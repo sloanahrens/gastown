@@ -118,3 +118,21 @@ func TestSettingsResolve(t *testing.T) {
 		}
 	}
 }
+
+// DefaultSettings is the canonical serialization of the compiled defaults:
+// resolving it returns exactly DefaultThresholds and DefaultStaleAfter, so
+// migrate writes a self-consistent block, not a second copy of the defaults.
+func TestDefaultSettingsResolveToDefaults(t *testing.T) {
+	t.Parallel()
+	s := DefaultSettings()
+	th, stale, err := s.Resolve()
+	if err != nil {
+		t.Fatalf("Resolve(DefaultSettings()) = %v", err)
+	}
+	if stale != DefaultStaleAfter || th != DefaultThresholds() {
+		t.Errorf("Resolve(DefaultSettings()) = %+v %v, want %+v %v", th, stale, DefaultThresholds(), DefaultStaleAfter)
+	}
+	if s.NotifyCommand != "" {
+		t.Errorf("NotifyCommand = %q, want empty (no default pager)", s.NotifyCommand)
+	}
+}

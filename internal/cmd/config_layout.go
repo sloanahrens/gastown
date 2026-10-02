@@ -31,7 +31,10 @@ with 'gt config validate', and restart the daemon to apply it.
 Each old file moves verbatim into a section of its new home. The new files
 are written and verified by a strict load before the old ones are removed,
 all under the files' locks; an interrupted run is finished by running it
-again. It then records each rig's database name, from the dolt_database
+again. It also writes the operational.health defaults (the town health
+thresholds) into settings/config.json, so every threshold lives in the
+operator config; a health block the operator already wrote is kept. It then
+records each rig's database name, from the dolt_database
 of the rig's bd .beads/metadata.json, in the rig's registry entry;
 metadata.json stays, because bd reads it. On a town that is already on two
 files and whose registry has every name it refuses.

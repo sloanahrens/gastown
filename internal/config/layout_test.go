@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/townhealth"
 )
 
 // fiveFileTown copies the live town's town-level files into a temp town.
@@ -69,9 +71,13 @@ func readTownValues(t *testing.T, root string) townValues {
 		t.Fatal(err)
 	}
 	// The hosts gain the sections; the comparison is about what the
-	// retired paths read.
+	// retired paths read. migrate also writes the operational.health defaults,
+	// which this comparison excludes (asserted separately).
 	v.Town.Registry, v.Town.Overseer = nil, nil
 	v.Settings.Daemon, v.Settings.Escalation = nil, nil
+	if v.Settings.Operational != nil {
+		v.Settings.Operational.Health = nil
+	}
 	return v
 }
 
@@ -156,6 +162,17 @@ func TestMigrateLayoutRoundTripsTheLiveTown(t *testing.T) {
 		if !reflect.DeepEqual(roundJSON(t, host[key]), trees[rel]) {
 			t.Errorf("%s section %q is not the old file's JSON", rel, key)
 		}
+	}
+
+	// migrate writes the operational.health defaults (gt-s3rec.8), so the
+	// operator config carries the thresholds the live town otherwise takes
+	// from compiled defaults.
+	settings, err := LoadOrCreateTownSettings(TownSettingsPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := settings.Operational.Health, townhealth.DefaultSettings(); !reflect.DeepEqual(got, want) {
+		t.Errorf("operational.health after migrate = %+v, want the defaults %+v", got, want)
 	}
 
 	if _, err := MigrateLayout(root); !errors.Is(err, ErrAlreadyMigrated) {
@@ -351,8 +368,14 @@ func TestMigrateLayoutWithoutOptionalFiles(t *testing.T) {
 	if rc, err := LoadRigsConfig(filepath.Join(root, "mayor", "rigs.json")); err != nil || rc.Rigs == nil || len(rc.Rigs) != 0 {
 		t.Fatalf("empty registry = %+v, %v", rc, err)
 	}
-	if _, err := os.Stat(filepath.Join(root, OperatorConfigFile)); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("settings/config.json written with nothing to hold (%v)", err)
+	// The operator config is created to hold the operational.health defaults
+	// even though no retired file moves into it (gt-s3rec.8).
+	s, err := LoadOrCreateTownSettings(TownSettingsPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := s.Operational.Health, townhealth.DefaultSettings(); !reflect.DeepEqual(got, want) {
+		t.Errorf("operational.health = %+v, want the defaults %+v", got, want)
 	}
 	if r, _ := DetectLayout(root); r.Layout != LayoutTwoFile {
 		t.Errorf("layout = %s", r.Layout)

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+
+	"github.com/steveyegge/gastown/internal/townhealth"
 )
 
 // ErrAlreadyMigrated: the town is on the two-file layout already. gt config
@@ -57,6 +59,9 @@ type migrationState struct {
 	// legacy holds each present retired file's JSON tree, by relative path.
 	legacy map[string]any
 	steps  []LayoutStep
+	// healthAdded reports that the operator host gained the operational.health
+	// defaults, so it is written even when no retired file moved into it.
+	healthAdded bool
 }
 
 type hostFile struct {
@@ -204,11 +209,35 @@ func readMigrationState(root string) (*migrationState, error) {
 	if len(st.steps) == 0 {
 		return nil, fmt.Errorf("%w: %s holds the rig registry and no old file is left", ErrAlreadyMigrated, MachineConfigFile)
 	}
+	st.addHealthDefaults()
 	return st, nil
 }
 
-// hostChanges reports whether any step adds a section to the host.
+// addHealthDefaults writes the townhealth thresholds into the operator host's
+// operational block, so settings/config.json carries the values the live town
+// otherwise takes from compiled defaults (gt-s3rec.8). It records whether it
+// changed the host so MigrateLayout writes it even when no retired file moved
+// into it. A health block the operator already wrote is kept.
+func (st *migrationState) addHealthDefaults() {
+	h := st.hosts[OperatorConfigFile]
+	op, _ := h.top["operational"].(map[string]any)
+	if op == nil {
+		op = map[string]any{}
+		h.top["operational"] = op
+	}
+	if _, has := op["health"]; has {
+		return
+	}
+	op["health"] = townhealth.DefaultSettings()
+	st.healthAdded = true
+}
+
+// hostChanges reports whether any step adds a section to the host, or the
+// health defaults were added to the operator host.
 func (st *migrationState) hostChanges(rel string) bool {
+	if rel == OperatorConfigFile && st.healthAdded {
+		return true
+	}
 	for _, step := range st.steps {
 		if step.Host == rel && step.Action != ActionRetire {
 			return true
@@ -236,6 +265,12 @@ func (st *migrationState) verify() error {
 		}
 		if want, moved := st.legacy[step.File]; moved && !reflect.DeepEqual(section, want) {
 			return fmt.Errorf("%s %q does not equal %s after writing it", step.Host, step.Key, step.File)
+		}
+	}
+	if st.healthAdded {
+		op, _ := got[OperatorConfigFile].top["operational"].(map[string]any)
+		if _, ok := op["health"]; !ok {
+			return fmt.Errorf("%s has no operational.health after writing it", OperatorConfigFile)
 		}
 	}
 	return nil
