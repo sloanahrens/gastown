@@ -214,10 +214,31 @@ func TestBuildTailSources_UnreadableRegistryKeepsHQAndDaemon(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(preface) != 1 || preface[0].Text != "cannot read the rig registry (rigs.json: no such file): showing hq and the daemon only" || preface[0].Rig != "town" {
+	if len(preface) != 1 || preface[0].Text != "cannot read the rig registry (rigs.json: no such file): showing hq, the daemon and the watch feed only" || preface[0].Rig != "town" {
 		t.Fatalf("preface = %+v", preface)
 	}
-	if len(sources) != 2 || len(journals) != 1 || journals["hq"] == nil {
+	if len(sources) != 3 || len(journals) != 1 || journals["hq"] == nil {
 		t.Fatalf("sources %d journals %v", len(sources), journals)
+	}
+}
+
+// TestBuildTailSources_WatchIsTownWide: the watch feed has no rig in it, so
+// --rig cannot narrow it and the source is built whatever rig is named.
+func TestBuildTailSources_WatchIsTownWide(t *testing.T) {
+	t.Parallel()
+	o, _ := fakeTailTown(t, []string{"gastown"}, nil)
+	o.rig, o.kinds, o.cutoff = "gastown", allTailKinds(), at("2026-09-30T13:00:00Z")
+	sources, _, err := buildTailSources(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, s := range sources {
+		if _, ok := s.(*tailWatchSource); ok {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("--rig gastown built %d watch sources; want 1", n)
 	}
 }

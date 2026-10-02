@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/deps"
@@ -427,6 +429,203 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// tailWatchAlert is one line of a watch feed file: the alerts.jsonl schema
+// (gt-z2pdg) that the operator's monitor scripts write and the daemon's
+// attention transitions (internal/attention) reuse. Unknown keys are ignored,
+// so an attention line's key and state fields need no handling here.
+type tailWatchAlert struct {
+	TS       time.Time `json:"ts"`
+	Class    string    `json:"class"`
+	Severity string    `json:"severity"`
+	Text     string    `json:"text"`
+}
+
+// tailWatchSeverityClass is the class a watch line is drawn in: the schema's
+// low is yellow, high is red. false is a severity the schema does not name,
+// which makes the line unreadable rather than drawable.
+func tailWatchSeverityClass(severity string) (tailClass, bool) {
+	switch strings.TrimSpace(severity) {
+	case string(attention.SeverityLow):
+		return tailClassWarning, true
+	case string(attention.SeverityHigh):
+		return tailClassFailure, true
+	}
+	return tailClassPlain, false
+}
+
+// tailWatchText is an alert's line: the class names what kind of condition it
+// is, the text says it. A line missing either prints the other alone.
+func tailWatchText(a tailWatchAlert) string {
+	text, class := strings.TrimSpace(a.Text), strings.TrimSpace(a.Class)
+	switch {
+	case class == "":
+		return text
+	case text == "":
+		return class
+	}
+	return class + ": " + text
+}
+
+// parseTailWatchLine reads one line as an alert. A line is unreadable when it
+// is not JSON, carries no timestamp, or names a severity the schema does not:
+// none of those can be drawn, and guessing a color would misreport them.
+func parseTailWatchLine(line []byte) (tailWatchAlert, bool) {
+	var a tailWatchAlert
+	if err := json.Unmarshal(line, &a); err != nil {
+		return a, false
+	}
+	if a.TS.IsZero() {
+		return a, false
+	}
+	if _, ok := tailWatchSeverityClass(a.Severity); !ok {
+		return a, false
+	}
+	return a, true
+}
+
+// tailWatchFile tails one watch feed file by byte offset. Each read returns the
+// complete lines appended since the previous one; a trailing line with no
+// newline yet is left for the next read, so a writer's half-written line is
+// never reported as a bad one. A missing file has no alerts and is not an
+// error. A file that shrank or was replaced — its writer rotates it at 1 MB —
+// is read again from its start.
+type tailWatchFile struct {
+	path string
+	name string // the base name, which is how a note names the file
+	// offset and info are the previous read's end and the file it ended in,
+	// so a replaced file is recognized rather than read as a longer one.
+	offset int64
+	info   os.FileInfo
+}
+
+func newTailWatchFile(path string) *tailWatchFile {
+	return &tailWatchFile{path: path, name: filepath.Base(path)}
+}
+
+// tailWatchItem is one complete line of a watch file, in file order: an alert
+// the stream prints, or the bytes of a line that is not one. The two travel
+// together so a skipped-line note prints where its line was.
+type tailWatchItem struct {
+	Alert tailWatchAlert
+	Bad   string // the line itself, when it is not an alert
+}
+
+// readNew returns the complete lines appended since the last read.
+func (f *tailWatchFile) readNew() (items []tailWatchItem, err error) {
+	file, err := os.Open(f.path)
+	if errors.Is(err, os.ErrNotExist) {
+		f.offset, f.info = 0, nil
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("opening %s: %w", f.name, err)
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("checking %s: %w", f.name, err)
+	}
+	if f.info != nil && (!os.SameFile(f.info, info) || info.Size() < f.offset) {
+		f.offset = 0
+	}
+	f.info = info
+	if info.Size() == f.offset {
+		return nil, nil
+	}
+	if _, err := file.Seek(f.offset, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("seeking %s: %w", f.name, err)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, info.Size()-f.offset))
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", f.name, err)
+	}
+	end := bytes.LastIndexByte(data, '\n')
+	if end < 0 {
+		return nil, nil
+	}
+	f.offset += int64(end + 1)
+	for _, line := range bytes.Split(data[:end], []byte{'\n'}) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		alert, ok := parseTailWatchLine(line)
+		if !ok {
+			items = append(items, tailWatchItem{Bad: string(line)})
+			continue
+		}
+		items = append(items, tailWatchItem{Alert: alert})
+	}
+	return items, nil
+}
+
+// tailWatchSource reads the town's watch feed: the operator monitors' alerts
+// and the daemon's attention transitions. Both are one alert per line in one
+// schema and both print under the tag "watch", so the operator reads them
+// where they happened rather than in a second command.
+type tailWatchSource struct {
+	files  []*tailWatchFile
+	cutoff time.Time
+	now    func() time.Time
+
+	// started is set by the first poll that read every file, so a first poll
+	// that failed is retried as a backlog read cut at the cutoff.
+	started bool
+	failed  tailOnce
+}
+
+// newTailWatchSource is the production watch source: the two files, in the
+// order their lines print when their times tie.
+func newTailWatchSource(townRoot string, cutoff time.Time, now func() time.Time) *tailWatchSource {
+	return &tailWatchSource{
+		files: []*tailWatchFile{
+			newTailWatchFile(filepath.Join(constants.TownRuntimePath(townRoot), "watch", "alerts.jsonl")),
+			newTailWatchFile(attention.EventsPath(townRoot)),
+		},
+		cutoff: cutoff,
+		now:    now,
+	}
+}
+
+func (s *tailWatchSource) line(at time.Time, format string, args ...any) tailLine {
+	return tailLine{At: at, Rig: tailKindWatch, Kind: tailKindWatch, Text: fmt.Sprintf(format, args...)}
+}
+
+func (s *tailWatchSource) Poll() []tailLine {
+	now := s.now()
+	backlog := !s.started
+	var out []tailLine
+	read := true
+	for _, f := range s.files {
+		items, err := f.readNew()
+		if err != nil {
+			read = false
+			if s.failed.first(err.Error()) {
+				out = append(out, s.line(now, "cannot read %s: %v", f.name, err))
+			}
+			continue
+		}
+		for _, item := range items {
+			if item.Bad != "" {
+				// A line that is not an alert is counted, never echoed: the
+				// stream must not republish whatever text ended up in the file.
+				out = append(out, s.line(now, "skipped unreadable watch line in %s (%d bytes)", f.name, len(item.Bad)))
+				continue
+			}
+			if backlog && item.Alert.TS.Before(s.cutoff) {
+				continue
+			}
+			class, _ := tailWatchSeverityClass(item.Alert.Severity)
+			out = append(out, tailLine{At: item.Alert.TS, Rig: tailKindWatch, Kind: tailKindWatch, Class: class, Text: tailWatchText(item.Alert)})
+		}
+	}
+	if read {
+		s.started = true
+		s.failed.clear()
+	}
+	return out
 }
 
 // tailSummaryMaxSeats bounds the polecat:bead pairs the summary line lists;

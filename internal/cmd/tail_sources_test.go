@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/landings"
 )
@@ -198,6 +200,197 @@ func TestLandingsSource_BacklogFollowAndBadLines(t *testing.T) {
 	}
 	if got := texts(s.Poll()); !reflect.DeepEqual(got, want) {
 		t.Fatalf("follow = %q\nwant %q", got, want)
+	}
+}
+
+// TestWatchSource_ReadsBothFilesColorsBySeverityAndNotesBadLines: the feed's
+// two files are one source, each line draws by its severity rather than its
+// words, the backlog is cut at --since, and a line that is not an alert is
+// skipped with one note naming the file.
+func TestWatchSource_ReadsBothFilesColorsBySeverityAndNotesBadLines(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	alerts := filepath.Join(town, ".runtime", "watch", "alerts.jsonl")
+	if err := os.MkdirAll(filepath.Dir(alerts), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	unknown := `{"ts":"2026-09-30T13:52:00Z","class":"x","severity":"loud","text":"unknown severity"}`
+	appendFile(t, alerts,
+		`{"ts":"2026-09-30T12:00:00Z","class":"stall","severity":"high","text":"before the cutoff"}`+"\n"+
+			`{"ts":"2026-09-30T13:50:00Z","class":"bd-slow","severity":"low","text":"bd took 4s"}`+"\n"+
+			"garbage\n"+
+			`{"ts":"2026-09-30T13:51:00Z","class":"direct-push","severity":"high","text":"a commit landed outside the queue"}`+"\n"+
+			unknown+"\n")
+	// The attention log is the same schema with two extra keys, which the
+	// source ignores.
+	events := attention.EventsPath(town)
+	if err := os.MkdirAll(filepath.Dir(events), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	appendFile(t, events,
+		`{"ts":"2026-09-30T13:53:00Z","class":"polecat-stall","severity":"low","text":"gastown/opal silent 40m","key":"stall:gastown/opal","state":"new"}`+"\n")
+
+	s := newTailWatchSource(town, at("2026-09-30T13:00:00Z"), fixedNow)
+	got := s.Poll()
+	// The backlog is the file's own order, each skipped-line note beside the
+	// line it replaced.
+	want := []string{
+		"watch watch bd-slow: bd took 4s",
+		"watch watch skipped unreadable watch line in alerts.jsonl (7 bytes)",
+		"watch watch direct-push: a commit landed outside the queue",
+		fmt.Sprintf("watch watch skipped unreadable watch line in alerts.jsonl (%d bytes)", len(unknown)),
+		"watch watch polecat-stall: gastown/opal silent 40m",
+	}
+	if !reflect.DeepEqual(texts(got), want) {
+		t.Fatalf("backlog:\n%q\nwant\n%q", texts(got), want)
+	}
+	wantClasses := []tailClass{tailClassWarning, tailClassPlain, tailClassFailure, tailClassPlain, tailClassWarning}
+	for i, c := range wantClasses {
+		if got[i].Class != c {
+			t.Errorf("line %d (%q) class = %v, want %v", i, got[i].Text, got[i].Class, c)
+		}
+	}
+	if !got[0].At.Equal(at("2026-09-30T13:50:00Z")) || !got[4].At.Equal(at("2026-09-30T13:53:00Z")) {
+		t.Fatalf("times: %v %v", got[0].At, got[4].At)
+	}
+
+	// Follow: the appended line prints, the notes do not repeat, and an idle
+	// poll says nothing.
+	appendFile(t, alerts, `{"ts":"2026-09-30T14:00:01Z","class":"red-main","severity":"high","text":"main is red"}`+"\n")
+	got = s.Poll()
+	if len(got) != 1 || got[0].Text != "red-main: main is red" || got[0].Class != tailClassFailure {
+		t.Fatalf("follow = %+v", got)
+	}
+	if got := s.Poll(); len(got) != 0 {
+		t.Fatalf("idle poll = %q", texts(got))
+	}
+}
+
+// TestWatchSource_MissingFilesAreSilent: a town whose writers have not run yet
+// has no feed, and the stream says nothing about it.
+func TestWatchSource_MissingFilesAreSilent(t *testing.T) {
+	t.Parallel()
+	s := newTailWatchSource(t.TempDir(), tailNow, fixedNow)
+	for i := 0; i < 2; i++ {
+		if got := s.Poll(); len(got) != 0 {
+			t.Fatalf("poll %d printed %q", i, texts(got))
+		}
+	}
+}
+
+// TestWatchSource_FailedFirstReadIsRetriedAsABacklogRead: a file that cannot
+// be read says so once, and the next poll reads it as a backlog cut at the
+// cutoff rather than dumping every old alert.
+func TestWatchSource_FailedFirstReadIsRetriedAsABacklogRead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	alerts := filepath.Join(town, ".runtime", "watch", "alerts.jsonl")
+	if err := os.MkdirAll(alerts, 0o700); err != nil { // unreadable as a file
+		t.Fatal(err)
+	}
+	s := newTailWatchSource(town, at("2026-09-30T13:00:00Z"), fixedNow)
+	got := s.Poll()
+	if len(got) != 1 || !strings.HasPrefix(got[0].Text, "cannot read alerts.jsonl: ") {
+		t.Fatalf("failed first poll = %q", texts(got))
+	}
+	if got := s.Poll(); len(got) != 0 {
+		t.Fatalf("the same failure printed again: %q", texts(got))
+	}
+	if err := os.Remove(alerts); err != nil {
+		t.Fatal(err)
+	}
+	appendFile(t, alerts, `{"ts":"2026-09-30T12:00:00Z","severity":"low","text":"too old"}`+"\n"+
+		`{"ts":"2026-09-30T13:59:00Z","severity":"high","text":"in window"}`+"\n")
+	if got := s.Poll(); len(got) != 1 || got[0].Text != "in window" {
+		t.Fatalf("retry ignored the cutoff or repeated the note: %q", texts(got))
+	}
+}
+
+// TestWatchSource_LeavesAPartialLineThenReadsARotatedFileFromItsStart: a
+// writer killed mid-line leaves no complete line to report, and a writer that
+// rotates at 1 MB replaces the file the next read starts over.
+func TestWatchSource_LeavesAPartialLineThenReadsARotatedFileFromItsStart(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	alerts := filepath.Join(town, ".runtime", "watch", "alerts.jsonl")
+	if err := os.MkdirAll(filepath.Dir(alerts), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	appendFile(t, alerts, `{"ts":"2026-09-30T13:50:00Z","severity":"low","text":"whole"}`+"\n"+
+		`{"ts":"2026-09-30T13:51:00Z","severity":"low","text":"half`)
+	s := newTailWatchSource(town, at("2026-09-30T13:00:00Z"), fixedNow)
+	if got := s.Poll(); len(got) != 1 || got[0].Text != "whole" {
+		t.Fatalf("a half-written line was reported: %q", texts(got))
+	}
+	appendFile(t, alerts, ` written"}`+"\n")
+	if got := s.Poll(); len(got) != 1 || got[0].Text != "half written" {
+		t.Fatalf("the completed line = %q", texts(got))
+	}
+
+	if err := os.Rename(alerts, alerts+".1"); err != nil {
+		t.Fatal(err)
+	}
+	appendFile(t, alerts, `{"ts":"2026-09-30T14:00:00Z","severity":"high","text":"after rotation"}`+"\n")
+	if got := s.Poll(); len(got) != 1 || got[0].Text != "after rotation" {
+		t.Fatalf("after rotation = %q", texts(got))
+	}
+}
+
+// TestWatchLine_DrawsBySeverityAndAlwaysShows: the default view keeps a watch
+// line whatever it says, and its severity — not a word in its text — decides
+// the color.
+func TestWatchLine_DrawsBySeverityAndAlwaysShows(t *testing.T) {
+	t.Parallel()
+	filter := &tailDefaultFilter{}
+	for _, tc := range []struct {
+		severity string
+		class    tailClass
+	}{
+		{"low", tailClassWarning},
+		{"high", tailClassFailure},
+	} {
+		class, ok := tailWatchSeverityClass(tc.severity)
+		if !ok || class != tc.class {
+			t.Fatalf("severity %q = %v, %v", tc.severity, class, ok)
+		}
+		line := tailLine{At: tailNow, Rig: tailKindWatch, Kind: tailKindWatch, Class: class, Text: "queue-stuck: nothing has landed"}
+		shown, ok := filter.visible(line)
+		if !ok {
+			t.Fatalf("a %s watch line was hidden", tc.severity)
+		}
+		if got := tailLineClass(shown); got != class {
+			t.Errorf("a %s watch line drew as %v", tc.severity, got)
+		}
+	}
+	if _, ok := tailWatchSeverityClass("loud"); ok {
+		t.Error("a severity the schema does not name was accepted")
+	}
+	// Without a class the text decides, which is what makes the Class field
+	// worth carrying.
+	if got := tailLineClass(tailLine{Rig: tailKindWatch, Kind: tailKindWatch, Text: "x: failed"}); got != tailClassFailure {
+		t.Errorf("text-classified watch line drew as %v", got)
+	}
+}
+
+// TestRenderLine_WatchTagAndSeverityIcon: a feed line prints under the watch
+// tag, one column like the daemon's, and its severity's icon.
+func TestRenderLine_WatchTagAndSeverityIcon(t *testing.T) {
+	t.Parallel()
+	line := tailLine{At: at("2026-09-30T14:05:06Z"), Rig: tailKindWatch, Kind: tailKindWatch, Class: tailClassWarning, Text: "bd-slow: bd took 4s"}
+	short := tailView{Loc: tailTestLoc, Layout: tailClockLayout, Decor: newTailDecor()}
+	got := short.renderLine(line)
+	if !strings.HasPrefix(got, "09:05:06 watch ") {
+		t.Errorf("the tag moved: %q", got)
+	}
+	if strings.Contains(got, tailKindWatch+" "+tailKindWatch) {
+		t.Errorf("the short form printed the kind as well: %q", got)
+	}
+	if !strings.Contains(got, tailIconWarning) || strings.Contains(got, tailIconFailure) {
+		t.Errorf("a low alert drew with the wrong icon: %q", got)
+	}
+	verbose := tailView{Loc: tailTestLoc, Layout: tailClockLayout, FullSource: true, Decor: newTailDecor()}
+	if got := verbose.renderLine(line); !strings.Contains(got, "watch watch ") {
+		t.Errorf("--verbose dropped a column: %q", got)
 	}
 }
 
