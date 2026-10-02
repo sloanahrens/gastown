@@ -274,7 +274,7 @@ func (d *Daemon) rebuildGTCycle(ctx context.Context, cycle *dogCycle, repoRoot s
 		d.logger.Printf("rebuild_gt: staleness could not be read; deferring")
 		return false
 	}
-	d.rebuildGTDrift(before)
+	d.rebuildGTDrift(repoRoot, before)
 
 	due := before.IsStale && (before.CommitsBehind == 0 || before.CommitsBehind >= rebuildGTInstallThreshold)
 
@@ -344,6 +344,23 @@ func (d *Daemon) rebuildGTCycle(ctx context.Context, cycle *dogCycle, repoRoot s
 		return true
 	}
 
+	// A backlog that changed nothing `make build` reads installs nothing: the
+	// binary already produces everything that change can. This runs after the
+	// staleness and safety checks and before the quiet gate, so a docs- or
+	// test-only landing costs neither a container-gate slot nor the daemon
+	// restart an install ends in (gt-3qmv4.3). A reading this cannot take is
+	// binary-affecting: an unreadable diff is not evidence that nothing needs
+	// building.
+	if nonBinary, read := d.rebuildGTNonBinaryRange(repoRoot, after.BinaryCommit, after.RepoCommit); read && nonBinary {
+		cycle.skipStep("non-binary", "only non-binary paths changed")
+		d.logger.Printf("rebuild_gt: skip: only non-binary paths changed (%d commits)", after.CommitsBehind)
+		// Nothing is due, so the starvation clock closes rather than ages: the
+		// whole range is non-binary, so no earlier binary-affecting commit is
+		// waiting in it.
+		d.rebuildGTCloseBlock("only non-binary paths changed")
+		return true
+	}
+
 	// An unmeasurable count is due, not under threshold: reading it as 0 is
 	// what let a stale, quiet, safe-to-rebuild binary sit deferred forever
 	// (gt-oqbw). The check reports 0 both for "nothing to compare" and for a
@@ -393,6 +410,105 @@ func (d *Daemon) rebuildGTCycle(ctx context.Context, cycle *dogCycle, repoRoot s
 
 	d.logger.Printf("rebuild_gt: installing %s (%s commits behind) through scripts/install-gt.sh", repoRoot, behind)
 	return d.rebuildGTInstall(ctx, cycle, repoRoot, reserveTimeout)
+}
+
+// rebuildGTEmbedDirs are the package directories carrying //go:embed
+// directives: internal/cmdtree (bd-command-tree.json), internal/config (roles/
+// *.toml), internal/formula (formulas/*.formula.toml) and internal/templates
+// (roles/, launchd/, systemd/, bodies/, townroot/claude.md, polecat-CLAUDE.md).
+// What they embed is compiled into the binary, so a change anywhere under one
+// is binary-affecting even when the file itself looks like documentation.
+var rebuildGTEmbedDirs = []string{
+	"internal/cmdtree/",
+	"internal/config/",
+	"internal/formula/",
+	"internal/templates/",
+}
+
+// rebuildGTNonBinaryPath reports whether a repo-relative path can be changed
+// without changing what `make build` produces. The shapes are documentation
+// under docs/, any markdown file, test sources and testdata — and nothing under
+// a rebuildGTEmbedDirs directory, whose contents the binary carries. Everything
+// else is binary-affecting, including scripts/, plugins/ and an embed's data.
+func rebuildGTNonBinaryPath(p string) bool {
+	if !rebuildGTDocOrTestPath(p) {
+		return false
+	}
+	// A test source is never compiled into the binary, so it stays non-binary
+	// even under an embed directory.
+	if strings.HasSuffix(p, "_test.go") {
+		return true
+	}
+	for _, dir := range rebuildGTEmbedDirs {
+		if strings.HasPrefix(p, dir) {
+			return false
+		}
+	}
+	return true
+}
+
+// rebuildGTDocOrTestPath matches the documented non-binary shapes: docs/**,
+// **/*.md, **/*_test.go and **/testdata/**.
+func rebuildGTDocOrTestPath(p string) bool {
+	switch {
+	case strings.HasPrefix(p, "docs/"):
+		return true
+	case strings.HasSuffix(p, ".md"):
+		return true
+	case strings.HasSuffix(p, "_test.go"):
+		return true
+	case p == "testdata", strings.HasPrefix(p, "testdata/"), strings.Contains(p, "/testdata/"):
+		return true
+	}
+	return false
+}
+
+// rebuildGTNonBinaryRange reports whether every path changed in from..to is
+// non-binary. read is false when git could not list the changes, or listed
+// none for a range that is stale: neither is evidence that nothing needs
+// building, and both send the caller on to install.
+func (d *Daemon) rebuildGTNonBinaryRange(repoRoot, from, to string) (nonBinary, read bool) {
+	if from == "" || to == "" {
+		return false, false
+	}
+	out, err := d.rebuildGTGit(repoRoot, "diff", "--name-only", from+".."+to)
+	if err != nil {
+		d.logger.Printf("rebuild_gt: cannot list the changes in %s..%s (%v); installing", shortSHA(from), shortSHA(to), err)
+		return false, false
+	}
+	paths := strings.Fields(out)
+	if len(paths) == 0 {
+		return false, false
+	}
+	for _, p := range paths {
+		if !rebuildGTNonBinaryPath(p) {
+			return false, true
+		}
+	}
+	return true, true
+}
+
+// rebuildGTBinaryAffectingCount counts the commits in from..to that change a
+// path `make build` reads, so a backlog of documentation is not drift. ok is
+// false when git could not answer.
+func (d *Daemon) rebuildGTBinaryAffectingCount(repoRoot, from, to string) (int, bool) {
+	if from == "" || to == "" {
+		return 0, false
+	}
+	// The excludes mirror rebuildGTNonBinaryPath. They cannot carry its embed
+	// directories back in — a git exclude always wins — but that only makes
+	// this count read low for an embed's markdown, and the alarm it feeds is
+	// advisory where the skip is not.
+	out, err := d.rebuildGTGit(repoRoot, "rev-list", "--count", from+".."+to, "--", ".",
+		":(exclude)docs/**", ":(exclude)*.md", ":(exclude)*_test.go", ":(exclude)**/testdata/**")
+	if err != nil {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }
 
 // rebuildGTSyncOutcome is how the pre-install sync of the source checkout ended.
@@ -646,20 +762,40 @@ func (d *Daemon) rebuildGTAlert(key, message string) error {
 }
 
 // rebuildGTDrift escalates on the outcome that matters — the binary falling
-// behind origin/main — before any skip reason is decided. A count that could
-// not be taken is not 0: it could be 1 commit or 1000, so it escalates too
-// (gt-oqbw).
-func (d *Daemon) rebuildGTDrift(info *version.StaleBinaryInfo) {
+// behind origin/main — before any skip reason is decided. The count is of
+// binary-affecting commits only, so a backlog of documentation, markdown, test
+// sources and testdata never escalates: it is not a binary anybody is running
+// behind (gt-3qmv4.3). A count that could not be taken is not 0: it could be 1
+// commit or 1000, so it escalates too (gt-oqbw).
+func (d *Daemon) rebuildGTDrift(repoRoot string, info *version.StaleBinaryInfo) {
 	if !info.IsStale {
 		return
 	}
-	switch {
-	case info.CommitsBehind > rebuildGTMaxCommitsBehind:
-		_ = d.rebuildGTAlert(alertKeyRebuildGTDrift,
-			fmt.Sprintf("rebuild-gt: binary is %d commits behind origin/main and has not been rebuilt", info.CommitsBehind))
-	case info.CommitsBehind == 0:
+	if info.CommitsBehind == 0 {
 		_ = d.rebuildGTAlert(alertKeyRebuildGTDriftUnknown,
 			"rebuild-gt: binary is stale but commits_behind could not be determined")
+		return
+	}
+	if info.CommitsBehind <= rebuildGTMaxCommitsBehind {
+		// Under the ceiling by the raw count, which can only overcount: the
+		// binary-affecting count is no larger, so there is nothing to say.
+		return
+	}
+	count, ok := d.rebuildGTBinaryAffectingCount(repoRoot, info.BinaryCommit, info.RepoCommit)
+	if !ok {
+		// The range could not be subdivided. Fall back to the path reading: a
+		// range that changed nothing the binary is built from is not drift,
+		// and one that could not be read either keeps the raw count rather
+		// than dropping the alarm.
+		if nonBinary, read := d.rebuildGTNonBinaryRange(repoRoot, info.BinaryCommit, info.RepoCommit); read && nonBinary {
+			count = 0
+		} else {
+			count = info.CommitsBehind
+		}
+	}
+	if count > rebuildGTMaxCommitsBehind {
+		_ = d.rebuildGTAlert(alertKeyRebuildGTDrift,
+			fmt.Sprintf("rebuild-gt: binary is %d commits behind origin/main and has not been rebuilt", count))
 	}
 }
 
@@ -697,6 +833,12 @@ func (d *Daemon) rebuildGTNoteBlocked(cycle *dogCycle, due bool, reason string) 
 // detail names the reading that closed it.
 func (d *Daemon) rebuildGTNotDue(cycle *dogCycle, detail string) {
 	cycle.skipStep("threshold", detail)
+	d.rebuildGTCloseBlock(detail)
+}
+
+// rebuildGTCloseBlock closes the starvation block, if one is open, under the
+// reading that closed it.
+func (d *Daemon) rebuildGTCloseBlock(detail string) {
 	if _, open := d.rebuildGTBlock.openFor(d.clk().Now()); !open {
 		return
 	}

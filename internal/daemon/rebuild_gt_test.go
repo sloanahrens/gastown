@@ -333,7 +333,7 @@ func TestRebuildGTDrift_EscalatesTheOutcomeNotTheReason(t *testing.T) {
 	t.Parallel()
 	d, _ := daemonWithRecorder(t)
 
-	d.rebuildGTDrift(staleInfo(rebuildGTMaxCommitsBehind + 1))
+	d.rebuildGTDrift(d.config.TownRoot, staleInfo(rebuildGTMaxCommitsBehind+1))
 	esc := d.notifier.(*notifyfake.Recorder).Escalations()
 	if len(esc) != 1 || esc[0].Escalation.Fingerprint != alertKeyRebuildGTDrift {
 		t.Fatalf("escalations = %+v, want one under %s", esc, alertKeyRebuildGTDrift)
@@ -345,7 +345,7 @@ func TestRebuildGTDrift_EscalatesTheOutcomeNotTheReason(t *testing.T) {
 	// A stale binary whose count could not be read is not "0 behind": it could
 	// be 1 commit or 1000 (gt-oqbw).
 	d2, rec2 := daemonWithRecorder(t)
-	d2.rebuildGTDrift(staleInfo(0))
+	d2.rebuildGTDrift(d2.config.TownRoot, staleInfo(0))
 	esc = rec2.Escalations()
 	if len(esc) != 1 || esc[0].Escalation.Fingerprint != alertKeyRebuildGTDriftUnknown {
 		t.Fatalf("escalations = %+v, want one under %s", esc, alertKeyRebuildGTDriftUnknown)
@@ -356,7 +356,7 @@ func TestRebuildGTDrift_EscalatesTheOutcomeNotTheReason(t *testing.T) {
 		_ = s
 	}
 	d3, rec3 := daemonWithRecorder(t)
-	d3.rebuildGTDrift(staleInfo(2))
+	d3.rebuildGTDrift(d3.config.TownRoot, staleInfo(2))
 	if esc := rec3.Escalations(); len(esc) != 0 {
 		t.Errorf("2 commits behind escalated: %+v", esc)
 	}
