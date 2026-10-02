@@ -2879,9 +2879,10 @@ const (
 	// AgentHung means the tmux session and agent process exist but there has
 	// been no tmux activity for longer than the specified threshold.
 	AgentHung
-	// AgentUnknown means the session exists but the agent-liveness query
-	// failed (e.g. `tmux show-environment` timed out under load). It is not a
-	// zombie: callers must report it and never kill or restart on it (gt-fcxe9.1).
+	// AgentUnknown means a query could not be answered — the existence probe
+	// (has-session) or the agent-liveness query (show-environment) failed
+	// (e.g. timed out under load). It is not a zombie: callers must report it
+	// and never kill or restart on it (gt-fcxe9.1, gt-i3okp).
 	AgentUnknown
 )
 
@@ -2920,9 +2921,12 @@ func (z ZombieStatus) IsZombie() bool {
 // CheckSessionHealth determines the health status of an agent session.
 // It performs three levels of checking:
 //  1. Session existence (tmux has-session)
-//  2. Agent process liveness (IsAgentAliveChecked — checks process tree);
-//     a failed query returns AgentUnknown, never AgentDead
+//  2. Agent process liveness (IsAgentAliveChecked — checks process tree)
 //  3. Activity staleness (GetWindowActivity — checks tmux pane output timestamp)
+//
+// A failed query at level 1 or 2 returns AgentUnknown, never a dead status:
+// only a positive answer (no session, or no agent process) reads as dead
+// (gt-fcxe9.1, gt-i3okp).
 //
 // The maxInactivity parameter controls how long a session can be idle before
 // being considered hung. Pass 0 to skip activity checking (only check process
@@ -2948,9 +2952,16 @@ func (z ZombieStatus) IsZombie() bool {
 //
 // This is the preferred unified method for zombie detection across all agent types.
 func (t *Tmux) CheckSessionHealth(session string, maxInactivity time.Duration) ZombieStatus {
-	// Level 1: Does the tmux session exist?
+	// Level 1: Does the tmux session exist? HasSession maps the two positive
+	// answers — ErrSessionNotFound and ErrNoServer — to (false, nil), so a
+	// non-nil error here is exactly the unanswerable case: a query tmux could
+	// not answer (runner timeout, server hung). That is not evidence the
+	// session is gone, so it reads AgentUnknown, never SessionDead (gt-i3okp).
 	alive, err := t.HasSession(session)
-	if err != nil || !alive {
+	if err != nil {
+		return AgentUnknown
+	}
+	if !alive {
 		return SessionDead
 	}
 
