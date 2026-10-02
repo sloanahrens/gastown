@@ -290,6 +290,7 @@ func (h *handle) WorktreeAddFromRef(path, branch, startPoint string) error {
 		return err
 	}
 	r.refs["refs/heads/"+branch] = id
+	setUpstream(r, branch, startPoint)
 	return nil
 }
 

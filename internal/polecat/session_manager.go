@@ -386,6 +386,9 @@ func (m *SessionManager) ensureCanonicalSessionBranch(g gitRepo, polecat string,
 	if err := g.CheckoutNewBranch(newBranch, startPoint); err != nil {
 		return currentBranch, m.baseBranchRepairError(townRoot, polecat, currentBranch, "check out "+newBranch, err)
 	}
+	// startPoint is the canonical base, so it is the upstream this branch's work
+	// merges into — the one thing git's own choice gets wrong here (gt-voz8q).
+	pinBranchUpstream(g, newBranch, startPoint)
 
 	return newBranch, nil
 }
