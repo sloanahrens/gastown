@@ -20,7 +20,7 @@ func TestAgentEnv_Mayor(t *testing.T) {
 	assertEnv(t, env, "BD_ACTOR", "mayor")
 	assertEnv(t, env, "GIT_AUTHOR_NAME", "mayor")
 	assertEnv(t, env, "GT_TOWN_ROOT", "/town")
-	assertEnv(t, env, "GT_ROOT", "/town") // the alias bd reads until it migrates (gt-syhch)
+	assertEnv(t, env, "GT_ROOT", "/town")                 // the alias bd reads until it migrates (gt-syhch)
 	assertEnv(t, env, "GIT_CEILING_DIRECTORIES", "/town") // prevents git walking to umbrella
 	assertEnv(t, env, "NODE_OPTIONS", "")                 // cleared to prevent debugger inheritance
 	assertEnv(t, env, "CLAUDECODE", "")                   // cleared to prevent nested session detection
