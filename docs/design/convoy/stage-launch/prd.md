@@ -139,7 +139,6 @@ go vet ./... && go build ./... && go test ./internal/cmd/... ./internal/convoy/.
 - [ ] Prints convoy ID and `gt convoy status <convoy-id>` command
 - [ ] Prints wave summary (how many waves, how many tasks per wave)
 - [ ] Lists each dispatched Wave 1 task with its assigned polecat
-- [ ] Prints hint: `gt convoy -i` for interactive TUI monitoring
 - [ ] Explains that subsequent waves are fed automatically by the daemon as tasks complete
 
 ### US-010: `gt convoy launch` as alias
