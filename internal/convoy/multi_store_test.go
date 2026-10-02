@@ -2,13 +2,11 @@ package convoy
 
 import (
 	"context"
+	"github.com/steveyegge/gastown/internal/beads"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
-
-	beadsdk "github.com/steveyegge/beads"
-	beadsRouting "github.com/steveyegge/gastown/internal/beads"
 )
 
 func TestStoreResolver_ResolveIssues_SingleStore(t *testing.T) {
@@ -19,14 +17,14 @@ func TestStoreResolver_ResolveIssues_SingleStore(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	issue := &beadsdk.Issue{
+	issue := &beads.Issue{
 		ID:        "hq-test1",
 		Title:     "Test Issue",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
 		t.Fatalf("CreateIssue: %v", err)
@@ -36,11 +34,11 @@ func TestStoreResolver_ResolveIssues_SingleStore(t *testing.T) {
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	os.MkdirAll(beadsDir, 0755)
-	beadsRouting.WriteRoutes(beadsDir, []beadsRouting.Route{
+	beads.WriteRoutes(beadsDir, []beads.Route{
 		{Prefix: "hq-", Path: "."},
 	})
 
-	resolver := NewStoreResolver(townRoot, map[string]beadsdk.Storage{
+	resolver := NewStoreResolver(townRoot, map[string]IssueSource{
 		"hq": store,
 	})
 
@@ -67,28 +65,28 @@ func TestStoreResolver_ResolveIssues_CrossStore(t *testing.T) {
 	now := time.Now().UTC()
 
 	// Create issue in "ds" store only
-	dsIssue := &beadsdk.Issue{
+	dsIssue := &beads.Issue{
 		ID:        "ds-abc",
 		Title:     "Dashboard Issue",
-		Status:    beadsdk.StatusClosed,
+		Status:    "closed",
 		Priority:  1,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 	if err := dsStore.CreateIssue(ctx, dsIssue, "test"); err != nil {
 		t.Fatalf("CreateIssue ds: %v", err)
 	}
 
 	// Create issue in "hq" store
-	hqIssue := &beadsdk.Issue{
+	hqIssue := &beads.Issue{
 		ID:        "hq-xyz",
 		Title:     "HQ Issue",
-		Status:    beadsdk.StatusOpen,
+		Status:    "open",
 		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+		Type:      "task",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
 	}
 	if err := hqStore.CreateIssue(ctx, hqIssue, "test"); err != nil {
 		t.Fatalf("CreateIssue hq: %v", err)
@@ -98,12 +96,12 @@ func TestStoreResolver_ResolveIssues_CrossStore(t *testing.T) {
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	os.MkdirAll(beadsDir, 0755)
-	beadsRouting.WriteRoutes(beadsDir, []beadsRouting.Route{
+	beads.WriteRoutes(beadsDir, []beads.Route{
 		{Prefix: "hq-", Path: "."},
 		{Prefix: "ds-", Path: "dashboard"},
 	})
 
-	resolver := NewStoreResolver(townRoot, map[string]beadsdk.Storage{
+	resolver := NewStoreResolver(townRoot, map[string]IssueSource{
 		"hq":        hqStore,
 		"dashboard": dsStore,
 	})
@@ -138,7 +136,7 @@ func TestStoreResolver_NilStores(t *testing.T) {
 
 func TestStoreResolver_EmptyIDs(t *testing.T) {
 	t.Parallel()
-	resolver := NewStoreResolver("/nonexistent", map[string]beadsdk.Storage{})
+	resolver := NewStoreResolver("/nonexistent", map[string]IssueSource{})
 	result := resolver.ResolveIssues(context.Background(), nil)
 	if len(result) != 0 {
 		t.Errorf("expected empty result for nil IDs, got %d", len(result))
@@ -150,7 +148,7 @@ func TestStoreResolver_StoreForID_ExternalFormat(t *testing.T) {
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
 	os.MkdirAll(beadsDir, 0755)
-	beadsRouting.WriteRoutes(beadsDir, []beadsRouting.Route{
+	beads.WriteRoutes(beadsDir, []beads.Route{
 		{Prefix: "ds-", Path: "dashboard"},
 	})
 
@@ -169,8 +167,8 @@ func TestStoreResolver_StoreForID_ExternalFormat(t *testing.T) {
 func TestStoreResolver_OwningStoreOrGap(t *testing.T) {
 	t.Parallel()
 	townRoot := setupTownRoot(t)
-	townStore := &fakeHoldStorage{}
-	rigStore := &fakeHoldStorage{}
+	townStore := newFakeStore()
+	rigStore := newFakeStore()
 
 	tests := []struct {
 		name      string
@@ -178,7 +176,7 @@ func TestStoreResolver_OwningStoreOrGap(t *testing.T) {
 		withRig   bool
 		nilResolv bool
 		issue     string
-		wantStore beadsdk.Storage
+		wantStore IssueSource
 		wantGap   bool
 	}{
 		{name: "no resolver", nilResolv: true, issue: "test-rigbead"},
@@ -191,7 +189,7 @@ func TestStoreResolver_OwningStoreOrGap(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			stores := map[string]beadsdk.Storage{}
+			stores := map[string]IssueSource{}
 			if tc.withHQ {
 				stores["hq"] = townStore
 			}

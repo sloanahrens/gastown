@@ -927,9 +927,10 @@ func (m *ConvoyManager) processJournalPage(name string, records []beads.EventRec
 		}
 
 		m.logger("Convoy: close detected: %s (from %s)", issueID, name)
-		resolver := convoy.NewStoreResolver(m.townRoot, stores)
-		convoy.CheckConvoysForIssue(m.ctx, hqStore, m.townRoot, issueID, "Convoy", m.logger, m.slingSlinger(), m.checkConvoy, m.isRigParked, resolver)
-		convoy.FireCrossRigDepNotifications(m.ctx, issueID, m.townRoot, stores, m.logger)
+		sources := librarySources(m.ctx, stores)
+		resolver := convoy.NewStoreResolver(m.townRoot, sources)
+		convoy.CheckConvoysForIssue(m.ctx, librarySource(m.ctx, hqStore), m.townRoot, issueID, "Convoy", m.logger, m.slingSlinger(), m.checkConvoy, m.isRigParked, resolver)
+		convoy.FireCrossRigDepNotifications(m.ctx, issueID, m.townRoot, sources, m.logger)
 	}
 	return true
 }
@@ -1418,7 +1419,7 @@ func (m *ConvoyManager) feedHold(rig, issueID string) (hold convoy.Hold, ok bool
 	if store == nil {
 		return convoy.Hold{}, false
 	}
-	return convoy.FeedHold(m.ctx, store, issueID, nil), true
+	return convoy.FeedHold(m.ctx, librarySource(m.ctx, store), issueID, nil), true
 }
 
 // issueAssignee returns issueID's assignee via the already-open per-rig

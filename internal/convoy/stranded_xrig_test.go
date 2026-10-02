@@ -6,40 +6,19 @@ import (
 	"strings"
 	"testing"
 
-	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
-// xrigStrandedStore is one rig's beads store for the stranded scan's blocker
-// check: its issues and the raw dependency edges recorded on them.
-type xrigStrandedStore struct {
-	beadsdk.Storage
-	issues map[string]*beadsdk.Issue
-	deps   []*beadsdk.Dependency
-}
-
-func (s *xrigStrandedStore) GetIssue(_ context.Context, id string) (*beadsdk.Issue, error) {
-	return s.issues[id], nil
-}
-
-func (s *xrigStrandedStore) GetIssuesByIDs(_ context.Context, ids []string) ([]*beadsdk.Issue, error) {
-	var out []*beadsdk.Issue
-	for _, id := range ids {
-		if iss, ok := s.issues[id]; ok {
-			out = append(out, iss)
-		}
-	}
-	return out, nil
-}
-
-func (s *xrigStrandedStore) GetDependencyRecords(_ context.Context, issueID string) ([]*beadsdk.Dependency, error) {
-	var out []*beadsdk.Dependency
-	for _, d := range s.deps {
-		if d.IssueID == issueID {
-			out = append(out, d)
-		}
-	}
-	return out, nil
+// workRigStore is the gastown rig for the stranded scan's blocker check:
+// gt-work, blocked by oag-x in the oag rig, and its unblocked sibling gt-sib.
+func workRigStore() *fakeStore {
+	s := newFakeStore()
+	s.seed(
+		beads.Issue{ID: "gt-work", Status: "open"},
+		beads.Issue{ID: "gt-sib", Status: "open"},
+	)
+	s.link("gt-work", "external:oag:oag-x", "blocks")
+	return s
 }
 
 // strandedXrigTown writes a town whose convoy hq-xr tracks gt-work and gt-sib.
@@ -63,7 +42,7 @@ func strandedXrigTown(t *testing.T) Town {
 
 // storeBlockCheck opens the stranded scan's blocker check over the given
 // stores, the daemon's wiring: every store is held up front.
-func storeBlockCheck(stores map[string]beadsdk.Storage) func(string) (blockCheck, func(), error) {
+func storeBlockCheck(stores map[string]IssueSource) func(string) (blockCheck, func(), error) {
 	return func(townRoot string) (blockCheck, func(), error) {
 		resolver := NewStoreResolver(townRoot, stores)
 		return func(id string) Block {
@@ -85,25 +64,17 @@ func noBlockers(string) (blockCheck, func(), error) {
 func TestFindStrandedConvoys_CrossRigBlockerNotReady(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		blocker   beadsdk.Status
+		blocker   string
 		wantReady []string
 	}{
-		{beadsdk.StatusOpen, []string{"gt-sib"}},
-		{beadsdk.StatusClosed, []string{"gt-work", "gt-sib"}},
+		{"open", []string{"gt-sib"}},
+		{"closed", []string{"gt-work", "gt-sib"}},
 	} {
-		t.Run(string(tc.blocker), func(t *testing.T) {
+		t.Run(tc.blocker, func(t *testing.T) {
 			town := strandedXrigTown(t)
-			gastown := &xrigStrandedStore{issues: map[string]*beadsdk.Issue{
-				"gt-work": {ID: "gt-work", Status: beadsdk.StatusOpen},
-				"gt-sib":  {ID: "gt-sib", Status: beadsdk.StatusOpen},
-			}, deps: []*beadsdk.Dependency{
-				{IssueID: "gt-work", DependsOnID: "external:oag:oag-x", Type: "blocks"},
-			}}
-			oag := &xrigStrandedStore{issues: map[string]*beadsdk.Issue{
-				"oag-x": {ID: "oag-x", Status: tc.blocker},
-			}}
-			hq := &xrigStrandedStore{issues: map[string]*beadsdk.Issue{}}
-			check := storeBlockCheck(map[string]beadsdk.Storage{"hq": hq, "gastown": gastown, "oag": oag})
+			oag := newFakeStore()
+			oag.seed(beads.Issue{ID: "oag-x", Status: tc.blocker})
+			check := storeBlockCheck(map[string]IssueSource{"hq": newFakeStore(), "gastown": workRigStore(), "oag": oag})
 
 			stranded, err := town.findStrandedWith(context.Background(), check)
 			if err != nil {
@@ -127,27 +98,19 @@ func TestFindStrandedConvoys_ReportsFailSafeHolds(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name      string
-		setup     func(oag *xrigStrandedStore)
+		setup     func(oag *fakeStore)
 		withOag   bool
 		wantCause string
 	}{
-		{"open blocker", func(*xrigStrandedStore) {}, true, ""},
-		{"dangling blocker", func(oag *xrigStrandedStore) { delete(oag.issues, "oag-x") }, true, "unresolved"},
-		{"blocker rig unreachable", func(*xrigStrandedStore) {}, false, "unreadable"},
+		{"open blocker", func(oag *fakeStore) { oag.seed(beads.Issue{ID: "oag-x", Status: "open"}) }, true, ""},
+		{"dangling blocker", func(*fakeStore) {}, true, "unresolved"},
+		{"blocker rig unreachable", func(*fakeStore) {}, false, "unreadable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			town := strandedXrigTown(t)
-			gastown := &xrigStrandedStore{issues: map[string]*beadsdk.Issue{
-				"gt-work": {ID: "gt-work", Status: beadsdk.StatusOpen},
-				"gt-sib":  {ID: "gt-sib", Status: beadsdk.StatusOpen},
-			}, deps: []*beadsdk.Dependency{
-				{IssueID: "gt-work", DependsOnID: "external:oag:oag-x", Type: "blocks"},
-			}}
-			oag := &xrigStrandedStore{issues: map[string]*beadsdk.Issue{
-				"oag-x": {ID: "oag-x", Status: beadsdk.StatusOpen},
-			}}
+			oag := newFakeStore()
 			tc.setup(oag)
-			stores := map[string]beadsdk.Storage{"hq": &xrigStrandedStore{}, "gastown": gastown}
+			stores := map[string]IssueSource{"hq": newFakeStore(), "gastown": workRigStore()}
 			if tc.withOag {
 				stores["oag"] = oag
 			}
@@ -200,7 +163,7 @@ func TestFindStrandedConvoys_TownStoreDownFailsTheScan(t *testing.T) {
 	t.Parallel()
 	town := strandedXrigTown(t)
 	down := func(townRoot string) (blockCheck, func(), error) {
-		return openStrandedBlockCheckWith(context.Background(), townRoot, func(string) (beadsdk.Storage, error) {
+		return openStrandedBlockCheckWith(context.Background(), townRoot, func(string) (IssueSource, error) {
 			return nil, errors.New("dial tcp 127.0.0.1:3307: connection refused")
 		})
 	}
