@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 	"github.com/steveyegge/gastown/internal/townconfig"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -400,7 +401,9 @@ func dispatchRigPictures(townRoot string, maxPriority int) ([]dispatchRig, error
 			continue
 		}
 
-		ready, urgent, err := countActionableReady(rigPath, maxPriority)
+		// Pass the rig's revert in flight, so a red-main bead the owner is
+		// already undoing is not counted as work to sling (gt-1fiv4).
+		ready, urgent, err := countActionableReady(rigPath, maxPriority, rigRevertInFlight(townRoot, name))
 		if err != nil {
 			return nil, fmt.Errorf("counting ready work for %s: %w", name, err)
 		}
@@ -435,19 +438,21 @@ func knownRigNames(townRoot string) ([]string, error) {
 }
 
 // countActionableReady counts the rig's actionable ready beads up to the
-// operator's priority ceiling, and the P0/P1 subset of them.
+// operator's priority ceiling, and the P0/P1 subset of them. rv is the revert
+// the rig's red-main owner has in flight, which holds that rig's red-main beads
+// out of the count (isActionableReadyBead).
 //
 // A read failure is returned, not swallowed. Under-reporting ready work is the
 // one error this check cannot absorb: it produces exactly the silence the
 // patrol exists to break, and produces it invisibly. A rig with no beads
 // database at all is not a failure — it has no ready work to report.
-func countActionableReady(rigPath string, maxPriority int) (ready, urgent int, err error) {
+func countActionableReady(rigPath string, maxPriority int, rv *specdispatch.Revert) (ready, urgent int, err error) {
 	issues, err := readyIssuesUnlimited(rigPath, readyBoardFor)
 	if err != nil {
 		return 0, 0, err
 	}
 	for _, issue := range filterIdentityBeads(issues) {
-		if !isActionableReadyBead(issue, maxPriority) {
+		if !isActionableReadyBead(issue, maxPriority, rv) {
 			continue
 		}
 		ready++
@@ -553,12 +558,13 @@ var patrolSuppressedTitlePrefixes = []string{
 
 // isActionableReadyBead reports whether a ready bead is work the mayor could
 // sling: at or above maxPriority's floor, and not one of the town's
-// bookkeeping families.
+// bookkeeping families. rv is the rig's revert in flight, which holds that
+// rig's red-main beads.
 //
 // Epics are excluded as containers. `gt sling` accepts one, but a container's
 // children are what a polecat takes, and they appear in ready on their own — a
 // nudge naming the epic would point the mayor at the wrong row.
-func isActionableReadyBead(issue *beads.Issue, maxPriority int) bool {
+func isActionableReadyBead(issue *beads.Issue, maxPriority int, rv *specdispatch.Revert) bool {
 	if issue == nil {
 		return false
 	}
@@ -576,6 +582,14 @@ func isActionableReadyBead(issue *beads.Issue, maxPriority int) bool {
 	// the convoy feeders' own, so this check and the spec dispatcher's draw the
 	// same line the sling guard does.
 	if dispatch.OperatorReservation(issue.Labels, issue.Assignee) != "" {
+		return false
+	}
+	// A red-main bead is the fix forward for a breakage the rig's owner is
+	// already undoing; counting it here nudges the mayor to sling the very fix
+	// the revert supersedes (gt-1fiv4). The rule is the spec dispatcher's own
+	// (specdispatch.RedMainHold), so the patrol and the dispatcher hold the same
+	// beads (gt-zkdwt).
+	if specdispatch.RedMainHold(specdispatch.Spec{Labels: issue.Labels}, rv) != "" {
 		return false
 	}
 

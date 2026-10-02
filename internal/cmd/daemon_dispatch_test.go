@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
 func TestDispatchDecision_NudgesWhenSeatsAreFreeAndWorkExists(t *testing.T) {
@@ -178,7 +179,7 @@ func TestIsActionableReadyBead(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isActionableReadyBead(tc.issue, 2); got != tc.want {
+			if got := isActionableReadyBead(tc.issue, 2, nil); got != tc.want {
 				t.Errorf("isActionableReadyBead = %v, want %v", got, tc.want)
 			}
 		})
@@ -191,14 +192,63 @@ func TestIsActionableReadyBead(t *testing.T) {
 func TestIsActionableReadyBeadHonorsTheCeiling(t *testing.T) {
 	t.Parallel()
 	p3 := &beads.Issue{ID: "gt-3", Title: "someday", Priority: 3}
-	if isActionableReadyBead(p3, 2) {
+	if isActionableReadyBead(p3, 2, nil) {
 		t.Error("a P3 bead is dispatchable at the default P2 ceiling")
 	}
-	if !isActionableReadyBead(p3, 4) {
+	if !isActionableReadyBead(p3, 4, nil) {
 		t.Error("a P3 bead is backlog at a P4 ceiling")
 	}
-	if isActionableReadyBead(&beads.Issue{ID: "gt-u", Title: "unscored", Priority: -1}, 4) {
+	if isActionableReadyBead(&beads.Issue{ID: "gt-u", Title: "unscored", Priority: -1}, 4, nil) {
 		t.Error("an unscored bead is dispatchable")
+	}
+}
+
+// TestIsActionableReadyBead_HoldsRedMainBeadWhileItsRevertIsInFlight is
+// gt-1fiv4: a bead the rig's red-main owner filed is not work to nudge the
+// mayor about while that owner is undoing the same breakage. The predicate is
+// specdispatch.RedMainHold's, so the patrol and the spec dispatcher hold the
+// same beads (gt-zkdwt).
+func TestIsActionableReadyBead_HoldsRedMainBeadWhileItsRevertIsInFlight(t *testing.T) {
+	t.Parallel()
+	redMain := &beads.Issue{
+		ID: "gt-3u7zu", Title: "gastown post-land test red", Priority: 1,
+		Labels: []string{specdispatch.LabelRedMain},
+	}
+	revert := &specdispatch.Revert{Culprit: "gt-cq5gb"}
+	plain := &beads.Issue{ID: "gt-plain", Title: "ordinary work", Priority: 1}
+
+	if isActionableReadyBead(redMain, 2, revert) {
+		t.Error("a red-main bead is dispatchable while the rig's revert of the same breakage is in flight")
+	}
+	// The hold is the label's: a revert in flight does not hold the rig's
+	// other work, and a red-main bead is work again once the revert is gone.
+	if !isActionableReadyBead(plain, 2, revert) {
+		t.Error("a bead without the red-main label is held by another bead's revert")
+	}
+	if !isActionableReadyBead(redMain, 2, nil) {
+		t.Error("a red-main bead is held with no revert in flight")
+	}
+	if !isActionableReadyBead(redMain, 2, &specdispatch.Revert{}) {
+		t.Error("a revert with no culprit is no hold")
+	}
+}
+
+// TestIsActionableReadyBead_AbsentRedMainStateCountsAsToday is the compat half
+// of gt-1fiv4: a rig with no red-main state file reads as no revert, so the
+// patrol counts its beads exactly as it did before the hold existed.
+func TestIsActionableReadyBead_AbsentRedMainStateCountsAsToday(t *testing.T) {
+	t.Parallel()
+	bead := &beads.Issue{
+		ID: "gt-3u7zu", Title: "gastown post-land test red", Priority: 1,
+		Labels: []string{specdispatch.LabelRedMain},
+	}
+
+	rv := rigRevertInFlight(t.TempDir(), "gastown")
+	if rv != nil {
+		t.Fatalf("absent red-main state = %+v, want no revert", rv)
+	}
+	if !isActionableReadyBead(bead, 2, rv) {
+		t.Error("a red-main bead is held by a rig whose red-main state file does not exist")
 	}
 }
 
