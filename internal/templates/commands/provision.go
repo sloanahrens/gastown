@@ -125,6 +125,37 @@ func Missing(workspacePath string) []string {
 	return missing
 }
 
+// Stale returns the commands whose copy in workspacePath/.claude/commands/
+// differs from the embedded template — the bodies a workspace provisioned
+// before a template edit still carries.
+//
+// An absent command is Missing's to report, not Stale's, so the two lists
+// never name the same command.
+func Stale(workspacePath string) []string {
+	dir := commandsDir(workspacePath)
+	var stale []string
+
+	for _, cmd := range Commands {
+		path := filepath.Join(dir, cmd.Name+".md")
+
+		existing, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+
+		want, err := BuildCommand(cmd)
+		if err != nil {
+			continue
+		}
+
+		if string(existing) != want {
+			stale = append(stale, cmd.Name)
+		}
+	}
+
+	return stale
+}
+
 // FindByName returns the command with the given name, or nil if not found.
 func FindByName(name string) *Command {
 	for i := range Commands {
