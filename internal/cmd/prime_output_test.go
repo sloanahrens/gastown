@@ -252,3 +252,31 @@ func TestOutputRoleDirectives_WarnsAboutUnusedFiles(t *testing.T) {
 		}
 	})
 }
+
+// TestOutputMayorContextDropsRetiredRoles pins the mayor brief to the roles
+// that still exist. The Refinery and Witness agent roles are retired
+// (gt-4k3fj.6.1): detectRole maps <rig>/witness to RoleUnknown and nothing
+// spawns a refinery, so the delegation target is `gt sling <bead> <rig>` and
+// the lifecycle signal is the daemon's idle-seat nudge. Naming the retired
+// roles here sent the mayor looking for agents that cannot answer (gt-qzwy9).
+func TestOutputMayorContextDropsRetiredRoles(t *testing.T) {
+	t.Parallel()
+
+	ctx := RoleContext{Role: RoleMayor, TownRoot: t.TempDir(), Rig: "myrig"}
+
+	var buf bytes.Buffer
+	outputMayorContext(&buf, ctx)
+	out := buf.String()
+
+	for _, banned := range []string{"Refiner", "Witness", "SLOT_OPEN"} {
+		if strings.Contains(out, banned) {
+			t.Errorf("mayor context still names %q:\n%s", banned, out)
+		}
+	}
+	if !strings.Contains(out, "sling <bead> <rig>") {
+		t.Errorf("mayor context should name the surviving dispatch command:\n%s", out)
+	}
+	if !strings.Contains(out, "Idle-Seat Nudges") {
+		t.Errorf("mayor context should name the surviving lifecycle signal:\n%s", out)
+	}
+}
