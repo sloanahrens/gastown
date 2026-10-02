@@ -62,9 +62,10 @@ func NonWorkBeadTypes() []string {
 }
 
 // NotWorkBead names why a bead is not a work bead the lint may check: its type
-// is an epic or a runtime family, or it wears a runtime family label
-// (gt:agent, gt:wisp, ...). Empty means the bead is a work bead. The reason
-// names what the bead is ("type epic", "label gt:agent").
+// is an epic or a runtime family, it wears a runtime family label (gt:agent,
+// gt:wisp, ...), or it is ephemeral, which is what a wisp is. Empty means the
+// bead is a work bead. The reason names what the bead is ("type epic",
+// "label gt:agent", "wisp").
 func NotWorkBead(s Spec) string {
 	t := strings.ToLower(strings.TrimSpace(s.Type))
 	if t == EpicType {
@@ -79,6 +80,9 @@ func NotWorkBead(s Spec) string {
 		if s.HasLabel(l) {
 			return "label " + l
 		}
+	}
+	if s.Ephemeral {
+		return "wisp"
 	}
 	return ""
 }
@@ -164,6 +168,9 @@ type Spec struct {
 	Design      string
 	Notes       string
 	Acceptance  string
+	// Ephemeral marks a wisp: an ephemeral bead (a molecule, a merge
+	// request) that bd keeps out of the issues table. No wisp is work.
+	Ephemeral bool
 }
 
 // HasLabel reports whether the spec carries label, ignoring case and space.

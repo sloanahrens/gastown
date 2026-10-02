@@ -451,7 +451,16 @@ func TestSpecLintJSONReport(t *testing.T) {
 		},
 		{
 			name:       "not a work bead",
-			json:       `[{"id":"gt-wisp","issue_type":"wisp","status":"open","description":"` + jsonEscape(specTestDescription) + `","acceptance_criteria":"- [ ] a"}]`,
+			json:       `[{"id":"gt-epic","issue_type":"epic","status":"open","description":"` + jsonEscape(specTestDescription) + `","acceptance_criteria":"- [ ] a"}]`,
+			wantOK:     false,
+			wantFields: "not a work bead",
+			wantExit:   1,
+		},
+		{
+			// A live wisp (bd show gt-wisp-pbug9, 2026-10-02): type molecule,
+			// ephemeral true, a clean-looking description. Must still refuse.
+			name:       "wisp",
+			json:       `[{"id":"gt-wisp-x","issue_type":"molecule","ephemeral":true,"status":"open","description":"` + jsonEscape(specTestDescription) + `","acceptance_criteria":"- [ ] a"}]`,
 			wantOK:     false,
 			wantFields: "not a work bead",
 			wantExit:   1,

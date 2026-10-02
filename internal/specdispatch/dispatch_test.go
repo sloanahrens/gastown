@@ -26,6 +26,7 @@ func TestEligible(t *testing.T) {
 		{func(s *Spec) { s.Assignee = "gastown/polecats/ruby" }, false, "assigned"},
 		{func(s *Spec) { s.Type = "epic" }, false, "not a work bead: type epic"},
 		{func(s *Spec) { s.Type = "wisp" }, false, "not a work bead: type wisp"},
+		{func(s *Spec) { s.Type = "molecule"; s.Ephemeral = true }, false, "not a work bead: wisp"},
 		{func(s *Spec) { s.Labels = []string{"gt:agent"} }, false, "not a work bead: label gt:agent"},
 		{func(s *Spec) { s.Labels = append(s.Labels, "gt:ready-to-land") }, false, "label gt:ready-to-land"},
 		{func(s *Spec) { s.Labels = append(s.Labels, "needs-human") }, false, "label needs-human"},

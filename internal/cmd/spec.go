@@ -154,6 +154,7 @@ func specFromIssue(issue *beads.Issue) specdispatch.Spec {
 		Design:      issue.Design,
 		Notes:       issue.Notes,
 		Acceptance:  issue.AcceptanceCriteria,
+		Ephemeral:   issue.Ephemeral,
 	}
 }
 

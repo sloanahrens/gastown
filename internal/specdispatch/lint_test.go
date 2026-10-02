@@ -105,6 +105,9 @@ func TestLintNamesEveryMissingField(t *testing.T) {
 		{"agent bead by label", func(s *Spec) { s.Labels = []string{"gt:agent"} }, "not a work bead", RouteRefuse},
 		{"wisp by type", func(s *Spec) { s.Type = "wisp" }, "not a work bead", RouteRefuse},
 		{"wisp by label", func(s *Spec) { s.Labels = []string{"gt:wisp"} }, "not a work bead", RouteRefuse},
+		// A molecule wisp reads as a plain bead: only ephemeral says what it
+		// is (bd show on a live wisp, 2026-10-02).
+		{"wisp by ephemeral", func(s *Spec) { s.Type = "molecule"; s.Ephemeral = true }, "not a work bead", RouteRefuse},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -159,6 +162,7 @@ func TestLintRefusesNonWorkBeadsWithoutReadingShape(t *testing.T) {
 		{"agent label", func(s *Spec) { s.Labels = []string{"gt:agent"} }, "label gt:agent"},
 		{"wisp type", func(s *Spec) { s.Type = "wisp" }, "type wisp"},
 		{"wisp label", func(s *Spec) { s.Labels = []string{"gt:wisp"} }, "label gt:wisp"},
+		{"wisp ephemeral", func(s *Spec) { s.Type = "molecule"; s.Ephemeral = true }, "wisp"},
 		{"message", func(s *Spec) { s.Type = "message" }, "type message"},
 	}
 	for _, tc := range cases {
