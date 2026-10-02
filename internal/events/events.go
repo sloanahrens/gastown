@@ -133,10 +133,31 @@ const (
 	ActorDaemon = "daemon" // daemon-originated events, e.g. mass-death detection
 )
 
-// CallerDaemon is the payload "caller" value on the session events the daemon
-// authors (crash detection, idle reap); gt doctor's test-leaks check
-// matches it so daemon activity is not read as test leakage (gt-d9423).
-const CallerDaemon = "daemon"
+// Payload "caller" stamps for the town processes that author session events
+// from outside a test binary. Those events name the tmux session as their
+// actor ("gt-opal", "hq-mayor"), a prefix the town does not know, so gt
+// doctor's test-leaks check would read the town's own housekeeping as leaked
+// test fixtures. The stamp is the whole test: a fixture actor logged with any
+// other caller is still reported (gt-d9423, gt-rqajq).
+const (
+	CallerDaemon = "daemon"    // daemon crash detection and idle reap
+	CallerDoctor = "gt doctor" // gt doctor --fix zombie and orphan cleanup
+	CallerDown   = "gt down"   // gt down town-session shutdown
+)
+
+// townProcessSessionCallers is the set IsTownProcessSessionCaller accepts.
+var townProcessSessionCallers = map[string]bool{
+	CallerDaemon: true,
+	CallerDoctor: true,
+	CallerDown:   true,
+}
+
+// IsTownProcessSessionCaller reports whether caller is a stamp the test-leaks
+// tripwire tolerates, the writer being the town rather than a test fixture
+// that reached the live events log (gt-x9o).
+func IsTownProcessSessionCaller(caller string) bool {
+	return townProcessSessionCallers[caller]
+}
 
 // Log writes an event to the events log.
 // The event is appended to <town-root>/.events.jsonl, with the town root

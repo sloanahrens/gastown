@@ -123,6 +123,48 @@ func TestTestLeakCheck_ToleratesTownActors(t *testing.T) {
 	}
 }
 
+// gt-rqajq: gt doctor --fix kills zombies and orphans, and gt down stops the
+// Mayor, each appending a session_death that names the tmux session as the
+// actor. A gate running beside that housekeeping is not leaking fixtures, so
+// every town-process stamp is tolerated — and only those stamps.
+func TestTestLeakCheck_ToleratesTownProcessSessionDeaths(t *testing.T) {
+	t.Parallel()
+	for _, caller := range []string{events.CallerDaemon, events.CallerDoctor, events.CallerDown} {
+		t.Run(caller, func(t *testing.T) {
+			t.Parallel()
+			town := leakTown(t)
+			line, err := json.Marshal(map[string]any{
+				"ts":      "2026-09-30T11:05:00Z",
+				"type":    "session_death",
+				"actor":   "gt-gastown-opal",
+				"payload": map[string]string{"caller": caller, "session": "gt-gastown-opal"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			appendLeakEvents(t, town, string(line)+"\n")
+
+			if r := runLeakCheck(t, newLeakCheck(), town); r.Status != StatusOK {
+				t.Errorf("%s session_death flagged: %v %s %v", caller, r.Status, r.Message, r.Details)
+			}
+		})
+	}
+}
+
+// A session-id actor with a caller no town process stamps is still the leak
+// the check exists to catch, so the tolerance is not "any session-ish actor".
+func TestTestLeakCheck_FlagsSessionActorWithUnknownCaller(t *testing.T) {
+	t.Parallel()
+	town := leakTown(t)
+	appendLeakEvents(t, town,
+		`{"ts":"2026-09-30T11:06:00Z","type":"session_death","actor":"gt-gastown-opal","payload":{"caller":"some-test"},"visibility":"feed"}`+"\n")
+
+	r := runLeakCheck(t, newLeakCheck(), town)
+	if r.Status != StatusWarning || len(r.Details) != 1 || !strings.Contains(r.Details[0], "gt-gastown-opal") {
+		t.Errorf("unknown caller: %v %s %v; want one warning naming the session actor", r.Status, r.Message, r.Details)
+	}
+}
+
 // A complete malformed line is reported; a trailing line still being
 // appended is not.
 func TestTestLeakCheck_MalformedAndPartialLines(t *testing.T) {

@@ -380,6 +380,29 @@ func TestSessionDeathPayload(t *testing.T) {
 	}
 }
 
+// gt-d9423, gt-rqajq: the tripwire's tolerance is the town processes that can
+// stamp a session event from outside a test binary, and nothing wider — the
+// emitters and the check read the same predicate.
+func TestIsTownProcessSessionCaller(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		caller string
+		want   bool
+	}{
+		{CallerDaemon, true},
+		{CallerDoctor, true},
+		{CallerDown, true},
+		{"gt log crash", false}, // names the agent as the actor; no tolerance needed
+		{"unknown", false},
+		{"myr/mycat", false},
+		{"", false},
+	} {
+		if got := IsTownProcessSessionCaller(tc.caller); got != tc.want {
+			t.Errorf("IsTownProcessSessionCaller(%q) = %v, want %v", tc.caller, got, tc.want)
+		}
+	}
+}
+
 func TestMassDeathPayload_WithCause(t *testing.T) {
 	t.Parallel()
 	sessions := []string{"s1", "s2"}
