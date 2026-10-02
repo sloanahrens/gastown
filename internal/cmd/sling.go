@@ -231,9 +231,9 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	var seatSpawn *SpawnedPolecatInfo
 	defer func() { seatSpawn.releaseSeatClaim() }()
 
-	// A refusal is not a mistyped command: print its reason and remediation
-	// without cobra's usage block trailing it (gt-fudap).
-	defer func() { silenceUsageOnRefusal(cmd, retErr) }()
+	// Only a mistyped command keeps cobra's usage block: a refusal or a runtime
+	// failure prints its reason and remediation without it (gt-fudap, gt-thnbp).
+	defer func() { silenceUsageOnFailure(cmd, retErr) }()
 
 	// Polecats cannot sling - check early before writing anything.
 	// Check GT_ROLE first: coordinators (mayor, witness, etc.) may have a stale
@@ -251,17 +251,17 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 
 	// Validate --merge flag if provided
 	if err := validateConvoyMergeFlag(r.opts.merge); err != nil {
-		return err
+		return &slingUsageError{err: err}
 	}
 
 	// Validate --branch / --pr resume flags (gh#3602).
 	// These flags reuse an existing branch/PR head instead of creating a fresh
 	// polecat branch, letting a polecat continue work on an existing PR.
 	if r.opts.resumeBranch != "" && r.opts.resumePR != 0 {
-		return fmt.Errorf("--branch and --pr are mutually exclusive")
+		return slingUsageErrorf("--branch and --pr are mutually exclusive")
 	}
 	if (r.opts.resumeBranch != "" || r.opts.resumePR != 0) && r.opts.baseBranch != "" {
-		return fmt.Errorf("--base-branch cannot be combined with --branch or --pr (resume implies starting on the existing branch)")
+		return slingUsageErrorf("--base-branch cannot be combined with --branch or --pr (resume implies starting on the existing branch)")
 	}
 	if r.opts.resumePR != 0 {
 		resolved, err := r.resolvePRBranch(r.opts.resumePR)
@@ -281,7 +281,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	// Handle --stdin: read message/args from stdin (avoids shell quoting issues)
 	if r.opts.stdin {
 		if r.opts.message != "" && r.opts.argsText != "" {
-			return fmt.Errorf("cannot use --stdin when both --message and --args are already provided")
+			return slingUsageErrorf("cannot use --stdin when both --message and --args are already provided")
 		}
 		data, err := io.ReadAll(r.stdin)
 		if err != nil {
@@ -317,7 +317,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	// e.g., "gt sling gt-abc gastown --crew mel" → target becomes "gastown/crew/mel"
 	if r.opts.crew != "" {
 		if len(args) < 2 {
-			return fmt.Errorf("--crew requires a rig target argument (e.g., gt sling <bead> <rig> --crew %s)", r.opts.crew)
+			return slingUsageErrorf("--crew requires a rig target argument (e.g., gt sling <bead> <rig> --crew %s)", r.opts.crew)
 		}
 		target := args[len(args)-1]
 		args[len(args)-1] = target + "/crew/" + r.opts.crew
@@ -358,7 +358,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 				for _, id := range beadIDs {
 					idType, typeErr := r.idType(id)
 					if typeErr == nil && idType != "task" {
-						return fmt.Errorf("%s '%s' cannot be batch-scheduled with an explicit rig\nUse: gt sling %s (children auto-resolve rigs)", idType, id, id)
+						return slingUsageErrorf("%s '%s' cannot be batch-scheduled with an explicit rig\nUse: gt sling %s (children auto-resolve rigs)", idType, id, id)
 					}
 				}
 				return r.batchSchedule(r.opts, beadIDs, rigName, townRoot)
@@ -415,7 +415,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	if deferred && r.opts.on != "" {
 		if len(args) >= 2 {
 			// Non-rig last arg with --on in deferred mode — give clear error
-			return fmt.Errorf("'%s' is not a known rig\nUse: gt sling %s --on %s <rig>", args[len(args)-1], args[0], r.opts.on)
+			return slingUsageErrorf("'%s' is not a known rig\nUse: gt sling %s --on %s <rig>", args[len(args)-1], args[0], r.opts.on)
 		}
 		// Auto-resolve rig from bead prefix
 		townRoot, twErr := r.townOrEnv()
@@ -424,7 +424,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		}
 		rigName := r.rigForBead(townRoot, r.opts.on)
 		if rigName == "" {
-			return fmt.Errorf("cannot resolve rig for bead %s\nSpecify explicitly: gt sling %s --on %s <rig>", r.opts.on, args[0], r.opts.on)
+			return slingUsageErrorf("cannot resolve rig for bead %s\nSpecify explicitly: gt sling %s --on %s <rig>", r.opts.on, args[0], r.opts.on)
 		}
 		formulaName := args[0]
 		if r.opts.hookRawBead {
@@ -458,7 +458,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 			// (children auto-resolve their rigs)
 			idType, err := r.idType(args[0])
 			if err == nil && idType != "task" {
-				return fmt.Errorf("%s cannot be scheduled with an explicit rig\nUse: gt sling %s (children auto-resolve rigs)",
+				return slingUsageErrorf("%s cannot be scheduled with an explicit rig\nUse: gt sling %s (children auto-resolve rigs)",
 					idType, args[0])
 			}
 			if r.verifyBead(args[0]) != nil {

@@ -902,12 +902,25 @@ func TestSlingRefusalSilencesUsage(t *testing.T) {
 		}
 	}
 
-	// Contrast: a failure that is not a refusal still prints usage.
+	// A failure that is not a refusal either (an unknown bead, a store that
+	// cannot answer) prints its one error line too (gt-thnbp).
 	failCmd := &cobra.Command{Use: "sling"}
 	if err := h.run.run(context.Background(), failCmd, []string{"gt-missing", "gastown"}); err == nil {
 		t.Fatal("an unknown bead must fail")
 	}
-	if failCmd.SilenceUsage {
-		t.Error("a non-refusal failure should keep cobra's usage block")
+	if !failCmd.SilenceUsage {
+		t.Error("a runtime failure should suppress cobra's usage block (gt-thnbp)")
+	}
+
+	// Contrast: a mistyped invocation still prints usage.
+	misuse := newSlingHarness(t)
+	misuse.run.opts.resumeBranch = "some-branch"
+	misuse.run.opts.resumePR = 7
+	misuseCmd := &cobra.Command{Use: "sling"}
+	if err := misuse.run.run(context.Background(), misuseCmd, []string{slingBead, "gastown"}); err == nil {
+		t.Fatal("--branch with --pr must fail")
+	}
+	if misuseCmd.SilenceUsage {
+		t.Error("a mistyped invocation should keep cobra's usage block")
 	}
 }
