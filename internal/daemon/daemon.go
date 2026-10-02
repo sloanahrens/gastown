@@ -375,9 +375,11 @@ type Daemon struct {
 	landingDrainedOnce sync.Once
 	landingDrainedCh   chan struct{}
 
-	// landingBeads maps rig -> the bead its landing pass is working on, for
-	// the restart's wait line.
-	landingBeads sync.Map
+	// landingStates maps rig -> its landing pass: the bead being landed, when
+	// it started, and when the rig last showed landing activity. The restart's
+	// wait line reads the bead; the attention queue's landing-stuck and
+	// queue-stuck collectors read the times (gt-vsct7.3).
+	landingStates landingStates
 
 	// postLandRuns counts rigs whose post-landing runner has a run in flight
 	// or queued. It runs outside the landing pass, so checkUpgradeRestart
