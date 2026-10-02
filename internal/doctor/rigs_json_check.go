@@ -1,139 +1,79 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/steveyegge/gastown/internal/config"
 )
 
-// RigsJSONCheck verifies that rigs.json exists and the PrefixRegistry is populated.
-// A missing rigs.json causes silent failures in session name parsing, crew cycling,
-// and nudge routing.
+// RigsJSONCheck verifies that the rig registry loads and carries rig prefixes.
+// An empty PrefixRegistry causes silent failures in session name parsing, crew
+// cycling, and nudge routing.
 type RigsJSONCheck struct {
-	FixableCheck
-	canonicalPath string
-	fallbackPath  string
-	townRoot      string
+	BaseCheck
 }
 
-// NewRigsJSONCheck creates a new rigs.json existence check.
+// NewRigsJSONCheck creates a new rig registry prefix check.
 func NewRigsJSONCheck() *RigsJSONCheck {
 	return &RigsJSONCheck{
-		FixableCheck: FixableCheck{
-			BaseCheck: BaseCheck{
-				CheckName:        "rigs-json",
-				CheckDescription: "Check that rigs.json exists for PrefixRegistry",
-				CheckCategory:    CategoryConfig,
-			},
+		BaseCheck: BaseCheck{
+			CheckName:        "rigs-json",
+			CheckDescription: "Check that the rig registry yields prefixes for PrefixRegistry",
+			CheckCategory:    CategoryConfig,
 		},
 	}
 }
 
-// CanFix returns true if the canonical path is missing but fallback exists.
-func (c *RigsJSONCheck) CanFix() bool {
-	if c.canonicalPath == "" {
-		return false
-	}
-	// Can fix if canonical is missing but fallback exists (copy it back).
-	if _, err := os.Stat(c.canonicalPath); os.IsNotExist(err) {
-		if _, err := os.Stat(c.fallbackPath); err == nil {
-			return true
-		}
-	}
-	return false
-}
-
-// Fix copies rigs.json from fallback to canonical location using atomic write.
-func (c *RigsJSONCheck) Fix(ctx *CheckContext) error {
-	data, err := os.ReadFile(c.fallbackPath)
-	if err != nil {
-		return fmt.Errorf("reading fallback rigs.json: %w", err)
-	}
-
-	// Ensure mayor directory exists
-	mayorDir := filepath.Dir(c.canonicalPath)
-	if err := os.MkdirAll(mayorDir, 0755); err != nil {
-		return fmt.Errorf("creating mayor dir: %w", err)
-	}
-
-	// Write to temp file then rename for atomic operation.
-	tmp := c.canonicalPath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		return fmt.Errorf("writing temp rigs.json: %w", err)
-	}
-	if err := os.Rename(tmp, c.canonicalPath); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("renaming temp to canonical rigs.json: %w", err)
-	}
-	return nil
-}
-
-// Run checks that rigs.json exists at the canonical or fallback location.
+// Run loads the rig registry through config.LoadRigsConfig, which follows
+// mayor/rigs.json into the registry section of mayor/town.json on the two-file
+// layout, and reports whether it carries any rig prefix.
 func (c *RigsJSONCheck) Run(ctx *CheckContext) *CheckResult {
-	c.townRoot = ctx.TownRoot
-	c.canonicalPath = ""
-	// On the two-file layout the registry is a section of mayor/town.json
-	// and there is no rigs.json to keep or restore (gt-y3pgh.7).
-	if r, err := config.DetectLayout(ctx.TownRoot); err == nil && r.Layout == config.LayoutTwoFile {
+	rigsPath := filepath.Join(ctx.TownRoot, "mayor", "rigs.json")
+	registry, err := config.LoadRigsConfig(rigsPath)
+	if errors.Is(err, config.ErrNotFound) {
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusOK,
-			Message: "Rig registry is in mayor/town.json (two-file layout)",
+			Status:  StatusError,
+			Message: "rig registry not found — PrefixRegistry is empty, session parsing broken",
+			Details: []string{
+				fmt.Sprintf("Looked in %s", config.SourcePathRel(ctx.TownRoot, rigsPath)),
+				"Session cycling and nudge routing will fail silently",
+			},
+			FixHint: "Restore the rig registry or run 'gt doctor fix rigs-registry-exists'",
 		}
 	}
-	c.canonicalPath = filepath.Join(ctx.TownRoot, "mayor", "rigs.json")
-	c.fallbackPath = filepath.Join(ctx.TownRoot, "rigs.json")
-
-	// Check canonical location
-	if _, err := os.Stat(c.canonicalPath); err == nil {
-		// Also verify the fallback copy exists for resilience
-		if _, err := os.Stat(c.fallbackPath); os.IsNotExist(err) {
-			return &CheckResult{
-				Name:    c.Name(),
-				Status:  StatusWarning,
-				Message: "rigs.json exists but no fallback copy at town root",
-				Details: []string{
-					fmt.Sprintf("Canonical: %s (exists)", c.canonicalPath),
-					fmt.Sprintf("Fallback: %s (missing)", c.fallbackPath),
-					"Git operations in mayor/ can delete rigs.json",
-				},
-				FixHint: fmt.Sprintf("cp %s %s", c.canonicalPath, c.fallbackPath),
-			}
-		}
+	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusOK,
-			Message: "rigs.json present with fallback copy",
+			Status:  StatusError,
+			Message: "The rig registry does not load",
+			Details: []string{err.Error()},
+			FixHint: "Fix the file the error names by hand",
 		}
 	}
 
-	// Canonical missing — check fallback
-	if _, err := os.Stat(c.fallbackPath); err == nil {
+	prefixes := 0
+	for _, entry := range registry.Rigs {
+		if entry.BeadsConfig != nil && entry.BeadsConfig.Prefix != "" {
+			prefixes++
+		}
+	}
+	if prefixes == 0 {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusWarning,
-			Message: "rigs.json missing from mayor/ (using fallback at town root)",
+			Message: "rig registry has no rig prefixes — PrefixRegistry is empty, session parsing broken",
 			Details: []string{
-				fmt.Sprintf("Canonical: %s (MISSING)", c.canonicalPath),
-				fmt.Sprintf("Fallback: %s (exists)", c.fallbackPath),
-				"Likely deleted by git operation in mayor worktree",
+				"Session cycling and nudge routing will fail silently",
 			},
-			FixHint: "Run 'gt doctor fix rigs-json' to restore from fallback",
+			FixHint: "Set a beads prefix per rig ('gt rig list'), or restore the registry",
 		}
 	}
-
-	// Both missing — critical
 	return &CheckResult{
 		Name:    c.Name(),
-		Status:  StatusError,
-		Message: "rigs.json not found — PrefixRegistry is empty, session parsing broken",
-		Details: []string{
-			fmt.Sprintf("Canonical: %s (MISSING)", c.canonicalPath),
-			fmt.Sprintf("Fallback: %s (MISSING)", c.fallbackPath),
-			"Session cycling and nudge routing will fail silently",
-		},
-		FixHint: "Restore rigs.json or run 'gt rig list' to regenerate",
+		Status:  StatusOK,
+		Message: fmt.Sprintf("rig registry provides %d rig prefix(es)", prefixes),
 	}
 }
