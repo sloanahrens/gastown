@@ -123,7 +123,8 @@ func (c *TownConfigValidCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 }
 
-// RigsRegistryExistsCheck verifies mayor/rigs.json exists.
+// RigsRegistryExistsCheck verifies the rig registry exists, in mayor/rigs.json
+// or, on the two-file layout, the registry section of mayor/town.json.
 type RigsRegistryExistsCheck struct {
 	FixableCheck
 }
@@ -134,14 +135,14 @@ func NewRigsRegistryExistsCheck() *RigsRegistryExistsCheck {
 		FixableCheck: FixableCheck{
 			BaseCheck: BaseCheck{
 				CheckName:        "rigs-registry-exists",
-				CheckDescription: "Check that mayor/rigs.json exists",
+				CheckDescription: "Check that the rig registry exists",
 				CheckCategory:    CategoryCore,
 			},
 		},
 	}
 }
 
-// Run checks if mayor/rigs.json exists.
+// Run checks if the rig registry exists.
 func (c *RigsRegistryExistsCheck) Run(ctx *CheckContext) *CheckResult {
 	rigsPath := filepath.Join(ctx.TownRoot, "mayor", "rigs.json")
 
@@ -157,10 +158,13 @@ func (c *RigsRegistryExistsCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
+	// Name the file the registry was read from: on a migrated town
+	// mayor/rigs.json does not exist, and naming it sends an operator to a
+	// file nothing reads (gt-cfdqw).
 	return &CheckResult{
 		Name:    c.Name(),
 		Status:  StatusOK,
-		Message: "mayor/rigs.json exists",
+		Message: fmt.Sprintf("rig registry found in %s", config.SourcePathRel(ctx.TownRoot, rigsPath)),
 	}
 }
 

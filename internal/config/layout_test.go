@@ -230,6 +230,24 @@ func TestSourcePathNamesTheFileThatHoldsTheContent(t *testing.T) {
 	}
 }
 
+// TestSourcePathRelNamesFilesRelativeToTheTownRoot: a doctor message names
+// the file the registry was read from relative to the town root, so a
+// two-file town reports the host section and not the retired file (gt-cfdqw).
+func TestSourcePathRelNamesFilesRelativeToTheTownRoot(t *testing.T) {
+	t.Parallel()
+
+	rigs := func(root string) string { return filepath.Join(root, "mayor", "rigs.json") }
+
+	twoFile := migratedTown(t)
+	if got, want := SourcePathRel(twoFile, rigs(twoFile)), `mayor/town.json (section "registry")`; got != want {
+		t.Errorf("SourcePathRel(two-file rigs) = %q, want %q", got, want)
+	}
+	fiveFile := fiveFileTown(t)
+	if got, want := SourcePathRel(fiveFile, rigs(fiveFile)), "mayor/rigs.json"; got != want {
+		t.Errorf("SourcePathRel(five-file rigs) = %q, want %q", got, want)
+	}
+}
+
 func TestWritesFollowRetiredFilesToTheirSections(t *testing.T) {
 	t.Parallel()
 	root := migratedTown(t)

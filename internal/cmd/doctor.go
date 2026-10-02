@@ -33,7 +33,7 @@ and other problems that could affect workspace operation.
 Workspace checks:
   - town-config-exists       Check mayor/town.json exists
   - town-config-valid        Check mayor/town.json is valid
-  - rigs-registry-exists     Check mayor/rigs.json exists (fixable)
+  - rigs-registry-exists     Check the rig registry exists (fixable)
   - rigs-registry-valid      Check registered rigs exist (fixable)
   - mayor-exists             Check mayor/ directory structure
   - disk-space               Check filesystem has sufficient free space
