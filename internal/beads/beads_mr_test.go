@@ -447,11 +447,11 @@ esac
 
 // installLabeledWispsBDStub returns three wisps from "bd sql": one agent wisp,
 // one merge-request wisp, and one carrying no labels at all, so a single
-// PreloadLabeledWisps("gt:agent", "gt:merge-request") call can warm both
-// caches at once. It also logs every invocation, so a test can assert
-// PreloadLabeledWisps costs exactly one bd sql round trip and that a
-// subsequent ListAgentBeadsFromWisps / ListMergeRequests reads the cache
-// instead of spawning its own (gt-92zx).
+// PreloadBeads([]string{"gt:agent", "gt:merge-request"}, ...) call can warm
+// both caches at once. It also logs every invocation, so a test can assert
+// PreloadBeads costs exactly one bd sql round trip and that a subsequent
+// ListAgentBeadsFromWisps / ListMergeRequests reads the cache instead of
+// spawning its own (gt-92zx).
 //
 // The unlabeled wisp is the regression case for the editorial rejection on
 // gt-92zx: it is an agent bead by ID pattern only, so it is invisible to any
@@ -482,7 +482,7 @@ case "${1:-}" in
     exit 0
     ;;
   sql)
-    printf '%s\n' '[{"id":"gt-om-witness","title":"witness agent","description":"role: witness\n","status":"open","priority":1,"assignee":"","created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","created_by":"tester","labels_csv":"gt:agent"},{"id":"gt-wisp-mr","title":"Merge: gt-source","description":"branch: polecat/test/gt-source@abc\ntarget: main\nsource_issue: gt-source\nrig: gastown\n","status":"open","priority":1,"assignee":"","created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","created_by":"tester","labels_csv":"gt:merge-request"},{"id":"gt-gastown-polecat-bare","title":"polecat bead with no label metadata","description":"","status":"open","priority":2,"assignee":"","created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","created_by":"tester","labels_csv":""}]'
+    printf '%s\n' '[{"id":"gt-om-witness","src":"wisp","title":"witness agent","description":"role: witness\n","status":"open","priority":1,"assignee":"","created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","created_by":"tester","labels_csv":"gt:agent"},{"id":"gt-wisp-mr","src":"wisp","title":"Merge: gt-source","description":"branch: polecat/test/gt-source@abc\ntarget: main\nsource_issue: gt-source\nrig: gastown\n","status":"open","priority":1,"assignee":"","created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","created_by":"tester","labels_csv":"gt:merge-request"},{"id":"gt-gastown-polecat-bare","src":"wisp","title":"polecat bead with no label metadata","description":"","status":"open","priority":2,"assignee":"","created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","created_by":"tester","labels_csv":""}]'
     exit 0
     ;;
   show)
@@ -506,15 +506,23 @@ esac
 	return logPath
 }
 
-// TestPreloadLabeledWispsSingleQuery covers the gt-92zx fix: warming both the
-// agent and merge-request wisp caches costs one bd sql round trip, not one
-// per label.
-func TestPreloadLabeledWispsSingleQuery(t *testing.T) {
+// preloadTestLabels and preloadTestStatuses are what `gt polecat list` asks the
+// preload for, and what the tests below warm it with.
+var (
+	preloadTestLabels   = []string{"gt:agent", "gt:merge-request"}
+	preloadTestStatuses = []IssueStatus{StatusOpen}
+)
+
+// TestPreloadBeadsSingleQuery covers the gt-92zx and gt-59p7e fixes: warming
+// both the agent and merge-request caches, from the wisps table and the issues
+// table, costs one bd sql round trip — not one per label, and not one per
+// table.
+func TestPreloadBeadsSingleQuery(t *testing.T) {
 	logPath := installLabeledWispsBDStub(t)
 
 	b := New(t.TempDir())
-	if err := b.PreloadLabeledWisps("gt:agent", "gt:merge-request"); err != nil {
-		t.Fatalf("PreloadLabeledWisps() error = %v", err)
+	if err := b.PreloadBeads(preloadTestLabels, preloadTestStatuses); err != nil {
+		t.Fatalf("PreloadBeads() error = %v", err)
 	}
 
 	logData, err := os.ReadFile(logPath)
@@ -527,44 +535,64 @@ func TestPreloadLabeledWispsSingleQuery(t *testing.T) {
 	}
 }
 
-// TestPreloadLabeledWispsQueryIsUnfiltered: the preload must read the whole
-// wisps table, not a label-filtered subset. ListAgentBeadsFromWisps runs its
-// type/ID fallbacks over whatever the preload read, so a `WHERE l.label IN`
-// here would make those fallbacks unreachable for exactly the wisps that need
+// TestPreloadBeadsWispsArmIsUnfiltered: the read's wisps arm must take the
+// whole wisps table, not a label-filtered subset. ListAgentBeadsFromWisps runs
+// its type/ID fallbacks over whatever the preload read, so a `WHERE l.label IN`
+// there would make those fallbacks unreachable for exactly the wisps that need
 // them and silently drop a live polecat from the listing — the regression the
-// editorial gate caught on the first attempt (gt-92zx). Asserting on the
-// query text is the point: the behavior it protects is an absence, which the
-// stub's happy data cannot show.
-func TestPreloadLabeledWispsQueryIsUnfiltered(t *testing.T) {
+// editorial gate caught on the first attempt (gt-92zx). Asserting on the query
+// text is the point: the behavior it protects is an absence, which the stub's
+// happy data cannot show.
+//
+// It is specifically the wisps arm that has to stay unfiltered. One statement
+// answers for both tables (gt-59p7e), and the labels it names are what scope
+// the issues arm, so the assertion slices the wisps arm out rather than
+// looking at the statement as a whole.
+func TestPreloadBeadsWispsArmIsUnfiltered(t *testing.T) {
 	logPath := installLabeledWispsBDStub(t)
 
 	b := New(t.TempDir())
-	if err := b.PreloadLabeledWisps("gt:agent", "gt:merge-request"); err != nil {
-		t.Fatalf("PreloadLabeledWisps() error = %v", err)
+	if err := b.PreloadBeads(preloadTestLabels, preloadTestStatuses); err != nil {
+		t.Fatalf("PreloadBeads() error = %v", err)
 	}
 
 	logData, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read bd log: %v", err)
 	}
-	logOutput := string(logData)
-	if strings.Contains(logOutput, "WHERE l.label IN") {
-		t.Fatalf("PreloadLabeledWisps filtered its query by label; the preloaded snapshot must be the full wisps read so ListAgentBeadsFromWisps's fallbacks still see unlabeled wisps\nlog:\n%s", logOutput)
+	wispsArm := preloadWispsArm(t, string(logData))
+	if strings.Contains(wispsArm, "label IN") {
+		t.Fatalf("the wisps arm filters its rows by label; the preloaded snapshot must be the full wisps read so ListAgentBeadsFromWisps's fallbacks still see unlabeled wisps\narm:\n%s", wispsArm)
 	}
-	if strings.Contains(logOutput, "'gt:agent'") || strings.Contains(logOutput, "'gt:merge-request'") {
-		t.Fatalf("PreloadLabeledWisps pushed a label literal into SQL; bucketing belongs in Go so one read serves both consumers\nlog:\n%s", logOutput)
+	if strings.Contains(wispsArm, "'gt:agent'") || strings.Contains(wispsArm, "'gt:merge-request'") {
+		t.Fatalf("the wisps arm carries a label literal; bucketing belongs in Go so one read serves both consumers\narm:\n%s", wispsArm)
 	}
 }
 
+// preloadWispsArm is the wisps row arm of the query a test logged: from
+// "FROM wisps w" to the arm that follows it.
+func preloadWispsArm(t *testing.T, log string) string {
+	t.Helper()
+	start := strings.Index(log, "FROM wisps w")
+	if start < 0 {
+		t.Fatalf("the logged query has no wisps arm:\n%s", log)
+	}
+	arm := log[start:]
+	if end := strings.Index(arm, " UNION ALL "); end >= 0 {
+		arm = arm[:end]
+	}
+	return arm
+}
+
 // TestListMergeRequestsUsesPreloadedWispCache covers the gt-92zx fix: once
-// PreloadLabeledWisps has warmed the cache, ListMergeRequests reads it
+// PreloadBeads has warmed the cache, ListMergeRequests reads it
 // instead of running its own "bd sql" query.
 func TestListMergeRequestsUsesPreloadedWispCache(t *testing.T) {
 	logPath := installLabeledWispsBDStub(t)
 
 	b := New(t.TempDir())
-	if err := b.PreloadLabeledWisps("gt:agent", "gt:merge-request"); err != nil {
-		t.Fatalf("PreloadLabeledWisps() error = %v", err)
+	if err := b.PreloadBeads(preloadTestLabels, preloadTestStatuses); err != nil {
+		t.Fatalf("PreloadBeads() error = %v", err)
 	}
 
 	issues, err := b.ListMergeRequests(ListOptions{Label: "gt:merge-request", Status: "all", Priority: -1})
@@ -585,7 +613,7 @@ func TestListMergeRequestsUsesPreloadedWispCache(t *testing.T) {
 }
 
 // TestListAgentBeadsFromWispsUsesPreloadedCache covers the gt-92zx fix: once
-// PreloadLabeledWisps has warmed the cache, ListAgentBeadsFromWisps reads it
+// PreloadBeads has warmed the cache, ListAgentBeadsFromWisps reads it
 // instead of running its own "bd mol wisp list" (the stub fails the test if
 // that subcommand is invoked). The unlabeled wisp must still come back — a
 // cached run has to classify the same wisps an uncached one would (gt-92zx,
@@ -594,8 +622,8 @@ func TestListAgentBeadsFromWispsUsesPreloadedCache(t *testing.T) {
 	installLabeledWispsBDStub(t)
 
 	b := New(t.TempDir())
-	if err := b.PreloadLabeledWisps("gt:agent", "gt:merge-request"); err != nil {
-		t.Fatalf("PreloadLabeledWisps() error = %v", err)
+	if err := b.PreloadBeads(preloadTestLabels, preloadTestStatuses); err != nil {
+		t.Fatalf("PreloadBeads() error = %v", err)
 	}
 
 	agents, err := b.ListAgentBeadsFromWisps()

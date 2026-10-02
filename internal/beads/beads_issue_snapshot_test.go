@@ -12,21 +12,23 @@ import (
 
 // snapshotIssuesJSON is what the stub returns for the issues-table read: an
 // agent bead, an open MR, a closed MR, an ephemeral MR, a hooked work bead, an
-// ordinary open bead, and a closed agent bead.
+// ordinary open bead, and a closed agent bead. Every row carries the src tag
+// beadsql.PreloadedBeads names its arms with, which is how the reader knows
+// these came from the issues table.
 const snapshotIssuesJSON = `[
-{"id":"gt-gastown-polecat-a","title":"agent a","description":"role_type: polecat\nhook_bead: gt-work1\n","status":"open","priority":2,"issue_type":"task","assignee":"","created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T01:00:00Z","created_by":"mayor","ephemeral":0,"labels_csv":"gt:agent"},
-{"id":"gt-mr-open","title":"Merge: open","description":"branch: b1\n","status":"open","priority":1,"issue_type":"task","assignee":"","created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","created_by":"t","ephemeral":0,"labels_csv":"gt:merge-request"},
-{"id":"gt-mr-closed","title":"Merge: closed","description":"branch: b2\n","status":"closed","priority":1,"issue_type":"task","assignee":"","created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","created_by":"t","ephemeral":0,"labels_csv":"gt:merge-request"},
-{"id":"gt-mr-eph","title":"Merge: ephemeral","description":"branch: b3\n","status":"open","priority":1,"issue_type":"task","assignee":"","created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","created_by":"t","ephemeral":1,"labels_csv":"gt:merge-request"},
-{"id":"gt-work1","title":"work","description":"","status":"hooked","priority":2,"issue_type":"bug","assignee":"gastown/polecats/a","created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","created_by":"t","ephemeral":0,"labels_csv":"ready-to-land,other"},
-{"id":"gt-plain","title":"plain","description":"","status":"open","priority":3,"issue_type":"task","assignee":null,"created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","created_by":"t","ephemeral":0,"labels_csv":""},
-{"id":"gt-gastown-polecat-gone","title":"agent gone","description":"","status":"closed","priority":2,"issue_type":"task","assignee":"","created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","created_by":"mayor","ephemeral":0,"labels_csv":"gt:agent"}
+{"id":"gt-gastown-polecat-a","src":"issue","title":"agent a","description":"role_type: polecat\nhook_bead: gt-work1\n","status":"open","priority":2,"issue_type":"task","assignee":"","created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T01:00:00Z","created_by":"mayor","ephemeral":0,"labels_csv":"gt:agent"},
+{"id":"gt-mr-open","src":"issue","title":"Merge: open","description":"branch: b1\n","status":"open","priority":1,"issue_type":"task","assignee":"","created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","created_by":"t","ephemeral":0,"labels_csv":"gt:merge-request"},
+{"id":"gt-mr-closed","src":"issue","title":"Merge: closed","description":"branch: b2\n","status":"closed","priority":1,"issue_type":"task","assignee":"","created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","created_by":"t","ephemeral":0,"labels_csv":"gt:merge-request"},
+{"id":"gt-mr-eph","src":"issue","title":"Merge: ephemeral","description":"branch: b3\n","status":"open","priority":1,"issue_type":"task","assignee":"","created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","created_by":"t","ephemeral":1,"labels_csv":"gt:merge-request"},
+{"id":"gt-work1","src":"issue","title":"work","description":"","status":"hooked","priority":2,"issue_type":"bug","assignee":"gastown/polecats/a","created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","created_by":"t","ephemeral":0,"labels_csv":"ready-to-land,other"},
+{"id":"gt-plain","src":"issue","title":"plain","description":"","status":"open","priority":3,"issue_type":"task","assignee":null,"created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","created_by":"t","ephemeral":0,"labels_csv":""},
+{"id":"gt-gastown-polecat-gone","src":"issue","title":"agent gone","description":"","status":"closed","priority":2,"issue_type":"task","assignee":"","created_at":"2026-06-29T00:00:00Z","updated_at":"2026-06-29T00:00:00Z","created_by":"mayor","ephemeral":0,"labels_csv":"gt:agent"}
 ]`
 
-// installIssueSnapshotBDStub answers the issues-table bd sql with
-// snapshotIssuesJSON, the wisps-table one with no rows, and fails any other
-// read the preloaded snapshots are supposed to make unnecessary — bd list,
-// bd query, bd mol. Every invocation is logged.
+// installIssueSnapshotBDStub answers the issues half of the preload bd sql with
+// snapshotIssuesJSON, the wisps half with no rows, and fails any other read the
+// preloaded snapshots are supposed to make unnecessary — bd list, bd query,
+// bd mol. Every invocation is logged.
 func installIssueSnapshotBDStub(t *testing.T) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -82,12 +84,12 @@ func preloadedIssueSnapshotBeads(t *testing.T) (*Beads, string) {
 	t.Helper()
 	logPath := installIssueSnapshotBDStub(t)
 	b := New(t.TempDir())
-	err := b.PreloadIssues(
+	err := b.PreloadBeads(
 		[]string{"gt:agent", "gt:merge-request"},
 		[]IssueStatus{IssueStatusHooked, StatusInProgress, StatusOpen},
 	)
 	if err != nil {
-		t.Fatalf("PreloadIssues() error = %v", err)
+		t.Fatalf("PreloadBeads() error = %v", err)
 	}
 	return b, logPath
 }
@@ -101,11 +103,11 @@ func sortedIDs(issues []*Issue) []string {
 	return ids
 }
 
-// TestPreloadIssuesSingleQuery: warming the snapshot is one bd sql round trip
-// over the issues table, and the query names both the labels and the statuses
-// it must cover — a snapshot narrower than what the readers ask would answer
-// them wrongly rather than fall through.
-func TestPreloadIssuesSingleQuery(t *testing.T) {
+// TestPreloadBeadsIssuesArmNamesItsScope: warming the snapshot is one bd sql
+// round trip that reads the issues table, and the query names both the labels
+// and the statuses it must cover — a snapshot narrower than what the readers
+// ask would answer them wrongly rather than fall through.
+func TestPreloadBeadsIssuesArmNamesItsScope(t *testing.T) {
 	_, logPath := preloadedIssueSnapshotBeads(t)
 
 	logData, err := os.ReadFile(logPath)
@@ -123,31 +125,42 @@ func TestPreloadIssuesSingleQuery(t *testing.T) {
 	}
 }
 
-// TestPreloadIssuesNothingToRead: no labels and no statuses is no query.
-func TestPreloadIssuesNothingToRead(t *testing.T) {
+// TestPreloadBeadsWithoutIssueScope: with no label and no status there is no
+// issue question to ask, so the statement carries the wisps arms alone — which
+// are still worth reading, and are why this is not a no-op — and the snapshot
+// covers nothing. A reader must refuse a question that read never asked rather
+// than answer it from a subset.
+func TestPreloadBeadsWithoutIssueScope(t *testing.T) {
 	logPath := installIssueSnapshotBDStub(t)
 	b := New(t.TempDir())
-	if err := b.PreloadIssues(nil, nil); err != nil {
-		t.Fatalf("PreloadIssues(nil, nil) error = %v", err)
+	if err := b.PreloadBeads(nil, nil); err != nil {
+		t.Fatalf("PreloadBeads(nil, nil) error = %v", err)
 	}
-	if b.issueSnapshot != nil {
-		t.Errorf("PreloadIssues(nil, nil) built a snapshot: %#v", b.issueSnapshot)
+	if b.issueSnapshot == nil {
+		t.Fatal("PreloadBeads(nil, nil) left no snapshot; a nil one means 'not warmed' and would have readers pay their own round trips")
 	}
-	if data, _ := os.ReadFile(logPath); strings.Contains(string(data), "sql") {
-		t.Errorf("PreloadIssues(nil, nil) ran a query:\n%s", data)
+	if got, ok := b.issueSnapshot.byStatus([]IssueStatus{StatusOpen}); ok {
+		t.Errorf("the snapshot answered byStatus(open) although no issue was read: %v", sortedIDs(got))
+	}
+	if _, ok := b.issueSnapshot.list(ListOptions{Label: "gt:merge-request", Priority: -1}); ok {
+		t.Error("the snapshot answered a list although no issue was read")
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bd log: %v", err)
+	}
+	if strings.Contains(string(data), "FROM issues") {
+		t.Errorf("PreloadBeads(nil, nil) read the issues table anyway:\n%s", data)
 	}
 }
 
-// TestPreloadedIssuesAnswerEveryReader is the gt-0hmt2 fix end to end: with
-// both snapshots warm, ListAgentBeads, ListMergeRequests and ListIssueStatuses
+// TestPreloadedBeadsAnswerEveryReader is the gt-0hmt2 fix end to end: with
+// the snapshot warm, ListAgentBeads, ListMergeRequests and ListIssueStatuses
 // spawn no bd process of their own. The stub fails bd list, bd query and
 // bd mol, so any of them falling back is a test failure; the log then shows the
-// two preload queries and nothing else.
-func TestPreloadedIssuesAnswerEveryReader(t *testing.T) {
+// one preload query and nothing else.
+func TestPreloadedBeadsAnswerEveryReader(t *testing.T) {
 	b, logPath := preloadedIssueSnapshotBeads(t)
-	if err := b.PreloadLabeledWisps("gt:agent", "gt:merge-request"); err != nil {
-		t.Fatalf("PreloadLabeledWisps() error = %v", err)
-	}
 
 	agents, err := b.ListAgentBeads()
 	if err != nil {
@@ -176,8 +189,8 @@ func TestPreloadedIssuesAnswerEveryReader(t *testing.T) {
 	}
 
 	logData, _ := os.ReadFile(logPath)
-	if count := strings.Count(string(logData), "sql --json"); count != 2 {
-		t.Errorf("sql --json count = %d, want 2 (the two preloads)\nlog:\n%s", count, logData)
+	if count := strings.Count(string(logData), "sql --json"); count != 1 {
+		t.Errorf("sql --json count = %d, want 1 (the one preload read)\nlog:\n%s", count, logData)
 	}
 }
 

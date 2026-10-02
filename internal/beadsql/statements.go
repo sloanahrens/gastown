@@ -184,7 +184,7 @@ func LabelPresent(id, label string) Query {
 // labels_csv; a read that filters on a label adds its own INNER JOIN, before
 // wispRowGroupBy.
 func wispRowSelect() string {
-	return preloadRowSelect("w", "''", false) + preloadRowTableJoin("w", "wisps", "wisp_labels")
+	return preloadRowSelect("w", "''", "", false) + preloadRowTableJoin("w", "wisps", "wisp_labels")
 }
 
 func wispRowGroupBy() string { return preloadRowGroupBy("w") }
@@ -201,18 +201,22 @@ func WispsWithLabels(labels []string) Query {
 		wispRowGroupBy())
 }
 
-// The two preload reads — PreloadedWisps behind PreloadLabeledWisps, and
-// PreloadedIssues behind PreloadIssues — return their rows and, in the same
-// round trip, the dependency rows of every row they return (gt-7dctf). That
-// is what lets ListMergeRequests hydrate its merge requests without the
-// separate `bd show --json <ids>` it used to pay per rig: the dependency and
-// blocker data a hydration needs is already read.
+// The preload read — PreloadedBeads behind *Beads.PreloadBeads — returns the
+// rig's wisps, the issues its caller asked for, and, in the same round trip,
+// the dependency rows of both (gt-7dctf). That is what lets ListMergeRequests
+// hydrate its merge requests without the separate `bd show --json <ids>` it
+// used to pay per rig: the dependency and blocker data a hydration needs is
+// already read. Wisps and issues share one statement because `gt polecat list`
+// reads both for the same three consumers, and two subprocesses where one
+// answers is a cost it was paying for nothing (gt-59p7e).
 //
-// Each read is one UNION ALL. Its row half is the read's own rows, tagged
-// dep_row = 0; its dependency half is one row per dependency of those rows,
-// tagged dep_row = 1 and keyed to the row it belongs to by dep_issue_id. Both
-// halves are rendered from preloadColumns, so they line up column for column
-// by construction rather than by two hand-kept lists staying in step.
+// The read is one UNION ALL of four arms: the wisps, their dependency rows,
+// the issues, their dependency rows. A row arm is a table's own rows, tagged
+// dep_row = 0 and src with the table the row came from; a dependency arm is one
+// row per dependency of those rows, tagged dep_row = 1 and keyed to the row it
+// belongs to by dep_issue_id. Every arm renders its columns from
+// preloadColumns, so the four line up column for column by construction rather
+// than by hand-kept lists staying in step.
 
 // depTargetExpr is bd's own resolution of a dependency row's target: the
 // first non-null of the three typed target columns (issueops.DepTargetExpr).
@@ -220,27 +224,35 @@ const depTargetExpr = "COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.d
 
 // preloadColumn is one column shared by the reads in this file: the row
 // expression ({t} is the row table's alias, {issue_type} the one column the
-// tables source differently) and what a dependency row puts in the same
-// position. A row-only read — one with no dependency half to line up with —
-// drops the dependency columns (depOnly).
+// tables source differently, {src} the name of the table the arm reads) and
+// what a dependency row puts in the same position. A row-only read — one with
+// neither a dependency half to line up with nor a second table to tell its rows
+// apart — drops the columns only the preload carries (preloadOnly).
 type preloadColumn struct {
-	row     string
-	dep     string
-	depOnly bool
+	row         string
+	dep         string
+	preloadOnly bool
 }
 
 // preloadColumns is that shared list: every column the issues and wisps reads
 // select, plus close_reason (`bd list` reports it; the wisps reads did not
-// select it) and the dep_* columns. One list serves every read, so a column
-// added here reaches all of them; a read with no use for one still decodes it
-// and ignores it.
+// select it), the src tag naming the row's table, and the dep_* columns. One
+// list serves every read, so a column added here reaches all of them; a read
+// with no use for one still decodes it and ignores it.
 var preloadColumns = []preloadColumn{
 	{row: "{t}.id", dep: "d.issue_id"},
+	{row: "{src} AS src", dep: "{src} AS src", preloadOnly: true},
 	{row: "{t}.title", dep: "''"},
 	{row: "{t}.description", dep: "''"},
 	{row: "{t}.status", dep: "''"},
 	{row: "{t}.priority", dep: "0"},
-	{row: "{issue_type}", dep: "''"},
+	// The one column the two tables source differently, and so the one place a
+	// row arm writes a constant where the other has a column. It is aliased
+	// because a UNION takes its output column names from its first arm — the
+	// wisps one, which has no issue_type to name — and an unaliased '' there
+	// would rename the issues' own issue_type out from under internal/beads'
+	// bdSQLIssueRow, which decodes by name.
+	{row: "{issue_type} AS issue_type", dep: "'' AS issue_type"},
 	{row: "{t}.assignee", dep: "''"},
 	// The two datetime columns are NULL, not '', on a dependency row: a UNION
 	// takes its column types from its first half, and the reads' ORDER BY then
@@ -251,30 +263,32 @@ var preloadColumns = []preloadColumn{
 	{row: "{t}.ephemeral", dep: "0"},
 	{row: "{t}.close_reason", dep: "''"},
 	{row: "GROUP_CONCAT(al.label) as labels_csv", dep: "''"},
-	{row: "0 AS dep_row", dep: "1 AS dep_row", depOnly: true},
-	{row: "'' AS dep_issue_id", dep: "d.issue_id", depOnly: true},
-	{row: "'' AS dep_type", dep: "d.type", depOnly: true},
-	{row: "'' AS dep_id", dep: "COALESCE(tw.id, ti.id)", depOnly: true},
-	{row: "'' AS dep_status", dep: "COALESCE(tw.status, ti.status)", depOnly: true},
-	{row: "'' AS dep_close_reason", dep: "COALESCE(tw.close_reason, ti.close_reason)", depOnly: true},
-	{row: "'' AS dep_title", dep: "COALESCE(tw.title, ti.title)", depOnly: true},
-	{row: "0 AS dep_priority", dep: "COALESCE(tw.priority, ti.priority)", depOnly: true},
-	{row: "'' AS dep_issue_type", dep: "COALESCE(tw.issue_type, ti.issue_type)", depOnly: true},
+	{row: "0 AS dep_row", dep: "1 AS dep_row", preloadOnly: true},
+	{row: "'' AS dep_issue_id", dep: "d.issue_id", preloadOnly: true},
+	{row: "'' AS dep_type", dep: "d.type", preloadOnly: true},
+	{row: "'' AS dep_id", dep: "COALESCE(tw.id, ti.id)", preloadOnly: true},
+	{row: "'' AS dep_status", dep: "COALESCE(tw.status, ti.status)", preloadOnly: true},
+	{row: "'' AS dep_close_reason", dep: "COALESCE(tw.close_reason, ti.close_reason)", preloadOnly: true},
+	{row: "'' AS dep_title", dep: "COALESCE(tw.title, ti.title)", preloadOnly: true},
+	{row: "0 AS dep_priority", dep: "COALESCE(tw.priority, ti.priority)", preloadOnly: true},
+	{row: "'' AS dep_issue_type", dep: "COALESCE(tw.issue_type, ti.issue_type)", preloadOnly: true},
 }
 
-// preloadRowSelect renders the row half for alias, with the dependency columns
-// included when the read has a dependency half for them to line up with.
-// issueType stands in for {issue_type}: a wisp's Type stays "" because
+// preloadRowSelect renders a row arm for alias, with the columns only the
+// preload carries included when the arm has a dependency half for them to line
+// up with. issueType stands in for {issue_type}: a wisp's Type stays "" because
 // ListAgentBeadsFromWisps reads that field to classify agent beads, and the
 // wisps table's own issue_type column ('task', 'molecule', …) is not the same
-// thing, so the wisps reads pass a constant there.
-func preloadRowSelect(alias, issueType string, withDeps bool) string {
+// thing, so the wisps reads pass a constant there. src names the table this arm
+// reads, which is what tells one table's rows from another's now that a single
+// statement answers for both.
+func preloadRowSelect(alias, issueType, src string, withDeps bool) string {
 	var exprs []string
 	for _, c := range preloadColumns {
-		if c.depOnly && !withDeps {
+		if c.preloadOnly && !withDeps {
 			continue
 		}
-		exprs = append(exprs, preloadSubstitute(c.row, alias, issueType))
+		exprs = append(exprs, preloadSubstitute(c.row, alias, issueType, quote(src)))
 	}
 	return "SELECT " + strings.Join(exprs, ", ")
 }
@@ -304,10 +318,10 @@ func preloadRowTableJoin(alias, table, labelsTable string) string {
 // exactly as bd drops it from `bd show`, and a target that is itself a wisp
 // resolves. Dependencies of wisps carry their targets in wisps, so both
 // tables have to be joined for either read.
-func preloadDependencyRows(depTable, scope string) string {
+func preloadDependencyRows(depTable, scope, src string) string {
 	exprs := make([]string, len(preloadColumns))
 	for i, c := range preloadColumns {
-		exprs[i] = c.dep
+		exprs[i] = strings.ReplaceAll(c.dep, "{src}", quote(src))
 	}
 	return "SELECT " + strings.Join(exprs, ", ") +
 		" FROM " + depTable + " d" +
@@ -317,56 +331,65 @@ func preloadDependencyRows(depTable, scope string) string {
 		" AND d.issue_id IN (" + scope + ")"
 }
 
-func preloadSubstitute(expr, alias, issueType string) string {
+func preloadSubstitute(expr, alias, issueType, src string) string {
 	expr = strings.ReplaceAll(expr, "{t}", alias)
-	return strings.ReplaceAll(expr, "{issue_type}", issueType)
+	expr = strings.ReplaceAll(expr, "{issue_type}", issueType)
+	return strings.ReplaceAll(expr, "{src}", src)
 }
 
-// PreloadedWisps is the wisps read behind PreloadLabeledWisps: every wisp in
+// PreloadedBeads is the single read behind *Beads.PreloadBeads: every wisp in
 // the rig with its labels — unfiltered by label, because the agent side of the
 // preload runs type and ID fallbacks over wisps the label join cannot see
-// (gt-92zx) — plus the dependency rows of every wisp it returns.
-func PreloadedWisps() Query {
-	return declared(preloadRowSelect("w", "''", true) +
-		preloadRowTableJoin("w", "wisps", "wisp_labels") +
-		wispRowGroupBy() +
-		" UNION ALL " +
-		preloadDependencyRows("wisp_dependencies", "SELECT id FROM wisps"))
-}
-
-// PreloadedIssues is the issues read behind PreloadIssues: every issue
-// carrying any of labels or in any of statuses, with its labels and, in the
-// same round trip, the dependency rows of every issue it returns. The row
-// half is ordered as `bd list` orders (priority, then age); dep_row first
-// keeps the dependency rows after it, so the order of the issue rows — which
-// the snapshot preserves — is unchanged by the union. Both lists empty is a
-// caller error.
-func PreloadedIssues(labels, statuses []string) Query {
-	clauses := issueScopeClauses("i", labels, statuses)
-	if len(clauses) == 0 {
-		return Query{err: fmt.Errorf("beadsql: PreloadedIssues needs a label or a status")}
+// (gt-92zx) — every issue carrying any of labels or in any of statuses with
+// its labels, and the dependency rows of both, in one bd sql round trip
+// (gt-59p7e).
+//
+// The issue rows come back as `bd list` orders them (priority, then age);
+// dep_row first sorts every dependency row after every row, so neither table's
+// rows are reordered by the union. The ORDER BY closes the whole statement
+// because a UNION takes only one and it has to be last. Labels and statuses
+// are what scope the issue arms: with both empty the read is the wisps alone,
+// which is still a read worth making, so that is not a caller error.
+func PreloadedBeads(labels, statuses []string) Query {
+	arms := []string{
+		preloadRowSelect("w", "''", WispSrc, true) +
+			preloadRowTableJoin("w", "wisps", "wisp_labels") +
+			wispRowGroupBy(),
+		preloadDependencyRows("wisp_dependencies", "SELECT id FROM wisps", WispSrc),
 	}
-	scope := strings.Join(issueScopeClauses("i2", labels, statuses), " OR ")
-	return declared(preloadRowSelect("i", "i.issue_type", true) +
-		preloadRowTableJoin("i", "issues", "labels") +
-		" WHERE " + strings.Join(clauses, " OR ") +
-		preloadRowGroupBy("i") +
-		" UNION ALL " +
-		preloadDependencyRows("dependencies", "SELECT i2.id FROM issues i2 WHERE "+scope) +
-		" ORDER BY " + preloadOrderBy)
+	if clauses := issueScopeClauses("i", labels, statuses); len(clauses) > 0 {
+		scope := strings.Join(issueScopeClauses("i2", labels, statuses), " OR ")
+		arms = append(arms,
+			preloadRowSelect("i", "i.issue_type", IssueSrc, true)+
+				preloadRowTableJoin("i", "issues", "labels")+
+				" WHERE "+strings.Join(clauses, " OR ")+
+				preloadRowGroupBy("i"),
+			preloadDependencyRows("dependencies", "SELECT i2.id FROM issues i2 WHERE "+scope, IssueSrc),
+		)
+	}
+	return declared(strings.Join(arms, " UNION ALL ") + " ORDER BY " + preloadOrderBy)
 }
 
-// preloadOrderBy is PreloadedIssues' ORDER BY, at the end of the whole UNION
+// The values PreloadedBeads tags its rows with, so a reader can tell which
+// table an arm's row came from (internal/beads' splitPreloadRows). They are the
+// values the union emits, under the src output column, not the SQL literals
+// around them.
+const (
+	WispSrc  = "wisp"
+	IssueSrc = "issue"
+)
+
+// preloadOrderBy is PreloadedBeads' ORDER BY, at the end of the whole UNION
 // because a UNION takes only one and it has to come last. dep_row first keeps
-// the dependency rows after the issue rows, so the issue rows keep the order
-// `bd list` gives them — priority, then age — which the snapshot preserves and
-// the readers rely on. These are the output column names of the union's first
-// half, which is what an ORDER BY over a UNION sees.
+// the dependency rows after the rows they belong to, so the issue rows keep
+// the order `bd list` gives them — priority, then age — which the snapshot
+// preserves and the readers rely on. These are the output column names of the
+// union's first arm, which is what an ORDER BY over a UNION sees.
 const preloadOrderBy = "dep_row, priority, created_at, id"
 
-// issueScopeClauses are the WHERE terms PreloadedIssues selects rows on,
-// written against alias so that the dependency half's scope subquery asks the
-// same question of the same rows.
+// issueScopeClauses are the WHERE terms PreloadedBeads selects its issue rows
+// on, written against alias so that the dependency arm's scope subquery asks
+// the same question of the same rows.
 func issueScopeClauses(alias string, labels, statuses []string) []string {
 	var clauses []string
 	if len(labels) > 0 {
