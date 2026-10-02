@@ -701,3 +701,21 @@ func TestLandGateShellTierDiffFailureIsInfra(t *testing.T) {
 		t.Fatalf("gate = %+v, want an infrastructure error before any step", res)
 	}
 }
+
+// TestLandGateShellTierUnreadableTreeIsInfra: a tree the change check cannot
+// read is not a tree without the tier, so it stops the landing as
+// infrastructure rather than skipping the step (gt-vsct7.8).
+func TestLandGateShellTierUnreadableTreeIsInfra(t *testing.T) {
+	t.Parallel()
+	dir := writeMakefile(t, gateStagesMakefile)
+	if err := os.WriteFile(filepath.Join(dir, "scripts"), []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := &scriptedRun{}
+	g := LandGate(dir, nil)
+	g.run = s.run
+	res := g.Run(context.Background(), dir)
+	if res.Err == nil || len(res.Steps) != 0 {
+		t.Fatalf("gate = %+v, want an infrastructure error for an unreadable tree", res)
+	}
+}

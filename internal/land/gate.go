@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -539,8 +540,12 @@ func (g CommandGate) Run(ctx context.Context, dir string) GateResult {
 // shellTierNeeded reports whether dir's merged tree changes one of the shell
 // tier's inputs against its base, and whether it ships the tier at all.
 func shellTierNeeded(ctx context.Context, dir string, run runFunc) (bool, error) {
-	if _, err := os.Stat(filepath.Join(dir, shellTierScript)); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, shellTierScript)); errors.Is(err, fs.ErrNotExist) {
 		return false, nil
+	} else if err != nil {
+		// A tree the check cannot read is not a tree without the tier: an
+		// unreadable path is infrastructure, not a skip.
+		return false, fmt.Errorf("looking for %s in %s: %w", shellTierScript, dir, err)
 	}
 	var buf bytes.Buffer
 	code, err := run(ctx, dir, nil, []string{"sh", "-c", shellTierDiffCommand}, &buf)
