@@ -16,11 +16,17 @@ func TestEligible(t *testing.T) {
 		why  string
 	}{
 		{func(s *Spec) {}, true, ""},
+		// The label spec and type feature are retired: neither keeps a
+		// candidate out (gt-mmsr2).
+		{func(s *Spec) { s.Labels = nil }, true, ""},
+		{func(s *Spec) { s.Type = "feature" }, true, ""},
+		{func(s *Spec) { s.Type = "bug" }, true, ""},
 		{func(s *Spec) { s.Status = "in_progress" }, false, "status in_progress"},
 		{func(s *Spec) { s.Status = "deferred" }, false, "deferred"},
 		{func(s *Spec) { s.Assignee = "gastown/polecats/ruby" }, false, "assigned"},
-		{func(s *Spec) { s.Labels = nil }, false, "no spec label"},
-		{func(s *Spec) { s.Type = "task" }, false, "type task"},
+		{func(s *Spec) { s.Type = "epic" }, false, "not a work bead: type epic"},
+		{func(s *Spec) { s.Type = "wisp" }, false, "not a work bead: type wisp"},
+		{func(s *Spec) { s.Labels = []string{"gt:agent"} }, false, "not a work bead: label gt:agent"},
 		{func(s *Spec) { s.Labels = append(s.Labels, "gt:ready-to-land") }, false, "label gt:ready-to-land"},
 		{func(s *Spec) { s.Labels = append(s.Labels, "needs-human") }, false, "label needs-human"},
 		{func(s *Spec) { s.Labels = append(s.Labels, "Needs-Mayor-Review") }, false, "label needs-mayor-review"},

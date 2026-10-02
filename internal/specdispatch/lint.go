@@ -3,10 +3,16 @@
 // `gt spec` commands (internal/cmd/spec.go) read beads, sessions and settings
 // and hand them here, so every decision is testable with plain values.
 //
-// A spec is a bead the operator writes against the D10 template
+// A work bead is a bead the operator writes against the D10 template
 // (~/.claude/docs/agents/spec-template.md). The operator-side writer
 // (/workorder) runs the same checks before filing and calls `gt spec lint`
 // afterwards, so the two stay in parity by reading one template file.
+//
+// Shape is a property of every work bead (gt-mmsr2): the lint checks the five
+// sections, the acceptance list and the Size on a task, bug or feature alike.
+// It does not read the bead's type or labels to decide whether to check —
+// epics, agent beads and the town's runtime families are refused as "not a
+// work bead", and nothing else is.
 package specdispatch
 
 import (
@@ -16,19 +22,27 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/constants"
 )
+
+// EpicType is the bead type of a container of work, never a unit of it.
+const EpicType = "epic"
 
 // Labels and types the lint and the dispatcher key on.
 const (
-	// SpecLabel marks a bead as a dispatchable spec.
+	// SpecLabel is retired (gt-mmsr2): the shape lint checks every work bead,
+	// so no bead needs it, and a filer who adds it by habit gets the same
+	// verdict.
 	SpecLabel = "spec"
+	// SpecType is retired with SpecLabel (gt-mmsr2): a work bead of any type
+	// is linted. Kept so callers that name it still compile.
+	SpecType = "feature"
 	// NeedsPlanningLabel routes a spec to the planner instead of a polecat.
 	NeedsPlanningLabel = "needs-planning"
 	// DispatchFailedLabel marks a spec whose sling failed for a reason other
 	// than capacity. The dispatcher skips it until the label is removed.
 	DispatchFailedLabel = "spec-dispatch-failed"
-	// SpecType is the only bead type a spec may carry.
-	SpecType = "feature"
 
 	// MinAcceptance and MaxAcceptance bound the acceptance list. Fewer than
 	// one is a refusal; more than MaxAcceptance is a spec one worker cannot
@@ -37,6 +51,37 @@ const (
 	PreferredAcceptance = 3
 	MaxAcceptance       = 6
 )
+
+// NonWorkBeadTypes are the bead kinds the lint never reads a shape from: an
+// epic is a container of work rather than a unit of it, and the town's runtime
+// families (wisp, message, agent, convoy, ...) record state, not work. The
+// runtime half is constants.NonDispatchableBeadTypes, the same list every
+// other consumer that asks "can a polecat take this?" filters on.
+func NonWorkBeadTypes() []string {
+	return append([]string{EpicType}, constants.NonDispatchableBeadTypes...)
+}
+
+// NotWorkBead names why a bead is not a work bead the lint may check: its type
+// is an epic or a runtime family, or it wears a runtime family label
+// (gt:agent, gt:wisp, ...). Empty means the bead is a work bead. The reason
+// names what the bead is ("type epic", "label gt:agent").
+func NotWorkBead(s Spec) string {
+	t := strings.ToLower(strings.TrimSpace(s.Type))
+	if t == EpicType {
+		return "type " + EpicType
+	}
+	for _, nt := range constants.NonDispatchableBeadTypes {
+		if t == nt {
+			return "type " + nt
+		}
+	}
+	for _, l := range constants.NonDispatchableBeadLabels {
+		if s.HasLabel(l) {
+			return "label " + l
+		}
+	}
+	return ""
+}
 
 // DefaultSections are the template's required sections, used when the
 // template file cannot be read. They match the file as of 2026-09-29; the file
@@ -143,14 +188,38 @@ const (
 	RouteRefuse Route = "refuse"
 )
 
+// Refusal is one shape failure: the field that failed ("## Gate",
+// "acceptance", "size", "not a work bead") and the phrase the one-line report
+// uses. gt spec lint --json prints the whole list so a shell caller can act on
+// every failure at once.
+type Refusal struct {
+	Field  string `json:"field"`
+	Reason string `json:"reason"`
+}
+
 // Verdict is the lint's answer.
 type Verdict struct {
 	Route Route
-	// Field names the first missing or failing field ("type", "label spec",
-	// "## Gate", "acceptance", "size"). Empty when clean.
+	// Field names the first refusal's field ("## Gate", "acceptance", "size",
+	// "not a work bead"), or "size" when the route is planning. Empty when
+	// clean.
 	Field string
 	// Reason is a short human phrase for Field.
 	Reason string
+	// Refusals is every shape failure found, in check order. Empty unless
+	// Route is RouteRefuse; Field and Reason are its first entry.
+	Refusals []Refusal
+}
+
+// refusal builds a refused verdict from one or more failures. Field and Reason
+// mirror the first failure so the one-line report and the dispatcher's note
+// keep naming one field.
+func refusal(failures ...Refusal) Verdict {
+	v := Verdict{Route: RouteRefuse, Refusals: failures}
+	if len(failures) > 0 {
+		v.Field, v.Reason = failures[0].Field, failures[0].Reason
+	}
+	return v
 }
 
 // Clean reports whether the spec may be dispatched to a polecat.
@@ -242,41 +311,41 @@ func acceptanceText(s Spec, sections map[string]string) string {
 	return ""
 }
 
-// Lint validates a spec against the template. Checks run in a fixed order and
-// the first miss is the verdict, so the one-line report always names the same
-// field for the same bead:
+// Lint validates the shape of a work bead against the template. Every failure
+// is collected, in a fixed check order, so the one-line report always names
+// the same first field for the same bead and --json can list the rest:
 //
-//  1. type feature
-//  2. label spec
-//  3. every template section present and non-empty
-//  4. at least one acceptance item
-//  5. size: needs-planning label, a Size that says planning, or more than
+//  1. not a work bead: an epic, an agent bead, a wisp and the other runtime
+//     families are refused before any shape is read
+//  2. every template section present and non-empty
+//  3. at least one acceptance item
+//  4. size: needs-planning label, a Size that says planning, or more than
 //     MaxAcceptance items route to the planner; a Size that does not say one
 //     worker is refused
+//
+// The bead's type and labels are not a gate: a task or bug with the five
+// sections is as lintable as a feature (gt-mmsr2).
 func Lint(s Spec, t Template) Verdict {
-	if !strings.EqualFold(strings.TrimSpace(s.Type), SpecType) {
-		got := strings.TrimSpace(s.Type)
-		if got == "" {
-			got = "none"
-		}
-		return Verdict{Route: RouteRefuse, Field: "type", Reason: fmt.Sprintf("type is %s, want %s", got, SpecType)}
-	}
-	if !s.HasLabel(SpecLabel) {
-		return Verdict{Route: RouteRefuse, Field: "label spec", Reason: "label spec missing"}
+	if why := NotWorkBead(s); why != "" {
+		return refusal(Refusal{Field: "not a work bead", Reason: why})
 	}
 	sections := Sections(s.Description)
+	var failures []Refusal
 	for _, name := range t.Sections {
 		body, ok := sections[strings.ToLower(name)]
-		if !ok {
-			return Verdict{Route: RouteRefuse, Field: "## " + name, Reason: "section missing"}
-		}
-		if body == "" {
-			return Verdict{Route: RouteRefuse, Field: "## " + name, Reason: "section empty"}
+		switch {
+		case !ok:
+			failures = append(failures, Refusal{Field: "## " + name, Reason: "section missing"})
+		case body == "":
+			failures = append(failures, Refusal{Field: "## " + name, Reason: "section empty"})
 		}
 	}
 	items := CountAcceptance(acceptanceText(s, sections))
 	if items < MinAcceptance {
-		return Verdict{Route: RouteRefuse, Field: "acceptance", Reason: "no acceptance criteria"}
+		failures = append(failures, Refusal{Field: "acceptance", Reason: "no acceptance criteria"})
+	}
+	if len(failures) > 0 {
+		return refusal(failures...)
 	}
 	size := sections["size"]
 	switch {
@@ -289,7 +358,7 @@ func Lint(s Spec, t Template) Verdict {
 	}
 	// A template without a Size section has nothing to read here.
 	if hasSection(t, "size") && !oneWorkerRe.MatchString(size) {
-		return Verdict{Route: RouteRefuse, Field: "size", Reason: fmt.Sprintf("size %q is not one worker, one MR", firstLine(size))}
+		return refusal(Refusal{Field: "size", Reason: fmt.Sprintf("size %q is not one worker, one MR", firstLine(size))})
 	}
 	return Verdict{Route: RouteDispatch}
 }

@@ -13,7 +13,7 @@ import (
 // Spec dispatcher ticker (gt-4k3fj.5).
 //
 // Every interval (default 60s) the daemon runs `gt spec dispatch --json`: one
-// tick of the spec dispatcher, which lints ready spec beads and slings clean
+// tick of the spec dispatcher, which lints ready work beads and slings clean
 // ones onto a free seat of their class (internal/cmd/spec.go). The decision
 // lives in internal/cmd next to the pool accounting and the sling path, which
 // the daemon cannot import; this side is the cadence, the single-flight guard

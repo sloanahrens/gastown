@@ -18,10 +18,12 @@ import (
 
 const specTestDescription = "## Goal\nA thing.\n\n## Constraints\nGo.\n\n## Out of scope\nNone.\n\n## Gate\nmake gate\n\n## Size\none worker, one MR"
 
+// cleanSpec is a plain work bead: type task, no labels. Shape is the whole
+// gate, so it must be dispatchable as it stands (gt-mmsr2).
 func cleanSpec(id string, priority int, created string) specdispatch.Spec {
 	return specdispatch.Spec{
-		ID: id, Title: "Add " + id, Type: "feature", Status: "open", Priority: priority, CreatedAt: created,
-		Labels: []string{"spec"}, Description: specTestDescription, Acceptance: "- [ ] a\n- [ ] b\n- [ ] c",
+		ID: id, Title: "Add " + id, Type: "task", Status: "open", Priority: priority, CreatedAt: created,
+		Description: specTestDescription, Acceptance: "- [ ] a\n- [ ] b\n- [ ] c",
 	}
 }
 
@@ -301,11 +303,10 @@ func TestSpecDispatchPoolRefusalIsASkip(t *testing.T) {
 func TestSpecDispatchDryRunTouchesNothing(t *testing.T) {
 	t.Parallel()
 	bad := cleanSpec("gt-bad", 1, "2026-09-29T10:00:00Z")
-	bad.Type = "task"
-	bad.Labels = []string{"spec"}
+	bad.Type = "epic" // not a work bead, so not a candidate
 	good := cleanSpec("gt-good", 1, "2026-09-29T11:00:00Z")
 	f := newFakeSpecTown(good)
-	f.specs["gt-bad"] = bad // not eligible by type; exercised via Show path below
+	f.specs["gt-bad"] = bad // not eligible; exercised via the Show path below
 	env := f.env()
 	env.DryRun = true
 	r := runSpecDispatchCycle(env)
@@ -373,9 +374,11 @@ func TestSpecLintCommandExitCodes(t *testing.T) {
 		name, json, want string
 		code             int
 	}{
-		{"clean", `[{"id":"gt-ok","issue_type":"feature","status":"open","labels":["spec"],"description":"` + jsonEscape(specTestDescription) + `","acceptance_criteria":"- [ ] a"}]`, "gt-ok: spec lint ok", 0},
-		{"refused", `[{"id":"gt-no","issue_type":"feature","status":"open","labels":["spec"],"description":"## Goal\nx"}]`, "gt-no: spec lint refused: ## Constraints: section missing", 1},
-		{"planning", `[{"id":"gt-pl","issue_type":"feature","status":"open","labels":["spec","needs-planning"],"description":"` + jsonEscape(specTestDescription) + `","acceptance_criteria":"- [ ] a"}]`, "gt-pl: spec needs planning: label needs-planning", 2},
+		// A task with no spec label lints clean: shape is the whole gate.
+		{"clean", `[{"id":"gt-ok","issue_type":"task","status":"open","description":"` + jsonEscape(specTestDescription) + `","acceptance_criteria":"- [ ] a"}]`, "gt-ok: spec lint ok", 0},
+		{"refused", `[{"id":"gt-no","issue_type":"bug","status":"open","description":"## Goal\nx"}]`, "gt-no: spec lint refused: ## Constraints: section missing", 1},
+		{"planning", `[{"id":"gt-pl","issue_type":"task","status":"open","labels":["needs-planning"],"description":"` + jsonEscape(specTestDescription) + `","acceptance_criteria":"- [ ] a"}]`, "gt-pl: spec needs planning: label needs-planning", 2},
+		{"not a work bead", `[{"id":"gt-epic","issue_type":"epic","status":"open","description":"` + jsonEscape(specTestDescription) + `","acceptance_criteria":"- [ ] a"}]`, "gt-epic: spec lint refused: not a work bead: type epic", 1},
 		{"unreadable bead", "", "gt-gone: spec lint refused: bead: bead gt-gone not found", 1},
 	}
 	for _, tc := range cases {
@@ -393,7 +396,7 @@ func TestSpecLintCommandExitCodes(t *testing.T) {
 				spec = specFromIssue(&issues[0])
 			}
 			var out bytes.Buffer
-			err := specLint(&out, beadID, spec, showErr, tmpl)
+			err := specLint(&out, beadID, spec, showErr, tmpl, false)
 			code, _ := IsSilentExit(err)
 			if err != nil && code == 0 {
 				t.Fatalf("unexpected error %v", err)
@@ -403,6 +406,103 @@ func TestSpecLintCommandExitCodes(t *testing.T) {
 			}
 			if got := strings.TrimSpace(out.String()); got != tc.want {
 				t.Errorf("output = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// gt spec lint --json prints {id, ok, needs_planning, refusals[]} so a shell
+// caller can act on every refusal, with the exit codes unchanged.
+func TestSpecLintJSONReport(t *testing.T) {
+	t.Parallel()
+	tmpl := filepath.Join(t.TempDir(), "spec-template.md")
+	if err := os.WriteFile(tmpl, []byte("--description=\"## Goal\n## Constraints\n## Out of scope\n## Gate\n## Size\n\""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name         string
+		json         string
+		wantOK       bool
+		wantPlanning bool
+		wantFields   string
+		wantExit     int
+	}{
+		{
+			name:       "clean",
+			json:       `[{"id":"gt-ok","issue_type":"task","status":"open","description":"` + jsonEscape(specTestDescription) + `","acceptance_criteria":"- [ ] a"}]`,
+			wantOK:     true,
+			wantFields: "",
+			wantExit:   0,
+		},
+		{
+			name:       "refused lists every failure",
+			json:       `[{"id":"gt-nope","issue_type":"task","status":"open","description":"## Goal\nx"}]`,
+			wantOK:     false,
+			wantFields: "## Constraints|## Out of scope|## Gate|## Size|acceptance",
+			wantExit:   1,
+		},
+		{
+			name:         "planning",
+			json:         `[{"id":"gt-pl","issue_type":"task","status":"open","labels":["needs-planning"],"description":"` + jsonEscape(specTestDescription) + `","acceptance_criteria":"- [ ] a"}]`,
+			wantOK:       false,
+			wantPlanning: true,
+			wantFields:   "",
+			wantExit:     2,
+		},
+		{
+			name:       "not a work bead",
+			json:       `[{"id":"gt-wisp","issue_type":"wisp","status":"open","description":"` + jsonEscape(specTestDescription) + `","acceptance_criteria":"- [ ] a"}]`,
+			wantOK:     false,
+			wantFields: "not a work bead",
+			wantExit:   1,
+		},
+		{
+			name:       "unreadable bead",
+			json:       "",
+			wantOK:     false,
+			wantFields: "bead",
+			wantExit:   1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			beadID := "gt-gone"
+			spec := specdispatch.Spec{}
+			var showErr error
+			if tc.json != "" {
+				var issues []beads.Issue
+				if err := json.Unmarshal([]byte(tc.json), &issues); err != nil {
+					t.Fatal(err)
+				}
+				beadID, spec = issues[0].ID, specFromIssue(&issues[0])
+			} else {
+				showErr = fmt.Errorf("bead %s not found", beadID)
+			}
+			var out bytes.Buffer
+			err := specLint(&out, beadID, spec, showErr, tmpl, true)
+			code, _ := IsSilentExit(err)
+			if code != tc.wantExit {
+				t.Fatalf("exit code = %d, want %d (%v)", code, tc.wantExit, err)
+			}
+			var got specLintReport
+			if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+				t.Fatalf("output is not JSON: %v\n%s", err, out.String())
+			}
+			if got.ID != beadID || got.OK != tc.wantOK || got.NeedsPlanning != tc.wantPlanning {
+				t.Errorf("report = %+v, want id %s ok %v planning %v", got, beadID, tc.wantOK, tc.wantPlanning)
+			}
+			var fields []string
+			for _, r := range got.Refusals {
+				if r.Reason == "" {
+					t.Errorf("refusal %+v has no reason", r)
+				}
+				fields = append(fields, r.Field)
+			}
+			if strings.Join(fields, "|") != tc.wantFields {
+				t.Errorf("refusal fields = %q, want %q", strings.Join(fields, "|"), tc.wantFields)
+			}
+			if got.Refusals == nil {
+				t.Error("refusals must serialize as [], not null")
 			}
 		})
 	}
@@ -426,9 +526,15 @@ func TestHasCommentWithPrefix(t *testing.T) {
 func TestSpecReadyQueryAndParse(t *testing.T) {
 	t.Parallel()
 	args := strings.Join(specReadyArgs(), " ")
-	for _, want := range []string{"ready --json", "--label spec", "--type feature", "--unassigned", "--limit 0", "needs-human", "gt:ready-to-land", "spec-dispatch-failed"} {
+	for _, want := range []string{"ready --json", "--unassigned", "--limit 0", "needs-human", "gt:ready-to-land", "spec-dispatch-failed", "--exclude-type", "epic,wisp", "gt:agent"} {
 		if !strings.Contains(args, want) {
 			t.Errorf("ready args %q missing %q", args, want)
+		}
+	}
+	// The retired label spec and type feature must not gate the board.
+	for _, unwanted := range []string{"--label spec", "--type feature"} {
+		if strings.Contains(args, unwanted) {
+			t.Errorf("ready args %q still carry the retired %q", args, unwanted)
 		}
 	}
 	for _, in := range []string{`[{"id":"gt-a","issue_type":"feature","status":"open"}]`, `{"issues":[{"id":"gt-a","issue_type":"feature","status":"open"}]}`} {

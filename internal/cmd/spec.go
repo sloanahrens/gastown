@@ -23,11 +23,13 @@ import (
 
 // Spec dispatcher (gt-4k3fj.5).
 //
-// `gt spec lint <id>` validates one bead against the D10 spec template and
-// prints one line. `gt spec dispatch` is one tick of the dispatcher: every
-// ready, unassigned, spec-labeled feature bead across operational rigs, in
-// priority/created/id order, is linted and — when clean and a seat is free —
-// slung through executeSling in-process. The daemon's
+// `gt spec lint <id>` validates one work bead's shape against the D10 spec
+// template and prints one line (--json prints every refusal). `gt spec
+// dispatch` is one tick of the dispatcher: every ready, unassigned work bead
+// across operational rigs, in priority/created/id order, is linted and — when
+// clean and a seat is free — slung through executeSling in-process. The label
+// spec and type feature are retired and accepted-but-ignored (gt-mmsr2). The
+// daemon's
 // spec_dispatch ticker runs `gt spec dispatch --json` on its cadence, the way
 // mayor_dispatch runs `gt daemon dispatch-check` (internal/cmd imports
 // internal/daemon, so the call cannot go the other way).
@@ -54,6 +56,7 @@ const (
 var (
 	specDispatchJSON   bool
 	specDispatchDryRun bool
+	specLintJSON       bool
 	specLintTemplate   string
 )
 
@@ -66,19 +69,24 @@ var specCmd = &cobra.Command{
 
 var specLintCmd = &cobra.Command{
 	Use:   "lint <bead-id>",
-	Short: "Check a bead against the spec template; one line, exit 0 when clean",
-	Long: `Check a bead against the spec template (~/.claude/docs/agents/spec-template.md,
-or daemon.json patrols.spec_dispatch.template) — the same lint the spec dispatcher runs before it
-allocates a seat:
+	Short: "Check a work bead's shape against the spec template; exit 0 when clean",
+	Long: `Check a work bead's shape against the spec template
+(~/.claude/docs/agents/spec-template.md, or daemon.json
+patrols.spec_dispatch.template) — the same lint the spec dispatcher runs before
+it allocates a seat:
 
-  - type feature
-  - label spec
   - every "## " section of the template present and non-empty
     (Goal, Constraints, Out of scope, Gate, Size)
-  - at least one acceptance criterion (3-6 preferred)
+  - 1-6 acceptance items (3-6 preferred)
   - Size is one worker, one MR
 
-Prints one line naming the bead and the first missing field.
+Shape is a property of every work bead: the lint checks a task, bug or feature
+the same way and never refuses one for its type. The label spec is retired: it
+is accepted and ignored. Epics, agent beads (gt:agent) and wisps are refused
+as "not a work bead" without reading a shape.
+
+Prints one line naming the bead and the first missing field. --json prints
+{id, ok, needs_planning, refusals[]} instead, listing every failure.
 
 Exit codes:
   0  clean: the dispatcher would slot it
@@ -96,10 +104,12 @@ var specDispatchCmd = &cobra.Command{
 	Short: "Run one spec-dispatcher tick (the daemon's spec_dispatch patrol)",
 	Long: `Run one tick of the spec dispatcher.
 
-Candidates are ready, unassigned, open beads with label spec and type feature
-in every operational rig, ordered by priority, then created_at, then id. Beads
-labeled gt:ready-to-land, needs-human or needs-mayor-review, or deferred, are
-never taken. Each candidate is linted (see gt spec lint):
+Candidates are ready, unassigned, open work beads in every operational rig,
+ordered by priority, then created_at, then id. Epics, agent beads, wisps and
+the other runtime families are never candidates; the retired label spec and
+type feature are accepted and ignored (gt-mmsr2). Beads labeled
+gt:ready-to-land, needs-human or needs-mayor-review, or deferred, are never
+taken. Each candidate is linted (see gt spec lint):
 
   - refused: one line, one comment on the bead, never dispatched
   - needs planning: label needs-planning added, one comment, never dispatched
@@ -119,6 +129,7 @@ The operator hold file and ESTOP stop the tick.`,
 
 func init() {
 	specLintCmd.Flags().StringVar(&specLintTemplate, "template", "", "Spec template path (default daemon.json patrols.spec_dispatch.template, else ~/.claude/docs/agents/spec-template.md)")
+	specLintCmd.Flags().BoolVar(&specLintJSON, "json", false, "Print {id, ok, needs_planning, refusals[]} instead of one line")
 	specDispatchCmd.Flags().BoolVar(&specDispatchJSON, "json", false, "Output the tick report as JSON")
 	specDispatchCmd.Flags().BoolVar(&specDispatchDryRun, "dry-run", false, "Decide and report without slinging, labeling or commenting")
 	specCmd.AddCommand(specLintCmd, specDispatchCmd)
@@ -162,27 +173,58 @@ func runSpecLint(cmd *cobra.Command, args []string) error {
 		path = specTemplatePath(loadSpecDispatchConfig(townRoot))
 	}
 	spec, err := showSpec(townRoot, args[0])
-	return specLint(cmd.OutOrStdout(), args[0], spec, err, path)
+	return specLint(cmd.OutOrStdout(), args[0], spec, err, path, specLintJSON)
+}
+
+// specLintReport is the --json shape for one bead, so a shell caller can read
+// the verdict without parsing prose: ok is the exit-0 route, needs_planning
+// the exit-2 route, and refusals lists every shape failure in check order.
+type specLintReport struct {
+	ID            string                 `json:"id"`
+	OK            bool                   `json:"ok"`
+	NeedsPlanning bool                   `json:"needs_planning"`
+	Refusals      []specdispatch.Refusal `json:"refusals"`
 }
 
 // specLint prints the lint verdict for beadID's spec (or for showErr, the
 // failure to read it) against the template at templatePath, and returns the
 // exit code as a SilentExit: 0 dispatchable, specLintExitRefused,
-// specLintExitNeedsPlan.
-func specLint(out io.Writer, beadID string, spec specdispatch.Spec, showErr error, templatePath string) error {
+// specLintExitNeedsPlan. With asJSON, it prints a specLintReport instead of
+// the one line; the exit code is the same either way.
+func specLint(out io.Writer, beadID string, spec specdispatch.Spec, showErr error, templatePath string, asJSON bool) error {
+	report := specLintReport{ID: beadID, Refusals: []specdispatch.Refusal{}}
 	if showErr != nil {
-		fmt.Fprintf(out, "%s: spec lint refused: bead: %v\n", beadID, showErr)
-		return NewSilentExit(specLintExitRefused)
+		report.Refusals = append(report.Refusals, specdispatch.Refusal{Field: "bead", Reason: showErr.Error()})
+		return emitSpecLint(out, report, fmt.Sprintf("%s: spec lint refused: bead: %v", beadID, showErr), specLintExitRefused, asJSON)
 	}
 	verdict := specdispatch.Lint(spec, specdispatch.LoadTemplate(templatePath))
-	fmt.Fprintln(out, verdict.Line(spec.ID))
+	report.OK = verdict.Clean()
+	report.NeedsPlanning = verdict.Route == specdispatch.RoutePlanning
+	report.Refusals = append(report.Refusals, verdict.Refusals...)
+	code := specLintExitRefused
 	switch verdict.Route {
 	case specdispatch.RouteDispatch:
-		return nil
+		code = 0
 	case specdispatch.RoutePlanning:
-		return NewSilentExit(specLintExitNeedsPlan)
+		code = specLintExitNeedsPlan
 	}
-	return NewSilentExit(specLintExitRefused)
+	return emitSpecLint(out, report, verdict.Line(beadID), code, asJSON)
+}
+
+func emitSpecLint(out io.Writer, report specLintReport, line string, code int, asJSON bool) error {
+	if asJSON {
+		data, err := json.Marshal(report)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(out, string(data))
+	} else {
+		fmt.Fprintln(out, line)
+	}
+	if code == 0 {
+		return nil
+	}
+	return NewSilentExit(code)
 }
 
 // specDispatchReport is one tick's outcome; the daemon logs it.
@@ -573,8 +615,8 @@ func printSpecDispatchReport(cmd *cobra.Command, r specDispatchReport) {
 	}
 }
 
-// specCandidates reads every operational rig's ready spec features and keeps
-// the eligible ones, ordered across rigs. A rig whose board cannot be read is
+// specCandidates reads every operational rig's ready work beads and keeps the
+// eligible ones, ordered across rigs. A rig whose board cannot be read is
 // reported and skipped; the rest still dispatch.
 func specCandidates(townRoot string) ([]specCandidate, []string) {
 	names, err := knownRigNames(townRoot)
@@ -602,13 +644,8 @@ func specCandidates(townRoot string) ([]specCandidate, []string) {
 		}
 		for _, issue := range issues {
 			s := specFromIssue(issue)
-			// The query filtered on label spec server-side, and bd ready
-			// --json does not always serialize labels, so the label is known
-			// even when absent from the row. The full bead is re-read before
+			// The ready board is a snapshot: the full bead is re-read before
 			// any decision.
-			if !s.HasLabel(specdispatch.SpecLabel) {
-				s.Labels = append(s.Labels, specdispatch.SpecLabel)
-			}
 			if ok, _ := specdispatch.Eligible(s); !ok {
 				continue
 			}
@@ -627,17 +664,18 @@ func specCandidates(townRoot string) ([]specCandidate, []string) {
 	return out, errs
 }
 
-// specReadyArgs is the ready query: unassigned spec features, with the
+// specReadyArgs is the ready query: unassigned work beads, with the
 // dispatcher's exclusions and the town's non-dispatchable families filtered
-// server-side, unlimited.
+// server-side, unlimited. The retired label spec and type feature are not
+// queried on (gt-mmsr2); the non-work types (an epic, the runtime families)
+// are excluded instead, so the board holds work beads only.
 func specReadyArgs() []string {
 	exclude := append(append([]string(nil), constants.NonDispatchableBeadLabels...), specdispatch.ExcludedLabels()...)
 	return []string{
 		"ready", "--json",
-		"--label", specdispatch.SpecLabel,
-		"--type", specdispatch.SpecType,
 		"--unassigned",
 		"--exclude-label", strings.Join(exclude, ","),
+		"--exclude-type", strings.Join(specdispatch.NonWorkBeadTypes(), ","),
 		"--limit", "0",
 	}
 }

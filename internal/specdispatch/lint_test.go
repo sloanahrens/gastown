@@ -3,6 +3,7 @@ package specdispatch
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -26,13 +27,14 @@ const goodAcceptance = `- [ ] one
 - [ ] two
 - [ ] three`
 
+// goodSpec is a plain work bead: no spec label, type task. The shape is the
+// whole gate (gt-mmsr2), so it must lint clean as it stands.
 func goodSpec() Spec {
 	return Spec{
 		ID:          "gt-good",
 		Title:       "Add a thing",
-		Type:        "feature",
+		Type:        "task",
 		Status:      "open",
-		Labels:      []string{"spec"},
 		Description: goodDescription,
 		Acceptance:  goodAcceptance,
 	}
@@ -80,9 +82,6 @@ func TestLintNamesEveryMissingField(t *testing.T) {
 		field string
 		route Route
 	}{
-		{"type task", func(s *Spec) { s.Type = "task" }, "type", RouteRefuse},
-		{"type empty", func(s *Spec) { s.Type = "" }, "type", RouteRefuse},
-		{"no spec label", func(s *Spec) { s.Labels = nil }, "label spec", RouteRefuse},
 		{"no goal", removeSection("Goal"), "## Goal", RouteRefuse},
 		{"no constraints", removeSection("Constraints"), "## Constraints", RouteRefuse},
 		{"no out of scope", removeSection("Out of scope"), "## Out of scope", RouteRefuse},
@@ -101,6 +100,11 @@ func TestLintNamesEveryMissingField(t *testing.T) {
 		{"too many acceptance items", func(s *Spec) {
 			s.Acceptance = strings.Repeat("- [ ] item\n", MaxAcceptance+1)
 		}, "size", RoutePlanning},
+		{"epic", func(s *Spec) { s.Type = "epic" }, "not a work bead", RouteRefuse},
+		{"agent bead by type", func(s *Spec) { s.Type = "agent" }, "not a work bead", RouteRefuse},
+		{"agent bead by label", func(s *Spec) { s.Labels = []string{"gt:agent"} }, "not a work bead", RouteRefuse},
+		{"wisp by type", func(s *Spec) { s.Type = "wisp" }, "not a work bead", RouteRefuse},
+		{"wisp by label", func(s *Spec) { s.Labels = []string{"gt:wisp"} }, "not a work bead", RouteRefuse},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -118,6 +122,104 @@ func TestLintNamesEveryMissingField(t *testing.T) {
 				t.Errorf("refusal %q does not name field %q", line, tc.field)
 			}
 		})
+	}
+}
+
+// Shape is property of the bead, not its type: every work-bead type lints the
+// same, and neither the type nor a missing spec label is a refusal (gt-mmsr2).
+func TestLintChecksEveryWorkBeadType(t *testing.T) {
+	t.Parallel()
+	for _, typ := range []string{"task", "bug", "feature", "", "TASK"} {
+		t.Run("type "+typ, func(t *testing.T) {
+			s := goodSpec()
+			s.Type = typ
+			if v := Lint(s, defaultTemplate()); !v.Clean() {
+				t.Fatalf("type %q refused a good shape: %s", typ, v.Line(s.ID))
+			}
+		})
+	}
+	s := goodSpec()
+	s.Labels = []string{"spec"} // the retired label is accepted and ignored
+	if v := Lint(s, defaultTemplate()); !v.Clean() {
+		t.Fatalf("retired spec label changed the verdict: %s", v.Line(s.ID))
+	}
+}
+
+// A bead that is not work is refused before its shape is read, and the reason
+// names what it is.
+func TestLintRefusesNonWorkBeadsWithoutReadingShape(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		edit func(*Spec)
+		why  string
+	}{
+		{"epic", func(s *Spec) { s.Type = "epic" }, "type epic"},
+		{"agent type", func(s *Spec) { s.Type = "agent" }, "type agent"},
+		{"agent label", func(s *Spec) { s.Labels = []string{"gt:agent"} }, "label gt:agent"},
+		{"wisp type", func(s *Spec) { s.Type = "wisp" }, "type wisp"},
+		{"wisp label", func(s *Spec) { s.Labels = []string{"gt:wisp"} }, "label gt:wisp"},
+		{"message", func(s *Spec) { s.Type = "message" }, "type message"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := goodSpec()
+			tc.edit(&s)
+			// A shape that would otherwise be clean must not save it: the
+			// sections are never read.
+			v := Lint(s, defaultTemplate())
+			if v.Route != RouteRefuse || v.Field != "not a work bead" || !strings.Contains(v.Reason, tc.why) {
+				t.Fatalf("Lint = %+v, want refuse not a work bead ~%q", v, tc.why)
+			}
+			if len(v.Refusals) != 1 {
+				t.Fatalf("refusals = %+v, want exactly the one", v.Refusals)
+			}
+			line := v.Line(s.ID)
+			if strings.Contains(line, "\n") || !strings.Contains(line, "not a work bead") {
+				t.Errorf("line = %q, want one line saying not a work bead", line)
+			}
+		})
+	}
+}
+
+func TestNotWorkBead(t *testing.T) {
+	t.Parallel()
+	if why := NotWorkBead(goodSpec()); why != "" {
+		t.Errorf("task is a work bead: %q", why)
+	}
+	types := NonWorkBeadTypes()
+	for _, want := range []string{EpicType, "wisp", "agent"} {
+		if !slices.Contains(types, want) {
+			t.Errorf("NonWorkBeadTypes = %v, missing %q", types, want)
+		}
+	}
+	// The list is freshly built, not a shared slice a caller could mutate.
+	types[0] = "task"
+	if got := NotWorkBead(Spec{Type: EpicType}); got != "type epic" {
+		t.Errorf("NonWorkBeadTypes aliases the shared list: %q", got)
+	}
+}
+
+// Every failure is reported, in check order, with the first as Field/Reason:
+// the one-line report is unchanged and --json can act on the rest.
+func TestLintListsEveryRefusalInOrder(t *testing.T) {
+	t.Parallel()
+	s := goodSpec()
+	s.Description = "## Goal\nA thing."
+	s.Acceptance = ""
+	v := Lint(s, defaultTemplate())
+	if v.Route != RouteRefuse || v.Field != "## Constraints" {
+		t.Fatalf("first refusal = %+v, want ## Constraints", v)
+	}
+	var fields []string
+	for _, r := range v.Refusals {
+		fields = append(fields, r.Field)
+	}
+	if got := strings.Join(fields, "|"); got != "## Constraints|## Out of scope|## Gate|## Size|acceptance" {
+		t.Fatalf("refusals = %s", got)
+	}
+	if v.Line(s.ID) != "gt-good: spec lint refused: ## Constraints: section missing" {
+		t.Errorf("line = %q", v.Line(s.ID))
 	}
 }
 
