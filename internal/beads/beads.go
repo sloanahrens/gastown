@@ -631,9 +631,12 @@ func isResolvedDependency(dep IssueDep) bool {
 
 // ListOptions specifies filters for listing issues.
 type ListOptions struct {
-	Status     string // "open", "closed", "all", or several joined by commas
-	Type       string // Deprecated: use Label instead. Was "task", "bug", "feature", "epic"; converted to "gt:" prefix.
-	Label      string // Label filter (e.g., "gt:agent", "gt:merge-request")
+	Status string // "open", "closed", "all", or several joined by commas
+	Type   string // Deprecated: use Label instead. Was "task", "bug", "feature", "epic"; converted to "gt:" prefix.
+	Label  string // Label filter (e.g., "gt:agent", "gt:merge-request")
+	// Labels keeps only issues carrying every one of them (bd list
+	// --label, once per label). Label, when set too, is a further AND.
+	Labels     []string
 	Priority   int    // 0-4, -1 for no filter
 	Parent     string // filter by parent ID
 	Assignee   string // filter by assignee (e.g., "gastown/Toast")
@@ -648,6 +651,8 @@ type ListOptions struct {
 	// ClosedAfter, when set, keeps only issues closed at or after it; an
 	// issue never closed is left out. Issues only, not wisps.
 	ClosedAfter time.Time
+	// CreatedAfter, when set, keeps only issues created at or after it.
+	CreatedAfter time.Time
 }
 
 // CreateOptions specifies options for creating an issue.
@@ -699,6 +704,10 @@ type UpdateOptions struct {
 	// existence alone (gt-mabxx). The in-process store path ignores it: that
 	// path has no CLI fences to override.
 	Force bool
+
+	// Persistent promotes an ephemeral issue (a wisp) to a regular one, bd's
+	// --persistent. The in-process store path ignores it.
+	Persistent bool
 }
 
 // Beads wraps bd CLI operations for a working directory.
@@ -1887,6 +1896,13 @@ func (b *Beads) listIssues(opts ListOptions) ([]*Issue, error) {
 		// Deprecated: convert type to label for backward compatibility
 		args = append(args, "--label=gt:"+opts.Type)
 	}
+	// bd list ANDs repeated --label flags, so one per label.
+	for _, label := range opts.Labels {
+		if label == "" {
+			continue
+		}
+		args = append(args, "--label="+label)
+	}
 	if opts.IssueType != "" {
 		args = append(args, "--type="+opts.IssueType)
 	}
@@ -1907,6 +1923,9 @@ func (b *Beads) listIssues(opts ListOptions) ([]*Issue, error) {
 	}
 	if !opts.ClosedAfter.IsZero() {
 		args = append(args, "--closed-after="+opts.ClosedAfter.UTC().Format(time.RFC3339))
+	}
+	if !opts.CreatedAfter.IsZero() {
+		args = append(args, "--created-after="+opts.CreatedAfter.UTC().Format(time.RFC3339))
 	}
 	if opts.Limit > 0 {
 		args = append(args, fmt.Sprintf("--limit=%d", opts.Limit))
@@ -2061,6 +2080,16 @@ func (b *Beads) listEphemeral(opts ListOptions) ([]*Issue, error) {
 		clauses = append(clauses, "label="+quoteBDQueryValue(opts.Label))
 	} else if opts.Type != "" {
 		clauses = append(clauses, "label="+quoteBDQueryValue("gt:"+opts.Type))
+	}
+	// The query language ANDs repeated label conditions, as bd list does.
+	for _, label := range opts.Labels {
+		if label == "" {
+			continue
+		}
+		clauses = append(clauses, "label="+quoteBDQueryValue(label))
+	}
+	if !opts.CreatedAfter.IsZero() {
+		clauses = append(clauses, "created>="+quoteBDQueryValue(opts.CreatedAfter.UTC().Format(time.RFC3339)))
 	}
 	if opts.Status != "" && opts.Status != "all" {
 		clauses = append(clauses, "status="+quoteBDQueryValue(opts.Status))
@@ -3489,6 +3518,9 @@ func (b *Beads) Update(id string, opts UpdateOptions) error {
 	if opts.Force {
 		args = append(args, "--force")
 	}
+	if opts.Persistent {
+		args = append(args, "--persistent")
+	}
 
 	if opts.Title != nil {
 		args = append(args, "--title="+*opts.Title)
@@ -3831,10 +3863,12 @@ func (b *Beads) Release(id string) error {
 	return b.ReleaseWithReason(id, "")
 }
 
-// ReleaseWithReason moves an in_progress issue back to open status with a reason.
-// The reason is added as a note to the issue for tracking purposes. It
-// overrides the holder's claim (bd --force): releasing is for a worker that
-// is gone.
+// ReleaseWithReason moves an in_progress issue back to open status with a
+// reason. The reason is added as a note to the issue for tracking purposes.
+// It does not force past a live claim (gt-v8ujv): bd refuses to clear an
+// in_progress issue another actor holds, so this releases the store's own
+// claim alone. Recovering a dead worker's claim is ReleaseIfAssignee or
+// TransferIfAssignee.
 func (b *Beads) ReleaseWithReason(id, reason string) error {
 	if b.store != nil {
 		updates := map[string]interface{}{
@@ -3849,9 +3883,7 @@ func (b *Beads) ReleaseWithReason(id, reason string) error {
 		return b.store.UpdateIssue(ctx, id, updates, b.getActor())
 	}
 
-	// --force: the claim being cleared belongs to a worker that died, and bd
-	// refuses to reassign another actor's in_progress claim without it.
-	args := []string{"update", id, "--status=open", "--assignee=", "--force"}
+	args := []string{"update", id, "--status=open", "--assignee="}
 
 	// Add reason as a note if provided
 	if reason != "" {
@@ -3859,23 +3891,7 @@ func (b *Beads) ReleaseWithReason(id, reason string) error {
 	}
 
 	_, err := b.run(args...)
-	if err != nil && strings.Contains(err.Error(), "unknown flag: --force") {
-		// A bd older than the claim fence has no --force on update, and no
-		// fence for it to override either.
-		_, err = b.run(removeArg(args, "--force")...)
-	}
 	return err
-}
-
-// removeArg returns args without any element equal to drop.
-func removeArg(args []string, drop string) []string {
-	out := make([]string, 0, len(args))
-	for _, a := range args {
-		if a != drop {
-			out = append(out, a)
-		}
-	}
-	return out
 }
 
 // AddDependency adds a dependency: issue depends on dependsOn.

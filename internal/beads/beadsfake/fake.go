@@ -211,6 +211,22 @@ func closedAtOrAfter(is *beads.Issue, t time.Time) bool {
 	return err == nil && !at.Before(t.Truncate(time.Second))
 }
 
+// createdAtOrAfter reports whether is was created at or after t.
+func createdAtOrAfter(is *beads.Issue, t time.Time) bool {
+	at, err := time.Parse(time.RFC3339, is.CreatedAt)
+	return err == nil && !at.Before(t.Truncate(time.Second))
+}
+
+// hasLabels reports whether is carries every one of labels.
+func hasLabels(is *beads.Issue, labels []string) bool {
+	for _, l := range labels {
+		if l != "" && !hasLabel(is, l) {
+			return false
+		}
+	}
+	return true
+}
+
 func hasLabel(is *beads.Issue, label string) bool {
 	for _, l := range is.Labels {
 		if l == label {
@@ -222,9 +238,9 @@ func hasLabel(is *beads.Issue, label string) bool {
 
 // List returns the issues matching opts, newest first. Ephemeral selects the
 // wisps instead of the issues. Status "" leaves out closed issues and "all"
-// keeps them; Type is read as the label "gt:<Type>"; Priority -1 means any.
-// Rig is ignored: a Fake is one database. IncludeInfra changes nothing: no
-// fake issue has an infrastructure type.
+// keeps them; Type is read as the label "gt:<Type>"; Labels must all be
+// present; Priority -1 means any. Rig is ignored: a Fake is one database.
+// IncludeInfra changes nothing: no fake issue has an infrastructure type.
 func (f *Fake) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -239,12 +255,14 @@ func (f *Fake) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 		case is.Ephemeral != opts.Ephemeral,
 			!statusMatches(is.Status, opts.Status),
 			label != "" && !hasLabel(is, label),
+			!hasLabels(is, opts.Labels),
 			opts.Priority >= 0 && is.Priority != opts.Priority,
 			opts.Parent != "" && is.Parent != opts.Parent,
 			opts.Assignee != "" && is.Assignee != opts.Assignee,
 			opts.NoAssignee && is.Assignee != "",
 			opts.IssueType != "" && is.Type != opts.IssueType,
-			!opts.ClosedAfter.IsZero() && !closedAtOrAfter(is, opts.ClosedAfter):
+			!opts.ClosedAfter.IsZero() && !closedAtOrAfter(is, opts.ClosedAfter),
+			!opts.CreatedAfter.IsZero() && !createdAtOrAfter(is, opts.CreatedAfter):
 			continue
 		}
 		out = append(out, is)
@@ -587,7 +605,7 @@ func (f *Fake) setStatus(r *record, status, reason string) {
 // in_progress issue another assignee holds, and to close an issue that has
 // open children or an open blocker. (Close's assignee refusal does not apply
 // to an update.) SetLabels replaces the labels; otherwise AddLabels and
-// RemoveLabels apply.
+// RemoveLabels apply. Persistent promotes a wisp to a regular issue.
 func (f *Fake) Update(id string, opts beads.UpdateOptions) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -625,6 +643,9 @@ func (f *Fake) Update(id string, opts beads.UpdateOptions) error {
 	}
 	if opts.Acceptance != nil {
 		is.AcceptanceCriteria = *opts.Acceptance
+	}
+	if opts.Persistent {
+		is.Ephemeral = false
 	}
 	switch {
 	case len(opts.SetLabels) > 0:
@@ -711,10 +732,49 @@ func (f *Fake) ForceCloseWithReason(reason string, ids ...string) error {
 	return f.close(reason, true, ids)
 }
 
-// Release returns an issue to open and clears its assignee, whoever holds it.
+// DeleteIssues removes the issues from the database, with their comments and
+// their dependency links in both directions, as bd delete --force does. No
+// ids is a no-op; an id that is not there fails the whole batch, naming it,
+// before anything is removed.
+func (f *Fake) DeleteIssues(ids ...string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(ids) == 0 {
+		return nil
+	}
+	var missing []string
+	for _, id := range ids {
+		if _, ok := f.issues[id]; !ok {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("issues not found: %s", strings.Join(missing, ", "))
+	}
+	f.tick()
+	gone := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		gone[id] = true
+		delete(f.issues, id)
+	}
+	for _, r := range f.issues {
+		var kept []edge
+		for _, e := range r.deps {
+			if !gone[e.to] {
+				kept = append(kept, e)
+			}
+		}
+		r.deps = kept
+	}
+	return nil
+}
+
+// Release returns an issue to open and clears its assignee.
 func (f *Fake) Release(id string) error { return f.ReleaseWithReason(id, "") }
 
 // ReleaseWithReason is Release, recording "Released: <reason>" in the notes.
+// Like bd it does not force: an in_progress issue another assignee holds is
+// refused, and only the Fake's own claim is released.
 func (f *Fake) ReleaseWithReason(id, reason string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -723,6 +783,9 @@ func (f *Fake) ReleaseWithReason(id, reason string) error {
 		return notFound(id)
 	}
 	f.tick()
+	if r.issue.Status == string(beads.StatusInProgress) && r.issue.Assignee != "" && r.issue.Assignee != f.actor {
+		return errClaimHeld(id, r.issue.Assignee)
+	}
 	f.setStatus(r, string(beads.StatusOpen), "")
 	r.issue.Assignee = ""
 	if reason != "" {

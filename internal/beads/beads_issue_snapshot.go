@@ -27,8 +27,9 @@ func (s *issueSnapshot) detail(id string) (*Issue, bool) {
 // list answers a listIssues(opts) call — `bd list` over the issues table —
 // for a label the snapshot was warmed for, with the filters that read used:
 // none beyond the label and a status of "", "open", "closed" or "all". Any
-// other filter (priority, parent, assignee, a limit, another status spelling)
-// is not covered, so the caller runs bd list itself.
+// other filter (priority, parent, assignee, another label, a created-after
+// bound, a limit, another status spelling) is not covered, so the caller runs
+// bd list itself.
 //
 // Two of bd list's defaults are reproduced. An empty status means "not
 // closed", and ephemeral issues are hidden. bd list also hides infrastructure
@@ -39,7 +40,7 @@ func (s *issueSnapshot) list(opts ListOptions) ([]*Issue, bool) {
 	if s == nil || opts.Label == "" || !s.labels[opts.Label] {
 		return nil, false
 	}
-	if opts.Priority >= 0 || opts.Parent != "" || opts.Assignee != "" || opts.NoAssignee || opts.Limit != 0 || opts.Ephemeral || opts.IssueType != "" || !opts.ClosedAfter.IsZero() {
+	if opts.Priority >= 0 || opts.Parent != "" || opts.Assignee != "" || opts.NoAssignee || opts.Limit != 0 || opts.Ephemeral || opts.IssueType != "" || !opts.ClosedAfter.IsZero() || !opts.CreatedAfter.IsZero() || len(opts.Labels) > 0 {
 		return nil, false
 	}
 	switch opts.Status {
