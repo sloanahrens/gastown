@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -434,5 +435,298 @@ func TestDaemonSource_FailedFirstReadIsRetriedAsABacklogRead(t *testing.T) {
 	appendFile(t, filepath.Join(dir, "daemon.log"), "2026/09/30 07:00:00 too-old\n2026/09/30 08:40:00 in-window\n")
 	if got := texts(s.Poll()); !reflect.DeepEqual(got, []string{"town daemon in-window"}) {
 		t.Fatalf("retry ignored the cutoff or reread the backups: %q", got)
+	}
+}
+
+// fakeTailStore is the fake store the title and verdict tests read through. It
+// answers by id and counts every read, so a test can see how many bd show
+// calls the stream made for which bead.
+type fakeTailStore struct {
+	issues map[string]*beads.Issue
+	errs   map[string]error
+	reads  []string
+}
+
+func (s *fakeTailStore) show(_ string, id string) (*beads.Issue, error) {
+	s.reads = append(s.reads, id)
+	if err := s.errs[id]; err != nil {
+		return nil, err
+	}
+	return s.issues[id], nil
+}
+
+func (s *fakeTailStore) readsFor(id string) int {
+	n := 0
+	for _, r := range s.reads {
+		if r == id {
+			n++
+		}
+	}
+	return n
+}
+
+// TestTailSpend_ReportsOnlyAFreshReading: the DeepSeek rate prints only while
+// the watch keeps measuring it. A reading older than the freshness window, one
+// with no timestamp, a malformed file and a missing file all report nothing —
+// never a zero the operator would read as a real rate.
+func TestTailSpend_ReportsOnlyAFreshReading(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	dir := filepath.Join(town, ".runtime", "watch")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "spend.json")
+	write := func(s string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(s), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stamp := func(d time.Duration) string {
+		return time.Now().Add(d).UTC().Format(time.RFC3339)
+	}
+
+	write(`{"ts":"` + stamp(0) + `","per_hour":1.25,"balance":100}`)
+	perHour, at, err := tailSpend(town)
+	if err != nil || perHour != 1.25 || at.IsZero() {
+		t.Fatalf("fresh spend = %v, %v, %v", perHour, at, err)
+	}
+
+	write(`{"ts":"` + stamp(-tailSummarySpendFresh-time.Minute) + `","per_hour":1.25}`)
+	if _, _, err := tailSpend(town); err == nil {
+		t.Error("a stale reading must report nothing")
+	}
+	write(`{"per_hour":1.25}`)
+	if _, _, err := tailSpend(town); err == nil {
+		t.Error("a reading with no timestamp must report nothing")
+	}
+	write("not json")
+	if _, _, err := tailSpend(town); err == nil {
+		t.Error("a malformed reading must report nothing")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := tailSpend(town); err == nil {
+		t.Error("a missing reading must report nothing")
+	}
+}
+
+// TestTailSeatPicture_ARigThatCannotBeReadIsAnError: a store that is down must
+// not read as an idle town, so a rig whose agent beads cannot be listed fails
+// the whole seat read instead of silently counting that rig as zero.
+func TestTailSeatPicture_ARigThatCannotBeReadIsAnError(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rigs := `{"version":1,"rigs":{"gastown":{"git_url":"x","added_at":"2026-01-01T00:00:00Z","beads":{"repo":"","prefix":"gt"}}}}`
+	if err := os.WriteFile(filepath.Join(town, "mayor", "rigs.json"), []byte(rigs), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(town, "gastown", "polecats", "opal"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	down := func(string) (map[string]*beads.Issue, error) {
+		return nil, errors.New("dolt: connection refused")
+	}
+	_, _, _, err := tailSeatPicture(town, down)
+	if err == nil || !strings.Contains(err.Error(), "agent beads of gastown") {
+		t.Fatalf("tailSeatPicture = %v; want the rig's read failure", err)
+	}
+}
+
+// blockingTailStore holds its read open until the test releases it, so a test
+// can observe what a second ask does while the first is in flight.
+type blockingTailStore struct {
+	entered chan string
+	release chan struct{}
+	mu      sync.Mutex
+	reads   []string
+}
+
+func (s *blockingTailStore) show(_ string, id string) (*beads.Issue, error) {
+	s.mu.Lock()
+	s.reads = append(s.reads, id)
+	s.mu.Unlock()
+	s.entered <- id
+	<-s.release
+	return &beads.Issue{ID: id, Title: "the title"}, nil
+}
+
+func (s *blockingTailStore) count(id string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, r := range s.reads {
+		if r == id {
+			n++
+		}
+	}
+	return n
+}
+
+// TestTailBeads_ConcurrentAskSharesTheInFlightRead: the sources poll at once
+// and share the title cache. A second ask while the first read is still in
+// flight answers "" rather than starting a second bd show for the same bead.
+func TestTailBeads_ConcurrentAskSharesTheInFlightRead(t *testing.T) {
+	t.Parallel()
+	store := &blockingTailStore{entered: make(chan string, 1), release: make(chan struct{})}
+	b := newTailBeads(store.show)
+
+	done := make(chan string, 1)
+	go func() { done <- b.title("gastown", "gt-1") }()
+	<-store.entered // the first read is in flight
+	if got := b.title("gastown", "gt-1"); got != "" {
+		t.Errorf("a second ask during the read = %q; it must not start a second read", got)
+	}
+	close(store.release)
+	if got := <-done; got != "the title" {
+		t.Errorf("the first read = %q", got)
+	}
+	if n := store.count("gt-1"); n != 1 {
+		t.Errorf("gt-1 was read %d times; want 1", n)
+	}
+	if got := b.title("gastown", "gt-1"); got != "the title" {
+		t.Errorf("the cached ask = %q", got)
+	}
+	if n := store.count("gt-1"); n != 1 {
+		t.Errorf("the cached ask read %d times", n)
+	}
+}
+
+// TestTailBeads_TitleIsReadOncePerBeadAndFailureIsSilence: one bd show per new
+// id, a failed read remembered as "no title", and never an error.
+func TestTailBeads_TitleIsReadOncePerBeadAndFailureIsSilence(t *testing.T) {
+	t.Parallel()
+	store := &fakeTailStore{
+		issues: map[string]*beads.Issue{
+			"gt-1": {ID: "gt-1", Title: "show the bead a line is about"},
+		},
+		errs: map[string]error{"gt-lost": errors.New("dolt: connection refused")},
+	}
+	b := newTailBeads(store.show)
+
+	if got := b.title("gastown", "gt-1"); got != "show the bead a line is about" {
+		t.Fatalf("title = %q", got)
+	}
+	if got := b.title("gastown", "gt-1"); got != "show the bead a line is about" {
+		t.Fatalf("cached title = %q", got)
+	}
+	if n := store.readsFor("gt-1"); n != 1 {
+		t.Fatalf("gt-1 was read %d times; the run reads each bead once", n)
+	}
+	for i := 0; i < 3; i++ {
+		if got := b.title("gastown", "gt-lost"); got != "" {
+			t.Fatalf("a failed read produced %q", got)
+		}
+	}
+	if n := store.readsFor("gt-lost"); n != 1 {
+		t.Fatalf("a failed read was retried %d times; failure is remembered", n)
+	}
+	if got := b.title("gastown", "gt-absent"); got != "" {
+		t.Fatalf("an unknown bead produced %q", got)
+	}
+}
+
+// TestTailBeads_TitleIsBounded: past the cap the run stops taking titles
+// rather than growing without bound, and a bounded-out bead costs no read.
+func TestTailBeads_TitleIsBounded(t *testing.T) {
+	t.Parallel()
+	store := &fakeTailStore{issues: map[string]*beads.Issue{}}
+	b := newTailBeads(store.show)
+	b.max = 2
+	if got := b.title("r", "gt-1"); got != "" {
+		t.Fatalf("title = %q", got)
+	}
+	b.title("r", "gt-2")
+	if got := b.title("r", "gt-3"); got != "" {
+		t.Fatalf("a bounded-out bead produced %q", got)
+	}
+	if len(store.reads) != 2 {
+		t.Fatalf("reads = %v; the cap must stop the reads too", store.reads)
+	}
+}
+
+// TestEventsSource_TitlesTheBeadAndReadsAVerdict: the source stamps the bead
+// the stream should name and the review loop's own words, with one bd show per
+// bead per poll, and never repeats a verdict already shown.
+func TestTailEventsSource_TitlesTheBeadAndReadsAVerdict(t *testing.T) {
+	t.Parallel()
+	store := &fakeTailStore{issues: map[string]*beads.Issue{
+		"gt-1": {
+			ID: "gt-1", Title: "one line per thing that happened",
+			Notes:    "MERGE REJECTION (attempt 1): gate-failed - make gate is red\n  findings:\n",
+			Comments: []beads.Comment{{Text: "pushed: crew/x at 9f4171a4"}},
+		},
+		"gt-2": {
+			ID: "gt-2", Title: "a bead with nothing to say",
+			Comments: []beads.Comment{{Text: "OVERSEER REVIEW aaaa PASS: reads well"}},
+		},
+	}}
+	j := &fakeTailJournal{config: "true", records: []beads.EventRecord{
+		{Seq: 1, TS: "2026-09-30T13:50:00Z", Op: "create", IssueID: "gt-1", Actor: "sloan", Status: "open"},
+		{Seq: 2, TS: "2026-09-30T13:50:00.5Z", Op: "update", IssueID: "gt-1", Actor: "daemon", Status: "open"},
+		{Seq: 3, TS: "2026-09-30T13:51:00Z", Op: "comment", IssueID: "gt-1", Actor: "sloan"},
+		{Seq: 4, TS: "2026-09-30T13:52:00Z", Op: "comment", IssueID: "gt-2", Actor: "steward"},
+		{Seq: 5, TS: "2026-09-30T13:53:00Z", Op: "update", IssueID: "gt-gastown-polecat-opal", Actor: "daemon"},
+	}}
+	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: newTailBeads(store.show)}
+	got := s.Poll()
+	if len(got) != 5 {
+		t.Fatalf("poll = %q", texts(got))
+	}
+	// The text is the journal's; the verdict is the only thing added.
+	if got[0].Text != "create gt-1 status=open actor=sloan seq=1" {
+		t.Fatalf("create line = %q", got[0].Text)
+	}
+	wantVerdicts := []string{
+		"",
+		"MERGE REJECTION (attempt 1): gate-failed - make gate is red",
+		"",
+		"OVERSEER REVIEW aaaa PASS: reads well",
+		"",
+	}
+	for i, want := range wantVerdicts {
+		if got[i].Verdict != want {
+			t.Errorf("line %d (%q) verdict = %q, want %q", i, got[i].Text, got[i].Verdict, want)
+		}
+	}
+	// One bd show per bead per poll, and none for a line the default view
+	// hides: a worker's own agent bead is not read.
+	if n := store.readsFor("gt-1"); n != 1 {
+		t.Errorf("gt-1 was read %d times in one poll", n)
+	}
+	if n := store.readsFor("gt-gastown-polecat-opal"); n != 0 {
+		t.Errorf("a polecat agent bead was read %d times", n)
+	}
+
+	// The next poll adds a comment the bead already answered with: it is not
+	// the review loop's, and a verdict already shown is not shown again.
+	j.records = append(j.records,
+		beads.EventRecord{Seq: 6, TS: "2026-09-30T13:54:00Z", Op: "comment", IssueID: "gt-1", Actor: "sloan"},
+		beads.EventRecord{Seq: 7, TS: "2026-09-30T13:55:00Z", Op: "update", IssueID: "gt-1", Actor: "daemon"},
+	)
+	got = s.Poll()
+	if len(got) != 2 || got[0].Verdict != "" || got[1].Verdict != "" {
+		t.Fatalf("a verdict was repeated: %+v", got)
+	}
+}
+
+// TestEventsSource_UnreadableBeadIsNotAnErrorLine: a store that cannot answer
+// costs the title and the verdict, and says nothing about it.
+func TestTailEventsSource_UnreadableBeadIsNotAnErrorLine(t *testing.T) {
+	t.Parallel()
+	store := &fakeTailStore{errs: map[string]error{"gt-1": errors.New("dolt: connection refused")}}
+	j := &fakeTailJournal{config: "true", records: []beads.EventRecord{
+		{Seq: 1, TS: "2026-09-30T13:50:00Z", Op: "comment", IssueID: "gt-1", Actor: "sloan"},
+	}}
+	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: newTailBeads(store.show)}
+	got := s.Poll()
+	if len(got) != 1 || got[0].Text != "comment gt-1 actor=sloan seq=1" || got[0].Verdict != "" {
+		t.Fatalf("poll = %+v", got)
 	}
 }

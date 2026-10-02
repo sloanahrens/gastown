@@ -1,0 +1,157 @@
+2026-10-02T14:00:01Z	town	daemon	Heartbeat starting (recovery-focused)
+2026-10-02T14:00:01Z	town	daemon	Handler: skipping plugin seat-refill (gate=manual, requires explicit trigger)
+2026-10-02T14:00:02Z	town	daemon	Convoy: checking convoy hq-cv-ohjaq
+2026-10-02T14:00:02Z	town	daemon	Convoy: gt-ydzwb tracked by 1 convoy(s): [hq-cv-e7w3w]
+2026-10-02T14:00:02Z	gastown	events	update gt-gastown-polecat-garnet actor=gastown/polecats/garnet seq=6901
+2026-10-02T14:00:03Z	town	daemon	Heartbeat complete (#531)
+2026-10-02T14:00:04Z	town	daemon	jsonl_git_backup: not due — last run 2m1s ago, interval 15m0s
+2026-10-02T14:00:04Z	town	daemon	checkpoint_dog: not due — last run 1m ago, interval 5m
+2026-10-02T14:00:04Z	town	daemon	doctor_dog: all clear (latency 2ms, connections 7/1000, orphans 1); no molecule
+2026-10-02T14:00:05Z	gastown	events	create gt-wisp-c3w9 status=open actor=daemon seq=6902
+2026-10-02T14:00:05Z	gastown	events	close gt-wisp-c3w9 status=closed actor=daemon seq=6903
+2026-10-02T14:00:05Z	town	daemon	Convoy: close detected: gt-wisp-c3w9 (from gastown)
+2026-10-02T14:00:06Z	gastown	events	create gt-hk555 status=open actor=sloan seq=6904
+2026-10-02T14:00:06Z	town	daemon	patrol_scan: gastown: checked 3 polecat(s): 0 restarted, 0 refused, 0 unknown, 0 molecule(s) closed, 0 stranded reported, 0 error(s)
+2026-10-02T14:00:07Z	town	daemon	townhealth: GREEN tick 4ms ago: exec-tax=133ms/exec needs-human=0
+2026-10-02T14:00:07Z	gastown	events	update gt-gastown-polecat-garnet status=open actor=daemon seq=6905
+2026-10-02T14:00:08Z	gastown	events	close gt-hk555 status=closed actor=gastown/polecats/opal seq=6906
+2026-10-02T14:00:08Z	gastown	events	close gt-hk555 status=closed actor=gastown/polecats/opal seq=6907
+2026-10-02T14:00:09Z	gastown	landings	landed gt-hk555 polecat/opal/gt-hk555 -> main commit=33333333 patch=44444444 gate=pass om=approve/0.92 route=worker
+2026-10-02T14:00:10Z	town	daemon	clearAlerts(jsonl_git_backup:push): backup push succeeded
+2026-10-02T14:00:11Z	town	daemon	Convoy hq-cv-mdir6: feeding gt-zkdwt to gastown (agent "deepseek-flash" recorded on convoy at sling time)
+2026-10-02T14:00:12Z	town	daemon	Convoy hq-cv-mdir6: deferring gt-qmdbt: pool: full (0/1) -> no seat for deepseek-flash
+2026-10-02T14:00:14Z	town	daemon	Convoy hq-cv-mdir6: deferring gt-qmdbt: pool: full (0/1) -> no seat for deepseek-flash
+2026-10-02T14:00:16Z	town	daemon	Convoy hq-cv-mdir6: deferring gt-qmdbt: pool: full (0/1) -> no seat for deepseek-flash
+2026-10-02T14:00:18Z	town	daemon	Convoy hq-cv-mdir6: deferring gt-qmdbt: pool: full (0/1) -> no seat for deepseek-flash
+2026-10-02T14:00:20Z	town	daemon	Convoy hq-cv-mdir6: deferring gt-qmdbt: pool: full (0/1) -> no seat for deepseek-flash
+2026-10-02T14:00:22Z	town	daemon	Convoy hq-cv-mdir6: deferring gt-qmdbt: pool: full (0/1) -> no seat for deepseek-flash
+2026-10-02T14:00:24Z	town	daemon	Convoy hq-cv-mdir6: deferring gt-qmdbt: pool: full (0/1) -> no seat for deepseek-flash
+2026-10-02T14:00:25Z	hq	events	update hq-wisp-e0g8y7 status=open actor=daemon seq=4410
+2026-10-02T14:00:26Z	town	daemon	Convoy hq-cv-mdir6: deferring gt-qmdbt: pool: full (0/1) -> no seat for deepseek-flash
+2026-10-02T14:00:28Z	town	daemon	Handler: script plugin seat-refill skipped (exit 3 after 2s); nothing to do this run
+2026-10-02T14:00:29Z	town	daemon	dog_cycle: checkpoint_dog outcome=ran steps=[scan=done]
+2026-10-02T14:00:30Z	town	daemon	Mayor patrol disabled in config, skipping
+2026-10-02T14:00:31Z	town	daemon	Handler patrol disabled in config, skipping
+2026-10-02T14:00:32Z	town	daemon	Heartbeat starting (recovery-focused)
+2026-10-02T14:00:33Z	gastown	events	update gt-gastown-polecat-malachite actor=gastown/polecats/malachite seq=6908
+2026-10-02T14:00:34Z	town	daemon	Heartbeat complete (#532)
+2026-10-02T14:00:35Z	gastown	events	update gt-ufjol status=in_progress actor=gastown/polecats/malachite seq=6909
+2026-10-02T14:00:35Z	gastown	events	update gt-ufjol status=in_progress actor=gastown/polecats/malachite seq=6910
+2026-10-02T14:00:36Z	gastown	events	update gt-ufjol status=in_progress actor=gastown/polecats/malachite seq=6911
+2026-10-02T14:00:40Z	town	daemon	townhealth: GREEN tick 3m0s ago: exec-tax=187ms/exec needs-human=0
+2026-10-02T14:00:42Z	town	daemon	Convoy hq-cv-mdir6: feeding gt-qmdbt to gastown (agent "deepseek-flash" recorded on convoy at sling time)
+2026-10-02T14:00:44Z	town	daemon	Convoy: checking convoy hq-cv-xglpm
+2026-10-02T14:00:46Z	town	daemon	Convoy: gt-40so9 tracked by 1 convoy(s): [hq-cv-xglpm]
+2026-10-02T14:00:48Z	town	daemon	jsonl_git_backup: not due — last run 2m30s ago, interval 15m0s
+2026-10-02T14:00:50Z	town	daemon	checkpoint_dog: not due — last run 1m30s ago, interval 5m
+2026-10-02T14:00:52Z	town	daemon	doctor_dog: all clear (latency 2ms, connections 7/1000, orphans 1); no molecule
+2026-10-02T14:00:54Z	gastown	events	create gt-wisp-liqn status=open actor=daemon seq=6912
+2026-10-02T14:00:56Z	town	daemon	Convoy: close detected: gt-wisp-liqn (from gastown)
+2026-10-02T14:00:58Z	gastown	events	close gt-wisp-liqn status=closed actor=daemon seq=6913
+2026-10-02T14:01:00Z	gastown	events	create gt-826cp status=open actor=sloan seq=6914
+2026-10-02T14:01:02Z	town	daemon	Heartbeat starting (recovery-focused)
+2026-10-02T14:01:04Z	town	daemon	Heartbeat complete (#533)
+2026-10-02T14:01:06Z	gastown	events	update gt-gastown-polecat-garnet actor=gastown/polecats/garnet seq=6915
+2026-10-02T14:01:08Z	town	daemon	patrol_scan: gastown: checked 3 polecat(s): 0 restarted, 0 refused, 0 unknown, 0 molecule(s) closed, 0 stranded reported, 0 error(s)
+2026-10-02T14:01:10Z	town	daemon	clearAlerts(patrol_watchdog:gastown/witness): watchdog quiet
+2026-10-02T14:01:12Z	gastown	events	close gt-826cp status=closed actor=gastown/polecats/opal seq=6916
+2026-10-02T14:01:14Z	town	daemon	landing_worker: gastown: pass: 2 landed, 0 repaired, 0 rejected, 0 skipped, 0 failed
+2026-10-02T14:01:16Z	town	daemon	Convoy hq-cv-mdir6: deferring gt-z2pdg: pool: full (0/1) -> no seat for deepseek-flash
+2026-10-02T14:01:18Z	town	daemon	Convoy hq-cv-mdir6: deferring gt-z2pdg: pool: full (0/1) -> no seat for deepseek-flash
+2026-10-02T14:01:20Z	town	daemon	Convoy hq-cv-mdir6: deferring gt-z2pdg: pool: full (0/1) -> no seat for deepseek-flash
+2026-10-02T14:01:22Z	town	daemon	Convoy hq-cv-mdir6: deferring gt-z2pdg: pool: full (0/1) -> no seat for deepseek-flash
+2026-10-02T14:01:24Z	town	daemon	Convoy hq-cv-mdir6: deferring gt-z2pdg: pool: full (0/1) -> no seat for deepseek-flash
+2026-10-02T14:01:26Z	town	daemon	Convoy hq-cv-mdir6: deferring gt-z2pdg: pool: full (0/1) -> no seat for deepseek-flash
+2026-10-02T14:01:28Z	hq	events	create hq-wisp-x91ka status=open actor=daemon seq=4411
+2026-10-02T14:01:30Z	hq	events	close hq-wisp-x91ka status=closed actor=daemon seq=4412
+2026-10-02T14:01:32Z	town	daemon	Handler: running script plugin seat-refill directly (timeout 5m0s)
+2026-10-02T14:01:34Z	town	daemon	Handler: script plugin seat-refill ok (exit 0 after 41s)
+2026-10-02T14:01:36Z	town	daemon	Convoy hq-cv-mdir6: feeding gt-z2pdg to gastown (agent "deepseek-flash" recorded on convoy at sling time)
+2026-10-02T14:01:38Z	town	daemon	Heartbeat starting (recovery-focused)
+2026-10-02T14:01:40Z	town	daemon	Heartbeat complete (#534)
+2026-10-02T14:01:42Z	town	daemon	townhealth: GREEN tick 4ms ago: exec-tax=130ms/exec needs-human=0
+2026-10-02T14:01:44Z	gastown	events	update gt-gastown-polecat-malachite actor=gastown/polecats/malachite seq=6917
+2026-10-02T14:01:46Z	gastown	events	update gt-ufjol status=open actor=gastown/polecats/malachite seq=6918
+2026-10-02T14:01:48Z	town	daemon	dog_cycle: checkpoint_dog outcome=ran steps=[scan=done]
+2026-10-02T14:01:50Z	town	daemon	checkpoint_dog: not due — last run 2m ago, interval 5m
+2026-10-02T14:01:52Z	town	daemon	doctor_dog: all clear (latency 2ms, connections 7/1000, orphans 1); no molecule
+2026-10-02T14:01:54Z	gastown	events	create gt-wisp-bb21z status=open actor=daemon seq=6919
+2026-10-02T14:01:56Z	town	daemon	Convoy: close detected: gt-wisp-bb21z (from gastown)
+2026-10-02T14:01:58Z	gastown	events	close gt-wisp-bb21z status=closed actor=daemon seq=6920
+2026-10-02T14:02:00Z	town	daemon	Convoy hq-cv-xglpm: gt-40so9 carries a merge rejection; its surviving branch does not hold it (rework)
+2026-10-02T14:02:02Z	town	daemon	Handler: script plugin seat-refill FAILED (exit 1 after 3s); escalating
+2026-10-02T14:02:04Z	town	daemon	Heartbeat starting (recovery-focused)
+2026-10-02T14:02:06Z	town	daemon	Heartbeat complete (#535)
+2026-10-02T14:02:08Z	town	daemon	Convoy: checking convoy hq-cv-e7w3w
+2026-10-02T14:02:10Z	town	daemon	Convoy: gt-ydzwb tracked by 1 convoy(s): [hq-cv-e7w3w]
+2026-10-02T14:02:12Z	gastown	events	update gt-gastown-polecat-garnet status=open actor=daemon seq=6921
+2026-10-02T14:02:14Z	gastown	events	update gt-gastown-polecat-garnet status=open actor=daemon seq=6922
+2026-10-02T14:02:16Z	town	daemon	townhealth: RED tick 4ms ago: escalation=oldest_2h needs-human=1
+2026-10-02T14:02:18Z	town	daemon	patrol_scan: gastown: checked 3 polecat(s): 0 restarted, 0 refused, 0 unknown, 0 molecule(s) closed, 0 stranded reported, 0 error(s)
+2026-10-02T14:02:20Z	gastown	events	create gt-vsct7.5 status=open actor=sloan seq=6923
+2026-10-02T14:02:22Z	town	daemon	clearAlerts(checkpoint_dog:scan): scan completed
+2026-10-02T14:02:24Z	town	daemon	jsonl_git_backup: not due — last run 3m ago, interval 15m0s
+2026-10-02T14:02:26Z	gastown	landings	landed gt-826cp polecat/opal/gt-826cp -> main commit=55555555 patch=66666666 gate=pass om=approve/0.90 route=worker
+2026-10-02T14:02:28Z	town	daemon	Heartbeat starting (recovery-focused)
+2026-10-02T14:02:30Z	town	daemon	Heartbeat complete (#536)
+2026-10-02T14:02:32Z	town	daemon	Convoy hq-cv-ai2te: deferring gt-4k3fj.8.8: pool: full (0/1) -> no seat for deepseek-flash
+2026-10-02T14:02:34Z	town	daemon	Convoy hq-cv-ai2te: deferring gt-4k3fj.8.8: pool: full (0/1) -> no seat for deepseek-flash
+2026-10-02T14:02:36Z	town	daemon	Convoy hq-cv-ai2te: deferring gt-4k3fj.8.8: pool: full (0/1) -> no seat for deepseek-flash
+2026-10-02T14:02:38Z	town	daemon	Convoy hq-cv-ai2te: deferring gt-4k3fj.8.8: pool: full (0/1) -> no seat for deepseek-flash
+2026-10-02T14:02:40Z	town	daemon	Convoy hq-cv-ai2te: deferring gt-4k3fj.8.8: pool: full (0/1) -> no seat for deepseek-flash
+2026-10-02T14:02:42Z	town	daemon	Convoy hq-cv-ai2te: feeding gt-4k3fj.8.8 to gastown (agent "deepseek-flash" recorded on convoy at sling time)
+2026-10-02T14:02:44Z	gastown	events	update gt-gastown-polecat-malachite actor=gastown/polecats/malachite seq=6924
+2026-10-02T14:02:46Z	town	daemon	doctor_dog: all clear (latency 2ms, connections 7/1000, orphans 1); no molecule
+2026-10-02T14:02:48Z	town	daemon	Heartbeat starting (recovery-focused)
+2026-10-02T14:02:50Z	town	daemon	Heartbeat complete (#537)
+2026-10-02T14:02:52Z	hq	events	update hq-wisp-e0g8y7 status=open actor=daemon seq=4413
+2026-10-02T14:02:54Z	town	daemon	Convoy: checking convoy hq-cv-xglpm
+2026-10-02T14:02:56Z	town	daemon	Convoy: gt-40so9 tracked by 1 convoy(s): [hq-cv-xglpm]
+2026-10-02T14:02:58Z	town	daemon	townhealth: RED tick 3m0s ago: exec-tax=190ms/exec needs-human=1
+2026-10-02T14:03:00Z	gastown	events	close gt-vsct7.5 status=closed actor=gastown/polecats/quartz seq=6925
+2026-10-02T14:03:02Z	town	daemon	landing_worker: gastown: pass: 1 landed, 0 repaired, 0 rejected, 0 skipped, 0 failed
+2026-10-02T14:03:04Z	town	daemon	Handler: skipping plugin seat-refill (gate=manual, requires explicit trigger)
+2026-10-02T14:03:06Z	town	daemon	Heartbeat starting (recovery-focused)
+2026-10-02T14:03:08Z	town	daemon	Heartbeat complete (#538)
+2026-10-02T14:03:10Z	gastown	events	create gt-wisp-jj90q status=open actor=daemon seq=6926
+2026-10-02T14:03:12Z	gastown	events	close gt-wisp-jj90q status=closed actor=daemon seq=6927
+2026-10-02T14:03:14Z	town	daemon	Convoy: close detected: gt-wisp-jj90q (from gastown)
+2026-10-02T14:03:16Z	town	daemon	patrol_scan: gastown: checked 3 polecat(s): 0 restarted, 0 refused, 0 unknown, 0 molecule(s) closed, 0 stranded reported, 0 error(s)
+2026-10-02T14:03:18Z	town	daemon	clearAlerts(doctor_dog:probe): probe succeeded
+2026-10-02T14:03:20Z	town	daemon	checkpoint_dog: not due — last run 1m ago, interval 5m
+2026-10-02T14:03:22Z	town	daemon	Mayor patrol disabled in config, skipping
+2026-10-02T14:03:24Z	gastown	events	update gt-ufjol status=in_progress actor=gastown/polecats/malachite seq=6928
+2026-10-02T14:03:26Z	town	daemon	Restarting for upgrade: shutting down so launchd restarts the daemon on the installed binary
+2026-10-02T14:03:28Z	town	daemon	Upgrade restart: leaving Dolt server running for the next daemon to adopt
+2026-10-02T14:03:30Z	town	daemon	Heartbeat starting (recovery-focused)
+2026-10-02T14:03:32Z	town	daemon	Heartbeat complete (#539)
+2026-10-02T14:03:34Z	town	daemon	dog_cycle: checkpoint_dog outcome=ran steps=[scan=done]
+2026-10-02T14:03:36Z	town	daemon	jsonl_git_backup: not due — last run 4m ago, interval 15m0s
+2026-10-02T14:03:38Z	town	daemon	SLOW: om review 12m31s over the 10m budget
+2026-10-02T14:03:40Z	gastown	events	close gt-4k3fj.8.8 status=closed actor=gastown/polecats/agate seq=6929
+2026-10-02T14:03:42Z	gastown	landings	landed gt-4k3fj.8.8 polecat/agate/gt-4k3fj.8.8 -> main commit=77777777 patch=88888888 gate=pass om=approve/0.91 route=worker
+2026-10-02T14:03:44Z	town	daemon	Handler patrol disabled in config, skipping
+2026-10-02T14:03:46Z	town	daemon	Convoy: checking convoy hq-cv-ai2te
+2026-10-02T14:03:48Z	town	daemon	Convoy: gt-4k3fj.8.8 tracked by 1 convoy(s): [hq-cv-ai2te]
+2026-10-02T14:03:50Z	town	daemon	Heartbeat starting (recovery-focused)
+2026-10-02T14:03:52Z	town	daemon	Heartbeat complete (#540)
+2026-10-02T14:03:54Z	town	daemon	townhealth: GREEN tick 4ms ago: exec-tax=129ms/exec needs-human=0
+2026-10-02T14:03:56Z	gastown	events	update gt-gastown-polecat-garnet actor=gastown/polecats/garnet seq=6930
+2026-10-02T14:03:58Z	gastown	events	update gt-gastown-polecat-garnet actor=gastown/polecats/garnet seq=6931
+2026-10-02T14:04:00Z	town	daemon	doctor_dog: all clear (latency 2ms, connections 7/1000, orphans 1); no molecule
+2026-10-02T14:04:02Z	hq	events	create hq-wisp-mm42p status=open actor=daemon seq=4414
+2026-10-02T14:04:04Z	town	daemon	Convoy: close detected: hq-wisp-mm42p (from hq)
+2026-10-02T14:04:06Z	town	daemon	Heartbeat starting (recovery-focused)
+2026-10-02T14:04:08Z	town	daemon	Heartbeat complete (#541)
+2026-10-02T14:04:10Z	town	daemon	Convoy: gt-ydzwb tracked by 1 convoy(s): [hq-cv-e7w3w]
+2026-10-02T14:04:12Z	town	daemon	Convoy hq-cv-e7w3w: feeding gt-ik4a1.4.7 to gastown (agent "deepseek-flash" recorded on convoy at sling time)
+2026-10-02T14:04:14Z	town	daemon	Convoy hq-cv-e7w3w: deferring gt-qmdbt: pool: full (0/1) -> no seat for deepseek-flash
+2026-10-02T14:04:16Z	town	daemon	Convoy hq-cv-e7w3w: deferring gt-qmdbt: pool: full (0/1) -> no seat for deepseek-flash
+2026-10-02T14:04:18Z	town	daemon	Convoy hq-cv-e7w3w: deferring gt-qmdbt: pool: full (0/1) -> no seat for deepseek-flash
+2026-10-02T14:04:20Z	town	daemon	Convoy hq-cv-e7w3w: deferring gt-qmdbt: pool: full (0/1) -> no seat for deepseek-flash
+2026-10-02T14:04:22Z	town	daemon	Convoy hq-cv-e7w3w: feeding gt-qmdbt to gastown (agent "deepseek-flash" recorded on convoy at sling time)
+2026-10-02T14:04:24Z	town	daemon	patrol_scan: gastown: checked 3 polecat(s): 0 restarted, 0 refused, 0 unknown, 0 molecule(s) closed, 0 stranded reported, 0 error(s)
+2026-10-02T14:04:26Z	gastown	events	create gt-ufjol status=open actor=sloan seq=6932
+2026-10-02T14:04:28Z	town	daemon	Heartbeat starting (recovery-focused)
+2026-10-02T14:04:30Z	town	daemon	Heartbeat complete (#542)
+2026-10-02T14:04:32Z	town	daemon	clearAlerts(jsonl_git_backup:push): backup push succeeded

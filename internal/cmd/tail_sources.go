@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,17 +13,162 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/deps"
+	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landings"
+	"github.com/steveyegge/gastown/internal/version"
 )
 
 // tailOnce remembers the last failure a source printed, so a source that
 // keeps failing the same way prints one line, not one per poll. A success
 // clears it, so the next failure prints again.
 type tailOnce struct{ last string }
+
+// tailTitleCacheSize bounds the titles one run remembers. A run that outlives
+// this many distinct beads stops taking new titles rather than growing: the
+// line prints without one, which is what a failed read does too.
+const tailTitleCacheSize = 512
+
+// tailBeads resolves the two bead facts gt tail prints beside an events line:
+// the title of a create, close, status change or dependency line, and the
+// verdict a comment or a note carries. It is the run's one door to bd — a
+// title costs one bd show per bead, and the verdict read is the caller's to
+// bound.
+//
+// Every read is read-only, and every failure is silence: a title that cannot
+// be read prints no title, never an error line, because a stream about the
+// town's health must not become a stream about bd's.
+type tailBeads struct {
+	show func(rig, id string) (*beads.Issue, error)
+	max  int
+
+	mu     sync.Mutex
+	titles map[string]string
+	// fetching marks the ids a read is already in flight for. The sources
+	// poll concurrently and share this cache, so two of them can ask about
+	// the same bead in the same instant; the marker keeps that from becoming
+	// two bd shows, and the second line prints without a title, which is what
+	// a failed read does too.
+	fetching map[string]bool
+}
+
+// newTailBeads wraps show with the per-run title cache.
+func newTailBeads(show func(rig, id string) (*beads.Issue, error)) *tailBeads {
+	return &tailBeads{show: show, max: tailTitleCacheSize, titles: map[string]string{}, fetching: map[string]bool{}}
+}
+
+// issue reads one bead now, with no caching: the caller wants what the bead
+// says at this moment (its notes, its comments).
+func (b *tailBeads) issue(rig, id string) *beads.Issue {
+	if b == nil || b.show == nil || id == "" {
+		return nil
+	}
+	issue, err := b.show(rig, id)
+	if err != nil {
+		return nil
+	}
+	return issue
+}
+
+// title reads one bead's title, at most once per run. A read that failed is
+// remembered as "no title", so a store that is down costs one attempt, not one
+// per line. A read already in flight answers "" rather than starting a second
+// one: the sources poll concurrently, and the town scan must not fan one
+// bead's read out into one per source.
+func (b *tailBeads) title(rig, id string) string {
+	if b == nil || b.show == nil || id == "" {
+		return ""
+	}
+	b.mu.Lock()
+	if title, ok := b.titles[id]; ok {
+		b.mu.Unlock()
+		return title
+	}
+	if b.fetching[id] || len(b.titles) >= b.max {
+		b.mu.Unlock()
+		return ""
+	}
+	b.fetching[id] = true
+	b.mu.Unlock()
+
+	title := ""
+	if issue := b.issue(rig, id); issue != nil {
+		title = issue.Title
+	}
+
+	b.mu.Lock()
+	delete(b.fetching, id)
+	if len(b.titles) < b.max {
+		b.titles[id] = title
+	}
+	b.mu.Unlock()
+	return title
+}
+
+// lineTitle is the title an events line carries, "" for a line that names no
+// bead the reader needs to recognize.
+func (b *tailBeads) lineTitle(l tailLine) string {
+	id, ok := tailTitleBeadID(l)
+	if !ok {
+		return ""
+	}
+	return b.title(l.Rig, id)
+}
+
+// tailTitleBeadID reads the bead a title belongs to off an events line, and
+// whether the line is one a title is appended to: a create, a close, a
+// dependency, or an update that moved the bead's status. The line's text is
+// "<op> <id> [status=<s>] [actor=<a>] seq=<n>".
+func tailTitleBeadID(l tailLine) (string, bool) {
+	if l.Kind != tailKindEvents || l.Verdict != "" {
+		return "", false
+	}
+	f := strings.Fields(l.Text)
+	if len(f) < 2 {
+		return "", false
+	}
+	switch f[0] {
+	case "create", "close", "dep_add":
+		return f[1], true
+	case "update":
+		for _, field := range f[2:] {
+			if strings.HasPrefix(field, "status=") {
+				return f[1], true
+			}
+		}
+	}
+	return "", false
+}
+
+// openTailBeads is the production tailBeads.show: the store that owns a rig's
+// beads, opened once per rig. The store is read with bd show, which routes by
+// issue id, so one store answers for any bead the monitor asks about.
+func openTailBeads(townRoot string) *tailBeads {
+	var mu sync.Mutex
+	stores := map[string]*beads.Beads{}
+	show := func(rig, id string) (*beads.Issue, error) {
+		mu.Lock()
+		store, ok := stores[rig]
+		if !ok {
+			dir := doltserver.FindRigBeadsDir(townRoot, rig)
+			if dir == "" {
+				mu.Unlock()
+				return nil, fmt.Errorf("no beads directory for %s", rig)
+			}
+			store = beads.NewWithBeadsDir(townRoot, dir)
+			stores[rig] = store
+		}
+		mu.Unlock()
+		return store.Show(id)
+	}
+	return newTailBeads(show)
+}
 
 func (o *tailOnce) first(msg string) bool {
 	if msg == o.last {
@@ -74,6 +220,14 @@ type eventsSource struct {
 	cutoff   time.Time
 	now      func() time.Time
 	pageSize int
+	beads    *tailBeads // the run's bead reads; nil prints no title and no verdict
+
+	// pollIssues and shownVerdicts are the verdict read's two bounds. One bd
+	// show per bead per poll answers every record that bead wrote, and a
+	// verdict already shown is not shown again however often the bead is
+	// rewritten (a rejection is re-recorded as the rework is retried).
+	pollIssues    map[string]*beads.Issue
+	shownVerdicts map[string]string
 
 	configChecked bool
 	// backlogDone is set by the first read that reaches the journal's head;
@@ -88,8 +242,46 @@ func (s *eventsSource) line(at time.Time, format string, args ...any) tailLine {
 	return tailLine{At: at, Rig: s.rig, Kind: tailKindEvents, Text: fmt.Sprintf(format, args...)}
 }
 
+// tailVerdictOp reports whether a journal record can carry a verdict: a
+// comment the review loop wrote, or a note a rejection appended to.
+func tailVerdictOp(op string) bool {
+	return op == "comment" || op == "update"
+}
+
+// verdictText is the verdict the record's bead carries, "" when there is none
+// or when this run already showed it. One bd show per bead per poll answers
+// every record that bead wrote, and a bead whose line the default view hides
+// (a wisp, a worker's own agent bead) is not read at all: nothing would print
+// it.
+func (s *eventsSource) verdictText(op, id string) string {
+	if s.beads == nil || !tailVerdictOp(op) || isWispID(id) || isPolecatAgentBead(id) {
+		return ""
+	}
+	if s.pollIssues == nil {
+		s.pollIssues = map[string]*beads.Issue{}
+	}
+	issue, ok := s.pollIssues[id]
+	if !ok {
+		issue = s.beads.issue(s.rig, id)
+		s.pollIssues[id] = issue
+	}
+	if issue == nil {
+		return ""
+	}
+	text := tailVerdictText(issue, op)
+	if text == "" || s.shownVerdicts[id] == text {
+		return ""
+	}
+	if s.shownVerdicts == nil {
+		s.shownVerdicts = map[string]string{}
+	}
+	s.shownVerdicts[id] = text
+	return text
+}
+
 func (s *eventsSource) Poll() []tailLine {
 	now := s.now()
+	s.pollIssues = nil
 	if s.openErr != nil {
 		if s.failed.first(s.openErr.Error()) {
 			return []tailLine{s.line(now, "cannot read the journal: %v", s.openErr)}
@@ -154,7 +346,9 @@ func (s *eventsSource) Poll() []tailLine {
 			if !ok {
 				text += " ts=" + r.TS
 			}
-			out = append(out, s.line(at, "%s", text))
+			line := s.line(at, "%s", text)
+			line.Verdict = s.verdictText(r.Op, r.IssueID)
+			out = append(out, line)
 		}
 		advanced := page.NextSince > s.since
 		if advanced {
@@ -233,6 +427,252 @@ func orDash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// tailSummaryMaxSeats bounds the polecat:bead pairs the summary line lists;
+// the rest are counted, not named.
+const tailSummaryMaxSeats = 6
+
+// tailSummarySpendFresh is how old the DeepSeek spend reading may be and still
+// be reported. An older one describes a rate that has stopped being measured,
+// so the field drops out rather than reporting it as current.
+const tailSummarySpendFresh = 15 * time.Minute
+
+// tailSummaryFresh is how often gt tail -f may reprint the summary line, even
+// when one of its fields moved. The line is a state line, not an event: what
+// the operator reads it for is the change, and a line that reprints every poll
+// is the noise this bead exists to remove.
+const tailSummaryFresh = 5 * time.Minute
+
+// tailSummaryFields is the town state the summary line reports. Each part is
+// optional: a part that could not be read is left out of the line rather than
+// reported as zero, so a store that is down does not read as an idle town.
+type tailSummaryFields struct {
+	Seats        []string // "<rig>/<polecat>:<bead>", sorted
+	SeatsUsed    int
+	SeatsCap     int
+	HasSeats     bool
+	ReadyToLand  int
+	HasReady     bool
+	MainTip      string // origin/main's short sha
+	InstalledGT  string // the running binary's short sha
+	Behind       int
+	HasMain      bool
+	Escalations  int
+	HasEscalate  bool
+	SpendPerHour float64
+	HasSpend     bool
+}
+
+// line is the one dim line the summary prints, "" when no field could be read.
+func (f tailSummaryFields) line() string {
+	var parts []string
+	if f.HasSeats {
+		seats := fmt.Sprintf("seats %d", f.SeatsUsed)
+		if f.SeatsCap > 0 {
+			seats = fmt.Sprintf("seats %d/%d", f.SeatsUsed, f.SeatsCap)
+		}
+		if len(f.Seats) > 0 {
+			shown := f.Seats
+			more := ""
+			if len(shown) > tailSummaryMaxSeats {
+				more = fmt.Sprintf(", +%d more", len(shown)-tailSummaryMaxSeats)
+				shown = shown[:tailSummaryMaxSeats]
+			}
+			seats += " [" + strings.Join(shown, ", ") + more + "]"
+		}
+		parts = append(parts, seats)
+	}
+	if f.HasReady {
+		parts = append(parts, fmt.Sprintf("ready %d", f.ReadyToLand))
+	}
+	if f.HasMain {
+		main := fmt.Sprintf("main %s vs gt %s", f.MainTip, f.InstalledGT)
+		if f.Behind > 0 {
+			main += fmt.Sprintf(" (+%d behind)", f.Behind)
+		}
+		parts = append(parts, main)
+	}
+	if f.HasEscalate {
+		parts = append(parts, fmt.Sprintf("escalations %d", f.Escalations))
+	}
+	if f.HasSpend {
+		parts = append(parts, fmt.Sprintf("DeepSeek $%.2f/h", f.SpendPerHour))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return tailSummaryIcon + " " + strings.Join(parts, tailSummarySep)
+}
+
+// tailSummaryIcon leads the summary line, and tailSummarySep joins its fields.
+const (
+	tailSummaryIcon = "📊"
+	tailSummarySep  = " · "
+)
+
+// readTailSummary reads the town's live state for the summary line. Every part
+// is optional and every failure is silence: the line reports what it could
+// read. It only reads — no bd write, no fetch, no reservation cleanup.
+//
+// listAgent lists one rig's agent beads (tailRigAgentBeads in production), so a
+// test can drive a rig's read failure without a store.
+func readTailSummary(townRoot string, listAgent func(rigPath string) (map[string]*beads.Issue, error)) tailSummaryFields {
+	var f tailSummaryFields
+	if seats, cap, pairs, err := tailSeatPicture(townRoot, listAgent); err == nil {
+		f.HasSeats, f.SeatsUsed, f.SeatsCap, f.Seats = true, seats, cap, pairs
+	}
+	if n, err := tailReadyToLand(townRoot); err == nil {
+		f.HasReady, f.ReadyToLand = true, n
+	}
+	if tip, installed, behind, err := tailMainPicture(townRoot); err == nil {
+		f.HasMain, f.MainTip, f.InstalledGT, f.Behind = true, tip, installed, behind
+	}
+	if n, err := tailOpenEscalations(townRoot); err == nil {
+		f.HasEscalate, f.Escalations = true, n
+	}
+	if perHour, at, err := tailSpend(townRoot); err == nil && !at.IsZero() {
+		f.HasSpend, f.SpendPerHour = true, perHour
+	}
+	return f
+}
+
+// tailSeatPicture counts the town's polecat seats in use and its cap, and names
+// the work each one holds. A seat is in use when the polecat's agent bead
+// carries a hooked bead: that is the write every dispatch makes and every
+// completion clears. The cap is the scheduler's, and 0 when the town runs
+// uncapped.
+//
+// A rig whose polecat directory or agent beads cannot be read is an error, not
+// a skip: counting it as zero would make a store that is down read as an idle
+// town, which is the one report the field exists to prevent.
+func tailSeatPicture(townRoot string, listAgent func(rigPath string) (map[string]*beads.Issue, error)) (used, cap int, pairs []string, err error) {
+	rigs, err := knownRigNames(townRoot)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	for _, rigName := range rigs {
+		rigPath := filepath.Join(townRoot, rigName)
+		names, err := listPolecatDirectoryNames(rigPath)
+		if err != nil {
+			return 0, 0, nil, fmt.Errorf("polecat directory of %s: %w", rigName, err)
+		}
+		if len(names) == 0 {
+			continue
+		}
+		agents, err := listAgent(rigPath)
+		if err != nil {
+			return 0, 0, nil, fmt.Errorf("agent beads of %s: %w", rigName, err)
+		}
+		prefix := beads.GetPrefixForRig(townRoot, rigName)
+		agentBeadID := func(name string) string { return beads.PolecatBeadIDWithPrefix(prefix, rigName, name) }
+		for name, bead := range polecatHookBeads(names, agentBeadID, agents) {
+			used++
+			pairs = append(pairs, fmt.Sprintf("%s/%s:%s", rigName, name, bead))
+		}
+	}
+	sort.Strings(pairs)
+	max, err := configuredSchedulerMaxPolecats(townRoot)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	if max < 0 {
+		// The scheduler answers -1 for "no cap configured"; a town that runs
+		// uncapped is not a town with a cap of minus one.
+		max = 0
+	}
+	return used, max, pairs, nil
+}
+
+// tailRigAgentBeads lists one rig's agent beads by polecat name. Agent beads
+// are rig-local and their IDs reroot, so the wrapper has to be the agent-scoped
+// one, never a bare beads.New chain (gt-a6g).
+func tailRigAgentBeads(rigPath string) (map[string]*beads.Issue, error) {
+	return beads.New(rigPath).ForAgentBead().ListAgentBeads()
+}
+
+// tailReadyToLand counts the beads waiting to land. The label lives on the
+// work bead in the rig that owns it, so every store is asked.
+func tailReadyToLand(townRoot string) (int, error) {
+	stores := []string{"hq"}
+	rigs, err := knownRigNames(townRoot)
+	if err != nil {
+		return 0, err
+	}
+	stores = append(stores, rigs...)
+	total := 0
+	for _, store := range stores {
+		dir := doltserver.FindRigBeadsDir(townRoot, store)
+		if dir == "" {
+			continue
+		}
+		issues, err := beads.NewWithBeadsDir(townRoot, dir).List(beads.ListOptions{
+			Label: land.LabelReadyToLand, Priority: -1,
+		})
+		if err != nil {
+			return 0, err
+		}
+		for _, issue := range issues {
+			if beads.HasLabel(issue, land.LabelReadyToLand) && beads.IssueStatus(issue.Status).IsActionable() {
+				total++
+			}
+		}
+	}
+	return total, nil
+}
+
+// tailMainPicture is origin/main against the binary running this stream: the
+// two short shas and how many commits the binary is behind. It reads the local
+// refs only — the summary line must not put a fetch in front of the operator
+// every five minutes.
+func tailMainPicture(townRoot string) (tip, installed string, behind int, err error) {
+	repo, err := version.GetRepoRootForTown(townRoot)
+	if err != nil {
+		return "", "", 0, err
+	}
+	info := version.CheckStaleBinary(repo)
+	if info == nil || info.Error != nil || info.Skipped {
+		return "", "", 0, fmt.Errorf("staleness of the installed gt is unknown")
+	}
+	if info.BinaryCommit == "" || info.RepoCommit == "" {
+		return "", "", 0, fmt.Errorf("commit of the installed gt or of %s is unknown", info.CompareRef)
+	}
+	return version.ShortCommit(info.RepoCommit), version.ShortCommit(info.BinaryCommit), info.CommitsBehind, nil
+}
+
+// tailOpenEscalations counts the town's open escalations, both bead planes,
+// minus the mail carriers that delivered them.
+func tailOpenEscalations(townRoot string) (int, error) {
+	issues, err := beads.New(beads.ResolveBeadsDir(townRoot)).ListEscalationsAcrossRigs()
+	if err != nil {
+		return 0, err
+	}
+	return len(issues), nil
+}
+
+// tailSpend reads the health watch's DeepSeek rate: ~/.runtime/watch/spend.json
+// is {"ts", "per_hour", "balance"}, rewritten as the watch measures it. A file
+// older than tailSummarySpendFresh reports nothing.
+func tailSpend(townRoot string) (perHour float64, at time.Time, err error) {
+	path := filepath.Join(constants.TownRuntimePath(townRoot), "watch", "spend.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	var f struct {
+		TS      time.Time `json:"ts"`
+		PerHour float64   `json:"per_hour"`
+	}
+	if err := json.Unmarshal(data, &f); err != nil {
+		return 0, time.Time{}, err
+	}
+	if f.TS.IsZero() {
+		return 0, time.Time{}, fmt.Errorf("spend.json carries no timestamp")
+	}
+	if time.Since(f.TS) > tailSummarySpendFresh {
+		return 0, time.Time{}, fmt.Errorf("spend.json is %s old", time.Since(f.TS).Round(time.Second))
+	}
+	return f.PerHour, f.TS, nil
 }
 
 // daemonLogStamp is log.LstdFlags as the daemon's logger writes it: local

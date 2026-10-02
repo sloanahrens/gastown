@@ -20,13 +20,16 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/landings"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/ui"
+	"github.com/steveyegge/gastown/internal/version"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -82,6 +85,35 @@ rejections, escalations, upgrade restarts, spec-dispatcher ticks and bead
 create/close/status changes always show, and a hidden line that reports a
 failure shows anyway. --all (or --verbose) shows everything.
 
+It also drops what repeats. An events line that says what the line before it
+said — the same bead, operation and status within two seconds — prints once:
+that is one bd write the journal recorded twice, or a retry that landed on the
+same row. A convoy that cannot seat a bead retries it every few seconds, so
+those "deferring gt-x: pool: full ..." lines collapse into one
+"⏳ waiting for a seat: gt-x", printed again only when the bead, the reason or
+the outcome changes. And an events line drops its seq= cursor, and its
+actor= when that actor is your own git user.name; another writer's actor
+stays. --verbose keeps both fields, which is what to cut or grep by position.
+
+A bead line names the bead: create, close, dependency and status-change lines
+append the bead's title after a " · ", read once per bead per run and
+truncated so the line still fits the terminal (80 columns when stdout is not
+one). A title that cannot be read is simply absent — never an error line.
+
+The review loop's own words show too. A comment or a note that opens with
+OVERSEER REVIEW, OVERSEER RULING, STEWARD or MERGE REJECTION prints its first
+100 characters after the line, green for a PASS, red for a FAIL, a REFUSED or
+a REJECTION, and yellow for a "(shadow)" verdict. Every other comment stays
+hidden, as it was.
+
+With -f, one dim "📊" line reports the town's state: the seats in use against
+the cap with the polecat:bead pairs holding them, the beads waiting to land,
+origin/main against the binary you are running, the open escalations, and the
+DeepSeek rate when ~/.runtime/watch/spend.json was written in the last fifteen
+minutes. It prints on the first poll, then only when one of those fields moves
+and at most once every five minutes; a field that cannot be read is left out.
+A run without -f never prints it.
+
 The first poll is gathered from every source — each one bounded by its own
 read budget — and printed in time order, so gt tail -f shows one ordered
 backlog. What arrives after it prints as each later poll returns.
@@ -135,9 +167,10 @@ func runTail(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	beadReads := openTailBeads(townRoot)
 	sources, preface, err := buildTailSources(tailOptions{
 		townRoot: townRoot, rig: tailRig, kinds: kinds, cutoff: cutoff, loc: loc, now: time.Now,
-		rigNames: knownRigNames, journalFor: openTailJournal,
+		rigNames: knownRigNames, journalFor: openTailJournal, beads: beadReads,
 	})
 	if err != nil {
 		return err
@@ -150,13 +183,109 @@ func runTail(cmd *cobra.Command, _ []string) error {
 		defer ticker.Stop()
 		tick = ticker.C
 	}
+	all := tailAll || tailVerbose
+	// The identity the default view trims is the default view's; a raw run
+	// asks git for nothing.
+	gitUser := ""
+	if !all {
+		gitUser = tailGitUser(townRoot)
+	}
 	view := newTailView(loc, tailViewOptions{
-		all:        tailAll || tailVerbose,
+		all:        all,
 		iso:        tailISO,
 		fullSource: tailVerbose,
 		decorate:   tailDecorate(colorMode),
+		width:      tailDisplayWidth(cmd.OutOrStdout()),
+		gitUser:    gitUser,
+		beads:      beadReads,
 	})
-	return runTailStream(ctx, cmd.OutOrStdout(), sources, preface, tailFollow, tick, view)
+	// The summary is the follow mode's: a run that prints a backlog and exits
+	// has no "since the last line" to summarize.
+	var summary *tailSummaryTracker
+	if tailFollow {
+		summary = &tailSummaryTracker{
+			read:     func() tailSummaryFields { return readTailSummary(townRoot, tailRigAgentBeads) },
+			now:      time.Now,
+			interval: tailSummaryFresh,
+			width:    view.Width,
+		}
+	}
+	return runTailStream(ctx, cmd.OutOrStdout(), sources, preface, tailFollow, tick, view, summary)
+}
+
+// tailDisplayWidth is the column the stream keeps its lines inside: the
+// terminal's when stdout is one, 80 otherwise, so a pipe and a log file read
+// as the terminal does. A terminal that will not report its size gets the
+// same 80.
+func tailDisplayWidth(w io.Writer) int {
+	const tailDefaultWidth = 80
+	f, ok := w.(*os.File)
+	if !ok {
+		return tailDefaultWidth
+	}
+	width, _, err := term.GetSize(int(f.Fd()))
+	if err != nil || width <= 0 {
+		return tailDefaultWidth
+	}
+	return width
+}
+
+// tailGitUser is the identity bd records for a write with no explicit actor.
+// An events line whose actor is this one is the operator's own write, and the
+// default view drops it; "" when the repo has no user.name, which keeps every
+// actor.
+func tailGitUser(townRoot string) string {
+	repo, err := version.GetRepoRootForTown(townRoot)
+	if err != nil {
+		return ""
+	}
+	name, err := git.NewGit(repo).ConfigGet("user.name")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(name)
+}
+
+// tailSummaryTracker prints the change-driven state line gt tail -f carries:
+// the summary line reprints when one of its fields moved, and at most once
+// every interval. It never runs for a non-following run — that run has no
+// "since the last line" to summarize.
+//
+// Reading the town's state is a handful of bd and git calls, so the tracker
+// makes them no more often than the interval says, not on every poll: inside
+// the window the line it last printed still stands.
+type tailSummaryTracker struct {
+	read     func() tailSummaryFields
+	now      func() time.Time
+	interval time.Duration
+	width    int
+
+	last   string    // the text last printed, "" until the first line
+	readAt time.Time // when the state was last read
+}
+
+// next returns the summary line to print and whether it is due.
+func (t *tailSummaryTracker) next() (tailLine, bool) {
+	if t == nil || t.read == nil {
+		return tailLine{}, false
+	}
+	now := t.now()
+	if !t.readAt.IsZero() && now.Sub(t.readAt) < t.interval {
+		return tailLine{}, false
+	}
+	t.readAt = now
+	text := t.read().line()
+	if text == "" {
+		return tailLine{}, false
+	}
+	if t.width > 0 {
+		text = tailTruncateDisplay(text, t.width)
+	}
+	if text == t.last {
+		return tailLine{}, false
+	}
+	t.last = text
+	return tailLine{At: now, Rig: "town", Kind: tailKindDaemon, Text: text, Plain: true}, true
 }
 
 // tailViewOptions is what the flags ask the view to do.
@@ -165,13 +294,21 @@ type tailViewOptions struct {
 	iso        bool // RFC3339 times with the date and zone
 	fullSource bool // keep the <rig> <kind> columns
 	decorate   bool // color the lines and tag them with an emoji
+	// width is the column the default view keeps every line inside (0 = no
+	// bound); gitUser is the identity whose actor= field the default view
+	// drops; beads resolves the title a bead line carries.
+	width   int
+	gitUser string
+	beads   *tailBeads
 }
 
 // newTailView is the view the flags select: the routine lines hidden unless
 // all, the time as HH:MM:SS unless iso, one short source tag unless
-// fullSource, and plain text unless decorate.
+// fullSource, and plain text unless decorate. The title and the two trimmed
+// fields belong to that default view too: --all and --verbose print the raw
+// line.
 func newTailView(loc *time.Location, o tailViewOptions) tailView {
-	v := tailView{Loc: loc, Layout: tailClockLayout, FullSource: o.fullSource}
+	v := tailView{Loc: loc, Layout: tailClockLayout, FullSource: o.fullSource, Width: o.width}
 	if o.iso {
 		v.Layout = time.RFC3339
 	}
@@ -179,10 +316,15 @@ func newTailView(loc *time.Location, o tailViewOptions) tailView {
 		v.Decor = newTailDecor()
 	}
 	if !o.all {
-		// The latch is the view's: it remembers the townhealth line this
-		// view last showed, not one an earlier run showed.
-		latch := &tailTownHealthLatch{}
-		v.Show = func(l tailLine) bool { return tailVisible(l) && latch.visible(l.Text) }
+		// The latches are the view's: they remember the lines this view
+		// showed, not ones an earlier run showed. The titles are its too —
+		// --all and --verbose print the raw line — and a run that asks for
+		// neither pays for no bead read at all.
+		filter := &tailDefaultFilter{}
+		v.Show = filter.visible
+		v.Trim = true
+		v.GitUser = o.gitUser
+		v.Beads = o.beads
 	}
 	return v
 }
@@ -232,6 +374,9 @@ type tailOptions struct {
 	rigNames func(townRoot string) ([]string, error)
 	// journalFor opens a store's journal (openTailJournal in production).
 	journalFor func(townRoot, rig string) (tailJournal, error)
+	// beads resolves the titles and verdicts an events line carries
+	// (openTailBeads in production, nil in a test that wants neither).
+	beads *tailBeads
 }
 
 func allTailKinds() map[string]bool {
@@ -284,7 +429,7 @@ func buildTailSources(o tailOptions) (sources []tailSource, preface []tailLine, 
 	for _, rig := range stores {
 		if o.kinds[tailKindEvents] {
 			j, openErr := o.journalFor(o.townRoot, rig)
-			sources = append(sources, &eventsSource{rig: rig, journal: j, openErr: openErr, cutoff: o.cutoff, now: o.now})
+			sources = append(sources, &eventsSource{rig: rig, journal: j, openErr: openErr, cutoff: o.cutoff, now: o.now, beads: o.beads})
 		}
 		if o.kinds[tailKindLandings] && rig != "hq" {
 			path, pathErr := landings.Path(o.townRoot, rig)
@@ -306,16 +451,29 @@ func buildTailSources(o tailOptions) (sources []tailSource, preface []tailLine, 
 }
 
 // tailView is how the stream is shown: the zone and layout of each line's
-// time (RFC3339 when Layout is empty), which lines print (all when Show is
-// nil), how the source is written (one short tag unless FullSource), and how
-// the line is drawn (plain unless Decor).
+// time (RFC3339 when Layout is empty), which lines print and what they say
+// (all, unchanged, when Show is nil), how the source is written (one short
+// tag unless FullSource), and how the line is drawn (plain unless Decor).
+//
+// Width bounds a line to a terminal column (0 = no bound), and Trim drops the
+// events cursor and the operator's own identity — the default view's doing,
+// which --verbose and --all turn off. Beads is where a bead line's title comes
+// from; nil, in a test or a store that cannot be read, prints no title.
 type tailView struct {
 	Loc        *time.Location
 	Layout     string
-	Show       func(tailLine) bool
+	Show       func(tailLine) (tailLine, bool)
 	FullSource bool
 	Decor      *tailDecor
+	Width      int
+	Trim       bool
+	GitUser    string
+	Beads      *tailBeads
 }
+
+// tailAnnotationSep joins a line's text to the title or the verdict it
+// carries.
+const tailAnnotationSep = " · "
 
 // tailClockLayout is the default time column: the day is the operator's own.
 const tailClockLayout = "15:04:05"
@@ -413,16 +571,31 @@ func pollTailSources(sources []tailSource) [][]tailLine {
 // first poll of a follow prints one backlog in time order across every source
 // and a later line prints after the lines already shown. A failed write (a
 // closed pipe) ends the stream with its error.
-func runTailStream(ctx context.Context, w io.Writer, sources []tailSource, preface []tailLine, follow bool, tick <-chan time.Time, view tailView) error {
+func runTailStream(ctx context.Context, w io.Writer, sources []tailSource, preface []tailLine, follow bool, tick <-chan time.Time, view tailView, summary *tailSummaryTracker) error {
 	bw := bufio.NewWriter(w)
 	show := func(lines []tailLine) error {
 		for _, l := range mergeTail(lines) {
-			if view.Show != nil && !view.Show(l) {
-				continue
+			if view.Show != nil {
+				var ok bool
+				if l, ok = view.Show(l); !ok {
+					continue
+				}
 			}
 			if _, err := bw.WriteString(view.renderLine(l) + "\n"); err != nil {
 				return err
 			}
+		}
+		return bw.Flush()
+	}
+	// The summary is not a source: it is the state those lines are happening
+	// to, so it is not filtered, and its own tracker decides when it is due.
+	emitSummary := func() error {
+		line, ok := summary.next()
+		if !ok {
+			return nil
+		}
+		if _, err := bw.WriteString(view.renderLine(line) + "\n"); err != nil {
+			return err
 		}
 		return bw.Flush()
 	}
@@ -439,12 +612,18 @@ func runTailStream(ctx context.Context, w io.Writer, sources []tailSource, prefa
 	if err := emit(preface); err != nil {
 		return err
 	}
+	if err := emitSummary(); err != nil {
+		return err
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-tick:
 			if err := emit(nil); err != nil {
+				return err
+			}
+			if err := emitSummary(); err != nil {
 				return err
 			}
 		}
@@ -455,11 +634,25 @@ func runTailStream(ctx context.Context, w io.Writer, sources []tailSource, prefa
 // belongs to ("town" for the daemon, "hq" for the town store), which source
 // produced it, and the text. Render turns it into
 // "<local RFC3339 time> <rig> <kind> <text>".
+//
+// Title and Verdict are the two annotations a line can carry, both written
+// after the text with " · ". Title is the bead title the default view looks up
+// for a create, close, status change or dependency line; Verdict is the review
+// loop's own words, read off a comment or a note event and carried by the
+// source so --all shows it too. The verdict is the more specific of the two.
+//
+// Plain draws the line dim whatever its text says. It is the summary line's:
+// a state line about the town is not one of the town's own lines, so the
+// classifier's reading of a word it carries — "escalations", say — is not the
+// class it is drawn in.
 type tailLine struct {
-	At   time.Time
-	Rig  string
-	Kind string
-	Text string
+	At      time.Time
+	Rig     string
+	Kind    string
+	Text    string
+	Title   string
+	Verdict string
+	Plain   bool
 }
 
 // tailSource is one read-only input to the stream. Poll returns the lines
@@ -497,10 +690,17 @@ func mergeTail(batches ...[]tailLine) []tailLine {
 // full source. A decorated view puts the class's emoji between the source and
 // the text and draws the text in the class's color.
 //
-// The rig and kind are single tokens and the text has no control characters,
-// so every record is exactly one line and, with --verbose, the first three
-// fields can be cut or grepped by position.
+// The rig and kind are single tokens, and the text and the annotation it
+// carries are passed through tailText, so every record is exactly one line
+// and, with --verbose, the first three fields can be cut or grepped by
+// position.
 func (v tailView) renderLine(l tailLine) string {
+	if v.Trim {
+		l = tailTrimEventFields(l, v.GitUser)
+	}
+	if l.Title == "" && l.Verdict == "" && v.Beads != nil {
+		l.Title = v.Beads.lineTitle(l)
+	}
 	layout := v.Layout
 	if layout == "" {
 		layout = time.RFC3339
@@ -513,13 +713,79 @@ func (v tailView) renderLine(l tailLine) string {
 		b.WriteByte(' ')
 		b.WriteString(tailToken(l.Kind))
 	}
-	class := tailClassOf(l.Text)
+	class := tailLineClass(l)
 	if icon := v.Decor.icon(class); icon != "" {
 		b.WriteByte(' ')
 		b.WriteString(icon)
 	}
+	text := tailText(l.Text)
+	annotation := l.Verdict
+	if annotation == "" {
+		annotation = l.Title
+	}
+	if annotation != "" {
+		// A bead's title and the review loop's words are bead text: they
+		// arrive after tailText has sanitized the line's own copy, so they
+		// need the same pass. A title carrying a newline or an escape would
+		// otherwise forge a second line or move the operator's cursor.
+		annotation = tailText(annotation)
+		// A line with no room for the annotation keeps its own words: the
+		// separator goes with the annotation, not before it.
+		if annotation = tailAnnotation(text, b.String()+" ", annotation, v.Width); annotation != "" {
+			text += tailAnnotationSep + annotation
+		}
+	}
 	b.WriteByte(' ')
-	b.WriteString(v.Decor.paint(class, tailText(l.Text)))
+	b.WriteString(v.Decor.paint(class, text))
+	return b.String()
+}
+
+// tailLineClass is the class a line is drawn in. Plain wins: the summary line
+// is a state line about the town, not one of the town's own lines, so the
+// classifier's reading of a word it carries ("escalations", say) is not the
+// class it is drawn in. A verdict takes the colors the loop's words ask for;
+// everything else is what its text says.
+func tailLineClass(l tailLine) tailClass {
+	switch {
+	case l.Plain:
+		return tailClassPlain
+	case l.Verdict != "":
+		return tailVerdictClass(l.Verdict)
+	}
+	return tailClassOf(l.Text)
+}
+
+// tailAnnotation fits an annotation to the room left on a line: the column
+// bound minus everything already written (prefix, its trailing space, the
+// line's own text) and minus the separator. A line with no bound, or one too
+// narrow to hold any annotation at all, carries it whole or not at all.
+func tailAnnotation(text, prefix, annotation string, width int) string {
+	if width <= 0 {
+		return annotation
+	}
+	room := width - lipgloss.Width(prefix) - lipgloss.Width(text) - lipgloss.Width(tailAnnotationSep)
+	if room <= 0 {
+		return ""
+	}
+	return tailTruncateDisplay(annotation, room)
+}
+
+// tailTruncateDisplay cuts text to at most width terminal columns, marking a
+// cut. It counts what the terminal draws, so a wide rune costs two.
+func tailTruncateDisplay(text string, width int) string {
+	if lipgloss.Width(text) <= width {
+		return text
+	}
+	var b strings.Builder
+	used := 0
+	for _, r := range text {
+		w := lipgloss.Width(string(r))
+		if used+w > width-1 {
+			return b.String() + "…"
+		}
+		b.WriteRune(r)
+		used += w
+	}
 	return b.String()
 }
 

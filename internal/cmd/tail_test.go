@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	"bytes"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -122,5 +125,234 @@ func TestParseTailKinds(t *testing.T) {
 		if _, err := parseTailKinds(bad); err == nil {
 			t.Errorf("parseTailKinds(%q) accepted", bad)
 		}
+	}
+}
+
+// TestRenderLine_TitleVerdictAndWidth: a bead line names its bead, a verdict
+// line says what the loop decided, and neither pushes the line past the
+// terminal it is printed on.
+func TestTailRenderLine_TitleVerdictAndWidth(t *testing.T) {
+	t.Parallel()
+	line := tailLine{At: at("2026-09-30T14:05:06Z"), Rig: "gastown", Kind: tailKindEvents, Text: "close gt-1 status=closed"}
+	cases := []struct {
+		name string
+		line tailLine
+		view tailView
+		want string
+	}{
+		{"title", tailLine{At: line.At, Rig: line.Rig, Kind: line.Kind, Text: line.Text, Title: "one line per thing that happened"},
+			tailView{Loc: tailTestLoc, Layout: tailClockLayout},
+			"09:05:06 gastown close gt-1 status=closed · one line per thing that happened"},
+		{"verdict", tailLine{At: line.At, Rig: line.Rig, Kind: line.Kind, Text: "update gt-1 status=open",
+			Title: "a title", Verdict: "OVERSEER REVIEW aaaa PASS: reads well"},
+			tailView{Loc: tailTestLoc, Layout: tailClockLayout},
+			"09:05:06 gastown update gt-1 status=open · OVERSEER REVIEW aaaa PASS: reads well"},
+		{"trimmed fields carry the title", tailLine{At: line.At, Rig: line.Rig, Kind: line.Kind,
+			Text: "close gt-1 status=closed actor=Sloan Ahrens seq=4", Title: "a title"},
+			tailView{Loc: tailTestLoc, Layout: tailClockLayout, Trim: true, GitUser: "Sloan Ahrens"},
+			"09:05:06 gastown close gt-1 status=closed · a title"},
+		{"verbose keeps the raw line", tailLine{At: line.At, Rig: line.Rig, Kind: line.Kind, Text: "close gt-1 status=closed actor=Sloan Ahrens seq=4"},
+			tailView{Loc: tailTestLoc, Layout: tailClockLayout, FullSource: true},
+			"09:05:06 gastown events close gt-1 status=closed actor=Sloan Ahrens seq=4"},
+	}
+	for _, c := range cases {
+		if got := c.view.renderLine(c.line); got != c.want {
+			t.Errorf("%s:\n got %q\nwant %q", c.name, got, c.want)
+		}
+	}
+
+	// A bound cuts the title, never the line's own words.
+	long := "a title long enough to run past a narrow terminal, and then some more"
+	bounded := tailView{Loc: tailTestLoc, Layout: tailClockLayout, Width: 60}
+	got := bounded.renderLine(tailLine{At: line.At, Rig: line.Rig, Kind: line.Kind, Text: line.Text, Title: long})
+	if !strings.HasPrefix(got, "09:05:06 gastown close gt-1 status=closed · ") {
+		t.Errorf("the bound ate the line: %q", got)
+	}
+	if w := len([]rune(got)); w > 60 {
+		t.Errorf("line is %d runes wide, bound is 60: %q", w, got)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("a cut title must show it was cut: %q", got)
+	}
+	// Too narrow for the annotation at all: the line loses it, not its text.
+	tight := tailView{Loc: tailTestLoc, Layout: tailClockLayout, Width: 20}
+	if got := tight.renderLine(tailLine{At: line.At, Rig: line.Rig, Kind: line.Kind, Text: line.Text, Title: long}); got != "09:05:06 gastown close gt-1 status=closed" {
+		t.Errorf("a line with no room for a title: %q", got)
+	}
+}
+
+// TestRenderLine_AnnotationIsSanitized: a bead's title and the review loop's
+// words are bead text, and they reach the terminal after the line's own copy
+// was sanitized. A title with a newline or an escape must not forge a second
+// line or move the operator's cursor.
+func TestRenderLine_AnnotationIsSanitized(t *testing.T) {
+	t.Parallel()
+	v := tailView{Loc: tailTestLoc, Layout: tailClockLayout}
+	got := v.renderLine(tailLine{
+		At: at("2026-09-30T14:05:06Z"), Rig: "gastown", Kind: tailKindEvents,
+		Text:  "close gt-1 status=closed",
+		Title: "one line\nforged line\twith a tab\x1b[31m and an escape",
+	})
+	if strings.ContainsAny(got, "\n\t\x1b") {
+		t.Fatalf("the annotation kept a control character: %q", got)
+	}
+	want := "09:05:06 gastown close gt-1 status=closed · one line forged line with a tab [31m and an escape"
+	if got != want {
+		t.Fatalf("render =\n%q\nwant\n%q", got, want)
+	}
+	// The verdict is the same annotation on the same path.
+	got = v.renderLine(tailLine{
+		At: at("2026-09-30T14:05:06Z"), Rig: "gastown", Kind: tailKindEvents,
+		Text: "comment gt-1 seq=9", Verdict: "MERGE REJECTION (attempt 1)\ngate failed",
+	})
+	if strings.ContainsAny(got, "\n\t\x1b") {
+		t.Fatalf("the verdict kept a control character: %q", got)
+	}
+}
+
+// TestTailLineClass_SummaryStaysDim: the summary line carries the word
+// "escalations", which the classifier reads as a warning. The line is a state
+// line, so it draws dim rather than as the town's own warning.
+func TestTailLineClass_SummaryStaysDim(t *testing.T) {
+	t.Parallel()
+	text := "📊 seats 0/6 · escalations 3 · main a1b2 vs gt c3d4"
+	if got := tailLineClass(tailLine{Rig: "town", Kind: tailKindDaemon, Text: text, Plain: true}); got != tailClassPlain {
+		t.Errorf("the summary line drew as %v; it must draw dim", got)
+	}
+	if got := tailLineClass(tailLine{Rig: "town", Kind: tailKindDaemon, Text: text}); got != tailClassWarning {
+		t.Errorf("the same words without Plain drew as %v; the test no longer covers the case it was written for", got)
+	}
+	if got := tailLineClass(tailLine{Text: "x", Verdict: "OVERSEER REVIEW a PASS"}); got != tailClassSuccess {
+		t.Errorf("a PASS verdict drew as %v", got)
+	}
+}
+
+// TestTailDisplayWidth: a writer that is not a terminal, and a terminal that
+// will not report its size, both get the 80-column default, so a pipe and a
+// log file read as the terminal does.
+func TestTailDisplayWidth(t *testing.T) {
+	t.Parallel()
+	if got := tailDisplayWidth(&bytes.Buffer{}); got != 80 {
+		t.Errorf("a buffer got width %d; want 80", got)
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close(); _ = w.Close() }()
+	if got := tailDisplayWidth(w); got != 80 {
+		t.Errorf("a pipe got width %d; want 80", got)
+	}
+}
+
+// TestTailSummaryFieldsLine: the line names each field it could read and
+// leaves out each one it could not.
+func TestTailSummaryFieldsLine(t *testing.T) {
+	t.Parallel()
+	full := tailSummaryFields{
+		HasSeats: true, SeatsUsed: 3, SeatsCap: 6,
+		Seats:       []string{"gastown/malachite:gt-ufjol", "gastown/opal:gt-hk555"},
+		HasReady:    true,
+		ReadyToLand: 2,
+		HasMain:     true, MainTip: "6a4fe5376de8", InstalledGT: "433697dd", Behind: 2,
+		HasEscalate: true, Escalations: 1,
+		HasSpend: true, SpendPerHour: 1.066,
+	}
+	want := "📊 seats 3/6 [gastown/malachite:gt-ufjol, gastown/opal:gt-hk555] · ready 2 · " +
+		"main 6a4fe5376de8 vs gt 433697dd (+2 behind) · escalations 1 · DeepSeek $1.07/h"
+	if got := full.line(); got != want {
+		t.Fatalf("line = %q\nwant %q", got, want)
+	}
+	if got := (tailSummaryFields{}).line(); got != "" {
+		t.Errorf("a summary that read nothing prints %q", got)
+	}
+	// A town the scheduler leaves uncapped reports the seats, not a cap of
+	// zero or of the scheduler's -1 for "unset".
+	uncapped := tailSummaryFields{HasSeats: true, SeatsUsed: 3, SeatsCap: 0}
+	if got := uncapped.line(); got != "📊 seats 3" {
+		t.Errorf("uncapped line = %q", got)
+	}
+
+	// More pairs than the line names are counted.
+	many := tailSummaryFields{HasSeats: true, SeatsCap: 9}
+	for i := 0; i < tailSummaryMaxSeats+2; i++ {
+		many.Seats = append(many.Seats, string(rune('a'+i))+":gt-x")
+	}
+	got := many.line()
+	if !strings.Contains(got, ", +2 more]") {
+		t.Errorf("the seats past the bound must be counted: %q", got)
+	}
+}
+
+// TestTailSummaryTracker_PrintsWhenAFieldMovesAndNotMoreOften: the summary is
+// a state line, so it prints once, again when a field moves, and never twice
+// inside the window.
+func TestTailSummaryTracker_PrintsWhenAFieldMovesAndNotMoreOften(t *testing.T) {
+	t.Parallel()
+	now := at("2026-09-30T14:00:00Z")
+	fields := tailSummaryFields{HasSeats: true, SeatsUsed: 1, SeatsCap: 6}
+	reads := 0
+	tracker := &tailSummaryTracker{
+		read:     func() tailSummaryFields { reads++; return fields },
+		now:      func() time.Time { return now },
+		interval: tailSummaryFresh,
+	}
+	line, ok := tracker.next()
+	if !ok || line.Text != "📊 seats 1/6" || line.Rig != "town" {
+		t.Fatalf("first poll = %+v, %v", line, ok)
+	}
+	if _, ok := tracker.next(); ok {
+		t.Error("an unchanged summary must not print again")
+	}
+	// The state read is the expensive half: inside the window the tracker
+	// must not make one, or gt tail -f would pay for a town scan every poll.
+	if reads != 1 {
+		t.Errorf("the town was read %d times inside the window; want 1", reads)
+	}
+	now = now.Add(time.Minute)
+	fields.SeatsUsed = 2
+	if _, ok := tracker.next(); ok {
+		t.Error("a change inside the window waits for the window")
+	}
+	now = now.Add(tailSummaryFresh)
+	line, ok = tracker.next()
+	if !ok || line.Text != "📊 seats 2/6" {
+		t.Fatalf("the change after the window = %+v, %v", line, ok)
+	}
+	if _, ok := tracker.next(); ok {
+		t.Error("the new state must not print twice")
+	}
+	// A summary that read nothing prints nothing — never an empty line.
+	fields = tailSummaryFields{}
+	now = now.Add(tailSummaryFresh)
+	if _, ok := tracker.next(); ok {
+		t.Error("a summary with no fields must not print")
+	}
+	// A tracker with no reader is what a non-following run gets.
+	if _, ok := (&tailSummaryTracker{}).next(); ok {
+		t.Error("a tracker with no reader must print nothing")
+	}
+}
+
+// TestTailSummaryTracker_KeepsTheLineInsideTheTerminal: the seats list is the
+// one field that can make the summary line longer than the terminal.
+func TestTailSummaryTracker_KeepsTheLineInsideTheTerminal(t *testing.T) {
+	t.Parallel()
+	fields := tailSummaryFields{HasSeats: true, SeatsUsed: 8, SeatsCap: 8, HasReady: true, ReadyToLand: 3}
+	for i := 0; i < 8; i++ {
+		fields.Seats = append(fields.Seats, "gastown/polecats/malachite"+string(rune('a'+i))+":gt-ufjol")
+	}
+	tracker := &tailSummaryTracker{
+		read:     func() tailSummaryFields { return fields },
+		now:      func() time.Time { return at("2026-09-30T14:00:00Z") },
+		interval: tailSummaryFresh,
+		width:    80,
+	}
+	line, ok := tracker.next()
+	if !ok {
+		t.Fatal("the first summary must print")
+	}
+	if w := len([]rune(line.Text)); w > 80 {
+		t.Fatalf("summary is %d runes wide: %q", w, line.Text)
 	}
 }
