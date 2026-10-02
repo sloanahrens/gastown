@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -532,6 +535,76 @@ func TestReadyStepOrderReversed(t *testing.T) {
 		if step.ID != expectedID {
 			t.Errorf("readySteps[%d] = %s, want %s", i, step.ID, expectedID)
 		}
+	}
+}
+
+// recordingStepWriter records the writes completing a step makes, in order.
+type recordingStepWriter struct {
+	calls     []string
+	updateErr error
+}
+
+func (r *recordingStepWriter) Update(id string, opts beads.UpdateOptions) error {
+	status := ""
+	if opts.Status != nil {
+		status = *opts.Status
+	}
+	r.calls = append(r.calls, "update "+id+" "+status)
+	return r.updateErr
+}
+
+func (r *recordingStepWriter) Close(ids ...string) error {
+	r.calls = append(r.calls, "close "+strings.Join(ids, ","))
+	return nil
+}
+
+// TestCloseStepReleasesPinFirst pins the order closeStep must write in. bd
+// refuses a close while the step is still pinned (observed: `bd close` on a
+// pinned bead exits 1 with "cannot modify pinned issue ... use --force"),
+// which is what left a polecat unable to complete the step it was handed.
+// A fake cannot reproduce that refusal, so this guards the write order and
+// the status used to release; the refusal itself is bd's (gt-tiv2x).
+func TestCloseStepReleasesPinFirst(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		status    string
+		updateErr error
+		wantCalls []string
+		wantErr   bool
+	}{
+		{
+			name:      "pinned step is released before the close",
+			status:    string(beads.StatusPinned),
+			wantCalls: []string{"update gt-mol.1 in_progress", "close gt-mol.1"},
+		},
+		{
+			name:      "unpinned step closes without a release",
+			status:    string(beads.StatusInProgress),
+			wantCalls: []string{"close gt-mol.1"},
+		},
+		{
+			name:      "a failed release leaves the step open",
+			status:    string(beads.StatusPinned),
+			updateErr: errors.New("bd unreachable"),
+			wantCalls: []string{"update gt-mol.1 in_progress"},
+			wantErr:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := &recordingStepWriter{updateErr: tt.updateErr}
+			step := makeStepIssue("gt-mol.1", "Load context", "gt-mol", tt.status, nil)
+
+			err := closeStep(w, step)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("closeStep error = %v, want error %v", err, tt.wantErr)
+			}
+			if !reflect.DeepEqual(w.calls, tt.wantCalls) {
+				t.Errorf("calls = %v, want %v", w.calls, tt.wantCalls)
+			}
+		})
 	}
 }
 
