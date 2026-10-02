@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
 func TestLandingWorkerConfigDefaults(t *testing.T) {
@@ -275,6 +276,35 @@ func TestFileMainStateRoundTrips(t *testing.T) {
 	}
 	if st, err := f.Load(); err != nil || st != want {
 		t.Fatalf("loaded %+v %v; want %+v", st, err, want)
+	}
+}
+
+// The state file is an interface between the landing worker that writes the
+// revert in flight and the spec dispatcher that reads it to hold a rig's
+// red-main beads (gt-zkdwt). This pins the two halves together, so a rename
+// on either side breaks here rather than silently dispatching the fix
+// forward a revert supersedes.
+func TestFileMainStateCarriesTheRevertTheDispatcherReads(t *testing.T) {
+	t.Parallel()
+	if specdispatch.LabelRedMain != landworker.LabelRedMain {
+		t.Fatalf("dispatcher label %q, red-main owner's %q", specdispatch.LabelRedMain, landworker.LabelRedMain)
+	}
+	town := t.TempDir()
+	f := fileMainState{path: RedMainStatePath(town, "gastown")}
+	if err := f.Save(landworker.MainState{LastGreen: "g1", Revert: &landworker.PendingRevert{Culprit: "gt-cul", Bead: "gt-rv"}}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rv := specdispatch.ParseRevert(raw)
+	if rv == nil || rv.Culprit != "gt-cul" || rv.Bead != "gt-rv" {
+		t.Fatalf("dispatcher read %+v from %s; want the revert of gt-cul as gt-rv", rv, raw)
+	}
+	// And the beads this hold is about are the ones the owner labels.
+	if specdispatch.RedMainHold(specdispatch.Spec{Labels: []string{landworker.LabelRedMain}}, rv) == "" {
+		t.Fatal("a bead the red-main owner filed is not held while its revert is in flight")
 	}
 }
 

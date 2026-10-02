@@ -35,6 +35,7 @@ type fakeSpecTown struct {
 	rosterErr  error
 	hold       string
 	rigHold    map[string]string
+	revert     map[string]*specdispatch.Revert
 	slingErrs  map[string][]error // per bead, consumed in order
 	slung      []string
 	slingSeats []specdispatch.SeatChoice
@@ -44,8 +45,8 @@ type fakeSpecTown struct {
 }
 
 func newFakeSpecTown(specs ...specdispatch.Spec) *fakeSpecTown {
-	f := &fakeSpecTown{specs: map[string]specdispatch.Spec{}, rigHold: map[string]string{}, slingErrs: map[string][]error{},
-		notes: map[string][]string{}, labels: map[string][]string{}}
+	f := &fakeSpecTown{specs: map[string]specdispatch.Spec{}, rigHold: map[string]string{}, revert: map[string]*specdispatch.Revert{},
+		slingErrs: map[string][]error{}, notes: map[string][]string{}, labels: map[string][]string{}}
 	for _, s := range specs {
 		f.specs[s.ID] = s
 	}
@@ -76,8 +77,9 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 			}
 			return s, nil
 		},
-		RigHold: func(rig string) string { return f.rigHold[rig] },
-		Roster:  func() (specRoster, error) { return f.roster, f.rosterErr },
+		RigHold:        func(rig string) string { return f.rigHold[rig] },
+		RevertInFlight: func(rig string) *specdispatch.Revert { return f.revert[rig] },
+		Roster:         func() (specRoster, error) { return f.roster, f.rosterErr },
 		Annotate: func(id, key, text string) error {
 			for _, n := range f.notes[id] {
 				if strings.HasPrefix(n, key) {
@@ -296,6 +298,76 @@ func TestSpecDispatchRespectsCapsAndRoster(t *testing.T) {
 	f.roster = specRoster{Newest: env.Now().Add(-time.Minute)}
 	if runSpecDispatchCycle(env); len(f.slung) != 0 {
 		t.Fatalf("min_spawn_gap ignored: slung %v", f.slung)
+	}
+}
+
+// gt-zkdwt: the dispatcher slung a red-main bead while the red-main owner's
+// revert of the same breakage was in flight, sending a polecat to fix forward
+// in parallel with the revert that supersedes it.
+func TestSpecDispatchHoldsRedMainBeadsWhileARevertIsInFlight(t *testing.T) {
+	t.Parallel()
+	redMain := cleanSpec("gt-red", 1, "2026-09-29T10:00:00Z")
+	redMain.Labels = []string{specdispatch.LabelRedMain}
+
+	// The revert is building or queued: the fix-forward bead is not a
+	// candidate, and nothing is written on it.
+	f := newFakeSpecTown(redMain)
+	f.revert["gastown"] = &specdispatch.Revert{Culprit: "gt-cul"}
+	r := runSpecDispatchCycle(f.env())
+	if len(f.slung) != 0 {
+		t.Fatalf("slung the red-main bead while a revert was in flight: %v", f.slung)
+	}
+	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, "gt-cul") {
+		t.Fatalf("report = %+v; want one skip naming the culprit", r)
+	}
+	if len(f.notes["gt-red"]) != 0 || len(f.labels["gt-red"]) != 0 {
+		t.Fatalf("held bead commented or labeled: notes %v, labels %v", f.notes, f.labels)
+	}
+
+	// A landed, rejected or never-filed revert leaves no state, and the bead
+	// is a candidate again.
+	f = newFakeSpecTown(redMain)
+	if r := runSpecDispatchCycle(f.env()); len(f.slung) != 1 {
+		t.Fatalf("slung %v, want the red-main bead once no revert is in flight (report %+v)", f.slung, r)
+	}
+}
+
+// The hold is the red-main bead's alone: other work in the rig keeps
+// dispatching while the owner reverts.
+func TestSpecDispatchHoldsOnlyRedMainBeads(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-plain", 1, "2026-09-29T10:00:00Z"))
+	f.revert["gastown"] = &specdispatch.Revert{Culprit: "gt-cul"}
+	if r := runSpecDispatchCycle(f.env()); len(f.slung) != 1 {
+		t.Fatalf("slung %v, want the plain bead dispatched beside a revert in flight (report %+v)", f.slung, r)
+	}
+}
+
+// The state read is the dispatcher's only view of the revert: absent,
+// malformed and revert-free states all mean "no revert", so a rig whose state
+// cannot be read never loses its red-main beads for good.
+func TestRigRevertInFlightReadsTheStateFile(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	dir := filepath.Join(town, ".runtime", "red-main")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if rv := rigRevertInFlight(town, "gastown"); rv != nil {
+		t.Fatalf("absent state = %+v, want nil", rv)
+	}
+	state := filepath.Join(dir, "gastown.json")
+	if err := os.WriteFile(state, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if rv := rigRevertInFlight(town, "gastown"); rv != nil {
+		t.Fatalf("malformed state = %+v, want nil", rv)
+	}
+	if err := os.WriteFile(state, []byte(`{"last_green":"aaa","revert":{"culprit":"gt-cul","bead":"gt-rv"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if rv := rigRevertInFlight(town, "gastown"); rv == nil || rv.Culprit != "gt-cul" || rv.Bead != "gt-rv" {
+		t.Fatalf("state = %+v, want the revert of gt-cul as gt-rv", rv)
 	}
 }
 
