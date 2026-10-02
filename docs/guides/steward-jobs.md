@@ -18,6 +18,14 @@ A head a job has already run on is not run again, so a resubmission (a new
 head) earns a new job and a failed fix does not loop. A bead assigned to a
 crew member, or labeled `gt:needs-human`, is left alone.
 
+While the patrol runs live it owns every rejected bead: a rework bead is the
+steward's to settle, and `gt sling` refuses to dispatch one without `--force`
+so the convoy feeders and seat-refill cannot spend a second polecat on work a
+job is already settling (gt-28ibg). In shadow the patrol owns nothing — its
+jobs change no branch, label or note — so rejections dispatch as they did
+before it existed. A town whose steward scans land in a narrow `rigs` list
+owns only those rigs' rejections.
+
 ## Configuration
 
 `patrols.steward` in `mayor/daemon.json`, off unless `enabled` is true:

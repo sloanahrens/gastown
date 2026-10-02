@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/sling"
 )
 
@@ -202,5 +204,70 @@ func TestConvoyFeederRefusesWithoutAnEngine(t *testing.T) {
 	if err := m.slingSlinger()(context.Background(), m.townRoot, sling.Options{BeadID: "gt-issue1", RigName: "gastown"}); err == nil ||
 		!strings.Contains(err.Error(), "no dispatch engine wired") {
 		t.Fatalf("the continuation feed with no engine = %v, want a refusal naming the missing engine", err)
+	}
+}
+
+// TestSlingInProcessRefusesAStewardsRework is gt-28ibg: the convoy feeder's
+// in-process dispatch does not take a rework bead while the town's steward
+// owns rejections, and what it gets back is the deferral marker its caller
+// already reads (a refusal, not a failed dispatch).
+func TestSlingInProcessRefusesAStewardsRework(t *testing.T) {
+	t.Parallel()
+	const owns = "the steward patrol owns rejections (patrols.steward.mode is live for gastown)"
+	for name, tc := range map[string]struct {
+		bead  *sling.Bead
+		owner string
+		force bool
+		// want is the refusal; asked is whether the guard consulted the owner.
+		want, asked bool
+	}{
+		"a live steward owns the rework": {
+			bead:  &sling.Bead{Title: "redo", Status: "open", Labels: []string{land.LabelRework}},
+			owner: owns, want: true, asked: true,
+		},
+		"no steward owns it": {
+			bead:  &sling.Bead{Title: "redo", Status: "open", Labels: []string{land.LabelRework}},
+			asked: true,
+		},
+		"the bead is not rework": {
+			bead:  &sling.Bead{Title: "new", Status: "open", Labels: []string{"task"}},
+			owner: owns,
+		},
+		"the steward's own re-sling passes force": {
+			bead:  &sling.Bead{Title: "redo", Status: "open", Labels: []string{land.LabelRework}},
+			owner: owns, force: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeEngineDeps{bead: tc.bead}
+			deps := f.deps()
+			deps.StewardReworkOwner = func(_, rig string) string {
+				f.calls = append(f.calls, "steward-owner:"+rig)
+				return tc.owner
+			}
+			m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, deps, 0, nil, nil, nil)
+
+			_, err := m.slingInProcess("hq-cv-1", sling.Options{
+				BeadID:             "gt-issue1",
+				RigName:            "gastown",
+				NoBoot:             true,
+				Actor:              "daemon/convoy:hq-cv-1",
+				TownRoot:           m.townRoot,
+				SkipDuplicateCheck: true,
+				Force:              tc.force,
+			})
+			refused := err != nil && strings.Contains(err.Error(), dispatch.SlingRefusalMarker)
+			if refused != tc.want {
+				t.Fatalf("slingInProcess err = %v, want the refusal = %v", err, tc.want)
+			}
+			if f.reached("steward-owner:gastown") != tc.asked {
+				t.Errorf("consulted the steward owner = %v, want %v; calls = %v",
+					f.reached("steward-owner:gastown"), tc.asked, f.calls)
+			}
+			if refused && f.reached("spawn") {
+				t.Error("the refused dispatch still spawned a polecat")
+			}
+		})
 	}
 }

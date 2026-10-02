@@ -17,8 +17,9 @@ const (
 	// LabelRework marks a work bead Land rejected for a reason its author can
 	// fix. Dispatch already routes on it (sling_pool.go).
 	LabelRework = "rework"
-	// LabelNeedsHuman marks a work bead Land refused on policy only a human
-	// can lift (no_merge).
+	// LabelNeedsHuman marks a work bead whose landing only a human can settle:
+	// Land refused it on policy (no_merge), or the bead hit
+	// MaxReworkAttempts and the rework loop is the failure (gt-28ibg).
 	LabelNeedsHuman = "gt:needs-human"
 
 	// LabelOverseerReviewed marks a work bead whose head the overseer

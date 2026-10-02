@@ -100,7 +100,10 @@ func TestSlingRefusesUnslingableBeads(t *testing.T) {
 		name  string
 		bead  beadInfo
 		force bool
-		want  string // "" = the sling goes ahead
+		// steward is the reason a live steward owns the bead's rework, "" when
+		// no steward does (daemon.StewardReworkOwner, gt-28ibg).
+		steward string
+		want    string // "" = the sling goes ahead
 	}{
 		{name: "closed", bead: beadInfo{Status: "closed"}, want: "work already completed"},
 		{name: "closed under force", bead: beadInfo{Status: "closed"}, force: true, want: "work already completed"},
@@ -114,6 +117,9 @@ func TestSlingRefusesUnslingableBeads(t *testing.T) {
 		{name: "operator label under force", bead: beadInfo{Labels: []string{dispatch.OperatorLabel}}, force: true},
 		{name: "submitted for landing", bead: beadInfo{Labels: []string{land.LabelReadyToLand}}, want: "submitted for landing"},
 		{name: "submitted for landing under force", bead: beadInfo{Labels: []string{land.LabelReadyToLand}}, force: true, want: "the landing worker owns it"},
+		{name: "rework with no steward", bead: beadInfo{Labels: []string{land.LabelRework}}},
+		{name: "rework the steward owns", bead: beadInfo{Labels: []string{land.LabelRework}}, steward: "the steward patrol owns rejections", want: dispatch.SlingRefusalMarker},
+		{name: "rework the steward owns under force", bead: beadInfo{Labels: []string{land.LabelRework}}, steward: "the steward patrol owns rejections", force: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -121,6 +127,9 @@ func TestSlingRefusesUnslingableBeads(t *testing.T) {
 			h := newSlingHarness(t)
 			h.addBead(slingBead, tc.bead)
 			h.run.opts.force = tc.force
+			if tc.steward != "" {
+				h.run.stewardReworkOwner = func(string, string) string { return tc.steward }
+			}
 			err := h.sling(slingBead, "gastown")
 			if tc.want == "" {
 				if err != nil {
@@ -132,6 +141,26 @@ func TestSlingRefusesUnslingableBeads(t *testing.T) {
 			h.wantNo("resolve target")
 			h.wantNo("hook")
 		})
+	}
+}
+
+// TestSlingAsksTheStewardOwnerAboutTheTargetRig is gt-28ibg: the guard reads
+// the rig the sling targets, so a steward scoped to other rigs does not hold
+// this one's rework.
+func TestSlingAsksTheStewardOwnerAboutTheTargetRig(t *testing.T) {
+	t.Parallel()
+	h := newSlingHarness(t)
+	h.addBead(slingBead, beadInfo{Labels: []string{land.LabelRework}})
+	var asked []string
+	h.run.stewardReworkOwner = func(townRoot, rig string) string {
+		asked = append(asked, townRoot+"|"+rig)
+		return ""
+	}
+	if err := h.sling(slingBead, "gastown"); err != nil {
+		t.Fatalf("sling: %v", err)
+	}
+	if len(asked) != 1 || !strings.HasSuffix(asked[0], "|gastown") {
+		t.Errorf("steward owner was asked about %q, want the target rig gastown", asked)
 	}
 }
 

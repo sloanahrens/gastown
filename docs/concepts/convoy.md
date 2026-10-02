@@ -265,6 +265,17 @@ it like any ready bead; the fresh polecat reads the rejection from the bead's
 notes. The rejected branch on origin does not trigger the feeder's
 surviving-branch skip.
 
+The one exception is a town whose steward patrol runs live: it owns every
+rejected bead, so `gt sling` refuses to dispatch one without `--force` and
+leaves it to the steward's rejection job ([steward
+jobs](../guides/steward-jobs.md), gt-28ibg). The steward re-slings with
+`--force` itself, and so does an operator who wants the bead on a polecat
+instead.
+
+A bead that reaches `land.MaxReworkAttempts` rejections does not come back at
+all: the landing worker labels it `gt:needs-human` and escalates, and every
+rule above then holds it like any other bead only a person can settle.
+
 A decision holds only where it is asserted: at the start of a line, past any
 `#`, `>`, `-`, or `*` in front of it. Prose that mentions the wording — a review
 note quoting it back, a bead describing this rule — does not hold the bead.

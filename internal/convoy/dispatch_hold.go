@@ -23,8 +23,9 @@ import (
 // wants a specific runtime, needs-mayor-review wants the mayor's eyes before
 // any work starts, and gt:needs-human (needs-human by hand) is a landing the
 // worker left for a person (om gave no verdict, a stage timed out, a policy
-// refusal): unlike rework, no polecat can settle it (gt-hpca9). Matched
-// case-insensitively, since a label is typed by hand.
+// refusal, or land.MaxReworkAttempts rejections): unlike rework, no polecat
+// can settle it (gt-hpca9, gt-28ibg). Matched case-insensitively, since a
+// label is typed by hand.
 // The operator reservation (dispatch.OperatorReservation) is the third decision
 // a label records, and the one that also reaches through the assignee; it is
 // applied in DispatchHoldFields rather than listed here so gt sling reads the

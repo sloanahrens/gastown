@@ -650,6 +650,23 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 			dispatch.SlingRefusalMarker, beadID, reason)
 	}
 
+	// Guard against a dispatcher taking a rework bead from the steward
+	// (gt-28ibg). Mirrors the engine's guard (internal/sling), so a bead one
+	// path refuses the other refuses too: while the steward runs live its
+	// rejection job settles every rejected bead, and seat-refill slinging one
+	// spends a second polecat on work that job is already settling. The check
+	// reads the target as given -- a rig target only, since the steward covers
+	// rigs -- and the explicit --force, matching the engine's, so the CLI's
+	// dead-agent auto-force cannot steal a bead the steward owns.
+	if r.stewardReworkOwner != nil && !r.opts.force && slices.Contains(info.Labels, land.LabelRework) && len(args) > 1 {
+		if targetRig, ok := r.isRigName(args[1]); ok {
+			if reason := r.stewardReworkOwner(townRoot, targetRig); reason != "" {
+				return fmt.Errorf("%s %s is rework and %s\nThe steward's rejection job settles it. Wait for that job, or pass --force to dispatch it to a polecat anyway",
+					dispatch.SlingRefusalMarker, beadID, reason)
+			}
+		}
+	}
+
 	// Guard against re-slinging work submitted for landing (gt-v4ssj.2). Its
 	// session ended on purpose in gt done and its assignee is dead by design,
 	// which the auto-force below would read as abandoned work. The landing

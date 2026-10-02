@@ -173,6 +173,23 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 			dispatch.SlingRefusalMarker, opts.BeadID, reason)
 	}
 
+	// Guard against a dispatcher taking a rework bead from the steward
+	// (gt-28ibg). While the steward patrol runs live it owns every rejected
+	// bead -- its rejection job repairs the branch, or re-slings it with the
+	// findings -- and a second sling spends a polecat on work a job is already
+	// settling. The steward's own re-sling is the --force the operator guard
+	// above also answers to; an automatic dispatcher passes no force, so none
+	// of them can take the bead by accident. explicitForce rather than
+	// opts.Force, so the dead-agent auto-force above is not read as a
+	// deliberate override.
+	if slices.Contains(info.Labels, land.LabelRework) && !explicitForce && d.StewardReworkOwner != nil {
+		if reason := d.StewardReworkOwner(townRoot, opts.RigName); reason != "" {
+			result.ErrMsg = "steward-rework"
+			return result, fmt.Errorf("%s %s is rework and %s\nThe steward's rejection job settles it. Wait for that job, or pass --force to dispatch it to a polecat anyway",
+				dispatch.SlingRefusalMarker, opts.BeadID, reason)
+		}
+	}
+
 	// Content duplicate check (gt-mcq): refuse a bead whose named tests and
 	// files already appear on open or recently-closed work in this rig. Placed
 	// after the already-hooked guard so an idempotent re-sling of the same bead

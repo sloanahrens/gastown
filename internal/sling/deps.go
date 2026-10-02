@@ -33,6 +33,12 @@ type Deps struct {
 	BeadInfoInTown     func(townRoot, beadID string) (*Bead, error)
 	AgentDead          func(assignee string) bool
 	SurvivingWorkGuard func(townRoot, beadID, holder string) error
+	// StewardReworkOwner reports why a rework bead is the steward patrol's to
+	// settle rather than this dispatch's, or "" when it is the dispatch's
+	// (gt-28ibg). It reads the town's patrol config, which lives outside this
+	// package, so the caller supplies the read; nil means no steward owns
+	// rejections, which is what a town with the patrol off or shadowed has.
+	StewardReworkOwner func(townRoot, rig string) string
 	CheckDuplicates    func(townRoot, beadID string, info *Bead) (*Duplicate, []DuplicateMatch, error)
 	VerifyInTargetRig  func(beadID, targetRig, townRoot string) error
 

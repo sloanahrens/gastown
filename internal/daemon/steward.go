@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -330,6 +331,40 @@ func StewardMode(config *DaemonPatrolConfig) (steward.Mode, error) {
 		return steward.ModeShadow, nil
 	}
 	return steward.ParseMode(c.Mode)
+}
+
+// StewardReworkOwner reports why a rework bead's dispatch belongs to the
+// steward patrol for rig, or "" when it does not. While the patrol runs live
+// and covers the rig, the steward's rejection job settles a rejected bead —
+// it repairs the branch or re-slings it with the findings (gt-9bioi) — and a
+// dispatcher that slings the same bead spends a second polecat on work a job
+// is already settling (gt-28ibg).
+//
+// A shadow run changes nothing outside its own comments, so it owns nothing:
+// with the patrol off, shadowed, or scoped to other rigs, rejections dispatch
+// as gt-et7ho left them. So does a config the town cannot read — the same
+// config decides whether the steward runs at all, and holding a bead for a job
+// that will never start would park it forever.
+func StewardReworkOwner(townRoot, rig string) string {
+	if loadDisabledPatrolsFromTownSettings(townRoot)["steward"] {
+		return ""
+	}
+	return stewardReworkOwner(LoadPatrolConfig(townRoot), rig)
+}
+
+// stewardReworkOwner is StewardReworkOwner's rule over a config already read.
+func stewardReworkOwner(config *DaemonPatrolConfig, rig string) string {
+	if !IsPatrolEnabled(config, "steward") {
+		return ""
+	}
+	mode, _ := StewardMode(config)
+	if mode.Shadow() {
+		return ""
+	}
+	if c := stewardConfig(config); c != nil && len(c.Rigs) > 0 && !slices.Contains(c.Rigs, rig) {
+		return ""
+	}
+	return "the steward patrol owns rejections (patrols.steward.mode is live for " + rig + ")"
 }
 
 func stewardRoutineAgent(c *StewardConfig) string {

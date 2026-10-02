@@ -6,10 +6,13 @@ import "strings"
 // a bead that is fine and simply not the sling's to take: the merge queue over
 // merge_queue.max_ready_for_dispatch (internal/cmd/sling_backpressure.go,
 // gt-xidg), the polecat pool with every seat at its cap
-// (internal/cmd/sling_pool.go, gt-jzr1), and a bead reserved for the human
-// operator (dispatch.OperatorReservation, gt-21pl0). None of them is a broken
-// sling: capacity refusals wait for the town to drain, and an operator-reserved
-// bead is never an automatic dispatcher's to take at all.
+// (internal/cmd/sling_pool.go, gt-jzr1), a bead reserved for the human
+// operator (dispatch.OperatorReservation, gt-21pl0), and a rework bead the
+// town's steward owns while its patrol runs live
+// (daemon.StewardReworkOwner, gt-28ibg). None of them is a broken sling:
+// capacity refusals wait for the town to drain, an operator-reserved bead is
+// never an automatic dispatcher's to take at all, and a steward-owned
+// rejection is settled by the steward's own job.
 //
 // Automatic dispatchers run sling as a subprocess, so this string — not the
 // typed error — is the contract between the guards and their callers. It lives

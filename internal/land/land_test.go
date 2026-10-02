@@ -412,6 +412,51 @@ func TestLandRedGateNeverPushes(t *testing.T) {
 	}
 }
 
+// TestLandCapsTheReworkLoop is gt-28ibg: the rejection at MaxReworkAttempts
+// goes to a human instead of back to a polecat, so a refusal the author keeps
+// reproducing ends in an escalation rather than another redispatch.
+func TestLandCapsTheReworkLoop(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.gate.fn = func(string) GateResult {
+		return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 2}}}
+	}
+	l := f.lander()
+	for attempt := 1; attempt <= MaxReworkAttempts; attempt++ {
+		_, err := l.Land(context.Background(), f.work)
+		var rej *Rejection
+		if !errors.As(err, &rej) || rej.Kind != RejectGate {
+			t.Fatalf("attempt %d: Land = %T %v, want a gate rejection", attempt, err, err)
+		}
+		if rej.RecordErr != nil {
+			t.Fatalf("attempt %d: rejection not recorded: %v", attempt, rej.RecordErr)
+		}
+		capped := attempt >= MaxReworkAttempts
+		if rej.Rework == capped {
+			t.Errorf("attempt %d: rej.Rework = %v, want %v", attempt, rej.Rework, !capped)
+		}
+		b := f.bead()
+		wantLabel := LabelRework
+		if capped {
+			wantLabel = LabelNeedsHuman
+		}
+		if !beads.HasLabel(b, wantLabel) || beads.HasLabel(b, LabelRework) == capped || beads.HasLabel(b, LabelReadyToLand) {
+			t.Errorf("attempt %d: labels after the rejection = %v, want %s", attempt, b.Labels, wantLabel)
+		}
+		if got := CountRejections(b.Notes); got != attempt {
+			t.Errorf("attempt %d: %d rejection block(s) in the notes", attempt, got)
+		}
+		if capped != strings.Contains(b.Notes, "the loop is escalated") {
+			t.Errorf("attempt %d: capped=%v, notes:\n%s", attempt, capped, b.Notes)
+		}
+		// The next round is a fresh submission of the same head, which is what
+		// a redispatched polecat's gt done produces.
+		if err := f.bd.Update(f.work.BeadID, beads.UpdateOptions{AddLabels: []string{LabelReadyToLand}}); err != nil {
+			t.Fatalf("attempt %d: re-submitting: %v", attempt, err)
+		}
+	}
+}
+
 func TestLandRequestChangesRejectsWithFindings(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
