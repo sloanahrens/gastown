@@ -37,21 +37,6 @@ const (
 	// PollInterval is the default polling interval for wait loops.
 	PollInterval = 100 * time.Millisecond
 
-	// ZombieKillGracePeriod is how long to wait after detecting a zombie
-	// session before killing it, to mitigate TOCTOU races where a slow-
-	// starting agent appears dead but is actually initializing.
-	ZombieKillGracePeriod = 500 * time.Millisecond
-
-	// SessionBootGracePeriod is how long a just-created session is presumed to
-	// be mid-boot, so a second caller arriving during bootstrap must not tear it
-	// down as a "zombie". It spans the whole first API round-trip, the window in
-	// which a liveness probe still reports a healthy booting session as dead and
-	// the window the spawning path waits out in ClaudeStartTimeout. A shorter
-	// grace reads those sessions as corpses and respawns them (the refinery
-	// burst of gt-uj9k); a longer one leaves a refinery that died during its
-	// first three minutes in place for an extra recovery heartbeat.
-	SessionBootGracePeriod = ClaudeStartTimeout
-
 	// EnvSessionStartReason is set by a spawner to record why it started an
 	// agent session. Read by `gt prime --hook` when it emits the session_start
 	// event, so every start can be attributed (gt-uj9k).
@@ -120,12 +105,6 @@ const (
 
 	// DirCrew is the directory containing crew workspaces.
 	DirCrew = "crew"
-
-	// DirRefinery is the directory containing the refinery clone.
-	DirRefinery = "refinery"
-
-	// DirWitness is the directory containing witness state.
-	DirWitness = "witness"
 
 	// DirRig is the subdirectory containing the actual git clone.
 	DirRig = "rig"
@@ -232,29 +211,8 @@ func BeadsCustomStatusesList() []string {
 
 // Git branch names.
 const (
-	// BranchMain is the default main branch name.
-	BranchMain = "main"
-
-	// BranchBeadsSync is the branch used for beads synchronization.
-	BranchBeadsSync = "beads-sync"
-
 	// BranchPolecatPrefix is the prefix for polecat work branches.
 	BranchPolecatPrefix = "polecat/"
-
-	// BranchIntegrationPrefix is the prefix for integration branches.
-	BranchIntegrationPrefix = "integration/"
-)
-
-// Tmux session names.
-// The mayor uses the hq- prefix: hq-mayor (town-level, one per machine).
-// Rig-level sessions use the rig's prefix: gt-crew-max, gt-<polecat>, etc.
-// Use session.MayorSessionName() and the session package's rig helpers.
-const (
-	// SessionPrefix is the prefix for rig-level Gas Town tmux sessions.
-	SessionPrefix = "gt-"
-
-	// HQSessionPrefix is the prefix for town-level sessions (Mayor, Overseer).
-	HQSessionPrefix = "hq-"
 )
 
 // Agent role names.
