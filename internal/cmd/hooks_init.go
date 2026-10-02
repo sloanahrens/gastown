@@ -208,10 +208,11 @@ func findCommonHooks(targets []targetHooks) *hooks.HooksConfig {
 }
 
 // hooksFingerprint returns a string key for a slice of hooks, used for
-// deduplication. Includes If: post-gt-5ihs, multiple hooks can share the
-// same Type+Command (e.g. three pr-workflow entries on matcher "Bash",
-// discriminated only by If) — omitting If from the key would collapse them
-// into one fingerprint and make an If-only drift invisible.
+// deduplication. Includes If: the built-in guards stopped setting If
+// (gt-3mp1), but an operator-supplied override may carry one, and two hooks
+// that share the same Type+Command on a bare tool-name matcher then differ
+// only by If — omitting If from the key would collapse them into one
+// fingerprint and make an If-only drift invisible.
 func hooksFingerprint(hks []hooks.Hook) string {
 	var s string
 	for _, h := range hks {
@@ -260,9 +261,10 @@ func computeDiff(base, target *hooks.HooksConfig) *hooks.HooksConfig {
 
 // hooksListEqual checks if two hook lists are identical, including each
 // hook's If condition (an If-only drift, e.g. a typo'd pattern in an
-// on-disk override, must be visible to gt hooks diff/init — gt-5ihs made If
-// load-bearing for routing three pr-workflow hooks that otherwise share an
-// identical Command).
+// operator-supplied on-disk override, must be visible to gt hooks diff/init;
+// the built-in guards stopped setting If in gt-3mp1, but an override may
+// still carry one, and two hooks that share a Command then differ only by
+// If).
 func hooksListEqual(a, b []hooks.Hook) bool {
 	if len(a) != len(b) {
 		return false
