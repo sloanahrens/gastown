@@ -146,7 +146,10 @@ type slingDeps struct {
 	cwdTown        func() string
 	crewExists     func(townRoot, rigName, name string) bool
 	peekPool       func(townRoot, requested string) (agent, reason string, err error)
-	wakeRig        func(rigName string)
+	// peekNamed is the named-polecat half of the same preview: a refusal the
+	// live sling would raise, or nil. See peekNamedPolecatSling (gt-yxc7m).
+	peekNamed func(townRoot, rigName string, opts SlingSpawnOptions) error
+	wakeRig   func(rigName string)
 
 	// Reassignment away from a previous holder.
 	requester          func() string
@@ -251,6 +254,7 @@ func realSlingDeps() *slingDeps {
 		cwdTown:        townFromCwd,
 		crewExists:     crewDirExists,
 		peekPool:       peekPolecatPoolAgent,
+		peekNamed:      peekNamedPolecatSling,
 		wakeRig:        wakeRigAgents,
 
 		requester:          reassignRequester,

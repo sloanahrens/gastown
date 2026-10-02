@@ -2242,6 +2242,52 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	}, nil
 }
 
+// PeekNamedReuse reports what ReuseIdlePolecat would decide for this named
+// polecat — reuse it, or stop with this refusal — without any of the gate's
+// side effects. A named sling stops on the reuse gate rather than letting the
+// pool substitute another polecat (gt-2w4f9), and `gt sling --dry-run` prints
+// the route a live sling would take, so its preview reads this instead of
+// assuming reuse (gt-yxc7m).
+//
+// It mirrors the gate's checks in the gate's own order — exists, park marker,
+// workstate verdict, worktree — and stops where the gate starts to mutate: no
+// session is killed, nothing is fetched or reset, and the branch is left
+// unprobed because claimBranch may hand a releasable holder's checkout back.
+// The verdict is exact for the causes the gate refuses on, and silent about
+// the ones only the live probe settles (a missing start point, a branch
+// another worktree holds).
+//
+// heldIssue is the work the polecat holds, for the caller's refusal hint; it
+// is returned alongside a refusal too.
+func (m *Manager) PeekNamedReuse(name string) (heldIssue string, err error) {
+	if !m.exists(name) {
+		return "", ErrPolecatNotFound
+	}
+	if reason, parked := m.parkedReuseBlocker(name); parked {
+		return "", fmt.Errorf("%w: %w: %s", ErrPolecatNeedsRecovery, ErrPolecatParked, reason)
+	}
+	current, err := m.loadFromBeads(name, nil)
+	if err != nil {
+		return "", err
+	}
+	// The gate's normalization, mirrored: a sessionless polecat with no hook is
+	// idle whatever state its last life left recorded.
+	if current.Issue == "" {
+		switch current.State {
+		case StateWorking, StateStalled, StateReviewNeeded:
+			current.State = StateIdle
+		}
+	}
+	if decision := m.reuseDecisionForPolecat(name, current.State); !decision.Reusable {
+		return current.Issue, fmt.Errorf("%w: %s", ErrPolecatNeedsRecovery, decision.Reason)
+	}
+	clonePath := m.clonePath(name)
+	if _, statErr := os.Stat(clonePath); statErr != nil {
+		return current.Issue, fmt.Errorf("idle polecat worktree not found at %s: %w", clonePath, statErr)
+	}
+	return current.Issue, nil
+}
+
 // heldByOtherWorktree returns ErrBranchHeld when branch is checked out in a
 // worktree other than the paths named in exempt. Polecat worktrees share one
 // .repo.git, so a branch held elsewhere is that polecat's live HEAD and not a
