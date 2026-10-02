@@ -2,16 +2,20 @@ package daemon
 
 import (
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/tmuxsweep"
 )
 
 // daemonSeams holds the collaborators tests replace in the heartbeat, the
-// upgrade restart and the legacy-socket cleanup. Each nil field is the
-// production behavior; the methods below pick.
+// upgrade restart, the legacy-socket cleanup and the test-pollution sweep.
+// Each nil field is the production behavior; the methods below pick.
 type daemonSeams struct {
 	heartbeatWork        func(d *Daemon, s *State, lifecycle bool)
 	heartbeatStep        func(d *Daemon, step heartbeatStep)
 	upgradeEscalate      func(d *Daemon, key, msg string)
 	cleanupLegacySockets func(townRoot string) (defaultCleaned, baseCleaned int)
+	testSocketSweep      func() (tmuxsweep.Report, error)
+	imposterSweep        func(townRoot string)
+	orphanReap           func()
 }
 
 // runHeartbeatWork runs the body of one heartbeat; lifecycle false holds
@@ -51,4 +55,14 @@ func (s daemonSeams) cleanupLegacySocketsFor(reg *session.PrefixRegistry, townRo
 		return s.cleanupLegacySockets(townRoot)
 	}
 	return cleanupLegacySockets(reg, townRoot)
+}
+
+// sweepTestSockets scans the machine's tmux socket directory for abandoned
+// test servers and reaps them. Unit tests replace it: no test may touch the
+// real socket directory.
+func (s daemonSeams) sweepTestSockets() (tmuxsweep.Report, error) {
+	if s.testSocketSweep != nil {
+		return s.testSocketSweep()
+	}
+	return sweepTestSockets()
 }

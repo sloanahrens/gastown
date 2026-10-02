@@ -119,3 +119,17 @@ func TestTriggerPatrolScanSingleFlight(t *testing.T) {
 		t.Fatal("guard not released")
 	}
 }
+
+// TestPatrolScanGHGatesHonorsTheRecordedRun pins the cadence: a gh gate check
+// within the interval dispatches nothing, so bd is never started. The unit
+// tier fails the run if an external tool starts, which is the assertion.
+func TestPatrolScanGHGatesHonorsTheRecordedRun(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := savePatrolLastRun(townRoot, "patrol_scan_gh_gates", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{logger: log.New(io.Discard, "", 0), config: &Config{TownRoot: townRoot}}
+
+	d.patrolScanGHGates(&patrolScanHost{d: d}, nil)
+}

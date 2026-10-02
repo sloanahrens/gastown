@@ -45,6 +45,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Test-pollution sweep** (gt-4k3fj.6.2) — the retired deacon's
+  test-pollution-cleanup step, as one daemon job on the doctor dog's cadence.
+  It reaps orphaned embedded `dolt sql-server` processes and the temp
+  directories of a killed beads suite (moved from `doctor_dog`), a foreign Dolt
+  holding the town's port, the PID file of a session or poller whose process is
+  gone (`.runtime/pids` and `.runtime/nudge_poller` had held one per agent that
+  ever ran, since the only sweep ran during `gt down`), and the tmux servers
+  bound to `gt-test-*` sockets. The sweep logic is `internal/tmuxsweep`, shared
+  with `gt doctor`'s `tmux-test-socket` check.
+
+- **GitHub gate evaluation in `patrol_scan`** (gt-4k3fj.6.2) — once an hour the
+  tick runs `bd gate check --type=gh` in the town database and each scanned
+  rig's, resolving a gate whose run succeeded. The deacon's gate-evaluation step
+  deferred these to a step that never existed, so nothing evaluated them.
+
 - **`git_hygiene` daemon patrol** (gt-4k3fj.8.5) — every 12h (`patrols.git_hygiene`
   in `mayor/daemon.json`, on when absent) the daemon fetches with `--prune` in
   each rig's repository, deletes local branches merged into the default

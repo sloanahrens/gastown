@@ -134,6 +134,7 @@ func (d *Daemon) runPatrolScan() {
 		}
 	}
 	d.patrolScanTimerGates(env, rigs)
+	d.patrolScanGHGates(env, rigs)
 	d.patrolScanRogueBD()
 }
 
@@ -142,14 +143,42 @@ func (d *Daemon) runPatrolScan() {
 // check-timer-gates step). `bd gate check` resolves a timer gate whose
 // timeout has passed; it never escalates one.
 func (d *Daemon) patrolScanTimerGates(h *patrolScanHost, rigs []string) {
+	d.patrolScanGateCheck(h, rigs, "timer")
+}
+
+// ghGateInterval is how often the tick evaluates GitHub gates. A check with a
+// gh gate open shells out to `gh` over the network, so it runs on its own slow
+// cadence rather than on the two-minute tick; with none open it is one query
+// per database.
+const ghGateInterval = time.Hour
+
+// patrolScanGHGates evaluates the GitHub gates (gh:run, gh:pr). The deacon's
+// gate-evaluation step deferred them to a separate step that never existed, so
+// before this no step in any patrol evaluated one (gt-4k3fj.6.2). It resolves
+// a gate whose run succeeded and leaves a failed one open; the tick sends no
+// mail, so escalation stays the operator's.
+func (d *Daemon) patrolScanGHGates(h *patrolScanHost, rigs []string) {
+	now := d.clk().Now()
+	if due := evaluatePatrolDue(d.config.TownRoot, "patrol_scan_gh_gates", time.Time{}, now, ghGateInterval); !due.due {
+		return
+	}
+	d.patrolScanGateCheck(h, rigs, "gh")
+	if err := savePatrolLastRun(d.config.TownRoot, "patrol_scan_gh_gates", now); err != nil {
+		d.logger.Printf("patrol_scan: gh gates: recording last run: %v", err)
+	}
+}
+
+// patrolScanGateCheck runs `bd gate check --type=<gateType>` over the town
+// database and each scanned rig's, logging what bd resolved.
+func (d *Daemon) patrolScanGateCheck(h *patrolScanHost, rigs []string, gateType string) {
 	for _, rigName := range append([]string{""}, rigs...) {
 		where := rigName
 		if where == "" {
 			where = "town"
 		}
-		out, err := h.bdMutating(rigName, "gate", "check", "--type=timer")
+		out, err := h.bdMutating(rigName, "gate", "check", "--type="+gateType)
 		if err != nil {
-			d.logger.Printf("patrol_scan: %s: timer gate check failed: %v", where, err)
+			d.logger.Printf("patrol_scan: %s: %s gate check failed: %v", where, gateType, err)
 			continue
 		}
 		// bd prints a JSON null before its no-gates notice ("nullNo open gates of
@@ -158,7 +187,7 @@ func (d *Daemon) patrolScanTimerGates(h *patrolScanHost, rigs []string) {
 		if line == "" || strings.HasPrefix(line, "No open gates") {
 			continue
 		}
-		d.logger.Printf("patrol_scan: %s: timer gates: %s", where, line)
+		d.logger.Printf("patrol_scan: %s: %s gates: %s", where, gateType, line)
 	}
 }
 

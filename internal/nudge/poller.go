@@ -158,6 +158,15 @@ func (pp pollerProcs) stopPoller(townRoot, session string) error {
 	return nil
 }
 
+// PruneDeadPollerPIDFiles removes the poller PID files under
+// <townRoot>/.runtime/nudge_poller whose process is gone. pollerAlive already
+// reclaims a stale file, but only for a session something still asks about:
+// the file of a session that is itself gone is never asked about, so it
+// outlives the poller it names. Nothing here signals a process.
+func PruneDeadPollerPIDFiles(townRoot string) (procid.PruneReport, error) {
+	return procid.PruneDeadRecords(pollerPidDir(townRoot))
+}
+
 // pollerAlive checks if a poller is running for the given session.
 // Returns the PID and whether the process is alive. A record that does not
 // name the same live process (missing start time, dead pid, or a pid reused by

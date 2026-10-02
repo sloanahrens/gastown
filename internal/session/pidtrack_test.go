@@ -193,3 +193,25 @@ func TestPidFile_Path(t *testing.T) {
 		t.Errorf("pidFile() = %q, want %q", got, want)
 	}
 }
+
+// TestPruneDeadTrackedPIDs covers the cadence sweep: it reads the same
+// directory TrackPID writes and reclaims a record whose process is gone.
+// procid's own tests cover the live/kept half with a scripted process table.
+func TestPruneDeadTrackedPIDs(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	// A pid no process holds: StartToken finds nothing, so the record does not
+	// name a running process.
+	dead := writePIDFile(t, townRoot, "gt-old.pid", "999999999|1700000000.5")
+
+	rep, err := PruneDeadTrackedPIDs(townRoot)
+	if err != nil {
+		t.Fatalf("PruneDeadTrackedPIDs: %v", err)
+	}
+	if rep.Removed != 1 {
+		t.Errorf("Removed = %d, want 1", rep.Removed)
+	}
+	if exists(dead) {
+		t.Error("the dead session's PID file survived the sweep")
+	}
+}
