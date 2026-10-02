@@ -668,7 +668,7 @@ func (d downStop) townSession(ts session.TownSession) (bool, error) {
 		reason = "forced shutdown"
 	}
 	_ = events.LogFeedTo(d.townRoot, events.TypeSessionDeath, ts.SessionID,
-		events.SessionDeathPayload(ts.SessionID, ts.Name, reason, "gt down"))
+		events.SessionDeathPayload(ts.SessionID, ts.Name, reason, events.CallerDown))
 	if err := d.session(ts.SessionID); err != nil {
 		return false, fmt.Errorf("killing %s session: %w", ts.Name, err)
 	}

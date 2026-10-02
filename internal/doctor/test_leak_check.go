@@ -185,8 +185,9 @@ func (c *TestLeakCheck) abandonedTemps(townRoot string) []string {
 // fixtureEvents reports recent events whose actor the town does not know: the
 // first path segment is neither a registered rig nor a built-in town actor.
 // Fixture actors like "myr/mycat" are what a test writing to the live event log
-// leaves (gt-x9o). Events the daemon authored are tolerated: crash detection
-// names a session as the actor (gt-d9423).
+// leaves (gt-x9o). Events a town process authored are tolerated: session_death
+// names a tmux session as the actor, from the daemon's crash detection
+// (gt-d9423) or gt doctor's and gt down's cleanup (gt-rqajq).
 func (c *TestLeakCheck) fixtureEvents(townRoot string) []string {
 	data, err := os.ReadFile(filepath.Join(townRoot, events.EventsFile)) //nolint:gosec // path is under the town root
 	if err != nil {
@@ -231,7 +232,7 @@ func eventLeaks(line string, known map[string]bool, since time.Time) []string {
 	if ts, err := time.Parse(time.RFC3339, ev.Timestamp); err == nil && ts.Before(since) {
 		return nil
 	}
-	if ev.Payload.Caller == events.CallerDaemon {
+	if events.IsTownProcessSessionCaller(ev.Payload.Caller) {
 		return nil
 	}
 	prefix, _, _ := strings.Cut(strings.TrimSuffix(ev.Actor, "/"), "/")

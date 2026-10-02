@@ -156,7 +156,7 @@ func (c *OrphanSessionCheck) Fix(ctx *CheckContext) error {
 		}
 		// Log pre-death event for crash investigation (before killing)
 		_ = events.LogFeed(events.TypeSessionDeath, sess,
-			events.SessionDeathPayload(sess, "unknown", "orphan cleanup", "gt doctor"))
+			events.SessionDeathPayload(sess, "unknown", "orphan cleanup", events.CallerDoctor))
 		if err := sup.KillStray(sess, "orphan session (no known rig)", doctorActor); err != nil {
 			lastErr = err
 		}

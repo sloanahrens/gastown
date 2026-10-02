@@ -174,7 +174,7 @@ func (c *ZombieSessionCheck) Fix(ctx *CheckContext) error {
 
 		// Log pre-death event for audit trail
 		_ = events.LogFeed(events.TypeSessionDeath, sess,
-			events.SessionDeathPayload(sess, "unknown", "zombie cleanup", "gt doctor"))
+			events.SessionDeathPayload(sess, "unknown", "zombie cleanup", events.CallerDoctor))
 
 		// Through the supervisor: a parked seat or an e-stop refuses, and the
 		// kill is logged with its actor (gt-4k3fj.3).
