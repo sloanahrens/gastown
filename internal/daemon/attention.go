@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
+	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
@@ -41,7 +43,15 @@ const (
 	attentionBeadTimeout = 30 * time.Second
 	// attentionTimeout bounds one attention tick's collectors.
 	attentionTimeout = 2 * time.Minute
+	// attentionRefusalWindow is how long a gt done refusal stays an item. A
+	// refusal older than this has either been acted on or outlived its
+	// branch; keeping it forever would turn the queue into a history file.
+	attentionRefusalWindow = 48 * time.Hour
 )
+
+// mayorAddress is the mailbox the polecat template sends BLOCKED reports to
+// (internal/templates/roles/polecat.md.tmpl).
+const mayorAddress = "mayor/"
 
 // The landing-pipeline thresholds (gt-vsct7.3), compiled in like the queue's
 // others.
@@ -202,6 +212,11 @@ type attentionSources struct {
 	pidAlive    func(pid int) bool
 	bdLatency   func(ctx context.Context) (time.Duration, error)
 
+	// refusals is gt done's refusal ledger; refusalBead reads one refused
+	// bead in its own rig; blockedMail is the mayor's unread mail.
+	refusals    func() ([]attention.Refusal, error)
+	refusalBead func(ctx context.Context, rig, id string) (*beads.Issue, error)
+	blockedMail func(ctx context.Context) ([]*mail.Message, error)
 	// landingState reads the rig's in-flight landing, the landing-stuck and
 	// queue-stuck collectors' subject.
 	landingState func(rig string) landingState
@@ -351,6 +366,8 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindSlotHeld, collect: s.collectSlotHeld},
 		{kind: attention.KindSlotDeadHolder, collect: s.collectSlotDeadHolder},
 		{kind: attention.KindBDSlow, collect: s.collectBDSlow},
+		{kind: attention.KindRevertRefused, collect: s.collectRevertRefused},
+		{kind: attention.KindBlockedMail, collect: s.collectBlockedMail},
 		{kind: attention.KindLandingStuck, collect: s.collectLandingStuck},
 		{kind: attention.KindQueueStuck, collect: s.collectQueueStuck},
 		{kind: attention.KindPolecatStall, collect: s.collectPolecatStall},
@@ -407,6 +424,21 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 	}
 	s.pidAlive = attentionPIDAlive
 	s.bdLatency = d.measureBDLatency
+	s.refusals = func() ([]attention.Refusal, error) {
+		return attention.ReadRefusals(d.config.TownRoot)
+	}
+	s.refusalBead = func(ctx context.Context, rig, id string) (*beads.Issue, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return d.rigWorkBeads(rig).Show(id)
+	}
+	s.blockedMail = func(ctx context.Context) ([]*mail.Message, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return mail.NewMailboxFromAddress(mayorAddress, d.config.TownRoot).ListUnread()
+	}
 	s.landingState = d.landingStates.get
 	s.readyToLand = d.attentionReadyToLand
 	s.seats = func() ([]townhealth.Seat, error) { return d.attentionSeats(now) }
@@ -747,6 +779,89 @@ func (s *attentionSources) collectBDSlow(ctx context.Context) ([]attention.Item,
 		Severity: attention.SeverityHigh,
 		Summary:  summary,
 	}}, nil
+}
+
+// collectRevertRefused raises one item per gt done refusal still standing: a
+// refusal recorded in the last attentionRefusalWindow whose bead is not closed
+// and has not since been submitted to land at another head. A refusal is the
+// strongest signal a polecat is destroying work other people merged (gt-63sz),
+// and until this it lived only in the refused pane.
+func (s *attentionSources) collectRevertRefused(ctx context.Context) ([]attention.Item, error) {
+	refusals, err := s.refusals()
+	if err != nil {
+		return nil, err
+	}
+	var out []attention.Item
+	for _, ref := range refusals {
+		if ref.Bead == "" || ref.Head == "" || s.now.Sub(ref.TS) >= attentionRefusalWindow {
+			continue
+		}
+		issue, err := s.refusalBead(ctx, ref.Rig, ref.Bead)
+		if errors.Is(err, beads.ErrNotFound) {
+			// A bead purged since the refusal is gone, not an unanswered read:
+			// clear the item rather than stall the kind on a dead id.
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", ref.Bead, err)
+		}
+		// The bead closing, or a later submission at a different head, is the
+		// clear: either the work landed another way or was redone after the
+		// refusal, so the reverted-branch alarm no longer holds.
+		if issue == nil || beads.IssueStatus(strings.TrimSpace(issue.Status)).IsTerminal() {
+			continue
+		}
+		if w, ok := land.ParseReadyNote(issue.Notes); ok && w.Head != "" && w.Head != ref.Head {
+			continue
+		}
+		out = append(out, attention.Item{
+			Key:      "refused:" + ref.Bead + ":" + head12(ref.Head),
+			Kind:     attention.KindRevertRefused,
+			Severity: attention.SeverityHigh,
+			Rig:      ref.Rig,
+			Bead:     ref.Bead,
+			SHA:      ref.Head,
+			Summary:  ref.Summary,
+		})
+	}
+	return out, nil
+}
+
+// head12 is the 12-character head a refusal item is keyed by.
+func head12(head string) string {
+	if len(head) > 12 {
+		return head[:12]
+	}
+	return head
+}
+
+// collectBlockedMail raises one item per unread message to the mayor whose
+// subject starts with BLOCKED: — a polecat saying it cannot proceed. The mayor
+// is stopped, so these sit unread; the read never marks one read, and the item
+// clears when its message is read or closed.
+func (s *attentionSources) collectBlockedMail(ctx context.Context) ([]attention.Item, error) {
+	messages, err := s.blockedMail(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []attention.Item
+	for _, m := range messages {
+		if m == nil || !blockedSubject(m.Subject) {
+			continue
+		}
+		out = append(out, attention.Item{
+			Key:      "blocked:" + m.ID,
+			Kind:     attention.KindBlockedMail,
+			Severity: attention.SeverityHigh,
+			Summary:  fmt.Sprintf("blocked mail from %s: %s", m.From, m.Subject),
+		})
+	}
+	return out, nil
+}
+
+// blockedSubject reports whether subject is a polecat's BLOCKED report.
+func blockedSubject(subject string) bool {
+	return strings.HasPrefix(strings.TrimSpace(subject), "BLOCKED:")
 }
 
 // doltRed returns the report's Dolt field when the report judged it red.

@@ -21,36 +21,51 @@ import (
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
-// Spec dispatcher (gt-4k3fj.5).
+// Spec dispatcher (gt-4k3fj.5, gt-4k3fj.8.8).
 //
 // `gt spec lint <id>` validates one work bead's shape against the D10 spec
 // template and prints one line (--json prints every refusal). `gt spec
 // dispatch` is one tick of the dispatcher: every ready, unassigned work bead
-// across operational rigs, in priority/created/id order, is linted and — when
-// clean and a seat is free — slung through executeSling in-process. The label
-// spec and type feature are retired and accepted-but-ignored (gt-mmsr2). The
-// daemon's
-// spec_dispatch ticker runs `gt spec dispatch --json` on its cadence, the way
-// mayor_dispatch runs `gt daemon dispatch-check` (internal/cmd imports
+// of a dispatchable type (task/bug/feature) across operational rigs, at or
+// above the operator's priority ceiling, in priority/created/id order, is
+// linted and — when clean and a seat is free — slung through executeSling
+// in-process. The label spec and type feature are retired and
+// accepted-but-ignored (gt-mmsr2): neither admits or refuses a bead now. The
+// daemon's spec_dispatch ticker runs `gt spec dispatch --json` on its cadence,
+// the way mayor_dispatch runs `gt daemon dispatch-check` (internal/cmd imports
 // internal/daemon, so the call cannot go the other way).
 //
+// This is the dispatcher that replaced the seat-refill plugin (gt-4k3fj.8.8):
+// the pool's seats (overflow_agent/max_overflow, pro_*), the operator's
+// ceiling (polecat_pool.max_priority) and the shape gate
+// (polecat_pool.shape_gate) all come from the same keys the plugin read, so the
+// town dispatches the same beads it did before the move.
+//
 // Seat accounting counts every live polecat session plus the in-flight seat
-// claims other slings hold, whoever slung them. seat-refill nudges and the
-// mayor's slings both land in that count, so the ticker never pushes past a
-// cap another path already filled — it skips the tick instead. Turn
-// seat-refill off when the ticker is the town's only dispatcher, so the roster
-// is the operator's to read.
+// claims other slings hold, whoever slung them. The mayor's slings land in that
+// same count, so the ticker never pushes past a cap another path already filled
+// — it skips the tick instead.
 
 const (
-	specDispatchActor       = "daemon/spec-dispatch"
-	specDispatchNotePrefix  = "spec-dispatch: "
-	defaultSpecHookedAgent  = "claude-sonnet"
-	defaultSpecMaxHooked    = 2
-	defaultSpecMaxOverflow  = 2
+	specDispatchActor      = "daemon/spec-dispatch"
+	specDispatchNotePrefix = "spec-dispatch: "
+	// defaultSpecHookedAgent is the agent the optional hooked seat runs when
+	// spec_dispatch.max_hooked names a cap but no agent.
+	defaultSpecHookedAgent = "claude-sonnet"
+	// defaultSpecOverflowCap caps the pool's overflow seat when the pool leaves
+	// max_overflow unset. The pool itself reads an unset max_overflow as
+	// uncapped, but an uncapped dispatcher seat is an unbounded run of paid
+	// sessions, so the dispatcher gives itself a cap it can defend rather than
+	// treating the pool's silence as infinite room.
+	defaultSpecOverflowCap  = 2
 	defaultSpecMaxPerTick   = 1
 	specLintExitRefused     = 1
 	specLintExitNeedsPlan   = 2
 	specDispatchCallerLabel = "spec-dispatch"
+	// specShapeLabel is what a refuse-mode shape gate labels a bead whose
+	// shape the lint rejected; a bead routed to the planner wears
+	// specdispatch.NeedsPlanningLabel (gt-cq5gb, carried over from seat-refill).
+	specShapeLabel = "needs-shape"
 )
 
 var (
@@ -104,23 +119,34 @@ var specDispatchCmd = &cobra.Command{
 	Short: "Run one spec-dispatcher tick (the daemon's spec_dispatch patrol)",
 	Long: `Run one tick of the spec dispatcher.
 
-Candidates are ready, unassigned, open work beads in every operational rig,
-ordered by priority, then created_at, then id. Epics, agent beads, wisps and
-the other runtime families are never candidates; the retired label spec and
-type feature are accepted and ignored (gt-mmsr2). Beads labeled
+Candidates are ready, unassigned, open task/bug/feature beads in every
+operational rig, numbered at or above polecat_pool.max_priority's ceiling
+(default 2) and ordered by priority, then created_at, then id. Epics, agent
+beads, wisps and the other runtime families are never candidates; the retired
+label spec and type feature are accepted and ignored (gt-mmsr2). Beads labeled
 gt:ready-to-land, needs-human or needs-mayor-review, or deferred, are never
-taken. Each candidate is linted (see gt spec lint):
+taken. Each candidate is linted (see gt spec lint), and
+polecat_pool.shape_gate says what the verdict does:
 
-  - refused: one line, one comment on the bead, never dispatched
-  - needs planning: label needs-planning added, one comment, never dispatched
-  - clean: slung onto the first free seat within the budget
+  - off: no lint runs; the bead is dispatched like any other
+  - warn (the default): the bead is dispatched, and the verdict is left on it
+    as one comment (SHAPE: ...)
+  - refuse: refused beads get one line, one comment and the needs-shape label,
+    and are never dispatched; a bead that needs planning gets the
+    needs-planning label and is left for the planner (gt-4k3fj.7)
+
+A clean candidate is slung onto the first free seat within the budget: the
+pool's overflow_agent (capped by max_overflow), then the pro seat (pro_agent,
+capped by pro_max, taking only pro_label beads). The claude-sonnet hooked seat
+is off unless patrols.spec_dispatch.max_hooked is set above zero.
 
 Every dispatch's sling args tell the polecat to test install paths in a
 temporary INSTALL_DIR.
 
 Budget comes from polecat_pool in settings/config.json (overflow_agent,
-max_overflow, min_spawn_gap) and patrols.spec_dispatch in mayor/daemon.json
-(hooked_agent, max_hooked, prefer_hooked, max_per_tick).
+max_overflow, min_spawn_gap, pro_agent, pro_max, pro_label) and
+patrols.spec_dispatch in mayor/daemon.json (hooked_agent, max_hooked,
+prefer_hooked, max_per_tick).
 The operator hold file and ESTOP stop the tick.`,
 	Args:         cobra.NoArgs,
 	SilenceUsage: true,
@@ -282,11 +308,20 @@ type specDispatchEnv struct {
 	Budget   specdispatch.Budget // agents, caps and preferences; live counts filled per tick
 	PerTick  int
 	DryRun   bool
+	// MaxPriority is the ceiling on a candidate's priority number
+	// (polecat_pool.max_priority): a bead numbered higher is backlog.
+	MaxPriority int
+	// ShapeGate is what the lint's verdict does to a candidate: off runs no
+	// lint, warn slings it anyway and comments the verdict, refuse skips and
+	// labels it (polecat_pool.shape_gate, gt-cq5gb).
+	ShapeGate string
 }
 
-// runSpecDispatchCycle is one tick. It never guesses: a bead the lint refuses
-// is annotated and left alone; a bead that needs planning is labeled and
-// left for the planner; a clean bead is slung only onto a free seat, and a skip leaves it ready for the next tick.
+// runSpecDispatchCycle is one tick. It never guesses: under a refuse gate a
+// bead the lint refuses is labeled and left alone, and one that needs planning
+// is labeled and left for the planner; under warn the verdict is commented and
+// the bead is dispatched anyway; off runs no lint. A candidate is slung only
+// onto a free seat that takes it, and a skip leaves it ready for the next tick.
 func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	report := specDispatchReport{Template: env.Template.Source}
 	if hold := env.Hold(); hold != "" {
@@ -322,37 +357,61 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			continue
 		}
 		// The ready board is a snapshot; re-check the fresh bead.
-		if ok, why := specdispatch.Eligible(full); !ok {
+		if ok, why := specdispatch.Eligible(full, env.MaxPriority); !ok {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: not eligible (%s)", id, why)})
 			continue
 		}
-		verdict := specdispatch.Lint(full, env.Template)
-		line := verdict.Line(id)
-		switch verdict.Route {
-		case specdispatch.RouteRefuse:
-			report.Refused = append(report.Refused, specDispatchEntry{Bead: id, Rig: c.Rig, Line: line})
-			if !env.DryRun {
-				if err := env.Annotate(id, specDispatchNotePrefix+line, specDispatchNotePrefix+line); err != nil {
-					report.Errors = append(report.Errors, fmt.Sprintf("%s: annotate: %v", id, err))
-				}
-			}
-			continue
-		case specdispatch.RoutePlanning:
-			report.Planning = append(report.Planning, specDispatchEntry{Bead: id, Rig: c.Rig, Line: line})
-			if !env.DryRun {
-				// The planner (gt-4k3fj.7) is not built: route by label and
-				// say so once. Nothing is spawned.
-				if !full.HasLabel(specdispatch.NeedsPlanningLabel) {
-					if err := env.AddLabel(id, specdispatch.NeedsPlanningLabel); err != nil {
-						report.Errors = append(report.Errors, fmt.Sprintf("%s: label: %v", id, err))
+		shapeNote := ""
+		if env.ShapeGate != specdispatch.ShapeGateOff {
+			verdict := specdispatch.Lint(full, env.Template)
+			switch {
+			case verdict.Clean():
+			case env.ShapeGate == specdispatch.ShapeGateWarn:
+				// The observe-first half of the rollout (the default): the bead
+				// is slung anyway, with the verdict left on it as one comment,
+				// in seat-refill's own note text (gt-cq5gb). The note is written
+				// on the dispatch path below, not here, so a candidate no free
+				// seat takes this tick is not commented about every tick.
+				shapeNote = verdict.ShapeNote()
+			default:
+				line := verdict.Line(id)
+				switch verdict.Route {
+				case specdispatch.RouteRefuse:
+					report.Refused = append(report.Refused, specDispatchEntry{Bead: id, Rig: c.Rig, Line: line})
+					if !env.DryRun {
+						// The label is the overseer's queue of beads to reshape,
+						// and a labeled bead stays a candidate: reshaping it is
+						// what puts it back within the seat's reach.
+						if !full.HasLabel(specShapeLabel) {
+							if err := env.AddLabel(id, specShapeLabel); err != nil {
+								report.Errors = append(report.Errors, fmt.Sprintf("%s: label: %v", id, err))
+							}
+						}
+						if note := verdict.ShapeNote(); note != "" {
+							if err := env.Annotate(id, note, note); err != nil {
+								report.Errors = append(report.Errors, fmt.Sprintf("%s: annotate: %v", id, err))
+							}
+						}
 					}
-				}
-				key := fmt.Sprintf("%s%s: routed to the planner", specDispatchNotePrefix, id)
-				if err := env.Annotate(id, key, fmt.Sprintf("%s (gt-4k3fj.7), not to a polecat: %s", key, verdict.Reason)); err != nil {
-					report.Errors = append(report.Errors, fmt.Sprintf("%s: annotate: %v", id, err))
+					continue
+				case specdispatch.RoutePlanning:
+					report.Planning = append(report.Planning, specDispatchEntry{Bead: id, Rig: c.Rig, Line: line})
+					if !env.DryRun {
+						// The planner (gt-4k3fj.7) is not built: route by label and
+						// say so once. Nothing is spawned.
+						if !full.HasLabel(specdispatch.NeedsPlanningLabel) {
+							if err := env.AddLabel(id, specdispatch.NeedsPlanningLabel); err != nil {
+								report.Errors = append(report.Errors, fmt.Sprintf("%s: label: %v", id, err))
+							}
+						}
+						key := fmt.Sprintf("%s%s: routed to the planner", specDispatchNotePrefix, id)
+						if err := env.Annotate(id, key, fmt.Sprintf("%s (gt-4k3fj.7), not to a polecat: %s", key, verdict.Reason)); err != nil {
+							report.Errors = append(report.Errors, fmt.Sprintf("%s: annotate: %v", id, err))
+						}
+					}
+					continue
 				}
 			}
-			continue
 		}
 
 		if len(report.Dispatched) >= perTick {
@@ -364,14 +423,24 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			continue
 		}
 		budget.Now = env.Now()
-		seat := specdispatch.ChooseSeat(budget)
+		seat := specdispatch.ChooseSeat(budget, full)
 		if seat.Skip {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: no seat: %s", id, seat.Reason)})
 			continue
 		}
+		// The warn-mode verdict goes on the bead beside its sling, once per
+		// distinct verdict (seat-refill's shape_note).
+		if shapeNote != "" && !env.DryRun {
+			if err := env.Annotate(id, shapeNote, shapeNote); err != nil {
+				report.Errors = append(report.Errors, fmt.Sprintf("%s: annotate: %v", id, err))
+			}
+		}
 		entry := specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent}
 		if env.DryRun {
 			entry.Line = fmt.Sprintf("%s: would sling to %s on %s (%s)", id, c.Rig, seat.Agent, seat.Reason)
+			if shapeNote != "" {
+				entry.Line += "; " + shapeNote
+			}
 			report.Dispatched = append(report.Dispatched, entry)
 			budget.Bump(seat.Agent, budget.Now)
 			continue
@@ -415,6 +484,9 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		if attempts > 1 {
 			entry.Line += fmt.Sprintf(" after %d attempts", attempts)
 		}
+		if shapeNote != "" {
+			entry.Line += "; " + shapeNote
+		}
 		report.Dispatched = append(report.Dispatched, entry)
 		budget.Bump(seat.Agent, budget.Now)
 	}
@@ -443,53 +515,62 @@ func firstErrLine(err error) string {
 // specBudgetFromConfig builds the seat list from polecat_pool and
 // patrols.spec_dispatch. Each seat is one agent with its own cap:
 //
-//   - the pool's overflow_agent, capped at max_overflow (default 2 when unset)
-//   - hooked_agent (default claude-sonnet), capped at max_hooked (default 2)
+//   - the pool's overflow_agent, capped at max_overflow (the dispatcher's own
+//     defaultSpecOverflowCap when the pool leaves it unset)
+//   - the pro seat: pro_agent, capped at pro_max, taking only pro_label beads
 //
-// Order is the list above, reversed under prefer_hooked. An agent named twice
-// keeps its first seat.
+// The hooked seat (spec_dispatch.hooked_agent, claude-sonnet by default) is
+// off unless max_hooked names a cap above zero: the pool's agents are the
+// town's seats, and a seat nobody asked for is a seat the dispatcher must not
+// spend. Order is the list above; prefer_hooked moves the hooked seat first.
+// An agent named twice keeps its first seat.
 func specBudgetFromConfig(ts *config.TownSettings, sd *config.SpecDispatchConfig) specdispatch.Budget {
-	hookedAgent, hookedCap := defaultSpecHookedAgent, defaultSpecMaxHooked
-	prefer := false
-	if sd != nil {
-		if sd.HookedAgent != "" {
-			hookedAgent = sd.HookedAgent
+	var b specdispatch.Budget
+	var pool *config.PolecatPool
+	if ts != nil {
+		pool = ts.PolecatPool
+	}
+	if pool != nil {
+		b.MinSpawnGap = pool.MinSpawnGapD()
+		if pool.OverflowAgent != "" {
+			capacity := pool.MaxOverflow
+			if capacity <= 0 {
+				capacity = defaultSpecOverflowCap
+			}
+			b.Seats = append(b.Seats, specdispatch.Seat{Agent: pool.OverflowAgent, Cap: capacity})
 		}
-		switch {
-		case sd.MaxHooked < 0:
-			hookedCap = 0
-		case sd.MaxHooked > 0:
-			hookedCap = sd.MaxHooked
+		if pool.GetProMax() > 0 {
+			b.Seats = append(b.Seats, specdispatch.Seat{
+				Agent: pool.GetProAgent(),
+				Cap:   pool.GetProMax(),
+				Label: pool.GetProLabel(),
+			})
 		}
-		prefer = sd.PreferHooked
 	}
 
-	var b specdispatch.Budget
-	var overflow *specdispatch.Seat
-	if ts != nil && ts.PolecatPool != nil && ts.PolecatPool.OverflowAgent != "" {
-		pool := ts.PolecatPool
-		capacity := pool.MaxOverflow
-		if capacity <= 0 {
-			capacity = defaultSpecMaxOverflow
+	if sd != nil && sd.MaxHooked > 0 {
+		agent := sd.HookedAgent
+		if agent == "" {
+			agent = defaultSpecHookedAgent
 		}
-		overflow = &specdispatch.Seat{Agent: pool.OverflowAgent, Cap: capacity}
+		hooked := specdispatch.Seat{Agent: agent, Cap: sd.MaxHooked}
+		if sd.PreferHooked {
+			b.Seats = append([]specdispatch.Seat{hooked}, b.Seats...)
+		} else {
+			b.Seats = append(b.Seats, hooked)
+		}
 	}
-	if ts != nil && ts.PolecatPool != nil {
-		b.MinSpawnGap = ts.PolecatPool.MinSpawnGapD()
-	}
-	hooked := &specdispatch.Seat{Agent: hookedAgent, Cap: hookedCap}
-	order := []*specdispatch.Seat{overflow, hooked}
-	if prefer {
-		order = []*specdispatch.Seat{hooked, overflow}
-	}
+
 	seen := map[string]bool{}
-	for _, seat := range order {
-		if seat == nil || seen[seat.Agent] {
+	seats := b.Seats[:0:0]
+	for _, seat := range b.Seats {
+		if seat.Agent == "" || seen[seat.Agent] {
 			continue
 		}
 		seen[seat.Agent] = true
-		b.Seats = append(b.Seats, *seat)
+		seats = append(seats, seat)
 	}
+	b.Seats = seats
 	return b
 }
 
@@ -553,10 +634,11 @@ func runSpecDispatch(cmd *cobra.Command, _ []string) error {
 	if slingActor == "" {
 		slingActor = specDispatchActor
 	}
+	maxPriority := ts.PolecatPool.GetMaxPriority()
 
 	env := specDispatchEnv{
 		Hold:       func() string { return dispatch.OperatorHold(townRoot) },
-		Candidates: func() ([]specCandidate, []string) { return specCandidates(townRoot) },
+		Candidates: func() ([]specCandidate, []string) { return specCandidates(townRoot, maxPriority, specReadyBoard) },
 		Show:       func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) },
 		RigHold:    func(rig string) string { return dispatch.RigHold(townRoot, rig) },
 		Roster: func() (specRoster, error) {
@@ -581,6 +663,9 @@ func runSpecDispatch(cmd *cobra.Command, _ []string) error {
 		Budget:   specBudgetFromConfig(ts, sd),
 		PerTick:  perTick,
 		DryRun:   specDispatchDryRun,
+
+		MaxPriority: maxPriority,
+		ShapeGate:   ts.PolecatPool.GetShapeGate(),
 	}
 	report := runSpecDispatchCycle(env)
 
@@ -616,10 +701,16 @@ func printSpecDispatchReport(cmd *cobra.Command, r specDispatchReport) {
 	}
 }
 
+// specBoard reads one rig's ready board. It is a parameter of specCandidates
+// rather than a package var so a test can serve a fake board without swapping
+// process state (internal/testpolicy's no-global-swap).
+type specBoard func(rigPath string) ([]*beads.Issue, error)
+
 // specCandidates reads every operational rig's ready work beads and keeps the
 // eligible ones, ordered across rigs. A rig whose board cannot be read is
-// reported and skipped; the rest still dispatch.
-func specCandidates(townRoot string) ([]specCandidate, []string) {
+// reported and skipped; the rest still dispatch. maxPriority is the operator's
+// ceiling on a candidate's priority number.
+func specCandidates(townRoot string, maxPriority int, board specBoard) ([]specCandidate, []string) {
 	names, err := knownRigNames(townRoot)
 	if err != nil {
 		return nil, []string{err.Error()}
@@ -638,7 +729,7 @@ func specCandidates(townRoot string) ([]specCandidate, []string) {
 		if !hasBeadsDatabase(beads.ResolveBeadsDir(rigPath)) {
 			continue
 		}
-		issues, err := specReadyBoard(rigPath)
+		issues, err := board(rigPath)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
 			continue
@@ -647,7 +738,7 @@ func specCandidates(townRoot string) ([]specCandidate, []string) {
 			s := specFromIssue(issue)
 			// The ready board is a snapshot: the full bead is re-read before
 			// any decision.
-			if ok, _ := specdispatch.Eligible(s); !ok {
+			if ok, _ := specdispatch.Eligible(s, maxPriority); !ok {
 				continue
 			}
 			if _, dup := rigOf[s.ID]; dup {
@@ -681,9 +772,8 @@ func specReadyArgs() []string {
 	}
 }
 
-// specReadyBoard runs the ready query in one rig. A var so tests can serve a
-// board without a live bd.
-var specReadyBoard = func(rigPath string) ([]*beads.Issue, error) {
+// specReadyBoard runs the ready query in one rig.
+func specReadyBoard(rigPath string) ([]*beads.Issue, error) {
 	out, err := beads.RunBdJSONAllowStale(rigPath, specReadyArgs()...)
 	if err != nil {
 		return nil, err

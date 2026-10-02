@@ -227,6 +227,30 @@ func TestLintListsEveryRefusalInOrder(t *testing.T) {
 	}
 }
 
+// ShapeNote is the comment a warn-mode shape gate leaves on a bead: every
+// refusal, or the planning route, in seat-refill's own text (gt-cq5gb).
+func TestVerdictShapeNote(t *testing.T) {
+	t.Parallel()
+	if got := (Verdict{Route: RouteDispatch}).ShapeNote(); got != "" {
+		t.Errorf("clean verdict note = %q, want empty", got)
+	}
+	planning := Verdict{Route: RoutePlanning, Field: "size", Reason: "size says: needs planning"}
+	if got := planning.ShapeNote(); got != "SHAPE: needs planning" {
+		t.Errorf("planning note = %q", got)
+	}
+
+	s := goodSpec()
+	s.Description = "## Goal\nA thing."
+	s.Acceptance = ""
+	if got := Lint(s, defaultTemplate()).ShapeNote(); got != "SHAPE: ## Constraints: section missing; ## Out of scope: section missing; ## Gate: section missing; ## Size: section missing; acceptance: no acceptance criteria" {
+		t.Errorf("refusal note = %q", got)
+	}
+	// A refused verdict with no refusals still renders a note.
+	if got := (Verdict{Route: RouteRefuse}).ShapeNote(); got != "SHAPE: refused" {
+		t.Errorf("empty refusal note = %q", got)
+	}
+}
+
 func TestLintAcceptanceFallsBackToDescriptionSection(t *testing.T) {
 	t.Parallel()
 	s := goodSpec()

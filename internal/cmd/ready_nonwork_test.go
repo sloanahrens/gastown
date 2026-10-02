@@ -82,7 +82,7 @@ func TestFilterNonDispatchableBeads_AgreesWithDispatchCheck(t *testing.T) {
 	}
 
 	for _, issue := range issues {
-		if !kept[issue.ID] && isActionableReadyBead(issue) {
+		if !kept[issue.ID] && isActionableReadyBead(issue, 2) {
 			t.Errorf("%s: ready list dropped it but dispatch-check counts it as actionable work",
 				issue.ID)
 		}
@@ -106,7 +106,7 @@ func TestFilterNonDispatchableBeads_KeepsANoticeThePatrolSuppresses(t *testing.T
 	if got := filterNonDispatchableBeads([]*beads.Issue{notice}); len(got) != 1 {
 		t.Errorf("ready list dropped %s; a filed bug is work even when its title reads like an alert", notice.ID)
 	}
-	if isActionableReadyBead(notice) {
+	if isActionableReadyBead(notice, 2) {
 		t.Errorf("dispatch-check should still suppress %s — the difference is intentional", notice.ID)
 	}
 }

@@ -48,17 +48,22 @@ One tick. The daemon runs it with `--json` when the ticker is on; `--dry-run`
 decides and reports without slinging, labeling or commenting.
 
 1. The operator hold file (`<town>/seat-refill.hold`) or ESTOP stops the tick.
-2. Candidates are ready, open, unassigned work beads in every rig that is not
-   parked or docked. Epics, agent beads, wisps and the other runtime families
-   are never candidates, and the retired label `spec` and type `feature` are
-   not required — the candidate filter does not read them (gt-mmsr2). Beads labeled
-   `gt:ready-to-land`, `needs-human`, `needs-mayor-review` or
-   `spec-dispatch-failed`, or deferred, are skipped. Order is priority, then
-   created_at, then id.
-3. Each candidate is linted. A refusal is one line in the report and one
-   comment on the bead, never repeated. A spec that needs planning gets the
-   `needs-planning` label and one comment; nothing is spawned (the planner,
-   gt-4k3fj.7, is not built yet).
+2. Candidates are ready, open, unassigned **task, bug or feature** beads at or
+   above `polecat_pool.max_priority` (default 2), in every rig that is not
+   parked or docked. Epics, agent beads, wisps, the other runtime families and
+   the non-work types (`chore`, `docs`, ...) are never candidates, and the
+   retired label `spec` and type `feature` are not required — the candidate
+   filter does not read them (gt-mmsr2). Beads labeled `gt:ready-to-land`,
+   `needs-human`, `needs-mayor-review` or `spec-dispatch-failed`, or deferred,
+   are skipped. Order is priority, then created_at, then id.
+3. Each candidate is linted, and `polecat_pool.shape_gate` decides what the
+   verdict does:
+   - `off` runs no lint at all;
+   - `warn` (the default) slings the bead anyway and leaves the verdict on it
+     as one `SHAPE: ...` comment, never repeated for the same verdict;
+   - `refuse` skips the bead, labels it `needs-shape` (or `needs-planning`
+     when that is the verdict) and comments it once. Nothing is spawned for a
+     bead that needs planning (the planner, gt-4k3fj.7, is not built yet).
 4. A clean spec takes the first free seat and is slung through the shared
    rig-dispatch path in-process, with no auto-convoy.
 
@@ -66,17 +71,20 @@ decides and reports without slinging, labeling or commenting.
 
 A seat is one agent with its own cap. Every agent runs the claude CLI with the
 town's managed settings and guard hooks, so no seat is less guarded than
-another. The `hooked_*` key names predate that and are kept for compatibility;
-`hookless_agent` and `max_hookless` are retired: still accepted, never read.
+another.
 
 Seats, in order:
 
-| Seat | Cap |
-|---|---|
-| `polecat_pool.overflow_agent` | `polecat_pool.max_overflow`, 2 when unset |
-| `patrols.spec_dispatch.hooked_agent`, default `claude-sonnet` | `max_hooked`, default 2 |
+| Seat | Cap | Takes |
+|---|---|---|
+| `polecat_pool.overflow_agent` | `polecat_pool.max_overflow`, 2 when unset | every candidate |
+| `polecat_pool.pro_agent` | `polecat_pool.pro_max`, 0 drops the seat | only beads carrying `polecat_pool.pro_label` |
 
-`prefer_hooked` moves the hooked_agent seat first.
+The pro seat is reserved: a bead carrying `pro_label` is slung only there, and
+the overflow seat leaves it alone. A `spec_dispatch.max_hooked > 0` adds the
+`hooked_agent` seat (default `claude-sonnet`) with that cap — off by default,
+because a seat nobody asked for is a seat the dispatcher must not spend;
+`prefer_hooked` moves it first.
 
 Occupancy is every live polecat session plus the seat claims in-flight slings
 hold, counted per agent from the session's `GT_AGENT`. An empty `GT_AGENT`
@@ -110,21 +118,24 @@ In `mayor/daemon.json`:
     "spec_dispatch": {
       "enabled": true,
       "interval": "60s",
-      "hooked_agent": "claude-sonnet",
-      "max_hooked": 2,
       "max_per_tick": 1
     }
   }
 }
 ```
 
-Then restart the daemon.
+Then restart the daemon. The seat budget comes from `polecat_pool`, not from
+this block; `max_hooked` is the only seat key here, and it is opt-in.
 
 ## seat-refill
 
+The plugin this ticker replaced is deleted (gt-4k3fj.8.8): the ticker is the
+town's automatic dispatch path, and its policy is the same `polecat_pool` keys
+the plugin read. Deleting the directory from the repo does not remove the
+runtime copy at `<town>/plugins` — `make install` runs `gt plugin sync`, which
+copies and updates but does not remove. After this lands, run `gt plugin sync
+--clean` once (or delete `<town>/plugins/seat-refill` by hand) or the deleted
+plugin keeps dispatching beside the ticker.
+
 The ticker counts every polecat, whoever slung it, so it never exceeds a cap
-that seat-refill nudges or mayor slings already filled. It skips the tick
-instead. On 2026-09-30 seat-refill filled four flash seats on its own and the
-operator's slings were refused. When the ticker is the town's dispatcher, turn
-seat-refill off so the roster is readable: disable the seat-refill plugin. Do not park seat-refill with its hold file, because the
-ticker honors that file too and would stop as well.
+a mayor sling already filled. It skips the tick instead.

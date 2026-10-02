@@ -676,7 +676,7 @@ Supported keys:
                               false = warn). Run 'gt config secrets migrate'
                               first; setting true refuses while literals remain
 
-  Seat refill (the seat-refill plugin's dispatch policy, in settings/config.json):
+  Spec dispatch (the polecat pool's dispatch policy, in settings/config.json):
 ` + polecatPoolKeyHelp + `
 
   Lifecycle (Dolt data maintenance):
@@ -725,7 +725,7 @@ Supported keys:
   maintenance.window          Maintenance window start time (HH:MM)
   secrets.refuse_literals     Literal tokens refused instead of warned (true/false)
 
-  Seat refill (the seat-refill plugin's dispatch policy, in settings/config.json):
+  Spec dispatch (the polecat pool's dispatch policy, in settings/config.json):
 ` + polecatPoolKeyHelp + `
 
   Lifecycle (Dolt data maintenance):
@@ -751,33 +751,35 @@ Examples:
 
 // polecatPoolKeyHelp is the one copy of the polecat_pool knob list that
 // gt config get, set and their unknown-key error print.
-const polecatPoolKeyHelp = `  polecat_pool.max_priority    Priority ceiling for the seat-refill plugin's
-                              dispatch: a bead numbered higher is left for the
-                              operator (default: 2)
-  polecat_pool.top_candidates  Candidate beads a nudge names (default: 3)
-  polecat_pool.empty_seconds   How long an empty seat waits with work ready
-                              before a nudge (default: 300)
-  polecat_pool.nudge_seconds   Shortest gap between two nudges about one empty
-                              episode; 0 removes the cap (default: 900)
+const polecatPoolKeyHelp = `  polecat_pool.max_priority    Priority ceiling for dispatch: a bead numbered
+                              higher is left for the operator (default: 2)
+  polecat_pool.top_candidates  Retired with the seat-refill plugin's nudge
+                              mode; kept, accepted and ignored (default: 3)
+  polecat_pool.empty_seconds   Retired with the plugin's nudge mode; kept and
+                              ignored (default: 300)
+  polecat_pool.nudge_seconds   Retired with the plugin's nudge mode; kept and
+                              ignored (default: 900)
   polecat_pool.dispatch_empty_seconds
-                              Delay before the plugin slings into an empty seat
-                              (default: 0: fill at once)
+                              Retired with the plugin; kept and ignored. The
+                              dispatcher fills a free seat at once (default: 0)
   polecat_pool.pro_max         Cap on the pro seat; 0 drops it (default: 1)
   polecat_pool.pro_agent       Agent the pro seat runs (default: deepseek-pro)
   polecat_pool.pro_label       Label a bead carries to reach the pro seat, and
                               the one the other seats leave alone (default:
                               needs-pro)
-  polecat_pool.mode            How an empty seat is filled: "sling" dispatches
-                              the bead, "nudge" asks the mayor (default: sling)
-  polecat_pool.shape_gate      What a sling does with a candidate's shape lint
-                              (gt spec lint): "off" runs no lint, "warn" slings
-                              it anyway and comments the verdict, "refuse"
-                              skips it and labels it needs-shape or
+  polecat_pool.mode            Retired with the plugin; kept and ignored. The
+                              dispatcher always slings: "sling" used to fill an
+                              empty seat, "nudge" asked the mayor (default:
+                              sling)
+  polecat_pool.shape_gate      What a dispatch does with a candidate's shape
+                              lint (gt spec lint): "off" runs no lint, "warn"
+                              slings it anyway and comments the verdict,
+                              "refuse" skips it and labels it needs-shape or
                               needs-planning (default: warn)`
 
 // polecatPoolIntKeys and polecatPoolStringKeys are gt config's view of
-// PolecatPool's seat-refill policy: one row per key, with the accessor that
-// reads its effective value and the setter gt config set writes.
+// PolecatPool's dispatch policy: one row per key, with the accessor that reads
+// its effective value and the setter gt config set writes.
 var (
 	polecatPoolIntKeys = []struct {
 		key string

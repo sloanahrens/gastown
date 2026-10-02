@@ -15,9 +15,8 @@ import (
 // working — the bead is fine and simply not this sling's to take — and its own
 // text already carries the reason and the remediation; a runtime failure has
 // its reason in the error. Cobra's usage block otherwise follows the reason and
-// buries it: seat-refill keeps only the last line of a failed sling
-// (plugins/seat-refill/run.sh), which was the usage line, so the dispatcher log
-// showed no cause at all (gt-fudap, gt-thnbp).
+// buries it, and an automatic dispatcher that logs only the last line of a
+// failed sling then shows no cause at all (gt-fudap, gt-thnbp).
 func silenceUsageOnFailure(cmd *cobra.Command, err error) {
 	if cmd == nil || err == nil {
 		return

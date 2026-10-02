@@ -731,9 +731,10 @@ func TestConfigMaintenanceSetGet(t *testing.T) {
 	})
 }
 
-// gt config reads and writes the seat-refill dispatch policy through the same
-// keys the plugin reads: get reports the effective value (the file's, else the
-// default), and set refuses a value the plugin cannot act on (gt-y3pgh.12).
+// gt config reads and writes the pool's dispatch policy through the same keys
+// the spec dispatcher reads: get reports the effective value (the file's, else
+// the default), and set refuses a value the dispatcher cannot act on
+// (gt-y3pgh.12).
 func TestConfigSetGetPolecatPoolPolicy(t *testing.T) {
 	t.Parallel()
 	townRoot := setupTestTownForConfig(t)

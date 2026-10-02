@@ -247,11 +247,10 @@ The `operator` label and a human assignee are the operator reservation: work
 the person means to do by hand. An agent address is always slash-qualified
 (`gastown/polecats/onyx`, `gastown/crew/sloan`, `mayor/`),
 so any other assignee is a person. Every automatic path skips it: the convoy
-feeders and the `patrol_scan` restart through the hold rule above, the
-idle-seat (`seat-refill`) and dispatch-check nudges that would otherwise ask
-the mayor to sling it, and `gt sling` itself, which refuses one before it
-spends a polecat seat. `gt sling --force` is the way to hand the work to an
-agent anyway.
+feeders and the `patrol_scan` restart through the hold rule above, the spec
+dispatcher and the dispatch-check nudge that would otherwise ask the mayor to
+sling it, and `gt sling` itself, which refuses one before it spends a polecat
+seat. `gt sling --force` is the way to hand the work to an agent anyway.
 
 On 2026-09-25 a convoy feeder re-slung gt-nj23.9 to a fresh polecat two minutes
 after the mayor had un-slung it and assigned it to the operator, undoing the

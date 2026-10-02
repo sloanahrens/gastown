@@ -407,9 +407,6 @@ test-makefile:
 	bash scripts/install-gt_test.sh
 	bash -n scripts/uninstall-gt.sh
 	bash scripts/uninstall-gt_test.sh
-	bash -n plugins/seat-refill/run.sh
-	bash -n plugins/seat-refill/run_test.sh
-	bash plugins/seat-refill/run_test.sh
 	bash -n scripts/docs-lint.sh
 	bash scripts/docs-lint_test.sh
 	bash -n scripts/repo-guards.sh
