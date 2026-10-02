@@ -254,12 +254,15 @@ func MarkIdle(townRoot string, s Seat, actor string, now time.Time) (bool, error
 	return changed, err
 }
 
-// ClearLanded ends a submitted seat's wait once the landing worker has
-// finished workBead (landed it, or handed it back as rework): the seat goes
-// to stop, so nothing reads "submitted" for a bead that is no longer waiting
-// and nothing restarts a session that has no work. A seat that is not
-// submitted, or is submitted for a different bead, is left as it is. It
-// reports whether it changed the record.
+// ClearLanded ends a submitted seat's wait once workBead is no longer waiting
+// to land: the landing worker finished it (landed it, or handed it back as
+// rework), or a detector found the wait over without the worker — a landing
+// pulled out of band leaves the record saying submitted while the bead asks
+// for the work back (gt-xs1ni). The seat goes to stop, so nothing reads
+// "submitted" for a bead that is no longer waiting and nothing restarts a
+// session that has no work. A seat that is not submitted, or is submitted for
+// a different bead, is left as it is. It reports whether it changed the
+// record.
 func ClearLanded(townRoot string, s Seat, workBead, actor string, now time.Time) (bool, error) {
 	rec, err := Read(townRoot, s)
 	if err != nil || !rec.Submitted() || (rec.WorkBead != "" && rec.WorkBead != workBead) {

@@ -56,6 +56,12 @@ type fakeEnv struct {
 	closed   []string
 	comments map[string][]string
 	reads    []string // AgentState reads, to prove they are refusal-only
+
+	// workBeads answers WorkBead by ID; a missing ID is a gone bead (nil).
+	workBeads   map[string]*Work
+	workBeadErr map[string]error
+	cleared     []string // "rig/polecat=workBead" per ClearSubmission
+	clearErr    map[string]error
 }
 
 func newFake() *fakeEnv {
@@ -67,7 +73,9 @@ func newFake() *fakeEnv {
 		dirs: map[string]bool{}, dirErr: map[string]error{},
 		sessions: map[string]bool{}, sessionErr: map[string]error{}, molStatus: map[string]string{},
 		molErr: map[string]error{}, branches: map[string]string{}, branchErr: map[string]error{},
-		comments: map[string][]string{},
+		comments:  map[string][]string{},
+		workBeads: map[string]*Work{}, workBeadErr: map[string]error{},
+		clearErr: map[string]error{},
 	}
 }
 
@@ -82,6 +90,19 @@ func (f *fakeEnv) Assess(_, p string) liveness.Result {
 	return liveness.Result{Verdict: liveness.Alive}
 }
 func (f *fakeEnv) AssignedWork(_, p string) (*Work, error) { return f.work[p], f.workErr[p] }
+func (f *fakeEnv) WorkBead(_, id string) (*Work, error) {
+	if err := f.workBeadErr[id]; err != nil {
+		return nil, err
+	}
+	return f.workBeads[id], nil
+}
+func (f *fakeEnv) ClearSubmission(rig, p, workBead string) (bool, error) {
+	if err := f.clearErr[p]; err != nil {
+		return false, err
+	}
+	f.cleared = append(f.cleared, rig+"/"+p+"="+workBead)
+	return true, nil
+}
 func (f *fakeEnv) AgentState(_, p string) (string, error) {
 	f.reads = append(f.reads, p)
 	return f.states[p], f.stateErr[p]
@@ -222,9 +243,22 @@ func TestNoRestartCases(t *testing.T) {
 		setup   func(env *fakeEnv)
 		outcome Outcome // "" = no finding
 	}{
-		{"submitted intent (hazard 1, landing guard)", func(env *fakeEnv) {
+		{"submitted intent, bead still waiting (hazard 1, landing guard)", func(env *fakeEnv) {
 			env.intents["ruby"] = intent.Record{Desired: intent.DesiredSubmitted, WorkBead: "gt-ruby"}
+			env.workBeads["gt-ruby"] = &Work{ID: "gt-ruby", Status: "hooked", Labels: []string{"gt:ready-to-land"}}
 		}, ""},
+		{"submitted intent, no work_bead named (fail closed)", func(env *fakeEnv) {
+			env.intents["ruby"] = intent.Record{Desired: intent.DesiredSubmitted}
+		}, ""},
+		{"submitted intent, bead unreadable (fail closed)", func(env *fakeEnv) {
+			env.intents["ruby"] = intent.Record{Desired: intent.DesiredSubmitted, WorkBead: "gt-ruby"}
+			env.workBeadErr["gt-ruby"] = errors.New("bd show: connection refused")
+		}, OutcomeUnknown},
+		{"submitted intent pulled for rework, ending the wait fails", func(env *fakeEnv) {
+			env.intents["ruby"] = intent.Record{Desired: intent.DesiredSubmitted, WorkBead: "gt-ruby"}
+			env.workBeads["gt-ruby"] = &Work{ID: "gt-ruby", Status: "hooked", Labels: []string{"rework"}}
+			env.clearErr["ruby"] = errors.New("intent lock: timed out")
+		}, OutcomeUnknown},
 		{"parked seat", func(env *fakeEnv) {
 			env.intents["ruby"] = intent.Record{Desired: intent.DesiredPark, Reason: "operator"}
 		}, ""},
@@ -299,17 +333,96 @@ func TestNoRestartCases(t *testing.T) {
 	}
 }
 
-// Held and submitted seats are decided from the intent record alone: no
-// liveness sample, no bd read.
-func TestHeldSeatReadsNothingElse(t *testing.T) {
+// gt-xs1ni: gt done submits, the landing worker (or an overseer) pulls the
+// landing back for rework, and the seat's session is gone. The record still
+// says submitted and gt:ready-to-land is off the bead, so the record alone
+// would hold the seat forever. The tick has to read the bead, end the stale
+// wait, and restart the seat on the ordinary dead-session path.
+func TestSubmittedSeatWithPulledLandingIsRestarted(t *testing.T) {
 	t.Parallel()
 	env := newFake()
 	deadWithWork(env, "ruby")
-	env.intents["ruby"] = intent.Record{Desired: intent.DesiredSubmitted}
-	scanner(env, nil).Tick("gastown")
-	if len(env.reads) != 0 {
-		t.Fatalf("agent bead read %d time(s) for a submitted seat", len(env.reads))
+	env.intents["ruby"] = intent.Record{Desired: intent.DesiredSubmitted, WorkBead: "gt-ruby"}
+	env.workBeads["gt-ruby"] = &Work{ID: "gt-ruby", Status: "hooked", Labels: []string{"rework"}}
+
+	r := scanner(env, nil).Tick("gastown")
+
+	if got := strings.Join(env.cleared, ","); got != "gastown/ruby=gt-ruby" {
+		t.Fatalf("cleared = %q, want the stale submission ended; report %v", got, r.Lines())
 	}
+	if got := strings.Join(env.restarts, ","); got != "ruby" {
+		t.Fatalf("restarts = %q, want ruby restarted; report %v", got, r.Lines())
+	}
+}
+
+// A record naming a bead bd no longer has is stale the same way: nothing is
+// waiting to land, so the seat falls through like any other.
+func TestSubmittedSeatWhoseBeadIsGoneIsRestarted(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	deadWithWork(env, "ruby")
+	env.intents["ruby"] = intent.Record{Desired: intent.DesiredSubmitted, WorkBead: "gt-gone"}
+
+	r := scanner(env, nil).Tick("gastown")
+
+	if got := strings.Join(env.restarts, ","); got != "ruby" {
+		t.Fatalf("restarts = %q, want ruby restarted; report %v", got, r.Lines())
+	}
+}
+
+// A landing that came back for rework and was landed again in the meantime
+// leaves a closed bead: the wait is over there too, but the seat holds no
+// work, so the ordinary path retires it instead of restarting it.
+func TestSubmittedSeatWithClosedBeadIsNotRestarted(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	deadWithWork(env, "ruby")
+	env.intents["ruby"] = intent.Record{Desired: intent.DesiredSubmitted, WorkBead: "gt-ruby"}
+	env.workBeads["gt-ruby"] = &Work{ID: "gt-ruby", Status: "closed"}
+	env.work["ruby"] = nil
+
+	r := scanner(env, nil).Tick("gastown")
+
+	if len(env.restarts) != 0 {
+		t.Fatalf("restarted %v with no work; report %v", env.restarts, r.Lines())
+	}
+	if len(env.cleared) != 1 {
+		t.Fatalf("cleared = %v, want the stale submission ended; report %v", env.cleared, r.Lines())
+	}
+	if got := strings.Join(env.idles, ","); got != "ruby" {
+		t.Fatalf("idles = %q, want ruby retired; report %v", got, r.Lines())
+	}
+}
+
+// Held and submitted seats are decided from the intent record alone: no
+// liveness sample, no bd read. A submitted record that names no work_bead
+// keeps that shortcut — nothing says which bead to check, so it is taken at
+// its word (gt-xs1ni).
+func TestHeldSeatReadsNothingElse(t *testing.T) {
+	t.Parallel()
+	t.Run("held", func(t *testing.T) {
+		t.Parallel()
+		env := newFake()
+		deadWithWork(env, "ruby")
+		env.intents["ruby"] = intent.Record{Desired: intent.DesiredPark, Reason: "operator"}
+		scanner(env, nil).Tick("gastown")
+		if len(env.reads) != 0 {
+			t.Fatalf("agent bead read %d time(s) for a parked seat", len(env.reads))
+		}
+	})
+	t.Run("submitted with no work_bead", func(t *testing.T) {
+		t.Parallel()
+		env := newFake()
+		deadWithWork(env, "ruby")
+		env.intents["ruby"] = intent.Record{Desired: intent.DesiredSubmitted}
+		scanner(env, nil).Tick("gastown")
+		if len(env.reads) != 0 {
+			t.Fatalf("agent bead read %d time(s) for a submitted seat", len(env.reads))
+		}
+		if len(env.cleared) != 0 {
+			t.Fatalf("cleared %v for a record that names no bead", env.cleared)
+		}
+	})
 }
 
 func TestPolecatListFailureIsAnErrorNotAnAllClear(t *testing.T) {

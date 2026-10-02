@@ -38,6 +38,9 @@ type workBD struct {
 	onlyIn string
 	// listErr, when set, fails every list.
 	listErr error
+	// showErr, when set, fails every show (a read that could not answer, as
+	// opposed to a bead bd says does not exist).
+	showErr error
 
 	mu    sync.Mutex
 	reads []string
@@ -91,6 +94,9 @@ type workBDReader struct {
 
 func (r workBDReader) Show(id string) (*beads.Issue, error) {
 	r.b.read("show " + id)
+	if r.b.showErr != nil {
+		return nil, r.b.showErr
+	}
 	return r.db.Show(id)
 }
 
