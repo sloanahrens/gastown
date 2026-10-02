@@ -13,9 +13,6 @@ bash scripts/check-deploy-source_test.sh
 bash -n scripts/install-gt.sh
 bash -n scripts/lib/install-gt-lib.sh
 bash scripts/install-gt_test.sh
-bash -n plugins/rebuild-gt/run.sh
-bash -n plugins/rebuild-gt/run_test.sh
-bash plugins/rebuild-gt/run_test.sh
 bash -n plugins/seat-refill/run.sh
 bash -n plugins/seat-refill/run_test.sh
 bash plugins/seat-refill/run_test.sh
