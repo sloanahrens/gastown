@@ -158,6 +158,41 @@ func TestStewardRunnerClosesRowsLeftByThePreviousProcess(t *testing.T) {
 	}
 }
 
+// TestStewardRunnerCompactsTheLedger: the ledger stops growing — a job that
+// ended before the retention is dropped when the runner starts, and one from
+// within it stays (gt-9bioi.6).
+func TestStewardRunnerCompactsTheLedger(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	ledger := steward.NewLedger(steward.LedgerPath(townRoot))
+	now := time.Now()
+	for _, j := range []steward.Job{
+		{ID: "steward-old", Event: steward.KindReview, Bead: "gt-x", Rig: "gastown",
+			Started: now.Add(-30 * 24 * time.Hour), Ended: now.Add(-30*24*time.Hour + time.Minute), Outcome: steward.OutcomePass},
+		{ID: "steward-young", Event: steward.KindReview, Bead: "gt-y", Rig: "gastown",
+			Started: now.Add(-time.Hour), Ended: now, Outcome: steward.OutcomePass},
+	} {
+		if err := ledger.Append(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Daemon{
+		config:       &Config{TownRoot: townRoot},
+		logger:       discardLogger,
+		patrolConfig: stewardPatrolConfig(&StewardConfig{Enabled: true, WorkRoot: t.TempDir()}),
+	}
+	if d.stewardRunnerFor(townRoot) == nil {
+		t.Fatal("no runner")
+	}
+	jobs, err := ledger.Latest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].ID != "steward-young" {
+		t.Fatalf("ledger holds %+v, want only the job from within the retention", jobs)
+	}
+}
+
 // TestStewardScanFindsQueueEvents: the scan asks bd for every priority (the
 // zero value would ask for P0 only) and turns the two labeled queues into
 // the events their jobs run on.

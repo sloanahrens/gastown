@@ -253,6 +253,13 @@ func (d *Daemon) stewardRunnerFor(townRoot string) *steward.Runner {
 		SpawnFor: d.stewardSpawnerFor(),
 	}
 	d.reapStewardOrphans(runner)
+	// A row whose daemon died is closed by the reap above, so every job this
+	// drops has ended and nothing on the ledger still calls it running.
+	if n, err := ledger.Compact(stewardRowRetention, d.clk().Now()); err != nil {
+		d.logger.Printf("steward: compacting the ledger: %v", err)
+	} else if n > 0 {
+		d.logger.Printf("steward: dropped %d ledger job(s) older than %s", n, stewardRowRetention)
+	}
 	d.stewardRunnerMu.Lock()
 	d.stewardRunner = runner
 	d.stewardRunnerMu.Unlock()

@@ -5,6 +5,7 @@ package steward
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -272,6 +273,78 @@ func (l *Ledger) CloseOrphans(kill KillGroup, own map[string]bool, now time.Time
 		closed++
 	}
 	return closed, errors.Join(stuck...)
+}
+
+// Compact drops every job that ended more than retention ago, rewriting the
+// ledger atomically, and returns how many jobs it dropped. A job's rows go
+// together: a later append of the same id is its latest row, so dropping only
+// its end row would leave the start row behind as one Active reads as still
+// running, and the bead it names would stay busy forever. A job with no end
+// time is kept, because a scan must still see it as busy. Only the daemon's
+// runner calls it, at startup before it starts a job of its own (gt-9bioi.6).
+func (l *Ledger) Compact(retention time.Duration, now time.Time) (int, error) {
+	if retention <= 0 {
+		return 0, nil
+	}
+	all, err := l.Read()
+	if err != nil {
+		return 0, err
+	}
+	old := map[string]bool{}
+	for _, j := range latestRows(all) {
+		if !j.Ended.IsZero() && now.Sub(j.Ended) >= retention {
+			old[j.ID] = true
+		}
+	}
+	if len(old) == 0 {
+		return 0, nil
+	}
+	var kept []Job
+	for _, j := range all {
+		if !old[j.ID] {
+			kept = append(kept, j)
+		}
+	}
+	if err := l.rewrite(kept); err != nil {
+		return 0, err
+	}
+	return len(old), nil
+}
+
+// rewrite replaces the ledger with rows, atomically: the temporary file is a
+// sibling of the ledger, so a reader sees the old file or the new one and
+// never a truncated one. A line Read skipped — a record a killed process left
+// half-written — is not in rows and so does not survive (gt-9bioi.6).
+func (l *Ledger) rewrite(rows []Job) error {
+	var b bytes.Buffer
+	for _, j := range rows {
+		data, err := json.Marshal(j)
+		if err != nil {
+			return fmt.Errorf("encoding job %s: %w", j.ID, err)
+		}
+		b.Write(append(data, '\n'))
+	}
+	dir := filepath.Dir(l.path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "jobs.jsonl.*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(b.Bytes()); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), l.path)
 }
 
 // Active returns the jobs with no end time, in the order they started: the

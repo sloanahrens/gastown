@@ -87,9 +87,13 @@ func (s *AgentSpawner) Spawn(ctx context.Context, req SpawnRequest) SpawnResult 
 	if err != nil {
 		return SpawnResult{ExitCode: -1, Err: fmt.Errorf("resolving agent %q: %w", req.Model, err)}
 	}
+	jobEnv, err := s.env(cfg, req)
+	if err != nil {
+		return SpawnResult{ExitCode: -1, Err: err}
+	}
 	cmd := exec.CommandContext(jctx, cfg.Command, append(append([]string{}, cfg.Args...), "-p", req.Prompt)...) //nolint:gosec // G204: the agent command and preset args come from the town's own config
 	cmd.Dir = req.Dir
-	cmd.Env = s.env(cfg, req)
+	cmd.Env = jobEnv
 
 	run := s.Run
 	if run == nil {
@@ -97,23 +101,26 @@ func (s *AgentSpawner) Spawn(ctx context.Context, req SpawnRequest) SpawnResult 
 		run = func(_ context.Context, c *exec.Cmd) error { return runRecorded(c, req.Started) }
 	}
 	runErr := run(jctx, cmd)
-	timedOut := jctx.Err() != nil && ctx.Err() == nil
+	// The runner holds the job's deadline and this spawner's own is a backstop
+	// behind it, so the parent expires first and either one is the same
+	// timeout; only the daemon's context ending is not one (gt-9bioi.6).
+	timedOut := errors.Is(jctx.Err(), context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded)
 
 	transcript, _ := agentlog.LatestTranscript(req.Dir)
 	res := SpawnResult{Transcript: transcript}
-	switch {
-	case runErr != nil:
+	if runErr != nil {
 		var ee *exec.ExitError
 		if errors.As(runErr, &ee) {
 			res.ExitCode = ee.ExitCode()
 		} else {
 			res.ExitCode = -1
 		}
-		if timedOut {
-			res.TimedOut = true
-		} else {
-			res.Err = runErr
-		}
+	}
+	switch {
+	case timedOut:
+		res.TimedOut = true
+	case runErr != nil:
+		res.Err = runErr
 	}
 	verdict, verdictErr := ReadVerdict(filepath.Join(req.Dir, ResultFile))
 	if verdictErr != nil {
@@ -197,8 +204,11 @@ func (s *AgentSpawner) resolveAgent(model string) (*agentconfig.RuntimeConfig, e
 
 // env is what the job's process reads: the standard agent environment for
 // its seat, then the preset's own variables, with daemon.env references
-// resolved (a job is a direct exec, so nothing else would resolve them).
-func (s *AgentSpawner) env(cfg *agentconfig.RuntimeConfig, req SpawnRequest) []string {
+// resolved (a job is a direct exec, so nothing else would resolve them). A
+// reference the town cannot resolve fails the job: an empty credential would
+// reach the provider as an auth error in a session nobody is watching, and
+// the prompt it never answered would look like a broken job (gt-yih1).
+func (s *AgentSpawner) env(cfg *agentconfig.RuntimeConfig, req SpawnRequest) ([]string, error) {
 	role := s.Role
 	if role == "" {
 		role = s.Rig + "/steward"
@@ -213,14 +223,33 @@ func (s *AgentSpawner) env(cfg *agentconfig.RuntimeConfig, req SpawnRequest) []s
 	// Values() resolves now, which is what a direct exec needs: a startup
 	// command that reads daemon.env at run time is a shell's trick, and no
 	// shell is in this path (gt-y3pgh.5).
-	if se, err := agentconfig.ResolveSpawnEnv(s.TownRoot, cfg.Env); err != nil {
-		s.logf("steward: %s: resolving the preset's env: %v", req.ID, err)
-	} else {
-		for k, v := range se.Values() {
-			vmap[k] = v
-		}
+	se, missing, err := agentconfig.ResolveSpawnEnvMissing(s.TownRoot, cfg.Env)
+	if err != nil {
+		return nil, fmt.Errorf("the preset %q env: %s", req.Model, daemonEnvFailure(err))
 	}
-	return mergeEnv(os.Environ(), vmap)
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("the preset %q env references %s, which is not set in the town's daemon.env or this process's environment", req.Model, strings.Join(missing, ", "))
+	}
+	for k, v := range se.Values() {
+		vmap[k] = v
+	}
+	return mergeEnv(os.Environ(), vmap), nil
+}
+
+// daemonEnvFailure renders an env-resolution failure without the quoting a
+// config parse error carries: a malformed daemon.env line may be a credential
+// someone wrote without its `=`, and this message reaches the ledger and the
+// daemon log (gt-9bioi.6).
+func daemonEnvFailure(err error) string {
+	var pe *agentconfig.ParseError
+	if !errors.As(err, &pe) {
+		return err.Error()
+	}
+	where := pe.Path
+	if pe.Line > 0 {
+		where = fmt.Sprintf("%s line %d", pe.Path, pe.Line)
+	}
+	return where + " does not parse"
 }
 
 // mergeEnv is base with set applied: an inherited variable the job sets is
