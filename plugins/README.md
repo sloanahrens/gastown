@@ -73,16 +73,18 @@ An edit made directly under `<town_root>/plugins` is a draft, not a change: the
 next `gt plugin sync` overwrites it. Land the edit here first. A gate edited
 there is a silent park (gt-o1z7).
 
-Two callers of one script push this directory to the runtime copy, and neither is a guarantee
-that the runtime copy is current:
+One caller pushes this directory to the runtime copy, and it is not a
+guarantee that the runtime copy is current:
 
 - `make install` (`scripts/install-gt.sh`) runs `gt plugin sync` from
   `<town>/gastown/mayor/rig` after every successful install. The step is
   fail-open: a failed sync does not fail the install, and it is logged as
   "non-fatal" rather than discarded.
-- The `rebuild-gt` plugin runs the same script, so the same sync.
 
-`gt plugin sync` resolves the town root from the CWD, so both paths fail
+The `rebuild-gt` plugin ran the same script too, once; it is a daemon job in
+Go now (internal/daemon/rebuild_gt.go, gt-4k3fj.8.6).
+
+`gt plugin sync` resolves the town root from the CWD, so that path fails
 outright when this checkout lives outside the town root (a `LocalRepo`
 override). `gt doctor`'s `patrol-plugin-drift` check is what catches the
 resulting divergence: it compares the two copies and warns when they diverge, or

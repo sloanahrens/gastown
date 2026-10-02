@@ -22,7 +22,8 @@ severity = "medium"
 
 Checks for and applies Homebrew updates to `beads` (bd) and `dolt`.
 
-gt is rebuilt separately by the `rebuild-gt` plugin (it builds from source, not Homebrew).
+gt is rebuilt separately, by the daemon's `rebuild_gt` job (it builds from
+source, not Homebrew — internal/daemon/rebuild_gt.go).
 
 ## Run
 

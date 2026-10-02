@@ -68,7 +68,7 @@ func TestPrintSlotStatusText_ListsTheMarkerOutsideThePoolListing(t *testing.T) {
 		t.Errorf("the marker is not named:\n%s", out)
 	}
 	if !strings.Contains(out, "gastown/om-review") {
-		t.Errorf("the marker's role (what rebuild-gt keys on) is missing:\n%s", out)
+		t.Errorf("the marker's role is missing from the listing:\n%s", out)
 	}
 	if !strings.Contains(out, "age 3m0s") {
 		t.Errorf("the marker is listed without its age:\n%s", out)
