@@ -1176,3 +1176,166 @@ func gitOutput(t *testing.T, dir string, args ...string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+// The gt-gas9g shape: main's history folds the two wisps reads into one call,
+// then adds the issues read on its own, and a polecat branch cut after that
+// commit writes one combined call over both. The issues read is a purely
+// additive commit, which is what made deleting its lines read as an inversion
+// (gt-59p7e).
+const (
+	preloadWispsSubject     = "perf: fold the two wisps reads into one (gt-test)"
+	preloadIssuesSubject    = "perf: answer the issues reads from one query (gt-test)"
+	preloadSupersedeSubject = "perf: read both tables in one preload (gt-test)"
+
+	preloadFile = "internal/cmd/polecat.go"
+
+	preloadTwoReads = `package cmd
+
+func buildRigSeats(b *bd.Client) {
+	if err := b.ListLabeledWisps("gt:agent"); err != nil {
+		warnf(err)
+	}
+	if err := b.ListLabeledWisps("gt:merge-request"); err != nil {
+		warnf(err)
+	}
+}
+`
+
+	preloadCollapsed = `package cmd
+
+func buildRigSeats(b *bd.Client) {
+	// ONE wisps read for both label sets this listing wants.
+	if err := b.PreloadLabeledWisps("gt:agent", "gt:merge-request"); err != nil {
+		warnf(err)
+	}
+}
+`
+
+	preloadWithIssues = `package cmd
+
+func buildRigSeats(b *bd.Client) {
+	// ONE wisps read for both label sets this listing wants.
+	if err := b.PreloadLabeledWisps("gt:agent", "gt:merge-request"); err != nil {
+		warnf(err)
+	}
+
+	// The issues read, one more round trip.
+	if err := b.PreloadIssues([]string{"gt:agent", "gt:merge-request"}, workStatuses); err != nil {
+		warnf(err)
+	}
+}
+`
+
+	preloadCombined = `package cmd
+
+func buildRigSeats(b *bd.Client) {
+	// ONE read for both tables.
+	if err := b.PreloadBeads([]string{"gt:agent", "gt:merge-request"}, workStatuses); err != nil {
+		warnf(err)
+	}
+}
+`
+
+	// preloadReadDropped is the fail-closed control's tree: the read deleted
+	// with no call written over it, the branch's own edit the only thing beside
+	// the hole.
+	preloadReadDropped = `package cmd
+
+func buildRigSeats(b *bd.Client) {
+	// ONE wisps read for both label sets this listing wants.
+	if err := b.PreloadLabeledWisps("gt:agent", "gt:merge-request"); err != nil {
+		warnf(err)
+	}
+	audit("seats")
+}
+`
+)
+
+func newSupersededPreloadScenario(t *testing.T) scenarioPaths {
+	t.Helper()
+	p := cachedGitFixtureStrings(t, "supersededPreload", func(dir string) []string {
+		sp := buildSupersededPreloadScenario(t, dir)
+		return []string{sp.seed, sp.polecat}
+	})
+	return scenarioPaths{seed: p[0], polecat: p[1]}
+}
+
+func buildSupersededPreloadScenario(t *testing.T, dir string) scenarioPaths {
+	t.Helper()
+	remote := filepath.Join(dir, "origin.git")
+	seed := filepath.Join(dir, "seed")
+	polecat := filepath.Join(dir, "polecat")
+
+	runGitCmd(t, "", "init", "--bare", remote)
+	runGitCmd(t, remote, "symbolic-ref", "HEAD", "refs/heads/main")
+	runGitCmd(t, "", "clone", remote, seed)
+	runGitCmd(t, seed, "config", "user.email", "seed@example.com")
+	runGitCmd(t, seed, "config", "user.name", "Seed")
+	writeTestFileAt(t, filepath.Join(seed, preloadFile), preloadTwoReads)
+	runGitCmd(t, seed, "add", "-A")
+	runGitCmd(t, seed, "commit", "-m", "base")
+	runGitCmd(t, seed, "push", "origin", "main")
+
+	writeTestFileAt(t, filepath.Join(seed, preloadFile), preloadCollapsed)
+	runGitCmd(t, seed, "add", "-A")
+	runGitCmd(t, seed, "commit", "-m", preloadWispsSubject)
+	runGitCmd(t, seed, "push", "origin", "main")
+
+	// The purely additive commit, and the point the polecat's checkout is cut
+	// at: the branch under test descends from it, so nothing about it is stale.
+	writeTestFileAt(t, filepath.Join(seed, preloadFile), preloadWithIssues)
+	runGitCmd(t, seed, "add", "-A")
+	runGitCmd(t, seed, "commit", "-m", preloadIssuesSubject)
+	runGitCmd(t, seed, "push", "origin", "main")
+
+	runGitCmd(t, "", "clone", remote, polecat)
+	runGitCmd(t, polecat, "config", "user.email", "polecat@example.com")
+	runGitCmd(t, polecat, "config", "user.name", "Polecat")
+	runGitCmd(t, polecat, "switch", "-c", "polecat/zircon/gt-test")
+	return scenarioPaths{seed: seed, polecat: polecat}
+}
+
+// TestDetectRevertedMerges_SupersedingThePreloadsIsNoRevert is the gt-gas9g
+// incident: the branch writes the one combined call that does both reads' work
+// over the two calls main merged, which is the change its bead asked for. The
+// call it deletes was added on its own, so gt done refused the branch and an
+// operator had to grant --allow-reverts by hand (gt-59p7e).
+func TestIntegrationDetectRevertedMerges_SupersedingThePreloadsIsNoRevert(t *testing.T) {
+	t.Parallel()
+	s := newSupersededPreloadScenario(t)
+	commitPolecat(t, s.polecat, map[string]string{preloadFile: preloadCombined}, preloadSupersedeSubject)
+
+	report := detectRevertedMerges(t, s.polecat)
+	if len(report.Reverted) != 0 || len(report.Relocated) != 0 {
+		t.Errorf("detectRevertedMerges refused a branch that supersedes the merged reads: reverted %+v, relocated %+v",
+			report.Reverted, report.Relocated)
+	}
+}
+
+// TestDetectRevertedMerges_DeletingTheAddedReadStillRefuses is that reading's
+// fail-closed control: the same branch drops the added read with nothing
+// written over it, so the removal is the whole of the addition and the commit
+// that added it is still undone.
+func TestIntegrationDetectRevertedMerges_DeletingTheAddedReadStillRefuses(t *testing.T) {
+	t.Parallel()
+	s := newSupersededPreloadScenario(t)
+	commitPolecat(t, s.polecat, map[string]string{preloadFile: preloadReadDropped}, "refactor: drop the issues read (gt-test)")
+
+	report := detectRevertedMerges(t, s.polecat)
+	if len(report.Relocated) != 0 {
+		t.Errorf("detectRevertedMerges called a deletion a relocation: %+v", report.Relocated)
+	}
+	if len(report.Reverted) != 1 {
+		t.Fatalf("detectRevertedMerges found %d reverted commits, want 1: %+v", len(report.Reverted), report.Reverted)
+	}
+	wantCommit, err := git.NewGit(s.polecat).Rev("origin/main")
+	if err != nil {
+		t.Fatalf("rev origin/main: %v", err)
+	}
+	if report.Reverted[0].Commit != wantCommit {
+		t.Errorf("reverted commit = %s, want main's additive commit %s", report.Reverted[0].Commit, wantCommit)
+	}
+	if !containsString(report.Reverted[0].Paths, preloadFile) {
+		t.Errorf("reverted paths %v missing %s", report.Reverted[0].Paths, preloadFile)
+	}
+}

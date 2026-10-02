@@ -70,6 +70,14 @@ import (
 // line or two is what a one-line fix looks like, and such a line turns up in
 // any unrelated file, so only a hunk of minMovedCodeLines substantial lines is
 // excused by it (gt-s5eou).
+//
+// A sixth shape inverts the premise: not a candidate undoing a change but one
+// SUPERSEDING it. A branch that rewrites the merged reads into one combined call
+// deletes the lines the change added while the behavior they carried lives on in
+// the line beside them, and where the change only added lines nothing weighed
+// against the deletion — the other containment is vacuous for such a change — so
+// the branch was refused for doing what its bead asked (gt-gas9g). A change with
+// nothing to restore now has to have been removed in full.
 
 // revertScanCommits bounds how far back through target's history the check
 // looks. A candidate can only revert commits merged after its checkout was
@@ -263,7 +271,10 @@ func addPath(bucket []RevertedMerge, at map[string]int, commit, path string) []R
 //
 // Containment is required in both directions: a candidate that merely deletes
 // a file the commit touched, or that happens to add a line the commit
-// removed, is not reverting it.
+// removed, is not reverting it. A commit that only added lines has nothing to
+// restore, which makes the second direction vacuous; the first one then has to
+// hold as equality, or a branch that deletes the lines while writing a
+// replacement of its own would read as undoing them (gt-gas9g).
 //
 // Blank lines take no part in either direction. BlobDiffLines keys a blank line
 // as "" like any other, so a commit that only strips blank lines reads as
@@ -294,6 +305,19 @@ func changeIsInvertedBy(g RevertReader, preImage, postImage, base, head string) 
 	// content on both sides is a reading at all.
 	if len(changeAdded)+len(changeRemoved) == 0 || len(branchAdded)+len(branchRemoved) == 0 {
 		return false, nil
+	}
+	// A change with nothing to restore leaves the second containment free: an
+	// empty multiset is contained by anything, so however much the branch writes
+	// over the lines it deletes, deleting them reads as an inversion. That
+	// refused a branch whose edit SUPERSEDED the change instead of undoing it —
+	// the PreloadIssues call deleted beside the single combined call that now
+	// does its work, which is what the bead asked for (gt-gas9g). With nothing
+	// to restore, the removal must be the whole of the addition: a revert takes
+	// back everything the commit put there, while a superseding edit keeps the
+	// lines its replacement also needs — the warning, the closing brace — and
+	// rewrites the ones it replaces.
+	if len(changeRemoved) == 0 {
+		return multisetContains(branchRemoved, changeAdded) && multisetContains(changeAdded, branchRemoved), nil
 	}
 	return multisetContains(branchRemoved, changeAdded) && multisetContains(branchAdded, changeRemoved), nil
 }
