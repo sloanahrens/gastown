@@ -3,6 +3,7 @@ package land
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -27,6 +28,20 @@ const (
 	// note naming that exact head (gt-g8t3m). gt done removes it on every
 	// submission, so a new head is never waved through on an old review.
 	LabelOverseerReviewed = "gt:overseer-reviewed"
+	// LabelOverseerReviewWanted marks a work bead whose landing touched a
+	// risk path (RiskPathsFile) and so wants a post-landing look at that head
+	// (gt-vsct7.4). It is deliberately not LabelOverseerReviewed: that one
+	// says the overseer stood in for om, this one asks for a human. Land adds
+	// it and nothing strips it — a review does not remove it, and the
+	// attention item it feeds clears on the review note (OverseerReviewMarker).
+	LabelOverseerReviewWanted = "gt:overseer-review-wanted"
+
+	// OverseerReviewMarker opens the note line "OVERSEER REVIEW <full head
+	// sha> PASS|FAIL" that answers a risk-path item: it names the head a
+	// human looked at, and PASS or FAIL says what they found. It is not
+	// OverseerReviewedMarker — that marker says om was bypassed, and must not
+	// satisfy a risk-path item (gt-vsct7.4).
+	OverseerReviewMarker = "OVERSEER REVIEW"
 	// OverseerReviewedMarker opens the note line "OVERSEER REVIEWED <full
 	// head sha>" that binds the overseer's review to one head.
 	OverseerReviewedMarker = "OVERSEER REVIEWED"
@@ -155,6 +170,30 @@ func OverseerReviewed(issue *beads.Issue, head string) bool {
 	for _, line := range strings.Split(issue.Notes, "\n") {
 		rest, ok := strings.CutPrefix(strings.TrimSpace(line), OverseerReviewedMarker+" ")
 		if ok && strings.TrimSpace(rest) == head {
+			return true
+		}
+	}
+	return false
+}
+
+// overseerReviewLine matches "OVERSEER REVIEW <sha> PASS|FAIL", the note that
+// answers a risk-path item. The trailing \b keeps a word from extending a
+// verdict ("PASSED" is not PASS), and the sha is compared whole, so a review
+// of another head does not answer. It deliberately does not match
+// "OVERSEER REVIEWED ...": that marker says om was bypassed, not that a human
+// reviewed this head (gt-vsct7.4).
+var overseerReviewLine = regexp.MustCompile(`^OVERSEER REVIEW ([0-9a-f]{7,64}) (PASS|FAIL)\b`)
+
+// HasOverseerReviewNote reports whether notes carry an "OVERSEER REVIEW <head>
+// PASS|FAIL" line naming exactly head. Both verdicts answer a risk-path item:
+// a FAIL says the head was reviewed and the overseer files the follow-up,
+// which is not the queue's to hold (gt-vsct7.4).
+func HasOverseerReviewNote(notes, head string) bool {
+	if head == "" {
+		return false
+	}
+	for _, line := range strings.Split(notes, "\n") {
+		if m := overseerReviewLine.FindStringSubmatch(strings.TrimSpace(line)); m != nil && m[1] == head {
 			return true
 		}
 	}

@@ -22,6 +22,8 @@ type Repo interface {
 	TreesIdentical(a, b string) (bool, error)
 	CommitMessages(base, head string) ([]git.CommitMessage, error)
 	CommitLineStatsInRange(revRange string, limit int) ([]git.CommitLineStats, error)
+	DiffNameOnly(base, head string) ([]string, error)
+	ShowFileAtRev(ref, path string) (string, error)
 	PatchID(base, head string) (string, error)
 	FetchRefspecWithTimeout(remote, refspec string, timeout time.Duration) error
 	PushRemoteBranchTip(remote, branch string) (string, error)
@@ -232,6 +234,66 @@ func (h *handle) TreesIdentical(a, b string) (bool, error) {
 		return false, fmt.Errorf("resolve tree of %s: %w", b, unknownRevision(b+"^{tree}", "rev-parse", b+"^{tree}"))
 	}
 	return sameTree(h.f.treeOf(ai), h.f.treeOf(bi)), nil
+}
+
+// DiffNameOnly returns the paths whose content differs between base and head,
+// the shape *git.Git answers from `git diff --name-only base...head`. The fake
+// compares the two trees directly and so never computes a merge base: it
+// agrees with *git.Git only while base is an ancestor of head, which every
+// caller building head on base satisfies. A caller whose base is not an
+// ancestor must not read the fake's answer as git's.
+func (h *handle) DiffNameOnly(base, head string) ([]string, error) {
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	args := []string{"diff", "--name-only", base + "..." + head}
+	r, wt, err := h.locate(args...)
+	if err != nil {
+		return nil, err
+	}
+	b, ok := h.resolve(r, wt, base)
+	if !ok {
+		return nil, unknownRevision(base+"..."+head, args...)
+	}
+	hd, ok := h.resolve(r, wt, head)
+	if !ok {
+		return nil, unknownRevision(base+"..."+head, args...)
+	}
+	from, to := h.f.treeOf(b), h.f.treeOf(hd)
+	var out []string
+	for p, c := range to {
+		if fc, ok := from[p]; !ok || fc != c {
+			out = append(out, p)
+		}
+	}
+	for p := range from {
+		if _, ok := to[p]; !ok {
+			out = append(out, p)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// ShowFileAtRev returns path's contents at ref, or git.ErrNotAtRef when ref's
+// tree has no such path. A ref that does not resolve stays an error, like
+// *git.Git: an absent path and a broken ref must not read the same.
+func (h *handle) ShowFileAtRev(ref, path string) (string, error) {
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	args := []string{"show", ref + ":" + path}
+	r, wt, err := h.locate(args...)
+	if err != nil {
+		return "", err
+	}
+	id, ok := h.resolve(r, wt, ref)
+	if !ok {
+		return "", unknownRevision(ref, args...)
+	}
+	content, ok := h.f.treeOf(id)[path]
+	if !ok {
+		return "", git.ErrNotAtRef
+	}
+	return strings.TrimSpace(content), nil
 }
 
 // resolveRange resolves base..head for a log.

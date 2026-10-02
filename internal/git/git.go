@@ -1738,6 +1738,27 @@ func (g *Git) ShowFile(ref, path string) (string, error) {
 	return out, nil
 }
 
+// ErrNotAtRef reports that a path is absent from a revision's tree. It is the
+// answer ShowFileAtRev gives for a file that does not exist at ref, so a
+// caller can tell "the file is not there" from "git failed": ShowFile folds
+// both into one error.
+var ErrNotAtRef = errors.New("path does not exist at ref")
+
+// ShowFileAtRev returns path's contents at ref, or ErrNotAtRef when path is
+// not in ref's tree. Unlike ShowFile, an absent file is an answer, and a ref
+// that does not resolve or an unreadable object stays a real error: the ref
+// is verified first so a broken repository cannot read as an empty file
+// (land.RiskPaths relies on exactly that split).
+func (g *Git) ShowFileAtRev(ref, path string) (string, error) {
+	if _, err := g.run("rev-parse", "--verify", "--quiet", ref+"^{commit}"); err != nil {
+		return "", fmt.Errorf("resolving %s: %w", ref, err)
+	}
+	if _, err := g.run("cat-file", "-e", ref+":"+path); err != nil {
+		return "", ErrNotAtRef
+	}
+	return g.ShowFile(ref, path)
+}
+
 // CheckoutFileFromRef restores a file from a given ref (e.g., "origin/main").
 // Equivalent to: git checkout <ref> -- <path>
 func (g *Git) CheckoutFileFromRef(ref string, paths ...string) error {

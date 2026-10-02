@@ -1,6 +1,7 @@
 package gitfake
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/git"
 )
 
 // Env builds the contract's fixtures and opens the implementation under
@@ -202,6 +205,28 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 		}
 		if _, err := g.TreesIdentical("no-such-ref", fx.head); err == nil {
 			t.Error("TreesIdentical of an unknown ref succeeded")
+		}
+	})
+
+	t.Run("DiffNameOnly names the change, ShowFileAtRev reads one file", func(t *testing.T) {
+		t.Parallel()
+		fx := newFixture(t, newEnv(t))
+		g := fx.env.Open(fx.clone)
+		// The branch adds b.txt, so the change base..head is exactly b.txt.
+		if got, err := g.DiffNameOnly(fx.base, fx.head); err != nil || !reflect.DeepEqual(got, []string{"b.txt"}) {
+			t.Errorf("DiffNameOnly = %q, %v; want [b.txt]", got, err)
+		}
+		if got, err := g.ShowFileAtRev(fx.head, "b.txt"); err != nil || got != "work" {
+			t.Errorf("ShowFileAtRev(b.txt) = %q, %v; want work", got, err)
+		}
+		// A path not in the ref's tree is an answer, not a failure.
+		if got, err := g.ShowFileAtRev(fx.base, "b.txt"); !errors.Is(err, git.ErrNotAtRef) {
+			t.Errorf("ShowFileAtRev of a missing path = %q, %v; want ErrNotAtRef", got, err)
+		}
+		// A ref that does not resolve stays a real error: absent and broken
+		// must not read the same.
+		if _, err := g.ShowFileAtRev("no-such-ref", "b.txt"); err == nil || errors.Is(err, git.ErrNotAtRef) {
+			t.Errorf("ShowFileAtRev of an unknown ref = %v; want a real error", err)
 		}
 	})
 
