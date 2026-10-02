@@ -30,6 +30,28 @@ func TestGetEmbeddedFormulas(t *testing.T) {
 	}
 }
 
+// TestFormulasDirHoldsOnlyEmbeddedFiles fails when internal/formula/formulas/
+// holds a file the embed glob (formulas/*.formula.toml) leaves out. Nothing
+// ships such a file: it is invisible to the binary, to the town sync and to
+// every sweep that reads the embedded FS, so prose no agent executes and a
+// shell block no test scans both hide there unread (gt-jdi2m).
+func TestFormulasDirHoldsOnlyEmbeddedFiles(t *testing.T) {
+	t.Parallel()
+	entries, err := os.ReadDir("formulas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	embedded, err := getEmbeddedFormulas()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if _, ok := embedded[e.Name()]; !ok {
+			t.Errorf("formulas/%s is in the source dir but not in the embedded set: nothing ships it, so no sweep reads it", e.Name())
+		}
+	}
+}
+
 // TestGetEmbeddedFormulaContent verifies extraction of individual embedded formulas.
 func TestGetEmbeddedFormulaContent(t *testing.T) {
 	t.Parallel()
