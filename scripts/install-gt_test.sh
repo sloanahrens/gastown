@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Tests for scripts/install-gt.sh: the one install path (`make install`,
-# rebuild-gt; claude-7fc, gt-z0l3s). A stub make on PATH "installs" by
-# writing a stub gt that reports a chosen commit; the stub gt answers
-# stale/version/sync/escalate/slot and logs what it was asked.
+# rebuild-gt; claude-7fc, gt-z0l3s). A stub make on PATH builds a stub gt that
+# reports a chosen commit and "installs" by copying it into place; the stub gt
+# answers stale/version/sync/escalate/slot and logs what it was asked.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -79,12 +79,22 @@ for a in "$@"; do
   esac
 done
 case "$target" in
-  build) [ -e "$T_WORLD/fail_build" ] && { echo "build failed" >&2; exit 2; }; exit 0 ;;
+  build)
+    [ -e "$T_WORLD/fail_build" ] && { echo "build failed" >&2; exit 2; }
+    # The build output: a stub gt reporting this build's commit (new_commit when
+    # a case pins one, else the rig's HEAD), landing where the real Makefile's
+    # $(BUILD_DIR)/$(BINARY) does.
+    c=$(cat "$T_WORLD/new_commit" 2>/dev/null || git rev-parse --short HEAD)
+    sed "s/__COMMIT__/$c/" "$T_WORLD/gt.tmpl" > "$T_WORLD/rig/gt"
+    chmod +x "$T_WORLD/rig/gt"
+    exit 0 ;;
   install-local)
     if [ -e "$T_WORLD/already_at_head" ]; then echo "Binary is already at HEAD, nothing to do"; exit 1; fi
     [ -e "$T_WORLD/fail_install" ] && exit 2
-    c=$(cat "$T_WORLD/new_commit" 2>/dev/null || git rev-parse --short HEAD)
-    sed "s/__COMMIT__/$c/" "$T_WORLD/gt.tmpl" > "$inst/.gt.new"
+    # install-binary.sh's copy of that build output into the install dir, and
+    # nothing more: every install-gt step around it belongs to install-gt.sh,
+    # signing included, so the test exercises that step and not a stand-in.
+    cp "$T_WORLD/rig/gt" "$inst/.gt.new"
     chmod +x "$inst/.gt.new"
     # simulate_immutable_replace marker: stand in for install-binary.sh's own
     # gt-vya0s clear-flag/replace/re-set-flag bracket, so a case can leave the
@@ -112,6 +122,7 @@ run_install() {
     if [ -n "${CALLER_ACTOR:-}" ]; then export BD_ACTOR="$CALLER_ACTOR"; fi
     export T_WORLD="$t" INSTALL_GT_BIN_DIR="$t/bin" INSTALL_GT_DAEMON_DIR="$t/daemon" \
       INSTALL_GT_RIG_DIR="$t/rig" INSTALL_GT_LOCK_WAIT="${LOCK_WAIT:-5}" \
+      INSTALL_GT_SIGN_DIR="$t/signing" \
       PATH="$t/stubs:/usr/bin:/bin:/opt/homebrew/bin:/usr/sbin:/sbin"
     bash "$INSTALLER" "$@" ) > "$t/run.out" 2>&1 || rc=$?
   echo "$rc"
@@ -124,6 +135,11 @@ last_receipt() {
 
 # actors T -> the distinct BD_ACTOR values the gt stub ran with, one line
 actors() { sort -u "$1/actors.log" 2>/dev/null | tr '\n' ' ' | sed 's/ $//'; }
+
+# escalations T -> the escalations the install raised: every gt.log escalation
+# line except the `escalate clear` of the fingerprints it just resolved, which
+# a successful install always runs (the stub logs 'escalate' plus its argv).
+escalations() { grep "^escalate " "$1/gt.log" 2>/dev/null | grep -v -- "escalate clear" || true; }
 
 # reported T -> the commit the installed gt stub reports
 reported() { "$1/bin/gt" stale --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["binary_commit"])'; }
@@ -313,6 +329,7 @@ run_located() {
   cp "$SCRIPT_DIR/lib/install-gt-lib.sh" "$dir/lib/"
   ( unset GT_TOWN_ROOT INSTALL_GT_DAEMON_DIR INSTALL_GT_RIG_DIR
     export T_WORLD="$t" INSTALL_GT_BIN_DIR="$t/bin" INSTALL_GT_LOCK_WAIT=5 \
+      INSTALL_GT_SIGN_DIR="$t/signing" \
       PATH="$t/stubs:/usr/bin:/bin:/opt/homebrew/bin:/usr/sbin:/sbin"
     bash "$dir/install-gt.sh" "$@" ) > "$t/run.out" 2>&1 || rc=$?
   echo "$rc"
@@ -430,6 +447,151 @@ rc=$(CALLER_ACTOR=daemon run_install "$T" --sha "$(cat "$T/c2")" --source rebuil
 [ "$rc" = "0" ] && [ "$(actors "$T")" = "daemon" ] \
   && pass "caller actor: every gt ran as BD_ACTOR=daemon" \
   || fail "caller actor: rc=$rc gt actors '$(actors "$T")'"
+
+# --- Case 18: signing (gt-426fo.1). install-gt signs the binary install-local
+# installed, before the smoke check runs it, so the installed gt keeps the
+# identifier the Developer Tools grant is keyed on; missing material or a failing
+# codesign is one WARN and an ad-hoc install, never a failure or a rollback. ---
+
+# KEYCHAINS_ORIG / restore_keychains: codesign only finds an identity in a
+# keychain the user's search list carries, so the throwaway one below goes on
+# that list for the case and comes back off whatever the case does. SIGN_KC is
+# deleted before the list is restored, so it never dangles.
+KEYCHAINS_ORIG=$(security list-keychains -d user 2>/dev/null | tr -d '"' | tr '\n' ' ' || true)
+KEYCHAINS_ORIG="${KEYCHAINS_ORIG% }"
+SIGN_KC=""
+restore_keychains() {
+  [ -n "$SIGN_KC" ] && security delete-keychain "$SIGN_KC" 2>/dev/null || true
+  [ -n "$KEYCHAINS_ORIG" ] && security list-keychains -d user -s $KEYCHAINS_ORIG 2>/dev/null || true
+}
+trap restore_keychains EXIT
+
+# make_signing_material T PASSWORD — a throwaway self-signed code-signing
+# identity named gastown-test-unattended in $T/signing/gastown-signing.keychain-db,
+# with its PASSWORD in the 0600 file beside it, as the installer expects. 0 on
+# success; anything missing (no security/codesign/openssl, or an openssl whose
+# PKCS#12 `security import` refuses) returns 1 so the case can SKIP.
+make_signing_material() {
+  local t="$1" pw="$2" kc="$1/signing/gastown-signing.keychain-db"
+  command -v security >/dev/null 2>&1 && command -v codesign >/dev/null 2>&1 \
+    && command -v openssl >/dev/null 2>&1 || return 1
+  [ -n "$SIGN_KC" ] && security delete-keychain "$SIGN_KC" 2>/dev/null || true
+  SIGN_KC=""
+  mkdir -p "$t/signing"
+  security create-keychain -p "$pw" "$kc" || return 1
+  SIGN_KC="$kc"
+  security unlock-keychain -p "$pw" "$kc" || return 1
+  openssl req -x509 -newkey rsa:2048 -sha256 -days 2 -nodes \
+    -keyout "$t/signing/test.key" -out "$t/signing/test.crt" \
+    -subj "/CN=gastown-test-unattended" \
+    -addext "basicConstraints=critical,CA:FALSE" \
+    -addext "keyUsage=critical,digitalSignature" \
+    -addext "extendedKeyUsage=critical,codeSigning" 2>/dev/null || return 1
+  # OpenSSL 3 writes a PKCS#12 (AES-256/PBKDF2) that `security import` refuses
+  # with "MAC verification failed"; -legacy restores the SHA1/3DES encoding it
+  # takes. macOS's own LibreSSL has no -legacy and already writes that encoding.
+  openssl pkcs12 -export -legacy -out "$t/signing/test.p12" -inkey "$t/signing/test.key" \
+    -in "$t/signing/test.crt" -passout "pass:$pw" -name gastown-test-unattended 2>/dev/null \
+    || openssl pkcs12 -export -out "$t/signing/test.p12" -inkey "$t/signing/test.key" \
+         -in "$t/signing/test.crt" -passout "pass:$pw" -name gastown-test-unattended 2>/dev/null \
+    || return 1
+  security import "$t/signing/test.p12" -k "$kc" -P "$pw" \
+    -T /usr/bin/codesign -T /usr/bin/security >/dev/null 2>&1 || return 1
+  security set-key-partition-list -S apple-tool:,apple: -s -k "$pw" "$kc" >/dev/null 2>&1 || return 1
+  printf '%s' "$pw" > "$t/signing/keychain.pass"
+  chmod 600 "$t/signing/keychain.pass"
+  # Appended, so the case never changes which keychain answers a lookup first
+  # for anything else on the machine while it runs.
+  security list-keychains -d user -s $KEYCHAINS_ORIG "$kc" || return 1
+  return 0
+}
+
+SIGN_PW="signtest-pw-4a2f"
+T=$(make_world)
+if make_signing_material "$T" "$SIGN_PW"; then
+  rc=$(INSTALL_GT_SIGN_IDENTITY=gastown-test-unattended run_install "$T" --sha "$(cat "$T/c2")" --source manual)
+  [ "$rc" = "0" ] && pass "signed install: exit 0" || fail "signed install: rc=$rc $(cat "$T/run.out")"
+  [ "$(codesign -dv "$T/bin/gt" 2>&1 | sed -n 's/^Identifier=//p')" = "com.gastown.gt" ] \
+    && pass "signed install: installed gt reports Identifier=com.gastown.gt" \
+    || fail "signed install: identifier '$(codesign -dv "$T/bin/gt" 2>&1 | tr '\n' ' ')'"
+  [ "$(reported "$T")" = "$(cat "$T/c2")" ] && pass "signed install: signed gt still passes the smoke check" \
+    || fail "signed install: in force $(reported "$T")"
+  grep -q "Signed .* as com.gastown.gt" "$T/run.out" && pass "signed install: logged the signature" \
+    || fail "signed install: no signing line: $(cat "$T/run.out")"
+  [ -z "$(escalations "$T")" ] && pass "signed install: no escalation" \
+    || fail "signed install: escalated: $(escalations "$T")"
+  for f in run.out make.log gt.log; do
+    if grep -q "$SIGN_PW" "$T/$f" 2>/dev/null; then fail "signed install: the password reached $f"; else pass "signed install: password never in $f"; fi
+  done
+
+  # A keychain that holds no identity by the name the caller asked for: codesign
+  # fails, and that too is a WARN with the install carrying on ad-hoc.
+  T=$(make_world)
+  make_signing_material "$T" "$SIGN_PW" || true
+  rc=$(INSTALL_GT_SIGN_IDENTITY=gastown-absent run_install "$T" --sha "$(cat "$T/c2")" --source manual)
+  [ "$rc" = "0" ] && [ "$(reported "$T")" = "$(cat "$T/c2")" ] \
+    && pass "codesign fails: exit 0, install proceeds ad-hoc" \
+    || fail "codesign fails: rc=$rc in force $(reported "$T" 2>/dev/null)"
+  grep -q "WARNING: installing ad-hoc: codesign failed: .*no identity found" "$T/run.out" \
+    && pass "codesign fails: WARN names the failure" || fail "codesign fails: $(grep WARNING "$T/run.out")"
+  [ -z "$(escalations "$T")" ] && pass "codesign fails: no escalation, no rollback" \
+    || fail "codesign fails: escalated: $(escalations "$T")"
+
+  # The OS-immutable flag install-binary.sh leaves on the installed binary must
+  # not stop the signing rename — sign_binary takes it off, replaces the binary,
+  # and puts it back.
+  if immutable_supported; then
+    T=$(make_world)
+    touch "$T/simulate_immutable_replace"
+    make_signing_material "$T" "$SIGN_PW" || true
+    rc=$(INSTALL_GT_SIGN_IDENTITY=gastown-test-unattended run_install "$T" --sha "$(cat "$T/c2")" --source manual)
+    [ "$rc" = "0" ] && pass "signed install (immutable): exit 0" \
+      || fail "signed install (immutable): rc=$rc $(cat "$T/run.out")"
+    [ "$(codesign -dv "$T/bin/gt" 2>&1 | sed -n 's/^Identifier=//p')" = "com.gastown.gt" ] \
+      && pass "signed install (immutable): signed despite the flag" \
+      || fail "signed install (immutable): identifier '$(codesign -dv "$T/bin/gt" 2>&1 | tr '\n' ' ')'"
+    rc2=0
+    ( printf 'STUB\n' > "$T/bin/gt" ) 2>/dev/null || rc2=$?
+    [ "$rc2" -ne 0 ] && pass "signed install (immutable): flag back on after signing" \
+      || fail "signed install (immutable): flag lost"
+    chflags nouchg "$T/bin/gt" 2>/dev/null || chattr -i "$T/bin/gt" 2>/dev/null || true
+  else
+    echo "  SKIP: OS immutable-flag enforcement unavailable on this host — the signed-install-under-immutable-flag check was not run"
+  fi
+else
+  echo "  SKIP: could not build a throwaway code-signing keychain on this host — the signed-install checks were not run"
+fi
+
+# --- Case 19: no signing material -> one WARN naming the missing path, and the
+# install proceeds ad-hoc. ---
+T=$(make_world)
+rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source manual)
+[ "$rc" = "0" ] && [ "$(reported "$T")" = "$(cat "$T/c2")" ] \
+  && pass "no signing material: exit 0, installed ad-hoc" || fail "no signing material: rc=$rc"
+[ "$(grep -c "WARNING: installing ad-hoc: no keychain at $T/signing/gastown-signing.keychain-db" "$T/run.out")" = "1" ] \
+  && pass "no signing material: one WARN naming the missing keychain" \
+  || fail "no signing material: $(grep WARNING "$T/run.out")"
+
+T=$(make_world)
+mkdir -p "$T/signing"
+: > "$T/signing/gastown-signing.keychain-db"
+rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source manual)
+[ "$rc" = "0" ] && [ "$(grep -c "WARNING: installing ad-hoc: no password file at $T/signing/keychain.pass" "$T/run.out")" = "1" ] \
+  && pass "no password file: one WARN naming it, install proceeds" \
+  || fail "no password file: rc=$rc $(grep WARNING "$T/run.out")"
+
+# --- Case 20: not a keychain at all -> unlock fails, still just a WARN. ---
+T=$(make_world)
+mkdir -p "$T/signing"
+printf 'not a keychain\n' > "$T/signing/gastown-signing.keychain-db"
+printf 'pw' > "$T/signing/keychain.pass"
+rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source manual)
+[ "$rc" = "0" ] && [ "$(reported "$T")" = "$(cat "$T/c2")" ] \
+  && pass "unlock fails: exit 0, installed ad-hoc" || fail "unlock fails: rc=$rc"
+grep -q "WARNING: installing ad-hoc: cannot unlock $T/signing/gastown-signing.keychain-db" "$T/run.out" \
+  && pass "unlock fails: WARN names the keychain" || fail "unlock fails: $(grep WARNING "$T/run.out")"
+[ -z "$(escalations "$T")" ] && pass "unlock fails: no escalation, no rollback" \
+  || fail "unlock fails: escalated: $(escalations "$T")"
 
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi
 echo "all install-gt tests passed"
