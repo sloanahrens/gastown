@@ -55,23 +55,6 @@ func TestCheckSessionHealth_UnanswerableExistenceIsUnknown(t *testing.T) {
 	}
 }
 
-// TestCleanupOrphanedSessions_LivenessErrorKillsNothing: the sweep kills only
-// sessions confirmed dead; an unanswerable liveness query leaves them alone.
-func TestCleanupOrphanedSessions_LivenessErrorKillsNothing(t *testing.T) {
-	t.Parallel()
-	f := newFakeServer()
-	f.addSession("gt-live", "claude")
-	tm, _ := failingShowEnv(f)
-
-	cleaned, err := tm.CleanupOrphanedSessions(func(string) bool { return true })
-	if err != nil {
-		t.Fatalf("CleanupOrphanedSessions: %v", err)
-	}
-	if cleaned != 0 || !f.has("gt-live") {
-		t.Fatalf("cleaned=%d, session present=%v; want 0 and true", cleaned, f.has("gt-live"))
-	}
-}
-
 // TestZombieStatus_CountsAsRunning pins the rule every IsRunning wrapper
 // (polecat, witness, refinery) uses: unknown counts as running, so a
 // failed query never leads a caller to start a second agent into the session.

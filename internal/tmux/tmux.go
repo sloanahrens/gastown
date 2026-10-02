@@ -5028,49 +5028,6 @@ func CurrentSessionName() string {
 	return strings.TrimSpace(string(out))
 }
 
-// CleanupOrphanedSessions scans for zombie Gas Town sessions and kills them.
-// A zombie session is one where tmux is alive but the Claude process has died.
-// This runs at `gt start` time to prevent session name conflicts and resource accumulation.
-//
-// The isGTSession predicate identifies Gas Town sessions (e.g. (*session.PrefixRegistry).IsKnownSession).
-// It is passed as a parameter to avoid a circular import from tmux → session.
-//
-// Returns:
-//   - cleaned: number of zombie sessions that were killed
-//   - err: error if session listing failed (individual kill errors are logged but not returned)
-func (t *Tmux) CleanupOrphanedSessions(isGTSession func(string) bool) (cleaned int, err error) {
-	sessions, err := t.ListSessions()
-	if err != nil {
-		return 0, fmt.Errorf("listing sessions: %w", err)
-	}
-
-	for _, sess := range sessions {
-		// Only process Gas Town sessions
-		if !isGTSession(sess) {
-			continue
-		}
-
-		// Check if the session is a zombie (tmux alive, agent dead). A failed
-		// liveness query is unknown, not dead: leave the session alone.
-		alive, aliveErr := t.IsAgentAliveChecked(sess)
-		if aliveErr != nil {
-			fmt.Printf("  warning: liveness of %s unknown (%v); not cleaned\n", sess, aliveErr)
-			continue
-		}
-		if !alive {
-			// Kill the zombie session
-			if killErr := t.KillSessionWithProcesses(sess); killErr != nil {
-				// Log but continue - other sessions may still need cleanup
-				fmt.Printf("  warning: failed to kill orphaned session %s: %v\n", sess, killErr)
-				continue
-			}
-			cleaned++
-		}
-	}
-
-	return cleaned, nil
-}
-
 // SetPaneDiedHook sets a pane-died hook on a session to detect crashes.
 // When the pane exits, tmux runs the hook command with exit status info.
 // The agentID is used to identify the agent in crash logs (e.g., "gastown/Toast").
