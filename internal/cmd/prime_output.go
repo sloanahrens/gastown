@@ -326,6 +326,7 @@ func outputUnknownContext(w io.Writer, ctx RoleContext) {
 	}
 	fmt.Fprintln(w, "Navigate to a specific agent directory:")
 	fmt.Fprintln(w, "- `<rig>/polecats/<name>/` - Polecat role")
+	fmt.Fprintln(w, "- `<rig>/crew/<name>/` - Crew role")
 	fmt.Fprintln(w, "- `mayor/` or `<rig>/mayor/` - Mayor role")
 	fmt.Fprintln(w, "- Town root is neutral (set GT_ROLE or cd into a role directory)")
 	fmt.Fprintln(w)
