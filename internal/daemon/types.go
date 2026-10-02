@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -330,19 +331,28 @@ func GetPatrolRigs(config *DaemonPatrolConfig, patrol string) []string {
 // loadDisabledPatrolsFromTownSettings loads the disabled_patrols list from
 // town settings (settings/config.json) as a set for O(1) lookup.
 func loadDisabledPatrolsFromTownSettings(townRoot string) map[string]bool {
-	settingsPath := filepath.Join(townRoot, "settings", "config.json")
-	data, err := os.ReadFile(settingsPath) //nolint:gosec // G304: path constructed internally
+	return loadDisabledPatrolsFromTownSettingsTo(townRoot, os.Stderr)
+}
+
+// loadDisabledPatrolsFromTownSettingsTo is loadDisabledPatrolsFromTownSettings
+// with the warning writer passed in, so a unit test reads the line without
+// swapping the process's stderr.
+//
+// It reads through the config loader so a file the kernel rejects (an unknown
+// key, say) is named by *config.ParseError instead of being read as a town
+// with nothing disabled (gt-y3pgh.2.7). The patrols stay enabled either way:
+// this reader gates a subset of the daemon's work, not the town's startup.
+func loadDisabledPatrolsFromTownSettingsTo(townRoot string, warn io.Writer) map[string]bool {
+	settings, err := agentconfig.LoadOrCreateTownSettings(agentconfig.TownSettingsPath(townRoot))
 	if err != nil {
+		fmt.Fprintf(warn, "daemon: %v\n", err)
 		return nil
 	}
-	var raw struct {
-		DisabledPatrols []string `json:"disabled_patrols"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil || len(raw.DisabledPatrols) == 0 {
+	if len(settings.DisabledPatrols) == 0 {
 		return nil
 	}
-	disabled := make(map[string]bool, len(raw.DisabledPatrols))
-	for _, p := range raw.DisabledPatrols {
+	disabled := make(map[string]bool, len(settings.DisabledPatrols))
+	for _, p := range settings.DisabledPatrols {
 		disabled[p] = true
 	}
 	return disabled

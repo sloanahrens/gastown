@@ -724,17 +724,10 @@ func FindRigsUsingTheme(townRoot, theme string) []string {
 
 	var using []string
 	for rigName := range registry.Rigs {
-		settingsPath := filepath.Join(townRoot, rigName, "settings", "config.json")
-		sdata, err := os.ReadFile(settingsPath)
+		// No settings file, or one the kernel rejects, is a rig that reports
+		// no style: skip it rather than count it as using the theme.
+		settings, err := config.LoadRigSettings(config.RigSettingsPath(filepath.Join(townRoot, rigName)))
 		if err != nil {
-			continue
-		}
-		var settings struct {
-			Namepool *struct {
-				Style string `json:"style"`
-			} `json:"namepool"`
-		}
-		if err := json.Unmarshal(sdata, &settings); err != nil {
 			continue
 		}
 		if settings.Namepool != nil && settings.Namepool.Style == theme {

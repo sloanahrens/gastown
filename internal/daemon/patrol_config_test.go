@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -134,6 +135,43 @@ func TestLoadDisabledPatrolsFromTownSettings(t *testing.T) {
 	}
 	if got["witness"] {
 		t.Error("expected witness to NOT be disabled")
+	}
+}
+
+// TestLoadDisabledPatrolsFromTownSettings_UnknownKeyIsReported pins the
+// fail-closed read: a key the town settings type does not declare is not
+// silently read as a town with nothing disabled (gt-y3pgh.2.7).
+func TestLoadDisabledPatrolsFromTownSettings_UnknownKeyIsReported(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	settingsDir := filepath.Join(tmpDir, "settings")
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(settingsDir, "config.json")
+	if err := os.WriteFile(settingsPath, []byte(`{
+		"type": "town-settings", "version": 1,
+		"disabled_patrols": ["witness"],
+		"undeclared_key": true
+	}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var logged bytes.Buffer
+	got := loadDisabledPatrolsFromTownSettingsTo(tmpDir, &logged)
+
+	if got != nil {
+		t.Errorf("expected nil for a file with an undeclared key, got %v", got)
+	}
+	line := strings.TrimSuffix(logged.String(), "\n")
+	if line == "" {
+		t.Fatal("expected one logged line naming the file, got none")
+	}
+	if n := strings.Count(line, "\n") + 1; n != 1 {
+		t.Errorf("expected one logged line, got %d:\n%s", n, line)
+	}
+	if !strings.Contains(line, settingsPath) {
+		t.Errorf("logged line does not name %s: %q", settingsPath, line)
 	}
 }
 
