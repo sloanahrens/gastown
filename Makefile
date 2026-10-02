@@ -1,4 +1,4 @@
-.PHONY: build install install-local uninstall check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate gate-lint gate-test tier-check presubmit exec-tax-preflight
+.PHONY: build install install-local uninstall check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-integration-wall test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate gate-lint gate-test tier-check presubmit exec-tax-preflight
 
 # The gate (docs/testing.md, "The gate"). Three tiers, each one target, and
 # every caller runs them verbatim: CI, gt done, the land path and a human at a
@@ -41,6 +41,14 @@
 #                          then every package in internal/testpolicy/docker.txt
 #                          whole, with GT_TEST_DOCKER=1. It starts containers,
 #                          so run it under `gt slot run`.
+#   make test-integration-wall
+#                          test-integration with a wall report (gt-ik4a1.4.5):
+#                          the same two commands, each -json, through one
+#                          tierwall run that prints a line per package,
+#                          slowest first, then the tier's wall against the 90s
+#                          the post-merge cadence waits for (gt-ik4a1.4). Nothing
+#                          fails on wall unless TIERWALL_FLAGS asks. It starts
+#                          containers, so run it under `gt slot run`.
 #   make test              all three, in that order, for a human. It starts
 #                          containers, so run it under `gt slot run`.
 #
@@ -390,6 +398,31 @@ test-integration:
 	@test -n "$(strip $(DOCKER_PKGS))" || { echo "test-integration: internal/testpolicy/docker.txt lists no package; refusing to run go test over nothing" >&2; exit 1; }
 	GT_TEST_DOCKER=1 $(INTEGRATION_GO_TEST) -tags integration -timeout 20m ./...
 	GT_TEST_DOCKER=1 $(INTEGRATION_GO_TEST) -timeout 20m $(DOCKER_PKGS)
+
+# test-integration-wall is test-integration with the tier's wall measured
+# (gt-ik4a1.4.5): the same two commands, each -json, both through one
+# internal/testpolicy/cmd/tierwall run, which prints a line per package,
+# slowest first, then the tier's own wall against the 90s the post-merge
+# cadence waits for (gt-ik4a1.4). scripts/tier-sweep.sh runs one package at a
+# time and logs only go test's ok line, so that wall was never measured.
+#
+# Nothing here fails on wall: wall time varies with host load, and a red
+# post-land run reverts landings (gt-z7qtk). TIERWALL_FLAGS=-max-wall=90s asks
+# for that failure. Either way the target sets GT_TEST_DOCKER=1, so it starts
+# containers and belongs under `gt slot run`.
+#
+# The recipe runs under bash for `set -o pipefail`, which keeps go test's own
+# failure red: without it the pipeline's exit status is tierwall's alone, and
+# a go test that died before emitting a FAIL event would read green.
+# TIERWALL_FLAGS is a variable only so a caller can add -max-wall.
+TIERWALL_FLAGS ?=
+test-integration-wall: SHELL := /bin/bash
+test-integration-wall:
+	@test -n "$(strip $(DOCKER_PKGS))" || { echo "test-integration-wall: internal/testpolicy/docker.txt lists no package; refusing to run go test over nothing" >&2; exit 1; }
+	@set -o pipefail; { \
+		GT_TEST_DOCKER=1 $(INTEGRATION_GO_TEST) -json -tags integration -timeout 20m ./...; \
+		GT_TEST_DOCKER=1 $(INTEGRATION_GO_TEST) -json -timeout 20m $(DOCKER_PKGS); \
+	} | go run ./internal/testpolicy/cmd/tierwall $(TIERWALL_FLAGS)
 
 # test-timing measures the unit tier in a tmux server started by launchd, which
 # macOS does not exempt from its first-run scan of new executables. It is the

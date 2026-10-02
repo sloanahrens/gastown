@@ -5,8 +5,10 @@
 # (a warning fails nothing, gt-2ycne.1), lint, build and the unit
 # tier over every package in that order (no slow tier since gt-ik4a1.9),
 # test-slow runs the gate and then the shell tests, neither starts a container
-# or takes the container-gate slot, and the integration tier runs every
-# Docker-backed package listed in internal/testpolicy/docker.txt.
+# or takes the container-gate slot, the integration tier runs every
+# Docker-backed package listed in internal/testpolicy/docker.txt, and
+# test-integration-wall reruns that tier through tierwall for the wall its
+# post-merge cadence is judged by (gt-ik4a1.4.5).
 #
 # The recipe shape is read through `make -n`, which prints recipes without
 # running them. That only holds while no gate recipe line references $(MAKE):
@@ -196,6 +198,36 @@ if [[ -z "$missing" ]]; then
   pass "test-integration runs every package in internal/testpolicy/docker.txt"
 else
   fail "test-integration runs every package in internal/testpolicy/docker.txt; missing:$missing" "$iout"
+fi
+
+echo "test-integration-wall"
+if wout=$(dry test-integration-wall); then
+  pass "make -n test-integration-wall exits 0"
+else
+  fail "make -n test-integration-wall exits 0" "$wout"
+fi
+# The wall report is only worth reading if it measures the tier the cadence
+# runs (gt-ik4a1.4.5), so each of test-integration's two go test commands must
+# reappear verbatim but for -json.
+wall_missing=""
+while IFS= read -r line; do
+  [[ "$line" != GT_TEST_DOCKER=1' go test '* ]] && continue
+  want="${line/'go test '/'go test -json '}"
+  grep -q -F -- "$want" <<<"$wout" || wall_missing="$wall_missing [$want]"
+done <<<"$iout"
+if [[ -z "$wall_missing" ]]; then
+  pass "test-integration-wall runs test-integration's two go test commands, each -json"
+else
+  fail "test-integration-wall runs test-integration's two go test commands, each -json; missing:$wall_missing" "$wout"
+fi
+wall_runs=$(grep -c -F -- 'GT_TEST_DOCKER=1 go test -json' <<<"$wout" || true)
+wall_tool=$(grep -c -F 'cmd/tierwall' <<<"$wout" || true)
+# set -o pipefail is what keeps a go test that died before emitting a FAIL
+# event red; without it the pipeline's exit status is tierwall's alone.
+if [[ "$wall_runs" == 2 && "$wall_tool" == 1 ]] && grep -q -F 'set -o pipefail' <<<"$wout" && grep -q -F 'test-integration-wall: internal/testpolicy/docker.txt lists no package' <<<"$wout" && no_run_filter "$wout"; then
+  pass "test-integration-wall pipes both commands through one tierwall run under pipefail, containers on, no -run filter"
+else
+  fail "test-integration-wall pipes both commands through one tierwall run under pipefail, containers on, no -run filter (lines: runs=$wall_runs tierwall=$wall_tool)" "$wout"
 fi
 
 echo "gate: failure paths, driven with stubs"

@@ -1,0 +1,35 @@
+{"Time":"2026-10-02T11:00:00.000000-05:00","Action":"start","Package":"github.com/steveyegge/gastown/internal/cmd"}
+{"Time":"2026-10-02T11:00:00.100000-05:00","Action":"run","Package":"github.com/steveyegge/gastown/internal/cmd","Test":"TestSlowThing"}
+{"Time":"2026-10-02T11:00:00.100500-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/cmd","Test":"TestSlowThing","Output":"=== RUN   TestSlowThing\n","OutputType":"frame"}
+{"Time":"2026-10-02T11:03:23.200000-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/cmd","Test":"TestSlowThing","Output":"    slow_test.go:12: a passing test's own line\n"}
+{"Time":"2026-10-02T11:03:23.200100-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/cmd","Test":"TestSlowThing","Output":"--- PASS: TestSlowThing (203.10s)\n","OutputType":"frame"}
+{"Time":"2026-10-02T11:03:23.200200-05:00","Action":"pass","Package":"github.com/steveyegge/gastown/internal/cmd","Test":"TestSlowThing","Elapsed":203.1}
+{"Time":"2026-10-02T11:03:23.200300-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/cmd","Output":"PASS\n","OutputType":"frame"}
+{"Time":"2026-10-02T11:03:23.200400-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/cmd","Output":"ok  \tgithub.com/steveyegge/gastown/internal/cmd\t203.400s\n"}
+{"Time":"2026-10-02T11:03:23.200500-05:00","Action":"pass","Package":"github.com/steveyegge/gastown/internal/cmd","Elapsed":203.4}
+{"Time":"2026-10-02T11:03:23.300000-05:00","Action":"start","Package":"github.com/steveyegge/gastown/internal/git"}
+{"Time":"2026-10-02T11:03:23.400000-05:00","Action":"run","Package":"github.com/steveyegge/gastown/internal/git","Test":"TestLog"}
+{"Time":"2026-10-02T11:03:23.400200-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/git","Test":"TestLog","Output":"=== RUN   TestLog\n","OutputType":"frame"}
+{"Time":"2026-10-02T11:03:46.000000-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/git","Test":"TestLog","Output":"--- PASS: TestLog (22.60s)\n","OutputType":"frame"}
+{"Time":"2026-10-02T11:03:46.000100-05:00","Action":"pass","Package":"github.com/steveyegge/gastown/internal/git","Test":"TestLog","Elapsed":22.6}
+{"Time":"2026-10-02T11:03:46.000200-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/git","Output":"PASS\n","OutputType":"frame"}
+{"Time":"2026-10-02T11:03:46.000300-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/git","Output":"ok  \tgithub.com/steveyegge/gastown/internal/git\t22.700s\n"}
+{"Time":"2026-10-02T11:03:46.000400-05:00","Action":"pass","Package":"github.com/steveyegge/gastown/internal/git","Elapsed":22.7}
+{"Time":"2026-10-02T11:03:46.100000-05:00","Action":"start","Package":"github.com/steveyegge/gastown/internal/none"}
+{"Time":"2026-10-02T11:03:46.200000-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/none","Output":"?   \tgithub.com/steveyegge/gastown/internal/none\t[no test files]\n"}
+{"Time":"2026-10-02T11:03:46.200100-05:00","Action":"skip","Package":"github.com/steveyegge/gastown/internal/none","Elapsed":0}
+{"Time":"2026-10-02T11:03:46.300000-05:00","Action":"start","Package":"github.com/steveyegge/gastown/internal/tmux"}
+{"Time":"2026-10-02T11:03:46.400000-05:00","Action":"run","Package":"github.com/steveyegge/gastown/internal/tmux","Test":"TestServer"}
+{"Time":"2026-10-02T11:04:05.300000-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/tmux","Test":"TestServer","Output":"--- PASS: TestServer (18.90s)\n","OutputType":"frame"}
+{"Time":"2026-10-02T11:04:05.300100-05:00","Action":"pass","Package":"github.com/steveyegge/gastown/internal/tmux","Test":"TestServer","Elapsed":18.9}
+{"Time":"2026-10-02T11:04:05.300200-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/tmux","Output":"PASS\n","OutputType":"frame"}
+{"Time":"2026-10-02T11:04:05.300300-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/tmux","Output":"ok  \tgithub.com/steveyegge/gastown/internal/tmux\t19.000s\n"}
+{"Time":"2026-10-02T11:04:05.300400-05:00","Action":"pass","Package":"github.com/steveyegge/gastown/internal/tmux","Elapsed":19}
+{"Time":"2026-10-02T11:04:05.400000-05:00","Action":"start","Package":"github.com/steveyegge/gastown/internal/slot"}
+{"Time":"2026-10-02T11:04:05.500000-05:00","Action":"run","Package":"github.com/steveyegge/gastown/internal/slot","Test":"TestSkip"}
+{"Time":"2026-10-02T11:04:05.600000-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/slot","Test":"TestSkip","Output":"    slot_test.go:9: no docker here\n"}
+{"Time":"2026-10-02T11:04:05.600100-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/slot","Test":"TestSkip","Output":"--- SKIP: TestSkip (0.00s)\n","OutputType":"frame"}
+{"Time":"2026-10-02T11:04:05.600200-05:00","Action":"skip","Package":"github.com/steveyegge/gastown/internal/slot","Test":"TestSkip","Elapsed":0}
+{"Time":"2026-10-02T11:04:05.600300-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/slot","Output":"PASS\n","OutputType":"frame"}
+{"Time":"2026-10-02T11:04:05.600400-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/slot","Output":"ok  \tgithub.com/steveyegge/gastown/internal/slot\t0.100s\n"}
+{"Time":"2026-10-02T11:04:05.600500-05:00","Action":"pass","Package":"github.com/steveyegge/gastown/internal/slot","Elapsed":0.1}
