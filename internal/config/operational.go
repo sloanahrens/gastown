@@ -150,6 +150,76 @@ func (d *DoltThresholds) CommitsPerDayWarnV() int {
 	return DefaultDoltCommitsPerDayWarn
 }
 
+// The Dolt server tunable accessors below return the configured value and
+// whether the setting is present, because the compiled-in defaults live in
+// internal/doltserver (which imports this package, so it cannot work the other
+// way). A present-but-empty value is meaningful where an accessor says so.
+
+// WaitTimeoutSecSetting returns the idle-session timeout in seconds and whether it is
+// configured. A negative setting disables the override and resolves to 0.
+func (d *DoltThresholds) WaitTimeoutSecSetting() (int, bool) {
+	if d == nil || d.WaitTimeoutSec == nil {
+		return 0, false
+	}
+	if *d.WaitTimeoutSec < 0 {
+		return 0, true
+	}
+	return *d.WaitTimeoutSec, true
+}
+
+// TimeZoneSetting returns the configured `time_zone` server variable and whether it
+// is set. A set-but-empty value skips the post-start SET GLOBAL.
+func (d *DoltThresholds) TimeZoneSetting() (string, bool) {
+	if d == nil || d.TimeZone == nil {
+		return "", false
+	}
+	return *d.TimeZone, true
+}
+
+// EventSchedulerSetting returns the configured event_scheduler value and whether it
+// is set.
+func (d *DoltThresholds) EventSchedulerSetting() (string, bool) {
+	if d == nil || d.EventScheduler == nil {
+		return "", false
+	}
+	return *d.EventScheduler, true
+}
+
+// StatsEnabledSetting returns the configured dolt_stats_enabled value and whether it
+// is set.
+func (d *DoltThresholds) StatsEnabledSetting() (string, bool) {
+	if d == nil || d.StatsEnabled == nil {
+		return "", false
+	}
+	return *d.StatsEnabled, true
+}
+
+// AutoGCSetting returns the configured auto_gc value and whether it is set.
+func (d *DoltThresholds) AutoGCSetting() (string, bool) {
+	if d == nil || d.AutoGC == nil {
+		return "", false
+	}
+	return *d.AutoGC, true
+}
+
+// UserSetting returns the configured Dolt user and whether it is set. An empty
+// setting is unset: the default user holds.
+func (d *DoltThresholds) UserSetting() (string, bool) {
+	if d == nil || d.User == nil || *d.User == "" {
+		return "", false
+	}
+	return *d.User, true
+}
+
+// LogLevelSetting returns the configured Dolt log level and whether it is set. An
+// empty setting is unset: the default level holds.
+func (d *DoltThresholds) LogLevelSetting() (string, bool) {
+	if d == nil || d.LogLevel == nil || *d.LogLevel == "" {
+		return "", false
+	}
+	return *d.LogLevel, true
+}
+
 // GetSessionConfig returns the session thresholds, never nil.
 func (c *OperationalConfig) GetSessionConfig() *SessionThresholds {
 	if c != nil && c.Session != nil {

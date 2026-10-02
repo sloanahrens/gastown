@@ -260,8 +260,8 @@ func loadRigNames(rigsPath string) map[string]struct{} {
 type DoltServerReachableCheck struct {
 	BaseCheck
 
-	// lookupEnv reads the GT_DOLT_* variables the server config honors; nil
-	// is the process environment.
+	// lookupEnv reads GT_DOLT_PASSWORD, the one variable the server config
+	// still honors; nil is the process environment (gt-y3pgh.2.3).
 	lookupEnv func(key string) (string, bool)
 	// dial reports whether a TCP connection to addr succeeds; nil dials.
 	dial func(addr string) error

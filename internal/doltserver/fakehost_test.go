@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -104,6 +105,20 @@ func (f *fakeHost) host() *host {
 		sleep:        f.sleep,
 		bdArgs:       func(_, args []string) []string { return args },
 		doltEndpoint: f.doltEndpoint,
+	}
+}
+
+// writeTownDoltSettings writes operational.dolt into townRoot's
+// settings/config.json (gt-y3pgh.2.3). doltJSON is the dolt object's body.
+func writeTownDoltSettings(t *testing.T, townRoot, doltJSON string) {
+	t.Helper()
+	dir := filepath.Join(townRoot, "settings")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"type":"town-settings","version":1,"operational":{"dolt":` + doltJSON + `}}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -4142,7 +4142,8 @@ func TestHostPort(t *testing.T) {
 }
 
 // The endpoint is the town's config, never GT_DOLT_HOST/GT_DOLT_PORT; the
-// other settings still come from their variables (gt-y3pgh.3).
+// server tunables come from town settings, and only the password from an
+// environment variable (gt-y3pgh.2.3).
 func TestDefaultConfig_EndpointNeverFromEnv(t *testing.T) {
 	t.Parallel()
 	f := newFakeHost()
@@ -4155,11 +4156,12 @@ func TestDefaultConfig_EndpointNeverFromEnv(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dataDir, "config.yaml"), []byte("listener:\n  host: 127.0.0.2\n  port: 4407\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	writeTownDoltSettings(t, townRoot, `{"user":"myuser"}`)
 
 	f.setenv("GT_DOLT_HOST", "10.0.0.5")
 	f.setenv("GT_DOLT_PORT", "13306")
 	f.setenv("GT_DOLT_IGNORE_CONFIG", "1")
-	f.setenv("GT_DOLT_USER", "myuser")
+	f.setenv("GT_DOLT_USER", "envuser")
 	f.setenv("GT_DOLT_PASSWORD", "mypass")
 
 	config := h.DefaultConfig(townRoot)
@@ -4168,49 +4170,55 @@ func TestDefaultConfig_EndpointNeverFromEnv(t *testing.T) {
 		t.Errorf("endpoint = %s:%d, want the town's 127.0.0.2:4407", config.Host, config.Port)
 	}
 	if config.User != "myuser" {
-		t.Errorf("User = %q, want %q", config.User, "myuser")
+		t.Errorf("User = %q, want the settings' myuser (the environment no longer carries it)", config.User)
 	}
 	if config.Password != "mypass" {
 		t.Errorf("Password = %q, want %q", config.Password, "mypass")
 	}
 }
 
-// DefaultConfigWithEnv reads the variables it is given, not the process's,
-// and a town without an endpoint gets port 0, never DefaultPort.
+// DefaultConfigWithEnv reads the variable it is given, not the process's, and
+// a town without an endpoint gets port 0, never DefaultPort.
 func TestDefaultConfigWithEnv(t *testing.T) {
 	t.Parallel()
-	env := map[string]string{"GT_DOLT_PORT": "13306", "GT_DOLT_USER": "myuser"}
-	config := DefaultConfigWithEnv(t.TempDir(), func(k string) (string, bool) { v, ok := env[k]; return v, ok })
-	if config.Port != 0 || config.User != "myuser" {
-		t.Errorf("Port, User = %d, %q; want 0, myuser", config.Port, config.User)
+	townRoot := t.TempDir()
+	writeTownDoltSettings(t, townRoot, `{"user":"myuser"}`)
+	env := map[string]string{"GT_DOLT_PORT": "13306", "GT_DOLT_PASSWORD": "mypass"}
+	config := DefaultConfigWithEnv(townRoot, func(k string) (string, bool) { v, ok := env[k]; return v, ok })
+	if config.Port != 0 || config.User != "myuser" || config.Password != "mypass" {
+		t.Errorf("Port, User, Password = %d, %q, %q; want 0, myuser, mypass", config.Port, config.User, config.Password)
 	}
 }
 
-// A host withEnv reads the given variables over its own environment, both
-// for its config and for the sql-server it starts, so a caller can hand Start
-// daemon.json's env without writing the process environment.
+// A host withEnv reads the given variables over its own environment for the
+// sql-server it starts, so a caller can hand Start daemon.json's env without
+// writing the process environment. Only the password still resolves through
+// the environment; the tunables come from town settings (gt-y3pgh.2.3).
 func TestHostWithEnvOverlaysConfigAndServerEnv(t *testing.T) {
 	t.Parallel()
-	f := newFakeHost().setenv("GT_DOLT_USER", "base-user").setenv("GT_DOLT_LOGLEVEL", "error").townPort(4551)
-	h := f.host().withEnv(map[string]string{"GT_DOLT_LOGLEVEL": "debug"})
+	f := newFakeHost().setenv("GT_DOLT_PASSWORD", "base-pass").townPort(4551)
+	h := f.host().withEnv(map[string]string{"GT_DOLT_PASSWORD": "overlay-pass"})
 
-	config := h.DefaultConfig(t.TempDir())
-	if config.LogLevel != "debug" || config.User != "base-user" {
-		t.Errorf("LogLevel, User = %q, %q; want debug (overlay), base-user (host)", config.LogLevel, config.User)
+	townRoot := t.TempDir()
+	writeTownDoltSettings(t, townRoot, `{"user":"myuser","log_level":"error"}`)
+	config := h.DefaultConfig(townRoot)
+	if config.Password != "overlay-pass" || config.User != "myuser" || config.LogLevel != "error" {
+		t.Errorf("Password, User, LogLevel = %q, %q, %q; want overlay-pass (overlay), myuser and error (settings)",
+			config.Password, config.User, config.LogLevel)
 	}
-	if got := f.host().DefaultConfig(t.TempDir()).LogLevel; got != "error" {
-		t.Errorf("the overlay leaked into the host it was made from: LogLevel = %q", got)
+	if got := f.host().DefaultConfig(townRoot).Password; got != "base-pass" {
+		t.Errorf("the overlay leaked into the host it was made from: Password = %q", got)
 	}
 
-	_ = h.Start(t.TempDir())
+	_ = h.Start(townRoot)
 	if len(f.started) == 0 {
 		t.Fatal("Start started no sql-server")
 	}
 	env := f.started[0].Env
-	if !slices.Contains(env, "GT_DOLT_LOGLEVEL=debug") || !slices.Contains(env, "GT_DOLT_USER=base-user") {
+	if !slices.Contains(env, "GT_DOLT_PASSWORD=overlay-pass") {
 		t.Errorf("sql-server env = %v, want the overlay over the host's environment", env)
 	}
-	if i, j := slices.Index(env, "GT_DOLT_LOGLEVEL=error"), slices.Index(env, "GT_DOLT_LOGLEVEL=debug"); i > j {
+	if i, j := slices.Index(env, "GT_DOLT_PASSWORD=base-pass"), slices.Index(env, "GT_DOLT_PASSWORD=overlay-pass"); i > j {
 		t.Errorf("sql-server env = %v, want the overlay after (winning over) the host's value", env)
 	}
 }
@@ -4275,7 +4283,7 @@ func TestDefaultConfig_DaemonJSONEnvIsNotAnEndpoint(t *testing.T) {
 	}
 }
 
-func TestDefaultConfig_ManagedDefaultsAndEnvOverrides(t *testing.T) {
+func TestDefaultConfig_ManagedDefaultsAndSettingsOverrides(t *testing.T) {
 	t.Parallel()
 	f := newFakeHost()
 	h := f.host()
@@ -4291,10 +4299,11 @@ func TestDefaultConfig_ManagedDefaultsAndEnvOverrides(t *testing.T) {
 	if config.AutoGC != "on" {
 		t.Errorf("AutoGC = %q, want on", config.AutoGC)
 	}
+	if config.User != DefaultUser || config.LogLevel != "warning" {
+		t.Errorf("User, LogLevel = %q, %q; want %q, warning", config.User, config.LogLevel, DefaultUser)
+	}
 
-	f.setenv("GT_DOLT_STATS_ENABLED", "omit")
-	f.setenv("GT_DOLT_EVENT_SCHEDULER", "omit")
-	f.setenv("GT_DOLT_AUTO_GC", "off")
+	writeTownDoltSettings(t, townRoot, `{"stats_enabled":"omit","event_scheduler":"omit","auto_gc":"off","user":"doltuser","log_level":"info","wait_timeout":120,"time_zone":"UTC"}`)
 	config = h.DefaultConfig(townRoot)
 	if config.DoltStatsEnabled != "omit" {
 		t.Errorf("DoltStatsEnabled = %q, want omit", config.DoltStatsEnabled)
@@ -4304,6 +4313,18 @@ func TestDefaultConfig_ManagedDefaultsAndEnvOverrides(t *testing.T) {
 	}
 	if config.AutoGC != "off" {
 		t.Errorf("AutoGC = %q, want off", config.AutoGC)
+	}
+	if config.User != "doltuser" {
+		t.Errorf("User = %q, want doltuser", config.User)
+	}
+	if config.LogLevel != "info" {
+		t.Errorf("LogLevel = %q, want info", config.LogLevel)
+	}
+	if config.WaitTimeoutSec != 120 {
+		t.Errorf("WaitTimeoutSec = %d, want 120", config.WaitTimeoutSec)
+	}
+	if config.TimeZone != "UTC" {
+		t.Errorf("TimeZone = %q, want UTC", config.TimeZone)
 	}
 }
 
