@@ -34,9 +34,8 @@ const (
 	// mid-flight — then by killing `gt nudge`, whose error read back as
 	// "signal: killed: Watching hq-mayor for idle" — which reported a nudge
 	// that had already queued as a hard failure instead of letting the
-	// watcher either deliver it or leave it for the next drain (gt-8hi4w,
-	// same shape as the seat-refill plugin's own bound, gt-hen4o). 90s covers
-	// 15s+60s with slack.
+	// watcher either deliver it or leave it for the next drain. 90s covers
+	// 15s+60s with slack (gt-8hi4w, gt-hen4o).
 	mayorNudgeTimeout = 90 * time.Second
 )
 

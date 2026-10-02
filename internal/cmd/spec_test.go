@@ -58,7 +58,7 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 		Candidates: func() ([]specCandidate, []string) {
 			var list []specdispatch.Spec
 			for _, s := range f.specs {
-				if ok, _ := specdispatch.Eligible(s); ok {
+				if ok, _ := specdispatch.Eligible(s, 2); ok {
 					list = append(list, s)
 				}
 			}
@@ -116,6 +116,10 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 			{Agent: "claude-sonnet", Cap: 2},
 		}},
 		PerTick: 1,
+		// The strict gate, so a test that cares about a refusal says so with
+		// its fixture rather than by opting out of the town's default (warn).
+		MaxPriority: 2,
+		ShapeGate:   specdispatch.ShapeGateRefuse,
 	}
 }
 
@@ -139,6 +143,71 @@ func TestSpecDispatchSlingsInDeterministicOrder(t *testing.T) {
 	if f.slingSeats[0].Agent != "deepseek-flash" || f.slingSeats[1].Agent != "deepseek-flash" || f.slingSeats[2].Agent != "claude-sonnet" {
 		t.Errorf("seats = %+v", f.slingSeats)
 	}
+}
+
+// The shape gate is the operator's (polecat_pool.shape_gate, gt-cq5gb), and
+// the dispatcher carries over every value the seat-refill plugin honored: warn
+// slings a badly shaped bead anyway and leaves the verdict on it, refuse skips
+// it and labels it needs-shape, off runs no lint at all.
+func TestSpecDispatchShapeGate(t *testing.T) {
+	t.Parallel()
+	shapeless := func() specdispatch.Spec {
+		s := cleanSpec("gt-bad", 1, "2026-09-29T10:00:00Z")
+		s.Description = strings.Replace(s.Description, "## Gate\nmake gate", "", 1)
+		return s
+	}
+	const refusedLine = "gt-bad: spec lint refused: ## Gate: section missing"
+
+	t.Run("warn slings and notes", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(shapeless())
+		env := f.env()
+		env.ShapeGate = specdispatch.ShapeGateWarn
+		r := runSpecDispatchCycle(env)
+		if len(f.slung) != 1 || len(r.Refused) != 0 {
+			t.Fatalf("slung %v refused %+v", f.slung, r.Refused)
+		}
+		if len(f.labels["gt-bad"]) != 0 {
+			t.Errorf("warn must not label the bead: %v", f.labels["gt-bad"])
+		}
+		if n := f.notes["gt-bad"]; len(n) != 1 || !strings.HasPrefix(n[0], "SHAPE: ## Gate: section missing") {
+			t.Errorf("notes = %v, want one SHAPE note", n)
+		}
+		if !strings.Contains(r.Dispatched[0].Line, "SHAPE: ## Gate: section missing") {
+			t.Errorf("dispatch line %q must carry the verdict", r.Dispatched[0].Line)
+		}
+		// A second tick with the same verdict writes no second note.
+		runSpecDispatchCycle(env)
+		if n := f.notes["gt-bad"]; len(n) != 1 {
+			t.Errorf("verdict noted %d times, want once", len(n))
+		}
+	})
+
+	t.Run("refuse skips and labels", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(shapeless())
+		r := runSpecDispatchCycle(f.env()) // the fixture's gate is refuse
+		if len(f.slung) != 0 || len(r.Refused) != 1 || r.Refused[0].Line != refusedLine {
+			t.Fatalf("slung %v refused %+v", f.slung, r.Refused)
+		}
+		if got := f.labels["gt-bad"]; len(got) != 1 || got[0] != "needs-shape" {
+			t.Errorf("labels = %v, want needs-shape once", got)
+		}
+		if n := f.notes["gt-bad"]; len(n) != 1 || !strings.HasPrefix(n[0], "SHAPE: ## Gate: section missing") {
+			t.Errorf("notes = %v, want one SHAPE note", n)
+		}
+	})
+
+	t.Run("off runs no lint", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(shapeless())
+		env := f.env()
+		env.ShapeGate = specdispatch.ShapeGateOff
+		r := runSpecDispatchCycle(env)
+		if len(f.slung) != 1 || len(r.Refused) != 0 || len(f.notes) != 0 || len(f.labels) != 0 {
+			t.Fatalf("off gate still gated: slung %v report %+v notes %v labels %v", f.slung, r, f.notes, f.labels)
+		}
+	})
 }
 
 func TestSpecDispatchPerTickLimit(t *testing.T) {
@@ -324,29 +393,87 @@ func TestSpecBudgetFromConfig(t *testing.T) {
 	ts.RoleAgents = map[string]string{"polecat": "deepseek-flash"}
 	ts.PolecatPool = &config.PolecatPool{OverflowAgent: "deepseek-flash", MaxOverflow: 3, MinSpawnGap: "4m"}
 
+	// The pool's seats: the overflow seat at max_overflow, then the pro seat at
+	// its own cap. No claude-sonnet seat is in the budget (gt-4k3fj.8.8).
 	b := specBudgetFromConfig(ts, nil)
-	if got := b.Picture(); got != "deepseek-flash 0/3, claude-sonnet 0/2" || b.MinSpawnGap != 4*time.Minute {
+	if got := b.Picture(); got != "deepseek-flash 0/3, deepseek-pro 0/1" || b.MinSpawnGap != 4*time.Minute {
 		t.Fatalf("defaults = %q gap %v", got, b.MinSpawnGap)
 	}
-	b = specBudgetFromConfig(ts, &config.SpecDispatchConfig{MaxHooked: 1, PreferHooked: true})
-	if got := b.Picture(); got != "claude-sonnet 0/1, deepseek-flash 0/3" {
-		t.Fatalf("configured = %q", got)
+	if b.Seats[1].Label != "needs-pro" {
+		t.Errorf("pro seat selector = %q, want needs-pro", b.Seats[1].Label)
 	}
-	b = specBudgetFromConfig(ts, &config.SpecDispatchConfig{MaxHooked: -1})
-	if got := b.Picture(); got != "deepseek-flash 0/3, claude-sonnet 0/0" {
-		t.Fatalf("max_hooked<0 must close the seat: %q", got)
+
+	// The pro seat's keys are the operator's: pro_max caps it (0 drops it
+	// entirely), pro_agent picks the agent, pro_label its selector.
+	ts.PolecatPool.ProMax = intPtr(2)
+	ts.PolecatPool.ProAgent = "deepseek-reasoner"
+	ts.PolecatPool.ProLabel = "hard"
+	b = specBudgetFromConfig(ts, nil)
+	if got := b.Picture(); got != "deepseek-flash 0/3, deepseek-reasoner 0/2" || b.Seats[1].Label != "hard" {
+		t.Fatalf("pro seat = %q selector %q", got, b.Seats[1].Label)
 	}
-	// hooked_agent naming the overflow agent keeps the overflow seat only.
-	b = specBudgetFromConfig(ts, &config.SpecDispatchConfig{HookedAgent: "deepseek-flash"})
-	if got := b.Picture(); got != "deepseek-flash 0/3" {
-		t.Fatalf("duplicate seat = %q", got)
+	ts.PolecatPool.ProMax = intPtr(0)
+	if got := specBudgetFromConfig(ts, nil).Picture(); got != "deepseek-flash 0/3" {
+		t.Fatalf("pro_max 0 must drop the seat: %q", got)
 	}
-	// max_overflow unset caps the overflow seat at the default, never uncapped.
+	ts.PolecatPool.ProMax = nil
+
+	// max_overflow unset: the dispatcher caps the seat itself rather than
+	// treating the pool's silence as unlimited room.
 	ts.PolecatPool.MaxOverflow = 0
-	if got := specBudgetFromConfig(ts, nil).Picture(); got != "deepseek-flash 0/2, claude-sonnet 0/2" {
-		t.Fatalf("uncapped overflow = %q", got)
+	if got := specBudgetFromConfig(ts, nil).Picture(); got != "deepseek-flash 0/2, deepseek-reasoner 0/1" {
+		t.Fatalf("unset max_overflow = %q", got)
+	}
+	ts.PolecatPool.MaxOverflow = 3
+	ts.PolecatPool.ProAgent, ts.PolecatPool.ProLabel = "", ""
+}
+
+// The hooked seat is off unless spec_dispatch names a cap above zero, even in
+// a town whose patrol is enabled: a seat nobody asked for is a seat the
+// dispatcher must not spend (gt-4k3fj.8.8 acceptance 3).
+func TestSpecBudgetHookedSeatIsOptIn(t *testing.T) {
+	t.Parallel()
+	ts := config.NewTownSettings()
+	ts.PolecatPool = &config.PolecatPool{OverflowAgent: "deepseek-flash", MaxOverflow: 3}
+
+	enabled := &config.SpecDispatchConfig{Enabled: true}
+	for _, sd := range []*config.SpecDispatchConfig{nil, enabled, {Enabled: true, MaxHooked: -1}} {
+		if got := specBudgetFromConfig(ts, sd).Picture(); got != "deepseek-flash 0/3, deepseek-pro 0/1" {
+			t.Errorf("sd %+v: a hooked seat appeared without max_hooked: %q", sd, got)
+		}
+	}
+
+	// An explicit cap adds it after the pool's seats (default agent).
+	if got := specBudgetFromConfig(ts, &config.SpecDispatchConfig{MaxHooked: 1}).Picture(); got != "deepseek-flash 0/3, deepseek-pro 0/1, claude-sonnet 0/1" {
+		t.Errorf("max_hooked 1 = %q", got)
+	}
+	// prefer_hooked moves it first, and hooked_agent names its agent.
+	sd := &config.SpecDispatchConfig{MaxHooked: 2, PreferHooked: true, HookedAgent: "claude-opus"}
+	if got := specBudgetFromConfig(ts, sd).Picture(); got != "claude-opus 0/2, deepseek-flash 0/3, deepseek-pro 0/1" {
+		t.Errorf("prefer_hooked = %q", got)
+	}
+	// hooked_agent naming an existing seat keeps that seat once.
+	sd = &config.SpecDispatchConfig{MaxHooked: 2, HookedAgent: "deepseek-flash"}
+	if got := specBudgetFromConfig(ts, sd).Picture(); got != "deepseek-flash 0/3, deepseek-pro 0/1" {
+		t.Errorf("duplicate seat = %q", got)
 	}
 }
+
+// A pool with no overflow_agent has no seat for the dispatcher to fill: the
+// pool's own admission point says the same (choosePoolAgent).
+func TestSpecBudgetWithoutAPoolSeat(t *testing.T) {
+	t.Parallel()
+	ts := config.NewTownSettings()
+	if got := specBudgetFromConfig(ts, nil).Picture(); got != "no seats" {
+		t.Errorf("nil pool = %q, want no seats", got)
+	}
+	ts.PolecatPool = &config.PolecatPool{MaxOverflow: 3}
+	if got := specBudgetFromConfig(ts, nil).Picture(); got != "deepseek-pro 0/1" {
+		t.Errorf("pool without overflow_agent = %q", got)
+	}
+}
+
+func intPtr(n int) *int { return &n }
 
 func TestSpecRosterCountsByAgent(t *testing.T) {
 	t.Parallel()
@@ -517,6 +644,85 @@ func TestSpecLintJSONReport(t *testing.T) {
 	}
 }
 
+// specTown is a temp town with one operational rig whose .beads looks like a
+// database, so specCandidates walks it. The board itself is served by the
+// specReadyBoard seam.
+func specTown(t *testing.T) string {
+	t.Helper()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// mayor/town.json makes the town load as a town; without it every rig
+	// reads as parked (townconfig.IsParked fails closed).
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"test"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(&config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{"gastown": {}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "rigs.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "gastown", ".beads", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return townRoot
+}
+
+// specCandidates is the dispatcher's intake, so it is the place the
+// acceptance case lives: a ready, unassigned, open task/bug/feature bead
+// without the retired spec label is a candidate; the skips
+// (gt:ready-to-land, needs-human, deferred, assigned), the non-work types and
+// the operator's ceiling are not (gt-4k3fj.8.8 acceptance 1 and 2). The board
+// comes from a fake store, so this pins the filter rather than bd's own.
+func TestSpecCandidatesFromAFakeStore(t *testing.T) {
+	t.Parallel()
+	townRoot := specTown(t)
+	fakeBoard := func(string) ([]*beads.Issue, error) {
+		return []*beads.Issue{
+			{ID: "gt-task", Type: "task", Status: "open", Priority: 2},
+			{ID: "gt-bug", Type: "bug", Status: "open", Priority: 1},
+			{ID: "gt-feature", Type: "feature", Status: "open", Priority: 3},
+			{ID: "gt-chore", Type: "chore", Status: "open", Priority: 1},
+			{ID: "gt-assigned", Type: "task", Status: "open", Priority: 1, Assignee: "gastown/polecats/ruby"},
+			{ID: "gt-landing", Type: "task", Status: "open", Priority: 1, Labels: []string{"gt:ready-to-land"}},
+			{ID: "gt-human", Type: "task", Status: "open", Priority: 1, Labels: []string{"needs-human"}},
+			{ID: "gt-deferred", Type: "task", Status: "deferred", Priority: 1},
+			{ID: "gt-epic", Type: "epic", Status: "open", Priority: 1},
+			{ID: "gt-p4", Type: "task", Status: "open", Priority: 4},
+		}, nil
+	}
+
+	idList := func(cs []specCandidate) string {
+		var out []string
+		for _, c := range cs {
+			if c.Rig != "gastown" {
+				t.Errorf("candidate %s carries rig %q, want gastown", c.Spec.ID, c.Rig)
+			}
+			out = append(out, c.Spec.ID)
+		}
+		return strings.Join(out, " ")
+	}
+
+	got, errs := specCandidates(townRoot, 2, fakeBoard)
+	if len(errs) != 0 {
+		t.Fatalf("errors = %v", errs)
+	}
+	if ids := idList(got); ids != "gt-bug gt-task" {
+		t.Errorf("candidates at the default ceiling = %q, want the P1 bug then the P2 task", ids)
+	}
+
+	// The ceiling is the operator's (polecat_pool.max_priority): at P4 the
+	// feature and the P4 task are the dispatcher's work too.
+	got, _ = specCandidates(townRoot, 4, fakeBoard)
+	if ids := idList(got); ids != "gt-bug gt-task gt-feature gt-p4" {
+		t.Errorf("candidates at a P4 ceiling = %q", ids)
+	}
+}
+
+// jsonEscape escapes a string for the JSON test fixtures above.
 func jsonEscape(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`).Replace(s)
 }

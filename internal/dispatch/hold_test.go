@@ -78,20 +78,6 @@ func TestOperatorHold_EmptyTownRoot_AllowsDispatch(t *testing.T) {
 	}
 }
 
-// The hold file is the seat-refill plugin's; this pins that Go and the shell
-// read the same path, so neither can drift to a name the other ignores.
-func TestHoldFileName_MatchesSeatRefillPlugin(t *testing.T) {
-	t.Parallel()
-	data, err := os.ReadFile(filepath.Join("..", "..", "plugins", "seat-refill", "run.sh"))
-	if err != nil {
-		t.Fatalf("read seat-refill run.sh: %v", err)
-	}
-	want := `$TOWN_ROOT/` + HoldFileName
-	if !strings.Contains(string(data), want) {
-		t.Errorf("plugins/seat-refill/run.sh does not default its hold file to %s", want)
-	}
-}
-
 func TestRigHold_RigEstopHoldsOnlyThatRig(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
