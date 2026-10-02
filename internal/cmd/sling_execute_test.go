@@ -242,7 +242,7 @@ func TestExecuteSlingRollsBackAfterTheSpawn(t *testing.T) {
 			}},
 		{name: "assignee lock fails", inject: func(h *slingHarness) {
 			h.run.lockAssignee = func(string, string) (func(), error) { return nil, injected }
-		}, errSub: "serializing hook write", undo: "cleanup spawn Toast convoy="},
+		}, errSub: "serializing hook write", undo: "rollback Toast bead=gt-abc123 convoy=", restore: true},
 		// Raw metadata is only stored when no formula is attached, so this case
 		// asks for the raw bead: an unnamed formula now means the rig's default,
 		// which is what `gt sling` applies to a polecat target.
@@ -250,10 +250,27 @@ func TestExecuteSlingRollsBackAfterTheSpawn(t *testing.T) {
 			inject: func(h *slingHarness) {
 				h.run.storeFields = func(string, string, beadFieldUpdates) error { return injected }
 			},
-			errSub: "storing raw sling metadata", undo: "cleanup spawn Toast convoy=", restore: true},
+			errSub: "storing raw sling metadata", undo: "rollback Toast bead=gt-abc123 convoy=", restore: true},
 		{name: "hook fails", inject: func(h *slingHarness) {
 			h.run.hook = func(string, string, string, string) error { return injected }
 		}, errSub: "failed to hook bead", undo: "rollback Toast bead=gt-abc123 convoy=", restore: true},
+		// The auto-convoy outlives the rollback so the convoy feeder can
+		// re-dispatch the bead with the agent and formula the convoy recorded
+		// (gt-yg24) — except where the dispatch never reached a hookable bead,
+		// and a re-feed could only repeat the same failure (gt-7evi4).
+		{name: "hook fails keeps the auto-convoy", params: func(p *SlingParams) { p.NoConvoy = false },
+			inject: func(h *slingHarness) {
+				h.run.hook = func(string, string, string, string) error { return injected }
+			},
+			errSub: "failed to hook bead", undo: "rollback Toast bead=gt-abc123 convoy=", restore: true},
+		{name: "raw metadata failure closes the auto-convoy",
+			params: func(p *SlingParams) {
+				p.ReviewOnly, p.HookRawBead, p.NoConvoy = true, true, false
+			},
+			inject: func(h *slingHarness) {
+				h.run.storeFields = func(string, string, beadFieldUpdates) error { return injected }
+			},
+			errSub: "storing raw sling metadata", undo: "rollback Toast bead=gt-abc123 convoy=hq-cv-auto", restore: true},
 		{name: "session fails", inject: func(h *slingHarness) {
 			h.run.startSession = func(*SpawnedPolecatInfo) (string, error) { return "", injected }
 		}, errSub: "starting polecat session", undo: "rollback Toast bead=gt-abc123 convoy=", restore: true},
