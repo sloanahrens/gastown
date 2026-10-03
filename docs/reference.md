@@ -782,6 +782,11 @@ parked seat does not refuse), logging actor and reason in
 `.runtime/supervisor/actions.jsonl`. Crew sessions are skipped unless
 `--crew` is given; the overseer session is never killed.
 
+Before writing or releasing a dispatch hold — a marker on a bead's own record
+that parks it out of automatic dispatch — read [Dispatch
+holds](concepts/dispatch-holds.md): it states the write form of each marker and
+the path that reads it.
+
 ### Attention Queue
 
 `gt attention` reads the queue of conditions the daemon maintains for human or
