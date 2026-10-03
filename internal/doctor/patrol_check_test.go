@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/plugin"
 )
 
 // writeRigsJSON creates a mayor/rigs.json with a single rig entry.
@@ -350,5 +351,145 @@ func TestPatrolPluginDriftCheck_InSync_ReturnsOK(t *testing.T) {
 
 	if result.Status != StatusOK {
 		t.Errorf("Status = %v, want StatusOK when runtime matches source", result.Status)
+	}
+}
+
+// gt-bw1wo: a plugin deleted from the source checkout survives in the runtime
+// copy unless the drift check names it. Reporting only Drifted and Missing
+// let <town>/plugins/seat-refill keep dispatching after its source directory
+// was deleted, with nothing warning.
+func TestPatrolPluginDriftCheck_ExtraPlugin_WarningNamesIt(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	sourceDir := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
+	targetDir := filepath.Join(townRoot, "plugins")
+
+	content := "+++\nname = \"stable\"\n+++\nsame body"
+	writePluginFixture(t, sourceDir, "stable", content)
+	writePluginFixture(t, targetDir, "stable", content)
+	writePluginFixture(t, targetDir, "seat-refill", "+++\nname = \"seat-refill\"\n+++\nretired body")
+
+	check := NewPatrolPluginDriftCheck()
+	result := check.Run(&CheckContext{TownRoot: townRoot})
+
+	if result.Status != StatusWarning {
+		t.Fatalf("Status = %v, want StatusWarning for a runtime plugin the source does not have", result.Status)
+	}
+	found := false
+	for _, d := range result.Details {
+		if strings.Contains(d, "seat-refill") && strings.Contains(d, "not in source") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Details = %v, want an entry naming seat-refill as in runtime, not in source", result.Details)
+	}
+}
+
+// The repairer must resolve the drift Run reports: a copy-only sync would
+// leave the extra in place and the next run would warn again. The clean flag
+// is what makes that repair complete, and the sync's own tests pin what it
+// removes (internal/plugin/sync_test.go TestSyncPlugins_CleanRemovesExtra).
+func TestPatrolPluginDriftCheck_FixSyncsClean(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	sourceDir := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
+	targetDir := filepath.Join(townRoot, "plugins")
+
+	content := "+++\nname = \"stable\"\n+++\nsame body"
+	writePluginFixture(t, sourceDir, "stable", content)
+	writePluginFixture(t, targetDir, "stable", content)
+	writePluginFixture(t, targetDir, "seat-refill", "+++\nname = \"seat-refill\"\n+++\nretired body")
+
+	check := NewPatrolPluginDriftCheck()
+	ctx := &CheckContext{TownRoot: townRoot}
+	if result := check.Run(ctx); result.Status != StatusWarning {
+		t.Fatalf("Status = %v, want StatusWarning before the repair", result.Status)
+	}
+
+	var gotSource, gotTarget string
+	var gotClean bool
+	check.syncPlugins = func(src, dst string, clean bool) (*plugin.SyncResult, error) {
+		gotSource, gotTarget, gotClean = src, dst, clean
+		return &plugin.SyncResult{Removed: []string{"seat-refill"}}, nil
+	}
+
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix() error = %v, want the extra pruned", err)
+	}
+	if !gotClean {
+		t.Error("Fix synced without clean; the extra plugin would survive the repair")
+	}
+	if gotSource != sourceDir || gotTarget != targetDir {
+		t.Errorf("Fix synced %s -> %s, want %s -> %s", gotSource, gotTarget, sourceDir, targetDir)
+	}
+}
+
+// The repair removes runtime plugin directories, so an agent running it must
+// record authorization first (gt-638go.3).
+func TestPatrolPluginDriftCheck_FixIsDestructive(t *testing.T) {
+	t.Parallel()
+
+	check := NewPatrolPluginDriftCheck()
+	if !IsDestructiveFix(check) {
+		t.Error("IsDestructiveFix = false; the repair removes runtime plugin directories")
+	}
+	if !check.CanFix() {
+		t.Error("a destructive check must still be fixable")
+	}
+}
+
+// A failed removal must not read as a clean repair: Fix surfaces the sync's
+// own errors instead of leaving FixOne to report a bare "still WARNING".
+func TestPatrolPluginDriftCheck_FixReportsSyncErrors(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	check := NewPatrolPluginDriftCheck()
+	ctx := &CheckContext{TownRoot: townRoot}
+	check.sourceDir = filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
+	check.targetDir = filepath.Join(townRoot, "plugins")
+	check.syncPlugins = func(_, _ string, _ bool) (*plugin.SyncResult, error) {
+		return &plugin.SyncResult{Errors: []string{"removing seat-refill: permission denied"}}, nil
+	}
+
+	err := check.Fix(ctx)
+	if err == nil {
+		t.Fatal("Fix() = nil, want an error carrying the sync's failure")
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Errorf("Fix() error = %v, want it to quote the sync error", err)
+	}
+}
+
+// A repair must not prune a plugin whose runtime copy holds edits the source
+// repo never had: the sync reports it in Protected and Fix surfaces it rather
+// than reporting a clean repair (gt-o848l).
+func TestPatrolPluginDriftCheck_FixReportsProtected(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	sourceDir := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
+	targetDir := filepath.Join(townRoot, "plugins")
+
+	content := "+++\nname = \"draft\"\n+++\nbody"
+	writePluginFixture(t, sourceDir, "draft", content)
+	writePluginFixture(t, targetDir, "draft", content)
+
+	check := NewPatrolPluginDriftCheck()
+	ctx := &CheckContext{TownRoot: townRoot}
+	check.sourceDir, check.targetDir = sourceDir, targetDir
+	check.syncPlugins = func(_, _ string, _ bool) (*plugin.SyncResult, error) {
+		return &plugin.SyncResult{Protected: map[string][]string{"local-only": {"plugin.md"}}}, nil
+	}
+
+	err := check.Fix(ctx)
+	if err == nil {
+		t.Fatal("Fix() = nil, want an error naming the plugin left untouched")
+	}
+	if !strings.Contains(err.Error(), "local-only") && !strings.Contains(err.Error(), "1 plugin") {
+		t.Errorf("Fix() error = %v, want it to name what was left untouched", err)
 	}
 }

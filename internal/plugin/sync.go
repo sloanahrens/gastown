@@ -371,7 +371,8 @@ func DetectDrift(sourceDir, targetDir string) (*DriftReport, error) {
 	return report, nil
 }
 
-// HasDrift returns true if the report indicates any differences.
+// HasDrift reports whether the runtime copy differs at all from source,
+// counting a plugin source no longer has (gt-bw1wo).
 func (r *DriftReport) HasDrift() bool {
-	return len(r.Drifted) > 0 || len(r.Missing) > 0
+	return len(r.Drifted) > 0 || len(r.Missing) > 0 || len(r.Extra) > 0
 }

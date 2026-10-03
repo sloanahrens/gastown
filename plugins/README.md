@@ -87,6 +87,13 @@ Go now (internal/daemon/rebuild_gt.go, gt-4k3fj.8.6).
 `gt plugin sync` resolves the town root from the CWD, so that path fails
 outright when this checkout lives outside the town root (a `LocalRepo`
 override). `gt doctor`'s `patrol-plugin-drift` check is what catches the
-resulting divergence: it compares the two copies and warns when they diverge, or
-when it cannot locate this source directory at all — it never silently reports
-OK in that case.
+resulting divergence: it compares the two copies and warns when they diverge,
+including a plugin the runtime copy still has and this directory no longer does
+(deleting a plugin directory here does not remove its runtime copy until
+something prunes it), or when it cannot locate this source directory at all —
+it never silently reports OK in that case. `gt doctor fix patrol-plugin-drift
+--authorized-by <bead-id>` rewrites the runtime copy from this directory and
+prunes those extras; it removes directories, so an agent needs the recorded
+authorization gt-638go.3 requires. A runtime plugin holding edits this
+directory never had is left in place, and the repair fails rather than
+reporting success.

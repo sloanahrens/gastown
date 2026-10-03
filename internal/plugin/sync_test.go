@@ -329,9 +329,14 @@ func TestDetectDrift_ExtraInTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Extra plugins are not drift (no HasDrift), but are reported
 	if len(report.Extra) != 1 || report.Extra[0] != "orphan" {
 		t.Errorf("expected orphan in extra, got %v", report.Extra)
+	}
+	// An extra is drift: a caller that reads "up to date" over a plugin the
+	// source retired is how <town>/plugins/seat-refill kept dispatching
+	// after its source directory was deleted (gt-bw1wo).
+	if !report.HasDrift() {
+		t.Error("expected HasDrift true for a runtime plugin the source does not have")
 	}
 }
 
