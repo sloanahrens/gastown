@@ -130,7 +130,6 @@ func convoyRecordByID(convoyID string) convoyRecord {
 func convoyScheduleOptionsFor(opts convoyScheduleOpts, agent string) ScheduleOptions {
 	return ScheduleOptions{
 		Formula:     opts.Formula,
-		NoConvoy:    true, // Already tracked by this convoy
 		Force:       opts.Force,
 		HookRawBead: opts.HookRawBead,
 		Agent:       agent,
@@ -151,7 +150,6 @@ func convoySlingParams(job convoyDispatchJob, opts convoyScheduleOpts, townRoot 
 		FormulaName:   opts.Formula,
 		Force:         opts.Force,
 		HookRawBead:   opts.HookRawBead,
-		NoConvoy:      true, // Already tracked by this convoy
 		NoBoot:        opts.NoBoot,
 		CallerContext: "convoy-sling",
 		TownRoot:      townRoot,
@@ -289,7 +287,7 @@ func runConvoyScheduleByID(convoyID string, opts convoyScheduleOpts) error {
 
 // runConvoySlingByID immediately dispatches all open tracked issues of a convoy.
 // Used when max_polecats=-1 (direct dispatch mode). Each tracked issue gets its
-// own polecat via executeSling(). Sets NoConvoy=true since issues are already tracked.
+// own polecat via executeSling().
 func runConvoySlingByID(convoyID string, opts convoyScheduleOpts) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {

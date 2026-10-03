@@ -2,10 +2,8 @@ package cmd
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 
-	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -20,9 +18,6 @@ type slingRollback struct {
 	townErr  error // set when the cwd is not in a town
 	// stores opens the work bead's databases; the zero value is bd.
 	stores slingStores
-	// townBeads is the town database an auto-convoy is closed in; nil is
-	// bd pinned to the town's .beads.
-	townBeads beads.Client
 
 	getBeadInfo      func(beadID string) (*beadInfo, error)
 	collectMolecules func(info *beadInfo) []string
@@ -58,7 +53,7 @@ func realSlingRollbackIn(townRoot string, err error) slingRollback {
 }
 
 // rollback is rollbackSlingArtifacts on this context.
-func (s slingRollback) rollback(spawnInfo *SpawnedPolecatInfo, beadID, hookWorkDir, convoyID string) {
+func (s slingRollback) rollback(spawnInfo *SpawnedPolecatInfo, beadID, hookWorkDir string) {
 	townRoot, err := s.townRoot, s.townErr
 
 	// 1. Burn any attached molecules from partial formula instantiation.
@@ -115,11 +110,11 @@ func (s slingRollback) rollback(spawnInfo *SpawnedPolecatInfo, beadID, hookWorkD
 	if spawnInfo == nil {
 		return
 	}
-	s.cleanupSpawned(spawnInfo, spawnInfo.RigName, beadID, hookWorkDir, convoyID)
+	s.cleanupSpawned(spawnInfo, spawnInfo.RigName, beadID, hookWorkDir)
 }
 
 // cleanupSpawned is cleanupSpawnedPolecatWork on this context.
-func (s slingRollback) cleanupSpawned(spawnInfo *SpawnedPolecatInfo, rigName, beadID, hookWorkDir, convoyID string) {
+func (s slingRollback) cleanupSpawned(spawnInfo *SpawnedPolecatInfo, rigName, beadID, hookWorkDir string) {
 	// The spawn's seat claim goes with the spawn: no session will ever exist
 	// for this polecat, so the seat it reserved must not stay reserved. This is
 	// the one path every caller-side failure after a spawn comes through —
@@ -168,28 +163,5 @@ func (s slingRollback) cleanupSpawned(spawnInfo *SpawnedPolecatInfo, rigName, be
 	if spawnInfo.Branch != "" && !spawnInfo.BranchCreated {
 		fmt.Printf("  %s Kept branch %s (not created by this sling)\n",
 			style.Dim.Render("○"), spawnInfo.Branch)
-	}
-
-	// Close the auto-convoy if one was created
-	if convoyID != "" {
-		s.closeConvoy(convoyID, "Sling rollback - hook failed")
-	}
-}
-
-// closeConvoy closes an auto-created convoy in the town beads.
-func (s slingRollback) closeConvoy(convoyID, reason string) {
-	townRoot, err := s.townRoot, s.townErr
-	if err != nil {
-		fmt.Printf("  %s Could not find workspace to close convoy %s: %v\n", style.Dim.Render("Warning:"), convoyID, err)
-		return
-	}
-	db := s.townBeads
-	if db == nil {
-		db = beads.NewPinned(filepath.Join(townRoot, ".beads"))
-	}
-	if err := db.CloseWithReason(reason, convoyID); err != nil {
-		fmt.Printf("  %s Could not close convoy %s: %v\n", style.Dim.Render("Warning:"), convoyID, err)
-	} else {
-		fmt.Printf("  %s Closed convoy %s\n", style.Dim.Render("○"), convoyID)
 	}
 }

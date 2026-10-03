@@ -27,13 +27,10 @@ type Options struct {
 	// Flag passthrough
 	Args         string   // --args
 	Vars         []string // --var (key=value pairs)
-	Merge        string   // --merge (convoy strategy)
 	BaseBranch   string   // --base-branch
 	ResumeBranch string   // --branch / --pr (resume existing PR branch, gh#3602)
 	Account      string   // --account
 	Agent        string   // --agent
-	NoConvoy     bool     // --no-convoy
-	Owned        bool     // --owned
 	NoMerge      bool     // --no-merge
 	Force        bool     // --force
 	HookRawBead  bool     // --hook-raw-bead
@@ -144,9 +141,6 @@ type FieldUpdates struct {
 	NoMerge          bool     // Skip merge queue on completion
 	ReviewOnly       bool     // Review-only mode
 	Mode             *string  // nil = unchanged, "" clears, "ralph" enables
-	ConvoyID         string   // Convoy bead ID
-	MergeStrategy    string   // "mr", "local"
-	ConvoyOwned      bool     // Convoy carries the gt:owned label
 	FormulaVars      string   // Newline-separated key=value pairs
 }
 

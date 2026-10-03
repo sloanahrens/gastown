@@ -35,7 +35,6 @@ type slingHarness struct {
 	formulas       map[string]bool
 	dead           map[string]bool
 	molecules      map[string][]string
-	convoys        map[string]string // bead -> tracking convoy
 	stored         map[string][]beadFieldUpdates
 	crew           map[string]bool         // "<rig>/<name>" crew members on disk
 	hookedFormulas map[string]*beads.Issue // agent -> formula wisp hooked to it
@@ -56,7 +55,6 @@ func newSlingHarness(t *testing.T) *slingHarness {
 		formulas:       map[string]bool{},
 		dead:           map[string]bool{},
 		molecules:      map[string][]string{},
-		convoys:        map[string]string{},
 		stored:         map[string][]beadFieldUpdates{},
 		crew:           map[string]bool{},
 		estops:         map[string]bool{},
@@ -182,8 +180,8 @@ func newSlingHarness(t *testing.T) *slingHarness {
 			h.record("start session %s", s.PolecatName)
 			return "%1", nil
 		},
-		cleanupSpawned: func(s *SpawnedPolecatInfo, _, _, convoyID string) {
-			h.record("cleanup spawn %s convoy=%s", s.PolecatName, convoyID)
+		cleanupSpawned: func(s *SpawnedPolecatInfo, _, _ string) {
+			h.record("cleanup spawn %s", s.PolecatName)
 		},
 		resolveAgent: func(target string) (string, string, string, error) {
 			h.record("resolve agent %s", target)
@@ -208,16 +206,6 @@ func newSlingHarness(t *testing.T) *slingHarness {
 			h.record("reassign %s %s -> %s", id, from, to)
 		},
 
-		trackedByConvoy: func(_, id string) string {
-			h.record("convoy lookup %s", id)
-			h.mu.Lock()
-			defer h.mu.Unlock()
-			return h.convoys[id]
-		},
-		createConvoy: func(_, id, _ string, _ bool, _, _, _, _ string) (string, error) {
-			h.record("create convoy %s", id)
-			return "hq-cv-auto", nil
-		},
 		collectMolecules: func(_ *beadInfo, id, _ string) ([]string, error) {
 			h.mu.Lock()
 			defer h.mu.Unlock()
@@ -282,12 +270,12 @@ func newSlingHarness(t *testing.T) *slingHarness {
 
 		slingContexts: func(string) slingContextStore { return fakeSlingContexts{h} },
 
-		rollbackArtifacts: func(s *SpawnedPolecatInfo, _, id, _, convoyID string) {
+		rollbackArtifacts: func(s *SpawnedPolecatInfo, _, id, _ string) {
 			name := ""
 			if s != nil {
 				name = s.PolecatName
 			}
-			h.record("rollback %s bead=%s convoy=%s", name, id, convoyID)
+			h.record("rollback %s bead=%s", name, id)
 		},
 		restoreRawFields: func(id, _, _ string, _ *beadInfo) { h.record("restore raw fields %s", id) },
 		restorePinned:    func(_, id, assignee string) { h.record("restore pinned %s %s", id, assignee) },
@@ -342,7 +330,7 @@ func (f fakeSlingContexts) CreateSlingContext(_, id string, fields *capacity.Sli
 }
 
 func (f fakeSlingContexts) UpdateSlingContextFields(id string, fields *capacity.SlingContextFields) error {
-	f.h.record("update context %s convoy=%s", id, fields.Convoy)
+	f.h.record("update context %s", id)
 	return nil
 }
 

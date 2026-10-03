@@ -1204,14 +1204,12 @@ func truncate(s string, maxLen int) string {
 }
 
 // buildConvoyLegSlingArgs constructs the gt-sling argument list for a convoy leg.
-// --no-convoy is always included: legs are tracked by the parent convoy, so per-leg
-// auto-convoy creation is redundant (closes #3856).
+// Legs are tracked by the parent convoy; a sling creates no convoy of its own.
 func buildConvoyLegSlingArgs(beadID, targetRig, description, title, agent string, reviewOnly bool) []string {
 	args := []string{
 		"sling", beadID, targetRig,
 		"-a", description,
 		"-s", title,
-		"--no-convoy",
 	}
 	if agent != "" {
 		args = append(args, "--agent", agent)
@@ -1223,14 +1221,12 @@ func buildConvoyLegSlingArgs(beadID, targetRig, description, title, agent string
 }
 
 // buildWorkflowStepSlingArgs constructs the gt-sling argument list for a workflow step.
-// --no-convoy is always included: steps are tracked by the parent workflow bead, so
-// per-step auto-convoy creation is redundant (closes #3856).
+// Steps are tracked by the parent workflow bead; a sling creates no convoy of its own.
 func buildWorkflowStepSlingArgs(beadID, targetRig, description, title, agent string) []string {
 	args := []string{
 		"sling", beadID, targetRig,
 		"-a", description,
 		"-s", title,
-		"--no-convoy",
 	}
 	if agent != "" {
 		args = append(args, "--agent", agent)

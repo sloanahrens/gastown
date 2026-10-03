@@ -183,7 +183,6 @@ exit /b 0
 	prevOn := slingOnTarget
 	prevVars := slingVars
 	prevDryRun := slingDryRun
-	prevNoConvoy := slingNoConvoy
 	prevHookRawBead := slingHookRawBead
 	prevReviewOnly := slingReviewOnly
 	prevNoMerge := slingNoMerge
@@ -194,7 +193,6 @@ exit /b 0
 		slingOnTarget = prevOn
 		slingVars = prevVars
 		slingDryRun = prevDryRun
-		slingNoConvoy = prevNoConvoy
 		slingHookRawBead = prevHookRawBead
 		slingReviewOnly = prevReviewOnly
 		slingNoMerge = prevNoMerge
@@ -204,7 +202,6 @@ exit /b 0
 	})
 
 	slingDryRun = false
-	slingNoConvoy = true
 	slingHookRawBead = false
 	slingReviewOnly = false
 	slingNoMerge = false

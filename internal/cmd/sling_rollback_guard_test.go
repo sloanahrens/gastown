@@ -50,7 +50,7 @@ func TestCleanupSpawnedPolecatWorkRespectsProvenance(t *testing.T) {
 			f.r.cleanupSpawned(&SpawnedPolecatInfo{
 				RigName: "gastown", PolecatName: "Toast", Branch: "polecat/Toast/gt-abc",
 				FreshSpawn: tc.fresh, BranchCreated: tc.created,
-			}, "gastown", "gt-abc", "", "")
+			}, "gastown", "gt-abc", "")
 
 			if got := len(sb.removed) == 1; got != tc.wantRemoved {
 				t.Errorf("sandbox removed = %v, want %v", sb.removed, tc.wantRemoved)
@@ -100,7 +100,7 @@ func TestCleanupSpawnedPolecatWorkRestoresOriginalHoldWhenWorkSurvives(t *testin
 			f.r.survivingWork = func(string, string) (string, error) { return tc.branch, tc.err }
 
 			info := &SpawnedPolecatInfo{RigName: "gastown", PolecatName: "Toast", FreshSpawn: true, originalHold: tc.orig}
-			f.r.cleanupSpawned(info, "gastown", "gt-abc", "", "")
+			f.r.cleanupSpawned(info, "gastown", "gt-abc", "")
 
 			got := rel.beads["gt-abc"]
 			if got[0] != tc.wantStatus || got[1] != tc.wantHolder {
@@ -119,7 +119,7 @@ func TestCleanupSpawnedPolecatWorkNeverUnhooksAnotherAssignee(t *testing.T) {
 	f := newRollbackFixture(t, nil, rel)
 
 	f.r.cleanupSpawned(&SpawnedPolecatInfo{RigName: "gastown", PolecatName: "Toast", FreshSpawn: true},
-		"gastown", "gt-abc", "", "")
+		"gastown", "gt-abc", "")
 	if len(rel.released) != 0 {
 		t.Fatalf("released a bead hooked to someone else: %v", rel.released)
 	}
@@ -132,7 +132,7 @@ func TestCleanupSpawnedPolecatWorkZeroProvenanceKeepsEverything(t *testing.T) {
 	f := newRollbackFixture(t, nil, nil)
 	sb := f.sb
 
-	f.r.cleanupSpawned(&SpawnedPolecatInfo{RigName: "gastown", PolecatName: "Toast", Branch: "feature/x"}, "gastown", "", "", "")
+	f.r.cleanupSpawned(&SpawnedPolecatInfo{RigName: "gastown", PolecatName: "Toast", Branch: "feature/x"}, "gastown", "", "")
 	if len(sb.removed) != 0 || len(sb.branches) != 0 {
 		t.Fatalf("zero-provenance cleanup destroyed %v / %v", sb.removed, sb.branches)
 	}
@@ -215,7 +215,7 @@ func TestRunSlingFormulaRollsBackOnEveryPostSpawnExit(t *testing.T) {
 			}
 			var wantRollback []string
 			if tc.wantRollback {
-				wantRollback = []string{"rollback Toast bead=" + tc.wantBeadID + " convoy="}
+				wantRollback = []string{"rollback Toast bead=" + tc.wantBeadID}
 			}
 			h.wantCalls("rollback", wantRollback...)
 			var wantBurned []string

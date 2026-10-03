@@ -56,9 +56,6 @@ func (d *slingDeps) engineDeps() *sling.Deps {
 		UpdateAgentMode:    d.updateAgentMode,
 		LogFeed:            d.logFeed,
 
-		TrackedByConvoy: d.trackedByConvoy,
-		CreateConvoy:    d.createConvoy,
-
 		RollbackArtifacts: d.engineRollbackArtifacts,
 		RestoreRawFields:  d.restoreRawFields,
 		RestorePinned:     d.restorePinned,
@@ -169,6 +166,6 @@ func (d *slingDeps) engineStartSession(spawn *sling.Spawn) (string, error) {
 	return d.startSession(cmdSpawn(spawn))
 }
 
-func (d *slingDeps) engineRollbackArtifacts(spawn *sling.Spawn, townRoot, beadID, hookWorkDir, convoyID string) {
-	d.rollbackArtifacts(cmdSpawn(spawn), townRoot, beadID, hookWorkDir, convoyID)
+func (d *slingDeps) engineRollbackArtifacts(spawn *sling.Spawn, townRoot, beadID, hookWorkDir string) {
+	d.rollbackArtifacts(cmdSpawn(spawn), townRoot, beadID, hookWorkDir)
 }

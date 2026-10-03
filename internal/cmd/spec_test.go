@@ -270,7 +270,7 @@ func TestSpecSlingParams(t *testing.T) {
 	t.Parallel()
 	c := specCandidate{Spec: cleanSpec("gt-a", 1, ""), Rig: "gastown"}
 	p := specSlingParams("/town", "/town/gastown/.beads", "mol-polecat-work", c, specdispatch.SeatChoice{Agent: "claude-sonnet"})
-	if p.Agent != "claude-sonnet" || !p.NoConvoy || !p.NoBoot || !p.FormulaFailFatal ||
+	if p.Agent != "claude-sonnet" || !p.NoBoot || !p.FormulaFailFatal ||
 		p.RigName != "gastown" || p.FormulaName != "mol-polecat-work" || !strings.Contains(p.Args, "temporary INSTALL_DIR") {
 		t.Fatalf("params = %+v", p)
 	}

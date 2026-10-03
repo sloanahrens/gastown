@@ -322,27 +322,27 @@ func TestSlingRollsBackOnlyWhatItSpawned(t *testing.T) {
 			inject: func(h *slingHarness) {
 				h.run.crossRigGuard = func(string, string, string) error { return errors.New("cross-rig mismatch") }
 			}},
-		{name: "formula instantiation fails", wantErr: "instantiating formula", wantRollback: "rollback Toast bead=gt-abc123 convoy=",
+		{name: "formula instantiation fails", wantErr: "instantiating formula", wantRollback: "rollback Toast bead=gt-abc123",
 			inject: func(h *slingHarness) {
 				h.run.instantiateFormula = func(_ context.Context, _, _, _, _, _ string, _ []string) (*FormulaOnBeadResult, error) {
 					return nil, injected
 				}
 			}},
-		{name: "assignee lock fails", wantErr: "serializing hook write", wantRollback: "rollback Toast bead=gt-abc123 convoy=",
+		{name: "assignee lock fails", wantErr: "serializing hook write", wantRollback: "rollback Toast bead=gt-abc123",
 			inject: func(h *slingHarness) {
 				h.run.lockAssignee = func(string, string) (func(), error) { return nil, injected }
 			}},
-		{name: "raw metadata store fails closes the convoy", wantErr: "storing raw sling metadata", wantRollback: "rollback Toast bead=gt-abc123 convoy=hq-cv-auto",
+		{name: "raw metadata store fails", wantErr: "storing raw sling metadata", wantRollback: "rollback Toast bead=gt-abc123",
 			inject: func(h *slingHarness) {
-				h.run.opts.hookRawBead, h.run.opts.noMerge, h.run.opts.noConvoy = true, true, false
+				h.run.opts.hookRawBead, h.run.opts.noMerge = true, true
 				h.run.storeFields = func(string, string, beadFieldUpdates) error { return injected }
 			}},
-		{name: "hook fails keeps the auto-convoy", wantErr: "injected failure", wantRollback: "rollback Toast bead=gt-abc123 convoy=",
+		{name: "hook fails", wantErr: "injected failure", wantRollback: "rollback Toast bead=gt-abc123",
 			inject: func(h *slingHarness) {
-				h.run.opts.hookRawBead, h.run.opts.noConvoy = true, false
+				h.run.opts.hookRawBead = true
 				h.run.hook = func(string, string, string, string) error { return injected }
 			}},
-		{name: "session start fails", wantErr: "starting polecat session", wantRollback: "rollback Toast bead=gt-abc123 convoy=",
+		{name: "session start fails", wantErr: "starting polecat session", wantRollback: "rollback Toast bead=gt-abc123",
 			inject: func(h *slingHarness) {
 				h.run.startSession = func(*SpawnedPolecatInfo) (string, error) { return "", injected }
 			}},
@@ -387,7 +387,6 @@ func TestSlingRollsBackAnInlineTargetsSpawn(t *testing.T) {
 	t.Parallel()
 	h := newSlingHarness(t)
 	h.addBead(slingBead, beadInfo{})
-	h.run.opts.noConvoy = true
 	h.run.resolveTarget = func(string, ResolveTargetOptions) (*ResolvedTarget, error) {
 		spawn := h.newSpawn("gastown")
 		return &ResolvedTarget{Agent: spawn.AgentID(), WorkDir: spawn.ClonePath, NewPolecatInfo: spawn}, nil
@@ -395,7 +394,7 @@ func TestSlingRollsBackAnInlineTargetsSpawn(t *testing.T) {
 	h.run.hook = func(string, string, string, string) error { return errors.New("injected failure") }
 	err := h.sling(slingBead, "gastown/polecats/Toast")
 	wantSlingErr(t, err, "injected failure")
-	h.wantCalls("rollback", "rollback Toast bead=gt-abc123 convoy=")
+	h.wantCalls("rollback", "rollback Toast bead=gt-abc123")
 	h.wantCalls("restore raw fields", "restore raw fields "+slingBead)
 }
 
@@ -412,35 +411,30 @@ func TestSlingForcedPinnedRollbackRestoresThePin(t *testing.T) {
 }
 
 // TestSlingDryRunWritesNothing: a dry run resolves the target and reports,
-// but looks up no convoy (GH#3903), writes nothing and rolls nothing back.
+// writes nothing and rolls nothing back.
 func TestSlingDryRunWritesNothing(t *testing.T) {
 	t.Parallel()
 	h := newSlingHarness(t)
 	h.addBead(slingBead, beadInfo{})
 	h.run.opts.dryRun = true
-	h.run.opts.noConvoy = false
 	if err := h.sling(slingBead, "gastown"); err != nil {
 		t.Fatalf("dry run: %v", err)
 	}
-	for _, p := range []string{"convoy lookup", "create convoy", "instantiate", "store fields", "hook", "rollback", "admit", "start session", "nudge"} {
+	for _, p := range []string{"convoy", "instantiate", "store fields", "hook", "rollback", "admit", "start session", "nudge"} {
 		h.wantNo(p)
-	}
-	if !strings.Contains(h.out.String(), "Would create convoy") {
-		t.Errorf("dry run output %q does not describe the convoy", h.out.String())
 	}
 }
 
 // TestSlingWritesInOrder: the success path of a bare bead to a rig. The
-// convoy exists before the formula, the hook comes after the formula and any
-// raw metadata, and the session starts last (gt-jn40ft). A rig target is the
-// engine's dispatch (gt-hk555), so this checks those milestones in order
-// rather than the engine's full call list, which internal/sling's callers
-// pin in sling_execute_test.go.
+// formula is applied before the hook, which comes after any raw metadata, and
+// the session starts last (gt-jn40ft). A rig target is the engine's dispatch
+// (gt-hk555), so this checks those milestones in order rather than the
+// engine's full call list, which internal/sling's callers pin in
+// sling_execute_test.go.
 func TestSlingWritesInOrder(t *testing.T) {
 	t.Parallel()
 	h := newSlingHarness(t)
 	h.addBead(slingBead, beadInfo{})
-	h.run.opts.noConvoy = false
 	if err := h.sling(slingBead, "gastown"); err != nil {
 		t.Fatalf("sling: %v", err)
 	}
@@ -448,7 +442,6 @@ func TestSlingWritesInOrder(t *testing.T) {
 	at := -1
 	for _, want := range []string{
 		"cross-rig guard gt-abc123 gastown/polecats/_",
-		"create convoy gt-abc123",
 		"instantiate mol-polecat-work on gt-abc123 vars=",
 		"hook gt-abc123 gastown/polecats/Toast",
 		"start session Toast",
@@ -463,8 +456,8 @@ func TestSlingWritesInOrder(t *testing.T) {
 		at = i
 	}
 	stored := h.stored[slingBead]
-	if len(stored) != 1 || stored[0].AttachedMolecule != "gt-wisp-new" || stored[0].AttachedFormula != "mol-polecat-work" || stored[0].ConvoyID != "hq-cv-auto" {
-		t.Errorf("stored fields = %+v, want the wisp, formula and convoy attached", stored)
+	if len(stored) != 1 || stored[0].AttachedMolecule != "gt-wisp-new" || stored[0].AttachedFormula != "mol-polecat-work" {
+		t.Errorf("stored fields = %+v, want the wisp and formula attached", stored)
 	}
 }
 
@@ -498,42 +491,30 @@ func TestSlingRigTargetWakesTheRig(t *testing.T) {
 	}
 }
 
-func TestSlingAutoConvoy(t *testing.T) {
+// TestSlingCreatesNoConvoy pins gt-gzhin.4: no sling path reaches for a convoy
+// any more, whatever the target or the bead's history.
+func TestSlingCreatesNoConvoy(t *testing.T) {
 	t.Parallel()
-	t.Run("already tracked", func(t *testing.T) {
-		t.Parallel()
-		h := newSlingHarness(t)
-		h.addBead(slingBead, beadInfo{})
-		h.run.opts.noConvoy = false
-		h.convoys[slingBead] = "hq-cv-old"
-		if err := h.sling(slingBead, "gastown"); err != nil {
-			t.Fatalf("sling: %v", err)
-		}
-		h.wantNo("create convoy")
-	})
-	t.Run("no-convoy", func(t *testing.T) {
-		t.Parallel()
-		h := newSlingHarness(t)
-		h.addBead(slingBead, beadInfo{})
-		h.run.opts.noConvoy = true
-		if err := h.sling(slingBead, "gastown"); err != nil {
-			t.Fatalf("sling: %v", err)
-		}
-		h.wantNo("convoy lookup")
-	})
-	t.Run("create failure is not fatal", func(t *testing.T) {
-		t.Parallel()
-		h := newSlingHarness(t)
-		h.addBead(slingBead, beadInfo{})
-		h.run.opts.noConvoy = false
-		h.run.createConvoy = func(string, string, string, bool, string, string, string, string) (string, error) {
-			return "", errors.New("dolt busy")
-		}
-		if err := h.sling(slingBead, "gastown"); err != nil {
-			t.Fatalf("sling: %v", err)
-		}
-		h.wantCalls("hook", "hook gt-abc123 gastown/polecats/Toast")
-	})
+	for _, tc := range []struct {
+		name   string
+		target string
+	}{
+		{name: "rig target", target: "gastown"},
+		{name: "named polecat", target: "gastown/polecats/Toast"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newSlingHarness(t)
+			h.addBead(slingBead, beadInfo{})
+			if err := h.sling(slingBead, tc.target); err != nil {
+				t.Fatalf("sling: %v", err)
+			}
+			h.wantNo("convoy")
+			if strings.Contains(h.out.String(), "convoy") {
+				t.Errorf("sling output mentions a convoy:\n%s", h.out.String())
+			}
+		})
+	}
 }
 
 // TestSlingFormulaChoice (#288): a bare bead to a polecat gets

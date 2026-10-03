@@ -27,12 +27,9 @@ type batchSlingOptions struct {
 	ralph         bool
 	argsText      string
 	vars          []string
-	merge         string
 	baseBranch    string
 	account       string
 	agent         string
-	noConvoy      bool
-	owned         bool
 	noMerge       bool
 	reviewOnly    bool
 	noBoot        bool
@@ -51,12 +48,9 @@ func batchSlingOptionsFrom(o slingOptions) batchSlingOptions {
 		ralph:         o.ralph,
 		argsText:      o.argsText,
 		vars:          append([]string(nil), o.vars...),
-		merge:         o.merge,
 		baseBranch:    o.baseBranch,
 		account:       o.account,
 		agent:         o.agent,
-		noConvoy:      o.noConvoy,
-		owned:         o.owned,
 		noMerge:       o.noMerge,
 		reviewOnly:    o.reviewOnly,
 		noBoot:        o.noBoot,
@@ -211,12 +205,9 @@ func (b batchSling) run(beadIDs []string, rigName string, townBeadsDir string) e
 			RigName:          rigName,
 			Args:             b.opts.argsText,
 			Vars:             b.opts.vars,
-			Merge:            b.opts.merge,
 			BaseBranch:       b.opts.baseBranch,
 			Account:          b.opts.account,
 			Agent:            b.opts.agent,
-			NoConvoy:         b.opts.noConvoy,
-			Owned:            b.opts.owned,
 			NoMerge:          b.opts.noMerge,
 			ReviewOnly:       b.opts.reviewOnly,
 			Force:            b.opts.force,
@@ -326,8 +317,8 @@ func (b batchSling) guardCrossRig(beadIDs []string, rigName, townRoot string) er
 
 // cleanupSpawnedPolecat undoes a spawn whose session/hook failed before any
 // work bead was hooked to it. See cleanupSpawnedPolecatWork.
-func cleanupSpawnedPolecat(spawnInfo *SpawnedPolecatInfo, townRoot, rigName, convoyID string) {
-	cleanupSpawnedPolecatWork(spawnInfo, townRoot, rigName, "", "", convoyID)
+func cleanupSpawnedPolecat(spawnInfo *SpawnedPolecatInfo, townRoot, rigName string) {
+	cleanupSpawnedPolecatWork(spawnInfo, townRoot, rigName, "", "")
 }
 
 // spawnedPolecatSandbox is the rig surface a rollback may touch: the polecat's
@@ -376,8 +367,8 @@ func openSpawnedPolecatSandbox(townRoot, rigName string) (spawnedPolecatSandbox,
 //   - Only a branch this sling created, on a sandbox this sling created, is a
 //     candidate for deletion, and deletePolecatBranch still keeps it when its
 //     tip is not on a remote. A resumed branch is never deleted.
-func cleanupSpawnedPolecatWork(spawnInfo *SpawnedPolecatInfo, townRoot, rigName, beadID, hookWorkDir, convoyID string) {
-	realSlingRollbackIn(townRoot, nil).cleanupSpawned(spawnInfo, rigName, beadID, hookWorkDir, convoyID)
+func cleanupSpawnedPolecatWork(spawnInfo *SpawnedPolecatInfo, townRoot, rigName, beadID, hookWorkDir string) {
+	realSlingRollbackIn(townRoot, nil).cleanupSpawned(spawnInfo, rigName, beadID, hookWorkDir)
 }
 
 // allBeadIDs returns true if every arg looks like a bead ID (syntactic check).

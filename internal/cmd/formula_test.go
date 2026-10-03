@@ -156,7 +156,10 @@ func TestFormulaSyncMessage(t *testing.T) {
 	}
 }
 
-func TestBuildConvoyLegSlingArgs_AlwaysIncludesNoConvoy(t *testing.T) {
+// TestBuildConvoyLegSlingArgs: a leg's sling carries the bead, the rig, the
+// context and the optional agent/review flags — and no --no-convoy, since a
+// sling creates no convoy to suppress (gt-gzhin.4).
+func TestBuildConvoyLegSlingArgs(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -165,10 +168,10 @@ func TestBuildConvoyLegSlingArgs_AlwaysIncludesNoConvoy(t *testing.T) {
 		reviewOnly bool
 		wantFlags  []string
 	}{
-		{"no agent no review", "", false, []string{"--no-convoy"}},
-		{"with agent", "claude", false, []string{"--no-convoy", "--agent", "claude"}},
-		{"review only", "", true, []string{"--no-convoy", "--review-only"}},
-		{"agent and review", "gemini", true, []string{"--no-convoy", "--agent", "gemini", "--review-only"}},
+		{"no agent no review", "", false, nil},
+		{"with agent", "claude", false, []string{"--agent", "claude"}},
+		{"review only", "", true, []string{"--review-only"}},
+		{"agent and review", "gemini", true, []string{"--agent", "gemini", "--review-only"}},
 	}
 
 	for _, tt := range tests {
@@ -183,11 +186,16 @@ func TestBuildConvoyLegSlingArgs_AlwaysIncludesNoConvoy(t *testing.T) {
 			if got[0] != "sling" {
 				t.Errorf("first arg must be 'sling', got %q", got[0])
 			}
+			if slices.Contains(got, "--no-convoy") {
+				t.Errorf("buildConvoyLegSlingArgs() still passes --no-convoy: %v", got)
+			}
 		})
 	}
 }
 
-func TestBuildWorkflowStepSlingArgs_AlwaysIncludesNoConvoy(t *testing.T) {
+// TestBuildWorkflowStepSlingArgs: a step's sling carries the bead, the rig,
+// the context and the optional agent — and no --no-convoy (gt-gzhin.4).
+func TestBuildWorkflowStepSlingArgs(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -202,8 +210,8 @@ func TestBuildWorkflowStepSlingArgs_AlwaysIncludesNoConvoy(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := buildWorkflowStepSlingArgs("bead-2", "myrig", "desc", "title", tt.agent)
-			if !slices.Contains(got, "--no-convoy") {
-				t.Errorf("buildWorkflowStepSlingArgs() missing --no-convoy in %v", got)
+			if slices.Contains(got, "--no-convoy") {
+				t.Errorf("buildWorkflowStepSlingArgs() still passes --no-convoy: %v", got)
 			}
 			if got[0] != "sling" {
 				t.Errorf("first arg must be 'sling', got %q", got[0])

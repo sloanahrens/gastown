@@ -177,7 +177,6 @@ func TestReconstructFromContext(t *testing.T) {
 		Formula:     "mol-polecat-work",
 		Args:        "do stuff",
 		Vars:        "x=1\ny=2",
-		Merge:       "mr",
 		BaseBranch:  "main",
 		Account:     "acme",
 		Agent:       "codex",
@@ -203,9 +202,6 @@ func TestReconstructFromContext(t *testing.T) {
 	}
 	if len(params.Vars) != 2 || params.Vars[0] != "x=1" || params.Vars[1] != "y=2" {
 		t.Errorf("Vars: got %v, want [x=1 y=2]", params.Vars)
-	}
-	if params.Merge != "mr" {
-		t.Errorf("Merge: got %q, want %q", params.Merge, "mr")
 	}
 	if params.BaseBranch != "main" {
 		t.Errorf("BaseBranch: got %q, want %q", params.BaseBranch, "main")

@@ -12,7 +12,7 @@ internal/cmd/done_open_source_consumers_integration_test.go argv 1
 internal/cmd/formula.go argv 1
 internal/cmd/install_integration_test.go argv 4
 internal/cmd/prime.go argv 1
-internal/cmd/scheduler_integration_test.go argv 9
+internal/cmd/scheduler_integration_test.go argv 8
 internal/cmd/scheduler_test_helpers_integration_test.go argv 9
 internal/cmd/show.go argv 1
 internal/cmdtree/gen-bd-tree/main.go argv 1

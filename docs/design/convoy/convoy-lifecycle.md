@@ -71,6 +71,10 @@ Manual overrides (`close --force`, `land`) bypass the check entirely.
 
 ## Auto-convoy creation: what `gt sling` actually does
 
+> **Removed (gt-gzhin.4).** `gt sling` no longer creates a convoy, and
+> `--no-convoy`, `--owned` and `--merge` are gone from the command. The
+> sections below describe the retired behavior.
+
 `gt sling` auto-creates a convoy for every bead it dispatches, unless
 `--no-convoy` is passed. The behavior differs significantly between
 single-bead and multi-bead (batch) sling.

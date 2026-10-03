@@ -270,7 +270,7 @@ func (r *slingRun) runFormula(ctx context.Context, args []string) (err error) {
 		}
 		if resolved.NewPolecatInfo != nil {
 			fmt.Fprintf(out, "%s Rolling back spawned polecat %s...\n", style.Warning.Render("⚠"), resolved.NewPolecatInfo.PolecatName)
-			r.rollbackArtifacts(resolved.NewPolecatInfo, r.townRoot, rollbackBeadID, rollbackWorkDir, "")
+			r.rollbackArtifacts(resolved.NewPolecatInfo, r.townRoot, rollbackBeadID, rollbackWorkDir)
 		}
 	}
 	defer rollbackUnlessCommitted()

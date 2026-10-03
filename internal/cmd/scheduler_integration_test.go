@@ -20,7 +20,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -420,10 +419,10 @@ func checkSchedulerCircuitBreakerExclusion(t *testing.T, hqPath, rigPath, gtBina
 	}
 }
 
-// TestIntegrationSchedulerAutoConvoyCreation verifies that gt sling deferred dispatch (max_polecats > 0)
-// creates an auto-convoy, stores the convoy ID in the sling context, and the
-// convoy is resolvable via bd show.
-func TestIntegrationSchedulerAutoConvoyCreation(t *testing.T) {
+// TestIntegrationSchedulerCreatesNoConvoy verifies that gt sling deferred
+// dispatch (max_polecats > 0) schedules the bead through its sling context and
+// creates no convoy (gt-gzhin.4).
+func TestIntegrationSchedulerCreatesNoConvoy(t *testing.T) {
 	t.Parallel()
 	hqPath, rigPath, gtBinary, env := setupSchedulerIntegrationTown(t)
 
@@ -441,62 +440,23 @@ func TestIntegrationSchedulerAutoConvoyCreation(t *testing.T) {
 	if fields.TargetRig != "testrig" {
 		t.Errorf("target_rig = %q, want %q", fields.TargetRig, "testrig")
 	}
-	if fields.Convoy == "" {
-		t.Fatalf("convoy ID not stored in sling context")
-	}
 
-	// Verify: convoy is resolvable via bd show from hq.
-	showArgs := beads.MaybePrependAllowStale([]string{"show", fields.Convoy, "--json"})
-	cmd := exec.Command("bd", showArgs...)
+	// Verify: no convoy was created for the sling (HQ beads DB holds none).
+	listArgs := beads.MaybePrependAllowStale([]string{"list", "--label=gt:convoy", "--json"})
+	cmd := exec.Command("bd", listArgs...)
 	cmd.Dir = hqPath
 	out, err := cmd.Output()
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			t.Fatalf("bd show convoy %s failed: %v\nstderr: %s\nstdout: %s", fields.Convoy, err, exitErr.Stderr, out)
-		}
-		t.Fatalf("bd show convoy %s failed: %v\noutput: %s", fields.Convoy, err, out)
+		t.Fatalf("bd list convoys failed: %v", err)
 	}
 	var convoys []struct {
-		ID        string   `json:"id"`
-		IssueType string   `json:"issue_type"`
-		Labels    []string `json:"labels"`
+		ID string `json:"id"`
 	}
 	if err := json.Unmarshal(out, &convoys); err != nil {
-		t.Fatalf("parse convoy show: %v\nraw output: %s", err, out)
+		t.Fatalf("parse convoy list: %v", err)
 	}
-	if len(convoys) == 0 {
-		t.Fatalf("convoy %s not found via bd show", fields.Convoy)
-	}
-	if convoys[0].IssueType != "task" || !slices.Contains(convoys[0].Labels, "gt:convoy") {
-		t.Errorf("convoy identity = type %q labels %v, want task with gt:convoy", convoys[0].IssueType, convoys[0].Labels)
-	}
-
-	// Verify: convoy has a "tracks" dependency pointing to the rig bead.
-	depArgs := beads.MaybePrependAllowStale([]string{
-		"dep", "list", fields.Convoy, fields.Convoy,
-		"--direction=down", "--type=tracks", "--json",
-	})
-	depCmd := exec.Command("bd", depArgs...)
-	depCmd.Dir = hqPath
-	depOut, err := depCmd.Output()
-	if err != nil {
-		t.Fatalf("convoy %s dep list failed: %v", fields.Convoy, err)
-	}
-	var deps []struct {
-		DependsOnID string `json:"depends_on_id"`
-	}
-	if err := json.Unmarshal(depOut, &deps); err != nil {
-		t.Fatalf("parse dep list: %v\nraw: %s", err, depOut)
-	}
-	foundTracked := false
-	for _, dep := range deps {
-		if strings.Contains(dep.DependsOnID, beadID) {
-			foundTracked = true
-			break
-		}
-	}
-	if !foundTracked {
-		t.Errorf("convoy %s should track bead %s via tracks dep, got deps: %s", fields.Convoy, beadID, depOut)
+	if len(convoys) != 0 {
+		t.Errorf("scheduling created %d convoy(s), want none: %+v", len(convoys), convoys)
 	}
 }
 

@@ -122,7 +122,6 @@ func runEpicScheduleByID(epicID string, opts epicScheduleOpts) error {
 			Formula:     formula,
 			Force:       opts.Force,
 			HookRawBead: opts.HookRawBead,
-			NoConvoy:    true, // Epic is the organizing structure
 		})
 		if err != nil {
 			fmt.Printf("  %s %s: %v\n", style.Dim.Render("✗"), c.ID, err)
@@ -163,7 +162,6 @@ func epicSlingParams(c epicDispatchCandidate, formula string, opts epicScheduleO
 		FormulaName:   formula,
 		Force:         opts.Force,
 		HookRawBead:   opts.HookRawBead,
-		NoConvoy:      true, // Epic is the organizing structure
 		NoBoot:        opts.NoBoot,
 		CallerContext: "epic-sling",
 		TownRoot:      townRoot,

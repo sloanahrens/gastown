@@ -128,14 +128,11 @@ Sling context beads eliminate all of this:
 | `args` | string | Natural language instructions for executor |
 | `vars` | string | Newline-separated formula variables (`key=value`) |
 | `enqueued_at` | RFC3339 | Timestamp of schedule |
-| `merge` | string | Merge strategy: `mr`, `local` |
-| `convoy` | string | Convoy bead ID (set after auto-convoy creation) |
 | `base_branch` | string | Override base branch for polecat worktree |
 | `no_merge` | bool | Do not land the work on completion |
 | `account` | string | Claude Code account handle |
 | `agent` | string | Agent/runtime override |
 | `hook_raw_bead` | bool | Hook without default formula |
-| `owned` | bool | Caller-managed convoy lifecycle |
 | `mode` | string | Execution mode: `ralph` (fresh context per step) |
 | `dispatch_failures` | int | Consecutive failure count (circuit breaker) |
 | `last_failure` | string | Most recent dispatch error message |
@@ -460,5 +457,5 @@ Convoys and the scheduler are complementary but distinct mechanisms. Convoys tra
 
 ## See Also
 
-- [Convoys](../concepts/convoy.md) — Convoy tracking, auto-convoy on schedule
+- [Convoys](../concepts/convoy.md) — Convoy tracking
 - [Property Layers](property-layers.md) — Labels-as-state pattern used by scheduler labels (see Operational State Events section)
