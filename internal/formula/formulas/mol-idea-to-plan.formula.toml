@@ -11,12 +11,12 @@ They'll pour this formula and it takes over from there.
       ↓
 [intake]         Agent structures it into a draft PRD
       ↓
-[prd-review]     6 polecats review PRD in parallel (mol-prd-review convoy)
+[prd-review]     6 polecats review PRD in parallel (one per dimension)
                  → requirements, gaps, ambiguity, feasibility, scope, stakeholders
       ↓
 [human-clarify]  Agent presents consolidated questions, you answer
       ↓
-[generate-plan]  6 polecats design the implementation in parallel (design convoy)
+[generate-plan]  6 polecats design the implementation in parallel (one per dimension)
                  → api, data, ux, scale, security, integration
       ↓
 [prd-align 1-3]  3 rounds × 2 polecats: align plan with PRD, apply fixes each round
@@ -41,10 +41,11 @@ runs autonomously — polecats review, orchestrator applies fixes, repeat.
 ## Orchestration Model
 
 This is a workflow formula. The orchestrating crew worker runs through
-steps sequentially. The parallel review steps kick off convoy sub-workflows
-(separate polecats for each review dimension) and await their synthesis reports
-via mail before proceeding. The iterative plan review rounds dispatch 2 polecats
-each, await their findings, apply fixes to the plan, then proceed to the next round.
+steps sequentially. The parallel review steps create one review bead per
+dimension, sling it to a polecat, and read the report from the bead's notes
+before consolidating. The iterative plan review rounds dispatch 2 polecats
+each, await their findings, apply fixes to the plan, then proceed to the next
+round.
 
 ## Variables
 
@@ -114,31 +115,21 @@ echo "prd_draft=.prd-reviews/{{review_id}}/prd-draft.md" >> .prd-reviews/{{revie
 
 [[steps]]
 id = "prd-review"
-title = "Run parallel PRD review (6 legs)"
+title = "Run parallel PRD review (6 reviewers)"
 needs = ["intake"]
 metadata.target = "mayor"
 description = """
-Pour the mol-prd-review convoy to run 6 parallel PRD reviewers.
+Dispatch 6 polecats in parallel, one per PRD review dimension, then consolidate
+their reports into a single review file.
 
-**1. Pour the convoy:**
-Bind the problem and context first. Both are free text, so they go through
-quoted heredocs and the command reads the quoted shell variables (each step
-runs in a fresh shell):
-```bash
-PROBLEM=$(cat <<'GT_PROBLEM_EOF'
-{{problem}}
-GT_PROBLEM_EOF
-)
-CONTEXT=$(cat <<'GT_CONTEXT_EOF'
-{{context}}
-GT_CONTEXT_EOF
-)
-gt formula run mol-prd-review \\
-  --set problem="$PROBLEM" \\
-  --set context="See .prd-reviews/{{review_id}}/prd-draft.md. $CONTEXT"
-```
+**1. Dispatch the 6 reviewers:**
 
-This spawns 6 polecats in parallel:
+Each reviewer is one polecat with one review. Create a bead per dimension whose
+description is that dimension's prompt, then sling the bead at the rig: the
+polecat reads the description and records its report as a note on the same
+bead. `gt:keep` holds a review bead off the spec dispatcher's board, so the
+sling here is the only thing that dispatches it. The dimensions:
+
 - requirements — success criteria and acceptance conditions
 - gaps — missing requirements nobody thought of
 - ambiguity — unclear or contradictory language
@@ -146,21 +137,70 @@ This spawns 6 polecats in parallel:
 - scope — MVP definition and scope creep risk
 - stakeholders — unconsidered actors and conflicting needs
 
-**2. Await synthesis:**
-The convoy's synthesis step will mail you when complete. Check your inbox:
 ```bash
-gt mail inbox
+BEAD=$(gt bead create "PRD review: requirements" --type=task --label=gt:keep \
+  --quiet --description="
+Review the PRD draft for the 'requirements' dimension.
+Read: .prd-reviews/{{review_id}}/prd-draft.md
+Assess whether the requirements are complete enough to build from: missing
+success criteria, undefined acceptance conditions, unmeasured outcomes, missing
+non-functional requirements, happy-path-only thinking.
+Report Critical Gaps (each with why it matters), Important Considerations, and
+Observations, plus a Confidence line (High/Medium/Low). Classify each gap
+must-fix or should-fix.
+
+Record this report as a note on the bead on your hook, then stop:
+  gt bead note <bead-id> '<report>'
+  gt done --cleanup-status clean
+")
+gt sling "$BEAD" gastown
 ```
 
-The mail subject will be: `PRD Review Complete: {{problem}}`
-The review file will be at: `.prd-reviews/<review-id>/prd-review.md`
+For the other five, keep the same command shape and change only the bead title,
+the dimension name and the assess line:
 
-**3. Read the synthesis:**
+- `gaps` — requirements missing entirely: unstated needs, edge cases, failure
+  modes, rollback and recovery.
+- `ambiguity` — unclear, contradictory, or overloaded language; the same term
+  used two ways.
+- `feasibility` — hard technical problems, prerequisites, unknowns, anything
+  that could make the build infeasible.
+- `scope` — what is MVP versus later; scope-creep risk; what to cut.
+- `stakeholders` — unconsidered actors, conflicting needs, who is affected but
+  not named.
+
+**2. Await the reports:**
 ```bash
-cat .prd-reviews/<review-id>/prd-review.md
+bd show <bead-id>   # closed, with the report in its notes
+```
+Repeat until all 6 beads carry a report note.
+
+**3. Consolidate:**
+Write the six reports into one review at
+`.prd-reviews/{{review_id}}/prd-review.md`:
+
+```markdown
+# PRD Review: {{problem}}
+
+## Executive Summary
+(one paragraph: overall PRD health)
+
+## Overall PRD Health
+(per-dimension confidence, Low dimensions first)
+
+## Before You Build: Critical Questions
+(deduplicated, prioritized questions the human must answer; keep each finding's
+suggested question)
+
+## Important Considerations
+(non-blocking, grouped by dimension)
+
+## Observations
+(anything worth watching)
 ```
 
-**Exit criteria:** You have received the PRD review synthesis mail and read the report."""
+**Exit criteria:** All 6 reports received and consolidated into
+`.prd-reviews/{{review_id}}/prd-review.md`."""
 
 [[steps]]
 id = "human-clarify"
@@ -222,25 +262,17 @@ title = "Generate implementation plan (6 design dimensions)"
 needs = ["human-clarify"]
 metadata.target = "mayor"
 description = """
-Pour the design convoy to generate an implementation plan from the refined PRD.
+Dispatch 6 polecats in parallel, one per design dimension, then consolidate
+their input into an implementation plan.
 
-**1. Pour the design convoy:**
-Bind the problem and context first, as in the PRD review step:
-```bash
-PROBLEM=$(cat <<'GT_PROBLEM_EOF'
-{{problem}}
-GT_PROBLEM_EOF
-)
-CONTEXT=$(cat <<'GT_CONTEXT_EOF'
-{{context}}
-GT_CONTEXT_EOF
-)
-gt formula run design \\
-  --set problem="$PROBLEM" \\
-  --set context="PRD with clarifications: .prd-reviews/{{review_id}}/prd-draft.md. $CONTEXT"
-```
+**1. Dispatch the 6 designers:**
 
-This spawns 6 polecats in parallel, each exploring a different dimension:
+Each designer is one polecat with one design dimension. Create a bead per
+dimension whose description is that dimension's prompt, then sling the bead at
+the rig: the polecat reads the description and records its report as a note on
+the same bead. `gt:keep` holds a review bead off the spec dispatcher's board,
+so the sling here is the only thing that dispatches it. The dimensions:
+
 - api — interface design and developer ergonomics
 - data — data model, storage, migrations
 - ux — user experience and CLI/UI ergonomics
@@ -248,16 +280,61 @@ This spawns 6 polecats in parallel, each exploring a different dimension:
 - security — threat model and attack surface
 - integration — how it fits the existing system
 
-**2. Await synthesis:**
-The synthesis step will produce a design document. Check for it:
 ```bash
-gt mail inbox  # synthesis notifies when done
-ls .designs/   # find the design output directory
+BEAD=$(gt bead create "Design: api" --type=task --label=gt:keep \
+  --quiet --description="
+Design the 'api' dimension of an implementation plan.
+Read the PRD with clarifications: .prd-reviews/{{review_id}}/prd-draft.md
+Propose the interfaces, call shapes, and developer ergonomics this feature
+should expose.
+Report: Proposed Design, Open Questions, Trade-offs, and anything the plan must
+account for.
+
+Record this report as a note on the bead on your hook, then stop:
+  gt bead note <bead-id> '<report>'
+  gt done --cleanup-status clean
+")
+gt sling "$BEAD" gastown
 ```
 
-**3. Read the design doc:**
+For the other five, keep the same command shape and change only the bead title,
+the dimension name and the design line:
+
+- `data` — data model, storage, migrations, retention.
+- `ux` — user experience and CLI/UI ergonomics.
+- `scale` — performance and bottlenecks at scale.
+- `security` — threat model and attack surface.
+- `integration` — how it fits the existing system.
+
+**2. Await the reports:**
 ```bash
-cat .designs/<design-review-id>/design-doc.md
+bd show <bead-id>   # closed, with the report in its notes
+```
+Repeat until all 6 beads carry a report note.
+
+**3. Consolidate into a design doc:**
+Write the six reports into `.designs/<design-review-id>/design-doc.md`:
+
+```markdown
+# Implementation Plan: {{problem}}
+
+## Summary
+(one paragraph)
+
+## Requirements Coverage
+(which PRD requirements each dimension addresses, and which remain open)
+
+## Implementation Plan
+(phased tasks, ordered, each with the files or subsystems it touches)
+
+## Open Questions
+(carry forward anything the PRD clarifications did not answer)
+
+## Trade-offs
+(per dimension, with the choice made)
+
+## Dimension Notes
+(per-dimension detail from the six reports)
 ```
 
 Pay attention to:
@@ -265,7 +342,8 @@ Pay attention to:
 - "Implementation Plan" section — does it align with requirements?
 - Trade-offs listed — do they match the human's priorities?
 
-**Exit criteria:** Design synthesis complete. Design doc exists and covers the requirements."""
+**Exit criteria:** All 6 reports received and consolidated into
+`.designs/<design-review-id>/design-doc.md`, covering the requirements."""
 
 # ============================================================================
 # PRD ALIGNMENT ROUNDS (1-3)

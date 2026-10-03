@@ -372,7 +372,7 @@ func TestInstallFormulasProvisioned(t *testing.T) {
 	// Verify at least some expected formulas exist
 	expectedFormulas := []string{
 		"mol-polecat-work.formula.toml",
-		"code-review.formula.toml",
+		"shiny.formula.toml",
 	}
 	for _, f := range expectedFormulas {
 		formulaPath := filepath.Join(formulasDir, f)

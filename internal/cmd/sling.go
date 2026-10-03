@@ -64,7 +64,7 @@ Content Duplicate Guard:
 
 Natural Language Args:
   gt sling gt-abc --args "patch release"
-  gt sling code-review --args "focus on security"
+  gt sling mol-polecat-code-review --args "focus on security"
 
 The --args string is stored in the bead and shown via gt prime. Since the
 executor is an LLM, it interprets these instructions naturally.
@@ -82,7 +82,7 @@ Stdin Mode (for shell-quoting-safe multi-line content):
 
 Formula Slinging:
   gt sling mol-release mayor/           # Cook + wisp + attach + nudge
-  gt sling code-review --var pr=42
+  gt sling mol-polecat-code-review --var focus=security
 
 Formula-on-Bead (--on flag):
   gt sling mol-review --on gt-abc       # Apply formula to existing work

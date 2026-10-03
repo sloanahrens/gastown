@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/pflag"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/formula"
@@ -156,43 +157,6 @@ func TestFormulaSyncMessage(t *testing.T) {
 	}
 }
 
-// TestBuildConvoyLegSlingArgs: a leg's sling carries the bead, the rig, the
-// context and the optional agent/review flags — and no --no-convoy, since a
-// sling creates no convoy to suppress (gt-gzhin.4).
-func TestBuildConvoyLegSlingArgs(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name       string
-		agent      string
-		reviewOnly bool
-		wantFlags  []string
-	}{
-		{"no agent no review", "", false, nil},
-		{"with agent", "claude", false, []string{"--agent", "claude"}},
-		{"review only", "", true, []string{"--review-only"}},
-		{"agent and review", "gemini", true, []string{"--agent", "gemini", "--review-only"}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := buildConvoyLegSlingArgs("bead-1", "myrig", "desc", "title", tt.agent, tt.reviewOnly)
-			for _, want := range tt.wantFlags {
-				if !slices.Contains(got, want) {
-					t.Errorf("buildConvoyLegSlingArgs() missing %q in %v", want, got)
-				}
-			}
-			if got[0] != "sling" {
-				t.Errorf("first arg must be 'sling', got %q", got[0])
-			}
-			if slices.Contains(got, "--no-convoy") {
-				t.Errorf("buildConvoyLegSlingArgs() still passes --no-convoy: %v", got)
-			}
-		})
-	}
-}
-
 // TestBuildWorkflowStepSlingArgs: a step's sling carries the bead, the rig,
 // the context and the optional agent — and no --no-convoy (gt-gzhin.4).
 func TestBuildWorkflowStepSlingArgs(t *testing.T) {
@@ -220,107 +184,6 @@ func TestBuildWorkflowStepSlingArgs(t *testing.T) {
 				t.Errorf("buildWorkflowStepSlingArgs() missing agent %q in %v", tt.agent, got)
 			}
 		})
-	}
-}
-
-func TestResolveFormulaLegAgent_Precedence(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		legAgent string
-		cliAgent string
-		want     string
-	}{
-		{"all empty", "", "", ""},
-		{"cli only", "", "codex", "codex"},
-		{"leg only", "claude-haiku", "", "claude-haiku"},
-		{"leg overrides cli", "claude-haiku", "codex", "claude-haiku"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := resolveFormulaLegAgent(tt.legAgent, tt.cliAgent)
-			if got != tt.want {
-				t.Errorf("resolveFormulaLegAgent(%q, %q) = %q, want %q",
-					tt.legAgent, tt.cliAgent, got, tt.want)
-			}
-		})
-	}
-}
-
-// convoyTree is bd's cooked tree for a convoy formula shaped like design:
-// run settings as vars, two legs and a synthesis step marked in metadata.
-const convoyTree = `{
-  "formula": "design", "type": "convoy", "description": "Design",
-  "vars": [
-    {"name": "base_prompt", "default": "Leg {{.leg.id}}", "value": "Leg {{.leg.id}}"},
-    {"name": "output_directory", "default": ".designs/{{.review_id}}", "value": ".designs/{{.review_id}}"},
-    {"name": "output_leg_pattern", "default": "{{.leg.id}}.md", "value": "{{.leg.id}}.md"},
-    {"name": "output_synthesis", "default": "design-doc.md", "value": "design-doc.md"},
-    {"name": "problem", "required": true, "default": null, "value": "set problem", "provided": true},
-    {"name": "context", "default": null, "value": null},
-    {"name": "review_only", "default": "true", "value": "true"}
-  ],
-  "unresolved_vars": [], "warnings": [],
-  "steps": [
-    {"id": "api", "title": "API", "description": "api body", "needs": [], "children": [],
-     "metadata": {"focus": "Interfaces", "agent": "codex"}},
-    {"id": "data", "title": "Data", "description": "data body", "needs": [], "children": [],
-     "metadata": {"focus": "Storage"}},
-    {"id": "synthesis", "title": "Synthesis", "description": "Combine {{.output.directory}}", "needs": ["api", "data"], "children": [],
-     "metadata": {"convoy": "synthesis"}}
-  ]
-}`
-
-// TestConvoyPlanFrom_ReadsLegsSynthesisAndSettings: gt formula run reads a
-// convoy from bd's cooked tree (gt-fd2cu.1.1): the step metadata marks the
-// synthesis and every other step is a leg; prompt, output files and
-// review_only come from vars.
-func TestConvoyPlanFrom_ReadsLegsSynthesisAndSettings(t *testing.T) {
-	t.Parallel()
-	p := convoyPlanFrom(cookedFixture(t, convoyTree))
-
-	want := []convoyLeg{
-		{ID: "api", Title: "API", Focus: "Interfaces", Description: "api body", Agent: "codex", ReviewOnly: true},
-		{ID: "data", Title: "Data", Focus: "Storage", Description: "data body", ReviewOnly: true},
-	}
-	if !reflect.DeepEqual(p.Legs, want) {
-		t.Errorf("legs = %+v, want %+v", p.Legs, want)
-	}
-	if p.Synthesis == nil || p.Synthesis.ID != "synthesis" || !slices.Equal(p.Synthesis.Needs, []string{"api", "data"}) {
-		t.Errorf("synthesis = %+v", p.Synthesis)
-	}
-	if p.BasePrompt != "Leg {{.leg.id}}" || p.OutputDir != ".designs/{{.review_id}}" ||
-		p.LegPattern != "{{.leg.id}}.md" || p.SynthesisFile != "design-doc.md" {
-		t.Errorf("settings = %q %q %q %q", p.BasePrompt, p.OutputDir, p.LegPattern, p.SynthesisFile)
-	}
-}
-
-// TestFormulaRunVars_ResolvedVarsThenUndeclaredSets: the template context has
-// every var bd gave a value and the --set pairs the formula does not declare;
-// a var without a value stays out, so a template reads it as missing.
-func TestFormulaRunVars_ResolvedVarsThenUndeclaredSets(t *testing.T) {
-	t.Parallel()
-	got := formulaRunVars(cookedFixture(t, convoyTree), []string{"problem=set problem", "extra=x"})
-	if got["problem"] != "set problem" || got["extra"] != "x" || got["output_synthesis"] != "design-doc.md" {
-		t.Errorf("vars = %v", got)
-	}
-	if _, ok := got["context"]; ok {
-		t.Errorf("context has no value but is in the context: %v", got)
-	}
-}
-
-func TestParseSetVarsPreservesMultilineValues(t *testing.T) {
-	t.Parallel()
-
-	got := parseSetVars([]string{"problem=First\n\nSecond", "context=a=b"})
-	if got["problem"] != "First\n\nSecond" {
-		t.Fatalf("problem = %q, want multiline value", got["problem"])
-	}
-	if got["context"] != "a=b" {
-		t.Fatalf("context = %q, want value with equals", got["context"])
 	}
 }
 
@@ -412,43 +275,52 @@ func TestAttachmentFormulaVarsRoundTripsPersistedVars(t *testing.T) {
 	}
 }
 
-func TestRenderTemplateUsesGoDotSyntax(t *testing.T) {
-	t.Parallel()
-
-	ctx := map[string]interface{}{"issue": "gt-123"}
-	got, err := renderTemplate("bd show {{.issue}}", ctx)
-	if err != nil {
-		t.Fatalf("renderTemplate() dotted syntax error: %v", err)
+// formulaStepText returns one [[steps]] block, "" when no block carries id.
+func formulaStepText(text, id string) string {
+	for _, block := range strings.Split(text, "[[steps]]") {
+		if strings.Contains(block, "id = \""+id+"\"") {
+			return block
+		}
 	}
-	if got != "bd show gt-123" {
-		t.Fatalf("renderTemplate() = %q, want %q", got, "bd show gt-123")
-	}
-
-	if _, err := renderTemplate("bd show {{issue}}", ctx); err == nil {
-		t.Fatal("renderTemplate() with bare syntax succeeded; want Go template error")
-	}
+	return ""
 }
 
-func TestFormulaRunExamplesUseSetVars(t *testing.T) {
-	t.Parallel()
-
-	for _, name := range []string{"design", "mol-idea-to-plan"} {
-		name := name
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-
-			content, err := formula.GetEmbeddedFormulaContent(name)
-			if err != nil {
-				t.Fatalf("GetEmbeddedFormulaContent(%s): %v", name, err)
+// commandFlags returns the name of every --flag on the lines of body that run
+// cmd, folding a line ending in a backslash into the next.
+func commandFlags(body, cmd string) []string {
+	var flags []string
+	lines := strings.Split(body, "\n")
+	for i := 0; i < len(lines); i++ {
+		if !strings.Contains(lines[i], cmd) {
+			continue
+		}
+		joined := lines[i]
+		for strings.HasSuffix(strings.TrimSpace(joined), "\\") && i+1 < len(lines) {
+			i++
+			joined += " " + lines[i]
+		}
+		for _, field := range strings.Fields(joined) {
+			if !strings.HasPrefix(field, "--") {
+				continue
 			}
-			text := string(content)
-			for _, bad := range []string{"--problem=", "--context=", "--plan="} {
-				if strings.Contains(text, bad) {
-					t.Fatalf("%s still contains invalid gt formula run flag %q", name, bad)
-				}
+			// pflag Lookup takes the name without its dashes: strip "--" and
+			// anything from "=" on.
+			name := strings.TrimPrefix(strings.Trim(field, `"'`), "--")
+			if eq := strings.IndexByte(name, '='); eq >= 0 {
+				name = name[:eq]
 			}
-		})
+			flags = append(flags, name)
+		}
 	}
+	return flags
+}
+
+// TestMolIdeaToPlanRewrittenStepsRunRealCommands pins the two dispatch steps
+// gt-gzhin.5 rewrote. The formula's other dispatch blocks carry phantom gt
+// sling flags that predate the slice and gt-6lm4o owns; only these two must
+// name commands and flags that exist, or the step fails the moment it runs.
+func TestMolIdeaToPlanRewrittenStepsRunRealCommands(t *testing.T) {
+	t.Parallel()
 
 	idea, err := formula.GetEmbeddedFormulaContent("mol-idea-to-plan")
 	if err != nil {
@@ -461,23 +333,37 @@ func TestFormulaRunExamplesUseSetVars(t *testing.T) {
 	if strings.Contains(ideaText, ".designs/<review-id>") {
 		t.Fatal("mol-idea-to-plan conflates design output ID with PRD review ID")
 	}
-	for _, want := range []string{
-		"--set problem=\"$PROBLEM\"",
-		"--set context=\"See .prd-reviews/{{review_id}}/prd-draft.md. $CONTEXT\"",
-		"--set context=\"PRD with clarifications: .prd-reviews/{{review_id}}/prd-draft.md. $CONTEXT\"",
-		".designs/<design-review-id>/design-doc.md",
-	} {
-		if !strings.Contains(ideaText, want) {
-			t.Fatalf("mol-idea-to-plan missing %q", want)
-		}
-	}
 
-	design, err := formula.GetEmbeddedFormulaContent("design")
-	if err != nil {
-		t.Fatalf("GetEmbeddedFormulaContent(design): %v", err)
-	}
-	if !strings.Contains(string(design), "gt formula run design --set problem=") {
-		t.Fatal("design usage examples do not mention --set problem=")
+	for _, id := range []string{"prd-review", "generate-plan"} {
+		body := formulaStepText(ideaText, id)
+		if body == "" {
+			t.Fatalf("mol-idea-to-plan has no step %q", id)
+		}
+		// The review prompt rides on the bead and the report comes back as a
+		// note, because gt sling carries no prompt flag.
+		for _, want := range []string{"gt bead create", "gt sling", "gt bead note"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("mol-idea-to-plan %s missing %q", id, want)
+			}
+		}
+		for _, bad := range []string{"--prompt", "--mail-back"} {
+			if strings.Contains(body, bad) {
+				t.Errorf("mol-idea-to-plan %s still uses %s, which gt sling does not define", id, bad)
+			}
+		}
+		for _, cmd := range []struct {
+			text  string
+			flags *pflag.FlagSet
+		}{
+			{"gt sling", slingCmd.Flags()},
+			{"gt bead create", beadCreateCmd.Flags()},
+		} {
+			for _, flag := range commandFlags(body, cmd.text) {
+				if cmd.flags.Lookup(flag) == nil {
+					t.Errorf("mol-idea-to-plan %s: %s has no %s flag", id, cmd.text, flag)
+				}
+			}
+		}
 	}
 }
 

@@ -166,7 +166,7 @@ func TestSyncFormulas_ClassifiesEveryFileByHash(t *testing.T) {
 	handEdit := append(append([]byte{}, embeddedWork...), []byte("\n# hand edit\n")...)
 	writeTownFile(t, filepath.Join(formulasDir, workFormula), handEdit)
 	// reinstall: gt wrote it, someone deleted it.
-	const deleted = "code-review.formula.toml"
+	const deleted = "mol-doc-audit.formula.toml"
 	if err := os.Remove(filepath.Join(formulasDir, deleted)); err != nil {
 		t.Fatal(err)
 	}

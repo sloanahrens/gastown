@@ -22,42 +22,33 @@ use the places it accepts:
 
 - Step metadata: a workflow step's `metadata.target` (where `gt formula run`
   slings it) and `metadata.interactive` (keep it in the current session).
-- Convoy formulas (`type = "convoy"`): the step with
-  `metadata.convoy = "synthesis"` is the synthesis and every other step is a
-  leg (`metadata.focus`, `metadata.agent`, `metadata.review_only`). The vars
-  `base_prompt`, `output_directory`, `output_leg_pattern`, `output_synthesis`
-  and `review_only` are the run settings; `--set` overrides any of them.
-- There is no formula-level `agent` (bd rejects the top-level key): set
-  `metadata.agent` on a leg, or pass `gt formula run --agent`, which also
-  applies to workflow steps.
+- There is no formula-level `agent` (bd rejects the top-level key): pass
+  `gt formula run --agent`, which applies to workflow steps.
+
+The convoy formula type is gone (gt-gzhin.5): bd still decodes
+`type = "convoy"`, but no embedded formula uses it and `gt formula run`
+dispatches workflow formulas only.
 
 ```toml
-formula = "design"
-type = "convoy"
+formula = "shiny"
+type = "workflow"
 version = 1
 
 [vars.problem]
-description = "The design problem"
+description = "The problem to work"
 required = true
 
-[vars.base_prompt]
-default = """Analyze {{.problem}} for {{.leg.focus}}."""
-
-[vars.output_directory]
-default = ".designs/{{.review_id}}"
-
 [[steps]]
-id = "api"
-title = "API Design"
-metadata.focus = "Interface design"
+id = "design"
+title = "Design"
+metadata.target = "mayor"
 description = "..."
 
 [[steps]]
 id = "synthesis"
-metadata.convoy = "synthesis"
-title = "Design Synthesis"
-description = "Combine {{.output.directory}}/*.md"
-depends_on = ["api"]
+title = "Synthesis"
+needs = ["design"]
+description = "Combine the design docs"
 ```
 
 ## Testing

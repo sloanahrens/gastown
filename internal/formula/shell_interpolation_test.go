@@ -246,7 +246,7 @@ func TestShellLineViolationsCatchesUnquotedVars(t *testing.T) {
 	t.Parallel()
 	fence := func(body string) string { return "prose\n```bash\n" + body + "\n```\n" }
 	bad := []string{
-		`gt formula run mol-prd-review --set problem="{{problem}}"`,
+		`gt formula run shiny --set problem="{{problem}}"`,
 		`ls -la {{scope}}`,
 		`gh pr view {{pr_url}}`,
 		`bd update {{issue}} --notes "{{focus}}"`,
