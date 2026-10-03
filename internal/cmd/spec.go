@@ -103,13 +103,16 @@ var specCmd = &cobra.Command{
 var specLintCmd = &cobra.Command{
 	Use:   "lint <bead-id>",
 	Short: "Check a work bead's shape against the spec template; exit 0 when clean",
-	Long: `Check a work bead's shape against the spec template
-(~/.claude/docs/agents/spec-template.md, or daemon.json
-patrols.spec_dispatch.template) — the same lint the spec dispatcher runs before
-it allocates a seat:
+	Long: `Check a work bead's shape against the spec template — the same lint the
+spec dispatcher runs before it allocates a seat.
 
-  - every "## " section of the template present and non-empty
-    (Goal, Constraints, Out of scope, Gate, Size)
+The required "## " sections are the template file's when that file exists:
+daemon.json patrols.spec_dispatch.template, else
+~/.claude/docs/agents/spec-template.md. No such file is needed — with no
+template file, or one carrying no "## " heading, the built-in sections are
+checked instead: Goal, Constraints, Out of scope, Gate and Size.
+
+  - every required "## " section present and non-empty
   - 1-6 acceptance items (3-6 preferred)
   - Size is one worker, one MR
 
@@ -119,7 +122,9 @@ is accepted and ignored. Epics, agent beads (gt:agent) and wisps are refused
 as "not a work bead" without reading a shape.
 
 Prints one line naming the bead and the first missing field. --json prints
-{id, ok, needs_planning, refusals[]} instead, listing every failure.
+{id, ok, needs_planning, refusals[]} instead, listing every failure. A human-form
+run that does not exit 0 also writes the required skeleton to stderr — every
+section with a one-phrase hint and the command that re-lints the bead.
 
 Exit codes:
   0  clean: the dispatcher would slot it
@@ -274,7 +279,7 @@ func runSpecLint(cmd *cobra.Command, args []string) error {
 		path = specTemplatePath(loadSpecDispatchConfig(townRoot))
 	}
 	spec, err := showSpec(townRoot, args[0])
-	return specLint(cmd.OutOrStdout(), args[0], spec, err, path, specLintJSON)
+	return specLint(cmd.OutOrStdout(), cmd.ErrOrStderr(), args[0], spec, err, path, specLintJSON)
 }
 
 // specLintReport is the --json shape for one bead, so a shell caller can read
@@ -291,14 +296,18 @@ type specLintReport struct {
 // failure to read it) against the template at templatePath, and returns the
 // exit code as a SilentExit: 0 dispatchable, specLintExitRefused,
 // specLintExitNeedsPlan. With asJSON, it prints a specLintReport instead of
-// the one line; the exit code is the same either way.
-func specLint(out io.Writer, beadID string, spec specdispatch.Spec, showErr error, templatePath string, asJSON bool) error {
+// the one line; the exit code is the same either way. A human-form run that
+// does not exit 0 also writes the required skeleton to errOut, after the
+// one-line verdict on out, so a refusal shows what a right bead looks like
+// (gt-ngtev).
+func specLint(out, errOut io.Writer, beadID string, spec specdispatch.Spec, showErr error, templatePath string, asJSON bool) error {
+	tmpl := specdispatch.LoadTemplate(templatePath)
 	report := specLintReport{ID: beadID, Refusals: []specdispatch.Refusal{}}
 	if showErr != nil {
 		report.Refusals = append(report.Refusals, specdispatch.Refusal{Field: "bead", Reason: showErr.Error()})
-		return emitSpecLint(out, report, fmt.Sprintf("%s: spec lint refused: bead: %v", beadID, showErr), specLintExitRefused, asJSON)
+		return emitSpecLint(out, errOut, tmpl, report, fmt.Sprintf("%s: spec lint refused: bead: %v", beadID, showErr), specLintExitRefused, asJSON)
 	}
-	verdict := specdispatch.Lint(spec, specdispatch.LoadTemplate(templatePath))
+	verdict := specdispatch.Lint(spec, tmpl)
 	report.OK = verdict.Clean()
 	report.NeedsPlanning = verdict.Route == specdispatch.RoutePlanning
 	report.Refusals = append(report.Refusals, verdict.Refusals...)
@@ -309,10 +318,10 @@ func specLint(out io.Writer, beadID string, spec specdispatch.Spec, showErr erro
 	case specdispatch.RoutePlanning:
 		code = specLintExitNeedsPlan
 	}
-	return emitSpecLint(out, report, verdict.Line(beadID), code, asJSON)
+	return emitSpecLint(out, errOut, tmpl, report, verdict.Line(beadID), code, asJSON)
 }
 
-func emitSpecLint(out io.Writer, report specLintReport, line string, code int, asJSON bool) error {
+func emitSpecLint(out, errOut io.Writer, tmpl specdispatch.Template, report specLintReport, line string, code int, asJSON bool) error {
 	if asJSON {
 		data, err := json.Marshal(report)
 		if err != nil {
@@ -321,6 +330,10 @@ func emitSpecLint(out io.Writer, report specLintReport, line string, code int, a
 		fmt.Fprintln(out, string(data))
 	} else {
 		fmt.Fprintln(out, line)
+		if code != 0 {
+			// Best effort: the exit code carries the verdict, not this write.
+			fmt.Fprintf(errOut, "%s", tmpl.Skeleton(report.ID))
+		}
 	}
 	if code == 0 {
 		return nil

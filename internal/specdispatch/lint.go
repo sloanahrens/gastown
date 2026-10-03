@@ -3,13 +3,14 @@
 // `gt spec` commands (internal/cmd/spec.go) read beads, sessions and settings
 // and hand them here, so every decision is testable with plain values.
 //
-// A work bead is a bead the operator writes against the D10 template
-// (~/.claude/docs/agents/spec-template.md). The operator-side writer
-// (/workorder) runs the same checks before filing and calls `gt spec lint`
-// afterwards, so the two stay in parity by reading one template file.
+// A work bead is a bead carrying the D10 shape: an acceptance list plus the
+// sections Template names — Goal, Constraints, Out of scope, Gate and Size by
+// default. That list is the template file's when the file exists and has
+// "## " headings, and DefaultSections otherwise; Template.Source names which
+// one was read.
 //
-// Shape is a property of every work bead (gt-mmsr2): the lint checks the five
-// sections, the acceptance list and the Size on a task, bug or feature alike.
+// Shape is a property of every work bead (gt-mmsr2): the lint checks the
+// required sections, the acceptance list and the Size on a task, bug or feature alike.
 // It does not read the bead's type or labels to decide whether to check —
 // epics, agent beads and the town's runtime families are refused as "not a
 // work bead", and nothing else is.
@@ -159,6 +160,61 @@ func ParseTemplateSections(text string) []string {
 		out = append(out, name)
 	}
 	return out
+}
+
+// acceptanceHint is the skeleton's acceptance line: the item count the lint
+// enforces, so the printed bound cannot drift from MinAcceptance/MaxAcceptance.
+var acceptanceHint = fmt.Sprintf(`%d-%d "- [ ] ..." items`, MinAcceptance, MaxAcceptance)
+
+// sectionHints are the one-phrase hints the skeleton prints under a required
+// section. A section a template adds on its own gets the generic hint.
+var sectionHints = map[string]string{
+	"goal":         "what the bead must achieve",
+	"constraints":  "files, limits and rules the work must respect",
+	"out of scope": "what this bead does not do",
+	"gate":         "the command that must pass",
+	"size":         "one worker, one landing",
+}
+
+// genericSectionHint is the hint for a template section the skeleton has no
+// phrase for.
+const genericSectionHint = "one or two sentences"
+
+// Skeleton renders the description shape a refused bead is missing: every
+// required section with a one-phrase hint, the acceptance line and the re-lint
+// command that takes the bead back to the lint.
+func (t Template) Skeleton(beadID string) string {
+	var b strings.Builder
+	for _, name := range t.Sections {
+		fmt.Fprintf(&b, "## %s\n%s\n", name, sectionHint(name))
+	}
+	if !t.hasAcceptanceSection() {
+		fmt.Fprintf(&b, "## Acceptance\n%s\n", acceptanceHint)
+	}
+	fmt.Fprintf(&b, "Fix the description (bd update %s --description=...) and run gt spec lint %s again.\n", beadID, beadID)
+	return b.String()
+}
+
+// hasAcceptanceSection reports whether the template already requires an
+// acceptance section, under any name acceptanceText reads.
+func (t Template) hasAcceptanceSection() bool {
+	for _, name := range t.Sections {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(name)), "acceptance") {
+			return true
+		}
+	}
+	return false
+}
+
+func sectionHint(name string) string {
+	key := strings.ToLower(strings.TrimSpace(name))
+	if strings.HasPrefix(key, "acceptance") {
+		return acceptanceHint
+	}
+	if hint, ok := sectionHints[key]; ok {
+		return hint
+	}
+	return genericSectionHint
 }
 
 // Spec is the slice of a bead the lint reads.

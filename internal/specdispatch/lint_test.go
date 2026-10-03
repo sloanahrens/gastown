@@ -304,8 +304,8 @@ func TestCountAcceptance(t *testing.T) {
 	}
 }
 
-// The real template's headings must parse to the built-in list, so the lint
-// and /workorder read one shape.
+// The real template's headings must parse to the built-in list, so a town with
+// the template file lints the same shape as one without it.
 func TestParseTemplateSectionsMatchesTemplateShape(t *testing.T) {
 	t.Parallel()
 	template := "# Spec template\n\n```bash\nbd create --description=\"## Goal\n<x>\n\n## Constraints\n<y>\n\n## Out of scope\n<z>\n\n## Gate\n<g>\n\n## Size\none worker, one MR\"\n```\n"
@@ -339,4 +339,66 @@ func TestLoadTemplateFileWinsAndFallsBack(t *testing.T) {
 	if fallback.Source != "built-in" || strings.Join(fallback.Sections, "|") != strings.Join(DefaultSections, "|") {
 		t.Fatalf("fallback = %+v", fallback)
 	}
+}
+
+// The refusal skeleton lists the sections the lint will require, each with a
+// hint, and ends with the re-lint command: the file's sections when a template
+// file is present, the built-in list when it is absent (gt-ngtev).
+func TestTemplateSkeleton(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "spec-template.md")
+	if err := os.WriteFile(path, []byte("## Goal\n## Rollback\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fix := "Fix the description (bd update gt-x --description=...) and run gt spec lint gt-x again.\n"
+
+	t.Run("built-in sections", func(t *testing.T) {
+		t.Parallel()
+		got := LoadTemplate(filepath.Join(dir, "missing.md")).Skeleton("gt-x")
+		for _, name := range DefaultSections {
+			if !strings.Contains(got, "## "+name+"\n") {
+				t.Errorf("skeleton is missing section %q:\n%s", name, got)
+			}
+		}
+		if !strings.Contains(got, "## Acceptance\n"+acceptanceHint+"\n") {
+			t.Errorf("skeleton is missing the acceptance line:\n%s", got)
+		}
+		if !strings.HasSuffix(got, fix) {
+			t.Errorf("skeleton does not end with the re-lint command:\n%s", got)
+		}
+		if !strings.Contains(got, "one worker, one landing") {
+			t.Errorf("skeleton size hint does not state the rule:\n%s", got)
+		}
+	})
+
+	t.Run("template file's own sections", func(t *testing.T) {
+		t.Parallel()
+		got := LoadTemplate(path).Skeleton("gt-x")
+		if !strings.Contains(got, "## Rollback\n") {
+			t.Errorf("skeleton is missing the template's own section:\n%s", got)
+		}
+		if strings.Contains(got, "## Constraints\n") {
+			t.Errorf("skeleton lists a section the template dropped:\n%s", got)
+		}
+	})
+
+	t.Run("no duplicated acceptance", func(t *testing.T) {
+		t.Parallel()
+		got := Template{Sections: []string{"Goal", "Acceptance criteria"}, Source: "built-in"}.Skeleton("gt-x")
+		if n := strings.Count(got, "## Acceptance"); n != 1 {
+			t.Errorf("skeleton acceptance headings = %d, want 1:\n%s", n, got)
+		}
+		if !strings.Contains(got, "## Acceptance criteria\n"+acceptanceHint+"\n") {
+			t.Errorf("the template's acceptance section lacks the count hint:\n%s", got)
+		}
+	})
+
+	t.Run("unknown template section", func(t *testing.T) {
+		t.Parallel()
+		got := Template{Sections: []string{"Rollback"}, Source: "built-in"}.Skeleton("gt-x")
+		if !strings.Contains(got, "## Rollback\n"+genericSectionHint+"\n") {
+			t.Errorf("unknown section lacks the generic hint:\n%s", got)
+		}
+	})
 }
