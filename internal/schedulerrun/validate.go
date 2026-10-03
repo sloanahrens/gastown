@@ -8,6 +8,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 	"github.com/steveyegge/gastown/internal/style"
 )
@@ -133,7 +134,9 @@ func (r *runner) recordFailure(townBeads beads.Client, b capacity.PendingBead, d
 
 // rigBeadsPrefix reads a rig's registered beads prefix: the rigs config first,
 // then the rig's own config.json. An empty answer means the rig declares no
-// prefix, which capacity.AcceptsPrefix reports as a refusal.
+// prefix, which capacity.AcceptsPrefix reports as a refusal. A config.json
+// that does not decode is reported once rather than read as declaring no
+// prefix (gt-8xk9k).
 func rigBeadsPrefix(townRoot, rigPath, rigName string) string {
 	rigsConfigPath := constants.MayorRigsPath(townRoot)
 	if rigsConfig, err := config.LoadRigsConfig(rigsConfigPath); err == nil {
@@ -142,8 +145,11 @@ func rigBeadsPrefix(townRoot, rigPath, rigName string) string {
 		}
 	}
 
-	rigConfigPath := filepath.Join(rigPath, "config.json")
-	if rigCfg, err := config.LoadRigConfig(rigConfigPath); err == nil && rigCfg.Beads != nil && rigCfg.Beads.Prefix != "" {
+	rigCfg, cfgErr := rig.LoadRigConfigIfPresent(rigPath)
+	if cfgErr != nil {
+		rig.WarnRigConfigOnce(rigPath, cfgErr)
+	}
+	if rigCfg != nil && rigCfg.Beads != nil && rigCfg.Beads.Prefix != "" {
 		return rigCfg.Beads.Prefix
 	}
 

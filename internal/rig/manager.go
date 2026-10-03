@@ -1703,9 +1703,14 @@ func (m *Manager) RegisterRig(opts RegisterRigOptions) (*RegisterRigResult, erro
 
 	result := &RegisterRigResult{Name: opts.Name}
 
-	// Try to load existing config.json
-	existingConfig, err := LoadRigConfig(rigPath)
-	if err == nil && existingConfig != nil {
+	// Try to load existing config.json. A file that does not decode is
+	// reported once and treated as absent, so adoption still proceeds with
+	// the values the caller passed (gt-8xk9k).
+	existingConfig, cfgErr := LoadRigConfigIfPresent(rigPath)
+	if cfgErr != nil {
+		WarnRigConfigOnce(rigPath, cfgErr)
+	}
+	if existingConfig != nil {
 		result.FromConfig = true
 		if opts.GitURL == "" {
 			result.GitURL = existingConfig.GitURL

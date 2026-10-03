@@ -1731,9 +1731,15 @@ func (d *Daemon) rigBeadVerdict(rigName string) (rigBeadEntry, bool) {
 func (d *Daemon) queryRigBead(rigName string) (string, rigBeadVerdict, error) {
 	rigPath := filepath.Join(d.config.TownRoot, rigName)
 
-	// Try to get prefix from rig config.json, fall back to rigs.json registry
+	// Try to get prefix from rig config.json, fall back to rigs.json registry.
+	// A config.json that does not decode is reported once rather than read as
+	// unconfigured (gt-8xk9k).
 	var prefix string
-	if rigCfg, err := rig.LoadRigConfig(rigPath); err == nil && rigCfg.Beads != nil {
+	rigCfg, cfgErr := rig.LoadRigConfigIfPresent(rigPath)
+	if cfgErr != nil {
+		rig.WarnRigConfigOnce(rigPath, cfgErr)
+	}
+	if rigCfg != nil && rigCfg.Beads != nil {
 		prefix = rigCfg.Beads.Prefix
 	} else {
 		// Fall back to registry (mayor/rigs.json) when config.json is missing
