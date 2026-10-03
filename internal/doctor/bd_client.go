@@ -89,8 +89,6 @@ type doctorBeads interface {
 	ListAgentBeadsFromWisps() (map[string]*beads.Issue, error)
 	ListWispIDs() (map[string]bool, error)
 	CreateAgentBead(id, title string, fields *beads.AgentFields) (*beads.Issue, error)
-	EnsureRigBead(name string, fields *beads.RigFields) (*beads.Issue, error)
-	CreateRigBead(name string, fields *beads.RigFields) (*beads.Issue, error)
 }
 
 var _ doctorBeads = (*beads.Beads)(nil)

@@ -97,7 +97,7 @@ func ParseRigFields(description string) *RigFields {
 // This is idempotent: if the bead already exists, it is returned as-is.
 // Handles races and Dolt query hiccups where Show may fail even when the bead
 // exists (gt-d8681).
-func (b *Beads) EnsureRigBead(name string, fields *RigFields) (*Issue, error) {
+func EnsureRigBead(c Client, name string, fields *RigFields) (*Issue, error) {
 	prefix := "gt"
 	if fields != nil && fields.Prefix != "" {
 		prefix = fields.Prefix
@@ -105,18 +105,18 @@ func (b *Beads) EnsureRigBead(name string, fields *RigFields) (*Issue, error) {
 	id := RigBeadIDWithPrefix(prefix, name)
 
 	// Try to find existing bead first
-	if existing, err := b.Show(id); err == nil {
+	if existing, err := c.Show(id); err == nil {
 		return existing, nil
 	}
 
 	// Not found — try to create
-	created, createErr := b.CreateRigBead(name, fields)
+	created, createErr := CreateRigBead(c, name, fields)
 	if createErr == nil {
 		return created, nil
 	}
 
 	// Create failed (likely duplicate key from race or Dolt hiccup) — retry Show
-	if existing, err := b.Show(id); err == nil {
+	if existing, err := c.Show(id); err == nil {
 		return existing, nil
 	}
 
@@ -127,21 +127,25 @@ func (b *Beads) EnsureRigBead(name string, fields *RigFields) (*Issue, error) {
 // The ID format is: <prefix>-rig-<name> (e.g., gt-rig-gastown)
 // The ID is constructed internally from fields.Prefix and name.
 // The created_by field is populated from BD_ACTOR env var for provenance tracking.
-func (b *Beads) CreateRigBead(name string, fields *RigFields) (*Issue, error) {
-	// Guard against flag-like rig names (gt-e0kx5: --help garbage beads)
-	if IsFlagLikeTitle(name) {
-		return nil, fmt.Errorf("refusing to create rig bead: %w (got %q)", ErrFlagTitle, name)
+//
+// A *Beads create runs bd directly: a rig bead is bd's custom issue_type
+// "rig", so the database's custom types are configured before the write, and
+// Client.Create has no field that sets an issue type on create (CreateOptions
+// .Type is the deprecated label form). Any other Client is one database and
+// one schema and runs createRigBeadOverClient.
+func CreateRigBead(c Client, name string, fields *RigFields) (*Issue, error) {
+	if b, ok := c.(*Beads); ok {
+		return createRigBeadOnStore(b, name, fields)
 	}
+	return createRigBeadOverClient(c, name, fields)
+}
 
-	if fields != nil && fields.State != "" && !ValidRigState(fields.State) {
-		return nil, fmt.Errorf("invalid rig state %q: must be one of active, archived, maintenance", fields.State)
+// createRigBeadOnStore is CreateRigBead's bd-backed path.
+func createRigBeadOnStore(b *Beads, name string, fields *RigFields) (*Issue, error) {
+	id, err := rigBeadIdentity(name, fields)
+	if err != nil {
+		return nil, err
 	}
-
-	prefix := "gt"
-	if fields != nil && fields.Prefix != "" {
-		prefix = fields.Prefix
-	}
-	id := RigBeadIDWithPrefix(prefix, name)
 	description := FormatRigDescription(name, fields)
 
 	// Ensure target database keeps rig as a durable custom type, not an
@@ -192,30 +196,53 @@ func (b *Beads) CreateRigBead(name string, fields *RigFields) (*Issue, error) {
 	return &issue, nil
 }
 
+// createRigBeadOverClient is CreateRigBead's path for a Client that is not
+// bd-backed: one database, one schema, no custom-type configuration to run,
+// and no Client method that sets a bd issue_type on create.
+func createRigBeadOverClient(c Client, name string, fields *RigFields) (*Issue, error) {
+	id, err := rigBeadIdentity(name, fields)
+	if err != nil {
+		return nil, err
+	}
+	return c.Create(CreateOptions{
+		ID:          id,
+		Title:       name,
+		Description: FormatRigDescription(name, fields),
+		Labels:      []string{"gt:rig"},
+		// Priority -1 leaves bd's own default in place, as the raw create's
+		// argv did by not passing --priority at all.
+		Priority: -1,
+	})
+}
+
+// rigBeadIdentity validates a rig bead's name and state and returns its ID.
+func rigBeadIdentity(name string, fields *RigFields) (string, error) {
+	// Guard against flag-like rig names (gt-e0kx5: --help garbage beads)
+	if IsFlagLikeTitle(name) {
+		return "", fmt.Errorf("refusing to create rig bead: %w (got %q)", ErrFlagTitle, name)
+	}
+
+	if fields != nil && fields.State != "" && !ValidRigState(fields.State) {
+		return "", fmt.Errorf("invalid rig state %q: must be one of active, archived, maintenance", fields.State)
+	}
+
+	prefix := "gt"
+	if fields != nil && fields.Prefix != "" {
+		prefix = fields.Prefix
+	}
+	return RigBeadIDWithPrefix(prefix, name), nil
+}
+
 // GetRigBead retrieves a rig bead by name.
 // Returns ErrNotFound if the rig does not exist.
-func (b *Beads) GetRigBead(name string) (*Issue, *RigFields, error) {
-	id := RigBeadID(name)
-	issue, err := b.Show(id)
-	if err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return nil, nil, ErrNotFound
-		}
-		return nil, nil, err
-	}
-
-	if !HasLabel(issue, "gt:rig") {
-		return nil, nil, fmt.Errorf("bead %s is not a rig bead (missing gt:rig label)", id)
-	}
-
-	fields := ParseRigFields(issue.Description)
-	return issue, fields, nil
+func GetRigBead(c Client, name string) (*Issue, *RigFields, error) {
+	return GetRigByID(c, RigBeadID(name))
 }
 
 // GetRigByID retrieves a rig bead by its full ID.
 // Returns ErrNotFound if the rig does not exist.
-func (b *Beads) GetRigByID(id string) (*Issue, *RigFields, error) {
-	issue, err := b.Show(id)
+func GetRigByID(c Client, id string) (*Issue, *RigFields, error) {
+	issue, err := c.Show(id)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil, nil, ErrNotFound
@@ -232,8 +259,8 @@ func (b *Beads) GetRigByID(id string) (*Issue, *RigFields, error) {
 }
 
 // UpdateRigBead updates the fields for a rig bead.
-func (b *Beads) UpdateRigBead(name string, fields *RigFields) (*Issue, error) {
-	issue, _, err := b.GetRigBead(name)
+func UpdateRigBead(c Client, name string, fields *RigFields) (*Issue, error) {
+	issue, _, err := GetRigBead(c, name)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil, fmt.Errorf("rig %q not found", name)
@@ -243,11 +270,11 @@ func (b *Beads) UpdateRigBead(name string, fields *RigFields) (*Issue, error) {
 
 	description := FormatRigDescription(name, fields)
 
-	if err := b.Update(issue.ID, UpdateOptions{Description: &description}); err != nil {
+	if err := c.Update(issue.ID, UpdateOptions{Description: &description}); err != nil {
 		return nil, err
 	}
 
-	updated, err := b.Show(issue.ID)
+	updated, err := c.Show(issue.ID)
 	if err != nil {
 		return nil, fmt.Errorf("fetching updated rig: %w", err)
 	}
@@ -255,24 +282,17 @@ func (b *Beads) UpdateRigBead(name string, fields *RigFields) (*Issue, error) {
 }
 
 // DeleteRigBead permanently deletes a rig bead.
-func (b *Beads) DeleteRigBead(name string) error {
-	id := RigBeadID(name)
-	return b.deleteBead(id)
+func DeleteRigBead(c Client, name string) error {
+	return c.DeleteIssues(RigBeadID(name))
 }
 
-// ListRigBeads returns all rig beads.
-func (b *Beads) ListRigBeads() (map[string]*RigFields, error) {
-	out, err := b.run("list", "--label=gt:rig", "--json", "--limit=0")
+// ListRigBeads returns all rig beads, keyed by their beads prefix.
+func ListRigBeads(c Client) (map[string]*RigFields, error) {
+	// Limit 0 overrides bd's default page, so a large town is not silently
+	// cut short (B1-04).
+	issues, err := c.List(ListOptions{Label: "gt:rig", Priority: -1})
 	if err != nil {
 		return nil, err
-	}
-
-	if err := RequireJSON(out, "bd list"); err != nil {
-		return nil, err
-	}
-	var issues []*Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd list output: %w", err)
 	}
 
 	result := make(map[string]*RigFields, len(issues))

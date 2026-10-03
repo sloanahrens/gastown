@@ -550,7 +550,7 @@ func (c *RigConfigSyncCheck) Fix(ctx *CheckContext) error {
 			State:  beads.RigStateActive,
 		}
 
-		if _, err := bd.CreateRigBead(info.rigName, fields); err != nil {
+		if _, err := beads.CreateRigBead(bd, info.rigName, fields); err != nil {
 			return fmt.Errorf("could not create rig bead for %s: %w", info.rigName, err)
 		}
 	}

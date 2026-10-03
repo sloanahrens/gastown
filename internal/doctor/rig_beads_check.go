@@ -163,7 +163,7 @@ func (c *RigBeadsCheck) Fix(ctx *CheckContext) error {
 		}
 
 		rigBeadID := beads.RigBeadIDWithPrefix(info.prefix, rigName)
-		if _, err := bd.EnsureRigBead(rigName, fields); err != nil {
+		if _, err := beads.EnsureRigBead(bd, rigName, fields); err != nil {
 			errs = append(errs, fmt.Errorf("ensuring %s: %w", rigBeadID, err))
 		}
 	}
