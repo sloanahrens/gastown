@@ -32,8 +32,8 @@ Check mail once at startup. Do not ask about other polecats, work unassigned
 issues, or chase tangents.
 
 When you find work outside your scope, file it with the five-section example in
-the polecat formula's **Discovered work** block (`gt bead create`) — don't fix
-it yourself.
+the polecat formula's **Discovered work** block — checklist step 3, printed by
+`gt prime --step 3` — using `gt bead create`; don't fix it yourself.
 
 ---
 
