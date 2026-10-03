@@ -154,6 +154,32 @@ func TestIntegrationProcessIdentity(t *testing.T) {
 	}
 }
 
+// startProcess reaps the child it starts, so processAlive goes false as soon
+// as the child exits. Without the reap the child stays a zombie, which
+// signal(0) answers for as long as it exists (gt-fpunm).
+func TestIntegrationStartProcessReapsExitedChild(t *testing.T) {
+	proc, err := std.startProcess(exec.Command("false"))
+	if err != nil {
+		t.Fatalf("startProcess: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && std.processAlive(proc.pid) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if std.processAlive(proc.pid) {
+		t.Fatalf("processAlive(%d) stayed true for 1s after the child exited: an unreaped zombie", proc.pid)
+	}
+	// The handle answers the same way every time it is asked.
+	for i := 0; i < 2; i++ {
+		if !proc.exited() {
+			t.Fatalf("exited() call %d = false after the reap", i+1)
+		}
+		if err := proc.waitErr(); err == nil {
+			t.Fatalf("waitErr() call %d = nil, want the child's exit status", i+1)
+		}
+	}
+}
+
 // freePort returns a loopback port nothing listens on.
 func freePort(t *testing.T) int {
 	t.Helper()

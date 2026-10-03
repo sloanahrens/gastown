@@ -2194,13 +2194,14 @@ func (h *host) Start(townRoot string) error {
 	cmd.Stdin = nil
 	setProcessGroup(cmd)
 
-	serverPID, err := h.startProcess(cmd)
+	server, err := h.startProcess(cmd)
 	if err != nil {
 		if closeErr := logFile.Close(); closeErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to close dolt log file: %v\n", closeErr)
 		}
 		return fmt.Errorf("starting Dolt server: %w", err)
 	}
+	serverPID := server.pid
 
 	// Close log file in parent (child has its own handle)
 	if closeErr := logFile.Close(); closeErr != nil {
@@ -2250,9 +2251,11 @@ func (h *host) Start(townRoot string) error {
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		h.wait(500 * time.Millisecond)
 
-		// Check if the process we started is still alive.
-		if !h.processAlive(serverPID) {
-			return fmt.Errorf("Dolt server process died during startup (check logs with 'gt dolt logs')")
+		// A child that exited is dead even while it is still an unreaped
+		// zombie, which processAlive reports as alive: exited() sees the
+		// reap (gt-fpunm).
+		if server.exited() || !h.processAlive(serverPID) {
+			return startupDeathError(config, server)
 		}
 
 		if !tcpReachable {
@@ -2295,6 +2298,73 @@ func (h *host) Start(townRoot string) error {
 		return fmt.Errorf("Dolt server process started (PID %d) but not accepting connections after %v (%d databases × 5s): %w\nCheck logs with: gt dolt logs", serverPID, totalTimeout, dbCount, lastErr)
 	}
 	return fmt.Errorf("Dolt server process started (PID %d) and is reachable, but databases failed to load after %v (%d databases × 5s): %w\nRecovery: gt dolt stop && gt dolt start\nCheck logs with: gt dolt logs", serverPID, totalTimeout, dbCount, lastErr)
+}
+
+// startupLogTailLines bounds the dolt log tail a startup-death error carries.
+const startupLogTailLines = 20
+
+// startupDeathError reports a dolt sql-server that exited during startup,
+// naming the exit status and the tail of the log it wrote, so the cause (a
+// rejected config, a taken port) is in the message instead of behind a
+// separate 'gt dolt logs' (gt-fpunm).
+func startupDeathError(config *Config, proc *startedProcess) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Dolt server process (PID %d) died during startup", proc.pid)
+	if err := proc.waitErr(); err != nil {
+		b.WriteString(": " + err.Error())
+	}
+	if tail := readLogTail(config.LogFile, startupLogTailLines); tail != "" {
+		b.WriteString("\n" + tail)
+	}
+	b.WriteString("\nCheck logs with: gt dolt logs")
+	return errors.New(b.String())
+}
+
+// logTailBytes bounds how much of a log's end readLogTail reads, so a
+// long-lived dolt.log never costs a full read.
+const logTailBytes = 8 << 10
+
+// readLogTail returns the last n lines of the file at path, or "" when it
+// cannot be read. A tail that starts mid-line (the file is longer than
+// logTailBytes) drops the partial first line.
+func readLogTail(path string, n int) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	partial := false
+	if size := info.Size(); size > logTailBytes {
+		if _, err := f.Seek(size-logTailBytes, io.SeekStart); err != nil {
+			return ""
+		}
+		partial = true
+	}
+	buf, err := io.ReadAll(f)
+	if err != nil {
+		return ""
+	}
+	text := string(buf)
+	if partial {
+		i := strings.IndexByte(text, '\n')
+		if i < 0 {
+			return "" // the last 8KiB is one line: no whole line to show
+		}
+		text = text[i+1:]
+	}
+	text = strings.TrimRight(text, "\n")
+	if text == "" {
+		return ""
+	}
+	lines := strings.Split(text, "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n") + "\n"
 }
 
 // Start is (*host).Start on the real machine.

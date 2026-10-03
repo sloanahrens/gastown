@@ -33,8 +33,8 @@ type host struct {
 	// run runs a command to completion and returns what it wrote. A failure
 	// that should read as an exit status implements interface{ ExitCode() int }.
 	run func(c hostCall) (stdout, stderr []byte, err error)
-	// start starts a long-running process (the sql-server) and returns its PID.
-	start func(cmd *exec.Cmd) (int, error)
+	// start starts a long-running process (the sql-server) and returns it.
+	start func(cmd *exec.Cmd) (*startedProcess, error)
 	// alive reports whether pid is a running process.
 	alive func(pid int) bool
 	// signal sends sig to pid.
@@ -184,14 +184,55 @@ func exitCode(err error) int {
 	return -1
 }
 
-func (h *host) startProcess(cmd *exec.Cmd) (int, error) {
+// startedProcess is a process the adapter started: its PID and the result of
+// reaping it. done is closed once the child is reaped, and err holds Wait's
+// result (nil for a clean exit).
+//
+// Reaping is what keeps a dead child visible to processAlive: kill(pid, 0)
+// succeeds on a zombie (gt-fpunm).
+type startedProcess struct {
+	pid  int
+	done chan struct{}
+	err  error
+}
+
+// exited reports whether the child has exited and been reaped. It is stable:
+// a second call answers as the first did.
+func (p *startedProcess) exited() bool {
+	select {
+	case <-p.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// waitErr returns the child's exit error, nil while it is still running or
+// when it exited cleanly. Reading it after exited reports true orders the read
+// after the reaper's write.
+func (p *startedProcess) waitErr() error {
+	if !p.exited() {
+		return nil
+	}
+	return p.err
+}
+
+// startProcess starts a long-running process (the sql-server) and reaps it on
+// exit, so processAlive sees the death (gt-fpunm).
+func (h *host) startProcess(cmd *exec.Cmd) (*startedProcess, error) {
 	if h.start != nil {
 		return h.start(cmd)
 	}
 	if err := cmd.Start(); err != nil {
-		return 0, err
+		return nil, err
 	}
-	return cmd.Process.Pid, nil
+	done := make(chan struct{})
+	p := &startedProcess{pid: cmd.Process.Pid, done: done}
+	go func() {
+		p.err = cmd.Wait()
+		close(done)
+	}()
+	return p, nil
 }
 
 func (h *host) processAlive(pid int) bool {

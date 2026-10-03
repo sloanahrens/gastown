@@ -39,6 +39,12 @@ type fakeHost struct {
 	started       []*exec.Cmd
 	// onStart, when set, runs for each process start with the new PID.
 	onStart func(pid int, cmd *exec.Cmd)
+	// startExited, when set, makes every start return a child that has
+	// already exited: the handle is already reaped while the process table
+	// keeps it alive, the way an unreaped zombie still answers signal(0)
+	// (gt-fpunm). startExitErr is that child's exit error.
+	startExited  bool
+	startExitErr error
 	// endpointPort, when set, is every town's Dolt endpoint port (townPort).
 	endpointPort int
 }
@@ -261,18 +267,24 @@ func (f *fakeHost) run(c hostCall) ([]byte, []byte, error) {
 	return []byte(r.stdout), []byte(r.stderr), nil
 }
 
-func (f *fakeHost) start(cmd *exec.Cmd) (int, error) {
+func (f *fakeHost) start(cmd *exec.Cmd) (*startedProcess, error) {
 	f.mu.Lock()
 	f.nextPID++
 	pid := f.nextPID
 	f.procs[pid] = &fakeProc{args: append([]string(nil), cmd.Args...), cwd: cmd.Dir, alive: true}
 	f.started = append(f.started, cmd)
+	exited, exitErr := f.startExited, f.startExitErr
 	onStart := f.onStart
 	f.mu.Unlock()
 	if onStart != nil {
 		onStart(pid, cmd)
 	}
-	return pid, nil
+	p := &startedProcess{pid: pid, done: make(chan struct{})}
+	if exited {
+		p.err = exitErr
+		close(p.done)
+	}
+	return p, nil
 }
 
 func (f *fakeHost) alive(pid int) bool {
