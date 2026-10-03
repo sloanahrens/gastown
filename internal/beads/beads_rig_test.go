@@ -233,12 +233,8 @@ func TestCreateRigBeadUsesDurableRigType(t *testing.T) {
 	script := `#!/bin/sh
 printf '%s\n' "$*" >> "$BD_LOG"
 case "$1:$2:$3" in
-  config:get:types.custom)
-    printf '%s\n' 'agent,role,rig,convoy,slot,queue,event,message,molecule,gate,merge-request'
-    exit 0
-    ;;
-  config:get:types.infra)
-    printf '%s\n' 'agent,role,message'
+  config:list:*)
+    printf '%s\n' '{"types.custom":"agent,role,rig,convoy,slot,queue,event,message,molecule,gate,merge-request","types.infra":"agent,role,message"}'
     exit 0
     ;;
 esac
@@ -293,16 +289,10 @@ func TestCreateRigBeadFailsClosedWhenTypeConfigFails(t *testing.T) {
 	script := `#!/bin/sh
 printf '%s\n' "$*" >> "$BD_LOG"
 if [ "$1" = "config" ]; then
-  case "$2:$3" in
-    get:types.custom)
-      printf '%s\n' 'agent,role,rig,convoy,slot,queue,event,message,molecule,gate,merge-request'
-      exit 0
-      ;;
-    get:types.infra)
-      printf '%s\n' 'agent,rig,role,message'
-      exit 0
-      ;;
-  esac
+  # types.infra carries the wrong value: the read-back must fail closed.
+  if [ "$2" = "list" ]; then
+    printf '%s\n' '{"types.custom":"agent,role,rig,convoy,slot,queue,event,message,molecule,gate,merge-request","types.infra":"agent,rig,role,message"}'
+  fi
   exit 0
 fi
 if [ "$1" = "create" ]; then
@@ -354,12 +344,8 @@ func TestCreateRigBeadRecoversFromStaleTypeSentinel(t *testing.T) {
 	script := `#!/bin/sh
 printf '%s\n' "$*" >> "$BD_LOG"
 case "$1:$2:$3" in
-  config:get:types.custom)
-    printf '%s\n' 'agent,role,rig,convoy,slot,queue,event,message,molecule,gate,merge-request'
-    exit 0
-    ;;
-  config:get:types.infra)
-    printf '%s\n' 'agent,role,message'
+  config:list:*)
+    printf '%s\n' '{"types.custom":"agent,role,rig,convoy,slot,queue,event,message,molecule,gate,merge-request","types.infra":"agent,role,message"}'
     exit 0
     ;;
 esac

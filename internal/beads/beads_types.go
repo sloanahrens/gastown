@@ -230,15 +230,16 @@ func EnsureCustomTypes(beadsDir string) error {
 		return err
 	}
 
-	// Verify the config was actually persisted in the database (GH#2637).
+	// Verify both keys were actually persisted in the database (GH#2637).
 	// bd config set can exit 0 but fail to write if it targets the wrong
 	// database (redirect mismatch, stale metadata, server not running).
 	// Without this check, the sentinel file below would cache a lie,
 	// causing all future EnsureCustomTypes calls to skip re-configuration.
-	if err := verifyBDConfig(beadsDir, bdEnv, "types.custom", customTypes); err != nil {
-		return err
-	}
-	if err := verifyBDConfig(beadsDir, bdEnv, "types.infra", infraTypes); err != nil {
+	// One bd read confirms both keys (gt-ik4a1.4.13).
+	if err := verifyBDConfigSet(beadsDir, bdEnv, []configExpectation{
+		{key: "types.custom", want: customTypes},
+		{key: "types.infra", want: infraTypes},
+	}); err != nil {
 		return err
 	}
 
@@ -301,17 +302,63 @@ func setBDConfig(beadsDir string, env []string, key, value string) error {
 	return nil
 }
 
-func verifyBDConfig(beadsDir string, env []string, key, want string) error {
-	cmd := exec.Command("bd", "config", "get", key)
+// configExpectation is one config key and the value the set that just ran must
+// have left in the database.
+type configExpectation struct {
+	key  string
+	want string
+}
+
+// verifyBDConfigSet confirms every expectation against the database the pinned
+// env addresses, in ONE bd read (GH#2637; gt-ik4a1.4.13).
+//
+// bd config set returning 0 does not prove the write landed: it can silently
+// target another database (redirect mismatch, stale metadata, server not
+// running). The read-back is what catches that, and it reads the same stored
+// settings table `bd config get` reads — bd reports config.yaml and the
+// environment beside the stored values, never merged into them — so a set that
+// landed elsewhere still comes back missing here.
+//
+// One `bd config list --json` names every stored setting at once, which is why
+// both custom-type keys ride a single subprocess instead of one `config get`
+// each. The payload arrives bare or inside bd's machine-mode envelope
+// (BD_MACHINE=1 is on every call), so it is unwrapped by LegacyPayload first.
+func verifyBDConfigSet(beadsDir string, env []string, expect []configExpectation) error {
+	cmd := exec.Command("bd", "config", "list", "--json")
 	cmd.Dir = beadsDir
 	cmd.Env = env
 	util.SetDetachedProcessGroup(cmd)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	output, err := cmd.Output()
-	got := ParseConfigOutput(output)
-	if err != nil || got != want {
-		return fmt.Errorf("%s not persisted in %s after bd config set (verify returned %q): db may be misconfigured", key, beadsDir, got)
+	if err != nil {
+		return fmt.Errorf("verify custom types in %s: bd config list: %s: %w",
+			beadsDir, strings.TrimSpace(stderr.String()), err)
+	}
+	values := configListValues(output)
+	for _, e := range expect {
+		if got := values[e.key]; got != e.want {
+			return fmt.Errorf("%s not persisted in %s after bd config set (verify returned %q): db may be misconfigured", e.key, beadsDir, got)
+		}
 	}
 	return nil
+}
+
+// configListValues returns the stored settings bd printed for
+// `config list --json`, unwrapping the machine-mode envelope when bd wrote one.
+// A nil map means the output was not a settings object at all (empty output, a
+// diagnostic, an older bd's error text), which callers read as every key
+// missing.
+func configListValues(output []byte) map[string]string {
+	payload := bytes.TrimSpace(LegacyPayload([]string{"config", "list"}, output))
+	if len(payload) == 0 || payload[0] != '{' {
+		return nil
+	}
+	var values map[string]string
+	if json.Unmarshal(payload, &values) != nil {
+		return nil
+	}
+	return values
 }
 
 // EnsureCustomTypesConfigYAML records Gas Town custom types directly in
