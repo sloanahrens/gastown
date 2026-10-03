@@ -132,8 +132,11 @@ func healthTown(t *testing.T, now time.Time) (*Daemon, *labelBeads) {
 
 	bd := &labelBeads{
 		issuesByLabel: map[string][]*beads.Issue{
-			"gt:ready-to-land": {{ID: "gt-1", Status: "open"}, {ID: "gt-2", Status: "closed"}},
-			"gt:needs-human":   {{ID: "gt-3", Status: "open", CreatedAt: now.Add(-2 * time.Hour).Format(time.RFC3339)}},
+			"gt:ready-to-land": {
+				{ID: "gt-1", Status: "open", Notes: "READY TO LAND\nBranch: polecat/opal/gt-1\nHead: aaaa\nTarget: main\nWorker: opal\nSubmitted: " + now.Add(-time.Minute).Format(time.RFC3339)},
+				{ID: "gt-2", Status: "closed"},
+			},
+			"gt:needs-human": {{ID: "gt-3", Status: "open", CreatedAt: now.Add(-2 * time.Hour).Format(time.RFC3339)}},
 		},
 		wispsByLabel: map[string][]*beads.Issue{
 			// Escalations are filed as ephemeral wisps.
@@ -198,7 +201,7 @@ func TestWriteTownHealth_WritesTheReportFromTheTownsRecords(t *testing.T) {
 		"dolt":                      {townhealth.Live, townhealth.Green, "p50 4ms"},
 		"daemon":                    {townhealth.Recorded, townhealth.Green, "heartbeat 3m ago"},
 		"tick:mayor_dispatch":       {townhealth.Recorded, townhealth.Green, "50m/30m"},
-		"landing/gastown":           {townhealth.Recorded, townhealth.Green, "1 pending, last 1h ago"},
+		"landing/gastown":           {townhealth.Recorded, townhealth.Green, "1 pending, oldest 1m"},
 		"main/gastown":              {townhealth.Recorded, townhealth.Red, "red"},
 		"escalation":                {townhealth.Live, townhealth.Degraded, "oldest 1h"},
 		"needs-human":               {townhealth.Live, townhealth.Degraded, "1"},

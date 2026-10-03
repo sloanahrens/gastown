@@ -102,7 +102,7 @@ func healthy() *fake {
 		execTax:  9 * time.Millisecond,
 		hb:       HeartbeatRecord{At: ago(time.Minute), Count: 41},
 		ticks:    []Tick{{Name: "wisp_reaper", Interval: 30 * time.Minute, LastFired: ago(10 * time.Minute)}},
-		landings: []RigLandings{{Rig: "gastown", Last: ago(time.Hour), Landed: 7, Pending: 1}},
+		landings: []RigLandings{{Rig: "gastown", Landed: 7, Pending: 1, Oldest: ago(time.Minute), OldestBead: "gt-x"}},
 		backupAt: ago(12 * time.Hour), backupOK: true,
 		mains: []RigMain{{Rig: "gastown", LastRun: "abc", LastGreen: "abc"}},
 		seats: []Seat{{Rig: "gastown", Name: "polecat/opal", Run: true, Sampled: ago(time.Minute), Changed: ago(5 * time.Minute)}},
@@ -347,26 +347,45 @@ func TestTicksAgainstInterval(t *testing.T) {
 	}
 }
 
+// gt-m36as: the landing field judges the oldest pending submission's own age,
+// not the time since the rig last landed. A submission made after hours of
+// quiet is green, one that has outlived a whole gate plus a pass is red
+// naming the bead and its wait, and a rig with nothing waiting is green
+// however quiet it has been.
 func TestLandings(t *testing.T) {
 	t.Parallel()
 	f := healthy()
 	f.landings = []RigLandings{
-		{Rig: "idle", Last: ago(100 * time.Hour), Landed: 0, Pending: 0},
-		{Rig: "slow", Last: ago(3 * time.Hour), Landed: 2, Pending: 4},
-		{Rig: "stuck", Last: ago(9 * time.Hour), Landed: 1, Pending: 1},
-		{Rig: "new", Pending: 2},
+		// No landings in the day and nothing waiting: quiet is not a fault.
+		{Rig: "quiet", Landed: 0, Pending: 0},
+		// A fresh submission on the same quiet rig: green, because the bead
+		// is young however old the rig's last landing is.
+		{Rig: "fresh", Landed: 0, Pending: 2, Oldest: ago(time.Minute), OldestBead: "gt-fresh"},
+		// Inside the gate budget: still a landing, not a queue.
+		{Rig: "gating", Landed: 1, Pending: 1, Oldest: ago(LandingStageBudget), OldestBead: "gt-gating"},
+		// Past the budget plus a pass interval: the queue is the problem.
+		{Rig: "stuck", Landed: 1, Pending: 1, Oldest: ago(LandingWaitBudget + time.Minute), OldestBead: "gt-stuck"},
+		// A pending bead with no readable submission time is a question the
+		// field cannot answer.
+		{Rig: "unstamped", Pending: 2},
 	}
 	r := Compute(context.Background(), inputs(f))
 	if !f.since.Equal(ago(24 * time.Hour)) {
 		t.Errorf("since = %v, want 24h before now", f.since)
 	}
-	for key, want := range map[string]Verdict{"landing/idle": Green, "landing/slow": Degraded, "landing/stuck": Red, "landing/new": Degraded} {
+	for key, want := range map[string]Verdict{"landing/quiet": Green, "landing/fresh": Green, "landing/gating": Degraded, "landing/stuck": Red, "landing/unstamped": Degraded} {
 		if got := field(t, r, key); got.Verdict != want {
 			t.Errorf("%s = %+v, want %s", key, got, want)
 		}
 	}
-	if r.Landed == nil || *r.Landed != 3 {
-		t.Errorf("Landed = %v, want 3", r.Landed)
+	if got := field(t, r, "landing/fresh"); got.Value != "2 pending, oldest 1m" {
+		t.Errorf("landing/fresh = %+v, want the oldest wait in the value", got)
+	}
+	if got := field(t, r, "landing/stuck"); !strings.Contains(got.Detail, "gt-stuck") || !strings.Contains(got.Detail, "15m") {
+		t.Errorf("landing/stuck = %+v, want the bead and its wait in the detail", got)
+	}
+	if r.Landed == nil || *r.Landed != 2 {
+		t.Errorf("Landed = %v, want 2", r.Landed)
 	}
 
 	f.landings = append(f.landings, RigLandings{Rig: "broken", Err: errors.New("unreadable")})

@@ -60,9 +60,6 @@ const (
 	// before it is an item. A gate takes minutes; eight on the same bead is a
 	// wedged pass, not a slow one.
 	attentionLandingStuck = 8 * time.Minute
-	// attentionQueueSilent is how long a rig with ready-to-land beads may show
-	// no landing activity before it is an item.
-	attentionQueueSilent = 10 * time.Minute
 	// attentionPolecatStall is how long a running seat's progress evidence may
 	// be unchanged before it is an item. It is deliberately shorter than
 	// liveness.DefaultStallAfter (30m), which gates restarts: this item asks a
@@ -84,20 +81,14 @@ const (
 )
 
 // landingState is one rig's landing state as the collectors read it
-// (gt-vsct7.3): the bead a landing is on and when it started, and when the
-// rig's queue last showed landing activity. The zero value is "no bead, no
-// activity seen".
+// (gt-vsct7.3): the bead a landing is on and when it started. The zero value
+// is "no bead in flight".
 type landingState struct {
 	// bead is the bead the rig's landing pass is landing; "" between beads and
 	// when no pass is running.
 	bead string
 	// since is when bead became the in-flight landing.
 	since time.Time
-	// active is the last time the rig showed landing activity: a bead entering
-	// or leaving flight, or the end of a pass that landed, repaired or
-	// rejected something. queue-stuck counts silence from here, and a pass
-	// that finds nothing to do does not move it.
-	active time.Time
 }
 
 // landingStates is the daemon's per-rig landing state. The landing worker
@@ -120,41 +111,28 @@ func (l *landingStates) get(rig string) landingState {
 
 func (l *landingStates) put(rig string, p landingState) { l.m.Store(rig, p) }
 
-// beginPass marks a landing pass as running with no bead in flight yet. The
-// process's first pass also sets the activity baseline: a daemon that just
-// started has observed no silence, and a zero clock would raise an item for
-// every waiting bead at once. Later passes move nothing — an idle pass is not
-// activity, or a queue polled every minute and never landed could never be
-// stuck.
-func (l *landingStates) beginPass(rig string, now time.Time) {
+// beginPass marks a landing pass as running with no bead in flight yet.
+func (l *landingStates) beginPass(rig string) {
 	p := l.get(rig)
 	p.bead, p.since = "", time.Time{}
-	if p.active.IsZero() {
-		p.active = now
-	}
 	l.put(rig, p)
 }
 
 // setBead records a bead entering (id != "") or leaving (id == "") the
-// in-flight landing. Both are landing activity.
+// in-flight landing.
 func (l *landingStates) setBead(rig, id string, now time.Time) {
 	p := l.get(rig)
-	p.bead, p.active, p.since = id, now, time.Time{}
+	p.bead, p.since = id, time.Time{}
 	if id != "" {
 		p.since = now
 	}
 	l.put(rig, p)
 }
 
-// endPass records the end of a landing pass. Only a pass that did work is
-// activity: a pass that found nothing to land says the worker is alive, not
-// that the queue is moving.
-func (l *landingStates) endPass(rig string, now time.Time, didWork bool) {
+// endPass records the end of a landing pass.
+func (l *landingStates) endPass(rig string) {
 	p := l.get(rig)
 	p.bead, p.since = "", time.Time{}
-	if didWork {
-		p.active = now
-	}
 	l.put(rig, p)
 }
 
@@ -222,11 +200,12 @@ type attentionSources struct {
 	refusals    func() ([]attention.Refusal, error)
 	refusalBead func(ctx context.Context, rig, id string) (*beads.Issue, error)
 	blockedMail func(ctx context.Context) ([]*mail.Message, error)
-	// landingState reads the rig's in-flight landing, the landing-stuck and
-	// queue-stuck collectors' subject.
+	// landingState reads the rig's in-flight landing, the landing-stuck
+	// collector's subject.
 	landingState func(rig string) landingState
-	// readyToLand counts the rig's actionable gt:ready-to-land beads.
-	readyToLand func(ctx context.Context, rig string) (int, error)
+	// readyToLand reads the rig's actionable gt:ready-to-land beads and
+	// reports the oldest submission among them, the age queue-stuck judges.
+	readyToLand func(ctx context.Context, rig string) (readyQueue, error)
 	// tierSweep reads one rig's tier-sweep record (tier_sweep.go), and
 	// tierSweepRigs is the rig set the sweep covers — none when the patrol is
 	// off.
@@ -508,28 +487,37 @@ func (d *Daemon) attentionRiskLandings(rig string, since time.Time) ([]land.Land
 	return f.Since(since)
 }
 
-// attentionReadyToLand counts the rig's actionable gt:ready-to-land beads: the
+// attentionReadyToLand reads the rig's actionable gt:ready-to-land beads: the
 // same list the landing worker's pass works, filtered the same way
 // (landworker.Worker.pass), so the queue-stuck item and the worker never
-// disagree about whether there is anything waiting.
-func (d *Daemon) attentionReadyToLand(ctx context.Context, rig string) (int, error) {
+// disagree about whether there is anything waiting. The oldest submission
+// among them is the age queue-stuck judges, by land.SubmittedAt — the clock
+// the worker orders the queue by (gt-m36as).
+func (d *Daemon) attentionReadyToLand(ctx context.Context, rig string) (readyQueue, error) {
 	if err := ctx.Err(); err != nil {
-		return 0, err
+		return readyQueue{}, err
 	}
 	issues, err := d.rigWorkBeads(rig).List(beads.ListOptions{
 		Label: land.LabelReadyToLand, Priority: -1, Limit: 0,
 	})
 	if err != nil {
-		return 0, err
+		return readyQueue{}, err
 	}
-	n := 0
+	var q readyQueue
 	for _, is := range issues {
 		if is == nil || !beads.IssueStatus(strings.TrimSpace(is.Status)).IsActionable() {
 			continue
 		}
-		n++
+		q.count++
+		t := land.SubmittedAt(is)
+		if t.IsZero() {
+			continue
+		}
+		if q.oldest.IsZero() || t.Before(q.oldest) {
+			q.oldest, q.bead = t, is.ID
+		}
 	}
-	return n, nil
+	return q, nil
 }
 
 // attentionSeats walks the town's seat records the way townhealth does, with
@@ -978,30 +966,27 @@ func (s *attentionSources) collectLandingStuck(ctx context.Context) ([]attention
 	return out, nil
 }
 
-// collectQueueStuck raises one item per rig that has ready-to-land beads and
-// has shown no landing activity for longer than attentionQueueSilent
-// (gt-vsct7.3): the daemon's copy of queue-watch STUCK-QUEUE. The clock is the
-// same landingState.active the in-flight item reads, so a queue that keeps
-// landing never raises it however long each landing takes.
+// collectQueueStuck raises one item per rig whose oldest ready-to-land
+// submission has waited longer than townhealth.LandingWaitBudget (gt-m36as):
+// the daemon's copy of queue-watch STUCK-QUEUE. It is the same age the
+// landing health field judges, so the health line and the alert agree, and it
+// is the waiting bead's own age rather than the time since the rig last
+// landed, so neither measures an idle town (gt-vsct7.3).
 func (s *attentionSources) collectQueueStuck(ctx context.Context) ([]attention.Item, error) {
 	var out []attention.Item
 	for _, rig := range s.landingRigs() {
-		ready, err := s.readyToLand(ctx, rig)
+		q, err := s.readyToLand(ctx, rig)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", rig, err)
 		}
-		if ready == 0 {
+		if q.count == 0 || q.oldest.IsZero() {
+			// Nothing waiting, or no submission time to judge one by: an
+			// unreadable stamp is the landing field's to report, not this
+			// collector's to guess at.
 			continue
 		}
-		p := s.landingState(rig)
-		if p.active.IsZero() {
-			// No pass has ever run for this rig, so there is no silence to
-			// measure. A daemon that has not started the worker reports the
-			// worker's absence elsewhere rather than guessing here.
-			continue
-		}
-		silent := s.now.Sub(p.active)
-		if silent <= attentionQueueSilent {
+		waited := s.now.Sub(q.oldest)
+		if waited <= townhealth.LandingWaitBudget {
 			continue
 		}
 		out = append(out, attention.Item{
@@ -1009,10 +994,22 @@ func (s *attentionSources) collectQueueStuck(ctx context.Context) ([]attention.I
 			Kind:     attention.KindQueueStuck,
 			Severity: attention.SeverityHigh,
 			Rig:      rig,
-			Summary:  fmt.Sprintf("landing queue silent %s with %d ready-to-land", townhealth.Short(silent), ready),
+			Bead:     q.bead,
+			Summary:  fmt.Sprintf("%s waiting %s with %d ready-to-land", q.bead, townhealth.Short(waited), q.count),
 		})
 	}
 	return out, nil
+}
+
+// readyQueue is a rig's waiting landing work: how many actionable
+// ready-to-land beads wait, and when the oldest of them was submitted.
+type readyQueue struct {
+	count int
+	// oldest is the oldest submission time; zero when nothing waits, or when
+	// no waiting bead carries a readable one.
+	oldest time.Time
+	// bead is the bead oldest belongs to; "" when oldest is zero.
+	bead string
 }
 
 // collectPolecatStall raises one item per running polecat whose progress

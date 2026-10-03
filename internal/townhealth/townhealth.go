@@ -181,8 +181,9 @@ type Thresholds struct {
 	// a multiple of its interval.
 	TickDegradedFactor float64
 	TickRedFactor      float64
-	// Landing judges the age of a rig's last landing while it has landings
-	// pending.
+	// Landing judges the age of a rig's oldest pending ready-to-land
+	// submission, so a waiting bead is measured from when it was submitted
+	// rather than from the rig's last landing (gt-m36as).
 	Landing Limits
 	// Escalation judges the age of the oldest open escalation.
 	Escalation Limits
@@ -220,6 +221,26 @@ type Thresholds struct {
 // (gt-xiw7o).
 const DefaultDispatchWindow = 10 * time.Minute
 
+// The landing wait bounds. They measure a ready-to-land submission's own age
+// — how long it has waited — not the time since the rig last landed, so a
+// first submission after an idle night is not instantly an alarm (gt-m36as).
+const (
+	// LandingStageBudget is the sum of the landing gate's stage timeouts,
+	// the time one submission may legitimately spend in the pipeline: lint
+	// (2m, the daemon's defaultLandLintTimeout), then the gate (6m,
+	// defaultLandTestTimeout), then om review (5m, land.DefaultOMTimeout).
+	LandingStageBudget = 13 * time.Minute
+	// LandingPassInterval is one landing worker pass interval (the daemon's
+	// defaultLandingWorkerInterval): the slack a waiting submission gets
+	// before the next pass can pick it up.
+	LandingPassInterval = time.Minute
+	// LandingWaitBudget is how long a submission may wait before the queue,
+	// not the gate, is the problem: the stage budget plus one pass interval.
+	// The landing field is red at it and the daemon's queue-stuck item uses
+	// the same age, so the health line and the alert agree.
+	LandingWaitBudget = LandingStageBudget + LandingPassInterval
+)
+
 // DefaultThresholds are the compiled defaults.
 func DefaultThresholds() Thresholds {
 	return Thresholds{
@@ -229,7 +250,7 @@ func DefaultThresholds() Thresholds {
 		Heartbeat:          Limits{Degraded: 10 * time.Minute, Red: 30 * time.Minute},
 		TickDegradedFactor: 2,
 		TickRedFactor:      4,
-		Landing:            Limits{Degraded: 2 * time.Hour, Red: 8 * time.Hour},
+		Landing:            Limits{Degraded: LandingStageBudget, Red: LandingWaitBudget},
 		Escalation:         Limits{Degraded: time.Hour, Red: 4 * time.Hour},
 		SlotHolder:         Limits{Degraded: 30 * time.Minute, Red: 2 * time.Hour},
 		Backup:             Limits{Degraded: 36 * time.Hour, Red: 72 * time.Hour},
@@ -280,12 +301,16 @@ type Ticks interface {
 // RigLandings is one rig's landing record and queue.
 type RigLandings struct {
 	Rig string
-	// Last is the newest landing on record; zero for none.
-	Last time.Time
 	// Landed counts landings at or after the since time Landings was given.
 	Landed int
 	// Pending counts work waiting for the landing worker.
 	Pending int
+	// Oldest is when the oldest pending submission was submitted for
+	// landing, the age the landing field judges. Zero when none is pending,
+	// and on a pending bead whose submission time cannot be read.
+	Oldest time.Time
+	// OldestBead is the bead Oldest belongs to; "" when Oldest is zero.
+	OldestBead string
 	// Err is a failed read for this rig; the rest is ignored.
 	Err error
 }
@@ -620,8 +645,10 @@ func ticks(in Inputs) []Field {
 	return fs
 }
 
-// landings judges each rig's last-landing age against its pending queue
-// and counts the day's landings. The count is nil when any rig is unknown.
+// landings judges each rig's oldest pending submission age and counts the
+// day's landings. A rig with nothing waiting is green however long since its
+// last landing: the wait, not the town's quiet, is what the field measures
+// (gt-m36as). The count is nil when any rig is unknown.
 func landings(ctx context.Context, in Inputs) (*int, []Field) {
 	if in.Landings == nil {
 		return nil, []Field{unknown(FieldLanding, "", "", errNotWired)}
@@ -639,18 +666,21 @@ func landings(ctx context.Context, in Inputs) (*int, []Field) {
 			continue
 		}
 		total += rl.Landed
-		// The queue is a live query; the last landing is the landings file.
 		f := Field{Name: FieldLanding, Rig: rl.Rig, Tag: Recorded, Verdict: Green, Value: fmt.Sprintf("%d pending", rl.Pending)}
-		switch {
-		case rl.Pending == 0:
-		case rl.Last.IsZero():
-			f.Verdict = Degraded
-			f.Detail = fmt.Sprintf("%d pending, no landing recorded", rl.Pending)
-		default:
-			age := in.Now.Sub(rl.Last)
-			f.Value = fmt.Sprintf("%d pending, last %s ago", rl.Pending, Short(age))
-			if f.Verdict = in.Thresholds.Landing.judge(age); f.Verdict != Green {
-				f.Detail = fmt.Sprintf("%d pending, last landing %s ago", rl.Pending, Short(age))
+		if rl.Pending > 0 {
+			switch {
+			case rl.Oldest.IsZero():
+				// A pending bead with no submission time is a question this
+				// field cannot answer; it says so rather than calling it
+				// green.
+				f.Verdict = Degraded
+				f.Detail = fmt.Sprintf("%d pending, no submission time recorded", rl.Pending)
+			default:
+				age := in.Now.Sub(rl.Oldest)
+				f.Value = fmt.Sprintf("%d pending, oldest %s", rl.Pending, Short(age))
+				if f.Verdict = in.Thresholds.Landing.judge(age); f.Verdict != Green {
+					f.Detail = fmt.Sprintf("%s submitted %s ago", rl.OldestBead, Short(age))
+				}
 			}
 		}
 		fs = append(fs, f)

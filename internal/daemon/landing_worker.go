@@ -257,12 +257,9 @@ func (d *Daemon) landingWorkerLoop(rigName string, interval time.Duration, pass 
 			skipLogged = ""
 			pruneLandingLogs(d.landingLogRoot(rigName), time.Now())
 			d.landingPasses.Add(1)
-			d.landingStates.beginPass(rigName, d.clk().Now())
+			d.landingStates.beginPass(rigName)
 			rep := pass(d.ctx)
-			// The pass's end is landing activity only when it did work: an
-			// idle pass every interval says the worker is alive, not that the
-			// queue is moving (gt-vsct7.3).
-			d.landingStates.endPass(rigName, d.clk().Now(), rep.Landed+rep.Rejected+rep.Repaired > 0)
+			d.landingStates.endPass(rigName)
 			d.landingPasses.Add(-1)
 			if rep != (landworker.Report{}) {
 				d.logger.Printf("landing_worker: %s: pass: %s", rigName, rep)

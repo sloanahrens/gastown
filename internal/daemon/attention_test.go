@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"os"
@@ -64,7 +63,7 @@ func newAttentionFixture(t *testing.T, now time.Time) *attentionFixture {
 		blockedMail: func(context.Context) ([]*mail.Message, error) { return nil, nil },
 
 		landingState:  func(string) landingState { return landingState{} },
-		readyToLand:   func(context.Context, string) (int, error) { return 0, nil },
+		readyToLand:   func(context.Context, string) (readyQueue, error) { return readyQueue{}, nil },
 		tierSweep:     func(string) (tierSweepState, error) { return tierSweepState{}, nil },
 		tierSweepRigs: func() []string { return nil },
 		seats:         func() ([]townhealth.Seat, error) { return nil, nil },
@@ -708,100 +707,72 @@ func TestAttentionLandingStuckClearsWhenThePassMoves(t *testing.T) {
 	}
 }
 
-// gt-vsct7.3: a rig with ready-to-land beads and no landing activity past the
-// threshold raises queue-stuck; a rig with nothing waiting never does.
+// gt-m36as: queue-stuck judges the oldest pending submission's own age, so a
+// rig with ready-to-land work raises no item while its oldest submission is
+// inside the budget, and one once it is past it; a rig with nothing waiting
+// never does.
 func TestAttentionQueueStuck(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
 	f := newAttentionFixture(t, now)
-	f.src.readyToLand = func(context.Context, string) (int, error) { return 1, nil }
-
-	f.src.landingState = func(string) landingState {
-		return landingState{active: now.Add(-attentionQueueSilent)}
+	f.src.readyToLand = func(context.Context, string) (readyQueue, error) {
+		return readyQueue{count: 1, oldest: now.Add(-townhealth.LandingWaitBudget), bead: "gt-a"}, nil
 	}
 	if items := f.collect(t, f.src.collectQueueStuck); len(items) != 0 {
-		t.Fatalf("items = %+v, want none at exactly the threshold", items)
+		t.Fatalf("items = %+v, want none at exactly the budget", items)
 	}
 
-	f.src.landingState = func(string) landingState {
-		return landingState{active: now.Add(-attentionQueueSilent - time.Minute)}
+	f.src.readyToLand = func(context.Context, string) (readyQueue, error) {
+		return readyQueue{count: 1, oldest: now.Add(-townhealth.LandingWaitBudget - time.Minute), bead: "gt-a"}, nil
 	}
 	items := f.collect(t, f.src.collectQueueStuck)
 	if len(items) != 1 {
-		t.Fatalf("items = %+v, want one silent queue", items)
+		t.Fatalf("items = %+v, want one stuck queue", items)
 	}
 	if got := items[0]; got.Key != "queue-stuck:gastown" || got.Kind != attention.KindQueueStuck ||
-		got.Rig != attentionRig || got.Severity != attention.SeverityHigh {
-		t.Errorf("item = %+v, want queue-stuck:gastown", got)
+		got.Rig != attentionRig || got.Severity != attention.SeverityHigh || got.Bead != "gt-a" {
+		t.Errorf("item = %+v, want queue-stuck:gastown naming gt-a", got)
 	}
 
-	// Nothing waiting: no item however quiet the rig has been.
-	f.src.readyToLand = func(context.Context, string) (int, error) { return 0, nil }
+	// Nothing waiting: no item however long the rig has been quiet.
+	f.src.readyToLand = func(context.Context, string) (readyQueue, error) {
+		return readyQueue{}, nil
+	}
 	if items := f.collect(t, f.src.collectQueueStuck); len(items) != 0 {
 		t.Fatalf("items = %+v, want none with an empty queue", items)
 	}
 
-	// A rig whose worker has never run a pass has no silence to measure.
-	f.src.readyToLand = func(context.Context, string) (int, error) { return 1, nil }
-	f.src.landingState = func(string) landingState { return landingState{} }
+	// A waiting bead whose submission time cannot be read has no age to
+	// judge; the landing health field reports the unreadable stamp.
+	f.src.readyToLand = func(context.Context, string) (readyQueue, error) {
+		return readyQueue{count: 1}, nil
+	}
 	if items := f.collect(t, f.src.collectQueueStuck); len(items) != 0 {
-		t.Fatalf("items = %+v, want none before the first pass", items)
+		t.Fatalf("items = %+v, want none without a submission time", items)
 	}
 }
 
-// The busy-queue case from the bead: five beads each landing in 2.5m is a
-// moving queue and never raises queue-stuck, however long it stays busy.
-func TestAttentionQueueStuckStaysQuietWhileLandingsContinue(t *testing.T) {
+// gt-m36as, the reported incident: a landing submitted after hours of quiet is
+// judged by the submission's own age, not by the time since the rig last
+// landed, so the first landing of the day is not instantly an item.
+func TestAttentionQueueStuckJudgesTheSubmissionAge(t *testing.T) {
 	t.Parallel()
-	start := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
-	f := newAttentionFixture(t, start)
-	f.src.readyToLand = func(context.Context, string) (int, error) { return 5, nil }
-	states := &landingStates{}
-	f.src.landingState = states.get
-
-	at := start
-	states.beginPass(attentionRig, at)
-	for i := 0; i < 5; i++ {
-		states.setBead(attentionRig, fmt.Sprintf("gt-%d", i), at)
-		at = at.Add(2*time.Minute + 30*time.Second)
-		states.setBead(attentionRig, "", at)
-		states.endPass(attentionRig, at, true)
-		f.src.now = at
-		if items := f.collect(t, f.src.collectQueueStuck); len(items) != 0 {
-			t.Fatalf("landing %d: items = %+v, want none while the queue is landing", i, items)
-		}
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	submitted := now.Add(-time.Minute)
+	f := newAttentionFixture(t, now)
+	f.src.readyToLand = func(context.Context, string) (readyQueue, error) {
+		return readyQueue{count: 1, oldest: submitted, bead: "gt-a"}, nil
+	}
+	if items := f.collect(t, f.src.collectQueueStuck); len(items) != 0 {
+		t.Fatalf("items = %+v, want none for a submission a minute old after a long quiet", items)
 	}
 
-	// The queue stops moving: the item appears once the silence passes.
-	at = at.Add(attentionQueueSilent + time.Minute)
-	f.src.now = at
+	// The same bead, still waiting a budget later: now the queue is the
+	// problem, and the item names the bead and its wait.
+	f.src.now = submitted.Add(townhealth.LandingWaitBudget + time.Minute)
 	items := f.collect(t, f.src.collectQueueStuck)
-	if len(items) != 1 || items[0].Key != "queue-stuck:gastown" {
-		t.Fatalf("items = %+v, want queue-stuck:gastown once the queue went quiet", items)
-	}
-}
-
-// An idle pass is not activity: a worker that keeps polling an unmoved queue
-// must still raise the item.
-func TestAttentionQueueStuckIgnoresIdlePasses(t *testing.T) {
-	t.Parallel()
-	start := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
-	f := newAttentionFixture(t, start)
-	f.src.readyToLand = func(context.Context, string) (int, error) { return 1, nil }
-	states := &landingStates{}
-	f.src.landingState = states.get
-
-	at := start
-	states.beginPass(attentionRig, at)
-	for i := 0; i < 20; i++ {
-		at = at.Add(time.Minute)
-		states.beginPass(attentionRig, at)
-		states.endPass(attentionRig, at, false)
-	}
-	f.src.now = at
-	items := f.collect(t, f.src.collectQueueStuck)
-	if len(items) != 1 {
-		t.Fatalf("items = %+v, want the item after 20 idle passes over a waiting queue", items)
+	if len(items) != 1 || items[0].Key != "queue-stuck:gastown" || items[0].Bead != "gt-a" {
+		t.Fatalf("items = %+v, want queue-stuck:gastown naming gt-a once its wait passed the budget", items)
 	}
 }
 
