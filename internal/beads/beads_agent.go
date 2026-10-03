@@ -527,12 +527,6 @@ type CompletionMetadata struct {
 	CompletionTime string // RFC3339 timestamp
 }
 
-// UpdateAgentCompletion atomically writes all completion metadata fields
-// to an agent bead. Called by gt done to record completion state.
-func (b *Beads) UpdateAgentCompletion(id string, meta *CompletionMetadata) error {
-	return UpdateAgentCompletion(b, id, meta)
-}
-
 // GetAgentBeadInStoreOnly retrieves an agent bead by ID, but ONLY if it is
 // physically present in THIS wrapper's own database — never resolving via
 // bd's per-ID prefix routing (routes.jsonl). `bd show <id>` and `bd delete

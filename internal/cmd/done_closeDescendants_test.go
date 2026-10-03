@@ -261,8 +261,8 @@ func TestDoneStateEnvZeroValueIsTheRealProcess(t *testing.T) {
 	if got, want := reflect.ValueOf(e.head()).Pointer(), reflect.ValueOf(done.CurrentReviewEvidenceHead).Pointer(); got != want {
 		t.Error("zero doneStateEnv does not resolve HEAD through done.CurrentReviewEvidenceHead")
 	}
-	if _, ok := e.routedAt(t.TempDir()).(*beads.Beads); !ok {
-		t.Error("zero doneStateEnv's routed store is not bd")
+	if _, isFake := e.routedAt(t.TempDir()).(*beadsfake.Fake); isFake {
+		t.Error("zero doneStateEnv's routed store is a fake; want the real bd store")
 	}
 	if got, want := reflect.ValueOf(e.sourceOpener()).Pointer(), reflect.ValueOf(done.OpenSourceStore).Pointer(); got != want {
 		t.Error("zero doneStateEnv does not open source stores through done.OpenSourceStore")

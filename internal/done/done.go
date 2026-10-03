@@ -526,7 +526,7 @@ func resolveCleanupStatusForSelfReport(doneCleanupStatus, observedStatus string)
 //     value, so recording it is fail-closed. It only makes "gt done ran and
 //     could not prove the tree was safe" distinguishable from "gt done never
 //     ran", which is what the blocked slots were indistinguishable from.
-func selfReportCleanupStatus(g cleanupStatusGit, branch string, updater cleanupStatusUpdater, agentBeadID, doneCleanupStatus string) {
+func selfReportCleanupStatus(g cleanupStatusGit, branch string, updater beads.Client, agentBeadID, doneCleanupStatus string) {
 	if agentBeadID == "" {
 		style.PrintWarning("no agent bead ID for this polecat; cleanup_status not recorded — the slot will read as cleanup_status=<missing> and cannot be reclaimed")
 		return
@@ -536,7 +536,7 @@ func selfReportCleanupStatus(g cleanupStatusGit, branch string, updater cleanupS
 		observed = observeCleanupStatus(g, branch)
 	}
 	status := resolveCleanupStatusForSelfReport(doneCleanupStatus, observed)
-	if err := updater.UpdateAgentCleanupStatus(agentBeadID, string(status)); err != nil {
+	if err := beads.UpdateAgentCleanupStatus(updater, agentBeadID, string(status)); err != nil {
 		// Non-fatal: the rest of gt done still runs (za-o9e)
 		fmt.Fprintf(os.Stderr, "Warning: couldn't update agent %s cleanup status: %v\n", agentBeadID, err)
 	}
@@ -925,7 +925,7 @@ func Run(opts Options) error {
 	// Recreate the agent bead if it's missing (hq-xu4p). Completion metadata
 	// writes to it; when it's gone every write fails
 	// 'issue not found'.
-	ensureAgentBeadExists(beads.New(r.cwd).ForAgentBead(), r.agentBeadID, ctx)
+	ensureAgentBeadExists(beads.ForAgentBead(beads.New(r.cwd)), r.agentBeadID, ctx)
 	var assignedIssueIDs []string
 	loadAssignedIssueIDs := func() []string {
 		if assignedIssueIDs == nil && r.sender != "" {
@@ -987,7 +987,7 @@ func Run(opts Options) error {
 			// Nothing is reported done, but the worktree's git state is still
 			// recorded: a session that dies before re-running gt done must not
 			// strand its slot (hq-vx224).
-			selfReportCleanupStatus(r.g, r.branch, beads.New(filepath.Join(r.townRoot, r.rigName)).ForAgentBead(), r.agentBeadID, cleanupStatus)
+			selfReportCleanupStatus(r.g, r.branch, beads.ForAgentBead(beads.New(filepath.Join(r.townRoot, r.rigName))), r.agentBeadID, cleanupStatus)
 			return err
 		}
 	} else {
@@ -1508,21 +1508,21 @@ func reportDone(r *doneRun, exitType string) error {
 	// anomalies and crash recovery (gt-1qlg).
 	fmt.Printf("\nRecording completion...\n")
 	if r.agentBeadID != "" {
-		completionBd := beads.New(r.cwd).ForAgentBead()
+		completionBd := beads.ForAgentBead(beads.New(r.cwd))
 		meta := &beads.CompletionMetadata{
 			ExitType:       exitType,
 			Branch:         r.branch,
 			HookBead:       r.issueID,
 			CompletionTime: time.Now().UTC().Format(time.RFC3339),
 		}
-		if err := completionBd.UpdateAgentCompletion(r.agentBeadID, meta); err != nil {
+		if err := beads.UpdateAgentCompletion(completionBd, r.agentBeadID, meta); err != nil {
 			style.PrintWarning("could not write completion metadata to agent bead: %v", err)
 		}
 	}
 
 	// Self-report cleanup_status (ZFC #10), addressed through the rig
 	// directory so it still resolves if the worktree is already gone.
-	selfReportCleanupStatus(r.g, r.branch, beads.New(filepath.Join(r.townRoot, r.rigName)).ForAgentBead(), r.agentBeadID, r.cleanupStatus)
+	selfReportCleanupStatus(r.g, r.branch, beads.ForAgentBead(beads.New(filepath.Join(r.townRoot, r.rigName))), r.agentBeadID, r.cleanupStatus)
 
 	if err := events.LogFeed(events.TypeDone, r.sender, events.DonePayload(r.issueID, r.branch)); err != nil {
 		style.PrintWarning("could not log done event: %v", err)
@@ -1820,7 +1820,7 @@ func unlandedPushMessage(branch string, pushErr, verifyErr error) string {
 // checkpoints, and active_mr writes don't silently fail (hq-xu4p). Only
 // rig-level agents are handled — town agents (mayor/deacon) are owned by
 // gt doctor. Best-effort: failures are warned, never fatal.
-func ensureAgentBeadExists(bd *beads.Beads, id string, ctx Agent) {
+func ensureAgentBeadExists(bd beads.Client, id string, ctx Agent) {
 	if id == "" {
 		return
 	}
@@ -1838,7 +1838,7 @@ func ensureAgentBeadExists(bd *beads.Beads, id string, ctx Agent) {
 		return
 	}
 
-	if _, err := bd.CreateOrReopenAgentBead(id, title, fields); err != nil {
+	if _, err := beads.CreateOrReopenAgentBead(bd, id, title, fields); err != nil {
 		style.PrintWarning("agent bead %s missing and recreate failed: %v", id, err)
 	} else {
 		fmt.Printf("%s Recreated/reopened missing agent bead: %s\n", style.Bold.Render("✓"), id)
@@ -1893,7 +1893,7 @@ func selectAssignedIssue(branchIssue string, assigned []string) (string, bool) {
 // scan of every rig. The assigned work bead is authoritative; agent-bead hook
 // slots are intentionally ignored.
 func findAssignedBeadsForAgent(workDir, townRoot, agentID string) []string {
-	return findAssignedBeadsForAgentIn(workDir, townRoot, agentID, func(dir string) issueLister {
+	return findAssignedBeadsForAgentIn(workDir, townRoot, agentID, func(dir string) beads.Client {
 		return beads.New(dir)
 	})
 }
@@ -1901,7 +1901,7 @@ func findAssignedBeadsForAgent(workDir, townRoot, agentID string) []string {
 // assignedBeadStore opens the bead store at dir. It is the seam the fallback
 // ladder runs through, so a unit test can prove each location is queried
 // without spawning bd.
-type assignedBeadStore func(dir string) issueLister
+type assignedBeadStore func(dir string) beads.Client
 
 func findAssignedBeadsForAgentIn(workDir, townRoot, agentID string, open assignedBeadStore) []string {
 	if agentID == "" {
@@ -2004,12 +2004,7 @@ func scanRigBeadsForAssigned(townRoot, agentID string, open assignedBeadStore) [
 	return nil
 }
 
-// issueLister is the slice of *beads.Beads queryAssignedBeads reads.
-type issueLister interface {
-	List(opts beads.ListOptions) ([]*beads.Issue, error)
-}
-
-func queryAssignedBeads(bd issueLister, agentID string) []*beads.Issue {
+func queryAssignedBeads(bd beads.Client, agentID string) []*beads.Issue {
 	hooked, err := bd.List(beads.ListOptions{
 		Status:   beads.StatusHooked,
 		Assignee: agentID,
@@ -2049,7 +2044,7 @@ func assignedIssueIDs(assigned []*beads.Issue) []string {
 // branch guard and the hook fallback silently no-op'd (same class of bug as
 // gt-pftz in the close path). Hooked wins over in_progress when both exist.
 // Returns empty string if no assignment bead is found.
-func FindHookedBeadForAgent(bd issueLister, agentID string) string {
+func FindHookedBeadForAgent(bd beads.Client, agentID string) string {
 	issueID, _ := selectAssignedIssue("", assignedIssueIDs(queryAssignedBeads(bd, agentID)))
 	return issueID
 }
