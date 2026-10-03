@@ -796,28 +796,12 @@ func runConvoyClose(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	stdout, err := beads.RunBdJSON(townBeads, "show", convoyID, "--json")
+	// NewPinned(townBeads) is the town store the raw call ran bd against:
+	// townBeads is the town root, which ResolveBeadsDir turns into its .beads.
+	convoy, err := beads.NewPinned(townBeads).Show(convoyID)
 	if err != nil {
 		return fmt.Errorf("convoy '%s' not found", convoyID)
 	}
-
-	var convoys []struct {
-		ID          string   `json:"id"`
-		Title       string   `json:"title"`
-		Status      string   `json:"status"`
-		Type        string   `json:"issue_type"`
-		Description string   `json:"description"`
-		Labels      []string `json:"labels"`
-	}
-	if err := json.Unmarshal(stdout, &convoys); err != nil {
-		return fmt.Errorf("parsing convoy data: %w", err)
-	}
-
-	if len(convoys) == 0 {
-		return fmt.Errorf("convoy '%s' not found", convoyID)
-	}
-
-	convoy := convoys[0]
 
 	// Verify it's actually a convoy type
 	if !convoyops.IsConvoyIssue(convoy.Type, convoy.Labels) {

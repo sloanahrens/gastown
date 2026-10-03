@@ -93,7 +93,7 @@ func runRigDock(cmd *cobra.Command, args []string) error {
 	// Find or create the rig identity bead (idempotent; handles duplicates
 	// and Dolt query hiccups gracefully — gt-d8681).
 	bd := beads.New(r.BeadsPath())
-	rigBead, err := bd.EnsureRigBead(rigName, &beads.RigFields{
+	rigBead, err := beads.EnsureRigBead(bd, rigName, &beads.RigFields{
 		Repo:   r.GitURL,
 		Prefix: prefix,
 		State:  beads.RigStateActive,

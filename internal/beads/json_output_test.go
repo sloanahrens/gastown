@@ -23,7 +23,7 @@ func TestNonJSONOutputIsAnError(t *testing.T) {
 			"ListIssueStatuses":         func() error { _, err := b.ListIssueStatuses(StatusOpen); return err },
 			"ListAssignedIssueStatuses": func() error { _, err := b.ListAssignedIssueStatuses("rig/polecats/x", StatusOpen); return err },
 			"PreloadBeads":              func() error { return b.PreloadBeads([]string{"gt:agent"}, nil) },
-			"ListRigBeads":              func() error { _, err := b.ListRigBeads(); return err },
+			"ListRigBeads":              func() error { _, err := ListRigBeads(b); return err },
 			"GetAgentBeadInStoreOnly":   func() error { _, _, err := b.GetAgentBeadInStoreOnly("gt-x"); return err },
 		}
 		for name, call := range calls {
@@ -46,7 +46,7 @@ func TestEmptyJSONArrayIsZeroResults(t *testing.T) {
 	if issues, err := b.List(ListOptions{Priority: -1}); err != nil || len(issues) != 0 {
 		t.Fatalf("List on [] = %v, %v; want no issues and no error", issues, err)
 	}
-	if rigs, err := b.ListRigBeads(); err != nil || len(rigs) != 0 {
+	if rigs, err := ListRigBeads(b); err != nil || len(rigs) != 0 {
 		t.Fatalf("ListRigBeads on [] = %v, %v", rigs, err)
 	}
 }
@@ -57,7 +57,7 @@ func TestListRigBeadsIsNotTruncated(t *testing.T) {
 	t.Parallel()
 	r := newRecorder(func([]string) reply { return reply{stdout: "[]"} })
 	b := newRecordedBeads(t.TempDir(), r)
-	if _, err := b.ListRigBeads(); err != nil {
+	if _, err := ListRigBeads(b); err != nil {
 		t.Fatal(err)
 	}
 	if argv := strings.Join(r.calls()[0].args, " "); !strings.Contains(argv, "--limit=0") {

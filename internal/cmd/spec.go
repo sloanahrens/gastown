@@ -998,6 +998,15 @@ func specReadyArgs() []string {
 }
 
 // specReadyBoard runs the ready query in one rig.
+//
+// keep-raw (gt-7iwy0.4.10): the ready query stays on the argv path. It is the
+// one dispatcher query whose filters (--unassigned, --exclude-label,
+// --exclude-type, --limit 0) must run server-side against the rig's own
+// database, and Client.ReadyAll answers a different, bookkeeping-only
+// exclusion set; expressing this one typed would push the dispatcher's
+// exclusions into a Go filter that no longer matches what bd ready selects,
+// changing which beads gt spec dispatch picks. RunBdJSONAllowStale pins the
+// rig database and asks bd's stale-read bypass, which no Client method does.
 func specReadyBoard(rigPath string) ([]*beads.Issue, error) {
 	out, err := beads.RunBdJSONAllowStale(rigPath, specReadyArgs()...)
 	if err != nil {

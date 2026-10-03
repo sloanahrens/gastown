@@ -1,9 +1,7 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
@@ -13,7 +11,7 @@ import (
 // bd JSON helpers the convoy commands share. They outlived gt mountain's
 // staging code, which was deleted with it (gt-638go.2, gt-31vjc).
 
-// bdShowResult matches the JSON output of `bd show <id> --json`.
+// bdShowResult is the bead shape the convoy commands read.
 type bdShowResult struct {
 	ID          string   `json:"id"`
 	Title       string   `json:"title"`
@@ -23,66 +21,63 @@ type bdShowResult struct {
 	Description string   `json:"description"`
 }
 
-func runBdJSONForBead(beadID string, args ...string) ([]byte, error) {
-	return beads.RunBdJSON(resolveBeadDir(beadID), args...)
+// storeForBead is the read store for beadID: the bd wrapper pinned to the rig
+// database its prefix routes to, via the same routes.jsonl lookup that names
+// the directory bd would run in.
+func storeForBead(beadID string) *beads.Beads {
+	return beads.NewPinned(resolveBeadDir(beadID))
 }
 
-// bdShow runs `bd show <id> --json` and returns the parsed bead info.
-// Returns error if bd exits non-zero or returns no results.
+// bdShowResultFromIssue reduces an Issue to the fields the convoy commands read.
+func bdShowResultFromIssue(issue *beads.Issue) *bdShowResult {
+	return &bdShowResult{
+		ID:          issue.ID,
+		Title:       issue.Title,
+		Status:      issue.Status,
+		IssueType:   issue.Type,
+		Labels:      issue.Labels,
+		Description: issue.Description,
+	}
+}
+
+// bdShow reads one bead, with the store resolved from its prefix. Returns an
+// error if the bead does not exist.
 func bdShow(beadID string) (*bdShowResult, error) {
-	out, err := runBdJSONForBead(beadID, "show", beadID, "--json")
-	return parseBdShow(beadID, out, err)
-}
-
-func parseBdShow(beadID string, out []byte, err error) (*bdShowResult, error) {
+	issue, err := storeForBead(beadID).Show(beadID)
 	if err != nil {
 		return nil, fmt.Errorf("bd show %s: %w", beadID, err)
 	}
-
-	var results []bdShowResult
-	if err := json.Unmarshal(out, &results); err != nil {
-		return nil, fmt.Errorf("bd show %s: parse JSON: %w (raw: %s)", beadID, err, out)
-	}
-	if len(results) == 0 {
-		return nil, fmt.Errorf("bd show %s: no results", beadID)
-	}
-
-	return &results[0], nil
+	return bdShowResultFromIssue(issue), nil
 }
 
-// bdListChildren runs `bd list --parent=<id> --json` and returns child beads.
-// bd list is CWD-sensitive — it only searches the beads database in the current
-// directory. We resolve the correct .beads directory from the bead's prefix via
-// routes.jsonl so this works regardless of the caller's working directory.
+// bdListChildren returns the direct children of parentID. bd is CWD-sensitive,
+// so the store is resolved from the bead's prefix via routes.jsonl and works
+// regardless of the caller's working directory.
 //
-// When the `--parent` index returns no rows, we fall back to a direct query
-// against the dependencies table (parent-child links) and resolve each child
-// via bdShow. This handles the case (GH #3700) where the index used by
-// `bd list --parent` doesn't see children that were added via `bd dep add ...
-// --type=parent-child`. The deps table is authoritative.
+// When the read returns no children, we fall back to a direct query against
+// the dependencies table (parent-child links) and resolve each child via
+// bdShow. This handles the case (GH #3700) where the children read doesn't see
+// links that were added via `bd dep add ... --type=parent-child`. The deps
+// table is authoritative.
 func bdListChildren(parentID string) ([]bdShowResult, error) {
-	out, err := runBdJSONForBead(parentID, "list", "--parent="+parentID, "--json")
+	issues, err := storeForBead(parentID).Children(parentID)
 	if err != nil {
-		return nil, fmt.Errorf("bd list --parent=%s: %w", parentID, err)
+		return nil, fmt.Errorf("bd children %s: %w", parentID, err)
 	}
-	return childrenOrDepsFallback(parentID, out, bdListChildrenViaDeps)
+	children := make([]bdShowResult, 0, len(issues))
+	for _, issue := range issues {
+		children = append(children, *bdShowResultFromIssue(issue))
+	}
+	return childrenOrDepsFallback(children, parentID, bdListChildrenViaDeps)
 }
 
-// childrenOrDepsFallback parses `bd list --parent` output, consulting viaDeps
-// only when that output lists no children.
-func childrenOrDepsFallback(parentID string, out []byte, viaDeps func(parentID string) ([]bdShowResult, error)) ([]bdShowResult, error) {
-	// Handle empty output (no children) — try the deps-table fallback first.
-	trimmed := strings.TrimSpace(string(out))
-	if trimmed == "" || trimmed == "[]" {
-		return viaDeps(parentID)
+// childrenOrDepsFallback returns children, consulting viaDeps only when the
+// primary read lists no children.
+func childrenOrDepsFallback(children []bdShowResult, parentID string, viaDeps func(parentID string) ([]bdShowResult, error)) ([]bdShowResult, error) {
+	if len(children) > 0 {
+		return children, nil
 	}
-
-	var results []bdShowResult
-	if err := json.Unmarshal(out, &results); err != nil {
-		return nil, fmt.Errorf("bd list --parent=%s: parse JSON: %w (raw: %s)", parentID, err, out)
-	}
-
-	return results, nil
+	return viaDeps(parentID)
 }
 
 // bdListChildrenViaDeps resolves children by querying the dependencies table

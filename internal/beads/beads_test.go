@@ -783,7 +783,7 @@ func TestDeleteBeadsUseSupportedBdDeleteFlags(t *testing.T) {
 		},
 		{
 			name:   "rig",
-			delete: func() error { return b.DeleteRigBead("gastown") },
+			delete: func() error { return DeleteRigBead(b, "gastown") },
 			want:   "delete gt-rig-gastown --force",
 		},
 	}

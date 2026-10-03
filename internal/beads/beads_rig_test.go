@@ -264,7 +264,7 @@ exit 0
 	}
 	ResetEnsuredDirs()
 
-	issue, err := NewIsolated(workDir).CreateRigBead("gastown", &RigFields{Prefix: "gt", State: RigStateActive})
+	issue, err := CreateRigBead(NewIsolated(workDir), "gastown", &RigFields{Prefix: "gt", State: RigStateActive})
 	if err != nil {
 		t.Fatalf("CreateRigBead: %v", err)
 	}
@@ -324,7 +324,7 @@ exit 0
 	}
 	ResetEnsuredDirs()
 
-	_, err := NewIsolated(workDir).CreateRigBead("gastown", &RigFields{Prefix: "gt"})
+	_, err := CreateRigBead(NewIsolated(workDir), "gastown", &RigFields{Prefix: "gt"})
 	if err == nil {
 		t.Fatal("expected CreateRigBead to fail when types.infra verification fails")
 	}
@@ -397,7 +397,7 @@ exit 0
 	}
 	ResetEnsuredDirs()
 
-	issue, err := NewIsolated(workDir).CreateRigBead("beads", &RigFields{Prefix: "be", State: RigStateActive})
+	issue, err := CreateRigBead(NewIsolated(workDir), "beads", &RigFields{Prefix: "be", State: RigStateActive})
 	if err != nil {
 		t.Fatalf("CreateRigBead should recover from stale type sentinel, got: %v", err)
 	}
