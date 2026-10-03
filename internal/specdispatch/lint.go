@@ -178,6 +178,10 @@ type Spec struct {
 	// Ephemeral marks a wisp: an ephemeral bead (a molecule, a merge
 	// request) that bd keeps out of the issues table. No wisp is work.
 	Ephemeral bool
+	// Children are the bead's direct children, filled by the caller from bd's
+	// parent-child edges. The container rule reads them through OpenChildHold;
+	// nothing in this package queries (gt-gektq).
+	Children []Child
 }
 
 // HasLabel reports whether the spec carries label, ignoring case and space.
