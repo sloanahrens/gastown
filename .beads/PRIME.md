@@ -29,6 +29,30 @@ This is physics, not politeness. Gas Town is a steam engine - you are a piston.
 - `gt mail inbox` - Check for messages
 - `bd ready` - Find available work (no blockers)
 
+## Filing a work bead (shape it first)
+
+The spec dispatcher only slots a bead that passes the shape lint. An unshaped
+bead is skipped (the daemon comments `SHAPE: ...` on it), so no polecat ever
+takes it. Every work bead, whether task, bug or feature, needs these in its
+description:
+
+```
+## Goal          what changes and why, in two or three sentences
+## Constraints   files and packages to touch, rules to keep, what must not change
+## Out of scope  what this bead must not do
+## Gate          the command that proves it (usually `make gate`)
+## Size          one worker, one landing
+## Acceptance    1-6 checkbox items (3-6 preferred), each checkable
+```
+
+After `bd create`, run `gt spec lint <id>` before you walk away. Exit 0 means
+the dispatcher would slot it. Exit 1 means a field is missing, and the first
+missing one is named. Exit 2 means it needs planning: more than six acceptance
+items, or a Size that says planning. Fix it and lint again.
+
+A bead you will land yourself needs no shape. One you want a polecat to build
+does. `gt prime --step 3 --formula mol-polecat-work` prints the shape in full.
+
 ## Session Close Protocol
 
 Before saying "done":
