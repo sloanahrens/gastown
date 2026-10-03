@@ -454,7 +454,7 @@ func (m *Manager) CheckDoltServerCapacity() error {
 	return nil
 }
 
-// createAgentBeadWithRetry wraps CreateOrReopenAgentBead with retry logic.
+// createAgentBeadWithRetry wraps beads.CreateOrReopenAgentBead with retry logic.
 // For transient Dolt failures (server exists but write fails), retries with backoff
 // and fails hard — a polecat without an agent bead is untrackable.
 // If beads is not configured (no .beads directory), warns and returns nil
@@ -464,7 +464,7 @@ func (m *Manager) CheckDoltServerCapacity() error {
 func (m *Manager) createAgentBeadWithRetry(agentID string, fields *beads.AgentFields) error {
 	var lastErr error
 	for attempt := 1; attempt <= doltMaxRetries; attempt++ {
-		_, err := m.beads.CreateOrReopenAgentBead(agentID, agentID, fields)
+		_, err := beads.CreateOrReopenAgentBead(m.agentBeads(), agentID, agentID, fields)
 		if err == nil {
 			return nil
 		}
@@ -497,7 +497,7 @@ func (m *Manager) agentBeads() beads.Client {
 }
 
 func (m *Manager) resetAgentBeadForReuse(agentID, reason string) error {
-	return m.beads.ResetAgentBeadForReuse(agentID, reason)
+	return beads.ResetAgentBeadForReuse(m.agentBeads(), agentID, reason)
 }
 
 // SetAgentStateWithRetry wraps SetAgentState with retry logic.

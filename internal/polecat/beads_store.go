@@ -3,10 +3,9 @@ package polecat
 import "github.com/steveyegge/gastown/internal/beads"
 
 // polecatBeads is the bead store the Manager reads and writes: the work-bead
-// operations of beads.Client, the merge-request and reassignment helpers, and
-// the two agent-bead writes no free function covers yet. The bd-backed store
-// implements it and so does the test fake; the construction in
-// openPolecatBeads is what pins the two.
+// operations of beads.Client plus the merge-request and reassignment helpers.
+// The bd-backed store implements it and so does the test fake; the
+// construction in openPolecatBeads is what pins the two.
 type polecatBeads interface {
 	Show(id string) (*beads.Issue, error)
 	List(opts beads.ListOptions) ([]*beads.Issue, error)
@@ -17,13 +16,6 @@ type polecatBeads interface {
 	ReleaseIfAssignee(id, expected string) (released bool, err error)
 	RecordReassignment(id, from, to, requester string, branches []string) error
 	FindMRForBranchAny(branch string) (*beads.Issue, error)
-
-	// The agent-bead writes that still need the concrete store: reopening a
-	// closed bead goes through bd's `reopen`, which no Client method covers.
-	// Both re-route the ID and take the agent-bead lock inside the store, so
-	// which wrapper they are called on does not change where they land.
-	CreateOrReopenAgentBead(id, title string, fields *beads.AgentFields) (*beads.Issue, error)
-	ResetAgentBeadForReuse(id, reason string) error
 }
 
 // polecatStore is what an injected opener hands back: a database that is both

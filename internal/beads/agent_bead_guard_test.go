@@ -15,9 +15,11 @@ import (
 // agentBeadIdentRE matches expressions that carry an agent-bead ID.
 var agentBeadIdentRE = regexp.MustCompile(`(?i)agentbead|agentid\b|witnessbeadid|refinerybeadid|polecatbeadid|crewbeadid`)
 
-// agentBeadHelpers are the Beads methods that must only be called on the store
-// they route from — the agent-scoped or pinned wrapper, or a free function's
-// Client — never chained directly onto beads.New*().
+// agentBeadHelpers are the agent-bead helper names that must only be called on
+// the store they route from — the agent-scoped or pinned wrapper, or a free
+// function's Client — never chained directly onto beads.New*(). The two write
+// helpers are free functions now (gt-7iwy0.4.13); their names stay listed so the
+// guard still fires if a same-named method ever comes back.
 var agentBeadHelpers = map[string]bool{
 	"UpdateAgentCleanupStatus":     true,
 	"UpdateAgentDescriptionFields": true, "CreateAgentBead": true,

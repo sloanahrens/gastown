@@ -331,9 +331,79 @@ func createAgentBead(c Client, id, title string, fields *AgentFields) (*Issue, e
 // back to the status update the store itself falls back to when reopen fails.
 func CreateOrReopenAgentBead(c Client, id, title string, fields *AgentFields) (*Issue, error) {
 	if b, ok := c.(*Beads); ok {
-		return b.CreateOrReopenAgentBead(id, title, fields)
+		return storeCreateOrReopenAgentBead(b, id, title, fields)
 	}
 	return createOrReopenAgentBead(c, id, title, fields)
+}
+
+// storeCreateOrReopenAgentBead is CreateOrReopenAgentBead's *Beads path: a
+// polecat nuked and re-spawned under the same name leaves a bead under the ID,
+// so a refused create updates it instead of failing on the unique constraint.
+// Its create is CreateAgentBead, which lands in the ID's canonical
+// (prefix-routed) database and configures that database's custom types; its
+// reopen is bd's own, which the Client path has no method for, so a legacy
+// closed bead comes back open before the update. Both the reopen and the
+// update run under the store's agent-bead lock (gt-joazs).
+func storeCreateOrReopenAgentBead(b *Beads, id, title string, fields *AgentFields) (*Issue, error) {
+	// First try to create the bead (no lock needed - create is atomic)
+	issue, err := b.CreateAgentBead(id, title, fields)
+	if err == nil {
+		return issue, nil
+	}
+
+	// Create failed - need to do Show→Reopen→Update which requires locking
+	// to prevent concurrent modifications (e.g. nuke clearing fields while
+	// spawn is updating them). See gt-joazs.
+	fl, lockErr := b.lockAgentBead(id)
+	if lockErr != nil {
+		return nil, fmt.Errorf("locking agent bead %s: %w", id, lockErr)
+	}
+	defer func() { unlockAgentBead(fl) }()
+
+	// Create failed - check if bead already exists (handles both open and closed states)
+	createErr := err
+
+	// Dual-scope: the bead may live in its canonical (rig-local) database or,
+	// for legacy agents, in the town database (gt-8we).
+	target := b.resolveAgentBead(id)
+
+	existing, showErr := target.Show(id)
+	if showErr != nil {
+		// Bead doesn't exist (or can't be read) - return original create error
+		return nil, createErr
+	}
+
+	// If bead is closed, reopen it first
+	if existing.Status == "closed" {
+		if _, reopenErr := target.run("reopen", id, "--reason=re-spawning agent"); reopenErr != nil {
+			// Reopen failed - try setting status to open via update as fallback
+			// This handles Dolt backends where bd reopen may not work
+			openStatus := "open"
+			if updateErr := target.Update(id, UpdateOptions{Status: &openStatus}); updateErr != nil {
+				return nil, fmt.Errorf("could not reopen agent bead %s (reopen: %v, update: %v, original: %v)",
+					id, reopenErr, updateErr, createErr)
+			}
+		}
+	}
+
+	// Update the bead with new fields and ensure gt:agent label is set.
+	// Agent beads use type=task (a valid built-in type) and are identified
+	// by the gt:agent label, not by type (see IsAgentBead).
+	description := FormatAgentDescription(title, fields)
+	updateOpts := UpdateOptions{
+		Title:       &title,
+		Description: &description,
+		SetLabels:   labelsForAgentBeadReuse(existing.Labels),
+	}
+	if err := target.Update(id, updateOpts); err != nil {
+		return nil, fmt.Errorf("updating agent bead: %w", err)
+	}
+
+	// Note: role slot no longer set - role definitions are config-based
+	// Note: hook_bead slot no longer set - bd slot removed in v0.62 (hq-l6mm5)
+
+	// Return the updated bead
+	return target.Show(id)
 }
 
 // createOrReopenAgentBead is CreateOrReopenAgentBead's Client path: create,
@@ -383,7 +453,7 @@ func createOrReopenAgentBead(c Client, id, title string, fields *AgentFields) (*
 // the ID to its canonical database; any other Client is one database.
 func ResetAgentBeadForReuse(c Client, id, reason string) error {
 	if b, ok := c.(*Beads); ok {
-		return b.ResetAgentBeadForReuse(id, reason)
+		return storeResetAgentBeadForReuse(b, id)
 	}
 	target := ForAgentBead(c)
 	release, err := lockAgentBeadFor(target, id)
@@ -391,6 +461,25 @@ func ResetAgentBeadForReuse(c Client, id, reason string) error {
 		return err
 	}
 	defer release()
+	return resetAgentBeadForReuse(target, id)
+}
+
+// storeResetAgentBeadForReuse is ResetAgentBeadForReuse's *Beads path: the ID
+// routes to its canonical database and the lock is the store's own. The
+// read-modify-write is shared with the Client path (resetAgentBeadForReuse).
+func storeResetAgentBeadForReuse(b *Beads, id string) error {
+	// Lock the agent bead to prevent concurrent read-modify-write races.
+	// Without this, a concurrent CreateOrReopenAgentBead could overwrite
+	// the nuked state we're about to set. See gt-joazs.
+	fl, lockErr := b.lockAgentBead(id)
+	if lockErr != nil {
+		return fmt.Errorf("locking agent bead %s: %w", id, lockErr)
+	}
+	defer func() { unlockAgentBead(fl) }()
+
+	// Dual-scope: rig-local (canonical) first, town fallback for legacy
+	// agent beads (gt-8we).
+	target := b.resolveAgentBead(id)
 	return resetAgentBeadForReuse(target, id)
 }
 

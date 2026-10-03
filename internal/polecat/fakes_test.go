@@ -20,9 +20,9 @@ import (
 )
 
 // polecatDB is one beads database as the Manager sees it: a beadsfake
-// database plus the agent-bead and merge-request helpers polecatBeads adds,
-// each reduced to the Client operations *beads.Beads performs. It records the
-// sites the manager opened it for and every write.
+// database plus the merge-request helper polecatBeads adds, reduced to the
+// Client operations *beads.Beads performs. It records the sites the manager
+// opened it for and every write.
 type polecatDB struct {
 	*beadsfake.Fake
 
@@ -193,42 +193,33 @@ func (db *polecatDB) findMR(branch string, skipClosed bool) (*beads.Issue, error
 	return nil, nil
 }
 
+// Create is where the agent-bead free functions' creates land: they run over
+// Client.Create, so a store that cannot write reports it here.
+func (db *polecatDB) Create(opts beads.CreateOptions) (*beads.Issue, error) {
+	if db.err != nil {
+		return nil, db.err
+	}
+	if db.createErr != nil && isAgentBeadCreate(opts) {
+		return nil, db.createErr
+	}
+	return db.Fake.Create(opts)
+}
+
+// isAgentBeadCreate reports whether opts creates an agent bead: the gt:agent
+// label is what identifies one (see beads.IsAgentBead).
+func isAgentBeadCreate(opts beads.CreateOptions) bool {
+	for _, label := range opts.Labels {
+		if label == "gt:agent" {
+			return true
+		}
+	}
+	return false
+}
+
 func (db *polecatDB) isHidden(id string) bool {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	return db.hidden[id]
-}
-
-func (db *polecatDB) CreateOrReopenAgentBead(id, title string, fields *beads.AgentFields) (*beads.Issue, error) {
-	if db.err != nil {
-		return nil, db.err
-	}
-	if db.createErr != nil {
-		return nil, db.createErr
-	}
-	description := beads.FormatAgentDescription(title, fields)
-	if _, err := db.Fake.Show(id); err != nil {
-		return db.Fake.Create(beads.CreateOptions{ID: id, Title: title, Description: description, Labels: []string{"gt:agent"}, Priority: -1})
-	}
-	open := string(beads.StatusOpen)
-	if err := db.Fake.Update(id, beads.UpdateOptions{Title: &title, Description: &description, Status: &open, SetLabels: []string{"gt:agent"}}); err != nil {
-		return nil, err
-	}
-	db.mu.Lock()
-	delete(db.hidden, id)
-	db.mu.Unlock()
-	return db.Fake.Show(id)
-}
-
-func (db *polecatDB) ResetAgentBeadForReuse(id, reason string) error {
-	issue, err := db.Show(id)
-	if err != nil {
-		return err
-	}
-	fields := beads.ParseAgentFields(issue.Description)
-	*fields = beads.AgentFields{RoleType: fields.RoleType, Rig: fields.Rig, AgentState: string(beads.AgentStateNuked)}
-	description := beads.FormatAgentDescription(issue.Title, fields)
-	return db.Update(id, beads.UpdateOptions{Description: &description})
 }
 
 // setAgent writes agent bead id, creating it when missing: edit changes the
