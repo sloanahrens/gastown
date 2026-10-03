@@ -78,6 +78,15 @@ import (
 // against the deletion — the other containment is vacuous for such a change — so
 // the branch was refused for doing what its bead asked (gt-gas9g). A change with
 // nothing to restore now has to have been removed in full.
+//
+// A seventh shape is the sixth's other edge. A branch that rewrites an added
+// line in place — the same line, its text edited, as a docs table row reworded
+// in its cell — removes exactly the line the change added, so the sixth shape's
+// equality holds and the rewrite reads as a revert. Nothing was taken back; the
+// line is there, updated (gt-qw70y). A pure addition whose lines the branch
+// replaces one-for-one with modifications of themselves has been superseded,
+// and only a removal the branch leaves nothing comparable in place of takes the
+// change back.
 
 // revertScanCommits bounds how far back through target's history the check
 // looks. A candidate can only revert commits merged after its checkout was
@@ -315,12 +324,111 @@ func changeIsInvertedBy(g RevertReader, preImage, postImage, base, head string) 
 	// to restore, the removal must be the whole of the addition: a revert takes
 	// back everything the commit put there, while a superseding edit keeps the
 	// lines its replacement also needs — the warning, the closing brace — and
-	// rewrites the ones it replaces.
+	// rewrites the ones it replaces. The replacement that is an edit OF the line
+	// it replaces removes that line in full, so it meets the equality too: a line
+	// the branch wrote that reads as a removed one rewritten is that line
+	// surviving rather than taken back (gt-qw70y).
 	if len(changeRemoved) == 0 {
-		return multisetContains(branchRemoved, changeAdded) && multisetContains(changeAdded, branchRemoved), nil
+		if !multisetContains(branchRemoved, changeAdded) || !multisetContains(changeAdded, branchRemoved) {
+			return false, nil
+		}
+		// The removal is the whole of the addition, but it may still not be a
+		// removal: a line edited in place leaves the branch with exactly the line
+		// the change added taken out and a modification of it written back, which
+		// is the same reading (gt-qw70y). What separates the two is the branch's
+		// own additions — a line it wrote that reads as a removed line rewritten
+		// is that line surviving, not undone.
+		return !rewritesEveryLine(branchRemoved, branchAdded), nil
 	}
 	return multisetContains(branchRemoved, changeAdded) && multisetContains(branchAdded, changeRemoved), nil
 }
+
+// rewritesEveryLine reports whether the branch rewrote the lines it removed
+// rather than dropping them: every removed line is paired with a line of its
+// own among the additions that reads as that line edited in place.
+//
+// The pairing is one line to one line, because a line left unpaired is a line
+// the branch took back however much it wrote beside it. Nothing pairs against
+// an empty side, so a branch whose own change only deleted the lines is a
+// removal and not a rewrite of them.
+func rewritesEveryLine(removed, added map[string]int) bool {
+	if countLines(removed) == 0 || countLines(added) == 0 {
+		return false
+	}
+	spare := expandLines(added)
+	for _, line := range expandLines(removed) {
+		rewrite := indexOfRewrite(spare, line)
+		if rewrite < 0 {
+			return false
+		}
+		spare = append(spare[:rewrite], spare[rewrite+1:]...)
+	}
+	return true
+}
+
+// expandLines lists a line multiset's lines, in a fixed order so which line
+// pairs with which comes out the same on every run.
+func expandLines(lines map[string]int) []string {
+	expanded := make([]string, 0, countLines(lines))
+	for line, count := range lines {
+		for i := 0; i < count; i++ {
+			expanded = append(expanded, line)
+		}
+	}
+	sort.Strings(expanded)
+	return expanded
+}
+
+// indexOfRewrite returns the index of the first line in candidates that line
+// reads as a rewrite of, or -1 when none does.
+func indexOfRewrite(candidates []string, line string) int {
+	for i, candidate := range candidates {
+		if isRewrite(candidate, line) {
+			return i
+		}
+	}
+	return -1
+}
+
+// isRewrite reports whether one line reads as the other edited in place: at
+// least half of the longer line's fields, and at least minRewriteFields of
+// them, are fields the two lines hold in common. Half the larger side is the
+// threshold git's rename detection applies and changeRenamed follows, and the
+// two-name floor is what makes a line substantial below.
+//
+// Both floors refuse more than they excuse. A branch that recasts a line past
+// half its fields, or that writes a line sharing only its keyword with the line
+// it dropped (return err against return nil), is read as reverting it — an
+// override to grant, where the other reading costs the merged fix (gt-s5eou).
+func isRewrite(a, b string) bool {
+	fieldsA, fieldsB := strings.Fields(a), strings.Fields(b)
+	common := commonFields(fieldsA, fieldsB)
+	return common >= minRewriteFields && 2*common >= max(len(fieldsA), len(fieldsB))
+}
+
+// commonFields counts the fields two lines hold in common, as a multiset: a
+// field both lines hold counts as many times as the smaller of the two counts.
+func commonFields(a, b []string) int {
+	spare := make(map[string]int, len(a))
+	for _, field := range a {
+		spare[field]++
+	}
+	common := 0
+	for _, field := range b {
+		if spare[field] > 0 {
+			spare[field]--
+			common++
+		}
+	}
+	return common
+}
+
+// minRewriteFields is how many fields two lines must hold in common before one
+// reads as the other rewritten. Two is the point where a line names something
+// of its own; below it the shared fields are a keyword and a bare argument
+// (return nil, warnf(err)), which a branch's own edit shares with the line it
+// dropped without rewriting it.
+const minRewriteFields = 2
 
 // nonBlankLines drops whitespace-only lines from one side of a diff. squashLine
 // reduces a line to its fields, so a line of spaces leaves with the "" a blank

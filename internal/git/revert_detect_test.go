@@ -140,3 +140,28 @@ func TestSubstantialLine(t *testing.T) {
 		}
 	}
 }
+
+// The two floors that separate a line rewritten in place from a line dropped
+// beside its replacement: half the longer line's fields in common, and two of
+// them named.
+func TestIsRewrite(t *testing.T) {
+	t.Parallel()
+	const row = "| `make presubmit` | `make lint`, then `go build ./...` | never | the cheap first look (gt-ssyxd) |"
+	for _, tt := range []struct {
+		name, was, now string
+		want           bool
+	}{
+		{"a row reworded inside its cell", row,
+			"| `make presubmit` | `make lint`, then `go build ./...` | never | the cheap first look, before the push (gt-ssyxd) |", true},
+		{"a line renamed in place", "\tif err := opts.PreloadIssues(labels, statuses); err != nil {",
+			"\tif err := opts.PreloadBeads(labels, statuses); err != nil {", true},
+		{"a line sharing only its keyword", "\treturn nil", "\treturn err", false},
+		{"a row a table's scaffolding alone makes similar", row,
+			"| `make bench` | `go test -bench=. ./...` | weekly | nightly bench numbers (gt-bench) |", false},
+		{"a fragment of a long line", row, "\tif err := opts.PreloadIssues(labels); err != nil {", false},
+	} {
+		if got := isRewrite(tt.was, tt.now); got != tt.want {
+			t.Errorf("isRewrite: %s = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}
