@@ -6,45 +6,107 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/dispatch"
 )
 
 func TestEligible(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		edit func(*Spec)
-		ok   bool
-		why  string
+		// reserved is the labels the tick's seats reserve; nil is a tick with
+		// no reserved seat, which is where the shared rule's hold on
+		// needs-pro stands.
+		reserved []string
+		ok       bool
+		why      string
 	}{
-		{func(s *Spec) {}, true, ""},
+		{func(s *Spec) {}, nil, true, ""},
 		// The label spec and type feature are retired: neither admits or keeps
 		// out a candidate (gt-mmsr2). The type whitelist is what admits the
 		// feature bead, not the retired label.
-		{func(s *Spec) { s.Labels = nil }, true, ""},
-		{func(s *Spec) { s.Type = "feature" }, true, ""},
-		{func(s *Spec) { s.Type = "bug" }, true, ""},
-		{func(s *Spec) { s.Type = "Feature" }, true, ""},
-		{func(s *Spec) { s.Status = "in_progress" }, false, "status in_progress"},
-		{func(s *Spec) { s.Status = "deferred" }, false, "deferred"},
-		{func(s *Spec) { s.Assignee = "gastown/polecats/ruby" }, false, "assigned"},
-		{func(s *Spec) { s.Type = "epic" }, false, "not a work bead: type epic"},
-		{func(s *Spec) { s.Type = "wisp" }, false, "not a work bead: type wisp"},
-		{func(s *Spec) { s.Type = "molecule"; s.Ephemeral = true }, false, "not a work bead: wisp"},
-		{func(s *Spec) { s.Type = "chore" }, false, "type chore"},
-		{func(s *Spec) { s.Type = "docs" }, false, "type docs"},
-		{func(s *Spec) { s.Labels = []string{"gt:agent"} }, false, "not a work bead: label gt:agent"},
-		{func(s *Spec) { s.Labels = append(s.Labels, "gt:ready-to-land") }, false, "label gt:ready-to-land"},
-		{func(s *Spec) { s.Labels = append(s.Labels, "needs-human") }, false, "label needs-human"},
-		{func(s *Spec) { s.Labels = append(s.Labels, "Needs-Mayor-Review") }, false, "label needs-mayor-review"},
-		{func(s *Spec) { s.Priority = 2 }, true, ""},
-		{func(s *Spec) { s.Priority = 3 }, false, "priority P3 outside the ceiling P2"},
-		{func(s *Spec) { s.Priority = -1 }, false, "priority P-1 outside the ceiling P2"},
+		{func(s *Spec) { s.Labels = nil }, nil, true, ""},
+		{func(s *Spec) { s.Type = "feature" }, nil, true, ""},
+		{func(s *Spec) { s.Type = "bug" }, nil, true, ""},
+		{func(s *Spec) { s.Type = "Feature" }, nil, true, ""},
+		{func(s *Spec) { s.Status = "in_progress" }, nil, false, "status in_progress"},
+		{func(s *Spec) { s.Status = "deferred" }, nil, false, "deferred"},
+		{func(s *Spec) { s.Assignee = "gastown/polecats/ruby" }, nil, false, "assigned"},
+		{func(s *Spec) { s.Type = "epic" }, nil, false, "not a work bead: type epic"},
+		{func(s *Spec) { s.Type = "wisp" }, nil, false, "not a work bead: type wisp"},
+		{func(s *Spec) { s.Type = "molecule"; s.Ephemeral = true }, nil, false, "not a work bead: wisp"},
+		{func(s *Spec) { s.Type = "chore" }, nil, false, "type chore"},
+		{func(s *Spec) { s.Type = "docs" }, nil, false, "type docs"},
+		{func(s *Spec) { s.Labels = []string{"gt:agent"} }, nil, false, "not a work bead: label gt:agent"},
+		{func(s *Spec) { s.Labels = append(s.Labels, "gt:ready-to-land") }, nil, false, "label gt:ready-to-land"},
+		{func(s *Spec) { s.Labels = append(s.Labels, "needs-human") }, nil, false, "label needs-human"},
+		{func(s *Spec) { s.Labels = append(s.Labels, "Needs-Mayor-Review") }, nil, false, "label needs-mayor-review"},
+		// The shared hold rule (dispatch.DispatchHoldFields). gt:needs-human is
+		// the spelling internal/land writes and the one excludedLabels never
+		// carried, so the bare "needs-human" case above does not cover it
+		// (gt-lxxo4).
+		{func(s *Spec) { s.Labels = append(s.Labels, "gt:needs-human") }, nil, false, "label gt:needs-human"},
+		// needs-pro is the shared rule's hold, but this dispatcher reserves a
+		// seat for it (polecat_pool.pro_label): with the seat the bead is
+		// routed, with none the hold stands (gt-lxxo4).
+		{func(s *Spec) { s.Labels = append(s.Labels, "needs-pro") }, nil, false, "label needs-pro"},
+		{func(s *Spec) { s.Labels = append(s.Labels, "needs-pro") }, []string{"needs-pro"}, true, ""},
+		// The operator's mark on a bead nobody is assigned: the sling guard
+		// refuses it late; the dispatcher must skip it here (gt-21pl0). A
+		// reserved seat does not lift it.
+		{func(s *Spec) { s.Labels = append(s.Labels, "operator") }, nil, false, "label operator"},
+		{func(s *Spec) {
+			s.Labels = append(s.Labels, "operator", "needs-pro")
+		}, []string{"needs-pro"}, false, "label operator"},
+		// A ruling in prose is a hold wherever it is written (gt-tq6l). The
+		// marker has to begin the line, decoration aside.
+		{func(s *Spec) { s.Design = "Some context.\n\nMAYOR DESIGN DECISION: park it." }, nil, false, "MAYOR DESIGN DECISION in design"},
+		{func(s *Spec) { s.Notes = "- do not redispatch" }, nil, false, "do not redispatch in notes"},
+		// A note that only quotes the wording back is not a ruling, and an
+		// unassigned bead with no marker stays the dispatcher's (the control
+		// case is the empty edit at the top of the table).
+		{func(s *Spec) { s.Notes = "this note explains the do-not-redispatch marker" }, nil, true, ""},
+		{func(s *Spec) { s.Priority = 2 }, nil, true, ""},
+		{func(s *Spec) { s.Priority = 3 }, nil, false, "priority P3 outside the ceiling P2"},
+		{func(s *Spec) { s.Priority = -1 }, nil, false, "priority P-1 outside the ceiling P2"},
 	}
 	for i, tc := range cases {
 		s := goodSpec()
 		tc.edit(&s)
-		ok, why := Eligible(s, 2)
+		ok, why := Eligible(s, 2, tc.reserved)
 		if ok != tc.ok || !strings.Contains(why, tc.why) {
 			t.Errorf("case %d: Eligible = %v %q, want %v %q", i, ok, why, tc.ok, tc.why)
+		}
+	}
+}
+
+// The dispatcher holds exactly what the shared hold rule holds. Each marker
+// below is asserted on a bead the dispatcher would otherwise take, and the
+// shared rule has to confirm the hold before Eligible's refusal counts — so a
+// marker the rule stops asserting, or a rule the dispatcher stops reading,
+// fails here rather than silently re-slinging a parked bead (gt-lxxo4).
+func TestEligibleFollowsTheSharedHoldRule(t *testing.T) {
+	t.Parallel()
+	markers := []struct {
+		name string
+		edit func(*Spec)
+	}{
+		{"gt:needs-human label", func(s *Spec) { s.Labels = []string{"gt:needs-human"} }},
+		{"bare needs-human label", func(s *Spec) { s.Labels = []string{"needs-human"} }},
+		{"needs-mayor-review label", func(s *Spec) { s.Labels = []string{"needs-mayor-review"} }},
+		{"operator label", func(s *Spec) { s.Labels = []string{"operator"} }},
+		{"pinned status", func(s *Spec) { s.Status = "pinned" }},
+		{"design ruling", func(s *Spec) { s.Design = "MAYOR DESIGN DECISION: park it." }},
+		{"notes ruling", func(s *Spec) { s.Notes = "do not redispatch" }},
+	}
+	for _, tc := range markers {
+		s := goodSpec()
+		tc.edit(&s)
+		if want := dispatch.DispatchHoldFields(s.Status, s.Labels, s.Assignee, s.Design, s.Notes); want == "" {
+			t.Fatalf("%s: the shared rule asserts no hold; this test is stale", tc.name)
+		}
+		if ok, why := Eligible(s, 2, nil); ok {
+			t.Errorf("%s: Eligible = true (%q), want a hold", tc.name, why)
 		}
 	}
 }
@@ -55,11 +117,63 @@ func TestEligibleHonorsTheConfiguredCeiling(t *testing.T) {
 	t.Parallel()
 	s := goodSpec()
 	s.Priority = 4
-	if ok, why := Eligible(s, 2); ok {
+	if ok, why := Eligible(s, 2, nil); ok {
 		t.Errorf("P4 bead eligible at the default ceiling: %q", why)
 	}
-	if ok, why := Eligible(s, 4); !ok {
+	if ok, why := Eligible(s, 4, nil); !ok {
 		t.Errorf("P4 bead refused at a P4 ceiling: %q", why)
+	}
+}
+
+// A reserved label is routed, not held: the seat that reserves it takes it, so
+// the dispatcher must leave it in the candidate set. The exception is per
+// label, not wholesale — a bead wearing a reserved label and a hold marker is
+// still held.
+func TestEligibleRoutesReservedLabelsToTheirSeat(t *testing.T) {
+	t.Parallel()
+	reserved := []string{"needs-pro", "needs-fast"}
+
+	routed := goodSpec()
+	routed.Labels = []string{"Needs-Pro"}
+	if ok, why := Eligible(routed, 2, reserved); !ok {
+		t.Errorf("needs-pro bead held with a pro seat configured: %q", why)
+	}
+	// The reservation matches however it was typed, as Seat.takes matches it.
+	if ok, why := Eligible(routed, 2, []string{"NEEDS-PRO"}); !ok {
+		t.Errorf("case-insensitive reservation not matched: %q", why)
+	}
+
+	unseated := goodSpec()
+	unseated.Labels = []string{"needs-pro"}
+	if ok, why := Eligible(unseated, 2, nil); ok {
+		t.Errorf("needs-pro bead eligible with no seat reserving it: %q", why)
+	}
+
+	held := goodSpec()
+	held.Labels = []string{"needs-pro", "gt:needs-human"}
+	if ok, why := Eligible(held, 2, reserved); ok {
+		t.Errorf("a hold marker was lifted by a reserved seat: %q", why)
+	}
+}
+
+// ReservedLabels is the seat selectors Eligible is handed, read from the
+// budget so the two cannot drift: a seat added later reserves its label with no
+// second list to update (gt-lxxo4).
+func TestReservedLabelsFollowsTheSeats(t *testing.T) {
+	t.Parallel()
+	var b Budget
+	if got := b.ReservedLabels(); got != nil {
+		t.Errorf("no seats = %v, want none", got)
+	}
+	b.Seats = []Seat{
+		{Agent: "pool", Cap: 2},
+		{Agent: "pro", Cap: 1, Label: "needs-pro"},
+		{Agent: "pro-copy", Cap: 1, Label: "Needs-Pro"},
+		{Agent: "fast", Cap: 1, Label: "needs-fast"},
+	}
+	got := b.ReservedLabels()
+	if len(got) != 2 || got[0] != "needs-pro" || got[1] != "needs-fast" {
+		t.Errorf("ReservedLabels = %v, want [needs-pro needs-fast]", got)
 	}
 }
 

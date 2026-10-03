@@ -55,6 +55,9 @@ type fakeSpecTown struct {
 	notes          map[string][]string
 	labels         map[string][]string
 	sleeps         int
+	// seats overrides the tick's budget seats; nil is the default pool, which
+	// reserves no label and so holds a needs-pro bead (gt-lxxo4).
+	seats []specdispatch.Seat
 }
 
 // specTestNow is the tick clock every dispatch test runs at.
@@ -71,6 +74,14 @@ func newFakeSpecTown(specs ...specdispatch.Spec) *fakeSpecTown {
 }
 
 func (f *fakeSpecTown) env() specDispatchEnv {
+	seats := f.seats
+	if seats == nil {
+		seats = []specdispatch.Seat{
+			{Agent: "deepseek-flash", Cap: 2},
+			{Agent: "claude-sonnet", Cap: 2},
+		}
+	}
+	budget := specdispatch.Budget{Seats: seats}
 	return specDispatchEnv{
 		Hold: func() string { return f.hold },
 		Candidates: func() specBoardRead {
@@ -81,7 +92,7 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 					labeled++
 					continue
 				}
-				if ok, _ := specdispatch.Eligible(s, 2); ok {
+				if ok, _ := specdispatch.Eligible(s, 2, budget.ReservedLabels()); ok {
 					list = append(list, s)
 				}
 			}
@@ -148,11 +159,8 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 		Sleep:    func(time.Duration) { f.sleeps++ },
 		Now:      func() time.Time { return specTestNow },
 		Template: specdispatch.Template{Sections: specdispatch.DefaultSections, Source: "built-in"},
-		Budget: specdispatch.Budget{Seats: []specdispatch.Seat{
-			{Agent: "deepseek-flash", Cap: 2},
-			{Agent: "claude-sonnet", Cap: 2},
-		}},
-		PerTick: 1,
+		Budget:   budget,
+		PerTick:  1,
 		// The strict gate, so a test that cares about a refusal says so with
 		// its fixture rather than by opting out of the town's default (warn).
 		MaxPriority: 2,
@@ -296,6 +304,83 @@ func TestSpecDispatchUnshapedHoldSpendsNoSeat(t *testing.T) {
 	if len(r.Dispatched) != 1 || r.Dispatched[0].Bead != "gt-good" {
 		t.Fatalf("dispatched = %+v, want the shaped bead behind the hold", r.Dispatched)
 	}
+}
+
+// A bead parked for a person or by a ruling never reaches the sling: the
+// dispatcher reads the shared hold rule over the fresh bead and holds it out of
+// the candidate set, so no tick spends a sling the guard then refuses
+// (gt-lxxo4). The intake is a filter, so the drop is silent — the assertion
+// that matters is that no attempt was made.
+func TestSpecDispatchHoldsParkedBeads(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		edit func(*specdispatch.Spec)
+	}{
+		// The spelling the landing worker writes, and the one the ready args'
+		// exclude list never carried.
+		{"gt:needs-human", func(s *specdispatch.Spec) { s.Labels = []string{"gt:needs-human"} }},
+		{"operator", func(s *specdispatch.Spec) { s.Labels = []string{"operator"} }},
+		{"design ruling", func(s *specdispatch.Spec) { s.Design = "MAYOR DESIGN DECISION: park it." }},
+		{"notes ruling", func(s *specdispatch.Spec) { s.Notes = "do not redispatch" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z")
+			tc.edit(&s)
+			f := newFakeSpecTown(s)
+			r := runSpecDispatchCycle(f.env())
+			if len(f.slung) != 0 || len(r.Dispatched) != 0 || len(r.Skipped) != 0 {
+				t.Fatalf("a parked bead was taken: slung %v skipped %+v report %+v", f.slung, r.Skipped, r)
+			}
+		})
+	}
+}
+
+// The control: the same tick still slings a bead that carries no hold, so the
+// cases above are not passing because the tick did nothing at all.
+func TestSpecDispatchSlingsAnUnheldBead(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+	r := runSpecDispatchCycle(f.env())
+	if len(f.slung) != 1 || f.slung[0] != "gt-a" || len(r.Dispatched) != 1 {
+		t.Fatalf("slung %v report %+v, want the unheld bead taken", f.slung, r)
+	}
+}
+
+// needs-pro is the pro seat's selector, so the tick routes the bead there
+// instead of reading the shared rule's hold on it; with no seat reserving the
+// label, the hold stands (gt-lxxo4).
+func TestSpecDispatchRoutesNeedsProToItsSeat(t *testing.T) {
+	t.Parallel()
+	pro := cleanSpec("gt-pro", 1, "2026-09-29T10:00:00Z")
+	pro.Labels = []string{"needs-pro"}
+
+	t.Run("a reserving seat takes it", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(pro)
+		f.seats = []specdispatch.Seat{
+			{Agent: "deepseek-flash", Cap: 2},
+			{Agent: "deepseek-pro", Cap: 1, Label: "needs-pro"},
+		}
+		r := runSpecDispatchCycle(f.env())
+		if len(f.slung) != 1 || f.slung[0] != "gt-pro" {
+			t.Fatalf("slung %v skipped %+v, want the needs-pro bead routed", f.slung, r.Skipped)
+		}
+		if len(f.slingSeats) != 1 || f.slingSeats[0].Agent != "deepseek-pro" {
+			t.Fatalf("seats %+v, want the pro seat", f.slingSeats)
+		}
+	})
+
+	t.Run("no reserving seat holds it", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(pro)
+		r := runSpecDispatchCycle(f.env())
+		if len(f.slung) != 0 || len(r.Dispatched) != 0 {
+			t.Fatalf("slung %v report %+v with no seat reserving needs-pro", f.slung, r)
+		}
+	})
 }
 
 // A bead whose children are open is a container, so it is held under any gate
@@ -1173,7 +1258,7 @@ func TestSpecCandidatesFromAFakeStore(t *testing.T) {
 		return strings.Join(out, " ")
 	}
 
-	got := specCandidates(townRoot, 2, fakeBoard)
+	got := specCandidates(townRoot, 2, fakeBoard, nil)
 	if len(got.Errors) != 0 {
 		t.Fatalf("errors = %v", got.Errors)
 	}
@@ -1189,7 +1274,7 @@ func TestSpecCandidatesFromAFakeStore(t *testing.T) {
 
 	// The ceiling is the operator's (polecat_pool.max_priority): at P4 the
 	// feature and the P4 task are the dispatcher's work too.
-	got = specCandidates(townRoot, 4, fakeBoard)
+	got = specCandidates(townRoot, 4, fakeBoard, nil)
 	if ids := idList(got.Candidates); ids != "gt-bug gt-task gt-feature gt-p4" {
 		t.Errorf("candidates at a P4 ceiling = %q", ids)
 	}
@@ -1268,7 +1353,7 @@ func TestSpecCandidatesCountsTheLabeledFailedFromACapturedBoard(t *testing.T) {
 	t.Parallel()
 	townRoot := specTown(t)
 
-	got := specCandidates(townRoot, 3, capturedSpecBoard(t))
+	got := specCandidates(townRoot, 3, capturedSpecBoard(t), nil)
 	if len(got.Errors) != 0 {
 		t.Fatalf("errors = %v", got.Errors)
 	}
