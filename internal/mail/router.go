@@ -68,17 +68,17 @@ type townBeads interface {
 	EnforceChannelRetention(name string) error
 }
 
-// channelTown adapts a *beads.Beads to townBeads: the channel helpers are
-// free functions over beads.Client now (gt-7iwy0.4.4), and the agent
-// notification level is still a *Beads method (agent-bead slice).
-type channelTown struct{ b *beads.Beads }
+// channelTown adapts a beads.Client to townBeads: every method is a free
+// function over that Client (gt-7iwy0.4.4, gt-7iwy0.4.6), so the interface is
+// only the router's test seam.
+type channelTown struct{ b beads.Client }
 
 func (t channelTown) GetChannelBead(name string) (*beads.Issue, *beads.ChannelFields, error) {
 	return beads.GetChannelBead(t.b, name)
 }
 
 func (t channelTown) GetAgentNotificationLevel(id string) (string, error) {
-	return t.b.GetAgentNotificationLevel(id)
+	return beads.GetAgentNotificationLevel(t.b, id)
 }
 
 func (t channelTown) EnforceChannelRetention(name string) error {

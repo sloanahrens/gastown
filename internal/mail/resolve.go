@@ -43,12 +43,14 @@ type Recipient struct {
 
 // Resolver handles address resolution for beads-native messaging.
 type Resolver struct {
-	beads    *beads.Beads
+	// beads is the store the group, queue, channel and agent-bead lookups
+	// read: any beads.Client runs the same helpers.
+	beads    beads.Client
 	townRoot string
 }
 
 // NewResolver creates a new address resolver.
-func NewResolver(b *beads.Beads, townRoot string) *Resolver {
+func NewResolver(b beads.Client, townRoot string) *Resolver {
 	return &Resolver{
 		beads:    b,
 		townRoot: townRoot,
@@ -155,7 +157,7 @@ func (r *Resolver) validateAgentAddress(address string) error {
 
 	// Check agent beads if available
 	if r.beads != nil {
-		agents, err := r.beads.ListAgentBeads()
+		agents, err := beads.ListAgentBeads(r.beads)
 		if err == nil {
 			for id := range agents {
 				addr := AgentBeadIDToAddress(id)
@@ -207,7 +209,7 @@ func (r *Resolver) resolvePattern(pattern string) ([]Recipient, error) {
 	}
 
 	// Get all agent beads
-	agents, err := r.beads.ListAgentBeads()
+	agents, err := beads.ListAgentBeads(r.beads)
 	if err != nil {
 		return nil, fmt.Errorf("listing agents: %w", err)
 	}

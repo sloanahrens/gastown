@@ -98,7 +98,7 @@ func (d *Daemon) mirrorAgentBead(seat supervisor.Seat, rec intent.Record) error 
 	if id == "" {
 		return nil
 	}
-	return beads.New(d.config.TownRoot).ForAgentBead().UpdateAgentState(id, string(beads.AgentStatePaused))
+	return beads.UpdateAgentState(beads.New(d.config.TownRoot), id, string(beads.AgentStatePaused))
 }
 
 // agentBeadIDForSeat returns the seat's agent bead ID, or "" for a seat with

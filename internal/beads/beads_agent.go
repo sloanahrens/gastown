@@ -420,9 +420,8 @@ func (b *Beads) ResetAgentBeadForReuse(id, reason string) error {
 //
 // Resolves the concrete target DB first so the update hits the correct database
 // when the agent bead routes to a different beads dir via routes.jsonl.
-func (b *Beads) UpdateAgentState(id string, state string) (retErr error) {
-	target := b.agentBeadTarget()
-	return target.UpdateAgentDescriptionFields(id, AgentFieldUpdates{AgentState: &state})
+func (b *Beads) UpdateAgentState(id string, state string) error {
+	return UpdateAgentState(b, id, state)
 }
 
 // SetHookBead and ClearHookBead removed (hq-l6mm5).
@@ -455,24 +454,7 @@ type AgentFieldUpdates struct {
 // condition where concurrent callers updating different fields overwrite each
 // other because the entire description is replaced.
 func (b *Beads) UpdateAgentDescriptionFields(id string, updates AgentFieldUpdates) error {
-	if target := b.agentBeadTarget(); target != b {
-		return target.UpdateAgentDescriptionFields(id, updates)
-	}
-
-	if err := updates.validate(); err != nil {
-		return err
-	}
-
-	// Lock the agent bead to prevent concurrent read-modify-write races.
-	// Without this, concurrent callers updating different fields could overwrite
-	// each other's changes. See gt-joazs.
-	fl, lockErr := b.lockAgentBead(id)
-	if lockErr != nil {
-		return fmt.Errorf("locking agent bead %s: %w", id, lockErr)
-	}
-	defer func() { _ = fl.Unlock() }()
-
-	return updateAgentDescriptionFields(b, id, updates)
+	return UpdateAgentDescriptionFields(b, id, updates)
 }
 
 // validate refuses an update no agent bead may carry.
@@ -545,14 +527,14 @@ func updateAgentDescriptionFields(c Client, id string, updates AgentFieldUpdates
 // This is called by the polecat to self-report its git state (ZFC compliance).
 // Valid statuses: clean, has_uncommitted, has_stash, has_unpushed
 func (b *Beads) UpdateAgentCleanupStatus(id string, cleanupStatus string) error {
-	return b.UpdateAgentDescriptionFields(id, AgentFieldUpdates{CleanupStatus: &cleanupStatus})
+	return UpdateAgentCleanupStatus(b, id, cleanupStatus)
 }
 
 // UpdateAgentActiveMR updates the active_mr field in an agent bead.
 // This links the agent to their current merge request for traceability.
 // Pass empty string to clear the field (e.g., after merge completes).
 func (b *Beads) UpdateAgentActiveMR(id string, activeMR string) error {
-	return b.UpdateAgentDescriptionFields(id, AgentFieldUpdates{ActiveMR: &activeMR})
+	return UpdateAgentActiveMR(b, id, activeMR)
 }
 
 // ClearAgentActiveMRIfMatches clears active_mr only when it still references
@@ -580,7 +562,7 @@ func (b *Beads) ClearAgentActiveMRIfMatches(id string, expectedMR string) (bool,
 // Valid levels: verbose, normal, muted (DND mode).
 // Pass empty string to reset to default (normal).
 func (b *Beads) UpdateAgentNotificationLevel(id string, level string) error {
-	return b.UpdateAgentDescriptionFields(id, AgentFieldUpdates{NotificationLevel: &level})
+	return UpdateAgentNotificationLevel(b, id, level)
 }
 
 // CompletionMetadata holds the fields written by gt done to record
@@ -600,49 +582,19 @@ type CompletionMetadata struct {
 // UpdateAgentCompletion atomically writes all completion metadata fields
 // to an agent bead. Called by gt done to record completion state.
 func (b *Beads) UpdateAgentCompletion(id string, meta *CompletionMetadata) error {
-	mrFailed := meta.MRFailed
-	pushFailed := meta.PushFailed
-	return b.UpdateAgentDescriptionFields(id, AgentFieldUpdates{
-		ExitType:        &meta.ExitType,
-		MRID:            &meta.MRID,
-		Branch:          &meta.Branch,
-		LastSourceIssue: &meta.HookBead,
-		MRFailed:        &mrFailed,
-		PushFailed:      &pushFailed,
-		CompletionTime:  &meta.CompletionTime,
-	})
+	return UpdateAgentCompletion(b, id, meta)
 }
 
 // ClearAgentCompletion removes all completion metadata fields from an agent bead.
 // Called when a polecat is re-slung with new work (resets stale completion state).
 func (b *Beads) ClearAgentCompletion(id string) error {
-	empty := ""
-	notFailed := false
-	return b.UpdateAgentDescriptionFields(id, AgentFieldUpdates{
-		ExitType:        &empty,
-		MRID:            &empty,
-		Branch:          &empty,
-		LastSourceIssue: &empty,
-		MRFailed:        &notFailed,
-		PushFailed:      &notFailed,
-		CompletionTime:  &empty,
-	})
+	return ClearAgentCompletion(b, id)
 }
 
 // GetAgentNotificationLevel returns the notification level for an agent.
 // Returns "normal" if not set (the default).
 func (b *Beads) GetAgentNotificationLevel(id string) (string, error) {
-	_, fields, err := b.GetAgentBead(id)
-	if err != nil {
-		return "", err
-	}
-	if fields == nil {
-		return NotifyNormal, nil
-	}
-	if fields.NotificationLevel == "" {
-		return NotifyNormal, nil
-	}
-	return fields.NotificationLevel, nil
+	return GetAgentNotificationLevel(b, id)
 }
 
 // GetAgentBeadInStoreOnly retrieves an agent bead by ID, but ONLY if it is
@@ -823,21 +775,7 @@ func (b *Beads) ListAgentBeadsFromWisps() (map[string]*Issue, error) {
 		wisps = wrapper.Wisps
 	}
 
-	result := make(map[string]*Issue)
-	for _, w := range wisps {
-		// Check by type/label first (works when fields are present)
-		if IsAgentBead(w) {
-			result[w.ID] = w
-			continue
-		}
-		// Fallback: wisps JSON may omit issue_type/labels fields.
-		// Detect agent beads by ID pattern (prefix-rig-role format).
-		if isAgentBeadByID(w.ID) {
-			result[w.ID] = w
-		}
-	}
-
-	return result, nil
+	return agentBeadsFromWisps(wisps), nil
 }
 
 // isAgentBeadByID detects agent beads by their ID naming convention.

@@ -63,7 +63,7 @@ func newMissingDB() *polecatDB {
 }
 
 // open is the manager's opener: it records the site and hands out db.
-func (db *polecatDB) open(site beadsSite) polecatBeads {
+func (db *polecatDB) open(site beadsSite) polecatStore {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	db.sites = append(db.sites, site)
@@ -99,6 +99,11 @@ func (db *polecatDB) Show(id string) (*beads.Issue, error) {
 	if db.err != nil {
 		return nil, db.err
 	}
+	// A hidden bead is one that could not be read at all (forgetAgent), so
+	// every read of it — beads.GetAgentBead's Show included — misses it.
+	if db.isHidden(id) {
+		return nil, fmt.Errorf("%s: %w", id, beads.ErrNotFound)
+	}
 	return db.Fake.Show(id)
 }
 
@@ -107,7 +112,17 @@ func (db *polecatDB) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 	if db.err != nil {
 		return nil, db.err
 	}
-	return db.Fake.List(opts)
+	issues, err := db.Fake.List(opts)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*beads.Issue, 0, len(issues))
+	for _, issue := range issues {
+		if !db.isHidden(issue.ID) {
+			out = append(out, issue)
+		}
+	}
+	return out, nil
 }
 
 func (db *polecatDB) ListByAssignee(assignee string) ([]*beads.Issue, error) {
@@ -188,22 +203,6 @@ func (db *polecatDB) isHidden(id string) bool {
 	return db.hidden[id]
 }
 
-func (db *polecatDB) GetAgentBead(id string) (*beads.Issue, *beads.AgentFields, error) {
-	if db.isHidden(id) {
-		return nil, nil, fmt.Errorf("%s: %w", id, beads.ErrNotFound)
-	}
-	issue, err := db.Show(id)
-	if err != nil {
-		return nil, nil, err
-	}
-	if !beads.IsAgentBead(issue) {
-		return nil, nil, fmt.Errorf("issue %s is not an agent bead (type=%s)", id, issue.Type)
-	}
-	fields := beads.ParseAgentFields(issue.Description)
-	fields.AgentState = beads.ResolveAgentState(issue.Description, issue.AgentState)
-	return issue, fields, nil
-}
-
 func (db *polecatDB) CreateOrReopenAgentBead(id, title string, fields *beads.AgentFields) (*beads.Issue, error) {
 	if db.err != nil {
 		return nil, db.err
@@ -234,27 +233,6 @@ func (db *polecatDB) ResetAgentBeadForReuse(id, reason string) error {
 	*fields = beads.AgentFields{RoleType: fields.RoleType, Rig: fields.Rig, AgentState: string(beads.AgentStateNuked)}
 	description := beads.FormatAgentDescription(issue.Title, fields)
 	return db.Update(id, beads.UpdateOptions{Description: &description})
-}
-
-func (db *polecatDB) UpdateAgentState(id, state string) error {
-	if db.err != nil {
-		return db.err
-	}
-	return beads.UpdateAgentDescriptionFields(db.Fake, id, beads.AgentFieldUpdates{AgentState: &state})
-}
-
-func (db *polecatDB) ListAgentBeads() (map[string]*beads.Issue, error) {
-	issues, err := db.List(beads.ListOptions{Label: "gt:agent", Priority: -1, IncludeInfra: true})
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]*beads.Issue, len(issues))
-	for _, is := range issues {
-		if !db.isHidden(is.ID) {
-			out[is.ID] = is
-		}
-	}
-	return out, nil
 }
 
 // setAgent writes agent bead id, creating it when missing: edit changes the
@@ -312,7 +290,7 @@ func (db *polecatDB) forgetAgent(id string) {
 // written there: beads.EnsureCustomTypes runs bd itself unless the sentinel
 // says the custom types are already configured.
 func newTestManager(r *rig.Rig, w *world, tm sessionProbe, db *polecatDB) *Manager {
-	var open func(beadsSite) polecatBeads
+	var open func(beadsSite) polecatStore
 	if db != nil {
 		open = db.open
 		if r.IdentityBeads == nil {
