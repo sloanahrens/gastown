@@ -15,7 +15,6 @@ which automatic path reads which marker.
 | a person's handle (`sloan`, `Sloan Ahrens`, `overseer`) | assignee |
 | `needs-pro`, `needs-mayor-review`, `gt:needs-human` (or `needs-human`) | label |
 | `MAYOR DESIGN DECISION`, `do not redispatch` | design or notes |
-| `HOLD RELEASED` | a comment, lifting an earlier comment hold |
 
 The markers are machine-read, so write one exactly as listed. A label matches
 however it is typed (case-insensitive). A prose marker holds only where it is
@@ -38,8 +37,8 @@ that would otherwise point the mayor at it skip it.
 `dispatch.DispatchHoldFields` about the hooked bead of a polecat it is about to
 restart (internal/daemon/patrol_scan.go), so a session it would otherwise raise
 against held work stays down (gt-n38c6). The read covers status, labels,
-assignee, design and notes. Comments are not read — `bd show --json` omits them
-— so a comment-recorded hold does not park a restart.
+assignee, design and notes; comments are not part of the rule (`bd show --json`
+omits them).
 
 **Spec dispatcher.** `gt spec dispatch`, the daemon's `spec_dispatch` tick,
 filters its candidates in `specdispatch.Eligible`
@@ -65,10 +64,7 @@ session is still live.
 
 ## Releases
 
-Release a field hold by editing the field that carries it: clear the label,
-reassign to an agent, set the status back to `open`, or remove the prose. A
-comment is the one field that cannot be edited, so the rule pairs it with a
-release marker: a later comment starting `HOLD RELEASED` lifts an earlier one.
-No automatic path reads comments today — `dispatch.HoldInComments` has had no
-caller since the convoy feeders were deleted (gt-gzhin.6, gt-thilk) — so write a
-hold in notes or design to give it a reader.
+Release a hold by editing the field that carries it: clear the label, reassign
+to an agent, set the status back to `open`, or remove the prose. A comment
+carries no hold — no automatic path reads one — so write a hold in notes or
+design to give it a reader.

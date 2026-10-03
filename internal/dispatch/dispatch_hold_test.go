@@ -86,20 +86,3 @@ func TestDispatchHoldFields_Verdicts(t *testing.T) {
 		})
 	}
 }
-
-// TestHoldInComments_ReleaseLiftsAnEarlierHold pins gt-tq6l's release: the
-// comment field is append-only, so the newest decision is the live one and a
-// later HOLD RELEASED is what takes a comment-recorded hold off.
-func TestHoldInComments_ReleaseLiftsAnEarlierHold(t *testing.T) {
-	t.Parallel()
-	comments := []beads.Comment{
-		{Text: "MAYOR DESIGN DECISION: park it"},
-		{Text: "> **HOLD RELEASED** — the ruling is in"},
-	}
-	if got := HoldInComments(comments); got != "" {
-		t.Errorf("HoldInComments after a release = %q, want \"\"", got)
-	}
-	if got := HoldInComments(comments[:1]); got != "MAYOR DESIGN DECISION in comment" {
-		t.Errorf("HoldInComments before the release = %q, want the design hold", got)
-	}
-}
