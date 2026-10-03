@@ -101,6 +101,11 @@ func OMThreshold(dir string) (float64, error) {
 // ErrOMTimeout is an om attempt that outlived its timeout.
 var ErrOMTimeout = errors.New("om review timed out")
 
+// ErrOMExecution is an om run that exited with neither verdict om can write (0
+// approve, 1 request_changes): it never judged the diff. Land reports the
+// merged tree's size alongside it, the one cause a reader can act on (gt-hhid7).
+var ErrOMExecution = errors.New("om review execution error")
+
 // OMReviewer runs `om review -C <dir> --base <base> --head <head> --out <file>`.
 // om exits 0 for approve, 1 for request_changes and 2 for an execution error.
 // The exit code decides; the verdict file must agree with it and supplies the
@@ -169,7 +174,7 @@ func (r OMReviewer) reviewOnce(ctx context.Context, dir, base, head string) (Ver
 		return Verdict{}, fmt.Errorf("om review did not run: %w", runErr)
 	}
 	if code != 0 && code != 1 {
-		return Verdict{}, fmt.Errorf("om review exited %d (execution error): %s", code, strings.TrimSpace(lastLines(buf.String(), 10)))
+		return Verdict{}, fmt.Errorf("%w: exited %d: %s", ErrOMExecution, code, strings.TrimSpace(lastLines(buf.String(), 10)))
 	}
 	data, err := os.ReadFile(outPath) //nolint:gosec // G304: path is the temp file created above
 	if err != nil || len(bytes.TrimSpace(data)) == 0 {

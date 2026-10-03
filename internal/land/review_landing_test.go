@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -42,6 +43,102 @@ func TestLandOMExecutionErrorLandsWithErrorVerdict(t *testing.T) {
 	}
 	if b := f.bead(); b.Status != "closed" || !strings.Contains(b.Notes, "om_verdict: error:") {
 		t.Fatalf("bead status %s notes:\n%s", b.Status, b.Notes)
+	}
+}
+
+// omStderr is the shape om's own output had in the incident (gt-hhid7): a long
+// config warning about the ignored .om.json backend first, the reason it gave
+// no verdict last. omError wraps it the way OMReviewer reports an execution
+// error.
+func omStderr() string {
+	return `om: warning: config: "backend" in /private/var/folders/dx/ccj87p8d14l8cs64cnp691pm0000gn/T/gt-landing-501/gastown/wt/.om.json is ignored — the reviewer backend is operator-config only` +
+		"\nthe reviewer backend claude-deepseek-flash exited 1 in 0 seconds"
+}
+
+func omError(stderr string) error {
+	return fmt.Errorf("%w: exited 2: %s", ErrOMExecution, stderr)
+}
+
+// TestReviewErrorReasonKeepsBothEnds: the bound still applies, but it now cuts
+// the middle, so the reason keeps the command that failed and the backend's own
+// stderr. The head-only cut it replaces kept the config warning and threw the
+// cause away (gt-hhid7).
+func TestReviewErrorReasonKeepsBothEnds(t *testing.T) {
+	t.Parallel()
+	stderr := strings.Repeat("warning: filler path segment/", 40) + "the reviewer backend claude-deepseek-flash exited 1 in 0 seconds"
+	got := reviewErrorReason(omError(stderr))
+	if n := len([]rune(got)); n > reviewErrorReasonMax {
+		t.Errorf("reason is %d runes, want at most %d: %q", n, reviewErrorReasonMax, got)
+	}
+	if !strings.Contains(got, "om review execution error") {
+		t.Errorf("reason lost its head: %q", got)
+	}
+	if !strings.Contains(got, "exited 1 in 0 seconds") {
+		t.Errorf("reason lost the backend's cause: %q", got)
+	}
+	if short := "om review execution error: exited 2"; reviewErrorReason(errors.New(short)) != short {
+		t.Errorf("a reason under the bound was rewritten: %q", reviewErrorReason(errors.New(short)))
+	}
+}
+
+// TestLandRejectionKeepsTheTailOfALongOMError: the rejection note a human reads
+// carries the backend's own failure, not only the leading config warning.
+func TestLandRejectionKeepsTheTailOfALongOMError(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.review.fn = func(string) (Verdict, error) { return Verdict{}, omError(omStderr()) }
+	l := f.lander()
+	l.ReviewErrorRejects = true
+	_, err := l.Land(context.Background(), f.work)
+	rej := f.assertRejected(t, err, RejectReview, LabelNeedsHuman)
+	if !strings.Contains(rej.Reason, "the reviewer backend claude-deepseek-flash exited 1 in 0 seconds") {
+		t.Errorf("rejection reason lost the backend's cause:\n%s", rej.Reason)
+	}
+	if !strings.Contains(f.bead().Notes, "the reviewer backend claude-deepseek-flash exited 1 in 0 seconds") {
+		t.Errorf("bead note lost the backend's cause:\n%s", f.bead().Notes)
+	}
+}
+
+// TestLandExecutionErrorOnAHugeDiffNamesTheSize: an om execution error on a
+// merged tree past the stated line bound is reported as the diff being too
+// large for om. The reader's next move (an overseer review) is not the rework a
+// bare execution error asks for, and the size was the part of the incident only
+// a hand-run of om revealed (gt-hhid7).
+func TestLandExecutionErrorOnAHugeDiffNamesTheSize(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	// A branch diff past the default bound, so the test exercises the real
+	// default rather than a configured one.
+	f.work.Head = f.git.Commit(t, f.origin, fixtureBranch, "feat: add a large b",
+		map[string]string{"b.txt": strings.Repeat("work\n", DefaultOMDiffTooLargeLines+10)})
+	f.review.fn = func(string) (Verdict, error) { return Verdict{}, omError(omStderr()) }
+	l := f.lander()
+	l.ReviewErrorRejects = true
+	_, err := l.Land(context.Background(), f.work)
+	rej := f.assertRejected(t, err, RejectReview, LabelNeedsHuman)
+	if !strings.Contains(rej.Reason, "diff too large for om; overseer review needed") {
+		t.Errorf("reason = %q; want it to name the size", rej.Reason)
+	}
+	if !strings.Contains(rej.Reason, "past the "+fmt.Sprint(DefaultOMDiffTooLargeLines)+"-line bound") {
+		t.Errorf("reason = %q; want the bound stated", rej.Reason)
+	}
+	if f.originMain() != f.base {
+		t.Error("origin/main moved: an unreviewed head must never land")
+	}
+}
+
+// TestLandExecutionErrorUnderTheBoundStaysBare: the same execution error on an
+// ordinary tree names no size, so the phrase keeps meaning something.
+func TestLandExecutionErrorUnderTheBoundStaysBare(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.review.fn = func(string) (Verdict, error) { return Verdict{}, omError(omStderr()) }
+	l := f.lander()
+	l.ReviewErrorRejects = true
+	_, err := l.Land(context.Background(), f.work)
+	rej := f.assertRejected(t, err, RejectReview, LabelNeedsHuman)
+	if strings.Contains(rej.Reason, "diff too large for om") {
+		t.Errorf("reason = %q; a small diff must not be called too large", rej.Reason)
 	}
 }
 
