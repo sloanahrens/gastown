@@ -17,6 +17,7 @@ import (
 type escalateFixture struct {
 	r        escalateRun
 	out      *strings.Builder
+	town     string // the temp town root, also the caller's cwd
 	raised   []notify.EscalationRequest
 	cleared  [][]string
 	raiseRes *notify.RaiseResult
@@ -26,7 +27,7 @@ type escalateFixture struct {
 func newEscalateFixture(t *testing.T) *escalateFixture {
 	t.Helper()
 	town := t.TempDir()
-	fx := &escalateFixture{out: &strings.Builder{}, raiseRes: &notify.RaiseResult{ID: "hq-created"}}
+	fx := &escalateFixture{out: &strings.Builder{}, town: town, raiseRes: &notify.RaiseResult{ID: "hq-created"}}
 	fx.r = escalateRun{
 		severity: "high",
 		in:       strings.NewReader(""),
@@ -65,6 +66,49 @@ func TestRunEscalate_FirstFiringCreatesOneKeyedBead(t *testing.T) {
 	}
 	if !strings.Contains(fx.out.String(), "Escalation created: hq-created") {
 		t.Errorf("output = %q", fx.out.String())
+	}
+}
+
+// TestRunEscalate_RecordsTheSendingProcessAsEscalatedBy pins who an
+// escalation says raised it. The daemon runs gt from the town root with
+// daemonGTEnv — every identity variable dropped and BD_ACTOR=daemon
+// (gt-kyik6) — and no agent-directory rule matches the town root, so before
+// detectSender read BD_ACTOR every automated alert landed
+// escalated_by=overseer, naming the human operator as its author (gt-bw6ai).
+// An agent's own session must still record the agent's address.
+func TestRunEscalate_RecordsTheSendingProcessAsEscalatedBy(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"daemon child", map[string]string{"BD_ACTOR": "daemon"}, "daemon"},
+		{"installer child", map[string]string{"BD_ACTOR": "installer"}, "installer"},
+		{
+			// Agent sessions carry GT_ROLE; some spawn paths also set BD_ACTOR.
+			"agent session",
+			map[string]string{"GT_ROLE": "gastown/polecats/granite", "BD_ACTOR": "gastown/polecats/granite"},
+			"gastown/polecats/granite",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fx := newEscalateFixture(t)
+			env := envMap(tt.env)
+			fx.r.sender = func() string { return detectSenderWith(env, fx.town) }
+
+			if err := fx.r.escalate([]string{"jsonl", "git", "backup:", "push", "failed"}); err != nil {
+				t.Fatalf("escalate: %v", err)
+			}
+			if len(fx.raised) != 1 {
+				t.Fatalf("raised %d escalations, want 1", len(fx.raised))
+			}
+			if got := fx.raised[0].EscalatedBy; got != tt.want {
+				t.Errorf("EscalatedBy = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

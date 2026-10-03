@@ -22,6 +22,32 @@ func TestDaemonNotifierDefaultsToGtAsDaemon(t *testing.T) {
 	}
 }
 
+// TestDaemonEscalationsGoOutAsTheDaemon: every automated alert the daemon
+// raises must travel through the notifier that names the daemon — BD_ACTOR
+// with no other identity variable (daemonGTEnv, gt-kyik6). gt escalate
+// derives the sender of the escalation it files from that environment, so a
+// notifier built any other way attributes the alert to the human operator:
+// that is how a daemon-raised escalation read "Escalated by: overseer"
+// (gt-bw6ai). The alert path must also use that notifier, not one of its own.
+func TestDaemonEscalationsGoOutAsTheDaemon(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: t.TempDir()}, gtPath: "gt"}
+	cli, ok := d.notify().(*notify.CLI)
+	if !ok || cli.Env == nil {
+		t.Fatalf("daemon notifier = %+v, want a notify.CLI with an explicit env", d.notify())
+	}
+	assertDaemonIdentity(t, "escalation notifier", cli.Env())
+
+	rec := notifyfake.New()
+	d.notifier = rec
+	if err := d.escalateAlertSeverity("low", "landing:slow", "landing_slow", "landing took 12m"); err != nil {
+		t.Fatalf("escalateAlertSeverity: %v", err)
+	}
+	if got := rec.Escalations(); len(got) != 1 || got[0].Escalation.Severity != "low" || got[0].Escalation.Fingerprint != "landing:slow" {
+		t.Fatalf("escalations = %+v, want the one low alert under its key", got)
+	}
+}
+
 func TestDoltServerManagerNotifierKeepsAnInjectedOne(t *testing.T) {
 	t.Parallel()
 	rec := notifyfake.New()
