@@ -74,6 +74,12 @@ type PatrolsConfig struct {
 	// of gt-9bioi. Opt-in: the jobs act on submitted work.
 	Steward *StewardConfig `json:"steward,omitempty"`
 
+	// StewardPlan spawns the plan job for a needs-planning spec
+	// (internal/daemon/steward.go, gt-4k3fj.14). Opt-in and separate from
+	// patrols.steward: a town that scans the landing queue is not also asking
+	// for planning work.
+	StewardPlan *StewardPlanConfig `json:"steward_plan,omitempty"`
+
 	// TierSweep runs scripts/tier-sweep.sh against origin/main on an interval,
 	// the tiers `make gate` does not run (internal/daemon/tier_sweep.go,
 	// gt-vsct7.5). Opt-in: it runs the town's expensive suites.
@@ -571,6 +577,28 @@ type StewardConfig struct {
 	// directory under it, 0700). It must not be under the town root: the git
 	// guard refuses worktrees there. Empty means $TMPDIR/gt-steward-<uid>.
 	WorkRoot string `json:"work_root,omitempty"`
+}
+
+// StewardPlanConfig holds configuration for the steward's plan jobs: one
+// planner session for a needs-planning spec, which proposes the child beads
+// and files nothing (gt-4k3fj.14). It is a separate patrol from
+// patrols.steward so planning is opt-in on its own.
+type StewardPlanConfig struct {
+	// Enabled turns plan jobs on. Defaults to false: a plan job spawns an LLM
+	// session, so the operator opts in.
+	Enabled bool `json:"enabled"`
+
+	// IntervalStr is the wait between scans for needs-planning specs (e.g.
+	// "60s"). Default 60s.
+	IntervalStr string `json:"interval,omitempty"`
+
+	// MaxJobs caps plan jobs running at once (default 1). Plan jobs run in
+	// the steward roster beside the review and rejection jobs, so this caps
+	// the plan seat, not the roster (internal/daemon/steward.go).
+	MaxJobs int `json:"max_jobs,omitempty"`
+
+	// Rigs limits the scans to these rigs. Empty means every known rig.
+	Rigs []string `json:"rigs,omitempty"`
 }
 
 // RolePatrol returns the patrol entry for a role-shaped patrol ("handler"),

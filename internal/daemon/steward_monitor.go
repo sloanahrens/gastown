@@ -99,6 +99,13 @@ func (d *Daemon) monitorSteward() {
 		byKey[j.Key()] = append(byKey[j.Key()], j)
 	}
 	for _, j := range rows {
+		// A plan job runs on steward.PlanAgent by design, and a flash-first
+		// town sets the same preset as hard_agent: that is the plan job's
+		// price, not a job that escalated to a harder model, so it earns no
+		// pro notice (gt-4k3fj.14).
+		if j.Event == steward.KindPlan {
+			continue
+		}
 		if j.Model != hard || j.Started.Before(now.Add(-stewardProNoticeWindow)) {
 			continue
 		}

@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/specdispatch"
+	"github.com/steveyegge/gastown/internal/steward"
 )
 
 const specTestDescription = "## Goal\nA thing.\n\n## Constraints\nGo.\n\n## Out of scope\nNone.\n\n## Gate\nmake gate\n\n## Size\none worker, one MR"
@@ -507,6 +508,46 @@ func TestSpecDispatchRoutesPlanningWithoutSpawning(t *testing.T) {
 	}
 	if len(f.notes["gt-big"]) != 1 || len(f.notes["gt-plan"]) != 1 {
 		t.Errorf("planning notes = %v", f.notes)
+	}
+}
+
+// TestSpecDispatchReportsPlanState: the tick says which of the two planning
+// states a spec is in — waiting for a plan job's proposal, or carrying one the
+// operator files — instead of naming a planner that is not built (gt-4k3fj.14).
+func TestSpecDispatchReportsPlanState(t *testing.T) {
+	t.Parallel()
+	waiting := cleanSpec("gt-wait", 1, "2026-09-29T10:00:00Z")
+	waiting.Labels = append(waiting.Labels, "needs-planning")
+	proposed := cleanSpec("gt-done", 1, "2026-09-29T11:00:00Z")
+	proposed.Labels = append(proposed.Labels, "needs-planning")
+	proposed.Notes = steward.PlanProposalMarker + "\nSpec: gt-done\nChildren: 2\n"
+	f := newFakeSpecTown(waiting, proposed)
+	r := runSpecDispatchCycle(f.env())
+	if len(r.Planning) != 2 {
+		t.Fatalf("planning = %+v, want both specs reported", r.Planning)
+	}
+	line := map[string]string{}
+	for _, e := range r.Planning {
+		line[e.Bead] = e.Line
+	}
+	if !strings.Contains(line["gt-wait"], "needs plan") {
+		t.Errorf("gt-wait line = %q, want the needs-plan state", line["gt-wait"])
+	}
+	if !strings.Contains(line["gt-done"], "plan proposed") {
+		t.Errorf("gt-done line = %q, want the plan-proposed state", line["gt-done"])
+	}
+	for _, l := range line {
+		if strings.Contains(l, "gt-4k3fj.7") || strings.Contains(l, "not built") {
+			t.Errorf("line %q still reports a planner that is not built", l)
+		}
+	}
+	// The two states leave two different notes, so the bead's history says
+	// when the proposal arrived.
+	if len(f.notes["gt-wait"]) != 1 || !strings.HasPrefix(f.notes["gt-wait"][0], specDispatchNotePrefix+"gt-wait: needs plan") {
+		t.Errorf("gt-wait notes = %v", f.notes["gt-wait"])
+	}
+	if len(f.notes["gt-done"]) != 1 || !strings.HasPrefix(f.notes["gt-done"][0], specDispatchNotePrefix+"gt-done: plan proposed") {
+		t.Errorf("gt-done notes = %v", f.notes["gt-done"])
 	}
 }
 

@@ -25,9 +25,9 @@ later still sees the beads queued now.
 A third kind, `plan`, is raised for an open spec labelled `needs-planning`
 whose notes carry no `PLAN PROPOSAL` block: the planner proposes the child
 beads it breaks into, writes them into that block, and files nothing. It is
-not scheduled yet, and it will take a flag of its own rather than a `kinds`
-entry, because a town scanning the landing queue is not also asking for
-planning work (gt-4k3fj.13, gt-4k3fj.14).
+not a `kinds` entry — planning is `patrols.steward_plan`, off until the
+operator turns it on — because a town scanning the landing queue is not also
+asking for planning work (gt-4k3fj.13, gt-4k3fj.14).
 
 While the patrol runs live it owns every rejected bead: a rework bead is the
 steward's to settle, and `gt sling` refuses to dispatch one without `--force`
@@ -58,6 +58,20 @@ The concurrency cap and the one-job-per-bead rule hold across scans for the
 lifetime of the daemon. `routine_agent` runs the first attempt; a job retries
 once on `hard_agent` after a failure, and a conflict rejection starts there.
 `work_root` must be outside the town: git refuses a worktree inside it.
+
+`patrols.steward_plan` runs the plan jobs, off until `enabled` is true:
+
+```json
+{"enabled": true, "interval": "60s", "max_jobs": 1, "rigs": ["gastown"]}
+```
+
+`max_jobs` caps plan jobs running at once (default 1), and a plan job takes a
+seat of the steward roster: the runner's cap is `patrols.steward.max_jobs`
+plus `steward_plan.max_jobs`, three seats with both defaults. A plan job runs
+once per spec, at the rig's default branch tip — a plan event names no
+submission — and the `PLAN PROPOSAL` block it writes is what retires the
+event, in shadow mode too: what the proposal withholds is filing the beads,
+and nothing files from a proposal anyway (gt-4k3fj.14).
 
 ## Rollout: shadow, then live
 

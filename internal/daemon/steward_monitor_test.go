@@ -236,3 +236,20 @@ func TestWriteTownHealthPublishesTheStewardCounters(t *testing.T) {
 		t.Errorf("steward field = %+v, want red 1 stuck", f)
 	}
 }
+
+// TestMonitorStewardDoesNotNoticeAPlanJobAsPro: a plan job runs on
+// steward.PlanAgent by design, and a flash-first town sets that same preset as
+// hard_agent, so it is not a job that escalated to a harder model and earns no
+// pro notice. A review job on the same preset still does (gt-4k3fj.14).
+func TestMonitorStewardDoesNotNoticeAPlanJobAsPro(t *testing.T) {
+	t.Parallel()
+	plan := monitorJob("plan", steward.PlanAgent, steward.OutcomePass, 10*time.Minute, time.Minute)
+	plan.Event = steward.KindPlan
+	review := monitorJob("rev", steward.PlanAgent, steward.OutcomePass, 20*time.Minute, time.Minute)
+	d, esc := monitorDaemon(t, plan, review)
+	d.patrolConfig = stewardPatrolConfig(&StewardConfig{Enabled: true, JobTimeoutStr: "45m", HardAgent: steward.PlanAgent})
+	d.monitorSteward()
+	if got := esc.keys(); len(got) != 1 || got[0] != "steward:pro:rev" {
+		t.Fatalf("escalated %v, want only the review job's pro notice", got)
+	}
+}
