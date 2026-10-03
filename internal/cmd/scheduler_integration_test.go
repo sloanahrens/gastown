@@ -42,7 +42,10 @@ var schedulerTestCounter atomic.Int32
 // compiled into it want; nineteen scheduler towns at once each spent up to
 // 260s in bd and gt subprocesses on the one Dolt container, against ~20s
 // four at a time.
-var schedulerTownSlots = make(chan struct{}, 4)
+//
+// 8 is the measured value: 126s median wall at 4 against 94s at 8, three runs
+// each and all green (gt-ik4a1.4.14).
+var schedulerTownSlots = make(chan struct{}, 8)
 
 // holdSchedulerTownSlot takes a scheduler town slot for the rest of t.
 func holdSchedulerTownSlot(t *testing.T) {
