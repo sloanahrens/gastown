@@ -681,23 +681,32 @@ var poolBeadLabelAdd = func(townRoot, beadID, label string) error {
 }
 
 // poolRouter is the pool decision for one town with its collaborators
-// explicit: the town's polecat_pool, the tmux sessions it counts, each
-// polecat's own bead state, the seat claims, and the clock. poolRouterFor
-// wires the real ones; the free functions below are thin wrappers over it.
+// explicit: the town's polecat_pool, the town root the seats mid-landing are
+// read from, the tmux sessions it counts, each polecat's own bead state, the
+// work beads the landing seats are confirmed with, the seat claims, and the
+// clock. poolRouterFor wires the real ones; the free functions below are thin
+// wrappers over it.
 type poolRouter struct {
+	// townRoot anchors the occupancy reads that live outside tmux: the seats
+	// mid-landing (poolOccupiedSessions). Empty is a router with no town to
+	// read, which counts live sessions alone.
+	townRoot string
 	// pool returns the town's polecat_pool, nil when none is configured or the
 	// settings cannot be read.
 	pool        func() *config.PolecatPool
 	sessions    func() sessionLister
 	disposition polecatDispositionFunc
+	work        poolSeatWorkFunc
 	seats       *poolSeatLedger
 	now         func() time.Time
 }
 
 // poolRouterFor wires the pool decision to the town on disk, the tmux server,
-// bd (each polecat's own state), and the seat claim of the spawn asking.
+// bd (each polecat's own state, and the work beads a landing seat is confirmed
+// with), and the seat claim of the spawn asking.
 func poolRouterFor(townRoot string, store *poolSeatClaimStore) *poolRouter {
 	return &poolRouter{
+		townRoot: townRoot,
 		pool: func() *config.PolecatPool {
 			ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
 			if err != nil || ts == nil {
@@ -709,6 +718,7 @@ func poolRouterFor(townRoot string, store *poolSeatClaimStore) *poolRouter {
 		disposition: func(rigName, polecatName string) (polecat.WorkstateDisposition, error) {
 			return poolPolecatDisposition(townRoot, rigName, polecatName)
 		},
+		work:  poolSeatWorkFor(townRoot),
 		seats: poolSeatLedgerFor(townRoot, store),
 		now:   time.Now,
 	}
@@ -761,12 +771,23 @@ func poolUncountedFallback(pool *config.PolecatPool) string {
 
 // route decides the route. live distinguishes a sling that will spawn from a
 // dry run: only a live sling claims a seat.
+//
+// The count it decides from is the pool's occupied seats: the live sessions and
+// the seats mid-landing (poolOccupiedSessions, the same source the dispatch
+// picture reads), plus the claims other slings hold, folded in under the
+// seat-decision lock below. A polecat that submitted and left its seat to land
+// still holds it, so a second sling admits into a full pool only when the pool
+// has room (gt-3o7zk).
 func (r *poolRouter) route(requested string, live bool) (agent, reason string, err error) {
 	pool := r.pool()
 	if pool == nil {
 		return "", "", nil
 	}
-	sessions, err := listPolecatSessionsWith(r.sessions(), r.disposition, r.now())
+	// The seats the pool already holds: the live sessions and the seats
+	// mid-landing, from the same occupancy source the dispatch picture reads,
+	// so a live sling counts a seat a mid-landing polecat still occupies
+	// (gt-3o7zk). The claims join the count under the lock below.
+	sessions, err := poolOccupiedSessions(r.sessions(), r.townRoot, r.disposition, r.work, pool, r.now)
 	if err != nil {
 		// A seat the pool does not own is not the pool's to override on a
 		// tmux hiccup any more than it is the pool's to admit (gt-67fj): the
@@ -774,11 +795,16 @@ func (r *poolRouter) route(requested string, live bool) (agent, reason string, e
 		if !poolOwnsAgent(pool, requested) {
 			return "", "", nil
 		}
-		// A town whose sessions cannot be counted is not a town at its cap,
-		// so the cap stays off here — a refusal would otherwise stop every
-		// sling on a tmux hiccup — and the reason says so.
+		// A town whose seats cannot be counted is not a town at its cap, so
+		// the cap stays off here — a refusal would otherwise stop every sling
+		// on a tmux hiccup — and the reason says so.
+		what := "count seats"
+		var oe *poolOccupancyError
+		if errors.As(err, &oe) && oe.sessions {
+			what = "list sessions"
+		}
 		return pool.OverflowAgent,
-			"pool: cannot list sessions (" + err.Error() + "), using " + poolUncountedFallback(pool), nil
+			"pool: cannot " + what + " (" + err.Error() + "), using " + poolUncountedFallback(pool), nil
 	}
 	// No release of a previous claim before counting: the store is this
 	// spawn's, and a spawn makes one decision. A claim from an earlier spawn

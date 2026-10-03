@@ -903,3 +903,118 @@ func TestPeekPolecatPoolAgentReportsTheOverflowRefusal(t *testing.T) {
 		t.Errorf("a dry run must not claim or drop a seat, got %v", claims)
 	}
 }
+
+// ── Admission counts the seat picture (gt-3o7zk) ────────────────────────────
+
+// TestPoolAdmissionAndSeatPictureCountTheSameSeats pins the acceptance
+// criterion that a live sling and the dispatch seat picture are one count of
+// one pool: on the same fixture they name the same occupied seats, so a sling
+// refuses exactly when the picture has no free seat. The mid-landing case is
+// the one admission missed — gt-thy6r taught the picture that a seat whose
+// polecat submitted still holds it, but poolRouter.route counted live sessions
+// alone and admitted past the cap while one was landing (gt-3o7zk).
+func TestPoolAdmissionAndSeatPictureCountTheSameSeats(t *testing.T) {
+	t.Parallel()
+	pool := &config.PolecatPool{OverflowAgent: claimAgent, MaxOverflow: 1}
+	oneLive := func() *fakeLister {
+		return &fakeLister{sessions: map[string]map[string]string{
+			"gt-jade": {"GT_ROLE": "gastown/polecats/jade", "GT_AGENT": claimAgent},
+		}}
+	}
+
+	cases := []struct {
+		name          string
+		lister        *fakeLister
+		claim         bool
+		landing       bool
+		submittedBead string // the bead the landing seat still waits to land
+		wantOccupied  int
+	}{
+		{"no session, no claim, no submission: free", &fakeLister{}, false, false, "", 0},
+		{"a live session holds the seat", oneLive(), false, false, "", 1},
+		{"an in-flight claim holds the seat", &fakeLister{}, true, false, "", 1},
+		{"a seat mid-landing holds the seat", &fakeLister{}, false, true, "gt-ruby", 1},
+		{"a landing record whose bead is not submitted: free", &fakeLister{}, false, true, "", 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			if c.claim {
+				writeSeatClaim(t, town, "claim-1", claimAgent)
+			}
+			if c.landing {
+				writeLandingSeat(t, town, "gastown", "ruby", "gt-ruby")
+			}
+			work := submittedWork(c.submittedBead)
+
+			// The picture `gt daemon dispatch-check` nudges from and the spec
+			// dispatcher's roster reads.
+			picture, err := poolSeatSessionsWith(c.lister, town, nil, work, pool)
+			if err != nil {
+				t.Fatalf("poolSeatSessionsWith: %v", err)
+			}
+			if got := poolSeatCount(pool, picture); got != c.wantOccupied {
+				t.Fatalf("picture counts %d occupied seats, want %d (%+v)", got, c.wantOccupied, picture)
+			}
+
+			// A live sling against the same fixture must take the same view of
+			// the same seats.
+			r := &poolRouter{
+				townRoot:    town,
+				pool:        func() *config.PolecatPool { return pool },
+				sessions:    func() sessionLister { return c.lister },
+				disposition: nil,
+				work:        work,
+				seats:       poolSeatLedgerFor(town, newPoolSeatClaimStore()),
+				now:         func() time.Time { return poolTestNow },
+			}
+			agent, reason, err := r.route("", true)
+			if c.wantOccupied == 0 {
+				if err != nil || agent != claimAgent || !strings.Contains(reason, "seat 1/1") {
+					t.Fatalf("a truly free seat must be admitted: got %q (%s) %v", agent, reason, err)
+				}
+				return
+			}
+			if !errors.Is(err, errPoolBackpressure) || !strings.Contains(reason, "pool: full (1/1)") {
+				t.Fatalf("admission must refuse the %d seat(s) the picture shows taken: got %q (%s) %v",
+					c.wantOccupied, agent, reason, err)
+			}
+		})
+	}
+}
+
+// TestRouteRefusesASeatMidLanding is the reported surface on its own: a live
+// `gt sling` reaching executeSling with the pool's only seat held by a polecat
+// that submitted and whose session is gone is refused with the typed
+// backpressure, not admitted (gt-3o7zk). The refusal must not claim a seat.
+func TestRouteRefusesASeatMidLanding(t *testing.T) {
+	t.Parallel()
+	pool := &config.PolecatPool{OverflowAgent: claimAgent, MaxOverflow: 1}
+	town := t.TempDir()
+	writeLandingSeat(t, town, "gastown", "ruby", "gt-ruby")
+
+	r := &poolRouter{
+		townRoot:    town,
+		pool:        func() *config.PolecatPool { return pool },
+		sessions:    func() sessionLister { return &fakeLister{} },
+		disposition: nil,
+		work:        submittedWork("gt-ruby"),
+		seats:       poolSeatLedgerFor(town, newPoolSeatClaimStore()),
+		now:         func() time.Time { return poolTestNow },
+	}
+	agent, reason, err := r.route("", true)
+	if !errors.Is(err, errPoolBackpressure) {
+		t.Fatalf("a seat mid-landing must refuse the next sling: got %q (%s) %v", agent, reason, err)
+	}
+	if agent != claimAgent || !strings.Contains(reason, "pool: full (1/1)") {
+		t.Errorf("the refusal names the occupied seat: %q (%s)", agent, reason)
+	}
+	claims, err := poolSeatLedgerFor(town, newPoolSeatClaimStore()).read()
+	if err != nil {
+		t.Fatalf("reading seat claims: %v", err)
+	}
+	if len(claims) != 0 {
+		t.Errorf("a refused sling must not claim a seat: %v", claims)
+	}
+}
