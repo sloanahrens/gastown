@@ -209,7 +209,7 @@ that may not be available in every environment. Use the helpers in
 | Helper | When to use |
 |--------|-------------|
 | `testutil.RequireDoltContainer(t)` | Test needs a running Dolt SQL server (starts a Docker container) |
-| `testutil.LeaseScratchDoltContainer(t)` | Code under test creates databases it names (gt install, gt rig add); a sequential test leases one shared scratch server, reset to its starting catalog after each test |
+| `testutil.LeaseScratchDoltContainer(t)` | Code under test creates databases it names (gt install, gt rig add); the test leases a scratch server exclusively, reset to its starting catalog when the test ends. A parallel test takes `LeaseScratchDoltContainerEnv` instead |
 | `testutil.RequireTownEnv(t)` | Test needs a live Gas Town workspace (checks `workspace.FindFromCwd` + `rigs.json`); returns root path |
 
 **`requireDoltServer`** (in `internal/cmd`) is a local wrapper around

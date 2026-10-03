@@ -18,75 +18,101 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 )
 
-// The scratch Dolt container serves tests whose code under test creates the
+// The scratch Dolt containers serve tests whose code under test creates the
 // databases it names — gt install's hq, gt rig add's rig database. The shared
 // container cannot serve them: its catalog must not change while tests run
 // (doltpool.go), and the next test would meet the last one's databases.
 //
-// Those tests used to start a container each (StartIsolatedDoltContainer).
-// One scratch container per test binary serves them all instead (gt-16rk2): a
-// test leases it exclusively, and when the lease ends every database the test
-// created is dropped, so each lessee starts from the catalog the container
-// started with. Nothing else runs on the container during a lease, so the
-// drops are not the catalog change beside a live session that the pool
-// exists to prevent.
+// A lease is one container to one test, so a container's catalog change is
+// never made beside a live session, and the lease drops what its test created
+// before the next lessee starts. One container per test binary served those
+// lessees (gt-16rk2) until internal/cmd measured the cost: eight tests queued
+// for ~100s of the package's 170s wall on 24 idle cores (gt-6u1qd). The pool
+// starts another container when a lease finds the free list empty, up to
+// scratchContainers, so overlapping lessees run at once while a package whose
+// tests never overlap still starts exactly one container.
 
-// scratchLeaseWait is how long a lease waits for the previous lessee. The
-// lessees are sequential tests, so a wait means one is running in parallel.
+// scratchContainers is the most scratch Dolt containers one test process runs
+// at once, and so the most leases that can overlap. Bounded so the shared
+// Docker VM sees a fixed few rather than one container per test.
+const scratchContainers = 3
+
+// scratchLeaseWait is how long a serial test's lease waits for a container. A
+// wait means scratchContainers tests are already running in parallel.
 const scratchLeaseWait = 5 * time.Minute
 
 // scratchParallelLeaseWait is how long a parallel test's lease waits. The
-// parallel lessees queue for the container behind each other, so the wait is
+// parallel lessees queue for the containers behind each other, so the wait is
 // the sum of their runs, not a sign of misuse.
 const scratchParallelLeaseWait = 10 * time.Minute
 
 // scratchResetTimeout bounds the catalog reset at the end of a lease.
 const scratchResetTimeout = 2 * time.Minute
 
-var scratchDolt struct {
-	once     sync.Once
+// scratchInstance is one container and the catalog it started with.
+type scratchInstance struct {
 	ctr      testcontainers.Container
 	port     string
 	baseline []string // the databases the container started with
-	err      error    // the start failed, or a reset did; no lease is granted after
-	lease    chan struct{}
 }
 
-// LeaseScratchDoltContainer gives t the scratch Dolt container for the rest
-// of the test and returns its port. GT_DOLT_PORT, BEADS_DOLT_PORT and
-// BEADS_DOLT_SERVER_PORT point this process and its subprocesses at it, and
-// BEADS_TEST_SERVER declares it a test server. Not for parallel tests: it sets
-// the environment, and the lease is exclusive.
+// scratchPool is this process's scratch containers: the ones started, the ones
+// no lease holds, and the start failure that stops it growing.
+type scratchPool struct {
+	mu       sync.Mutex
+	insts    []*scratchInstance    // started and alive; at most scratchContainers
+	starting int                   // starts in flight, counted against that cap
+	free     chan *scratchInstance // the containers no lease holds
+	broken   chan struct{}         // closed when a start fails
+	err      error                 // the failure that stopped the pool
+	start    func(context.Context) (*scratchInstance, error)
+}
+
+// newScratchPool returns an empty pool that starts its containers with start.
+func newScratchPool(start func(context.Context) (*scratchInstance, error)) *scratchPool {
+	return &scratchPool{
+		free:   make(chan *scratchInstance, scratchContainers),
+		broken: make(chan struct{}),
+		start:  start,
+	}
+}
+
+var scratch = newScratchPool(startScratchDoltContainer)
+
+// LeaseScratchDoltContainer gives t a scratch Dolt container for the rest of
+// the test and returns its port, pointing GT_DOLT_PORT, BEADS_DOLT_PORT,
+// BEADS_DOLT_SERVER_PORT and BEADS_TEST_SERVER at it process-wide. Not for
+// parallel tests: use LeaseScratchDoltContainerEnv, which returns the same
+// environment for the test to hand to each subprocess.
 func LeaseScratchDoltContainer(t *testing.T) string {
 	t.Helper()
-	leaseScratch(t, scratchLeaseWait)
-	for _, kv := range scratchEnv(scratchDolt.port) {
+	inst := leaseScratch(t, scratchLeaseWait)
+	for _, kv := range scratchEnv(inst.port) {
 		k, v, _ := strings.Cut(kv, "=")
 		t.Setenv(k, v)
 	}
-	return scratchDolt.port
+	return inst.port
 }
 
 // LeaseScratchDoltContainerEnv is LeaseScratchDoltContainer for a parallel
-// test. It takes the same exclusive lease, waiting for the other parallel
-// lessees for up to scratchParallelLeaseWait, and sets nothing: it returns
-// the port and os.Environ() with the variables LeaseScratchDoltContainer
-// would set, which the test must give every bd and gt it runs. A subprocess
-// that inherits the process environment instead reaches the package's shared
-// container, whose catalog must not change.
+// test. It returns the port of a leased container and os.Environ() with the
+// variables LeaseScratchDoltContainer would set, which the test must give
+// every bd and gt it runs. A subprocess that inherits the process environment
+// instead reaches the package's shared container, whose catalog must not
+// change.
 func LeaseScratchDoltContainerEnv(t *testing.T) (port string, env []string) {
 	t.Helper()
-	leaseScratch(t, scratchParallelLeaseWait)
+	inst := leaseScratch(t, scratchParallelLeaseWait)
 	env = os.Environ()
-	for _, kv := range scratchEnv(scratchDolt.port) {
+	for _, kv := range scratchEnv(inst.port) {
 		k, _, _ := strings.Cut(kv, "=")
 		env = beads.StripEnvKey(env, k)
 	}
-	return scratchDolt.port, append(env, scratchEnv(scratchDolt.port)...)
+	return inst.port, append(env, scratchEnv(inst.port)...)
 }
 
-// scratchEnv is the environment that points bd and gt at the scratch
-// container on port.
+// scratchEnv is the environment that points bd and gt at the container on
+// port.
 func scratchEnv(port string) []string {
 	return []string{
 		"GT_DOLT_PORT=" + port,
@@ -96,9 +122,9 @@ func scratchEnv(port string) []string {
 	}
 }
 
-// leaseScratch takes the scratch container for the rest of t, waiting at
-// most wait for the previous lessee, and drops what t created when t ends.
-func leaseScratch(t *testing.T, wait time.Duration) {
+// leaseScratch takes a container for the rest of t, waiting at most wait for
+// one to come free, and drops what t created when t ends.
+func leaseScratch(t *testing.T, wait time.Duration) *scratchInstance {
 	t.Helper()
 	if !DockerTestsEnabled() {
 		t.Skip(dockerTestsSkipMsg)
@@ -107,58 +133,136 @@ func leaseScratch(t *testing.T, wait time.Duration) {
 		t.Fatal(dockerMissingMsg)
 	}
 
-	scratchDolt.once.Do(startScratchDoltContainer)
-	select {
-	case scratchDolt.lease <- struct{}{}:
-	case <-time.After(wait):
-		t.Fatalf("scratch Dolt container still leased after %s", wait)
-	}
-	if scratchDolt.err != nil {
-		<-scratchDolt.lease
-		t.Fatalf("scratch Dolt container (%s=1 opted in, so a missing container fails): %v", DockerTestsEnv, scratchDolt.err)
-	}
-	t.Cleanup(func() {
-		defer func() { <-scratchDolt.lease }()
-		if err := resetScratchCatalog(); err != nil {
-			scratchDolt.err = fmt.Errorf("resetting the catalog after %s: %w", t.Name(), err)
-			t.Errorf("scratch Dolt container: %v", scratchDolt.err)
+	deadline := time.Now().Add(wait)
+	for {
+		inst, err := scratch.acquire()
+		if err != nil {
+			t.Fatalf("scratch Dolt container (%s=1 opted in, so a missing container fails): %v", DockerTestsEnv, err)
 		}
-	})
+		if inst != nil {
+			return holdScratch(t, inst)
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			t.Fatalf("no scratch Dolt container free after %s", wait)
+		}
+		select {
+		case inst := <-scratch.free:
+			return holdScratch(t, inst)
+		case <-scratch.broken:
+			t.Fatalf("scratch Dolt container (%s=1 opted in, so a missing container fails): %v", DockerTestsEnv, scratch.startErr())
+		case <-time.After(remaining):
+		}
+	}
 }
 
-// startScratchDoltContainer starts the scratch container and records its
-// starting catalog.
-func startScratchDoltContainer() {
-	scratchDolt.lease = make(chan struct{}, 1)
-	ctx := context.Background()
+// holdScratch gives t the lease on inst, and when t ends resets the catalog it
+// created on and returns it to the pool.
+func holdScratch(t *testing.T, inst *scratchInstance) *scratchInstance {
+	t.Helper()
+	t.Cleanup(func() {
+		defer scratch.release(inst)
+		if err := resetScratchCatalog(inst); err != nil {
+			err = fmt.Errorf("resetting the catalog after %s: %w", t.Name(), err)
+			scratch.fail(err)
+			t.Errorf("scratch Dolt container: %v", err)
+		}
+	})
+	return inst
+}
+
+// acquire returns a free container or starts one while the pool is under
+// scratchContainers. A nil container with a nil error means every slot is
+// leased or starting, so the caller waits; a start that fails stops the pool
+// and every lease reports it from here on.
+func (p *scratchPool) acquire() (*scratchInstance, error) {
+	p.mu.Lock()
+	if p.err != nil {
+		err := p.err
+		p.mu.Unlock()
+		return nil, err
+	}
+	select {
+	case inst := <-p.free:
+		p.mu.Unlock()
+		return inst, nil
+	default:
+	}
+	if p.starting+len(p.insts) >= scratchContainers {
+		p.mu.Unlock()
+		return nil, nil
+	}
+	// Hold the slot across the start, so concurrent lessees cannot between
+	// them start more than scratchContainers.
+	p.starting++
+	p.mu.Unlock()
+
+	inst, err := p.start(context.Background())
+
+	p.mu.Lock()
+	p.starting--
+	if err != nil {
+		p.mu.Unlock()
+		p.fail(err)
+		return nil, err
+	}
+	p.insts = append(p.insts, inst)
+	p.mu.Unlock()
+	return inst, nil
+}
+
+// release returns inst to the pool for the next lessee.
+func (p *scratchPool) release(inst *scratchInstance) {
+	p.free <- inst
+}
+
+// fail records the first failure that stopped the pool and wakes every lessee
+// waiting for a container.
+func (p *scratchPool) fail(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.err == nil {
+		p.err = err
+		close(p.broken)
+	}
+}
+
+// startErr returns the failure that stopped the pool, if any.
+func (p *scratchPool) startErr() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.err
+}
+
+// startScratchDoltContainer starts one container and records its starting
+// catalog.
+func startScratchDoltContainer(ctx context.Context) (*scratchInstance, error) {
 	ctr, err := runDoltContainerWithRetry(ctx)
 	if err != nil {
-		scratchDolt.err = fmt.Errorf("starting Dolt container: %w", err)
-		return
+		return nil, fmt.Errorf("starting Dolt container: %w", err)
 	}
 	port, err := waitForMappedPort(ctx, doltPortLookup(ctr))
 	if err == nil {
-		scratchDolt.port = port
-		scratchDolt.baseline, err = scratchDatabases(ctx)
+		inst := &scratchInstance{ctr: ctr, port: port}
+		if inst.baseline, err = scratchDatabases(ctx, port); err == nil {
+			n, _ := strconv.Atoi(port)
+			beads.RegisterTestServerPort(n)
+			return inst, nil
+		}
 	}
-	if err != nil {
-		scratchDolt.err = containerStartError(ctx, ctr, err)
-		_ = terminateContainer(ctr)
-		return
-	}
-	scratchDolt.ctr = ctr
-	n, _ := strconv.Atoi(port)
-	beads.RegisterTestServerPort(n)
+	startErr := containerStartError(ctx, ctr, err)
+	_ = terminateContainer(ctr)
+	return nil, startErr
 }
 
-// openScratch opens a session pool on the scratch container.
-func openScratch() (*sql.DB, error) {
-	return sql.Open("mysql", "root:@tcp(127.0.0.1:"+scratchDolt.port+")/?timeout=10s&readTimeout=60s&writeTimeout=60s")
+// openScratch opens a session pool on the scratch container on port.
+func openScratch(port string) (*sql.DB, error) {
+	return sql.Open("mysql", "root:@tcp(127.0.0.1:"+port+")/?timeout=10s&readTimeout=60s&writeTimeout=60s")
 }
 
-// scratchDatabases lists the scratch container's databases.
-func scratchDatabases(ctx context.Context) ([]string, error) {
-	db, err := openScratch()
+// scratchDatabases lists the databases on the scratch container on port.
+func scratchDatabases(ctx context.Context, port string) ([]string, error) {
+	db, err := openScratch(port)
 	if err != nil {
 		return nil, err
 	}
@@ -179,16 +283,17 @@ func scratchDatabases(ctx context.Context) ([]string, error) {
 	return names, rows.Err()
 }
 
-// resetScratchCatalog drops every database the container did not start with.
-func resetScratchCatalog() error {
+// resetScratchCatalog drops every database the container did not start with,
+// so the next lease of it starts from the catalog it began with.
+func resetScratchCatalog(inst *scratchInstance) error {
 	ctx, cancel := context.WithTimeout(context.Background(), scratchResetTimeout)
 	defer cancel()
-	now, err := scratchDatabases(ctx)
+	now, err := scratchDatabases(ctx, inst.port)
 	if err != nil {
 		return err
 	}
-	extra := databasesAdded(scratchDolt.baseline, now)
-	db, err := openScratch()
+	extra := databasesAdded(inst.baseline, now)
+	db, err := openScratch(inst.port)
 	if err != nil {
 		return err
 	}
@@ -223,13 +328,31 @@ func databasesAdded(baseline, now []string) []string {
 	return added
 }
 
-// terminateScratchDoltContainer stops and removes the scratch container, if
-// this process started one.
-func terminateScratchDoltContainer() error {
-	if scratchDolt.ctr == nil {
+// scratchContainerAny returns a started scratch container. Every instance
+// starts with the same options, so a test that inspects the options rather
+// than a leased catalog may take any of them. Returns nil before the pool has
+// started one.
+func scratchContainerAny() testcontainers.Container {
+	scratch.mu.Lock()
+	defer scratch.mu.Unlock()
+	if len(scratch.insts) == 0 {
 		return nil
 	}
-	err := terminateContainer(scratchDolt.ctr)
-	scratchDolt.ctr = nil
-	return err
+	return scratch.insts[0].ctr
+}
+
+// terminateScratchDoltContainer stops and removes every scratch container
+// this process started.
+func terminateScratchDoltContainer() error {
+	scratch.mu.Lock()
+	insts := scratch.insts
+	scratch.insts = nil
+	scratch.mu.Unlock()
+	var errs []error
+	for _, inst := range insts {
+		if err := terminateContainer(inst.ctr); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }

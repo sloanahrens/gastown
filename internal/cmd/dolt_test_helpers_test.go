@@ -31,9 +31,10 @@ func requireDoltServer(t *testing.T) {
 // and a later test creates the same names again. On the shared container that
 // is a catalog change while other tests run, which the pool's teardown guard
 // fails the package for (internal/testutil/doltpool.go), and the next test
-// meets the last one's databases. The scratch container is leased to one test
-// at a time and dropped back to its starting catalog after each, so these
-// tests share one container instead of starting one each (gt-16rk2).
+// meets the last one's databases. A lease holds one scratch container
+// exclusively and drops it back to its starting catalog when the test ends, so
+// these tests share a small pool instead of starting a container each
+// (gt-16rk2, gt-6u1qd).
 func requireScratchDoltServer(t *testing.T) {
 	t.Helper()
 	testutil.LeaseScratchDoltContainer(t)
