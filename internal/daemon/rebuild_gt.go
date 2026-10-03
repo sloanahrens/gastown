@@ -203,6 +203,10 @@ func (d *Daemon) triggerRebuildGT() {
 		d.logger.Printf("rebuild_gt: WARNING: %s — %s", dec.warn, dec.note)
 	}
 	go func() {
+		// Registered first so it runs last, after the guard clears: a test
+		// woken by it reads the cycle's own end, not an earlier cycle's
+		// (gt-v0t6k).
+		defer d.noteRebuildGTCycleDone()
 		defer d.rebuildGTRunning.Store(false)
 		if !d.runRebuildGT() {
 			// Nothing accomplished: leave the gate open so the next
@@ -215,6 +219,15 @@ func (d *Daemon) triggerRebuildGT() {
 			d.logger.Printf("rebuild_gt: WARNING: cannot persist last-run time (%v)", err)
 		}
 	}()
+}
+
+// noteRebuildGTCycleDone tells a test its wait for a cycle is over (see
+// rebuildGTCycleDoneFn). It runs on the cycle's goroutine, so the hook must not
+// block: a test that stopped waiting cannot stall the cycle (gt-v0t6k).
+func (d *Daemon) noteRebuildGTCycleDone() {
+	if d.rebuildGTCycleDoneFn != nil {
+		d.rebuildGTCycleDoneFn()
+	}
 }
 
 // requestRebuildGTInstall arms the sticky request that makes the next

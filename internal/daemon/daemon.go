@@ -365,6 +365,14 @@ type Daemon struct {
 	// landed (gt-u641b), so isIdleForUpgrade waits for it to reach zero.
 	landingPasses atomic.Int32
 
+	// landingPassFn, when non-nil, is called on the landing loop's goroutine
+	// once a pass's report has been applied, before the next pass starts. Test
+	// seam (gt-v0t6k): the wait helpers in landing_drain_test.go block on it
+	// rather than on a runtime.Gosched budget, which runs out under load
+	// before the landing goroutine is scheduled. It must not block; nil in
+	// production.
+	landingPassFn func()
+
 	// upgradeRestartPending is true while a restart marker the daemon must
 	// act on exists. The landing workers drain on it: they finish the pass in
 	// flight and start no new one, so the restart finds an idle moment
@@ -410,6 +418,13 @@ type Daemon struct {
 	rebuildGTRunning   atomic.Bool
 	rebuildGTRequested atomic.Bool
 	rebuildGTBlock     rebuildGTBlock
+
+	// rebuildGTCycleDoneFn, when non-nil, is called on the cycle's own
+	// goroutine as it ends, after rebuildGTRunning clears. Test seam
+	// (gt-v0t6k): awaitRebuildGTIdle blocks on it rather than on a
+	// runtime.Gosched budget, which runs out under load before the cycle
+	// goroutine is scheduled. It must not block; nil in production.
+	rebuildGTCycleDoneFn func()
 
 	// tierSweepRunning is the tier_sweep job's single-flight guard
 	// (tier_sweep.go).
