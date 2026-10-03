@@ -12,9 +12,7 @@ sections and the acceptance list of a task, bug or feature the same way; a
 bead's type and labels do not decide whether it is checked.
 
 The label `spec` is **retired: accepted and ignored** (gt-mmsr2). Leave it off
-new beads; a filer who adds it by habit changes nothing. The spec-template doc
-(`~/.claude/docs/agents/spec-template.md`) and `gt spec lint --help` say the
-same.
+new beads; a filer who adds it by habit changes nothing.
 
 ## `gt spec lint <id>`
 
@@ -38,9 +36,11 @@ Exit 0 means clean. Exit 1 means refused. Exit 2 means the spec needs planning:
 label `needs-planning`, a Size that says planning, or more than six
 acceptance items. `--json` does not change the exit codes.
 
-The template path is daemon.json `patrols.spec_dispatch.template`, else the
-file above, else the five sections built in. `/workorder` runs `gt spec lint <id>` after filing when
-`gt spec lint --help` succeeds, so both read one shape.
+The required `## ` sections are the template file's when that file exists:
+daemon.json `patrols.spec_dispatch.template`, else
+`~/.claude/docs/agents/spec-template.md`. With no template file, or one
+carrying no `## ` heading, the built-in Goal, Constraints, Out of scope, Gate
+and Size are checked instead.
 
 ## `gt spec dispatch`
 
