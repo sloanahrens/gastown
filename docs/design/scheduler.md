@@ -231,8 +231,7 @@ daemon at construction, since cmd is what starts it.
 6. **Cook formula** — `bd cook` to catch bad protos before daemon dispatch
 7. **Build context fields** — `SlingContextFields` struct with all sling params
 8. **Create sling context** — `bd create --ephemeral` + `bd dep add --type=tracks` (atomic)
-9. **Auto-convoy** — create convoy if not already tracked, store convoy ID in context fields
-10. **Log event** — feed event for dashboard visibility
+9. **Log event** — feed event for dashboard visibility
 
 The create is a **single atomic operation** — no two-step write, no rollback needed.
 
