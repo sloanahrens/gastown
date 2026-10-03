@@ -350,28 +350,13 @@ func compactWisps(bd *beads.Beads, allWisps []*beads.Issue, ttls map[string]time
 	}
 }
 
-// listWisps queries the issues plane and keeps the ephemeral entries. It does
-// not pass IncludeInfra, the same scope the raw `bd list --all` call it
-// replaced asked for; on a database whose wisps live in the wisp plane that
-// yields none, which gt-ekep1 owns fixing. Widening the scope here would
-// change what compaction deletes and promotes.
-func listWisps(bd *beads.Beads) ([]*beads.Issue, error) {
+// listWisps reads the wisp plane. Ephemeral selects it explicitly: bd list
+// leaves wisps out of its default view, so an issues-plane query returns none
+// of them (gt-ekep1).
+func listWisps(bd beads.Client) ([]*beads.Issue, error) {
 	// Status "all" keeps closed wisps in the result; Priority -1 leaves the
 	// priority unfiltered (0 would mean P0).
-	issues, err := bd.List(beads.ListOptions{Status: "all", Priority: -1})
-	if err != nil {
-		return nil, err
-	}
-
-	// Filter to ephemeral only
-	var wisps []*beads.Issue
-	for _, issue := range issues {
-		if issue.Ephemeral {
-			wisps = append(wisps, issue)
-		}
-	}
-
-	return wisps, nil
+	return bd.List(beads.ListOptions{Ephemeral: true, Status: "all", Priority: -1})
 }
 
 // extractJSONArray finds the first '[' byte in data and returns from that
