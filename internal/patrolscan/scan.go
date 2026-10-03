@@ -7,7 +7,10 @@
 //     enforces the park/freeze, e-stop, submitted and 3-per-hour budget
 //     guards in one place. A submitted seat is restarted once its work bead
 //     stops reading as submitted, which is how a landing pulled for rework
-//     comes back to a session it no longer has (gt-xs1ni);
+//     comes back to a session it no longer has (gt-xs1ni). A seat whose
+//     agent bead reads stuck after a DEFERRED exit is restarted the same
+//     way, on its preserved branch: that bead is a finished turn left behind
+//     by gt done, not a polecat holding the seat (gt-ks62m);
 //   - orphaned molecules: a polecat that is gone (no session and no
 //     directory) leaves its work bead's bonded mol-polecat-work wisp and step
 //     wisps open; they are closed so the base bead is not blocked by them;
@@ -44,6 +47,14 @@ import (
 // land.LabelReadyToLand, repeated here so this package stays out of the land
 // package's dependency tree; a daemon test pins the two together.
 const ReadyToLandLabel = "gt:ready-to-land"
+
+// ExitDeferred is the gt done exit type that hands a finished turn on. A
+// polecat that exits DEFERRED signaled neither completion nor an escalation:
+// its worktree keeps the commits it made and a successor is expected to carry
+// the bead on. It is done.ExitDeferred, repeated here so this package stays
+// out of the done package's dependency tree; a daemon test pins the two
+// together.
+const ExitDeferred = "DEFERRED"
 
 // Defaults.
 const (
@@ -100,6 +111,21 @@ func hasResumeBranch(notes, branch string) bool {
 		}
 	}
 	return false
+}
+
+// AgentRecord is the slice of a polecat's agent bead the tick reads to tell a
+// seat the polecat still holds from the record of a finished turn: gt done
+// writes the state, the exit type and the cleanup status together when the
+// turn ends.
+type AgentRecord struct {
+	// State is agent_state (stuck, awaiting-gate, paused, done, nuked, ...).
+	State string
+	// ExitType is the gt done exit type the bead recorded (DEFERRED,
+	// ESCALATED, COMPLETED), "" when the bead carries none.
+	ExitType string
+	// CleanupStatus is the polecat's self-reported git state (clean,
+	// has_uncommitted, has_stash, has_unpushed), "" when the bead carries none.
+	CleanupStatus string
 }
 
 // Work is the slice of a work bead the tick decides on.
@@ -171,10 +197,10 @@ type Env interface {
 	// longer submitted for landing, so the ordinary path can decide what the
 	// seat needs. It reports whether the record changed.
 	ClearSubmission(rig, polecat, workBead string) (bool, error)
-	// AgentState returns the agent_state the polecat's agent bead records
-	// (stuck, awaiting-gate, paused, done, ...). It is read only to refuse a
+	// AgentRecord returns the agent_state, gt done exit type and cleanup
+	// status the polecat's agent bead records. It is read only to refuse a
 	// restart, never to cause one.
-	AgentState(rig, polecat string) (string, error)
+	AgentRecord(rig, polecat string) (AgentRecord, error)
 	// Heartbeat returns the session heartbeat, nil when there is none.
 	Heartbeat(rig, polecat string) *Heartbeat
 	// Restart restarts the seat through the supervisor.
@@ -472,12 +498,37 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 	// Hazard 1 (gt-x45us): a polecat that parked itself is not a crash,
 	// whatever else the record says. The agent bead is read only here, only
 	// to refuse, and an unreadable one is Unknown.
-	state, err := s.env.AgentState(rig, name)
+	agent, err := s.env.AgentRecord(rig, name)
 	if err != nil {
 		return unknown("agent state unreadable", err)
 	}
-	switch strings.ToLower(strings.TrimSpace(state)) {
-	case "stuck", "awaiting-gate", "paused":
+	// deferredExit records that the bead reads stuck after a DEFERRED exit:
+	// the turn ended without completing or escalating, so a successor is
+	// expected to carry the bead on. It is not a hold, and the restart below
+	// says so.
+	deferredExit := false
+	switch state := strings.ToLower(strings.TrimSpace(agent.State)); state {
+	case "stuck":
+		// agent_state=stuck is not a self-park. The only writer is gt done's
+		// own exit path, which sets it for every non-COMPLETED exit
+		// (internal/cmd/done_agent_state.go); a live polecat that is stuck
+		// holds the seat through its heartbeat instead, which is checked
+		// below. A stale stuck bead left by a DEFERRED exit is a finished
+		// turn whose worktree still holds unpushed commits and whose bead is
+		// still hooked, so it falls through to the ordinary dead-session path
+		// and the supervisor restarts the seat on its preserved branch rather
+		// than leaving the work dead until an operator notices (gt-ks62m). An
+		// ESCALATED exit is the operator's: the polecat stopped on purpose to
+		// raise a blocker, and a restart would fight it.
+		if !strings.EqualFold(strings.TrimSpace(agent.ExitType), ExitDeferred) {
+			detail := "agent_state stuck: stopped on purpose"
+			if e := strings.TrimSpace(agent.ExitType); e != "" {
+				detail += " (exit " + e + ")"
+			}
+			return skip(detail)
+		}
+		deferredExit = true
+	case "awaiting-gate", "paused":
 		return skip("agent_state " + state + ": held by the polecat")
 	case "done", "nuked":
 		return skip("agent_state " + state + ": stopped on purpose")
@@ -500,6 +551,17 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 	}
 
 	reason := fmt.Sprintf("patrol scan: %s with %s hooked (%d dead samples)", res.Reason, work.ID, samples)
+	if deferredExit {
+		// A restart here is a recovery, not a crash relaunch: name the turn
+		// that ended and what the worktree holds, so the reason line reads as
+		// the recovery it is (gt-ks62m).
+		cleanup := strings.TrimSpace(agent.CleanupStatus)
+		if cleanup == "" {
+			cleanup = "unknown"
+		}
+		reason = fmt.Sprintf("patrol scan: %s with %s hooked after a DEFERRED exit (cleanup_status %s, %d dead samples)",
+			res.Reason, work.ID, cleanup, samples)
+	}
 	if err := s.env.Restart(rig, name, reason); err != nil {
 		if s.o.IsRefusal(err) {
 			f.Outcome, f.Detail = OutcomeRefused, err.Error()

@@ -402,13 +402,26 @@ func (h *patrolScanHost) ClearSubmission(rig, name, workBead string) (bool, erro
 	return intent.ClearLanded(h.town(), supervisor.IntentSeat(h.seat(rig, name)), workBead, patrolscan.Actor, h.d.clk().Now())
 }
 
-func (h *patrolScanHost) AgentState(rig, name string) (string, error) {
+// AgentRecord reads the polecat's agent bead: the state, the gt done exit type
+// and the cleanup status gt done wrote beside it. One read answers all three,
+// since they are one record of how the last turn ended.
+func (h *patrolScanHost) AgentRecord(rig, name string) (patrolscan.AgentRecord, error) {
 	id := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(h.town(), rig), rig, name)
 	issue, err := h.readBeads(rig).Show(id)
 	if err != nil {
-		return "", err
+		return patrolscan.AgentRecord{}, err
 	}
-	return beads.ResolveAgentState(issue.Description, issue.AgentState), nil
+	if issue == nil {
+		// Fail closed: a read that answered nothing is not "no state", which
+		// the tick would read as a free seat.
+		return patrolscan.AgentRecord{}, fmt.Errorf("bd show %s: no issue", id)
+	}
+	rec := patrolscan.AgentRecord{State: beads.ResolveAgentState(issue.Description, issue.AgentState)}
+	if f := beads.ParseAgentFields(issue.Description); f != nil {
+		rec.ExitType = f.ExitType
+		rec.CleanupStatus = f.CleanupStatus
+	}
+	return rec, nil
 }
 
 func (h *patrolScanHost) Heartbeat(rig, name string) *patrolscan.Heartbeat {
