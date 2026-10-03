@@ -67,13 +67,23 @@ func patrolScanOptions(config *DaemonPatrolConfig, now func() time.Time) patrols
 		HoldReason: func(w patrolscan.Work) string {
 			return dispatch.DispatchHoldFields(w.Status, w.Labels, w.Assignee, w.Design, w.Notes)
 		},
-		IsRefusal: func(err error) bool { return errors.Is(err, supervisor.ErrRefused) },
-		Now:       now,
+		IsRefusal: func(err error) bool {
+			return errors.Is(err, supervisor.ErrRefused) || errors.Is(err, errReapRefused)
+		},
+		Now: now,
 	}
 	if c := patrolScanConfig(config); c != nil {
 		o.DeadSamples = c.DeadSamples
 		if d, err := time.ParseDuration(c.ReportWindow); err == nil && d > 0 {
 			o.ReportWindow = d
+		}
+		if wc := c.WorktreeCleanup; wc.IsEnabled() {
+			o.Reap = &patrolscan.ReapOptions{
+				DryRun:      wc.IsDryRun(),
+				Grace:       wc.Grace(),
+				ParkedGrace: wc.ParkedGrace(),
+				MaxPerTick:  wc.Cap(),
+			}
 		}
 	}
 	return o
@@ -272,6 +282,14 @@ type patrolScanHost struct {
 	// openRecoveryBeads is the routed bd client when nil: a seam for the unit
 	// tier, which cannot start bd.
 	openRecoveryBeads func(env []string) beads.Client
+	// reapBatches caches each rig's check-recovery-batch for the life of this
+	// host, which is one tick: the reap pass asks for a verdict on every
+	// session-less seat, and one bulk sweep must answer them all.
+	reapBatches map[string]reapBatch
+	// reapClaims caches each rig's non-terminal bead listing for this tick:
+	// every seat with a branch asks whether a bead claims it, and one
+	// listing answers them all.
+	reapClaims map[string]reapClaim
 }
 
 var _ patrolscan.Env = (*patrolScanHost)(nil)
