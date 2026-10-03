@@ -28,7 +28,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/specdispatch"
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // Tag says how a field was observed.
@@ -881,16 +881,23 @@ func failedLabelCount(ticks []DispatchTick) int {
 // withFailedLabels puts the beads the label is holding in front of the
 // operator: a dispatcher that is otherwise healthy still leaves them out of
 // the queue, so the field degrades and its value carries the count (gt-q6zoo).
+//
+// The count rides as a parenthesised clause after whatever state the field
+// already reads ("ok (2 failed)", "off (2 failed)", "stalled (1 failed)"), so
+// it composes with every state the dispatcher can be in without the state word
+// and the number running together as one phrase (om, gt-q6zoo attempt 1).
 func withFailedLabels(f Field, n int) Field {
-	detail := fmt.Sprintf("%d bead(s) labeled %s are out of the queue until the label is cleared", n, specdispatch.DispatchFailedLabel)
+	detail := fmt.Sprintf("%d bead(s) labeled %s are out of the queue until the label is cleared", n, constants.LabelSpecDispatchFailed)
 	if f.Detail != "" {
 		detail = f.Detail + "; " + detail
 	}
 	f.Detail = detail
-	// UNKNOWN keeps its "?" value: the count rides in the detail, so the one
-	// convention an unknown field has is not broken.
+	// UNKNOWN keeps its "?" value and carries the count in the detail alone:
+	// the count is one thing the line cannot show for a field whose question
+	// nobody could answer, and breaking the "?" convention to show it would
+	// cost every reader of the line more than it tells them.
 	if f.Verdict != VerdictUnknown {
-		f.Value = fmt.Sprintf("%s %d failed", f.Value, n)
+		f.Value = fmt.Sprintf("%s (%d failed)", f.Value, n)
 	}
 	if f.Verdict == Green {
 		f.Verdict = Degraded

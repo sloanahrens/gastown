@@ -221,8 +221,8 @@ func formatSpecDispatchReport(out []byte) []string {
 	if r.Hold != "" {
 		return []string{"held: " + r.Hold}
 	}
-	lines := []string{fmt.Sprintf("tick: %d candidate(s), roster %s, %d dispatched, %d refused, %d planning, %d skipped, %d failed",
-		r.Candidates, r.Roster, len(r.Dispatched), len(r.Refused), len(r.Planning), len(r.Skipped), len(r.Failed))}
+	lines := []string{fmt.Sprintf("tick: %d candidate(s), roster %s, %d dispatched, %d refused, %d planning, %d skipped, %d failed, %d held by the failed label",
+		r.Candidates, r.Roster, len(r.Dispatched), len(r.Refused), len(r.Planning), len(r.Skipped), len(r.Failed), r.LabeledFailed)}
 	for _, group := range []struct {
 		name    string
 		entries []struct {

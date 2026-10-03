@@ -167,8 +167,18 @@ not a full town (gt-xiw7o).
 
 The field counts the ready beads carrying `spec-dispatch-failed` as well, so a
 bead a failed dispatch left out of the queue is visible even while the
-dispatcher itself is healthy: `dispatch=ok_3_failed[R]` is three beads waiting
-for someone to clear the label (gt-q6zoo).
+dispatcher itself is healthy: `dispatch=ok_(3_failed)[R]` is three beads
+waiting for someone to clear the label (gt-q6zoo). The count is the newest
+tick's, so it comes off the line on the next tick after the label is cleared;
+it rides whichever state the field already reads (`off_(2_failed)`,
+`stalled_(1_failed)`), and a `dispatch[?]` or `dispatch=silent[R]` field shows
+it in the detail only — a field with no answer, or no tick in the window, has
+no count to show on the line.
+
+The count is read from the tick's own ready board, not a second query: the
+`bd ready --json` the dispatcher runs hydrates each issue's `labels` array
+(verified against a live board, gt-q6zoo), so the beads the label holds are in
+the same snapshot as the candidates and the tick counts them in one pass.
 
 ## seat-refill
 

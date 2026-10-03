@@ -970,6 +970,16 @@ func specCandidates(townRoot string, maxPriority int, board specBoard) specBoard
 // board must carry the beads it holds so the tick can count them and the
 // health line can show the count (gt-q6zoo). Eligible still keeps them out of
 // the candidate set.
+//
+// The count is read from this board, not a second query, because `bd ready
+// --json` hydrates each issue's labels array. That is the CLI's own answer for
+// the bd on PATH (RunBdJSONAllowStale runs it as a subprocess); the notes in
+// internal/cmd/ready.go and internal/beads about `bd ready --json` carrying no
+// labels describe the store-backed readers, which build their issue list from
+// the store and never see this JSON. A live board captured 2026-10-02 with
+// these exact args carried labels on 61 of 72 issues (every issue that has
+// any), and TestCapturedSpecBoardCarriesLabels pins the shape against a
+// captured board whose labeled bead is the one the dispatcher itself labeled.
 func specReadyArgs() []string {
 	exclude := append([]string(nil), constants.NonDispatchableBeadLabels...)
 	for _, l := range specdispatch.ExcludedLabels() {

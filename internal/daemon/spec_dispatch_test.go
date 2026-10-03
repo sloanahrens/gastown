@@ -53,13 +53,20 @@ func TestFormatSpecDispatchReport(t *testing.T) {
 	lines := formatSpecDispatchReport(out)
 	joined := strings.Join(lines, "\n")
 	for _, want := range []string{
-		"tick: 3 candidate(s), roster claude-sonnet 1/2, deepseek-flash 2/2, 1 dispatched, 1 refused, 0 planning, 1 skipped, 0 failed",
+		"tick: 3 candidate(s), roster claude-sonnet 1/2, deepseek-flash 2/2, 1 dispatched, 1 refused, 0 planning, 1 skipped, 0 failed, 0 held by the failed label",
 		"dispatched: gt-a: slung to gastown/p",
 		"refused: gt-b: spec lint refused: ## Gate",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing %q in:\n%s", want, joined)
 		}
+	}
+	// The tick line carries the beads the spec-dispatch-failed label is
+	// holding out of the queue: a tick that dispatched nothing but left two
+	// beads stuck must say so in the daemon log, not only in the health field
+	// (om, gt-q6zoo attempt 1).
+	if got := formatSpecDispatchReport([]byte(`{"candidates": 3, "labeled_failed": 2}`)); !strings.Contains(got[0], "2 held by the failed label") {
+		t.Errorf("tick line = %q, want it to carry the 2 beads held by the label", got[0])
 	}
 	if got := formatSpecDispatchReport([]byte(`{"notices":["gastown: ignoring stale revert: revert of gt-cul has been building for 31m"]}`)); len(got) != 2 || got[1] != "note: gastown: ignoring stale revert: revert of gt-cul has been building for 31m" {
 		t.Errorf("notices = %v", got)

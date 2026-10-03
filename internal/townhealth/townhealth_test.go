@@ -563,12 +563,36 @@ func TestDispatch(t *testing.T) {
 		{
 			"a working dispatcher holding beads out of the queue is degraded, not green",
 			DispatchRecord{Active: true, Ticks: []DispatchTick{{At: ago(2 * time.Minute), Candidates: 3, Seats: []DispatchSeat{{Live: 1, Cap: 2}}, Dispatched: 1, LabeledFailed: 2}}},
-			ago(time.Hour), Recorded, Degraded, "ok 2 failed", "labeled spec-dispatch-failed", "dispatch=ok_2_failed[R]",
+			ago(time.Hour), Recorded, Degraded, "ok (2 failed)", "labeled spec-dispatch-failed", "dispatch=ok_(2_failed)[R]",
 		},
 		{
 			"a held dispatcher still surfaces the beads it left labeled",
 			DispatchRecord{Hold: "town ESTOP active", Ticks: []DispatchTick{{At: ago(2 * time.Minute), Candidates: 3, Seats: []DispatchSeat{{Live: 1, Cap: 2}}, LabeledFailed: 1}}},
-			ago(time.Hour), Recorded, Degraded, "held 1 failed", "labeled spec-dispatch-failed", "dispatch=held_1_failed[R]",
+			ago(time.Hour), Recorded, Degraded, "held (1 failed)", "labeled spec-dispatch-failed", "dispatch=held_(1_failed)[R]",
+		},
+		{
+			"the count reads on an off dispatcher too: the beads are stuck whether or not the ticker runs",
+			DispatchRecord{Active: false, Ticks: []DispatchTick{{At: ago(2 * time.Minute), Candidates: 3, LabeledFailed: 2}}},
+			ago(time.Hour), Recorded, Red, "off (2 failed)", "labeled spec-dispatch-failed", "dispatch=off_(2_failed)[R]",
+		},
+		{
+			"the count reads on a stalled dispatcher: a stall does not hide the beads already stuck",
+			DispatchRecord{Active: true, Ticks: []DispatchTick{{At: ago(2 * time.Minute), Candidates: 2, Seats: []DispatchSeat{{Live: 1, Cap: 2}}, LabeledFailed: 1}}},
+			ago(time.Hour), Recorded, Red, "stalled (1 failed)", "labeled spec-dispatch-failed", "dispatch=stalled_(1_failed)[R]",
+		},
+		{
+			// "silent" means no tick inside the window, and the count comes
+			// from the newest tick inside it, so the two cannot combine: a
+			// silent field carries no count, and the detail is the only place
+			// a stale count could hide — which failedLabelCount refuses to do.
+			"a silent dispatcher carries no count: there is no tick in the window to count from",
+			DispatchRecord{Active: true, Ticks: []DispatchTick{{At: ago(11 * time.Minute), Candidates: 3, LabeledFailed: 4}}},
+			ago(30 * time.Minute), Recorded, Red, "silent", "no tick in the last 10m", "dispatch=silent[R]",
+		},
+		{
+			"an unknown dispatch field keeps its '?' and carries the count in the detail",
+			DispatchRecord{Active: true, Ticks: []DispatchTick{{At: ago(2 * time.Minute), Candidates: 3, RosterUnreadable: true, LabeledFailed: 2}}},
+			ago(time.Hour), Unknown, VerdictUnknown, "?", "labeled spec-dispatch-failed", "dispatch[?]",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -1060,6 +1060,95 @@ func TestSpecCandidatesFromAFakeStore(t *testing.T) {
 	}
 }
 
+// capturedSpecBoard is the board the dispatcher reads, as the dispatcher reads
+// it: the bytes of testdata/spec_ready_labels.json — a `bd ready --json`
+// response captured from the live gastown rig on 2026-10-02 with the exact
+// args specReadyArgs builds — through the production decoder parseSpecReady.
+//
+// The fakes elsewhere in this file hand the decoder a slice of beads.Issue
+// values with Labels filled in, so they cannot catch a read path that never
+// carries labels at all. This one starts from bd's own JSON, which is where
+// om's critical finding lived (gt-q6zoo attempt 1).
+func capturedSpecBoard(t *testing.T) specBoard {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "spec_ready_labels.json"))
+	if err != nil {
+		t.Fatalf("captured board fixture: %v", err)
+	}
+	return func(string) ([]*beads.Issue, error) { return parseSpecReady(data) }
+}
+
+// The count of beads the spec-dispatch-failed label holds comes from the ready
+// board the dispatcher already reads, not a second query, so the count is real
+// only if that board carries labels. `bd ready --json` does: it hydrates a
+// "labels" array on every issue that has one, and the captured board has one
+// bead wearing a real unrelated label and one wearing the dispatcher's own. A
+// bd whose ready JSON dropped labels would fail this test (om's critical
+// finding; the "bd ready --json doesn't include labels" note in ready.go
+// describes the store-backed readers, which never see this JSON).
+func TestCapturedSpecBoardCarriesLabels(t *testing.T) {
+	t.Parallel()
+	issues, err := capturedSpecBoard(t)("")
+	if err != nil {
+		t.Fatalf("decode the captured board: %v", err)
+	}
+	if len(issues) == 0 {
+		t.Fatal("the captured board decoded to no issues")
+	}
+
+	var labeled, unrelated, unlabeled int
+	for _, issue := range issues {
+		s := specFromIssue(issue)
+		switch {
+		case s.HasLabel(specdispatch.DispatchFailedLabel):
+			labeled++
+			if issue.ID != "gt-8xk9k" {
+				t.Errorf("bead %s carries %s; the fixture labels gt-8xk9k", issue.ID, specdispatch.DispatchFailedLabel)
+			}
+		case len(s.Labels) > 0:
+			// gt-wlm2a wears "gt:task" in the capture: the array surviving
+			// the decode, rather than this one label matching by accident.
+			unrelated++
+			if !s.HasLabel("gt:task") {
+				t.Errorf("bead %s lost its captured labels: got %v", issue.ID, s.Labels)
+			}
+		default:
+			unlabeled++
+		}
+	}
+	if labeled != 1 || unrelated != 1 || unlabeled != 1 {
+		t.Errorf("captured board decoded to %d labeled, %d unrelated-label, %d unlabeled beads; want 1 of each", labeled, unrelated, unlabeled)
+	}
+}
+
+// specCandidates counts the beads the label holds in the same pass that builds
+// the candidate list, from the same board. Driving it with the captured board
+// is what would have caught a read path that dropped labels: the count would
+// read 0 and the labeled bead would be admitted as a candidate (om, gt-q6zoo
+// attempt 1).
+func TestSpecCandidatesCountsTheLabeledFailedFromACapturedBoard(t *testing.T) {
+	t.Parallel()
+	townRoot := specTown(t)
+
+	got := specCandidates(townRoot, 3, capturedSpecBoard(t))
+	if len(got.Errors) != 0 {
+		t.Fatalf("errors = %v", got.Errors)
+	}
+	if got.LabeledFailed != 1 {
+		t.Errorf("LabeledFailed = %d, want 1: the captured board carries gt-8xk9k's labels", got.LabeledFailed)
+	}
+	for _, c := range got.Candidates {
+		if c.Spec.ID == "gt-8xk9k" {
+			t.Errorf("gt-8xk9k is a candidate; %s must hold it out of the queue", specdispatch.DispatchFailedLabel)
+		}
+	}
+	// The three captured beads are P3, unassigned and open: the two without
+	// the label are candidates at a P3 ceiling and the labeled one is not.
+	if len(got.Candidates) != 2 {
+		t.Errorf("candidates = %d, want the two unlabeled P3 beads", len(got.Candidates))
+	}
+}
+
 // jsonEscape escapes a string for the JSON test fixtures above.
 func jsonEscape(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`).Replace(s)
