@@ -362,13 +362,9 @@ func isScheduled(beadID string) bool {
 }
 
 // detectSchedulerIDType determines what kind of ID was passed for scheduling.
-// Returns "convoy", "epic", or "task".
+// Returns "epic" or "task". Convoys were retired (gt-gzhin.7): a convoy is no
+// longer schedulable, so its IDs fall through to the task path.
 func detectSchedulerIDType(id string) (string, error) {
-	// Fast path: hq-cv-* is always a convoy
-	if strings.HasPrefix(id, "hq-cv-") {
-		return "convoy", nil
-	}
-
 	info, err := getBeadInfo(id)
 	if err != nil {
 		return "", fmt.Errorf("cannot resolve bead '%s': %w", id, err)
@@ -377,16 +373,12 @@ func detectSchedulerIDType(id string) (string, error) {
 	switch info.IssueType {
 	case "epic":
 		return "epic", nil
-	case "convoy":
-		return "convoy", nil
 	}
 
 	for _, label := range info.Labels {
 		switch label {
 		case "gt:epic":
 			return "epic", nil
-		case "gt:convoy":
-			return "convoy", nil
 		}
 	}
 

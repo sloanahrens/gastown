@@ -1,4 +1,4 @@
-package convoy
+package cmd
 
 import (
 	"context"
@@ -14,17 +14,21 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
-// DepListRawIDs queries the raw dependencies table to get dependency target
+// depListRawIDs queries the raw dependencies table to get dependency target
 // IDs. Unlike bd dep list, this does NOT join with the issues table, so it
 // works for cross-database dependencies where the target issues live in a
 // different Dolt database. See GH #2624.
+//
+// It moved here from internal/convoy when that package was deleted
+// (gt-gzhin.7): the query is generic dependency SQL, not convoy state, and
+// scheduler_epic is its only caller.
 //
 // dir is the town beads directory for HQ queries. direction is "down"
 // (issue_id → depends_on_id) or "up" (depends_on_id → issue_id). depType
 // filters by dependency type (e.g., "tracks", "blocks"); empty means all.
 //
 // It returns deduplicated, unwrapped issue IDs (external:prefix:id → id).
-func (t Town) DepListRawIDs(dir, issueID, direction, depType string) ([]string, error) {
+func depListRawIDs(dir, issueID, direction, depType string) ([]string, error) {
 	// Bead IDs are system-generated alphanumeric strings with hyphens, dots,
 	// and underscores — validate to prevent injection before interpolating below.
 	if !beads.IsValidBeadID(issueID) {
@@ -45,7 +49,7 @@ func (t Town) DepListRawIDs(dir, issueID, direction, depType string) ([]string, 
 		return ids, nil
 	}
 
-	rows, err := t.store(dir).SQLCSV(beadsql.RawDeps(issueID, direction, depType))
+	rows, err := beads.NewPinned(beads.ResolveBeadsDir(dir)).SQLCSV(beadsql.RawDeps(issueID, direction, depType))
 	if err != nil {
 		return nil, fmt.Errorf("bd sql for deps of %s: %w", issueID, err)
 	}
@@ -136,10 +140,4 @@ func parseRawDepRows(rows [][]string, parseKey string) ([]string, error) {
 		}
 	}
 	return ids, nil
-}
-
-// DepListRawIDs is Town.DepListRawIDs for a bare directory and the process
-// environment.
-func DepListRawIDs(dir, issueID, direction, depType string) ([]string, error) {
-	return Town{Root: dir}.DepListRawIDs(dir, issueID, direction, depType)
 }

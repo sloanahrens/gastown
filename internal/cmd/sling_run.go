@@ -104,8 +104,6 @@ type slingDeps struct {
 	rigBeadsDir            func(townRoot, rigName string) (string, bool)
 	resolveFormula         func(explicit string, hookRawBead bool, townRoot, rigName string) string
 	slingFormula           func(ctx context.Context, args []string) error
-	convoySchedule         func(convoyID string, opts convoyScheduleOpts) error
-	convoySling            func(convoyID string, opts convoyScheduleOpts) error
 	epicSchedule           func(epicID string, opts epicScheduleOpts) error
 	epicSling              func(epicID string, opts epicScheduleOpts) error
 
@@ -213,8 +211,6 @@ func realSlingDeps() *slingDeps {
 		rigForBead:             resolveRigForBead,
 		rigBeadsDir:            beads.ResolveRepoAliasBeadsDir,
 		resolveFormula:         resolveFormula,
-		convoySchedule:         runConvoyScheduleByID,
-		convoySling:            runConvoySlingByID,
 		epicSchedule:           runEpicScheduleByID,
 		epicSling:              runEpicSlingByID,
 

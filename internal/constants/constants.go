@@ -240,16 +240,6 @@ const (
 	EmojiPolecat = "😺"
 )
 
-// Molecule formula names for the convoy workflows, used as formula
-// identifiers in `bd mol wisp <name>` commands.
-const (
-	// MolConvoyFeed is the convoy feeder formula name.
-	MolConvoyFeed = "mol-convoy-feed"
-
-	// MolConvoyCleanup is the convoy cleanup formula name.
-	MolConvoyCleanup = "mol-convoy-cleanup"
-)
-
 // SupportedShells lists shell binaries that Gas Town can detect and work with.
 // Used to identify if a tmux pane is at a shell prompt vs running a command.
 var SupportedShells = []string{"bash", "zsh", "sh", "fish", "tcsh", "ksh", "pwsh", "powershell"}

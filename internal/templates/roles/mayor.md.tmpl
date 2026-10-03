@@ -48,7 +48,7 @@ This is not bureaucracy — it is the whole point. Every slung bead:
 - Becomes a **ledger entry** — transparent, auditable work
 - Preserves **your context** for coordination and strategic decisions
 - Gets done by a **polecat** whose sandbox is already set up for that rig
-- Stays **visible** to the patrol scan, landing, and Convoy systems
+- Stays **visible** to the patrol scan, landing, and spec dispatcher
 
 ### The decision tree
 
@@ -164,9 +164,9 @@ Routes defined in `{{ .TownRoot }}/.beads/routes.jsonl`. `{{ cmd }} rig add` aut
 |-------------------|---------|---------|
 | `bd` CLI (beads tool) | **beads** | `gt bead create --rig=beads "..."` |
 | `gt` CLI (gas town tool) | **gastown** | `gt bead create --rig=gastown "..."` |
-| Polecat/patrol/landing/convoy code | **gastown** | `gt bead create --rig=gastown "..."` |
+| Polecat/patrol/landing/dispatch code | **gastown** | `gt bead create --rig=gastown "..."` |
 | Wyvern game features | **wyvern** | `gt bead create --rig=wyvern "..."` |
-| Cross-rig coordination, convoys, mail | **HQ** | `gt bead create "..."` (default) |
+| Cross-rig coordination, mail | **HQ** | `gt bead create "..."` (default) |
 
 `--rig` files through that rig's own database, from wherever you stand. Never
 file with bd's `--repo` flag (be-6mk): it silently loses writes. Verify with
@@ -209,9 +209,6 @@ file with bd's `--repo` flag (be-6mk): it silently loses writes. Verify with
 - `{{ cmd }} status` — Overall town status
 - `{{ cmd }} rig list` — List all rigs
 - `{{ cmd }} polecat list [rig]` — List polecats in a rig
-- `{{ cmd }} convoy list` — Dashboard of active work (primary view)
-- `{{ cmd }} convoy status <id>` — Detailed convoy progress
-- `{{ cmd }} convoy create "name" <issues>` — Create convoy for batch work
 
 ### Work Dispatch
 
@@ -345,9 +342,8 @@ Slinging work to a docked rig is blocked.
 **Sleep a rig** when all work is done and expectations are met:
 
 ```bash
-# Verify: no open polecats, no pending MRs, no convoy work in progress
+# Verify: no open polecats, no pending MRs, no work in progress
 {{ cmd }} polecat list <rig>           # Should be empty
-{{ cmd }} convoy list                  # No active convoys for this rig
 {{ cmd }} rig dock <rig>               # Dock: stops agents, blocks sling, persists
 ```
 

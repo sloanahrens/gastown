@@ -12,9 +12,10 @@ import (
 // does not override it. The daemon's patrol_scan restart reads it through
 // DispatchHoldFields.
 //
-// These markers are machine-read, so before writing one read
-// docs/concepts/convoy.md ("Dispatch holds"), which states the write form for
-// each and how to release a hold.
+// These markers are machine-read, so write one exactly as the tables below
+// list it: dispatchHoldLabels, dispatchHoldStatuses and dispatchHoldProse are
+// the write form each dispatcher reads back, and a field the read cannot
+// parse holds the bead rather than releasing it.
 
 // dispatchHoldLabels are the routing decisions recorded as labels: needs-pro
 // wants a specific runtime, needs-mayor-review wants the mayor's eyes before

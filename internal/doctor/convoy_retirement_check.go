@@ -21,9 +21,9 @@ type ConvoyRetirementCheck struct {
 	open []string
 }
 
-// Convoy bead identity, both markers a convoy can wear. internal/convoy owns
-// these today (ConvoyLabel and IsConvoyIssue); they are repeated here because
-// gt-gzhin.7 deletes that package and this check outlives it.
+// Convoy bead identity, both markers a convoy can wear. internal/convoy owned
+// these (ConvoyLabel and IsConvoyIssue) until gt-gzhin.7 deleted that package,
+// which this check outlives.
 const (
 	convoyLabel     = "gt:convoy"
 	convoyIssueType = "convoy"

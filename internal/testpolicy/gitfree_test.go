@@ -8,8 +8,9 @@ import (
 
 // minGitFree is the number of entries gitfree.txt holds. The list only
 // grows: converting a package onto gitfake adds its line AND raises this, in
-// the same change.
-const minGitFree = 25
+// the same change. It shrinks only when a listed package is deleted, which is
+// why it dropped to 24 with internal/convoy (gt-gzhin.7).
+const minGitFree = 24
 
 func TestGitFreeFindingsFixtures(t *testing.T) {
 	t.Parallel()

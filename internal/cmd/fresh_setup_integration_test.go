@@ -91,40 +91,6 @@ func TestIntegrationFreshInstallRigPolecatHookIntegration(t *testing.T) {
 			hookStatus.Target, hookStatus.HasWork, hookStatus.PinnedBead, issue.ID, agentID)
 	}
 
-	// The gt CLI, not an in-process call: the subprocess takes its town from
-	// the cwd and its Dolt port from env, so the test needs neither Setenv nor
-	// Chdir and can run in the parallel phase.
-	created := runFreshSetupOutputCmd(t, hqPath, env, gtBinary, "convoy", "create", "Work: "+issue.Title, issue.ID, "--merge", "mr", "--base-branch", "main")
-	convoyID := parseCreatedConvoyID(t, created)
-	runFreshSetupCmd(t, hqPath, env, "bd", "show", convoyID)
-	statusJSON := runFreshSetupOutputCmd(t, hqPath, env, gtBinary, "convoy", "status", convoyID, "--json")
-	var convoyStatus struct {
-		Tracked []struct {
-			ID string `json:"id"`
-		} `json:"tracked"`
-	}
-	if err := json.Unmarshal([]byte(statusJSON), &convoyStatus); err != nil {
-		t.Fatalf("parse gt convoy status --json output: %v\n%s", err, statusJSON)
-	}
-	if len(convoyStatus.Tracked) != 1 || convoyStatus.Tracked[0].ID != issue.ID {
-		t.Fatalf("convoy %s tracks %+v, want exactly %s", convoyID, convoyStatus.Tracked, issue.ID)
-	}
-}
-
-// parseCreatedConvoyID reads the convoy ID from gt convoy create's
-// "Created convoy 🚚 <id>" line and checks it uses the hq-cv- prefix.
-func parseCreatedConvoyID(t *testing.T, out string) string {
-	t.Helper()
-	const marker = "Created convoy 🚚 "
-	_, rest, ok := strings.Cut(out, marker)
-	if !ok {
-		t.Fatalf("gt convoy create output has no %q line:\n%s", marker, out)
-	}
-	fields := strings.Fields(rest)
-	if len(fields) == 0 || !strings.HasPrefix(fields[0], "hq-cv-") {
-		t.Fatalf("convoy ID in %q does not use hq-cv- prefix", out)
-	}
-	return fields[0]
 }
 
 type freshSetupIssue struct {
