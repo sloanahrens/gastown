@@ -1,6 +1,6 @@
 // Package patrolscan is the deterministic half of the witness patrol, run by
 // the daemon as the patrol_scan tick (ADR 0005, gt-4k3fj.6). One tick scans one
-// rig and does three things:
+// rig and does four things:
 //
 //   - restart: a polecat whose session is confirmed dead while it holds
 //     unfinished, unheld work is restarted through the supervisor, which
@@ -11,9 +11,12 @@
 //   - orphaned molecules: a polecat that is gone (no session and no
 //     directory) leaves its work bead's bonded mol-polecat-work wisp and step
 //     wisps open; they are closed so the base bead is not blocked by them;
-//   - stranded work: a hooked bead whose polecat is gone gets ONE comment per
-//     report window naming the surviving branch (or saying none survives). The
-//     tick never re-slings, resets or reassigns the bead;
+//   - dead-holder recovery: a hooked or in_progress bead whose polecat is gone
+//     (no session, no directory) is released to the ready queue — open and
+//     unassigned — with the branch its work survives on recorded as a
+//     `resume_branch:` notes line, so the dispatcher resumes that branch
+//     instead of starting fresh from main (gt-gzhin.2). A bead carrying
+//     gt:ready-to-land, or held by a parked seat, is left alone;
 //   - idle seats: a polecat whose session is confirmed gone and which holds
 //     no work has its record retired to stop, so nothing keeps reporting the
 //     seat dead (gt-613vw). Dispatching work to it sets the record back to run.
@@ -61,6 +64,26 @@ const (
 
 // Actor is the supervisor actor and comment author of every tick action.
 const Actor = "daemon/patrol-scan"
+
+// ResumeBranchKey prefixes the notes line recording the branch a gone
+// polecat's unlanded work survives on. The spec dispatcher reads the line
+// back (gt-gzhin.3), so the key is part of a bead's contract, not a log
+// format: `resume_branch: <branch>`, one per line.
+const ResumeBranchKey = "resume_branch:"
+
+// ResumeBranchNote renders one ResumeBranchKey line.
+func ResumeBranchNote(branch string) string { return ResumeBranchKey + " " + branch }
+
+// hasResumeBranch reports whether notes already carry the line for branch, so
+// a retry after a failed release does not append it a second time.
+func hasResumeBranch(notes, branch string) bool {
+	for _, line := range strings.Split(notes, "\n") {
+		if strings.TrimSpace(line) == ResumeBranchNote(branch) {
+			return true
+		}
+	}
+	return false
+}
 
 // Work is the slice of a work bead the tick decides on.
 type Work struct {
@@ -161,9 +184,16 @@ type Env interface {
 	// CloseMolecule closes a molecule root and its step wisps, returning how
 	// many closed.
 	CloseMolecule(id, reason string) (int, error)
-	// SurvivingBranch returns the branch carrying the bead's unlanded work,
-	// "" when none does; an error means unknown.
+	// SurvivingBranch returns the polecat branch for beadID that is present
+	// on the rig's origin remote, "" when none is; an error means unknown.
 	SurvivingBranch(rig, beadID string) (string, error)
+	// RecordResumeBranch appends the resume_branch notes line naming branch.
+	RecordResumeBranch(rig, beadID, branch string) error
+	// Reopen releases a gone polecat's work bead to the ready queue, open and
+	// unassigned, but only while it is still assigned to assignee: the guard
+	// is what makes the release happen once however many ticks see the bead.
+	// It reports whether the bead changed.
+	Reopen(rig, beadID, assignee string) (bool, error)
 	// Comment appends a comment to a bead.
 	Comment(beadID, text string) error
 }
@@ -224,17 +254,16 @@ func New(env Env, ledger Ledger, o Options) *Scanner {
 type Outcome string
 
 const (
-	OutcomeRestarted  Outcome = "restarted"
-	OutcomeRefused    Outcome = "refused"    // the supervisor said no
-	OutcomeFailed     Outcome = "failed"     // an action ran and failed
-	OutcomeSkipped    Outcome = "skipped"    // a guard said leave it
-	OutcomeUnknown    Outcome = "unknown"    // a read failed; nothing done
-	OutcomeWaiting    Outcome = "waiting"    // dead, but not confirmed yet
-	OutcomeStalled    Outcome = "stalled"    // reported only
-	OutcomeClosed     Outcome = "closed"     // orphaned molecule closed
-	OutcomeReported   Outcome = "reported"   // stranded comment written
-	OutcomeSuppressed Outcome = "suppressed" // already reported this window
-	OutcomeIdled      Outcome = "idled"      // idle seat's record retired to stop
+	OutcomeRestarted Outcome = "restarted"
+	OutcomeRefused   Outcome = "refused"  // the supervisor said no
+	OutcomeFailed    Outcome = "failed"   // an action ran and failed
+	OutcomeSkipped   Outcome = "skipped"  // a guard said leave it
+	OutcomeUnknown   Outcome = "unknown"  // a read failed; nothing done
+	OutcomeWaiting   Outcome = "waiting"  // dead, but not confirmed yet
+	OutcomeStalled   Outcome = "stalled"  // reported only
+	OutcomeClosed    Outcome = "closed"   // orphaned molecule closed
+	OutcomeReopened  Outcome = "reopened" // dead holder's bead returned to the queue
+	OutcomeIdled     Outcome = "idled"    // idle seat's record retired to stop
 )
 
 // Finding is one line of a tick's report.
@@ -276,9 +305,9 @@ func (r Report) Count(o Outcome) int {
 // Lines renders the report for the daemon log: one summary line, then one
 // line per finding that is not a quiet skip.
 func (r Report) Lines() []string {
-	lines := []string{fmt.Sprintf("%s: checked %d polecat(s): %d restarted, %d refused, %d unknown, %d molecule(s) closed, %d stranded reported, %d error(s)",
+	lines := []string{fmt.Sprintf("%s: checked %d polecat(s): %d restarted, %d refused, %d unknown, %d molecule(s) closed, %d reopened, %d error(s)",
 		r.Rig, r.Checked, r.Count(OutcomeRestarted), r.Count(OutcomeRefused), r.Count(OutcomeUnknown),
-		r.Count(OutcomeClosed), r.Count(OutcomeReported), len(r.Errors))}
+		r.Count(OutcomeClosed), r.Count(OutcomeReopened), len(r.Errors))}
 	for _, f := range r.Findings {
 		lines = append(lines, r.Rig+": "+f.String())
 	}
@@ -516,7 +545,9 @@ func (s *Scanner) orphans(rig string, r *Report) {
 		if f, ok := s.molecule(w, name); ok {
 			r.Findings = append(r.Findings, f)
 		}
-		r.Findings = append(r.Findings, s.stranded(rig, w, name))
+		if f, ok := s.recover(rig, w, name); ok {
+			r.Findings = append(r.Findings, f)
+		}
 	}
 }
 
@@ -561,50 +592,90 @@ func (s *Scanner) molecule(w Work, holder string) (Finding, bool) {
 	return f, true
 }
 
-// stranded writes one comment per report window on a bead whose holder is
-// gone. It never changes the bead's status, assignee or hook (hazard 2).
-func (s *Scanner) stranded(rig string, w Work, holder string) Finding {
+// recover returns a gone polecat's work bead to the ready queue — open,
+// unassigned — with the branch its work survives on recorded as a notes line,
+// so the spec dispatcher resumes that branch rather than starting fresh from
+// main (gt-gzhin.2). It reports a finding only when there is something to say.
+//
+// Every read and write fails closed. An unreadable seat record, a branch
+// state that cannot be determined, or a notes write that failed leaves the
+// bead hooked where it is; a parked seat is the operator's. The guarded
+// release makes the bead change once, so a later tick that still sees it
+// (the release itself failed) retries instead of racing.
+func (s *Scanner) recover(rig string, w Work, holder string) (Finding, bool) {
 	f := Finding{Kind: "stranded", Subject: w.ID}
-	now := s.o.Now()
-	key := rig + "/" + w.ID
-	if last, ok := s.ledger.LastReported(key); ok && now.Sub(last) < s.o.ReportWindow {
-		f.Outcome, f.Detail = OutcomeSuppressed, "reported "+now.Sub(last).Round(time.Minute).String()+" ago"
-		return f
+	rec, err := s.env.Intent(rig, holder)
+	if err != nil {
+		f.Outcome, f.Detail = OutcomeUnknown, "holder record unreadable: "+err.Error()
+		return f, true
 	}
+	if rec.Held() {
+		return Finding{}, false // parked or frozen: the operator's, silently
+	}
+
 	branch, err := s.env.SurvivingBranch(rig, w.ID)
 	if err != nil {
 		f.Outcome, f.Detail = OutcomeUnknown, "surviving-work check failed: "+err.Error()
-		return f
+		return f, true
 	}
-	text := StrandedComment(w, rig, holder, branch, s.o.ReportWindow)
-	if err := s.env.Comment(w.ID, text); err != nil {
-		f.Outcome, f.Detail = OutcomeFailed, "comment: "+err.Error()
-		return f
+	// The notes line is written first: a release whose branch record was lost
+	// sends the dispatcher to main on work that exists on a branch, which is
+	// the discard this recovery exists to prevent. A retry finds the line
+	// already there and writes only the release.
+	if branch != "" && !hasResumeBranch(w.Notes, branch) {
+		if err := s.env.RecordResumeBranch(rig, w.ID, branch); err != nil {
+			f.Outcome, f.Detail = OutcomeFailed, "recording "+ResumeBranchNote(branch)+": "+err.Error()
+			return f, true
+		}
 	}
-	if err := s.ledger.MarkReported(key, now); err != nil {
-		// The comment is written; the next tick may write it again. Say so.
-		f.Outcome, f.Detail = OutcomeReported, "ledger not updated: "+err.Error()
-		return f
+	reopened, err := s.env.Reopen(rig, w.ID, w.Assignee)
+	if err != nil {
+		f.Outcome, f.Detail = OutcomeFailed, "reopening "+w.ID+": "+err.Error()
+		return f, true
 	}
-	detail := "no surviving branch"
+	if !reopened {
+		return Finding{}, false // released or reassigned since the list read
+	}
+
+	f.Outcome = OutcomeReopened
+	f.Detail = "no surviving branch"
 	if branch != "" {
-		detail = "surviving branch " + branch
+		f.Detail = ResumeBranchNote(branch)
 	}
-	f.Outcome, f.Detail = OutcomeReported, detail
-	return f
+	s.reopenComment(rig, w, holder, branch, &f)
+	return f, true
 }
 
-// StrandedComment is the text of a stranded-work report.
-func StrandedComment(w Work, rig, holder, branch string, window time.Duration) string {
+// reopenComment leaves the durable human-readable record of a recovery, once
+// per report window: the status change is a bead event nothing reads back,
+// and the notes line is machine contract, not narrative.
+func (s *Scanner) reopenComment(rig string, w Work, holder, branch string, f *Finding) {
+	now := s.o.Now()
+	key := rig + "/" + w.ID
+	if last, ok := s.ledger.LastReported(key); ok && now.Sub(last) < s.o.ReportWindow {
+		return
+	}
+	if err := s.env.Comment(w.ID, ReopenedComment(w, rig, holder, branch)); err != nil {
+		// The bead is reopened; only its record is missing. Say so rather than
+		// claim a clean recovery.
+		f.Detail += "; comment failed: " + err.Error()
+		return
+	}
+	if err := s.ledger.MarkReported(key, now); err != nil {
+		f.Detail += "; ledger not updated: " + err.Error()
+	}
+}
+
+// ReopenedComment is the text of the record left on a bead the tick returned
+// to the ready queue.
+func ReopenedComment(w Work, rig, holder, branch string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "STRANDED (patrol scan): %s is %s and assigned to %s/polecats/%s, which no longer exists (no session, no directory).", w.ID, w.Status, rig, holder)
+	fmt.Fprintf(&b, "REOPENED (patrol scan): %s was %s and assigned to %s/polecats/%s, which no longer exists (no session, no directory).", w.ID, w.Status, rig, holder)
+	b.WriteString(" Returned to the ready queue, unassigned.")
 	if branch != "" {
-		fmt.Fprintf(&b, " Unlanded work survives on branch %s.", branch)
-		b.WriteString(" Resume it on that branch; do not re-sling with --force, which discards it.")
+		fmt.Fprintf(&b, " Unlanded work survives on branch %s (%s); resume it rather than starting from main.", branch, ResumeBranchNote(branch))
 	} else {
 		b.WriteString(" No polecat branch carries unlanded work for it.")
-		b.WriteString(" Release it with `bd update " + w.ID + " --status open --assignee \"\"` if it should be redone.")
 	}
-	fmt.Fprintf(&b, " The patrol scan does not re-dispatch; this report repeats at most once per %s.", window)
 	return b.String()
 }

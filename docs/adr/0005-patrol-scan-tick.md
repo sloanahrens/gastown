@@ -29,9 +29,12 @@ We decided that the daemon runs a `patrol_scan` tick (`internal/patrolscan`, hos
 - **Orphaned molecules.** For hooked work whose polecat has neither a session nor a directory,
   the bonded `mol-polecat-work` root and its step wisps are force-closed, read with
   `bd show --children` so ephemeral steps are seen (gt-22hdp.36).
-- **Stranded work.** The same beads get one comment per window (default 24h), naming the branch
-  that carries unlanded work or saying none does. The tick never re-slings, resets, unassigns or
-  passes `--force`.
+- **Dead-holder recovery.** The same beads are returned to the ready queue — open, unassigned —
+  with the polecat branch their work survives on recorded in the bead's notes
+  (`resume_branch: <branch>`), so the dispatcher resumes that branch instead of starting fresh
+  from main (gt-gzhin.2). The release is guarded on the assignee (`bd --if-assignee`), so it
+  happens once; a bead carrying `gt:ready-to-land`, or held by a parked seat, is left alone. The
+  tick never re-slings or passes `--force`.
 
 Town-wide it also resolves elapsed timer gates in the town and scanned rigs' databases, once an
 hour evaluates the GitHub gates (`bd gate check --type=gh`), and once an hour walks agent
@@ -53,9 +56,10 @@ sends mail; the operator hears from it through `gt escalate` (budget exhaustion,
 Anything that needed judgement is gone, not ported. Stalled seats are logged, not nudged or
 restarted, until the stall threshold is measured (ADR 0003 item 7). Dirty-worktree recovery is
 dropped because it meant an LLM authoring commits in another agent's worktree. The restart keeps
-the worktree, and the stranded comment names the surviving branch. Resetting an orphaned bead
-for re-dispatch is dropped: git cannot tell work that landed under another bead from work never
-started, so the bead is reported, not released. HELP triage belongs to the operator inbox.
+the worktree. Resetting an orphaned bead with no branch recorded is still not done — git cannot
+tell work that landed under another bead from work never started — so the bead is released only
+with the branch its work survives on, which the dispatcher resumes (gt-gzhin.2). HELP triage
+belongs to the operator inbox.
 
 ### Witness, `mol-witness-patrol` (10 steps)
 
@@ -64,7 +68,7 @@ started, so the bead is reported, not released. HELP triage belongs to the opera
 | 1 | inbox-check | Dropped. Mail hygiene is self-maintenance; HELP routing is judgement; MERGED and SWARM_START have no live sender. |
 | 2 | process-cleanups | Dropped (judgement). Restarts preserve worktrees; `checkpoint_dog` commits WIP. |
 | 3 | check-refinery | Dropped. The refinery is gone (ADR 0004); mayor and deacon liveness are daemon ensure paths. |
-| 4 | survey-workers | **Ported**: dead-seat restart, orphaned molecules, stranded report. Nudges, completion routing (the landing worker owns it) and bead reset dropped. |
+| 4 | survey-workers | **Ported**: dead-seat restart, orphaned molecules, dead-holder recovery. Nudges and completion routing (the landing worker owns it) dropped. |
 | 5 | state-collapse | Dropped. Its MR half reads merge-request wisps, which ADR 0004 deleted; a live stranded bead is the tick's report, a closed one has a landing record. |
 | 6 | check-timer-gates | **Ported** (timer gates). |
 | 7 | check-swarm-completion | Dropped: nothing sends SWARM_START. |

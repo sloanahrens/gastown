@@ -75,7 +75,7 @@ Real-time messaging between agents with `gt nudge`. Nudges allow immediate commu
 Agent session refresh via `/handoff`. When context gets full or an agent needs a fresh start, handoff transfers work state to a new session.
 
 ### Patrol scan
-The daemon's per-rig Go tick: restarts a polecat whose session is dead while it holds work, closes orphaned molecules, and comments on stranded work. It replaced the witness and deacon patrol agents.
+The daemon's per-rig Go tick: restarts a polecat whose session is dead while it holds work, closes orphaned molecules, and returns a gone polecat's work bead to the ready queue with its surviving branch recorded. It replaced the witness and deacon patrol agents.
 
 ## Supervision
 

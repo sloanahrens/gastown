@@ -6,10 +6,12 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
@@ -260,5 +262,92 @@ func TestPatrolScanClearSubmissionEndsTheWait(t *testing.T) {
 	}
 	if changed, err := h.ClearSubmission("myr", "mycat", "gt-work1"); err != nil || changed {
 		t.Fatalf("ClearSubmission for another bead = %v, %v; want false, nil", changed, err)
+	}
+}
+
+// deadHolderBranch is the ported origin listing: the newest polecat branch
+// generated for the bead, "" when origin has none, and the listing's error
+// otherwise so the caller fails closed rather than releasing on a guess
+// (gt-gzhin.2).
+func TestPatrolScanDeadHolderBranch(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		branches []string
+		listErr  error
+		want     string
+		wantErr  bool
+	}{
+		{name: "no branch for the bead", branches: []string{"polecat/onyx/gt-other@abc"}},
+		{name: "one branch", branches: []string{"polecat/onyx/gt-a@abc"}, want: "polecat/onyx/gt-a@abc"},
+		{
+			name: "newest generated branch wins",
+			branches: []string{
+				"polecat/onyx/gt-a@aaa",
+				"polecat/onyx/gt-a@zzz",
+			},
+			want: "polecat/onyx/gt-a@zzz",
+		},
+		{name: "unreadable origin is an error", listErr: errors.New("ls-remote: could not read from remote"), wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := &patrolScanHost{
+				d:                  &Daemon{config: &Config{TownRoot: t.TempDir()}},
+				listOriginBranches: func(string) ([]string, error) { return tc.branches, tc.listErr },
+			}
+			got, err := h.SurvivingBranch("myr", "gt-a")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("SurvivingBranch = %q, nil; want an error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("SurvivingBranch: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("SurvivingBranch = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The recovery writes go through one client: the resume_branch line lands in
+// the bead's notes, where the spec dispatcher reads it back (gt-gzhin.3), and
+// the release fires only while the dead holder still owns the bead — bd's
+// --if-assignee guard is what keeps a bead re-slung to a live polecat out of
+// it (gt-vm5g4).
+func TestPatrolScanRecoveryWrites(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "gt-a", Status: "hooked", Assignee: "myr/polecats/onyx"})
+	h := &patrolScanHost{
+		d:                 &Daemon{config: &Config{TownRoot: t.TempDir()}},
+		openRecoveryBeads: func([]string) beads.Client { return db },
+	}
+
+	if err := h.RecordResumeBranch("myr", "gt-a", "polecat/onyx/gt-a@abc"); err != nil {
+		t.Fatalf("RecordResumeBranch: %v", err)
+	}
+	reopened, err := h.Reopen("myr", "gt-a", "myr/polecats/onyx")
+	if err != nil || !reopened {
+		t.Fatalf("Reopen = %v, %v; want true, nil", reopened, err)
+	}
+	// The guard no longer holds: the bead is no longer onyx's.
+	if reopened, err := h.Reopen("myr", "gt-a", "myr/polecats/onyx"); err != nil || reopened {
+		t.Fatalf("Reopen with a stale guard = %v, %v; want false, nil", reopened, err)
+	}
+
+	is, err := db.Show("gt-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if is.Status != string(beads.StatusOpen) || is.Assignee != "" {
+		t.Fatalf("bead = %s/%q, want open and unassigned", is.Status, is.Assignee)
+	}
+	if !strings.Contains(is.Notes, "resume_branch: polecat/onyx/gt-a@abc") {
+		t.Fatalf("notes = %q", is.Notes)
 	}
 }
