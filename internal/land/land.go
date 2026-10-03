@@ -112,6 +112,11 @@ type Lander struct {
 	// Slow reports a gate or om stage that runs past its threshold; nil
 	// reports nothing (gt-lcu5p).
 	Slow *SlowAlarm
+	// Stage, when set, is told each stage as the landing enters it, by the
+	// StageGate/StageOM names. It is how the daemon judges a pass by the stage
+	// it is running rather than by the pipeline as a whole; the work before
+	// the gate has no stage of its own and reports nothing (gt-84gcp).
+	Stage func(beadID, stage string)
 
 	afterPush func()                // test seam: runs between the push and the read-back
 	openRepo  func(dir string) Repo // test seam: opens git at dir; nil means *git.Git
@@ -222,6 +227,22 @@ func (e *RecordError) Error() string {
 	return fmt.Sprintf("landed %s but the landing record is incomplete: %v", shortSHA(e.Result.LandedCommit), e.Err)
 }
 func (e *RecordError) Unwrap() error { return e.Err }
+
+// The landing pipeline's stages, as Lander reports them to Stage and as the
+// slow-landing alarm labels them (gt-lcu5p). Only the two the gate and the
+// review run have a timeout of their own; the rest are bounded by the
+// landing's overall budget.
+const (
+	StageGate = "gate"
+	StageOM   = "om"
+)
+
+// stage reports the landing's current stage to the Stage hook, if one is set.
+func (l *Lander) stage(w Work, stage string) {
+	if l.Stage != nil {
+		l.Stage(w.BeadID, stage)
+	}
+}
 
 func (l *Lander) remote() string {
 	if l.Remote == "" {
@@ -373,7 +394,8 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	// The gate's stages (lint, then tests) run in order, and om only after
 	// they pass: om is the costly stage, and work that fails lint or tests
 	// never pays for it (gt-b5ugw).
-	gateCtx, gateDone := l.Slow.watch(ctx, l, w, dir, "gate")
+	l.stage(w, StageGate)
+	gateCtx, gateDone := l.Slow.watch(ctx, l, w, dir, StageGate)
 	gateRes := l.Gate.Run(gateCtx, dir)
 	gateDone()
 	res := Result{LandedCommit: merged, PatchID: patchID, Base: base, Gate: gateRes, RiskPaths: riskPaths}
@@ -428,7 +450,8 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		l.logf("%s: %s, om skipped (overseer-reviewed)", w.BeadID, stageTimes(gateRes, 0))
 	} else {
 		reviewStart := time.Now()
-		omCtx, omDone := l.Slow.watch(ctx, l, w, dir, "om")
+		l.stage(w, StageOM)
+		omCtx, omDone := l.Slow.watch(ctx, l, w, dir, StageOM)
 		verdict, reviewErr = l.Reviewer.Review(omCtx, dir, base, merged)
 		omDone()
 		l.logf("%s: %s", w.BeadID, stageTimes(gateRes, time.Since(reviewStart)))

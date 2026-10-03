@@ -652,7 +652,8 @@ func TestWriteAttention_WritesTheQueueFromTheDaemonsOwnReads(t *testing.T) {
 
 // gt-vsct7.3: a rig whose landing pass has been on the same bead longer than
 // the threshold raises landing-stuck, and the item clears when the pass moves
-// on. The clock is the fixture's fake one.
+// on. The clock is the fixture's fake one. A pass that has reported no stage
+// is judged against the whole landing budget, the fast work before the gate.
 func TestAttentionLandingStuck(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
@@ -660,14 +661,14 @@ func TestAttentionLandingStuck(t *testing.T) {
 
 	// Exactly at the threshold is not yet past it.
 	f.src.landingState = func(string) landingState {
-		return landingState{bead: "gt-a", since: now.Add(-attentionLandingStuck)}
+		return landingState{bead: "gt-a", since: now.Add(-townhealth.LandingWaitBudget)}
 	}
 	if items := f.collect(t, f.src.collectLandingStuck); len(items) != 0 {
 		t.Fatalf("items = %+v, want none at exactly the threshold", items)
 	}
 
 	f.src.landingState = func(string) landingState {
-		return landingState{bead: "gt-a", since: now.Add(-attentionLandingStuck - time.Minute)}
+		return landingState{bead: "gt-a", since: now.Add(-townhealth.LandingWaitBudget - time.Minute)}
 	}
 	items := f.collect(t, f.src.collectLandingStuck)
 	if len(items) != 1 {
@@ -688,6 +689,83 @@ func TestAttentionLandingStuck(t *testing.T) {
 	}
 }
 
+// gt-84gcp, the reported incident: the alarm judges the stage the pass is
+// running, not the whole landing, so a healthy landing that has been gating
+// for eight minutes — inside the gate's own budget — is not an item, and the
+// gate's minutes do not count against the review that follows it.
+func TestAttentionLandingStuckJudgesTheStage(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	gateBudget := f.d.attentionLandingStuckBudget(land.StageGate)
+	omBudget := f.d.attentionLandingStuckBudget(land.StageOM)
+
+	// The incident: eight minutes into the gate, the old flat threshold, is
+	// healthy — the gate may legitimately run its lint, test and shell steps.
+	f.src.landingState = func(string) landingState {
+		return landingState{bead: "gt-a", since: now.Add(-8 * time.Minute), stage: land.StageGate, stageSince: now.Add(-8 * time.Minute)}
+	}
+	if items := f.collect(t, f.src.collectLandingStuck); len(items) != 0 {
+		t.Fatalf("items = %+v, want none for a healthy gate", items)
+	}
+
+	// A long pipeline is still healthy while the stage it is running is not
+	// wedged: twenty minutes of in-flight time, three of them in the gate.
+	f.src.landingState = func(string) landingState {
+		return landingState{bead: "gt-a", since: now.Add(-20 * time.Minute), stage: land.StageGate, stageSince: now.Add(-3 * time.Minute)}
+	}
+	if items := f.collect(t, f.src.collectLandingStuck); len(items) != 0 {
+		t.Fatalf("items = %+v, want none for a stage inside its budget", items)
+	}
+
+	// The review is judged by its own, shorter budget, and the item names the
+	// stage it outlived.
+	f.src.landingState = func(string) landingState {
+		return landingState{bead: "gt-a", since: now.Add(-20 * time.Minute), stage: land.StageOM, stageSince: now.Add(-omBudget - time.Minute)}
+	}
+	items := f.collect(t, f.src.collectLandingStuck)
+	if len(items) != 1 || items[0].Bead != "gt-a" {
+		t.Fatalf("items = %+v, want one wedged review", items)
+	}
+	if !strings.Contains(items[0].Summary, land.StageOM) {
+		t.Errorf("summary = %q, want it to name the %s stage", items[0].Summary, land.StageOM)
+	}
+
+	// A gate past its own budget is the item.
+	f.src.landingState = func(string) landingState {
+		return landingState{bead: "gt-a", since: now.Add(-20 * time.Minute), stage: land.StageGate, stageSince: now.Add(-gateBudget - time.Minute)}
+	}
+	if items := f.collect(t, f.src.collectLandingStuck); len(items) != 1 {
+		t.Fatalf("items = %+v, want one wedged gate", items)
+	}
+}
+
+// gt-84gcp: the stage belongs to the bead in flight. Entering a new bead
+// clears it, so the next landing's gate is not judged by the last one's.
+func TestLandingStatesStageFollowsTheBead(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	var l landingStates
+	l.setBead("gastown", "gt-a", now)
+	l.setStage("gastown", land.StageGate, now.Add(time.Minute))
+
+	p := l.get("gastown")
+	if p.stage != land.StageGate || !p.stageSince.Equal(now.Add(time.Minute)) {
+		t.Fatalf("state = %+v, want the gate stage from a minute in", p)
+	}
+
+	l.setBead("gastown", "gt-b", now.Add(2*time.Minute))
+	if p := l.get("gastown"); p.stage != "" || !p.stageSince.IsZero() {
+		t.Fatalf("state = %+v, want no stage on the next bead", p)
+	}
+
+	l.setStage("gastown", land.StageOM, now.Add(3*time.Minute))
+	l.endPass("gastown")
+	if p := l.get("gastown"); p.stage != "" || !p.stageSince.IsZero() {
+		t.Fatalf("state = %+v, want the stage cleared with the pass", p)
+	}
+}
+
 // The item clears in the queue, not just in one collector: the next tick stops
 // returning it and Reconcile drops it.
 func TestAttentionLandingStuckClearsWhenThePassMoves(t *testing.T) {
@@ -695,7 +773,7 @@ func TestAttentionLandingStuckClearsWhenThePassMoves(t *testing.T) {
 	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
 	f := newAttentionFixture(t, now)
 	f.src.landingState = func(string) landingState {
-		return landingState{bead: "gt-a", since: now.Add(-attentionLandingStuck - time.Minute)}
+		return landingState{bead: "gt-a", since: now.Add(-townhealth.LandingWaitBudget - time.Minute)}
 	}
 	st := f.tick(t, now)
 	itemByKey(t, st, "landing-stuck:gastown:gt-a")
