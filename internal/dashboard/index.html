@@ -89,6 +89,12 @@ td.n,th.n{text-align:right}
 .qdetail h4{margin:8px 0 2px;font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;font-weight:400}
 .qdetail pre{margin:0;white-space:pre-wrap;font:inherit;background:#10161d;border:1px solid var(--line);border-radius:6px;padding:6px 8px;max-height:320px;overflow:auto}
 .qcomment{border-left:2px solid var(--line);padding-left:8px;margin:4px 0}
+section>h2{cursor:pointer;user-select:none}
+section>h2:hover{color:var(--text)}
+section>h2 .caret{display:inline-block;width:10px;color:var(--dim)}
+section.collapsed>:not(h2){display:none}
+section.collapsed>h2{border-bottom:0}
+#queue{max-height:70vh;overflow:auto}
 .good{color:var(--green)}.warnc{color:var(--amber)}.badc{color:var(--red)}
 #alertsctl{cursor:pointer;background:none;font:inherit;font-size:12px;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:2px 10px}
 #alertsctl.on{color:var(--teal);border-color:var(--teal)}
@@ -718,7 +724,8 @@ function renderQueue(s, force) {
   qKey = key;
   delete box.dataset.empty;
   box.replaceChildren();
-  $("queuenote").textContent = "read " + age(q.at) + " ago";
+  const okCount = (q.ready || []).filter(b => b.shape === "ok").length;
+  $("queuenote").textContent = (q.ready_total || 0) + " ready (" + okCount + " dispatchable) · " + (q.landing_total || 0) + " landing · " + (q.blocked_total || 0) + " blocked · read " + age(q.at) + " ago";
   if ((q.unreadable || []).length) box.append(el("div", "badc", "⚠ could not read: " + q.unreadable.join(", ") + " (its beads are missing below)"));
   const tabs = el("div", "qtabs");
   QTABS.forEach(([k, label, totalKey]) => {
@@ -829,6 +836,33 @@ function connect() {
   es.addEventListener("alert", ev => onAlert(JSON.parse(ev.data)));
 }
 initAlerts();
+// Every panel folds when its title bar is clicked; the choice survives reloads.
+function setupCollapse() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem("gt-collapsed") || "{}") || {}; } catch (e) {}
+  document.querySelectorAll("main section, .grid section").forEach(sec => {
+    const h = sec.querySelector(":scope > h2");
+    if (!h || h.dataset.fold) return;
+    h.dataset.fold = "1";
+    const name = (h.firstChild && h.firstChild.textContent || h.textContent).trim();
+    const caret = el("span", "caret");
+    h.prepend(caret);
+    h.setAttribute("role", "button");
+    h.tabIndex = 0;
+    const apply = collapsed => { sec.classList.toggle("collapsed", collapsed); caret.textContent = collapsed ? "▸" : "▾"; h.setAttribute("aria-expanded", collapsed ? "false" : "true"); };
+    apply(!!saved[name]);
+    const toggle = ev => {
+      if (ev && ev.target && ev.target.closest && ev.target.closest("button, .chips, a")) return;
+      const now = !sec.classList.contains("collapsed");
+      apply(now);
+      saved[name] = now;
+      try { localStorage.setItem("gt-collapsed", JSON.stringify(saved)); } catch (e) {}
+    };
+    h.addEventListener("click", toggle);
+    h.addEventListener("keydown", ev => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); toggle(ev); } });
+  });
+}
+setupCollapse();
 renderChips();
 connect();
 // Ages and elapsed times drift between pushes; redraw the cheap parts locally.
