@@ -10,9 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"text/template"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -30,11 +28,9 @@ var (
 	formulaListJSON   bool
 	formulaShowJSON   bool
 	formulaShowRaw    bool
-	formulaRunPR      int
 	formulaRunRig     string
 	formulaRunDryRun  bool
 	formulaRunAgent   string
-	formulaRunFiles   []string
 	formulaRunSet     []string
 	formulaCreateType string
 
@@ -68,7 +64,7 @@ Search paths (in order):
 Examples:
   gt formula list                    # List all formulas
   gt formula show shiny              # Show formula details
-  gt formula run shiny --pr=123      # Run formula on PR #123
+  gt formula run shiny               # Run a workflow formula
   gt formula create my-workflow      # Create new formula template`,
 }
 
@@ -121,40 +117,30 @@ This command:
   2. Pours it to create a molecule (or uses existing proto)
   3. Dispatches the molecule to available workers
 
-For PR-based workflows, use --pr to specify the GitHub PR number.
+Only workflow formulas run this way. A formula of another type is reported
+and nothing is dispatched; sling it instead (gt sling cooks it and pours a
+wisp).
 
 If no formula name is provided, uses the default formula configured in
 the rig's settings/config.json under workflow.default_formula.
 
 Options:
-  --pr=N        Run formula on GitHub PR #N
   --rig=NAME    Target specific rig (default: inferred from cwd, or sole registered rig)
-  --agent=ALIAS Override agent for all legs (e.g., claude-haiku)
+  --agent=ALIAS Override agent for all steps (e.g., claude-haiku)
   --dry-run     Show what would happen without executing
 
-bd cooks the formula with the --set pairs as its vars. In a convoy formula
-the step with metadata.convoy = "synthesis" is the synthesis and every other
-step is a leg (metadata.focus, .agent, .review_only); the base_prompt,
-output_* and review_only vars set the leg prompt, output files and
-analysis-only legs. A workflow step's metadata.target names where it is slung
-and metadata.interactive keeps it in the current session.
-
-Agent precedence (highest to lowest):
-  1. Per-leg metadata.agent in the formula
-  2. --agent CLI flag
-  3. Rig/town default agent (fallback)
+bd cooks the formula with the --set pairs as its vars. A workflow step's
+metadata.target names where it is slung and metadata.interactive keeps it
+in the current session.
 
 There is no formula-level agent: bd's strict decode rejects a top-level
-agent key, so set metadata.agent per leg or pass --agent (it applies to
-workflow steps too).
+agent key, so pass --agent (it applies to workflow steps).
 
 Examples:
   gt formula run shiny                    # Run formula in current rig
   gt formula run                          # Run default formula from rig config
-  gt formula run shiny --pr=123           # Run on PR #123
   gt formula run security-audit --rig=beads  # Run in specific rig
-  gt formula run release --dry-run        # Preview execution
-  gt formula run code-review --agent=claude-haiku  # All legs use claude-haiku`,
+  gt formula run release --dry-run        # Preview execution`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runFormulaRun,
 }
@@ -220,11 +206,9 @@ func init() {
 	formulaShowCmd.Flags().BoolVar(&formulaShowRaw, "raw", false, "Show the formula as written, without resolving extends and compose")
 
 	// Run flags
-	formulaRunCmd.Flags().IntVar(&formulaRunPR, "pr", 0, "GitHub PR number to run formula on")
 	formulaRunCmd.Flags().StringVar(&formulaRunRig, "rig", "", "Target rig (default: inferred from cwd, or sole registered rig)")
 	formulaRunCmd.Flags().BoolVar(&formulaRunDryRun, "dry-run", false, "Preview execution without running")
-	formulaRunCmd.Flags().StringVar(&formulaRunAgent, "agent", "", "Override agent for all legs (e.g., claude-haiku)")
-	formulaRunCmd.Flags().StringSliceVar(&formulaRunFiles, "files", nil, "Files to pass to formula legs (available as {{.files}} in templates)")
+	formulaRunCmd.Flags().StringVar(&formulaRunAgent, "agent", "", "Override agent for all steps (e.g., claude-haiku)")
 	formulaRunCmd.Flags().StringSliceVar(&formulaRunSet, "set", nil, "Set input variables as key=value pairs (available as {{.key}} in templates)")
 
 	// Sync flags
@@ -305,9 +289,9 @@ func passBdFormulaOutput(bdArgs []string, asJSON bool) error {
 	return err
 }
 
-// runFormulaRun executes a formula by spawning a convoy of polecats.
-// For convoy-type formulas, it creates a convoy bead, creates leg beads,
-// and slings each leg to a separate polecat with leg-specific prompts.
+// runFormulaRun executes a workflow formula: it creates step beads with their
+// dependencies wired and slings each ready step to a polecat. Any other formula
+// type is reported and left alone.
 func runFormulaRun(cmd *cobra.Command, args []string) error {
 	// Determine target rig first (needed for default formula lookup)
 	targetRig := formulaRunRig
@@ -374,14 +358,12 @@ func runFormulaRun(cmd *cobra.Command, args []string) error {
 	}
 
 	switch f.Type {
-	case "convoy":
-		return executeConvoyFormula(f, formulaName, targetRig)
 	case "workflow":
 		return executeWorkflowFormula(f, formulaName, targetRig)
 	default:
-		fmt.Printf("%s Formula type '%s' not yet supported for execution.\n",
+		fmt.Printf("%s Formula type '%s' is not supported for execution.\n",
 			style.Dim.Render("Note:"), f.Type)
-		fmt.Printf("Currently only 'convoy' and 'workflow' formulas can be run.\n")
+		fmt.Printf("Currently only 'workflow' formulas can be run.\n")
 		fmt.Printf("\nTo run '%s' manually:\n", formulaName)
 		fmt.Printf("  1. View formula:   gt formula show %s\n", formulaName)
 		fmt.Printf("  2. Sling to rig:   gt sling %s %s  (cooks it and pours a wisp)\n", formulaName, targetRig)
@@ -636,9 +618,6 @@ func dryRunFormula(f *cookedFormula, formulaName, targetRig string) error {
 	fmt.Printf("  Formula: %s\n", style.Bold.Render(formulaName))
 	fmt.Printf("  Type:    %s\n", f.Type)
 	fmt.Printf("  Rig:     %s\n", targetRig)
-	if formulaRunPR > 0 {
-		fmt.Printf("  PR:      #%d\n", formulaRunPR)
-	}
 	// Show effective agent override (GH#2118)
 	if formulaRunAgent != "" {
 		fmt.Printf("  Agent:   %s\n", formulaRunAgent)
@@ -651,81 +630,6 @@ func dryRunFormula(f *cookedFormula, formulaName, targetRig string) error {
 			fmt.Printf(" %s", s)
 		}
 		fmt.Println()
-	}
-
-	if p := convoyPlanFrom(f); f.Type == "convoy" && len(p.Legs) > 0 {
-		// Generate review ID for dry-run display
-		reviewID := generateFormulaShortID()
-
-		// The formula's vars and the --set pairs, for template rendering
-		setVars := formulaRunVars(f, formulaRunSet)
-
-		// Build target description
-		var targetDescription string
-		if formulaRunPR > 0 {
-			targetDescription = fmt.Sprintf("PR #%d", formulaRunPR)
-		} else {
-			targetDescription = "local files"
-		}
-
-		// Fetch PR info if --pr flag is set
-		var prTitle string
-		var changedFiles []map[string]interface{}
-		if formulaRunPR > 0 {
-			prTitle, changedFiles = fetchPRInfo(formulaRunPR)
-			if prTitle != "" {
-				fmt.Printf("  PR Title: %s\n", prTitle)
-			}
-			if len(changedFiles) > 0 {
-				fmt.Printf("  Changed files: %d\n", len(changedFiles))
-			}
-		}
-
-		// Show output directory if configured
-		var outputDir string
-		if p.OutputDir != "" {
-			dirCtx := formulaTemplateContext(formulaName, targetDescription, reviewID,
-				formulaRunPR, prTitle, changedFiles, formulaRunFiles, setVars)
-			outputDir = renderTemplateOrDefault(p.OutputDir, dirCtx, ".reviews/"+reviewID)
-			fmt.Printf("\n  Output directory: %s\n", outputDir)
-		}
-
-		fmt.Printf("\n  Legs (%d parallel):\n", len(p.Legs))
-		for _, leg := range p.Legs {
-			// Show rendered output path for each leg
-			if outputDir != "" {
-				legCtx := formulaTemplateContext(formulaName, targetDescription, reviewID,
-					formulaRunPR, prTitle, changedFiles, formulaRunFiles, setVars)
-				legCtx["leg"] = map[string]interface{}{
-					"id":          leg.ID,
-					"title":       leg.Title,
-					"focus":       leg.Focus,
-					"description": leg.Description,
-				}
-				legPattern := renderTemplateOrDefault(p.LegPattern, legCtx, leg.ID+"-findings.md")
-				outputPath := filepath.Join(outputDir, legPattern)
-				agentSuffix := resolveFormulaLegAgent(leg.Agent, formulaRunAgent)
-				if agentSuffix != "" {
-					agentSuffix = fmt.Sprintf(" [agent: %s]", agentSuffix)
-				}
-				fmt.Printf("    • %s: %s%s\n      → %s\n", leg.ID, leg.Title, agentSuffix, outputPath)
-			} else {
-				agentSuffix := resolveFormulaLegAgent(leg.Agent, formulaRunAgent)
-				if agentSuffix != "" {
-					agentSuffix = fmt.Sprintf(" [agent: %s]", agentSuffix)
-				}
-				fmt.Printf("    • %s: %s%s\n", leg.ID, leg.Title, agentSuffix)
-			}
-		}
-		if p.Synthesis != nil {
-			fmt.Printf("\n  Synthesis:\n")
-			if outputDir != "" {
-				synthPath := filepath.Join(outputDir, p.SynthesisFile)
-				fmt.Printf("    • %s\n      → %s\n", p.Synthesis.Title, synthPath)
-			} else {
-				fmt.Printf("    • %s\n", p.Synthesis.Title)
-			}
-		}
 	}
 
 	if f.Type == "workflow" && len(f.Steps) > 0 {
@@ -742,252 +646,6 @@ func dryRunFormula(f *cookedFormula, formulaName, targetRig string) error {
 			fmt.Printf("    %d. %s: %s%s%s\n", i+1, step.ID, step.Title, needsStr, readyStr)
 		}
 	}
-
-	return nil
-}
-
-// executeConvoyFormula spawns a convoy of polecats to execute a convoy formula
-func executeConvoyFormula(f *cookedFormula, formulaName, targetRig string) error {
-	fmt.Printf("%s Executing convoy formula: %s\n\n",
-		style.Bold.Render("🚚"), formulaName)
-
-	p := convoyPlanFrom(f)
-	if len(p.Legs) == 0 {
-		return fmt.Errorf("convoy formula '%s' has no legs", formulaName)
-	}
-
-	// Get town root and resolve rig-scoped bead prefix
-	townRoot, err := workspace.FindFromCwd()
-	if err != nil {
-		return fmt.Errorf("finding town root: %w", err)
-	}
-	townBeads := filepath.Join(townRoot, ".beads")
-
-	// Resolve the target rig's beads prefix and directory so convoy legs
-	// are created in the correct database. Legs need the rig prefix
-	// (not hq-) so polecats can resolve them via prefix routing.
-	rigPrefix := beads.GetPrefixForRig(townRoot, targetRig)
-	rigBeadsDir := townBeads // default to town beads
-	if rigPrefix != "hq" {
-		// Look up the rig's beads path from routes
-		routes, _ := beads.LoadRoutes(townBeads)
-		for _, r := range routes {
-			parts := strings.SplitN(r.Path, "/", 2)
-			if len(parts) > 0 && parts[0] == targetRig {
-				rigBeadsDir = filepath.Join(townRoot, r.Path, ".beads")
-				break
-			}
-		}
-	}
-
-	// Step 1: Create convoy bead
-	convoyID := fmt.Sprintf("%s-cv-%s", rigPrefix, generateFormulaShortID())
-	convoyTitle := fmt.Sprintf("%s: %s", formulaName, f.Description)
-	if len(convoyTitle) > 80 {
-		convoyTitle = convoyTitle[:77] + "..."
-	}
-
-	// Build description with formula context
-	description := fmt.Sprintf("Formula convoy: %s\n\nLegs: %d\nRig: %s",
-		formulaName, len(p.Legs), targetRig)
-	if formulaRunPR > 0 {
-		description += fmt.Sprintf("\nPR: #%d", formulaRunPR)
-	}
-
-	// Guard against flag-like convoy titles (gt-e0kx5)
-	if beads.IsFlagLikeTitle(convoyTitle) {
-		return fmt.Errorf("refusing to create formula convoy: title %q looks like a CLI flag", convoyTitle)
-	}
-
-	townBd := beads.NewPinned(townBeads)
-	rigBd := beads.NewPinned(rigBeadsDir)
-	if _, err := townBd.CreateWithID(convoyID, beads.CreateOptions{
-		Title:       convoyTitle,
-		Description: description,
-		Labels:      []string{"gt:convoy"},
-		Priority:    -1,
-	}); err != nil {
-		return fmt.Errorf("creating convoy bead: %w", err)
-	}
-
-	fmt.Printf("%s Created convoy: %s\n", style.Bold.Render("✓"), convoyID)
-
-	// Generate a unique review ID for this convoy run
-	reviewID := generateFormulaShortID()
-
-	// Build target description
-	var targetDescription string
-	if formulaRunPR > 0 {
-		targetDescription = fmt.Sprintf("PR #%d", formulaRunPR)
-	} else {
-		targetDescription = "local files"
-	}
-
-	// Fetch PR info if --pr flag is set
-	var prTitle string
-	var changedFiles []map[string]interface{}
-	if formulaRunPR > 0 {
-		prTitle, changedFiles = fetchPRInfo(formulaRunPR)
-	}
-
-	// The formula's vars and the --set pairs, for template rendering.
-	setVars := formulaRunVars(f, formulaRunSet)
-
-	// Create output directory if configured
-	var outputDir string
-	if p.OutputDir != "" {
-		dirCtx := formulaTemplateContext(formulaName, targetDescription, reviewID,
-			formulaRunPR, prTitle, changedFiles, formulaRunFiles, setVars)
-		outputDir = renderTemplateOrDefault(p.OutputDir, dirCtx, ".reviews/"+reviewID)
-
-		// Create the directory
-		if err := os.MkdirAll(outputDir, 0755); err != nil {
-			fmt.Printf("%s Failed to create output directory %s: %v\n",
-				style.Dim.Render("Warning:"), outputDir, err)
-		} else {
-			fmt.Printf("  %s Output directory: %s\n", style.Dim.Render("📁"), outputDir)
-		}
-	}
-
-	// Step 2: Create leg beads and track them
-	legBeads := make(map[string]string) // leg.ID -> bead ID
-	for _, leg := range p.Legs {
-		legBeadID := fmt.Sprintf("%s-leg-%s", rigPrefix, generateFormulaShortID())
-
-		// Build leg description with prompt if available
-		legDesc := leg.Description
-		if p.BasePrompt != "" {
-			// Build template context for this leg
-			legCtx := formulaTemplateContext(formulaName, targetDescription, reviewID,
-				formulaRunPR, prTitle, changedFiles, formulaRunFiles, setVars)
-			legCtx["leg"] = map[string]interface{}{
-				"id":          leg.ID,
-				"title":       leg.Title,
-				"focus":       leg.Focus,
-				"description": leg.Description,
-			}
-
-			// Compute output path for this leg
-			if p.OutputDir != "" {
-				legPattern := renderTemplateOrDefault(p.LegPattern, legCtx, leg.ID+"-findings.md")
-				outputPath := filepath.Join(outputDir, legPattern)
-				legCtx["output_path"] = outputPath
-				addOutputTemplateContext(legCtx, outputDir, p.SynthesisFile)
-			}
-
-			// Render the base prompt with template context
-			renderedPrompt, err := renderTemplate(p.BasePrompt, legCtx)
-			if err != nil {
-				fmt.Printf("%s Failed to render template for %s: %v\n",
-					style.Dim.Render("Warning:"), leg.ID, err)
-				renderedPrompt = p.BasePrompt // Fall back to raw template
-			}
-			legDesc = fmt.Sprintf("%s\n\n---\nBase Prompt:\n%s", leg.Description, renderedPrompt)
-		}
-
-		if _, err := rigBd.CreateWithID(legBeadID, beads.CreateOptions{
-			Title:       leg.Title,
-			Description: legDesc,
-			Priority:    -1,
-		}); err != nil {
-			fmt.Printf("%s Failed to create leg bead for %s: %v\n",
-				style.Dim.Render("Warning:"), leg.ID, err)
-			continue
-		}
-
-		// Track the leg with the convoy
-		if err := addTrackingRelationFn(townBeads, convoyID, legBeadID); err != nil {
-			fmt.Printf("%s Failed to track leg %s: %v\n",
-				style.Dim.Render("Warning:"), leg.ID, err)
-		}
-
-		legBeads[leg.ID] = legBeadID
-		fmt.Printf("  %s Created leg: %s (%s)\n", style.Dim.Render("○"), leg.ID, legBeadID)
-	}
-
-	// Step 3: Create synthesis bead if defined
-	var synthesisBeadID string
-	if p.Synthesis != nil {
-		synthesisBeadID = fmt.Sprintf("%s-syn-%s", rigPrefix, generateFormulaShortID())
-
-		synDesc := p.Synthesis.Description
-		if synDesc == "" {
-			synDesc = "Synthesize findings from all legs into unified output"
-		}
-		synCtx := formulaTemplateContext(formulaName, targetDescription, reviewID,
-			formulaRunPR, prTitle, changedFiles, formulaRunFiles, setVars)
-		if p.OutputDir != "" {
-			addOutputTemplateContext(synCtx, outputDir, p.SynthesisFile)
-		}
-		if rendered, err := renderTemplate(synDesc, synCtx); err == nil {
-			synDesc = rendered
-		} else {
-			fmt.Printf("%s Failed to render synthesis template: %v\n",
-				style.Dim.Render("Warning:"), err)
-		}
-
-		if _, err := rigBd.CreateWithID(synthesisBeadID, beads.CreateOptions{
-			Title:       p.Synthesis.Title,
-			Description: synDesc,
-			Priority:    -1,
-		}); err != nil {
-			fmt.Printf("%s Failed to create synthesis bead: %v\n",
-				style.Dim.Render("Warning:"), err)
-		} else {
-			// Track synthesis with convoy
-			_ = addTrackingRelationFn(townBeads, convoyID, synthesisBeadID)
-
-			// Add dependencies: synthesis depends on all legs
-			for _, legBeadID := range legBeads {
-				_ = rigBd.AddDependency(synthesisBeadID, legBeadID)
-			}
-
-			fmt.Printf("  %s Created synthesis: %s\n", style.Dim.Render("★"), synthesisBeadID)
-		}
-	}
-
-	// Step 4: Sling each leg to a polecat
-	fmt.Printf("\n%s Dispatching legs to polecats...\n\n", style.Bold.Render("→"))
-
-	slingCount := 0
-	for _, leg := range p.Legs {
-		legBeadID, ok := legBeads[leg.ID]
-		if !ok {
-			continue
-		}
-
-		// Build context message for the polecat
-		contextMsg := fmt.Sprintf("Convoy leg: %s\nFocus: %s", leg.Title, leg.Focus)
-
-		// Agent precedence (GH#2118): per-leg > CLI --agent
-		legAgent := resolveFormulaLegAgent(leg.Agent, formulaRunAgent)
-
-		slingArgs := buildConvoyLegSlingArgs(legBeadID, targetRig, leg.Description, leg.Title, legAgent, leg.ReviewOnly)
-
-		slingCmd := exec.Command("gt", slingArgs...)
-		slingCmd.Stdout = os.Stdout
-		slingCmd.Stderr = os.Stderr
-
-		if err := slingCmd.Run(); err != nil {
-			fmt.Printf("%s Failed to sling leg %s: %v\n",
-				style.Dim.Render("Warning:"), leg.ID, err)
-			// Add comment to bead about failure
-			_ = rigBd.AddComment(legBeadID, fmt.Sprintf("Failed to sling: %v", err))
-			continue
-		}
-
-		slingCount++
-		_ = contextMsg // Used in future for richer context
-	}
-
-	// Summary
-	fmt.Printf("\n%s Convoy dispatched!\n", style.Bold.Render("✓"))
-	fmt.Printf("  Convoy:  %s\n", convoyID)
-	fmt.Printf("  Legs:    %d dispatched\n", slingCount)
-	if synthesisBeadID != "" {
-		fmt.Printf("  Synthesis: %s (blocked until legs complete)\n", synthesisBeadID)
-	}
-	fmt.Printf("\n  Track progress: gt convoy status %s\n", convoyID)
 
 	return nil
 }
@@ -1203,25 +861,6 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen-3] + "..."
 }
 
-// buildConvoyLegSlingArgs constructs the gt-sling argument list for a convoy leg.
-// --no-convoy is always included: legs are tracked by the parent convoy, so per-leg
-// auto-convoy creation is redundant (closes #3856).
-func buildConvoyLegSlingArgs(beadID, targetRig, description, title, agent string, reviewOnly bool) []string {
-	args := []string{
-		"sling", beadID, targetRig,
-		"-a", description,
-		"-s", title,
-		"--no-convoy",
-	}
-	if agent != "" {
-		args = append(args, "--agent", agent)
-	}
-	if reviewOnly {
-		args = append(args, "--review-only")
-	}
-	return args
-}
-
 // buildWorkflowStepSlingArgs constructs the gt-sling argument list for a workflow step.
 // --no-convoy is always included: steps are tracked by the parent workflow bead, so
 // per-step auto-convoy creation is redundant (closes #3856).
@@ -1236,107 +875,6 @@ func buildWorkflowStepSlingArgs(beadID, targetRig, description, title, agent str
 		args = append(args, "--agent", agent)
 	}
 	return args
-}
-
-// parseSetVars parses --set key=value pairs into a map for template rendering.
-func parseSetVars(setArgs []string) map[string]interface{} {
-	vars := make(map[string]interface{})
-	for _, arg := range setArgs {
-		if idx := strings.IndexByte(arg, '='); idx > 0 {
-			vars[arg[:idx]] = arg[idx+1:]
-		}
-	}
-	return vars
-}
-
-func formulaTemplateContext(formulaName, targetDescription, reviewID string, prNumber int, prTitle string, changedFiles []map[string]interface{}, files []string, setVars map[string]interface{}) map[string]interface{} {
-	ctx := map[string]interface{}{
-		"formula_name":       formulaName,
-		"target_description": targetDescription,
-		"review_id":          reviewID,
-		"pr_number":          prNumber,
-		"pr_title":           prTitle,
-		"changed_files":      changedFiles,
-		"files":              files,
-	}
-	for k, v := range setVars {
-		ctx[k] = v
-	}
-	return ctx
-}
-
-func addOutputTemplateContext(ctx map[string]interface{}, outputDir, synthesisFile string) {
-	ctx["output"] = map[string]interface{}{
-		"directory": outputDir,
-		"synthesis": synthesisFile,
-	}
-}
-
-// renderTemplate renders a Go text/template with the given context map
-func renderTemplate(tmplText string, ctx map[string]interface{}) (string, error) {
-	tmpl, err := template.New("prompt").Parse(tmplText)
-	if err != nil {
-		return "", fmt.Errorf("parsing template: %w", err)
-	}
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, ctx); err != nil {
-		return "", fmt.Errorf("executing template: %w", err)
-	}
-	return buf.String(), nil
-}
-
-// renderTemplateOrDefault renders a template, returning defaultVal on error
-func renderTemplateOrDefault(tmplText string, ctx map[string]interface{}, defaultVal string) string {
-	if tmplText == "" {
-		return defaultVal
-	}
-	result, err := renderTemplate(tmplText, ctx)
-	if err != nil {
-		return defaultVal
-	}
-	return result
-}
-
-// fetchPRInfo fetches PR title and changed files from GitHub using gh CLI
-func fetchPRInfo(prNumber int) (string, []map[string]interface{}) {
-	var prTitle string
-	var changedFiles []map[string]interface{}
-
-	// Get PR title
-	titleCmd := exec.Command("gh", "pr", "view", fmt.Sprintf("%d", prNumber), "--json", "title", "--jq", ".title")
-	titleOut, err := titleCmd.Output()
-	if err == nil {
-		prTitle = strings.TrimSpace(string(titleOut))
-	}
-
-	// Get changed files with stats
-	filesCmd := exec.Command("gh", "pr", "view", fmt.Sprintf("%d", prNumber), "--json", "files", "--jq", ".files[] | \"\\(.path) \\(.additions) \\(.deletions)\"")
-	filesOut, err := filesCmd.Output()
-	if err == nil {
-		for _, line := range strings.Split(strings.TrimSpace(string(filesOut)), "\n") {
-			if line == "" {
-				continue
-			}
-			parts := strings.Fields(line)
-			if len(parts) >= 3 {
-				additions, err := strconv.Atoi(parts[1])
-				if err != nil {
-					continue
-				}
-				deletions, err := strconv.Atoi(parts[2])
-				if err != nil {
-					continue
-				}
-				changedFiles = append(changedFiles, map[string]interface{}{
-					"path":      parts[0],
-					"additions": additions,
-					"deletions": deletions,
-				})
-			}
-		}
-	}
-
-	return prTitle, changedFiles
 }
 
 // generateFormulaShortID generates a short random ID (5 lowercase chars)
@@ -1571,72 +1109,6 @@ Perform the patrol inspection.
 # description = "Enable verbose output"
 # default = "false"
 `, name, title, name)
-}
-
-// resolveFormulaLegAgent returns the effective agent for a convoy leg using
-// the precedence: per-leg > CLI --agent. Returns "" if no agent override
-// applies. See GH#2118.
-func resolveFormulaLegAgent(legAgent, cliAgent string) string {
-	if legAgent != "" {
-		return legAgent
-	}
-	return cliAgent
-}
-
-// convoyLeg is one leg of a convoy formula: a cooked step, with its focus,
-// agent and review_only in its metadata table.
-type convoyLeg struct {
-	ID, Title, Focus, Description, Agent string
-	ReviewOnly                           bool
-}
-
-// convoyPlan is what gt formula run dispatches for a convoy formula, read from
-// bd's cooked tree (gt-fd2cu.1.1): the synthesis step (metadata.convoy =
-// "synthesis"), every other step as a leg, and the run settings the formula
-// declares as vars, so --set overrides them like any input.
-type convoyPlan struct {
-	Legs       []convoyLeg
-	Synthesis  *cookedStep
-	BasePrompt string
-	// OutputDir, LegPattern and SynthesisFile are Go templates; OutputDir
-	// empty means the convoy writes no files.
-	OutputDir, LegPattern, SynthesisFile string
-}
-
-func convoyPlanFrom(f *cookedFormula) convoyPlan {
-	allReviewOnly := f.varValue("review_only") == "true"
-	p := convoyPlan{
-		BasePrompt:    f.varValue("base_prompt"),
-		OutputDir:     f.varValue("output_directory"),
-		LegPattern:    f.varValue("output_leg_pattern"),
-		SynthesisFile: f.varValue("output_synthesis"),
-	}
-	for i := range f.Steps {
-		s := &f.Steps[i]
-		if s.metaString("convoy") == "synthesis" {
-			p.Synthesis = s
-			continue
-		}
-		p.Legs = append(p.Legs, convoyLeg{
-			ID: s.ID, Title: s.Title, Description: s.Description,
-			Focus: s.metaString("focus"), Agent: s.metaString("agent"),
-			ReviewOnly: allReviewOnly || s.metaBool("review_only"),
-		})
-	}
-	return p
-}
-
-// formulaRunVars is the template context's inputs: every var bd resolved (its
-// --set value, else its default), then the --set pairs the formula does not
-// declare.
-func formulaRunVars(f *cookedFormula, setArgs []string) map[string]interface{} {
-	vars := parseSetVars(setArgs)
-	for _, v := range f.Vars {
-		if v.Value != nil {
-			vars[v.Name] = *v.Value
-		}
-	}
-	return vars
 }
 
 // promptYesNo asks the user a yes/no question

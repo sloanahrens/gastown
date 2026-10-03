@@ -11,8 +11,6 @@
 //     override files (OverlayDir, LoadFormulaOverlay)
 //
 // Gastown's own fields ride in keys bd's strict decode accepts: a step's
-// metadata table (a workflow step's target and interactive flag, a convoy
-// leg's focus, agent and review_only, metadata.convoy = "synthesis") and
-// vars (a convoy's base_prompt, output_* and review_only settings), which
+// metadata table (a workflow step's target and interactive flag), which
 // gt formula run reads from the cooked tree.
 package formula

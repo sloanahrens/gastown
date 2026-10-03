@@ -156,37 +156,6 @@ func TestFormulaSyncMessage(t *testing.T) {
 	}
 }
 
-func TestBuildConvoyLegSlingArgs_AlwaysIncludesNoConvoy(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name       string
-		agent      string
-		reviewOnly bool
-		wantFlags  []string
-	}{
-		{"no agent no review", "", false, []string{"--no-convoy"}},
-		{"with agent", "claude", false, []string{"--no-convoy", "--agent", "claude"}},
-		{"review only", "", true, []string{"--no-convoy", "--review-only"}},
-		{"agent and review", "gemini", true, []string{"--no-convoy", "--agent", "gemini", "--review-only"}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := buildConvoyLegSlingArgs("bead-1", "myrig", "desc", "title", tt.agent, tt.reviewOnly)
-			for _, want := range tt.wantFlags {
-				if !slices.Contains(got, want) {
-					t.Errorf("buildConvoyLegSlingArgs() missing %q in %v", want, got)
-				}
-			}
-			if got[0] != "sling" {
-				t.Errorf("first arg must be 'sling', got %q", got[0])
-			}
-		})
-	}
-}
-
 func TestBuildWorkflowStepSlingArgs_AlwaysIncludesNoConvoy(t *testing.T) {
 	t.Parallel()
 
@@ -212,107 +181,6 @@ func TestBuildWorkflowStepSlingArgs_AlwaysIncludesNoConvoy(t *testing.T) {
 				t.Errorf("buildWorkflowStepSlingArgs() missing agent %q in %v", tt.agent, got)
 			}
 		})
-	}
-}
-
-func TestResolveFormulaLegAgent_Precedence(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		legAgent string
-		cliAgent string
-		want     string
-	}{
-		{"all empty", "", "", ""},
-		{"cli only", "", "codex", "codex"},
-		{"leg only", "claude-haiku", "", "claude-haiku"},
-		{"leg overrides cli", "claude-haiku", "codex", "claude-haiku"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := resolveFormulaLegAgent(tt.legAgent, tt.cliAgent)
-			if got != tt.want {
-				t.Errorf("resolveFormulaLegAgent(%q, %q) = %q, want %q",
-					tt.legAgent, tt.cliAgent, got, tt.want)
-			}
-		})
-	}
-}
-
-// convoyTree is bd's cooked tree for a convoy formula shaped like design:
-// run settings as vars, two legs and a synthesis step marked in metadata.
-const convoyTree = `{
-  "formula": "design", "type": "convoy", "description": "Design",
-  "vars": [
-    {"name": "base_prompt", "default": "Leg {{.leg.id}}", "value": "Leg {{.leg.id}}"},
-    {"name": "output_directory", "default": ".designs/{{.review_id}}", "value": ".designs/{{.review_id}}"},
-    {"name": "output_leg_pattern", "default": "{{.leg.id}}.md", "value": "{{.leg.id}}.md"},
-    {"name": "output_synthesis", "default": "design-doc.md", "value": "design-doc.md"},
-    {"name": "problem", "required": true, "default": null, "value": "set problem", "provided": true},
-    {"name": "context", "default": null, "value": null},
-    {"name": "review_only", "default": "true", "value": "true"}
-  ],
-  "unresolved_vars": [], "warnings": [],
-  "steps": [
-    {"id": "api", "title": "API", "description": "api body", "needs": [], "children": [],
-     "metadata": {"focus": "Interfaces", "agent": "codex"}},
-    {"id": "data", "title": "Data", "description": "data body", "needs": [], "children": [],
-     "metadata": {"focus": "Storage"}},
-    {"id": "synthesis", "title": "Synthesis", "description": "Combine {{.output.directory}}", "needs": ["api", "data"], "children": [],
-     "metadata": {"convoy": "synthesis"}}
-  ]
-}`
-
-// TestConvoyPlanFrom_ReadsLegsSynthesisAndSettings: gt formula run reads a
-// convoy from bd's cooked tree (gt-fd2cu.1.1): the step metadata marks the
-// synthesis and every other step is a leg; prompt, output files and
-// review_only come from vars.
-func TestConvoyPlanFrom_ReadsLegsSynthesisAndSettings(t *testing.T) {
-	t.Parallel()
-	p := convoyPlanFrom(cookedFixture(t, convoyTree))
-
-	want := []convoyLeg{
-		{ID: "api", Title: "API", Focus: "Interfaces", Description: "api body", Agent: "codex", ReviewOnly: true},
-		{ID: "data", Title: "Data", Focus: "Storage", Description: "data body", ReviewOnly: true},
-	}
-	if !reflect.DeepEqual(p.Legs, want) {
-		t.Errorf("legs = %+v, want %+v", p.Legs, want)
-	}
-	if p.Synthesis == nil || p.Synthesis.ID != "synthesis" || !slices.Equal(p.Synthesis.Needs, []string{"api", "data"}) {
-		t.Errorf("synthesis = %+v", p.Synthesis)
-	}
-	if p.BasePrompt != "Leg {{.leg.id}}" || p.OutputDir != ".designs/{{.review_id}}" ||
-		p.LegPattern != "{{.leg.id}}.md" || p.SynthesisFile != "design-doc.md" {
-		t.Errorf("settings = %q %q %q %q", p.BasePrompt, p.OutputDir, p.LegPattern, p.SynthesisFile)
-	}
-}
-
-// TestFormulaRunVars_ResolvedVarsThenUndeclaredSets: the template context has
-// every var bd gave a value and the --set pairs the formula does not declare;
-// a var without a value stays out, so a template reads it as missing.
-func TestFormulaRunVars_ResolvedVarsThenUndeclaredSets(t *testing.T) {
-	t.Parallel()
-	got := formulaRunVars(cookedFixture(t, convoyTree), []string{"problem=set problem", "extra=x"})
-	if got["problem"] != "set problem" || got["extra"] != "x" || got["output_synthesis"] != "design-doc.md" {
-		t.Errorf("vars = %v", got)
-	}
-	if _, ok := got["context"]; ok {
-		t.Errorf("context has no value but is in the context: %v", got)
-	}
-}
-
-func TestParseSetVarsPreservesMultilineValues(t *testing.T) {
-	t.Parallel()
-
-	got := parseSetVars([]string{"problem=First\n\nSecond", "context=a=b"})
-	if got["problem"] != "First\n\nSecond" {
-		t.Fatalf("problem = %q, want multiline value", got["problem"])
-	}
-	if got["context"] != "a=b" {
-		t.Fatalf("context = %q, want value with equals", got["context"])
 	}
 }
 
@@ -404,49 +272,19 @@ func TestAttachmentFormulaVarsRoundTripsPersistedVars(t *testing.T) {
 	}
 }
 
-func TestRenderTemplateUsesGoDotSyntax(t *testing.T) {
-	t.Parallel()
-
-	ctx := map[string]interface{}{"issue": "gt-123"}
-	got, err := renderTemplate("bd show {{.issue}}", ctx)
-	if err != nil {
-		t.Fatalf("renderTemplate() dotted syntax error: %v", err)
-	}
-	if got != "bd show gt-123" {
-		t.Fatalf("renderTemplate() = %q, want %q", got, "bd show gt-123")
-	}
-
-	if _, err := renderTemplate("bd show {{issue}}", ctx); err == nil {
-		t.Fatal("renderTemplate() with bare syntax succeeded; want Go template error")
-	}
-}
-
 func TestFormulaRunExamplesUseSetVars(t *testing.T) {
 	t.Parallel()
-
-	for _, name := range []string{"design", "mol-idea-to-plan"} {
-		name := name
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-
-			content, err := formula.GetEmbeddedFormulaContent(name)
-			if err != nil {
-				t.Fatalf("GetEmbeddedFormulaContent(%s): %v", name, err)
-			}
-			text := string(content)
-			for _, bad := range []string{"--problem=", "--context=", "--plan="} {
-				if strings.Contains(text, bad) {
-					t.Fatalf("%s still contains invalid gt formula run flag %q", name, bad)
-				}
-			}
-		})
-	}
 
 	idea, err := formula.GetEmbeddedFormulaContent("mol-idea-to-plan")
 	if err != nil {
 		t.Fatalf("GetEmbeddedFormulaContent(mol-idea-to-plan): %v", err)
 	}
 	ideaText := string(idea)
+	for _, bad := range []string{"--problem=", "--context=", "--plan="} {
+		if strings.Contains(ideaText, bad) {
+			t.Fatalf("mol-idea-to-plan still contains invalid gt formula run flag %q", bad)
+		}
+	}
 	if strings.Contains(ideaText, "<design-id>") {
 		t.Fatal("mol-idea-to-plan still references stale <design-id> output paths")
 	}
@@ -462,14 +300,6 @@ func TestFormulaRunExamplesUseSetVars(t *testing.T) {
 		if !strings.Contains(ideaText, want) {
 			t.Fatalf("mol-idea-to-plan missing %q", want)
 		}
-	}
-
-	design, err := formula.GetEmbeddedFormulaContent("design")
-	if err != nil {
-		t.Fatalf("GetEmbeddedFormulaContent(design): %v", err)
-	}
-	if !strings.Contains(string(design), "gt formula run design --set problem=") {
-		t.Fatal("design usage examples do not mention --set problem=")
 	}
 }
 

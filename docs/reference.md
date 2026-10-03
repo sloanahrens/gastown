@@ -894,44 +894,28 @@ read `--events` for the span the commit snapshots lost.
 
 ## Formula Invocation Patterns
 
-**CRITICAL**: Different formula types require different invocation methods.
-
-### Workflow Formulas (sequential steps, single polecat)
+Workflow formulas (sequential steps, single polecat) run one of two ways:
 
 Examples: `shiny`, `shiny-enterprise`, `mol-polecat-work`
 
 ```bash
+# Sling it: gt cooks the formula and pours a wisp for the target
 gt sling <formula> --on <bead-id> <target>
 gt sling shiny-enterprise --on gt-abc123 gastown
+
+# Or dispatch it from gt: ready steps become beads, wired by their needs
+gt formula run <formula> --rig=<rig>
 ```
 
-### Convoy Formulas (parallel legs, multiple polecats)
-
-Examples: `code-review`
-
-**DO NOT use `gt sling` for convoy formulas!** It fails with "convoy type not supported".
+`gt formula run` dispatches workflow formulas only. A formula of another type
+is reported and nothing is dispatched; the convoy formula type and its
+formulas (code-review, design, mol-plan-review, mol-prd-review) were deleted
+(gt-gzhin.5).
 
 ```bash
-# Correct invocation - use gt formula run:
-gt formula run code-review --pr=123
-gt formula run code-review --files="src/*.go"
-
-# Dry run to preview:
-gt formula run code-review --pr=123 --dry-run
+gt formula show <name>   # Shows the formula's type and steps
+bd formula list          # Lists formulas
 ```
-
-### Identifying Formula Type
-
-```bash
-gt formula show <name>   # Shows "Type: convoy" or "Type: workflow"
-bd formula list          # Lists formulas by type
-```
-
-### Why This Matters
-
-- `gt sling` attempts to cook+pour the formula, which fails for convoy type
-- `gt formula run` handles convoy dispatch directly, spawning parallel polecats
-- Convoy formulas create multiple polecats (one per leg) + synthesis step
 
 ## Common Issues
 
