@@ -77,8 +77,11 @@ func roleRigContext(ctx RoleContext) (defaultBranch string, isForkRig bool, upst
 		return defaultBranch, false, ""
 	}
 	rigPath := filepath.Join(ctx.TownRoot, ctx.Rig)
-	rigCfg, err := rig.LoadRigConfig(rigPath)
-	if err != nil || rigCfg == nil {
+	rigCfg, cfgErr := rig.LoadRigConfigIfPresent(rigPath)
+	if cfgErr != nil {
+		rig.WarnRigConfigOnce(rigPath, cfgErr)
+	}
+	if rigCfg == nil {
 		return defaultBranch, false, ""
 	}
 	if rigCfg.DefaultBranch != "" {

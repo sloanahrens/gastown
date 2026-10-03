@@ -969,7 +969,12 @@ func Run(opts Options) error {
 	}
 
 	r.defaultBranch = "main" // fallback
-	if rigCfg, err := rig.LoadRigConfig(filepath.Join(r.townRoot, r.rigName)); err == nil && rigCfg.DefaultBranch != "" {
+	rigPath := filepath.Join(r.townRoot, r.rigName)
+	rigCfg, cfgErr := rig.LoadRigConfigIfPresent(rigPath)
+	if cfgErr != nil {
+		rig.WarnRigConfigOnce(rigPath, cfgErr)
+	}
+	if rigCfg != nil && rigCfg.DefaultBranch != "" {
 		r.defaultBranch = rigCfg.DefaultBranch
 	}
 

@@ -147,8 +147,11 @@ func rigBeadsPrefix(townRoot, rigPath, rigName string) string {
 		}
 	}
 
-	rigConfigPath := filepath.Join(rigPath, "config.json")
-	if rigCfg, err := config.LoadRigConfig(rigConfigPath); err == nil && rigCfg.Beads != nil && rigCfg.Beads.Prefix != "" {
+	rigCfg, cfgErr := rig.LoadRigConfigIfPresent(rigPath)
+	if cfgErr != nil {
+		rig.WarnRigConfigOnce(rigPath, cfgErr)
+	}
+	if rigCfg != nil && rigCfg.Beads != nil && rigCfg.Beads.Prefix != "" {
 		return rigCfg.Beads.Prefix
 	}
 

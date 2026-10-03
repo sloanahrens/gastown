@@ -298,8 +298,14 @@ func newManager(r *rig.Rig, g gitRepo, t sessionProbe, open func(beadsSite) pole
 		)
 	} else {
 		// Fallback: check rig-level config.json for polecat_names
-		// (pool-init and gt rig config write namepool config here).
-		if rigCfg, rcErr := rig.LoadRigConfig(r.Path); rcErr == nil && len(rigCfg.PolecatNames) > 0 {
+		// (pool-init and gt rig config write namepool config here). A
+		// config.json that does not decode is reported rather than read as
+		// "no names configured" (gt-w8dw5).
+		rigCfg, rcErr := rig.LoadRigConfigIfPresent(r.Path)
+		if rcErr != nil {
+			rig.WarnRigConfigOnce(r.Path, rcErr)
+		}
+		if rigCfg != nil && len(rigCfg.PolecatNames) > 0 {
 			pool = NewNamePoolWithConfig(r.Path, r.Name, "", rigCfg.PolecatNames, 0)
 		} else {
 			pool = NewNamePool(r.Path, r.Name)
@@ -1011,11 +1017,7 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 		if opts.BaseBranch != "" {
 			startPoint = opts.BaseBranch
 		} else {
-			defaultBranch := "main"
-			if rigCfg, err := rig.LoadRigConfig(m.rig.Path); err == nil && rigCfg.DefaultBranch != "" {
-				defaultBranch = rigCfg.DefaultBranch
-			}
-			startPoint = fmt.Sprintf("origin/%s", defaultBranch)
+			startPoint = fmt.Sprintf("origin/%s", m.rig.DefaultBranch())
 		}
 
 		if exists, err := repoGit.RefExists(startPoint); err != nil {
@@ -1218,11 +1220,7 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retE
 		if opts.BaseBranch != "" {
 			startPoint = opts.BaseBranch
 		} else {
-			defaultBranch := "main"
-			if rigCfg, err := rig.LoadRigConfig(m.rig.Path); err == nil && rigCfg.DefaultBranch != "" {
-				defaultBranch = rigCfg.DefaultBranch
-			}
-			startPoint = fmt.Sprintf("origin/%s", defaultBranch)
+			startPoint = fmt.Sprintf("origin/%s", m.rig.DefaultBranch())
 		}
 
 		// Validate that startPoint ref exists before attempting worktree creation
@@ -1883,11 +1881,7 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 		if opts.BaseBranch != "" {
 			startPoint = opts.BaseBranch
 		} else {
-			defaultBranch := "main"
-			if rigCfg, err := rig.LoadRigConfig(m.rig.Path); err == nil && rigCfg.DefaultBranch != "" {
-				defaultBranch = rigCfg.DefaultBranch
-			}
-			startPoint = fmt.Sprintf("origin/%s", defaultBranch)
+			startPoint = fmt.Sprintf("origin/%s", m.rig.DefaultBranch())
 		}
 
 		// Validate that startPoint ref exists before attempting worktree creation
@@ -2122,11 +2116,7 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	case opts.BaseBranch != "":
 		startPoint = opts.BaseBranch
 	default:
-		defaultBranch := "main"
-		if rigCfg, err := rig.LoadRigConfig(m.rig.Path); err == nil && rigCfg.DefaultBranch != "" {
-			defaultBranch = rigCfg.DefaultBranch
-		}
-		startPoint = fmt.Sprintf("origin/%s", defaultBranch)
+		startPoint = fmt.Sprintf("origin/%s", m.rig.DefaultBranch())
 	}
 
 	// Validate that startPoint ref exists
@@ -3868,10 +3858,7 @@ func (m *Manager) DetectStalePolecats(threshold int) ([]*StalenessInfo, error) {
 	}
 
 	// Get default branch from rig config
-	defaultBranch := "main"
-	if rigCfg, err := rig.LoadRigConfig(m.rig.Path); err == nil && rigCfg.DefaultBranch != "" {
-		defaultBranch = rigCfg.DefaultBranch
-	}
+	defaultBranch := m.rig.DefaultBranch()
 
 	var results []*StalenessInfo
 	for _, p := range polecats {

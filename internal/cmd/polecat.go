@@ -3575,10 +3575,16 @@ func runPolecatPoolInit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Determine pool size: flag > rig config > default
+	// Determine pool size: flag > rig config > default. A config.json that
+	// exists but does not decode stops the command: the operator is here to
+	// configure this rig, so silently using defaults would write the wrong
+	// pool (gt-w8dw5).
+	rigCfg, cfgErr := rig.LoadRigConfigIfPresent(r.Path)
+	if cfgErr != nil {
+		return fmt.Errorf("reading %s: %w", filepath.Join(r.Path, "config.json"), cfgErr)
+	}
 	poolSize := 4 // default
-	rigCfg, cfgErr := rig.LoadRigConfig(r.Path)
-	if cfgErr == nil && rigCfg.PolecatPoolSize > 0 {
+	if rigCfg != nil && rigCfg.PolecatPoolSize > 0 {
 		poolSize = rigCfg.PolecatPoolSize
 	}
 	if polecatPoolInitSize > 0 {
@@ -3587,7 +3593,7 @@ func runPolecatPoolInit(cmd *cobra.Command, args []string) error {
 
 	// Determine names: rig config > name pool theme
 	var fixedNames []string
-	if cfgErr == nil && len(rigCfg.PolecatNames) > 0 {
+	if rigCfg != nil && len(rigCfg.PolecatNames) > 0 {
 		fixedNames = rigCfg.PolecatNames
 	}
 

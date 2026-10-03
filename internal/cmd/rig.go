@@ -545,7 +545,10 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 
 	// Read default branch from rig config
 	defaultBranch := "main"
-	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, name)); err == nil && rigCfg.DefaultBranch != "" {
+	rigPath := filepath.Join(townRoot, name)
+	if rigCfg, cfgErr := rig.LoadRigConfigIfPresent(rigPath); cfgErr != nil {
+		rig.WarnRigConfigOnce(rigPath, cfgErr)
+	} else if rigCfg != nil && rigCfg.DefaultBranch != "" {
 		defaultBranch = rigCfg.DefaultBranch
 	}
 

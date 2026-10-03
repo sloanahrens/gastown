@@ -93,7 +93,11 @@ func newWorkSurvival(gits gitOpener, rigRoot string, fetchTimeout time.Duration)
 	}
 	g := openRigRepo(gits, root)
 	defaultBranch := "main"
-	if cfg, err := rig.LoadRigConfig(rigRoot); err == nil && cfg.DefaultBranch != "" {
+	cfg, cfgErr := rig.LoadRigConfigIfPresent(rigRoot)
+	if cfgErr != nil {
+		rig.WarnRigConfigOnce(rigRoot, cfgErr)
+	}
+	if cfg != nil && cfg.DefaultBranch != "" {
 		defaultBranch = cfg.DefaultBranch
 	}
 	return &WorkSurvival{g: g, defaultBranch: defaultBranch, fetchTimeout: fetchTimeout}, nil

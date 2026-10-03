@@ -1406,8 +1406,12 @@ func loadRigCommandVars(townRoot, rig string) []string {
 
 	// Load default_branch from rig root config.json (single source of truth per 5ee9abcc).
 	// This sets base_branch for formula instantiation so polecats fork from the right branch.
-	rigCfg, err := rigpkg.LoadRigConfig(filepath.Join(townRoot, rig))
-	if err == nil && rigCfg != nil && rigCfg.DefaultBranch != "" {
+	rigPath := filepath.Join(townRoot, rig)
+	rigCfg, cfgErr := rigpkg.LoadRigConfigIfPresent(rigPath)
+	if cfgErr != nil {
+		rigpkg.WarnRigConfigOnce(rigPath, cfgErr)
+	}
+	if rigCfg != nil && rigCfg.DefaultBranch != "" {
 		vars = append(vars, fmt.Sprintf("base_branch=%s", rigCfg.DefaultBranch))
 	}
 
