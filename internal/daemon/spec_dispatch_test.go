@@ -50,7 +50,7 @@ func TestFormatSpecDispatchReport(t *testing.T) {
 		"  \"dispatched\": [{\"bead\": \"gt-a\", \"line\": \"gt-a: slung to gastown/p on claude-sonnet (hooked seat 2/2)\"}],\n" +
 		"  \"refused\": [{\"bead\": \"gt-b\", \"line\": \"gt-b: spec lint refused: ## Gate: section missing\"}],\n" +
 		"  \"planning\": null, \"skipped\": [{\"bead\": \"gt-c\", \"line\": \"x\"}], \"failed\": null\n}\n")
-	lines := formatSpecDispatchReport(out)
+	lines := (&Daemon{}).formatSpecDispatchReport(out)
 	joined := strings.Join(lines, "\n")
 	for _, want := range []string{
 		"tick: 3 candidate(s), roster claude-sonnet 1/2, deepseek-flash 2/2, 1 dispatched, 1 refused, 0 planning, 1 skipped, 0 failed, 0 held by the failed label",
@@ -65,18 +65,116 @@ func TestFormatSpecDispatchReport(t *testing.T) {
 	// holding out of the queue: a tick that dispatched nothing but left two
 	// beads stuck must say so in the daemon log, not only in the health field
 	// (om, gt-q6zoo attempt 1).
-	if got := formatSpecDispatchReport([]byte(`{"candidates": 3, "labeled_failed": 2}`)); !strings.Contains(got[0], "2 held by the failed label") {
+	if got := (&Daemon{}).formatSpecDispatchReport([]byte(`{"candidates": 3, "labeled_failed": 2}`)); !strings.Contains(got[0], "2 held by the failed label") {
 		t.Errorf("tick line = %q, want it to carry the 2 beads held by the label", got[0])
 	}
-	if got := formatSpecDispatchReport([]byte(`{"notices":["gastown: ignoring stale revert: revert of gt-cul has been building for 31m"]}`)); len(got) != 2 || got[1] != "note: gastown: ignoring stale revert: revert of gt-cul has been building for 31m" {
+	if got := (&Daemon{}).formatSpecDispatchReport([]byte(`{"notices":["gastown: ignoring stale revert: revert of gt-cul has been building for 31m"]}`)); len(got) != 2 || got[1] != "note: gastown: ignoring stale revert: revert of gt-cul has been building for 31m" {
 		t.Errorf("notices = %v", got)
 	}
-	if got := formatSpecDispatchReport([]byte(`{"hold":"town ESTOP active"}`)); len(got) != 1 || got[0] != "held: town ESTOP active" {
+	if got := (&Daemon{}).formatSpecDispatchReport([]byte(`{"hold":"town ESTOP active"}`)); len(got) != 1 || got[0] != "held: town ESTOP active" {
 		t.Errorf("hold = %v", got)
 	}
-	if got := formatSpecDispatchReport([]byte("garbage")); !strings.Contains(got[0], "unparseable") {
+	if got := (&Daemon{}).formatSpecDispatchReport([]byte("garbage")); !strings.Contains(got[0], "unparseable") {
 		t.Errorf("garbage = %v", got)
 	}
+}
+
+// The tick line names every skipped bead with its reason after the counts, so
+// the feed says why a candidate did not dispatch instead of only how many
+// stayed ready (gt-gzav5).
+func TestFormatSpecDispatchReportNamesSkippedBeads(t *testing.T) {
+	t.Parallel()
+	out := []byte(`{"candidates": 4, "skipped": [
+		{"bead": "gt-a", "line": "gt-a: unshaped: ## Goal, acceptance"},
+		{"bead": "gt-b", "line": "gt-b: no seat: claude-sonnet 2/2 live"},
+		{"bead": "gt-c", "line": "gt-c: clean, per-tick limit 1 reached"},
+		{"bead": "gt-d", "line": "gt-d: held: open child gt-e"}
+	]}`)
+	lines := (&Daemon{}).formatSpecDispatchReport(out)
+	tick := lines[0]
+	for _, want := range []string{
+		"4 skipped",
+		"gt-a (unshaped: ## Goal, acceptance)",
+		"gt-b (no seat: claude-sonnet 2/2 live)",
+		"gt-c (clean, per-tick limit 1 reached)",
+		"gt-d (held: open child gt-e)",
+	} {
+		if !strings.Contains(tick, want) {
+			t.Errorf("tick line %q missing %q", tick, want)
+		}
+	}
+}
+
+// The skipped list is capped: at most specDispatchSkipCap beads are named and
+// the rest are counted, so one tick with a long board still logs one line
+// (gt-gzav5).
+func TestFormatSpecDispatchReportCapsSkippedBeads(t *testing.T) {
+	t.Parallel()
+	out := []byte(`{"candidates": 8, "skipped": [
+		{"bead": "gt-a", "line": "gt-a: no seat: full"},
+		{"bead": "gt-b", "line": "gt-b: no seat: full"},
+		{"bead": "gt-c", "line": "gt-c: no seat: full"},
+		{"bead": "gt-d", "line": "gt-d: no seat: full"},
+		{"bead": "gt-e", "line": "gt-e: no seat: full"},
+		{"bead": "gt-f", "line": "gt-f: no seat: full"},
+		{"bead": "gt-g", "line": "gt-g: no seat: full"},
+		{"bead": "gt-h", "line": "gt-h: no seat: full"}
+	]}`)
+	tick := (&Daemon{}).formatSpecDispatchReport(out)[0]
+	for _, want := range []string{"gt-f (no seat: full)", " +2 more"} {
+		if !strings.Contains(tick, want) {
+			t.Errorf("tick line %q missing %q", tick, want)
+		}
+	}
+	for _, beyond := range []string{"gt-g (", "gt-h ("} {
+		if strings.Contains(tick, beyond) {
+			t.Errorf("tick line %q names %q past the cap of %d", tick, beyond, specDispatchSkipCap)
+		}
+	}
+}
+
+// An unshaped bead stays ready and is held again every tick, so its warning
+// lands once — naming the missing headings — and the next tick's tick line
+// still names it without a second warning (gt-gzav5).
+func TestFormatSpecDispatchReportWarnsOnceAboutUnshaped(t *testing.T) {
+	t.Parallel()
+	out := []byte(`{"candidates": 2, "skipped": [
+		{"bead": "gt-a", "line": "gt-a: unshaped: ## Gate, ## Size"},
+		{"bead": "gt-b", "line": "gt-b: no seat: claude-sonnet 2/2 live"}
+	]}`)
+	d := &Daemon{}
+
+	first := d.formatSpecDispatchReport(out)
+	if !warnsAbout(first, "gt-a", "unshaped: ## Gate, ## Size") {
+		t.Errorf("first tick = %v, want one warning naming gt-a's missing headings", first)
+	}
+	for _, line := range first {
+		if strings.Contains(line, "gt-b") && strings.HasPrefix(line, "warning:") {
+			t.Errorf("a bead skipped for a reason other than shape warned: %q", line)
+		}
+	}
+
+	second := d.formatSpecDispatchReport(out)
+	if !strings.Contains(second[0], "gt-a (unshaped: ## Gate, ## Size)") {
+		t.Errorf("second tick = %q, want the skip still named on the tick line", second[0])
+	}
+	for _, line := range second {
+		if strings.HasPrefix(line, "warning:") {
+			t.Errorf("second tick warned again: %v", second)
+		}
+	}
+}
+
+// warnsAbout reports whether lines carry one warning for bead that names
+// reason.
+func warnsAbout(lines []string, bead, reason string) bool {
+	want := "warning: " + bead + " " + reason
+	for _, line := range lines {
+		if line == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestDispatchRosterSeats(t *testing.T) {

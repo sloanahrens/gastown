@@ -53,6 +53,8 @@ func TestTailVisible_HidesRoutineKeepsTheRest(t *testing.T) {
 		{"alert cleared", dm("clearAlerts(jsonl_git_backup:push): backup push succeeded"), false},
 		{"alert clear failed", dm("clearAlerts(patrol_watchdog:gastown/witness): recording the clear failed"), true},
 		{"town health", dm("townhealth: RED tick 4ms ago: escalation=oldest_2h needs-human=1"), true},
+		{"spec dispatch tick naming skips", dm("spec_dispatch: tick: 4 candidate(s), roster deepseek-flash 0/3, 0 dispatched, 0 refused, 0 planning, 4 skipped, 0 failed, 0 held by the failed label; skipped: gt-a (unshaped: ## Gate); gt-b (no seat: claude-sonnet 2/2)"), true},
+		{"spec dispatch unshaped warning", dm("spec_dispatch: warning: gt-a unshaped: ## Gate, acceptance"), true},
 		{"upgrade restart", dm("Restarting for upgrade: shutting down so launchd restarts the daemon on the installed binary"), true},
 		{"landing", tailLine{Rig: "gastown", Kind: tailKindLandings, Text: "landed gt-1 polecat/opal/gt-1 -> main"}, true},
 	}

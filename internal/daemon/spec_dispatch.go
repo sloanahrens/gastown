@@ -37,6 +37,10 @@ const (
 	// townhealth's dispatch field: two hours at the default 60s interval,
 	// far past the health window (gt-xiw7o).
 	dispatchTickHistory = 120
+
+	// specDispatchSkipCap bounds the skipped beads the tick line names; past
+	// it the line says how many more it left unnamed (gt-gzav5).
+	specDispatchSkipCap = 6
 )
 
 // specDispatchInterval returns the configured interval, or 60s.
@@ -51,6 +55,13 @@ func specDispatchInterval(config *DaemonPatrolConfig) time.Duration {
 	return defaultSpecDispatchInterval
 }
 
+// specDispatchTickEntry is one bead the tick decided about: Bead names it and
+// Line is the sentence for the log, "<bead>: <reason>".
+type specDispatchTickEntry struct {
+	Bead string `json:"bead"`
+	Line string `json:"line"`
+}
+
 // specDispatchTickReport is the slice of the tick's JSON the daemon logs.
 type specDispatchTickReport struct {
 	Hold       string `json:"hold"`
@@ -59,24 +70,14 @@ type specDispatchTickReport struct {
 	// LabeledFailed is the tick's count of ready beads held out of the queue
 	// by the spec-dispatch-failed label, which the health field surfaces
 	// (gt-q6zoo).
-	LabeledFailed int `json:"labeled_failed"`
-	Dispatched    []struct {
-		Line string `json:"line"`
-	} `json:"dispatched"`
-	Refused []struct {
-		Line string `json:"line"`
-	} `json:"refused"`
-	Planning []struct {
-		Line string `json:"line"`
-	} `json:"planning"`
-	Skipped []struct {
-		Line string `json:"line"`
-	} `json:"skipped"`
-	Failed []struct {
-		Line string `json:"line"`
-	} `json:"failed"`
-	Notices []string `json:"notices"`
-	Errors  []string `json:"errors"`
+	LabeledFailed int                     `json:"labeled_failed"`
+	Dispatched    []specDispatchTickEntry `json:"dispatched"`
+	Refused       []specDispatchTickEntry `json:"refused"`
+	Planning      []specDispatchTickEntry `json:"planning"`
+	Skipped       []specDispatchTickEntry `json:"skipped"`
+	Failed        []specDispatchTickEntry `json:"failed"`
+	Notices       []string                `json:"notices"`
+	Errors        []string                `json:"errors"`
 }
 
 // triggerSpecDispatch starts one tick on its own goroutine unless one is
@@ -109,7 +110,7 @@ func (d *Daemon) runSpecDispatch() {
 	if r, perr := parseSpecDispatchReport(out); perr == nil && r.Hold == "" {
 		d.recordDispatchTick(r, d.clk().Now())
 	}
-	for _, line := range formatSpecDispatchReport(out) {
+	for _, line := range d.formatSpecDispatchReport(out) {
 		d.logger.Printf("spec_dispatch: %s", line)
 	}
 }
@@ -212,8 +213,10 @@ func parseSpecDispatchReport(out []byte) (specDispatchTickReport, error) {
 	return r, err
 }
 
-// formatSpecDispatchReport renders a tick's JSON as log lines.
-func formatSpecDispatchReport(out []byte) []string {
+// formatSpecDispatchReport renders a tick's JSON as log lines. The tick line
+// names every skipped bead with its reason, and a bead skipped unshaped warns
+// once, on the first tick that sees it (gt-gzav5).
+func (d *Daemon) formatSpecDispatchReport(out []byte) []string {
 	r, err := parseSpecDispatchReport(out)
 	if err != nil {
 		return []string{fmt.Sprintf("unparseable tick output (%v)", err)}
@@ -221,13 +224,10 @@ func formatSpecDispatchReport(out []byte) []string {
 	if r.Hold != "" {
 		return []string{"held: " + r.Hold}
 	}
-	lines := []string{fmt.Sprintf("tick: %d candidate(s), roster %s, %d dispatched, %d refused, %d planning, %d skipped, %d failed, %d held by the failed label",
-		r.Candidates, r.Roster, len(r.Dispatched), len(r.Refused), len(r.Planning), len(r.Skipped), len(r.Failed), r.LabeledFailed)}
+	lines := []string{specDispatchTickLine(r)}
 	for _, group := range []struct {
 		name    string
-		entries []struct {
-			Line string `json:"line"`
-		}
+		entries []specDispatchTickEntry
 	}{{"dispatched", r.Dispatched}, {"refused", r.Refused}, {"planning", r.Planning}, {"failed", r.Failed}} {
 		for _, e := range group.entries {
 			lines = append(lines, group.name+": "+e.Line)
@@ -236,10 +236,75 @@ func formatSpecDispatchReport(out []byte) []string {
 	for _, n := range r.Notices {
 		lines = append(lines, "note: "+n)
 	}
+	lines = append(lines, d.specUnshapedWarnings(r.Skipped)...)
 	for _, e := range r.Errors {
 		lines = append(lines, "error: "+e)
 	}
 	return lines
+}
+
+// specDispatchTickLine renders the tick's counts and, after them, the beads it
+// skipped with their reasons, capped at specDispatchSkipCap and then "+N more"
+// (gt-gzav5). The counts text is unchanged so a monitor parsing the numbers
+// still reads the same fields.
+func specDispatchTickLine(r specDispatchTickReport) string {
+	line := fmt.Sprintf("tick: %d candidate(s), roster %s, %d dispatched, %d refused, %d planning, %d skipped, %d failed, %d held by the failed label",
+		r.Candidates, r.Roster, len(r.Dispatched), len(r.Refused), len(r.Planning), len(r.Skipped), len(r.Failed), r.LabeledFailed)
+	if len(r.Skipped) == 0 {
+		return line
+	}
+	named := make([]string, 0, specDispatchSkipCap)
+	for i, e := range r.Skipped {
+		if i == specDispatchSkipCap {
+			break
+		}
+		named = append(named, specSkipLabel(e))
+	}
+	line += "; skipped: " + strings.Join(named, "; ")
+	if more := len(r.Skipped) - specDispatchSkipCap; more > 0 {
+		line += fmt.Sprintf(" +%d more", more)
+	}
+	return line
+}
+
+// specSkipLabel names one skipped bead and its reason: "gt-a (no seat:
+// claude-sonnet 2/2)".
+func specSkipLabel(e specDispatchTickEntry) string {
+	if e.Bead == "" {
+		return e.Line
+	}
+	return fmt.Sprintf("%s (%s)", e.Bead, specSkipReason(e))
+}
+
+// specSkipReason is a skipped entry's reason, the tail of its line, which
+// starts "<bead>: ".
+func specSkipReason(e specDispatchTickEntry) string {
+	if e.Bead == "" {
+		return e.Line
+	}
+	return strings.TrimPrefix(e.Line, e.Bead+": ")
+}
+
+// specUnshapedWarnings warns once per bead the tick skipped unshaped, naming
+// the missing headings, and remembers it. An unshaped bead stays ready, so
+// every tick holds it again; without the memory the same warning would repeat
+// each interval (gt-gzav5).
+func (d *Daemon) specUnshapedWarnings(skipped []specDispatchTickEntry) []string {
+	var out []string
+	d.specUnshapedWarnedMu.Lock()
+	defer d.specUnshapedWarnedMu.Unlock()
+	if d.specUnshapedWarned == nil {
+		d.specUnshapedWarned = map[string]bool{}
+	}
+	for _, e := range skipped {
+		reason := specSkipReason(e)
+		if e.Bead == "" || !strings.HasPrefix(reason, "unshaped") || d.specUnshapedWarned[e.Bead] {
+			continue
+		}
+		d.specUnshapedWarned[e.Bead] = true
+		out = append(out, fmt.Sprintf("warning: %s %s", e.Bead, reason))
+	}
+	return out
 }
 
 func lastLine(s string) string {
