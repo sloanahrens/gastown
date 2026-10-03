@@ -560,6 +560,16 @@ func TestDispatch(t *testing.T) {
 			DispatchRecord{Active: true, Ticks: []DispatchTick{{At: ago(2 * time.Minute), Candidates: 3, RosterUnreadable: true}}},
 			ago(time.Hour), Unknown, VerdictUnknown, "?", "could not read", "dispatch[?]",
 		},
+		{
+			"a working dispatcher holding beads out of the queue is degraded, not green",
+			DispatchRecord{Active: true, Ticks: []DispatchTick{{At: ago(2 * time.Minute), Candidates: 3, Seats: []DispatchSeat{{Live: 1, Cap: 2}}, Dispatched: 1, LabeledFailed: 2}}},
+			ago(time.Hour), Recorded, Degraded, "ok 2 failed", "labeled spec-dispatch-failed", "dispatch=ok_2_failed[R]",
+		},
+		{
+			"a held dispatcher still surfaces the beads it left labeled",
+			DispatchRecord{Hold: "town ESTOP active", Ticks: []DispatchTick{{At: ago(2 * time.Minute), Candidates: 3, Seats: []DispatchSeat{{Live: 1, Cap: 2}}, LabeledFailed: 1}}},
+			ago(time.Hour), Recorded, Degraded, "held 1 failed", "labeled spec-dispatch-failed", "dispatch=held_1_failed[R]",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := healthy()
@@ -583,6 +593,28 @@ func TestDispatch(t *testing.T) {
 				t.Errorf("line = %q, want it to carry %q", line, tc.linePart)
 			}
 		})
+	}
+}
+
+// The labeled-failed count is the newest tick's, so a label the operator
+// cleared comes off the line on the next tick and a count from a tick outside
+// the window is not carried forward (gt-q6zoo).
+func TestDispatchLabeledFailedCountIsTheNewestTicks(t *testing.T) {
+	t.Parallel()
+	tick := func(at time.Time, labeled int) DispatchTick {
+		return DispatchTick{At: at, Candidates: 3, Seats: []DispatchSeat{{Live: 1, Cap: 2}}, Dispatched: 1, LabeledFailed: labeled}
+	}
+
+	f := healthy()
+	f.dispatch = DispatchRecord{Active: true, Ticks: []DispatchTick{tick(ago(6*time.Minute), 3), tick(ago(2*time.Minute), 0)}}
+	if got := field(t, Compute(context.Background(), inputs(f)), "dispatch"); got.Verdict != Green || got.Value != "ok" {
+		t.Errorf("dispatch = %+v, want green ok: the newest tick found none left labeled", got)
+	}
+
+	f = healthy()
+	f.dispatch = DispatchRecord{Active: true, Ticks: []DispatchTick{tick(ago(11*time.Minute), 3)}}
+	if got := field(t, Compute(context.Background(), inputs(f)), "dispatch"); got.Value != "silent" {
+		t.Errorf("dispatch = %+v, want silent: a count from outside the window is not carried forward", got)
 	}
 }
 

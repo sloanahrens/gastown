@@ -275,15 +275,19 @@ func emitSpecLint(out io.Writer, report specLintReport, line string, code int, a
 
 // specDispatchReport is one tick's outcome; the daemon logs it.
 type specDispatchReport struct {
-	Hold       string              `json:"hold,omitempty"`
-	Template   string              `json:"template"`
-	Roster     string              `json:"roster"`
-	Candidates int                 `json:"candidates"`
-	Dispatched []specDispatchEntry `json:"dispatched"`
-	Refused    []specDispatchEntry `json:"refused"`
-	Planning   []specDispatchEntry `json:"planning"`
-	Skipped    []specDispatchEntry `json:"skipped"`
-	Failed     []specDispatchEntry `json:"failed"`
+	Hold       string `json:"hold,omitempty"`
+	Template   string `json:"template"`
+	Roster     string `json:"roster"`
+	Candidates int    `json:"candidates"`
+	// LabeledFailed counts the ready beads the tick found carrying
+	// specdispatch.DispatchFailedLabel: they are out of the queue until the
+	// label is cleared, and the health line surfaces the count (gt-q6zoo).
+	LabeledFailed int                 `json:"labeled_failed,omitempty"`
+	Dispatched    []specDispatchEntry `json:"dispatched"`
+	Refused       []specDispatchEntry `json:"refused"`
+	Planning      []specDispatchEntry `json:"planning"`
+	Skipped       []specDispatchEntry `json:"skipped"`
+	Failed        []specDispatchEntry `json:"failed"`
 	// Notices are lines the tick decided on but no single candidate owns,
 	// logged once each (gt-wgyca).
 	Notices []string `json:"notices,omitempty"`
@@ -315,7 +319,7 @@ type specRoster struct {
 // in tests.
 type specDispatchEnv struct {
 	Hold       func() string
-	Candidates func() ([]specCandidate, []string)
+	Candidates func() specBoardRead
 	Show       func(beadID string) (specdispatch.Spec, error)
 	RigHold    func(rig string) string
 	// RevertInFlight is the revert the rig's red-main owner has building or
@@ -371,9 +375,10 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	budget.NewestSpawn = roster.Newest
 	report.Roster = budget.Picture()
 
-	candidates, errs := env.Candidates()
-	report.Errors = append(report.Errors, errs...)
-	report.Candidates = len(candidates)
+	read := env.Candidates()
+	report.Errors = append(report.Errors, read.Errors...)
+	report.Candidates = len(read.Candidates)
+	report.LabeledFailed = read.LabeledFailed
 	perTick := env.PerTick
 	if perTick <= 0 {
 		perTick = defaultSpecMaxPerTick
@@ -383,7 +388,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	// (gt-wgyca).
 	staleNoted := map[string]bool{}
 
-	for _, c := range candidates {
+	for _, c := range read.Candidates {
 		id := c.Spec.ID
 		full, err := env.Show(id)
 		if err != nil {
@@ -523,6 +528,15 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			return slingErr
 		})
 		if err != nil {
+			if isSpecOverlapRefusal(err) {
+				// The content-overlap guard refuses only live work, so the
+				// refusal lifts on its own when the overlapping bead closes.
+				// The bead stays ready and the next tick retries it, rather
+				// than leaving a label for an operator to clear by hand
+				// (gt-q6zoo).
+				report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent, Line: fmt.Sprintf("%s: sling deferred, content overlap clears when the overlapping bead closes: %s", id, firstErrLine(err))})
+				continue
+			}
 			if isSpecSlingRefusal(err) {
 				// Capacity, not failure: the pool or the merge queue said
 				// not now. The bead stays ready.
@@ -533,18 +547,20 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			if specdispatch.IsSerializationFailure(err) {
 				why = fmt.Sprintf("%v after %d attempts: %s", specdispatch.ErrRetriesExhausted, attempts, why)
 			}
-			failLine := fmt.Sprintf("%s: dispatch failed, left unassigned: %s", id, why)
+			excluded := fmt.Sprintf("excluded from the queue until label %s is cleared", specdispatch.DispatchFailedLabel)
+			failLine := fmt.Sprintf("%s: dispatch failed, left unassigned: %s; %s", id, why, excluded)
 			entry.Line = failLine
 			report.Failed = append(report.Failed, entry)
 			// The label takes the bead out of the candidate set, so a sling
 			// that fails for a reason other than capacity does not spawn and
-			// roll back a polecat every tick. Removing it retries.
+			// roll back a polecat every tick. Removing it retries. Only a
+			// failure that cannot clear itself is labeled; an overlap is
+			// deferred above instead (gt-q6zoo).
 			if err := env.AddLabel(id, specdispatch.DispatchFailedLabel); err != nil {
 				report.Errors = append(report.Errors, fmt.Sprintf("%s: label: %v", id, err))
 			}
 			key := fmt.Sprintf("%s%s: dispatch failed", specDispatchNotePrefix, id)
-			text := fmt.Sprintf("%s%s (remove label %s to retry)", specDispatchNotePrefix, failLine, specdispatch.DispatchFailedLabel)
-			if err := env.Annotate(id, key, text); err != nil {
+			if err := env.Annotate(id, key, specDispatchNotePrefix+failLine); err != nil {
 				report.Errors = append(report.Errors, fmt.Sprintf("%s: annotate: %v", id, err))
 			}
 			continue
@@ -580,6 +596,14 @@ func specResumeNote(resume, gone string) string {
 		return "; resume branch " + gone + " gone"
 	}
 	return ""
+}
+
+// isSpecOverlapRefusal reports whether a sling error is the content-overlap
+// guard's refusal. The guard refuses only live work, so the refusal clears on
+// its own when the overlapping bead closes: the dispatcher defers the bead
+// rather than labeling it out of the queue (gt-q6zoo).
+func isSpecOverlapRefusal(err error) bool {
+	return errors.Is(err, errSlingDuplicateContent)
 }
 
 func isSpecSlingRefusal(err error) bool {
@@ -727,7 +751,7 @@ func runSpecDispatch(cmd *cobra.Command, _ []string) error {
 
 	env := specDispatchEnv{
 		Hold:       func() string { return dispatch.OperatorHold(townRoot) },
-		Candidates: func() ([]specCandidate, []string) { return specCandidates(townRoot, maxPriority, specReadyBoard) },
+		Candidates: func() specBoardRead { return specCandidates(townRoot, maxPriority, specReadyBoard) },
 		Show:       func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) },
 		RigHold:    func(rig string) string { return dispatch.RigHold(townRoot, rig) },
 		RevertInFlight: func(rig string) *specdispatch.Revert {
@@ -782,7 +806,11 @@ func printSpecDispatchReport(cmd *cobra.Command, r specDispatchReport) {
 		fmt.Fprintf(w, "spec dispatch held: %s\n", r.Hold)
 		return
 	}
-	fmt.Fprintf(w, "spec dispatch: %d candidate(s); roster %s; template %s\n", r.Candidates, r.Roster, r.Template)
+	summary := fmt.Sprintf("spec dispatch: %d candidate(s)", r.Candidates)
+	if r.LabeledFailed > 0 {
+		summary += fmt.Sprintf(", %d held by %s", r.LabeledFailed, specdispatch.DispatchFailedLabel)
+	}
+	fmt.Fprintf(w, "%s; roster %s; template %s\n", summary, r.Roster, r.Template)
 	for _, group := range []struct {
 		name    string
 		entries []specDispatchEntry
@@ -859,18 +887,33 @@ func revertStatusOpen(status string) bool {
 // process state (internal/testpolicy's no-global-swap).
 type specBoard func(rigPath string) ([]*beads.Issue, error)
 
+// specBoardRead is one tick's read of the ready boards: the eligible
+// candidates, the ready beads the spec-dispatch-failed label is holding out of
+// the queue, and the rigs whose boards could not be read.
+type specBoardRead struct {
+	Candidates []specCandidate
+	// LabeledFailed counts the ready beads the tick found carrying
+	// specdispatch.DispatchFailedLabel. They are out of the queue until the
+	// label is cleared, and the count is the operator's signal that a bead is
+	// stuck there (gt-q6zoo).
+	LabeledFailed int
+	Errors        []string
+}
+
 // specCandidates reads every operational rig's ready work beads and keeps the
 // eligible ones, ordered across rigs. A rig whose board cannot be read is
 // reported and skipped; the rest still dispatch. maxPriority is the operator's
 // ceiling on a candidate's priority number.
-func specCandidates(townRoot string, maxPriority int, board specBoard) ([]specCandidate, []string) {
+func specCandidates(townRoot string, maxPriority int, board specBoard) specBoardRead {
+	var read specBoardRead
 	names, err := knownRigNames(townRoot)
 	if err != nil {
-		return nil, []string{err.Error()}
+		read.Errors = []string{err.Error()}
+		return read
 	}
-	var errs []string
 	var specs []specdispatch.Spec
 	rigOf := map[string]string{}
+	labeled := map[string]bool{}
 	for _, name := range names {
 		rigPath := filepath.Join(townRoot, name)
 		if _, err := os.Stat(rigPath); err != nil {
@@ -884,11 +927,18 @@ func specCandidates(townRoot string, maxPriority int, board specBoard) ([]specCa
 		}
 		issues, err := board(rigPath)
 		if err != nil {
-			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
+			read.Errors = append(read.Errors, fmt.Sprintf("%s: %v", name, err))
 			continue
 		}
 		for _, issue := range issues {
 			s := specFromIssue(issue)
+			// A bead the failed label is holding is counted, not taken: the
+			// count is what the health line surfaces, and Eligible would drop
+			// it from candidacy anyway (gt-q6zoo).
+			if s.HasLabel(specdispatch.DispatchFailedLabel) {
+				labeled[s.ID] = true
+				continue
+			}
 			// The ready board is a snapshot: the full bead is re-read before
 			// any decision.
 			if ok, _ := specdispatch.Eligible(s, maxPriority); !ok {
@@ -902,11 +952,12 @@ func specCandidates(townRoot string, maxPriority int, board specBoard) ([]specCa
 		}
 	}
 	specdispatch.Order(specs)
-	out := make([]specCandidate, 0, len(specs))
+	read.Candidates = make([]specCandidate, 0, len(specs))
 	for _, s := range specs {
-		out = append(out, specCandidate{Spec: s, Rig: rigOf[s.ID]})
+		read.Candidates = append(read.Candidates, specCandidate{Spec: s, Rig: rigOf[s.ID]})
 	}
-	return out, errs
+	read.LabeledFailed = len(labeled)
+	return read
 }
 
 // specReadyArgs is the ready query: unassigned work beads, with the
@@ -914,8 +965,19 @@ func specCandidates(townRoot string, maxPriority int, board specBoard) ([]specCa
 // server-side, unlimited. The retired label spec and type feature are not
 // queried on (gt-mmsr2); the non-work types (an epic, the runtime families)
 // are excluded instead, so the board holds work beads only.
+//
+// spec-dispatch-failed is deliberately not among the excluded labels: the
+// board must carry the beads it holds so the tick can count them and the
+// health line can show the count (gt-q6zoo). Eligible still keeps them out of
+// the candidate set.
 func specReadyArgs() []string {
-	exclude := append(append([]string(nil), constants.NonDispatchableBeadLabels...), specdispatch.ExcludedLabels()...)
+	exclude := append([]string(nil), constants.NonDispatchableBeadLabels...)
+	for _, l := range specdispatch.ExcludedLabels() {
+		if strings.EqualFold(l, specdispatch.DispatchFailedLabel) {
+			continue
+		}
+		exclude = append(exclude, l)
+	}
 	return []string{
 		"ready", "--json",
 		"--unassigned",
