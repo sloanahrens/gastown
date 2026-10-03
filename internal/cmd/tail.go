@@ -117,12 +117,29 @@ it. A missing feed file is silence; a line that is not an alert is skipped
 with one note beside it. Writers append and rotate at 1 MB (see
 docs/reference.md).
 
+A bead's trip is shown too. The daemon log's own lines — the spec
+dispatcher's dispatch, the landing worker's merge and land, and the upgrade
+restart that installs a commit — say when a bead was dispatched, merged,
+landed and deployed, and one line per deploy reports it: "<bead> deployed in
+<n>m (work <n>m, land <n>m, deploy <n>m)", the total and its three stages
+(work is dispatched to merged, land is merged to landed, deploy is landed to
+deployed). A bead counts as deployed only when its landed commit is an
+ancestor of the commit a restart installs — a git merge-base --is-ancestor
+run in the town's gt source checkout — never merely by the next restart,
+because a restart can install a binary built before the bead landed; a check
+that cannot run leaves the bead waiting. A bead with no dispatch line, one a
+human slung, prints its deploy stage alone. The deploy lines are the town's,
+like the watch feed's, so --rig does not narrow them.
+
 With -f, one dim "📊" line reports the town's state: the seats in use against
 the cap with the polecat:bead pairs holding them, the beads waiting to land,
 origin/main against the binary you are running, the open escalations, and the
 DeepSeek rate when ~/.runtime/watch/spend.json was written in the last fifteen
 minutes. It prints on the first poll, then only when one of those fields moves
 and at most once every five minutes; a field that cannot be read is left out.
+The line also carries the town's shipping speed: the median
+dispatched-to-deployed minutes over the beads that landed in the last hour,
+and how many landed beads still wait for a deploy with the oldest one's age.
 A run without -f never prints it.
 
 The first poll is gathered from every source — each one bounded by its own
@@ -179,9 +196,10 @@ func runTail(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	beadReads := openTailBeads(townRoot)
+	deploys := newTailDeploys(time.Now, tailGitAncestry(townRoot), cutoff)
 	sources, preface, err := buildTailSources(tailOptions{
 		townRoot: townRoot, rig: tailRig, kinds: kinds, cutoff: cutoff, loc: loc, now: time.Now,
-		rigNames: knownRigNames, journalFor: openTailJournal, beads: beadReads,
+		rigNames: knownRigNames, journalFor: openTailJournal, beads: beadReads, deploys: deploys,
 	})
 	if err != nil {
 		return err
@@ -215,7 +233,7 @@ func runTail(cmd *cobra.Command, _ []string) error {
 	var summary *tailSummaryTracker
 	if tailFollow {
 		summary = &tailSummaryTracker{
-			read:     func() tailSummaryFields { return readTailSummary(townRoot, tailRigAgentBeads) },
+			read:     func() tailSummaryFields { return readTailSummary(townRoot, tailRigAgentBeads, deploys) },
 			now:      time.Now,
 			interval: tailSummaryFresh,
 			width:    view.Width,
@@ -388,6 +406,9 @@ type tailOptions struct {
 	// beads resolves the titles and verdicts an events line carries
 	// (openTailBeads in production, nil in a test that wants neither).
 	beads *tailBeads
+	// deploys tracks each bead's dispatch-to-deploy time off the daemon log
+	// (nil in a test that wants the raw daemon source).
+	deploys *tailDeploys
 }
 
 func allTailKinds() map[string]bool {
@@ -452,11 +473,19 @@ func buildTailSources(o tailOptions) (sources []tailSource, preface []tailLine, 
 		}
 	}
 	if o.kinds[tailKindDaemon] {
-		d := &daemonSource{dir: filepath.Join(o.townRoot, "daemon"), cutoff: o.cutoff, loc: o.loc, now: o.now}
+		var rigFilter *regexp.Regexp
 		if o.rig != "" {
-			d.rigFilter = tailRigFilter(o.rig)
+			rigFilter = tailRigFilter(o.rig)
 		}
-		sources = append(sources, d)
+		if o.deploys == nil {
+			sources = append(sources, &daemonSource{dir: filepath.Join(o.townRoot, "daemon"), cutoff: o.cutoff, loc: o.loc, now: o.now, rigFilter: rigFilter})
+		} else {
+			// The tracker reads an hour back whatever --since says, so the
+			// source cannot carry the rig filter: the wrapper applies both
+			// the cutoff and the filter to the lines the stream shows.
+			d := &daemonSource{dir: filepath.Join(o.townRoot, "daemon"), cutoff: o.deploys.logCutoff(o.cutoff), loc: o.loc, now: o.now}
+			sources = append(sources, &tailDeploySource{inner: d, track: o.deploys, from: o.cutoff, rigFilter: rigFilter})
+		}
 	}
 	if o.kinds[tailKindWatch] {
 		// The feed is the town's, not a store's; it carries no rig for --rig to

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -24,6 +25,7 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landings"
+	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/version"
 )
 
@@ -661,11 +663,19 @@ type tailSummaryFields struct {
 	HasEscalate  bool
 	SpendPerHour float64
 	HasSpend     bool
+	// HasDeploy and Deploy are the speed the town is shipping at, read off
+	// the dispatch-to-deploy tracker. They are absent until a landing is
+	// tracked: a town with no landings has no median to report.
+	HasDeploy bool
+	Deploy    tailDeploySummary
 }
 
-// line is the one dim line the summary prints, "" when no field could be read.
+// line is the one dim line the summary prints, "" when no field could be
+// read. The deploy fields lead: the line is truncated to the terminal's
+// width, and the median is the town's headline number, so a narrow terminal
+// must not cut it off the end.
 func (f tailSummaryFields) line() string {
-	var parts []string
+	parts := tailDeploySummaryParts(f)
 	if f.HasSeats {
 		seats := fmt.Sprintf("seats %d", f.SeatsUsed)
 		if f.SeatsCap > 0 {
@@ -704,6 +714,25 @@ func (f tailSummaryFields) line() string {
 	return tailSummaryIcon + " " + strings.Join(parts, tailSummarySep)
 }
 
+// tailDeploySummaryParts is the shipping-speed half of the summary line: the
+// median dispatched-to-deployed minutes over the beads that landed in the
+// last hour, and the landed beads still waiting for a deploy.
+func tailDeploySummaryParts(f tailSummaryFields) []string {
+	if !f.HasDeploy {
+		return nil
+	}
+	var parts []string
+	if f.Deploy.HasMedian {
+		parts = append(parts, fmt.Sprintf("dispatch→deploy %s median (%d)",
+			tailDeployMinutesOf(f.Deploy.MedianMin), f.Deploy.MedianBeads))
+	}
+	waiting := fmt.Sprintf("waiting %d", f.Deploy.Waiting)
+	if f.Deploy.Waiting > 0 && f.Deploy.HasOldest {
+		waiting += " (oldest " + reportAge(f.Deploy.OldestWaiting) + ")"
+	}
+	return append(parts, waiting)
+}
+
 // tailSummaryIcon leads the summary line, and tailSummarySep joins its fields.
 const (
 	tailSummaryIcon = "📊"
@@ -716,7 +745,7 @@ const (
 //
 // listAgent lists one rig's agent beads (tailRigAgentBeads in production), so a
 // test can drive a rig's read failure without a store.
-func readTailSummary(townRoot string, listAgent func(rigPath string) (map[string]*beads.Issue, error)) tailSummaryFields {
+func readTailSummary(townRoot string, listAgent func(rigPath string) (map[string]*beads.Issue, error), deploys *tailDeploys) tailSummaryFields {
 	var f tailSummaryFields
 	if seats, cap, pairs, err := tailSeatPicture(townRoot, listAgent); err == nil {
 		f.HasSeats, f.SeatsUsed, f.SeatsCap, f.Seats = true, seats, cap, pairs
@@ -732,6 +761,11 @@ func readTailSummary(townRoot string, listAgent func(rigPath string) (map[string
 	}
 	if perHour, at, err := tailSpend(townRoot); err == nil && !at.IsZero() {
 		f.HasSpend, f.SpendPerHour = true, perHour
+	}
+	// The tracker is in-memory, so the deploy reading costs nothing here; it
+	// is absent only until the first landing reaches it.
+	if s := deploys.snapshot(); s.Landed > 0 {
+		f.HasDeploy, f.Deploy = true, s
 	}
 	return f
 }
@@ -1061,4 +1095,317 @@ func (s *daemonSource) readCurrent(emit func(string)) (note string, err error) {
 		s.offset += int64(len(line))
 		emit(strings.TrimRight(line, "\r\n"))
 	}
+}
+
+// --- dispatched to deployed ---
+
+// tailDeployWindow is how far back the deploy tracker reads the daemon log:
+// at least an hour, so the summary's rolling median sees the hour it names
+// even when --since is shorter.
+const tailDeployWindow = time.Hour
+
+// tailDeployGitTimeout bounds one ancestry check. The check is a local git
+// call, so a hang means the source checkout is on a stuck mount; the bead
+// stays waiting rather than stalling the stream.
+const tailDeployGitTimeout = 10 * time.Second
+
+// The daemon log's dispatch-to-deploy facts, each read off lines the source
+// already parses. The landed line comes in two wordings — the landing worker's
+// own "landed <sha> on origin/main" and its repair of a bead already on main,
+// "already landed as <sha>" — and both name the same landing.
+var (
+	tailDeployDispatchRe = regexp.MustCompile(`spec_dispatch: dispatched: (\S+): slung`)
+	tailDeployMergeRe    = regexp.MustCompile(`\[land\] (\S+): merged `)
+	tailDeployLandedRe   = regexp.MustCompile(`\[land\] (\S+): (?:already )?landed (?:as )?([0-9a-f]{7,40})`)
+	tailDeployRestartRe  = regexp.MustCompile(`upgrade-restart: running (\S+) covers marker`)
+)
+
+// tailAncestry answers whether commit is an ancestor of of. ok is false when
+// the question cannot be answered — a git error — and the caller then leaves
+// the bead waiting rather than counting it deployed.
+type tailAncestry func(commit, of string) (ancestor, ok bool)
+
+// tailDeployRecord is one bead's trip, read off the daemon log. A zero time
+// is a step the log has not shown.
+type tailDeployRecord struct {
+	bead       string
+	dispatched time.Time
+	merged     time.Time
+	landed     time.Time
+	sha        string
+	deployed   time.Time
+}
+
+// dispatchTime is the dispatch the tracker counts: the first line, and only
+// when it came before the landing. A redispatch after a landing is the rework
+// loop, not this bead's start.
+func (r *tailDeployRecord) dispatchTime() time.Time {
+	if r.dispatched.IsZero() || r.dispatched.After(r.landed) {
+		return time.Time{}
+	}
+	return r.dispatched
+}
+
+// tailDeploys tracks each bead from the spec dispatcher's sling to the daemon
+// restart that installs its commit. It reads the daemon log's four facts and
+// decides deployment by ancestry: the landed commit must be an ancestor of
+// the installed one, because a restart can install a binary built before the
+// bead landed. Every question it cannot answer leaves the bead waiting.
+type tailDeploys struct {
+	now      func() time.Time
+	ancestor tailAncestry
+	from     time.Time // the run's cutoff: no deploy line older than this
+
+	mu      sync.Mutex
+	records map[string]*tailDeployRecord
+	order   []string // first-seen order, which for landed beads is landing order
+}
+
+// newTailDeploys returns a tracker that reads the daemon log back to the
+// run's cutoff, from the run's clock, and answers deployment with ancestor.
+func newTailDeploys(now func() time.Time, ancestor tailAncestry, from time.Time) *tailDeploys {
+	return &tailDeploys{now: now, ancestor: ancestor, from: from, records: map[string]*tailDeployRecord{}}
+}
+
+// logCutoff is how far back the daemon log is read to feed the tracker: the
+// run's cutoff, or an hour back when that is shorter.
+func (t *tailDeploys) logCutoff(runCutoff time.Time) time.Time {
+	if want := t.now().Add(-tailDeployWindow); want.Before(runCutoff) {
+		return want
+	}
+	return runCutoff
+}
+
+func (t *tailDeploys) record(bead string) *tailDeployRecord {
+	r, ok := t.records[bead]
+	if !ok {
+		r = &tailDeployRecord{bead: bead}
+		t.records[bead] = r
+		t.order = append(t.order, bead)
+	}
+	return r
+}
+
+// observe feeds a batch of daemon lines to the tracker and returns one line
+// for each bead the batch deploys. Lines the run's window excludes still feed
+// it: the summary's median and waiting count are state, not stream.
+func (t *tailDeploys) observe(lines []tailLine) []tailLine {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []tailLine
+	for _, ln := range lines {
+		if ln.Kind != tailKindDaemon {
+			continue
+		}
+		// One line carries one fact, so the first shape that matches wins and
+		// the rest are not tried.
+		if m := tailDeployDispatchRe.FindStringSubmatch(ln.Text); m != nil {
+			if r := t.record(m[1]); r.dispatched.IsZero() {
+				r.dispatched = ln.At
+			}
+		} else if m := tailDeployLandedRe.FindStringSubmatch(ln.Text); m != nil {
+			if r := t.record(m[1]); r.landed.IsZero() {
+				r.landed, r.sha = ln.At, m[2]
+			}
+		} else if m := tailDeployMergeRe.FindStringSubmatch(ln.Text); m != nil {
+			if r := t.record(m[1]); r.merged.IsZero() {
+				r.merged = ln.At
+			}
+		} else if m := tailDeployRestartRe.FindStringSubmatch(ln.Text); m != nil {
+			out = append(out, t.deployAt(ln.At, m[1])...)
+		}
+	}
+	return out
+}
+
+// deployAt marks every waiting landed bead whose commit the installed commit
+// contains, and returns their lines. A bead that landed after the restart
+// cannot be in a binary built before it, so it is not asked.
+func (t *tailDeploys) deployAt(at time.Time, installed string) []tailLine {
+	var out []tailLine
+	for _, bead := range t.order {
+		r := t.records[bead]
+		if r.landed.IsZero() || !r.deployed.IsZero() || r.sha == "" || r.landed.After(at) {
+			continue
+		}
+		ancestor, ok := t.ancestor(r.sha, installed)
+		if !ok || !ancestor {
+			continue
+		}
+		r.deployed = at
+		if at.Before(t.from) {
+			continue
+		}
+		out = append(out, t.deployedLine(r))
+	}
+	return out
+}
+
+// deployedLine is the one line a deployed bead prints: how long it took and
+// the stages it broke into. A hand-slung bead has no dispatch line, so it
+// prints its landed-to-deployed part alone.
+func (t *tailDeploys) deployedLine(r *tailDeployRecord) tailLine {
+	dispatched := r.dispatchTime()
+	var parts []string
+	total := r.deployed.Sub(r.landed)
+	if !dispatched.IsZero() {
+		total = r.deployed.Sub(dispatched)
+		if !r.merged.IsZero() {
+			parts = append(parts,
+				"work "+tailDeployMinutes(r.merged.Sub(dispatched)),
+				"land "+tailDeployMinutes(r.landed.Sub(r.merged)))
+		}
+	}
+	parts = append(parts, "deploy "+tailDeployMinutes(r.deployed.Sub(r.landed)))
+	return tailLine{
+		At: r.deployed, Rig: "town", Kind: tailKindDaemon, Class: tailClassSuccess,
+		Text: fmt.Sprintf("%s deployed in %s (%s)", r.bead, tailDeployMinutes(total), strings.Join(parts, ", ")),
+	}
+}
+
+// tailDeploySummary is the tracker's state for the summary line: the rolling
+// median the town is shipping at, and the landings still waiting for a
+// restart.
+type tailDeploySummary struct {
+	Landed        int // landings tracked
+	HasMedian     bool
+	MedianMin     float64
+	MedianBeads   int
+	Waiting       int
+	OldestWaiting time.Duration
+	HasOldest     bool
+}
+
+// snapshot reads the tracker's state: the median dispatched-to-deployed
+// minutes over the beads that landed in the last hour, and the landed beads
+// still waiting for a deploy. A hand-slung bead prints its own time but is
+// left out of the median: it has no dispatch to measure the town by.
+func (t *tailDeploys) snapshot() tailDeploySummary {
+	var s tailDeploySummary
+	if t == nil {
+		return s
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := t.now()
+	since := now.Add(-tailDeployWindow)
+	var mins []float64
+	for _, bead := range t.order {
+		r := t.records[bead]
+		if r.landed.IsZero() {
+			continue
+		}
+		s.Landed++
+		if r.deployed.IsZero() {
+			s.Waiting++
+			if age := now.Sub(r.landed); !s.HasOldest || age > s.OldestWaiting {
+				s.OldestWaiting, s.HasOldest = age, true
+			}
+			continue
+		}
+		// Only a bead with a dispatch, that landed in the window, has a
+		// dispatched-to-deployed time to add; a hand-slung bead has none.
+		dispatched := r.dispatchTime()
+		if dispatched.IsZero() || r.landed.Before(since) {
+			continue
+		}
+		mins = append(mins, r.deployed.Sub(dispatched).Minutes())
+	}
+	if len(mins) > 0 {
+		sort.Float64s(mins)
+		s.HasMedian, s.MedianBeads = true, len(mins)
+		s.MedianMin = tailMedian(mins)
+	}
+	return s
+}
+
+// tailMedian is the middle value of a sorted slice, the mean of the two
+// middle values when the count is even.
+func tailMedian(sorted []float64) float64 {
+	n := len(sorted)
+	if n == 0 {
+		return 0
+	}
+	if n%2 == 1 {
+		return sorted[n/2]
+	}
+	return (sorted[n/2-1] + sorted[n/2]) / 2
+}
+
+// tailDeployMinutes renders a stage's length in minutes, the unit the
+// operator reads the town's speed in.
+func tailDeployMinutes(d time.Duration) string {
+	return tailDeployMinutesOf(d.Minutes())
+}
+
+// tailDeployMinutesOf renders a count of minutes, floored at zero so clock
+// skew never prints a negative stage.
+func tailDeployMinutesOf(m float64) string {
+	if m < 0 {
+		m = 0
+	}
+	return fmt.Sprintf("%.1fm", m)
+}
+
+// tailDeploySource is the daemon source with the tracker in front of it:
+// every daemon.log line feeds the tracker, the lines the run's window and rig
+// filter select pass through, and each bead a restart deploys adds its own
+// line. The tracker reads wider than the stream — an hour, for the summary's
+// median — so the passthrough, not the read, is what --since and --rig bound.
+type tailDeploySource struct {
+	inner     *daemonSource
+	track     *tailDeploys
+	from      time.Time
+	rigFilter *regexp.Regexp
+}
+
+func (s *tailDeploySource) Poll() []tailLine {
+	lines := s.inner.Poll()
+	out := make([]tailLine, 0, len(lines))
+	for _, ln := range lines {
+		if ln.At.Before(s.from) {
+			continue
+		}
+		if s.rigFilter != nil && !s.rigFilter.MatchString(ln.Text) {
+			continue
+		}
+		out = append(out, ln)
+	}
+	return append(out, s.track.observe(lines)...)
+}
+
+// tailGitAncestry answers the tracker's ancestry question in the town's gt
+// source checkout. A town with no checkout answers unknown to every question,
+// so no bead is ever called deployed on a guess.
+func tailGitAncestry(townRoot string) tailAncestry {
+	repo, err := version.GetRepoRootForTown(townRoot)
+	if err != nil {
+		return func(string, string) (bool, bool) { return false, false }
+	}
+	return func(commit, of string) (bool, bool) { return tailGitIsAncestor(repo, commit, of) }
+}
+
+// tailGitIsAncestor runs git merge-base --is-ancestor in repo: exit 0 is an
+// ancestor, exit 1 is not, and any other failure — a bad object, a timeout —
+// is unknown.
+func tailGitIsAncestor(repo, commit, of string) (ancestor, ok bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), tailDeployGitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", commit, of)
+	cmd.Dir = repo
+	// The same detached process group internal/version gives its git calls:
+	// the context is the only thing that ends this one.
+	util.SetDetachedProcessGroup(cmd)
+	err := cmd.Run()
+	if err == nil {
+		return true, true
+	}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		return false, true
+	}
+	return false, false
 }
