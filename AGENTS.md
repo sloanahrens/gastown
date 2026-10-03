@@ -93,7 +93,7 @@ gt mail send laneassist/crew/dom -s "PR Review" --stdin <<'BODY'
 Multi-line message content here.
 Details about the PR and what to look for.
 BODY
-gt mail send --human -s "Subject" -m "Message to overseer"
+gt mail send overseer -s "Subject" -m "Message to overseer"
 ```
 
 ### When to Use Which

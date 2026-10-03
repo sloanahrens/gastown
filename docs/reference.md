@@ -722,7 +722,7 @@ Agent overrides:
 gt mail inbox
 gt mail read <id>
 gt mail send <addr> -s "Subject" -m "Body"
-gt mail send --human -s "..."    # To overseer
+gt mail send overseer -s "..."   # To overseer
 ```
 
 ### Escalation
