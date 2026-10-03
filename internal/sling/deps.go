@@ -81,12 +81,8 @@ type Deps struct {
 	UpdateAgentMode    func(agentID, mode, workDir, townBeadsDir string)
 	LogFeed            func(eventType, actor string, payload map[string]interface{}) error
 
-	// Convoy tracking.
-	TrackedByConvoy func(townRoot, beadID string) string
-	CreateConvoy    func(townRoot, beadID, beadTitle string, owned bool, mergeStrategy, baseBranch, agent, formula string) (string, error)
-
 	// Undoing a partial dispatch.
-	RollbackArtifacts func(spawn *Spawn, townRoot, beadID, hookWorkDir, convoyID string)
+	RollbackArtifacts func(spawn *Spawn, townRoot, beadID, hookWorkDir string)
 	RestoreRawFields  func(beadID, townRoot, hookWorkDir string, originalInfo *Bead)
 	RestorePinned     func(townRoot, beadID, assignee string)
 	NoteDispatched    func(townRoot string, candidate *Duplicate)

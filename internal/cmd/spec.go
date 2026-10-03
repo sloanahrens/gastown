@@ -932,10 +932,9 @@ func hasCommentWithPrefix(comments []beads.Comment, key string) bool {
 	return false
 }
 
-// specSlingParams is the sling a spec dispatch makes. The agent is explicit;
-// there is no auto-convoy, so a failed dispatch
-// leaves the bead unassigned for the next tick rather than handing it to a
-// convoy re-feed loop; and every dispatch carries the host-safety instruction.
+// specSlingParams is the sling a spec dispatch makes. The agent is explicit; a
+// failed dispatch leaves the bead unassigned for the next tick; and every
+// dispatch carries the host-safety instruction.
 func specSlingParams(townRoot, beadsDir, formula string, c specCandidate, seat specdispatch.SeatChoice) SlingParams {
 	return SlingParams{
 		BeadID:           c.Spec.ID,
@@ -944,7 +943,6 @@ func specSlingParams(townRoot, beadsDir, formula string, c specCandidate, seat s
 		Agent:            seat.Agent,
 		Args:             specdispatch.HostSafetyPrompt,
 		FormulaFailFatal: true,
-		NoConvoy:         true,
 		CallerContext:    specDispatchCallerLabel,
 		NoBoot:           true,
 		TownRoot:         townRoot,

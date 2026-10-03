@@ -60,11 +60,8 @@ type ScheduleOptions struct {
 	Formula      string   // Formula to apply at dispatch time (e.g., "mol-polecat-work")
 	Args         string   // Natural language args for executor
 	Vars         []string // Formula variables (key=value)
-	Merge        string   // Merge strategy: direct/mr/local
 	BaseBranch   string   // Override base branch for polecat worktree
 	ResumeBranch string   // Resume an existing branch (gh#3602); mutually exclusive with BaseBranch
-	NoConvoy     bool     // Skip auto-convoy creation
-	Owned        bool     // Mark auto-convoy as caller-managed lifecycle
 	DryRun       bool     // Show what would be done without acting
 	Force        bool     // Force schedule even if bead is hooked/in_progress
 	NoMerge      bool     // Skip merge queue on completion
@@ -162,9 +159,6 @@ func (d *slingDeps) scheduleSlingBead(beadID, rigName string, opts ScheduleOptio
 	if opts.DryRun {
 		fmt.Fprintf(d.out, "Would schedule %s → %s\n", beadID, rigName)
 		fmt.Fprintf(d.out, "  Would create sling context bead\n")
-		if !opts.NoConvoy {
-			fmt.Fprintf(d.out, "  Would create auto-convoy\n")
-		}
 		return nil
 	}
 
@@ -192,9 +186,6 @@ func (d *slingDeps) scheduleSlingBead(beadID, rigName string, opts ScheduleOptio
 	if len(opts.Vars) > 0 {
 		fields.Vars = strings.Join(opts.Vars, "\n")
 	}
-	if opts.Merge != "" {
-		fields.Merge = opts.Merge
-	}
 	if opts.BaseBranch != "" {
 		fields.BaseBranch = opts.BaseBranch
 	}
@@ -213,35 +204,12 @@ func (d *slingDeps) scheduleSlingBead(beadID, rigName string, opts ScheduleOptio
 	if opts.Ralph {
 		fields.Mode = "ralph"
 	}
-	fields.Owned = opts.Owned
 
 	// Create sling context bead in the target rig's beads dir so the rig's
 	// witness discovers it during patrol. (GH#3468)
 	ctxBead, err := rigBeads.CreateSlingContext(info.Title, beadID, fields)
 	if err != nil {
 		return fmt.Errorf("creating sling context: %w", err)
-	}
-
-	// Auto-convoy (unless --no-convoy)
-	if !opts.NoConvoy {
-		existingConvoy := d.trackedByConvoy(townRoot, beadID)
-		if existingConvoy == "" {
-			// Persist the requested agent and formula so a convoy re-feed
-			// keeps them (gt-yg24, gt-4lor).
-			convoyID, err := d.createConvoy(townRoot, beadID, info.Title, opts.Owned, opts.Merge, opts.BaseBranch, opts.Agent, opts.Formula)
-			if err != nil {
-				fmt.Fprintf(d.out, "%s Could not create auto-convoy: %v\n", style.Dim.Render("Warning:"), err)
-			} else {
-				fmt.Fprintf(d.out, "%s Created convoy %s\n", style.Bold.Render("→"), convoyID)
-				// Update the context bead fields with convoy ID
-				fields.Convoy = convoyID
-				if updateErr := rigBeads.UpdateSlingContextFields(ctxBead.ID, fields); updateErr != nil {
-					fmt.Fprintf(d.out, "%s Could not update context with convoy: %v\n", style.Dim.Render("Warning:"), updateErr)
-				}
-			}
-		} else {
-			fmt.Fprintf(d.out, "%s Already tracked by convoy %s\n", style.Dim.Render("○"), existingConvoy)
-		}
 	}
 
 	actor := d.actor()
@@ -276,9 +244,6 @@ func runBatchScheduleWith(o slingOptions, beadIDs []string, rigName, townRoot st
 			Formula:      formula,
 			Args:         o.argsText,
 			Vars:         o.vars,
-			NoConvoy:     o.noConvoy,
-			Owned:        o.owned,
-			Merge:        o.merge,
 			BaseBranch:   o.baseBranch,
 			ResumeBranch: o.resumeBranch,
 			DryRun:       false,
@@ -435,7 +400,7 @@ func detectSchedulerIDType(id string) (string, error) {
 // not convoy or epic mode.
 var schedulerTaskOnlyFlagNames = []string{
 	"account", "agent", "ralph", "args", "var",
-	"merge", "base-branch", "no-convoy", "owned", "no-merge", "review-only",
+	"base-branch", "no-merge", "review-only",
 }
 
 // validateNoTaskOnlySchedulerFlags checks that no task-only flags were set.

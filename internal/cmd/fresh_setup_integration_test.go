@@ -91,9 +91,9 @@ func TestIntegrationFreshInstallRigPolecatHookIntegration(t *testing.T) {
 			hookStatus.Target, hookStatus.HasWork, hookStatus.PinnedBead, issue.ID, agentID)
 	}
 
-	// The gt CLI, not the in-process createAutoConvoy: the subprocess takes
-	// its town from the cwd and its Dolt port from env, so the test needs
-	// neither Setenv nor Chdir and can run in the parallel phase.
+	// The gt CLI, not an in-process call: the subprocess takes its town from
+	// the cwd and its Dolt port from env, so the test needs neither Setenv nor
+	// Chdir and can run in the parallel phase.
 	created := runFreshSetupOutputCmd(t, hqPath, env, gtBinary, "convoy", "create", "Work: "+issue.Title, issue.ID, "--merge", "mr", "--base-branch", "main")
 	convoyID := parseCreatedConvoyID(t, created)
 	runFreshSetupCmd(t, hqPath, env, "bd", "show", convoyID)

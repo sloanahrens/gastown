@@ -14,7 +14,7 @@ import (
 // run it on slingHarness fakes.
 
 func executeParams() SlingParams {
-	return SlingParams{BeadID: slingBead, RigName: "gastown", TownRoot: slingTestTown, NoConvoy: true, FormulaFailFatal: true}
+	return SlingParams{BeadID: slingBead, RigName: "gastown", TownRoot: slingTestTown, FormulaFailFatal: true}
 }
 
 func TestExecuteSlingRefusals(t *testing.T) {
@@ -142,7 +142,7 @@ func TestExecuteSlingSuccess(t *testing.T) {
 	h := newSlingHarness(t)
 	h.addBead(slingBead, beadInfo{})
 	p := executeParams()
-	p.FormulaName, p.NoConvoy, p.Mode, p.Vars = "mol-polecat-work", false, "ralph", []string{"k=v"}
+	p.FormulaName, p.Mode, p.Vars = "mol-polecat-work", "ralph", []string{"k=v"}
 	res, err := h.run.executeSling(p)
 	if err != nil {
 		t.Fatalf("executeSling: %v", err)
@@ -153,8 +153,6 @@ func TestExecuteSlingSuccess(t *testing.T) {
 	want := []string{
 		"lock bead gt-abc123",
 		"spawn gastown",
-		"convoy lookup gt-abc123",
-		"create convoy gt-abc123",
 		"cook mol-polecat-work",
 		"instantiate mol-polecat-work on gt-abc123 vars=k=v",
 		"lock assignee gastown/polecats/Toast",
@@ -226,14 +224,14 @@ func TestExecuteSlingRollsBackAfterTheSpawn(t *testing.T) {
 	}{
 		{name: "cook fails", params: func(p *SlingParams) { p.FormulaName = "mol-polecat-work" },
 			inject: func(h *slingHarness) { h.run.cook = func(string, string, string) error { return injected } },
-			errSub: "cooking formula", undo: "rollback Toast bead=gt-abc123 convoy=", restore: true},
+			errSub: "cooking formula", undo: "rollback Toast bead=gt-abc123", restore: true},
 		{name: "formula fails", params: func(p *SlingParams) { p.FormulaName = "mol-polecat-work" },
 			inject: func(h *slingHarness) {
 				h.run.instantiateFormula = func(context.Context, string, string, string, string, string, []string) (*FormulaOnBeadResult, error) {
 					return nil, injected
 				}
 			},
-			errSub: "instantiating formula", undo: "rollback Toast bead=gt-abc123 convoy=", restore: true},
+			errSub: "instantiating formula", undo: "rollback Toast bead=gt-abc123", restore: true},
 		{name: "formula fails in a batch", params: func(p *SlingParams) { p.FormulaName, p.FormulaFailFatal = "mol-polecat-work", false },
 			inject: func(h *slingHarness) {
 				h.run.instantiateFormula = func(context.Context, string, string, string, string, string, []string) (*FormulaOnBeadResult, error) {
@@ -242,7 +240,7 @@ func TestExecuteSlingRollsBackAfterTheSpawn(t *testing.T) {
 			}},
 		{name: "assignee lock fails", inject: func(h *slingHarness) {
 			h.run.lockAssignee = func(string, string) (func(), error) { return nil, injected }
-		}, errSub: "serializing hook write", undo: "rollback Toast bead=gt-abc123 convoy=", restore: true},
+		}, errSub: "serializing hook write", undo: "rollback Toast bead=gt-abc123", restore: true},
 		// Raw metadata is only stored when no formula is attached, so this case
 		// asks for the raw bead: an unnamed formula now means the rig's default,
 		// which is what `gt sling` applies to a polecat target.
@@ -250,30 +248,13 @@ func TestExecuteSlingRollsBackAfterTheSpawn(t *testing.T) {
 			inject: func(h *slingHarness) {
 				h.run.storeFields = func(string, string, beadFieldUpdates) error { return injected }
 			},
-			errSub: "storing raw sling metadata", undo: "rollback Toast bead=gt-abc123 convoy=", restore: true},
+			errSub: "storing raw sling metadata", undo: "rollback Toast bead=gt-abc123", restore: true},
 		{name: "hook fails", inject: func(h *slingHarness) {
 			h.run.hook = func(string, string, string, string) error { return injected }
-		}, errSub: "failed to hook bead", undo: "rollback Toast bead=gt-abc123 convoy=", restore: true},
-		// The auto-convoy outlives the rollback so the convoy feeder can
-		// re-dispatch the bead with the agent and formula the convoy recorded
-		// (gt-yg24) — except where the dispatch never reached a hookable bead,
-		// and a re-feed could only repeat the same failure (gt-7evi4).
-		{name: "hook fails keeps the auto-convoy", params: func(p *SlingParams) { p.NoConvoy = false },
-			inject: func(h *slingHarness) {
-				h.run.hook = func(string, string, string, string) error { return injected }
-			},
-			errSub: "failed to hook bead", undo: "rollback Toast bead=gt-abc123 convoy=", restore: true},
-		{name: "raw metadata failure closes the auto-convoy",
-			params: func(p *SlingParams) {
-				p.ReviewOnly, p.HookRawBead, p.NoConvoy = true, true, false
-			},
-			inject: func(h *slingHarness) {
-				h.run.storeFields = func(string, string, beadFieldUpdates) error { return injected }
-			},
-			errSub: "storing raw sling metadata", undo: "rollback Toast bead=gt-abc123 convoy=hq-cv-auto", restore: true},
+		}, errSub: "failed to hook bead", undo: "rollback Toast bead=gt-abc123", restore: true},
 		{name: "session fails", inject: func(h *slingHarness) {
 			h.run.startSession = func(*SpawnedPolecatInfo) (string, error) { return "", injected }
-		}, errSub: "starting polecat session", undo: "rollback Toast bead=gt-abc123 convoy=", restore: true},
+		}, errSub: "starting polecat session", undo: "rollback Toast bead=gt-abc123", restore: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

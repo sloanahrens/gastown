@@ -36,7 +36,7 @@ func TestSchedulerSlingParamsCarriesRawReviewOnlyContext(t *testing.T) {
 	if p.BeadID != "gt-rawrollback" || !p.HookRawBead || !p.NoMerge || !p.ReviewOnly {
 		t.Errorf("params lost the queued sling: %+v", p)
 	}
-	if !p.FormulaFailFatal || !p.NoConvoy || !p.NoBoot || p.CallerContext != "scheduler-dispatch" {
+	if !p.FormulaFailFatal || !p.NoBoot || p.CallerContext != "scheduler-dispatch" {
 		t.Errorf("params lost the scheduler settings: %+v", p)
 	}
 	if p.BeadsDir != filepath.Join(townRoot, ".beads") || p.TownRoot != townRoot {

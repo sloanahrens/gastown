@@ -448,9 +448,6 @@ func buildSlingFieldUpdates(
 	reviewOnly bool,
 	mode string,
 	formulaVars string,
-	convoyID string,
-	mergeStrategy string,
-	convoyOwned bool,
 ) beadFieldUpdates {
 	updates := beadFieldUpdates{
 		Dispatcher:       dispatcher,
@@ -461,9 +458,6 @@ func buildSlingFieldUpdates(
 		NoMerge:          noMerge,
 		ReviewOnly:       reviewOnly,
 		Mode:             &mode,
-		ConvoyID:         convoyID,
-		MergeStrategy:    mergeStrategy,
-		ConvoyOwned:      convoyOwned,
 		FormulaVars:      formulaVars,
 	}
 	if attachedMolecule != "" || attachedFormula != "" || noMerge || reviewOnly {
@@ -547,15 +541,6 @@ func applyBeadFieldUpdates(issue *beads.Issue, updates beadFieldUpdates) string 
 	}
 	if updates.Mode != nil {
 		fields.Mode = *updates.Mode
-	}
-	if updates.ConvoyID != "" {
-		fields.ConvoyID = updates.ConvoyID
-	}
-	if updates.MergeStrategy != "" {
-		fields.MergeStrategy = updates.MergeStrategy
-	}
-	if updates.ConvoyOwned {
-		fields.ConvoyOwned = true
 	}
 	if updates.FormulaVars != "" {
 		fields.FormulaVars = updates.FormulaVars

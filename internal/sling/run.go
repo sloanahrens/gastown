@@ -303,44 +303,16 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	targetAgent := spawnInfo.AgentID()
 	hookWorkDir := spawnInfo.ClonePath
 
-	// 4. Auto-convoy (if !NoConvoy)
-	convoyID := ""
-	// A rollback leaves the auto-convoy open so the convoy feeder re-dispatches
-	// the bead with the agent and formula the convoy recorded (gt-yg24). Only a
-	// sling that never reached a dispatchable bead closes the convoy it created,
-	// because the feeder could only re-dispatch the same failure (gt-7evi4).
-	rollbackConvoyID := func(reason string) string {
-		if reason == RawMetadataRollbackReason {
-			return convoyID
-		}
-		return ""
-	}
 	rollbackSpawnedPolecat := func(rollbackBeadID, reason string) {
 		fmt.Fprintf(d.out(), "  %s %s, rolling back spawned polecat %s...\n", style.Warning.Render("⚠"), reason, spawnInfo.PolecatName)
-		d.RollbackArtifacts(spawnInfo, townRoot, rollbackBeadID, hookWorkDir, rollbackConvoyID(reason))
+		d.RollbackArtifacts(spawnInfo, townRoot, rollbackBeadID, hookWorkDir)
 		d.RestoreRawFields(rollbackBeadID, townRoot, hookWorkDir, info)
 		if opts.Force && info.Status == "pinned" {
 			d.RestorePinned(townRoot, opts.BeadID, info.Assignee)
 		}
 	}
-	if !opts.NoConvoy {
-		existingConvoy := d.TrackedByConvoy(townRoot, opts.BeadID)
-		if existingConvoy == "" {
-			var err error
-			// Persist the requested agent and formula so a convoy re-feed
-			// keeps them (gt-yg24, gt-4lor).
-			convoyID, err = d.CreateConvoy(townRoot, opts.BeadID, info.Title, opts.Owned, opts.Merge, opts.BaseBranch, opts.Agent, opts.FormulaName)
-			if err != nil {
-				fmt.Fprintf(d.out(), "  %s Could not create auto-convoy: %v\n", style.Dim.Render("Warning:"), err)
-			} else {
-				fmt.Fprintf(d.out(), "  %s Created convoy %s\n", style.Bold.Render("→"), convoyID)
-			}
-		} else {
-			fmt.Fprintf(d.out(), "  %s Already tracked by convoy %s\n", style.Dim.Render("○"), existingConvoy)
-		}
-	}
 
-	// 5. Cook formula (unless SkipCook)
+	// 4. Cook formula (unless SkipCook)
 	// Past the spawn now, so every exit below rolls the polecat back.
 	if err := canceled(ctx); err != nil {
 		rollbackSpawnedPolecat(opts.BeadID, "Dispatch canceled")
@@ -363,7 +335,7 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		}
 	}
 
-	// 6. Instantiate formula on bead (wisp + bond)
+	// 5. Instantiate formula on bead (wisp + bond)
 	beadToHook := opts.BeadID
 	attachedMoleculeID := ""
 	var allVars []string
@@ -419,9 +391,6 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		NoMerge:          opts.NoMerge,
 		ReviewOnly:       opts.ReviewOnly,
 		Mode:             &opts.Mode,
-		ConvoyID:         convoyID,
-		MergeStrategy:    opts.Merge,
-		ConvoyOwned:      opts.Owned,
 		FormulaVars:      formulaVarsForAttachment,
 	}
 	if attachedMoleculeID != "" || opts.NoMerge || opts.ReviewOnly {
@@ -437,7 +406,7 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		}
 	}
 
-	// 7. Hook bead with retry
+	// 6. Hook bead with retry
 	if err := canceled(ctx); err != nil {
 		rollbackSpawnedPolecat(beadToHook, "Dispatch canceled")
 		result.ErrMsg = err.Error()
@@ -456,8 +425,8 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	defer assigneeUnlock()
 	if attachedMoleculeID == "" && (opts.NoMerge || opts.ReviewOnly) {
 		if err := d.StoreFields(townRoot, beadToHook, fieldUpdates); err != nil {
-			// The one rollback that also closes the auto-convoy: the dispatch
-			// never reached a hookable bead, so the feeder could only repeat it
+			// The dispatch never reached a hookable bead, so there is nothing
+			// for a later dispatch to pick up and everything to unwind
 			// (gt-7evi4).
 			rollbackSpawnedPolecat(beadToHook, RawMetadataRollbackReason)
 			result.ErrMsg = "raw sling metadata failed"
@@ -489,13 +458,13 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	// see it in the pool even though their snapshot predates this hook.
 	d.NoteDispatched(townRoot, dupCandidate)
 
-	// 8. Log dispatch event
+	// 7. Log dispatch event
 	_ = d.LogFeed(events.TypeSling, actor, events.SlingPayload(beadToHook, targetAgent))
 
-	// 9. Update agent hook_bead state
+	// 8. Update agent hook_bead state
 	d.UpdateAgentHook(targetAgent, beadToHook, hookWorkDir, beadsDir)
 
-	// 10. Store fields in bead (dispatcher, args, attached_molecule, no_merge, mode)
+	// 9. Store fields in bead (dispatcher, args, attached_molecule, no_merge, mode)
 	// Use beadToHook for the update target (may differ from beadID when formula-on-bead)
 	if err := d.StoreFields(townRoot, beadToHook, fieldUpdates); err != nil {
 		fmt.Fprintf(d.out(), "  %s Could not store fields in bead: %v\n", style.Dim.Render("Warning:"), err)
@@ -506,7 +475,7 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		d.UpdateAgentMode(targetAgent, opts.Mode, hookWorkDir, beadsDir)
 	}
 
-	// 11. Start polecat session
+	// 10. Start polecat session
 	if err := canceled(ctx); err != nil {
 		rollbackSpawnedPolecat(beadToHook, "Dispatch canceled")
 		result.ErrMsg = err.Error()
@@ -577,9 +546,9 @@ func IsDeferredBead(info *Bead) bool {
 }
 
 // RawMetadataRollbackReason marks the rollback of a dispatch that failed
-// storing the raw workflow metadata a hook-less bead needs: the one rollback
-// that also closes the auto-convoy, because the dispatch never reached a
-// hookable bead for the feeder to re-dispatch (gt-7evi4).
+// storing the raw workflow metadata a hook-less bead needs: the dispatch never
+// reached a hookable bead, so the rollback is the only state left to unwind
+// (gt-7evi4).
 const RawMetadataRollbackReason = "Raw sling metadata failed"
 
 // ErrRigUnavailable is the sentinel for a rig an e-stop, park or dock refuses a

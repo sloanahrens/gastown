@@ -12,16 +12,16 @@ The convoy system tracks batches of work across rigs. A convoy is a bead that `t
 ```
 +============================ CREATION =============================+
 |                                                                   |
-|   gt sling <beads>             gt convoy create ...              |
-|        |  (auto-convoy)              |  (explicit)               |
-|        v                             v                           |
-|   +-----------+                 +-----------+                    |
-|   |  status:  |                 |  status:  |                    |
-|   |   open    |                 |   open    |                    |
-|   +-----------+                 +-----------+                    |
+|                       gt convoy create ...                        |
+|                              |  (explicit)                       |
+|                              v                                    |
+|                       +-----------+                               |
+|                       |  status:  |                               |
+|                       |   open    |                               |
+|                       +-----------+                               |
 |                                                                   |
-|   All paths produce: CONVOY (hq-cv-*)                             |
-|                      tracks: issue1, issue2, ...                  |
+|   Produces: CONVOY (hq-cv-*)                                      |
+|             tracks: issue1, issue2, ...                           |
 +===================================================================+
               |                              |
               v                              v
@@ -179,7 +179,7 @@ go test ./internal/convoy/... ./internal/daemon/... ./internal/cmd/... -count=1
 go test ./internal/convoy/... -v -count=1                       # feeding logic
 go test ./internal/daemon/... -v -count=1 -run TestConvoy       # ConvoyManager
 go test ./internal/daemon/... -v -count=1 -run TestFeedFirstReady
-go test ./internal/cmd/... -v -count=1 -run TestCreateAutoConvoy   # auto-convoy
+go test ./internal/cmd/... -v -count=1 -run TestSlingCreatesNoConvoy
 go test ./internal/cmd/... -v -count=1 -run TestBatchSling
 go test ./internal/cmd/... -v -count=1 -run TestResolveRig      # rig resolution
 go test ./internal/daemon/... -v -count=1 -run Integration      # real beads stores

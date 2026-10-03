@@ -192,7 +192,6 @@ func TestSlingRejectsBeadMissingFromTargetRigBeforeSpawn(t *testing.T) {
 	t.Parallel()
 	h := newSlingHarness(t)
 	h.addBead("gt-r2405", beadInfo{Title: "HQ-owned issue"})
-	h.run.opts.noConvoy = true
 	h.run.resolveTarget = h.run.resolveSlingTarget
 	h.run.verifyInTargetRig = func(id, rig, _ string) error {
 		return fmt.Errorf("bead %s is not present in target rig %q", id, rig)
@@ -237,7 +236,7 @@ func TestScheduleBeadRejectsMissingTargetRigDatabaseBeforeContext(t *testing.T) 
 
 	err := h.run.scheduleSlingBead("gt-r2405", "gastown", ScheduleOptions{Formula: "mol-polecat-work"})
 	wantSlingErr(t, err, "not present in target rig")
-	for _, sideEffect := range []string{"find context", "create context", "update context", "cook", "create convoy", "feed"} {
+	for _, sideEffect := range []string{"find context", "create context", "update context", "cook", "feed"} {
 		h.wantNo(sideEffect)
 	}
 }
@@ -407,7 +406,7 @@ func TestSlingFormulaRollsBackSpawnedPolecatOnWispFailure(t *testing.T) {
 	h.run.createWisp = func(string, string, string, []string) ([]byte, error) {
 		return nil, errors.New("missing required vars")
 	}
-	h.run.rollbackArtifacts = func(s *SpawnedPolecatInfo, _, id, dir, _ string) {
+	h.run.rollbackArtifacts = func(s *SpawnedPolecatInfo, _, id, dir string) {
 		h.record("rollback %s bead=%q dir=%s", s.PolecatName, id, dir)
 	}
 
@@ -715,7 +714,7 @@ func TestHookBeadWithRetryWritesHookDirDatabase(t *testing.T) {
 	}
 }
 
-func TestBuildSlingFieldUpdatesIncludesConvoyFields(t *testing.T) {
+func TestBuildSlingFieldUpdates(t *testing.T) {
 	t.Parallel()
 	got := buildSlingFieldUpdates(
 		"mayor",
@@ -727,43 +726,32 @@ func TestBuildSlingFieldUpdatesIncludesConvoyFields(t *testing.T) {
 		false,
 		"ralph",
 		"feature=test",
-		"hq-cv-test1",
-		"local",
-		true,
 	)
 
-	if got.ConvoyID != "hq-cv-test1" {
-		t.Fatalf("ConvoyID = %q, want %q", got.ConvoyID, "hq-cv-test1")
+	if got.Dispatcher != "mayor" || got.Args != "review this" {
+		t.Fatalf("updates = %+v", got)
 	}
-	if got.MergeStrategy != "local" {
-		t.Fatalf("MergeStrategy = %q, want %q", got.MergeStrategy, "local")
-	}
-	if !got.ConvoyOwned {
-		t.Fatal("ConvoyOwned = false, want true")
+	if got.AttachedMolecule != "gt-wisp-test" || got.AttachedFormula != "mol-polecat-work" {
+		t.Fatalf("updates = %+v", got)
 	}
 	if got.Mode == nil || *got.Mode != "ralph" {
 		t.Fatalf("Mode = %v, want ralph", got.Mode)
 	}
 }
 
-// TestStoreFieldsInBeadConvoyFields: convoy membership lands in the bead's
-// attachment fields.
-func TestStoreFieldsInBeadConvoyFields(t *testing.T) {
+// TestStoreFieldsInBeadWritesNoConvoyFields: a sling writes no convoy
+// membership onto the bead (gt-gzhin.4).
+func TestStoreFieldsInBeadWritesNoConvoyFields(t *testing.T) {
 	t.Parallel()
 	text := applyBeadFieldUpdates(&beads.Issue{}, beadFieldUpdates{
-		ConvoyID:      "hq-cv-test1",
-		MergeStrategy: "local",
-		ConvoyOwned:   true,
+		Dispatcher: "mayor",
+		NoMerge:    true,
 	})
 
-	if !strings.Contains(text, "convoy_id: hq-cv-test1") {
-		t.Fatalf("missing convoy_id in description:\n%s", text)
-	}
-	if !strings.Contains(text, "merge_strategy: local") {
-		t.Fatalf("missing merge_strategy in description:\n%s", text)
-	}
-	if !strings.Contains(text, "convoy_owned: true") {
-		t.Fatalf("missing convoy_owned in description:\n%s", text)
+	for _, unwanted := range []string{"convoy_id:", "merge_strategy:", "convoy_owned:"} {
+		if strings.Contains(text, unwanted) {
+			t.Fatalf("unexpected %s in description:\n%s", unwanted, text)
+		}
 	}
 }
 

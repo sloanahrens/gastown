@@ -35,20 +35,9 @@ This is THE command for assigning work in Gas Town. It handles:
   - Existing agents (mayor, crew, witness, refinery)
   - Auto-spawning polecats when target is a rig
   - Formula instantiation and wisp creation
-  - Auto-convoy creation so the work is tracked
 
-Auto-Convoy:
-  When slinging a single issue (not a formula), sling automatically creates
-  a convoy to track the work unless --no-convoy is specified. This ensures
-  all work appears in 'gt convoy list', even "swarm of one" assignments.
-
-  gt sling gt-abc gastown              # Creates "Work: <issue-title>" convoy
-  gt sling gt-abc gastown --no-convoy  # Skip auto-convoy creation
-
-Merge Strategy (--merge):
-  Controls how completed work lands. Stored on the auto-convoy.
-  gt sling gt-abc gastown --merge=mr      # Merge queue (default)
-  gt sling gt-abc gastown --merge=local   # Keep on feature branch
+A sling does not create a convoy: the spec dispatcher is the only automatic
+dispatcher, and a hand-slung bead is tracked by its own status and assignee.
 
 Target Resolution:
   gt sling gt-abc                       # Self (current agent)
@@ -132,10 +121,7 @@ var (
 	slingForce         bool   // --force: force spawn even if polecat has unread mail
 	slingAccount       string // --account: Claude Code account handle to use
 	slingAgent         string // --agent: override runtime agent for this sling/spawn
-	slingNoConvoy      bool   // --no-convoy: skip auto-convoy creation
-	slingOwned         bool   // --owned: mark auto-convoy as caller-managed lifecycle
 	slingNoMerge       bool   // --no-merge: skip merge queue on completion (for upstream PRs/human review)
-	slingMerge         string // --merge: merge strategy for convoy (mr/local)
 	slingNoBoot        bool   // --no-boot: skip wakeRigAgents (avoid witness/refinery boot and lock contention)
 	slingMaxConcurrent int    // --max-concurrent: throttle spawn rate in batch mode (spawns N, pauses, spawns N more)
 	slingBaseBranch    string // --base-branch: override base branch for polecat worktree
@@ -162,11 +148,8 @@ func init() {
 	slingCmd.Flags().BoolVar(&slingForce, "force", false, "Force spawn even if polecat has unread mail")
 	slingCmd.Flags().StringVar(&slingAccount, "account", "", "Claude Code account handle to use")
 	slingCmd.Flags().StringVar(&slingAgent, "agent", "", "Override agent for this sling (e.g., claude, claude-haiku, or custom alias). A polecat_pool seat is honored or the sling is refused; the pool never swaps in the other seat")
-	slingCmd.Flags().BoolVar(&slingNoConvoy, "no-convoy", false, "Skip auto-convoy creation for single-issue sling")
-	slingCmd.Flags().BoolVar(&slingOwned, "owned", false, "Mark auto-convoy as caller-managed lifecycle (no automatic witness/refinery registration)")
 	slingCmd.Flags().BoolVar(&slingHookRawBead, "hook-raw-bead", false, "Hook raw bead without default formula (expert mode)")
 	slingCmd.Flags().BoolVar(&slingNoMerge, "no-merge", false, "Skip merge queue on completion (keep work on feature branch for review)")
-	slingCmd.Flags().StringVar(&slingMerge, "merge", "", "Merge strategy: mr (merge queue, default), local (keep on branch)")
 	slingCmd.Flags().BoolVar(&slingNoBoot, "no-boot", false, "Skip rig boot after polecat spawn (avoids witness/refinery lock contention)")
 	slingCmd.Flags().IntVar(&slingMaxConcurrent, "max-concurrent", 0, "Throttle spawn rate: spawn N polecats, pause, then spawn N more (0 = no throttle). Does not limit total concurrent polecats")
 	slingCmd.Flags().StringVar(&slingBaseBranch, "base-branch", "", "Override base branch for polecat worktree (e.g., 'develop', 'release/v2')")
@@ -247,11 +230,6 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		}
 	} else if polecatName := r.getenv("GT_POLECAT"); polecatName != "" {
 		return fmt.Errorf("polecats cannot sling (use gt done for handoff)")
-	}
-
-	// Validate --merge flag if provided
-	if err := validateConvoyMergeFlag(r.opts.merge); err != nil {
-		return &slingUsageError{err: err}
 	}
 
 	// Validate --branch / --pr resume flags (gh#3602).
@@ -393,11 +371,8 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 				Formula:      formulaName,
 				Args:         r.opts.argsText,
 				Vars:         r.opts.vars,
-				Merge:        r.opts.merge,
 				BaseBranch:   r.opts.baseBranch,
 				ResumeBranch: r.opts.resumeBranch,
-				NoConvoy:     r.opts.noConvoy,
-				Owned:        r.opts.owned,
 				DryRun:       r.opts.dryRun,
 				Force:        r.opts.force,
 				NoMerge:      r.opts.noMerge,
@@ -434,11 +409,8 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 			Formula:      formulaName,
 			Args:         r.opts.argsText,
 			Vars:         r.opts.vars,
-			Merge:        r.opts.merge,
 			BaseBranch:   r.opts.baseBranch,
 			ResumeBranch: r.opts.resumeBranch,
-			NoConvoy:     r.opts.noConvoy,
-			Owned:        r.opts.owned,
 			DryRun:       r.opts.dryRun,
 			Force:        r.opts.force,
 			NoMerge:      r.opts.noMerge,
@@ -479,11 +451,8 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 				Formula:      formula,
 				Args:         r.opts.argsText,
 				Vars:         r.opts.vars,
-				Merge:        r.opts.merge,
 				BaseBranch:   r.opts.baseBranch,
 				ResumeBranch: r.opts.resumeBranch,
-				NoConvoy:     r.opts.noConvoy,
-				Owned:        r.opts.owned,
 				DryRun:       r.opts.dryRun,
 				Force:        r.opts.force,
 				NoMerge:      r.opts.noMerge,
@@ -840,24 +809,14 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	// failure before that never burns molecules or releases a hook this sling
 	// did not create. With no polecat spawned, the guard has nothing to own once
 	// the hook has landed.
-	//
-	// The auto-convoy stays open on a rollback so the convoy feeder can
-	// re-dispatch the bead with the recorded agent (gt-yg24) — except when raw
-	// metadata could not be stored, where the sling never got as far as a
-	// dispatchable bead and the convoy is closed with the spawn.
 	slingCommitted := false
 	hooked := false
 	rollbackBeadID := ""
 	rollbackReason := ""
-	var convoyID string
 	rollbackSpawnedPolecat := func(reason string) {
 		if newPolecatInfo != nil {
-			rollbackConvoyID := ""
-			if reason == rawSlingMetadataRollbackReason {
-				rollbackConvoyID = convoyID
-			}
 			fmt.Fprintf(r.out, "%s %s, rolling back spawned polecat %s...\n", style.Warning.Render("⚠"), reason, newPolecatInfo.PolecatName)
-			r.rollbackArtifacts(newPolecatInfo, r.townRoot, rollbackBeadID, hookWorkDir, rollbackConvoyID)
+			r.rollbackArtifacts(newPolecatInfo, r.townRoot, rollbackBeadID, hookWorkDir)
 		}
 		if rollbackBeadID == "" {
 			return // this sling has not written to the bead: nothing to restore
@@ -941,44 +900,6 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 			// Unhook the bead from old owner (set status back to open)
 			if err := r.unhook(townRoot, beadID); err != nil {
 				fmt.Fprintf(r.out, "%s Could not unhook bead from old owner: %v\n", style.Dim.Render("Warning:"), err)
-			}
-		}
-	}
-
-	// Auto-convoy: check if issue is already tracked by a convoy
-	// If not, create one so the work is tracked (unless --no-convoy is set)
-	if !r.opts.noConvoy && formulaName == "" {
-		if r.opts.dryRun {
-			fmt.Fprintf(r.out, "Would create convoy 'Work: %s' if needed\n", info.Title)
-			fmt.Fprintf(r.out, "Would add tracking relation to %s if needed\n", beadID)
-			if r.opts.merge != "" {
-				fmt.Fprintf(r.out, "Would set convoy merge strategy: %s\n", r.opts.merge)
-			}
-		} else {
-			existingConvoy := r.trackedByConvoy(r.townRoot, beadID)
-			if existingConvoy == "" {
-				var err error
-				// Record the requested runtime agent and formula on the convoy:
-				// if this sling fails after the convoy exists, the convoy
-				// feeder re-dispatches the bead and must re-use this agent and
-				// formula rather than the rig default (gt-yg24, gt-4lor).
-				convoyID, err = r.createConvoy(r.townRoot, beadID, info.Title, r.opts.owned, r.opts.merge, r.opts.baseBranch, r.opts.agent, r.opts.formula)
-				if err != nil {
-					// Log warning but don't fail - convoy is optional
-					fmt.Fprintf(r.out, "%s Could not create auto-convoy: %v\n", style.Dim.Render("Warning:"), err)
-				} else {
-					fmt.Fprintf(r.out, "%s Created convoy 🚚 %s\n", style.Bold.Render("→"), convoyID)
-					r.steps.Step("convoy")
-					fmt.Fprintf(r.out, "  Tracking: %s\n", beadID)
-					if r.opts.owned {
-						fmt.Fprintf(r.out, "  Lifecycle: caller-managed (owned)\n")
-					}
-					if r.opts.merge != "" {
-						fmt.Fprintf(r.out, "  Merge:    %s\n", r.opts.merge)
-					}
-				}
-			} else {
-				fmt.Fprintf(r.out, "%s Already tracked by convoy %s\n", style.Dim.Render("○"), existingConvoy)
 			}
 		}
 	}
@@ -1119,9 +1040,6 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		r.opts.reviewOnly,
 		mode,
 		formulaVarsForAttachment,
-		convoyID,
-		r.opts.merge,
-		r.opts.owned,
 	)
 
 	// Hook the bead with retry and verification.
@@ -1291,13 +1209,10 @@ func (r *slingRun) runRigTarget(rigName, beadID, formulaName, townRoot string) e
 
 		Args:         r.opts.argsText,
 		Vars:         append([]string(nil), r.opts.vars...),
-		Merge:        r.opts.merge,
 		BaseBranch:   r.opts.baseBranch,
 		ResumeBranch: r.opts.resumeBranch,
 		Account:      r.opts.account,
 		Agent:        r.opts.agent,
-		NoConvoy:     r.opts.noConvoy,
-		Owned:        r.opts.owned,
 		NoMerge:      r.opts.noMerge,
 		Force:        r.opts.force,
 		HookRawBead:  r.opts.hookRawBead,
@@ -1412,7 +1327,7 @@ func checkCrossRigGuard(beadID, targetAgent, townRoot string) error {
 }
 
 // rawSlingMetadataRollbackReason is the engine's, so the inline rollback guard
-// and the engine's agree on which rollback closes the auto-convoy.
+// and the engine's describe the same failure the same way.
 const rawSlingMetadataRollbackReason = sling.RawMetadataRollbackReason
 
 // rollbackSlingArtifactsFn is a seam for tests. Production uses rollbackSlingArtifacts.
@@ -1632,6 +1547,6 @@ func resolvePRBranch(prNumber int) (string, error) {
 // Cleanup is best-effort: each step logs warnings but continues to clean as much as possible.
 // beadID is the bead this sling touched ("" when the failure came before the
 // sling wrote to any bead); it is never unhooked from a different assignee.
-func rollbackSlingArtifacts(spawnInfo *SpawnedPolecatInfo, townRoot, beadID, hookWorkDir, convoyID string) {
-	realSlingRollbackIn(townRoot, nil).rollback(spawnInfo, beadID, hookWorkDir, convoyID)
+func rollbackSlingArtifacts(spawnInfo *SpawnedPolecatInfo, townRoot, beadID, hookWorkDir string) {
+	realSlingRollbackIn(townRoot, nil).rollback(spawnInfo, beadID, hookWorkDir)
 }

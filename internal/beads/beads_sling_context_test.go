@@ -15,15 +15,12 @@ func TestFormatParseSlingContextRoundTrip(t *testing.T) {
 		Args:             "implement feature X",
 		Vars:             "a=1\nb=2",
 		EnqueuedAt:       "2026-01-15T10:00:00Z",
-		Merge:            "direct",
-		Convoy:           "hq-cv-test",
 		BaseBranch:       "develop",
 		NoMerge:          true,
 		ReviewOnly:       true,
 		Account:          "acme",
 		Agent:            "gemini",
 		HookRawBead:      true,
-		Owned:            true,
 		Mode:             "ralph",
 		DispatchFailures: 2,
 		LastFailure:      "sling failed: timeout",
@@ -57,12 +54,6 @@ func TestFormatParseSlingContextRoundTrip(t *testing.T) {
 	if parsed.EnqueuedAt != original.EnqueuedAt {
 		t.Errorf("EnqueuedAt: got %q, want %q", parsed.EnqueuedAt, original.EnqueuedAt)
 	}
-	if parsed.Merge != original.Merge {
-		t.Errorf("Merge: got %q, want %q", parsed.Merge, original.Merge)
-	}
-	if parsed.Convoy != original.Convoy {
-		t.Errorf("Convoy: got %q, want %q", parsed.Convoy, original.Convoy)
-	}
 	if parsed.BaseBranch != original.BaseBranch {
 		t.Errorf("BaseBranch: got %q, want %q", parsed.BaseBranch, original.BaseBranch)
 	}
@@ -80,9 +71,6 @@ func TestFormatParseSlingContextRoundTrip(t *testing.T) {
 	}
 	if parsed.HookRawBead != original.HookRawBead {
 		t.Errorf("HookRawBead: got %v, want %v", parsed.HookRawBead, original.HookRawBead)
-	}
-	if parsed.Owned != original.Owned {
-		t.Errorf("Owned: got %v, want %v", parsed.Owned, original.Owned)
 	}
 	if parsed.Mode != original.Mode {
 		t.Errorf("Mode: got %q, want %q", parsed.Mode, original.Mode)

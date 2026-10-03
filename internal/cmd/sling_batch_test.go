@@ -1,45 +1,21 @@
 package cmd
 
 import (
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
 
-// TestBatchSling_ConvoyIDStoredInBeadFieldUpdates verifies that the batch convoy ID
-// is stored in each bead's fieldUpdates.ConvoyID. This was a bug where ConvoyID and
-// MergeStrategy were never persisted in batch mode.
-func TestBatchSling_ConvoyIDStoredInBeadFieldUpdates(t *testing.T) {
+// TestSlingHasNoConvoyFlags pins gt-gzhin.4: a sling creates no convoy, so the
+// flags that shaped the auto-convoy are gone from the command.
+func TestSlingHasNoConvoyFlags(t *testing.T) {
 	t.Parallel()
-	// This test verifies the data flow: batchConvoyID is set in fieldUpdates.ConvoyID
-	// for each bead in the loop. We test this at the unit level by checking the
-	// beadFieldUpdates struct construction.
-
-	// Simulate the logic from runBatchSling: convoy created before loop,
-	// ConvoyID stored in each bead's fieldUpdates.
-	batchConvoyID := "hq-cv-test1"
-	mergeStrategy := "direct"
-
-	beadIDs := []string{"gt-aaa", "gt-bbb", "gt-ccc"}
-	for _, beadID := range beadIDs {
-		fieldUpdates := beadFieldUpdates{
-			Dispatcher:    "test-actor",
-			ConvoyID:      batchConvoyID,
-			MergeStrategy: mergeStrategy,
-		}
-
-		if fieldUpdates.ConvoyID != batchConvoyID {
-			t.Errorf("bead %s: ConvoyID = %q, want %q", beadID, fieldUpdates.ConvoyID, batchConvoyID)
-		}
-		if fieldUpdates.MergeStrategy != mergeStrategy {
-			t.Errorf("bead %s: MergeStrategy = %q, want %q", beadID, fieldUpdates.MergeStrategy, mergeStrategy)
+	for _, name := range []string{"no-convoy", "owned", "merge"} {
+		if f := slingCmd.Flags().Lookup(name); f != nil {
+			t.Errorf("gt sling still has --%s: %s", name, f.Usage)
 		}
 	}
 }
@@ -186,185 +162,6 @@ func TestResolveRigFromBeadIDs_TownLevelPrefix_Errors(t *testing.T) {
 	}
 }
 
-// newAutoConvoyTown is a temp town with a .beads dir and a fake database.
-func newAutoConvoyTown(t *testing.T) slingConvoyTown {
-	t.Helper()
-	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	return slingConvoyTown{root: root, db: beadsfake.New(beadsfake.WithPrefix("hq"))}
-}
-
-// createdConvoy is the convoy createAutoConvoy wrote in town's database.
-func createdConvoy(t *testing.T, town slingConvoyTown, id string) *beads.Issue {
-	t.Helper()
-	is, err := town.db.Show(id)
-	if err != nil {
-		t.Fatalf("convoy %s not in the town database: %v", id, err)
-	}
-	return is
-}
-
-// ---------------------------------------------------------------------------
-// slingGenerateShortID tests
-// ---------------------------------------------------------------------------
-
-// TestSlingGenerateShortID_Format verifies the generated ID is 5 lowercase
-// base32 characters.
-func TestSlingGenerateShortID_Format(t *testing.T) {
-	t.Parallel()
-	id := slingGenerateShortID()
-	if len(id) != 5 {
-		t.Fatalf("expected 5-char ID, got %d chars: %q", len(id), id)
-	}
-	// base32 lowercase alphabet: a-z, 2-7
-	for _, ch := range id {
-		if !((ch >= 'a' && ch <= 'z') || (ch >= '2' && ch <= '7')) {
-			t.Errorf("unexpected character %q in ID %q (expected base32 lowercase)", ch, id)
-		}
-	}
-}
-
-// TestSlingGenerateShortID_Unique verifies successive calls produce different IDs.
-func TestSlingGenerateShortID_Unique(t *testing.T) {
-	t.Parallel()
-	a := slingGenerateShortID()
-	b := slingGenerateShortID()
-	if a == b {
-		t.Errorf("two successive calls returned the same ID: %q", a)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// createAutoConvoy tests
-// ---------------------------------------------------------------------------
-
-// TestCreateAutoConvoy_BasicSuccess: the auto-convoy is created as
-// "Work: <title>" with an hq-cv-* ID, and then tracks the bead.
-func TestCreateAutoConvoy_BasicSuccess(t *testing.T) {
-	t.Parallel()
-	town := newAutoConvoyTown(t)
-	db := town.db.(*beadsfake.Fake)
-	db.Seed(beads.Issue{ID: "gt-aaa", Title: "Fix the widget", Status: "open"})
-
-	convoyID, err := town.createAutoConvoy("gt-aaa", "Fix the widget", false, "mr", "", "", "")
-	if err != nil {
-		t.Fatalf("createAutoConvoy() error: %v", err)
-	}
-	if !strings.HasPrefix(convoyID, "hq-cv-") {
-		t.Errorf("convoy ID %q should have hq-cv- prefix", convoyID)
-	}
-	if c := createdConvoy(t, town, convoyID); c.Title != "Work: Fix the widget" || strings.Join(c.Labels, ",") != "gt:convoy" {
-		t.Errorf("convoy = title %q labels %v", c.Title, c.Labels)
-	}
-	if deps, err := db.DepList(convoyID, "tracks"); err != nil || len(deps) != 1 || deps[0].ID != "gt-aaa" {
-		t.Errorf("convoy tracks %+v (%v), want gt-aaa", deps, err)
-	}
-}
-
-// TestCreateAutoConvoy_RecordsRequestedAgent is the regression test for
-// gt-yg24: the --agent a sling was dispatched with is persisted on the convoy,
-// so a convoy feeder re-dispatching the bead after a failed sling re-uses it
-// instead of quietly falling back to the rig default.
-func TestCreateAutoConvoy_RecordsRequestedAgent(t *testing.T) {
-	t.Parallel()
-	town := newAutoConvoyTown(t)
-	id, err := town.createAutoConvoy("gt-aaa", "Fix the widget", false, "mr", "main", "deepseek-flash", "")
-	if err != nil {
-		t.Fatalf("createAutoConvoy() error: %v", err)
-	}
-	create := createdConvoy(t, town, id).Description
-	if !strings.Contains(create, "agent: deepseek-flash") {
-		t.Errorf("convoy description should record the requested agent:\n%s", create)
-	}
-	if !strings.Contains(create, "base_branch: main") {
-		t.Errorf("convoy description should still record base_branch:\n%s", create)
-	}
-
-	// No agent requested: nothing recorded, so feeders fall back to the rig
-	// default (and log it) rather than pinning a stray value.
-	other := newAutoConvoyTown(t)
-	id, err = other.createAutoConvoy("gt-bbb", "Another task", false, "", "", "", "")
-	if err != nil {
-		t.Fatalf("createAutoConvoy() error: %v", err)
-	}
-	if create := createdConvoy(t, other, id).Description; strings.Contains(create, "agent:") {
-		t.Errorf("convoy description should omit agent when none requested:\n%s", create)
-	}
-}
-
-// TestCreateAutoConvoy_RecordsRequestedFormula is the regression test for
-// gt-4lor: the --formula a sling was dispatched with is persisted on the
-// convoy, so a convoy feeder re-dispatching the bead after a failed sling
-// re-uses it instead of quietly falling back to the rig default formula.
-func TestCreateAutoConvoy_RecordsRequestedFormula(t *testing.T) {
-	t.Parallel()
-	town := newAutoConvoyTown(t)
-	id, err := town.createAutoConvoy("gt-aaa", "Fix the widget", false, "mr", "main", "", " mol-doc-audit ")
-	if err != nil {
-		t.Fatalf("createAutoConvoy() error: %v", err)
-	}
-	if create := createdConvoy(t, town, id).Description; !strings.Contains(create, "formula: mol-doc-audit") {
-		t.Errorf("convoy description should record the requested formula:\n%s", create)
-	}
-
-	// No formula requested: nothing recorded, so feeders fall back to
-	// gt sling's own resolution rather than pinning a stray value.
-	other := newAutoConvoyTown(t)
-	id, err = other.createAutoConvoy("gt-bbb", "Another task", false, "", "", "", "")
-	if err != nil {
-		t.Fatalf("createAutoConvoy() error: %v", err)
-	}
-	if create := createdConvoy(t, other, id).Description; strings.Contains(create, "formula:") {
-		t.Errorf("convoy description should omit formula when none requested:\n%s", create)
-	}
-}
-
-// TestCreateAutoConvoy_OwnedLabel verifies that owned=true adds the gt:owned
-// label next to gt:convoy.
-func TestCreateAutoConvoy_OwnedLabel(t *testing.T) {
-	t.Parallel()
-	town := newAutoConvoyTown(t)
-	id, err := town.createAutoConvoy("gt-aaa", "My task", true, "local", "", "", "")
-	if err != nil {
-		t.Fatalf("createAutoConvoy() error: %v", err)
-	}
-	if labels := createdConvoy(t, town, id).Labels; strings.Join(labels, ",") != "gt:convoy,gt:owned" {
-		t.Errorf("convoy labels = %v, want gt:convoy and gt:owned", labels)
-	}
-}
-
-// TestCreateAutoConvoy_DepFailIsNonFatal verifies that when the dep add fails
-// (e.g., cross-rig bead), createAutoConvoy succeeds with a warning rather than
-// returning an error, and does not close the convoy it created. Tracking
-// failure is non-fatal since commit 103b6aaa because beads v0.62 removed
-// cross-rig routing from bd dep add.
-func TestCreateAutoConvoy_DepFailIsNonFatal(t *testing.T) {
-	t.Parallel()
-	town := newAutoConvoyTown(t) // gt-aaa is not in the town database: the dep add fails
-	convoyID, err := town.createAutoConvoy("gt-aaa", "My task", false, "", "", "", "")
-	if err != nil {
-		t.Fatalf("expected no error (dep fail is non-fatal), got: %v", err)
-	}
-	if status := createdConvoy(t, town, convoyID).Status; status != "open" {
-		t.Errorf("convoy status %q: a failed dep add must not close it", status)
-	}
-}
-
-// TestCreateAutoConvoy_FlagLikeTitleReturnsError verifies that a title starting
-// with "--" is rejected.
-func TestCreateAutoConvoy_FlagLikeTitleReturnsError(t *testing.T) {
-	t.Parallel()
-	_, err := createAutoConvoy(t.TempDir(), "gt-aaa", "--verbose", false, "", "", "", "")
-	if err == nil {
-		t.Fatal("expected error for flag-like title, got nil")
-	}
-	if !strings.Contains(err.Error(), "CLI flag") {
-		t.Errorf("error should mention CLI flag, got: %v", err)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Cross-rig guard in runBatchSling tests
 // ---------------------------------------------------------------------------
@@ -481,35 +278,6 @@ func TestResolveRigFromBeadIDs_MixedPrefixes_DoesNotSuggestForce(t *testing.T) {
 	}
 }
 
-// TestBatchSling_ConvoyCreationFailureIsHardError verifies that when
-// createBatchConvoy fails, runBatchSling returns an error instead of
-// continuing with empty ConvoyID (which silently regresses to pre-fix behavior).
-// Review finding: convoy creation failure silently regresses.
-func TestBatchSling_ConvoyCreationFailureIsHardError(t *testing.T) {
-	t.Parallel()
-	// Verify the contract: when convoy creation fails and --no-convoy is not set,
-	// the batch should NOT proceed. We test this by checking that runBatchSling
-	// would return an error rather than continuing with empty batchConvoyID.
-
-	// The pattern: if createBatchConvoy returns error and !slingNoConvoy,
-	// runBatchSling should return that error.
-	// We test the decision logic inline since runBatchSling has many side effects.
-	slingNoConvoyVal := false
-	var batchConvoyID string
-	convoyErr := fmt.Errorf("creating batch convoy: connection refused")
-
-	// Simulate the fix: convoy creation failure is now a hard error
-	if convoyErr != nil && !slingNoConvoyVal {
-		// This is the expected behavior after the fix
-		if batchConvoyID != "" {
-			t.Error("batchConvoyID should be empty when creation fails")
-		}
-		// The error should be returned, not swallowed
-		return
-	}
-	t.Fatal("should have returned error for convoy creation failure")
-}
-
 // TestBatchSling_SliceAliasingInCrossRigGuard verifies that the cross-rig guard
 // error message does not mutate the input beadIDs slice via append.
 // Review finding: append(beadIDs, rigName) mutates shared backing array.
@@ -530,96 +298,5 @@ func TestBatchSling_SliceAliasingInCrossRigGuard(t *testing.T) {
 	// Verify the original args are not mutated
 	if args[2] != "gastown" {
 		t.Errorf("args[2] was mutated from 'gastown' to %q — slice aliasing bug", args[2])
-	}
-}
-
-// ---------------------------------------------------------------------------
-// convoyByDescription tests
-// ---------------------------------------------------------------------------
-
-// convoyScanTown is an auto-convoy town whose database holds convoys and
-// answers the raw tracks-dep query: up (what tracks a bead) with trackers
-// and down (what a convoy tracks) with tracked, the same rows for every ID.
-func convoyScanTown(t *testing.T, trackers, tracked []string, convoys ...beads.Issue) slingConvoyTown {
-	t.Helper()
-	town := newAutoConvoyTown(t)
-	db := town.db.(*beadsfake.Fake)
-	for _, cv := range convoys {
-		if cv.Type == "" {
-			cv.Labels = append(cv.Labels, "gt:convoy")
-		}
-		db.Seed(cv)
-	}
-	db.OnSQL(func(query string) ([][]string, error) {
-		rows := [][]string{{"depends_on_id"}}
-		ids := tracked
-		if strings.HasPrefix(query, "SELECT issue_id") {
-			rows, ids = [][]string{{"issue_id"}}, trackers
-		}
-		for _, id := range ids {
-			rows = append(rows, []string{id})
-		}
-		return rows, nil
-	})
-	return town
-}
-
-// TestFindConvoyByDescription_MatchesDescriptionPattern verifies that a convoy
-// whose description contains "tracking <beadID>" is found by description scan.
-func TestFindConvoyByDescription_MatchesDescriptionPattern(t *testing.T) {
-	t.Parallel()
-	town := convoyScanTown(t, nil, nil, beads.Issue{ID: "hq-cv-match1", Description: "Auto-created convoy tracking gt-abc"})
-	if got := town.convoyByDescription("gt-abc"); got != "hq-cv-match1" {
-		t.Errorf("convoyByDescription() = %q, want %q", got, "hq-cv-match1")
-	}
-}
-
-// TestFindConvoyByDescription_NoMatch verifies that empty string is returned
-// when no convoy description matches and no convoy tracks the bead.
-func TestFindConvoyByDescription_NoMatch(t *testing.T) {
-	t.Parallel()
-	town := convoyScanTown(t, nil, nil, beads.Issue{ID: "hq-cv-other", Description: "Auto-created convoy tracking gt-other"})
-	if got := town.convoyByDescription("gt-zzz"); got != "" {
-		t.Errorf("convoyByDescription() = %q, want empty string", got)
-	}
-}
-
-// TestFindConvoyByDescription_FallsBackToTrackedDeps verifies that when no
-// description matches, the scan falls back to checking tracked deps of each
-// convoy.
-func TestFindConvoyByDescription_FallsBackToTrackedDeps(t *testing.T) {
-	t.Parallel()
-	town := convoyScanTown(t, nil, []string{"gt-abc"}, beads.Issue{ID: "hq-cv-manual", Description: "Manually created convoy"})
-	if got := town.convoyByDescription("gt-abc"); got != "hq-cv-manual" {
-		t.Errorf("convoyByDescription() = %q, want %q", got, "hq-cv-manual")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// trackingConvoy tests
-// ---------------------------------------------------------------------------
-
-// TestIsTrackedByConvoy_FoundViaDepList verifies that a convoy found by the
-// raw dep query (direction=up) is returned once bd show confirms it is an
-// open convoy.
-func TestIsTrackedByConvoy_FoundViaDepList(t *testing.T) {
-	t.Parallel()
-	town := convoyScanTown(t, []string{"hq-cv-found"}, nil, beads.Issue{ID: "hq-cv-found", Type: "convoy"})
-	if got := town.trackingConvoy("gt-abc"); got != "hq-cv-found" {
-		t.Errorf("trackingConvoy() = %q, want %q", got, "hq-cv-found")
-	}
-}
-
-// TestIsTrackedByConvoy_NotFound verifies that empty string is returned when
-// no convoy tracks the bead (neither via dep query nor description), and that
-// a tracker bd show does not confirm as an open convoy does not count.
-func TestIsTrackedByConvoy_NotFound(t *testing.T) {
-	t.Parallel()
-	if got := convoyScanTown(t, nil, nil).trackingConvoy("gt-zzz"); got != "" {
-		t.Errorf("trackingConvoy() = %q, want empty string", got)
-	}
-	closed := convoyScanTown(t, []string{"hq-cv-done"}, nil, beads.Issue{ID: "hq-cv-done", Type: "convoy", Status: "closed"})
-	if got := closed.trackingConvoy("gt-zzz"); got != "" {
-		t.Errorf("trackingConvoy() = %q for a closed tracker, want empty string", got)
 	}
 }
