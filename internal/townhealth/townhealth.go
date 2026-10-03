@@ -27,6 +27,8 @@ import (
 	"fmt"
 	"sort"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
 // Tag says how a field was observed.
@@ -392,6 +394,11 @@ type DispatchTick struct {
 	// not a deliberate declination: a tick that only failed is stalled
 	// (gt-xiw7o).
 	Failed int
+	// LabeledFailed counts the ready beads the tick found carrying the
+	// spec-dispatch-failed label. They are out of the queue until the label
+	// is cleared, so a non-zero count is the operator's signal that a bead
+	// is stuck there (gt-q6zoo).
+	LabeledFailed int
 }
 
 // declined reports whether the tick turned candidates away on purpose rather
@@ -830,6 +837,11 @@ func seats(in Inputs) []Field {
 // A tick whose roster could not be read is not a full town: the field cannot
 // tell a free seat from a taken one, so it reads unknown rather than green
 // (gt-xiw7o).
+//
+// Whatever the dispatcher's own state, the field carries the beads the
+// spec-dispatch-failed label is holding out of the queue: a healthy dispatcher
+// with three such beads is not a town an operator can leave alone, so the
+// count degrades a green verdict and rides in the value (gt-q6zoo).
 func dispatch(in Inputs) Field {
 	if in.Dispatch == nil {
 		return unknown(FieldDispatch, "", "", errNotWired)
@@ -837,12 +849,6 @@ func dispatch(in Inputs) Field {
 	rec, err := in.Dispatch.Dispatch()
 	if err != nil {
 		return unknown(FieldDispatch, "", "", err)
-	}
-	if rec.Hold != "" {
-		return Field{Name: FieldDispatch, Tag: Recorded, Verdict: Green, Value: "held", Detail: rec.Hold}
-	}
-	if !rec.Active {
-		return Field{Name: FieldDispatch, Tag: Recorded, Verdict: Red, Value: "off", Detail: "spec_dispatch is off"}
 	}
 	win := in.Thresholds.DispatchWindow
 	if win <= 0 {
@@ -854,6 +860,52 @@ func dispatch(in Inputs) Field {
 		if !t.At.Before(since) {
 			ticks = append(ticks, t)
 		}
+	}
+	f := dispatchField(in, rec, ticks, win)
+	if n := failedLabelCount(ticks); n > 0 {
+		f = withFailedLabels(f, n)
+	}
+	return f
+}
+
+// failedLabelCount is the newest tick's count of ready beads the
+// spec-dispatch-failed label is holding out of the queue; zero when no tick in
+// the window carried one (gt-q6zoo).
+func failedLabelCount(ticks []DispatchTick) int {
+	if len(ticks) == 0 {
+		return 0
+	}
+	return ticks[len(ticks)-1].LabeledFailed
+}
+
+// withFailedLabels puts the beads the label is holding in front of the
+// operator: a dispatcher that is otherwise healthy still leaves them out of
+// the queue, so the field degrades and its value carries the count (gt-q6zoo).
+func withFailedLabels(f Field, n int) Field {
+	detail := fmt.Sprintf("%d bead(s) labeled %s are out of the queue until the label is cleared", n, specdispatch.DispatchFailedLabel)
+	if f.Detail != "" {
+		detail = f.Detail + "; " + detail
+	}
+	f.Detail = detail
+	// UNKNOWN keeps its "?" value: the count rides in the detail, so the one
+	// convention an unknown field has is not broken.
+	if f.Verdict != VerdictUnknown {
+		f.Value = fmt.Sprintf("%s %d failed", f.Value, n)
+	}
+	if f.Verdict == Green {
+		f.Verdict = Degraded
+	}
+	return f
+}
+
+// dispatchField judges the dispatcher's own state; dispatch adds the beads the
+// spec-dispatch-failed label holds out of the queue to whatever it returns.
+func dispatchField(in Inputs, rec DispatchRecord, ticks []DispatchTick, win time.Duration) Field {
+	if rec.Hold != "" {
+		return Field{Name: FieldDispatch, Tag: Recorded, Verdict: Green, Value: "held", Detail: rec.Hold}
+	}
+	if !rec.Active {
+		return Field{Name: FieldDispatch, Tag: Recorded, Verdict: Red, Value: "off", Detail: "spec_dispatch is off"}
 	}
 	if len(ticks) == 0 {
 		if in.DaemonStarted.IsZero() {

@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/patrolscan"
+	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
@@ -67,9 +68,14 @@ func newFakeSpecTown(specs ...specdispatch.Spec) *fakeSpecTown {
 func (f *fakeSpecTown) env() specDispatchEnv {
 	return specDispatchEnv{
 		Hold: func() string { return f.hold },
-		Candidates: func() ([]specCandidate, []string) {
+		Candidates: func() specBoardRead {
 			var list []specdispatch.Spec
+			labeled := 0
 			for _, s := range f.specs {
+				if s.HasLabel(specdispatch.DispatchFailedLabel) {
+					labeled++
+					continue
+				}
 				if ok, _ := specdispatch.Eligible(s, 2); ok {
 					list = append(list, s)
 				}
@@ -79,7 +85,7 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 			for _, s := range list {
 				out = append(out, specCandidate{Spec: s, Rig: "gastown"})
 			}
-			return out, nil
+			return specBoardRead{Candidates: out, LabeledFailed: labeled}
 		},
 		Show: func(id string) (specdispatch.Spec, error) {
 			s, ok := f.specs[id]
@@ -618,6 +624,79 @@ func TestSpecDispatchPoolRefusalIsASkip(t *testing.T) {
 	}
 }
 
+// A content-overlap refusal is a deferral, not a failure: the guard refuses
+// only live work, so the refusal clears by itself when the overlapping bead
+// closes and the bead is retried with no label for an operator to remove
+// (gt-q6zoo).
+func TestSpecDispatchOverlapRefusalDefersAndRetries(t *testing.T) {
+	t.Parallel()
+	overlap := sling.DecideDuplicates("gt-a", []sling.DuplicateMatch{{
+		Bead:        sling.Duplicate{ID: "gt-b", Status: "open"},
+		SharedTests: []string{"TestSpecDispatch"},
+	}}).Err()
+	if !errors.Is(overlap, errSlingDuplicateContent) {
+		t.Fatalf("fixture: %v is not the overlap sentinel", overlap)
+	}
+
+	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+	f.slingErrs["gt-a"] = []error{overlap}
+	r := runSpecDispatchCycle(f.env())
+	if len(r.Failed) != 0 || len(r.Skipped) != 1 {
+		t.Fatalf("overlap refusal handled as a failure: %+v", r)
+	}
+	if !strings.Contains(r.Skipped[0].Line, "content overlap") {
+		t.Errorf("deferral line = %q, want the overlap named", r.Skipped[0].Line)
+	}
+	if got := f.labels["gt-a"]; len(got) != 0 {
+		t.Errorf("overlap-refused bead labeled %v; the label would strand it out of the queue", got)
+	}
+	if n := len(f.notes["gt-a"]); n != 0 {
+		t.Errorf("overlap-refused bead annotated %d times, want none", n)
+	}
+
+	// The overlapping bead closes, the guard stops refusing, and the next tick
+	// dispatches the bead with nothing removed by hand.
+	r = runSpecDispatchCycle(f.env())
+	if len(f.slung) != 1 || f.slung[0] != "gt-a" {
+		t.Fatalf("slung %v, want gt-a retried on the next tick", f.slung)
+	}
+	if len(f.labels["gt-a"]) != 0 {
+		t.Errorf("labels after the retry = %v, want none", f.labels["gt-a"])
+	}
+}
+
+// A dispatch that fails for a reason it cannot clear itself leaves the queue
+// under the spec-dispatch-failed label, and the tick says exactly that: the
+// bead id, the reason, and the label that holds it out (gt-q6zoo).
+func TestSpecDispatchFailureNamesTheExclusion(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+	f.slingErrs["gt-a"] = []error{errors.New("rig gastown is down")}
+	r := runSpecDispatchCycle(f.env())
+	if len(r.Failed) != 1 {
+		t.Fatalf("failed = %+v, want one entry", r.Failed)
+	}
+	for _, want := range []string{"gt-a", "rig gastown is down", specdispatch.DispatchFailedLabel, "excluded from the queue"} {
+		if !strings.Contains(r.Failed[0].Line, want) {
+			t.Errorf("failure line %q missing %q", r.Failed[0].Line, want)
+		}
+	}
+	if got := f.labels["gt-a"]; len(got) != 1 || got[0] != specdispatch.DispatchFailedLabel {
+		t.Fatalf("labels = %v, want %s once", got, specdispatch.DispatchFailedLabel)
+	}
+	notes := f.notes["gt-a"]
+	if len(notes) != 1 || !strings.Contains(notes[0], specdispatch.DispatchFailedLabel) {
+		t.Errorf("bead notes = %v, want one naming the label", notes)
+	}
+
+	// The label is what excludes it: the next tick reads the bead, counts it
+	// and takes no candidate from it.
+	r = runSpecDispatchCycle(f.env())
+	if r.Candidates != 0 || r.LabeledFailed != 1 || len(r.Dispatched) != 0 {
+		t.Errorf("next tick = %d candidate(s), %d labeled-failed, %d dispatched; want 0, 1, 0", r.Candidates, r.LabeledFailed, len(r.Dispatched))
+	}
+}
+
 func TestSpecDispatchDryRunTouchesNothing(t *testing.T) {
 	t.Parallel()
 	bad := cleanSpec("gt-bad", 1, "2026-09-29T10:00:00Z")
@@ -941,6 +1020,7 @@ func TestSpecCandidatesFromAFakeStore(t *testing.T) {
 			{ID: "gt-deferred", Type: "task", Status: "deferred", Priority: 1},
 			{ID: "gt-epic", Type: "epic", Status: "open", Priority: 1},
 			{ID: "gt-p4", Type: "task", Status: "open", Priority: 4},
+			{ID: "gt-stuck", Type: "task", Status: "open", Priority: 1, Labels: []string{specdispatch.DispatchFailedLabel}},
 		}, nil
 	}
 
@@ -955,19 +1035,28 @@ func TestSpecCandidatesFromAFakeStore(t *testing.T) {
 		return strings.Join(out, " ")
 	}
 
-	got, errs := specCandidates(townRoot, 2, fakeBoard)
-	if len(errs) != 0 {
-		t.Fatalf("errors = %v", errs)
+	got := specCandidates(townRoot, 2, fakeBoard)
+	if len(got.Errors) != 0 {
+		t.Fatalf("errors = %v", got.Errors)
 	}
-	if ids := idList(got); ids != "gt-bug gt-task" {
+	if ids := idList(got.Candidates); ids != "gt-bug gt-task" {
 		t.Errorf("candidates at the default ceiling = %q, want the P1 bug then the P2 task", ids)
+	}
+	// gt-stuck is ready, but spec-dispatch-failed holds it out of the queue:
+	// the read counts it instead of taking it, so the tick can surface the
+	// count (gt-q6zoo).
+	if got.LabeledFailed != 1 {
+		t.Errorf("LabeledFailed = %d, want 1", got.LabeledFailed)
 	}
 
 	// The ceiling is the operator's (polecat_pool.max_priority): at P4 the
 	// feature and the P4 task are the dispatcher's work too.
-	got, _ = specCandidates(townRoot, 4, fakeBoard)
-	if ids := idList(got); ids != "gt-bug gt-task gt-feature gt-p4" {
+	got = specCandidates(townRoot, 4, fakeBoard)
+	if ids := idList(got.Candidates); ids != "gt-bug gt-task gt-feature gt-p4" {
 		t.Errorf("candidates at a P4 ceiling = %q", ids)
+	}
+	if got.LabeledFailed != 1 {
+		t.Errorf("LabeledFailed at a P4 ceiling = %d, want 1", got.LabeledFailed)
 	}
 }
 
@@ -990,10 +1079,16 @@ func TestHasCommentWithPrefix(t *testing.T) {
 func TestSpecReadyQueryAndParse(t *testing.T) {
 	t.Parallel()
 	args := strings.Join(specReadyArgs(), " ")
-	for _, want := range []string{"ready --json", "--unassigned", "--limit 0", "needs-human", "gt:ready-to-land", "spec-dispatch-failed", "--exclude-type", "epic,wisp", "gt:agent"} {
+	for _, want := range []string{"ready --json", "--unassigned", "--limit 0", "needs-human", "gt:ready-to-land", "--exclude-type", "epic,wisp", "gt:agent"} {
 		if !strings.Contains(args, want) {
 			t.Errorf("ready args %q missing %q", args, want)
 		}
+	}
+	// spec-dispatch-failed is not excluded server-side: the board carries the
+	// beads the label holds so the tick can count them, and Eligible keeps
+	// them out of the candidate set (gt-q6zoo).
+	if strings.Contains(args, "spec-dispatch-failed") {
+		t.Errorf("ready args %q still exclude spec-dispatch-failed; the tick cannot count what it never reads", args)
 	}
 	// The retired label spec and type feature must not gate the board.
 	for _, unwanted := range []string{"--label spec", "--type feature"} {

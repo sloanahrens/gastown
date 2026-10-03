@@ -140,6 +140,21 @@ func TestRecordDispatchTickRecordsTheDeclines(t *testing.T) {
 	}
 }
 
+// The recorded tick carries the count of ready beads the spec-dispatch-failed
+// label is holding out of the queue, which the health field puts in front of
+// the operator (gt-q6zoo).
+func TestRecordDispatchTickRecordsTheLabeledFailures(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	d := &Daemon{}
+	d.recordDispatchTick(tickReport(t, `{"roster": "claude-sonnet 1/2", "candidates": 4, "labeled_failed": 3}`), at)
+
+	got := d.dispatchTickRecords()
+	if len(got) != 1 || got[0].LabeledFailed != 3 {
+		t.Errorf("recorded %+v, want one tick with 3 ready beads held by the label", got)
+	}
+}
+
 // A tick whose roster the daemon cannot read is recorded unreadable, not as a
 // town with every seat taken (gt-xiw7o).
 func TestRecordDispatchTickRecordsAnUnreadableRoster(t *testing.T) {
