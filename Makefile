@@ -390,14 +390,22 @@ DOCKER_PKGS := $(addprefix ./,$(shell sed -e 's/\#.*//' internal/testpolicy/dock
 # a filter is what left ~120 of them running nowhere (gt-ik4a1.2). The tag also
 # compiles the unit tests in beside them, and those run too.
 #
+# Each command pins GT_TEST_DOLT_INIT_CONCURRENCY to the scheduler town slot
+# count, internal/cmd's schedulerTownSlots. Package beads reads that override
+# at init() and otherwise caps test-Dolt inits at its default of 4, so town
+# setup queues as soon as the slot cap rises above that (gt-ik4a1.4.9,
+# gt-ik4a1.4.12). It is a literal, like GT_TEST_DOCKER, so an inherited value
+# cannot decide it; TestMakefileHandsTheContainerOptInToTheSuite and
+# scripts/makefile-gate_test.sh read schedulerTownSlots and fail on drift.
+#
 # Before changing this target, read the gate section of docs/testing.md: it
 # holds when each tier runs, and INTEGRATION_GO_TEST, the runner swap CI uses
 # to collect JUnit output from this one definition of the tier.
 INTEGRATION_GO_TEST ?= go test
 test-integration:
 	@test -n "$(strip $(DOCKER_PKGS))" || { echo "test-integration: internal/testpolicy/docker.txt lists no package; refusing to run go test over nothing" >&2; exit 1; }
-	GT_TEST_DOCKER=1 $(INTEGRATION_GO_TEST) -tags integration -timeout 20m ./...
-	GT_TEST_DOCKER=1 $(INTEGRATION_GO_TEST) -timeout 20m $(DOCKER_PKGS)
+	GT_TEST_DOCKER=1 GT_TEST_DOLT_INIT_CONCURRENCY=4 $(INTEGRATION_GO_TEST) -tags integration -timeout 20m ./...
+	GT_TEST_DOCKER=1 GT_TEST_DOLT_INIT_CONCURRENCY=4 $(INTEGRATION_GO_TEST) -timeout 20m $(DOCKER_PKGS)
 
 # test-integration-wall is test-integration with the tier's wall measured
 # (gt-ik4a1.4.5): the same two commands, each -json, both through one
@@ -408,8 +416,9 @@ test-integration:
 #
 # Nothing here fails on wall: wall time varies with host load, and a red
 # post-land run reverts landings (gt-z7qtk). TIERWALL_FLAGS=-max-wall=90s asks
-# for that failure. Either way the target sets GT_TEST_DOCKER=1, so it starts
-# containers and belongs under `gt slot run`.
+# for that failure. Either way the target sets GT_TEST_DOCKER=1 and the same
+# GT_TEST_DOLT_INIT_CONCURRENCY as test-integration, so it starts containers
+# and belongs under `gt slot run`.
 #
 # The recipe runs under bash for `set -o pipefail`, which keeps go test's own
 # failure red: without it the pipeline's exit status is tierwall's alone, and
@@ -420,8 +429,8 @@ test-integration-wall: SHELL := /bin/bash
 test-integration-wall:
 	@test -n "$(strip $(DOCKER_PKGS))" || { echo "test-integration-wall: internal/testpolicy/docker.txt lists no package; refusing to run go test over nothing" >&2; exit 1; }
 	@set -o pipefail; { \
-		GT_TEST_DOCKER=1 $(INTEGRATION_GO_TEST) -json -tags integration -timeout 20m ./...; \
-		GT_TEST_DOCKER=1 $(INTEGRATION_GO_TEST) -json -timeout 20m $(DOCKER_PKGS); \
+		GT_TEST_DOCKER=1 GT_TEST_DOLT_INIT_CONCURRENCY=4 $(INTEGRATION_GO_TEST) -json -tags integration -timeout 20m ./...; \
+		GT_TEST_DOCKER=1 GT_TEST_DOLT_INIT_CONCURRENCY=4 $(INTEGRATION_GO_TEST) -json -timeout 20m $(DOCKER_PKGS); \
 	} | go run ./internal/testpolicy/cmd/tierwall $(TIERWALL_FLAGS)
 
 # test-timing measures the unit tier in a tmux server started by launchd, which

@@ -159,6 +159,15 @@ else
   fail "test-slow runs the gate, then the shell tests, containers off, no slot (lines: gate=$sgate shell=$sshell)" "$sout"
 fi
 
+# The container suite's test-Dolt init pool must be as wide as the scheduler
+# town slot count (gt-ik4a1.4.12). Package beads reads the pool override in
+# init(), so TestMain is too late: it has to be in the environment before the
+# test binary starts, which is the make target. The count is read from
+# schedulerTownSlots, the channel that defines it, so raising that cap without
+# the recipes fails here.
+town_slots="$(sed -n 's/.*schedulerTownSlots = make(chan struct{}, \([0-9][0-9]*\)).*/\1/p' "$ROOT/internal/cmd/scheduler_integration_test.go")"
+init_pool_lines() { grep -c -F -- "GT_TEST_DOLT_INIT_CONCURRENCY=$town_slots" <<<"$1" || true; }
+
 echo "test-integration"
 if iout=$(dry test-integration); then
   pass "make -n test-integration exits 0"
@@ -199,6 +208,11 @@ if [[ -z "$missing" ]]; then
 else
   fail "test-integration runs every package in internal/testpolicy/docker.txt; missing:$missing" "$iout"
 fi
+if [[ -n "$town_slots" && "$(init_pool_lines "$iout")" == 2 ]]; then
+  pass "test-integration sets the test-Dolt init pool to the town slot count ($town_slots) on both commands"
+else
+  fail "test-integration sets the test-Dolt init pool to the town slot count (read '$town_slots' from schedulerTownSlots)" "$iout"
+fi
 
 echo "test-integration-wall"
 if wout=$(dry test-integration-wall); then
@@ -207,20 +221,24 @@ else
   fail "make -n test-integration-wall exits 0" "$wout"
 fi
 # The wall report is only worth reading if it measures the tier the cadence
-# runs (gt-ik4a1.4.5), so each of test-integration's two go test commands must
-# reappear verbatim but for -json.
+# runs (gt-ik4a1.4.5), so each of test-integration's two suite commands must
+# reappear verbatim but for -json. A suite command carries the container
+# opt-in and the test-Dolt init pool ahead of go test (gt-ik4a1.4.12), so
+# match on the opt-in and `go test` rather than a fixed prefix.
 wall_missing=""
+suite_seen=0
 while IFS= read -r line; do
-  [[ "$line" != GT_TEST_DOCKER=1' go test '* ]] && continue
+  [[ "$line" != *'GT_TEST_DOCKER=1'* || "$line" != *'go test '* ]] && continue
+  suite_seen=$((suite_seen + 1))
   want="${line/'go test '/'go test -json '}"
   grep -q -F -- "$want" <<<"$wout" || wall_missing="$wall_missing [$want]"
 done <<<"$iout"
-if [[ -z "$wall_missing" ]]; then
+if [[ "$suite_seen" == 2 && -z "$wall_missing" ]]; then
   pass "test-integration-wall runs test-integration's two go test commands, each -json"
 else
-  fail "test-integration-wall runs test-integration's two go test commands, each -json; missing:$wall_missing" "$wout"
+  fail "test-integration-wall runs test-integration's two go test commands, each -json (suite lines: $suite_seen); missing:$wall_missing" "$wout"
 fi
-wall_runs=$(grep -c -F -- 'GT_TEST_DOCKER=1 go test -json' <<<"$wout" || true)
+wall_runs=$(grep -c -E -- 'GT_TEST_DOCKER=1.*go test -json' <<<"$wout" || true)
 wall_tool=$(grep -c -F 'cmd/tierwall' <<<"$wout" || true)
 # set -o pipefail is what keeps a go test that died before emitting a FAIL
 # event red; without it the pipeline's exit status is tierwall's alone.
@@ -228,6 +246,11 @@ if [[ "$wall_runs" == 2 && "$wall_tool" == 1 ]] && grep -q -F 'set -o pipefail' 
   pass "test-integration-wall pipes both commands through one tierwall run under pipefail, containers on, no -run filter"
 else
   fail "test-integration-wall pipes both commands through one tierwall run under pipefail, containers on, no -run filter (lines: runs=$wall_runs tierwall=$wall_tool)" "$wout"
+fi
+if [[ -n "$town_slots" && "$(init_pool_lines "$wout")" == 2 ]]; then
+  pass "test-integration-wall sets the test-Dolt init pool to the town slot count ($town_slots) on both commands"
+else
+  fail "test-integration-wall sets the test-Dolt init pool to the town slot count (read '$town_slots' from schedulerTownSlots)" "$wout"
 fi
 
 echo "gate: failure paths, driven with stubs"
