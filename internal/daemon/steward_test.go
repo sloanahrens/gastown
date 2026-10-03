@@ -867,3 +867,32 @@ func TestStewardPlanScanPlansOneJobPerSpecWithinTheRosterCap(t *testing.T) {
 		}
 	}
 }
+
+// TestStewardRosterCapCountsOnlyEnabledPatrols: the plan seat is in the roster
+// only while patrols.steward_plan is on, so a town that never turned planning
+// on keeps the cap its steward patrol alone asks for — the default 2, not 3
+// (gt-4k3fj.14).
+func TestStewardRosterCapCountsOnlyEnabledPatrols(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		cfg  *DaemonPatrolConfig
+		want int
+	}{
+		{"steward only", stewardPatrolConfig(&StewardConfig{Enabled: true}), 2},
+		{"plan key absent", planPatrolConfig(&StewardConfig{Enabled: true}, nil), 2},
+		{"plan key without enabled", planPatrolConfig(&StewardConfig{Enabled: true}, &StewardPlanConfig{}), 2},
+		{"plan key disabled", planPatrolConfig(&StewardConfig{Enabled: true}, &StewardPlanConfig{Enabled: false}), 2},
+		{"both on", planPatrolConfig(&StewardConfig{Enabled: true}, &StewardPlanConfig{Enabled: true}), 3},
+		{"plan only", planPatrolConfig(nil, &StewardPlanConfig{Enabled: true}), 1},
+		{"steward disabled, plan on", planPatrolConfig(&StewardConfig{}, &StewardPlanConfig{Enabled: true}), 1},
+		{"neither on", planPatrolConfig(&StewardConfig{}, &StewardPlanConfig{}), 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := stewardRosterCap(tc.cfg); got != tc.want {
+				t.Fatalf("stewardRosterCap = %d, want %d seats", got, tc.want)
+			}
+		})
+	}
+}

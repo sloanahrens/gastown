@@ -52,12 +52,20 @@ func (d *Daemon) stewardStats(rows []steward.Job, now time.Time) steward.Stats {
 	})
 }
 
+// stewardPatrolsActive reports whether any patrol that runs jobs on the
+// steward runner is on. The monitor, the health snapshot and their escalations
+// answer for the runner's whole ledger, so a plan-only town gets them as a
+// steward-only one does (gt-4k3fj.14).
+func (d *Daemon) stewardPatrolsActive() bool {
+	return d.isPatrolActive("steward") || d.isPatrolActive("steward_plan")
+}
+
 // monitorSteward raises the steward's escalations: a notice for each job on
 // the hard preset, an alert for each job stuck past its timeout, and one for
 // an error rate over the threshold. Each escalation that fails is retried by
 // the next scan, because its key is recorded only once it was raised.
 func (d *Daemon) monitorSteward() {
-	if !d.isPatrolActive("steward") || d.config == nil {
+	if !d.stewardPatrolsActive() || d.config == nil {
 		return
 	}
 	townRoot := d.config.TownRoot
@@ -99,11 +107,9 @@ func (d *Daemon) monitorSteward() {
 		byKey[j.Key()] = append(byKey[j.Key()], j)
 	}
 	for _, j := range rows {
-		// A plan job runs on steward.PlanAgent by design, and a flash-first
-		// town sets the same preset as hard_agent: that is the plan job's
-		// price, not a job that escalated to a harder model, so it earns no
-		// pro notice (gt-4k3fj.14).
-		if j.Event == steward.KindPlan {
+		// A kind exempt from the pro count is exempt from its notice too, or
+		// the escalations and the counters would disagree (gt-4k3fj.14).
+		if j.Event.ProExempt() {
 			continue
 		}
 		if j.Model != hard || j.Started.Before(now.Add(-stewardProNoticeWindow)) {
@@ -158,10 +164,11 @@ func stewardCounters(s steward.Stats) townhealth.StewardCounters {
 }
 
 // Steward answers the health report's steward source from the job ledger. A
-// town without the steward patrol is not unhealthy: the report omits the
-// field.
+// town with neither steward patrol on is not unhealthy: the report omits the
+// field. A plan-only town's snapshot carries the plan jobs, since they run on
+// the runner these counters describe (gt-4k3fj.14).
 func (s *healthSources) Steward(ctx context.Context) (townhealth.StewardSnapshot, error) {
-	if !s.d.isPatrolActive("steward") {
+	if !s.d.stewardPatrolsActive() {
 		return townhealth.StewardSnapshot{}, nil
 	}
 	if err := ctx.Err(); err != nil {

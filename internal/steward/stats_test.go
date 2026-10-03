@@ -136,3 +136,21 @@ func TestSummarizeCountsShadowJobs(t *testing.T) {
 		t.Errorf("jobs/shadow = %d/%d, want 3/1", s.Jobs, s.Shadow)
 	}
 }
+
+// TestSummarizeLeavesProExemptJobsOutOfPro: a plan job runs on PlanAgent by
+// design, so a town whose hard agent is that same preset counts no escalated
+// usage for it. The counter agrees with the pro notice the monitor skips for
+// the same reason; Models still counts the job by preset (gt-4k3fj.14).
+func TestSummarizeLeavesProExemptJobsOutOfPro(t *testing.T) {
+	t.Parallel()
+	plan := ended("plan", PlanAgent, OutcomePass, 0, time.Minute)
+	plan.Event = KindPlan
+	review := ended("rev", PlanAgent, OutcomePass, 10*time.Minute, time.Minute)
+	s := Summarize([]Job{plan, review}, StatsOptions{Since: testEpoch.Add(-time.Hour), Now: testEpoch.Add(time.Hour), HardAgent: PlanAgent, Last: -1})
+	if s.Pro != 1 {
+		t.Errorf("Pro = %d, want 1: the review job only", s.Pro)
+	}
+	if s.Models[PlanAgent] != 2 {
+		t.Errorf("Models = %v, want both jobs counted by preset", s.Models)
+	}
+}

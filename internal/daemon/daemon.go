@@ -352,9 +352,10 @@ type Daemon struct {
 	// across scans, not within one (gt-9bioi.1, steward.go).
 	stewardRunning atomic.Bool
 	stewardCycles  sync.WaitGroup
-	// stewardPlanScan is the plan scan's own single-flight guard: it runs on
-	// its own ticker but shares stewardCycles, so shutdown drains both
-	// (gt-4k3fj.14).
+	// stewardPlanScan is the plan scan's own single-flight guard. It runs on
+	// its own ticker but counts in stewardCycles, which tests wait on; the
+	// jobs it starts are on the shared runner, so shutdown's
+	// drainStewardJobs covers them (gt-4k3fj.14).
 	stewardPlanScan atomic.Bool
 	// stewardMonitoring is the monitoring pass's own single-flight guard
 	// (steward_monitor.go).

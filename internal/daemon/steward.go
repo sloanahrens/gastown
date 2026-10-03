@@ -145,12 +145,22 @@ func stewardPlanMaxJobs(c *StewardPlanConfig) int {
 	return defaultStewardPlanMaxJobs
 }
 
-// stewardRosterCap is the daemon's steward roster: the steward patrol's seats
-// plus the plan patrol's, so a plan job is counted against the cap a review or
+// stewardRosterCap is the daemon's steward roster: the seats each enabled
+// patrol asks for, so a plan job is counted against the cap a review or
 // rejection job is counted against — one roster, not two pools (gt-4k3fj.14).
-// With both patrols on their defaults that is 2 + 1 = 3 seats.
+// A patrol that is off contributes no seat: a town running only
+// patrols.steward keeps the cap its own max_jobs asks for (2 by default), and
+// a plan-only town's roster is the plan seats alone. With both on their
+// defaults that is 2 + 1 = 3 seats.
 func stewardRosterCap(config *DaemonPatrolConfig) int {
-	return stewardMaxJobs(stewardConfig(config)) + stewardPlanMaxJobs(stewardPlanConfig(config))
+	seats := 0
+	if c := stewardConfig(config); c != nil && c.Enabled {
+		seats += stewardMaxJobs(c)
+	}
+	if c := stewardPlanConfig(config); c != nil && c.Enabled {
+		seats += stewardPlanMaxJobs(c)
+	}
+	return seats
 }
 
 // triggerSteward starts one scan on its own goroutine unless one is
@@ -266,6 +276,11 @@ func (d *Daemon) runSteward() {
 // triggerStewardPlan starts one plan scan on its own goroutine unless one is
 // already running. It reports whether a scan started.
 func (d *Daemon) triggerStewardPlan() bool {
+	// The monitor runs off the plan tick too: in a plan-only town the steward
+	// ticker never starts, and the jobs this patrol raises would otherwise be
+	// raised unwatched (gt-4k3fj.14). Every tick of either patrol calls it;
+	// its single-flight guard collapses the overlap.
+	d.triggerStewardMonitor()
 	if !d.stewardPlanScan.CompareAndSwap(false, true) {
 		d.logger.Printf("steward plan: previous scan still running, skipping")
 		return false

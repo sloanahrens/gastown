@@ -66,8 +66,10 @@ once on `hard_agent` after a failure, and a conflict rejection starts there.
 ```
 
 `max_jobs` caps plan jobs running at once (default 1), and a plan job takes a
-seat of the steward roster: the runner's cap is `patrols.steward.max_jobs`
-plus `steward_plan.max_jobs`, three seats with both defaults. A plan job runs
+seat of the steward roster: the runner's cap is the seats each *enabled*
+patrol asks for — `patrols.steward.max_jobs` plus `steward_plan.max_jobs`,
+three with both on their defaults and two when only the steward is on, so a
+town that leaves planning off keeps the cap it had. A plan job runs
 once per spec, at the rig's default branch tip — a plan event names no
 submission — and the `PLAN PROPOSAL` block it writes is what retires the
 event, in shadow mode too: what the proposal withholds is filing the beads,
