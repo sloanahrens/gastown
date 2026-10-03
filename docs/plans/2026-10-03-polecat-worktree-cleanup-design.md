@@ -71,7 +71,7 @@ not eligible. Then the live git check: no unique commits per
 
 New outcomes: `reaped`, `would-reap`, `blocked`.
 
-### Env surface
+### Env surface (superseded by Revision 1 below)
 
 ```go
 // ReapFacts reads the seat's live state. Any failed read is an error, never "clean".
@@ -157,6 +157,60 @@ assume them:
 - That `rec.Held()` covers every parked case, and how `MarkIdle`'s `stop`
   record interacts with the reap vetoes.
 - The `closed_at` and agent-bead update sources for the grace clock.
+
+## Revision 1 (2026-10-03, found while planning; needs Sloan's confirmation)
+
+Reading `origin/main` for the plan showed that `gt polecat check-recovery
+<rig>/<name> --json` already returns the safety verdict this design was going to
+rebuild: `verdict`, `reusable`, `safe_to_nuke`, `blockers`, `git_state_source`,
+`active_mr`, `branch`, `issue`. It is the verdict the nuke path and the Witness
+use, and it is assembled in `internal/cmd` from the live git probe, hook-bead
+classification (`ClassifyHookBead`) and active-MR landed evidence, none of which
+the daemon can import. Rebuilding it in the daemon would be a second copy of the
+logic gt-eqiid and gt-hsg were fixed for. `DecideSlotReuse` also has no
+non-test callers on main, so it is not the reuse source this spec assumed.
+
+Changes to the design above:
+
+1. **`ReapFacts` is dropped.** The decision reads `Env` methods it already has
+   (`Intent`, `SessionExists`, `Heartbeat`, `AssignedWork`) plus a new optional
+   interface:
+
+   ```go
+   type ReapEnv interface {
+       Recovery(rig, polecat string) (Recovery, error)   // parses check-recovery --json
+       IdleSince(rig, polecat string) (time.Time, error) // grace clock
+       BranchClaimed(rig, branch string) (string, error) // non-terminal bead naming branch/resume_branch
+       Reap(rig, polecat string) error                   // gt polecat nuke, never --force
+   }
+   ```
+
+   `Scanner` finds it by type assertion, so the pure package builds and tests
+   with no host change, and a host that lacks it simply never reaps.
+2. **Safe means the CLI said so, measured live:** `safe_to_nuke` true AND
+   `verdict == "SAFE_TO_NUKE"` AND `git_state_source == "live"`. A recorded or
+   unknown git source is `blocked`, never acted on (the gt-7kr/gt-14a class).
+3. **Verdict mapping:** `WORKING`, `SUBMITTED`, `PENDING_MR` are quiet skips
+   (someone owns the seat); `reusable` is a quiet skip (Q1); `NEEDS_RECOVERY` and
+   `NEEDS_MQ_SUBMIT` are `blocked`. A seat that is `SAFE_TO_NUKE` yet not
+   `reusable` is the parked-and-landed case, the real v1 target.
+4. **Frozen seats are never reaped.** `Held()` is `Frozen || Desired==park`; only
+   a park gets the 24h grace, a freeze is skipped silently.
+5. **Grace is quiet.** A seat inside its grace emits no line (a line per seat per
+   2-minute tick would flood the log); `would-reap` and `reaped` carry the
+   signal.
+6. **The nuke refusal needs a distinct exit status.** `gt polecat nuke` refuses
+   with exit 1, the same as any failure. The plan adds a dedicated exit code for
+   a safety refusal so the host maps it to `blocked` without matching text.
+7. The real-git integration test is dropped: the daemon no longer runs git
+   probes, and `check-recovery` has its own tests.
+
+Verified while planning: `escalateAlert` dedupes (`gt escalate --fingerprint`
+records a repeat onto the open escalation; `gt escalate clear --fingerprint`
+closes it). `PatrolScanConfig` still lives in `internal/config/daemon_config.go`
+as a section of `mayor/town.json`. `check-recovery --json` exits 0 whatever the
+verdict, and `--reconcile-cleanup` (the only write) defaults off and is never
+passed.
 
 ## Non-goals
 
