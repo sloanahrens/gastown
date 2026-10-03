@@ -370,3 +370,72 @@ func TestDetectRevertedMergesStillRefusesADeletedAdditionBesideAnEdit(t *testing
 			report.Reverted, report.Relocated)
 	}
 }
+
+// The gt-qw70y shape in miniature: main added one row to a docs table, and the
+// branch reworded that row in place. The row is there, updated; nothing merged
+// is taken back — but the branch removes exactly the line main added, so an
+// addition with no removal beside it reads as undone.
+const (
+	tablePath = "docs/testing.md"
+
+	tableBefore = "| target | command | runs |\n" +
+		"| `make test` | `go test ./...` | never |\n"
+
+	tableWithPresubmitRow = tableBefore +
+		"| `make presubmit` | `make lint`, then `go build ./...` | never | the cheap first look (gt-ssyxd) |\n"
+
+	tableRowReworded = tableBefore +
+		"| `make presubmit` | `make lint`, then `go build ./...` | never | the cheap first look, before the push (gt-ssyxd) |\n"
+
+	tableRowDropped = tableBefore +
+		"| `make bench` | `go test -bench=. ./...` | weekly | nightly bench numbers (gt-bench) |\n"
+)
+
+// rewordedTableTree builds those blobs into an observation: main's tip is the
+// table with the added row, and the candidate writes candidateBlob over it.
+func rewordedTableTree(candidateBlob string) fakeRevertTree {
+	return fakeRevertTree{
+		blobs: map[string]string{
+			"before": tableBefore, "withRow": tableWithPresubmitRow,
+			"reworded": tableRowReworded, "dropped": tableRowDropped,
+		},
+		trees: map[string]map[string]string{
+			"base": {tablePath: "withRow"},
+			"main": {tablePath: "withRow"},
+			"tree": {tablePath: candidateBlob},
+		},
+		changes: []CommitFileChange{
+			{Commit: "add the presubmit row", Path: tablePath, OldBlob: "before", NewBlob: "withRow"},
+		},
+	}
+}
+
+// A branch that edits an added line in place is superseding it, not undoing
+// it: the line the change added is gone from the branch's tree because the
+// branch wrote its reworded copy in the same place (gt-qw70y).
+func TestDetectRevertedMergesReadsARewordedAdditionAsNoRevert(t *testing.T) {
+	t.Parallel()
+	report, err := DetectRevertedMerges(rewordedTableTree("reworded"), "main", "tree")
+	if err != nil {
+		t.Fatalf("DetectRevertedMerges: %v", err)
+	}
+	if len(report.Reverted) != 0 || len(report.Relocated) != 0 {
+		t.Errorf("a branch that rewords the added row in place: reverted %+v, relocated %+v; want neither",
+			report.Reverted, report.Relocated)
+	}
+}
+
+// The edge that reading must not cross: an addition the branch drops while
+// writing a line of its own over the hole is undoing the change. The line it
+// wrote shares only a table's scaffolding with the one it dropped.
+func TestDetectRevertedMergesStillRefusesADroppedAdditionBesideItsOwnRow(t *testing.T) {
+	t.Parallel()
+	report, err := DetectRevertedMerges(rewordedTableTree("dropped"), "main", "tree")
+	if err != nil {
+		t.Fatalf("DetectRevertedMerges: %v", err)
+	}
+	if len(report.Reverted) != 1 || len(report.Relocated) != 0 {
+		t.Errorf("a tree that drops the added row beside a row of its own: reverted %+v, relocated %+v; want the commit reverted",
+			report.Reverted, report.Relocated)
+	}
+}
