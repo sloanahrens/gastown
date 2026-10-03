@@ -377,3 +377,53 @@ func drainFrames(s *Sub) string {
 		}
 	}
 }
+
+// The feed hands its backlog to the first page that connects. A rejection from
+// before the page opened is history, not an alert.
+func TestOldRejectionsAreNotAlerts(t *testing.T) {
+	t.Parallel()
+	old := Entry{Seq: 1, At: alertBase.Add(-time.Hour), Kind: "landings", Text: "[land] gt-1: rejected (review): score 0.4"}
+	recent := Entry{Seq: 2, At: alertBase.Add(-time.Minute), Kind: "landings", Text: "[land] gt-2: rejected (gate): lint failed"}
+	a := NewAlerter(func() time.Time { return alertBase })
+	got := a.Observe(State{}, State{}, []Entry{old, recent})
+	if len(got) != 1 || !strings.Contains(got[0].Title, "gate") {
+		t.Fatalf("backlog -> %+v, want only the recent rejection", got)
+	}
+}
+
+// The landing worker logs one rejection as two lines, and both are in the feed.
+func TestOneRejectionLoggedTwiceAlertsOnce(t *testing.T) {
+	t.Parallel()
+	first := Entry{Seq: 10, At: alertBase, Kind: "daemon", Text: "landing_worker: [land] gt-9: rejected (review): om requested changes (score 0.50)"}
+	second := Entry{Seq: 11, At: alertBase, Kind: "daemon", Text: "landing_worker: gastown: gt-9: landing rejected (review): om requested changes (score 0.50)"}
+	other := Entry{Seq: 12, At: alertBase, Kind: "daemon", Text: "landing_worker: [land] gt-10: rejected (review): om requested changes (score 0.55)"}
+	a := NewAlerter(func() time.Time { return alertBase })
+	got := a.Observe(State{}, State{}, []Entry{first, second, other})
+	if len(got) != 2 {
+		t.Fatalf("two beads rejected (one logged twice) -> %d alerts: %+v", len(got), got)
+	}
+}
+
+// The first snapshot after a page connects is taken before the polecat summary
+// has been read, so it lists no polecats. The baseline is the first snapshot
+// that does: a polecat that was already stalled is not news.
+func TestPolecatBaselineWaitsUntilPolecatsHaveBeenRead(t *testing.T) {
+	t.Parallel()
+	a := NewAlerter(func() time.Time { return alertBase })
+	stalled := Polecat{Rig: "beads", Name: "mutant", Bead: "be-1", State: StateStalled}
+	working := stalled
+	working.State = StateWorking
+
+	if got := a.Observe(State{}, State{}, nil); len(got) != 0 {
+		t.Fatalf("an empty first snapshot alerted: %+v", got)
+	}
+	read := State{Polecats: []Polecat{stalled}}
+	if got := a.Observe(State{}, read, nil); len(got) != 0 {
+		t.Fatalf("a polecat already stalled when the summary was first read alerted: %+v", got)
+	}
+	// real news after the baseline still alerts
+	a.Observe(read, State{Polecats: []Polecat{working}}, nil)
+	if got := a.Observe(State{Polecats: []Polecat{working}}, read, nil); len(got) != 1 {
+		t.Fatalf("a polecat that newly stalled -> %+v, want one alert", got)
+	}
+}

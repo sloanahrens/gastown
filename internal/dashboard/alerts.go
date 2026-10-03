@@ -51,6 +51,16 @@ const (
 // landing was sent back: a failed review, gate, conflict, policy or empty diff.
 var rejectionRe = regexp.MustCompile(`rejected \((review|gate|conflict|policy|empty)\)`)
 
+// rejectionBeadRe reads the bead off the same lines. The landing worker logs a
+// rejection twice, as "[land] gt-x: rejected (review)" and "gastown: gt-x:
+// landing rejected (review)", and both name the bead.
+var rejectionBeadRe = regexp.MustCompile(`(\S+): (?:landing )?rejected \((?:review|gate|conflict|policy|empty)\)`)
+
+// rejectionFreshWithin is how old a rejection line may be and still alert. The
+// feed delivers its backlog (the last couple of hours) to the first page that
+// connects, and a rejection from before the page opened is history, not news.
+const rejectionFreshWithin = 10 * time.Minute
+
 // Alerter decides, on the server, when the town needs attention. It is a state
 // machine over the snapshot sequence rather than a pure function of one
 // snapshot: debounce needs the run length, cooldown needs the last time a key
@@ -219,6 +229,12 @@ func (a *Alerter) polecatAlerts(prev, next State, now time.Time) []Alert {
 	for _, p := range prev.Polecats {
 		was[polecatKey(p)] = p.State
 	}
+	// The baseline is the first snapshot that has polecats in it. A snapshot
+	// taken before the summary was read lists none, and baselining on it would
+	// announce every polecat that was already stalled as a change.
+	if len(next.Polecats) == 0 {
+		return nil
+	}
 	baseline := a.polecatsSeen
 	a.polecatsSeen = true
 	if !baseline {
@@ -279,7 +295,17 @@ func (a *Alerter) rejectionAlerts(entries []Entry, now time.Time) []Alert {
 			continue
 		}
 		a.rejectSeen[e.Seq] = true
-		al, ok := a.fire(now, LevelWarn, fmt.Sprintf("reject:%d", e.Seq),
+		if !e.At.IsZero() && now.Sub(e.At) > rejectionFreshWithin {
+			continue // history from before the page opened
+		}
+		// One rejection is two log lines. Keying on the bead and the kind lets the
+		// cooldown fold them into one alert; a line that names no bead keys on its
+		// own number.
+		key := fmt.Sprintf("reject:%d", e.Seq)
+		if b := rejectionBeadRe.FindStringSubmatch(e.Text); b != nil {
+			key = "reject:" + b[1] + ":" + m[1]
+		}
+		al, ok := a.fire(now, LevelWarn, key,
 			"a landing was rejected ("+m[1]+")", e.Text)
 		if ok {
 			out = append(out, al)
