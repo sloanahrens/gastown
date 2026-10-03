@@ -26,11 +26,11 @@ func (h *Hub) Handler() http.Handler {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(indexHTML)
+		_, _ = w.Write(indexHTML)
 	})
 	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(h.State())
+		_ = json.NewEncoder(w).Encode(h.State())
 	})
 	mux.HandleFunc("/stream", h.serveStream)
 	return guard(mux)
@@ -87,7 +87,9 @@ func (h *Hub) serveStream(w http.ResponseWriter, r *http.Request) {
 	sub, initial := h.Subscribe()
 	defer h.Unsubscribe(sub)
 	for _, f := range initial {
-		w.Write(f)
+		if _, err := w.Write(f); err != nil {
+			return
+		}
 	}
 	fl.Flush()
 	tick := time.NewTicker(keepAlive)

@@ -88,16 +88,6 @@ func (h *Hub) Run(ctx context.Context) {
 // interval old.
 func (h *Hub) work(ctx context.Context, every time.Duration, fn func()) {
 	var last time.Time
-	run := func() {
-		if h.viewers() == 0 {
-			return
-		}
-		if h.cfg.Now().Sub(last) < every {
-			return
-		}
-		last = h.cfg.Now()
-		fn()
-	}
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
@@ -107,8 +97,25 @@ func (h *Hub) work(ctx context.Context, every time.Duration, fn func()) {
 		case <-t.C:
 		case <-h.wake:
 		}
-		run()
+		if h.due(&last, every) {
+			fn()
+		}
 	}
+}
+
+// due reports whether a worker whose last run was at *last should run now,
+// and if so records the run. It is false when no page is watching, and false
+// when the last run is less than a whole interval old.
+func (h *Hub) due(last *time.Time, every time.Duration) bool {
+	if h.viewers() == 0 {
+		return false
+	}
+	now := h.cfg.Now()
+	if now.Sub(*last) < every {
+		return false
+	}
+	*last = now
+	return true
 }
 
 func (h *Hub) viewers() int {

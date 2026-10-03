@@ -14,6 +14,7 @@ func omTestRec(bead, verdict string, score float64, route string, at time.Time) 
 }
 
 func TestOMStageDuration(t *testing.T) {
+	t.Parallel()
 	d := omStageDuration("lint 14s, gate 34s, om 1m56s")
 	if d == nil || *d != 116*time.Second {
 		t.Fatalf("om duration = %v", d)
@@ -27,6 +28,7 @@ func TestOMStageDuration(t *testing.T) {
 }
 
 func TestOMParseLogLine(t *testing.T) {
+	t.Parallel()
 	r := &omReader{}
 	r.parseLogLine("2026/10/03 16:41:42 landing_worker: [land] gt-y3pgh.2.13.1: stages: lint 16s, gate 36s, om 1m56s")
 	r.parseLogLine("2026/10/03 12:24:29 landing_worker: [land] gt-6u1qd: rejected (review): om requested changes (score 0.55, 5 finding(s))")
@@ -47,6 +49,7 @@ func TestOMParseLogLine(t *testing.T) {
 }
 
 func TestScanLogIsIncrementalAndSurvivesRotation(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "daemon.log")
 	line := "2026/10/03 16:41:42 landing_worker: [land] gt-a: stages: lint 1s, om 10s\n"
@@ -79,6 +82,7 @@ func TestScanLogIsIncrementalAndSurvivesRotation(t *testing.T) {
 }
 
 func TestBuildOM(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 10, 3, 18, 0, 0, 0, time.Local)
 	h := func(n int) time.Time { return now.Add(-time.Duration(n) * time.Hour) }
 	recs := []omRecord{
@@ -141,6 +145,7 @@ func TestBuildOM(t *testing.T) {
 }
 
 func TestPercentile(t *testing.T) {
+	t.Parallel()
 	v := []float64{10, 20, 30, 40, 50, 60, 70, 80, 90, 100}
 	if percentile(v, 0.5) != 50 || percentile(v, 0.95) != 100 || percentile(nil, 0.5) != 0 {
 		t.Errorf("percentile wrong: %v %v", percentile(v, 0.5), percentile(v, 0.95))
