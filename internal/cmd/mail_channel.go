@@ -161,7 +161,7 @@ func runChannelList(cmd *cobra.Command, args []string) error {
 	}
 
 	b := beads.New(townRoot)
-	channels, err := b.ListChannelBeads()
+	channels, err := beads.ListChannelBeads(b)
 	if err != nil {
 		return fmt.Errorf("listing channels: %w", err)
 	}
@@ -207,7 +207,7 @@ func runChannelShow(cmd *cobra.Command, args []string) error {
 	b := beads.New(townRoot)
 
 	// Check if channel exists
-	_, fields, err := b.GetChannelBead(channelName)
+	_, fields, err := beads.GetChannelBead(b, channelName)
 	if err != nil {
 		return fmt.Errorf("getting channel: %w", err)
 	}
@@ -290,7 +290,7 @@ func runChannelCreate(cmd *cobra.Command, args []string) error {
 	b := beads.New(townRoot)
 
 	// Check if channel already exists
-	existing, _, err := b.GetChannelBead(name)
+	existing, _, err := beads.GetChannelBead(b, name)
 	if err != nil {
 		return err
 	}
@@ -298,14 +298,14 @@ func runChannelCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("channel already exists: %s", name)
 	}
 
-	_, err = b.CreateChannelBead(name, nil, createdBy)
+	_, err = beads.CreateChannelBead(b, name, nil, createdBy)
 	if err != nil {
 		return fmt.Errorf("creating channel: %w", err)
 	}
 
 	// Update retention settings if specified
 	if channelRetainCount > 0 || channelRetainHours > 0 {
-		if err := b.UpdateChannelRetention(name, channelRetainCount, channelRetainHours); err != nil {
+		if err := beads.UpdateChannelRetention(b, name, channelRetainCount, channelRetainHours); err != nil {
 			// Non-fatal: channel created but retention not set
 			style.PrintWarning("could not set retention: %v", err)
 		}
@@ -332,7 +332,7 @@ func runChannelDelete(cmd *cobra.Command, args []string) error {
 	b := beads.New(townRoot)
 
 	// Check if channel exists
-	existing, _, err := b.GetChannelBead(name)
+	existing, _, err := beads.GetChannelBead(b, name)
 	if err != nil {
 		return err
 	}
@@ -340,7 +340,7 @@ func runChannelDelete(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("channel not found: %s", name)
 	}
 
-	if err := b.DeleteChannelBead(name); err != nil {
+	if err := beads.DeleteChannelBead(b, name); err != nil {
 		return fmt.Errorf("deleting channel: %w", err)
 	}
 
@@ -364,7 +364,7 @@ func runChannelSubscribe(cmd *cobra.Command, args []string) error {
 	b := beads.New(townRoot)
 
 	// Check channel exists and current subscription status
-	_, fields, err := b.GetChannelBead(name)
+	_, fields, err := beads.GetChannelBead(b, name)
 	if err != nil {
 		return fmt.Errorf("getting channel: %w", err)
 	}
@@ -380,7 +380,7 @@ func runChannelSubscribe(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if err := b.SubscribeToChannel(name, subscriber); err != nil {
+	if err := beads.SubscribeToChannel(b, name, subscriber); err != nil {
 		return fmt.Errorf("subscribing to channel: %w", err)
 	}
 
@@ -404,7 +404,7 @@ func runChannelUnsubscribe(cmd *cobra.Command, args []string) error {
 	b := beads.New(townRoot)
 
 	// Check channel exists and current subscription status
-	_, fields, err := b.GetChannelBead(name)
+	_, fields, err := beads.GetChannelBead(b, name)
 	if err != nil {
 		return fmt.Errorf("getting channel: %w", err)
 	}
@@ -425,7 +425,7 @@ func runChannelUnsubscribe(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	if err := b.UnsubscribeFromChannel(name, subscriber); err != nil {
+	if err := beads.UnsubscribeFromChannel(b, name, subscriber); err != nil {
 		return fmt.Errorf("unsubscribing from channel: %w", err)
 	}
 
@@ -443,7 +443,7 @@ func runChannelSubscribers(cmd *cobra.Command, args []string) error {
 
 	b := beads.New(townRoot)
 
-	_, fields, err := b.GetChannelBead(name)
+	_, fields, err := beads.GetChannelBead(b, name)
 	if err != nil {
 		return fmt.Errorf("getting channel: %w", err)
 	}

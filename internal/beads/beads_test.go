@@ -768,17 +768,17 @@ func TestDeleteBeadsUseSupportedBdDeleteFlags(t *testing.T) {
 	}{
 		{
 			name:   "group",
-			delete: func() error { return b.DeleteGroupBead("ops-team") },
+			delete: func() error { return DeleteGroupBead(b, "ops-team") },
 			want:   "delete hq-group-ops-team --force",
 		},
 		{
 			name:   "channel",
-			delete: func() error { return b.DeleteChannelBead("alerts") },
+			delete: func() error { return DeleteChannelBead(b, "alerts") },
 			want:   "delete hq-channel-alerts --force",
 		},
 		{
 			name:   "queue",
-			delete: func() error { return b.DeleteQueueBead("hq-q-work") },
+			delete: func() error { return DeleteQueueBead(b, "hq-q-work") },
 			want:   "delete hq-q-work --force",
 		},
 		{

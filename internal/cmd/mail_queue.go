@@ -40,14 +40,14 @@ func runMailClaim(cmd *cobra.Command, args []string) error {
 
 		// Look up the queue bead
 		queueID := beads.QueueBeadID(queueName, true) // Try town-level first
-		issue, fields, err := bd.GetQueueBead(queueID)
+		issue, fields, err := beads.GetQueueBead(bd, queueID)
 		if err != nil {
 			return fmt.Errorf("looking up queue: %w", err)
 		}
 		if issue == nil {
 			// Try rig-level
 			queueID = beads.QueueBeadID(queueName, false)
-			issue, fields, err = bd.GetQueueBead(queueID)
+			issue, fields, err = beads.GetQueueBead(bd, queueID)
 			if err != nil {
 				return fmt.Errorf("looking up queue: %w", err)
 			}
@@ -64,7 +64,7 @@ func runMailClaim(cmd *cobra.Command, args []string) error {
 		}
 	} else {
 		// No queue specified - find any queue the caller can claim from
-		eligibleIssues, eligibleFields, err := bd.FindEligibleQueues(caller)
+		eligibleIssues, eligibleFields, err := beads.FindEligibleQueues(bd, caller)
 		if err != nil {
 			return fmt.Errorf("finding eligible queues: %w", err)
 		}
@@ -483,7 +483,7 @@ func runMailQueueCreate(cmd *cobra.Command, args []string) error {
 	queueID := beads.QueueBeadID(queueName, true)
 
 	// Check if queue already exists
-	existing, _, err := b.GetQueueBead(queueID)
+	existing, _, err := beads.GetQueueBead(b, queueID)
 	if err != nil {
 		return fmt.Errorf("checking for existing queue: %w", err)
 	}
@@ -501,7 +501,7 @@ func runMailQueueCreate(cmd *cobra.Command, args []string) error {
 	}
 
 	title := fmt.Sprintf("Queue: %s", queueName)
-	_, err = b.CreateQueueBead(queueID, title, fields)
+	_, err = beads.CreateQueueBead(b, queueID, title, fields)
 	if err != nil {
 		return fmt.Errorf("creating queue: %w", err)
 	}
@@ -527,7 +527,7 @@ func runMailQueueShow(cmd *cobra.Command, args []string) error {
 	b := beads.NewWithBeadsDir(townRoot, beads.ResolveBeadsDir(townRoot))
 
 	queueID := beads.QueueBeadID(queueName, true)
-	issue, fields, err := b.GetQueueBead(queueID)
+	issue, fields, err := beads.GetQueueBead(b, queueID)
 	if err != nil {
 		return fmt.Errorf("getting queue: %w", err)
 	}
@@ -588,7 +588,7 @@ func runMailQueueList(cmd *cobra.Command, args []string) error {
 	// List queue beads
 	b := beads.NewWithBeadsDir(townRoot, beads.ResolveBeadsDir(townRoot))
 
-	queues, err := b.ListQueueBeads()
+	queues, err := beads.ListQueueBeads(b)
 	if err != nil {
 		return fmt.Errorf("listing queues: %w", err)
 	}
@@ -645,7 +645,7 @@ func runMailQueueDelete(cmd *cobra.Command, args []string) error {
 	queueID := beads.QueueBeadID(queueName, true)
 
 	// Verify queue exists
-	issue, _, err := b.GetQueueBead(queueID)
+	issue, _, err := beads.GetQueueBead(b, queueID)
 	if err != nil {
 		return fmt.Errorf("getting queue: %w", err)
 	}
@@ -653,7 +653,7 @@ func runMailQueueDelete(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("queue %q not found", queueName)
 	}
 
-	if err := b.DeleteQueueBead(queueID); err != nil {
+	if err := beads.DeleteQueueBead(b, queueID); err != nil {
 		return fmt.Errorf("deleting queue: %w", err)
 	}
 

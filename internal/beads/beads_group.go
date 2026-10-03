@@ -3,7 +3,6 @@
 package beads
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -138,8 +137,9 @@ func GroupBeadID(name string) string {
 // CreateGroupBead creates a group bead for mail distribution.
 // The ID format is: hq-group-<name> (e.g., hq-group-ops-team)
 // Groups are town-level entities (hq- prefix) because they span rigs.
-// The created_by field is populated from BD_ACTOR env var for provenance tracking.
-func (b *Beads) CreateGroupBead(name string, fields *GroupFields) (*Issue, error) {
+// The created_by field is populated from BD_ACTOR for provenance tracking;
+// Client.Create records the actor the raw call passed.
+func CreateGroupBead(c Client, name string, fields *GroupFields) (*Issue, error) {
 	if err := ValidateGroupName(name); err != nil {
 		return nil, err
 	}
@@ -156,39 +156,19 @@ func (b *Beads) CreateGroupBead(name string, fields *GroupFields) (*Issue, error
 
 	description := FormatGroupDescription(title, fields)
 
-	args := []string{"create", "--json",
-		"--id=" + id,
-		"--title=" + title,
-		"--description=" + description,
-		"--type=task", // Groups use task type with gt:group label
-		"--labels=gt:group",
-		"--force", // Override prefix check (town beads may have mixed prefixes)
-	}
-
-	// Default actor from BD_ACTOR env var for provenance tracking
-	// Uses getActor() to respect isolated mode (tests)
-	if actor := b.getActor(); actor != "" {
-		args = append(args, "--actor="+actor)
-	}
-
-	out, err := b.run(args...)
-	if err != nil {
-		return nil, err
-	}
-
-	var issue Issue
-	if err := json.Unmarshal(out, &issue); err != nil {
-		return nil, fmt.Errorf("parsing bd create output: %w", err)
-	}
-
-	return &issue, nil
+	return c.Create(CreateOptions{
+		ID:          id,
+		Title:       title,
+		Description: description,
+		Labels:      []string{"gt:group"},
+	})
 }
 
 // GetGroupByName retrieves a group bead by name.
 // Returns ErrNotFound if the group does not exist.
-func (b *Beads) GetGroupByName(name string) (*Issue, *GroupFields, error) {
+func GetGroupByName(c Client, name string) (*Issue, *GroupFields, error) {
 	id := GroupBeadID(name)
-	issue, err := b.Show(id)
+	issue, err := c.Show(id)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil, nil, ErrNotFound
@@ -206,8 +186,8 @@ func (b *Beads) GetGroupByName(name string) (*Issue, *GroupFields, error) {
 
 // GetGroupByID retrieves a group bead by its full ID.
 // Returns ErrNotFound if the group does not exist.
-func (b *Beads) GetGroupByID(id string) (*Issue, *GroupFields, error) {
-	issue, err := b.Show(id)
+func GetGroupByID(c Client, id string) (*Issue, *GroupFields, error) {
+	issue, err := c.Show(id)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil, nil, ErrNotFound
@@ -224,8 +204,8 @@ func (b *Beads) GetGroupByID(id string) (*Issue, *GroupFields, error) {
 }
 
 // UpdateGroupMembers updates the members list for a group.
-func (b *Beads) UpdateGroupMembers(name string, members []string) (*Issue, error) {
-	issue, fields, err := b.GetGroupByName(name)
+func UpdateGroupMembers(c Client, name string, members []string) (*Issue, error) {
+	issue, fields, err := GetGroupByName(c, name)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil, fmt.Errorf("group %q not found", name)
@@ -236,11 +216,11 @@ func (b *Beads) UpdateGroupMembers(name string, members []string) (*Issue, error
 	fields.Members = members
 	description := FormatGroupDescription(issue.Title, fields)
 
-	if err := b.Update(issue.ID, UpdateOptions{Description: &description}); err != nil {
+	if err := c.Update(issue.ID, UpdateOptions{Description: &description}); err != nil {
 		return nil, err
 	}
 
-	updated, err := b.Show(issue.ID)
+	updated, err := c.Show(issue.ID)
 	if err != nil {
 		return nil, fmt.Errorf("fetching updated group: %w", err)
 	}
@@ -248,8 +228,8 @@ func (b *Beads) UpdateGroupMembers(name string, members []string) (*Issue, error
 }
 
 // AddGroupMember adds a member to a group if not already present.
-func (b *Beads) AddGroupMember(name string, member string) (*Issue, error) {
-	issue, fields, err := b.GetGroupByName(name)
+func AddGroupMember(c Client, name string, member string) (*Issue, error) {
+	issue, fields, err := GetGroupByName(c, name)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil, fmt.Errorf("group %q not found", name)
@@ -267,11 +247,11 @@ func (b *Beads) AddGroupMember(name string, member string) (*Issue, error) {
 	fields.Members = append(fields.Members, member)
 	description := FormatGroupDescription(issue.Title, fields)
 
-	if err := b.Update(issue.ID, UpdateOptions{Description: &description}); err != nil {
+	if err := c.Update(issue.ID, UpdateOptions{Description: &description}); err != nil {
 		return nil, err
 	}
 
-	updated, err := b.Show(issue.ID)
+	updated, err := c.Show(issue.ID)
 	if err != nil {
 		return nil, fmt.Errorf("fetching updated group: %w", err)
 	}
@@ -279,8 +259,8 @@ func (b *Beads) AddGroupMember(name string, member string) (*Issue, error) {
 }
 
 // RemoveGroupMember removes a member from a group.
-func (b *Beads) RemoveGroupMember(name string, member string) (*Issue, error) {
-	issue, fields, err := b.GetGroupByName(name)
+func RemoveGroupMember(c Client, name string, member string) (*Issue, error) {
+	issue, fields, err := GetGroupByName(c, name)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil, fmt.Errorf("group %q not found", name)
@@ -299,11 +279,11 @@ func (b *Beads) RemoveGroupMember(name string, member string) (*Issue, error) {
 	fields.Members = newMembers
 	description := FormatGroupDescription(issue.Title, fields)
 
-	if err := b.Update(issue.ID, UpdateOptions{Description: &description}); err != nil {
+	if err := c.Update(issue.ID, UpdateOptions{Description: &description}); err != nil {
 		return nil, err
 	}
 
-	updated, err := b.Show(issue.ID)
+	updated, err := c.Show(issue.ID)
 	if err != nil {
 		return nil, fmt.Errorf("fetching updated group: %w", err)
 	}
@@ -311,21 +291,15 @@ func (b *Beads) RemoveGroupMember(name string, member string) (*Issue, error) {
 }
 
 // DeleteGroupBead permanently deletes a group bead.
-func (b *Beads) DeleteGroupBead(name string) error {
-	id := GroupBeadID(name)
-	return b.deleteBead(id)
+func DeleteGroupBead(c Client, name string) error {
+	return c.DeleteIssues(GroupBeadID(name))
 }
 
 // ListGroupBeads returns all group beads.
-func (b *Beads) ListGroupBeads() (map[string]*GroupFields, error) {
-	out, err := b.run("list", "--label=gt:group", "--json")
+func ListGroupBeads(c Client) (map[string]*GroupFields, error) {
+	issues, err := c.List(ListOptions{Labels: []string{"gt:group"}, Priority: -1})
 	if err != nil {
 		return nil, err
-	}
-
-	var issues []*Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd list output: %w", err)
 	}
 
 	result := make(map[string]*GroupFields, len(issues))
@@ -342,9 +316,9 @@ func (b *Beads) ListGroupBeads() (map[string]*GroupFields, error) {
 // LookupGroupByName finds a group by its name field (not by ID).
 // This is used for address resolution where we may not know the full bead ID.
 // Returns ErrNotFound if no group with the given name exists.
-func (b *Beads) LookupGroupByName(name string) (*Issue, *GroupFields, error) {
+func LookupGroupByName(c Client, name string) (*Issue, *GroupFields, error) {
 	// First try direct lookup by standard ID format
-	issue, fields, err := b.GetGroupByName(name)
+	issue, fields, err := GetGroupByName(c, name)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return nil, nil, err
 	}
@@ -353,7 +327,7 @@ func (b *Beads) LookupGroupByName(name string) (*Issue, *GroupFields, error) {
 	}
 
 	// If not found by ID, search all groups by name field
-	groups, err := b.ListGroupBeads()
+	groups, err := ListGroupBeads(c)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -361,7 +335,7 @@ func (b *Beads) LookupGroupByName(name string) (*Issue, *GroupFields, error) {
 	if fields, ok := groups[name]; ok {
 		// Found by name, now get the full issue
 		id := GroupBeadID(name)
-		issue, err := b.Show(id)
+		issue, err := c.Show(id)
 		if err != nil {
 			return nil, nil, err
 		}

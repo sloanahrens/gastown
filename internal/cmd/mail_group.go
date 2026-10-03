@@ -122,7 +122,7 @@ func runGroupList(cmd *cobra.Command, args []string) error {
 	}
 
 	b := beads.New(townRoot)
-	groups, err := b.ListGroupBeads()
+	groups, err := beads.ListGroupBeads(b)
 	if err != nil {
 		return fmt.Errorf("listing groups: %w", err)
 	}
@@ -160,7 +160,7 @@ func runGroupShow(cmd *cobra.Command, args []string) error {
 	}
 
 	b := beads.New(townRoot)
-	_, fields, err := b.GetGroupByName(name)
+	_, fields, err := beads.GetGroupByName(b, name)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
 			return fmt.Errorf("group not found: %s", name)
@@ -223,7 +223,7 @@ func runGroupCreate(cmd *cobra.Command, args []string) error {
 	b := beads.New(townRoot)
 
 	// Check if group already exists
-	existing, _, err := b.GetGroupByName(name)
+	existing, _, err := beads.GetGroupByName(b, name)
 	if err != nil && !errors.Is(err, beads.ErrNotFound) {
 		return err
 	}
@@ -231,7 +231,7 @@ func runGroupCreate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("group already exists: %s", name)
 	}
 
-	_, err = b.CreateGroupBead(name, &beads.GroupFields{
+	_, err = beads.CreateGroupBead(b, name, &beads.GroupFields{
 		Members:   members,
 		CreatedBy: createdBy,
 	})
@@ -257,7 +257,7 @@ func runGroupAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	b := beads.New(townRoot)
-	if _, err := b.AddGroupMember(name, member); err != nil {
+	if _, err := beads.AddGroupMember(b, name, member); err != nil {
 		return fmt.Errorf("adding member: %w", err)
 	}
 
@@ -275,7 +275,7 @@ func runGroupRemove(cmd *cobra.Command, args []string) error {
 	}
 
 	b := beads.New(townRoot)
-	if _, err := b.RemoveGroupMember(name, member); err != nil {
+	if _, err := beads.RemoveGroupMember(b, name, member); err != nil {
 		return fmt.Errorf("removing member: %w", err)
 	}
 
@@ -294,7 +294,7 @@ func runGroupDelete(cmd *cobra.Command, args []string) error {
 	b := beads.New(townRoot)
 
 	// Check if group exists
-	_, _, err = b.GetGroupByName(name)
+	_, _, err = beads.GetGroupByName(b, name)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
 			return fmt.Errorf("group not found: %s", name)
@@ -302,7 +302,7 @@ func runGroupDelete(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if err := b.DeleteGroupBead(name); err != nil {
+	if err := beads.DeleteGroupBead(b, name); err != nil {
 		return fmt.Errorf("deleting group: %w", err)
 	}
 

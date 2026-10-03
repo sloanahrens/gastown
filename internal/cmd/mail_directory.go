@@ -48,7 +48,7 @@ func runMailDirectory(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
-	return writeMailDirectory(os.Stdout, os.Stderr, beads.New(townRoot), mailDirJSON)
+	return writeMailDirectory(os.Stdout, os.Stderr, townDirBeads{beads.New(townRoot)}, mailDirJSON)
 }
 
 // mailDirectorySource lists the addressable beads of a town.
@@ -57,6 +57,28 @@ type mailDirectorySource interface {
 	ListGroupBeads() (map[string]*beads.GroupFields, error)
 	ListQueueBeads() (map[string]*beads.Issue, error)
 	ListChannelBeads() (map[string]*beads.ChannelFields, error)
+}
+
+// townDirBeads adapts a *beads.Beads to mailDirectorySource: the group, queue
+// and channel listings are free functions over beads.Client now
+// (gt-7iwy0.4.4), and the agent list is still a *Beads method (agent-bead
+// slice).
+type townDirBeads struct{ b *beads.Beads }
+
+func (t townDirBeads) ListAgentBeads() (map[string]*beads.Issue, error) {
+	return t.b.ListAgentBeads()
+}
+
+func (t townDirBeads) ListGroupBeads() (map[string]*beads.GroupFields, error) {
+	return beads.ListGroupBeads(t.b)
+}
+
+func (t townDirBeads) ListQueueBeads() (map[string]*beads.Issue, error) {
+	return beads.ListQueueBeads(t.b)
+}
+
+func (t townDirBeads) ListChannelBeads() (map[string]*beads.ChannelFields, error) {
+	return beads.ListChannelBeads(t.b)
 }
 
 // writeMailDirectory writes the address directory of b to out, as JSON or a

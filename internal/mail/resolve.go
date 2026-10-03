@@ -242,7 +242,7 @@ func (r *Resolver) resolveAtPatternWithVisited(address string, visited map[strin
 	// First check if this is a beads-native group (if beads available)
 	if r.beads != nil {
 		groupName := strings.TrimPrefix(address, "@")
-		_, fields, err := r.beads.LookupGroupByName(groupName)
+		_, fields, err := beads.LookupGroupByName(r.beads, groupName)
 		if err != nil && !errors.Is(err, beads.ErrNotFound) {
 			return nil, err
 		}
@@ -270,7 +270,7 @@ func (r *Resolver) resolveByNameWithVisited(name string, visited map[string]bool
 
 	// Check for beads-native group
 	if r.beads != nil {
-		_, fields, err := r.beads.LookupGroupByName(name)
+		_, fields, err := beads.LookupGroupByName(r.beads, name)
 		if err != nil && !errors.Is(err, beads.ErrNotFound) {
 			return nil, err
 		}
@@ -282,7 +282,7 @@ func (r *Resolver) resolveByNameWithVisited(name string, visited map[string]bool
 
 	// Check for beads-native queue
 	if r.beads != nil {
-		_, queueFields, err := r.beads.LookupQueueByName(name)
+		_, queueFields, err := beads.LookupQueueByName(r.beads, name)
 		if err != nil {
 			return nil, err
 		}
@@ -293,7 +293,7 @@ func (r *Resolver) resolveByNameWithVisited(name string, visited map[string]bool
 
 	// Check for beads-native channel
 	if r.beads != nil {
-		_, channelFields, err := r.beads.LookupChannelByName(name)
+		_, channelFields, err := beads.LookupChannelByName(r.beads, name)
 		if err != nil {
 			return nil, err
 		}
@@ -367,7 +367,7 @@ func (r *Resolver) resolveBeadsGroupWithVisited(name string, visited map[string]
 		return nil, fmt.Errorf("beads not available")
 	}
 
-	_, fields, err := r.beads.LookupGroupByName(name)
+	_, fields, err := beads.LookupGroupByName(r.beads, name)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
 			return nil, fmt.Errorf("group not found: %s", name)
@@ -426,7 +426,7 @@ func (r *Resolver) expandGroupMembersWithVisited(fields *beads.GroupFields, visi
 func (r *Resolver) resolveMemberWithVisited(member string, visited map[string]bool) ([]Recipient, error) {
 	// Check if this is a nested group reference
 	if r.beads != nil && !strings.Contains(member, "/") && !strings.HasPrefix(member, "@") {
-		_, fields, err := r.beads.LookupGroupByName(member)
+		_, fields, err := beads.LookupGroupByName(r.beads, member)
 		if err == nil && fields != nil {
 			return r.expandGroupMembersWithVisited(fields, visited)
 		}

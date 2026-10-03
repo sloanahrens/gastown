@@ -2,7 +2,6 @@
 package beads
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -166,8 +165,9 @@ func QueueBeadID(name string, isTownLevel bool) string {
 
 // CreateQueueBead creates a queue bead for tracking work queues.
 // The ID format is: <prefix>-q-<name> (e.g., gt-q-merge, hq-q-dispatch)
-// The created_by field is populated from BD_ACTOR env var for provenance tracking.
-func (b *Beads) CreateQueueBead(id, title string, fields *QueueFields) (*Issue, error) {
+// The created_by field is populated from BD_ACTOR for provenance tracking;
+// Client.Create records the actor the raw call passed.
+func CreateQueueBead(c Client, id, title string, fields *QueueFields) (*Issue, error) {
 	// Guard against flag-like titles (gt-e0kx5: --help garbage beads)
 	if IsFlagLikeTitle(title) {
 		return nil, fmt.Errorf("refusing to create queue bead: %w (got %q)", ErrFlagTitle, title)
@@ -175,37 +175,18 @@ func (b *Beads) CreateQueueBead(id, title string, fields *QueueFields) (*Issue, 
 
 	description := FormatQueueDescription(title, fields)
 
-	args := []string{"create", "--json",
-		"--id=" + id,
-		"--title=" + title,
-		"--description=" + description,
-		"--type=queue",
-		"--labels=gt:queue",
-	}
-
-	// Default actor from BD_ACTOR env var for provenance tracking
-	// Uses getActor() to respect isolated mode (tests)
-	if actor := b.getActor(); actor != "" {
-		args = append(args, "--actor="+actor)
-	}
-
-	out, err := b.run(args...)
-	if err != nil {
-		return nil, err
-	}
-
-	var issue Issue
-	if err := json.Unmarshal(out, &issue); err != nil {
-		return nil, fmt.Errorf("parsing bd create output: %w", err)
-	}
-
-	return &issue, nil
+	return c.Create(CreateOptions{
+		ID:          id,
+		Title:       title,
+		Description: description,
+		Labels:      []string{"gt:queue"},
+	})
 }
 
 // GetQueueBead retrieves a queue bead by ID.
 // Returns nil if not found.
-func (b *Beads) GetQueueBead(id string) (*Issue, *QueueFields, error) {
-	issue, err := b.Show(id)
+func GetQueueBead(c Client, id string) (*Issue, *QueueFields, error) {
+	issue, err := c.Show(id)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil, nil, nil
@@ -222,20 +203,20 @@ func (b *Beads) GetQueueBead(id string) (*Issue, *QueueFields, error) {
 }
 
 // UpdateQueueFields updates the fields of a queue bead.
-func (b *Beads) UpdateQueueFields(id string, fields *QueueFields) error {
-	issue, err := b.Show(id)
+func UpdateQueueFields(c Client, id string, fields *QueueFields) error {
+	issue, err := c.Show(id)
 	if err != nil {
 		return err
 	}
 
 	description := FormatQueueDescription(issue.Title, fields)
-	return b.Update(id, UpdateOptions{Description: &description})
+	return c.Update(id, UpdateOptions{Description: &description})
 }
 
 // UpdateQueueCounts updates the count fields of a queue bead.
 // This is a convenience method for incrementing/decrementing counts.
-func (b *Beads) UpdateQueueCounts(id string, available, processing, completed, failed int) error {
-	issue, currentFields, err := b.GetQueueBead(id)
+func UpdateQueueCounts(c Client, id string, available, processing, completed, failed int) error {
+	issue, currentFields, err := GetQueueBead(c, id)
 	if err != nil {
 		return err
 	}
@@ -248,17 +229,17 @@ func (b *Beads) UpdateQueueCounts(id string, available, processing, completed, f
 	currentFields.CompletedCount = completed
 	currentFields.FailedCount = failed
 
-	return b.UpdateQueueFields(id, currentFields)
+	return UpdateQueueFields(c, id, currentFields)
 }
 
 // UpdateQueueStatus updates the status of a queue bead.
-func (b *Beads) UpdateQueueStatus(id, status string) error {
+func UpdateQueueStatus(c Client, id, status string) error {
 	// Validate status
 	if status != QueueStatusActive && status != QueueStatusPaused && status != QueueStatusClosed {
 		return fmt.Errorf("invalid queue status %q: must be active, paused, or closed", status)
 	}
 
-	issue, currentFields, err := b.GetQueueBead(id)
+	issue, currentFields, err := GetQueueBead(c, id)
 	if err != nil {
 		return err
 	}
@@ -267,19 +248,14 @@ func (b *Beads) UpdateQueueStatus(id, status string) error {
 	}
 
 	currentFields.Status = status
-	return b.UpdateQueueFields(id, currentFields)
+	return UpdateQueueFields(c, id, currentFields)
 }
 
 // ListQueueBeads returns all queue beads.
-func (b *Beads) ListQueueBeads() (map[string]*Issue, error) {
-	out, err := b.run("list", "--label=gt:queue", "--json")
+func ListQueueBeads(c Client) (map[string]*Issue, error) {
+	issues, err := c.List(ListOptions{Labels: []string{"gt:queue"}, Priority: -1})
 	if err != nil {
 		return nil, err
-	}
-
-	var issues []*Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd list output: %w", err)
 	}
 
 	result := make(map[string]*Issue, len(issues))
@@ -291,17 +267,17 @@ func (b *Beads) ListQueueBeads() (map[string]*Issue, error) {
 }
 
 // DeleteQueueBead permanently deletes a queue bead.
-func (b *Beads) DeleteQueueBead(id string) error {
-	return b.deleteBead(id)
+func DeleteQueueBead(c Client, id string) error {
+	return c.DeleteIssues(id)
 }
 
 // LookupQueueByName finds a queue by its name field (not by ID).
 // This is used for address resolution where we may not know the full bead ID.
-func (b *Beads) LookupQueueByName(name string) (*Issue, *QueueFields, error) {
+func LookupQueueByName(c Client, name string) (*Issue, *QueueFields, error) {
 	// First try direct lookup by standard ID formats (town and rig level)
 	for _, isTownLevel := range []bool{true, false} {
 		id := QueueBeadID(name, isTownLevel)
-		issue, fields, err := b.GetQueueBead(id)
+		issue, fields, err := GetQueueBead(c, id)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -311,7 +287,7 @@ func (b *Beads) LookupQueueByName(name string) (*Issue, *QueueFields, error) {
 	}
 
 	// If not found by ID, search all queues by name field
-	queues, err := b.ListQueueBeads()
+	queues, err := ListQueueBeads(c)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -368,8 +344,8 @@ func MatchClaimPattern(pattern, identity string) bool {
 }
 
 // FindEligibleQueues returns all queue beads that the given identity can claim from.
-func (b *Beads) FindEligibleQueues(identity string) ([]*Issue, []*QueueFields, error) {
-	queues, err := b.ListQueueBeads()
+func FindEligibleQueues(c Client, identity string) ([]*Issue, []*QueueFields, error) {
+	queues, err := ListQueueBeads(c)
 	if err != nil {
 		return nil, nil, err
 	}

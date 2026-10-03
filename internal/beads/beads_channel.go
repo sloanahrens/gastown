@@ -3,9 +3,9 @@
 package beads
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -136,8 +136,9 @@ func ChannelBeadID(name string) string {
 // CreateChannelBead creates a channel bead for pub/sub messaging.
 // The ID format is: hq-channel-<name> (e.g., hq-channel-alerts)
 // Channels are town-level entities (hq- prefix) because they span rigs.
-// The created_by field is populated from BD_ACTOR env var for provenance tracking.
-func (b *Beads) CreateChannelBead(name string, subscribers []string, createdBy string) (*Issue, error) {
+// The created_by field is populated from BD_ACTOR for provenance tracking;
+// Client.Create records the actor the raw call passed.
+func CreateChannelBead(c Client, name string, subscribers []string, createdBy string) (*Issue, error) {
 	id := ChannelBeadID(name)
 	title := fmt.Sprintf("Channel: %s", name)
 
@@ -151,39 +152,19 @@ func (b *Beads) CreateChannelBead(name string, subscribers []string, createdBy s
 
 	description := FormatChannelDescription(title, fields)
 
-	args := []string{"create", "--json",
-		"--id=" + id,
-		"--title=" + title,
-		"--description=" + description,
-		"--type=task", // Channels use task type with gt:channel label
-		"--labels=gt:channel",
-		"--force", // Override prefix check (town beads may have mixed prefixes)
-	}
-
-	// Default actor from BD_ACTOR env var for provenance tracking
-	// Uses getActor() to respect isolated mode (tests)
-	if actor := b.getActor(); actor != "" {
-		args = append(args, "--actor="+actor)
-	}
-
-	out, err := b.run(args...)
-	if err != nil {
-		return nil, err
-	}
-
-	var issue Issue
-	if err := json.Unmarshal(out, &issue); err != nil {
-		return nil, fmt.Errorf("parsing bd create output: %w", err)
-	}
-
-	return &issue, nil
+	return c.Create(CreateOptions{
+		ID:          id,
+		Title:       title,
+		Description: description,
+		Labels:      []string{"gt:channel"},
+	})
 }
 
 // GetChannelBead retrieves a channel bead by name.
 // Returns nil, nil if not found.
-func (b *Beads) GetChannelBead(name string) (*Issue, *ChannelFields, error) {
+func GetChannelBead(c Client, name string) (*Issue, *ChannelFields, error) {
 	id := ChannelBeadID(name)
-	issue, err := b.Show(id)
+	issue, err := c.Show(id)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil, nil, nil
@@ -201,8 +182,8 @@ func (b *Beads) GetChannelBead(name string) (*Issue, *ChannelFields, error) {
 
 // GetChannelByID retrieves a channel bead by its full ID.
 // Returns nil, nil if not found.
-func (b *Beads) GetChannelByID(id string) (*Issue, *ChannelFields, error) {
-	issue, err := b.Show(id)
+func GetChannelByID(c Client, id string) (*Issue, *ChannelFields, error) {
+	issue, err := c.Show(id)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil, nil, nil
@@ -219,8 +200,8 @@ func (b *Beads) GetChannelByID(id string) (*Issue, *ChannelFields, error) {
 }
 
 // UpdateChannelSubscribers updates the subscribers list for a channel.
-func (b *Beads) UpdateChannelSubscribers(name string, subscribers []string) error {
-	issue, fields, err := b.GetChannelBead(name)
+func UpdateChannelSubscribers(c Client, name string, subscribers []string) error {
+	issue, fields, err := GetChannelBead(c, name)
 	if err != nil {
 		return err
 	}
@@ -231,12 +212,12 @@ func (b *Beads) UpdateChannelSubscribers(name string, subscribers []string) erro
 	fields.Subscribers = subscribers
 	description := FormatChannelDescription(issue.Title, fields)
 
-	return b.Update(issue.ID, UpdateOptions{Description: &description})
+	return c.Update(issue.ID, UpdateOptions{Description: &description})
 }
 
 // SubscribeToChannel adds a subscriber to a channel if not already subscribed.
-func (b *Beads) SubscribeToChannel(name string, subscriber string) error {
-	issue, fields, err := b.GetChannelBead(name)
+func SubscribeToChannel(c Client, name string, subscriber string) error {
+	issue, fields, err := GetChannelBead(c, name)
 	if err != nil {
 		return err
 	}
@@ -254,12 +235,12 @@ func (b *Beads) SubscribeToChannel(name string, subscriber string) error {
 	fields.Subscribers = append(fields.Subscribers, subscriber)
 	description := FormatChannelDescription(issue.Title, fields)
 
-	return b.Update(issue.ID, UpdateOptions{Description: &description})
+	return c.Update(issue.ID, UpdateOptions{Description: &description})
 }
 
 // UnsubscribeFromChannel removes a subscriber from a channel.
-func (b *Beads) UnsubscribeFromChannel(name string, subscriber string) error {
-	issue, fields, err := b.GetChannelBead(name)
+func UnsubscribeFromChannel(c Client, name string, subscriber string) error {
+	issue, fields, err := GetChannelBead(c, name)
 	if err != nil {
 		return err
 	}
@@ -278,12 +259,12 @@ func (b *Beads) UnsubscribeFromChannel(name string, subscriber string) error {
 	fields.Subscribers = newSubscribers
 	description := FormatChannelDescription(issue.Title, fields)
 
-	return b.Update(issue.ID, UpdateOptions{Description: &description})
+	return c.Update(issue.ID, UpdateOptions{Description: &description})
 }
 
 // UpdateChannelRetention updates the retention policy for a channel.
-func (b *Beads) UpdateChannelRetention(name string, retentionCount, retentionHours int) error {
-	issue, fields, err := b.GetChannelBead(name)
+func UpdateChannelRetention(c Client, name string, retentionCount, retentionHours int) error {
+	issue, fields, err := GetChannelBead(c, name)
 	if err != nil {
 		return err
 	}
@@ -295,17 +276,17 @@ func (b *Beads) UpdateChannelRetention(name string, retentionCount, retentionHou
 	fields.RetentionHours = retentionHours
 	description := FormatChannelDescription(issue.Title, fields)
 
-	return b.Update(issue.ID, UpdateOptions{Description: &description})
+	return c.Update(issue.ID, UpdateOptions{Description: &description})
 }
 
 // UpdateChannelStatus updates the status of a channel bead.
-func (b *Beads) UpdateChannelStatus(name, status string) error {
+func UpdateChannelStatus(c Client, name, status string) error {
 	// Validate status
 	if status != ChannelStatusActive && status != ChannelStatusClosed {
 		return fmt.Errorf("invalid channel status %q: must be active or closed", status)
 	}
 
-	issue, fields, err := b.GetChannelBead(name)
+	issue, fields, err := GetChannelBead(c, name)
 	if err != nil {
 		return err
 	}
@@ -316,25 +297,19 @@ func (b *Beads) UpdateChannelStatus(name, status string) error {
 	fields.Status = status
 	description := FormatChannelDescription(issue.Title, fields)
 
-	return b.Update(issue.ID, UpdateOptions{Description: &description})
+	return c.Update(issue.ID, UpdateOptions{Description: &description})
 }
 
 // DeleteChannelBead permanently deletes a channel bead.
-func (b *Beads) DeleteChannelBead(name string) error {
-	id := ChannelBeadID(name)
-	return b.deleteBead(id)
+func DeleteChannelBead(c Client, name string) error {
+	return c.DeleteIssues(ChannelBeadID(name))
 }
 
 // ListChannelBeads returns all channel beads.
-func (b *Beads) ListChannelBeads() (map[string]*ChannelFields, error) {
-	out, err := b.run("list", "--label=gt:channel", "--json")
+func ListChannelBeads(c Client) (map[string]*ChannelFields, error) {
+	issues, err := c.List(ListOptions{Labels: []string{"gt:channel"}, Priority: -1})
 	if err != nil {
 		return nil, err
-	}
-
-	var issues []*Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd list output: %w", err)
 	}
 
 	result := make(map[string]*ChannelFields, len(issues))
@@ -350,9 +325,9 @@ func (b *Beads) ListChannelBeads() (map[string]*ChannelFields, error) {
 
 // LookupChannelByName finds a channel by its name field (not by ID).
 // This is used for address resolution where we may not know the full bead ID.
-func (b *Beads) LookupChannelByName(name string) (*Issue, *ChannelFields, error) {
+func LookupChannelByName(c Client, name string) (*Issue, *ChannelFields, error) {
 	// First try direct lookup by standard ID format
-	issue, fields, err := b.GetChannelBead(name)
+	issue, fields, err := GetChannelBead(c, name)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -361,7 +336,7 @@ func (b *Beads) LookupChannelByName(name string) (*Issue, *ChannelFields, error)
 	}
 
 	// If not found by ID, search all channels by name field
-	channels, err := b.ListChannelBeads()
+	channels, err := ListChannelBeads(c)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -369,7 +344,7 @@ func (b *Beads) LookupChannelByName(name string) (*Issue, *ChannelFields, error)
 	if fields, ok := channels[name]; ok {
 		// Found by name, now get the full issue
 		id := ChannelBeadID(name)
-		issue, err := b.Show(id)
+		issue, err := c.Show(id)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -379,12 +354,40 @@ func (b *Beads) LookupChannelByName(name string) (*Issue, *ChannelFields, error)
 	return nil, nil, nil // Not found
 }
 
+// channelMessages returns a channel's messages oldest first, the order bd's
+// `list --sort=created` gave before the retention helpers moved onto Client.
+func channelMessages(c Client, name string) ([]*Issue, error) {
+	messages, err := c.List(ListOptions{
+		Labels:   []string{"gt:message", "channel:" + name},
+		Priority: -1,
+	})
+	if err != nil {
+		return nil, err
+	}
+	sortIssuesByCreated(messages)
+	return messages, nil
+}
+
+// sortIssuesByCreated orders issues oldest first by their CreatedAt
+// timestamp. An issue whose timestamp does not parse, and any tie, keeps its
+// listed position.
+func sortIssuesByCreated(issues []*Issue) {
+	slices.SortStableFunc(issues, func(a, b *Issue) int {
+		at, aErr := time.Parse(time.RFC3339, a.CreatedAt)
+		bt, bErr := time.Parse(time.RFC3339, b.CreatedAt)
+		if aErr != nil || bErr != nil {
+			return 0
+		}
+		return at.Compare(bt)
+	})
+}
+
 // EnforceChannelRetention prunes old messages from a channel to enforce retention.
 // Called after posting a new message to the channel (on-write cleanup).
 // Enforces both count-based (RetentionCount) and time-based (RetentionHours) limits.
-func (b *Beads) EnforceChannelRetention(name string) error {
+func EnforceChannelRetention(c Client, name string) error {
 	// Get channel config
-	_, fields, err := b.GetChannelBead(name)
+	_, fields, err := GetChannelBead(c, name)
 	if err != nil {
 		return err
 	}
@@ -397,24 +400,9 @@ func (b *Beads) EnforceChannelRetention(name string) error {
 		return nil
 	}
 
-	// Query messages in this channel (oldest first)
-	out, err := b.run("list",
-		"--label=gt:message",
-		"--label=channel:"+name,
-		"--json",
-		"--limit=0",
-		"--sort=created",
-	)
+	messages, err := channelMessages(c, name)
 	if err != nil {
 		return fmt.Errorf("listing channel messages: %w", err)
-	}
-
-	var messages []struct {
-		ID        string `json:"id"`
-		CreatedAt string `json:"created_at"`
-	}
-	if err := json.Unmarshal(out, &messages); err != nil {
-		return fmt.Errorf("parsing channel messages: %w", err)
 	}
 
 	// Track which messages to delete (use map to avoid duplicates)
@@ -442,10 +430,9 @@ func (b *Beads) EnforceChannelRetention(name string) error {
 		}
 	}
 
-	// Delete marked messages (best-effort)
+	// Close marked messages (best-effort): close instead of delete for audit trail
 	for id := range toDeleteIDs {
-		// Use close instead of delete for audit trail
-		_, _ = b.run("close", id, "--reason=channel retention pruning")
+		_ = c.CloseWithReason("channel retention pruning", id)
 	}
 
 	return nil
@@ -455,8 +442,8 @@ func (b *Beads) EnforceChannelRetention(name string) error {
 // Called by Deacon patrol as a backup cleanup mechanism.
 // Enforces both count-based (RetentionCount) and time-based (RetentionHours) limits.
 // Uses a 10% buffer for count-based pruning to avoid thrashing.
-func (b *Beads) PruneAllChannels() (int, error) {
-	channels, err := b.ListChannelBeads()
+func PruneAllChannels(c Client) (int, error) {
+	channels, err := ListChannelBeads(c)
 	if err != nil {
 		return 0, err
 	}
@@ -468,24 +455,9 @@ func (b *Beads) PruneAllChannels() (int, error) {
 			continue
 		}
 
-		// Get messages with timestamps
-		out, err := b.run("list",
-			"--label=gt:message",
-			"--label=channel:"+name,
-			"--json",
-			"--limit=0",
-			"--sort=created",
-		)
+		messages, err := channelMessages(c, name)
 		if err != nil {
 			continue // Skip on error
-		}
-
-		var messages []struct {
-			ID        string `json:"id"`
-			CreatedAt string `json:"created_at"`
-		}
-		if err := json.Unmarshal(out, &messages); err != nil {
-			continue
 		}
 
 		// Track which messages to delete (use map to avoid duplicates)
@@ -516,9 +488,9 @@ func (b *Beads) PruneAllChannels() (int, error) {
 			}
 		}
 
-		// Delete marked messages
+		// Close marked messages
 		for id := range toDeleteIDs {
-			if _, err := b.run("close", id, "--reason=patrol retention pruning"); err == nil {
+			if err := c.CloseWithReason("patrol retention pruning", id); err == nil {
 				pruned++
 			}
 		}
