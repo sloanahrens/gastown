@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -394,5 +395,93 @@ func TestRevertGuardWaiverNoteFailureKeepsTheSubmission(t *testing.T) {
 	}
 	if n := strings.Count(warn.String(), "could not record the deletes-by-spec waiver"); n != 1 {
 		t.Errorf("warnings = %q, want exactly one waiver warning", warn.String())
+	}
+}
+
+// TestRevertedPathsNamesOnlyAtAPathBoundary (gt-j5q4i): a reverted path counts
+// as named only when the description carries it as a whole path. A longer path
+// ending in it does not name it, so README.md and go.mod stay unnamed while the
+// path the description really writes — closed by a sentence period — is waived.
+func TestRevertedPathsNamesOnlyAtAPathBoundary(t *testing.T) {
+	t.Parallel()
+	reverted := []git.RevertedMerge{{Commit: "aaaaaaaaaaaa", Paths: []string{
+		"README.md", "go.mod", "internal/x.go", "docs/README.md",
+	}}}
+	all, unnamed := revertedPaths(reverted, "Delete docs/README.md and internal/go.mod, then internal/x.go.")
+
+	wantAll := []string{"README.md", "go.mod", "internal/x.go", "docs/README.md"}
+	if !reflect.DeepEqual(all, wantAll) {
+		t.Errorf("all = %q, want %q", all, wantAll)
+	}
+	wantUnnamed := []string{"README.md", "go.mod"}
+	if !reflect.DeepEqual(unnamed, wantUnnamed) {
+		t.Errorf("unnamed = %q, want %q", unnamed, wantUnnamed)
+	}
+}
+
+// TestNamedInDescriptionBoundaries (gt-j5q4i): the boundary rule, case by case.
+// A path character on either side disqualifies the match, a sentence's trailing
+// period or comma does not, and an occurrence inside a longer path does not
+// hide a later occurrence that stands on its own.
+func TestNamedInDescriptionBoundaries(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		description string
+		path        string
+		want        bool
+	}{
+		{"longer directory path does not name it", "Delete docs/README.md.", "README.md", false},
+		{"longer directory path does not name go.mod", "Delete internal/go.mod.", "go.mod", false},
+		{"extension suffix does not name it", "Keep internal/x.go.bak.", "internal/x.go", false},
+		{"prefixed path does not name it", "Keep xinternal/x.go.", "internal/x.go", false},
+		{"backticks", "Delete `internal/x.go` now.", "internal/x.go", true},
+		{"double quotes", `Delete "internal/x.go" now.`, "internal/x.go", true},
+		{"parentheses", "Delete (internal/x.go) now.", "internal/x.go", true},
+		{"after a space", "Delete internal/x.go now.", "internal/x.go", true},
+		{"start of the text", "internal/x.go is gone.", "internal/x.go", true},
+		{"start of a line", "Unrelated.\ninternal/x.go is gone.", "internal/x.go", true},
+		{"before a sentence period", "Delete internal/x.go.", "internal/x.go", true},
+		{"before a sentence comma", "Delete internal/x.go, which we replaced.", "internal/x.go", true},
+		{"standalone later occurrence", "Delete docs/README.md; README.md is unrelated.", "README.md", true},
+		{"empty path names nothing", "Delete internal/x.go.", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := namedInDescription(tc.description, tc.path); got != tc.want {
+				t.Errorf("namedInDescription(%q, %q) = %v, want %v", tc.description, tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRevertGuardRefusesAPathNamedOnlyInsideALongerOne (gt-j5q4i): the waiver
+// stands down for the paths the description really writes and refuses the ones
+// it only mentions inside a longer path, naming them.
+func TestRevertGuardRefusesAPathNamedOnlyInsideALongerOne(t *testing.T) {
+	t.Parallel()
+	bd := &fakeNotesClient{}
+	issue := &beads.Issue{
+		ID:          "gt-x",
+		Labels:      []string{"deletes-by-spec"},
+		Description: "Delete docs/README.md and internal/x.go.bak.",
+	}
+	r := waivedRun(t.TempDir(), issue, bd)
+	g := fakeRevertGit{subjects: map[string]string{"aaaaaaaaaaaa": "old work"}}
+	reverted := []git.RevertedMerge{{Commit: "aaaaaaaaaaaa", Paths: []string{"README.md", "internal/x.go"}}}
+
+	var warn strings.Builder
+	err := reportRevertedMergesRecordingTo(&warn, r, g, detected(git.RevertReport{Reverted: reverted}, nil), "origin/main")
+	if err == nil {
+		t.Fatal("a path the description names only inside a longer one was waived")
+	}
+	for _, want := range []string{"unnamed: README.md", "unnamed: internal/x.go"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal lacks %q:\n%s", want, err)
+		}
+	}
+	if len(bd.notes) != 0 {
+		t.Errorf("notes = %v, want none on a refusal", bd.notes)
 	}
 }

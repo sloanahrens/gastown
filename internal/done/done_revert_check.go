@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -136,9 +138,9 @@ func waiverFromIssue(issue *beads.Issue) revertWaiver {
 }
 
 // revertedPaths is the paths the branch undoes, once each in report order, and
-// the subset the description does not name verbatim. The count is of files
-// being deleted, not of report lines, so a path undone by two commits counts
-// once.
+// the subset the description does not name (namedInDescription). The count is
+// of files being deleted, not of report lines, so a path undone by two commits
+// counts once.
 func revertedPaths(reverted []git.RevertedMerge, description string) (all, unnamed []string) {
 	seen := make(map[string]bool)
 	for _, f := range reverted {
@@ -148,12 +150,77 @@ func revertedPaths(reverted []git.RevertedMerge, description string) (all, unnam
 			}
 			seen[path] = true
 			all = append(all, path)
-			if !strings.Contains(description, path) {
+			if !namedInDescription(description, path) {
 				unnamed = append(unnamed, path)
 			}
 		}
 	}
 	return all, unnamed
+}
+
+// namedInDescription reports whether description names path as a whole path
+// rather than as a run of characters inside a longer one (gt-j5q4i). A
+// substring match only counts when path characters do not touch it, so
+// "docs/README.md" does not name "README.md" and "internal/x.go.bak" does not
+// name "internal/x.go" — a short top-level path is not named by the longer path
+// that ends with it. A sentence's trailing period or comma closes the name, so
+// "internal/x.go." and "internal/x.go, which we replaced" both name it.
+func namedInDescription(description, path string) bool {
+	if path == "" {
+		return false
+	}
+	for from := 0; from+len(path) <= len(description); {
+		at := strings.Index(description[from:], path)
+		if at < 0 {
+			return false
+		}
+		at += from
+		if nameBoundary(description, at, at+len(path)) {
+			return true
+		}
+		from = at + 1
+	}
+	return false
+}
+
+// nameBoundary reports whether the match at description[start:end] stands as a
+// whole path: non-path characters (or the text's edges) bound it, except that a
+// period or comma followed by whitespace or the end closes a sentence and so
+// closes the name too.
+func nameBoundary(description string, start, end int) bool {
+	if start > 0 && pathChar(description[start-1]) {
+		return false
+	}
+	if end == len(description) || !pathChar(description[end]) {
+		return true
+	}
+	if c := description[end]; c == '.' || c == ',' {
+		return whitespaceOrEmpty(description[end+1:])
+	}
+	return false
+}
+
+// pathChar reports whether c can appear inside a repo-relative, slash-separated
+// path: a letter, digit, underscore, dot, hyphen or slash. Multi-byte rune
+// bytes are all >= 0x80, so a non-ASCII neighbor never counts as a path
+// character and never hides or widens a name.
+func pathChar(c byte) bool {
+	switch {
+	case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9':
+		return true
+	case c == '_', c == '.', c == '-', c == '/':
+		return true
+	}
+	return false
+}
+
+// whitespaceOrEmpty reports whether s is empty or begins with whitespace.
+func whitespaceOrEmpty(s string) bool {
+	if s == "" {
+		return true
+	}
+	r, _ := utf8.DecodeRuneInString(s)
+	return unicode.IsSpace(r)
 }
 
 // deletesBySpecNote is the one notes line recording the guard standing down: a
