@@ -69,12 +69,9 @@ func TestCommandTokensResolve(t *testing.T) {
 	// the scanner does not read; go was 34 after the handoff/hook/rollback move,
 	// 18 after the sling formula/duplicate/done move, and 17 after the
 	// scheduler-run leaf (gt-638go.9) deleted the daemon's `gt scheduler run`.
-	// It is 8 now, the floor for the rest of the D1 one-client migration
-	// (gt-7iwy0.4): that migration drains go-source bd argv entirely, so the
-	// floor must not be raised as its slices land.
 	// The seat-refill plugin's deletion (gt-4k3fj.8.8) took plugins to 5: only
 	// tool-updater still calls gt from a plugin, so the floor dropped with it.
-	floors := map[string]int{"formulas": 160, "templates": 290, "plugins": 2, "go": 8, "scripts": 22, "agent": 10}
+	floors := map[string]int{"formulas": 160, "templates": 290, "plugins": 2, "go": 17, "scripts": 22, "agent": 10}
 	counts := map[string]int{}
 	for _, r := range refs {
 		counts[refSource(r.File)]++

@@ -257,12 +257,24 @@ func issueFilterFromListOpts(opts ListOptions) beadsdk.IssueFilter {
 		after := opts.ClosedAfter
 		f.ClosedAfter = &after
 	}
+	if !opts.CreatedAfter.IsZero() {
+		after := opts.CreatedAfter
+		f.CreatedAfter = &after
+	}
 
-	// Prefer Label; fall back to deprecated Type
-	if opts.Label != "" {
-		f.Labels = []string{opts.Label}
-	} else if opts.Type != "" {
-		f.Labels = []string{"gt:" + opts.Type}
+	// One AND list: IssueFilter.Labels requires every entry, so the singular
+	// Label (over deprecated Type) and the Labels slice join the same list,
+	// as bd list's repeated --label does.
+	switch {
+	case opts.Label != "":
+		f.Labels = append(f.Labels, opts.Label)
+	case opts.Type != "":
+		f.Labels = append(f.Labels, "gt:"+opts.Type)
+	}
+	for _, label := range opts.Labels {
+		if label != "" {
+			f.Labels = append(f.Labels, label)
+		}
 	}
 
 	if opts.IssueType != "" {
@@ -508,6 +520,14 @@ func (b *Beads) storeCreate(opts CreateOptions) (*Issue, error) {
 
 // storeUpdate implements Update using the in-process store.
 func (b *Beads) storeUpdate(id string, opts UpdateOptions) error {
+	// Persistent moves the row between the wisp and issue tables, which the
+	// public beadsdk.Storage has no call for (promotion sits on the SDK's
+	// internal BulkIssueStore). A silent no-op would leave the caller
+	// believing the wisp is durable (gt-7iwy0.4.2).
+	if opts.Persistent {
+		return fmt.Errorf("store update %s: Persistent needs the bd CLI path; the in-process store cannot promote a wisp", id)
+	}
+
 	ctx, cancel := storeCtx()
 	defer cancel()
 

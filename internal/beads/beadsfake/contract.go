@@ -899,8 +899,9 @@ func contractRelease(t *testing.T, s *scope) {
 	}
 }
 
-// contractDeleteIssues pins the batch delete: every id is gone afterwards,
-// with what hung off it, and an empty batch is a no-op.
+// contractDeleteIssues pins the batch delete: every id is gone afterwards, a
+// live issue is left with no edge onto a deleted one, and an empty batch is a
+// no-op.
 func contractDeleteIssues(t *testing.T, s *scope) {
 	mustDo(t, "DeleteIssues()", s.DeleteIssues())
 
@@ -908,16 +909,25 @@ func contractDeleteIssues(t *testing.T, s *scope) {
 	b := s.mustCreate(t, beads.CreateOptions{Title: "doomed b", Priority: -1})
 	mustDo(t, "comment", s.AddComment(a.ID, "goes with it"))
 	mustDo(t, "dependency", s.AddDependency(a.ID, b.ID))
+
+	// A survivor pointing at a deleted issue: deleting both ends of the only
+	// edge above cannot show that the edge went with them.
+	survivor := s.mustCreate(t, beads.CreateOptions{Title: "survivor", Priority: -1})
+	mustDo(t, "survivor dependency", s.AddDependency(survivor.ID, a.ID))
+
 	mustDo(t, "DeleteIssues", s.DeleteIssues(a.ID, b.ID))
 	for _, id := range []string{a.ID, b.ID} {
 		if _, err := s.Show(id); !errors.Is(err, beads.ErrNotFound) {
 			t.Errorf("Show(%s) after DeleteIssues = %v, want ErrNotFound", id, err)
 		}
 	}
+	if got := s.mustShow(t, survivor.ID); depOn(got, a.ID, "blocks") != nil {
+		t.Errorf("%s still depends on deleted %s: %+v", survivor.ID, a.ID, got.Dependencies)
+	}
 	if got, err := s.List(beads.ListOptions{Status: "all", Priority: -1}); err != nil {
 		t.Errorf("List after DeleteIssues: %v", err)
-	} else if mine := s.mine(got); len(mine) != 0 {
-		t.Errorf("List after DeleteIssues still holds %v", ids(mine))
+	} else if mine := s.mine(got); len(mine) != 1 || mine[0].ID != survivor.ID {
+		t.Errorf("List after DeleteIssues holds %v, want only %s", ids(mine), survivor.ID)
 	}
 }
 

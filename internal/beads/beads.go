@@ -706,7 +706,8 @@ type UpdateOptions struct {
 	Force bool
 
 	// Persistent promotes an ephemeral issue (a wisp) to a regular one, bd's
-	// --persistent. The in-process store path ignores it.
+	// --persistent. The in-process store path cannot move the row between
+	// tables, so it fails rather than no-op; see storeUpdate.
 	Persistent bool
 }
 
@@ -3856,21 +3857,23 @@ func (b *Beads) verifyBatchClosed(ids []string) error {
 	return pe
 }
 
-// Release moves an in_progress issue back to open status.
-// This is used to recover stuck steps when a worker dies mid-task.
-// It clears the assignee so the step can be claimed by another worker.
+// Release is ReleaseWithReason with no reason to record.
 func (b *Beads) Release(id string) error {
 	return b.ReleaseWithReason(id, "")
 }
 
-// ReleaseWithReason moves an in_progress issue back to open status with a
-// reason. The reason is added as a note to the issue for tracking purposes.
-// It does not force past a live claim (gt-v8ujv): bd refuses to clear an
-// in_progress issue another actor holds, so this releases the store's own
-// claim alone. Recovering a dead worker's claim is ReleaseIfAssignee or
-// TransferIfAssignee.
+// ReleaseWithReason moves an in_progress issue back to open status and records
+// reason in its notes. It clears the store's own claim alone, forcing past no
+// live claim another actor holds (gt-v8ujv): recovering a dead worker's claim
+// is ReleaseIfAssignee or TransferIfAssignee, not this.
 func (b *Beads) ReleaseWithReason(id, reason string) error {
 	if b.store != nil {
+		ctx, cancel := storeCtx()
+		defer cancel()
+		actor := b.getActor()
+		if err := b.refuseLiveClaim(ctx, id, actor); err != nil {
+			return err
+		}
 		updates := map[string]interface{}{
 			"status":   "open",
 			"assignee": "",
@@ -3878,9 +3881,7 @@ func (b *Beads) ReleaseWithReason(id, reason string) error {
 		if reason != "" {
 			updates["notes"] = "Released: " + reason
 		}
-		ctx, cancel := storeCtx()
-		defer cancel()
-		return b.store.UpdateIssue(ctx, id, updates, b.getActor())
+		return b.store.UpdateIssue(ctx, id, updates, actor)
 	}
 
 	args := []string{"update", id, "--status=open", "--assignee="}
@@ -3892,6 +3893,24 @@ func (b *Beads) ReleaseWithReason(id, reason string) error {
 
 	_, err := b.run(args...)
 	return err
+}
+
+// refuseLiveClaim applies bd's claim fence on the store path: bd refuses to
+// clear an in_progress issue another actor holds without --force, and Release
+// passes none (gt-v8ujv). A missing issue is left to the update that follows,
+// which reports it the way this path always has.
+func (b *Beads) refuseLiveClaim(ctx context.Context, id, actor string) error {
+	cur, err := b.store.GetIssue(ctx, id)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return nil
+		}
+		return fmt.Errorf("store release %s: %w", id, err)
+	}
+	if cur.Status == beadsdk.Status(StatusInProgress) && cur.Assignee != "" && cur.Assignee != actor {
+		return fmt.Errorf("cannot reassign %s: held by %q (in_progress); pass --force only if their claim is abandoned", id, cur.Assignee)
+	}
+	return nil
 }
 
 // AddDependency adds a dependency: issue depends on dependsOn.
