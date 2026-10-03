@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
 
@@ -283,6 +284,33 @@ func (s *SessionThresholds) StartupNudgeMaxRetriesV() int {
 		return *s.StartupNudgeMaxRetries
 	}
 	return DefaultStartupNudgeMaxRetries
+}
+
+// BdCommandTimeoutD returns the budget for a single bd command that a caller
+// runs through its own exec wiring (internal/beads' CommandTimeoutFor), or
+// constants.BdCommandTimeout (30s) when the key is unset, unparseable, or
+// non-positive. A bad value is the default, never an unbounded command.
+func (s *SessionThresholds) BdCommandTimeoutD() time.Duration {
+	if s != nil {
+		if d := ParseDurationOrDefault(s.BdCommandTimeout, 0); d > 0 {
+			return d
+		}
+	}
+	return constants.BdCommandTimeout
+}
+
+// BdSubprocessTimeoutD returns operational.session.bd_subprocess_timeout when
+// it is set to a positive duration, and 0 otherwise. Zero means "not
+// configured", not "no deadline": the beads package's own per-command budgets
+// (init, test container, steady state) apply. This is where the retired
+// timeout environment override moved (gt-y3pgh.2.6).
+func (s *SessionThresholds) BdSubprocessTimeoutD() time.Duration {
+	if s != nil {
+		if d := ParseDurationOrDefault(s.BdSubprocessTimeout, 0); d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 // --- Nudge accessors ---

@@ -8,45 +8,49 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // TestSubprocessTimeoutForBudget pins the per-command budgets. Init mints a
 // database and installs integrations, so it needs more than the steady-state
 // 60s (gt-824d); a non-init call against the test Dolt container gets 3m,
 // because the shared container stalls calls under gate load (gt-elvf4); an
-// explicit GT_BD_TIMEOUT_SEC still wins over all of them.
+// explicit operational.session.bd_subprocess_timeout wins over all of them.
 func TestSubprocessTimeoutForBudget(t *testing.T) {
 	tests := []struct {
 		name      string
 		args      []string
 		container bool
-		envVal    string
-		envSet    bool
+		session   *config.SessionThresholds
 		want      time.Duration
 	}{
 		{name: "init takes the init budget", args: []string{"init", "--prefix", "gt"}, want: bdInitSubprocessTimeout},
 		{name: "list takes the default budget", args: []string{"list", "--json"}, want: bdSubprocessTimeout},
-		{name: "override shortens init", args: []string{"init"}, envSet: true, envVal: "2", want: 2 * time.Second},
-		{name: "override shortens list", args: []string{"list"}, envSet: true, envVal: "2", want: 2 * time.Second},
-		{name: "invalid override leaves init on the init budget", args: []string{"init"}, envSet: true, envVal: "abc", want: bdInitSubprocessTimeout},
+		{name: "override shortens init", args: []string{"init"}, session: sessionWith("2s"), want: 2 * time.Second},
+		{name: "override shortens list", args: []string{"list"}, session: sessionWith("2s"), want: 2 * time.Second},
+		{name: "invalid override leaves init on the init budget", args: []string{"init"}, session: sessionWith("abc"), want: bdInitSubprocessTimeout},
+		{name: "zero override leaves init on the init budget", args: []string{"init"}, session: sessionWith("0s"), want: bdInitSubprocessTimeout},
+		{name: "negative override leaves list on the default budget", args: []string{"list"}, session: sessionWith("-1s"), want: bdSubprocessTimeout},
 		{name: "container init keeps the init budget", args: []string{"init", "--database", "testdb_0123456789abcdef"}, container: true, want: bdInitSubprocessTimeout},
 		{name: "container list takes the container budget", args: []string{"list", "--json"}, container: true, want: bdContainerSubprocessTimeout},
 		{name: "container create takes the container budget", args: []string{"create", "--title", "x"}, container: true, want: bdContainerSubprocessTimeout},
-		{name: "override shortens a container call", args: []string{"show", "gt-1"}, container: true, envSet: true, envVal: "2", want: 2 * time.Second},
-		{name: "invalid override leaves a container call on the container budget", args: []string{"show"}, container: true, envSet: true, envVal: "abc", want: bdContainerSubprocessTimeout},
+		{name: "override shortens a container call", args: []string{"show", "gt-1"}, container: true, session: sessionWith("2s"), want: 2 * time.Second},
+		{name: "invalid override leaves a container call on the container budget", args: []string{"show"}, container: true, session: sessionWith("abc"), want: bdContainerSubprocessTimeout},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.envSet {
-				t.Setenv(bdTimeoutEnvVar, tt.envVal)
-			} else {
-				_ = os.Unsetenv(bdTimeoutEnvVar)
-			}
-			if got := subprocessTimeoutFor(tt.args, tt.container); got != tt.want {
+			if got := subprocessTimeoutFor(tt.args, tt.session, tt.container); got != tt.want {
 				t.Errorf("subprocessTimeoutFor(%q, container=%v) = %v, want %v", tt.args, tt.container, got, tt.want)
 			}
 		})
 	}
+}
+
+// sessionWith is a session settings stub carrying only bd_subprocess_timeout.
+func sessionWith(bdSubprocessTimeout string) *config.SessionThresholds {
+	return &config.SessionThresholds{BdSubprocessTimeout: bdSubprocessTimeout}
 }
 
 // TestSubprocessBudgetValues pins the three budgets the spec fixes.
@@ -65,7 +69,6 @@ func TestSubprocessBudgetValues(t *testing.T) {
 // TestBeadsSubprocessTimeoutScope pins who gets the container budget: only a
 // wrapper aimed at the test Dolt container. Real-town wrappers keep 60s.
 func TestBeadsSubprocessTimeoutScope(t *testing.T) {
-	t.Setenv(bdTimeoutEnvVar, "")
 	dir := t.TempDir()
 	tests := []struct {
 		name     string
@@ -87,6 +90,81 @@ func TestBeadsSubprocessTimeoutScope(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestBeadsSubprocessTimeoutFromTownSettings pins the move off GT_BD_TIMEOUT_SEC
+// (gt-y3pgh.2.6): a client in a town whose settings/config.json sets
+// operational.session.bd_subprocess_timeout takes that budget for every
+// command, and a client in a town without the field keeps the compiled-in
+// 60s/5m budgets. The two fixture towns differ only in that key, so a change
+// that dropped the read or leaked it across towns fails here.
+func TestBeadsSubprocessTimeoutFromTownSettings(t *testing.T) {
+	t.Parallel()
+	withField := writeFixtureTown(t, `{"type":"town-settings","version":1,"operational":{"session":{"bd_subprocess_timeout":"7s"}}}`)
+	withoutField := writeFixtureTown(t, `{"type":"town-settings","version":1,"operational":{"session":{"startup_nudge_max_retries":4}}}`)
+
+	tests := []struct {
+		name    string
+		workDir string
+		args    []string
+		want    time.Duration
+	}{
+		{name: "configured budget governs a list", workDir: withField, args: []string{"list", "--json"}, want: 7 * time.Second},
+		{name: "configured budget governs init", workDir: withField, args: []string{"init", "--prefix", "gt"}, want: 7 * time.Second},
+		{name: "absent field keeps the steady-state budget", workDir: withoutField, args: []string{"list", "--json"}, want: bdSubprocessTimeout},
+		{name: "absent field keeps the init budget", workDir: withoutField, args: []string{"init", "--prefix", "gt"}, want: bdInitSubprocessTimeout},
+		{name: "no town at all keeps the steady-state budget", workDir: t.TempDir(), args: []string{"list", "--json"}, want: bdSubprocessTimeout},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := NewIsolated(tt.workDir)
+			if got := b.subprocessTimeout(tt.args); got != tt.want {
+				t.Errorf("subprocessTimeout(%q) = %v, want %v", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCommandTimeoutForTownSettings pins the budget for a caller that runs bd
+// through its own exec wiring (gt tail's journal probe): the town's
+// bd_command_timeout, or the compiled-in 30s outside a town.
+func TestCommandTimeoutForTownSettings(t *testing.T) {
+	t.Parallel()
+	town := writeFixtureTown(t, `{"type":"town-settings","version":1,"operational":{"session":{"bd_command_timeout":"45s"}}}`)
+	blanket := writeFixtureTown(t, `{"type":"town-settings","version":1,"operational":{"session":{"bd_command_timeout":"45s","bd_subprocess_timeout":"12s"}}}`)
+
+	if got := CommandTimeoutFor(town); got != 45*time.Second {
+		t.Errorf("CommandTimeoutFor(town) = %v, want 45s", got)
+	}
+	if got := CommandTimeoutFor(blanket); got != 12*time.Second {
+		t.Errorf("CommandTimeoutFor(blanket override) = %v, want the 12s bd_subprocess_timeout", got)
+	}
+	if got := CommandTimeoutFor(t.TempDir()); got != constants.BdCommandTimeout {
+		t.Errorf("CommandTimeoutFor(no town) = %v, want %v", got, constants.BdCommandTimeout)
+	}
+}
+
+// writeFixtureTown creates the town root FindTownRoot requires (mayor/town.json)
+// plus settings/config.json when settings is non-empty, and returns its path.
+func writeFixtureTown(t *testing.T, settings string) string {
+	t.Helper()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(town, "mayor", "town.json"), []byte(`{"name":"fixture"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if settings == "" {
+		return town
+	}
+	if err := os.MkdirAll(filepath.Join(town, "settings"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(town, "settings", "config.json"), []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return town
 }
 
 // TestInitDeadlineIsReportedAsTimeout reproduces gt-824d. bd writes a warning

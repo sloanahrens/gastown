@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beadsql"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/testdb"
@@ -1344,7 +1345,7 @@ func testDatabaseFor(port int, ownerDir string) (string, error) {
 // Jetsam may SIGKILL the orphaned bd process before it ever returns.
 // 60s is large enough to cover normal slow-path retries (Dolt MySQL client
 // retries up to 30s) but short enough to fail fast and surface to callers.
-// Override via GT_BD_TIMEOUT_SEC env var for testing or unusual workloads.
+// Override via operational.session.bd_subprocess_timeout (gt-y3pgh.2.6).
 // Investigation: dc-1pq8 (forensic report 2026-05-02).
 const bdSubprocessTimeout = 60 * time.Second
 
@@ -1358,81 +1359,62 @@ const bdSubprocessTimeout = 60 * time.Second
 // waiting out a wedged init.
 const bdInitSubprocessTimeout = 5 * time.Minute
 
-// bdTimeoutEnvVar overrides every subprocess budget, bdInitSubprocessTimeout
-// included, so tests and unusual workloads can shorten one command's budget.
-const bdTimeoutEnvVar = "GT_BD_TIMEOUT_SEC"
+// sessionThresholdsCache memoizes LoadOperationalConfig per town root:
+// subprocessTimeout runs on every bd call, so re-reading settings/config.json
+// there would put a file read on the hot path. It is never invalidated — the
+// town reads config once per process (gt-y3pgh: no hot reload, no watchers) —
+// and keyed by root so a process that touches two towns (a fixture town in
+// tests) resolves each correctly.
+var (
+	sessionThresholdsMu    sync.Mutex
+	sessionThresholdsCache = map[string]*config.SessionThresholds{}
+)
 
-// bdTestTimeoutEnvVar is a test-only, in-binary knob that sets a hard cap
-// (in seconds) on the in-process client's subprocess budget, applied after
-// bdTimeoutEnvVar: tests can bind their own budget without exporting the
-// operator-facing override into the environment.
-const bdTestTimeoutEnvVar = "GT_TEST_BD_TIMEOUT_SEC"
-
-// parseBdTimeoutOverride returns the GT_BD_TIMEOUT_SEC override when it parses
-// as a positive whole number of seconds. An unparseable value is no override
-// at all, so a typo cannot silently shrink a budget.
-func parseBdTimeoutOverride() (time.Duration, bool) {
-	v := os.Getenv(bdTimeoutEnvVar)
-	if v == "" {
-		return 0, false
+// sessionThresholdsFor returns the operational.session thresholds of townRoot,
+// loaded at most once per town per process. nil when townRoot is empty — the
+// caller is not in a town — so the compiled-in budgets apply.
+func sessionThresholdsFor(townRoot string) *config.SessionThresholds {
+	if townRoot == "" {
+		return nil
 	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n <= 0 {
-		return 0, false
+	sessionThresholdsMu.Lock()
+	defer sessionThresholdsMu.Unlock()
+	if s, ok := sessionThresholdsCache[townRoot]; ok {
+		return s
 	}
-	return time.Duration(n) * time.Second, true
+	s := config.LoadOperationalConfig(townRoot).GetSessionConfig()
+	sessionThresholdsCache[townRoot] = s
+	return s
 }
 
-// parseBdTestTimeoutOverride reads bdTestTimeoutEnvVar. Same fail-closed
-// contract as parseBdTimeoutOverride: empty or unparseable means no override.
-func parseBdTestTimeoutOverride() (time.Duration, bool) {
-	v := os.Getenv(bdTestTimeoutEnvVar)
-	if v == "" {
-		return 0, false
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n <= 0 {
-		return 0, false
-	}
-	return time.Duration(n) * time.Second, true
-}
-
-// resolveBdSubprocessTimeout returns the configured timeout, honoring the
-// GT_BD_TIMEOUT_SEC env var override (must parse as a positive integer).
-func resolveBdSubprocessTimeout() time.Duration {
-	if d, ok := parseBdTimeoutOverride(); ok {
+// CommandTimeoutFor returns the budget for a bd command that a caller runs
+// through its own exec wiring (gt tail's journal probe) rather than through
+// this package's run paths, so that command shares the town's budget instead
+// of inventing a second, drifting constant. It reads the town above dir: a
+// blanket bd_subprocess_timeout when the operator set one, else
+// bd_command_timeout (default constants.BdCommandTimeout, 30s). Not being in a
+// town means the default.
+func CommandTimeoutFor(dir string) time.Duration {
+	session := sessionThresholdsFor(FindTownRoot(dir))
+	if d := session.BdSubprocessTimeoutD(); d > 0 {
 		return d
 	}
-	return bdSubprocessTimeout
-}
-
-// ResolveSubprocessTimeout exposes resolveBdSubprocessTimeout to callers
-// outside this package that build their own bd *exec.Cmd (e.g. internal/witness's
-// DefaultBdCli) instead of going through Beads.run, so they can bound that
-// command on the same steady-state budget and honor the same GT_BD_TIMEOUT_SEC
-// override rather than inventing a second, drifting constant.
-func ResolveSubprocessTimeout() time.Duration {
-	return resolveBdSubprocessTimeout()
+	return session.BdCommandTimeoutD()
 }
 
 // subprocessTimeoutFor returns the subprocess budget for one bd command. args
 // is the caller's argv before --allow-stale/--flat injection, so args[0] is
-// the command word; testContainer is whether the call targets testutil's
+// the command word; session is the town's operational.session thresholds (nil
+// outside a town); testContainer is whether the call targets testutil's
 // ephemeral Dolt container (targetsTestDoltContainer). An explicit
-// GT_BD_TIMEOUT_SEC wins over every per-command budget, so tests can shorten
-// a slow command without waiting it out; after it, init keeps the init budget
-// wherever it runs, other test-container calls get the container budget
-// (gt-elvf4), and everything else gets the steady-state 60s.
-func subprocessTimeoutFor(args []string, testContainer bool) time.Duration {
-	if d, ok := parseBdTimeoutOverride(); ok {
+// operational.session.bd_subprocess_timeout wins over every per-command budget
+// — it replaced the retired env override of the same name (gt-y3pgh.2.6) — so an
+// operator can shorten a slow command without waiting it out; after it, init
+// keeps the init budget wherever it runs, other test-container calls get the
+// container budget (gt-elvf4), and everything else gets the steady-state 60s.
+func subprocessTimeoutFor(args []string, session *config.SessionThresholds, testContainer bool) time.Duration {
+	if d := session.BdSubprocessTimeoutD(); d > 0 {
 		return d
-	}
-	// Testing(): the GT_TEST knob exists to bind test binaries; checking the
-	// flag avoids teaching it to a production process.
-	if testing.Testing() {
-		if d, ok := parseBdTestTimeoutOverride(); ok {
-			return d
-		}
 	}
 	if len(args) > 0 && args[0] == "init" {
 		return bdInitSubprocessTimeout
@@ -1448,7 +1430,7 @@ func (b *Beads) subprocessTimeout(args []string) time.Duration {
 	if b.budget > 0 {
 		return b.budget
 	}
-	return subprocessTimeoutFor(args, b.targetsTestDoltContainer())
+	return subprocessTimeoutFor(args, sessionThresholdsFor(b.getTownRoot()), b.targetsTestDoltContainer())
 }
 
 // SubprocessFailureError names the cause of a bd failure that the exec error

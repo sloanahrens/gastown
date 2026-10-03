@@ -190,7 +190,9 @@ func RunTestContainerInit(ctx context.Context, dir string, args []string, env []
 	}
 	env = append(StripEnvKey(env, allowRemoteMigrateEnv), testContainerEnv()...)
 
-	timeout := subprocessTimeoutFor(args, true)
+	// nil session: test infrastructure runs on the compiled-in budgets, never
+	// on whatever town the test happens to be inside.
+	timeout := subprocessTimeoutFor(args, nil, true)
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var out bytes.Buffer
