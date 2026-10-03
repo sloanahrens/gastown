@@ -1605,7 +1605,7 @@ func TestBDListSlowListDoesNotBlockUnrelatedList(t *testing.T) {
 		slowCancel()
 		select {
 		case <-slowDone:
-		case <-time.After(5 * time.Second):
+		case <-time.After(listConcurrencyBackstop):
 		}
 	})
 
@@ -1646,6 +1646,9 @@ func TestBDListSlowListDoesNotBlockUnrelatedList(t *testing.T) {
 	default:
 	}
 
+	// Releasing the stub is this test's own signal, so this wait is a hang
+	// guard rather than a latency assertion, and it uses the same
+	// listConcurrencyBackstop as the rest of the test.
 	releaseSlow()
 	select {
 	case res := <-slowDone:
@@ -1653,9 +1656,9 @@ func TestBDListSlowListDoesNotBlockUnrelatedList(t *testing.T) {
 		if res.err != nil {
 			t.Fatalf("slow bd list failed: %v\n%s", res.err, res.output)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(listConcurrencyBackstop):
 		slowCancel()
-		t.Fatalf("slow bd list did not finish")
+		t.Fatalf("slow bd list did not finish within %s of release", listConcurrencyBackstop)
 	}
 }
 
