@@ -577,8 +577,8 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	}
 
 	// A bare rig target is one dispatch, and the engine batch sling, the
-	// scheduler and the daemon's convoy feeders dispatch on owns it — handing it
-	// the request here is what keeps a single sling from being a second
+	// scheduler and the spec dispatcher dispatch on owns it — handing it the
+	// request here is what keeps a single sling from being a second
 	// implementation of the same twelve steps (gt-hk555).
 	//
 	// It has to happen before the bead lock below: the engine takes that lock
@@ -678,8 +678,8 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	force := r.opts.force // local copy to avoid mutating package-level flag
 	if (info.Status == "pinned" || info.Status == "hooked" || info.Status == "in_progress") && !force {
 		// Auto-force when hooked/in_progress agent's session is confirmed dead (gt-pqf9x, GH#1380).
-		// This eliminates the #1 friction in convoy feeding: stale hooks from
-		// dead polecats blocking re-sling without --force.
+		// This eliminates the #1 friction in re-slinging: stale hooks from
+		// dead polecats blocking a re-sling without --force.
 		// IMPORTANT: Stale-hook check must run BEFORE idempotency check so that
 		// a dead polecat with a matching target triggers re-sling, not a no-op.
 		if (info.Status == "hooked" || info.Status == "in_progress") && info.Assignee != "" && r.agentDead(info.Assignee) {
@@ -1178,8 +1178,8 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 }
 
 // runRigTarget dispatches `gt sling <bead> <rig>` on the engine in
-// internal/sling — the one path batch sling, the scheduler and the daemon's
-// convoy feeders dispatch on (gt-hk555) — and boots the rig's agents the way
+// internal/sling — the one path batch sling, the scheduler and the spec
+// dispatcher dispatch on (gt-hk555) — and boots the rig's agents the way
 // the engine's callers must once the dispatch lands.
 func (r *slingRun) runRigTarget(rigName, beadID, formulaName, townRoot string) error {
 	if held, err := r.rigTargetHeld(rigName, beadID, formulaName); err != nil || held {

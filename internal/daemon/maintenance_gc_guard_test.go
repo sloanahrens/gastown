@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,9 +16,9 @@ import (
 	"time"
 )
 
-// Fix round 1 guards: restart suppression, the Dolt-task lock, the Convoy
-// pause, discovery, external servers, and the skipped-window streak. Fakes
-// only; no Dolt, no ~/gt, no Docker.
+// Fix round 1 guards: restart suppression, the Dolt-task lock, discovery,
+// external servers, and the skipped-window streak. Fakes only; no Dolt, no
+// ~/gt, no Docker.
 
 // --- Dolt health restart suppression ---------------------------------------
 
@@ -314,113 +313,6 @@ func TestCompactorDogSkipsWhileGCHoldsLock(t *testing.T) {
 	awaitCompactorDogIdle(t, d)
 	if n := count(); n != 1 {
 		t.Errorf("after the gc: %d cycle(s), want 1", n)
-	}
-}
-
-func TestGCPausesConvoyAroundEachDatabase(t *testing.T) {
-	t.Parallel()
-	d, _ := gcTestDaemon(t)
-	f := withGCFakes(t, d)
-	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}, "gt": {600 * mib, 0}}
-
-	d.maintenanceGCCycle([]string{"hq", "gt"}, "/unused")
-	if f.pauses != 2 || f.resumes != 2 {
-		t.Errorf("pauses=%d resumes=%d, want 2/2 (once around each gc)", f.pauses, f.resumes)
-	}
-
-	d, _ = gcTestDaemon(t) // fresh state: no baseline for hq
-	f2 := withGCFakes(t, d)
-	f2.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}}
-	f2.pauseFails = true
-	res := d.maintenanceGCCycle([]string{"hq"}, "/unused")
-	if res.outcome != gcOutcomeDeferred || res.reason != "convoy poll busy" || len(f2.gcCalls) != 0 {
-		t.Errorf("pause failure: outcome %v reason %q gc %v, want deferred without gc", res.outcome, res.reason, f2.gcCalls)
-	}
-	// The lock was released on the pause-failure path.
-	if release, ok := d.tryDoltTask("x"); !ok {
-		t.Error("doltMaintMu leaked on the convoy-pause failure path")
-	} else {
-		release()
-	}
-}
-
-func TestConvoyManagerPauseResume(t *testing.T) {
-	t.Parallel()
-	var logged []string
-	m := &ConvoyManager{logger: func(format string, args ...interface{}) {
-		logged = append(logged, fmt.Sprintf(format, args...))
-	}}
-
-	// A tick in flight holds the read side: Pause times out and holds nothing.
-	m.pollGate.RLock()
-	if m.Pause(120 * time.Millisecond) {
-		t.Fatal("Pause succeeded while a tick was in flight")
-	}
-	m.pollGate.RUnlock()
-
-	if !m.Pause(time.Second) {
-		t.Fatal("Pause failed with nothing in flight")
-	}
-	// While paused, a scan skips instead of reading Dolt.
-	m.scan()
-	if len(logged) != 1 || !strings.Contains(logged[0], "paused for scheduled gc") {
-		t.Errorf("scan while paused logged %v", logged)
-	}
-	if m.pollGate.TryRLock() {
-		t.Error("a poll tick could start while paused")
-	}
-	m.Resume()
-	if !m.pollGate.TryRLock() {
-		t.Error("poll tick blocked after Resume")
-	} else {
-		m.pollGate.RUnlock()
-	}
-}
-
-// Back-to-back ticks (a tick slower than its interval re-takes the read side
-// the moment it releases it) must not starve Pause: while Pause waits, no new
-// tick may start, so the one in flight drains and Pause wins.
-func TestConvoyManagerPauseNotStarvedByBackToBackTicks(t *testing.T) {
-	t.Parallel()
-	m := &ConvoyManager{logger: func(string, ...interface{}) {}}
-
-	stop := make(chan struct{})
-	done := make(chan struct{})
-	started := make(chan struct{})
-	go func() {
-		defer close(done)
-		once := false
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			if m.tryBeginTick() {
-				if !once {
-					once = true
-					close(started)
-				}
-				runtime.Gosched() // the tick's Dolt reads
-				m.pollGate.RUnlock()
-				continue // the next tick is already due
-			}
-			runtime.Gosched()
-		}
-	}()
-	<-started
-
-	ok := m.Pause(time.Second)
-	close(stop)
-	if ok {
-		m.Resume()
-	}
-	<-done
-	if !ok {
-		t.Fatal("Pause timed out under back-to-back ticks; want it to drain the in-flight tick and win")
-	}
-	if m.pausing.Load() {
-		t.Error("pausing still set after Pause returned")
 	}
 }
 

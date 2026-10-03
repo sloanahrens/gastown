@@ -368,3 +368,28 @@ func TestExecScheduledSlingRunner_CreatesAndClosesRunBeads(t *testing.T) {
 		t.Errorf("closed run bead: status %q reason %q", is.Status, is.CloseReason)
 	}
 }
+
+// The scheduled sling runs `gt sling` as a subprocess and logs one line of its
+// stderr when it fails. With the step timing lines on stderr that line would be
+// "[sling] step admission took ..." and the real error would be lost, so the
+// summary skips them (om review of gt-llg8, major).
+func TestSlingErrorLineSkipsTimingLines(t *testing.T) {
+	t.Parallel()
+	stderr := "[sling] step admission took 1.2s (total 1.2s)\n" +
+		"[sling] step allocate took 3s (total 4.2s)\n" +
+		"Error: worktree verification failed for opal: no such directory\n" +
+		"Hint: try gt polecat nuke\n"
+	if got, want := slingErrorLine(stderr), "Error: worktree verification failed for opal: no such directory"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestSlingErrorLineFallsBackToFirstLine(t *testing.T) {
+	t.Parallel()
+	if got := slingErrorLine("[sling] step admission took 1s (total 1s)\n"); got != "[sling] step admission took 1s (total 1s)" {
+		t.Fatalf("got %q", got)
+	}
+	if got := slingErrorLine(""); got != "" {
+		t.Fatalf("got %q, want empty", got)
+	}
+}

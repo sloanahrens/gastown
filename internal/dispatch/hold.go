@@ -1,7 +1,7 @@
 // Package dispatch holds the contracts every automatic dispatcher in the town
-// shares — the daemon's convoy feeders and scheduled_slings patrol, and the
-// deacon's RECOVERED_BEAD redispatch. It is a leaf package so that daemon,
-// deacon and convoy, which cannot import each other freely, can all reach it.
+// shares — the spec dispatcher and the daemon's scheduled slings. It is a leaf
+// package so that the callers, which cannot import each other freely, can all
+// reach it.
 package dispatch
 
 import (

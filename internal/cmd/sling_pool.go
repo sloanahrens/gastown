@@ -722,14 +722,12 @@ func peekPolecatPoolAgent(townRoot, requested string) (agent, reason string, err
 var errPoolBackpressure = errors.New("polecat pool backpressure")
 
 // poolBackpressureError is the typed refusal: the pool's seat is at its cap. The message leads with `sling refused:`, the marker that tells
-// the convoy feeder to defer the bead instead of failing it (see
-// internal/daemon/convoy_sling_backpressure.go), and carries the pool's own
-// reason line.
+// an automatic dispatcher to defer the bead instead of failing it (internal/
+// dispatch/refusal.go), and carries the pool's own reason line.
 //
-// There is no flag that spawns past the cap, deliberately (gt-4lbz). Every
-// automated redispatch path — the convoy feeder, the deacon's RECOVERED_BEAD
-// redispatch, the dead-holder auto-force in sling.go — carries --force for the
-// safety guards it also needs, so a cap that --force opens is a cap no
+// There is no flag that spawns past the cap, deliberately (gt-4lbz). An
+// automated path that carries --force for the safety guards it also needs opens
+// the cap with that same flag, so a cap that --force opens is a cap no
 // automated path is actually held by: that is the spawn (a 4th flash session
 // with max_overflow 3) this guard exists to stop. Capacity is a property of
 // the town, so it is raised where it is declared — polecat_pool.max_overflow —

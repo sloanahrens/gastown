@@ -491,11 +491,6 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 	daemon.PublishIdentity()
 
 	config := daemon.DefaultConfig(townRoot)
-	// The convoy feeder dispatches in process. internal/daemon cannot import
-	// this package, so the engine's mechanisms are built here and handed over;
-	// the alternative was exec'ing `gt sling`, which ran the dispatch in a
-	// second process with this one's cwd and environment.
-	config.SlingEngine = slingEngineDeps()
 	d, err := daemon.New(config)
 	if err != nil {
 		return fmt.Errorf("creating daemon: %w", err)

@@ -90,7 +90,7 @@ func findCurrentRig(townRoot string) (string, *rig.Rig, error) {
 
 // slingBlocked is why a sling into rigName must not run, or nil when it may.
 // The guards themselves are sling.Blocked's: the dispatch engine runs them for
-// the daemon's convoy feeder as well as for this command, and a second copy
+// the automatic dispatchers as well as for this command, and a second copy
 // here is a rule the two could drift apart on.
 func slingBlocked(townRoot, rigName string, estopOn func(townRoot, rigName string) (bool, error), parked func(townRoot, rigName string) (bool, string)) error {
 	_, err := sling.Blocked(townRoot, rigName, estopOn, parked)

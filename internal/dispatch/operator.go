@@ -18,8 +18,8 @@ const OperatorLabel = "operator"
 // `Sloan Ahrens`, `overseer`).
 //
 // The reservation is a record on the bead, so every dispatcher can read it
-// without asking who wrote it: a convoy feeder re-slings any open member of a
-// convoy, and on 2026-09-25 one re-slung gt-nj23.9 to a fresh polecat two
+// without asking who wrote it: an automatic dispatcher re-slings a ready
+// bead, and on 2026-09-25 one re-slung gt-nj23.9 to a fresh polecat two
 // minutes after the mayor had un-slung it and assigned it to the operator,
 // undoing the reversal (gt-21pl0).
 func OperatorReservation(labels []string, assignee string) string {

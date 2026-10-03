@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -217,6 +218,23 @@ func (r *execScheduledSlingRunner) sling(ctx context.Context, beadID string, e S
 		return fmt.Errorf("gt sling %s: %w: %s", beadID, err, slingErrorLine(string(stderr)))
 	}
 	return nil
+}
+
+// slingErrorLine is the one-line summary of a failed sling's output: the
+// first line that is not a step timing line (sling.StepPrefix, internal/sling/
+// timer.go), falling back to the first line so a failure is never logged as an
+// empty string.
+func slingErrorLine(output string) string {
+	first := ""
+	for i, l := range strings.Split(output, "\n") {
+		if i == 0 {
+			first = l
+		}
+		if l != "" && !strings.HasPrefix(l, sling.StepPrefix) {
+			return l
+		}
+	}
+	return first
 }
 
 func (d *Daemon) scheduledRunner() scheduledSlingRunner {

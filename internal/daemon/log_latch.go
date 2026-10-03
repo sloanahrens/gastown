@@ -7,8 +7,8 @@ import (
 
 // logLatch logs a line for a key only when it differs from the last line
 // logged for that key. The daemon re-checks steady states on every pass (a
-// convoy with tracked issues but none ready, a polecat whose crash detection
-// is skipped because its work is submitted); logging each pass buried
+// polecat whose crash detection is skipped because its work is submitted);
+// logging each pass buried
 // everything else in gt tail (~2/3 of daemon lines). With the latch a state
 // is logged when it starts or changes, and again if it ends (forget,
 // keepOnly) and recurs. The zero value is ready to use.

@@ -381,7 +381,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 			fmt.Printf("   %s Could not set routing.mode: %s\n", style.Dim.Render("⚠"), bdErrOutput(err))
 		}
 
-		// The convoy manager polls the events journal (gt-7iwy0.7).
+		// gt tail reads the events journal (gt-7iwy0.7).
 		if err := townBd.ConfigSet(beads.EventsJournalKey, "true"); err != nil {
 			fmt.Printf("   %s Could not turn on the events journal: %s\n", style.Dim.Render("⚠"), bdErrOutput(err))
 		}

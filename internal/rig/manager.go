@@ -695,7 +695,7 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 			}
 			_ = beads.EnsureConfigYAMLValue(resolvedBeadsDir, "types.custom", constants.BeadsCustomTypes)
 			_ = beads.EnsureConfigYAMLValue(resolvedBeadsDir, "types.infra", constants.BeadsInfraTypes)
-			// The convoy manager polls the events journal (gt-7iwy0.7). Only
+			// gt tail reads the events journal (gt-7iwy0.7). Only
 			// here, for a rig whose .beads is untracked: a tracked config.yaml
 			// belongs to the source repo, which commits the key itself, and
 			// gt doctor's events-journal check flags a store that lacks it.

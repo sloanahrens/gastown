@@ -32,9 +32,9 @@ const doltServerStopBudget = 30 * time.Second
 
 // ShutdownBudget is the real wall-clock ceiling on Daemon.shutdown(): its one
 // bounded step, the Dolt SQL server's own graceful-stop wait
-// (doltServerStopBudget) before it SIGKILLs. Everything else in shutdown
-// (stopping the curator, convoy manager) is in-process and returns
-// immediately. Shutdown no longer pushes Dolt remotes (ADR 0002) or flushes
+// (doltServerStopBudget) before it SIGKILLs. Everything else in shutdown is
+// in-process and returns immediately. Shutdown no longer pushes Dolt remotes
+// (ADR 0002) or flushes
 // OTel telemetry (deleted, gt-s3rec.5), so there is no other step.
 //
 // This is the actual value a daemon restart must plan around — not an
@@ -112,12 +112,6 @@ type DoltServerManager struct {
 	// Health check warnings (Option B throttling for doctor molecule).
 	// Populated by checkHealthLocked(), consumed by Daemon.ensureDoltServerRunning().
 	lastWarnings []string // Warnings from the most recent health check
-
-	// onRecoveryFn is called (in a goroutine) when the Dolt server transitions
-	// from unhealthy back to healthy, i.e., when the DOLT_UNHEALTHY signal file
-	// is cleared after having been present. Set by SetRecoveryCallback.
-	// Protected by mu.
-	onRecoveryFn func()
 
 	// restartSuppressed, when set and returning true, defers a health-driven
 	// restart of a running server: EnsureRunning logs the failure and returns
@@ -228,15 +222,6 @@ func normalizeDoltServerConfig(townRoot string, config *DoltServerConfig) *DoltS
 	normalized.Host = ep.Host
 	normalized.Port = ep.Port
 	return &normalized
-}
-
-// SetRecoveryCallback registers fn to be called (in a goroutine) whenever Dolt
-// transitions from unhealthy back to healthy. Only the most recently registered
-// callback is used. Pass nil to clear the callback.
-func (m *DoltServerManager) SetRecoveryCallback(fn func()) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.onRecoveryFn = fn
 }
 
 func (m *DoltServerManager) now() time.Time {
@@ -897,18 +882,9 @@ func (m *DoltServerManager) writeUnhealthySignal(reason, detail string) bool {
 }
 
 // clearUnhealthySignal removes the DOLT_UNHEALTHY signal file when the server is healthy.
-// If the signal file was present (meaning Dolt was previously unhealthy), it fires the
-// onRecoveryFn callback in a goroutine to trigger a convoy recovery sweep.
-// Must be called with mu held (onRecoveryFn is protected by mu).
+// Must be called with mu held.
 func (m *DoltServerManager) clearUnhealthySignal() {
-	signalFile := m.unhealthySignalFile()
-	_, wasUnhealthy := os.Stat(signalFile)
-	_ = os.Remove(signalFile)
-	// Transition detected: was unhealthy, now healthy — fire recovery callback.
-	if wasUnhealthy == nil && m.onRecoveryFn != nil {
-		fn := m.onRecoveryFn
-		go fn()
-	}
+	_ = os.Remove(m.unhealthySignalFile())
 }
 
 // IsDoltUnhealthy checks if the DOLT_UNHEALTHY signal file exists.

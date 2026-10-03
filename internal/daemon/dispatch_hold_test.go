@@ -3,7 +3,6 @@ package daemon
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -16,8 +15,8 @@ import (
 	"github.com/steveyegge/gastown/internal/schedulerrun"
 )
 
-// The daemon's automatic dispatchers — the stranded-convoy feeder and the
-// scheduled_slings patrol — stand down while the operator's town-wide hold
+// The daemon's automatic dispatch — the spec dispatcher and the
+// scheduled_slings patrol — stands down while the operator's town-wide hold
 // file exists (gt-ifijm). Each test uses a temp town root; the real
 // ~/gt/seat-refill.hold is never read.
 
@@ -25,32 +24,6 @@ func writeOperatorHold(t *testing.T, townRoot string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(townRoot, "seat-refill.hold"), nil, 0644); err != nil {
 		t.Fatalf("write hold: %v", err)
-	}
-}
-
-func TestFeedFirstReady_OperatorHold_SlingsNothing(t *testing.T) {
-	t.Parallel()
-	// A gt that would succeed: only the hold can stop the sling.
-	townRoot, gt, _ := backpressureFeedRig(t)
-	writeOperatorHold(t, townRoot)
-
-	var logged []string
-	logger := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
-	m := newFeedManager(townRoot, logger, gt)
-
-	m.feedFirstReady(strandedConvoyInfo{ID: "hq-cv-held", ReadyCount: 1, ReadyIssues: []string{"gt-issue1"}})
-
-	if calls := gt.argvs(); len(calls) != 0 {
-		t.Errorf("gt invoked during an operator hold: %q", calls)
-	}
-	found := false
-	for _, l := range logged {
-		if strings.Contains(l, "seat-refill.hold") {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("no log line naming the hold; got %v", logged)
 	}
 }
 
@@ -184,23 +157,17 @@ func TestDispatchQueuedWork_OperatorHold_SkipsDispatchAndLogsOnce(t *testing.T) 
 func TestDispatchQueuedWork_HoldLiftedLineNamesTheDispatchers(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name    string
-		spec    bool
-		feeding bool
-		want    string
+		name string
+		spec bool
+		want string
 	}{
-		{"both on", true, true, "(spec_dispatch on, convoy feed on)"},
-		{"spec_dispatch on, feeder stopped", true, false, "(spec_dispatch on, convoy feed off)"},
-		{"both off", false, false, "(spec_dispatch off, convoy feed off)"},
+		{"spec_dispatch on", true, "(spec_dispatch on)"},
+		{"spec_dispatch off", false, "(spec_dispatch off)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			townRoot := t.TempDir()
 			writeOperatorHold(t, townRoot)
 			logger, lines := lineLogger()
-			feed := NewConvoyManager(townRoot, logger.Printf, nil, 0, nil, nil, nil)
-			// A running feeder without its goroutines: FeedActive reads the
-			// state Start sets, not the work the goroutines do.
-			feed.started.Store(tc.feeding)
 			d := &Daemon{
 				config: &Config{TownRoot: townRoot},
 				logger: logger,
@@ -208,7 +175,6 @@ func TestDispatchQueuedWork_HoldLiftedLineNamesTheDispatchers(t *testing.T) {
 					SpecDispatch: &SpecDispatchConfig{Enabled: tc.spec},
 				}},
 				schedulerDeps: schedulerDepsForTest(),
-				convoyManager: feed,
 			}
 
 			d.dispatchQueuedWork() // logs the hold once
@@ -277,42 +243,5 @@ func TestRunScheduledSlings_RigEstop_SkipsOnlyThatRig(t *testing.T) {
 	}
 	if n := d.scheduledSlingFailures["doc-audit"]; n != 0 || len(*esc) != 0 {
 		t.Errorf("a rig ESTOP counted as a failure (%d) or escalated (%v)", n, *esc)
-	}
-}
-
-func TestFeedFirstReady_OperatorHold_LogsOncePerStateChange(t *testing.T) {
-	t.Parallel()
-	townRoot, gt, _ := backpressureFeedRig(t)
-	writeOperatorHold(t, townRoot)
-	var logged []string
-	logger := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
-	m := newFeedManager(townRoot, logger, gt)
-
-	for i := 0; i < 3; i++ {
-		m.feedFirstReady(strandedConvoyInfo{ID: "hq-cv-held", ReadyCount: 1, ReadyIssues: []string{"gt-issue1"}})
-	}
-	if n := countContaining(logged, "seat-refill.hold"); n != 1 {
-		t.Errorf("hold logged %d times over 3 scans, want once; log: %v", n, logged)
-	}
-}
-
-func TestFeedFirstReady_RigEstop_SkipsThatRigsIssue(t *testing.T) {
-	t.Parallel()
-	townRoot, gt, _ := backpressureFeedRig(t)
-	// routes map gt- to rig "gt".
-	if err := os.WriteFile(filepath.Join(townRoot, "ESTOP.gt"), []byte("manual\t2026-09-24T00:00:00Z\tt\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	var logged []string
-	logger := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
-	m := newFeedManager(townRoot, logger, gt)
-
-	m.feedFirstReady(strandedConvoyInfo{ID: "hq-cv-rig", ReadyCount: 1, ReadyIssues: []string{"gt-issue1"}})
-
-	if calls := gt.argvs(); len(calls) != 0 {
-		t.Errorf("slung into a rig under ESTOP: %q", calls)
-	}
-	if countContaining(logged, "gt-issue1", "ESTOP.gt") == 0 {
-		t.Errorf("no log line naming the rig ESTOP; got %v", logged)
 	}
 }

@@ -22,7 +22,7 @@ import (
 // spends its entire 60s budget (internal/beads.bdSubprocessTimeout) when the
 // host is CPU-starved, and one heartbeat evaluates it per rig from roughly ten
 // call sites: each patrol's rig filter (getPatrolRigs), witness auto-start,
-// refinery auto-start, and the convoy manager's isRigParked callback. A
+// and refinery auto-start. A
 // saturated host therefore stalled the heartbeat for a minute per rig per call
 // site - during exactly the window the heartbeat exists to cover, since some of
 // those call sites are the ones that restart dead agents (gt-4nu3). So the

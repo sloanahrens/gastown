@@ -12,9 +12,9 @@ import (
 )
 
 // EventsJournalCheck fails when a store's config leaves bd's events journal
-// off. The convoy manager polls the journal (gt-7iwy0.2), and a close reaches
-// it only when the store's config.yaml turns it on (gt-7iwy0.7). The value is
-// read with any inherited BD_EVENTS_JOURNAL removed.
+// off. gt tail reads the journal, and bd writes one only when the store's
+// config.yaml turns it on (gt-7iwy0.7). The value is read with any inherited
+// BD_EVENTS_JOURNAL removed.
 type EventsJournalCheck struct {
 	BaseCheck
 	// environ is the environment bd runs under before the check pins it to
@@ -86,7 +86,7 @@ func (c *EventsJournalCheck) Run(ctx *CheckContext) *CheckResult {
 	return &CheckResult{
 		Name:    c.Name(),
 		Status:  StatusError,
-		Message: fmt.Sprintf("Events journal off in %d store(s): convoys miss closes made with bd directly", len(off)),
+		Message: fmt.Sprintf("Events journal off in %d store(s): gt tail reads no events from them", len(off)),
 		Details: details,
 		FixHint: fmt.Sprintf("In each store's beads dir run 'BEADS_DIR=<dir> bd config set %s true', then commit config.yaml where it is git-tracked", beads.EventsJournalKey),
 	}

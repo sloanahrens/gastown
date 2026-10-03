@@ -43,15 +43,3 @@ func SlingRefusalReason(stderr string) (string, bool) {
 // and an operator resumes it with --branch or discards it with --force. For
 // an automatic dispatcher it is still a deferral, never a failed attempt.
 const ReslingRefusalMarker = "refusing to re-sling"
-
-// ReslingRefusalReason extracts a re-sling refusal from a failed sling's
-// stderr, reporting false for every other failure. Like SlingRefusalReason,
-// the line is returned from the marker on.
-func ReslingRefusalReason(stderr string) (string, bool) {
-	for _, line := range strings.Split(stderr, "\n") {
-		if i := strings.Index(line, ReslingRefusalMarker); i >= 0 {
-			return strings.TrimSpace(line[i:]), true
-		}
-	}
-	return "", false
-}
