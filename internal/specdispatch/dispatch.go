@@ -44,10 +44,12 @@ func IsDispatchType(t string) bool {
 const (
 	// ShapeGateOff runs no lint: shape is not a gate.
 	ShapeGateOff = "off"
-	// ShapeGateWarn slings the bead anyway and leaves the verdict on it as one
-	// comment.
+	// ShapeGateWarn holds a bead the lint refuses instead of slinging it: the
+	// bead stays ready and wears one SHAPE comment, for the operator to shape
+	// or waive (gt-f8ppx).
 	ShapeGateWarn = "warn"
-	// ShapeGateRefuse skips the bead and labels it.
+	// ShapeGateRefuse holds the bead like warn, and labels it needs-shape (or
+	// needs-planning) so the operator's reshape queue names it.
 	ShapeGateRefuse = "refuse"
 )
 

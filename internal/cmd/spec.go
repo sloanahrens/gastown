@@ -30,8 +30,8 @@ import (
 // dispatch` is one tick of the dispatcher: every ready, unassigned work bead
 // of a dispatchable type (task/bug/feature) across operational rigs, at or
 // above the operator's priority ceiling, in priority/created/id order, is
-// linted and — when clean and a seat is free — slung through executeSling
-// in-process. The label spec and type feature are retired and
+// linted and — when it clears the shape gate and a seat is free — slung through
+// executeSling in-process. The label spec and type feature are retired and
 // accepted-but-ignored (gt-mmsr2): neither admits or refuses a bead now. The
 // daemon's spec_dispatch ticker runs `gt spec dispatch --json` on its cadence,
 // the way mayor_dispatch runs `gt daemon dispatch-check` (internal/cmd imports
@@ -141,11 +141,13 @@ taken. Each candidate is linted (see gt spec lint), and
 polecat_pool.shape_gate says what the verdict does:
 
   - off: no lint runs; the bead is dispatched like any other
-  - warn (the default): the bead is dispatched, and the verdict is left on it
-    as one comment (SHAPE: ...)
-  - refuse: refused beads get one line, one comment and the needs-shape label,
-    and are never dispatched; a bead that needs planning gets the
-    needs-planning label and is left for the planner (gt-4k3fj.7)
+  - warn (the default): a bead the lint refuses is held — skipped with the
+    reason "unshaped: <fields>" and left ready for the next tick — and the
+    verdict is left on it as one comment (SHAPE: ...). A bead labeled
+    spec-shape-waived waives the lint and dispatches anyway
+  - refuse: as warn, and a held bead also wears the needs-shape label; a bead
+    that needs planning gets the needs-planning label and is left for the
+    planner (gt-4k3fj.7)
 
 Beads labeled red-main are held while the red-main owner is reverting the
 breakage they were filed for: the landing worker records a revert in flight in
@@ -346,16 +348,18 @@ type specDispatchEnv struct {
 	// (polecat_pool.max_priority): a bead numbered higher is backlog.
 	MaxPriority int
 	// ShapeGate is what the lint's verdict does to a candidate: off runs no
-	// lint, warn slings it anyway and comments the verdict, refuse skips and
-	// labels it (polecat_pool.shape_gate, gt-cq5gb).
+	// lint, warn holds a refused bead and comments the verdict, refuse also
+	// labels it needs-shape (polecat_pool.shape_gate, gt-cq5gb, gt-f8ppx).
 	ShapeGate string
 }
 
-// runSpecDispatchCycle is one tick. It never guesses: under a refuse gate a
-// bead the lint refuses is labeled and left alone, and one that needs planning
-// is labeled and left for the planner; under warn the verdict is commented and
-// the bead is dispatched anyway; off runs no lint. A candidate is slung only
-// onto a free seat that takes it, and a skip leaves it ready for the next tick.
+// runSpecDispatchCycle is one tick. It never guesses: under the default warn
+// gate a bead the lint refuses is held — skipped unshaped and commented once —
+// while one that needs planning still dispatches; under refuse the held bead is
+// also labeled needs-shape, and one that needs planning is labeled and left for
+// the planner; off runs no lint. A bead labeled spec-shape-waived waives the
+// lint and dispatches under any gate (gt-f8ppx). A candidate is slung only onto
+// a free seat that takes it, and a skip leaves it ready for the next tick.
 func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	report := specDispatchReport{Template: env.Template.Source}
 	if hold := env.Hold(); hold != "" {
@@ -420,12 +424,31 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			verdict := specdispatch.Lint(full, env.Template)
 			switch {
 			case verdict.Clean():
+			case full.HasLabel(specdispatch.ShapeWaivedLabel):
+				// The operator waived this bead's shape lint (gt-f8ppx): it
+				// dispatches under any gate, with the verdict left on it as the
+				// one comment, in seat-refill's own note text (gt-cq5gb).
+				shapeNote = verdict.ShapeNote()
 			case env.ShapeGate == specdispatch.ShapeGateWarn:
-				// The observe-first half of the rollout (the default): the bead
-				// is slung anyway, with the verdict left on it as one comment,
-				// in seat-refill's own note text (gt-cq5gb). The note is written
-				// on the dispatch path below, not here, so a candidate no free
-				// seat takes this tick is not commented about every tick.
+				// The default gate holds a bead the lint refuses rather than
+				// slinging it (gt-f8ppx): a flash polecat handed work the bead
+				// does not pin down wanders off it, so the bead waits for the
+				// operator to shape it or waive the lint. The one SHAPE note
+				// still lands so the bead's history says why; it is written
+				// here, not on the dispatch path below, because a held bead
+				// never reaches that path. A planning verdict is not a refusal
+				// and still dispatches.
+				if reason := verdict.UnshapedReason(); reason != "" {
+					report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s", id, reason)})
+					if !env.DryRun {
+						if note := verdict.ShapeNote(); note != "" {
+							if err := env.Annotate(id, note, note); err != nil {
+								report.Errors = append(report.Errors, fmt.Sprintf("%s: annotate: %v", id, err))
+							}
+						}
+					}
+					continue
+				}
 				shapeNote = verdict.ShapeNote()
 			default:
 				line := verdict.Line(id)

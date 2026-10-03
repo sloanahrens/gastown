@@ -171,10 +171,10 @@ func TestSpecDispatchSlingsInDeterministicOrder(t *testing.T) {
 	}
 }
 
-// The shape gate is the operator's (polecat_pool.shape_gate, gt-cq5gb), and
-// the dispatcher carries over every value the seat-refill plugin honored: warn
-// slings a badly shaped bead anyway and leaves the verdict on it, refuse skips
-// it and labels it needs-shape, off runs no lint at all.
+// The shape gate is the operator's (polecat_pool.shape_gate, gt-cq5gb): warn
+// holds a bead the lint refuses and leaves the verdict on it once, refuse also
+// labels the held bead needs-shape, off runs no lint at all, and a bead the
+// operator waived with spec-shape-waived dispatches under any gate (gt-f8ppx).
 func TestSpecDispatchShapeGate(t *testing.T) {
 	t.Parallel()
 	shapeless := func() specdispatch.Spec {
@@ -184,14 +184,17 @@ func TestSpecDispatchShapeGate(t *testing.T) {
 	}
 	const refusedLine = "gt-bad: spec lint refused: ## Gate: section missing"
 
-	t.Run("warn slings and notes", func(t *testing.T) {
+	t.Run("warn holds and notes", func(t *testing.T) {
 		t.Parallel()
 		f := newFakeSpecTown(shapeless())
 		env := f.env()
 		env.ShapeGate = specdispatch.ShapeGateWarn
 		r := runSpecDispatchCycle(env)
-		if len(f.slung) != 1 || len(r.Refused) != 0 {
-			t.Fatalf("slung %v refused %+v", f.slung, r.Refused)
+		if len(f.slung) != 0 || len(r.Dispatched) != 0 {
+			t.Fatalf("warn slung a refused bead: slung %v report %+v", f.slung, r)
+		}
+		if len(r.Skipped) != 1 || r.Skipped[0].Line != "gt-bad: unshaped: ## Gate" {
+			t.Fatalf("skipped = %+v, want one unshaped hold", r.Skipped)
 		}
 		if len(f.labels["gt-bad"]) != 0 {
 			t.Errorf("warn must not label the bead: %v", f.labels["gt-bad"])
@@ -199,13 +202,38 @@ func TestSpecDispatchShapeGate(t *testing.T) {
 		if n := f.notes["gt-bad"]; len(n) != 1 || !strings.HasPrefix(n[0], "SHAPE: ## Gate: section missing") {
 			t.Errorf("notes = %v, want one SHAPE note", n)
 		}
-		if !strings.Contains(r.Dispatched[0].Line, "SHAPE: ## Gate: section missing") {
-			t.Errorf("dispatch line %q must carry the verdict", r.Dispatched[0].Line)
+		// A second tick holds and reports the bead again, but writes no second
+		// note for the same verdict.
+		r = runSpecDispatchCycle(env)
+		if len(r.Skipped) != 1 {
+			t.Fatalf("second tick skipped = %+v", r.Skipped)
 		}
-		// A second tick with the same verdict writes no second note.
-		runSpecDispatchCycle(env)
 		if n := f.notes["gt-bad"]; len(n) != 1 {
 			t.Errorf("verdict noted %d times, want once", len(n))
+		}
+	})
+
+	t.Run("waived slings despite the refusal", func(t *testing.T) {
+		t.Parallel()
+		for _, gate := range []string{specdispatch.ShapeGateWarn, specdispatch.ShapeGateRefuse} {
+			waived := shapeless()
+			waived.Labels = []string{specdispatch.ShapeWaivedLabel}
+			f := newFakeSpecTown(waived)
+			env := f.env()
+			env.ShapeGate = gate
+			r := runSpecDispatchCycle(env)
+			if len(f.slung) != 1 || len(r.Dispatched) != 1 || len(r.Skipped) != 0 || len(r.Refused) != 0 {
+				t.Fatalf("%s gate held a waived bead: slung %v report %+v", gate, f.slung, r)
+			}
+			if len(f.labels["gt-bad"]) != 0 {
+				t.Errorf("%s gate labeled a waived bead: %v", gate, f.labels["gt-bad"])
+			}
+			if n := f.notes["gt-bad"]; len(n) != 1 || !strings.HasPrefix(n[0], "SHAPE: ## Gate: section missing") {
+				t.Errorf("%s gate notes = %v, want one SHAPE note", gate, n)
+			}
+			if !strings.Contains(r.Dispatched[0].Line, "SHAPE: ## Gate: section missing") {
+				t.Errorf("%s dispatch line %q must carry the verdict", gate, r.Dispatched[0].Line)
+			}
 		}
 	})
 
@@ -234,6 +262,48 @@ func TestSpecDispatchShapeGate(t *testing.T) {
 			t.Fatalf("off gate still gated: slung %v report %+v notes %v labels %v", f.slung, r, f.notes, f.labels)
 		}
 	})
+}
+
+// A held unshaped bead spends no seat and does not block the shaped beads
+// behind it: the hold is a skip, not a stop (gt-f8ppx acceptance 4).
+func TestSpecDispatchUnshapedHoldSpendsNoSeat(t *testing.T) {
+	t.Parallel()
+	bad := cleanSpec("gt-bad", 1, "2026-09-29T10:00:00Z")
+	bad.Description = strings.Replace(bad.Description, "## Gate\nmake gate", "", 1)
+	good := cleanSpec("gt-good", 2, "2026-09-29T11:00:00Z")
+	f := newFakeSpecTown(bad, good)
+	env := f.env()
+	env.ShapeGate = specdispatch.ShapeGateWarn
+	env.PerTick = 1 // the held bead must not spend the one slot
+	r := runSpecDispatchCycle(env)
+	if got := strings.Join(f.slung, " "); got != "gt-good" {
+		t.Fatalf("slung %q, want only the shaped bead", got)
+	}
+	if len(r.Skipped) != 1 || r.Skipped[0].Bead != "gt-bad" {
+		t.Fatalf("skipped = %+v, want the unshaped bead held", r.Skipped)
+	}
+	if len(r.Dispatched) != 1 || r.Dispatched[0].Bead != "gt-good" {
+		t.Fatalf("dispatched = %+v, want the shaped bead behind the hold", r.Dispatched)
+	}
+}
+
+// --dry-run holds an unshaped bead too: it reports the unshaped reason and
+// writes nothing (gt-f8ppx acceptance 1).
+func TestSpecDispatchDryRunHoldsUnshaped(t *testing.T) {
+	t.Parallel()
+	bad := cleanSpec("gt-bad", 1, "2026-09-29T10:00:00Z")
+	bad.Description = strings.Replace(bad.Description, "## Gate\nmake gate", "", 1)
+	f := newFakeSpecTown(bad)
+	env := f.env()
+	env.ShapeGate = specdispatch.ShapeGateWarn
+	env.DryRun = true
+	r := runSpecDispatchCycle(env)
+	if len(r.Skipped) != 1 || r.Skipped[0].Line != "gt-bad: unshaped: ## Gate" {
+		t.Fatalf("skipped = %+v, want the unshaped hold", r.Skipped)
+	}
+	if len(f.slung) != 0 || len(f.notes) != 0 || len(f.labels) != 0 {
+		t.Fatalf("dry run had side effects: slung %v notes %v labels %v", f.slung, f.notes, f.labels)
+	}
 }
 
 func TestSpecDispatchPerTickLimit(t *testing.T) {
