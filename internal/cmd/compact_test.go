@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
 
 // writeTestRigsConfig sets up a fake town root at dir with mayor/rigs.json
@@ -255,6 +256,79 @@ func TestExtractJSONArray(t *testing.T) {
 				t.Errorf("extractJSONArray(%q) = %q, want %q", tc.data, got, tc.want)
 			}
 		})
+	}
+}
+
+// recordingListClient captures the ListOptions a caller passes, so a test can
+// pin the filter without a real bd.
+type recordingListClient struct {
+	beads.Client
+	opts beads.ListOptions
+}
+
+func (c *recordingListClient) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	c.opts = opts
+	return c.Client.List(opts)
+}
+
+// listWisps must reach the wisp plane, which bd's default list view omits:
+// a seeded wisp comes back, a durable issue does not, and a closed wisp
+// survives the status filter (gt-ekep1).
+func TestListWispsReadsTheWispPlane(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	db.Seed(
+		beads.Issue{ID: "gt-wisp-open", Title: "heartbeat", Status: "open", Ephemeral: true, WispType: "heartbeat"},
+		beads.Issue{ID: "gt-wisp-closed", Title: "done patrol", Status: "closed", Ephemeral: true, WispType: "patrol"},
+		beads.Issue{ID: "gt-task", Title: "durable work", Status: "open"},
+	)
+
+	wisps, err := listWisps(db)
+	if err != nil {
+		t.Fatalf("listWisps: %v", err)
+	}
+
+	got := make(map[string]bool, len(wisps))
+	for _, w := range wisps {
+		got[w.ID] = true
+	}
+	if len(wisps) != 2 || !got["gt-wisp-open"] || !got["gt-wisp-closed"] {
+		t.Fatalf("listWisps = %v, want the two wisps and no durable issue", ids(wisps))
+	}
+}
+
+// ids names issues by ID for a failure message.
+func ids(issues []*beads.Issue) []string {
+	out := make([]string, 0, len(issues))
+	for _, is := range issues {
+		out = append(out, is.ID)
+	}
+	return out
+}
+
+// Priority 0 is both a valid wisp priority and ListOptions' "no filter"
+// sentinel value, so listWisps must pass -1 or P0 wisps vanish (gt-ekep1).
+func TestListWispsLeavesPriorityUnfiltered(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	db.Seed(
+		beads.Issue{ID: "gt-wisp-p0", Status: "open", Ephemeral: true, Priority: 0},
+		beads.Issue{ID: "gt-wisp-p4", Status: "open", Ephemeral: true, Priority: 4},
+	)
+	rec := &recordingListClient{Client: db}
+
+	wisps, err := listWisps(rec)
+	if err != nil {
+		t.Fatalf("listWisps: %v", err)
+	}
+	if rec.opts.Priority != -1 {
+		t.Errorf("List Priority = %d, want -1 (no filter)", rec.opts.Priority)
+	}
+	if !rec.opts.Ephemeral || rec.opts.Status != "all" {
+		t.Errorf("List opts = %+v, want Ephemeral with Status all", rec.opts)
+	}
+	if len(wisps) != 2 {
+		t.Fatalf("listWisps = %v, want both priorities", ids(wisps))
 	}
 }
 
