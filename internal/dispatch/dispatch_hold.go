@@ -3,8 +3,6 @@ package dispatch
 import (
 	"strings"
 	"unicode"
-
-	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // A dispatch hold is a decision recorded on a bead's own record that takes it
@@ -15,7 +13,7 @@ import (
 // These markers are machine-read: before writing or releasing one, read
 // docs/concepts/dispatch-holds.md, which states the write form of each and the
 // paths that read it. dispatchHoldLabels, dispatchHoldStatuses and
-// dispatchHoldProse below are the field half of that vocabulary.
+// dispatchHoldProse below are that vocabulary.
 
 // dispatchHoldLabels are the routing decisions recorded as labels: needs-pro
 // wants a specific runtime, needs-mayor-review wants the mayor's eyes before
@@ -40,20 +38,14 @@ var dispatchHoldStatuses = []string{"deferred", "pinned"}
 // listed as they are written so the reason can quote them back.
 var dispatchHoldProse = []string{"MAYOR DESIGN DECISION", "do not redispatch"}
 
-// dispatchHoldRelease clears a decision recorded in a comment, the one field
-// that cannot be edited or withdrawn: beads comments are append-only, so a hold
-// written as a comment needs a later comment to lift it.
-var dispatchHoldRelease = "HOLD RELEASED"
-
 // DispatchHoldFields reports the hold a bead's own fields assert, or "" when
 // they assert none.
 //
-// It is the field half of the shared hold rule, exported so a caller that has a
-// bead's fields but no IssueSource reaches the same verdict instead of a second
-// copy of the rule — the witness reads a polecat's hooked bead as JSON to
-// decide whether a restart may raise it (gt-n38c6). Comments are not part of
-// this: bd show --json omits them, which makes such a caller narrower than
-// HoldInComments and never wider. status is a plain string so that
+// It is the shared hold rule for a bead's fields, exported so a caller that has
+// a bead's fields but no IssueSource reaches the same verdict instead of a
+// second copy of the rule — the witness reads a polecat's hooked bead as JSON
+// to decide whether a restart may raise it (gt-n38c6). Comments are not part of
+// the rule: bd show --json omits them. status is a plain string so that
 // JSON-reading caller needs no SDK type.
 func DispatchHoldFields(status string, labels []string, assignee, design, notes string) string {
 	for _, held := range dispatchHoldStatuses {
@@ -83,26 +75,6 @@ func DispatchHoldFields(status string, labels []string, assignee, design, notes 
 	return ""
 }
 
-// HoldInComments reports the hold a bead's comment history asserts, or "".
-//
-// It is the comment half of the rule DispatchHoldFields applies to a bead's
-// fields. Comments arrive oldest first, and the newest decision is the live
-// one: a later release lifts an earlier hold, which is what makes a
-// comment-recorded hold releasable (gt-tq6l).
-func HoldInComments(comments []beads.Comment) string {
-	held := ""
-	for _, comment := range comments {
-		if decisionOnLine(comment.Text, []string{dispatchHoldRelease}) != "" {
-			held = ""
-			continue
-		}
-		if decision := holdDecisionIn(comment.Text); decision != "" {
-			held = decision + " in comment"
-		}
-	}
-	return held
-}
-
 // holdDecisionIn returns the keep-off decision text asserts, or "". The
 // decision has to be asserted, not merely mentioned, so a note that quotes the
 // wording back — as this feature's own beads do — is not held by it (gt-tq6l).
@@ -125,8 +97,8 @@ func decisionOnLine(text string, markers []string) string {
 }
 
 // stripLineDecoration drops the leading decoration a decision may be written
-// behind: "- do not redispatch", "> **HOLD RELEASED**", "## MAYOR DESIGN
-// DECISION".
+// behind: "- do not redispatch", "> **MAYOR DESIGN DECISION**", "## MAYOR
+// DESIGN DECISION".
 func stripLineDecoration(line string) string {
 	return strings.TrimLeft(strings.TrimSpace(line), "#*->+` \t")
 }
