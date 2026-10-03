@@ -4826,6 +4826,28 @@ func TestWriteServerConfig_Defaults(t *testing.T) {
 // kill-switch: AutoGC="off" emits auto_gc_behavior {enable:false,
 // archive_level:0} so auto_gc can be disabled at runtime without a source
 // revert+rebuild (hq-excy9g escape hatch).
+// Dolt interpolates environment references across the whole config file,
+// comments included, and exits at startup on an unset one.
+func TestWriteServerConfig_NoEnvReferences(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	config := &Config{Port: 3307, DataDir: dir, LogLevel: "warning", Host: "127.0.0.1",
+		MaxConnections: 1000, ReadTimeoutMs: DefaultReadTimeoutMs, WriteTimeoutMs: DefaultWriteTimeoutMs}
+	if err := writeServerConfig(config, configPath); err != nil {
+		t.Fatalf("writeServerConfig: %v", err)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("reading config: %v", err)
+	}
+	for i, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(line, "$") {
+			t.Errorf("config line %d contains '$', which dolt expands as an environment reference: %q", i+1, line)
+		}
+	}
+}
+
 func TestWriteServerConfig_AutoGCDisabled(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

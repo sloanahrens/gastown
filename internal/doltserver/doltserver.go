@@ -1938,13 +1938,17 @@ func writeServerConfig(config *Config, configPath string) error {
 		autoGcBlock = "  auto_gc_behavior:\n    enable: false\n    archive_level: 0\n"
 	}
 
+	// Dolt expands environment references anywhere in this file, comments
+	// included, and refuses to start on an unset one: the template must never
+	// contain a dollar sign (gt-y3pgh.2.4 put one in a comment and every
+	// fresh start failed).
 	content := fmt.Sprintf(`# Dolt SQL server configuration — managed by Gas Town (gt dolt start)
 # Do not edit manually; changes are overwritten on each server start.
 # The listener comes from mayor/town.json (gt config set dolt.port).
 # To customize the rest, set operational.dolt in settings/config.json: the
 # Dolt user, log level, idle-session timeout, time zone, event scheduler
 # (OFF, ON, omit), stats (0, 1, omit) and auto GC (on, off).
-# The Dolt password is operational.dolt.password, a ${VAR} reference into
+# The Dolt password is operational.dolt.password, a reference to a variable in
 # settings/daemon.env; it is never written to this file.
 
 log_level: %s
