@@ -139,8 +139,10 @@ func parseDelegationFromMetadata(metadata json.RawMessage) (*Delegation, error) 
 // ListDelegationsFrom returns all delegations from a parent work unit.
 // This searches for issues that have delegated_from pointing to the parent.
 func (b *Beads) ListDelegationsFrom(parent string) ([]*Delegation, error) {
-	// List all issues that depend on this parent (delegated work blocks parent)
-	issues, err := b.List(ListOptions{Status: "all"})
+	// List all issues that depend on this parent (delegated work blocks parent).
+	// Priority -1: a delegated bead carries whatever priority its creator gave
+	// it, and the zero value would silently read P0 only.
+	issues, err := b.List(ListOptions{Status: "all", Priority: -1})
 	if err != nil {
 		return nil, fmt.Errorf("listing issues: %w", err)
 	}
