@@ -24,7 +24,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
@@ -373,7 +372,6 @@ func TestIntegrationSchedulerSingleRigChecks(t *testing.T) {
 func TestIntegrationSchedulerMultiRigChecks(t *testing.T) {
 	t.Parallel()
 	hqPath, rig1Path, rig2Path, gtBinary, env := setupMultiRigSchedulerTown(t)
-	t.Run("ConvoyFlagRejection", func(t *testing.T) { checkSchedulerConvoyFlagRejection(t, hqPath, rig1Path, rig2Path, gtBinary, env) })
 	t.Run("EpicFlagRejection", func(t *testing.T) { checkSchedulerEpicFlagRejection(t, hqPath, rig1Path, rig2Path, gtBinary, env) })
 	t.Run("EpicDetection", func(t *testing.T) { checkSchedulerEpicDetection(t, hqPath, rig1Path, rig2Path, gtBinary, env) })
 	t.Run("MixedBatchRejection", func(t *testing.T) { checkSchedulerMixedBatchRejection(t, hqPath, rig1Path, rig2Path, gtBinary, env) })
@@ -1051,8 +1049,7 @@ func TestIntegrationSchedulerQueuedContextUsesRoutedCrossRigSourceLookup(t *test
 // Cross-rig container tests
 //
 // These tests verify that gt sling deferred dispatch (max_polecats > 0) correctly auto-resolves
-// each child's target rig from its bead ID prefix, enabling multi-rig epics
-// and convoys.
+// each child's target rig from its bead ID prefix, enabling multi-rig epics.
 // --------------------------------------------------------------------------
 
 // TestIntegrationSchedulerMultiRigEpicAutoResolve verifies that gt sling <epic> deferred dispatch (max_polecats > 0)
@@ -1122,26 +1119,6 @@ func TestIntegrationSchedulerMultiRigEpicAutoResolve(t *testing.T) {
 	}
 }
 
-// checkSchedulerConvoyFlagRejection verifies that task-only flags are rejected
-// when gt sling deferred dispatch (max_polecats > 0) auto-detects a convoy ID.
-func checkSchedulerConvoyFlagRejection(t *testing.T, hqPath, rig1Path, rig2Path, gtBinary string, env []string) {
-
-	// Create a convoy in HQ.
-	convoyID := createTestBeadOfType(t, hqPath, "Flag rejection convoy", "convoy")
-
-	// Attempt to schedule convoy with task-only flag --ralph.
-	out, err := runGTCmdMayFail(t, gtBinary, hqPath, env, "sling", convoyID, "--ralph")
-	if err == nil {
-		t.Fatalf("gt sling %s deferred dispatch (max_polecats > 0) --ralph should fail, but succeeded:\n%s", convoyID, out)
-	}
-	if !strings.Contains(out, "convoy mode does not support") {
-		t.Errorf("expected 'convoy mode does not support' error, got:\n%s", out)
-	}
-	if !strings.Contains(out, "--ralph") {
-		t.Errorf("error should mention --ralph, got:\n%s", out)
-	}
-}
-
 // checkSchedulerEpicFlagRejection verifies that task-only flags are rejected
 // when gt sling deferred dispatch (max_polecats > 0) auto-detects an epic ID.
 func checkSchedulerEpicFlagRejection(t *testing.T, hqPath, rig1Path, rig2Path, gtBinary string, env []string) {
@@ -1206,77 +1183,6 @@ func checkSchedulerMixedBatchRejection(t *testing.T, hqPath, rig1Path, rig2Path,
 	_, err := runGTCmdMayFail(t, gtBinary, hqPath, env, "sling", taskID, epicID, "--dry-run")
 	if err == nil {
 		t.Fatalf("gt sling %s %s should fail (epic is not a rig target), but succeeded", taskID, epicID)
-	}
-}
-
-// TestIntegrationSchedulerMultiRigConvoyAutoResolve verifies that gt sling <convoy> deferred dispatch (max_polecats > 0)
-// auto-resolves each tracked issue's target rig from its prefix. A convoy in HQ
-// tracking beads in rig1 and rig2 should schedule each bead to its respective rig.
-func TestIntegrationSchedulerMultiRigConvoyAutoResolve(t *testing.T) {
-	t.Parallel()
-	hqPath, rig1Path, rig2Path, gtBinary, env := setupMultiRigSchedulerTown(t)
-
-	// Create a convoy in HQ (the typical location for convoys).
-	convoyID := createTestBeadOfType(t, hqPath, "Multi-rig convoy", "convoy")
-
-	// Create beads in different rigs.
-	bead1 := createTestBead(t, rig1Path, "Rig1 tracked bead")
-	bead2 := createTestBead(t, rig2Path, "Rig2 tracked bead")
-
-	// Add tracks deps from convoy (HQ) to beads in each rig.
-	// bead1 and bead2 are in different DBs — stored as external refs in HQ.
-	bead1Prefix := strings.TrimSuffix(beads.ExtractPrefix(bead1), "-")
-	bead1ExtRef := fmt.Sprintf("external:%s:%s", bead1Prefix, bead1)
-	addBeadDependencyOfType(t, convoyID, bead1ExtRef, "tracks", hqPath)
-	bead2Prefix := strings.TrimSuffix(beads.ExtractPrefix(bead2), "-")
-	bead2ExtRef := fmt.Sprintf("external:%s:%s", bead2Prefix, bead2)
-	addBeadDependencyOfType(t, convoyID, bead2ExtRef, "tracks", hqPath)
-
-	// Wait for bd's issues.jsonl timestamp to settle (same race as
-	// TestIntegrationSchedulerDirectConvoyDispatch — 1-second granularity stale check).
-	time.Sleep(2 * time.Second)
-
-	// Dry-run: verify auto-rig-resolution routes each bead correctly.
-	out := runGTCmdOutput(t, gtBinary, hqPath, env, "sling", convoyID, "--dry-run")
-
-	// Verify: bead1 should be routed to rig1
-	expected1 := fmt.Sprintf("%s -> rig1", bead1)
-	if !strings.Contains(out, expected1) {
-		t.Errorf("convoy dry-run should route %s -> rig1\noutput: %s", bead1, out)
-	}
-
-	// Verify: bead2 should be routed to rig2
-	expected2 := fmt.Sprintf("%s -> rig2", bead2)
-	if !strings.Contains(out, expected2) {
-		t.Errorf("convoy dry-run should route %s -> rig2\noutput: %s", bead2, out)
-	}
-
-	// Non-dry-run: actually schedule each bead to its auto-resolved rig.
-	slingToScheduler(t, gtBinary, hqPath, env, bead1, "rig1")
-	slingToScheduler(t, gtBinary, hqPath, env, bead2, "rig2")
-
-	// Verify: both beads should have sling contexts with correct target rigs
-	fields1 := findSlingContext(t, hqPath, bead1)
-	if fields1 == nil {
-		t.Fatalf("bead1 %s should have a sling context", bead1)
-	}
-	if fields1.TargetRig != "rig1" {
-		t.Errorf("bead1 target_rig = %q, want rig1", fields1.TargetRig)
-	}
-
-	fields2 := findSlingContext(t, hqPath, bead2)
-	if fields2 == nil {
-		t.Fatalf("bead2 %s should have a sling context", bead2)
-	}
-	if fields2.TargetRig != "rig2" {
-		t.Errorf("bead2 target_rig = %q, want rig2", fields2.TargetRig)
-	}
-
-	// Verify: scheduler status should find both beads
-	status := getSchedulerStatus(t, gtBinary, hqPath, env)
-	total := int(status["queued_total"].(float64))
-	if total != 2 {
-		t.Errorf("queued_total = %d, want 2", total)
 	}
 }
 
@@ -1651,48 +1557,6 @@ func TestIntegrationSchedulerDispatchFailureRecordedInContextSourceDB(t *testing
 		if rigCtx.ID == ctxID {
 			t.Fatalf("context %s unexpectedly exists in rig DB; failure should update source HQ DB", ctxID)
 		}
-	}
-}
-
-// TestIntegrationSchedulerDirectConvoyDispatch verifies that gt sling <convoy-id> --dry-run
-// with max_polecats=-1 (direct mode) routes to the direct dispatch path.
-func TestIntegrationSchedulerDirectConvoyDispatch(t *testing.T) {
-	t.Parallel()
-	hqPath, rig1Path, rig2Path, gtBinary, env := setupMultiRigSchedulerTown(t)
-
-	// Reconfigure to direct dispatch mode
-	configureScheduler(t, hqPath, -1, 1)
-
-	// Create a convoy in HQ tracking beads in different rigs.
-	convoyID := createTestBeadOfType(t, hqPath, "Direct dispatch convoy", "convoy")
-	bead1 := createTestBead(t, rig1Path, "Rig1 direct tracked")
-	bead2 := createTestBead(t, rig2Path, "Rig2 direct tracked")
-	bead1Prefix := strings.TrimSuffix(beads.ExtractPrefix(bead1), "-")
-	bead1ExtRef := fmt.Sprintf("external:%s:%s", bead1Prefix, bead1)
-	addBeadDependencyOfType(t, convoyID, bead1ExtRef, "tracks", hqPath)
-	bead2Prefix := strings.TrimSuffix(beads.ExtractPrefix(bead2), "-")
-	bead2ExtRef := fmt.Sprintf("external:%s:%s", bead2Prefix, bead2)
-	addBeadDependencyOfType(t, convoyID, bead2ExtRef, "tracks", hqPath)
-
-	// Wait for bd's issues.jsonl timestamp to settle. bd checks that the Dolt
-	// import timestamp >= jsonl mtime (1-second granularity). Without this,
-	// the sling command flakes with "database out of sync" when the jsonl write
-	// and Dolt import straddle a second boundary.
-	time.Sleep(2 * time.Second)
-
-	// gt sling <convoy-id> --dry-run in direct mode
-	out := runGTCmdOutput(t, gtBinary, hqPath, env, "sling", convoyID, "--dry-run")
-
-	// Should mention tracked beads
-	if !strings.Contains(out, bead1) {
-		t.Errorf("direct convoy dry-run should mention bead1 %s\noutput: %s", bead1, out)
-	}
-	if !strings.Contains(out, bead2) {
-		t.Errorf("direct convoy dry-run should mention bead2 %s\noutput: %s", bead2, out)
-	}
-	// Direct dispatch uses "Would sling" not "Would schedule"
-	if strings.Contains(out, "Would schedule") {
-		t.Errorf("direct mode should NOT show 'Would schedule'\noutput: %s", out)
 	}
 }
 
