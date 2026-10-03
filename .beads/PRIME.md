@@ -47,18 +47,20 @@ description:
 
 After `bd create`, run `gt spec lint <id>` before you walk away. Exit 0 means
 the dispatcher would slot it. Exit 1 means a field is missing, and the first
-missing one is named. Exit 2 means it needs planning: more than six acceptance
-items, or a Size that says planning. Fix it and lint again.
+missing one is named. Exit 2 means it needs planning: label `needs-planning`,
+a Size that says planning, or more than six acceptance items. Fix it and lint
+again.
 
 A bead you will land yourself needs no shape. One you want a polecat to build
 does. `gt prime --step 3 --formula mol-polecat-work` prints the shape in full.
 
 ## Session Close Protocol
 
-Before saying "done":
+Before signaling completion:
 1. git status (check what changed)
 2. git add <files> (stage code changes)
 3. git commit -m "..." (commit code)
 4. git push (push to remote)
+5. `gt done` (submit for landing and exit)
 
-**Work is not done until pushed.** Beads changes are automatically committed with Dolt.
+**Polecats MUST call `gt done` - this submits work and exits the session.**
