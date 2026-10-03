@@ -94,6 +94,14 @@ func TestChangedPackages(t *testing.T) {
 			[]string{"internal/land"},
 		},
 		{
+			// A fixture with no enclosing package has no owner to name, and
+			// the fixture directory itself must never be handed to `go test`,
+			// which cannot build it (gt-f1ynu).
+			"a testdata fixture with no enclosing package is skipped",
+			"M\tplugins/foo/testdata/x.go\n",
+			nil,
+		},
+		{
 			"embedded file maps to the owning package",
 			"M\tinternal/formula/formulas/mol-x.formula.toml\n",
 			[]string{"internal/formula"},
