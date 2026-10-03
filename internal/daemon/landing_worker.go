@@ -234,10 +234,12 @@ func (d *Daemon) runRigLandingWorker(lw *landingWorkers, rigName string, interva
 // interval (gt-fzwcd).
 func (d *Daemon) landingWorkerLoop(rigName string, interval time.Duration, pass func(context.Context) landworker.Report) {
 	skipLogged := ""
-	// lastPassLanded is what makes the pass after a landing readable as the
-	// drain: only an idle pass that follows one says the queue emptied, and
-	// only that pass is the quiet point the install follows (gt-3qmv4.1).
-	lastPassLanded := false
+	// landedSinceQuiet makes an idle pass readable as the drain: main moved
+	// under the installed binary and the queue has now emptied, the quiet
+	// point the install follows. A pass that did not land leaves it standing —
+	// a rejection sends its bead to rework rather than back in the queue — and
+	// the idle pass clears it, so one landing draws one install (gt-3qmv4.4).
+	landedSinceQuiet := false
 	for {
 		if !d.isPatrolActive("landing_worker") {
 			d.logger.Printf("landing_worker: %s: patrol disabled; worker stopping", rigName)
@@ -272,10 +274,13 @@ func (d *Daemon) landingWorkerLoop(rigName string, interval time.Duration, pass 
 			if rep.InstallRequested {
 				d.noteLandingInstallNow(rigName)
 			}
-			if rep == (landworker.Report{}) && lastPassLanded {
+			if rep == (landworker.Report{}) && landedSinceQuiet {
 				d.noteLandingDrained(rigName)
+				landedSinceQuiet = false
 			}
-			lastPassLanded = rep.Landed > 0
+			if rep.Landed > 0 {
+				landedSinceQuiet = true
+			}
 			// This pass was the last thing a pending restart waited for, so
 			// its end is the idle moment: wake the run loop now rather than
 			// up to a heartbeat (3 min) later (gt-fzwcd).

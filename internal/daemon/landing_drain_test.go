@@ -140,6 +140,78 @@ func TestLandingDrainRequestsAnInstall(t *testing.T) {
 	}
 }
 
+// TestLandingDrainSurvivesANonLandingPass pins the drain across a pass that
+// did not land: a rejection sends its bead to rework, so it is not the queue
+// emptying, and the idle pass after it is still the quiet point (gt-3qmv4.4).
+func TestLandingDrainSurvivesANonLandingPass(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		// A rejection pass spins straight into the next pass, a skipped one
+		// waits out the interval, so only the skip needs a short one.
+		interval time.Duration
+		mid      landworker.Report
+	}{
+		{name: "rejected", interval: time.Hour, mid: landworker.Report{Rejected: 1}},
+		{name: "skipped", interval: time.Nanosecond, mid: landworker.Report{Skipped: 1}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, logs := landingDrainDaemon(t)
+			var passes atomic.Int32
+			pass := func(context.Context) landworker.Report {
+				switch passes.Add(1) {
+				case 1:
+					return landworker.Report{Landed: 1}
+				case 2:
+					return tc.mid
+				}
+				return landworker.Report{}
+			}
+			go d.landingWorkerLoop("gastown", tc.interval, pass)
+
+			awaitLog(t, logs, drainRequestLine)
+			if !d.rebuildGTRequested.Load() {
+				t.Fatal("a pass that did not land dropped the install request")
+			}
+			if n := strings.Count(logs.String(), drainRequestLine); n != 1 {
+				t.Fatalf("request lines = %d, want 1:\n%s", n, logs.String())
+			}
+		})
+	}
+}
+
+// TestLandingRejectWithWorkQueuedNeverRequestsAnInstall pins that a rejection
+// is not itself the drain: while the queue still holds work the pass after the
+// rejection lands rather than finds nothing, so the install waits for the pass
+// that actually empties it (gt-3qmv4.4).
+func TestLandingRejectWithWorkQueuedNeverRequestsAnInstall(t *testing.T) {
+	t.Parallel()
+	d, logs := landingDrainDaemon(t)
+	var passes atomic.Int32
+	pass := func(ctx context.Context) landworker.Report {
+		switch passes.Add(1) {
+		case 1, 3:
+			return landworker.Report{Landed: 1}
+		case 2:
+			return landworker.Report{Rejected: 1}
+		}
+		// The queue never empties: hold the pass the loop would drain on.
+		<-ctx.Done()
+		return landworker.Report{}
+	}
+	go d.landingWorkerLoop("gastown", time.Hour, pass)
+
+	settlePasses(t, &passes, 4)
+	if d.rebuildGTRequested.Load() {
+		t.Fatal("a rejection with work still queued requested an install")
+	}
+	if strings.Contains(logs.String(), drainRequestLine) {
+		t.Fatalf("the queue never emptied, yet a drain was logged:\n%s", logs.String())
+	}
+}
+
 // TestLandingDrainOnAnotherRigNeverRequestsAnInstall pins the rig gate: a
 // landing on any other rig moves that rig's main, not the main the binary is
 // built from.
