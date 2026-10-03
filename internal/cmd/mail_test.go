@@ -31,6 +31,19 @@ func TestMailHelpUsesTownRootMessagingConfig(t *testing.T) {
 	}
 }
 
+// TestMailHelpDoesNotAdvertiseHuman: gt mail send has no --human flag
+// (`unknown flag: --human`), so the mail help must not offer it as an address
+// form. It names the overseer address exactly as gt mail directory prints it.
+func TestMailHelpDoesNotAdvertiseHuman(t *testing.T) {
+	t.Parallel()
+	if strings.Contains(mailCmd.Long, "--human") {
+		t.Errorf("mail help still advertises --human:\n%s", mailCmd.Long)
+	}
+	if !strings.Contains(mailCmd.Long, "@overseer") {
+		t.Errorf("mail help does not name the @overseer address:\n%s", mailCmd.Long)
+	}
+}
+
 // TestClaimPatternMatching tests claim pattern matching via the beads package.
 // This verifies that the pattern matching used for queue eligibility works correctly.
 func TestClaimPatternMatching(t *testing.T) {

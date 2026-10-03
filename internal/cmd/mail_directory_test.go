@@ -73,10 +73,14 @@ func TestRunMailDirectory_WellKnownAddresses(t *testing.T) {
 		t.Fatalf("writeMailDirectory: %v", err)
 	}
 	output := out.String()
-	for _, addr := range []string{"mayor/", "--human", "--self", "@town", "@crew", "@witnesses", "@overseer", "ADDRESS", "TYPE", "(4 warnings)"} {
+	for _, addr := range []string{"mayor/", "--self", "@town", "@crew", "@witnesses", "@overseer", "ADDRESS", "TYPE", "(4 warnings)"} {
 		if !strings.Contains(output, addr) {
 			t.Errorf("output lacks %q:\n%s", addr, output)
 		}
+	}
+	// gt mail send has no --human flag, so the directory must not offer it.
+	if strings.Contains(output, "--human") {
+		t.Errorf("output still lists --human:\n%s", output)
 	}
 	if strings.Count(warn.String(), "warning:") != 4 {
 		t.Errorf("warnings:\n%s", warn.String())
@@ -96,13 +100,16 @@ func TestRunMailDirectory_JSONOutput(t *testing.T) {
 	for _, e := range entries {
 		got[e.Address] = e.Type
 	}
-	for addr, typ := range map[string]string{"gastown/witness": "agent", "group:ops": "group", "queue:work": "queue", "channel:alerts": "channel", "--human": "well-known", "@town": "special"} {
+	for addr, typ := range map[string]string{"gastown/witness": "agent", "group:ops": "group", "queue:work": "queue", "channel:alerts": "channel", "@town": "special"} {
 		if got[addr] != typ {
 			t.Errorf("address %q has type %q, want %q (all: %v)", addr, got[addr], typ, got)
 		}
 	}
 	if _, ok := got["queue:"]; ok {
 		t.Error("a queue with no name field was listed")
+	}
+	if _, ok := got["--human"]; ok {
+		t.Error("--human listed, but gt mail send rejects it")
 	}
 }
 

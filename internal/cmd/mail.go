@@ -85,7 +85,7 @@ ADDRESS FORMATS:
   <rig>/refinery      → Rig's Refinery
   <rig>/<polecat>     → Polecat (e.g., greenplace/Toast)
   <rig>/crew/<name>   → Crew worker (e.g., greenplace/crew/max)
-  --human             → Special: human overseer
+  @overseer           → Special: human overseer
 
 COMMANDS:
   inbox     View your inbox
