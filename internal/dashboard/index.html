@@ -67,6 +67,9 @@ td.n,th.n{text-align:right}
 .st-working{color:var(--green)}.st-gating{color:var(--violet)}.st-queued{color:var(--blue)}
 .st-needs-human{color:var(--red)}.st-quiet{color:var(--amber)}.st-stalled{color:var(--red)}.st-review-needed,.st-recovery{color:var(--amber)}.st-spawning{color:var(--teal)}.st-parked,.st-idle,.st-unknown{color:var(--dim)}
 .tag.p0,.tag.p1{color:var(--red)}.tag.p2{color:var(--amber)}.tag.p3,.tag.p4{color:var(--dim)}
+.cmd{display:inline-block;margin:2px 6px 0 0;padding:0 6px;border:1px solid var(--line);border-radius:4px;color:var(--dim);background:none;font:inherit;font-size:11px;cursor:pointer;text-align:left}
+.cmd:hover{color:var(--text);border-color:var(--dim)}.cmd.done{color:var(--green);border-color:var(--green)}
+.skip{padding:3px 0;border-top:1px solid var(--line)}.skip .why{color:var(--dim);display:block}
 .good{color:var(--green)}.warnc{color:var(--amber)}.badc{color:var(--red)}
 </style>
 </head>
@@ -83,6 +86,7 @@ td.n,th.n{text-align:right}
 <div class="grid">
   <div class="col">
     <section><h2>Polecats <span class="r" id="seatsnote"></span></h2><div class="body" id="seats"></div></section>
+    <section><h2>Dispatcher <span class="r" id="dispnote"></span></h2><div class="body" id="disp"></div></section>
     <section><h2>Machine <span class="r" id="machnote"></span></h2><div class="body" id="machine"></div></section>
     <section><h2>DeepSeek <span class="r" id="spendnote"></span></h2><div class="body" id="spend"></div></section>
   </div>
@@ -157,6 +161,11 @@ function renderTiles(s) {
   $("tiles").dataset.at = s.summary_at || "";
 }
 
+function copyText(text, btn) {
+  const ok = () => { const old = btn.textContent; btn.classList.add("done"); btn.textContent = "copied"; setTimeout(() => { btn.classList.remove("done"); btn.textContent = old; }, 1200); };
+  const fallback = () => { const t = document.createElement("textarea"); t.value = text; document.body.append(t); t.select(); try { document.execCommand("copy"); ok(); } catch (e) {} t.remove(); };
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(ok, fallback); else fallback();
+}
 const STATE_HELP = {
   working: "holds a bead and its session is producing output",
   gating: "its bead is being gated and om-reviewed by the landing worker",
@@ -215,6 +224,10 @@ function renderSeats(s) {
         (p.labels || []).forEach(l => bd.append(document.createTextNode(" "), el("span", "tag warnc", l)));
         if (p.title) bd.append(document.createElement("br"), el("span", "title", p.title));
       } else bd.append(el("span", "title", p.reason || "–"));
+      if ((p.hints || []).length) {
+        bd.append(document.createElement("br"));
+        p.hints.forEach(h => { const b = el("button", "cmd", h); b.title = "copy (the dashboard never runs it)"; b.onclick = () => copyText(h, b); bd.append(b); });
+      }
       tr.append(bd);
       const on = p.slung ? (now - new Date(p.slung).getTime()) / 1000 : null;
       tr.append(el("td", "n" + (on > 5400 ? " warnc" : ""), p.bead ? (on == null ? "–" : fmtDur(on)) : ""));
@@ -407,7 +420,37 @@ function renderOM(s) {
   }
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderSeats(state); renderMachine(state); renderSpend(state); renderOM(state); }
+function renderDispatch(s) {
+  const box = $("disp");
+  box.replaceChildren();
+  const d = s.dispatch;
+  if (!d) { box.append(el("div", "empty", "no dispatcher tick in the daemon log yet")); $("dispnote").textContent = ""; return; }
+  const ageSec = (Date.now() - new Date(d.at).getTime()) / 1000;
+  const stale = ageSec > 300;
+  $("dispnote").textContent = "last tick " + fmtDur(ageSec) + " ago";
+  $("dispnote").className = "r" + (stale ? " badc" : ageSec > 150 ? " warnc" : "");
+  if (stale) box.append(el("div", "badc", "⚠ the dispatcher has not ticked for " + fmtDur(ageSec) + " (it ticks every minute)"));
+  const kv = el("div", "kv");
+  const add = (v, k, cls) => { const x = el("div"); x.append(el("b", cls || "", String(v)), el("span", "", k)); kv.append(x); };
+  add(d.roster || "–", "roster");
+  add(d.candidates, "candidates");
+  add(d.dispatched, "dispatched", d.dispatched ? "good" : "");
+  add(d.skipped, "skipped", d.skipped ? "warnc" : "");
+  if (d.refused) add(d.refused, "refused", "warnc");
+  if (d.failed) add(d.failed, "failed", "badc");
+  if (d.held) add(d.held, "held (failed label)", "warnc");
+  box.append(kv);
+  const named = d.named || [];
+  if (!named.length && !d.skipped) box.append(el("div", "empty", d.candidates ? "everything ready was dispatched" : "nothing ready to dispatch"));
+  named.forEach(n => {
+    const row = el("div", "skip");
+    row.append(el("span", "bead", n.bead || "?"), el("span", "why", n.reason));
+    box.append(row);
+  });
+  if (d.more) box.append(el("div", "empty", "+" + d.more + " more not named in the log line"));
+}
+
+function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderSeats(state); renderMachine(state); renderSpend(state); renderOM(state); renderDispatch(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));
