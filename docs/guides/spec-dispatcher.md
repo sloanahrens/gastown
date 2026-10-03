@@ -59,13 +59,15 @@ decides and reports without slinging, labeling or commenting.
 3. Each candidate is linted, and `polecat_pool.shape_gate` decides what the
    verdict does:
    - `off` runs no lint at all;
-   - `warn` (the default) slings the bead anyway and leaves the verdict on it
-     as one `SHAPE: ...` comment, never repeated for the same verdict;
-   - `refuse` skips the bead, labels it `needs-shape` (or `needs-planning`
-     when that is the verdict) and comments it once. Nothing is spawned for a
-     bead that needs planning (the planner, gt-4k3fj.7, is not built yet).
-4. A clean spec takes the first free seat and is slung through the shared
-   rig-dispatch path in-process, with no auto-convoy.
+   - `warn` (the default) holds a bead the lint refuses: it is skipped with the
+     reason `unshaped: <fields>`, spends no seat, and wears one `SHAPE: ...`
+     comment, never repeated for the same verdict. A bead labeled
+     `spec-shape-waived` waives the lint and is slung anyway;
+   - `refuse` also holds it, and labels it `needs-shape` (or `needs-planning`
+     when that is the verdict) with one comment. Nothing is spawned for a bead
+     that needs planning (the planner, gt-4k3fj.7, is not built yet).
+4. A spec that clears the shape gate takes the first free seat and is slung
+   through the shared rig-dispatch path in-process, with no auto-convoy.
 
 ## A red main defers to its revert
 

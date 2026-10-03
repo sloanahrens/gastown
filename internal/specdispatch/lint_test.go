@@ -251,6 +251,33 @@ func TestVerdictShapeNote(t *testing.T) {
 	}
 }
 
+// UnshapedReason is the dispatcher's hold reason for a refused bead: every
+// failed field, in check order, after the "unshaped:" prefix. A clean or
+// planning verdict has none — the planner's route is not an unshaped hold
+// (gt-f8ppx).
+func TestVerdictUnshapedReason(t *testing.T) {
+	t.Parallel()
+	if got := (Verdict{Route: RouteDispatch}).UnshapedReason(); got != "" {
+		t.Errorf("clean verdict reason = %q, want empty", got)
+	}
+	if got := (Verdict{Route: RoutePlanning, Field: "size", Reason: "size says: needs planning"}).UnshapedReason(); got != "" {
+		t.Errorf("planning verdict reason = %q, want empty", got)
+	}
+
+	s := goodSpec()
+	s.Description = "## Goal\nA thing."
+	s.Acceptance = ""
+	if got := Lint(s, defaultTemplate()).UnshapedReason(); got != "unshaped: ## Constraints, ## Out of scope, ## Gate, ## Size, acceptance" {
+		t.Errorf("refusal reason = %q", got)
+	}
+
+	oneField := goodSpec()
+	oneField.Description = strings.Replace(oneField.Description, "## Gate\nmake gate", "", 1)
+	if got := Lint(oneField, defaultTemplate()).UnshapedReason(); got != "unshaped: ## Gate" {
+		t.Errorf("one-field reason = %q", got)
+	}
+}
+
 func TestLintAcceptanceFallsBackToDescriptionSection(t *testing.T) {
 	t.Parallel()
 	s := goodSpec()
