@@ -306,8 +306,8 @@ func ids(issues []*beads.Issue) []string {
 	return out
 }
 
-// Priority 0 is both a valid wisp priority and ListOptions' "no filter"
-// sentinel value, so listWisps must pass -1 or P0 wisps vanish (gt-ekep1).
+// A priority the caller never set must not narrow the read: -1 is
+// ListOptions' no-filter value, and 0 would keep only P0 wisps (gt-ekep1).
 func TestListWispsLeavesPriorityUnfiltered(t *testing.T) {
 	t.Parallel()
 	db := beadsfake.New()
