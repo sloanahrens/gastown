@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/done"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/patrolscan"
@@ -55,6 +56,51 @@ func TestPatrolScanReadyToLandLabelMatchesLand(t *testing.T) {
 	t.Parallel()
 	if patrolscan.ReadyToLandLabel != land.LabelReadyToLand {
 		t.Fatalf("patrolscan.ReadyToLandLabel = %q, land.LabelReadyToLand = %q", patrolscan.ReadyToLandLabel, land.LabelReadyToLand)
+	}
+}
+
+// The patrol scan repeats the DEFERRED exit type to stay out of the done
+// package's dependency tree; this pins the copy to the original. It is the
+// one exit type the tick restarts on, so a drift here would silently stop or
+// start restarting finished turns (gt-ks62m).
+func TestPatrolScanExitDeferredMatchesDone(t *testing.T) {
+	t.Parallel()
+	if patrolscan.ExitDeferred != done.ExitDeferred {
+		t.Fatalf("patrolscan.ExitDeferred = %q, done.ExitDeferred = %q", patrolscan.ExitDeferred, done.ExitDeferred)
+	}
+}
+
+// AgentRecord reads the three fields that tell a finished turn from a held
+// seat off one agent bead: agent_state, the gt done exit type and the cleanup
+// status. An omitted field is empty, not an error.
+func TestPatrolScanAgentRecordReadsTheBead(t *testing.T) {
+	t.Parallel()
+	bd := newWorkBD(t)
+	const id = "gt-myr-polecat-mycat"
+	bd.db.Seed(beads.Issue{ID: id, Description: beads.FormatAgentDescription("mycat", &beads.AgentFields{
+		RoleType:      constants.RolePolecat,
+		Rig:           "myr",
+		AgentState:    "stuck",
+		ExitType:      "DEFERRED",
+		CleanupStatus: "has_unpushed",
+	})})
+	bd.db.Seed(beads.Issue{ID: "gt-myr-polecat-plain", Description: "role_type: polecat\nrig: myr\nagent_state: working\n"})
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, openWorkBeads: bd.open}
+	h := &patrolScanHost{d: d}
+
+	got, err := h.AgentRecord("myr", "mycat")
+	if err != nil {
+		t.Fatalf("AgentRecord: %v", err)
+	}
+	if got != (patrolscan.AgentRecord{State: "stuck", ExitType: "DEFERRED", CleanupStatus: "has_unpushed"}) {
+		t.Fatalf("AgentRecord = %+v", got)
+	}
+	plain, err := h.AgentRecord("myr", "plain")
+	if err != nil {
+		t.Fatalf("AgentRecord(plain): %v", err)
+	}
+	if plain.State != "working" || plain.ExitType != "" || plain.CleanupStatus != "" {
+		t.Fatalf("AgentRecord(plain) = %+v, want working and no exit metadata", plain)
 	}
 }
 

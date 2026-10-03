@@ -29,7 +29,7 @@ type fakeEnv struct {
 	verdicts    map[string]liveness.Result
 	work        map[string]*Work
 	workErr     map[string]error
-	states      map[string]string
+	agents      map[string]AgentRecord
 	stateErr    map[string]error
 	heartbeats  map[string]*Heartbeat
 	restartErr  map[string]error
@@ -78,7 +78,7 @@ func newFake() *fakeEnv {
 	return &fakeEnv{
 		intents: map[string]intent.Record{}, intentErr: map[string]error{},
 		verdicts: map[string]liveness.Result{}, work: map[string]*Work{}, workErr: map[string]error{},
-		states: map[string]string{}, stateErr: map[string]error{}, heartbeats: map[string]*Heartbeat{},
+		agents: map[string]AgentRecord{}, stateErr: map[string]error{}, heartbeats: map[string]*Heartbeat{},
 		restartErr: map[string]error{}, idleErr: map[string]error{}, submitErr: map[string]error{},
 		idleStopped: map[string]bool{},
 		dirs:        map[string]bool{}, dirErr: map[string]error{},
@@ -118,9 +118,9 @@ func (f *fakeEnv) ClearSubmission(rig, p, workBead string) (bool, error) {
 	f.cleared = append(f.cleared, rig+"/"+p+"="+workBead)
 	return true, nil
 }
-func (f *fakeEnv) AgentState(_, p string) (string, error) {
+func (f *fakeEnv) AgentRecord(_, p string) (AgentRecord, error) {
 	f.reads = append(f.reads, p)
-	return f.states[p], f.stateErr[p]
+	return f.agents[p], f.stateErr[p]
 }
 func (f *fakeEnv) Heartbeat(_, p string) *Heartbeat { return f.heartbeats[p] }
 func (f *fakeEnv) Restart(_, p, _ string) error {
@@ -234,7 +234,7 @@ func deadWithWork(env *fakeEnv, p string) {
 	env.polecats = append(env.polecats, p)
 	env.verdicts[p] = dead(2)
 	env.work[p] = &Work{ID: "gt-" + p, Status: "hooked", Assignee: "gastown/polecats/" + p, UpdatedAt: now.Add(-time.Hour)}
-	env.states[p] = "working"
+	env.agents[p] = AgentRecord{State: "working"}
 }
 
 func seatFinding(t *testing.T, r Report, p string) Finding {
@@ -257,6 +257,52 @@ func TestDeadSeatWithHookedWorkIsRestarted(t *testing.T) {
 	}
 	if f := seatFinding(t, r, "ruby"); f.Outcome != OutcomeRestarted {
 		t.Fatalf("outcome = %v, want restarted", f)
+	}
+}
+
+// gt done --status DEFERRED (and gt handoff's redirect) writes
+// exit_type=DEFERRED and agent_state=stuck together, then retires the session:
+// the bead stays hooked with the polecat's commits still in the worktree. The
+// stuck bead is an exit artifact, not a polecat holding the seat, so the tick
+// has to restart the seat on its preserved branch instead of skipping it
+// forever while townhealth reports it dead (gt-ks62m).
+func TestDeferredExitSeatIsRestartedNotSkipped(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	deadWithWork(env, "ruby")
+	env.agents["ruby"] = AgentRecord{State: "stuck", ExitType: ExitDeferred, CleanupStatus: "has_unpushed"}
+
+	r := scanner(env, nil).Tick("gastown")
+
+	if got := strings.Join(env.restarts, ","); got != "ruby" {
+		t.Fatalf("restarts = %q, want ruby; report %v", got, r.Lines())
+	}
+	f := seatFinding(t, r, "ruby")
+	if f.Outcome != OutcomeRestarted {
+		t.Fatalf("outcome = %v, want restarted", f)
+	}
+	if !strings.Contains(f.Detail, "DEFERRED") || !strings.Contains(f.Detail, "has_unpushed") {
+		t.Fatalf("detail = %q, want the DEFERRED exit and cleanup status named", f.Detail)
+	}
+}
+
+// The restart is confirmed across ticks like any other: the first dead sample
+// reads as waiting, the second restarts. A skipped seat never gets there.
+func TestDeferredExitSeatWaitsOutTheFirstSample(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	deadWithWork(env, "ruby")
+	env.verdicts["ruby"] = dead(1)
+	env.agents["ruby"] = AgentRecord{State: "stuck", ExitType: ExitDeferred, CleanupStatus: "has_unpushed"}
+
+	r := scanner(env, nil).Tick("gastown")
+
+	f := seatFinding(t, r, "ruby")
+	if f.Outcome != OutcomeWaiting {
+		t.Fatalf("outcome = %v (%q), want waiting", f.Outcome, f.Detail)
+	}
+	if len(env.restarts) != 0 {
+		t.Fatalf("restarts = %v, want none on the first sample", env.restarts)
 	}
 }
 
@@ -367,10 +413,15 @@ func TestNoRestartCases(t *testing.T) {
 		{"unreadable intent record", func(env *fakeEnv) {
 			env.intentErr["ruby"] = errors.New("permission denied")
 		}, OutcomeUnknown},
-		{"agent_state stuck (hazard 1)", func(env *fakeEnv) { env.states["ruby"] = "stuck" }, OutcomeSkipped},
-		{"agent_state awaiting-gate (hazard 1)", func(env *fakeEnv) { env.states["ruby"] = "awaiting-gate" }, OutcomeSkipped},
-		{"agent_state paused (hazard 1)", func(env *fakeEnv) { env.states["ruby"] = "paused" }, OutcomeSkipped},
-		{"agent_state done", func(env *fakeEnv) { env.states["ruby"] = "done" }, OutcomeSkipped},
+		{"agent_state stuck after an ESCALATED exit (the operator's)", func(env *fakeEnv) {
+			env.agents["ruby"] = AgentRecord{State: "stuck", ExitType: "ESCALATED"}
+		}, OutcomeSkipped},
+		{"agent_state stuck with no exit type recorded (fail closed)", func(env *fakeEnv) {
+			env.agents["ruby"] = AgentRecord{State: "stuck"}
+		}, OutcomeSkipped},
+		{"agent_state awaiting-gate (hazard 1)", func(env *fakeEnv) { env.agents["ruby"] = AgentRecord{State: "awaiting-gate"} }, OutcomeSkipped},
+		{"agent_state paused (hazard 1)", func(env *fakeEnv) { env.agents["ruby"] = AgentRecord{State: "paused"} }, OutcomeSkipped},
+		{"agent_state done", func(env *fakeEnv) { env.agents["ruby"] = AgentRecord{State: "done"} }, OutcomeSkipped},
 		{"agent bead unreadable (hazard 3)", func(env *fakeEnv) {
 			env.stateErr["ruby"] = errors.New("bd show: exit status 1")
 		}, OutcomeUnknown},
@@ -388,6 +439,10 @@ func TestNoRestartCases(t *testing.T) {
 		}, OutcomeSkipped},
 		{"closed work", func(env *fakeEnv) { env.work["ruby"].Status = "closed" }, ""},
 		{"no work: idle polecat retired to stop", func(env *fakeEnv) { env.work["ruby"] = nil }, OutcomeIdled},
+		{"stuck after a DEFERRED exit with no hook: idle seat retired, not restarted", func(env *fakeEnv) {
+			env.work["ruby"] = nil
+			env.agents["ruby"] = AgentRecord{State: "stuck", ExitType: ExitDeferred, CleanupStatus: "has_unpushed"}
+		}, OutcomeIdled},
 		{"no work, death unconfirmed", func(env *fakeEnv) {
 			env.work["ruby"] = nil
 			env.verdicts["ruby"] = dead(1)

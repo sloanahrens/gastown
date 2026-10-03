@@ -18,9 +18,16 @@ We decided that the daemon runs a `patrol_scan` tick (`internal/patrolscan`, hos
   samples, while it holds hooked or in_progress work, is restarted through the supervisor
   (`gt session restart --force`, worktree preserved). Nothing is restarted when the intent record
   is parked, frozen or `submitted`; the work carries `gt:ready-to-land` or a dispatch hold; the
-  work was hooked within the spawn grace; the agent bead says `stuck`, `awaiting-gate`, `paused`,
-  `done` or `nuked`; or the heartbeat says `stuck` or a fresh `exiting`. The supervisor still
-  enforces e-stop, shutdown and the 3-per-hour budget.
+  work was hooked within the spawn grace; the agent bead says `awaiting-gate`, `paused`, `done` or
+  `nuked`, or says `stuck` after a non-DEFERRED exit; or the heartbeat says `stuck` or a fresh
+  `exiting`. The supervisor still enforces e-stop, shutdown and the 3-per-hour budget.
+
+  `agent_state=stuck` is not a hold, so it is read with the exit type beside it. The only writer is
+  `gt done`'s own exit path, which sets it for every non-COMPLETED exit; a live polecat that is
+  stuck holds the seat through its heartbeat instead. A `DEFERRED` exit is a finished turn handed
+  on with its bead still hooked, so the seat is restarted on its preserved branch rather than left
+  dead until an operator notices (gt-ks62m). An `ESCALATED` exit is the operator's; a bead with no
+  exit type recorded fails closed to the skip.
 - **Idle seats.** A polecat Dead on two consecutive samples which holds no hooked or in_progress
   work has its intent record retired to `stop` (gt-613vw): the town needs no session for a seat
   with nothing to run, and a record left at `desired=run` was what made townhealth report the
