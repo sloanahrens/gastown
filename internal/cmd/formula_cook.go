@@ -42,8 +42,8 @@ type cookedVar struct {
 }
 
 // cookedStep is one step of bd's tree. Metadata is the step's metadata
-// table, where a formula carries gastown's own step fields (convoy legs, sling
-// targets): bd's strict decode accepts any key there.
+// table, where a formula carries gastown's own step fields (a workflow step's
+// sling target and interactive flag): bd's strict decode accepts any key there.
 type cookedStep struct {
 	ID          string         `json:"id"`
 	Title       string         `json:"title"`
@@ -63,16 +63,6 @@ func (s cookedStep) metaString(key string) string {
 func (s cookedStep) metaBool(key string) bool {
 	v, _ := s.Metadata[key].(bool)
 	return v
-}
-
-// varValue is the value bd substituted for var name, "" when it has none.
-func (f *cookedFormula) varValue(name string) string {
-	for _, v := range f.Vars {
-		if v.Name == name && v.Value != nil {
-			return *v.Value
-		}
-	}
-	return ""
 }
 
 // checklist returns every step an agent runs, each parent before its

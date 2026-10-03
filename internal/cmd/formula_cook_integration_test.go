@@ -12,14 +12,10 @@ import (
 	"github.com/steveyegge/gastown/internal/formula"
 )
 
-// convoyFormulas are the shipped convoy formulas gt formula run dispatches.
-var convoyFormulas = []string{"code-review", "design", "mol-plan-review", "mol-prd-review"}
-
 // TestIntegrationFormulaCook renders every shipped formula through the real bd
 // cook the way prime does (gt-fd2cu.1): each one cooks with no warning, a
-// workflow renders a bounded checklist, the town overlay applies, a convoy
-// reads as legs plus a synthesis that renders, and a workflow step keeps its
-// sling target (gt-fd2cu.1.1).
+// workflow renders a bounded checklist, the town overlay applies, and a
+// workflow step keeps its sling target (gt-fd2cu.1.1).
 func TestIntegrationFormulaCook(t *testing.T) {
 	town := t.TempDir()
 	if _, err := formula.ProvisionFormulas(town); err != nil {
@@ -48,10 +44,6 @@ func TestIntegrationFormulaCook(t *testing.T) {
 		}
 		if len(f.Warnings) > 0 {
 			t.Errorf("%s: cook warnings %v", name, f.Warnings)
-		}
-		if slices.Contains(convoyFormulas, name) {
-			checkCookedConvoy(t, name, f)
-			continue
 		}
 		if f.Type != "workflow" {
 			continue
@@ -95,50 +87,5 @@ func TestIntegrationFormulaCook(t *testing.T) {
 	want := []string{"feature=t", "issue=gt-cook", "base_branch=main", "build_command=", "lint_command=", "setup_command=", "test_command=", "typecheck_command="}
 	if !slices.Equal(got, want) {
 		t.Errorf("bond vars = %v, want %v", got, want)
-	}
-}
-
-// checkCookedConvoy: a cooked convoy reads as legs with a focus plus a
-// synthesis that needs every leg, the review convoys' legs are analysis-only,
-// and its output paths and synthesis render with no placeholder left.
-func checkCookedConvoy(t *testing.T, name string, f *cookedFormula) {
-	t.Helper()
-	p := convoyPlanFrom(f)
-	if f.Type != "convoy" || len(p.Legs) == 0 || p.Synthesis == nil || p.BasePrompt == "" {
-		t.Errorf("%s: type %s, %d legs, synthesis %v, base prompt %d chars", name, f.Type, len(p.Legs), p.Synthesis != nil, len(p.BasePrompt))
-		return
-	}
-	// bd cooks the synthesis step's depends_on into its needs: exactly the
-	// leg ids, in order (gt formula run wires its bead to every leg itself).
-	var legIDs []string
-	for _, leg := range p.Legs {
-		legIDs = append(legIDs, leg.ID)
-	}
-	if !slices.Equal(p.Synthesis.Needs, legIDs) {
-		t.Errorf("%s: real bd cooked synthesis needs %v, want the legs %v", name, p.Synthesis.Needs, legIDs)
-	}
-	wantReviewOnly := name == "mol-plan-review" || name == "mol-prd-review" // gt-kvf
-	for _, leg := range p.Legs {
-		if leg.Focus == "" || leg.ReviewOnly != wantReviewOnly {
-			t.Errorf("%s: leg %s focus %q review_only %v", name, leg.ID, leg.Focus, leg.ReviewOnly)
-		}
-	}
-	ctx := formulaTemplateContext(name, "local files", "abc123", 0, "", nil, nil,
-		map[string]interface{}{"context": "extra context", "plan": "test plan", "prd_review": "prd-review.md", "problem": "test problem", "scope": "test scope"})
-	dir, err := renderTemplate(p.OutputDir, ctx)
-	if err != nil || !strings.HasSuffix(dir, "/abc123") {
-		t.Errorf("%s: output directory = %q, %v", name, dir, err)
-	}
-	addOutputTemplateContext(ctx, dir, p.SynthesisFile)
-	ctx["leg"] = map[string]interface{}{"id": p.Legs[0].ID, "title": p.Legs[0].Title, "focus": p.Legs[0].Focus, "description": p.Legs[0].Description}
-	ctx["output_path"] = dir + "/" + renderTemplateOrDefault(p.LegPattern, ctx, "")
-	for what, text := range map[string]string{"synthesis": p.Synthesis.Description, "base prompt": p.BasePrompt} {
-		got, err := renderTemplate(text, ctx)
-		if err != nil || strings.Contains(got, "{{") || strings.Contains(got, "<no value>") {
-			t.Errorf("%s: %s left placeholders (%v): %q", name, what, err, got)
-		}
-	}
-	if syn, _ := renderTemplate(p.Synthesis.Description, ctx); !strings.Contains(syn, dir) {
-		t.Errorf("%s: synthesis does not name the output directory %s", name, dir)
 	}
 }

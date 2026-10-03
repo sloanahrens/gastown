@@ -334,20 +334,14 @@ in git history — only a closed PR comment links them to the work.
 {{ cmd }} formula run mol-idea-to-plan --set problem="describe the idea here"
 ```
 
-This runs the full pipeline autonomously: structured PRD → 6-leg parallel review →
-human clarification gate → implementation plan → 5-leg parallel plan review →
-human approval gate → beads with dependency graph.
+This runs the full pipeline autonomously: structured PRD → 6-reviewer parallel
+review → human clarification gate → implementation plan → iterative 2-polecat
+plan review → human approval gate → beads with dependency graph.
 
 **Trigger this suggestion when the human:**
 - Describes a feature, idea, or problem and says "let's build this" / "plan this out"
 - Asks about requirements, design, or implementation approach for something new
 - Wants to go from vague idea to a concrete plan
-
-**Standalone phases (if they only want part of the pipeline):**
-```bash
-{{ cmd }} formula run mol-prd-review --set problem="..."          # PRD review only (6 parallel legs)
-{{ cmd }} formula run mol-plan-review --set plan="..." --set problem="..."  # Plan review only (5 parallel legs)
-```
 
 ### Communication: Mail
 
