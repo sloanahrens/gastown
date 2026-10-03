@@ -135,32 +135,19 @@ func TestIntegrationBeadsDbInitAfterClone(t *testing.T) {
 	}
 	// Dolt server required: bd init auto-detects server on 3307,
 	// and gt rig add --adopt uses --server mode for re-initialization.
-	// gt install and gt rig add create the databases they name, so the
-	// town needs the scratch container; its lease sets no environment, so
-	// the test runs beside the package's parallel tests, and every bd and
-	// gt below gets env.
+	// gt install and gt rig add create the databases they name, so each
+	// subtest needs the scratch container.
 	t.Parallel()
-	port, env := testutil.LeaseScratchDoltContainerEnv(t)
 
 	tmpDir := t.TempDir()
 	configureTestGitIdentity(t, tmpDir)
 	gtBinary := buildGT(t)
-	gtEnv := append(slices.Clip(env), "HOME="+tmpDir)
-
-	// One town serves every subtest: each adopts a rig of its own name, and
-	// a gt install per subtest was most of the test's time.
-	townRoot := filepath.Join(tmpDir, "town")
-	install := exec.Command(gtBinary, "install", townRoot, "--name", "adopt-test", "--dolt-port", port)
-	install.Env = gtEnv
-	if output, err := install.CombinedOutput(); err != nil {
-		t.Fatalf("gt install failed: %v\nOutput: %s", err, output)
-	}
-	// Bridge test Dolt server PID so AddRig/IsRunning checks pass.
-	bridgeDoltPidToTownOnPort(t, townRoot, port)
 
 	t.Run("TrackedRepoWithExistingPrefix", func(t *testing.T) {
 		// GitHub Issue #72: gt rig add --adopt should detect existing prefix and init database.
 		// When a tracked beads repo has config.yaml with a prefix, adopt should detect it.
+		t.Parallel()
+		townRoot, gtEnv, env := newAdoptTown(t, gtBinary, tmpDir)
 
 		// Create a repo with existing beads prefix "existing-prefix" AND issues
 		// directly at the expected rig location
@@ -212,6 +199,8 @@ func TestIntegrationBeadsDbInitAfterClone(t *testing.T) {
 	t.Run("TrackedRepoWithNoIssuesRequiresPrefix", func(t *testing.T) {
 		// Regression test: When a tracked beads repo has NO issues (fresh init),
 		// gt rig add must use the --prefix flag since there's nothing to detect from.
+		t.Parallel()
+		townRoot, gtEnv, env := newAdoptTown(t, gtBinary, tmpDir)
 
 		// Create a tracked beads repo with NO issues at the expected rig location
 		rigDir := filepath.Join(townRoot, "emptyrig")
@@ -262,6 +251,8 @@ func TestIntegrationBeadsDbInitAfterClone(t *testing.T) {
 		// the prefix detected from the database, gt rig add fails with an error.
 		// Prefix detection uses config.yaml (not metadata.json), which survives
 		// clones since it is tracked by git.
+		t.Parallel()
+		townRoot, gtEnv, env := newAdoptTown(t, gtBinary, tmpDir)
 
 		// Create a repo with existing beads prefix "real-prefix" with issues
 		rigDir := filepath.Join(townRoot, "mismatchrig")
@@ -294,6 +285,8 @@ func TestIntegrationBeadsDbInitAfterClone(t *testing.T) {
 	t.Run("TrackedRepoWithNoIssuesFallsBackToDerivedPrefix", func(t *testing.T) {
 		// Test the fallback behavior: when a tracked beads repo has NO issues
 		// and NO --prefix is provided, gt rig add should derive prefix from rig name.
+		t.Parallel()
+		townRoot, gtEnv, env := newAdoptTown(t, gtBinary, tmpDir)
 
 		// Create a tracked beads repo with NO issues at the expected rig location
 		rigDir := filepath.Join(townRoot, "testrig")
@@ -338,6 +331,8 @@ func TestIntegrationBeadsDbInitAfterClone(t *testing.T) {
 		// and gt rig add --adopt must re-initialize the database.
 		// This simulates an edge case (e.g., legacy repo, manual deletion)
 		// where dolt/ and metadata.json are absent despite .beads/ existing.
+		t.Parallel()
+		townRoot, gtEnv, env := newAdoptTown(t, gtBinary, tmpDir)
 
 		// Create a tracked beads repo with issues
 		rigDir := filepath.Join(townRoot, "reinitrig")
@@ -383,6 +378,34 @@ func TestIntegrationBeadsDbInitAfterClone(t *testing.T) {
 		// which requires a running dolt sql-server for runtime access. The init itself
 		// is verified by checking that metadata.json and dolt/ were recreated.
 	})
+}
+
+// newAdoptTown gives one subtest its own scratch Dolt container with a town
+// installed on it, and returns the town root plus the environments its gt and
+// bd commands need (gtEnv has HOME set, env is the bare container env bd
+// commands inside a rig use).
+//
+// Each subtest needs its own town, and so its own container, for two reasons
+// that used to serialize this test behind one town and one container for its
+// whole 60s: gt rig add registers a route by rewriting the town's
+// routes.jsonl (beads.AppendRouteToDir is a load, append and write), so
+// subtests sharing a town lose each other's routes; and the town beads
+// database is named "hq" (internal/cmd/install.go), so subtests sharing a
+// container collide.
+func newAdoptTown(t *testing.T, gtBinary, homeDir string) (townRoot string, gtEnv, bdEnv []string) {
+	t.Helper()
+
+	port, bdEnv := testutil.LeaseScratchDoltContainerEnv(t)
+	gtEnv = append(slices.Clip(bdEnv), "HOME="+homeDir)
+	townRoot = filepath.Join(t.TempDir(), "town")
+	install := exec.Command(gtBinary, "install", townRoot, "--name", "adopt-test", "--dolt-port", port)
+	install.Env = gtEnv
+	if output, err := install.CombinedOutput(); err != nil {
+		t.Fatalf("gt install failed: %v\nOutput: %s", err, output)
+	}
+	// Bridge test Dolt server PID so AddRig/IsRunning checks pass.
+	bridgeDoltPidToTownOnPort(t, townRoot, port)
+	return townRoot, gtEnv, bdEnv
 }
 
 // createTrackedBeadsRepoWithNoIssues creates a git repo with .beads/ tracked but NO issues.
