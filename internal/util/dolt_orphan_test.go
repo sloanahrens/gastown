@@ -50,6 +50,72 @@ func TestDoltSQLServerConfigPath(t *testing.T) {
 	}
 }
 
+func TestDoltSQLServerEndpointFlags(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		args     string
+		wantPort int
+		wantDir  string
+	}{
+		{"dolt sql-server --port 3399 --data-dir /tmp/doltprobe/data", 3399, "/tmp/doltprobe/data"},
+		{"dolt sql-server --port=3308 --data-dir=/tmp/x", 3308, "/tmp/x"},
+		{"dolt sql-server --config /tmp/x/dolt-server-config.yaml", 0, ""},
+		{"dolt sql-server", 0, ""},
+	}
+	for _, tt := range tests {
+		if got := doltSQLServerPort(tt.args); got != tt.wantPort {
+			t.Errorf("doltSQLServerPort(%q) = %d, want %d", tt.args, got, tt.wantPort)
+		}
+		if got := doltSQLServerDataDir(tt.args); got != tt.wantDir {
+			t.Errorf("doltSQLServerDataDir(%q) = %q, want %q", tt.args, got, tt.wantDir)
+		}
+	}
+}
+
+// TestDoltProcessDataDir prefers an explicit --data-dir and falls back to the
+// --config file's directory, which is how a managed server names its data-dir.
+func TestDoltProcessDataDir(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		args string
+		cfg  string
+		want string
+	}{
+		{"dolt sql-server --port 3399 --data-dir /tmp/doltprobe/data", "", "/tmp/doltprobe/data"},
+		{"dolt sql-server --config /tmp/x/config.yaml", "/tmp/x/config.yaml", "/tmp/x"},
+		{"dolt sql-server --port 3399 --data-dir /d --config /tmp/x/config.yaml", "/tmp/x/config.yaml", "/d"},
+		{"dolt sql-server", "", ""},
+	}
+	for _, tt := range tests {
+		if got := doltProcessDataDir(tt.args, tt.cfg); got != tt.want {
+			t.Errorf("doltProcessDataDir(%q, %q) = %q, want %q", tt.args, tt.cfg, got, tt.want)
+		}
+	}
+}
+
+// TestClassifyDoltOrphanEndpoint reproduces the gt-gyw5w leak: a test server
+// on a foreign port with a /tmp data-dir keeps its endpoint on the orphan
+// record, which is what picks its remedy (`kill <pid>`, not kill-imposters).
+func TestClassifyDoltOrphanEndpoint(t *testing.T) {
+	t.Parallel()
+	got, ok := classifyDoltOrphan(doltProcEntry{
+		PID: 29490, PPID: 1, Etime: "01:00:00",
+		Args: "dolt sql-server --port 3399 --data-dir /tmp/doltprobe/data",
+	})
+	if !ok {
+		t.Fatal("classifyDoltOrphan() ok = false, want true for the leaked test server")
+	}
+	if got.Port != 3399 || got.DataDir != "/tmp/doltprobe/data" {
+		t.Errorf("endpoint = (port %d, data-dir %q), want (3399, /tmp/doltprobe/data)", got.Port, got.DataDir)
+	}
+	if got.Reason != "orphan" {
+		t.Errorf("Reason = %q, want orphan", got.Reason)
+	}
+	if remedy := StrayDoltRemedy(StrayDoltProcess{PID: got.PID, Port: got.Port, DataDir: got.DataDir}, 3307, "/Users/x/gt/.dolt-data"); remedy != "kill 29490" {
+		t.Errorf("remedy = %q, want %q", remedy, "kill 29490")
+	}
+}
+
 func TestIsBeadsTestConfigPath(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
