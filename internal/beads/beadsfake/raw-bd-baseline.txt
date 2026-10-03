@@ -21,5 +21,4 @@ internal/deps/bd_handshake.go argv 1
 internal/deps/beads.go argv 1
 internal/mail/bd.go argv 1
 internal/mail/router_integration_test.go argv 1
-internal/plugin/recording.go argv 1
 internal/testutil/cmd.go argv 2

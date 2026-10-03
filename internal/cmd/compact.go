@@ -174,13 +174,6 @@ func getTTL(ttls map[string]time.Duration, wispType string) time.Duration {
 	return ttls["default"]
 }
 
-// compactIssue is the extended issue struct that includes fields from bd list --json.
-type compactIssue struct {
-	beads.Issue
-	CommentCount int    `json:"comment_count"`
-	WispType     string `json:"wisp_type,omitempty"`
-}
-
 // compactTarget identifies one beads database for `gt compact` to sweep.
 type compactTarget struct {
 	workDir string // passed to beads.New as the bd subprocess's working directory
@@ -302,7 +295,7 @@ func runCompact(cmd *cobra.Command, args []string) error {
 
 // compactWisps applies the TTL-based compaction policy to one database's
 // batch of wisps, accumulating outcomes into result.
-func compactWisps(bd *beads.Beads, allWisps []*compactIssue, ttls map[string]time.Duration, now time.Time, result *compactResult) {
+func compactWisps(bd *beads.Beads, allWisps []*beads.Issue, ttls map[string]time.Duration, now time.Time, result *compactResult) {
 	for _, w := range allWisps {
 		age, err := wispAge(w, now)
 		if err != nil {
@@ -357,29 +350,22 @@ func compactWisps(bd *beads.Beads, allWisps []*compactIssue, ttls map[string]tim
 	}
 }
 
-// listWisps queries all ephemeral issues from the database.
-// Returns extended issue structs with comment_count and wisp_type.
-func listWisps(bd *beads.Beads) ([]*compactIssue, error) {
-	// Use bd list --json --all to get wisps in all statuses, unlimited
-	out, err := bd.Run("list", "--json", "--all", "-n", "0")
+// listWisps queries the issues plane and keeps the ephemeral entries. It does
+// not pass IncludeInfra, the same scope the raw `bd list --all` call it
+// replaced asked for; on a database whose wisps live in the wisp plane that
+// yields none, which gt-ekep1 owns fixing. Widening the scope here would
+// change what compaction deletes and promotes.
+func listWisps(bd *beads.Beads) ([]*beads.Issue, error) {
+	// Status "all" keeps closed wisps in the result; Priority -1 leaves the
+	// priority unfiltered (0 would mean P0).
+	issues, err := bd.List(beads.ListOptions{Status: "all", Priority: -1})
 	if err != nil {
 		return nil, err
 	}
 
-	// Strip any non-JSON prefix (warnings, notices) that bd may emit to
-	// stdout before the JSON array. Without this, unicode characters like
-	// emoji in wisp subjects can trigger "invalid character looking for
-	// beginning of value" errors when a warning line contains non-ASCII.
-	out = extractJSONArray(out)
-
-	var allIssues []*compactIssue
-	if err := json.Unmarshal(out, &allIssues); err != nil {
-		return nil, fmt.Errorf("parsing issue list: %w", err)
-	}
-
 	// Filter to ephemeral only
-	var wisps []*compactIssue
-	for _, issue := range allIssues {
+	var wisps []*beads.Issue
+	for _, issue := range issues {
 		if issue.Ephemeral {
 			wisps = append(wisps, issue)
 		}
@@ -400,8 +386,8 @@ func extractJSONArray(data []byte) []byte {
 	return data[idx:]
 }
 
-// promoteWisp makes a wisp permanent by setting --persistent and adding a comment.
-func promoteWisp(bd *beads.Beads, w *compactIssue, reason string, result *compactResult) {
+// promoteWisp makes a wisp permanent by setting Persistent and adding a comment.
+func promoteWisp(bd *beads.Beads, w *beads.Issue, reason string, result *compactResult) {
 	action := compactAction{ID: w.ID, Title: w.Title, Reason: reason, WispType: w.WispType}
 
 	if compactDryRun {
@@ -413,15 +399,14 @@ func promoteWisp(bd *beads.Beads, w *compactIssue, reason string, result *compac
 		return
 	}
 
-	// bd update --persistent sets ephemeral=false
-	_, err := bd.Run("update", w.ID, "--persistent")
-	if err != nil {
+	// Persistent sets ephemeral=false
+	if err := bd.Update(w.ID, beads.UpdateOptions{Persistent: true}); err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("promote %s: %v", w.ID, err))
 		return
 	}
 
 	// Add comment noting the promotion
-	_, _ = bd.Run("comments", "add", w.ID, fmt.Sprintf("Promoted from Level 0: %s", reason))
+	_ = bd.AddComment(w.ID, fmt.Sprintf("Promoted from Level 0: %s", reason))
 
 	result.Promoted = append(result.Promoted, action)
 
@@ -432,7 +417,7 @@ func promoteWisp(bd *beads.Beads, w *compactIssue, reason string, result *compac
 }
 
 // deleteWisp removes a closed wisp that has expired past its TTL.
-func deleteWisp(bd *beads.Beads, w *compactIssue, reason string, result *compactResult) {
+func deleteWisp(bd *beads.Beads, w *beads.Issue, reason string, result *compactResult) {
 	action := compactAction{ID: w.ID, Title: w.Title, Reason: reason, WispType: w.WispType}
 
 	if compactDryRun {
@@ -444,9 +429,8 @@ func deleteWisp(bd *beads.Beads, w *compactIssue, reason string, result *compact
 		return
 	}
 
-	// bd delete --force (safe: Dolt AS OF preserves history)
-	_, err := bd.Run("delete", w.ID, "--force")
-	if err != nil {
+	// DeleteIssues is bd's delete --force (safe: Dolt AS OF preserves history)
+	if err := bd.DeleteIssues(w.ID); err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("delete %s: %v", w.ID, err))
 		return
 	}
@@ -504,18 +488,18 @@ func compactTruncate(s string, maxLen int) string {
 	return string([]rune(s)[:maxLen-3]) + "..."
 }
 
-// hasComments checks the comment_count on the compactIssue.
-func hasComments(w *compactIssue) bool {
+// hasComments checks the comment_count on the issue.
+func hasComments(w *beads.Issue) bool {
 	return w.CommentCount > 0
 }
 
 // isReferenced checks dependency counts.
-func isReferenced(w *compactIssue) bool {
+func isReferenced(w *beads.Issue) bool {
 	return w.DependentCount > 0 || w.DependencyCount > 0
 }
 
 // hasKeepLabel checks for keep labels.
-func hasKeepLabel(w *compactIssue) bool {
+func hasKeepLabel(w *beads.Issue) bool {
 	for _, label := range w.Labels {
 		if label == "keep" || label == "gt:keep" {
 			return true
@@ -524,8 +508,8 @@ func hasKeepLabel(w *compactIssue) bool {
 	return false
 }
 
-// wispAge returns the age of a compactIssue.
-func wispAge(w *compactIssue, now time.Time) (time.Duration, error) {
+// wispAge returns the age of a wisp.
+func wispAge(w *beads.Issue, now time.Time) (time.Duration, error) {
 	ts := w.UpdatedAt
 	if ts == "" {
 		ts = w.CreatedAt

@@ -95,9 +95,7 @@ func TestWispAge(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			w := &compactIssue{
-				Issue: beads.Issue{UpdatedAt: tc.updatedAt},
-			}
+			w := &beads.Issue{UpdatedAt: tc.updatedAt}
 			got, err := wispAge(w, now)
 			if tc.wantErr {
 				if err == nil {
@@ -130,9 +128,7 @@ func TestHasKeepLabel(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			w := &compactIssue{
-				Issue: beads.Issue{Labels: tc.labels},
-			}
+			w := &beads.Issue{Labels: tc.labels}
 			if got := hasKeepLabel(w); got != tc.want {
 				t.Errorf("hasKeepLabel = %v, want %v", got, tc.want)
 			}
@@ -153,7 +149,7 @@ func TestHasComments(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			w := &compactIssue{CommentCount: tc.count}
+			w := &beads.Issue{CommentCount: tc.count}
 			if got := hasComments(w); got != tc.want {
 				t.Errorf("hasComments = %v, want %v", got, tc.want)
 			}
@@ -177,11 +173,9 @@ func TestIsReferenced(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			w := &compactIssue{
-				Issue: beads.Issue{
-					DependencyCount: tc.depCnt,
-					DependentCount:  tc.deptCnt,
-				},
+			w := &beads.Issue{
+				DependencyCount: tc.depCnt,
+				DependentCount:  tc.deptCnt,
 			}
 			if got := isReferenced(w); got != tc.want {
 				t.Errorf("isReferenced = %v, want %v", got, tc.want)

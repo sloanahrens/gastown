@@ -139,6 +139,7 @@ func sdkIssueToIssue(si *beadsdk.Issue) *Issue {
 		Assignee:           si.Assignee,
 		Labels:             si.Labels,
 		Ephemeral:          si.Ephemeral,
+		WispType:           string(si.WispType),
 		AcceptanceCriteria: si.AcceptanceCriteria,
 		Metadata:           si.Metadata,
 		CloseReason:        si.CloseReason,
