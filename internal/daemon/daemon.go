@@ -335,6 +335,12 @@ type Daemon struct {
 	dispatchTicksMu sync.Mutex
 	dispatchTicks   []townhealth.DispatchTick
 
+	// specUnshapedWarned remembers the beads the spec_dispatch ticker has
+	// warned about as unshaped, so a bead held unshaped every tick warns on the
+	// first tick that sees it, not on each (gt-gzav5).
+	specUnshapedWarnedMu sync.Mutex
+	specUnshapedWarned   map[string]bool
+
 	// patrolScanRunning / patrolScanCycles are the patrol_scan tick's
 	// single-flight guard and cycle count (gt-4k3fj.6, patrol_scan.go).
 	patrolScanRunning atomic.Bool
