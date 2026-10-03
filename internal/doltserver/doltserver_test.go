@@ -4342,6 +4342,41 @@ func TestDefaultConfig_ManagedDefaultsAndSettingsOverrides(t *testing.T) {
 	}
 }
 
+// LogLevelOrDefault reports the caller's default when the town sets no
+// operational.dolt.log_level, and the setting when it does (gt-gbpvx). The
+// daemon-managed server passes info, where this Config's own default is
+// warning.
+func TestConfigLogLevelOrDefault(t *testing.T) {
+	t.Parallel()
+
+	unset := t.TempDir()
+	writeTownDoltSettings(t, unset, `{"user":"doltuser"}`)
+	if got := DefaultConfig(unset).LogLevelOrDefault("info"); got != "info" {
+		t.Errorf("unset LogLevelOrDefault = %q, want info", got)
+	}
+
+	set := t.TempDir()
+	writeTownDoltSettings(t, set, `{"log_level":"debug"}`)
+	if got := DefaultConfig(set).LogLevelOrDefault("info"); got != "debug" {
+		t.Errorf("operational.dolt.log_level=debug: LogLevelOrDefault = %q, want debug", got)
+	}
+
+	// A setting equal to this Config's own default is still a setting.
+	explicitWarning := t.TempDir()
+	writeTownDoltSettings(t, explicitWarning, `{"log_level":"warning"}`)
+	if got := DefaultConfig(explicitWarning).LogLevelOrDefault("info"); got != "warning" {
+		t.Errorf("operational.dolt.log_level=warning: LogLevelOrDefault = %q, want warning", got)
+	}
+
+	// A Config DefaultConfig did not build never saw a setting.
+	if got := (&Config{LogLevel: "warning"}).LogLevelOrDefault("info"); got != "info" {
+		t.Errorf("hand-built Config LogLevelOrDefault = %q, want info", got)
+	}
+	if got := (*Config)(nil).LogLevelOrDefault("info"); got != "info" {
+		t.Errorf("nil Config LogLevelOrDefault = %q, want info", got)
+	}
+}
+
 func TestBuildDoltSQLCmd_Local(t *testing.T) {
 	t.Parallel()
 	h := newFakeHost().host()

@@ -268,7 +268,14 @@ type Config struct {
 	// LogLevel is the Dolt server log level (trace, debug, info, warning, error, fatal).
 	// Default is "warning" to suppress connection open/close noise. Set
 	// operational.dolt.log_level to info (or debug) for diagnostics.
+	// LogLevelOrDefault reads it when the setting supplied it.
 	LogLevel string
+
+	// logLevelSet records that operational.dolt.log_level supplied LogLevel,
+	// rather than LogLevel holding the "warning" default above. The
+	// daemon-managed server writes its own default of info, so it must tell an
+	// unset key from one set to the CLI default (gt-gbpvx).
+	logLevelSet bool
 
 	// EventScheduler controls Dolt's MySQL event scheduler in managed config.
 	// Default is OFF for Gas Town: background SQL events are not part of normal
@@ -360,6 +367,7 @@ func (h *host) DefaultConfig(townRoot string) *Config {
 	config.Password = configpkg.ResolveDoltPassword(townRoot, doltCfg)
 	if ll, ok := doltCfg.LogLevelSetting(); ok {
 		config.LogLevel = ll
+		config.logLevelSet = true
 	}
 
 	return config
@@ -368,6 +376,17 @@ func (h *host) DefaultConfig(townRoot string) *Config {
 // DefaultConfig is (*host).DefaultConfig on the real machine.
 func DefaultConfig(townRoot string) *Config {
 	return std.DefaultConfig(townRoot)
+}
+
+// LogLevelOrDefault returns the town's configured Dolt log level, or def when
+// operational.dolt.log_level is unset. def is the caller's own default: the
+// daemon-managed server has always written info, where the CLI path writes this
+// config's warning default (gt-gbpvx).
+func (c *Config) LogLevelOrDefault(def string) string {
+	if c == nil || !c.logLevelSet {
+		return def
+	}
+	return c.LogLevel
 }
 
 // IsRemote returns true when the config points to a non-local Dolt server.

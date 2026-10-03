@@ -898,8 +898,8 @@ func IsDoltUnhealthy(townRoot string) bool {
 // daemon's DoltServerConfig. Unlike CLI flags, config.yaml can set
 // read_timeout_millis and write_timeout_millis, which prevents CLOSE_WAIT
 // accumulation when clients disconnect without completing their SQL sessions.
-// knobs carries the event scheduler, stats and auto-GC switches, resolved by
-// doltserver's one reader of them (gt-y3pgh.2).
+// knobs carries the log level and the event scheduler, stats and auto-GC
+// switches, resolved by doltserver's one reader of them (gt-y3pgh.2).
 func writeDaemonDoltConfig(cfg *DoltServerConfig, configPath string, knobs *doltserver.Config) error {
 	hostLine := ""
 	if cfg.Host != "" {
@@ -925,10 +925,12 @@ func writeDaemonDoltConfig(cfg *DoltServerConfig, configPath string, knobs *dolt
 	if vv := strings.ToLower(strings.TrimSpace(knobs.AutoGC)); vv == "off" || vv == "false" || vv == "0" || vv == "disabled" {
 		autoGcBlock = "  auto_gc_behavior:\n    enable: false\n    archive_level: 0\n"
 	}
+	// operational.dolt.log_level overrides the daemon's own info default, as it
+	// already does for the CLI path (gt-gbpvx).
 	content := fmt.Sprintf(`# Dolt SQL server configuration — managed by Gas Town daemon
 # Do not edit manually; overwritten on each daemon-managed server start.
 
-log_level: info
+log_level: %s
 
 listener:
   port: %d%s
@@ -941,6 +943,7 @@ data_dir: %q
 behavior:
   dolt_transaction_commit: false
 %s%s%s`,
+		knobs.LogLevelOrDefault("info"),
 		cfg.Port,
 		hostLine,
 		cfg.DataDir,
