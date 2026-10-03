@@ -615,3 +615,51 @@ func TestDoltThresholds_ServerTunables(t *testing.T) {
 		t.Error("an unknown operational.dolt key decoded; strict decoding is broken")
 	}
 }
+
+// TestDoltLogLevelSetting_Validates: only the levels Dolt's config.yaml accepts
+// are returned, lowercased; a typo, surrounding whitespace, a newline, a colon
+// or a ${...} reference is unset, so a value that would make Dolt reject or
+// mis-parse the file never reaches it (gt-it0zt).
+func TestDoltLogLevelSetting_Validates(t *testing.T) {
+	t.Parallel()
+
+	valid := []struct{ in, want string }{
+		{"trace", "trace"},
+		{"debug", "debug"},
+		{"info", "info"},
+		{"warning", "warning"},
+		{"error", "error"},
+		{"fatal", "fatal"},
+		{"INFO", "info"},
+		{"Debug", "debug"},
+		{"Warning", "warning"},
+	}
+	for _, tc := range valid {
+		got, ok := (&DoltThresholds{LogLevel: &tc.in}).LogLevelSetting()
+		if !ok || got != tc.want {
+			t.Errorf("log_level=%q: got %q, %v; want %q, true", tc.in, got, ok, tc.want)
+		}
+	}
+
+	rejected := []string{
+		"warn",                       // a typo for warning
+		"verbose",                    // not a Dolt level
+		" info",                      // leading space
+		"info ",                      // trailing space
+		"info\n",                     // a newline is not trimmed away
+		"info\nbehavior:\n  fake: 1", // newline injection into a YAML key
+		"info: evil",                 // colon
+		"${GT_DOLT_LOG_LEVEL}",       // Dolt expands ${...} anywhere in the file
+	}
+	for _, in := range rejected {
+		got, ok := (&DoltThresholds{LogLevel: &in}).LogLevelSetting()
+		if ok || got != "" {
+			t.Errorf("log_level=%q: got %q, %v; want \"\", false (treated as unset)", in, got, ok)
+		}
+	}
+
+	empty := ""
+	if got, ok := (&DoltThresholds{LogLevel: &empty}).LogLevelSetting(); ok || got != "" {
+		t.Errorf("empty log_level: got %q, %v; want \"\", false", got, ok)
+	}
+}

@@ -249,7 +249,8 @@ type DoltThresholds struct {
 	// User is the Dolt SQL user (default "root").
 	User *string `json:"user,omitempty"`
 	// LogLevel is the Dolt server log level: trace, debug, info, warning,
-	// error, fatal (default "warning").
+	// error, or fatal (default "warning"); a value outside that set is
+	// ignored, leaving the default (gt-it0zt).
 	LogLevel *string `json:"log_level,omitempty"`
 	// Password is the Dolt SQL password, held as a ${VAR} reference to a
 	// settings/daemon.env entry (for example "${GT_DOLT_PASSWORD}") rather

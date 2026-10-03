@@ -274,7 +274,8 @@ type Config struct {
 	// logLevelSet records that operational.dolt.log_level supplied LogLevel,
 	// rather than LogLevel holding the "warning" default above. The
 	// daemon-managed server writes its own default of info, so it must tell an
-	// unset key from one set to the CLI default (gt-gbpvx).
+	// unset key from one set to the CLI default (gt-gbpvx). Only a level
+	// LogLevelSetting accepted reaches this assignment (gt-it0zt).
 	logLevelSet bool
 
 	// EventScheduler controls Dolt's MySQL event scheduler in managed config.
