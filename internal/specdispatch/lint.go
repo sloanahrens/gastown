@@ -46,6 +46,10 @@ const (
 	// the beads wearing it and must not import this package to spell it
 	// (gt-q6zoo).
 	DispatchFailedLabel = constants.LabelSpecDispatchFailed
+	// ShapeWaivedLabel waives a bead's shape lint: the dispatcher slings a
+	// bead wearing it even when the lint refuses it, so an operator can take
+	// one bead off the unshaped hold by hand instead of reshaping it (gt-f8ppx).
+	ShapeWaivedLabel = "spec-shape-waived"
 
 	// MinAcceptance and MaxAcceptance bound the acceptance list. Fewer than
 	// one is a refusal; more than MaxAcceptance is a spec one worker cannot
@@ -257,6 +261,27 @@ func (v Verdict) ShapeNote() string {
 		return "SHAPE: refused"
 	}
 	return "SHAPE: " + strings.Join(parts, "; ")
+}
+
+// UnshapedReason is the dispatcher's hold reason for a bead whose shape the
+// lint refused: "unshaped: <fields>", naming every failed field in check order
+// ("unshaped: ## Goal, acceptance"). Empty when the verdict is not a refusal:
+// a planning verdict is the planner's, not an unshaped hold (gt-f8ppx).
+func (v Verdict) UnshapedReason() string {
+	if v.Route != RouteRefuse {
+		return ""
+	}
+	fields := make([]string, 0, len(v.Refusals))
+	for _, r := range v.Refusals {
+		fields = append(fields, r.Field)
+	}
+	if len(fields) == 0 {
+		if v.Field == "" {
+			return "unshaped"
+		}
+		fields = append(fields, v.Field)
+	}
+	return "unshaped: " + strings.Join(fields, ", ")
 }
 
 // Line renders the one-line report for a bead: "<id>: spec lint ok",

@@ -773,8 +773,8 @@ const polecatPoolKeyHelp = `  polecat_pool.max_priority    Priority ceiling for 
                               sling)
   polecat_pool.shape_gate      What a dispatch does with a candidate's shape
                               lint (gt spec lint): "off" runs no lint, "warn"
-                              slings it anyway and comments the verdict,
-                              "refuse" skips it and labels it needs-shape or
+                              holds a refused bead with the verdict commented,
+                              "refuse" also labels it needs-shape or
                               needs-planning (default: warn)`
 
 // polecatPoolIntKeys and polecatPoolStringKeys are gt config's view of
