@@ -20,7 +20,10 @@ func TestIntegrationDoltContainerDataDirIsTmpfs(t *testing.T) {
 	}
 	LeaseScratchDoltContainer(t)
 	ctx := context.Background()
-	ctr := scratchDolt.ctr
+	ctr := scratchContainerAny()
+	if ctr == nil {
+		t.Fatal("no scratch container started")
+	}
 	code, r, err := ctr.Exec(ctx, []string{"stat", "-f", "-c", "%T", doltDataDir}, tcexec.Multiplexed())
 	if err != nil || code != 0 {
 		t.Fatalf("stat %s: code=%d err=%v", doltDataDir, code, err)

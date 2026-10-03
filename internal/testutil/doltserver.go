@@ -534,7 +534,7 @@ func DoltContainerPort() string {
 // a database created or dropped while tests ran fails the package, with an
 // error that wraps ErrDoltCatalogChanged and names each database.
 //
-// The scratch container (LeaseScratchDoltContainer) goes too.
+// The scratch containers (LeaseScratchDoltContainer) go too.
 func TerminateDoltContainer() error {
 	scratchErr := terminateScratchDoltContainer()
 	if doltCtr == nil {
