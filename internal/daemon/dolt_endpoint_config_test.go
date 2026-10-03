@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -180,7 +181,8 @@ func writeAndReadDaemonAutoGC(t *testing.T, doltSettings string) struct {
 
 // TestWriteDaemonDoltConfig_LogLevel covers operational.dolt.log_level on the
 // daemon-managed server: the same setting the CLI path already honors. The
-// daemon keeps its own info default, where the CLI default is warning.
+// daemon keeps its own info default, where the CLI default is warning, and a
+// value Dolt would reject leaves the file at that default (gt-it0zt).
 func TestWriteDaemonDoltConfig_LogLevel(t *testing.T) {
 	t.Parallel()
 
@@ -198,20 +200,52 @@ func TestWriteDaemonDoltConfig_LogLevel(t *testing.T) {
 		}
 	})
 
-	t.Run("configured level is emitted", func(t *testing.T) {
+	t.Run("each accepted level is written", func(t *testing.T) {
 		t.Parallel()
-		if got := writeAndReadDaemonLogLevel(t, `{"log_level":"debug"}`); got != "debug" {
-			t.Errorf("operational.dolt.log_level=debug: log_level = %q, want debug", got)
+		for _, level := range []string{"trace", "debug", "info", "warning", "error", "fatal"} {
+			t.Run(level, func(t *testing.T) {
+				t.Parallel()
+				if got := writeAndReadDaemonLogLevel(t, fmt.Sprintf(`{"log_level":%q}`, level)); got != level {
+					t.Errorf("operational.dolt.log_level=%s: log_level = %q, want %s", level, got, level)
+				}
+			})
 		}
 	})
 
-	t.Run("invalid level is written through like the CLI path", func(t *testing.T) {
+	t.Run("uppercase is written lowercase", func(t *testing.T) {
 		t.Parallel()
-		// Neither path validates: writeServerConfig writes the string as given
-		// and Dolt rejects it at start. The daemon must not diverge by
-		// swallowing or correcting it.
-		if got := writeAndReadDaemonLogLevel(t, `{"log_level":"verbose"}`); got != "verbose" {
-			t.Errorf("operational.dolt.log_level=verbose: log_level = %q, want verbose", got)
+		if got := writeAndReadDaemonLogLevel(t, `{"log_level":"DEBUG"}`); got != "debug" {
+			t.Errorf("operational.dolt.log_level=DEBUG: log_level = %q, want debug", got)
+		}
+	})
+
+	// A rejected value is treated as unset, and none of its text reaches the
+	// file: each write must be byte-identical to one with no log_level at all.
+	// Both writes share one town root so data_dir is not a difference.
+	t.Run("rejected values leave the default write", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
+		writeTownDoltSettings(t, townRoot, `{"auto_gc":"off"}`)
+		baseline := writeDaemonDoltConfigContent(t, townRoot)
+		rejected := []struct{ name, value string }{
+			{"typo", "warn"},
+			{"unknown level", "verbose"},
+			{"leading space", " info"},
+			{"trailing space", "info "},
+			{"newline", "info\n"},
+			{"yaml injection", "info\nbehavior:\n  fake: 1"},
+			{"colon", "info: evil"},
+			{"dollar-brace reference", "${GT_DOLT_LOG_LEVEL}"},
+		}
+		for _, tc := range rejected {
+			// Not parallel: every case rewrites the one town root's settings.
+			t.Run(tc.name, func(t *testing.T) {
+				writeTownDoltSettings(t, townRoot, fmt.Sprintf(`{"auto_gc":"off","log_level":%q}`, tc.value))
+				got := writeDaemonDoltConfigContent(t, townRoot)
+				if got != baseline {
+					t.Errorf("operational.dolt.log_level=%q changed the config file; want the default write\n--- got ---\n%s", tc.value, got)
+				}
+			})
 		}
 	})
 }
@@ -222,27 +256,36 @@ func TestWriteDaemonDoltConfig_LogLevel(t *testing.T) {
 func writeAndReadDaemonLogLevel(t *testing.T, doltJSON string) string {
 	t.Helper()
 
-	dir := t.TempDir()
+	townRoot := t.TempDir()
 	if doltJSON != "" {
-		writeTownDoltSettings(t, dir, doltJSON)
+		writeTownDoltSettings(t, townRoot, doltJSON)
 	}
-	configPath := filepath.Join(dir, "config.yaml")
-	cfg := &DoltServerConfig{Port: 3307, DataDir: dir}
+	content := writeDaemonDoltConfigContent(t, townRoot)
+
+	var parsed struct {
+		LogLevel string `yaml:"log_level"`
+	}
+	if err := yaml.Unmarshal([]byte(content), &parsed); err != nil {
+		t.Fatalf("generated daemon config is invalid YAML: %v\n%s", err, content)
+	}
+	return parsed.LogLevel
+}
+
+// writeDaemonDoltConfigContent writes the daemon's Dolt config for townRoot and
+// returns the file's contents.
+func writeDaemonDoltConfigContent(t *testing.T, townRoot string) string {
+	t.Helper()
+
+	configPath := filepath.Join(townRoot, "config.yaml")
+	cfg := &DoltServerConfig{Port: 3307, DataDir: townRoot}
 	// The log level comes from the same knobs the CLI path reads (gt-gbpvx);
 	// DefaultConfig resolves them from the town's settings.
-	if err := writeDaemonDoltConfig(cfg, configPath, doltserver.DefaultConfig(dir)); err != nil {
+	if err := writeDaemonDoltConfig(cfg, configPath, doltserver.DefaultConfig(townRoot)); err != nil {
 		t.Fatalf("writeDaemonDoltConfig: %v", err)
 	}
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatalf("reading daemon Dolt config: %v", err)
 	}
-
-	var parsed struct {
-		LogLevel string `yaml:"log_level"`
-	}
-	if err := yaml.Unmarshal(data, &parsed); err != nil {
-		t.Fatalf("generated daemon config is invalid YAML: %v\n%s", err, data)
-	}
-	return parsed.LogLevel
+	return string(data)
 }

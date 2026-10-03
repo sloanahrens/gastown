@@ -4377,6 +4377,38 @@ func TestConfigLogLevelOrDefault(t *testing.T) {
 	}
 }
 
+// A rejected operational.dolt.log_level is unset on the CLI path too:
+// DefaultConfig keeps its warning default and writeServerConfig writes it, so
+// the value never reaches the file (gt-it0zt).
+func TestDefaultConfigRejectsUnknownLogLevel(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []string{"warn", "verbose", " info", "info\n", "info: evil", "${GT_DOLT_LOG_LEVEL}"} {
+		townRoot := t.TempDir()
+		writeTownDoltSettings(t, townRoot, fmt.Sprintf(`{"log_level":%q}`, value))
+
+		config := DefaultConfig(townRoot)
+		if config.LogLevel != "warning" {
+			t.Errorf("log_level=%q: Config.LogLevel = %q, want warning (the CLI default)", value, config.LogLevel)
+		}
+		if got := config.LogLevelOrDefault("info"); got != "info" {
+			t.Errorf("log_level=%q: LogLevelOrDefault = %q, want info (treated as unset)", value, got)
+		}
+
+		configPath := filepath.Join(townRoot, "config.yaml")
+		if err := writeServerConfig(config, configPath); err != nil {
+			t.Fatalf("writeServerConfig: %v", err)
+		}
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("reading config: %v", err)
+		}
+		if !strings.Contains(string(data), "log_level: warning") {
+			t.Errorf("log_level=%q: CLI config missing the warning default:\n%s", value, data)
+		}
+	}
+}
+
 func TestBuildDoltSQLCmd_Local(t *testing.T) {
 	t.Parallel()
 	h := newFakeHost().host()

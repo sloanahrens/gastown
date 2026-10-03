@@ -1,7 +1,10 @@
 package config
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/townhealth"
@@ -69,6 +72,11 @@ const (
 	// day per database once bd commits once per invocation (gt-8z769).
 	DefaultDoltCommitsPerDayWarn = 500
 )
+
+// doltLogLevels are the log_level values Dolt's config.yaml accepts. A value
+// outside this set can make Dolt reject or mis-parse the file it is written
+// into — Dolt expands ${...} anywhere in that file, comments included (gt-it0zt).
+var doltLogLevels = []string{"trace", "debug", "info", "warning", "error", "fatal"}
 
 // LoadOperationalConfig loads operational config from a town root.
 // Returns a valid (possibly empty) config — never nil, never errors.
@@ -211,13 +219,35 @@ func (d *DoltThresholds) UserSetting() (string, bool) {
 	return *d.User, true
 }
 
-// LogLevelSetting returns the configured Dolt log level and whether it is set. An
-// empty setting is unset: the default level holds.
+// LogLevelSetting returns the configured Dolt log level and whether it is set;
+// an empty or unrecognized value is unset, so the default level holds, and an
+// unrecognized one earns one warning naming the setting and the levels Dolt
+// accepts (gt-it0zt).
 func (d *DoltThresholds) LogLevelSetting() (string, bool) {
 	if d == nil || d.LogLevel == nil || *d.LogLevel == "" {
 		return "", false
 	}
-	return *d.LogLevel, true
+	level, ok := normalizeDoltLogLevel(*d.LogLevel)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "warning: operational.dolt.log_level=%q is not a valid level, using the default (allowed: %s)\n",
+			*d.LogLevel, strings.Join(doltLogLevels, ", "))
+		return "", false
+	}
+	return level, true
+}
+
+// normalizeDoltLogLevel returns s as one of doltLogLevels, lowercased, and
+// whether it matched. The whole string must match: it is destined for a YAML
+// file, so surrounding whitespace or any other character disqualifies it rather
+// than being trimmed (gt-it0zt).
+func normalizeDoltLogLevel(s string) (string, bool) {
+	level := strings.ToLower(s)
+	for _, l := range doltLogLevels {
+		if level == l {
+			return l, true
+		}
+	}
+	return "", false
 }
 
 // PasswordSetting returns the configured Dolt SQL password value and whether
