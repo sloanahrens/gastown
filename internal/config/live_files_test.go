@@ -16,7 +16,9 @@ import (
 // the patrols.quota_resume key gt-638go.2 deleted from the schema and the
 // merge_queue.post_merge_command/post_merge_timeout keys gt-6zf1o deleted and
 // the refinery-era merge_queue keys gt-5nlvq deleted (batch_*,
-// test_verify_command, cycle_session_after_merge): a
+// test_verify_command, cycle_session_after_merge) and the 41 dead operational
+// keys gt-y3pgh.2.13.1 deleted (operational.witness.done_intent_*,
+// operational.daemon.boot_spawn_cooldown and the rest): a
 // live file must lose such a key before a binary carrying the deletion is
 // installed, or the startup gate refuses the town.
 // Strict decoding must accept every key they carry: a kernel that refused the

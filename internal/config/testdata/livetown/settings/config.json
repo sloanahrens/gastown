@@ -269,13 +269,6 @@
     "witness": "medium"
   },
   "operational": {
-    "witness": {
-      "done_intent_stuck_timeout": "90m",
-      "done_intent_recent_grace": "2m"
-    },
-    "daemon": {
-      "boot_spawn_cooldown": "6m"
-    },
     "container_gate": {
       "slots": 4,
       "reserved_for_gate": 2
