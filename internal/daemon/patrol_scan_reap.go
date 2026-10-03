@@ -61,10 +61,7 @@ var _ patrolscan.ReapEnv = (*patrolScanHost)(nil)
 // reapCleanup is the worktree_cleanup block this host reaps under, nil when
 // the tick carries none.
 func (h *patrolScanHost) reapCleanup() *agentconfig.WorktreeCleanupConfig {
-	if c := patrolScanConfig(h.d.patrolConfig); c != nil {
-		return c.WorktreeCleanup
-	}
-	return nil
+	return reapCleanupConfig(h.d.patrolConfig)
 }
 
 // reapNotCovered is the error every ReapEnv method returns for a rig the

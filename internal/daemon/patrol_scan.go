@@ -142,6 +142,7 @@ func (d *Daemon) runPatrolScan() {
 		for _, line := range report.Lines() {
 			d.logger.Printf("patrol_scan: %s", line)
 		}
+		d.reapAlertsIfEnabled(rigName, report)
 	}
 	d.patrolScanTimerGates(env, rigs)
 	d.patrolScanGHGates(env, rigs)
