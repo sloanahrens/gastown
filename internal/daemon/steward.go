@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	gtgit "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 	"github.com/steveyegge/gastown/internal/steward"
 )
 
@@ -22,9 +23,20 @@ import (
 // prompts and their authority are gt-9bioi.2's; this file is the trigger, the
 // concurrency cap, the timeout and the ledger. Off unless
 // patrols.steward.enabled is true.
+//
+// A second scan, behind patrols.steward_plan (default off), raises one plan
+// event per needs-planning spec no planner has proposed a breakdown for
+// (gt-4k3fj.13, gt-4k3fj.14). Plan jobs run on the steward's runner, so a plan
+// job takes a seat of one roster rather than opening a second pool.
 
 const (
 	defaultStewardInterval = 60 * time.Second
+
+	// defaultStewardPlanMaxJobs caps plan jobs running at once. A plan job
+	// spends an LLM session and its proposal is read by a person before
+	// anything exists as a bead, so one at a time is the useful rate
+	// (gt-4k3fj.14).
+	defaultStewardPlanMaxJobs = 1
 
 	// stewardBeadLimit bounds one rig's queue scan. The landing queue is
 	// small (the daemon holds one submission per polecat), so a limit that
@@ -88,6 +100,67 @@ func stewardRigs(config *DaemonPatrolConfig, known []string) []string {
 		}
 	}
 	return out
+}
+
+// stewardPlanConfig is patrols.steward_plan, or nil when the town does not ask
+// for planning jobs (gt-4k3fj.14).
+func stewardPlanConfig(config *DaemonPatrolConfig) *StewardPlanConfig {
+	if config == nil || config.Patrols == nil {
+		return nil
+	}
+	return config.Patrols.StewardPlan
+}
+
+func stewardPlanInterval(config *DaemonPatrolConfig) time.Duration {
+	if c := stewardPlanConfig(config); c != nil && c.IntervalStr != "" {
+		if d, err := time.ParseDuration(c.IntervalStr); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultStewardInterval
+}
+
+// stewardPlanRigs is the configured rig allowlist within known.
+func stewardPlanRigs(config *DaemonPatrolConfig, known []string) []string {
+	c := stewardPlanConfig(config)
+	if c == nil || len(c.Rigs) == 0 {
+		return known
+	}
+	var out []string
+	for _, r := range known {
+		for _, want := range c.Rigs {
+			if r == want {
+				out = append(out, r)
+				break
+			}
+		}
+	}
+	return out
+}
+
+func stewardPlanMaxJobs(c *StewardPlanConfig) int {
+	if c != nil && c.MaxJobs > 0 {
+		return c.MaxJobs
+	}
+	return defaultStewardPlanMaxJobs
+}
+
+// stewardRosterCap is the daemon's steward roster: the seats each enabled
+// patrol asks for, so a plan job is counted against the cap a review or
+// rejection job is counted against — one roster, not two pools (gt-4k3fj.14).
+// A patrol that is off contributes no seat: a town running only
+// patrols.steward keeps the cap its own max_jobs asks for (2 by default), and
+// a plan-only town's roster is the plan seats alone. With both on their
+// defaults that is 2 + 1 = 3 seats.
+func stewardRosterCap(config *DaemonPatrolConfig) int {
+	seats := 0
+	if c := stewardConfig(config); c != nil && c.Enabled {
+		seats += stewardMaxJobs(c)
+	}
+	if c := stewardPlanConfig(config); c != nil && c.Enabled {
+		seats += stewardPlanMaxJobs(c)
+	}
+	return seats
 }
 
 // triggerSteward starts one scan on its own goroutine unless one is
@@ -200,6 +273,175 @@ func (d *Daemon) runSteward() {
 	}
 }
 
+// triggerStewardPlan starts one plan scan on its own goroutine unless one is
+// already running. It reports whether a scan started.
+func (d *Daemon) triggerStewardPlan() bool {
+	// The monitor runs off the plan tick too: in a plan-only town the steward
+	// ticker never starts, and the jobs this patrol raises would otherwise be
+	// raised unwatched (gt-4k3fj.14). Every tick of either patrol calls it;
+	// its single-flight guard collapses the overlap.
+	d.triggerStewardMonitor()
+	if !d.stewardPlanScan.CompareAndSwap(false, true) {
+		d.logger.Printf("steward plan: previous scan still running, skipping")
+		return false
+	}
+	d.stewardCycles.Add(1)
+	go func() {
+		defer d.stewardCycles.Done()
+		defer d.stewardPlanScan.Store(false)
+		d.runStewardPlan()
+	}()
+	return true
+}
+
+// runStewardPlan scans every rig the patrol covers and starts a plan job for
+// each needs-planning spec no plan job has proposed a breakdown for. A job
+// runs on past the scan; the runner owns it from there (gt-4k3fj.14).
+func (d *Daemon) runStewardPlan() {
+	if !d.isPatrolActive("steward_plan") || d.config == nil || d.ctx == nil {
+		return
+	}
+	townRoot := d.config.TownRoot
+	runner := d.stewardRunnerFor(townRoot)
+	if runner == nil {
+		return
+	}
+	d.reapStewardOrphans(runner)
+	ledger := steward.NewLedger(steward.LedgerPath(townRoot))
+	jobs, err := ledger.Read()
+	if err != nil {
+		d.logger.Printf("steward plan: reading the ledger: %v", err)
+		return
+	}
+	// Plan history is keyed by the event's own key — one event on one bead —
+	// not by the ledger row's: a row carries the tip the job checked out, and
+	// that moves as main advances, so a spec must not be planned twice
+	// because main moved (gt-4k3fj.14).
+	history := map[string][]steward.Job{}
+	for _, j := range jobs {
+		if j.Event != steward.KindPlan {
+			continue
+		}
+		key := steward.Event{Kind: steward.KindPlan, Bead: j.Bead}.Key()
+		history[key] = append(history[key], j)
+	}
+	// A plan job runs once: a spec no planner could break down goes to the
+	// operator, not to a second attempt (gt-4k3fj.13). The proposal a job
+	// writes is what retires the event, so both modes spend it.
+	seen := func(key string) bool {
+		_, run := steward.StartedModel(steward.Event{Kind: steward.KindPlan}, history[key], "", "")
+		return !run
+	}
+	cap := stewardPlanMaxJobs(stewardPlanConfig(d.patrolConfig))
+	mode, modeErr := StewardMode(d.patrolConfig)
+	if modeErr != nil {
+		d.logger.Printf("steward plan: %v", modeErr)
+	}
+	running := planJobsRunning(runner)
+	var started []string
+	for _, rigName := range stewardPlanRigs(d.patrolConfig, d.getKnownRigs()) {
+		if d.ctx.Err() != nil {
+			return
+		}
+		if ok, why := d.isRigOperational(rigName); !ok {
+			d.logger.Printf("steward plan: %s: not scanning: %s", rigName, why)
+			continue
+		}
+		for _, ev := range d.stewardPlanEvents(rigName, seen) {
+			if running >= cap {
+				d.logger.Printf("steward plan: %d plan job(s) already running; the cap is %d", running, cap)
+				return
+			}
+			if runner.RunningBead(ev.Bead) {
+				continue
+			}
+			model, run := steward.StartedModel(ev, history[ev.Key()], "", "")
+			if !run {
+				continue
+			}
+			// A plan event names no head, and the spawner refuses one: the job
+			// reads the rig's own code, so it runs at the branch the rig's work
+			// lands on (gt-4k3fj.14).
+			head, branch, err := d.planCheckout(ev.Rig)
+			if err != nil {
+				d.logger.Printf("steward plan: %s: not started: %v", ev.Bead, err)
+				continue
+			}
+			ev.Head, ev.Branch, ev.Mode = head, branch, mode
+			prompt, err := steward.PromptFor(ev, true)
+			if err != nil {
+				d.logger.Printf("steward plan: %s: not started: %v", ev.Bead, err)
+				continue
+			}
+			if !runner.Start(d.ctx, ev, model, prompt) {
+				d.logger.Printf("steward plan: %s: not started: the roster cap (%d) is full or the bead is already running", ev.Bead, runner.MaxJobs)
+				return
+			}
+			running++
+			started = append(started, string(ev.Kind)+":"+ev.Bead)
+		}
+	}
+	if len(started) > 0 {
+		d.logger.Printf("steward plan: started %d job(s): %v", len(started), started)
+	}
+}
+
+// planJobsRunning counts the plan jobs this process has in flight, so the plan
+// seat's own cap holds inside the shared roster (gt-4k3fj.14).
+func planJobsRunning(runner *steward.Runner) int {
+	n := 0
+	for _, j := range runner.Running() {
+		if j.Event == steward.KindPlan {
+			n++
+		}
+	}
+	return n
+}
+
+// stewardPlanEvents is the plan events one rig raises: an open bead labeled
+// needs-planning whose notes carry no PLAN PROPOSAL block. It is not a
+// stewardEventSources entry — plan is not a patrols.steward.kinds value
+// (gt-9bioi.7, gt-4k3fj.13) — so the plan scan lists the label itself. A scan
+// that cannot read a queue is logged and skipped: the next scan retries it.
+func (d *Daemon) stewardPlanEvents(rigName string, seen func(key string) bool) []steward.Event {
+	rigPath := filepath.Join(d.config.TownRoot, rigName)
+	list := d.stewardListFn
+	if list == nil {
+		bd := beads.NewWithBeadsDir(rigPath, beads.ResolveBeadsDir(rigPath))
+		list = func(_ string, opts beads.ListOptions) ([]*beads.Issue, error) { return bd.List(opts) }
+	}
+	// Priority -1 is "no filter": the zero value asks bd for P0 beads only.
+	issues, err := list(rigPath, beads.ListOptions{Status: "open", Label: specdispatch.NeedsPlanningLabel, Priority: -1, Limit: stewardBeadLimit})
+	if err != nil {
+		d.logger.Printf("steward plan: %s: listing %s beads: %v", rigName, specdispatch.NeedsPlanningLabel, err)
+		return nil
+	}
+	var out []steward.Event
+	for _, issue := range issues {
+		if ev, ok := steward.Detect(issue, rigName, seen); ok && ev.Kind == steward.KindPlan {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// planCheckout is the worktree a plan job runs in: the rig's default branch
+// tip, where the planner reads the code the spec talks about. A plan event
+// names no head because the spec is a bead to decompose, not a submission.
+func (d *Daemon) planCheckout(rigName string) (head, branch string, err error) {
+	g := d.gitAt(filepath.Join(d.config.TownRoot, rigName, ".repo.git"))
+	branch = g.RemoteDefaultBranch()
+	if branch == "" {
+		branch = "main"
+	}
+	for _, ref := range []string{"refs/remotes/origin/" + branch, "refs/heads/" + branch} {
+		if head, err = g.Rev(ref + "^{commit}"); err == nil {
+			return head, branch, nil
+		}
+	}
+	return "", "", fmt.Errorf("reading %s in %s: %w", branch, rigName, err)
+}
+
 // stewardEventSources pairs each queued label with the event kind it raises.
 var stewardEventSources = []struct {
 	label string
@@ -246,16 +488,23 @@ func (d *Daemon) stewardEvents(rigName string, kinds []steward.Kind, seen func(k
 
 // stewardRunnerFor is the runner for this daemon process, built on first use.
 // One runner per process is what makes the concurrency cap and the
-// one-job-per-bead rule hold across scans, not just within one.
+// one-job-per-bead rule hold across scans, not just within one — plan jobs
+// included, since they run on this same roster (gt-4k3fj.14).
 func (d *Daemon) stewardRunnerFor(townRoot string) *steward.Runner {
+	d.stewardRunnerMu.Lock()
+	defer d.stewardRunnerMu.Unlock()
 	if d.stewardRunner != nil {
 		return d.stewardRunner
 	}
 	cfg := stewardConfig(d.patrolConfig)
-	if cfg == nil {
+	if cfg == nil && stewardPlanConfig(d.patrolConfig) == nil {
 		return nil
 	}
-	root, err := stewardWorkRoot(cfg.WorkRoot, townRoot)
+	root := ""
+	if cfg != nil {
+		root = cfg.WorkRoot
+	}
+	root, err := stewardWorkRoot(root, townRoot)
 	if err != nil {
 		d.logger.Printf("steward: %v", err)
 		return nil
@@ -268,7 +517,7 @@ func (d *Daemon) stewardRunnerFor(townRoot string) *steward.Runner {
 	runner := &steward.Runner{
 		Ledger:   ledger,
 		WorkDir:  root,
-		MaxJobs:  stewardMaxJobs(cfg),
+		MaxJobs:  stewardRosterCap(d.patrolConfig),
 		Timeout:  stewardJobTimeout(cfg),
 		Logf:     d.logger.Printf,
 		SpawnFor: d.stewardSpawnerFor(),
@@ -281,12 +530,10 @@ func (d *Daemon) stewardRunnerFor(townRoot string) *steward.Runner {
 	} else if n > 0 {
 		d.logger.Printf("steward: dropped %d ledger job(s) older than %s", n, stewardRowRetention)
 	}
-	d.stewardRunnerMu.Lock()
 	d.stewardRunner = runner
-	d.stewardRunnerMu.Unlock()
 	d.logger.Printf("steward: runner started (work root %s, max jobs %d, job timeout %s)", root, runner.MaxJobs, runner.Timeout)
 	d.pruneStewardWorktrees(root, townRoot)
-	return d.stewardRunner
+	return runner
 }
 
 // reapStewardOrphans closes the ledger's running jobs this process did not

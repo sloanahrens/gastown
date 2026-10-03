@@ -55,7 +55,9 @@ type Stats struct {
 	// Models counts every job in the window by the preset it ran on.
 	Models map[string]int `json:"models"`
 	// Pro is the jobs that ran on the hard preset, the usage the overseer
-	// is notified of one job at a time.
+	// is notified of one job at a time. A kind ProExempt runs on a preset of
+	// its own choosing, not because a job escalated, so it is in Models but
+	// not here (gt-4k3fj.14).
 	Pro int `json:"pro"`
 	// Broke is the attempted jobs that ended in error or timeout: the
 	// steward failing, as opposed to a job whose verdict is fail.
@@ -110,7 +112,7 @@ func Summarize(rows []Job, o StatsOptions) Stats {
 		if j.Mode.Shadow() {
 			s.Shadow++
 		}
-		if j.Model == o.HardAgent {
+		if j.Model == o.HardAgent && !j.Event.ProExempt() {
 			s.Pro++
 		}
 		if running {

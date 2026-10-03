@@ -30,6 +30,15 @@ const (
 	KindPlan Kind = "plan"
 )
 
+// ProExempt reports whether a job of this kind is exempt from the Pro count
+// and its notice. A plan job runs on PlanAgent by design, and a flash-first
+// town sets that same preset as the hard agent: its model says what the kind
+// costs, not that a job escalated to a harder one. Every other kind reaches
+// the hard preset only by retrying a failure or starting from a conflict
+// rejection, which is the usage the overseer is told about one job at a time
+// (gt-9bioi.3, gt-4k3fj.14).
+func (k Kind) ProExempt() bool { return k == KindPlan }
+
 // ParseKind reads one entry of patrols.steward.kinds: the landing-queue kinds
 // the scan may cover. The set is closed: an empty string and anything that is
 // not one of them are errors naming the key (gt-9bioi.7). KindPlan is not one

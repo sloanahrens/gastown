@@ -67,7 +67,11 @@ decides and reports without slinging, labeling or commenting.
      `spec-shape-waived` waives the lint and is slung anyway;
    - `refuse` also holds it, and labels it `needs-shape` (or `needs-planning`
      when that is the verdict) with one comment. Nothing is spawned for a bead
-     that needs planning (the planner, gt-4k3fj.7, is not built yet).
+     that needs planning: the tick reports its planning state, `needs plan`
+     while it waits for a proposal or `plan proposed` once a plan job has
+     written its `PLAN PROPOSAL` block for the operator to file
+     (gt-4k3fj.14). The plan jobs themselves are `patrols.steward_plan`, in
+     [Steward jobs](steward-jobs.md#configuration).
 4. A spec that clears the shape gate takes the first free seat and is slung
    through the shared rig-dispatch path in-process, with no auto-convoy.
 

@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 	"github.com/steveyegge/gastown/internal/steward"
 )
 
@@ -667,5 +669,230 @@ func TestStewardReworkOwnerReadsTheTownConfig(t *testing.T) {
 	}
 	if got := StewardReworkOwner(townRoot, "gastown"); got != "" {
 		t.Errorf("a disabled steward still owns rejections: %q", got)
+	}
+}
+
+// planningBead is a spec the dispatcher routed to the planner: open, labeled
+// needs-planning, with the notes given (a PLAN PROPOSAL block means the plan
+// job already ran).
+func planningBead(id, notes string) *beads.Issue {
+	return &beads.Issue{ID: id, Status: "open", Labels: []string{specdispatch.NeedsPlanningLabel}, Notes: notes}
+}
+
+// planPatrolConfig is a patrol config with the plan key set, and the steward
+// key as given (nil leaves it absent).
+func planPatrolConfig(stewardCfg *StewardConfig, plan *StewardPlanConfig) *DaemonPatrolConfig {
+	return &DaemonPatrolConfig{Patrols: &PatrolsConfig{Steward: stewardCfg, StewardPlan: plan}}
+}
+
+// newPlanTestDaemon is a daemon whose plan scan reads one rig, whose bd list
+// answers with issues, and whose git is a gitfake world with origin/main at a
+// base commit — the branch a plan job checks out.
+func newPlanTestDaemon(t *testing.T, cfg *DaemonPatrolConfig, sp steward.Spawner, issues []*beads.Issue) (*Daemon, *steward.Runner, *gitfake.Fake) {
+	t.Helper()
+	townRoot := t.TempDir()
+	writeRigsJSON(t, townRoot, []string{"gastown"})
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"type":"town","version":2,"name":"t"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ids := 0
+	runner := &steward.Runner{
+		Ledger:  steward.NewLedger(steward.LedgerPath(townRoot)),
+		Spawn:   sp,
+		WorkDir: t.TempDir(),
+		MaxJobs: stewardRosterCap(cfg),
+		Timeout: time.Minute,
+		Logf:    func(string, ...any) {},
+		NewID:   func() string { ids++; return strconv.Itoa(ids) },
+	}
+	d := &Daemon{
+		config:        &Config{TownRoot: townRoot},
+		logger:        discardLogger,
+		ctx:           t.Context(),
+		patrolConfig:  cfg,
+		stewardRunner: runner,
+		rigBeadShowFn: func(_, id string) (*beads.Issue, error) { return &beads.Issue{ID: id}, nil },
+		stewardListFn: func(_ string, _ beads.ListOptions) ([]*beads.Issue, error) { return issues, nil },
+	}
+	f := useGitfake(t, d)
+	repo := filepath.Join(townRoot, "gastown", ".repo.git")
+	f.InitBare(t, repo)
+	f.SetRef(t, repo, "refs/remotes/origin/main", f.Commit(t, repo, "main", "base", map[string]string{"README.md": "hi\n"}))
+	return d, runner, f
+}
+
+// blockingSpawner holds every job until release, so a scan's cap is observed
+// with jobs actually in flight. spawned signals each Spawn, which the runner
+// hands to a goroutine of its own: a test waits on it instead of sleeping.
+type blockingSpawner struct {
+	mu      sync.Mutex
+	seen    []steward.Event
+	release chan struct{}
+	spawned chan struct{}
+}
+
+func (b *blockingSpawner) Spawn(ctx context.Context, req steward.SpawnRequest) steward.SpawnResult {
+	b.mu.Lock()
+	b.seen = append(b.seen, req.Event)
+	b.mu.Unlock()
+	b.spawned <- struct{}{}
+	select {
+	case <-b.release:
+	case <-ctx.Done():
+	}
+	return steward.SpawnResult{Verdict: &steward.Result{Outcome: steward.OutcomePass, Summary: "ok"}}
+}
+
+func (b *blockingSpawner) events() []steward.Event {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]steward.Event(nil), b.seen...)
+}
+
+// TestStewardPlanPatrolIsOptIn: a plan job spends an LLM session, so planning
+// is its own opt-in key and never rides the steward flag (gt-4k3fj.14).
+func TestStewardPlanPatrolIsOptIn(t *testing.T) {
+	t.Parallel()
+	if IsPatrolEnabled(nil, "steward_plan") {
+		t.Error("plan jobs are on without a config")
+	}
+	if IsPatrolEnabled(planPatrolConfig(nil, &StewardPlanConfig{}), "steward_plan") {
+		t.Error("plan jobs are on with no enabled flag")
+	}
+	if !IsPatrolEnabled(planPatrolConfig(nil, &StewardPlanConfig{Enabled: true}), "steward_plan") {
+		t.Error("plan jobs are off with enabled:true")
+	}
+	if IsPatrolEnabled(planPatrolConfig(nil, &StewardPlanConfig{Enabled: true}), "steward") {
+		t.Error("the plan key turned the steward patrol on")
+	}
+}
+
+// TestStewardPlanScanDoesNothingByDefault: with patrols.steward_plan absent or
+// false no plan job spawns, however many specs wait — and the landing-queue
+// scan does not raise plan events either (gt-4k3fj.14).
+func TestStewardPlanScanDoesNothingByDefault(t *testing.T) {
+	t.Parallel()
+	for name, cfg := range map[string]*DaemonPatrolConfig{
+		"absent":   stewardPatrolConfig(&StewardConfig{Enabled: true, Kinds: []string{"rejection"}}),
+		"disabled": planPatrolConfig(&StewardConfig{Enabled: true, Kinds: []string{"rejection"}}, &StewardPlanConfig{Enabled: false}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			sp := &countingSpawner{result: steward.SpawnResult{Verdict: &steward.Result{Outcome: steward.OutcomePass, Summary: "ok"}}}
+			d, runner, _ := newPlanTestDaemon(t, cfg, sp, []*beads.Issue{planningBead("gt-pl", "")})
+			d.runStewardPlan()
+			runner.Wait()
+			if got := sp.events(); len(got) != 0 {
+				t.Fatalf("plan jobs spawned with the plan patrol off: %+v", got)
+			}
+			// The landing-queue scan covers its own labels, and a kind it does
+			// not cover is filtered even when the list hands the bead back
+			// (gt-9bioi.7).
+			d.runSteward()
+			runner.Wait()
+			for _, ev := range sp.events() {
+				if ev.Kind == steward.KindPlan {
+					t.Fatalf("the landing-queue scan raised a plan event: %+v", ev)
+				}
+			}
+		})
+	}
+}
+
+// TestStewardPlanScanPlansOneJobPerSpecWithinTheRosterCap: with
+// patrols.steward_plan on, one plan job runs per needs-planning spec, at most
+// one at a time, and it takes a seat of the steward roster — 2 steward seats
+// plus 1 plan seat by default (gt-4k3fj.14).
+func TestStewardPlanScanPlansOneJobPerSpecWithinTheRosterCap(t *testing.T) {
+	t.Parallel()
+	cfg := planPatrolConfig(&StewardConfig{Enabled: true, Kinds: []string{"rejection"}}, &StewardPlanConfig{Enabled: true})
+	if got := stewardRosterCap(cfg); got != 3 {
+		t.Fatalf("stewardRosterCap = %d, want 3 (2 steward seats + 1 plan seat)", got)
+	}
+	sp := &blockingSpawner{release: make(chan struct{}), spawned: make(chan struct{}, 8)}
+	d, runner, f := newPlanTestDaemon(t, cfg, sp, []*beads.Issue{planningBead("gt-p1", ""), planningBead("gt-p2", "")})
+	if runner.MaxJobs != 3 {
+		t.Fatalf("runner.MaxJobs = %d, want the 3-seat roster", runner.MaxJobs)
+	}
+
+	d.runStewardPlan()
+	<-sp.spawned
+	// The plan seat's cap is one: the second spec waits, and so does a second
+	// scan while the first job is still in flight.
+	beadsStarted := func() []string {
+		var out []string
+		for _, ev := range sp.events() {
+			out = append(out, ev.Bead)
+		}
+		return out
+	}
+	if got := beadsStarted(); !slices.Equal(got, []string{"gt-p1"}) {
+		t.Fatalf("started %v, want one plan job for gt-p1", got)
+	}
+	// A plan event names no head, and the spawner refuses one: the scan hands
+	// the job the rig's default branch tip to check out (gt-4k3fj.14).
+	if ev := sp.events()[0]; ev.Head == "" || ev.Branch != "main" {
+		t.Fatalf("plan event %+v names no head to run at", ev)
+	}
+	d.runStewardPlan()
+	if got := beadsStarted(); !slices.Equal(got, []string{"gt-p1"}) {
+		t.Fatalf("a second scan started %v, want nothing while the plan seat is full", got)
+	}
+	if n := planJobsRunning(runner); n != 1 {
+		t.Fatalf("plan jobs in flight = %d, want 1", n)
+	}
+
+	close(sp.release)
+	runner.Wait()
+
+	// Main moves on. A plan event names no head, so the spec already planned
+	// must not be planned again because the tip it ran at is stale.
+	repo := filepath.Join(d.config.TownRoot, "gastown", ".repo.git")
+	f.SetRef(t, repo, "refs/remotes/origin/main", f.Commit(t, repo, "main", "advance", nil))
+
+	d.runStewardPlan()
+	runner.Wait()
+	if got := beadsStarted(); !slices.Equal(got, []string{"gt-p1", "gt-p2"}) {
+		t.Fatalf("started %v, want one plan job per spec over both scans", got)
+	}
+	jobs, err := runner.Ledger.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 4 {
+		t.Fatalf("ledger rows = %d, want a start and an end row for each of the 2 plan jobs: %+v", len(jobs), jobs)
+	}
+	for _, j := range jobs {
+		if j.Event != steward.KindPlan {
+			t.Errorf("ledger row %+v is not a plan job", j)
+		}
+	}
+}
+
+// TestStewardRosterCapCountsOnlyEnabledPatrols: the plan seat is in the roster
+// only while patrols.steward_plan is on, so a town that never turned planning
+// on keeps the cap its steward patrol alone asks for — the default 2, not 3
+// (gt-4k3fj.14).
+func TestStewardRosterCapCountsOnlyEnabledPatrols(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		cfg  *DaemonPatrolConfig
+		want int
+	}{
+		{"steward only", stewardPatrolConfig(&StewardConfig{Enabled: true}), 2},
+		{"plan key absent", planPatrolConfig(&StewardConfig{Enabled: true}, nil), 2},
+		{"plan key without enabled", planPatrolConfig(&StewardConfig{Enabled: true}, &StewardPlanConfig{}), 2},
+		{"plan key disabled", planPatrolConfig(&StewardConfig{Enabled: true}, &StewardPlanConfig{Enabled: false}), 2},
+		{"both on", planPatrolConfig(&StewardConfig{Enabled: true}, &StewardPlanConfig{Enabled: true}), 3},
+		{"plan only", planPatrolConfig(nil, &StewardPlanConfig{Enabled: true}), 1},
+		{"steward disabled, plan on", planPatrolConfig(&StewardConfig{}, &StewardPlanConfig{Enabled: true}), 1},
+		{"neither on", planPatrolConfig(&StewardConfig{}, &StewardPlanConfig{}), 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := stewardRosterCap(tc.cfg); got != tc.want {
+				t.Fatalf("stewardRosterCap = %d, want %d seats", got, tc.want)
+			}
+		})
 	}
 }

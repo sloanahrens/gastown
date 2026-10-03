@@ -236,3 +236,44 @@ func TestWriteTownHealthPublishesTheStewardCounters(t *testing.T) {
 		t.Errorf("steward field = %+v, want red 1 stuck", f)
 	}
 }
+
+// TestMonitorStewardDoesNotNoticeAPlanJobAsPro: a plan job runs on
+// steward.PlanAgent by design, and a flash-first town sets that same preset as
+// hard_agent, so it is not a job that escalated to a harder model and earns no
+// pro notice. A review job on the same preset still does (gt-4k3fj.14).
+func TestMonitorStewardDoesNotNoticeAPlanJobAsPro(t *testing.T) {
+	t.Parallel()
+	plan := monitorJob("plan", steward.PlanAgent, steward.OutcomePass, 10*time.Minute, time.Minute)
+	plan.Event = steward.KindPlan
+	review := monitorJob("rev", steward.PlanAgent, steward.OutcomePass, 20*time.Minute, time.Minute)
+	d, esc := monitorDaemon(t, plan, review)
+	d.patrolConfig = stewardPatrolConfig(&StewardConfig{Enabled: true, JobTimeoutStr: "45m", HardAgent: steward.PlanAgent})
+	d.monitorSteward()
+	if got := esc.keys(); len(got) != 1 || got[0] != "steward:pro:rev" {
+		t.Fatalf("escalated %v, want only the review job's pro notice", got)
+	}
+}
+
+// TestMonitorStewardRunsForAPlanOnlyTown: planning is its own patrol, and a
+// town that turns the steward's landing-queue scan off still gets the alarm
+// and the health counters for the plan jobs it runs — otherwise the config the
+// docs support (steward off, steward_plan on) would raise jobs nothing watches
+// (gt-4k3fj.14).
+func TestMonitorStewardRunsForAPlanOnlyTown(t *testing.T) {
+	t.Parallel()
+	stuck := monitorJob("plan", steward.PlanAgent, "", 50*time.Minute, 0)
+	stuck.Event = steward.KindPlan
+	d, esc := monitorDaemon(t, stuck)
+	d.patrolConfig = planPatrolConfig(nil, &StewardPlanConfig{Enabled: true})
+	d.monitorSteward()
+	if got := esc.keys(); len(got) != 1 || got[0] != "steward:stuck:plan" {
+		t.Fatalf("escalated %v, want the stuck plan job's alert", got)
+	}
+	snap, err := (&healthSources{d: d, now: monitorNow}).Steward(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snap.Enabled || snap.Counters.Jobs != 1 || snap.Counters.Stuck != 1 {
+		t.Fatalf("snapshot = %+v, want the plan job counted", snap)
+	}
+}

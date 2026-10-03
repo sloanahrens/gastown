@@ -92,6 +92,9 @@ func TestIsIdleForUpgrade(t *testing.T) {
 			release()
 		}, true},
 		{"steward scan in flight", func(_ *testing.T, d *Daemon) { d.stewardRunning.Store(true) }, false},
+		// gt-4k3fj.14: the plan scan is the steward runner's other producer,
+		// and a restart mid-scan loses the jobs it was about to start.
+		{"steward plan scan in flight", func(_ *testing.T, d *Daemon) { d.stewardPlanScan.Store(true) }, false},
 		{"install lock file present, not held", func(t *testing.T, d *Daemon) {
 			writeInstallLock(t, d)
 		}, true},
