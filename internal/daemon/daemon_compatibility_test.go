@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/convoy"
 )
 
 // TestSchemaLevelProblem is the guard's verdict without a database: equal
@@ -112,18 +112,9 @@ func TestCheckBeadsStoreCompatibility_ReadsThroughBD(t *testing.T) {
 	}
 }
 
-// closeRecorder is a store that only records Close; the guard must refuse
-// before it reads anything from a store.
-type closeRecorder struct {
-	beadsdk.Storage
-	closed bool
-}
-
-func (c *closeRecorder) Close() error { c.closed = true; return nil }
-
 // TestVerifyBeadsStoresBlocksOnBDSchemaLevel drives the startup gate through
 // its schema-level reader: a failed read and a bd that reports no schema level
-// (a pre-machine-surface build) each block startup and close every store.
+// (a pre-machine-surface build) each block startup.
 func TestVerifyBeadsStoresBlocksOnBDSchemaLevel(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -138,13 +129,10 @@ func TestVerifyBeadsStoresBlocksOnBDSchemaLevel(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			schemaLevel := func(context.Context, string) (int, error) { return tc.level, tc.err }
-			store := &closeRecorder{}
-			err := verifyBeadsStores(context.Background(), nil, t.TempDir(), map[string]beadsdk.Storage{"hq": store}, schemaLevel, probesFor(nil))
+			store := &stubStore{}
+			err := verifyBeadsStores(context.Background(), nil, t.TempDir(), map[string]convoy.Store{"hq": store}, schemaLevel, probesFor(nil))
 			if err == nil || !strings.Contains(err.Error(), "daemon startup blocked") || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("verifyBeadsStores = %v, want a startup block naming %q", err, tc.want)
-			}
-			if !store.closed {
-				t.Error("stores were not closed on refusal")
 			}
 		})
 	}

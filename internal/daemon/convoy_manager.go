@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/jonboulle/clockwork"
-	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/dispatch"
@@ -77,7 +76,7 @@ const (
 // and skipped convoy lookups for every event that followed — indefinitely
 // (gt-i36h).
 type storeOpenResult struct {
-	Stores  map[string]beadsdk.Storage
+	Stores  map[string]convoy.Store
 	Missing []string
 }
 
@@ -185,7 +184,7 @@ type ConvoyManager struct {
 	// Other keys are rig names (e.g., "gastown", "beads", "shippercrm").
 	// Populated lazily via openStores if nil at startup (e.g., Dolt not ready).
 	// Protected by storesMu.
-	stores   map[string]beadsdk.Storage
+	stores   map[string]convoy.Store
 	storesMu sync.Mutex
 
 	// openStores is called to (re)open beads stores whenever the store set is
@@ -309,11 +308,25 @@ type eventJournal interface {
 	EventsTail(since int64, limit int) (*beads.EventsPage, error)
 }
 
+// clientSources wraps every store in the daemon's map as a convoy issue
+// source, skipping empty ones. The convoy reads then go through bd (the
+// stores' own client), the same surface the CLI paths use.
+func clientSources(stores map[string]convoy.Store) map[string]convoy.IssueSource {
+	out := make(map[string]convoy.IssueSource, len(stores))
+	for name, store := range stores {
+		if store != nil {
+			out[name] = convoy.ClientSource(store)
+		}
+	}
+	return out
+}
+
 // newEventJournal returns the journal reader for the named store: the store
-// itself when it carries its own journal (an in-memory store does; no Dolt
-// store type can, since the page type is this module's), else bd pinned to
-// the town's .beads for "hq", or to the rig's canonical beads directory.
-func newEventJournal(townRoot, name string, store beadsdk.Storage) (eventJournal, error) {
+// itself, since a bd-backed *beads.Beads carries its own journal (EventsTail),
+// else bd pinned to the town's .beads for "hq", or to the rig's canonical beads
+// directory. The fallback remains for a store type that offers the issue reads
+// but not the journal.
+func newEventJournal(townRoot, name string, store convoy.Store) (eventJournal, error) {
 	if j, ok := store.(eventJournal); ok {
 		return j, nil
 	}
@@ -326,7 +339,8 @@ func newEventJournal(townRoot, name string, store beadsdk.Storage) (eventJournal
 
 // NewConvoyManager creates a new convoy manager.
 // scanInterval controls the periodic stranded scan; 0 uses default (30s).
-// stores maps store names ("hq", rig names) to beads stores for event polling.
+// stores maps store names ("hq", rig names) to bd-backed convoy stores for
+// event polling.
 // nil stores disables event-driven convoy checks (stranded scan still runs),
 // unless openStores is provided for lazy initialization.
 // openStores completes the store set: it is called when the set is not yet
@@ -337,7 +351,7 @@ func newEventJournal(townRoot, name string, store beadsdk.Storage) (eventJournal
 // slingDeps is the dispatch engine's collaborators, for the feeder's in-process
 // dispatch (nil refuses to feed, which is what a daemon with no engine wired
 // should do rather than spawn nothing quietly).
-func NewConvoyManager(townRoot string, logger func(format string, args ...interface{}), slingDeps *sling.Deps, scanInterval time.Duration, stores map[string]beadsdk.Storage, openStores func() storeOpenResult, isRigParked func(string) bool) *ConvoyManager {
+func NewConvoyManager(townRoot string, logger func(format string, args ...interface{}), slingDeps *sling.Deps, scanInterval time.Duration, stores map[string]convoy.Store, openStores func() storeOpenResult, isRigParked func(string) bool) *ConvoyManager {
 	if scanInterval <= 0 {
 		scanInterval = defaultStrandedScanInterval
 	}
@@ -361,19 +375,18 @@ func NewConvoyManager(townRoot string, logger func(format string, args ...interf
 // copyStores takes a private copy of a store map, preserving nil.
 //
 // The manager writes to m.stores as it adopts stores a retry reopened, and it
-// must never write to the caller's map: the daemon keeps its own reference to
-// the map it hands over (d.beadsStores) and ranges over it from the patrol
-// goroutine (hasActiveWork), so writing through to it would be a concurrent map
-// iteration and write — a fatal error the daemon cannot recover from, against a
-// patrol run that only wanted to know whether work was in flight (gt-i36h).
+// must never write to the caller's map: the daemon keeps the map it hands over,
+// and a write through to it is a write to a map the caller still owns and may
+// range over — a concurrent map iteration and write, which is fatal rather than
+// recoverable (gt-i36h).
 //
 // The stores themselves are shared, not cloned: this is about who owns the map,
 // not the handles in it. Handles already held are kept by both sides.
-func copyStores(stores map[string]beadsdk.Storage) map[string]beadsdk.Storage {
+func copyStores(stores map[string]convoy.Store) map[string]convoy.Store {
 	if stores == nil {
 		return nil
 	}
-	owned := make(map[string]beadsdk.Storage, len(stores))
+	owned := make(map[string]convoy.Store, len(stores))
 	for name, store := range stores {
 		owned[name] = store
 	}
@@ -402,25 +415,16 @@ func (m *ConvoyManager) FeedActive() bool {
 	return m != nil && m.started.Load()
 }
 
-// Stop gracefully stops the convoy manager and closes any beads stores it owns.
+// Stop gracefully stops the convoy manager and releases its store map. The
+// stores are bd-backed handles now (bd runs as a subprocess), so there is
+// nothing to close.
 func (m *ConvoyManager) Stop() {
 	m.cancel()
 	m.wg.Wait()
 
-	// Close stores (whether eagerly passed or lazily opened)
 	m.storesMu.Lock()
-	stores := m.stores
 	m.stores = nil
 	m.storesMu.Unlock()
-	for name, store := range stores {
-		if store != nil {
-			if err := store.Close(); err != nil {
-				m.logger("Convoy: error closing beads store (%s): %v", name, err)
-			} else {
-				m.logger("Convoy: closed beads store (%s)", name)
-			}
-		}
-	}
 }
 
 // SetAlertHooks wires the escalation sink used when the town store cannot be
@@ -482,15 +486,11 @@ func (m *ConvoyManager) mergeStoreOpenResultLocked(result storeOpenResult, now t
 			continue
 		}
 		if _, held := m.stores[name]; held {
-			// Already polling this name: keep that handle and close the
-			// duplicate so the connections it opened are not leaked.
-			if err := store.Close(); err != nil {
-				m.logger("Convoy: error closing duplicate beads store (%s): %v", name, err)
-			}
+			// Already polling this name: keep the handle in use.
 			continue
 		}
 		if m.stores == nil {
-			m.stores = make(map[string]beadsdk.Storage, len(result.Stores))
+			m.stores = make(map[string]convoy.Store, len(result.Stores))
 		}
 		m.stores[name] = store
 		reopened++
@@ -688,7 +688,7 @@ func (m *ConvoyManager) pollTick(currentInterval time.Duration, ticker *time.Tic
 	// Take a snapshot of stores for this tick to avoid holding the
 	// lock across potentially slow network/Dolt calls.
 	m.storesMu.Lock()
-	snapshot := make(map[string]beadsdk.Storage, len(m.stores))
+	snapshot := make(map[string]convoy.Store, len(m.stores))
 	for k, v := range m.stores {
 		snapshot[k] = v
 	}
@@ -780,7 +780,7 @@ func (m *ConvoyManager) Resume() {
 // A per-cycle seen set deduplicates close events across stores so each
 // issueID is processed at most once per poll cycle.
 // Returns true if any store poll encountered an error.
-func (m *ConvoyManager) pollStoresSnapshot(stores map[string]beadsdk.Storage) bool {
+func (m *ConvoyManager) pollStoresSnapshot(stores map[string]convoy.Store) bool {
 	seen := make(map[string]bool)
 	hadError := false
 	for name, store := range stores {
@@ -806,7 +806,7 @@ func (m *ConvoyManager) pollStoresSnapshot(stores map[string]beadsdk.Storage) bo
 // where it stopped. A cursor bd has pruned past resumes at the oldest
 // retained record: the gap is logged and recovery mode set, so the stranded
 // scan catches any convoy whose last close fell in it.
-func (m *ConvoyManager) pollStore(name string, store beadsdk.Storage, stores map[string]beadsdk.Storage, seen map[string]bool) error {
+func (m *ConvoyManager) pollStore(name string, store convoy.Store, stores map[string]convoy.Store, seen map[string]bool) error {
 	journal, err := newEventJournal(m.townRoot, name, store)
 	if err != nil {
 		m.logger("Convoy: event poll error (%s): %v", name, err)
@@ -877,7 +877,7 @@ func (m *ConvoyManager) pollStore(name string, store beadsdk.Storage, stores map
 // processJournalPage runs the convoy checks for the closes in records. It
 // reports false, having done nothing, when the hq store convoy lookups read
 // through is missing.
-func (m *ConvoyManager) processJournalPage(name string, records []beads.EventRecord, stores map[string]beadsdk.Storage, seen map[string]bool) bool {
+func (m *ConvoyManager) processJournalPage(name string, records []beads.EventRecord, stores map[string]convoy.Store, seen map[string]bool) bool {
 	if len(records) == 0 {
 		return true
 	}
@@ -927,9 +927,9 @@ func (m *ConvoyManager) processJournalPage(name string, records []beads.EventRec
 		}
 
 		m.logger("Convoy: close detected: %s (from %s)", issueID, name)
-		sources := librarySources(m.ctx, stores)
+		sources := clientSources(stores)
 		resolver := convoy.NewStoreResolver(m.townRoot, sources)
-		convoy.CheckConvoysForIssue(m.ctx, librarySource(m.ctx, hqStore), m.townRoot, issueID, "Convoy", m.logger, m.slingSlinger(), m.checkConvoy, m.isRigParked, resolver)
+		convoy.CheckConvoysForIssue(m.ctx, convoy.ClientSource(hqStore), m.townRoot, issueID, "Convoy", m.logger, m.slingSlinger(), m.checkConvoy, m.isRigParked, resolver)
 		convoy.FireCrossRigDepNotifications(m.ctx, issueID, m.townRoot, sources, m.logger)
 	}
 	return true
@@ -939,14 +939,14 @@ func (m *ConvoyManager) processJournalPage(name string, records []beads.EventRec
 // close, or an update whose resulting status is closed (bd update --status
 // closed, and any later update to an issue that stays closed).
 func isCloseRecord(r beads.EventRecord) bool {
-	return (r.Op == "close" || r.Op == "update") && r.Status == string(beadsdk.StatusClosed)
+	return (r.Op == "close" || r.Op == "update") && r.Status == string(beads.StatusClosed)
 }
 
 // isReopenRecord reports whether a journal record leaves its issue in a
 // status other than closed. On an issue this manager saw closed, that is a
 // reopen; on any other it clears nothing.
 func isReopenRecord(r beads.EventRecord) bool {
-	return r.Op == "update" && r.Status != "" && r.Status != string(beadsdk.StatusClosed)
+	return r.Op == "update" && r.Status != "" && r.Status != string(beads.StatusClosed)
 }
 
 // runStrandedScan is the periodic stranded convoy scan loop.
@@ -1310,11 +1310,11 @@ func (m *ConvoyManager) convoyStatusOf(convoyID string) (string, bool) {
 	if store == nil {
 		return "", false
 	}
-	issue, err := store.GetIssue(m.ctx, convoyID)
+	issue, err := store.Show(convoyID)
 	if err != nil || issue == nil {
 		return "", false
 	}
-	return string(issue.Status), true
+	return issue.Status, true
 }
 
 // listOriginBranches lists the polecat branches on a rig's origin through
@@ -1419,7 +1419,7 @@ func (m *ConvoyManager) feedHold(rig, issueID string) (hold convoy.Hold, ok bool
 	if store == nil {
 		return convoy.Hold{}, false
 	}
-	return convoy.FeedHold(m.ctx, librarySource(m.ctx, store), issueID, nil), true
+	return convoy.FeedHold(m.ctx, convoy.ClientSource(store), issueID, nil), true
 }
 
 // issueAssignee returns issueID's assignee via the already-open per-rig
@@ -1436,7 +1436,7 @@ func (m *ConvoyManager) issueAssignee(rig, issueID string) string {
 		return ""
 	}
 
-	issue, err := store.GetIssue(m.ctx, issueID)
+	issue, err := store.Show(issueID)
 	if err != nil || issue == nil {
 		return ""
 	}

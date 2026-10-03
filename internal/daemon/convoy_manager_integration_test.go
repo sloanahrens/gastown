@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/sling"
 )
 
@@ -46,7 +46,7 @@ func TestIntegrationConvoyManager_FullLifecycle(t *testing.T) {
 	}
 
 	// Start with short scan interval so stranded scan fires quickly.
-	m := NewConvoyManager(townRoot, logger, nil, 500*time.Millisecond, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m := NewConvoyManager(townRoot, logger, nil, 500*time.Millisecond, map[string]convoy.Store{"hq": store}, nil, nil)
 	m.installScanFakes(strandedJSON, checkLogPath)
 
 	// S-08: Start should succeed.
@@ -179,7 +179,7 @@ func TestIntegrationConvoyManager_LoggingFlow(t *testing.T) {
 	}
 
 	// Start manager with short scan interval; event poll is 5s (fixed).
-	stores := map[string]beadsdk.Storage{"hq": hqStore, "gt": rigStore}
+	stores := map[string]convoy.Store{"hq": hqStore, "gt": rigStore}
 	m := NewConvoyManager(townRoot, logger, nil, 1*time.Hour, stores, nil, nil)
 	m.installScanFakes("[]", "")
 	// The feeder dispatches in process (gt-638go.7): record the bead it feeds

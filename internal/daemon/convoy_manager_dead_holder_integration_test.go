@@ -12,7 +12,8 @@ import (
 	"testing"
 	"time"
 
-	beadsdk "github.com/steveyegge/beads"
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/convoy"
 )
 
 // TestIntegrationResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips runs
@@ -26,18 +27,16 @@ func TestIntegrationResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips(t *t
 	defer cleanup()
 
 	ctx := context.Background()
-	now := time.Now().UTC()
-	held := &beadsdk.Issue{
-		ID: "gt-issue1", Title: "Held by dead session", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, Assignee: "gt/polecats/basalt",
-		CreatedAt: now, UpdatedAt: now,
+	held := &beads.Issue{
+		ID: "gt-issue1", Title: "Held by dead session", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task", Assignee: "gt/polecats/basalt",
 	}
 	if err := store.CreateIssue(ctx, held, "test"); err != nil {
 		t.Fatalf("CreateIssue held: %v", err)
 	}
-	fresh := &beadsdk.Issue{
-		ID: "gt-fresh2", Title: "Never touched", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	fresh := &beads.Issue{
+		ID: "gt-fresh2", Title: "Never touched", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task",
 	}
 	if err := store.CreateIssue(ctx, fresh, "test"); err != nil {
 		t.Fatalf("CreateIssue fresh: %v", err)
@@ -54,7 +53,7 @@ func TestIntegrationResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips(t *t
 	var escalated []string
 	m := newFakeGtManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
-	}, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	}, gtf, 10*time.Minute, map[string]convoy.Store{"gt": store}, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 	m.SetAlertHooks(func(key, source, message string) {
 		escalated = append(escalated, message)

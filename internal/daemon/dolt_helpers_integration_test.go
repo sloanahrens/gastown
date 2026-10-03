@@ -3,7 +3,6 @@
 package daemon
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
 	"io"
@@ -14,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/testutil"
 )
@@ -89,24 +88,6 @@ func openTestDoltDB(d *Daemon, dbName string) (*sql.DB, error) {
 	return sql.Open("mysql", dsn)
 }
 
-// setupTestStore opens a real beads database for integration tests. It skips
-// only when container tests are not opted in (GT_TEST_DOCKER unset) or Docker
-// is absent; once opted in, any error fails the test — a skipped store test is
-// coverage lost without a red signal. The store is also closed when the test
-// ends; calling cleanup earlier is fine.
-//
-// BEADS_TEST_MODE is set once in TestMain, not here: t.Setenv would forbid
-// t.Parallel in every caller (gt-fx3c).
-func setupTestStore(t *testing.T) (beadsdk.Storage, func()) {
-	t.Helper()
-	ctx := context.Background()
-	store := testutil.OpenTestStore(t, ctx)
-	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		t.Fatalf("SetConfig: %v", err)
-	}
-	return store, func() { _ = store.Close() }
-}
-
 // setupJournaledTown makes a town whose hq .beads is a bd-initialized
 // workspace on the package's container, as a real town's is, and returns its
 // root with a bd handle on hq and the in-process store opened from its config.
@@ -118,7 +99,7 @@ func setupTestStore(t *testing.T) (beadsdk.Storage, func()) {
 // the library cannot write to bd's schema (gt-idv8s). So, as in production, bd
 // makes the database and every write, journaled (each workspace's config
 // turns events-journal on), and the store only reads.
-func setupJournaledTown(t *testing.T) (string, *beads.Beads, beadsdk.Storage) {
+func setupJournaledTown(t *testing.T) (string, *beads.Beads, convoy.Store) {
 	t.Helper()
 	townRoot := t.TempDir()
 	bd, store := initJournaledWorkspace(t, townRoot, "hq")
@@ -131,7 +112,7 @@ func setupJournaledTown(t *testing.T) (string, *beads.Beads, beadsdk.Storage) {
 // the town and linked in: bd init walks up from a directory inside the town,
 // finds hq's workspace and refuses to init over it (a real rig is a git clone,
 // which bounds that walk).
-func addJournaledRig(t *testing.T, townRoot, rig, prefix string) (*beads.Beads, beadsdk.Storage) {
+func addJournaledRig(t *testing.T, townRoot, rig, prefix string) (*beads.Beads, convoy.Store) {
 	t.Helper()
 	rigDir := t.TempDir()
 	bd, store := initJournaledWorkspace(t, rigDir, prefix)
@@ -151,9 +132,10 @@ func addJournaledRig(t *testing.T, townRoot, rig, prefix string) (*beads.Beads, 
 }
 
 // initJournaledWorkspace runs bd init --prefix prefix in dir against the
-// package's container, turns its events journal on and opens the store its
-// metadata.json names.
-func initJournaledWorkspace(t *testing.T, dir, prefix string) (*beads.Beads, beadsdk.Storage) {
+// package's container, turns its events journal on and returns the bd-backed
+// convoy store pinned to that workspace — the same shape the daemon opens
+// (beads.NewPinned).
+func initJournaledWorkspace(t *testing.T, dir, prefix string) (*beads.Beads, convoy.Store) {
 	t.Helper()
 	testutil.RequireDoltContainer(t)
 	port, err := strconv.Atoi(testutil.DoltContainerPort())
@@ -168,11 +150,11 @@ func initJournaledWorkspace(t *testing.T, dir, prefix string) (*beads.Beads, bea
 	if _, err := beads.EnsureEventsJournal(bd); err != nil {
 		t.Fatalf("events journal on in %s: %v", dir, err)
 	}
-	store, err := beads.OpenStoreFromConfig(context.Background(), filepath.Join(dir, ".beads"))
-	if err != nil {
-		t.Fatalf("open store on the bd workspace in %s: %v", dir, err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
+	// GT_DOLT_PORT keeps the pinned store on the package's container: without
+	// it a workspace whose metadata bd cannot read would reach the live town's
+	// server on 3307.
+	store := beads.NewPinned(filepath.Join(dir, ".beads"),
+		beads.WithEnv(append(os.Environ(), "GT_DOLT_PORT="+testutil.DoltContainerPort())))
 	return bd, store
 }
 
