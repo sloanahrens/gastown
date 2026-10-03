@@ -241,6 +241,15 @@ func contractCreateShow(t *testing.T, s *scope) {
 	if !s.mustShow(t, wisp.ID).Ephemeral {
 		t.Error("ephemeral create is not ephemeral")
 	}
+	criteria := "- [ ] create sets the field\n- [ ] the block keeps its newlines"
+	criteriaBead := s.mustCreate(t, beads.CreateOptions{Title: "with criteria", Priority: -1, Acceptance: criteria})
+	if got := s.mustShow(t, criteriaBead.ID).AcceptanceCriteria; got != criteria {
+		t.Errorf("acceptance criteria at create = %q, want %q", got, criteria)
+	}
+	plain := s.mustCreate(t, beads.CreateOptions{Title: "no criteria", Priority: -1})
+	if got := s.mustShow(t, plain.ID).AcceptanceCriteria; got != "" {
+		t.Errorf("a create without --acceptance left criteria %q", got)
+	}
 }
 
 func contractMissing(t *testing.T, s *scope) {

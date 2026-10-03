@@ -670,11 +670,14 @@ type CreateOptions struct {
 	Labels      []string // Labels to set (e.g., "gt:task", "gt:merge-request")
 	Priority    int      // 0-4
 	Description string
-	Parent      string
-	Assignee    string // Who the issue is assigned to from creation ("" is nobody)
-	Actor       string // Who is creating this issue (populates created_by)
-	Ephemeral   bool   // Create as ephemeral (wisp) - not synced to git
-	Rig         string // Target rig database (e.g., "gantry"). When set, binds create to the rig's .beads directory.
+	// Acceptance sets the criteria block on the new issue, the create-time
+	// twin of UpdateOptions.Acceptance (gt-iowd4).
+	Acceptance string
+	Parent     string
+	Assignee   string // Who the issue is assigned to from creation ("" is nobody)
+	Actor      string // Who is creating this issue (populates created_by)
+	Ephemeral  bool   // Create as ephemeral (wisp) - not synced to git
+	Rig        string // Target rig database (e.g., "gantry"). When set, binds create to the rig's .beads directory.
 
 	// EventKind makes the issue an event (bd's --type=event) of this
 	// namespaced kind (e.g. "wisp.compaction"), carrying EventPayload: an
@@ -3095,6 +3098,9 @@ func (b *Beads) Create(opts CreateOptions) (*Issue, error) {
 	if opts.Description != "" {
 		args = append(args, "--description="+opts.Description)
 	}
+	if opts.Acceptance != "" {
+		args = append(args, "--acceptance="+opts.Acceptance)
+	}
 	if opts.Parent != "" {
 		args = append(args, "--parent="+opts.Parent)
 	}
@@ -3175,6 +3181,9 @@ func (b *Beads) createWithID(id string, opts CreateOptions) (*Issue, error) {
 	}
 	if opts.Description != "" {
 		args = append(args, "--description="+opts.Description)
+	}
+	if opts.Acceptance != "" {
+		args = append(args, "--acceptance="+opts.Acceptance)
 	}
 	if opts.Parent != "" {
 		args = append(args, "--parent="+opts.Parent)

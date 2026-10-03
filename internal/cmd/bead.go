@@ -42,15 +42,16 @@ Read with 'gt show' or 'bd show'; write with these:
 }
 
 var (
-	beadCreateType     string
-	beadCreatePriority int
-	beadCreateLabels   []string
-	beadCreateDesc     string
-	beadCreateParent   string
-	beadCreateRig      string
-	beadCreateTitle    string
-	beadCreateQuiet    bool
-	beadCreateJSON     bool
+	beadCreateType       string
+	beadCreatePriority   int
+	beadCreateLabels     []string
+	beadCreateDesc       string
+	beadCreateAcceptance string
+	beadCreateParent     string
+	beadCreateRig        string
+	beadCreateTitle      string
+	beadCreateQuiet      bool
+	beadCreateJSON       bool
 
 	beadUpdateTitle       string
 	beadUpdatePriority    int
@@ -71,9 +72,13 @@ var beadCreateCmd = &cobra.Command{
 database: never cd elsewhere or pass bd --repo (be-6mk). --type records the
 kind as a gt:<type> label.
 
+--acceptance sets the criteria block on the new bead, so a follow-up that
+needs one is a single command rather than create-then-update.
+
 Examples:
   gt bead create "Found: nil map in sling" --type=bug --priority=2
   gt bead create --rig=beads "bd CLI bug: ..." --type=bug
+  gt bead create "Add --acceptance" --acceptance="- [ ] the flag sets the field"
   gt bead create "Fix-merge PR #1234" -l pr-review -q   # print only the ID`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -87,7 +92,8 @@ Examples:
 		return newBeadVerbs(cmd).create(beadCreateRequest{
 			title: title, kind: beadCreateType, priority: beadCreatePriority,
 			labels: beadCreateLabels, description: beadCreateDesc,
-			parent: beadCreateParent, rig: beadCreateRig,
+			acceptance: beadCreateAcceptance,
+			parent:     beadCreateParent, rig: beadCreateRig,
 			quiet: beadCreateQuiet, json: beadCreateJSON,
 		})
 	},
@@ -242,6 +248,7 @@ func init() {
 	f.IntVarP(&beadCreatePriority, "priority", "p", -1, "Priority 0-4 (default: bd's, 2)")
 	f.StringArrayVarP(&beadCreateLabels, "label", "l", nil, "Label to add (repeatable)")
 	f.StringVarP(&beadCreateDesc, "description", "d", "", "Description")
+	f.StringVar(&beadCreateAcceptance, "acceptance", "", "Acceptance criteria block for the new bead")
 	f.StringVar(&beadCreateParent, "parent", "", "Parent bead: the new bead becomes its child")
 	f.StringVar(&beadCreateRig, "rig", "", "File in this rig's database (hq for town beads)")
 	f.BoolVarP(&beadCreateQuiet, "quiet", "q", false, "Print only the new bead's ID")
@@ -307,10 +314,10 @@ func sessionCloseRefusal(cwd string) func(id, reason string) string {
 }
 
 type beadCreateRequest struct {
-	title, kind, description, parent, rig string
-	priority                              int
-	labels                                []string
-	quiet, json                           bool
+	title, kind, description, acceptance, parent, rig string
+	priority                                          int
+	labels                                            []string
+	quiet, json                                       bool
 }
 
 func (v *beadVerbs) create(r beadCreateRequest) error {
@@ -323,7 +330,8 @@ func (v *beadVerbs) create(r beadCreateRequest) error {
 	}
 	is, err := v.client.Create(beads.CreateOptions{
 		Title: r.title, Labels: labels, Priority: r.priority,
-		Description: r.description, Parent: r.parent, Rig: r.rig, Actor: v.actor,
+		Description: r.description, Acceptance: r.acceptance,
+		Parent: r.parent, Rig: r.rig, Actor: v.actor,
 	})
 	if err != nil {
 		return err
