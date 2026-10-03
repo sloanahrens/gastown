@@ -23,7 +23,7 @@ func discoverRigHooks(r *rig.Rig, crews []string) []AgentHookInfo {
 	b := beads.New(r.Path)
 
 	// Batch-fetch all handoff beads in one bd call
-	allHandoffs, err := b.FindAllHandoffBeads()
+	allHandoffs, err := beads.FindAllHandoffBeads(b)
 	if err != nil {
 		// On error, return empty hooks for all agents rather than failing
 		allHandoffs = make(map[string]*beads.Issue)

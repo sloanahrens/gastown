@@ -171,7 +171,7 @@ func (c *HookAttachmentValidCheck) Fix(ctx *CheckContext) error {
 	for _, inv := range c.invalidAttachments {
 		b := ctx.beadsAt(filepath.Dir(inv.pinnedBeadDir))
 
-		_, err := b.DetachMolecule(inv.pinnedBeadID)
+		_, err := beads.DetachMolecule(b, inv.pinnedBeadID)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("failed to detach from %s: %v", inv.pinnedBeadID, err))
 		}

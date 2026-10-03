@@ -103,7 +103,7 @@ func runMoleculeAttachFromMail(cmd *cobra.Command, args []string) error {
 	}
 
 	// Attach the molecule to the hook
-	issue, err := b.AttachMolecule(hookBead.ID, moleculeID)
+	issue, err := beads.AttachMolecule(b, hookBead.ID, moleculeID)
 	if err != nil {
 		return fmt.Errorf("attaching molecule: %w", err)
 	}

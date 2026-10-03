@@ -12,6 +12,12 @@ import (
 	"github.com/steveyegge/gastown/internal/lock"
 )
 
+// The handoff, mail-sweep and molecule-attachment helpers below are free
+// functions over Client so any Client (internal/beads/beadsfake in unit
+// tests) runs the same logic *Beads did. The one store concern they keep is
+// the per-bead flock around a molecule attach/detach: its file lives in the
+// store's own .beads directory, so only a *Beads can name it (see lockBeadFor).
+
 // Issue status constants kept as untyped strings for backward compatibility.
 // The typed versions (IssueStatus) are in status.go.
 const (
@@ -27,13 +33,8 @@ func HandoffBeadTitle(role string) string {
 	return role + " Handoff"
 }
 
-// FindHandoffBead finds the pinned handoff bead for a role by title.
-// Returns nil if not found (not an error).
-func (b *Beads) FindHandoffBead(role string) (*Issue, error) {
-	return FindHandoffBead(b, role)
-}
-
-// FindHandoffBead is (*Beads).FindHandoffBead in any Client.
+// FindHandoffBead returns the role's pinned handoff bead, or nil when there
+// is none.
 func FindHandoffBead(c Client, role string) (*Issue, error) {
 	issues, err := c.List(ListOptions{Status: StatusPinned, Priority: -1})
 	if err != nil {
@@ -50,11 +51,10 @@ func FindHandoffBead(c Client, role string) (*Issue, error) {
 	return nil, nil
 }
 
-// FindAllHandoffBeads fetches all pinned beads once and returns a map from
-// role name to handoff bead. This avoids the N+1 subprocess problem where
-// FindHandoffBead is called once per agent, each spawning a bd subprocess.
-func (b *Beads) FindAllHandoffBeads() (map[string]*Issue, error) {
-	issues, err := b.List(ListOptions{Status: StatusPinned, Priority: -1})
+// FindAllHandoffBeads returns every pinned handoff bead keyed by role, one
+// list call rather than the N+1 FindHandoffBead would cost.
+func FindAllHandoffBeads(c Client) (map[string]*Issue, error) {
+	issues, err := c.List(ListOptions{Status: StatusPinned, Priority: -1})
 	if err != nil {
 		return nil, fmt.Errorf("listing pinned issues: %w", err)
 	}
@@ -71,10 +71,11 @@ func (b *Beads) FindAllHandoffBeads() (map[string]*Issue, error) {
 	return result, nil
 }
 
-// GetOrCreateHandoffBead returns the handoff bead for a role, creating it if needed.
-func (b *Beads) GetOrCreateHandoffBead(role string) (*Issue, error) {
+// GetOrCreateHandoffBead returns the handoff bead for a role, creating and
+// pinning it when the role has none.
+func GetOrCreateHandoffBead(c Client, role string) (*Issue, error) {
 	// Check if it exists
-	existing, err := b.FindHandoffBead(role)
+	existing, err := FindHandoffBead(c, role)
 	if err != nil {
 		return nil, err
 	}
@@ -82,7 +83,7 @@ func (b *Beads) GetOrCreateHandoffBead(role string) (*Issue, error) {
 		return existing, nil
 	}
 
-	issue, err := b.Create(CreateOptions{
+	issue, err := c.Create(CreateOptions{
 		Title:       HandoffBeadTitle(role),
 		Labels:      []string{"gt:task"},
 		Priority:    2,
@@ -96,30 +97,32 @@ func (b *Beads) GetOrCreateHandoffBead(role string) (*Issue, error) {
 	// Update to pinned status. If this fails, clean up the orphaned bead
 	// to prevent duplicates on retry (FindHandoffBead only searches pinned beads).
 	status := StatusPinned
-	if err := b.Update(issue.ID, UpdateOptions{Status: &status}); err != nil {
+	if err := c.Update(issue.ID, UpdateOptions{Status: &status}); err != nil {
 		// Best-effort cleanup — ignore delete error since pin failure is the real problem
-		_ = b.CloseWithReason("orphaned: failed to pin", issue.ID)
+		_ = c.CloseWithReason("orphaned: failed to pin", issue.ID)
 		return nil, fmt.Errorf("setting handoff bead to pinned: %w", err)
 	}
 
 	// Re-fetch to get updated status. If this fails, the bead is already
 	// created and pinned — a retry of GetOrCreateHandoffBead will find it.
-	return b.Show(issue.ID)
+	return c.Show(issue.ID)
 }
 
-// UpdateHandoffContent updates the handoff bead's description with new content.
-func (b *Beads) UpdateHandoffContent(role, content string) error {
-	issue, err := b.GetOrCreateHandoffBead(role)
+// UpdateHandoffContent replaces the handoff bead's description with content,
+// creating the bead when the role has none.
+func UpdateHandoffContent(c Client, role, content string) error {
+	issue, err := GetOrCreateHandoffBead(c, role)
 	if err != nil {
 		return err
 	}
 
-	return b.Update(issue.ID, UpdateOptions{Description: &content})
+	return c.Update(issue.ID, UpdateOptions{Description: &content})
 }
 
-// ClearHandoffContent clears the handoff bead's description.
-func (b *Beads) ClearHandoffContent(role string) error {
-	issue, err := b.FindHandoffBead(role)
+// ClearHandoffContent empties the role's handoff bead description; a role
+// with no handoff bead is not an error.
+func ClearHandoffContent(c Client, role string) error {
+	issue, err := FindHandoffBead(c, role)
 	if err != nil {
 		return err
 	}
@@ -128,7 +131,7 @@ func (b *Beads) ClearHandoffContent(role string) error {
 	}
 
 	empty := ""
-	return b.Update(issue.ID, UpdateOptions{Description: &empty})
+	return c.Update(issue.ID, UpdateOptions{Description: &empty})
 }
 
 // ClearMailResult contains statistics from a ClearMail operation.
@@ -137,12 +140,11 @@ type ClearMailResult struct {
 	Cleared int // Number of pinned messages cleared (content removed)
 }
 
-// ClearMail closes or clears all open messages.
-// Non-pinned messages are closed with the given reason.
-// Pinned messages have their description cleared but remain open.
-func (b *Beads) ClearMail(reason string) (*ClearMailResult, error) {
+// ClearMail closes the open non-pinned messages and empties the pinned ones,
+// which stay open.
+func ClearMail(c Client, reason string) (*ClearMailResult, error) {
 	// List all open messages
-	issues, err := b.List(ListOptions{
+	issues, err := c.List(ListOptions{
 		Status:   "open",
 		Label:    "gt:message",
 		Priority: -1,
@@ -170,7 +172,7 @@ func (b *Beads) ClearMail(reason string) (*ClearMailResult, error) {
 	// to the pinned messages; any other failure closed nothing.
 	var closeErr error
 	if len(toClose) > 0 {
-		err := b.CloseWithReason(reason, toClose...)
+		err := c.CloseWithReason(reason, toClose...)
 		result.Closed = len(ClosedIDs(toClose, err))
 		if err != nil {
 			if !errors.Is(err, ErrCloseRefused) {
@@ -184,7 +186,7 @@ func (b *Beads) ClearMail(reason string) (*ClearMailResult, error) {
 	empty := ""
 	var clearErrs []error
 	for _, issue := range toClear {
-		if err := b.Update(issue.ID, UpdateOptions{Description: &empty}); err != nil {
+		if err := c.Update(issue.ID, UpdateOptions{Description: &empty}); err != nil {
 			clearErrs = append(clearErrs, fmt.Errorf("clearing pinned message %s: %w", issue.ID, err))
 			continue
 		}
@@ -199,11 +201,11 @@ func (b *Beads) ClearMail(reason string) (*ClearMailResult, error) {
 	return result, closeErr
 }
 
-// CloseStaleHookedMailBeads closes any gt:message beads in status=hooked assigned
-// to agentID. Called before creating a new handoff mail to prevent accumulation of
-// stale beads across sessions. Returns the number of beads closed. (GH#3859)
-func (b *Beads) CloseStaleHookedMailBeads(agentID string) (int, error) {
-	hooked, err := b.List(ListOptions{
+// CloseStaleHookedMailBeads closes agentID's gt:message beads in status=hooked
+// and returns how many it closed, so a new handoff mail does not accumulate
+// behind the ones an ended session left hooked. (GH#3859)
+func CloseStaleHookedMailBeads(c Client, agentID string) (int, error) {
+	hooked, err := c.List(ListOptions{
 		Status:   StatusHooked,
 		Label:    "gt:message",
 		Assignee: agentID,
@@ -219,7 +221,7 @@ func (b *Beads) CloseStaleHookedMailBeads(agentID string) (int, error) {
 	for i, h := range hooked {
 		ids[i] = h.ID
 	}
-	if err := b.ForceCloseWithReason("handoff: superseded by new session", ids...); err != nil {
+	if err := c.ForceCloseWithReason("handoff: superseded by new session", ids...); err != nil {
 		return 0, err
 	}
 	return len(ids), nil
@@ -237,20 +239,41 @@ func (b *Beads) lockBead(beadID string) (func(), error) {
 	return lock.FlockAcquire(lockPath)
 }
 
-// AttachMolecule attaches a molecule to a pinned bead by updating its description.
-// The moleculeID is the root issue ID of the molecule to attach.
-// Uses advisory file locking to prevent concurrent read-modify-write races.
-// Returns the updated issue.
-func (b *Beads) AttachMolecule(pinnedBeadID, moleculeID string) (*Issue, error) {
-	// Acquire per-bead lock to serialize concurrent attach/detach operations
-	unlock, err := b.lockBead(pinnedBeadID)
+// beadLocker is the per-bead cross-process lock a store holds around a
+// read-modify-write of one pinned bead. Only *Beads implements it: the lock
+// file lives in the store's own .beads directory.
+type beadLocker interface {
+	lockBead(beadID string) (func(), error)
+}
+
+// lockBeadFor takes c's lock for beadID and returns the release. A Client
+// that keeps no such lock (beadsfake in unit tests) releases nothing: there
+// is no file to guard, and no second process to race.
+func lockBeadFor(c Client, beadID string) (func(), error) {
+	l, ok := c.(beadLocker)
+	if !ok {
+		return func() {}, nil
+	}
+	unlock, err := l.lockBead(beadID)
 	if err != nil {
 		return nil, fmt.Errorf("acquiring bead lock: %w", err)
+	}
+	return unlock, nil
+}
+
+// AttachMolecule records moleculeID as pinnedBeadID's attached molecule,
+// stamping the attach time. On a *Beads the read-modify-write runs under the
+// bead's flock.
+func AttachMolecule(c Client, pinnedBeadID, moleculeID string) (*Issue, error) {
+	// Acquire per-bead lock to serialize concurrent attach/detach operations
+	unlock, err := lockBeadFor(c, pinnedBeadID)
+	if err != nil {
+		return nil, err
 	}
 	defer unlock()
 
 	// Fetch the pinned bead
-	issue, err := b.Show(pinnedBeadID)
+	issue, err := c.Show(pinnedBeadID)
 	if err != nil {
 		return nil, fmt.Errorf("fetching pinned bead: %w", err)
 	}
@@ -270,27 +293,27 @@ func (b *Beads) AttachMolecule(pinnedBeadID, moleculeID string) (*Issue, error) 
 	newDesc := SetAttachmentFields(issue, fields)
 
 	// Update the issue
-	if err := b.Update(pinnedBeadID, UpdateOptions{Description: &newDesc}); err != nil {
+	if err := c.Update(pinnedBeadID, UpdateOptions{Description: &newDesc}); err != nil {
 		return nil, fmt.Errorf("updating pinned bead: %w", err)
 	}
 
 	// Re-fetch to return updated state
-	return b.Show(pinnedBeadID)
+	return c.Show(pinnedBeadID)
 }
 
-// DetachMolecule removes molecule attachment from a pinned bead.
-// Uses advisory file locking to prevent concurrent read-modify-write races.
-// Returns the updated issue.
-func (b *Beads) DetachMolecule(pinnedBeadID string) (*Issue, error) {
+// DetachMolecule removes pinnedBeadID's molecule attachment, returning the
+// bead unchanged when there is nothing attached. On a *Beads the
+// read-modify-write runs under the bead's flock.
+func DetachMolecule(c Client, pinnedBeadID string) (*Issue, error) {
 	// Acquire per-bead lock to serialize concurrent attach/detach operations
-	unlock, err := b.lockBead(pinnedBeadID)
+	unlock, err := lockBeadFor(c, pinnedBeadID)
 	if err != nil {
-		return nil, fmt.Errorf("acquiring bead lock: %w", err)
+		return nil, err
 	}
 	defer unlock()
 
 	// Fetch the pinned bead
-	issue, err := b.Show(pinnedBeadID)
+	issue, err := c.Show(pinnedBeadID)
 	if err != nil {
 		return nil, fmt.Errorf("fetching pinned bead: %w", err)
 	}
@@ -304,18 +327,18 @@ func (b *Beads) DetachMolecule(pinnedBeadID string) (*Issue, error) {
 	newDesc := SetAttachmentFields(issue, nil)
 
 	// Update the issue
-	if err := b.Update(pinnedBeadID, UpdateOptions{Description: &newDesc}); err != nil {
+	if err := c.Update(pinnedBeadID, UpdateOptions{Description: &newDesc}); err != nil {
 		return nil, fmt.Errorf("updating pinned bead: %w", err)
 	}
 
 	// Re-fetch to return updated state
-	return b.Show(pinnedBeadID)
+	return c.Show(pinnedBeadID)
 }
 
-// GetAttachment returns the attachment fields from a pinned bead.
-// Returns nil if no molecule is attached.
-func (b *Beads) GetAttachment(pinnedBeadID string) (*AttachmentFields, error) {
-	issue, err := b.Show(pinnedBeadID)
+// GetAttachment returns pinnedBeadID's attachment fields, nil when no
+// molecule is attached.
+func GetAttachment(c Client, pinnedBeadID string) (*AttachmentFields, error) {
+	issue, err := c.Show(pinnedBeadID)
 	if err != nil {
 		return nil, err
 	}

@@ -171,7 +171,7 @@ func runReady(cmd *cobra.Command, args []string) error {
 			defer wg.Done()
 			townBeadsPath := beads.GetTownBeadsPath(townRoot)
 			townBeads := beads.New(townBeadsPath)
-			issues, err := townBeads.ReadyDispatchable()
+			issues, err := beads.ReadyDispatchable(townBeads)
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -204,7 +204,7 @@ func runReady(cmd *cobra.Command, args []string) error {
 			// Use rig root path where rig-level beads are stored
 			// BeadsPath returns rig root; redirect system handles mayor/rig routing
 			rigBeads := beads.New(r.BeadsPath())
-			issues, err := rigBeads.ReadyDispatchable()
+			issues, err := beads.ReadyDispatchable(rigBeads)
 
 			mu.Lock()
 			defer mu.Unlock()

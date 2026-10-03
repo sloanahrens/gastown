@@ -172,7 +172,7 @@ func TestClearMailCountsOnlyClosedMessages(t *testing.T) {
 	b := NewIsolated(t.TempDir())
 	b.exec = r.exec
 
-	res, err := b.ClearMail("clear")
+	res, err := ClearMail(b, "clear")
 	if !errors.Is(err, ErrCloseRefused) {
 		t.Errorf("ClearMail error = %v, want it to report the refused message", err)
 	}

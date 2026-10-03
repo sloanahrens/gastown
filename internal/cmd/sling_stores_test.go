@@ -1,36 +1,14 @@
 package cmd
 
 import (
-	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
 
-// slingFake is a fake database as sling's stores see it: the fake plus the
-// audited molecule detach, which clears the attachment fields the way
-// *beads.Beads does (the audit log is not modeled).
+// slingFake is a fake database as sling's stores see it. The molecule detach
+// is the beads free function over it, which clears the attachment fields the
+// way the store does (the audit log is not modeled).
 type slingFake struct {
 	*beadsfake.Fake
-}
-
-func (f slingFake) DetachMoleculeWithAudit(id string, _ beads.DetachOptions) (*beads.Issue, error) {
-	return fakeDetach(f, id)
-}
-
-// fakeDetach clears id's attachment fields in c the way
-// (*beads.Beads).DetachMoleculeWithAudit does, without the audit log.
-func fakeDetach(f beads.Client, id string) (*beads.Issue, error) {
-	issue, err := f.Show(id)
-	if err != nil {
-		return nil, err
-	}
-	if beads.ParseAttachmentFields(issue) == nil {
-		return issue, nil
-	}
-	desc := beads.SetAttachmentFields(issue, nil)
-	if err := f.Update(id, beads.UpdateOptions{Description: &desc}); err != nil {
-		return nil, err
-	}
-	return f.Show(id)
 }
 
 // fakeSlingStores answers every pinned and routed store from db.

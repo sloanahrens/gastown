@@ -308,7 +308,7 @@ func (s slingStores) burnMolecules(molecules []string, beadID, townRoot string) 
 	// and advisory locking). This clears attached_molecule/attached_at from the description.
 	// Without this, storeFieldsInBead preserves the stale reference because it only
 	// overwrites when updates.AttachedMolecule is non-empty.
-	if _, err := bd.DetachMoleculeWithAudit(beadID, beads.DetachOptions{
+	if _, err := beads.DetachMoleculeWithAudit(bd, beadID, beads.DetachOptions{
 		Operation: "burn",
 		Reason:    "force re-sling: burning stale molecules",
 	}); err != nil {
@@ -1521,7 +1521,7 @@ func clearReassignedPolecatState(townRoot, assignee string) {
 // Returns nil if no prior attempt exists. (GH#gt-zqvj)
 func lookupPriorAttempt(beadsDir, issueID string) []string {
 	bd := beads.New(beadsDir)
-	mrs, err := bd.FindOpenMRsForIssue(issueID)
+	mrs, err := beads.FindOpenMRsForIssue(bd, issueID)
 	if err != nil || len(mrs) == 0 {
 		return nil
 	}

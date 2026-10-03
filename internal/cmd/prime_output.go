@@ -397,7 +397,7 @@ func outputHandoffContent(w io.Writer, ctx RoleContext) {
 	roleKey := string(ctx.Role)
 
 	bd := beads.New(ctx.TownRoot)
-	issue, err := bd.FindHandoffBead(roleKey)
+	issue, err := beads.FindHandoffBead(bd, roleKey)
 	if err != nil {
 		// Silently skip if beads lookup fails (might not be a beads repo)
 		return
