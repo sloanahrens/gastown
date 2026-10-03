@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/townhealth"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // readDoltCommitMeter fills the commits-per-day meter into info. A meter
@@ -26,6 +27,25 @@ func readDoltCommitMeter(info *DoltInfo, townRoot string, measure func(context.C
 	}
 	info.CommitsLastDay = counts
 	info.CommitsPerDayWarn = config.LoadOperationalConfig(townRoot).GetDoltConfig().CommitsPerDayWarnV()
+}
+
+// strayDoltInfos turns the orphan scan into the status model's stray list,
+// pairing each process with the command that clears it: kill-imposters on the
+// town's port or data-dir, `kill <pid>` for a foreign-port leak (gt-gyw5w).
+func strayDoltInfos(orphans []util.DoltOrphanServer, townPort int, townDataDir string) []StrayDoltInfo {
+	if len(orphans) == 0 {
+		return nil
+	}
+	out := make([]StrayDoltInfo, 0, len(orphans))
+	for _, o := range orphans {
+		out = append(out, StrayDoltInfo{
+			PID:     o.PID,
+			Port:    o.Port,
+			DataDir: o.DataDir,
+			Remedy:  util.StrayDoltRemedy(util.StrayDoltProcess{PID: o.PID, Port: o.Port, DataDir: o.DataDir}, townPort, townDataDir),
+		})
+	}
+	return out
 }
 
 // HealthView reads the health file the daemon writes every tick

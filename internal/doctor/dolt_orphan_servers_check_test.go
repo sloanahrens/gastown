@@ -2,6 +2,8 @@ package doctor
 
 import (
 	"errors"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/util"
@@ -63,6 +65,45 @@ func TestDoltOrphanServersCheck_Run(t *testing.T) {
 				t.Errorf("FixHint = %q with status %v; want one exactly when warning", result.FixHint, result.Status)
 			}
 		})
+	}
+}
+
+// TestDoltOrphanServersCheck_RunNamesRemedy pins gt-gyw5w: each reported pid
+// carries its port, its data-dir, and the command that clears it — kill
+// -imposters for a stray on the town's own endpoint, `kill <pid>` for one the
+// imposter matcher can never reach.
+func TestDoltOrphanServersCheck_RunNamesRemedy(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	townDataDir := filepath.Join(townRoot, ".dolt-data")
+
+	foreign := util.DoltOrphanServer{
+		PID: 29490, PPID: 1, Reason: "orphan", Age: 600,
+		Port: 3399, DataDir: "/tmp/doltprobe/data",
+		ConfigPath: "/tmp/doltprobe/data/config.yaml",
+	}
+	imposter := util.DoltOrphanServer{
+		PID: 500, PPID: 1, Reason: "unexpected", Age: 600,
+		Port: 0, DataDir: townDataDir,
+	}
+
+	check := NewDoltOrphanServersCheck()
+	check.findOrphans = func(string) ([]util.DoltOrphanServer, error) {
+		return []util.DoltOrphanServer{foreign, imposter}, nil
+	}
+	check.findStaleDirs = func() ([]string, error) { return nil, nil }
+
+	result := check.Run(&CheckContext{TownRoot: townRoot})
+	joined := strings.Join(result.Details, "\n")
+	for _, want := range []string{
+		"port 3399",
+		"/tmp/doltprobe/data",
+		"remedy: kill 29490",
+		"remedy: gt dolt kill-imposters",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("details missing %q:\n%s", want, joined)
+		}
 	}
 }
 

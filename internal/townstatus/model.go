@@ -54,12 +54,26 @@ type DoltInfo struct {
 	DataDir       string `json:"data_dir,omitempty"`
 	PortConflict  bool   `json:"port_conflict,omitempty"`  // Port taken by another town's Dolt
 	ConflictOwner string `json:"conflict_owner,omitempty"` // --data-dir of the process holding the port
+	// Stray lists Dolt servers on the machine that are not the town's own,
+	// each with the command that clears it (gt-gyw5w). Empty when there are
+	// none. Not read under --fast.
+	Stray []StrayDoltInfo `json:"stray,omitempty"`
 	// CommitsLastDay is the commits-per-day meter (gt-8z769.4): each
 	// database's Dolt commits in the last 24h. Not read under --fast.
 	CommitsLastDay []doltserver.DBCommits `json:"commits_last_day,omitempty"`
 	// CommitsPerDayWarn is the per-database limit the meter is held to
 	// (operational.dolt.commits_per_day_warn).
 	CommitsPerDayWarn int `json:"commits_per_day_warn,omitempty"`
+}
+
+// StrayDoltInfo is one Dolt server process that is not the town's own, with
+// the command that clears it. Port and DataDir are zero/empty when the
+// process's argv named neither; the Remedy is then the pid alone.
+type StrayDoltInfo struct {
+	PID     int    `json:"pid"`
+	Port    int    `json:"port,omitempty"`
+	DataDir string `json:"data_dir,omitempty"`
+	Remedy  string `json:"remedy"`
 }
 
 // TmuxInfo represents the tmux server status.

@@ -3,6 +3,7 @@ package doctor
 import (
 	"fmt"
 
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -78,11 +79,17 @@ func (c *DoltOrphanServersCheck) Run(ctx *CheckContext) *CheckResult {
 
 	var details []string
 	reapable := 0
+	// Name the remedy per pid: the town's port and data-dir tell an imposter
+	// (kill-imposters) from a leak that command cannot reach (`kill <pid>`).
+	townCfg := doltserver.DefaultConfig(ctx.TownRoot)
 	for _, o := range c.orphans {
 		if o.Reason == "orphan" {
 			reapable++
 		}
-		details = append(details, fmt.Sprintf("PID %d (ppid %d, %s, %ds old): %s", o.PID, o.PPID, o.Reason, o.Age, o.ConfigPath))
+		remedy := util.StrayDoltRemedy(util.StrayDoltProcess{PID: o.PID, Port: o.Port, DataDir: o.DataDir}, townCfg.Port, townCfg.DataDir)
+		details = append(details, fmt.Sprintf(
+			"PID %d (ppid %d, %s, %ds old, port %d, data-dir %s): %s — remedy: %s",
+			o.PID, o.PPID, o.Reason, o.Age, o.Port, dataDirOrNone(o.DataDir), o.ConfigPath, remedy))
 	}
 	for _, d := range c.staleDirs {
 		details = append(details, "Stale test temp dir (server gone): "+d)
@@ -96,6 +103,15 @@ func (c *DoltOrphanServersCheck) Run(ctx *CheckContext) *CheckResult {
 		Details: details,
 		FixHint: "Run 'gt doctor fix dolt-orphan-servers' to SIGTERM orphaned servers and remove stale test temp dirs",
 	}
+}
+
+// dataDirOrNone renders a blank data-dir as "(none)" so the detail line stays
+// readable when a stray server's argv named neither --data-dir nor --config.
+func dataDirOrNone(dir string) string {
+	if dir == "" {
+		return "(none)"
+	}
+	return dir
 }
 
 // DestructiveFix marks this repair as destructive (gt-638go.3): it SIGTERMs orphaned Dolt servers.

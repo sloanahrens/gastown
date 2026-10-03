@@ -322,6 +322,25 @@ func outputStatusText(w io.Writer, status townstatus.TownStatus) error {
 		fmt.Fprintln(w)
 	}
 
+	// Stray Dolt servers: processes that are not the town's own, each with the
+	// command that clears it. kill-imposters only looks at the town's port, so
+	// a foreign-port leak gets `kill <pid>` instead (gt-gyw5w).
+	if status.Dolt != nil && len(status.Dolt.Stray) > 0 {
+		fmt.Fprintf(w, "⚠ %s\n", style.Bold.Render(fmt.Sprintf("%d stray Dolt server(s):", len(status.Dolt.Stray))))
+		for _, s := range status.Dolt.Stray {
+			port := "-"
+			if s.Port > 0 {
+				port = fmt.Sprintf(":%d", s.Port)
+			}
+			dataDir := s.DataDir
+			if dataDir == "" {
+				dataDir = "(none)"
+			}
+			fmt.Fprintf(w, "   PID %d  port %s  data-dir %s  → %s\n", s.PID, port, dataDir, s.Remedy)
+		}
+		fmt.Fprintln(w)
+	}
+
 	// Container-suite gate slot (gt-bcsq): only one Docker-backed test suite
 	// may run at a time townwide. Only shown while held.
 	if status.Slot != nil {

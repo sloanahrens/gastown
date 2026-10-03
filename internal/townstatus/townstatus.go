@@ -27,6 +27,7 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -309,6 +310,14 @@ func Gather(opts Options) (TownStatus, error) {
 			if conflictPid, conflictDir := doltserver.CheckPortConflict(townRoot); conflictPid > 0 {
 				doltInfo.PortConflict = true
 				doltInfo.ConflictOwner = conflictDir
+			}
+		}
+		// Stray Dolt servers: processes that are not the town's own, each with
+		// the command that clears it. kill-imposters only looks at the town's
+		// port, so a foreign-port leak gets `kill <pid>` instead (gt-gyw5w).
+		if !fast {
+			if orphans, err := util.FindOrphanDoltServers(townRoot); err == nil {
+				doltInfo.Stray = strayDoltInfos(orphans, doltCfg.Port, doltCfg.DataDir)
 			}
 		}
 		status.Dolt = doltInfo

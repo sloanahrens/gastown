@@ -37,8 +37,13 @@ type DoltOrphanServer struct {
 	PID        int
 	PPID       int    // Parent pid at scan time; <= 1 means reparented to launchd/init
 	ConfigPath string // --config value from argv, or "" if not present
-	Age        int    // seconds, from ps etime
-	Reason     string // "orphan" (auto-fixable) or "unexpected" (reported only)
+	// Port and DataDir are the endpoint the process's argv reveals: --port and
+	// --data-dir, else the --config file's directory. Zero/empty when it names
+	// none. They choose the remedy (StrayDoltRemedy, gt-gyw5w).
+	Port    int
+	DataDir string
+	Age     int    // seconds, from ps etime
+	Reason  string // "orphan" (auto-fixable) or "unexpected" (reported only)
 }
 
 // DoltOrphanReapResult describes what happened when a DoltOrphanServer was signaled.
@@ -115,6 +120,53 @@ func doltSQLServerConfigPath(args string) string {
 	return ""
 }
 
+// doltSQLServerPort extracts the --port flag's value from a dolt sql-server
+// argv string, or 0 if not present or unparsable.
+func doltSQLServerPort(args string) int {
+	fields := strings.Fields(args)
+	for i, f := range fields {
+		if f == "--port" && i+1 < len(fields) {
+			if p, err := strconv.Atoi(fields[i+1]); err == nil {
+				return p
+			}
+		}
+		if v, ok := strings.CutPrefix(f, "--port="); ok {
+			if p, err := strconv.Atoi(v); err == nil {
+				return p
+			}
+		}
+	}
+	return 0
+}
+
+// doltSQLServerDataDir extracts the --data-dir flag's value from a dolt
+// sql-server argv string, or "" if not present.
+func doltSQLServerDataDir(args string) string {
+	fields := strings.Fields(args)
+	for i, f := range fields {
+		if f == "--data-dir" && i+1 < len(fields) {
+			return fields[i+1]
+		}
+		if v, ok := strings.CutPrefix(f, "--data-dir="); ok {
+			return v
+		}
+	}
+	return ""
+}
+
+// doltProcessDataDir is the data-dir a stray dolt server runs from: the
+// --data-dir flag when given, else the directory of its --config file (a
+// managed server names its data-dir only through the config's location).
+func doltProcessDataDir(args, configPath string) string {
+	if dir := doltSQLServerDataDir(args); dir != "" {
+		return dir
+	}
+	if configPath != "" {
+		return filepath.Dir(configPath)
+	}
+	return ""
+}
+
 // isBeadsTestConfigPath reports whether a config path is under a
 // beads-bd-tests-* scratch dir (either the per-test or shared-server shape).
 func isBeadsTestConfigPath(configPath string) bool {
@@ -165,6 +217,8 @@ func classifyDoltOrphan(e doltProcEntry) (DoltOrphanServer, bool) {
 		PID:        e.PID,
 		PPID:       e.PPID,
 		ConfigPath: cfg,
+		Port:       doltSQLServerPort(e.Args),
+		DataDir:    doltProcessDataDir(e.Args, cfg),
 		Age:        age,
 		Reason:     reason,
 	}, true
