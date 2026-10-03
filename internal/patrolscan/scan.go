@@ -260,14 +260,18 @@ type Options struct {
 	// IsRefusal reports whether a Restart error is the supervisor refusing
 	// (parked, frozen, e-stop, budget) rather than failing.
 	IsRefusal func(error) bool
-	Now       func() time.Time
+	// Reap enables the worktree reap pass. Nil leaves it off, and it does
+	// nothing unless the Env also implements ReapEnv.
+	Reap *ReapOptions
+	Now  func() time.Time
 }
 
 // Scanner runs ticks.
 type Scanner struct {
-	env    Env
-	ledger Ledger
-	o      Options
+	env     Env
+	ledger  Ledger
+	o       Options
+	reapEnv ReapEnv
 }
 
 // New returns a Scanner with defaults filled in.
@@ -290,7 +294,22 @@ func New(env Env, ledger Ledger, o Options) *Scanner {
 	if o.IsRefusal == nil {
 		o.IsRefusal = func(error) bool { return false }
 	}
-	return &Scanner{env: env, ledger: ledger, o: o}
+	s := &Scanner{env: env, ledger: ledger, o: o}
+	if o.Reap != nil {
+		r := *o.Reap
+		if r.Grace <= 0 {
+			r.Grace = DefaultReapGrace
+		}
+		if r.ParkedGrace <= 0 {
+			r.ParkedGrace = DefaultReapParkedGrace
+		}
+		if r.MaxPerTick <= 0 {
+			r.MaxPerTick = DefaultReapMaxPerTick
+		}
+		s.o.Reap = &r
+		s.reapEnv, _ = env.(ReapEnv)
+	}
+	return s
 }
 
 // Outcome names what the tick did about one seat or bead.
@@ -298,15 +317,18 @@ type Outcome string
 
 const (
 	OutcomeRestarted Outcome = "restarted"
-	OutcomeRefused   Outcome = "refused"  // the supervisor said no
-	OutcomeFailed    Outcome = "failed"   // an action ran and failed
-	OutcomeSkipped   Outcome = "skipped"  // a guard said leave it
-	OutcomeUnknown   Outcome = "unknown"  // a read failed; nothing done
-	OutcomeWaiting   Outcome = "waiting"  // dead, but not confirmed yet
-	OutcomeStalled   Outcome = "stalled"  // reported only
-	OutcomeClosed    Outcome = "closed"   // orphaned molecule closed
-	OutcomeReopened  Outcome = "reopened" // dead holder's bead returned to the queue
-	OutcomeIdled     Outcome = "idled"    // idle seat's record retired to stop
+	OutcomeRefused   Outcome = "refused"    // the supervisor said no
+	OutcomeFailed    Outcome = "failed"     // an action ran and failed
+	OutcomeSkipped   Outcome = "skipped"    // a guard said leave it
+	OutcomeUnknown   Outcome = "unknown"    // a read failed; nothing done
+	OutcomeWaiting   Outcome = "waiting"    // dead, but not confirmed yet
+	OutcomeStalled   Outcome = "stalled"    // reported only
+	OutcomeClosed    Outcome = "closed"     // orphaned molecule closed
+	OutcomeReopened  Outcome = "reopened"   // dead holder's bead returned to the queue
+	OutcomeIdled     Outcome = "idled"      // idle seat's record retired to stop
+	OutcomeReaped    Outcome = "reaped"     // finished seat's worktree removed
+	OutcomeWouldReap Outcome = "would-reap" // dry-run: a seat a real run would remove
+	OutcomeBlocked   Outcome = "blocked"    // not safe to remove, or nuke refused
 )
 
 // Finding is one line of a tick's report.
@@ -348,9 +370,10 @@ func (r Report) Count(o Outcome) int {
 // Lines renders the report for the daemon log: one summary line, then one
 // line per finding that is not a quiet skip.
 func (r Report) Lines() []string {
-	lines := []string{fmt.Sprintf("%s: checked %d polecat(s): %d restarted, %d refused, %d unknown, %d molecule(s) closed, %d reopened, %d error(s)",
+	lines := []string{fmt.Sprintf("%s: checked %d polecat(s): %d restarted, %d refused, %d unknown, %d molecule(s) closed, %d reopened, %d error(s), %d reaped, %d would-reap, %d blocked",
 		r.Rig, r.Checked, r.Count(OutcomeRestarted), r.Count(OutcomeRefused), r.Count(OutcomeUnknown),
-		r.Count(OutcomeClosed), r.Count(OutcomeReopened), len(r.Errors))}
+		r.Count(OutcomeClosed), r.Count(OutcomeReopened), len(r.Errors),
+		r.Count(OutcomeReaped), r.Count(OutcomeWouldReap), r.Count(OutcomeBlocked))}
 	for _, f := range r.Findings {
 		lines = append(lines, r.Rig+": "+f.String())
 	}
@@ -371,6 +394,19 @@ func (s *Scanner) Tick(rig string) Report {
 		for _, name := range polecats {
 			r.Checked++
 			if f, ok := s.seat(rig, name); ok {
+				r.Findings = append(r.Findings, f)
+			}
+		}
+		// The reap pass runs after seat() and before orphans(): removing a
+		// directory makes a dead holder's bead recoverable, and the reap
+		// vetoes keep any seat with a live bead out of the reaper, so recovery
+		// never sees a reaped seat's work.
+		left := 0
+		if s.reapEnv != nil {
+			left = s.o.Reap.MaxPerTick
+		}
+		for _, name := range polecats {
+			if f, ok := s.reap(rig, name, &left); ok {
 				r.Findings = append(r.Findings, f)
 			}
 		}
