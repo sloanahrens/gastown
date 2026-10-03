@@ -653,7 +653,7 @@ func (r pluginSyncRun) run() error {
 
 		fmt.Fprintf(r.out, "  %s\n\n", style.Dim.Render("dry run — nothing written"))
 
-		if !report.HasDrift() && len(report.Extra) == 0 {
+		if !report.HasDrift() {
 			fmt.Fprintf(r.out, "  %s All plugins up to date\n", style.Success.Render("✓"))
 			return nil
 		}
@@ -664,9 +664,13 @@ func (r pluginSyncRun) run() error {
 		for _, name := range report.Missing {
 			fmt.Fprintf(r.out, "  %s %s (new, would be copied)\n", style.Success.Render("+"), name)
 		}
-		if r.clean {
-			for _, name := range report.Extra {
+		// Name an extra even without --clean: it is drift whether or not this
+		// run removes it (gt-bw1wo).
+		for _, name := range report.Extra {
+			if r.clean {
 				fmt.Fprintf(r.out, "  %s %s (would be removed)\n", style.Error.Render("-"), name)
+			} else {
+				fmt.Fprintf(r.out, "  %s %s (in runtime, not in source)\n", style.Warning.Render("!"), name)
 			}
 		}
 		return nil
@@ -676,8 +680,25 @@ func (r pluginSyncRun) run() error {
 	if err != nil {
 		return fmt.Errorf("syncing plugins: %w", err)
 	}
-	printPluginSyncResult(r.out, r.errOut, result)
+	var leftExtras []string
+	if !r.clean {
+		leftExtras = extraPlugins(sourceDir, targetDir)
+	}
+	printPluginSyncResult(r.out, r.errOut, result, leftExtras)
 	return reportProtectedPlugins(r.errOut, result.Protected)
+}
+
+// extraPlugins names the runtime plugins source no longer has. Without
+// --clean a sync leaves them in place, and one that said only "already up to
+// date" let a retired plugin keep dispatching (gt-bw1wo).
+func extraPlugins(sourceDir, targetDir string) []string {
+	report, err := plugin.DetectDrift(sourceDir, targetDir)
+	if err != nil {
+		return nil
+	}
+	names := append([]string(nil), report.Extra...)
+	sort.Strings(names)
+	return names
 }
 
 // reportProtectedPlugins lists plugins the sync left untouched because their
@@ -703,26 +724,35 @@ func reportProtectedPlugins(errOut io.Writer, protected map[string][]string) err
 	return fmt.Errorf("%d plugin(s) hold runtime edits and were not synced", len(protected))
 }
 
-func printPluginSyncResult(out, errOut io.Writer, result *plugin.SyncResult) {
+func printPluginSyncResult(out, errOut io.Writer, result *plugin.SyncResult, leftExtras []string) {
 	if len(result.Copied) == 0 && len(result.Removed) == 0 && len(result.Protected) == 0 {
-		fmt.Fprintf(out, "%s Plugins already up to date (%d checked)\n",
-			style.Success.Render("✓"), len(result.Skipped))
-		return
-	}
-
-	fmt.Fprintf(out, "%s Synced plugins\n", style.Success.Render("●"))
-	for _, name := range result.Copied {
-		fmt.Fprintf(out, "  %s %s\n", style.Success.Render("↑"), name)
-	}
-	for _, name := range result.Removed {
-		fmt.Fprintf(out, "  %s %s\n", style.Error.Render("×"), name)
-	}
-	if len(result.Skipped) > 0 {
-		fmt.Fprintf(out, "  %s %d plugin(s) already current\n",
-			style.Dim.Render("·"), len(result.Skipped))
+		switch {
+		case len(leftExtras) == 0:
+			fmt.Fprintf(out, "%s Plugins already up to date (%d checked)\n",
+				style.Success.Render("✓"), len(result.Skipped))
+		case len(result.Skipped) > 0:
+			fmt.Fprintf(out, "  %s %d plugin(s) already current\n",
+				style.Dim.Render("·"), len(result.Skipped))
+		}
+	} else {
+		fmt.Fprintf(out, "%s Synced plugins\n", style.Success.Render("●"))
+		for _, name := range result.Copied {
+			fmt.Fprintf(out, "  %s %s\n", style.Success.Render("↑"), name)
+		}
+		for _, name := range result.Removed {
+			fmt.Fprintf(out, "  %s %s\n", style.Error.Render("×"), name)
+		}
+		if len(result.Skipped) > 0 {
+			fmt.Fprintf(out, "  %s %d plugin(s) already current\n",
+				style.Dim.Render("·"), len(result.Skipped))
+		}
 	}
 	for _, e := range result.Errors {
 		fmt.Fprintf(errOut, "  %s %s\n", style.Error.Render("!"), e)
+	}
+	if len(leftExtras) > 0 {
+		fmt.Fprintf(errOut, "%s In runtime, not in source (--clean removes them): %s\n",
+			style.Warning.Render("⚠"), strings.Join(leftExtras, ", "))
 	}
 }
 

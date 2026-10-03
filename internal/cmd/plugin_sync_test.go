@@ -97,6 +97,80 @@ func TestRunPluginSync_SourceFlagIsLabelledExplicit(t *testing.T) {
 	}
 }
 
+// gt-bw1wo: a dry run that would not remove an extra still names it. Printing
+// nothing read as "nothing to see" while the plugin kept dispatching.
+func TestRunPluginSync_DryRunNamesExtraWithoutClean(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	markTestTown(t, townRoot)
+	sourcePlugins := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
+	writeTestPlugin(t, sourcePlugins, "current-plugin", "current")
+	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "current-plugin", "current")
+	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "seat-refill", "retired")
+
+	var out bytes.Buffer
+	r := pluginSyncRun{townRoot: townRoot, dryRun: true, out: &out, errOut: io.Discard}
+	if err := r.run(); err != nil {
+		t.Fatalf("run() error = %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "seat-refill (in runtime, not in source)") {
+		t.Errorf("dry run did not name the extra plugin; output:\n%s", got)
+	}
+	if strings.Contains(got, "up to date") {
+		t.Errorf("dry run claimed up to date with an extra plugin present; output:\n%s", got)
+	}
+}
+
+// The real sync without --clean leaves the extra in place, so it must say so
+// on stderr: "already up to date" over a retired plugin is how seat-refill
+// kept dispatching with nothing warning (gt-bw1wo).
+func TestRunPluginSync_ReportsExtraItLeaves(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	markTestTown(t, townRoot)
+	sourcePlugins := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
+	writeTestPlugin(t, sourcePlugins, "current-plugin", "current")
+	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "current-plugin", "current")
+	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "seat-refill", "retired")
+
+	var out, errOut bytes.Buffer
+	r := pluginSyncRun{townRoot: townRoot, out: &out, errOut: &errOut}
+	if err := r.run(); err != nil {
+		t.Fatalf("run() error = %v", err)
+	}
+	if !strings.Contains(errOut.String(), "seat-refill") {
+		t.Errorf("sync left seat-refill in place without naming it; stderr:\n%s", errOut.String())
+	}
+	if _, err := os.Stat(filepath.Join(townRoot, "plugins", "seat-refill")); err != nil {
+		t.Errorf("sync without --clean removed the extra: %v", err)
+	}
+}
+
+// The same dry run with --clean must say what it would remove, not just name
+// the plugin.
+func TestRunPluginSync_DryRunCleanSaysWouldRemove(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	markTestTown(t, townRoot)
+	sourcePlugins := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
+	writeTestPlugin(t, sourcePlugins, "current-plugin", "current")
+	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "current-plugin", "current")
+	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "seat-refill", "retired")
+
+	var out bytes.Buffer
+	r := pluginSyncRun{townRoot: townRoot, dryRun: true, clean: true, out: &out, errOut: io.Discard}
+	if err := r.run(); err != nil {
+		t.Fatalf("run() error = %v", err)
+	}
+	if !strings.Contains(out.String(), "seat-refill (would be removed)") {
+		t.Errorf("--clean dry run did not name what it would remove; output:\n%s", out.String())
+	}
+}
+
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {

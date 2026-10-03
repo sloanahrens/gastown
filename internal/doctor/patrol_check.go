@@ -273,6 +273,8 @@ type PatrolPluginDriftCheck struct {
 	FixableCheck
 	sourceDir string
 	targetDir string
+	// syncPlugins is the sync the repair runs; nil means plugin.SyncPlugins.
+	syncPlugins func(sourceDir, targetDir string, clean bool) (*plugin.SyncResult, error)
 }
 
 // NewPatrolPluginDriftCheck creates a new plugin drift check.
@@ -341,30 +343,45 @@ func (c *PatrolPluginDriftCheck) Run(ctx *CheckContext) *CheckResult {
 	for _, name := range report.Missing {
 		details = append(details, fmt.Sprintf("%s: missing from runtime", name))
 	}
+	for _, name := range report.Extra {
+		details = append(details, fmt.Sprintf("%s: in runtime, not in source", name))
+	}
 
 	return &CheckResult{
 		Name:    c.Name(),
 		Status:  StatusWarning,
-		Message: fmt.Sprintf("%d plugin(s) out of sync", len(report.Drifted)+len(report.Missing)),
+		Message: fmt.Sprintf("%d plugin(s) out of sync", len(report.Drifted)+len(report.Missing)+len(report.Extra)),
 		Details: details,
-		FixHint: "Run 'gt plugin sync' to update runtime plugins",
+		FixHint: "Run 'gt doctor fix patrol-plugin-drift --authorized-by <bead-id>' to update runtime plugins and remove the ones source no longer has",
 	}
 }
 
-// Fix syncs plugins from source to runtime.
+// Fix syncs runtime plugins from source, removing the ones source no longer
+// has (gt-bw1wo).
 func (c *PatrolPluginDriftCheck) Fix(ctx *CheckContext) error {
 	if c.sourceDir == "" || c.targetDir == "" {
 		return fmt.Errorf("drift check did not run; cannot fix")
 	}
-	result, err := plugin.SyncPlugins(c.sourceDir, c.targetDir, false)
+	syncPlugins := c.syncPlugins
+	if syncPlugins == nil {
+		syncPlugins = plugin.SyncPlugins
+	}
+	result, err := syncPlugins(c.sourceDir, c.targetDir, true)
 	if err != nil {
 		return err
 	}
+	if len(result.Errors) > 0 {
+		return fmt.Errorf("sync reported %d error(s): %s", len(result.Errors), strings.Join(result.Errors, "; "))
+	}
 	if len(result.Protected) > 0 {
-		return fmt.Errorf("left %d plugin(s) with runtime edits untouched; run 'gt plugin sync' to see them, --force to discard", len(result.Protected))
+		return fmt.Errorf("left %d plugin(s) with runtime edits untouched; run 'gt plugin sync --clean --force' to discard them", len(result.Protected))
 	}
 	return nil
 }
+
+// DestructiveFix marks the repair destructive: it removes runtime plugin
+// directories, including ones under <town>/plugins that the check never named.
+func (c *PatrolPluginDriftCheck) DestructiveFix() bool { return true }
 
 // discoverRigs finds all registered rigs.
 func discoverRigs(townRoot string) ([]string, error) {
