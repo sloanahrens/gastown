@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 )
 
 // Dead operational keys (gt-y3pgh.2.13). Nothing reads them; strict decoding
@@ -71,33 +72,69 @@ var deadOperationalKeys = []string{
 	"operational.witness.composer_stall_frozen_for",
 }
 
-// warnDeadOperationalKeys logs one warning for each dead key that data sets.
+// deadOperationalWarned keys the warnings this process has already printed,
+// on the file path plus the key as the file spells it (gt-x2w2g). The loader
+// runs on every gt command and every daemon tick, so without it a town that
+// still sets a dead key repeats the same lines indefinitely.
+var deadOperationalWarned sync.Map
+
+// warnDeadOperationalKeys logs one warning for each dead key that data sets,
+// at most once per (file, key) per process.
 func warnDeadOperationalKeys(path string, data []byte) {
-	for _, w := range deadOperationalWarnings(path, data) {
+	for _, w := range newDeadOperationalWarnings(path, data) {
 		fmt.Fprintln(os.Stderr, w)
 	}
 }
 
+// newDeadOperationalWarnings returns the messages for dead keys that data sets
+// and this process has not warned about yet, recording each as warned. Two
+// files that set the same key each get a message, as do two keys in one file.
+func newDeadOperationalWarnings(path string, data []byte) []string {
+	var fresh []string
+	for _, spelling := range deadOperationalSpellings(data) {
+		if _, dup := deadOperationalWarned.LoadOrStore(path+"\x00"+spelling, struct{}{}); dup {
+			continue
+		}
+		fresh = append(fresh, deadOperationalWarning(path, spelling))
+	}
+	return fresh
+}
+
 // deadOperationalWarnings returns one message per dead key that data sets,
-// naming the key as the file spells it and the file it came from. A file whose
-// keys were all fixed yields nothing, and so does data that does not walk as
-// JSON — the strict decode that runs first reports that once, as an error.
+// naming the key as the file spells it and the file it came from, and records
+// nothing: newDeadOperationalWarnings is the deduplicating loader path. A file
+// whose keys were all fixed yields nothing, and so does data that does not walk
+// as JSON — the strict decode that runs first reports that once, as an error.
 func deadOperationalWarnings(path string, data []byte) []string {
+	spellings := deadOperationalSpellings(data)
+	warnings := make([]string, 0, len(spellings))
+	for _, spelling := range spellings {
+		warnings = append(warnings, deadOperationalWarning(path, spelling))
+	}
+	return warnings
+}
+
+// deadOperationalSpellings returns, in deadOperationalKeys order, how data
+// spells each dead key it sets.
+func deadOperationalSpellings(data []byte) []string {
 	present, err := presentKeyPaths(data)
 	if err != nil {
 		return nil
 	}
-	var warnings []string
+	var spellings []string
 	for _, key := range deadOperationalKeys {
-		spelling, ok := present[key]
-		if !ok {
-			continue
+		if spelling, ok := present[key]; ok {
+			spellings = append(spellings, spelling)
 		}
-		warnings = append(warnings, fmt.Sprintf(
-			"warning: %s: %s is set but nothing reads it; delete the key, because a future release will refuse it",
-			path, spelling))
 	}
-	return warnings
+	return spellings
+}
+
+// deadOperationalWarning is the line printed for one dead key in one file.
+func deadOperationalWarning(path, spelling string) string {
+	return fmt.Sprintf(
+		"warning: %s: %s is set but nothing reads it; delete the key, because a future release will refuse it",
+		path, spelling)
 }
 
 // presentKeyPaths maps every object key path in data, lowercased (encoding/json
