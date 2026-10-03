@@ -22,10 +22,10 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/jonboulle/clockwork"
-	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/doltbackup"
@@ -69,7 +69,7 @@ type Daemon struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	convoyManager *ConvoyManager
-	beadsStores   map[string]beadsdk.Storage
+	beadsStores   map[string]convoy.Store
 	doltServer    *DoltServerManager
 
 	// disabledPatrols is loaded from town settings (disabled_patrols field).
@@ -1509,14 +1509,13 @@ func bdSchemaLevel(ctx context.Context, townRoot string) (int, error) {
 // report the schema level it migrates to, and every store must be at that
 // level with a journal bd can tail. Every read goes through bd (probeFor;
 // gt-7iwy0.2), not the store handles; schemaLevel reads bd's level
-// (bdSchemaLevel in production). On refusal it closes every store.
-func verifyBeadsStores(ctx context.Context, logger *log.Logger, townRoot string, stores map[string]beadsdk.Storage, schemaLevel func(ctx context.Context, townRoot string) (int, error), probeFor func(townRoot, name string) (storeProbe, error)) error {
+// (bdSchemaLevel in production).
+func verifyBeadsStores(ctx context.Context, logger *log.Logger, townRoot string, stores map[string]convoy.Store, schemaLevel func(ctx context.Context, townRoot string) (int, error), probeFor func(townRoot, name string) (storeProbe, error)) error {
 	bdSchema, err := schemaLevel(ctx, townRoot)
 	if err == nil && bdSchema <= 0 {
 		err = fmt.Errorf("bd version --json reports no db_schema_version (a bd build from before the machine surface); install the beads fork's bd with make safe-install")
 	}
 	if err != nil {
-		closeBeadsStores(logger, stores)
 		return fmt.Errorf("daemon startup blocked: cannot read bd's schema level: %w", err)
 	}
 	names := make([]string, 0, len(stores))
@@ -1531,7 +1530,6 @@ func verifyBeadsStores(ctx context.Context, logger *log.Logger, townRoot string,
 		}
 	}
 	if err := checkBeadsStoreCompatibility(ctx, townRoot, names, bdSchema, probeFor, warn); err != nil {
-		closeBeadsStores(logger, stores)
 		return err
 	}
 	return nil
@@ -1704,23 +1702,6 @@ func displayBeadsStoreName(name string) string {
 	return fmt.Sprintf("rig %q beads store", name)
 }
 
-func closeBeadsStores(logger *log.Logger, stores map[string]beadsdk.Storage) {
-	for name, store := range stores {
-		if store == nil {
-			continue
-		}
-		if err := store.Close(); err != nil {
-			if logger != nil {
-				logger.Printf("Convoy: error closing beads store (%s): %v", name, err)
-			}
-			continue
-		}
-		if logger != nil {
-			logger.Printf("Convoy: closed beads store (%s)", name)
-		}
-	}
-}
-
 // logStartOutcome logs a supervisor Restart that did not start a role.
 func (d *Daemon) logStartOutcome(role, rigName string, err error) {
 	switch {
@@ -1851,41 +1832,65 @@ func (d *Daemon) prefixRegistry() *session.PrefixRegistry {
 	return session.DefaultRegistry()
 }
 
-// openBeadsStores opens beads stores for the town (hq) and all known rigs.
-// It returns the stores that opened — keyed by "hq" for town-level and by rig
-// name for per-rig stores — plus the names that were wanted but would not open.
-// Stores that fail to open are logged and skipped. Successfully opened stores
-// are compatibility-checked before being returned to Convoy polling.
+// wantedStore is one store the daemon wants open: the name convoy lookups use
+// ("hq" for the town, the rig name otherwise) and the beads directory bd is
+// pinned to.
+type wantedStore struct {
+	name string
+	dir  string
+}
+
+// openBeadsStores opens the convoy stores the daemon polls: the town store
+// (hq) and every known rig's, each a bd-backed store pinned to that workspace
+// (beads.NewPinned). It returns the stores that opened — keyed by "hq" for
+// town-level and by rig name for per-rig stores — plus the names that were
+// wanted but would not open. Successfully opened stores are
+// compatibility-checked before being returned to Convoy polling.
 //
 // The names that failed are returned rather than only logged: a store missed
 // while Dolt is restarting has to be retried, and the convoy manager cannot
-// retry what it was never told was wanted (gt-i36h).
+// retry what it was never told was wanted (gt-i36h). A store whose beads
+// directory is absent is wanted-and-missing for the same reason, and a Dolt
+// server not accepting connections yet reports every wanted store missing, so
+// the daemon still comes up around the opener's retries.
 func (d *Daemon) openBeadsStores() (storeOpenResult, error) {
-	stores := make(map[string]beadsdk.Storage)
+	stores := make(map[string]convoy.Store)
 	var missing []string
 
-	// Town-level store (hq)
-	hqBeadsDir := filepath.Join(d.config.TownRoot, ".beads")
-	if store, err := beads.OpenStoreFromConfig(d.ctx, hqBeadsDir); err == nil {
-		stores["hq"] = store
-	} else {
-		d.logger.Printf("Convoy: hq beads store unavailable: %s", util.FirstLine(err.Error()))
-		missing = append(missing, "hq")
+	wants := make([]wantedStore, 0, 1+len(d.getKnownRigs()))
+	wants = append(wants, wantedStore{name: "hq", dir: filepath.Join(d.config.TownRoot, ".beads")})
+	for _, rigName := range d.getKnownRigs() {
+		wants = append(wants, wantedStore{name: rigName, dir: doltserver.FindRigBeadsDir(d.config.TownRoot, rigName)})
 	}
 
-	// Per-rig stores
-	for _, rigName := range d.getKnownRigs() {
-		beadsDir := doltserver.FindRigBeadsDir(d.config.TownRoot, rigName)
-		if beadsDir == "" {
+	// A Dolt server that is not accepting connections yet (or has been paused)
+	// is the startup case the store opener exists for: a pinned store cannot
+	// open eagerly, so every wanted store is reported missing and the daemon
+	// comes up with the opener retrying the set. Without this the compatibility
+	// gate would read a down server as an unusable workspace and refuse to
+	// start (gt-i36h).
+	if len(doltserver.HasServerModeMetadata(d.config.TownRoot)) > 0 {
+		if err := doltserver.CheckServerReachable(d.config.TownRoot); err != nil {
+			d.logger.Printf("Convoy: %s", util.FirstLine(err.Error()))
+			for _, w := range wants {
+				missing = append(missing, w.name)
+			}
+			return storeOpenResult{Missing: missing}, nil
+		}
+	}
+
+	for _, w := range wants {
+		if w.dir == "" {
+			d.logger.Printf("Convoy: %s beads store unavailable: no beads directory", w.name)
+			missing = append(missing, w.name)
 			continue
 		}
-		store, err := beads.OpenStoreFromConfig(d.ctx, beadsDir)
-		if err != nil {
-			d.logger.Printf("Convoy: %s beads store unavailable: %s", rigName, util.FirstLine(err.Error()))
-			missing = append(missing, rigName)
+		if _, err := os.Stat(w.dir); err != nil {
+			d.logger.Printf("Convoy: %s beads store unavailable: %s", w.name, util.FirstLine(err.Error()))
+			missing = append(missing, w.name)
 			continue
 		}
-		stores[rigName] = store
+		stores[w.name] = beads.NewPinned(w.dir, beads.WithBin(d.bdPathOrDefault()))
 	}
 
 	if len(stores) == 0 {

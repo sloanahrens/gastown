@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/convoy"
 	"github.com/steveyegge/gastown/internal/dispatch"
@@ -80,7 +79,7 @@ func convoyTestTown(t *testing.T, routes string) string {
 }
 
 // newFakeGtManager is NewConvoyManager with its gt calls answered by gt.
-func newFakeGtManager(townRoot string, logger func(format string, args ...interface{}), gt *fakeCLI, scanInterval time.Duration, stores map[string]beadsdk.Storage, openStores func() storeOpenResult, isRigParked func(string) bool) *ConvoyManager {
+func newFakeGtManager(townRoot string, logger func(format string, args ...interface{}), gt *fakeCLI, scanInterval time.Duration, stores map[string]convoy.Store, openStores func() storeOpenResult, isRigParked func(string) bool) *ConvoyManager {
 	m := NewConvoyManager(townRoot, logger, nil, scanInterval, stores, openStores, isRigParked)
 	m.slingFn = slingSeamThrough(gt)
 	answerScanThrough(m, gt)
@@ -217,15 +216,12 @@ func TestEventPoll_DetectsCloseEvents(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	now := time.Now().UTC()
-	issue := &beadsdk.Issue{
-		ID:        "gt-close1",
-		Title:     "To Close",
-		Status:    beadsdk.StatusOpen,
-		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+	issue := &beads.Issue{
+		ID:       "gt-close1",
+		Title:    "To Close",
+		Status:   string(beads.StatusOpen),
+		Priority: 2,
+		Type:     "task",
 	}
 	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
 		t.Fatalf("CreateIssue: %v", err)
@@ -240,7 +236,7 @@ func TestEventPoll_DetectsCloseEvents(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(townRoot, logger, nil, 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m := NewConvoyManager(townRoot, logger, nil, 10*time.Minute, map[string]convoy.Store{"hq": store}, nil, nil)
 	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
@@ -500,7 +496,7 @@ func TestRetryMissingStores_EmptyResultDoesNotConfirmPartialSet(t *testing.T) {
 	}
 
 	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, nil, time.Hour,
-		map[string]beadsdk.Storage{"gastown": &closeTrackingStorage{}}, opener, nil)
+		map[string]convoy.Store{"gastown": &stubStore{}}, opener, nil)
 
 	m.retryMissingStores(time.Now())
 	if m.storeRecovery.confirmed {
@@ -520,17 +516,16 @@ func TestRetryMissingStores_EmptyResultDoesNotConfirmPartialSet(t *testing.T) {
 func TestRetryMissingStores_CompletesPartialStoreSet(t *testing.T) {
 	t.Parallel()
 
-	held := &closeTrackingStorage{}
-	reopened := &closeTrackingStorage{}
-	duplicate := &closeTrackingStorage{}
+	held := &stubStore{}
+	reopened := &stubStore{}
 
 	calls := 0
 	opener := func() storeOpenResult {
 		calls++
 		// The retry re-opens every store it knows about, including ones already
 		// held. Dolt is up now, so hq opens where the startup walk lost it.
-		return storeOpenResult{Stores: map[string]beadsdk.Storage{
-			"gastown": duplicate,
+		return storeOpenResult{Stores: map[string]convoy.Store{
+			"gastown": &stubStore{},
 			"hq":      reopened,
 		}}
 	}
@@ -546,7 +541,7 @@ func TestRetryMissingStores_CompletesPartialStoreSet(t *testing.T) {
 	// The daemon hands over a map that is missing hq: Dolt restarted between the
 	// walk's first store and its last, and hq is walked first (gt-i36h).
 	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute,
-		map[string]beadsdk.Storage{"gastown": held}, opener, nil)
+		map[string]convoy.Store{"gastown": held}, opener, nil)
 
 	m.retryMissingStores(time.Now())
 
@@ -555,9 +550,6 @@ func TestRetryMissingStores_CompletesPartialStoreSet(t *testing.T) {
 	}
 	if m.stores["gastown"] != held {
 		t.Error("a live handle must not be replaced by a retry")
-	}
-	if !duplicate.closed {
-		t.Error("the duplicate handle for a store already held must be closed, not leaked")
 	}
 	if !m.storeRecovery.confirmed {
 		t.Errorf("a non-empty store set with nothing missing should confirm complete; logs: %v", logged)
@@ -574,7 +566,7 @@ func TestRetryMissingStores_CompletesPartialStoreSet(t *testing.T) {
 func TestRetryMissingStores_BacksOffEscalatesAndClears(t *testing.T) {
 	t.Parallel()
 
-	reopened := &closeTrackingStorage{}
+	reopened := &stubStore{}
 	missing := true
 	calls := 0
 	opener := func() storeOpenResult {
@@ -583,7 +575,7 @@ func TestRetryMissingStores_BacksOffEscalatesAndClears(t *testing.T) {
 			// hq is the store that matters; om is a rig store riding along.
 			return storeOpenResult{Missing: []string{"hq", "om"}}
 		}
-		return storeOpenResult{Stores: map[string]beadsdk.Storage{"hq": reopened}}
+		return storeOpenResult{Stores: map[string]convoy.Store{"hq": reopened}}
 	}
 
 	type firing struct{ key, source, msg string }
@@ -591,7 +583,7 @@ func TestRetryMissingStores_BacksOffEscalatesAndClears(t *testing.T) {
 	var cleared []string
 
 	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, nil, time.Hour,
-		map[string]beadsdk.Storage{"gastown": &closeTrackingStorage{}}, opener, nil)
+		map[string]convoy.Store{"gastown": &stubStore{}}, opener, nil)
 	m.SetAlertHooks(
 		func(key, source, msg string) { raised = append(raised, firing{key, source, msg}) },
 		func(reason string, keys ...string) error { cleared = append(cleared, keys...); return nil },
@@ -655,16 +647,16 @@ func TestRetryMissingStores_RigStoreMissingDoesNotEscalate(t *testing.T) {
 	t.Parallel()
 
 	var raised []string
-	store := &closeTrackingStorage{}
+	store := &stubStore{}
 	opener := func() storeOpenResult {
 		return storeOpenResult{
-			Stores:  map[string]beadsdk.Storage{"hq": store},
+			Stores:  map[string]convoy.Store{"hq": store},
 			Missing: []string{"om"},
 		}
 	}
 
 	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, nil, time.Hour,
-		map[string]beadsdk.Storage{"gastown": &closeTrackingStorage{}}, opener, nil)
+		map[string]convoy.Store{"gastown": &stubStore{}}, opener, nil)
 	m.SetAlertHooks(
 		func(key, source, msg string) { raised = append(raised, key) },
 		func(reason string, keys ...string) error { return nil },
@@ -715,7 +707,7 @@ func TestStoreOpenBackoff(t *testing.T) {
 func TestStoreOpenerNeeded(t *testing.T) {
 	t.Parallel()
 
-	stub := func() beadsdk.Storage { return &closeTrackingStorage{} }
+	stub := func() convoy.Store { return &stubStore{} }
 	cases := []struct {
 		name string
 		res  storeOpenResult
@@ -724,15 +716,15 @@ func TestStoreOpenerNeeded(t *testing.T) {
 		{"nothing opened", storeOpenResult{Missing: []string{"hq", "gastown"}}, true},
 		{"opened nothing, reported nothing", storeOpenResult{}, true},
 		{"partial: hq lost mid-walk", storeOpenResult{
-			Stores:  map[string]beadsdk.Storage{"gastown": stub(), "om": stub()},
+			Stores:  map[string]convoy.Store{"gastown": stub(), "om": stub()},
 			Missing: []string{"hq"},
 		}, true},
 		{"partial: a rig store lost", storeOpenResult{
-			Stores:  map[string]beadsdk.Storage{"hq": stub()},
+			Stores:  map[string]convoy.Store{"hq": stub()},
 			Missing: []string{"om"},
 		}, true},
 		{"complete", storeOpenResult{
-			Stores: map[string]beadsdk.Storage{"hq": stub(), "gastown": stub()},
+			Stores: map[string]convoy.Store{"hq": stub(), "gastown": stub()},
 		}, false},
 	}
 	for _, tc := range cases {
@@ -759,7 +751,7 @@ func TestLogMissingRequiredStore_IsRateLimited(t *testing.T) {
 	}
 
 	m := NewConvoyManager(t.TempDir(), logger, nil, time.Hour,
-		map[string]beadsdk.Storage{"gastown": &closeTrackingStorage{}}, nil, nil)
+		map[string]convoy.Store{"gastown": &stubStore{}}, nil, nil)
 	m.storeRecovery.missing = []string{"hq"}
 
 	for i := 0; i < 50; i++ {
@@ -799,11 +791,11 @@ func TestLogMissingRequiredStore_IsRateLimited(t *testing.T) {
 func TestConvoyManager_DoesNotWriteThroughCallerStoreMap(t *testing.T) {
 	t.Parallel()
 
-	startup := map[string]beadsdk.Storage{"gastown": &closeTrackingStorage{}}
-	reopened := &closeTrackingStorage{}
+	startup := map[string]convoy.Store{"gastown": &stubStore{}}
+	reopened := &stubStore{}
 	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, nil, time.Hour, startup,
 		func() storeOpenResult {
-			return storeOpenResult{Stores: map[string]beadsdk.Storage{"hq": reopened}}
+			return storeOpenResult{Stores: map[string]convoy.Store{"hq": reopened}}
 		}, nil)
 
 	m.retryMissingStores(time.Now())
@@ -828,10 +820,10 @@ func TestConvoyManager_DoesNotWriteThroughCallerStoreMap(t *testing.T) {
 	townRoot := t.TempDir()
 	noop := func(string, ...interface{}) {}
 	opener := func() storeOpenResult {
-		return storeOpenResult{Stores: map[string]beadsdk.Storage{"hq": &closeTrackingStorage{}}}
+		return storeOpenResult{Stores: map[string]convoy.Store{"hq": &stubStore{}}}
 	}
 	for i := 0; i < 200; i++ {
-		caller := map[string]beadsdk.Storage{"gastown": &closeTrackingStorage{}}
+		caller := map[string]convoy.Store{"gastown": &stubStore{}}
 		m := NewConvoyManager(townRoot, noop, nil, time.Hour, caller, opener, nil)
 		adopted := make(chan struct{})
 		go func() {
@@ -844,21 +836,10 @@ func TestConvoyManager_DoesNotWriteThroughCallerStoreMap(t *testing.T) {
 	}
 }
 
-// closeTrackingStorage is a Storage stub that records Close, for tests that
-// only care which handles the manager keeps and which it releases. The embedded
-// interface panics on anything else, which is what a test wants if the code
-// under test starts reading from it.
-type closeTrackingStorage struct {
-	beadsdk.Storage
-	closed bool
-	closes int
-}
-
-func (s *closeTrackingStorage) Close() error {
-	s.closed = true
-	s.closes++
-	return nil
-}
+// stubStore is a store handle for tests that only care which handles the
+// manager keeps: the embedded interface panics on any call, which is what a
+// test wants if the code under test starts reading from it.
+type stubStore struct{ convoy.Store }
 
 func TestConvoyManager_ScanInterval_Configurable(t *testing.T) {
 	t.Parallel()
@@ -1164,7 +1145,7 @@ func TestPollEvents_JournalReadError(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, map[string]convoy.Store{"hq": store}, nil, nil)
 	if !m.pollStoresSnapshot(m.stores) {
 		t.Error("a failed journal read did not report an error")
 	}
@@ -1201,7 +1182,7 @@ func TestPollEvents_TruncatedJournalResumesAtFloor(t *testing.T) {
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
-	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, map[string]convoy.Store{"hq": store}, nil, nil)
 	startCursorsAtZero(m)
 	m.eventCursors.Store("hq", int64(2))
 	if m.pollStoresSnapshot(m.stores) {
@@ -1244,7 +1225,7 @@ func TestPollEvents_PagesThroughJournal(t *testing.T) {
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
-	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, map[string]convoy.Store{"hq": store}, nil, nil)
 	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 	closes := 0
@@ -1274,7 +1255,7 @@ func TestPollEvents_WarmupAndUpdateOnClosedIssue(t *testing.T) {
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
-	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, map[string]convoy.Store{"hq": store}, nil, nil)
 	m.pollStoresSnapshot(m.stores)
 	for _, s := range logged {
 		if strings.Contains(s, "close detected") {
@@ -1327,7 +1308,7 @@ func TestPollEvents_FailedFirstReadStillWarmsUp(t *testing.T) {
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
-	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, map[string]beadsdk.Storage{"hq": hq, "gastown": rig}, nil, nil)
+	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, map[string]convoy.Store{"hq": hq, "gastown": rig}, nil, nil)
 	m.pollStoresSnapshot(m.stores)
 	if _, ok := m.eventCursors.Load("gastown"); ok {
 		t.Fatal("a failed first read recorded a cursor")
@@ -1358,7 +1339,7 @@ func TestPollEvents_TruncationWithoutProgressSkipsToHead(t *testing.T) {
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
-	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, map[string]convoy.Store{"hq": store}, nil, nil)
 	m.eventCursors.Store("hq", int64(3))
 	store.truncateOnce = true
 	if m.pollStoresSnapshot(m.stores) {
@@ -1383,7 +1364,7 @@ func TestPollEvents_TruncationDuringWarmupRecordsNoEarlyCursor(t *testing.T) {
 	store.truncateOnce = true
 	store.failAfterTruncate = errors.New("bd events tail: store_unavailable")
 
-	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, nil, 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, nil, 10*time.Minute, map[string]convoy.Store{"hq": store}, nil, nil)
 	m.pollStoresSnapshot(m.stores)
 	if v, ok := m.eventCursors.Load("hq"); ok {
 		t.Errorf("warm-up cut short recorded cursor %v", v)
@@ -1393,8 +1374,7 @@ func TestPollEvents_TruncationDuringWarmupRecordsNoEarlyCursor(t *testing.T) {
 func mustCreateClosed(t *testing.T, store *memStore, id string) {
 	t.Helper()
 	ctx := context.Background()
-	now := time.Now().UTC()
-	if err := store.CreateIssue(ctx, &beadsdk.Issue{ID: id, Title: id, Status: beadsdk.StatusOpen, Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now}, "test"); err != nil {
+	if err := store.CreateIssue(ctx, &beads.Issue{ID: id, Title: id, Status: string(beads.StatusOpen), Priority: 2, Type: "task"}, "test"); err != nil {
 		t.Fatalf("CreateIssue(%s): %v", id, err)
 	}
 	if err := store.CloseIssue(ctx, id, "done", "test", ""); err != nil {
@@ -1713,28 +1693,23 @@ func TestFeedFirstReady_RejectionMarker_FeedsAsRework(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	now := time.Now().UTC()
-	rejected := &beadsdk.Issue{
-		ID:        "gt-rejected1",
-		Title:     "Previously rejected",
-		Status:    beadsdk.StatusOpen,
-		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		Notes:     "MERGE REJECTION (attempt 1): needs work - see review\nBranch: polecat/x/gt-rejected1+abc",
-		CreatedAt: now,
-		UpdatedAt: now,
+	rejected := &beads.Issue{
+		ID:       "gt-rejected1",
+		Title:    "Previously rejected",
+		Status:   string(beads.StatusOpen),
+		Priority: 2,
+		Type:     "task",
+		Notes:    "MERGE REJECTION (attempt 1): needs work - see review\nBranch: polecat/x/gt-rejected1+abc",
 	}
 	if err := store.CreateIssue(ctx, rejected, "test"); err != nil {
 		t.Fatalf("CreateIssue rejected: %v", err)
 	}
-	fresh := &beadsdk.Issue{
-		ID:        "gt-fresh2",
-		Title:     "Never touched",
-		Status:    beadsdk.StatusOpen,
-		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+	fresh := &beads.Issue{
+		ID:       "gt-fresh2",
+		Title:    "Never touched",
+		Status:   string(beads.StatusOpen),
+		Priority: 2,
+		Type:     "task",
 	}
 	if err := store.CreateIssue(ctx, fresh, "test"); err != nil {
 		t.Fatalf("CreateIssue fresh: %v", err)
@@ -1749,7 +1724,7 @@ func TestFeedFirstReady_RejectionMarker_FeedsAsRework(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, map[string]convoy.Store{"gt": store}, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) {
 		return []string{"polecat/x/gt-rejected1+abc"}, nil
 	}
@@ -1790,7 +1765,7 @@ func TestFeedFirstReady_NoStoreForRig_FailsOpen(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, map[string]beadsdk.Storage{}, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, map[string]convoy.Store{}, nil, nil)
 
 	c := strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -1820,7 +1795,7 @@ func TestFeedHold_Verdicts(t *testing.T) {
 	t.Parallel()
 
 	store := &holdTestStorage{
-		issues: map[string]*beadsdk.Issue{
+		issues: map[string]*beads.Issue{
 			"gt-clean":    {Notes: "nothing to see here"},
 			"gt-rejected": {Notes: "MERGE REJECTION (attempt 1): see review"},
 		},
@@ -1828,7 +1803,7 @@ func TestFeedHold_Verdicts(t *testing.T) {
 	errStore := &holdTestStorage{readErr: fmt.Errorf("dolt: connection refused")}
 
 	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, nil, 10*time.Minute,
-		map[string]beadsdk.Storage{"gt": store, "broken": errStore}, nil, nil)
+		map[string]convoy.Store{"gt": store, "broken": errStore}, nil, nil)
 
 	if _, ok := m.feedHold("missing-rig", "gt-clean"); ok {
 		t.Errorf("no store for rig: want ok=false")
@@ -1850,9 +1825,9 @@ func TestFeedHold_Verdicts(t *testing.T) {
 func TestFeedFirstReady_RejectionMarker_HermeticStore(t *testing.T) {
 	t.Parallel()
 
-	store := &holdTestStorage{issues: map[string]*beadsdk.Issue{
-		"gt-rejected1": {Status: beadsdk.StatusOpen, Notes: "MERGE REJECTION (attempt 1): needs work - see review"},
-		"gt-fresh2":    {Status: beadsdk.StatusOpen},
+	store := &holdTestStorage{issues: map[string]*beads.Issue{
+		"gt-rejected1": {Status: string(beads.StatusOpen), Notes: "MERGE REJECTION (attempt 1): needs work - see review"},
+		"gt-fresh2":    {Status: string(beads.StatusOpen)},
 	}}
 	townRoot, gtf := holdTestTown(t)
 
@@ -1860,7 +1835,7 @@ func TestFeedFirstReady_RejectionMarker_HermeticStore(t *testing.T) {
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
-	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, map[string]convoy.Store{"gt": store}, nil, nil)
 
 	m.feedFirstReady(strandedConvoyInfo{
 		ID:          "hq-cv1",
@@ -1892,7 +1867,7 @@ func TestFeedFirstReady_UnreadableRecord_FailsClosedAtHoldGate(t *testing.T) {
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
-	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, map[string]convoy.Store{"gt": store}, nil, nil)
 
 	m.feedFirstReady(strandedConvoyInfo{ID: "hq-cv-u", ReadyCount: 1, ReadyIssues: []string{"gt-unreadable"}})
 
@@ -2112,15 +2087,15 @@ func TestScanStranded_MixedReadyAndEmpty(t *testing.T) {
 	}
 }
 
-// --- P0: Stop() closes lazily-opened stores ---
+// --- P0: Stop() releases the store map ---
 
-func TestStop_ClosesLazilyOpenedStores(t *testing.T) {
+func TestStop_ClearsLazilyOpenedStores(t *testing.T) {
 	t.Parallel()
 	store, cleanup := newMemStore(t)
-	defer cleanup() // safety net; Stop() should close first
+	defer cleanup()
 
 	opener := func() storeOpenResult {
-		return storeOpenResult{Stores: map[string]beadsdk.Storage{"hq": store}}
+		return storeOpenResult{Stores: map[string]convoy.Store{"hq": store}}
 	}
 
 	var logged []string
@@ -2138,63 +2113,35 @@ func TestStop_ClosesLazilyOpenedStores(t *testing.T) {
 
 	m.Stop()
 
-	// Verify Close was called via the log message Stop() emits
-	found := false
+	// bd runs as a subprocess, so the stores hold no connection to release:
+	// Stop just drops the map.
 	for _, s := range logged {
-		if strings.Contains(s, "closed beads store") && strings.Contains(s, "hq") {
-			found = true
-			break
+		if strings.Contains(s, "closed beads store") {
+			t.Errorf("Stop should not report closing a bd-backed store: %v", s)
 		}
 	}
-	if !found {
-		t.Errorf("expected 'closed beads store (hq)' in logs after Stop(), got: %v", logged)
-	}
-
-	// Verify stores map is nil after Stop
 	if m.stores != nil {
 		t.Error("stores should be nil after Stop()")
 	}
 }
 
-func TestStop_ClosesMultipleStores(t *testing.T) {
+func TestStop_ClearsStoreMap(t *testing.T) {
 	t.Parallel()
 	hqStore, hqCleanup := newMemStore(t)
 	defer hqCleanup()
 	rigStore, rigCleanup := newMemStore(t)
 	defer rigCleanup()
 
-	var logged []string
-	logger := func(format string, args ...interface{}) {
-		logged = append(logged, fmt.Sprintf(format, args...))
-	}
-
-	stores := map[string]beadsdk.Storage{
+	stores := map[string]convoy.Store{
 		"hq":      hqStore,
 		"gastown": rigStore,
 	}
 
-	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute, stores, nil, nil)
+	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, nil, 10*time.Minute, stores, nil, nil)
 	m.Stop()
 
-	// Both stores should have been closed
-	closedHq := false
-	closedRig := false
-	for _, s := range logged {
-		if strings.Contains(s, "closed beads store") && strings.Contains(s, "hq") {
-			closedHq = true
-		}
-		if strings.Contains(s, "closed beads store") && strings.Contains(s, "gastown") {
-			closedRig = true
-		}
-	}
-	if !closedHq {
-		t.Errorf("expected hq store closed in logs, got: %v", logged)
-	}
-	if !closedRig {
-		t.Errorf("expected gastown store closed in logs, got: %v", logged)
-	}
 	if m.stores != nil {
-		t.Error("stores should be nil after Stop()")
+		t.Errorf("stores = %v after Stop(), want nil", m.stores)
 	}
 }
 
@@ -2208,18 +2155,15 @@ func TestPollAllStores_MultiRig_DetectsCloseFromNonHqStore(t *testing.T) {
 	defer rigCleanup()
 
 	ctx := context.Background()
-	now := time.Now().UTC()
 
 	// Create and close an issue in the rig store (NOT hq).
 	// This is the core multi-rig scenario: events originate from per-rig stores.
-	issue := &beadsdk.Issue{
-		ID:        "sh-rig1",
-		Title:     "Rig Issue",
-		Status:    beadsdk.StatusOpen,
-		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+	issue := &beads.Issue{
+		ID:       "sh-rig1",
+		Title:    "Rig Issue",
+		Status:   string(beads.StatusOpen),
+		Priority: 2,
+		Type:     "task",
 	}
 	if err := rigStore.CreateIssue(ctx, issue, "test"); err != nil {
 		t.Fatalf("CreateIssue in rig store: %v", err)
@@ -2235,7 +2179,7 @@ func TestPollAllStores_MultiRig_DetectsCloseFromNonHqStore(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	stores := map[string]beadsdk.Storage{
+	stores := map[string]convoy.Store{
 		"hq":         hqStore,
 		"shippercrm": rigStore,
 	}
@@ -2265,12 +2209,11 @@ func TestPollAllStores_MultiRig_BothStoresPolled(t *testing.T) {
 	defer rigCleanup()
 
 	ctx := context.Background()
-	now := time.Now().UTC()
 
 	// Close event in hq store
-	hqIssue := &beadsdk.Issue{
-		ID: "hq-task1", Title: "HQ Task", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	hqIssue := &beads.Issue{
+		ID: "hq-task1", Title: "HQ Task", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task",
 	}
 	if err := hqStore.CreateIssue(ctx, hqIssue, "test"); err != nil {
 		t.Fatalf("CreateIssue hq: %v", err)
@@ -2280,9 +2223,9 @@ func TestPollAllStores_MultiRig_BothStoresPolled(t *testing.T) {
 	}
 
 	// Close event in rig store
-	rigIssue := &beadsdk.Issue{
-		ID: "gt-task1", Title: "Rig Task", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	rigIssue := &beads.Issue{
+		ID: "gt-task1", Title: "Rig Task", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task",
 	}
 	if err := rigStore.CreateIssue(ctx, rigIssue, "test"); err != nil {
 		t.Fatalf("CreateIssue rig: %v", err)
@@ -2296,7 +2239,7 @@ func TestPollAllStores_MultiRig_BothStoresPolled(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	stores := map[string]beadsdk.Storage{
+	stores := map[string]convoy.Store{
 		"hq":      hqStore,
 		"gastown": rigStore,
 	}
@@ -2336,7 +2279,6 @@ func TestPollAllStores_SkipsParkedRigs(t *testing.T) {
 	defer parkedCleanup()
 
 	ctx := context.Background()
-	now := time.Now().UTC()
 
 	// Use unique IDs to avoid cross-test contamination from shared Dolt server
 	activeID := fmt.Sprintf("gt-active-park-%d", time.Now().UnixNano())
@@ -2344,15 +2286,15 @@ func TestPollAllStores_SkipsParkedRigs(t *testing.T) {
 
 	// Close events in both rig stores
 	for _, tc := range []struct {
-		store beadsdk.Storage
+		store *memStore
 		id    string
 	}{
 		{activeStore, activeID},
 		{parkedStore, parkedID},
 	} {
-		issue := &beadsdk.Issue{
-			ID: tc.id, Title: tc.id, Status: beadsdk.StatusOpen,
-			Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+		issue := &beads.Issue{
+			ID: tc.id, Title: tc.id, Status: string(beads.StatusOpen),
+			Priority: 2, Type: "task",
 		}
 		if err := tc.store.CreateIssue(ctx, issue, "test"); err != nil {
 			t.Fatalf("CreateIssue %s: %v", tc.id, err)
@@ -2367,7 +2309,7 @@ func TestPollAllStores_SkipsParkedRigs(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	stores := map[string]beadsdk.Storage{
+	stores := map[string]convoy.Store{
 		"hq":         hqStore,
 		"gastown":    activeStore,
 		"shippercrm": parkedStore,
@@ -2412,10 +2354,9 @@ func TestPollAllStores_HqNeverSkippedEvenIfParkedCallbackReturnsTrue(t *testing.
 	defer cleanup()
 
 	ctx := context.Background()
-	now := time.Now().UTC()
-	issue := &beadsdk.Issue{
-		ID: "hq-always1", Title: "HQ Always Polled", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	issue := &beads.Issue{
+		ID: "hq-always1", Title: "HQ Always Polled", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task",
 	}
 	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
 		t.Fatalf("CreateIssue: %v", err)
@@ -2434,7 +2375,7 @@ func TestPollAllStores_HqNeverSkippedEvenIfParkedCallbackReturnsTrue(t *testing.
 	alwaysParked := func(string) bool { return true }
 
 	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute,
-		map[string]beadsdk.Storage{"hq": store}, nil, alwaysParked)
+		map[string]convoy.Store{"hq": store}, nil, alwaysParked)
 	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
@@ -2458,12 +2399,11 @@ func TestPollAllStores_HighWaterMark_NoReprocessing(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	now := time.Now().UTC()
 	// Use unique ID to avoid cross-test contamination from shared Dolt server
 	issueID := fmt.Sprintf("gt-hw-%d", time.Now().UnixNano())
-	issue := &beadsdk.Issue{
-		ID: issueID, Title: "High Water Test", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	issue := &beads.Issue{
+		ID: issueID, Title: "High Water Test", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task",
 	}
 	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
 		t.Fatalf("CreateIssue: %v", err)
@@ -2478,7 +2418,7 @@ func TestPollAllStores_HighWaterMark_NoReprocessing(t *testing.T) {
 	}
 
 	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute,
-		map[string]beadsdk.Storage{"hq": store}, nil, nil)
+		map[string]convoy.Store{"hq": store}, nil, nil)
 
 	// First poll: should detect our close event
 	startCursorsAtZero(m)
@@ -2507,17 +2447,14 @@ func TestPollAllStores_HighWaterMark_NoReprocessing(t *testing.T) {
 
 func TestPollAllStores_ReopenClearsCloseDedupAcrossPolls(t *testing.T) {
 	t.Parallel()
-	store, cleanup := newMemStore(t)
-	defer cleanup()
 	clk := newFixedClock()
-	store.now = clk.Now
+	store := newMemStoreAt(clk)
 
 	ctx := context.Background()
-	now := time.Now().UTC()
 	issueID := fmt.Sprintf("gt-reclose-%d", time.Now().UnixNano())
-	issue := &beadsdk.Issue{
-		ID: issueID, Title: "Reclose Test", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	issue := &beads.Issue{
+		ID: issueID, Title: "Reclose Test", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task",
 	}
 	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
 		t.Fatalf("CreateIssue: %v", err)
@@ -2532,7 +2469,7 @@ func TestPollAllStores_ReopenClearsCloseDedupAcrossPolls(t *testing.T) {
 	}
 
 	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute,
-		map[string]beadsdk.Storage{"hq": store}, nil, nil)
+		map[string]convoy.Store{"hq": store}, nil, nil)
 	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
@@ -2547,7 +2484,7 @@ func TestPollAllStores_ReopenClearsCloseDedupAcrossPolls(t *testing.T) {
 	}
 
 	clk.Advance(10 * time.Millisecond)
-	if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{"status": beadsdk.StatusOpen}, "test"); err != nil {
+	if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{"status": string(beads.StatusOpen)}, "test"); err != nil {
 		t.Fatalf("ReopenIssue via UpdateIssue: %v", err)
 	}
 
@@ -2584,17 +2521,14 @@ func TestPollAllStores_ReopenClearsCloseDedupAcrossPolls(t *testing.T) {
 
 func TestPollAllStores_ReopenResetsPerCycleDedup(t *testing.T) {
 	t.Parallel()
-	store, cleanup := newMemStore(t)
-	defer cleanup()
 	clk := newFixedClock()
-	store.now = clk.Now
+	store := newMemStoreAt(clk)
 
 	ctx := context.Background()
-	now := time.Now().UTC()
 	issueID := fmt.Sprintf("gt-reclose-same-poll-%d", time.Now().UnixNano())
-	issue := &beadsdk.Issue{
-		ID: issueID, Title: "Reclose Same Poll Test", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	issue := &beads.Issue{
+		ID: issueID, Title: "Reclose Same Poll Test", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task",
 	}
 	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
 		t.Fatalf("CreateIssue: %v", err)
@@ -2607,7 +2541,7 @@ func TestPollAllStores_ReopenResetsPerCycleDedup(t *testing.T) {
 	// Space the lifecycle transitions across distinct seconds so the store's
 	// created_at ordering is deterministic within this single poll.
 	clk.Advance(1100 * time.Millisecond)
-	if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{"status": beadsdk.StatusOpen}, "test"); err != nil {
+	if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{"status": string(beads.StatusOpen)}, "test"); err != nil {
 		t.Fatalf("ReopenIssue via UpdateIssue: %v", err)
 	}
 
@@ -2622,7 +2556,7 @@ func TestPollAllStores_ReopenResetsPerCycleDedup(t *testing.T) {
 	}
 
 	m := NewConvoyManager(t.TempDir(), logger, nil, 10*time.Minute,
-		map[string]beadsdk.Storage{"hq": store}, nil, nil)
+		map[string]convoy.Store{"hq": store}, nil, nil)
 	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
@@ -2647,14 +2581,13 @@ func TestPollAllStores_CrossStoreDedup(t *testing.T) {
 	defer rigCleanup()
 
 	ctx := context.Background()
-	now := time.Now().UTC()
 	issueID := fmt.Sprintf("gt-dedup-%d", time.Now().UnixNano())
 
 	// Create and close the same issue in BOTH stores (simulating replication)
-	for _, store := range []beadsdk.Storage{hqStore, rigStore} {
-		issue := &beadsdk.Issue{
-			ID: issueID, Title: "Dedup Test", Status: beadsdk.StatusOpen,
-			Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	for _, store := range []*memStore{hqStore, rigStore} {
+		issue := &beads.Issue{
+			ID: issueID, Title: "Dedup Test", Status: string(beads.StatusOpen),
+			Priority: 2, Type: "task",
 		}
 		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
 			t.Fatalf("CreateIssue: %v", err)
@@ -2669,7 +2602,7 @@ func TestPollAllStores_CrossStoreDedup(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	stores := map[string]beadsdk.Storage{
+	stores := map[string]convoy.Store{
 		"hq":      hqStore,
 		"gastown": rigStore,
 	}
@@ -2697,12 +2630,11 @@ func TestPollAllStores_PerStoreHighWaterMarks(t *testing.T) {
 	defer rigCleanup()
 
 	ctx := context.Background()
-	now := time.Now().UTC()
 
 	// Close event only in hq initially
-	hqIssue := &beadsdk.Issue{
-		ID: "hq-hw1", Title: "HQ HW", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	hqIssue := &beads.Issue{
+		ID: "hq-hw1", Title: "HQ HW", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task",
 	}
 	if err := hqStore.CreateIssue(ctx, hqIssue, "test"); err != nil {
 		t.Fatalf("CreateIssue hq: %v", err)
@@ -2716,7 +2648,7 @@ func TestPollAllStores_PerStoreHighWaterMarks(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	stores := map[string]beadsdk.Storage{
+	stores := map[string]convoy.Store{
 		"hq":      hqStore,
 		"gastown": rigStore,
 	}
@@ -2727,9 +2659,9 @@ func TestPollAllStores_PerStoreHighWaterMarks(t *testing.T) {
 	m.pollStoresSnapshot(m.stores)
 
 	// Now add a close event to gastown AFTER the first poll
-	rigIssue := &beadsdk.Issue{
-		ID: "gt-hw2", Title: "Rig HW", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	rigIssue := &beads.Issue{
+		ID: "gt-hw2", Title: "Rig HW", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task",
 	}
 	if err := rigStore.CreateIssue(ctx, rigIssue, "test"); err != nil {
 		t.Fatalf("CreateIssue rig: %v", err)
@@ -2766,16 +2698,13 @@ func TestEventPoll_SkipsNonCloseEvents_NegativeAssertion(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	now := time.Now().UTC()
 	issueID := "gt-open2"
-	issue := &beadsdk.Issue{
-		ID:        issueID,
-		Title:     "Stays Open",
-		Status:    beadsdk.StatusOpen,
-		Priority:  2,
-		IssueType: beadsdk.TypeTask,
-		CreatedAt: now,
-		UpdatedAt: now,
+	issue := &beads.Issue{
+		ID:       issueID,
+		Title:    "Stays Open",
+		Status:   string(beads.StatusOpen),
+		Priority: 2,
+		Type:     "task",
 	}
 	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
 		t.Fatalf("CreateIssue: %v", err)
@@ -2790,7 +2719,7 @@ func TestEventPoll_SkipsNonCloseEvents_NegativeAssertion(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, map[string]beadsdk.Storage{"hq": store}, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, map[string]convoy.Store{"hq": store}, nil, nil)
 	startCursorsAtZero(m)
 	m.pollStoresSnapshot(m.stores)
 
@@ -2814,10 +2743,9 @@ func TestPollStore_NilHqStore_LogsWarningAndSkips(t *testing.T) {
 	defer rigCleanup()
 
 	ctx := context.Background()
-	now := time.Now().UTC()
-	issue := &beadsdk.Issue{
-		ID: "gt-nohq1", Title: "No HQ Store", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	issue := &beads.Issue{
+		ID: "gt-nohq1", Title: "No HQ Store", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task",
 	}
 	if err := rigStore.CreateIssue(ctx, issue, "test"); err != nil {
 		t.Fatalf("CreateIssue: %v", err)
@@ -2832,7 +2760,7 @@ func TestPollStore_NilHqStore_LogsWarningAndSkips(t *testing.T) {
 	}
 
 	// stores map has a rig but no "hq" key
-	stores := map[string]beadsdk.Storage{
+	stores := map[string]convoy.Store{
 		"gastown": rigStore,
 	}
 
@@ -3248,18 +3176,16 @@ func TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	now := time.Now().UTC()
-	held := &beadsdk.Issue{
-		ID: "gt-issue1", Title: "Held by dead session", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, Assignee: "gt/polecats/basalt",
-		CreatedAt: now, UpdatedAt: now,
+	held := &beads.Issue{
+		ID: "gt-issue1", Title: "Held by dead session", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task", Assignee: "gt/polecats/basalt",
 	}
 	if err := store.CreateIssue(ctx, held, "test"); err != nil {
 		t.Fatalf("CreateIssue held: %v", err)
 	}
-	fresh := &beadsdk.Issue{
-		ID: "gt-fresh2", Title: "Never touched", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	fresh := &beads.Issue{
+		ID: "gt-fresh2", Title: "Never touched", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task",
 	}
 	if err := store.CreateIssue(ctx, fresh, "test"); err != nil {
 		t.Fatalf("CreateIssue fresh: %v", err)
@@ -3278,7 +3204,7 @@ func TestResolveDeadHolderWork_UnpushedCommits_PreservesAndSkips(t *testing.T) {
 	var escalated []string
 	m := newFakeGtManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
-	}, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	}, gtf, 10*time.Minute, map[string]convoy.Store{"gt": store}, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 	m.openGitFn = deadHolderOpener(t, f)
 	m.SetAlertHooks(func(key, source, message string) {
@@ -3316,18 +3242,16 @@ func TestResolveDeadHolderWork_UncommittedChanges_EscalatesAndSkips(t *testing.T
 	defer cleanup()
 
 	ctx := context.Background()
-	now := time.Now().UTC()
-	held := &beadsdk.Issue{
-		ID: "gt-issue2", Title: "Held by dead session, dirty tree", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, Assignee: "gt/polecats/basalt",
-		CreatedAt: now, UpdatedAt: now,
+	held := &beads.Issue{
+		ID: "gt-issue2", Title: "Held by dead session, dirty tree", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task", Assignee: "gt/polecats/basalt",
 	}
 	if err := store.CreateIssue(ctx, held, "test"); err != nil {
 		t.Fatalf("CreateIssue held: %v", err)
 	}
-	fresh := &beadsdk.Issue{
-		ID: "gt-fresh2", Title: "Never touched", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	fresh := &beads.Issue{
+		ID: "gt-fresh2", Title: "Never touched", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task",
 	}
 	if err := store.CreateIssue(ctx, fresh, "test"); err != nil {
 		t.Fatalf("CreateIssue fresh: %v", err)
@@ -3344,7 +3268,7 @@ func TestResolveDeadHolderWork_UncommittedChanges_EscalatesAndSkips(t *testing.T
 	var escalated []string
 	m := newFakeGtManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
-	}, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	}, gtf, 10*time.Minute, map[string]convoy.Store{"gt": store}, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 	m.openGitFn = deadHolderOpener(t, f)
 	m.SetAlertHooks(func(key, source, message string) {
@@ -3377,18 +3301,16 @@ func TestResolveDeadHolderWork_UnreadableOriginState_EscalatesAndSkips(t *testin
 	defer cleanup()
 
 	ctx := context.Background()
-	now := time.Now().UTC()
-	held := &beadsdk.Issue{
-		ID: "gt-issue3", Title: "Held by dead session, remote unreadable", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, Assignee: "gt/polecats/basalt",
-		CreatedAt: now, UpdatedAt: now,
+	held := &beads.Issue{
+		ID: "gt-issue3", Title: "Held by dead session, remote unreadable", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task", Assignee: "gt/polecats/basalt",
 	}
 	if err := store.CreateIssue(ctx, held, "test"); err != nil {
 		t.Fatalf("CreateIssue held: %v", err)
 	}
-	fresh := &beadsdk.Issue{
-		ID: "gt-fresh2", Title: "Never touched", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	fresh := &beads.Issue{
+		ID: "gt-fresh2", Title: "Never touched", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task",
 	}
 	if err := store.CreateIssue(ctx, fresh, "test"); err != nil {
 		t.Fatalf("CreateIssue fresh: %v", err)
@@ -3399,7 +3321,7 @@ func TestResolveDeadHolderWork_UnreadableOriginState_EscalatesAndSkips(t *testin
 	var escalated []string
 	m := newFakeGtManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
-	}, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	}, gtf, 10*time.Minute, map[string]convoy.Store{"gt": store}, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) {
 		return nil, fmt.Errorf("remote unreachable")
 	}
@@ -3433,18 +3355,16 @@ func TestResolveDeadHolderWork_SurvivingOriginBranch_SkipsWithoutEscalation(t *t
 	defer cleanup()
 
 	ctx := context.Background()
-	now := time.Now().UTC()
-	held := &beadsdk.Issue{
-		ID: "gt-issue4", Title: "Held by dead session, already on origin", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, Assignee: "gt/polecats/basalt",
-		CreatedAt: now, UpdatedAt: now,
+	held := &beads.Issue{
+		ID: "gt-issue4", Title: "Held by dead session, already on origin", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task", Assignee: "gt/polecats/basalt",
 	}
 	if err := store.CreateIssue(ctx, held, "test"); err != nil {
 		t.Fatalf("CreateIssue held: %v", err)
 	}
-	fresh := &beadsdk.Issue{
-		ID: "gt-fresh2", Title: "Never touched", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	fresh := &beads.Issue{
+		ID: "gt-fresh2", Title: "Never touched", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task",
 	}
 	if err := store.CreateIssue(ctx, fresh, "test"); err != nil {
 		t.Fatalf("CreateIssue fresh: %v", err)
@@ -3456,7 +3376,7 @@ func TestResolveDeadHolderWork_SurvivingOriginBranch_SkipsWithoutEscalation(t *t
 	var escalated []string
 	m := newFakeGtManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
-	}, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	}, gtf, 10*time.Minute, map[string]convoy.Store{"gt": store}, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) {
 		return []string{branch}, nil
 	}
@@ -3501,18 +3421,16 @@ func TestResolveDeadHolderWork_WorktreeStateUnreadable_EscalatesAndSkips(t *test
 	defer cleanup()
 
 	ctx := context.Background()
-	now := time.Now().UTC()
-	held := &beadsdk.Issue{
-		ID: "gt-issue5", Title: "Held by dead session, worktree unreadable", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, Assignee: "gt/polecats/basalt",
-		CreatedAt: now, UpdatedAt: now,
+	held := &beads.Issue{
+		ID: "gt-issue5", Title: "Held by dead session, worktree unreadable", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task", Assignee: "gt/polecats/basalt",
 	}
 	if err := store.CreateIssue(ctx, held, "test"); err != nil {
 		t.Fatalf("CreateIssue held: %v", err)
 	}
-	fresh := &beadsdk.Issue{
-		ID: "gt-fresh2", Title: "Never touched", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	fresh := &beads.Issue{
+		ID: "gt-fresh2", Title: "Never touched", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task",
 	}
 	if err := store.CreateIssue(ctx, fresh, "test"); err != nil {
 		t.Fatalf("CreateIssue fresh: %v", err)
@@ -3523,7 +3441,7 @@ func TestResolveDeadHolderWork_WorktreeStateUnreadable_EscalatesAndSkips(t *test
 	var escalated []string
 	m := newFakeGtManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
-	}, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	}, gtf, 10*time.Minute, map[string]convoy.Store{"gt": store}, nil, nil)
 	m.deadHolderWorktreeStateFn = func(townRoot, assignee, issueID string) (deadHolderWorktreeState, error) {
 		return deadHolderWorktreeState{}, fmt.Errorf("reading current branch: exit status 128")
 	}
@@ -3558,11 +3476,9 @@ func TestResolveDeadHolderWork_NoWorktree_FeedsWithoutEscalation(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	now := time.Now().UTC()
-	held := &beadsdk.Issue{
-		ID: "gt-issue6", Title: "Held by dead session, no worktree on disk", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, Assignee: "gt/polecats/basalt",
-		CreatedAt: now, UpdatedAt: now,
+	held := &beads.Issue{
+		ID: "gt-issue6", Title: "Held by dead session, no worktree on disk", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task", Assignee: "gt/polecats/basalt",
 	}
 	if err := store.CreateIssue(ctx, held, "test"); err != nil {
 		t.Fatalf("CreateIssue held: %v", err)
@@ -3580,7 +3496,7 @@ func TestResolveDeadHolderWork_NoWorktree_FeedsWithoutEscalation(t *testing.T) {
 	var escalated []string
 	m := newFakeGtManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
-	}, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	}, gtf, 10*time.Minute, map[string]convoy.Store{"gt": store}, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 	m.SetAlertHooks(func(key, source, message string) {
 		escalated = append(escalated, message)
@@ -3608,11 +3524,9 @@ func TestResolveDeadHolderWork_ReusedSeat_FeedsWithoutEscalation(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	now := time.Now().UTC()
-	held := &beadsdk.Issue{
-		ID: "gt-issue7", Title: "Held by dead session, seat reused since", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, Assignee: "gt/polecats/basalt",
-		CreatedAt: now, UpdatedAt: now,
+	held := &beads.Issue{
+		ID: "gt-issue7", Title: "Held by dead session, seat reused since", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task", Assignee: "gt/polecats/basalt",
 	}
 	if err := store.CreateIssue(ctx, held, "test"); err != nil {
 		t.Fatalf("CreateIssue held: %v", err)
@@ -3629,7 +3543,7 @@ func TestResolveDeadHolderWork_ReusedSeat_FeedsWithoutEscalation(t *testing.T) {
 	var escalated []string
 	m := newFakeGtManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
-	}, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	}, gtf, 10*time.Minute, map[string]convoy.Store{"gt": store}, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 	m.openGitFn = deadHolderOpener(t, f)
 	m.SetAlertHooks(func(key, source, message string) {
@@ -3658,11 +3572,9 @@ func TestResolveDeadHolderWork_RuntimeOnlyDirt_FeedsWithoutEscalation(t *testing
 	defer cleanup()
 
 	ctx := context.Background()
-	now := time.Now().UTC()
-	held := &beadsdk.Issue{
-		ID: "gt-issue8", Title: "Held by dead session, only runtime dirt", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, Assignee: "gt/polecats/basalt",
-		CreatedAt: now, UpdatedAt: now,
+	held := &beads.Issue{
+		ID: "gt-issue8", Title: "Held by dead session, only runtime dirt", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task", Assignee: "gt/polecats/basalt",
 	}
 	if err := store.CreateIssue(ctx, held, "test"); err != nil {
 		t.Fatalf("CreateIssue held: %v", err)
@@ -3682,7 +3594,7 @@ func TestResolveDeadHolderWork_RuntimeOnlyDirt_FeedsWithoutEscalation(t *testing
 	var escalated []string
 	m := newFakeGtManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
-	}, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	}, gtf, 10*time.Minute, map[string]convoy.Store{"gt": store}, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 	m.openGitFn = deadHolderOpener(t, f)
 	m.SetAlertHooks(func(key, source, message string) {
@@ -3711,18 +3623,16 @@ func TestResolveDeadHolderWork_PreservePushFails_EscalatesAndSkips(t *testing.T)
 	defer cleanup()
 
 	ctx := context.Background()
-	now := time.Now().UTC()
-	held := &beadsdk.Issue{
-		ID: "gt-issue9", Title: "Held by dead session, push fails", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, Assignee: "gt/polecats/basalt",
-		CreatedAt: now, UpdatedAt: now,
+	held := &beads.Issue{
+		ID: "gt-issue9", Title: "Held by dead session, push fails", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task", Assignee: "gt/polecats/basalt",
 	}
 	if err := store.CreateIssue(ctx, held, "test"); err != nil {
 		t.Fatalf("CreateIssue held: %v", err)
 	}
-	fresh := &beadsdk.Issue{
-		ID: "gt-fresh2", Title: "Never touched", Status: beadsdk.StatusOpen,
-		Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now,
+	fresh := &beads.Issue{
+		ID: "gt-fresh2", Title: "Never touched", Status: string(beads.StatusOpen),
+		Priority: 2, Type: "task",
 	}
 	if err := store.CreateIssue(ctx, fresh, "test"); err != nil {
 		t.Fatalf("CreateIssue fresh: %v", err)
@@ -3743,7 +3653,7 @@ func TestResolveDeadHolderWork_PreservePushFails_EscalatesAndSkips(t *testing.T)
 	var escalated []string
 	m := newFakeGtManager(townRoot, func(format string, args ...interface{}) {
 		*logged = append(*logged, fmt.Sprintf(format, args...))
-	}, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	}, gtf, 10*time.Minute, map[string]convoy.Store{"gt": store}, nil, nil)
 	m.listOriginBranchesFn = func(rigRoot string) ([]string, error) { return nil, nil }
 	m.openGitFn = deadHolderOpener(t, f)
 	m.SetAlertHooks(func(key, source, message string) {
@@ -3773,24 +3683,24 @@ func TestResolveDeadHolderWork_PreservePushFails_EscalatesAndSkips(t *testing.T)
 // scan's per-bead checks are testable without a Dolt container. The embedded
 // interface panics on anything else the code under test starts calling.
 type holdTestStorage struct {
-	beadsdk.Storage
-	issues   map[string]*beadsdk.Issue
-	comments map[string][]*beadsdk.Comment
+	convoy.Store
+	issues   map[string]*beads.Issue
+	comments map[string][]beads.Comment
 	readErr  error
 }
 
-func (s *holdTestStorage) GetIssue(_ context.Context, id string) (*beadsdk.Issue, error) {
+func (s *holdTestStorage) Show(id string) (*beads.Issue, error) {
 	if s.readErr != nil {
 		return nil, s.readErr
 	}
 	issue, ok := s.issues[id]
 	if !ok {
-		return nil, fmt.Errorf("holdTestStorage: no issue %s", id)
+		return nil, fmt.Errorf("%s: %w", id, beads.ErrNotFound)
 	}
 	return issue, nil
 }
 
-func (s *holdTestStorage) GetIssueComments(_ context.Context, id string) ([]*beadsdk.Comment, error) {
+func (s *holdTestStorage) Comments(id string) ([]beads.Comment, error) {
 	if s.readErr != nil {
 		return nil, s.readErr
 	}
@@ -3818,40 +3728,40 @@ func TestFeedFirstReady_DispatchHold_Skips(t *testing.T) {
 
 	held := []struct {
 		id         string
-		issue      *beadsdk.Issue
-		comments   []*beadsdk.Comment
+		issue      *beads.Issue
+		comments   []beads.Comment
 		wantReason string
 	}{
 		{
 			id:         "gt-holddefer",
-			issue:      &beadsdk.Issue{Status: beadsdk.StatusDeferred},
+			issue:      &beads.Issue{Status: string(beads.StatusDeferred)},
 			wantReason: "status deferred",
 		},
 		{
 			// Frozen in beads' own status model, alongside deferred.
 			id:         "gt-holdpinned",
-			issue:      &beadsdk.Issue{Status: beadsdk.Status("pinned")},
+			issue:      &beads.Issue{Status: "pinned"},
 			wantReason: "status pinned",
 		},
 		{
 			id:         "gt-holdpro",
-			issue:      &beadsdk.Issue{Status: beadsdk.StatusOpen, Labels: []string{"needs-pro"}},
+			issue:      &beads.Issue{Status: string(beads.StatusOpen), Labels: []string{"needs-pro"}},
 			wantReason: "label needs-pro",
 		},
 		{
 			id:         "gt-holdprocaps",
-			issue:      &beadsdk.Issue{Status: beadsdk.StatusOpen, Labels: []string{"NEEDS-PRO"}},
+			issue:      &beads.Issue{Status: string(beads.StatusOpen), Labels: []string{"NEEDS-PRO"}},
 			wantReason: "label NEEDS-PRO",
 		},
 		{
 			id:         "gt-holdmayor",
-			issue:      &beadsdk.Issue{Status: beadsdk.StatusOpen, Labels: []string{"bug", "needs-mayor-review"}},
+			issue:      &beads.Issue{Status: string(beads.StatusOpen), Labels: []string{"bug", "needs-mayor-review"}},
 			wantReason: "label needs-mayor-review",
 		},
 		{
 			id: "gt-holddesign",
-			issue: &beadsdk.Issue{
-				Status: beadsdk.StatusOpen,
+			issue: &beads.Issue{
+				Status: string(beads.StatusOpen),
 				Notes:  "MAYOR DESIGN DECISION: route this through the deacon, not the convoy feeder",
 			},
 			wantReason: "MAYOR DESIGN DECISION in notes",
@@ -3859,8 +3769,8 @@ func TestFeedFirstReady_DispatchHold_Skips(t *testing.T) {
 		{
 			// The decision sits on its own line, under prose that explains it.
 			id: "gt-holdnodisp",
-			issue: &beadsdk.Issue{
-				Status: beadsdk.StatusOpen,
+			issue: &beads.Issue{
+				Status: string(beads.StatusOpen),
 				Notes:  "Blocked on gt-nj23.7 landing first.\ndo not redispatch",
 			},
 			wantReason: "do not redispatch in notes",
@@ -3869,24 +3779,24 @@ func TestFeedFirstReady_DispatchHold_Skips(t *testing.T) {
 			// List and emphasis decoration are in front of the decision, not
 			// part of it.
 			id: "gt-holdbullet",
-			issue: &beadsdk.Issue{
-				Status: beadsdk.StatusOpen,
+			issue: &beads.Issue{
+				Status: string(beads.StatusOpen),
 				Notes:  "Notes:\n  - **do-not-redispatch** until the mayor rules",
 			},
 			wantReason: "do not redispatch in notes",
 		},
 		{
 			id: "gt-holdindesign",
-			issue: &beadsdk.Issue{
-				Status: beadsdk.StatusOpen,
+			issue: &beads.Issue{
+				Status: string(beads.StatusOpen),
 				Design: "MAYOR DESIGN DECISION: the deacon owns this one",
 			},
 			wantReason: "MAYOR DESIGN DECISION in design",
 		},
 		{
 			id:    "gt-holdcomment",
-			issue: &beadsdk.Issue{Status: beadsdk.StatusOpen},
-			comments: []*beadsdk.Comment{
+			issue: &beads.Issue{Status: string(beads.StatusOpen)},
+			comments: []beads.Comment{
 				{Author: "mayor", Text: "do-not-redispatch until gt-nj23.7 is merged"},
 			},
 			wantReason: "do not redispatch in comment",
@@ -3895,8 +3805,8 @@ func TestFeedFirstReady_DispatchHold_Skips(t *testing.T) {
 			// Same decision, hyphen between "re" and "dispatch": the fold has to
 			// reach both spellings.
 			id:    "gt-holdcommenthyphen",
-			issue: &beadsdk.Issue{Status: beadsdk.StatusOpen},
-			comments: []*beadsdk.Comment{
+			issue: &beads.Issue{Status: string(beads.StatusOpen)},
+			comments: []beads.Comment{
 				{Author: "mayor", Text: "Do not re-dispatch until gt-nj23.7 is merged"},
 			},
 			wantReason: "do not redispatch in comment",
@@ -3905,8 +3815,8 @@ func TestFeedFirstReady_DispatchHold_Skips(t *testing.T) {
 			// The newest decision wins: a hold written after a release holds
 			// again.
 			id:    "gt-reheld",
-			issue: &beadsdk.Issue{Status: beadsdk.StatusOpen},
-			comments: []*beadsdk.Comment{
+			issue: &beads.Issue{Status: string(beads.StatusOpen)},
+			comments: []beads.Comment{
 				{Author: "mayor", Text: "do not redispatch until gt-nj23.7 is merged"},
 				{Author: "mayor", Text: "HOLD RELEASED"},
 				{Author: "mayor", Text: "the dependency reappeared\nMAYOR DESIGN DECISION: hold it"},
@@ -3917,26 +3827,26 @@ func TestFeedFirstReady_DispatchHold_Skips(t *testing.T) {
 
 	unheld := []struct {
 		id       string
-		issue    *beadsdk.Issue
-		comments []*beadsdk.Comment
+		issue    *beads.Issue
+		comments []beads.Comment
 	}{
 		{
 			id:    "gt-plain",
-			issue: &beadsdk.Issue{Status: beadsdk.StatusOpen},
+			issue: &beads.Issue{Status: string(beads.StatusOpen)},
 		},
 		{
 			// A record that only mentions the wording is not held by it.
 			id: "gt-mentionsnotes",
-			issue: &beadsdk.Issue{
-				Status: beadsdk.StatusOpen,
+			issue: &beads.Issue{
+				Status: string(beads.StatusOpen),
 				Notes:  "This is not a MAYOR DESIGN DECISION, so the feeder may take it",
 			},
 		},
 		{
 			// Neither is a comment that quotes it back, as a review note does.
 			id:    "gt-mentionscomment",
-			issue: &beadsdk.Issue{Status: beadsdk.StatusOpen},
-			comments: []*beadsdk.Comment{
+			issue: &beads.Issue{Status: string(beads.StatusOpen)},
+			comments: []beads.Comment{
 				{Author: "garnet", Text: "The notes used to say \"do not redispatch\" — that line is gone now"},
 			},
 		},
@@ -3944,8 +3854,8 @@ func TestFeedFirstReady_DispatchHold_Skips(t *testing.T) {
 			// Comments are the one field that cannot be edited, so a comment
 			// hold needs a later comment to lift it.
 			id:    "gt-released",
-			issue: &beadsdk.Issue{Status: beadsdk.StatusOpen},
-			comments: []*beadsdk.Comment{
+			issue: &beads.Issue{Status: string(beads.StatusOpen)},
+			comments: []beads.Comment{
 				{Author: "mayor", Text: "do not redispatch until gt-nj23.7 is merged"},
 				{Author: "mayor", Text: "gt-nj23.7 merged\nHOLD RELEASED"},
 			},
@@ -3953,8 +3863,8 @@ func TestFeedFirstReady_DispatchHold_Skips(t *testing.T) {
 	}
 
 	store := &holdTestStorage{
-		issues:   map[string]*beadsdk.Issue{},
-		comments: map[string][]*beadsdk.Comment{},
+		issues:   map[string]*beads.Issue{},
+		comments: map[string][]beads.Comment{},
 	}
 	for _, h := range held {
 		h.issue.ID = h.id
@@ -3976,7 +3886,7 @@ func TestFeedFirstReady_DispatchHold_Skips(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 
-	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, map[string]convoy.Store{"gt": store}, nil, nil)
 
 	// One bead per convoy, so each case is decided on its own record: a convoy
 	// holding several would stop at its first dispatchable member.
@@ -4034,7 +3944,7 @@ func TestFeedFirstReady_DispatchHold_UnreadableRecordFailsClosed(t *testing.T) {
 	logger := func(format string, args ...interface{}) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
-	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, map[string]beadsdk.Storage{"gt": store}, nil, nil)
+	m := newFakeGtManager(townRoot, logger, gtf, 10*time.Minute, map[string]convoy.Store{"gt": store}, nil, nil)
 
 	m.feedFirstReady(strandedConvoyInfo{
 		ID:          "hq-cv-unreadable",
@@ -4056,7 +3966,7 @@ func TestResolveDeadHolderWork_ClearRunsOncePerAlertKey(t *testing.T) {
 	t.Parallel()
 
 	m := NewConvoyManager(t.TempDir(), func(string, ...interface{}) {}, nil, time.Hour,
-		map[string]beadsdk.Storage{}, nil, nil)
+		map[string]convoy.Store{}, nil, nil)
 	m.listOriginBranchesFn = func(string) ([]string, error) { return nil, nil }
 
 	var stateErr error
@@ -4183,13 +4093,10 @@ func TestPollEvents_RigCloseFindsConvoyTrackingItExternally(t *testing.T) {
 	defer rigCleanup()
 
 	ctx := context.Background()
-	now := time.Now().UTC()
-	if err := hq.CreateIssue(ctx, &beadsdk.Issue{ID: "hq-cv-ext", Title: "convoy", Status: beadsdk.StatusOpen, Priority: 2, IssueType: beadsdk.TypeTask, CreatedAt: now, UpdatedAt: now}, "test"); err != nil {
+	if err := hq.CreateIssue(ctx, &beads.Issue{ID: "hq-cv-ext", Title: "convoy", Status: string(beads.StatusOpen), Priority: 2, Type: "task"}, "test"); err != nil {
 		t.Fatalf("CreateIssue: %v", err)
 	}
-	if err := hq.AddDependency(ctx, &beadsdk.Dependency{IssueID: "hq-cv-ext", DependsOnID: "external:gt:gt-ext1", Type: "tracks", CreatedAt: now, CreatedBy: "test"}, "test"); err != nil {
-		t.Fatalf("AddDependency: %v", err)
-	}
+	hq.addRawDep("hq-cv-ext", "external:gt:gt-ext1", "tracks")
 	mustCreateClosed(t, rig, "gt-ext1")
 
 	var logged []string
@@ -4197,7 +4104,7 @@ func TestPollEvents_RigCloseFindsConvoyTrackingItExternally(t *testing.T) {
 		logged = append(logged, fmt.Sprintf(format, args...))
 	}
 	var checked []string
-	m := NewConvoyManager(townRoot, logger, nil, 10*time.Minute, map[string]beadsdk.Storage{"hq": hq, "gastown": rig}, nil, nil)
+	m := NewConvoyManager(townRoot, logger, nil, 10*time.Minute, map[string]convoy.Store{"hq": hq, "gastown": rig}, nil, nil)
 	m.checkConvoyFn = func(_ context.Context, convoyID string) error {
 		checked = append(checked, convoyID)
 		return nil
