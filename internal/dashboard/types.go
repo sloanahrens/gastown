@@ -96,6 +96,60 @@ type GatePoint struct {
 	Text string    `json:"text"`
 }
 
+// OMWindow is the om review's numbers over one span of time.
+type OMWindow struct {
+	Label      string   `json:"label"`
+	Landed     int      `json:"landed"`
+	Approved   int      `json:"approved"`
+	Skipped    int      `json:"skipped"` // landed without a review (an operator route)
+	Errors     int      `json:"errors"`  // review did not run or failed
+	Rejected   int      `json:"rejected"`
+	AvgScore   *float64 `json:"avg_score,omitempty"`
+	MedianSecs *float64 `json:"median_secs,omitempty"`
+	P95Secs    *float64 `json:"p95_secs,omitempty"`
+}
+
+// OMDay is one local day of landings and rejections.
+type OMDay struct {
+	Day      string   `json:"day"`
+	Approved int      `json:"approved"`
+	Skipped  int      `json:"skipped"`
+	Errors   int      `json:"errors"`
+	Rejected int      `json:"rejected"`
+	AvgSecs  *float64 `json:"avg_secs,omitempty"`
+}
+
+// OMReview is one landing or rejection the review loop decided.
+type OMReview struct {
+	At      time.Time `json:"at"`
+	Bead    string    `json:"bead"`
+	Rig     string    `json:"rig,omitempty"`
+	Outcome string    `json:"outcome"`        // approved, skipped, error, rejected
+	Kind    string    `json:"kind,omitempty"` // for a rejection: review, gate, conflict, policy, empty
+	Score   *float64  `json:"score,omitempty"`
+	Secs    *float64  `json:"secs,omitempty"` // om's own wall time
+	Route   string    `json:"route,omitempty"`
+	Gate    string    `json:"gate,omitempty"`
+	Risk    bool      `json:"risk,omitempty"`
+	Detail  string    `json:"detail,omitempty"`
+}
+
+// OM is the reviewer's record, read from the landings files and the daemon log.
+type OM struct {
+	Backend   string         `json:"backend,omitempty"`
+	Depth     string         `json:"depth,omitempty"`
+	Threshold *float64       `json:"threshold,omitempty"`
+	TimeoutS  int            `json:"timeout_s,omitempty"`
+	Since     time.Time      `json:"since"`
+	Windows   []OMWindow     `json:"windows"`
+	Days      []OMDay        `json:"days"`
+	Scores    [10]int        `json:"scores"` // decile counts: approvals and review rejections
+	Rejects   map[string]int `json:"rejects"`
+	Routes    map[string]int `json:"routes"`
+	RiskPaths int            `json:"risk_paths"` // landings that touched risk paths
+	Recent    []OMReview     `json:"recent"`
+}
+
 // State is everything the page draws apart from the feed.
 type State struct {
 	Now       time.Time       `json:"now"`
@@ -108,6 +162,7 @@ type State struct {
 	Loads     []LoadPoint     `json:"loads"`
 	Gates     []GatePoint     `json:"gates"`
 	Spend     json.RawMessage `json:"spend,omitempty"`
+	OM        *OM             `json:"om,omitempty"`
 }
 
 // Config wires the hub to its readers. Every reader is optional; a nil reader
@@ -124,6 +179,8 @@ type Config struct {
 	Machine func() (Machine, error)
 	// Spend returns the DeepSeek spend report as JSON, nil when unavailable.
 	Spend func() json.RawMessage
+	// OM reads the reviewer's record from disk.
+	OM func() *OM
 	// Title names a bead for the seats table; "" when unknown.
 	Title func(id string) string
 
@@ -134,6 +191,7 @@ type Config struct {
 	HealthEvery  time.Duration
 	MachineEvery time.Duration
 	SpendEvery   time.Duration
+	OMEvery      time.Duration
 
 	RingSize int // feed entries kept for a page that connects late
 }
@@ -152,6 +210,7 @@ func (c *Config) defaults() {
 	def(&c.HealthEvery, 5*time.Second)
 	def(&c.MachineEvery, 10*time.Second)
 	def(&c.SpendEvery, 5*time.Minute)
+	def(&c.OMEvery, 60*time.Second)
 	if c.RingSize <= 0 {
 		c.RingSize = 500
 	}

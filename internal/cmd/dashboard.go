@@ -150,12 +150,14 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		}
 		return out
 	}
+	om := newOMReader(townRoot)
 	return dashboard.NewHub(dashboard.Config{
 		Feed:    feed,
 		Summary: func() dashboard.Summary { return dashboardSummary(townRoot, deploys) },
 		Health:  func() dashboard.Health { return dashboardHealth(townRoot) },
 		Machine: dashboard.SampleMachine,
 		Spend:   dashboardSpend(resolveSpendCmd(spendCmd)),
+		OM:      func() *dashboard.OM { return om.read(time.Now()) },
 		Title:   func(id string) string { return beadReads.title("", id) },
 	}), nil
 }

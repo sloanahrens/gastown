@@ -29,8 +29,8 @@ h1{font-size:15px;margin:0;letter-spacing:.08em;text-transform:uppercase;color:v
 @media (max-width:1000px){.grid{grid-template-columns:1fr}}
 .col{display:flex;flex-direction:column;gap:12px;min-width:0}
 section{background:var(--panel);border:1px solid var(--line);border-radius:8px;min-width:0}
-section>h2{margin:0;padding:9px 12px;border-bottom:1px solid var(--line);font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--dim);display:flex;gap:10px;align-items:center}
-section>h2 .r{margin-left:auto;text-transform:none;letter-spacing:0}
+section>h2{white-space:nowrap;margin:0;padding:9px 12px;border-bottom:1px solid var(--line);font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--dim);display:flex;gap:10px;align-items:center}
+section>h2 .r{margin-left:auto;text-transform:none;letter-spacing:0;white-space:normal;text-align:right}
 .body{padding:10px 12px}
 table{border-collapse:collapse;width:100%}
 th{color:var(--dim);font-weight:400;text-align:left;font-size:11px;padding:3px 8px 3px 0}
@@ -51,6 +51,16 @@ td.n,th.n{text-align:right}
 .row .x{overflow-wrap:anywhere}
 .c-failure .x{color:var(--red)}.c-warning .x{color:var(--amber)}.c-success .x{color:var(--green)}
 .c-landing .x{color:var(--violet)}.c-dispatch .x{color:var(--blue)}.c-restart .x{color:var(--teal)}.c-plain .x{color:var(--dim)}
+.bars{display:flex;align-items:flex-end;gap:3px;height:54px;margin:4px 0 2px;position:relative}
+.bars i{flex:1;background:var(--blue);min-height:1px;border-radius:2px 2px 0 0;position:relative}
+.bars i.low{background:var(--red)}
+.bars .thr{position:absolute;top:0;bottom:0;width:0;border-left:1px dashed var(--amber)}
+.axis{display:flex;justify-content:space-between;color:var(--dim);font-size:10px}
+.stack{display:flex;height:9px;border-radius:2px;overflow:hidden;background:var(--line);min-width:90px}
+.stack i{display:block;height:100%}
+.sa{background:var(--green)}.ss{background:var(--dim)}.se{background:var(--amber)}.sr{background:var(--red)}
+.tag{display:inline-block;padding:0 6px;border-radius:4px;font-size:11px;border:1px solid var(--line);margin-right:4px}
+.o-approved{color:var(--green)}.o-skipped{color:var(--dim)}.o-error{color:var(--amber)}.o-rejected{color:var(--red)}
 .good{color:var(--green)}.warnc{color:var(--amber)}.badc{color:var(--red)}
 </style>
 </head>
@@ -71,6 +81,7 @@ td.n,th.n{text-align:right}
     <section><h2>DeepSeek <span class="r" id="spendnote"></span></h2><div class="body" id="spend"></div></section>
   </div>
   <div class="col">
+    <section><h2>om review <span class="r" id="omnote"></span></h2><div class="body" id="om"></div></section>
     <section>
       <h2>Feed <span class="chips" id="chips"></span></h2>
       <div id="feed"></div>
@@ -232,7 +243,98 @@ function renderSpend(s) {
   $("spendnote").textContent = d.last_sample ? "ledger " + d.last_sample.replace("T", " ") : "";
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderSeats(state); renderMachine(state); renderSpend(state); }
+function sec(v) { return v == null ? "–" : fmtDur(v); }
+function renderOM(s) {
+  const box = $("om");
+  box.replaceChildren();
+  const om = s.om;
+  if (!om) { box.append(el("div", "empty", "reading the landings and the daemon log…")); $("omnote").textContent = ""; return; }
+  $("omnote").textContent = [om.backend, om.depth, om.threshold != null ? "threshold " + om.threshold : null, om.timeout_s ? om.timeout_s + "s timeout" : null].filter(Boolean).join(" · ");
+
+  const t = el("table");
+  const hr = el("tr");
+  ["", "Landed", "Approved", "No review", "Errors", "Rejected", "Avg score", "om median", "om p95"].forEach((x, i) => hr.append(el("th", i ? "n" : "", x)));
+  t.append(hr);
+  for (const w of om.windows || []) {
+    const tr = el("tr");
+    tr.append(el("td", "", w.label));
+    const rej = w.rejected, err = w.errors;
+    [w.landed, w.approved, w.skipped, err, rej].forEach((v, i) => tr.append(el("td", "n" + (i === 3 && v ? " warnc" : "") + (i === 4 && v ? " badc" : ""), String(v))));
+    tr.append(el("td", "n", w.avg_score == null ? "–" : w.avg_score.toFixed(2)), el("td", "n", sec(w.median_secs)), el("td", "n" + (w.p95_secs > 240 ? " warnc" : ""), sec(w.p95_secs)));
+    t.append(tr);
+  }
+  box.append(t);
+
+  // score histogram: approvals and review rejections by decile; red below the threshold
+  const scores = om.scores || [];
+  const max = Math.max(1, ...scores);
+  const bars = el("div", "bars");
+  scores.forEach((n, i) => {
+    const b = el("i", om.threshold != null && (i + 1) / 10 <= om.threshold ? "low" : "");
+    b.style.height = (n / max * 100) + "%";
+    b.title = (i / 10).toFixed(1) + "–" + ((i + 1) / 10).toFixed(1) + ": " + n;
+    bars.append(b);
+  });
+  if (om.threshold != null) { const th = el("div", "thr"); th.style.left = (om.threshold * 100) + "%"; bars.append(th); }
+  const kd = el("div", "k title", "score distribution (approvals + review rejections)");
+  const axis = el("div", "axis"); ["0.0", "0.5", "1.0"].forEach(x => axis.append(el("span", "", x)));
+  box.append(kd, bars, axis);
+
+  const meta = el("div", "", "");
+  meta.style.margin = "8px 0";
+  const rj = Object.entries(om.rejects || {}).sort((a, b) => b[1] - a[1]);
+  meta.append(el("span", "title", "rejected: "));
+  if (!rj.length) meta.append(el("span", "", "none"));
+  rj.forEach(([k, n]) => meta.append(el("span", "tag", k + " " + n)));
+  const rt = Object.entries(om.routes || {}).sort((a, b) => b[1] - a[1]);
+  meta.append(document.createElement("br"), el("span", "title", "routes: "));
+  rt.forEach(([k, n]) => meta.append(el("span", "tag", k + " " + n)));
+  if (om.risk_paths) meta.append(document.createElement("br"), el("span", "title", "touched risk paths: "), el("span", "warnc", om.risk_paths + " landings"));
+  box.append(meta);
+
+  const days = om.days || [];
+  if (days.length) {
+    const dt = el("table");
+    const dh = el("tr");
+    ["Day", "", "om avg"].forEach((x, i) => dh.append(el("th", i === 2 ? "n" : "", x)));
+    dt.append(dh);
+    const dmax = Math.max(1, ...days.map(d => d.approved + d.skipped + d.errors + d.rejected));
+    for (const d of days) {
+      const tr = el("tr");
+      tr.append(el("td", "", d.day));
+      const td = el("td"); const st = el("div", "stack"); st.style.width = ((d.approved + d.skipped + d.errors + d.rejected) / dmax * 100) + "%";
+      [["sa", d.approved], ["ss", d.skipped], ["se", d.errors], ["sr", d.rejected]].forEach(([c, n]) => { if (n) { const i = el("i", c); i.style.flex = n; i.title = c + " " + n; st.append(i); } });
+      td.append(st); tr.append(td);
+      const lbl = d.approved + " ok" + (d.skipped ? " · " + d.skipped + " manual" : "") + (d.errors ? " · " + d.errors + " err" : "") + (d.rejected ? " · " + d.rejected + " rej" : "");
+      td.append(el("div", "title", lbl));
+      tr.append(el("td", "n", sec(d.avg_secs)));
+      dt.append(tr);
+    }
+    box.append(el("div", "k title", "by day"), dt);
+  }
+
+  const rec = om.recent || [];
+  if (rec.length) {
+    const rt2 = el("table");
+    const rh = el("tr");
+    ["When", "Bead", "Outcome", "Score", "om"].forEach((x, i) => rh.append(el("th", i > 2 ? "n" : "", x)));
+    rt2.append(rh);
+    for (const r of rec) {
+      const tr = el("tr");
+      tr.append(el("td", "", clock(r.at)));
+      const b = el("td"); b.append(el("span", "bead", r.bead));
+      if (r.risk) b.append(el("span", "warnc", " ⚑"));
+      if (r.detail) { b.append(document.createElement("br")); b.append(el("span", "title", r.detail)); }
+      tr.append(b);
+      tr.append(el("td", "o-" + r.outcome, r.outcome === "rejected" ? "rejected (" + r.kind + ")" : r.outcome + (r.route && r.route !== "daemon" ? " · " + r.route : "")));
+      tr.append(el("td", "n" + (r.score != null && om.threshold != null && r.score < om.threshold ? " badc" : ""), r.score == null ? "–" : r.score.toFixed(2)), el("td", "n", sec(r.secs)));
+      rt2.append(tr);
+    }
+    box.append(el("div", "k title", "recent"), rt2);
+  }
+}
+
+function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderSeats(state); renderMachine(state); renderSpend(state); renderOM(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));

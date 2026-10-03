@@ -77,6 +77,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.Spend != nil {
 		start(h.cfg.SpendEvery, h.pollSpend)
 	}
+	if h.cfg.OM != nil {
+		start(h.cfg.OMEvery, h.pollOM)
+	}
 	wg.Wait()
 }
 
@@ -126,7 +129,7 @@ func (h *Hub) Subscribe() (*Sub, [][]byte) {
 	h.mu.Unlock()
 	// Wake every worker; a non-blocking send per worker is enough because
 	// each one re-checks its own age.
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 8; i++ {
 		select {
 		case h.wake <- struct{}{}:
 		default:
@@ -212,6 +215,17 @@ func (h *Hub) pollMachine() {
 	if n := len(h.state.Loads); n > loadHistory {
 		h.state.Loads = append([]LoadPoint(nil), h.state.Loads[n-loadHistory:]...)
 	}
+	h.publishLocked()
+}
+
+func (h *Hub) pollOM() {
+	om := h.cfg.OM()
+	if om == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.state.OM = om
 	h.publishLocked()
 }
 
