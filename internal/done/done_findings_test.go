@@ -36,9 +36,12 @@ func TestResolveDoneAgentIdentityKeepsSeededPolecatWhenDetectionIsUnnamed(t *tes
 	}
 }
 
-// assignedLister is an issueLister returning a fixed set for the hooked status
-// and nothing otherwise.
-type assignedLister struct{ issues []*beads.Issue }
+// assignedLister is a Client returning a fixed set for the hooked status and
+// nothing otherwise.
+type assignedLister struct {
+	beads.Client
+	issues []*beads.Issue
+}
 
 func (l assignedLister) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 	if opts.Status == beads.StatusHooked {
@@ -64,7 +67,7 @@ func TestFindAssignedBeadsForAgentFindsAssignmentOnlyInTownBeads(t *testing.T) {
 	}
 
 	const agent = "gastown/polecats/refuge"
-	open := func(dir string) issueLister {
+	open := func(dir string) beads.Client {
 		if filepath.Clean(dir) == filepath.Clean(townBeadsDir) {
 			return assignedLister{issues: []*beads.Issue{{ID: "gt-town-only", Assignee: agent, Status: beads.StatusHooked}}}
 		}

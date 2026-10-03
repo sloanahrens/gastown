@@ -1,6 +1,7 @@
 package done
 
 import (
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/role"
 	"github.com/steveyegge/gastown/internal/session"
 )
@@ -14,18 +15,28 @@ func doneTestRegistry() *session.PrefixRegistry {
 	return registry
 }
 
-// doneFakeCleanupUpdater records the cleanup_status self-report.
+// doneFakeCleanupUpdater records the cleanup_status self-report: one agent
+// bead whose write beads.UpdateAgentCleanupStatus performs.
 type doneFakeCleanupUpdater struct {
+	beads.Client
 	calls  int
 	id     string
 	status string
 	err    error
 }
 
-func (f *doneFakeCleanupUpdater) UpdateAgentCleanupStatus(id, status string) error {
+// Show returns the agent bead the read-modify-write reads.
+func (f *doneFakeCleanupUpdater) Show(id string) (*beads.Issue, error) {
+	return &beads.Issue{ID: id, Title: "Polecat worker", Labels: []string{"gt:agent"}}, nil
+}
+
+// Update records the description write and the cleanup_status it set.
+func (f *doneFakeCleanupUpdater) Update(id string, opts beads.UpdateOptions) error {
 	f.calls++
 	f.id = id
-	f.status = status
+	if opts.Description != nil {
+		f.status = beads.ParseAgentFields(*opts.Description).CleanupStatus
+	}
 	return f.err
 }
 

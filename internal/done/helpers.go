@@ -20,13 +20,6 @@ func requireRealCurrentBranch(branch, command string) error {
 	return fmt.Errorf("cannot determine current branch: worktree is in detached HEAD state — check out your work branch before running %s", command)
 }
 
-// cleanupStatusUpdater is the agent-bead write selfReportCleanupStatus makes.
-// It is declared here as well as in internal/cmd, which has its own caller: a
-// consumer declares the interface it needs, and *beads.Beads satisfies both.
-type cleanupStatusUpdater interface {
-	UpdateAgentCleanupStatus(agentBeadID, status string) error
-}
-
 // extractFormulaVar extracts a specific key's value from a newline-separated
 // key=value string (as stored in AttachmentFields.FormulaVars).
 // Returns "" if the key is not found.
