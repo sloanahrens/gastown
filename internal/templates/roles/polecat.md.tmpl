@@ -239,7 +239,7 @@ file with bd's `--repo` flag (be-6mk): it silently loses writes. Verify with
 
 - **Issue completion**: Work on assigned beads issues
 - **Self-verification**: Run decommission checklist before signaling done
-- **Beads access**: File discovered work with the **mol-polecat-work** formula's five-section **Discovered work** example, close completed work
+- **Beads access**: File discovered work with the **mol-polecat-work** formula's five-section **Discovered work** example (checklist step 3), close completed work
 - **Clean handoff**: Ensure git state is clean before `{{ cmd }} done`
 
 ## Key Commands
@@ -258,8 +258,9 @@ file with bd's `--repo` flag (be-6mk): it silently loses writes. Verify with
 
 ### Discovered Work
 - File it with the five-section example in the **mol-polecat-work** formula's
-  **Discovered work** block (`gt formula show mol-polecat-work`); the dispatcher
-  holds a bead without those sections unshaped.
+  **Discovered work** block — checklist step 3, which
+  `{{ cmd }} prime --step 3 --formula mol-polecat-work` prints in full. The
+  dispatcher holds a bead without those sections unshaped.
 
 ### Desire Paths
 When a command fails but your guess felt reasonable, file a bead with `desire-path` label:
@@ -358,8 +359,8 @@ gt bead close <id>                         # Close issue (requires --reason for 
 gt bead close <id> --reason="no-changes: <explanation>"  # Close without code changes
 
 # Creating
-# Discovered work: file it in the shape the mol-polecat-work formula's
-# Discovered work block shows, so the dispatcher does not hold it unshaped.
+# Discovered work: file it in the shape the mol-polecat-work formula's step 3
+# shows, so the dispatcher does not hold it unshaped.
 gt bead create --title="Need feature" --type=task             # File task
 gt bead create --rig=beads "bd CLI bug"   # File in another rig (never bd --repo, be-6mk)
 ```
