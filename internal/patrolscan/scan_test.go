@@ -681,6 +681,33 @@ func TestReopenLosesTheRaceOnTheAssigneeGuard(t *testing.T) {
 	}
 }
 
+// TestResumeBranchFromNotes pins the reader the spec dispatcher uses
+// (gt-gzhin.3): the last line wins, and anything that is not the line is not
+// a branch.
+func TestResumeBranchFromNotes(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		notes string
+		want  string
+	}{
+		{"none", "a note\nanother note", ""},
+		{"empty", "", ""},
+		{"one", "lead in\n" + ResumeBranchNote("polecat/a/gt-1+mu1") + "\ntrailing", "polecat/a/gt-1+mu1"},
+		{"last wins", ResumeBranchNote("polecat/a/gt-1+mu1") + "\n" + ResumeBranchNote("polecat/b/gt-1+mu2"), "polecat/b/gt-1+mu2"},
+		{"blank branch ignored", ResumeBranchNote("polecat/a/gt-1+mu1") + "\n" + ResumeBranchKey, "polecat/a/gt-1+mu1"},
+		{"not a line prefix", "see resume_branch: polecat/a/gt-1+mu1", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ResumeBranchFromNotes(tc.notes); got != tc.want {
+				t.Errorf("ResumeBranchFromNotes(%q) = %q, want %q", tc.notes, got, tc.want)
+			}
+		})
+	}
+}
+
 // A retry after a failed release does not append the line twice: the notes
 // now carry it.
 func TestResumeBranchLineIsNotRecordedTwice(t *testing.T) {

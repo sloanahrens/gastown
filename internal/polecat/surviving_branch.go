@@ -61,6 +61,37 @@ func listOriginPolecatBranches(gits gitOpener, rigRoot string) ([]string, error)
 	return names, nil
 }
 
+// BranchOnOrigin reports whether branch is present on the rig's "origin"
+// remote. An error means the remote could not be queried (or the rig has no
+// repo), which callers must not read as the branch being gone.
+func BranchOnOrigin(rigRoot, branch string) (bool, error) {
+	return branchOnOrigin(gitOpener{}, rigRoot, branch)
+}
+
+func branchOnOrigin(gits gitOpener, rigRoot, branch string) (bool, error) {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return false, nil
+	}
+	root := rigGitRepo(rigRoot)
+	if root == "" {
+		return false, ErrNoRigRepo
+	}
+	// The listing globs the prefix, so an exact compare is what separates
+	// refs/heads/x from refs/heads/x-suffix.
+	refs, err := openRigRepo(gits, root).ListRemoteRefsWithHashes("origin", "refs/heads/"+branch)
+	if err != nil {
+		return false, err
+	}
+	want := "refs/heads/" + branch
+	for _, r := range refs {
+		if r.Name == want {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // FindSurvivingBranchesForIssue returns the generated polecat branches still
 // present on the rig's origin remote that encode issueID, most recently
 // generated first. Returns an empty slice (not an error) when the rig has no
