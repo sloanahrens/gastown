@@ -790,8 +790,9 @@ func (w *Worker) clearIntent(work land.Work) {
 }
 
 // sortByLandingOrder orders the ready queue the way the worker lands it:
-// highest priority first, then the bead submitted for landing earliest, then
-// ID. Priority leads because a P1 fix pays for every bead landed ahead of it.
+// highest priority first, then the bead submitted for landing earliest (by
+// land.SubmittedAt, the clock the alarms read too), then ID. Priority leads
+// because a P1 fix pays for every bead landed ahead of it.
 func sortByLandingOrder(issues []*beads.Issue) {
 	sort.SliceStable(issues, func(i, j int) bool {
 		a, b := issues[i], issues[j]
@@ -801,27 +802,12 @@ func sortByLandingOrder(issues []*beads.Issue) {
 		if a.Priority != b.Priority {
 			return a.Priority < b.Priority
 		}
-		as, bs := submittedAt(a), submittedAt(b)
+		as, bs := land.SubmittedAt(a), land.SubmittedAt(b)
 		if !as.Equal(bs) {
 			return as.Before(bs)
 		}
 		return a.ID < b.ID
 	})
-}
-
-// submittedAt is when issue was submitted for landing: the READY TO LAND
-// block's time, which gt done stamps and no comment moves. A bead submitted
-// before the block carried one falls back to its last update, the only
-// ordering it ever had (gt-t2jhf).
-func submittedAt(issue *beads.Issue) time.Time {
-	if w, ok := land.ParseReadyNote(issue.Notes); ok && !w.Submitted.IsZero() {
-		return w.Submitted
-	}
-	at, err := time.Parse(time.RFC3339, issue.UpdatedAt)
-	if err != nil {
-		return time.Time{}
-	}
-	return at
 }
 
 func short(sha string) string {

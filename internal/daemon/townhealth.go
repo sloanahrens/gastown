@@ -222,55 +222,91 @@ func (s *healthSources) Landings(ctx context.Context, since time.Time) ([]townhe
 			out = append(out, rl)
 			continue
 		}
-		rl.Last, rl.Landed, rl.Err = s.landingHistory(rig, since)
+		rl.Landed, rl.Err = s.landingCount(rig, since)
 		if rl.Err == nil {
-			rl.Pending, rl.Err = s.countOpen(rig, land.LabelReadyToLand, nil)
+			rl.Pending, rl.Oldest, rl.OldestBead, rl.Err = s.pendingLandings(rig)
 		}
 		out = append(out, rl)
 	}
 	return out, nil
 }
 
-// landingHistory reads a rig's landings file: the newest landing and how
-// many landed at or after since.
-func (s *healthSources) landingHistory(rig string, since time.Time) (time.Time, int, error) {
+// landingCount reads a rig's landings file and counts how many landed at or
+// after since.
+func (s *healthSources) landingCount(rig string, since time.Time) (int, error) {
 	path, err := landings.Path(s.townRoot(), rig)
 	if err != nil {
-		return time.Time{}, 0, err
+		return 0, err
 	}
 	recs, _, err := (&landings.Reader{Path: path}).ReadNew()
 	if err != nil {
-		return time.Time{}, 0, err
+		return 0, err
 	}
-	var last time.Time
 	n := 0
 	for _, r := range recs {
-		if r.LandedAt.After(last) {
-			last = r.LandedAt
-		}
 		if !r.LandedAt.Before(since) {
 			n++
 		}
 	}
-	return last, n, nil
+	return n, nil
+}
+
+// pendingLandings counts rig's actionable ready-to-land beads and finds the
+// oldest submission among them by land.SubmittedAt, the same clock the ready
+// queue orders by: the READY TO LAND block's own time, else the bead's last
+// update (gt-m36as). A bead whose time cannot be read is counted but never
+// named, so an unreadable stamp cannot move the age or the bead the health
+// field reports.
+func (s *healthSources) pendingLandings(rig string) (int, time.Time, string, error) {
+	issues, err := s.actionableBeads(rig, land.LabelReadyToLand)
+	if err != nil {
+		return 0, time.Time{}, "", err
+	}
+	n := 0
+	var oldest time.Time
+	var bead string
+	for _, is := range issues {
+		n++
+		t := land.SubmittedAt(is)
+		if t.IsZero() {
+			continue
+		}
+		if oldest.IsZero() || t.Before(oldest) {
+			oldest, bead = t, is.ID
+		}
+	}
+	return n, oldest, bead, nil
+}
+
+// actionableBeads lists rig's beads carrying label that are still actionable.
+//
+// Actionable is beads.IsActionable, not non-closed: a deferred bead is parked
+// by the operator, so counting it holds a field at a constant and hides the
+// beads that do need attention (gt-tk2xd).
+func (s *healthSources) actionableBeads(rig, label string) ([]*beads.Issue, error) {
+	issues, err := s.d.workBeads(s.d.workBeadsEnv(rig), townHealthBDTimeout).List(beads.ListOptions{Label: label, Priority: -1})
+	if err != nil {
+		return nil, err
+	}
+	var out []*beads.Issue
+	for _, is := range issues {
+		if is == nil || !beads.IssueStatus(strings.TrimSpace(is.Status)).IsActionable() {
+			continue
+		}
+		out = append(out, is)
+	}
+	return out, nil
 }
 
 // countOpen counts rig's pending beads carrying label, and reports each one's
 // creation time to seen when it is set.
-//
-// Pending is beads.IsActionable, not non-closed: a deferred bead is parked by
-// the operator, so counting it holds the field at a constant and hides the
-// beads that do need attention (gt-tk2xd).
 func (s *healthSources) countOpen(rig, label string, seen func(created time.Time)) (int, error) {
-	issues, err := s.d.workBeads(s.d.workBeadsEnv(rig), townHealthBDTimeout).List(beads.ListOptions{Label: label, Priority: -1})
+	issues, err := s.actionableBeads(rig, label)
 	if err != nil {
 		return 0, err
 	}
 	n := 0
 	for _, is := range issues {
-		if is == nil || !beads.IssueStatus(strings.TrimSpace(is.Status)).IsActionable() {
-			continue
-		}
 		n++
 		if seen != nil {
 			if t, err := time.Parse(time.RFC3339, is.CreatedAt); err == nil {

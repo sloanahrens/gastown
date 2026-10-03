@@ -130,6 +130,24 @@ func finishReady(w Work) (Work, bool) {
 	return w, true
 }
 
+// SubmittedAt is when issue was submitted for landing: the READY TO LAND
+// block's time, which gt done stamps and no comment moves. A bead submitted
+// before the block carried one falls back to its last update, the only
+// ordering it ever had (gt-t2jhf). Zero when neither can be read.
+func SubmittedAt(issue *beads.Issue) time.Time {
+	if issue == nil {
+		return time.Time{}
+	}
+	if w, ok := ParseReadyNote(issue.Notes); ok && !w.Submitted.IsZero() {
+		return w.Submitted
+	}
+	at, err := time.Parse(time.RFC3339, issue.UpdatedAt)
+	if err != nil {
+		return time.Time{}
+	}
+	return at
+}
+
 // ErrNotReady means the bead does not carry a complete landing request.
 var ErrNotReady = errors.New("work bead is not ready to land")
 

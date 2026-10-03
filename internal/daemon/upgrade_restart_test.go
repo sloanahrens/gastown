@@ -597,7 +597,7 @@ func TestUpgradeDrainsLandingPassesThenRestarts(t *testing.T) {
 	}
 
 	// The pass ends: restart at once.
-	d.landingStates.endPass("gastown", time.Now(), false)
+	d.landingStates.endPass("gastown")
 	d.landingPasses.Add(-1)
 	if !d.checkUpgradeRestart(now.Add(4 * time.Minute)) {
 		t.Fatal("must restart once no pass is in flight")
