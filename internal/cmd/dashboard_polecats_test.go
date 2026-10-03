@@ -1,118 +1,85 @@
 package cmd
 
 import (
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/landings"
+	"github.com/steveyegge/gastown/internal/polecat"
 )
+
+func dashItem(state polecat.State, d polecat.WorkstateDisposition) polecatInventoryItem {
+	return polecatInventoryItem{State: state, Disposition: d}
+}
+
+func TestDashPolecatStateFollowsTheInventory(t *testing.T) {
+	t.Parallel()
+	parked := polecat.WorkstateDisposition{ReuseStatus: polecat.WorkstateReuseStatusParked}
+	recovery := polecat.WorkstateDisposition{NeedsRecovery: true, Reason: "has_unpushed"}
+	for name, c := range map[string]struct {
+		item   polecatInventoryItem
+		work   bool
+		ready  bool
+		labels []string
+		want   string
+	}{
+		"working":     {dashItem(polecat.StateWorking, polecat.WorkstateDisposition{}), true, false, nil, dashboard.StateWorking},
+		"submitted":   {dashItem(polecat.StateSubmitted, polecat.WorkstateDisposition{}), true, false, nil, dashboard.StateQueued},
+		"queue says":  {dashItem(polecat.StateWorking, polecat.WorkstateDisposition{}), true, true, nil, dashboard.StateQueued},
+		"spawning":    {dashItem(polecat.StateSpawning, polecat.WorkstateDisposition{}), true, false, nil, dashboard.StateSpawning},
+		"stalled":     {dashItem(polecat.StateStalled, polecat.WorkstateDisposition{}), true, false, nil, dashboard.StateStalled},
+		"review":      {dashItem(polecat.StateReviewNeeded, polecat.WorkstateDisposition{}), false, false, nil, dashboard.StateReviewNeeded},
+		"human":       {dashItem(polecat.StateWorking, polecat.WorkstateDisposition{}), true, true, []string{"gt:needs-human"}, dashboard.StateNeedsHuman},
+		"parked":      {dashItem(polecat.StateIdle, parked), false, false, nil, dashboard.StateParked},
+		"recovery":    {dashItem(polecat.StateIdle, recovery), false, false, nil, dashboard.StateRecovery},
+		"idle":        {dashItem(polecat.StateIdle, polecat.WorkstateDisposition{Reusable: true}), false, false, nil, dashboard.StateIdle},
+		"done":        {dashItem(polecat.StateDone, polecat.WorkstateDisposition{Reusable: true}), false, false, nil, dashboard.StateIdle},
+		"label no wk": {dashItem(polecat.StateIdle, polecat.WorkstateDisposition{}), false, false, []string{"needs-human"}, dashboard.StateIdle},
+	} {
+		got, _ := dashPolecatState(c.item, c.work, c.ready, c.labels)
+		if got != c.want {
+			t.Errorf("%s: state = %q, want %q", name, got, c.want)
+		}
+	}
+}
 
 func TestBuildDashPolecats(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 3, 18, 0, 0, 0, time.UTC)
+	cap1 := polecat.WorkstateDisposition{CountsTowardCapacity: true}
 	seats := []dashSeat{
-		{Rig: "gastown", Name: "working", Session: "gt-working", Bead: "gt-1"},
-		{Rig: "gastown", Name: "nosession", Session: "gt-nosession", Bead: "gt-2"},
-		{Rig: "gastown", Name: "queued", Session: "gt-queued", Bead: "gt-3"},
-		{Rig: "gastown", Name: "human", Session: "gt-human", Bead: "gt-4"},
-		{Rig: "gastown", Name: "dupa", Session: "gt-dupa", Bead: "gt-5"},
-		{Rig: "gastown", Name: "dupb", Session: "gt-dupb", Bead: "gt-5"},
-		{Rig: "gastown", Name: "free", Session: "gt-free"},
-		{Rig: "gastown", Name: "closedhook", Session: "gt-closedhook", Bead: "gt-6"},
-	}
-	sessions := map[string]time.Time{}
-	for _, n := range []string{"working", "queued", "human", "dupa", "dupb", "free", "closedhook"} {
-		sessions["gt-"+n] = now.Add(-time.Minute)
-	}
-	issues := map[string]*beads.Issue{
-		"gt-1": {Title: "one", Priority: 1},
-		"gt-4": {Title: "four", Priority: 2, Labels: []string{"gt:needs-human", "noise"}},
-		"gt-6": {Title: "done already", Status: "closed"},
+		{Rig: "gastown", Name: "free", Session: "gt-free", Item: dashItem(polecat.StateIdle, polecat.WorkstateDisposition{Reusable: true})},
+		{Rig: "gastown", Name: "stalled", Session: "gt-stalled", Item: dashItem(polecat.StateStalled, cap1), Issue: &beads.Issue{ID: "gt-2", Title: "two", Priority: 1}},
+		{Rig: "gastown", Name: "working", Session: "gt-working", Item: dashItem(polecat.StateWorking, cap1), Issue: &beads.Issue{ID: "gt-1", Title: "one", Priority: 2, Labels: []string{"gt:deferred", "noise"}}},
 	}
 	rec := func(name, verdict string, score float64, ago time.Duration) omRecord {
 		return omRecord{Record: landings.Record{Rig: "gastown", Branch: "polecat/" + name + "/gt-x+abc", OMVerdict: verdict, OMScore: score, LandedAt: now.Add(-ago)}}
 	}
-	records := []omRecord{
-		rec("working", "approve", 0.8, time.Hour), rec("working", "approve", 0.6, 2*time.Hour),
-		rec("working", "error:om did not run", 0, 3*time.Hour), rec("working", "approve", 0.9, 48*time.Hour),
-	}
 	pcs := buildDashPolecats(dashPolecatInputs{
-		Now: now, Seats: seats, Ready: map[string]bool{"gt-3": true}, Sessions: sessions, Known: true,
-		Bead: func(_, id string) *beads.Issue { return issues[id] }, Records: records,
+		Now: now, Seats: seats,
+		Sessions: map[string]time.Time{"gt-working": now.Add(-time.Minute)},
+		Records: []omRecord{
+			rec("working", "approve", 0.8, time.Hour), rec("working", "approve", 0.6, 2*time.Hour),
+			rec("working", "error:om did not run", 0, 3*time.Hour), rec("working", "approve", 0.9, 48*time.Hour),
+		},
 	})
-	got := map[string]dashboard.Polecat{}
-	for _, p := range pcs {
-		got[p.Name] = p
+	if len(pcs) != 3 || pcs[0].Name != "stalled" || pcs[1].Name != "working" || pcs[2].Name != "free" {
+		t.Fatalf("order = %+v (what needs a look first, idle last)", pcs)
 	}
-	for name, want := range map[string]string{
-		"working": dashboard.StateWorking, "nosession": dashboard.StateStale, "queued": dashboard.StateQueued,
-		"human": dashboard.StateNeedsHuman, "closedhook": dashboard.StateStale, "dupa": dashboard.StateWorking, "free": dashboard.StateIdle,
-	} {
-		if got[name].State != want {
-			t.Errorf("%s state = %q, want %q", name, got[name].State, want)
-		}
+	w := pcs[1]
+	if w.Bead != "gt-1" || w.Title != "one" || w.Priority == nil || *w.Priority != 2 || !w.HasSession || !w.CountsTowardCapacity {
+		t.Errorf("working = %+v", w)
 	}
-	w := got["working"]
-	if w.Title != "one" || w.Priority == nil || *w.Priority != 1 {
-		t.Errorf("working bead facts = %+v", w)
+	if len(w.Labels) != 1 || w.Labels[0] != "deferred" {
+		t.Errorf("labels = %v (only badge-worthy labels, without the gt: prefix)", w.Labels)
 	}
 	if w.Landed24h != 3 || w.Approved24h != 2 || w.AvgScore24h == nil || *w.AvgScore24h < 0.699 || *w.AvgScore24h > 0.701 {
-		t.Errorf("working record = landed %d approved %d score %v (the 48h-old landing must not count)", w.Landed24h, w.Approved24h, w.AvgScore24h)
+		t.Errorf("record = landed %d approved %d score %v (a 48h-old landing must not count)", w.Landed24h, w.Approved24h, w.AvgScore24h)
 	}
-	if l := got["human"].Labels; len(l) != 1 || l[0] != "needs-human" {
-		t.Errorf("human labels = %v (only badge-worthy labels, without the gt: prefix)", l)
-	}
-	if len(got["dupa"].AlsoHeldBy) != 1 || got["dupa"].AlsoHeldBy[0] != "gastown/dupb" {
-		t.Errorf("dupa also held by = %v", got["dupa"].AlsoHeldBy)
-	}
-	if got["free"].Bead != "" || got["free"].Title != "" {
-		t.Errorf("an idle polecat carries no bead: %+v", got["free"])
-	}
-	// the order puts what needs attention first and idle last
-	if pcs[0].State != dashboard.StateNeedsHuman || pcs[len(pcs)-1].State != dashboard.StateIdle {
-		t.Errorf("order: first %q last %q", pcs[0].State, pcs[len(pcs)-1].State)
-	}
-}
-
-// When tmux cannot be read, a missing session means nothing: no polecat may
-// be called stale for want of a reading.
-func TestBuildDashPolecatsUnknownSessionsAreNotStale(t *testing.T) {
-	t.Parallel()
-	pcs := buildDashPolecats(dashPolecatInputs{
-		Now: time.Now(), Known: false,
-		Seats: []dashSeat{{Rig: "gastown", Name: "a", Session: "gt-a", Bead: "gt-1"}},
-	})
-	if pcs[0].State != dashboard.StateWorking {
-		t.Errorf("state = %q, want working", pcs[0].State)
-	}
-}
-
-func TestDashBeadInfoCachesForTTLAndRemembersFailure(t *testing.T) {
-	t.Parallel()
-	var reads atomic.Int32
-	now := time.Date(2026, 10, 3, 18, 0, 0, 0, time.UTC)
-	c := newDashBeadInfo(func(_, id string) *beads.Issue {
-		reads.Add(1)
-		if id == "gt-bad" {
-			return nil
-		}
-		return &beads.Issue{ID: id, Title: "t"}
-	})
-	c.now = func() time.Time { return now }
-	for i := 0; i < 3; i++ {
-		c.get("g", "gt-1")
-		c.get("g", "gt-bad")
-	}
-	if reads.Load() != 2 {
-		t.Fatalf("%d reads, want 2 (one per bead, a failed read included)", reads.Load())
-	}
-	now = now.Add(11 * time.Minute)
-	c.get("g", "gt-1")
-	if reads.Load() != 3 {
-		t.Fatalf("%d reads after the ttl, want 3", reads.Load())
+	if pcs[0].HasSession || pcs[2].Bead != "" || pcs[2].CountsTowardCapacity {
+		t.Errorf("stalled/free = %+v / %+v", pcs[0], pcs[2])
 	}
 }
 
@@ -121,5 +88,27 @@ func TestDashBadgeLabels(t *testing.T) {
 	got := dashBadgeLabels([]string{"gt:ready-to-land", "needs-human", "gt:deferred", "bug"})
 	if len(got) != 2 || got[0] != "needs-human" || got[1] != "deferred" {
 		t.Errorf("badges = %v", got)
+	}
+}
+
+func TestDashSeatCacheReusesUntilKeyOrTTLChanges(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 3, 18, 0, 0, 0, time.UTC)
+	c := newDashSeatCache()
+	c.now = func() time.Time { return now }
+	item := polecatInventoryItem{Name: "agate"}
+	if _, ok := c.get("gastown/agate", "k1"); ok {
+		t.Fatal("an empty cache hit")
+	}
+	c.put("gastown/agate", "k1", item)
+	if got, ok := c.get("gastown/agate", "k1"); !ok || got.Name != "agate" {
+		t.Fatalf("same key missed: %+v %v", got, ok)
+	}
+	if _, ok := c.get("gastown/agate", "k2"); ok {
+		t.Error("a changed agent bead, work or session must re-classify")
+	}
+	now = now.Add(5 * time.Minute)
+	if _, ok := c.get("gastown/agate", "k1"); ok {
+		t.Error("an entry past its ttl must re-classify")
 	}
 }

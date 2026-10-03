@@ -151,11 +151,11 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		return out
 	}
 	recs := newDashLandings(townRoot)
+	seatCache := newDashSeatCache()
 	om := newOMReader(townRoot, recs)
-	beadInfo := newDashBeadInfo(beadReads.issue)
 	return dashboard.NewHub(dashboard.Config{
 		Feed:    feed,
-		Summary: func() dashboard.Summary { return dashboardSummary(townRoot, deploys, recs, beadInfo) },
+		Summary: func() dashboard.Summary { return dashboardSummary(townRoot, deploys, recs, seatCache) },
 		Health:  func() dashboard.Health { return dashboardHealth(townRoot) },
 		Machine: dashboard.SampleMachine,
 		Spend:   dashboardSpend(resolveSpendCmd(spendCmd)),
@@ -220,7 +220,7 @@ func dashboardHealth(townRoot string) dashboard.Health {
 // dashboardSummary is the summary line's state as fields, the polecat table,
 // and the age of the oldest bead waiting to land. A reader that fails leaves
 // its fields out.
-func dashboardSummary(townRoot string, deploys *tailDeploys, recs *dashLandings, beadInfo *dashBeadInfo) dashboard.Summary {
+func dashboardSummary(townRoot string, deploys *tailDeploys, recs *dashLandings, seatCache *dashSeatCache) dashboard.Summary {
 	var s dashboard.Summary
 	ready := map[string]bool{}
 	if n, oldest, ids, err := dashboardReadyToLand(townRoot); err == nil {
@@ -228,15 +228,18 @@ func dashboardSummary(townRoot string, deploys *tailDeploys, recs *dashLandings,
 		s.OldestReady = oldest
 		ready = ids
 	}
-	if seats, err := dashSeats(townRoot); err == nil {
-		sessions, known := dashSessions()
+	sessions, _ := dashSessions()
+	names := make([]string, 0, len(sessions))
+	for n := range sessions {
+		names = append(names, n)
+	}
+	if seats, err := dashSeats(townRoot, names, seatCache); err == nil {
 		s.Polecats = buildDashPolecats(dashPolecatInputs{
-			Now: time.Now(), Seats: seats, Ready: ready, Sessions: sessions, Known: known,
-			Bead: beadInfo.get, Records: recs.get(),
+			Now: time.Now(), Seats: seats, Ready: ready, Sessions: sessions, Records: recs.get(),
 		})
 		used := 0
 		for _, p := range s.Polecats {
-			if p.Bead != "" {
+			if p.CountsTowardCapacity {
 				used++
 			}
 		}

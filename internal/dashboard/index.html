@@ -65,7 +65,7 @@ td.n,th.n{text-align:right}
 .o-approved{color:var(--green)}.o-skipped{color:var(--dim)}.o-error{color:var(--amber)}.o-rejected{color:var(--red)}
 .badge{padding:1px 8px;border-radius:999px;font-size:11px;border:1px solid currentColor;white-space:nowrap}
 .st-working{color:var(--green)}.st-gating{color:var(--violet)}.st-queued{color:var(--blue)}
-.st-needs-human{color:var(--red)}.st-quiet{color:var(--amber)}.st-stale{color:var(--red)}.st-idle{color:var(--dim)}
+.st-needs-human{color:var(--red)}.st-quiet{color:var(--amber)}.st-stalled{color:var(--red)}.st-review-needed,.st-recovery{color:var(--amber)}.st-spawning{color:var(--teal)}.st-parked,.st-idle{color:var(--dim)}
 .tag.p0,.tag.p1{color:var(--red)}.tag.p2{color:var(--amber)}.tag.p3,.tag.p4{color:var(--dim)}
 .good{color:var(--green)}.warnc{color:var(--amber)}.badc{color:var(--red)}
 </style>
@@ -139,9 +139,9 @@ function renderTiles(s) {
   const pcs = s.polecats || [];
   const n = k => pcs.filter(p => p.state === k).length;
   const active = n("working") + n("quiet") + n("gating");
-  const bad = n("stale") + n("needs-human");
+  const bad = n("stalled") + n("needs-human");
   tiles.append(tile("Polecats working", pcs.length ? String(active) : "–",
-    [sm.seats_cap ? "cap " + sm.seats_cap : null, n("queued") ? n("queued") + " queued" : null, n("stale") ? n("stale") + " stale" : null, n("needs-human") ? n("needs-human") + " need a human" : null, n("quiet") ? n("quiet") + " quiet" : null].filter(Boolean).join(" · "),
+    [sm.seats_used != null ? "capacity " + sm.seats_used + (sm.seats_cap ? "/" + sm.seats_cap : "") : null, n("queued") ? n("queued") + " queued" : null, n("stalled") ? n("stalled") + " stalled" : null, n("needs-human") ? n("needs-human") + " need a human" : null, n("quiet") ? n("quiet") + " quiet" : null].filter(Boolean).join(" · "),
     bad ? "bad" : n("quiet") ? "warn" : ""));
   tiles.append(tile("Escalations", sm.escalations == null ? "–" : String(sm.escalations), "", sm.escalations ? "bad" : (sm.escalations === 0 ? "ok" : "")));
   const med = sm.median_deploy_min;
@@ -163,7 +163,11 @@ const STATE_HELP = {
   queued: "its bead is submitted and waiting to land",
   "needs-human": "its bead is waiting on an operator",
   quiet: "its session has been silent for 10 minutes or more",
-  stale: "holds a bead but has no tmux session: a hook nothing is working",
+  stalled: "has assigned work and no live session: nothing is doing it",
+  spawning: "dispatched seconds ago, session not up yet",
+  "review-needed": "a live session holding uncommitted or unpushed work",
+  recovery: "idle, but its worktree needs recovery before it can be reused",
+  parked: "parked by an operator",
   idle: "holds nothing"
 };
 let openIdle = false;
@@ -176,7 +180,7 @@ function renderSeats(s) {
   const by = {};
   pcs.forEach(p => by[p.state] = (by[p.state] || 0) + 1);
   const sum = el("div", "kv");
-  ["needs-human", "stale", "quiet", "working", "gating", "queued", "idle"].forEach(k => {
+  ["needs-human", "stalled", "review-needed", "recovery", "quiet", "working", "spawning", "gating", "queued", "parked", "idle"].forEach(k => {
     if (!by[k]) return;
     const x = el("div"); x.title = STATE_HELP[k];
     x.append(el("b", "st-" + k, String(by[k])), el("span", "", k));
@@ -199,11 +203,9 @@ function renderSeats(s) {
     if (p.bead) {
       bd.append(el("span", "bead", p.bead));
       if (p.priority != null) bd.append(document.createTextNode(" "), el("span", "tag p" + Math.min(p.priority, 4), "P" + p.priority));
-      if (p.bead_status === "closed") bd.append(document.createTextNode(" "), el("span", "tag badc", "bead closed"));
       (p.labels || []).forEach(l => bd.append(document.createTextNode(" "), el("span", "tag warnc", l)));
       if (p.title) bd.append(document.createElement("br"), el("span", "title", p.title));
-      if ((p.also_held_by || []).length) bd.append(document.createElement("br"), el("span", "warnc", "⚠ also held by " + p.also_held_by.join(", ")));
-    } else bd.append(el("span", "title", "—"));
+    } else bd.append(el("span", "title", p.reason || "—"));
     tr.append(bd);
     const on = p.slung ? (now - new Date(p.slung).getTime()) / 1000 : null;
     tr.append(el("td", "n" + (on > 5400 ? " warnc" : ""), p.bead ? (on == null ? "–" : fmtDur(on)) : ""));
