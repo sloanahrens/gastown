@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -243,11 +242,9 @@ func polecatBeadIDForRig(r *rig.Rig, rigName, polecatName string) string {
 	return beads.PolecatBeadIDWithPrefix(rigPrefix(r), rigName, polecatName)
 }
 
-// displaySafetyCheckBlocked prints blocked polecats and guidance.
-func displaySafetyCheckBlocked(blocked []*SafetyCheckResult) {
-	displaySafetyCheckBlockedTo(os.Stderr, blocked)
-}
-
+// displaySafetyCheckBlockedTo prints blocked polecats and guidance. The nuke
+// gate calls it with os.Stderr; the writer is a parameter so the refusal text
+// can be asserted without capturing the process's stderr.
 func displaySafetyCheckBlockedTo(w io.Writer, blocked []*SafetyCheckResult) {
 	fmt.Fprintf(w, "%s Cannot nuke the following polecats:\n\n", style.Error.Render("Error:"))
 	var polecatList []string

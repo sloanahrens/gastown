@@ -2496,6 +2496,41 @@ func splitLines(s string) []string {
 	return lines
 }
 
+// NukeRefusedExitCode is the exit status `gt polecat nuke` returns when the
+// safety check refuses the nuke. It is distinct from 1 (an ordinary failure)
+// and from 2 (a usage error) so a caller that shells out — the daemon's reap
+// pass — can tell "refused" from "failed" without matching the refusal text.
+const NukeRefusedExitCode = 3
+
+// nukeSafetyRefusal is the pre-nuke safety gate. --force and --dry-run bypass
+// it, exactly as they did when this was inline. Otherwise, when any target is
+// blocked it prints the blocked list to w and returns an ExitCodeError carrying
+// NukeRefusedExitCode; a clean pass returns nil.
+//
+// The refusal is an error, not a success, because the nuke did not happen: the
+// caller must not read exit 0 as "removed". The checked function is a parameter
+// so the gate can be exercised without a live Dolt or git state.
+func nukeSafetyRefusal(w io.Writer, targets []polecatTarget, force, dryRun bool,
+	check func(polecatTarget) *SafetyCheckResult) error {
+	if force || dryRun {
+		return nil
+	}
+	var blocked []*SafetyCheckResult
+	for _, p := range targets {
+		if result := check(p); result.Blocked {
+			blocked = append(blocked, result)
+		}
+	}
+	if len(blocked) == 0 {
+		return nil
+	}
+	displaySafetyCheckBlockedTo(w, blocked)
+	return &ExitCodeError{
+		Code: NukeRefusedExitCode,
+		Err:  fmt.Errorf("blocked: %d polecat(s) failed nuke safety checks: %s", len(blocked), formatSafetyCheckBlockers(blocked)),
+	}
+}
+
 func runPolecatNuke(cmd *cobra.Command, args []string) error {
 	targets, err := resolvePolecatTargets(args, polecatNukeAll)
 	if err != nil {
@@ -2508,19 +2543,8 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 	}
 
 	// Safety checks: refuse to nuke polecats with active work unless --force is set
-	if !polecatNukeForce && !polecatNukeDryRun {
-		var blocked []*SafetyCheckResult
-		for _, p := range targets {
-			result := checkPolecatSafety(p)
-			if result.Blocked {
-				blocked = append(blocked, result)
-			}
-		}
-
-		if len(blocked) > 0 {
-			displaySafetyCheckBlocked(blocked)
-			return fmt.Errorf("blocked: %d polecat(s) failed nuke safety checks: %s", len(blocked), formatSafetyCheckBlockers(blocked))
-		}
+	if err := nukeSafetyRefusal(os.Stderr, targets, polecatNukeForce, polecatNukeDryRun, checkPolecatSafety); err != nil {
+		return err
 	}
 
 	// Nuke each polecat
