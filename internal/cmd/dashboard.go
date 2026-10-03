@@ -150,15 +150,16 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		}
 		return out
 	}
-	om := newOMReader(townRoot)
+	recs := newDashLandings(townRoot)
+	om := newOMReader(townRoot, recs)
+	beadInfo := newDashBeadInfo(beadReads.issue)
 	return dashboard.NewHub(dashboard.Config{
 		Feed:    feed,
-		Summary: func() dashboard.Summary { return dashboardSummary(townRoot, deploys) },
+		Summary: func() dashboard.Summary { return dashboardSummary(townRoot, deploys, recs, beadInfo) },
 		Health:  func() dashboard.Health { return dashboardHealth(townRoot) },
 		Machine: dashboard.SampleMachine,
 		Spend:   dashboardSpend(resolveSpendCmd(spendCmd)),
 		OM:      func() *dashboard.OM { return om.read(time.Now()) },
-		Title:   func(id string) string { return beadReads.title("", id) },
 	}), nil
 }
 
@@ -216,24 +217,33 @@ func dashboardHealth(townRoot string) dashboard.Health {
 	return h
 }
 
-// dashboardSummary is the summary line's state as fields, plus the age of the
-// oldest bead waiting to land. A reader that fails leaves its fields out.
-func dashboardSummary(townRoot string, deploys *tailDeploys) dashboard.Summary {
+// dashboardSummary is the summary line's state as fields, the polecat table,
+// and the age of the oldest bead waiting to land. A reader that fails leaves
+// its fields out.
+func dashboardSummary(townRoot string, deploys *tailDeploys, recs *dashLandings, beadInfo *dashBeadInfo) dashboard.Summary {
 	var s dashboard.Summary
-	if used, cap, pairs, err := tailSeatPicture(townRoot, tailRigAgentBeads); err == nil {
-		s.SeatsUsed = &used
-		if cap > 0 {
-			s.SeatsCap = &cap
-		}
-		for _, p := range pairs {
-			if r := parseSeatPair(p); r.Bead != "" {
-				s.Seats = append(s.Seats, r)
-			}
-		}
-	}
-	if n, oldest, err := dashboardReadyToLand(townRoot); err == nil {
+	ready := map[string]bool{}
+	if n, oldest, ids, err := dashboardReadyToLand(townRoot); err == nil {
 		s.ReadyToLand = &n
 		s.OldestReady = oldest
+		ready = ids
+	}
+	if seats, err := dashSeats(townRoot); err == nil {
+		sessions, known := dashSessions()
+		s.Polecats = buildDashPolecats(dashPolecatInputs{
+			Now: time.Now(), Seats: seats, Ready: ready, Sessions: sessions, Known: known,
+			Bead: beadInfo.get, Records: recs.get(),
+		})
+		used := 0
+		for _, p := range s.Polecats {
+			if p.Bead != "" {
+				used++
+			}
+		}
+		s.SeatsUsed = &used
+		if max, err := configuredSchedulerMaxPolecats(townRoot); err == nil && max > 0 {
+			s.SeatsCap = &max
+		}
 	}
 	if tip, installed, behind, err := tailMainPicture(townRoot); err == nil {
 		s.MainTip, s.InstalledGT, s.Behind = tip, installed, &behind
@@ -256,29 +266,20 @@ func dashboardSummary(townRoot string, deploys *tailDeploys) dashboard.Summary {
 	return s
 }
 
-// parseSeatPair splits "<rig>/<polecat>:<bead>".
-func parseSeatPair(p string) dashboard.SeatRef {
-	who, bead, ok := strings.Cut(p, ":")
-	if !ok {
-		return dashboard.SeatRef{}
-	}
-	rig, polecat, _ := strings.Cut(who, "/")
-	return dashboard.SeatRef{Rig: rig, Polecat: polecat, Bead: bead}
-}
-
 // dashboardReadyToLand is tailReadyToLand plus the oldest waiting bead's last
 // update, which is when it was last touched, not strictly when it was
 // submitted: the label write is normally the bead's last write until the
 // landing worker picks it up.
-func dashboardReadyToLand(townRoot string) (int, *time.Time, error) {
+func dashboardReadyToLand(townRoot string) (int, *time.Time, map[string]bool, error) {
 	stores := []string{"hq"}
 	rigs, err := knownRigNames(townRoot)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	stores = append(stores, rigs...)
 	total := 0
 	var oldest *time.Time
+	ids := map[string]bool{}
 	for _, store := range stores {
 		dir := doltserver.FindRigBeadsDir(townRoot, store)
 		if dir == "" {
@@ -286,20 +287,21 @@ func dashboardReadyToLand(townRoot string) (int, *time.Time, error) {
 		}
 		issues, err := beads.NewWithBeadsDir(townRoot, dir).List(beads.ListOptions{Label: land.LabelReadyToLand, Priority: -1})
 		if err != nil {
-			return 0, nil, err
+			return 0, nil, nil, err
 		}
 		for _, issue := range issues {
 			if !beads.HasLabel(issue, land.LabelReadyToLand) || !beads.IssueStatus(issue.Status).IsActionable() {
 				continue
 			}
 			total++
+			ids[issue.ID] = true
 			if at, err := time.Parse(time.RFC3339, issue.UpdatedAt); err == nil && (oldest == nil || at.Before(*oldest)) {
 				at := at
 				oldest = &at
 			}
 		}
 	}
-	return total, oldest, nil
+	return total, oldest, ids, nil
 }
 
 const dashboardSpendTimeout = 25 * time.Second

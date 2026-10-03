@@ -31,27 +31,52 @@ type Health struct {
 	ReadAt  time.Time `json:"read_at"`
 }
 
-// SeatRef is a polecat seat in use: who holds which bead.
-type SeatRef struct {
-	Rig     string `json:"rig"`
-	Polecat string `json:"polecat"`
-	Bead    string `json:"bead"`
-}
+// Polecat states, in the order the page sorts them.
+const (
+	StateWorking    = "working"     // holds a bead and its session is producing output
+	StateGating     = "gating"      // its bead is being gated and reviewed by the landing worker
+	StateQueued     = "queued"      // its bead is submitted and waits to land
+	StateNeedsHuman = "needs-human" // its bead is waiting on an operator
+	StateQuiet      = "quiet"       // holds a bead; its session has been silent past QuietAfter
+	StateStale      = "stale"       // holds a bead but has no session: a hook nothing is working
+	StateIdle       = "idle"        // holds nothing
+)
 
-// Seat is a SeatRef with what the hub knows about it.
-type Seat struct {
-	SeatRef
-	Title   string     `json:"title,omitempty"`
-	Slung   *time.Time `json:"slung,omitempty"` // when the dispatch line named this bead
-	Elapsed int64      `json:"elapsed_sec,omitempty"`
+// QuietAfter is how long a working session may stay silent before it reads as quiet.
+const QuietAfter = 10 * time.Minute
+
+// Polecat is one polecat: what it holds, what state that is in, and its record.
+type Polecat struct {
+	Rig   string `json:"rig"`
+	Name  string `json:"name"`
+	Bead  string `json:"bead,omitempty"`
+	Title string `json:"title,omitempty"`
+	State string `json:"state"`
+
+	Priority   *int     `json:"priority,omitempty"`
+	Labels     []string `json:"labels,omitempty"`
+	BeadStatus string   `json:"bead_status,omitempty"` // the held bead's status; "closed" on a hook that should have been cleared
+
+	Slung      *time.Time `json:"slung,omitempty"` // when a dispatch line named the bead
+	ElapsedSec int64      `json:"elapsed_sec,omitempty"`
+	HasSession bool       `json:"has_session"`
+	LastActive *time.Time `json:"last_active,omitempty"`
+	QuietSec   int64      `json:"quiet_sec,omitempty"`
+	AlsoHeldBy []string   `json:"also_held_by,omitempty"` // other polecats holding the same bead
+
+	Landed24h   int      `json:"landed_24h"`
+	Approved24h int      `json:"approved_24h"`
+	AvgScore24h *float64 `json:"avg_score_24h,omitempty"`
 }
 
 // Summary is the slow-changing state of the town. A pointer or zero field the
 // reader could not fill is left out of the page rather than shown as zero.
 type Summary struct {
-	SeatsUsed *int      `json:"seats_used,omitempty"`
-	SeatsCap  *int      `json:"seats_cap,omitempty"`
-	Seats     []SeatRef `json:"-"`
+	SeatsUsed *int `json:"seats_used,omitempty"`
+	SeatsCap  *int `json:"seats_cap,omitempty"`
+	// Polecats is the summary reader's picture; the hub adds the live parts
+	// (dispatch time, silence, the gating phase) before the page sees it.
+	Polecats []Polecat `json:"-"`
 
 	ReadyToLand *int       `json:"ready_to_land,omitempty"`
 	OldestReady *time.Time `json:"oldest_ready,omitempty"`
@@ -157,7 +182,7 @@ type State struct {
 	Health    Health          `json:"health"`
 	Summary   *Summary        `json:"summary,omitempty"`
 	SummaryAt time.Time       `json:"summary_at,omitempty"`
-	Seats     []Seat          `json:"seats"`
+	Polecats  []Polecat       `json:"polecats"`
 	Machine   Machine         `json:"machine"`
 	Loads     []LoadPoint     `json:"loads"`
 	Gates     []GatePoint     `json:"gates"`
@@ -181,8 +206,6 @@ type Config struct {
 	Spend func() json.RawMessage
 	// OM reads the reviewer's record from disk.
 	OM func() *OM
-	// Title names a bead for the seats table; "" when unknown.
-	Title func(id string) string
 
 	Now func() time.Time
 

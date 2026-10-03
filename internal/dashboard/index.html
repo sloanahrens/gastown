@@ -43,9 +43,11 @@ td.n,th.n{text-align:right}
 .kv b{font-size:16px}.kv span{color:var(--dim);font-size:11px;display:block}
 .chips{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}
 .chip{cursor:pointer;border:1px solid var(--line);border-radius:999px;padding:1px 9px;font-size:11px;color:var(--dim);background:none;font:inherit;font-size:11px}
-.chip.on{color:var(--text);border-color:var(--dim)}
+.chip.on{color:var(--text);border-color:var(--blue);background:#1c2a3d}
+.chip b{font-weight:400;color:var(--dim);margin-left:4px}
 #feed{max-height:68vh;overflow:auto;padding:4px 0}
 .row{display:grid;grid-template-columns:62px 82px 1fr;gap:8px;padding:2px 12px}
+[hidden]{display:none !important}
 .row:hover{background:#19212b}
 .row .t{color:var(--dim)}.row .g{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .row .x{overflow-wrap:anywhere}
@@ -61,6 +63,10 @@ td.n,th.n{text-align:right}
 .sa{background:var(--green)}.ss{background:var(--dim)}.se{background:var(--amber)}.sr{background:var(--red)}
 .tag{display:inline-block;padding:0 6px;border-radius:4px;font-size:11px;border:1px solid var(--line);margin-right:4px}
 .o-approved{color:var(--green)}.o-skipped{color:var(--dim)}.o-error{color:var(--amber)}.o-rejected{color:var(--red)}
+.badge{padding:1px 8px;border-radius:999px;font-size:11px;border:1px solid currentColor;white-space:nowrap}
+.st-working{color:var(--green)}.st-gating{color:var(--violet)}.st-queued{color:var(--blue)}
+.st-needs-human{color:var(--red)}.st-quiet{color:var(--amber)}.st-stale{color:var(--red)}.st-idle{color:var(--dim)}
+.tag.p0,.tag.p1{color:var(--red)}.tag.p2{color:var(--amber)}.tag.p3,.tag.p4{color:var(--dim)}
 .good{color:var(--green)}.warnc{color:var(--amber)}.badc{color:var(--red)}
 </style>
 </head>
@@ -130,7 +136,13 @@ function renderTiles(s) {
   let oldest = sm.oldest_ready ? (Date.now() - new Date(sm.oldest_ready).getTime()) / 1000 : null;
   tiles.append(tile("Waiting to land", q == null ? "–" : String(q),
     q ? "oldest " + fmtDur(oldest) : "queue empty", q == null ? "" : (oldest > 3600 ? "bad" : oldest > 900 ? "warn" : q ? "" : "ok")));
-  tiles.append(tile("Seats held", sm.seats_used == null ? "–" : sm.seats_used + (sm.seats_cap ? " / " + sm.seats_cap : ""), "held by a polecat"));
+  const pcs = s.polecats || [];
+  const n = k => pcs.filter(p => p.state === k).length;
+  const active = n("working") + n("quiet") + n("gating");
+  const bad = n("stale") + n("needs-human");
+  tiles.append(tile("Polecats working", pcs.length ? String(active) : "–",
+    [sm.seats_cap ? "cap " + sm.seats_cap : null, n("queued") ? n("queued") + " queued" : null, n("stale") ? n("stale") + " stale" : null, n("needs-human") ? n("needs-human") + " need a human" : null, n("quiet") ? n("quiet") + " quiet" : null].filter(Boolean).join(" · "),
+    bad ? "bad" : n("quiet") ? "warn" : ""));
   tiles.append(tile("Escalations", sm.escalations == null ? "–" : String(sm.escalations), "", sm.escalations ? "bad" : (sm.escalations === 0 ? "ok" : "")));
   const med = sm.median_deploy_min;
   tiles.append(tile("Ship time", med == null ? "–" : Math.round(med) + "m", "median dispatch→deploy" +
@@ -145,27 +157,74 @@ function renderTiles(s) {
   $("tiles").dataset.at = s.summary_at || "";
 }
 
+const STATE_HELP = {
+  working: "holds a bead and its session is producing output",
+  gating: "its bead is being gated and om-reviewed by the landing worker",
+  queued: "its bead is submitted and waiting to land",
+  "needs-human": "its bead is waiting on an operator",
+  quiet: "its session has been silent for 10 minutes or more",
+  stale: "holds a bead but has no tmux session: a hook nothing is working",
+  idle: "holds nothing"
+};
+let openIdle = false;
 function renderSeats(s) {
   const box = $("seats");
   box.replaceChildren();
-  const seats = s.seats || [];
-  if (!seats.length) { box.append(el("div", "empty", s.summary ? "no polecat holds a bead" : "reading…")); $("seatsnote").textContent = ""; return; }
+  const pcs = s.polecats || [];
+  if (!pcs.length) { box.append(el("div", "empty", s.summary ? "no polecats" : "reading…")); $("seatsnote").textContent = ""; return; }
+
+  const by = {};
+  pcs.forEach(p => by[p.state] = (by[p.state] || 0) + 1);
+  const sum = el("div", "kv");
+  ["needs-human", "stale", "quiet", "working", "gating", "queued", "idle"].forEach(k => {
+    if (!by[k]) return;
+    const x = el("div"); x.title = STATE_HELP[k];
+    x.append(el("b", "st-" + k, String(by[k])), el("span", "", k));
+    sum.append(x);
+  });
+  box.append(sum);
+
+  const busy = pcs.filter(p => p.state !== "idle"), idle = pcs.filter(p => p.state === "idle");
+  const table = list => {
   const t = el("table");
   const hr = el("tr");
-  ["Polecat", "Bead", "Time"].forEach((x, i) => hr.append(el("th", i === 2 ? "n" : "", x)));
+  ["Polecat", "State", "Bead", "On it", "Quiet", "24h"].forEach((x, i) => hr.append(el("th", i >= 3 ? "n" : "", x)));
   t.append(hr);
-  for (const seat of seats) {
+  const now = Date.now();
+  for (const p of list) {
     const tr = el("tr");
-    tr.append(el("td", "", seat.rig + "/" + seat.polecat));
-    const td = el("td");
-    td.append(el("span", "bead", seat.bead));
-    if (seat.title) { td.append(document.createTextNode(" ")); td.append(el("span", "title", seat.title)); }
-    tr.append(td);
-    const el_ = seat.elapsed_sec ? Math.max(0, (Date.now() - new Date(seat.slung).getTime()) / 1000) : null;
-    tr.append(el("td", "n" + (el_ > 5400 ? " warnc" : ""), el_ == null ? "–" : fmtDur(el_)));
+    tr.append(el("td", "", p.rig === "gastown" ? p.name : p.rig + "/" + p.name));
+    const st = el("td"); const badge = el("span", "badge st-" + p.state, p.state); badge.title = STATE_HELP[p.state] || ""; st.append(badge); tr.append(st);
+    const bd = el("td");
+    if (p.bead) {
+      bd.append(el("span", "bead", p.bead));
+      if (p.priority != null) bd.append(document.createTextNode(" "), el("span", "tag p" + Math.min(p.priority, 4), "P" + p.priority));
+      if (p.bead_status === "closed") bd.append(document.createTextNode(" "), el("span", "tag badc", "bead closed"));
+      (p.labels || []).forEach(l => bd.append(document.createTextNode(" "), el("span", "tag warnc", l)));
+      if (p.title) bd.append(document.createElement("br"), el("span", "title", p.title));
+      if ((p.also_held_by || []).length) bd.append(document.createElement("br"), el("span", "warnc", "⚠ also held by " + p.also_held_by.join(", ")));
+    } else bd.append(el("span", "title", "—"));
+    tr.append(bd);
+    const on = p.slung ? (now - new Date(p.slung).getTime()) / 1000 : null;
+    tr.append(el("td", "n" + (on > 5400 ? " warnc" : ""), p.bead ? (on == null ? "–" : fmtDur(on)) : ""));
+    const q = p.last_active ? (now - new Date(p.last_active).getTime()) / 1000 : null;
+    tr.append(el("td", "n" + (q != null && q >= 600 ? " warnc" : ""), p.bead ? (p.has_session ? fmtDur(q) : "no session") : ""));
+    let rec = "–";
+    if (p.landed_24h) rec = p.landed_24h + (p.approved_24h < p.landed_24h ? " · " + Math.round(p.approved_24h / p.landed_24h * 100) + "%" : "") + (p.avg_score_24h != null ? " · " + p.avg_score_24h.toFixed(2) : "");
+    tr.append(el("td", "n", rec));
     t.append(tr);
   }
-  box.append(t);
+  return t;
+  };
+  if (busy.length) box.append(table(busy));
+  if (idle.length) {
+    const d = document.createElement("details");
+    d.open = openIdle;
+    d.ontoggle = () => { openIdle = d.open; };
+    d.append(el("summary", "title", idle.length + " idle"), table(idle));
+    box.append(d);
+  }
+  box.append(el("div", "k title", "24h = landings · approval rate when below 100% · average om score"));
   $("seatsnote").textContent = s.summary_at ? "read " + age(s.summary_at) + " ago" : "";
 }
 
@@ -194,7 +253,7 @@ function renderMachine(s) {
   const top = m.top || [];
   if (top.length) {
     const t = el("table");
-    for (const p of top) { const tr = el("tr"); tr.append(el("td", "", p.name), el("td", "n", p.cpu.toFixed(0) + "%")); t.append(tr); }
+    for (const p of top) { const tr = el("tr"); tr.append(el("td", "", p.name), el("td", "n", p.cpu >= 100 ? (p.cpu / 100).toFixed(1) + " cores" : p.cpu.toFixed(0) + "%")); t.append(tr); }
     box.append(el("div", "k title", "busiest processes"), t);
   }
   const gates = s.gates || [];
@@ -338,11 +397,14 @@ function renderAll() { if (!state) return; renderHealth(state.health); renderTil
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));
+const counts = {};
 function renderChips() {
   const box = $("chips");
   box.replaceChildren();
   for (const c of CLASSES) {
     const b = el("button", "chip" + (shown.has(c) ? " on" : ""), c);
+    b.title = "show or hide " + c + " lines";
+    b.append(el("b", "", String(counts[c] || 0)));
     b.onclick = () => { shown.has(c) ? shown.delete(c) : shown.add(c); try { localStorage.setItem("gt-chips", JSON.stringify([...shown])); } catch (e) {} renderChips(); applyFilter(); };
     box.append(b);
   }
@@ -359,7 +421,9 @@ function pushEntry(e, stick) {
   const f = $("feed");
   const atBottom = f.scrollHeight - f.scrollTop - f.clientHeight < 40;
   f.append(rowFor(e));
-  while (f.children.length > 800) f.firstChild.remove();
+  counts[e.class] = (counts[e.class] || 0) + 1;
+  while (f.children.length > 800) { counts[f.firstChild.dataset.class]--; f.firstChild.remove(); }
+  if (!pushEntry.t) pushEntry.t = setTimeout(() => { pushEntry.t = null; renderChips(); }, 1000);
   if (atBottom || stick) f.scrollTop = f.scrollHeight;
 }
 
@@ -368,7 +432,7 @@ function connect() {
   es.onopen = () => { $("conn").className = "on"; $("conn").textContent = "live"; };
   es.onerror = () => { $("conn").className = "off"; $("conn").textContent = "reconnecting"; };
   es.addEventListener("state", ev => { state = JSON.parse(ev.data); renderAll(); });
-  es.addEventListener("backlog", ev => { $("feed").replaceChildren(); JSON.parse(ev.data).forEach(e => pushEntry(e, true)); });
+  es.addEventListener("backlog", ev => { $("feed").replaceChildren(); for (const k of Object.keys(counts)) delete counts[k]; JSON.parse(ev.data).forEach(e => pushEntry(e, true)); });
   es.addEventListener("entry", ev => pushEntry(JSON.parse(ev.data)));
 }
 renderChips();

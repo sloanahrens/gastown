@@ -71,7 +71,7 @@ type omConfig struct {
 // omReader keeps the daemon-log scan between polls, so a poll reads only what
 // the log gained, and re-reads the small landings files whole.
 type omReader struct {
-	townRoot string
+	landings *dashLandings
 	logPath  string
 	cfgPath  string
 
@@ -81,12 +81,12 @@ type omReader struct {
 	rejects []omRejection
 }
 
-func newOMReader(townRoot string) *omReader {
+func newOMReader(townRoot string, landings *dashLandings) *omReader {
 	cfg := ""
 	if home, err := os.UserHomeDir(); err == nil {
 		cfg = filepath.Join(home, ".config", "om", "config.json")
 	}
-	return &omReader{townRoot: townRoot, logPath: filepath.Join(townRoot, "daemon", "daemon.log"), cfgPath: cfg}
+	return &omReader{landings: landings, logPath: filepath.Join(townRoot, "daemon", "daemon.log"), cfgPath: cfg}
 }
 
 // read is the panel's whole reading. A reader that fails leaves its part out;
@@ -97,15 +97,7 @@ func (r *omReader) read(now time.Time) *dashboard.OM {
 	if err := r.scanLog(); err != nil && len(r.stages) == 0 && len(r.rejects) == 0 {
 		return nil
 	}
-	var recs []omRecord
-	rigs, _ := knownRigNames(r.townRoot)
-	for _, rig := range append([]string{"hq"}, rigs...) {
-		path, err := landings.Path(r.townRoot, rig)
-		if err != nil {
-			continue
-		}
-		recs = append(recs, readOMRecords(path)...)
-	}
+	recs := r.landings.get()
 	return buildOM(now, recs, r.stages, r.rejects, loadOMConfig(r.cfgPath))
 }
 
