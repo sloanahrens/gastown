@@ -318,7 +318,7 @@ func TestRecoveryThresholds_DecodeFromWitnessKey(t *testing.T) {
 	t.Parallel()
 
 	var op OperationalConfig
-	body := `{"witness":{"max_bead_respawns":5,"heartbeat_startup_grace":"7m","done_intent_stuck_timeout":"90m"}}`
+	body := `{"witness":{"max_bead_respawns":5,"heartbeat_startup_grace":"7m"}}`
 	if err := json.Unmarshal([]byte(body), &op); err != nil {
 		t.Fatal(err)
 	}
@@ -487,27 +487,6 @@ func TestContainerGateThresholds_YieldOverrides(t *testing.T) {
 	}
 }
 
-// TestOperationalConfig_RetiredKeysDecode: keys whose accessors were deleted
-// (gt-e2kxa), and the done_intent keys whose label gt done no longer writes
-// (gt-ik4a1.7), still decode strictly, so an older settings file keeps loading.
-func TestOperationalConfig_RetiredKeysDecode(t *testing.T) {
-	t.Parallel()
-
-	data := []byte(`{"operational": {
-		"session": {"claude_start_timeout": "60s", "gupp_violation_timeout": "30m"},
-		"nudge": {"ready_timeout": "10s", "urgent_ttl": "2h"},
-		"daemon": {"mass_death_threshold": 3, "doctor_mol_cooldown": "5m"},
-		"polecat": {"namepool_size": 50, "dolt_backoff_max": "30s"},
-		"dolt": {"max_connections": 1000},
-		"mail": {"bd_read_timeout": "60s", "max_concurrent_ack_ops": 8},
-		"web": {"max_body_len": 100000},
-		"witness": {"done_intent_stuck_timeout": "90m", "done_intent_recent_grace": "2m", "done_intent_max_age": "1h"}
-	}}`)
-	if err := DecodeJSONFile("config.json", data, &TownSettings{}); err != nil {
-		t.Fatalf("retired operational keys must still decode: %v", err)
-	}
-}
-
 // TestDoltThresholds_CommitsPerDayWarn: the default is the D3 target, a
 // positive override wins, and a non-positive one falls back to the default.
 func TestDoltThresholds_CommitsPerDayWarn(t *testing.T) {
@@ -527,7 +506,7 @@ func TestDoltThresholds_CommitsPerDayWarn(t *testing.T) {
 		}
 	}
 
-	data := []byte(`{"operational": {"dolt": {"commits_per_day_warn": 800, "max_connections": 1000}}}`)
+	data := []byte(`{"operational": {"dolt": {"commits_per_day_warn": 800}}}`)
 	var ts TownSettings
 	if err := DecodeJSONFile("config.json", data, &ts); err != nil {
 		t.Fatalf("decode: %v", err)

@@ -185,17 +185,6 @@ type OperationalConfig struct {
 	// Daemon configures daemon lifecycle thresholds.
 	Daemon *DaemonThresholds `json:"daemon,omitempty"`
 
-	// Deacon is retired with the deacon role (gt-4k3fj.6.1): nothing reads
-	// it; it is declared so a settings file that still carries it decodes,
-	// and kept verbatim across rewrites.
-	Deacon json.RawMessage `json:"deacon,omitempty"`
-
-	// Polecat and Web have no reader (gt-e2kxa): the code uses its own
-	// constants. They are declared so a settings file that still carries
-	// them decodes, and kept verbatim across rewrites.
-	Polecat json.RawMessage `json:"polecat,omitempty"`
-	Web     json.RawMessage `json:"web,omitempty"`
-
 	// Dolt configures Dolt server thresholds.
 	Dolt *DoltThresholds `json:"dolt,omitempty"`
 
@@ -259,13 +248,6 @@ type DoltThresholds struct {
 	// but FindLiteralSecrets reports it, and secrets.refuse_literals rejects
 	// it, exactly as for an agent env value.
 	Password *string `json:"password,omitempty"`
-
-	// The keys below have no reader (gt-e2kxa). They are declared so a
-	// settings file that still carries them decodes.
-	HealthCheckInterval string `json:"health_check_interval,omitempty"`
-	CmdTimeout          string `json:"cmd_timeout,omitempty"`
-	MaxConnections      *int   `json:"max_connections,omitempty"`
-	SlowQueryThreshold  string `json:"slow_query_threshold,omitempty"`
 }
 
 // ContainerGateThresholds configures the container-gate slot pool.
@@ -305,14 +287,6 @@ type SessionThresholds struct {
 	// budgets included. Unset keeps the per-command budgets. It replaced the
 	// retired timeout environment override (gt-y3pgh.2.6).
 	BdSubprocessTimeout string `json:"bd_subprocess_timeout,omitempty"`
-
-	// The keys below have no reader (gt-e2kxa). They are declared so a
-	// settings file that still carries them decodes.
-	ClaudeStartTimeout      string `json:"claude_start_timeout,omitempty"`
-	ShellReadyTimeout       string `json:"shell_ready_timeout,omitempty"`
-	GracefulShutdownTimeout string `json:"graceful_shutdown_timeout,omitempty"`
-	GUPPViolationTimeout    string `json:"gupp_violation_timeout,omitempty"`
-	HungSessionThreshold    string `json:"hung_session_threshold,omitempty"`
 }
 
 // NudgeThresholds configures nudge queue and delivery timeouts.
@@ -333,27 +307,10 @@ type NudgeThresholds struct {
 	// eligible for delivery again (default "30s"). Spaces out retries so a
 	// persistently failing injection cannot re-inject at the poll interval.
 	RequeueBackoff string `json:"requeue_backoff,omitempty"`
-
-	// The keys below have no reader (gt-e2kxa): the code uses the
-	// internal/constants and internal/nudge values. They are declared so a
-	// settings file that still carries them decodes.
-	ReadyTimeout  string `json:"ready_timeout,omitempty"`
-	RetryInterval string `json:"retry_interval,omitempty"`
-	LockTimeout   string `json:"lock_timeout,omitempty"`
-	NormalTTL     string `json:"normal_ttl,omitempty"`
-	UrgentTTL     string `json:"urgent_ttl,omitempty"`
 }
 
 // DaemonThresholds configures daemon lifecycle and patrol thresholds.
 type DaemonThresholds struct {
-	// DogIdleSessionTimeout, DogIdleRemoveTimeout, StaleWorkingTimeout and
-	// MaxDogPoolSize are retired with the dog pack (gt-ckunw): nothing reads
-	// them. They are declared so a config that still carries them decodes.
-	DogIdleSessionTimeout json.RawMessage `json:"dog_idle_session_timeout,omitempty"`
-	DogIdleRemoveTimeout  json.RawMessage `json:"dog_idle_remove_timeout,omitempty"`
-	StaleWorkingTimeout   json.RawMessage `json:"stale_working_timeout,omitempty"`
-	MaxDogPoolSize        json.RawMessage `json:"max_dog_pool_size,omitempty"`
-
 	// PolecatIdleSessionTimeout is how long a polecat can be idle before its session
 	// is killed to prevent API slot burn (default "15m"). Polecats are ephemeral workers
 	// and should not persist when idle.
@@ -369,24 +326,6 @@ type DaemonThresholds struct {
 
 	// RecoveryHeartbeatInterval is the fixed interval for recovery-focused daemon heartbeat (default "3m").
 	RecoveryHeartbeatInterval string `json:"recovery_heartbeat_interval,omitempty"`
-
-	// The boot and deacon keys are retired with those roles (gt-4k3fj.6.1):
-	// nothing reads them; they are declared so a settings file that still
-	// carries them decodes.
-	BootSpawnCooldown   string `json:"boot_spawn_cooldown,omitempty"`
-	BootTurnBudget      string `json:"boot_turn_budget,omitempty"`
-	BootIdleSuppression string `json:"boot_idle_suppression,omitempty"`
-	BootMode            string `json:"boot_mode,omitempty"`
-	DeaconGracePeriod   string `json:"deacon_grace_period,omitempty"`
-
-	// The keys below have no reader (gt-e2kxa): the daemon uses its own
-	// constants. They are declared so a settings file that still carries
-	// them decodes.
-	MassDeathWindow                string `json:"mass_death_window,omitempty"`
-	MassDeathThreshold             *int   `json:"mass_death_threshold,omitempty"`
-	MaxLifecycleMessageAge         string `json:"max_lifecycle_message_age,omitempty"`
-	SyncFailureEscalationThreshold *int   `json:"sync_failure_escalation_threshold,omitempty"`
-	DoctorMolCooldown              string `json:"doctor_mol_cooldown,omitempty"`
 
 	// PressureCPUThreshold is the per-core load average above which new
 	// non-infrastructure spawns are deferred. Disabled by default (0).
@@ -409,13 +348,6 @@ type MailThresholds struct {
 	// to reply via gt mail send rather than in chat (default "30s").
 	// Set to "0s" to disable reply reminders entirely.
 	ReplyReminderDelay string `json:"reply_reminder_delay,omitempty"`
-
-	// The keys below have no reader (gt-e2kxa). They are declared so a
-	// settings file that still carries them decodes.
-	IdleNotifyTimeout   string `json:"idle_notify_timeout,omitempty"`
-	BdReadTimeout       string `json:"bd_read_timeout,omitempty"`
-	BdWriteTimeout      string `json:"bd_write_timeout,omitempty"`
-	MaxConcurrentAckOps *int   `json:"max_concurrent_ack_ops,omitempty"`
 }
 
 // RecoveryThresholds configures stalled-polecat recovery thresholds.
@@ -428,16 +360,6 @@ type RecoveryThresholds struct {
 	// with assigned work but no heartbeat file counts as possibly stuck at
 	// startup (e.g., auth 401 blocking initialization, default "5m").
 	HeartbeatStartupGrace string `json:"heartbeat_startup_grace,omitempty"`
-
-	// The keys below belonged to the retired witness patrol (gt-4k3fj.6.1):
-	// nothing reads them; they are declared so a settings file that still
-	// carries them decodes.
-	StartupStallThreshold  string `json:"startup_stall_threshold,omitempty"`
-	StartupActivityGrace   string `json:"startup_activity_grace,omitempty"`
-	DoneIntentStuckTimeout string `json:"done_intent_stuck_timeout,omitempty"`
-	DoneIntentRecentGrace  string `json:"done_intent_recent_grace,omitempty"`
-	DoneIntentMaxAge       string `json:"done_intent_max_age,omitempty"`
-	ComposerStallFrozenFor string `json:"composer_stall_frozen_for,omitempty"`
 }
 
 // DefaultOperationalConfig returns an OperationalConfig with all defaults.
