@@ -642,7 +642,6 @@ For deeper technical details, see the design docs in `docs/`:
 | Molecules | [docs/concepts/molecules.md](docs/concepts/molecules.md) |
 | Escalation | [docs/design/escalation.md](docs/design/escalation.md) |
 | Scheduler | [docs/design/scheduler.md](docs/design/scheduler.md) |
-| Convoy lifecycle | [docs/design/convoy/](docs/design/convoy/) |
 | Polecat lifecycle | [docs/concepts/polecat-lifecycle.md](docs/concepts/polecat-lifecycle.md) |
 | Plugin system | [docs/design/plugin-system.md](docs/design/plugin-system.md) |
 | Hooks | [docs/HOOKS.md](docs/HOOKS.md) |

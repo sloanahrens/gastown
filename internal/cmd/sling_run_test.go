@@ -677,8 +677,6 @@ func TestSlingRoutesRequests(t *testing.T) {
 		{name: "batch to a rig", args: []string{"gt-a", "gt-b", "gt-c", "gastown"}, want: "batch sling gt-a,gt-b,gt-c -> gastown"},
 		{name: "batch auto-resolves its rig", args: []string{"gt-a", "gt-b", "gt-c"}, want: "batch sling gt-a,gt-b,gt-c -> gastown"},
 		{name: "two beads auto-resolve", args: []string{"gt-a", "gt-b"}, want: "batch sling gt-a,gt-b -> gastown"},
-		{name: "convoy", args: []string{"hq-cv-1"}, want: "convoy sling hq-cv-1",
-			setup: func(h *slingHarness) { h.run.idType = func(string) (string, error) { return "convoy", nil } }},
 		{name: "epic", args: []string{"gt-epic"}, want: "epic sling gt-epic",
 			setup: func(h *slingHarness) { h.run.idType = func(string) (string, error) { return "epic", nil } }},
 		{name: "standalone formula", args: []string{"mol-patrol", "gastown"}, want: "sling formula mol-patrol gastown",
@@ -695,11 +693,6 @@ func TestSlingRoutesRequests(t *testing.T) {
 			setup: func(h *slingHarness) {
 				h.formulas["mol-patrol"] = true
 				h.run.shouldDefer = func() (bool, error) { return true, nil }
-			}},
-		{name: "deferred convoy", args: []string{"hq-cv-1"}, want: "convoy schedule hq-cv-1",
-			setup: func(h *slingHarness) {
-				h.run.shouldDefer = func() (bool, error) { return true, nil }
-				h.run.idType = func(string) (string, error) { return "convoy", nil }
 			}},
 		{name: "deferred formula on a bead", args: []string{"mol-review", "gastown"}, want: "schedule gt-abc123 -> gastown formula=mol-review",
 			setup: func(h *slingHarness) {
@@ -734,7 +727,7 @@ func TestSlingRoutesRequests(t *testing.T) {
 				t.Fatalf("sling: %v", err)
 			}
 			var routed []string
-			for _, p := range []string{"batch", "schedule", "convoy", "epic", "sling formula"} {
+			for _, p := range []string{"batch", "schedule", "epic", "sling formula"} {
 				routed = append(routed, h.matching(p)...)
 			}
 			if len(routed) != 1 || routed[0] != tc.want {

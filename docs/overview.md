@@ -66,8 +66,8 @@ gt convoy list
 - Auto-notification when work lands
 - Historical record of completed work (`gt convoy list --all`)
 
-The "swarm" is the set of workers currently assigned to a convoy's issues.
-When issues close, the convoy lands. See [Convoys](concepts/convoy.md) for details.
+The "swarm" is the set of workers currently assigned to an epic's issues.
+When issues close, the epic's work is done.
 
 ## Crew vs Polecats
 

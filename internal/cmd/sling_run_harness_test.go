@@ -112,10 +112,8 @@ func newSlingHarness(t *testing.T) *slingHarness {
 			h.record("sling formula %s", strings.Join(args, " "))
 			return nil
 		},
-		convoySchedule: func(id string, _ convoyScheduleOpts) error { h.record("convoy schedule %s", id); return nil },
-		convoySling:    func(id string, _ convoyScheduleOpts) error { h.record("convoy sling %s", id); return nil },
-		epicSchedule:   func(id string, _ epicScheduleOpts) error { h.record("epic schedule %s", id); return nil },
-		epicSling:      func(id string, _ epicScheduleOpts) error { h.record("epic sling %s", id); return nil },
+		epicSchedule: func(id string, _ epicScheduleOpts) error { h.record("epic schedule %s", id); return nil },
+		epicSling:    func(id string, _ epicScheduleOpts) error { h.record("epic sling %s", id); return nil },
 
 		verifyBead: func(id string) error {
 			if h.bead(id) == nil {

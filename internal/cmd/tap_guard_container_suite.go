@@ -61,7 +61,7 @@ func init() {
 // `go list -test -f '{{.ImportPath}} {{join .Deps "\n"}}' ./internal/...`
 // and filtering for the module's testutil import path. This catches both
 // call-site packages (internal/daemon, internal/mail,
-// internal/doltserver, internal/beads, internal/convoy, internal/polecat —
+// internal/doltserver, internal/beads, internal/polecat —
 // test files calling the entry points) and import-only packages (doctor,
 // crew, deacon, ... — the tests import testutil for the hermetic harness,
 // and the harness re-exports the opt-in env GT_TEST_DOCKER, so the linked
@@ -75,7 +75,6 @@ func init() {
 var containerSuitePackages = []string{
 	"internal/beads",
 	"internal/cmd",
-	"internal/convoy",
 	"internal/crew",
 	"internal/daemon",
 	"internal/deps",

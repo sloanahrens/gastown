@@ -467,34 +467,13 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		return fmt.Errorf("deferred dispatch requires a rig target: gt sling %s <rig>\n'%s' is not a known rig", args[0], args[1])
 	}
 
-	// Epic/convoy auto-detection (1 arg, no rig): works for both deferred and direct
+	// Epic auto-detection (1 arg, no rig): works for both deferred and direct
 	if len(args) == 1 {
 		idType, err := r.idType(args[0])
 		if err == nil && idType != "task" {
 			formula := r.resolveFormula(r.opts.formula, r.opts.hookRawBead, townRoot, "")
 
 			switch idType {
-			case "convoy":
-				if err := validateNoTaskOnlySchedulerFlags(cmd, "convoy"); err != nil {
-					return err
-				}
-				if deferred {
-					return r.convoySchedule(args[0], convoyScheduleOpts{
-						Formula:         formula,
-						FormulaExplicit: r.opts.formula != "",
-						HookRawBead:     r.opts.hookRawBead,
-						Force:           r.opts.force,
-						DryRun:          r.opts.dryRun,
-					})
-				}
-				return r.convoySling(args[0], convoyScheduleOpts{
-					Formula:         formula,
-					FormulaExplicit: r.opts.formula != "",
-					HookRawBead:     r.opts.hookRawBead,
-					Force:           r.opts.force,
-					DryRun:          r.opts.dryRun,
-					NoBoot:          r.opts.noBoot,
-				})
 			case "epic":
 				if err := validateNoTaskOnlySchedulerFlags(cmd, "epic"); err != nil {
 					return err

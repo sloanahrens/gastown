@@ -662,23 +662,18 @@ func designNotesDuplicateStore() listLikeBD {
 // TestSchedulerSlingParamsRunDuplicateCheck is the gt-skk7 / gt-eisp2 wiring
 // test. Every scheduler used to set SkipDuplicateCheck on what is actually the
 // bead's FIRST dispatch, so the check never ran on those paths at all. The
-// operator's 'gt sling <convoy|epic>' has no earlier checked sling, so the
-// params each builds must leave the check on and carry --force, the escape
-// hatch these schedulers document. That executeSling refuses on those params
-// is TestExecuteSlingDuplicateContent.
+// operator's 'gt sling <epic>' has no earlier checked sling, so the params it
+// builds must leave the check on and carry --force, the escape hatch the
+// scheduler documents. That executeSling refuses on those params is
+// TestExecuteSlingDuplicateContent.
 func TestSchedulerSlingParamsRunDuplicateCheck(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	job := convoyDispatchJob{
-		candidate: convoyCandidate{ID: "gt-3vr", Title: bead3vrTitle, RigName: "testrig"},
-		agent:     "deepseek-flash",
-	}
 	epicChild := epicDispatchCandidate{ID: "gt-3vr", Title: bead3vrTitle, RigName: "testrig"}
 
 	for _, force := range []bool{false, true} {
 		for name, params := range map[string]SlingParams{
-			"gt sling <convoy>": convoySlingParams(job, convoyScheduleOpts{Formula: "mol-polecat-work", NoBoot: true, Force: force}, townRoot),
-			"gt sling <epic>":   epicSlingParams(epicChild, "mol-polecat-work", epicScheduleOpts{Formula: "mol-polecat-work", NoBoot: true, Force: force}, townRoot),
+			"gt sling <epic>": epicSlingParams(epicChild, "mol-polecat-work", epicScheduleOpts{Formula: "mol-polecat-work", NoBoot: true, Force: force}, townRoot),
 		} {
 			if params.SkipDuplicateCheck {
 				t.Errorf("%s (force=%v): SkipDuplicateCheck set on a first dispatch", name, force)

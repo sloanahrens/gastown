@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // cookedVar is one var of bd's cooked tree.
@@ -35,8 +34,7 @@ var templateKeywords = []string{"else", "end", "this"}
 // TestIntegrationFormulaCook_WispInputs cooks the dog and polecat formulas
 // through the real bd with their inputs (GitHub #1133: a template variable
 // with no [vars] entry fails bd mol wisp): every placeholder left is a
-// declared var, the inputs are declared required, and mol-convoy-feed keeps
-// its step order.
+// declared var and the inputs are declared required.
 func TestIntegrationFormulaCook_WispInputs(t *testing.T) {
 	town := t.TempDir()
 	if _, err := ProvisionFormulas(town); err != nil {
@@ -49,8 +47,6 @@ func TestIntegrationFormulaCook_WispInputs(t *testing.T) {
 		name   string
 		inputs []string
 	}{
-		{constants.MolConvoyFeed, []string{"convoy"}},
-		{constants.MolConvoyCleanup, nil},
 		{"mol-dep-propagate", nil},
 		{"mol-orphan-scan", nil},
 		{"mol-session-gc", nil},
@@ -80,16 +76,6 @@ func TestIntegrationFormulaCook_WispInputs(t *testing.T) {
 		for _, in := range tc.inputs {
 			if !slices.Contains(f.Vars, cookedVar{Name: in, Required: true}) {
 				t.Errorf("%s: input %q is not a required var", tc.name, in)
-			}
-		}
-		if tc.name == constants.MolConvoyFeed {
-			var ids []string
-			for _, s := range f.Steps {
-				ids = append(ids, s.ID)
-			}
-			want := []string{"load-convoy", "check-capacity", "dispatch-work", "report-results", "return-to-kennel"}
-			if !slices.Equal(ids, want) {
-				t.Errorf("%s: steps %v, want %v", tc.name, ids, want)
 			}
 		}
 	}

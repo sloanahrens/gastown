@@ -56,7 +56,7 @@ func TestFormulaCheck_Run_Missing(t *testing.T) {
 
 	// Delete a formula
 	formulasDir := filepath.Join(tmpDir, ".beads", "formulas")
-	formulaPath := filepath.Join(formulasDir, "mol-convoy-feed.formula.toml")
+	formulaPath := filepath.Join(formulasDir, "mol-orphan-scan.formula.toml")
 	if err := os.Remove(formulaPath); err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestFormulaCheck_Fix(t *testing.T) {
 
 	// Delete a formula
 	formulasDir := filepath.Join(tmpDir, ".beads", "formulas")
-	formulaPath := filepath.Join(formulasDir, "mol-convoy-feed.formula.toml")
+	formulaPath := filepath.Join(formulasDir, "mol-orphan-scan.formula.toml")
 	if err := os.Remove(formulaPath); err != nil {
 		t.Fatal(err)
 	}

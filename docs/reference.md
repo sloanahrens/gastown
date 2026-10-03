@@ -695,7 +695,7 @@ gt convoy list --all                    # Include landed convoys
 gt convoy list --status=closed          # Only landed convoys
 ```
 
-Note: "Swarm" is ephemeral (workers on a convoy's issues). See [Convoys](concepts/convoy.md).
+Note: "Swarm" is ephemeral (workers on an epic's issues).
 
 ### Work Assignment
 

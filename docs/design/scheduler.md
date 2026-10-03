@@ -457,5 +457,4 @@ Convoys and the scheduler are complementary but distinct mechanisms. Convoys tra
 
 ## See Also
 
-- [Convoys](../concepts/convoy.md) — Convoy tracking
 - [Property Layers](property-layers.md) — Labels-as-state pattern used by scheduler labels (see Operational State Events section)
