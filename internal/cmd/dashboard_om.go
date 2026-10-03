@@ -75,10 +75,11 @@ type omReader struct {
 	logPath  string
 	cfgPath  string
 
-	mu      sync.Mutex
-	offset  int64
-	stages  []omStage
-	rejects []omRejection
+	mu       sync.Mutex
+	offset   int64
+	stages   []omStage
+	rejects  []omRejection
+	lastTick *dashboard.Dispatch // the spec dispatcher's latest tick line
 }
 
 func newOMReader(townRoot string, landings *dashLandings) *omReader {
@@ -160,7 +161,7 @@ func (r *omReader) scanLog() error {
 			return err
 		}
 		r.offset += int64(len(line))
-		if !strings.Contains(line, "[land]") {
+		if !strings.Contains(line, "[land]") && !strings.Contains(line, dispatchTickMarker) {
 			continue
 		}
 		r.parseLogLine(strings.TrimRight(line, "\r\n"))
@@ -168,6 +169,12 @@ func (r *omReader) scanLog() error {
 }
 
 func (r *omReader) parseLogLine(line string) {
+	if strings.Contains(line, dispatchTickMarker) {
+		if d := parseDispatchTick(line); d != nil {
+			r.lastTick = d
+		}
+		return
+	}
 	if m := omStageRe.FindStringSubmatch(line); m != nil {
 		if at, err := time.ParseInLocation(omLogTimeLayout, m[1], time.Local); err == nil {
 			r.stages = append(r.stages, omStage{At: at, Bead: m[2], OM: omStageDuration(m[3])})
@@ -439,4 +446,18 @@ func truncateRunes(s string, n int) string {
 		return s
 	}
 	return string(r[:n-1]) + "…"
+}
+
+// dispatch returns the latest dispatcher tick in the log, nil when there is none.
+func (r *omReader) dispatch() *dashboard.Dispatch {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.scanLog(); err != nil && r.lastTick == nil {
+		return nil
+	}
+	if r.lastTick == nil {
+		return nil
+	}
+	d := *r.lastTick
+	return &d
 }

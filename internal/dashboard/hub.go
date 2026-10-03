@@ -80,6 +80,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.OM != nil {
 		start(h.cfg.OMEvery, h.pollOM)
 	}
+	if h.cfg.Dispatch != nil {
+		start(h.cfg.DispatchEvery, h.pollDispatch)
+	}
 	wg.Wait()
 }
 
@@ -233,6 +236,17 @@ func (h *Hub) pollOM() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.OM = om
+	h.publishLocked()
+}
+
+func (h *Hub) pollDispatch() {
+	d := h.cfg.Dispatch()
+	if d == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.state.Dispatch = d
 	h.publishLocked()
 }
 

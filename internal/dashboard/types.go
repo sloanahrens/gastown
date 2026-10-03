@@ -75,6 +75,10 @@ type Polecat struct {
 	LastActive *time.Time `json:"last_active,omitempty"`
 	QuietSec   int64      `json:"quiet_sec,omitempty"`
 
+	// Hints are read-only commands an operator would run to look into this
+	// polecat. The page shows them with a copy button and never runs them.
+	Hints []string `json:"hints,omitempty"`
+
 	Landed24h   int      `json:"landed_24h"`
 	Approved24h int      `json:"approved_24h"`
 	AvgScore24h *float64 `json:"avg_score_24h,omitempty"`
@@ -185,6 +189,28 @@ type OM struct {
 	Recent    []OMReview     `json:"recent"`
 }
 
+// SkippedBead is a bead the dispatcher considered and did not sling, with the
+// reason it logged.
+type SkippedBead struct {
+	Bead   string `json:"bead"`
+	Reason string `json:"reason"`
+}
+
+// Dispatch is the spec dispatcher's most recent tick.
+type Dispatch struct {
+	At         time.Time     `json:"at"`
+	Candidates int           `json:"candidates"`
+	Roster     string        `json:"roster"` // "deepseek-flash 2/3"
+	Dispatched int           `json:"dispatched"`
+	Refused    int           `json:"refused"`
+	Planning   int           `json:"planning"`
+	Skipped    int           `json:"skipped"`
+	Failed     int           `json:"failed"`
+	Held       int           `json:"held"` // held by the failed label
+	Named      []SkippedBead `json:"named,omitempty"`
+	More       int           `json:"more,omitempty"` // skipped beads the line did not name
+}
+
 // State is everything the page draws apart from the feed.
 type State struct {
 	Now       time.Time       `json:"now"`
@@ -198,6 +224,7 @@ type State struct {
 	Gates     []GatePoint     `json:"gates"`
 	Spend     json.RawMessage `json:"spend,omitempty"`
 	OM        *OM             `json:"om,omitempty"`
+	Dispatch  *Dispatch       `json:"dispatch,omitempty"`
 }
 
 // Config wires the hub to its readers. Every reader is optional; a nil reader
@@ -216,15 +243,18 @@ type Config struct {
 	Spend func() json.RawMessage
 	// OM reads the reviewer's record from disk.
 	OM func() *OM
+	// Dispatch reads the spec dispatcher's last tick from the daemon log.
+	Dispatch func() *Dispatch
 
 	Now func() time.Time
 
-	FeedEvery    time.Duration
-	SummaryEvery time.Duration
-	HealthEvery  time.Duration
-	MachineEvery time.Duration
-	SpendEvery   time.Duration
-	OMEvery      time.Duration
+	FeedEvery     time.Duration
+	SummaryEvery  time.Duration
+	HealthEvery   time.Duration
+	MachineEvery  time.Duration
+	SpendEvery    time.Duration
+	OMEvery       time.Duration
+	DispatchEvery time.Duration
 
 	RingSize int // feed entries kept for a page that connects late
 }
@@ -244,6 +274,7 @@ func (c *Config) defaults() {
 	def(&c.MachineEvery, 10*time.Second)
 	def(&c.SpendEvery, 5*time.Minute)
 	def(&c.OMEvery, 60*time.Second)
+	def(&c.DispatchEvery, 10*time.Second)
 	if c.RingSize <= 0 {
 		c.RingSize = 500
 	}

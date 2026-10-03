@@ -197,6 +197,7 @@ func buildDashPolecats(in dashPolecatInputs) []dashboard.Polecat {
 		if !in.SessionsKnown && p.State == dashboard.StateStalled {
 			p.State, p.Reason = dashboard.StateUnknown, "tmux could not be read, so stalled cannot be told from working"
 		}
+		p.Hints = dashPolecatHints(s.Rig, s.Name, p.Bead, p.State)
 		out = append(out, p)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
