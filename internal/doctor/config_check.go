@@ -792,7 +792,7 @@ func (c *CustomStatusesCheck) Run(ctx *CheckContext) *CheckResult {
 			Message: "Custom statuses not configured",
 			Details: []string{
 				"Gas Town custom statuses (staged_ready, staged_warnings) are not registered",
-				"Convoy staging will fail without these statuses",
+				"Beads still carrying those statuses would not validate",
 			},
 			FixHint: "Run 'gt doctor fix beads-custom-statuses' or 'bd config set status.custom \"" + constants.BeadsCustomStatuses + "\"'",
 		}

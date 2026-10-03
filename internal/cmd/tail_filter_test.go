@@ -32,8 +32,6 @@ func TestTailVisible_HidesRoutineKeepsTheRest(t *testing.T) {
 		{"polecat bead create", ev("create gt-gastown-polecat-garnet status=open actor=daemon seq=1"), true},
 		{"polecat bead close", ev("close gt-gastown-polecat-garnet status=closed actor=daemon seq=9"), true},
 		{"other bead update", ev("update gt-pf2ml status=open actor=sloan seq=5"), true},
-		{"wisp close detected", dm("Convoy: close detected: gt-wisp-liqn (from gastown)"), false},
-		{"bead close detected", dm("Convoy: close detected: gt-7oc5s (from gastown)"), true},
 		{"heartbeat start", dm("Heartbeat starting (recovery-focused)"), false},
 		{"heartbeat done", dm("Heartbeat complete (#53)"), false},
 		{"handler skip", dm("Handler: skipping plugin seat-refill (gate=manual, requires explicit trigger)"), false},
@@ -52,14 +50,10 @@ func TestTailVisible_HidesRoutineKeepsTheRest(t *testing.T) {
 		{"doctor finding", dm("doctor_dog: 1 finding(s), pouring molecule for agent execution: backup beads is 5h0m0s old (threshold 4h0m0s)"), true},
 		{"patrol scan summary", dm("patrol_scan: gastown: checked 3 polecat(s): 0 restarted, 0 refused, 0 unknown, 0 molecule(s) closed, 0 reopened, 0 error(s)"), false},
 		{"patrol scan error", dm("patrol_scan: gastown: scan failed: dolt unreachable"), true},
-		{"convoy tracked by", dm("Convoy: gt-ydzwb tracked by 1 convoy(s): [hq-cv-e7w3w]"), false},
-		{"convoy checked", dm("Convoy: checking convoy hq-cv-ohjaq"), false},
-		{"convoy store unavailable", dm("Convoy: hm beads store unavailable: dolt circuit breaker is open: server appears down, failing fast (cooldown 5s)"), true},
 		{"alert cleared", dm("clearAlerts(jsonl_git_backup:push): backup push succeeded"), false},
 		{"alert clear failed", dm("clearAlerts(patrol_watchdog:gastown/witness): recording the clear failed"), true},
 		{"town health", dm("townhealth: RED tick 4ms ago: escalation=oldest_2h needs-human=1"), true},
 		{"upgrade restart", dm("Restarting for upgrade: shutting down so launchd restarts the daemon on the installed binary"), true},
-		{"rejection marker", dm("Convoy hq-cv-zd1: gt-1go.1 carries a merge rejection; its surviving branch does not hold it (rework)"), true},
 		{"landing", tailLine{Rig: "gastown", Kind: tailKindLandings, Text: "landed gt-1 polecat/opal/gt-1 -> main"}, true},
 	}
 	for _, c := range cases {
@@ -123,8 +117,7 @@ func TestTailClassOf(t *testing.T) {
 		{"polecat/opal/gt-1: stages: lint 18s, gate 92s, om 2m31s", tailClassLanding},
 		{"slung gt-1 to gastown/polecats/opal", tailClassDispatch},
 		{"spawned polecat basalt for gastown", tailClassDispatch},
-		{`Convoy hq-cv-euzgw: feeding gt-gzmfs to gastown (agent "claude-sonnet" recorded on convoy at sling time)`, tailClassDispatch},
-		{"Convoy: gt-hk555 has surviving branch polecat/quartz/gt-hk555+mupx50ri on origin (dead holder gastown/crew/sloan) — work preserved, skipping feed (resume with: gt sling gt-hk555 gastown --branch polecat/quartz/gt-hk555+mupx50ri)", tailClassPlain},
+		{"gt-1: work survives on polecat/quartz/gt-1+mupx50 on origin (resume with gt sling gt-1 gastown --branch polecat/quartz/gt-1+mupx50)", tailClassPlain},
 		{"Restarting for upgrade: shutting down so launchd restarts the daemon on the installed binary", tailClassRestart},
 		{"Upgrade restart: leaving Dolt server running for the next daemon to adopt", tailClassRestart},
 		{"upgrade-restart: draining: no new landing pass until restart", tailClassRestart},
@@ -444,47 +437,8 @@ func TestTailEventDuplicateLatch(t *testing.T) {
 	if got := tailEventKey("read failed: bd events tail: exit status 25"); got != "" {
 		t.Errorf("a source diagnostic line keyed as %q; it has no journal op", got)
 	}
-	if !latch.visible(tailLine{At: at("2026-09-30T14:00:06Z"), Rig: "town", Kind: tailKindDaemon, Text: "Convoy: close detected: gt-1 (from gastown)"}) {
+	if !latch.visible(tailLine{At: at("2026-09-30T14:00:06Z"), Rig: "town", Kind: tailKindDaemon, Text: "hm witness restarted"}) {
 		t.Error("a daemon line is not a journal record")
-	}
-}
-
-// TestTailSeatWaitLatch: a convoy retrying a bead with no seat prints one
-// waiting line, and prints again only when the bead, the reason or the
-// outcome changes.
-func TestTailSeatWaitLatch(t *testing.T) {
-	t.Parallel()
-	dm := func(text string) tailLine {
-		return tailLine{At: at("2026-09-30T14:00:00Z"), Rig: "town", Kind: tailKindDaemon, Text: text}
-	}
-	latch := &tailSeatWaitLatch{}
-	got, ok := latch.adjust(dm("Convoy hq-cv-1: deferring gt-abc: pool: full (0/1) -> no seat for deepseek-flash"))
-	if !ok || got.Text != "⏳ waiting for a seat: gt-abc" {
-		t.Fatalf("first deferral = %q, %v", got.Text, ok)
-	}
-	if _, ok := latch.adjust(dm("Convoy hq-cv-1: deferring gt-abc: pool: full (0/1) -> no seat for deepseek-flash")); ok {
-		t.Error("the same bead for the same reason must not print again")
-	}
-	if _, ok := latch.adjust(dm("Convoy hq-cv-1: deferring gt-abc: pool: full (0/1) -> no seat for deepseek-flash")); ok {
-		t.Error("the retry loop must stay collapsed while bead and reason hold still")
-	}
-	if _, ok := latch.adjust(dm("Convoy hq-cv-2: deferring gt-other: pool: full (0/1) -> no seat for deepseek-flash")); !ok {
-		t.Error("another bead waiting for a seat is its own line")
-	}
-	// The outcome changed: the bead got its seat.
-	if _, ok := latch.adjust(dm(`Convoy hq-cv-1: feeding gt-abc to gastown (agent "deepseek-flash" recorded on convoy at sling time)`)); !ok {
-		t.Error("the feeding line is the outcome and must print")
-	}
-	if _, ok := latch.adjust(dm("Convoy hq-cv-1: deferring gt-abc: pool: full (0/1) -> no seat for deepseek-flash")); !ok {
-		t.Error("the bead losing its seat again must print a fresh waiting line")
-	}
-	// A deferral that is not about seating keeps the convoy's own words.
-	plain := "Convoy hq-cv-1: deferring gt-abc: bead is held by another convoy"
-	if got, ok := latch.adjust(dm(plain)); !ok || got.Text != plain {
-		t.Fatalf("a non-seat deferral = %q, %v", got.Text, ok)
-	}
-	if got, ok := latch.adjust(dm("hm witness restarted")); !ok || got.Text != "hm witness restarted" {
-		t.Fatalf("an unrelated daemon line = %q, %v", got.Text, ok)
 	}
 }
 
@@ -610,28 +564,14 @@ func TestTailDefaultFilter(t *testing.T) {
 	if shown(ev("2026-09-30T14:00:01Z", "close gt-1 status=closed actor=daemon seq=4")) {
 		t.Error("the duplicate must be hidden")
 	}
-	got, ok := f.visible(dm("2026-09-30T14:00:02Z", "Convoy hq-cv-1: deferring gt-9: pool: full (0/1) -> no seat for x"))
-	if !ok || got.Text != "⏳ waiting for a seat: gt-9" {
-		t.Fatalf("a seat wait = %q, %v", got.Text, ok)
-	}
-	if _, ok := f.visible(dm("2026-09-30T14:00:05Z", "Convoy hq-cv-1: deferring gt-9: pool: full (0/1) -> no seat for x")); ok {
-		t.Error("the seat-retry repeat must be hidden")
-	}
 }
 
-// tailBusyDropFloor is the least share of a busy quarter hour the default view
-// must remove of what it printed before the latches. It is a floor rather than
-// the sample's own 38%: the sample is one recording, and the guarantee is that
-// the view shrinks materially, not that it hits a ratio.
-const tailBusyDropFloor = 0.30
-
-// TestTailDefaultView_RemovesAboutAThirdOfABusyQuarterHour is the bead's own
-// measure, over a recorded busy quarter hour: the lines this bead adds latches
-// for — a repeated events row, a convoy's seat-retry loop — are about a third
-// of what the default view used to print, so the default view shrinks rather
-// than grows, and no line that reports a landing, a rejection or an escalation
-// is lost to it.
-func TestTailDefaultView_RemovesAboutAThirdOfABusyQuarterHour(t *testing.T) {
+// TestTailDefaultView_DropsRepeatsAndKeepsReportingLines: over a recorded busy
+// quarter hour, the default view folds away the lines its latches exist for —
+// a repeated events row, a repeated townhealth line — so it prints less than
+// the routine-line filter alone, and no line that reports a landing, a
+// rejection or an escalation is lost to it.
+func TestTailDefaultView_DropsRepeatsAndKeepsReportingLines(t *testing.T) {
 	t.Parallel()
 	raw, err := os.ReadFile(filepath.Join("testdata", "tail_busy_sample.txt"))
 	if err != nil {
@@ -660,23 +600,17 @@ func TestTailDefaultView_RemovesAboutAThirdOfABusyQuarterHour(t *testing.T) {
 		}
 		return n
 	}
-	// The view as it was before the latches: the routine lines hidden and a
-	// townhealth repeat latched, which is all it did.
+	// The view without the duplicate latch: the routine lines hidden and a
+	// townhealth repeat latched.
 	before := &tailTownHealthLatch{}
 	beforeCount := count(func(l tailLine) (tailLine, bool) { return l, tailVisible(l) && before.visible(l.Text) })
 	afterCount := count(newTailView(tailTestLoc, tailViewOptions{}).Show)
-	drop := 1 - float64(afterCount)/float64(beforeCount)
-	t.Logf("default view prints %d of %d lines (%.0f%% dropped)", afterCount, beforeCount, drop*100)
-	// The recorded sample drops 58 lines to 36 — 38%. The floor sits a little
-	// below that, so a sample that shifts by a line or two does not flip the
-	// test, and still fails loudly if a latch stops working: with no latches
-	// the drop is zero.
-	if drop < tailBusyDropFloor {
-		t.Fatalf("the default view prints %d lines where it printed %d (%.0f%% dropped); want at least %.0f%% gone",
-			afterCount, beforeCount, drop*100, tailBusyDropFloor*100)
-	}
-	if afterCount >= len(lines) {
-		t.Fatalf("the default view prints %d of the sample's %d raw lines", afterCount, len(lines))
+	t.Logf("default view prints %d of %d lines", afterCount, beforeCount)
+	// The sample carries repeated events rows, so the duplicate latch must fold
+	// something away; a latch that stops working leaves the two counts equal.
+	if afterCount >= beforeCount {
+		t.Fatalf("the default view prints %d lines where the routine filter alone printed %d; want fewer",
+			afterCount, beforeCount)
 	}
 	// The lines that report something must survive: nothing here is routine.
 	for _, l := range lines {

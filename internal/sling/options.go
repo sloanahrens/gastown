@@ -4,9 +4,9 @@
 //
 // internal/cmd keeps the cobra layer: it parses flags into Options and supplies
 // everything the engine reaches outside the process (polecat spawn, bd writes,
-// hooks, convoys, sessions) through Deps. The daemon's convoy feeder and the
-// convoy continuation feed call Run in process with the same Options, so a
-// dispatch that used to exec `gt sling` is a typed call a compiler checks.
+// hooks, sessions) through Deps. An in-process caller such as the daemon calls
+// Run with the same Options, so a dispatch that used to exec `gt sling` is a
+// typed call a compiler checks.
 package sling
 
 import (
@@ -16,8 +16,8 @@ import (
 // Options is one dispatch request: what to sling, where, and under which flags.
 //
 // Actor names the recorded dispatcher when the caller has no live agent role of
-// its own (the daemon records "daemon/convoy:<id>"); empty leaves the choice to
-// the caller's Actor dep.
+// its own (the daemon records "daemon/spec-dispatch"); empty leaves the choice
+// to the caller's Actor dep.
 type Options struct {
 	// What to sling
 	BeadID      string // Base bead
@@ -42,17 +42,17 @@ type Options struct {
 	// Execution behavior (set by caller, not a flag)
 	SkipCook         bool   // Batch optimization: formula already cooked
 	FormulaFailFatal bool   // true=rollback+error (single/queue), false=hook raw bead (batch)
-	CallerContext    string // Identifies the caller for shutdown messages (e.g., "queue-dispatch", "batch-sling", "daemon/convoy:hq-cv-1")
+	CallerContext    string // Identifies the caller for shutdown messages (e.g., "queue-dispatch", "batch-sling", "daemon/spec-dispatch")
 	TownRoot         string
 	BeadsDir         string
 
 	// Steps times the spawn path's stages (gt-llg8). Nil is no timer. A caller
-	// that owns its own log — the daemon, which reports per convoy — passes its
+	// that owns its own log — the daemon, which reports per tick — passes its
 	// own; the cobra command leaves it to this process's timer.
 	Steps func(name string)
 
 	// SkipDuplicateCheck disables the pre-dispatch content duplicate check
-	// (gt-mcq). No production dispatcher sets it: convoy, epic and capacity-queue
+	// (gt-mcq). No production dispatcher sets it: spec, epic and capacity-queue
 	// dispatch are each a bead's first dispatch and run the check (gt-skk7,
 	// gt-eisp2). Tests that target a later guard set it to reach that guard.
 	SkipDuplicateCheck bool

@@ -4161,7 +4161,7 @@ func buildRigPrefixMap(townRoot string) map[string]string {
 //
 // For rigs that use a short DB prefix (e.g. database "be" for the "beads_el"
 // rig), EnsureAllMetadata resolves the rig name from rigs.json and writes the
-// correct dolt_database value ("be") so that convoy event polling connects to
+// correct dolt_database value ("be") so that event polling connects to
 // the right database instead of a non-existent "beads_el" database.
 func (h *host) EnsureAllMetadata(townRoot string) (updated []string, errs []error) {
 	databases, err := h.ListDatabases(townRoot)

@@ -1485,7 +1485,7 @@ func matchesDangerousGitPush(tokens []string) string {
 // gastown-release) and a plugin script's own push when an agent runs its
 // instructions by hand. Neither gets a signal because a signal an agent sets
 // for itself is a user override, not a gate - only the Refinery's merge and
-// `gt done`'s direct-merge convoy, which gt itself sets, are gates. So the
+// `gt done`'s own direct merge, which gt itself sets, are gates. So the
 // allow path for both is a crew, mayor, or refinery session.
 const (
 	polecatMainPushReason      = "Polecats never push to main/master (use gt done)"

@@ -755,8 +755,8 @@ func contractDependencies(t *testing.T, s *scope) {
 	s.want(t, "Ready after RemoveDependency", ready, err, blocker.ID, blocked.ID)
 }
 
-// contractTypedDependencies pins AddTypedDependency the way convoys use it:
-// a tracks edge to a local issue shows on Show and does not block, a tracks
+// contractTypedDependencies pins AddTypedDependency the way a tracks edge uses
+// it: a tracks edge to a local issue shows on Show and does not block, a tracks
 // edge to an external:<rig>:<id> target is accepted although no such issue
 // exists here (bd's show omits it), and RemoveDependency drops either.
 func contractTypedDependencies(t *testing.T, s *scope) {

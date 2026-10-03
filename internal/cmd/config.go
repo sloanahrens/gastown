@@ -654,8 +654,6 @@ var configSetCmd = &cobra.Command{
 	Long: `Set a town configuration value using dot-notation keys.
 
 Supported keys:
-  convoy.notify_on_complete   Push notification to Mayor session on convoy
-                              completion (true/false, default: false)
   cli_theme                   CLI color scheme ("dark", "light", "auto")
   default_agent               Default agent preset name
   dolt.port                   Dolt SQL server port (gt install writes 3307). Set
@@ -694,7 +692,6 @@ Supported keys:
   lifecycle.backup.interval    Backup interval (default: 15m)
 
 Examples:
-  gt config set convoy.notify_on_complete true
   gt config set cli_theme dark
   gt config set default_agent claude
   gt config set dolt.port 3308
@@ -713,8 +710,6 @@ var configGetCmd = &cobra.Command{
 	Long: `Get a town configuration value using dot-notation keys.
 
 Supported keys:
-  convoy.notify_on_complete   Push notification to Mayor session on convoy
-                              completion (true/false, default: false)
   cli_theme                   CLI color scheme
   default_agent               Default agent preset name
   scheduler.max_polecats      Dispatch mode (-1 = direct, N > 0 = deferred)
@@ -741,7 +736,6 @@ Supported keys:
   lifecycle.backup.interval    Backup interval
 
 Examples:
-  gt config get convoy.notify_on_complete
   gt config get cli_theme
   gt config get maintenance.window
   gt config get lifecycle.reaper.delete_age`,
@@ -880,16 +874,6 @@ func configSet(e configCmdEnv, args []string) error {
 	}
 
 	switch key {
-	case "convoy.notify_on_complete":
-		b, err := parseBool(value)
-		if err != nil {
-			return fmt.Errorf("invalid value for %s: %w (expected true/false)", key, err)
-		}
-		if townSettings.Convoy == nil {
-			townSettings.Convoy = &config.ConvoyConfig{}
-		}
-		townSettings.Convoy.NotifyOnComplete = b
-
 	case "cli_theme":
 		switch value {
 		case "dark", "light", "auto":
@@ -986,7 +970,7 @@ func configSet(e configCmdEnv, args []string) error {
 		}
 		err := setPolecatPoolValue(townSettings, key, value)
 		if errors.Is(err, errNotAPolecatPoolKey) {
-			return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  secrets.refuse_literals\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*\n%s", key, polecatPoolKeyHelp)
+			return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  secrets.refuse_literals\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*\n%s", key, polecatPoolKeyHelp)
 		}
 		if err != nil {
 			return err
@@ -1021,13 +1005,6 @@ func configGet(e configCmdEnv, args []string) error {
 
 	var value string
 	switch key {
-	case "convoy.notify_on_complete":
-		if townSettings.Convoy != nil && townSettings.Convoy.NotifyOnComplete {
-			value = "true"
-		} else {
-			value = "false"
-		}
-
 	case "cli_theme":
 		value = townSettings.CLITheme
 		if value == "" {
@@ -1088,7 +1065,7 @@ func configGet(e configCmdEnv, args []string) error {
 		}
 		poolValue, handled := polecatPoolValue(townSettings.PolecatPool, key)
 		if !handled {
-			return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  convoy.notify_on_complete\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  secrets.refuse_literals\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*\n%s", key, polecatPoolKeyHelp)
+			return fmt.Errorf("unknown config key: %q\n\nSupported keys:\n  cli_theme\n  default_agent\n  dolt.port\n  scheduler.max_polecats\n  scheduler.batch_size\n  scheduler.spawn_delay\n  polecat.target_clean_policy\n  maintenance.window\n  secrets.refuse_literals\n  lifecycle.reaper.*\n  lifecycle.compactor.*\n  lifecycle.doctor.*\n  lifecycle.backup.*\n%s", key, polecatPoolKeyHelp)
 		}
 		value = poolValue
 	}

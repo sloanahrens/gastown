@@ -701,7 +701,7 @@ func detectActor() string {
 // resolveSlingActor returns the --actor override for this sling invocation
 // when one was passed, otherwise falls back to detectActor(). System callers
 // that shell out to `gt sling` without a live agent role of their own (e.g.
-// the daemon's convoy auto-dispatch) would otherwise record actor "unknown";
+// a daemon dispatcher) would otherwise record actor "unknown";
 // they should pass --actor explicitly instead.
 func resolveSlingActor() string {
 	if slingActor != "" {
@@ -867,8 +867,8 @@ func (f formulaBD) varsForBead(formulaName, beadID, title, formulaWorkDir, townR
 // bondFormulaDirect attaches a formula to a bead through bd's canonical bond path.
 //
 // The bond is the write that spawns the wisp and attaches it, and it is the one
-// step of a sling an unrelated writer can take from under it: under load the
-// convoy's bulk wisp closes commit against it often enough that Dolt aborts it
+// step of a sling an unrelated writer can take from under it: under load an
+// unrelated wisp close commits against it often enough that Dolt aborts it
 // (gt-4ckuf). An abort there is a dead end for the operator — the sling exits
 // non-zero with the bead left open and unassigned — so the attempt is repeated
 // while bd reports contention. bd's storage layer owns the broad fix across its
@@ -1102,7 +1102,7 @@ func reslingSurvivingWorkGuardWith(survivingWork func(townRoot, beadID string) (
 }
 
 // errReslingRefused matches every reslingSurvivingWorkGuard refusal
-// (errors.Is). Automated dispatchers (scheduler, convoy and epic feeders)
+// (errors.Is). Automated dispatchers (scheduler, spec and epic dispatchers)
 // treat it as a deferral, not a failure: the bead waits for an operator to
 // resume (--branch) or discard (--force) the work, or for survival to become
 // verifiable again, and must not burn a dispatch attempt meanwhile.
@@ -1117,7 +1117,7 @@ func (e *reslingRefusal) Error() string { return e.msg }
 
 func (e *reslingRefusal) Is(target error) bool { return target == errReslingRefused }
 
-// feederDispatchTally counts one convoy or epic feeder run's executeSling
+// feederDispatchTally counts one automated dispatch run's executeSling
 // outcomes. A resling refusal is a deferral: it is neither a success nor a
 // failed attempt, and a run whose every attempt was deferred is not an error.
 type feederDispatchTally struct {

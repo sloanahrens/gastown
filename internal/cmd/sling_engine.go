@@ -63,7 +63,7 @@ func (d *slingDeps) engineDeps() *sling.Deps {
 }
 
 // engineActor names the dispatcher a dispatch is recorded under. An Options
-// that names its own actor (the daemon's "daemon/convoy:<id>") wins: the
+// that names its own actor (e.g. "daemon/spec-dispatch") wins: the
 // auto-detected actor is the role of whoever happens to be running the process,
 // which in a daemon is nobody.
 func (d *slingDeps) engineActor(opts sling.Options) string {
@@ -94,8 +94,8 @@ func (d *slingDeps) engineReleaseSeat(spawn *sling.Spawn) {
 // dispatch that named none: resolveFormula's rig property layers, its rig
 // settings file, and the system default. The engine asks for it instead of the
 // caller so that a dispatch made from the daemon resolves the same formula the
-// `gt sling` it replaced would have — the caller there holds a convoy's record,
-// not the town's config.
+// `gt sling` it replaced would have — the caller there holds a bead, not the
+// town's config.
 func (d *slingDeps) engineDefaultFormula(townRoot, rigName string) string {
 	return d.resolveFormula("", false, townRoot, rigName)
 }

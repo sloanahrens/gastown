@@ -63,7 +63,7 @@ type AgentFields struct {
 
 // Notification level constants
 const (
-	NotifyVerbose = "verbose" // All notifications (mail, convoy events, etc.)
+	NotifyVerbose = "verbose" // All notifications (mail, escalations, etc.)
 	NotifyNormal  = "normal"  // Important events only (default)
 	NotifyMuted   = "muted"   // Silent/DND mode - batch for later
 )

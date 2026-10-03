@@ -20,8 +20,8 @@ import (
 // dispatch is allowed, prepares the polecat, attaches the work and starts the
 // session.
 //
-// Its callers are the single-sling cobra path for rig targets, batch and queue
-// dispatch, and the daemon's convoy feeder. Two caller responsibilities are
+// Its callers are the single-sling cobra path for rig targets, and batch and
+// queue dispatch. Two caller responsibilities are
 // NOT handled here: the cross-rig guard (callers verify the bead's prefix
 // matches the target rig before Run) and waking the rig's agents after the
 // dispatch loop when NoBoot is false.
@@ -118,7 +118,7 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	// landing worker owns it until it lands or is handed back.
 	//
 	// --force does not override, unlike the operator-reservation guard: the
-	// automated redispatch paths — the convoy feeder, the scheduler — all pass
+	// automated redispatch paths — the spec dispatcher, the scheduler — all pass
 	// --force for the other guards they need, so a guard --force opens is a
 	// guard none of them is actually held by. A human who needs the bead back
 	// removes the label.
@@ -166,8 +166,8 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 
 	// Guard against dispatching a bead the human operator owns (gt-21pl0).
 	// Mirrors the guard in the single-sling CLI path so the batch and queue
-	// callers — which include the daemon's convoy feeders — refuse one too, and
-	// read the refusal as a deferral rather than a failed dispatch.
+	// callers refuse one too, and read the refusal as a deferral rather than a
+	// failed dispatch.
 	if reason := dispatch.OperatorReservation(info.Labels, info.Assignee); reason != "" && !explicitForce {
 		result.ErrMsg = "operator-reserved"
 		return result, fmt.Errorf("%s %s is the operator's work (%s)\nAn agent does not take it. Use --force to sling it to one anyway",
@@ -237,9 +237,7 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	//
 	// A caller that named a formula keeps it; one that did not gets the target
 	// rig's default, which is what `gt sling` has always applied to a polecat
-	// target and what the callers holding only a convoy's record used to
-	// inherit from the command they exec'd. Only --hook-raw-bead asks for the
-	// bare bead (gt-4lor).
+	// target. Only --hook-raw-bead asks for the bare bead (gt-4lor).
 	if opts.FormulaName == "" && !opts.HookRawBead && d.DefaultFormula != nil {
 		opts.FormulaName = d.DefaultFormula(townRoot, opts.RigName)
 	}
@@ -251,8 +249,8 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		}
 		if len(existingMolecules) > 0 {
 			// Auto-burn when bead is unassigned (molecules are definitionally stale),
-			// or when the assigned agent's session is dead. This unblocks the daemon's
-			// stranded convoy scan which never passes --force.
+			// or when the assigned agent's session is dead. This unblocks an
+			// automated redispatch that never passes --force.
 			stale := opts.Force ||
 				(info.Assignee == "" && (info.Status == "open" || info.Status == "in_progress")) ||
 				(info.Assignee != "" && d.AgentDead(info.Assignee))

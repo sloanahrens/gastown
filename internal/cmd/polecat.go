@@ -2292,7 +2292,7 @@ func recoveryTargetRefs(bd recoveryBeads, issueID, activeMR, branch string, extr
 				continue
 			}
 			if issue, err := bd.Show(candidateIssueID); err == nil {
-				appendAttachmentTargets(&refs, bd, issue)
+				appendAttachmentTargets(&refs, issue)
 			} else {
 				lookupFailed = true
 			}
@@ -2301,7 +2301,7 @@ func recoveryTargetRefs(bd recoveryBeads, issueID, activeMR, branch string, extr
 	return uniqueStrings(refs), lookupFailed, mrForBranch, mrForBranchErr
 }
 
-func appendAttachmentTargets(refs *[]string, bd issueShower, issue *beads.Issue) {
+func appendAttachmentTargets(refs *[]string, issue *beads.Issue) {
 	attachment := beads.ParseAttachmentFields(issue)
 	if attachment == nil {
 		return
@@ -2309,13 +2309,6 @@ func appendAttachmentTargets(refs *[]string, bd issueShower, issue *beads.Issue)
 	appendBaseBranchVars(refs, attachment.FormulaVars)
 	for _, value := range attachment.AttachedVars {
 		appendBaseBranchVars(refs, value)
-	}
-	if attachment.ConvoyID != "" && bd != nil {
-		if convoy, err := bd.Show(attachment.ConvoyID); err == nil {
-			if fields := beads.ParseConvoyFields(convoy); fields != nil && fields.BaseBranch != "" {
-				*refs = append(*refs, fields.BaseBranch)
-			}
-		}
 	}
 }
 

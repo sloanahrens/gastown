@@ -76,8 +76,8 @@ func adminExport(t *testing.T, s *adminScope) {
 	t.Errorf("export has no line for %s:\n%s", is.ID, data)
 }
 
-// adminEventsJournal pins EventsTail over the mutations the convoy manager
-// reads: a close is op close with status closed, and a reopen is an update
+// adminEventsJournal pins EventsTail over the mutations an events-journal
+// reader sees: a close is op close with status closed, and a reopen is an update
 // whose status is no longer closed. The database is shared with the other
 // cases, so it asserts only on its own issue's records.
 func adminEventsJournal(t *testing.T, s *adminScope) {

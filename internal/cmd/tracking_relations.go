@@ -16,7 +16,7 @@ type trackingDeps interface {
 }
 
 // townTrackingDeps returns the bd client for the town database, where
-// convoys (hq-cv-*) and their tracks edges live.
+// town-level beads and their tracks edges live.
 func townTrackingDeps(townRoot string) (trackingDeps, error) {
 	resolved := beads.ResolveBeadsDir(townRoot)
 	if resolved == "" {

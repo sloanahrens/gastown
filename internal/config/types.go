@@ -113,9 +113,6 @@ type TownSettings struct {
 	// drop operator data. Delete the key from settings/config.json by hand.
 	FeedCurator json.RawMessage `json:"feed_curator,omitempty"`
 
-	// Convoy configures convoy behavior settings.
-	Convoy *ConvoyConfig `json:"convoy,omitempty"`
-
 	// RoleEffort maps role names to effort levels for per-role effort configuration.
 	// Keys are role names: "mayor", "polecat", "crew". Keys for retired roles
 	// ("deacon", "witness", "refinery", "boot", "dog") are accepted and ignored.
@@ -438,13 +435,6 @@ type RecoveryThresholds struct {
 // DefaultOperationalConfig returns an OperationalConfig with all defaults.
 func DefaultOperationalConfig() *OperationalConfig {
 	return &OperationalConfig{}
-}
-
-// ConvoyConfig configures convoy behavior settings.
-type ConvoyConfig struct {
-	// NotifyOnComplete controls whether convoy completion pushes a notification
-	// into the active Mayor session (in addition to mail). Opt-in; default false.
-	NotifyOnComplete bool `json:"notify_on_complete,omitempty"`
 }
 
 // PolecatConfig configures per-polecat behavior. Added for hq-x0v7v
