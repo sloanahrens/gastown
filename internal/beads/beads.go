@@ -322,6 +322,9 @@ type Issue struct {
 	BlockedBy   []string `json:"blocked_by,omitempty"`
 	Labels      []string `json:"labels,omitempty"`
 	Ephemeral   bool     `json:"ephemeral,omitempty"` // Wisp/ephemeral issues, not synced to git
+	// WispType classifies an ephemeral wisp for TTL-based compaction (bd's
+	// wisp_type). Empty for a durable issue and for an untyped wisp.
+	WispType string `json:"wisp_type,omitempty"`
 
 	// Event fields (issue_type "event" only): the namespaced kind and its
 	// JSON payload, as CreateOptions.EventKind and EventPayload set them.
@@ -338,6 +341,7 @@ type Issue struct {
 	// Note: role_bead field removed - role definitions are now config-based
 
 	// Counts from list output
+	CommentCount    int `json:"comment_count,omitempty"`
 	DependencyCount int `json:"dependency_count,omitempty"`
 	DependentCount  int `json:"dependent_count,omitempty"`
 	BlockedByCount  int `json:"blocked_by_count,omitempty"`

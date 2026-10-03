@@ -131,7 +131,7 @@ type compactReportRun struct {
 	// directory with the process environment (compactReportDB).
 	db beads.Client
 	// wisps lists the active wisps; nil asks bd in workDir (listReportWisps).
-	wisps func() ([]*compactIssue, error)
+	wisps func() ([]*beads.Issue, error)
 	// compact runs `gt compact --json` and returns its output.
 	compact func() ([]byte, error)
 	// mail sends subject and body to mayor/.
@@ -195,7 +195,7 @@ func (r compactReportRun) dailyDigest() error {
 	// Query active wisps for the "Active" column
 	wisps := r.wisps
 	if wisps == nil {
-		wisps = func() ([]*compactIssue, error) { return listReportWisps(beads.New(r.workDir)) }
+		wisps = func() ([]*beads.Issue, error) { return listReportWisps(beads.New(r.workDir)) }
 	}
 	activeWisps, err := wisps()
 	if err != nil {
@@ -246,19 +246,16 @@ func (r compactReportRun) dailyDigest() error {
 // listReportWisps includes infrastructure wisps that the default bd list view
 // hides. This is intentionally separate from listWisps, whose result drives
 // mutating compaction decisions and must retain its existing scope.
-func listReportWisps(bd *beads.Beads) ([]*compactIssue, error) {
-	out, err := bd.Run("list", "--include-infra", "--json", "--all", "-n", "0")
+func listReportWisps(bd *beads.Beads) ([]*beads.Issue, error) {
+	// Status "all" keeps closed wisps in the result; Priority -1 leaves the
+	// priority unfiltered (0 would mean P0).
+	issues, err := bd.List(beads.ListOptions{Status: "all", IncludeInfra: true, Priority: -1})
 	if err != nil {
 		return nil, err
 	}
 
-	var allIssues []*compactIssue
-	if err := json.Unmarshal(extractJSONArray(out), &allIssues); err != nil {
-		return nil, fmt.Errorf("parsing report issue list: %w", err)
-	}
-
-	var wisps []*compactIssue
-	for _, issue := range allIssues {
+	var wisps []*beads.Issue
+	for _, issue := range issues {
 		if issue.Ephemeral {
 			wisps = append(wisps, issue)
 		}
@@ -267,7 +264,7 @@ func listReportWisps(bd *beads.Beads) ([]*compactIssue, error) {
 }
 
 // buildReport aggregates compaction results by category.
-func buildReport(dateStr string, result *compactResult, activeWisps []*compactIssue) *compactReport {
+func buildReport(dateStr string, result *compactResult, activeWisps []*beads.Issue) *compactReport {
 	report := &compactReport{
 		Date:       dateStr,
 		Categories: make(map[string]*categoryStats),

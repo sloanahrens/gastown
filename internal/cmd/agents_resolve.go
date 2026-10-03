@@ -218,19 +218,15 @@ func loadAgentBeadsFromDir(beadsDir string, issueSource, wispSource agentBeadSou
 }
 
 func listAgentIssues(db *beads.Beads) ([]*beads.Issue, error) {
-	out, err := db.Run("list", "--label=gt:agent", "--include-infra", "--status=all", "--json", "--flat", "--no-pager", "--limit=0")
-	if err != nil {
-		return nil, err
-	}
-	if len(out) == 0 || !json.Valid(out) {
-		return nil, nil
-	}
-
-	var issues []*beads.Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd list output: %w", err)
-	}
-	return issues, nil
+	// Limit 0 is unlimited (bd's default page is 50); Priority -1 leaves the
+	// priority unfiltered, where 0 would mean P0 only.
+	return db.List(beads.ListOptions{
+		Label:        "gt:agent",
+		IncludeInfra: true,
+		Status:       "all",
+		Limit:        0,
+		Priority:     -1,
+	})
 }
 
 func agentBeadMatches(issue *beads.Issue, role, rig string) bool {

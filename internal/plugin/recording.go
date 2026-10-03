@@ -1,14 +1,11 @@
 package plugin
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // RunResult represents the outcome of a plugin execution.
@@ -52,30 +49,14 @@ type PluginRunBead struct {
 
 // Recorder handles plugin run recording and querying.
 type Recorder struct {
-	townRoot string
-	bd       bdRunner
+	bd beads.Client
 }
 
-// bdRunner runs one bd command against the town's beads and returns what it
-// wrote to stdout and stderr. Tests script it; production runs bd.
-type bdRunner func(ctx context.Context, mode beads.SubprocessEnvMode, args ...string) (stdout []byte, stderr string, err error)
-
-// NewRecorder creates a new plugin run recorder.
+// NewRecorder creates a new plugin run recorder against the town's beads
+// database, pinned so the receipts land in the town's ledger and nowhere the
+// prefix router might send them.
 func NewRecorder(townRoot string) *Recorder {
-	r := &Recorder{townRoot: townRoot}
-	r.bd = r.runBD
-	return r
-}
-
-// runBD runs bd from the town root, with the town's beads as the fallback
-// beads directory.
-func (r *Recorder) runBD(ctx context.Context, mode beads.SubprocessEnvMode, args ...string) ([]byte, string, error) {
-	cmd := beads.CommandContext(ctx, r.townRoot, beads.ResolveBeadsDir(r.townRoot), mode, args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	return stdout.Bytes(), stderr.String(), err
+	return &Recorder{bd: beads.NewPinned(beads.ResolveBeadsDir(townRoot))}
 }
 
 // RecordRun creates an ephemeral bead for a plugin run.
@@ -97,43 +78,21 @@ func (r *Recorder) RecordRun(record PluginRunRecord) (string, error) {
 	}
 	labels = append(labels, record.ExtraLabels...)
 
-	// Build bd create command
-	args := []string{
-		"create",
-		"--ephemeral",
-		"--json",
-		"-t", "chore",
-		"--title=" + title,
-	}
-	for _, label := range labels {
-		args = append(args, "-l", label)
-	}
-	if record.Body != "" {
-		args = append(args, "--description="+record.Body)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), constants.BdCommandTimeout)
-	defer cancel()
-	stdout, stderr, err := r.bd(ctx, beads.MutationPinned, args...)
+	created, err := r.bd.Create(beads.CreateOptions{
+		Title:       title,
+		Labels:      labels,
+		Description: record.Body,
+		Ephemeral:   true,
+	})
 	if err != nil {
-		return "", fmt.Errorf("creating plugin run bead: %s: %w", stderr, err)
-	}
-
-	// Parse created bead ID from JSON output
-	var result struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(stdout, &result); err != nil {
-		return "", fmt.Errorf("parsing bd create output: %w", err)
+		return "", fmt.Errorf("creating plugin run bead: %w", err)
 	}
 
 	// Close the receipt immediately — it exists for audit/cooldown-gate queries
-	// (which use --all to include closed beads) but should not stay open.
-	closeCtx, closeCancel := context.WithTimeout(context.Background(), constants.BdCommandTimeout)
-	defer closeCancel()
-	_, _, _ = r.bd(closeCtx, beads.MutationPinned, "close", result.ID, "--reason", "plugin run recorded") // Best-effort — reaper will catch it if this fails
+	// (which read every status) but should not stay open.
+	_ = r.bd.CloseWithReason("plugin run recorded", created.ID) // Best-effort — the reaper catches it if this fails
 
-	return result.ID, nil
+	return created.ID, nil
 }
 
 // GetLastRun returns the most recent run for a plugin.
@@ -155,21 +114,19 @@ func (r *Recorder) GetRunsSince(pluginName string, since string) ([]*PluginRunBe
 	return r.queryRuns(pluginName, 0, since)
 }
 
-// queryRuns queries plugin run beads from the ledger.
+// queryRuns queries plugin run beads from the ledger. Receipts are ephemeral,
+// so the read is pinned to the wisps plane: the durable issues table holds
+// none of them (gt-5sq).
 func (r *Recorder) queryRuns(pluginName string, limit int, since string) ([]*PluginRunBead, error) {
-	args := []string{
-		"list",
-		"--json",
-		"--all",           // Include closed beads too
-		"--include-infra", // Plugin-run receipts are ephemeral; bd hides those by default
-		"-l", "type:plugin-run",
-		"-l", fmt.Sprintf("plugin:%s", pluginName),
-	}
-	if limit > 0 {
-		args = append(args, fmt.Sprintf("--limit=%d", limit))
+	opts := beads.ListOptions{
+		Status:    "all", // Include closed receipts too
+		Labels:    []string{"type:plugin-run", fmt.Sprintf("plugin:%s", pluginName)},
+		Ephemeral: true,
+		Limit:     limit,
+		Priority:  -1, // any priority
 	}
 	if since != "" {
-		// Parse as Go duration and compute an absolute RFC3339 cutoff.
+		// Parse as a Go duration and compute an absolute RFC3339 cutoff.
 		// bd's compact duration uses "m" for months, but plugin gate
 		// durations use Go's time.ParseDuration where "m" means minutes.
 		// Passing an absolute timestamp avoids this unit mismatch.
@@ -177,55 +134,32 @@ func (r *Recorder) queryRuns(pluginName string, limit int, since string) ([]*Plu
 		if err != nil {
 			return nil, fmt.Errorf("parsing duration %q: %w", since, err)
 		}
-		cutoff := time.Now().Add(-d).UTC().Format(time.RFC3339)
-		args = append(args, "--created-after="+cutoff)
+		opts.CreatedAfter = time.Now().Add(-d).UTC()
 	}
-	args = beads.InjectFlatForListJSON(args)
 
-	ctx, cancel := context.WithTimeout(context.Background(), constants.BdCommandTimeout)
-	defer cancel()
-	stdout, stderr, err := r.bd(ctx, beads.ReadOnlyPinned, args...)
+	issues, err := r.bd.List(opts)
 	if err != nil {
-		// Empty result is OK (no runs found)
-		if stderr == "" || string(stdout) == "[]\n" {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("querying plugin runs: %s: %w", stderr, err)
-	}
-
-	// Parse JSON output
-	var beads []struct {
-		ID        string   `json:"id"`
-		Title     string   `json:"title"`
-		CreatedAt string   `json:"created_at"`
-		Labels    []string `json:"labels"`
-	}
-	if err := json.Unmarshal(stdout, &beads); err != nil {
-		// Empty array is valid
-		if string(stdout) == "[]\n" || len(stdout) == 0 {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("parsing bd list output: %w", err)
+		return nil, fmt.Errorf("querying plugin runs: %w", err)
 	}
 
 	// Convert to PluginRunBead with parsed result
-	runs := make([]*PluginRunBead, 0, len(beads))
-	for _, b := range beads {
+	runs := make([]*PluginRunBead, 0, len(issues))
+	for _, issue := range issues {
 		run := &PluginRunBead{
-			ID:     b.ID,
-			Title:  b.Title,
-			Labels: b.Labels,
+			ID:     issue.ID,
+			Title:  issue.Title,
+			Labels: issue.Labels,
 		}
 
 		// Parse created_at
-		if t, err := time.Parse(time.RFC3339, b.CreatedAt); err == nil {
+		if t, err := time.Parse(time.RFC3339, issue.CreatedAt); err == nil {
 			run.CreatedAt = t
 		}
 
 		// Extract result from labels
-		for _, label := range b.Labels {
-			if len(label) > 7 && label[:7] == "result:" {
-				run.Result = RunResult(label[7:])
+		for _, label := range issue.Labels {
+			if result, ok := strings.CutPrefix(label, "result:"); ok {
+				run.Result = RunResult(result)
 				break
 			}
 		}

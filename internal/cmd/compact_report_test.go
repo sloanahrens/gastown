@@ -63,11 +63,11 @@ func TestBuildReport(t *testing.T) {
 		Skipped: 5,
 	}
 
-	activeWisps := []*compactIssue{
-		{Issue: beads.Issue{ID: "w-10"}, WispType: "heartbeat"},
-		{Issue: beads.Issue{ID: "w-11"}, WispType: "patrol"},
-		{Issue: beads.Issue{ID: "w-12"}, WispType: "patrol"},
-		{Issue: beads.Issue{ID: "w-13"}, WispType: "error"},
+	activeWisps := []*beads.Issue{
+		{ID: "w-10", WispType: "heartbeat"},
+		{ID: "w-11", WispType: "patrol"},
+		{ID: "w-12", WispType: "patrol"},
+		{ID: "w-13", WispType: "error"},
 	}
 
 	report := buildReport("2026-02-09", result, activeWisps)
@@ -350,7 +350,7 @@ func newCompactReportFixture(t *testing.T, now time.Time) *compactReportFixture 
 		now:     now,
 		workDir: t.TempDir(),
 		db:      fx.db,
-		wisps:   func() ([]*compactIssue, error) { return nil, nil },
+		wisps:   func() ([]*beads.Issue, error) { return nil, nil },
 		compact: func() ([]byte, error) { return []byte(`{"promoted":[],"deleted":[],"skipped":0}`), nil },
 		mail: func(subject, body string) error {
 			fx.mails = append(fx.mails, subject)
