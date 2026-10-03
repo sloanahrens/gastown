@@ -58,7 +58,7 @@ The base image is Anthropic's hardened Linux template for Claude Code sandboxes.
 
 ### System packages
 
-A single `apt-get install` adds the tooling Gas Town uses at runtime: `build-essential`, `git`, `libicu-dev`, `sqlite3`, `tmux`, `curl`, `ripgrep`, `zsh`, `gh`, `netcat-openbsd`, `tini`, and `vim`. The same `RUN` step cleans up `/var/lib/apt/lists/` afterwards to keep the layer small. `tini` runs as the container's PID 1 (see *Entrypoint*).
+A single `apt-get install` adds the tooling Gas Town uses at runtime: `build-essential`, `git`, `libicu-dev`, `tmux`, `curl`, `ripgrep`, `zsh`, `gh`, `netcat-openbsd`, `tini`, and `vim`. The same `RUN` step cleans up `/var/lib/apt/lists/` afterwards to keep the layer small. `tini` runs as the container's PID 1 (see *Entrypoint*).
 
 ### Language runtimes and gt dependencies
 
