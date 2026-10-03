@@ -22,6 +22,13 @@ crew member, or labeled `gt:needs-human`, is left alone.
 unlisted kind is not scanned at all, so its heads are not spent: enabling it
 later still sees the beads queued now.
 
+A third kind, `plan`, is raised for an open spec labelled `needs-planning`
+whose notes carry no `PLAN PROPOSAL` block: the planner proposes the child
+beads it breaks into, writes them into that block, and files nothing. It is
+not scheduled yet, and it will take a flag of its own rather than a `kinds`
+entry, because a town scanning the landing queue is not also asking for
+planning work (gt-4k3fj.13, gt-4k3fj.14).
+
 While the patrol runs live it owns every rejected bead: a rework bead is the
 steward's to settle, and `gt sling` refuses to dispatch one without `--force`
 so the spec dispatcher cannot spend a second polecat on

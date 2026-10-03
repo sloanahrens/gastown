@@ -270,6 +270,67 @@ func TestStartedModelSendsConflictsToTheHardPreset(t *testing.T) {
 	}
 }
 
+// TestStartedModelRunsPlanJobsOnThePlannerPreset: a plan job runs once, on
+// the planner's preset whatever the town configures for routine jobs, and a
+// failed proposal goes to the operator rather than to a second planner
+// (gt-4k3fj.13).
+func TestStartedModelRunsPlanJobsOnThePlannerPreset(t *testing.T) {
+	t.Parallel()
+	if PlanAgent != "deepseek-flash" {
+		t.Errorf("PlanAgent = %q, want deepseek-flash", PlanAgent)
+	}
+	ev := specEvent("gt-spec")
+	if model, run := StartedModel(ev, nil, "local-model", "opus"); !run || model != PlanAgent {
+		t.Errorf("no history: %q %v, want %q true", model, run, PlanAgent)
+	}
+	ran := func(id string, outcome Outcome) []Job {
+		return []Job{{ID: id, Event: KindPlan, Bead: "gt-spec", Model: PlanAgent, Outcome: outcome}}
+	}
+	if model, run := StartedModel(ev, ran("1", OutcomeFail), "local-model", "opus"); run {
+		t.Errorf("a failed plan job earned a second run on %q", model)
+	}
+	if model, run := StartedModel(ev, ran("1", OutcomeEscalated), "local-model", "opus"); run {
+		t.Errorf("an escalated plan job earned a second run on %q", model)
+	}
+	// A daemon restart is not an attempt, so the spec still gets its planner.
+	cut := []Job{{ID: "1", Event: KindPlan, Bead: "gt-spec", Model: PlanAgent}, {ID: "1", Event: KindPlan, Bead: "gt-spec", Model: PlanAgent, Outcome: OutcomeInterrupted}}
+	if model, run := StartedModel(ev, cut, "local-model", "opus"); !run || model != PlanAgent {
+		t.Errorf("after a restart: %q %v, want %q true", model, run, PlanAgent)
+	}
+}
+
+// TestRunnerRecordsAPlanJob: the ledger row a plan job leaves names its kind
+// and the planner preset, which is what gt steward status counts (gt-4k3fj.13).
+func TestRunnerRecordsAPlanJob(t *testing.T) {
+	t.Parallel()
+	sp := &fakeSpawner{write: &Result{Outcome: OutcomePass, Summary: "2 children proposed"}}
+	r := testRunner(t, sp, DefaultMaxJobs)
+	ev := specEvent("gt-spec")
+	model, run := StartedModel(ev, nil, "local-model", "opus")
+	if !run {
+		t.Fatal("no plan job for an unplanned spec")
+	}
+	prompt, err := PromptFor(ev, model != "local-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Start(context.Background(), ev, model, prompt) {
+		t.Fatal("the plan job did not start")
+	}
+	r.Wait()
+	jobs, err := r.Ledger.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	end := jobs[len(jobs)-1]
+	if end.Event != KindPlan || end.Bead != "gt-spec" || end.Model != PlanAgent || end.Outcome != OutcomePass {
+		t.Fatalf("outcome row = %+v", end)
+	}
+	if len(sp.requests()) != 1 || !strings.Contains(sp.requests()[0].Prompt, PlanProposalMarker) {
+		t.Errorf("the planner was handed %+v", sp.requests())
+	}
+}
+
 // errBadOutcome is the error ReadVerdict produces for a word outside the set,
 // so the classification test reads a real message rather than a stand-in.
 var errBadOutcome = fmt.Errorf("%s reports outcome %q, which is not one of %s", ResultFile, "done", outcomeList())

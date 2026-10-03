@@ -6,10 +6,10 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
-// Kind is the landing-queue event a job answers. The set is closed: these are
-// the two events the daemon watches for (gt-9bioi).
+// Kind is the event a job answers. The set is closed (gt-9bioi).
 type Kind string
 
 const (
@@ -18,11 +18,22 @@ const (
 	// KindRejection: the landing worker rejected a bead, which now carries
 	// the rework label and a MERGE REJECTION block naming the rejected head.
 	KindRejection Kind = "rejection"
+	// KindPlan: an open spec carries the needs-planning label and no plan
+	// proposal yet, so the planner is asked to break it down. It has no head
+	// and no branch: the spec is a bead to decompose, not a submission to
+	// judge.
+	//
+	// It is not a patrols.steward.kinds value, and the scan does not raise it
+	// yet: planning is its own default-off flag, so a town that scans the
+	// landing queue is not also asking for planning work (gt-4k3fj.13,
+	// scheduled by gt-4k3fj.14).
+	KindPlan Kind = "plan"
 )
 
-// ParseKind reads one entry of patrols.steward.kinds. The set is closed: an
-// empty string and anything that is not a kind are errors naming the key
-// (gt-9bioi.7).
+// ParseKind reads one entry of patrols.steward.kinds: the landing-queue kinds
+// the scan may cover. The set is closed: an empty string and anything that is
+// not one of them are errors naming the key (gt-9bioi.7). KindPlan is not one
+// of them — planning has its own flag (gt-4k3fj.13).
 func ParseKind(s string) (Kind, error) {
 	switch Kind(s) {
 	case KindReview:
@@ -61,7 +72,8 @@ type Event struct {
 
 // Key is the dedupe key: one event on one head of one bead. A resubmission
 // pushes a new head, so a fixed-then-rejected bead earns a new job
-// (gt-9bioi.1).
+// (gt-9bioi.1). A plan event names no head, so its key is one event on one
+// bead (gt-4k3fj.13).
 func (e Event) Key() string {
 	return strings.Join([]string{string(e.Kind), e.Bead, e.Head}, "|")
 }
@@ -80,7 +92,9 @@ func CrewAssigned(assignee string) bool {
 // Order matters: a bead the landing worker rejected carries the rework label
 // and no ready label, since Land swaps them. A bead carrying both is
 // mid-transition; the ready label wins, because the landing worker is about
-// to judge it anyway.
+// to judge it anyway. A plan event comes last of all: a bead that is both a
+// spec and submitted work is a submission, which the landing worker is about
+// to judge, and a plan proposal on it would be written over a queue entry.
 func Detect(issue *beads.Issue, rig string, seen func(key string) bool) (Event, bool) {
 	if issue == nil || CrewAssigned(issue.Assignee) {
 		return Event{}, false
@@ -116,7 +130,25 @@ func Detect(issue *beads.Issue, rig string, seen func(key string) bool) (Event, 
 		}
 		return ev, true
 	}
-	return Event{}, false
+	return planEvent(issue, rig, seen)
+}
+
+// planEvent is the event an open needs-planning spec raises: no planner has
+// proposed a breakdown for it yet. A spec whose notes carry a proposal is
+// planned — the proposal is the deliverable, and the operator deletes the
+// block to ask for another (gt-4k3fj.13).
+func planEvent(issue *beads.Issue, rig string, seen func(key string) bool) (Event, bool) {
+	if issue.Status != string(beads.StatusOpen) || !beads.HasLabel(issue, specdispatch.NeedsPlanningLabel) {
+		return Event{}, false
+	}
+	if HasPlanProposal(issue.Notes) {
+		return Event{}, false
+	}
+	ev := Event{Kind: KindPlan, Rig: rig, Bead: issue.ID}
+	if seen(ev.Key()) {
+		return Event{}, false
+	}
+	return ev, true
 }
 
 // RejectionDetail renders the rejection a job must act on as one line: the
