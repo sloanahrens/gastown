@@ -74,3 +74,48 @@ func TestDetectSenderPolecatWithoutRoleUsesRigWhenPresent(t *testing.T) {
 		t.Fatalf("detectSender() = %q, want %q", got, "gastown/granite")
 	}
 }
+
+// TestDetectSenderDaemonActorNeverFallsToOverseer pins the environment the
+// daemon gives every gt it forks: daemonGTEnv drops the identity variables
+// and sets BD_ACTOR=daemon (gt-kyik6), so gt escalate run from there must
+// attribute the escalation to the daemon, not to the human operator the cwd
+// fallback names (gt-bw6ai). The daemon runs from the town root, which no
+// agent-directory rule matches, so this is the exact shape that regressed.
+func TestDetectSenderDaemonActorNeverFallsToOverseer(t *testing.T) {
+	t.Parallel()
+	got := detectSenderWith(envMap(map[string]string{"BD_ACTOR": "daemon"}), t.TempDir())
+	if got != "daemon" {
+		t.Fatalf("detectSender() = %q, want %q (never overseer)", got, "daemon")
+	}
+}
+
+// TestDetectSenderAgentIdentityWinsOverDaemonActor: an agent session carries
+// both its own role and, in some spawn paths, a BD_ACTOR set to that same
+// address; the agent's own identity must win either way, so escalations
+// raised by agents still record the agent (gt-bw6ai).
+func TestDetectSenderAgentIdentityWinsOverDaemonActor(t *testing.T) {
+	t.Parallel()
+	got := detectSenderWith(envMap(map[string]string{
+		"GT_ROLE":  "gastown/polecats/granite",
+		"BD_ACTOR": "daemon",
+	}), t.TempDir())
+	if got != "gastown/polecats/granite" {
+		t.Fatalf("detectSender() = %q, want the agent's own address", got)
+	}
+}
+
+// TestDetectSenderPolecatWinsOverDaemonActor: the hooks live-fire probe keeps
+// BD_ACTOR from the session it runs in while setting its synthetic GT_POLECAT
+// (liveFireProbeEnv strips GT_ROLE and GT_RIG). The synthetic polecat must
+// still win, or the probe would name whatever actor it inherited instead
+// (gt-wyia, gt-bw6ai).
+func TestDetectSenderPolecatWinsOverDaemonActor(t *testing.T) {
+	t.Parallel()
+	got := detectSenderWith(envMap(map[string]string{
+		"GT_POLECAT": "live-fire",
+		"BD_ACTOR":   "daemon",
+	}), t.TempDir())
+	if got != "live-fire" {
+		t.Fatalf("detectSender() = %q, want %q", got, "live-fire")
+	}
+}
