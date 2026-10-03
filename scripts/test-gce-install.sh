@@ -82,20 +82,17 @@ fi
 export PATH=$PATH:$HOME/go/bin
 
 # ============================================
-# STEP 2: Install Beads
+# STEP 2: Check for Beads
 # ============================================
-log "Installing beads (bd)..."
+# gastown never installs bd: bd is its own product with its own release
+# channel, and a `go install` here pinned this script to whatever bd@latest
+# happened to be at run time. Require it instead.
+log "Checking for beads (bd)..."
 
 if command -v bd &> /dev/null; then
     check "beads already installed: $(bd --version)"
 else
-    # Install via go install
-    go install github.com/steveyegge/beads/cmd/bd@latest
-    if command -v bd &> /dev/null; then
-        check "beads installed: $(bd --version)"
-    else
-        fail "beads installation failed"
-    fi
+    fail "beads (bd) is not installed; install it first (gastown never installs bd)"
 fi
 
 # ============================================

@@ -4,12 +4,18 @@ package beads
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
+	agentconfig "github.com/steveyegge/gastown/internal/config"
 )
+
+// ErrNoConfiguredDatabase is the refusal of a .beads directory that names no
+// Dolt database.
+var ErrNoConfiguredDatabase = errors.New("beads directory names no Dolt database")
 
 // InitDatabaseTarget returns the Dolt database a gt-driven `bd init` must name
 // for beadsDir, or ErrNoConfiguredDatabase when the workspace names none.
@@ -25,6 +31,18 @@ func InitDatabaseTarget(beadsDir string) (string, error) {
 		return db, nil
 	}
 	return "", fmt.Errorf("%w: %s — refusing to run bd init, which would create its default database", ErrNoConfiguredDatabase, beadsDir)
+}
+
+// configuredDatabase reads dolt_database from the files bd reads for it:
+// beadsDir's own metadata.json (no redirect followed), else the legacy
+// config.json it migrates from.
+func configuredDatabase(beadsDir string) string {
+	for _, name := range []string{agentconfig.BeadsMetadataFile, "config.json"} {
+		if db, present := agentconfig.BeadsFileDatabase(filepath.Join(beadsDir, name)); present {
+			return db
+		}
+	}
+	return ""
 }
 
 // EnsureMetadataDatabase records dbName as beadsDir's dolt_database, preserving

@@ -584,9 +584,9 @@ func polecatSeatPoolSize() int {
 // because the failure would be silent: the worktree probe spawns git, and the
 // beads facts come from a shared *beads.Beads whose reads are sync.Once-guarded
 // or pure (getTownRoot, getResolvedBeadsDir) with the queries themselves
-// running as `bd` subprocesses — beads.New sets no in-process store, so Show
-// never enters the SDK storage path. Anything added here that shares mutable
-// state (an in-process store, a cached cursor) has to be made safe first.
+// running as `bd` subprocesses, so Show touches no shared storage. Anything
+// added here that shares mutable state (a cached cursor, say) has to be made
+// safe first.
 func resolvePolecatSeats(seats []polecatSeat) []PolecatListItem {
 	items := make([]PolecatListItem, len(seats))
 	workers := polecatSeatPoolSize()

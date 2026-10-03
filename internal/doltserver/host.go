@@ -54,8 +54,8 @@ type host struct {
 	sleep func(d time.Duration)
 	// bdArgs prepends --allow-stale to a bd argv when that bd accepts it.
 	bdArgs func(env, args []string) []string
-	// readIssuePrefix and writeIssuePrefix read issue_prefix through bd and
-	// write it through the in-process store (seedRigIssuePrefix).
+	// readIssuePrefix and writeIssuePrefix read and write issue_prefix
+	// through bd (seedRigIssuePrefix).
 	readIssuePrefix  func(townRoot, beadsDir string) (string, error)
 	writeIssuePrefix func(townRoot, beadsDir, database, prefix string) error
 	// doltEndpoint is the town's Dolt endpoint (config.ResolveDoltEndpoint).

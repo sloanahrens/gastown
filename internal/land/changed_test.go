@@ -10,7 +10,9 @@ import (
 
 func TestChangedPackages(t *testing.T) {
 	t.Parallel()
-	// The tree after the change: these directories hold Go files.
+	// The tree after the change: these directories hold Go files. A testdata
+	// directory holds one too once a fixture is written in Go, and the go tool
+	// still does not build it (gt-f1ynu).
 	live := map[string]bool{
 		"internal/land":    true,
 		"internal/cmd":     true,
@@ -18,6 +20,11 @@ func TestChangedPackages(t *testing.T) {
 		"internal/newhome": true,
 		"internal/oldhome": true, // lost one file but keeps others
 		"cmd/gt":           true,
+
+		"internal/testpolicy":                           true,
+		"internal/testpolicy/testdata/docker/qualified": true,
+		"internal/land/testdata/case":                   true,
+		"internal/land/_build":                          true,
 	}
 	hasGo := func(dir string) bool { return live[dir] }
 
@@ -71,6 +78,19 @@ func TestChangedPackages(t *testing.T) {
 		{
 			"testdata maps to the owning package",
 			"A\tinternal/land/testdata/case/input.txt\n",
+			[]string{"internal/land"},
+		},
+		{
+			// The go tool skips a testdata directory, so the fixture package
+			// is internal/testpolicy — not the fixture directory itself, which
+			// `go test` cannot build (gt-f1ynu).
+			"a go fixture under testdata maps to the owning package",
+			"M\tinternal/testpolicy/testdata/docker/qualified/x_test.go\n",
+			[]string{"internal/testpolicy"},
+		},
+		{
+			"an underscored directory is a fixture directory too",
+			"M\tinternal/land/_build/gen.go\n",
 			[]string{"internal/land"},
 		},
 		{

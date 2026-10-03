@@ -574,7 +574,7 @@ func TestDecidesWithoutTheStore(t *testing.T) {
 	}
 	for _, imp := range f.Imports {
 		path := strings.Trim(imp.Path.Value, `"`)
-		if path == "os/exec" || strings.Contains(path, "internal/beads") || strings.Contains(path, "steveyegge/beads") || strings.Contains(path, "internal/doltserver") {
+		if path == "os/exec" || strings.Contains(path, "internal/beads") || strings.Contains(path, "internal/doltserver") {
 			t.Errorf("supervisor.go imports %s", path)
 		}
 	}

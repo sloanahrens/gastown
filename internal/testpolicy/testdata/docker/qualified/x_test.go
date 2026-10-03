@@ -8,5 +8,5 @@ import (
 
 func TestStore(t *testing.T) {
 	t.Parallel()
-	_ = testutil.OpenTestStore(t, nil)
+	_ = testutil.TakePooledSQLDatabase(t)
 }

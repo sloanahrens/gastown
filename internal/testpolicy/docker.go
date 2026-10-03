@@ -21,7 +21,6 @@ var containerEntryPoints = map[string]bool{
 	"EnsureDoltContainerForTestMain": true,
 	"LeaseScratchDoltContainer":      true,
 	"LeaseScratchDoltContainerEnv":   true,
-	"OpenTestStore":                  true,
 	"TakePooledSQLDatabase":          true,
 	"WithDolt":                       true,
 	"DockerTestsEnabled":             true,

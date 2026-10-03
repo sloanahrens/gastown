@@ -9,7 +9,7 @@ import (
 func TestStartsContainersFixtures(t *testing.T) {
 	t.Parallel()
 	cases := map[string]bool{
-		"qualified":        true,  // testutil.OpenTestStore in a unit test
+		"qualified":        true,  // testutil.TakePooledSQLDatabase in a unit test
 		"unqualified":      true,  // RequireDoltContainer inside package testutil
 		"integration_only": false, // only an integration-tagged file calls one
 		"none":             false, // a comment or a string is not a call

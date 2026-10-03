@@ -28,8 +28,8 @@ import (
 
 // doltPoolInits is how many template databases the pool holds for bd inits.
 // It bounds how many bd init leases get one at once, not how many a run
-// uses: a lease beyond it gets an empty store database and migrates it, as
-// every bd init did before the template.
+// uses: a lease beyond it gets one of the pool's spare databases, migrated
+// by bd init itself, as every bd init did before the template.
 const doltPoolInits = 24
 
 // doltInitTemplateDB is the database bd init migrates for the template. It

@@ -41,8 +41,8 @@ func addTrackingRelation(townRoot, trackerID, issueID string) error {
 
 // addTrackingRelationWith writes trackerID --tracks--> issueID through bd
 // (bd dep add --type=tracks); a cross-rig target is stored as
-// external:<rig>:<id>. It is the only write path: the in-process store call
-// it replaced wrote through the v1.0.5 library (gt-7iwy0.2).
+// external:<rig>:<id>. It is the only write path: the in-process store call it
+// replaced went with the beads library (gt-7iwy0.2, gt-7iwy0.3).
 func addTrackingRelationWith(deps trackingDeps, townRoot, trackerID, issueID string) error {
 	if !isTrackingTargetID(issueID) {
 		return fmt.Errorf("refusing to record a tracks edge to %q: not a bead ID", issueID)

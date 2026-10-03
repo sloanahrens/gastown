@@ -256,14 +256,14 @@ func TestClassifyReadyErr_CappedIsNotAFailure(t *testing.T) {
 	}
 }
 
-// TestClassifyReadyErr_CappedWithoutTrueCount pins the sub-case where the
-// store path's unbounded re-query itself failed (ErrReadyTruncated.StoreError
-// set, TrueCount left at zero): the page is still capped data, not a hard
-// failure, even though the probe couldn't confirm how much more exists.
+// TestClassifyReadyErr_CappedWithoutTrueCount pins the sub-case where bd's
+// envelope carried no usable total (TrueCount left at zero): the page is
+// still capped data, not a hard failure, even though the size of the board
+// behind it is unconfirmed.
 func TestClassifyReadyErr_CappedWithoutTrueCount(t *testing.T) {
 	t.Parallel()
 	src := ReadySource{Name: "town"}
-	err := &beads.ErrReadyTruncated{Found: 100, Cap: 100, StoreError: errors.New("probe timed out")}
+	err := &beads.ErrReadyTruncated{Found: 100, Cap: 100}
 
 	capped := classifyReadyErr(&src, err)
 
@@ -274,7 +274,7 @@ func TestClassifyReadyErr_CappedWithoutTrueCount(t *testing.T) {
 		t.Error("src.Capped = false, want true")
 	}
 	if src.TrueCount != 0 {
-		t.Errorf("src.TrueCount = %d, want 0 (probe failed, no confirmed count)", src.TrueCount)
+		t.Errorf("src.TrueCount = %d, want 0 (bd reported no total)", src.TrueCount)
 	}
 	if src.Error != "" {
 		t.Errorf("src.Error = %q, want empty — a capped page is not a failed source", src.Error)
