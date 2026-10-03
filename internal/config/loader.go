@@ -728,6 +728,7 @@ func LoadOrCreateTownSettings(path string) (*TownSettings, error) {
 	if err := DecodeJSONFile(path, data, &settings); err != nil {
 		return nil, err
 	}
+	warnDeadOperationalKeys(path, data)
 	return &settings, nil
 }
 
