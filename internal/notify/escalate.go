@@ -87,7 +87,7 @@ func Raise(req EscalationRequest, cfg *config.EscalationConfig) (*RaiseResult, e
 	res.AlertKey = AlertKey(req.Fingerprint, req.Source, req.Description)
 	res.FingerprintLabel = FingerprintLabel(res.AlertKey)
 	if res.FingerprintLabel != "" {
-		matches, err := bd.ListEscalationsByFingerprint(res.FingerprintLabel)
+		matches, err := beads.ListEscalationsByFingerprint(bd, res.FingerprintLabel)
 		if err != nil {
 			return nil, fmt.Errorf("checking escalation fingerprint: %w", err)
 		}
@@ -100,7 +100,7 @@ func Raise(req EscalationRequest, cfg *config.EscalationConfig) (*RaiseResult, e
 			// doesn't spam every channel on every cycle. One that arrives after
 			// the window elapsed must still reach a human, or a persisting
 			// condition would go silent forever after its first alert (gt-9qg1).
-			occurrences, renotify, err := bd.BumpEscalation(existing.ID, req.Severity, req.Reason, req.Source, cfg.GetRenotifyWindow())
+			occurrences, renotify, err := beads.BumpEscalation(bd, existing.ID, req.Severity, req.Reason, req.Source, cfg.GetRenotifyWindow())
 			if err != nil {
 				return nil, fmt.Errorf("recording repeat of escalation %s: %w", existing.ID, err)
 			}
@@ -130,7 +130,7 @@ func Raise(req EscalationRequest, cfg *config.EscalationConfig) (*RaiseResult, e
 		// first notification instead of falling back to it implicitly.
 		LastNotifiedAt: notifiedAt,
 	}
-	issue, err := bd.CreateEscalationBead(req.Description, fields)
+	issue, err := beads.CreateEscalationBead(bd, req.Description, fields)
 	if err != nil {
 		return nil, fmt.Errorf("creating escalation bead: %w", err)
 	}
@@ -186,7 +186,7 @@ func sendNotifications(req EscalationRequest, issueID string, cfg *config.Escala
 		status.RuntimeNotified = true
 
 		mailBeads := beads.New(beads.ResolveBeadsDir(townRoot))
-		mailIssue, err := mailBeads.FindLatestIssueByTitleAndAssignee(msg.Subject, mail.AddressToIdentity(target))
+		mailIssue, err := beads.FindLatestIssueByTitleAndAssignee(mailBeads, msg.Subject, mail.AddressToIdentity(target))
 		if err != nil {
 			status.Warning = fmt.Sprintf("annotation lookup failed: %v", err)
 			statuses = append(statuses, status)
@@ -241,7 +241,7 @@ func Clear(townRoot string, keys []string, closedBy, reason string) ([]string, e
 	}
 
 	bd := beads.New(beads.ResolveBeadsDir(townRoot))
-	closed, err := bd.CloseEscalationsByFingerprints(labels, closedBy, reason)
+	closed, err := beads.CloseEscalationsByFingerprints(bd, labels, closedBy, reason)
 	if err != nil {
 		return nil, fmt.Errorf("clearing escalations for %s: %w", strings.Join(keys, ", "), err)
 	}

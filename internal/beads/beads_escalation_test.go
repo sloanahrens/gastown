@@ -379,7 +379,7 @@ exit 0
 	ResetBdAllowStaleCacheForTest()
 
 	b := New(t.TempDir())
-	escalations, err := b.ListEscalations()
+	escalations, err := ListEscalations(b)
 	if err != nil {
 		t.Fatalf("ListEscalations: %v", err)
 	}
@@ -488,7 +488,7 @@ func TestListEscalationsAcrossRigsInjectsFlatAndRoutes(t *testing.T) {
 	logPath := escalationBDStub(t, false)
 	b := New(t.TempDir())
 
-	escalations, err := b.ListEscalationsAcrossRigs()
+	escalations, err := ListEscalationsAcrossRigs(b)
 	if err != nil {
 		t.Fatalf("ListEscalationsAcrossRigs: %v", err)
 	}
@@ -513,7 +513,7 @@ func TestListEscalationsAcrossRigsRetriesWithoutFlatOnOldBd(t *testing.T) {
 	logPath := escalationBDStub(t, true)
 	b := New(t.TempDir())
 
-	escalations, err := b.ListEscalationsAcrossRigs()
+	escalations, err := ListEscalationsAcrossRigs(b)
 	if err != nil {
 		t.Fatalf("ListEscalationsAcrossRigs against a pre---flat bd: %v", err)
 	}
@@ -538,7 +538,7 @@ func TestListEscalationsStaysPinnedToCurrentDatabase(t *testing.T) {
 	logPath := escalationBDStub(t, false)
 	b := New(t.TempDir())
 
-	if _, err := b.ListEscalations(); err != nil {
+	if _, err := ListEscalations(b); err != nil {
 		t.Fatalf("ListEscalations: %v", err)
 	}
 
@@ -556,7 +556,7 @@ func TestListAllEscalationsAcrossRigsKeepsMessages(t *testing.T) {
 	logPath := escalationBDStub(t, false)
 	b := New(t.TempDir())
 
-	escalations, err := b.ListAllEscalationsAcrossRigs()
+	escalations, err := ListAllEscalationsAcrossRigs(b)
 	if err != nil {
 		t.Fatalf("ListAllEscalationsAcrossRigs: %v", err)
 	}
@@ -637,7 +637,7 @@ exit 0
 		Fingerprint: "escalation-fp:abc123def456",
 	}
 
-	if _, err := b.CreateEscalationBead("Test escalation", fields); err != nil {
+	if _, err := CreateEscalationBead(b, "Test escalation", fields); err != nil {
 		t.Fatalf("CreateEscalationBead: %v", err)
 	}
 

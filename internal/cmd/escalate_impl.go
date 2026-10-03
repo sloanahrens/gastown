@@ -333,12 +333,12 @@ func listEscalations(w, errOut io.Writer, bd *beads.Beads, all, asJSON bool) err
 	var issues []*beads.Issue
 	if all {
 		// List all (open and closed)
-		issues, err = bd.ListAllEscalationsAcrossRigs()
+		issues, err = beads.ListAllEscalationsAcrossRigs(bd)
 		if err != nil {
 			return fmt.Errorf("listing escalations: %w", err)
 		}
 	} else {
-		issues, err = bd.ListEscalationsAcrossRigs()
+		issues, err = beads.ListEscalationsAcrossRigs(bd)
 		if err != nil {
 			return fmt.Errorf("listing escalations: %w", err)
 		}
@@ -419,7 +419,7 @@ func runEscalateAck(cmd *cobra.Command, args []string) error {
 	}
 
 	bd := beads.New(beads.ResolveBeadsDir(townRoot))
-	if err := bd.AckEscalation(escalationID, ackedBy); err != nil {
+	if err := beads.AckEscalation(bd, escalationID, ackedBy); err != nil {
 		return fmt.Errorf("acknowledging escalation: %w", err)
 	}
 
@@ -448,7 +448,7 @@ func runEscalateClose(cmd *cobra.Command, args []string) error {
 	}
 
 	bd := beads.New(beads.ResolveBeadsDir(townRoot))
-	if err := bd.CloseEscalation(escalationID, closedBy, escalateCloseReason); err != nil {
+	if err := beads.CloseEscalation(bd, escalationID, closedBy, escalateCloseReason); err != nil {
 		return fmt.Errorf("closing escalation: %w", err)
 	}
 
@@ -535,7 +535,7 @@ func runEscalateStale(cmd *cobra.Command, args []string) error {
 	maxReescalations := escalationConfig.GetMaxReescalations()
 
 	bd := beads.New(beads.ResolveBeadsDir(townRoot))
-	stale, err := bd.ListStaleEscalations(threshold)
+	stale, err := beads.ListStaleEscalations(bd, threshold)
 	if err != nil {
 		return fmt.Errorf("listing stale escalations: %w", err)
 	}
@@ -590,7 +590,7 @@ func runEscalateStale(cmd *cobra.Command, args []string) error {
 	defer router.WaitPendingNotifications()
 
 	for _, issue := range stale {
-		result, err := bd.ReescalateEscalation(issue.ID, reescalatedBy, maxReescalations)
+		result, err := beads.ReescalateEscalation(bd, issue.ID, reescalatedBy, maxReescalations)
 		if err != nil {
 			style.PrintWarning("failed to reescalate %s: %v", issue.ID, err)
 			continue
@@ -717,7 +717,7 @@ func runEscalateShow(cmd *cobra.Command, args []string) error {
 	}
 
 	bd := beads.New(beads.ResolveBeadsDir(townRoot))
-	issue, fields, err := bd.GetEscalationBead(escalationID)
+	issue, fields, err := beads.GetEscalationBead(bd, escalationID)
 	if err != nil {
 		return fmt.Errorf("getting escalation: %w", err)
 	}

@@ -10,6 +10,14 @@ import (
 	"time"
 )
 
+// The escalation helpers are free functions over Client (gt-7iwy0.4.5): every
+// caller passes the Client it already opens, so a *Beads and any other Client
+// (internal/beads/beadsfake in unit tests) run the same logic on the Client
+// surface. Where a *Beads has a bd capability Client deliberately does not
+// expose — the stdin-bodied wisp create below, and bd's cross-database prefix
+// routing — the *Beads-only helper sits next to the free function that reaches
+// for it.
+
 // EscalationFields holds structured fields for escalation beads.
 // These are stored as "key: value" lines in the description.
 type EscalationFields struct {
@@ -197,35 +205,72 @@ func ParseEscalationFields(description string) *EscalationFields {
 	return fields
 }
 
+// escalationPriority is bd's priority for a bead created without --priority,
+// which is what the escalation create has always passed.
+const escalationPriority = 2
+
+// escalationLabels are the labels an escalation bead carries: the family
+// label, plus its severity and its fingerprint when it has one.
+func escalationLabels(fields *EscalationFields) []string {
+	labels := []string{"gt:escalation"}
+	if fields != nil && fields.Severity != "" {
+		labels = append(labels, "severity:"+fields.Severity)
+	}
+	if fields != nil && fields.Fingerprint != "" {
+		labels = append(labels, fields.Fingerprint)
+	}
+	return labels
+}
+
 // CreateEscalationBead creates an escalation bead for tracking escalations.
-// The created_by field is populated from BD_ACTOR env var for provenance tracking.
-func (b *Beads) CreateEscalationBead(title string, fields *EscalationFields) (*Issue, error) {
+// The created_by field is populated from the creating client's actor for
+// provenance tracking.
+//
+// A *Beads files it as an ephemeral wisp through bd's stdin (see
+// createEscalationWisp): bd 1.0.3+ rejects a newline inside --description, and
+// every escalation description is multi-line. Another Client creates through
+// its own Create, which is the seam it has.
+func CreateEscalationBead(c Client, title string, fields *EscalationFields) (*Issue, error) {
 	// Guard against flag-like titles (gt-e0kx5: --help garbage beads)
 	if IsFlagLikeTitle(title) {
 		return nil, fmt.Errorf("refusing to create escalation bead: %w (got %q)", ErrFlagTitle, title)
 	}
 
+	labelList := escalationLabels(fields)
 	description := FormatEscalationDescription(title, fields)
 
-	// Pass description via stdin (--body-file=-) instead of --description=...
-	// to avoid embedding newlines in a flag value. bd 1.0.3+ rejects newline-
-	// containing flag values, which broke `gt escalate` for any escalation
-	// with structured YAML metadata in the description.
+	if b, ok := c.(*Beads); ok {
+		return createEscalationWisp(b, title, description, labelList)
+	}
+
+	return c.Create(CreateOptions{
+		Title:       title,
+		Description: description,
+		Labels:      labelList,
+		Priority:    escalationPriority,
+		Ephemeral:   true,
+	})
+}
+
+// createEscalationWisp is the *Beads create for an escalation: an ephemeral
+// wisp whose description goes to bd through stdin.
+//
+// The description travels via stdin (--body-file=-) rather than as a
+// --description= value, because bd rejects a newline inside a flag value and
+// every escalation description is multi-line (dc-1bxe). --wisp-type=escalation
+// keeps the bead out of bd list and bd ready while it is open and gives it the
+// escalation TTL under gt compact. Client.Create exposes neither the stdin body
+// nor the wisp type, which is why this stays a *Beads-only helper.
+func createEscalationWisp(b *Beads, title, description string, labels []string) (*Issue, error) {
 	args := []string{"create", "--json",
 		"--title=" + title,
 		"--body-file=-",
 		"--type=task",
 		"--ephemeral",
 		"--wisp-type=escalation",
-		"--labels=gt:escalation",
 	}
-
-	// Add severity as a label for easy filtering
-	if fields != nil && fields.Severity != "" {
-		args = append(args, fmt.Sprintf("--labels=severity:%s", fields.Severity))
-	}
-	if fields != nil && fields.Fingerprint != "" {
-		args = append(args, "--labels="+fields.Fingerprint)
+	for _, label := range labels {
+		args = append(args, "--labels="+label)
 	}
 
 	// Default actor from BD_ACTOR env var for provenance tracking
@@ -249,10 +294,9 @@ func (b *Beads) CreateEscalationBead(title string, fields *EscalationFields) (*I
 
 // AckEscalation acknowledges an escalation bead.
 // Sets acked_by and acked_at fields, adds "acked" label.
-func (b *Beads) AckEscalation(id, ackedBy string) error {
-	target := b.forIssueID(id)
+func AckEscalation(c Client, id, ackedBy string) error {
 	// First get current issue to preserve other fields
-	issue, err := target.Show(id)
+	issue, err := c.Show(id)
 	if err != nil {
 		return err
 	}
@@ -270,7 +314,7 @@ func (b *Beads) AckEscalation(id, ackedBy string) error {
 	// Format new description
 	description := FormatEscalationDescription(issue.Title, fields)
 
-	return target.Update(id, UpdateOptions{
+	return c.Update(id, UpdateOptions{
 		Description: &description,
 		AddLabels:   []string{"acked"},
 	})
@@ -278,10 +322,9 @@ func (b *Beads) AckEscalation(id, ackedBy string) error {
 
 // CloseEscalation closes an escalation bead with a resolution reason.
 // Sets closed_by and closed_reason fields, closes the issue.
-func (b *Beads) CloseEscalation(id, closedBy, reason string) error {
-	target := b.forIssueID(id)
+func CloseEscalation(c Client, id, closedBy, reason string) error {
 	// First get current issue to preserve other fields
-	issue, err := target.Show(id)
+	issue, err := c.Show(id)
 	if err != nil {
 		return err
 	}
@@ -300,7 +343,7 @@ func (b *Beads) CloseEscalation(id, closedBy, reason string) error {
 	description := FormatEscalationDescription(issue.Title, fields)
 
 	// Update description first
-	if err := target.Update(id, UpdateOptions{
+	if err := c.Update(id, UpdateOptions{
 		Description: &description,
 		AddLabels:   []string{"resolved"},
 	}); err != nil {
@@ -308,8 +351,7 @@ func (b *Beads) CloseEscalation(id, closedBy, reason string) error {
 	}
 
 	// Close the issue
-	_, err = target.run("close", id, "--reason="+reason)
-	return err
+	return c.CloseWithReason(reason, id)
 }
 
 // BumpEscalation records another firing of an already-open escalation instead
@@ -339,9 +381,8 @@ func (b *Beads) CloseEscalation(id, closedBy, reason string) error {
 // versa.
 //
 // Returns the new occurrence count and whether this firing should re-notify.
-func (b *Beads) BumpEscalation(id, severity, reason, source string, renotifyWindow time.Duration) (occurrences int, renotify bool, err error) {
-	target := b.forIssueID(id)
-	issue, err := target.Show(id)
+func BumpEscalation(c Client, id, severity, reason, source string, renotifyWindow time.Duration) (occurrences int, renotify bool, err error) {
+	issue, err := c.Show(id)
 	if err != nil {
 		return 0, false, err
 	}
@@ -374,7 +415,7 @@ func (b *Beads) BumpEscalation(id, severity, reason, source string, renotifyWind
 	}
 
 	description := FormatEscalationDescription(issue.Title, fields)
-	if err := target.Update(id, UpdateOptions{Description: &description}); err != nil {
+	if err := c.Update(id, UpdateOptions{Description: &description}); err != nil {
 		return 0, false, err
 	}
 	return fields.Occurrences, renotify, nil
@@ -405,7 +446,7 @@ func ShouldRenotify(fields *EscalationFields, window time.Duration) bool {
 	return time.Since(t) >= window
 }
 
-// CloseEscalationsByFingerprint closes every open escalation carrying the given
+// CloseEscalationsByFingerprints closes every open escalation carrying the given
 // fingerprint label and reports the IDs it closed.
 //
 // This is the "auto-close on clear" half of gt-vwry: the producer that raised a
@@ -413,7 +454,7 @@ func ShouldRenotify(fields *EscalationFields, window time.Duration) bool {
 // the condition no longer holds (branch merged, main green, spike gone). A key
 // that matches nothing is not an error — that is the ordinary case for a
 // producer that calls clear on every healthy cycle.
-func (b *Beads) CloseEscalationsByFingerprints(fingerprintLabels []string, closedBy, reason string) ([]string, error) {
+func CloseEscalationsByFingerprints(c Client, fingerprintLabels []string, closedBy, reason string) ([]string, error) {
 	wanted := make(map[string]bool, len(fingerprintLabels))
 	for _, label := range fingerprintLabels {
 		if label != "" {
@@ -426,7 +467,7 @@ func (b *Beads) CloseEscalationsByFingerprints(fingerprintLabels []string, close
 
 	// One open-escalation listing serves every key: a producer clearing its
 	// whole owned set on a healthy cycle must not cost one query per key.
-	open, err := b.ListEscalations()
+	open, err := ListEscalations(c)
 	if err != nil {
 		return nil, err
 	}
@@ -437,7 +478,7 @@ func (b *Beads) CloseEscalationsByFingerprints(fingerprintLabels []string, close
 		if !matchesAnyLabel(issue, wanted) {
 			continue
 		}
-		if err := b.CloseEscalation(issue.ID, closedBy, reason); err != nil {
+		if err := CloseEscalation(c, issue.ID, closedBy, reason); err != nil {
 			errs = append(errs, fmt.Errorf("closing %s: %w", issue.ID, err))
 			continue
 		}
@@ -451,8 +492,8 @@ func (b *Beads) CloseEscalationsByFingerprints(fingerprintLabels []string, close
 
 // CloseEscalationsByFingerprint is the single-key form of
 // CloseEscalationsByFingerprints.
-func (b *Beads) CloseEscalationsByFingerprint(fingerprintLabel, closedBy, reason string) ([]string, error) {
-	return b.CloseEscalationsByFingerprints([]string{fingerprintLabel}, closedBy, reason)
+func CloseEscalationsByFingerprint(c Client, fingerprintLabel, closedBy, reason string) ([]string, error) {
+	return CloseEscalationsByFingerprints(c, []string{fingerprintLabel}, closedBy, reason)
 }
 
 func matchesAnyLabel(issue *Issue, wanted map[string]bool) bool {
@@ -466,8 +507,8 @@ func matchesAnyLabel(issue *Issue, wanted map[string]bool) bool {
 
 // GetEscalationBead retrieves an escalation bead by ID.
 // Returns nil if not found.
-func (b *Beads) GetEscalationBead(id string) (*Issue, *EscalationFields, error) {
-	issue, err := b.forIssueID(id).Show(id)
+func GetEscalationBead(c Client, id string) (*Issue, *EscalationFields, error) {
+	issue, err := c.Show(id)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return nil, nil, nil
@@ -483,31 +524,63 @@ func (b *Beads) GetEscalationBead(id string) (*Issue, *EscalationFields, error) 
 	return issue, fields, nil
 }
 
-// ListEscalations returns all open escalation beads in the current database.
+// ListEscalations returns all open escalation beads in the client's database.
 //
 // Escalations are created as ephemeral wisps (gt-fcsf), which `bd list`
 // hides by default. Without --include-infra this silently returned zero
 // results while escalations sat open and unseen — the same bug class as
 // gt-4mnd.
 //
-// This is deliberately single-database. ListEscalations is not only a display
+// This is deliberately single-database: ListEscalations is not only a display
 // path: ListStaleEscalations consumes it to reescalate and send mail, and
 // ListEscalationsByFingerprint consumes the same query shape for the duplicate
 // suppression in runEscalate. Widening those to every rig would change what
 // "stale" and "duplicate" mean for two mutating flows. For the display path see
 // ListEscalationsAcrossRigs, which is cross-rig by design.
-func (b *Beads) ListEscalations() ([]*Issue, error) {
-	out, err := b.run("list", "--label=gt:escalation", "--status=open", "--include-infra", "--json")
+func ListEscalations(c Client) ([]*Issue, error) {
+	issues, err := listEscalationsWhere(c, ListOptions{
+		Label:        "gt:escalation",
+		Status:       string(StatusOpen),
+		IncludeInfra: true,
+		Priority:     -1,
+	})
 	if err != nil {
 		return nil, err
 	}
+	return filterEscalationRecords(issues), nil
+}
 
-	var issues []*Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd list output: %w", err)
+// listEscalationsWhere is the read behind every escalation listing: the issues
+// and the wisps matching opts, in one slice.
+//
+// A *Beads answers it in one bd call, because bd's --include-infra returns the
+// persistent issues and the wisps together. Any other Client (beadsfake) keeps
+// one plane per List, so the wisp read is a second call merged here — the same
+// shape ListMergeRequests uses. A failed wisp read degrades to the issues
+// alone, as it does there.
+func listEscalationsWhere(c Client, opts ListOptions) ([]*Issue, error) {
+	issues, err := c.List(opts)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := c.(*Beads); ok {
+		return issues, nil
 	}
 
-	return filterEscalationRecords(issues), nil
+	wispOpts := opts
+	wispOpts.Ephemeral = true
+	wisps, _ := c.List(wispOpts)
+
+	seen := make(map[string]bool, len(issues))
+	for _, issue := range issues {
+		seen[issue.ID] = true
+	}
+	for _, wisp := range wisps {
+		if !seen[wisp.ID] {
+			issues = append(issues, wisp)
+		}
+	}
+	return issues, nil
 }
 
 // ListEscalationsAcrossRigs returns all open escalation beads visible to bd's
@@ -522,18 +595,35 @@ func (b *Beads) ListEscalations() ([]*Issue, error) {
 // Kept separate from ListEscalations, which the mutating escalation flows rely
 // on being local; see the note there. Message carriers (gt:message) are
 // excluded, matching the open-only display path.
-func (b *Beads) ListEscalationsAcrossRigs() ([]*Issue, error) {
-	return b.listEscalationsAcrossRigs("open")
+func ListEscalationsAcrossRigs(c Client) ([]*Issue, error) {
+	return listEscalationsAcrossRigs(c, string(StatusOpen))
 }
 
 // ListAllEscalationsAcrossRigs is ListEscalationsAcrossRigs without the
 // --status=open filter, for `gt escalate list --all`. It keeps gt:message
 // carriers, matching that flag's long-standing output.
-func (b *Beads) ListAllEscalationsAcrossRigs() ([]*Issue, error) {
-	return b.listEscalationsAcrossRigs("all")
+func ListAllEscalationsAcrossRigs(c Client) ([]*Issue, error) {
+	return listEscalationsAcrossRigs(c, "all")
 }
 
-func (b *Beads) listEscalationsAcrossRigs(status string) ([]*Issue, error) {
+// listEscalationsAcrossRigs reads the escalations at status across databases.
+//
+// A *Beads runs the query through bd's own prefix routing; another Client has
+// only its List, which is one database. The two are not equivalent — Client.List
+// pins BEADS_DIR to the client's database, so it answers with that one
+// database's beads while the routed call lets bd resolve from the working
+// directory — which is why this keeps the routed path for a *Beads rather than
+// quietly narrowing the display view (gt-wbxb).
+func listEscalationsAcrossRigs(c Client, status string) ([]*Issue, error) {
+	if b, ok := c.(*Beads); ok {
+		return listEscalationsRouted(b, status)
+	}
+	return listEscalationsAtStatus(c, status)
+}
+
+// listEscalationsRouted is the *Beads cross-database read: bd's native prefix
+// routing via routes.jsonl, without the BEADS_DIR pin run/runWithStdin apply.
+func listEscalationsRouted(b *Beads, status string) ([]*Issue, error) {
 	out, err := b.runWithRouting("list", "--label=gt:escalation", "--status="+status, "--include-infra", "--json")
 	if err != nil {
 		return nil, err
@@ -544,7 +634,25 @@ func (b *Beads) listEscalationsAcrossRigs(status string) ([]*Issue, error) {
 		return nil, fmt.Errorf("parsing bd list output: %w", err)
 	}
 
-	if status == "open" {
+	if status == string(StatusOpen) {
+		return filterEscalationRecords(issues), nil
+	}
+	return issues, nil
+}
+
+// listEscalationsAtStatus is the single-database read any Client can run.
+func listEscalationsAtStatus(c Client, status string) ([]*Issue, error) {
+	issues, err := listEscalationsWhere(c, ListOptions{
+		Label:        "gt:escalation",
+		Status:       status,
+		IncludeInfra: true,
+		Priority:     -1,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if status == string(StatusOpen) {
 		return filterEscalationRecords(issues), nil
 	}
 	return issues, nil
@@ -554,24 +662,19 @@ func (b *Beads) listEscalationsAcrossRigs(status string) ([]*Issue, error) {
 //
 // Single-database by design: this backs the duplicate suppression in
 // runEscalate, which must agree with where the escalation would be created.
-func (b *Beads) ListEscalationsByFingerprint(fingerprintLabel string) ([]*Issue, error) {
+func ListEscalationsByFingerprint(c Client, fingerprintLabel string) ([]*Issue, error) {
 	if fingerprintLabel == "" {
 		return nil, nil
 	}
-	out, err := b.run("list",
-		"--label=gt:escalation",
-		"--label="+fingerprintLabel,
-		"--status=open",
-		"--include-infra",
-		"--json",
-	)
+	issues, err := listEscalationsWhere(c, ListOptions{
+		Label:        "gt:escalation",
+		Labels:       []string{fingerprintLabel},
+		Status:       string(StatusOpen),
+		IncludeInfra: true,
+		Priority:     -1,
+	})
 	if err != nil {
 		return nil, err
-	}
-
-	var issues []*Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd list output: %w", err)
 	}
 
 	return filterEscalationRecords(issues), nil
@@ -581,21 +684,16 @@ func (b *Beads) ListEscalationsByFingerprint(fingerprintLabel string) ([]*Issue,
 //
 // Single-database: no caller needs a cross-rig severity view. A display path
 // that does should query ListEscalationsAcrossRigs and filter locally.
-func (b *Beads) ListEscalationsBySeverity(severity string) ([]*Issue, error) {
-	out, err := b.run("list",
-		"--label=gt:escalation",
-		"--label=severity:"+severity,
-		"--status=open",
-		"--include-infra",
-		"--json",
-	)
+func ListEscalationsBySeverity(c Client, severity string) ([]*Issue, error) {
+	issues, err := listEscalationsWhere(c, ListOptions{
+		Label:        "gt:escalation",
+		Labels:       []string{"severity:" + severity},
+		Status:       string(StatusOpen),
+		IncludeInfra: true,
+		Priority:     -1,
+	})
 	if err != nil {
 		return nil, err
-	}
-
-	var issues []*Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd list output: %w", err)
 	}
 
 	return filterEscalationRecords(issues), nil
@@ -625,9 +723,9 @@ func IsEscalationRecord(issue *Issue) bool {
 
 // ListStaleEscalations returns escalations older than the given threshold.
 // threshold is a duration string like "1h" or "30m".
-func (b *Beads) ListStaleEscalations(threshold time.Duration) ([]*Issue, error) {
+func ListStaleEscalations(c Client, threshold time.Duration) ([]*Issue, error) {
 	// Get all open escalations
-	escalations, err := b.ListEscalations()
+	escalations, err := ListEscalations(c)
 	if err != nil {
 		return nil, err
 	}
@@ -670,9 +768,9 @@ type ReescalationResult struct {
 // Returns the new severity if successful, or an error.
 // reescalatedBy should be the identity of the agent/process doing the reescalation.
 // maxReescalations limits how many times an escalation can be bumped (0 = unlimited).
-func (b *Beads) ReescalateEscalation(id, reescalatedBy string, maxReescalations int) (*ReescalationResult, error) {
+func ReescalateEscalation(c Client, id, reescalatedBy string, maxReescalations int) (*ReescalationResult, error) {
 	// Get the escalation
-	issue, fields, err := b.GetEscalationBead(id)
+	issue, fields, err := GetEscalationBead(c, id)
 	if err != nil {
 		return nil, err
 	}
@@ -720,7 +818,7 @@ func (b *Beads) ReescalateEscalation(id, reescalatedBy string, maxReescalations 
 	description := FormatEscalationDescription(issue.Title, fields)
 
 	// Update the bead with new description and severity label
-	if err := b.forIssueID(id).Update(id, UpdateOptions{
+	if err := c.Update(id, UpdateOptions{
 		Description:  &description,
 		AddLabels:    []string{"reescalated", "severity:" + newSeverity},
 		RemoveLabels: []string{"severity:" + result.OldSeverity},
@@ -729,6 +827,33 @@ func (b *Beads) ReescalateEscalation(id, reescalatedBy string, maxReescalations 
 	}
 
 	return result, nil
+}
+
+// FindLatestIssueByTitleAndAssignee finds the newest issue matching the given
+// title and assignee, in any Client.
+//
+// Client.List has no title filter, so this lists the assignee's open issues and
+// keeps the exact title matches itself; it is the same set bd's --title would
+// have returned for the same assignee, without a second query shape.
+func FindLatestIssueByTitleAndAssignee(c Client, title, assignee string) (*Issue, error) {
+	issues, err := c.List(ListOptions{Assignee: assignee, Status: string(StatusOpen), Priority: -1})
+	if err != nil {
+		return nil, fmt.Errorf("bd list: %w", err)
+	}
+
+	var newest *Issue
+	for _, issue := range issues {
+		if issue.Title != title || issue.Assignee != assignee {
+			continue
+		}
+		if newest == nil || issue.CreatedAt > newest.CreatedAt {
+			newest = issue
+		}
+	}
+	if newest == nil {
+		return nil, ErrNotFound
+	}
+	return newest, nil
 }
 
 // bumpSeverity returns the next higher severity level.
