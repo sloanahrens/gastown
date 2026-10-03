@@ -1,10 +1,12 @@
-// Package formularefs finds references to formulas the convoy retirement
-// deleted: code-review, design, mol-plan-review and mol-prd-review went with
-// the convoy formula type (gt-gzhin.5), and mol-convoy-feed and
-// mol-convoy-cleanup went with the gt convoy commands and internal/convoy
-// (gt-gzhin.7). A shipped formula or role template that still names one hands
-// an agent a command that cannot run, so the guard tests in internal/formula
-// and internal/templates scan their embedded trees through this package.
+// Package formularefs finds references to formulas a retirement deleted:
+// code-review, design, mol-plan-review and mol-prd-review went with the convoy
+// formula type (gt-gzhin.5); mol-convoy-feed and mol-convoy-cleanup went with
+// the gt convoy commands and internal/convoy (gt-gzhin.7); and
+// mol-idea-to-plan went on its own, for invoking gt sling flags that do not
+// exist (gt-6lm4o). A shipped formula or role template that still names one
+// hands an agent a command that cannot run, so the guard tests in
+// internal/formula and internal/templates scan their embedded trees through
+// this package.
 package formularefs
 
 import (
@@ -13,10 +15,10 @@ import (
 	"strings"
 )
 
-// Removed lists the formulas the convoy retirement deleted: the convoy formula
-// type's (gt-gzhin.5) and the two convoy-workflow formulas its last slice
-// carried out (gt-gzhin.7).
-var Removed = []string{"code-review", "design", "mol-plan-review", "mol-prd-review", "mol-convoy-feed", "mol-convoy-cleanup"}
+// Removed lists the formulas a retirement deleted: the convoy formula type's
+// (gt-gzhin.5), the two convoy-workflow formulas its last slice carried out
+// (gt-gzhin.7), and mol-idea-to-plan (gt-6lm4o).
+var Removed = []string{"code-review", "design", "mol-plan-review", "mol-prd-review", "mol-convoy-feed", "mol-convoy-cleanup", "mol-idea-to-plan"}
 
 // uniqueRemoved reports whether name belongs to the deleted formulas alone, so
 // that it is a reference wherever it stands. "design" is an ordinary English
