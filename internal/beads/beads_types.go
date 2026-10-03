@@ -30,10 +30,70 @@ const statusesSentinel = ".gt-statuses-configured"
 
 // ensuredDirs tracks which beads directories have been ensured this session.
 // This provides fast in-memory caching for multiple creates in the same CLI run.
+//
+// ensuredMu guards the maps below and is held only for map access — never
+// across the bd work. Serializing one directory's setup against itself is
+// ensuredLocks' job (see lockEnsured), so setup work for distinct directories
+// runs concurrently instead of queueing behind one process-wide lock
+// (gt-ik4a1.4.11).
 var (
-	ensuredDirs = make(map[string]bool)
-	ensuredMu   sync.Mutex
+	ensuredMu    sync.Mutex
+	ensuredDirs  = make(map[string]bool)
+	ensuredLocks = make(map[string]*dirLock)
 )
+
+// dirLock is the in-flight lock for one cache key. refs counts the callers
+// holding or waiting for it so the entry can be dropped once the last one
+// releases; an entry is created on demand and never outlives its holders.
+type dirLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+// lockEnsured takes the per-directory lock for key: concurrent calls for the
+// same beads dir serialize on it, calls for different dirs do not. The
+// returned function releases it.
+//
+// Callers must re-check the ensuredDirs and sentinel fast paths while holding
+// this lock. That re-check is what makes two concurrent calls for one dir run
+// the bd work exactly once: the second waits, sees the first's result, and
+// returns without repeating the subprocesses.
+func lockEnsured(key string) func() {
+	ensuredMu.Lock()
+	l := ensuredLocks[key]
+	if l == nil {
+		l = &dirLock{}
+		ensuredLocks[key] = l
+	}
+	l.refs++
+	ensuredMu.Unlock()
+
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		ensuredMu.Lock()
+		l.refs--
+		if l.refs == 0 {
+			delete(ensuredLocks, key)
+		}
+		ensuredMu.Unlock()
+	}
+}
+
+// ensuredCached reports whether key's setup already completed this session,
+// per the in-memory cache.
+func ensuredCached(key string) bool {
+	ensuredMu.Lock()
+	defer ensuredMu.Unlock()
+	return ensuredDirs[key]
+}
+
+// markEnsured records that key's setup completed this session.
+func markEnsured(key string) {
+	ensuredMu.Lock()
+	defer ensuredMu.Unlock()
+	ensuredDirs[key] = true
+}
 
 // FindTownRoot returns the Gas Town town root containing startDir: the
 // outermost directory holding a mayor/town.json. The walk itself belongs to
@@ -125,11 +185,15 @@ func EnsureCustomTypes(beadsDir string) error {
 	infraTypes := strings.Join(constants.BeadsInfraTypesList(), ",")
 	sentinelValue := TypeConfigSentinelValue()
 
-	ensuredMu.Lock()
-	defer ensuredMu.Unlock()
+	// Serialize only this beads dir's setup: another dir's setup, including its
+	// bd config subprocesses, runs concurrently.
+	unlock := lockEnsured(beadsDir)
+	defer unlock()
 
-	// Fast path: in-memory cache (same CLI invocation)
-	if ensuredDirs[beadsDir] {
+	// Fast path: in-memory cache (same CLI invocation). Re-checked here rather
+	// than before the lock so a caller that waited behind this dir's setup
+	// returns without repeating it.
+	if ensuredCached(beadsDir) {
 		return nil
 	}
 
@@ -140,7 +204,7 @@ func EnsureCustomTypes(beadsDir string) error {
 	sentinelPath := filepath.Join(beadsDir, typesSentinel)
 	if data, err := os.ReadFile(sentinelPath); err == nil {
 		if strings.TrimSpace(string(data)) == sentinelValue {
-			ensuredDirs[beadsDir] = true
+			markEnsured(beadsDir)
 			return nil
 		}
 		// Sentinel exists but is stale — fall through to re-configure
@@ -183,7 +247,7 @@ func EnsureCustomTypes(beadsDir string) error {
 	// re-configure automatically.
 	_ = os.WriteFile(sentinelPath, []byte(sentinelValue+"\n"), 0644)
 
-	ensuredDirs[beadsDir] = true
+	markEnsured(beadsDir)
 	return nil
 }
 
@@ -197,9 +261,14 @@ func EnsureCustomTypes(beadsDir string) error {
 // older gt versions (before the GH#2637 verify step) can cache a lie when
 // bd config set silently targeted the wrong database (gt-8po).
 func InvalidateTypeConfigCache(beadsDir string) {
+	// Hold this dir's lock so an in-flight setup cannot re-populate the cache
+	// behind the drop.
+	unlock := lockEnsured(beadsDir)
+	defer unlock()
+
 	ensuredMu.Lock()
-	defer ensuredMu.Unlock()
 	delete(ensuredDirs, beadsDir)
+	ensuredMu.Unlock()
 	_ = os.Remove(filepath.Join(beadsDir, typesSentinel))
 }
 
@@ -211,6 +280,13 @@ func TypeConfigSentinelValue() string {
 		strings.Join(constants.BeadsInfraTypesList(), ","))
 }
 
+// bdConfigExecFn executes one prepared bd config command. Tests swap in a fake
+// that blocks and counts calls, so the per-directory locking in
+// EnsureCustomTypes can be exercised without spawning bd (the XxxFn = Xxx seam
+// convention). It wraps execution, not construction, so the bd argv stays a
+// literal exec.Command the command-tree lint can still read.
+var bdConfigExecFn = func(cmd *exec.Cmd) ([]byte, error) { return cmd.CombinedOutput() }
+
 func setBDConfig(beadsDir string, env []string, key, value string) error {
 	cmd := exec.Command("bd", "config", "set", key, value)
 	cmd.Dir = beadsDir
@@ -219,7 +295,7 @@ func setBDConfig(beadsDir string, env []string, key, value string) error {
 	// operates on the correct database. Strip inherited values first — getenv()
 	// returns the first match (gt-uygpe).
 	cmd.Env = env
-	if output, err := cmd.CombinedOutput(); err != nil {
+	if output, err := bdConfigExecFn(cmd); err != nil {
 		return fmt.Errorf("configure %s in %s: %s: %w", key, beadsDir, strings.TrimSpace(string(output)), err)
 	}
 	return nil
@@ -274,13 +350,17 @@ func EnsureCustomStatuses(beadsDir string) error {
 
 	statusesList := strings.Join(constants.BeadsCustomStatusesList(), ",")
 
-	ensuredMu.Lock()
-	defer ensuredMu.Unlock()
-
 	cacheKey := beadsDir + ":statuses"
 
-	// Fast path: in-memory cache (same CLI invocation)
-	if ensuredDirs[cacheKey] {
+	// Same per-directory locking as EnsureCustomTypes, keyed on the beads dir
+	// rather than the cache key so the two setups for one dir (types, statuses)
+	// still serialize against each other — they share that dir's database and
+	// its init. Statuses for another dir do not wait on them.
+	unlock := lockEnsured(beadsDir)
+	defer unlock()
+
+	// Fast path: in-memory cache (same CLI invocation), re-checked under the lock
+	if ensuredCached(cacheKey) {
 		return nil
 	}
 
@@ -288,7 +368,7 @@ func EnsureCustomStatuses(beadsDir string) error {
 	sentinelPath := filepath.Join(beadsDir, statusesSentinel)
 	if data, err := os.ReadFile(sentinelPath); err == nil {
 		if strings.TrimSpace(string(data)) == statusesList {
-			ensuredDirs[cacheKey] = true
+			markEnsured(cacheKey)
 			return nil
 		}
 		// Sentinel exists but is stale — fall through to re-configure
@@ -348,7 +428,7 @@ func EnsureCustomStatuses(beadsDir string) error {
 	// Write sentinel file
 	_ = os.WriteFile(sentinelPath, []byte(statusesList+"\n"), 0644)
 
-	ensuredDirs[cacheKey] = true
+	markEnsured(cacheKey)
 	return nil
 }
 
