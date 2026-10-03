@@ -295,6 +295,29 @@ func TestLandMergesGatesPushesAndRecords(t *testing.T) {
 	landsAndRecords(t, newLandFixture(t))
 }
 
+// gt-84gcp: a landing reports each stage as it enters it, so the daemon's
+// landing-stuck alarm can judge the stage the pass is running rather than the
+// pipeline as a whole. The stages before the gate are reported by nothing:
+// they have no timeout of their own.
+func TestLandReportsItsStages(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	var stages []string
+	l := f.lander()
+	l.Stage = func(beadID, stage string) {
+		if beadID != f.work.BeadID {
+			t.Errorf("stage %q reported for bead %q, want %q", stage, beadID, f.work.BeadID)
+		}
+		stages = append(stages, stage)
+	}
+	if _, err := l.Land(context.Background(), f.work); err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	if want := []string{StageGate, StageOM}; !slices.Equal(stages, want) {
+		t.Fatalf("stages = %v, want %v", stages, want)
+	}
+}
+
 // landsAndRecords lands the fixture's work onto a main that moved on, and
 // checks the merge, the gate and review, the push and the whole record. The
 // integration tier runs it over real git.

@@ -56,10 +56,6 @@ const mayorAddress = "mayor/"
 // The landing-pipeline thresholds (gt-vsct7.3), compiled in like the queue's
 // others.
 const (
-	// attentionLandingStuck is how long one bead may be the in-flight landing
-	// before it is an item. A gate takes minutes; eight on the same bead is a
-	// wedged pass, not a slow one.
-	attentionLandingStuck = 8 * time.Minute
 	// attentionPolecatStall is how long a running seat's progress evidence may
 	// be unchanged before it is an item. It is deliberately shorter than
 	// liveness.DefaultStallAfter (30m), which gates restarts: this item asks a
@@ -81,14 +77,21 @@ const (
 )
 
 // landingState is one rig's landing state as the collectors read it
-// (gt-vsct7.3): the bead a landing is on and when it started. The zero value
-// is "no bead in flight".
+// (gt-vsct7.3): the bead a landing is on, when it started, and the stage it
+// is running. The zero value is "no bead in flight".
 type landingState struct {
 	// bead is the bead the rig's landing pass is landing; "" between beads and
 	// when no pass is running.
 	bead string
 	// since is when bead became the in-flight landing.
 	since time.Time
+	// stage is the landing stage the pass is running, by the land.Stage*
+	// names; "" before the gate reports its stage (gt-84gcp).
+	stage string
+	// stageSince is when stage started. The landing-stuck alarm judges a
+	// reported stage by its own clock, not the bead's, so a long but healthy
+	// gate does not make the review that follows it look wedged.
+	stageSince time.Time
 }
 
 // landingStates is the daemon's per-rig landing state. The landing worker
@@ -114,25 +117,34 @@ func (l *landingStates) put(rig string, p landingState) { l.m.Store(rig, p) }
 // beginPass marks a landing pass as running with no bead in flight yet.
 func (l *landingStates) beginPass(rig string) {
 	p := l.get(rig)
-	p.bead, p.since = "", time.Time{}
+	p.bead, p.since, p.stage, p.stageSince = "", time.Time{}, "", time.Time{}
 	l.put(rig, p)
 }
 
 // setBead records a bead entering (id != "") or leaving (id == "") the
-// in-flight landing.
+// in-flight landing. A bead entering flight has no stage yet; the landing
+// reports one when it reaches the gate.
 func (l *landingStates) setBead(rig, id string, now time.Time) {
 	p := l.get(rig)
-	p.bead, p.since = id, time.Time{}
+	p.bead, p.since, p.stage, p.stageSince = id, time.Time{}, "", time.Time{}
 	if id != "" {
 		p.since = now
 	}
 	l.put(rig, p)
 }
 
+// setStage records the stage the in-flight landing has reached. The landing
+// loop's own goroutine calls it, so the bead in flight is the one reporting.
+func (l *landingStates) setStage(rig, stage string, now time.Time) {
+	p := l.get(rig)
+	p.stage, p.stageSince = stage, now
+	l.put(rig, p)
+}
+
 // endPass records the end of a landing pass.
 func (l *landingStates) endPass(rig string) {
 	p := l.get(rig)
-	p.bead, p.since = "", time.Time{}
+	p.bead, p.since, p.stage, p.stageSince = "", time.Time{}, "", time.Time{}
 	l.put(rig, p)
 }
 
@@ -545,6 +557,24 @@ func (d *Daemon) attentionLandingLimits() townhealth.Limits {
 	return th.Landing
 }
 
+// attentionLandingStuckBudget is how long the in-flight landing's stage may
+// run before the pass running it is wedged: the stage's own timeout — the
+// gate's lint, test and shell steps summed, om's review — plus one pass
+// interval of slack. A landing that outlives the stage it is running is
+// wedged; one that is merely farther along in a healthy pipeline is not
+// (gt-84gcp). A stage the pipeline reports no timeout for, the fast work
+// before the gate, is judged against the whole landing budget instead.
+func (d *Daemon) attentionLandingStuckBudget(stage string) time.Duration {
+	cfg := landingWorkerConfig(d.patrolConfig)
+	switch stage {
+	case land.StageGate:
+		return landingGateBudget(cfg) + townhealth.LandingPassInterval
+	case land.StageOM:
+		return landingOMBudget(cfg) + townhealth.LandingPassInterval
+	}
+	return townhealth.LandingWaitBudget
+}
+
 // attentionSeatWork reports whether the polecat holds assigned open work: a
 // bead assigned to its seat with one of the statuses a sling sets
 // (Daemon.hasAssignedOpenWork's set). Work already submitted for landing is
@@ -947,12 +977,16 @@ func attentionPIDAlive(pid int) bool {
 	return isProcessAlive(p)
 }
 
-// collectLandingStuck raises one item per rig whose landing pass has been on
-// the same bead longer than attentionLandingStuck (gt-vsct7.3). It is the
-// daemon's copy of the queue-watch STUCK-INFLIGHT check, read from the Active
-// callback the worker already makes rather than by tailing the log. The item
-// clears on its own: the next tick returns no item once the pass moves to
-// another bead or ends.
+// collectLandingStuck raises one item per rig whose in-flight landing has
+// outlived the stage it is running: the daemon's copy of the landing-worker
+// STUCK-INFLIGHT check, read from the Active and Stage callbacks the worker
+// already makes rather than by tailing the log (gt-vsct7.3). A pass is judged
+// against its own stage's timeout plus one pass interval of slack, so a
+// landing that is legitimately gating — lint, then the gate, then om — is
+// never an item, however long the pipeline as a whole takes (gt-84gcp). A
+// pass on no reported stage, the fast work before the gate, is judged against
+// the whole landing budget instead. The item clears on its own: the next tick
+// returns no item once the pass moves to another bead or ends.
 func (s *attentionSources) collectLandingStuck(ctx context.Context) ([]attention.Item, error) {
 	var out []attention.Item
 	for _, rig := range s.landingRigs() {
@@ -963,9 +997,19 @@ func (s *attentionSources) collectLandingStuck(ctx context.Context) ([]attention
 		if p.bead == "" || p.since.IsZero() {
 			continue
 		}
-		inFlight := s.now.Sub(p.since)
-		if inFlight <= attentionLandingStuck {
+		// A reported stage is judged by its own clock, so the gate's minutes
+		// do not count against the review that follows it; the bead's clock
+		// covers the work before the gate, where no stage has been reported.
+		age, stage := s.now.Sub(p.since), ""
+		if p.stage != "" && !p.stageSince.IsZero() {
+			age, stage = s.now.Sub(p.stageSince), p.stage
+		}
+		if age <= s.d.attentionLandingStuckBudget(stage) {
 			continue
+		}
+		summary := fmt.Sprintf("%s in flight %s", p.bead, townhealth.Short(age))
+		if stage != "" {
+			summary = fmt.Sprintf("%s in the %s stage %s", p.bead, stage, townhealth.Short(age))
 		}
 		out = append(out, attention.Item{
 			Key:      "landing-stuck:" + rig + ":" + p.bead,
@@ -973,7 +1017,7 @@ func (s *attentionSources) collectLandingStuck(ctx context.Context) ([]attention
 			Severity: attention.SeverityHigh,
 			Rig:      rig,
 			Bead:     p.bead,
-			Summary:  fmt.Sprintf("%s in flight %s", p.bead, townhealth.Short(inFlight)),
+			Summary:  summary,
 		})
 	}
 	return out, nil

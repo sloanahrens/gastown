@@ -440,6 +440,12 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		RangeChecks:        []land.RangeCheck{land.AttributionCheck},
 		ReviewErrorRejects: true,
 		Slow:               d.landingSlowAlarm(rigName, cfg),
+		// The Stage callback lets the landing-stuck item judge the pass by the
+		// stage it is running rather than by the whole pipeline, so a long but
+		// healthy gate is not an item (gt-84gcp).
+		Stage: func(_ string, stage string) {
+			d.landingStates.setStage(rigName, stage, d.clk().Now())
+		},
 		// A revert of a red main lands without om rather than wait on it.
 		ReviewErrorLandsLabels: []string{landworker.LabelRevert},
 	}
@@ -514,6 +520,30 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 			return err
 		},
 	}, nil
+}
+
+// landingGateBudget is the wall the merged-tree gate's stage may legitimately
+// take: its lint, test and shell steps' timeouts summed, the same numbers
+// rigLandGate arms them with. Summing the shell step even when a submission
+// does not move its inputs is the safe bound — the alarm only asks whether
+// the stage has outlived every deadline it could still be running under
+// (gt-84gcp).
+func landingGateBudget(cfg *LandingWorkerConfig) time.Duration {
+	lint, test := defaultLandLintTimeout, defaultLandTestTimeout
+	if cfg != nil {
+		lint = landingWorkerDuration(cfg.LintTimeoutStr, defaultLandLintTimeout)
+		test = landingWorkerDuration(cfg.TestTimeoutStr, defaultLandTestTimeout)
+	}
+	return lint + test + defaultLandShellTimeout
+}
+
+// landingOMBudget is the wall the review stage may legitimately take: the om
+// timeout the rig's lander arms the reviewer with (gt-84gcp).
+func landingOMBudget(cfg *LandingWorkerConfig) time.Duration {
+	if cfg == nil {
+		return land.DefaultOMTimeout
+	}
+	return landingWorkerDuration(cfg.OMTimeoutStr, land.DefaultOMTimeout)
 }
 
 // landingSlowAlarm is the rig's slow-landing alarm: evidence beside the
