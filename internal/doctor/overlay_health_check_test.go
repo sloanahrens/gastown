@@ -160,15 +160,15 @@ func TestOverlayHealthCheck_UncookableFormulaFailsClosed(t *testing.T) {
 	overlayDir := filepath.Join(tmpDir, "formula-overlays")
 	require.NoError(t, os.MkdirAll(overlayDir, 0o755))
 	content := "[[step-overrides]]\nstep_id = \"synthesis\"\nmode = \"skip\"\n"
-	overlayPath := filepath.Join(overlayDir, "code-review.toml")
+	overlayPath := filepath.Join(overlayDir, "shiny.toml")
 	require.NoError(t, os.WriteFile(overlayPath, []byte(content), 0o644))
 
-	check := overlayCheckWithSteps(polecatWorkSteps) // code-review does not cook
+	check := overlayCheckWithSteps(polecatWorkSteps) // shiny is shipped but the stub does not cook it
 	ctx := &CheckContext{TownRoot: tmpDir}
 	result := check.Run(ctx)
 	assert.Equal(t, StatusSkipped, result.Status)
 	require.NotEmpty(t, result.Details)
-	assert.Contains(t, result.Details[0], "bd cannot cook code-review")
+	assert.Contains(t, result.Details[0], "bd cannot cook shiny")
 
 	require.NoError(t, check.Fix(ctx))
 	data, err := os.ReadFile(overlayPath)
