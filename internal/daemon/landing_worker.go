@@ -287,6 +287,9 @@ func (d *Daemon) landingWorkerLoop(rigName string, interval time.Duration, pass 
 			if d.upgradeRestartPending.Load() {
 				d.signalLandingDrained()
 			}
+			// The pass's report has been applied, so the pass is over: tell a
+			// waiting test now, before the next pass starts (gt-v0t6k).
+			d.noteLandingPassDone()
 			// A pass that did work may have left beads behind it: anything
 			// submitted while it ran. Pass again at once rather than idle them
 			// for a whole interval; only an idle pass waits. Skipped or
@@ -320,6 +323,15 @@ func (d *Daemon) signalLandingDrained() {
 	select {
 	case d.landingDrained() <- struct{}{}:
 	default:
+	}
+}
+
+// noteLandingPassDone tells a test its wait for a landing pass is over (see
+// landingPassFn). It runs on the landing loop's goroutine, so the hook must not
+// block: a test that stopped waiting cannot stall landing (gt-v0t6k).
+func (d *Daemon) noteLandingPassDone() {
+	if d.landingPassFn != nil {
+		d.landingPassFn()
 	}
 }
 

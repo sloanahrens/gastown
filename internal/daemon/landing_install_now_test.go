@@ -45,14 +45,15 @@ func TestLandingInstallNowRequestsAnInstallAtOnce(t *testing.T) {
 func TestLandingInstallNowOnAnotherRigRequestsNoInstall(t *testing.T) {
 	t.Parallel()
 	d, logs := landingDrainDaemon(t)
-	var passes atomic.Int32
+	done := countPasses(d)
 	pass := func(context.Context) landworker.Report {
-		passes.Add(1)
 		return landworker.Report{Landed: 1, InstallRequested: true}
 	}
 	go d.landingWorkerLoop("agate", time.Hour, pass)
 
-	settlePasses(t, &passes, 3)
+	// Three finished passes, so the gate has been through the label's request
+	// three times: the rig, not an unfinished pass, is what held the install.
+	settlePasses(t, done, 3)
 	if d.rebuildGTRequested.Load() {
 		t.Fatal("a landing on another rig armed the install request")
 	}
