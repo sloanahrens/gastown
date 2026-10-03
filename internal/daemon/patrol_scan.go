@@ -13,7 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/convoy"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/patrolscan"
@@ -65,7 +65,7 @@ func patrolScanConfig(config *DaemonPatrolConfig) *PatrolScanConfig {
 func patrolScanOptions(config *DaemonPatrolConfig, now func() time.Time) patrolscan.Options {
 	o := patrolscan.Options{
 		HoldReason: func(w patrolscan.Work) string {
-			return convoy.DispatchHoldFields(w.Status, w.Labels, w.Assignee, w.Design, w.Notes)
+			return dispatch.DispatchHoldFields(w.Status, w.Labels, w.Assignee, w.Design, w.Notes)
 		},
 		IsRefusal: func(err error) bool { return errors.Is(err, supervisor.ErrRefused) },
 		Now:       now,

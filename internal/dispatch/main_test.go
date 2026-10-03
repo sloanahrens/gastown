@@ -4,9 +4,9 @@ import (
 	"os"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/testutil/unittier"
+	"github.com/steveyegge/gastown/internal/testutil"
 )
 
 func TestMain(m *testing.M) {
-	os.Exit(unittier.Main(m))
+	os.Exit(testutil.HermeticMain(m))
 }
