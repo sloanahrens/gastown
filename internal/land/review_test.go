@@ -87,6 +87,19 @@ func TestOMReviewerFailsClosed(t *testing.T) {
 	}
 }
 
+// TestOMReviewerMarksAnExecutionError: exit 2 is the one om failure Land reads
+// by type, to report the merged tree's size alongside it (gt-hhid7).
+func TestOMReviewerMarksAnExecutionError(t *testing.T) {
+	t.Parallel()
+	var argv []string
+	r := OMReviewer{OutDir: t.TempDir()}
+	r.run = fakeOM(t, "", 2, nil, &argv)
+	_, err := r.Review(context.Background(), "/wt", "a", "b")
+	if !errors.Is(err, ErrOMExecution) {
+		t.Fatalf("Review error = %v, want it to wrap ErrOMExecution", err)
+	}
+}
+
 // hangThenOM blocks its first `hangs` invocations until their context ends
 // (a provider that accepts the request and never answers), then answers like
 // fakeOM with an approve.

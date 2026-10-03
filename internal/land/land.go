@@ -99,6 +99,10 @@ type Lander struct {
 	// ReviewErrorRejects says: the red-main owner's reverts, so an om outage
 	// never keeps main red (gt-b5ugw review).
 	ReviewErrorLandsLabels []string
+	// OMDiffTooLargeLines is the merged-tree change size (lines added plus
+	// removed) past which an om execution error is reported as the diff being
+	// too large for om. Zero means DefaultOMDiffTooLargeLines (gt-hhid7).
+	OMDiffTooLargeLines int
 	// Rerun reruns only pkgs' tests, once, in the merged tree at dir: the
 	// flake policy's rerun (flake.go). nil means a red gate is final.
 	Rerun func(ctx context.Context, dir string, pkgs []string) GateResult
@@ -439,7 +443,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		}
 		if !l.ReviewErrorLands && !l.landsUnreviewed(issue) {
 			rej := &Rejection{Kind: RejectReview, Rework: false,
-				Reason: "om review returned no verdict on a green merged tree, so it does not land unreviewed: " + reviewErrorReason(reviewErr)}
+				Reason: l.reviewErrorRejectionReason(wt, base, merged, reviewErr)}
 			return Result{}, l.reject(issue, w, rej, nil)
 		}
 		verdict = Verdict{Verdict: VerdictErrorPrefix + reviewErrorReason(reviewErr)}
@@ -707,13 +711,83 @@ func stageTimes(g GateResult, om time.Duration) string {
 	return "stages: " + strings.Join(parts, ", ")
 }
 
-// reviewErrorReason is err on one bounded line, for the recorded verdict.
+// reviewErrorReasonMax bounds the review error recorded in the rejection note
+// and the verdict string.
+const reviewErrorReasonMax = 200
+
+// reviewErrorReason is err on one bounded line, for the recorded verdict. The
+// bound keeps both ends, because an om error opens with the command that failed
+// and closes with the backend's own stderr while the middle is boilerplate: the
+// head-only cut this replaced kept a config warning and dropped the cause
+// (gt-hhid7).
 func reviewErrorReason(err error) string {
-	reason := NoteField(err.Error())
-	if len(reason) > 200 {
-		reason = reason[:200] + "..."
+	return elideMiddle(NoteField(err.Error()), reviewErrorReasonMax)
+}
+
+// elideMiddle shortens s to at most max runes by dropping from the middle,
+// marking the drop with an ellipsis. Counted in runes, not bytes, so a cut
+// never splits a multi-byte character.
+func elideMiddle(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
 	}
-	return reason
+	const marker = " … "
+	head := (max - len([]rune(marker))) / 2
+	tail := max - len([]rune(marker)) - head
+	return string(r[:head]) + marker + string(r[len(r)-tail:])
+}
+
+// DefaultOMDiffTooLargeLines is the changed-line bound past which an om
+// execution error is read as the diff being too large for om. Ordinary landings
+// are a small fraction of it, so the phrase stays rare and means what it says
+// (gt-hhid7).
+const DefaultOMDiffTooLargeLines = 5000
+
+// omDiffScanLimit bounds the commit walk that totals the merged tree's changed
+// lines. A landing branch is a handful of commits (a squashed branch is one),
+// so the walk is never cut short on a real branch.
+const omDiffScanLimit = 1000
+
+// omDiffTooLargeLines is the configured bound, or the default when unset.
+func (l *Lander) omDiffTooLargeLines() int {
+	if l.OMDiffTooLargeLines > 0 {
+		return l.OMDiffTooLargeLines
+	}
+	return DefaultOMDiffTooLargeLines
+}
+
+// reviewErrorRejectionReason is the RejectReview reason for a green merged tree
+// on which om returned no verdict. An execution error on a tree past the stated
+// bound names the size, because the reader's next move — an overseer review,
+// not a rework — differs from a bare execution error's (gt-hhid7).
+func (l *Lander) reviewErrorRejectionReason(g Repo, base, merged string, reviewErr error) string {
+	const preface = "om review returned no verdict on a green merged tree, so it does not land unreviewed: "
+	if !errors.Is(reviewErr, ErrOMExecution) {
+		return preface + reviewErrorReason(reviewErr)
+	}
+	lines, ok := mergedDiffLines(g, base, merged)
+	bound := l.omDiffTooLargeLines()
+	if !ok || lines <= bound {
+		return preface + reviewErrorReason(reviewErr)
+	}
+	return fmt.Sprintf("diff too large for om; overseer review needed: the merged tree changes %d lines, past the %d-line bound, and om exited with an execution error: %s",
+		lines, bound, reviewErrorReason(reviewErr))
+}
+
+// mergedDiffLines totals the lines base..head changed (added plus removed), the
+// size the om bound is stated in. ok is false when the history could not be
+// read; the caller then reports the bare execution error rather than guess.
+func mergedDiffLines(g Repo, base, head string) (int, bool) {
+	stats, err := g.CommitLineStatsInRange(base+".."+head, omDiffScanLimit)
+	if err != nil {
+		return 0, false
+	}
+	total := 0
+	for _, s := range stats {
+		total += s.Added + s.Removed
+	}
+	return total, true
 }
 
 // MaxReworkAttempts is the rejection count that ends the rework loop: a bead
