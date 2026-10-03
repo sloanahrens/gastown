@@ -8,7 +8,7 @@
 # or takes the container-gate slot, the integration tier runs every
 # Docker-backed package listed in internal/testpolicy/docker.txt, and
 # test-integration-wall reruns that tier through tierwall for the wall its
-# post-merge cadence is judged by (gt-ik4a1.4.5).
+# post-merge cadence is judged by (gt-ik4a1.4.5), uncached (-count=1, gt-gq4gl).
 #
 # The recipe shape is read through `make -n`, which prints recipes without
 # running them. That only holds while no gate recipe line references $(MAKE):
@@ -222,21 +222,50 @@ else
 fi
 # The wall report is only worth reading if it measures the tier the cadence
 # runs (gt-ik4a1.4.5), so each of test-integration's two suite commands must
-# reappear verbatim but for -json. A suite command carries the container
-# opt-in and the test-Dolt init pool ahead of go test (gt-ik4a1.4.12), so
-# match on the opt-in and `go test` rather than a fixed prefix.
+# reappear verbatim but for -json and -count=1. A suite command carries the
+# container opt-in and the test-Dolt init pool ahead of go test (gt-ik4a1.4.12),
+# so match on the opt-in and `go test` rather than a fixed prefix.
 wall_missing=""
 suite_seen=0
 while IFS= read -r line; do
   [[ "$line" != *'GT_TEST_DOCKER=1'* || "$line" != *'go test '* ]] && continue
   suite_seen=$((suite_seen + 1))
-  want="${line/'go test '/'go test -json '}"
+  want="${line/'go test '/'go test -json -count=1 '}"
   grep -q -F -- "$want" <<<"$wout" || wall_missing="$wall_missing [$want]"
 done <<<"$iout"
 if [[ "$suite_seen" == 2 && -z "$wall_missing" ]]; then
-  pass "test-integration-wall runs test-integration's two go test commands, each -json"
+  pass "test-integration-wall runs test-integration's two go test commands, each -json -count=1"
 else
-  fail "test-integration-wall runs test-integration's two go test commands, each -json (suite lines: $suite_seen); missing:$wall_missing" "$wout"
+  fail "test-integration-wall runs test-integration's two go test commands, each -json -count=1 (suite lines: $suite_seen); missing:$wall_missing" "$wout"
+fi
+# -count=1 keeps the wall an uncached run (gt-gq4gl): the number decides the
+# cadence switch (gt-ik4a1.4), and without it a second run of unchanged source
+# is served from the Go test cache, whose wall can sit far under a cold run's
+# (6.6s cached against 209s cold on 2026-10-03). Both commands, exactly.
+wall_uncached() { [[ "$(grep -c -E -- 'go test -json -count=1' <<<"$1")" == 2 ]]; }
+if wall_uncached "$wout"; then
+  pass "test-integration-wall is an uncached run: both commands carry -count=1 (gt-gq4gl)"
+else
+  fail "test-integration-wall is an uncached run: both commands carry -count=1 (gt-gq4gl)" "$wout"
+fi
+# The check is exercised on the shape it exists to catch: the pre-gt-gq4gl
+# recipe, whose two commands took -json and no -count.
+if wall_uncached "GT_TEST_DOCKER=1 go test -json -tags integration -timeout 20m ./..."; then
+  fail "the -count=1 check rejects the pre-gt-gq4gl wall recipe"
+else
+  pass "the -count=1 check rejects the pre-gt-gq4gl wall recipe"
+fi
+# The flag rides after $(INTEGRATION_GO_TEST), not inside the default, or a CI
+# runner swap would drop it and silently restore the cached measurement.
+if wswap=$(dry test-integration-wall INTEGRATION_GO_TEST="go test -x") && [[ "$(grep -c -F -- 'go test -x -json -count=1' <<<"$wswap")" == 2 ]]; then
+  pass "INTEGRATION_GO_TEST still swaps the wall's runner, and -count=1 rides after it (gt-gq4gl)"
+else
+  fail "INTEGRATION_GO_TEST still swaps the wall's runner, and -count=1 rides after it (gt-gq4gl)" "$wswap"
+fi
+if grep -q -F -- '-count=1' <<<"$(grep -E '^INTEGRATION_GO_TEST' "$ROOT/Makefile" || true)"; then
+  fail "the runner default (INTEGRATION_GO_TEST) carries no -count=1; the wall's recipe does"
+else
+  pass "the runner default (INTEGRATION_GO_TEST) carries no -count=1; the wall's recipe does"
 fi
 wall_runs=$(grep -c -E -- 'GT_TEST_DOCKER=1.*go test -json' <<<"$wout" || true)
 wall_tool=$(grep -c -F 'cmd/tierwall' <<<"$wout" || true)
