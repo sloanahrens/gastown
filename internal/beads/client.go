@@ -54,7 +54,14 @@ type Client interface {
 	CloseWithReason(reason string, ids ...string) error
 	// ForceCloseWithReason is CloseWithReason past bd's close fences.
 	ForceCloseWithReason(reason string, ids ...string) error
-	// Release returns a claimed issue to open and clears its assignee.
+	// DeleteIssues permanently deletes ids, with their labels, comments and
+	// dependency links in both directions (bd delete --force). The batch is
+	// all-or-nothing: a nil error means every id is gone.
+	DeleteIssues(ids ...string) error
+	// Release returns a claimed issue to open and clears its assignee. It
+	// does not force past a live claim: bd refuses a release of an issue
+	// another actor still holds in_progress, so recovering a dead worker's
+	// claim is ReleaseIfAssignee/TransferIfAssignee.
 	Release(id string) error
 	// ReleaseWithReason is Release, recording reason in the notes.
 	ReleaseWithReason(id, reason string) error

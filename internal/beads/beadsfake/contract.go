@@ -79,6 +79,7 @@ var contractCases = []contractCase{
 	{"typed dependencies", contractTypedDependencies},
 	{"ready filter", contractReadyFilter},
 	{"children", contractChildren},
+	{"delete issues", contractDeleteIssues},
 	{"release", contractRelease},
 	{"batch close refusal", contractBatchCloseRefusal},
 	{"batch close of a blocks chain in reverse order", contractBatchCloseChain},
@@ -325,6 +326,40 @@ func contractUpdateFields(t *testing.T, s *scope) {
 	if a := s.mustShow(t, is.ID).Assignee; a != s.who("bob") {
 		t.Errorf("hooked reassign left assignee %q", a)
 	}
+
+	// Persistent promotes a wisp: after it the issue is a durable one.
+	wisp := s.mustCreate(t, beads.CreateOptions{Title: "wisp", Priority: -1, Ephemeral: true})
+	if !s.mustShow(t, wisp.ID).Ephemeral {
+		t.Fatalf("%s was not created as a wisp", wisp.ID)
+	}
+	mustDo(t, "Update Persistent", s.Update(wisp.ID, beads.UpdateOptions{Persistent: true}))
+	if s.mustShow(t, wisp.ID).Ephemeral {
+		t.Error("a persistent update left the issue a wisp")
+	}
+	durable, err := s.List(beads.ListOptions{Priority: -1})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if !holds(s.mine(durable), wisp.ID) {
+		t.Errorf("List without Ephemeral after Persistent does not hold %s", wisp.ID)
+	}
+	wisps, err := s.List(beads.ListOptions{Priority: -1, Ephemeral: true})
+	if err != nil {
+		t.Fatalf("List{Ephemeral}: %v", err)
+	}
+	if holds(s.mine(wisps), wisp.ID) {
+		t.Errorf("List{Ephemeral} after Persistent still holds %s", wisp.ID)
+	}
+}
+
+// holds reports whether issues include id.
+func holds(issues []*beads.Issue, id string) bool {
+	for _, is := range issues {
+		if is.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func contractLabels(t *testing.T, s *scope) {
@@ -520,6 +555,31 @@ func contractListFilters(t *testing.T, s *scope) {
 	s.want(t, "List{ClosedAfter:before close}", got, err, cl.ID)
 	got, err = s.List(beads.ListOptions{Status: "all", Priority: 3, ClosedAfter: closedAt.Add(time.Hour)})
 	s.want(t, "List{ClosedAfter:after close}", got, err)
+
+	// Labels is an AND over every one of them, on its own or alongside the
+	// single Label.
+	m := s.label("M")
+	both := s.mustCreate(t, beads.CreateOptions{Title: "both", Labels: []string{l, m}, Priority: -1})
+	got, err = s.List(beads.ListOptions{Labels: []string{l, m}, Priority: -1})
+	s.want(t, "List{Labels}", got, err, both.ID)
+	got, err = s.List(beads.ListOptions{Label: l, Labels: []string{m}, Priority: -1})
+	s.want(t, "List{Label,Labels}", got, err, both.ID)
+	got, err = s.List(beads.ListOptions{Labels: []string{l, s.label("none")}, Priority: -1})
+	s.want(t, "List{Labels:one absent}", got, err)
+
+	// CreatedAfter keeps only what was created at or after the bound. (Two
+	// creates can land in the same second, so, as for ClosedAfter, the bound
+	// sits an hour off the issue's own created_at rather than on it.)
+	ca := s.mustCreate(t, beads.CreateOptions{Title: "created first", Priority: 4})
+	cb := s.mustCreate(t, beads.CreateOptions{Title: "created second", Priority: 4})
+	createdAt, err := time.Parse(time.RFC3339, ca.CreatedAt)
+	if err != nil {
+		t.Fatalf("created_at of %s: %v", ca.ID, err)
+	}
+	got, err = s.List(beads.ListOptions{Priority: 4, CreatedAfter: createdAt.Add(-time.Hour)})
+	s.want(t, "List{CreatedAfter:before create}", got, err, ca.ID, cb.ID)
+	got, err = s.List(beads.ListOptions{Priority: 4, CreatedAfter: createdAt.Add(time.Hour)})
+	s.want(t, "List{CreatedAfter:after create}", got, err)
 }
 
 // contractEvents pins event issues: EventKind makes an issue_type "event"
@@ -798,9 +858,28 @@ func contractChildren(t *testing.T, s *scope) {
 	s.want(t, "Children after unlinking", kids, err, b.ID, w.ID)
 }
 
+// contractRelease pins that Release does not force. A claim another actor
+// still holds survives it, with an error, because bd refuses to reassign
+// their live in_progress claim without --force (gt-v8ujv); the store's own
+// claim is released, reason and all.
 func contractRelease(t *testing.T, s *scope) {
+	held := s.mustCreate(t, beads.CreateOptions{Title: "held", Priority: -1})
+	holder := s.who("dead")
+	mustDo(t, "claim", s.Update(held.ID, beads.UpdateOptions{Status: ptr("in_progress"), Assignee: ptr(holder)}))
+	refused(t, "releasing another actor's live claim", s.ReleaseWithReason(held.ID, "worker died"))
+	if got := s.mustShow(t, held.ID); got.Status != "in_progress" || got.Assignee != holder {
+		t.Errorf("a refused release changed the claim to %q held by %q, want in_progress by %s", got.Status, got.Assignee, holder)
+	}
+
+	// The store's own claim is releasable. Its actor is the creator bd
+	// recorded: no case's assignee is ever the actor, so this is the only
+	// name the contract can claim as.
 	is := s.mustCreate(t, beads.CreateOptions{Title: "stuck", Priority: -1})
-	mustDo(t, "claim", s.Update(is.ID, beads.UpdateOptions{Status: ptr("in_progress"), Assignee: ptr(s.who("dead"))}))
+	self := is.CreatedBy
+	if self == "" {
+		t.Fatal("the store recorded no creator, so its own claim cannot be made")
+	}
+	mustDo(t, "claim as the store's actor", s.Update(is.ID, beads.UpdateOptions{Status: ptr("in_progress"), Assignee: ptr(self)}))
 	mustDo(t, "ReleaseWithReason", s.ReleaseWithReason(is.ID, "worker died"))
 	got := s.mustShow(t, is.ID)
 	if got.Status != "open" || got.Assignee != "" {
@@ -810,13 +889,45 @@ func contractRelease(t *testing.T, s *scope) {
 		t.Errorf("notes = %q, want the release reason", got.Notes)
 	}
 	other := s.mustCreate(t, beads.CreateOptions{Title: "stuck 2", Priority: -1})
-	mustDo(t, "claim 2", s.Update(other.ID, beads.UpdateOptions{Status: ptr("in_progress"), Assignee: ptr(s.who("dead"))}))
+	mustDo(t, "claim 2", s.Update(other.ID, beads.UpdateOptions{Status: ptr("in_progress"), Assignee: ptr(self)}))
 	mustDo(t, "Release", s.Release(other.ID))
 	if got := s.mustShow(t, other.ID); got.Status != "open" || got.Assignee != "" {
 		t.Errorf("after Release: status %q assignee %q", got.Status, got.Assignee)
 	}
 	if err := s.Release("gt-nosuch"); !errors.Is(err, beads.ErrNotFound) {
 		t.Errorf("Release(missing) = %v, want ErrNotFound", err)
+	}
+}
+
+// contractDeleteIssues pins the batch delete: every id is gone afterwards, a
+// live issue is left with no edge onto a deleted one, and an empty batch is a
+// no-op.
+func contractDeleteIssues(t *testing.T, s *scope) {
+	mustDo(t, "DeleteIssues()", s.DeleteIssues())
+
+	a := s.mustCreate(t, beads.CreateOptions{Title: "doomed a", Priority: -1})
+	b := s.mustCreate(t, beads.CreateOptions{Title: "doomed b", Priority: -1})
+	mustDo(t, "comment", s.AddComment(a.ID, "goes with it"))
+	mustDo(t, "dependency", s.AddDependency(a.ID, b.ID))
+
+	// A survivor pointing at a deleted issue: deleting both ends of the only
+	// edge above cannot show that the edge went with them.
+	survivor := s.mustCreate(t, beads.CreateOptions{Title: "survivor", Priority: -1})
+	mustDo(t, "survivor dependency", s.AddDependency(survivor.ID, a.ID))
+
+	mustDo(t, "DeleteIssues", s.DeleteIssues(a.ID, b.ID))
+	for _, id := range []string{a.ID, b.ID} {
+		if _, err := s.Show(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Errorf("Show(%s) after DeleteIssues = %v, want ErrNotFound", id, err)
+		}
+	}
+	if got := s.mustShow(t, survivor.ID); depOn(got, a.ID, "blocks") != nil {
+		t.Errorf("%s still depends on deleted %s: %+v", survivor.ID, a.ID, got.Dependencies)
+	}
+	if got, err := s.List(beads.ListOptions{Status: "all", Priority: -1}); err != nil {
+		t.Errorf("List after DeleteIssues: %v", err)
+	} else if mine := s.mine(got); len(mine) != 1 || mine[0].ID != survivor.ID {
+		t.Errorf("List after DeleteIssues holds %v, want only %s", ids(mine), survivor.ID)
 	}
 }
 

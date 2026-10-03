@@ -203,6 +203,7 @@ func (noBeadsDB) Update(string, beads.UpdateOptions) error         { return errN
 func (noBeadsDB) Close(...string) error                            { return errNoDatabase }
 func (noBeadsDB) CloseWithReason(string, ...string) error          { return errNoDatabase }
 func (noBeadsDB) ForceCloseWithReason(string, ...string) error     { return errNoDatabase }
+func (noBeadsDB) DeleteIssues(...string) error                     { return errNoDatabase }
 func (noBeadsDB) Release(string) error                             { return errNoDatabase }
 func (noBeadsDB) ReleaseWithReason(string, string) error           { return errNoDatabase }
 func (noBeadsDB) AddComment(string, string) error                  { return errNoDatabase }

@@ -5,8 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -64,6 +68,8 @@ func (s reportNoWriteStore) ForceCloseWithReason(string, ...string) error {
 	return nil
 }
 
+func (s reportNoWriteStore) DeleteIssues(...string) error { s.fail("DeleteIssues"); return nil }
+
 func (s reportNoWriteStore) Release(string) error { s.fail("Release"); return nil }
 
 func (s reportNoWriteStore) ReleaseWithReason(string, string) error {
@@ -106,6 +112,63 @@ func (s reportNoWriteStore) ReleaseIfAssignee(string, string) (bool, error) {
 func (s reportNoWriteStore) TransferIfAssignee(string, string, string, string) (bool, error) {
 	s.fail("TransferIfAssignee")
 	return false, nil
+}
+
+// reportReadOnlyClientMethods are the beads.Client methods gt report may
+// call: the query surface. Everything else on Client is a write, and
+// reportNoWriteStore has to override it.
+var reportReadOnlyClientMethods = map[string]bool{
+	"Show": true, "ShowMultiple": true, "List": true, "ListByAssignee": true,
+	"GetAssignedIssue": true, "ListIssueStatuses": true,
+	"ListAssignedIssueStatuses": true, "Ready": true, "ReadyAll": true,
+	"Children": true, "ChildrenOf": true, "Comments": true, "DepList": true,
+}
+
+// TestReportNoWriteGuardCoversClient pins that the no-write guard still
+// observes every write on beads.Client. reportNoWriteStore embeds
+// reportStore, so a Client method it does not override is satisfied by the
+// embedded store and a write through the guard goes unseen — which is how
+// DeleteIssues slipped past it when the method landed (gt-7iwy0.4.2). The
+// guard is read from this file's source rather than its Go method set, since
+// reflection reports the embedded store's methods as the guard's own.
+func TestReportNoWriteGuardCoversClient(t *testing.T) {
+	t.Parallel()
+	guarded := map[string]bool{}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "report_test.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ast.Inspect(file, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Recv == nil || len(fn.Recv.List) != 1 {
+			return true
+		}
+		if recv, ok := fn.Recv.List[0].Type.(*ast.Ident); ok && recv.Name == "reportNoWriteStore" {
+			guarded[fn.Name.Name] = true
+		}
+		return true
+	})
+	if len(guarded) == 0 {
+		t.Fatal("parsed no reportNoWriteStore methods: the guard moved or was renamed")
+	}
+	client := reflect.TypeOf((*beads.Client)(nil)).Elem()
+	var uncovered []string
+	for i := 0; i < client.NumMethod(); i++ {
+		name := client.Method(i).Name
+		if !guarded[name] && !reportReadOnlyClientMethods[name] {
+			uncovered = append(uncovered, name)
+		}
+	}
+	if len(uncovered) > 0 {
+		t.Errorf("beads.Client methods the report no-write guard neither overrides nor lists read-only: %v\n"+
+			"override each write in report_test.go, or add it to reportReadOnlyClientMethods if gt report may call it", uncovered)
+	}
+	for name := range guarded {
+		if reportReadOnlyClientMethods[name] {
+			t.Errorf("%s is both overridden and listed read-only; drop it from reportReadOnlyClientMethods", name)
+		}
+	}
 }
 
 // reportTown writes a town from relative path → contents and returns its root.

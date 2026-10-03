@@ -329,13 +329,12 @@ func TestPlainErrorKeepsOutput(t *testing.T) {
 	}
 }
 
-// TestReleaseOverridesTheDeadHoldersClaim pins that Release passes --force.
-// Release exists to recover a step whose worker died, so the claim it clears
-// is by definition another actor's, and bd 1.2 refuses to reassign another
-// actor's in_progress claim without --force ("cannot reassign X: held by
-// ..."): without it `gt release` failed on exactly the issues it is for.
+// TestReleaseDoesNotForceTheHoldersClaim pins that Release sends no --force
+// (gt-v8ujv): it clears the store's own claim, and bd's fence is left to
+// refuse another actor's live one. Recovering a dead worker's claim is
+// ReleaseIfAssignee/TransferIfAssignee.
 // TestIntegrationClientContract/release pins the same against real bd.
-func TestReleaseOverridesTheDeadHoldersClaim(t *testing.T) {
+func TestReleaseDoesNotForceTheHoldersClaim(t *testing.T) {
 	t.Parallel()
 	r := newRecorder(nil)
 	b := newRecordedBeads(t.TempDir(), r)
@@ -346,11 +345,19 @@ func TestReleaseOverridesTheDeadHoldersClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"update gt-1 --status=open --assignee= --force --notes=Released: worker died",
-		"update gt-2 --status=open --assignee= --force",
+		"update gt-1 --status=open --assignee= --notes=Released: worker died",
+		"update gt-2 --status=open --assignee=",
 	}
 	if got := r.argvs(); !reflect.DeepEqual(got, want) {
 		t.Errorf("calls = %q\nwant    %q", got, want)
+	}
+
+	// A refusal is one failing call: there is no fallback argv to retry.
+	denied := newRecorder(func([]string) reply {
+		return reply{stderr: "Error: cannot reassign gt-3: held by \"alice\"\n", err: exitError{1}}
+	})
+	if err := newRecordedBeads(t.TempDir(), denied).Release("gt-3"); err == nil || len(denied.calls()) != 1 {
+		t.Errorf("a refused Release = %v after %d calls, want one failing call", err, len(denied.calls()))
 	}
 }
 
@@ -409,39 +416,6 @@ func TestBDProcessChoosesPlainOnlyForPlainCalls(t *testing.T) {
 	}
 	if routed.Dir != "/rig" || !reflect.DeepEqual(routed.Env, env) {
 		t.Errorf("routed call: Dir = %q, Env = %q; want /rig and exactly the call's env", routed.Dir, routed.Env)
-	}
-}
-
-// TestReleaseFallsBackWithoutForce: a bd build older than the claim fence
-// may not know `update --force`.
-// On such a bd, Release retries without it, as --flat already falls back,
-// instead of failing every release.
-func TestReleaseFallsBackWithoutForce(t *testing.T) {
-	t.Parallel()
-	r := newRecorder(func(args []string) reply {
-		for _, a := range args {
-			if a == "--force" {
-				return reply{stderr: "Error: unknown flag: --force\n", err: exitError{1}}
-			}
-		}
-		return reply{}
-	})
-	b := newRecordedBeads(t.TempDir(), r)
-	if err := b.ReleaseWithReason("gt-1", "worker died"); err != nil {
-		t.Fatalf("ReleaseWithReason on a bd without --force: %v", err)
-	}
-	want := []string{
-		"update gt-1 --status=open --assignee= --force --notes=Released: worker died",
-		"update gt-1 --status=open --assignee= --notes=Released: worker died",
-	}
-	if got := r.argvs(); !reflect.DeepEqual(got, want) {
-		t.Errorf("calls = %q\nwant    %q", got, want)
-	}
-
-	// Any other failure is not retried.
-	other := newRecorder(func([]string) reply { return reply{stderr: "Error: issue not found", err: exitError{1}} })
-	if err := newRecordedBeads(t.TempDir(), other).Release("gt-2"); err == nil || len(other.calls()) != 1 {
-		t.Errorf("Release on a missing issue = %v after %d calls, want one failing call", err, len(other.calls()))
 	}
 }
 

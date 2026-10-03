@@ -77,6 +77,32 @@ func TestListEphemeralQuotesQueryValuesAndDisablesLimit(t *testing.T) {
 	}
 }
 
+// TestListEphemeralPinsLabelsAndCreatedAfter pins the wisp query's two added
+// clauses (gt-7iwy0.4.2): Labels is one label= condition per label, which the
+// query language ANDs the way bd list ANDs repeated --label, and CreatedAfter
+// becomes created>=. Both live in listEphemeral, which bd list cannot serve.
+func TestListEphemeralPinsLabelsAndCreatedAfter(t *testing.T) {
+	ResetBdAllowStaleCacheForTest()
+	logPath := installMockBDRecorder(t)
+
+	b := New(t.TempDir())
+	_, err := b.List(ListOptions{
+		Labels:       []string{"gt:merge-request", "rig:gastown"},
+		CreatedAfter: time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC),
+		Priority:     -1,
+		Ephemeral:    true,
+		Limit:        0,
+	})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+
+	want := `query --json ephemeral=true AND label="gt:merge-request" AND label="rig:gastown" AND created>="2026-09-30T12:00:00Z" --limit=0`
+	if logOutput := readMockBDLog(t, logPath); !strings.Contains(logOutput, want) {
+		t.Fatalf("bd log missing %q\nlog:\n%s", want, logOutput)
+	}
+}
+
 func TestListIssueStatusesUsesSingleQuery(t *testing.T) {
 	ResetBdAllowStaleCacheForTest()
 	logPath := installMockBDRecorder(t)

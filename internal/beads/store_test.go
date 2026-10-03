@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -193,6 +194,9 @@ func (m *mockStorage) SearchIssues(_ context.Context, query string, filter beads
 			if !found {
 				continue
 			}
+		}
+		if filter.CreatedAfter != nil && issue.CreatedAt.Before(*filter.CreatedAfter) {
+			continue
 		}
 		if len(filter.Labels) > 0 {
 			issueLabels := m.labels[issue.ID]
@@ -514,6 +518,69 @@ func TestStoreListWithStatusFilter(t *testing.T) {
 	if issues[0].Title != "open-one" {
 		t.Fatalf("expected 'open-one', got %q", issues[0].Title)
 	}
+}
+
+// TestStoreListAppliesLabelsAndCreatedAfter pins that the in-process path
+// honors the two added list filters instead of dropping them (gt-7iwy0.4.2).
+// A filter the store path ignores is a fail-open: the caller asked for a
+// slice of the board and would get the whole one.
+func TestStoreListAppliesLabelsAndCreatedAfter(t *testing.T) {
+	store := newMockStorage()
+	b := newTestBeads(store)
+
+	old := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	early := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	late := time.Date(2026, 9, 15, 0, 0, 0, 0, time.UTC)
+	for id, is := range map[string]*beadsdk.Issue{
+		// Both labels and latest: the only issue the second List wants.
+		"test-both-late": {ID: "test-both-late", Title: "both late", CreatedAt: late},
+		"test-both-old":  {ID: "test-both-old", Title: "both old", CreatedAt: old},
+		"test-one-label": {ID: "test-one-label", Title: "one label", CreatedAt: early},
+	} {
+		store.issues[id] = is
+	}
+	store.labels["test-both-late"] = []string{"gt:merge-request", "rig:gastown"}
+	store.labels["test-both-old"] = []string{"gt:merge-request", "rig:gastown"}
+	store.labels["test-one-label"] = []string{"gt:merge-request"}
+
+	got, err := b.List(ListOptions{Labels: []string{"gt:merge-request", "rig:gastown"}})
+	if err != nil {
+		t.Fatalf("List{Labels}: %v", err)
+	}
+	if len(got) != 2 || !hasTitle(got, "test-both-late") || !hasTitle(got, "test-both-old") {
+		t.Errorf("List{Labels} returned %v, want the two carrying both labels", titles(got))
+	}
+
+	// The bound sits between the two Septembers: CreatedAfter drops the
+	// August issue by time and Labels drops the single-label one, so only
+	// their intersection survives. A store path that dropped either filter
+	// would return two.
+	got, err = b.List(ListOptions{Labels: []string{"gt:merge-request", "rig:gastown"}, CreatedAfter: early.Add(24 * time.Hour)})
+	if err != nil {
+		t.Fatalf("List{Labels, CreatedAfter}: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "test-both-late" {
+		t.Errorf("List{Labels, CreatedAfter} returned %v, want only test-both-late", titles(got))
+	}
+}
+
+// hasTitle reports whether issues include id.
+func hasTitle(issues []*Issue, id string) bool {
+	for _, is := range issues {
+		if is.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// titles names the issues in a List result for a failure message.
+func titles(issues []*Issue) []string {
+	out := make([]string, len(issues))
+	for i, is := range issues {
+		out[i] = is.ID
+	}
+	return out
 }
 
 func TestStoreListError(t *testing.T) {
@@ -1122,10 +1189,9 @@ func TestStoreReleaseWithReason(t *testing.T) {
 	store := newMockStorage()
 	b := newTestBeads(store)
 
-	store.CreateIssue(context.Background(), &beadsdk.Issue{
-		Title:    "in-progress",
-		Assignee: "agent-1",
-	}, "test")
+	// No assignee: an isolated client's actor is "", so this claim is the
+	// store's own and the fence lets it through.
+	store.CreateIssue(context.Background(), &beadsdk.Issue{Title: "in-progress"}, "test")
 	store.issues["test-1"].Status = "in_progress"
 
 	err := b.ReleaseWithReason("test-1", "agent stuck")
@@ -1134,6 +1200,50 @@ func TestStoreReleaseWithReason(t *testing.T) {
 	}
 	if string(store.issues["test-1"].Status) != "open" {
 		t.Fatalf("expected status 'open', got %q", store.issues["test-1"].Status)
+	}
+}
+
+// TestStoreReleaseRefusesAnotherActorsClaim pins the store branch of
+// ReleaseWithReason to bd's fence (gt-v8ujv, gt-7iwy0.4.2). Without it the
+// store path clears any claim, so the fence the bd path gained would hold on
+// one path and not the other.
+func TestStoreReleaseRefusesAnotherActorsClaim(t *testing.T) {
+	store := newMockStorage()
+	b := newTestBeads(store) // isolated: its actor is ""
+
+	store.CreateIssue(context.Background(), &beadsdk.Issue{Title: "held", Assignee: "agent-1"}, "test")
+	store.issues["test-1"].Status = beadsdk.StatusInProgress
+
+	err := b.ReleaseWithReason("test-1", "worker died")
+	if err == nil {
+		t.Fatal("releasing another actor's live claim succeeded, want a refusal")
+	}
+	got := store.issues["test-1"]
+	if got.Status != beadsdk.StatusInProgress || got.Assignee != "agent-1" {
+		t.Errorf("a refused release left status %q assignee %q, want in_progress by agent-1", got.Status, got.Assignee)
+	}
+}
+
+// TestStoreUpdateRefusesPersistent pins the store path's answer to
+// UpdateOptions.Persistent: an error, not the silent no-op that would leave
+// the caller believing a wisp was promoted (gt-7iwy0.4.2). Promotion moves
+// the row between the wisp and issue tables and the public beadsdk.Storage
+// has no call for it.
+func TestStoreUpdateRefusesPersistent(t *testing.T) {
+	store := newMockStorage()
+	b := newTestBeads(store)
+
+	store.CreateIssue(context.Background(), &beadsdk.Issue{Title: "wisp", Ephemeral: true}, "test")
+
+	err := b.Update("test-1", UpdateOptions{Persistent: true})
+	if err == nil {
+		t.Fatal("Update{Persistent} on the store path succeeded, want an error")
+	}
+	if !strings.Contains(err.Error(), "Persistent") {
+		t.Errorf("error = %v, want it to name Persistent so the caller can act on it", err)
+	}
+	if !store.issues["test-1"].Ephemeral {
+		t.Error("the refused update changed the issue anyway")
 	}
 }
 
