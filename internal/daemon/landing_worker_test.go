@@ -14,8 +14,53 @@ import (
 	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
+
+// writeDaemonRigConfigFile writes body to <rigPath>/config.json, so a caller
+// reads a real rig config file through the same strict loader production uses.
+func writeDaemonRigConfigFile(t *testing.T, rigPath, body string) {
+	t.Helper()
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", rigPath, err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write config.json: %v", err)
+	}
+}
+
+// TestRigDefaultBranch_ValidConfigUnchanged is the positive half of gt-8xk9k:
+// a config.json that decodes still supplies default_branch, and nothing is
+// reported.
+func TestRigDefaultBranch_ValidConfigUnchanged(t *testing.T) {
+	t.Parallel()
+	rigPath := filepath.Join(t.TempDir(), "testrig")
+	writeDaemonRigConfigFile(t, rigPath, `{"type":"rig","version":1,"name":"testrig","default_branch":"develop"}`)
+
+	if got := rigDefaultBranch(rigPath); got != "develop" {
+		t.Errorf("rigDefaultBranch() = %q, want %q", got, "develop")
+	}
+	if rig.RigConfigWarned(rigPath) {
+		t.Errorf("RigConfigWarned(%s) = true for a valid config", rigPath)
+	}
+}
+
+// TestRigDefaultBranch_UnparseableConfigReports pins the fix: a typo'd key no
+// longer yields a silent "main" with the operator's file looking
+// authoritative.
+func TestRigDefaultBranch_UnparseableConfigReports(t *testing.T) {
+	t.Parallel()
+	rigPath := filepath.Join(t.TempDir(), "testrig")
+	writeDaemonRigConfigFile(t, rigPath, `{"type":"rig","version":1,"name":"testrig","default_branchh":"develop"}`)
+
+	if got := rigDefaultBranch(rigPath); got != "main" {
+		t.Errorf("rigDefaultBranch() = %q, want the main fallback", got)
+	}
+	if !rig.RigConfigWarned(rigPath) {
+		t.Errorf("rigDefaultBranch() fell back to main without reporting the parse error")
+	}
+}
 
 func TestLandingWorkerConfigDefaults(t *testing.T) {
 	t.Parallel()

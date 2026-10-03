@@ -1327,6 +1327,75 @@ func TestRegisterRig_RecordsTheRigDatabase(t *testing.T) {
 	}
 }
 
+// TestRegisterRig_ValidConfigUnchanged is the positive half of gt-8xk9k: an
+// existing config.json that decodes still supplies the adopted values, and
+// nothing is reported.
+func TestRegisterRig_ValidConfigUnchanged(t *testing.T) {
+	t.Parallel()
+	root, rigsConfig := setupTestTown(t)
+	manager, _, _ := testManager(root, rigsConfig)
+
+	rigName := "adoptme"
+	rigPath := filepath.Join(root, rigName)
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	url := "https://example.invalid/adoptme.git"
+	writeRigConfigFile(t, rigPath, `{"type":"rig","version":1,"name":"adoptme","git_url":"`+url+`","default_branch":"develop"}`)
+
+	result, err := manager.RegisterRig(RegisterRigOptions{Name: rigName})
+	if err != nil {
+		t.Fatalf("RegisterRig: %v", err)
+	}
+	if !result.FromConfig {
+		t.Errorf("FromConfig = false for a valid config.json")
+	}
+	if result.DefaultBranch != "develop" {
+		t.Errorf("DefaultBranch = %q; want develop", result.DefaultBranch)
+	}
+	if result.GitURL != url {
+		t.Errorf("GitURL = %q; want %q from config", result.GitURL, url)
+	}
+	if RigConfigWarned(rigPath) {
+		t.Errorf("RigConfigWarned(%s) = true for a valid config", rigPath)
+	}
+}
+
+// TestRegisterRig_ReportsUnparseableConfig pins gt-8xk9k for adoption: an
+// existing config.json that no longer decodes is reported once and treated as
+// absent, so adoption falls back to the caller's values rather than reading a
+// broken file as authoritative.
+func TestRegisterRig_ReportsUnparseableConfig(t *testing.T) {
+	t.Parallel()
+	root, rigsConfig := setupTestTown(t)
+	manager, _, _ := testManager(root, rigsConfig)
+
+	rigName := "typorig"
+	rigPath := filepath.Join(root, rigName)
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	url := "https://example.invalid/typorig.git"
+	writeRigConfigFile(t, rigPath, `{"type":"rig","version":1,"name":"typorig","git_url":"https://example.invalid/other.git","default_branch":"develop","default_branchh":"x"}`)
+
+	result, err := manager.RegisterRig(RegisterRigOptions{Name: rigName, GitURL: url})
+	if err != nil {
+		t.Fatalf("RegisterRig: %v", err)
+	}
+	if result.FromConfig {
+		t.Errorf("FromConfig = true for an unparseable config.json")
+	}
+	if result.DefaultBranch != "" {
+		t.Errorf("DefaultBranch = %q; want the empty fallback", result.DefaultBranch)
+	}
+	if result.GitURL != url {
+		t.Errorf("GitURL = %q; want the caller's %q", result.GitURL, url)
+	}
+	if !RigConfigWarned(rigPath) {
+		t.Errorf("RegisterRig did not report the unparseable config.json")
+	}
+}
+
 func TestDetectGitURL_MayorRigFallback(t *testing.T) {
 	t.Parallel()
 	// Verify detectGitURL finds the origin remote from mayor/rig when the

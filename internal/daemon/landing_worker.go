@@ -745,9 +745,15 @@ func (f fileMainState) Save(st landworker.MainState) error {
 }
 
 // rigDefaultBranch is the branch the landing worker watches for direct
-// pushes: the rig's configured default branch, else main.
+// pushes: the rig's configured default branch, else main. A config.json that
+// does not decode is reported once instead of silently yielding main
+// (gt-8xk9k).
 func rigDefaultBranch(rigPath string) string {
-	if cfg, err := rig.LoadRigConfig(rigPath); err == nil && cfg.DefaultBranch != "" {
+	cfg, err := rig.LoadRigConfigIfPresent(rigPath)
+	if err != nil {
+		rig.WarnRigConfigOnce(rigPath, err)
+	}
+	if cfg != nil && cfg.DefaultBranch != "" {
 		return cfg.DefaultBranch
 	}
 	return "main"

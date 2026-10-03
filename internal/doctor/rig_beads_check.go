@@ -149,10 +149,17 @@ func (c *RigBeadsCheck) Fix(ctx *CheckContext) error {
 		rigBeadsPath := filepath.Join(ctx.TownRoot, info.beadsPath)
 		bd := ctx.beadsAt(rigBeadsPath)
 
-		// Try to get git URL from rig config
+		// Try to get git URL from rig config. A config.json that does not
+		// decode is reported once and leaves gitURL empty, the fallback this
+		// path always had (gt-8xk9k). The structured finding stays with
+		// RigConfigSyncCheck; this warning is the generic, once-per-rig line.
 		rigPath := filepath.Join(ctx.TownRoot, rigName)
 		gitURL := ""
-		if cfg, err := rig.LoadRigConfig(rigPath); err == nil {
+		cfg, cfgErr := rig.LoadRigConfigIfPresent(rigPath)
+		if cfgErr != nil {
+			rig.WarnRigConfigOnce(rigPath, cfgErr)
+		}
+		if cfg != nil {
 			gitURL = cfg.GitURL
 		}
 

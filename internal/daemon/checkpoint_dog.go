@@ -290,7 +290,13 @@ func (d *Daemon) checkpointRevertTarget(workDir, rigName string) string {
 	defaultBranch := checkpointRevertTargetDefault
 	if d.config != nil && d.config.TownRoot != "" {
 		rigPath := filepath.Join(d.config.TownRoot, rigName)
-		if rigCfg, err := rig.LoadRigConfig(rigPath); err == nil && rigCfg.DefaultBranch != "" {
+		// A config.json that does not decode is reported once rather than
+		// silently guarding against the wrong branch (gt-8xk9k).
+		rigCfg, cfgErr := rig.LoadRigConfigIfPresent(rigPath)
+		if cfgErr != nil {
+			rig.WarnRigConfigOnce(rigPath, cfgErr)
+		}
+		if rigCfg != nil && rigCfg.DefaultBranch != "" {
 			defaultBranch = rigCfg.DefaultBranch
 		}
 	}
