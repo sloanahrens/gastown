@@ -63,6 +63,13 @@ func stallingHTTPRemote(t *testing.T) (string, func() []net.Conn) {
 	}
 }
 
+// stallingRemoteBound bounds a call to the stalling http remote. It must
+// outlast a loaded host's start of git and its git-remote-http helper, or the
+// bound expires before the connection this test needs exists: at one second
+// the helper had not started, the server saw no request, and the run failed
+// without exercising the http path (gt-ndqjn).
+const stallingRemoteBound = 5 * time.Second
+
 // assertBoundedAndHelperGone checks that a timed remote call returned a
 // timeout within its bound plus the process-group kill grace, and that the
 // remote helper holding the connection is dead (the server sees EOF).
@@ -74,9 +81,11 @@ func assertBoundedAndHelperGone(t *testing.T, err error, elapsed, bound time.Dur
 	if !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("want a timeout, got %v", err)
 	}
-	// bound + SIGTERM grace + scheduling slack; a surviving helper holding
-	// the pipe blocks for as long as the server stalls (unbounded).
-	if limit := bound + 6*time.Second; elapsed > limit {
+	// bound + the kill grace the timed path allows git to exit under
+	// (timedCommandWaitDelay: SIGTERM, SIGKILL after util.ProcessGroupKillGrace,
+	// then exec's WaitDelay backstop) + scheduling slack; a surviving helper
+	// holding the pipe blocks for as long as the server stalls (unbounded).
+	if limit := bound + timedCommandWaitDelay + time.Second; elapsed > limit {
 		t.Fatalf("bounded call took %v (limit %v)", elapsed, limit)
 	}
 	t.Logf("returned in %v (bound %v)", elapsed.Round(10*time.Millisecond), bound)
@@ -113,10 +122,9 @@ func TestIntegrationFetchRefspecWithTimeoutBoundsAStallingHTTPRemote(t *testing.
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
 	g := NewGitWithDir(dir, "")
-	const bound = time.Second
 	start := time.Now()
-	err := g.FetchRefspecWithTimeout(url, "+refs/heads/main:refs/remotes/origin/main", bound)
-	assertBoundedAndHelperGone(t, err, time.Since(start), bound, conns())
+	err := g.FetchRefspecWithTimeout(url, "+refs/heads/main:refs/remotes/origin/main", stallingRemoteBound)
+	assertBoundedAndHelperGone(t, err, time.Since(start), stallingRemoteBound, conns())
 }
 
 // ls-remote against the same stalling http remote is bounded the same way.
@@ -127,8 +135,7 @@ func TestIntegrationListRemoteRefsWithHashesTimeoutBoundsAStallingHTTPRemote(t *
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
 	g := NewGitWithDir(dir, "")
-	const bound = time.Second
 	start := time.Now()
-	_, err := g.ListRemoteRefsWithHashesTimeout(url, "refs/heads/polecat/", bound)
-	assertBoundedAndHelperGone(t, err, time.Since(start), bound, conns())
+	_, err := g.ListRemoteRefsWithHashesTimeout(url, "refs/heads/polecat/", stallingRemoteBound)
+	assertBoundedAndHelperGone(t, err, time.Since(start), stallingRemoteBound, conns())
 }
