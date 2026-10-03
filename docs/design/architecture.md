@@ -16,7 +16,6 @@ from project implementation work.
 
 Organizational chain for cross-rig coordination:
 - Mayor mail and messages
-- Convoy coordination (batch work across rigs)
 - Strategic issues and decisions
 - **Town-level agent beads** (Mayor)
 - **Role definition beads** (global templates)

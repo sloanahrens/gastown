@@ -76,12 +76,6 @@ A comprehensive catalog of all cleanup-related commands in the gastown/beads eco
 | `gt unsling` / `gt unhook` | Removes work from agent's hook, resets bead status to "open" |
 | `gt hook clear` | Alias for unsling |
 
-## Convoy Cleanup
-
-| Command | What it does |
-|---------|-------------|
-| `gt convoy close <id>` | Closes a convoy bead |
-
 ## Mail Cleanup
 
 | Command | What it does |

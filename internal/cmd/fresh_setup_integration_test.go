@@ -56,7 +56,7 @@ func TestIntegrationFreshInstallRigPolecatHookIntegration(t *testing.T) {
 
 	rigPath := filepath.Join(hqPath, rigName)
 	assertFreshSetupRoute(t, hqPath, "hq-", ".")
-	assertFreshSetupRoute(t, hqPath, "hq-cv-", ".")
+	assertFreshSetupNoRoute(t, hqPath, "hq-cv-")
 	assertFreshSetupRoutePathExists(t, hqPath, prefix+"-")
 	assertBeadsRedirectResolves(t, filepath.Join(rigPath, ".beads"))
 
@@ -185,10 +185,21 @@ func assertTownBeadsPrefix(t *testing.T, hqPath string) {
 		t.Fatalf("read town beads config: %v", err)
 	}
 	text := string(data)
-	for _, want := range []string{"prefix: hq", "issue-prefix: hq"} {
+	for _, want := range []string{"prefix: hq", "issue-prefix: hq", "allowed_prefixes: hq"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("town beads config missing %q:\n%s", want, text)
 		}
+	}
+	if strings.Contains(text, "hq-cv") {
+		t.Fatalf("town beads config still allows the retired hq-cv prefix:\n%s", text)
+	}
+}
+
+// assertFreshSetupNoRoute asserts a fresh install writes no route for prefix.
+func assertFreshSetupNoRoute(t *testing.T, hqPath, prefix string) {
+	t.Helper()
+	if _, ok := freshSetupRoutePath(t, hqPath, prefix); ok {
+		t.Fatalf("fresh install wrote a route for retired prefix %q", prefix)
 	}
 }
 

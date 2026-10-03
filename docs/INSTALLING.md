@@ -223,8 +223,7 @@ Gas Town supports two operational modes:
 Run individual runtime instances manually. Gas Town only tracks state.
 
 ```bash
-# Create and assign work
-gt convoy create "Fix bugs" gt-abc12
+# Assign work
 gt sling gt-abc12 myproject
 
 # Run runtime manually
@@ -232,7 +231,7 @@ cd ~/gt/myproject/polecats/<worker>
 claude --resume          # Claude Code
 
 # Check progress
-gt convoy list
+bd show gt-abc12
 ```
 
 **When to use**: Testing, simple workflows, or when you prefer manual control.
@@ -245,13 +244,11 @@ Agents run in tmux sessions. Daemon manages lifecycle automatically.
 # Start the daemon
 gt daemon start
 
-# Create and assign work (workers spawn automatically)
-gt convoy create "Feature X" gt-abc12 gt-def34
-gt sling gt-abc12 myproject
-gt sling gt-def34 myproject
+# Assign work (workers spawn automatically)
+gt sling gt-abc12 gt-def34 myproject
 
-# Watch convoy progress
-gt convoy list
+# Check dispatch
+gt scheduler status
 
 # Attach to any agent session
 gt mayor attach
@@ -460,6 +457,6 @@ rm -rf ~/gt                # CAUTION: every rig, worktree and bead in the town
 After installation:
 
 1. **Read the README** - Core concepts and workflows
-2. **Try a simple workflow** - `bd create "Test task"` then `gt convoy create "Test" <bead-id>`
+2. **Try a simple workflow** - `bd create "Test task"` then `gt sling <bead-id> <rig>`
 3. **Explore docs** - `docs/reference.md` for command reference
 4. **Run doctor regularly** - `gt doctor` catches problems early

@@ -733,9 +733,9 @@ func initTownBeads(townPath string) error {
 		return fmt.Errorf("ensuring custom types: %w", err)
 	}
 
-	// Configure allowed_prefixes for convoy beads (hq-cv-* IDs).
-	// This allows bd create --id=hq-cv-xxx to pass prefix validation.
-	if err := beads.EnsureConfigYAMLValue(beadsDir, "allowed_prefixes", "hq,hq-cv"); err != nil {
+	// Configure allowed_prefixes for town beads (hq-* IDs).
+	// This allows bd create --id=hq-xxx to pass prefix validation.
+	if err := beads.EnsureConfigYAMLValue(beadsDir, "allowed_prefixes", "hq"); err != nil {
 		fmt.Printf("   %s Could not set allowed_prefixes: %v\n", style.Dim.Render("⚠"), err)
 	}
 
@@ -752,12 +752,6 @@ func initTownBeads(townPath string) error {
 	if err := beads.AppendRoute(townPath, beads.Route{Prefix: "hq-", Path: "."}); err != nil {
 		// Non-fatal: routing still works in many contexts, but explicit mapping is preferred.
 		fmt.Printf("   %s Could not update routes.jsonl: %v\n", style.Dim.Render("⚠"), err)
-	}
-
-	// Register hq-cv- prefix for convoy beads (auto-created by gt sling).
-	// Convoys use hq-cv-* IDs for visual distinction from other town beads.
-	if err := beads.AppendRoute(townPath, beads.Route{Prefix: "hq-cv-", Path: "."}); err != nil {
-		fmt.Printf("   %s Could not register convoy prefix: %v\n", style.Dim.Render("⚠"), err)
 	}
 
 	return nil
