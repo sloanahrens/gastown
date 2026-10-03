@@ -51,6 +51,11 @@ type fakeEnv struct {
 	branches   map[string]string
 	branchErr  map[string]error
 	commentErr error
+	notesErr   map[string]error
+	reopenErr  map[string]error
+	// heldBeads names beads whose guarded release no longer holds: another
+	// actor reassigned them since the list read.
+	heldBeads map[string]bool
 
 	restarts  []string
 	idles     []string // polecats whose seat was retired to stop
@@ -59,6 +64,8 @@ type fakeEnv struct {
 	comments  map[string][]string
 	reads     []string // AgentState reads, to prove they are refusal-only
 	workReads []string // AssignedWork reads, to prove a skipped seat reads no Dolt
+	recorded  []string // "bead=resume_branch: <branch>" per RecordResumeBranch
+	reopened  []string // "bead=assignee" per Reopen
 
 	// workBeads answers WorkBead by ID; a missing ID is a gone bead (nil).
 	workBeads   map[string]*Work
@@ -77,6 +84,7 @@ func newFake() *fakeEnv {
 		dirs:        map[string]bool{}, dirErr: map[string]error{},
 		sessions: map[string]bool{}, sessionErr: map[string]error{}, molStatus: map[string]string{},
 		molErr: map[string]error{}, branches: map[string]string{}, branchErr: map[string]error{},
+		notesErr: map[string]error{}, reopenErr: map[string]error{}, heldBeads: map[string]bool{},
 		comments:  map[string][]string{},
 		workBeads: map[string]*Work{}, workBeadErr: map[string]error{},
 		clearErr: map[string]error{},
@@ -159,6 +167,28 @@ func (f *fakeEnv) CloseMolecule(id, _ string) (int, error) {
 }
 func (f *fakeEnv) SurvivingBranch(_, id string) (string, error) {
 	return f.branches[id], f.branchErr[id]
+}
+func (f *fakeEnv) RecordResumeBranch(_, id, branch string) error {
+	if err := f.notesErr[id]; err != nil {
+		return err
+	}
+	f.recorded = append(f.recorded, id+"="+ResumeBranchNote(branch))
+	return nil
+}
+func (f *fakeEnv) Reopen(_, id, assignee string) (bool, error) {
+	if err := f.reopenErr[id]; err != nil {
+		return false, err
+	}
+	if f.heldBeads[id] {
+		return false, nil
+	}
+	f.reopened = append(f.reopened, id+"="+assignee)
+	for i := range f.active {
+		if f.active[i].ID == id {
+			f.active[i].Assignee = "" // released: no longer a polecat's active work
+		}
+	}
+	return true, nil
 }
 func (f *fakeEnv) Comment(id, text string) error {
 	if f.commentErr != nil {
@@ -567,7 +597,112 @@ func TestActiveWorkListFailureDoesNothing(t *testing.T) {
 	}
 }
 
-func TestStrandedBranchIsReportedOncePerWindow(t *testing.T) {
+// strandedFinding returns the recovery finding for one bead.
+func strandedFinding(t *testing.T, r Report, id string) Finding {
+	t.Helper()
+	for _, f := range r.Findings {
+		if f.Kind == "stranded" && f.Subject == id {
+			return f
+		}
+	}
+	return Finding{}
+}
+
+// A gone holder's bead goes back to the ready queue with the branch its work
+// survives on recorded, so the dispatcher resumes that branch (gt-gzhin.2).
+func TestGoneHolderWithBranchIsReopened(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	goneHolder(env, "gt-a", "onyx")
+	env.branches["gt-a"] = "polecat/onyx/gt-a@abc"
+
+	r := scanner(env, nil).Tick("gastown")
+
+	if got := strings.Join(env.reopened, ","); got != "gt-a=gastown/polecats/onyx" {
+		t.Fatalf("reopened = %q, want gt-a released from onyx; report %v", got, r.Lines())
+	}
+	if got := strings.Join(env.recorded, ","); got != "gt-a=resume_branch: polecat/onyx/gt-a@abc" {
+		t.Fatalf("recorded = %q; report %v", got, r.Lines())
+	}
+	if f := strandedFinding(t, r, "gt-a"); f.Outcome != OutcomeReopened || f.Detail != "resume_branch: polecat/onyx/gt-a@abc" {
+		t.Fatalf("finding = %v %q; report %v", f.Outcome, f.Detail, r.Lines())
+	}
+	if !strings.Contains(strings.Join(r.Lines(), "\n"), "1 reopened") {
+		t.Fatalf("summary does not count the reopen: %v", r.Lines())
+	}
+	c := strings.Join(env.comments["gt-a"], "\n")
+	if !strings.Contains(c, "polecat/onyx/gt-a@abc") || !strings.Contains(c, "REOPENED") {
+		t.Fatalf("comment = %q", c)
+	}
+	if len(env.restarts) != 0 {
+		t.Fatalf("restarted %v; the tick reopens, it does not re-sling", env.restarts)
+	}
+}
+
+// Without a branch the bead still returns to the queue, with no notes line
+// claiming one survived.
+func TestGoneHolderWithoutBranchIsReopened(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	goneHolder(env, "gt-a", "onyx")
+
+	r := scanner(env, nil).Tick("gastown")
+
+	if len(env.recorded) != 0 {
+		t.Fatalf("recorded = %v, want no resume_branch line", env.recorded)
+	}
+	if got := strings.Join(env.reopened, ","); got != "gt-a=gastown/polecats/onyx" {
+		t.Fatalf("reopened = %q; report %v", got, r.Lines())
+	}
+	if f := strandedFinding(t, r, "gt-a"); f.Outcome != OutcomeReopened || f.Detail != "no surviving branch" {
+		t.Fatalf("finding = %v %q", f.Outcome, f.Detail)
+	}
+	if c := strings.Join(env.comments["gt-a"], "\n"); !strings.Contains(c, "No polecat branch carries unlanded work") {
+		t.Fatalf("comment = %q", c)
+	}
+}
+
+// The release is guarded, so a bead another actor reassigned since the list
+// read is left to that actor, silently and with no notes line written.
+func TestReopenLosesTheRaceOnTheAssigneeGuard(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	goneHolder(env, "gt-a", "onyx")
+	env.branches["gt-a"] = "polecat/onyx/gt-a@abc"
+	env.heldBeads["gt-a"] = true
+
+	r := scanner(env, nil).Tick("gastown")
+
+	if len(env.reopened) != 0 || len(env.comments) != 0 {
+		t.Fatalf("reopened = %v comments = %v, want nothing", env.reopened, env.comments)
+	}
+	if f := strandedFinding(t, r, "gt-a"); f.Outcome != "" {
+		t.Fatalf("finding = %v %q, want none", f.Outcome, f.Detail)
+	}
+}
+
+// A retry after a failed release does not append the line twice: the notes
+// now carry it.
+func TestResumeBranchLineIsNotRecordedTwice(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	w := goneHolder(env, "gt-a", "onyx")
+	env.branches["gt-a"] = "polecat/onyx/gt-a@abc"
+	w.Notes = "resume_branch: polecat/onyx/gt-a@abc"
+
+	scanner(env, nil).Tick("gastown")
+
+	if len(env.recorded) != 0 {
+		t.Fatalf("recorded = %v, want the line left alone", env.recorded)
+	}
+	if len(env.reopened) != 1 {
+		t.Fatalf("reopened = %v, want the release retried", env.reopened)
+	}
+}
+
+// The bead is released once: the next tick does not see it as a polecat's
+// active work, so nothing is written a second time.
+func TestReopenedBeadIsNotWrittenAgain(t *testing.T) {
 	t.Parallel()
 	env := newFake()
 	goneHolder(env, "gt-a", "onyx")
@@ -577,47 +712,104 @@ func TestStrandedBranchIsReportedOncePerWindow(t *testing.T) {
 
 	s.Tick("gastown")
 	s.Tick("gastown")
+	if len(env.reopened) != 1 || len(env.recorded) != 1 {
+		t.Fatalf("reopened = %v recorded = %v, want each once", env.reopened, env.recorded)
+	}
 	if n := len(env.comments["gt-a"]); n != 1 {
-		t.Fatalf("comments = %d, want exactly 1 within the window", n)
-	}
-	c := env.comments["gt-a"][0]
-	for _, want := range []string{"polecat/onyx/gt-a@abc", "do not re-sling with --force"} {
-		if !strings.Contains(c, want) {
-			t.Fatalf("comment %q missing %q", c, want)
-		}
-	}
-
-	// A window later it may report again.
-	ledger["gastown/gt-a"] = now.Add(-DefaultReportWindow - time.Minute)
-	s.Tick("gastown")
-	if n := len(env.comments["gt-a"]); n != 2 {
-		t.Fatalf("comments = %d after the window, want 2", n)
+		t.Fatalf("comments = %d, want 1", n)
 	}
 }
 
-func TestStrandedNeverRedispatches(t *testing.T) {
+// A live holder — directory or session — is the seat pass's business, not
+// this one's.
+func TestLiveHolderIsLeftAlone(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		setup func(env *fakeEnv)
+	}{
+		{"holder directory exists", func(env *fakeEnv) { env.dirs["onyx"] = true }},
+		{"holder session alive", func(env *fakeEnv) { env.sessions["onyx"] = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := newFake()
+			goneHolder(env, "gt-a", "onyx")
+			env.branches["gt-a"] = "polecat/onyx/gt-a@abc"
+			tc.setup(env)
+
+			scanner(env, nil).Tick("gastown")
+
+			if len(env.reopened) != 0 || len(env.comments) != 0 {
+				t.Fatalf("reopened = %v comments = %v, want the bead left alone", env.reopened, env.comments)
+			}
+		})
+	}
+}
+
+// A submitted bead belongs to the landing worker: a dead holder is expected
+// there, and reopening it would take the landing back.
+func TestReadyToLandHolderIsLeftAlone(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	goneHolder(env, "gt-a", "onyx").Labels = []string{ReadyToLandLabel}
+	env.branches["gt-a"] = "polecat/onyx/gt-a@abc"
+
+	r := scanner(env, nil).Tick("gastown")
+
+	if len(env.reopened) != 0 || len(env.recorded) != 0 || len(env.comments) != 0 {
+		t.Fatalf("reopened = %v recorded = %v comments = %v, want nothing", env.reopened, env.recorded, env.comments)
+	}
+	if f := strandedFinding(t, r, "gt-a"); f.Outcome != "" {
+		t.Fatalf("finding = %v %q, want none", f.Outcome, f.Detail)
+	}
+}
+
+// A parked holder is a deliberate stop: its work waits for the operator.
+func TestParkedHolderIsLeftAlone(t *testing.T) {
 	t.Parallel()
 	env := newFake()
 	goneHolder(env, "gt-a", "onyx")
-	scanner(env, nil).Tick("gastown")
-	c := strings.Join(env.comments["gt-a"], "\n")
-	if !strings.Contains(c, "No polecat branch carries unlanded work") || strings.Contains(c, "gt sling") {
-		t.Fatalf("comment = %q", c)
+	env.branches["gt-a"] = "polecat/onyx/gt-a@abc"
+	env.intents["onyx"] = intent.Record{Desired: intent.DesiredPark, Reason: "operator"}
+
+	r := scanner(env, nil).Tick("gastown")
+
+	if len(env.reopened) != 0 || len(env.recorded) != 0 || len(env.comments) != 0 {
+		t.Fatalf("reopened = %v recorded = %v comments = %v, want nothing", env.reopened, env.recorded, env.comments)
 	}
-	if len(env.restarts) != 0 {
-		t.Fatalf("restarted %v", env.restarts)
+	if f := strandedFinding(t, r, "gt-a"); f.Outcome != "" {
+		t.Fatalf("finding = %v %q, want none", f.Outcome, f.Detail)
 	}
 }
 
+// An unreadable seat record is a hold: the bead stays where it is.
+func TestUnreadableHolderRecordLeavesTheBead(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	goneHolder(env, "gt-a", "onyx")
+	env.intentErr["onyx"] = errors.New("permission denied")
+
+	r := scanner(env, nil).Tick("gastown")
+
+	if len(env.reopened) != 0 || len(env.recorded) != 0 {
+		t.Fatalf("acted on an unreadable holder record: %v %v", env.reopened, env.recorded)
+	}
+	if f := strandedFinding(t, r, "gt-a"); f.Outcome != OutcomeUnknown {
+		t.Fatalf("finding = %v %q, want unknown", f.Outcome, f.Detail)
+	}
+}
+
+// Without a survival answer the bead stays hooked: releasing on a failed
+// query hands preserved work to a fresh polecat starting from main.
 func TestSurvivingWorkUnknownWritesNothing(t *testing.T) {
 	t.Parallel()
 	env := newFake()
 	goneHolder(env, "gt-a", "onyx")
 	env.branchErr["gt-a"] = errors.New("ls-remote timed out")
-	ledger := memLedger{}
-	r := scanner(env, ledger).Tick("gastown")
-	if len(env.comments) != 0 || len(ledger) != 0 {
-		t.Fatalf("wrote a report on an unknown survival answer: %v", env.comments)
+	r := scanner(env, nil).Tick("gastown")
+	if len(env.comments) != 0 || len(env.reopened) != 0 || len(env.recorded) != 0 {
+		t.Fatalf("acted on an unknown survival answer: reopened=%v recorded=%v comments=%v", env.reopened, env.recorded, env.comments)
 	}
 	found := false
 	for _, f := range r.Findings {
@@ -627,6 +819,25 @@ func TestSurvivingWorkUnknownWritesNothing(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("want an unknown stranded finding, got %v", r.Lines())
+	}
+}
+
+// A notes write that failed leaves the bead hooked, so the next tick retries
+// instead of releasing work the dispatcher would go looking for on no branch.
+func TestFailedResumeBranchWriteLeavesTheBeadHooked(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	goneHolder(env, "gt-a", "onyx")
+	env.branches["gt-a"] = "polecat/onyx/gt-a@abc"
+	env.notesErr["gt-a"] = errors.New("bd update: connection refused")
+
+	r := scanner(env, nil).Tick("gastown")
+
+	if len(env.reopened) != 0 {
+		t.Fatalf("reopened = %v with the branch unrecorded", env.reopened)
+	}
+	if f := strandedFinding(t, r, "gt-a"); f.Outcome != OutcomeFailed {
+		t.Fatalf("finding = %v %q, want failed", f.Outcome, f.Detail)
 	}
 }
 

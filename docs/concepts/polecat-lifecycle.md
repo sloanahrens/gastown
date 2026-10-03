@@ -324,7 +324,8 @@ The daemon is the only process that kills or restarts a polecat
 ([ADR 0003](../adr/0003-one-supervisor-no-idle-llm.md)). Its `patrol_scan` tick
 ([ADR 0005](../adr/0005-patrol-scan-tick.md)) restarts a polecat whose session
 is dead on two consecutive samples while it holds work, closes the molecules
-of hooked work whose polecat is gone, and comments on stranded work. It does
+of hooked work whose polecat is gone, and returns a gone polecat's work bead
+to the ready queue with its surviving branch recorded. It does
 not force session cycles, interrupt a live session, re-sling or reset work.
 A polecat that needs help runs `gt escalate`.
 
@@ -362,7 +363,7 @@ This distinction matters for:
 - `internal/cmd/done_agent_state.go` — the CLI layer's hooked-bead close and agent-bead state write
 - `internal/cmd/sling.go` + `polecat_spawn.go` — capacity allocation, branch setup
 - `internal/cmd/handoff.go` — session cycling for all roles
-- `internal/patrolscan/` — dead-session restart, orphaned molecules, stranded work
+- `internal/patrolscan/` — dead-session restart, orphaned molecules, dead-holder recovery
 - `internal/landworker/`, `internal/land/` — the landing worker
 - `internal/polecat/manager.go` — stale detection, done-state projection, pool management
 

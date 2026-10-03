@@ -266,6 +266,12 @@ func bdSourceTree(root string) bool {
 // patrolScanHost implements patrolscan.Env for the daemon.
 type patrolScanHost struct {
 	d *Daemon
+	// listOriginBranches is polecat.ListOriginPolecatBranches when nil: a seam
+	// for the unit tier, which cannot start git.
+	listOriginBranches func(rigRoot string) ([]string, error)
+	// openRecoveryBeads is the routed bd client when nil: a seam for the unit
+	// tier, which cannot start bd.
+	openRecoveryBeads func(env []string) beads.Client
 }
 
 var _ patrolscan.Env = (*patrolScanHost)(nil)
@@ -481,13 +487,9 @@ func (h *patrolScanHost) CloseMolecule(id, reason string) (int, error) {
 	return beads.CloseWispTree(ctx, h.town(), bdMutationRoutingEnv(h.town()), reason, tree)
 }
 
-func (h *patrolScanHost) SurvivingBranch(rig, beadID string) (string, error) {
-	return polecat.SurvivingWorkForIssue(filepath.Join(h.town(), rig), beadID)
-}
-
+// Comment appends a comment written by the tick to a bead.
 func (h *patrolScanHost) Comment(beadID, text string) error {
-	b := beads.NewPlain(h.town(), bdMutationRoutingEnv(h.town()), beads.WithBin(h.d.bdPathOrDefault())).WithTimeout(patrolScanBdTimeout)
-	if err := b.AddCommentAs(beadID, patrolscan.Actor, text); err != nil {
+	if err := h.recoveryBeads().AddCommentAs(beadID, patrolscan.Actor, text); err != nil {
 		return fmt.Errorf("bd comments add %s: %w", beadID, err)
 	}
 	return nil
