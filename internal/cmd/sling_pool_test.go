@@ -109,7 +109,7 @@ func TestListPolecatSessions(t *testing.T) {
 		},
 		created: map[string]time.Time{"gt-marble": now.Add(-time.Minute), "gt-slate": now.Add(-time.Hour)},
 	}
-	got, err := listPolecatSessions(f, "")
+	got, err := listPolecatSessionsWith(f, poolDispositionFor(""), now)
 	if err != nil {
 		t.Fatal(err)
 	}

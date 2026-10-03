@@ -1,15 +1,20 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
@@ -334,6 +339,226 @@ func TestPoolSeatPicture_UncappedSeatIsAtLeastOneFreeSeat(t *testing.T) {
 	}
 	if seats.Free < 1 {
 		t.Errorf("free = %d, want at least 1 while the seat is uncapped", seats.Free)
+	}
+}
+
+// ── The seat picture's sources (gt-thy6r) ───────────────────────────────────
+
+// writeLandingSeat stages a seat mid-landing: the polecat's directory, so the
+// seat exists, and the intent record `gt done` leaves behind — desired
+// submitted, naming the work bead it handed to the landing worker.
+func writeLandingSeat(t *testing.T, townRoot, rigName, polecatName, workBead string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(townRoot, rigName, "polecats", polecatName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeIntentRecord(t, intent.Seat{Rig: rigName, Role: constants.RolePolecat, Name: polecatName}, townRoot,
+		intent.Record{Desired: intent.DesiredSubmitted, WorkBead: workBead})
+}
+
+// writeIntentRecord writes an intent record at its own seat path.
+func writeIntentRecord(t *testing.T, seat intent.Seat, townRoot string, rec intent.Record) {
+	t.Helper()
+	path := seat.Path(townRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeSeatClaim stages the claim a sling holds on a seat while its session is
+// still starting, at the path and in the shape poolSeatClaimSessions reads.
+func writeSeatClaim(t *testing.T, townRoot, id, agent string) {
+	t.Helper()
+	dir := poolSeatClaimDir(townRoot)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(poolSeatClaim{ID: id, PID: os.Getpid(), Agent: agent, CreatedAt: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, id+".json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// submittedWork answers the batched seat-work read with the named beads as
+// they look while they are still waiting to land.
+func submittedWork(ids ...string) poolSeatWorkFunc {
+	want := map[string]bool{}
+	for _, id := range ids {
+		want[id] = true
+	}
+	return func(got []string) (map[string]*beads.Issue, error) {
+		out := map[string]*beads.Issue{}
+		for _, id := range got {
+			if want[id] {
+				out[id] = &beads.Issue{ID: id, Status: string(beads.StatusOpen), Labels: []string{land.LabelReadyToLand}}
+			}
+		}
+		return out, nil
+	}
+}
+
+// TestPoolSeatSessionsCountsEveryKindOfTakenSeat pins the three sources the
+// picture is built from — the live session, the in-flight claim a sling writes
+// before its session exists, and the seat mid-landing — against the fourth
+// state, a seat that is simply free. The mid-landing case is the one the
+// deleted seat-refill plugin and the first cut of the Go fold both counted as
+// free (gt-thy6r, gt-59o9, gt-t8q5).
+func TestPoolSeatSessionsCountsEveryKindOfTakenSeat(t *testing.T) {
+	t.Parallel()
+	pool := &config.PolecatPool{OverflowAgent: "deepseek-flash", MaxOverflow: 3}
+	live := &fakeLister{sessions: map[string]map[string]string{
+		"gt-jade": {"GT_ROLE": "gastown/polecats/jade", "GT_AGENT": "deepseek-flash"},
+	}}
+
+	cases := []struct {
+		name    string
+		lister  sessionLister
+		claim   bool
+		landing bool
+		want    int
+	}{
+		{"a live session holds the seat", live, false, false, 1},
+		{"an in-flight claim holds the seat", &fakeLister{}, true, false, 1},
+		{"a seat mid-landing holds the seat", &fakeLister{}, false, true, 1},
+		{"no session, no claim, no submission: free", &fakeLister{}, false, false, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			work := submittedWork()
+			if c.claim {
+				writeSeatClaim(t, town, "claim-1", pool.OverflowAgent)
+			}
+			if c.landing {
+				writeLandingSeat(t, town, "gastown", "ruby", "gt-ruby")
+				work = submittedWork("gt-ruby")
+			}
+
+			got, err := poolSeatSessionsWith(c.lister, town, nil, work, pool)
+			if err != nil {
+				t.Fatalf("poolSeatSessionsWith: %v", err)
+			}
+			if n := poolSeatCount(pool, got); n != c.want {
+				t.Fatalf("seat count = %d, want %d (%+v)", n, c.want, got)
+			}
+			seats := poolSeatPicture(pool, got)
+			if seats.Occupied != c.want || seats.Free != 3-c.want {
+				t.Errorf("picture = %+v, want %d occupied and %d free", seats, c.want, 3-c.want)
+			}
+		})
+	}
+}
+
+// TestPoolLandingSeatEndsWithTheLabel pins that the intent record is only the
+// cheap half of the signal: the bead decides. A submission pulled back for
+// rework, or already landed, leaves a record the patrol scan has not corrected
+// yet (gt-xs1ni); its bead no longer carries gt:ready-to-land, so the seat is
+// free rather than held for a wait that is over.
+func TestPoolLandingSeatEndsWithTheLabel(t *testing.T) {
+	t.Parallel()
+	pool := &config.PolecatPool{OverflowAgent: "deepseek-flash", MaxOverflow: 3}
+	town := t.TempDir()
+	writeLandingSeat(t, town, "gastown", "ruby", "gt-ruby")
+
+	// The record says submitted, the bead says otherwise.
+	over := func(got []string) (map[string]*beads.Issue, error) {
+		out := map[string]*beads.Issue{}
+		for _, id := range got {
+			out[id] = &beads.Issue{ID: id, Status: string(beads.StatusOpen)}
+		}
+		return out, nil
+	}
+	got, err := poolSeatSessionsWith(&fakeLister{}, town, nil, over, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("want no occupied seat for a bead that is no longer submitted, got %+v", got)
+	}
+
+	// A record with no work bead names nothing to confirm, so it holds nothing.
+	writeLandingSeat(t, town, "gastown", "opal", "")
+	got, err = poolSeatSessionsWith(&fakeLister{}, town, nil, over, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("want no occupied seat for a submission with no bead, got %+v", got)
+	}
+}
+
+// TestPoolLandingSeatSkipsASeatThatIsGone: an intent record outlives the seat
+// it belongs to, and a seat that is gone holds nothing. Records that are not a
+// polecat's — a witness, refinery or crew seat — hold no pool seat either.
+func TestPoolLandingSeatSkipsASeatThatIsGone(t *testing.T) {
+	t.Parallel()
+	pool := &config.PolecatPool{OverflowAgent: "deepseek-flash", MaxOverflow: 3}
+	town := t.TempDir()
+
+	// A submitted record with no polecat directory behind it.
+	writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "ghost"}, town,
+		intent.Record{Desired: intent.DesiredSubmitted, WorkBead: "gt-ghost"})
+	// A submitted record for a seat that is not a polecat's.
+	writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: "witness"}, town,
+		intent.Record{Desired: intent.DesiredSubmitted, WorkBead: "gt-witness"})
+
+	got, err := poolSeatSessionsWith(&fakeLister{}, town, nil, submittedWork("gt-ghost", "gt-witness"), pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("want no occupied seat, got %+v", got)
+	}
+}
+
+// TestDispatchSeatPictureAndSpecRosterAgreeOnALandingSeat pins the acceptance
+// criterion that the picture `gt daemon dispatch-check` nudges from and the
+// roster the spec dispatcher spends seats from are one count of one pool: a
+// mid-landing seat occupies it in both, so the dispatcher does not sling a
+// second bead into a pool class that is still occupied (gt-thy6r).
+func TestDispatchSeatPictureAndSpecRosterAgreeOnALandingSeat(t *testing.T) {
+	t.Parallel()
+	pool := &config.PolecatPool{OverflowAgent: "deepseek-flash", MaxOverflow: 2}
+	ts := &config.TownSettings{RoleAgents: map[string]string{"polecat": "deepseek-flash"}}
+	town := t.TempDir()
+	writeLandingSeat(t, town, "gastown", "ruby", "gt-ruby")
+	lister := &fakeLister{sessions: map[string]map[string]string{
+		"gt-jade": {"GT_ROLE": "gastown/polecats/jade", "GT_AGENT": "deepseek-flash"},
+	}}
+
+	sessions, err := poolSeatSessionsWith(lister, town, nil, submittedWork("gt-ruby"), pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The daemon's picture: one live polecat and one mid-landing seat fill the
+	// two seats, so the idle-seat check has nothing to nudge about.
+	seats := poolSeatPicture(pool, sessions)
+	if seats.Occupied != 2 || seats.Free != 0 {
+		t.Fatalf("dispatch picture = %+v, want both seats occupied", seats)
+	}
+
+	// The spec dispatcher's roster counts the same seats, and the seat choice
+	// it feeds spends nothing while one is landing.
+	roster := specRosterFrom(sessions, ts)
+	if got := roster.Live[pool.OverflowAgent]; got != seats.Occupied {
+		t.Fatalf("spec roster counts %d on %s; the dispatch picture counts %d", got, pool.OverflowAgent, seats.Occupied)
+	}
+	budget := specdispatch.Budget{Seats: []specdispatch.Seat{{Agent: pool.OverflowAgent, Cap: pool.MaxOverflow}}}
+	budget.SetLive(roster.Live)
+	if choice := specdispatch.ChooseSeat(budget, specdispatch.Spec{}); !choice.Skip {
+		t.Errorf("the dispatcher took a seat while one was mid-landing: %+v", choice)
 	}
 }
 

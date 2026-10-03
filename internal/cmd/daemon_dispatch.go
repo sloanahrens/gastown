@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,8 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 	"github.com/steveyegge/gastown/internal/townconfig"
@@ -291,9 +294,9 @@ func dispatchSeatPicture(townRoot string) (dispatchSeats, error) {
 
 	var sessions []poolSession
 	if settings.PolecatPool != nil && settings.PolecatPool.OverflowAgent != "" {
-		sessions, err = listPolecatSessions(newPoolSessionLister(), townRoot)
+		sessions, err = poolSeatSessions(newPoolSessionLister(), townRoot, settings.PolecatPool)
 		if err != nil {
-			return dispatchSeats{}, fmt.Errorf("listing polecat sessions for dispatch seats: %w", err)
+			return dispatchSeats{}, fmt.Errorf("listing polecat seats for dispatch seats: %w", err)
 		}
 	}
 
@@ -317,9 +320,187 @@ func dispatchSeatPicture(townRoot string) (dispatchSeats, error) {
 	}
 }
 
-// poolSeatPicture reports the pool's seats, counting the live sessions the
-// caller listed. Source is empty when no pool is configured, which is the
-// signal that this model has nothing to say.
+// poolSeatSessions lists the seats the pool counts as taken: the live polecat
+// sessions, the in-flight seat claims a sling writes before its session exists
+// (gt-t8q5), and the seats mid-landing (gt-thy6r).
+//
+// All three belong in the count. The pool's own admission path counts sessions
+// and claims (choosePoolAgent), so a picture taken from live sessions alone can
+// name a seat free that the very next sling refuses — and a nudge that names
+// room the next sling refuses is worse than no nudge, because it spends the
+// mayor's attention to produce a refusal (gt-59o9). A seat mid-landing is the
+// same lie one stage later: the polecat that ran `gt done` has no session and
+// has dropped its claim, so the plugins/seat-refill accounting this replaces
+// read it as free and could sling a second bead into a pool class that was
+// still occupied (gt-2z8k1). The seat is not free until the landing worker
+// records the result.
+//
+// The picture is the one `gt daemon dispatch-check` nudges from and the spec
+// dispatcher's roster reads (spec.go's Roster), so both take it from here and
+// cannot disagree about a seat.
+func poolSeatSessions(t sessionLister, townRoot string, pool *config.PolecatPool) ([]poolSession, error) {
+	return poolSeatSessionsWith(t, townRoot, poolDispositionFor(townRoot), poolSeatWorkFor(townRoot), pool)
+}
+
+// poolSeatSessionsWith is poolSeatSessions with the town's reads explicit: the
+// per-seat polecat-state read (listPolecatSessions' disposition) and the
+// batched work-bead read the landing seats are confirmed with. A caller with
+// no town to read (a test) passes nil for both.
+func poolSeatSessionsWith(t sessionLister, townRoot string, disposition polecatDispositionFunc, work poolSeatWorkFunc, pool *config.PolecatPool) ([]poolSession, error) {
+	sessions, err := listPolecatSessionsWith(t, disposition, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	claims, err := poolSeatClaimSessions(townRoot, "")
+	if err != nil {
+		// A claim set that cannot be read is not an empty claim set: reading it
+		// as one is what makes the picture lie (gt-t8q5).
+		return nil, err
+	}
+	landing, err := poolLandingSessions(townRoot, pool, work)
+	if err != nil {
+		return nil, err
+	}
+	return append(append(sessions, claims...), landing...), nil
+}
+
+// poolSeatWorkFunc reads work beads by ID in one call, keyed by ID. Missing
+// IDs are left out (beads.Client.ShowMultiple). It is the batched read the
+// landing seats are confirmed with; nil is a caller with no store to read.
+type poolSeatWorkFunc func(ids []string) (map[string]*beads.Issue, error)
+
+// poolSeatWorkFor is the batched work-bead read a caller in townRoot wants, or
+// nil when there is no town to read. The town's client routes each ID to its
+// own database, so a landing seat's bead is read wherever it lives (a bead
+// slung from the town carries the hq- prefix).
+func poolSeatWorkFor(townRoot string) poolSeatWorkFunc {
+	if townRoot == "" {
+		return nil
+	}
+	return func(ids []string) (map[string]*beads.Issue, error) {
+		return beads.New(townRoot).ShowMultiple(ids)
+	}
+}
+
+// poolLandingSessions lists the seats mid-landing as occupants of the pool's
+// seat: the polecats whose work bead still carries gt:ready-to-land and whose
+// session is gone because `gt done` ended it.
+//
+// The seat's intent record is the cheap half of the signal, and the reason
+// this costs no store call in the common case: it is a small JSON file per
+// seat under .runtime/agents, written by `gt done` (desired=submitted) and
+// cleared by the landing worker when it records the result, or by the next
+// sling onto the seat. The record alone is not trusted — it can outlive a
+// submission that was pulled back for rework, and the patrol scan corrects
+// that a tick later (gt-xs1ni) — so the seats it names are confirmed against
+// the bead in ONE batched read, and a seat whose bead no longer reads as
+// submitted is a free seat.
+//
+// A record whose polecat directory is gone is left out, the way townhealth
+// reads the same directory: the seat is gone, and its record outlived it.
+//
+// pool is the seat the town's polecats run; a landing seat is rendered on its
+// overflow agent, the class the pool owns. A nil pool (or one with no
+// overflow_agent) owns no seat, so nothing is rendered and no bead is read.
+func poolLandingSessions(townRoot string, pool *config.PolecatPool, work poolSeatWorkFunc) ([]poolSession, error) {
+	if townRoot == "" || pool == nil || pool.OverflowAgent == "" || work == nil {
+		return nil, nil
+	}
+
+	type landing struct{ rig, name, bead string }
+	var candidates []landing
+	dir := filepath.Join(constants.TownRuntimePath(townRoot), "agents")
+	err := filepath.WalkDir(dir, func(path string, e os.DirEntry, err error) error {
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) && path == dir {
+				// No seat has ever recorded an intent: nothing is mid-landing.
+				return filepath.SkipDir
+			}
+			return err
+		}
+		if e.IsDir() || filepath.Ext(path) != ".json" {
+			return nil
+		}
+		rig, name, ok := polecatSeatRecord(dir, path)
+		if !ok {
+			return nil
+		}
+		rec, rerr := intent.ReadPath(path)
+		if rerr != nil {
+			// A record that cannot be read is not a seat that is free: the
+			// picture fails rather than undersell the occupied seats, as the
+			// claim set does (gt-t8q5).
+			return fmt.Errorf("reading intent record for %s/%s: %w", rig, name, rerr)
+		}
+		if !rec.Submitted() || rec.WorkBead == "" {
+			// A submission with no bead names nothing to confirm: it holds no
+			// seat.
+			return nil
+		}
+		if _, serr := os.Stat(filepath.Join(townRoot, rig, "polecats", name)); serr != nil {
+			return nil // the seat is gone; the record outlived it
+		}
+		candidates = append(candidates, landing{rig: rig, name: name, bead: rec.WorkBead})
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("reading landing seats from %s: %w", dir, err)
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
+	ids := make([]string, 0, len(candidates))
+	seen := make(map[string]struct{}, len(candidates))
+	for _, c := range candidates {
+		if _, ok := seen[c.bead]; ok {
+			continue
+		}
+		seen[c.bead] = struct{}{}
+		ids = append(ids, c.bead)
+	}
+	sort.Strings(ids)
+	issues, err := work(ids)
+	if err != nil {
+		// A bead that could not be read is not a bead that landed.
+		return nil, fmt.Errorf("reading landing seats' work beads: %w", err)
+	}
+
+	out := make([]poolSession, 0, len(candidates))
+	for _, c := range candidates {
+		if !polecat.IsSubmittedWork(issues[c.bead]) {
+			continue // the bead no longer waits to land: the seat is free
+		}
+		// created is left zero on purpose: a landing seat is not a spawn, and
+		// the spec dispatcher's stagger (min_spawn_gap) must not arm from a
+		// submission.
+		out = append(out, poolSession{name: "landing/" + c.rig + "/" + c.name, agent: pool.OverflowAgent})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+	return out, nil
+}
+
+// polecatSeatRecord splits an intent record's path under dir
+// ("<rig>/polecat.<name>.json") into the rig and polecat it names, reporting
+// ok=false for a record that is not a polecat's — a witness, refinery or
+// crew seat holds no pool seat.
+func polecatSeatRecord(dir, path string) (rigName, polecatName string, ok bool) {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return "", "", false
+	}
+	rigName = filepath.Dir(rel)
+	stem := strings.TrimSuffix(filepath.Base(rel), ".json")
+	role, name, named := strings.Cut(stem, ".")
+	if rigName == "." || !named || role != constants.RolePolecat || name == "" || strings.Contains(name, ".") {
+		return "", "", false
+	}
+	return rigName, name, true
+}
+
+// poolSeatPicture reports the pool's seats, counting the seats the caller
+// listed (poolSeatSessions). Source is empty when no pool is configured, which
+// is the signal that this model has nothing to say.
 func poolSeatPicture(pool *config.PolecatPool, sessions []poolSession) dispatchSeats {
 	if pool == nil || pool.OverflowAgent == "" {
 		return dispatchSeats{}

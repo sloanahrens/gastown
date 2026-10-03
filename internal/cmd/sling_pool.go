@@ -136,11 +136,30 @@ var newPoolSessionLister = func() sessionLister { return tmux.NewTmux() }
 // func is a pool that cannot read any polecat's state.
 type polecatDispositionFunc func(rigName, polecatName string) (polecat.WorkstateDisposition, error)
 
-// listPolecatSessions returns every live polecat session with its agent and
-// creation time. Polecats are identified by the GT_ROLE their session
-// carries ("<rig>/polecats/<name>"), so witnesses, refineries and dogs on
-// the same server are not counted. GT_AGENT is written into the session
-// environment at spawn (SessionStartOptions.Agent / AgentEnv fallback).
+// poolDispositionFor is the polecat-state read a caller in townRoot wants, or
+// nil when there is no town to read (a caller that then fails open; see
+// polecatSeatOccupied). Every reader of a polecat's own seat state builds it
+// here, so the seat picture the dispatchers take (poolSeatSessions) and any
+// other count cannot read the same polecat two ways.
+func poolDispositionFor(townRoot string) polecatDispositionFunc {
+	if townRoot == "" {
+		return nil
+	}
+	return func(rigName, polecatName string) (polecat.WorkstateDisposition, error) {
+		return poolPolecatDisposition(townRoot, rigName, polecatName)
+	}
+}
+
+// listPolecatSessionsWith returns every live polecat session with its agent and
+// creation time, less the seats the polecat-state read says are no longer
+// spending one. Polecats are identified by the GT_ROLE their session carries
+// ("<rig>/polecats/<name>"), so witnesses, refineries and dogs on the same
+// server are not counted. GT_AGENT is written into the session environment at
+// spawn (SessionStartOptions.Agent / AgentEnv fallback).
+//
+// disposition is the polecat's own bead state (poolDispositionFor); a nil one
+// fails open. now stands in for a session whose creation time tmux cannot
+// report.
 //
 // A session surviving past `gt done` (preserved for recovery, or torn down
 // a beat later than the polecat's own agent_state write) does not mean the
@@ -152,19 +171,6 @@ type polecatDispositionFunc func(rigName, polecatName string) (polecat.Workstate
 // scheduler.max_polecats (polecat_capacity.go) already trust over a session's
 // mere presence, so a session that outlives its polecat's done+MR-open state
 // never counts twice against two different capacity models.
-func listPolecatSessions(t sessionLister, townRoot string) ([]poolSession, error) {
-	var disposition polecatDispositionFunc
-	if townRoot != "" {
-		disposition = func(rigName, polecatName string) (polecat.WorkstateDisposition, error) {
-			return poolPolecatDisposition(townRoot, rigName, polecatName)
-		}
-	}
-	return listPolecatSessionsWith(t, disposition, time.Now())
-}
-
-// listPolecatSessionsWith is listPolecatSessions with the polecat-state read and
-// the clock explicit. now stands in for a session whose creation time tmux
-// cannot report.
 func listPolecatSessionsWith(t sessionLister, disposition polecatDispositionFunc, now time.Time) ([]poolSession, error) {
 	names, err := t.ListSessions()
 	if err != nil {
