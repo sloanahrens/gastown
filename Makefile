@@ -404,8 +404,8 @@ DOCKER_PKGS := $(addprefix ./,$(shell sed -e 's/\#.*//' internal/testpolicy/dock
 INTEGRATION_GO_TEST ?= go test
 test-integration:
 	@test -n "$(strip $(DOCKER_PKGS))" || { echo "test-integration: internal/testpolicy/docker.txt lists no package; refusing to run go test over nothing" >&2; exit 1; }
-	GT_TEST_DOCKER=1 GT_TEST_DOLT_INIT_CONCURRENCY=4 $(INTEGRATION_GO_TEST) -tags integration -timeout 20m ./...
-	GT_TEST_DOCKER=1 GT_TEST_DOLT_INIT_CONCURRENCY=4 $(INTEGRATION_GO_TEST) -timeout 20m $(DOCKER_PKGS)
+	GT_TEST_DOCKER=1 GT_TEST_DOLT_INIT_CONCURRENCY=8 $(INTEGRATION_GO_TEST) -tags integration -timeout 20m ./...
+	GT_TEST_DOCKER=1 GT_TEST_DOLT_INIT_CONCURRENCY=8 $(INTEGRATION_GO_TEST) -timeout 20m $(DOCKER_PKGS)
 
 # test-integration-wall is test-integration with the tier's wall measured
 # (gt-ik4a1.4.5): the same two commands, each -json, both through one
@@ -429,8 +429,8 @@ test-integration-wall: SHELL := /bin/bash
 test-integration-wall:
 	@test -n "$(strip $(DOCKER_PKGS))" || { echo "test-integration-wall: internal/testpolicy/docker.txt lists no package; refusing to run go test over nothing" >&2; exit 1; }
 	@set -o pipefail; { \
-		GT_TEST_DOCKER=1 GT_TEST_DOLT_INIT_CONCURRENCY=4 $(INTEGRATION_GO_TEST) -json -tags integration -timeout 20m ./...; \
-		GT_TEST_DOCKER=1 GT_TEST_DOLT_INIT_CONCURRENCY=4 $(INTEGRATION_GO_TEST) -json -timeout 20m $(DOCKER_PKGS); \
+		GT_TEST_DOCKER=1 GT_TEST_DOLT_INIT_CONCURRENCY=8 $(INTEGRATION_GO_TEST) -json -tags integration -timeout 20m ./...; \
+		GT_TEST_DOCKER=1 GT_TEST_DOLT_INIT_CONCURRENCY=8 $(INTEGRATION_GO_TEST) -json -timeout 20m $(DOCKER_PKGS); \
 	} | go run ./internal/testpolicy/cmd/tierwall $(TIERWALL_FLAGS)
 
 # test-timing measures the unit tier in a tmux server started by launchd, which
