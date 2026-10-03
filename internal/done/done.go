@@ -827,8 +827,13 @@ type doneRun struct {
 	// recordAgentState is the CLI layer's agent-bead state write; nil when the
 	// caller has no agent bead to write.
 	recordAgentState func(cwd, townRoot, exitType, issueID string) error
-	opts             doneOptions
-	deps             doneSubmitDeps
+	// sourceIssue and sourceBD are the same pair doneSubmission carries; the
+	// revert guard reads the bead's label and description from here and appends
+	// the deletes-by-spec waiver through its client.
+	sourceIssue *beads.Issue
+	sourceBD    beads.Client
+	opts        doneOptions
+	deps        doneSubmitDeps
 }
 
 // doneSubmission is what a COMPLETED run handed over.
@@ -1137,6 +1142,8 @@ func submitForLanding(r *doneRun) error {
 		}
 		sub.sourceIssue = issue
 		sub.sourceBD = issueBD
+		r.sourceIssue = issue
+		r.sourceBD = issueBD
 		if af := beads.ParseAttachmentFields(sub.sourceIssue); af != nil {
 			isNoMergeTask = af.NoMerge || af.ReviewOnly
 			reviewOnlySource = af.ReviewOnly

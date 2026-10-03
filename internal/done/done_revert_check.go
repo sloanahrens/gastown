@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/style"
 )
@@ -44,6 +45,11 @@ const revertReportLimit = 8
 // revertPathsPerCommit caps the paths listed under a single reverted commit.
 const revertPathsPerCommit = 4
 
+// deletesBySpecLabel marks a bead whose own description names the files its
+// branch is meant to delete: a directed deletion, not a stale tree. The label
+// alone waives nothing, because the author of a bead can label it (gt-b8f9z).
+const deletesBySpecLabel = "deletes-by-spec"
+
 // reportRevertedMerges prints the branch's diff against target and refuses the
 // submission when the branch undoes merged work.
 //
@@ -65,15 +71,17 @@ type revertReportGit interface {
 	Rev(ref string) (string, error)
 }
 
-// reportRevertedMergesWith is reportRevertedMerges with the detection given.
+// reportRevertedMergesWith is reportRevertedMerges with the detection given,
+// for a caller with no source bead to claim anything.
 func reportRevertedMergesWith(g revertReportGit, detect func() (git.RevertReport, error), target string) error {
-	_, err := revertedMergesReport(g, detect, target)
+	_, err := revertedMergesReport(g, detect, target, revertWaiver{})
 	return err
 }
 
 // revertedMergesReport is reportRevertedMergesWith returning the report it
-// acted on, so the submit path can record what it refused.
-func revertedMergesReport(g revertReportGit, detect func() (git.RevertReport, error), target string) (git.RevertReport, error) {
+// acted on, so the submit path can record what it refused. The waiver is the
+// source bead's deletes-by-spec claim, if any.
+func revertedMergesReport(g revertReportGit, detect func() (git.RevertReport, error), target string, waive revertWaiver) (git.RevertReport, error) {
 	if stat, err := g.DiffStatThreeDot(target, "HEAD"); err != nil {
 		style.PrintWarning("could not compute branch diff against %s: %v", target, err)
 	} else if strings.TrimSpace(stat) != "" {
@@ -99,7 +107,60 @@ func revertedMergesReport(g revertReportGit, detect func() (git.RevertReport, er
 	if len(report.Reverted) == 0 {
 		return report, nil
 	}
-	return report, revertedMergeRefusal(g, target, report.Reverted)
+	if waive.claimed {
+		_, unnamed := revertedPaths(report.Reverted, waive.description)
+		if len(unnamed) == 0 {
+			fmt.Printf("  %s\n\n", deletesBySpecNote(report.Reverted, waive.description))
+			return report, nil
+		}
+		return report, revertedMergeRefusal(g, target, report.Reverted, unnamed)
+	}
+	return report, revertedMergeRefusal(g, target, report.Reverted, nil)
+}
+
+// revertWaiver is the source bead's deletes-by-spec claim. The label alone
+// waives nothing: the description must also name every path the branch deletes,
+// because the author of a bead can label it (gt-b8f9z).
+type revertWaiver struct {
+	claimed     bool
+	description string
+}
+
+// waiverFromIssue reads the claim off the source bead. No bead, or no label,
+// claims nothing.
+func waiverFromIssue(issue *beads.Issue) revertWaiver {
+	if issue == nil || !beads.HasLabel(issue, deletesBySpecLabel) {
+		return revertWaiver{}
+	}
+	return revertWaiver{claimed: true, description: issue.Description}
+}
+
+// revertedPaths is the paths the branch undoes, once each in report order, and
+// the subset the description does not name verbatim. The count is of files
+// being deleted, not of report lines, so a path undone by two commits counts
+// once.
+func revertedPaths(reverted []git.RevertedMerge, description string) (all, unnamed []string) {
+	seen := make(map[string]bool)
+	for _, f := range reverted {
+		for _, path := range f.Paths {
+			if seen[path] {
+				continue
+			}
+			seen[path] = true
+			all = append(all, path)
+			if !strings.Contains(description, path) {
+				unnamed = append(unnamed, path)
+			}
+		}
+	}
+	return all, unnamed
+}
+
+// deletesBySpecNote is the one notes line recording the guard standing down: a
+// later reader of the bead can see that its deletions were directed, not stale.
+func deletesBySpecNote(reverted []git.RevertedMerge, description string) string {
+	all, _ := revertedPaths(reverted, description)
+	return fmt.Sprintf("revert guard waived by deletes-by-spec for %d path(s): %s", len(all), strings.Join(all, ", "))
 }
 
 // reportRevertedMergesRecording is reportRevertedMerges for the submit path: a
@@ -119,11 +180,29 @@ func reportRevertedMergesRecording(r *doneRun, target string) error {
 // reportRevertedMergesRecordingTo is reportRevertedMergesRecording with the
 // detection given and the warning writer taken, so a test reads both.
 func reportRevertedMergesRecordingTo(warn io.Writer, r *doneRun, g revertReportGit, detect func() (git.RevertReport, error), target string) error {
-	report, err := revertedMergesReport(g, detect, target)
+	waive := waiverFromIssue(r.sourceIssue)
+	report, err := revertedMergesReport(g, detect, target, waive)
+	if err == nil && waive.claimed && len(report.Reverted) > 0 {
+		recordDeletesBySpecWaiver(warn, r, report.Reverted)
+	}
 	if err != nil && len(report.Reverted) > 0 {
 		recordRevertRefusal(warn, r, g, report.Reverted)
 	}
 	return err
+}
+
+// recordDeletesBySpecWaiver appends the one notes line that records the guard
+// standing down. Like the refusal record it is best-effort: the submission is
+// already allowed, and a note that fails must not refuse it.
+func recordDeletesBySpecWaiver(warn io.Writer, r *doneRun, reverted []git.RevertedMerge) {
+	if r.sourceBD == nil {
+		style.FprintWarning(warn, "could not record the deletes-by-spec waiver on %s: no beads client for the source bead", r.issueID)
+		return
+	}
+	note := deletesBySpecNote(reverted, r.sourceIssue.Description)
+	if err := r.sourceBD.AppendNotes(r.issueID, note); err != nil {
+		style.FprintWarning(warn, "could not record the deletes-by-spec waiver on %s: %v", r.issueID, err)
+	}
 }
 
 // recordRevertRefusal appends one line to the attention ledger naming the
@@ -182,8 +261,9 @@ func relocatedMergesNote(g revertReportGit, relocated []git.RevertedMerge) strin
 // revertedMergeRefusal builds the refusal error for a branch that undoes merged
 // work. The message deliberately does not name the flag that overrides it:
 // agents read refusal text and self-bypass, so the text says what to do about
-// the branch instead.
-func revertedMergeRefusal(g revertReportGit, target string, found []git.RevertedMerge) error {
+// the branch instead. unnamed is the reverted paths a deletes-by-spec waiver
+// could not cover, and is empty unless the bead carries that label.
+func revertedMergeRefusal(g revertReportGit, target string, found []git.RevertedMerge, unnamed []string) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "refusing to submit: this branch undoes work already merged to %s\n\n", target)
 	fmt.Fprintf(&b, "These commits on %s are undone by your branch:\n", target)
@@ -199,6 +279,13 @@ func revertedMergeRefusal(g revertReportGit, target string, found []git.Reverted
 				break
 			}
 			fmt.Fprintf(&b, "      undoes: %s\n", path)
+		}
+	}
+	if len(unnamed) > 0 {
+		b.WriteString("\nThe bead carries deletes-by-spec, which waives a directed deletion only when " +
+			"the description names every path being deleted. It does not name:\n")
+		for _, path := range unnamed {
+			fmt.Fprintf(&b, "  unnamed: %s\n", path)
 		}
 	}
 	b.WriteString("\nYour working tree is older than the base your commit claims to sit on, " +

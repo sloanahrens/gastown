@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
 )
 
@@ -225,5 +226,173 @@ func TestRevertCheckRecordFailureWarnsAndKeepsTheRefusal(t *testing.T) {
 	}
 	if n := strings.Count(warn.String(), "could not record the refusal"); n != 1 {
 		t.Errorf("warnings = %q, want exactly one record warning", warn.String())
+	}
+}
+
+// fakeNotesClient records the notes gt done appends to the source bead.
+type fakeNotesClient struct {
+	beads.Client
+	id    string
+	notes []string
+	err   error
+}
+
+func (f *fakeNotesClient) AppendNotes(id, note string) error {
+	f.id = id
+	f.notes = append(f.notes, note)
+	return f.err
+}
+
+// waivedRun is a doneRun whose source bead carries labels and a description.
+func waivedRun(town string, issue *beads.Issue, bd beads.Client) *doneRun {
+	return &doneRun{
+		townRoot: town, rigName: "gastown", polecatName: "emerald", branch: "b", issueID: issue.ID,
+		sourceIssue: issue, sourceBD: bd,
+	}
+}
+
+// TestRevertGuardWaivesLabeledDeletionNamedByTheBead (gt-b8f9z): a bead labeled
+// deletes-by-spec whose description names every reverted path is deleting what
+// it says it deletes, so gt done submits and appends one notes line recording
+// the waiver. A path undone by two commits counts once.
+func TestRevertGuardWaivesLabeledDeletionNamedByTheBead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	bd := &fakeNotesClient{}
+	issue := &beads.Issue{
+		ID:          "gt-x",
+		Labels:      []string{"deletes-by-spec"},
+		Description: "Delete internal/old/a.go and internal/old/b.go; both are superseded.",
+	}
+	r := waivedRun(town, issue, bd)
+	g := fakeRevertGit{head: "abcdef1234567890", subjects: map[string]string{"aaaaaaaaaaaa": "old work"}}
+	reverted := []git.RevertedMerge{
+		{Commit: "aaaaaaaaaaaa", Paths: []string{"internal/old/a.go", "internal/old/b.go"}},
+		{Commit: "bbbbbbbbbbbb", Paths: []string{"internal/old/a.go"}},
+	}
+
+	var warn strings.Builder
+	err := reportRevertedMergesRecordingTo(&warn, r, g, detected(git.RevertReport{Reverted: reverted}, nil), "origin/main")
+	if err != nil {
+		t.Fatalf("a labeled deletion its description names was refused: %v", err)
+	}
+	if warn.String() != "" {
+		t.Errorf("warning = %q, want none", warn.String())
+	}
+	want := "revert guard waived by deletes-by-spec for 2 path(s): internal/old/a.go, internal/old/b.go"
+	if bd.id != "gt-x" || len(bd.notes) != 1 || bd.notes[0] != want {
+		t.Errorf("notes = %v on %q, want one line %q", bd.notes, bd.id, want)
+	}
+
+	refusals, rerr := attention.ReadRefusals(town)
+	if rerr != nil {
+		t.Fatalf("ReadRefusals: %v", rerr)
+	}
+	if len(refusals) != 0 {
+		t.Errorf("refusals = %+v, want none for a waived submission", refusals)
+	}
+}
+
+// TestRevertGuardRefusesLabeledDeletionTheDescriptionMisses (gt-b8f9z): the
+// label alone waives nothing. A reverted path the description never names is
+// still a refusal, and the refusal names that path.
+func TestRevertGuardRefusesLabeledDeletionTheDescriptionMisses(t *testing.T) {
+	t.Parallel()
+	bd := &fakeNotesClient{}
+	issue := &beads.Issue{
+		ID:          "gt-x",
+		Labels:      []string{"deletes-by-spec"},
+		Description: "Delete internal/old/a.go, which the reader replaced.",
+	}
+	r := waivedRun(t.TempDir(), issue, bd)
+	g := fakeRevertGit{subjects: map[string]string{"aaaaaaaaaaaa": "old work"}}
+	reverted := []git.RevertedMerge{{Commit: "aaaaaaaaaaaa", Paths: []string{"internal/old/a.go", "internal/old/b.go"}}}
+
+	var warn strings.Builder
+	err := reportRevertedMergesRecordingTo(&warn, r, g, detected(git.RevertReport{Reverted: reverted}, nil), "origin/main")
+	if err == nil {
+		t.Fatal("a labeled deletion the description does not name was accepted")
+	}
+	if !strings.Contains(err.Error(), "refusing to submit") || !strings.Contains(err.Error(), "unnamed: internal/old/b.go") {
+		t.Errorf("refusal does not name the path the description misses:\n%s", err)
+	}
+	if strings.Contains(err.Error(), "unnamed: internal/old/a.go") {
+		t.Errorf("refusal names a path the description carries:\n%s", err)
+	}
+	if len(bd.notes) != 0 {
+		t.Errorf("notes = %v, want none on a refusal", bd.notes)
+	}
+}
+
+// TestRevertGuardWithoutTheLabelIsUnchanged (gt-b8f9z): a description that
+// names every reverted path waives nothing without the label, and the refusal
+// does not mention the label.
+func TestRevertGuardWithoutTheLabelIsUnchanged(t *testing.T) {
+	t.Parallel()
+	bd := &fakeNotesClient{}
+	issue := &beads.Issue{ID: "gt-x", Description: "Delete internal/old/a.go and internal/old/b.go."}
+	r := waivedRun(t.TempDir(), issue, bd)
+	g := fakeRevertGit{subjects: map[string]string{"aaaaaaaaaaaa": "old work"}}
+	reverted := []git.RevertedMerge{{Commit: "aaaaaaaaaaaa", Paths: []string{"internal/old/a.go", "internal/old/b.go"}}}
+
+	var warn strings.Builder
+	err := reportRevertedMergesRecordingTo(&warn, r, g, detected(git.RevertReport{Reverted: reverted}, nil), "origin/main")
+	if err == nil || !strings.Contains(err.Error(), "refusing to submit") {
+		t.Fatalf("refusal = %v, want the unlabeled refusal", err)
+	}
+	if strings.Contains(err.Error(), "deletes-by-spec") {
+		t.Errorf("an unlabeled refusal mentions the label:\n%s", err)
+	}
+	if len(bd.notes) != 0 {
+		t.Errorf("notes = %v, want none without the label", bd.notes)
+	}
+}
+
+// TestRevertGuardRefusesLabeledDeletionWithNoDescription (gt-b8f9z): an empty
+// description names no path, so every reverted path is refused and listed.
+func TestRevertGuardRefusesLabeledDeletionWithNoDescription(t *testing.T) {
+	t.Parallel()
+	bd := &fakeNotesClient{}
+	issue := &beads.Issue{ID: "gt-x", Labels: []string{"deletes-by-spec"}}
+	r := waivedRun(t.TempDir(), issue, bd)
+	g := fakeRevertGit{subjects: map[string]string{"aaaaaaaaaaaa": "old work"}}
+	reverted := []git.RevertedMerge{{Commit: "aaaaaaaaaaaa", Paths: []string{"internal/old/a.go", "internal/old/b.go"}}}
+
+	var warn strings.Builder
+	err := reportRevertedMergesRecordingTo(&warn, r, g, detected(git.RevertReport{Reverted: reverted}, nil), "origin/main")
+	if err == nil {
+		t.Fatal("an empty description waived a deletion")
+	}
+	for _, want := range []string{"unnamed: internal/old/a.go", "unnamed: internal/old/b.go"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal lacks %q:\n%s", want, err)
+		}
+	}
+	if len(bd.notes) != 0 {
+		t.Errorf("notes = %v, want none on a refusal", bd.notes)
+	}
+}
+
+// TestRevertGuardWaiverNoteFailureKeepsTheSubmission (gt-b8f9z): the waiver
+// note is best-effort. A write that fails warns and the submission stands;
+// recording can never turn an accepted branch into a refused one.
+func TestRevertGuardWaiverNoteFailureKeepsTheSubmission(t *testing.T) {
+	t.Parallel()
+	bd := &fakeNotesClient{err: errors.New("dolt is down")}
+	issue := &beads.Issue{
+		ID:          "gt-x",
+		Labels:      []string{"deletes-by-spec"},
+		Description: "Delete internal/old/a.go.",
+	}
+	r := waivedRun(t.TempDir(), issue, bd)
+	reverted := []git.RevertedMerge{{Commit: "aaaaaaaaaaaa", Paths: []string{"internal/old/a.go"}}}
+
+	var warn strings.Builder
+	err := reportRevertedMergesRecordingTo(&warn, r, fakeRevertGit{}, detected(git.RevertReport{Reverted: reverted}, nil), "origin/main")
+	if err != nil {
+		t.Fatalf("a failed waiver note refused the branch: %v", err)
+	}
+	if n := strings.Count(warn.String(), "could not record the deletes-by-spec waiver"); n != 1 {
+		t.Errorf("warnings = %q, want exactly one waiver warning", warn.String())
 	}
 }
