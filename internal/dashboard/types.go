@@ -31,15 +31,24 @@ type Health struct {
 	ReadAt  time.Time `json:"read_at"`
 }
 
-// Polecat states, in the order the page sorts them.
+// Polecat states. They are the town's own inventory states (what gt polecat
+// list shows and the dispatcher's capacity counts), plus gating and quiet,
+// which only the dashboard can see.
 const (
-	StateWorking    = "working"     // holds a bead and its session is producing output
-	StateGating     = "gating"      // its bead is being gated and reviewed by the landing worker
-	StateQueued     = "queued"      // its bead is submitted and waits to land
-	StateNeedsHuman = "needs-human" // its bead is waiting on an operator
-	StateQuiet      = "quiet"       // holds a bead; its session has been silent past QuietAfter
-	StateStale      = "stale"       // holds a bead but has no session: a hook nothing is working
-	StateIdle       = "idle"        // holds nothing
+	StateWorking      = "working"       // assigned work and a live session
+	StateQuiet        = "quiet"         // working, but the session has been silent past QuietAfter
+	StateGating       = "gating"        // its bead is being gated and om-reviewed by the landing worker
+	StateQueued       = "queued"        // its work is submitted and waits to land
+	StateSpawning     = "spawning"      // dispatched seconds ago, session not up yet
+	StateStalled      = "stalled"       // assigned work but no session: nothing is doing it
+	StateReviewNeeded = "review-needed" // a live session holding uncommitted or unpushed state
+	StateRecovery     = "recovery"      // idle, but its worktree needs recovery before reuse
+	StateNeedsHuman   = "needs-human"   // its bead is waiting on an operator
+	StateParked       = "parked"        // parked by an operator
+	StateIdle         = "idle"
+	// StateUnknown is a polecat the dashboard cannot classify because tmux could
+	// not be read: without the session list "working" and "stalled" look alike.
+	StateUnknown = "unknown"
 )
 
 // QuietAfter is how long a working session may stay silent before it reads as quiet.
@@ -47,22 +56,24 @@ const QuietAfter = 10 * time.Minute
 
 // Polecat is one polecat: what it holds, what state that is in, and its record.
 type Polecat struct {
-	Rig   string `json:"rig"`
-	Name  string `json:"name"`
-	Bead  string `json:"bead,omitempty"`
-	Title string `json:"title,omitempty"`
-	State string `json:"state"`
+	Rig    string `json:"rig"`
+	Name   string `json:"name"`
+	Bead   string `json:"bead,omitempty"`
+	Title  string `json:"title,omitempty"`
+	State  string `json:"state"`
+	Reason string `json:"reason,omitempty"` // why the town's inventory put it in this state
+	// CountsTowardCapacity is the dispatcher's own accounting: this polecat
+	// occupies one of the roster's seats.
+	CountsTowardCapacity bool `json:"counts_toward_capacity"`
 
-	Priority   *int     `json:"priority,omitempty"`
-	Labels     []string `json:"labels,omitempty"`
-	BeadStatus string   `json:"bead_status,omitempty"` // the held bead's status; "closed" on a hook that should have been cleared
+	Priority *int     `json:"priority,omitempty"`
+	Labels   []string `json:"labels,omitempty"`
 
 	Slung      *time.Time `json:"slung,omitempty"` // when a dispatch line named the bead
 	ElapsedSec int64      `json:"elapsed_sec,omitempty"`
 	HasSession bool       `json:"has_session"`
 	LastActive *time.Time `json:"last_active,omitempty"`
 	QuietSec   int64      `json:"quiet_sec,omitempty"`
-	AlsoHeldBy []string   `json:"also_held_by,omitempty"` // other polecats holding the same bead
 
 	Landed24h   int      `json:"landed_24h"`
 	Approved24h int      `json:"approved_24h"`
@@ -72,8 +83,7 @@ type Polecat struct {
 // Summary is the slow-changing state of the town. A pointer or zero field the
 // reader could not fill is left out of the page rather than shown as zero.
 type Summary struct {
-	SeatsUsed *int `json:"seats_used,omitempty"`
-	SeatsCap  *int `json:"seats_cap,omitempty"`
+	SeatsCap *int `json:"seats_cap,omitempty"`
 	// Polecats is the summary reader's picture; the hub adds the live parts
 	// (dispatch time, silence, the gating phase) before the page sees it.
 	Polecats []Polecat `json:"-"`

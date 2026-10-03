@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -10,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/landings"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -67,40 +70,6 @@ func (l *dashLandings) get() []omRecord {
 	return l.recs
 }
 
-// dashBeadInfo reads a bead's priority, labels and title once and keeps them
-// for ttl: the polecat panel wants the facts, not a bd read per refresh.
-type dashBeadInfo struct {
-	read func(rig, id string) *beads.Issue
-	now  func() time.Time
-	ttl  time.Duration
-
-	mu    sync.Mutex
-	cache map[string]dashBeadEntry
-}
-
-type dashBeadEntry struct {
-	at    time.Time
-	issue *beads.Issue // nil: the read failed; retried after ttl, not every refresh
-}
-
-func newDashBeadInfo(read func(rig, id string) *beads.Issue) *dashBeadInfo {
-	return &dashBeadInfo{read: read, now: time.Now, ttl: 10 * time.Minute, cache: map[string]dashBeadEntry{}}
-}
-
-func (c *dashBeadInfo) get(rig, id string) *beads.Issue {
-	c.mu.Lock()
-	if e, ok := c.cache[id]; ok && c.now().Sub(e.at) < c.ttl {
-		c.mu.Unlock()
-		return e.issue
-	}
-	c.mu.Unlock()
-	issue := c.read(rig, id)
-	c.mu.Lock()
-	c.cache[id] = dashBeadEntry{at: c.now(), issue: issue}
-	c.mu.Unlock()
-	return issue
-}
-
 // dashLabelsShown are the labels worth a badge: the ones that say a bead is
 // waiting on someone or somewhere, not the bookkeeping ones.
 var dashLabelsShown = map[string]bool{"needs-human": true, "needs-mayor-review": true, "deferred": true, "failed": true}
@@ -115,31 +84,63 @@ func dashBadgeLabels(labels []string) []string {
 	return out
 }
 
+// dashSeat is one polecat as the town's own inventory sees it, with the work
+// bead the inventory found assigned to it.
+type dashSeat struct {
+	Rig, Name string
+	Session   string
+	Item      polecatInventoryItem
+	Issue     *beads.Issue // the assigned work, nil when it holds none
+}
+
 // dashPolecatInputs is everything the polecat table is built from, so the
 // join is a pure function a test can drive.
 type dashPolecatInputs struct {
 	Now      time.Time
-	Seats    []dashSeat           // every polecat the town has, held or not
+	Seats    []dashSeat
 	Ready    map[string]bool      // beads submitted and waiting to land
 	Sessions map[string]time.Time // tmux session -> last window activity
-	Known    bool                 // the tmux read worked: a missing session is then meaningful
-	Bead     func(rig, id string) *beads.Issue
-	Records  []omRecord
+	// SessionsKnown is false when tmux could not be read. The session list is
+	// then empty by failure, not by fact, and a polecat with work and no
+	// session is unknown, not stalled.
+	SessionsKnown bool
+	Records       []omRecord
 }
 
-// dashSeat is one polecat directory and the bead its agent bead hooks.
-type dashSeat struct {
-	Rig, Name, Session, Bead string
+// dashPolecatState maps the town's inventory state to the dashboard's. The
+// inventory decides; the dashboard adds only what the inventory cannot see: a
+// bead the queue says is waiting to land, and a bead labeled for a human.
+func dashPolecatState(item polecatInventoryItem, hasWork, ready bool, labels []string) (state, reason string) {
+	d := item.Disposition
+	switch {
+	case hasWork && hasAnyLabel(labels, "needs-human", "gt:needs-human"):
+		return dashboard.StateNeedsHuman, "the bead is labeled needs-human"
+	case hasWork && ready:
+		return dashboard.StateQueued, "submitted for landing"
+	}
+	switch item.State {
+	case polecat.StateWorking:
+		return dashboard.StateWorking, d.Reason
+	case polecat.StateSubmitted:
+		return dashboard.StateQueued, d.Reason
+	case polecat.StateSpawning:
+		return dashboard.StateSpawning, d.Reason
+	case polecat.StateStalled, polecat.StateStuck, polecat.StateZombie:
+		return dashboard.StateStalled, "assigned work and no live session"
+	case polecat.StateReviewNeeded:
+		return dashboard.StateReviewNeeded, d.Reason
+	}
+	switch {
+	case d.ReuseStatus == polecat.WorkstateReuseStatusParked:
+		return dashboard.StateParked, d.Reason
+	case d.NeedsRecovery:
+		return dashboard.StateRecovery, d.Reason
+	}
+	return dashboard.StateIdle, ""
 }
 
 // buildDashPolecats joins the seats with their session, bead and record.
 func buildDashPolecats(in dashPolecatInputs) []dashboard.Polecat {
-	holders := map[string][]string{}
-	for _, s := range in.Seats {
-		if s.Bead != "" {
-			holders[s.Bead] = append(holders[s.Bead], s.Rig+"/"+s.Name)
-		}
-	}
 	type rec struct {
 		landed, approved int
 		scoreSum         float64
@@ -169,7 +170,7 @@ func buildDashPolecats(in dashPolecatInputs) []dashboard.Polecat {
 
 	out := make([]dashboard.Polecat, 0, len(in.Seats))
 	for _, s := range in.Seats {
-		p := dashboard.Polecat{Rig: s.Rig, Name: s.Name, Bead: s.Bead, State: dashboard.StateIdle}
+		p := dashboard.Polecat{Rig: s.Rig, Name: s.Name, CountsTowardCapacity: s.Item.Disposition.CountsTowardCapacity}
 		if x := record[s.Rig+"/"+s.Name]; x != nil {
 			p.Landed24h, p.Approved24h = x.landed, x.approved
 			if x.scoreN > 0 {
@@ -182,38 +183,19 @@ func buildDashPolecats(in dashPolecatInputs) []dashboard.Polecat {
 			at := at
 			p.LastActive = &at
 		}
-		if s.Bead == "" {
-			out = append(out, p)
-			continue
-		}
-		for _, h := range holders[s.Bead] {
-			if h != s.Rig+"/"+s.Name {
-				p.AlsoHeldBy = append(p.AlsoHeldBy, h)
-			}
-		}
 		var labels []string
-		if in.Bead != nil {
-			if issue := in.Bead(s.Rig, s.Bead); issue != nil {
-				p.Title = issue.Title
-				pr := issue.Priority
-				p.Priority = &pr
-				labels = issue.Labels
-				p.BeadStatus = issue.Status
-				p.Labels = dashBadgeLabels(labels)
-			}
+		hasWork := s.Issue != nil
+		if hasWork {
+			p.Bead = s.Issue.ID
+			p.Title = s.Issue.Title
+			pr := s.Issue.Priority
+			p.Priority = &pr
+			labels = s.Issue.Labels
+			p.Labels = dashBadgeLabels(labels)
 		}
-		switch {
-		case p.BeadStatus == "closed":
-			// the work is done and the hook was never cleared
-			p.State = dashboard.StateStale
-		case in.Ready[s.Bead]:
-			p.State = dashboard.StateQueued
-		case hasAnyLabel(labels, "needs-human", "gt:needs-human"):
-			p.State = dashboard.StateNeedsHuman
-		case in.Known && !p.HasSession:
-			p.State = dashboard.StateStale
-		default:
-			p.State = dashboard.StateWorking
+		p.State, p.Reason = dashPolecatState(s.Item, hasWork, hasWork && in.Ready[p.Bead], labels)
+		if !in.SessionsKnown && p.State == dashboard.StateStalled {
+			p.State, p.Reason = dashboard.StateUnknown, "tmux could not be read, so stalled cannot be told from working"
 		}
 		out = append(out, p)
 	}
@@ -237,37 +219,97 @@ func hasAnyLabel(labels []string, want ...string) bool {
 	return false
 }
 
+// dashStateRank orders the table: what needs a look first, idle last.
 func dashStateRank(state string) int {
 	switch state {
 	case dashboard.StateNeedsHuman:
 		return 0
-	case dashboard.StateStale:
+	case dashboard.StateStalled, dashboard.StateUnknown:
 		return 1
-	case dashboard.StateQuiet:
+	case dashboard.StateReviewNeeded, dashboard.StateRecovery:
 		return 2
-	case dashboard.StateWorking:
+	case dashboard.StateQuiet:
 		return 3
-	case dashboard.StateGating:
+	case dashboard.StateWorking, dashboard.StateSpawning:
 		return 4
-	case dashboard.StateQueued:
+	case dashboard.StateGating:
 		return 5
+	case dashboard.StateQueued:
+		return 6
+	case dashboard.StateParked:
+		return 7
 	}
-	return 6
+	return 8
 }
 
-// dashSeats lists every polecat directory in every rig with the bead its
-// agent bead hooks. A rig whose agent beads cannot be read is an error: its
-// polecats would otherwise read as idle, which is the one report a monitor
-// must not make for a store that is down.
-func dashSeats(townRoot string) ([]dashSeat, error) {
+// dashSeatKey is what a cached classification depends on: the agent bead's
+// last write, the work assigned to the polecat, whether its session is up, and
+// whether it is inside its spawn grace window. The last is a function of time
+// alone, so without it a polecat that just left its grace would keep the
+// "spawning" reading until the ttl.
+func dashSeatKey(updatedAt, now time.Time, grace time.Duration, activeID string, running bool) string {
+	inGrace := !updatedAt.IsZero() && now.Sub(updatedAt) < grace
+	return fmt.Sprintf("%d|%s|%t|%t", updatedAt.UnixNano(), activeID, running, inGrace)
+}
+
+// dashSeatCache keeps a polecat's classification between refreshes. The
+// classification includes a live git probe of its worktree (the same one gt
+// polecat list pays per seat), and an idle polecat's worktree does not change
+// on its own, so the result is reused until the polecat's agent bead, its
+// assigned work or its session changes, or ttl passes.
+type dashSeatCache struct {
+	ttl time.Duration
+	now func() time.Time
+
+	mu sync.Mutex
+	m  map[string]dashSeatCached
+}
+
+type dashSeatCached struct {
+	key  string
+	at   time.Time
+	item polecatInventoryItem
+}
+
+func newDashSeatCache() *dashSeatCache {
+	return &dashSeatCache{ttl: 5 * time.Minute, now: time.Now, m: map[string]dashSeatCached{}}
+}
+
+func (c *dashSeatCache) get(id, key string) (polecatInventoryItem, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.m[id]
+	if !ok || e.key != key || c.now().Sub(e.at) >= c.ttl {
+		return polecatInventoryItem{}, false
+	}
+	return e.item, true
+}
+
+func (c *dashSeatCache) put(id, key string, item polecatInventoryItem) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.m[id] = dashSeatCached{key: key, at: c.now(), item: item}
+}
+
+// dashSeats classifies every polecat the town has with the same inventory and
+// environment gt polecat list uses, so the dashboard and the CLI agree on what
+// a polecat is doing. (The capacity accounting's counts-only environment
+// reports a parked or finished polecat as stalled, which is right for counting
+// seats and wrong for describing them.) Sessions are the tmux names read once
+// by the caller. A rig whose beads cannot be read is an error, not a rig of
+// idle polecats: a store that is down must not read as a quiet town.
+func dashSeats(townRoot string, sessionNames []string, sessionsKnown bool, cache *dashSeatCache) ([]dashSeat, error) {
 	rigs, err := knownRigNames(townRoot)
 	if err != nil {
 		return nil, err
 	}
 	reg := townRegistry()
+	sessions := newPolecatSessionSet(reg, sessionNames)
+	spawnWindow := polecatSpawnGraceWindow(townRoot)
+	now := time.Now()
 	var seats []dashSeat
 	for _, rig := range rigs {
-		rigPath := townRoot + "/" + rig
+		rigPath := filepath.Join(townRoot, rig)
 		names, err := listPolecatDirectoryNames(rigPath)
 		if err != nil {
 			return nil, err
@@ -275,21 +317,57 @@ func dashSeats(townRoot string) ([]dashSeat, error) {
 		if len(names) == 0 {
 			continue
 		}
-		agents, err := tailRigAgentBeads(rigPath)
+		rigBeads := beads.New(rigPath)
+		agents, err := beads.ListAgentBeads(rigBeads)
 		if err != nil {
 			return nil, err
 		}
 		prefix := beads.GetPrefixForRig(townRoot, rig)
-		hooks := polecatHookBeads(names, func(name string) string { return beads.PolecatBeadIDWithPrefix(prefix, rig, name) }, agents)
+		agentBeadID := func(name string) string { return beads.PolecatBeadIDWithPrefix(prefix, rig, name) }
+		active, err := listActivePolecatWorkByName(rigBeads, rig, polecatHookBeads(names, agentBeadID, agents))
+		if err != nil {
+			return nil, err
+		}
+		// The merge-request index is one query per rig, and only a polecat
+		// that must be re-classified needs it.
+		var mrIndex polecatMRIndex
+		mrLoaded := false
 		for _, name := range names {
-			seats = append(seats, dashSeat{Rig: rig, Name: name, Session: session.PolecatSessionName(reg.PrefixForRig(rig), name), Bead: hooks[name]})
+			agentBead := agents[agentBeadID(name)]
+			_, running := sessions.session(rig, name)
+			activeID := ""
+			if active[name] != nil {
+				activeID = active[name].ID
+			}
+			key := dashSeatKey(polecat.AgentBeadUpdatedAt(agentBead), now, spawnWindow, activeID, running)
+			id := rig + "/" + name
+			// A classification made without a session list is not the polecat's:
+			// it is neither read from nor written to the cache.
+			item, ok := polecatInventoryItem{}, false
+			if sessionsKnown {
+				item, ok = cache.get(id, key)
+			}
+			if !ok {
+				if !mrLoaded {
+					mrIndex, _ = loadPolecatMRIndex(rigBeads, rig)
+					mrLoaded = true
+				}
+				env := polecatListInventoryEnv(rigPath, rig, name, mrIndex, polecatActiveMRReader{index: mrIndex, bd: rigBeads},
+					polecatSpawnFacts{UpdatedAt: polecat.AgentBeadUpdatedAt(agentBead), Grace: spawnWindow, Now: now})
+				item = buildPolecatInventoryItem(rig, name, parsePolecatAgentFields(agentBead), active[name], sessions, env)
+				if sessionsKnown {
+					cache.put(id, key, item)
+				}
+			}
+			seats = append(seats, dashSeat{Rig: rig, Name: name, Session: session.PolecatSessionName(reg.PrefixForRig(rig), name), Item: item, Issue: active[name]})
 		}
 	}
 	return seats, nil
 }
 
 // dashSessions is the tmux sessions' last activity, and whether the read
-// worked. No tmux server is a working read of no sessions.
+// worked. A town with no tmux server is a working read of no sessions; only a
+// failed read is not known.
 func dashSessions() (map[string]time.Time, bool) {
 	m, err := tmux.NewTmux().ListWindowActivity()
 	if err != nil {
