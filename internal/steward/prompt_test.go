@@ -17,6 +17,10 @@ func rejectionEvent(detail string) Event {
 	}
 }
 
+func specEvent(bead string) Event {
+	return Event{Kind: KindPlan, Rig: "gastown", Bead: bead}
+}
+
 func mustPrompt(t *testing.T, ev Event, final bool) string {
 	t.Helper()
 	p, err := PromptFor(ev, final)
@@ -73,6 +77,75 @@ func TestRejectionPromptCarriesTheRecoveryProcedure(t *testing.T) {
 		if !strings.Contains(p, "**"+string(kind)+"**") {
 			t.Errorf("rejection prompt names no handling for kind %q", kind)
 		}
+	}
+}
+
+// TestPlanPromptCarriesTheProposalProcedure: the planner is handed the shape
+// each child is written in, the command that appends the block, and the
+// marker a reader and the scan look for (gt-4k3fj.13).
+func TestPlanPromptCarriesTheProposalProcedure(t *testing.T) {
+	t.Parallel()
+	p := mustPrompt(t, specEvent("gt-spec"), false)
+	requireAll(t, "plan prompt", p,
+		ResultFile, "gt-spec", "bd show gt-spec", "gt bead note gt-spec",
+		"Goal", "Constraints", "Out of scope", "Gate", "Size", "Acceptance", "Deps",
+		"gt bead dep add A B", "PLAN 2 children proposed",
+	)
+	// The block's first line is the marker alone: that is the line
+	// HasPlanProposal matches, and a marker written any other way leaves the
+	// spec looking unplanned, which earns it a second planner.
+	if !strings.Contains(p, "\n"+PlanProposalMarker+"\n") {
+		t.Errorf("the plan prompt writes %q in no position the scan reads:\n%s", PlanProposalMarker, p)
+	}
+	// It files nothing: a proposal is the operator's to act on.
+	requireAll(t, "plan prompt", p, "files no bead")
+	for _, banned := range []string{"bd create", "gt bead create", "gt sling", "bd close", "gt bead close", "--add-label", "--remove-label", "git push"} {
+		if strings.Contains(p, banned) {
+			t.Errorf("plan prompt contains %q:\n%s", banned, p)
+		}
+	}
+	// The planner runs once: a doubt is the operator's, not another model's.
+	if strings.Contains(p, "needs-opus") {
+		t.Errorf("plan prompt hands a doubt to a model that never runs:\n%s", p)
+	}
+}
+
+// TestPlanPromptWritesTheProposalInEitherMode: the shadow tag rides on the
+// comment so a shadow proposal is never read as one the town acted on, and
+// the proposal itself is written in both modes — it is the whole output
+// (gt-4k3fj.13).
+func TestPlanPromptWritesTheProposalInEitherMode(t *testing.T) {
+	t.Parallel()
+	shadow := specEvent("gt-spec")
+	shadow.Mode = ModeShadow
+	p := mustPrompt(t, shadow, false)
+	requireAll(t, "shadow plan prompt", p, "STEWARD (shadow) PLAN", "gt bead note gt-spec", PlanProposalMarker)
+	live := mustPrompt(t, specEvent("gt-spec"), true)
+	if strings.Contains(live, "shadow") {
+		t.Errorf("live plan prompt mentions shadow:\n%s", live)
+	}
+}
+
+// TestPlanProposalBlockIsOneTheScanReads: the block the prompt tells the
+// planner to append is one HasPlanProposal — and so Detect — reads as a
+// proposal. A drifted first line would leave the spec looking unplanned and
+// earn it a second planner (gt-4k3fj.13).
+func TestPlanProposalBlockIsOneTheScanReads(t *testing.T) {
+	t.Parallel()
+	p := mustPrompt(t, specEvent("gt-spec"), false)
+	start := strings.Index(p, "\n"+PlanProposalMarker+"\n")
+	if start < 0 {
+		t.Fatalf("no %s block in the prompt:\n%s", PlanProposalMarker, p)
+	}
+	block := p[start+1:]
+	block = block[:strings.Index(block, "\nPROPOSAL\n")]
+	if !HasPlanProposal(block) {
+		t.Fatalf("the scan cannot read the block the prompt writes:\n%s", block)
+	}
+	spec := needsPlanningIssue("gt-spec")
+	spec.Notes = block
+	if ev, ok := Detect(spec, "gastown", never); ok {
+		t.Errorf("a spec carrying the prompt's block raised %+v", ev)
 	}
 }
 
@@ -145,7 +218,7 @@ func TestPromptOutcomesAreRecordable(t *testing.T) {
 	t.Parallel()
 	line := regexp.MustCompile("Outcomes for this job: (.*)\n?")
 	word := regexp.MustCompile("`(\\w+)`")
-	for _, ev := range []Event{reviewEvent("gt-x", testHead), rejectionEvent("kind=gate reason=x")} {
+	for _, ev := range []Event{reviewEvent("gt-x", testHead), rejectionEvent("kind=gate reason=x"), specEvent("gt-spec")} {
 		p := mustPrompt(t, ev, false)
 		m := line.FindStringSubmatch(p)
 		if m == nil {

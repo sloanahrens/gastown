@@ -1,0 +1,72 @@
+A spec was filed that needs decomposing before it can be dispatched. Read it, propose the work beads it breaks into, and write the proposal into the spec's notes. Nothing is filed from this run: the operator reads the proposal and files from it by hand.
+
+Bead: {{ .Bead }}
+Rig: {{ .Rig }}
+
+You run headless, with `{{ .Bead }}` as your only subject. Start with `bd show {{ .Bead }}`: the spec's Goal, Constraints, Out of scope, Gate and Size sections are what you decompose.
+
+## Plan
+
+1. **Read the spec.** `bd show {{ .Bead }}`. A spec whose notes already carry a `{{ .PlanMarker }}` block has been planned: comment that and write outcome `pass`. Done when the five sections are in hand.
+2. **Propose the children.** Each child is one unit of work a single polecat can land in one branch, written in the standard bead shape an operator's spec uses:
+   - **Goal** — what the child makes true, in one or two lines.
+   - **Constraints** — the files and packages it may touch, and what it must leave alone.
+   - **Out of scope** — what a reader might expect and will not find.
+   - **Gate** — the command that proves it, usually `make gate`.
+   - **Size** — one worker, one landing.
+   Add the child's acceptance criteria as a `- [ ]` checklist, and its dependencies on the other children by their position in this proposal. `gt bead dep add A B` means A needs B: a child that cannot be built until another has landed depends on that one, and being listed later is not by itself a dependency. Done when every child has all five lines, a checklist and a deps line.
+3. **Write the block into the notes.** Append one block to `{{ .Bead }}`:
+
+```bash
+gt bead note {{ .Bead }} "$(cat <<'PROPOSAL'
+{{ .PlanMarker }}
+Spec: {{ .Bead }}
+Children: 2
+
+1. <the child's title>
+Goal: <what the child makes true>
+Constraints: <files and packages, and what it must leave alone>
+Out of scope: <what it excludes>
+Gate: make gate
+Size: one worker, one landing
+Acceptance: - [ ] <the check that proves it>; - [ ] <another check>
+Deps: none
+
+2. <the child's title>
+<the same lines>
+Deps: 1
+PROPOSAL
+)"
+```
+
+   The first line is `{{ .PlanMarker }}` and nothing else: it is how a reader, and the steward's own scan, tells a planned spec from an unplanned one. The quoted delimiter keeps the shell out of the text; for a proposal too long even for that, write it to a file and pass it: `gt bead note {{ .Bead }} "$(cat proposal.txt)"`. Done when `bd show {{ .Bead }}` prints the block under the notes.
+4. **Report.** `gt bead comment {{ .Bead }} "{{ template "steward-tag" . }} PLAN 2 children proposed: <their titles>"`, then write the verdict file. Done when `bd show {{ .Bead }}` lists your comment.
+
+## What you may do
+
+- Append the proposal to `{{ .Bead }}`'s notes (`gt bead note {{ .Bead }} "<text>"`).
+- Comment on `{{ .Bead }}` (`gt bead comment {{ .Bead }} "<text>"`).
+
+Everything else is the operator's: this run files no bead, and changes no label, no section of the spec and no other bead.
+
+## When you cannot decide
+
+You are the only job for this spec: no second run follows, whatever this one ends with. When the spec does not settle something you need — a Goal that names no outcome, a Gate that cannot be run, two units that cannot be separated — say what is missing and stop:
+
+```bash
+gt bead comment {{ .Bead }} "{{ template "steward-tag" . }} PLAN ESCALATE: <the section you quote, and what it leaves open>"
+```
+
+Then write outcome `escalated`.
+
+## Verdict
+
+Write `{{ .ResultFile }}` in the working directory before you stop:
+
+```json
+{"outcome": "<outcome>", "summary": "<one line: how many children, and what you could not settle>"}
+```
+
+The runner records this file. A job that writes none is recorded as an error.
+
+Outcomes for this job: `pass`, `escalated`, `error`.

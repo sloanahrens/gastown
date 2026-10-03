@@ -27,6 +27,12 @@ const (
 	// DefaultHardAgent is the preset a job retries on after a routine
 	// failure, and the one a conflict job starts on.
 	DefaultHardAgent = "deepseek-pro"
+	// PlanAgent is the one preset a plan job runs on, retry included. The
+	// planner drafts a proposal the operator reads before anything exists as
+	// a bead, so a stronger model changes nothing the operator decides — and
+	// a town that re-points routine_agent must not move the planner with it
+	// (gt-4k3fj.13).
+	PlanAgent = "deepseek-flash"
 )
 
 // ResultFile is the file a job writes to report its verdict: a JSON object
@@ -403,8 +409,17 @@ func attempts(history []Job) []Job {
 
 // StartedModel is the preset a job runs on when no history exists yet, so a
 // conflict — which the routine model is not trusted to resolve — starts hard
-// (gt-9bioi).
+// (gt-9bioi). A plan job is the exception on both counts: it runs on
+// PlanAgent whatever the town configures, and it runs once, so a spec no
+// planner could break down goes to the operator instead of to a second
+// attempt (gt-4k3fj.13).
 func StartedModel(ev Event, history []Job, routine, hard string) (string, bool) {
+	if ev.Kind == KindPlan {
+		if len(attempts(history)) > 0 {
+			return "", false
+		}
+		return PlanAgent, true
+	}
 	model, run := ChooseModel(history, routine, hard)
 	if run && len(attempts(history)) == 0 && strings.HasPrefix(ev.RejectionDetail, "kind=conflict") {
 		return hard, true

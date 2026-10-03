@@ -105,7 +105,7 @@ func (t *Templates) render(role string, data any) (string, error) {
 // StewardData is what a steward job's instructions are rendered from: the
 // landing-queue event and the seat the job runs in (gt-9bioi.2).
 type StewardData struct {
-	Kind            string // "review" or "rejection"
+	Kind            string // "review", "rejection" or "plan"
 	Rig             string
 	Bead            string
 	Branch          string
@@ -117,14 +117,17 @@ type StewardData struct {
 	ResultFile      string // the verdict file the job writes
 	Final           bool   // true when no further job runs for this event
 	Shadow          bool   // true when the job decides and comments but changes nothing (gt-9bioi.4)
+	// PlanMarker is the line that opens the block a plan job appends to a
+	// spec's notes; empty for the other kinds (gt-4k3fj.13).
+	PlanMarker string
 }
 
 // RenderSteward renders the instructions of the steward job d.Kind names.
 func (t *Templates) RenderSteward(d StewardData) (string, error) {
 	switch d.Kind {
-	case "review", "rejection":
+	case "review", "rejection", "plan":
 	default:
-		return "", fmt.Errorf("steward job kind %q is neither review nor rejection", d.Kind)
+		return "", fmt.Errorf("steward job kind %q is none of review, rejection and plan", d.Kind)
 	}
 	return t.render("steward-"+d.Kind, d)
 }

@@ -6,6 +6,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
 // readyIssue is a bead gt done submitted: the ready label and a READY TO
@@ -35,6 +36,16 @@ func rejectedIssue(id, head string, note land.RejectionNote) *beads.Issue {
 
 func never(string) bool { return false }
 
+// needsPlanningIssue is a spec the dispatcher routed to the planner: open,
+// labelled, with no proposal on it yet.
+func needsPlanningIssue(id string) *beads.Issue {
+	return &beads.Issue{
+		ID:     id,
+		Status: "open",
+		Labels: []string{specdispatch.NeedsPlanningLabel},
+	}
+}
+
 // TestParseKind: the kind set is closed and an unknown name is an error that
 // names the key, so the caller can run the default instead (gt-9bioi.7).
 func TestParseKind(t *testing.T) {
@@ -49,6 +60,10 @@ func TestParseKind(t *testing.T) {
 		"empty":     {"", "", true},
 		"typo":      {"reviw", "", true},
 		"case":      {"Review", "", true},
+		// Planning is not a kinds value: it is its own flag, so a town that
+		// scans the landing queue is not asking for planning work
+		// (gt-4k3fj.13).
+		"plan": {"plan", "", true},
 	} {
 		got, err := ParseKind(tc.in)
 		if (err != nil) != tc.wantErr {
@@ -112,6 +127,47 @@ func TestDetectRejection(t *testing.T) {
 	}
 }
 
+// TestDetectPlan: an open spec labelled needs-planning raises the plan event
+// once, and the planner's own proposal is what retires it (gt-4k3fj.13).
+func TestDetectPlan(t *testing.T) {
+	t.Parallel()
+	issue := needsPlanningIssue("gt-spec")
+	ev, ok := Detect(issue, "gastown", never)
+	if !ok {
+		t.Fatal("no event for an unplanned spec")
+	}
+	if ev.Kind != KindPlan || ev.Bead != "gt-spec" || ev.Rig != "gastown" {
+		t.Fatalf("event = %+v", ev)
+	}
+	// A spec is not a submission: the planner reads the bead, so the event
+	// carries no head and no branch to work at.
+	if ev.Head != "" || ev.Branch != "" || ev.Target != "" {
+		t.Errorf("the plan event carries submission facts: %+v", ev)
+	}
+	// A plan head names no commit, so the bead alone is the key.
+	if _, ok := Detect(issue, "gastown", func(key string) bool { return key == ev.Key() }); ok {
+		t.Error("a spec a plan job already ran on raised a second event")
+	}
+	// The proposal is the deliverable, so it retires the event without the
+	// ledger: an operator who wants another deletes the block.
+	planned := needsPlanningIssue("gt-spec")
+	planned.Notes = PlanProposalMarker + "\nSpec: gt-spec\nChildren: 1\n"
+	if ev, ok := Detect(planned, "gastown", never); ok {
+		t.Errorf("a planned spec raised %+v", ev)
+	}
+	// A marker quoted inside the spec's own prose is content, not a block, and
+	// the block opens with the marker alone on its line — the line the prompt
+	// writes.
+	quoted := needsPlanningIssue("gt-spec")
+	quoted.Notes = "The steward writes a " + PlanProposalMarker + " block into these notes."
+	if _, ok := Detect(quoted, "gastown", never); !ok {
+		t.Error("a spec quoting the marker raised no event")
+	}
+	if HasPlanProposal(PlanProposalMarker + ": gt-spec\n") {
+		t.Errorf("a line starting %q opened a block", PlanProposalMarker+":")
+	}
+}
+
 // TestDetectSkips is everything a scan must leave alone.
 func TestDetectSkips(t *testing.T) {
 	t.Parallel()
@@ -122,12 +178,17 @@ func TestDetectSkips(t *testing.T) {
 	noready := &beads.Issue{ID: "gt-x", Status: "open", Labels: []string{land.LabelReadyToLand}, Notes: "no block here"}
 	nolabel := &beads.Issue{ID: "gt-x", Status: "open", Notes: readyIssue("gt-x", "c0ffee").Notes}
 	nohead := rejectedIssue("gt-x", "", land.RejectionNote{Attempt: 1, Kind: "gate", Reason: "make test exit 2"})
+	closed := needsPlanningIssue("gt-x")
+	closed.Status = "closed"
+	unlabelled := &beads.Issue{ID: "gt-x", Status: "open"}
 
 	for name, issue := range map[string]*beads.Issue{
 		"nil": issueNil(), "crew-assigned": crew, "needs-human": human,
 		"ready label without a READY TO LAND block": noready,
 		"a READY TO LAND block without the label":   nolabel,
 		"a rejection without a head":                nohead,
+		"a closed spec":                             closed,
+		"an open bead with no planning label":       unlabelled,
 	} {
 		if ev, ok := Detect(issue, "gastown", never); ok {
 			t.Errorf("%s raised %+v", name, ev)
