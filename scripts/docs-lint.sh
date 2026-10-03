@@ -58,7 +58,6 @@ tier_agent_facing() {
 CEILING_EXEMPT=(
   internal/formula/formulas/mol-polecat-work.formula.toml          # the polecat work loop, 10 steps
   internal/formula/formulas/mol-polecat-work-monorepo.formula.toml # the same loop for monorepos
-  internal/formula/formulas/mol-idea-to-plan.formula.toml          # 3 review rounds of PRD and plan
 )
 
 # The agent-facing tier the gate holds to the ceiling, less CEILING_EXEMPT.

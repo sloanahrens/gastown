@@ -326,23 +326,6 @@ in git history — only a closed PR comment links them to the work.
 - `bd show <id>` — View issue details
 - `gt bead close <id>` — Mark issue complete
 
-### Planning New Features
-
-**When the human describes an idea and wants to turn it into a plan, offer this:**
-
-```bash
-{{ cmd }} formula run mol-idea-to-plan --set problem="describe the idea here"
-```
-
-This runs the full pipeline autonomously: structured PRD → 6-reviewer parallel
-review → human clarification gate → implementation plan → iterative 2-polecat
-plan review → human approval gate → beads with dependency graph.
-
-**Trigger this suggestion when the human:**
-- Describes a feature, idea, or problem and says "let's build this" / "plan this out"
-- Asks about requirements, design, or implementation approach for something new
-- Wants to go from vague idea to a concrete plan
-
 ### Communication: Mail
 
 **Reading mail:**
