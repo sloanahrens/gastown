@@ -90,6 +90,19 @@ td.n,th.n{text-align:right}
 .qdetail pre{margin:0;white-space:pre-wrap;font:inherit;background:#10161d;border:1px solid var(--line);border-radius:6px;padding:6px 8px;max-height:320px;overflow:auto}
 .qcomment{border-left:2px solid var(--line);padding-left:8px;margin:4px 0}
 .good{color:var(--green)}.warnc{color:var(--amber)}.badc{color:var(--red)}
+#alertsctl{cursor:pointer;background:none;font:inherit;font-size:12px;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:2px 10px}
+#alertsctl.on{color:var(--teal);border-color:var(--teal)}
+#toasts{position:fixed;top:54px;right:16px;z-index:5;display:flex;flex-direction:column;gap:6px;width:min(420px,90vw)}
+.toast{display:flex;gap:8px;align-items:flex-start;background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--dim);border-radius:6px;padding:7px 9px}
+.toast.info{border-left-color:var(--blue)}.toast.warn{border-left-color:var(--amber)}.toast.crit{border-left-color:var(--red)}
+.toast .tt{font-weight:700;overflow-wrap:anywhere}
+.toast .tx{color:var(--dim);overflow-wrap:anywhere}
+.toast button{margin-left:auto;background:none;border:0;color:var(--dim);font:inherit;cursor:pointer}
+.alvl{display:inline-block;padding:0 6px;border-radius:4px;font-size:11px;border:1px solid currentColor;margin-right:6px}
+.alvl.info{color:var(--blue)}.alvl.warn{color:var(--amber)}.alvl.crit{color:var(--red)}
+.arow{border-top:1px solid var(--line);padding:4px 0;overflow-wrap:anywhere}
+.arow .t{color:var(--dim)}
+.arow .tx{color:var(--dim)}
 </style>
 </head>
 <body>
@@ -98,7 +111,10 @@ td.n,th.n{text-align:right}
   <span id="verdict" class="pill unknown">UNKNOWN</span>
   <span id="healthline">waiting for the town…</span>
   <span id="conn" class="off">connecting</span>
+  <button id="alertsctl" type="button">alerts: off</button>
 </header>
+
+<div id="toasts"></div>
 
 <div class="tiles" id="tiles"></div>
 
@@ -110,6 +126,7 @@ td.n,th.n{text-align:right}
     <section><h2>DeepSeek <span class="r" id="spendnote"></span></h2><div class="body" id="spend"></div></section>
   </div>
   <div class="col">
+    <section><h2>Alerts <span class="r" id="alertsnote"></span></h2><div class="body" id="alerts"></div></section>
     <section><h2>Work queue <span class="r" id="queuenote"></span></h2><div class="body" id="queue"></div></section>
     <section id="trendsec" hidden><h2>Last 24 hours <span class="r" id="trendnote"></span></h2><div class="body" id="trend"></div></section>
     <section><h2>om review <span class="r" id="omnote"></span></h2><div class="body" id="om"></div></section>
@@ -564,6 +581,89 @@ function renderDispatch(s) {
   if (d.more) box.append(el("div", "empty", "+" + d.more + " more not named in the log line"));
 }
 
+// Alerts. The server decides what needs attention and pushes each new one as an
+// "alert" event; the page shows a toast, marks the title, and (when the browser
+// allows it) raises a notification — but only while the operator has alerts on.
+// The recent list below renders from State.Alerts either way, so switching
+// alerts off never hides what happened.
+const BASE_TITLE = document.title;
+let alertsOn = false;
+try { alertsOn = localStorage.getItem("gt-alerts") === "on"; } catch (e) { alertsOn = false; }
+let unreadAlerts = 0;
+
+function syncAlertCtl() {
+  const b = $("alertsctl");
+  b.className = alertsOn ? "on" : "";
+  b.textContent = "alerts: " + (alertsOn ? "on" : "off");
+  b.title = alertsOn
+    ? "alerts are on: a toast, a title marker, and a browser notification while the tab is in the background"
+    : "turn alerts on: a toast, a title marker, and a browser notification while the tab is in the background";
+}
+
+function markTitle() {
+  document.title = alertsOn && unreadAlerts > 0 && !document.hasFocus() ? "(!) " + BASE_TITLE : BASE_TITLE;
+}
+
+function showToast(a) {
+  const box = $("toasts");
+  const t = el("div", "toast " + a.level);
+  const body = el("div");
+  body.append(el("div", "tt", a.title || "alert"), el("div", "tx", a.text || ""));
+  const x = el("button", "", "✕");
+  x.type = "button";
+  x.title = "dismiss";
+  x.onclick = () => t.remove();
+  t.append(body, x);
+  box.prepend(t);
+  while (box.children.length > 5) box.lastChild.remove();
+}
+
+function notify(a) {
+  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+  try { new Notification(a.title || "Gas Town", {body: a.text || ""}); } catch (e) {}
+}
+
+function onAlert(a) {
+  if (!alertsOn) return;
+  showToast(a);
+  notify(a);
+  if (!document.hasFocus()) { unreadAlerts++; markTitle(); }
+}
+
+function renderAlerts(s) {
+  const box = $("alerts");
+  box.replaceChildren();
+  const list = ((s && s.alerts) || []).slice().reverse();
+  $("alertsnote").textContent = list.length ? list.length + " recent" : "";
+  if (!list.length) { box.append(el("div", "empty", "nothing has needed attention")); return; }
+  for (const a of list) {
+    const row = el("div", "arow");
+    row.append(el("span", "alvl " + a.level, a.level || "info"), el("span", "t", clock(a.at) + "  "));
+    row.append(el("span", "tt", a.title || ""), el("div", "tx", a.text || ""));
+    box.append(row);
+  }
+}
+
+function initAlerts() {
+  syncAlertCtl();
+  $("alertsctl").onclick = () => {
+    alertsOn = !alertsOn;
+    try { localStorage.setItem("gt-alerts", alertsOn ? "on" : "off"); } catch (e) {}
+    syncAlertCtl();
+    if (alertsOn) {
+      unreadAlerts = 0;
+      markTitle();
+      if (typeof Notification !== "undefined" && Notification.permission === "default") {
+        try { const p = Notification.requestPermission(); if (p && p.catch) p.catch(() => {}); } catch (e) {}
+      }
+    } else {
+      $("toasts").replaceChildren();
+    }
+  };
+  window.addEventListener("focus", () => { unreadAlerts = 0; markTitle(); });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { unreadAlerts = 0; markTitle(); } });
+}
+
 let qTab = "ready";
 let qRig = "all";
 let qShape = "all";
@@ -685,7 +785,7 @@ function renderQueue(s, force) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderSeats(state); renderTrend(state); renderMachine(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
+function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderAlerts(state); renderSeats(state); renderTrend(state); renderMachine(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));
@@ -726,7 +826,9 @@ function connect() {
   es.addEventListener("state", ev => { state = JSON.parse(ev.data); renderAll(); });
   es.addEventListener("backlog", ev => { $("feed").replaceChildren(); for (const k of Object.keys(counts)) delete counts[k]; JSON.parse(ev.data).forEach(e => pushEntry(e, true)); });
   es.addEventListener("entry", ev => pushEntry(JSON.parse(ev.data)));
+  es.addEventListener("alert", ev => onAlert(JSON.parse(ev.data)));
 }
+initAlerts();
 renderChips();
 connect();
 // Ages and elapsed times drift between pushes; redraw the cheap parts locally.

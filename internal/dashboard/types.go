@@ -254,6 +254,9 @@ type State struct {
 	Dispatch  *Dispatch       `json:"dispatch,omitempty"`
 	Queue     *Queue          `json:"queue,omitempty"`
 	Trend     *Trend          `json:"trend,omitempty"`
+	// Alerts is the most recent alerts the alerter raised, newest last, capped
+	// at alertsKept. The page lists them whether or not alerts are switched on.
+	Alerts []Alert `json:"alerts,omitempty"`
 }
 
 // Config wires the hub to its readers. Every reader is optional; a nil reader

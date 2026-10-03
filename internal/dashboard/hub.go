@@ -26,6 +26,11 @@ type Hub struct {
 	gating   map[string]bool      // beads the landing worker is gating right now
 	polecats []Polecat
 
+	// alerts decides what needs the operator's attention, and prev is the
+	// snapshot it compares the next one against.
+	alerts *Alerter
+	prev   State
+
 	// wake nudges every worker when a page connects after an idle spell, so
 	// the first page does not wait out a whole interval for fresh data.
 	wake chan struct{}
@@ -49,6 +54,7 @@ func NewHub(cfg Config) *Hub {
 		slung:  map[string]time.Time{},
 		gating: map[string]bool{},
 		wake:   make(chan struct{}),
+		alerts: NewAlerter(cfg.Now),
 	}
 }
 
@@ -140,6 +146,13 @@ func (h *Hub) viewers() int {
 func (h *Hub) Subscribe() (*Sub, [][]byte) {
 	s := &Sub{C: make(chan []byte, 64)}
 	h.mu.Lock()
+	if len(h.subs) == 0 {
+		// Polling starts here. The snapshot from before the gap is not a
+		// baseline for the alert rules: a polecat that stalled while nobody was
+		// watching must not read as a change that just happened.
+		h.prev = State{}
+		h.alerts.Baseline()
+	}
 	h.subs[s] = struct{}{}
 	initial := [][]byte{frame("state", h.stateLocked())}
 	if len(h.ring) > 0 {
@@ -207,6 +220,28 @@ func (h *Hub) publishLocked() {
 	h.broadcastLocked(frame("state", h.stateLocked()))
 }
 
+// observeLocked runs the alert rules over the state change this poll just made,
+// broadcasts each new alert to the open pages, and keeps the last few for
+// display. The snapshot it is compared against is the previous poll's, so a
+// rule that needs a run length or a transition sees one poll at a time. It
+// returns how many alerts it raised, which is a state change of its own.
+func (h *Hub) observeLocked(entries []Entry) int {
+	next := h.state
+	next.Now = h.cfg.Now()
+	next.Polecats = h.polecatsLocked(next.Now)
+	raised := 0
+	for _, al := range h.alerts.Observe(h.prev, next, entries) {
+		raised++
+		h.state.Alerts = append(h.state.Alerts, al)
+		if n := len(h.state.Alerts); n > alertsKept {
+			h.state.Alerts = append([]Alert(nil), h.state.Alerts[n-alertsKept:]...)
+		}
+		h.broadcastLocked(frame("alert", al))
+	}
+	h.prev = next
+	return raised
+}
+
 func frame(event string, v any) []byte {
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -220,6 +255,7 @@ func (h *Hub) pollHealth() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.Health = hl
+	h.observeLocked(nil)
 	h.publishLocked()
 }
 
@@ -260,6 +296,7 @@ func (h *Hub) pollDispatch() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.Dispatch = d
+	h.observeLocked(nil)
 	h.publishLocked()
 }
 
@@ -303,6 +340,7 @@ func (h *Hub) pollSummary() {
 	h.polecats = s.Polecats
 	h.state.Summary = &s
 	h.state.SummaryAt = h.cfg.Now()
+	h.observeLocked(nil)
 	h.publishLocked()
 }
 
@@ -358,9 +396,10 @@ func (h *Hub) pollFeed() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	changed := false
-	for _, e := range entries {
+	for i := range entries {
 		h.seq++
-		e.Seq = h.seq
+		entries[i].Seq = h.seq
+		e := entries[i]
 		h.ring = append(h.ring, e)
 		if m := slungRe.FindStringSubmatch(e.Text); m != nil {
 			h.slung[m[1]] = e.At
@@ -384,6 +423,9 @@ func (h *Hub) pollFeed() {
 	}
 	if n := len(h.ring); n > h.cfg.RingSize {
 		h.ring = append([]Entry(nil), h.ring[n-h.cfg.RingSize:]...)
+	}
+	if alerts := h.observeLocked(entries); alerts > 0 {
+		changed = true
 	}
 	if changed {
 		h.publishLocked()
