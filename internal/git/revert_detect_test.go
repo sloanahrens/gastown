@@ -165,3 +165,70 @@ func TestIsRewrite(t *testing.T) {
 		}
 	}
 }
+
+// The gt-0wy03 shape: main added one t.Parallel() to a test file, and a
+// fast-forward branch deleted a different test's t.Parallel() from that file.
+// The two lines are one text, so the deletion reads as the addition inverted;
+// the copy the file still holds is what says nothing merged was taken back, and
+// the branch must not be refused.
+func TestDetectRevertedMergesAcceptsOneDeletedParallelLine(t *testing.T) {
+	t.Parallel()
+	const path = "internal/cmd/done_test_verify_test.go"
+	const withoutParallel = `package cmd
+
+func TestFirst(t *testing.T) {
+	checkGot(t, want, got)
+}
+
+func TestSecond(t *testing.T) {
+	t.Parallel()
+	checkGot(t, want, got)
+}
+`
+	const addedToFirst = `package cmd
+
+func TestFirst(t *testing.T) {
+	t.Parallel()
+	checkGot(t, want, got)
+}
+
+func TestSecond(t *testing.T) {
+	t.Parallel()
+	checkGot(t, want, got)
+}
+`
+	const droppedFromSecond = `package cmd
+
+func TestFirst(t *testing.T) {
+	t.Parallel()
+	checkGot(t, want, got)
+}
+
+func TestSecond(t *testing.T) {
+	checkGot(t, want, got)
+}
+`
+	g := fakeRevertTree{
+		blobs: map[string]string{
+			"withoutParallel":   withoutParallel,
+			"addedToFirst":      addedToFirst,
+			"droppedFromSecond": droppedFromSecond,
+		},
+		trees: map[string]map[string]string{
+			"base": {path: "addedToFirst"},
+			"main": {path: "addedToFirst"},
+			"tree": {path: "droppedFromSecond"},
+		},
+		changes: []CommitFileChange{{Commit: "add t.Parallel to the sequential tests", Path: path, OldBlob: "withoutParallel", NewBlob: "addedToFirst"}},
+	}
+	report, err := DetectRevertedMerges(g, "main", "tree")
+	if err != nil {
+		t.Fatalf("DetectRevertedMerges: %v", err)
+	}
+	if len(report.Reverted) != 0 {
+		t.Errorf("a branch that deletes one t.Parallel() line beside the file's other copy: reverted %+v; want none", report.Reverted)
+	}
+	if len(report.Relocated) != 1 {
+		t.Errorf("the deleted line is unaccounted for: relocated %+v; want the commit, not silence", report.Relocated)
+	}
+}
