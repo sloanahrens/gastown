@@ -297,13 +297,20 @@ type SessionThresholds struct {
 	// StartupNudgeMaxRetries is max retries for startup nudge (default 3).
 	StartupNudgeMaxRetries *int `json:"startup_nudge_max_retries,omitempty"`
 
+	// BdCommandTimeout is the budget for a single bd command a caller runs
+	// through its own exec wiring (default constants.BdCommandTimeout, 30s).
+	BdCommandTimeout string `json:"bd_command_timeout,omitempty"`
+
+	// BdSubprocessTimeout caps every bd subprocess, init and test-container
+	// budgets included. Unset keeps the per-command budgets. It replaced the
+	// retired timeout environment override (gt-y3pgh.2.6).
+	BdSubprocessTimeout string `json:"bd_subprocess_timeout,omitempty"`
+
 	// The keys below have no reader (gt-e2kxa). They are declared so a
 	// settings file that still carries them decodes.
 	ClaudeStartTimeout      string `json:"claude_start_timeout,omitempty"`
 	ShellReadyTimeout       string `json:"shell_ready_timeout,omitempty"`
 	GracefulShutdownTimeout string `json:"graceful_shutdown_timeout,omitempty"`
-	BdCommandTimeout        string `json:"bd_command_timeout,omitempty"`
-	BdSubprocessTimeout     string `json:"bd_subprocess_timeout,omitempty"`
 	GUPPViolationTimeout    string `json:"gupp_violation_timeout,omitempty"`
 	HungSessionThreshold    string `json:"hung_session_threshold,omitempty"`
 }

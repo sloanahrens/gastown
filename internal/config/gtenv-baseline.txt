@@ -6,10 +6,8 @@
 # TestNoNewGTEnvReads fails when a count grows (a new env read of a config
 # fact) and when one shrinks (lower it here), so this file only goes down.
 # Read a new fact from config instead of adding a line. The remaining
-# entries are config knobs (GT_BD_TIMEOUT_SEC), session-manager
-# signals (GT_POLECAT_PATH, GT_MAYOR), and test seams (GT_TEST_*).
-internal/beads/beads.go GT_BD_TIMEOUT_SEC 1
-internal/beads/beads.go GT_TEST_BD_TIMEOUT_SEC 1
+# entries are session-manager signals (GT_POLECAT_PATH, GT_MAYOR) and test
+# seams (GT_TEST_*).
 internal/beads/test_container.go GT_TEST_DOLT_INIT_CONCURRENCY 1
 internal/cmd/install.go GT_TEST_EXTERNAL_DOLT 1
 internal/cmd/tap_guard_container_suite.go GT_TEST_DOCKER 1

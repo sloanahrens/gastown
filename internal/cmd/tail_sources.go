@@ -202,7 +202,7 @@ type tailBDJournal struct {
 }
 
 func (j *tailBDJournal) ConfigGet(key string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), beads.ResolveSubprocessTimeout())
+	ctx, cancel := context.WithTimeout(context.Background(), beads.CommandTimeoutFor(j.dir))
 	defer cancel()
 	stdout, stderr, err := j.run(ctx, []string{"BEADS_DIR=" + j.dir, "BD_EVENTS_JOURNAL=", "BD_MACHINE=1"}, "config", "get", key, "--json")
 	if err != nil {
