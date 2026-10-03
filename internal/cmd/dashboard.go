@@ -153,6 +153,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	recs := newDashLandings(townRoot)
 	seatCache := newDashSeatCache()
 	om := newOMReader(townRoot, recs)
+	queue := newDashQueueReader(townRoot)
 	return dashboard.NewHub(dashboard.Config{
 		Feed:     feed,
 		Summary:  func() dashboard.Summary { return dashboardSummary(townRoot, deploys, recs, seatCache) },
@@ -161,6 +162,8 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Spend:    dashboardSpend(resolveSpendCmd(spendCmd)),
 		OM:       func() *dashboard.OM { return om.read(time.Now()) },
 		Dispatch: om.dispatch,
+		Queue:    func() *dashboard.Queue { return queue.read(time.Now()) },
+		Bead:     queue.detail,
 	}), nil
 }
 

@@ -70,6 +70,17 @@ td.n,th.n{text-align:right}
 .cmd{display:inline-block;margin:2px 6px 0 0;padding:0 6px;border:1px solid var(--line);border-radius:4px;color:var(--dim);background:none;font:inherit;font-size:11px;cursor:pointer;text-align:left}
 .cmd:hover{color:var(--text);border-color:var(--dim)}.cmd.done{color:var(--green);border-color:var(--green)}
 .skip{padding:3px 0;border-top:1px solid var(--line)}.skip .why{color:var(--dim);display:block}
+.qtabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+.qrow{border-top:1px solid var(--line)}
+.qhead{display:grid;grid-template-columns:auto auto 1fr auto;gap:4px 8px;align-items:baseline;width:100%;text-align:left;background:none;border:0;color:inherit;font:inherit;padding:5px 0;cursor:pointer}
+.qhead:hover{background:#19212b}
+.qhead .t{overflow-wrap:anywhere}
+.qhead .caret{color:var(--dim);width:10px;display:inline-block}
+.qsub{grid-column:2 / -1;color:var(--dim);font-size:11px}
+.qdetail{padding:4px 0 10px 18px;overflow-wrap:anywhere}
+.qdetail h4{margin:8px 0 2px;font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em;font-weight:400}
+.qdetail pre{margin:0;white-space:pre-wrap;font:inherit;background:#10161d;border:1px solid var(--line);border-radius:6px;padding:6px 8px;max-height:320px;overflow:auto}
+.qcomment{border-left:2px solid var(--line);padding-left:8px;margin:4px 0}
 .good{color:var(--green)}.warnc{color:var(--amber)}.badc{color:var(--red)}
 </style>
 </head>
@@ -91,6 +102,7 @@ td.n,th.n{text-align:right}
     <section><h2>DeepSeek <span class="r" id="spendnote"></span></h2><div class="body" id="spend"></div></section>
   </div>
   <div class="col">
+    <section><h2>Work queue <span class="r" id="queuenote"></span></h2><div class="body" id="queue"></div></section>
     <section><h2>om review <span class="r" id="omnote"></span></h2><div class="body" id="om"></div></section>
     <section>
       <h2>Feed <span class="chips" id="chips"></span></h2>
@@ -110,6 +122,7 @@ const fmtDur = s => {
   const m = Math.round(s / 60);
   if (m < 90) return m + "m";
   const h = Math.floor(m / 60);
+  if (h >= 48) return Math.floor(h / 24) + "d";
   return h + "h" + String(m % 60).padStart(2, "0") + "m";
 };
 const age = iso => iso ? fmtDur((Date.now() - new Date(iso).getTime()) / 1000) : "–";
@@ -450,7 +463,128 @@ function renderDispatch(s) {
   if (d.more) box.append(el("div", "empty", "+" + d.more + " more not named in the log line"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderSeats(state); renderMachine(state); renderSpend(state); renderOM(state); renderDispatch(state); }
+let qTab = "ready";
+let qRig = "all";
+let qShape = "all";
+const qOpen = new Set();
+const qDetail = {};
+let qKey = "";
+const QTABS = [["ready", "Ready to build", "ready_total", "ready"], ["landing", "Waiting to land", "landing_total", "landing"], ["blocked", "Blocked", "blocked_total", "blocked"]];
+
+function openBead(b) {
+  const id = b.rig + "/" + b.id;
+  if (qOpen.has(id)) { qOpen.delete(id); renderQueue(state, true); return; }
+  qOpen.add(id);
+  if (!qDetail[id]) {
+    qDetail[id] = {loading: true};
+    fetch("/api/bead?rig=" + encodeURIComponent(b.rig) + "&id=" + encodeURIComponent(b.id))
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(String(r.status))))
+      .then(d => { qDetail[id] = d; renderQueue(state, true); })
+      .catch(() => { qDetail[id] = {error: true}; renderQueue(state, true); });
+  }
+  renderQueue(state, true);
+}
+
+function detailBlock(d) {
+  const box = el("div", "qdetail");
+  if (d.loading) { box.append(el("div", "empty", "loading…")); return box; }
+  if (d.error) { box.append(el("div", "badc", "could not read this bead right now")); return box; }
+  const meta = [d.status, d.assignee ? "assigned " + d.assignee : "unassigned", d.created_at ? "created " + age(d.created_at) + " ago" : null, d.updated_at ? "updated " + age(d.updated_at) + " ago" : null].filter(Boolean).join(" · ");
+  box.append(el("div", "title", meta));
+  if ((d.labels || []).length) { const l = el("div"); d.labels.forEach(x => l.append(el("span", "tag", x))); box.append(l); }
+  if ((d.blocked_by || []).length) box.append(el("div", "warnc", "blocked by " + d.blocked_by.join(", ")));
+  const sec = (name, text) => { if (!text) return; box.append(el("h4", "", name), el("pre", "", text)); };
+  sec("Description", d.description);
+  sec("Acceptance", d.acceptance);
+  sec("Design", d.design);
+  sec("Notes", d.notes);
+  if ((d.comments || []).length) {
+    box.append(el("h4", "", "Comments"));
+    d.comments.forEach(c => { const x = el("div", "qcomment"); x.append(el("div", "title", (c.author || "?") + (c.at ? " · " + age(c.at) + " ago" : "")), el("div", "", c.text)); box.append(x); });
+  }
+  if (d.truncated) box.append(el("div", "empty", "some text was cut to keep this small; bd show " + d.id + " has all of it"));
+  return box;
+}
+
+function renderQueue(s, force) {
+  const box = $("queue");
+  const q = s.queue;
+  if (!q) { if (!box.dataset.empty) { box.replaceChildren(el("div", "empty", "reading the work queue…")); box.dataset.empty = "1"; } return; }
+  const unshaped = {};
+  ((s.dispatch && s.dispatch.named) || []).forEach(n => { if (n.bead && /^unshaped/.test(n.reason)) unshaped[n.bead] = n.reason; });
+  const key = q.at + "|" + qTab + "|" + qRig + "|" + qShape + "|" + [...qOpen].join(",") + "|" + Object.keys(qDetail).map(k => k + (qDetail[k].loading ? "L" : qDetail[k].error ? "E" : "D")).join(",") + "|" + Object.keys(unshaped).join(",");
+  if (!force && key === qKey) return;
+  qKey = key;
+  delete box.dataset.empty;
+  box.replaceChildren();
+  $("queuenote").textContent = "read " + age(q.at) + " ago";
+  if ((q.unreadable || []).length) box.append(el("div", "badc", "⚠ could not read: " + q.unreadable.join(", ") + " (its beads are missing below)"));
+  const tabs = el("div", "qtabs");
+  QTABS.forEach(([k, label, totalKey]) => {
+    const b = el("button", "chip" + (qTab === k ? " on" : ""), label);
+    b.append(el("b", "", String(q[totalKey] || 0)));
+    b.onclick = () => { qTab = k; renderQueue(state, true); };
+    tabs.append(b);
+  });
+  box.append(tabs);
+  const caption = {ready: "Open beads with nothing blocking them. Only the green “ready” ones are taken by the spec dispatcher: shaped, and not an epic. The rest need shaping first, or are old backlog.",
+    landing: "Submitted by a polecat or crew and waiting for the landing worker.",
+    blocked: "Open beads waiting on another bead to close."}[qTab];
+  box.append(el("div", "empty", caption));
+  const [, , totalKey, listKey] = QTABS.find(t => t[0] === qTab);
+  const all = q[listKey] || [];
+  // filters: which store, and (for the ready list) whether the dispatcher would slot it
+  const rigs = Object.assign({}, q[listKey + "_rigs"] || {});
+  if (!Object.keys(rigs).length) all.forEach(b => rigs[b.rig] = (rigs[b.rig] || 0) + 1);
+  const rigNames = Object.keys(rigs).sort((a, b) => rigs[b] - rigs[a]);
+  if (qRig !== "all" && !rigs[qRig]) qRig = "all";
+  if (rigNames.length > 1 || qTab === "ready") {
+    const f = el("div", "qtabs");
+    const chip = (label, count, on, fn) => { const b = el("button", "chip" + (on ? " on" : ""), label); b.append(el("b", "", String(count))); b.onclick = fn; f.append(b); };
+    if (rigNames.length > 1) {
+      chip("all stores", q[totalKey] || all.length, qRig === "all", () => { qRig = "all"; renderQueue(state, true); });
+      rigNames.forEach(r => chip(r, rigs[r], qRig === r, () => { qRig = r; renderQueue(state, true); }));
+    }
+    if (qTab === "ready") {
+      const inRig = all.filter(b => qRig === "all" || b.rig === qRig);
+      const ok = inRig.filter(b => b.shape === "ok").length;
+      chip("dispatchable", ok, qShape === "ok", () => { qShape = qShape === "ok" ? "all" : "ok"; renderQueue(state, true); });
+      chip("needs shaping", inRig.filter(b => b.shape === "fix").length, qShape === "fix", () => { qShape = qShape === "fix" ? "all" : "fix"; renderQueue(state, true); });
+    }
+    box.append(f);
+  }
+  const rows = all.filter(b => (qRig === "all" || b.rig === qRig) && (qTab !== "ready" || qShape === "all" || b.shape === qShape));
+  if (!rows.length) box.append(el("div", "empty", all.length ? "nothing matches these filters" : qTab === "ready" ? "nothing is waiting to be built" : qTab === "landing" ? "nothing is waiting to land" : "nothing is blocked"));
+  rows.forEach(b => {
+    const id = b.rig + "/" + b.id;
+    const open = qOpen.has(id);
+    const row = el("div", "qrow");
+    const head = el("button", "qhead");
+    head.setAttribute("aria-expanded", open ? "true" : "false");
+    head.append(el("span", "tag p" + Math.min(b.priority, 4), "P" + b.priority));
+    const idc = el("span", "bead"); idc.append(el("span", "caret", open ? "▾" : "▸"), document.createTextNode(b.id));
+    head.append(idc);
+    const t = el("span", "t", b.title || "(no title)");
+    if (b.shape === "ok") { const g = el("span", "tag good", "ready"); g.title = "the spec dispatcher would slot this bead"; t.append(document.createTextNode(" "), g); }
+    else if (b.shape === "fix") { const g = el("span", "tag warnc", "needs shaping"); g.title = b.shape_note || ""; t.append(document.createTextNode(" "), g); }
+    else if (b.shape === "planning") { const g = el("span", "tag", "needs planning"); g.title = b.shape_note || ""; t.append(document.createTextNode(" "), g); }
+    else if (unshaped[b.id]) t.append(document.createTextNode(" "), el("span", "tag warnc", "unshaped"));
+    (b.labels || []).filter(l => !/^gt:/.test(l) && l !== "rework").forEach(l => t.append(document.createTextNode(" "), el("span", "tag", l)));
+    if (b.labels && b.labels.indexOf("rework") >= 0) t.append(document.createTextNode(" "), el("span", "tag warnc", "rework"));
+    head.append(t, el("span", "title", b.created_at ? age(b.created_at) : ""));
+    const sub = [b.type, b.rig !== "gastown" ? b.rig : null, b.assignee ? "→ " + b.assignee : null, (b.blocked_by || []).length ? "blocked by " + b.blocked_by.join(", ") : null].filter(Boolean).join(" · ");
+    if (sub) head.append(el("span", "qsub", sub));
+    head.onclick = () => openBead(b);
+    row.append(head);
+    if (open) row.append(detailBlock(qDetail[id] || {loading: true}));
+    box.append(row);
+  });
+  const shownInRig = rows.length;
+  const totalInRig = qRig === "all" ? (q[totalKey] || 0) : (rigs[qRig] || 0);
+  if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
+}
+
+function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderSeats(state); renderMachine(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));

@@ -32,6 +32,7 @@ func (h *Hub) Handler() http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(h.State())
 	})
+	mux.HandleFunc("/api/bead", h.serveBead)
 	mux.HandleFunc("/stream", h.serveStream)
 	return guard(mux)
 }
@@ -113,4 +114,22 @@ func (h *Hub) serveStream(w http.ResponseWriter, r *http.Request) {
 			fl.Flush()
 		}
 	}
+}
+
+// serveBead returns one bead's text for the queue's expandable rows. The query
+// is validated before it reaches bd, a read failure says nothing about why, and
+// reads are cached and serialized in the hub.
+func (h *Hub) serveBead(w http.ResponseWriter, r *http.Request) {
+	rig, id := r.URL.Query().Get("rig"), r.URL.Query().Get("id")
+	if !ValidBeadRef(rig, id) {
+		http.Error(w, "bad bead reference", http.StatusBadRequest)
+		return
+	}
+	d, err := h.beadDetail(rig, id)
+	if err != nil {
+		http.Error(w, "bead unavailable", http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(d)
 }
