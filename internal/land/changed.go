@@ -12,13 +12,15 @@ import (
 // directories whose tests the change can affect, sorted and relative to the
 // repo root ("internal/land", never "./internal/land").
 //
-// A .go file names its own directory. A file of any other kind (testdata, an
-// embedded template, a fixture) names the nearest ancestor directory that
-// holds Go files, because that package is the one that reads it; a file with
-// no such ancestor, such as docs/x.md, names nothing. Both sides of a rename
-// and a deleted file count, so a package that lost a file is still tested. A
-// directory with no Go files left is dropped: `go test` of a deleted package
-// is an error, not a pass.
+// A .go file names its own directory, unless it sits in one the go tool skips
+// (testdata, or a name beginning with "." or "_"): a .go file there is a
+// fixture, not a package member, and names the owning package like any other
+// fixture (gt-f1ynu). A file of any other kind (an embedded template, a
+// fixture) names the nearest ancestor directory that holds Go files, because
+// that package is the one that reads it; a file with no such ancestor, such as
+// docs/x.md, names nothing. Both sides of a rename and a deleted file count,
+// so a package that lost a file is still tested. A directory with no Go files
+// left is dropped: `go test` of a deleted package is an error, not a pass.
 //
 // The guards that judge paths outside their own package are GuardSelects,
 // not this: testing the package a guard file lives in would run its whole
@@ -130,18 +132,35 @@ func eachChange(nameStatus string, fn func(status string, now, gone []string)) {
 func owningPackage(file string, hasGo func(dir string) bool) string {
 	file = path.Clean(filepath.ToSlash(file))
 	dir := path.Dir(file)
-	if strings.HasSuffix(file, ".go") {
+	if strings.HasSuffix(file, ".go") && !isFixtureDir(dir) {
 		if hasGo(dir) {
 			return dir
 		}
 		return ""
 	}
 	for ; dir != "." && dir != "/"; dir = path.Dir(dir) {
-		if hasGo(dir) {
+		if !isFixtureDir(dir) && hasGo(dir) {
 			return dir
 		}
 	}
 	return ""
+}
+
+// isFixtureDir reports whether dir is not a package directory, mirroring the
+// go tool: `./...` skips a directory named testdata and one whose name begins
+// with "." or "_". A .go file there is a fixture, not a package member, so it
+// maps to the package that reads it — and a directory the go tool skips must
+// never be handed to `go test`, which cannot build it (gt-f1ynu).
+func isFixtureDir(dir string) bool {
+	if dir == "." || dir == "/" {
+		return false
+	}
+	for _, elem := range strings.Split(dir, "/") {
+		if elem == "testdata" || strings.HasPrefix(elem, ".") || strings.HasPrefix(elem, "_") {
+			return true
+		}
+	}
+	return false
 }
 
 // PackageDirHasGo reports whether repoRoot/dir holds a .go file directly.
