@@ -842,7 +842,7 @@ func tailMainPicture(townRoot string) (tip, installed string, behind int, err er
 // tailOpenEscalations counts the town's open escalations, both bead planes,
 // minus the mail carriers that delivered them.
 func tailOpenEscalations(townRoot string) (int, error) {
-	issues, err := beads.New(beads.ResolveBeadsDir(townRoot)).ListEscalationsAcrossRigs()
+	issues, err := beads.ListEscalationsAcrossRigs(beads.New(beads.ResolveBeadsDir(townRoot)))
 	if err != nil {
 		return 0, err
 	}

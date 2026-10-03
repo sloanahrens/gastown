@@ -85,9 +85,15 @@ func (s *escalationStub) setShowJSON(t *testing.T, issues ...*Issue) {
 	s.writeFile(filepath.Join(s.dir, "show.json"), string(raw))
 }
 
-// setListJSON makes `bd list` answer with the given issues.
+// setListJSON makes `bd list` answer with the given issues. An empty list is
+// written as [] rather than json.Marshal's null, matching what bd prints for a
+// query that matched nothing.
 func (s *escalationStub) setListJSON(t *testing.T, issues ...*Issue) {
 	t.Helper()
+	if len(issues) == 0 {
+		s.writeFile(filepath.Join(s.dir, "list.json"), "[]")
+		return
+	}
 	raw, err := json.Marshal(issues)
 	if err != nil {
 		t.Fatalf("marshal list fixture: %v", err)
@@ -152,7 +158,7 @@ func TestBumpEscalation_RecordsRepeatOnTheExistingBead(t *testing.T) {
 	stub.setShowJSON(t, existing)
 
 	b := New(t.TempDir())
-	count, renotify, err := b.BumpEscalation("hq-e1", "high", "second firing", "main_branch_test", time.Hour)
+	count, renotify, err := BumpEscalation(b, "hq-e1", "high", "second firing", "main_branch_test", time.Hour)
 	if err != nil {
 		t.Fatalf("BumpEscalation: %v", err)
 	}
@@ -196,7 +202,7 @@ func TestBumpEscalation_SeedsOccurrencesForPreexistingBeads(t *testing.T) {
 	stub.setShowJSON(t, escalationIssueForTest("hq-old", "escalation-fp:abc123", 0))
 
 	b := New(t.TempDir())
-	count, _, err := b.BumpEscalation("hq-old", "high", "second firing", "main_branch_test", time.Hour)
+	count, _, err := BumpEscalation(b, "hq-old", "high", "second firing", "main_branch_test", time.Hour)
 	if err != nil {
 		t.Fatalf("BumpEscalation: %v", err)
 	}
@@ -213,7 +219,7 @@ func TestBumpEscalation_RejectsNonEscalationBeads(t *testing.T) {
 	stub.setShowJSON(t, plain)
 
 	b := New(t.TempDir())
-	if _, _, err := b.BumpEscalation("gt-work", "high", "reason", "source", time.Hour); err == nil {
+	if _, _, err := BumpEscalation(b, "gt-work", "high", "reason", "source", time.Hour); err == nil {
 		t.Fatal("expected BumpEscalation to refuse a bead that is not an escalation")
 	}
 }
@@ -233,7 +239,7 @@ func TestBumpEscalation_SuppressesWithinRenotifyWindow(t *testing.T) {
 	stub.setShowJSON(t, existing)
 
 	b := New(t.TempDir())
-	count, renotify, err := b.BumpEscalation("hq-e1", "high", "second firing", "main_branch_test", time.Hour)
+	count, renotify, err := BumpEscalation(b, "hq-e1", "high", "second firing", "main_branch_test", time.Hour)
 	if err != nil {
 		t.Fatalf("BumpEscalation: %v", err)
 	}
@@ -267,7 +273,7 @@ func TestBumpEscalation_RenotifiesAfterWindowElapses(t *testing.T) {
 	stub.setShowJSON(t, existing)
 
 	b := New(t.TempDir())
-	_, renotify, err := b.BumpEscalation("hq-e1", "high", "still failing", "main_branch_test", time.Hour)
+	_, renotify, err := BumpEscalation(b, "hq-e1", "high", "still failing", "main_branch_test", time.Hour)
 	if err != nil {
 		t.Fatalf("BumpEscalation: %v", err)
 	}
@@ -351,7 +357,7 @@ func TestCloseEscalationsByFingerprints_ClosesOnlyMatchingKeys(t *testing.T) {
 	stub.setShowJSON(t, mine)
 
 	b := New(t.TempDir())
-	closed, err := b.CloseEscalationsByFingerprints([]string{"escalation-fp:aaa111"}, "daemon", "main branch tests green")
+	closed, err := CloseEscalationsByFingerprints(b, []string{"escalation-fp:aaa111"}, "daemon", "main branch tests green")
 	if err != nil {
 		t.Fatalf("CloseEscalationsByFingerprints: %v", err)
 	}
@@ -377,7 +383,7 @@ func TestCloseEscalationsByFingerprints_ClearWithNothingToClear(t *testing.T) {
 	stub.setListJSON(t)
 
 	b := New(t.TempDir())
-	closed, err := b.CloseEscalationsByFingerprints([]string{"escalation-fp:absent"}, "daemon", "condition cleared")
+	closed, err := CloseEscalationsByFingerprints(b, []string{"escalation-fp:absent"}, "daemon", "condition cleared")
 	if err != nil {
 		t.Fatalf("clearing an absent key must not error: %v", err)
 	}
@@ -392,7 +398,7 @@ func TestCloseEscalationsByFingerprints_ClearWithNothingToClear(t *testing.T) {
 func TestCloseEscalationsByFingerprints_NoKeysIsANoOp(t *testing.T) {
 	stub := newEscalationStub(t)
 	b := New(t.TempDir())
-	closed, err := b.CloseEscalationsByFingerprints(nil, "daemon", "reason")
+	closed, err := CloseEscalationsByFingerprints(b, nil, "daemon", "reason")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
