@@ -43,11 +43,13 @@
 #                          so run it under `gt slot run`.
 #   make test-integration-wall
 #                          test-integration with a wall report (gt-ik4a1.4.5):
-#                          the same two commands, each -json, through one
-#                          tierwall run that prints a line per package,
+#                          the same two commands, each -json -count=1, through
+#                          one tierwall run that prints a line per package,
 #                          slowest first, then the tier's wall against the 90s
-#                          the post-merge cadence waits for (gt-ik4a1.4). Nothing
-#                          fails on wall unless TIERWALL_FLAGS asks. It starts
+#                          the post-merge cadence waits for (gt-ik4a1.4). -count=1
+#                          keeps it an uncached run, so the wall cannot come
+#                          from the test cache (gt-gq4gl). Nothing fails on
+#                          wall unless TIERWALL_FLAGS asks. It starts
 #                          containers, so run it under `gt slot run`.
 #   make test              all three, in that order, for a human. It starts
 #                          containers, so run it under `gt slot run`.
@@ -414,6 +416,12 @@ test-integration:
 # cadence waits for (gt-ik4a1.4). scripts/tier-sweep.sh runs one package at a
 # time and logs only go test's ok line, so that wall was never measured.
 #
+# Both commands also carry -count=1 (gt-gq4gl): the number decides the cadence
+# switch (gt-ik4a1.4), and without it a second run on unchanged source is
+# served from the Go test cache, so a wall measured from the cache can pass
+# the 90s bar a cold run of the same tree would blow. The flag sits after
+# $(INTEGRATION_GO_TEST) so a CI runner swap keeps it.
+#
 # Nothing here fails on wall: wall time varies with host load, and a red
 # post-land run reverts landings (gt-z7qtk). TIERWALL_FLAGS=-max-wall=90s asks
 # for that failure. Either way the target sets GT_TEST_DOCKER=1 and the same
@@ -429,8 +437,8 @@ test-integration-wall: SHELL := /bin/bash
 test-integration-wall:
 	@test -n "$(strip $(DOCKER_PKGS))" || { echo "test-integration-wall: internal/testpolicy/docker.txt lists no package; refusing to run go test over nothing" >&2; exit 1; }
 	@set -o pipefail; { \
-		GT_TEST_DOCKER=1 GT_TEST_DOLT_INIT_CONCURRENCY=8 $(INTEGRATION_GO_TEST) -json -tags integration -timeout 20m ./...; \
-		GT_TEST_DOCKER=1 GT_TEST_DOLT_INIT_CONCURRENCY=8 $(INTEGRATION_GO_TEST) -json -timeout 20m $(DOCKER_PKGS); \
+		GT_TEST_DOCKER=1 GT_TEST_DOLT_INIT_CONCURRENCY=8 $(INTEGRATION_GO_TEST) -json -count=1 -tags integration -timeout 20m ./...; \
+		GT_TEST_DOCKER=1 GT_TEST_DOLT_INIT_CONCURRENCY=8 $(INTEGRATION_GO_TEST) -json -count=1 -timeout 20m $(DOCKER_PKGS); \
 	} | go run ./internal/testpolicy/cmd/tierwall $(TIERWALL_FLAGS)
 
 # test-timing measures the unit tier in a tmux server started by launchd, which
