@@ -170,9 +170,9 @@ var (
 )
 
 // Allowed beyond systemGeneratedVar, all machine-shaped: review_id is a slug
-// the agent picks (lowercase letters, digits, hyphens; mol-idea-to-plan says
-// so), convoy and resolved_issue are bead ids, and the rest are slugs and
-// counts the operator configures. None can carry human prose.
+// the agent picks (lowercase letters, digits, hyphens), convoy and
+// resolved_issue are bead ids, and the rest are slugs and counts the operator
+// configures. None can carry human prose.
 var machineShapedShellVar = regexp.MustCompile(`\{\{(review_id|convoy|resolved_issue|repo|patrol_label|slice_docs|slice_go|max_open_beads|scan_interval_seconds)\}\}`)
 
 // The *_command vars are the operator's own command lines: rendering one into a
