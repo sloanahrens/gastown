@@ -705,7 +705,7 @@ func TestCreateOrReopenAgentBead_UpdatesRigLocalBead(t *testing.T) {
 		func(rig, _ string) string { return rig })
 
 	bd := NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir)
-	if _, err := bd.CreateOrReopenAgentBead("gt-gastown-polecat-rust", "gt-gastown-polecat-rust", &AgentFields{
+	if _, err := CreateOrReopenAgentBead(bd, "gt-gastown-polecat-rust", "gt-gastown-polecat-rust", &AgentFields{
 		RoleType:   "polecat",
 		Rig:        "gastown",
 		AgentState: "spawning",
@@ -734,7 +734,7 @@ func TestCreateOrReopenAgentBead_IgnoresLegacyTownBead(t *testing.T) {
 		func(_, town string) string { return town })
 
 	bd := NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir)
-	if _, err := bd.CreateOrReopenAgentBead("gt-gastown-polecat-rust", "gt-gastown-polecat-rust", &AgentFields{
+	if _, err := CreateOrReopenAgentBead(bd, "gt-gastown-polecat-rust", "gt-gastown-polecat-rust", &AgentFields{
 		RoleType:   "polecat",
 		Rig:        "gastown",
 		AgentState: "spawning",

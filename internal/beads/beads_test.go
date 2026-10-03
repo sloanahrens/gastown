@@ -4468,7 +4468,7 @@ func TestResetAgentBeadForReuse_NukeRespawnCycle(t *testing.T) {
 	agentID := "test-testrig-polecat-reset"
 
 	// Spawn 1: Create agent bead
-	issue1, err := bd.CreateOrReopenAgentBead(agentID, agentID, &AgentFields{
+	issue1, err := CreateOrReopenAgentBead(bd, agentID, agentID, &AgentFields{
 		RoleType:   "polecat",
 		Rig:        "testrig",
 		AgentState: "spawning",
@@ -4482,7 +4482,7 @@ func TestResetAgentBeadForReuse_NukeRespawnCycle(t *testing.T) {
 	}
 
 	// Nuke 1: Reset for reuse (bead stays open with cleared fields)
-	err = bd.ResetAgentBeadForReuse(agentID, "polecat nuked")
+	err = ResetAgentBeadForReuse(bd, agentID, "polecat nuked")
 	if err != nil {
 		t.Fatalf("Nuke 1 - ResetAgentBeadForReuse: %v", err)
 	}
@@ -4504,7 +4504,7 @@ func TestResetAgentBeadForReuse_NukeRespawnCycle(t *testing.T) {
 	}
 
 	// Spawn 2: CreateOrReopenAgentBead should detect open bead and update it
-	issue2, err := bd.CreateOrReopenAgentBead(agentID, agentID, &AgentFields{
+	issue2, err := CreateOrReopenAgentBead(bd, agentID, agentID, &AgentFields{
 		RoleType:   "polecat",
 		Rig:        "testrig",
 		AgentState: "spawning",
@@ -4525,13 +4525,13 @@ func TestResetAgentBeadForReuse_NukeRespawnCycle(t *testing.T) {
 	}
 
 	// Nuke 2: Reset again
-	err = bd.ResetAgentBeadForReuse(agentID, "polecat nuked again")
+	err = ResetAgentBeadForReuse(bd, agentID, "polecat nuked again")
 	if err != nil {
 		t.Fatalf("Nuke 2: %v", err)
 	}
 
 	// Spawn 3: Should still work
-	issue3, err := bd.CreateOrReopenAgentBead(agentID, agentID, &AgentFields{
+	issue3, err := CreateOrReopenAgentBead(bd, agentID, agentID, &AgentFields{
 		RoleType:   "polecat",
 		Rig:        "testrig",
 		AgentState: "spawning",

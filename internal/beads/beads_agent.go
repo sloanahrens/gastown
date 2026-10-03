@@ -14,9 +14,9 @@ import (
 )
 
 // lockAgentBead acquires an exclusive file lock for a specific agent bead ID.
-// This prevents concurrent read-modify-write races in methods like
-// CreateOrReopenAgentBead, ResetAgentBeadForReuse, and UpdateAgentDescriptionFields.
-// Caller must defer fl.Unlock().
+// This prevents concurrent read-modify-write races in the agent-bead writers:
+// CreateOrReopenAgentBead, ResetAgentBeadForReuse and the store path of
+// UpdateAgentDescriptionFields. Caller must defer fl.Unlock().
 func (b *Beads) lockAgentBead(id string) (*flock.Flock, error) {
 	lockDir := filepath.Join(b.getResolvedBeadsDir(), ".locks")
 	if err := os.MkdirAll(lockDir, 0755); err != nil {
@@ -269,83 +269,6 @@ func (b *Beads) CreateAgentBead(id, title string, fields *AgentFields) (*Issue, 
 	return &issue, nil
 }
 
-// CreateOrReopenAgentBead creates an agent bead or reopens an existing one.
-// This handles the case where a polecat is nuked and re-spawned with the same name:
-// the old agent bead exists (open or closed), so we update it instead of
-// failing with a UNIQUE constraint error.
-//
-// The function:
-// 1. Tries to create the agent bead
-// 2. If create fails, checks if bead exists (via bd show)
-// 3. If bead exists and is closed, reopens it
-// 4. Updates the bead with new fields regardless of prior state
-//
-// This is robust against Dolt backend issues where bd close/reopen may fail:
-// - If nuke used ResetAgentBeadForReuse, bead is open → update directly
-// - If bead is closed (legacy state), reopen then update
-// - If bead is in unknown state, falls back to show+update
-func (b *Beads) CreateOrReopenAgentBead(id, title string, fields *AgentFields) (*Issue, error) {
-	// First try to create the bead (no lock needed - create is atomic)
-	issue, err := b.CreateAgentBead(id, title, fields)
-	if err == nil {
-		return issue, nil
-	}
-
-	// Create failed - need to do Show→Reopen→Update which requires locking
-	// to prevent concurrent modifications (e.g., nuke clearing fields while
-	// spawn is updating them). See gt-joazs.
-	fl, lockErr := b.lockAgentBead(id)
-	if lockErr != nil {
-		return nil, fmt.Errorf("locking agent bead %s: %w", id, lockErr)
-	}
-	defer func() { _ = fl.Unlock() }()
-
-	// Create failed - check if bead already exists (handles both open and closed states)
-	createErr := err
-
-	// Dual-scope: the bead may live in its canonical (rig-local) database or,
-	// for legacy agents, in the town database (gt-8we).
-	target := b.resolveAgentBead(id)
-
-	existing, showErr := target.Show(id)
-	if showErr != nil {
-		// Bead doesn't exist (or can't be read) - return original create error
-		return nil, createErr
-	}
-
-	// If bead is closed, reopen it first
-	if existing.Status == "closed" {
-		if _, reopenErr := target.run("reopen", id, "--reason=re-spawning agent"); reopenErr != nil {
-			// Reopen failed - try setting status to open via update as fallback
-			// This handles Dolt backends where bd reopen may not work
-			openStatus := "open"
-			if updateErr := target.Update(id, UpdateOptions{Status: &openStatus}); updateErr != nil {
-				return nil, fmt.Errorf("could not reopen agent bead %s (reopen: %v, update: %v, original: %v)",
-					id, reopenErr, updateErr, createErr)
-			}
-		}
-	}
-
-	// Update the bead with new fields and ensure gt:agent label is set.
-	// Agent beads use type=task (a valid built-in type) and are identified
-	// by the gt:agent label, not by type (see IsAgentBead).
-	description := FormatAgentDescription(title, fields)
-	updateOpts := UpdateOptions{
-		Title:       &title,
-		Description: &description,
-		SetLabels:   labelsForAgentBeadReuse(existing.Labels),
-	}
-	if err := target.Update(id, updateOpts); err != nil {
-		return nil, fmt.Errorf("updating agent bead: %w", err)
-	}
-
-	// Note: role slot no longer set - role definitions are config-based
-	// Note: hook_bead slot no longer set - bd slot removed in v0.62 (hq-l6mm5)
-
-	// Return the updated bead
-	return target.Show(id)
-}
-
 func labelsForAgentBeadReuse(existing []string) []string {
 	labels := []string{"gt:agent"}
 	seen := map[string]bool{"gt:agent": true}
@@ -357,33 +280,6 @@ func labelsForAgentBeadReuse(existing []string) []string {
 		seen[label] = true
 	}
 	return labels
-}
-
-// ResetAgentBeadForReuse clears all mutable fields on an agent bead without closing it.
-// This is the preferred cleanup method during polecat nuke because it avoids the
-// close/reopen cycle that fails on Dolt backends (tombstone operations not supported,
-// bd reopen failures). By keeping the bead open with agent_state="nuked",
-// CreateOrReopenAgentBead can simply update it on re-spawn without needing reopen.
-//
-// This is the standard nuke path (gt-14b8o).
-func (b *Beads) ResetAgentBeadForReuse(id, reason string) error {
-	// Lock the agent bead to prevent concurrent read-modify-write races.
-	// Without this, a concurrent CreateOrReopenAgentBead could overwrite
-	// the nuked state we're about to set. See gt-joazs.
-	fl, lockErr := b.lockAgentBead(id)
-	if lockErr != nil {
-		return fmt.Errorf("locking agent bead %s: %w", id, lockErr)
-	}
-	defer func() { _ = fl.Unlock() }()
-
-	// Dual-scope: rig-local (canonical) first, town fallback for legacy
-	// agent beads (gt-8we).
-	target := b.resolveAgentBead(id)
-
-	// The read-modify-write is shared with the Client path
-	// (resetAgentBeadForReuse); the lock above and the routing here are what
-	// only the store adds.
-	return resetAgentBeadForReuse(target, id)
 }
 
 // SetHookBead and ClearHookBead removed (hq-l6mm5).

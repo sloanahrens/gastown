@@ -131,7 +131,7 @@ func TestIntegrationManagerGetPrefersHookedBeadOverStaleAgentHook(t *testing.T) 
 	}
 
 	agentID := mgr.agentBeadID("toast")
-	if _, err := mgr.beads.CreateOrReopenAgentBead(agentID, assignee, &beads.AgentFields{
+	if _, err := beads.CreateOrReopenAgentBead(mgr.agentBeads(), agentID, assignee, &beads.AgentFields{
 		HookBead:   stale.ID,
 		AgentState: string(beads.AgentStateWorking),
 	}); err != nil {
@@ -201,7 +201,7 @@ func TestIntegrationManagerTreatsLiveSessionWithoutWorkAsReviewNeeded(t *testing
 
 	agentID := mgr.agentBeadID("toast")
 	assignee := mgr.assigneeID("toast")
-	if _, err := mgr.beads.CreateOrReopenAgentBead(agentID, assignee, &beads.AgentFields{
+	if _, err := beads.CreateOrReopenAgentBead(mgr.agentBeads(), agentID, assignee, &beads.AgentFields{
 		AgentState: string(beads.AgentStateIdle),
 	}); err != nil {
 		t.Fatalf("create idle agent bead: %v", err)
