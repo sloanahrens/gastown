@@ -1,6 +1,8 @@
+> Status: approved 2026-10-03; implemented by the slice beads that depend on gt-kqzns. Historical once merged; not maintained.
+
 # Automatic cleanup of finished polecat worktrees (patrol_scan)
 
-Date: 2026-10-03. Status: draft for review. Handoff bead: claude-0bg.
+Date: 2026-10-03. Approved by Sloan, including Revision 1. Handoff bead: claude-0bg.
 Verified against `origin/main` (fetched 2026-10-03), not the stale crew/sloan checkout.
 
 ## Problem

@@ -1,3 +1,5 @@
+> Status: approved 2026-10-03; implemented by the slice beads that depend on gt-kqzns. Historical once merged; not maintained.
+
 # Polecat Worktree Cleanup Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
