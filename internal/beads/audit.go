@@ -26,19 +26,27 @@ type DetachOptions struct {
 	Reason    string // Optional reason for the detach
 }
 
-// DetachMoleculeWithAudit removes molecule attachment from a pinned bead and logs the operation.
-// Uses advisory file locking to prevent concurrent read-modify-write races.
-// Returns the updated issue.
-func (b *Beads) DetachMoleculeWithAudit(pinnedBeadID string, opts DetachOptions) (*Issue, error) {
+// detachAuditLogger is the store that keeps a detach audit log: the file
+// lives in the store's own .beads directory, which a Client in general has no
+// way to name. A Client that implements it (a *Beads) records the entry; one
+// that does not (beadsfake in unit tests) detaches without one.
+type detachAuditLogger interface {
+	LogDetachAudit(entry DetachAuditEntry) error
+}
+
+// DetachMoleculeWithAudit removes molecule attachment from a pinned bead,
+// logging the operation when the Client keeps an audit log. On a *Beads the
+// read-modify-write runs under the bead's flock.
+func DetachMoleculeWithAudit(c Client, pinnedBeadID string, opts DetachOptions) (*Issue, error) {
 	// Acquire per-bead lock to serialize concurrent attach/detach operations
-	unlock, err := b.lockBead(pinnedBeadID)
+	unlock, err := lockBeadFor(c, pinnedBeadID)
 	if err != nil {
-		return nil, fmt.Errorf("acquiring bead lock: %w", err)
+		return nil, err
 	}
 	defer unlock()
 
 	// Fetch the pinned bead first to get previous state
-	issue, err := b.Show(pinnedBeadID)
+	issue, err := c.Show(pinnedBeadID)
 	if err != nil {
 		return nil, fmt.Errorf("fetching pinned bead: %w", err)
 	}
@@ -63,21 +71,23 @@ func (b *Beads) DetachMoleculeWithAudit(pinnedBeadID string, opts DetachOptions)
 		Reason:           opts.Reason,
 		PreviousState:    issue.Status,
 	}
-	if err := b.LogDetachAudit(entry); err != nil {
-		// Log error but don't fail the detach operation
-		fmt.Fprintf(os.Stderr, "Warning: failed to write audit log: %v\n", err)
+	if logger, ok := c.(detachAuditLogger); ok {
+		if err := logger.LogDetachAudit(entry); err != nil {
+			// Log error but don't fail the detach operation
+			fmt.Fprintf(os.Stderr, "Warning: failed to write audit log: %v\n", err)
+		}
 	}
 
 	// Clear attachment fields by passing nil
 	newDesc := SetAttachmentFields(issue, nil)
 
 	// Update the issue
-	if err := b.Update(pinnedBeadID, UpdateOptions{Description: &newDesc}); err != nil {
+	if err := c.Update(pinnedBeadID, UpdateOptions{Description: &newDesc}); err != nil {
 		return nil, fmt.Errorf("updating pinned bead: %w", err)
 	}
 
 	// Re-fetch to return updated state
-	return b.Show(pinnedBeadID)
+	return c.Show(pinnedBeadID)
 }
 
 // LogDetachAudit appends an audit entry to the audit log file.

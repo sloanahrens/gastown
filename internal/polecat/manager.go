@@ -487,9 +487,11 @@ func (m *Manager) createAgentBeadWithRetry(agentID string, fields *beads.AgentFi
 	return fmt.Errorf("creating agent bead after %d attempts: %w", doltMaxRetries, lastErr)
 }
 
-// agentBeads is the store the agent-bead helpers read: the one
-// openPolecatBeads opened with dual-scope resolution (gt-8we). Every caller
-// passes it to a beads.Client free function.
+// agentBeads is the Manager's Client handle on its bead database: the one
+// openPolecatBeads opened with dual-scope agent-bead resolution (gt-8we).
+// Every caller passes it to a beads.Client free function; the agent-bead
+// scope it carries changes per-ID resolution only, so a List-based read (the
+// merge-request scan) answers the same question through it.
 func (m *Manager) agentBeads() beads.Client {
 	return m.agentBD
 }
@@ -1663,7 +1665,7 @@ func (m *Manager) ReclaimBrokenIdlePolecat(name string) (retErr error) {
 	if blocker := brokenIdleReclaimDispositionBlocker(m.WorkstateDispositionForPolecat(name, current.State, current.Issue)); blocker != "" {
 		return fmt.Errorf("not safe to reclaim: %s", blocker)
 	}
-	mr, mrErr := m.beads.FindMRForBranch(fields.Branch)
+	mr, mrErr := beads.FindMRForBranch(m.agentBeads(), fields.Branch)
 	if blocker := brokenIdleReclaimMRBlocker(fields.Branch, mr, mrErr); blocker != "" {
 		return fmt.Errorf("not safe to reclaim: %s", blocker)
 	}

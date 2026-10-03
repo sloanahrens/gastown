@@ -96,7 +96,7 @@ func moleculeBurn(e moleculeLifecycleEnv, args []string) (retErr error) {
 		style.PrintWarning("closing descendants of %s: %v", moleculeID, descErr)
 	}
 	// Detach the molecule with audit logging (this "burns" it by removing the attachment)
-	_, err = b.DetachMoleculeWithAudit(handoff.ID, beads.DetachOptions{
+	_, err = beads.DetachMoleculeWithAudit(b, handoff.ID, beads.DetachOptions{
 		Operation: "burn",
 		Agent:     target,
 		Reason:    "molecule burned by agent",
@@ -316,7 +316,7 @@ squashed_at: %s
 	if !e.noDigest {
 		detachReason = "molecule squashed"
 	}
-	_, err = b.DetachMoleculeWithAudit(handoff.ID, beads.DetachOptions{
+	_, err = beads.DetachMoleculeWithAudit(b, handoff.ID, beads.DetachOptions{
 		Operation: "squash",
 		Agent:     target,
 		Reason:    detachReason,
@@ -623,10 +623,10 @@ type moleculeLifecycleEnv struct {
 }
 
 // moleculeStore is the store gt mol burn and squash work in: the shared
-// Client and the audited molecule detach. *beads.Beads implements it.
+// Client every read, write and molecule detach runs over. *beads.Beads
+// implements it.
 type moleculeStore interface {
 	beads.Client
-	DetachMoleculeWithAudit(id string, opts beads.DetachOptions) (*beads.Issue, error)
 }
 
 func (e moleculeLifecycleEnv) storeAt(workDir string) moleculeStore {

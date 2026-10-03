@@ -16,7 +16,6 @@ type polecatBeads interface {
 	Update(id string, opts beads.UpdateOptions) error
 	ReleaseIfAssignee(id, expected string) (released bool, err error)
 	RecordReassignment(id, from, to, requester string, branches []string) error
-	FindMRForBranch(branch string) (*beads.Issue, error)
 	FindMRForBranchAny(branch string) (*beads.Issue, error)
 
 	// The agent-bead writes that still need the concrete store: reopening a

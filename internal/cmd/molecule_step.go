@@ -274,7 +274,7 @@ func findAllReadySteps(b *beads.Beads, moleculeID string) ([]*beads.Issue, bool,
 	// This replaces manual dependency walking with isBlockingDepType,
 	// using beads' blocked_issues_cache which handles all blocking types,
 	// transitive propagation, and conditional-blocks resolution.
-	readySteps, err := b.ReadyForMol(moleculeID)
+	readySteps, err := beads.ReadyForMol(b, moleculeID)
 	if err != nil {
 		return nil, false, fmt.Errorf("finding ready steps: %w", err)
 	}

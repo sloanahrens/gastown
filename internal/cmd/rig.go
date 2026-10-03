@@ -1246,7 +1246,7 @@ func runRigReset(cmd *cobra.Command, args []string) error {
 
 	// Reset handoff content
 	if resetAll || rigResetHandoff {
-		if err := townBd.ClearHandoffContent(roleKey); err != nil {
+		if err := beads.ClearHandoffContent(townBd, roleKey); err != nil {
 			return fmt.Errorf("clearing handoff content: %w", err)
 		}
 		fmt.Printf("%s Cleared handoff content for %s\n", style.Success.Render("✓"), roleKey)
@@ -1254,7 +1254,7 @@ func runRigReset(cmd *cobra.Command, args []string) error {
 
 	// Clear stale mail messages
 	if resetAll || rigResetMail {
-		result, err := townBd.ClearMail("Cleared during reset")
+		result, err := beads.ClearMail(townBd, "Cleared during reset")
 		if err != nil {
 			return fmt.Errorf("clearing mail: %w", err)
 		}

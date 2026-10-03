@@ -932,7 +932,7 @@ func runMoleculeCurrent(cmd *cobra.Command, args []string) error {
 	role := extractRoleFromIdentity(target)
 
 	// Find handoff bead for this identity
-	handoff, err := b.FindHandoffBead(role)
+	handoff, err := beads.FindHandoffBead(b, role)
 	if err != nil {
 		return fmt.Errorf("finding handoff bead: %w", err)
 	}

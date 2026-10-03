@@ -173,10 +173,6 @@ func (db *polecatDB) RecordReassignment(id, from, to, requester string, branches
 	return beads.RecordReassignmentIn(db.Fake, id, from, to, requester, branches)
 }
 
-func (db *polecatDB) FindMRForBranch(branch string) (*beads.Issue, error) {
-	return db.findMR(branch, true)
-}
-
 func (db *polecatDB) FindMRForBranchAny(branch string) (*beads.Issue, error) {
 	return db.findMR(branch, false)
 }

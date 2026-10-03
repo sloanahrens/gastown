@@ -134,18 +134,6 @@ func (db doctorDB) CreateAgentBead(id, title string, fields *beads.AgentFields) 
 	return db.Create(beads.CreateOptions{ID: id, Title: title, Description: beads.FormatAgentDescription(title, fields), Labels: []string{"gt:agent"}, Priority: -1})
 }
 
-func (db doctorDB) DetachMolecule(id string) (*beads.Issue, error) {
-	issue, err := db.Show(id)
-	if err != nil {
-		return nil, err
-	}
-	desc := beads.SetAttachmentFields(issue, nil)
-	if err := db.Fake.Update(id, beads.UpdateOptions{Description: &desc}); err != nil {
-		return nil, err
-	}
-	return db.Show(id)
-}
-
 func (db doctorDB) EnsureRigBead(name string, fields *beads.RigFields) (*beads.Issue, error) {
 	if existing, err := db.Show(rigBeadIDFor(name, fields)); err == nil {
 		return existing, nil
@@ -226,7 +214,6 @@ func (noBeadsDB) ListWispIDs() (map[string]bool, error) { return nil, errNoDatab
 func (noBeadsDB) CreateAgentBead(string, string, *beads.AgentFields) (*beads.Issue, error) {
 	return nil, errNoDatabase
 }
-func (noBeadsDB) DetachMolecule(string) (*beads.Issue, error) { return nil, errNoDatabase }
 func (noBeadsDB) EnsureRigBead(string, *beads.RigFields) (*beads.Issue, error) {
 	return nil, errNoDatabase
 }

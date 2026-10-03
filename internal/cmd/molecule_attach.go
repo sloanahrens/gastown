@@ -61,7 +61,7 @@ func runMoleculeAttach(cmd *cobra.Command, args []string) error {
 
 		role := extractRoleFromIdentity(target)
 
-		handoff, err := b.FindHandoffBead(role)
+		handoff, err := beads.FindHandoffBead(b, role)
 		if err != nil {
 			return fmt.Errorf("finding handoff bead: %w", err)
 		}
@@ -72,7 +72,7 @@ func runMoleculeAttach(cmd *cobra.Command, args []string) error {
 	}
 
 	// Attach the molecule
-	issue, err := b.AttachMolecule(pinnedBeadID, moleculeID)
+	issue, err := beads.AttachMolecule(b, pinnedBeadID, moleculeID)
 	if err != nil {
 		return fmt.Errorf("attaching molecule: %w", err)
 	}
@@ -97,7 +97,7 @@ func runMoleculeDetach(cmd *cobra.Command, args []string) error {
 	b := beads.New(workDir)
 
 	// Check current attachment first
-	attachment, err := b.GetAttachment(pinnedBeadID)
+	attachment, err := beads.GetAttachment(b, pinnedBeadID)
 	if err != nil {
 		return fmt.Errorf("checking attachment: %w", err)
 	}
@@ -110,7 +110,7 @@ func runMoleculeDetach(cmd *cobra.Command, args []string) error {
 	previousMolecule := attachment.AttachedMolecule
 
 	// Detach the molecule with audit logging
-	_, err = b.DetachMoleculeWithAudit(pinnedBeadID, beads.DetachOptions{
+	_, err = beads.DetachMoleculeWithAudit(b, pinnedBeadID, beads.DetachOptions{
 		Operation: "detach",
 		Agent:     detectCurrentAgent(),
 	})

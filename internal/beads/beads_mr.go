@@ -5,11 +5,11 @@ import (
 	"strings"
 )
 
-// FindMRForBranch searches for an open merge-request bead for the given branch.
-// Returns the MR bead if found, nil if not found.
-// This enables idempotent `gt done` - if an MR already exists, we skip creation.
-func (b *Beads) FindMRForBranch(branch string) (*Issue, error) {
-	return b.findMRForBranch(branch, true)
+// FindMRForBranch returns the open merge-request bead whose description names
+// branch, nil when there is none. On a *Beads an instance warmed by
+// PreloadMergeRequests answers from memory instead of rescanning.
+func FindMRForBranch(c Client, branch string) (*Issue, error) {
+	return findMRForBranch(c, branch, true)
 }
 
 // FindMRForBranchAny searches for a merge-request bead for the given branch
@@ -19,28 +19,45 @@ func (b *Beads) FindMRForBranchAny(branch string) (*Issue, error) {
 	return b.findMRForBranch(branch, false)
 }
 
-// findMRForBranch searches the wisps table (Dolt) for a merge-request
-// bead matching the given branch.
-// Uses status=all which includes all issue statuses with full descriptions.
-// Ephemeral=true routes to the wisps table where MR beads live (GH#2446).
-// When skipClosed is true, closed beads are excluded (for open-MR checks).
+// findMRForBranch searches for a merge-request bead matching branch. When
+// skipClosed is true, closed beads are excluded (for open-MR checks).
 func (b *Beads) findMRForBranch(branch string, skipClosed bool) (*Issue, error) {
-	branchPrefix := "branch: " + branch + "\n"
-
 	issues, err := b.mergeRequestsForBranchSearch()
 	if err != nil {
 		return nil, err
 	}
+	return scanMRsForBranch(issues, branch, skipClosed), nil
+}
+
+// findMRForBranch is FindMRForBranch's Client path: the full-table
+// merge-request scan ListMergeRequests runs, with no preload cache to consult.
+func findMRForBranch(c Client, branch string, skipClosed bool) (*Issue, error) {
+	if b, ok := c.(*Beads); ok {
+		return b.findMRForBranch(branch, skipClosed)
+	}
+	issues, err := ListMergeRequests(c, ListOptions{
+		Status: "all",
+		Label:  "gt:merge-request",
+	})
+	if err != nil {
+		return nil, err
+	}
+	return scanMRsForBranch(issues, branch, skipClosed), nil
+}
+
+// scanMRsForBranch returns the first merge-request bead whose description
+// opens with the branch header, skipping closed ones when skipClosed is set.
+func scanMRsForBranch(issues []*Issue, branch string, skipClosed bool) *Issue {
+	branchPrefix := "branch: " + branch + "\n"
 	for _, issue := range issues {
 		if skipClosed && issue.Status == "closed" {
 			continue
 		}
 		if strings.HasPrefix(issue.Description, branchPrefix) {
-			return issue, nil
+			return issue
 		}
 	}
-
-	return nil, nil
+	return nil
 }
 
 // mergeRequestsForBranchSearch returns the merge-request beads findMRForBranch
@@ -93,8 +110,8 @@ func (b *Beads) PreloadMergeRequests() error {
 // FindOpenMRsForIssue returns all open merge-request beads whose source_issue
 // matches the given issue ID. Used to find prior attempts when re-dispatching
 // an issue and to supersede old MRs when a new one is created.
-func (b *Beads) FindOpenMRsForIssue(issueID string) ([]*Issue, error) {
-	issues, err := b.ListMergeRequests(ListOptions{
+func FindOpenMRsForIssue(c Client, issueID string) ([]*Issue, error) {
+	issues, err := ListMergeRequests(c, ListOptions{
 		Status: "open",
 		Label:  "gt:merge-request",
 	})

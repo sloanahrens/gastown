@@ -56,12 +56,9 @@ func testMoleculeEnv(townRoot string, db *doneRecorder) moleculeLifecycleEnv {
 	}
 }
 
-// moleculeFake is a recorded store with the audited detach.
+// moleculeFake is a recorded store; the molecule detach runs through the
+// beads free function over it.
 type moleculeFake struct{ *doneRecorder }
-
-func (f moleculeFake) DetachMoleculeWithAudit(id string, _ beads.DetachOptions) (*beads.Issue, error) {
-	return fakeDetach(f, id)
-}
 
 // handoffMoleculeDB holds one pinned handoff bead titled handoffTitle with
 // molecule attached, the molecule's root, and steps as its children; every

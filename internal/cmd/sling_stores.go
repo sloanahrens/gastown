@@ -9,12 +9,11 @@ import (
 )
 
 // slingStore is the bead store surface sling's reads, rollback and molecule
-// burn use: the shared Client, the raw molecule-bond query and the audited
-// molecule detach. *beads.Beads implements it.
+// burn use: the shared Client and the raw molecule-bond query. *beads.Beads
+// implements it.
 type slingStore interface {
 	beads.Client
 	SQLCSV(query beadsql.Query) ([][]string, error)
-	DetachMoleculeWithAudit(id string, opts beads.DetachOptions) (*beads.Issue, error)
 }
 
 // slingStores opens the bead stores sling works in. The zero value is bd;

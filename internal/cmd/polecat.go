@@ -3163,7 +3163,7 @@ func nukeCleanupMolecules(workBeadID string, r *rig.Rig) {
 	}
 
 	// Detach the molecule with audit trail
-	if _, detachErr := bd.DetachMoleculeWithAudit(workBeadID, beads.DetachOptions{
+	if _, detachErr := beads.DetachMoleculeWithAudit(bd, workBeadID, beads.DetachOptions{
 		Operation: "burn",
 		Reason:    "polecat nuked: cleaning stale molecule",
 	}); detachErr != nil {

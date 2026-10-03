@@ -92,7 +92,7 @@ func TestCloseStaleHookedMailBeads(t *testing.T) {
 		r := newRecorder(answer(`[]`))
 		b := newRecordedBeads(t.TempDir(), r)
 
-		n, err := b.CloseStaleHookedMailBeads("gastown/mayor")
+		n, err := CloseStaleHookedMailBeads(b, "gastown/mayor")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -110,7 +110,7 @@ func TestCloseStaleHookedMailBeads(t *testing.T) {
 		r := newRecorder(answer(`[{"id":"test-hm-1"},{"id":"test-hm-2"}]`))
 		b := newRecordedBeads(t.TempDir(), r)
 
-		n, err := b.CloseStaleHookedMailBeads("gastown/mayor")
+		n, err := CloseStaleHookedMailBeads(b, "gastown/mayor")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -135,7 +135,7 @@ func TestCloseStaleHookedMailBeads(t *testing.T) {
 		r := newRecorder(answer(`[]`))
 		b := newRecordedBeads(t.TempDir(), r)
 
-		if _, err := b.CloseStaleHookedMailBeads("gastown/mayor"); err != nil {
+		if _, err := CloseStaleHookedMailBeads(b, "gastown/mayor"); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		for _, args := range r.calls() {

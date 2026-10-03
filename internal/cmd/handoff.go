@@ -1412,7 +1412,7 @@ func sendHandoffMail(subject, message string) (string, error) {
 	// Close stale hooked mail beads from previous sessions before creating a new one.
 	// Without this, each handoff cycle accumulates beads in status=hooked. (GH#3859)
 	townB := beads.New(filepath.Join(townRoot, ".beads"))
-	if n, closeErr := townB.CloseStaleHookedMailBeads(agentID); closeErr != nil {
+	if n, closeErr := beads.CloseStaleHookedMailBeads(townB, agentID); closeErr != nil {
 		style.PrintWarning("couldn't close previous hooked mail bead(s): %v", closeErr)
 	} else if n > 0 {
 		fmt.Printf("%s Closed %d stale hooked mail bead(s)\n", style.Dim.Render("🧹"), n)
@@ -1758,7 +1758,7 @@ func cleanupMoleculeOnHandoff() {
 	parts := strings.Split(agentID, "/")
 	role := parts[len(parts)-1]
 
-	handoffBead, err := b.FindHandoffBead(role)
+	handoffBead, err := beads.FindHandoffBead(b, role)
 	if err != nil || handoffBead == nil {
 		return
 	}
@@ -1777,7 +1777,7 @@ func cleanupMoleculeOnHandoff() {
 	}
 
 	// Detach molecule with audit trail
-	if _, err := b.DetachMoleculeWithAudit(handoffBead.ID, beads.DetachOptions{
+	if _, err := beads.DetachMoleculeWithAudit(b, handoffBead.ID, beads.DetachOptions{
 		Operation: "squash",
 		Reason:    "handoff: session cycling",
 	}); err != nil {
