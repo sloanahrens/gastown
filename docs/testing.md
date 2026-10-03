@@ -76,12 +76,12 @@ The integration tier is only for tests that need the real tool. A test that move
 - They poll for the condition they need with a generous deadline (`eventually` and `integrationWait` in `internal/tmux`), never sleep for a guessed interval.
 - A missing precondition fails the test instead of skipping it.
 
-A test that needs a Dolt database on the shared test container leases one from the container's pool (`internal/testutil/doltpool.go`): `testutil.OpenTestStore` for an in-process store, an isolated `beads.Init` or `beads.RunTestContainerInit` for bd init, and `testutil.TakePooledSQLDatabase` for plain SQL. Never CREATE or DROP a database there; the teardown guard fails the package on one.
+A test that needs a Dolt database on the shared test container leases one from the container's pool (`internal/testutil/doltpool.go`): an isolated `beads.Init` or `beads.RunTestContainerInit` for bd init, and `testutil.TakePooledSQLDatabase` for plain SQL. Never CREATE or DROP a database there; the teardown guard fails the package on one.
 - A lease is the test's alone. When the test ends, passed or failed, the database is reset to the commit it was handed out at and goes back to the pool. A bd init lease ends once the directory the init ran in, which must be an absolute path under the test's `t.TempDir`, is gone.
 - Do not remove or rename that directory before the test ends, for example with a `defer os.RemoveAll`. The pool takes the database back as soon as the directory is gone, while the test's own cleanups may still use it.
 - Close every store and connection on the database before the test ends. A session still open at the release is killed, the database is taken out of the pool, and the test (or, for a bd init lease, the package) fails with the lessee's name. Otherwise the session could commit into the database the next test gets.
 - A reset cannot restore `AUTO_INCREMENT` counters, so a database whose reset point has an `AUTO_INCREMENT` column is refused at release.
-- The pool has a fixed size whatever `-count` says. A lease waits for a returned database and fails after two minutes; it never creates one. A test that holds more databases at once than the pool has needs a bigger `doltPoolStores`.
+- The pool has a fixed size whatever `-count` says. A lease waits for a returned database and fails after two minutes; it never creates one. A test that holds more databases at once than the pool has needs a bigger `doltPoolSpares`.
 
 `go test -tags integration` compiles both tiers together, so a package with a `TestMain` in each tier tags the unit-tier one `//go:build !integration` (see `internal/tmux/main_test.go` and `internal/tmux/testmain_integration_test.go`). A unit test must pass with no tmux, ps or docker on `PATH`.
 

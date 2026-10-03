@@ -247,7 +247,7 @@ func assertNoStoreImports(t *testing.T, file string) {
 	}
 	for _, imp := range f.Imports {
 		path := strings.Trim(imp.Path.Value, `"`)
-		if path == "os/exec" || strings.Contains(path, "internal/beads") || strings.Contains(path, "steveyegge/beads") || strings.Contains(path, "internal/doltserver") {
+		if path == "os/exec" || strings.Contains(path, "internal/beads") || strings.Contains(path, "internal/doltserver") {
 			t.Errorf("%s imports %s", file, path)
 		}
 	}

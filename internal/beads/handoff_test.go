@@ -1,9 +1,9 @@
 package beads
 
 import (
+	"slices"
+	"strings"
 	"testing"
-
-	beadsdk "github.com/steveyegge/beads"
 )
 
 func TestHandoffBeadTitle(t *testing.T) {
@@ -68,87 +68,96 @@ func TestClearMailResultZeroValues(t *testing.T) {
 	}
 }
 
+// TestCloseStaleHookedMailBeads pins the bd conversation the sweep runs
+// (GH#3859). Which beads are stale is bd's answer, not gastown's:
+// CloseStaleHookedMailBeads asks for one agent's hooked gt:message beads and
+// closes exactly the page it gets back, so the filter — not a client-side
+// scan of every hooked bead — is what keeps another agent's mail, and
+// gt:task beads, out of the sweep.
 func TestCloseStaleHookedMailBeads(t *testing.T) {
-	hookedMailBead := func(store *mockStorage, assignee string) string {
-		id := "test-hm-1"
-		store.issues[id] = &beadsdk.Issue{
-			ID:       id,
-			Title:    "🤝 HANDOFF: prev session",
-			Status:   beadsdk.Status(StatusHooked),
-			Assignee: assignee,
-			Labels:   []string{"gt:message"},
+	t.Parallel()
+
+	// page is the list answer; every other call (a close) succeeds silently.
+	answer := func(page string) func([]string) reply {
+		return func(args []string) reply {
+			if len(args) > 0 && args[0] == "list" {
+				return reply{stdout: page}
+			}
+			return reply{}
 		}
-		store.labels[id] = []string{"gt:message"}
-		return id
 	}
 
-	t.Run("closes hooked gt:message beads for agent", func(t *testing.T) {
-		store := newMockStorage()
-		b := newTestBeads(store)
-		id := hookedMailBead(store, "gastown/mayor")
-
-		n, err := b.CloseStaleHookedMailBeads("gastown/mayor")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if n != 1 {
-			t.Errorf("want 1 closed, got %d", n)
-		}
-		if !store.closed[id] {
-			t.Errorf("bead %s was not closed", id)
-		}
-	})
-
-	t.Run("does not close hooked gt:task beads", func(t *testing.T) {
-		store := newMockStorage()
-		b := newTestBeads(store)
-		taskID := "test-task-1"
-		store.issues[taskID] = &beadsdk.Issue{
-			ID:       taskID,
-			Status:   beadsdk.Status(StatusHooked),
-			Assignee: "gastown/mayor",
-			Labels:   []string{"gt:task"},
-		}
-		store.labels[taskID] = []string{"gt:task"}
+	t.Run("asks bd for this agent's hooked mail beads", func(t *testing.T) {
+		t.Parallel()
+		r := newRecorder(answer(`[]`))
+		b := newRecordedBeads(t.TempDir(), r)
 
 		n, err := b.CloseStaleHookedMailBeads("gastown/mayor")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if n != 0 {
-			t.Errorf("want 0 (gt:task bead should be untouched), got %d", n)
+			t.Errorf("want 0 closed, got %d", n)
 		}
-		if store.closed[taskID] {
-			t.Errorf("gt:task bead %s was incorrectly closed", taskID)
+		want := "list --json --status=hooked --label=gt:message --assignee=gastown/mayor --limit=0 --flat"
+		if got := r.argvs(); len(got) != 1 || got[0] != want {
+			t.Errorf("bd calls = %q, want exactly [%q]", got, want)
 		}
 	})
 
-	t.Run("returns 0 when no hooked mail beads exist", func(t *testing.T) {
-		b := newTestBeads(newMockStorage())
+	t.Run("closes every bead the page named", func(t *testing.T) {
+		t.Parallel()
+		r := newRecorder(answer(`[{"id":"test-hm-1"},{"id":"test-hm-2"}]`))
+		b := newRecordedBeads(t.TempDir(), r)
 
 		n, err := b.CloseStaleHookedMailBeads("gastown/mayor")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if n != 0 {
-			t.Errorf("want 0, got %d", n)
+		if n != 2 {
+			t.Errorf("want 2 closed, got %d", n)
+		}
+		closeArgs := closeCall(t, r)
+		for _, want := range []string{
+			"test-hm-1",
+			"test-hm-2",
+			"--force",
+			"--reason=handoff: superseded by new session",
+		} {
+			if !slices.Contains(closeArgs, want) {
+				t.Errorf("close argv %q lacks %q", strings.Join(closeArgs, " "), want)
+			}
 		}
 	})
 
-	t.Run("does not close mail beads belonging to other agents", func(t *testing.T) {
-		store := newMockStorage()
-		b := newTestBeads(store)
-		id := hookedMailBead(store, "gastown/witness")
+	t.Run("closes nothing when the page is empty", func(t *testing.T) {
+		t.Parallel()
+		r := newRecorder(answer(`[]`))
+		b := newRecordedBeads(t.TempDir(), r)
 
-		n, err := b.CloseStaleHookedMailBeads("gastown/mayor")
-		if err != nil {
+		if _, err := b.CloseStaleHookedMailBeads("gastown/mayor"); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if n != 0 {
-			t.Errorf("want 0 (other agent's bead should be untouched), got %d", n)
-		}
-		if store.closed[id] {
-			t.Errorf("other agent's bead %s was incorrectly closed", id)
+		for _, args := range r.calls() {
+			if len(args.args) > 0 && args.args[0] == "close" {
+				t.Fatalf("an empty page still ran %q", strings.Join(args.args, " "))
+			}
 		}
 	})
+}
+
+// closeCall returns the argv of the one close call r saw, failing t if the
+// number of close calls is not one.
+func closeCall(t *testing.T, r *recorder) []string {
+	t.Helper()
+	var closes [][]string
+	for _, call := range r.calls() {
+		if len(call.args) > 0 && call.args[0] == "close" {
+			closes = append(closes, call.args)
+		}
+	}
+	if len(closes) != 1 {
+		t.Fatalf("bd close calls = %d, want 1 (argvs: %q)", len(closes), r.argvs())
+	}
+	return closes[0]
 }

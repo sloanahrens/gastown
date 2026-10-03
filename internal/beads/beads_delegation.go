@@ -60,18 +60,12 @@ func (b *Beads) AddDelegation(d *Delegation) error {
 		return fmt.Errorf("delegation requires both delegated_by and delegated_to entities")
 	}
 
-	var err error
-	if b.store != nil {
-		err = b.storeDelegationSet(d.Child, d)
-	} else {
-		// CLI path: use --set-metadata flag (bd update in v0.62+).
-		delegationJSON, marshalErr := json.Marshal(d)
-		if marshalErr != nil {
-			return fmt.Errorf("marshaling delegation: %w", marshalErr)
-		}
-		_, err = b.run("update", d.Child, "--set-metadata=delegated_from="+string(delegationJSON))
+	// bd update --set-metadata (v0.62+).
+	delegationJSON, marshalErr := json.Marshal(d)
+	if marshalErr != nil {
+		return fmt.Errorf("marshaling delegation: %w", marshalErr)
 	}
-	if err != nil {
+	if _, err := b.run("update", d.Child, "--set-metadata=delegated_from="+string(delegationJSON)); err != nil {
 		return fmt.Errorf("setting delegation metadata: %w", err)
 	}
 
@@ -86,14 +80,8 @@ func (b *Beads) AddDelegation(d *Delegation) error {
 
 // RemoveDelegation removes a delegation relationship.
 func (b *Beads) RemoveDelegation(parent, child string) error {
-	var err error
-	if b.store != nil {
-		err = b.storeDelegationClear(child)
-	} else {
-		// CLI path: use --unset-metadata flag (bd update in v0.62+).
-		_, err = b.run("update", child, "--unset-metadata=delegated_from")
-	}
-	if err != nil {
+	// bd update --unset-metadata (v0.62+).
+	if _, err := b.run("update", child, "--unset-metadata=delegated_from"); err != nil {
 		return fmt.Errorf("clearing delegation metadata: %w", err)
 	}
 

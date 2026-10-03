@@ -19,7 +19,6 @@ import (
 	"testing"
 	"time"
 
-	beadsdk "github.com/steveyegge/beads"
 	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/runtime"
@@ -352,7 +351,7 @@ type Issue struct {
 
 	// Arbitrary metadata blob (JSON object). Used for extension points such as
 	// delegation state (delegated_from key) and merge-slot state (holder/waiters).
-	// Populated by both bd show --json and the in-process store path.
+	// Populated by bd show --json.
 	Metadata json.RawMessage `json:"metadata,omitempty"`
 	Comments []Comment       `json:"comments,omitempty"`
 }
@@ -705,31 +704,23 @@ type UpdateOptions struct {
 	// blocker. A caller reaches for it only on a claim it has established is
 	// abandoned — a crashed agent or an expired lease — because bd cannot see
 	// the holder's session and a plain update is refused on the claim's
-	// existence alone (gt-mabxx). The in-process store path ignores it: that
-	// path has no CLI fences to override.
+	// existence alone (gt-mabxx).
 	Force bool
 
 	// Persistent promotes an ephemeral issue (a wisp) to a regular one, bd's
-	// --persistent. The in-process store path cannot move the row between
-	// tables, so it fails rather than no-op; see storeUpdate.
+	// --persistent.
 	Persistent bool
 }
 
 // Beads wraps bd CLI operations for a working directory.
-// When store is non-nil, methods with in-process implementations use the
-// beadsdk.Storage directly instead of shelling out to the bd CLI. This
-// eliminates ~600ms of subprocess overhead per operation.
+//
+// Every read and write goes through the bd subprocess; gastown never links
+// beads' in-process library (D1, gt-7iwy0.3).
 type Beads struct {
 	workDir    string
 	beadsDir   string // Optional BEADS_DIR override for cross-database access
 	isolated   bool   // If true, suppress inherited beads env vars (for test isolation)
 	serverPort int    // If set, pass --server-port to bd init and GT_DOLT_PORT to env
-
-	// store is an optional in-process beadsdk.Storage. When set, methods
-	// bypass the bd subprocess and use the store directly. Follows the
-	// pattern in internal/daemon/convoy_manager.go. Callers are responsible
-	// for closing the store.
-	store beadsdk.Storage
 
 	// exec runs every bd subprocess; nil means the real bd on PATH (see
 	// runner). Tests of this package inject a recording runner.
@@ -842,7 +833,6 @@ type beadsFields struct {
 	beadsDir   string
 	isolated   bool
 	serverPort int
-	store      beadsdk.Storage
 	townRoot   string
 	noRoute    bool
 	agentScope bool
@@ -895,7 +885,6 @@ func (b *Beads) ActingAs(actor string) *Beads {
 		beadsDir:   b.beadsDir,
 		isolated:   b.isolated,
 		serverPort: b.serverPort,
-		store:      b.store,
 		townRoot:   b.townRoot,
 		noRoute:    b.noRoute,
 		agentScope: b.agentScope,
@@ -937,7 +926,6 @@ func newBeads(f beadsFields) *Beads {
 		beadsDir:   f.beadsDir,
 		isolated:   f.isolated,
 		serverPort: f.serverPort,
-		store:      f.store,
 		townRoot:   f.townRoot,
 		noRoute:    f.noRoute,
 		agentScope: f.agentScope,
@@ -1023,7 +1011,6 @@ func (b *Beads) ForAgentBead() *Beads {
 		beadsDir:   b.beadsDir,
 		isolated:   b.isolated,
 		serverPort: b.serverPort,
-		store:      b.store,
 		townRoot:   b.getTownRoot(),
 		agentScope: true,
 		exec:       b.exec,
@@ -1071,9 +1058,7 @@ func (b *Beads) safeWorkDirForBeadsDir(beadsDir string) string {
 }
 
 // pinnedToBeadsDir returns a copy of b pinned (noRoute) to the given beads
-// directory, preserving isolation/port settings. The in-process store is NOT
-// carried over: it is bound to the database it was opened on, which may not
-// be the pinned target.
+// directory, preserving isolation/port settings.
 func (b *Beads) pinnedToBeadsDir(beadsDir string) *Beads {
 	return newBeads(beadsFields{
 		workDir:    b.safeWorkDirForBeadsDir(beadsDir),
@@ -1875,9 +1860,6 @@ func stripEnvPrefixes(environ []string, prefixes ...string) []string {
 // wisps table (where ephemeral issues live in beads v0.59+). Without this,
 // "bd list" only searches the issues table and misses wisps entirely.
 func (b *Beads) List(opts ListOptions) ([]*Issue, error) {
-	if b.store != nil {
-		return b.storeList(opts)
-	}
 	if opts.Ephemeral {
 		return b.listEphemeral(opts)
 	}
@@ -1980,18 +1962,6 @@ func (b *Beads) ListIssueStatuses(statuses ...IssueStatus) ([]*Issue, error) {
 		return nil, nil
 	}
 
-	if b.store != nil {
-		var all []*Issue
-		for _, status := range unique {
-			issues, err := b.storeList(ListOptions{Status: string(status), Priority: -1})
-			if err != nil {
-				return nil, err
-			}
-			all = append(all, issues...)
-		}
-		return all, nil
-	}
-
 	if issues, ok := b.issueSnapshot.byStatus(unique); ok {
 		return issues, nil
 	}
@@ -2024,9 +1994,9 @@ func (b *Beads) ListIssueStatuses(statuses ...IssueStatus) ([]*Issue, error) {
 // are hook lookups, which run once per agent per probe, so a query per status
 // per table is multiplied by the fleet size.
 //
-// "ephemeral" is deliberately absent from the expression. A nil
-// beadsdk.IssueFilter.Ephemeral means "either table"; pinning it either way
-// drops half the union.
+// "ephemeral" is deliberately absent from the expression: bd's filter treats
+// the absent predicate as "either table", and pinning it either way drops
+// half the union.
 func (b *Beads) ListAssignedIssueStatuses(assignee string, statuses ...IssueStatus) ([]*Issue, error) {
 	if assignee == "" {
 		return nil, nil
@@ -2034,22 +2004,6 @@ func (b *Beads) ListAssignedIssueStatuses(assignee string, statuses ...IssueStat
 	unique := uniqueStatuses(statuses)
 	if len(unique) == 0 {
 		return nil, nil
-	}
-
-	if b.store != nil {
-		var all []*Issue
-		for _, status := range unique {
-			issues, err := b.storeListAnyTable(ListOptions{
-				Status:   string(status),
-				Assignee: assignee,
-				Priority: -1,
-			})
-			if err != nil {
-				return nil, err
-			}
-			all = append(all, issues...)
-		}
-		return all, nil
 	}
 
 	statusClauses := make([]string, 0, len(unique))
@@ -2687,19 +2641,14 @@ func parseReadyOutput(out []byte) ([]*Issue, error) {
 
 // Ready returns issues that are ready to work (not blocked). Bookkeeping
 // families (mail, escalations, identity, merge queue, event records) are
-// excluded server-side by the same WorkFilter / --exclude flags
-// ReadyDispatchable sends, so the ready query answers the same question on
-// every path (gt-0q80).
+// excluded server-side by the same --exclude flags ReadyDispatchable sends,
+// so the ready query answers the same question on every path (gt-0q80).
 //
 // When the ready page came back capped at bd's default limit of 100, Ready
 // returns the page AND an ErrReadyTruncated sentinel so a caller that needs
 // the whole board can tell a full page from a whole board — a board whose
 // size is silently 100 mis-sizes every count built on it (gt-m7pq).
 func (b *Beads) Ready() ([]*Issue, error) {
-	if b.store != nil {
-		return b.storeReadyWithFilter(readyWorkFilter())
-	}
-
 	out, err := b.runReadyCLI(readyCliArgs()...)
 	if err != nil {
 		return nil, err
@@ -2739,20 +2688,15 @@ func (b *Beads) ReadyAll() ([]*Issue, error) {
 // ReadyDispatchable returns ready issues with the town's bookkeeping
 // families (mail, escalations, identity, merge queue, event records)
 // excluded server-side by the same filter Ready sends (gt-0q80): the
-// WorkFilter to the in-process store, the --exclude-label/--exclude-type
-// flags to bd. The exclusion travels with the query, so it holds no matter
-// which table a bead's labels live in at scan time and whether they were
-// hydrated into the response — a filterless fetch followed by a
-// client-side IsNonDispatchableBead pass did not hold (gt-b9wq).
+// --exclude-label/--exclude-type flags to bd. The exclusion travels with the
+// query, so it holds no matter which table a bead's labels live in at scan
+// time and whether they were hydrated into the response — a filterless fetch
+// followed by a client-side IsNonDispatchableBead pass did not hold (gt-b9wq).
 //
 // On a bd build old enough to reject the exclude flags, this falls back to
 // the unfiltered ready query; the caller's own IsNonDispatchableBead pass
 // remains the backstop in that case.
 func (b *Beads) ReadyDispatchable() ([]*Issue, error) {
-	if b.store != nil {
-		return b.storeReadyWithFilter(readyWorkFilter())
-	}
-
 	out, err := b.runReadyCLI(readyCliArgs()...)
 	if err != nil {
 		if strings.Contains(err.Error(), "unknown flag") {
@@ -2764,15 +2708,6 @@ func (b *Beads) ReadyDispatchable() ([]*Issue, error) {
 	}
 
 	return parseReadyOutput(out)
-}
-
-// readyWorkFilter is the WorkFilter every in-process store ready query sends:
-// the bookkeeping-family exclusions (gt-0q80).
-func readyWorkFilter() beadsdk.WorkFilter {
-	return beadsdk.WorkFilter{
-		ExcludeLabels: constants.NonDispatchableBeadLabels,
-		ExcludeTypes:  nonDispatchableIssueTypesSDK(),
-	}
 }
 
 // readyCliArgs is the bd invocation that carries the same exclusion:
@@ -2789,16 +2724,6 @@ func readyCliArgs() []string {
 // a bd build old enough to reject the exclude flags.
 func readyBaseArgs() []string {
 	return []string{"ready", "--json"}
-}
-
-// nonDispatchableIssueTypesSDK converts the bookkeeping types to the SDK's
-// IssueType for WorkFilter.ExcludeTypes.
-func nonDispatchableIssueTypesSDK() []beadsdk.IssueType {
-	types := make([]beadsdk.IssueType, len(constants.NonDispatchableBeadTypes))
-	for i, t := range constants.NonDispatchableBeadTypes {
-		types[i] = beadsdk.IssueType(t)
-	}
-	return types
 }
 
 // readyMolEnvelope is the shape bd ready --mol --json prints: one molecule's
@@ -2858,13 +2783,6 @@ func parseReadyMolOutput(out []byte) ([]*Issue, error) {
 // (blocked_issues_cache), handling all blocking types, transitive propagation,
 // and conditional-blocks resolution.
 func (b *Beads) ReadyForMol(moleculeID string) ([]*Issue, error) {
-	if b.store != nil {
-		return b.storeReadyWithFilter(beadsdk.WorkFilter{
-			ParentID: &moleculeID,
-			Limit:    100,
-		})
-	}
-
 	out, err := b.run("ready", "--mol", moleculeID, "--json", "-n", "100")
 	if err != nil {
 		return nil, err
@@ -2880,8 +2798,7 @@ func (b *Beads) ReadyForMol(moleculeID string) ([]*Issue, error) {
 // withoutMoleculeRoot drops the molecule's own issue from a ready-step list.
 // bd ready --mol counts the root wisp among its own ready steps, and a walker
 // that keeps it reads the root as a second ready step and continues to it
-// instead of the next one, so the molecule never advances (gt-mejma). The
-// store path never sees the root: its parent filter excludes it.
+// instead of the next one, so the molecule never advances (gt-mejma).
 func withoutMoleculeRoot(steps []*Issue, moleculeID string) []*Issue {
 	kept := make([]*Issue, 0, len(steps))
 	for _, step := range steps {
@@ -2897,13 +2814,6 @@ func withoutMoleculeRoot(steps []*Issue, moleculeID string) []*Issue {
 // Uses bd ready --label flag for server-side filtering.
 // The issueType is converted to a gt:<type> label (e.g., "molecule" -> "gt:molecule").
 func (b *Beads) ReadyWithType(issueType string) ([]*Issue, error) {
-	if b.store != nil {
-		return b.storeReadyWithFilter(beadsdk.WorkFilter{
-			Labels: []string{"gt:" + issueType},
-			Limit:  100,
-		})
-	}
-
 	out, err := b.run("ready", "--json", "--label", "gt:"+issueType, "-n", "100")
 	if err != nil {
 		return nil, err
@@ -2923,10 +2833,6 @@ func (b *Beads) Show(id string) (*Issue, error) {
 		if target := b.forIssueID(id); target != b {
 			return target.Show(id)
 		}
-	}
-
-	if b.store != nil {
-		return b.storeShow(id)
 	}
 
 	out, err := b.run("show", id, "--json")
@@ -2954,9 +2860,8 @@ func (b *Beads) Show(id string) (*Issue, error) {
 // list --parent` / `bd children`, which List shells out to): that path only
 // queries the persistent "dependencies" table and misses ephemeral wisp
 // children, whose parent-child edges live in a separate "wisp_dependencies"
-// table that it never checks. `bd show --children` (and the SDK's
-// GetDependentsWithMetadata, used below for the in-process store path)
-// correctly unions both tables. Discovered via gt-43t7 (mol-polecat-work
+// table that it never checks. `bd show --children` correctly unions both
+// tables. Discovered via gt-43t7 (mol-polecat-work
 // step wisps leaking without bound because closeDescendantsImpl couldn't
 // find them to close).
 func (b *Beads) Children(parentID string) ([]*Issue, error) {
@@ -2964,10 +2869,6 @@ func (b *Beads) Children(parentID string) ([]*Issue, error) {
 		if target := b.forIssueID(parentID); target != b {
 			return target.Children(parentID)
 		}
-	}
-
-	if b.store != nil {
-		return b.storeChildren(parentID)
 	}
 
 	out, err := b.run("show", parentID, "--children", "--json")
@@ -2988,20 +2889,6 @@ func (b *Beads) ChildrenOf(parentIDs ...string) (map[string][]*Issue, error) {
 		if target := b.forIssueID(parentIDs[0]); target != b {
 			return target.ChildrenOf(parentIDs...)
 		}
-	}
-
-	if b.store != nil {
-		out := make(map[string][]*Issue)
-		for _, id := range parentIDs {
-			kids, err := b.storeChildren(id)
-			if err != nil {
-				return nil, err
-			}
-			if len(kids) > 0 {
-				out[id] = kids
-			}
-		}
-		return out, nil
 	}
 
 	args := append([]string{"show"}, parentIDs...)
@@ -3150,10 +3037,6 @@ func (b *Beads) showMultipleLocal(ids []string) (map[string]*Issue, error) {
 		return make(map[string]*Issue), nil
 	}
 
-	if b.store != nil {
-		return b.storeShowMultiple(ids)
-	}
-
 	// bd show supports multiple IDs
 	args := append([]string{"show", "--json"}, ids...)
 	out, err := b.run(args...)
@@ -3205,10 +3088,6 @@ func partialShowFound(err error) ([]byte, bool) {
 
 // Blocked returns issues that are blocked by dependencies.
 func (b *Beads) Blocked() ([]*Issue, error) {
-	if b.store != nil {
-		return b.storeBlocked()
-	}
-
 	out, err := b.run("blocked", "--json")
 	if err != nil {
 		return nil, err
@@ -3247,11 +3126,6 @@ func (b *Beads) Create(opts CreateOptions) (*Issue, error) {
 			actor:      b.actor,
 		})
 		return bdForCreate.Create(opts)
-	}
-
-	// The store path has no event fields; bd writes events.
-	if b.store != nil && !opts.Ephemeral && opts.EventKind == "" {
-		return b.storeCreate(opts)
 	}
 
 	args := []string{"create", "--json"}
@@ -3403,10 +3277,6 @@ type SearchOptions struct {
 
 // Search searches issues by text query across title, description, and ID.
 func (b *Beads) Search(opts SearchOptions) ([]*Issue, error) {
-	if b.store != nil {
-		return b.storeSearch(opts)
-	}
-
 	args := []string{"search", "--json"}
 
 	if opts.Query != "" {
@@ -3513,10 +3383,6 @@ func (b *Beads) Update(id string, opts UpdateOptions) error {
 		}
 	}
 
-	if b.store != nil {
-		return b.storeUpdate(id, opts)
-	}
-
 	args := []string{"update", id}
 	var stdinData []byte
 
@@ -3569,20 +3435,11 @@ func (b *Beads) Update(id string, opts UpdateOptions) error {
 }
 
 // AddComment appends a comment to an issue, routing by issue ID when needed.
-// With an in-process store the comment goes through the store, as Comments
-// reads it back, rather than through bd.
 func (b *Beads) AddComment(id, comment string) error {
 	if !b.noRoute {
 		if target := b.forIssueID(id); target != b {
 			return target.AddComment(id, comment)
 		}
-	}
-
-	if b.store != nil {
-		ctx, cancel := storeCtx()
-		defer cancel()
-		_, err := b.store.AddIssueComment(ctx, id, b.getActor(), comment)
-		return err
 	}
 
 	_, err := b.run("comments", "add", id, comment)
@@ -3597,13 +3454,6 @@ func (b *Beads) AddCommentAs(id, author, comment string) error {
 		}
 	}
 
-	if b.store != nil {
-		ctx, cancel := storeCtx()
-		defer cancel()
-		_, err := b.store.AddIssueComment(ctx, id, author, comment)
-		return err
-	}
-
 	_, err := b.run("comments", "add", id, comment, "--author", author)
 	return err
 }
@@ -3614,21 +3464,6 @@ func (b *Beads) Comments(id string) ([]Comment, error) {
 		if target := b.forIssueID(id); target != b {
 			return target.Comments(id)
 		}
-	}
-
-	if b.store != nil {
-		comments, err := b.store.GetIssueComments(context.Background(), id)
-		if err != nil {
-			return nil, err
-		}
-		out := make([]Comment, 0, len(comments))
-		for _, comment := range comments {
-			converted, ok := sdkCommentToComment(comment)
-			if ok {
-				out = append(out, converted)
-			}
-		}
-		return out, nil
 	}
 
 	out, err := b.run("comments", id, "--json")
@@ -3732,15 +3567,6 @@ func (b *Beads) closeWithOptions(opts closeOptions, ids ...string) error {
 }
 
 func (b *Beads) closeInCurrentDB(opts closeOptions, ids ...string) error {
-	// In-process store close doesn't enforce dependency checks (no --force
-	// needed). Note: this means the store path bypasses the dependency
-	// validation that the CLI's --force flag overrides. Callers relying on
-	// ForceCloseWithReason (e.g., gt done nuking polecat wisps) are already
-	// accepting that deps may remain dangling, so this is intentional.
-	if b.store != nil {
-		return b.storeClose(opts.reason, runtime.SessionIDFromEnv(), ids...)
-	}
-
 	args := append([]string{"close"}, ids...)
 	if opts.withReason {
 		args = append(args, "--reason="+opts.reason)
@@ -3867,27 +3693,9 @@ func (b *Beads) Release(id string) error {
 }
 
 // ReleaseWithReason moves an in_progress issue back to open status and records
-// reason in its notes. It clears the store's own claim alone, forcing past no
-// live claim another actor holds (gt-v8ujv): recovering a dead worker's claim
-// is ReleaseIfAssignee or TransferIfAssignee, not this.
+// reason in its notes (gt-v8ujv): recovering a dead worker's claim is
+// ReleaseIfAssignee or TransferIfAssignee, not this.
 func (b *Beads) ReleaseWithReason(id, reason string) error {
-	if b.store != nil {
-		ctx, cancel := storeCtx()
-		defer cancel()
-		actor := b.getActor()
-		if err := b.refuseLiveClaim(ctx, id, actor); err != nil {
-			return err
-		}
-		updates := map[string]interface{}{
-			"status":   "open",
-			"assignee": "",
-		}
-		if reason != "" {
-			updates["notes"] = "Released: " + reason
-		}
-		return b.store.UpdateIssue(ctx, id, updates, actor)
-	}
-
 	args := []string{"update", id, "--status=open", "--assignee="}
 
 	// Add reason as a note if provided
@@ -3899,37 +3707,15 @@ func (b *Beads) ReleaseWithReason(id, reason string) error {
 	return err
 }
 
-// refuseLiveClaim applies bd's claim fence on the store path: bd refuses to
-// clear an in_progress issue another actor holds without --force, and Release
-// passes none (gt-v8ujv). A missing issue is left to the update that follows,
-// which reports it the way this path always has.
-func (b *Beads) refuseLiveClaim(ctx context.Context, id, actor string) error {
-	cur, err := b.store.GetIssue(ctx, id)
-	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			return nil
-		}
-		return fmt.Errorf("store release %s: %w", id, err)
-	}
-	if cur.Status == beadsdk.Status(StatusInProgress) && cur.Assignee != "" && cur.Assignee != actor {
-		return fmt.Errorf("cannot reassign %s: held by %q (in_progress); pass --force only if their claim is abandoned", id, cur.Assignee)
-	}
-	return nil
-}
-
 // AddDependency adds a dependency: issue depends on dependsOn.
 func (b *Beads) AddDependency(issue, dependsOn string) error {
-	if b.store != nil {
-		return b.storeAddDependency(issue, dependsOn)
-	}
-
 	_, err := b.run("dep", "add", issue, dependsOn)
 	return err
 }
 
 // AddTypedDependency records that issue depends on dependsOn with relation
-// depType, through bd dep add --type. It has no in-process store branch: it
-// is one of the writes moved off the library (gt-7iwy0.2).
+// depType, through bd dep add --type. It is one of the writes moved off the
+// library (gt-7iwy0.2).
 func (b *Beads) AddTypedDependency(issue, dependsOn, depType string) error {
 	_, err := b.run("dep", "add", issue, dependsOn, "--type="+depType)
 	return err
@@ -3960,11 +3746,8 @@ func (b *Beads) DepList(id, depType string) ([]IssueDep, error) {
 
 // RemoveDependency removes a dependency.
 //
-// It goes through bd even when the instance carries an in-process store: the
-// store's RemoveDependency writes no event and recomputes is_blocked with the
-// pre-0059 predicate that lacks the null-safe gate COALESCE, dispatching
-// waits-for waiters as soon as any child closes (gt-fcxe9.11). bd's dep remove
-// maintains is_blocked, the journal and row_lock itself.
+// bd's dep remove maintains is_blocked, the journal and row_lock itself
+// (gt-fcxe9.11).
 func (b *Beads) RemoveDependency(issue, dependsOn string) error {
 	_, err := b.run("dep", "remove", issue, dependsOn)
 	return err

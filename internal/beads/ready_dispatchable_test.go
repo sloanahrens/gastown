@@ -79,8 +79,8 @@ exit 0
 
 // TestReady_ExcludesBookkeepingServerSide is the gt-0q80 regression test:
 // Ready() must send the same --exclude-label/--exclude-type flags
-// ReadyDispatchable sends, so the in-process store path and the CLI path
-// answer the same question. The stub mirrors the gt-b9wq gap — it only
+// ReadyDispatchable sends, so every ready path answers the same question.
+// The stub mirrors the gt-b9wq gap — it only
 // omits the mail-shaped issue when it observes the exclusion flags.
 func TestReady_ExcludesBookkeepingServerSide(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -153,7 +153,7 @@ func readyPageID(issues []*Issue) string {
 // the CLI path: when bd reports its ready page capped (the JSON envelope's
 // pagination carries truncated=true), Ready returns the page AND an
 // ErrReadyTruncated sentinel — the same "full page is a loud answer" contract
-// the in-process store path got from the one-shot probe.
+// gt-59o9 established.
 func TestReady_CappedEnvelopeReturnsSentinel(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses Unix shell script mock for bd")

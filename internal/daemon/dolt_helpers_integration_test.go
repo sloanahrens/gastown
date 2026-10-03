@@ -90,15 +90,14 @@ func openTestDoltDB(d *Daemon, dbName string) (*sql.DB, error) {
 
 // setupJournaledTown makes a town whose hq .beads is a bd-initialized
 // workspace on the package's container, as a real town's is, and returns its
-// root with a bd handle on hq and the in-process store opened from its config.
+// root with a bd handle on hq and the bd-backed convoy store pinned to that
+// workspace.
 //
 // A ConvoyManager test needs both halves on one database: the manager reads
 // closes through bd (bd events tail, gt-7iwy0.2, from the store's canonical
-// .beads) and convoy tracking through the store. OpenTestStore's pooled
-// database is migrated by the store library and has no bd_events_journal, and
-// the library cannot write to bd's schema (gt-idv8s). So, as in production, bd
-// makes the database and every write, journaled (each workspace's config
-// turns events-journal on), and the store only reads.
+// .beads) and convoy tracking through the same workspace. So, as in
+// production, bd makes the database and every write, journaled (each
+// workspace's config turns events-journal on).
 func setupJournaledTown(t *testing.T) (string, *beads.Beads, convoy.Store) {
 	t.Helper()
 	townRoot := t.TempDir()

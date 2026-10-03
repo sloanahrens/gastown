@@ -35,9 +35,9 @@ func (r *fakeResets) all() []string {
 // newFakeDoltPool is a pool whose databases were never created: each entry's
 // initial commit is "init<i>", resets are recorded, and a lease that finds
 // nothing free fails at once.
-func newFakeDoltPool(t *testing.T, stores, sqlDBs int) (*doltDBPool, *fakeResets) {
+func newFakeDoltPool(t *testing.T, spares, sqlDBs int) (*doltDBPool, *fakeResets) {
 	t.Helper()
-	p, err := newDoltDBPool(0, stores, sqlDBs)
+	p, err := newDoltDBPool(0, spares, sqlDBs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,11 +56,11 @@ func TestDoltPoolReturnsALeaseResetWhenItsTestEnds(t *testing.T) {
 	t.Parallel()
 	p, resets := newFakeDoltPool(t, 1, 0)
 	var first, second string
-	t.Run("first", func(t *testing.T) { first = p.leaseForTest(t, leaseStore).name })
+	t.Run("first", func(t *testing.T) { first = p.leaseForTest(t, leaseInit).name })
 	if got, want := resets.all(), []string{first + "@init0"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("resets after the first test = %q, want %q", got, want)
 	}
-	t.Run("second", func(t *testing.T) { second = p.leaseForTest(t, leaseStore).name })
+	t.Run("second", func(t *testing.T) { second = p.leaseForTest(t, leaseInit).name })
 	if second != first {
 		t.Fatalf("second lease = %s, want the one database %s back", second, first)
 	}
@@ -87,7 +87,7 @@ func TestDoltPoolReturnsTheLeaseOfAFailedTest(t *testing.T) {
 	t.Parallel()
 	p, resets := newFakeDoltPool(t, 1, 0)
 	failing := &cleanupTB{TB: t}
-	e := p.leaseForTest(failing, leaseStore)
+	e := p.leaseForTest(failing, leaseInit)
 	if len(failing.cleanups) != 1 {
 		t.Fatalf("lease registered %d cleanups, want 1: the release must be a t.Cleanup, which runs for a failed test too", len(failing.cleanups))
 	}
@@ -98,7 +98,7 @@ func TestDoltPoolReturnsTheLeaseOfAFailedTest(t *testing.T) {
 	if got := resets.all(); len(got) != 1 || got[0] != e.name+"@init0" {
 		t.Fatalf("resets = %q, want the failed test's lease reset", got)
 	}
-	if _, err := p.acquire(leaseStore, "next", ""); err != nil {
+	if _, err := p.acquire(leaseInit, "next", ""); err != nil {
 		t.Fatalf("lease after a failed test: %v", err)
 	}
 }
@@ -106,24 +106,24 @@ func TestDoltPoolReturnsTheLeaseOfAFailedTest(t *testing.T) {
 func TestDoltPoolExhaustedFailsWithoutCreatingADatabase(t *testing.T) {
 	t.Parallel()
 	p, resets := newFakeDoltPool(t, 1, 1)
-	if _, err := p.acquire(leaseStore, "TestHolder", ""); err != nil {
+	if _, err := p.acquire(leaseInit, "TestHolder", ""); err != nil {
 		t.Fatal(err)
 	}
-	_, err := p.acquire(leaseStore, "TestWaiter", "")
+	_, err := p.acquire(leaseInit, "TestWaiter", "")
 	if err == nil {
 		t.Fatal("second lease from a one-database pool succeeded; an exhausted pool must fail, never create a database mid-run")
 	}
-	for _, want := range []string{"no free database for a store lease", "TestHolder", "doltPoolStores"} {
+	for _, want := range []string{"no free database for a bd init lease", "TestHolder", "doltPoolSpares"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("exhaustion error %q does not say %q", err, want)
 		}
 	}
-	if len(p.stores) != 1 || len(resets.all()) != 0 {
-		t.Errorf("exhaustion changed the pool: %d stores, resets %q", len(p.stores), resets.all())
+	if len(p.spares) != 1 || len(resets.all()) != 0 {
+		t.Errorf("exhaustion changed the pool: %d spares, resets %q", len(p.spares), resets.all())
 	}
 	// The SQL databases are a pool of their own.
 	if _, err := p.acquire(leaseSQL, "TestSQL", ""); err != nil {
-		t.Errorf("SQL lease while every store database is leased: %v", err)
+		t.Errorf("SQL lease while every bd init database is leased: %v", err)
 	}
 }
 
@@ -131,13 +131,13 @@ func TestDoltPoolLeaseWaitsForARelease(t *testing.T) {
 	t.Parallel()
 	p, _ := newFakeDoltPool(t, 1, 0)
 	p.wait = time.Hour
-	held, err := p.acquire(leaseStore, "TestHolder", "")
+	held, err := p.acquire(leaseInit, "TestHolder", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := make(chan *doltPoolEntry, 1)
 	go func() {
-		e, err := p.acquire(leaseStore, "TestWaiter", "")
+		e, err := p.acquire(leaseInit, "TestWaiter", "")
 		if err != nil {
 			t.Errorf("waiting lease: %v", err)
 		}
@@ -193,7 +193,7 @@ func TestDoltPoolRefusesABdInitWithoutAnAbsoluteDir(t *testing.T) {
 	if p.inUse != 0 {
 		t.Fatalf("a refused bd init leased %d databases", p.inUse)
 	}
-	if name, err := p.initSource(p.port, t.TempDir()); err != nil || name != p.stores[0].name {
+	if name, err := p.initSource(p.port, t.TempDir()); err != nil || name != p.spares[0].name {
 		t.Errorf("initSource(abs) = %q, %v; want the pool's database", name, err)
 	}
 	if name, err := p.initSource(p.port+1, t.TempDir()); err != nil || name != "" {
@@ -213,47 +213,6 @@ func TestDoltPoolKeepsABdInitLeaseWhoseDirNeverExisted(t *testing.T) {
 	}
 }
 
-func TestDoltPoolStoreAndInitLeasesPickTheirState(t *testing.T) {
-	t.Parallel()
-	p, resets := newFakeDoltPool(t, 2, 0)
-	migrated := p.stores[1]
-	migrated.head, migrated.migrated = "mig1", true
-
-	store, err := p.acquire(leaseStore, "store", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if store != migrated {
-		t.Errorf("store lease got %s, want the migrated %s", store.name, migrated.name)
-	}
-	if err := p.release(store); err != nil {
-		t.Fatal(err)
-	}
-	if got := resets.all(); len(got) != 1 || got[0] != migrated.name+"@mig1" {
-		t.Errorf("release of a migrated store reset to %q, want its migration commit", got)
-	}
-
-	fresh, err := p.acquire(leaseInit, "init 1", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fresh != p.stores[0] {
-		t.Errorf("bd init lease got %s, want the unmigrated %s", fresh.name, p.stores[0].name)
-	}
-	// Only the migrated database is left: a bd init gets it reset to its
-	// initial commit, since bd init needs an empty database.
-	last, err := p.acquire(leaseInit, "init 2", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if last != migrated || last.migrated || last.head != "init1" {
-		t.Errorf("bd init lease got %s (migrated %v, head %s), want %s reset to init1", last.name, last.migrated, last.head, migrated.name)
-	}
-	if got := resets.all(); got[len(got)-1] != migrated.name+"@init1" {
-		t.Errorf("resets = %q, want the last one to take %s back to init1", got, migrated.name)
-	}
-}
-
 func TestDoltPoolBdInitsTakeTemplateDatabasesFirst(t *testing.T) {
 	t.Parallel()
 	p, resets := newFakeDoltPool(t, 1, 0)
@@ -261,12 +220,19 @@ func TestDoltPoolBdInitsTakeTemplateDatabasesFirst(t *testing.T) {
 	tmpl := p.inits[0]
 	tmpl.initCommit, tmpl.head = "tmpl0", "tmpl0"
 
-	if store, err := p.acquire(leaseStore, "store", ""); err != nil || store != p.stores[0] {
-		t.Fatalf("store lease = %v, %v; want the store database, never a template one", store, err)
-	}
 	first, err := p.acquire(leaseInit, "init 1", "")
 	if err != nil || first != tmpl {
 		t.Fatalf("bd init lease = %v, %v; want the template database %s", first, err, tmpl.name)
+	}
+	second, err := p.acquire(leaseInit, "init 2", "")
+	if err != nil || second != p.spares[0] {
+		t.Fatalf("second bd init lease = %v, %v; want the spare %s behind the templates", second, err, p.spares[0].name)
+	}
+	// Every template database is leased and the spare too: the exhaustion
+	// error counts both.
+	_, err = p.acquire(leaseInit, "init 3", "")
+	if err == nil || !strings.Contains(err.Error(), "all 2 are leased") {
+		t.Errorf("third bd init lease = %v, want exhaustion over both kinds", err)
 	}
 	if err := p.release(first); err != nil {
 		t.Fatal(err)
@@ -274,21 +240,12 @@ func TestDoltPoolBdInitsTakeTemplateDatabasesFirst(t *testing.T) {
 	if got := resets.all(); len(got) != 1 || got[0] != tmpl.name+"@tmpl0" {
 		t.Errorf("release of a template database reset to %q, want its template commit", got)
 	}
-	if _, err := p.acquire(leaseInit, "init 2", ""); err != nil {
-		t.Fatal(err)
-	}
-	// Every template database is leased and the store one too: the
-	// exhaustion error counts both.
-	_, err = p.acquire(leaseInit, "init 3", "")
-	if err == nil || !strings.Contains(err.Error(), "all 2 are leased") {
-		t.Errorf("third bd init lease = %v, want exhaustion over both kinds", err)
-	}
 }
 
 func TestDoltPoolNeverLendsADatabaseItCouldNotReset(t *testing.T) {
 	t.Parallel()
 	p, resets := newFakeDoltPool(t, 1, 0)
-	e, err := p.acquire(leaseStore, "TestDirtier", "")
+	e, err := p.acquire(leaseInit, "TestDirtier", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +253,7 @@ func TestDoltPoolNeverLendsADatabaseItCouldNotReset(t *testing.T) {
 	if err := p.release(e); err == nil || !strings.Contains(err.Error(), "TestDirtier") {
 		t.Fatalf("release = %v, want the reset failure naming the lessee", err)
 	}
-	if _, err := p.acquire(leaseStore, "next", ""); err == nil || !strings.Contains(err.Error(), "unusable") {
+	if _, err := p.acquire(leaseInit, "next", ""); err == nil || !strings.Contains(err.Error(), "unusable") {
 		t.Fatalf("lease after a failed reset = %v, want exhaustion naming the unusable database", err)
 	}
 }
