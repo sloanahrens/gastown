@@ -11,7 +11,6 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/nudge"
-	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 )
 
 // slingHarness is a gt sling with every collaborator faked: beads live in a
@@ -316,23 +315,27 @@ func (h *slingHarness) resolveTarget(target string, opts ResolveTargetOptions) (
 }
 
 // fakeSlingContexts is a rig's sling contexts: none exist, and every lookup
-// and write lands in the call log.
+// and write the sling-context helpers make lands in the call log.
 type fakeSlingContexts struct{ h *slingHarness }
 
-func (f fakeSlingContexts) FindOpenSlingContext(id string) (*beads.Issue, *capacity.SlingContextFields, error) {
-	f.h.record("find context %s", id)
-	return nil, nil, nil
+func (f fakeSlingContexts) List(beads.ListOptions) ([]*beads.Issue, error) {
+	f.h.record("find context")
+	return nil, nil
 }
 
-func (f fakeSlingContexts) CreateSlingContext(_, id string, fields *capacity.SlingContextFields) (*beads.Issue, error) {
-	f.h.record("create context %s -> %s", id, fields.TargetRig)
+func (f fakeSlingContexts) Create(opts beads.CreateOptions) (*beads.Issue, error) {
+	f.h.record("create context %s", opts.Title)
 	return &beads.Issue{ID: "gt-ctx-new"}, nil
 }
 
-func (f fakeSlingContexts) UpdateSlingContextFields(id string, fields *capacity.SlingContextFields) error {
+func (f fakeSlingContexts) Update(id string, _ beads.UpdateOptions) error {
 	f.h.record("update context %s", id)
 	return nil
 }
+
+func (f fakeSlingContexts) CloseWithReason(string, ...string) error { return nil }
+
+func (f fakeSlingContexts) AddTypedDependency(string, string, string) error { return nil }
 
 func (h *slingHarness) newSpawn(rig string) *SpawnedPolecatInfo {
 	return &SpawnedPolecatInfo{RigName: rig, PolecatName: "Toast", ClonePath: slingTestTown + "/" + rig + "/polecats/Toast",

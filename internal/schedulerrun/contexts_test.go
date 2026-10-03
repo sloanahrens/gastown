@@ -66,10 +66,10 @@ func TestListBlockedWorkBeadIDStatesPartialFailureFailsClosedPerGroup(t *testing
 		t.Fatalf("write routes: %v", err)
 	}
 
-	blocked, unknown, err := listBlockedWorkBeadIDStatesWithRunner(townRoot, []string{"a-ready", "b-ready", "b-other"}, func(beadsDir string, groupedIDs []string) ([]byte, error) {
+	blocked, unknown, err := listBlockedWorkBeadIDStatesWithRunner(townRoot, []string{"a-ready", "b-ready", "b-other"}, func(beadsDir string, groupedIDs []string) ([]*beads.Issue, error) {
 		switch groupedIDs[0][:1] {
 		case "a":
-			return []byte(`[{"id":"a-ready"}]`), nil
+			return []*beads.Issue{{ID: "a-ready"}}, nil
 		case "b":
 			return nil, fmt.Errorf("blocked query failed")
 		default:
@@ -89,11 +89,11 @@ func TestListBlockedWorkBeadIDStatesPartialFailureFailsClosedPerGroup(t *testing
 		t.Fatalf("failed group IDs should be blocked-unknown, got %#v", unknown)
 	}
 
-	_, unknown, err = listBlockedWorkBeadIDStatesWithRunner(townRoot, []string{"a-ready", "b-ready"}, func(string, []string) ([]byte, error) {
-		return []byte(`not-json`), nil
+	_, unknown, err = listBlockedWorkBeadIDStatesWithRunner(townRoot, []string{"a-ready", "b-ready"}, func(string, []string) ([]*beads.Issue, error) {
+		return nil, fmt.Errorf("blocked read failed")
 	}, nil)
 	if err == nil {
-		t.Fatalf("all blocked query JSON failures should return an error")
+		t.Fatalf("all blocked query failures should return an error")
 	}
 	if !unknown["a-ready"] || !unknown["b-ready"] {
 		t.Fatalf("all failed groups should mark every ID blocked-unknown, got %#v", unknown)

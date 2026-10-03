@@ -60,12 +60,16 @@ type DependencyMergeStatus struct {
 // status-based question "is this blocker closed?" into the merge-aware
 // question "has this blocker's work landed?".
 //
+// It is written over Client so schedulerrun reads the merge queue through the
+// same interface it reads beads: ListMergeRequests is the Client path, and a
+// *Beads still answers from its one-round-trip wisp read.
+//
 // At most one MR per source issue is expected; if several are somehow open the
 // lexicographically smallest MR ID wins, so callers get a deterministic answer.
 // MRs without a parseable source_issue are skipped — they cannot be attributed
 // to a blocker and so cannot hold one back.
-func (b *Beads) OpenMRsBySourceIssue() (map[string]*Issue, error) {
-	mrs, err := b.ListMergeRequests(ListOptions{
+func OpenMRsBySourceIssue(c Client) (map[string]*Issue, error) {
+	mrs, err := ListMergeRequests(c, ListOptions{
 		Status: "open",
 		Label:  "gt:merge-request",
 	})
@@ -249,7 +253,7 @@ func ResolveDependencyMergeStatuses(townBeadsDir string, issue *Issue) []Depende
 	}
 	for dir, ids := range byDir {
 		b := NewWithBeadsDir(filepath.Dir(dir), dir)
-		index, err := b.OpenMRsBySourceIssue()
+		index, err := OpenMRsBySourceIssue(b)
 		if err != nil {
 			for _, id := range ids {
 				unchecked[id] = true

@@ -29,53 +29,56 @@ func ParseSlingContextFields(description string) *capacity.SlingContextFields {
 	return &fields
 }
 
+// SlingContextStore is the Client surface the sling-context helpers below
+// need: create, list, update, close, and one typed dependency edge. Client
+// satisfies it, so *Beads and internal/beads/beadsfake both do; a caller
+// holding less than a Client declares the same method set.
+type SlingContextStore interface {
+	Create(opts CreateOptions) (*Issue, error)
+	Update(id string, opts UpdateOptions) error
+	CloseWithReason(reason string, ids ...string) error
+	List(opts ListOptions) ([]*Issue, error)
+	AddTypedDependency(issue, dependsOn, depType string) error
+}
+
+// A Client is enough to run every helper below.
+var _ SlingContextStore = (Client)(nil)
+
 // CreateSlingContext creates an ephemeral sling context bead that tracks
 // scheduling state for a work bead. The work bead is never modified.
-func (b *Beads) CreateSlingContext(workBeadTitle, workBeadID string, fields *capacity.SlingContextFields) (*Issue, error) {
+//
+// The bead takes bd's default issue type: CreateOptions carries no issue_type,
+// and the label is what identifies a sling context.
+func CreateSlingContext(c SlingContextStore, workBeadTitle, workBeadID string, fields *capacity.SlingContextFields) (*Issue, error) {
 	title := fmt.Sprintf("sling-context: %s", workBeadTitle)
 	if len(title) > 200 {
 		title = title[:200]
 	}
 
-	description := FormatSlingContextDescription(fields)
-
-	args := []string{"create", "--json",
-		"--ephemeral",
-		"--title=" + title,
-		"--description=" + description,
-		"--type=task",
-		"--labels=" + capacity.LabelSlingContext,
-	}
-
-	if actor := b.getActor(); actor != "" {
-		args = append(args, "--actor="+actor)
-	}
-
-	out, err := b.run(args...)
+	issue, err := c.Create(CreateOptions{
+		Title:       title,
+		Description: FormatSlingContextDescription(fields),
+		Labels:      []string{capacity.LabelSlingContext},
+		Ephemeral:   true,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("creating sling context: %w", err)
 	}
 
-	var issue Issue
-	if err := json.Unmarshal(out, &issue); err != nil {
-		return nil, fmt.Errorf("parsing bd create output: %w", err)
-	}
-
 	// Add tracks dependency: context bead → work bead
-	_, depErr := b.run("dep", "add", issue.ID, workBeadID, "--type=tracks")
-	if depErr != nil {
+	if err := c.AddTypedDependency(issue.ID, workBeadID, "tracks"); err != nil {
 		// Non-fatal: the context bead was created, just missing the dep link.
 		// This can happen if the work bead is in a different DB and external refs aren't set up.
-		fmt.Printf("Warning: could not add tracks dep %s → %s: %v\n", issue.ID, workBeadID, depErr)
+		fmt.Printf("Warning: could not add tracks dep %s → %s: %v\n", issue.ID, workBeadID, err)
 	}
 
-	return &issue, nil
+	return issue, nil
 }
 
 // FindOpenSlingContext finds an open sling context for the given work bead ID.
 // Used for idempotency checks. Returns (nil, nil, nil) if none found.
-func (b *Beads) FindOpenSlingContext(workBeadID string) (*Issue, *capacity.SlingContextFields, error) {
-	contexts, err := b.ListOpenSlingContexts()
+func FindOpenSlingContext(c SlingContextStore, workBeadID string) (*Issue, *capacity.SlingContextFields, error) {
+	contexts, err := ListOpenSlingContexts(c)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -100,14 +103,14 @@ var openSlingContexts = ListOptions{
 }
 
 // ListOpenSlingContexts returns all open sling context beads.
-func (b *Beads) ListOpenSlingContexts() ([]*Issue, error) {
-	return b.List(openSlingContexts)
+func ListOpenSlingContexts(c SlingContextStore) ([]*Issue, error) {
+	return c.List(openSlingContexts)
 }
 
 // CloseSlingContext closes a sling context bead with a reason.
 // Idempotent: suppresses "already closed" errors so retries are safe.
-func (b *Beads) CloseSlingContext(contextID, reason string) error {
-	_, err := b.run("close", contextID, "--reason="+reason)
+func CloseSlingContext(c SlingContextStore, contextID, reason string) error {
+	err := c.CloseWithReason(reason, contextID)
 	if err != nil && strings.Contains(err.Error(), "already closed") {
 		return nil // Idempotent — already in desired state
 	}
@@ -115,7 +118,7 @@ func (b *Beads) CloseSlingContext(contextID, reason string) error {
 }
 
 // UpdateSlingContextFields updates the description (fields) of a sling context bead.
-func (b *Beads) UpdateSlingContextFields(contextID string, fields *capacity.SlingContextFields) error {
+func UpdateSlingContextFields(c SlingContextStore, contextID string, fields *capacity.SlingContextFields) error {
 	description := FormatSlingContextDescription(fields)
-	return b.Update(contextID, UpdateOptions{Description: &description})
+	return c.Update(contextID, UpdateOptions{Description: &description})
 }

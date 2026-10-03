@@ -333,7 +333,7 @@ func runSchedulerClear(cmd *cobra.Command, args []string) error {
 		for _, ctx := range contexts {
 			fields := beads.ParseSlingContextFields(ctx.Issue.Description)
 			if fields != nil && fields.WorkBeadID == schedulerClearBead {
-				if err := beadsForContextRecord(ctx).CloseSlingContext(ctx.Issue.ID, "cleared"); err != nil {
+				if err := beads.CloseSlingContext(beadsForContextRecord(ctx), ctx.Issue.ID, "cleared"); err != nil {
 					fmt.Printf("  %s Could not close context %s: %v\n", style.Dim.Render("Warning:"), ctx.Issue.ID, err)
 					continue
 				}
@@ -363,7 +363,7 @@ func runSchedulerClear(cmd *cobra.Command, args []string) error {
 
 	cleared := 0
 	for _, ctx := range allContexts {
-		if err := beadsForContextRecord(ctx).CloseSlingContext(ctx.Issue.ID, "cleared"); err != nil {
+		if err := beads.CloseSlingContext(beadsForContextRecord(ctx), ctx.Issue.ID, "cleared"); err != nil {
 			fmt.Printf("  %s Could not close context %s: %v\n", style.Dim.Render("Warning:"), ctx.Issue.ID, err)
 			continue
 		}

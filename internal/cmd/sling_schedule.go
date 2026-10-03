@@ -73,12 +73,9 @@ type ScheduleOptions struct {
 }
 
 // slingContextStore is the slice of a rig's beads a scheduled bead's sling
-// context lives in.
-type slingContextStore interface {
-	FindOpenSlingContext(workBeadID string) (*beads.Issue, *capacity.SlingContextFields, error)
-	CreateSlingContext(workBeadTitle, workBeadID string, fields *capacity.SlingContextFields) (*beads.Issue, error)
-	UpdateSlingContextFields(contextID string, fields *capacity.SlingContextFields) error
-}
+// context lives in: the Client primitives internal/beads' sling-context
+// helpers call.
+type slingContextStore = beads.SlingContextStore
 
 // scheduleBead schedules a bead with the running gt's collaborators.
 func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
@@ -126,7 +123,7 @@ func (d *slingDeps) scheduleSlingBead(beadID, rigName string, opts ScheduleOptio
 		return fmt.Errorf("cannot resolve target rig %q beads database for bead %s", rigName, beadID)
 	}
 	rigBeads := d.slingContexts(rigBeadsDir)
-	existingCtx, _, findErr := rigBeads.FindOpenSlingContext(beadID)
+	existingCtx, _, findErr := beads.FindOpenSlingContext(rigBeads, beadID)
 	if findErr != nil {
 		return fmt.Errorf("checking for existing sling context: %w", findErr)
 	}
@@ -207,7 +204,7 @@ func (d *slingDeps) scheduleSlingBead(beadID, rigName string, opts ScheduleOptio
 
 	// Create sling context bead in the target rig's beads dir so the rig's
 	// witness discovers it during patrol. (GH#3468)
-	ctxBead, err := rigBeads.CreateSlingContext(info.Title, beadID, fields)
+	ctxBead, err := beads.CreateSlingContext(rigBeads, info.Title, beadID, fields)
 	if err != nil {
 		return fmt.Errorf("creating sling context: %w", err)
 	}

@@ -302,7 +302,7 @@ func setupSchedulerIntegrationTown(t *testing.T) (hqPath, rigPath, gtBinary stri
 func createSlingContext(t *testing.T, hqPath string, fields *capacity.SlingContextFields) string {
 	t.Helper()
 	townBeads := beads.NewWithBeadsDir(hqPath, filepath.Join(hqPath, ".beads"))
-	ctxBead, err := townBeads.CreateSlingContext("test: "+fields.WorkBeadID, fields.WorkBeadID, fields)
+	ctxBead, err := beads.CreateSlingContext(townBeads, "test: "+fields.WorkBeadID, fields.WorkBeadID, fields)
 	if err != nil {
 		t.Fatalf("CreateSlingContext for %s failed: %v", fields.WorkBeadID, err)
 	}
@@ -627,7 +627,7 @@ func TestIntegrationSchedulerMissingSourceDoesNotHideReadyContext(t *testing.T) 
 
 	missingID := beads.ExtractPrefix(readyID) + "missing-source"
 	rigBeads := beads.NewWithBeadsDir(rigPath, filepath.Join(rigPath, ".beads"))
-	if _, err := rigBeads.CreateSlingContext("missing source", missingID, &capacity.SlingContextFields{
+	if _, err := beads.CreateSlingContext(rigBeads, "missing source", missingID, &capacity.SlingContextFields{
 		Version:    1,
 		WorkBeadID: missingID,
 		TargetRig:  "testrig",
@@ -1454,7 +1454,7 @@ func TestIntegrationSchedulerInvalidJSONContextCleanup(t *testing.T) {
 
 	// Verify the invalid context is no longer listed.
 	townBeads := beads.NewWithBeadsDir(hqPath, filepath.Join(hqPath, ".beads"))
-	contexts, err := townBeads.ListOpenSlingContexts()
+	contexts, err := beads.ListOpenSlingContexts(townBeads)
 	if err != nil {
 		t.Fatalf("ListOpenSlingContexts failed: %v", err)
 	}
@@ -1474,7 +1474,7 @@ func TestIntegrationSchedulerActualDispatchRoutesPollutedEnvToTargetRig(t *testi
 
 	beadID := createTestBead(t, rigPath, "Polluted env actual dispatch")
 	rigBeads := beads.NewWithBeadsDir(rigPath, filepath.Join(rigPath, ".beads"))
-	ctxBead, err := rigBeads.CreateSlingContext("dispatch: "+beadID, beadID, &capacity.SlingContextFields{
+	ctxBead, err := beads.CreateSlingContext(rigBeads, "dispatch: "+beadID, beadID, &capacity.SlingContextFields{
 		Version:     1,
 		WorkBeadID:  beadID,
 		TargetRig:   "testrig",
@@ -1519,7 +1519,7 @@ func TestIntegrationSchedulerActualDispatchRoutesPollutedEnvToTargetRig(t *testi
 		t.Fatalf("rig bead state = status:%q assignee:%q, want hooked testrig/polecats/envtest", issue.Status, issue.Assignee)
 	}
 
-	openContexts, err := rigBeads.ListOpenSlingContexts()
+	openContexts, err := beads.ListOpenSlingContexts(rigBeads)
 	if err != nil {
 		t.Fatalf("ListOpenSlingContexts: %v", err)
 	}
@@ -1535,7 +1535,7 @@ func TestIntegrationSchedulerFormulaDispatchRoutesPollutedEnvToTargetRig(t *test
 
 	beadID := createTestBead(t, rigPath, "Polluted env formula dispatch")
 	rigBeads := beads.NewWithBeadsDir(rigPath, filepath.Join(rigPath, ".beads"))
-	ctxBead, err := rigBeads.CreateSlingContext("dispatch: "+beadID, beadID, &capacity.SlingContextFields{
+	ctxBead, err := beads.CreateSlingContext(rigBeads, "dispatch: "+beadID, beadID, &capacity.SlingContextFields{
 		Version:    1,
 		WorkBeadID: beadID,
 		TargetRig:  "testrig",
@@ -1586,7 +1586,7 @@ func TestIntegrationSchedulerFormulaDispatchRoutesPollutedEnvToTargetRig(t *test
 		t.Fatalf("attachment fields = %#v, want mol-polecat-work with attached molecule (description: %s)", attachment, issue.Description)
 	}
 
-	openContexts, err := rigBeads.ListOpenSlingContexts()
+	openContexts, err := beads.ListOpenSlingContexts(rigBeads)
 	if err != nil {
 		t.Fatalf("ListOpenSlingContexts: %v", err)
 	}
@@ -1643,7 +1643,7 @@ func TestIntegrationSchedulerDispatchFailureRecordedInContextSourceDB(t *testing
 	}
 
 	rigBeads := beads.NewWithBeadsDir(rigPath, filepath.Join(rigPath, ".beads"))
-	rigContexts, err := rigBeads.ListOpenSlingContexts()
+	rigContexts, err := beads.ListOpenSlingContexts(rigBeads)
 	if err != nil {
 		t.Fatalf("rig ListOpenSlingContexts: %v", err)
 	}
