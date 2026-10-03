@@ -377,6 +377,21 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	if _, err := os.Stat(repo); err != nil {
 		return nil, fmt.Errorf("rig repository %s: %w", repo, err)
 	}
+	// Fail closed on a config.json that exists but does not decode: the file
+	// names no branch, so the rig gets no worker and no landing until it is
+	// fixed. Construction is the seam because the manager retries it every
+	// interval, which is what lets the rig resume on its own (gt-v4r0x).
+	watchBranch, cfgErr := rigDefaultBranch(rigPath)
+	if cfgErr != nil {
+		configPath := filepath.Join(rigPath, "config.json")
+		// The notify layer keys an alert by fingerprint, so the manager's
+		// retries upsert onto one escalation rather than minting one apiece.
+		// The error the caller logs is what names the file.
+		d.escalateAlert("landing-rig-config:"+rigName, "landing_worker",
+			fmt.Sprintf("%s does not decode, so the landing worker for rig %s is not running and nothing is landing: %v",
+				configPath, rigName, cfgErr))
+		return nil, fmt.Errorf("rig config %s: %w", configPath, cfgErr)
+	}
 	landings, err := land.RigLandingsFile(townRoot, rigName)
 	if err != nil {
 		return nil, err
@@ -482,7 +497,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Landings:    landings,
 		PostLand:    postLand,
 		Reverts:     redMain,
-		WatchTarget: rigDefaultBranch(rigPath),
+		WatchTarget: watchBranch,
 		MainState:   mainState,
 		LandTimeout: landingWorkerLandTimeout(d.patrolConfig),
 		Logf:        d.logger.Printf,
@@ -757,18 +772,18 @@ func (f fileMainState) Save(st landworker.MainState) error {
 }
 
 // rigDefaultBranch is the branch the landing worker watches for direct
-// pushes: the rig's configured default branch, else main. A config.json that
-// does not decode is reported once instead of silently yielding main
-// (gt-8xk9k).
-func rigDefaultBranch(rigPath string) string {
+// pushes: the rig's configured default branch, else main. A file that exists
+// but does not decode yields an error, never the main fallback, so a landing
+// cannot run against a branch the rig's own file did not name (gt-v4r0x).
+func rigDefaultBranch(rigPath string) (string, error) {
 	cfg, err := rig.LoadRigConfigIfPresent(rigPath)
 	if err != nil {
-		rig.WarnRigConfigOnce(rigPath, err)
+		return "", err
 	}
 	if cfg != nil && cfg.DefaultBranch != "" {
-		return cfg.DefaultBranch
+		return cfg.DefaultBranch, nil
 	}
-	return "main"
+	return "main", nil
 }
 
 // postLandRevert builds the revert of a landing in a throwaway worktree of

@@ -472,8 +472,14 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 	s.seatWork = d.attentionSeatWork
 	s.remoteTip = func(rig string) (string, error) {
 		rigPath := filepath.Join(d.config.TownRoot, rig)
+		branch, err := rigDefaultBranch(rigPath)
+		if err != nil {
+			// Fail closed: a config.json that does not decode names no branch,
+			// so there is no tip to read (gt-v4r0x).
+			return "", fmt.Errorf("%s: %w", filepath.Join(rigPath, "config.json"), err)
+		}
 		return git.NewGit(filepath.Join(rigPath, ".repo.git")).
-			RemoteBranchTip("origin", rigDefaultBranch(rigPath))
+			RemoteBranchTip("origin", branch)
 	}
 	s.landedCommit = d.attentionLandedCommit
 	s.commitInfo = d.attentionCommitInfo

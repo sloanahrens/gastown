@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
@@ -38,7 +39,11 @@ func TestRigDefaultBranch_ValidConfigUnchanged(t *testing.T) {
 	rigPath := filepath.Join(t.TempDir(), "testrig")
 	writeDaemonRigConfigFile(t, rigPath, `{"type":"rig","version":1,"name":"testrig","default_branch":"develop"}`)
 
-	if got := rigDefaultBranch(rigPath); got != "develop" {
+	got, err := rigDefaultBranch(rigPath)
+	if err != nil {
+		t.Fatalf("rigDefaultBranch() error = %v; want nil", err)
+	}
+	if got != "develop" {
 		t.Errorf("rigDefaultBranch() = %q, want %q", got, "develop")
 	}
 	if rig.RigConfigWarned(rigPath) {
@@ -46,19 +51,83 @@ func TestRigDefaultBranch_ValidConfigUnchanged(t *testing.T) {
 	}
 }
 
-// TestRigDefaultBranch_UnparseableConfigReports pins the fix: a typo'd key no
-// longer yields a silent "main" with the operator's file looking
-// authoritative.
-func TestRigDefaultBranch_UnparseableConfigReports(t *testing.T) {
+// TestRigDefaultBranch_AbsentConfigFallsBackToMain pins the case that keeps
+// today's behavior through the new error return: a rig with no config.json at
+// all has no branch to be wrong about, so main stands (gt-v4r0x).
+func TestRigDefaultBranch_AbsentConfigFallsBackToMain(t *testing.T) {
+	t.Parallel()
+	rigPath := filepath.Join(t.TempDir(), "testrig")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", rigPath, err)
+	}
+
+	got, err := rigDefaultBranch(rigPath)
+	if err != nil {
+		t.Fatalf("rigDefaultBranch(no config.json) error = %v; want nil", err)
+	}
+	if got != "main" {
+		t.Errorf("rigDefaultBranch(no config.json) = %q, want the main fallback", got)
+	}
+}
+
+// TestRigDefaultBranch_UnparseableConfigFailsClosed is the fail-closed half of
+// gt-v4r0x: a typo'd key yields an error rather than a silent "main" with the
+// operator's file looking authoritative.
+func TestRigDefaultBranch_UnparseableConfigFailsClosed(t *testing.T) {
 	t.Parallel()
 	rigPath := filepath.Join(t.TempDir(), "testrig")
 	writeDaemonRigConfigFile(t, rigPath, `{"type":"rig","version":1,"name":"testrig","default_branchh":"develop"}`)
 
-	if got := rigDefaultBranch(rigPath); got != "main" {
-		t.Errorf("rigDefaultBranch() = %q, want the main fallback", got)
+	got, err := rigDefaultBranch(rigPath)
+	if err == nil {
+		t.Fatalf("rigDefaultBranch() = %q, nil; want an error for a config.json that does not decode", got)
 	}
-	if !rig.RigConfigWarned(rigPath) {
-		t.Errorf("rigDefaultBranch() fell back to main without reporting the parse error")
+	if got != "" {
+		t.Errorf("rigDefaultBranch() = %q with an error; want no branch, never the main fallback", got)
+	}
+
+	// The same seam on the next pass after the operator fixes the file: the
+	// rig is readable again and names its branch (gt-v4r0x).
+	writeDaemonRigConfigFile(t, rigPath, `{"type":"rig","version":1,"name":"testrig","default_branch":"develop"}`)
+	got, err = rigDefaultBranch(rigPath)
+	if err != nil || got != "develop" {
+		t.Errorf("rigDefaultBranch() = %q, %v after the file was fixed; want %q, nil", got, err, "develop")
+	}
+}
+
+// TestNewRigLandingWorker_RefusesARigWhoseConfigDoesNotDecode is the landing
+// worker's half of gt-v4r0x: a rig whose config.json exists but does not
+// decode gets no worker at all, so the pass never runs and nothing lands for
+// it, and the operator gets one escalation naming the file. The rig resumes
+// landing on the manager's next attempt once the file is fixed.
+func TestNewRigLandingWorker_RefusesARigWhoseConfigDoesNotDecode(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	const rigName = "testrig"
+	rigPath := filepath.Join(townRoot, rigName)
+	if err := os.MkdirAll(filepath.Join(rigPath, ".repo.git"), 0o755); err != nil {
+		t.Fatalf("mkdir .repo.git: %v", err)
+	}
+	writeDaemonRigConfigFile(t, rigPath, `{"type":"rig","version":1,"name":"testrig","default_branchh":"develop"}`)
+
+	rec := notifyfake.New()
+	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: rec}
+
+	if _, err := d.newRigLandingWorker(rigName); err == nil {
+		t.Fatal("newRigLandingWorker() = nil error for a config.json that does not decode; want the rig refused")
+	} else if configPath := filepath.Join(rigPath, "config.json"); !strings.Contains(err.Error(), configPath) {
+		t.Errorf("error %q does not name %s", err, configPath)
+	}
+
+	esc := rec.Escalations()
+	if len(esc) != 1 {
+		t.Fatalf("escalations = %+v, want exactly one", esc)
+	}
+	if key := "landing-rig-config:" + rigName; esc[0].Escalation.Fingerprint != key {
+		t.Errorf("escalation fingerprint = %q, want %q", esc[0].Escalation.Fingerprint, key)
+	}
+	if !strings.Contains(esc[0].Escalation.Reason, filepath.Join(rigPath, "config.json")) {
+		t.Errorf("escalation reason %q does not name the config file", esc[0].Escalation.Reason)
 	}
 }
 
