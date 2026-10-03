@@ -1,6 +1,7 @@
 package townconfig
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -362,5 +363,48 @@ func TestLoadReadsTheTwoFileLayout(t *testing.T) {
 	}
 	if err := Check(root); err != nil {
 		t.Errorf("Check(two-file town) = %v", err)
+	}
+}
+
+// The kernel decodes the daemon document strictly, so a patrol_scan.worktree_cleanup
+// block only loads because internal/config declares it (gt-rwfua). The two-file
+// layout reads the same document from settings/config.json's "daemon" section
+// through the same loader, so this covers both layouts.
+func TestLoadDecodesWorktreeCleanupBlock(t *testing.T) {
+	t.Parallel()
+	root := copyLiveTown(t)
+	path := filepath.Join(root, FileDaemon)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	patrols, _ := doc["patrols"].(map[string]any)
+	patrols["patrol_scan"] = map[string]any{
+		"enabled": true,
+		"worktree_cleanup": map[string]any{
+			"enabled": true, "dry_run": false, "max_per_tick": 3,
+		},
+	}
+	patched, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, root, FileDaemon, string(patched))
+
+	town, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load(town with worktree_cleanup) = %v", err)
+	}
+	wc := town.Daemon().Patrols.PatrolScan.WorktreeCleanup
+	if wc == nil {
+		t.Fatal("worktree_cleanup did not load")
+	}
+	if !wc.IsEnabled() || wc.IsDryRun() || wc.Cap() != 3 {
+		t.Errorf("loaded block = enabled:%v dry-run:%v cap:%d, want true/false/3",
+			wc.IsEnabled(), wc.IsDryRun(), wc.Cap())
 	}
 }

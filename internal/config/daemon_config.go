@@ -355,6 +355,123 @@ type PatrolScanConfig struct {
 	// ReportWindow is the minimum gap between two stranded-work comments on
 	// one bead (default "24h").
 	ReportWindow string `json:"report_window,omitempty"`
+
+	// WorktreeCleanup reaps polecat worktrees that can never be reused.
+	// Absent means off: the tick behaves as if the block were not there.
+	WorktreeCleanup *WorktreeCleanupConfig `json:"worktree_cleanup,omitempty"`
+}
+
+// WorktreeCleanupConfig configures the patrol_scan reap pass (gt-rwfua).
+// Every default fails safe: an unset block is off, and an enabled block
+// without a dry_run key is dry-run. Read it through the accessors, which
+// treat a nil receiver and an empty or malformed field as its default.
+type WorktreeCleanupConfig struct {
+	// Enabled turns the reap pass on. Default off.
+	Enabled bool `json:"enabled"`
+
+	// DryRun reports candidates without removing them. It is a pointer so an
+	// unset key (nil) defaults to true; only an explicit false reaps.
+	DryRun *bool `json:"dry_run,omitempty"`
+
+	// Rigs limits the pass to these rigs; empty means ["gastown"].
+	Rigs []string `json:"rigs,omitempty"`
+
+	// GraceStr is how long a seat must sit idle before it is eligible
+	// (default "30m").
+	GraceStr string `json:"grace,omitempty"`
+
+	// ParkedGraceStr is the idle time a parked seat needs (default "24h").
+	ParkedGraceStr string `json:"parked_grace,omitempty"`
+
+	// MaxPerTick caps removals per tick; zero or negative means 2, never
+	// unlimited.
+	MaxPerTick int `json:"max_per_tick,omitempty"`
+
+	// BlockedAlertThreshold is the blocked count that raises one alert
+	// (default 5).
+	BlockedAlertThreshold int `json:"blocked_alert_threshold,omitempty"`
+}
+
+// DefaultWorktreeCleanupRig is the rig the reap pass covers when Rigs is empty.
+const DefaultWorktreeCleanupRig = "gastown"
+
+// IsEnabled reports whether the reap pass runs; a nil block is off.
+func (c *WorktreeCleanupConfig) IsEnabled() bool { return c != nil && c.Enabled }
+
+// IsDryRun reports whether the pass only reports; a nil block, or one without
+// an explicit dry_run key, is dry-run.
+func (c *WorktreeCleanupConfig) IsDryRun() bool {
+	return c == nil || c.DryRun == nil || *c.DryRun
+}
+
+// CoversRig reports whether the reap pass may touch rig; an empty Rigs list
+// covers only DefaultWorktreeCleanupRig.
+func (c *WorktreeCleanupConfig) CoversRig(rig string) bool {
+	if c == nil || len(c.Rigs) == 0 {
+		return rig == DefaultWorktreeCleanupRig
+	}
+	for _, r := range c.Rigs {
+		if r == rig {
+			return true
+		}
+	}
+	return false
+}
+
+// Grace returns the idle time before a seat is eligible, defaulting to 30m on
+// an unset or malformed value.
+func (c *WorktreeCleanupConfig) Grace() time.Duration {
+	return worktreeCleanupDuration(c.graceStr(), 30*time.Minute)
+}
+
+// ParkedGrace returns the idle time a parked seat needs, defaulting to 24h on
+// an unset or malformed value.
+func (c *WorktreeCleanupConfig) ParkedGrace() time.Duration {
+	return worktreeCleanupDuration(c.parkedGraceStr(), 24*time.Hour)
+}
+
+// Cap returns the per-tick removal cap, defaulting to 2 for zero or negative.
+func (c *WorktreeCleanupConfig) Cap() int {
+	if c == nil || c.MaxPerTick <= 0 {
+		return 2
+	}
+	return c.MaxPerTick
+}
+
+// AlertThreshold returns the blocked count that raises one alert, defaulting
+// to 5 for zero or negative.
+func (c *WorktreeCleanupConfig) AlertThreshold() int {
+	if c == nil || c.BlockedAlertThreshold <= 0 {
+		return 5
+	}
+	return c.BlockedAlertThreshold
+}
+
+func (c *WorktreeCleanupConfig) graceStr() string {
+	if c == nil {
+		return ""
+	}
+	return c.GraceStr
+}
+
+func (c *WorktreeCleanupConfig) parkedGraceStr() string {
+	if c == nil {
+		return ""
+	}
+	return c.ParkedGraceStr
+}
+
+func worktreeCleanupDuration(s string, def time.Duration) time.Duration {
+	if s == "" {
+		return def
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		// A non-positive grace would make every seat instantly eligible, the
+		// opposite of fail-safe; treat it like an unset one.
+		return def
+	}
+	return d
 }
 
 // SpecDispatchConfig configures the spec dispatcher ticker (gt-4k3fj.5): a
