@@ -210,15 +210,16 @@ func TestBuildAllRigSeatsSingleRigRunsInline(t *testing.T) {
 // TestPolecatSeatPoolSizeIsBounded: the pool exists to keep a large town from
 // forking hundreds of git processes at once, so the bound has to hold on every
 // host. Too small and a 47-seat listing serializes again; unbounded and the
-// fan-out defeats the purpose.
+// fan-out defeats the purpose. The ceiling is four because wider pools only
+// bought kernel time (see polecatSeatPoolSize).
 func TestPolecatSeatPoolSizeIsBounded(t *testing.T) {
 	t.Parallel()
 	size := polecatSeatPoolSize()
-	if size < 4 {
-		t.Fatalf("polecatSeatPoolSize() = %d, want at least 4 so a many-seat listing overlaps its probes", size)
+	if size < 2 {
+		t.Fatalf("polecatSeatPoolSize() = %d, want at least 2 so a many-seat listing overlaps its probes", size)
 	}
-	if size > 12 {
-		t.Fatalf("polecatSeatPoolSize() = %d, want at most 12 so a many-seat listing does not fork git without bound", size)
+	if size > 4 {
+		t.Fatalf("polecatSeatPoolSize() = %d, want at most 4: wider pools measured no faster and cost twice the system CPU", size)
 	}
 }
 

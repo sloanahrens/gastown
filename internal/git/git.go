@@ -17,6 +17,9 @@ import (
 	"github.com/steveyegge/gastown/internal/util"
 )
 
+// errNoUpstream stands for git's error when the branch has no upstream.
+var errNoUpstream = errors.New("no upstream configured")
+
 var errNoComparisonRefs = errors.New("no comparison refs resolved")
 
 // GitError contains raw output from a git command for agent observation.
@@ -2005,6 +2008,9 @@ func (g *Git) skipWorktreeFiles() map[string]bool {
 
 // CurrentBranch returns the current branch name.
 func (g *Git) CurrentBranch() (string, error) {
+	if branch, ok := g.currentBranchFast(); ok {
+		return branch, nil
+	}
 	return g.run("rev-parse", "--abbrev-ref", "HEAD")
 }
 
@@ -3409,6 +3415,9 @@ func (g *Git) CheckBranchContamination(baseRef string) (BranchContamination, err
 // to only count stashes that actually belong to this worktree; a detached HEAD
 // counts only "(no branch)" stashes (see stashOwnerFilter).
 func (g *Git) StashCount() (int, error) {
+	if none, ok := g.noStashFast(); ok && none {
+		return 0, nil
+	}
 	out, err := g.run("stash", "list")
 	if err != nil {
 		return 0, err
@@ -3715,6 +3724,9 @@ func (g *Git) BranchPreservationStatusLocal(localBranch, remote string, targets 
 // exists locally, and clear the unpushed-work blocker this check exists to
 // raise.
 func (g *Git) localRemoteBranchTip(remote, branch string) (string, error) {
+	if tip, ok := g.remoteTrackingTipFast(remote, branch); ok {
+		return tip, nil
+	}
 	sha, err := g.Rev("refs/remotes/" + remote + "/" + branch)
 	if err != nil {
 		return "", nil
@@ -3813,7 +3825,17 @@ func (g *Git) branchPreservationStatusWith(localBranch, remote string, targets [
 		}
 	}
 
-	if upstream, err := g.run("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"); err == nil && strings.TrimSpace(upstream) != "" {
+	upstream, upstreamErr := "", error(nil)
+	if fast, has, known := g.headUpstreamFast(); known {
+		if has {
+			upstream = fast
+		} else {
+			upstreamErr = errNoUpstream
+		}
+	} else {
+		upstream, upstreamErr = g.run("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+	}
+	if upstreamErr == nil && strings.TrimSpace(upstream) != "" {
 		upstream = strings.TrimSpace(upstream)
 		// Another polecat's branch is no custody of this one's work: it can be
 		// behind main, be deleted, or hold a different line of commits. A
