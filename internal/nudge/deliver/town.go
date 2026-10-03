@@ -66,7 +66,7 @@ func (n *Town) notificationLevel(townRoot, agentBeadID string) (string, error) {
 	if n.NotificationLevel != nil {
 		return n.NotificationLevel(townRoot, agentBeadID)
 	}
-	return beads.New(townRoot).GetAgentNotificationLevel(agentBeadID)
+	return beads.GetAgentNotificationLevel(beads.New(townRoot), agentBeadID)
 }
 
 func (n *Town) rigExists(townRoot, rig string) bool {

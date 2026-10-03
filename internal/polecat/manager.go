@@ -163,8 +163,9 @@ type Manager struct {
 	gits  gitOpener
 	beads polecatBeads
 	// agentBD is beads scoped to agent beads: rig-local first, with the
-	// dual-scope resolution agent-bead helpers need (gt-8we).
-	agentBD  polecatBeads
+	// dual-scope resolution the agent-bead free functions route through
+	// (gt-8we). Its reads and writes go through beads.Client helpers.
+	agentBD  beads.Client
 	namePool *NamePool
 	// tmux is nil when the caller has no tmux; NewManager never stores a
 	// typed-nil *tmux.Tmux here, so the nil checks below stay meaningful.
@@ -262,7 +263,7 @@ func (m *Manager) sessionName(name string) string {
 // newManager is NewManager with its collaborators injected: tmux answers the
 // session probes (nil for none), and open, when non-nil, opens the bead store
 // instead of bd.
-func newManager(r *rig.Rig, g gitRepo, t sessionProbe, open func(beadsSite) polecatBeads) *Manager {
+func newManager(r *rig.Rig, g gitRepo, t sessionProbe, open func(beadsSite) polecatStore) *Manager {
 	// Use the resolved beads directory to find where bd commands should run.
 	// For tracked beads: rig/.beads/redirect -> mayor/rig/.beads, so use mayor/rig
 	// For local beads: rig/.beads is the database, so use rig root
@@ -457,7 +458,7 @@ func (m *Manager) CheckDoltServerCapacity() error {
 func (m *Manager) createAgentBeadWithRetry(agentID string, fields *beads.AgentFields) error {
 	var lastErr error
 	for attempt := 1; attempt <= doltMaxRetries; attempt++ {
-		_, err := m.agentBeads().CreateOrReopenAgentBead(agentID, agentID, fields)
+		_, err := m.beads.CreateOrReopenAgentBead(agentID, agentID, fields)
 		if err == nil {
 			return nil
 		}
@@ -480,12 +481,15 @@ func (m *Manager) createAgentBeadWithRetry(agentID string, fields *beads.AgentFi
 	return fmt.Errorf("creating agent bead after %d attempts: %w", doltMaxRetries, lastErr)
 }
 
-func (m *Manager) agentBeads() polecatBeads {
+// agentBeads is the store the agent-bead helpers read: the one
+// openPolecatBeads opened with dual-scope resolution (gt-8we). Every caller
+// passes it to a beads.Client free function.
+func (m *Manager) agentBeads() beads.Client {
 	return m.agentBD
 }
 
 func (m *Manager) resetAgentBeadForReuse(agentID, reason string) error {
-	return m.agentBeads().ResetAgentBeadForReuse(agentID, reason)
+	return m.beads.ResetAgentBeadForReuse(agentID, reason)
 }
 
 // SetAgentStateWithRetry wraps SetAgentState with retry logic.
@@ -1577,7 +1581,7 @@ func (m *Manager) clearIntentRecord(name string) {
 // store, then classifies the MR/source through the normal rig beads reader.
 func (m *Manager) ActiveMRRemovalBlocker(name string) (string, string) {
 	agentID := m.agentBeadID(name)
-	_, fields, err := m.agentBeads().GetAgentBead(agentID)
+	_, fields, err := beads.GetAgentBead(m.agentBeads(), agentID)
 	if err != nil {
 		return "<unknown>", fmt.Sprintf("agent_lookup_error: %v", err)
 	}
@@ -1638,7 +1642,7 @@ func (m *Manager) ReclaimBrokenIdlePolecat(name string) (retErr error) {
 	}
 
 	agentID := m.agentBeadID(name)
-	agentIssue, fields, err := m.agentBeads().GetAgentBead(agentID)
+	agentIssue, fields, err := beads.GetAgentBead(m.agentBeads(), agentID)
 	if err != nil {
 		return fmt.Errorf("not safe to reclaim: agent_bead=%s lookup_error: %w", agentID, err)
 	}
@@ -2226,7 +2230,7 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 	// StartSession sets it to "working". Without this, the column and
 	// description diverge, and readers of either see incorrect state.
 	// Agent beads live in town DB — bypass prefix routing.
-	if err := m.agentBeads().UpdateAgentState(agentID, "spawning"); err != nil {
+	if err := beads.UpdateAgentState(m.agentBeads(), agentID, "spawning"); err != nil {
 		style.PrintWarning("could not sync agent_state column to spawning: %v", err)
 	}
 
@@ -2728,7 +2732,7 @@ func (m *Manager) removePartialOrphanPolecatDir(name, polecatDir string) error {
 	}
 
 	agentID := m.agentBeadID(name)
-	agentIssue, fields, err := m.agentBeads().GetAgentBead(agentID)
+	agentIssue, fields, err := beads.GetAgentBead(m.agentBeads(), agentID)
 	if err == nil && (agentIssue != nil || fields != nil) {
 		return fmt.Errorf("not safe to remove partial orphan: agent_bead=%s exists", agentID)
 	}
@@ -2880,7 +2884,7 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	agentID := m.agentBeadID(name)
 	activeMR := ""
 	sourceHint := ""
-	_, fields, err := m.agentBeads().GetAgentBead(agentID)
+	_, fields, err := beads.GetAgentBead(m.agentBeads(), agentID)
 	if err != nil {
 		facts.GitCheckFailed = true
 	}
@@ -3166,7 +3170,7 @@ func (m *Manager) SetAgentState(name string, state string) error {
 	agentID := m.agentBeadID(name)
 	// ForAgentBead: dual-scope agent-bead resolution (rig-local first,
 	// legacy town fallback — gt-8we).
-	return m.agentBeads().UpdateAgentState(agentID, state)
+	return beads.UpdateAgentState(m.agentBeads(), agentID, state)
 }
 
 // - StateDone: assignee cleared from issue (polecat ready for cleanup)
@@ -3461,7 +3465,7 @@ func (m *Manager) loadBeadsBatch() *beadsBatch {
 		}
 	}
 
-	if agentBeadsByID, err := m.agentBeads().ListAgentBeads(); err == nil {
+	if agentBeadsByID, err := beads.ListAgentBeads(m.agentBeads()); err == nil {
 		batch.agentBeadsByID = agentBeadsByID
 	}
 
@@ -3493,7 +3497,7 @@ func (m *Manager) lookupAgentBead(agentID string, batch *beadsBatch) (*beads.Iss
 		fields.AgentState = beads.ResolveAgentState(issue.Description, issue.AgentState)
 		return issue, fields, nil
 	}
-	return m.beads.GetAgentBead(agentID)
+	return beads.GetAgentBead(m.agentBeads(), agentID)
 }
 
 // lookupAssignedIssue returns GetAssignedIssue's result for assignee,
@@ -3892,7 +3896,7 @@ func (m *Manager) DetectStalePolecats(threshold int) ([]*StalenessInfo, error) {
 
 		// Check agent bead state
 		agentID := m.agentBeadID(p.Name)
-		_, fields, err := m.beads.GetAgentBead(agentID)
+		_, fields, err := beads.GetAgentBead(m.agentBeads(), agentID)
 		if err == nil && fields != nil {
 			info.AgentState = fields.AgentState
 		}

@@ -452,9 +452,11 @@ func TestList_BatchesBeadsQueriesAcrossPolecats(t *testing.T) {
 	}
 
 	// Batched: the rig-wide queries are independent of polecat count —
-	// hooked list, assigned/status query, agent-beads list. Per-polecat
-	// querying would need at least one store read per polecat here (5).
-	const wantBatchedReads = 3
+	// hooked list, assigned/status query, and the two reads ListAgentBeads
+	// makes (durable gt:agent issues, then the wisp half, which bd answers
+	// from the wisps table). Per-polecat querying would need at least one
+	// store read per polecat here (5).
+	const wantBatchedReads = 4
 	if reads := bd.readCount(); reads != wantBatchedReads {
 		t.Fatalf("store read %d times for %d polecats — want exactly %d rig-wide queries (batched)",
 			reads, len(names), wantBatchedReads)
@@ -2116,7 +2118,7 @@ func TestManagerAgentLifecycleUsesRigLocalBeadsDir(t *testing.T) {
 	if sites := bd.openedSites(); len(sites) != 1 || sites[0] != want {
 		t.Fatalf("store opened at %+v, want exactly %+v", sites, want)
 	}
-	_, fields, err := bd.GetAgentBead(agentID)
+	_, fields, err := beads.GetAgentBead(bd, agentID)
 	if err != nil {
 		t.Fatalf("GetAgentBead after create and reset: %v", err)
 	}
@@ -2641,7 +2643,7 @@ func TestLoadFromBeads_SpawnGraceEndToEnd(t *testing.T) {
 			// the same bead: it must agree with the state the derivation
 			// produced. A mismatch means the derivation consumed something
 			// other than the bead this fake returned.
-			agentIssue, fields, err := mgr.beads.GetAgentBead(mgr.agentBeadID(agentName))
+			agentIssue, fields, err := beads.GetAgentBead(mgr.agentBeads(), mgr.agentBeadID(agentName))
 			if err != nil {
 				t.Fatalf("GetAgentBead: %v", err)
 			}
