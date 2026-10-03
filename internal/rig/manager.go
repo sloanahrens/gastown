@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -1013,6 +1015,46 @@ func LoadRigConfig(rigPath string) (*RigConfig, error) {
 	return config.LoadRigConfig(configPath)
 }
 
+// LoadRigConfigIfPresent loads <rig>/config.json for a caller with a fallback
+// of its own, telling a rig that has no config file apart from one whose
+// config file does not decode: the first yields (nil, nil) and callers fall
+// back silently, as they always have, while the second yields (nil, err) so a
+// typo'd key cannot read as "this rig is unconfigured" (gt-w8dw5).
+func LoadRigConfigIfPresent(rigPath string) (*RigConfig, error) {
+	cfg, err := LoadRigConfig(rigPath)
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, config.ErrNotFound) {
+		return nil, nil
+	}
+	return cfg, err
+}
+
+// rigConfigWarnedPaths holds rig config directories already reported by
+// WarnRigConfigOnce, so the loops that read a rig's default branch per polecat
+// print one line rather than one per polecat.
+var rigConfigWarnedPaths sync.Map
+
+// WarnRigConfigOnce reports, once per rig directory, that config.json exists
+// but did not load — for callers that can only fall back, not return the
+// error (gt-w8dw5).
+func WarnRigConfigOnce(rigPath string, err error) {
+	if err == nil {
+		return
+	}
+	if _, dup := rigConfigWarnedPaths.LoadOrStore(rigPath, struct{}{}); dup {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "WARNING: %s is unreadable, falling back to defaults: %v\n",
+		filepath.Join(rigPath, "config.json"), err)
+}
+
+// RigConfigWarned reports whether WarnRigConfigOnce has reported rigPath, so
+// tests can assert an unparseable config.json is reported rather than dropped
+// silently (gt-w8dw5).
+func RigConfigWarned(rigPath string) bool {
+	_, ok := rigConfigWarnedPaths.Load(rigPath)
+	return ok
+}
+
 // ResolveMergeQueueConfig resolves a rig's merge-queue gate commands using
 // the same three-tier precedence `gt sling` uses to populate formula gate
 // vars: rig root config.json merge_queue (floor, gt-me9t) -> repo-committed
@@ -1033,7 +1075,12 @@ func ResolveMergeQueueConfig(townRoot, rigName string) *config.MergeQueueConfig 
 	}
 
 	var rigRootMQ *config.MergeQueueConfig
-	if rigCfg, err := LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg != nil {
+	rigPath := filepath.Join(townRoot, rigName)
+	rigCfg, err := LoadRigConfigIfPresent(rigPath)
+	if err != nil {
+		WarnRigConfigOnce(rigPath, err)
+	}
+	if rigCfg != nil {
 		rigRootMQ = rigCfg.MergeQueue
 	}
 

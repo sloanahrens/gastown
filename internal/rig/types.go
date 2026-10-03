@@ -84,11 +84,15 @@ func (r *Rig) BeadsPath() string {
 	return r.Path
 }
 
-// DefaultBranch returns the configured default branch for this rig.
-// Falls back to "main" if not configured or if config cannot be loaded.
+// DefaultBranch returns the configured default branch for this rig, falling
+// back to "main" when config.json is absent or leaves default_branch unset and
+// reporting a config.json that exists but does not decode (gt-w8dw5).
 func (r *Rig) DefaultBranch() string {
-	cfg, err := LoadRigConfig(r.Path)
-	if err != nil || cfg.DefaultBranch == "" {
+	cfg, err := LoadRigConfigIfPresent(r.Path)
+	if err != nil {
+		WarnRigConfigOnce(r.Path, err)
+	}
+	if cfg == nil || cfg.DefaultBranch == "" {
 		return "main"
 	}
 	return cfg.DefaultBranch

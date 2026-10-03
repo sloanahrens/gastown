@@ -178,7 +178,11 @@ func ensureDefaultBranch(dir, roleName, rigPath string) error {
 
 	// Get configured default branch for this rig
 	defaultBranch := "main" // fallback
-	if rigCfg, err := rig.LoadRigConfig(rigPath); err == nil && rigCfg.DefaultBranch != "" {
+	rigCfg, cfgErr := rig.LoadRigConfigIfPresent(rigPath)
+	if cfgErr != nil {
+		rig.WarnRigConfigOnce(rigPath, cfgErr)
+	}
+	if rigCfg != nil && rigCfg.DefaultBranch != "" {
 		defaultBranch = rigCfg.DefaultBranch
 	}
 
@@ -218,7 +222,11 @@ func warnIfNotDefaultBranch(dir, roleName, rigPath string) {
 	}
 
 	defaultBranch := "main"
-	if rigCfg, err := rig.LoadRigConfig(rigPath); err == nil && rigCfg.DefaultBranch != "" {
+	rigCfg, cfgErr := rig.LoadRigConfigIfPresent(rigPath)
+	if cfgErr != nil {
+		rig.WarnRigConfigOnce(rigPath, cfgErr)
+	}
+	if rigCfg != nil && rigCfg.DefaultBranch != "" {
 		defaultBranch = rigCfg.DefaultBranch
 	}
 

@@ -161,7 +161,12 @@ func runDoneCrew(opts Options, exitType string, getenv func(string) string) erro
 		defaultBranch: "main",
 	}
 	if rigName != "" {
-		if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
+		rigPath := filepath.Join(townRoot, rigName)
+		rigCfg, cfgErr := rig.LoadRigConfigIfPresent(rigPath)
+		if cfgErr != nil {
+			rig.WarnRigConfigOnce(rigPath, cfgErr)
+		}
+		if rigCfg != nil && rigCfg.DefaultBranch != "" {
 			r.defaultBranch = rigCfg.DefaultBranch
 		}
 	}

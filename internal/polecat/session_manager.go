@@ -297,7 +297,11 @@ func parseFreshBranchName(branch string) freshBranchMeta {
 
 func (m *SessionManager) canonicalSessionStartPoint(g gitRepo) string {
 	defaultBranch := ""
-	if rigCfg, err := rig.LoadRigConfig(m.rig.Path); err == nil && rigCfg.DefaultBranch != "" {
+	rigCfg, cfgErr := rig.LoadRigConfigIfPresent(m.rig.Path)
+	if cfgErr != nil {
+		rig.WarnRigConfigOnce(m.rig.Path, cfgErr)
+	}
+	if rigCfg != nil {
 		defaultBranch = rigCfg.DefaultBranch
 	}
 	if defaultBranch == "" {

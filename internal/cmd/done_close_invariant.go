@@ -103,7 +103,12 @@ func doneCloseTimeInvariantSkipReason(cwd, townRoot, rigName, issueID string) st
 // the default branch (nothing to compare against itself).
 func closeTimeBranchTarget(g *git.Git, townRoot, rigName string) (branch, target string, ok bool) {
 	defaultBranch := "main"
-	if rigCfg, err := rig.LoadRigConfig(filepath.Join(townRoot, rigName)); err == nil && rigCfg.DefaultBranch != "" {
+	rigPath := filepath.Join(townRoot, rigName)
+	rigCfg, cfgErr := rig.LoadRigConfigIfPresent(rigPath)
+	if cfgErr != nil {
+		rig.WarnRigConfigOnce(rigPath, cfgErr)
+	}
+	if rigCfg != nil && rigCfg.DefaultBranch != "" {
 		defaultBranch = rigCfg.DefaultBranch
 	}
 	branch, err := g.CurrentBranch()

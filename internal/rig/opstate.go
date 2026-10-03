@@ -65,9 +65,15 @@ func getOpState(townRoot, rigName string, store beads.Client) (OpState, string) 
 	rigPath := filepath.Join(townRoot, rigName)
 
 	// Prefix from the rig's own config.json, falling back to the town
-	// registry when config.json is missing.
+	// registry when config.json is missing. A config.json that exists but does
+	// not decode is reported: falling back there would read a different rig's
+	// prefix than the operator's file names (gt-w8dw5).
 	var prefix string
-	if rigCfg, err := LoadRigConfig(rigPath); err == nil && rigCfg.Beads != nil {
+	rigCfg, cfgErr := LoadRigConfigIfPresent(rigPath)
+	if cfgErr != nil {
+		WarnRigConfigOnce(rigPath, cfgErr)
+	}
+	if rigCfg != nil && rigCfg.Beads != nil {
 		prefix = rigCfg.Beads.Prefix
 	} else {
 		prefix = config.GetRigPrefix(townRoot, rigName)
