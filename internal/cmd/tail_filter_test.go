@@ -141,6 +141,43 @@ func TestTailClassOf(t *testing.T) {
 	}
 }
 
+// TestTailClassOf_ZeroCountSummaries: a healthy dispatcher tick and a GREEN
+// sweep are both quiet, and the words they spend on nothing must not read as
+// failures. The two healthy lines are verbatim from daemon.log; the rest are
+// the same lines with one count moved off zero, which is the only thing that
+// should turn them red (gt-wjuxp).
+func TestTailClassOf_ZeroCountSummaries(t *testing.T) {
+	t.Parallel()
+	const (
+		tickQuiet = "spec_dispatch: tick: 0 candidate(s), roster deepseek-flash 0/3, 0 dispatched, 0 refused, 0 planning, 0 skipped, 0 failed, 0 held by the failed label"
+		sweepYard = "tier-sweep: shell GREEN passed=6 failed=0 skipped=0 (logs /var/folders/dx/ccj87p8d14l8cs64cnp691pm0000gn/T//tier-sweep.vqEOw3)"
+	)
+	cases := []struct {
+		text string
+		want tailClass
+	}{
+		{tickQuiet, tailClassPlain},
+		{sweepYard, tailClassSuccess},
+		// The same lines with one count above zero stay failure: "N failed"
+		// as a bare pair, "N held by the failed label", and "failed=1".
+		{"spec_dispatch: tick: 0 candidate(s), roster deepseek-flash 0/3, 0 dispatched, 0 refused, 0 planning, 0 skipped, 2 failed, 0 held by the failed label", tailClassFailure},
+		{"spec_dispatch: tick: 0 candidate(s), roster deepseek-flash 0/3, 0 dispatched, 0 refused, 0 planning, 0 skipped, 0 failed, 3 held by the failed label", tailClassFailure},
+		{"tier-sweep: integration RED passed=31 failed=1", tailClassFailure},
+		// Every word tailZeroCountRe lists, as a key=value zero, is a count of
+		// none; the nonzero form is not.
+		{"pass: landed=0, repaired=0, rejected=0", tailClassPlain},
+		{"pass: landed=0, repaired=0, rejected=1", tailClassFailure},
+		{"patrol: restarted=0, refused=0, skipped=0, unknown=0, error=0", tailClassPlain},
+		{"patrol: restarted=1", tailClassRestart},
+		{"patrol: refused=1", tailClassPlain},
+	}
+	for _, c := range cases {
+		if got := tailClassOf(c.text); got != c.want {
+			t.Errorf("tailClassOf(%q) = %v, want %v", c.text, got, c.want)
+		}
+	}
+}
+
 // TestRenderLine_DrawsOnlyWhenDecorated: a decorated view colors the text and
 // tags the class with an emoji; an undecorated one (a pipe, or --color=never)
 // emits neither. The routine classes stay dim and untagged either way.

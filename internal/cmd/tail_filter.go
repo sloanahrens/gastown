@@ -391,9 +391,13 @@ var (
 	// tailZeroCountRe: a running summary's count of none — the patrol scan's
 	// "0 restarted, 0 refused, 0 error(s)", the landing pass's "2 landed, 0
 	// repaired, 0 rejected, 0 failed". What such a line reports is the
-	// nonzero part of it, so its zero pairs are struck from the copy the
-	// classifier reads; the line itself prints whole.
-	tailZeroCountRe = regexp.MustCompile(`\b0 (landed|repaired|rejected|failed|restarted|refused|skipped|unknown|error)\b`)
+	// nonzero part of it, so its zero counts are struck from the copy the
+	// classifier reads; the line itself prints whole. Three shapes carry such
+	// a zero: the bare pair ("0 failed"), the key=value summary's "failed=0",
+	// and the dispatcher tick's trailing "0 held by the failed label" — that
+	// last one spends the word "failed" without a count of it, and the count
+	// in front is the one that matters (gt-wjuxp).
+	tailZeroCountRe = regexp.MustCompile(`\b0 (landed|repaired|rejected|failed|restarted|refused|skipped|unknown|error)\b|\b(landed|repaired|rejected|failed|restarted|refused|skipped|unknown|error)=0\b|\b0 held by the failed label\b`)
 )
 
 // tailClassOf classifies one line's text. The classes are tried most severe
