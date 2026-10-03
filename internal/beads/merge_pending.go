@@ -70,8 +70,9 @@ type DependencyMergeStatus struct {
 // to a blocker and so cannot hold one back.
 func OpenMRsBySourceIssue(c Client) (map[string]*Issue, error) {
 	mrs, err := ListMergeRequests(c, ListOptions{
-		Status: "open",
-		Label:  "gt:merge-request",
+		Status:   "open",
+		Label:    "gt:merge-request",
+		Priority: -1, // no priority filter: MRs carry their creator's priority
 	})
 	if err != nil {
 		return nil, err

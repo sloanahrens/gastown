@@ -58,8 +58,12 @@ func mergeSlotStatusFromIssue(issue *Issue) *MergeSlotStatus {
 
 // getMergeSlotBead finds the merge slot bead (label=gt:merge-slot).
 // Returns ErrNotFound if no slot bead exists.
+//
+// Priority -1 leaves the read unfiltered: MergeSlotCreate reaches bd through
+// CreateOptions' zero value, which bd reads as --priority=0, so a zero-value
+// filter would find the slot only by coincidence of the creator's default.
 func getMergeSlotBead(b Client) (*Issue, error) {
-	issues, err := b.List(ListOptions{Label: "gt:merge-slot"})
+	issues, err := b.List(ListOptions{Label: "gt:merge-slot", Priority: -1})
 	if err != nil {
 		return nil, fmt.Errorf("listing merge slot beads: %w", err)
 	}

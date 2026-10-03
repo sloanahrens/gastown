@@ -36,8 +36,9 @@ func findMRForBranch(c Client, branch string, skipClosed bool) (*Issue, error) {
 		return b.findMRForBranch(branch, skipClosed)
 	}
 	issues, err := ListMergeRequests(c, ListOptions{
-		Status: "all",
-		Label:  "gt:merge-request",
+		Status:   "all",
+		Label:    "gt:merge-request",
+		Priority: -1, // no priority filter: MRs carry their creator's priority
 	})
 	if err != nil {
 		return nil, err
@@ -74,8 +75,9 @@ func (b *Beads) mergeRequestsForBranchSearch() ([]*Issue, error) {
 		return b.mrCache.issues, nil
 	}
 	return b.ListMergeRequests(ListOptions{
-		Status: "all",
-		Label:  "gt:merge-request",
+		Status:   "all",
+		Label:    "gt:merge-request",
+		Priority: -1,
 	})
 }
 
@@ -97,8 +99,9 @@ type mrCacheState struct {
 // create/close merge-request beads mid-run.
 func (b *Beads) PreloadMergeRequests() error {
 	mrs, err := b.ListMergeRequests(ListOptions{
-		Status: "all",
-		Label:  "gt:merge-request",
+		Status:   "all",
+		Label:    "gt:merge-request",
+		Priority: -1,
 	})
 	if err != nil {
 		return err
@@ -112,8 +115,9 @@ func (b *Beads) PreloadMergeRequests() error {
 // an issue and to supersede old MRs when a new one is created.
 func FindOpenMRsForIssue(c Client, issueID string) ([]*Issue, error) {
 	issues, err := ListMergeRequests(c, ListOptions{
-		Status: "open",
-		Label:  "gt:merge-request",
+		Status:   "open",
+		Label:    "gt:merge-request",
+		Priority: -1,
 	})
 	if err != nil {
 		return nil, err

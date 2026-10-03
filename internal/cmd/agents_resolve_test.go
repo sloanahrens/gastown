@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
 
 func TestAgentBeadMatchesDescriptionAndIDFallback(t *testing.T) {
@@ -202,4 +203,70 @@ func candidate(id string, source agentBeadSource, status string) agentBeadCandid
 		Status: status,
 		Issue:  &beads.Issue{ID: id, Status: status},
 	}
+}
+
+// listRecorder wraps a Client and keeps every ListOptions it was called with,
+// so a test can assert on the read's filters as well as its results.
+type listRecorder struct {
+	beads.Client
+	calls []beads.ListOptions
+}
+
+func (r *listRecorder) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	r.calls = append(r.calls, opts)
+	return r.Client.List(opts)
+}
+
+// A P2 agent wisp must survive the wisp read: CreateAgentBead passes no
+// --priority, so bd files agent wisps at its default P2 and a zero-value
+// ListOptions.Priority reads P0 only (gt-vqkah).
+func TestLoadAgentBeadsFromReadsAgentWispsAtAnyPriority(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	wisp, err := db.Create(beads.CreateOptions{
+		Title:       "Agent",
+		Description: "role_type: refinery\nrig: gastown",
+		Labels:      []string{"gt:agent"},
+		Priority:    2, // bd's default for a create without --priority
+		Ephemeral:   true,
+	})
+	if err != nil {
+		t.Fatalf("creating agent wisp: %v", err)
+	}
+
+	rec := &listRecorder{Client: db}
+	candidates, err := loadAgentBeadsFrom(rec, "/tmp/rig/.beads", agentSourceRigIssues, agentSourceRigWisps)
+	if err != nil {
+		t.Fatalf("loadAgentBeadsFrom returned error: %v", err)
+	}
+
+	got, ok := candidateByID(candidates, wisp.ID)
+	if !ok {
+		t.Fatalf("candidates = %+v, want the P2 wisp %s from the wisp read", candidates, wisp.ID)
+	}
+	if got.Source != agentSourceRigWisps {
+		t.Fatalf("candidate source = %q, want %q", got.Source, agentSourceRigWisps)
+	}
+
+	var wispRead *beads.ListOptions
+	for i := range rec.calls {
+		if rec.calls[i].Ephemeral {
+			wispRead = &rec.calls[i]
+		}
+	}
+	if wispRead == nil {
+		t.Fatalf("List calls = %+v, want one wisp read", rec.calls)
+	}
+	if wispRead.Priority != -1 {
+		t.Fatalf("wisp read Priority = %d, want -1 (no priority filter)", wispRead.Priority)
+	}
+}
+
+func candidateByID(candidates []agentBeadCandidate, id string) (agentBeadCandidate, bool) {
+	for _, c := range candidates {
+		if c.ID == id {
+			return c, true
+		}
+	}
+	return agentBeadCandidate{}, false
 }

@@ -185,7 +185,10 @@ func findAgentBeadCandidates(cwd, currentBeadsDir string) ([]agentBeadCandidate,
 }
 
 func loadAgentBeadsFromDir(beadsDir string, issueSource, wispSource agentBeadSource) ([]agentBeadCandidate, error) {
-	db := beads.NewWithBeadsDir(filepath.Dir(beadsDir), beadsDir)
+	return loadAgentBeadsFrom(beads.NewWithBeadsDir(filepath.Dir(beadsDir), beadsDir), beadsDir, issueSource, wispSource)
+}
+
+func loadAgentBeadsFrom(db beads.Client, beadsDir string, issueSource, wispSource agentBeadSource) ([]agentBeadCandidate, error) {
 	var candidates []agentBeadCandidate
 
 	issues, err := listAgentIssues(db)
@@ -202,7 +205,7 @@ func loadAgentBeadsFromDir(beadsDir string, issueSource, wispSource agentBeadSou
 		})
 	}
 
-	if wisps, err := db.List(beads.ListOptions{Ephemeral: true, Label: "gt:agent", Status: "all"}); err == nil {
+	if wisps, err := listAgentWisps(db); err == nil {
 		for _, wisp := range wisps {
 			candidates = append(candidates, agentBeadCandidate{
 				ID:       wisp.ID,
@@ -217,7 +220,7 @@ func loadAgentBeadsFromDir(beadsDir string, issueSource, wispSource agentBeadSou
 	return candidates, nil
 }
 
-func listAgentIssues(db *beads.Beads) ([]*beads.Issue, error) {
+func listAgentIssues(db beads.Client) ([]*beads.Issue, error) {
 	// Limit 0 is unlimited (bd's default page is 50); Priority -1 leaves the
 	// priority unfiltered, where 0 would mean P0 only.
 	return db.List(beads.ListOptions{
@@ -226,6 +229,19 @@ func listAgentIssues(db *beads.Beads) ([]*beads.Issue, error) {
 		Status:       "all",
 		Limit:        0,
 		Priority:     -1,
+	})
+}
+
+func listAgentWisps(db beads.Client) ([]*beads.Issue, error) {
+	// Same trap as listAgentIssues: CreateAgentBead passes no --priority, so bd
+	// files agent wisps at its default P2 and the zero value here would read
+	// P0 only (gt-vqkah).
+	return db.List(beads.ListOptions{
+		Ephemeral: true,
+		Label:     "gt:agent",
+		Status:    "all",
+		Limit:     0,
+		Priority:  -1,
 	})
 }
 
