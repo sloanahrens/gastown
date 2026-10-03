@@ -309,8 +309,7 @@ spec dispatcher lints, so the bead is dispatchable instead of held unshaped:
 Goal (what exists after it lands), Constraints (the files to change, and what
 must not change), Out of scope (what the bead is not), Gate (the command that
 proves it) and Size (one worker, one landing), plus at least one acceptance
-item. `gt bead create` has no `--acceptance` flag, so take the new id from `-q`
-and set the acceptance with `gt bead update`:
+item. `--acceptance` sets that item in the same command:
 ```bash
 desc="$(cat <<'BEAD'
 ## Goal
@@ -325,9 +324,9 @@ desc="$(cat <<'BEAD'
 one worker, one landing
 BEAD
 )"
-id=$(gt bead create --title "Found: <short description>" --type task --priority 3 --description "$desc" -q)
-gt bead update "$id" --acceptance "- [ ] <the observable result a reviewer can check>"
-# Note the ID, continue with your work
+gt bead create --title "Found: <short description>" --type task --priority 3 \
+  --description "$desc" --acceptance "- [ ] <the observable result a reviewer can check>" -q
+# Note the printed ID, continue with your work
 ```
 
 Do NOT fix unrelated issues in this branch.
