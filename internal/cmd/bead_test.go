@@ -47,8 +47,9 @@ func mustShowBead(t *testing.T, c beads.Client, id string) *beads.Issue {
 func TestBeadCreate(t *testing.T) {
 	t.Parallel()
 	v, fake, out := testBeadVerbs("gastown/polecats/opal")
+	criteria := "- [ ] the flag sets the field"
 	err := v.create(beadCreateRequest{title: "Found: nil map", kind: "bug", priority: 1,
-		labels: []string{"pr-review"}, description: "details", quiet: true})
+		labels: []string{"pr-review"}, description: "details", acceptance: criteria, quiet: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,6 +57,7 @@ func TestBeadCreate(t *testing.T) {
 	got := mustShowBead(t, fake, id)
 	sort.Strings(got.Labels)
 	if got.Title != "Found: nil map" || got.Priority != 1 || got.Description != "details" ||
+		got.AcceptanceCriteria != criteria ||
 		got.CreatedBy != "gastown/polecats/opal" || !reflect.DeepEqual(got.Labels, []string{"gt:bug", "pr-review"}) {
 		t.Errorf("created %+v", got)
 	}

@@ -1882,6 +1882,54 @@ exit 0
 	}
 }
 
+// TestCreateAcceptanceGoesThroughArgv: the criteria block reaches bd create
+// as one --acceptance argv element with its newlines intact, so a follow-up
+// that needs criteria is one command instead of create-then-update (gt-iowd4).
+func TestCreateAcceptanceGoesThroughArgv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script bd stub")
+	}
+
+	ResetBdAllowStaleCacheForTest()
+	t.Setenv("BD_ACTOR", "")
+	stubDir := t.TempDir()
+	argsPath := filepath.Join(stubDir, "args.txt")
+	stubPath := filepath.Join(stubDir, "bd")
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "--allow-stale" ]; then
+  echo "Error: unknown flag: --allow-stale" >&2
+  exit 0
+fi
+for a in "$@"; do
+  printf '%%s\n' "$a" >> %q
+done
+printf '{"id":"gt-test1","title":"x","status":"open","priority":2,"labels":[]}\n'
+exit 0
+`, argsPath)
+	if err := os.WriteFile(stubPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	criteria := "- [ ] make gate passes\n- [ ] the block survives argv"
+	is, err := New(t.TempDir()).Create(CreateOptions{Title: "file the follow-up", Priority: -1, Acceptance: criteria})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if is.ID != "gt-test1" {
+		t.Errorf("Create returned id %q, want gt-test1", is.ID)
+	}
+
+	argsData, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read args: %v", err)
+	}
+	want := "create\n--json\n--title=file the follow-up\n--acceptance=" + criteria + "\n"
+	if got := string(argsData); got != want {
+		t.Fatalf("argv =\n%q\nwant\n%q", got, want)
+	}
+}
+
 func TestUpdateDescriptionUsesBodyFileStdin(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("test uses Unix shell script bd stub")
