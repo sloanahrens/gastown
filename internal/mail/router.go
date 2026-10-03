@@ -61,11 +61,28 @@ type Router struct {
 }
 
 // townBeads is what the router reads from the town's beads (channel beads
-// and agents' notification levels), plus channel retention. *beads.Beads implements it.
+// and agents' notification levels), plus channel retention.
 type townBeads interface {
 	GetChannelBead(name string) (*beads.Issue, *beads.ChannelFields, error)
 	GetAgentNotificationLevel(id string) (string, error)
 	EnforceChannelRetention(name string) error
+}
+
+// channelTown adapts a *beads.Beads to townBeads: the channel helpers are
+// free functions over beads.Client now (gt-7iwy0.4.4), and the agent
+// notification level is still a *Beads method (agent-bead slice).
+type channelTown struct{ b *beads.Beads }
+
+func (t channelTown) GetChannelBead(name string) (*beads.Issue, *beads.ChannelFields, error) {
+	return beads.GetChannelBead(t.b, name)
+}
+
+func (t channelTown) GetAgentNotificationLevel(id string) (string, error) {
+	return t.b.GetAgentNotificationLevel(id)
+}
+
+func (t channelTown) EnforceChannelRetention(name string) error {
+	return beads.EnforceChannelRetention(t.b, name)
 }
 
 // townBeads is r.town, or bd in the town root.
@@ -73,7 +90,7 @@ func (r *Router) townBeads() townBeads {
 	if r.town != nil {
 		return r.town
 	}
-	return beads.NewWithBeadsDir(r.townRoot, "")
+	return channelTown{beads.NewWithBeadsDir(r.townRoot, "")}
 }
 
 // notifyTmux is the tmux surface notifyRecipient drives. *tmux.Tmux
