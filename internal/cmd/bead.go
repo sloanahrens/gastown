@@ -28,7 +28,7 @@ var beadCmd = &cobra.Command{
 
 Read with 'gt show' or 'bd show'; write with these:
 
-  gt bead create "title" --type=bug    File a bead (--rig <rig> files in another rig)
+  gt bead create "title"               File a bead (--rig <rig> files in another rig)
   gt bead note <id> "findings"         Append to the bead's notes
   gt bead update <id> --title=...      Edit title, priority, labels, acceptance
   gt bead claim <id>                   Claim a bead (in_progress, assigned to you)
@@ -75,10 +75,13 @@ kind as a gt:<type> label.
 --acceptance sets the criteria block on the new bead, so a follow-up that
 needs one is a single command rather than create-then-update.
 
+Before filing discovered work, read the five-section example in the
+mol-polecat-work formula's Discovered work block, and copy its shape, so the
+spec dispatcher slots the bead instead of holding it unshaped.
+
 Examples:
-  gt bead create "Found: nil map in sling" --type=bug --priority=2
-  gt bead create --rig=beads "bd CLI bug: ..." --type=bug
   gt bead create "Add --acceptance" --acceptance="- [ ] the flag sets the field"
+  gt bead create --rig=beads "bd CLI: slow query on list" -q   # file in another rig
   gt bead create "Fix-merge PR #1234" -l pr-review -q   # print only the ID`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
