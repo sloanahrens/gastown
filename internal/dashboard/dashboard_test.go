@@ -107,9 +107,10 @@ func TestPollsFillStateAndFeedReachesAPage(t *testing.T) {
 		},
 		Health:  func() Health { return Health{Line: "GREEN ok", Verdict: "green"} },
 		Machine: func() (Machine, error) { return Machine{Load1: 7.5, At: now}, nil },
-		Summary: func() Summary { return Summary{Seats: []SeatRef{{Rig: "gastown", Polecat: "agate", Bead: "gt-abc"}}} },
-		Title:   func(id string) string { return "the title of " + id },
-		Now:     func() time.Time { return now.Add(10 * time.Minute) },
+		Summary: func() Summary {
+			return Summary{Polecats: []Polecat{{Rig: "gastown", Name: "agate", Bead: "gt-abc", Title: "the title", State: StateWorking}}}
+		},
+		Now: func() time.Time { return now.Add(10 * time.Minute) },
 	})
 	page, _ := h.Subscribe()
 	defer h.Unsubscribe(page)
@@ -123,11 +124,11 @@ func TestPollsFillStateAndFeedReachesAPage(t *testing.T) {
 	if st.Health.Verdict != "green" || st.Machine.Load1 != 7.5 || st.Viewers != 1 {
 		t.Fatalf("state = %+v", st)
 	}
-	if len(st.Seats) != 1 {
-		t.Fatalf("seats = %+v", st.Seats)
+	if len(st.Polecats) != 1 {
+		t.Fatalf("polecats = %+v", st.Polecats)
 	}
-	if seat := st.Seats[0]; seat.Title != "the title of gt-abc" || seat.Elapsed != 600 {
-		t.Errorf("seat = %+v (want its title, and 600s from the dispatch line to now)", seat)
+	if p := st.Polecats[0]; p.Title != "the title" || p.ElapsedSec != 600 {
+		t.Errorf("polecat = %+v (want its title, and 600s from the dispatch line to now)", p)
 	}
 	if len(st.Gates) != 1 || st.Gates[0].Secs != 301 || st.Gates[0].Load == nil || *st.Gates[0].Load != 7.5 {
 		t.Errorf("gates = %+v", st.Gates)
@@ -247,5 +248,48 @@ func TestStreamSendsStateFirstAndUnsubscribes(t *testing.T) {
 	}
 	if n := h.viewers(); n != 0 {
 		t.Fatalf("%d pages still subscribed after the stream ended", n)
+	}
+}
+
+func TestPolecatOverlaysQuietAndGating(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 3, 16, 0, 0, 0, time.UTC)
+	active := now.Add(-11 * time.Minute)
+	recent := now.Add(-time.Minute)
+	h := NewHub(Config{
+		Now: func() time.Time { return now },
+		Summary: func() Summary {
+			return Summary{Polecats: []Polecat{
+				{Rig: "g", Name: "silent", Bead: "gt-1", State: StateWorking, HasSession: true, LastActive: &active},
+				{Rig: "g", Name: "busy", Bead: "gt-2", State: StateWorking, HasSession: true, LastActive: &recent},
+				{Rig: "g", Name: "landing", Bead: "gt-3", State: StateQueued},
+				{Rig: "g", Name: "free", State: StateIdle},
+			}}
+		},
+		Feed: func() []Entry {
+			return []Entry{{At: now, Kind: "daemon", Text: "landing_worker: [land] gt-3: merged abc onto origin/main (def) as ghi; gating the merged tree, then om review"}}
+		},
+	})
+	h.pollSummary()
+	h.pollFeed()
+	got := map[string]string{}
+	for _, p := range h.State().Polecats {
+		got[p.Name] = p.State
+	}
+	want := map[string]string{"silent": StateQuiet, "busy": StateWorking, "landing": StateGating, "free": StateIdle}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %q, want %q (all: %v)", k, got[k], v, got)
+		}
+	}
+	// the landing worker's verdict ends the gating phase
+	h.cfg.Feed = func() []Entry {
+		return []Entry{{At: now, Kind: "daemon", Text: "landing_worker: [land] gt-3: landed abc on origin/main (patch-id x)"}}
+	}
+	h.pollFeed()
+	for _, p := range h.State().Polecats {
+		if p.Name == "landing" && p.State != StateQueued {
+			t.Errorf("after landing, state = %q, want queued (the summary's own view)", p.State)
+		}
 	}
 }

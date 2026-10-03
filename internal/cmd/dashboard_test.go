@@ -2,21 +2,7 @@ package cmd
 
 import (
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/dashboard"
 )
-
-func TestParseSeatPair(t *testing.T) {
-	t.Parallel()
-	got := parseSeatPair("gastown/agate:gt-4k3fj.14")
-	want := dashboard.SeatRef{Rig: "gastown", Polecat: "agate", Bead: "gt-4k3fj.14"}
-	if got != want {
-		t.Errorf("parseSeatPair = %+v, want %+v", got, want)
-	}
-	if parseSeatPair("no-colon") != (dashboard.SeatRef{}) {
-		t.Error("a pair with no bead must parse to the zero ref")
-	}
-}
 
 func TestDashboardClassName(t *testing.T) {
 	t.Parallel()

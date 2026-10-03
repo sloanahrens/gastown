@@ -23,8 +23,8 @@ type Hub struct {
 	seq      int64
 	subs     map[*Sub]struct{}
 	slung    map[string]time.Time // bead -> when a dispatch line named it
-	titles   map[string]string
-	seatRefs []SeatRef
+	gating   map[string]bool      // beads the landing worker is gating right now
+	polecats []Polecat
 
 	// wake nudges every worker when a page connects after an idle spell, so
 	// the first page does not wait out a whole interval for fresh data.
@@ -44,7 +44,7 @@ func NewHub(cfg Config) *Hub {
 		cfg:    cfg,
 		subs:   map[*Sub]struct{}{},
 		slung:  map[string]time.Time{},
-		titles: map[string]string{},
+		gating: map[string]bool{},
 		wake:   make(chan struct{}),
 	}
 }
@@ -174,7 +174,7 @@ func (h *Hub) stateLocked() State {
 	st := h.state
 	st.Now = h.cfg.Now()
 	st.Viewers = len(h.subs)
-	st.Seats = h.seatsLocked(st.Now)
+	st.Polecats = h.polecatsLocked(st.Now)
 	return st
 }
 
@@ -249,46 +249,56 @@ func (h *Hub) pollSpend() {
 
 func (h *Hub) pollSummary() {
 	s := h.cfg.Summary()
-	titles := map[string]string{}
-	if h.cfg.Title != nil {
-		for _, r := range s.Seats {
-			if t := h.cfg.Title(r.Bead); t != "" {
-				titles[r.Bead] = t
-			}
-		}
-	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.seatRefs = s.Seats
-	for id, t := range titles {
-		h.titles[id] = t
-	}
+	h.polecats = s.Polecats
 	h.state.Summary = &s
 	h.state.SummaryAt = h.cfg.Now()
 	h.publishLocked()
 }
 
-// seatsLocked joins the seat list with the titles and dispatch times known.
-func (h *Hub) seatsLocked(now time.Time) []Seat {
-	out := make([]Seat, 0, len(h.seatRefs))
-	for _, r := range h.seatRefs {
-		s := Seat{SeatRef: r, Title: h.titles[r.Bead]}
-		if at, ok := h.slung[r.Bead]; ok {
+// polecatsLocked adds the live parts to the summary's polecats: the dispatch
+// time off the feed, how long the session has been silent, and the gating
+// phase off the landing worker's lines. Working becomes quiet here, not in the
+// summary, so a session that goes silent shows within a poll, not a minute.
+func (h *Hub) polecatsLocked(now time.Time) []Polecat {
+	out := make([]Polecat, len(h.polecats))
+	copy(out, h.polecats)
+	for i := range out {
+		p := &out[i]
+		if p.Bead == "" {
+			continue
+		}
+		if at, ok := h.slung[p.Bead]; ok {
 			at := at
-			s.Slung = &at
+			p.Slung = &at
 			if d := now.Sub(at); d > 0 {
-				s.Elapsed = int64(d / time.Second)
+				p.ElapsedSec = int64(d / time.Second)
 			}
 		}
-		out = append(out, s)
+		if p.LastActive != nil {
+			if d := now.Sub(*p.LastActive); d > 0 {
+				p.QuietSec = int64(d / time.Second)
+			}
+		}
+		switch {
+		case h.gating[p.Bead] && p.State != StateIdle:
+			p.State = StateGating
+		case p.State == StateWorking && p.HasSession && time.Duration(p.QuietSec)*time.Second >= QuietAfter:
+			p.State = StateQuiet
+		}
 	}
 	return out
 }
 
 var (
-	slungRe  = regexp.MustCompile(`([A-Za-z0-9][\w.-]*):? slung to `)
-	stagesRe = regexp.MustCompile(`\bstages: `)
-	gateRe   = regexp.MustCompile(`\bgate ((?:\d+h)?(?:\d+m)?\d+(?:\.\d+)?s)\b`)
+	slungRe = regexp.MustCompile(`([A-Za-z0-9][\w.-]*):? slung to `)
+	// A bead is gated from the worker's "merged ... gating" line until it lands,
+	// is rejected, or reports its stage times.
+	gateStartRe = regexp.MustCompile(`\[land\] (\S+): merged .*gating`)
+	gateEndRe   = regexp.MustCompile(`\[land\] (\S+): (?:stages: |landed |rejected )`)
+	stagesRe    = regexp.MustCompile(`\bstages: `)
+	gateRe      = regexp.MustCompile(`\bgate ((?:\d+h)?(?:\d+m)?\d+(?:\.\d+)?s)\b`)
 )
 
 func (h *Hub) pollFeed() {
@@ -305,6 +315,13 @@ func (h *Hub) pollFeed() {
 		h.ring = append(h.ring, e)
 		if m := slungRe.FindStringSubmatch(e.Text); m != nil {
 			h.slung[m[1]] = e.At
+			changed = true
+		}
+		if m := gateStartRe.FindStringSubmatch(e.Text); m != nil {
+			h.gating[m[1]] = true
+			changed = true
+		} else if m := gateEndRe.FindStringSubmatch(e.Text); m != nil && h.gating[m[1]] {
+			delete(h.gating, m[1])
 			changed = true
 		}
 		if g, ok := gatePoint(e, h.loadAtLocked(e.At)); ok {
