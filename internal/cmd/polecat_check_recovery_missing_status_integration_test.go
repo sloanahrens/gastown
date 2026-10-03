@@ -140,7 +140,7 @@ func TestIntegrationCheckRecoveryMissingCleanupStatusEscape(t *testing.T) {
 			b := db
 
 			p := &polecat.Polecat{Name: polecatName, Rig: rigName, State: polecat.StateIdle, ClonePath: tt.worktree(t), Branch: branch, Issue: sourceID}
-			status := checkRecoveryForPolecat(b, r, rigName, polecatName, p, false)
+			status := checkRecoveryForPolecat(b, nil, r, rigName, polecatName, p, false)
 
 			if status.SafeToNuke != tt.wantSafe || status.Verdict != tt.wantVerdict {
 				t.Fatalf("SafeToNuke/Verdict = %v/%s, want %v/%s (status %+v)", status.SafeToNuke, status.Verdict, tt.wantSafe, tt.wantVerdict, status)
@@ -156,19 +156,10 @@ func TestIntegrationCheckRecoveryMissingCleanupStatusEscape(t *testing.T) {
 	}
 }
 
-// recoveryDB is a beadsfake database with the agent-bead and merge-request
-// helpers check-recovery reads, each reduced to Client operations.
+// recoveryDB is a beadsfake database with the merge-request lookup
+// check-recovery reads. Its Client surface is the fake's: the agent-bead reads
+// and writes go through the free functions (gt-7iwy0.4.7).
 type recoveryDB struct{ *beadsfake.Fake }
-
-func (db *recoveryDB) GetAgentBead(id string) (*beads.Issue, *beads.AgentFields, error) {
-	issue, err := db.Show(id)
-	if err != nil {
-		return nil, nil, err
-	}
-	fields := beads.ParseAgentFields(issue.Description)
-	fields.AgentState = beads.ResolveAgentState(issue.Description, issue.AgentState)
-	return issue, fields, nil
-}
 
 func (db *recoveryDB) FindMRForBranchAny(branch string) (*beads.Issue, error) {
 	mrs, err := db.List(beads.ListOptions{Label: "gt:merge-request", Status: "all", Priority: -1})
@@ -181,8 +172,4 @@ func (db *recoveryDB) FindMRForBranchAny(branch string) (*beads.Issue, error) {
 		}
 	}
 	return nil, nil
-}
-
-func (db *recoveryDB) UpdateAgentCleanupStatus(id, status string) error {
-	return beads.UpdateAgentDescriptionFields(db.Fake, id, beads.AgentFieldUpdates{CleanupStatus: &status})
 }

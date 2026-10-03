@@ -451,7 +451,7 @@ func disableCurrentAgentDND(townRoot string) (bool, error) {
 	}
 
 	bd := beads.New(townRoot)
-	level, err := bd.GetAgentNotificationLevel(agentBeadID)
+	level, err := beads.GetAgentNotificationLevel(bd, agentBeadID)
 	if err != nil {
 		// Missing bead/field should not block startup.
 		return false, nil
@@ -460,7 +460,7 @@ func disableCurrentAgentDND(townRoot string) (bool, error) {
 		return false, nil
 	}
 
-	if err := bd.UpdateAgentNotificationLevel(agentBeadID, beads.NotifyNormal); err != nil {
+	if err := beads.UpdateAgentNotificationLevel(bd, agentBeadID, beads.NotifyNormal); err != nil {
 		return false, fmt.Errorf("updating notification level for %s: %w", agentBeadID, err)
 	}
 	return true, nil

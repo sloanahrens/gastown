@@ -14,18 +14,11 @@ import (
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
-// agentBeadUpserter captures the subset of bead operations needed by crew add.
-// Using a narrow interface allows deterministic unit tests of crew bead creation
-// behavior without requiring a live bd backend.
-type agentBeadUpserter interface {
-	CreateOrReopenAgentBead(id, title string, fields *beads.AgentFields) (*beads.Issue, error)
-}
-
 // upsertCrewAgentBead ensures the crew agent bead exists with expected metadata.
-// It uses CreateOrReopenAgentBead instead of a Show()+Create sequence so existing
-// beads in alternate stores (issues/wisps) do not trigger false "issue not found"
-// warnings during crew creation.
-func upsertCrewAgentBead(bd agentBeadUpserter, townRoot, rigName, crewName string) (string, error) {
+// It uses beads.CreateOrReopenAgentBead instead of a Show()+Create sequence so
+// existing beads in alternate stores (issues/wisps) do not trigger false "issue
+// not found" warnings during crew creation.
+func upsertCrewAgentBead(bd beads.Client, townRoot, rigName, crewName string) (string, error) {
 	prefix := beads.GetPrefixForRig(townRoot, rigName)
 	crewID := beads.CrewBeadIDWithPrefix(prefix, rigName, crewName)
 	fields := &beads.AgentFields{
@@ -34,7 +27,7 @@ func upsertCrewAgentBead(bd agentBeadUpserter, townRoot, rigName, crewName strin
 		AgentState: "idle",
 	}
 	desc := fmt.Sprintf("Crew worker %s in %s - human-managed persistent workspace.", crewName, rigName)
-	if _, err := bd.CreateOrReopenAgentBead(crewID, desc, fields); err != nil {
+	if _, err := beads.CreateOrReopenAgentBead(bd, crewID, desc, fields); err != nil {
 		return "", err
 	}
 	return crewID, nil

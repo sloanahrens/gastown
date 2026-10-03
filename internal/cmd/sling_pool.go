@@ -234,7 +234,7 @@ func polecatSeatOccupied(disposition polecatDispositionFunc, rigName, polecatNam
 func poolPolecatDisposition(townRoot, rigName, polecatName string) (polecat.WorkstateDisposition, error) {
 	prefix := beads.GetPrefixForRig(townRoot, rigName)
 	agentID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
-	_, fields, err := beads.New(filepath.Join(townRoot, rigName)).ForAgentBead().GetAgentBead(agentID)
+	_, fields, err := beads.GetAgentBead(beads.New(filepath.Join(townRoot, rigName)), agentID)
 	if err != nil {
 		return polecat.WorkstateDisposition{}, err
 	}

@@ -394,7 +394,7 @@ func applyRigOccupancyToCapacitySnapshot(snapshot *polecatCapacitySnapshot, town
 	}
 
 	rigBeads := beads.New(rigPath)
-	agents, err := rigBeads.ListAgentBeads()
+	agents, err := beads.ListAgentBeads(rigBeads)
 	if err != nil {
 		return fmt.Errorf("listing agent beads for %s capacity: %w", rigName, err)
 	}

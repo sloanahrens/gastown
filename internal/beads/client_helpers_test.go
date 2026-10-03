@@ -205,3 +205,122 @@ func agentIDs(agents map[string]*beads.Issue) []string {
 	}
 	return ids
 }
+
+// TestCreateAgentBeadOverClient covers the create: the ID is the caller's, the
+// bead carries gt:agent, and the description round-trips the fields. A
+// flag-like title is refused before anything is written.
+func TestCreateAgentBeadOverClient(t *testing.T) {
+	t.Parallel()
+	c := beadsfake.New()
+
+	const id = "gt-gastown-polecat-toast"
+	issue, err := beads.CreateAgentBead(c, id, "Polecat toast", &beads.AgentFields{
+		RoleType: "polecat", Rig: "gastown", AgentState: "spawning",
+	})
+	if err != nil {
+		t.Fatalf("CreateAgentBead: %v", err)
+	}
+	if issue == nil || issue.ID != id {
+		t.Fatalf("CreateAgentBead = %#v, want the bead under %s", issue, id)
+	}
+
+	stored, err := c.Show(id)
+	if err != nil {
+		t.Fatalf("Show: %v", err)
+	}
+	if !beads.IsAgentBead(stored) {
+		t.Errorf("bead %s is not an agent bead: labels %v type %q", id, stored.Labels, stored.Type)
+	}
+	fields := beads.ParseAgentFields(stored.Description)
+	if fields.RoleType != "polecat" || fields.Rig != "gastown" || fields.AgentState != "spawning" {
+		t.Errorf("created fields = %+v, want role_type=polecat rig=gastown agent_state=spawning", fields)
+	}
+
+	if _, err := beads.CreateAgentBead(c, "gt-gastown-polecat-bad", "--help", nil); err == nil {
+		t.Error("CreateAgentBead accepted a flag-like title")
+	}
+}
+
+// TestCreateOrReopenAgentBeadOverClient covers the upsert: the second call for
+// an ID already in use takes the update path rather than failing the create,
+// and a closed bead is reopened on the way.
+func TestCreateOrReopenAgentBeadOverClient(t *testing.T) {
+	t.Parallel()
+	c := beadsfake.New()
+
+	const id = "gt-gastown-polecat-toast"
+	if _, err := beads.CreateOrReopenAgentBead(c, id, "Polecat toast", &beads.AgentFields{
+		RoleType: "polecat", Rig: "gastown", AgentState: "spawning",
+	}); err != nil {
+		t.Fatalf("CreateOrReopenAgentBead (create): %v", err)
+	}
+
+	issue, err := beads.CreateOrReopenAgentBead(c, id, "Polecat toast", &beads.AgentFields{
+		RoleType: "polecat", Rig: "gastown", AgentState: "working", HookBead: "gt-7iwy0.4.7",
+	})
+	if err != nil {
+		t.Fatalf("CreateOrReopenAgentBead (reopen): %v", err)
+	}
+	fields := beads.ParseAgentFields(issue.Description)
+	if fields.AgentState != "working" || fields.HookBead != "gt-7iwy0.4.7" {
+		t.Fatalf("reopened fields = %+v, want agent_state=working hook_bead=gt-7iwy0.4.7", fields)
+	}
+
+	// A closed bead is reopened, not left closed with fresh fields on it.
+	if err := c.Close(id); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	issue, err = beads.CreateOrReopenAgentBead(c, id, "Polecat toast", &beads.AgentFields{
+		RoleType: "polecat", Rig: "gastown", AgentState: "spawning",
+	})
+	if err != nil {
+		t.Fatalf("CreateOrReopenAgentBead (closed bead): %v", err)
+	}
+	if issue.Status == "closed" {
+		t.Fatalf("CreateOrReopenAgentBead left the bead closed: %#v", issue)
+	}
+}
+
+// TestResetAgentBeadForReuseOverClient covers the nuke reset: mutable fields
+// are cleared, agent_state reads nuked, and the immutable identity fields
+// survive.
+func TestResetAgentBeadForReuseOverClient(t *testing.T) {
+	t.Parallel()
+	c := beadsfake.New()
+
+	const id = "gt-gastown-polecat-toast"
+	used := &beads.AgentFields{
+		RoleType: "polecat", Rig: "gastown", AgentState: "done",
+		HookBead: "gt-work", ActiveMR: "gt-wisp-mr", CleanupStatus: "has_uncommitted",
+		ExitType: "COMPLETED", MRID: "gt-wisp-mr", Branch: "polecat/toast/gt-work",
+		LastSourceIssue: "gt-work", MRFailed: true, PushFailed: true,
+		CompletionTime: "2026-10-02T00:00:00Z",
+	}
+	findAgentBeads(t, c, id, used)
+
+	if err := beads.ResetAgentBeadForReuse(c, id, "nuked"); err != nil {
+		t.Fatalf("ResetAgentBeadForReuse: %v", err)
+	}
+
+	stored, err := c.Show(id)
+	if err != nil {
+		t.Fatalf("Show: %v", err)
+	}
+	if stored.Title != id {
+		t.Errorf("title = %q, want the immutable %q preserved", stored.Title, id)
+	}
+	fields := beads.ParseAgentFields(stored.Description)
+	if fields.AgentState != string(beads.AgentStateNuked) {
+		t.Errorf("agent_state = %q, want %q", fields.AgentState, beads.AgentStateNuked)
+	}
+	if fields.HookBead != "" || fields.ActiveMR != "" || fields.CleanupStatus != "" || fields.Mode != "" {
+		t.Errorf("reset left mutable fields behind: %+v", fields)
+	}
+	if fields.ExitType != "" || fields.MRID != "" || fields.Branch != "" || fields.LastSourceIssue != "" ||
+		fields.MRFailed || fields.PushFailed || fields.CompletionTime != "" {
+		t.Errorf("reset left completion metadata behind: %+v", fields)
+	}
+	if fields.RoleType != "polecat" || fields.Rig != "gastown" {
+		t.Errorf("reset lost the identity fields: %+v", fields)
+	}
+}

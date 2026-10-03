@@ -1480,7 +1480,7 @@ func updateAgentMode(agentID, mode, workDir, townBeadsDir string) {
 
 	agentWorkDir := beads.ResolveHookDir(townRoot, agentBeadID, workDir)
 	bd := beads.New(agentWorkDir)
-	if err := bd.UpdateAgentDescriptionFields(agentBeadID, beads.AgentFieldUpdates{Mode: &mode}); err != nil {
+	if err := beads.UpdateAgentDescriptionFields(bd, agentBeadID, beads.AgentFieldUpdates{Mode: &mode}); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: couldn't set agent %s mode: %v\n", agentBeadID, err)
 	}
 }
@@ -1506,11 +1506,11 @@ func clearReassignedPolecatState(townRoot, assignee string) {
 	bd := beads.New(agentWorkDir)
 
 	emptyHook := ""
-	if err := bd.UpdateAgentDescriptionFields(agentBeadID, beads.AgentFieldUpdates{HookBead: &emptyHook}); err != nil {
+	if err := beads.UpdateAgentDescriptionFields(bd, agentBeadID, beads.AgentFieldUpdates{HookBead: &emptyHook}); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: couldn't clear hook_bead on %s: %v\n", agentBeadID, err)
 	}
 	idle := string(beads.AgentStateIdle)
-	if err := bd.UpdateAgentState(agentBeadID, idle); err != nil {
+	if err := beads.UpdateAgentState(bd, agentBeadID, idle); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: couldn't clear agent_state on %s: %v\n", agentBeadID, err)
 	}
 }

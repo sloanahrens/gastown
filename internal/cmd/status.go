@@ -697,7 +697,7 @@ func detectCurrentDNDStatus(townRoot string) *townstatus.DNDInfo {
 	}
 
 	bd := beads.New(townRoot)
-	level, err := bd.GetAgentNotificationLevel(agentBeadID)
+	level, err := beads.GetAgentNotificationLevel(bd, agentBeadID)
 	if err != nil || level == "" {
 		level = beads.NotifyNormal
 	}

@@ -380,48 +380,10 @@ func (b *Beads) ResetAgentBeadForReuse(id, reason string) error {
 	// agent beads (gt-8we).
 	target := b.resolveAgentBead(id)
 
-	// Get current issue to preserve immutable fields (title, role_type, rig)
-	issue, err := target.Show(id)
-	if err != nil {
-		return err
-	}
-
-	// Parse existing fields and clear mutable ones
-	fields := ParseAgentFields(issue.Description)
-	fields.HookBead = ""      // Clear hook_bead
-	fields.ActiveMR = ""      // Clear active_mr
-	fields.CleanupStatus = "" // Clear cleanup_status
-	fields.Mode = ""          // Clear Ralph-mode threshold marker
-	fields.AgentState = string(AgentStateNuked)
-	// Clear completion metadata (gt-x7t9)
-	fields.ExitType = ""
-	fields.MRID = ""
-	fields.Branch = ""
-	fields.LastSourceIssue = ""
-	fields.MRFailed = false
-	fields.PushFailed = false
-	fields.CompletionTime = ""
-
-	// Update description with cleared fields
-	description := FormatAgentDescription(issue.Title, fields)
-	if err := target.Update(id, UpdateOptions{Description: &description}); err != nil {
-		return fmt.Errorf("resetting agent bead fields: %w", err)
-	}
-
-	// Hook slot no longer maintained (hq-l6mm5) — no need to clear.
-
-	return nil
-}
-
-// UpdateAgentState updates the agent_state field in an agent bead.
-// bd >= 0.62.0 no longer provides a supported `bd agent state` writer, so
-// Gastown writes agent_state through the description field and readers mirror
-// that contract with fallback to the legacy structured column via ResolveAgentState.
-//
-// Resolves the concrete target DB first so the update hits the correct database
-// when the agent bead routes to a different beads dir via routes.jsonl.
-func (b *Beads) UpdateAgentState(id string, state string) error {
-	return UpdateAgentState(b, id, state)
+	// The read-modify-write is shared with the Client path
+	// (resetAgentBeadForReuse); the lock above and the routing here are what
+	// only the store adds.
+	return resetAgentBeadForReuse(target, id)
 }
 
 // SetHookBead and ClearHookBead removed (hq-l6mm5).
@@ -530,13 +492,6 @@ func (b *Beads) UpdateAgentCleanupStatus(id string, cleanupStatus string) error 
 	return UpdateAgentCleanupStatus(b, id, cleanupStatus)
 }
 
-// UpdateAgentActiveMR updates the active_mr field in an agent bead.
-// This links the agent to their current merge request for traceability.
-// Pass empty string to clear the field (e.g., after merge completes).
-func (b *Beads) UpdateAgentActiveMR(id string, activeMR string) error {
-	return UpdateAgentActiveMR(b, id, activeMR)
-}
-
 // ClearAgentActiveMRIfMatches clears active_mr only when it still references
 // expectedMR. It returns true when a clear was written.
 func (b *Beads) ClearAgentActiveMRIfMatches(id string, expectedMR string) (bool, error) {
@@ -558,13 +513,6 @@ func (b *Beads) ClearAgentActiveMRIfMatches(id string, expectedMR string) (bool,
 	return clearAgentActiveMRIfMatches(b, id, expectedMR)
 }
 
-// UpdateAgentNotificationLevel updates the notification_level field in an agent bead.
-// Valid levels: verbose, normal, muted (DND mode).
-// Pass empty string to reset to default (normal).
-func (b *Beads) UpdateAgentNotificationLevel(id string, level string) error {
-	return UpdateAgentNotificationLevel(b, id, level)
-}
-
 // CompletionMetadata holds the fields written by gt done to record
 // polecat work completion on the agent bead. The witness survey-workers
 // step reads these fields to discover completion state from beads
@@ -583,18 +531,6 @@ type CompletionMetadata struct {
 // to an agent bead. Called by gt done to record completion state.
 func (b *Beads) UpdateAgentCompletion(id string, meta *CompletionMetadata) error {
 	return UpdateAgentCompletion(b, id, meta)
-}
-
-// ClearAgentCompletion removes all completion metadata fields from an agent bead.
-// Called when a polecat is re-slung with new work (resets stale completion state).
-func (b *Beads) ClearAgentCompletion(id string) error {
-	return ClearAgentCompletion(b, id)
-}
-
-// GetAgentNotificationLevel returns the notification level for an agent.
-// Returns "normal" if not set (the default).
-func (b *Beads) GetAgentNotificationLevel(id string) (string, error) {
-	return GetAgentNotificationLevel(b, id)
 }
 
 // GetAgentBeadInStoreOnly retrieves an agent bead by ID, but ONLY if it is

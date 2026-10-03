@@ -783,11 +783,12 @@ func tailSeatPicture(townRoot string, listAgent func(rigPath string) (map[string
 	return used, max, pairs, nil
 }
 
-// tailRigAgentBeads lists one rig's agent beads by polecat name. Agent beads
-// are rig-local and their IDs reroot, so the wrapper has to be the agent-scoped
-// one, never a bare beads.New chain (gt-a6g).
+// tailRigAgentBeads lists one rig's agent beads by polecat name. A list reads
+// the wrapper's own database and never per-ID rerouting, so the rig's own
+// store is the whole of what it needs — the agent-scoping that gt-a6g requires
+// of the per-ID helpers has nothing to route here.
 func tailRigAgentBeads(rigPath string) (map[string]*beads.Issue, error) {
-	return beads.New(rigPath).ForAgentBead().ListAgentBeads()
+	return beads.ListAgentBeads(beads.New(rigPath))
 }
 
 // tailReadyToLand counts the beads waiting to land. The label lives on the

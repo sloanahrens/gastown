@@ -59,14 +59,12 @@ type mailDirectorySource interface {
 	ListChannelBeads() (map[string]*beads.ChannelFields, error)
 }
 
-// townDirBeads adapts a *beads.Beads to mailDirectorySource: the group, queue
-// and channel listings are free functions over beads.Client now
-// (gt-7iwy0.4.4), and the agent list is still a *Beads method (agent-bead
-// slice).
+// townDirBeads adapts a *beads.Beads to mailDirectorySource: every listing is
+// a free function over beads.Client now (gt-7iwy0.4.4, gt-7iwy0.4.7).
 type townDirBeads struct{ b *beads.Beads }
 
 func (t townDirBeads) ListAgentBeads() (map[string]*beads.Issue, error) {
-	return t.b.ListAgentBeads()
+	return beads.ListAgentBeads(t.b)
 }
 
 func (t townDirBeads) ListGroupBeads() (map[string]*beads.GroupFields, error) {

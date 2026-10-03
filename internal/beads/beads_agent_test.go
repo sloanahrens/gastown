@@ -219,7 +219,7 @@ func TestUpdateAgentState_UsesUpdateDescriptionPath(t *testing.T) {
 	logPath := installMockBDShowRecorder(t, `[{"id":"gt-gastown-polecat-nux","title":"Polecat nux","issue_type":"agent","labels":["gt:agent"],"description":"role_type: polecat\nrig: gastown\nagent_state: spawning\nhook_bead: null"}]`)
 	bd := NewIsolated(tmpDir)
 
-	if err := bd.UpdateAgentState("gt-gastown-polecat-nux", "working"); err != nil {
+	if err := UpdateAgentState(bd, "gt-gastown-polecat-nux", "working"); err != nil {
 		t.Fatalf("UpdateAgentState: %v", err)
 	}
 
@@ -327,7 +327,7 @@ func TestUpdateAgentState_UsesExplicitBeadsDir(t *testing.T) {
 	installMockBDRequireExplicitBeadsDir(t, targetBeadsDir)
 
 	bd := NewWithBeadsDir(workDir, targetBeadsDir)
-	if err := bd.UpdateAgentState("gt-gastown-polecat-nux", "spawning"); err != nil {
+	if err := UpdateAgentState(bd, "gt-gastown-polecat-nux", "spawning"); err != nil {
 		t.Fatalf("UpdateAgentState: %v", err)
 	}
 }

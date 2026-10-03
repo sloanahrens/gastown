@@ -25,6 +25,12 @@ import (
 // the Client is. The reads differ only in what a Client can answer from
 // memory: ListAgentBeads and GetAgentBead consult a *Beads' preload snapshot
 // and fall through to a query for everyone else.
+//
+// The creates are the one write family that keeps its *Beads branch: creating
+// an agent bead also chooses its canonical database and configures that
+// database's custom types, which a bare Client cannot name (gt-8we).
+// CreateOrReopenAgentBead's reopen and ResetAgentBeadForReuse's routing are on
+// the store for the same reason.
 
 // ListMergeRequests returns the merge-request beads matching opts, durable
 // issues and wisps alike, hydrated with their full details. opts.Label
@@ -286,4 +292,134 @@ func ClearAgentCompletion(c Client, id string) error {
 		PushFailed:      &notFailed,
 		CompletionTime:  &empty,
 	})
+}
+
+// CreateAgentBead creates an agent bead. A *Beads create lands in the ID's
+// canonical (prefix-routed) database and configures that database's custom
+// types before it writes (gt-8we, gt-fcxe9.11) — store concerns a bare Client
+// has no way to name, so they stay on the *Beads method. Any other Client is
+// one database and one schema, and runs createAgentBead.
+func CreateAgentBead(c Client, id, title string, fields *AgentFields) (*Issue, error) {
+	if b, ok := c.(*Beads); ok {
+		return b.CreateAgentBead(id, title, fields)
+	}
+	return createAgentBead(c, id, title, fields)
+}
+
+// createAgentBead is the Client create path, over Client.Create so a fake can
+// script it. Client.Create supplies --force for an ID whose prefix the database
+// would not read (NeedsForceForID) and records the actor the raw call passed.
+func createAgentBead(c Client, id, title string, fields *AgentFields) (*Issue, error) {
+	// Guard against flag-like titles (gt-e0kx5: --help garbage beads)
+	if IsFlagLikeTitle(title) {
+		return nil, fmt.Errorf("refusing to create agent bead: %w (got %q)", ErrFlagTitle, title)
+	}
+	return c.Create(CreateOptions{
+		ID:          id,
+		Title:       title,
+		Description: FormatAgentDescription(title, fields),
+		Labels:      []string{"gt:agent"},
+		// Priority -1 leaves bd's own default in place, as this create's raw
+		// argv did by not passing --priority at all.
+		Priority: -1,
+	})
+}
+
+// CreateOrReopenAgentBead creates an agent bead, or updates the bead already
+// under that ID when the create is refused. A *Beads create-failure path goes
+// through bd's reopen, which no Client method covers; any other Client falls
+// back to the status update the store itself falls back to when reopen fails.
+func CreateOrReopenAgentBead(c Client, id, title string, fields *AgentFields) (*Issue, error) {
+	if b, ok := c.(*Beads); ok {
+		return b.CreateOrReopenAgentBead(id, title, fields)
+	}
+	return createOrReopenAgentBead(c, id, title, fields)
+}
+
+// createOrReopenAgentBead is CreateOrReopenAgentBead's Client path: create,
+// then on failure the locked read-modify-write that reopens a closed bead and
+// rewrites title, description and labels. It takes the agent-bead lock when c
+// keeps one, the same guard the store's path runs under (gt-joazs).
+func createOrReopenAgentBead(c Client, id, title string, fields *AgentFields) (*Issue, error) {
+	issue, createErr := createAgentBead(c, id, title, fields)
+	if createErr == nil {
+		return issue, nil
+	}
+
+	target := ForAgentBead(c)
+	release, lockErr := lockAgentBeadFor(target, id)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer release()
+
+	existing, showErr := target.Show(id)
+	if showErr != nil {
+		// No bead under this ID to reopen: the original create error stands.
+		return nil, createErr
+	}
+	if existing.Status == "closed" {
+		open := "open"
+		if updateErr := target.Update(id, UpdateOptions{Status: &open}); updateErr != nil {
+			return nil, fmt.Errorf("could not reopen agent bead %s (update: %v, original: %v)",
+				id, updateErr, createErr)
+		}
+	}
+
+	description := FormatAgentDescription(title, fields)
+	if updateErr := target.Update(id, UpdateOptions{
+		Title:       &title,
+		Description: &description,
+		SetLabels:   labelsForAgentBeadReuse(existing.Labels),
+	}); updateErr != nil {
+		return nil, fmt.Errorf("updating agent bead: %w", updateErr)
+	}
+	return target.Show(id)
+}
+
+// ResetAgentBeadForReuse clears every mutable field on an agent bead without
+// closing it, leaving agent_state=nuked so a re-spawn updates it in place
+// instead of running bd's close/reopen cycle (gt-14b8o). A *Beads reset routes
+// the ID to its canonical database; any other Client is one database.
+func ResetAgentBeadForReuse(c Client, id, reason string) error {
+	if b, ok := c.(*Beads); ok {
+		return b.ResetAgentBeadForReuse(id, reason)
+	}
+	target := ForAgentBead(c)
+	release, err := lockAgentBeadFor(target, id)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return resetAgentBeadForReuse(target, id)
+}
+
+// resetAgentBeadForReuse is the read-modify-write of ResetAgentBeadForReuse,
+// with the ID already routed and the agent-bead lock already held.
+func resetAgentBeadForReuse(c Client, id string) error {
+	issue, err := c.Show(id)
+	if err != nil {
+		return err
+	}
+
+	// Preserve the immutable fields (title, role_type, rig); clear the rest.
+	fields := ParseAgentFields(issue.Description)
+	fields.HookBead = ""
+	fields.ActiveMR = ""
+	fields.CleanupStatus = ""
+	fields.Mode = ""
+	fields.AgentState = string(AgentStateNuked)
+	fields.ExitType = ""
+	fields.MRID = ""
+	fields.Branch = ""
+	fields.LastSourceIssue = ""
+	fields.MRFailed = false
+	fields.PushFailed = false
+	fields.CompletionTime = ""
+
+	description := FormatAgentDescription(issue.Title, fields)
+	if err := c.Update(id, UpdateOptions{Description: &description}); err != nil {
+		return fmt.Errorf("resetting agent bead fields: %w", err)
+	}
+	return nil
 }
