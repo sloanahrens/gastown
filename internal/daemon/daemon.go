@@ -346,6 +346,13 @@ type Daemon struct {
 	patrolScanRunning atomic.Bool
 	patrolScanCycles  sync.WaitGroup
 
+	// reapAlertState is the blocked-seat alert pass's memory between ticks,
+	// and reapAlertSink is where it sends; a nil sink uses
+	// escalateAlert/clearAlerts (patrol_scan_reap_alert.go). The tick is
+	// single-flight, so only its goroutine touches the state.
+	reapAlertState reapAlertState
+	reapAlertSink  reapAlertSink
+
 	// stewardRunning / stewardCycles are the steward scan's single-flight
 	// guard and scan count, and stewardRunner is the process's one job
 	// runner: the concurrency cap and the one-job-per-bead rule have to hold
