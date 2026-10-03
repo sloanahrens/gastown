@@ -132,48 +132,6 @@ func (c *Cmd) CombinedOutput() ([]byte, error) {
 	return append(LegacyPayload(c.Args[1:], stdout.Bytes()), stderr.Bytes()...), nil
 }
 
-// Command builds a bd command with the shared Gas Town bd environment policy.
-func Command(dir, fallbackBeadsDir string, mode SubprocessEnvMode, args ...string) *Cmd {
-	cmd := exec.Command("bd", args...) //nolint:gosec // G204: args are constructed internally
-	ConfigureCommand(cmd, dir, fallbackBeadsDir, mode)
-	return &Cmd{Cmd: cmd}
-}
-
-// CommandContext builds a context-bound bd command with the shared Gas Town bd
-// environment policy.
-func CommandContext(ctx context.Context, dir, fallbackBeadsDir string, mode SubprocessEnvMode, args ...string) *Cmd {
-	cmd := exec.CommandContext(ctx, "bd", args...) //nolint:gosec // G204: args are constructed internally
-	ConfigureCommand(cmd, dir, fallbackBeadsDir, mode)
-	return &Cmd{Cmd: cmd}
-}
-
-// CommandContextBounded is CommandContext plus a real deadline: cmd.Cancel
-// kills the whole process group (not just the direct bd child) when ctx
-// expires, and cmd.WaitDelay bounds how long Wait can then block on a
-// descendant that escaped the group and kept an output pipe open. Use this
-// instead of CommandContext whenever the caller's ctx timeout must actually
-// hold — CommandContext's ConfigureCommand applies SetDetachedProcessGroup,
-// which has no Cancel hook, so on timeout it kills only bd itself and Wait
-// can still hang on a runaway grandchild (e.g. an interactive credential
-// prompt bd or a helper it spawned is blocked on) — the hang gt-7itep traced
-// to this package's DefaultBdCli having no deadline at all.
-func CommandContextBounded(ctx context.Context, dir, fallbackBeadsDir string, mode SubprocessEnvMode, args ...string) *Cmd {
-	cmd := exec.CommandContext(ctx, "bd", args...) //nolint:gosec // G204: args are constructed internally
-	cmd.Dir = dir
-	cmd.Env = policyEnv(cmd.Args[1:], fallbackBeadsDir, mode)
-	cmd.WaitDelay = SubprocessKillGrace
-	util.SetProcessGroup(cmd)
-	return &Cmd{Cmd: cmd}
-}
-
-// CommandContextWithBin is CommandContext for a caller that resolves and caches
-// bd's path itself.
-func CommandContextWithBin(ctx context.Context, bin, dir, fallbackBeadsDir string, mode SubprocessEnvMode, args ...string) *Cmd {
-	cmd := exec.CommandContext(ctx, bin, args...) //nolint:gosec // G204: bin/args are constructed internally
-	ConfigureCommand(cmd, dir, fallbackBeadsDir, mode)
-	return &Cmd{Cmd: cmd}
-}
-
 // ConfigureCommand applies the shared bd subprocess policy to an existing
 // command. This is for callers that need a custom bd path.
 func ConfigureCommand(cmd *exec.Cmd, dir, fallbackBeadsDir string, mode SubprocessEnvMode) {
@@ -216,6 +174,57 @@ func CommandContextWithPath(ctx context.Context, bin, dir string, env []string, 
 	cmd.Dir = dir
 	cmd.Env = machineEnvForCall(dir, env, args)
 	return &Cmd{Cmd: cmd}
+}
+
+// RunBdJSONAllowStale runs bd in dir with bd's stale-read bypass and returns
+// its stdout. A failure carries bd's stderr instead of a bare "exit status 1".
+// An inherited BEADS_DIR is stripped and the command pinned to dir's own
+// resolved database, so bd answers about the directory the caller named.
+//
+// keep-raw (gt-7iwy0.4.12): this is the one survivor of the RunBdJSON* family
+// that bdjson.go held. gt spec's ready query must run its filters server-side
+// against the rig's own database and asks bd's stale-read bypass, which no
+// Client method does; the other variants had no caller left and went with
+// the file.
+func RunBdJSONAllowStale(dir string, args ...string) ([]byte, error) {
+	verb := "bd"
+	if len(args) > 0 {
+		verb = args[0]
+	}
+	// The environment the deleted BdCmd.Build built: the parent's, less
+	// BEADS_DIR, then the subprocess-mode policy pinned to dir's own database.
+	env := StripEnvKey(os.Environ(), "BEADS_DIR")
+	mode := MutationRouting
+	if ArgsAreReadOnly(args) {
+		mode = ReadOnlyRouting
+	}
+	beadsDir := ""
+	if dir != "" {
+		beadsDir = ResolveBeadsDir(dir)
+		if mode == ReadOnlyRouting {
+			mode = ReadOnlyPinned
+		} else {
+			mode = MutationPinned
+		}
+	}
+	env = EnvForSubprocessMode(env, beadsDir, mode)
+	// An installed bd that rejects --allow-stale must still run, so the flag
+	// travels only when the binary supports it.
+	if BdSupportsAllowStaleWithEnv(env) {
+		args = append([]string{"--allow-stale"}, args...)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd := CommandWithEnv(dir, env, args...)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if errMsg := strings.TrimSpace(stderr.String()); errMsg != "" {
+			return nil, fmt.Errorf("bd %s: %s", verb, errMsg)
+		}
+		return nil, fmt.Errorf("bd %s: %w", verb, err)
+	}
+	return stdout.Bytes(), nil
 }
 
 // policyEnv is the environment EnvForSubprocessMode builds from the parent's,

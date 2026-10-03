@@ -18,16 +18,11 @@ import (
 // rawBdConstructors are the internal/beads functions that hand a caller bd
 // argv instead of a typed method.
 var rawBdConstructors = map[string]bool{
-	"Command":                true,
-	"CommandContext":         true,
-	"CommandContextBounded":  true,
-	"CommandContextWithBin":  true,
 	"CommandWithEnv":         true,
 	"CommandContextWithEnv":  true,
 	"CommandWithPath":        true,
 	"CommandContextWithPath": true,
 	"ConfigureCommand":       true,
-	"NewBdCmd":               true,
 }
 
 // rawBdKey is one file's count of one kind of raw bd site.
@@ -38,8 +33,8 @@ type rawBdKey struct {
 
 // scanRawBd counts, in one Go file, the ways code outside internal/beads
 // reaches bd past Client: argv (a beads.Command* builder, ConfigureCommand,
-// NewBdCmd, or exec.Command naming "bd"), BdCmd (package cmd's alias of
-// NewBdCmd) and BDRunner (the in-process bd test seam).
+// or exec.Command naming "bd"), BdCmd (a bare BdCmd(...) call, the shape the
+// deleted NewBdCmd alias took) and BDRunner (the in-process bd test seam).
 func scanRawBd(file string, src []byte, counts map[rawBdKey]int) error {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, file, src, parser.SkipObjectResolution)
@@ -203,7 +198,7 @@ func TestScanRawBd(t *testing.T) {
 	src := `package p
 func f() {
 	beads.CommandWithEnv("", nil, "show")
-	beads.NewBdCmd("list").Run()
+	beads.CommandContextWithEnv(ctx, "", nil, "list")
 	exec.Command("bd", "list")
 	exec.CommandContext(ctx, "bd", "list")
 	exec.Command("git", "status")

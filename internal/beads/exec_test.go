@@ -3,31 +3,12 @@ package beads
 import (
 	"context"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
-
-func TestCommandSetsDirAndDetachedProcessGroup(t *testing.T) {
-	cmd := Command("/tmp", "", MutationRouting, "show", "gt-1")
-	if cmd.Dir != "/tmp" {
-		t.Fatalf("Dir = %q, want /tmp", cmd.Dir)
-	}
-	if cmd.SysProcAttr == nil {
-		t.Fatal("SysProcAttr not set; expected a detached process group")
-	}
-	if len(cmd.Args) < 1 || cmd.Args[0] != "bd" {
-		t.Fatalf("Args[0] = %v, want bd", cmd.Args)
-	}
-}
-
-func TestCommandContextAppliesSameConfiguration(t *testing.T) {
-	cmd := CommandContext(context.Background(), "/tmp", "", ReadOnlyRouting, "list")
-	if cmd.Dir != "/tmp" {
-		t.Fatalf("Dir = %q, want /tmp", cmd.Dir)
-	}
-	if cmd.SysProcAttr == nil {
-		t.Fatal("SysProcAttr not set; expected a detached process group")
-	}
-}
 
 func TestCommandWithEnvPreservesCallerEnv(t *testing.T) {
 	env := append(append([]string{}, os.Environ()...), "GT_TEST_MARKER=1")
@@ -83,11 +64,9 @@ func TestCommandWithPathUsesGivenArgv0(t *testing.T) {
 	}
 }
 
-func TestCommandContextWithBinUsesGivenArgv0AndAppliesPolicy(t *testing.T) {
-	cmd := CommandContextWithBin(context.Background(), "/opt/bin/bd", "/work", "/work/.beads", MutationRouting, "list")
-	if len(cmd.Args) == 0 || cmd.Args[0] != "/opt/bin/bd" {
-		t.Fatalf("Args[0] = %v, want /opt/bin/bd", cmd.Args)
-	}
+func TestConfigureCommandAppliesPolicy(t *testing.T) {
+	cmd := exec.Command("bd", "list")
+	ConfigureCommand(cmd, "/work", "/work/.beads", MutationRouting)
 	if cmd.Dir != "/work" {
 		t.Fatalf("Dir = %q, want /work", cmd.Dir)
 	}
@@ -143,9 +122,6 @@ func TestContextConstructorsAreContextBound(t *testing.T) {
 		cmd  *Cmd
 		want bool
 	}{
-		{"Command", Command("/work", "", MutationRouting, "list"), false},
-		{"CommandContext", CommandContext(ctx, "/work", "", MutationRouting, "list"), true},
-		{"CommandContextWithBin", CommandContextWithBin(ctx, "/opt/bin/bd", "/work", "", MutationRouting, "list"), true},
 		{"CommandWithEnv", CommandWithEnv("/work", nil, "list"), false},
 		{"CommandContextWithEnv", CommandContextWithEnv(ctx, "/work", nil, "list"), true},
 		{"CommandWithPath", CommandWithPath("/opt/bin/bd", "/work", nil, "list"), false},
@@ -158,4 +134,44 @@ func TestContextConstructorsAreContextBound(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRunBdJSONAllowStale_FailureCarriesBdsStderr pins the contract gt spec
+// relies on when its ready query fails: the error names the verb and carries
+// bd's own stderr, not a bare "exit status 1". It came over from the deleted
+// bdjson.go with the one RunBdJSON variant that still has a caller.
+func TestRunBdJSONAllowStale_FailureCarriesBdsStderr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell stub")
+	}
+	binDir := t.TempDir()
+	writeBDStub(t, binDir, "#!/bin/sh\necho 'database locked' >&2\nexit 1\n", "")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := RunBdJSONAllowStale(t.TempDir(), "show", "gt-x", "--json")
+	if err == nil {
+		t.Fatal("RunBdJSONAllowStale succeeded, want bd's failure")
+	}
+	if !strings.Contains(err.Error(), "bd show: database locked") {
+		t.Errorf("err = %q, want it to carry bd's stderr", err)
+	}
+}
+
+// writeBDStub writes a fake bd into binDir and returns its path.
+func writeBDStub(t *testing.T, binDir string, unixScript string, windowsScript string) string {
+	t.Helper()
+
+	if runtime.GOOS == "windows" {
+		path := filepath.Join(binDir, "bd.cmd")
+		if err := os.WriteFile(path, []byte(windowsScript), 0644); err != nil {
+			t.Fatalf("write bd stub: %v", err)
+		}
+		return path
+	}
+
+	path := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(path, []byte(unixScript), 0755); err != nil {
+		t.Fatalf("write bd stub: %v", err)
+	}
+	return path
 }

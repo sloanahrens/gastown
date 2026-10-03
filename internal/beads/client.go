@@ -10,10 +10,18 @@ import "time"
 // behavior.
 //
 // The interface is deliberately small. A method joins it only when consumers
-// in several packages call it and the fake can model it faithfully; the rest
-// of *Beads (agent, merge-request, channel and other domain helpers built on
-// these primitives) stays on the concrete type. Consumers that need less
-// should declare their own narrower interface.
+// in several packages call it and the fake can model it faithfully. Consumers
+// that need less should declare their own narrower interface.
+//
+// The domain helpers built on these primitives — the agent-bead reads and
+// writes, merge requests, escalations, handoffs, slings — are free functions
+// over Client (client_helpers.go and its neighbors), not methods, so a fake
+// Client runs the same logic *Beads does. What stays on the concrete type is
+// Client, Admin, and a short list of engine verbs a Client cannot express
+// (raw `bd sql`, database migration, the preload fast paths);
+// beadsfake.TestBeadsMethodSetIsClientAdminAndEngine pins that list, and a
+// method outside it is a wrapper to delete rather than a second name for an
+// operation the free functions already cover.
 type Client interface {
 	// Show returns one issue, or an error wrapping ErrNotFound.
 	Show(id string) (*Issue, error)

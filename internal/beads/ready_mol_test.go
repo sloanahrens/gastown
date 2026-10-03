@@ -90,7 +90,7 @@ func TestReadyForMolReadsBDsMolEnvelope(t *testing.T) {
 		return reply{}
 	})
 
-	issues, err := newRecordedBeads(t.TempDir(), rec).ReadyForMol("gt-mol-1")
+	issues, err := newRecordedBeads(t.TempDir(), rec).readyForMol("gt-mol-1")
 	if err != nil {
 		t.Fatalf("ReadyForMol: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestReadyForMolDropsTheMoleculeRoot(t *testing.T) {
 		return reply{}
 	})
 
-	issues, err := newRecordedBeads(t.TempDir(), rec).ReadyForMol("gt-mol-1")
+	issues, err := newRecordedBeads(t.TempDir(), rec).readyForMol("gt-mol-1")
 	if err != nil {
 		t.Fatalf("ReadyForMol: %v", err)
 	}
