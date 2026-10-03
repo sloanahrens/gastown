@@ -398,6 +398,60 @@ func TestLandings(t *testing.T) {
 	}
 }
 
+// gt-cpefw: the landing wait budget scales with the depth of the queue. The
+// oldest of n waiting submissions may legitimately spend n passes in the
+// pipeline, so a three-deep queue is not red until its oldest has waited
+// three budgets; a single submission keeps the flat budget, and a depth below
+// one never shrinks it.
+func TestLandingWaitLimits(t *testing.T) {
+	t.Parallel()
+	base := Limits{Degraded: LandingStageBudget, Red: LandingWaitBudget}
+	for _, tc := range []struct {
+		name    string
+		pending int
+		want    Limits
+	}{
+		{"depth one is the flat budget", 1, base},
+		{"depth three triples", 3, Limits{Degraded: 3 * LandingStageBudget, Red: 3 * LandingWaitBudget}},
+		{"empty queue is depth one", 0, base},
+		{"negative depth is depth one", -2, base},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := LandingWaitLimits(base, tc.pending); got != tc.want {
+				t.Errorf("LandingWaitLimits(%+v, %d) = %+v, want %+v", base, tc.pending, got, tc.want)
+			}
+		})
+	}
+}
+
+// gt-cpefw: the landing field reads a healthy serial queue of three as green
+// while the oldest has waited past one budget but not three, and red once the
+// oldest is past three; the flat depth-one case still reds past one budget.
+func TestLandingsScaleWithQueueDepth(t *testing.T) {
+	t.Parallel()
+	f := healthy()
+	f.landings = []RigLandings{
+		// Three submissions 9 minutes into a loaded sequence: the oldest has
+		// waited 20m, under three budgets. Healthy, not stuck.
+		{Rig: "busy", Landed: 1, Pending: 3, Oldest: ago(20 * time.Minute), OldestBead: "gt-busy"},
+		// Three waiting with nothing in flight and the oldest past three
+		// budgets: the queue, not the gate, is the problem.
+		{Rig: "hoarding", Landed: 1, Pending: 3, Oldest: ago(3*LandingWaitBudget + time.Minute), OldestBead: "gt-hoarding"},
+		// One submission past one budget is still red.
+		{Rig: "stale", Landed: 0, Pending: 1, Oldest: ago(LandingWaitBudget + time.Minute), OldestBead: "gt-stale"},
+	}
+	r := Compute(context.Background(), inputs(f))
+	for key, want := range map[string]Verdict{"landing/busy": Green, "landing/hoarding": Red, "landing/stale": Red} {
+		if got := field(t, r, key); got.Verdict != want {
+			t.Errorf("%s = %+v, want %s", key, got, want)
+		}
+	}
+	if got := field(t, r, "landing/hoarding"); !strings.Contains(got.Detail, "gt-hoarding") {
+		t.Errorf("landing/hoarding = %+v, want the bead named in the detail", got)
+	}
+}
+
 func TestAgeFields(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {

@@ -234,12 +234,28 @@ const (
 	// defaultLandingWorkerInterval): the slack a waiting submission gets
 	// before the next pass can pick it up.
 	LandingPassInterval = time.Minute
-	// LandingWaitBudget is how long a submission may wait before the queue,
+	// LandingWaitBudget is how long one submission may wait before the queue,
 	// not the gate, is the problem: the stage budget plus one pass interval.
-	// The landing field is red at it and the daemon's queue-stuck item uses
-	// the same age, so the health line and the alert agree.
+	// It is the depth-one limit; a deeper queue is judged by
+	// LandingWaitLimits, and the landing field and the daemon's queue-stuck
+	// item both judge by that, so the health line and the alert agree.
 	LandingWaitBudget = LandingStageBudget + LandingPassInterval
 )
+
+// LandingWaitLimits scales the per-submission landing wait limits by the depth
+// of a rig's ready-to-land queue, treating a depth below one as one. Landing
+// is serial, so the oldest of n waiting submissions may legitimately spend n
+// passes in the pipeline; judging it by one submission's budget reads a
+// healthy backlog of two or three as a stuck queue (gt-cpefw). The health
+// field and the daemon's queue-stuck item both judge by this, so they cannot
+// disagree.
+func LandingWaitLimits(base Limits, pending int) Limits {
+	if pending < 1 {
+		pending = 1
+	}
+	n := time.Duration(pending)
+	return Limits{Degraded: base.Degraded * n, Red: base.Red * n}
+}
 
 // DefaultThresholds are the compiled defaults.
 func DefaultThresholds() Thresholds {
@@ -646,9 +662,11 @@ func ticks(in Inputs) []Field {
 }
 
 // landings judges each rig's oldest pending submission age and counts the
-// day's landings. A rig with nothing waiting is green however long since its
-// last landing: the wait, not the town's quiet, is what the field measures
-// (gt-m36as). The count is nil when any rig is unknown.
+// day's landings. The age is judged against LandingWaitLimits, so the queue's
+// depth buys the wait it can legitimately take (gt-cpefw). A rig with nothing
+// waiting is green however long since its last landing: the wait, not the
+// town's quiet, is what the field measures (gt-m36as). The count is nil when
+// any rig is unknown.
 func landings(ctx context.Context, in Inputs) (*int, []Field) {
 	if in.Landings == nil {
 		return nil, []Field{unknown(FieldLanding, "", "", errNotWired)}
@@ -678,7 +696,7 @@ func landings(ctx context.Context, in Inputs) (*int, []Field) {
 			default:
 				age := in.Now.Sub(rl.Oldest)
 				f.Value = fmt.Sprintf("%d pending, oldest %s", rl.Pending, Short(age))
-				if f.Verdict = in.Thresholds.Landing.judge(age); f.Verdict != Green {
+				if f.Verdict = LandingWaitLimits(in.Thresholds.Landing, rl.Pending).judge(age); f.Verdict != Green {
 					f.Detail = fmt.Sprintf("%s submitted %s ago", rl.OldestBead, Short(age))
 				}
 			}
