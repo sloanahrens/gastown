@@ -3300,7 +3300,7 @@ func (m *Manager) unassignWorkBeads(name string, judged map[string]SurvivalVerdi
 	for _, issue := range work {
 		// Submitted for landing: the landing worker owns the bead until it
 		// lands or hands it back, and releasing it here would put it back in
-		// front of the convoy feed within a minute (gt-v4ssj.2).
+		// front of automatic dispatch within a minute (gt-v4ssj.2).
 		if IsSubmittedWork(issue) {
 			fmt.Printf("  Keeping %s assigned to %s: submitted for landing\n", issue.ID, assignee)
 			continue

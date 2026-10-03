@@ -196,9 +196,6 @@ type gcFakes struct {
 	quietCalls  int
 	quietUntil  int // quiet for this many calls, then busy; -1 = always quiet
 	escalations []string
-	pauses      int
-	resumes     int
-	pauseFails  bool
 
 	// The nightly backup: backupRoot is a temp dir, backupCalls the
 	// databases copied, backupErr a failure per database.
@@ -231,13 +228,6 @@ func withGCFakes(t *testing.T, d *Daemon) *gcFakes {
 		return dbs, nil
 	}
 	d.maint.gcExternal = func(*Daemon) (bool, string) { return false, "" }
-	d.maint.convoyPause = func(*Daemon) (func(), bool) {
-		f.pauses++
-		if f.pauseFails {
-			return nil, false
-		}
-		return func() { f.resumes++ }, true
-	}
 	d.maint.now = func() time.Time { return gcTestNow }
 	d.maint.pauseCurrent = func(string, time.Time) *doltpause.Marker { return f.foreignPause }
 	d.maint.pauseWrite = func(_ string, m doltpause.Marker) error {

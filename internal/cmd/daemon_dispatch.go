@@ -582,9 +582,8 @@ func isActionableReadyBead(issue *beads.Issue, maxPriority int, rv *specdispatch
 		return false
 	}
 	// Work the operator reserved is not the mayor's to sling: naming one here
-	// is what sends the mayor into a sling that refuses (gt-21pl0). The rule is
-	// the convoy feeders' own, so this check and the spec dispatcher's draw the
-	// same line the sling guard does.
+	// is what sends the mayor into a sling that refuses (gt-21pl0). This check
+	// and the spec dispatcher's draw the same line the sling guard does.
 	if dispatch.OperatorReservation(issue.Labels, issue.Assignee) != "" {
 		return false
 	}

@@ -8,9 +8,8 @@ import (
 
 // SlingParams and SlingResult are the dispatch engine's request and outcome.
 // They are aliases, not copies: the engine lives in internal/sling so the
-// daemon's convoy feeder and the convoy continuation feed can dispatch in
-// process, and a second definition here would be a boundary no compiler
-// checks.
+// daemon's scheduled dispatch and the spec dispatcher reach the same code, and
+// a second definition here would be a boundary no compiler checks.
 type (
 	SlingParams = sling.Options
 	SlingResult = sling.Result

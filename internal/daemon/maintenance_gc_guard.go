@@ -17,8 +17,6 @@ import (
 //     while a gc holds the write side; the gc takes the write side with TryLock
 //     and defers while any task holds the read side. Neither side ever blocks,
 //     so the select loop never waits on a gc.
-//   - The ConvoyManager's event poll and stranded scan are paused around each
-//     database's gc (a live reader racing gc; design doc, Problem).
 //   - The Dolt health check defers a restart while a gc call is in flight and
 //     under its timeout (doltRestartHeldForGC).
 //   - Windows that close with gc still deferred are counted, and escalated
@@ -32,10 +30,6 @@ import (
 // stuck, and a stuck server is what the health restart exists for.
 const maintenanceGCRestartGrace = 2 * time.Minute
 
-// maintenanceConvoyPauseTimeout bounds how long the gc waits for an in-flight
-// Convoy poll or scan to finish before it defers.
-const maintenanceConvoyPauseTimeout = 60 * time.Second
-
 // tryDoltTask takes the read side of doltMaintMu for one of the daemon's Dolt
 // tasks. When a gc holds the write side it logs "<name>: skipped: gc in
 // flight" and reports false; the task skips this tick. Never blocks.
@@ -45,19 +39,6 @@ func (d *Daemon) tryDoltTask(name string) (release func(), ok bool) {
 		return nil, false
 	}
 	return d.doltMaintMu.RUnlock, true
-}
-
-// pauseConvoyForGC pauses the ConvoyManager's Dolt reads for one database's
-// gc and returns the resume function.
-func pauseConvoyForGC(d *Daemon) (resume func(), ok bool) {
-	cm := d.convoyManager
-	if cm == nil {
-		return func() {}, true
-	}
-	if !cm.Pause(maintenanceConvoyPauseTimeout) {
-		return nil, false
-	}
-	return cm.Resume, true
 }
 
 // doltRestartHeldForGC is the Dolt manager's restart suppressor: true while a

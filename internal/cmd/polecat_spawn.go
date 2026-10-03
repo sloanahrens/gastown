@@ -63,9 +63,9 @@ type SpawnedPolecatInfo struct {
 
 	// townRoot is the town this spawn belongs to, recorded by its spawner. It
 	// is what startSession and noteStartOutcome read the workspace from: the
-	// daemon's convoy feeder starts sessions in process, and a session started
-	// against whichever town the daemon's cwd names is the wrong town. Empty
-	// falls back to the cwd, which is what a test-built spawn has.
+	// daemon's scheduled dispatch starts sessions in process, and a session
+	// started against whichever town the daemon's cwd names is the wrong town.
+	// Empty falls back to the cwd, which is what a test-built spawn has.
 	townRoot string
 
 	// originalHold is the work bead's status and assignee before this sling
@@ -853,8 +853,8 @@ func (s *SpawnedPolecatInfo) StartSession() (string, error) {
 
 // noteStartOutcome records a failed session start against the bead, and
 // clears the record on a successful one. A sling that fails here leaves the
-// bead open and unassigned — the state the convoy feeders dispatch from — so
-// without the record they re-sling it on their next tick (gt-wacl).
+// bead open and unassigned — the state automatic dispatch draws from — so
+// without the record it is re-slung on the next tick (gt-wacl).
 func (s *SpawnedPolecatInfo) noteStartOutcome(startErr error) {
 	if s.HookBead == "" {
 		return

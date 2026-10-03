@@ -10,7 +10,7 @@ import (
 // A dispatch hold is a decision recorded on a bead's own record that takes it
 // off the generic dispatch path, so an automatic dispatcher's default sling
 // does not override it. The daemon's patrol_scan restart reads it through
-// DispatchHoldFields, the convoy feeders through convoy.FeedHold.
+// DispatchHoldFields.
 //
 // These markers are machine-read, so before writing one read
 // docs/concepts/convoy.md ("Dispatch holds"), which states the write form for

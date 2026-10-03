@@ -81,8 +81,7 @@ func resolveBeadDirFromRigsJSON(townRoot, prefix string) string {
 }
 
 // beadInfo is the dispatch engine's view of a bead, owned by internal/sling so
-// the daemon's convoy feeders read and write the same shape the cobra command
-// does.
+// every dispatch path reads and writes the same shape the cobra command does.
 type beadInfo = sling.Bead
 
 // isDeferredBead checks whether a bead should be rejected from slinging because
@@ -1110,8 +1109,8 @@ func reslingSurvivingWorkGuardWith(survivingWork func(townRoot, beadID string) (
 var errReslingRefused = errors.New(dispatch.ReslingRefusalMarker)
 
 // reslingRefusal is the guard's refusal. Its text starts with
-// dispatch.ReslingRefusalMarker, which the daemon's convoy feeder (running gt
-// sling as a subprocess) matches on stderr.
+// dispatch.ReslingRefusalMarker, the marker an automatic dispatcher running gt
+// sling as a subprocess matches on stderr.
 type reslingRefusal struct{ msg string }
 
 func (e *reslingRefusal) Error() string { return e.msg }

@@ -131,8 +131,8 @@ func parkRigs(w io.Writer, townRoot string, rigNames []string, rec config.RigPar
 }
 
 // unparkRigs clears each rig's park record and turns the rig store's events
-// journal on, which the convoy manager polls. A rig whose journal cannot be
-// turned on stays unparked with a warning; gt doctor fails it until fixed.
+// journal on, which `gt tail` reads. A rig whose journal cannot be turned on
+// stays unparked with a warning; gt doctor fails it until fixed.
 func unparkRigs(w io.Writer, townRoot string, rigNames []string, journal rigJournalEnsurer) error {
 	failed := 0
 	for _, rigName := range rigNames {

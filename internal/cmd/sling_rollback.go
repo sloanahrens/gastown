@@ -33,8 +33,8 @@ type slingRollback struct {
 // tests of other paths still replace).
 //
 // The town root is a parameter rather than a lookup because the dispatch
-// engine reaches the daemon's convoy feeder as well as the cobra command, and
-// the daemon's cwd is not the town it dispatches into.
+// engine runs from the daemon as well as from the cobra command, and the
+// daemon's cwd is not the town it dispatches into.
 func realSlingRollbackIn(townRoot string, err error) slingRollback {
 	if townRoot == "" && err == nil {
 		townRoot, err = workspace.FindFromCwdOrError()

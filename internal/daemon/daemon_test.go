@@ -391,25 +391,6 @@ func TestIsShutdownInProgress_ActiveLock(t *testing.T) {
 	}
 }
 
-// TestDaemon_StopsManagerAndScanner verifies that stopping the convoy manager
-// completes without blocking (e.g. context cancellation works).
-func TestDaemon_StopsManagerAndScanner(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-
-	manager := NewConvoyManager(townRoot, func(string, ...interface{}) {}, nil, 1*time.Hour, nil, nil, nil)
-	manager.findStrandedFn = noStranded
-	if err := manager.Start(); err != nil {
-		t.Fatalf("manager Start: %v", err)
-	}
-
-	// A Stop that blocks fails the run at go test's -timeout.
-	manager.Stop()
-}
-
 // TestIsRunningFromPID_StalePIDReturnsNoError verifies that isRunningFromPID
 // returns (false, 0, nil) — not an error — when it finds and removes a stale
 // PID file. This is the fix for GH#2107: `gt daemon start` was treating the

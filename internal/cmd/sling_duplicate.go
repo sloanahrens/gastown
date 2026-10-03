@@ -46,9 +46,10 @@ const (
 	duplicateLookback = 72 * time.Hour
 
 	// duplicatePoolTTL is how long a fetched pool is reused. Dispatches arrive
-	// in bursts (batch sling, convoy feeds) and a pool fetch costs two bd list
-	// round-trips, so a short TTL collapses a burst into one fetch. The window
-	// is short enough that a bead closed seconds ago is seen by the next burst.
+	// in bursts (batch sling, the scheduler's batch) and a pool fetch costs two
+	// bd list round-trips, so a short TTL collapses a burst into one fetch. The
+	// window is short enough that a bead closed seconds ago is seen by the next
+	// burst.
 	duplicatePoolTTL = 60 * time.Second
 )
 

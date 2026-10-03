@@ -20,7 +20,6 @@ import (
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/sling"
 )
 
 // Config holds daemon configuration.
@@ -36,15 +35,6 @@ type Config struct {
 
 	// PidFile is the path to the PID file.
 	PidFile string `json:"pid_file"`
-
-	// SlingEngine is the dispatch engine's collaborators, injected by the
-	// command that starts the daemon. internal/daemon cannot import
-	// internal/cmd, which owns the mechanisms a dispatch reaches outside the
-	// process, so the command builds them and hands them over here — the
-	// daemon's convoy feeder used to exec `gt sling` to get at the same work.
-	// Nil refuses to feed: a daemon with no engine must not report a dispatch
-	// it never made.
-	SlingEngine *sling.Deps `json:"-"`
 }
 
 // DefaultConfig returns the default daemon configuration.

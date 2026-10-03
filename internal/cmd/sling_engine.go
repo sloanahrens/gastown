@@ -8,8 +8,7 @@ import (
 
 // engineDeps is internal/sling's view of this process's collaborators. The
 // engine owns the dispatch policy; this file owns the mechanisms it reaches
-// outside the process, so the same policy drives the cobra command and the
-// daemon's convoy feeders.
+// outside the process.
 //
 // Most fields pass straight through: the shapes sling declares are the shapes
 // this package already uses (beadInfo, beadFieldUpdates, duplicateCandidate and
@@ -61,15 +60,6 @@ func (d *slingDeps) engineDeps() *sling.Deps {
 		RestorePinned:     d.restorePinned,
 		NoteDispatched:    d.noteDispatched,
 	}
-}
-
-// slingEngineDeps is the engine's collaborators for a caller that is not the
-// cobra command — the daemon's convoy feeder and the convoy continuation feed.
-// The daemon cannot import this package (it would close the cycle back to
-// internal/daemon), so it is handed these at startup instead of exec'ing
-// `gt sling`.
-func slingEngineDeps() *sling.Deps {
-	return realSlingDeps().engineDeps()
 }
 
 // engineActor names the dispatcher a dispatch is recorded under. An Options

@@ -11,17 +11,12 @@ import (
 // replaces these seams, so without a guard a seam whose nil path stopped
 // calling the real thing would pass every other test.
 
-// TestGitSeamsDefaultToRealGit guards the git seams' nil paths: with no
-// opener set, the daemon and the convoy manager open a *git.Git on the
-// directory asked for.
-func TestGitSeamsDefaultToRealGit(t *testing.T) {
+// TestGitSeamDefaultsToRealGit guards the git seam's nil path: with no opener
+// set, the daemon opens a *git.Git on the directory asked for.
+func TestGitSeamDefaultsToRealGit(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	if g, ok := (&Daemon{}).gitAt(dir).(*git.Git); !ok || g.WorkDir() != dir {
 		t.Errorf("Daemon.gitAt(%s) = %T; want a *git.Git on it", dir, (&Daemon{}).gitAt(dir))
-	}
-	m := &ConvoyManager{}
-	if g, ok := m.gitAt(dir).(*git.Git); !ok || g.WorkDir() != dir {
-		t.Errorf("ConvoyManager.gitAt(%s) = %T; want a *git.Git on it", dir, m.gitAt(dir))
 	}
 }

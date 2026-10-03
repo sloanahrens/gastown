@@ -135,10 +135,10 @@ func (d *slingDeps) scheduleSlingBead(beadID, rigName string, opts ScheduleOptio
 
 	// Guard against scheduling closed/tombstone beads (defense-in-depth, hq-ki2).
 	// Mirrors the closed-bead guards in runSling (sling.go) and executeSling
-	// (sling_dispatch.go). The daemon's stranded scan can route closed cross-prefix
-	// beads through scheduleBead in deferred dispatch mode; without this check, a
-	// fresh ghost convoy is created for already-completed work. Not bypassed by
-	// --force — if you need to re-dispatch, reopen the bead first.
+	// (sling_dispatch.go). Deferred dispatch can route a closed cross-prefix
+	// bead through scheduleBead; without this check, a dispatch is scheduled for
+	// already-completed work. Not bypassed by --force — if you need to
+	// re-dispatch, reopen the bead first.
 	if info.Status == "closed" || info.Status == "tombstone" {
 		return fmt.Errorf("bead %s is %s (work already completed)", beadID, info.Status)
 	}

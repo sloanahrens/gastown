@@ -14,11 +14,10 @@ import (
 // what order, and everything that makes it fail closed — is patrolscan's;
 // this file only answers "which branch?" and performs the two guarded writes.
 //
-// The branch lookup is the convoy feeder's origin listing, ported rather than
-// called: the feeder is being deleted (gt-gzhin.6) and this tick becomes the
-// one dead-holder path for every bead, convoy or not. Unlike the feeder it
-// keeps no per-rig cache — one tick scans one rig once, and a rig whose
-// holders are all alive asks nothing.
+// The branch lookup is the deleted convoy feeder's origin listing, ported
+// rather than called (gt-gzhin.6): this tick is the one dead-holder path for
+// every bead. Unlike the feeder it keeps no per-rig cache — one tick scans one
+// rig once, and a rig whose holders are all alive asks nothing.
 
 // deadHolderBranch returns the most recently generated polecat branch for
 // beadID present on the rig's origin remote, "" when none is, and an error

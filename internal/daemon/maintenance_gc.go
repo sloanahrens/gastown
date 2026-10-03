@@ -510,14 +510,8 @@ func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string) maintena
 		if !d.doltMaintMu.TryLock() {
 			return defer_(i, "daemon Dolt task in flight")
 		}
-		resume, paused := d.maintenance().convoyPause(d)
-		if !paused {
-			d.doltMaintMu.Unlock()
-			return defer_(i, "convoy poll busy")
-		}
 
 		err := d.maintenanceGCOne(parent, dataDir, c)
-		resume()
 		d.doltMaintMu.Unlock()
 		if err != nil {
 			d.maintenance().escalate(d, "scheduled_maintenance", fmt.Sprintf(

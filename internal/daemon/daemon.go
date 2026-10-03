@@ -1,9 +1,7 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,7 +12,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,8 +22,6 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/convoy"
-	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltserver"
@@ -62,15 +57,13 @@ type Daemon struct {
 	// per state, not every heartbeat (gt tail noise).
 	crashSkipLog logLatch
 
-	config        *Config
-	patrolConfig  *DaemonPatrolConfig
-	tmux          sessionTmux
-	logger        *log.Logger
-	ctx           context.Context
-	cancel        context.CancelFunc
-	convoyManager *ConvoyManager
-	beadsStores   map[string]convoy.Store
-	doltServer    *DoltServerManager
+	config       *Config
+	patrolConfig *DaemonPatrolConfig
+	tmux         sessionTmux
+	logger       *log.Logger
+	ctx          context.Context
+	cancel       context.CancelFunc
+	doltServer   *DoltServerManager
 
 	// disabledPatrols is loaded from town settings (disabled_patrols field).
 	// Provides a simple way to disable individual patrol dogs without editing
@@ -153,8 +146,7 @@ type Daemon struct {
 	// costs its entire 60s budget (gt-4nu3).
 	//
 	// Concurrent by design: isRigOperational runs on the heartbeat goroutine
-	// (patrol rig filters), on rigPool workers (witness/refinery auto-start),
-	// and on the convoy manager's goroutine (its isRigParked callback).
+	// (patrol rig filters) and on rigPool workers (witness/refinery auto-start).
 	rigOperational rigOperationalCache
 
 	// rigStatusAlert / rigStatusClear raise and close the escalation for a rig
@@ -801,56 +793,12 @@ func (d *Daemon) Run() (err error) {
 
 	d.logger.Printf("Daemon running, recovery heartbeat interval %v", d.recoveryHeartbeatInterval())
 
-	// Start convoy manager (event-driven + periodic stranded scan)
-	// Try opening beads stores eagerly; if Dolt isn't ready yet,
-	// pass the opener as a callback for lazy retry on each poll tick.
-	startupStores, err := d.openBeadsStores()
-	if err != nil {
-		return err
-	}
-	d.beadsStores = startupStores.Stores
-
 	// Clean sessions left behind on legacy tmux sockets after daemon startup has
 	// passed fatal preflight checks but before any patrol agents can be spawned.
 	d.cleanupLegacySocketSessions()
 
-	isRigParked := func(rigName string) bool {
-		ok, _ := d.isRigOperational(rigName)
-		return !ok
-	}
-	var storeOpener func() storeOpenResult
-	if storeOpenerNeeded(startupStores) {
-		storeOpener = func() storeOpenResult {
-			stores, err := d.openBeadsStores()
-			if err != nil {
-				d.logger.Printf("Convoy: beads compatibility check failed: %v", err)
-				return storeOpenResult{}
-			}
-			return stores
-		}
-	}
-	d.convoyManager = NewConvoyManager(d.config.TownRoot, d.logger.Printf, d.config.SlingEngine, 0, d.beadsStores, storeOpener, isRigParked)
-	d.convoyManager.prefixes = d.prefixRegistry()
-	d.convoyManager.SetAlertHooks(d.escalateAlert, d.clearAlertsErr)
-	if err := d.convoyManager.Start(); err != nil {
-		d.logger.Printf("Warning: failed to start convoy manager: %v", err)
-	} else {
-		d.logger.Println("Convoy manager started")
-	}
-
 	// Landing workers (gt-v4ssj.2): opt-in, one goroutine per rig.
 	d.startLandingWorkers()
-
-	// Wire a recovery callback so that when Dolt transitions from unhealthy
-	// back to healthy, the convoy manager runs a sweep to catch any convoys
-	// that completed during the outage and were missed by the event poller.
-	if d.doltServer != nil {
-		cm := d.convoyManager
-		d.doltServer.SetRecoveryCallback(func() {
-			d.logger.Printf("Dolt recovery detected: triggering convoy recovery sweep")
-			cm.scan()
-		})
-	}
 
 	// Start dedicated Dolt health check ticker if Dolt server is configured.
 	// This runs at a much higher frequency (default 30s) than the general
@@ -1486,222 +1434,6 @@ func readBeadsBackend(beadsDir string) string {
 	return metadata.Backend
 }
 
-type beadsDBAccessor interface {
-	DB() *sql.DB
-}
-
-// bdSchemaLevel returns the schema level the bd on PATH migrates a database
-// to (bd version --json db_schema_version). Zero with a nil error means bd
-// did not report one: a build from before the machine surface.
-func bdSchemaLevel(ctx context.Context, townRoot string) (int, error) {
-	stdout, stderr, err := deps.NewBDProcessRunner(townRoot)(ctx, nil, "version", "--json")
-	if err != nil {
-		return 0, fmt.Errorf("bd version --json: %w (%s)", err, strings.TrimSpace(string(stderr)))
-	}
-	info, err := deps.ParseBDVersionJSON(stdout)
-	if err != nil {
-		return 0, err
-	}
-	return info.DBSchemaVersion, nil
-}
-
-// verifyBeadsStores is the daemon's startup gate on opened stores: bd must
-// report the schema level it migrates to, and every store must be at that
-// level with a journal bd can tail. Every read goes through bd (probeFor;
-// gt-7iwy0.2), not the store handles; schemaLevel reads bd's level
-// (bdSchemaLevel in production).
-func verifyBeadsStores(ctx context.Context, logger *log.Logger, townRoot string, stores map[string]convoy.Store, schemaLevel func(ctx context.Context, townRoot string) (int, error), probeFor func(townRoot, name string) (storeProbe, error)) error {
-	bdSchema, err := schemaLevel(ctx, townRoot)
-	if err == nil && bdSchema <= 0 {
-		err = fmt.Errorf("bd version --json reports no db_schema_version (a bd build from before the machine surface); install the beads fork's bd with make safe-install")
-	}
-	if err != nil {
-		return fmt.Errorf("daemon startup blocked: cannot read bd's schema level: %w", err)
-	}
-	names := make([]string, 0, len(stores))
-	for name, store := range stores {
-		if store != nil {
-			names = append(names, name)
-		}
-	}
-	warn := func(w string) {
-		if logger != nil {
-			logger.Printf("Convoy: %s", w)
-		}
-	}
-	if err := checkBeadsStoreCompatibility(ctx, townRoot, names, bdSchema, probeFor, warn); err != nil {
-		return err
-	}
-	return nil
-}
-
-// storeProbe is what the compatibility check reads about one store, all
-// through bd.
-type storeProbe interface {
-	// SchemaLevel is the database's highest applied migration.
-	SchemaLevel(ctx context.Context) (int, error)
-	// EventsTail reads the events journal; the check reads one record.
-	EventsTail(since int64, limit int) (*beads.EventsPage, error)
-	// JournalConfig is events-journal as the store's config.yaml sets it,
-	// read without any inherited BD_EVENTS_JOURNAL.
-	JournalConfig() (string, error)
-}
-
-// bdStoreProbe reads a store's compatibility facts through the bd on PATH,
-// pinned to the store's beads directory.
-type bdStoreProbe struct {
-	dir    string
-	run    deps.BDRunner
-	client eventsTailer
-}
-
-// eventsTailer is the journal read the probe makes: *beads.Beads, or a
-// beadsfake database in tests.
-type eventsTailer interface {
-	EventsTail(since int64, limit int) (*beads.EventsPage, error)
-}
-
-// newBDStoreProbe returns the probe for the named store ("hq" or a rig).
-func newBDStoreProbe(townRoot, name string) (storeProbe, error) {
-	dir := doltserver.FindRigBeadsDir(townRoot, name)
-	if dir == "" {
-		return nil, fmt.Errorf("no beads directory for store %q", name)
-	}
-	return &bdStoreProbe{dir: dir, run: deps.NewBDProcessRunner(filepath.Dir(dir)), client: beads.NewWithBeadsDir(townRoot, dir)}, nil
-}
-
-// pinned runs bd with BEADS_DIR set to the store's directory and
-// BD_EVENTS_JOURNAL cleared, so bd reports the workspace's own settings.
-func (p *bdStoreProbe) pinned(ctx context.Context, extraEnv []string, args ...string) ([]byte, []byte, error) {
-	env := append([]string{"BEADS_DIR=" + p.dir, "BD_EVENTS_JOURNAL="}, extraEnv...)
-	return p.run(ctx, env, args...)
-}
-
-func (p *bdStoreProbe) SchemaLevel(ctx context.Context) (int, error) {
-	return deps.ReadDBSchemaLevel(ctx, p.pinned)
-}
-
-func (p *bdStoreProbe) EventsTail(since int64, limit int) (*beads.EventsPage, error) {
-	return p.client.EventsTail(since, limit)
-}
-
-func (p *bdStoreProbe) JournalConfig() (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), beads.ResolveSubprocessTimeout())
-	defer cancel()
-	stdout, stderr, err := p.pinned(ctx, []string{"BD_MACHINE=1"}, "config", "get", "events-journal", "--json")
-	if err != nil {
-		return "", fmt.Errorf("bd config get events-journal: %w (%s)", err, strings.TrimSpace(string(stderr)))
-	}
-	return parseConfigGetValue(stdout)
-}
-
-// parseConfigGetValue reads the value from bd config get --json: the
-// machine envelope's data, or the legacy {key, value, location} object.
-func parseConfigGetValue(out []byte) (string, error) {
-	var env struct {
-		Data json.RawMessage `json:"data"`
-	}
-	body := bytes.TrimSpace(out)
-	if json.Unmarshal(body, &env) == nil && len(env.Data) > 0 && string(env.Data) != "null" {
-		body = env.Data
-	}
-	var kv struct {
-		Value *string `json:"value"`
-	}
-	if err := json.Unmarshal(body, &kv); err != nil || kv.Value == nil {
-		return "", fmt.Errorf("bd config get --json: no value in %q", util.FirstLine(string(out)))
-	}
-	return strings.TrimSpace(*kv.Value), nil
-}
-
-// checkBeadsStoreCompatibility refuses stores whose database schema level
-// is not the level bd migrates to (bdSchema), or whose events journal bd
-// cannot read. It compares schema integers read from schema_migrations, the
-// table bd advances (B5-02). A journal left off in a store's config.yaml is
-// passed to warn, not refused: closes in that store wait for the stranded
-// scan, and gt doctor --check events-journal is the check that fails it.
-func checkBeadsStoreCompatibility(ctx context.Context, townRoot string, names []string, bdSchema int, probeFor func(townRoot, name string) (storeProbe, error), warn func(string)) error {
-	if len(names) == 0 {
-		return nil
-	}
-	names = append([]string(nil), names...)
-	sort.Strings(names)
-
-	var problems []string
-	for _, name := range names {
-		problem, warning := checkSingleBeadsStoreCompatibility(ctx, townRoot, name, bdSchema, probeFor)
-		if problem != "" {
-			problems = append(problems, problem)
-		}
-		if warning != "" && warn != nil {
-			warn(warning)
-		}
-	}
-	if len(problems) == 0 {
-		return nil
-	}
-
-	remediation := "Install the beads fork's bd at the database's schema level (make safe-install in the beads repository), check `gt doctor`, then retry `gt daemon start`."
-
-	return fmt.Errorf("daemon startup blocked: incompatible beads workspace / gt binary combination\n\n  %s\n\n%s",
-		strings.Join(problems, "\n  "), remediation)
-}
-
-func checkSingleBeadsStoreCompatibility(ctx context.Context, townRoot, name string, bdSchema int, probeFor func(townRoot, name string) (storeProbe, error)) (problem, warning string) {
-	label := displayBeadsStoreName(name)
-	probe, err := probeFor(townRoot, name)
-	if err != nil {
-		return fmt.Sprintf("%s: %v", label, err), ""
-	}
-
-	var reasons []string
-	level, err := probe.SchemaLevel(ctx)
-	if p := schemaLevelProblem(level, err, bdSchema); p != "" {
-		reasons = append(reasons, p)
-	}
-	if _, err := probe.EventsTail(0, 1); err != nil {
-		// A journal pruned below seq 1 is readable; bd says so with a
-		// window that holds records. Anything else is a failed probe.
-		var trunc *beads.EventsTruncatedError
-		if !errors.As(err, &trunc) || trunc.Floor <= 0 || trunc.Head < trunc.Floor {
-			reasons = append(reasons, fmt.Sprintf("events journal probe failed: %v", err))
-		}
-	}
-	if len(reasons) > 0 {
-		problem = fmt.Sprintf("%s: %s", label, strings.Join(reasons, "; "))
-	}
-
-	switch v, err := probe.JournalConfig(); {
-	case err != nil:
-		warning = fmt.Sprintf("%s: cannot read events-journal from its config (%v); if the journal is off, convoy closes there wait for the stranded scan. Check with bd config get events-journal; enable with bd config set events-journal true", label, err)
-	case v != "true":
-		warning = fmt.Sprintf("%s: events journal is off in its config.yaml (events-journal=%q): closes there are not journaled and wait for the stranded scan. Enable with bd config set events-journal true in that beads directory and commit the config.yaml", label, v)
-	}
-	return problem, warning
-}
-
-// schemaLevelProblem is the verdict on one store: "" when the database is at
-// exactly bd's level, otherwise the reason naming both integers. A failed
-// read or an unknown bd level is a problem, never a pass.
-func schemaLevelProblem(level int, readErr error, bdSchema int) string {
-	switch {
-	case readErr != nil:
-		return fmt.Sprintf("cannot read schema_migrations: %v", readErr)
-	case bdSchema <= 0:
-		return fmt.Sprintf("bd schema level unknown (database schema %d); bd version --json reports no db_schema_version", level)
-	case level != bdSchema:
-		return fmt.Sprintf("database schema %d does not match bd schema %d", level, bdSchema)
-	}
-	return ""
-}
-
-func displayBeadsStoreName(name string) string {
-	if name == "hq" {
-		return "town-root beads store"
-	}
-	return fmt.Sprintf("rig %q beads store", name)
-}
-
 // logStartOutcome logs a supervisor Restart that did not start a role.
 func (d *Daemon) logStartOutcome(role, rigName string, err error) {
 	switch {
@@ -1832,97 +1564,6 @@ func (d *Daemon) prefixRegistry() *session.PrefixRegistry {
 	return session.DefaultRegistry()
 }
 
-// wantedStore is one store the daemon wants open: the name convoy lookups use
-// ("hq" for the town, the rig name otherwise) and the beads directory bd is
-// pinned to.
-type wantedStore struct {
-	name string
-	dir  string
-}
-
-// openBeadsStores opens the convoy stores the daemon polls: the town store
-// (hq) and every known rig's, each a bd-backed store pinned to that workspace
-// (beads.NewPinned). It returns the stores that opened — keyed by "hq" for
-// town-level and by rig name for per-rig stores — plus the names that were
-// wanted but would not open. Successfully opened stores are
-// compatibility-checked before being returned to Convoy polling.
-//
-// The names that failed are returned rather than only logged: a store missed
-// while Dolt is restarting has to be retried, and the convoy manager cannot
-// retry what it was never told was wanted (gt-i36h). A store whose beads
-// directory is absent is wanted-and-missing for the same reason, and a Dolt
-// server not accepting connections yet reports every wanted store missing, so
-// the daemon still comes up around the opener's retries.
-func (d *Daemon) openBeadsStores() (storeOpenResult, error) {
-	stores := make(map[string]convoy.Store)
-	var missing []string
-
-	wants := make([]wantedStore, 0, 1+len(d.getKnownRigs()))
-	wants = append(wants, wantedStore{name: "hq", dir: filepath.Join(d.config.TownRoot, ".beads")})
-	for _, rigName := range d.getKnownRigs() {
-		wants = append(wants, wantedStore{name: rigName, dir: doltserver.FindRigBeadsDir(d.config.TownRoot, rigName)})
-	}
-
-	// A Dolt server that is not accepting connections yet (or has been paused)
-	// is the startup case the store opener exists for: a pinned store cannot
-	// open eagerly, so every wanted store is reported missing and the daemon
-	// comes up with the opener retrying the set. Without this the compatibility
-	// gate would read a down server as an unusable workspace and refuse to
-	// start (gt-i36h).
-	if len(doltserver.HasServerModeMetadata(d.config.TownRoot)) > 0 {
-		if err := doltserver.CheckServerReachable(d.config.TownRoot); err != nil {
-			d.logger.Printf("Convoy: %s", util.FirstLine(err.Error()))
-			for _, w := range wants {
-				missing = append(missing, w.name)
-			}
-			return storeOpenResult{Missing: missing}, nil
-		}
-	}
-
-	for _, w := range wants {
-		if w.dir == "" {
-			d.logger.Printf("Convoy: %s beads store unavailable: no beads directory", w.name)
-			missing = append(missing, w.name)
-			continue
-		}
-		if _, err := os.Stat(w.dir); err != nil {
-			d.logger.Printf("Convoy: %s beads store unavailable: %s", w.name, util.FirstLine(err.Error()))
-			missing = append(missing, w.name)
-			continue
-		}
-		stores[w.name] = beads.NewPinned(w.dir, beads.WithBin(d.bdPathOrDefault()))
-	}
-
-	if len(stores) == 0 {
-		d.logger.Printf("Convoy: no beads stores available, event polling disabled")
-		return storeOpenResult{Missing: missing}, nil
-	}
-
-	if err := verifyBeadsStores(d.ctx, d.logger, d.config.TownRoot, stores, bdSchemaLevel, newBDStoreProbe); err != nil {
-		return storeOpenResult{Missing: missing}, err
-	}
-
-	names := make([]string, 0, len(stores))
-	for name := range stores {
-		names = append(names, name)
-	}
-	d.logger.Printf("Convoy: opened %d beads store(s): %v", len(stores), names)
-	return storeOpenResult{Stores: stores, Missing: missing}, nil
-}
-
-// storeOpenerNeeded reports whether the convoy manager must be handed the
-// store opener to complete the set this startup walk produced.
-//
-// A walk that came up short is not only one that came up empty. Dolt restarting
-// mid-walk drops whichever stores it had not reached — hq is opened first, so a
-// restart landing there loses hq while the rigs that follow open fine — and
-// with no opener that partial map read as complete: every convoy lookup was
-// skipped for the life of the daemon, silently, while the rigs kept polling
-// (gt-i36h).
-func storeOpenerNeeded(res storeOpenResult) bool {
-	return len(res.Stores) == 0 || len(res.Missing) > 0
-}
-
 // getKnownRigs returns list of registered rig names.
 // Results are memoized per heartbeat tick to coalesce the ~10 per-tick callers
 // into a single mayor/rigs.json read. The cache is invalidated at the start of
@@ -2002,10 +1643,10 @@ func (d *Daemon) getPatrolRigs(patrol string) []string {
 // Docked is the identity bead's status:docked label, and reading it costs a
 // bd subprocess, so that read is memoized for a short window
 // (rigOperationalCacheTTL) - see internal/daemon/rig_status.go for why. This
-// function is evaluated per rig per heartbeat by the patrol rig filters,
-// witness and refinery auto-start, and the convoy manager, and each of those
-// used to repeat the subprocess read, whose 60s budget a CPU-starved host
-// spends in full (gt-4nu3).
+// function is evaluated per rig per heartbeat by the patrol rig filters and
+// witness and refinery auto-start, and each of those used to repeat the
+// subprocess read, whose 60s budget a CPU-starved host spends in full
+// (gt-4nu3).
 //
 // A failed bead read still fails closed: the rig is reported not operational, so
 // nothing is auto-started for a rig whose state could not be verified. It is
@@ -2137,13 +1778,6 @@ func autoRestartDisabled(val interface{}) bool {
 // shutdown performs graceful shutdown.
 func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return kept for future use
 	d.logger.Println("Daemon shutting down")
-
-	// Stop convoy manager (also closes beads stores)
-	if d.convoyManager != nil {
-		d.convoyManager.Stop()
-		d.logger.Println("Convoy manager stopped")
-	}
-	d.beadsStores = nil
 
 	// Stop Dolt server if we're managing it. An upgrade restart leaves Dolt
 	// running: the server is detached and the next daemon adopts it via
@@ -3060,10 +2694,10 @@ func (d *Daemon) dispatchQueuedWork() {
 
 // autoDispatchers names the automatic dispatchers the operator hold parks and
 // whether each is on, for the hold-lifted line: an operator reading it learns
-// what came back without a second lookup (gt-xiw7o).
+// what came back without a second lookup (gt-xiw7o). The spec dispatcher is
+// the only one (gt-gzhin.6).
 func (d *Daemon) autoDispatchers() string {
-	return fmt.Sprintf("spec_dispatch %s, convoy feed %s",
-		onOff(d.isPatrolActive("spec_dispatch")), onOff(d.convoyManager.FeedActive()))
+	return fmt.Sprintf("spec_dispatch %s", onOff(d.isPatrolActive("spec_dispatch")))
 }
 
 func onOff(on bool) string {

@@ -22,8 +22,6 @@ type maintenanceSeams struct {
 	pauseCurrent func(townRoot string, now time.Time) *doltpause.Marker
 	pauseWrite   func(townRoot string, m doltpause.Marker) error
 	pauseRemove  func(townRoot string) (bool, error)
-	// convoyPause pauses the ConvoyManager's Dolt reads for one database's gc.
-	convoyPause func(d *Daemon) (resume func(), ok bool)
 	// gcDatabases discovers the databases under a data dir.
 	gcDatabases func(dataDir string) ([]string, error)
 	// gcExternal reports whether the Dolt server is not one this daemon can
@@ -68,9 +66,6 @@ func (d *Daemon) maintenance() maintenanceSeams {
 	}
 	if s.escalate == nil {
 		s.escalate = (*Daemon).escalate
-	}
-	if s.convoyPause == nil {
-		s.convoyPause = pauseConvoyForGC
 	}
 	if s.gcDatabases == nil {
 		s.gcDatabases = discoverMaintenanceDatabases

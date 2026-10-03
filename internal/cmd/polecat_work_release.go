@@ -88,7 +88,8 @@ func heldBy(r polecatWorkReleaser, agentID, beadID string) (bool, string) {
 		return false, fmt.Sprintf("status %s is not held", status)
 	}
 	// Work submitted for landing stays with the landing worker: releasing it
-	// would put it back in front of the convoy feed (gt-v4ssj.2).
+	// would put it back in front of automatic dispatch while its landing is
+	// still in flight (gt-v4ssj.2).
 	if sr, ok := r.(landingSubmissionReader); ok {
 		submitted, err := sr.SubmittedForLanding(beadID)
 		switch {

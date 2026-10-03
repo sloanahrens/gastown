@@ -7,9 +7,9 @@ import (
 )
 
 // EventsJournalKey is the config.yaml key that turns bd's events journal on.
-// The convoy manager polls the journal (gt-7iwy0.2), so every store gastown
-// creates or un-parks turns it on and gt doctor fails a store that leaves it
-// off (gt-7iwy0.7).
+// gt tail reads the journal (gt-7iwy0.2), so every store gastown creates or
+// un-parks turns it on and gt doctor fails a store that leaves it off
+// (gt-7iwy0.7).
 const EventsJournalKey = "events-journal"
 
 // EventsJournalOn reads an events-journal value as bd's config does: a boolean.

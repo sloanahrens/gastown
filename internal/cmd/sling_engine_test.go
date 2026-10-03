@@ -8,14 +8,12 @@ import (
 	"github.com/steveyegge/gastown/internal/sling"
 )
 
-// TestEngineDepsWiresEveryCollaborator is the wiring guard for slingEngineDeps.
+// TestEngineDepsWiresEveryCollaborator is the wiring guard for engineDeps.
 //
-// The daemon is handed these Deps at startup and cannot complete or check them
-// itself — internal/daemon cannot import this package — so a collaborator added
-// to sling.Deps and left unwired here reaches the daemon as a nil func and
-// panics on the first convoy feed, in a background process, far from the
-// omission. Building the production Deps and requiring every field to be set
-// reports it as a test failure instead (gt-638go.7).
+// A collaborator added to sling.Deps and left unwired reaches the engine as a
+// nil func and panics mid-dispatch, far from the omission. Building the
+// production Deps and requiring every field to be set reports it as a test
+// failure instead (gt-638go.7).
 func TestEngineDepsWiresEveryCollaborator(t *testing.T) {
 	t.Parallel()
 
@@ -26,12 +24,12 @@ func TestEngineDepsWiresEveryCollaborator(t *testing.T) {
 		t.Fatal("the wiring guard sees no unwired fields in an empty sling.Deps, so it cannot fail")
 	}
 
-	deps := slingEngineDeps()
+	deps := realSlingDeps().engineDeps()
 	if deps == nil {
-		t.Fatal("slingEngineDeps() returned nil")
+		t.Fatal("engineDeps() returned nil")
 	}
 	for _, name := range unwiredEngineDeps(deps) {
-		t.Errorf("sling.Deps.%s is not wired: the daemon's convoy feeder reaches it as nil", name)
+		t.Errorf("sling.Deps.%s is not wired: a dispatch reaches it as nil", name)
 	}
 }
 
