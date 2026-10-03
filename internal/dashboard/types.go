@@ -1,0 +1,158 @@
+// Package dashboard serves a read-only, localhost-only page that shows the
+// town the way gt tail -f does: from the files and readers the town already
+// has, polled only while someone is watching.
+//
+// The old web dashboard forked a dozen bd, tmux, gh and git children per
+// browser tab every 30 seconds. This one has one hub. The hub polls its
+// readers on its own clock, keeps the result, and pushes it to every open page
+// over server-sent events, so a second tab costs nothing. When no page is open
+// the hub polls nothing at all.
+package dashboard
+
+import (
+	"encoding/json"
+	"time"
+)
+
+// Entry is one line of the feed: what gt tail's default view would print.
+type Entry struct {
+	Seq   int64     `json:"seq"`
+	At    time.Time `json:"at"`
+	Rig   string    `json:"rig"`
+	Kind  string    `json:"kind"`
+	Text  string    `json:"text"`
+	Class string    `json:"class"` // failure, warning, success, landing, dispatch, restart, plain
+}
+
+// Health is the town's one health line and its verdict.
+type Health struct {
+	Line    string    `json:"line"`
+	Verdict string    `json:"verdict"` // green, degraded, red, unknown
+	ReadAt  time.Time `json:"read_at"`
+}
+
+// SeatRef is a polecat seat in use: who holds which bead.
+type SeatRef struct {
+	Rig     string `json:"rig"`
+	Polecat string `json:"polecat"`
+	Bead    string `json:"bead"`
+}
+
+// Seat is a SeatRef with what the hub knows about it.
+type Seat struct {
+	SeatRef
+	Title   string     `json:"title,omitempty"`
+	Slung   *time.Time `json:"slung,omitempty"` // when the dispatch line named this bead
+	Elapsed int64      `json:"elapsed_sec,omitempty"`
+}
+
+// Summary is the slow-changing state of the town. A pointer or zero field the
+// reader could not fill is left out of the page rather than shown as zero.
+type Summary struct {
+	SeatsUsed *int      `json:"seats_used,omitempty"`
+	SeatsCap  *int      `json:"seats_cap,omitempty"`
+	Seats     []SeatRef `json:"-"`
+
+	ReadyToLand *int       `json:"ready_to_land,omitempty"`
+	OldestReady *time.Time `json:"oldest_ready,omitempty"`
+
+	MainTip     string `json:"main_tip,omitempty"`
+	InstalledGT string `json:"installed_gt,omitempty"`
+	Behind      *int   `json:"behind,omitempty"`
+
+	Escalations *int `json:"escalations,omitempty"`
+
+	MedianDeployMin *float64 `json:"median_deploy_min,omitempty"`
+	DeployWaiting   *int     `json:"deploy_waiting,omitempty"`
+	OldestDeploySec *int64   `json:"oldest_deploy_waiting_sec,omitempty"`
+}
+
+// Proc is one busy process.
+type Proc struct {
+	Name string  `json:"name"`
+	CPU  float64 `json:"cpu"`
+}
+
+// Machine is the host's load and what is burning it.
+type Machine struct {
+	Load1  float64   `json:"load1"`
+	Load5  float64   `json:"load5"`
+	Load15 float64   `json:"load15"`
+	Top    []Proc    `json:"top"`
+	At     time.Time `json:"at"`
+}
+
+// LoadPoint is one load sample for the sparkline.
+type LoadPoint struct {
+	At   time.Time `json:"at"`
+	Load float64   `json:"load"`
+}
+
+// GatePoint is one landing gate's wall time and the load when it finished.
+type GatePoint struct {
+	At   time.Time `json:"at"`
+	Secs float64   `json:"secs"`
+	Load *float64  `json:"load,omitempty"` // nil when no sample covers the gate
+	Text string    `json:"text"`
+}
+
+// State is everything the page draws apart from the feed.
+type State struct {
+	Now       time.Time       `json:"now"`
+	Viewers   int             `json:"viewers"`
+	Health    Health          `json:"health"`
+	Summary   *Summary        `json:"summary,omitempty"`
+	SummaryAt time.Time       `json:"summary_at,omitempty"`
+	Seats     []Seat          `json:"seats"`
+	Machine   Machine         `json:"machine"`
+	Loads     []LoadPoint     `json:"loads"`
+	Gates     []GatePoint     `json:"gates"`
+	Spend     json.RawMessage `json:"spend,omitempty"`
+}
+
+// Config wires the hub to its readers. Every reader is optional; a nil reader
+// leaves its part of the page empty. Readers are called from the hub's own
+// goroutines, one call at a time per reader.
+type Config struct {
+	// Feed returns the entries that appeared since its last call.
+	Feed func() []Entry
+	// Summary reads the town's slow state (it may run bd).
+	Summary func() Summary
+	// Health reads the daemon's health report from disk.
+	Health func() Health
+	// Machine samples load and the busiest processes.
+	Machine func() (Machine, error)
+	// Spend returns the DeepSeek spend report as JSON, nil when unavailable.
+	Spend func() json.RawMessage
+	// Title names a bead for the seats table; "" when unknown.
+	Title func(id string) string
+
+	Now func() time.Time
+
+	FeedEvery    time.Duration
+	SummaryEvery time.Duration
+	HealthEvery  time.Duration
+	MachineEvery time.Duration
+	SpendEvery   time.Duration
+
+	RingSize int // feed entries kept for a page that connects late
+}
+
+func (c *Config) defaults() {
+	if c.Now == nil {
+		c.Now = time.Now
+	}
+	def := func(d *time.Duration, v time.Duration) {
+		if *d <= 0 {
+			*d = v
+		}
+	}
+	def(&c.FeedEvery, 3*time.Second)
+	def(&c.SummaryEvery, 60*time.Second)
+	def(&c.HealthEvery, 5*time.Second)
+	def(&c.MachineEvery, 10*time.Second)
+	def(&c.SpendEvery, 5*time.Minute)
+	if c.RingSize <= 0 {
+		c.RingSize = 500
+	}
+}

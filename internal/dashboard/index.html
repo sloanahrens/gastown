@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gas Town</title>
+<style>
+:root{
+  --bg:#0d1117;--panel:#141a22;--line:#232c38;--text:#d7dee8;--dim:#7d8896;
+  --green:#3fb950;--amber:#d29922;--red:#f85149;--blue:#58a6ff;--teal:#39c5bb;--violet:#b392f0;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+body{padding:0 16px 24px;max-width:1500px;margin:0 auto}
+header{display:flex;align-items:center;gap:14px;padding:14px 0;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:2}
+h1{font-size:15px;margin:0;letter-spacing:.08em;text-transform:uppercase;color:var(--teal)}
+.pill{padding:3px 10px;border-radius:999px;font-weight:700;font-size:12px;border:1px solid currentColor}
+.pill.green{color:var(--green)}.pill.degraded{color:var(--amber)}.pill.red{color:var(--red)}.pill.unknown{color:var(--dim)}
+#healthline{color:var(--dim);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#conn{font-size:12px;color:var(--dim)}
+#conn.on::before{content:"● ";color:var(--green)}#conn.off::before{content:"● ";color:var(--red)}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:14px 0}
+.tile{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.tile .k{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+.tile .v{font-size:22px;font-weight:700;margin-top:2px}
+.tile .s{color:var(--dim);font-size:11px;min-height:15px}
+.tile.warn .v{color:var(--amber)}.tile.bad .v{color:var(--red)}.tile.ok .v{color:var(--green)}
+.grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);gap:12px}
+@media (max-width:1000px){.grid{grid-template-columns:1fr}}
+.col{display:flex;flex-direction:column;gap:12px;min-width:0}
+section{background:var(--panel);border:1px solid var(--line);border-radius:8px;min-width:0}
+section>h2{margin:0;padding:9px 12px;border-bottom:1px solid var(--line);font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--dim);display:flex;gap:10px;align-items:center}
+section>h2 .r{margin-left:auto;text-transform:none;letter-spacing:0}
+.body{padding:10px 12px}
+table{border-collapse:collapse;width:100%}
+th{color:var(--dim);font-weight:400;text-align:left;font-size:11px;padding:3px 8px 3px 0}
+td{padding:4px 8px 4px 0;vertical-align:top;border-top:1px solid var(--line)}
+td.n,th.n{text-align:right}
+.bead{color:var(--blue)}.title{color:var(--dim)}
+.empty{color:var(--dim);padding:6px 0}
+.spark{width:100%;height:56px;display:block}
+.kv{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:8px}
+.kv b{font-size:16px}.kv span{color:var(--dim);font-size:11px;display:block}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}
+.chip{cursor:pointer;border:1px solid var(--line);border-radius:999px;padding:1px 9px;font-size:11px;color:var(--dim);background:none;font:inherit;font-size:11px}
+.chip.on{color:var(--text);border-color:var(--dim)}
+#feed{max-height:68vh;overflow:auto;padding:4px 0}
+.row{display:grid;grid-template-columns:62px 82px 1fr;gap:8px;padding:2px 12px}
+.row:hover{background:#19212b}
+.row .t{color:var(--dim)}.row .g{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row .x{overflow-wrap:anywhere}
+.c-failure .x{color:var(--red)}.c-warning .x{color:var(--amber)}.c-success .x{color:var(--green)}
+.c-landing .x{color:var(--violet)}.c-dispatch .x{color:var(--blue)}.c-restart .x{color:var(--teal)}.c-plain .x{color:var(--dim)}
+.good{color:var(--green)}.warnc{color:var(--amber)}.badc{color:var(--red)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Gas Town</h1>
+  <span id="verdict" class="pill unknown">UNKNOWN</span>
+  <span id="healthline">waiting for the town…</span>
+  <span id="conn" class="off">connecting</span>
+</header>
+
+<div class="tiles" id="tiles"></div>
+
+<div class="grid">
+  <div class="col">
+    <section><h2>Polecats <span class="r" id="seatsnote"></span></h2><div class="body" id="seats"></div></section>
+    <section><h2>Machine <span class="r" id="machnote"></span></h2><div class="body" id="machine"></div></section>
+    <section><h2>DeepSeek <span class="r" id="spendnote"></span></h2><div class="body" id="spend"></div></section>
+  </div>
+  <div class="col">
+    <section>
+      <h2>Feed <span class="chips" id="chips"></span></h2>
+      <div id="feed"></div>
+    </section>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+const fmtDur = s => {
+  if (s == null || s < 0) return "–";
+  s = Math.round(s);
+  if (s < 90) return s + "s";
+  const m = Math.round(s / 60);
+  if (m < 90) return m + "m";
+  const h = Math.floor(m / 60);
+  return h + "h" + String(m % 60).padStart(2, "0") + "m";
+};
+const age = iso => iso ? fmtDur((Date.now() - new Date(iso).getTime()) / 1000) : "–";
+const clock = iso => new Date(iso).toLocaleTimeString([], {hour12: false});
+const money = v => v == null ? "–" : "$" + Number(v).toFixed(2);
+
+let state = null;
+
+function tile(k, v, sub, cls) {
+  const t = el("div", "tile" + (cls ? " " + cls : ""));
+  t.append(el("div", "k", k), el("div", "v", v), el("div", "s", sub || ""));
+  return t;
+}
+
+function renderHealth(h) {
+  const v = (h && h.verdict) || "unknown";
+  const p = $("verdict");
+  p.className = "pill " + v;
+  p.textContent = v.toUpperCase();
+  $("healthline").textContent = h && h.line ? h.line : "no health report";
+}
+
+function renderTiles(s) {
+  const sm = s.summary || {};
+  const tiles = $("tiles");
+  tiles.replaceChildren();
+  const q = sm.ready_to_land;
+  let oldest = sm.oldest_ready ? (Date.now() - new Date(sm.oldest_ready).getTime()) / 1000 : null;
+  tiles.append(tile("Waiting to land", q == null ? "–" : String(q),
+    q ? "oldest " + fmtDur(oldest) : "queue empty", q == null ? "" : (oldest > 3600 ? "bad" : oldest > 900 ? "warn" : q ? "" : "ok")));
+  tiles.append(tile("Seats held", sm.seats_used == null ? "–" : sm.seats_used + (sm.seats_cap ? " / " + sm.seats_cap : ""), "held by a polecat"));
+  tiles.append(tile("Escalations", sm.escalations == null ? "–" : String(sm.escalations), "", sm.escalations ? "bad" : (sm.escalations === 0 ? "ok" : "")));
+  const med = sm.median_deploy_min;
+  tiles.append(tile("Ship time", med == null ? "–" : Math.round(med) + "m", "median dispatch→deploy" +
+    (sm.deploy_waiting ? " · " + sm.deploy_waiting + " awaiting deploy" : "")));
+  tiles.append(tile("main vs gt", sm.behind == null ? "–" : (sm.behind === 0 ? "current" : sm.behind + " behind"),
+    sm.main_tip ? sm.main_tip + " / " + (sm.installed_gt || "?") : "", sm.behind > 20 ? "warn" : ""));
+  const m = s.machine || {};
+  const cores = navigator.hardwareConcurrency || 8;
+  tiles.append(tile("Load", m.load1 == null ? "–" : m.load1.toFixed(1),
+    m.load5 != null ? "5m " + m.load5.toFixed(1) + " · 15m " + m.load15.toFixed(1) : "",
+    m.load1 > cores * 3 ? "bad" : m.load1 > cores ? "warn" : ""));
+  $("tiles").dataset.at = s.summary_at || "";
+}
+
+function renderSeats(s) {
+  const box = $("seats");
+  box.replaceChildren();
+  const seats = s.seats || [];
+  if (!seats.length) { box.append(el("div", "empty", s.summary ? "no polecat holds a bead" : "reading…")); $("seatsnote").textContent = ""; return; }
+  const t = el("table");
+  const hr = el("tr");
+  ["Polecat", "Bead", "Time"].forEach((x, i) => hr.append(el("th", i === 2 ? "n" : "", x)));
+  t.append(hr);
+  for (const seat of seats) {
+    const tr = el("tr");
+    tr.append(el("td", "", seat.rig + "/" + seat.polecat));
+    const td = el("td");
+    td.append(el("span", "bead", seat.bead));
+    if (seat.title) { td.append(document.createTextNode(" ")); td.append(el("span", "title", seat.title)); }
+    tr.append(td);
+    const el_ = seat.elapsed_sec ? Math.max(0, (Date.now() - new Date(seat.slung).getTime()) / 1000) : null;
+    tr.append(el("td", "n" + (el_ > 5400 ? " warnc" : ""), el_ == null ? "–" : fmtDur(el_)));
+    t.append(tr);
+  }
+  box.append(t);
+  $("seatsnote").textContent = s.summary_at ? "read " + age(s.summary_at) + " ago" : "";
+}
+
+function spark(points, w, h, color) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 " + w + " " + h);
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.setAttribute("class", "spark");
+  if (points.length < 2) return svg;
+  const max = Math.max(...points, 1);
+  const d = points.map((v, i) => (i / (points.length - 1) * w).toFixed(1) + "," + (h - 2 - v / max * (h - 6)).toFixed(1)).join(" ");
+  const pl = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+  pl.setAttribute("points", d); pl.setAttribute("fill", "none"); pl.setAttribute("stroke", color); pl.setAttribute("stroke-width", "1.5");
+  svg.append(pl);
+  return svg;
+}
+
+function renderMachine(s) {
+  const box = $("machine");
+  box.replaceChildren();
+  const m = s.machine || {};
+  const loads = (s.loads || []).map(p => p.load);
+  box.append(spark(loads, 400, 56, "#58a6ff"));
+  const note = loads.length > 1 ? "load, last " + fmtDur((new Date(s.loads[s.loads.length - 1].at) - new Date(s.loads[0].at)) / 1000) : "";
+  $("machnote").textContent = note;
+  const top = m.top || [];
+  if (top.length) {
+    const t = el("table");
+    for (const p of top) { const tr = el("tr"); tr.append(el("td", "", p.name), el("td", "n", p.cpu.toFixed(0) + "%")); t.append(tr); }
+    box.append(el("div", "k title", "busiest processes"), t);
+  }
+  const gates = s.gates || [];
+  if (gates.length) {
+    const t = el("table");
+    const hr = el("tr");
+    ["Gate finished", "Wall", "Load then"].forEach((x, i) => hr.append(el("th", i ? "n" : "", x)));
+    t.append(hr);
+    for (const g of gates.slice(-6).reverse()) {
+      const tr = el("tr");
+      tr.append(el("td", "", clock(g.at)), el("td", "n" + (g.secs > 180 ? " warnc" : ""), fmtDur(g.secs)), el("td", "n", g.load == null ? "–" : g.load.toFixed(1)));
+      t.append(tr);
+    }
+    box.append(el("div", "k title", "landing gates"), t);
+  }
+}
+
+function renderSpend(s) {
+  const box = $("spend");
+  box.replaceChildren();
+  const d = s.spend;
+  if (!d) { box.append(el("div", "empty", "no spend report")); $("spendnote").textContent = ""; return; }
+  const live = d.live || {};
+  const kv = el("div", "kv");
+  const add = (v, k, cls) => { const x = el("div"); x.append(el("b", cls || "", v), el("span", "", k)); kv.append(x); };
+  add(money(d.balance), "balance", live.available === false ? "badc" : "");
+  add(money(d.spent_total), "spent since top-up");
+  add(d.pace_1h ? money(d.pace_1h.per_hour) + "/h" : "–", "last 1h");
+  add(d.pace_24h ? money(d.pace_24h.per_hour) + "/h" : "–", "last 24h");
+  const rw = d.runway_days_at_24h_pace;
+  add(rw == null ? "–" : rw.toFixed(1) + "d", "runway", rw != null && rw < 3 ? "badc" : rw != null && rw < 7 ? "warnc" : "");
+  box.append(kv);
+  const days = Object.entries(d.per_day || {}).slice(-7);
+  if (days.length) {
+    const t = el("table");
+    for (const [day, v] of days.reverse()) {
+      const tr = el("tr");
+      tr.append(el("td", "", day), el("td", "n", v.spent < 0 ? "top-up" : money(v.spent)), el("td", "n title", money(v.close)));
+      t.append(tr);
+    }
+    box.append(t);
+  }
+  const alerts = d.alerts || [];
+  if (live.ok === false) box.append(el("div", "badc", "live balance unreachable; showing the ledger"));
+  if (d.watcher_pid == null || d.watcher_pid === "") box.append(el("div", "badc", "spend watcher is not running"));
+  $("spendnote").textContent = d.last_sample ? "ledger " + d.last_sample.replace("T", " ") : "";
+}
+
+function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderSeats(state); renderMachine(state); renderSpend(state); }
+
+const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
+const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));
+function renderChips() {
+  const box = $("chips");
+  box.replaceChildren();
+  for (const c of CLASSES) {
+    const b = el("button", "chip" + (shown.has(c) ? " on" : ""), c);
+    b.onclick = () => { shown.has(c) ? shown.delete(c) : shown.add(c); try { localStorage.setItem("gt-chips", JSON.stringify([...shown])); } catch (e) {} renderChips(); applyFilter(); };
+    box.append(b);
+  }
+}
+function rowFor(e) {
+  const r = el("div", "row c-" + e.class);
+  r.dataset.class = e.class;
+  r.append(el("span", "t", clock(e.at)), el("span", "g", e.rig + (e.kind === "landings" ? " ⬇" : "")), el("span", "x", e.text));
+  r.hidden = !shown.has(e.class);
+  return r;
+}
+function applyFilter() { for (const r of $("feed").children) r.hidden = !shown.has(r.dataset.class); }
+function pushEntry(e, stick) {
+  const f = $("feed");
+  const atBottom = f.scrollHeight - f.scrollTop - f.clientHeight < 40;
+  f.append(rowFor(e));
+  while (f.children.length > 800) f.firstChild.remove();
+  if (atBottom || stick) f.scrollTop = f.scrollHeight;
+}
+
+function connect() {
+  const es = new EventSource("/stream");
+  es.onopen = () => { $("conn").className = "on"; $("conn").textContent = "live"; };
+  es.onerror = () => { $("conn").className = "off"; $("conn").textContent = "reconnecting"; };
+  es.addEventListener("state", ev => { state = JSON.parse(ev.data); renderAll(); });
+  es.addEventListener("backlog", ev => { $("feed").replaceChildren(); JSON.parse(ev.data).forEach(e => pushEntry(e, true)); });
+  es.addEventListener("entry", ev => pushEntry(JSON.parse(ev.data)));
+}
+renderChips();
+connect();
+// Ages and elapsed times drift between pushes; redraw the cheap parts locally.
+setInterval(() => { if (state) { renderTiles(state); renderSeats(state); } }, 15000);
+</script>
+</body>
+</html>

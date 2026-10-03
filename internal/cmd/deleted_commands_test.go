@@ -65,7 +65,6 @@ var deletedCommands = [][]string{
 	{"dolt", "rollback"},
 	{"dolt", "recover"},
 	{"boot"}, // gt-4k3fj.6.1: the boot role and its triage command were retired
-	{"dashboard"},
 	{"krc"},
 	{"quota"},
 	{"account"},
