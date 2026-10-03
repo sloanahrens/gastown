@@ -14,8 +14,8 @@ import (
 // text a reader copies, not a copy kept here to drift.
 var (
 	followUpDescRe   = regexp.MustCompile(`(?s)desc="\$\(cat <<'BEAD'\n(.*?)\nBEAD\n\)"`)
-	followUpCreateRe = regexp.MustCompile(`(?m)^id=\$\(gt bead create .*\)$`)
-	followUpAcceptRe = regexp.MustCompile(`(?m)^gt bead update "\$id" --acceptance "([^"]+)"$`)
+	followUpCreateRe = regexp.MustCompile(`(?ms)^gt bead create .*?-q$`)
+	followUpAcceptRe = regexp.MustCompile(`--acceptance "([^"]+)"`)
 )
 
 // TestPolecatFollowUpBeadExampleLintsClean guards the Discovered work example
@@ -36,11 +36,11 @@ func TestPolecatFollowUpBeadExampleLintsClean(t *testing.T) {
 	}
 	create := followUpCreateRe.FindString(text)
 	if create == "" {
-		t.Fatal("the Discovered work example carries no id=$(gt bead create ...) line")
+		t.Fatal("the Discovered work example carries no gt bead create ... -q line")
 	}
-	acc := followUpAcceptRe.FindStringSubmatch(text)
+	acc := followUpAcceptRe.FindStringSubmatch(create)
 	if acc == nil {
-		t.Fatal("the Discovered work example carries no gt bead update \"$id\" --acceptance \"...\" line")
+		t.Fatal("the Discovered work example's gt bead create line carries no --acceptance \"...\"")
 	}
 	if !strings.Contains(create, "--type task") {
 		t.Errorf("the example does not file --type task, and bd's bug type demands a Steps to Reproduce section: %s", create)
