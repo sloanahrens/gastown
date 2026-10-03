@@ -1114,8 +1114,8 @@ func TestSpecLintCommandExitCodes(t *testing.T) {
 				}
 				spec = specFromIssue(&issues[0])
 			}
-			var out bytes.Buffer
-			err := specLint(&out, beadID, spec, showErr, tmpl, false)
+			var out, errOut bytes.Buffer
+			err := specLint(&out, &errOut, beadID, spec, showErr, tmpl, false)
 			code, _ := IsSilentExit(err)
 			if err != nil && code == 0 {
 				t.Fatalf("unexpected error %v", err)
@@ -1125,6 +1125,23 @@ func TestSpecLintCommandExitCodes(t *testing.T) {
 			}
 			if got := strings.TrimSpace(out.String()); got != tc.want {
 				t.Errorf("output = %q, want %q", got, tc.want)
+			}
+			// A non-zero exit carries the skeleton on stderr; a clean bead
+			// prints nothing extra (gt-ngtev).
+			stderr := errOut.String()
+			if code == 0 {
+				if stderr != "" {
+					t.Errorf("clean bead wrote to stderr: %q", stderr)
+				}
+				return
+			}
+			for _, want := range append([]string{"Acceptance"}, specdispatch.DefaultSections...) {
+				if !strings.Contains(stderr, "## "+want+"\n") {
+					t.Errorf("stderr is missing section %q:\n%s", want, stderr)
+				}
+			}
+			if !strings.Contains(stderr, "run gt spec lint "+beadID+" again.") {
+				t.Errorf("stderr is missing the re-lint command:\n%s", stderr)
 			}
 		})
 	}
@@ -1206,11 +1223,14 @@ func TestSpecLintJSONReport(t *testing.T) {
 			} else {
 				showErr = fmt.Errorf("bead %s not found", beadID)
 			}
-			var out bytes.Buffer
-			err := specLint(&out, beadID, spec, showErr, tmpl, true)
+			var out, errOut bytes.Buffer
+			err := specLint(&out, &errOut, beadID, spec, showErr, tmpl, true)
 			code, _ := IsSilentExit(err)
 			if code != tc.wantExit {
 				t.Fatalf("exit code = %d, want %d (%v)", code, tc.wantExit, err)
+			}
+			if errOut.Len() != 0 {
+				t.Errorf("--json wrote the skeleton to stderr: %q", errOut.String())
 			}
 			var got specLintReport
 			if err := json.Unmarshal(out.Bytes(), &got); err != nil {
