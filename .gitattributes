@@ -8,8 +8,8 @@
 # RejectConflict on it costs a polecat rebase, so it gets the rule.
 #
 # Never add merge=union for anything else in this tree: unconverted.txt,
-# realgit.txt, docker.txt and overbudget.txt shrink; the guardlint, cmdtree,
-# gtenv and beadsfake (raw bd) baselines are rewritten; CHANGELOG.md and
+# realgit.txt, docker.txt and overbudget.txt shrink; the guardlint, cmdtree
+# and beadsfake (raw bd) baselines are rewritten; CHANGELOG.md and
 # docs/testing.md are prose whose edits union would duplicate.
 # TestUnionMergeOnlyOnGrowOnlyLists (internal/testpolicy) fails any
 # merge=union path whose file does not carry the grow-only header.
