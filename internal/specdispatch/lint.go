@@ -41,8 +41,11 @@ const (
 	// NeedsPlanningLabel routes a spec to the planner instead of a polecat.
 	NeedsPlanningLabel = "needs-planning"
 	// DispatchFailedLabel marks a spec whose sling failed for a reason other
-	// than capacity. The dispatcher skips it until the label is removed.
-	DispatchFailedLabel = "spec-dispatch-failed"
+	// than capacity. The dispatcher skips it until the label is removed. The
+	// name is constants.LabelSpecDispatchFailed's: internal/townhealth counts
+	// the beads wearing it and must not import this package to spell it
+	// (gt-q6zoo).
+	DispatchFailedLabel = constants.LabelSpecDispatchFailed
 
 	// MinAcceptance and MaxAcceptance bound the acceptance list. Fewer than
 	// one is a refusal; more than MaxAcceptance is a spec one worker cannot

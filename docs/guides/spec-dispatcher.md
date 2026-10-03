@@ -134,9 +134,13 @@ filed as gt-tt8sg.
 
 A Dolt serialization failure (Error 1213) retries the whole dispatch up to
 four times with jittered backoff; the bond step inside the sling already
-retries on its own. Pool and merge-queue refusals are skips. Any other failure
-leaves the bead unassigned, adds `spec-dispatch-failed` and one comment. Remove
-the label to retry.
+retries on its own. Pool and merge-queue refusals are skips, and so is a
+content-overlap refusal: the guard refuses only live work, so the refusal
+clears by itself when the overlapping bead closes and the next tick takes the
+bead again with no label for anyone to remove (gt-q6zoo). Any other failure
+leaves the bead unassigned, adds `spec-dispatch-failed` and one comment saying
+the bead is out of the queue until the label is cleared. Remove the label to
+retry.
 
 ## Turning the ticker off
 
@@ -160,6 +164,21 @@ dispatcher says so from the one signal an operator reads. A tick that
 refused, replanned or skipped its candidates was working, not stalled. A tick
 whose roster the daemon cannot read is `dispatch[?]`: an unreadable roster is
 not a full town (gt-xiw7o).
+
+The field counts the ready beads carrying `spec-dispatch-failed` as well, so a
+bead a failed dispatch left out of the queue is visible even while the
+dispatcher itself is healthy: `dispatch=ok_(3_failed)[R]` is three beads
+waiting for someone to clear the label (gt-q6zoo). The count is the newest
+tick's, so it comes off the line on the next tick after the label is cleared;
+it rides whichever state the field already reads (`off_(2_failed)`,
+`stalled_(1_failed)`), and a `dispatch[?]` or `dispatch=silent[R]` field shows
+it in the detail only — a field with no answer, or no tick in the window, has
+no count to show on the line.
+
+The count is read from the tick's own ready board, not a second query: the
+`bd ready --json` the dispatcher runs hydrates each issue's `labels` array
+(verified against a live board, gt-q6zoo), so the beads the label holds are in
+the same snapshot as the candidates and the tick counts them in one pass.
 
 ## seat-refill
 

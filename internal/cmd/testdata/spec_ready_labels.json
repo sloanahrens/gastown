@@ -1,0 +1,55 @@
+[
+  {
+    "id": "gt-wlm2a",
+    "title": "convoy: no test pins ClientSource's raw dependency read against a real Dolt store (the fake-vs-Dolt parity test went with fakeRigStore)",
+    "notes": "Found by lapis in gt-7iwy0.3.1: TestIntegrationFakeStoreMatchesDolt compared the beadsdk test fake (fakeRigStore) against a real Dolt store through testutil.OpenTestStore; it went with fakeRigStore. The unit tests now pin ClientSource's raw reads against a scripted bd-sql answer (fake_source_test.go answerRawDeps), which follows beadsql.RawDeps' exact statement text, but nothing exercises the read against real Dolt. internal/convoy's integration tier now has only its TestMain.",
+    "status": "open",
+    "priority": 3,
+    "issue_type": "task",
+    "owner": "sloan.ahrens@gmail.com",
+    "created_at": "2026-10-02T23:39:50Z",
+    "created_by": "gastown/polecats/lapis",
+    "updated_at": "2026-10-02T23:40:06Z",
+    "labels": [
+      "gt:task"
+    ],
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "gt-bw6ai",
+    "title": "Daemon-raised escalations record the daemon as escalated_by, not 'overseer'",
+    "description": "## Goal\nhq-wisp-btoyzk (checkpoint_dog revert guard, raised by the daemon) showed 'Escalated by: overseer', misattributing an automated alert to the operator.\n## Constraints\ninternal/daemon escalation path and internal/notify or the escalate sender detection it uses.\n## Out of scope\nEscalation routing and severity.\n## Gate\nmake lint, make gate\n## Size\none worker, one landing",
+    "acceptance_criteria": "- [ ] An escalation raised through Daemon.escalateAlertSeverity (internal/daemon/jsonl_git_backup.go:944) shows Escalated by: daemon (or daemon/<source>), never the town overseer identity; test with a fake notifier\n- [ ] Escalations raised by agents still record the agent address; test\n- [ ] make lint && make gate pass",
+    "status": "open",
+    "priority": 3,
+    "issue_type": "task",
+    "owner": "sloan.ahrens@gmail.com",
+    "created_at": "2026-10-02T17:29:58Z",
+    "created_by": "Sloan Ahrens",
+    "updated_at": "2026-10-02T17:29:58Z",
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  },
+  {
+    "id": "gt-8xk9k",
+    "title": "Remaining rig.LoadRigConfig callers in daemon, schedulerrun and doctor still swallow a parse error",
+    "description": "gt-w8dw5 routed the call sites it named through rig.LoadRigConfigIfPresent. The same 'if err == nil' fallback remains at:\n- internal/daemon/daemon.go:2095 (beads prefix)\n- internal/daemon/landing_worker.go:745 (default_branch)\n- internal/daemon/checkpoint_dog.go:293 (default_branch)\n- internal/rig/manager.go RegisterRig (~1707, reuses an existing config.json)\n- internal/schedulerrun/validate.go:146 (beads prefix)\n- internal/doctor/rig_beads_check.go:155 (git URL; doctor has a dedicated unreadable-config check, so confirm double-reporting is acceptable before changing it)\nWith strict decoding (gt-y3pgh.2.5) a typo'd key at any of these degrades silently, exactly where fail-closed wants it loud.",
+    "status": "open",
+    "priority": 3,
+    "issue_type": "task",
+    "owner": "sloan.ahrens@gmail.com",
+    "created_at": "2026-10-03T01:22:01Z",
+    "created_by": "gastown/polecats/lapis",
+    "updated_at": "2026-10-03T01:22:01Z",
+    "labels": [
+      "gt:bug",
+      "spec-dispatch-failed"
+    ],
+    "dependency_count": 0,
+    "dependent_count": 0,
+    "comment_count": 0
+  }
+]

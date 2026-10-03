@@ -56,7 +56,11 @@ type specDispatchTickReport struct {
 	Hold       string `json:"hold"`
 	Roster     string `json:"roster"`
 	Candidates int    `json:"candidates"`
-	Dispatched []struct {
+	// LabeledFailed is the tick's count of ready beads held out of the queue
+	// by the spec-dispatch-failed label, which the health field surfaces
+	// (gt-q6zoo).
+	LabeledFailed int `json:"labeled_failed"`
+	Dispatched    []struct {
 		Line string `json:"line"`
 	} `json:"dispatched"`
 	Refused []struct {
@@ -127,6 +131,7 @@ func (d *Daemon) recordDispatchTick(r specDispatchTickReport, at time.Time) {
 		Planning:         len(r.Planning),
 		Skipped:          len(r.Skipped),
 		Failed:           len(r.Failed),
+		LabeledFailed:    r.LabeledFailed,
 	}
 	d.dispatchTicksMu.Lock()
 	defer d.dispatchTicksMu.Unlock()
@@ -216,8 +221,8 @@ func formatSpecDispatchReport(out []byte) []string {
 	if r.Hold != "" {
 		return []string{"held: " + r.Hold}
 	}
-	lines := []string{fmt.Sprintf("tick: %d candidate(s), roster %s, %d dispatched, %d refused, %d planning, %d skipped, %d failed",
-		r.Candidates, r.Roster, len(r.Dispatched), len(r.Refused), len(r.Planning), len(r.Skipped), len(r.Failed))}
+	lines := []string{fmt.Sprintf("tick: %d candidate(s), roster %s, %d dispatched, %d refused, %d planning, %d skipped, %d failed, %d held by the failed label",
+		r.Candidates, r.Roster, len(r.Dispatched), len(r.Refused), len(r.Planning), len(r.Skipped), len(r.Failed), r.LabeledFailed)}
 	for _, group := range []struct {
 		name    string
 		entries []struct {

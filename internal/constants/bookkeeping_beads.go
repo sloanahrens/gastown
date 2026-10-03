@@ -40,6 +40,15 @@ var NonDispatchableBeadTypes = []string{
 // health signal (gt-s3rec.3): a notice the operator is told about, not work.
 const LabelTownHealth = "gt:townhealth"
 
+// LabelSpecDispatchFailed marks a work bead whose dispatch failed for a reason
+// it cannot clear itself, so the bead stays out of the dispatcher's queue
+// until an operator removes the label (gt-q6zoo). It lives here rather than in
+// internal/specdispatch, which is where the dispatcher reads it, because
+// internal/townhealth's dispatch field counts the beads wearing it: spelling
+// the label in a health detail line must not pull the whole decision core into
+// that package's imports.
+const LabelSpecDispatchFailed = "spec-dispatch-failed"
+
 // NonDispatchableBeadLabels are the "gt:" labels that mark a bead as a member
 // of a runtime family, regardless of the issue_type it carries. An escalation
 // waits on the mayor or the operator, a message on its recipient, an agent
