@@ -70,11 +70,9 @@ switch ($cmd) {
     if ($args.Length -ge 3 -and $args[1] -eq 'get' -and $args[2] -eq 'status.custom') {
       Write-Output ''
     }
-			if ($args.Length -ge 3 -and $args[1] -eq 'get' -and $args[2] -eq 'types.custom') {
-			  Write-Output 'agent,role,rig,convoy,slot,queue,event,message,molecule,gate,merge-request'
-			}
-			if ($args.Length -ge 3 -and $args[1] -eq 'get' -and $args[2] -eq 'types.infra') {
-			  Write-Output 'agent,role,message'
+			# One config list --json answers the whole verifyBDConfigSet read.
+			if ($args.Length -ge 2 -and $args[1] -eq 'list') {
+			  Write-Output '{"types.custom":"agent,role,rig,convoy,slot,queue,event,message,molecule,gate,merge-request","types.infra":"agent,role,message"}'
 			}
 			exit 0
 		  }
@@ -118,11 +116,9 @@ case "$cmd" in
     exit 0
     ;;
 	  config)
-	    # Return types list for "config get types.custom" verification
-	    if echo "$*" | grep -q "get types.custom"; then
-	      echo "agent,role,rig,convoy,slot,queue,event,message,molecule,gate,merge-request"
-	    elif echo "$*" | grep -q "get types.infra"; then
-	      echo "agent,role,message"
+	    # One config list --json answers the whole verifyBDConfigSet read.
+	    if echo "$*" | grep -q "config list"; then
+	      echo '{"types.custom":"agent,role,rig,convoy,slot,queue,event,message,molecule,gate,merge-request","types.infra":"agent,role,message"}'
 	    fi
 	    exit 0
     ;;
@@ -651,16 +647,19 @@ func TestEnsureCustomTypesConfigYAMLIgnoresDBCache(t *testing.T) {
 }
 
 func TestEnsureCustomTypes_VerifyPersistence(t *testing.T) {
-	t.Run("sentinel not written when db verify fails", func(t *testing.T) {
+	t.Run("wrong-database set still fails init", func(t *testing.T) {
 		if runtime.GOOS == "windows" {
 			t.Skip("test uses Unix shell script mock for bd")
 		}
-		// Install a mock bd that succeeds on "config set" but returns empty
-		// on "config get types.custom" — simulating a silent write failure.
+		// Model GH#2637: "config set" exits 0, but the write lands in another
+		// database. The read-back against THIS workspace never sees the keys,
+		// so init must still fail and the sentinel must stay unwritten.
 		binDir := t.TempDir()
 		logPath := filepath.Join(binDir, "bd.log")
+		wrongDBPath := filepath.Join(binDir, "wrong-db.log")
 		script := `#!/bin/sh
 LOG_FILE='` + logPath + `'
+WRONG_DB='` + wrongDBPath + `'
 printf '%s\n' "$*" >> "$LOG_FILE"
 cmd=""
 for arg in "$@"; do
@@ -674,9 +673,13 @@ case "$cmd" in
     exit 0
     ;;
   config)
-    # "config set" succeeds but "config get types.custom" returns empty
-    if echo "$*" | grep -q "get types.custom"; then
-      echo ""
+    # The set reports success but persists to the wrong database.
+    if echo "$*" | grep -q "config set"; then
+      printf '%s\n' "$*" >> "$WRONG_DB"
+    fi
+    # A read of the workspace's own database: the types were never written here.
+    if echo "$*" | grep -q "config list"; then
+      echo '{"issue_prefix":"gt"}'
     fi
     exit 0
     ;;
@@ -697,10 +700,16 @@ esac
 
 		err := EnsureCustomTypes(beadsDir)
 		if err == nil {
-			t.Fatal("expected error when types.custom verify fails, got nil")
+			t.Fatal("expected error when the set landed in another database, got nil")
 		}
 		if !strings.Contains(err.Error(), "not persisted") {
 			t.Fatalf("expected 'not persisted' error, got: %v", err)
+		}
+
+		// The mock must really have written somewhere else, or the test proves
+		// nothing about a silent wrong-database write.
+		if wrong := readMockBDLog(t, wrongDBPath); !strings.Contains(wrong, "config set types.custom") {
+			t.Fatalf("mock never recorded the misplaced set:\n%s", wrong)
 		}
 
 		// Sentinel file should NOT have been written
@@ -709,6 +718,57 @@ esac
 			t.Error("sentinel file should not exist when verify fails")
 		}
 	})
+}
+
+// TestEnsureCustomTypes_OneConfigReadBack pins town setup's per-dir bd config
+// budget (gt-ik4a1.4.13): configuring one beads dir costs five bd config
+// subprocesses — two sets for the custom types, one read-back that confirms
+// both keys, and the statuses merge's get and set. Two per-key `config get`
+// verifications used to make it six, and the container suite's scheduler
+// subset runs that cost for every beads dir in every town.
+func TestEnsureCustomTypes_OneConfigReadBack(t *testing.T) {
+	logPath := installMockBDRecorder(t)
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	writeNamedBeadsWorkspace(t, beadsDir)
+	ResetEnsuredDirs()
+	t.Cleanup(ResetEnsuredDirs)
+
+	if err := EnsureCustomTypes(beadsDir); err != nil {
+		t.Fatalf("EnsureCustomTypes: %v", err)
+	}
+	if err := EnsureCustomStatuses(beadsDir); err != nil {
+		t.Fatalf("EnsureCustomStatuses: %v", err)
+	}
+
+	var configCalls []string
+	for _, line := range strings.Split(readMockBDLog(t, logPath), "\n") {
+		if line = strings.TrimSpace(line); strings.HasPrefix(line, "config ") {
+			configCalls = append(configCalls, line)
+		}
+	}
+	joined := strings.Join(configCalls, "\n")
+	// The statuses merge's pair must be in the log, or a path that stopped
+	// making bd calls at all would pass the budget below for the wrong reason.
+	for _, want := range []string{"config get status.custom", "config set status.custom"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("mock bd log is missing %q; the count below is not the whole per-dir cost:\n%s", want, joined)
+		}
+	}
+	if len(configCalls) > 5 {
+		t.Fatalf("bd config subprocesses for one beads dir = %d, want <= 5:\n%s", len(configCalls), joined)
+	}
+	reads := 0
+	for _, call := range configCalls {
+		if strings.HasPrefix(call, "config get types.") {
+			t.Fatalf("per-key custom-type read-back is back; one bd config list must cover both keys:\n%s", joined)
+		}
+		if strings.HasPrefix(call, "config list") {
+			reads++
+		}
+	}
+	if reads != 1 {
+		t.Fatalf("custom-type read-backs = %d, want exactly 1 (one bd config list):\n%s", reads, joined)
+	}
 }
 
 func TestEnsureCustomStatuses(t *testing.T) {
