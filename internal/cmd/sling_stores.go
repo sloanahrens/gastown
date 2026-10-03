@@ -68,6 +68,20 @@ func (s slingStores) show(townRoot, beadID string) (*beads.Issue, error) {
 	return nil, err
 }
 
+// children reads beadID's direct children from its own rig's database, the way
+// show reads the bead. It is bd's parent-child view (`bd show --children`,
+// which unions the issue and wisp tables), never the raw dependency scan: a
+// parent-child edge is stored child → parent, so a "down" scan of that table
+// answers a leaf bead with its PARENT (gt-gektq).
+func (s slingStores) children(townRoot, beadID string) ([]*beads.Issue, error) {
+	if townRoot == "" {
+		if root, err := workspace.FindFromCwdOrError(); err == nil {
+			townRoot = root
+		}
+	}
+	return s.pinnedAt(resolveBeadDirFromTownRoot(townRoot, beadID)).Children(beadID)
+}
+
 // beadInfo is show as the sling guards read it.
 func (s slingStores) beadInfo(townRoot, beadID string) (*beadInfo, error) {
 	issue, err := s.show(townRoot, beadID)

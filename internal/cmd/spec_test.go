@@ -31,13 +31,17 @@ func cleanSpec(id string, priority int, created string) specdispatch.Spec {
 
 // fakeSpecTown records every side effect a dispatcher tick makes.
 type fakeSpecTown struct {
-	specs      map[string]specdispatch.Spec
-	order      []string
-	roster     specRoster
-	rosterErr  error
-	hold       string
-	rigHold    map[string]string
-	revert     map[string]*specdispatch.Revert
+	specs     map[string]specdispatch.Spec
+	order     []string
+	roster    specRoster
+	rosterErr error
+	hold      string
+	rigHold   map[string]string
+	revert    map[string]*specdispatch.Revert
+	// children is each bead's direct child set, and childErrs a per-bead
+	// children read failure, for the container rule.
+	children   map[string][]specdispatch.Child
+	childErrs  map[string]error
 	slingErrs  map[string][]error // per bead, consumed in order
 	slung      []string
 	slingSeats []specdispatch.SeatChoice
@@ -58,7 +62,8 @@ var specTestNow = time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 
 func newFakeSpecTown(specs ...specdispatch.Spec) *fakeSpecTown {
 	f := &fakeSpecTown{specs: map[string]specdispatch.Spec{}, rigHold: map[string]string{}, revert: map[string]*specdispatch.Revert{},
-		slingErrs: map[string][]error{}, originBranches: map[string]bool{}, notes: map[string][]string{}, labels: map[string][]string{}}
+		slingErrs: map[string][]error{}, originBranches: map[string]bool{}, notes: map[string][]string{}, labels: map[string][]string{},
+		children: map[string][]specdispatch.Child{}, childErrs: map[string]error{}}
 	for _, s := range specs {
 		f.specs[s.ID] = s
 	}
@@ -93,6 +98,12 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 				return s, errors.New("not found")
 			}
 			return s, nil
+		},
+		Children: func(id string) ([]specdispatch.Child, error) {
+			if err := f.childErrs[id]; err != nil {
+				return nil, err
+			}
+			return f.children[id], nil
 		},
 		RigHold:        func(rig string) string { return f.rigHold[rig] },
 		RevertInFlight: func(rig string) *specdispatch.Revert { return f.revert[rig] },
@@ -285,6 +296,63 @@ func TestSpecDispatchUnshapedHoldSpendsNoSeat(t *testing.T) {
 	if len(r.Dispatched) != 1 || r.Dispatched[0].Bead != "gt-good" {
 		t.Fatalf("dispatched = %+v, want the shaped bead behind the hold", r.Dispatched)
 	}
+}
+
+// A bead whose children are open is a container, so it is held under any gate
+// and spends no seat; one whose children have all closed is a unit of work
+// again (gt-gektq).
+func TestSpecDispatchOpenChildrenHoldTheContainer(t *testing.T) {
+	t.Parallel()
+	container := cleanSpec("gt-container", 1, "2026-09-29T10:00:00Z")
+	landed := cleanSpec("gt-landed", 2, "2026-09-29T11:00:00Z")
+
+	t.Run("open child holds, under the off gate too", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(container)
+		f.children["gt-container"] = []specdispatch.Child{
+			{ID: "gt-container.1", Status: "open"},
+			{ID: "gt-container.2", Status: "closed"},
+		}
+		env := f.env()
+		env.ShapeGate = specdispatch.ShapeGateOff // shape is no gate; the container rule still is
+		r := runSpecDispatchCycle(env)
+		if len(f.slung) != 0 || len(r.Dispatched) != 0 {
+			t.Fatalf("slung a container: slung %v report %+v", f.slung, r)
+		}
+		want := "gt-container: held: container: open child gt-container.1"
+		if len(r.Skipped) != 1 || r.Skipped[0].Line != want {
+			t.Fatalf("skipped = %+v, want %q", r.Skipped, want)
+		}
+	})
+
+	t.Run("all children closed slings", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(container, landed)
+		f.children["gt-container"] = []specdispatch.Child{
+			{ID: "gt-container.1", Status: "closed"},
+			{ID: "gt-container.2", Status: "tombstone"},
+		}
+		r := runSpecDispatchCycle(f.env())
+		if got := strings.Join(f.slung, " "); got != "gt-container" {
+			t.Fatalf("slung %q, want the container whose children all landed", got)
+		}
+		if len(r.Dispatched) != 1 || r.Dispatched[0].Bead != "gt-container" {
+			t.Fatalf("dispatched = %+v", r.Dispatched)
+		}
+	})
+
+	t.Run("an unreadable child set holds", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(container)
+		f.childErrs["gt-container"] = errors.New("bd children: boom")
+		r := runSpecDispatchCycle(f.env())
+		if len(f.slung) != 0 {
+			t.Fatalf("slung a bead whose children could not be read: %v", f.slung)
+		}
+		if len(r.Errors) != 1 || !strings.Contains(r.Errors[0], "cannot read children") {
+			t.Fatalf("errors = %+v, want one children-read failure", r.Errors)
+		}
+	})
 }
 
 // --dry-run holds an unshaped bead too: it reports the unshaped reason and

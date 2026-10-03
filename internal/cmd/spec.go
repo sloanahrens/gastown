@@ -214,6 +214,21 @@ func showSpec(townRoot, beadID string) (specdispatch.Spec, error) {
 	return specFromIssue(issue), nil
 }
 
+// specChildren reads a bead's direct children and reduces them to what the
+// container rule reads (gt-gektq). The read is slingStores.children, whose
+// comment says why it is bd's view and not the raw dependency scan.
+func specChildren(townRoot, beadID string) ([]specdispatch.Child, error) {
+	issues, err := slingStores{}.children(townRoot, beadID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]specdispatch.Child, 0, len(issues))
+	for _, issue := range issues {
+		out = append(out, specdispatch.Child{ID: issue.ID, Status: issue.Status})
+	}
+	return out, nil
+}
+
 func runSpecLint(cmd *cobra.Command, args []string) error {
 	townRoot, _ := workspace.FindFromCwd()
 	path := specLintTemplate
@@ -323,7 +338,11 @@ type specDispatchEnv struct {
 	Hold       func() string
 	Candidates func() specBoardRead
 	Show       func(beadID string) (specdispatch.Spec, error)
-	RigHold    func(rig string) string
+	// Children reads a bead's direct children for the container rule
+	// (gt-gektq). The set is read here and handed to specdispatch, which never
+	// queries.
+	Children func(beadID string) ([]specdispatch.Child, error)
+	RigHold  func(rig string) string
 	// RevertInFlight is the revert the rig's red-main owner has building or
 	// queued, from the state the landing worker writes; nil is none. It holds
 	// that rig's red-main beads, never any other bead (gt-zkdwt).
@@ -358,8 +377,10 @@ type specDispatchEnv struct {
 // while one that needs planning still dispatches; under refuse the held bead is
 // also labeled needs-shape, and one that needs planning is labeled and left for
 // the planner; off runs no lint. A bead labeled spec-shape-waived waives the
-// lint and dispatches under any gate (gt-f8ppx). A candidate is slung only onto
-// a free seat that takes it, and a skip leaves it ready for the next tick.
+// lint and dispatches under any gate (gt-f8ppx). A container — a bead with at
+// least one open child — is held until its children close, under any gate
+// (gt-gektq). A candidate is slung only onto a free seat that takes it, and a
+// skip leaves it ready for the next tick.
 func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	report := specDispatchReport{Template: env.Template.Source}
 	if hold := env.Hold(); hold != "" {
@@ -489,6 +510,22 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 					continue
 				}
 			}
+		}
+
+		// A bead whose children are open is a container, not a unit of work:
+		// its scope is already sliced into children a seat will take, so
+		// spending one on the parent duplicates them (gt-gektq). An unreadable
+		// child set is not an empty one — the bead might be a container — so it
+		// is left for the next tick rather than slung.
+		children, err := env.Children(id)
+		if err != nil {
+			report.Errors = append(report.Errors, fmt.Sprintf("%s: cannot read children: %v", id, err))
+			continue
+		}
+		full.Children = children
+		if why := specdispatch.OpenChildHold(full); why != "" {
+			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: held: %s", id, why)})
+			continue
 		}
 
 		if len(report.Dispatched) >= perTick {
@@ -776,6 +813,7 @@ func runSpecDispatch(cmd *cobra.Command, _ []string) error {
 		Hold:       func() string { return dispatch.OperatorHold(townRoot) },
 		Candidates: func() specBoardRead { return specCandidates(townRoot, maxPriority, specReadyBoard) },
 		Show:       func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) },
+		Children:   func(id string) ([]specdispatch.Child, error) { return specChildren(townRoot, id) },
 		RigHold:    func(rig string) string { return dispatch.RigHold(townRoot, rig) },
 		RevertInFlight: func(rig string) *specdispatch.Revert {
 			return rigRevertInFlightPinned(townRoot, rig)
