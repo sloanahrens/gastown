@@ -856,7 +856,7 @@ func initTownAgentBeads(townPath string) error {
 			// Note: RoleBead field removed - role definitions are now config-based
 		}
 
-		if _, err := bd.CreateAgentBead(agent.id, agent.title, fields); err != nil {
+		if _, err := beads.CreateAgentBead(bd, agent.id, agent.title, fields); err != nil {
 			return fmt.Errorf("creating %s: %w", agent.id, err)
 		}
 		fmt.Printf("   ✓ Created agent bead: %s\n", agent.id)

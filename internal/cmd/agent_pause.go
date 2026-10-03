@@ -167,7 +167,7 @@ func (a *agentAddr) displayAddress(role, name string) string {
 // readAgentState reads the agent bead's current agent_state verbatim, or ""
 // when the bead cannot be read or carries no agent fields.
 func readAgentState(townRoot, beadID string) string {
-	issue, fields, err := beads.New(townRoot).ForAgentBead().GetAgentBead(beadID)
+	issue, fields, err := beads.GetAgentBead(beads.New(townRoot), beadID)
 	if err != nil || issue == nil || fields == nil {
 		return ""
 	}
@@ -231,7 +231,7 @@ func runAgentPause(cmd *cobra.Command, args []string) error {
 	//    polecat identity show`). Best-effort and never consulted by any
 	//    scanner — the marker file above is what gates restarts, so a Dolt
 	//    blip here cannot undo the pause.
-	if err := beads.New(townRoot).ForAgentBead().UpdateAgentState(target.BeadID, string(beads.AgentStatePaused)); err != nil {
+	if err := beads.UpdateAgentState(beads.New(townRoot), target.BeadID, string(beads.AgentStatePaused)); err != nil {
 		style.PrintWarning("could not mirror agent_state=paused to bead %s: %v", target.BeadID, err)
 	}
 
@@ -271,7 +271,7 @@ type beadsAgentStates struct{ townRoot string }
 func (s beadsAgentStates) read(beadID string) string { return readAgentState(s.townRoot, beadID) }
 
 func (s beadsAgentStates) write(beadID, state string) error {
-	return beads.New(s.townRoot).ForAgentBead().UpdateAgentState(beadID, state)
+	return beads.UpdateAgentState(beads.New(s.townRoot), beadID, state)
 }
 
 // resumeAgent clears target's pause marker under townRoot, restores the bead

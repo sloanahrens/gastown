@@ -113,7 +113,7 @@ func checkPolecatSafety(target polecatTarget) *SafetyCheckResult {
 	// Check 1: Unpushed commits via cleanup_status or git state
 	bd := beads.New(target.r.Path)
 	agentBeadID := polecatBeadIDForRig(target.r, target.rigName, target.polecatName)
-	agentIssue, fields, err := bd.GetAgentBead(agentBeadID)
+	agentIssue, fields, err := beads.GetAgentBead(bd, agentBeadID)
 
 	if err != nil || fields == nil {
 		// No agent bead - fall back to git check
@@ -283,7 +283,7 @@ func displayDryRunSafetyCheck(target polecatTarget) bool {
 	polecatInfo, infoErr := target.mgr.Get(target.polecatName)
 	bd := beads.New(target.r.Path)
 	agentBeadID := polecatBeadIDForRig(target.r, target.rigName, target.polecatName)
-	agentIssue, fields, err := bd.GetAgentBead(agentBeadID)
+	agentIssue, fields, err := beads.GetAgentBead(bd, agentBeadID)
 
 	// Check 1: cleanup status or fallback git state
 	if err != nil || fields == nil {

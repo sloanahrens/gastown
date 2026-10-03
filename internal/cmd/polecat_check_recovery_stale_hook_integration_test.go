@@ -143,7 +143,7 @@ func TestIntegrationCheckRecoveryResolvesHookFromLiveBeadState(t *testing.T) {
 				Name: polecatName, Rig: rigName, State: tt.state,
 				ClonePath: repo, Branch: branch, Issue: tt.hookBead,
 			}
-			status := checkRecoveryForPolecat(db, r, rigName, polecatName, p, false)
+			status := checkRecoveryForPolecat(db, nil, r, rigName, polecatName, p, false)
 
 			if status.Verdict != tt.wantVerdict || status.SafeToNuke != tt.wantSafe || status.NeedsRecovery != tt.wantRecovery {
 				t.Fatalf("checkRecoveryForPolecat() = verdict %s safe_to_nuke=%v needs_recovery=%v, want %s/%v/%v (status %+v)",

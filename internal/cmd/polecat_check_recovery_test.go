@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
 )
@@ -30,18 +31,46 @@ func (f fakeIssueShower) Show(issueID string) (*beads.Issue, error) {
 	return f.issue, f.err
 }
 
+// fakeCleanupUpdater is the store reconcileCleanupStatusIfSafe writes through:
+// a beadsfake Client (so the free function's read-modify-write runs for real)
+// that counts the updates it is asked to make, and can be told to fail one.
 type fakeCleanupUpdater struct {
-	err    error
-	id     string
-	status string
-	calls  int
+	*beadsfake.Fake
+	err   error
+	id    string
+	desc  string
+	calls int
 }
 
-func (f *fakeCleanupUpdater) UpdateAgentCleanupStatus(id string, cleanupStatus string) error {
+func (f *fakeCleanupUpdater) Update(id string, opts beads.UpdateOptions) error {
 	f.calls++
 	f.id = id
-	f.status = cleanupStatus
-	return f.err
+	if opts.Description != nil {
+		f.desc = *opts.Description
+	}
+	if f.err != nil {
+		return f.err
+	}
+	return f.Fake.Update(id, opts)
+}
+
+// newCleanupUpdater returns an updater with the polecat's agent bead seeded,
+// so the reconcile's read half succeeds and the write half is what the test
+// observes.
+func newCleanupUpdater(t *testing.T, previous polecat.CleanupStatus) *fakeCleanupUpdater {
+	t.Helper()
+	f := &fakeCleanupUpdater{Fake: beadsfake.New()}
+	fields := &beads.AgentFields{RoleType: "polecat", AgentState: string(beads.AgentStateIdle), CleanupStatus: string(previous)}
+	if _, err := f.Create(beads.CreateOptions{
+		ID:          "gt-gastown-polecat-nitro",
+		Title:       "Polecat nitro",
+		Description: beads.FormatAgentDescription("Polecat nitro", fields),
+		Labels:      []string{"gt:agent"},
+		Priority:    -1,
+	}); err != nil {
+		t.Fatalf("seeding agent bead: %v", err)
+	}
+	return f
 }
 
 type fakeActiveMRRemovalChecker struct {
@@ -606,17 +635,20 @@ func TestReconcileCleanupStatusIfSafe(t *testing.T) {
 				Branch:        "polecat/nitro",
 				MQStatus:      "submitted",
 			}
-			updater := &fakeCleanupUpdater{}
+			updater := newCleanupUpdater(t, previous)
 			reconcileCleanupStatusIfSafe(status, updater, "gt-gastown-polecat-nitro", &polecat.Polecat{State: polecat.StateIdle}, &beads.AgentFields{
 				AgentState:    string(beads.AgentStateIdle),
 				CleanupStatus: string(previous),
 			})
 
 			if updater.calls != 1 {
-				t.Fatalf("UpdateAgentCleanupStatus calls = %d, want 1", updater.calls)
+				t.Fatalf("agent-bead writes = %d, want 1", updater.calls)
 			}
-			if updater.id != "gt-gastown-polecat-nitro" || updater.status != string(polecat.CleanupClean) {
-				t.Fatalf("update = (%q, %q), want clean update for agent", updater.id, updater.status)
+			if updater.id != "gt-gastown-polecat-nitro" {
+				t.Fatalf("updated %q, want the polecat's agent bead", updater.id)
+			}
+			if got := beads.ParseAgentFields(updater.desc).CleanupStatus; got != string(polecat.CleanupClean) {
+				t.Fatalf("cleanup_status written = %q, want %q", got, polecat.CleanupClean)
 			}
 			if status.CleanupStatus != polecat.CleanupClean || !status.Reconciled {
 				t.Fatalf("status after reconcile = (%q, reconciled=%v), want clean true", status.CleanupStatus, status.Reconciled)
@@ -633,7 +665,9 @@ func TestReconcileCleanupStatusIfSafe_FailsClosed(t *testing.T) {
 		Branch:        "polecat/nitro",
 		MQStatus:      "submitted",
 	}
-	reconcileCleanupStatusIfSafe(status, &fakeCleanupUpdater{err: errors.New("bd update failed")}, "gt-gastown-polecat-nitro", &polecat.Polecat{State: polecat.StateIdle}, &beads.AgentFields{
+	updater := newCleanupUpdater(t, polecat.CleanupUnpushed)
+	updater.err = errors.New("bd update failed")
+	reconcileCleanupStatusIfSafe(status, updater, "gt-gastown-polecat-nitro", &polecat.Polecat{State: polecat.StateIdle}, &beads.AgentFields{
 		AgentState:    string(beads.AgentStateIdle),
 		CleanupStatus: string(polecat.CleanupUnpushed),
 	})

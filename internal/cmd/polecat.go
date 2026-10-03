@@ -665,7 +665,7 @@ func buildRigSeatsFor(r *rig.Rig, sessions polecatSessionSet, spawnWindow time.D
 		fmt.Fprintf(os.Stderr, "warning: failed to list merge requests in %s: %v — MR status reported as unknown\n", r.Name, mrErr)
 	}
 
-	agents, agentErr := bd.ListAgentBeads()
+	agents, agentErr := beads.ListAgentBeads(bd)
 	agentLookupFailed := agentErr != nil
 	if agentLookupFailed {
 		fmt.Fprintf(os.Stderr, "warning: failed to list agent beads in %s: %v — orphan sessions in this rig cannot be confirmed foreign, treating as zombie\n", r.Name, agentErr)
@@ -1485,7 +1485,7 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 	}
 
 	bd := beads.New(r.Path)
-	status := checkRecoveryForPolecat(bd, r, rigName, polecatName, p, polecatCheckRecoveryReconcileCleanup)
+	status := checkRecoveryForPolecat(bd, nil, r, rigName, polecatName, p, polecatCheckRecoveryReconcileCleanup)
 
 	// JSON output
 	if polecatCheckRecoveryJSON {
@@ -1514,14 +1514,20 @@ func runPolecatCheckRecoveryBatch(cmd *cobra.Command, args []string) error {
 	}
 
 	bd := beads.New(r.Path)
-	// Each preload degrades independently into a warning: a failed bulk fetch
-	// leaves that cache unwarmed, and the per-polecat helpers it feeds
-	// (GetAgentBead, FindMRForBranchAny) fall back to their normal per-call bd
-	// path for every polecat instead of silently reporting wrong data for all
-	// of them — the same degrade-per-query pattern loadBeadsBatch uses for
+	// The two bulk reads degrade independently into a warning, so a failed one
+	// leaves its lookup empty and every polecat falls back to its own per-ID
+	// bd read instead of the sweep silently reporting the same wrong data for
+	// all of them — the same degrade-per-query pattern loadBeadsBatch uses for
 	// runPolecatList (gt-ls4u).
-	if err := bd.PreloadAgentBeads(); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to preload agent beads in %s: %v — falling back to per-polecat bd show\n", rigName, err)
+	//
+	// The agent beads are held as a map and looked up per polecat, the shape
+	// manager.go's lookupAgentBead uses; the merge requests stay a store-side
+	// preload (PreloadMergeRequests) because the wisp index it warms is engine
+	// state no Client method exposes (gt-7iwy0.4.7 notes).
+	agentBeadsByID, agentErr := beads.ListAgentBeads(bd)
+	if agentErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to preload agent beads in %s: %v — falling back to per-polecat bd show\n", rigName, agentErr)
+		agentBeadsByID = nil
 	}
 	if err := bd.PreloadMergeRequests(); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to preload merge requests in %s: %v — falling back to per-polecat bd list\n", rigName, err)
@@ -1541,7 +1547,7 @@ func runPolecatCheckRecoveryBatch(cmd *cobra.Command, args []string) error {
 			// longer exists.
 			continue
 		}
-		statuses = append(statuses, checkRecoveryForPolecat(bd, r, rigName, polecatName, p, polecatCheckRecoveryBatchReconcile))
+		statuses = append(statuses, checkRecoveryForPolecat(bd, agentBeadsByID, r, rigName, polecatName, p, polecatCheckRecoveryBatchReconcile))
 	}
 
 	if polecatCheckRecoveryBatchJSON {
@@ -1559,16 +1565,16 @@ func runPolecatCheckRecoveryBatch(cmd *cobra.Command, args []string) error {
 
 // checkRecoveryForPolecat computes one polecat's RecoveryStatus. It is the
 // per-polecat body both runPolecatCheckRecovery (a single polecat) and
-// runPolecatCheckRecoveryBatch (every polecat in a rig, sharing one bd
-// instance and its preloaded caches — see PreloadAgentBeads/
-// PreloadMergeRequests) drive; the two callers differ only in how many times
-// they call it and whether bd's caches are warmed first.
-func checkRecoveryForPolecat(bd recoveryBeads, r *rig.Rig, rigName, polecatName string, p *polecat.Polecat, reconcileCleanup bool) RecoveryStatus {
+// runPolecatCheckRecoveryBatch (every polecat in a rig, sharing one bd instance
+// and its preloaded merge requests) drive; the two callers differ only in how
+// many times they call it and whether a bulk agent-bead list arms the
+// per-polecat lookup first.
+func checkRecoveryForPolecat(bd recoveryBeads, preloadedAgentBeads map[string]*beads.Issue, r *rig.Rig, rigName, polecatName string, p *polecat.Polecat, reconcileCleanup bool) RecoveryStatus {
 	// Get cleanup_status from agent bead
 	// We need to read it directly from beads since manager doesn't expose it
 	agentBeadID := polecatBeadIDForRig(r, rigName, polecatName)
 	assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
-	agentIssue, fields, err := bd.GetAgentBead(agentBeadID)
+	agentIssue, fields, err := recoveryAgentBead(bd, preloadedAgentBeads, agentBeadID)
 
 	status := RecoveryStatus{
 		Rig:     rigName,
@@ -1976,14 +1982,30 @@ func applyWorkstateDispositionToRecoveryStatus(status *RecoveryStatus, dispositi
 	}
 }
 
-// recoveryBeads is the bead store check-recovery reads: *beads.Beads, or a
-// beadsfake database with the agent-bead and merge-request helpers in tests.
+// recoveryBeads is the bead store check-recovery reads: the Client surface the
+// agent-bead free functions run over (beads.GetAgentBead,
+// beads.UpdateAgentCleanupStatus), plus the merge-request lookup that is still
+// a *Beads method. *beads.Beads and a beadsfake-backed test store both
+// implement it.
 type recoveryBeads interface {
-	Show(issueID string) (*beads.Issue, error)
-	GetAssignedIssue(assignee string) (*beads.Issue, error)
-	GetAgentBead(id string) (*beads.Issue, *beads.AgentFields, error)
+	beads.Client
 	FindMRForBranchAny(branch string) (*beads.Issue, error)
-	UpdateAgentCleanupStatus(id string, cleanupStatus string) error
+}
+
+// recoveryAgentBead answers one polecat's agent bead from the batch caller's
+// preloaded map when it is in there, and with a per-ID read otherwise. The map
+// is the bulk read's answer, not the last word: the list it came from is open
+// beads plus wisps, so an ID it does not hold (a closed agent bead) still
+// resolves through its own read — the same degrade-per-item shape
+// manager.go's lookupAgentBead gives the runPolecatList batch, and the one
+// gt-b839 relies on here.
+func recoveryAgentBead(bd recoveryBeads, preloaded map[string]*beads.Issue, agentBeadID string) (*beads.Issue, *beads.AgentFields, error) {
+	if issue, ok := preloaded[agentBeadID]; ok && issue != nil {
+		fields := beads.ParseAgentFields(issue.Description)
+		fields.AgentState = beads.ResolveAgentState(issue.Description, issue.AgentState)
+		return issue, fields, nil
+	}
+	return beads.GetAgentBead(bd, agentBeadID)
 }
 
 type issueShower interface {
@@ -2095,11 +2117,10 @@ func hookBeadSafeForCleanup(bd issueShower, hookBead string) polecat.HookBeadDis
 	return polecat.ClassifyHookBead(hookBead, issue, err)
 }
 
-type cleanupStatusUpdater interface {
-	UpdateAgentCleanupStatus(id string, cleanupStatus string) error
-}
-
-func reconcileCleanupStatusIfSafe(status *RecoveryStatus, updater cleanupStatusUpdater, agentBeadID string, p *polecat.Polecat, fields *beads.AgentFields) {
+// reconcileCleanupStatusIfSafe rewrites a stale cleanup_status to clean when
+// the predicates allow it. The write is the beads.UpdateAgentCleanupStatus free
+// function over the same Client the rest of check-recovery reads.
+func reconcileCleanupStatusIfSafe(status *RecoveryStatus, updater beads.Client, agentBeadID string, p *polecat.Polecat, fields *beads.AgentFields) {
 	previous, ok := cleanupStatusReconcileCandidate(status, p, fields)
 	if !ok {
 		return
@@ -2110,7 +2131,7 @@ func reconcileCleanupStatusIfSafe(status *RecoveryStatus, updater cleanupStatusU
 		status.Blockers = append(status.Blockers, "cleanup_reconcile_failed: updater unavailable")
 		return
 	}
-	if err := updater.UpdateAgentCleanupStatus(agentBeadID, string(polecat.CleanupClean)); err != nil {
+	if err := beads.UpdateAgentCleanupStatus(updater, agentBeadID, string(polecat.CleanupClean)); err != nil {
 		status.NeedsRecovery = true
 		status.Verdict = "NEEDS_RECOVERY"
 		status.Blockers = append(status.Blockers, fmt.Sprintf("cleanup_reconcile_failed: %v", err))
@@ -3102,7 +3123,7 @@ func checkNukeActiveMRSafety(checker activeMRRemovalChecker, polecatName, rigNam
 func resetPolecatAgentBeadForReuse(r *rig.Rig, rigName, polecatName string) {
 	agentBeadID := polecatBeadIDForRig(r, rigName, polecatName)
 	bd := beads.New(r.Path)
-	if err := bd.ForAgentBead().ResetAgentBeadForReuse(agentBeadID, "nuked"); err != nil {
+	if err := beads.ResetAgentBeadForReuse(bd, agentBeadID, "nuked"); err != nil {
 		fmt.Printf("  %s agent bead not found or already cleaned\n", style.Dim.Render("○"))
 	} else {
 		fmt.Printf("  %s reset agent bead %s\n", style.Success.Render("✓"), agentBeadID)

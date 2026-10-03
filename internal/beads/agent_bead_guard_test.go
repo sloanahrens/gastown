@@ -15,10 +15,11 @@ import (
 // agentBeadIdentRE matches expressions that carry an agent-bead ID.
 var agentBeadIdentRE = regexp.MustCompile(`(?i)agentbead|agentid\b|witnessbeadid|refinerybeadid|polecatbeadid|crewbeadid`)
 
-// agentBeadHelpers are the Beads methods that must only be called on an
-// agent-scoped or pinned wrapper — never chained directly onto beads.New*().
+// agentBeadHelpers are the Beads methods that must only be called on the store
+// they route from — the agent-scoped or pinned wrapper, or a free function's
+// Client — never chained directly onto beads.New*().
 var agentBeadHelpers = map[string]bool{
-	"UpdateAgentState": true, "UpdateAgentCleanupStatus": true,
+	"UpdateAgentCleanupStatus":     true,
 	"UpdateAgentDescriptionFields": true, "CreateAgentBead": true,
 	"CreateOrReopenAgentBead": true, "ResetAgentBeadForReuse": true,
 	"ListAgentBeads": true, "GetAgentBead": true,
@@ -59,7 +60,7 @@ func TestNoShellBdWritesToAgentBeads(t *testing.T) {
 		}
 	}
 	if len(violations) > 0 {
-		t.Fatalf("agent beads must be read/written through beads.New(...).ForAgentBead() or beads.NewRigLocal(...), never via shell bd or a bare beads.New*() chain:\n%s", strings.Join(violations, "\n"))
+		t.Fatalf("agent beads must be read/written through the beads.<helper>(...) free functions over a client, or beads.New(...).ForAgentBead() / beads.NewRigLocal(...), never via shell bd or a bare beads.New*() chain:\n%s", strings.Join(violations, "\n"))
 	}
 }
 
@@ -142,14 +143,14 @@ func TestAgentBeadGuardDetectsEachPattern(t *testing.T) {
 		"bd.Run":       `package x; func f(bd *BdCli, workDir, agentBeadID string) { _ = bd.Run(workDir, "update", agentBeadID, "--description", "d") }`,
 		"BdCmd":        `package x; func f(agentID string) { _ = BdCmd("update", agentID, "--status=open") }`,
 		"exec.Command": `package x; import "os/exec"; func f(witnessBeadID string) { _ = exec.Command("bd", "close", witnessBeadID) }`,
-		"bare chain":   `package x; func f(id string) { _ = beads.New("/x").UpdateAgentState(id, "idle") }`,
+		"bare chain":   `package x; func f(id string) { _ = beads.New("/x").UpdateAgentCleanupStatus(id, "clean") }`,
 	}
 	for name, src := range cases {
 		if v := agentBeadShellWrites(t, name+".go", []byte(src)); len(v) == 0 {
 			t.Errorf("%s: guard did not flag %q", name, src)
 		}
 	}
-	clean := `package x; func f(id string) { _ = beads.New("/x").ForAgentBead().UpdateAgentState(id, "idle"); _ = beads.NewRigLocal("/x").GetAgentBead(id) }`
+	clean := `package x; func f(id string) { _ = beads.UpdateAgentCleanupStatus(beads.New("/x"), id, "clean"); _ = beads.NewRigLocal("/x").GetAgentBead(id) }`
 	if v := agentBeadShellWrites(t, "clean.go", []byte(clean)); len(v) != 0 {
 		t.Errorf("guard flagged compliant code: %v", v)
 	}
