@@ -347,7 +347,7 @@ func poolSeatSessions(t sessionLister, townRoot string, pool *config.PolecatPool
 // batched work-bead read the landing seats are confirmed with. A caller with
 // no town to read (a test) passes nil for both.
 func poolSeatSessionsWith(t sessionLister, townRoot string, disposition polecatDispositionFunc, work poolSeatWorkFunc, pool *config.PolecatPool) ([]poolSession, error) {
-	sessions, err := listPolecatSessionsWith(t, disposition, time.Now())
+	sessions, err := poolOccupiedSessions(t, townRoot, disposition, work, pool, time.Now)
 	if err != nil {
 		return nil, err
 	}
@@ -357,12 +357,48 @@ func poolSeatSessionsWith(t sessionLister, townRoot string, disposition polecatD
 		// as one is what makes the picture lie (gt-t8q5).
 		return nil, err
 	}
+	return append(sessions, claims...), nil
+}
+
+// poolOccupiedSessions lists the seats the pool already holds: the live polecat
+// sessions and the seats mid-landing (gt-thy6r). It is the one occupancy source
+// the pool's own admission decision (poolRouter.route) and the dispatch seat
+// picture (poolSeatSessions) both read, so a seat one counts as taken is taken
+// in the other — admission that counted live sessions alone admits past the cap
+// while a seat is mid-landing (gt-3o7zk).
+//
+// The seat claims are deliberately not folded in here: route decides from the
+// claims it reads under the seat-decision lock (poolSeatLedger.begin), and
+// poolSeatSessionsWith appends the reader's own view of them
+// (poolSeatClaimSessions). Counting a claim here as well would fill two seats
+// with one.
+//
+// A failure carries which read failed (poolOccupancyError), so a caller can
+// keep its own words for a lister it cannot talk to without parsing the error.
+func poolOccupiedSessions(t sessionLister, townRoot string, disposition polecatDispositionFunc, work poolSeatWorkFunc, pool *config.PolecatPool, now func() time.Time) ([]poolSession, error) {
+	live, err := listPolecatSessionsWith(t, disposition, now())
+	if err != nil {
+		return nil, &poolOccupancyError{sessions: true, err: err}
+	}
 	landing, err := poolLandingSessions(townRoot, pool, work)
 	if err != nil {
-		return nil, err
+		return nil, &poolOccupancyError{err: err}
 	}
-	return append(append(sessions, claims...), landing...), nil
+	return append(live, landing...), nil
 }
+
+// poolOccupancyError labels a poolOccupiedSessions failure by the read that
+// produced it: sessions distinguishes a session list the pool could not read
+// from landing seats it could not confirm. Error and Unwrap delegate to the
+// underlying error, so a caller that does not care about the source sees the
+// failure it would have seen directly.
+type poolOccupancyError struct {
+	sessions bool
+	err      error
+}
+
+func (e *poolOccupancyError) Error() string { return e.err.Error() }
+func (e *poolOccupancyError) Unwrap() error { return e.err }
 
 // poolSeatWorkFunc reads work beads by ID in one call, keyed by ID. Missing
 // IDs are left out (beads.Client.ShowMultiple). It is the batched read the
