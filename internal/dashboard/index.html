@@ -65,7 +65,7 @@ td.n,th.n{text-align:right}
 .o-approved{color:var(--green)}.o-skipped{color:var(--dim)}.o-error{color:var(--amber)}.o-rejected{color:var(--red)}
 .badge{padding:1px 8px;border-radius:999px;font-size:11px;border:1px solid currentColor;white-space:nowrap}
 .st-working{color:var(--green)}.st-gating{color:var(--violet)}.st-queued{color:var(--blue)}
-.st-needs-human{color:var(--red)}.st-quiet{color:var(--amber)}.st-stalled{color:var(--red)}.st-review-needed,.st-recovery{color:var(--amber)}.st-spawning{color:var(--teal)}.st-parked,.st-idle{color:var(--dim)}
+.st-needs-human{color:var(--red)}.st-quiet{color:var(--amber)}.st-stalled{color:var(--red)}.st-review-needed,.st-recovery{color:var(--amber)}.st-spawning{color:var(--teal)}.st-parked,.st-idle,.st-unknown{color:var(--dim)}
 .tag.p0,.tag.p1{color:var(--red)}.tag.p2{color:var(--amber)}.tag.p3,.tag.p4{color:var(--dim)}
 .good{color:var(--green)}.warnc{color:var(--amber)}.badc{color:var(--red)}
 </style>
@@ -141,7 +141,7 @@ function renderTiles(s) {
   const active = n("working") + n("quiet") + n("gating");
   const bad = n("stalled") + n("needs-human");
   tiles.append(tile("Polecats working", pcs.length ? String(active) : "–",
-    [sm.seats_used != null ? "capacity " + sm.seats_used + (sm.seats_cap ? "/" + sm.seats_cap : "") : null, n("queued") ? n("queued") + " queued" : null, n("stalled") ? n("stalled") + " stalled" : null, n("needs-human") ? n("needs-human") + " need a human" : null, n("quiet") ? n("quiet") + " quiet" : null].filter(Boolean).join(" · "),
+    [sm.seats_cap ? "cap " + sm.seats_cap : null, n("queued") ? n("queued") + " queued" : null, n("stalled") ? n("stalled") + " stalled" : null, n("unknown") ? n("unknown") + " unknown (tmux unreadable)" : null, n("needs-human") ? n("needs-human") + " need a human" : null, n("quiet") ? n("quiet") + " quiet" : null].filter(Boolean).join(" · "),
     bad ? "bad" : n("quiet") ? "warn" : ""));
   tiles.append(tile("Escalations", sm.escalations == null ? "–" : String(sm.escalations), "", sm.escalations ? "bad" : (sm.escalations === 0 ? "ok" : "")));
   const med = sm.median_deploy_min;
@@ -168,6 +168,7 @@ const STATE_HELP = {
   "review-needed": "a live session holding uncommitted or unpushed work",
   recovery: "idle, but its worktree needs recovery before it can be reused",
   parked: "parked by an operator",
+  unknown: "tmux could not be read, so this polecat cannot be told apart from a working one",
   idle: "holds nothing"
 };
 let openIdle = false;
@@ -180,7 +181,7 @@ function renderSeats(s) {
   const by = {};
   pcs.forEach(p => by[p.state] = (by[p.state] || 0) + 1);
   const sum = el("div", "kv");
-  ["needs-human", "stalled", "review-needed", "recovery", "quiet", "working", "spawning", "gating", "queued", "parked", "idle"].forEach(k => {
+  ["needs-human", "unknown", "stalled", "review-needed", "recovery", "quiet", "working", "spawning", "gating", "queued", "parked", "idle"].forEach(k => {
     if (!by[k]) return;
     const x = el("div"); x.title = STATE_HELP[k];
     x.append(el("b", "st-" + k, String(by[k])), el("span", "", k));
@@ -188,45 +189,56 @@ function renderSeats(s) {
   });
   box.append(sum);
 
-  const busy = pcs.filter(p => p.state !== "idle"), idle = pcs.filter(p => p.state === "idle");
-  const table = list => {
-  const t = el("table");
-  const hr = el("tr");
-  ["Polecat", "State", "Bead", "On it", "Quiet", "24h"].forEach((x, i) => hr.append(el("th", i >= 3 ? "n" : "", x)));
-  t.append(hr);
+  const busy = pcs.filter(p => p.state !== "idle");
+  const idle = pcs.filter(p => p.state === "idle").sort((x, y) => (y.landed_24h - x.landed_24h) || (x.rig + x.name).localeCompare(y.rig + y.name));
   const now = Date.now();
-  for (const p of list) {
-    const tr = el("tr");
-    tr.append(el("td", "", p.rig === "gastown" ? p.name : p.rig + "/" + p.name));
-    const st = el("td"); const badge = el("span", "badge st-" + p.state, p.state); badge.title = STATE_HELP[p.state] || ""; st.append(badge); tr.append(st);
-    const bd = el("td");
-    if (p.bead) {
-      bd.append(el("span", "bead", p.bead));
-      if (p.priority != null) bd.append(document.createTextNode(" "), el("span", "tag p" + Math.min(p.priority, 4), "P" + p.priority));
-      (p.labels || []).forEach(l => bd.append(document.createTextNode(" "), el("span", "tag warnc", l)));
-      if (p.title) bd.append(document.createElement("br"), el("span", "title", p.title));
-    } else bd.append(el("span", "title", p.reason || "—"));
-    tr.append(bd);
-    const on = p.slung ? (now - new Date(p.slung).getTime()) / 1000 : null;
-    tr.append(el("td", "n" + (on > 5400 ? " warnc" : ""), p.bead ? (on == null ? "–" : fmtDur(on)) : ""));
-    const q = p.last_active ? (now - new Date(p.last_active).getTime()) / 1000 : null;
-    tr.append(el("td", "n" + (q != null && q >= 600 ? " warnc" : ""), p.bead ? (p.has_session ? fmtDur(q) : "no session") : ""));
-    let rec = "–";
-    if (p.landed_24h) rec = p.landed_24h + (p.approved_24h < p.landed_24h ? " · " + Math.round(p.approved_24h / p.landed_24h * 100) + "%" : "") + (p.avg_score_24h != null ? " · " + p.avg_score_24h.toFixed(2) : "");
-    tr.append(el("td", "n", rec));
-    t.append(tr);
-  }
-  return t;
+  const name = p => p.rig === "gastown" ? p.name : p.rig + "/" + p.name;
+  // The three right-hand columns are the polecat's last 24 hours of landings.
+  const R = [
+    ["Landed", "beads this polecat landed in the last 24 hours", p => p.landed_24h ? String(p.landed_24h) : "–"],
+    ["om ok", "share of those landings om approved (the rest landed without a review or after an error)", p => p.landed_24h ? Math.round(p.approved_24h / p.landed_24h * 100) + "%" : "–"],
+    ["Score", "average om score on its approved landings", p => p.avg_score_24h != null ? p.avg_score_24h.toFixed(2) : "–"],
+  ];
+  const head = cols => { const hr = el("tr"); cols.forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); }); return hr; };
+  const rightCells = (tr, p) => R.forEach(([, , f]) => tr.append(el("td", "n", f(p))));
+  const busyTable = list => {
+    const t = el("table");
+    t.append(head([["Polecat"], ["State"], ["Bead"], ["On it", "time since the bead was dispatched", 1], ["Quiet", "time since its session last printed anything", 1], ...R.map(r => [r[0], r[1], 1])]));
+    for (const p of list) {
+      const tr = el("tr");
+      tr.append(el("td", "", name(p)));
+      const st = el("td"); const badge = el("span", "badge st-" + p.state, p.state); badge.title = (STATE_HELP[p.state] || "") + (p.reason && p.bead ? " — " + p.reason : ""); st.append(badge); tr.append(st);
+      const bd = el("td");
+      if (p.bead) {
+        bd.append(el("span", "bead", p.bead));
+        if (p.priority != null) bd.append(document.createTextNode(" "), el("span", "tag p" + Math.min(p.priority, 4), "P" + p.priority));
+        (p.labels || []).forEach(l => bd.append(document.createTextNode(" "), el("span", "tag warnc", l)));
+        if (p.title) bd.append(document.createElement("br"), el("span", "title", p.title));
+      } else bd.append(el("span", "title", p.reason || "–"));
+      tr.append(bd);
+      const on = p.slung ? (now - new Date(p.slung).getTime()) / 1000 : null;
+      tr.append(el("td", "n" + (on > 5400 ? " warnc" : ""), p.bead ? (on == null ? "–" : fmtDur(on)) : ""));
+      const q = p.last_active ? (now - new Date(p.last_active).getTime()) / 1000 : null;
+      tr.append(el("td", "n" + (q != null && q >= 600 ? " warnc" : ""), p.bead ? (p.state === "unknown" ? "?" : p.has_session ? fmtDur(q) : "no session") : ""));
+      rightCells(tr, p);
+      t.append(tr);
+    }
+    return t;
   };
-  if (busy.length) box.append(table(busy));
+  const idleTable = list => {
+    const t = el("table");
+    t.append(head([["Polecat"], ...R.map(r => [r[0], r[1], 1])]));
+    for (const p of list) { const tr = el("tr"); tr.append(el("td", "", name(p))); rightCells(tr, p); t.append(tr); }
+    return t;
+  };
+  if (busy.length) box.append(busyTable(busy));
   if (idle.length) {
     const d = document.createElement("details");
     d.open = openIdle;
     d.ontoggle = () => { openIdle = d.open; };
-    d.append(el("summary", "title", idle.length + " idle"), table(idle));
+    d.append(el("summary", "title", idle.length + " idle (free to take work) · last 24h landings on the right"), idleTable(idle));
     box.append(d);
   }
-  box.append(el("div", "k title", "24h = landings · approval rate when below 100% · average om score"));
   $("seatsnote").textContent = s.summary_at ? "read " + age(s.summary_at) + " ago" : "";
 }
 

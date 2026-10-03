@@ -58,7 +58,7 @@ func TestBuildDashPolecats(t *testing.T) {
 		return omRecord{Record: landings.Record{Rig: "gastown", Branch: "polecat/" + name + "/gt-x+abc", OMVerdict: verdict, OMScore: score, LandedAt: now.Add(-ago)}}
 	}
 	pcs := buildDashPolecats(dashPolecatInputs{
-		Now: now, Seats: seats,
+		Now: now, Seats: seats, SessionsKnown: true,
 		Sessions: map[string]time.Time{"gt-working": now.Add(-time.Minute)},
 		Records: []omRecord{
 			rec("working", "approve", 0.8, time.Hour), rec("working", "approve", 0.6, 2*time.Hour),
@@ -110,5 +110,43 @@ func TestDashSeatCacheReusesUntilKeyOrTTLChanges(t *testing.T) {
 	now = now.Add(5 * time.Minute)
 	if _, ok := c.get("gastown/agate", "k1"); ok {
 		t.Error("an entry past its ttl must re-classify")
+	}
+}
+
+// A failed tmux read leaves the session list empty by failure, not by fact. A
+// polecat with work and no session must then read unknown, never stalled: a
+// stalled polecat is a red alert, and a monitor must not raise one on a read
+// that did not work.
+func TestFailedTmuxReadIsUnknownNotStalled(t *testing.T) {
+	t.Parallel()
+	seat := dashSeat{Rig: "gastown", Name: "busy", Session: "gt-busy",
+		Item:  dashItem(polecat.StateStalled, polecat.WorkstateDisposition{CountsTowardCapacity: true}),
+		Issue: &beads.Issue{ID: "gt-1", Title: "one"}}
+	got := buildDashPolecats(dashPolecatInputs{Now: time.Now(), Seats: []dashSeat{seat}, SessionsKnown: false})
+	if got[0].State != dashboard.StateUnknown {
+		t.Errorf("unreadable tmux: state = %q, want unknown", got[0].State)
+	}
+	// With the read working, the same polecat and an empty session list is a
+	// real stall: no tmux server means no session.
+	got = buildDashPolecats(dashPolecatInputs{Now: time.Now(), Seats: []dashSeat{seat}, SessionsKnown: true})
+	if got[0].State != dashboard.StateStalled {
+		t.Errorf("readable tmux with no session: state = %q, want stalled", got[0].State)
+	}
+}
+
+func TestDashSeatKeyChangesWhenTheSpawnGraceEnds(t *testing.T) {
+	t.Parallel()
+	updated := time.Date(2026, 10, 3, 18, 0, 0, 0, time.UTC)
+	grace := 2 * time.Minute
+	inside := dashSeatKey(updated, updated.Add(time.Minute), grace, "gt-1", false)
+	outside := dashSeatKey(updated, updated.Add(3*time.Minute), grace, "gt-1", false)
+	if inside == outside {
+		t.Error("the key must change when the polecat leaves its spawn grace, or 'spawning' outlives the grace until the ttl")
+	}
+	if dashSeatKey(updated, updated.Add(time.Minute), grace, "gt-1", false) != inside {
+		t.Error("the key must be stable while nothing changed")
+	}
+	if dashSeatKey(updated, updated.Add(time.Minute), grace, "gt-1", true) == inside {
+		t.Error("a session coming up must change the key")
 	}
 }

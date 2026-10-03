@@ -228,22 +228,15 @@ func dashboardSummary(townRoot string, deploys *tailDeploys, recs *dashLandings,
 		s.OldestReady = oldest
 		ready = ids
 	}
-	sessions, _ := dashSessions()
+	sessions, sessionsKnown := dashSessions()
 	names := make([]string, 0, len(sessions))
 	for n := range sessions {
 		names = append(names, n)
 	}
-	if seats, err := dashSeats(townRoot, names, seatCache); err == nil {
+	if seats, err := dashSeats(townRoot, names, sessionsKnown, seatCache); err == nil {
 		s.Polecats = buildDashPolecats(dashPolecatInputs{
-			Now: time.Now(), Seats: seats, Ready: ready, Sessions: sessions, Records: recs.get(),
+			Now: time.Now(), Seats: seats, Ready: ready, Sessions: sessions, SessionsKnown: sessionsKnown, Records: recs.get(),
 		})
-		used := 0
-		for _, p := range s.Polecats {
-			if p.CountsTowardCapacity {
-				used++
-			}
-		}
-		s.SeatsUsed = &used
 		if max, err := configuredSchedulerMaxPolecats(townRoot); err == nil && max > 0 {
 			s.SeatsCap = &max
 		}

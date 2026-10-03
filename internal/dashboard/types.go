@@ -46,6 +46,9 @@ const (
 	StateNeedsHuman   = "needs-human"   // its bead is waiting on an operator
 	StateParked       = "parked"        // parked by an operator
 	StateIdle         = "idle"
+	// StateUnknown is a polecat the dashboard cannot classify because tmux could
+	// not be read: without the session list "working" and "stalled" look alike.
+	StateUnknown = "unknown"
 )
 
 // QuietAfter is how long a working session may stay silent before it reads as quiet.
@@ -80,8 +83,7 @@ type Polecat struct {
 // Summary is the slow-changing state of the town. A pointer or zero field the
 // reader could not fill is left out of the page rather than shown as zero.
 type Summary struct {
-	SeatsUsed *int `json:"seats_used,omitempty"`
-	SeatsCap  *int `json:"seats_cap,omitempty"`
+	SeatsCap *int `json:"seats_cap,omitempty"`
 	// Polecats is the summary reader's picture; the hub adds the live parts
 	// (dispatch time, silence, the gating phase) before the page sees it.
 	Polecats []Polecat `json:"-"`
