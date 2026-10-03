@@ -1,10 +1,49 @@
 package polecat
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestBranchOnOrigin: the spec dispatcher's resume-branch check reads the
+// rig's origin remote, matches the recorded name exactly (a longer branch
+// sharing the prefix is not the branch), and calls a rig with no repo an
+// error rather than a gone branch (gt-gzhin.3).
+func TestBranchOnOrigin(t *testing.T) {
+	t.Parallel()
+	w := newWorld()
+	root := t.TempDir()
+	buildCanonicalRigIn(t, w, root)
+	mayorRig := filepath.Join(root, "mayor", "rig")
+	head := w.rev(t, mayorRig, "main")
+	w.SetRef(t, mayorRig, "refs/heads/polecat/agate/gt-a+mu1", head)
+	w.SetRef(t, mayorRig, "refs/heads/polecat/agate/gt-a+mu1-suffix", head)
+
+	for _, tc := range []struct {
+		branch string
+		want   bool
+	}{
+		{"polecat/agate/gt-a+mu1", true},
+		{"polecat/agate/gt-a+mu1-suffix", true},
+		{"polecat/agate/gt-a", false},
+		{"polecat/agate/gt-a+gone", false},
+		{"", false},
+	} {
+		got, err := branchOnOrigin(w.opener(), root, tc.branch)
+		if err != nil {
+			t.Fatalf("branchOnOrigin(%q): %v", tc.branch, err)
+		}
+		if got != tc.want {
+			t.Errorf("branchOnOrigin(%q) = %v, want %v", tc.branch, got, tc.want)
+		}
+	}
+
+	if _, err := branchOnOrigin(w.opener(), t.TempDir(), "polecat/agate/gt-a+mu1"); !errors.Is(err, ErrNoRigRepo) {
+		t.Errorf("no-repo error = %v, want ErrNoRigRepo", err)
+	}
+}
 
 func TestMatchSurvivingBranches(t *testing.T) {
 	t.Parallel()

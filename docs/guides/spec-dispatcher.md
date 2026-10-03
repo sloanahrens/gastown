@@ -83,6 +83,20 @@ never filed one. A state that is missing, malformed or has no `revert` key is
 no revert at all: reading silence as a hold would keep a rig's red-main beads
 from a seat for good.
 
+## A recovered bead resumes its branch
+
+The patrol tick readies a dead polecat's bead with the branch its unlanded work
+survives on, in the bead's notes (gt-gzhin.2). The dispatcher reads the newest
+`resume_branch: <branch>` line and slings the bead onto that branch — the
+equivalent of `gt sling --branch <branch>` — so reopened work continues where
+it stopped instead of a second polecat starting from main over it. The tick's
+dispatched line names the resumed branch.
+
+A recorded branch that no longer exists on the rig's origin cannot be resumed:
+the bead is slung fresh and one comment records the branch that was gone. A
+remote that cannot be read is unknown, not gone — the candidate waits for the
+next tick rather than handing preserved work to a fresh start (ADR 0005).
+
 ## Seats and budget
 
 A seat is one agent with its own cap. Every agent runs the claude CLI with the

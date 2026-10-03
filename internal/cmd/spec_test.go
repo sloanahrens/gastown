@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
@@ -39,9 +40,16 @@ type fakeSpecTown struct {
 	slingErrs  map[string][]error // per bead, consumed in order
 	slung      []string
 	slingSeats []specdispatch.SeatChoice
-	notes      map[string][]string
-	labels     map[string][]string
-	sleeps     int
+	// slungResume is the resume branch each sling carried, positionally with
+	// slung: "" when the dispatch started fresh.
+	slungResume []string
+	// originBranches is what BranchOnOrigin finds, keyed "rig/branch"; an
+	// absent key is a branch that is gone from origin.
+	originBranches map[string]bool
+	originErr      error
+	notes          map[string][]string
+	labels         map[string][]string
+	sleeps         int
 }
 
 // specTestNow is the tick clock every dispatch test runs at.
@@ -49,7 +57,7 @@ var specTestNow = time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 
 func newFakeSpecTown(specs ...specdispatch.Spec) *fakeSpecTown {
 	f := &fakeSpecTown{specs: map[string]specdispatch.Spec{}, rigHold: map[string]string{}, revert: map[string]*specdispatch.Revert{},
-		slingErrs: map[string][]error{}, notes: map[string][]string{}, labels: map[string][]string{}}
+		slingErrs: map[string][]error{}, originBranches: map[string]bool{}, notes: map[string][]string{}, labels: map[string][]string{}}
 	for _, s := range specs {
 		f.specs[s.ID] = s
 	}
@@ -82,7 +90,13 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 		},
 		RigHold:        func(rig string) string { return f.rigHold[rig] },
 		RevertInFlight: func(rig string) *specdispatch.Revert { return f.revert[rig] },
-		Roster:         func() (specRoster, error) { return f.roster, f.rosterErr },
+		BranchOnOrigin: func(rig, branch string) (bool, error) {
+			if f.originErr != nil {
+				return false, f.originErr
+			}
+			return f.originBranches[rig+"/"+branch], nil
+		},
+		Roster: func() (specRoster, error) { return f.roster, f.rosterErr },
 		Annotate: func(id, key, text string) error {
 			for _, n := range f.notes[id] {
 				if strings.HasPrefix(n, key) {
@@ -99,7 +113,7 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 			f.specs[id] = s
 			return nil
 		},
-		Sling: func(c specCandidate, seat specdispatch.SeatChoice) (string, error) {
+		Sling: func(c specCandidate, resumeBranch string, seat specdispatch.SeatChoice) (string, error) {
 			if errs := f.slingErrs[c.Spec.ID]; len(errs) > 0 {
 				f.slingErrs[c.Spec.ID] = errs[1:]
 				if errs[0] != nil {
@@ -108,6 +122,7 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 			}
 			f.slung = append(f.slung, c.Spec.ID)
 			f.slingSeats = append(f.slingSeats, seat)
+			f.slungResume = append(f.slungResume, resumeBranch)
 			s := f.specs[c.Spec.ID]
 			s.Status, s.Assignee = "hooked", "gastown/polecats/p"
 			f.specs[c.Spec.ID] = s
@@ -269,10 +284,101 @@ func TestSpecDispatchRoutesPlanningWithoutSpawning(t *testing.T) {
 func TestSpecSlingParams(t *testing.T) {
 	t.Parallel()
 	c := specCandidate{Spec: cleanSpec("gt-a", 1, ""), Rig: "gastown"}
-	p := specSlingParams("/town", "/town/gastown/.beads", "mol-polecat-work", c, specdispatch.SeatChoice{Agent: "claude-sonnet"})
+	p := specSlingParams("/town", "/town/gastown/.beads", "mol-polecat-work", c, "", specdispatch.SeatChoice{Agent: "claude-sonnet"})
 	if p.Agent != "claude-sonnet" || !p.NoBoot || !p.FormulaFailFatal ||
 		p.RigName != "gastown" || p.FormulaName != "mol-polecat-work" || !strings.Contains(p.Args, "temporary INSTALL_DIR") {
 		t.Fatalf("params = %+v", p)
+	}
+	if p.ResumeBranch != "" {
+		t.Errorf("ResumeBranch = %q, want empty for a bead with no recorded branch", p.ResumeBranch)
+	}
+	// The resume branch is the gt sling --branch the recovered work continues on.
+	p = specSlingParams("/town", "/town/gastown/.beads", "mol-polecat-work", c, "polecat/mica/gt-a+mu1", specdispatch.SeatChoice{Agent: "claude-sonnet"})
+	if p.ResumeBranch != "polecat/mica/gt-a+mu1" {
+		t.Errorf("ResumeBranch = %q, want the recorded branch", p.ResumeBranch)
+	}
+}
+
+// TestSpecDispatchResumesARecordedBranch: a bead the patrol tick readied after
+// its polecat died is slung onto the branch its work survives on, and the tick
+// line names it (gt-gzhin.3).
+func TestSpecDispatchResumesARecordedBranch(t *testing.T) {
+	t.Parallel()
+	const branch = "polecat/mica/gt-a+mu1"
+	recovered := cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z")
+	recovered.Notes = "some note\n" + patrolscan.ResumeBranchNote(branch) + "\n"
+	f := newFakeSpecTown(recovered)
+	f.originBranches["gastown/"+branch] = true
+
+	r := runSpecDispatchCycle(f.env())
+	if got := strings.Join(f.slungResume, "|"); got != branch {
+		t.Fatalf("slung resume branches = %q, want %q (slung %v)", got, branch, f.slung)
+	}
+	if len(r.Dispatched) != 1 || !strings.Contains(r.Dispatched[0].Line, "resumed "+branch) {
+		t.Fatalf("dispatched = %+v, want the line to name the resumed branch", r.Dispatched)
+	}
+	if n := f.notes["gt-a"]; len(n) != 0 {
+		t.Errorf("notes = %v, want none: the branch exists, so nothing was lost", n)
+	}
+}
+
+// TestSpecDispatchSlingsFreshWhenTheBranchIsGone: a recorded branch that no
+// longer exists on origin cannot be resumed; the bead is slung fresh and a
+// comment records the loss (gt-gzhin.3).
+func TestSpecDispatchSlingsFreshWhenTheBranchIsGone(t *testing.T) {
+	t.Parallel()
+	const branch = "polecat/mica/gt-a+mu1"
+	recovered := cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z")
+	recovered.Notes = patrolscan.ResumeBranchNote(branch)
+	f := newFakeSpecTown(recovered)
+
+	r := runSpecDispatchCycle(f.env())
+	if len(f.slung) != 1 || f.slungResume[0] != "" {
+		t.Fatalf("slung %v resume %v, want a fresh sling", f.slung, f.slungResume)
+	}
+	if len(r.Dispatched) != 1 || !strings.Contains(r.Dispatched[0].Line, "resume branch "+branch+" gone") {
+		t.Fatalf("dispatched = %+v, want the line to name the gone branch", r.Dispatched)
+	}
+	if n := f.notes["gt-a"]; len(n) != 1 || !strings.Contains(n[0], branch) || !strings.Contains(n[0], "gone from origin") {
+		t.Fatalf("notes = %v, want one comment recording the gone branch", n)
+	}
+	// The comment lands once, not once per tick.
+	runSpecDispatchCycle(f.env())
+	if n := f.notes["gt-a"]; len(n) != 1 {
+		t.Errorf("notes = %v, want the gone comment written once", n)
+	}
+}
+
+// TestSpecDispatchSlingsFreshWithoutAResumeLine: a bead with no resume_branch
+// note dispatches exactly as before — a fresh sling and no comment.
+func TestSpecDispatchSlingsFreshWithoutAResumeLine(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+	r := runSpecDispatchCycle(f.env())
+	if len(f.slung) != 1 || f.slungResume[0] != "" || len(f.notes) != 0 {
+		t.Fatalf("slung %v resume %v notes %v, want a plain fresh sling", f.slung, f.slungResume, f.notes)
+	}
+	if len(r.Dispatched) != 1 || strings.Contains(r.Dispatched[0].Line, "resum") {
+		t.Fatalf("dispatched = %+v, want no resume note", r.Dispatched)
+	}
+}
+
+// TestSpecDispatchHoldsACandidateWhenOriginCannotBeChecked: a resume branch
+// that cannot be verified is unknown, not gone, so the bead is left for the
+// next tick instead of being handed to a polecat starting from main.
+func TestSpecDispatchHoldsACandidateWhenOriginCannotBeChecked(t *testing.T) {
+	t.Parallel()
+	recovered := cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z")
+	recovered.Notes = patrolscan.ResumeBranchNote("polecat/mica/gt-a+mu1")
+	f := newFakeSpecTown(recovered)
+	f.originErr = errors.New("origin unreachable")
+
+	r := runSpecDispatchCycle(f.env())
+	if len(f.slung) != 0 {
+		t.Fatalf("slung %v, want none: the branch could not be checked", f.slung)
+	}
+	if len(r.Errors) != 1 || !strings.Contains(r.Errors[0], "cannot check resume branch") {
+		t.Fatalf("report = %+v, want one error naming the uncheckable branch", r)
 	}
 }
 

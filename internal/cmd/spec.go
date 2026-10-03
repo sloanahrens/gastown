@@ -17,6 +17,8 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/patrolscan"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -44,6 +46,12 @@ import (
 // A rig whose red-main owner has a revert in flight holds that rig's red-main
 // beads out of the candidate set: a seat spent on the fix forward would race
 // the revert over the same package (gt-zkdwt).
+//
+// A bead the patrol tick readied after its polecat died carries the branch its
+// work survives on (patrol_scan's resume_branch note). The dispatch resumes
+// that branch — the equivalent of `gt sling --branch` — so the reopened work
+// continues where it stopped instead of starting a second polecat from main
+// (gt-gzhin.3).
 //
 // Seat accounting counts every live polecat session plus the in-flight seat
 // claims other slings hold, whoever slung them. The mayor's slings land in that
@@ -319,13 +327,17 @@ type specDispatchEnv struct {
 	// comment starting with key, so each kind of note lands once.
 	Annotate func(beadID, key, text string) error
 	AddLabel func(beadID, label string) error
-	Sling    func(c specCandidate, seat specdispatch.SeatChoice) (polecat string, err error)
-	Sleep    func(time.Duration)
-	Now      func() time.Time
-	Template specdispatch.Template
-	Budget   specdispatch.Budget // agents, caps and preferences; live counts filled per tick
-	PerTick  int
-	DryRun   bool
+	// BranchOnOrigin reports whether a bead's recorded resume branch still
+	// exists on the rig's origin. An error means the answer is unknown, and
+	// the candidate is left for the next tick (gt-gzhin.3).
+	BranchOnOrigin func(rig, branch string) (bool, error)
+	Sling          func(c specCandidate, resumeBranch string, seat specdispatch.SeatChoice) (polecat string, err error)
+	Sleep          func(time.Duration)
+	Now            func() time.Time
+	Template       specdispatch.Template
+	Budget         specdispatch.Budget // agents, caps and preferences; live counts filled per tick
+	PerTick        int
+	DryRun         bool
 	// MaxPriority is the ceiling on a candidate's priority number
 	// (polecat_pool.max_priority): a bead numbered higher is backlog.
 	MaxPriority int
@@ -465,6 +477,26 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: no seat: %s", id, seat.Reason)})
 			continue
 		}
+		// A bead readied again after its holder died carries the branch its
+		// work survives on (patrol_scan's resume_branch note). Continuing that
+		// branch keeps the work; a fresh sling would start a second polecat
+		// from main over it (gt-gzhin.2).
+		recorded := patrolscan.ResumeBranchFromNotes(full.Notes)
+		resume, gone := "", ""
+		if recorded != "" {
+			exists, err := env.BranchOnOrigin(c.Rig, recorded)
+			if err != nil {
+				// Unknown is not gone: a failed probe must not hand preserved
+				// work to a polecat starting from main.
+				report.Errors = append(report.Errors, fmt.Sprintf("%s: cannot check resume branch %s: %v", id, recorded, err))
+				continue
+			}
+			if exists {
+				resume = recorded
+			} else {
+				gone = recorded
+			}
+		}
 		// The warn-mode verdict goes on the bead beside its sling, once per
 		// distinct verdict (seat-refill's shape_note).
 		if shapeNote != "" && !env.DryRun {
@@ -475,6 +507,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		entry := specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent}
 		if env.DryRun {
 			entry.Line = fmt.Sprintf("%s: would sling to %s on %s (%s)", id, c.Rig, seat.Agent, seat.Reason)
+			entry.Line += specResumeNote(resume, gone)
 			if shapeNote != "" {
 				entry.Line += "; " + shapeNote
 			}
@@ -486,7 +519,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		var polecat string
 		attempts, err := specdispatch.RetryOnContention(specdispatch.RetryAttempts, env.Sleep, rand.New(rand.NewSource(env.Now().UnixNano())), func() error { //nolint:gosec // G404: backoff jitter
 			var slingErr error
-			polecat, slingErr = env.Sling(c, seat)
+			polecat, slingErr = env.Sling(c, resume, seat)
 			return slingErr
 		})
 		if err != nil {
@@ -518,6 +551,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		}
 		entry.Polecat = polecat
 		entry.Line = fmt.Sprintf("%s: slung to %s/%s on %s (%s)", id, c.Rig, polecat, seat.Agent, seat.Reason)
+		entry.Line += specResumeNote(resume, gone)
 		if attempts > 1 {
 			entry.Line += fmt.Sprintf(" after %d attempts", attempts)
 		}
@@ -526,8 +560,26 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		}
 		report.Dispatched = append(report.Dispatched, entry)
 		budget.Bump(seat.Agent, budget.Now)
+		if gone != "" {
+			note := fmt.Sprintf("%s%s: resume branch %s is gone from origin; dispatched fresh (gt-gzhin.3)", specDispatchNotePrefix, id, gone)
+			if err := env.Annotate(id, note, note); err != nil {
+				report.Errors = append(report.Errors, fmt.Sprintf("%s: annotate: %v", id, err))
+			}
+		}
 	}
 	return report
+}
+
+// specResumeNote names the branch a dispatch continues, or the recorded
+// branch that was gone, for the tick's dispatched line.
+func specResumeNote(resume, gone string) string {
+	switch {
+	case resume != "":
+		return "; resumed " + resume
+	case gone != "":
+		return "; resume branch " + gone + " gone"
+	}
+	return ""
 }
 
 func isSpecSlingRefusal(err error) bool {
@@ -694,8 +746,11 @@ func runSpecDispatch(cmd *cobra.Command, _ []string) error {
 		},
 		Annotate: func(id, key, text string) error { return annotateSpecOnce(townRoot, id, key, text) },
 		AddLabel: func(id, label string) error { return poolBeadLabelAdd(townRoot, id, label) },
-		Sling: func(c specCandidate, seat specdispatch.SeatChoice) (string, error) {
-			return slingSpec(townRoot, c, seat)
+		BranchOnOrigin: func(rig, branch string) (bool, error) {
+			return polecat.BranchOnOrigin(filepath.Join(townRoot, rig), branch)
+		},
+		Sling: func(c specCandidate, resumeBranch string, seat specdispatch.SeatChoice) (string, error) {
+			return slingSpec(townRoot, c, resumeBranch, seat)
 		},
 		Sleep:    time.Sleep,
 		Now:      time.Now,
@@ -934,13 +989,15 @@ func hasCommentWithPrefix(comments []beads.Comment, key string) bool {
 
 // specSlingParams is the sling a spec dispatch makes. The agent is explicit; a
 // failed dispatch leaves the bead unassigned for the next tick; and every
-// dispatch carries the host-safety instruction.
-func specSlingParams(townRoot, beadsDir, formula string, c specCandidate, seat specdispatch.SeatChoice) SlingParams {
+// dispatch carries the host-safety instruction. A non-empty resumeBranch is
+// the gt sling --branch a recovered bead's surviving work resumes on.
+func specSlingParams(townRoot, beadsDir, formula string, c specCandidate, resumeBranch string, seat specdispatch.SeatChoice) SlingParams {
 	return SlingParams{
 		BeadID:           c.Spec.ID,
 		RigName:          c.Rig,
 		FormulaName:      formula,
 		Agent:            seat.Agent,
+		ResumeBranch:     resumeBranch,
 		Args:             specdispatch.HostSafetyPrompt,
 		FormulaFailFatal: true,
 		CallerContext:    specDispatchCallerLabel,
@@ -953,12 +1010,12 @@ func specSlingParams(townRoot, beadsDir, formula string, c specCandidate, seat s
 // slingSpec dispatches one clean spec through the shared rig-dispatch path.
 // The agent is explicit, so it wins over the bead's route:* labels in the
 // pool; the pool still enforces its own caps and may refuse.
-func slingSpec(townRoot string, c specCandidate, seat specdispatch.SeatChoice) (string, error) {
+func slingSpec(townRoot string, c specCandidate, resumeBranch string, seat specdispatch.SeatChoice) (string, error) {
 	targetBeadsDir, ok := beads.ResolveRepoAliasBeadsDir(townRoot, c.Rig)
 	if !ok {
 		return "", fmt.Errorf("cannot resolve rig %q beads database for %s", c.Rig, c.Spec.ID)
 	}
-	params := specSlingParams(townRoot, targetBeadsDir, resolveFormula("", false, townRoot, c.Rig), c, seat)
+	params := specSlingParams(townRoot, targetBeadsDir, resolveFormula("", false, townRoot, c.Rig), c, resumeBranch, seat)
 	result, err := executeSling(params)
 	if err != nil {
 		return "", err

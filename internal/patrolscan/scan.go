@@ -74,6 +74,23 @@ const ResumeBranchKey = "resume_branch:"
 // ResumeBranchNote renders one ResumeBranchKey line.
 func ResumeBranchNote(branch string) string { return ResumeBranchKey + " " + branch }
 
+// ResumeBranchFromNotes returns the branch the last ResumeBranchKey line in
+// notes names, or "" when notes carry none: a bead recovered more than once
+// resumes its newest branch.
+func ResumeBranchFromNotes(notes string) string {
+	branch := ""
+	for _, line := range strings.Split(notes, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, ResumeBranchKey) {
+			continue
+		}
+		if b := strings.TrimSpace(strings.TrimPrefix(line, ResumeBranchKey)); b != "" {
+			branch = b
+		}
+	}
+	return branch
+}
+
 // hasResumeBranch reports whether notes already carry the line for branch, so
 // a retry after a failed release does not append it a second time.
 func hasResumeBranch(notes, branch string) bool {
