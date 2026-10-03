@@ -258,9 +258,8 @@ func setupSchedulerIntegrationTown(t *testing.T) (hqPath, rigPath, gtBinary stri
 	routes := []beads.Route{
 		{Prefix: hqPrefix + "-", Path: "."},
 		{Prefix: rigPrefix + "-", Path: "testrig/mayor/rig"},
-		// Convoy beads use a literal "hq-cv-" prefix (see install.go — registered
-		// on real towns during `gt install`). Route them to HQ so tests that
-		// look up auto-convoys via `bd show` resolve correctly.
+		// Route the retired hq-cv- prefix to HQ so a convoy-shaped bead a
+		// regression test might create still resolves via `bd show`.
 		{Prefix: "hq-cv-", Path: "."},
 	}
 	if err := beads.WriteRoutes(townBeadsDir, routes); err != nil {
@@ -903,7 +902,7 @@ func setupMultiRigSchedulerTown(t *testing.T) (hqPath, rig1Path, rig2Path, gtBin
 		{Prefix: hqPrefix + "-", Path: "."},
 		{Prefix: rig1Prefix + "-", Path: "rig1/mayor/rig"},
 		{Prefix: rig2Prefix + "-", Path: "rig2/mayor/rig"},
-		// Convoy beads use a literal "hq-cv-" prefix (see install.go).
+		// Route the retired hq-cv- prefix so a convoy-shaped bead still resolves.
 		{Prefix: "hq-cv-", Path: "."},
 	}
 	if err := beads.WriteRoutes(townBeadsDir, routes); err != nil {

@@ -13,7 +13,6 @@ gt config set scheduler.max_polecats 5
 # 2. Schedule work via gt sling (auto-defers when max_polecats > 0)
 gt sling gt-abc gastown              # Single task bead
 gt sling gt-abc gt-def gt-ghi gastown  # Batch task beads
-gt sling hq-cv-abc                   # Convoy (schedules all tracked issues)
 gt sling gt-epic-123                 # Epic (schedules all children)
 
 # 3. Check what's scheduled
@@ -43,7 +42,6 @@ No per-invocation flag needed. The same `gt sling` command adapts automatically.
 |---------|-------------|
 | `gt sling <bead> <rig>` | Sling bead (direct or deferred, per config) |
 | `gt sling <bead>... <rig>` | Batch sling/schedule multiple beads |
-| `gt sling <convoy-id>` | Sling/schedule all tracked issues in convoy |
 | `gt sling <epic-id>` | Sling/schedule all children of epic |
 | `gt scheduler status` | Show scheduler state and capacity |
 | `gt scheduler list` | List all scheduled beads by rig |
@@ -179,14 +177,13 @@ Key invariant: the work bead is **never modified** by the scheduler. All state l
 | `gt sling <bead> <rig>` | Immediate dispatch | Schedule for later dispatch |
 | `gt sling <bead>... <rig>` | Batch immediate dispatch | Batch schedule |
 | `gt sling <epic-id>` | `runEpicSlingByID()` — dispatch all children | `runEpicScheduleByID()` — schedule all children |
-| `gt sling <convoy-id>` | `runConvoySlingByID()` — dispatch all tracked | `runConvoyScheduleByID()` — schedule all tracked |
 
 **Detection chain** in `runSling`:
 1. `shouldDeferDispatch()` — check `scheduler.max_polecats` config
 2. Batch (3+ args, last is rig) — `runBatchSchedule()` or `runBatchSling()`
 3. `--on` flag set — formula-on-bead mode
 4. 2 args + last is rig — `scheduleBead()` or inline dispatch
-5. 1 arg, auto-detect type: epic/convoy/task
+5. 1 arg, auto-detect type: epic/task
 
 All schedule paths go through `scheduleBead()` in `internal/cmd/sling_schedule.go`.
 All dispatch goes through `schedulerrun.Run()` in `internal/schedulerrun/`.
@@ -393,30 +390,13 @@ gt scheduler list --json    # JSON output
 
 ---
 
-## Scheduler and Convoy Integration
+## Scheduler and Epic Integration
 
-Convoys and the scheduler are complementary but distinct mechanisms. Convoys track completion of related beads; the scheduler controls dispatch capacity. Two paths exist for dispatching convoy work:
-
-### Dispatch Paths
-
-| Path | Trigger | Capacity Control | Use Case |
-|------|---------|-----------------|----------|
-| **Direct dispatch** | `gt sling <convoy-id>` (max_polecats=-1) | None (fires immediately) | Default mode — all issues dispatch at once |
-| **Deferred dispatch** | `gt sling <convoy-id>` (max_polecats>0) | Yes (daemon heartbeat, max_polecats, batch_size) | Capacity-controlled — batched with back-pressure |
-
-**Direct dispatch** (max_polecats=-1): `gt sling <convoy-id>` calls `runConvoySlingByID()` which dispatches all open tracked issues immediately via `executeSling()`. Each issue's rig is auto-resolved from its bead ID prefix. No capacity control — all issues dispatch at once.
-
-**Deferred dispatch** (max_polecats>0): `gt sling <convoy-id>` calls `runConvoyScheduleByID()` which schedules all open tracked issues (creating sling context beads). The daemon dispatches incrementally through the same dispatch pass `gt scheduler run` runs, respecting `max_polecats` and `batch_size`. Use this for large batches where simultaneous dispatch would exhaust resources.
-
-### When to Use Which
-
-- **Small convoys (< 5 issues)**: Direct dispatch (default, max_polecats=-1)
-- **Large batches (5+ issues)**: Set `scheduler.max_polecats` for capacity-controlled dispatch
-- **Epics**: Same logic — `gt sling <epic-id>` auto-resolves mode from config
+An epic and the scheduler are complementary but distinct mechanisms: the epic groups related beads; the scheduler controls dispatch capacity. `gt sling <epic-id>` auto-resolves the direct or deferred mode from `scheduler.max_polecats`. Use direct dispatch for small epics (< 5 issues) and set `scheduler.max_polecats` for large ones, where simultaneous dispatch would exhaust resources.
 
 ### Rig Resolution
 
-`gt sling <convoy-id>` and `gt sling <epic-id>` auto-resolve the target rig per-bead from its ID prefix using `beads.ExtractPrefix()` + `beads.GetRigNameForPrefix()`. Town-root beads (`hq-*`) are skipped with a warning since they are coordination artifacts, not dispatchable work.
+`gt sling <epic-id>` auto-resolves the target rig per-bead from its ID prefix using `beads.ExtractPrefix()` + `beads.GetRigNameForPrefix()`. Town-root beads (`hq-*`) are skipped with a warning since they are coordination artifacts, not dispatchable work.
 
 ---
 
@@ -447,7 +427,6 @@ Convoys and the scheduler are complementary but distinct mechanisms. Convoys tra
 | `internal/cmd/sling_schedule.go` | `scheduleBead()`, `shouldDeferDispatch()`, `isScheduled()` |
 | `internal/cmd/scheduler.go` | `gt scheduler` command tree |
 | `internal/cmd/scheduler_epic.go` | Epic schedule/sling handlers |
-| `internal/cmd/scheduler_convoy.go` | Convoy schedule/sling handlers |
 | `internal/schedulerrun/` | The queue and dispatch pass: `Run()`, context assessment, validation |
 | `internal/cmd/capacity_dispatch.go` | The sling and capacity deps the dispatcher runs on |
 | `internal/daemon/scheduler_dispatch.go` | Heartbeat integration (`schedulerrun.Run` in process) |

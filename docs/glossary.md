@@ -24,7 +24,7 @@ A project-specific Git repository under Gas Town management. Each Rig has its ow
 ## Town-Level Roles
 
 ### Mayor
-Chief-of-staff agent responsible for initiating Convoys, coordinating work distribution, and notifying users of important events. The Mayor operates from the town level and has visibility across all Rigs.
+Chief-of-staff agent responsible for coordinating work distribution and notifying users of important events. The Mayor operates from the town level and has visibility across all Rigs.
 
 ### Daemon
 The Go background process, not an agent. It is the only process that kills or restarts a session, runs the `patrol_scan` tick that restarts a dead polecat holding work, and hosts the landing worker.
@@ -61,9 +61,6 @@ Ephemeral Beads destroyed after runs. Wisps are lightweight work items used for 
 A special pinned Bead for each agent. The Hook is an agent's primary work queue - when work appears on your Hook, GUPP dictates you must run it.
 
 ## Workflow Commands
-
-### Convoy
-Primary work-order wrapping related Beads. Convoys group related tasks together and can be assigned to multiple workers. Created with `gt convoy create`.
 
 ### Slinging
 Assigning work to agents via `gt sling`. When you sling work to a Polecat or Crew member, you're putting it on their Hook for execution.

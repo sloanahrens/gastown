@@ -54,7 +54,9 @@ func TestRoutesCheck_MissingTownRoute(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// Create routes.jsonl with both hq- and hq-cv- routes
+		// Create routes.jsonl with the hq- route plus a leftover hq-cv-
+		// route from before convoys retired: an extra town-level route is
+		// harmless and must not fail the check.
 		routesPath := filepath.Join(beadsDir, "routes.jsonl")
 		routesContent := `{"prefix": "hq-", "path": "."}
 {"prefix": "hq-cv-", "path": "."}
@@ -108,7 +110,7 @@ func TestRoutesCheck_FixRestoresTownRoute(t *testing.T) {
 			t.Fatalf("Fix failed: %v", err)
 		}
 
-		// Verify routes.jsonl now contains both hq- and hq-cv- routes
+		// Verify routes.jsonl now contains only the hq- town route
 		content, err := os.ReadFile(routesPath)
 		if err != nil {
 			t.Fatalf("Failed to read routes.jsonl: %v", err)
@@ -120,7 +122,6 @@ func TestRoutesCheck_FixRestoresTownRoute(t *testing.T) {
 
 		contentStr := string(content)
 		if contentStr != `{"prefix":"hq-","path":"."}
-{"prefix":"hq-cv-","path":"."}
 ` {
 			t.Errorf("unexpected routes.jsonl content: %s", contentStr)
 		}
@@ -175,16 +176,15 @@ func TestRoutesCheck_FixRestoresTownRoute(t *testing.T) {
 		}
 
 		contentStr := string(content)
-		// Should have the original rig route plus both hq- and hq-cv- routes
+		// Should have the original rig route plus the hq- town route
 		if contentStr != `{"prefix":"my-","path":"myrig/mayor/rig"}
 {"prefix":"hq-","path":"."}
-{"prefix":"hq-cv-","path":"."}
 ` {
 			t.Errorf("unexpected routes.jsonl content: %s", contentStr)
 		}
 	})
 
-	t.Run("fix does not duplicate existing town route", func(t *testing.T) {
+	t.Run("fix leaves a leftover convoy route in place", func(t *testing.T) {
 		tmpDir := t.TempDir()
 
 		// Create .beads directory with valid routes.jsonl
@@ -193,7 +193,8 @@ func TestRoutesCheck_FixRestoresTownRoute(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// Create routes.jsonl with both hq- and hq-cv- routes already present
+		// Create routes.jsonl with the hq- route and a leftover hq-cv- route
+		// (a live town still closing its convoys). Fix must not remove it.
 		routesPath := filepath.Join(beadsDir, "routes.jsonl")
 		originalContent := `{"prefix": "hq-", "path": "."}
 {"prefix": "hq-cv-", "path": "."}
@@ -221,7 +222,8 @@ func TestRoutesCheck_FixRestoresTownRoute(t *testing.T) {
 			t.Fatalf("Failed to read routes.jsonl: %v", err)
 		}
 
-		// File should be unchanged - fix doesn't write when no modifications needed
+		// File should be unchanged - fix doesn't write when no modifications needed,
+		// and it never drops a route an existing town already has.
 		if string(content) != originalContent {
 			t.Errorf("routes.jsonl was modified when it shouldn't have been: %s", string(content))
 		}
@@ -336,7 +338,6 @@ func TestRoutesCheck_DirectLayoutRig(t *testing.T) {
 		contentStr := string(content)
 		// Should use "myrig" path (direct layout), not "myrig/mayor/rig"
 		expected := `{"prefix":"hq-","path":"."}
-{"prefix":"hq-cv-","path":"."}
 {"prefix":"mr-","path":"myrig"}
 `
 		if contentStr != expected {
@@ -513,6 +514,10 @@ func TestRoutesCheck_SuboptimalRoutes(t *testing.T) {
 		if strings.Contains(contentStr, `"path":"crom"}`) {
 			t.Error("old suboptimal route path 'crom' still present after fix")
 		}
+		// The fix rewrites rig routes only; a leftover hq-cv- route stays as-is.
+		if !strings.Contains(contentStr, `{"prefix":"hq-cv-","path":"."}`) {
+			t.Errorf("fix dropped the existing hq-cv- route:\n%s", contentStr)
+		}
 
 		// Run should now pass
 		result := check.Run(ctx)
@@ -669,7 +674,6 @@ func TestRoutesCheck_CorruptedRoutesJsonl(t *testing.T) {
 
 		contentStr := string(content)
 		if contentStr != `{"prefix":"hq-","path":"."}
-{"prefix":"hq-cv-","path":"."}
 ` {
 			t.Errorf("unexpected routes.jsonl content after fix: %s", contentStr)
 		}

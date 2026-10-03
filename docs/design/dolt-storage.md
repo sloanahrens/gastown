@@ -381,8 +381,6 @@ Around each database's gc the patrol also:
   jsonl_git_backup, the compactor_dog cycle) take the read side and skip
   their tick with `<task>: skipped: gc in flight`; a task in flight makes the
   gc defer with `daemon Dolt task in flight`. Nothing blocks the select loop.
-- pauses the Convoy manager's event poll and stranded scan (waiting up to 60s
-  for an in-flight tick; otherwise it defers with `convoy poll busy`).
 - holds off a health-driven Dolt restart while the gc call is in flight and
   under its 10-minute timeout (plus 2 minutes' grace). Past that it escalates
   once and lets the restart proceed. A dead server is still started.
