@@ -337,7 +337,7 @@ in git history — only a closed PR comment links them to the work.
 **Sending mail — address format is `<rig>/<role>` or `<rig>/<sublevel>/<name>`:**
 ```bash
 {{ cmd }} mail send mayor/ -s "Subject" -m "Short message"
-{{ cmd }} mail send --human -s "Subject" -m "Short message"
+{{ cmd }} mail send overseer -s "Subject" -m "Short message"
 {{ cmd }} mail send --self -s "Subject" -m "Note to self"
 {{ cmd }} mail send {{ .RigName }}/crew/peer -s "Subject" -m "Short message"
 ```
