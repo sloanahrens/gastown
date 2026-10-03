@@ -362,18 +362,12 @@ func goCallArgs(call *ast.CallExpr) (string, []ast.Expr) {
 			if b := lit(1); b == "gt" || b == "bd" {
 				return b, after(2)
 			}
-		case "beads.Command":
-			return "bd", after(3)
-		case "beads.CommandContext", "beads.CommandContextBounded":
-			return "bd", after(4)
 		case "beads.CommandWithEnv":
 			return "bd", after(2)
 		case "beads.CommandContextWithEnv", "beads.CommandWithPath":
 			return "bd", after(3)
 		case "beads.CommandContextWithPath":
 			return "bd", after(4)
-		case "beads.CommandContextWithBin":
-			return "bd", after(5)
 		}
 	}
 	return "", nil

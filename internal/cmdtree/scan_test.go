@@ -182,16 +182,16 @@ import (
 	"os/exec"
 )
 
-func f(ctx context.Context, id string, args []string) {
+func f(ctx context.Context, id, dir, bin string, env, args []string) {
 	_ = exec.Command("gt", "swarm", "land", id)
 	_ = exec.CommandContext(ctx, "bd", "mol", "wisp", "--json")
 	_ = exec.Command("git", "status")
 	_ = exec.Command("gt", args...)
 	_ = BdCmd("dep", "add", id)
-	_ = beads.CommandContext(ctx, "d", "b", beads.MutationPinned, "sync")
-	_ = beads.Command("d", "b", beads.ReadOnlyPinned, args...)
-	_ = beads.CommandWithPath(bin, "d", env, "show", id)
-	_ = beads.CommandContextWithBin(ctx, bin, "d", "b", beads.ReadOnlyPinned, "ready")
+	_ = beads.CommandWithEnv(dir, env, "show", id)
+	_ = beads.CommandContextWithEnv(ctx, dir, env, "dep", "add", id)
+	_ = beads.CommandWithPath(bin, dir, env, "update", id, "--status", "closed")
+	_ = beads.CommandContextWithPath(ctx, bin, dir, env, "ready", "--json")
 }
 `
 	refs, err := ScanGo("x.go", []byte(src))
@@ -202,8 +202,9 @@ func f(ctx context.Context, id string, args []string) {
 		"9:gt swarm land",
 		"10:bd mol wisp",
 		"13:bd dep add",
-		"14:bd sync",
-		"16:bd show",
+		"14:bd show",
+		"15:bd dep add",
+		"16:bd update",
 		"17:bd ready",
 	)
 }
