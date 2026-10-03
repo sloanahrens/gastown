@@ -144,7 +144,6 @@ func writeMailDirectory(out, errOut io.Writer, b mailDirectorySource, asJSON boo
 	// 5. Well-known addresses
 	wellKnown := []DirectoryEntry{
 		{Address: "mayor/", Type: "well-known"},
-		{Address: "--human", Type: "well-known"},
 		{Address: "--self", Type: "well-known"},
 		{Address: "@town", Type: "special"},
 		{Address: "@crew", Type: "special"},
