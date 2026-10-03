@@ -386,7 +386,7 @@ func detectSchedulerIDType(id string) (string, error) {
 }
 
 // schedulerTaskOnlyFlagNames lists flags that only apply to task bead scheduling,
-// not convoy or epic mode.
+// not epic mode.
 var schedulerTaskOnlyFlagNames = []string{
 	"account", "agent", "ralph", "args", "var",
 	"base-branch", "no-merge", "review-only",

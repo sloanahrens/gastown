@@ -26,7 +26,7 @@ func (c Child) Open() bool {
 }
 
 // maxNamedChildren bounds the child ids OpenChildHold names, so one wide
-// convoy does not turn a skip line into a wall.
+// container does not turn a skip line into a wall.
 const maxNamedChildren = 3
 
 // OpenChildHold reports why a bead is a container of work rather than a unit

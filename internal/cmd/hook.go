@@ -358,7 +358,7 @@ func runHook(_ *cobra.Command, args []string) error {
 
 	// Hook the bead using bd update with retry logic (discovery-based approach).
 	// Run from town root so bd can find routes.jsonl for prefix-based routing.
-	// This is essential for hooking convoys (hq-* prefix) stored in town beads.
+	// This is essential for hooking town beads (hq-* prefix) stored in ~/gt/.beads.
 	// Dolt can fail with concurrency errors (HTTP 400) when multiple agents write
 	// simultaneously. We retry with exponential backoff, matching sling.go behavior.
 	const hookMaxRetries = 5
@@ -505,9 +505,8 @@ func runHookShow(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("listing active hook work: %w", err)
 	}
 
-	// If nothing found in local beads, also check town beads for hooked convoys.
-	// Convoys (hq-cv-*) are stored in town beads (~/gt/.beads) and any agent
-	// can hook them for convoy-driver mode.
+	// If nothing found in local beads, also check town beads for hooked items.
+	// Town beads (hq-*) are stored in ~/gt/.beads and can hold a hook.
 	if len(hookedBeads) == 0 {
 		townRoot, err := workspace.FindFromCwd()
 		if err == nil && townRoot != "" {

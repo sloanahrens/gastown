@@ -45,8 +45,8 @@ import (
 //     branch name: polecat branches are `polecat/<name>/<bead-id>+<suffix>`
 //     (gt-6hmz's own branch format), so a bead is judged only when its ID
 //     appears as a whole component of the current branch name. Everything else
-//     — closing a filed bug bead, a molecule step, a convoy, an unrelated
-//     task — is not this guard's business and passes untouched.
+//     — closing a filed bug bead, a molecule step, an unrelated task — is not
+//     this guard's business and passes untouched.
 //
 //     The rejected alternative was scoping by the agent bead's hook_bead,
 //     which would also judge a hooked task whose branch belongs to a

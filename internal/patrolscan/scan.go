@@ -255,7 +255,7 @@ type Options struct {
 	ReportWindow   time.Duration
 	HeartbeatFresh time.Duration
 	// HoldReason returns why a work bead is held from dispatch ("" when it
-	// is not): the convoy dispatchers' hold rule. Nil means no hold rule.
+	// is not): the dispatchers' hold rule. Nil means no hold rule.
 	HoldReason func(Work) string
 	// IsRefusal reports whether a Restart error is the supervisor refusing
 	// (parked, frozen, e-stop, budget) rather than failing.

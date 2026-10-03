@@ -8,5 +8,5 @@ import "github.com/steveyegge/gastown/internal/sling"
 //
 // The daemon runs the dispatch engine in process and has no per-run command to
 // set this, so it hands the engine its own sling.Timer through Options.Steps
-// instead, which keeps the timing lines tagged with the convoy being fed.
+// instead, which keeps the timing lines on the daemon's own log.
 var slingSteps *sling.Timer

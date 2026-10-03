@@ -195,12 +195,12 @@ func BeadsInfraTypesList() []string {
 // Beads custom status configuration constants.
 const (
 	// BeadsCustomStatuses is the comma-separated list of custom issue statuses
-	// that Gas Town registers with beads. Convoy staging uses staged_ready and
-	// staged_warnings to track convoy readiness before launch.
+	// that Gas Town registers with beads. They were convoy staging's; they stay
+	// registered so a bead that still carries one validates.
 	//
 	// Status origins:
-	//   staged_ready    - Convoy staged with no warnings (ready to launch)
-	//   staged_warnings - Convoy staged with warnings (requires --force to launch)
+	//   staged_ready    - Staged with no warnings
+	//   staged_warnings - Staged with warnings
 	BeadsCustomStatuses = "staged_ready,staged_warnings"
 )
 

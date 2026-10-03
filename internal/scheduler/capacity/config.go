@@ -1,5 +1,5 @@
 // Package capacity provides types and pure functions for the capacity-controlled
-// dispatch scheduler. The impure orchestration (dispatch loop, enqueue, epic/convoy
+// dispatch scheduler. The impure orchestration (dispatch loop, enqueue, epic
 // resolution) stays in cmd but uses types and pure functions from this package.
 package capacity
 

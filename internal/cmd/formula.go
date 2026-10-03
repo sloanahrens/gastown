@@ -699,7 +699,7 @@ func executeWorkflowFormula(f *cookedFormula, formulaName, targetRig string) err
 		ID:          workflowID,
 		Title:       workflowTitle,
 		Description: description,
-		Labels:      []string{"gt:convoy", "gt:workflow"},
+		Labels:      []string{"gt:workflow"},
 		Priority:    -1,
 	}); err != nil {
 		return fmt.Errorf("creating workflow bead: %w", err)
@@ -823,7 +823,6 @@ func executeWorkflowFormula(f *cookedFormula, formulaName, targetRig string) err
 		fmt.Printf("  Steps:    %d total, %d dispatched, %d awaiting dependencies\n",
 			len(f.Steps), slingCount, blockedCount)
 	}
-	fmt.Printf("\n  Track progress: gt convoy status %s\n", workflowID)
 
 	return nil
 }
@@ -863,7 +862,7 @@ func truncate(s string, maxLen int) string {
 }
 
 // buildWorkflowStepSlingArgs constructs the gt-sling argument list for a workflow step.
-// Steps are tracked by the parent workflow bead; a sling creates no convoy of its own.
+// Steps are tracked by the parent workflow bead.
 func buildWorkflowStepSlingArgs(beadID, targetRig, description, title, agent string) []string {
 	args := []string{
 		"sling", beadID, targetRig,

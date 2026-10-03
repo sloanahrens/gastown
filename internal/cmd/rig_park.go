@@ -28,7 +28,7 @@ var rigParkCmd = &cobra.Command{
 	Long: `Park rigs to take them out of service.
 
 Parking a rig writes a "parked" record {since, by, reason} into the rig's
-entry in mayor/rigs.json. Dispatch (gt sling, convoys, gt dispatch) refuses
+entry in mayor/rigs.json. Dispatch (gt sling, gt dispatch) refuses
 the rig and the daemon auto-starts nothing for it until 'gt rig unpark'.
 A rig that is already parked keeps its original record.
 

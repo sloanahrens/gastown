@@ -99,8 +99,8 @@ func poolOwnsAgent(pool *config.PolecatPool, requested string) bool {
 // the seat is at its cap, so the caller stops the sling instead of spawning
 // past it.
 //
-// requested is the agent named on the command line (--agent), including the
-// agent a convoy recorded at sling time. An agent the pool does not own leaves
+// requested is the agent named on the command line (--agent), including any
+// agent recorded at sling time. An agent the pool does not own leaves
 // it nothing to admit, and the request stands untouched (gt-4lbz). A request
 // for the pool's own agent is admitted by the seat's cap like any other sling.
 func choosePoolAgent(pool *config.PolecatPool, requested string, sessions []poolSession) (agent, reason string, refused bool) {

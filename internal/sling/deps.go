@@ -10,9 +10,9 @@ import (
 //
 // The engine owns the dispatch policy — which guards run, in what order, and
 // what is rolled back when one fails. Its callers own the mechanisms, so the
-// same policy runs behind the cobra command, behind the daemon's convoy
-// feeder, and behind a unit test's fakes without a process boundary between
-// them.
+// same policy runs behind the cobra command, behind an in-process caller such
+// as the spec dispatcher, and behind a unit test's fakes without a process
+// boundary between them.
 type Deps struct {
 	// Output and identity.
 	Out       io.Writer
@@ -44,11 +44,9 @@ type Deps struct {
 
 	// DefaultFormula is the formula a dispatch runs under when its caller named
 	// none: the target rig's configured default, falling back to the system
-	// one. `gt sling` has always resolved this for a polecat target, and a
-	// caller that only has the convoy's record — the daemon's convoy feeder and
-	// the convoy continuation feed, which pass the formula recorded at sling
-	// time and nothing when none was recorded — used to get it by exec'ing that
-	// command. Nil leaves an empty FormulaName meaning "hook the raw bead".
+	// one. `gt sling` has always resolved this for a polecat target; a caller
+	// in process that named no formula gets it here rather than by exec'ing
+	// that command. Nil leaves an empty FormulaName meaning "hook the raw bead".
 	DefaultFormula func(townRoot, rigName string) string
 
 	// Serializing concurrent writes.

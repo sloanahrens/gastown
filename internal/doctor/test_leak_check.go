@@ -263,8 +263,8 @@ func eventLeaks(line string, known map[string]bool, since time.Time) []string {
 //   - "overseer": detectSender()'s fallback mail actor (internal/cmd/mail_identity.go).
 //   - "gt": events.ActorGt, town infrastructure events with no owning agent.
 //   - "daemon": events.ActorDaemon, daemon-originated events.
-//   - "convoy": convoyNotifyFrom() builds "convoy/<convoy-id>" for a convoy's
-//     completion mail.
+//   - "convoy": a legacy "convoy/<id>" mail actor, still tolerated for
+//     messages and fixtures that carry it.
 var builtinActorPrefixes = []string{
 	"mayor", "deacon", "boot", "deacon-boot", "witness", "refinery", "polecat",
 	"crew", "dog", "unknown", "overseer", events.ActorGt, events.ActorDaemon, "convoy",

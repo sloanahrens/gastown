@@ -83,7 +83,7 @@ func (e Escalation) Validate() error {
 // MailOptions are the optional parts of a mail send.
 type MailOptions struct {
 	// From overrides the sender address, which is otherwise detected from
-	// the sending process (relay/bridge use, e.g. "convoy/<id>").
+	// the sending process (relay/bridge use).
 	From string
 	// NoNotify suppresses the recipient's runtime notification; the message
 	// is still delivered to the mailbox.

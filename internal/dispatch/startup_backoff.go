@@ -10,7 +10,7 @@ import (
 )
 
 // A sling that fails at session start leaves its bead open and unassigned, the
-// exact state the convoy feeders dispatch from. Without a record of the
+// exact state an automatic dispatcher dispatches from. Without a record of the
 // failure they re-sling it on their next tick: the retry spends one of the
 // bead's respawn attempts, holds the per-bead sling flock so the operator's
 // own retry is refused as "already being slung", and fails the same way again

@@ -53,8 +53,8 @@ func ensureWorkspaceTrust(workDir, configDir string, rc *config.RuntimeConfig, e
 		return err
 	}
 
-	// Serialize gt's own concurrent spawns (e.g. a convoy dispatching several
-	// polecats at once) so parallel read-modify-writes don't drop entries.
+	// Serialize gt's own concurrent spawns (e.g. a batch dispatch starting
+	// several polecats at once) so parallel read-modify-writes don't drop entries.
 	unlock, err := lock.FlockAcquire(path + ".gt.lock")
 	if err != nil {
 		return fmt.Errorf("locking %s: %w", path, err)

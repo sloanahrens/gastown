@@ -16,10 +16,9 @@ import (
 
 // tailRoutineDaemon matches the daemon.log lines that say "ran, nothing
 // happened": the heartbeat, plugin handler skips, the patrols a config leaves
-// off, the dogs' not-due and scan summaries, the doctor's all-clear, the
-// convoy bookkeeping, and the alert clears. A Handler line is hidden only for
-// the outcomes that did no work, so an "ok", a FAILED, or a failure to record
-// the run still shows.
+// off, the dogs' not-due and scan summaries, the doctor's all-clear, and the
+// alert clears. A Handler line is hidden only for the outcomes that did no
+// work, so an "ok", a FAILED, or a failure to record the run still shows.
 var tailRoutineDaemon = regexp.MustCompile(`^(` +
 	`Heartbeat (starting|complete)` +
 	`|Handler: (skipping plugin |running script plugin |script plugin \S+ skipped )` +
@@ -29,8 +28,6 @@ var tailRoutineDaemon = regexp.MustCompile(`^(` +
 	`|doctor_dog: all clear` +
 	`|dog_cycle: checkpoint_dog ` +
 	`|patrol_scan: ` +
-	`|Convoy: checking convoy` +
-	`|Convoy: \S+ tracked by [0-9]+ convoy` +
 	`|clearAlerts\(` +
 	`)`)
 
@@ -53,10 +50,6 @@ func tailVisible(l tailLine) bool {
 		}
 		return !tailAgentBeadOpen(f)
 	case tailKindDaemon:
-		if id, ok := strings.CutPrefix(l.Text, "Convoy: close detected: "); ok {
-			f := strings.Fields(id)
-			return len(f) == 0 || !isWispID(f[0])
-		}
 		return !tailRoutineDaemon.MatchString(l.Text) || tailFailure.MatchString(l.Text)
 	}
 	return true
@@ -196,86 +189,19 @@ func (l *tailEventDuplicateLatch) visible(ln tailLine) bool {
 	return !same
 }
 
-// tailSeatWaitIcon leads the one line a convoy's seat-retry loop prints.
-const tailSeatWaitIcon = "⏳"
-
-// The daemon lines a convoy's seat-retry loop writes: the attempt that fed the
-// bead, the attempt that could not, and the reason that names a missing seat
-// as opposed to any other complaint.
-var (
-	tailConvoyFeedRe   = regexp.MustCompile(`^Convoy \S+: feeding (\S+) to `)
-	tailConvoyDeferRe  = regexp.MustCompile(`^Convoy \S+: deferring (\S+): (.*)$`)
-	tailConvoyNoSeatRe = regexp.MustCompile(`(?i:\bpool: full\b|\bno seat\b)`)
-)
-
-// tailSeatWaitLatch collapses a convoy's seat-retry loop into one line. A
-// convoy retries a bead every few seconds while the pool has no seat, so the
-// stream carries "deferring gt-x: pool: full ..." once per attempt, all of it
-// saying the same thing. The first prints as one waiting line; the rest are
-// suppressed until the bead, the reason or the outcome changes. A later
-// success — the convoy's "feeding gt-x" line — clears the latch, so the bead
-// printing a fresh waiting line means it lost its seat again.
-type tailSeatWaitLatch struct {
-	mu     sync.Mutex
-	bead   string
-	reason string
-}
-
-// tailSeatWaitText is the one line a seat-waiting bead prints as.
-func tailSeatWaitText(bead string) string {
-	return tailSeatWaitIcon + " waiting for a seat: " + bead
-}
-
-// adjust returns the line to print and whether to print it.
-func (l *tailSeatWaitLatch) adjust(ln tailLine) (tailLine, bool) {
-	if ln.Kind != tailKindDaemon {
-		return ln, true
-	}
-	if m := tailConvoyFeedRe.FindStringSubmatch(ln.Text); m != nil {
-		l.mu.Lock()
-		if l.bead == m[1] {
-			l.bead, l.reason = "", ""
-		}
-		l.mu.Unlock()
-		return ln, true
-	}
-	m := tailConvoyDeferRe.FindStringSubmatch(ln.Text)
-	if m == nil || !tailConvoyNoSeatRe.MatchString(m[2]) {
-		return ln, true
-	}
-	bead, reason := m[1], strings.TrimSpace(m[2])
-	l.mu.Lock()
-	repeat := l.bead == bead && l.reason == reason
-	if !repeat {
-		l.bead, l.reason = bead, reason
-	}
-	l.mu.Unlock()
-	if repeat {
-		return ln, false
-	}
-	ln.Text = tailSeatWaitText(bead)
-	return ln, true
-}
-
 // tailDefaultFilter is the default view's filter. It hides the routine lines,
-// collapses a convoy's seat-retry loop, drops an events line that repeats the
-// one before it, and latches a townhealth line that repeats the last one
-// shown. --all and --verbose keep every raw line.
+// drops an events line that repeats the one before it, and latches a
+// townhealth line that repeats the last one shown. --all and --verbose keep
+// every raw line.
 type tailDefaultFilter struct {
 	townHealth tailTownHealthLatch
 	duplicates tailEventDuplicateLatch
-	seats      tailSeatWaitLatch
 }
 
 func (f *tailDefaultFilter) visible(ln tailLine) (tailLine, bool) {
 	if !tailVisible(ln) {
 		return ln, false
 	}
-	adjusted, ok := f.seats.adjust(ln)
-	if !ok {
-		return ln, false
-	}
-	ln = adjusted
 	if !f.duplicates.visible(ln) {
 		return ln, false
 	}
@@ -451,11 +377,11 @@ var (
 	// tailClassDispatchRe: work handed to a worker.
 	tailClassDispatchRe = regexp.MustCompile(`(?i:\b(slung|sling|spawn)\w*\b)`)
 	// tailDispatchMentionRe: the text that quotes a dispatch instead of
-	// reporting one. A convoy line about stranded work prints the command
-	// that would resume it — "(resume with: gt sling gt-x gastown --branch
-	// ...)" — one per stranded bead, so the word alone would tag the line
-	// with an action that has not happened (gt-uqabu).
-	tailDispatchMentionRe = regexp.MustCompile(`(?i:resume with:)`)
+	// reporting one. A surviving-work line prints the command that would
+	// resume the bead — "(resume with gt sling gt-x gastown --branch ...)" —
+	// so the word alone would tag the line with an action that has not
+	// happened (gt-uqabu).
+	tailDispatchMentionRe = regexp.MustCompile(`(?i:resume with)`)
 	// tailClassRestartRe: a process replaced by the same one.
 	tailClassRestartRe = regexp.MustCompile(`(?i:\b(restart|upgrade)\w*\b)`)
 	// tailRestartNotAnEventRe: the shapes that spend a restart word without

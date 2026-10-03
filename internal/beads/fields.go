@@ -22,9 +22,7 @@ type AttachmentFields struct {
 	NoMerge          bool     // If true, gt done skips merge queue (for upstream PRs/human review)
 	ReviewOnly       bool     // If true, assignee must evaluate and report back — no merge/commit/push
 	Mode             string   // Execution mode: "" (normal) or "ralph" (Ralph Wiggum loop)
-	ConvoyID         string   // Convoy bead ID tracking this issue (e.g., "hq-cv-abc")
-	MergeStrategy    string   // Convoy merge strategy: "mr", "local", or "" (default = mr)
-	ConvoyOwned      bool     // If true, convoy has gt:owned label (caller-managed lifecycle)
+	MergeStrategy    string   // Merge strategy override: "mr", "local", or "" (default = mr)
 	FormulaVars      string   // Newline-separated key=value pairs for formula template substitution
 }
 
@@ -86,14 +84,8 @@ func ParseAttachmentFields(issue *Issue) *AttachmentFields {
 		case "mode":
 			fields.Mode = value
 			hasFields = true
-		case "convoy_id", "convoy-id", "convoyid", "convoy":
-			fields.ConvoyID = value
-			hasFields = true
 		case "merge_strategy", "merge-strategy", "mergestrategy":
 			fields.MergeStrategy = value
-			hasFields = true
-		case "convoy_owned", "convoy-owned", "convoyowned":
-			fields.ConvoyOwned = strings.ToLower(value) == "true"
 			hasFields = true
 		case "formula_vars", "formula-vars", "formulavars":
 			formulaVars = append(formulaVars, splitFormulaVars(parseFormulaVars(value))...)
@@ -146,14 +138,8 @@ func FormatAttachmentFields(fields *AttachmentFields) string {
 	if fields.Mode != "" {
 		lines = append(lines, "mode: "+fields.Mode)
 	}
-	if fields.ConvoyID != "" {
-		lines = append(lines, "convoy_id: "+fields.ConvoyID)
-	}
 	if fields.MergeStrategy != "" {
 		lines = append(lines, "merge_strategy: "+fields.MergeStrategy)
-	}
-	if fields.ConvoyOwned {
-		lines = append(lines, "convoy_owned: true")
 	}
 	if fields.FormulaVars != "" {
 		if formatted := formatFormulaVars(fields.FormulaVars); formatted != "" {
@@ -195,16 +181,9 @@ func SetAttachmentFields(issue *Issue, fields *AttachmentFields) string {
 		"review-only":       true,
 		"reviewonly":        true,
 		"mode":              true,
-		"convoy_id":         true,
-		"convoy-id":         true,
-		"convoyid":          true,
-		"convoy":            true,
 		"merge_strategy":    true,
 		"merge-strategy":    true,
 		"mergestrategy":     true,
-		"convoy_owned":      true,
-		"convoy-owned":      true,
-		"convoyowned":       true,
 		"formula_vars":      true,
 		"formula-vars":      true,
 		"formulavars":       true,
@@ -256,185 +235,6 @@ func SetAttachmentFields(issue *Issue, fields *AttachmentFields) string {
 	}
 
 	return formatted + "\n\n" + strings.Join(otherLines, "\n")
-}
-
-// ConvoyFields holds the structured fields for a convoy bead.
-// These fields are stored as key: value lines in the issue description.
-type ConvoyFields struct {
-	Owner                string // Convoy owner address (e.g., "mayor/")
-	Notify               string // Additional notification address
-	Molecule             string // Associated molecule/swarm ID
-	Merge                string // Merge strategy
-	BaseBranch           string // Target branch for polecats (e.g., "feat/extraction-review")
-	Agent                string // Runtime agent requested at sling time (--agent), re-used by convoy feeders (gt-yg24)
-	Formula              string // Formula requested at sling time (--formula), re-used by convoy feeders (gt-4lor)
-	Watchers             string // Comma-separated mail notification addresses (description key "watchers")
-	NudgeWatchers        string // Comma-separated nudge notification addresses (description key "nudge_watchers")
-	CompletionNotifiedAt string // RFC3339 timestamp when completion notifications were claimed/sent
-}
-
-// ParseConvoyFields extracts convoy fields from an issue's description.
-// Returns nil if no convoy fields found.
-func ParseConvoyFields(issue *Issue) *ConvoyFields {
-	if issue == nil || issue.Description == "" {
-		return nil
-	}
-
-	fields := &ConvoyFields{}
-	hasFields := false
-
-	for _, line := range strings.Split(issue.Description, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		colonIdx := strings.Index(line, ":")
-		if colonIdx == -1 {
-			continue
-		}
-
-		key := strings.TrimSpace(line[:colonIdx])
-		value := strings.TrimSpace(line[colonIdx+1:])
-		if value == "" {
-			continue
-		}
-
-		switch strings.ToLower(key) {
-		case "owner":
-			fields.Owner = value
-			hasFields = true
-		case "notify":
-			fields.Notify = value
-			hasFields = true
-		case "molecule":
-			fields.Molecule = value
-			hasFields = true
-		case "merge":
-			fields.Merge = value
-			hasFields = true
-		case "base_branch", "base-branch", "basebranch":
-			fields.BaseBranch = value
-			hasFields = true
-		case "agent":
-			fields.Agent = value
-			hasFields = true
-		case "formula":
-			fields.Formula = value
-			hasFields = true
-		case "watchers":
-			fields.Watchers = value
-			hasFields = true
-		case "nudge_watchers", "nudge-watchers", "nudgewatchers":
-			fields.NudgeWatchers = value
-			hasFields = true
-		case "completion_notified_at", "completion-notified-at", "completionnotifiedat":
-			fields.CompletionNotifiedAt = value
-			hasFields = true
-		}
-	}
-
-	if !hasFields {
-		return nil
-	}
-	return fields
-}
-
-// NotificationAddresses returns deduplicated mail notification addresses from convoy fields.
-// Includes Owner, Notify, and all Watchers addresses.
-func (f *ConvoyFields) NotificationAddresses() []string {
-	if f == nil {
-		return nil
-	}
-	seen := make(map[string]bool)
-	var addrs []string
-	for _, addr := range []string{f.Owner, f.Notify} {
-		if addr != "" && !seen[addr] {
-			addrs = append(addrs, addr)
-			seen[addr] = true
-		}
-	}
-	for _, addr := range splitWatchers(f.Watchers) {
-		if addr != "" && !seen[addr] {
-			addrs = append(addrs, addr)
-			seen[addr] = true
-		}
-	}
-	return addrs
-}
-
-// NudgeNotificationAddresses returns deduplicated nudge addresses from convoy fields.
-func (f *ConvoyFields) NudgeNotificationAddresses() []string {
-	if f == nil {
-		return nil
-	}
-	seen := make(map[string]bool)
-	var addrs []string
-	for _, addr := range splitWatchers(f.NudgeWatchers) {
-		if addr != "" && !seen[addr] {
-			addrs = append(addrs, addr)
-			seen[addr] = true
-		}
-	}
-	return addrs
-}
-
-// splitWatchers splits a comma-separated watcher string into trimmed, non-empty addresses.
-func splitWatchers(s string) []string {
-	if s == "" {
-		return nil
-	}
-	parts := strings.Split(s, ",")
-	var result []string
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			result = append(result, p)
-		}
-	}
-	return result
-}
-
-// FormatConvoyFields formats ConvoyFields as a string suitable for an issue description.
-// Only non-empty fields are included.
-func FormatConvoyFields(fields *ConvoyFields) string {
-	if fields == nil {
-		return ""
-	}
-
-	var lines []string
-	if fields.Owner != "" {
-		lines = append(lines, "Owner: "+fields.Owner)
-	}
-	if fields.Notify != "" {
-		lines = append(lines, "Notify: "+fields.Notify)
-	}
-	if fields.Merge != "" {
-		lines = append(lines, "Merge: "+fields.Merge)
-	}
-	if fields.Molecule != "" {
-		lines = append(lines, "Molecule: "+fields.Molecule)
-	}
-	if fields.BaseBranch != "" {
-		lines = append(lines, "base_branch: "+fields.BaseBranch)
-	}
-	if fields.Agent != "" {
-		lines = append(lines, "agent: "+fields.Agent)
-	}
-	if fields.Formula != "" {
-		lines = append(lines, "formula: "+fields.Formula)
-	}
-	if fields.Watchers != "" {
-		lines = append(lines, "Watchers: "+fields.Watchers)
-	}
-	if fields.NudgeWatchers != "" {
-		lines = append(lines, "nudge_watchers: "+fields.NudgeWatchers)
-	}
-	if fields.CompletionNotifiedAt != "" {
-		lines = append(lines, "completion_notified_at: "+fields.CompletionNotifiedAt)
-	}
-
-	return strings.Join(lines, "\n")
 }
 
 func formatAttachedVars(vars []string) string {
@@ -494,79 +294,6 @@ func splitFormulaVars(raw string) []string {
 	return out
 }
 
-// SetConvoyFields updates an issue's description with the given convoy fields.
-// Existing convoy field lines are replaced; other content is preserved.
-// Returns the new description string.
-func SetConvoyFields(issue *Issue, fields *ConvoyFields) string {
-	if issue == nil {
-		return FormatConvoyFields(fields)
-	}
-
-	// Known convoy field keys (lowercase)
-	convoyKeys := map[string]bool{
-		"owner":                  true,
-		"notify":                 true,
-		"merge":                  true,
-		"molecule":               true,
-		"base_branch":            true,
-		"base-branch":            true,
-		"basebranch":             true,
-		"agent":                  true,
-		"formula":                true,
-		"watchers":               true,
-		"nudge_watchers":         true,
-		"nudge-watchers":         true,
-		"nudgewatchers":          true,
-		"completion_notified_at": true,
-		"completion-notified-at": true,
-		"completionnotifiedat":   true,
-	}
-
-	// Collect non-convoy lines from existing description
-	var otherLines []string
-	if issue.Description != "" {
-		for _, line := range strings.Split(issue.Description, "\n") {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" {
-				otherLines = append(otherLines, line)
-				continue
-			}
-
-			colonIdx := strings.Index(trimmed, ":")
-			if colonIdx == -1 {
-				otherLines = append(otherLines, line)
-				continue
-			}
-
-			key := strings.ToLower(strings.TrimSpace(trimmed[:colonIdx]))
-			if !convoyKeys[key] {
-				otherLines = append(otherLines, line)
-			}
-		}
-	}
-
-	// Build new description: other content first, then convoy fields
-	formatted := FormatConvoyFields(fields)
-
-	// Trim trailing blank lines from other content
-	for len(otherLines) > 0 && strings.TrimSpace(otherLines[len(otherLines)-1]) == "" {
-		otherLines = otherLines[:len(otherLines)-1]
-	}
-	// Trim leading blank lines from other content
-	for len(otherLines) > 0 && strings.TrimSpace(otherLines[0]) == "" {
-		otherLines = otherLines[1:]
-	}
-
-	if len(otherLines) == 0 {
-		return formatted
-	}
-	if formatted == "" {
-		return strings.Join(otherLines, "\n")
-	}
-
-	return strings.Join(otherLines, "\n") + "\n" + formatted
-}
-
 // MRFields holds the structured fields for a merge-request issue.
 // These fields are stored as key: value lines in the issue description.
 type MRFields struct {
@@ -590,10 +317,6 @@ type MRFields struct {
 	RetryCount      int    // Number of conflict-resolution cycles
 	LastConflictSHA string // SHA of main when conflict occurred
 	ConflictTaskID  string // Link to conflict-resolution task (if any)
-
-	// Convoy tracking (for priority scoring - convoy starvation prevention)
-	ConvoyID        string // Parent convoy ID if part of a convoy
-	ConvoyCreatedAt string // Convoy creation time (ISO 8601) for starvation prevention
 
 	// Pre-verification fields (Phase 3: polecat-owned rebasing)
 	// When a polecat rebases onto the target and runs gates before submission,
@@ -699,12 +422,6 @@ func ParseMRFields(issue *Issue) *MRFields {
 			hasFields = true
 		case "conflict_task_id", "conflict-task-id", "conflicttaskid":
 			fields.ConflictTaskID = value
-			hasFields = true
-		case "convoy_id", "convoy-id", "convoyid", "convoy":
-			fields.ConvoyID = value
-			hasFields = true
-		case "convoy_created_at", "convoy-created-at", "convoycreatedat":
-			fields.ConvoyCreatedAt = value
 			hasFields = true
 		case "pre_verified", "pre-verified", "preverified":
 			fields.PreVerified = strings.ToLower(value) == "true"
@@ -821,12 +538,6 @@ func FormatMRFields(fields *MRFields) string {
 	}
 	if fields.ConflictTaskID != "" {
 		lines = append(lines, "conflict_task_id: "+fields.ConflictTaskID)
-	}
-	if fields.ConvoyID != "" {
-		lines = append(lines, "convoy_id: "+fields.ConvoyID)
-	}
-	if fields.ConvoyCreatedAt != "" {
-		lines = append(lines, "convoy_created_at: "+fields.ConvoyCreatedAt)
 	}
 	if fields.PreVerified {
 		lines = append(lines, "pre_verified: true")

@@ -7,15 +7,15 @@ import (
 )
 
 // StepPrefix starts every line a Timer writes. A caller that reads the timing
-// back out of the dispatch's output — the daemon, which times a convoy feed
-// into its own buffer — matches on it, so it lives here beside the writer
-// rather than in each reader.
+// back out of the dispatch's output — the daemon's scheduled-sling runner,
+// which strips them from its own buffer — matches on it, so it lives here
+// beside the writer rather than in each reader.
 const StepPrefix = "[sling] step "
 
 // Timer prints one line per dispatch step so a slow dispatch can be attributed
 // to admission, allocation, worktree creation, the hook write, or session
-// start (gt-llg8). Measured 2026-09-19: a convoy-fed sling took 11m15s from
-// feed to tmux session with nothing on the path timed.
+// start (gt-llg8). Measured 2026-09-19: a sling took 11m15s from sling to tmux
+// session with nothing on the path timed.
 //
 // A nil *Timer is a no-op, so callers on the spawn path never guard it.
 type Timer struct {

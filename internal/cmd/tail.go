@@ -79,21 +79,17 @@ always draws both.
 The default view hides what the town does every few seconds: wisp events
 (gt-wisp-*, hq-wisp-*) and their "close detected" lines, the daemon's
 heartbeat, plugin-handler skips, the patrols a config leaves off, the
-checkpoint, jsonl-backup, patrol-scan and doctor all-clear lines, the convoy
-bookkeeping ("tracked by", "checking convoy"), clearAlerts lines, a polecat
-agent bead's own status writes, and a townhealth line that repeats the last
-one shown but for the age and the exec-tax reading it carries. Landings,
-rejections, escalations, upgrade restarts, spec-dispatcher ticks and bead
-create/close/status changes always show, and a hidden line that reports a
-failure shows anyway. --all (or --verbose) shows everything.
+checkpoint, jsonl-backup, patrol-scan and doctor all-clear lines, clearAlerts
+lines, a polecat agent bead's own status writes, and a townhealth line that
+repeats the last one shown but for the age and the exec-tax reading it
+carries. Landings, rejections, escalations, upgrade restarts, spec-dispatcher
+ticks and bead create/close/status changes always show, and a hidden line that
+reports a failure shows anyway. --all (or --verbose) shows everything.
 
 It also drops what repeats. An events line that says what the line before it
 said — the same bead, operation and status within two seconds — prints once:
 that is one bd write the journal recorded twice, or a retry that landed on the
-same row. A convoy that cannot seat a bead retries it every few seconds, so
-those "deferring gt-x: pool: full ..." lines collapse into one
-"⏳ waiting for a seat: gt-x", printed again only when the bead, the reason or
-the outcome changes. And an events line drops its seq= cursor, and its
+same row. And an events line drops its seq= cursor, and its
 actor= when that actor is your own git user.name; another writer's actor
 stays. --verbose keeps both fields, which is what to cut or grep by position.
 

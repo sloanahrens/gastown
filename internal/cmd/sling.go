@@ -159,7 +159,7 @@ func init() {
 	slingCmd.Flags().StringVar(&slingFormula, "formula", "", "Formula to apply (default: mol-polecat-work for polecat targets)")
 	slingCmd.Flags().StringVar(&slingCrew, "crew", "", "Target a crew member in the specified rig (e.g., --crew mel with target gastown → gastown/crew/mel)")
 	slingCmd.Flags().BoolVar(&slingReviewOnly, "review-only", false, "Mark work as review-only: assignee evaluates and reports back, must NOT merge/commit/push")
-	slingCmd.Flags().StringVar(&slingActor, "actor", "", "Override the actor recorded for this sling (e.g. daemon/convoy:<id>). Default: auto-detected from role. For system/daemon-originated dispatch that has no live agent role of its own.")
+	slingCmd.Flags().StringVar(&slingActor, "actor", "", "Override the actor recorded for this sling (e.g. daemon/spec-dispatch). Default: auto-detected from role. For system/daemon-originated dispatch that has no live agent role of its own.")
 
 	slingCmd.AddCommand(slingRespawnResetCmd)
 	rootCmd.AddCommand(slingCmd)
@@ -201,7 +201,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 }
 
 // run is one gt sling: it validates the request, routes it to the batch,
-// scheduler, formula, convoy or epic path, or dispatches a single bead
+// scheduler, formula or epic path, or dispatches a single bead
 // itself, rolling back a spawned polecat on every exit short of the commit
 // point.
 func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (retErr error) {
@@ -332,7 +332,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		if rigName, isRig := r.isRigName(lastArg); isRig {
 			beadIDs := args[:len(args)-1]
 			if deferred {
-				// Reject epic/convoy IDs in batch — they must be dispatched individually
+				// Reject container IDs in batch — they must be dispatched individually
 				for _, id := range beadIDs {
 					idType, typeErr := r.idType(id)
 					if typeErr == nil && idType != "task" {
@@ -426,7 +426,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	if deferred && len(args) == 2 {
 		rigName, isRig := r.isRigName(args[1])
 		if isRig {
-			// Reject epic/convoy IDs — they must be dispatched without a rig
+			// Reject container IDs — they must be dispatched without a rig
 			// (children auto-resolve their rigs)
 			idType, err := r.idType(args[0])
 			if err == nil && idType != "task" {

@@ -32,7 +32,7 @@ var readyCmd = &cobra.Command{
 	Long: `Display all ready work items across the town and all rigs.
 
 Aggregates ready issues from:
-- Town beads (hq-* items: convoys, cross-rig coordination)
+- Town beads (hq-* items: mail, cross-rig coordination)
 - Each rig's beads (project-level issues, MRs)
 
 Ready items have no blockers and can be worked immediately.

@@ -3077,14 +3077,14 @@ func (m *Manager) reuseTargetRefs(fields *beads.AgentFields, branch string) ([]s
 	}
 	if fields.LastSourceIssue != "" && fields.LastSourceIssue != fields.HookBead {
 		if issue, err := m.beads.Show(fields.LastSourceIssue); err == nil {
-			refs = append(refs, attachmentTargetRefs(m.beads, issue)...)
+			refs = append(refs, attachmentTargetRefs(issue)...)
 		} else {
 			lookupFailed = true
 		}
 	}
 	if fields.HookBead != "" {
 		if issue, err := m.beads.Show(fields.HookBead); err == nil {
-			refs = append(refs, attachmentTargetRefs(m.beads, issue)...)
+			refs = append(refs, attachmentTargetRefs(issue)...)
 		} else {
 			lookupFailed = true
 		}
@@ -3092,7 +3092,7 @@ func (m *Manager) reuseTargetRefs(fields *beads.AgentFields, branch string) ([]s
 	return uniqueRefs(refs), lookupFailed
 }
 
-func attachmentTargetRefs(bd IssueReader, issue *beads.Issue) []string {
+func attachmentTargetRefs(issue *beads.Issue) []string {
 	attachment := beads.ParseAttachmentFields(issue)
 	if attachment == nil {
 		return nil
@@ -3101,13 +3101,6 @@ func attachmentTargetRefs(bd IssueReader, issue *beads.Issue) []string {
 	appendBaseBranchRefs(&refs, attachment.FormulaVars)
 	for _, value := range attachment.AttachedVars {
 		appendBaseBranchRefs(&refs, value)
-	}
-	if attachment.ConvoyID != "" && bd != nil {
-		if convoy, err := bd.Show(attachment.ConvoyID); err == nil {
-			if fields := beads.ParseConvoyFields(convoy); fields != nil && fields.BaseBranch != "" {
-				refs = append(refs, fields.BaseBranch)
-			}
-		}
 	}
 	return refs
 }

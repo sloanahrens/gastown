@@ -599,7 +599,7 @@ func (s slingSeatSpawn) spawn(townRoot, rigName string, opts SlingSpawnOptions) 
 	// Polecat seat pool: the town's polecat_pool caps live polecats on its
 	// agent (see sling_pool.go). It is consulted on every spawn path, --agent
 	// included: an agent that names the pool's seat is admitted by its cap or
-	// refused, so the agent a convoy recorded at sling time can no longer spawn
+	// refused, so a requested agent can no longer spawn
 	// past a full pool (gt-4lbz). An agent the pool does not own leaves it with
 	// no opinion and the request stands. The reason line always names the agent
 	// the pool chose, and a pool whose seat is at its cap refuses the sling.

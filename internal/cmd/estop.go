@@ -37,8 +37,8 @@ var estopCmd = &cobra.Command{
 An E-stop writes a sentinel file at the town root (ESTOP, or ESTOP.<rig>
 with --rig). While it is present:
 
-  - nothing new is dispatched: the daemon's dispatchers (scheduler, convoy
-    feeder, scheduled slings, spec dispatcher, seat refill) hold, and
+  - nothing new is dispatched: the daemon's dispatchers (scheduler,
+    scheduled slings, spec dispatcher, seat refill) hold, and
     gt sling refuses to send work into a covered rig;
   - nothing is restarted or killed: the supervisor refuses every Restart
     and Kill for a covered seat, whoever asks;
