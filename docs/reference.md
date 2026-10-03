@@ -706,8 +706,9 @@ gt sling gt-abc <rig>                    # Assign to polecat
 gt sling gt-abc <rig> --agent claude-haiku  # Override the agent for this sling/spawn
 gt sling <proto> --on gt-def <rig>       # With workflow template
 
-# Quick sling (auto-creates convoy)
-gt sling <bead> <rig>                    # Auto-convoy for dashboard visibility
+# A sling does not create a convoy: the spec dispatcher is the only automatic
+# dispatcher, and a hand-slung bead is tracked by its own status and assignee.
+gt sling <bead> <rig>                    # Dispatch to a polecat in the rig
 ```
 
 Agent overrides:
