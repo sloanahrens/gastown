@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/dispatch"
 )
 
 // HostSafetyPrompt is the instruction every spec dispatch carries (stored as
@@ -15,7 +17,13 @@ const HostSafetyPrompt = "HOST SAFETY (spec dispatcher): any test of install or 
 	"INSTALL_DIR (mktemp -d) and never the real ~/.local/bin. Never run make install, gt dolt cleanup, " +
 	"or rm -rf outside your worktree on this host."
 
-// Labels that keep a bead away from the dispatcher whatever its lint says.
+// excludedLabels is the pre-filter the ready board is read with (`bd ready
+// --exclude-label`), so a bead the dispatcher would never take is not fetched
+// at all. It is not the dispatcher's verdict: the verdict is Eligible's, on the
+// full bead, and it reads every routing decision through the shared hold rule
+// (dispatch.DispatchHoldFields). A hold this list does not name — the operator
+// label, gt:needs-human, a ruling in prose — still stops the dispatcher there,
+// and every label it does name Eligible would have refused anyway (gt-lxxo4).
 var excludedLabels = []string{"gt:ready-to-land", "needs-human", "needs-mayor-review", DispatchFailedLabel}
 
 // ExcludedLabels returns the labels that keep a bead from the dispatcher.
@@ -56,17 +64,27 @@ const (
 // Eligible reports whether a ready bead is the dispatcher's to consider, and
 // why not when it is not. It is the candidate filter: status open, unassigned,
 // a work bead (not an epic, not a runtime family) of a dispatchable type
-// (task/bug/feature), at or above maxPriority's floor, and none of the
-// excluded labels or a deferred status. The label spec and type feature are
-// retired and accepted-but-ignored (gt-mmsr2), so neither gates a candidate:
-// the retired type name is not what admits a feature bead, the type whitelist
-// is. The shape lint runs later, on the full bead.
+// (task/bug/feature), at or above maxPriority's floor, carrying none of the
+// excluded labels, and asserting no hold on its own record
+// (dispatch.DispatchHoldFields): a bead parked for a person or by a ruling is a
+// skip here, not a sling the guard has to refuse every tick (gt-lxxo4). The
+// label spec and type feature are retired and accepted-but-ignored (gt-mmsr2),
+// so neither gates a candidate: the retired type name is not what admits a
+// feature bead, the type whitelist is. The shape lint runs later, on the full
+// bead.
 //
 // maxPriority is the operator's ceiling on a candidate's priority number
 // (polecat_pool.max_priority, default 2): a bead numbered higher is backlog the
 // operator keeps. A negative priority is an unscored bead, which is never
 // dispatched.
-func Eligible(s Spec, maxPriority int) (bool, string) {
+//
+// reserved names the labels this tick's seats reserve (Budget.ReservedLabels:
+// polecat_pool.pro_label, "needs-pro" by default). The shared hold rule counts
+// such a label as a hold, because a dispatcher with no seat for it must leave
+// the bead alone — but this dispatcher's reserved seat is the path that label
+// asks for, so a bead carrying one is routed there, not held (gt-lxxo4). Pass
+// nil when there is no such seat: then the rule's hold stands.
+func Eligible(s Spec, maxPriority int, reserved []string) (bool, string) {
 	status := strings.ToLower(strings.TrimSpace(s.Status))
 	switch {
 	case status == "deferred":
@@ -87,10 +105,46 @@ func Eligible(s Spec, maxPriority int) (bool, string) {
 			return false, "label " + l
 		}
 	}
+	// The shared hold rule, over the bead's own fields. A decision recorded
+	// there — a routing label, gt:needs-human (the spelling internal/land
+	// writes, and the one excludedLabels never carried), the operator's
+	// reservation, or a MAYOR DESIGN DECISION / do-not-redispatch ruling in
+	// design or notes — takes the bead off every automatic dispatch path, so
+	// the dispatcher must not re-sling it (gt-lxxo4). Reading the rule here is
+	// what keeps the dispatcher's draw and the sling guard's the same line.
+	// labels drops the seat-reserved ones, so a needs-pro bead reaches the pro
+	// seat instead of being held as the rule holds it for a dispatcher with no
+	// such seat.
+	labels := withoutLabels(s.Labels, reserved)
+	if why := dispatch.DispatchHoldFields(s.Status, labels, s.Assignee, s.Design, s.Notes); why != "" {
+		return false, "hold: " + why
+	}
 	if s.Priority < 0 || s.Priority > maxPriority {
 		return false, fmt.Sprintf("priority P%d outside the ceiling P%d", s.Priority, maxPriority)
 	}
 	return true, ""
+}
+
+// withoutLabels returns labels with every entry of drop removed, matching as
+// HasLabel does (case- and space-insensitive). The input is never modified.
+func withoutLabels(labels, drop []string) []string {
+	if len(drop) == 0 {
+		return labels
+	}
+	out := make([]string, 0, len(labels))
+	for _, l := range labels {
+		keep := true
+		for _, d := range drop {
+			if strings.EqualFold(strings.TrimSpace(l), strings.TrimSpace(d)) {
+				keep = false
+				break
+			}
+		}
+		if keep {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 // Order sorts candidates deterministically: priority (P0 first), then
@@ -181,6 +235,29 @@ func (b Budget) Picture() string {
 		return "no seats"
 	}
 	return strings.Join(parts, ", ")
+}
+
+// ReservedLabels returns the labels the seats reserve, in seat order and
+// without repeats: a bead carrying one belongs to that seat alone, and so is
+// routed rather than held when Eligible reads the shared hold rule over it.
+func (b Budget) ReservedLabels() []string {
+	var out []string
+	for _, s := range b.Seats {
+		if s.Label == "" {
+			continue
+		}
+		dup := false
+		for _, seen := range out {
+			if strings.EqualFold(seen, s.Label) {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			out = append(out, s.Label)
+		}
+	}
+	return out
 }
 
 // SetLive fills each seat's Live from a count per agent.

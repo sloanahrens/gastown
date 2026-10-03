@@ -53,9 +53,11 @@ decides and reports without slinging, labeling or commenting.
    parked or docked. Epics, agent beads, wisps, the other runtime families and
    the non-work types (`chore`, `docs`, ...) are never candidates, and the
    retired label `spec` and type `feature` are not required — the candidate
-   filter does not read them (gt-mmsr2). Beads labeled `gt:ready-to-land`,
-   `needs-human`, `needs-mayor-review` or `spec-dispatch-failed`, or deferred,
-   are skipped. Order is priority, then created_at, then id.
+   filter does not read them (gt-mmsr2). A bead held off the dispatch path is
+   skipped: labeled `gt:ready-to-land` or `spec-dispatch-failed`, or carrying a
+   dispatch hold. Before writing or reading either, read [Dispatch
+   holds](../concepts/dispatch-holds.md): it lists the markers and where each is
+   written. Order is priority, then created_at, then id.
 3. Each candidate is linted, and `polecat_pool.shape_gate` decides what the
    verdict does:
    - `off` runs no lint at all;

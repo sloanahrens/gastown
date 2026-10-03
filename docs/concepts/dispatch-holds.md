@@ -45,13 +45,14 @@ assignee, design and notes. Comments are not read — `bd show --json` omits the
 filters its candidates in `specdispatch.Eligible`
 (internal/specdispatch/dispatch.go): a bead is held when its status is not
 `open` (so `deferred`, `pinned`, `hooked` and `in_progress`), when it carries
-any assignee, or when it wears `gt:ready-to-land`, `needs-human`,
-`needs-mayor-review`, `spec-dispatch-failed`, or a runtime-family label. Two
-markers diverge from the table above, and both are open (gt-lxxo4): the
-`operator` label on an unassigned bead is caught only later by `gt sling`'s
-refusal, and `gt:needs-human` — the spelling the landing worker writes — is not
-held at all. `needs-pro` is not a hold here either: it routes the bead to the
-seat that reserves that label. Design and notes prose is not read.
+any assignee, when it wears `gt:ready-to-land`, `spec-dispatch-failed` or a
+runtime-family label, or when `dispatch.DispatchHoldFields` asserts a hold on
+its fields — the table above, read rather than copied (gt-lxxo4).
+
+One marker in that table is not a hold here: `needs-pro` is the pro seat's
+selector (`polecat_pool.pro_label`), so it routes the bead to the seat that
+reserves it. `Eligible` reads the rule with the seat labels dropped, which
+means a `needs-pro` bead is held once no seat reserves the label.
 
 **Idle-seat nudge.** `gt daemon dispatch-check` counts the ready beads the mayor
 could sling and skips any that `dispatch.OperatorReservation` names

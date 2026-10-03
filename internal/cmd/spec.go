@@ -422,7 +422,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			continue
 		}
 		// The ready board is a snapshot; re-check the fresh bead.
-		if ok, why := specdispatch.Eligible(full, env.MaxPriority); !ok {
+		if ok, why := specdispatch.Eligible(full, env.MaxPriority, budget.ReservedLabels()); !ok {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: not eligible (%s)", id, why)})
 			continue
 		}
@@ -811,12 +811,15 @@ func runSpecDispatch(cmd *cobra.Command, _ []string) error {
 	}
 	maxPriority := ts.PolecatPool.GetMaxPriority()
 
+	budget := specBudgetFromConfig(ts, sd)
 	env := specDispatchEnv{
-		Hold:       func() string { return dispatch.OperatorHold(townRoot) },
-		Candidates: func() specBoardRead { return specCandidates(townRoot, maxPriority, specReadyBoard) },
-		Show:       func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) },
-		Children:   func(id string) ([]specdispatch.Child, error) { return specChildren(townRoot, id) },
-		RigHold:    func(rig string) string { return dispatch.RigHold(townRoot, rig) },
+		Hold: func() string { return dispatch.OperatorHold(townRoot) },
+		Candidates: func() specBoardRead {
+			return specCandidates(townRoot, maxPriority, specReadyBoard, budget.ReservedLabels())
+		},
+		Show:     func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) },
+		Children: func(id string) ([]specdispatch.Child, error) { return specChildren(townRoot, id) },
+		RigHold:  func(rig string) string { return dispatch.RigHold(townRoot, rig) },
 		RevertInFlight: func(rig string) *specdispatch.Revert {
 			return rigRevertInFlightPinned(townRoot, rig)
 		},
@@ -842,7 +845,7 @@ func runSpecDispatch(cmd *cobra.Command, _ []string) error {
 		Sleep:    time.Sleep,
 		Now:      time.Now,
 		Template: specdispatch.LoadTemplate(tmplPath),
-		Budget:   specBudgetFromConfig(ts, sd),
+		Budget:   budget,
 		PerTick:  perTick,
 		DryRun:   specDispatchDryRun,
 
@@ -966,8 +969,10 @@ type specBoardRead struct {
 // specCandidates reads every operational rig's ready work beads and keeps the
 // eligible ones, ordered across rigs. A rig whose board cannot be read is
 // reported and skipped; the rest still dispatch. maxPriority is the operator's
-// ceiling on a candidate's priority number.
-func specCandidates(townRoot string, maxPriority int, board specBoard) specBoardRead {
+// ceiling on a candidate's priority number, and reserved the labels the tick's
+// seats reserve — the same pair the per-candidate re-check uses, so a bead the
+// seats route is not dropped here before it can reach them.
+func specCandidates(townRoot string, maxPriority int, board specBoard, reserved []string) specBoardRead {
 	var read specBoardRead
 	names, err := knownRigNames(townRoot)
 	if err != nil {
@@ -1004,7 +1009,7 @@ func specCandidates(townRoot string, maxPriority int, board specBoard) specBoard
 			}
 			// The ready board is a snapshot: the full bead is re-read before
 			// any decision.
-			if ok, _ := specdispatch.Eligible(s, maxPriority); !ok {
+			if ok, _ := specdispatch.Eligible(s, maxPriority, reserved); !ok {
 				continue
 			}
 			if _, dup := rigOf[s.ID]; dup {
