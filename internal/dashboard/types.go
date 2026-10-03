@@ -225,6 +225,7 @@ type State struct {
 	Spend     json.RawMessage `json:"spend,omitempty"`
 	OM        *OM             `json:"om,omitempty"`
 	Dispatch  *Dispatch       `json:"dispatch,omitempty"`
+	Queue     *Queue          `json:"queue,omitempty"`
 }
 
 // Config wires the hub to its readers. Every reader is optional; a nil reader
@@ -245,6 +246,9 @@ type Config struct {
 	OM func() *OM
 	// Dispatch reads the spec dispatcher's last tick from the daemon log.
 	Dispatch func() *Dispatch
+	// Queue reads the work queue lists; Bead reads one bead's text on request.
+	Queue func() *Queue
+	Bead  func(rig, id string) (*BeadDetail, error)
 
 	Now func() time.Time
 
@@ -255,6 +259,7 @@ type Config struct {
 	SpendEvery    time.Duration
 	OMEvery       time.Duration
 	DispatchEvery time.Duration
+	QueueEvery    time.Duration
 
 	RingSize int // feed entries kept for a page that connects late
 }
@@ -275,6 +280,7 @@ func (c *Config) defaults() {
 	def(&c.SpendEvery, 5*time.Minute)
 	def(&c.OMEvery, 60*time.Second)
 	def(&c.DispatchEvery, 10*time.Second)
+	def(&c.QueueEvery, 60*time.Second)
 	if c.RingSize <= 0 {
 		c.RingSize = 500
 	}

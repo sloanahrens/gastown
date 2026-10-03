@@ -29,6 +29,9 @@ type Hub struct {
 	// wake nudges every worker when a page connects after an idle spell, so
 	// the first page does not wait out a whole interval for fresh data.
 	wake chan struct{}
+
+	detailMu    sync.Mutex
+	detailCache map[string]detailEntry
 }
 
 // Sub is one open page.
@@ -82,6 +85,9 @@ func (h *Hub) Run(ctx context.Context) {
 	}
 	if h.cfg.Dispatch != nil {
 		start(h.cfg.DispatchEvery, h.pollDispatch)
+	}
+	if h.cfg.Queue != nil {
+		start(h.cfg.QueueEvery, h.pollQueue)
 	}
 	wg.Wait()
 }
@@ -247,6 +253,17 @@ func (h *Hub) pollDispatch() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.Dispatch = d
+	h.publishLocked()
+}
+
+func (h *Hub) pollQueue() {
+	q := h.cfg.Queue()
+	if q == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.state.Queue = q
 	h.publishLocked()
 }
 
