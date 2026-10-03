@@ -3,10 +3,13 @@ package beads
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
 )
@@ -477,6 +480,112 @@ func TestEnsureCustomTypes(t *testing.T) {
 
 		if err := EnsureCustomTypes(beadsDir); err != nil {
 			t.Errorf("expected cache hit, got: %v", err)
+		}
+	})
+}
+
+// swapBDConfigExec installs fn as the bd config executor and returns a
+// function restoring the previous one. The fake sees the prepared *exec.Cmd,
+// so it can key on cmd.Dir and count invocations.
+func swapBDConfigExec(fn func(cmd *exec.Cmd) ([]byte, error)) func() {
+	prev := bdConfigExecFn
+	bdConfigExecFn = fn
+	return func() { bdConfigExecFn = prev }
+}
+
+// TestEnsureCustomTypes_LockNarrowed pins the scheduling contract of the
+// type-config cache (gt-ik4a1.4.11): the lock covers one beads dir at a time
+// rather than the whole process, so dirs set up in parallel no longer queue
+// behind each other's bd config subprocesses — while two calls for the same
+// dir still run that bd config work exactly once.
+//
+// The fake bd config runner blocks on channels (no sleeps) and the timeouts
+// below are deadlock guards that only fire when the old process-wide
+// serialization is back.
+func TestEnsureCustomTypes_LockNarrowed(t *testing.T) {
+	t.Run("different dirs overlap", func(t *testing.T) {
+		installMockBDRecorder(t)
+		dirA := filepath.Join(t.TempDir(), ".beads")
+		writeNamedBeadsWorkspace(t, dirA)
+		dirB := filepath.Join(t.TempDir(), ".beads")
+		writeNamedBeadsWorkspace(t, dirB)
+		ResetEnsuredDirs()
+		t.Cleanup(ResetEnsuredDirs)
+
+		var once sync.Once
+		inDirA := make(chan struct{})
+		release := make(chan struct{})
+		defer swapBDConfigExec(func(cmd *exec.Cmd) ([]byte, error) {
+			if cmd.Dir == dirA {
+				once.Do(func() { close(inDirA) })
+				<-release
+			}
+			return nil, nil
+		})()
+
+		doneA := make(chan error, 1)
+		go func() { doneA <- EnsureCustomTypes(dirA) }()
+
+		select {
+		case <-inDirA:
+		case <-time.After(30 * time.Second):
+			t.Fatal("dirA never reached its bd config work")
+		}
+
+		doneB := make(chan error, 1)
+		go func() { doneB <- EnsureCustomTypes(dirB) }()
+		select {
+		case err := <-doneB:
+			if err != nil {
+				t.Fatalf("EnsureCustomTypes(dirB): %v", err)
+			}
+		case <-time.After(30 * time.Second):
+			close(release)
+			t.Fatal("dirB's setup blocked while dirA held its lock: dirs are serialized process-wide again")
+		}
+
+		close(release)
+		if err := <-doneA; err != nil {
+			t.Fatalf("EnsureCustomTypes(dirA): %v", err)
+		}
+	})
+
+	t.Run("same dir runs the bd config work once", func(t *testing.T) {
+		installMockBDRecorder(t)
+		beadsDir := filepath.Join(t.TempDir(), ".beads")
+		writeNamedBeadsWorkspace(t, beadsDir)
+		ResetEnsuredDirs()
+		t.Cleanup(ResetEnsuredDirs)
+
+		var mu sync.Mutex
+		calls := 0
+		defer swapBDConfigExec(func(*exec.Cmd) ([]byte, error) {
+			mu.Lock()
+			calls++
+			mu.Unlock()
+			return nil, nil
+		})()
+
+		const callers = 8
+		start := make(chan struct{})
+		done := make(chan error, callers)
+		for i := 0; i < callers; i++ {
+			go func() {
+				<-start
+				done <- EnsureCustomTypes(beadsDir)
+			}()
+		}
+		close(start)
+		for i := 0; i < callers; i++ {
+			if err := <-done; err != nil {
+				t.Fatalf("EnsureCustomTypes: %v", err)
+			}
+		}
+
+		// One full bd config work is types.custom plus types.infra. A narrowing
+		// that dropped the under-lock fast-path re-check would run 2 per caller.
+		if calls != 2 {
+			t.Fatalf("bd config calls for one dir = %d, want 2 (the config work ran exactly once)", calls)
 		}
 	})
 }
