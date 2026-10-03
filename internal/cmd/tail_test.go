@@ -393,3 +393,36 @@ func TestTailSummaryTracker_KeepsTheLineInsideTheTerminal(t *testing.T) {
 		t.Fatalf("summary is %d runes wide: %q", w, line.Text)
 	}
 }
+
+// TestRenderLine_NewAnnotations: the plain default view prints a comment's text
+// and a submitted line after the record, the verdict wins over either, and
+// --verbose and --iso keep the line as it was (gt-vxr95).
+func TestRenderLine_NewAnnotations(t *testing.T) {
+	t.Parallel()
+	comment := tailLine{At: at("2026-09-30T13:50:00Z"), Rig: "gastown", Kind: tailKindEvents,
+		Text: "comment gt-1 actor=sloan", Comment: "pushed: crew/x at 9f4171a4"}
+	submit := tailLine{At: at("2026-09-30T13:51:00Z"), Rig: "gastown", Kind: tailKindEvents,
+		Text: "update gt-2 status=open actor=opal", Submit: "submitted gt-2 @ abcdef1 for landing"}
+	plain := tailView{Loc: tailTestLoc, Layout: tailClockLayout, Trim: true, newAnnotations: true}
+	if got := plain.renderLine(comment); got != "08:50:00 gastown comment gt-1 actor=sloan · pushed: crew/x at 9f4171a4" {
+		t.Errorf("comment line = %q", got)
+	}
+	if got := plain.renderLine(submit); got != "08:51:00 gastown update gt-2 status=open actor=opal · submitted gt-2 @ abcdef1 for landing" {
+		t.Errorf("submit line = %q", got)
+	}
+	verdict := comment
+	verdict.Verdict = "OVERSEER REVIEW aaaa PASS"
+	if got := plain.renderLine(verdict); !strings.Contains(got, "OVERSEER REVIEW aaaa PASS") || strings.Contains(got, "pushed:") {
+		t.Errorf("a verdict must win over the comment text: %q", got)
+	}
+	// --verbose keeps every raw line: the annotations are the plain view's.
+	raw := tailView{Loc: tailTestLoc, Layout: tailClockLayout, FullSource: true}
+	if got := raw.renderLine(comment); got != "08:50:00 gastown events comment gt-1 actor=sloan" {
+		t.Errorf("--verbose comment = %q", got)
+	}
+	// --iso keeps today's line: it is not the plain view.
+	iso := tailView{Loc: tailTestLoc, Layout: time.RFC3339, Trim: true}
+	if got := iso.renderLine(comment); strings.Contains(got, "pushed:") {
+		t.Errorf("--iso must not print the comment text: %q", got)
+	}
+}

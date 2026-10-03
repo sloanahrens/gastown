@@ -226,12 +226,14 @@ type eventsSource struct {
 	pageSize int
 	beads    *tailBeads // the run's bead reads; nil prints no title and no verdict
 
-	// pollIssues and shownVerdicts are the verdict read's two bounds. One bd
-	// show per bead per poll answers every record that bead wrote, and a
-	// verdict already shown is not shown again however often the bead is
+	// pollIssues and the shown* maps are the annotation reads' bounds. One bd
+	// show per bead per poll answers every record that bead wrote, and a piece
+	// of text already shown is not shown again however often the bead is
 	// rewritten (a rejection is re-recorded as the rework is retried).
 	pollIssues    map[string]*beads.Issue
 	shownVerdicts map[string]string
+	shownComments map[string]string
+	shownSubmits  map[string]string
 
 	configChecked bool
 	// backlogDone is set by the first read that reaches the journal's head;
@@ -261,14 +263,7 @@ func (s *eventsSource) verdictText(op, id string) string {
 	if s.beads == nil || !tailVerdictOp(op) || isWispID(id) || isPolecatAgentBead(id) {
 		return ""
 	}
-	if s.pollIssues == nil {
-		s.pollIssues = map[string]*beads.Issue{}
-	}
-	issue, ok := s.pollIssues[id]
-	if !ok {
-		issue = s.beads.issue(s.rig, id)
-		s.pollIssues[id] = issue
-	}
+	issue := s.pollIssue(id)
 	if issue == nil {
 		return ""
 	}
@@ -281,6 +276,88 @@ func (s *eventsSource) verdictText(op, id string) string {
 	}
 	s.shownVerdicts[id] = text
 	return text
+}
+
+// commentText is the bead's newest comment, cut to the length the plain default
+// view prints, "" when the bead has none, the comment is empty, or this run
+// already showed that text. A comment opening with a review marker is the
+// verdict's, not this one's.
+func (s *eventsSource) commentText(id string) string {
+	if s.beads == nil || isWispID(id) || isPolecatAgentBead(id) {
+		return ""
+	}
+	issue := s.pollIssue(id)
+	if issue == nil || len(issue.Comments) == 0 {
+		return ""
+	}
+	text := tailCommentText(issue.Comments[len(issue.Comments)-1].Text)
+	if text == "" || s.shownComments[id] == text {
+		return ""
+	}
+	if s.shownComments == nil {
+		s.shownComments = map[string]string{}
+	}
+	s.shownComments[id] = text
+	return text
+}
+
+// submitText is the "submitted <bead> @ <sha> for landing" line a polecat's gt
+// done leaves on its work bead: the READY TO LAND block it wrote, "" when the
+// bead carries none or this run already showed that head. The ready-to-land
+// label has to be present too: a landing removes it when it takes the bead, so
+// an update after the landing does not reprint a submission that is over.
+func (s *eventsSource) submitText(id string) string {
+	if s.beads == nil || isWispID(id) || isPolecatAgentBead(id) {
+		return ""
+	}
+	issue := s.pollIssue(id)
+	if issue == nil {
+		return ""
+	}
+	w, err := land.WorkFromBead(issue, s.rig)
+	if err != nil || w.Head == "" {
+		return ""
+	}
+	text := fmt.Sprintf("submitted %s @ %s for landing", id, tailSHA7(w.Head))
+	if s.shownSubmits[id] == text {
+		return ""
+	}
+	if s.shownSubmits == nil {
+		s.shownSubmits = map[string]string{}
+	}
+	s.shownSubmits[id] = text
+	return text
+}
+
+// pollIssue reads one bead once per poll, for every annotation the poll's
+// records ask of it. A poll is sequential, so the map needs no lock.
+func (s *eventsSource) pollIssue(id string) *beads.Issue {
+	if s.pollIssues == nil {
+		s.pollIssues = map[string]*beads.Issue{}
+	}
+	issue, ok := s.pollIssues[id]
+	if !ok {
+		issue = s.beads.issue(s.rig, id)
+		s.pollIssues[id] = issue
+	}
+	return issue
+}
+
+// tailCommentWidth is how much of a comment the plain default view prints.
+const tailCommentWidth = 60
+
+// tailCommentText cuts a comment to the first tailCommentWidth characters for
+// the default view's annotation.
+func tailCommentText(text string) string {
+	return tailTruncateRunes(strings.TrimSpace(text), tailCommentWidth)
+}
+
+// tailSHA7 is the short commit a submitted line names.
+func tailSHA7(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
 }
 
 func (s *eventsSource) Poll() []tailLine {
@@ -352,6 +429,17 @@ func (s *eventsSource) Poll() []tailLine {
 			}
 			line := s.line(at, "%s", text)
 			line.Verdict = s.verdictText(r.Op, r.IssueID)
+			if line.Verdict == "" {
+				// The verdict is the more specific of the two, so a comment
+				// that carries one does not also print its own text, and a
+				// rejection does not also print as submitted.
+				switch r.Op {
+				case "comment":
+					line.Comment = s.commentText(r.IssueID)
+				case "update":
+					line.Submit = s.submitText(r.IssueID)
+				}
+			}
 			out = append(out, line)
 		}
 		advanced := page.NextSince > s.since

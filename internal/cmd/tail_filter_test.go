@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -651,6 +652,37 @@ func TestTailDefaultView_DropsRepeatsAndKeepsReportingLines(t *testing.T) {
 		t.Fatalf("the default view prints %d lines where the routine filter alone printed %d; want fewer",
 			afterCount, beforeCount)
 	}
+	// The sample's run of one bead's status updates, written within a minute,
+	// folds to one line carrying the last status and the count (gt-vxr95).
+	var foldedRun bool
+	for _, l := range newTailView(tailTestLoc, tailViewOptions{}).foldUpdates(lines, true) {
+		if l.Text == "update gt-ufjol status=open actor=gastown/polecats/malachite seq=6935 (×3)" {
+			foldedRun = true
+		}
+		if strings.Contains(l.Text, "update gt-ufjol ") && strings.Contains(l.Text, "seq=6933") {
+			t.Errorf("the first update of the run printed on its own: %q", l.Text)
+		}
+	}
+	if !foldedRun {
+		t.Error("the sample's update run did not fold into one line carrying the last status and the count")
+	}
+	// The sample's repeated spec tick folds; the tick that dispatched shows.
+	show := newTailView(tailTestLoc, tailViewOptions{}).Show
+	var ticks []string
+	for _, l := range lines {
+		if !strings.HasPrefix(l.Text, "spec_dispatch: tick:") {
+			continue
+		}
+		if _, ok := show(l); ok {
+			ticks = append(ticks, l.Text)
+		}
+	}
+	if len(ticks) != 2 {
+		t.Fatalf("the sample's ticks printed %d lines, want 2: one quiet tick folds, the dispatching one shows: %q", len(ticks), ticks)
+	}
+	if !strings.Contains(ticks[0], "0 dispatched") || !strings.Contains(ticks[1], "1 dispatched") {
+		t.Fatalf("the surviving ticks = %q", ticks)
+	}
 	// The lines that report something must survive: nothing here is routine.
 	for _, l := range lines {
 		if !strings.Contains(l.Text, "landed ") && !strings.Contains(l.Text, "escalat") && !strings.Contains(l.Text, "rejection") {
@@ -659,5 +691,159 @@ func TestTailDefaultView_DropsRepeatsAndKeepsReportingLines(t *testing.T) {
 		if _, ok := newTailView(tailTestLoc, tailViewOptions{}).Show(l); !ok {
 			t.Fatalf("a reporting line was hidden: %q", l.Text)
 		}
+	}
+}
+
+// TestTailSpecTickLatch_FoldsARepeatedTick: the dispatcher rewrites the same
+// tick every few seconds when nothing moved. An identical tick folds; one whose
+// counts moved, and one that dispatched a bead, show — and become the tick a
+// later repeat is measured against (gt-vxr95).
+func TestTailSpecTickLatch_FoldsARepeatedTick(t *testing.T) {
+	t.Parallel()
+	const (
+		quiet      = "spec_dispatch: tick: 4 candidate(s), roster deepseek-flash 0/3, 0 dispatched, 0 refused, 0 planning, 4 skipped, 0 failed, 0 held by the failed label; skipped: gt-a (unshaped: ## Gate)"
+		moreWork   = "spec_dispatch: tick: 5 candidate(s), roster deepseek-flash 0/3, 0 dispatched, 0 refused, 0 planning, 5 skipped, 0 failed, 0 held by the failed label; skipped: gt-a (unshaped: ## Gate); gt-b (no seat: claude-sonnet 2/2)"
+		dispatched = "spec_dispatch: tick: 5 candidate(s), roster deepseek-flash 1/3, 2 dispatched, 0 refused, 0 planning, 3 skipped, 0 failed, 0 held by the failed label"
+	)
+	latch := &tailSpecTickLatch{}
+	if !latch.visible(quiet) {
+		t.Fatal("the first tick must show")
+	}
+	if latch.visible(quiet) {
+		t.Error("an identical tick must fold")
+	}
+	if !latch.visible(moreWork) {
+		t.Error("a tick whose counts moved must show")
+	}
+	if latch.visible(moreWork) {
+		t.Error("the changed tick repeated must fold")
+	}
+	if !latch.visible(dispatched) {
+		t.Error("a tick that dispatched must show")
+	}
+	if !latch.visible(dispatched) {
+		t.Error("a tick that dispatched must always show, even repeated")
+	}
+	if !latch.visible(quiet) {
+		t.Error("a tick differing from the last shown tick must show")
+	}
+	if !latch.visible("spec_dispatch: warning: gt-a unshaped: ## Gate") {
+		t.Error("a warning is not a tick; it passes the latch")
+	}
+	if !latch.visible("Heartbeat complete (#531)") {
+		t.Error("a line that is not a spec_dispatch tick passes the latch")
+	}
+}
+
+// TestTailDefaultFilter_FoldsTicksOnlyInThePlainView: the tick latch belongs to
+// the plain default view; --iso keeps every tick.
+func TestTailDefaultFilter_FoldsTicksOnlyInThePlainView(t *testing.T) {
+	t.Parallel()
+	const tick = "spec_dispatch: tick: 4 candidate(s), roster deepseek-flash 0/3, 0 dispatched, 0 refused, 0 planning, 4 skipped, 0 failed, 0 held by the failed label"
+	dm := func(ts string) tailLine {
+		return tailLine{At: at(ts), Rig: "town", Kind: tailKindDaemon, Text: tick}
+	}
+	f := &tailDefaultFilter{foldTicks: true}
+	if _, ok := f.visible(dm("2026-09-30T13:50:00Z")); !ok {
+		t.Fatal("the first tick must show")
+	}
+	if _, ok := f.visible(dm("2026-09-30T13:50:05Z")); ok {
+		t.Error("the repeated tick must fold")
+	}
+	iso := &tailDefaultFilter{foldTicks: false}
+	if _, ok := iso.visible(dm("2026-09-30T13:50:00Z")); !ok {
+		t.Fatal("the first tick must show")
+	}
+	if _, ok := iso.visible(dm("2026-09-30T13:50:05Z")); !ok {
+		t.Error("--iso must keep every tick")
+	}
+}
+
+// TestTailUpdateCollapse_FoldsOneBeadsRun: a polecat rewrites its bead's status
+// every few seconds, so a run folds into one line carrying the last status and
+// the count. A run of one, a gap over the window, and another bead do not fold.
+func TestTailUpdateCollapse_FoldsOneBeadsRun(t *testing.T) {
+	t.Parallel()
+	ev := func(ts, text string) tailLine {
+		return tailLine{At: at(ts), Rig: "gastown", Kind: tailKindEvents, Text: text}
+	}
+	c := &tailUpdateCollapse{window: tailUpdateWindow, now: fixedNow}
+	out := c.fold([]tailLine{
+		ev("2026-09-30T13:50:00Z", "update gt-1 status=in_progress actor=opal seq=1"),
+		ev("2026-09-30T13:50:05Z", "update gt-1 status=in_progress actor=opal seq=2"),
+		ev("2026-09-30T13:50:10Z", "update gt-1 status=open actor=opal seq=3"),
+		ev("2026-09-30T13:51:11Z", "update gt-1 status=in_progress actor=opal seq=4"),
+		ev("2026-09-30T13:51:20Z", "update gt-2 status=open actor=opal seq=5"),
+		ev("2026-09-30T13:51:21Z", "close gt-2 status=closed actor=opal seq=6"),
+	}, true)
+	want := []string{
+		"update gt-1 status=open actor=opal seq=3 (×3)",
+		"update gt-1 status=in_progress actor=opal seq=4",
+		"update gt-2 status=open actor=opal seq=5",
+		"close gt-2 status=closed actor=opal seq=6",
+	}
+	var got []string
+	for _, l := range out {
+		got = append(got, l.Text)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("folded =\n%q\nwant\n%q", got, want)
+	}
+	if !out[0].At.Equal(at("2026-09-30T13:50:10Z")) {
+		t.Errorf("a run prints at its last update; got %v", out[0].At)
+	}
+	// A line the view hides is passed through, not folded into a run.
+	hidden := c.fold([]tailLine{
+		ev("2026-09-30T13:52:00Z", "update gt-wisp-a status=open actor=daemon seq=7"),
+		ev("2026-09-30T13:52:01Z", "update gt-wisp-a status=open actor=daemon seq=8"),
+	}, true)
+	if len(hidden) != 2 || hidden[0].Text != "update gt-wisp-a status=open actor=daemon seq=7" {
+		t.Fatalf("a hidden line must not fold: %v", tailTextsOf(hidden))
+	}
+}
+
+// tailTextsOf is the Text of each line, for a failure message.
+func tailTextsOf(lines []tailLine) []string {
+	out := make([]string, 0, len(lines))
+	for _, l := range lines {
+		out = append(out, l.Text)
+	}
+	return out
+}
+
+// TestTailUpdateCollapse_HoldsTheTrailingRun: the batch's last run is held so it
+// keeps folding across polls, and prints when it goes quiet or the stream ends.
+func TestTailUpdateCollapse_HoldsTheTrailingRun(t *testing.T) {
+	t.Parallel()
+	ev := func(ts, text string) tailLine {
+		return tailLine{At: at(ts), Rig: "gastown", Kind: tailKindEvents, Text: text}
+	}
+	now := tailNow
+	c := &tailUpdateCollapse{window: tailUpdateWindow, now: func() time.Time { return now }}
+	if got := c.fold([]tailLine{ev("2026-09-30T13:50:00Z", "update gt-1 status=in_progress actor=opal seq=1")}, false); len(got) != 0 {
+		t.Fatalf("a trailing run must be held, got %v", tailTextsOf(got))
+	}
+	now = at("2026-09-30T13:50:20Z")
+	if got := c.fold([]tailLine{ev("2026-09-30T13:50:10Z", "update gt-1 status=open actor=opal seq=2")}, false); len(got) != 0 {
+		t.Fatalf("a continued run stays held, got %v", tailTextsOf(got))
+	}
+	if got := c.drain(); len(got) != 0 {
+		t.Fatalf("a live run must not drain, got %v", tailTextsOf(got))
+	}
+	now = at("2026-09-30T13:51:11Z")
+	got := c.drain()
+	if len(got) != 1 || got[0].Text != "update gt-1 status=open actor=opal seq=2 (×2)" {
+		t.Fatalf("a quiet run drains as %v", tailTextsOf(got))
+	}
+	if got := c.drain(); len(got) != 0 {
+		t.Fatalf("a drained run must not drain twice: %v", tailTextsOf(got))
+	}
+	// final prints the trailing run in its own place.
+	held := c.fold([]tailLine{ev("2026-09-30T13:52:00Z", "update gt-2 status=open actor=opal seq=3")}, false)
+	if len(held) != 0 {
+		t.Fatalf("held = %v", tailTextsOf(held))
+	}
+	if got := c.fold(nil, true); len(got) != 1 || got[0].Text != "update gt-2 status=open actor=opal seq=3" {
+		t.Fatalf("final must print the trailing run, got %v", tailTextsOf(got))
 	}
 }

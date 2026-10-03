@@ -13,7 +13,13 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/land"
 )
+
+// tailTickQuiet is a spec-dispatch tick with nothing to do, matching the
+// daemon's own line. The default view folds a repeat of it; --verbose keeps
+// both (gt-vxr95).
+const tailTickQuiet = "spec_dispatch: tick: 4 candidate(s), roster deepseek-flash 0/3, 0 dispatched, 0 refused, 0 planning, 4 skipped, 0 failed, 0 held by the failed label; skipped: gt-a (unshaped: ## Gate)"
 
 // scriptedTailSource returns one scripted batch per poll, then nothing.
 type scriptedTailSource struct {
@@ -39,6 +45,8 @@ func TestRunTailStream_GoldenMergedStream(t *testing.T) {
 	gastownEvents := &scriptedTailSource{batches: [][]tailLine{{
 		ev("2026-09-30T14:00:00Z", "gastown", "journal off in config (events-journal=false): nothing is journaled"),
 		ev("2026-09-30T13:50:00Z", "gastown", "update gt-1 status=in_progress actor=gastown/polecats/opal seq=2"),
+		ev("2026-09-30T13:50:30Z", "gastown", "update gt-1 status=open actor=gastown/polecats/opal seq=4"),
+		ev("2026-09-30T13:51:00Z", "gastown", "comment gt-1 actor=sloan seq=5"),
 		ev("2026-09-30T13:52:00Z", "gastown", "close gt-1 status=closed actor=gastown/polecats/opal seq=3"),
 	}}}
 	gastownLandings := &scriptedTailSource{batches: [][]tailLine{{
@@ -49,6 +57,8 @@ func TestRunTailStream_GoldenMergedStream(t *testing.T) {
 	daemon := &scriptedTailSource{batches: [][]tailLine{{
 		{At: at("2026-09-30T13:51:00Z"), Rig: "town", Kind: tailKindDaemon, Text: "Convoy: close detected: gt-1 (from gastown)"},
 		{At: at("2026-09-30T13:51:00Z"), Rig: "town", Kind: tailKindDaemon, Text: "  continuation of the convoy line"},
+		{At: at("2026-09-30T13:57:00Z"), Rig: "town", Kind: tailKindDaemon, Text: tailTickQuiet},
+		{At: at("2026-09-30T13:57:05Z"), Rig: "town", Kind: tailKindDaemon, Text: tailTickQuiet},
 	}}}
 
 	var buf bytes.Buffer
@@ -272,5 +282,81 @@ func TestBuildTailSources_WatchIsTownWide(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("--rig gastown built %d watch sources; want 1", n)
+	}
+}
+
+// TestRunTailStream_DefaultViewGolden: the plain default view folds the churn
+// each rule names — one bead's repeated status updates, a repeated spec tick —
+// and prints what the rules add: a comment's first 60 characters and a
+// submitted-for-landing line. The same records under --verbose are
+// testdata/tail_golden.txt's concern (gt-vxr95).
+func TestRunTailStream_DefaultViewGolden(t *testing.T) {
+	t.Parallel()
+	store := &fakeTailStore{issues: map[string]*beads.Issue{
+		"gt-1": {ID: "gt-1", Title: "one line per thing that happened", Comments: []beads.Comment{{Text: "pushed: crew/x at 9f4171a4"}}},
+		"gt-2": {ID: "gt-2", Title: "the submitted bead", Labels: []string{land.LabelReadyToLand}, Notes: "READY TO LAND\nBranch: polecat/opal/gt-2\nHead: abcdef1234567890\nTarget: main\nWorker: gastown/polecats/opal\n"},
+		"gt-3": {ID: "gt-3", Title: "a reviewed bead", Comments: []beads.Comment{{Text: "OVERSEER REVIEW aaaa PASS: reads well"}}},
+		"gt-4": {ID: "gt-4", Title: "a fresh bead"},
+	}}
+	j := &fakeTailJournal{config: "true", records: []beads.EventRecord{
+		{Seq: 1, TS: "2026-09-30T13:50:00Z", Op: "update", IssueID: "gt-1", Actor: "gastown/polecats/opal", Status: "in_progress"},
+		{Seq: 2, TS: "2026-09-30T13:50:05Z", Op: "update", IssueID: "gt-1", Actor: "gastown/polecats/opal", Status: "in_progress"},
+		{Seq: 3, TS: "2026-09-30T13:50:10Z", Op: "update", IssueID: "gt-1", Actor: "gastown/polecats/opal", Status: "open"},
+		{Seq: 4, TS: "2026-09-30T13:51:00Z", Op: "comment", IssueID: "gt-1", Actor: "sloan"},
+		{Seq: 5, TS: "2026-09-30T13:52:00Z", Op: "comment", IssueID: "gt-3", Actor: "steward"},
+		{Seq: 6, TS: "2026-09-30T13:53:00Z", Op: "update", IssueID: "gt-2", Actor: "gastown/polecats/quartz", Status: "open"},
+		{Seq: 7, TS: "2026-09-30T13:53:30Z", Op: "create", IssueID: "gt-4", Actor: "sloan", Status: "open"},
+	}}
+	events := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: newTailBeads(store.show)}
+	const tickDispatched = "spec_dispatch: tick: 4 candidate(s), roster deepseek-flash 1/3, 1 dispatched, 0 refused, 0 planning, 3 skipped, 0 failed, 0 held by the failed label; skipped: gt-a (unshaped: ## Gate)"
+	daemon := &scriptedTailSource{batches: [][]tailLine{{
+		{At: at("2026-09-30T13:54:00Z"), Rig: "town", Kind: tailKindDaemon, Text: tailTickQuiet},
+		{At: at("2026-09-30T13:54:05Z"), Rig: "town", Kind: tailKindDaemon, Text: tailTickQuiet},
+		{At: at("2026-09-30T13:54:10Z"), Rig: "town", Kind: tailKindDaemon, Text: tickDispatched},
+		{At: at("2026-09-30T13:54:12Z"), Rig: "town", Kind: tailKindDaemon, Text: "Heartbeat complete (#531)"},
+	}}}
+
+	var buf bytes.Buffer
+	view := newTailView(tailTestLoc, tailViewOptions{beads: newTailBeads(store.show), now: fixedNow})
+	if err := runTailStream(context.Background(), &buf, []tailSource{events, daemon}, nil, false, nil, view, nil); err != nil {
+		t.Fatal(err)
+	}
+	golden, err := os.ReadFile(filepath.Join("testdata", "tail_default_golden.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if buf.String() != string(golden) {
+		t.Fatalf("default view differs from testdata/tail_default_golden.txt:\n%s", buf.String())
+	}
+}
+
+// TestRunTailStream_FollowFoldsUpdatesAcrossPolls: in --follow one bead's
+// updates keep folding across polls, stay quiet while the run is live, and
+// print once with the count when the stream ends (gt-vxr95).
+func TestRunTailStream_FollowFoldsUpdatesAcrossPolls(t *testing.T) {
+	t.Parallel()
+	src := &scriptedTailSource{batches: [][]tailLine{
+		{{At: at("2026-09-30T14:00:00Z"), Rig: "gastown", Kind: tailKindEvents, Text: "update gt-1 status=in_progress actor=opal seq=1"}},
+		{{At: at("2026-09-30T14:00:10Z"), Rig: "gastown", Kind: tailKindEvents, Text: "update gt-1 status=open actor=opal seq=2"}},
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	tick := make(chan time.Time)
+	var out syncBuffer
+	done := make(chan error, 1)
+	view := newTailView(tailTestLoc, tailViewOptions{now: fixedNow})
+	go func() {
+		done <- runTailStream(ctx, &out, []tailSource{src}, nil, true, tick, view, nil)
+	}()
+	tick <- time.Time{}
+	tick <- time.Time{}
+	if got := out.String(); got != "" {
+		t.Fatalf("a live run must stay held, but the stream printed %q", got)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if want := "09:00:10 gastown update gt-1 status=open actor=opal (×2)\n"; out.String() != want {
+		t.Fatalf("follow output %q, want %q", out.String(), want)
 	}
 }

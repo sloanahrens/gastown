@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"sync"
@@ -128,6 +129,39 @@ func (l *tailTownHealthLatch) visible(text string) bool {
 	return true
 }
 
+// tailSpecTick matches the spec dispatcher's summary tick: the line it rewrites
+// every few seconds, with the same counts when there is nothing to do. The
+// "warning:", "tick failed:" and "previous tick still running" lines are not
+// ticks and never fold here.
+var tailSpecTick = regexp.MustCompile(`^spec_dispatch: tick: `)
+
+// tailSpecTickDispatched matches a tick that dispatched a bead. Such a tick is
+// news whatever its counts, so it never folds.
+var tailSpecTickDispatched = regexp.MustCompile(`\b[1-9][0-9]* dispatched\b`)
+
+// tailSpecTickLatch folds a spec-dispatch tick whose counts repeat the last tick
+// shown, the way the townhealth latch folds a repeated health line. A tick the
+// dispatcher wrote after dispatching a bead, or one whose counts moved, is a
+// change and shows; it also becomes the tick a later repeat is measured against
+// (gt-vxr95).
+type tailSpecTickLatch struct {
+	mu   sync.Mutex
+	last string
+}
+
+func (l *tailSpecTickLatch) visible(text string) bool {
+	if !tailSpecTick.MatchString(text) {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if text == l.last && !tailSpecTickDispatched.MatchString(text) {
+		return false
+	}
+	l.last = text
+	return true
+}
+
 // tailDuplicateWindow is how close two identical events lines have to be for
 // the second to be the same event written twice.
 const tailDuplicateWindow = 2 * time.Second
@@ -189,13 +223,139 @@ func (l *tailEventDuplicateLatch) visible(ln tailLine) bool {
 	return !same
 }
 
+// tailUpdateWindow is how far apart two of one bead's status updates may be and
+// still fold into one line.
+const tailUpdateWindow = 60 * time.Second
+
+// tailUpdateRun is one bead's folded run of status updates: the last update is
+// the line the run prints, carrying the count of the updates folded into it.
+type tailUpdateRun struct {
+	bead  string
+	count int
+	last  tailLine
+}
+
+func (r *tailUpdateRun) fold(l tailLine) {
+	r.count++
+	r.last = l
+}
+
+// line is the run's one line: the last update's own text and status, and the
+// count of the updates folded in. A run of one is that update unchanged.
+func (r *tailUpdateRun) line() tailLine {
+	l := r.last
+	if r.count > 1 {
+		l.Text = fmt.Sprintf("%s (×%d)", l.Text, r.count)
+	}
+	return l
+}
+
+// tailUpdateCollapse folds one bead's repeated status updates, written within
+// tailUpdateWindow of one another, into one line: the last status and the count
+// (gt-vxr95). A polecat rewrites its bead's status every few seconds as it
+// works, and the stream otherwise repeats the same sentence. Only updates the
+// default view would show are folded, and only adjacent ones: an update
+// separated from the run by another line starts its own run.
+//
+// The batch's trailing run is held while the stream continues, because it may
+// continue in the next poll; it prints when final says the stream has ended, or
+// when drain finds it quiet for a window.
+type tailUpdateCollapse struct {
+	window time.Duration
+	now    func() time.Time
+
+	held *tailUpdateRun
+}
+
+// fold rewrites one time-ordered batch, returning the lines to print. final
+// ends the stream, so a trailing run prints in its own place rather than being
+// held for a poll that will not come.
+func (c *tailUpdateCollapse) fold(batch []tailLine, final bool) []tailLine {
+	run := c.held
+	c.held = nil
+	var out []tailLine
+	for _, l := range batch {
+		if run != nil && c.continues(run, l) {
+			run.fold(l)
+			continue
+		}
+		if run != nil {
+			out = append(out, run.line())
+			run = nil
+		}
+		if !c.foldable(l) {
+			out = append(out, l)
+			continue
+		}
+		run = &tailUpdateRun{bead: tailUpdateBead(l), count: 1, last: l}
+	}
+	if run != nil {
+		if final {
+			out = append(out, run.line())
+		} else {
+			c.held = run
+		}
+	}
+	return out
+}
+
+// continues reports whether l is the next update of run: the same bead's
+// status, written within the window of the run's last update.
+func (c *tailUpdateCollapse) continues(run *tailUpdateRun, l tailLine) bool {
+	if !c.foldable(l) || tailUpdateBead(l) != run.bead {
+		return false
+	}
+	gap := l.At.Sub(run.last.At)
+	return gap >= 0 && gap <= c.window
+}
+
+// foldable reports whether l is a status update the default view would print.
+func (c *tailUpdateCollapse) foldable(l tailLine) bool {
+	return !l.At.IsZero() && tailUpdateBead(l) != "" && tailVisible(l)
+}
+
+// drain returns the held run once it has been quiet for a window, so a live run
+// keeps folding across polls instead of printing early.
+func (c *tailUpdateCollapse) drain() []tailLine {
+	if c == nil || c.held == nil {
+		return nil
+	}
+	if c.now().Sub(c.held.last.At) <= c.window {
+		return nil
+	}
+	l := c.held.line()
+	c.held = nil
+	return []tailLine{l}
+}
+
+// tailUpdateBead reads the bead an events line moves the status of, "" for a
+// line that is not an "update <bead> ... status=<s>" record.
+func tailUpdateBead(l tailLine) string {
+	if l.Kind != tailKindEvents {
+		return ""
+	}
+	f := strings.Fields(l.Text)
+	if len(f) < 2 || f[0] != "update" {
+		return ""
+	}
+	for _, field := range f[2:] {
+		if strings.HasPrefix(field, "status=") {
+			return f[1]
+		}
+	}
+	return ""
+}
+
 // tailDefaultFilter is the default view's filter. It hides the routine lines,
-// drops an events line that repeats the one before it, and latches a
-// townhealth line that repeats the last one shown. --all and --verbose keep
-// every raw line.
+// drops an events line that repeats the one before it, latches a townhealth
+// line that repeats the last one shown, and folds a spec-dispatch tick that
+// repeats the last tick shown. --all, --verbose and --iso keep every raw line.
 type tailDefaultFilter struct {
 	townHealth tailTownHealthLatch
 	duplicates tailEventDuplicateLatch
+	specTicks  tailSpecTickLatch
+	// foldTicks is false for --iso, whose output stays as it was.
+	foldTicks bool
 }
 
 func (f *tailDefaultFilter) visible(ln tailLine) (tailLine, bool) {
@@ -203,6 +363,9 @@ func (f *tailDefaultFilter) visible(ln tailLine) (tailLine, bool) {
 		return ln, false
 	}
 	if !f.duplicates.visible(ln) {
+		return ln, false
+	}
+	if f.foldTicks && !f.specTicks.visible(ln.Text) {
 		return ln, false
 	}
 	return ln, f.townHealth.visible(ln.Text)

@@ -80,11 +80,21 @@ The default view hides what the town does every few seconds: wisp events
 (gt-wisp-*, hq-wisp-*) and their "close detected" lines, the daemon's
 heartbeat, plugin-handler skips, the patrols a config leaves off, the
 checkpoint, jsonl-backup, patrol-scan and doctor all-clear lines, clearAlerts
-lines, a polecat agent bead's own status writes, and a townhealth line that
+lines, a polecat agent bead's own status writes, a townhealth line that
 repeats the last one shown but for the age and the exec-tax reading it
-carries. Landings, rejections, escalations, upgrade restarts, spec-dispatcher
-ticks and bead create/close/status changes always show, and a hidden line that
-reports a failure shows anyway. --all (or --verbose) shows everything.
+carries, and a spec-dispatcher tick whose counts repeat the last tick shown. A
+tick that dispatched a bead, or whose counts moved, always shows. Landings,
+rejections, escalations, upgrade restarts, a tick that dispatched, and bead
+create/close/status changes always show, and a hidden line that reports a
+failure shows anyway. --all (or --verbose) shows everything; --iso prints
+today's stream, without the folds and the annotations described below.
+
+It also folds one bead's own churn. A bead's status is rewritten every few
+seconds as a polecat works, so the default view collapses the status updates
+for one bead written within a minute of one another into one line: the last
+status and the count of updates folded into it, as "update gt-1
+status=in_progress (×4)". An update that is not adjacent to the run, and a run
+of one, prints as it is.
 
 It also drops what repeats. An events line that says what the line before it
 said — the same bead, operation and status within two seconds — prints once:
@@ -98,11 +108,17 @@ append the bead's title after a " · ", read once per bead per run and
 truncated so the line still fits the terminal (80 columns when stdout is not
 one). A title that cannot be read is simply absent — never an error line.
 
-The review loop's own words show too. A comment or a note that opens with
-OVERSEER REVIEW, OVERSEER RULING, STEWARD or MERGE REJECTION prints its first
-100 characters after the line, green for a PASS, red for a FAIL, a REFUSED or
-a REJECTION, and yellow for a "(shadow)" verdict. Every other comment stays
-hidden, as it was.
+Two more annotations are the default view's. A comment line prints the first 60
+characters of the comment, and a work bead's submission prints "submitted
+<bead> @ <sha7> for landing" beside the update that left it — the READY TO LAND
+block a polecat's gt done writes, shown once per head while the bead waits to
+land.
+
+The review loop's own words win over the comment text. A comment or a note
+that opens with OVERSEER REVIEW, OVERSEER RULING, STEWARD or MERGE REJECTION
+prints its first 100 characters after the line, green for a PASS, red for a
+FAIL, a REFUSED or a REJECTION, and yellow for a "(shadow)" verdict. Every
+other comment prints only its first 60 characters.
 
 The watch feed is what the operator's monitor scripts and the daemon's
 attention queue see: one JSON object per line, {ts, class, severity, text}.
@@ -223,6 +239,7 @@ func runTail(cmd *cobra.Command, _ []string) error {
 		width:      tailDisplayWidth(cmd.OutOrStdout()),
 		gitUser:    gitUser,
 		beads:      beadReads,
+		now:        time.Now,
 	})
 	// The summary is the follow mode's: a run that prints a backlog and exits
 	// has no "since the last line" to summarize.
@@ -321,10 +338,13 @@ type tailViewOptions struct {
 	decorate   bool // color the lines and tag them with an emoji
 	// width is the column the default view keeps every line inside (0 = no
 	// bound); gitUser is the identity whose actor= field the default view
-	// drops; beads resolves the title a bead line carries.
+	// drops; beads resolves the title a bead line carries. now is the clock
+	// the update collapse reads to decide a folded run has gone quiet; nil is
+	// time.Now.
 	width   int
 	gitUser string
 	beads   *tailBeads
+	now     func() time.Time
 }
 
 // newTailView is the view the flags select: the routine lines hidden unless
@@ -332,6 +352,11 @@ type tailViewOptions struct {
 // fullSource, and plain text unless decorate. The title and the two trimmed
 // fields belong to that default view too: --all and --verbose print the raw
 // line.
+//
+// The two behaviors that fold lines and annotate them — the update collapse,
+// the spec-tick latch, the comment text and the submitted line — are the plain
+// default view's alone. --iso keeps the stream as it was, and --all keeps every
+// raw line (gt-vxr95).
 func newTailView(loc *time.Location, o tailViewOptions) tailView {
 	v := tailView{Loc: loc, Layout: tailClockLayout, FullSource: o.fullSource, Width: o.width}
 	if o.iso {
@@ -345,11 +370,19 @@ func newTailView(loc *time.Location, o tailViewOptions) tailView {
 		// showed, not ones an earlier run showed. The titles are its too —
 		// --all and --verbose print the raw line — and a run that asks for
 		// neither pays for no bead read at all.
-		filter := &tailDefaultFilter{}
+		filter := &tailDefaultFilter{foldTicks: !o.iso}
 		v.Show = filter.visible
 		v.Trim = true
 		v.GitUser = o.gitUser
 		v.Beads = o.beads
+		if !o.iso {
+			now := o.now
+			if now == nil {
+				now = time.Now
+			}
+			v.newAnnotations = true
+			v.collapse = &tailUpdateCollapse{window: tailUpdateWindow, now: now}
+		}
 	}
 	return v
 }
@@ -510,6 +543,31 @@ type tailView struct {
 	Trim       bool
 	GitUser    string
 	Beads      *tailBeads
+	// collapse folds a bead's repeated status updates into one line, and
+	// newAnnotations prints the comment text and the submitted line the
+	// events source resolved. Both are the plain default view's; --iso,
+	// --all and --verbose leave them nil and false (gt-vxr95).
+	collapse       *tailUpdateCollapse
+	newAnnotations bool
+}
+
+// foldUpdates folds a poll's batch of repeated bead status updates into one
+// line each; final is the stream's end, which prints a trailing run in place.
+// A view with no collapse returns the batch unchanged.
+func (v tailView) foldUpdates(batch []tailLine, final bool) []tailLine {
+	if v.collapse == nil {
+		return batch
+	}
+	return v.collapse.fold(batch, final)
+}
+
+// drainUpdates returns the folded run that has gone quiet, if one has. A run
+// the stream's end still holds is printed by foldUpdates with final set.
+func (v tailView) drainUpdates() []tailLine {
+	if v.collapse == nil {
+		return nil
+	}
+	return v.collapse.drain()
 }
 
 // tailAnnotationSep joins a line's text to the title or the verdict it
@@ -614,15 +672,28 @@ func pollTailSources(sources []tailSource) [][]tailLine {
 // closed pipe) ends the stream with its error.
 func runTailStream(ctx context.Context, w io.Writer, sources []tailSource, preface []tailLine, follow bool, tick <-chan time.Time, view tailView, summary *tailSummaryTracker) error {
 	bw := bufio.NewWriter(w)
-	show := func(lines []tailLine) error {
-		for _, l := range mergeTail(lines) {
+	writeLine := func(l tailLine) error {
+		_, err := bw.WriteString(view.renderLine(l) + "\n")
+		return err
+	}
+	// show prints one poll: the batch, folded and filtered, then the folded
+	// update runs that poll brought due. final is the stream's end, which drains
+	// every run still open. Only the view folds, so a view that keeps every line
+	// passes the batch through untouched.
+	show := func(lines []tailLine, final bool) error {
+		for _, l := range view.foldUpdates(mergeTail(lines), final) {
 			if view.Show != nil {
 				var ok bool
 				if l, ok = view.Show(l); !ok {
 					continue
 				}
 			}
-			if _, err := bw.WriteString(view.renderLine(l) + "\n"); err != nil {
+			if err := writeLine(l); err != nil {
+				return err
+			}
+		}
+		for _, l := range view.drainUpdates() {
+			if err := writeLine(l); err != nil {
 				return err
 			}
 		}
@@ -635,22 +706,22 @@ func runTailStream(ctx context.Context, w io.Writer, sources []tailSource, prefa
 		if !ok {
 			return nil
 		}
-		if _, err := bw.WriteString(view.renderLine(line) + "\n"); err != nil {
+		if err := writeLine(line); err != nil {
 			return err
 		}
 		return bw.Flush()
 	}
-	emit := func(extra []tailLine) error {
+	emit := func(extra []tailLine, final bool) error {
 		all := extra
 		for _, b := range pollTailSources(sources) {
 			all = append(all, b...)
 		}
-		return show(all)
+		return show(all, final)
 	}
 	if !follow {
-		return emit(preface)
+		return emit(preface, true)
 	}
-	if err := emit(preface); err != nil {
+	if err := emit(preface, false); err != nil {
 		return err
 	}
 	if err := emitSummary(); err != nil {
@@ -659,9 +730,12 @@ func runTailStream(ctx context.Context, w io.Writer, sources []tailSource, prefa
 	for {
 		select {
 		case <-ctx.Done():
+			if err := show(nil, true); err != nil {
+				return err
+			}
 			return nil
 		case <-tick:
-			if err := emit(nil); err != nil {
+			if err := emit(nil, false); err != nil {
 				return err
 			}
 			if err := emitSummary(); err != nil {
@@ -676,11 +750,14 @@ func runTailStream(ctx context.Context, w io.Writer, sources []tailSource, prefa
 // produced it, and the text. Render turns it into
 // "<local RFC3339 time> <rig> <kind> <text>".
 //
-// Title and Verdict are the two annotations a line can carry, both written
-// after the text with " · ". Title is the bead title the default view looks up
-// for a create, close, status change or dependency line; Verdict is the review
-// loop's own words, read off a comment or a note event and carried by the
-// source so --all shows it too. The verdict is the more specific of the two.
+// Title, Verdict, Comment and Submit are the annotations a line can carry,
+// written after the text with " · ". Title is the bead title the default view
+// looks up for a create, close, status change or dependency line; Verdict is
+// the review loop's own words, read off a comment or a note event and carried by
+// the source so --all shows it too. Comment is a comment's own text, cut short,
+// and Submit is the READY TO LAND block a submission wrote — both are the plain
+// default view's to print. The more specific annotation wins: a verdict over a
+// submitted or a comment line, and those over the title.
 //
 // Plain draws the line dim whatever its text says. It is the summary line's:
 // a state line about the town is not one of the town's own lines, so the
@@ -698,6 +775,8 @@ type tailLine struct {
 	Text    string
 	Title   string
 	Verdict string
+	Comment string
+	Submit  string
 	Plain   bool
 	Class   tailClass
 }
@@ -748,7 +827,8 @@ func (v tailView) renderLine(l tailLine) string {
 	if v.Trim {
 		l = tailTrimEventFields(l, v.GitUser)
 	}
-	if l.Title == "" && l.Verdict == "" && v.Beads != nil {
+	annotated := v.newAnnotations && (l.Submit != "" || l.Comment != "")
+	if l.Title == "" && l.Verdict == "" && !annotated && v.Beads != nil {
 		l.Title = v.Beads.lineTitle(l)
 	}
 	layout := v.Layout
@@ -770,6 +850,13 @@ func (v tailView) renderLine(l tailLine) string {
 	}
 	text := tailText(l.Text)
 	annotation := l.Verdict
+	if annotation == "" && v.newAnnotations {
+		if l.Submit != "" {
+			annotation = l.Submit
+		} else {
+			annotation = l.Comment
+		}
+	}
 	if annotation == "" {
 		annotation = l.Title
 	}

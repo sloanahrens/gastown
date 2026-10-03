@@ -16,6 +16,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landings"
 )
 
@@ -1132,5 +1133,64 @@ func TestTailDeploySource_PrintsTheDeployedLineInItsWindow(t *testing.T) {
 	}
 	if got := texts(s.Poll()); !reflect.DeepEqual(got, want) {
 		t.Fatalf("stream = %q\nwant %q", got, want)
+	}
+}
+
+// TestEventsSource_CommentTextAndSubmittedLine: a plain comment carries its
+// first 60 characters, a work bead's READY TO LAND block carries a submitted
+// line, a comment with a review marker keeps the verdict instead, and neither
+// annotation repeats (gt-vxr95).
+func TestTailEventsSource_CommentTextAndSubmittedLine(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("x", 70)
+	store := &fakeTailStore{issues: map[string]*beads.Issue{
+		"gt-1": {ID: "gt-1", Title: "t", Comments: []beads.Comment{{Text: "pushed: crew/x at 9f4171a4"}}},
+		"gt-2": {ID: "gt-2", Title: "t", Labels: []string{land.LabelReadyToLand}, Notes: "READY TO LAND\nBranch: polecat/opal/gt-2\nHead: abcdef1234567890\nTarget: main\nWorker: gastown/polecats/opal\n"},
+		"gt-3": {ID: "gt-3", Title: "t", Comments: []beads.Comment{{Text: long}}},
+		"gt-4": {ID: "gt-4", Title: "t", Comments: []beads.Comment{{Text: "OVERSEER REVIEW aaaa PASS: reads well"}}},
+	}}
+	j := &fakeTailJournal{config: "true", records: []beads.EventRecord{
+		{Seq: 1, TS: "2026-09-30T13:50:00Z", Op: "comment", IssueID: "gt-1", Actor: "sloan"},
+		{Seq: 2, TS: "2026-09-30T13:51:00Z", Op: "update", IssueID: "gt-2", Actor: "opal", Status: "open"},
+		{Seq: 3, TS: "2026-09-30T13:52:00Z", Op: "comment", IssueID: "gt-3", Actor: "sloan"},
+		{Seq: 4, TS: "2026-09-30T13:53:00Z", Op: "comment", IssueID: "gt-4", Actor: "steward"},
+	}}
+	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: newTailBeads(store.show)}
+	got := s.Poll()
+	if len(got) != 4 {
+		t.Fatalf("poll = %q", texts(got))
+	}
+	if got[0].Comment != "pushed: crew/x at 9f4171a4" || got[0].Verdict != "" {
+		t.Errorf("plain comment = comment %q verdict %q", got[0].Comment, got[0].Verdict)
+	}
+	if got[1].Submit != "submitted gt-2 @ abcdef1 for landing" || got[1].Verdict != "" {
+		t.Errorf("submission = submit %q verdict %q", got[1].Submit, got[1].Verdict)
+	}
+	if want := strings.Repeat("x", 60) + "…"; got[2].Comment != want {
+		t.Errorf("a long comment = %q, want %q", got[2].Comment, want)
+	}
+	if got[3].Comment != "" || got[3].Verdict != "OVERSEER REVIEW aaaa PASS: reads well" {
+		t.Errorf("a verdict comment = comment %q verdict %q", got[3].Comment, got[3].Verdict)
+	}
+	// One bd show per bead per poll answers every annotation read.
+	if n := store.readsFor("gt-1"); n != 1 {
+		t.Errorf("gt-1 was read %d times in one poll", n)
+	}
+	// The same text is not shown twice, however often the bead is rewritten.
+	j.records = append(j.records,
+		beads.EventRecord{Seq: 5, TS: "2026-09-30T13:54:00Z", Op: "comment", IssueID: "gt-1", Actor: "sloan"},
+		beads.EventRecord{Seq: 6, TS: "2026-09-30T13:55:00Z", Op: "update", IssueID: "gt-2", Actor: "opal", Status: "open"},
+	)
+	got = s.Poll()
+	if len(got) != 2 || got[0].Comment != "" || got[1].Submit != "" {
+		t.Fatalf("an annotation repeated: %+v", got)
+	}
+	// A landing takes the ready-to-land label, so an update after it does not
+	// reprint a submission that is over.
+	store.issues["gt-2"].Labels = nil
+	j.records = append(j.records, beads.EventRecord{Seq: 7, TS: "2026-09-30T13:56:00Z", Op: "update", IssueID: "gt-2", Actor: "opal", Status: "closed"})
+	got = s.Poll()
+	if len(got) != 1 || got[0].Submit != "" {
+		t.Fatalf("a landed bead reprinted its submission: %+v", got)
 	}
 }
