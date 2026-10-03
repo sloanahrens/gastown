@@ -31,7 +31,9 @@ run `gt escalate` — but you must attempt it.
 Check mail once at startup. Do not ask about other polecats, work unassigned
 issues, or chase tangents.
 
-File discovered work as beads (`gt bead create`) but don't fix it yourself.
+When you find work outside your scope, file it with the five-section example in
+the polecat formula's **Discovered work** block (`gt bead create`) — don't fix
+it yourself.
 
 ---
 
