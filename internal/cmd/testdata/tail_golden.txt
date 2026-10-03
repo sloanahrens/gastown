@@ -1,8 +1,12 @@
 2026-09-30T08:50:00-05:00 gastown events update gt-1 status=in_progress actor=gastown/polecats/opal seq=2
+2026-09-30T08:50:30-05:00 gastown events update gt-1 status=open actor=gastown/polecats/opal seq=4
+2026-09-30T08:51:00-05:00 gastown events comment gt-1 actor=sloan seq=5
 2026-09-30T08:51:00-05:00 town daemon Convoy: close detected: gt-1 (from gastown)
 2026-09-30T08:51:00-05:00 town daemon   continuation of the convoy line
 2026-09-30T08:52:00-05:00 gastown events close gt-1 status=closed actor=gastown/polecats/opal seq=3
 2026-09-30T08:55:00-05:00 gastown landings landed gt-1 polecat/opal/gt-1 -> main commit=33333333 patch=44444444 gate=pass om=approve/0.92 route=worker
+2026-09-30T08:57:00-05:00 town daemon spec_dispatch: tick: 4 candidate(s), roster deepseek-flash 0/3, 0 dispatched, 0 refused, 0 planning, 4 skipped, 0 failed, 0 held by the failed label; skipped: gt-a (unshaped: ## Gate)
+2026-09-30T08:57:05-05:00 town daemon spec_dispatch: tick: 4 candidate(s), roster deepseek-flash 0/3, 0 dispatched, 0 refused, 0 planning, 4 skipped, 0 failed, 0 held by the failed label; skipped: gt-a (unshaped: ## Gate)
 2026-09-30T08:58:00-05:00 hq events create hq-9 status=open actor=mayor seq=41
 2026-09-30T09:00:00-05:00 gastown events journal off in config (events-journal=false): nothing is journaled
 2026-09-30T09:00:00-05:00 hm events read failed: bd events tail: exit status 25

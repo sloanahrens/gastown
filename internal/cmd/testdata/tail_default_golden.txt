@@ -1,0 +1,7 @@
+08:50:10 gastown update gt-1 status=open actor=gastown/polecats/opal (×3) · one line per thing that happened
+08:51:00 gastown comment gt-1 actor=sloan · pushed: crew/x at 9f4171a4
+08:52:00 gastown comment gt-3 actor=steward · OVERSEER REVIEW aaaa PASS: reads well
+08:53:00 gastown update gt-2 status=open actor=gastown/polecats/quartz · submitted gt-2 @ abcdef1 for landing
+08:53:30 gastown create gt-4 status=open actor=sloan · a fresh bead
+08:54:00 town spec_dispatch: tick: 4 candidate(s), roster deepseek-flash 0/3, 0 dispatched, 0 refused, 0 planning, 4 skipped, 0 failed, 0 held by the failed label; skipped: gt-a (unshaped: ## Gate)
+08:54:10 town spec_dispatch: tick: 4 candidate(s), roster deepseek-flash 1/3, 1 dispatched, 0 refused, 0 planning, 3 skipped, 0 failed, 0 held by the failed label; skipped: gt-a (unshaped: ## Gate)
