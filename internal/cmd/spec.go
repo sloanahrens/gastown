@@ -325,8 +325,9 @@ type specCandidate struct {
 	Rig  string
 }
 
-// specRoster is the live polecat picture the budget is built from: live
-// polecats (and in-flight seat claims) per agent, and the newest spawn.
+// specRoster is the live polecat picture the budget is built from: the seats
+// the pool counts as taken per agent — live polecats, in-flight seat claims,
+// and the seats mid-landing (poolSeatSessions) — and the newest spawn.
 type specRoster struct {
 	Live   map[string]int
 	Newest time.Time
@@ -747,8 +748,9 @@ func specBudgetFromConfig(ts *config.TownSettings, sd *config.SpecDispatchConfig
 	return b
 }
 
-// specRosterFrom counts live polecats (and in-flight seat claims) per agent.
-// An empty GT_AGENT runs the polecat role default.
+// specRosterFrom counts the seats the pool counts as taken (live polecats,
+// in-flight seat claims, and seats mid-landing) per agent. An empty GT_AGENT
+// runs the polecat role default.
 func specRosterFrom(sessions []poolSession, ts *config.TownSettings) specRoster {
 	r := specRoster{Live: map[string]int{}}
 	roleDefault := ""
@@ -819,15 +821,15 @@ func runSpecDispatch(cmd *cobra.Command, _ []string) error {
 			return rigRevertInFlightPinned(townRoot, rig)
 		},
 		Roster: func() (specRoster, error) {
-			sessions, err := listPolecatSessions(newPoolSessionLister(), townRoot)
+			// The same seat picture `gt daemon dispatch-check` nudges from:
+			// live sessions, in-flight claims, and seats mid-landing. Two
+			// pictures of one pool is how the dispatcher ends up slinging into
+			// a seat the nudge just called free (gt-thy6r).
+			sessions, err := poolSeatSessions(newPoolSessionLister(), townRoot, ts.PolecatPool)
 			if err != nil {
-				return specRoster{}, fmt.Errorf("listing polecat sessions: %w", err)
+				return specRoster{}, fmt.Errorf("listing polecat seats: %w", err)
 			}
-			claims, err := poolSeatClaimSessions(townRoot, "")
-			if err != nil {
-				return specRoster{}, fmt.Errorf("reading seat claims: %w", err)
-			}
-			return specRosterFrom(append(sessions, claims...), ts), nil
+			return specRosterFrom(sessions, ts), nil
 		},
 		Annotate: func(id, key, text string) error { return annotateSpecOnce(townRoot, id, key, text) },
 		AddLabel: func(id, label string) error { return poolBeadLabelAdd(townRoot, id, label) },
