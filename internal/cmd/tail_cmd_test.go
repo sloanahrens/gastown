@@ -222,6 +222,38 @@ func TestBuildTailSources_UnreadableRegistryKeepsHQAndDaemon(t *testing.T) {
 	}
 }
 
+// TestBuildTailSources_DeploysWrapTheDaemonSource: with a tracker the daemon
+// source is wrapped, the filter moves to the wrapper, and the raw daemon lines
+// still print.
+func TestBuildTailSources_DeploysWrapTheDaemonSource(t *testing.T) {
+	t.Parallel()
+	o, _ := fakeTailTown(t, []string{"gastown"}, nil)
+	o.rig, o.kinds, o.cutoff = "gastown", map[string]bool{tailKindDaemon: true}, at("2026-09-30T13:00:00Z")
+	o.deploys = newTailDeploys(fixedNow, fakeTailAncestry(), o.cutoff)
+	sources, _, err := buildTailSources(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) != 1 {
+		t.Fatalf("sources = %d; want 1", len(sources))
+	}
+	ds, ok := sources[0].(*tailDeploySource)
+	if !ok {
+		t.Fatalf("daemon source = %T; want a tailDeploySource", sources[0])
+	}
+	if ds.inner.rigFilter != nil {
+		t.Error("the tracker's source must not be rig-filtered: the tracker needs every line")
+	}
+	if ds.rigFilter == nil {
+		t.Error("--rig must still filter the lines the stream shows")
+	}
+	// The rig filter keeps only the line that names gastown; it is the one the
+	// plain source would show too.
+	if got := texts(ds.Poll()); !reflect.DeepEqual(got, []string{"town daemon Convoy: close detected: gt-1 (from gastown)"}) {
+		t.Fatalf("stream = %q", got)
+	}
+}
+
 // TestBuildTailSources_WatchIsTownWide: the watch feed has no rig in it, so
 // --rig cannot narrow it and the source is built whatever rig is named.
 func TestBuildTailSources_WatchIsTownWide(t *testing.T) {

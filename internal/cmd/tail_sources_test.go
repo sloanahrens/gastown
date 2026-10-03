@@ -923,3 +923,214 @@ func TestTailEventsSource_UnreadableBeadIsNotAnErrorLine(t *testing.T) {
 		t.Fatalf("poll = %+v", got)
 	}
 }
+
+// --- dispatched to deployed ---
+
+// fakeTailAncestry answers from a set of "<commit> <of>" ancestor pairs;
+// anything else is "not an ancestor". It never answers unknown, so a test
+// that wants the git-error path builds its own seam.
+func fakeTailAncestry(pairs ...string) tailAncestry {
+	set := map[string]bool{}
+	for _, p := range pairs {
+		set[p] = true
+	}
+	return func(commit, of string) (bool, bool) { return set[commit+" "+of], true }
+}
+
+func daemonAt(ts, text string) tailLine {
+	return tailLine{At: at(ts), Rig: "town", Kind: tailKindDaemon, Text: text}
+}
+
+// TestTailDeploys_OnlyALaterRestartDeploys: a restart that predates the
+// landing cannot have installed its commit, so the bead waits for a restart
+// whose installed commit contains it.
+func TestTailDeploys_OnlyALaterRestartDeploys(t *testing.T) {
+	t.Parallel()
+	track := newTailDeploys(fixedNow, fakeTailAncestry("1111aaaa 2222bbbb"), at("2026-09-30T13:00:00Z"))
+	got := track.observe([]tailLine{
+		daemonAt("2026-09-30T13:01:00Z", "spec_dispatch: dispatched: gt-1: slung to gastown/opal on deepseek-flash (seat deepseek-flash 1/3)"),
+		daemonAt("2026-09-30T13:02:00Z", "landing_worker: [land] gt-1: merged 0f0f onto origin/main (aaaa) as 1111aaaa; gating the merged tree, then om review"),
+		// A restart before the landing cannot have installed its commit.
+		daemonAt("2026-09-30T13:02:30Z", "upgrade-restart: running 3333cccc covers marker 3333cccc; cleared"),
+		daemonAt("2026-09-30T13:03:00Z", "landing_worker: [land] gt-1: landed 1111aaaa on origin/main (patch-id 9e9e)"),
+		// This restart predates the landing too, so it still does not count.
+		daemonAt("2026-09-30T13:03:30Z", "upgrade-restart: running 4444dddd covers marker 4444dddd; cleared"),
+		// The installed commit contains the landing: deployed here.
+		daemonAt("2026-09-30T13:04:00Z", "upgrade-restart: running 2222bbbb covers marker 2222bbbb; cleared"),
+	})
+	want := []string{"town daemon gt-1 deployed in 3.0m (work 1.0m, land 1.0m, deploy 1.0m)"}
+	if !reflect.DeepEqual(texts(got), want) {
+		t.Fatalf("deployed = %q\nwant %q", texts(got), want)
+	}
+	if !got[0].At.Equal(at("2026-09-30T13:04:00Z")) {
+		t.Fatalf("deployed line time = %v; want the covering restart's time", got[0].At)
+	}
+	if s := track.snapshot(); s.Waiting != 0 || !s.HasMedian {
+		t.Fatalf("snapshot after deploy = %+v", s)
+	}
+}
+
+// TestTailDeploys_FirstDispatchWinsOverAReworkRedispatch: a second dispatch
+// after the first merge is the rework loop, not the bead's start.
+func TestTailDeploys_FirstDispatchWinsOverAReworkRedispatch(t *testing.T) {
+	t.Parallel()
+	track := newTailDeploys(fixedNow, fakeTailAncestry("1111aaaa 2222bbbb"), at("2026-09-30T12:00:00Z"))
+	track.observe([]tailLine{
+		daemonAt("2026-09-30T12:00:00Z", "spec_dispatch: dispatched: gt-1: slung to gastown/opal on x (seat 1/3)"),
+		daemonAt("2026-09-30T12:02:00Z", "landing_worker: [land] gt-1: merged 0f0f onto origin/main (aaaa) as 1111aaaa; gating the merged tree"),
+		daemonAt("2026-09-30T12:03:00Z", "spec_dispatch: dispatched: gt-1: slung to gastown/jade on x (seat 1/3)"),
+		daemonAt("2026-09-30T12:04:00Z", "landing_worker: [land] gt-1: landed 1111aaaa on origin/main (patch-id 9e9e)"),
+	})
+	got := texts(track.observe([]tailLine{
+		daemonAt("2026-09-30T12:05:00Z", "upgrade-restart: running 2222bbbb covers marker 2222bbbb; cleared"),
+	}))
+	want := "town daemon gt-1 deployed in 5.0m (work 2.0m, land 2.0m, deploy 1.0m)"
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("deployed = %q\nwant %q", got, want)
+	}
+}
+
+// TestTailDeploys_HandSlungPrintsTheDeployPartAlone: a bead with no dispatch
+// line has nothing to measure the work or the land from, so it prints the
+// deploy stage only and is left out of the median.
+func TestTailDeploys_HandSlungPrintsTheDeployPartAlone(t *testing.T) {
+	t.Parallel()
+	track := newTailDeploys(fixedNow, fakeTailAncestry("1111aaaa 2222bbbb"), at("2026-09-30T12:00:00Z"))
+	got := track.observe([]tailLine{
+		daemonAt("2026-09-30T12:02:00Z", "landing_worker: [land] gt-2: merged 0f0f onto origin/main (aaaa) as 1111aaaa; gating the merged tree"),
+		daemonAt("2026-09-30T12:03:00Z", "landing_worker: [land] gt-2: landed 1111aaaa on origin/main (patch-id 9e9e)"),
+		daemonAt("2026-09-30T12:04:00Z", "upgrade-restart: running 2222bbbb covers marker 2222bbbb; cleared"),
+	})
+	want := []string{"town daemon gt-2 deployed in 1.0m (deploy 1.0m)"}
+	if !reflect.DeepEqual(texts(got), want) {
+		t.Fatalf("deployed = %q\nwant %q", texts(got), want)
+	}
+	if s := track.snapshot(); s.HasMedian {
+		t.Fatalf("a hand-slung bead entered the median: %+v", s)
+	}
+}
+
+// TestTailDeploys_RepairedLandingCounts: the landing worker records a bead
+// already on main as "already landed as <sha>", the same landing in another
+// wording.
+func TestTailDeploys_RepairedLandingCounts(t *testing.T) {
+	t.Parallel()
+	track := newTailDeploys(fixedNow, fakeTailAncestry("a9f727de 2222bbbb"), at("2026-09-30T13:00:00Z"))
+	got := track.observe([]tailLine{
+		daemonAt("2026-09-30T13:20:00Z", "landing_worker: [land] gt-4k3fj.6: already landed as a9f727de; finishing its record"),
+		daemonAt("2026-09-30T13:30:00Z", "upgrade-restart: running 2222bbbb covers marker 2222bbbb; cleared"),
+	})
+	want := []string{"town daemon gt-4k3fj.6 deployed in 10.0m (deploy 10.0m)"}
+	if !reflect.DeepEqual(texts(got), want) {
+		t.Fatalf("deployed = %q\nwant %q", texts(got), want)
+	}
+}
+
+// TestTailDeploys_UnansweredAncestryLeavesTheBeadWaiting: a git failure is not
+// a deployment.
+func TestTailDeploys_UnansweredAncestryLeavesTheBeadWaiting(t *testing.T) {
+	t.Parallel()
+	unknown := func(string, string) (bool, bool) { return false, false }
+	track := newTailDeploys(fixedNow, unknown, at("2026-09-30T12:00:00Z"))
+	got := track.observe([]tailLine{
+		daemonAt("2026-09-30T12:01:00Z", "spec_dispatch: dispatched: gt-1: slung to gastown/opal on x (seat 1/3)"),
+		daemonAt("2026-09-30T12:03:00Z", "landing_worker: [land] gt-1: landed 1111aaaa on origin/main (patch-id 9e9e)"),
+		daemonAt("2026-09-30T12:04:00Z", "upgrade-restart: running 2222bbbb covers marker 2222bbbb; cleared"),
+	})
+	if len(got) != 0 {
+		t.Fatalf("an unanswered ancestry deployed the bead: %q", texts(got))
+	}
+	if s := track.snapshot(); s.Waiting != 1 || s.HasOldest != true {
+		t.Fatalf("snapshot = %+v; want the bead waiting", s)
+	}
+}
+
+// TestTailDeploys_SnapshotMedianAndWaiting: the median covers the beads that
+// landed in the last hour and had a dispatch; every waiting landing is
+// counted, with the oldest one's age.
+func TestTailDeploys_SnapshotMedianAndWaiting(t *testing.T) {
+	t.Parallel()
+	// now = 14:00Z, so the median window is 13:00Z..14:00Z.
+	track := newTailDeploys(fixedNow,
+		fakeTailAncestry("aaaaaaaa x1", "bbbbbbbb x2", "dddddddd x3"), at("2026-09-30T11:00:00Z"))
+	track.observe([]tailLine{
+		daemonAt("2026-09-30T11:00:00Z", "spec_dispatch: dispatched: gt-d: slung to gastown/opal on x (seat 1/3)"),
+		daemonAt("2026-09-30T12:00:00Z", "landing_worker: [land] gt-d: landed dddddddd on origin/main (patch-id 1)"),
+		daemonAt("2026-09-30T12:30:00Z", "upgrade-restart: running x3 covers marker x3; cleared"),
+		daemonAt("2026-09-30T13:00:00Z", "spec_dispatch: dispatched: gt-a: slung to gastown/opal on x (seat 1/3)"),
+		daemonAt("2026-09-30T13:30:00Z", "landing_worker: [land] gt-a: landed aaaaaaaa on origin/main (patch-id 2)"),
+		daemonAt("2026-09-30T13:20:00Z", "spec_dispatch: dispatched: gt-b: slung to gastown/opal on x (seat 1/3)"),
+		daemonAt("2026-09-30T13:40:00Z", "landing_worker: [land] gt-b: landed bbbbbbbb on origin/main (patch-id 3)"),
+		daemonAt("2026-09-30T13:45:00Z", "upgrade-restart: running x2 covers marker x2; cleared"),
+		daemonAt("2026-09-30T13:45:00Z", "landing_worker: [land] gt-c: landed cccccccc on origin/main (patch-id 4)"),
+		daemonAt("2026-09-30T13:50:00Z", "upgrade-restart: running x1 covers marker x1; cleared"),
+	})
+	s := track.snapshot()
+	if s.Landed != 4 || s.Waiting != 1 || !s.HasOldest || s.OldestWaiting != 15*time.Minute {
+		t.Fatalf("snapshot = %+v; want 4 landed, 1 waiting for 15m", s)
+	}
+	// gt-a: 13:00 -> 13:50 is 50m; gt-b: 13:20 -> 13:45 is 25m; gt-d landed
+	// before the window so it is out; gt-c never deployed.
+	if !s.HasMedian || s.MedianBeads != 2 || s.MedianMin != 37.5 {
+		t.Fatalf("median = %+v; want 37.5 over 2 beads", s)
+	}
+}
+
+// TestTailDeploySource_WindowBoundsTheStreamNotTheTracker: a covering restart
+// older than the run's window still deploys the bead for the summary, but
+// neither its raw line nor its deploy line prints.
+func TestTailDeploySource_WindowBoundsTheStreamNotTheTracker(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	appendFile(t, filepath.Join(dir, "daemon.log"),
+		"2026/09/30 08:00:00 spec_dispatch: dispatched: gt-1: slung to gastown/opal on x (seat 1/3)\n"+
+			"2026/09/30 08:05:00 landing_worker: [land] gt-1: merged aa onto origin/main (bb) as cc; gating the merged tree\n"+
+			"2026/09/30 08:10:00 landing_worker: [land] gt-1: landed 1111aaaa on origin/main (patch-id 9e)\n"+
+			"2026/09/30 08:20:00 upgrade-restart: running 2222bbbb covers marker 2222bbbb; cleared\n"+
+			"2026/09/30 08:50:00 hm witness started\n")
+
+	track := newTailDeploys(fixedNow, fakeTailAncestry("1111aaaa 2222bbbb"), at("2026-09-30T13:30:00Z"))
+	s := &tailDeploySource{
+		inner: &daemonSource{dir: dir, cutoff: track.logCutoff(at("2026-09-30T13:30:00Z")), loc: tailTestLoc, now: fixedNow},
+		track: track, from: at("2026-09-30T13:30:00Z"),
+	}
+	got := texts(s.Poll())
+	if !reflect.DeepEqual(got, []string{"town daemon hm witness started"}) {
+		t.Fatalf("stream = %q; want only the line inside the window", got)
+	}
+	snap := track.snapshot()
+	if snap.Landed != 1 || snap.Waiting != 0 || !snap.HasMedian || snap.MedianMin != 20 {
+		t.Fatalf("snapshot = %+v; want the pre-window restart to have deployed gt-1", snap)
+	}
+}
+
+// TestTailDeploySource_PrintsTheDeployedLineInItsWindow: a restart inside the
+// run's window prints both its own line and the bead's deploy line, and the
+// rig filter still narrows the raw lines.
+func TestTailDeploySource_PrintsTheDeployedLineInItsWindow(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	appendFile(t, filepath.Join(dir, "daemon.log"),
+		"2026/09/30 08:00:00 spec_dispatch: dispatched: gt-1: slung to gastown/opal on x (seat 1/3)\n"+
+			"2026/09/30 08:05:00 landing_worker: [land] gt-1: merged aa onto origin/main (bb) as cc; gating the merged tree\n"+
+			"2026/09/30 08:10:00 landing_worker: [land] gt-1: landed 1111aaaa on origin/main (patch-id 9e)\n"+
+			"2026/09/30 08:20:00 upgrade-restart: running 2222bbbb covers marker 2222bbbb; cleared\n"+
+			"2026/09/30 08:45:00 Skipping crash detection for gastown/jade\n"+
+			"2026/09/30 08:50:00 hm witness started\n")
+
+	// --rig gastown: the restart line names no rig, so it does not print, but
+	// the deployed bead's line does, and the untracked hm line stays out.
+	from := at("2026-09-30T13:15:00Z")
+	track := newTailDeploys(fixedNow, fakeTailAncestry("1111aaaa 2222bbbb"), from)
+	s := &tailDeploySource{
+		inner: &daemonSource{dir: dir, cutoff: track.logCutoff(from), loc: tailTestLoc, now: fixedNow},
+		track: track, from: from, rigFilter: tailRigFilter("gastown"),
+	}
+	want := []string{
+		"town daemon Skipping crash detection for gastown/jade",
+		"town daemon gt-1 deployed in 20.0m (work 5.0m, land 5.0m, deploy 10.0m)",
+	}
+	if got := texts(s.Poll()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("stream = %q\nwant %q", got, want)
+	}
+}

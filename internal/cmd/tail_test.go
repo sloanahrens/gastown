@@ -284,6 +284,43 @@ func TestTailSummaryFieldsLine(t *testing.T) {
 	}
 }
 
+// TestTailSummaryFieldsLine_Deploy: the shipping-speed fields print the median
+// and the waiting count with its oldest age, and drop out whole until a
+// landing is tracked.
+func TestTailSummaryFieldsLine_Deploy(t *testing.T) {
+	t.Parallel()
+	f := tailSummaryFields{HasDeploy: true, Deploy: tailDeploySummary{
+		Landed: 4, HasMedian: true, MedianMin: 28.4, MedianBeads: 3,
+		Waiting: 2, OldestWaiting: 12 * time.Minute, HasOldest: true,
+	}}
+	want := "📊 dispatch→deploy 28.4m median (3) · waiting 2 (oldest 12m0s)"
+	if got := f.line(); got != want {
+		t.Fatalf("line = %q\nwant %q", got, want)
+	}
+	// Nothing waiting: the count still prints, so an idle queue reads as zero,
+	// not as a missing field.
+	f.Deploy = tailDeploySummary{Landed: 1, Waiting: 0}
+	if got := f.line(); got != "📊 waiting 0" {
+		t.Errorf("idle line = %q", got)
+	}
+	// No landing tracked: no deploy fields at all.
+	if got := (tailSummaryFields{}).line(); got != "" {
+		t.Errorf("untracked town prints %q", got)
+	}
+}
+
+// TestTailCommandHelp_DocumentsTheDeployedLine: --help names the deploy line
+// and the summary's deploy fields, so the operator can read the stream without
+// the source.
+func TestTailCommandHelp_DocumentsTheDeployedLine(t *testing.T) {
+	t.Parallel()
+	for _, want := range []string{"deployed in", "merge-base --is-ancestor", "median", "wait for a deploy"} {
+		if !strings.Contains(tailCmd.Long, want) {
+			t.Errorf("gt tail --help does not mention %q", want)
+		}
+	}
+}
+
 // TestTailSummaryTracker_PrintsWhenAFieldMovesAndNotMoreOften: the summary is
 // a state line, so it prints once, again when a field moves, and never twice
 // inside the window.
