@@ -806,8 +806,8 @@ writes `acks.json`:
 - `events.jsonl` — the transitions, append-only, rotated to `events.jsonl.1` at
   1 MB. Each line is `{ts, class, severity, text, key, state}`, `state` being
   `new` or `cleared`. The first four fields are the `alerts.jsonl` schema
-  (`gt-z2pdg`) that `gt tail`'s watch source reads, so transitions show in the
-  feed.
+  (`gt-z2pdg`) that `gt tail`'s watch source reads (see **Watch Feed**), so
+  transitions show in the feed.
 - `acks.json` — the acknowledged keys, `{acks: [{key, at}]}`, written by `gt
   attention ack` under a flock. The daemon reads it and never writes it, so
   neither process races the other's file.
@@ -816,6 +816,32 @@ An ack hides its item until the item's condition clears; the ack is then
 dropped, so a recurrence raises a new item rather than hiding behind the old
 ack. A state older than 15 minutes is stale — the daemon has stopped writing
 it — and `gt attention` prints a `STALE` header and exits 3.
+
+### Watch Feed
+
+Two files carry the town's own alerts in one schema, and `gt tail`'s watch
+source reads both under the `watch` tag:
+
+- `<town>/.runtime/watch/alerts.jsonl` — what the operator's monitor scripts
+  write (`gt-watch`, outside this repo): a stuck in-flight landing, a stuck
+  queue, a direct push, a stalled polecat, a slow `bd`, a health change.
+- `<town>/.runtime/attention/events.jsonl` — the daemon's attention
+  transitions (see **Attention Queue**); its first four fields are this
+  schema, and `key` and `state` are extra, which a reader ignores.
+
+One JSON object per line:
+
+| field | meaning |
+|-------|---------|
+| `ts` | RFC3339, when the condition was seen |
+| `class` | what kind of condition it is, e.g. `polecat-stall` |
+| `severity` | `low` or `high` |
+| `text` | the one-line description |
+
+A writer appends and rotates at 1 MB — the attention log renames to
+`events.jsonl.1` — and leaves a file it does not own alone. A line that is not
+an object with a `ts` and a `low`/`high` severity is skipped, with one note in
+the feed naming the file and the line's size, so a writer emitting one sees it.
 
 ### Hourly Report
 

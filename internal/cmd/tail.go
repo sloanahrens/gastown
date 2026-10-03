@@ -51,17 +51,19 @@ const tailMinInterval = 500 * time.Millisecond
 var tailCmd = &cobra.Command{
 	Use:     "tail",
 	GroupID: GroupDiag,
-	Short:   "Stream bd events, landings and daemon.log as one time-ordered log",
+	Short:   "Stream bd events, landings, daemon.log and the watch feed as one time-ordered log",
 	Long: `Print one time-ordered, plain-text stream of what the town is doing,
-merged from three read-only sources:
+merged from four read-only sources:
 
   events    each store's bd events journal (hq and every registered rig)
   landings  each rig's landings file (.runtime/landings/<rig>.jsonl)
   daemon    daemon/daemon.log, plus its rotated backups for --since
+  watch     the town's watch feed: .runtime/watch/alerts.jsonl and
+            .runtime/attention/events.jsonl
 
-Every line is "<local time> <tag> <text>": one short source tag, the daemon's
-"town" or the store's rig name, so a typical line fits a terminal without
-wrapping. The time is HH:MM:SS in local time; --iso prints RFC3339 with the
+Every line is "<local time> <tag> <text>": one short source tag — the daemon's
+"town", the store's rig name, or the watch feed's "watch" — so a typical line
+fits a terminal without wrapping. The time is HH:MM:SS in local time; --iso prints RFC3339 with the
 date and zone. --verbose keeps the "<rig> <kind>" columns, the form to cut or
 grep by position.
 
@@ -106,6 +108,15 @@ OVERSEER REVIEW, OVERSEER RULING, STEWARD or MERGE REJECTION prints its first
 a REJECTION, and yellow for a "(shadow)" verdict. Every other comment stays
 hidden, as it was.
 
+The watch feed is what the operator's monitor scripts and the daemon's
+attention queue see: one JSON object per line, {ts, class, severity, text}.
+Each line prints under the "watch" tag, colored by its severity alone — low
+yellow, high red — and the default view always shows it. The feed is the
+town's, not one store's, so no line carries a rig and --rig does not narrow
+it. A missing feed file is silence; a line that is not an alert is skipped
+with one note beside it. Writers append and rotate at 1 MB (see
+docs/reference.md).
+
 With -f, one dim "📊" line reports the town's state: the seats in use against
 the cap with the polecat:bead pairs holding them, the beads waiting to land,
 origin/main against the binary you are running, the open escalations, and the
@@ -134,10 +145,10 @@ Examples:
 }
 
 func init() {
-	tailCmd.Flags().StringVar(&tailRig, "rig", "", "Show one rig: its events and landings, and daemon lines naming it (hq for the town store)")
+	tailCmd.Flags().StringVar(&tailRig, "rig", "", "Show one rig: its events and landings, and daemon lines naming it (hq for the town store; the watch feed is town-wide)")
 	tailCmd.Flags().StringVar(&tailSince, "since", "15m", "Start at a duration back (15m, 2h, 1d; 0 = now) or a time (RFC3339, 2006-01-02T15:04:05, 2006-01-02 15:04, 2006-01-02)")
 	tailCmd.Flags().BoolVarP(&tailFollow, "follow", "f", false, "Keep polling every source and print new lines as they appear")
-	tailCmd.Flags().StringVar(&tailKind, "kind", strings.Join(tailKinds, ","), "Comma-separated sources to show: events, landings, daemon")
+	tailCmd.Flags().StringVar(&tailKind, "kind", strings.Join(tailKinds, ","), "Comma-separated sources to show: events, landings, daemon, watch")
 	tailCmd.Flags().DurationVar(&tailInterval, "interval", 3*time.Second, "Poll interval with --follow")
 	tailCmd.Flags().BoolVar(&tailAll, "all", false, "Show routine lines too: wisp events, heartbeats, handler skips, dog and patrol-scan chatter")
 	tailCmd.Flags().BoolVar(&tailVerbose, "verbose", false, "Same as --all, and keep the <rig> <kind> columns")
@@ -410,7 +421,7 @@ func buildTailSources(o tailOptions) (sources []tailSource, preface []tailLine, 
 			return nil, nil, fmt.Errorf("--rig %q: cannot read the rig registry: %w", o.rig, regErr)
 		}
 		preface = append(preface, tailLine{At: o.now(), Rig: "town", Kind: "tail",
-			Text: fmt.Sprintf("cannot read the rig registry (%v): showing hq and the daemon only", regErr)})
+			Text: fmt.Sprintf("cannot read the rig registry (%v): showing hq, the daemon and the watch feed only", regErr)})
 		rigs = nil
 	}
 	stores := append([]string{"hq"}, rigs...)
@@ -446,6 +457,11 @@ func buildTailSources(o tailOptions) (sources []tailSource, preface []tailLine, 
 			d.rigFilter = tailRigFilter(o.rig)
 		}
 		sources = append(sources, d)
+	}
+	if o.kinds[tailKindWatch] {
+		// The feed is the town's, not a store's; it carries no rig for --rig to
+		// select on, so it is read the same whatever --rig says.
+		sources = append(sources, newTailWatchSource(o.townRoot, o.cutoff, o.now))
 	}
 	return sources, preface, nil
 }
@@ -645,6 +661,11 @@ func runTailStream(ctx context.Context, w io.Writer, sources []tailSource, prefa
 // a state line about the town is not one of the town's own lines, so the
 // classifier's reading of a word it carries — "escalations", say — is not the
 // class it is drawn in.
+//
+// Class is how the line's source fixed its class, for a line whose own field
+// says how it should be drawn whatever its words say: a watch alert draws by
+// its severity, and an alert's text naming a failure it is not must not
+// repaint it. The zero class means the source fixed none.
 type tailLine struct {
 	At      time.Time
 	Rig     string
@@ -653,6 +674,7 @@ type tailLine struct {
 	Title   string
 	Verdict string
 	Plain   bool
+	Class   tailClass
 }
 
 // tailSource is one read-only input to the stream. Poll returns the lines
@@ -668,9 +690,12 @@ const (
 	tailKindEvents   = "events"
 	tailKindLandings = "landings"
 	tailKindDaemon   = "daemon"
+	// tailKindWatch is both the kind and the tag of a watch line: the feed is
+	// the town's, not one store's, so it prints no rig.
+	tailKindWatch = "watch"
 )
 
-var tailKinds = []string{tailKindEvents, tailKindLandings, tailKindDaemon}
+var tailKinds = []string{tailKindEvents, tailKindLandings, tailKindDaemon, tailKindWatch}
 
 // mergeTail concatenates the batches and orders them by time. The sort is
 // stable, so lines with equal times keep batch order and, within a batch,
@@ -743,12 +768,14 @@ func (v tailView) renderLine(l tailLine) string {
 // tailLineClass is the class a line is drawn in. Plain wins: the summary line
 // is a state line about the town, not one of the town's own lines, so the
 // classifier's reading of a word it carries ("escalations", say) is not the
-// class it is drawn in. A verdict takes the colors the loop's words ask for;
-// everything else is what its text says.
+// class it is drawn in. A class its source fixed — a watch alert's severity —
+// is next, then a verdict's own colors; everything else is what its text says.
 func tailLineClass(l tailLine) tailClass {
 	switch {
 	case l.Plain:
 		return tailClassPlain
+	case l.Class != tailClassPlain:
+		return l.Class
 	case l.Verdict != "":
 		return tailVerdictClass(l.Verdict)
 	}
