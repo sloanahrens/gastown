@@ -51,7 +51,7 @@ exit 0
 	t.Setenv("MOCK_BD_LOG", logPath)
 
 	b := NewIsolated(t.TempDir())
-	issues, err := b.ReadyDispatchable()
+	issues, err := b.readyDispatchable()
 	if err != nil {
 		t.Fatalf("ReadyDispatchable: %v", err)
 	}
@@ -228,7 +228,7 @@ exit 0
 	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	b := NewIsolated(t.TempDir())
-	issues, err := b.ReadyDispatchable()
+	issues, err := b.readyDispatchable()
 	if err == nil {
 		t.Fatal("expected ErrReadyTruncated (bd reported the page capped)")
 	}
@@ -363,7 +363,7 @@ esac
 	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	b := NewIsolated(t.TempDir())
-	issues, err := b.ReadyDispatchable()
+	issues, err := b.readyDispatchable()
 	if err != nil {
 		t.Fatalf("ReadyDispatchable: %v", err)
 	}

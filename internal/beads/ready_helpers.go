@@ -14,7 +14,7 @@ import "fmt"
 // client-side.
 func ReadyDispatchable(c Client) ([]*Issue, error) {
 	if b, ok := c.(*Beads); ok {
-		return b.ReadyDispatchable()
+		return b.readyDispatchable()
 	}
 	issues, err := c.Ready()
 	if issues == nil {
@@ -43,7 +43,7 @@ func dispatchableOnly(issues []*Issue) []*Issue {
 // only source of a molecule's ready set, and no Client method reaches it yet.
 func ReadyForMol(c Client, moleculeID string) ([]*Issue, error) {
 	if b, ok := c.(*Beads); ok {
-		return b.ReadyForMol(moleculeID)
+		return b.readyForMol(moleculeID)
 	}
 	return nil, fmt.Errorf("ready steps for molecule %s need a bd-backed Client (no Client method covers bd ready --mol)", moleculeID)
 }

@@ -1,7 +1,7 @@
 # Raw bd sites outside internal/beads still waiting to move onto typed beads
 # methods (gt-7iwy0.4.1), per file and kind: argv (beads.Command*,
-# ConfigureCommand, NewBdCmd, exec.Command("bd", ...)), BdCmd (package cmd's
-# alias of NewBdCmd) and BDRunner (the in-process bd test seam).
+# ConfigureCommand, exec.Command("bd", ...)), BdCmd (a bare BdCmd(...) call)
+# and BDRunner (the in-process bd test seam).
 # TestNoNewRawBdSites fails when a count grows, and when one shrinks without
 # this file being lowered to match. Never raise a count.
 # The lines with a "keep-raw (gt-7iwy0.4.1)" comment at the site are

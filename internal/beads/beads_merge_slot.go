@@ -74,11 +74,6 @@ func getMergeSlotBead(b Client) (*Issue, error) {
 	return b.Show(issues[0].ID)
 }
 
-// MergeSlotCreate creates the merge slot bead for the current rig.
-// The slot is used for serialized conflict resolution in the merge queue.
-// Returns the slot ID if successful.
-func (b *Beads) MergeSlotCreate() (string, error) { return MergeSlotCreate(b) }
-
 // MergeSlotCreate creates the merge slot bead through c.
 func MergeSlotCreate(b Client) (string, error) {
 	initial, _ := json.Marshal(mergeSlotData{})
@@ -93,10 +88,6 @@ func MergeSlotCreate(b Client) (string, error) {
 	return issue.ID, nil
 }
 
-// MergeSlotCheck checks the availability of the merge slot.
-// Returns the current status including holder and waiters if held.
-func (b *Beads) MergeSlotCheck() (*MergeSlotStatus, error) { return MergeSlotCheck(b) }
-
 // MergeSlotCheck checks the merge slot through c. A missing slot is
 // reported as Error "not found", not as an error.
 func MergeSlotCheck(b Client) (*MergeSlotStatus, error) {
@@ -110,20 +101,9 @@ func MergeSlotCheck(b Client) (*MergeSlotStatus, error) {
 	return mergeSlotStatusFromIssue(issue), nil
 }
 
-// MergeSlotAcquire attempts to acquire the merge slot for exclusive access.
-// If holder is empty, defaults to the configured actor.
-// If addWaiter is true and the slot is held, the requester is added to the
-// waiters queue (informational; callers use retries for contention handling).
-// Returns the acquisition result.
-func (b *Beads) MergeSlotAcquire(holder string, addWaiter bool) (*MergeSlotStatus, error) {
-	if holder == "" {
-		holder = b.getActor()
-	}
-	return MergeSlotAcquire(b, holder, addWaiter)
-}
-
-// MergeSlotAcquire acquires the merge slot through c for holder, with
-// (*Beads).MergeSlotAcquire's rules; holder is used as given.
+// MergeSlotAcquire acquires the merge slot through c for holder. holder is
+// used as given; the deleted (*Beads) wrapper was the one that defaulted an
+// empty holder to the store's actor.
 func MergeSlotAcquire(b Client, holder string, addWaiter bool) (*MergeSlotStatus, error) {
 	issue, err := getMergeSlotBead(b)
 	if err != nil {
@@ -182,12 +162,7 @@ func MergeSlotAcquire(b Client, holder string, addWaiter bool) (*MergeSlotStatus
 	}, nil
 }
 
-// MergeSlotRelease releases the merge slot after conflict resolution completes.
-// If holder is provided, it verifies the slot is held by that holder before releasing.
-func (b *Beads) MergeSlotRelease(holder string) error { return MergeSlotRelease(b, holder) }
-
-// MergeSlotRelease releases the merge slot through c, with
-// (*Beads).MergeSlotRelease's rules.
+// MergeSlotRelease releases the merge slot through c.
 func MergeSlotRelease(b Client, holder string) error {
 	issue, err := getMergeSlotBead(b)
 	if err != nil {
@@ -224,10 +199,6 @@ func MergeSlotRelease(b Client, holder string) error {
 
 	return nil
 }
-
-// MergeSlotEnsureExists creates the merge slot if it doesn't exist.
-// This is idempotent - safe to call multiple times.
-func (b *Beads) MergeSlotEnsureExists() (string, error) { return MergeSlotEnsureExists(b) }
 
 // MergeSlotEnsureExists creates the merge slot through c if it is missing,
 // and returns its ID.

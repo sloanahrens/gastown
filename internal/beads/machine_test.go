@@ -310,10 +310,6 @@ func TestCommandConstructorsPutBdInMachineMode(t *testing.T) {
 	dir := t.TempDir()
 	ctx := t.Context()
 	cmds := map[string]*Cmd{
-		"Command":                      Command(dir, "", MutationRouting, "show", "gt-1"),
-		"CommandContext":               CommandContext(ctx, dir, "", ReadOnlyRouting, "list"),
-		"CommandContextBounded":        CommandContextBounded(ctx, dir, "", ReadOnlyPinned, "list"),
-		"CommandContextWithBin":        CommandContextWithBin(ctx, "/opt/bin/bd", dir, "", MutationPinned, "list"),
 		"CommandWithEnv":               CommandWithEnv(dir, []string{"A=1"}, "list"),
 		"CommandWithEnv nil env":       CommandWithEnv(dir, nil, "list"),
 		"CommandContextWithEnv":        CommandContextWithEnv(ctx, dir, []string{"A=1"}, "list"),
@@ -328,9 +324,9 @@ func TestCommandConstructorsPutBdInMachineMode(t *testing.T) {
 	}
 	// bd sql is the exempt verb on every constructor.
 	for name, cmd := range map[string]*Cmd{
-		"Command":                Command(dir, "", MutationRouting, "sql", "SELECT 1"),
-		"CommandContextBounded":  CommandContextBounded(ctx, dir, "", ReadOnlyPinned, "sql", "SELECT 1"),
 		"CommandWithEnv":         CommandWithEnv(dir, []string{"A=1"}, "sql", "SELECT 1"),
+		"CommandContextWithEnv":  CommandContextWithEnv(ctx, dir, []string{"A=1"}, "sql", "SELECT 1"),
+		"CommandWithPath":        CommandWithPath("/opt/bin/bd", dir, nil, "sql", "SELECT 1"),
 		"CommandContextWithPath": CommandContextWithPath(ctx, "/opt/bin/bd", dir, nil, "sql", "SELECT 1"),
 	} {
 		if _, ok := lastEnvValue(cmd.Environ(), "BD_MACHINE"); ok {

@@ -2685,9 +2685,10 @@ func (b *Beads) ReadyAll() ([]*Issue, error) {
 	return issues, nil
 }
 
-// ReadyDispatchable returns ready issues with the town's bookkeeping
-// families (mail, escalations, identity, merge queue, event records)
-// excluded server-side by the same filter Ready sends (gt-0q80): the
+// readyDispatchable is the *Beads path behind the exported free function
+// ReadyDispatchable (ready_helpers.go): ready issues with the town's
+// bookkeeping families (mail, escalations, identity, merge queue, event
+// records) excluded server-side by the same filter Ready sends (gt-0q80): the
 // --exclude-label/--exclude-type flags to bd. The exclusion travels with the
 // query, so it holds no matter which table a bead's labels live in at scan
 // time and whether they were hydrated into the response — a filterless fetch
@@ -2696,7 +2697,7 @@ func (b *Beads) ReadyAll() ([]*Issue, error) {
 // On a bd build old enough to reject the exclude flags, this falls back to
 // the unfiltered ready query; the caller's own IsNonDispatchableBead pass
 // remains the backstop in that case.
-func (b *Beads) ReadyDispatchable() ([]*Issue, error) {
+func (b *Beads) readyDispatchable() ([]*Issue, error) {
 	out, err := b.runReadyCLI(readyCliArgs()...)
 	if err != nil {
 		if strings.Contains(err.Error(), "unknown flag") {
@@ -2777,12 +2778,13 @@ func parseReadyMolOutput(out []byte) ([]*Issue, error) {
 	return issues, nil
 }
 
-// ReadyForMol returns ready steps within a specific molecule. The molecule's
-// own issue is never one of them.
-// Delegates to bd ready --mol which uses beads' canonical blocking semantics
-// (blocked_issues_cache), handling all blocking types, transitive propagation,
-// and conditional-blocks resolution.
-func (b *Beads) ReadyForMol(moleculeID string) ([]*Issue, error) {
+// readyForMol is the *Beads path behind the exported free function
+// ReadyForMol (ready_helpers.go): ready steps within a specific molecule.
+// The molecule's own issue is never one of them. It delegates to bd ready
+// --mol, which uses beads' canonical blocking semantics
+// (blocked_issues_cache), handling all blocking types, transitive
+// propagation, and conditional-blocks resolution.
+func (b *Beads) readyForMol(moleculeID string) ([]*Issue, error) {
 	out, err := b.run("ready", "--mol", moleculeID, "--json", "-n", "100")
 	if err != nil {
 		return nil, err
@@ -2808,23 +2810,6 @@ func withoutMoleculeRoot(steps []*Issue, moleculeID string) []*Issue {
 		kept = append(kept, step)
 	}
 	return kept
-}
-
-// ReadyWithType returns ready issues filtered by label.
-// Uses bd ready --label flag for server-side filtering.
-// The issueType is converted to a gt:<type> label (e.g., "molecule" -> "gt:molecule").
-func (b *Beads) ReadyWithType(issueType string) ([]*Issue, error) {
-	out, err := b.run("ready", "--json", "--label", "gt:"+issueType, "-n", "100")
-	if err != nil {
-		return nil, err
-	}
-
-	var issues []*Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd ready output: %w", err)
-	}
-
-	return issues, nil
 }
 
 // Show returns detailed information about an issue.
@@ -2958,36 +2943,6 @@ func parseChildrenMapJSON(raw []byte) (map[string][]*Issue, error) {
 		}
 	}
 	return out, nil
-}
-
-// FindLatestIssueByTitleAndAssignee finds the newest issue matching the given title and assignee.
-func (b *Beads) FindLatestIssueByTitleAndAssignee(title, assignee string) (*Issue, error) {
-	out, err := b.run("list", "--json", "--limit", "0", "--title", title, "--assignee", assignee)
-	if err != nil {
-		return nil, fmt.Errorf("bd list: %w", err)
-	}
-
-	var issues []*Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd list output: %w", err)
-	}
-	if len(issues) == 0 {
-		return nil, ErrNotFound
-	}
-
-	var newest *Issue
-	for _, issue := range issues {
-		if issue.Title != title || issue.Assignee != assignee {
-			continue
-		}
-		if newest == nil || issue.CreatedAt > newest.CreatedAt {
-			newest = issue
-		}
-	}
-	if newest == nil {
-		return nil, ErrNotFound
-	}
-	return newest, nil
 }
 
 // ShowMultiple fetches multiple issues by ID, grouped by routed database.
@@ -3191,10 +3146,10 @@ func (b *Beads) Create(opts CreateOptions) (*Issue, error) {
 	return &issue, nil
 }
 
-// CreateWithID creates an issue with a specific ID.
-// This is useful for agent beads, role beads, and other beads that need
-// deterministic IDs rather than auto-generated ones.
-func (b *Beads) CreateWithID(id string, opts CreateOptions) (*Issue, error) {
+// createWithID creates an issue with a specific ID, the create path the
+// agent-bead store uses. It is useful for agent beads, role beads, and other
+// beads that need deterministic IDs rather than auto-generated ones.
+func (b *Beads) createWithID(id string, opts CreateOptions) (*Issue, error) {
 	// Guard against flag-like titles (gt-e0kx5: --help garbage beads)
 	if IsFlagLikeTitle(opts.Title) {
 		return nil, fmt.Errorf("refusing to create bead: %w (got %q)", ErrFlagTitle, opts.Title)
@@ -3215,7 +3170,7 @@ func (b *Beads) CreateWithID(id string, opts CreateOptions) (*Issue, error) {
 			baseEnv:    b.baseEnv,
 			actor:      b.actor,
 		})
-		return bdForCreate.CreateWithID(id, opts)
+		return bdForCreate.createWithID(id, opts)
 	}
 
 	args := []string{"create", "--json", "--id=" + id}
@@ -3264,115 +3219,6 @@ func (b *Beads) CreateWithID(id string, opts CreateOptions) (*Issue, error) {
 	}
 
 	return &issue, nil
-}
-
-// SearchOptions specifies options for searching issues.
-type SearchOptions struct {
-	Query        string // Text query to search titles and descriptions
-	Status       string // "open", "closed", "all"
-	Label        string // Label filter (e.g., "gt:bug")
-	Limit        int    // Max results (0 = default)
-	DescContains string // Filter by description substring
-}
-
-// Search searches issues by text query across title, description, and ID.
-func (b *Beads) Search(opts SearchOptions) ([]*Issue, error) {
-	args := []string{"search", "--json"}
-
-	if opts.Query != "" {
-		args = append(args, opts.Query)
-	}
-	if opts.Status != "" {
-		args = append(args, "--status="+opts.Status)
-	}
-	if opts.Label != "" {
-		args = append(args, "--label="+opts.Label)
-	}
-	if opts.Limit > 0 {
-		args = append(args, fmt.Sprintf("--limit=%d", opts.Limit))
-	}
-	if opts.DescContains != "" {
-		args = append(args, "--desc-contains="+opts.DescContains)
-	}
-
-	out, err := b.run(args...)
-	if err != nil {
-		return nil, err
-	}
-
-	var issues []*Issue
-	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, fmt.Errorf("parsing bd search output: %w", err)
-	}
-
-	return issues, nil
-}
-
-// FindOpenBugsByTitle searches for existing open bugs with titles similar to the given title.
-// Used for duplicate detection before filing new test-failure bugs.
-// Returns matching issues sorted by relevance (best match first).
-func (b *Beads) FindOpenBugsByTitle(title string) ([]*Issue, error) {
-	// Extract key terms from the title for searching.
-	// Test failure titles typically contain the test name or error description.
-	issues, err := b.Search(SearchOptions{
-		Query:  title,
-		Status: "open",
-		Label:  "gt:bug",
-		Limit:  10,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("searching for duplicate bugs: %w", err)
-	}
-
-	return issues, nil
-}
-
-// CreateIfNoDuplicate creates a new bug only if no existing open bug has a similar title.
-// If a duplicate is found, it returns the existing issue and a nil error.
-// The returned bool is true if a new issue was created, false if an existing duplicate was found.
-func (b *Beads) CreateIfNoDuplicate(opts CreateOptions) (*Issue, bool, error) {
-	if opts.Title == "" {
-		return nil, false, fmt.Errorf("title is required for duplicate detection")
-	}
-
-	// Search for existing open bugs with similar titles
-	existing, err := b.FindOpenBugsByTitle(opts.Title)
-	if err != nil {
-		// If search fails, fall through to create (fail-open)
-		issue, createErr := b.Create(opts)
-		if createErr != nil {
-			return nil, false, createErr
-		}
-		return issue, true, nil
-	}
-
-	// Check for title similarity using normalized comparison
-	normalizedTitle := normalizeBugTitle(opts.Title)
-	for _, issue := range existing {
-		if normalizeBugTitle(issue.Title) == normalizedTitle {
-			// Exact normalized match — this is a duplicate
-			return issue, false, nil
-		}
-	}
-
-	// No duplicate found, create the new bug
-	issue, err := b.Create(opts)
-	if err != nil {
-		return nil, false, err
-	}
-	return issue, true, nil
-}
-
-// normalizeBugTitle normalizes a bug title for duplicate comparison.
-// Strips common prefixes, whitespace, and case differences so that
-// "Pre-existing failure: test_foo fails" matches "pre-existing failure: test_foo fails".
-func normalizeBugTitle(title string) string {
-	t := strings.ToLower(strings.TrimSpace(title))
-	// Strip common prefixes that the refinery adds
-	for _, prefix := range []string{"pre-existing failure: ", "pre-existing: ", "test failure: "} {
-		t = strings.TrimPrefix(t, prefix)
-	}
-	return t
 }
 
 // Update updates an existing issue.
@@ -3751,15 +3597,6 @@ func (b *Beads) DepList(id, depType string) ([]IssueDep, error) {
 func (b *Beads) RemoveDependency(issue, dependsOn string) error {
 	_, err := b.run("dep", "remove", issue, dependsOn)
 	return err
-}
-
-// Stats returns repository statistics.
-func (b *Beads) Stats() (string, error) {
-	out, err := b.run("stats")
-	if err != nil {
-		return "", err
-	}
-	return string(out), nil
 }
 
 // IsBeadsRepo checks if the working directory is a beads repository.

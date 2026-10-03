@@ -2,7 +2,6 @@ package beads
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1089,7 +1088,7 @@ exit 0
 
 			bd := New(workerDir)
 			if tc.withID {
-				if _, err := bd.CreateWithID("tr-fixed", tc.opts); err != nil {
+				if _, err := bd.createWithID("tr-fixed", tc.opts); err != nil {
 					t.Fatalf("CreateWithID: %v", err)
 				}
 			} else if _, err := bd.Create(tc.opts); err != nil {
@@ -2094,57 +2093,6 @@ func TestIsBeadsRepo(t *testing.T) {
 	// Should return false since there's no .beads directory
 	if b.IsBeadsRepo() {
 		t.Error("IsBeadsRepo returned true for non-beads directory")
-	}
-}
-
-// TestNormalizeBugTitle tests title normalization for duplicate detection.
-func TestNormalizeBugTitle(t *testing.T) {
-	tests := []struct {
-		a, b string
-		want bool // should they match?
-	}{
-		// Exact match after normalization
-		{"test_foo fails", "test_foo fails", true},
-		{"Test_foo Fails", "test_foo fails", true},
-		{" test_foo fails ", "test_foo fails", true},
-
-		// Common prefix stripping
-		{"Pre-existing failure: test_foo fails", "test_foo fails", true},
-		{"Pre-existing failure: test_foo fails", "Pre-existing: test_foo fails", true},
-		{"Test failure: test_foo fails", "test_foo fails", true},
-
-		// Different failures should NOT match
-		{"test_foo fails", "test_bar fails", false},
-		{"lint error in main.go", "test_foo fails", false},
-	}
-
-	for _, tt := range tests {
-		na := normalizeBugTitle(tt.a)
-		nb := normalizeBugTitle(tt.b)
-		got := na == nb
-		if got != tt.want {
-			t.Errorf("normalizeBugTitle(%q) == normalizeBugTitle(%q): got %v, want %v (normalized: %q vs %q)",
-				tt.a, tt.b, got, tt.want, na, nb)
-		}
-	}
-}
-
-// TestSearchOptions verifies SearchOptions fields.
-func TestSearchOptions(t *testing.T) {
-	opts := SearchOptions{
-		Query:  "test failure",
-		Status: "open",
-		Label:  "gt:bug",
-		Limit:  5,
-	}
-	if opts.Query != "test failure" {
-		t.Errorf("Query = %q, want 'test failure'", opts.Query)
-	}
-	if opts.Status != "open" {
-		t.Errorf("Status = %q, want 'open'", opts.Status)
-	}
-	if opts.Label != "gt:bug" {
-		t.Errorf("Label = %q, want 'gt:bug'", opts.Label)
 	}
 }
 
@@ -3715,105 +3663,6 @@ func TestParseWispTTLKey(t *testing.T) {
 				t.Errorf("ParseWispTTLKey(%q) type = %q, want %q", tt.key, gotType, tt.wantType)
 			}
 		})
-	}
-}
-
-// TestDelegationStruct tests the Delegation struct serialization.
-func TestDelegationStruct(t *testing.T) {
-	tests := []struct {
-		name       string
-		delegation Delegation
-		wantJSON   string
-	}{
-		{
-			name: "full delegation",
-			delegation: Delegation{
-				Parent:      "hop://accenture.com/eng/proj-123/task-a",
-				Child:       "hop://alice@example.com/main-town/gastown/gt-xyz",
-				DelegatedBy: "hop://accenture.com",
-				DelegatedTo: "hop://alice@example.com",
-				Terms: &DelegationTerms{
-					Portion:     "backend-api",
-					Deadline:    "2025-06-01",
-					CreditShare: 80,
-				},
-				CreatedAt: "2025-01-15T10:00:00Z",
-			},
-			wantJSON: `{"parent":"hop://accenture.com/eng/proj-123/task-a","child":"hop://alice@example.com/main-town/gastown/gt-xyz","delegated_by":"hop://accenture.com","delegated_to":"hop://alice@example.com","terms":{"portion":"backend-api","deadline":"2025-06-01","credit_share":80},"created_at":"2025-01-15T10:00:00Z"}`,
-		},
-		{
-			name: "minimal delegation",
-			delegation: Delegation{
-				Parent:      "gt-abc",
-				Child:       "gt-xyz",
-				DelegatedBy: "steve",
-				DelegatedTo: "alice",
-			},
-			wantJSON: `{"parent":"gt-abc","child":"gt-xyz","delegated_by":"steve","delegated_to":"alice"}`,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := json.Marshal(tt.delegation)
-			if err != nil {
-				t.Fatalf("json.Marshal failed: %v", err)
-			}
-			if string(got) != tt.wantJSON {
-				t.Errorf("json.Marshal = %s, want %s", string(got), tt.wantJSON)
-			}
-
-			// Test round-trip
-			var parsed Delegation
-			if err := json.Unmarshal(got, &parsed); err != nil {
-				t.Fatalf("json.Unmarshal failed: %v", err)
-			}
-			if parsed.Parent != tt.delegation.Parent {
-				t.Errorf("parsed.Parent = %s, want %s", parsed.Parent, tt.delegation.Parent)
-			}
-			if parsed.Child != tt.delegation.Child {
-				t.Errorf("parsed.Child = %s, want %s", parsed.Child, tt.delegation.Child)
-			}
-			if parsed.DelegatedBy != tt.delegation.DelegatedBy {
-				t.Errorf("parsed.DelegatedBy = %s, want %s", parsed.DelegatedBy, tt.delegation.DelegatedBy)
-			}
-			if parsed.DelegatedTo != tt.delegation.DelegatedTo {
-				t.Errorf("parsed.DelegatedTo = %s, want %s", parsed.DelegatedTo, tt.delegation.DelegatedTo)
-			}
-		})
-	}
-}
-
-// TestDelegationTerms tests the DelegationTerms struct.
-func TestDelegationTerms(t *testing.T) {
-	terms := &DelegationTerms{
-		Portion:            "frontend",
-		Deadline:           "2025-03-15",
-		AcceptanceCriteria: "All tests passing, code reviewed",
-		CreditShare:        70,
-	}
-
-	got, err := json.Marshal(terms)
-	if err != nil {
-		t.Fatalf("json.Marshal failed: %v", err)
-	}
-
-	var parsed DelegationTerms
-	if err := json.Unmarshal(got, &parsed); err != nil {
-		t.Fatalf("json.Unmarshal failed: %v", err)
-	}
-
-	if parsed.Portion != terms.Portion {
-		t.Errorf("parsed.Portion = %s, want %s", parsed.Portion, terms.Portion)
-	}
-	if parsed.Deadline != terms.Deadline {
-		t.Errorf("parsed.Deadline = %s, want %s", parsed.Deadline, terms.Deadline)
-	}
-	if parsed.AcceptanceCriteria != terms.AcceptanceCriteria {
-		t.Errorf("parsed.AcceptanceCriteria = %s, want %s", parsed.AcceptanceCriteria, terms.AcceptanceCriteria)
-	}
-	if parsed.CreditShare != terms.CreditShare {
-		t.Errorf("parsed.CreditShare = %d, want %d", parsed.CreditShare, terms.CreditShare)
 	}
 }
 
