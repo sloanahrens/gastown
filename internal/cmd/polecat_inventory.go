@@ -557,17 +557,22 @@ func buildPolecatSeatItem(rigName, name string, fields *beads.AgentFields, activ
 // ~300 concurrent processes. Retuning it for one workload moves the other, so
 // check both before changing it.
 //
-// The multiplier is deliberately modest. Both probes are mostly waiting on
-// subprocesses rather than burning CPU, so more goroutines than cores is
-// right; but the work is a few tens of milliseconds per unit even locally, so
-// the pool only needs to overlap waves, not maximize throughput.
+// The width is capped at four, and the cap is a measurement, not a guess. A
+// probe is a fork/exec of git or bd from a process whose heap already holds
+// the rig's beads, and parallel forks of a large process contend in the
+// kernel: on a 24-core macOS host `gt polecat list --all` (30 polecats, three
+// rigs) took 0.8s wall at any width from 4 to 12, but 4.0s of system CPU at 12
+// (spiking past 11s when the host was busy), 2.6s at 6, 1.8s at 4 and 1.6s at
+// 3. Below 3 the wall time starts to grow. The extra width bought nothing but
+// kernel time, and that time competes with the landing gate for CPU. Retuning
+// it for one workload moves the other, so check both before changing it.
 func polecatSeatPoolSize() int {
 	size := runtime.GOMAXPROCS(0) * 2
-	if size < 4 {
-		size = 4
+	if size < 2 {
+		size = 2
 	}
-	if size > 12 {
-		size = 12
+	if size > 4 {
+		size = 4
 	}
 	return size
 }
