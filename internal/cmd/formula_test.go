@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/pflag"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/formula"
@@ -274,7 +275,51 @@ func TestAttachmentFormulaVarsRoundTripsPersistedVars(t *testing.T) {
 	}
 }
 
-func TestMolIdeaToPlanDispatchesDirectlyWithoutConvoys(t *testing.T) {
+// formulaStepText returns one [[steps]] block, "" when no block carries id.
+func formulaStepText(text, id string) string {
+	for _, block := range strings.Split(text, "[[steps]]") {
+		if strings.Contains(block, "id = \""+id+"\"") {
+			return block
+		}
+	}
+	return ""
+}
+
+// commandFlags returns the name of every --flag on the lines of body that run
+// cmd, folding a line ending in a backslash into the next.
+func commandFlags(body, cmd string) []string {
+	var flags []string
+	lines := strings.Split(body, "\n")
+	for i := 0; i < len(lines); i++ {
+		if !strings.Contains(lines[i], cmd) {
+			continue
+		}
+		joined := lines[i]
+		for strings.HasSuffix(strings.TrimSpace(joined), "\\") && i+1 < len(lines) {
+			i++
+			joined += " " + lines[i]
+		}
+		for _, field := range strings.Fields(joined) {
+			if !strings.HasPrefix(field, "--") {
+				continue
+			}
+			// pflag Lookup takes the name without its dashes: strip "--" and
+			// anything from "=" on.
+			name := strings.TrimPrefix(strings.Trim(field, `"'`), "--")
+			if eq := strings.IndexByte(name, '='); eq >= 0 {
+				name = name[:eq]
+			}
+			flags = append(flags, name)
+		}
+	}
+	return flags
+}
+
+// TestMolIdeaToPlanRewrittenStepsRunRealCommands pins the two dispatch steps
+// gt-gzhin.5 rewrote. The formula's other dispatch blocks carry phantom gt
+// sling flags that predate the slice and gt-6lm4o owns; only these two must
+// name commands and flags that exist, or the step fails the moment it runs.
+func TestMolIdeaToPlanRewrittenStepsRunRealCommands(t *testing.T) {
 	t.Parallel()
 
 	idea, err := formula.GetEmbeddedFormulaContent("mol-idea-to-plan")
@@ -282,26 +327,42 @@ func TestMolIdeaToPlanDispatchesDirectlyWithoutConvoys(t *testing.T) {
 		t.Fatalf("GetEmbeddedFormulaContent(mol-idea-to-plan): %v", err)
 	}
 	ideaText := string(idea)
-	for _, bad := range []string{"--problem=", "--context=", "--plan="} {
-		if strings.Contains(ideaText, bad) {
-			t.Fatalf("mol-idea-to-plan still contains invalid gt formula run flag %q", bad)
-		}
-	}
 	if strings.Contains(ideaText, "<design-id>") {
 		t.Fatal("mol-idea-to-plan still references stale <design-id> output paths")
 	}
 	if strings.Contains(ideaText, ".designs/<review-id>") {
 		t.Fatal("mol-idea-to-plan conflates design output ID with PRD review ID")
 	}
-	// gt-gzhin.5 deleted the convoy formulas and the convoy run path, so the
-	// parallel review and design steps dispatch polecats directly instead.
-	for _, want := range []string{
-		"gt sling --prompt=",
-		".prd-reviews/{{review_id}}/prd-review.md",
-		".designs/<design-review-id>/design-doc.md",
-	} {
-		if !strings.Contains(ideaText, want) {
-			t.Fatalf("mol-idea-to-plan missing %q", want)
+
+	for _, id := range []string{"prd-review", "generate-plan"} {
+		body := formulaStepText(ideaText, id)
+		if body == "" {
+			t.Fatalf("mol-idea-to-plan has no step %q", id)
+		}
+		// The review prompt rides on the bead and the report comes back as a
+		// note, because gt sling carries no prompt flag.
+		for _, want := range []string{"gt bead create", "gt sling", "gt bead note"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("mol-idea-to-plan %s missing %q", id, want)
+			}
+		}
+		for _, bad := range []string{"--prompt", "--mail-back"} {
+			if strings.Contains(body, bad) {
+				t.Errorf("mol-idea-to-plan %s still uses %s, which gt sling does not define", id, bad)
+			}
+		}
+		for _, cmd := range []struct {
+			text  string
+			flags *pflag.FlagSet
+		}{
+			{"gt sling", slingCmd.Flags()},
+			{"gt bead create", beadCreateCmd.Flags()},
+		} {
+			for _, flag := range commandFlags(body, cmd.text) {
+				if cmd.flags.Lookup(flag) == nil {
+					t.Errorf("mol-idea-to-plan %s: %s has no %s flag", id, cmd.text, flag)
+				}
+			}
 		}
 	}
 }

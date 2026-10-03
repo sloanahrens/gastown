@@ -41,11 +41,11 @@ runs autonomously — polecats review, orchestrator applies fixes, repeat.
 ## Orchestration Model
 
 This is a workflow formula. The orchestrating crew worker runs through
-steps sequentially. The parallel review steps dispatch one polecat per review
-dimension with `gt sling --mail-back`, collect their reports from mail, and
-consolidate them before proceeding. The iterative plan review rounds dispatch
-2 polecats each, await their findings, apply fixes to the plan, then proceed to
-the next round.
+steps sequentially. The parallel review steps create one review bead per
+dimension, sling it to a polecat, and read the report from the bead's notes
+before consolidating. The iterative plan review rounds dispatch 2 polecats
+each, await their findings, apply fixes to the plan, then proceed to the next
+round.
 
 ## Variables
 
@@ -124,8 +124,11 @@ their reports into a single review file.
 
 **1. Dispatch the 6 reviewers:**
 
-Each polecat reads the draft PRD, assesses one dimension, and mails its report
-back. The dimensions:
+Each reviewer is one polecat with one review. Create a bead per dimension whose
+description is that dimension's prompt, then sling the bead at the rig: the
+polecat reads the description and records its report as a note on the same
+bead. `gt:keep` holds a review bead off the spec dispatcher's board, so the
+sling here is the only thing that dispatches it. The dimensions:
 
 - requirements — success criteria and acceptance conditions
 - gaps — missing requirements nobody thought of
@@ -134,21 +137,27 @@ back. The dimensions:
 - scope — MVP definition and scope creep risk
 - stakeholders — unconsidered actors and conflicting needs
 
-Run one sling per dimension, giving each its own `--prompt`:
-
 ```bash
-gt sling --prompt="Review the PRD draft for the 'requirements' dimension.
+BEAD=$(gt bead create "PRD review: requirements" --type=task --label=gt:keep \
+  --quiet --description="
+Review the PRD draft for the 'requirements' dimension.
 Read: .prd-reviews/{{review_id}}/prd-draft.md
 Assess whether the requirements are complete enough to build from: missing
 success criteria, undefined acceptance conditions, unmeasured outcomes, missing
 non-functional requirements, happy-path-only thinking.
 Report Critical Gaps (each with why it matters), Important Considerations, and
 Observations, plus a Confidence line (High/Medium/Low). Classify each gap
-must-fix or should-fix. Mail your full report back when done." --mail-back
+must-fix or should-fix.
+
+Record this report as a note on the bead on your hook, then stop:
+  gt bead note <bead-id> '<report>'
+  gt done --cleanup-status clean
+")
+gt sling "$BEAD" gastown
 ```
 
-For the other five, keep the same prompt shape and change only the dimension
-name and the assess line:
+For the other five, keep the same command shape and change only the bead title,
+the dimension name and the assess line:
 
 - `gaps` — requirements missing entirely: unstated needs, edge cases, failure
   modes, rollback and recovery.
@@ -162,8 +171,9 @@ name and the assess line:
 
 **2. Await the reports:**
 ```bash
-gt mail inbox   # repeat until all 6 have reported
+bd show <bead-id>   # closed, with the report in its notes
 ```
+Repeat until all 6 beads carry a report note.
 
 **3. Consolidate:**
 Write the six reports into one review at
@@ -257,8 +267,11 @@ their input into an implementation plan.
 
 **1. Dispatch the 6 designers:**
 
-Each polecat reads the refined PRD, designs its dimension, and mails a report
-back. The dimensions:
+Each designer is one polecat with one design dimension. Create a bead per
+dimension whose description is that dimension's prompt, then sling the bead at
+the rig: the polecat reads the description and records its report as a note on
+the same bead. `gt:keep` holds a review bead off the spec dispatcher's board,
+so the sling here is the only thing that dispatches it. The dimensions:
 
 - api — interface design and developer ergonomics
 - data — data model, storage, migrations
@@ -267,19 +280,25 @@ back. The dimensions:
 - security — threat model and attack surface
 - integration — how it fits the existing system
 
-Run one sling per dimension, giving each its own `--prompt`:
-
 ```bash
-gt sling --prompt="Design the 'api' dimension of an implementation plan.
+BEAD=$(gt bead create "Design: api" --type=task --label=gt:keep \
+  --quiet --description="
+Design the 'api' dimension of an implementation plan.
 Read the PRD with clarifications: .prd-reviews/{{review_id}}/prd-draft.md
 Propose the interfaces, call shapes, and developer ergonomics this feature
 should expose.
 Report: Proposed Design, Open Questions, Trade-offs, and anything the plan must
-account for. Mail your full report back when done." --mail-back
+account for.
+
+Record this report as a note on the bead on your hook, then stop:
+  gt bead note <bead-id> '<report>'
+  gt done --cleanup-status clean
+")
+gt sling "$BEAD" gastown
 ```
 
-For the other five, keep the same prompt shape and change only the dimension
-name and the design line:
+For the other five, keep the same command shape and change only the bead title,
+the dimension name and the design line:
 
 - `data` — data model, storage, migrations, retention.
 - `ux` — user experience and CLI/UI ergonomics.
@@ -289,8 +308,9 @@ name and the design line:
 
 **2. Await the reports:**
 ```bash
-gt mail inbox   # repeat until all 6 have reported
+bd show <bead-id>   # closed, with the report in its notes
 ```
+Repeat until all 6 beads carry a report note.
 
 **3. Consolidate into a design doc:**
 Write the six reports into `.designs/<design-review-id>/design-doc.md`:
