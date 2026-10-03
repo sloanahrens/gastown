@@ -37,10 +37,13 @@ var (
 
 const omLogTimeLayout = "2006/01/02 15:04:05"
 
-// omStage is one gated merge's stage timings, off a "stages:" log line.
+// omStage is one gated merge's stage timings, off a "stages:" log line. A
+// stage the line does not name is nil; om is nil when the review did not run.
 type omStage struct {
 	At   time.Time
 	Bead string
+	Lint *time.Duration
+	Gate *time.Duration
 	OM   *time.Duration
 }
 
@@ -177,7 +180,8 @@ func (r *omReader) parseLogLine(line string) {
 	}
 	if m := omStageRe.FindStringSubmatch(line); m != nil {
 		if at, err := time.ParseInLocation(omLogTimeLayout, m[1], time.Local); err == nil {
-			r.stages = append(r.stages, omStage{At: at, Bead: m[2], OM: omStageDuration(m[3])})
+			lint, gate, om := omStageTimes(m[3])
+			r.stages = append(r.stages, omStage{At: at, Bead: m[2], Lint: lint, Gate: gate, OM: om})
 		}
 		return
 	}
@@ -197,17 +201,34 @@ func (r *omReader) parseLogLine(line string) {
 // omStageDuration reads om's time off "lint 14s, gate 34s, om 40s"; nil when
 // the review did not run (no om stage).
 func omStageDuration(stages string) *time.Duration {
+	_, _, om := omStageTimes(stages)
+	return om
+}
+
+// omStageTimes reads each stage's duration off "lint 14s, gate 34s, om 40s".
+// A stage the line does not name comes back nil, as does one whose token is
+// not a duration; a trailing "(timed out)" after the token is ignored.
+func omStageTimes(stages string) (lint, gate, om *time.Duration) {
 	for _, part := range strings.Split(stages, ", ") {
 		name, rest, ok := strings.Cut(part, " ")
-		if !ok || name != "om" {
+		if !ok {
 			continue
 		}
 		tok, _, _ := strings.Cut(rest, " ")
-		if d, err := time.ParseDuration(tok); err == nil {
-			return &d
+		d, err := time.ParseDuration(tok)
+		if err != nil {
+			continue
+		}
+		switch name {
+		case "lint":
+			lint = &d
+		case "gate":
+			gate = &d
+		case "om":
+			om = &d
 		}
 	}
-	return nil
+	return lint, gate, om
 }
 
 // omOutcome classifies a landing record's om verdict.
@@ -446,6 +467,27 @@ func truncateRunes(s string, n int) string {
 		return s
 	}
 	return string(r[:n-1]) + "…"
+}
+
+// trendInputs returns the stage lines and rejections the review scan has
+// collected at or after since, for the trend panel's window.
+func (r *omReader) trendInputs(since time.Time) ([]omStage, []omRejection) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_ = r.scanLog()
+	var stages []omStage
+	for _, st := range r.stages {
+		if !st.At.Before(since) {
+			stages = append(stages, st)
+		}
+	}
+	var rejs []omRejection
+	for _, rj := range r.rejects {
+		if !rj.At.Before(since) {
+			rejs = append(rejs, rj)
+		}
+	}
+	return stages, rejs
 }
 
 // dispatch returns the latest dispatcher tick in the log, nil when there is none.

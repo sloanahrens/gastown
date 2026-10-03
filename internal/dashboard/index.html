@@ -39,6 +39,14 @@ td.n,th.n{text-align:right}
 .bead{color:var(--blue)}.title{color:var(--dim)}
 .empty{color:var(--dim);padding:6px 0}
 .spark{width:100%;height:56px;display:block}
+.chart{width:100%;height:64px;display:block}
+.hbars{display:flex;align-items:stretch;gap:2px;height:64px;margin:4px 0 2px}
+.hbar{flex:1;display:flex;flex-direction:column;justify-content:flex-end;min-height:1px}
+.hbar i{display:block;min-height:1px}
+.hok{background:var(--blue);border-radius:0 0 2px 2px}
+.hrej{background:var(--red);border-radius:2px 2px 0 0}
+.legend{display:flex;gap:12px;flex-wrap:wrap;color:var(--dim);font-size:11px;margin-top:3px}
+.sw{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:-1px}
 .kv{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:8px}
 .kv b{font-size:16px}.kv span{color:var(--dim);font-size:11px;display:block}
 .chips{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}
@@ -103,6 +111,7 @@ td.n,th.n{text-align:right}
   </div>
   <div class="col">
     <section><h2>Work queue <span class="r" id="queuenote"></span></h2><div class="body" id="queue"></div></section>
+    <section id="trendsec" hidden><h2>Last 24 hours <span class="r" id="trendnote"></span></h2><div class="body" id="trend"></div></section>
     <section><h2>om review <span class="r" id="omnote"></span></h2><div class="body" id="om"></div></section>
     <section>
       <h2>Feed <span class="chips" id="chips"></span></h2>
@@ -280,6 +289,98 @@ function spark(points, w, h, color) {
   pl.setAttribute("points", d); pl.setAttribute("fill", "none"); pl.setAttribute("stroke", color); pl.setAttribute("stroke-width", "1.5");
   svg.append(pl);
   return svg;
+}
+
+const SVGNS = "http://www.w3.org/2000/svg";
+function svgEl(tag, attrs) {
+  const e = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  return e;
+}
+// chartSVG draws one or more time series. A null value breaks the line, so a
+// gap in the data is a gap in the drawing, not a line across it.
+function chartSVG(series, x0, x1, w, h) {
+  const svg = svgEl("svg", {viewBox: "0 0 " + w + " " + h, preserveAspectRatio: "none", class: "chart"});
+  let max = 0;
+  for (const s of series) for (const p of s.pts) if (p.v != null && p.v > max) max = p.v;
+  if (max <= 0) return svg;
+  const span = Math.max(1, x1 - x0);
+  const X = t => (Math.min(Math.max(t, x0), x1) - x0) / span * (w - 6) + 3;
+  const Y = v => h - 4 - v / max * (h - 10);
+  series.forEach(s => {
+    let run = [];
+    const flush = () => {
+      if (run.length > 1) svg.append(svgEl("polyline", {points: run.join(" "), fill: "none", stroke: s.color, "stroke-width": "1.5"}));
+      else if (run.length === 1) { const [cx, cy] = run[0].split(","); svg.append(svgEl("circle", {cx: cx, cy: cy, r: "1.5", fill: s.color})); }
+      run = [];
+    };
+    for (const p of s.pts) {
+      if (p.v == null) { flush(); continue; }
+      run.push(X(p.t).toFixed(1) + "," + Y(p.v).toFixed(1));
+    }
+    flush();
+  });
+  return svg;
+}
+function legend(items) {
+  const d = el("div", "legend");
+  for (const [color, label] of items) {
+    const x = el("span");
+    const sw = el("i", "sw"); sw.style.background = color;
+    x.append(sw, document.createTextNode(label));
+    d.append(x);
+  }
+  return d;
+}
+function renderTrend(s) {
+  const sec = $("trendsec"), box = $("trend");
+  const t = s.trend;
+  if (!t || !(t.hours || []).length) { sec.hidden = true; box.replaceChildren(); return; }
+  sec.hidden = false;
+  box.replaceChildren();
+  const hours = t.hours;
+  const hhmm = iso => new Date(iso).toLocaleTimeString([], {hour12: false}).slice(0, 5);
+  const t0 = new Date(hours[0].hour).getTime();
+  const t1 = new Date(hours[hours.length - 1].hour).getTime() + 3600e3;
+
+  // landings per hour: the blue part landed, the red part is rejections
+  const max = Math.max(1, ...hours.map(h => h.landed + h.rejected));
+  const bars = el("div", "hbars");
+  for (const h of hours) {
+    const col = el("div", "hbar");
+    col.title = hhmm(h.hour) + " · " + h.landed + " landed" + (h.rejected ? " · " + h.rejected + " rejected" : "") + (h.load_avg != null ? " · load " + h.load_avg.toFixed(1) : "");
+    if (h.rejected) { const r = el("i", "hrej"); r.style.height = h.rejected / max * 100 + "%"; col.append(r); }
+    if (h.landed) { const l = el("i", "hok"); l.style.height = h.landed / max * 100 + "%"; col.append(l); }
+    bars.append(col);
+  }
+  const axis = el("div", "axis");
+  axis.append(el("span", "", hhmm(hours[0].hour)), el("span", "", "now"));
+  box.append(el("div", "k title", "landings per hour, red = rejected"), bars, axis);
+
+  // gate and om seconds per landing
+  const stages = t.stages || [];
+  if (stages.length) {
+    const hasOM = stages.some(p => p.om_secs != null);
+    const series = [{color: "#d29922", pts: stages.map(p => ({t: new Date(p.at).getTime(), v: p.gate_secs}))}];
+    const key = [["#d29922", "gate"]];
+    if (hasOM) {
+      series.push({color: "#39c5bb", pts: stages.map(p => ({t: new Date(p.at).getTime(), v: p.om_secs}))});
+      key.push(["#39c5bb", "om"]);
+    }
+    const peak = Math.max(...series.flatMap(x => x.pts.map(p => p.v == null ? 0 : p.v)));
+    box.append(el("div", "k title", "gate and om seconds per landing · peak " + fmtDur(peak)), chartSVG(series, t0, t1, 600, 64), legend(key));
+  } else box.append(el("div", "empty", "no stage lines in the last 24 hours"));
+
+  // hourly load average
+  const loads = hours.filter(h => h.load_avg != null).map(h => ({t: new Date(h.hour).getTime(), v: h.load_avg}));
+  if (loads.length) {
+    const peak = Math.max(...loads.map(p => p.v));
+    box.append(el("div", "k title", "hourly load average · peak " + peak.toFixed(1)), chartSVG([{color: "#58a6ff", pts: loads}], t0, t1, 600, 64), legend([["#58a6ff", "load avg"]]));
+  } else box.append(el("div", "empty", "no load history yet (it fills while a page is open)"));
+
+  const landed = hours.reduce((n, h) => n + h.landed, 0);
+  const rejected = hours.reduce((n, h) => n + h.rejected, 0);
+  $("trendnote").textContent = landed + " landed · " + rejected + " rejected";
 }
 
 function renderMachine(s) {
@@ -584,7 +685,7 @@ function renderQueue(s, force) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderSeats(state); renderMachine(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
+function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderSeats(state); renderTrend(state); renderMachine(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));

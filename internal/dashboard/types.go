@@ -211,6 +211,33 @@ type Dispatch struct {
 	More       int           `json:"more,omitempty"` // skipped beads the line did not name
 }
 
+// TrendHour is one local hour of the last 24: how many landings and rejections
+// fell in it, and the host load seen while it ran. LoadAvg and LoadMax are nil
+// for an hour no load sample covers.
+type TrendHour struct {
+	Hour     time.Time `json:"hour"`
+	Landed   int       `json:"landed"`
+	Rejected int       `json:"rejected"`
+	LoadAvg  *float64  `json:"load_avg,omitempty"`
+	LoadMax  *float64  `json:"load_max,omitempty"`
+}
+
+// TrendPoint is one landing's stage times, off its "stages: lint Ns, gate Ns,
+// om Ns" line. OMSecs is nil when the review did not run.
+type TrendPoint struct {
+	At       time.Time `json:"at"`
+	LintSecs float64   `json:"lint_secs"`
+	GateSecs float64   `json:"gate_secs"`
+	OMSecs   *float64  `json:"om_secs,omitempty"`
+}
+
+// Trend is the last 24 hours as the page draws it: landings and rejections by
+// local hour, the newest landings' stage times, and the host load per hour.
+type Trend struct {
+	Hours  []TrendHour  `json:"hours"`
+	Stages []TrendPoint `json:"stages,omitempty"`
+}
+
 // State is everything the page draws apart from the feed.
 type State struct {
 	Now       time.Time       `json:"now"`
@@ -226,6 +253,7 @@ type State struct {
 	OM        *OM             `json:"om,omitempty"`
 	Dispatch  *Dispatch       `json:"dispatch,omitempty"`
 	Queue     *Queue          `json:"queue,omitempty"`
+	Trend     *Trend          `json:"trend,omitempty"`
 }
 
 // Config wires the hub to its readers. Every reader is optional; a nil reader
@@ -249,6 +277,12 @@ type Config struct {
 	// Queue reads the work queue lists; Bead reads one bead's text on request.
 	Queue func() *Queue
 	Bead  func(rig, id string) (*BeadDetail, error)
+	// Trend reads the last 24 hours of landings, rejections, stage times and
+	// host load.
+	Trend func() *Trend
+	// LoadSample records one machine sample for the trend's load history. The
+	// hub calls it from its machine poll, which runs only while a page is open.
+	LoadSample func(at time.Time, load float64)
 
 	Now func() time.Time
 
@@ -260,6 +294,7 @@ type Config struct {
 	OMEvery       time.Duration
 	DispatchEvery time.Duration
 	QueueEvery    time.Duration
+	TrendEvery    time.Duration
 
 	RingSize int // feed entries kept for a page that connects late
 }
@@ -281,6 +316,7 @@ func (c *Config) defaults() {
 	def(&c.OMEvery, 60*time.Second)
 	def(&c.DispatchEvery, 10*time.Second)
 	def(&c.QueueEvery, 60*time.Second)
+	def(&c.TrendEvery, 60*time.Second)
 	if c.RingSize <= 0 {
 		c.RingSize = 500
 	}
