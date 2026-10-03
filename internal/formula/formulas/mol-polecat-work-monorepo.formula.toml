@@ -231,9 +231,29 @@ copy of the bead title — the title states the problem, so a subject pasted fro
 it reads as if the commit introduced that problem (gt-hphli).**
 
 **Discovered work:**
-If you find bugs or improvements outside your scope:
+If you find bugs or improvements outside your scope, file them in the shape the
+spec dispatcher lints, so the bead is dispatchable instead of held unshaped:
+Goal (what exists after it lands), Constraints (the files to change, and what
+must not change), Out of scope (what the bead is not), Gate (the command that
+proves it) and Size (one worker, one landing), plus at least one acceptance
+item. `gt bead create` has no `--acceptance` flag, so take the new id from `-q`
+and set the acceptance with `gt bead update`:
 ```bash
-gt bead create --title "Found: <description>" --type bug --priority 2
+desc="$(cat <<'BEAD'
+## Goal
+<what exists after this lands>
+## Constraints
+<the files to change, and what must not change>
+## Out of scope
+<what this bead is not>
+## Gate
+<the command that proves it>
+## Size
+one worker, one landing
+BEAD
+)"
+id=$(gt bead create --title "Found: <short description>" --type task --priority 3 --description "$desc" -q)
+gt bead update "$id" --acceptance "- [ ] <the observable result a reviewer can check>"
 # Note the ID, continue with your work
 ```
 

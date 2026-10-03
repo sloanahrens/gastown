@@ -21,12 +21,29 @@ var (
 // TestPolecatFollowUpBeadExampleLintsClean guards the Discovered work example
 // against the dispatcher's own lint: filing a follow-up in this shape costs the
 // filer nothing, and any other shape holds the bead off the dispatch path until
-// someone reshapes it (gt-vpeaj).
+// someone reshapes it. Both polecat work formulas carry the example, so a
+// monorepo polecat files the same shape a default polecat does (gt-vpeaj,
+// gt-craw6).
 func TestPolecatFollowUpBeadExampleLintsClean(t *testing.T) {
 	t.Parallel()
-	raw, err := GetEmbeddedFormulaContent("mol-polecat-work")
+	for _, name := range []string{
+		"mol-polecat-work",
+		"mol-polecat-work-monorepo",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			assertFollowUpBeadExampleLintsClean(t, name)
+		})
+	}
+}
+
+// assertFollowUpBeadExampleLintsClean pulls the example out of the named
+// formula's embedded text and puts it through the dispatcher lint.
+func assertFollowUpBeadExampleLintsClean(t *testing.T, name string) {
+	t.Helper()
+	raw, err := GetEmbeddedFormulaContent(name)
 	if err != nil {
-		t.Fatalf("GetEmbeddedFormulaContent(mol-polecat-work): %v", err)
+		t.Fatalf("GetEmbeddedFormulaContent(%s): %v", name, err)
 	}
 	text := string(raw)
 
