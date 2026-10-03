@@ -141,8 +141,9 @@ func ConfigureCommand(cmd *exec.Cmd, dir, fallbackBeadsDir string, mode Subproce
 }
 
 // CommandWithEnv builds a bd command for a caller that supplies its own dir and
-// env, without the environment policy Command applies; a nil env inherits the
-// parent's environment and takes PWD from dir, as exec.Command does.
+// env, applying machine mode but not ConfigureCommand's env targeting, read-only
+// routing or process group; a nil env inherits the parent's environment and takes
+// PWD from dir, as exec.Command does.
 func CommandWithEnv(dir string, env []string, args ...string) *Cmd {
 	cmd := exec.Command("bd", args...) //nolint:gosec // G204: args are constructed internally
 	cmd.Dir = dir
@@ -159,8 +160,9 @@ func CommandContextWithEnv(ctx context.Context, dir string, env []string, args .
 }
 
 // CommandWithPath is CommandWithEnv for a caller that resolves and caches bd's
-// path itself; for the same with the environment policy applied, use
-// CommandContextWithBin.
+// path itself; CommandContextWithPath is its context-bound counterpart. Neither
+// applies the environment policy, so a caller that needs it goes through
+// beads.Client.
 func CommandWithPath(bin, dir string, env []string, args ...string) *Cmd {
 	cmd := exec.Command(bin, args...) //nolint:gosec // G204: bin/args are constructed internally
 	cmd.Dir = dir
