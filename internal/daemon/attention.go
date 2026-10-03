@@ -532,6 +532,19 @@ func (d *Daemon) attentionSeats(now time.Time) ([]townhealth.Seat, error) {
 	return (&healthSources{d: d, evidence: th.SeatEvidence, now: now}).Seats()
 }
 
+// attentionLandingLimits is the town's configured landing wait limits, the
+// compiled defaults when the health block is broken (the config field reports
+// that). The queue-stuck collector scales these with the queue's depth the
+// same way the townhealth landing field does, so the two read the same
+// limits (gt-cpefw).
+func (d *Daemon) attentionLandingLimits() townhealth.Limits {
+	th, _, err := d.loadOperationalConfig().GetHealthSettings().Resolve()
+	if err != nil {
+		th = townhealth.DefaultThresholds()
+	}
+	return th.Landing
+}
+
 // attentionSeatWork reports whether the polecat holds assigned open work: a
 // bead assigned to its seat with one of the statuses a sling sets
 // (Daemon.hasAssignedOpenWork's set). Work already submitted for landing is
@@ -967,12 +980,15 @@ func (s *attentionSources) collectLandingStuck(ctx context.Context) ([]attention
 }
 
 // collectQueueStuck raises one item per rig whose oldest ready-to-land
-// submission has waited longer than townhealth.LandingWaitBudget (gt-m36as):
-// the daemon's copy of queue-watch STUCK-QUEUE. It is the same age the
-// landing health field judges, so the health line and the alert agree, and it
-// is the waiting bead's own age rather than the time since the rig last
-// landed, so neither measures an idle town (gt-vsct7.3).
+// submission has waited past its queue's wait allowance: the daemon's copy of
+// queue-watch STUCK-QUEUE. The allowance is townhealth.LandingWaitLimits, the
+// landing wait budget scaled by the queue's depth, so a healthy serial queue
+// of two or three behind a loaded gate is not an item (gt-cpefw); it is the
+// same limits the health field judges, so the alert and the health line
+// cannot disagree. It judges the waiting bead's own age, not the time since
+// the rig last landed, so it does not measure an idle town (gt-m36as).
 func (s *attentionSources) collectQueueStuck(ctx context.Context) ([]attention.Item, error) {
+	base := s.d.attentionLandingLimits()
 	var out []attention.Item
 	for _, rig := range s.landingRigs() {
 		q, err := s.readyToLand(ctx, rig)
@@ -986,7 +1002,8 @@ func (s *attentionSources) collectQueueStuck(ctx context.Context) ([]attention.I
 			continue
 		}
 		waited := s.now.Sub(q.oldest)
-		if waited <= townhealth.LandingWaitBudget {
+		allowance := townhealth.LandingWaitLimits(base, q.count).Red
+		if allowance <= 0 || waited <= allowance {
 			continue
 		}
 		out = append(out, attention.Item{

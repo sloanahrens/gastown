@@ -752,6 +752,43 @@ func TestAttentionQueueStuck(t *testing.T) {
 	}
 }
 
+// gt-cpefw: queue-stuck scales its allowance with the queue's depth, the same
+// townhealth.LandingWaitLimits the health field uses, so a healthy serial
+// queue of three is not an item while a single submission past one budget
+// still is.
+func TestAttentionQueueStuckScalesWithDepth(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+
+	// Three waiting, the oldest 20m in: under three budgets, healthy.
+	f.src.readyToLand = func(context.Context, string) (readyQueue, error) {
+		return readyQueue{count: 3, oldest: now.Add(-20 * time.Minute), bead: "gt-busy"}, nil
+	}
+	if items := f.collect(t, f.src.collectQueueStuck); len(items) != 0 {
+		t.Fatalf("items = %+v, want none for a three-deep queue inside three budgets", items)
+	}
+
+	// The same queue once the oldest has waited past three budgets.
+	f.src.readyToLand = func(context.Context, string) (readyQueue, error) {
+		return readyQueue{count: 3, oldest: now.Add(-3*townhealth.LandingWaitBudget - time.Minute), bead: "gt-busy"}, nil
+	}
+	items := f.collect(t, f.src.collectQueueStuck)
+	if len(items) != 1 || items[0].Key != "queue-stuck:gastown" || items[0].Bead != "gt-busy" {
+		t.Fatalf("items = %+v, want queue-stuck:gastown naming gt-busy past three budgets", items)
+	}
+
+	// A single submission keeps the flat budget: past one, it is an item
+	// however healthy the rig has otherwise been.
+	f.src.readyToLand = func(context.Context, string) (readyQueue, error) {
+		return readyQueue{count: 1, oldest: now.Add(-townhealth.LandingWaitBudget - time.Minute), bead: "gt-solo"}, nil
+	}
+	items = f.collect(t, f.src.collectQueueStuck)
+	if len(items) != 1 || items[0].Bead != "gt-solo" {
+		t.Fatalf("items = %+v, want the lone stale submission to still be an item", items)
+	}
+}
+
 // gt-m36as, the reported incident: a landing submitted after hours of quiet is
 // judged by the submission's own age, not by the time since the rig last
 // landed, so the first landing of the day is not instantly an item.
