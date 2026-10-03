@@ -746,10 +746,10 @@ type Beads struct {
 
 	// plainTimeout bounds each bd call of a plain wrapper; zero means none.
 	plainTimeout time.Duration
-	// accessMode marks a wrapper built by NewPinned: each call runs
-	// read-only or as an auto-committed mutation by its argv, as
-	// beads.Command's pinned modes did, whatever BD_READONLY or
-	// BD_DOLT_AUTO_COMMIT the process inherited.
+	// accessMode marks a wrapper built by NewPinned: each call is forced
+	// read-only or into an auto-committed mutation by its argv, through
+	// forceBDReadOnly or forceBDMutation, overriding whatever
+	// BD_READONLY or BD_DOLT_AUTO_COMMIT the process inherited.
 	accessMode bool
 
 	// Lazy-cached town root for routing resolution.
@@ -979,9 +979,8 @@ func NewRigLocal(workDir string) *Beads {
 
 // NewPinned is NewRigLocal for a resolved beads directory: bd runs from
 // beadsDir's parent with BEADS_DIR=beadsDir, no ID routes elsewhere, and
-// each call is read-only or an auto-committed mutation by its argv. It
-// replaces beads.Command with a pinned mode for callers that already hold
-// the directory.
+// each call is read-only or an auto-committed mutation by its argv. Use it
+// for callers that already hold the directory.
 func NewPinned(beadsDir string, opts ...Option) *Beads {
 	b := newBeads(applyOptions(beadsFields{workDir: filepath.Dir(beadsDir), beadsDir: beadsDir, noRoute: true}, opts))
 	b.accessMode = true
