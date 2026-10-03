@@ -117,7 +117,7 @@ func init() {
 	doneCmd.Flags().StringVar(&doneStatus, "status", ExitCompleted, "Exit status: COMPLETED, ESCALATED, or DEFERRED")
 	doneCmd.Flags().StringVar(&doneCleanupStatus, "cleanup-status", "", "Git cleanup status: clean, uncommitted, unpushed, stash, unknown (ZFC: agent-observed)")
 	doneCmd.Flags().StringVar(&doneTarget, "target", "", "Explicit target branch (overrides the bead's base_branch and the rig default)")
-	doneCmd.Flags().BoolVar(&doneAllowReverts, "allow-reverts", false, "Submit a branch that undoes content already merged to the target (refused by default)")
+	doneCmd.Flags().BoolVar(&doneAllowReverts, "allow-reverts", false, "Submit a branch that undoes content already merged to the target (refused by default); waived for a bead labeled deletes-by-spec whose description names every reverted path verbatim")
 	doneCmd.Flags().BoolVar(&doneAllowThrowawayPaths, "allow-throwaway-paths", false, "Submit a branch that adds scratch, backup or /tmp files to the target (refused by default)")
 	doneCmd.Flags().StringVar(&doneBead, "bead", "", "Crew: the work bead to submit (default: parse from the branch name)")
 	doneCmd.Flags().BoolVar(&donePreVerified, "pre-verified", false, "Crew only: skip the local presubmit gate (the landing worker still gates the merged tree)")
