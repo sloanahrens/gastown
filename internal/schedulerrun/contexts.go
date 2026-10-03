@@ -1,7 +1,6 @@
 package schedulerrun
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -73,7 +72,7 @@ func warnf(w io.Writer, format string, args ...interface{}) {
 	fmt.Fprintf(w, format, args...)
 }
 
-func beadsForContextRecord(rec contextRecord) *beads.Beads {
+func beadsForContextRecord(rec contextRecord) beads.Client {
 	return beads.NewWithBeadsDir(rec.workDir, rec.beadsDir)
 }
 
@@ -135,11 +134,11 @@ func cleanupStaleContexts(townRoot string) error {
 	for _, ctx := range contexts {
 		fields := beads.ParseSlingContextFields(ctx.issue.Description)
 		if fields == nil {
-			_ = beadsForContextRecord(ctx).CloseSlingContext(ctx.issue.ID, "invalid-context")
+			_ = beads.CloseSlingContext(beadsForContextRecord(ctx), ctx.issue.ID, "invalid-context")
 			continue
 		}
 		if fields.DispatchFailures >= MaxDispatchFailures {
-			_ = beadsForContextRecord(ctx).CloseSlingContext(ctx.issue.ID, "circuit-broken")
+			_ = beads.CloseSlingContext(beadsForContextRecord(ctx), ctx.issue.ID, "circuit-broken")
 			continue
 		}
 		staleCheckContexts = append(staleCheckContexts, ctx)
@@ -168,7 +167,7 @@ func cleanupStaleContexts(townRoot string) error {
 		fields := staleCheckFields[i]
 		info, found := workBeadInfo[fields.WorkBeadID]
 		if found && (info.Status == "hooked" || info.Status == "closed" || info.Status == "tombstone") {
-			_ = beadsForContextRecord(ctx).CloseSlingContext(ctx.issue.ID, "stale-work-bead")
+			_ = beads.CloseSlingContext(beadsForContextRecord(ctx), ctx.issue.ID, "stale-work-bead")
 		}
 	}
 	return nil
@@ -350,29 +349,18 @@ func batchFetchBeadInfoByIDs(townRoot string, ids []string) map[string]beadStatu
 // fetchBeadStatuses reads the status, title, labels and declared dependencies
 // of the given beads from one beads database.
 func fetchBeadStatuses(beadsDir string, ids []string) (map[string]beadStatusInfo, error) {
-	b := beads.NewWithBeadsDir(filepath.Dir(beadsDir), beadsDir)
-	args := append([]string{"show", "--json"}, ids...)
-	out, err := b.Run(args...)
+	c := beads.NewWithBeadsDir(filepath.Dir(beadsDir), beadsDir)
+	issues, err := c.ShowMultiple(ids)
 	if err != nil {
 		return nil, err
 	}
-	var items []struct {
-		ID           string           `json:"id"`
-		Status       string           `json:"status"`
-		Title        string           `json:"title"`
-		Labels       []string         `json:"labels"`
-		Dependencies []beads.IssueDep `json:"dependencies"`
-	}
-	if err := json.Unmarshal(out, &items); err != nil {
-		return nil, err
-	}
-	result := make(map[string]beadStatusInfo, len(items))
-	for _, item := range items {
-		result[item.ID] = beadStatusInfo{
-			Status:       item.Status,
-			Title:        item.Title,
-			Labels:       item.Labels,
-			Dependencies: item.Dependencies,
+	result := make(map[string]beadStatusInfo, len(issues))
+	for id, issue := range issues {
+		result[id] = beadStatusInfo{
+			Status:       issue.Status,
+			Title:        issue.Title,
+			Labels:       issue.Labels,
+			Dependencies: issue.Dependencies,
 		}
 	}
 	return result, nil
@@ -425,13 +413,24 @@ func groupBeadIDsByResolvedBeadsDir(townRoot string, ids []string) map[string][]
 	return idsByBeadsDir
 }
 
-type blockedWorkQuery func(beadsDir string, groupedIDs []string) ([]byte, error)
+// blockedWorkQuery answers which beads one database reports blocked. It is
+// the test seam for the read below, whose production value is
+// runBlockedWorkQuery.
+type blockedWorkQuery func(beadsDir string, groupedIDs []string) ([]*beads.Issue, error)
 
-func runBlockedWorkQuery(beadsDir string, _ []string) ([]byte, error) {
-	// Use Beads wrapper to get proper BEADS_DIR resolution, --allow-stale,
-	// and BEADS_DOLT_PORT translation.
-	b := beads.NewWithBeadsDir(filepath.Dir(beadsDir), beadsDir)
-	return b.Run("blocked", "--json")
+// blockedReader is the store surface the blocked read needs: bd's blocked
+// cache has no Client verb, so this pins the one call to the typed method.
+type blockedReader interface {
+	Blocked() ([]*beads.Issue, error)
+}
+
+func runBlockedWorkQuery(beadsDir string, _ []string) ([]*beads.Issue, error) {
+	// Use the Beads wrapper to get proper BEADS_DIR resolution, --allow-stale,
+	// and BEADS_DOLT_PORT translation. bd's blocked cache is the authority a
+	// dependency walk would only approximate, so this stays the one read the
+	// scheduler makes outside Client.
+	var store blockedReader = beads.NewWithBeadsDir(filepath.Dir(beadsDir), beadsDir)
+	return store.Blocked()
 }
 
 func listBlockedWorkBeadIDStates(townRoot string, workBeadIDs []string, w io.Writer) (map[string]bool, map[string]bool, error) {
@@ -448,7 +447,7 @@ func listBlockedWorkBeadIDStatesWithRunner(townRoot string, workBeadIDs []string
 	failCount := 0
 	var lastErr error
 	for beadsDir, groupedIDs := range idsByBeadsDir {
-		blockedOut, err := query(beadsDir, groupedIDs)
+		blockedBeads, err := query(beadsDir, groupedIDs)
 		if err != nil {
 			failCount++
 			lastErr = err
@@ -457,19 +456,10 @@ func listBlockedWorkBeadIDStatesWithRunner(townRoot string, workBeadIDs []string
 				style.Dim.Render("⚠"), filepath.Dir(beadsDir), err)
 			continue
 		}
-		var blockedBeads []struct {
-			ID string `json:"id"`
-		}
-		if err := json.Unmarshal(blockedOut, &blockedBeads); err != nil {
-			failCount++
-			lastErr = err
-			markBlockedUnknown(blockedUnknownIDs, groupedIDs)
-			warnf(w, "%s Warning: parsing bd blocked failed for %s: %v\n",
-				style.Dim.Render("⚠"), filepath.Dir(beadsDir), err)
-			continue
-		}
-		for _, b := range blockedBeads {
-			blockedIDs[b.ID] = true
+		for _, blocked := range blockedBeads {
+			if blocked != nil && blocked.ID != "" {
+				blockedIDs[blocked.ID] = true
+			}
 		}
 	}
 	if failCount == len(idsByBeadsDir) && failCount > 0 {
@@ -515,8 +505,8 @@ func isScheduledWorkBeadMergeReady(workBeadID string, info beadStatusInfo, found
 type openMRIndexLookup func(beadsDir string) (map[string]*beads.Issue, error)
 
 func runOpenMRIndexLookup(beadsDir string) (map[string]*beads.Issue, error) {
-	b := beads.NewWithBeadsDir(filepath.Dir(beadsDir), beadsDir)
-	return b.OpenMRsBySourceIssue()
+	c := beads.NewWithBeadsDir(filepath.Dir(beadsDir), beadsDir)
+	return beads.OpenMRsBySourceIssue(c)
 }
 
 // listUnmergedBlockedWorkBeadIDs returns the work beads that must not dispatch

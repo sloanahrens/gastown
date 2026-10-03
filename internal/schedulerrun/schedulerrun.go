@@ -319,7 +319,7 @@ func Run(ctx context.Context, opts Options, deps Deps) (Report, error) {
 		OnSuccess: func(b capacity.PendingBead) error {
 			// OnSuccess may be retried — only do the close here, no side effects.
 			// Route to the correct rig's beads dir (GH#3468).
-			return beadsForPendingContext(opts.TownRoot, b).CloseSlingContext(b.ID, "dispatched")
+			return beads.CloseSlingContext(beadsForPendingContext(opts.TownRoot, b), b.ID, "dispatched")
 		},
 		OnFailure: func(b capacity.PendingBead, err error) {
 			var onSuccessErr *capacity.ErrOnSuccessFailed
@@ -331,7 +331,7 @@ func Run(ctx context.Context, opts Options, deps Deps) (Report, error) {
 				// Last-resort close attempt to prevent double-dispatch on next cycle.
 				// OnSuccess already retried 2x; this is a final attempt before circuit-breaking.
 				ctxBeads := beadsForPendingContext(opts.TownRoot, b)
-				if closeErr := ctxBeads.CloseSlingContext(b.ID, "dispatch-close-failed"); closeErr != nil {
+				if closeErr := beads.CloseSlingContext(ctxBeads, b.ID, "dispatch-close-failed"); closeErr != nil {
 					r.eprintf("%s CRITICAL: last-resort close of %s failed — risk of double-dispatch for %s: %v\n",
 						style.Warning.Render("⚠"), b.ID, b.WorkBeadID, closeErr)
 				} else {
@@ -543,7 +543,7 @@ func (r *runner) printDryRunPlanFor(plan capacity.DispatchPlan, seats Seats, bat
 // bead. Sling contexts live in the target rig's beads dir (GH#3468), so we
 // resolve the dir from the context's TargetRig field. Falls back to HQ if
 // the target rig is unknown (e.g., invalid context with nil fields).
-func beadsForContext(townRoot string, fields *capacity.SlingContextFields) *beads.Beads {
+func beadsForContext(townRoot string, fields *capacity.SlingContextFields) beads.Client {
 	if fields != nil && fields.TargetRig != "" {
 		rigBeadsDir := doltserver.FindRigBeadsDir(townRoot, fields.TargetRig)
 		if rigBeadsDir != "" {
@@ -554,7 +554,7 @@ func beadsForContext(townRoot string, fields *capacity.SlingContextFields) *bead
 	return beads.NewWithBeadsDir(townRoot, filepath.Join(townRoot, ".beads"))
 }
 
-func beadsForPendingContext(townRoot string, b capacity.PendingBead) *beads.Beads {
+func beadsForPendingContext(townRoot string, b capacity.PendingBead) beads.Client {
 	if b.ContextBeadsDir != "" {
 		workDir := b.ContextWorkDir
 		if workDir == "" {

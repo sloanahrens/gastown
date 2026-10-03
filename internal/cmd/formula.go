@@ -801,7 +801,8 @@ func executeConvoyFormula(f *cookedFormula, formulaName, targetRig string) error
 
 	townBd := beads.NewPinned(townBeads)
 	rigBd := beads.NewPinned(rigBeadsDir)
-	if _, err := townBd.CreateWithID(convoyID, beads.CreateOptions{
+	if _, err := townBd.Create(beads.CreateOptions{
+		ID:          convoyID,
 		Title:       convoyTitle,
 		Description: description,
 		Labels:      []string{"gt:convoy"},
@@ -885,7 +886,8 @@ func executeConvoyFormula(f *cookedFormula, formulaName, targetRig string) error
 			legDesc = fmt.Sprintf("%s\n\n---\nBase Prompt:\n%s", leg.Description, renderedPrompt)
 		}
 
-		if _, err := rigBd.CreateWithID(legBeadID, beads.CreateOptions{
+		if _, err := rigBd.Create(beads.CreateOptions{
+			ID:          legBeadID,
 			Title:       leg.Title,
 			Description: legDesc,
 			Priority:    -1,
@@ -926,7 +928,8 @@ func executeConvoyFormula(f *cookedFormula, formulaName, targetRig string) error
 				style.Dim.Render("Warning:"), err)
 		}
 
-		if _, err := rigBd.CreateWithID(synthesisBeadID, beads.CreateOptions{
+		if _, err := rigBd.Create(beads.CreateOptions{
+			ID:          synthesisBeadID,
 			Title:       p.Synthesis.Title,
 			Description: synDesc,
 			Priority:    -1,
@@ -1037,7 +1040,8 @@ func executeWorkflowFormula(f *cookedFormula, formulaName, targetRig string) err
 	}
 
 	rigBd := beads.NewPinned(rigBeadsDir)
-	if _, err := beads.NewPinned(townBeads).CreateWithID(workflowID, beads.CreateOptions{
+	if _, err := beads.NewPinned(townBeads).Create(beads.CreateOptions{
+		ID:          workflowID,
 		Title:       workflowTitle,
 		Description: description,
 		Labels:      []string{"gt:convoy", "gt:workflow"},
@@ -1058,7 +1062,7 @@ func executeWorkflowFormula(f *cookedFormula, formulaName, targetRig string) err
 		// The description goes in through Update, which sends it on stdin
 		// (--body-file=-): large markdown would hit CLI arg length limits
 		// and quoting issues as a create argument.
-		_, err := rigBd.CreateWithID(stepBeadID, beads.CreateOptions{Title: step.Title, Priority: -1})
+		_, err := rigBd.Create(beads.CreateOptions{ID: stepBeadID, Title: step.Title, Priority: -1})
 		if err == nil {
 			err = rigBd.Update(stepBeadID, beads.UpdateOptions{Description: &stepDescription})
 		}

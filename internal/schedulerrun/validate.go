@@ -108,7 +108,7 @@ func (r *runner) dropRigHeldBeads(townRoot string, plan capacity.DispatchPlan) c
 // recordFailure increments the dispatch failure counter on the sling context
 // bead, closing it as circuit-broken once it has failed MaxDispatchFailures
 // times.
-func (r *runner) recordFailure(townBeads *beads.Beads, b capacity.PendingBead, dispatchErr error) {
+func (r *runner) recordFailure(townBeads beads.Client, b capacity.PendingBead, dispatchErr error) {
 	if b.Context == nil {
 		return
 	}
@@ -116,13 +116,13 @@ func (r *runner) recordFailure(townBeads *beads.Beads, b capacity.PendingBead, d
 	b.Context.DispatchFailures++
 	b.Context.LastFailure = dispatchErr.Error()
 
-	if err := townBeads.UpdateSlingContextFields(b.ID, b.Context); err != nil {
+	if err := beads.UpdateSlingContextFields(townBeads, b.ID, b.Context); err != nil {
 		r.printf("  %s Failed to record dispatch failure for %s: %v\n",
 			style.Warning.Render("⚠"), b.ID, err)
 	}
 
 	if b.Context.DispatchFailures >= MaxDispatchFailures {
-		if err := townBeads.CloseSlingContext(b.ID, "circuit-broken"); err != nil {
+		if err := beads.CloseSlingContext(townBeads, b.ID, "circuit-broken"); err != nil {
 			r.printf("  %s Failed to close circuit-broken context %s: %v\n",
 				style.Warning.Render("⚠"), b.ID, err)
 		}
