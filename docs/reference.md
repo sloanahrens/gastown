@@ -684,15 +684,14 @@ consumes. When it is `null` or missing, such a script must fail loudly rather
 than no-op (gt-chqi, gt-xxwx). The daemon's git_hygiene patrol calls
 `Rig.RepoPath()` directly.
 
-### Convoy Management (Primary Dashboard)
+### Work Tracking (Primary Dashboard)
 
 ```bash
-gt convoy list                          # Dashboard of active convoys
-gt convoy status [convoy-id]            # Show progress (🚚 hq-cv-*)
-gt convoy create "name" [issues...]     # Create convoy tracking issues
-gt convoy create "name" gt-a bd-b --notify mayor/  # With notification
-gt convoy list --all                    # Include landed convoys
-gt convoy list --status=closed          # Only landed convoys
+gt ready                                # Beads with no blockers, town-wide
+gt ready --rig=gastown                  # One rig's unblocked beads
+gt show <bead-id>                       # Status, dependencies, assignee
+gt agents                               # Live agent sessions
+gt polecat list <rig>                   # Polecats in a rig (hidden from gt agents)
 ```
 
 Note: "Swarm" is ephemeral (workers on an epic's issues).
@@ -700,8 +699,8 @@ Note: "Swarm" is ephemeral (workers on an epic's issues).
 ### Work Assignment
 
 ```bash
-# Standard workflow: convoy first, then sling
-gt convoy create "Feature X" gt-abc gt-def
+# Standard workflow: order the batch, then sling each bead
+bd dep add gt-def gt-abc                 # gt-def waits for gt-abc to land
 gt sling gt-abc <rig>                    # Assign to polecat
 gt sling gt-abc <rig> --agent claude-haiku  # Override the agent for this sling/spawn
 gt sling <proto> --on gt-def <rig>       # With workflow template

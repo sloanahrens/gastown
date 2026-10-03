@@ -69,15 +69,11 @@ Worker agents with persistent identity but ephemeral sessions. Spawned for tasks
 
 Git worktree-based persistent storage for agent work. Survives crashes and restarts.
 
-### Convoys 🚚
-
-Work tracking units. Bundle multiple beads that get assigned to agents.
-
 ### Beads Integration 📿
 
 Git-backed issue tracking system that stores work state as structured data.
 
-**Bead IDs** (also called **issue IDs**) use a prefix + 5-character alphanumeric format (e.g., `gt-abc12`, `hq-x7k2m`). The prefix indicates the item's origin or rig. Commands like `gt sling` and `gt convoy` accept these IDs to reference specific work items. The terms "bead" and "issue" are used interchangeably—beads are the underlying data format, while issues are the work items stored as beads.
+**Bead IDs** (also called **issue IDs**) use a prefix + 5-character alphanumeric format (e.g., `gt-abc12`, `hq-x7k2m`). The prefix indicates the item's origin or rig. Commands like `gt sling` and `bd dep add` accept these IDs to reference specific work items. The terms "bead" and "issue" are used interchangeably—beads are the underlying data format, while issues are the work items stored as beads.
 
 ### Molecules 🧬
 
@@ -114,7 +110,7 @@ Native installs require the host tools below. Docker installs only require Docke
 | Git | 2.20+ | Worktree support |
 | Go | 1.26.2+ (see `go.mod`) | Required for the Linux and Windows paths and for macOS source builds. Not needed for `brew install gastown` or Docker setup. |
 | Beads (`bd`) | 0.57.0+ | Required for native installs. Homebrew and Docker supply it; source/native Go paths install it with `go install`. |
-| sqlite3 | any | Used by convoy database queries. Usually pre-installed on macOS and Linux. |
+| sqlite3 | any | Usually pre-installed on macOS and Linux. |
 | ICU4C dev headers | varies | Required for source builds that compile the ICU-backed query layer. Use `libicu-dev` on Debian/Ubuntu, `libicu-devel` on Fedora/RHEL, `icu4c` on macOS, and MSYS2 ICU packages for native Windows. |
 | tmux | 3.0+ | Required for `gt up` and the tmux-backed roles (Mayor, crew, polecats). Optional only for minimal-mode workflows where you run runtime instances manually. |
 | Claude Code CLI | latest | The only runtime. See [Runtime Configuration](#runtime-configuration) for wrappers and other backends. |
@@ -283,16 +279,16 @@ and tell the Mayor what you want to build!
 sequenceDiagram
     participant You
     participant Mayor
-    participant Convoy
+    participant Beads
     participant Agent
     participant Hook
 
     You->>Mayor: Tell Mayor what to build
-    Mayor->>Convoy: Create convoy with beads
+    Mayor->>Beads: File the work; bd dep add orders it
     Mayor->>Agent: Sling bead to agent
     Agent->>Hook: Store work state
     Agent->>Agent: Complete work
-    Agent->>Convoy: Report completion
+    Agent->>Beads: gt done submits the branch
     Mayor->>You: Summary of progress
 ```
 
@@ -302,14 +298,16 @@ sequenceDiagram
 # 1. Start the Mayor
 gt mayor attach
 
-# 2. In Mayor session, create a convoy with bead IDs
-gt convoy create "Feature X" gt-abc12 gt-def34 --notify --human
+# 2. In the Mayor session, file the beads and order them with a dependency
+bd create "Feature X: API"     # → gt-abc12
+bd create "Feature X: UI"      # → gt-def34
+bd dep add gt-def34 gt-abc12   # the UI waits for the API to land
 
 # 3. Assign work to an agent
 gt sling gt-abc12 myproject
 
 # 4. Track progress
-gt convoy list
+gt ready
 
 # 5. Monitor agents
 gt agents
@@ -324,8 +322,8 @@ gt agents
 ```mermaid
 flowchart LR
     Start([Start Mayor]) --> Tell[Tell Mayor<br/>what to build]
-    Tell --> Creates[Mayor creates<br/>convoy + agents]
-    Creates --> Monitor[Monitor progress<br/>via convoy list]
+    Tell --> Creates[Mayor files beads<br/>+ spawns agents]
+    Creates --> Monitor[Monitor progress<br/>via gt ready]
     Monitor --> Done{All done?}
     Done -->|No| Monitor
     Done -->|Yes| Review[Review work]
@@ -337,11 +335,13 @@ flowchart LR
 # Attach to Mayor
 gt mayor attach
 
-# In Mayor, create convoy and let it orchestrate
-gt convoy create "Auth System" gt-x7k2m gt-p9n4q --notify
+# In the Mayor session, describe the work; the Mayor files and slings the beads
+# Order dependent beads first, so a slung bead is never blocked
+bd dep add gt-p9n4q gt-x7k2m
 
 # Track progress
-gt convoy list
+gt ready
+gt agents
 ```
 
 ### Minimal Mode (No Tmux)
@@ -349,10 +349,10 @@ gt convoy list
 Run individual runtime instances manually. Gas Town just tracks state.
 
 ```bash
-gt convoy create "Fix bugs" gt-abc12   # Create convoy (sling auto-creates if skipped)
 gt sling gt-abc12 myproject            # Assign to worker
 claude --resume                        # Agent reads mail, runs work
-gt convoy list                         # Check progress
+gt ready                               # Check for unblocked work
+gt agents                              # Check for live sessions
 ```
 
 ### Beads Formula Workflow
@@ -415,22 +415,20 @@ bd cook release --var version=1.2.0
 bd mol pour release --var version=1.2.0
 ```
 
-### Manual Convoy Workflow
+### Manual Dispatch Workflow
 
 **Best for:** Direct control over work distribution
 
 ```bash
-# Create convoy manually
-gt convoy create "Bug Fixes" --human
-
-# Add issues to existing convoy
-gt convoy add hq-cv-abc gt-m3k9p gt-w5t2x
+# Order the batch: gt-w5t2x waits for gt-m3k9p to land
+bd dep add gt-w5t2x gt-m3k9p
 
 # Assign to specific agents
 gt sling gt-m3k9p myproject/my-agent
 
-# Check status
-gt convoy show
+# Check what is unblocked and who is running
+gt ready
+gt agents
 ```
 
 ## Runtime Configuration
@@ -480,13 +478,12 @@ gt tail --since 1h          # The last hour, then exit
 
 **Built-in agent presets**: `claude`, `groq-compound` (the Claude CLI over Groq)
 
-### Convoy (Work Tracking)
+### Tracking Work
 
 ```bash
-gt convoy create <name> [issues...]   # Create convoy with issues
-gt convoy list              # List all convoys
-gt convoy show [id]         # Show convoy details
-gt convoy add <convoy-id> <issue-id...>  # Add issues to convoy
+gt ready                    # Beads with no open blockers, town-wide
+gt show <bead-id>           # One bead's status, dependencies, assignee
+gt polecat list <rig>       # Polecats in a rig
 ```
 
 ### Configuration
@@ -593,10 +590,10 @@ MEOW is the recommended pattern:
 
 1. **Tell the Mayor** - Describe what you want
 2. **Mayor analyzes** - Breaks down into tasks
-3. **Convoy creation** - Mayor creates convoy with beads
+3. **Bead creation** - Mayor files the work as beads and orders it with `bd dep add`
 4. **Agent spawning** - Mayor spawns appropriate agents
 5. **Work distribution** - Beads slung to agents via hooks
-6. **Progress monitoring** - Track through convoy status
+6. **Progress monitoring** - Track through `gt ready` and `gt agents`
 7. **Completion** - Mayor summarizes results
 
 ## Shell Completions
@@ -620,12 +617,11 @@ gt completion fish > ~/.config/fish/completions/gt.fish
 | **Human (You)** | Crew member                          | Your crew directory  |
 | **Polecat**     | Worker agent                         | Spawned by Mayor     |
 | **Hook**        | Persistent storage                   | Git worktree         |
-| **Convoy**      | Work tracker                         | `gt convoy` commands |
 
 ## Tips
 
 - **Always start with the Mayor** - It's designed to be your primary interface
-- **Use convoys for coordination** - They provide visibility across agents
+- **Order dependent work with `bd dep add`** - A blocked bead stays out of `gt ready` until its blocker lands
 - **Leverage hooks for persistence** - Your work won't disappear
 - **Create formulas for repeated tasks** - Save time with Beads recipes
 - **Use `gt tail -f` for live monitoring** - Watch agent activity and catch stuck agents early
@@ -659,12 +655,14 @@ gt hooks list
 gt hooks repair
 ```
 
-### Convoy stuck
+### Work is not being dispatched
 
-Force refresh:
+Check what is unblocked and whether a session is live:
 
 ```bash
-gt convoy refresh <convoy-id>
+gt ready
+gt agents
+gt doctor
 ```
 
 ### Mayor not responding

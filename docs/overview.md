@@ -44,27 +44,25 @@ These roles do actual project work:
 | **Polecat** | Worker with persistent identity, ephemeral sessions | Daemon-supervised ([details](concepts/polecat-lifecycle.md)) |
 | **Crew** | Persistent worker with own clone | Long-lived, user-managed |
 
-## Convoys: Tracking Work
+## Tracking Work
 
-A **convoy** (🚚) is how you track batched work in Gas Town. When you kick off work -
-even a single issue - create a convoy to track it.
+Work is tracked by beads. A bead's status and assignee are the record of what is
+in flight: `gt sling` assigns it to a worker, and the landing worker closes it
+when the branch lands.
+
+Order dependent work with `bd dep add`; a bead that depends on another stays out
+of `gt ready` until its blocker closes.
 
 ```bash
-# Create a convoy tracking some issues
-gt convoy create "Feature X" gt-abc gt-def --notify overseer
+# gt-def waits for gt-abc
+bd dep add gt-def gt-abc
 
-# Check progress
-gt convoy status hq-cv-abc
-
-# Dashboard of active convoys
-gt convoy list
+# Every bead with no open blocker, town-wide
+gt ready
 ```
 
-**Why convoys matter:**
-- Single view of "what's in flight"
-- Cross-rig tracking (convoy in hq-*, issues in gt-*, bd-*)
-- Auto-notification when work lands
-- Historical record of completed work (`gt convoy list --all`)
+`gt ready` aggregates unblocked beads from the town and every rig; `gt show
+<bead-id>` prints one bead's status, dependencies, and assignee.
 
 The "swarm" is the set of workers currently assigned to an epic's issues.
 When issues close, the epic's work is done.
@@ -90,7 +88,7 @@ Both do project work, but with key differences:
 
 **When to use Polecats**:
 - Discrete, well-defined tasks
-- Batch work (tracked via convoys)
+- Batch work (ordered with `bd dep add`)
 - Parallelizable work
 - Work that benefits from supervision
 
@@ -99,11 +97,10 @@ Both do project work, but with key differences:
 When work belongs to another rig, dispatch it to that rig's workers:
 
 ```bash
-# Create issue in target rig
-bd create --repo beads "Fix authentication bug"
+# File the issue in the target rig's database
+gt bead create --rig=beads "Fix authentication bug"
 
-# Create convoy and sling to target rig
-gt convoy create "Auth fix" bd-xyz
+# Sling it to the rig that owns it
 gt sling bd-xyz beads
 ```
 
