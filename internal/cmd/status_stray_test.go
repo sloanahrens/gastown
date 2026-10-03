@@ -12,6 +12,7 @@ import (
 // Dolt server is printed with its pid, its port, its data-dir and the command
 // that clears it.
 func TestOutputStatusTextListsStrayDolt(t *testing.T) {
+	t.Parallel()
 	status := townstatus.TownStatus{
 		Name:     "gt",
 		Location: t.TempDir(),
