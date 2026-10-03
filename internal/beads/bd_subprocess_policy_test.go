@@ -19,15 +19,16 @@ var hardenedPackages = []string{
 	"internal/plugin",
 }
 
-// policyConstructors apply ConfigureCommand: env targeting, read-only routing
-// and a detached process group. A constructor absent from this map is denied to
-// hardenedPackages, so a new pass-through fails closed rather than silently
-// widening their reach. (gt-sz0s)
+// policyConstructors are the bd command builders hardenedPackages may use: they
+// route through machineEnvForCall, which applies the machine-mode environment
+// and preserves the caller's dir. A constructor absent from this map is denied
+// to hardenedPackages, so a new one fails closed rather than silently widening
+// their reach. (gt-sz0s)
 var policyConstructors = map[string]bool{
-	"Command":               true,
-	"CommandContext":        true,
-	"CommandContextBounded": true,
-	"CommandContextWithBin": true,
+	"CommandWithEnv":         true,
+	"CommandContextWithEnv":  true,
+	"CommandWithPath":        true,
+	"CommandContextWithPath": true,
 }
 
 // TestBdSubprocessPolicyInHardenedPackages requires hardenedPackages to reach bd
@@ -54,7 +55,7 @@ func TestBdSubprocessPolicyInHardenedPackages(t *testing.T) {
 
 	if len(violations) > 0 {
 		sort.Strings(violations)
-		t.Fatalf("spawn bd through %s in hardened packages; the pass-through constructors skip env targeting, read-only mode and the detached process group (gt-sz0s):\n%s",
+		t.Fatalf("spawn bd through %s in hardened packages instead of a hand-built command; the constructors apply the shared machine-mode environment (gt-sz0s):\n%s",
 			strings.Join(sortedNames(policyConstructors), "/"), strings.Join(violations, "\n"))
 	}
 }
@@ -99,7 +100,7 @@ func TestNoAdHocBdSubprocessesOutsideBeads(t *testing.T) {
 
 	if len(violations) > 0 {
 		sort.Strings(violations)
-		t.Fatalf("do not spawn bd directly outside internal/beads; use Command/CommandContext/CommandContextWithBin for the environment policy, or CommandWithEnv/CommandContextWithEnv/CommandWithPath to supply your own dir and env (gt-sz0s):\n%s", strings.Join(violations, "\n"))
+		t.Fatalf("do not spawn bd directly outside internal/beads; build the command with CommandWithEnv/CommandContextWithEnv/CommandWithPath/CommandContextWithPath (gt-sz0s):\n%s", strings.Join(violations, "\n"))
 	}
 }
 

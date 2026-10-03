@@ -159,8 +159,7 @@ func CommandContextWithEnv(ctx context.Context, dir string, env []string, args .
 }
 
 // CommandWithPath is CommandWithEnv for a caller that resolves and caches bd's
-// path itself; for the same with the environment policy applied, use
-// CommandContextWithBin.
+// path itself; CommandContextWithPath is its context-bound counterpart.
 func CommandWithPath(bin, dir string, env []string, args ...string) *Cmd {
 	cmd := exec.Command(bin, args...) //nolint:gosec // G204: bin/args are constructed internally
 	cmd.Dir = dir
