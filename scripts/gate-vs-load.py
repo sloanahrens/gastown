@@ -9,6 +9,9 @@ The load suffix is what makes a slow gate readable without a sampler: the
 number beside it is the 1-minute load average of the host the stages ran on.
 Lines written before that (or on a host that reports no load) carry no suffix;
 they are counted as "no load" and reported on their own row, never dropped.
+The suffix is read wherever it sits, not only at the line's end: the
+om-skipped path appends ", om skipped (overseer-reviewed)" after the stages
+(gt-g46b7).
 
 Read-only. Nothing here starts the daemon or touches its log.
 
@@ -31,8 +34,10 @@ LAND_RE = re.compile(
     r"^(?:(\d{4}/\d{2}/\d{2}) \d{2}:\d{2}:\d{2}[^\n]*?)?\[land\] (\S+): stages: (.*)$"
 )
 
-# The trailing load suffix gt-a025o added. Its absence is the "no load" case.
-LOAD_RE = re.compile(r" \(load1 ([0-9]+(?:\.[0-9]+)?)\)\s*$")
+# The load suffix gt-a025o added. It is not anchored to the end: the om-skipped
+# path appends a status after it, so a mid-payload suffix is still the load.
+# Its absence is the "no load" case.
+LOAD_RE = re.compile(r" \(load1 ([0-9]+(?:\.[0-9]+)?)\)")
 
 # A Go time.Duration.String() token: 18s, 1m45s, 5m2s, 1h1m1s. Longest unit
 # first, so "45ms" never reads as "45m" + a stray "s".
@@ -112,16 +117,19 @@ def bucket_of(load):
 
 
 def parse_line(payload):
-    """(load or None, {stage: seconds}) for one landing's stages payload.
+    """(load or None, {stage: seconds}, unparsable entries) for one payload.
 
-    A stage whose duration cannot be read is left out of the dict but its name
-    is returned in `unparsable` so the caller can say it skipped one.
+    A stage whose duration cannot be read is left out of the dict, and its
+    whole entry text is returned in `unparsable` so the caller can count it.
     """
     load = None
     m = LOAD_RE.search(payload)
     if m:
         load = float(m.group(1))
-        payload = payload[: m.start()]
+        # Splice the suffix out where it sits, so a status appended after it
+        # stays a whole ", "-separated part rather than merging with the stage
+        # before it.
+        payload = payload[: m.start()] + payload[m.end() :]
 
     stages = {}
     unparsable = []
