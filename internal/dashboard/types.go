@@ -261,6 +261,43 @@ type Trend struct {
 	Recent []LandingRow `json:"recent,omitempty"`
 }
 
+// TierSweepStage is one tier's verdict inside a sweep row. Failed names the
+// failing units the sweep's own record kept, and is empty for every row but the
+// rig's latest: the record holds only the last run (internal/daemon/tier_sweep.go).
+type TierSweepStage struct {
+	Tier    string   `json:"tier"`
+	Verdict string   `json:"verdict"` // GREEN or RED
+	Failed  []string `json:"failed,omitempty"`
+}
+
+// TierSweepRun is a sweep in flight: the stage executing now and how long it
+// has been at it.
+type TierSweepRun struct {
+	Rig        string    `json:"rig"`
+	Tier       string    `json:"tier"`
+	Since      time.Time `json:"since"` // when this stage started
+	ElapsedSec int64     `json:"elapsed_sec"`
+}
+
+// TierSweepRow is one completed sweep, off its "swept" log line. Secs is nil
+// for a line that predates the duration the daemon logs since gt-iqzr0.
+type TierSweepRow struct {
+	At     time.Time        `json:"at"`
+	Rig    string           `json:"rig"`
+	SHA    string           `json:"sha"`
+	Stages []TierSweepStage `json:"stages"`
+	Secs   *float64         `json:"secs,omitempty"`
+}
+
+// TierSweep is the daemon's tier sweeps: whether one is running now, and the
+// last few that finished. Unavailable says the daemon log could not be read,
+// which is not the same as a log that holds no sweeps.
+type TierSweep struct {
+	Running     *TierSweepRun  `json:"running,omitempty"`
+	Sweeps      []TierSweepRow `json:"sweeps"`
+	Unavailable bool           `json:"unavailable,omitempty"`
+}
+
 // State is everything the page draws apart from the feed.
 type State struct {
 	Now       time.Time `json:"now"`
@@ -271,14 +308,15 @@ type State struct {
 	Polecats  []Polecat `json:"polecats"`
 	// Rigs is one row per known rig, joined from the queue and the polecats
 	// (RigRows). It is nil until both readers have reported.
-	Rigs     []Rig           `json:"rigs,omitempty"`
-	Machine  Machine         `json:"machine"`
-	Loads    []LoadPoint     `json:"loads"`
-	Spend    json.RawMessage `json:"spend,omitempty"`
-	OM       *OM             `json:"om,omitempty"`
-	Dispatch *Dispatch       `json:"dispatch,omitempty"`
-	Queue    *Queue          `json:"queue,omitempty"`
-	Trend    *Trend          `json:"trend,omitempty"`
+	Rigs      []Rig           `json:"rigs,omitempty"`
+	Machine   Machine         `json:"machine"`
+	Loads     []LoadPoint     `json:"loads"`
+	Spend     json.RawMessage `json:"spend,omitempty"`
+	OM        *OM             `json:"om,omitempty"`
+	TierSweep *TierSweep      `json:"tiersweep,omitempty"`
+	Dispatch  *Dispatch       `json:"dispatch,omitempty"`
+	Queue     *Queue          `json:"queue,omitempty"`
+	Trend     *Trend          `json:"trend,omitempty"`
 	// Alerts is the most recent alerts the alerter raised, newest last, capped
 	// at alertsKept. The page lists them whether or not alerts are switched on.
 	Alerts []Alert `json:"alerts,omitempty"`
@@ -300,6 +338,8 @@ type Config struct {
 	Spend func() json.RawMessage
 	// OM reads the reviewer's record from disk.
 	OM func() *OM
+	// TierSweep reads the daemon's tier sweeps from the daemon log.
+	TierSweep func() *TierSweep
 	// Dispatch reads the spec dispatcher's last tick from the daemon log.
 	Dispatch func() *Dispatch
 	// Queue reads the work queue lists; Bead reads one bead's text on request.
@@ -314,15 +354,16 @@ type Config struct {
 
 	Now func() time.Time
 
-	FeedEvery     time.Duration
-	SummaryEvery  time.Duration
-	HealthEvery   time.Duration
-	MachineEvery  time.Duration
-	SpendEvery    time.Duration
-	OMEvery       time.Duration
-	DispatchEvery time.Duration
-	QueueEvery    time.Duration
-	TrendEvery    time.Duration
+	FeedEvery      time.Duration
+	SummaryEvery   time.Duration
+	HealthEvery    time.Duration
+	MachineEvery   time.Duration
+	SpendEvery     time.Duration
+	OMEvery        time.Duration
+	TierSweepEvery time.Duration
+	DispatchEvery  time.Duration
+	QueueEvery     time.Duration
+	TrendEvery     time.Duration
 
 	RingSize int // feed entries kept for a page that connects late
 }
@@ -342,6 +383,7 @@ func (c *Config) defaults() {
 	def(&c.MachineEvery, 10*time.Second)
 	def(&c.SpendEvery, 5*time.Minute)
 	def(&c.OMEvery, 60*time.Second)
+	def(&c.TierSweepEvery, 60*time.Second)
 	def(&c.DispatchEvery, 10*time.Second)
 	def(&c.QueueEvery, 60*time.Second)
 	def(&c.TrendEvery, 60*time.Second)

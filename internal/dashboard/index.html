@@ -138,6 +138,7 @@ section.collapsed>h2{border-bottom:0}
   </div>
   <div class="col">
     <section><h2>Machine <span class="r" id="machnote"></span></h2><div class="body" id="machine"></div></section>
+    <section><h2>Tier sweeps <span class="r" id="tiersweepnote"></span></h2><div class="body" id="tiersweep"></div></section>
     <section><h2>om review <span class="r" id="omnote"></span></h2><div class="body" id="om"></div></section>
     <section id="trendsec" hidden><h2>Landings <span class="r" id="trendnote"></span></h2><div class="body" id="trend"></div></section>
     <section>
@@ -538,6 +539,58 @@ function renderMachine(s) {
   }
 }
 
+// One compact line per sweep: when, which rig and sha, a verdict per tier, and
+// how long the whole cycle took. A tier the sweep did not run is left blank, and
+// a RED one carries the failing units its rig's record still holds.
+const TIERSWEEP_TIERS = ["shell", "integration", "race"];
+function renderTierSweep(s) {
+  const box = $("tiersweep");
+  box.replaceChildren();
+  const ts = s.tiersweep;
+  if (!ts) { box.append(el("div", "empty", "reading the daemon log…")); $("tiersweepnote").textContent = ""; return; }
+  if (ts.unavailable) { box.append(el("div", "badc", "unavailable: the daemon log could not be read")); $("tiersweepnote").textContent = ""; return; }
+  const kv = el("div", "kv");
+  const run = ts.running;
+  const st = el("div");
+  if (run) st.append(el("b", "good", "running"), el("span", "", run.rig + " · " + run.tier + " · " + fmtDur((Date.now() - new Date(run.since).getTime()) / 1000)));
+  else st.append(el("b", "", "idle"), el("span", "", "no sweep is running"));
+  kv.append(st);
+  box.append(kv);
+  const rows = ts.sweeps || [];
+  if (!rows.length) { box.append(el("div", "empty", "no sweeps in the daemon log")); $("tiersweepnote").textContent = ""; return; }
+  const t = el("table");
+  const hr = el("tr");
+  [["When"], ["Rig"], ["Sha"], ...TIERSWEEP_TIERS.map(x => [x]), ["Total", "the whole cycle, every stage the sweep ran", 1]].forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); });
+  t.append(hr);
+  const today = new Date().toDateString();
+  for (const row of rows) {
+    const tr = el("tr");
+    const when = new Date(row.at);
+    tr.append(el("td", "title", when.toDateString() === today ? clock(row.at).slice(0, 5) : when.toLocaleDateString([], {month: "short", day: "numeric"}) + " " + clock(row.at).slice(0, 5)));
+    tr.append(el("td", "", row.rig));
+    tr.append(el("td", "title", row.sha || "–"));
+    const by = {};
+    (row.stages || []).forEach(x => by[x.tier] = x);
+    TIERSWEEP_TIERS.forEach(tier => {
+      const v = by[tier];
+      if (!v) { tr.append(el("td", "title", "–")); return; }
+      const cell = el("td", v.verdict === "RED" ? "badc" : v.verdict === "GREEN" ? "good" : "", v.verdict);
+      if ((v.failed || []).length) cell.title = "failed: " + v.failed.join(", ");
+      tr.append(cell);
+    });
+    tr.append(el("td", "n", row.secs == null ? "–" : fmtDur(row.secs)));
+    t.append(tr);
+  }
+  box.append(t);
+  // The newest RED the record still explains, named under the table so it reads
+  // without a hover.
+  const newest = rows[0];
+  (newest.stages || []).filter(x => x.verdict === "RED" && (x.failed || []).length).forEach(x => {
+    box.append(el("div", "badc title", newest.rig + " " + x.tier + " RED: " + x.failed.join(", ")));
+  });
+  $("tiersweepnote").textContent = rows.length + " sweeps · last " + fmtDur((Date.now() - new Date(newest.at).getTime()) / 1000) + " ago";
+}
+
 function renderSpend(s) {
   const box = $("spend");
   box.replaceChildren();
@@ -873,7 +926,7 @@ function renderQueue(s, force) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
+function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));
@@ -950,7 +1003,7 @@ setupCollapse();
 renderChips();
 connect();
 // Ages and elapsed times drift between pushes; redraw the cheap parts locally.
-setInterval(() => { if (state) { renderTiles(state); renderSeats(state); } }, 15000);
+setInterval(() => { if (state) { renderTiles(state); renderSeats(state); renderTierSweep(state); } }, 15000);
 </script>
 </body>
 </html>

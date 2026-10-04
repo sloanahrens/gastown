@@ -166,18 +166,20 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	recs := newDashLandings(townRoot)
 	seatCache := newDashSeatCache()
 	om := newOMReader(townRoot, recs)
+	tierSweeps := newTierSweepReader(townRoot)
 	queue := newDashQueueReader(townRoot)
 	loads := newDashLoads(townRoot, time.Now)
 	return dashboard.NewHub(dashboard.Config{
-		Feed:     feed,
-		Summary:  func() dashboard.Summary { return dashboardSummary(townRoot, deploys, recs, seatCache) },
-		Health:   func() dashboard.Health { return dashboardHealth(townRoot) },
-		Machine:  dashboard.SampleMachine,
-		Spend:    dashboardSpend(resolveSpendCmd(spendCmd)),
-		OM:       func() *dashboard.OM { return om.read(time.Now()) },
-		Dispatch: om.dispatch,
-		Queue:    func() *dashboard.Queue { return queue.read(time.Now()) },
-		Bead:     queue.detail,
+		Feed:      feed,
+		Summary:   func() dashboard.Summary { return dashboardSummary(townRoot, deploys, recs, seatCache) },
+		Health:    func() dashboard.Health { return dashboardHealth(townRoot) },
+		Machine:   dashboard.SampleMachine,
+		Spend:     dashboardSpend(resolveSpendCmd(spendCmd)),
+		OM:        func() *dashboard.OM { return om.read(time.Now()) },
+		TierSweep: func() *dashboard.TierSweep { return tierSweeps.read(time.Now()) },
+		Dispatch:  om.dispatch,
+		Queue:     func() *dashboard.Queue { return queue.read(time.Now()) },
+		Bead:      queue.detail,
 		Trend: func() *dashboard.Trend {
 			now := time.Now()
 			stages, rejects := om.trendInputs(trendWindowStart(now))
