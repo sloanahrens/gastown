@@ -15,7 +15,6 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/rig"
-	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/util"
@@ -34,8 +33,6 @@ func renderRoleTemplate(ctx RoleContext) (string, error) {
 	// Map role to template name
 	var roleName string
 	switch ctx.Role {
-	case RoleMayor:
-		roleName = constants.RoleMayor
 	case RolePolecat:
 		roleName = constants.RolePolecat
 	case RoleCrew:
@@ -61,7 +58,6 @@ func renderRoleTemplate(ctx RoleContext) (string, error) {
 		IsForkRig:     isForkRig,
 		UpstreamURL:   upstreamURL,
 		Polecat:       ctx.Polecat,
-		MayorSession:  session.MayorSessionName(),
 	}
 
 	output, err := tmpl.RenderRole(roleName, data)
@@ -125,7 +121,7 @@ func outputRoleDirectivesCapped(ctx RoleContext, w io.Writer, explainEnabled, ca
 
 	// A misnamed file is dead for every role, so this runs before the
 	// content check below rather than inside it: the roles most likely to act
-	// on the warning (mayor, polecat) are exactly the ones that have a
+	// on the warning (polecat, crew) are exactly the ones that have a
 	// directive of their own and would never reach the early return.
 	outputUnusedDirectiveWarning(w, townRoot, rigName)
 
@@ -214,8 +210,6 @@ func outputUnusedDirectiveWarning(w io.Writer, townRoot, rigName string) {
 
 func outputPrimeContextFallback(w io.Writer, ctx RoleContext) {
 	switch ctx.Role {
-	case RoleMayor:
-		outputMayorContext(w, ctx)
 	case RolePolecat:
 		outputPolecatContext(w, ctx)
 	case RoleCrew:
@@ -223,43 +217,6 @@ func outputPrimeContextFallback(w io.Writer, ctx RoleContext) {
 	default:
 		outputUnknownContext(w, ctx)
 	}
-}
-
-func outputMayorContext(w io.Writer, ctx RoleContext) {
-	fmt.Fprintf(w, "%s\n\n", style.Bold.Render("# Mayor Context"))
-	fmt.Fprintln(w, "You are the **Mayor** - the global coordinator of Gas Town.")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "## Responsibilities")
-	fmt.Fprintln(w, "- Coordinate work across all rigs")
-	fmt.Fprintln(w, "- Delegate to rigs with `"+cli.Name()+" sling <bead> <rig>`, not directly to individual polecats")
-	fmt.Fprintln(w, "- Monitor overall system health")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "## Key Commands")
-	fmt.Fprintln(w, "- `"+cli.Name()+" mail inbox` - Check your messages")
-	fmt.Fprintln(w, "- `"+cli.Name()+" mail read <id>` - Read a specific message")
-	fmt.Fprintln(w, "- `"+cli.Name()+" status` - Show overall town status")
-	fmt.Fprintln(w, "- `"+cli.Name()+" rig list` - List all rigs")
-	fmt.Fprintln(w, "- `bd ready` - Issues ready to work")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "## Hookable Mail")
-	fmt.Fprintln(w, "Mail can be hooked for ad-hoc instructions: `"+cli.Name()+" hook attach <mail-id>`")
-	fmt.Fprintln(w, "If mail is on your hook, read and execute its instructions (GUPP applies).")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "## Idle-Seat Nudges")
-	fmt.Fprintln(w, "The daemon's mayor_dispatch patrol nudges you when polecat seats are empty")
-	fmt.Fprintln(w, "and work is ready to fill them. **Always verify via CLI")
-	fmt.Fprintln(w, "before deciding action:**")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "1. Run `"+cli.Name()+" polecat list` to get ground truth on polecat state")
-	fmt.Fprintln(w, "2. Do NOT trust your in-context belief about polecat state — it may be stale")
-	fmt.Fprintln(w, "3. If seats are free and beads are ready: `"+cli.Name()+" sling <bead> <rig>`")
-	fmt.Fprintln(w, "4. Answer every nudge — with slings, or with mail to the overseer saying why not")
-	fmt.Fprintln(w)
-	fmt.Fprintln(w, "## Startup")
-	fmt.Fprintln(w, "Check for handoff messages with 🤝 HANDOFF in subject - continue predecessor's work.")
-	fmt.Fprintln(w)
-	outputCommandQuickReference(os.Stdout, ctx)
-	fmt.Fprintf(w, "Town root: %s\n", style.Dim.Render(ctx.TownRoot))
 }
 
 func outputPolecatContext(w io.Writer, ctx RoleContext) {
@@ -330,7 +287,6 @@ func outputUnknownContext(w io.Writer, ctx RoleContext) {
 	fmt.Fprintln(w, "Navigate to a specific agent directory:")
 	fmt.Fprintln(w, "- `<rig>/polecats/<name>/` - Polecat role")
 	fmt.Fprintln(w, "- `<rig>/crew/<name>/` - Crew role")
-	fmt.Fprintln(w, "- `mayor/` or `<rig>/mayor/` - Mayor role")
 	fmt.Fprintln(w, "- Town root is neutral (set GT_ROLE or cd into a role directory)")
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "Town root: %s\n", style.Dim.Render(ctx.TownRoot))
@@ -346,17 +302,6 @@ func outputCommandQuickReference(w io.Writer, ctx RoleContext) {
 	fmt.Fprintln(w)
 
 	switch ctx.Role {
-	case RoleMayor:
-		fmt.Fprintln(w, "| Want to... | Correct command | Common mistake |")
-		fmt.Fprintln(w, "|------------|----------------|----------------|")
-		fmt.Fprintln(w, "| Close/complete a bead | `gt bead close <id>` | ~~bd complete~~ (not a command), ~~bd update --status done~~ (invalid status) |")
-		fmt.Fprintf(w, "| Dispatch work to polecat | `%s sling <bead> <rig>` | ~~gt polecat spawn~~ (not a command) |\n", c)
-		fmt.Fprintf(w, "| Message another agent | `%s nudge <target> \"msg\"` | ~~tmux send-keys~~ (unreliable) |\n", c)
-		fmt.Fprintf(w, "| Kill stuck polecat | `%s polecat nuke <rig>/<name> --force` | ~~gt polecat kill~~ (not a command) |\n", c)
-		fmt.Fprintf(w, "| Pause rig (daemon won't restart) | `%s rig park <rig>` | ~~gt rig stop~~ (daemon will restart it) |\n", c)
-		fmt.Fprintf(w, "| Permanently disable rig | `%s rig dock <rig>` | ~~gt rig park~~ (temporary only) |\n", c)
-		fmt.Fprintln(w, "| Create issues | `gt bead create \"title\"` | ~~gt issue create~~ (not a command) |")
-
 	case RoleCrew:
 		fmt.Fprintln(w, "| Want to... | Correct command | Common mistake |")
 		fmt.Fprintln(w, "|------------|----------------|----------------|")
@@ -416,20 +361,9 @@ func outputHandoffContent(w io.Writer, ctx RoleContext) {
 }
 
 // outputStartupDirective outputs role-specific instructions for the agent.
-// This tells agents like Mayor to announce themselves on startup.
+// This tells agents like the crew worker to announce themselves on startup.
 func outputStartupDirective(w io.Writer, ctx RoleContext) {
 	switch ctx.Role {
-	case RoleMayor:
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "---")
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "**STARTUP PROTOCOL**: You are the Mayor. Please:")
-		fmt.Fprintln(w, "1. Run `"+cli.Name()+" prime` (loads full context, mail, and pending work)")
-		fmt.Fprintln(w, "2. Announce: \"Mayor, checking in.\"")
-		fmt.Fprintln(w, "3. Check mail: `"+cli.Name()+" mail inbox` - look for 🤝 HANDOFF messages")
-		fmt.Fprintln(w, "4. Check for attached work: `"+cli.Name()+" hook`")
-		fmt.Fprintln(w, "   - If mol attached → **RUN IT** (no human input needed)")
-		fmt.Fprintln(w, "   - If no mol → await user instruction")
 	case RolePolecat:
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "---")

@@ -57,7 +57,7 @@ func renderSystemPromptFileForSpawn(role, townRoot, rigPath, agentName, path str
 // the session cwd, for an agent that has not started yet. WorkDir follows the
 // directory each role's session is launched in: the polecat worktree
 // (polecats/<name>/<rig>, or the legacy polecats/<name> when the nested clone
-// does not exist), crew/<name> and mayor.
+// does not exist) and crew/<name>.
 func spawnRoleContext(role, townRoot, rigPath, agentName string) (RoleContext, error) {
 	if townRoot == "" {
 		return RoleContext{}, errors.New("town root is required to render a system prompt")
@@ -68,8 +68,6 @@ func spawnRoleContext(role, townRoot, rigPath, agentName string) (RoleContext, e
 		rigName = filepath.Base(rigPath)
 	}
 	switch role {
-	case constants.RoleMayor:
-		r = RoleMayor
 	case constants.RolePolecat:
 		r = RolePolecat
 	case constants.RoleCrew:

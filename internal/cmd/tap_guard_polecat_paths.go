@@ -308,9 +308,9 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 			}
 		case base == "cd" || base == "pushd":
 			// cd is not a write, but it decides where every later relative path
-			// lands: a polecat that walks into a sibling worktree (or the
-			// mayor/deacon/settings trees) is one careless relative write away
-			// from corrupting them.
+			// lands: a polecat that walks into a sibling worktree (or a
+			// town-level tree such as mayor/) is one careless relative write
+			// away from corrupting them.
 			if reason := s.checkBashArgs(args, base, false); reason != "" {
 				return reason
 			}

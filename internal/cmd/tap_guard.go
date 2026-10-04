@@ -369,7 +369,6 @@ func isGasTownAgentContextIn(getenv func(string) string, getwd func() (string, e
 		"GT_CREW",
 		"GT_WITNESS",
 		"GT_REFINERY",
-		"GT_MAYOR",
 		"GT_DEACON",
 		"GT_DOG_NAME",
 	}
@@ -410,9 +409,9 @@ func isMaintainerOrigin(proc guardProcess) bool {
 
 // isPolecatSession reports whether the current process is running as a
 // polecat, by the same GT_ROLE-first rule `gt sling`, `gt hook` and
-// `gt handoff` use: a coordinator (mayor, witness) may carry a
-// stale GT_POLECAT in its environment from having spawned polecats, so
-// GT_ROLE decides whenever it is set and GT_POLECAT is only the fallback.
+// `gt handoff` use: a coordinator session may carry a stale GT_POLECAT in
+// its environment from having spawned polecats, so GT_ROLE decides whenever
+// it is set and GT_POLECAT is only the fallback.
 func isPolecatSession(proc guardProcess) bool {
 	if role := strings.TrimSpace(proc.getenv("GT_ROLE")); role != "" {
 		return isPolecatRole(role)

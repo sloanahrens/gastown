@@ -5,16 +5,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/constants"
 )
 
-// TestTapGuardMolPatrolIn covers the guard's identity check: inside an agent
-// context only the mayor may run patrol. The agent context is forced with a
-// cwd under a polecats layout so the role check — not the earlier "is this an
-// agent at all" return — is what decides each verdict. GT_ROLE is that check
-// because a mayor session carries GT_ROLE=mayor; GT_MAYOR, which the guard
-// used to read, is set nowhere (gt-y3pgh.2.9).
+// TestTapGuardMolPatrolIn covers the guard's identity check: every Gas Town
+// agent context is blocked, whatever its role, and only a caller outside the
+// agent tree is allowed. The agent context is forced with a cwd under a
+// polecats layout so the block comes from the role/agent check and not from
+// an accident of the working directory.
 func TestTapGuardMolPatrolIn(t *testing.T) {
 	t.Parallel()
 	polecatCwd := filepath.Join(t.TempDir(), "gastown", "polecats", "toast", "gastown")
@@ -27,16 +24,10 @@ func TestTapGuardMolPatrolIn(t *testing.T) {
 		wantExit int // 0 means allowed
 	}{
 		{
-			name:     "mayor allowed in agent context",
-			env:      map[string]string{EnvGTRole: constants.RoleMayor},
+			name:     "deacon role blocked",
+			env:      map[string]string{EnvGTRole: "deacon"},
 			cwd:      polecatCwd,
-			wantExit: 0,
-		},
-		{
-			name:     "compound mayor role allowed in agent context",
-			env:      map[string]string{EnvGTRole: "gastown/mayor"},
-			cwd:      polecatCwd,
-			wantExit: 0,
+			wantExit: 2,
 		},
 		{
 			name:     "polecat blocked",

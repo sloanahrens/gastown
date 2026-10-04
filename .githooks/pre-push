@@ -58,8 +58,8 @@ fi
 # default branch, so nothing here reaches it.
 
 # is_polecat_caller reports whether the process running this hook belongs to a
-# polecat, as opposed to crew / refinery / mayor / witness / any non-agent
-# caller. Two independent signals, either one is enough:
+# polecat, as opposed to crew / refinery / witness / any non-agent caller. Two
+# independent signals, either one is enough:
 #
 #   GT_ROLE - set by the session manager at spawn: "polecat", or the compound
 #             form "<rig>/polecats/<name>".
@@ -189,7 +189,7 @@ while read local_ref local_sha remote_ref remote_sha; do
     echo "  - a plugin script's own push, when an agent runs its instructions"
     echo "      (plugins write both, but the daemon runs them as GT_ROLE=daemon/plugin"
     echo "       and is not a polecat caller - this only bites a manual run)"
-    echo "Both belong to a crew, mayor, or refinery session. Run them there."
+    echo "Both belong to a crew or refinery session. Run them there."
     exit 1
   fi
 
