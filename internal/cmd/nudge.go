@@ -49,8 +49,7 @@ var nudgeCmd = &cobra.Command{
 	Short:   "Send a synchronous message to any Gas Town worker",
 	Long: `Universal messaging API for Gas Town worker-to-worker communication.
 
-Delivers a message to any worker's Claude Code session: polecats, crew,
-or the mayor.
+Delivers a message to any worker's Claude Code session: polecats or crew.
 
 Delivery modes (--mode):
   wait-idle  Wait for agent to become idle (prompt visible), then deliver
@@ -75,9 +74,6 @@ use --mode=immediate.
 This is the ONLY way to send messages to Claude sessions.
 Do not use raw tmux send-keys elsewhere.
 
-Role shortcuts (expand to session names):
-  mayor     Maps to gt-mayor
-
 Channel syntax:
   channel:<name>  Nudges all members of a named channel defined in
                   <town-root>/config/messaging.json under "nudge_channels".
@@ -90,7 +86,6 @@ DND (Do Not Disturb):
 Examples:
   gt nudge greenplace/furiosa "Check your mail and start working"
   gt nudge greenplace/alpha -m "What's your status?"
-  gt nudge mayor "Status update requested"
   gt nudge channel:workers "New priority work available"
 
   # Use --stdin for messages with special characters or formatting:
@@ -186,10 +181,9 @@ func validateNudgeFlags(mode, priority string) error {
 // nudgeTargetAndMessage reads the nudge target from args and the message
 // from -m, --stdin (through readStdin) or the second argument.
 func nudgeTargetAndMessage(messageFlag string, stdin bool, readStdin func() ([]byte, error), args []string) (target, message string, err error) {
-	// Normalize trailing slash: the mail system uses "mayor/" as the
-	// canonical address, but nudge role shortcuts expect bare names.
-	// Without this, "mayor/" falls through to parseAddress which rejects
-	// the empty second component, silently dropping the nudge.
+	// Normalize trailing slash so a mail-style address ("rig/name/") matches
+	// the nudge target form. Without this, the trailing slash leaves an empty
+	// second component, which silently drops the nudge.
 	target = strings.TrimSuffix(args[0], "/")
 
 	// Handle --stdin: read message from stdin (avoids shell quoting issues)

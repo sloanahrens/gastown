@@ -91,6 +91,18 @@ func TestIntegrationValidateRecipient(t *testing.T) {
 		t.Fatalf("creating dog dir: %v", err)
 	}
 
+	// The production layout keeps a mayor/ clone in every rig, and the town
+	// keeps a mayor/ marker. Neither directory makes the retired mayor role
+	// addressable, in town form or rig-scoped form (gt-rwp7z.5).
+	for _, dir := range []string{
+		filepath.Join(townRoot, "mayor"),
+		filepath.Join(townRoot, "testrig", "mayor", "rig"),
+	} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("creating %s: %v", dir, err)
+		}
+	}
+
 	r := NewRouterWithTownRoot(townRoot, townRoot, testPrefixRegistry())
 
 	tests := []struct {
@@ -102,9 +114,6 @@ func TestIntegrationValidateRecipient(t *testing.T) {
 		// Overseer is always valid (human operator, no agent bead)
 		{"overseer", "overseer", false, ""},
 
-		// Town-level agents (validated against beads)
-		{"mayor", "mayor/", false, ""},
-
 		// Rig-level agents (validated against beads)
 		{"witness", "testrig/witness", false, ""},
 		{"crew member", "testrig/alice", false, ""},
@@ -114,6 +123,7 @@ func TestIntegrationValidateRecipient(t *testing.T) {
 		{"bare name", "ruby", true, "no agent found"},
 		{"nonexistent rig agent", "testrig/nonexistent", true, "no agent found"},
 		{"wrong rig", "wrongrig/alice", true, "no agent found"},
+		{"retired mayor with bead and marker dir", "mayor/", true, "no agent found"}, // gt-rwp7z.5
 		{"misrouted town agent", "testrig/mayor", true, "no agent found"},
 		{"retired dog with kennel dir", "deacon/dogs/fido", true, "no agent found"},
 		{"retired deacon despite its bead", "deacon/", true, "no agent found"}, // gt-4k3fj.6.1
