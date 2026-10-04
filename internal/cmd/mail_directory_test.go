@@ -73,7 +73,7 @@ func TestRunMailDirectory_WellKnownAddresses(t *testing.T) {
 		t.Fatalf("writeMailDirectory: %v", err)
 	}
 	output := out.String()
-	for _, addr := range []string{"mayor/", "--self", "@town", "@crew", "@witnesses", "@overseer", "ADDRESS", "TYPE", "(4 warnings)"} {
+	for _, addr := range []string{"--self", "@town", "@crew", "@witnesses", "@overseer", "ADDRESS", "TYPE", "(4 warnings)"} {
 		if !strings.Contains(output, addr) {
 			t.Errorf("output lacks %q:\n%s", addr, output)
 		}
@@ -113,17 +113,22 @@ func TestRunMailDirectory_JSONOutput(t *testing.T) {
 	}
 }
 
-// TestRunMailDirectory_Deduplication: mayor/ is both an agent and a
-// well-known address, and is listed once.
+// TestRunMailDirectory_Deduplication: every address is listed once, however
+// many sources name it.
 func TestRunMailDirectory_Deduplication(t *testing.T) {
 	t.Parallel()
-	entries := mailDirectoryJSON(t, fakeDirSource{agents: map[string]*beads.Issue{"hq-mayor": {}}})
+	entries := mailDirectoryJSON(t, fakeDirSource{
+		agents:   map[string]*beads.Issue{"gt-gastown-witness": {}, "gt-alpha-witness": {}},
+		groups:   map[string]*beads.GroupFields{"ops": {}},
+		queues:   map[string]*beads.Issue{"hq-q1": {Description: "name: work"}},
+		channels: map[string]*beads.ChannelFields{"alerts": {}},
+	})
 	seen := map[string]int{}
 	for _, e := range entries {
 		seen[e.Address]++
 	}
-	if seen["mayor/"] != 1 {
-		t.Errorf("mayor/ listed %d times", seen["mayor/"])
+	if len(seen) == 0 {
+		t.Fatal("no addresses listed")
 	}
 	for addr, n := range seen {
 		if n > 1 {
@@ -149,7 +154,7 @@ func TestRunMailDirectory_SortOrder(t *testing.T) {
 
 func TestDirectoryEntry_JSONTags(t *testing.T) {
 	t.Parallel()
-	e := DirectoryEntry{Address: "mayor/", Type: "well-known"}
+	e := DirectoryEntry{Address: "gastown/witness", Type: "agent"}
 	data, err := json.Marshal(e)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -160,10 +165,10 @@ func TestDirectoryEntry_JSONTags(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if raw["address"] != "mayor/" {
+	if raw["address"] != "gastown/witness" {
 		t.Errorf("JSON key should be 'address', got: %v", raw)
 	}
-	if raw["type"] != "well-known" {
+	if raw["type"] != "agent" {
 		t.Errorf("JSON key should be 'type', got: %v", raw)
 	}
 }

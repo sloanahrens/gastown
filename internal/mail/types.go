@@ -65,7 +65,7 @@ type Message struct {
 	// ID is a unique message identifier (beads issue ID like "bd-abc123").
 	ID string `json:"id"`
 
-	// From is the sender address (e.g., "gastown/Toast" or "mayor/").
+	// From is the sender address (e.g., "gastown/Toast" or "overseer").
 	From string `json:"from"`
 
 	// To is the recipient address.
@@ -544,7 +544,6 @@ func ParseMessageType(s string) MessageType {
 //
 // Liberal normalization (Postel's Law - be liberal in what you accept):
 //   - "overseer" → "overseer" (human operator, no trailing slash)
-//   - "mayor" or "mayor/" → "mayor/" (town-level, trailing slash)
 //   - "gastown/polecats/Toast" → "gastown/Toast" (crew/polecats normalized)
 //   - "gastown/crew/max" → "gastown/max" (crew/polecats normalized)
 //   - "gastown/Toast" → "gastown/Toast" (already canonical)
@@ -555,22 +554,11 @@ func normalizeAddress(s string) string {
 		return "overseer"
 	}
 
-	// The town-level mayor keeps a trailing slash
-	if s == "mayor" || s == "mayor/" {
-		return "mayor/"
-	}
-
-	// Resolve the rig-scoped mayor to its canonical form (gt-te23):
-	// "gastown/mayor" → "mayor/". The mayor is a town-level singleton.
-	parts := strings.Split(s, "/")
-	if len(parts) == 2 && parts[1] == "mayor" {
-		return "mayor/"
-	}
-
 	// Normalize crew/, polecat/, and polecats/ to canonical form:
 	// "rig/crew/name" → "rig/name"
 	// "rig/polecat/name" → "rig/name" (legacy singular input)
 	// "rig/polecats/name" → "rig/name"
+	parts := strings.Split(s, "/")
 	if len(parts) == 3 && (parts[1] == "crew" || parts[1] == "polecat" || parts[1] == "polecats") {
 		return parts[0] + "/" + parts[2]
 	}
@@ -582,8 +570,6 @@ func normalizeAddress(s string) string {
 //
 // Addresses use slash format:
 //   - "overseer" → "overseer" (human operator, no trailing slash)
-//   - "mayor/" → "mayor/"
-//   - "mayor" → "mayor/"
 //   - "gastown/polecats/Toast" → "gastown/Toast" (normalized)
 //   - "gastown/crew/max" → "gastown/max" (normalized)
 //   - "gastown/Toast" → "gastown/Toast" (already canonical)
@@ -591,7 +577,6 @@ func normalizeAddress(s string) string {
 //   - "gastown/" → "gastown" (rig broadcast)
 func AddressToIdentity(address string) string {
 	// Trim trailing slash for rig-level addresses before normalization.
-	// normalizeAddress handles mayor/ correctly even after trimming.
 	if len(address) > 0 && address[len(address)-1] == '/' {
 		address = address[:len(address)-1]
 	}
@@ -602,7 +587,6 @@ func AddressToIdentity(address string) string {
 //
 // Examples:
 //   - "overseer" → "overseer" (human operator)
-//   - "mayor/" → "mayor/"
 //   - "gastown/polecats/Toast" → "gastown/Toast" (normalized)
 //   - "gastown/crew/max" → "gastown/max" (normalized)
 //   - "gastown/Toast" → "gastown/Toast" (already canonical)

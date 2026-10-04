@@ -129,33 +129,6 @@ func envOf(vars map[string]string) func(string) string {
 	return func(k string) string { return vars[k] }
 }
 
-func TestIsTownLevelAddress(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		address string
-		want    bool
-	}{
-		{"mayor", true},
-		{"mayor/", true},
-		{"deacon", false}, // deacon role retired (gt-4k3fj.6.1)
-		{"deacon/", false},
-		{"overseer", true},
-		{"gastown/refinery", false},
-		{"gastown/polecats/Toast", false},
-		{"gastown/", false},
-		{"", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.address, func(t *testing.T) {
-			got := isTownLevelAddress(tt.address)
-			if got != tt.want {
-				t.Errorf("isTownLevelAddress(%q) = %v, want %v", tt.address, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestAddressToSessionIDs(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -165,12 +138,12 @@ func TestAddressToSessionIDs(t *testing.T) {
 		// Overseer (human operator) - single session
 		{"overseer", []string{"hq-overseer"}},
 
-		// Town-level addresses - single session
-		{"mayor", []string{"hq-mayor"}},
-		{"mayor/", []string{"hq-mayor"}},
+		// Town-level addresses whose role is retired - no session
 		{"deacon", nil}, // deacon role retired (gt-4k3fj.6.1)
 		{"deacon/", nil},
 		{"deacon/dogs/alpha", nil}, // dog role retired (gt-29q6g)
+		{"mayor", nil},             // mayor role retired (gt-rwp7z)
+		{"mayor/", nil},
 
 		// Rig singletons - single session (no crew/polecat ambiguity)
 		// Refinery role removed (gt-v4ssj.6): no longer a singleton, so it is
@@ -417,7 +390,7 @@ func TestRouterBatchMailSummaries(t *testing.T) {
 		named := strings.Contains(query, "'gastown/max'")
 		switch {
 		case strings.Contains(query, "FROM issues") && named:
-			return `[{"id":"issue-direct-open","title":"Direct open","status":"open","assignee":"gastown/max","cc_labels_csv":null,"is_read":0},{"id":"issue-already-read","title":"Already read","status":"open","assignee":"gastown/max","cc_labels_csv":null,"is_read":1},{"id":"issue-cc-both","title":"CC to max and mayor","status":"open","assignee":"someone/else","cc_labels_csv":"cc:gastown/max,cc:mayor/","is_read":0}]`, "", 0
+			return `[{"id":"issue-direct-open","title":"Direct open","status":"open","assignee":"gastown/max","cc_labels_csv":null,"is_read":0},{"id":"issue-already-read","title":"Already read","status":"open","assignee":"gastown/max","cc_labels_csv":null,"is_read":1},{"id":"issue-cc-both","title":"CC to max and witness","status":"open","assignee":"someone/else","cc_labels_csv":"cc:gastown/max,cc:gastown/witness","is_read":0}]`, "", 0
 		case strings.Contains(query, "FROM wisps") && named:
 			return `[{"id":"wisp-direct","title":"Wisp direct","description":"","status":"open","priority":2,"assignee":"gastown/max","created_at":"2026-06-12T12:00:00Z","updated_at":"2026-06-12T12:00:00Z","labels_csv":"gt:message","assignee_match":1,"cc_match":0},{"id":"wisp-already-read","title":"Wisp already read","description":"","status":"open","priority":2,"assignee":"gastown/max","created_at":"2026-06-12T12:00:00Z","updated_at":"2026-06-12T12:00:00Z","labels_csv":"gt:message,read","assignee_match":1,"cc_match":0}]`, "", 0
 		}
@@ -429,7 +402,7 @@ func TestRouterBatchMailSummaries(t *testing.T) {
 	r.town = noTownBeads{}
 	// "gastown/crew/max" is the raw GGT address form (as discoverRigAgents
 	// builds it); it must be normalized to "gastown/max" before querying.
-	summaries, err := r.BatchMailSummaries([]string{"gastown/crew/max", "mayor/"})
+	summaries, err := r.BatchMailSummaries([]string{"gastown/crew/max", "gastown/witness"})
 	if err != nil {
 		t.Fatalf("BatchMailSummaries: %v", err)
 	}
@@ -446,12 +419,12 @@ func TestRouterBatchMailSummaries(t *testing.T) {
 		t.Errorf("gastown/crew/max FirstSubject = %q, want %q", got, "Direct open")
 	}
 
-	// mayor/: CC only, on issue-cc-both. 1 unread total.
-	if got := summaries["mayor/"].UnreadCount; got != 1 {
-		t.Errorf("mayor/ UnreadCount = %d, want 1", got)
+	// gastown/witness: CC only, on issue-cc-both. 1 unread total.
+	if got := summaries["gastown/witness"].UnreadCount; got != 1 {
+		t.Errorf("gastown/witness UnreadCount = %d, want 1", got)
 	}
-	if got := summaries["mayor/"].FirstSubject; got != "CC to max and mayor" {
-		t.Errorf("mayor/ FirstSubject = %q, want %q", got, "CC to max and mayor")
+	if got := summaries["gastown/witness"].FirstSubject; got != "CC to max and witness" {
+		t.Errorf("gastown/witness FirstSubject = %q, want %q", got, "CC to max and witness")
 	}
 
 	if calls := bd.argvs(); len(calls) != 2 {
@@ -1089,6 +1062,21 @@ func TestParseGroupAddress(t *testing.T) {
 	}
 }
 
+// TestTownGroupSendWithNoTownLevelAgents: @town must still resolve to the
+// town-level agents that exist, and to nothing when none do — a broadcast
+// into an empty town is a silent no-op, never a bounce (gt-rwp7z).
+func TestTownGroupSendWithNoTownLevelAgents(t *testing.T) {
+	t.Parallel()
+	bd := &bdScript{answer: func(c bdCall) (string, string, int) { return "[]", "", 0 }}
+	r := NewRouterWithTownRoot(t.TempDir(), t.TempDir(), testPrefixRegistry())
+	r.bd = bd.run
+	r.town = noTownBeads{}
+
+	if err := r.sendToGroup(&Message{To: "@town", From: "overseer", Subject: "s", Body: "b"}); err != nil {
+		t.Fatalf("sendToGroup(@town) = %v, want no error when the town has no town-level agents", err)
+	}
+}
+
 func TestAgentBeadToAddress(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1394,12 +1382,12 @@ func TestAddressToAgentBeadID(t *testing.T) {
 		{
 			name:     "mayor",
 			address:  "mayor/",
-			expected: "hq-mayor",
+			expected: "", // mayor role retired (gt-rwp7z)
 		},
 		{
 			name:     "mayor without slash",
 			address:  "mayor",
-			expected: "hq-mayor",
+			expected: "",
 		},
 		{
 			name:     "deacon",
@@ -2153,7 +2141,7 @@ func TestEnqueueReplyReminder_Basic(t *testing.T) {
 
 func TestEnqueueReplyReminder_SkipsUnreplyableSender(t *testing.T) {
 	t.Parallel()
-	for _, from := range []string{"gt-sling", "sling", "gt-done", "system", "daemon", "unknown"} {
+	for _, from := range []string{"gt-sling", "sling", "gt-done", "system", "daemon", "unknown", "mayor/"} {
 		t.Run(from, func(t *testing.T) {
 			townRoot := t.TempDir()
 			r := &Router{workDir: t.TempDir(), townRoot: townRoot}
@@ -2180,7 +2168,7 @@ func TestEnqueueReplyReminder_SkipsUnreplyableSender(t *testing.T) {
 
 func TestEnqueueReplyReminder_RoutableSenderStillQueues(t *testing.T) {
 	t.Parallel()
-	for _, from := range []string{"overseer", "mayor/", "gastown/witness", "gastown/refinery", "gastown/crew/alice", "gastown/polecat/rust", "gastown/polecats/rust", "gastown/rust"} {
+	for _, from := range []string{"overseer", "gastown/witness", "gastown/refinery", "gastown/crew/alice", "gastown/polecat/rust", "gastown/polecats/rust", "gastown/rust"} {
 		t.Run(from, func(t *testing.T) {
 			townRoot := t.TempDir()
 			r := &Router{workDir: t.TempDir(), townRoot: townRoot}
@@ -2238,8 +2226,8 @@ func TestSenderCanReceiveReply(t *testing.T) {
 		{from: "deacon/dogs/alpha/extra", want: false},
 		{from: "deacon/dogs/alpha", want: false}, // dog role retired (gt-29q6g)
 		{from: "overseer", want: true},
-		{from: "mayor", want: true},
-		{from: "mayor/", want: true},
+		{from: "mayor", want: false}, // mayor role retired (gt-rwp7z)
+		{from: "mayor/", want: false},
 		{from: "gastown/mayor", want: true},
 		{from: "gastown/deacon", want: true},
 		{from: "gastown/witness", want: true},

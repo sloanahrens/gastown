@@ -327,7 +327,7 @@ func isValidGroupName(name string) bool {
 
 // isValidMemberPattern checks if a member pattern is syntactically valid.
 // Valid patterns include:
-// - Direct addresses: gastown/crew/max, mayor/, deacon/
+// - Direct addresses: gastown/crew/max, deacon/
 // - Wildcards: */witness, gastown/*, gastown/crew/*
 // - Special patterns: @town, @crew, @witnesses
 // - Group names: ops-team

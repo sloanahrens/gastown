@@ -151,8 +151,6 @@ func detectSenderFromRole(getenv func(string) string, cwd, role string) string {
 
 	// GT_ROLE is a simple role name, build the full address
 	switch role {
-	case constants.RoleMayor:
-		return "mayor/"
 	case constants.RolePolecat:
 		polecat := getenv("GT_POLECAT")
 		if rig != "" && polecat != "" {
@@ -225,11 +223,6 @@ func detectSenderFromCwd(cwd string) string {
 		}
 	}
 
-	// If in the town's mayor directory
-	if strings.Contains(cwd, "/mayor") {
-		return "mayor"
-	}
-
 	// Default to overseer (human)
 	return "overseer"
 }
@@ -268,8 +261,6 @@ func identityFromAgentFile(parsed agentIdentityFile) string {
 	name := strings.TrimSpace(parsed.Name)
 
 	switch role {
-	case constants.RoleMayor:
-		return "mayor/"
 	case constants.RoleCrew:
 		if rig != "" && name != "" {
 			return fmt.Sprintf("%s/crew/%s", rig, name)

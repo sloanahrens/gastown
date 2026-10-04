@@ -126,16 +126,16 @@ func (n *Town) log(townRoot, sender, rig, target, message string) {
 	_ = events.LogFeedTo(townRoot, events.TypeNudge, sender, events.NudgePayload(rig, target, message))
 }
 
-// Nudge delivers message from sender to target: a role shortcut ("mayor"), a
-// rig address ("gastown/max", "gastown/crew/max", "gastown/polecats/toast"),
-// a raw session name or a channel ("channel:<name>", NudgeChannel).
+// Nudge delivers message from sender to target: a rig address
+// ("gastown/max", "gastown/crew/max", "gastown/polecats/toast"), a raw session
+// name or a channel ("channel:<name>", NudgeChannel).
 func (n *Town) Nudge(ctx context.Context, target, message, sender string) error {
 	d := n.Delivery
 	townRoot := d.TownRoot
 	reg := n.registry()
 
-	// Normalize trailing slash: the mail system uses "mayor/" as the
-	// canonical address, but nudge role shortcuts expect bare names.
+	// Normalize a mail-style trailing slash so the address form matches the
+	// nudge target form.
 	target = strings.TrimSuffix(target, "/")
 	if channel, ok := strings.CutPrefix(target, "channel:"); ok {
 		_, err := n.NudgeChannel(ctx, channel, message, sender)
@@ -147,11 +147,7 @@ func (n *Town) Nudge(ctx context.Context, target, message, sender string) error 
 		return nil
 	}
 
-	// Expand role shortcuts to session names.
-	if target == constants.RoleMayor {
-		target = session.MayorSessionName()
-	}
-	if strings.HasPrefix(target, constants.RoleMayor+"/") || strings.HasPrefix(target, "deacon/") {
+	if strings.HasPrefix(target, constants.DirMayor+"/") || strings.HasPrefix(target, "deacon/") {
 		return fmt.Errorf("invalid town target %q", target)
 	}
 
@@ -289,10 +285,10 @@ func (n *Town) NudgeChannel(ctx context.Context, channel, message, sender string
 }
 
 // ChannelSessions resolves a nudge channel's member patterns to the running
-// agent sessions among live, each once, in pattern order. A pattern is a
-// role ("mayor"), a rig address ("gastown/crew/max", "gastown/polecats/toast",
-// or "gastown/toast" for a polecat) or one with "*" for the rig or the name
-// ("gastown/polecats/*", "*/crew/*").
+// agent sessions among live, each once, in pattern order. A pattern is a rig
+// address ("gastown/crew/max", "gastown/polecats/toast", or "gastown/toast"
+// for a polecat) or one with "*" for the rig or the name ("gastown/polecats/*",
+// "*/crew/*").
 func ChannelSessions(reg *session.PrefixRegistry, patterns, live []string) []string {
 	var agents []*session.AgentIdentity
 	names := map[*session.AgentIdentity]string{}
@@ -302,17 +298,14 @@ func ChannelSessions(reg *session.PrefixRegistry, patterns, live []string) []str
 			continue
 		}
 		switch id.Role {
-		case session.RoleMayor, session.RoleCrew, session.RolePolecat:
+		case session.RoleCrew, session.RolePolecat:
 			agents = append(agents, id)
 			names[id] = name
 		}
 	}
-	// The mayor first, then by rig, crew before polecats, then by name.
+	// By rig, crew before polecats, then by name.
 	sort.SliceStable(agents, func(i, j int) bool {
 		a, b := agents[i], agents[j]
-		if (a.Role == session.RoleMayor) != (b.Role == session.RoleMayor) {
-			return a.Role == session.RoleMayor
-		}
 		if a.Rig != b.Rig {
 			return a.Rig < b.Rig
 		}
@@ -331,10 +324,6 @@ func ChannelSessions(reg *session.PrefixRegistry, patterns, live []string) []str
 		}
 	}
 	for _, pattern := range patterns {
-		if pattern == constants.RoleMayor {
-			add(session.MayorSessionName())
-			continue
-		}
 		rigPattern, target, ok := strings.Cut(pattern, "/")
 		if !ok {
 			continue
@@ -360,7 +349,7 @@ func ChannelSessions(reg *session.PrefixRegistry, patterns, live []string) []str
 }
 
 // SessionAddress is the nudge address of an agent session ("" when the name
-// is no agent's): "hq-mayor" -> "mayor", "gt-crew-max" -> "gastown/crew/max",
+// is no agent's): "gt-crew-max" -> "gastown/crew/max",
 // "gt-alpha" -> "gastown/alpha".
 func SessionAddress(reg *session.PrefixRegistry, sessionName string) string {
 	id, err := session.ParseSessionNameWithRegistry(sessionName, reg)
@@ -368,8 +357,6 @@ func SessionAddress(reg *session.PrefixRegistry, sessionName string) string {
 		return ""
 	}
 	switch id.Role {
-	case session.RoleMayor:
-		return constants.RoleMayor
 	case session.RoleCrew:
 		return fmt.Sprintf("%s/crew/%s", id.Rig, id.Name)
 	case session.RolePolecat:
@@ -382,14 +369,9 @@ func SessionAddress(reg *session.PrefixRegistry, sessionName string) string {
 // AgentBeadID converts a nudge target address to the agent bead whose
 // notification level gates it ("" when the address names none).
 // Examples:
-//   - "mayor" -> "hq-mayor"
 //   - "gastown/alpha" -> "gt-alpha"
 func AgentBeadID(reg *session.PrefixRegistry, address string) string {
-	switch address {
-	case constants.RoleMayor, constants.RoleMayor + "/":
-		return session.MayorSessionName()
-	}
-	if strings.HasPrefix(address, constants.RoleMayor+"/") || strings.HasPrefix(address, "deacon/") {
+	if strings.HasPrefix(address, constants.DirMayor+"/") || strings.HasPrefix(address, "deacon/") {
 		return ""
 	}
 
@@ -440,8 +422,6 @@ func Sender(cwd, townRoot string, getenv func(string) string) string {
 		}
 	}
 	switch role {
-	case constants.RoleMayor:
-		return constants.RoleMayor
 	case roleCrew:
 		return fmt.Sprintf("%s/crew/%s", rig, name)
 	case rolePolecat:
@@ -457,9 +437,8 @@ const (
 	roleUnknown = "unknown"
 )
 
-// roleFromDir is the role whose home dir is (the mayor, a crew member or a
-// polecat), and the rig and name the path names even when it is no role's
-// home.
+// roleFromDir is the role whose home dir is (a crew member or a polecat), and
+// the rig and name the path names even when it is no role's home.
 func roleFromDir(dir, townRoot string) (role, rig, name string) {
 	rel, err := filepath.Rel(townRoot, dir)
 	if err != nil {
@@ -471,18 +450,13 @@ func roleFromDir(dir, townRoot string) (role, rig, name string) {
 		return roleUnknown, "", ""
 	}
 	parts := strings.Split(rel, "/")
-	switch parts[0] {
-	case constants.RoleMayor:
-		return constants.RoleMayor, "", ""
-	case "deacon":
+	if parts[0] == "deacon" {
 		// deacon/ held the deleted deacon, boot and dog roles; it is not a rig.
 		return roleUnknown, "", ""
 	}
 	rig = parts[0]
 	if len(parts) >= 2 {
 		switch parts[1] {
-		case constants.RoleMayor:
-			return constants.RoleMayor, rig, ""
 		case "polecats":
 			if len(parts) >= 3 {
 				return rolePolecat, rig, parts[2]
@@ -496,7 +470,7 @@ func roleFromDir(dir, townRoot string) (role, rig, name string) {
 	return roleUnknown, rig, ""
 }
 
-// parseRole parses a GT_ROLE value like "mayor", "gastown/crew/max" or
+// parseRole parses a GT_ROLE value like "gastown/crew/max" or
 // "gastown/polecats/alpha".
 func parseRole(s string) (role, rig, name string) {
 	s = strings.TrimSpace(s)
@@ -504,9 +478,6 @@ func parseRole(s string) (role, rig, name string) {
 		s = strings.ReplaceAll(s, "//", "/")
 	}
 	s = strings.TrimSuffix(s, "/")
-	if s == constants.RoleMayor {
-		return constants.RoleMayor, "", ""
-	}
 	parts := strings.Split(s, "/")
 	if len(parts) < 2 {
 		return s, "", ""

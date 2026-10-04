@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/nudge"
 )
 
@@ -19,12 +18,13 @@ func TestExpiryObserverInstalled(t *testing.T) {
 	}
 }
 
-// TestExpiredNudgeMailTargetFallsBackToMayor covers the session that no rig
-// claims: the notice still has a mailbox to reach (gt-oexm).
-func TestExpiredNudgeMailTargetFallsBackToMayor(t *testing.T) {
+// TestExpiredNudgeMailTargetIsEmptyForUnparseableSession: the session that no
+// rig claims has no mailbox to reach, so the notice is dropped rather than
+// mailed to a dead address (gt-oexm, mayor retired by gt-rwp7z).
+func TestExpiredNudgeMailTargetIsEmptyForUnparseableSession(t *testing.T) {
 	t.Parallel()
-	if got := expiredNudgeMailTarget(nudgeTestRegistry(), "not a session name"); got != constants.RoleMayor {
-		t.Errorf("expiredNudgeMailTarget(unparseable session) = %q, want %q", got, constants.RoleMayor)
+	if got := expiredNudgeMailTarget(nudgeTestRegistry(), "not a session name"); got != "" {
+		t.Errorf("expiredNudgeMailTarget(unparseable session) = %q, want no mailbox", got)
 	}
 }
 

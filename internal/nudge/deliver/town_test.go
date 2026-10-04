@@ -44,8 +44,7 @@ func (l *townLog) entries() []string {
 }
 
 // testTown is a Town over ft in a scratch town whose one rig, gastown, has
-// prefix gt, and whose one nudge channel, workers, is gastown's polecats and
-// the mayor.
+// prefix gt, and whose one nudge channel, workers, is gastown's polecats.
 func testTown(t *testing.T, ft *deliveryTmux) (*Town, *townLog) {
 	t.Helper()
 	reg := session.NewPrefixRegistry()
@@ -58,42 +57,43 @@ func testTown(t *testing.T, ft *deliveryTmux) (*Town, *townLog) {
 		Log:               l.log,
 		RigExists:         func(_, rig string) bool { return rig == "gastown" },
 		Channels: func(string) (map[string][]string, error) {
-			return map[string][]string{"workers": {"gastown/polecats/*", "mayor"}, "empty": nil}, nil
+			return map[string][]string{"workers": {"gastown/polecats/*"}, "empty": nil}, nil
 		},
 	}, l
 }
 
-func TestTownNudgesMayorByRoleShortcut(t *testing.T) {
+// TestTownRefusesRetiredRoleShortcut: the mayor role is retired, so neither its
+// bare name nor its mail-style address names a session any more.
+func TestTownRefusesRetiredRoleShortcut(t *testing.T) {
 	t.Parallel()
-	ft := newDeliveryTmux(t, "hq-mayor")
-	ft.SetIdle("hq-mayor", true)
-	town, l := testTown(t, ft)
+	for _, target := range []string{"mayor", "mayor/"} {
+		t.Run(target, func(t *testing.T) {
+			t.Parallel()
+			ft := newDeliveryTmux(t)
+			town, l := testTown(t, ft)
 
-	if err := town.Nudge(t.Context(), "mayor/", "dispatch", "unknown"); err != nil {
-		t.Fatalf("Nudge: %v", err)
-	}
-	if got := ft.Sent("hq-mayor"); len(got) != 1 || !strings.Contains(got[0], "[from unknown] dispatch") {
-		t.Fatalf("sent = %q, want the nudge delivered to hq-mayor", got)
-	}
-	if got := l.entries(); len(got) != 1 || got[0] != "unknown  hq-mayor dispatch" {
-		t.Errorf("logged = %q, want one entry for hq-mayor", got)
-	}
-	if len(l.read) != 1 || l.read[0] != "hq-mayor" {
-		t.Errorf("DND read %v, want hq-mayor's bead", l.read)
+			err := town.Nudge(t.Context(), target, "dispatch", "unknown")
+			if err == nil || !strings.Contains(err.Error(), "not found") {
+				t.Fatalf("Nudge(%q) = %v, want session not found", target, err)
+			}
+			if got := l.entries(); len(got) != 0 {
+				t.Errorf("logged = %q, want nothing", got)
+			}
+		})
 	}
 }
 
 func TestTownSkipsMutedTarget(t *testing.T) {
 	t.Parallel()
-	ft := newDeliveryTmux(t, "hq-mayor")
-	ft.SetIdle("hq-mayor", true)
+	ft := newDeliveryTmux(t, "gt-crew-max")
+	ft.SetIdle("gt-crew-max", true)
 	town, l := testTown(t, ft)
-	l.levels["hq-mayor"] = beads.NotifyMuted
+	l.levels["gt-crew-max"] = beads.NotifyMuted
 
-	if err := town.Nudge(t.Context(), "mayor", "dispatch", "unknown"); err != nil {
+	if err := town.Nudge(t.Context(), "gastown/crew/max", "dispatch", "unknown"); err != nil {
 		t.Fatalf("Nudge to a muted target = %v, want a silent skip", err)
 	}
-	if got := ft.Sent("hq-mayor"); len(got) != 0 {
+	if got := ft.Sent("gt-crew-max"); len(got) != 0 {
 		t.Fatalf("sent = %q, want nothing to a muted target", got)
 	}
 	if got := l.entries(); len(got) != 0 {
@@ -103,15 +103,15 @@ func TestTownSkipsMutedTarget(t *testing.T) {
 
 func TestTownDeliversWhenDNDUnreadable(t *testing.T) {
 	t.Parallel()
-	ft := newDeliveryTmux(t, "hq-mayor")
-	ft.SetIdle("hq-mayor", true)
+	ft := newDeliveryTmux(t, "gt-crew-max")
+	ft.SetIdle("gt-crew-max", true)
 	town, l := testTown(t, ft)
 	l.err = errors.New("no such bead")
 
-	if err := town.Nudge(t.Context(), "mayor", "dispatch", "unknown"); err != nil {
+	if err := town.Nudge(t.Context(), "gastown/crew/max", "dispatch", "unknown"); err != nil {
 		t.Fatalf("Nudge: %v", err)
 	}
-	if got := ft.Sent("hq-mayor"); len(got) != 1 {
+	if got := ft.Sent("gt-crew-max"); len(got) != 1 {
 		t.Fatalf("sent = %q, want the nudge delivered (DND fails open)", got)
 	}
 }
@@ -252,8 +252,8 @@ func TestTownRefusesPolecatOfUnknownRig(t *testing.T) {
 
 func TestTownNudgesChannelMembers(t *testing.T) {
 	t.Parallel()
-	ft := newDeliveryTmux(t, "hq-mayor", "gt-alpha", "gt-beta", "gt-crew-max")
-	for _, s := range []string{"hq-mayor", "gt-alpha", "gt-beta", "gt-crew-max"} {
+	ft := newDeliveryTmux(t, "gt-alpha", "gt-beta", "gt-crew-max")
+	for _, s := range []string{"gt-alpha", "gt-beta", "gt-crew-max"} {
 		ft.SetIdle(s, true)
 	}
 	town, l := testTown(t, ft)
@@ -264,10 +264,10 @@ func TestTownNudgesChannelMembers(t *testing.T) {
 	if err := town.Nudge(t.Context(), "channel:workers", "standup", "mayor"); err != nil {
 		t.Fatalf("Nudge(channel:workers): %v", err)
 	}
-	if want := []string{"gt-alpha:", "gt-beta:" + beads.NotifyMuted, "hq-mayor:"}; strings.Join(reported, ",") != strings.Join(want, ",") {
+	if want := []string{"gt-alpha:", "gt-beta:" + beads.NotifyMuted}; strings.Join(reported, ",") != strings.Join(want, ",") {
 		t.Errorf("members = %q, want %q", reported, want)
 	}
-	for session, n := range map[string]int{"gt-alpha": 1, "hq-mayor": 1, "gt-beta": 0, "gt-crew-max": 0} {
+	for session, n := range map[string]int{"gt-alpha": 1, "gt-beta": 0, "gt-crew-max": 0} {
 		if got := ft.Sent(session); len(got) != n {
 			t.Errorf("sent to %s = %q, want %d nudge(s)", session, got, n)
 		}
@@ -281,15 +281,15 @@ func TestTownChannelReportsFailedMembers(t *testing.T) {
 	t.Parallel()
 	ft := newDeliveryTmux(t, "gt-alpha")
 	ft.SetIdle("gt-alpha", true)
+	ft.submitErr = errors.New("pane is gone")
 	town, _ := testTown(t, ft)
 
 	results, err := town.NudgeChannel(t.Context(), "workers", "standup", "mayor")
 	if err == nil {
 		t.Fatal("NudgeChannel succeeded, want the failed delivery reported")
 	}
-	// hq-mayor is not running, so the mayor pattern names a dead session.
-	if len(results) != 2 || results[0].Session != "gt-alpha" || results[0].Err != nil || results[1].Session != "hq-mayor" || results[1].Err == nil {
-		t.Errorf("results = %+v, want gt-alpha then a failed hq-mayor", results)
+	if len(results) != 1 || results[0].Session != "gt-alpha" || results[0].Err == nil {
+		t.Errorf("results = %+v, want gt-alpha with a delivery error", results)
 	}
 }
 
@@ -303,7 +303,7 @@ func TestChannelSessions(t *testing.T) {
 		patterns []string
 		want     string
 	}{
-		{[]string{"mayor"}, "hq-mayor"},
+		{[]string{"mayor"}, ""}, // the mayor role is retired (gt-rwp7z): no such member
 		{[]string{"gastown/polecats/*"}, "gt-alpha gt-beta"},
 		{[]string{"gastown/polecats/alpha"}, "gt-alpha"},
 		{[]string{"gastown/crew/*"}, "gt-crew-jack gt-crew-max"},
@@ -313,7 +313,7 @@ func TestChannelSessions(t *testing.T) {
 		{[]string{"gastown/*"}, ""},
 		{[]string{"nonexistent/polecats/*"}, ""},
 		{[]string{"invalid"}, ""},
-		{[]string{"gastown/crew/max", "*/crew/*", "mayor"}, "gt-crew-max gt-crew-jack hq-mayor"},
+		{[]string{"gastown/crew/max", "*/crew/*", "mayor"}, "gt-crew-max gt-crew-jack"},
 	} {
 		if got := strings.Join(ChannelSessions(reg, tc.patterns, live), " "); got != tc.want {
 			t.Errorf("ChannelSessions(%q) = %q, want %q", tc.patterns, got, tc.want)
@@ -326,7 +326,7 @@ func TestSessionAddress(t *testing.T) {
 	reg := session.NewPrefixRegistry()
 	reg.Register("gt", "gastown")
 	for session, want := range map[string]string{
-		"hq-mayor":    "mayor",
+		"hq-mayor":    "", // mayor role retired (gt-rwp7z)
 		"gt-witness":  "gastown/witness",
 		"gt-crew-max": "gastown/crew/max",
 		"gt-alpha":    "gastown/alpha",
@@ -351,7 +351,7 @@ func TestSender(t *testing.T) {
 		want string
 	}{
 		{"town root, no identity (the daemon)", ".", nil, "unknown"},
-		{"mayor dir", "mayor", nil, "mayor"},
+		{"mayor state dir", "mayor", nil, "unknown"},
 		{"crew dir", "gastown/crew/max", nil, "gastown/crew/max"},
 		{"crew subdir", "gastown/crew/max/sub", nil, "gastown/crew/max"},
 		{"polecat dir", "gastown/polecats/toast", nil, "gastown/toast"},

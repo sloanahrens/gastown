@@ -112,8 +112,8 @@ func (r *Resolver) resolveAgentAddress(address string) ([]Recipient, error) {
 	}
 
 	// Validate that the address refers to a known agent before accepting.
-	// Without this check, typos like "laser/mayor" (instead of "mayor/")
-	// silently deliver to a dead inbox with no error.
+	// Without this check, typos like "gastown/witnes" silently deliver to a
+	// dead inbox with no error.
 	// See: https://github.com/steveyegge/gastown/issues/2038
 	if err := r.validateAgentAddress(address); err != nil {
 		return nil, err
@@ -141,9 +141,8 @@ func (r *Resolver) validateAgentAddress(address string) error {
 
 	normalized := normalizeAddress(strings.TrimSuffix(address, "/"))
 
-	// Well-known town-level singletons always valid
-	switch normalized {
-	case constants.RoleMayor + "/", constants.RoleMayor, "overseer":
+	// The overseer is the only well-known singleton address.
+	if normalized == "overseer" {
 		return nil
 	}
 	if isReservedTownSubpath(normalized) {
@@ -458,7 +457,7 @@ func (r *Resolver) resolveChannel(name string) ([]Recipient, error) {
 
 // AgentBeadIDToAddress converts an agent bead ID to a mail address.
 // Handles both gt- (rig agents) and hq- (town agents) prefixes:
-//   - hq-mayor → mayor/
+//   - hq-deacon → deacon/
 //   - gt-gastown-crew-max → gastown/crew/max
 func AgentBeadIDToAddress(id string) string {
 	var rest string
@@ -477,7 +476,7 @@ func AgentBeadIDToAddress(id string) string {
 	parts := strings.Split(rest, "-")
 
 	if len(parts) == 1 {
-		// Town-level: gt-mayor → mayor/
+		// Town-level: gt-deacon → deacon/
 		return parts[0] + "/"
 	}
 

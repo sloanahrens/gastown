@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -125,6 +126,33 @@ func TestResolverValidateAgentAddressRetiredDogs(t *testing.T) {
 				t.Fatalf("validateAgentAddress(%q) unexpected error: %v", tt.address, err)
 			}
 		})
+	}
+}
+
+// TestResolverResolve_RetiredMayorAddress covers the stale-config case: a town
+// whose config or muscle memory still addresses the retired mayor gets the
+// same "unknown recipient" failure any other dead address gets, not a silent
+// delivery to a mailbox nothing reads (gt-rwp7z).
+func TestResolverResolve_RetiredMayorAddress(t *testing.T) {
+	t.Parallel()
+	// The town marker directory exists, exactly as it does in a live town: the
+	// kept mayor/ path must not make the retired address validate as an agent.
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatalf("creating mayor dir: %v", err)
+	}
+	resolver := NewResolver(nil, townRoot)
+
+	for _, address := range []string{"mayor/", "gastown/mayor"} {
+		t.Run(address, func(t *testing.T) {
+			if _, err := resolver.Resolve(address); !errors.Is(err, ErrUnknownRecipient) {
+				t.Fatalf("Resolve(%q) = %v, want ErrUnknownRecipient", address, err)
+			}
+		})
+	}
+	// The bare name is no address at all: it fails as an unknown name.
+	if _, err := resolver.Resolve("mayor"); err == nil {
+		t.Fatal("Resolve(\"mayor\") succeeded, want an unknown-name error")
 	}
 }
 

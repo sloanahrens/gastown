@@ -143,7 +143,6 @@ func writeMailDirectory(out, errOut io.Writer, b mailDirectorySource, asJSON boo
 
 	// 5. Well-known addresses
 	wellKnown := []DirectoryEntry{
-		{Address: "mayor/", Type: "well-known"},
 		{Address: "--self", Type: "well-known"},
 		{Address: "@town", Type: "special"},
 		{Address: "@crew", Type: "special"},
@@ -152,7 +151,7 @@ func writeMailDirectory(out, errOut io.Writer, b mailDirectorySource, asJSON boo
 	}
 	entries = append(entries, wellKnown...)
 
-	// Deduplicate (e.g., mayor/ may appear as both agent and well-known)
+	// Deduplicate (an address may be listed by more than one source)
 	seen := make(map[string]bool)
 	deduped := entries[:0]
 	for _, e := range entries {

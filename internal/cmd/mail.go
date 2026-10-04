@@ -59,16 +59,12 @@ var mailCmd = &cobra.Command{
 	RunE:    requireSubcommand,
 	Long: `Send and receive messages between agents.
 
-The mail system allows Mayor, polecats, and the Refinery to communicate.
+The mail system allows crew, polecats, and the Refinery to communicate.
 Messages are stored in beads as issues with type=message.
 
 MAIL ROUTING:
   ┌─────────────────────────────────────────────────────┐
   │                    Town (.beads/)                   │
-  │  ┌─────────────────────────────────────────────┐   │
-  │  │                 Mayor Inbox                 │   │
-  │  │  └── mayor/                                 │   │
-  │  └─────────────────────────────────────────────┘   │
   │                                                     │
   │  ┌─────────────────────────────────────────────┐   │
   │  │           gastown/ (rig mailboxes)          │   │
@@ -80,7 +76,6 @@ MAIL ROUTING:
   └─────────────────────────────────────────────────────┘
 
 ADDRESS FORMATS:
-  mayor/              → Mayor inbox
   <rig>/witness       → Rig's Witness
   <rig>/refinery      → Rig's Refinery
   <rig>/<polecat>     → Polecat (e.g., greenplace/Toast)
@@ -100,7 +95,6 @@ var mailSendCmd = &cobra.Command{
 	Long: `Send a message to an agent.
 
 Addresses:
-  mayor/           - Send to Mayor
   <rig>/refinery   - Send to a rig's Refinery
   <rig>/<polecat>  - Send to a specific polecat
   <rig>/           - Broadcast to a rig
@@ -127,17 +121,16 @@ Use --urgent as shortcut for --priority 0.
 
 Examples:
   gt mail send greenplace/Toast -s "Status check" -m "How's that bug fix going?"
-  gt mail send mayor/ -s "Work complete" -m "Finished gt-abc"
   gt mail send gastown/ -s "All hands" -m "Swarm starting" --notify
   gt mail send greenplace/Toast -s "Task" -m "Fix bug" --type task --priority 1
   gt mail send greenplace/Toast -s "Urgent" -m "Help!" --urgent
-  gt mail send mayor/ -s "Re: Status" -m "Done" --reply-to msg-abc123
+  gt mail send greenplace/crew/max -s "Re: Status" -m "Done" --reply-to msg-abc123
   gt mail send --self -s "Handoff" -m "Context for next session"
   gt mail send greenplace/Toast -s "Update" -m "Progress report" --cc overseer
   gt mail send list:oncall -s "Alert" -m "System down"
 
   # Read body from stdin (avoids shell quoting issues):
-  gt mail send mayor/ -s "Update" --stdin <<'BODY'
+  gt mail send greenplace/Toast -s "Update" --stdin <<'BODY'
   Message with 'quotes' and "quotes" and $variables.
   BODY`,
 	Args: cobra.MaximumNArgs(1),
@@ -159,7 +152,6 @@ Examples:
   gt mail inbox                       # Current context (auto-detected)
   gt mail inbox --all                 # Explicitly show all messages
   gt mail inbox --unread              # Show only unread messages
-  gt mail inbox mayor/                # Mayor's inbox
   gt mail inbox greenplace/Toast         # Polecat's inbox
   gt mail inbox --identity greenplace/Toast  # Explicit polecat identity`,
 	Args: cobra.MaximumNArgs(1),
@@ -389,8 +381,7 @@ Use case: Town quiescence - reset all inboxes across workers efficiently.
 
 Examples:
   gt mail clear                      # Clear your inbox
-  gt mail clear gastown/polecats/joe # Clear joe's inbox
-  gt mail clear mayor/               # Clear mayor's inbox`,
+  gt mail clear gastown/polecats/joe # Clear joe's inbox`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runMailClear,
 }
@@ -419,7 +410,7 @@ Examples:
   gt mail search "status.*check" --subject   # Regex in subjects only
   gt mail search "error" --from witness      # From witness, containing "error"
   gt mail search "handoff" --archive         # Include archived messages
-  gt mail search "" --from mayor/            # All messages from mayor`,
+  gt mail search "" --from gastown/witness    # All messages from the witness`,
 	Args: cobra.ExactArgs(1),
 	RunE: runMailSearch,
 }

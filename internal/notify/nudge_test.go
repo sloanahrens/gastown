@@ -141,12 +141,12 @@ func TestTownNudgerAttributesTheNudgeByDirAndEnv(t *testing.T) {
 	}{
 		{"the daemon at the town root", root, []string{"BD_ACTOR=daemon"}, "unknown"},
 		{"a crew dir", filepath.Join(root, "gastown/crew/max"), nil, "gastown/crew/max"},
-		{"GT_ROLE, last assignment wins", root, []string{"GT_ROLE=gastown/crew/max", "GT_ROLE=mayor"}, "mayor"},
+		{"GT_ROLE, last assignment wins", root, []string{"GT_ROLE=gastown/polecats/alpha", "GT_ROLE=gastown/crew/max"}, "gastown/crew/max"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			ft, s := newNudgeTmux("hq-mayor"), &sent{}
-			if err := townNudger(tc.dir, tc.env, ft, s).Nudge(t.Context(), "mayor", "dispatch"); err != nil {
+			ft, s := newNudgeTmux("gt-crew-max"), &sent{}
+			if err := townNudger(tc.dir, tc.env, ft, s).Nudge(t.Context(), "gt-crew-max", "dispatch"); err != nil {
 				t.Fatalf("Nudge: %v", err)
 			}
 			if len(s.townRoots) != 1 || s.townRoots[0] != root {
@@ -155,7 +155,7 @@ func TestTownNudgerAttributesTheNudgeByDirAndEnv(t *testing.T) {
 			if len(s.senders) != 1 || s.senders[0] != tc.want {
 				t.Errorf("senders = %v, want [%s]", s.senders, tc.want)
 			}
-			if got := ft.sentTo("hq-mayor"); len(got) != 1 || !strings.Contains(got[0], "[from "+tc.want+"] dispatch") {
+			if got := ft.sentTo("gt-crew-max"); len(got) != 1 || !strings.Contains(got[0], "[from "+tc.want+"] dispatch") {
 				t.Errorf("sent = %q, want the nudge from %s", got, tc.want)
 			}
 		})
@@ -178,17 +178,17 @@ func TestTownNudgerReportsAMissingSession(t *testing.T) {
 // deadline, and the deadline is reported as such.
 func TestTownNudgerReturnsAtTheDeadlineWhenTmuxHangs(t *testing.T) {
 	t.Parallel()
-	ft := newNudgeTmux("hq-mayor")
+	ft := newNudgeTmux("gt-crew-max")
 	ft.hang = true
 	defer close(ft.release)
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
 
-	err := townNudger(nudgeTown(t), nil, ft, &sent{}).Nudge(ctx, "mayor", "m")
+	err := townNudger(nudgeTown(t), nil, ft, &sent{}).Nudge(ctx, "gt-crew-max", "m")
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Nudge = %v, want context.DeadlineExceeded", err)
 	}
-	if got := ft.sentTo("hq-mayor"); len(got) != 0 {
+	if got := ft.sentTo("gt-crew-max"); len(got) != 0 {
 		t.Errorf("sent = %q, want nothing", got)
 	}
 }
@@ -204,7 +204,7 @@ func TestTownNudgerRefusesBeforeDelivering(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if err := n.Nudge(ctx, "mayor", "m"); !errors.Is(err, context.Canceled) {
+	if err := n.Nudge(ctx, "gt-crew-max", "m"); !errors.Is(err, context.Canceled) {
 		t.Errorf("done context: %v, want context.Canceled", err)
 	}
 }
@@ -212,20 +212,20 @@ func TestTownNudgerRefusesBeforeDelivering(t *testing.T) {
 func TestCLIHandsNudgesToItsNudger(t *testing.T) {
 	t.Parallel()
 	r := &recordedRun{}
-	ft, s := newNudgeTmux("hq-mayor"), &sent{}
+	ft, s := newNudgeTmux("gt-crew-max"), &sent{}
 	cli := newTestCLI(r)
 	cli.Nudger = townNudger(nudgeTown(t), nil, ft, s)
 
-	if err := cli.Nudge(t.Context(), "mayor", "MERGED: mr-1"); err != nil {
+	if err := cli.Nudge(t.Context(), "gt-crew-max", "MERGED: mr-1"); err != nil {
 		t.Fatal(err)
 	}
 	if len(r.calls) != 0 {
 		t.Fatalf("ran %+v, want no gt", r.calls)
 	}
-	if got := ft.sentTo("hq-mayor"); len(got) != 1 {
+	if got := ft.sentTo("gt-crew-max"); len(got) != 1 {
 		t.Fatalf("sent = %q, want the nudge delivered in-process", got)
 	}
-	if err := cli.Nudge(t.Context(), "mayor", " "); !errors.Is(err, ErrInvalid) {
+	if err := cli.Nudge(t.Context(), "gt-crew-max", " "); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("blank message: %v, want ErrInvalid", err)
 	}
 }

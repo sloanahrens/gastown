@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/nudge/deliver"
@@ -22,11 +21,15 @@ func init() {
 
 // mailExpiredNudge delivers a nudge that reached its TTL undelivered to the
 // agent it was queued for, so the sender's message outlives its queue entry.
-// A session name that does not parse has no agent address to reach, so the
-// notice goes to the mayor, who owns town-level routing (gt-oexm).
+// A session name that parses to no agent address has no mailbox to reach, so
+// there is nothing to mail: the queue's expired/ trace stays the only record.
 func mailExpiredNudge(ev nudge.ExpiryEvent) {
 	reg := townRegistry()
 	to := expiredNudgeMailTarget(reg, ev.Session)
+	if to == "" {
+		style.PrintWarning("expired nudge for %s has no reachable mailbox; not mailed", ev.Session)
+		return
+	}
 
 	router := mail.NewRouter(ev.TownRoot, reg)
 	msg := &mail.Message{
@@ -47,14 +50,10 @@ func mailExpiredNudge(ev nudge.ExpiryEvent) {
 	}
 }
 
-// expiredNudgeMailTarget picks the mailbox for an expiry notice: the agent
-// that owned the session when its name parses, else the mayor, who owns
-// town-level routing for a session no rig claims.
+// expiredNudgeMailTarget is the mailbox for an expiry notice: the agent that
+// owned the session, or "" when the session name parses to none.
 func expiredNudgeMailTarget(reg *session.PrefixRegistry, sessionName string) string {
-	if addr := deliver.SessionAddress(reg, sessionName); addr != "" {
-		return addr
-	}
-	return constants.RoleMayor
+	return deliver.SessionAddress(reg, sessionName)
 }
 
 // formatExpiredNudgeMailBody reproduces the message and the facts needed to
