@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -105,6 +106,98 @@ func buildTrend(now time.Time, recs []omRecord, stages []omStage, rejs []omRejec
 		tr.Stages = append([]dashboard.TrendPoint(nil), tr.Stages[n-trendMaxStages:]...)
 	}
 	return tr
+}
+
+// recentLandingRows is how many landings and rejections the Landings table shows.
+const recentLandingRows = 30
+
+// buildRecentLandings joins the last 24 hours of landings and rejections with
+// the stage lines that say what each cost, newest first, capped at limit. The
+// title of a bead is asked for only once the rows to show are known, so the
+// lookups are bounded by limit, not by the day's traffic.
+func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, title func(rig, bead string) string, limit int) []dashboard.LandingRow {
+	since := now.Add(-trendHours * time.Hour)
+	var rows []dashboard.LandingRow
+	rigOf := map[string]string{} // a rejection line names no rig; a landing of the same bead does
+	for _, rec := range recs {
+		rigOf[rec.Bead] = rec.Rig
+	}
+	timing := func(r *dashboard.LandingRow, st *omStage) {
+		if st == nil {
+			return
+		}
+		r.LintSecs, r.GateSecs, r.OMSecs = secsPtr(st.Lint), secsPtr(st.Gate), secsPtr(st.OM)
+	}
+	for _, rec := range recs {
+		if rec.LandedAt.Before(since) {
+			continue
+		}
+		row := dashboard.LandingRow{
+			At: rec.LandedAt, Bead: rec.Bead, Rig: rec.Rig, Polecat: polecatOfBranch(rec.Branch),
+			Outcome: "landed", Verdict: omOutcome(rec.OMVerdict), Commit: shortSHA(rec.LandedCommit),
+			Route: rec.Route, Risk: len(rec.RiskPaths) > 0,
+		}
+		if rec.OMScore > 0 {
+			sc := rec.OMScore
+			row.Score = &sc
+		}
+		if row.Verdict == "error" {
+			row.Detail = truncateRunes(rec.OMVerdict, 140)
+		}
+		timing(&row, omStageFor(stages, rec.Bead, rec.LandedAt))
+		rows = append(rows, row)
+	}
+	for _, rj := range rejs {
+		if rj.At.Before(since) {
+			continue
+		}
+		rig := rigOf[rj.Bead]
+		if rig == "" {
+			rig = "gastown" // the only rig with a landing worker running
+		}
+		row := dashboard.LandingRow{At: rj.At, Bead: rj.Bead, Rig: rig, Outcome: "rejected", Kind: rj.Kind, Score: rj.Score, Detail: truncateRunes(rj.Detail, 160)}
+		timing(&row, omStageFor(stages, rj.Bead, rj.At))
+		rows = append(rows, row)
+	}
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].At.After(rows[j].At) })
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	if title != nil {
+		seen := map[string]string{}
+		for i := range rows {
+			key := rows[i].Rig + "/" + rows[i].Bead
+			t, ok := seen[key]
+			if !ok {
+				t = title(rows[i].Rig, rows[i].Bead)
+				seen[key] = t
+			}
+			rows[i].Title = t
+		}
+	}
+	return rows
+}
+
+// polecatOfBranch names who built a landing from its branch: the polecat in a
+// "polecat/<name>/<bead>+<nonce>" branch, or the first path element of any
+// other branch ("sloan/dashboard" is sloan's, a crew or operator landing). It
+// is empty when the branch says nothing.
+func polecatOfBranch(branch string) string {
+	parts := strings.Split(branch, "/")
+	switch {
+	case len(parts) >= 3 && parts[0] == "polecat":
+		return parts[1]
+	case len(parts) >= 2 && parts[0] != "polecat" && parts[0] != "":
+		return parts[0]
+	}
+	return ""
+}
+
+func shortSHA(sha string) string {
+	if len(sha) > 8 {
+		return sha[:8]
+	}
+	return sha
 }
 
 func durSecs(d *time.Duration) float64 {

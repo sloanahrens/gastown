@@ -168,7 +168,9 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Trend: func() *dashboard.Trend {
 			now := time.Now()
 			stages, rejects := om.trendInputs(trendWindowStart(now))
-			return buildTrend(now, recs.get(), stages, rejects, loads.points())
+			tr := buildTrend(now, recs.get(), stages, rejects, loads.points())
+			tr.Recent = buildRecentLandings(now, recs.get(), stages, rejects, func(rig, id string) string { return beadReads.title(rig, id) }, recentLandingRows)
+			return tr
 		},
 		LoadSample: loads.append,
 	}), nil

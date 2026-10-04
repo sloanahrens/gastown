@@ -95,6 +95,9 @@ section>h2 .caret{display:inline-block;width:10px;color:var(--dim)}
 section.collapsed>:not(h2){display:none}
 section.collapsed>h2{border-bottom:0}
 #queue{max-height:70vh;overflow:auto}
+.ltable td{vertical-align:top}
+.ltable td.n,.ltable th.n{padding-left:14px}
+.ltable td:nth-child(2){overflow-wrap:anywhere}
 .good{color:var(--green)}.warnc{color:var(--amber)}.badc{color:var(--red)}
 #alertsctl{cursor:pointer;background:none;font:inherit;font-size:12px;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:2px 10px}
 #alertsctl.on{color:var(--teal);border-color:var(--teal)}
@@ -128,13 +131,13 @@ section.collapsed>h2{border-bottom:0}
   <div class="col">
     <section><h2>Polecats <span class="r" id="seatsnote"></span></h2><div class="body" id="seats"></div></section>
     <section><h2>Dispatcher <span class="r" id="dispnote"></span></h2><div class="body" id="disp"></div></section>
+    <section id="trendsec" hidden><h2>Landings <span class="r" id="trendnote"></span></h2><div class="body" id="trend"></div></section>
     <section><h2>Machine <span class="r" id="machnote"></span></h2><div class="body" id="machine"></div></section>
     <section><h2>DeepSeek <span class="r" id="spendnote"></span></h2><div class="body" id="spend"></div></section>
   </div>
   <div class="col">
     <section><h2>Alerts <span class="r" id="alertsnote"></span></h2><div class="body" id="alerts"></div></section>
     <section><h2>Work queue <span class="r" id="queuenote"></span></h2><div class="body" id="queue"></div></section>
-    <section id="trendsec" hidden><h2>Last 24 hours <span class="r" id="trendnote"></span></h2><div class="body" id="trend"></div></section>
     <section><h2>om review <span class="r" id="omnote"></span></h2><div class="body" id="om"></div></section>
     <section>
       <h2>Feed <span class="chips" id="chips"></span></h2>
@@ -334,7 +337,8 @@ function svgEl(tag, attrs) {
 }
 // chartSVG draws one or more time series. A null value breaks the line, so a
 // gap in the data is a gap in the drawing, not a line across it.
-function chartSVG(series, x0, x1, w, h) {
+function chartSVG(series, x0, x1, w, h, gapMs) {
+  gapMs = gapMs || 45 * 60e3;   // a quiet spell is a gap, not a slope between two landings
   const svg = svgEl("svg", {viewBox: "0 0 " + w + " " + h, preserveAspectRatio: "none", class: "chart"});
   let max = 0;
   for (const s of series) for (const p of s.pts) if (p.v != null && p.v > max) max = p.v;
@@ -345,13 +349,17 @@ function chartSVG(series, x0, x1, w, h) {
   series.forEach(s => {
     let run = [];
     const flush = () => {
-      if (run.length > 1) svg.append(svgEl("polyline", {points: run.join(" "), fill: "none", stroke: s.color, "stroke-width": "1.5"}));
-      else if (run.length === 1) { const [cx, cy] = run[0].split(","); svg.append(svgEl("circle", {cx: cx, cy: cy, r: "1.5", fill: s.color})); }
+      if (run.length > 1) svg.append(svgEl("polyline", {points: run.join(" "), fill: "none", stroke: s.color, "stroke-width": "1.2", "stroke-opacity": "0.8"}));
       run = [];
     };
+    let prev = null;
     for (const p of s.pts) {
-      if (p.v == null) { flush(); continue; }
-      run.push(X(p.t).toFixed(1) + "," + Y(p.v).toFixed(1));
+      if (p.v == null) { flush(); prev = null; continue; }
+      if (prev != null && p.t - prev > gapMs) flush();
+      const x = X(p.t).toFixed(1), y = Y(p.v).toFixed(1);
+      run.push(x + "," + y);
+      svg.append(svgEl("circle", {cx: x, cy: y, r: "1.4", fill: s.color}));
+      prev = p.t;
     }
     flush();
   });
@@ -367,6 +375,22 @@ function legend(items) {
   }
   return d;
 }
+function median(xs) {
+  const v = xs.filter(x => x != null).sort((a, b) => a - b);
+  if (!v.length) return null;
+  const m = Math.floor(v.length / 2);
+  return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+}
+
+// Four evenly spaced time labels and "now", under a chart that spans t0..t1.
+function timeAxis(t0, t1) {
+  const hhmm = ms => new Date(ms).toLocaleTimeString([], {hour12: false}).slice(0, 5);
+  const a = el("div", "axis");
+  for (let i = 0; i < 4; i++) a.append(el("span", "", hhmm(t0 + i * (t1 - t0) / 4)));
+  a.append(el("span", "", "now"));
+  return a;
+}
+
 function renderTrend(s) {
   const sec = $("trendsec"), box = $("trend");
   const t = s.trend;
@@ -377,6 +401,26 @@ function renderTrend(s) {
   const hhmm = iso => new Date(iso).toLocaleTimeString([], {hour12: false}).slice(0, 5);
   const t0 = new Date(hours[0].hour).getTime();
   const t1 = new Date(hours[hours.length - 1].hour).getTime() + 3600e3;
+  const stages = t.stages || [];
+  const landed = hours.reduce((n, h) => n + h.landed, 0);
+  const rejected = hours.reduce((n, h) => n + h.rejected, 0);
+  $("trendnote").textContent = landed + " landed · " + rejected + " rejected";
+
+  // the day in numbers
+  const kv = el("div", "kv");
+  const add = (v, k, tip, cls) => { const x = el("div"); if (tip) x.title = tip; x.append(el("b", cls || "", v), el("span", "", k)); kv.append(x); };
+  add(String(landed), "landed");
+  add(String(rejected), "rejected", "rejections in the last 24 hours, whatever the reason", rejected ? "warnc" : "");
+  const attempts = landed + rejected;
+  if (attempts) add(Math.round(landed / attempts * 100) + "%", "first-pass", "landings as a share of landing attempts (landed + rejected)");
+  const mg = median(stages.map(p => p.gate_secs)), mo = median(stages.map(p => p.om_secs));
+  const mt = median(stages.map(p => p.lint_secs + p.gate_secs + (p.om_secs || 0)));
+  if (mg != null) add(fmtDur(mg), "median gate");
+  if (mo != null) add(fmtDur(mo), "median om");
+  if (mt != null) add(fmtDur(mt), "median total", "lint + gate + om, per landing");
+  const slow = stages.length ? Math.max(...stages.map(p => p.lint_secs + p.gate_secs + (p.om_secs || 0))) : null;
+  if (slow != null) add(fmtDur(slow), "slowest", "the longest landing in the window", slow > 600 ? "warnc" : "");
+  box.append(kv);
 
   // landings per hour: the blue part landed, the red part is rejections
   const max = Math.max(1, ...hours.map(h => h.landed + h.rejected));
@@ -388,12 +432,9 @@ function renderTrend(s) {
     if (h.landed) { const l = el("i", "hok"); l.style.height = h.landed / max * 100 + "%"; col.append(l); }
     bars.append(col);
   }
-  const axis = el("div", "axis");
-  axis.append(el("span", "", hhmm(hours[0].hour)), el("span", "", "now"));
-  box.append(el("div", "k title", "landings per hour, red = rejected"), bars, axis);
+  box.append(el("div", "k title", "landings per hour, red = rejected"), bars, timeAxis(t0, t1));
 
-  // gate and om seconds per landing
-  const stages = t.stages || [];
+  // gate and om seconds per landing: dots are landings, lines join neighbours but not across a quiet spell
   if (stages.length) {
     const hasOM = stages.some(p => p.om_secs != null);
     const series = [{color: "#d29922", pts: stages.map(p => ({t: new Date(p.at).getTime(), v: p.gate_secs}))}];
@@ -403,19 +444,48 @@ function renderTrend(s) {
       key.push(["#39c5bb", "om"]);
     }
     const peak = Math.max(...series.flatMap(x => x.pts.map(p => p.v == null ? 0 : p.v)));
-    box.append(el("div", "k title", "gate and om seconds per landing · peak " + fmtDur(peak)), chartSVG(series, t0, t1, 600, 64), legend(key));
+    box.append(el("div", "k title", "gate and om time per landing · peak " + fmtDur(peak)), chartSVG(series, t0, t1, 600, 56), timeAxis(t0, t1), legend(key));
   } else box.append(el("div", "empty", "no stage lines in the last 24 hours"));
 
-  // hourly load average
-  const loads = hours.filter(h => h.load_avg != null).map(h => ({t: new Date(h.hour).getTime(), v: h.load_avg}));
+  // hourly load average (recorded only while a page is open)
+  const loads = hours.filter(h => h.load_avg != null).map(h => ({t: new Date(h.hour).getTime() + 1800e3, v: h.load_avg}));
   if (loads.length) {
     const peak = Math.max(...loads.map(p => p.v));
-    box.append(el("div", "k title", "hourly load average · peak " + peak.toFixed(1)), chartSVG([{color: "#58a6ff", pts: loads}], t0, t1, 600, 64), legend([["#58a6ff", "load avg"]]));
+    box.append(el("div", "k title", "hourly load average · peak " + peak.toFixed(1) + " · " + loads.length + " of 24 hours recorded (only while a page is open)"), chartSVG([{color: "#58a6ff", pts: loads}], t0, t1, 600, 44, 90 * 60e3), timeAxis(t0, t1));
   } else box.append(el("div", "empty", "no load history yet (it fills while a page is open)"));
 
-  const landed = hours.reduce((n, h) => n + h.landed, 0);
-  const rejected = hours.reduce((n, h) => n + h.rejected, 0);
-  $("trendnote").textContent = landed + " landed · " + rejected + " rejected";
+  // the recent landings, newest first
+  const rows = t.recent || [];
+  if (rows.length) {
+    const thr = s.om && s.om.threshold != null ? s.om.threshold : null;
+    const tbl = el("table", "ltable");
+    const hr = el("tr");
+    [["When"], ["Landing"], ["By", "who built it: the polecat, or the crew member whose branch it was"], ["Gate", "wall time of the gate stage", 1], ["om", "wall time of the om review", 1], ["Score", "om's score", 1]].forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); });
+    tbl.append(hr);
+    const today = new Date().toDateString();
+    for (const r of rows) {
+      const tr = el("tr");
+      const when = new Date(r.at);
+      tr.append(el("td", "title", when.toDateString() === today ? clock(r.at).slice(0, 5) : when.toLocaleDateString([], {month: "short", day: "numeric"}) + " " + clock(r.at).slice(0, 5)));
+      const main = el("td");
+      main.append(el("span", "bead", r.bead));
+      if (r.outcome === "rejected") { const g = el("span", "tag badc", "rejected · " + (r.kind || "?")); main.append(document.createTextNode(" "), g); }
+      else if (r.verdict === "skipped") main.append(document.createTextNode(" "), el("span", "tag", "no review"));
+      else if (r.verdict === "error") { const g = el("span", "tag warnc", "om error"); g.title = r.detail || ""; main.append(document.createTextNode(" "), g); }
+      if (r.risk) { const g = el("span", "warnc", " ⚑"); g.title = "touched risk paths"; main.append(g); }
+      if (r.title) main.append(document.createElement("br"), el("span", "title", r.title));
+      if (r.outcome === "rejected" && r.detail) main.append(document.createElement("br"), el("span", "badc", r.detail));
+      const total = (r.lint_secs || 0) + (r.gate_secs || 0) + (r.om_secs || 0);
+      tr.title = [r.commit ? "commit " + r.commit : null, total ? "lint " + fmtDur(r.lint_secs || 0) + " + gate " + fmtDur(r.gate_secs || 0) + " + om " + fmtDur(r.om_secs || 0) + " = " + fmtDur(total) : null, r.route ? "route " + r.route : null].filter(Boolean).join(" · ");
+      tr.append(main);
+      tr.append(el("td", "title", r.polecat || (r.route ? r.route.replace(/^overseer-/, "") : "–")));
+      tr.append(el("td", "n" + (r.gate_secs > 180 ? " warnc" : ""), r.gate_secs != null ? fmtDur(r.gate_secs) : "–"));
+      tr.append(el("td", "n" + (r.om_secs > 240 ? " warnc" : ""), r.om_secs != null ? fmtDur(r.om_secs) : "–"));
+      tr.append(el("td", "n" + (r.score != null && thr != null && r.score < thr ? " badc" : ""), r.score != null ? r.score.toFixed(2) : "–"));
+      tbl.append(tr);
+    }
+    box.append(el("div", "k title", "recent landings (newest first; hover a row for the commit and stage times)"), tbl);
+  }
 }
 
 function renderMachine(s) {
@@ -548,25 +618,6 @@ function renderOM(s) {
     box.append(el("div", "k title", "by day"), dt);
   }
 
-  const rec = om.recent || [];
-  if (rec.length) {
-    const rt2 = el("table");
-    const rh = el("tr");
-    ["When", "Bead", "Outcome", "Score", "om"].forEach((x, i) => rh.append(el("th", i > 2 ? "n" : "", x)));
-    rt2.append(rh);
-    for (const r of rec) {
-      const tr = el("tr");
-      tr.append(el("td", "", clock(r.at)));
-      const b = el("td"); b.append(el("span", "bead", r.bead));
-      if (r.risk) b.append(el("span", "warnc", " ⚑"));
-      if (r.detail) { b.append(document.createElement("br")); b.append(el("span", "title", r.detail)); }
-      tr.append(b);
-      tr.append(el("td", "o-" + r.outcome, r.outcome === "rejected" ? "rejected (" + r.kind + ")" : r.outcome + (r.route && r.route !== "daemon" ? " · " + r.route : "")));
-      tr.append(el("td", "n" + (r.score != null && om.threshold != null && r.score < om.threshold ? " badc" : ""), r.score == null ? "–" : r.score.toFixed(2)), el("td", "n", sec(r.secs)));
-      rt2.append(tr);
-    }
-    box.append(el("div", "k title", "recent"), rt2);
-  }
 }
 
 function renderDispatch(s) {
