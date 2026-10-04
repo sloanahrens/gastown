@@ -47,6 +47,60 @@ func TestAgentEnv_Polecat(t *testing.T) {
 	assertEnv(t, env, "CLAUDECODE", "")             // cleared to prevent nested session detection
 }
 
+// A polecat seat's go commands plan for seatGOFLAGSParallelism packages so
+// several seats plus the landing gate share the host (gt-5lyns). The
+// spawning environment's GOFLAGS is the operator's say: a value that already
+// caps -p wins outright, any other value keeps its flags and gains the cap.
+func TestAgentEnv_PolecatGOFLAGSCap(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		current string
+		want    string
+	}{
+		{"unset", "", "-p=8"},
+		{"blank", "  ", "-p=8"},
+		{"unrelated flags are kept", "-mod=mod", "-mod=mod -p=8"},
+		{"an operator's -p is left alone", "-p=4", "-p=4"},
+		{"a -p among other flags is left alone", "-mod=mod -p=12", "-mod=mod -p=12"},
+		{"a flag merely starting with -p is not a cap", "-pkgdir=/x", "-pkgdir=/x -p=8"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			current := tt.current
+			env := AgentEnv(AgentEnvConfig{
+				Role:      "polecat",
+				Rig:       "myrig",
+				AgentName: "Toast",
+				TownRoot:  "/town",
+				Getenv:    func(string) string { return current },
+			})
+			assertEnv(t, env, "GOFLAGS", tt.want)
+		})
+	}
+}
+
+// The cap is the seat's alone: the landing worker's merged-tree gate runs
+// `make gate` from the daemon's own environment (land.Gate), which AgentEnv
+// never builds, so no other role may pick up a GOFLAGS the cap would add —
+// the gate keeps the whole host it was measured against (gt-5lyns).
+func TestAgentEnv_GOFLAGSCapIsPolecatOnly(t *testing.T) {
+	t.Parallel()
+
+	for _, role := range []string{"mayor", "crew", "witness", "refinery", "deacon", "dog"} {
+		env := AgentEnv(AgentEnvConfig{
+			Role:      role,
+			Rig:       "myrig",
+			AgentName: "name",
+			TownRoot:  "/town",
+			Getenv:    func(string) string { return "-mod=mod" },
+		})
+		assertNotSet(t, env, "GOFLAGS")
+	}
+}
+
 // A pin's provenance decides how a handoff treats it: only an explicit --agent
 // override outranks role_agents, so only an override spawn writes the marker.
 // A GT_AGENT that came from role resolution must stay indistinguishable from a

@@ -246,6 +246,30 @@ func TestCommandGateRetriesAContendedLint(t *testing.T) {
 	}
 }
 
+// The -p cap gt-5lyns puts on a polecat seat's go commands must never reach
+// the landing worker's merged-tree gate: the gate is the command the cap
+// exists to leave cores for (gt-v4r0x), and it runs from the daemon's own
+// environment. A step that named GOFLAGS would cap it.
+func TestLandGateStepsCarryNoGOFLAGSEnv(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	makefile := "gate:\n\tmake gate-lint gate-test\ngate-lint:\n\t@golangci-lint run\ngate-test:\n\t@go test ./...\n"
+	if err := os.WriteFile(filepath.Join(dir, "Makefile"), []byte(makefile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g := LandGate(dir, &config.MergeQueueConfig{})
+	if len(g.Steps) == 0 {
+		t.Fatal("LandGate returned no steps")
+	}
+	for _, s := range g.Steps {
+		for _, e := range s.Env {
+			if e == "GOFLAGS" || strings.HasPrefix(e, "GOFLAGS=") {
+				t.Fatalf("landing gate step %q carries %q; the seat cap must not reach the gate", s.Name, e)
+			}
+		}
+	}
+}
+
 func TestMergeEnvReplacesInheritedKeys(t *testing.T) {
 	t.Parallel()
 	got := mergeEnv([]string{"A=1", "GT_TEST_DOCKER=1", "B=2"}, []string{"GT_TEST_DOCKER=0"})
