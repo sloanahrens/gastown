@@ -22,12 +22,16 @@ to repeat after a partial failure:
   scope at all; `viewer` `read:repository,read:user`. An unknown role is an
   error, not a default scope. A token minted by an earlier version keeps its
   old scope until `--rotate` replaces it;
-- for each `--repo OWNER/NAME`, each role's collaborator access and the two
-  branch-protection rules the landing path depends on. `main` refuses a push
+- for each `--repo OWNER/NAME`, each role's collaborator access and the one
+  branch-protection rule the landing path depends on. `main` refuses a push
   from everyone, admins included, merges only through the landing bot, requires
-  the gate and review contexts, and refuses a stale candidate. `land/*` allows
-  a push from the landing bot alone: no deploy key may push a candidate branch
-  either.
+  the gate and review contexts, and refuses a stale candidate. `main` is the
+  only protected branch: Forgejo refuses to delete a branch any protection rule
+  matches, admins and the landing bot included, and the worker deletes
+  `land/<bead>` after every merge (the API merge does not apply the
+  repository's delete-branch-after-merge setting, which only the web UI's merge
+  honours). A run reports a `land/*` rule left by an earlier cutover and
+  removes it; under `--dry-run` it reports the removal without sending it.
 
 Run it with `--help` for the flags.
 
@@ -82,7 +86,7 @@ file.
 
 The push mirror and the gate workflow are not the script's work. The mirror is
 cutover work and the workflow lives in the rig repo, both named in the design
-doc's slice list. The protection rules name the workflow's context, so a renamed
+doc's slice list. The protection rule names the workflow's context, so a renamed
 job orphans the requirement: re-running the script with the new context is what
 reports the mismatch.
 
@@ -108,7 +112,7 @@ the revoked value until it restarts.
 | Symptom | Cause and fix |
 |---------|---------------|
 | `the admin token cannot mint a token for <bot>` | The token lacks site-admin rights. `POST /users/{name}/tokens` wants HttpBasic auth by design, so only a site-admin token on the `/admin/users/{name}/tokens` route can mint for another account. |
-| `the rule exists but Forgejo did not resolve its name` | The rule name is a branch glob (`land/*`) and Forgejo resolves it through the URL path. Set the rule by hand under Settings → Branches, then re-run. |
+| `the rule exists but Forgejo did not resolve its name` | Forgejo resolves a rule name through the URL path, so a name holding `/` is sent encoded. Set the rule by hand under Settings → Branches, then re-run. |
 | `the repository is not on <api>` | The repo does not exist on this Forgejo, or the admin token cannot see it. Check `--api-url` and the repository owner. |
 | A bot's push is refused | It is not a collaborator with write access, or the protection rule does not list it. Check both. |
 | `token file ... is mode ...; it must be 600`, from the client | The file lost its mode. The script restores 600 on the next run. |

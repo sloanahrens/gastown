@@ -16,6 +16,7 @@ type fakePulls struct {
 	statuses    []forgejo.StatusRequest
 	created     []forgejo.CreatePullRequestOption
 	merges      []forgejo.MergePullRequestOption
+	deleted     []string
 	mergePR     int64
 	combined    *forgejo.CombinedStatus
 	statusErr   error
@@ -23,6 +24,7 @@ type fakePulls struct {
 	listErr     error
 	createErr   error
 	mergeErr    error
+	deleteErr   error
 }
 
 func (f *fakePulls) PostStatus(_ context.Context, _, _, _ string, req forgejo.StatusRequest) (*forgejo.CommitStatus, error) {
@@ -61,6 +63,11 @@ func (f *fakePulls) MergePull(_ context.Context, _, _ string, index int64, opt f
 	f.merges = append(f.merges, opt)
 	f.mergePR = index
 	return f.mergeErr
+}
+
+func (f *fakePulls) DeleteBranch(_ context.Context, _, _, branch string) error {
+	f.deleted = append(f.deleted, branch)
+	return f.deleteErr
 }
 
 const (
@@ -143,6 +150,58 @@ func TestForgejoMergerPostsTheVerdictAndFastForwards(t *testing.T) {
 	}
 	if client.mergePR != 7 {
 		t.Fatalf("merged pull request #%d, want the created #7", client.mergePR)
+	}
+	// The API merge does not apply Forgejo's delete-branch-after-merge setting,
+	// so the worker deletes the candidate itself; it is what the branch is
+	// named after the merge.
+	if len(client.deleted) != 1 || client.deleted[0] != "land/gt-abc" {
+		t.Fatalf("deleted %v after the merge, want just land/gt-abc", client.deleted)
+	}
+}
+
+// TestForgejoMergerDeleteFailureDoesNotFailTheMerge: the landing already
+// succeeded when the candidate is deleted, so a refused delete is logged and
+// swallowed — a later landing for the same bead force-updates the branch.
+func TestForgejoMergerDeleteFailureDoesNotFailTheMerge(t *testing.T) {
+	t.Parallel()
+	client := &fakePulls{deleteErr: &forgejo.APIError{Method: "DELETE", Path: "/x", StatusCode: 403}}
+	var out strings.Builder
+	m := testMerger(client)
+	m.Out = &out
+	if err := m.Merge(context.Background(), mergeRequestForTest(Verdict{Verdict: VerdictApprove})); err != nil {
+		t.Fatalf("Merge: %v; a failed candidate delete must not fail a landed merge", err)
+	}
+	if len(client.deleted) != 1 {
+		t.Fatalf("deleted %v, want the attempt recorded", client.deleted)
+	}
+	if !strings.Contains(out.String(), "could not delete land/gt-abc") {
+		t.Fatalf("log = %q; want the failed delete reported", out.String())
+	}
+}
+
+// TestForgejoMergerLeavesTheCandidateWhenTheMergeDidNotHappen: a 409 rebuild, a
+// 405 refusal and an infra error all leave land/<bead> in place, because the
+// next attempt rebuilds and re-pushes it.
+func TestForgejoMergerLeavesTheCandidateWhenTheMergeDidNotHappen(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		mergeEr error
+	}{
+		{"409 rebuild", &forgejo.APIError{Method: "POST", Path: "/x", StatusCode: 409}},
+		{"405 refusal", &forgejo.APIError{Method: "POST", Path: "/x", StatusCode: 405}},
+		{"infra error", &forgejo.APIError{Method: "POST", Path: "/x", StatusCode: 500}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			client := &fakePulls{mergeErr: tc.mergeEr}
+			if err := testMerger(client).Merge(context.Background(), mergeRequestForTest(Verdict{Verdict: VerdictApprove})); err == nil {
+				t.Fatal("Merge succeeded; want the merge error to reach the caller")
+			}
+			if len(client.deleted) != 0 {
+				t.Fatalf("deleted %v; a merge that did not happen must leave the branch for the retry", client.deleted)
+			}
+		})
 	}
 }
 

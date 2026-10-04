@@ -400,6 +400,7 @@ type ForgejoPulls interface {
 	OpenPulls(ctx context.Context, owner, repo string) ([]forgejo.PullRequest, error)
 	CreatePull(ctx context.Context, owner, repo string, opt forgejo.CreatePullRequestOption) (*forgejo.PullRequest, error)
 	MergePull(ctx context.Context, owner, repo string, index int64, opt forgejo.MergePullRequestOption) error
+	DeleteBranch(ctx context.Context, owner, repo, branch string) error
 }
 
 // ForgejoMerger is the production Merger. The daemon builds it from the rig's
@@ -473,7 +474,27 @@ func (m *ForgejoMerger) Merge(parent context.Context, req MergeRequest) error {
 		return &InfraError{Stage: "merge pull request", Err: err}
 	}
 	m.logf("%s: merged %s on %s through pull request #%d", w.BeadID, shortSHA(head), w.Target, pr.Number)
+	m.deleteCandidate(ctx, w)
 	return nil
+}
+
+// deleteCandidate removes the land/<bead> candidate branch once the PR is
+// merged. Forgejo applies a repository's delete-branch-after-merge setting only
+// to a merge made in the web UI, never to one made through the API, so without
+// this the candidate branches accumulate on every landing (gt-fn9e6.21).
+//
+// The deletion runs as the landing bot: the one account the landing path
+// pushes the candidate with. A failure is logged and ignored — the landing has
+// already succeeded and a later landing for the same bead force-updates the
+// branch anyway — and a merge that did not happen never reaches here, so the
+// branch stays for the retry.
+func (m *ForgejoMerger) deleteCandidate(ctx context.Context, w Work) {
+	branch := w.Candidate()
+	if err := m.Client.DeleteBranch(ctx, m.Owner, m.RepoName, branch); err != nil {
+		m.logf("%s: could not delete %s after the merge: %v", w.BeadID, branch, err)
+		return
+	}
+	m.logf("%s: deleted %s after the merge", w.BeadID, branch)
 }
 
 // postVerdict posts om's verdict as the required om / review status on the
