@@ -80,6 +80,46 @@ func TestQueueReadNamesAnUnreadableStore(t *testing.T) {
 	}
 }
 
+// The Rigs panel's rows come from the same read as the queue: one per known
+// rig in registry order, hq left out (it is the town store, not a rig), and a
+// store this read could not reach left blank rather than shown as empty.
+func TestQueueReadFillsOneRigRowPerStore(t *testing.T) {
+	t.Parallel()
+	gastown := &fakeQueueStore{
+		ready:   []*beads.Issue{{ID: "gt-1", Title: "one"}, {ID: "gt-2", Title: "two"}},
+		landing: []*beads.Issue{{ID: "gt-3", Title: "submitted", Status: "open", Labels: []string{land.LabelReadyToLand}}},
+	}
+	mango := &fakeQueueStore{ready: []*beads.Issue{{ID: "ma-1", Title: "parked work"}}}
+	doltDown := &fakeQueueStore{err: errors.New("dolt down")}
+	r := queueReaderOver(map[string]dashQueueStore{
+		"hq": &fakeQueueStore{}, "gastown": gastown, "mango": mango, "beads": doltDown,
+	}, "hq", "gastown", "mango", "beads")
+	r.parked = func(rig string) bool { return rig == "mango" }
+	q := r.read(time.Now())
+
+	var names []string
+	for _, row := range q.Rigs {
+		names = append(names, row.Name)
+		switch row.Name {
+		case "gastown":
+			if row.Parked || row.Ready == nil || *row.Ready != 2 || row.Landing == nil || *row.Landing != 1 {
+				t.Errorf("gastown row = %+v", row)
+			}
+		case "mango":
+			if !row.Parked || row.Ready == nil || *row.Ready != 1 || row.Landing == nil || *row.Landing != 0 {
+				t.Errorf("mango row = %+v (a parked rig keeps its row and its numbers)", row)
+			}
+		case "beads":
+			if row.Ready != nil || row.Landing != nil {
+				t.Errorf("an unreadable store must leave its counts unset, not zero: %+v", row)
+			}
+		}
+	}
+	if strings.Join(names, ",") != "gastown,mango,beads" {
+		t.Errorf("rig rows = %v, want one per known rig and no hq", names)
+	}
+}
+
 func TestQueueDetailOnlyReadsKnownStores(t *testing.T) {
 	t.Parallel()
 	st := &fakeQueueStore{shown: &beads.Issue{

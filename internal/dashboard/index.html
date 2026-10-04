@@ -131,6 +131,7 @@ section.collapsed>h2{border-bottom:0}
   <div class="col">
     <section><h2>Alerts <span class="r" id="alertsnote"></span></h2><div class="body" id="alerts"></div></section>
     <section><h2>DeepSeek <span class="r" id="spendnote"></span></h2><div class="body" id="spend"></div></section>
+    <section><h2>Rigs <span class="r" id="rigsnote"></span></h2><div class="body" id="rigs"></div></section>
     <section><h2>Polecats <span class="r" id="seatsnote"></span></h2><div class="body" id="seats"></div></section>
     <section><h2>Dispatcher <span class="r" id="dispnote"></span></h2><div class="body" id="disp"></div></section>
     <section id="trendsec" hidden><h2>Landings <span class="r" id="trendnote"></span></h2><div class="body" id="trend"></div></section>
@@ -231,6 +232,39 @@ const STATE_HELP = {
 };
 let openIdle = false;
 let openParkedRig = false;
+// One compact line per rig: whether it is parked, and where its work is. A
+// count the dashboard could not read says so rather than showing a zero.
+function renderRigs(s) {
+  const box = $("rigs");
+  box.replaceChildren();
+  const rows = s.rigs || [];
+  if (!rows.length) { box.append(el("div", "empty", s.queue ? "no rigs" : "reading…")); $("rigsnote").textContent = ""; return; }
+  const t = el("table");
+  const hr = el("tr");
+  [["Rig"], ["State"], ["Seats", "polecats in this rig that hold nothing and are free to take work", 1],
+   ["Ready", "beads in this rig open with nothing blocking them", 1],
+   ["Landing", "beads in this rig submitted and waiting to land", 1]].forEach(([h, tip, num]) => {
+    const th = el("th", num ? "n" : "", h);
+    if (tip) th.title = tip;
+    hr.append(th);
+  });
+  t.append(hr);
+  const cell = v => { const td = el("td", "n" + (v == null ? " title" : ""), v == null ? "unavailable" : String(v)); if (v == null) td.title = "the dashboard could not read this"; return td; };
+  for (const r of rows) {
+    const tr = el("tr");
+    tr.append(el("td", "", r.name));
+    const st = el("td");
+    const badge = el("span", "badge st-" + (r.parked ? "parked" : "working"), r.parked ? "parked" : "active");
+    if (r.parked) badge.title = "stood down by an operator: the dispatcher does not serve it";
+    st.append(badge);
+    tr.append(st, cell(r.seats), cell(r.ready), cell(r.landing));
+    t.append(tr);
+  }
+  box.append(t);
+  const parked = rows.filter(r => r.parked).length;
+  const at = s.queue && s.queue.at;
+  $("rigsnote").textContent = rows.length + " rigs" + (parked ? " · " + parked + " parked" : "") + (at ? " · read " + age(at) + " ago" : "");
+}
 function renderSeats(s) {
   const box = $("seats");
   box.replaceChildren();
@@ -839,7 +873,7 @@ function renderQueue(s, force) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderAlerts(state); renderSeats(state); renderTrend(state); renderMachine(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
+function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));

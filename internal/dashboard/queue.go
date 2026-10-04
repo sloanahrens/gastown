@@ -66,6 +66,12 @@ type Queue struct {
 	Unreadable []string `json:"unreadable,omitempty"`
 	// ParkedRigs names the stores whose rigs are parked.
 	ParkedRigs []string `json:"parked_rigs,omitempty"`
+	// Rigs is one row per known rig, in registry order, as the Rigs panel
+	// draws it: the rig's park state and, for a store this read reached, its
+	// ready and landing counts. The seat count is not the store's to know, so
+	// the hub fills it and publishes the joined rows as State.Rigs; this field
+	// is the join's input, not part of the page's payload.
+	Rigs []Rig `json:"-"`
 }
 
 // SortQueueRows orders rows the way the dispatcher takes them: most urgent

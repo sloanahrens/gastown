@@ -263,19 +263,22 @@ type Trend struct {
 
 // State is everything the page draws apart from the feed.
 type State struct {
-	Now       time.Time       `json:"now"`
-	Viewers   int             `json:"viewers"`
-	Health    Health          `json:"health"`
-	Summary   *Summary        `json:"summary,omitempty"`
-	SummaryAt time.Time       `json:"summary_at,omitempty"`
-	Polecats  []Polecat       `json:"polecats"`
-	Machine   Machine         `json:"machine"`
-	Loads     []LoadPoint     `json:"loads"`
-	Spend     json.RawMessage `json:"spend,omitempty"`
-	OM        *OM             `json:"om,omitempty"`
-	Dispatch  *Dispatch       `json:"dispatch,omitempty"`
-	Queue     *Queue          `json:"queue,omitempty"`
-	Trend     *Trend          `json:"trend,omitempty"`
+	Now       time.Time `json:"now"`
+	Viewers   int       `json:"viewers"`
+	Health    Health    `json:"health"`
+	Summary   *Summary  `json:"summary,omitempty"`
+	SummaryAt time.Time `json:"summary_at,omitempty"`
+	Polecats  []Polecat `json:"polecats"`
+	// Rigs is one row per known rig, joined from the queue and the polecats
+	// (RigRows). It is nil until both readers have reported.
+	Rigs     []Rig           `json:"rigs,omitempty"`
+	Machine  Machine         `json:"machine"`
+	Loads    []LoadPoint     `json:"loads"`
+	Spend    json.RawMessage `json:"spend,omitempty"`
+	OM       *OM             `json:"om,omitempty"`
+	Dispatch *Dispatch       `json:"dispatch,omitempty"`
+	Queue    *Queue          `json:"queue,omitempty"`
+	Trend    *Trend          `json:"trend,omitempty"`
 	// Alerts is the most recent alerts the alerter raised, newest last, capped
 	// at alertsKept. The page lists them whether or not alerts are switched on.
 	Alerts []Alert `json:"alerts,omitempty"`

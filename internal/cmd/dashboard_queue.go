@@ -96,9 +96,23 @@ func (r *dashQueueReader) read(now time.Time) *dashboard.Queue {
 	}
 	q := &dashboard.Queue{At: now}
 	var ready, landing, blocked []dashboard.QueueBead
+	// The Rigs panel lists one row per known rig; hq is the town store, not a
+	// rig, so it gets none. A store this read could not reach keeps its row and
+	// leaves its counts unset, which the page shows as unavailable.
+	var rigs []dashboard.Rig
+	readable := map[string]bool{}
+	addRig := func(name string, parked, read bool) {
+		if name == "hq" {
+			return
+		}
+		rigs = append(rigs, dashboard.Rig{Name: name, Parked: parked})
+		readable[name] = read
+	}
 	for _, name := range names {
 		st := stores[name]
+		parked := r.parked != nil && r.parked(name)
 		if st == nil {
+			addRig(name, parked, false)
 			continue
 		}
 		rd, err1 := st.ReadyAll()
@@ -106,9 +120,10 @@ func (r *dashQueueReader) read(now time.Time) *dashboard.Queue {
 		ln, err3 := st.List(beads.ListOptions{Label: land.LabelReadyToLand, Priority: -1})
 		if err1 != nil || err2 != nil || err3 != nil {
 			q.Unreadable = append(q.Unreadable, name)
+			addRig(name, parked, false)
 			continue
 		}
-		parked := r.parked != nil && r.parked(name)
+		addRig(name, parked, true)
 		if parked {
 			q.ParkedRigs = append(q.ParkedRigs, name)
 		}
@@ -148,6 +163,16 @@ func (r *dashQueueReader) read(now time.Time) *dashboard.Queue {
 	q.Ready, q.ReadyTotal, q.ReadyRigs = dashboard.CapQueueRows(kept)
 	q.Landing, q.LandingTotal, q.LandingRigs = dashboard.CapQueueRows(landing)
 	q.Blocked, q.BlockedTotal, q.BlockedRigs = dashboard.CapQueueRows(blocked)
+	// The per-store totals the capping above just computed are exact, so the
+	// rows take their counts from them rather than counting again.
+	for i := range rigs {
+		if !readable[rigs[i].Name] {
+			continue
+		}
+		n, m := q.ReadyRigs[rigs[i].Name], q.LandingRigs[rigs[i].Name]
+		rigs[i].Ready, rigs[i].Landing = &n, &m
+	}
+	q.Rigs = rigs
 	sort.Strings(q.Unreadable)
 	sort.Strings(q.ParkedRigs)
 	return q
