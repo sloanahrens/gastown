@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/checkpoint"
+	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/git"
 )
 
@@ -89,11 +90,17 @@ type Lander struct {
 	// built and unused on such a rig, because shadow mode runs both (slice 8).
 	Gate      Gate
 	Candidate Candidate
-	Reviewer  Reviewer
-	Beads     Beads
-	Landings  *LandingsFile
-	Out       io.Writer
-	Now       func() time.Time
+	// Merger, when set, lands the merged tree through a Forgejo pull request
+	// instead of the local force-push: it posts om's verdict, opens
+	// land/<bead> -> the target and merges it pinned to the candidate commit.
+	// The daemon sets it beside Candidate for a rig with a merge_queue.forgejo
+	// block; a rig without one keeps the force-push.
+	Merger   Merger
+	Reviewer Reviewer
+	Beads    Beads
+	Landings *LandingsFile
+	Out      io.Writer
+	Now      func() time.Time
 	// RangeChecks run on base..head before the merge (the landing worker
 	// passes AttributionCheck). A returned Rejection is written to the bead
 	// like any other.
@@ -167,6 +174,10 @@ const (
 	RejectNotPushed RejectionKind = "not_pushed"
 	// RejectTimeout is a gate stage that outlived its own timeout (gt-b5ugw).
 	RejectTimeout RejectionKind = "timeout"
+	// RejectMergeRefused is a cut-over rig's PR the API refused as "not ready
+	// to be merged" (405) with the base unmoved: a required status is missing
+	// or red, which a retry never fixes, so a human owns it (gt-fn9e6.5).
+	RejectMergeRefused RejectionKind = "merge_refused"
 )
 
 // Rejection is a landing refused because of the work itself. Land has
@@ -198,17 +209,40 @@ func (r *Rejection) Error() string {
 	return msg
 }
 
-// RaceError means the target moved between the merge and the push, so the
-// lease refused the push. Nothing was written; land again from the top.
+// RaceError means the target moved between the merge and the write, so the
+// lease refused the push — or, on a cut-over rig, Forgejo's outdated-branch
+// guard refused the merge. Nothing was written; land again from the top.
 type RaceError struct {
 	Target   string
 	Expected string
 	Actual   string
+	// Rebuild is set when a cut-over rig's merge was refused because the
+	// target moved after the candidate was built. The candidate is cut from
+	// the target, so a busy target makes this the normal case, not a failure:
+	// the next attempt rebuilds it on the new tip (design, "Risks").
+	Rebuild bool
 }
 
 func (e *RaceError) Error() string {
+	if e.Rebuild {
+		// The outdated-branch guard reports no tips, only that the merge is
+		// refused: the worker rebuilds rather than comparing.
+		return fmt.Sprintf("landing lost the race: %s moved after the candidate was built; it must be rebuilt on the new tip", e.Target)
+	}
 	return fmt.Sprintf("landing lost the race: %s moved from %s to %s during the gate; nothing pushed", e.Target, shortSHA(e.Expected), shortSHA(e.Actual))
 }
+
+// MergeRefusedError is Forgejo refusing a PR merge with 405 "not ready to be
+// merged" when the base has not moved: a required status is missing or red, so
+// the PR cannot merge and a retry never will. It is separate from the
+// outdated-branch race (a 409), which the worker answers by rebuilding; Land
+// turns this one into a rejection for a human (gt-fn9e6.5 review note).
+type MergeRefusedError struct {
+	Err error
+}
+
+func (e *MergeRefusedError) Error() string { return "the merge was refused: " + e.Err.Error() }
+func (e *MergeRefusedError) Unwrap() error { return e.Err }
 
 // ErrLintTimeout is the cause of an *InfraError whose lint stage outlived its
 // timeout. The landing worker counts a run of them per bead and escalates
@@ -295,6 +329,133 @@ func (l *Lander) candidateGate(ctx context.Context, wt Repo, dir string, w Work,
 	}
 }
 
+// Merger lands the merged candidate through a Forgejo pull request, the write
+// path a cut-over rig replaces the force-push with. It posts om's verdict as
+// the om / review commit status, opens land/<bead> -> the target, and merges
+// the PR pinned to the candidate commit (design, "om review and the om /
+// review status" and "The PR, the merge and the forgery check").
+// *ForgejoMerger is the production implementation; a Lander with no Merger
+// keeps the local force-push.
+type Merger interface {
+	// Merge lands w's candidate. head is the merged commit CI gated and om
+	// reviewed, and is the merge's head_commit_id. A 409 from the
+	// outdated-branch guard comes back as a *RaceError with Rebuild set.
+	Merge(ctx context.Context, w Work, head string, verdict Verdict) error
+}
+
+// ForgejoPulls is the part of the Forgejo client the land PR uses.
+// *forgejo.Client implements it; tests pass a fake.
+type ForgejoPulls interface {
+	PostStatus(ctx context.Context, owner, repo, sha string, req forgejo.StatusRequest) (*forgejo.CommitStatus, error)
+	OpenPulls(ctx context.Context, owner, repo string) ([]forgejo.PullRequest, error)
+	CreatePull(ctx context.Context, owner, repo string, opt forgejo.CreatePullRequestOption) (*forgejo.PullRequest, error)
+	MergePull(ctx context.Context, owner, repo string, index int64, opt forgejo.MergePullRequestOption) error
+}
+
+// ForgejoMerger is the production Merger. The daemon builds it from the rig's
+// merge_queue.forgejo block, beside the CandidateGate and from the same client
+// (daemon/landing_worker.go), so the bot that pushes the candidate is the bot
+// that posts the review and merges.
+type ForgejoMerger struct {
+	// Client is the Forgejo API.
+	Client ForgejoPulls
+	// Owner and RepoName name the Forgejo repository that holds the PR.
+	Owner, RepoName string
+	// CallTimeout bounds one Forgejo call; a zero means
+	// DefaultCandidateCallTimeout.
+	CallTimeout time.Duration
+	// Out, when set, receives one line per stage.
+	Out io.Writer
+}
+
+// Merge posts the review status, opens the land PR (reusing the one an earlier
+// attempt left) and merges it pinned to head.
+func (m *ForgejoMerger) Merge(parent context.Context, w Work, head string, verdict Verdict) error {
+	ctx, cancel := context.WithTimeout(parent, nonZero(m.CallTimeout, DefaultCandidateCallTimeout))
+	defer cancel()
+	if err := m.postVerdict(ctx, head, verdict); err != nil {
+		return err
+	}
+	pr, err := m.pullFor(ctx, w, head)
+	if err != nil {
+		return err
+	}
+	err = m.Client.MergePull(ctx, m.Owner, m.RepoName, pr.Number, forgejo.MergePullRequestOption{
+		// The candidate already is the merge of the work onto the target, so a
+		// fast-forward lands that exact commit — the one CI gated and om
+		// reviewed — as the target's tip. A merge commit made here would test
+		// one tree and land another.
+		Style:        forgejo.MergeStyleFastForward,
+		HeadCommitID: head,
+	})
+	if err != nil {
+		var apiErr *forgejo.APIError
+		switch {
+		case errors.As(err, &apiErr) && apiErr.IsConflict():
+			// block_on_outdated_branch: the target moved after the candidate was
+			// built, so this candidate is stale. Not a rejection and not a lost
+			// race the author pays for — the next attempt rebuilds it (design,
+			// "The worker must treat the rebuild as the normal case").
+			m.logf("%s: %s moved before the merge; the candidate must be rebuilt", w.BeadID, w.Target)
+			return &RaceError{Target: w.Target, Rebuild: true}
+		case errors.As(err, &apiErr) && apiErr.IsNotReadyToMerge():
+			// "not ready to be merged" with no moved base means a required
+			// status is missing or red, which a retry never fixes: a renamed
+			// workflow, a context that never reported, a status branch
+			// protection refused. A human owns it (gt-fn9e6.5 review note).
+			m.logf("%s: %s refused the merge as not ready", w.BeadID, m.RepoName)
+			return &MergeRefusedError{Err: err}
+		}
+		return &InfraError{Stage: "merge pull request", Err: err}
+	}
+	m.logf("%s: merged %s on %s through pull request #%d", w.BeadID, shortSHA(head), w.Target, pr.Number)
+	return nil
+}
+
+// postVerdict posts om's verdict as the required om / review status on the
+// candidate commit.
+func (m *ForgejoMerger) postVerdict(ctx context.Context, head string, verdict Verdict) error {
+	if _, err := m.Client.PostStatus(ctx, m.Owner, m.RepoName, head, OMVerdictStatus(verdict)); err != nil {
+		return &InfraError{Stage: "post om review status", Err: err}
+	}
+	return nil
+}
+
+// pullFor is the open PR for w's candidate branch, or a new one. A rebuild
+// after the outdated-branch guard leaves the first attempt's PR open — the
+// branch is force-updated and the PR follows it — so the retry reuses that PR
+// at its new head rather than failing to open a second one for the same pair
+// of branches.
+func (m *ForgejoMerger) pullFor(ctx context.Context, w Work, head string) (*forgejo.PullRequest, error) {
+	branch := w.Candidate()
+	pulls, err := m.Client.OpenPulls(ctx, m.Owner, m.RepoName)
+	if err != nil {
+		return nil, &InfraError{Stage: "list pull requests", Err: err}
+	}
+	for i := range pulls {
+		if pulls[i].Head.Ref == branch {
+			return &pulls[i], nil
+		}
+	}
+	pr, err := m.Client.CreatePull(ctx, m.Owner, m.RepoName, forgejo.CreatePullRequestOption{
+		Title: NoteField(fmt.Sprintf("land: %s (%s)", w.BeadID, w.Branch)),
+		Body: fmt.Sprintf("Landing %s from %s at %s onto %s.\nCI gated this commit; the %s status records the review the merge is pinned to.\n",
+			w.BeadID, NoteField(w.Branch), shortSHA(head), w.Target, OMStatusContext),
+		Head: branch,
+		Base: w.Target,
+	})
+	if err != nil {
+		return nil, &InfraError{Stage: "open the land pull request", Err: err}
+	}
+	return pr, nil
+}
+
+func (m *ForgejoMerger) logf(format string, args ...any) {
+	if m.Out != nil {
+		_, _ = fmt.Fprintf(m.Out, "[land] "+format+"\n", args...)
+	}
+}
+
 // stage reports the landing's current stage to the Stage hook, if one is set.
 func (l *Lander) stage(w Work, stage string) {
 	if l.Stage != nil {
@@ -331,9 +492,14 @@ func (l *Lander) now() time.Time {
 
 // Land lands w: the declared head merged onto a throwaway worktree of the
 // target, the merged tree gated — locally, or by CI on the pushed candidate
-// when the rig has a Candidate gate — then om review, a --force-with-lease
-// push against the tip the merge was built on, a read-back of that tip, then
-// the landings file, the LANDING RECORD block and the close.
+// when the rig has a Candidate gate — then om review, then the target written:
+// a --force-with-lease push against the tip the merge was built on, or, on a
+// rig with a Merger, an om / review status and a land/<bead> PR merged with
+// head_commit_id. Either way the target's tip is read back, then the landings
+// file, the LANDING RECORD block and the close.
+//
+// A 409 from the PR merge means the target moved and the candidate is rebuilt
+// through the race path; a 405 is a refusal for a human, never a race.
 //
 // A red gate goes through the flake policy (flake.go) before it is a
 // rejection.
@@ -565,18 +731,39 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		return Result{}, &InfraError{Stage: "push", Err: err}
 	}
 
-	if err := wt.PushForceWithLease(remote, "HEAD:refs/heads/"+w.Target, "refs/heads/"+w.Target, base); err != nil {
-		tip, tipErr := wt.PushRemoteBranchTip(remote, w.Target)
-		if tipErr == nil && tip != "" && tip != base {
-			return Result{}, &RaceError{Target: w.Target, Expected: base, Actual: tip}
+	if l.Merger != nil {
+		// A cut-over rig lands through Forgejo: the om status is posted and the
+		// PR merged with head_commit_id, so a candidate that moved after the
+		// verdict cannot land on it (design, "The PR, the merge and the forgery
+		// check"). The merge is a fast-forward, so the target's tip is the
+		// candidate commit the read-back checks.
+		if err := l.Merger.Merge(ctx, w, merged, verdict); err != nil {
+			var refused *MergeRefusedError
+			if errors.As(err, &refused) {
+				rej := &Rejection{Kind: RejectMergeRefused, Rework: false,
+					Reason: fmt.Sprintf("Forgejo refused to merge %s into %s (405, not ready to be merged): %s. A required status is missing or red, so a retry cannot converge: check that branch protection's required contexts match the gate workflow's, and that the %s status was accepted. A human decides.",
+						w.Candidate(), w.Target, elideMiddle(NoteField(refused.Err.Error()), reviewErrorReasonMax), OMStatusContext)}
+				return Result{}, l.reject(issue, w, rej, nil)
+			}
+			return Result{}, err
 		}
-		return Result{}, &InfraError{Stage: "push", Err: err}
-	}
-	if l.afterPush != nil {
-		l.afterPush()
-	}
-	if err := wt.VerifyPushedCommit(remote, w.Target, merged); err != nil {
-		return Result{}, &InfraError{Stage: "read-back", Err: fmt.Errorf("%w: %v", ErrReadBack, err)}
+		if err := wt.VerifyPushedCommit(remote, w.Target, merged); err != nil {
+			return Result{}, &InfraError{Stage: "read-back", Err: fmt.Errorf("%w: %v", ErrReadBack, err)}
+		}
+	} else {
+		if err := wt.PushForceWithLease(remote, "HEAD:refs/heads/"+w.Target, "refs/heads/"+w.Target, base); err != nil {
+			tip, tipErr := wt.PushRemoteBranchTip(remote, w.Target)
+			if tipErr == nil && tip != "" && tip != base {
+				return Result{}, &RaceError{Target: w.Target, Expected: base, Actual: tip}
+			}
+			return Result{}, &InfraError{Stage: "push", Err: err}
+		}
+		if l.afterPush != nil {
+			l.afterPush()
+		}
+		if err := wt.VerifyPushedCommit(remote, w.Target, merged); err != nil {
+			return Result{}, &InfraError{Stage: "read-back", Err: fmt.Errorf("%w: %v", ErrReadBack, err)}
+		}
 	}
 	l.logf("%s: landed %s on %s/%s (patch-id %s)", w.BeadID, shortSHA(merged), remote, w.Target, shortSHA(patchID))
 

@@ -452,13 +452,15 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	}
 	// A rig with a merge_queue.forgejo block lands through its Forgejo CI: the
 	// candidate gate replaces the local gate built above, which stays for
-	// shadow mode (slice 8).
+	// shadow mode (slice 8), and the PR merger replaces the force-push that
+	// writes the target.
 	if forgejoCfg := rig.ResolveForgejoConfig(townRoot, rigName); forgejoCfg != nil {
-		candidate, err := d.newForgejoCandidate(rigName, forgejoCfg, repo, landings, cfg)
+		candidate, merger, err := d.newForgejoLanding(rigName, forgejoCfg, repo, landings, cfg)
 		if err != nil {
 			return nil, err
 		}
 		lander.Candidate = candidate
+		lander.Merger = merger
 	}
 	run := postLandRun(repo, workRoot, d.landingLogRoot(rigName), townRoot, rigName, landingWorkerDuration(cfg.PostLandTimeoutStr, defaultPostLandTimeout))
 	mainState := fileMainState{path: RedMainStatePath(townRoot, rigName)}
@@ -537,23 +539,26 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 // startup context check reads to find a commit the gate workflow tested.
 const forgejoVerifyWindow = 20
 
-// newForgejoCandidate builds the Forgejo gate a cut-over rig lands through and
-// checks its required context against the rig's own history. A rig whose
-// merge_queue.forgejo block is unusable (no readable remote, no landing bot
-// token) fails construction: CI is that rig's only landing path, so running
-// the local gate instead would bypass the cutover.
-func (d *Daemon) newForgejoCandidate(rigName string, fj *config.ForgejoConfig, repo string, landings *land.LandingsFile, cfg *LandingWorkerConfig) (*land.CandidateGate, error) {
+// newForgejoLanding builds the Forgejo gate and PR merger a cut-over rig lands
+// through and checks the gate's required context against the rig's own
+// history. A rig whose merge_queue.forgejo block is unusable (no readable
+// remote, no landing bot token) fails construction: CI is that rig's only
+// landing path, so running the local gate instead would bypass the cutover.
+//
+// One client serves both halves — the same landing bot pushes the candidate,
+// posts om's verdict and merges the PR (design, "Bots and tokens").
+func (d *Daemon) newForgejoLanding(rigName string, fj *config.ForgejoConfig, repo string, landings *land.LandingsFile, cfg *LandingWorkerConfig) (*land.CandidateGate, *land.ForgejoMerger, error) {
 	owner, repoName, err := land.RepoFromRemoteURL(fj.RemoteURL)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	apiBase, err := land.APIBaseFromRemoteURL(fj.RemoteURL)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	tokenDir, err := cfg.ForgejoTokenDir()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// The token is read from the role's file, never from config: the key names
 	// the role, and the file is what holds the secret (design, "Bots and
@@ -562,17 +567,19 @@ func (d *Daemon) newForgejoCandidate(rigName string, fj *config.ForgejoConfig, r
 		forgejo.WithBaseURL(apiBase),
 		forgejo.WithTokenFile(filepath.Join(tokenDir, "forgejo-"+config.ForgejoRoleLanding+".env")))
 	if err != nil {
-		return nil, fmt.Errorf("rig %s lands through Forgejo CI and its %s bot token is unusable: %w", rigName, config.ForgejoRoleLanding, err)
+		return nil, nil, fmt.Errorf("rig %s lands through Forgejo CI and its %s bot token is unusable: %w", rigName, config.ForgejoRoleLanding, err)
 	}
+	out := landingLogWriter{logf: d.logger.Printf}
 	gate := &land.CandidateGate{
 		Client:   client,
 		Owner:    owner,
 		RepoName: repoName,
 		Workflow: fj.GateWorkflowName(),
-		Out:      landingLogWriter{logf: d.logger.Printf},
+		Out:      out,
 	}
 	d.verifyForgejoGate(rigName, gate, repo, fj.GateWorkflowName(), landings)
-	return gate, nil
+	merger := &land.ForgejoMerger{Client: client, Owner: owner, RepoName: repoName, Out: out}
+	return gate, merger, nil
 }
 
 // verifyForgejoGate checks the required context the workflow file derives

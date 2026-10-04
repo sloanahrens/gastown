@@ -579,6 +579,16 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		w.clearIntent(work)
 	case outRace:
 		// Target moved during the gate: nothing written; land again next pass.
+		var race *land.RaceError
+		errors.As(err, &race)
+		if race != nil && race.Rebuild {
+			// A cut-over rig merges a candidate cut from the target, so a busy
+			// target refuses the merge and the rebuild is the normal case, not
+			// a failure the report counts (design, "Risks": "The worker must
+			// treat the rebuild as the normal case, not an error").
+			w.logf("%s: %v; rebuilding the candidate on the new tip", work.BeadID, err)
+			return
+		}
 		rep.Failed++
 		w.logf("%s: %v", work.BeadID, err)
 	case outNotReady:

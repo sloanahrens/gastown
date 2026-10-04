@@ -3,8 +3,13 @@ package forgejo
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strconv"
 )
+
+// openPullsLimit bounds the page of open pull requests the landing reads when
+// it is looking for one it already opened.
+const openPullsLimit = 50
 
 // PullRequest is a Forgejo pull request as the landing path reads it.
 type PullRequest struct {
@@ -67,6 +72,22 @@ func (c *Client) CreatePull(ctx context.Context, owner, repo string, opt CreateP
 		return nil, err
 	}
 	return &out, nil
+}
+
+// OpenPulls returns the repository's open pull requests, one bounded page.
+// The landing reads it to find the PR it opened for a candidate branch: when
+// the outdated-branch guard refuses a merge the branch is rebuilt, and its PR
+// follows the branch, so the retry merges that PR at its new head instead of
+// failing to open a second one for the same pair of branches.
+func (c *Client) OpenPulls(ctx context.Context, owner, repo string) ([]PullRequest, error) {
+	q := url.Values{}
+	q.Set("state", "open")
+	q.Set("limit", strconv.Itoa(openPullsLimit))
+	var out []PullRequest
+	if err := c.call(ctx, http.MethodGet, repoPath(owner, repo, "/pulls"), q, nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // GetPull returns the pull request numbered index.
