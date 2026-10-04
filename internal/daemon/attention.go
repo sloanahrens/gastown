@@ -569,6 +569,8 @@ func (d *Daemon) attentionLandingStuckBudget(stage string) time.Duration {
 	switch stage {
 	case land.StageGate:
 		return landingGateBudget(cfg) + townhealth.LandingPassInterval
+	case land.StageCI:
+		return landingCIBudget() + townhealth.LandingPassInterval
 	case land.StageOM:
 		return landingOMBudget(cfg) + townhealth.LandingPassInterval
 	}

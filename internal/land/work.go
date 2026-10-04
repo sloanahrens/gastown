@@ -66,6 +66,22 @@ type Work struct {
 	// a submission and does not move it (gt-t2jhf). Zero on a bead submitted
 	// before the note carried one.
 	Submitted time.Time
+	// CandidateBranch and CandidateHead name the merge candidate: the branch
+	// Land pushes it as and the merged commit on it. A READY TO LAND block
+	// carries neither — Candidate derives the branch from BeadID — and Land
+	// fills both for the run, so a log, a note or a repair names what CI
+	// tested rather than recomputing it.
+	CandidateBranch string
+	CandidateHead   string
+}
+
+// Candidate is the branch w's merge candidate is pushed as for the Forgejo
+// gate: the CandidateBranch field when one is set, else "land/<bead>".
+func (w Work) Candidate() string {
+	if w.CandidateBranch != "" {
+		return w.CandidateBranch
+	}
+	return "land/" + w.BeadID
 }
 
 // FormatReadyNote renders the READY TO LAND block for w. Every value is

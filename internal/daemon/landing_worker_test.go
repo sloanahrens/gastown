@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
@@ -597,5 +598,121 @@ func TestLandingSlowAlarmWiring(t *testing.T) {
 	want := filepath.Join(d.config.TownRoot, ".runtime", "landing-logs", "gastown", "land-123")
 	if dir := alarm.EvidenceDir(ctx, "/work/wt"); dir != want {
 		t.Errorf("evidence dir = %q, want %q", dir, want)
+	}
+}
+
+// forgejoRigConfig is a rig root config.json naming the rig's Forgejo landing
+// block: the operator tier ResolveForgejoConfig reads.
+func forgejoRigConfig(t *testing.T, townRoot, rigName string) string {
+	t.Helper()
+	rigPath := filepath.Join(townRoot, rigName)
+	if err := os.MkdirAll(filepath.Join(rigPath, ".repo.git"), 0o755); err != nil {
+		t.Fatalf("mkdir .repo.git: %v", err)
+	}
+	writeDaemonRigConfigFile(t, rigPath, `{"type":"rig","version":1,"name":"`+rigName+`","default_branch":"main",
+		"merge_queue":{"forgejo":{"remote_url":"https://forgejo.example/gastown/gastown.git","gate_workflow":"gate","bots":{"landing":"gt-landing"}}}}`)
+	return rigPath
+}
+
+// TestNewRigLandingWorker_WiresTheForgejoCandidateGate: a rig with a
+// merge_queue.forgejo block lands through CI, so its worker carries the
+// candidate gate built from that block (slice 5).
+func TestNewRigLandingWorker_WiresTheForgejoCandidateGate(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	const rigName = "testrig"
+	forgejoRigConfig(t, townRoot, rigName)
+
+	tokenDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tokenDir, "forgejo-landing.env"), []byte("FORGEJO_TOKEN=secret\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+
+	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: notifyfake.New(),
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{LandingWorker: &LandingWorkerConfig{
+			Forgejo: &config.ForgejoWorkerConfig{TokenDir: tokenDir}}}}}
+
+	w, err := d.newRigLandingWorker(rigName)
+	if err != nil {
+		t.Fatalf("newRigLandingWorker: %v", err)
+	}
+	lander, ok := w.Lander.(*land.Lander)
+	if !ok {
+		t.Fatalf("Lander = %T, want *land.Lander", w.Lander)
+	}
+	gate, ok := lander.Candidate.(*land.CandidateGate)
+	if !ok || gate == nil {
+		t.Fatalf("Candidate = %T; want the rig's Forgejo gate", lander.Candidate)
+	}
+	if gate.Owner != "gastown" || gate.RepoName != "gastown" || gate.Workflow != "gate" {
+		t.Fatalf("gate %+v; want the owner/repo and workflow from merge_queue.forgejo", gate)
+	}
+}
+
+// TestNewRigLandingWorker_NoForgejoConfigKeepsTheLocalGate: a rig with no
+// forgejo block keeps landing through the local gate, which is every rig
+// until a cutover adds one.
+func TestNewRigLandingWorker_NoForgejoConfigKeepsTheLocalGate(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	const rigName = "testrig"
+	rigPath := filepath.Join(townRoot, rigName)
+	if err := os.MkdirAll(filepath.Join(rigPath, ".repo.git"), 0o755); err != nil {
+		t.Fatalf("mkdir .repo.git: %v", err)
+	}
+	writeDaemonRigConfigFile(t, rigPath, `{"type":"rig","version":1,"name":"testrig","default_branch":"main"}`)
+
+	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: notifyfake.New()}
+	w, err := d.newRigLandingWorker(rigName)
+	if err != nil {
+		t.Fatalf("newRigLandingWorker: %v", err)
+	}
+	if lander, ok := w.Lander.(*land.Lander); !ok || lander.Candidate != nil {
+		t.Fatalf("Candidate = %v; want none without a forgejo block", w.Lander)
+	}
+}
+
+// TestNewRigLandingWorker_ForgejoWithoutATokenFailsClosed: the rig's only
+// landing path is CI, so an unusable landing bot token is a rig that must not
+// land at all.
+func TestNewRigLandingWorker_ForgejoWithoutATokenFailsClosed(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	const rigName = "testrig"
+	forgejoRigConfig(t, townRoot, rigName)
+
+	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: notifyfake.New(),
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{LandingWorker: &LandingWorkerConfig{
+			Forgejo: &config.ForgejoWorkerConfig{TokenDir: t.TempDir()}}}}}
+
+	if _, err := d.newRigLandingWorker(rigName); err == nil {
+		t.Fatal("newRigLandingWorker() = nil error without a landing bot token; want the rig refused")
+	} else if !strings.Contains(err.Error(), "token") {
+		t.Fatalf("error %q does not name the token", err)
+	}
+}
+
+// TestLastLandedCandidateReadsTheWorkersOwnLandings: the startup context check
+// reads commits the worker itself landed, whose candidates CI tested.
+func TestLastLandedCandidateReadsTheWorkersOwnLandings(t *testing.T) {
+	t.Parallel()
+	landings, err := land.RigLandingsFile(t.TempDir(), "testrig")
+	if err != nil {
+		t.Fatalf("RigLandingsFile: %v", err)
+	}
+	if got := lastLandedCandidate(landings, t.Logf, "testrig"); got != "" {
+		t.Fatalf("lastLandedCandidate on an empty file = %q, want empty", got)
+	}
+	for _, rec := range []land.LandingRecord{
+		{BeadID: "gt-a", Route: "daemon", LandedCommit: "aaaa"},
+		{BeadID: "gt-b", Route: "crew", LandedCommit: "bbbb"},
+		{BeadID: "gt-c", Route: "daemon", LandedCommit: "cccc"},
+	} {
+		if err := landings.Append(rec); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	if got := lastLandedCandidate(landings, t.Logf, "testrig"); got != "cccc" {
+		t.Fatalf("lastLandedCandidate = %q, want the newest daemon landing cccc", got)
 	}
 }
