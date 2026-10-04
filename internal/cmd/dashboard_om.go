@@ -24,8 +24,10 @@ import (
 // It runs no om and no bd.
 
 const (
-	omRecentRows   = 15
-	omDayRows      = 7
+	omRecentRows = 15
+	// The by-day table is a fixed window: today and the three calendar days
+	// before it. A day with no reviews still gets a row.
+	omDayRows      = 4
 	omStageJoinMin = 45 * time.Minute // a stages line this far before a landing belongs to it
 )
 
@@ -256,7 +258,13 @@ func buildOM(now time.Time, recs []omRecord, stages []omStage, rejs []omRejectio
 		label string
 		since time.Time
 	}
-	wins := []win{{"24h", now.Add(-24 * time.Hour)}, {"7d", now.Add(-7 * 24 * time.Hour)}, {"all", time.Time{}}}
+	wins := []win{
+		{"1h", now.Add(-1 * time.Hour)},
+		{"6h", now.Add(-6 * time.Hour)},
+		{"24h", now.Add(-24 * time.Hour)},
+		{"7d", now.Add(-7 * 24 * time.Hour)},
+		{"all", time.Time{}},
+	}
 	out := make([]dashboard.OMWindow, len(wins))
 	scoreSum := make([]float64, len(wins))
 	scoreN := make([]int, len(wins))
@@ -266,10 +274,23 @@ func buildOM(now time.Time, recs []omRecord, stages []omStage, rejs []omRejectio
 	}
 	inWin := func(i int, at time.Time) bool { return wins[i].since.IsZero() || !at.Before(wins[i].since) }
 
+	dayKeys := make([]string, omDayRows)
+	dayAllowed := make(map[string]bool, omDayRows)
+	today := now.In(time.Local)
+	for i := range dayKeys {
+		k := today.AddDate(0, 0, -i).Format("2006-01-02")
+		dayKeys[i], dayAllowed[k] = k, true
+	}
+
 	days := map[string]*dashboard.OMDay{}
 	daySecs := map[string][]float64{}
+	// day returns the row an event's timestamp belongs to, or nil when its day
+	// is older than the three days before today.
 	day := func(at time.Time) *dashboard.OMDay {
 		k := at.In(time.Local).Format("2006-01-02")
+		if !dayAllowed[k] {
+			return nil
+		}
 		if days[k] == nil {
 			days[k] = &dashboard.OMDay{Day: k}
 		}
@@ -320,16 +341,18 @@ func buildOM(now time.Time, recs []omRecord, stages []omStage, rejs []omRejectio
 				out[i].Skipped++
 			}
 		}
-		switch oc {
-		case "approved":
-			d.Approved++
-			if rec.OMScore > 0 {
-				bucket(rec.OMScore)
+		if d != nil {
+			switch oc {
+			case "approved":
+				d.Approved++
+			case "error":
+				d.Errors++
+			default:
+				d.Skipped++
 			}
-		case "error":
-			d.Errors++
-		default:
-			d.Skipped++
+		}
+		if oc == "approved" && rec.OMScore > 0 {
+			bucket(rec.OMScore)
 		}
 		rv := dashboard.OMReview{At: rec.LandedAt, Bead: rec.Bead, Rig: rec.Rig, Outcome: oc, Route: rec.Route,
 			Gate: rec.GateResult, Risk: len(rec.RiskPaths) > 0}
@@ -350,7 +373,9 @@ func buildOM(now time.Time, recs []omRecord, stages []omStage, rejs []omRejectio
 	for _, rj := range rejs {
 		note(rj.At)
 		om.Rejects[rj.Kind]++
-		day(rj.At).Rejected++
+		if d := day(rj.At); d != nil {
+			d.Rejected++
+		}
 		for i := range wins {
 			if inWin(i, rj.At) {
 				out[i].Rejected++
@@ -378,9 +403,9 @@ func buildOM(now time.Time, recs []omRecord, stages []omStage, rejs []omRejectio
 				secs[i] = append(secs[i], s)
 			}
 		}
-		k := st.At.In(time.Local).Format("2006-01-02")
-		daySecs[k] = append(daySecs[k], s)
-		day(st.At)
+		if d := day(st.At); d != nil {
+			daySecs[d.Day] = append(daySecs[d.Day], s)
+		}
 	}
 
 	for i := range out {
@@ -397,16 +422,11 @@ func buildOM(now time.Time, recs []omRecord, stages []omStage, rejs []omRejectio
 	om.Windows = out
 	om.Since = first
 
-	keys := make([]string, 0, len(days))
-	for k := range days {
-		keys = append(keys, k)
-	}
-	sort.Sort(sort.Reverse(sort.StringSlice(keys)))
-	if len(keys) > omDayRows {
-		keys = keys[:omDayRows]
-	}
-	for _, k := range keys {
-		d := *days[k]
+	for _, k := range dayKeys {
+		d := dashboard.OMDay{Day: k}
+		if v := days[k]; v != nil {
+			d = *v
+		}
 		if s := daySecs[k]; len(s) > 0 {
 			var sum float64
 			for _, v := range s {

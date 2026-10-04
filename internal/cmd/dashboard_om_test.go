@@ -110,7 +110,7 @@ func TestBuildOM(t *testing.T) {
 	if om.Backend != "claude-deepseek-flash" || om.Depth != "standard" {
 		t.Errorf("config = %q %q", om.Backend, om.Depth)
 	}
-	d, all := om.Windows[0], om.Windows[2]
+	d, all := om.Windows[2], om.Windows[4]
 	if d.Label != "24h" || d.Landed != 4 || d.Approved != 1 || d.Skipped != 2 || d.Errors != 1 || d.Rejected != 2 {
 		t.Errorf("24h = %+v", d)
 	}
@@ -141,6 +141,59 @@ func TestBuildOM(t *testing.T) {
 	}
 	if len(om.Days) == 0 || om.Days[0].Day != now.Format("2006-01-02") {
 		t.Errorf("days = %+v", om.Days)
+	}
+}
+
+func TestOMWindowBoundaries(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 3, 18, 0, 0, 0, time.Local)
+	recs := []omRecord{
+		omTestRec("gt-30m", "approve", 0.7, "daemon", now.Add(-30*time.Minute)),
+		omTestRec("gt-5h", "approve", 0.5, "daemon", now.Add(-5*time.Hour)),
+	}
+	om := buildOM(now, recs, nil, nil, omConfig{})
+	labels := []string{"1h", "6h", "24h", "7d", "all"}
+	if len(om.Windows) != len(labels) {
+		t.Fatalf("windows = %d, want %d", len(om.Windows), len(labels))
+	}
+	for i, l := range labels {
+		if om.Windows[i].Label != l {
+			t.Errorf("window %d = %q, want %q", i, om.Windows[i].Label, l)
+		}
+	}
+	// 30 minutes ago is in 1h, 6h, 24h; 5 hours ago is in 6h and 24h but not 1h.
+	for i, want := range []int{1, 2, 2, 2, 2} {
+		if got := om.Windows[i].Landed; got != want {
+			t.Errorf("%s landed = %d, want %d", labels[i], got, want)
+		}
+	}
+}
+
+func TestOMDaysAreTheLastFourCalendarDays(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 3, 18, 0, 0, 0, time.Local)
+	agoDay := func(n int) time.Time { return now.AddDate(0, 0, -n) }
+	recs := []omRecord{
+		omTestRec("gt-today", "approve", 0.8, "daemon", now.Add(-time.Hour)),
+		omTestRec("gt-1d", "approve", 0.6, "daemon", agoDay(1)),
+		// agoDay(2) has no reviews: its row must still appear.
+		omTestRec("gt-3d", "error:om review did not run", 0, "daemon", agoDay(3)),
+		omTestRec("gt-4d", "approve", 0.9, "daemon", agoDay(4)),
+	}
+	om := buildOM(now, recs, nil, nil, omConfig{})
+	if len(om.Days) != 4 {
+		t.Fatalf("days = %d (%+v)", len(om.Days), om.Days)
+	}
+	for i := 0; i < 4; i++ {
+		if want := agoDay(i).Format("2006-01-02"); om.Days[i].Day != want {
+			t.Errorf("days[%d] = %q, want %q", i, om.Days[i].Day, want)
+		}
+	}
+	if d := om.Days[2]; d.Approved != 0 || d.Skipped != 0 || d.Errors != 0 || d.Rejected != 0 || d.AvgSecs != nil {
+		t.Errorf("a day with no reviews must be a zero row: %+v", d)
+	}
+	if om.Days[0].Approved != 1 || om.Days[1].Approved != 1 || om.Days[3].Errors != 1 {
+		t.Errorf("counts landed on the wrong rows: %+v", om.Days)
 	}
 }
 
