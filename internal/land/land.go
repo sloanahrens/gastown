@@ -72,7 +72,9 @@ type Lander struct {
 	// Repo is a clone of the rig's repository that throwaway worktrees are
 	// added from. It is never checked out onto anything by Land.
 	Repo string
-	// Remote is the remote to fetch from and push to; "" means origin.
+	// Remote is the remote to fetch from and push to; "" means origin. The
+	// landing worker sets it to the rig's configured landing remote
+	// (gt-fn9e6.9).
 	Remote string
 	// WorkRoot is a private directory (0700) the throwaway worktrees live in.
 	WorkRoot string
@@ -982,7 +984,8 @@ func policyRejection(issue *beads.Issue) *Rejection {
 	return nil
 }
 
-// checkHeadPushed asserts origin/<branch> carries the declared head, so Land
+// checkHeadPushed asserts <remote>/<branch> — the rig's configured landing
+// remote (gt-fn9e6.9), origin by default — carries the declared head, so Land
 // never merges a commit the author did not push (gt-sda9).
 func (l *Lander) checkHeadPushed(g Repo, w Work) (*Rejection, error) {
 	remote := l.remote()

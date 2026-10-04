@@ -209,8 +209,9 @@ type CandidateGate struct {
 	// means config.DefaultGateWorkflow.
 	Workflow string
 	// Remote is the git remote the candidate is pushed to; "" means origin.
-	// It is a remote name, not merge_queue.forgejo.remote_url: which remote a
-	// cut-over rig pushes to is the repoint slice's (slice 9).
+	// It is a remote name, not merge_queue.forgejo.remote_url: the daemon
+	// resolves the configured URL to the remote that carries it and sets this
+	// (gt-fn9e6.9), so a cut-over rig's candidate reaches the CI that gates it.
 	Remote string
 	// PollInterval, CallTimeout and WaitTimeout bound the poll; a zero means
 	// the DefaultCandidate* constant.

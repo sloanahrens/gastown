@@ -1153,6 +1153,62 @@ func ResolveForgejoConfig(townRoot, rigName string) *config.ForgejoConfig {
 	return mq.Forgejo
 }
 
+// LandingRemoteOrigin is the remote a rig lands through when its settings name
+// no other.
+const LandingRemoteOrigin = "origin"
+
+// LandingRemotes is the git surface the landing-remote resolution reads: the
+// rig bare repository's remote names and their URLs, declared from the
+// *git.Git methods it calls so a caller whose unit tier runs no git — the
+// daemon's is git-free (internal/testpolicy/gitfree.txt) — reads the rig's
+// remotes through its own git seam instead (docs/testing.md, "Seams for
+// external tools").
+type LandingRemotes interface {
+	Remotes() ([]string, error)
+	RemoteURL(name string) (string, error)
+}
+
+// ResolveLandingRemote resolves the git remote name a rig's landing path — gt
+// done's branch push — should use, read from the rig's Forgejo settings
+// (merge_queue.forgejo.remote_url, gt-fn9e6.3) instead of assuming origin
+// (gt-fn9e6.9). It opens the rig's bare repository itself; ResolveLandingRemoteIn
+// is the same resolution over a caller-supplied git seam.
+func ResolveLandingRemote(townRoot, rigName string) string {
+	return ResolveLandingRemoteIn(git.NewGit(filepath.Join(townRoot, rigName, ".repo.git")), townRoot, rigName)
+}
+
+// ResolveLandingRemoteIn is ResolveLandingRemote's rule over repo. It returns
+// the remote in the rig's bare repository whose URL is the configured one, and
+// LandingRemoteOrigin when the rig has no Forgejo block, names no URL, or has
+// no such remote — so every rig today lands through origin, whether the cutover
+// repoints origin's URL or attaches a separately named remote.
+func ResolveLandingRemoteIn(repo LandingRemotes, townRoot, rigName string) string {
+	fc := ResolveForgejoConfig(townRoot, rigName)
+	if fc == nil || strings.TrimSpace(fc.RemoteURL) == "" {
+		return LandingRemoteOrigin
+	}
+	remotes, _ := repo.Remotes()
+	urls := make(map[string]string, len(remotes))
+	for _, name := range remotes {
+		if url, err := repo.RemoteURL(name); err == nil {
+			urls[name] = url
+		}
+	}
+	return landingRemoteForURL(remotes, urls, fc.RemoteURL)
+}
+
+// landingRemoteForURL is ResolveLandingRemote's matching rule: the first remote
+// whose URL is want, in the repository's order, else origin. A remote whose URL
+// could not be read is skipped rather than guessed at.
+func landingRemoteForURL(remotes []string, urls map[string]string, want string) string {
+	for _, name := range remotes {
+		if url, ok := urls[name]; ok && git.SameRemoteURL(url, want) {
+			return name
+		}
+	}
+	return LandingRemoteOrigin
+}
+
 // LoadNamedGateCommands reads the rig-root config.json's merge_queue.gates
 // map, returning each named gate's command keyed by name (timeout and phase
 // are irrelevant to gate-set identity, so they are not read here). This is

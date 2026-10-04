@@ -15,9 +15,11 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/slot"
 )
 
@@ -42,7 +44,7 @@ func TestIntegrationPostLandRunUsesAWorktreeAtTheLandedCommitUnderTheSlot(t *tes
 	lwGit(t, repo, "add", ".")
 	lwGit(t, repo, "commit", "-q", "-m", "landed")
 	commit := lwGit(t, repo, "rev-parse", "HEAD")
-	run := postLandRun(repo, filepath.Join(root, "work"), filepath.Join(root, "logs"), townRoot, "gastown", time.Minute)
+	run := postLandRun(repo, filepath.Join(root, "work"), filepath.Join(root, "logs"), townRoot, "gastown", "origin", time.Minute)
 
 	res := run(context.Background(), "cat marker && echo slow tier failed && exit 3", landworker.PostLand{BeadID: "gt-a", Commit: commit})
 	if res.Err != nil || res.ExitCode != 3 || !strings.Contains(res.Tail, "landed") || !strings.Contains(res.Tail, "slow tier failed") {
@@ -124,7 +126,7 @@ func TestIntegrationPostLandRunFetchesADirectPush(t *testing.T) {
 		t.Fatal(err)
 	}
 	stubSlotContainers()
-	run := postLandRun(bare, filepath.Join(root, "work"), filepath.Join(root, "logs"), townRoot, "gastown", time.Minute)
+	run := postLandRun(bare, filepath.Join(root, "work"), filepath.Join(root, "logs"), townRoot, "gastown", "origin", time.Minute)
 
 	res := run(context.Background(), "cat pushed.txt", landworker.PostLand{Commit: pushed, Target: "main", Direct: true, From: from})
 	if res.Err != nil || res.ExitCode != 0 || !strings.Contains(res.Tail, "direct") {
@@ -321,7 +323,7 @@ func TestIntegrationRedMainRevertsTheCulpritThroughLand(t *testing.T) {
 	state := fileMainState{path: RedMainStatePath(town, "gastown")}
 	var status []string
 	redMain := &landworker.RedMain{Rig: "gastown", Beads: bd, Logf: t.Logf, State: state, Landings: landings,
-		Revert: postLandRevert(bare, workRoot),
+		Revert: postLandRevert(bare, workRoot, "origin"),
 		// The landing's real commit range, read out of the rig's own repo as
 		// the daemon wires it: red-main only reverts a landing whose diff can
 		// have moved what failed (gt-40so9).
@@ -362,5 +364,57 @@ func TestIntegrationRedMainRevertsTheCulpritThroughLand(t *testing.T) {
 	}
 	if st, err := state.Load(); err != nil || st.LastGreen != green || st.LastRun != red {
 		t.Fatalf("main state %+v %v", st, err)
+	}
+}
+
+// TestIntegrationNewRigLandingWorkerUsesTheConfiguredLandingRemote: on a rig
+// whose bare repository carries a remote matching its merge_queue.forgejo URL,
+// every remote the landing path names — the lander, the branch-tip reads the
+// worker makes through gitRemote, and the candidate gate that pushes land/<bead>
+// — is that remote rather than an assumed origin (gt-fn9e6.9). A candidate
+// pushed to origin would go to GitHub and the Forgejo gate would wait on a
+// verdict that never comes.
+func TestIntegrationNewRigLandingWorkerUsesTheConfiguredLandingRemote(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	const rigName = "testrig"
+	rigPath := forgejoRigConfig(t, townRoot, rigName)
+	bare := filepath.Join(rigPath, ".repo.git")
+	lwGit(t, townRoot, "init", "-q", "--bare", "-b", "main", bare)
+	lwGit(t, bare, "remote", "add", "origin", "https://github.com/acme/gastown.git")
+	lwGit(t, bare, "remote", "add", "forgejo", "https://forgejo.example/gastown/gastown.git")
+
+	tokenDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tokenDir, "forgejo-landing.env"), []byte("FORGEJO_TOKEN=secret\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: notifyfake.New(),
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{LandingWorker: &LandingWorkerConfig{
+			Forgejo: &config.ForgejoWorkerConfig{TokenDir: tokenDir}}}}}
+
+	w, err := d.newRigLandingWorker(rigName)
+	if err != nil {
+		t.Fatalf("newRigLandingWorker: %v", err)
+	}
+	lander, ok := w.Lander.(*land.Lander)
+	if !ok {
+		t.Fatalf("Lander = %T, want *land.Lander", w.Lander)
+	}
+	if lander.Remote != "forgejo" {
+		t.Errorf("Lander.Remote = %q, want forgejo (the URL's remote)", lander.Remote)
+	}
+	gate, ok := lander.Candidate.(*land.CandidateGate)
+	if !ok {
+		t.Fatalf("Candidate = %T; want the rig's Forgejo gate", lander.Candidate)
+	}
+	if gate.Remote != "forgejo" {
+		t.Errorf("CandidateGate.Remote = %q, want forgejo so the candidate reaches the CI that gates it", gate.Remote)
+	}
+	remote, ok := w.Remote.(gitRemote)
+	if !ok {
+		t.Fatalf("Remote = %T, want the daemon's gitRemote", w.Remote)
+	}
+	if remote.remote != "forgejo" {
+		t.Errorf("gitRemote.remote = %q, want forgejo so the branch-tip reads match what gt done pushed", remote.remote)
 	}
 }

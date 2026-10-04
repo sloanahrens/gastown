@@ -43,6 +43,11 @@ type daemonGit interface {
 	PackSize() (string, error)
 	LogAll(max int) ([]git.LogEntry, error)
 
+	// Remotes lists the repository's remotes (with RemoteURL above, enough to
+	// resolve the remote a rig lands through from its configured Forgejo URL,
+	// gt-fn9e6.9).
+	Remotes() ([]string, error)
+
 	// Rig repository upkeep, for the git_hygiene patrol.
 	FetchPrune(remote string) error
 	RemoteDefaultBranch() string

@@ -1201,12 +1201,32 @@ func (g *Git) CleanBaseRef(remote, defaultBranch, target string) string {
 
 // RemoteForRef returns the remote prefix from refs like origin/main or
 // upstream/main. It returns an empty string for local branch names.
-func RemoteForRef(ref string) string {
+//
+// known lists further remote names to recognize beside those two — a rig's
+// configured landing remote, so forgejo/main reads as a remote-tracking ref
+// rather than a local branch (gt-fn9e6.9). A caller that knows no such remote
+// passes none and gets the old answer.
+func RemoteForRef(ref string, known ...string) string {
 	remote, _, ok := strings.Cut(strings.TrimSpace(ref), "/")
-	if !ok || (remote != "origin" && remote != "upstream") {
+	if !ok {
 		return ""
 	}
-	return remote
+	if remote == "origin" || remote == "upstream" {
+		return remote
+	}
+	for _, name := range known {
+		if name != "" && remote == name {
+			return remote
+		}
+	}
+	return ""
+}
+
+// SameRemoteURL reports whether two remote URLs name the same repository,
+// folding the spellings git treats as one: a trailing slash, a .git suffix, and
+// the https and ssh forms of the same host and path (gt-fn9e6.9).
+func SameRemoteURL(a, b string) bool {
+	return sameGitRemoteURL(a, b)
 }
 
 // RefuseForkBackedDefaultPush fails closed before default-branch pushes in a
