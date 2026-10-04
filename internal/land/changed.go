@@ -318,6 +318,20 @@ var treeWideGuards = []treeWideGuard{
 		},
 		judges: goFile,
 	},
+	{
+		// The shipped-rubric tests read the repo-root .om.json, which no
+		// package owns, so a change to the rubric alone names no package in
+		// ChangedPackages and the guards would run only at the landing gate
+		// (gt-1zff). A deletion counts: the tests open the file, and a
+		// landing that removed the rubric would take the gate with it.
+		pkg: "internal/land",
+		tests: []string{
+			"TestShippedOMRubricIsGradeable",
+			"TestShippedOMRubricCarriesInstructionProliferationCriterion",
+		},
+		judges:  func(rel string) bool { return rel == ".om.json" },
+		removal: true,
+	},
 }
 
 // treeWideGuard is one guard package's inputs: the test functions to run and

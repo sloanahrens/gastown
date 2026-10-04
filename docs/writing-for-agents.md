@@ -95,6 +95,12 @@ This is the rule behind the others. When a line survives every rule above, ask t
 
 An agent that ran the suite reports what it saw and can point at the command. A reviewer that has only read the tree and the diff — the om editorial gate executes nothing (gt-jq95) — has no run to cite, so "the tests fail" is unfalsifiable from where it stands; operators discount a finding that overstates certainty. "This will fail when run because `<defect>` at `<path>:<n>`" is the same claim with evidence the reader can check.
 
+### Enforcement
+
+**R15. R2 is graded when a copy is added, not when the copies drift: om enforces it as `instruction-proliferation`.**
+
+A reviewer needs a citation for the copy itself. Without one, two copies that agree today pass, and the drift that follows is charged to whichever later change touches one of them.
+
 ## Applying the rules
 
 An audit run records, per file, which rule ids produced edits. A finding it cannot act on (a deletion proposal, rot outside its slice, a rule that needs sharpening) goes in the run bead comment, not in the file.
