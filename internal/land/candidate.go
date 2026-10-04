@@ -172,6 +172,11 @@ type CandidateResult struct {
 	Context string
 	// Tail is the failing job's log tail, for CandidateFailed.
 	Tail string
+	// RunStatus is the status of the run that tested SHA: for a red context,
+	// whether the run behind it ran, or ended without judging the work. It is
+	// "unknown" when no run could be read, so a red verdict never claims a run
+	// it did not see (gt-fn9e6.16).
+	RunStatus string
 	// Err is why no verdict was reached — the workflow file, the push, the API
 	// — or that the wait ended with nothing reported. A result carrying Err is
 	// infrastructure whatever State says.
@@ -222,7 +227,52 @@ const (
 	// candidateJobFailure is the job status Forgejo reports for a job that ran
 	// and failed, the fallback when the named job is not in the run.
 	candidateJobFailure = "failure"
+	// candidateRunFailure is the run status Forgejo reports for a run that ran
+	// and came back red: the one status that is a verdict on the work.
+	candidateRunFailure = "failure"
+	// candidateRunCancelled and candidateRunSkipped are the terminal run
+	// statuses a run reaches without judging the work. A cancel is what an
+	// operator's cancel, a runner restart or a dind recreate leaves behind
+	// (verified on Forgejo 16.0.5, gt-fn9e6.16).
+	candidateRunCancelled = "cancelled" //nolint:misspell // the run status Forgejo reports
+	candidateRunSkipped   = "skipped"
+	// candidateRunSuccess is terminal too, and a red context cannot come from a
+	// run that succeeded: a run that did judged something other than the work.
+	candidateRunSuccess = "success"
+	// candidateRunUnknown goes in a result whose red context's run could not be
+	// found or read.
+	candidateRunUnknown = "unknown"
 )
+
+// runVerdict is what the run behind a red required context says about the work.
+type runVerdict int
+
+const (
+	// runJudgedRed is a run that ran and failed: the red, and its job log, are
+	// the work's.
+	runJudgedRed runVerdict = iota
+	// runNeverJudged is a run that ended on a status which is not a failure.
+	// It is infrastructure, so it takes the infra backoff instead of sending
+	// the polecat a rework for a run it did not fail (gt-fn9e6.16).
+	runNeverJudged
+	// runUnread is a run whose status this rule does not read as terminal: one
+	// that could not be found or read, one still going, or one whose status
+	// names something else entirely. The red stands as it did before the rule,
+	// with the status that was seen recorded in the result.
+	runUnread
+)
+
+// verdictOf classifies a run status against a red context.
+func verdictOf(status string) runVerdict {
+	switch status {
+	case candidateRunFailure:
+		return runJudgedRed
+	case candidateRunCancelled, candidateRunSkipped, candidateRunSuccess:
+		return runNeverJudged
+	default:
+		return runUnread
+	}
+}
 
 // Run pushes head as w's candidate branch and waits for the gate workflow's
 // verdict on it.
@@ -266,7 +316,7 @@ func (g *CandidateGate) wait(parent context.Context, wf GateWorkflow, res Candid
 	ctx, cancel := context.WithTimeout(parent, g.waitTimeout())
 	defer cancel()
 	for {
-		state, err := g.state(ctx, wf, res)
+		state, err := g.state(ctx, wf, &res)
 		switch {
 		case err != nil:
 			res.Err = err
@@ -300,7 +350,7 @@ func (g *CandidateGate) wait(parent context.Context, wf GateWorkflow, res Candid
 // state reads the required context's status on the candidate commit. A context
 // that has not reported and one still pending are both "no verdict yet": the
 // wait window decides when the second becomes silence.
-func (g *CandidateGate) state(parent context.Context, wf GateWorkflow, res CandidateResult) (CandidateState, error) {
+func (g *CandidateGate) state(parent context.Context, wf GateWorkflow, res *CandidateResult) (CandidateState, error) {
 	ctx, cancel := context.WithTimeout(parent, g.callTimeout())
 	defer cancel()
 	combined, err := g.Client.CombinedStatus(ctx, g.Owner, g.RepoName, res.SHA)
@@ -315,7 +365,30 @@ func (g *CandidateGate) state(parent context.Context, wf GateWorkflow, res Candi
 		return CandidatePassed, nil
 	}
 	// failure, error, warning, skipped: the context is required, so anything
-	// but success is the gate not passing.
+	// but success is the gate not passing — unless the run behind it never
+	// judged the work.
+	return g.redVerdict(ctx, wf, res, status.Status)
+}
+
+// redVerdict reads the run behind a red required context. The context is
+// required, so a run that ran and failed is the work's red; a run that ended on
+// a status which is not a failure never judged the work at all, and reporting
+// that as a red verdict would send the polecat a rework for CI's downtime
+// (gt-fn9e6.16).
+func (g *CandidateGate) redVerdict(ctx context.Context, wf GateWorkflow, res *CandidateResult, contextState forgejo.CommitState) (CandidateState, error) {
+	run, err := g.runFor(ctx, res.SHA)
+	if err != nil {
+		// No run to read: the red stands, and the result records that the run
+		// behind it is unknown rather than reporting a failure it never saw.
+		res.RunStatus = candidateRunUnknown
+		g.logf("%s is %s on %s and the run that tested it could not be read: %v; the red stands", wf.Context(), contextState, shortSHA(res.SHA), err)
+		return CandidateFailed, nil
+	}
+	res.RunStatus = run.Status
+	if verdictOf(run.Status) == runNeverJudged {
+		return CandidateSilent, fmt.Errorf("%w: %s is %s on %s, but the run that tested it is %s: the run ended without judging the work",
+			ErrCISilence, wf.Context(), contextState, shortSHA(res.SHA), run.Status)
+	}
 	return CandidateFailed, nil
 }
 
@@ -330,27 +403,34 @@ func (g *CandidateGate) failureTail(ctx context.Context, wf GateWorkflow, sha st
 	return tail
 }
 
-// jobTail is the tail of the gate job's log in the run that tested sha.
-func (g *CandidateGate) jobTail(parent context.Context, wf GateWorkflow, sha string) (string, error) {
+// runFor is the run that tested sha: the one whose job log carries a red
+// verdict, and whose status says whether that verdict was ever reached.
+func (g *CandidateGate) runFor(parent context.Context, sha string) (forgejo.ActionRun, error) {
 	ctx, cancel := context.WithTimeout(parent, g.callTimeout())
 	defer cancel()
 	runs, err := g.Client.ListRuns(ctx, g.Owner, g.RepoName, forgejo.RunFilter{
 		Event: []string{"push"}, HeadSHA: sha, Limit: candidateRunPage,
 	})
 	if err != nil {
-		return "", err
+		return forgejo.ActionRun{}, err
 	}
-	runID := int64(0)
 	for _, run := range runs.Runs {
 		if run.CommitSHA == sha {
-			runID = run.ID
-			break
+			return run, nil
 		}
 	}
-	if runID == 0 {
-		return "", fmt.Errorf("no workflow run tested %s", shortSHA(sha))
+	return forgejo.ActionRun{}, fmt.Errorf("no workflow run tested %s", shortSHA(sha))
+}
+
+// jobTail is the tail of the gate job's log in the run that tested sha.
+func (g *CandidateGate) jobTail(parent context.Context, wf GateWorkflow, sha string) (string, error) {
+	ctx, cancel := context.WithTimeout(parent, g.callTimeout())
+	defer cancel()
+	run, err := g.runFor(ctx, sha)
+	if err != nil {
+		return "", err
 	}
-	jobs, err := g.Client.ListRunJobs(ctx, g.Owner, g.RepoName, runID)
+	jobs, err := g.Client.ListRunJobs(ctx, g.Owner, g.RepoName, run.ID)
 	if err != nil {
 		return "", err
 	}
@@ -370,7 +450,7 @@ func (g *CandidateGate) jobTail(parent context.Context, wf GateWorkflow, sha str
 		}
 	}
 	if jobID == 0 {
-		return "", fmt.Errorf("run %d has no job %q and no failed job", runID, wf.Job)
+		return "", fmt.Errorf("run %d has no job %q and no failed job", run.ID, wf.Job)
 	}
 	log, err := g.Client.JobLogsTail(ctx, g.Owner, g.RepoName, jobID, candidateTailBytes)
 	if err != nil {

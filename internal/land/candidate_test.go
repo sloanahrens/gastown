@@ -44,12 +44,15 @@ func writeGateWorkflow(t *testing.T, body string) string {
 
 // fakeForgejo answers the candidate gate's Forgejo calls from canned data.
 // statuses gives one whole status per poll and the last one repeats, so a test
-// drives pending -> success without a second clock.
+// drives pending -> success without a second clock. runs carries each run's
+// status, so a test says whether the run behind a red context ran, was
+// cancelled, or was never there.
 type fakeForgejo struct {
 	mu       sync.Mutex
 	statuses []forgejo.CommitStatus
 	polls    int
 	runs     []forgejo.ActionRun
+	runsErr  error
 	jobs     []forgejo.ActionRunJob
 	log      string
 	err      error
@@ -72,6 +75,9 @@ func (f *fakeForgejo) CombinedStatus(context.Context, string, string, string) (*
 }
 
 func (f *fakeForgejo) ListRuns(context.Context, string, string, forgejo.RunFilter) (*forgejo.RunList, error) {
+	if f.runsErr != nil {
+		return nil, f.runsErr
+	}
 	return &forgejo.RunList{Runs: f.runs}, nil
 }
 
@@ -218,7 +224,7 @@ func TestCandidateGateRedCarriesTheJobLogTail(t *testing.T) {
 	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
 	client := &fakeForgejo{
 		statuses: []forgejo.CommitStatus{status(forgejo.StateFailure, "ci / gate (push)")},
-		runs:     []forgejo.ActionRun{{ID: 7, CommitSHA: sha}},
+		runs:     []forgejo.ActionRun{{ID: 7, CommitSHA: sha, Status: "failure"}},
 		jobs:     []forgejo.ActionRunJob{{ID: 9, RunID: 7, Name: "gate", Status: "failure"}},
 		log:      "make gate\n--- FAIL: TestThing\n",
 	}
@@ -229,8 +235,71 @@ func TestCandidateGateRedCarriesTheJobLogTail(t *testing.T) {
 	if res.State != CandidateFailed {
 		t.Fatalf("state = %v, want failed", res.State)
 	}
+	if res.RunStatus != "failure" {
+		t.Fatalf("RunStatus = %q, want the failed run's status", res.RunStatus)
+	}
 	if !strings.Contains(res.Tail, "--- FAIL: TestThing") {
 		t.Fatalf("tail %q; want the failing job's log", res.Tail)
+	}
+}
+
+// TestCandidateGateRunStatusDecidesTheRed: the run behind a red context decides
+// whether the red reaches the polecat. Only a run that ran and failed is the
+// work's; a run an operator cancelled — or a runner restart, or a dind recreate,
+// which Forgejo reports the same way — never judged the work, so it takes the
+// infra backoff instead of a rework (gt-fn9e6.16).
+func TestCandidateGateRunStatusDecidesTheRed(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		run       *forgejo.ActionRun
+		runsErr   error
+		wantState CandidateState
+		// wantErr is the run status the infra result must name; "" means the red
+		// verdict stands with no error.
+		wantErr string
+		wantRun string
+	}{
+		{name: "a failed run is the work's red", run: &forgejo.ActionRun{ID: 7, Status: "failure"},
+			wantState: CandidateFailed, wantRun: "failure"},
+		{name: "a cancelled run is infrastructure", run: &forgejo.ActionRun{ID: 7, Status: "cancelled"},
+			wantState: CandidateSilent, wantErr: "cancelled", wantRun: "cancelled"},
+		{name: "a skipped run is infrastructure", run: &forgejo.ActionRun{ID: 7, Status: "skipped"},
+			wantState: CandidateSilent, wantErr: "skipped", wantRun: "skipped"},
+		{name: "a run that has not finished keeps today's red", run: &forgejo.ActionRun{ID: 7, Status: "running"},
+			wantState: CandidateFailed, wantRun: "running"},
+		{name: "no run leaves the red unverified", wantState: CandidateFailed, wantRun: "unknown"},
+		{name: "a run list that cannot be read leaves the red unverified",
+			runsErr: errors.New("connection refused"), wantState: CandidateFailed, wantRun: "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
+			client := &fakeForgejo{
+				statuses: []forgejo.CommitStatus{status(forgejo.StateFailure, "ci / gate (push)")},
+				runsErr:  tt.runsErr,
+			}
+			if tt.run != nil {
+				tt.run.CommitSHA = sha
+				client.runs = []forgejo.ActionRun{*tt.run}
+			}
+			res := fastGate(client).Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+			if res.State != tt.wantState {
+				t.Fatalf("state = %v, want %v (err %v)", res.State, tt.wantState, res.Err)
+			}
+			if tt.wantErr == "" {
+				if res.Err != nil {
+					t.Fatalf("err = %v; want the red verdict to stand with no error", res.Err)
+				}
+			} else if !errors.Is(res.Err, ErrCISilence) || !strings.Contains(res.Err.Error(), tt.wantErr) {
+				t.Fatalf("err = %v; want one wrapping ErrCISilence and naming the %q run", res.Err, tt.wantErr)
+			}
+			if res.RunStatus != tt.wantRun {
+				t.Fatalf("RunStatus = %q, want %q", res.RunStatus, tt.wantRun)
+			}
+		})
 	}
 }
 
