@@ -186,18 +186,19 @@ function renderTiles(s) {
   tiles.append(tile("Waiting to land", q == null ? "–" : String(q),
     q ? "oldest " + fmtDur(oldest) : "queue empty", q == null ? "" : (oldest > 3600 ? "bad" : oldest > 900 ? "warn" : q ? "" : "ok")));
   const pcs = s.polecats || [];
-  const n = k => pcs.filter(p => p.state === k).length;
+  const live = pcs.filter(p => !p.rig_parked);   // a parked rig is stood down on purpose
+  const n = k => live.filter(p => p.state === k).length;
   const active = n("working") + n("quiet") + n("gating");
   const bad = n("stalled") + n("needs-human");
   tiles.append(tile("Polecats working", pcs.length ? String(active) : "–",
-    [sm.seats_cap ? "cap " + sm.seats_cap : null, n("queued") ? n("queued") + " queued" : null, n("stalled") ? n("stalled") + " stalled" : null, n("unknown") ? n("unknown") + " unknown (tmux unreadable)" : null, n("needs-human") ? n("needs-human") + " need a human" : null, n("quiet") ? n("quiet") + " quiet" : null].filter(Boolean).join(" · "),
+    [sm.seats_cap ? "cap " + sm.seats_cap : null, pcs.length > live.length ? (pcs.length - live.length) + " in parked rigs" : null, n("queued") ? n("queued") + " queued" : null, n("stalled") ? n("stalled") + " stalled" : null, n("unknown") ? n("unknown") + " unknown (tmux unreadable)" : null, n("needs-human") ? n("needs-human") + " need a human" : null, n("quiet") ? n("quiet") + " quiet" : null].filter(Boolean).join(" · "),
     bad ? "bad" : n("quiet") ? "warn" : ""));
   tiles.append(tile("Escalations", sm.escalations == null ? "–" : String(sm.escalations), "", sm.escalations ? "bad" : (sm.escalations === 0 ? "ok" : "")));
   const med = sm.median_deploy_min;
   tiles.append(tile("Ship time", med == null ? "–" : Math.round(med) + "m", "median dispatch→deploy" +
     (sm.deploy_waiting ? " · " + sm.deploy_waiting + " awaiting deploy" : "")));
   tiles.append(tile("main vs gt", sm.behind == null ? "–" : (sm.behind === 0 ? "current" : sm.behind + " behind"),
-    sm.main_tip ? sm.main_tip + " / " + (sm.installed_gt || "?") : "", sm.behind > 20 ? "warn" : ""));
+    sm.main_tip ? sm.main_tip + " / " + (sm.installed_gt || "?") + " · as of the install repo’s last fetch" : "", sm.behind > 20 ? "warn" : ""));
   const m = s.machine || {};
   const cores = navigator.hardwareConcurrency || 8;
   tiles.append(tile("Load", m.load1 == null ? "–" : m.load1.toFixed(1),
@@ -226,6 +227,7 @@ const STATE_HELP = {
   idle: "holds nothing"
 };
 let openIdle = false;
+let openParkedRig = false;
 function renderSeats(s) {
   const box = $("seats");
   box.replaceChildren();
@@ -233,7 +235,8 @@ function renderSeats(s) {
   if (!pcs.length) { box.append(el("div", "empty", s.summary ? "no polecats" : "reading…")); $("seatsnote").textContent = ""; return; }
 
   const by = {};
-  pcs.forEach(p => by[p.state] = (by[p.state] || 0) + 1);
+  pcs.filter(p => !p.rig_parked).forEach(p => by[p.state] = (by[p.state] || 0) + 1);
+  const parkedCount = pcs.filter(p => p.rig_parked).length;
   const sum = el("div", "kv");
   ["needs-human", "unknown", "stalled", "review-needed", "recovery", "quiet", "working", "spawning", "gating", "queued", "parked", "idle"].forEach(k => {
     if (!by[k]) return;
@@ -241,10 +244,12 @@ function renderSeats(s) {
     x.append(el("b", "st-" + k, String(by[k])), el("span", "", k));
     sum.append(x);
   });
+  if (parkedCount) { const x = el("div"); x.title = "polecats in parked rigs: stood down on purpose, not counted above"; x.append(el("b", "st-parked", String(parkedCount)), el("span", "", "in parked rigs")); sum.append(x); }
   box.append(sum);
 
-  const busy = pcs.filter(p => p.state !== "idle");
-  const idle = pcs.filter(p => p.state === "idle").sort((x, y) => (y.landed_24h - x.landed_24h) || (x.rig + x.name).localeCompare(y.rig + y.name));
+  const busy = pcs.filter(p => p.state !== "idle" && !p.rig_parked);
+  const parkedRigPcs = pcs.filter(p => p.rig_parked).sort((x, y) => (x.state === "idle") - (y.state === "idle") || (x.rig + x.name).localeCompare(y.rig + y.name));
+  const idle = pcs.filter(p => p.state === "idle" && !p.rig_parked).sort((x, y) => (y.landed_24h - x.landed_24h) || (x.rig + x.name).localeCompare(y.rig + y.name));
   const now = Date.now();
   const name = p => p.rig === "gastown" ? p.name : p.rig + "/" + p.name;
   // The three right-hand columns are the polecat's last 24 hours of landings.
@@ -290,6 +295,13 @@ function renderSeats(s) {
     return t;
   };
   if (busy.length) box.append(busyTable(busy));
+  if (parkedRigPcs.length) {
+    const d = document.createElement("details");
+    d.open = openParkedRig;
+    d.ontoggle = () => { openParkedRig = d.open; };
+    d.append(el("summary", "title", parkedRigPcs.length + " in parked rigs (stood down on purpose; not alerts)"), busyTable(parkedRigPcs));
+    box.append(d);
+  }
   if (idle.length) {
     const d = document.createElement("details");
     d.open = openIdle;
@@ -735,7 +747,7 @@ function renderQueue(s, force) {
     tabs.append(b);
   });
   box.append(tabs);
-  const caption = {ready: "Open beads with nothing blocking them. Only the green “ready” ones are taken by the spec dispatcher: shaped, and not an epic. The rest need shaping first, or are old backlog.",
+  const caption = {ready: "Open beads with nothing blocking them. Only the green “ready” ones are taken by the spec dispatcher: shaped, not an epic, and in a rig that is not parked. Beads in parked rigs wait until the rig is re-enabled.",
     landing: "Submitted by a polecat or crew and waiting for the landing worker.",
     blocked: "Open beads waiting on another bead to close."}[qTab];
   box.append(el("div", "empty", caption));
@@ -751,7 +763,8 @@ function renderQueue(s, force) {
     const chip = (label, count, on, fn) => { const b = el("button", "chip" + (on ? " on" : ""), label); b.append(el("b", "", String(count))); b.onclick = fn; f.append(b); };
     if (rigNames.length > 1) {
       chip("all stores", q[totalKey] || all.length, qRig === "all", () => { qRig = "all"; renderQueue(state, true); });
-      rigNames.forEach(r => chip(r, rigs[r], qRig === r, () => { qRig = r; renderQueue(state, true); }));
+      const parkedRigs = q.parked_rigs || [];
+      rigNames.forEach(r => chip(r + (parkedRigs.indexOf(r) >= 0 ? " (parked)" : ""), rigs[r], qRig === r, () => { qRig = r; renderQueue(state, true); }));
     }
     if (qTab === "ready") {
       const inRig = all.filter(b => qRig === "all" || b.rig === qRig);
@@ -774,6 +787,7 @@ function renderQueue(s, force) {
     head.append(idc);
     const t = el("span", "t", b.title || "(no title)");
     if (b.shape === "ok") { const g = el("span", "tag good", "ready"); g.title = "the spec dispatcher would slot this bead"; t.append(document.createTextNode(" "), g); }
+    else if (b.shape === "parked") { const g = el("span", "tag", "rig parked"); g.title = b.shape_note || ""; t.append(document.createTextNode(" "), g); }
     else if (b.shape === "fix") { const g = el("span", "tag warnc", "needs shaping"); g.title = b.shape_note || ""; t.append(document.createTextNode(" "), g); }
     else if (b.shape === "planning") { const g = el("span", "tag", "needs planning"); g.title = b.shape_note || ""; t.append(document.createTextNode(" "), g); }
     else if (unshaped[b.id]) t.append(document.createTextNode(" "), el("span", "tag warnc", "unshaped"));

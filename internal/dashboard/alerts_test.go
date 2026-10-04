@@ -427,3 +427,20 @@ func TestPolecatBaselineWaitsUntilPolecatsHaveBeenRead(t *testing.T) {
 		t.Fatalf("a polecat that newly stalled -> %+v, want one alert", got)
 	}
 }
+
+// A parked rig is stood down on purpose. Its polecats stalling is the expected
+// state, not news, so they never alert; a live rig's polecat still does.
+func TestParkedRigPolecatsDoNotAlert(t *testing.T) {
+	t.Parallel()
+	mutant := Polecat{Rig: "beads", Name: "mutant", Bead: "be-1", State: StateWorking, RigParked: true}
+	agate := Polecat{Rig: "gastown", Name: "agate", Bead: "gt-1", State: StateWorking}
+	a := NewAlerter(func() time.Time { return alertBase })
+	prev := State{Polecats: []Polecat{mutant, agate}}
+	a.Observe(State{}, prev, nil) // baseline
+
+	mutant.State, agate.State = StateStalled, StateStalled
+	got := a.Observe(prev, State{Polecats: []Polecat{mutant, agate}}, nil)
+	if len(got) != 1 || got[0].Key != "polecat:gastown/agate" {
+		t.Fatalf("both stalled -> %+v, want one alert, for the live rig only", got)
+	}
+}

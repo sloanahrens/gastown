@@ -74,6 +74,10 @@ type Polecat struct {
 	HasSession bool       `json:"has_session"`
 	LastActive *time.Time `json:"last_active,omitempty"`
 	QuietSec   int64      `json:"quiet_sec,omitempty"`
+	// RigParked marks a polecat whose rig is parked. A parked rig is stood down
+	// on purpose: its polecats are not dispatch targets, and a stalled one is
+	// the expected condition, not an alarm.
+	RigParked bool `json:"rig_parked,omitempty"`
 
 	// Hints are read-only commands an operator would run to look into this
 	// polecat. The page shows them with a copy button and never runs them.

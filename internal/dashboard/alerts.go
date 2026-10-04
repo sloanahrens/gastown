@@ -246,6 +246,9 @@ func (a *Alerter) polecatAlerts(prev, next State, now time.Time) []Alert {
 		if p.State != StateStalled && p.State != StateNeedsHuman {
 			continue
 		}
+		if p.RigParked {
+			continue // a parked rig is stood down on purpose; its polecats are not news
+		}
 		key := polecatKey(p)
 		if old, ok := was[key]; ok && old == p.State {
 			continue

@@ -29,11 +29,13 @@ var _ dashQueueStore = (*beads.Beads)(nil)
 type dashQueueReader struct {
 	townRoot string
 	template specdispatch.Template                               // the shape the dispatcher lints against
+	parked   func(rig string) bool                               // whether a store's rig is parked (nil: none is)
 	stores   func() (map[string]dashQueueStore, []string, error) // store by name, in order
 }
 
 func newDashQueueReader(townRoot string) *dashQueueReader {
-	r := &dashQueueReader{townRoot: townRoot, template: specdispatch.LoadTemplate(specdispatch.DefaultTemplatePath())}
+	r := &dashQueueReader{townRoot: townRoot, template: specdispatch.LoadTemplate(specdispatch.DefaultTemplatePath()),
+		parked: func(rig string) bool { return rig != "hq" && IsRigParked(townRoot, rig) }}
 	r.stores = func() (map[string]dashQueueStore, []string, error) {
 		rigs, err := knownRigNames(townRoot)
 		if err != nil {
@@ -106,9 +108,18 @@ func (r *dashQueueReader) read(now time.Time) *dashboard.Queue {
 			q.Unreadable = append(q.Unreadable, name)
 			continue
 		}
+		parked := r.parked != nil && r.parked(name)
+		if parked {
+			q.ParkedRigs = append(q.ParkedRigs, name)
+		}
 		for _, i := range rd {
 			row := dashQueueRow(name, i)
+			row.RigParked = parked
 			row.Shape, row.ShapeNote = dashShape(r.template, i)
+			if parked && row.Shape == "ok" {
+				// well shaped, but the dispatcher does not serve a parked rig
+				row.Shape, row.ShapeNote = "parked", "the rig is parked: the dispatcher does not serve it"
+			}
 			ready = append(ready, row)
 		}
 		for _, i := range bl {
@@ -138,6 +149,7 @@ func (r *dashQueueReader) read(now time.Time) *dashboard.Queue {
 	q.Landing, q.LandingTotal, q.LandingRigs = dashboard.CapQueueRows(landing)
 	q.Blocked, q.BlockedTotal, q.BlockedRigs = dashboard.CapQueueRows(blocked)
 	sort.Strings(q.Unreadable)
+	sort.Strings(q.ParkedRigs)
 	return q
 }
 
