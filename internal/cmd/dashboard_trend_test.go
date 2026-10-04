@@ -203,7 +203,7 @@ func TestBuildRecentLandingsJoinsStagesAndOrdersNewestFirst(t *testing.T) {
 	rejs := []omRejection{{At: now.Add(-20 * time.Minute), Bead: "gt-new", Kind: "review", Detail: "om requested changes (score 0.55, 5 finding(s))", Score: &score}}
 
 	var asked []string
-	rows := buildRecentLandings(now, recs, stages, rejs, func(rig, id string) string { asked = append(asked, rig+"/"+id); return "title of " + id }, 30)
+	rows := buildRecentLandings(now, recs, stages, rejs, nil, func(rig, id string) string { asked = append(asked, rig+"/"+id); return "title of " + id }, 30)
 
 	if len(rows) != 4 {
 		t.Fatalf("%d rows, want 4 (the 30-hour-old landing is outside the day): %+v", len(rows), rows)
@@ -239,12 +239,59 @@ func TestBuildRecentLandingsCapsRowsAndAsksTitlesOnlyForThoseShown(t *testing.T)
 		recs = append(recs, omRecord{Record: landings.Record{Bead: fmt.Sprintf("gt-%d", i), Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-time.Duration(i) * time.Minute)}})
 	}
 	asked := 0
-	rows := buildRecentLandings(now, recs, nil, nil, func(rig, id string) string { asked++; return "" }, 30)
+	rows := buildRecentLandings(now, recs, nil, nil, nil, func(rig, id string) string { asked++; return "" }, 30)
 	if len(rows) != 30 || asked != 30 {
 		t.Fatalf("rows=%d title lookups=%d, want 30 and 30: a title read costs a bd call, so it is bounded by the rows shown", len(rows), asked)
 	}
 	if rows[0].Bead != "gt-0" || rows[29].Bead != "gt-29" {
 		t.Errorf("not the newest 30: first %s last %s", rows[0].Bead, rows[29].Bead)
+	}
+}
+
+// TestBuildRecentLandingsFillsShipTime covers the four rows the Ship column
+// tells apart: a deployed landing shows its dispatch-to-deploy seconds, a
+// landed bead with a dispatch line shows pending, a hand-slung bead with no
+// dispatch line shows neither, and a rejection never carries a ship time. The
+// tracker runs on a fixed clock and a fake ancestry, so nothing waits on a
+// real clock or a real git.
+func TestBuildRecentLandingsFillsShipTime(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 3, 18, 0, 0, 0, time.UTC)
+	track := newTailDeploys(func() time.Time { return now }, fakeTailAncestry("1111aaaa 2222bbbb", "4444dddd 2222bbbb"), now.Add(-24*time.Hour))
+	track.observe([]tailLine{
+		daemonAt("2026-10-03T17:00:00Z", "spec_dispatch: dispatched: gt-deployed: slung to gastown/opal on x (seat 1/3)"),
+		daemonAt("2026-10-03T17:03:00Z", "landing_worker: [land] gt-deployed: landed 1111aaaa on origin/main (patch-id 9e9e)"),
+		daemonAt("2026-10-03T17:04:00Z", "spec_dispatch: dispatched: gt-pending: slung to gastown/jade on x (seat 1/3)"),
+		daemonAt("2026-10-03T17:06:00Z", "landing_worker: [land] gt-pending: landed 3333cccc on origin/main (patch-id 9e9e)"),
+		daemonAt("2026-10-03T17:07:00Z", "landing_worker: [land] gt-slung: landed 4444dddd on origin/main (patch-id 9e9e)"),
+		// One restart installs gt-deployed and the hand-slung gt-slung; it does
+		// not contain gt-pending's commit, so that bead stays waiting.
+		daemonAt("2026-10-03T17:10:00Z", "upgrade-restart: running 2222bbbb covers marker 2222bbbb; cleared"),
+		daemonAt("2026-10-03T17:15:00Z", "landing_worker: [land] gt-rejected: rejected (review): om requested changes"),
+	})
+	recs := []omRecord{
+		omTestRec("gt-deployed", "approve", 0.9, "daemon", at("2026-10-03T17:03:00Z")),
+		omTestRec("gt-pending", "approve", 0.9, "daemon", at("2026-10-03T17:06:00Z")),
+		omTestRec("gt-slung", "skipped", 0, "overseer-manual", at("2026-10-03T17:07:00Z")),
+	}
+	rejs := []omRejection{{At: at("2026-10-03T17:15:00Z"), Bead: "gt-rejected", Kind: "review"}}
+
+	rows := buildRecentLandings(now, recs, nil, rejs, track.shipStatus, func(string, string) string { return "" }, 30)
+	byBead := map[string]dashboard.LandingRow{}
+	for _, r := range rows {
+		byBead[r.Bead+":"+r.Outcome] = r
+	}
+	if r := byBead["gt-deployed:landed"]; r.ShipSecs == nil || *r.ShipSecs != 600 || r.ShipPending {
+		t.Errorf("deployed row ship = %v pending %v, want 600s", r.ShipSecs, r.ShipPending)
+	}
+	if r := byBead["gt-pending:landed"]; r.ShipSecs != nil || !r.ShipPending {
+		t.Errorf("pending row ship = %v pending %v, want pending", r.ShipSecs, r.ShipPending)
+	}
+	if r := byBead["gt-slung:landed"]; r.ShipSecs != nil || r.ShipPending {
+		t.Errorf("hand-slung row ship = %v pending %v, want neither", r.ShipSecs, r.ShipPending)
+	}
+	if r := byBead["gt-rejected:rejected"]; r.ShipSecs != nil || r.ShipPending {
+		t.Errorf("rejected row ship = %v pending %v, want neither", r.ShipSecs, r.ShipPending)
 	}
 }
 

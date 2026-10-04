@@ -186,7 +186,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 			now := time.Now()
 			stages, rejects := om.trendInputs(trendWindowStart(now))
 			tr := buildTrend(now, recs.get(), stages, rejects, loads.points())
-			tr.Recent = buildRecentLandings(now, recs.get(), stages, rejects, func(rig, id string) string { return beadReads.title(rig, id) }, recentLandingRows)
+			tr.Recent = buildRecentLandings(now, recs.get(), stages, rejects, deploys.shipStatus, func(rig, id string) string { return beadReads.title(rig, id) }, recentLandingRows)
 			return tr
 		},
 		LoadSample: loads.append,
