@@ -125,8 +125,10 @@ case "$method $path" in
       exit 0
     fi
     name=$(field "$body" name)
-    mkdir -p "$STUB_STATE/tokens/$user"
+    mkdir -p "$STUB_STATE/tokens/$user" "$STUB_STATE/mints"
     printf '%s' "$STUB_TOKEN_VALUE-$user" > "$STUB_STATE/tokens/$user/$name"
+    # Keep the mint request so the tests can read back the scopes it asked for.
+    cp "$body" "$STUB_STATE/mints/$user.json"
     send 201 "{\"id\":7,\"name\":\"$name\",\"sha1\":\"$STUB_TOKEN_VALUE-$user\",\"token_last_eight\":\"ijklmnop\"}"
     ;;
   "DELETE /admin/users/"*"/tokens/"*)
@@ -185,6 +187,29 @@ case "$method $path" in
       cat "$body" > "$key"
       send 200 "$(cat "$key")"
     fi
+    ;;
+  "GET /repos/"*"/collaborators/"*)
+    rest=${path#/repos/}
+    owner=${rest%%/*}
+    rest=${rest#*/}
+    repo=${rest%%/*}
+    user=${rest#*/collaborators/}
+    if [ -e "$STUB_STATE/collaborators/${owner}__${repo}__${user}" ]; then
+      send 204 ''
+    else
+      send 404 '{"message":"user is not a collaborator"}'
+    fi
+    ;;
+  "PUT /repos/"*"/collaborators/"*)
+    rest=${path#/repos/}
+    owner=${rest%%/*}
+    rest=${rest#*/}
+    repo=${rest%%/*}
+    user=${rest#*/collaborators/}
+    perm=$(field "$body" permission)
+    mkdir -p "$STUB_STATE/collaborators"
+    printf '%s' "$perm" > "$STUB_STATE/collaborators/${owner}__${repo}__${user}"
+    send 204 ''
     ;;
   *)
     send 404 '{"message":"unhandled stub route"}'
@@ -253,8 +278,16 @@ check "main merges through the landing bot alone" grep -q '"merge_whitelist_user
 check "main requires the gate and review contexts" has_all "$main_rule" 'ci / gate (push)' 'om / review'
 check "main refuses a stale candidate" grep -q '"block_on_outdated_branch":true' "$main_rule"
 check "land/** push is whitelisted to the landing bot" grep -q '"push_whitelist_usernames":\["bot-landing"\]' "$land_rule"
-check "land/** lets the push mirror's deploy keys push" grep -q '"push_whitelist_deploy_keys":true' "$land_rule"
+check "land/** refuses a deploy-key push" grep -q '"push_whitelist_deploy_keys":false' "$land_rule"
 check "land/** takes no push beyond the whitelist" has_all "$land_rule" '"enable_push_whitelist":true' '"apply_to_admins":true'
+check "main refuses a deploy-key push too" grep -q '"push_whitelist_deploy_keys":false' "$main_rule"
+check "polecat mints write:repository" has_all "$STATE/mints/bot-polecat.json" '"scopes":["write:repository"]'
+check "landing mints write:repository and read:user" has_all "$STATE/mints/bot-landing.json" '"scopes":["write:repository","read:user"]'
+check "registry mints package scopes only" has_all "$STATE/mints/bot-registry.json" '"scopes":["write:package","read:package"]'
+check "polecat is granted write on the repo" test "$(cat "$STATE/collaborators/acme__rig__bot-polecat")" = write
+check "landing is granted write on the repo" test "$(cat "$STATE/collaborators/acme__rig__bot-landing")" = write
+check "registry is granted no repo access" test ! -e "$STATE/collaborators/acme__rig__bot-registry"
+check "the collaborator grants read before they write" test "$(count_calls GET /collaborators)" = 2 -a "$(count_calls PUT /collaborators)" = 2
 check "each role mints exactly one token" test "$(count_calls POST /tokens)" = 3
 check "nothing is written into HOME" test "$(find "$TMP/home" -type f | wc -l | tr -d ' ')" = 0
 check "the config dir holds the three token files and nothing else" test "$(find "$CFG" -type f | wc -l | tr -d ' ')" = 3
@@ -265,7 +298,9 @@ before=$(cat "$(token_file landing)")
 out=$(run_provision --repo acme/rig); rc=$?
 if [ "$rc" = 0 ]; then pass "second run exits 0"; else fail "second run exits 0 (rc=$rc)" "$out"; fi
 check "second run sends no POST" test "$(count_calls POST)" = 0
-check "second run sends no PATCH or DELETE" test "$(count_calls PATCH)" = 0 -a "$(count_calls DELETE)" = 0
+check "second run sends no PATCH, PUT or DELETE" test "$(count_calls PATCH)" = 0 -a "$(count_calls DELETE)" = 0 -a "$(count_calls PUT)" = 0
+check "second run re-reads the collaborator grants" test "$(count_calls GET /collaborators)" = 2
+check "second run reports the grants as already held" contains "already has write access" "$out"
 check "second run leaves the token file alone" test "$(cat "$(token_file landing)")" = "$before"
 check "second run reports the rules as already set" contains "already set" "$out"
 
@@ -276,6 +311,7 @@ out=$(run_provision --repo acme/rig); rc=$?
 if [ "$rc" = 0 ]; then pass "drift run exits 0"; else fail "drift run exits 0 (rc=$rc)" "$out"; fi
 check "the drifted main rule is patched" test "$(count_calls PATCH /branch_protections/main)" = 1
 check "the patch restores no-push for admins too" grep -q '"enable_push":false' "$main_rule"
+check "the patch restores no deploy-key push" grep -q '"push_whitelist_deploy_keys":false' "$main_rule"
 check "the patch restores the required contexts" grep -q 'om / review' "$main_rule"
 check "the untouched land rule is not patched" test "$(count_calls PATCH /branch_protections/land)" = 0
 
@@ -298,10 +334,12 @@ CFG="$TMP/config-dry"
 fresh_state
 out=$(run_provision --repo acme/rig --dry-run); rc=$?
 if [ "$rc" = 0 ]; then pass "dry run exits 0"; else fail "dry run exits 0 (rc=$rc)" "$out"; fi
-check "dry run sends no write method" test "$(count_calls POST)" = 0 -a "$(count_calls PATCH)" = 0 -a "$(count_calls DELETE)" = 0
+check "dry run sends no write method" test "$(count_calls POST)" = 0 -a "$(count_calls PATCH)" = 0 -a "$(count_calls DELETE)" = 0 -a "$(count_calls PUT)" = 0
 check "dry run creates no user" test ! -e "$STATE/users/bot-polecat"
 check "dry run writes no token file" test ! -e "$(token_file polecat)"
+check "dry run grants no collaborator access" test ! -e "$STATE/collaborators/acme__rig__bot-polecat"
 check "dry run says what it would do" contains "would create user bot-polecat" "$out"
+check "dry run says what access it would grant" contains "would grant bot-polecat write access" "$out"
 STATE="$TMP/state"
 CFG="$TMP/config"
 
@@ -328,11 +366,28 @@ out=$(run_provision --repo acme/missing); rc=$?
 if [ "$rc" != 0 ]; then pass "a repo the instance does not hold exits non-zero"; else fail "a repo the instance does not hold exits non-zero (rc=$rc)" "$out"; fi
 check "the failure names the repository" contains "repos/acme/missing" "$out"
 
+echo "=== the viewer role reads only ==="
+viewer_state="$STATE-viewer"
+viewer_cfg="$CFG-viewer"
+STATE="$viewer_state"
+CFG="$viewer_cfg"
+fresh_state
+out=$(run_provision --role viewer --repo acme/rig); rc=$?
+if [ "$rc" = 0 ]; then pass "the viewer role provisions and exits 0"; else fail "the viewer role provisions and exits 0 (rc=$rc)" "$out"; fi
+check "viewer mints read scopes only" has_all "$STATE/mints/bot-viewer.json" '"scopes":["read:repository","read:user"]'
+check "viewer is granted read on the repo" test "$(cat "$STATE/collaborators/acme__rig__bot-viewer")" = read
+check "the viewer run creates only its own bot" test -e "$STATE/users/bot-viewer" -a ! -e "$STATE/users/bot-polecat"
+STATE="$TMP/state"
+CFG="$TMP/config"
+
 echo "=== argument errors ==="
 out=$(run_provision --repo not-a-repo); rc=$?
 if [ "$rc" = 2 ]; then pass "--repo without OWNER/NAME exits 2"; else fail "--repo without OWNER/NAME exits 2 (rc=$rc)" "$out"; fi
 out=$(run_provision --role 'bad/role'); rc=$?
 if [ "$rc" = 2 ]; then pass "a role with a slash exits 2"; else fail "a role with a slash exits 2 (rc=$rc)" "$out"; fi
+out=$(run_provision --role widget); rc=$?
+if [ "$rc" = 2 ]; then pass "an unknown role exits 2"; else fail "an unknown role exits 2 (rc=$rc)" "$out"; fi
+check "the unknown role is named in the error" contains "unknown role 'widget'" "$out"
 out=$(env -u FORGEJO_ADMIN_TOKEN HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/config" PATH="$TMP/bin:$PATH" \
   STUB_STATE="$STATE" STUB_API="$API" STUB_ADMIN_TOKEN="$STUB_ADMIN_TOKEN" \
   bash "$PROVISION" --api-url "$API" --admin-token-file "$TMP/absent.env" 2>&1); rc=$?

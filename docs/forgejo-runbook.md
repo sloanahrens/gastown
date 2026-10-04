@@ -1,8 +1,8 @@
 # Forgejo runbook
 
 Read this before provisioning a rig on the local Forgejo — the bots, their
-tokens and the branch protection — and before rotating a bot token. The why
-behind every rule the script sets is in
+tokens, their repository access and the branch protection — and before rotating
+a bot token. The why behind every rule the script sets is in
 [forgejo-primary-landing.md](design/forgejo-primary-landing.md); this page is
 the operations.
 
@@ -15,15 +15,19 @@ to repeat after a partial failure:
   default; `--role viewer` adds the read-only dashboard bot the rig config also
   names), as ordinary accounts with no site-admin rights and a random password
   the script never keeps — a bot signs in by token, never by password;
-- one token per bot, scoped `write:repository`, written to
-  `~/.config/gt/forgejo-<role>.env` — the scope slice 4 fixes for every role,
-  so the read-only `viewer` bot carries a wider scope than its use until an
-  operator decides a narrower one;
-- for each `--repo OWNER/NAME`, the two branch-protection rules the landing
-  path depends on. `main` refuses a push from everyone, admins included, merges
-  only through the landing bot, requires the gate and review contexts, and
-  refuses a stale candidate. `land/*` allows a push from the landing bot and
-  from deploy keys, and lets nobody else through.
+- one token per bot, written to `~/.config/gt/forgejo-<role>.env`, scoped to
+  what that role does: `polecat` `write:repository`; `landing`
+  `write:repository,read:user` (it reads its own login); `registry`
+  `write:package,read:package` only, which pushes images with no repository
+  scope at all; `viewer` `read:repository,read:user`. An unknown role is an
+  error, not a default scope. A token minted by an earlier version keeps its
+  old scope until `--rotate` replaces it;
+- for each `--repo OWNER/NAME`, each role's collaborator access and the two
+  branch-protection rules the landing path depends on. `main` refuses a push
+  from everyone, admins included, merges only through the landing bot, requires
+  the gate and review contexts, and refuses a stale candidate. `land/*` allows
+  a push from the landing bot alone: no deploy key may push a candidate branch
+  either.
 
 Run it with `--help` for the flags.
 
@@ -38,17 +42,23 @@ Run it with `--help` for the flags.
 
 ## Provisioning
 
-Bots and tokens are instance-wide; the protection rules are per repository, so
-a fresh instance is two commands:
+Bots and tokens are instance-wide; collaborator access and the protection rules
+are per repository, so a fresh instance is two commands:
 
 ```bash
 bash scripts/forgejo-provision.sh                        # bots and tokens
-bash scripts/forgejo-provision.sh --repo OWNER/NAME      # one repo's rules
+bash scripts/forgejo-provision.sh --repo OWNER/NAME      # one repo's access and rules
 ```
+
+With `--repo`, each role's bot is granted the access it needs — `write` for
+polecat and landing, `read` for viewer, none for registry, which works in the
+package registry alone. The grant is read before it is written, so a second run
+on unchanged state sends no write.
 
 `--dry-run` reads the live state and prints what it would write without
 sending a write. Expect one line per action, then `provisioning complete`; a
-second run reports the users, token files and rules it found already in place.
+second run reports the users, token files, access and rules it found already in
+place.
 
 The bot logins and gate workflow a rig uses are its operator-only
 `merge_queue.forgejo` settings; the flags here must carry the same values, and
@@ -70,16 +80,11 @@ file.
 
 ## After the bots exist
 
-Two things the script does not do:
-
-- **Repository access.** Each bot needs write access to the rig's repository,
-  or it cannot push. Add it under Repository → Settings → Collaborators with
-  the Write role, the same way the web UI adds any account.
-- **The push mirror and the gate workflow.** The mirror is cutover work and the
-  workflow lives in the rig repo, both named in the design doc's slice list.
-  The protection rules name the workflow's context, so a renamed job orphans
-  the requirement: re-running the script with the new context is what reports
-  the mismatch.
+The push mirror and the gate workflow are not the script's work. The mirror is
+cutover work and the workflow lives in the rig repo, both named in the design
+doc's slice list. The protection rules name the workflow's context, so a renamed
+job orphans the requirement: re-running the script with the new context is what
+reports the mismatch.
 
 Verify in the web UI under Repository → Settings → Branches, and under Site
 administration → User accounts.

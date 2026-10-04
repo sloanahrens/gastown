@@ -5,6 +5,9 @@
 # Live runbook: docs/forgejo-runbook.md. Design of record:
 # docs/design/forgejo-primary-landing.md.
 #
+# Each role's bot is minted only the token scopes its work needs, and with
+# --repo granted only the repository access it needs (gt-fn9e6.15).
+#
 # Idempotent: a second run against unchanged state makes no write call, and a
 # run is safe to repeat after a partial failure. The admin token never reaches
 # argv — curl reads it from a mode-600 config file — and a minted bot token is
@@ -17,8 +20,9 @@
 #                          $FORGEJO_URL, else --api-url less /api/v1)
 #   --admin-token-file F   file holding FORGEJO_ADMIN_TOKEN=... (default
 #                          $FORGEJO_ADMIN_ENV, else $HOME/forgejo/.env)
-#   --role NAME            bot role to provision; repeatable
-#                          (default: polecat landing registry)
+#   --role NAME            bot role to provision; repeatable (default: polecat
+#                          landing registry; known: polecat landing registry
+#                          viewer)
 #   --bot-prefix P         bot username prefix (default: bot-)
 #   --bot-email-domain D   email domain for new bots (default: bots.invalid)
 #   --config-dir DIR       where the role token files go (default
@@ -114,6 +118,20 @@ require_json_safe() { # require_json_safe LABEL VALUE
   esac
 }
 
+# role_scopes ROLE prints the token scopes a role's bot needs, and returns 1 for
+# a name no role uses (gt-fn9e6.15). A registry bot pushes packages with
+# write:package and no repository scope at all, so it cannot touch a rig repo;
+# the landing bot reads its own login; the viewer only reads.
+role_scopes() {
+  case "$1" in
+    polecat)  printf '["write:repository"]' ;;
+    landing)  printf '["write:repository","read:user"]' ;;
+    registry) printf '["write:package","read:package"]' ;;
+    viewer)   printf '["read:repository","read:user"]' ;;
+    *) return 1 ;;
+  esac
+}
+
 case "$API_URL" in
   http://*|https://*) ;;
   *) usage_die "--api-url must be http:// or https:// (got '$API_URL')" ;;
@@ -123,7 +141,10 @@ API_URL="${API_URL%/}"
 
 command -v curl >/dev/null 2>&1 || die "curl is not on PATH"
 
-for role in "${ROLES[@]}"; do require_plain "--role" "$role"; done
+for role in "${ROLES[@]}"; do
+  require_plain "--role" "$role"
+  role_scopes "$role" >/dev/null || usage_die "unknown role '$role' (known roles: polecat landing registry viewer)"
+done
 require_plain "--bot-prefix" "$BOT_PREFIX"
 require_plain "--token-name" "$TOKEN_NAME"
 require_plain "--landing-bot" "$LANDING_BOT"
@@ -289,7 +310,8 @@ token_file_path() { printf '%s/forgejo-%s.env' "$CONFIG_DIR" "$1"; }
 
 # ensure_token ROLE: writes the role's env file, minting a token only when the
 # file is absent (or --rotate). A token's value is returned once, at creation, so
-# a lost file means rotation, never a recovery.
+# a lost file means rotation, never a recovery. An existing token keeps the
+# scopes it was minted with until --rotate replaces it (gt-fn9e6.15).
 ensure_token() {
   local role=$1 user="${BOT_PREFIX}$1" path
   path="$(token_file_path "$role")"
@@ -308,7 +330,7 @@ ensure_token() {
   if [ "$ROTATE" = 1 ]; then
     revoke_old_token "$user"
   fi
-  printf '{"name":"%s","scopes":["write:repository"]}\n' "$(json_escape "$TOKEN_NAME")" > "$BODY_FILE"
+  printf '{"name":"%s","scopes":%s}\n' "$(json_escape "$TOKEN_NAME")" "$(role_scopes "$role")" > "$BODY_FILE"
   # The admin route is the one a token may mint through: /users/{name}/tokens
   # wants HttpBasic auth by design, so a site-admin token can create another
   # user's token only here (forgejo#12323).
@@ -376,15 +398,51 @@ write_token_file() {
   chmod 600 "$path"
 }
 
+# --- collaborators -----------------------------------------------------------
+
+# collaborator_permission ROLE prints the repository access a role's bot gets, or
+# nothing when the role needs no repository access at all (gt-fn9e6.15).
+collaborator_permission() {
+  case "$1" in
+    polecat|landing) printf 'write' ;;
+    viewer) printf 'read' ;;
+    registry) : ;;
+    *) die "no repository access is defined for role '$1'" ;;
+  esac
+}
+
+# ensure_collaborator ROLE OWNER/NAME PERMISSION grants the role's bot its access
+# to the repository. The read decides first, so a second run sends no write.
+ensure_collaborator() {
+  local role=$1 repo=$2 permission=$3
+  local owner=${repo%%/*} name=${repo#*/} user="${BOT_PREFIX}$role"
+  api GET "/repos/$owner/$name/collaborators/$user"
+  case "$HTTP_STATUS" in
+    204)
+      log "$user already has $permission access to $repo"
+      return 0 ;;
+    404) ;;
+    *) die "GET /repos/$repo/collaborators/$user: unexpected HTTP $HTTP_STATUS$(body_tail)" ;;
+  esac
+  printf '{"permission":"%s"}\n' "$(json_escape "$permission")" > "$BODY_FILE"
+  run "grant $user $permission access to $repo" api PUT "/repos/$owner/$name/collaborators/$user" "$BODY_FILE"
+  if [ "$DRY_RUN" = 1 ]; then return 0; fi
+  case "$HTTP_STATUS" in
+    204|200|201) log "granted $user $permission access to $repo" ;;
+    *) die "PUT /repos/$repo/collaborators/$user: unexpected HTTP $HTTP_STATUS$(body_tail)" ;;
+  esac
+}
+
 # --- branch protection -------------------------------------------------------
 
 # main_checks prints the fragments the landing target must carry: no pusher at
-# all, admins included; the landing bot alone may merge; the required contexts;
-# and a stale PR is refused rather than merged.
+# all, admins included; no deploy key may push; the landing bot alone may merge;
+# the required contexts; and a stale PR is refused rather than merged.
 main_checks() {
   printf '%s\n' \
     '"enable_push":false' \
     '"apply_to_admins":true' \
+    '"push_whitelist_deploy_keys":false' \
     '"enable_merge_whitelist":true' \
     "\"merge_whitelist_usernames\":[\"$(json_escape "$LANDING_BOT")\"]" \
     '"enable_status_check":true' \
@@ -396,10 +454,10 @@ main_checks() {
 }
 
 # land_checks prints the fragments the candidate branches must carry: the landing
-# bot and any --land-push login may push, deploy keys — the push mirror's
-# credential class — may too, and admins get no bypass.
+# bot and any --land-push login may push, no deploy key may (a candidate branch
+# is written only through the landing path), and admins get no bypass.
 land_checks() {
-  printf '%s\n' '"enable_push":true' '"enable_push_whitelist":true' '"apply_to_admins":true' '"push_whitelist_deploy_keys":true'
+  printf '%s\n' '"enable_push":true' '"enable_push_whitelist":true' '"apply_to_admins":true' '"push_whitelist_deploy_keys":false'
   local login
   for login in "$LANDING_BOT" ${LAND_PUSH[@]+"${LAND_PUSH[@]}"}; do
     printf '"%s"\n' "$(json_escape "$login")"
@@ -460,11 +518,11 @@ done
 if [ ${#REPOS[@]} -gt 0 ]; then
   land_body="$WORK/land-rule.json"
   land_whitelist=("$LANDING_BOT" ${LAND_PUSH[@]+"${LAND_PUSH[@]}"})
-  printf '{"rule_name":"%s","enable_push":true,"enable_push_whitelist":true,"push_whitelist_usernames":%s,"push_whitelist_deploy_keys":true,"apply_to_admins":true}\n' \
+  printf '{"rule_name":"%s","enable_push":true,"enable_push_whitelist":true,"push_whitelist_usernames":%s,"push_whitelist_deploy_keys":false,"apply_to_admins":true}\n' \
     "$(json_escape "$LAND_BRANCH")" "$(json_list "${land_whitelist[@]}")" > "$land_body"
 
   main_body="$WORK/main-rule.json"
-  printf '{"rule_name":"%s","enable_push":false,"enable_push_whitelist":false,"push_whitelist_usernames":[],"apply_to_admins":true,"enable_merge_whitelist":true,"merge_whitelist_usernames":%s,"enable_status_check":true,"status_check_contexts":%s,"block_on_outdated_branch":true}\n' \
+  printf '{"rule_name":"%s","enable_push":false,"enable_push_whitelist":false,"push_whitelist_usernames":[],"push_whitelist_deploy_keys":false,"apply_to_admins":true,"enable_merge_whitelist":true,"merge_whitelist_usernames":%s,"enable_status_check":true,"status_check_contexts":%s,"block_on_outdated_branch":true}\n' \
     "$(json_escape "$MAIN_BRANCH")" "$(json_list "$LANDING_BOT")" "$(json_list "${GATE_CONTEXTS[@]}")" > "$main_body"
 
   main_checks > "$WORK/main-checks"
@@ -477,6 +535,11 @@ if [ ${#REPOS[@]} -gt 0 ]; then
   for repo in "${REPOS[@]}"; do
     ensure_rule "$repo" "$MAIN_BRANCH" "$main_body" "${main_check_list[@]}"
     ensure_rule "$repo" "$LAND_BRANCH" "$land_body" "${land_check_list[@]}"
+    for role in "${ROLES[@]}"; do
+      permission="$(collaborator_permission "$role")"
+      [ -n "$permission" ] || continue
+      ensure_collaborator "$role" "$repo" "$permission"
+    done
   done
 fi
 
