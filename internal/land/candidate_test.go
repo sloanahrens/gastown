@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/steveyegge/gastown/internal/forgejo"
 )
 
@@ -143,6 +145,64 @@ func TestParseGateWorkflow(t *testing.T) {
 				t.Fatalf("Context() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestGastownGateWorkflowFixesTheRequiredContext pins this repo's committed
+// gate workflow to the contract the candidate gate derives from it. The file
+// is the single source of the required context "ci / gate (push)"; if its name
+// or job key moves without the branch-protection rule moving too, the landing
+// waits on a context nobody posts and every candidate goes silently red
+// (gt-fn9e6.10).
+func TestGastownGateWorkflowFixesTheRequiredContext(t *testing.T) {
+	t.Parallel()
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wf, err := LoadGateWorkflow(root, "gate")
+	if err != nil {
+		t.Fatalf("this repo's gate workflow: %v", err)
+	}
+	if wf.Name != "ci" || wf.Job != "gate" {
+		t.Fatalf("gate workflow = %+v, want the ci workflow's gate job", wf)
+	}
+	if got := wf.Context(); got != "ci / gate (push)" {
+		t.Fatalf("Context() = %q, want %q", got, "ci / gate (push)")
+	}
+}
+
+// TestGastownGateWorkflowRunsTheMergeQueueGate holds the workflow to the same
+// command the rig's merge_queue.gate names, so the local gate and the CI job
+// cannot drift into testing different things (design: "the same targets").
+func TestGastownGateWorkflowRunsTheMergeQueueGate(t *testing.T) {
+	t.Parallel()
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, GateWorkflowPath("gate")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Run string `yaml:"run"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("parsing this repo's gate workflow: %v", err)
+	}
+	var runs []string
+	for _, step := range doc.Jobs["gate"].Steps {
+		if step.Run != "" {
+			runs = append(runs, step.Run)
+		}
+	}
+	if len(runs) != 1 || runs[0] != "make gate" {
+		t.Fatalf("gate job runs %q, want exactly [%q] — gastown's merge_queue.gate", runs, "make gate")
 	}
 }
 

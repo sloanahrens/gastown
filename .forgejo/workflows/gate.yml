@@ -1,0 +1,29 @@
+# The landing gate, run by the local Forgejo on the candidate branch the
+# landing worker pushes as land/<bead> (gt-fn9e6.10).
+#
+# The workflow's name and its one job key together are the required status
+# context, "ci / gate (push)": internal/land reads both from this file so the
+# branch-protection rule and the job that satisfies it cannot drift apart, and
+# a rename here that the derivation does not follow orphans the rule instead of
+# typing the string twice.
+#
+# runs-on is the host runner's ci-base label, the Go + Node + docker-CLI image
+# in ~/forgejo/runner-image. That image must carry everything `make gate`
+# needs; it is a host file outside this repo, so gastown's requirements are
+# called out in the landing note rather than committed here.
+#
+# fetch-depth: 0 matches this repo's GitHub gate job: parts of `make gate` read
+# the module history, and the default shallow clone turns that into a red run.
+name: ci
+on:
+  push:
+    branches: ["land/**"]
+
+jobs:
+  gate:
+    runs-on: ci-base
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: make gate
