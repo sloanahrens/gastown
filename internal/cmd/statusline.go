@@ -3,12 +3,9 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -63,31 +60,21 @@ func runStatusLine(cmd *cobra.Command, args []string) error {
 	t := tmux.NewTmux()
 
 	// Get session environment
-	var polecat, crew, issue, role string
+	var polecat, crew, issue string
 
 	if statusLineSession != "" {
 		// Non-fatal: missing env vars are handled gracefully below
 		polecat, _ = t.GetEnvironment(statusLineSession, "GT_POLECAT")
 		crew, _ = t.GetEnvironment(statusLineSession, "GT_CREW")
 		issue, _ = t.GetEnvironment(statusLineSession, "GT_ISSUE")
-		role, _ = t.GetEnvironment(statusLineSession, "GT_ROLE")
 	} else {
 		// Fallback to process environment
 		polecat = os.Getenv("GT_POLECAT")
 		crew = os.Getenv("GT_CREW")
 		issue = os.Getenv("GT_ISSUE")
-		role = os.Getenv("GT_ROLE")
 	}
 
-	// Get session names for comparison
-	mayorSession := getMayorSessionName()
-
-	// Determine identity and output based on role
-	if role == "mayor" || statusLineSession == mayorSession {
-		return runMayorStatusLine(t)
-	}
-
-	// Crew/Polecat status line
+	// Worker status line for the remaining roles.
 	return runWorkerStatusLine(polecat, crew, issue)
 }
 
@@ -119,152 +106,6 @@ func runWorkerStatusLine(polecat, crew, issue string) error {
 		fmt.Print(strings.Join(parts, " | ") + " |")
 	}
 
-	return nil
-}
-
-func runMayorStatusLine(t *tmux.Tmux) error {
-	// Count active sessions by listing tmux sessions
-	sessions, err := t.ListSessions()
-	if err != nil {
-		return nil // Silent fail
-	}
-
-	// Get town root from mayor pane's working directory
-	var townRoot string
-	mayorSession := getMayorSessionName()
-	paneDir, err := t.GetPaneWorkDir(mayorSession)
-	if err == nil && paneDir != "" {
-		townRoot, _ = workspace.Find(paneDir)
-	}
-
-	// Load registered rigs to validate against
-	registeredRigs := make(map[string]bool)
-	if townRoot != "" {
-		rigsConfigPath := filepath.Join(townRoot, "mayor", "rigs.json")
-		if rigsConfig, err := config.LoadRigsConfig(rigsConfigPath); err == nil {
-			for rigName := range rigsConfig.Rigs {
-				registeredRigs[rigName] = true
-			}
-		}
-	}
-
-	// Track per-rig status for LED indicators and sorting
-	type rigStatus struct {
-		running bool   // any of the rig's agents has a session
-		opState string // "OPERATIONAL", "PARKED", or "DOCKED"
-	}
-	rigStatuses := make(map[string]*rigStatus)
-
-	// Initialize for all registered rigs
-	for rigName := range registeredRigs {
-		rigStatuses[rigName] = &rigStatus{}
-	}
-
-	reg := townRegistry()
-	for _, s := range sessions {
-		agent := categorizeSession(reg, s)
-		if agent == nil {
-			continue
-		}
-		// A rig reads as running while any of its agents has a session.
-		// Polecats are not tracked in tmux - they're a GC concern, not a display concern
-		if agent.Rig != "" && registeredRigs[agent.Rig] {
-			if rigStatuses[agent.Rig] == nil {
-				rigStatuses[agent.Rig] = &rigStatus{}
-			}
-			rigStatuses[agent.Rig].running = true
-		}
-	}
-
-	// Status-line is a tmux hot path. Do not query beads for dock/park state here;
-	// `gt rig list/status` remains the authoritative live status view.
-	for _, status := range rigStatuses {
-		status.opState = "OPERATIONAL"
-	}
-
-	// Build status
-	var parts []string
-
-	// Build rig status display with LED indicators (see GetRigLED for definitions)
-
-	// Create sortable rig list
-	type rigInfo struct {
-		name   string
-		status *rigStatus
-	}
-	var rigs []rigInfo
-	for rigName, status := range rigStatuses {
-		// Skip docked rigs — they're intentionally disabled and don't need display.
-		// Reserve 🛑 for error states (crashed agents, unreachable Dolt, etc.).
-		if status.opState == "DOCKED" {
-			continue
-		}
-		rigs = append(rigs, rigInfo{name: rigName, status: status})
-	}
-
-	// Sort by: 1) running state, 2) operational state, 3) alphabetical
-	sort.Slice(rigs, func(i, j int) bool {
-		isRunningI := rigs[i].status.running
-		isRunningJ := rigs[j].status.running
-
-		// Primary sort: running rigs before non-running rigs
-		if isRunningI != isRunningJ {
-			return isRunningI
-		}
-
-		// Secondary sort: operational state (for non-running rigs: OPERATIONAL < PARKED < DOCKED)
-		stateOrder := map[string]int{"OPERATIONAL": 0, "PARKED": 1, "DOCKED": 2}
-		stateI := stateOrder[rigs[i].status.opState]
-		stateJ := stateOrder[rigs[j].status.opState]
-		if stateI != stateJ {
-			return stateI < stateJ
-		}
-
-		// Tertiary sort: alphabetical
-		return rigs[i].name < rigs[j].name
-	})
-
-	// Build display with group separators
-	var rigParts []string
-	var lastGroup string
-	for _, rig := range rigs {
-		isRunning := rig.status.running
-		var currentGroup string
-		if isRunning {
-			currentGroup = "running"
-		} else {
-			currentGroup = "idle-" + rig.status.opState
-		}
-
-		// Add separator when group changes (running -> non-running, or different opStates within non-running)
-		if lastGroup != "" && lastGroup != currentGroup {
-			rigParts = append(rigParts, "|")
-		}
-		lastGroup = currentGroup
-
-		status := rig.status
-		led := GetRigLED(status.running, status.opState)
-
-		// All icons get 1 space, Park gets 2
-		space := " "
-		if led == "🅿️" {
-			space = "  "
-		}
-		// Abbreviate rig names to beads prefix when >2 rigs
-		displayName := rig.name
-		if len(rigs) > 2 && townRoot != "" {
-			if prefix := config.GetRigPrefix(townRoot, rig.name); prefix != "" {
-				displayName = prefix
-			}
-		}
-		rigParts = append(rigParts, led+space+displayName)
-	}
-
-	if len(rigParts) > 0 {
-		parts = append(parts, strings.Join(rigParts, " "))
-	}
-
-	fmt.Print(strings.Join(parts, " | ") + " |")
 	return nil
 }
 

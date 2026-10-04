@@ -35,7 +35,7 @@ var handoffCmd = &cobra.Command{
 
 This is the canonical way to end any agent session. It handles all roles:
 
-  - Mayor, Crew: Respawns with fresh Claude instance
+  - Crew: Respawns with fresh Claude instance
   - Polecats: Calls 'gt done --status DEFERRED'
 
 When run without arguments, hands off the current session.
@@ -49,7 +49,6 @@ Examples:
   gt handoff -s "Context" -m "Notes"  # Hand off with custom message
   gt handoff -c                       # Collect state into handoff message
   gt handoff crew                     # Hand off crew session
-  gt handoff mayor                    # Hand off mayor session
 
 The --collect (-c) flag gathers current state (hooked work, inbox, ready beads,
 in-progress items) and includes it in the handoff mail. This provides context
@@ -112,7 +111,7 @@ func handoffMessageInput(messageFlag string, stdin bool, readStdin func() ([]byt
 
 // handoffPolecat reports whether the handing-off session is a polecat, which
 // hands off through gt done instead, and its name. GT_ROLE decides first:
-// coordinators (mayor, witness, etc.) may have a stale GT_POLECAT in their
+// coordinators (witness, etc.) may have a stale GT_POLECAT in their
 // environment from spawning polecats. Only a role that parses as polecat
 // counts (handles compound forms like "gastown/polecats/Toast"). If GT_ROLE
 // is unset, GT_POLECAT decides.
@@ -176,7 +175,7 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check if we're a polecat - polecats use gt done instead.
-	// Check GT_ROLE first: coordinators (mayor, witness, etc.) may have a stale
+	// Check GT_ROLE first: coordinators (witness, etc.) may have a stale
 	// GT_POLECAT in their environment from spawning polecats. Only block if the
 	// parsed role is actually polecat (handles compound forms like
 	// "gastown/polecats/Toast"). If GT_ROLE is unset, fall back to GT_POLECAT.
@@ -601,7 +600,7 @@ func getCurrentTmuxSession() (string, error) {
 
 // resolveRoleToSession converts a role name or path to a tmux session name.
 // Accepts:
-//   - Role shortcuts: "crew", "mayor"
+//   - Role shortcuts: "crew"
 //   - Full paths: "<rig>/crew/<name>"
 //   - Direct session names (passed through)
 //
@@ -613,9 +612,6 @@ func resolveRoleToSession(reg *session.PrefixRegistry, role string) (string, err
 	}
 
 	switch strings.ToLower(role) {
-	case constants.RoleMayor, "may":
-		return getMayorSessionName(), nil
-
 	case constants.RoleCrew:
 		// Try to get rig and crew name from environment or cwd
 		rig := os.Getenv("GT_RIG")
@@ -1192,14 +1188,7 @@ func updateSessionEnvForHandoff(reg *session.PrefixRegistry, t *tmux.Tmux, sessi
 // sessionWorkDir returns the correct working directory for a session.
 // This is the canonical home for each role type. reg supplies the rig prefixes.
 func sessionWorkDir(reg *session.PrefixRegistry, sessionName, townRoot string) (string, error) {
-	// Get session names for comparison
-	mayorSession := getMayorSessionName()
 	switch {
-	case sessionName == mayorSession:
-		// Mayor runs from ~/gt/mayor/, not town root.
-		// Tools use workspace.FindFromCwd() which walks UP to find town root.
-		return townRoot + "/mayor", nil
-
 	case strings.Contains(sessionName, "-crew-"):
 		// gt-<rig>-crew-<name> -> <townRoot>/<rig>/crew/<name>
 		rig, name, _, ok := parseCrewSessionName(reg, sessionName)
@@ -1215,8 +1204,6 @@ func sessionWorkDir(reg *session.PrefixRegistry, sessionName, townRoot string) (
 			return "", fmt.Errorf("unknown session type: %s (%w)", sessionName, err)
 		}
 		switch identity.Role {
-		case session.RoleMayor:
-			return townRoot + "/mayor", nil
 		case session.RoleOverseer:
 			// The overseer is the human operator, working from the town root.
 			return townRoot, nil
@@ -1806,7 +1793,7 @@ func cleanupMoleculeOnHandoff() {
 // less than MinHandoffCooldown ago, the function sleeps for the remaining
 // time. This ensures at least MinHandoffCooldown passes between handoffs.
 //
-// Crew and mayor roles are exempt — they hand off on human request,
+// Crew is exempt — it hands off on human request,
 // not on patrol loops, so the cooldown just gets in the way.
 func enforceHandoffCooldown() {
 	cwd, err := os.Getwd()
@@ -1823,7 +1810,7 @@ func enforceHandoffCooldownIn(w io.Writer, role, dir string, sleep func(time.Dur
 	if role != "" {
 		parsed, _, _ := parseRoleString(role)
 		switch parsed {
-		case RoleMayor, RoleCrew:
+		case RoleCrew:
 			return
 		}
 	}

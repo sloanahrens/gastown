@@ -59,7 +59,6 @@ Shutdown levels (progressively more aggressive):
 
 Infrastructure agents stopped:
   • Crew       - Per-rig crew member sessions
-  • Mayor      - Global work coordinator
   • Daemon     - Go background process
   • Dolt       - Shared SQL database server
 
@@ -182,25 +181,6 @@ func runDown(cmd *cobra.Command, args []string) error {
 	} else {
 		if crewStopped > 0 {
 			printDownStatus("Crew", true, fmt.Sprintf("%d stopped", crewStopped))
-		}
-	}
-
-	// Phase 3: Stop town-level sessions (the Mayor)
-	for _, ts := range session.TownSessions() {
-		if downDryRun {
-			if running, _ := t.HasSession(ts.SessionID); running {
-				printDownStatus(ts.Name, true, "would stop")
-			}
-			continue
-		}
-		stopped, err := stop.townSession(ts)
-		if err != nil {
-			printDownStatus(ts.Name, false, err.Error())
-			allOK = false
-		} else if stopped {
-			printDownStatus(ts.Name, true, "stopped")
-		} else {
-			printDownStatus(ts.Name, true, "not running")
 		}
 	}
 
@@ -412,7 +392,7 @@ func runDown(cmd *cobra.Command, args []string) error {
 
 	if allOK {
 		fmt.Printf("%s All services stopped\n", style.Bold.Render("✓"))
-		stoppedServices := []string{"dolt", "daemon", "mayor"}
+		stoppedServices := []string{"dolt", "daemon"}
 		if crewStopped > 0 {
 			stoppedServices = append(stoppedServices, "crew")
 		}
@@ -654,25 +634,6 @@ func (d downStop) session(sessionName string) error {
 	// Kill the session (the supervisor's tmux kills its processes too, so
 	// none are orphaned).
 	return d.kill(sessionName)
-}
-
-// townSession stops a town-level session (the Mayor), logging its death to
-// the feed first for crash investigation.
-func (d downStop) townSession(ts session.TownSession) (bool, error) {
-	running, err := d.tmux.HasSession(ts.SessionID)
-	if err != nil || !running {
-		return false, err
-	}
-	reason := "user shutdown"
-	if d.force {
-		reason = "forced shutdown"
-	}
-	_ = events.LogFeedTo(d.townRoot, events.TypeSessionDeath, ts.SessionID,
-		events.SessionDeathPayload(ts.SessionID, ts.Name, reason, events.CallerDown))
-	if err := d.session(ts.SessionID); err != nil {
-		return false, fmt.Errorf("killing %s session: %w", ts.Name, err)
-	}
-	return true, nil
 }
 
 // acquireShutdownLock prevents concurrent shutdowns.

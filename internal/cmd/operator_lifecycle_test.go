@@ -9,11 +9,9 @@ import (
 
 	"github.com/steveyegge/gastown/internal/crew"
 	"github.com/steveyegge/gastown/internal/estop"
-	"github.com/steveyegge/gastown/internal/mayor"
 	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
-	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
 )
 
@@ -68,14 +66,14 @@ func actionLog(t *testing.T, town string) string {
 }
 
 // gt down is a forced operator stop: under a town e-stop it still kills
-// crew, polecat and Mayor sessions, each logged as verb stop with the actor.
+// crew and polecat sessions, each logged as verb stop with the actor.
 func TestDownStopsThroughEstopAndLogs(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	if err := estop.Activate(town, estop.TriggerManual, "x"); err != nil {
 		t.Fatal(err)
 	}
-	tm := newOpTmux("gt-crew-sloan", "gt-flint", session.MayorSessionName())
+	tm := newOpTmux("gt-crew-sloan", "gt-flint")
 	stop := downStop{tmux: tm, sup: opSupervisor(town, tm), townRoot: town, actor: "gt down/overseer", force: true}
 
 	if err := stop.session("gt-crew-sloan"); err != nil {
@@ -84,21 +82,18 @@ func TestDownStopsThroughEstopAndLogs(t *testing.T) {
 	if err := stop.kill("gt-flint"); err != nil {
 		t.Fatalf("polecat stop = %v", err)
 	}
-	if was, err := stop.townSession(session.TownSessions()[0]); !was || err != nil {
-		t.Fatalf("mayor stop = %v, %v", was, err)
-	}
 	if err := stop.session("gt-gone"); err != nil {
 		t.Fatalf("absent session = %v, want nil", err)
 	}
-	if got, want := strings.Join(tm.killed, ","), "gt-crew-sloan,gt-flint,"+session.MayorSessionName(); got != want {
+	if got, want := strings.Join(tm.killed, ","), "gt-crew-sloan,gt-flint"; got != want {
 		t.Errorf("killed %s, want %s", got, want)
 	}
 	if len(tm.keys) != 0 {
 		t.Errorf("forced down sent keys %v", tm.keys)
 	}
 	log := actionLog(t, town)
-	if n := strings.Count(log, `"verb":"stop"`); n != 3 {
-		t.Errorf("action log has %d stop lines, want 3:\n%s", n, log)
+	if n := strings.Count(log, `"verb":"stop"`); n != 2 {
+		t.Errorf("action log has %d stop lines, want 2:\n%s", n, log)
 	}
 	if !strings.Contains(log, `"actor":"gt down/overseer"`) || strings.Contains(log, "refused") {
 		t.Errorf("action log lacks the actor or refused a stop:\n%s", log)
@@ -266,57 +261,6 @@ func TestSessionRestartRespawnRefusedByEstop(t *testing.T) {
 	if err := superviseSessionRestartWith(sup, reg, seat, true, patrolscan.Actor, "gt session restart/"+patrolscan.Actor, restart); err != nil || !ran {
 		t.Fatalf("daemon executor restart: err=%v ran=%v, want it run (already supervised)", err, ran)
 	}
-}
-
-// The Mayor: gt mayor stop is an operator Stop (not refused), a start over a
-// dead session and gt mayor restart over a running one are Respawns (refused
-// by an e-stop), and gt mayor attach reviving an exited runtime is too.
-func TestMayorVerbsUnderEstop(t *testing.T) {
-	t.Parallel()
-	town := estopTown(t)
-	tm := newOpTmux(mayorSeat.SessionName())
-	sup := opSupervisor(town, tm)
-
-	mgr := mayor.NewManager(town)
-	superviseMayor(mgr, sup, "gt mayor/overseer")
-	ran := false
-	if err := mgr.Respawn("mayor start: replace a session whose agent exited", func() error { ran = true; return nil }); !errors.Is(err, supervisor.ErrEstop) || ran {
-		t.Fatalf("mayor start respawn under e-stop: err=%v ran=%v", err, ran)
-	}
-
-	stopper := &fakeMayorStopper{running: true}
-	if err := restartMayor(stopper, sup, "gt mayor restart/overseer", func() error { ran = true; return nil }); !errors.Is(err, supervisor.ErrEstop) || ran || stopper.stopped {
-		t.Fatalf("mayor restart under e-stop: err=%v ran=%v stopped=%v", err, ran, stopper.stopped)
-	}
-	stopper.running = false
-	if err := restartMayor(stopper, sup, "gt mayor restart/overseer", func() error { ran = true; return nil }); err != nil || !ran {
-		t.Fatalf("mayor restart with nothing running: err=%v ran=%v, want a plain start", err, ran)
-	}
-
-	f := &fakeMayorTmux{}
-	if err := restartMayorRuntimeIfDead(f, mayorSeat.SessionName(), town, sup, "gt mayor attach/overseer"); !errors.Is(err, supervisor.ErrEstop) || len(f.calls) != 0 {
-		t.Fatalf("mayor attach revive under e-stop: err=%v calls=%v", err, f.calls)
-	}
-
-	if err := mgr.StopKill(mayorSeat.SessionName()); err != nil {
-		t.Fatalf("mayor stop under e-stop = %v", err)
-	}
-	if len(tm.killed) != 1 || tm.killed[0] != mayorSeat.SessionName() {
-		t.Fatalf("killed %v, want only the stop", tm.killed)
-	}
-	if log := actionLog(t, town); !strings.Contains(log, `"verb":"stop"`) || !strings.Contains(log, `"seat":"mayor"`) {
-		t.Errorf("action log = %s", log)
-	}
-}
-
-type fakeMayorStopper struct {
-	running, stopped bool
-}
-
-func (f *fakeMayorStopper) IsRunning() (bool, error) { return f.running, nil }
-func (f *fakeMayorStopper) Stop() error {
-	f.stopped = true
-	return nil
 }
 
 // gt handoff and gt mol step done cycle a session through respawnSession: an

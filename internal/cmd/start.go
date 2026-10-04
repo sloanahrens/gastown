@@ -239,8 +239,7 @@ func runGracefulShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) err
 
 	// Phase 4: Kill sessions in correct order
 	fmt.Printf("\nPhase 4: Terminating sessions...\n")
-	mayorSession := getMayorSessionName()
-	stopped := killSessionsInOrder(t, gtSessions, mayorSession)
+	stopped := killSessionsInOrder(t, gtSessions)
 
 	// Phase 5: Always clean up orphaned Claude processes after killing sessions.
 	// Processes can survive session kills if they caught/ignored SIGHUP or called setsid().
@@ -277,8 +276,7 @@ func runGracefulShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) err
 func runImmediateShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) error {
 	fmt.Println("Shutting down Gas Town...")
 
-	mayorSession := getMayorSessionName()
-	stopped := killSessionsInOrder(t, gtSessions, mayorSession)
+	stopped := killSessionsInOrder(t, gtSessions)
 
 	// Always clean up orphaned Claude processes after killing sessions.
 	// Processes can survive session kills if they caught/ignored SIGHUP or called setsid().
@@ -317,14 +315,13 @@ func runImmediateShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) er
 	return nil
 }
 
-// killSessionsInOrder stops sessions in the correct shutdown order, matching gt down:
-// every rig-level session (polecats, crew, and any session left over from a
-// retired role) first, then the Mayor. mayorSession is the dynamic Mayor
-// session name for the current town.
+// killSessionsInOrder stops every session, matching gt down. Only rig-level
+// sessions (polecats, crew, and any session left over from a retired role)
+// remain, so the order is the list's.
 //
 // Returns the count of sessions that were successfully stopped (verified by checking
 // if the session no longer exists after the kill attempt).
-func killSessionsInOrder(t *tmux.Tmux, sessions []string, mayorSession string) int {
+func killSessionsInOrder(t *tmux.Tmux, sessions []string) int {
 	stopped := 0
 
 	// Helper to kill a session and verify it was stopped
@@ -349,18 +346,10 @@ func killSessionsInOrder(t *tmux.Tmux, sessions []string, mayorSession string) i
 		return false
 	}
 
-	hasMayor := false
 	for _, sess := range sessions {
-		if sess == mayorSession {
-			hasMayor = true
-			continue
-		}
 		if killAndVerify(sess) {
 			stopped++
 		}
-	}
-	if hasMayor && killAndVerify(mayorSession) {
-		stopped++
 	}
 
 	return stopped

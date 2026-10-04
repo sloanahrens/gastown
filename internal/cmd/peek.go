@@ -35,14 +35,13 @@ The nudge/peek pair provides the canonical interface for agent sessions:
 Supports polecats, crew workers, and town-level agents:
   - Polecats: rig/name format (e.g., greenplace/furiosa)
   - Crew: rig/crew/name format (e.g., beads/crew/dave)
-  - Town-level: mayor, deacon, boot (or hq/mayor, hq/deacon, hq/boot)
+  - Town-level: deacon, boot (or hq/deacon, hq/boot)
 
 Examples:
   gt peek greenplace/furiosa         # Polecat: last 100 lines (default)
   gt peek greenplace/furiosa 50      # Polecat: last 50 lines
   gt peek beads/crew/dave            # Crew: last 100 lines
   gt peek beads/crew/dave -n 200     # Crew: last 200 lines
-  gt peek mayor                      # Mayor: last 100 lines
   gt peek deacon -n 50               # Deacon: last 50 lines`,
 	Args: cobra.RangeArgs(1, 2),
 	RunE: runPeek,
@@ -61,11 +60,9 @@ func runPeek(cmd *cobra.Command, args []string) error {
 		lines = n
 	}
 
-	// Handle town-level agents: mayor, deacon, boot
-	// These use session names like "hq-mayor", "hq-deacon" but have no rig.
+	// Handle town-level agents: deacon, boot
+	// These use session names like "hq-deacon" but have no rig.
 	townAgentSessions := map[string]string{
-		"mayor":     "hq-mayor",
-		"hq/mayor":  "hq-mayor",
 		"deacon":    "hq-deacon",
 		"hq/deacon": "hq-deacon",
 		"boot":      "hq-boot",

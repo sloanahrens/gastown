@@ -467,7 +467,7 @@ func detectCurrentSession(reg *session.PrefixRegistry) string {
 	// Check if we're mayor (handles both bare and compound forms)
 	parsedRole, _, _ := parseRoleString(role)
 	if parsedRole == RoleMayor {
-		return getMayorSessionName()
+		return session.MayorSessionName()
 	}
 
 	return ""

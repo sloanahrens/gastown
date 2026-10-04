@@ -298,6 +298,22 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error
 	return &StartResult{RuntimeConfig: runtimeConfig}, nil
 }
 
+// WaitForSessionExit polls for a session's process to exit within the given timeout.
+// Returns true if the process exited on its own, false if the timeout was reached.
+// This allows graceful shutdown (e.g., after Ctrl-C) to actually complete before
+// falling through to forceful termination.
+func WaitForSessionExit(t *tmux.Tmux, sessionID string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		running, err := t.HasSession(sessionID)
+		if err != nil || !running {
+			return true
+		}
+		time.Sleep(constants.PollInterval)
+	}
+	return false
+}
+
 // StopSession stops a tmux session with optional graceful shutdown.
 //
 // If graceful is true, sends Ctrl-C first and waits for the session to exit

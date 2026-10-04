@@ -30,8 +30,6 @@ var bdHandshakeGatedCommands = map[string]bool{
 	"gt sling":           true,
 	"gt crew start":      true,
 	"gt crew restart":    true,
-	"gt mayor start":     true,
-	"gt mayor restart":   true,
 	"gt session start":   true,
 	"gt session restart": true,
 	"gt scheduler run":   true,

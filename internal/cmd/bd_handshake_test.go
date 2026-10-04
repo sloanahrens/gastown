@@ -54,7 +54,7 @@ func TestBDHandshakeGatedCommandsExist(t *testing.T) {
 	for path := range bdHandshakeGatedCommands {
 		findCommand(t, path)
 	}
-	for _, want := range []string{"gt up", "gt daemon start", "gt daemon run", "gt sling", "gt crew start", "gt mayor start", "gt session start"} {
+	for _, want := range []string{"gt up", "gt daemon start", "gt daemon run", "gt sling", "gt crew start", "gt session start"} {
 		if !bdHandshakeGatedCommands[want] {
 			t.Errorf("%q must be gated by the bd handshake", want)
 		}
@@ -72,7 +72,7 @@ func TestBDHandshakeGate_OnlyTownRunningCommands(t *testing.T) {
 		{"gt crew start", true},
 		{"gt status", false},
 		{"gt show", false},
-		{"gt mayor status", false},
+		{"gt hook", false},
 		{"gt daemon status", false},
 		{"gt doctor", false},
 	} {
@@ -129,8 +129,8 @@ func TestPersistentPreRunSkipsHandshakeForReadOnlyCommands(t *testing.T) {
 	g, calls := testTownStartGate(func(context.Context) (*deps.BDHandshake, error) {
 		return nil, errors.New("must not run")
 	}, configOK)
-	if err := gateTownCommand(findCommand(t, "gt mayor status"), g); err != nil {
-		t.Fatalf("gateTownCommand(gt mayor status) = %v", err)
+	if err := gateTownCommand(findCommand(t, "gt hook"), g); err != nil {
+		t.Fatalf("gateTownCommand(gt hook) = %v", err)
 	}
 	if *calls != 0 {
 		t.Fatalf("read-only command ran the handshake %d times", *calls)
