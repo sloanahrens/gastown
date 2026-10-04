@@ -107,7 +107,7 @@ func TestIntegrationVerifyPushLandedFailsClosedOnRejectingRemote(t *testing.T) {
 		t.Fatalf("test premise broken: bare ref = %q, want local HEAD %q", bareTip, head)
 	}
 
-	err = verifyPushLanded(g, townRoot, rig, branch, head)
+	err = verifyPushLanded(g, "origin", townRoot, rig, branch, head)
 	if err == nil {
 		t.Fatal("verifyPushLanded = nil, want failure: origin never received the commit")
 	}
@@ -142,7 +142,7 @@ func TestIntegrationVerifyPushLandedPassesWhenOriginHasCommit(t *testing.T) {
 	}
 
 	townRoot := filepath.Join(tmp, "town")
-	if err := verifyPushLanded(g, townRoot, "gastown", branch, head); err != nil {
+	if err := verifyPushLanded(g, "origin", townRoot, "gastown", branch, head); err != nil {
 		t.Fatalf("verifyPushLanded = %v, want nil for a landed push", err)
 	}
 }
@@ -172,7 +172,7 @@ func TestIntegrationVerifyPushLandedBareFallbackStillQueriesRemote(t *testing.T)
 		testRunGit(t, g.WorkDir(), "remote", "remove", "origin")
 		defer testRunGit(t, g.WorkDir(), "remote", "add", "origin", remote)
 
-		if err := verifyPushLanded(g, townRoot, "gastown", branch, head); err != nil {
+		if err := verifyPushLanded(g, "origin", townRoot, "gastown", branch, head); err != nil {
 			t.Fatalf("verifyPushLanded = %v, want nil via the bare repo fallback", err)
 		}
 	})
@@ -188,7 +188,7 @@ func TestIntegrationVerifyPushLandedBareFallbackStillQueriesRemote(t *testing.T)
 		}
 		testRunGit(t, bareRepoPath, "fetch", g.WorkDir(), "refs/heads/"+branch+":refs/heads/"+branch)
 
-		if err := verifyPushLanded(g, townRoot, "gastown", branch, strings.TrimSpace(unpushed)); err == nil {
+		if err := verifyPushLanded(g, "origin", townRoot, "gastown", branch, strings.TrimSpace(unpushed)); err == nil {
 			t.Fatal("verifyPushLanded = nil, want failure: the bare repo ref is not origin")
 		}
 	})
@@ -219,7 +219,7 @@ func TestIntegrationLandBranchPushProceedsWhenOriginAlreadyHasTheCommit(t *testi
 		if verifyCalls == 1 {
 			return errors.New("verified_push_failed: unable to read origin/" + branch + ": connection reset")
 		}
-		return verifyPushLanded(g, townRoot, "gastown", branch, head)
+		return verifyPushLanded(g, "origin", townRoot, "gastown", branch, head)
 	}
 	pushCalls := 0
 	attemptPush := func() error {
@@ -257,7 +257,7 @@ func TestIntegrationLandBranchPushRejectingRemoteStillFails(t *testing.T) {
 
 	recovered, err := landBranchPush(
 		func() error { return g.Push("origin", branch+":"+branch, false) },
-		func() error { return verifyPushLanded(g, townRoot, "gastown", branch, head) },
+		func() error { return verifyPushLanded(g, "origin", townRoot, "gastown", branch, head) },
 		noSleep,
 		pushLandingRetryDelays,
 	)

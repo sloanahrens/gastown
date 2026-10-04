@@ -374,6 +374,8 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	if _, err := os.Stat(repo); err != nil {
 		return nil, fmt.Errorf("rig repository %s: %w", repo, err)
 	}
+	// The rig's configured landing remote (gt-fn9e6.9).
+	landingRemote := rig.ResolveLandingRemote(townRoot, rigName)
 	// Fail closed on a config.json that exists but does not decode: the file
 	// names no branch, so the rig gets no worker and no landing until it is
 	// fixed. Construction is the seam because the manager retries it every
@@ -424,6 +426,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	}
 	lander := &land.Lander{
 		Repo:     repo,
+		Remote:   landingRemote,
 		WorkRoot: workRoot,
 		Route:    "daemon",
 		Gate: rigLandGate{
@@ -449,7 +452,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		// A revert of a red main lands without om rather than wait on it.
 		ReviewErrorLandsLabels: []string{landworker.LabelRevert},
 	}
-	run := postLandRun(repo, workRoot, d.landingLogRoot(rigName), townRoot, rigName, landingWorkerDuration(cfg.PostLandTimeoutStr, defaultPostLandTimeout))
+	run := postLandRun(repo, workRoot, d.landingLogRoot(rigName), townRoot, rigName, landingRemote, landingWorkerDuration(cfg.PostLandTimeoutStr, defaultPostLandTimeout))
 	mainState := fileMainState{path: RedMainStatePath(townRoot, rigName)}
 	redMain := &landworker.RedMain{
 		Rig:   rigName,
@@ -469,7 +472,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Logf:     d.logger.Printf,
 		State:    mainState,
 		Landings: landings,
-		Revert:   postLandRevert(repo, workRoot),
+		Revert:   postLandRevert(repo, workRoot, landingRemote),
 		// The landing's own commit range: the record's base is what it merged
 		// onto, so name-only is the landing's change (gt-40so9).
 		Diff: func(_ context.Context, rec land.LandingRecord) ([]string, error) {
@@ -495,7 +498,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	return &landworker.Worker{
 		Rig:         rigName,
 		Beads:       bd,
-		Remote:      gitRemote{g: git.NewGit(repo), remote: "origin"},
+		Remote:      gitRemote{g: git.NewGit(repo), remote: landingRemote},
 		Lander:      lander,
 		Landings:    landings,
 		PostLand:    postLand,
@@ -640,7 +643,7 @@ func rigPostLandCommand(rigPath string) string {
 
 // postLandRun runs the post-landing command in a throwaway worktree of repo
 // at the landed commit, under the container slot, bounded by timeout.
-func postLandRun(repo, workRoot, logRoot, townRoot, rigName string, timeout time.Duration) func(context.Context, string, landworker.PostLand) landworker.PostLandResult {
+func postLandRun(repo, workRoot, logRoot, townRoot, rigName, remote string, timeout time.Duration) func(context.Context, string, landworker.PostLand) landworker.PostLandResult {
 	return func(ctx context.Context, cmd string, pl landworker.PostLand) landworker.PostLandResult {
 		if err := os.MkdirAll(workRoot, 0o700); err != nil {
 			return landworker.PostLandResult{ExitCode: -1, Err: err}
@@ -651,7 +654,7 @@ func postLandRun(repo, workRoot, logRoot, townRoot, rigName string, timeout time
 		}
 		defer func() { _ = os.RemoveAll(parent) }()
 		g := git.NewGit(repo)
-		if err := postLandFetch(g, "origin", pl); err != nil {
+		if err := postLandFetch(g, remote, pl); err != nil {
 			return landworker.PostLandResult{ExitCode: -1, Err: err}
 		}
 		dir := filepath.Join(parent, "wt")
@@ -814,10 +817,10 @@ func rigDefaultBranch(rigPath string) (string, error) {
 }
 
 // postLandRevert builds the revert of a landing in a throwaway worktree of
-// repo at the landed commit and pushes it to origin as branch. A landing is
-// a --no-ff merge (reverted against its first parent, the target) or a
-// squash (one parent).
-func postLandRevert(repo, workRoot string) landworker.RevertBuilder {
+// repo at the landed commit and pushes it to remote as branch, the rig's
+// configured landing remote (gt-fn9e6.9). A landing is a --no-ff merge
+// (reverted against its first parent, the target) or a squash (one parent).
+func postLandRevert(repo, workRoot, remote string) landworker.RevertBuilder {
 	return func(_ context.Context, rec land.LandingRecord, branch string) (string, error) {
 		if err := os.MkdirAll(workRoot, 0o700); err != nil {
 			return "", err
@@ -852,7 +855,7 @@ func postLandRevert(repo, workRoot string) landworker.RevertBuilder {
 		if err != nil {
 			return "", err
 		}
-		if err := wt.Push("origin", "HEAD:refs/heads/"+branch, false); err != nil {
+		if err := wt.Push(remote, "HEAD:refs/heads/"+branch, false); err != nil {
 			return "", fmt.Errorf("pushing %s: %w", branch, err)
 		}
 		return head, nil
@@ -872,8 +875,8 @@ type landingRemoteGit interface {
 
 var _ landingRemoteGit = (*git.Git)(nil)
 
-// gitRemote answers the worker's questions about origin from the rig's
-// bare repository.
+// gitRemote answers the worker's questions about the rig's landing remote
+// (gt-fn9e6.9) in the rig's bare repository.
 type gitRemote struct {
 	g      landingRemoteGit
 	remote string

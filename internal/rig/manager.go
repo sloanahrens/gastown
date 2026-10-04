@@ -1153,6 +1153,46 @@ func ResolveForgejoConfig(townRoot, rigName string) *config.ForgejoConfig {
 	return mq.Forgejo
 }
 
+// LandingRemoteOrigin is the remote a rig lands through when its settings name
+// no other.
+const LandingRemoteOrigin = "origin"
+
+// ResolveLandingRemote resolves the git remote name a rig's landing path — gt
+// done's branch push and the daemon's landing worker — should use, read from
+// the rig's Forgejo settings (merge_queue.forgejo.remote_url, gt-fn9e6.3)
+// instead of assuming origin (gt-fn9e6.9). It returns the remote in the rig's
+// bare repository whose URL is the configured one, and LandingRemoteOrigin when
+// the rig has no Forgejo block, names no URL, or has no such remote — so every
+// rig today lands through origin, whether the cutover repoints origin's URL or
+// attaches a separately named remote.
+func ResolveLandingRemote(townRoot, rigName string) string {
+	fc := ResolveForgejoConfig(townRoot, rigName)
+	if fc == nil || strings.TrimSpace(fc.RemoteURL) == "" {
+		return LandingRemoteOrigin
+	}
+	bare := git.NewGit(filepath.Join(townRoot, rigName, ".repo.git"))
+	remotes, _ := bare.Remotes()
+	urls := make(map[string]string, len(remotes))
+	for _, name := range remotes {
+		if url, err := bare.RemoteURL(name); err == nil {
+			urls[name] = url
+		}
+	}
+	return landingRemoteForURL(remotes, urls, fc.RemoteURL)
+}
+
+// landingRemoteForURL is ResolveLandingRemote's matching rule: the first remote
+// whose URL is want, in the repository's order, else origin. A remote whose URL
+// could not be read is skipped rather than guessed at.
+func landingRemoteForURL(remotes []string, urls map[string]string, want string) string {
+	for _, name := range remotes {
+		if url, ok := urls[name]; ok && git.SameRemoteURL(url, want) {
+			return name
+		}
+	}
+	return LandingRemoteOrigin
+}
+
 // LoadNamedGateCommands reads the rig-root config.json's merge_queue.gates
 // map, returning each named gate's command keyed by name (timeout and phase
 // are irrelevant to gate-set identity, so they are not read here). This is
