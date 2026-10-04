@@ -24,25 +24,23 @@ func stampBinary(path string) (binaryStamp, error) {
 	return binaryStamp{size: fi.Size(), mod: fi.ModTime(), ino: fileInode(fi)}, nil
 }
 
-// watchBinary calls changed once, when the file at path has a different stamp
-// from the one it started with and has held that new stamp for two polls in a
-// row, so a binary still being written is not picked up half-copied. A missing
-// file (the instant between rename and create) is not a change.
-func watchBinary(ctx context.Context, path string, every time.Duration, changed func()) {
-	base, err := stampBinary(path)
+// watchBinary calls changed once, when stamp reports something different from
+// what it reported first and keeps reporting that new value on the next tick,
+// so a binary still being written is not picked up half-copied. A stamp error
+// (the instant between rename and create) is not a change.
+func watchBinary(ctx context.Context, stamp func() (binaryStamp, error), ticks <-chan time.Time, changed func()) {
+	base, err := stamp()
 	if err != nil {
 		return
 	}
 	var pending *binaryStamp
-	tick := time.NewTicker(every)
-	defer tick.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-tick.C:
+		case <-ticks:
 		}
-		cur, err := stampBinary(path)
+		cur, err := stamp()
 		if err != nil || cur == base {
 			pending = nil
 			continue
@@ -53,4 +51,12 @@ func watchBinary(ctx context.Context, path string, every time.Duration, changed 
 		}
 		pending = &cur
 	}
+}
+
+// watchBinaryFile is watchBinary on the executable at path, polled every
+// interval.
+func watchBinaryFile(ctx context.Context, path string, every time.Duration, changed func()) {
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	watchBinary(ctx, func() (binaryStamp, error) { return stampBinary(path) }, tick.C, changed)
 }

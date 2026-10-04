@@ -102,7 +102,7 @@ func runDashboard(cmd *cobra.Command, _ []string) error {
 	exe, _ := os.Executable()
 	reexec := false
 	if exe != "" {
-		go watchBinary(ctx, exe, dashboardBinaryPoll, func() { reexec = true; stop() })
+		go watchBinaryFile(ctx, exe, dashboardBinaryPoll, func() { reexec = true; stop() })
 	}
 
 	srv := &http.Server{Handler: hub.Handler(), ReadHeaderTimeout: 10 * time.Second}
