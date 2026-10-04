@@ -1043,8 +1043,22 @@ func TestStageTimesReportsTheShellStep(t *testing.T) {
 		{Name: "lint", Elapsed: 18 * time.Second},
 		{Name: "gate", Elapsed: 92 * time.Second},
 		{Name: ShellStepName, Elapsed: 12 * time.Second},
-	}}, 0)
+	}}, 0, false)
 	if !strings.Contains(got, "shell 12s") {
 		t.Errorf("stageTimes = %q, want the shell step's wall time", got)
+	}
+}
+
+// TestStageTimesMarksARetriedOMRun: the stages line carries the retry, so a
+// flaky reviewer is visible in daemon.log without reading the error beside it
+// (gt-q241r).
+func TestStageTimesMarksARetriedOMRun(t *testing.T) {
+	t.Parallel()
+	got := stageTimes(GateResult{Steps: []StepResult{{Name: "gate", Elapsed: 33 * time.Second}}}, 90*time.Second, true)
+	if !strings.Contains(got, "om 1m30s (retried)") {
+		t.Errorf("stageTimes = %q, want the retried om stage marked", got)
+	}
+	if plain := stageTimes(GateResult{}, 90*time.Second, false); strings.Contains(plain, "retried") {
+		t.Errorf("stageTimes = %q; an unretried om run must not say retried", plain)
 	}
 }
