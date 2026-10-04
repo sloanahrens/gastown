@@ -30,7 +30,7 @@ var escalateCmd = &cobra.Command{
 	Long: `Create and manage escalations for critical issues.
 
 The escalation system provides severity-based routing for issues that need
-human or mayor attention. Escalations are tracked as beads with gt:escalation label.
+human attention. Escalations are tracked as beads with gt:escalation label.
 
 SEVERITY LEVELS:
   critical  (P0) Immediate attention required
@@ -60,7 +60,7 @@ RECURRING ALERTS:
 
 CONFIGURATION:
   Routing is configured in ~/gt/settings/escalation.json:
-  - routes: Map severity to action lists (bead, mail:mayor, email:human, sms:human)
+  - routes: Map severity to action lists (bead, mail:gastown/witness, email:human, sms:human)
   - contacts: Human email/SMS for external notifications
   - stale_threshold: When unacked escalations are re-escalated (default: 4h)
   - max_reescalations: How many times to bump severity (default: 2)

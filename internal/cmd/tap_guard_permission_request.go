@@ -12,8 +12,9 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/mail"
+	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -24,10 +25,11 @@ import (
 // Interactive roles carry no PermissionRequest entry, so their prompts still
 // reach a person.
 const (
-	// promptEscalationTimeout bounds the mail that records the park. A hung
-	// Dolt must not hold the decision past the hook's budget.
+	// promptEscalationTimeout bounds the escalation bead that records the
+	// park. A hung Dolt must not hold the decision past the hook's budget.
 	promptEscalationTimeout = 5 * time.Second
-	// promptEscalationMaxDispatch caps the command text quoted into the mail.
+	// promptEscalationMaxDispatch caps the command text quoted into the
+	// escalation.
 	promptEscalationMaxDispatch = 500
 )
 
@@ -75,13 +77,13 @@ type permissionRequestOutput struct {
 }
 
 func runTapGuardPermissionRequest(cmd *cobra.Command, args []string) error {
-	return tapGuardPermissionRequest(os.Stdin, os.Stdout, realGuardProcess(), defaultParkedPromptMailer)
+	return tapGuardPermissionRequest(os.Stdin, os.Stdout, realGuardProcess(), defaultParkedPromptEscalator)
 }
 
 // tapGuardPermissionRequest is the permission-request guard: it reads the
 // hook payload from stdin and the session from proc, escalates through
-// mailer, and writes its decision to stdout.
-func tapGuardPermissionRequest(stdin io.Reader, stdout io.Writer, proc guardProcess, mailer parkedPromptMailer) error {
+// escalate, and writes its decision to stdout.
+func tapGuardPermissionRequest(stdin io.Reader, stdout io.Writer, proc guardProcess, escalate parkedPromptEscalator) error {
 	input, err := io.ReadAll(stdin)
 	if err != nil || len(input) == 0 {
 		// Nothing to judge. The harness's own prompt flow proceeds, which is
@@ -96,7 +98,7 @@ func tapGuardPermissionRequest(stdin io.Reader, stdout io.Writer, proc guardProc
 		return nil
 	}
 
-	escalation := escalateParkedPromptOnce(hook, proc.tempDir(), mailer)
+	escalation := escalateParkedPromptOnce(hook, proc.tempDir(), escalate)
 	writePermissionRequestDenial(stdout, hook, escalation)
 	return nil
 }
@@ -104,7 +106,7 @@ func tapGuardPermissionRequest(stdin io.Reader, stdout io.Writer, proc guardProc
 // unattendedPromptSession reports whether the requesting session runs with
 // nobody at the pane. Only the polecat and dog roles qualify: the town spawns
 // them into a tmux pane and leaves them alone, and their settings files are
-// the only ones carrying this hook. Crew, mayor, witness, refinery and deacon
+// the only ones carrying this hook. Crew, witness, refinery and deacon
 // sessions keep their prompts, so the check is what stops a copied entry from
 // silencing a person's dialog.
 //
@@ -263,14 +265,15 @@ func writePermissionRequestDenial(stdout io.Writer, hook permissionRequestInput,
 	fmt.Fprintln(stdout, string(encoded))
 }
 
-// escalateParkedPromptOnce mails the mayor that a prompt parked this session,
-// and returns the sentence the denial carries about it. The marker is written
-// before the mail is attempted, so a retry loop cannot write a Dolt commit per
-// attempt. Each failure path returns its own sentence rather than "" so a
-// silent bookkeeping or delivery failure is never indistinguishable from a
-// deny that carries no escalation note at all (gt-8stz review,
-// finding 4ce05cf3cf09). The marker lives in tempDir; mailer sends the mail.
-func escalateParkedPromptOnce(hook permissionRequestInput, tempDir string, mailer parkedPromptMailer) string {
+// escalateParkedPromptOnce files an escalation bead that a prompt parked this
+// session, and returns the sentence the denial carries about it. The marker is
+// written before the escalation is attempted, so a retry loop cannot write a
+// Dolt commit per attempt. Each failure path returns its own sentence rather
+// than "" so a silent bookkeeping or delivery failure is never
+// indistinguishable from a deny that carries no escalation note at all
+// (gt-8stz review, finding 4ce05cf3cf09). The marker lives in tempDir;
+// escalate files the bead.
+func escalateParkedPromptOnce(hook permissionRequestInput, tempDir string, escalate parkedPromptEscalator) string {
 	shape := promptShape(hook)
 	marker := promptEscalationMarker(hook, shape, tempDir)
 	if _, err := os.Stat(marker); err == nil {
@@ -281,10 +284,10 @@ func escalateParkedPromptOnce(hook permissionRequestInput, tempDir string, maile
 	}
 	subject := fmt.Sprintf("Parked prompt denied: %s", shape)
 	body := promptEscalationBody(hook, shape)
-	if !mailer(subject, body) {
-		return " Escalating to the mayor failed; mail the witness if this call is required."
+	if !escalate(subject, body) {
+		return " Recording the escalation failed; mail the witness if this call is required."
 	}
-	return " The mayor has been notified."
+	return " The escalation was recorded as a bead."
 }
 
 // promptShape labels the denied call for the mail subject and the rate-limit
@@ -332,18 +335,18 @@ func promptEscalationMarker(hook permissionRequestInput, shape, tempDir string) 
 // to be a credential rather than an ordinary path segment or flag value.
 var secretLikeToken = regexp.MustCompile(`[A-Za-z0-9_\-+/=]{20,}`)
 
-// redactSecrets masks token-shaped substrings before a command reaches mail a
-// third party (the mayor) reads. It is deliberately over-eager — a false
+// redactSecrets masks token-shaped substrings before a command reaches the
+// escalation bead a person reads. It is deliberately over-eager — a false
 // positive over a long non-secret string costs nothing, a leaked token is a
 // real credential exposure — so this must run on any command text this guard
-// mails, never the raw string (gt-8stz review, finding 36adb619b71a).
+// files, never the raw string (gt-8stz review, finding 36adb619b71a).
 func redactSecrets(s string) string {
 	return secretLikeToken.ReplaceAllString(s, "[REDACTED]")
 }
 
-// cwdClass buckets a session's cwd into the shape the mayor needs to judge
-// the report, without repeating the full path into mail the way the denied
-// command no longer is (gt-8stz review, finding 36adb619b71a).
+// cwdClass buckets a session's cwd into the shape a person needs to judge the
+// report, without repeating the full path into the escalation the way the
+// denied command no longer is (gt-8stz review, finding 36adb619b71a).
 func cwdClass(cwd string) string {
 	switch {
 	case cwd == "":
@@ -358,10 +361,10 @@ func cwdClass(cwd string) string {
 }
 
 // promptEscalationBody carries the rule name, session, cwd class, and a
-// secret-redacted preview of the call plus its full hash — enough for the
-// mayor to judge whether the deny is right or the shape should be steered
-// away from, without the raw command (which may carry a credential) ever
-// landing in mail (gt-8stz review, finding 36adb619b71a).
+// secret-redacted preview of the call plus its full hash — enough for a person
+// to judge whether the deny is right or the shape should be steered away from,
+// without the raw command (which may carry a credential) ever landing in the
+// escalation (gt-8stz review, finding 36adb619b71a).
 func promptEscalationBody(hook permissionRequestInput, shape string) string {
 	dispatch := hook.ToolInput.Command
 	if dispatch == "" {
@@ -390,30 +393,36 @@ legitimate, steer the worker to a formulation that does not ask.`,
 		shape, session, cwdClass(hook.Cwd), preview, hash[:8])
 }
 
-// parkedPromptMailer delivers the escalation mail and reports whether it was
-// sent. A parameter so tests can pass a fake and verify
-// escalateParkedPromptOnce reaches the send call without ever touching the
-// town's mail store (gt-8stz review, finding d1058e444298).
-type parkedPromptMailer func(subject, body string) bool
+// parkedPromptEscalator files the escalation and reports whether it was
+// recorded. A parameter so tests can pass a fake and verify
+// escalateParkedPromptOnce reaches the escalate call without ever touching the
+// town's beads (gt-8stz review, finding d1058e444298).
+type parkedPromptEscalator func(subject, body string) bool
 
-// defaultParkedPromptMailer sends the escalation through the town's mail
-// router, bounded so a slow or hung Dolt cannot hold the hook open.
-func defaultParkedPromptMailer(subject, body string) bool {
+// defaultParkedPromptEscalator raises the parked prompt as an escalation
+// bead — escalations are bead-only (gt-rwp7z.6) — bounded so a slow or hung
+// Dolt cannot hold the hook open.
+func defaultParkedPromptEscalator(subject, body string) bool {
 	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return false
+	}
+	cfg, err := config.LoadOrCreateEscalationConfig(config.EscalationConfigPath(townRoot))
 	if err != nil {
 		return false
 	}
 	done := make(chan error, 1)
 	go func() {
-		router := mail.NewRouter(townRoot, townRegistry())
-		done <- router.Send(&mail.Message{
-			From:     detectSender(),
-			To:       "mayor/",
-			Subject:  subject,
-			Body:     body,
-			Type:     mail.TypeEscalation,
-			Priority: mail.PriorityHigh,
-		})
+		_, err := notify.Raise(notify.EscalationRequest{
+			TownRoot:    townRoot,
+			Severity:    config.SeverityHigh,
+			Description: subject,
+			Reason:      body,
+			Source:      "tap-guard:parked-prompt",
+			EscalatedBy: detectSender(),
+			Prefixes:    townRegistry(),
+		}, cfg)
+		done <- err
 	}()
 	select {
 	case err := <-done:

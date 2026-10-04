@@ -18,7 +18,8 @@ import (
 // the refinery-era merge_queue keys gt-5nlvq deleted (batch_*,
 // test_verify_command, cycle_session_after_merge) and the 41 dead operational
 // keys gt-y3pgh.2.13.1 deleted (operational.witness.done_intent_*,
-// operational.daemon.boot_spawn_cooldown and the rest): a
+// operational.daemon.boot_spawn_cooldown and the rest) and the mail:mayor
+// route action gt-rwp7z.6 retired from the defaults: a
 // live file must lose such a key before a binary carrying the deletion is
 // installed, or the startup gate refuses the town.
 // Strict decoding must accept every key they carry: a kernel that refused the

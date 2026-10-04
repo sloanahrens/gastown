@@ -29,11 +29,11 @@ import (
 // malformed request as an error wrapping ErrInvalid. A context that is done
 // before or during a send yields an error wrapping the context's error.
 type Notifier interface {
-	// MailSend sends one mail message to an address (e.g. "mayor/",
+	// MailSend sends one mail message to an address (e.g. "overseer",
 	// "gastown/witness").
 	MailSend(ctx context.Context, to, subject, body string, opts ...MailOption) error
-	// Nudge delivers message to a live agent session (e.g. "mayor",
-	// "deacon", "gastown/witness", "gastown/furiosa").
+	// Nudge delivers message to a live agent session (e.g. "gastown/witness",
+	// "gastown/refinery", "gastown/furiosa").
 	Nudge(ctx context.Context, target, message string) error
 	// Escalate raises an escalation, or records a repeat of the open one
 	// with the same alert key.

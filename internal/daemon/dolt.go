@@ -617,11 +617,11 @@ func (m *DoltServerManager) restartWithBackoff() error {
 	if len(m.restartTimes) >= maxRestarts {
 		if !m.escalated {
 			m.escalated = true
-			m.logger("Dolt server restart cap reached (%d restarts in %v), escalating to mayor",
+			m.logger("Dolt server restart cap reached (%d restarts in %v), raising an escalation",
 				len(m.restartTimes), m.config.RestartWindow)
-			m.sendEscalationMail(len(m.restartTimes))
+			m.escalateCrashLoop(len(m.restartTimes))
 		}
-		return fmt.Errorf("dolt server restart cap exceeded (%d restarts in %v); escalated to mayor",
+		return fmt.Errorf("dolt server restart cap exceeded (%d restarts in %v); escalation raised",
 			len(m.restartTimes), m.config.RestartWindow)
 	}
 
@@ -728,10 +728,11 @@ func (m *DoltServerManager) maybeResetBackoff() {
 	}
 }
 
-// sendEscalationMail sends a mail to the mayor when the Dolt server has
-// exceeded its restart cap, indicating a systemic issue.
-// Runs the mail command asynchronously to avoid blocking the mutex.
-func (m *DoltServerManager) sendEscalationMail(restartCount int) {
+// escalateCrashLoop raises the Dolt crash-loop as an escalation bead when the
+// server has exceeded its restart cap, indicating a systemic issue. The
+// escalation bead is the town's alert record; there is no mail recipient for
+// it (gt-rwp7z.6). Runs asynchronously to avoid blocking the mutex.
+func (m *DoltServerManager) escalateCrashLoop(restartCount int) {
 	if m.escalateFn != nil {
 		m.escalateFn(restartCount)
 		return
@@ -760,19 +761,13 @@ Action needed: Investigate and fix the root cause, then restart the daemon or th
 	n := m.notify()
 
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), doltAlertMailTimeout)
-		defer cancel()
-		if err := n.MailSend(ctx, "mayor/", subject, body); err != nil {
-			logger("Warning: failed to send escalation mail to mayor: %v", err)
-		} else {
-			logger("Sent escalation mail to mayor about Dolt server crash-loop")
-		}
+		raiseDoltAlert(n, "high", "dolt:crash-loop", subject, body, logger)
 	}()
 }
 
-// sendCrashAlert sends a mail to the mayor when the Dolt server is found dead.
-// This is for single crash detection — distinct from crash-loop escalation.
-// Runs asynchronously to avoid blocking.
+// sendCrashAlert raises an escalation bead when the Dolt server is found
+// dead. This is for single crash detection — distinct from crash-loop
+// escalation. Runs asynchronously to avoid blocking.
 func (m *DoltServerManager) sendCrashAlert(deadPID int) {
 	if m.crashAlertFn != nil {
 		m.crashAlertFn(deadPID)
@@ -795,12 +790,13 @@ Check the log file for crash details. If crashes recur, the daemon will escalate
 	n := m.notify()
 
 	go func() {
-		sendDoltAlertMail(n, "mayor/", subject, body, logger)
+		raiseDoltAlert(n, "medium", "dolt:crash", subject, body, logger)
 	}()
 }
 
-// sendUnhealthyAlert sends a mail to the mayor when the Dolt server fails health checks.
-// The server is running but not responding to queries. Runs asynchronously.
+// sendUnhealthyAlert raises an escalation bead when the Dolt server fails
+// health checks. The server is running but not responding to queries. Runs
+// asynchronously.
 func (m *DoltServerManager) sendUnhealthyAlert(healthErr error) {
 	if m.unhealthyAlertFn != nil {
 		m.unhealthyAlertFn(healthErr)
@@ -824,19 +820,27 @@ This may indicate high load, connection exhaustion, or internal server errors.`,
 	n := m.notify()
 
 	go func() {
-		sendDoltAlertMail(n, "mayor/", subject, body, logger)
+		raiseDoltAlert(n, "medium", "dolt:unhealthy", subject, body, logger)
 	}()
 }
 
-// doltAlertMailTimeout bounds one Dolt alert mail send.
-const doltAlertMailTimeout = 30 * time.Second
+// doltAlertTimeout bounds one Dolt alert escalation send.
+const doltAlertTimeout = 30 * time.Second
 
-// sendDoltAlertMail sends a Dolt alert mail to a specific recipient.
-func sendDoltAlertMail(n notify.Notifier, recipient, subject, body string, logger func(format string, v ...interface{})) {
-	ctx, cancel := context.WithTimeout(context.Background(), doltAlertMailTimeout)
+// raiseDoltAlert files a Dolt alert as an escalation bead under a stable
+// fingerprint, so a recurring condition upserts onto the one open escalation
+// instead of minting a bead per tick (gt-rwp7z.6).
+func raiseDoltAlert(n notify.Notifier, severity, alertKey, subject, body string, logger func(format string, v ...interface{})) {
+	ctx, cancel := context.WithTimeout(context.Background(), doltAlertTimeout)
 	defer cancel()
-	if err := n.MailSend(ctx, recipient, subject, body); err != nil {
-		logger("Warning: failed to send Dolt alert to %s: %v", recipient, err)
+	if err := n.Escalate(ctx, notify.Escalation{
+		Severity:    severity,
+		Description: subject,
+		Reason:      body,
+		Source:      "daemon:dolt",
+		Fingerprint: alertKey,
+	}); err != nil {
+		logger("Warning: failed to raise Dolt alert %q: %v", alertKey, err)
 	}
 }
 
@@ -1598,7 +1602,7 @@ concurrent polecat count or staggering write-heavy operations.`,
 	n := m.notify()
 
 	go func() {
-		sendDoltAlertMail(n, "mayor/", subject, body, logger)
+		raiseDoltAlert(n, "medium", "dolt:read-only", subject, body, logger)
 	}()
 }
 

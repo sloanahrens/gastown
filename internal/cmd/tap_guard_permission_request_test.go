@@ -196,11 +196,11 @@ func TestPermissionRequestDenialShape(t *testing.T) {
 	}
 }
 
-// fakeParkedPromptMailer is a parkedPromptMailer that records each send and
-// answers result, so a test can verify escalateParkedPromptOnce reaches (or
-// does not reach) the send call without ever touching the town's real mail
-// store (gt-8stz review, finding d1058e444298).
-func fakeParkedPromptMailer(result bool) (parkedPromptMailer, *[]string) {
+// fakeParkedPromptEscalator is a parkedPromptEscalator that records each call
+// and answers result, so a test can verify escalateParkedPromptOnce reaches
+// (or does not reach) the escalation call without ever touching the town's
+// real beads (gt-8stz review, finding d1058e444298).
+func fakeParkedPromptEscalator(result bool) (parkedPromptEscalator, *[]string) {
 	var sent []string
 	return func(subject, body string) bool {
 		sent = append(sent, subject+"\n"+body)
@@ -214,10 +214,10 @@ func fakeParkedPromptMailer(result bool) (parkedPromptMailer, *[]string) {
 func TestPermissionRequestEscalatesOncePerShape(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
-	mailer, sent := fakeParkedPromptMailer(true)
+	escalator, sent := fakeParkedPromptEscalator(true)
 	hook := payloadInput(t, bashPermissionPayload("cd /tmp/x && rm -rf *"))
 
-	first := escalateParkedPromptOnce(hook, tmp, mailer)
+	first := escalateParkedPromptOnce(hook, tmp, escalator)
 	if strings.Contains(first, "already reported") {
 		t.Fatalf("first call reported itself as a repeat: %q", first)
 	}
@@ -225,36 +225,36 @@ func TestPermissionRequestEscalatesOncePerShape(t *testing.T) {
 		t.Fatalf("no marker written for the first call: %v", err)
 	}
 	if len(*sent) != 1 {
-		t.Fatalf("fake mailer received %d sends, want 1: %v", len(*sent), *sent)
+		t.Fatalf("fake escalator received %d calls, want 1: %v", len(*sent), *sent)
 	}
-	if second := escalateParkedPromptOnce(hook, tmp, mailer); !strings.Contains(second, "already reported") {
+	if second := escalateParkedPromptOnce(hook, tmp, escalator); !strings.Contains(second, "already reported") {
 		t.Errorf("second call did not reuse the marker: %q", second)
 	}
 	if len(*sent) != 1 {
-		t.Errorf("repeat call reached the mailer again: %v", *sent)
+		t.Errorf("repeat call reached the escalator again: %v", *sent)
 	}
 	// A different shape in the same session is a different incident.
 	other := payloadInput(t, bashPermissionPayload("cd /tmp/x && rm -rf *"))
 	other.ToolInput.Command = `rm -rf /tmp/x/*`
-	if got := escalateParkedPromptOnce(other, tmp, mailer); strings.Contains(got, "already reported") {
+	if got := escalateParkedPromptOnce(other, tmp, escalator); strings.Contains(got, "already reported") {
 		t.Errorf("second shape was suppressed by the first shape's marker: %q", got)
 	}
 	if len(*sent) != 2 {
-		t.Errorf("second shape did not reach the mailer: %v", *sent)
+		t.Errorf("second shape did not reach the escalator: %v", *sent)
 	}
 }
 
-// TestPermissionRequestEscalationMailerFailure pins the failure-message
-// distinction the review asked for: a mailer failure must not read like no
+// TestPermissionRequestEscalationFailureMessage pins the failure-message
+// distinction the review asked for: a failed escalation must not read like no
 // escalation was attempted at all (gt-8stz review, finding 4ce05cf3cf09).
-func TestPermissionRequestEscalationMailerFailure(t *testing.T) {
+func TestPermissionRequestEscalationFailureMessage(t *testing.T) {
 	t.Parallel()
-	mailer, _ := fakeParkedPromptMailer(false)
+	escalator, _ := fakeParkedPromptEscalator(false)
 	hook := payloadInput(t, bashPermissionPayload("cd /tmp/x && rm -rf *"))
 
-	got := escalateParkedPromptOnce(hook, t.TempDir(), mailer)
-	if !strings.Contains(got, "Escalating to the mayor failed") {
-		t.Errorf("mailer failure did not surface a distinct message: %q", got)
+	got := escalateParkedPromptOnce(hook, t.TempDir(), escalator)
+	if !strings.Contains(got, "Recording the escalation failed") {
+		t.Errorf("escalation failure did not surface a distinct message: %q", got)
 	}
 }
 

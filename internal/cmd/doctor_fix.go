@@ -37,7 +37,7 @@ The fixer refuses when it cannot know what to repair:
 A repair that can destroy state or end a running process — it kills a session,
 removes a repository, purges rows — requires recorded authorization when an
 agent runs it. Pass --authorized-by <bead-id>, an open bead labeled
-'doctor-fix-auth' that the mayor/overseer created. A human at a terminal is not
+'doctor-fix-auth' that the overseer created. A human at a terminal is not
 asked.
 
 Exit code is non-zero when the repair refused, failed, or did not clear the
@@ -111,7 +111,7 @@ func authorizeDestructiveFix(townRoot string, check doctor.Check, envActor strin
 	if authorizedBy == "" {
 		return fmt.Errorf(`%q can destroy state or end a running process, and agent actor %q may not run it without recorded authorization (gt-638go.3)
 
-Get approval from the mayor/overseer, then name the bead that records the
+Get approval from the overseer, then name the bead that records the
 decision:
   gt doctor fix %s --authorized-by <bead-id>`, check.Name(), actor, check.Name())
 	}

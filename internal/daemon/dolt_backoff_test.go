@@ -865,7 +865,7 @@ func TestEnsureRunning_HealthyResetsBackoff(t *testing.T) {
 }
 
 // TestEscalation_RestartCapExceeded verifies that when the restart cap is
-// exceeded, sendEscalationMail is called exactly once with the correct count,
+// exceeded, escalateCrashLoop is called exactly once with the correct count,
 // and subsequent calls do not double-escalate.
 func TestEscalation_RestartCapExceeded(t *testing.T) {
 	t.Parallel()

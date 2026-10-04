@@ -93,7 +93,7 @@ func ValidateForceAuthorization(issue *beads.Issue, actor string) error {
 	if !labeled {
 		return fmt.Errorf(`bead %s is not an authorization record: missing the %q label (gt-2oy)
 
-An authorization bead must be created by the mayor/overseer with:
+An authorization bead must be created by the overseer with:
   bd update %s --labels=%s   # or create a new bead carrying that label`,
 			issue.ID, ForceAuthLabel, issue.ID, ForceAuthLabel)
 	}
@@ -102,7 +102,7 @@ An authorization bead must be created by the mayor/overseer with:
 			issue.ID, issue.Status)
 	}
 	if actor != "" && issue.CreatedBy == actor {
-		return fmt.Errorf("authorization bead %s was created by %s itself — self-authorization is not allowed (gt-2oy); the bead must record a mayor/overseer decision",
+		return fmt.Errorf("authorization bead %s was created by %s itself — self-authorization is not allowed (gt-2oy); the bead must record an overseer decision",
 			issue.ID, actor)
 	}
 	return nil

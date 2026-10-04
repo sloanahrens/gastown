@@ -12,9 +12,10 @@ with automatic re-escalation.
 
 | Level | Priority | Description | Default Route |
 |-------|----------|-------------|---------------|
-| **CRITICAL** | P0 (urgent) | System-threatening, immediate attention | bead + mail + email + SMS |
-| **HIGH** | P1 (high) | Important blocker, needs human soon | bead + mail + email |
-| **MEDIUM** | P2 (normal) | Standard escalation, human at convenience | bead + mail mayor |
+| **CRITICAL** | P0 (urgent) | System-threatening, immediate attention | bead + email + SMS |
+| **HIGH** | P1 (high) | Important blocker, needs human soon | bead + email |
+| **MEDIUM** | P2 (normal) | Standard escalation, human at convenience | bead |
+| **LOW** | P3 (information) | Informational, can wait | bead |
 
 ## Tiered Escalation Flow
 
@@ -22,10 +23,10 @@ with automatic re-escalation.
 Agent -> gt escalate -s <SEVERITY> "description"
            |
            v
-     [Mayor receives]
+     [Escalation bead filed]
            |
-           +-- resolves --> updates issue, re-slings work
-           +-- cannot  --> forwards to Overseer --> resolves
+           +-- routed --> bead and any configured outside channels
+           +-- reviewed --> ack / close by whoever picks it up
 ```
 
 Each tier can resolve OR forward. The chain is tracked via bead comments.
@@ -47,9 +48,10 @@ cycle, and a condition that persists for days would never say so twice.
   "type": "escalation",
   "version": 1,
   "routes": {
-    "medium": ["bead", "mail:mayor"],
-    "high": ["bead", "mail:mayor", "email:human"],
-    "critical": ["bead", "mail:mayor", "email:human", "sms:human"]
+    "low": ["bead"],
+    "medium": ["bead"],
+    "high": ["bead", "email:human"],
+    "critical": ["bead", "email:human", "sms:human"]
   },
   "contacts": {
     "human_email": "",
@@ -73,7 +75,7 @@ cycle, and a condition that persists for days would never say so twice.
 | Action | Format | Behavior |
 |--------|--------|----------|
 | `bead` | `bead` | Create escalation bead (always first, implicit) |
-| `mail:<target>` | `mail:mayor` | Send gt mail to target |
+| `mail:<target>` | `mail:gastown/witness` | Send gt mail to target |
 | `email:human` | `email:human` | Send email to `contacts.human_email` |
 | `sms:human` | `sms:human` | Send SMS to `contacts.human_sms` |
 | `slack` | `slack` | Post to `contacts.slack_webhook` |
@@ -101,12 +103,12 @@ Not yet implemented; routing is by severity only.
 
 | Category | Description | Default Route |
 |----------|-------------|---------------|
-| `decision` | Multiple valid paths, need choice | Mayor |
-| `help` | Need guidance or expertise | Mayor |
-| `blocked` | Waiting on unresolvable dependency | Mayor |
-| `failed` | Unexpected error, can't proceed | Mayor |
+| `decision` | Multiple valid paths, need choice | Overseer |
+| `help` | Need guidance or expertise | Overseer |
+| `blocked` | Waiting on unresolvable dependency | Overseer |
+| `failed` | Unexpected error, can't proceed | Overseer |
 | `emergency` | Security or data integrity issue | Overseer (direct) |
-| `gate_timeout` | Gate didn't resolve in time | Mayor |
+| `gate_timeout` | Gate didn't resolve in time | Overseer |
 
 ## Commands
 
@@ -190,10 +192,11 @@ deleted (ADR 0005); run it by hand or from a plugin.
 - **Recoverable errors**: Transient failures that will auto-retry
 - **Information queries**: Questions that can be answered from context
 
-## Mayor Startup Check
+## Operator Review
 
-On `gt prime`, Mayor displays pending escalations grouped by severity.
-Action: review with `bd list --tag=escalation`, close with `bd close <id> --reason "..."`.
+Open escalations surface in the town's attention queue and in `gt escalate list`.
+Action: review the open records, then ack or close them with
+`gt escalate close <id> --reason "..."`.
 
 
 ## Viewing Escalations

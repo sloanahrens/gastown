@@ -291,7 +291,7 @@ func AlertKey(fingerprint, source, description string) string {
 }
 
 // MailTargets extracts the mail targets from route actions:
-// ["bead", "mail:mayor", "email:human"] returns ["mayor"].
+// ["bead", "mail:gastown/witness", "email:human"] returns ["gastown/witness"].
 func MailTargets(actions []string) []string {
 	var targets []string
 	for _, action := range actions {

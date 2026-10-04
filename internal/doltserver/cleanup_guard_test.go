@@ -68,7 +68,7 @@ func TestValidateForceAuthorization(t *testing.T) {
 			ID:        "hq-auth1",
 			Title:     "Authorize forced cleanup of testdb_*",
 			Status:    "open",
-			CreatedBy: "mayor",
+			CreatedBy: "overseer",
 			Labels:    []string{ForceAuthLabel},
 		}
 	}
