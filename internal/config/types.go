@@ -1158,6 +1158,13 @@ type ForgejoConfig struct {
 	// MirrorTarget is the rig's read-only push mirror target, e.g. its
 	// GitHub repository URL. A mirror failure never blocks a landing.
 	MirrorTarget string `json:"mirror_target,omitempty"`
+
+	// ShadowMode runs both gates on a rig that has not cut over yet: the
+	// worker pushes the merge candidate and records the required context's
+	// verdict, and the local LandGate still decides. Both verdicts reach the
+	// landing record, so the flip/no-flip call has evidence (slice 8). Nil and
+	// false both mean the candidate gate is the authority.
+	ShadowMode *bool `json:"shadow_mode,omitempty"`
 }
 
 // GateWorkflowName returns the configured gate workflow, or
@@ -1176,6 +1183,12 @@ func (c *ForgejoConfig) BotLogin(role string) string {
 		return ""
 	}
 	return c.Bots[role]
+}
+
+// IsShadowMode reports whether the rig runs both gates with the local one
+// deciding (slice 8). Nil-safe.
+func (c *ForgejoConfig) IsShadowMode() bool {
+	return c != nil && c.ShadowMode != nil && *c.ShadowMode
 }
 
 // IsPolecatIntegrationEnabled returns whether polecat integration branch

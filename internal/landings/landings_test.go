@@ -42,6 +42,31 @@ func TestRecord_MatchesD2LandFields(t *testing.T) {
 	}
 }
 
+// shadowLine is a shadow-mode landing (slice 8) as the writer serializes it:
+// the local gate in gate_result, the candidate gate's verdict beside it.
+const shadowLine = `{"bead":"gt-abc","rig":"gastown","branch":"polecat/opal/gt-abc","head":"1111111111111111111111111111111111111111","target":"main","base":"2222222222222222222222222222222222222222","landed_commit":"3333333333333333333333333333333333333333","patch_id":"4444444444444444444444444444444444444444","gate_result":"pass (test exit 0 1m2s)","om_verdict":"approve","om_score":0.92,"route":"daemon","landed_at":"2026-09-30T14:05:06Z","ci_verdict":"failed","ci_context":"ci / gate (push)","ci_candidate":"3333333333333333333333333333333333333333","ci_branch":"land/gt-abc","ci_run_status":"failure"}`
+
+func TestRecord_MatchesShadowLandFields(t *testing.T) {
+	t.Parallel()
+	var rec Record
+	if err := json.Unmarshal([]byte(shadowLine), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec.CIVerdict != "failed" || rec.CIContext != "ci / gate (push)" ||
+		rec.CICandidate != "3333333333333333333333333333333333333333" ||
+		rec.CIBranch != "land/gt-abc" || rec.CIRunStatus != "failure" {
+		t.Fatalf("shadow CI fields did not arrive: %+v", rec)
+	}
+	// Every shadow-land key maps to a field and back: no key is dropped.
+	out, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keys(t, out) != keys(t, []byte(shadowLine)) {
+		t.Fatalf("key set drifted:\n got %s\nwant %s", keys(t, out), keys(t, []byte(shadowLine)))
+	}
+}
+
 func keys(t *testing.T, b []byte) string {
 	t.Helper()
 	var m map[string]json.RawMessage
