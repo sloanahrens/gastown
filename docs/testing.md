@@ -422,7 +422,7 @@ Four bugs were found this way in `internal/tmux`:
 
 A flaky test is a bug in the test or in the code. It is never retried, skipped or quarantined. There are no reruns in CI, no `t.Skip` for "environment could not supply the precondition", and no quarantine list.
 
-The one rerun is the landing's (ADR 0004, `internal/land/flake.go`). When the gate on a merged tree fails, Land reruns only the failed packages, once. If they pass, the work lands and Land files a `flake` bead per failing test, naming the package and the test; that bead is the bug, and someone still has to fix it. A test budget overrun is never rerun: it blocks the landing and files a `test-budget` bead. Nothing lands on a red gate.
+The one rerun is the landing's (ADR 0004, `internal/land/flake.go`). When the gate on a merged tree fails, Land reruns only the failed packages, once. If they pass, the work lands and Land files a `flake` bead naming the package and the test — one bead per test, or one bead for the whole package when `MinPackageFlakeTests` (5) or more of its tests failed together, so one setup stall cannot file dozens; that bead is the bug, and someone still has to fix it. A test budget overrun is never rerun: it blocks the landing and files a `test-budget` bead. Nothing lands on a red gate.
 
 Prove a fix under load before claiming it:
 
