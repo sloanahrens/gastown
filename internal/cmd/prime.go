@@ -1486,12 +1486,10 @@ func acquireIdentityLock(ctx RoleContext) error {
 }
 
 // getAgentBeadID returns the agent bead ID for the current role.
-// The mayor uses the hq- prefix; rig-scoped agents use the rig's prefix.
-// Returns empty string for unknown roles.
+// Rig-scoped agents use the rig's prefix.
+// Returns empty string for unknown roles and for a role that owns no bead.
 func getAgentBeadID(ctx RoleContext) string {
 	switch ctx.Role {
-	case RoleMayor:
-		return beads.MayorBeadIDTown()
 	case RolePolecat:
 		if ctx.Rig != "" && ctx.Polecat != "" {
 			prefix := beads.GetPrefixForRig(ctx.TownRoot, ctx.Rig)

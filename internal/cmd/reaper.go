@@ -601,7 +601,7 @@ var reaperAutoCloseCmd = &cobra.Command{
 	Long: `Close issues open with no updates past the stale-age threshold.
 
 Eligibility excludes P0/P1, epics, convoys, molecules and other infrastructure
-issue types, agent beads (every mayor, deacon, dog, witness, refinery, crew and
+issue types, agent beads (every deacon, dog, witness, refinery, crew and
 polecat bead carries gt:agent), plugin receipts, and issues with active
 dependencies. Scan and auto-close share one eligibility clause and one
 stale-age floor rule, so 'gt reaper scan' is a faithful preview of this

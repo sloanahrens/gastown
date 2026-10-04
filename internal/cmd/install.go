@@ -369,12 +369,6 @@ func runInstall(cmd *cobra.Command, args []string) error {
 			fmt.Printf("   ✓ Provisioned %d formulas\n", count)
 		}
 
-		// Create the town-level agent bead (the Mayor).
-		// These use hq- prefix and are stored in town beads for cross-rig coordination.
-		if err := initTownAgentBeads(absPath); err != nil {
-			fmt.Printf("   %s Could not create town-level agent beads: %v\n", style.Dim.Render("⚠"), err)
-		}
-
 		// Set beads routing mode to explicit (required by gt doctor).
 		townBd := beads.NewPlain(absPath, withBeadsDirEnv(filepath.Join(absPath, ".beads")))
 		if err := townBd.ConfigSet("routing.mode", "explicit"); err != nil {
@@ -785,77 +779,6 @@ func ensureCustomTypes(beadsPath string) error {
 			return fmt.Errorf("bd config set %s: %s", cfg.key, bdErrOutput(err))
 		}
 	}
-	return nil
-}
-
-// initTownAgentBeads creates town-level agent beads using hq- prefix.
-// This creates:
-//   - hq-mayor (the agent bead for the town-level Mayor)
-//
-// These beads are stored in town beads (~/gt/.beads/) and are shared across all rigs.
-//
-// Note: Role definitions are now config-based (internal/config/roles/*.toml),
-// not stored as beads. See config-based-roles.md for details.
-//
-// Agent beads use hard fail - installation aborts if creation fails.
-// Agent beads are identity beads that track agent state, hooks, and
-// form the foundation of the CV/reputation ledger. Without them, agents cannot
-// be properly tracked or coordinated.
-func initTownAgentBeads(townPath string) error {
-	bd := beads.New(townPath)
-
-	// bd init doesn't enable "custom" issue types by default, but Gas Town uses
-	// agent beads during install and runtime. Ensure these types are enabled
-	// before attempting to create any town-level system beads.
-	if err := beads.EnsureCustomTypesConfigYAML(beads.ResolveBeadsDir(townPath)); err != nil {
-		return err
-	}
-
-	// Town-level agent beads
-	agentDefs := []struct {
-		id       string
-		roleType string
-		title    string
-	}{
-		{
-			id:       beads.MayorBeadIDTown(),
-			roleType: "mayor",
-			title:    "Mayor - global coordinator, handles cross-rig communication and escalations.",
-		},
-	}
-
-	existingAgents, err := bd.List(beads.ListOptions{
-		Status:   "all",
-		Label:    "gt:agent",
-		Priority: -1,
-	})
-	if err != nil {
-		return fmt.Errorf("listing existing agent beads: %w", err)
-	}
-	existingAgentIDs := make(map[string]struct{}, len(existingAgents))
-	for _, issue := range existingAgents {
-		existingAgentIDs[issue.ID] = struct{}{}
-	}
-
-	for _, agent := range agentDefs {
-		if _, ok := existingAgentIDs[agent.id]; ok {
-			continue
-		}
-
-		fields := &beads.AgentFields{
-			RoleType:   agent.roleType,
-			Rig:        "", // Town-level agents have no rig
-			AgentState: "idle",
-			HookBead:   "",
-			// Note: RoleBead field removed - role definitions are now config-based
-		}
-
-		if _, err := beads.CreateAgentBead(bd, agent.id, agent.title, fields); err != nil {
-			return fmt.Errorf("creating %s: %w", agent.id, err)
-		}
-		fmt.Printf("   ✓ Created agent bead: %s\n", agent.id)
-	}
-
 	return nil
 }
 

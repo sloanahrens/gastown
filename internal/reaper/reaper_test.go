@@ -221,11 +221,10 @@ func TestAutoCloseEligibilityExcludesInfrastructureBeads(t *testing.T) {
 		fragment string
 		why      string
 	}{
-		{"'gt:agent'", "agent beads (mayor, deacon, dog, witness, refinery, crew, polecat) carry this label"},
+		{"'gt:agent'", "agent beads (deacon, dog, witness, refinery, crew, polecat) carry this label"},
 		{"'epic', 'convoy', 'molecule', 'rig', 'agent', 'event'", "infrastructure issue types are lifecycle containers, not stale work"},
 		{"i.id NOT LIKE '%-witness'", "witness bead id pattern"},
 		{"i.id NOT LIKE '%-refinery'", "refinery bead id pattern"},
-		{"i.id NOT LIKE '%-mayor'", "mayor bead id pattern"},
 		{"i.id NOT LIKE '%-deacon'", "deacon bead id pattern"},
 		{"i.id NOT LIKE '%-crew-%'", "crew bead id pattern"},
 		{"i.id NOT LIKE '%-polecat-%'", "polecat bead id pattern"},
@@ -251,6 +250,22 @@ func TestAutoCloseEligibilityExcludesInfrastructureBeads(t *testing.T) {
 	// The qualified form is AutoClose's, and must target the same schema.
 	if !strings.Contains(clause, "FROM `hq`.labels l") {
 		t.Fatalf("qualified clause should target the named schema, got:\n%s", clause)
+	}
+}
+
+// TestAutoCloseEligibilityDoesNotExemptTheMayorID pins gt-rwp7z.10: the mayor
+// role is retired, so the reaper no longer exempts the `%-mayor` id pattern by
+// name. The hq-mayor bead an older install minted is left to the reaper — the
+// gt:agent label still protects it while it carries one, and with the label
+// gone it is ordinary stale work.
+func TestAutoCloseEligibilityDoesNotExemptTheMayorID(t *testing.T) {
+	t.Parallel()
+	clause := staleIssueEligibilityClause("`hq`.")
+	if strings.Contains(clause, "-mayor") {
+		t.Errorf("eligibility clause still exempts mayor ids by name:\n%s", clause)
+	}
+	if !strings.Contains(clause, "'gt:agent'") {
+		t.Error("the gt:agent label exclusion must remain the protection for agent beads")
 	}
 }
 
@@ -738,7 +753,7 @@ func sourceBetween(t *testing.T, source, startMarker, endMarker string) string {
 
 // TestReapExcludesAgentBeads verifies that the Reap function excludes agent beads
 // from being closed, regardless of their age. This is a regression test for the bug
-// where the wisp reaper was closing agent beads (hq-mayor, hq-deacon, witness, refinery,
+// where the wisp reaper was closing agent beads (hq-deacon, witness, refinery,
 // etc.) after 24 hours, causing doctor to report them as missing.
 func TestReapExcludesAgentBeads(t *testing.T) {
 	t.Parallel()
@@ -756,7 +771,7 @@ func TestReapExcludesAgentBeads(t *testing.T) {
 	// beyond the scope of this unit test. The exclusion is verified manually
 	// by checking that agent beads are not closed by the wisp_reaper patrol.
 	t.Log("Agent beads (issue_type='agent') are excluded from wisp reaping")
-	t.Log("This prevents hq-mayor, hq-deacon, witness, refinery, etc. from being closed")
+	t.Log("This prevents hq-deacon, witness, refinery, etc. from being closed")
 }
 
 // TestScanExcludesAgentBeads documents that Scan() must use the same eligibility

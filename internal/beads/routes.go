@@ -170,7 +170,7 @@ func WriteRoutes(beadsDir string, routes []Route) error {
 }
 
 // GetTownBeadsPath returns the path to town-level beads directory.
-// Town beads store hq-* prefixed issues including Mayor, Deacon, and role beads.
+// Town beads store hq-* prefixed issues including Deacon and role beads.
 // The townRoot should be the Gas Town root directory (e.g., ~/gt).
 func GetTownBeadsPath(townRoot string) string {
 	return filepath.Join(townRoot, ".beads")

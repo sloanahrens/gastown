@@ -994,7 +994,7 @@ func NewPinned(beadsDir string, opts ...Option) *Beads {
 //
 // Agent beads (labeled gt:agent) live RIG-LOCAL: rig-prefixed agent IDs
 // (e.g. "gt-gastown-polecat-furiosa") belong in their rig's database and
-// hq-prefixed global agents (mayor, deacon, dogs) in the town database.
+// hq-prefixed global agents (deacon, dogs) in the town database.
 //
 // Per-ID operations (Show, Update, and the agent-bead helpers) resolve each
 // ID to its canonical prefix-routed database and nowhere else: there is no
