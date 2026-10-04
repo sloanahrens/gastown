@@ -25,6 +25,11 @@ type daemonGit interface {
 	WriteTree() (string, error)
 	Commit(message string) error
 	CleanDefaultBranchBaseRef(remote, defaultBranch string) string
+
+	// GitDir locates the directory that holds a worktree's MERGE_HEAD and
+	// rebase-* markers, so the checkpoint dog can tell a mid-conflict
+	// worktree from a dirty one (gt-kbp1t).
+	GitDir() (string, error)
 	git.RevertReader
 
 	// The JSONL backup repository.
