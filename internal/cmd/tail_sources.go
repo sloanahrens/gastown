@@ -997,6 +997,87 @@ func tailSpend(townRoot string) (perHour float64, at time.Time, err error) {
 	return f.PerHour, f.TS, nil
 }
 
+// tailRigs labels a daemon.log line with the rig it belongs to. The town's
+// routes.jsonl is the table — the same one bd routes a bead by — so a bead's
+// prefix resolves through the existing routing helper rather than a second
+// list. A line the table cannot place stays "town": the daemon's own town-wide
+// lines, and a bead whose prefix has no route.
+type tailRigs struct {
+	prefix map[string]string // "gt-" -> "gastown"
+	names  map[string]bool   // every rig in the table
+}
+
+// loadTailRigs reads the town's routes. A missing or unreadable routes file
+// yields a table that places nothing, so every line stays town.
+func loadTailRigs(townRoot string) *tailRigs {
+	r := &tailRigs{prefix: map[string]string{}, names: map[string]bool{}}
+	routes, err := beads.LoadRoutes(filepath.Join(townRoot, ".beads"))
+	if err != nil {
+		return r
+	}
+	for _, route := range routes {
+		rig := strings.SplitN(route.Path, "/", 2)[0]
+		// A "." path is the town store, which the daemon labels "town".
+		if rig == "" || rig == "." {
+			continue
+		}
+		r.prefix[route.Prefix] = rig
+		r.names[rig] = true
+	}
+	return r
+}
+
+// line returns the rig a daemon.log line belongs to, or "town" for the town's
+// own lines. A nil table (a source built without one) places nothing.
+//
+// The daemon names the rig on a line it writes for one rig —
+// "landing_worker: gastown: pass: 1 landed", "tier_sweep: om: swept ...". A
+// "[land] <bead>: ..." line names no rig: it carries only the bead, so its rig
+// comes from the bead's prefix. Everything else the daemon logs — enabled,
+// upgrade-restart, townhealth, dispatcher ticks — is town-wide.
+func (r *tailRigs) line(text string) string {
+	if r == nil {
+		return "town"
+	}
+	if rest, ok := strings.CutPrefix(text, "landing_worker: "); ok {
+		if rig := r.leadingRig(rest); rig != "" {
+			return rig
+		}
+		if rest, ok := strings.CutPrefix(rest, "[land] "); ok {
+			if bead, _, ok := strings.Cut(rest, ":"); ok {
+				return r.bead(bead)
+			}
+		}
+		return "town"
+	}
+	if rest, ok := strings.CutPrefix(text, "tier_sweep: "); ok {
+		if rig := r.leadingRig(rest); rig != "" {
+			return rig
+		}
+	}
+	return "town"
+}
+
+// leadingRig returns the rig when text opens with "<rig>: ", naming one the
+// table knows, and "" otherwise. Membership is the test, not the shape: the
+// town-wide "tier_sweep: WARNING: ..." opens with a token that is not a rig.
+func (r *tailRigs) leadingRig(text string) string {
+	name, _, ok := strings.Cut(text, ": ")
+	if !ok || !r.names[name] {
+		return ""
+	}
+	return name
+}
+
+// bead returns the rig a bead id routes to, or "town" when no route claims its
+// prefix.
+func (r *tailRigs) bead(id string) string {
+	if rig := r.prefix[beads.ExtractPrefix(id)]; rig != "" {
+		return rig
+	}
+	return "town"
+}
+
 // daemonLogStamp is log.LstdFlags as the daemon's logger writes it: local
 // time, no zone.
 const daemonLogStamp = "2006/01/02 15:04:05"
@@ -1014,6 +1095,13 @@ type daemonSource struct {
 	loc       *time.Location
 	now       func() time.Time
 	rigFilter *regexp.Regexp // nil = every line
+	// rigName is the rig rigFilter selects. A line that belongs to it without
+	// naming it — "[land] gt-x: ..." names its bead — is kept too, so --rig
+	// shows the rig's landing lines, not just the ones that spell it.
+	rigName string
+	// rigs labels a line with the rig it belongs to; nil leaves every line
+	// "town".
+	rigs *tailRigs
 
 	// started is set by the first successful daemon.log read; until then
 	// every line is cut at the cutoff. backupsRead keeps a retried first
@@ -1027,13 +1115,26 @@ type daemonSource struct {
 }
 
 // tailRigFilter matches a line naming rig as a whole word: "gastown" in
-// "(from gastown)" and "gastown/jade", not in "gastownish" or "gastown-x".
+// "(from gastown)" and "gastown/jade", not in "gastownish" or "gastown-x". A
+// daemonSource applies it together with the line's own rig, so a line that
+// belongs to the rig without naming it ("[land] gt-x: ...") is kept too.
 func tailRigFilter(rig string) *regexp.Regexp {
 	return regexp.MustCompile(`(^|[^A-Za-z0-9_.-])` + regexp.QuoteMeta(rig) + `($|[^A-Za-z0-9_.-])`)
 }
 
 func (s *daemonSource) line(at time.Time, text string) tailLine {
 	return tailLine{At: at, Rig: "town", Kind: tailKindDaemon, Text: text}
+}
+
+// rigOf is the rig a daemon.log line belongs to, "town" for the town's own.
+func (s *daemonSource) rigOf(text string) string {
+	return s.rigs.line(text)
+}
+
+// keeps reports whether a --rig run shows this line: the line names the rig,
+// or the rig is the one it belongs to.
+func (s *daemonSource) keeps(text string) bool {
+	return s.rigFilter == nil || s.rigFilter.MatchString(text) || s.rigOf(text) == s.rigName
 }
 
 func (s *daemonSource) Poll() []tailLine {
@@ -1048,10 +1149,10 @@ func (s *daemonSource) Poll() []tailLine {
 		if at.IsZero() {
 			at = now
 		}
-		if s.rigFilter != nil && !s.rigFilter.MatchString(text) {
+		if !s.keeps(text) {
 			return
 		}
-		out = append(out, s.line(at, text))
+		out = append(out, tailLine{At: at, Rig: s.rigOf(text), Kind: tailKindDaemon, Text: text})
 	}
 	if !s.backupsRead {
 		s.backupsRead = true
@@ -1445,10 +1546,15 @@ func tailDeployMinutesOf(m float64) string {
 // line. The tracker reads wider than the stream — an hour, for the summary's
 // median — so the passthrough, not the read, is what --since and --rig bound.
 type tailDeploySource struct {
-	inner     *daemonSource
-	track     *tailDeploys
-	from      time.Time
+	inner *daemonSource
+	track *tailDeploys
+	from  time.Time
+	// rigFilter and rigName are the --rig selection the inner source applies
+	// to the lines it reads; the wrapper repeats it because the tracker reads
+	// wider than the stream. A line belongs to the rig when it names it or
+	// when its own rig is the one selected.
 	rigFilter *regexp.Regexp
+	rigName   string
 }
 
 func (s *tailDeploySource) Poll() []tailLine {
@@ -1458,7 +1564,7 @@ func (s *tailDeploySource) Poll() []tailLine {
 		if ln.At.Before(s.from) {
 			continue
 		}
-		if s.rigFilter != nil && !s.rigFilter.MatchString(ln.Text) {
+		if s.rigFilter != nil && !s.rigFilter.MatchString(ln.Text) && ln.Rig != s.rigName {
 			continue
 		}
 		out = append(out, ln)

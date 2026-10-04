@@ -61,9 +61,10 @@ merged from four read-only sources:
   watch     the town's watch feed: .runtime/watch/alerts.jsonl and
             .runtime/attention/events.jsonl
 
-Every line is "<local time> <tag> <text>": one short source tag — the daemon's
-"town", the store's rig name, or the watch feed's "watch" — so a typical line
-fits a terminal without wrapping. The time is HH:MM:SS in local time; --iso prints RFC3339 with the
+Every line is "<local time> <tag> <text>": one short source tag — the rig a
+daemon line belongs to ("town" for the daemon's own town-wide lines), the
+store's rig name, or the watch feed's "watch" — so a typical line fits a
+terminal without wrapping. The time is HH:MM:SS in local time; --iso prints RFC3339 with the
 date and zone. --verbose keeps the "<rig> <kind>" columns, the form to cut or
 grep by position.
 
@@ -129,6 +130,15 @@ it. A missing feed file is silence; a line that is not an alert is skipped
 with one note beside it. Writers append and rotate at 1 MB (see
 docs/reference.md).
 
+A daemon line that belongs to one rig prints under that rig's tag, not "town".
+The daemon names the rig on a line it writes for one — "landing_worker:
+<rig>: ..." and "tier_sweep: <rig>: ..." — and a "[land] <bead>: ..." line
+routes the bead's prefix through the town's routes.jsonl (gt- is gastown, om-
+is om, hm- is hm, be- is beads). A prefix with no route, and the daemon's own
+town-wide lines (starting, upgrade-restart, townhealth, dispatcher ticks, the
+patrols), stay "town". Only the tag changes: the daemon log's text is what
+gt-kpi, the gt-watch scripts and the dashboard parse, and it is untouched.
+
 A bead's trip is shown too. The daemon log's own lines — the spec
 dispatcher's dispatch, the landing worker's merge and land, and the upgrade
 restart that installs a commit — say when a bead was dispatched, merged,
@@ -166,7 +176,7 @@ journal off says so once: nothing is journaled there.
 Examples:
   gt tail                           # the last 15 minutes, then exit
   gt tail -f                        # the last 15 minutes, then follow
-  gt tail --rig gastown --since 2h  # one rig (daemon lines naming it)
+  gt tail --rig gastown --since 2h  # one rig (its daemon lines)
   gt tail --kind landings --since 1d
   gt tail -f --verbose --since 0 | grep ' landings '`,
 	Args: cobra.NoArgs,
@@ -174,7 +184,7 @@ Examples:
 }
 
 func init() {
-	tailCmd.Flags().StringVar(&tailRig, "rig", "", "Show one rig: its events and landings, and daemon lines naming it (hq for the town store; the watch feed is town-wide)")
+	tailCmd.Flags().StringVar(&tailRig, "rig", "", "Show one rig: its events and landings, and the daemon lines it names or belongs to (hq for the town store; the watch feed is town-wide)")
 	tailCmd.Flags().StringVar(&tailSince, "since", "15m", "Start at a duration back (15m, 2h, 1d; 0 = now) or a time (RFC3339, 2006-01-02T15:04:05, 2006-01-02 15:04, 2006-01-02)")
 	tailCmd.Flags().BoolVarP(&tailFollow, "follow", "f", false, "Keep polling every source and print new lines as they appear")
 	tailCmd.Flags().StringVar(&tailKind, "kind", strings.Join(tailKinds, ","), "Comma-separated sources to show: events, landings, daemon, watch")
@@ -506,14 +516,15 @@ func buildTailSources(o tailOptions) (sources []tailSource, preface []tailLine, 
 		if o.rig != "" {
 			rigFilter = tailRigFilter(o.rig)
 		}
+		rigs := loadTailRigs(o.townRoot)
 		if o.deploys == nil {
-			sources = append(sources, &daemonSource{dir: filepath.Join(o.townRoot, "daemon"), cutoff: o.cutoff, loc: o.loc, now: o.now, rigFilter: rigFilter})
+			sources = append(sources, &daemonSource{dir: filepath.Join(o.townRoot, "daemon"), cutoff: o.cutoff, loc: o.loc, now: o.now, rigFilter: rigFilter, rigName: o.rig, rigs: rigs})
 		} else {
 			// The tracker reads an hour back whatever --since says, so the
 			// source cannot carry the rig filter: the wrapper applies both
 			// the cutoff and the filter to the lines the stream shows.
-			d := &daemonSource{dir: filepath.Join(o.townRoot, "daemon"), cutoff: o.deploys.logCutoff(o.cutoff), loc: o.loc, now: o.now}
-			sources = append(sources, &tailDeploySource{inner: d, track: o.deploys, from: o.cutoff, rigFilter: rigFilter})
+			d := &daemonSource{dir: filepath.Join(o.townRoot, "daemon"), cutoff: o.deploys.logCutoff(o.cutoff), loc: o.loc, now: o.now, rigs: rigs}
+			sources = append(sources, &tailDeploySource{inner: d, track: o.deploys, from: o.cutoff, rigFilter: rigFilter, rigName: o.rig})
 		}
 	}
 	if o.kinds[tailKindWatch] {
@@ -746,8 +757,9 @@ func runTailStream(ctx context.Context, w io.Writer, sources []tailSource, prefa
 }
 
 // tailLine is one line of the gt tail stream: when it happened, which rig it
-// belongs to ("town" for the daemon, "hq" for the town store), which source
-// produced it, and the text. Render turns it into
+// belongs to ("hq" for the town store, the rig a daemon line names or routes
+// to, and "town" for the daemon's town-wide lines), which source produced it,
+// and the text. Render turns it into
 // "<local RFC3339 time> <rig> <kind> <text>".
 //
 // Title, Verdict, Comment and Submit are the annotations a line can carry,
@@ -814,10 +826,10 @@ func mergeTail(batches ...[]tailLine) []tailLine {
 }
 
 // renderLine formats one line: the time in the view's layout (RFC3339 when
-// empty), the source, and the text. The source is one short tag — the rig, or
-// "town" for the daemon — or the "<rig> <kind>" pair when the view keeps the
-// full source. A decorated view puts the class's emoji between the source and
-// the text and draws the text in the class's color.
+// empty), the source, and the text. The source is one short tag — the line's
+// rig, "town" for the daemon's town-wide lines — or the "<rig> <kind>" pair
+// when the view keeps the full source. A decorated view puts the class's emoji
+// between the source and the text and draws the text in the class's color.
 //
 // The rig and kind are single tokens, and the text and the annotation it
 // carries are passed through tailText, so every record is exactly one line
