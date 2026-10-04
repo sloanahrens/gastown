@@ -25,6 +25,8 @@ func TestChoosePoolAgent(t *testing.T) {
 	retiredLocal := &config.PolecatPool{LocalAgent: []byte(`"local-coder-polecat"`), MaxLocal: []byte(`0`), OverflowAgent: "deepseek-flash", MaxOverflow: 2}
 	oneTaken := []poolSession{s("deepseek-flash"), s("claude-sonnet")}
 	full := []poolSession{s("deepseek-flash"), s("deepseek-flash")}
+	// A full seat filled by a crashed polecat whose restart is due (gt-tldj4).
+	crashed := []poolSession{{name: "dead/gastown/ember", agent: "deepseek-flash", deadHooked: true}, s("deepseek-flash")}
 
 	cases := []struct {
 		name        string
@@ -40,6 +42,7 @@ func TestChoosePoolAgent(t *testing.T) {
 		{"empty town takes the first seat", capped, "", nil, "deepseek-flash", "pool: seat 1/2 -> deepseek-flash", false},
 		{"other agents' sessions do not count", capped, "", oneTaken, "deepseek-flash", "pool: seat 2/2 -> deepseek-flash", false},
 		{"a full pool refuses", capped, "", full, "deepseek-flash", "pool: full (2/2) -> no seat for deepseek-flash", true},
+		{"a full pool names the dead-hooked seat that filled it", capped, "", crashed, "deepseek-flash", "pool: full (2/2, 1 dead-hooked) -> no seat for deepseek-flash", true},
 		{"a request for the pool's agent is held by its cap", capped, "deepseek-flash", full, "deepseek-flash", "pool: full (2/2) -> no seat for deepseek-flash", true},
 		{"a request the pool does not own stands untouched", capped, "claude-sonnet", full, "", "", false},
 		{"max_overflow 0 leaves the seat uncapped", uncapped, "", full, "deepseek-flash", "pool: seat 3 (uncapped) -> deepseek-flash", false},
@@ -142,11 +145,11 @@ func TestListPolecatSessions(t *testing.T) {
 // polecats were counted as occupants; this is the fix.
 func TestListPolecatSessionsExcludesDoneWithOpenMR(t *testing.T) {
 	t.Parallel()
-	disposition := func(rigName, polecatName string) (polecat.WorkstateDisposition, error) {
+	disposition := func(rigName, polecatName string) (poolSeatState, error) {
 		if polecatName == "diamond" {
-			return polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictPendingMR, ReuseStatus: "idle-pr-open"}, nil
+			return poolSeatState{Disposition: polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictPendingMR, ReuseStatus: "idle-pr-open"}}, nil
 		}
-		return polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictWorking}, nil
+		return poolSeatState{Disposition: polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictWorking}}, nil
 	}
 
 	f := &fakeLister{
@@ -176,18 +179,18 @@ func TestListPolecatSessionsExcludesDoneWithOpenMR(t *testing.T) {
 // seat's work stays recoverable without the seat filling the roster.
 func TestListPolecatSessionsExcludesFinishedSeatWithPreservedCommits(t *testing.T) {
 	t.Parallel()
-	disposition := func(rigName, polecatName string) (polecat.WorkstateDisposition, error) {
+	disposition := func(rigName, polecatName string) (poolSeatState, error) {
 		if polecatName == "agate" {
-			return polecat.WorkstateDisposition{
+			return poolSeatState{Disposition: polecat.WorkstateDisposition{
 				Verdict:                  polecat.WorkstateVerdictNeedsRecovery,
 				Reason:                   "git-unpushed",
 				NeedsRecovery:            true,
 				CommitsPreservedOnBranch: true,
 				ReuseStatus:              "idle-recovery-needed",
-			}, nil
+			}}, nil
 		}
 		// A recovery-blocked seat that still counts keeps occupying the pool.
-		return polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictNeedsRecovery, NeedsRecovery: true, CountsTowardCapacity: true}, nil
+		return poolSeatState{Disposition: polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictNeedsRecovery, NeedsRecovery: true, CountsTowardCapacity: true}}, nil
 	}
 
 	f := &fakeLister{
@@ -210,8 +213,8 @@ func TestListPolecatSessionsExcludesFinishedSeatWithPreservedCommits(t *testing.
 // prevent (gt-md4z) is worse than one extra refused sling.
 func TestListPolecatSessionsFailsOpenOnDispositionError(t *testing.T) {
 	t.Parallel()
-	disposition := func(rigName, polecatName string) (polecat.WorkstateDisposition, error) {
-		return polecat.WorkstateDisposition{}, errors.New("dolt unreachable")
+	disposition := func(rigName, polecatName string) (poolSeatState, error) {
+		return poolSeatState{}, errors.New("dolt unreachable")
 	}
 
 	f := &fakeLister{

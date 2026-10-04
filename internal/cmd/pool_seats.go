@@ -23,13 +23,17 @@ import (
 // (gt-rwp7z.3); the picture itself outlives the patrol.
 
 // poolSeatSessions lists the seats the pool counts as taken: the live polecat
-// sessions, the in-flight seat claims a sling writes before its session exists
-// (gt-t8q5), and the seats mid-landing (gt-thy6r).
+// sessions, the seats whose session is gone while their bead is still hooked
+// (gt-tldj4), the in-flight seat claims a sling writes before its session
+// exists (gt-t8q5), and the seats mid-landing (gt-thy6r).
 //
-// All three belong in the count. The pool's own admission path counts sessions
+// All of them belong in the count. The pool's own admission path counts sessions
 // and claims (choosePoolAgent), so a picture taken from live sessions alone can
-// name a seat free that the very next sling refuses (gt-59o9). A seat
-// mid-landing is the same lie one stage later: the polecat that ran `gt done`
+// name a seat free that the very next sling refuses (gt-59o9). A crashed seat
+// waiting for its supervised restart is the same lie one step earlier: its
+// session is gone but the polecat is coming back within minutes, so dropping
+// the seat lets the restart itself push the town past its cap (gt-tldj4). A
+// seat mid-landing is the lie one stage later: the polecat that ran `gt done`
 // has no session and has dropped its claim, so an accounting that read live
 // sessions alone would sling a second bead into a pool class that was still
 // occupied (gt-2z8k1). The seat is not free until the landing worker records
@@ -57,11 +61,13 @@ func poolSeatSessionsWith(t sessionLister, townRoot string, disposition polecatD
 }
 
 // poolOccupiedSessions lists the seats the pool already holds: the live polecat
-// sessions and the seats mid-landing (gt-thy6r). It is the one occupancy source
-// the pool's own admission decision (poolRouter.route) and the spec
+// sessions, the seats whose session is gone while their bead is still hooked
+// (gt-tldj4), and the seats mid-landing (gt-thy6r). It is the one occupancy
+// source the pool's own admission decision (poolRouter.route) and the spec
 // dispatcher's roster both read, so a seat one counts as taken is taken in the
 // other — admission that counted live sessions alone admits past the cap while
-// a seat is mid-landing (gt-3o7zk).
+// a seat is mid-landing (gt-3o7zk), and a crashed polecat waiting for its
+// supervised restart would let a restart push the town over the cap (gt-tldj4).
 //
 // The seat claims are deliberately not folded in here: route decides from the
 // claims it reads under the seat-decision lock (poolSeatLedger.begin), and
@@ -76,11 +82,83 @@ func poolOccupiedSessions(t sessionLister, townRoot string, disposition polecatD
 	if err != nil {
 		return nil, &poolOccupancyError{sessions: true, err: err}
 	}
+	dead, err := poolDeadHookedSessions(townRoot, pool, disposition, live)
+	if err != nil {
+		return nil, &poolOccupancyError{err: err}
+	}
 	landing, err := poolLandingSessions(townRoot, pool, work)
 	if err != nil {
 		return nil, &poolOccupancyError{err: err}
 	}
-	return append(live, landing...), nil
+	return append(append(live, dead...), landing...), nil
+}
+
+// poolDeadHookedSessions lists the seats whose tmux session is gone but whose
+// agent bead still names hooked, non-terminal work: a polecat that crashed and
+// whose supervised restart is due (gt-tldj4). Such a seat keeps holding the
+// pool's seat while it waits — the supervisor brings the polecat back within
+// minutes, so dropping the seat in the gap is what let a restart push the town
+// past its cap (the 4/3 on 2026-10-04: sapphire's session died at 18:06 with
+// gt-rwp7z.10 still hooked, the roster read 2/3 at 18:07 and slung a fourth
+// polecat, and the restart at 18:08 made that four).
+//
+// Seats are enumerated the way `gt polecat list` and the capacity snapshot
+// enumerate them — the polecat directories under each rig (listPolecatDirectoryNames)
+// — less the seats a live session already accounts for. The decision is the
+// shared seat-state read (polecatDispositionFunc), so a seat whose bead is
+// terminal, or whose hook names nothing live, is not counted here any more than
+// it is by a live session (gt-b9ud0).
+//
+// A seat whose state cannot be read is skipped: it is not proven held, the live
+// seats are already counted, and counting every unreadable directory would let
+// a bead-database hiccup fill every seat and refuse every sling.
+//
+// The seat is rendered on the pool's overflow agent. No per-polecat agent
+// survives its session's death — the agent is the tmux session's GT_AGENT, and
+// `gt polecat list` leaves the field empty for a seat with no live session — so
+// the overflow seat, the one the town cap bounds, is the seat such a polecat is
+// counted against. On a pool that also runs a pro seat, a dead pro occupant is
+// counted on the overflow seat instead; that can only over-count it, refusing a
+// sling rather than admitting past the cap.
+func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, disposition polecatDispositionFunc, live []poolSession) ([]poolSession, error) {
+	if townRoot == "" || pool == nil || pool.OverflowAgent == "" || disposition == nil {
+		return nil, nil
+	}
+	liveSeats := make(map[string]bool, len(live))
+	for _, s := range live {
+		if s.rig != "" && s.polecat != "" {
+			liveSeats[s.rig+"/"+s.polecat] = true
+		}
+	}
+	rigs, err := knownRigNames(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	var out []poolSession
+	for _, rigName := range rigs {
+		names, err := listPolecatDirectoryNames(filepath.Join(townRoot, rigName))
+		if err != nil {
+			return nil, fmt.Errorf("listing polecats in %s: %w", rigName, err)
+		}
+		for _, name := range names {
+			if liveSeats[rigName+"/"+name] {
+				continue
+			}
+			state, err := disposition(rigName, name)
+			if err != nil || !state.HookHeld || !state.Disposition.CountsTowardCapacity {
+				continue
+			}
+			out = append(out, poolSession{
+				name:       "dead/" + rigName + "/" + name,
+				agent:      pool.OverflowAgent,
+				rig:        rigName,
+				polecat:    name,
+				deadHooked: true,
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+	return out, nil
 }
 
 // poolOccupancyError labels a poolOccupiedSessions failure by the read that

@@ -166,6 +166,12 @@ func dispatchRosterSeats(roster string) ([]townhealth.DispatchSeat, bool) {
 	var out []townhealth.DispatchSeat
 	for _, part := range strings.Split(roster, ",") {
 		part = strings.TrimSpace(part)
+		// A seat may carry the dead-hooked breakdown Picture renders —
+		// "agent live/cap (N dead-hooked)" (gt-tldj4) — which is not part of
+		// the count parsed here.
+		if i := strings.LastIndexByte(part, '('); i >= 0 && strings.HasSuffix(part, ")") {
+			part = strings.TrimSpace(part[:i])
+		}
 		i := strings.LastIndexByte(part, ' ')
 		if i < 0 {
 			return nil, true

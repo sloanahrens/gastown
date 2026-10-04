@@ -186,6 +186,9 @@ func TestDispatchRosterSeats(t *testing.T) {
 	}{
 		{"claude-sonnet 1/2, deepseek-flash 2/2", []townhealth.DispatchSeat{{Live: 1, Cap: 2}, {Live: 2, Cap: 2}}, false},
 		{"claude-sonnet 0/1", []townhealth.DispatchSeat{{Live: 0, Cap: 1}}, false},
+		// A seat carrying the dead-hooked breakdown Picture renders still reads
+		// as its count (gt-tldj4).
+		{"claude-sonnet 1/2, deepseek-flash 3/3 (1 dead-hooked)", []townhealth.DispatchSeat{{Live: 1, Cap: 2}, {Live: 3, Cap: 3}}, false},
 		{"no seats", nil, false},
 		// A roster the daemon cannot read in full must not read as a full
 		// town, so each unreadable shape is reported rather than dropped
