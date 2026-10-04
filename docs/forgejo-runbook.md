@@ -22,8 +22,12 @@ to repeat after a partial failure:
   scope at all; `viewer` `read:repository,read:user`. An unknown role is an
   error, not a default scope. A token minted by an earlier version keeps its
   old scope until `--rotate` replaces it;
-- for each `--repo OWNER/NAME`, each role's collaborator access and the one
-  branch-protection rule the landing path depends on. `main` refuses a push
+- for each `--repo OWNER/NAME`, each role's collaborator access and then the one
+  branch-protection rule the landing path depends on. The access comes first on
+  purpose: Forgejo drops a `merge_whitelist_usernames` entry for a login that is
+  not yet a collaborator with write access, so writing the rule first leaves a
+  fresh repo with an empty merge whitelist and nobody, admins included, able to
+  merge. `main` refuses a push
   from everyone, admins included, merges only through the landing bot, requires
   the gate and review contexts, and refuses a stale candidate. `main` is the
   only protected branch: Forgejo refuses to delete a branch any protection rule
@@ -32,6 +36,9 @@ to repeat after a partial failure:
   repository's delete-branch-after-merge setting, which only the web UI's merge
   honours). A run reports a `land/*` rule left by an earlier cutover and
   removes it; under `--dry-run` it reports the removal without sending it.
+  A protection write whose read-back differs from what was sent exits
+  non-zero, so a field Forgejo dropped stops the run instead of leaving a rule
+  nobody can merge through.
 
 Run it with `--help` for the flags.
 
@@ -56,8 +63,9 @@ bash scripts/forgejo-provision.sh --repo OWNER/NAME      # one repo's access and
 
 With `--repo`, each role's bot is granted the access it needs — `write` for
 polecat and landing, `read` for viewer, none for registry, which works in the
-package registry alone. The grant is read before it is written, so a second run
-on unchanged state sends no write.
+package registry alone. The grant is read before it is written and lands before
+the protection rule is created or patched, so a second run on unchanged state
+sends no write.
 
 `--dry-run` reads the live state and prints what it would write without
 sending a write. Expect one line per action, then `provisioning complete`; a
@@ -114,6 +122,7 @@ the revoked value until it restarts.
 | `the admin token cannot mint a token for <bot>` | The token lacks site-admin rights. `POST /users/{name}/tokens` wants HttpBasic auth by design, so only a site-admin token on the `/admin/users/{name}/tokens` route can mint for another account. |
 | `the rule exists but Forgejo did not resolve its name` | Forgejo resolves a rule name through the URL path, so a name holding `/` is sent encoded. Set the rule by hand under Settings → Branches, then re-run. |
 | `the repository is not on <api>` | The repo does not exist on this Forgejo, or the admin token cannot see it. Check `--api-url` and the repository owner. |
+| `the write for main on <repo> did not take` | Forgejo accepted the request but its response omitted a field the run sent — commonly a `merge_whitelist_usernames` entry for a login that is not a collaborator with write access. The run exits non-zero and leaves the rule as Forgejo stored it. Grant the named login access (a normal `--repo` run does this for the roles it provisions) and re-run. |
 | A bot's push is refused | It is not a collaborator with write access, or the protection rule does not list it. Check both. |
 | `token file ... is mode ...; it must be 600`, from the client | The file lost its mode. The script restores 600 on the next run. |
 

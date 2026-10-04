@@ -89,6 +89,26 @@ field() { # field FILE KEY — the first "key":"value" in FILE
   sed -n 's/.*"'"$2"'":"\([^"]*\)".*/\1/p' "$1" | head -1
 }
 
+# filter_whitelist OWNER REPO FILE drops each merge_whitelist_usernames entry for
+# a login that is not a collaborator with write access, modelling the field
+# Forgejo silently discards (gt-fn9e6.23).
+filter_whitelist() {
+  local owner=$1 repo=$2 file=$3
+  local wl entry out="" perm tmp
+  wl=$(sed -n 's/.*"merge_whitelist_usernames":\[\([^]]*\)\].*/\1/p' "$file" | head -1)
+  case "$wl" in *'"'*) ;; *) return 0 ;; esac
+  while IFS= read -r entry; do
+    entry=${entry//[\" ]/}
+    [ -n "$entry" ] || continue
+    perm=$(cat "$STUB_STATE/collaborators/${owner}__${repo}__${entry}" 2>/dev/null || true)
+    case "$perm" in
+      write|admin) out="${out:+$out,}\"$entry\"" ;;
+    esac
+  done <<< "$(printf '%s' "$wl" | tr ',' '\n')"
+  tmp="$file.filtered"
+  sed "s|\"merge_whitelist_usernames\":\[[^]]*\]|\"merge_whitelist_usernames\":[$out]|" "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
 case "$method $path" in
   "GET /users/"*)
     user=${path#/users/}
@@ -167,6 +187,7 @@ case "$method $path" in
     else
       mkdir -p "$STUB_STATE/protections"
       cat "$body" > "$key"
+      filter_whitelist "$owner" "$repo" "$key"
       send 201 "$(cat "$key")"
     fi
     ;;
@@ -185,6 +206,7 @@ case "$method $path" in
       # The server applies the fields the client sent; the provisioner sends
       # every field it verifies, so storing the body models the result.
       cat "$body" > "$key"
+      filter_whitelist "$owner" "$repo" "$key"
       send 200 "$(cat "$key")"
     fi
     ;;
@@ -260,6 +282,11 @@ fresh_state() {
 }
 
 calls() { cat "$STATE/calls.log" 2>/dev/null || true; }
+# first_call_line METHOD [PATH_CONTAINS] — the line of the first matching call in
+# calls.log, so a test can assert the order of two calls.
+first_call_line() {
+  grep -n "^$1 .*${2:-}" "$STATE/calls.log" 2>/dev/null | head -1 | cut -d: -f1
+}
 count_calls() { # count_calls METHOD [PATH_CONTAINS]
   local n=0 line
   while IFS= read -r line; do
@@ -303,6 +330,10 @@ check "polecat is granted write on the repo" test "$(cat "$STATE/collaborators/a
 check "landing is granted write on the repo" test "$(cat "$STATE/collaborators/acme__rig__bot-landing")" = write
 check "registry is granted no repo access" test ! -e "$STATE/collaborators/acme__rig__bot-registry"
 check "the collaborator grants read before they write" test "$(count_calls GET /collaborators)" = 2 -a "$(count_calls PUT /collaborators)" = 2
+grant_line=$(first_call_line PUT /collaborators)
+rule_line=$(first_call_line POST /branch_protections)
+check "the access is granted before the protection is written" \
+  test -n "$grant_line" -a -n "$rule_line" -a "$grant_line" -lt "$rule_line"
 check "each role mints exactly one token" test "$(count_calls POST /tokens)" = 3
 check "nothing is written into HOME" test "$(find "$TMP/home" -type f | wc -l | tr -d ' ')" = 0
 check "the config dir holds the three token files and nothing else" test "$(find "$CFG" -type f | wc -l | tr -d ' ')" = 3
@@ -391,6 +422,19 @@ out=$(run_provision --repo acme/rig); rc=$?
 if [ "$rc" = 0 ]; then pass "an unprotected repo provisions and exits 0"; else fail "an unprotected repo provisions and exits 0 (rc=$rc)" "$out"; fi
 check "only the main rule is created on it" test "$(count_calls POST /branch_protections)" = 1 -a "$(count_calls DELETE /branch_protections)" = 0
 
+echo "=== a whitelist entry for a non-collaborator is dropped ==="
+# Forgejo discards a merge_whitelist_usernames entry for a login that is not a
+# collaborator with write access. Provisioning only the registry role (which
+# gets no repository access) leaves the landing bot a non-collaborator, so the
+# write comes back with an empty whitelist and the run must fail loudly rather
+# than leave an unmergeable protection behind (gt-fn9e6.23).
+fresh_state
+out=$(run_provision --role registry --repo acme/rig); rc=$?
+if [ "$rc" != 0 ]; then pass "a dropped whitelist entry exits non-zero"; else fail "a dropped whitelist entry exits non-zero (rc=$rc)" "$out"; fi
+check "the fake dropped the landing bot from the whitelist" \
+  contains '"merge_whitelist_usernames":[]' "$(cat "$STATE/protections/acme__rig__main")"
+check "the failure reports the write did not take" contains "did not take" "$out"
+
 echo "=== an unknown repository fails loudly ==="
 fresh_state
 out=$(run_provision --repo acme/missing); rc=$?
@@ -403,6 +447,11 @@ viewer_cfg="$CFG-viewer"
 STATE="$viewer_state"
 CFG="$viewer_cfg"
 fresh_state
+# The runbook's flow provisions the default roles on a repo before a later
+# viewer run, so the landing bot already holds write access here; without it the
+# protection's whitelist entry would be dropped and the run fail (gt-fn9e6.23).
+mkdir -p "$STATE/collaborators"
+printf 'write' > "$STATE/collaborators/acme__rig__bot-landing"
 out=$(run_provision --role viewer --repo acme/rig); rc=$?
 if [ "$rc" = 0 ]; then pass "the viewer role provisions and exits 0"; else fail "the viewer role provisions and exits 0 (rc=$rc)" "$out"; fi
 check "viewer mints read scopes only" has_all "$STATE/mints/bot-viewer.json" '"scopes":["read:repository","read:user"]'
