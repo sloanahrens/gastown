@@ -2670,6 +2670,34 @@ type nukePolecatOptions struct {
 	// looks exactly like a routine nuke from the outside, so the operator has
 	// to name the loss. See NukeAcknowledgeUnpreservedFlag.
 	AcknowledgeUnpreserved bool
+	// Deps overrides the collaborators a nuke reaches for. Production leaves it
+	// nil, which is every production choice; a unit test injects the ones whose
+	// production version starts a process (a tmux kill, a bd call), which the
+	// unit tier refuses.
+	Deps *nukeDeps
+}
+
+// nukeDeps is the nuke's process-starting collaborators, each nil meaning the
+// production one. See nukePolecatOptions.Deps.
+type nukeDeps struct {
+	// Sessions stops the seat's tmux session. nil: the operator supervisor's
+	// polecat session manager over a fresh tmux.
+	Sessions polecatSessionStopper
+	// Releaser is the bead surface the hooked-work release writes through.
+	// nil: bd, through newPolecatWorkReleaserFn.
+	Releaser polecatWorkReleaser
+	// SurvivingWork answers whether a bead's polecat branch still carries
+	// unmerged work. nil: nukeSurvivingWorkFn.
+	SurvivingWork func(beadID string) (string, error)
+	// MoleculeBeads is the database the molecule burn reads and writes.
+	// nil: bd, in the rig's repo directory.
+	MoleculeBeads beads.Client
+}
+
+// polecatSessionStopper is the session surface the nuke's first step uses.
+// *polecat.SessionManager implements it.
+type polecatSessionStopper interface {
+	Stop(polecat string, force bool) error
 }
 
 // NukeAcknowledgeUnpreservedFlag is the flag that makes
@@ -2790,8 +2818,10 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 	if err := checkNukeActiveMRSafety(mgr, polecatName, rigName, opts.Force); err != nil {
 		return err
 	}
-
-	t := tmux.NewTmux()
+	deps := opts.Deps
+	if deps == nil {
+		deps = &nukeDeps{}
+	}
 
 	// Step 1: Kill tmux session unconditionally to prevent ghost sessions
 	// when IsRunning fails to detect the session.
@@ -2802,7 +2832,10 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 	//
 	// An operator verb ending the session: the supervisor's Stop, logged and
 	// not refused by an e-stop or a park (gt-4k3fj.4.1).
-	sessMgr := supervisedPolecatSessions(t, r, "polecat nuke", operatorActor("gt polecat nuke"))
+	sessMgr := deps.Sessions
+	if sessMgr == nil {
+		sessMgr = supervisedPolecatSessions(tmux.NewTmux(), r, "polecat nuke", operatorActor("gt polecat nuke"))
+	}
 	if err := sessMgr.Stop(polecatName, true); err != nil {
 		if !errors.Is(err, polecat.ErrSessionNotFound) {
 			fmt.Printf("  %s session kill failed: %v\n", style.Warning.Render("⚠"), err)
@@ -2823,7 +2856,7 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 	// The stale attached_molecule in the work bead's description causes sling to
 	// fail with "bead already has N attached molecule(s)" on re-dispatch (gt-npzy).
 	if getErr == nil && polecatInfo != nil && polecatInfo.Issue != "" {
-		nukeCleanupMolecules(polecatInfo.Issue, r)
+		nukeCleanupMolecules(polecatInfo.Issue, r, deps.MoleculeBeads)
 	}
 
 	// Step 2.75: Self-preserve push before nuke (gt-4vr guardrail, gt-yxys
@@ -2910,9 +2943,17 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 	if getErr == nil {
 		infoForHook = polecatInfo
 	}
+	releaser := deps.Releaser
+	if releaser == nil {
+		releaser = newPolecatWorkReleaserFn(beads.FindTownRoot(r.Path), "")
+	}
+	survives := deps.SurvivingWork
+	if survives == nil {
+		survives = func(beadID string) (string, error) { return nukeSurvivingWorkFn(r.Path, beadID) }
+	}
 	hookedWork := startNukeHookedWork(
-		newPolecatWorkReleaserFn(beads.FindTownRoot(r.Path), ""),
-		func(beadID string) (string, error) { return nukeSurvivingWorkFn(r.Path, beadID) },
+		releaser,
+		survives,
 		rigName, polecatName, infoForHook,
 		func() string { return readAgentHookBeadFn(r, rigName, polecatName) },
 	)
@@ -3159,12 +3200,18 @@ func resetPolecatAgentBeadForReuse(r *rig.Rig, rigName, polecatName string) {
 // nukeCleanupMolecules burns any molecule attached to a work bead during polecat nuke.
 // This prevents stale attached_molecule references from blocking re-dispatch (gt-npzy).
 // Best-effort: failures are logged but don't abort the nuke.
-func nukeCleanupMolecules(workBeadID string, r *rig.Rig) {
+//
+// store, when non-nil, is the database to use instead of bd; the nuke's tests
+// inject an in-memory one, because the unit tier starts no bd process.
+func nukeCleanupMolecules(workBeadID string, r *rig.Rig, store beads.Client) {
 	// Use mayor/rig as workDir so ResolveBeadsDir finds the Dolt-backed
 	// .beads/ directory, not the gitignored rig-root .beads/. Without this,
 	// detach/close operations route to the wrong database and the stale
 	// molecule attachment persists on the work bead. (gt--1up)
-	bd := beads.New(filepath.Join(r.Path, "mayor", "rig"))
+	bd := store
+	if bd == nil {
+		bd = beads.New(filepath.Join(r.Path, "mayor", "rig"))
+	}
 
 	// Fetch the work bead to check for attached molecules
 	issue, err := bd.Show(workBeadID)
