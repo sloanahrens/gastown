@@ -1,0 +1,12 @@
+[
+  {
+    "remote_name": "github",
+    "remote_address": "git@github.com:gastownhall/gastown.git",
+    "branch_filter": "main",
+    "sync_on_commit": true,
+    "interval": "10m0s",
+    "last_update": "2026-10-04T19:02:00Z",
+    "last_error": "",
+    "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGastownMirrorDeployKey forgejo-mirror"
+  }
+]
