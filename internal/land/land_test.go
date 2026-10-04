@@ -1062,3 +1062,20 @@ func TestStageTimesMarksARetriedOMRun(t *testing.T) {
 		t.Errorf("stageTimes = %q; an unretried om run must not say retried", plain)
 	}
 }
+
+// TestStageTimesEndsWithTheHostLoad1: the stages line carries the load its
+// stages ran under, so a slow gate is read against its host from daemon.log
+// alone; a host that reports no load leaves the old line whole (gt-a025o).
+func TestStageTimesEndsWithTheHostLoad1(t *testing.T) {
+	t.Parallel()
+	g := GateResult{Steps: []StepResult{{Name: "gate", Elapsed: 29 * time.Second}}}
+	readable := func() (float64, bool) { return 7.44, true }
+	unreadable := func() (float64, bool) { return 0, false }
+
+	if got, want := stageTimesUnderLoad(g, 95*time.Second, false, readable), "stages: gate 29s, om 1m35s (load1 7.4)"; got != want {
+		t.Errorf("stageTimesUnderLoad = %q, want %q", got, want)
+	}
+	if got, want := stageTimesUnderLoad(g, 95*time.Second, false, unreadable), "stages: gate 29s, om 1m35s"; got != want {
+		t.Errorf("stageTimesUnderLoad = %q, want the line unchanged when the load is unreadable", got)
+	}
+}
