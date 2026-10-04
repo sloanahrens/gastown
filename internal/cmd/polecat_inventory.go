@@ -265,6 +265,38 @@ func polecatSessionKey(rigName, polecatName string) string {
 // projection's case: it is a capacity question, not a reuse decision, and
 // paying a beads call per polecat on the admission path is exactly what
 // polecatListInventoryEnv exists to avoid.
+// assignedBeadTerminalForInventory reports whether the bead a seat is assigned
+// to is terminal, the fact that lets the classifier stop counting a finished
+// seat's leftover commits against dispatch capacity (gt-b9ud0).
+//
+// The bead is the one agentSourceIssueHint names — the live assigned issue,
+// else the source-issue hint the agent bead records — the same resolution the
+// reuse gate (Manager.workstateInputForPolecat) and the active_mr policy use,
+// so no two readers disagree about which bead "assigned" means. A live assigned
+// issue is non-terminal by construction (assessPolecatAssignedIssueWork drops
+// terminal beads), and a hint that is the hook reference reuses the hook lookup
+// this seat's caller already made; only a distinct recorded hint costs a read.
+// With no issue source — the counts-only capacity projection — terminality is
+// unproven and the answer is false, the fail-closed side for an accounting
+// change.
+func assignedBeadTerminalForInventory(source polecat.IssueReader, itemIssue string, fields *beads.AgentFields, hookBead string, hookDisposition polecat.HookBeadDisposition) bool {
+	if source == nil || itemIssue != "" {
+		return false
+	}
+	hint := agentSourceIssueHint(itemIssue, fields)
+	switch {
+	case hint == "":
+		return false
+	case hint == hookBead:
+		return hookDisposition.Terminal
+	}
+	issue, err := source.Show(hint)
+	if err != nil || issue == nil {
+		return false
+	}
+	return beads.IssueStatus(issue.Status).IsTerminal()
+}
+
 func hookBeadDispositionForInventory(source polecat.IssueReader, hookBead string) polecat.HookBeadDisposition {
 	if source == nil {
 		return polecat.HookBeadDisposition{Blocker: "hook_bead=" + hookBead + " status=unverified"}
@@ -369,18 +401,32 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 		item.State = polecat.StateReviewNeeded
 	}
 
-	if fields != nil && !activeWorkEvidence.BlocksCleanup {
-		if hookBead := strings.TrimSpace(fields.HookBead); hookBead != "" {
-			// The same classifier check-recovery and the reuse gate read, so a
-			// seat the recovery report clears is not still flagged here as an
-			// unverified hook (gt-eqiid).
-			disposition := hookBeadDispositionForInventory(env.IssueSource, hookBead)
-			if disposition.Safe {
-				facts.HookBeadSubmitted = disposition.Submitted
-			} else {
-				facts.ActiveWorkBlocker = disposition.Blocker
-			}
+	hookBead := ""
+	hookDisposition := polecat.HookBeadDisposition{}
+	if fields != nil {
+		hookBead = strings.TrimSpace(fields.HookBead)
+	}
+	if hookBead != "" && !activeWorkEvidence.BlocksCleanup {
+		// The same classifier check-recovery and the reuse gate read, so a
+		// seat the recovery report clears is not still flagged here as an
+		// unverified hook (gt-eqiid). The disposition is kept: the terminality
+		// read below reuses the lookup this already paid for.
+		hookDisposition = hookBeadDispositionForInventory(env.IssueSource, hookBead)
+		if hookDisposition.Safe {
+			facts.HookBeadSubmitted = hookDisposition.Submitted
+		} else {
+			facts.ActiveWorkBlocker = hookDisposition.Blocker
 		}
+	}
+	// Only a seat whose git facts were measured live can be told its remaining
+	// at-risk evidence is preserved commits (gt-b9ud0). Without a probe the
+	// facts are the recorded ones and gitSafe is true by omission, so a
+	// terminal bead on top of them would waive a recorded dirty/stash/unpushed
+	// status nobody measured — turning a seat with real uncommitted work into a
+	// reusable, safe-to-nuke one. The callers that reach here with a source
+	// (the list path) are the ones that probe.
+	if facts.GitStateSource == polecat.GitStateSourceLive {
+		facts.AssignedBeadTerminal = assignedBeadTerminalForInventory(env.IssueSource, item.Issue, fields, hookBead, hookDisposition)
 	}
 	if item.ActiveMR != "" {
 		// The decision is the shared active_mr policy, so what the list shows

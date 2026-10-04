@@ -72,9 +72,64 @@ func TestDecideWorkstateCanonicalFields(t *testing.T) {
 			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "git-stash", NeedsRecovery: true, CountsTowardCapacity: true, ReuseStatus: "idle-recovery-needed", Blockers: []string{"git_state=has_stash stash_count=1"}},
 		},
 		{
-			name: "terminal source does not suppress unpreserved commits",
+			// gt-b9ud0: the unpushed-commits refusal is kept, so the work is
+			// still reported and the seat still needs recovery — but a
+			// terminal assigned bead means nothing is in flight, and nuke
+			// preserves the branch on origin, so the seat stops holding a
+			// dispatch seat. Only the capacity accounting and the extra
+			// preservations line change.
+			name: "terminal source keeps the unpushed blocker without its capacity",
 			in:   WorkstateInput{State: StateIdle, CleanupStatus: CleanupClean, Branch: "polecat/test", UnpushedCommits: 1, MQCheckRequired: true, HasSubmittableWork: true, AssignedBeadTerminal: true},
+			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "git-unpushed", NeedsRecovery: true, CountsTowardCapacity: false, CommitsPreservedOnBranch: true, ReuseStatus: "idle-recovery-needed", Blockers: []string{"git_state=has_unpushed unpushed_commits=1", "unpushed commits preserved on branch polecat/test only"}},
+		},
+		{
+			// The exemption is for the measured refusal. A recorded
+			// cleanup_status is a hint about a moment in the past, not a
+			// measurement, and nothing here proves the commits are on the
+			// branch: the seat keeps counting until a probe says otherwise.
+			name: "terminal source with only a recorded unpushed cleanup still counts",
+			in:   WorkstateInput{State: StateIdle, CleanupStatus: CleanupUnpushed, Branch: "polecat/test", AssignedBeadTerminal: true},
+			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "cleanup-has_unpushed", NeedsRecovery: true, CountsTowardCapacity: true, ReuseStatus: "idle-recovery-needed", Blockers: []string{"cleanup_status=has_unpushed"}},
+		},
+		{
+			// The exemption is for commits alone. A dirty tree is work no nuke
+			// preserves, so a terminal bead does not excuse it.
+			name: "terminal source with a dirty tree still counts",
+			in:   WorkstateInput{State: StateIdle, CleanupStatus: CleanupClean, Branch: "polecat/test", GitDirty: true, GitDirtyReason: "git_state=has_uncommitted uncommitted_files=1", UnpushedCommits: 1, AssignedBeadTerminal: true},
+			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "git-dirty", NeedsRecovery: true, CountsTowardCapacity: true, ReuseStatus: "idle-recovery-needed", Blockers: []string{"git_state=has_uncommitted uncommitted_files=1", "git_state=has_unpushed unpushed_commits=1"}},
+		},
+		{
+			// The realistic sibling of the case above: a push that never reached
+			// the remote is not something nuke preserves — the branch is only
+			// preserved because the push failed, and nothing proves the commits
+			// are on origin. A terminal bead does not excuse it.
+			name: "terminal source with a failed push still counts",
+			in:   WorkstateInput{State: StateIdle, CleanupStatus: CleanupClean, Branch: "polecat/test", PushFailed: true, UnpushedCommits: 1, AssignedBeadTerminal: true},
+			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "push-failed", NeedsRecovery: true, CountsTowardCapacity: true, ReuseStatus: "idle-recovery-needed", Blockers: []string{"push_failed=true", "git_state=has_unpushed unpushed_commits=1"}},
+		},
+		{
+			name: "terminal source with a stash still counts",
+			in:   WorkstateInput{State: StateIdle, CleanupStatus: CleanupClean, Branch: "polecat/test", StashCount: 1, UnpushedCommits: 1, AssignedBeadTerminal: true},
+			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "git-stash", NeedsRecovery: true, CountsTowardCapacity: true, ReuseStatus: "idle-recovery-needed", Blockers: []string{"git_state=has_stash stash_count=1", "git_state=has_unpushed unpushed_commits=1"}},
+		},
+		{
+			// Liveness, not terminality, decides a hook: a seat whose bead is
+			// terminal but whose hook is still set is holding work.
+			name: "terminal source with a hook still set still counts",
+			in:   WorkstateInput{State: StateIdle, CleanupStatus: CleanupClean, Branch: "polecat/test", UnpushedCommits: 1, HookBead: "gt-hooked", AssignedBeadTerminal: true},
+			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "hook-still-set", NeedsRecovery: true, CountsTowardCapacity: true, ReuseStatus: "idle-recovery-needed", Blockers: []string{"has work on hook (gt-hooked)", "git_state=has_unpushed unpushed_commits=1"}},
+		},
+		{
+			// A live bead keeps the refusal and the seat (gt-nkyy's case was
+			// the closed-source half; this is the half it did not move).
+			name: "nonterminal source with unpushed commits still counts",
+			in:   WorkstateInput{State: StateIdle, CleanupStatus: CleanupClean, Branch: "polecat/test", UnpushedCommits: 1, AssignedBeadTerminal: false},
 			want: WorkstateDisposition{Verdict: WorkstateVerdictNeedsRecovery, Reason: "git-unpushed", NeedsRecovery: true, CountsTowardCapacity: true, ReuseStatus: "idle-recovery-needed", Blockers: []string{"git_state=has_unpushed unpushed_commits=1"}},
+		},
+		{
+			name: "terminal source with no commits and no other blocker is reusable",
+			in:   WorkstateInput{State: StateIdle, CleanupStatus: CleanupClean, Branch: "polecat/test", AssignedBeadTerminal: true},
+			want: WorkstateDisposition{Verdict: WorkstateVerdictSafeToNuke, Reason: "reusable", Reusable: true, SafeToNuke: true, ReuseStatus: "idle-preserved"},
 		},
 		{
 			name: "push failure blocks terminal source",

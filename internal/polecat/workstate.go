@@ -92,16 +92,23 @@ type WorkstateInput struct {
 // predicate in Blockers, so no consumer has to report an unnamed guard
 // (gt-3r1h).
 type WorkstateDisposition struct {
-	Verdict              string   `json:"verdict"`
-	Reason               string   `json:"reason,omitempty"`
-	Reusable             bool     `json:"reusable"`
-	SafeToNuke           bool     `json:"safe_to_nuke"`
-	NeedsRecovery        bool     `json:"needs_recovery"`
-	NeedsMQSubmit        bool     `json:"needs_mq_submit"`
-	MQStatus             string   `json:"mq_status,omitempty"`
-	CountsTowardCapacity bool     `json:"counts_toward_capacity"`
-	ReuseStatus          string   `json:"reuse_status,omitempty"`
-	Blockers             []string `json:"blockers,omitempty"`
+	Verdict              string `json:"verdict"`
+	Reason               string `json:"reason,omitempty"`
+	Reusable             bool   `json:"reusable"`
+	SafeToNuke           bool   `json:"safe_to_nuke"`
+	NeedsRecovery        bool   `json:"needs_recovery"`
+	NeedsMQSubmit        bool   `json:"needs_mq_submit"`
+	MQStatus             string `json:"mq_status,omitempty"`
+	CountsTowardCapacity bool   `json:"counts_toward_capacity"`
+	// CommitsPreservedOnBranch reports that the seat's only capacity-counting
+	// blocker is commits that exist on its branch alone, which nuke preserves
+	// on origin, so the seat needs recovery without holding a dispatch seat
+	// (gt-b9ud0). CountsTowardCapacity is false whenever it is set; a consumer
+	// that must tell this exemption from a seat that never counted reads this
+	// field rather than matching blocker text.
+	CommitsPreservedOnBranch bool     `json:"commits_preserved_on_branch,omitempty"`
+	ReuseStatus              string   `json:"reuse_status,omitempty"`
+	Blockers                 []string `json:"blockers,omitempty"`
 	// CleanupStatusSource is the provenance of the recorded cleanup_status
 	// hint this disposition was decided against — always "recorded", because
 	// there is no live cleanup_status (see CleanupStatusSourceRecorded).
@@ -274,6 +281,7 @@ func decideWorkstate(in WorkstateInput) WorkstateDisposition {
 
 	d := WorkstateDisposition{Verdict: WorkstateVerdictSafeToNuke}
 	capacityBlocked := false
+	capacityBlockers := 0
 	block := func(reason, blocker string, countsTowardCapacity bool) {
 		if d.Reason == "" {
 			d.Reason = reason
@@ -282,6 +290,9 @@ func decideWorkstate(in WorkstateInput) WorkstateDisposition {
 			d.Blockers = append(d.Blockers, blocker)
 		}
 		capacityBlocked = capacityBlocked || countsTowardCapacity
+		if countsTowardCapacity {
+			capacityBlockers++
+		}
 	}
 
 	// A submitted hook is set by design — the landing worker needs it — so it
@@ -341,6 +352,23 @@ func decideWorkstate(in WorkstateInput) WorkstateDisposition {
 		d.NeedsRecovery = true
 		d.CountsTowardCapacity = capacityBlocked
 		d.ReuseStatus = "idle-recovery-needed"
+		// A finished seat whose assigned bead is already terminal has no work
+		// in flight. Its leftover commits are the one shape of at-risk work a
+		// nuke already preserves — the branch goes to origin — so they stay
+		// recoverable from it, and the seat stops holding a dispatch seat
+		// without anything being deleted or reaped (gt-b9ud0). Only the
+		// measured unpushed-commits refusal is accounted this way, and only as
+		// the sole capacity-counting blocker: a dirty tree or stash,
+		// push_failed, mr_failed, a hook still set, a failed or unread bead, or
+		// a recorded status no probe confirmed are work a terminal bead says
+		// nothing about, and they keep counting. Verdict, NeedsRecovery,
+		// Reusable and SafeToNuke are untouched, so the seat stays visible and
+		// recoverable.
+		if in.AssignedBeadTerminal && in.UnpushedCommits > 0 && capacityBlockers == 1 {
+			d.CountsTowardCapacity = false
+			d.CommitsPreservedOnBranch = true
+			d.Blockers = append(d.Blockers, preservedCommitsBlocker(in))
+		}
 		return d
 	}
 
@@ -427,6 +455,17 @@ func gitStashBlocker(in WorkstateInput) string {
 
 func gitUnpushedBlocker(in WorkstateInput) string {
 	return "git_state=has_unpushed unpushed_commits=" + itoa(in.UnpushedCommits)
+}
+
+// preservedCommitsBlocker is the line a terminal-bead seat carries beside the
+// unpushed-commits refusal that no longer counts toward capacity (gt-b9ud0).
+// It names where the work actually is, so a reader does not have to know that
+// nuke preserves the branch on origin to see why dropping the refusal is safe.
+func preservedCommitsBlocker(in WorkstateInput) string {
+	if in.Branch == "" {
+		return "unpushed commits preserved on the branch only"
+	}
+	return "unpushed commits preserved on branch " + in.Branch + " only"
 }
 
 // liveGitRiskBlockers names the at-risk git facts a live probe measured, in
