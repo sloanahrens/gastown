@@ -52,6 +52,16 @@ const (
 	// passes an unset value.
 	defaultReapBlockedThreshold = 5
 
+	// reapBlockedAlertSeverity is the severity of one seat's blocked alert, and
+	// reapThresholdAlertSeverity that of the rig-wide pile-up. A blocked seat is
+	// a fact to relay, not something to page a person for: the seat's own
+	// recovery path is in the message, and one seat is the common case. A rig
+	// that has crossed the threshold has stopped making progress, so it is
+	// worth a look — still below HIGH, which is reserved for an alert whose
+	// failure needs a person now (escalateAlertErr).
+	reapBlockedAlertSeverity   = "low"
+	reapThresholdAlertSeverity = "medium"
+
 	// reapAlertKeyPrefix namespaces this pass's throttle entries in the
 	// patrolscan ledger. The recovery comment keys share that file and look
 	// like "<rig>/<beadID>", so the prefix keeps the two key spaces apart.
@@ -62,21 +72,21 @@ const (
 	reapAlertStoreName = "reap_alerts.json"
 )
 
-// reapAlertSink is the alert side of the blocked-seat pass: raise one alert
-// under a stable key, and clear the keys whose condition went away. Both return
-// the delivery outcome, because the pass records an alert as raised or cleared
-// only once gt escalate delivered it; tests inject a recorder that can fail on
-// demand.
+// reapAlertSink is the alert side of the blocked-seat pass: raise one alert at
+// a given severity under a stable key, and clear the keys whose condition went
+// away. Both return the delivery outcome, because the pass records an alert as
+// raised or cleared only once gt escalate delivered it; tests inject a recorder
+// that can fail on demand.
 type reapAlertSink interface {
-	Raise(key, source, message string) error
+	Raise(severity, key, source, message string) error
 	Clear(reason string, keys ...string) error
 }
 
 // daemonAlertSink is the production reapAlertSink.
 type daemonAlertSink struct{ d *Daemon }
 
-func (s daemonAlertSink) Raise(key, source, message string) error {
-	return s.d.escalateAlertErr(key, source, message)
+func (s daemonAlertSink) Raise(severity, key, source, message string) error {
+	return s.d.escalateAlertSeverity(severity, key, source, message)
 }
 
 func (s daemonAlertSink) Clear(reason string, keys ...string) error {
@@ -194,9 +204,10 @@ func (d *Daemon) reapAlertsIfEnabled(rig string, r patrolscan.Report, ledger pat
 }
 
 // reapAlerts raises one alert per blocked reap candidate in r, plus one
-// threshold alert when the blocked count reaches threshold. It clears a
-// seat's alert once that seat stops being blocked, and the threshold alert
-// once the count falls back below the threshold.
+// threshold alert when the blocked count reaches threshold, at the severities
+// the pass's two constants name. It clears a seat's alert once that seat stops
+// being blocked, and the threshold alert once the count falls back below the
+// threshold.
 //
 // A repeat under a key that is already open is throttled to once per report
 // window; a new or changed key is always raised, so an unreadable throttle
@@ -252,7 +263,7 @@ func (d *Daemon) reapAlerts(rig string, r patrolscan.Report, threshold int, ledg
 			// window: a repeat now would only bump the occurrence count.
 			continue
 		}
-		if err := sink.Raise(key, reapAlertSource, reapBlockedMessage(rig, f.Subject, f.Detail)); err != nil {
+		if err := sink.Raise(reapBlockedAlertSeverity, key, reapAlertSource, reapBlockedMessage(rig, f.Subject, f.Detail)); err != nil {
 			// A raise that did not land records nothing: the throttle entry
 			// would suppress the retry for the whole window, and the seat's
 			// state would claim an alert that never reached an operator.
@@ -297,7 +308,7 @@ func (d *Daemon) reapAlerts(rig string, r patrolscan.Report, threshold int, ledg
 	switch {
 	case len(blocked) >= threshold:
 		if !st.Threshold[rig] || !ledgerReportedWithin(ledger, thresholdKey, now, window) {
-			if err := sink.Raise(thresholdKey, reapAlertSource, reapThresholdMessage(rig, len(blocked), threshold)); err != nil {
+			if err := sink.Raise(reapThresholdAlertSeverity, thresholdKey, reapAlertSource, reapThresholdMessage(rig, len(blocked), threshold)); err != nil {
 				d.logReapAlertUndelivered("raise", rig, thresholdKey, err)
 				break
 			}

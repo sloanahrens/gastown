@@ -11,6 +11,7 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/patrolscan"
 )
 
@@ -26,7 +27,7 @@ type recordingAlerts struct {
 	failClear bool
 }
 
-type alertRaise struct{ key, source, message string }
+type alertRaise struct{ severity, key, source, message string }
 
 type alertClear struct {
 	reason string
@@ -37,8 +38,8 @@ type alertClear struct {
 // retries are exhausted (Dolt contention, slot starvation).
 var errAlertUndelivered = errors.New("gt escalate did not deliver")
 
-func (r *recordingAlerts) Raise(key, source, message string) error {
-	r.raised = append(r.raised, alertRaise{key: key, source: source, message: message})
+func (r *recordingAlerts) Raise(severity, key, source, message string) error {
+	r.raised = append(r.raised, alertRaise{severity: severity, key: key, source: source, message: message})
 	if r.failRaise {
 		return errAlertUndelivered
 	}
@@ -148,6 +149,11 @@ func TestReapAlertsOnePerBlockedSeat(t *testing.T) {
 	for _, a := range r.rec.raised {
 		if a.source != "patrol-scan" {
 			t.Errorf("source = %q, want patrol-scan", a.source)
+		}
+		// One blocked seat is informational, not something that pages a person
+		// (gt-j2svz): it must not arrive at escalateAlertErr's HIGH.
+		if a.severity != reapBlockedAlertSeverity {
+			t.Errorf("severity = %q, want %q", a.severity, reapBlockedAlertSeverity)
 		}
 	}
 	if len(r.rec.cleared) != 0 {
@@ -513,6 +519,42 @@ func TestReapAlertsEnabledCoversRigAndUsesConfigThreshold(t *testing.T) {
 	}
 	if !containsKey(raisedKeys(r.rec), reapBlockedKey("gastown", "agate", "verdict NEEDS_RECOVERY")) {
 		t.Fatalf("per-seat alert missing: %v", raisedKeys(r.rec))
+	}
+
+	// The rig-wide pile-up is worth a look, but still below HIGH (gt-j2svz).
+	for _, a := range r.rec.raised {
+		if a.key != reapThresholdKey("gastown") {
+			continue
+		}
+		if a.severity != reapThresholdAlertSeverity {
+			t.Errorf("threshold severity = %q, want %q", a.severity, reapThresholdAlertSeverity)
+		}
+	}
+}
+
+// TestDaemonAlertSinkRaisesAtTheGivenSeverity: the production sink must pass
+// the severity the pass chose through to escalateAlertSeverity, not the HIGH
+// that escalateAlertErr hard-codes (gt-j2svz).
+func TestDaemonAlertSinkRaisesAtTheGivenSeverity(t *testing.T) {
+	t.Parallel()
+	rec := notifyfake.New()
+	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: t.TempDir()}, gtPath: "gt", notifier: rec}
+
+	const key = "reap-blocked:gastown/agate:0f1e2d3c"
+	if err := (daemonAlertSink{d: d}).Raise(reapBlockedAlertSeverity, key, reapAlertSource, "gastown/agate is a blocked reap candidate"); err != nil {
+		t.Fatalf("Raise: %v", err)
+	}
+
+	got := rec.Escalations()
+	if len(got) != 1 {
+		t.Fatalf("escalations = %d, want 1", len(got))
+	}
+	e := got[0].Escalation
+	if e.Severity != reapBlockedAlertSeverity || e.Fingerprint != key {
+		t.Fatalf("escalation = %+v, want the alert at %q under key %q", e, reapBlockedAlertSeverity, key)
+	}
+	if e.Severity == "HIGH" {
+		t.Error("the reap sink raised at HIGH")
 	}
 }
 
