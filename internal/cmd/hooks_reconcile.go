@@ -13,8 +13,8 @@ import (
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
-// interimHookMarker identifies the mayor's interim host-hygiene PreToolUse
-// hook (gt-nqcy) that 'gt hooks reconcile' removes.
+// interimHookMarker identifies the interim host-hygiene PreToolUse hook
+// (gt-nqcy) that 'gt hooks reconcile' removes.
 const interimHookMarker = "no-root-scan.sh"
 
 var hooksReconcileDryRun bool
@@ -22,7 +22,7 @@ var hooksReconcileDryRun bool
 var hooksReconcileCmd = &cobra.Command{
 	Use:   "reconcile",
 	Short: "One-time removal of the interim host-hygiene hook from settings.json files",
-	Long: `Remove the mayor's interim PreToolUse hook (no-root-scan.sh) from every
+	Long: `Remove the interim host-hygiene PreToolUse hook (no-root-scan.sh) from every
 managed .claude/settings.json file that still carries it (gt-nqcy).
 
 'gt hooks sync' does not remove it — the interim entry lives outside the

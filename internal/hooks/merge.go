@@ -14,7 +14,7 @@ import (
 //
 // Merge rules:
 //  1. Start with base hooks
-//  2. Apply role override (crew, polecats, mayor)
+//  2. Apply role override (crew, polecats)
 //  3. Apply rig+role override if exists (gastown/crew, beads/polecats, etc.)
 //
 // For each hook type (SessionStart, PreToolUse, etc.):

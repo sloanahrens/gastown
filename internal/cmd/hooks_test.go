@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/hooks"
 )
 
@@ -264,6 +265,29 @@ func TestDiscoverHooksCrewLevel(t *testing.T) {
 	}
 }
 
+// TestDetermineTargetsSkipsTownLevelDirectories pins the --all-rigs scan: the
+// town root holds the mayor/, deacon/ and hooks/ directories next to the rigs,
+// and none of them is a rig to install a role hook into.
+func TestDetermineTargetsSkipsTownLevelDirectories(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	for _, dir := range []string{"mayor", "deacon", "hooks", ".beads", "myrig/crew", "myrig/polecats"} {
+		if err := os.MkdirAll(filepath.Join(townRoot, filepath.FromSlash(dir)), 0755); err != nil {
+			t.Fatalf("create %s: %v", dir, err)
+		}
+	}
+
+	targets, err := determineTargets(townRoot, constants.RoleCrew, true, []string{constants.RoleCrew})
+	if err != nil {
+		t.Fatalf("determineTargets: %v", err)
+	}
+
+	want := []string{filepath.Join(townRoot, "myrig", "crew")}
+	if len(targets) != len(want) || targets[0] != want[0] {
+		t.Errorf("determineTargets = %v, want %v", targets, want)
+	}
+}
+
 func TestResolveSettingsTarget(t *testing.T) {
 	t.Parallel()
 	townRoot := "/home/user/gt"
@@ -294,7 +318,7 @@ func TestResolveSettingsTarget(t *testing.T) {
 			expected: "/home/user/gt/myrig/witness",
 		},
 		{
-			name:     "mayor stays at cwd",
+			name:     "town-level directory stays at cwd",
 			cwd:      "/home/user/gt/mayor",
 			expected: "/home/user/gt/mayor",
 		},

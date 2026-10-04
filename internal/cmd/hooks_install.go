@@ -165,7 +165,9 @@ func determineTargets(townRoot, role string, allRigs bool, allowedRoles []string
 			return nil, err
 		}
 		for _, e := range entries {
-			if e.IsDir() && !strings.HasPrefix(e.Name(), ".") && e.Name() != "mayor" && e.Name() != "deacon" && e.Name() != "hooks" {
+			// Town-root entries that are not rigs: the mayor/ and deacon/
+			// town directories and the hooks/ registry.
+			if e.IsDir() && !strings.HasPrefix(e.Name(), ".") && e.Name() != constants.DirMayor && e.Name() != "deacon" && e.Name() != "hooks" {
 				rigs = append(rigs, e.Name())
 			}
 		}
@@ -219,9 +221,10 @@ func resolveSettingsTarget(townRoot, cwd string) string {
 	}
 	parts := strings.Split(relPath, string(filepath.Separator))
 	if len(parts) < 2 {
-		return cwd // At town root or top-level dir (mayor/deacon)
+		return cwd // At the town root or a town-level directory
 	}
-	// parts[0] = rig name (or mayor/deacon), parts[1] = role dir
+	// parts[0] = a town-root directory (a rig name or a town-level dir),
+	// parts[1] = role dir
 	roleDir := parts[1]
 	switch roleDir {
 	case "crew", "polecats", "witness":
