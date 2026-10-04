@@ -80,6 +80,11 @@ type StepResult struct {
 type FailedTest struct {
 	Package string
 	Test    string
+	// Duration is how long the test took, from the "(0.01s)" go test printed
+	// on its "--- FAIL" line; zero when the line named no duration. A long
+	// first failure points at a setup stall rather than an independent flake
+	// (gt-cffxl).
+	Duration time.Duration
 }
 
 // BudgetOverrun is one failing "BUDGET:" line of the budget runner.
@@ -673,8 +678,9 @@ func (g CommandGate) runStep(parent context.Context, dir string, run runFunc, s 
 var packageLineRE = regexp.MustCompile(`^(ok|FAIL)\s+(\S+)(\s|$)`)
 
 // failedTestRE matches a "--- FAIL: TestName (0.01s)" line, subtests
-// (indented, "TestName/sub") included.
-var failedTestRE = regexp.MustCompile(`^\s*--- FAIL: (\S+)`)
+// (indented, "TestName/sub") included, and captures the duration go test
+// prints in parentheses (absent on some lines).
+var failedTestRE = regexp.MustCompile(`^\s*--- FAIL: (\S+)(?: \(([0-9.]+)s\))?`)
 
 // parseGoTestOutput reads go test's text output: each package's summary line
 // and the top-level tests that failed in it. go test (and the budget runner)
@@ -684,13 +690,13 @@ func parseGoTestOutput(out string) ([]PackageResult, []FailedTest) {
 	var (
 		pkgs    []PackageResult
 		tests   []FailedTest
-		pending []string
+		pending []FailedTest
 	)
 	for _, line := range strings.Split(out, "\n") {
 		if m := failedTestRE.FindStringSubmatch(line); m != nil {
 			name, _, _ := strings.Cut(m[1], "/")
-			if !slices.Contains(pending, name) {
-				pending = append(pending, name)
+			if !slices.ContainsFunc(pending, func(ft FailedTest) bool { return ft.Test == name }) {
+				pending = append(pending, FailedTest{Test: name, Duration: parseTestDuration(m[2])})
 			}
 			continue
 		}
@@ -701,13 +707,27 @@ func parseGoTestOutput(out string) ([]PackageResult, []FailedTest) {
 		passed := m[1] == "ok"
 		pkgs = append(pkgs, PackageResult{Package: m[2], Passed: passed})
 		if !passed {
-			for _, name := range pending {
-				tests = append(tests, FailedTest{Package: m[2], Test: name})
+			for _, ft := range pending {
+				ft.Package = m[2]
+				tests = append(tests, ft)
 			}
 		}
 		pending = nil
 	}
 	return pkgs, tests
+}
+
+// parseTestDuration turns the "(0.01s)" a "--- FAIL" line carried (captured
+// without its unit) into a duration; absent or unparsable is zero.
+func parseTestDuration(secs string) time.Duration {
+	if secs == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(secs + "s")
+	if err != nil {
+		return 0
+	}
+	return d
 }
 
 // parseShellTierFailures is the scripts the tier sweep's summary line named,

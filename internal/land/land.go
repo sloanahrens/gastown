@@ -111,8 +111,9 @@ type Lander struct {
 	// Rerun reruns only pkgs' tests, once, in the merged tree at dir: the
 	// flake policy's rerun (flake.go). nil means a red gate is final.
 	Rerun func(ctx context.Context, dir string, pkgs []string) GateResult
-	// GateBeads files the flake policy's beads: one per flaky test, one per
-	// package over the test budget. nil logs them only.
+	// GateBeads files the flake policy's beads: one per flaky test (or one
+	// per package when MinPackageFlakeTests or more of its tests failed
+	// together), one per package over the test budget. nil logs them only.
 	GateBeads GateBeads
 	// Slow reports a gate or om stage that runs past its threshold; nil
 	// reports nothing (gt-lcu5p).

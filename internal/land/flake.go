@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 )
 
 // The flake policy (gt-v4ssj.5, deep review D2 Q5): a red gate on the merged
@@ -16,8 +17,10 @@ import (
 //   - Otherwise, when the failed step named failing Go packages, those
 //     packages alone are rerun once in the same merged tree. If every one
 //     passes, the landing goes on and each test that failed gets a flake bead
-//     naming its package and test. If any fails again, the gate rejection
-//     stands.
+//     naming its package and test -- except that MinPackageFlakeTests or more
+//     failures in one package are one package bead listing them, so a single
+//     setup stall cannot file dozens (gt-cffxl). If any package fails again,
+//     the gate rejection stands.
 //   - A red gate that named no failing package (lint, build) is a rejection,
 //     with no rerun.
 //
@@ -28,6 +31,14 @@ import (
 // "--- FAIL" line (a panic, a timeout, a TestMain failure).
 const NoTestNamed = "(no test named)"
 
+// MinPackageFlakeTests is how many tests of one package must fail together
+// before the flake policy files one bead for the package instead of one bead
+// per test (gt-cffxl). Below it nothing changes. One infrastructure hiccup --
+// a container or fixture that took 62s to start (hm-8uq, 2026-10-04) -- fails
+// every test behind it; filing 41 beads for that one stall is queue noise and
+// it hides a real single-test flake.
+const MinPackageFlakeTests = 5
+
 // GateBeadKind says what a gate bead records.
 type GateBeadKind string
 
@@ -35,6 +46,11 @@ const (
 	// GateBeadFlake is a test that failed on the merged tree and passed when
 	// its package was rerun.
 	GateBeadFlake GateBeadKind = "flake"
+	// GateBeadFlakePackage is MinPackageFlakeTests or more tests of one
+	// package that failed together on the merged tree and all passed when the
+	// package was rerun: one bead for the package, listing them, in place of
+	// one per test.
+	GateBeadFlakePackage GateBeadKind = "flake-package"
 	// GateBeadBudget is a package over the test budget; it blocked a landing.
 	GateBeadBudget GateBeadKind = "budget"
 )
@@ -44,14 +60,23 @@ type GateBead struct {
 	Kind    GateBeadKind
 	Package string
 	// Test is the flaky test's name (NoTestNamed when the package named
-	// none); empty for a budget overrun.
+	// none); for a package flake bead, its first failing test. Empty for a
+	// budget overrun.
 	Test string
+	// Tests lists every failing test of a package flake bead, first failure
+	// first. Empty for the other kinds, which name one test in Test.
+	Tests []string
+	// TestDuration is how long that first failing test took, when the gate log
+	// carried it; a long first failure points at a setup stall rather than an
+	// independent flake. Zero when the log named no duration.
+	TestDuration time.Duration
 	// Detail says where it was seen: the work, the merged commit, the runs.
 	Detail string
 }
 
 // GateBeads files gate beads. Implementations comment on the open bead for
-// the same package and test instead of filing a duplicate.
+// the same package and test (or package, for a package flake bead) instead of
+// filing a duplicate.
 type GateBeads interface {
 	FileGateBead(b GateBead) (id string, err error)
 }
@@ -107,14 +132,60 @@ func (l *Lander) applyFlakePolicy(ctx context.Context, dir string, w Work, merge
 	if !rr.Passed || !allPassed(rr, failed) {
 		return v, nil
 	}
-	for _, ft := range flakyTests(step, failed) {
-		f := Flake{FailedTest: ft}
-		f.BeadID = l.fileGateBead(GateBead{Kind: GateBeadFlake, Package: ft.Package, Test: ft.Test, Detail: fmt.Sprintf(
-			"%s failed in the gate on %s's merged tree %s and passed when its package was rerun once; the landing went on. Rerun: %s",
-			ft.Test, w.BeadID, merged, rr.Summary())})
+	for _, b := range flakeBeads(step, failed) {
+		b.Detail = flakeDetail(b, w, merged, rr)
+		f := Flake{FailedTest: FailedTest{Package: b.Package, Test: b.Test}}
+		f.BeadID = l.fileGateBead(b)
 		v.flakes = append(v.flakes, f)
 	}
 	return v, nil
+}
+
+// flakeBeads groups the failed tests by package: a package whose failed tests
+// number MinPackageFlakeTests or more becomes one GateBeadFlakePackage listing
+// them; every other failed test keeps its own GateBeadFlake. Order is pkgs'
+// package order, then the gate's own test order.
+func flakeBeads(step StepResult, pkgs []string) []GateBead {
+	failed := flakyTests(step, pkgs)
+	var out []GateBead
+	for _, pkg := range pkgs {
+		var tests []FailedTest
+		for _, ft := range failed {
+			if ft.Package == pkg {
+				tests = append(tests, ft)
+			}
+		}
+		if len(tests) >= MinPackageFlakeTests {
+			b := GateBead{Kind: GateBeadFlakePackage, Package: pkg, Test: tests[0].Test, TestDuration: tests[0].Duration}
+			for _, ft := range tests {
+				b.Tests = append(b.Tests, ft.Test)
+			}
+			out = append(out, b)
+			continue
+		}
+		for _, ft := range tests {
+			out = append(out, GateBead{Kind: GateBeadFlake, Package: pkg, Test: ft.Test})
+		}
+	}
+	return out
+}
+
+// flakeDetail is the detail on the bead for one group b: the work, the merged
+// commit and the rerun, and -- for a package group -- the tests and the first
+// failure with its duration.
+func flakeDetail(b GateBead, w Work, merged string, rr GateResult) string {
+	if b.Kind == GateBeadFlakePackage {
+		first := b.Test
+		if b.TestDuration > 0 {
+			first = fmt.Sprintf("%s (%s)", b.Test, b.TestDuration)
+		}
+		return fmt.Sprintf(
+			"%d tests of %s failed together in the gate on %s's merged tree %s and all passed when the package was rerun once; the landing went on. First failing test: %s. Failed: %s. Rerun: %s",
+			len(b.Tests), b.Package, w.BeadID, merged, first, strings.Join(b.Tests, ", "), rr.Summary())
+	}
+	return fmt.Sprintf(
+		"%s failed in the gate on %s's merged tree %s and passed when its package was rerun once; the landing went on. Rerun: %s",
+		b.Test, w.BeadID, merged, rr.Summary())
 }
 
 // fileGateBead files b and returns its id, or a note why there is none. A
