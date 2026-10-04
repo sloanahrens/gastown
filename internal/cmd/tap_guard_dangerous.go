@@ -55,6 +55,14 @@ This guard blocks operations that could cause irreversible damage:
     (gt-yts7).
   - go clean -cache/-testcache/-modcache/-fuzzcache (wipes the Go build
     cache SHARED by every agent on the host — see gt-nqcy follow-up).
+  - 'go test -count=1 ./...' (with or without -json, any flag order) from a
+    polecat session: an uncached whole-module run recompiles and relinks every
+    package and throws the results away, saturating the shared host. Two such
+    runs plus a landing gate on 10-03 drove load to 45-55 and stretched the
+    gate from ~30s to 5m02s (gt-v4r0x). A seat submits with 'make presubmit',
+    which tests only the packages the branch changed; the landing worker runs
+    the full gate on the merged tree. Scoped runs (./internal/<pkg>/..., a
+    -run filter) and cached 'go test ./...' stay allowed.
   - a loop or watcher around 'gt done' or 'gt slot': a for/while/until block
     whose body invokes either, an xargs/watch/seq beside either, or a heredoc
     body written to a file that contains either shape. 'gt done' waits for the
@@ -202,6 +210,9 @@ func evaluateDangerousCommand(command string, depth int, sess guardSession) (rea
 		return r, ""
 	}
 	if r, alt := matchesGoCleanSharedCache(lowerTokens); r != "" {
+		return r, alt
+	}
+	if r, alt := matchesPolecatFullSuiteUncached(lowerTokens, inPolecatSession(sess.proc)); r != "" {
 		return r, alt
 	}
 	// A loop or watcher around `gt done` / `gt slot` is the improvised retry
@@ -1811,6 +1822,84 @@ func matchesGoCleanSharedCache(tokens []string) (reason, alternative string) {
 		}
 	}
 	return "", ""
+}
+
+// polecatFullSuiteUncachedReason is the block text for an uncached
+// whole-module 'go test' from a polecat seat (gt-v4r0x).
+const polecatFullSuiteUncachedReason = "'go test -count=1' over the whole module (./...) recompiles every package from scratch and discards each result, saturating the Go build cache and this shared host"
+
+const polecatFullSuiteUncachedAlternative = "Alternative: run 'make presubmit' — it lints, builds, and tests only the packages your branch changed against origin/main " +
+	"(plus the tree-wide guard tests); the landing worker runs the full gate on the merged tree. A cached 'go test ./...' and scoped uncached runs stay allowed."
+
+// matchesPolecatFullSuiteUncached blocks an uncached whole-module 'go test'
+// from a polecat session: a 'go test' with '-count=1' set and at least one
+// package argument naming the whole-repo wildcard (./..., ...; see
+// normalizeGoPackageArg). Such a run — with or without -json, in any flag
+// order — recompiles and relinks every package and throws the results away,
+// so a seat that runs it competes with the very gate it is waiting on. Two
+// runs plus a landing gate on 10-03 drove load to 45-55 and stretched the
+// gate from ~30s to 5m02s (gt-v4r0x). 'make presubmit' already tests only
+// the changed packages, so a seat has no need for the full-tree form.
+//
+// Only the full-tree form is blocked. A plain cached 'go test ./...' (no
+// -count=1) reuses the shared cache and stays allowed; scoped uncached runs
+// (go test -count=1 ./internal/cmd/...) and -run-filtered runs stay allowed;
+// crew, refinery, mayor, and operator sessions are untouched
+// (polecatSession is supplied by the caller from inPolecatSession, exactly
+// as matchesPolecatMainPush does, so the matcher stays pure and
+// table-testable).
+//
+// tokens must be lowercased, shell-aware tokens (see shellTokenize). Flag
+// scanning stops at a shell separator or '--', so a later unrelated command
+// on the same line cannot contribute a -count=1 that belongs to itself
+// (mirroring matchesGoCleanSharedCache's separator reset).
+func matchesPolecatFullSuiteUncached(tokens []string, polecatSession bool) (reason, alternative string) {
+	if !polecatSession {
+		return "", ""
+	}
+	for i := 0; i+1 < len(tokens); i++ {
+		if tokens[i] == "go" && tokens[i+1] == "test" {
+			if fullSuiteUncachedGoTest(tokens[i+2:]) {
+				return polecatFullSuiteUncachedReason, polecatFullSuiteUncachedAlternative
+			}
+		}
+	}
+	return "", ""
+}
+
+// fullSuiteUncachedGoTest reports whether the tokens following a 'go test'
+// invocation (rest) form an uncached whole-module run: -count=1 is set (as
+// '-count=1' or '-count 1') and some package argument normalizes to the
+// whole-repo wildcard. Flag value tokens are skipped via goTestValueFlags so
+// a '-run ./...'-style value is never mistaken for a package argument, and
+// scanning stops at '--' (test-binary args) or a shell separator.
+func fullSuiteUncachedGoTest(rest []string) bool {
+	count1 := false
+	wholeRepo := false
+	for i := 0; i < len(rest); i++ {
+		tok := rest[i]
+		if shellCommandSeparators[tok] || tok == "--" {
+			break
+		}
+		if strings.HasPrefix(tok, "-") {
+			flag, value, hasValue := strings.Cut(tok, "=")
+			if flag == "-count" {
+				if hasValue {
+					count1 = value == "1"
+				} else if i+1 < len(rest) && rest[i+1] == "1" {
+					count1 = true
+				}
+			}
+			if goTestValueFlags[flag] && !hasValue && i+1 < len(rest) {
+				i++
+			}
+			continue
+		}
+		if isWholeRepoPackageArg(normalizeGoPackageArg(tok)) {
+			wholeRepo = true
+		}
+	}
+	return count1 && wholeRepo
 }
 
 // idleGateLoad1Threshold is the 1-minute load average above which a

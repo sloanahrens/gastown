@@ -1606,6 +1606,88 @@ func TestGoCleanSharedCacheReachesGuard(t *testing.T) {
 	}
 }
 
+// TestMatchesPolecatFullSuiteUncached pins the gt-v4r0x rule: an uncached
+// whole-module 'go test' is denied in a polecat session, in any flag order
+// and with or without -json, while cached full-tree runs, scoped uncached
+// runs, and -run-filtered runs stay allowed — and the same full-tree command
+// stays allowed outside a polecat session (crew, refinery, mayor, operator).
+func TestMatchesPolecatFullSuiteUncached(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		polecat bool
+		blocked bool
+	}{
+		// Blocked in a polecat session — full tree with -count=1.
+		{"plain full tree uncached", "go test -count=1 ./...", true, true},
+		{"json full tree uncached", "go test -count=1 -json ./...", true, true},
+		{"json before count", "go test -json -count=1 ./...", true, true},
+		{"flag order count last", "go test -json ./... -count=1", true, true},
+		{"space-separated count", "go test -count 1 ./...", true, true},
+		{"bare wildcard", "go test -count=1 ...", true, true},
+		{"module-prefixed wildcard", "go test -count=1 github.com/steveyegge/gastown/...", true, true},
+		{"full tree plus scoped pkg", "go test -count=1 ./internal/cmd ./...", true, true},
+		{"after a shell separator", "cd internal && go test -count=1 ./...", true, true},
+		{"other flags present", "go test -count=1 -timeout 10m -race ./...", true, true},
+
+		// Allowed in a polecat session.
+		{"cached full tree", "go test ./...", true, false},
+		{"json cached full tree", "go test -json ./...", true, false},
+		{"scoped uncached", "go test -count=1 ./internal/cmd/...", true, false},
+		{"scoped package uncached", "go test -count=1 ./internal/cmd", true, false},
+		{"run-filtered uncached", "go test -count=1 -run TestFoo ./internal/cmd", true, false},
+		{"presubmit", "make presubmit", true, false},
+		{"go build full tree", "go build ./...", true, false},
+		{"count not one", "go test -count=3 ./...", true, false},
+		{"prose in quoted mail body", `gt mail send x -s "note" -m "never go test -count=1 ./..."`, true, false},
+		{"count on a later unrelated command", "go test ./... ; ls -count=1", true, false},
+
+		// Not a polecat session: the same command stays allowed.
+		{"crew full tree uncached", "go test -count=1 ./...", false, false},
+		{"crew json full tree uncached", "go test -count=1 -json ./...", false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, alternative := matchesPolecatFullSuiteUncached(lowerTokens(tt.command), tt.polecat)
+			if (reason != "") != tt.blocked {
+				t.Errorf("matchesPolecatFullSuiteUncached(%q, polecat=%v) blocked=%v, want %v", tt.command, tt.polecat, reason != "", tt.blocked)
+			}
+			if tt.blocked && !strings.Contains(alternative, "make presubmit") {
+				t.Errorf("matchesPolecatFullSuiteUncached(%q) alternative=%q, want it to name make presubmit", tt.command, alternative)
+			}
+		})
+	}
+}
+
+// TestPolecatFullSuiteUncachedReachesGuard checks the full
+// evaluateDangerousCommand path — including recursion into bash -c/eval
+// wrappers — for the uncached-full-suite class, and that the session gate is
+// honored end to end.
+func TestPolecatFullSuiteUncachedReachesGuard(t *testing.T) {
+	t.Parallel()
+	polecat := guardSession{proc: fakeGuardProcess(map[string]string{"GT_ROLE": "gastown/polecats/agate"}, "")}
+	tests := []struct {
+		name    string
+		command string
+		sess    guardSession
+		blocked bool
+	}{
+		{"top-level polecat", "go test -count=1 ./...", polecat, true},
+		{"bash -c wrapped polecat", `bash -c "go test -count=1 -json ./..."`, polecat, true},
+		{"top-level non-polecat", "go test -count=1 ./...", noTownSession, false},
+		{"scoped polecat", "go test -count=1 ./internal/cmd/...", polecat, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateDangerousCommand(tt.command, 0, tt.sess)
+			if blocked := reason != ""; blocked != tt.blocked {
+				t.Errorf("evaluateDangerousCommand(%q) blocked=%v (reason=%q), want %v", tt.command, blocked, reason, tt.blocked)
+			}
+		})
+	}
+}
+
 // TestIsIdleGatedSuiteStartCommand pins the gt-nqcy follow-up's detection of
 // unwrapped full-suite starts, ported from the interim host-hygiene hook:
 // 'make test', 'go test ./...', 'make build', and 'go build ./...' are
