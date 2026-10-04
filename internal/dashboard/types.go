@@ -246,10 +246,18 @@ type LandingRow struct {
 	LintSecs *float64 `json:"lint_secs,omitempty"`
 	GateSecs *float64 `json:"gate_secs,omitempty"`
 	OMSecs   *float64 `json:"om_secs,omitempty"`
-	Commit   string   `json:"commit,omitempty"`
-	Route    string   `json:"route,omitempty"`
-	Risk     bool     `json:"risk,omitempty"`
-	Detail   string   `json:"detail,omitempty"`
+	// ShipSecs is the landing's total ship time, dispatched to deployed in
+	// seconds: the number the Ship time tile reports as a median. It is nil for
+	// a landing with no dispatch line (hand-slung), a rejection, and a landing
+	// still waiting for the restart that installs it.
+	ShipSecs *float64 `json:"ship_secs,omitempty"`
+	// ShipPending marks a landing that has a dispatch line and has not been
+	// installed yet. It is false where ShipSecs is set and where neither applies.
+	ShipPending bool   `json:"ship_pending,omitempty"`
+	Commit      string `json:"commit,omitempty"`
+	Route       string `json:"route,omitempty"`
+	Risk        bool   `json:"risk,omitempty"`
+	Detail      string `json:"detail,omitempty"`
 }
 
 // Trend is the last 24 hours as the page draws it: landings and rejections by

@@ -1456,6 +1456,32 @@ func (t *tailDeploys) deployedLine(r *tailDeployRecord) tailLine {
 	}
 }
 
+// shipStatus is one bead's total ship time for the Landings table: the seconds
+// from the spec dispatcher's sling to the restart that installed its commit,
+// or a pending mark for a bead that landed with a dispatch line and has not
+// been installed yet. A bead with no dispatch line (hand-slung) has no total to
+// report, so both readings are absent and the table shows a dash.
+func (t *tailDeploys) shipStatus(bead string) (secs *float64, pending bool) {
+	if t == nil {
+		return nil, false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	r, ok := t.records[bead]
+	if !ok {
+		return nil, false
+	}
+	dispatched := r.dispatchTime()
+	if dispatched.IsZero() {
+		return nil, false
+	}
+	if r.deployed.IsZero() {
+		return nil, true
+	}
+	v := r.deployed.Sub(dispatched).Seconds()
+	return &v, false
+}
+
 // tailDeploySummary is the tracker's state for the summary line: the rolling
 // median the town is shipping at, and the landings still waiting for a
 // restart.

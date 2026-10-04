@@ -114,8 +114,9 @@ const recentLandingRows = 30
 // buildRecentLandings joins the last 24 hours of landings and rejections with
 // the stage lines that say what each cost, newest first, capped at limit. The
 // title of a bead is asked for only once the rows to show are known, so the
-// lookups are bounded by limit, not by the day's traffic.
-func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, title func(rig, bead string) string, limit int) []dashboard.LandingRow {
+// lookups are bounded by limit, not by the day's traffic. ship reads a bead's
+// total ship time off the deploy tracker; a rejection never carries one.
+func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, ship func(bead string) (secs *float64, pending bool), title func(rig, bead string) string, limit int) []dashboard.LandingRow {
 	since := now.Add(-trendHours * time.Hour)
 	var rows []dashboard.LandingRow
 	rigOf := map[string]string{} // a rejection line names no rig; a landing of the same bead does
@@ -143,6 +144,9 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 		}
 		if row.Verdict == "error" {
 			row.Detail = truncateRunes(rec.OMVerdict, 140)
+		}
+		if ship != nil {
+			row.ShipSecs, row.ShipPending = ship(rec.Bead)
 		}
 		timing(&row, omStageFor(stages, rec.Bead, rec.LandedAt))
 		rows = append(rows, row)

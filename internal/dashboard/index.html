@@ -498,7 +498,7 @@ function renderTrend(s) {
     const thr = s.om && s.om.threshold != null ? s.om.threshold : null;
     const tbl = el("table", "ltable");
     const hr = el("tr");
-    [["When"], ["Landing"], ["By", "who built it: the polecat, or the crew member whose branch it was"], ["Gate", "wall time of the gate stage", 1], ["om", "wall time of the om review", 1], ["Score", "om's score", 1]].forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); });
+    [["When"], ["Landing"], ["By", "who built it: the polecat, or the crew member whose branch it was"], ["Gate", "wall time of the gate stage", 1], ["om", "wall time of the om review", 1], ["Ship", "total ship time: dispatched to deployed, minutes", 1], ["Score", "om's score", 1]].forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); });
     tbl.append(hr);
     const today = new Date().toDateString();
     for (const r of rows) {
@@ -519,6 +519,11 @@ function renderTrend(s) {
       tr.append(el("td", "title", r.polecat || (r.route ? r.route.replace(/^overseer-/, "") : "–")));
       tr.append(el("td", "n" + (r.gate_secs > 180 ? " warnc" : ""), r.gate_secs != null ? fmtDur(r.gate_secs) : "–"));
       tr.append(el("td", "n" + (r.om_secs > 240 ? " warnc" : ""), r.om_secs != null ? fmtDur(r.om_secs) : "–"));
+      const ship = el("td", "n" + (r.ship_pending ? " warnc" : ""));
+      if (r.ship_secs != null) { ship.textContent = Math.round(r.ship_secs / 60) + "m"; ship.title = "dispatched to deployed"; }
+      else if (r.ship_pending) { ship.textContent = "pending"; ship.title = "landed; waiting for the restart that installs it"; }
+      else ship.textContent = "–";
+      tr.append(ship);
       tr.append(el("td", "n" + (r.score != null && thr != null && r.score < thr ? " badc" : ""), r.score != null ? r.score.toFixed(2) : "–"));
       tbl.append(tr);
     }
