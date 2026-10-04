@@ -20,7 +20,8 @@ func tierSweepTestReader(t *testing.T, lines ...string) (*tierSweepReader, strin
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return &tierSweepReader{logPath: path, stateDir: filepath.Join(dir, "tier-sweep"), last: map[string]tierSweepEvent{}}, path
+	return &tierSweepReader{logPath: path, stateDir: filepath.Join(dir, "tier-sweep"),
+		last: map[string]tierSweepEvent{}, start: map[string]tierSweepStarted{}}, path
 }
 
 func TestTierSweepReadsACycleFromTheLog(t *testing.T) {
@@ -47,8 +48,70 @@ func TestTierSweepReadsACycleFromTheLog(t *testing.T) {
 	}
 }
 
-// The daemon logs no cycle start, so a sweep reads as running from the shell
-// stage's finished line until the swept line closes the cycle.
+// The daemon's "sweep started" line states the cycle exactly: the rig is
+// running from that timestamp, over every tier the line names, until a swept
+// line closes it (gt-rntre).
+func TestTierSweepRunningFromTheSweepStartedLine(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 10, 4, 14, 0, 0, 0, time.Local)
+	r, _ := tierSweepTestReader(t,
+		"2026/10/04 14:00:00 tier_sweep: gastown: sweep started a9be03e4 (shell, integration, race)",
+		// The shell stage finishes while the integration stage runs: the pane
+		// still reads the start line's whole list, not the fallback's single
+		// inferred stage.
+		"2026/10/04 14:01:05 tier_sweep: gastown: shell finished (exit 0) in 1m5s; last lines:",
+	)
+	ts := r.read(start.Add(4 * time.Minute))
+	if ts.Running == nil {
+		t.Fatalf("a started cycle with no swept line is running: %+v", ts)
+	}
+	run := ts.Running
+	if run.Rig != "gastown" || run.ElapsedSec != 240 {
+		t.Errorf("running = %+v, want gastown at 4m", run)
+	}
+	if len(run.Tiers) != 3 || run.Tiers[0] != "shell" || run.Tiers[2] != "race" {
+		t.Errorf("running tiers = %+v, want the line's list", run.Tiers)
+	}
+	if ts := r.read(start.Add(tierSweepStaleAfter + time.Minute)); ts.Running != nil {
+		t.Errorf("a start older than the stage budget is not a live sweep: %+v", ts.Running)
+	}
+}
+
+// An odd-hour cycle is the shell tier alone, and the pane says so rather than
+// inferring an integration stage that will never run (gt-rntre).
+func TestTierSweepRunningShellOnlyCycle(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 10, 4, 15, 0, 0, 0, time.Local)
+	r, _ := tierSweepTestReader(t, "2026/10/04 15:00:00 tier_sweep: gastown: sweep started a9be03e4 (shell)")
+	ts := r.read(start.Add(time.Minute))
+	if ts.Running == nil {
+		t.Fatalf("a started cycle with no swept line is running: %+v", ts)
+	}
+	if run := ts.Running; len(run.Tiers) != 1 || run.Tiers[0] != "shell" {
+		t.Errorf("running tiers = %+v, want shell alone", run.Tiers)
+	}
+}
+
+// A swept line closes the cycle its start opened: the rig reads idle, and the
+// sweep appears in the rows.
+func TestTierSweepSweptClosesTheStartedCycle(t *testing.T) {
+	t.Parallel()
+	r, _ := tierSweepTestReader(t,
+		"2026/10/04 14:00:00 tier_sweep: gastown: sweep started a9be03e4 (shell, integration, race)",
+		"2026/10/04 14:09:36 tier_sweep: gastown: swept a9be03e4 (shell GREEN, integration GREEN, race GREEN) in 9m36s",
+	)
+	ts := r.read(time.Date(2026, 10, 4, 14, 20, 0, 0, time.Local))
+	if ts.Running != nil {
+		t.Errorf("a started-then-swept cycle still reads running: %+v", ts.Running)
+	}
+	if len(ts.Sweeps) != 1 || ts.Sweeps[0].Rig != "gastown" {
+		t.Errorf("sweeps = %+v", ts.Sweeps)
+	}
+}
+
+// A log from a daemon that logs no cycle start is still read: the sweep reads
+// as running from the shell stage's finished line until the swept line closes
+// the cycle, the fallback for an older daemon or a restart mid-sweep.
 func TestTierSweepRunningWhileASweepIsInFlight(t *testing.T) {
 	t.Parallel()
 	shellDone := time.Date(2026, 10, 3, 22, 51, 48, 0, time.Local)
@@ -114,7 +177,8 @@ func writeTierSweepRecord(t *testing.T, dir, rig, body string) {
 
 func TestTierSweepUnreadableLog(t *testing.T) {
 	t.Parallel()
-	r := &tierSweepReader{logPath: filepath.Join(t.TempDir(), "missing.log"), stateDir: t.TempDir(), last: map[string]tierSweepEvent{}}
+	r := &tierSweepReader{logPath: filepath.Join(t.TempDir(), "missing.log"), stateDir: t.TempDir(),
+		last: map[string]tierSweepEvent{}, start: map[string]tierSweepStarted{}}
 	ts := r.read(time.Now())
 	if !ts.Unavailable {
 		t.Fatalf("an unreadable log must not read as a log with no sweeps: %+v", ts)

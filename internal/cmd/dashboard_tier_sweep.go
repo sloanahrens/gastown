@@ -43,6 +43,10 @@ var (
 	// <dur>" is absent on a cycle that ran before gt-iqzr0:
 	// "tier_sweep: gastown: swept a9be03e4 (shell GREEN, integration GREEN) in 9m36s".
 	tierSweepSweptRe = regexp.MustCompile(`^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) tier_sweep: (\S+): swept (\S+) \(([^)]*)\)(?: in (\S+))?\s*$`)
+	// tierSweepStartedRe matches the line opening a cycle, which names the
+	// tiers the cycle will run (gt-rntre):
+	// "tier_sweep: gastown: sweep started a9be03e4 (shell, integration, race)".
+	tierSweepStartedRe = regexp.MustCompile(`^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) tier_sweep: (\S+): sweep started (\S+) \(([^)]*)\)\s*$`)
 )
 
 // tierSweepEvent is the newest thing the log said about one rig: a stage that
@@ -54,6 +58,14 @@ type tierSweepEvent struct {
 	swept bool   // the line closed a cycle
 }
 
+// tierSweepStarted is a cycle the log opened and no swept line has closed: what
+// the "sweep started" line said, so the pane names the stages the cycle runs
+// and times it from its true start rather than inferring it (gt-rntre).
+type tierSweepStarted struct {
+	at    time.Time
+	tiers []string
+}
+
 // tierSweepReader keeps the daemon-log scan between polls.
 type tierSweepReader struct {
 	logPath  string
@@ -63,7 +75,10 @@ type tierSweepReader struct {
 	offset int64
 	readOK bool
 	last   map[string]tierSweepEvent
-	rows   []dashboard.TierSweepRow
+	// start holds the cycle each rig opened and has not closed. A rig absent
+	// from it is read the old way, off its shell stage's finished line.
+	start map[string]tierSweepStarted
+	rows  []dashboard.TierSweepRow
 }
 
 func newTierSweepReader(townRoot string) *tierSweepReader {
@@ -71,6 +86,7 @@ func newTierSweepReader(townRoot string) *tierSweepReader {
 		logPath:  filepath.Join(townRoot, "daemon", "daemon.log"),
 		stateDir: filepath.Join(constants.TownRuntimePath(townRoot), "tier-sweep"),
 		last:     map[string]tierSweepEvent{},
+		start:    map[string]tierSweepStarted{},
 	}
 }
 
@@ -129,6 +145,14 @@ func (r *tierSweepReader) scanLog() error {
 }
 
 func (r *tierSweepReader) parseLogLine(line string) {
+	if m := tierSweepStartedRe.FindStringSubmatch(line); m != nil {
+		at, err := time.ParseInLocation(omLogTimeLayout, m[1], time.Local)
+		if err != nil {
+			return
+		}
+		r.start[m[2]] = tierSweepStarted{at: at, tiers: splitTierSweepTiers(m[4])}
+		return
+	}
 	if m := tierSweepSweptRe.FindStringSubmatch(line); m != nil {
 		at, err := time.ParseInLocation(omLogTimeLayout, m[1], time.Local)
 		if err != nil {
@@ -146,6 +170,7 @@ func (r *tierSweepReader) parseLogLine(line string) {
 			r.rows = append([]dashboard.TierSweepRow(nil), r.rows[len(r.rows)-tierSweepRowsKept:]...)
 		}
 		r.last[m[2]] = tierSweepEvent{at: at, swept: true}
+		delete(r.start, m[2])
 		return
 	}
 	if m := tierSweepStageRe.FindStringSubmatch(line); m != nil {
@@ -155,6 +180,18 @@ func (r *tierSweepReader) parseLogLine(line string) {
 		}
 		r.last[m[2]] = tierSweepEvent{at: at, stage: m[3]}
 	}
+}
+
+// splitTierSweepTiers reads the "(shell, integration, race)" part of a "sweep
+// started" line into the tiers it names, in the order the cycle runs them.
+func splitTierSweepTiers(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 // parseTierSweepVerdicts reads the "(shell GREEN, integration GREEN)" part of a
@@ -176,25 +213,52 @@ func parseTierSweepVerdicts(s string) []dashboard.TierSweepStage {
 	return out
 }
 
-// running is the stage a sweep is at now. The daemon logs no cycle start, so a
-// sweep reads as in flight when a rig's newest line is the shell stage
-// finishing: the script's second stage, integration (which carries race), is
-// running in the silence that follows and has not yet been closed by a swept
-// line. A finished integration stage means the cycle is over.
+// running is the sweep at least one rig is in flight in now. A cycle the log
+// opened with a "sweep started" line and no swept line has closed is running by
+// definition: the line names the tiers the cycle will run, and its timestamp is
+// the cycle's start (gt-rntre). A rig with no open start is read the old way,
+// for a log from a daemon that logs none: the shell stage's finished line is
+// the sign, a cycle whose integration stage (which carries race) is running in
+// the silence that follows.
 func (r *tierSweepReader) running(now time.Time) *dashboard.TierSweepRun {
 	var best *dashboard.TierSweepRun
+	consider := func(run *dashboard.TierSweepRun) {
+		if best == nil || run.Since.After(best.Since) {
+			best = run
+		}
+	}
+	live := func(at time.Time) (int64, bool) {
+		d := now.Sub(at)
+		if d < 0 || d > tierSweepStaleAfter {
+			return 0, false
+		}
+		return int64(d / time.Second), true
+	}
+
+	for rig, s := range r.start {
+		elapsed, ok := live(s.at)
+		if !ok {
+			continue
+		}
+		run := &dashboard.TierSweepRun{Rig: rig, Tiers: s.tiers, Since: s.at, ElapsedSec: elapsed}
+		if len(s.tiers) > 0 {
+			run.Tier = s.tiers[0]
+		}
+		consider(run)
+	}
 	for rig, ev := range r.last {
 		if ev.swept || ev.stage != "shell" {
 			continue
 		}
-		d := now.Sub(ev.at)
-		if d < 0 || d > tierSweepStaleAfter {
+		if _, open := r.start[rig]; open {
+			// The cycle's own start line says better than this inference does.
 			continue
 		}
-		run := &dashboard.TierSweepRun{Rig: rig, Tier: "integration", Since: ev.at, ElapsedSec: int64(d / time.Second)}
-		if best == nil || run.Since.After(best.Since) {
-			best = run
+		elapsed, ok := live(ev.at)
+		if !ok {
+			continue
 		}
+		consider(&dashboard.TierSweepRun{Rig: rig, Tier: "integration", Since: ev.at, ElapsedSec: elapsed})
 	}
 	return best
 }

@@ -346,6 +346,17 @@ func tierSweepStages(rig string, now time.Time) (stages []tierSweepStage, full b
 	return stages, len(stages) > 1
 }
 
+// tierSweepTierList names the tiers a cycle's stages will run, in the order it
+// runs them, for the "sweep started" line: "shell", or
+// "shell, integration, race" on an even hour.
+func tierSweepTierList(stages []tierSweepStage) string {
+	var tiers []string
+	for _, st := range stages {
+		tiers = append(tiers, st.tiers...)
+	}
+	return strings.Join(tiers, ", ")
+}
+
 // tierSweepRigCycle runs the stages, writes the record, and files or closes the
 // beads the verdicts imply.
 func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, repo, sha string, state tierSweepState, now time.Time) bool {
@@ -370,6 +381,11 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 	defer cleanup()
 
 	stages, full := tierSweepStages(rig, now)
+	// The cycle's start, logged before the first stage runs so the dashboard's
+	// Tier sweeps pane reads a sweep as running from its true beginning, over
+	// the stages it will run, instead of inferring it from the shell stage
+	// finishing (gt-rntre). Nothing reaches here for a skipped cycle.
+	d.logger.Printf("tier_sweep: %s: sweep started %s (%s)", rig, shortSHA(sha), tierSweepTierList(stages))
 	run := seams.run
 	if run == nil {
 		run = d.tierSweepRunStage

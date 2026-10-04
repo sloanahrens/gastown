@@ -427,6 +427,38 @@ func TestRunTierSweep_LogsTheElapsedTimeOfTheSweep(t *testing.T) {
 	}
 }
 
+// TestRunTierSweep_LogsSweepStarted: the cycle's start names the rig's sha and
+// every tier the cycle will run, so the dashboard's Tier sweeps pane reads an
+// exact running state instead of inferring it (gt-rntre).
+func TestRunTierSweep_LogsSweepStarted(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		hour int
+		want string
+	}{
+		{"odd hour runs the shell tier alone", 15, "tier_sweep: gastown: sweep started aaaaaaaa (shell)"},
+		{"even hour runs shell then the integration suite", 14, "tier_sweep: gastown: sweep started aaaaaaaa (shell, integration, race)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			now := atHour(time.Now(), tc.hour)
+			d, rec, _, logs := newTierSweepDaemon(t, now, "gastown")
+			rec.green()
+			sha := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+			d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return sha, nil }
+			d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+
+			if !d.runTierSweep() {
+				t.Fatal("runTierSweep deferred; want a verdict")
+			}
+			if out := logs.String(); !strings.Contains(out, tc.want) {
+				t.Errorf("log missing %q; got:\n%s", tc.want, out)
+			}
+		})
+	}
+}
+
 // TestRunTierSweep_SkippedSweepLogsNoDuration: nothing ran, so there is no
 // elapsed time to report and the skip line must not imply one (gt-iqzr0).
 func TestRunTierSweep_SkippedSweepLogsNoDuration(t *testing.T) {
@@ -452,6 +484,9 @@ func TestRunTierSweep_SkippedSweepLogsNoDuration(t *testing.T) {
 	}
 	if strings.Contains(out, "swept ") || strings.Contains(out, "finished (exit") {
 		t.Errorf("a skipped sweep logged a stage or sweep line; got:\n%s", out)
+	}
+	if strings.Contains(out, "sweep started") {
+		t.Errorf("a skipped cycle logged a start line; got:\n%s", out)
 	}
 }
 

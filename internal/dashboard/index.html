@@ -552,8 +552,12 @@ function renderTierSweep(s) {
   const kv = el("div", "kv");
   const run = ts.running;
   const st = el("div");
-  if (run) st.append(el("b", "good", "running"), el("span", "", run.rig + " · " + run.tier + " · " + fmtDur((Date.now() - new Date(run.since).getTime()) / 1000)));
-  else st.append(el("b", "", "idle"), el("span", "", "no sweep is running"));
+  // The cycle's own stage list when the daemon logged one; an older log gives
+  // only the stage the fallback inferred.
+  if (run) {
+    const stages = (run.tiers && run.tiers.length) ? run.tiers.join(", ") : run.tier;
+    st.append(el("b", "good", "running"), el("span", "", run.rig + " · " + stages + " · " + fmtDur((Date.now() - new Date(run.since).getTime()) / 1000)));
+  } else st.append(el("b", "", "idle"), el("span", "", "no sweep is running"));
   kv.append(st);
   box.append(kv);
   const rows = ts.sweeps || [];
