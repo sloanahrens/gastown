@@ -55,6 +55,13 @@ Host is not a loopback name.
 runs every five minutes while a page is open; with none, the spend panel is
 left out.
 
+Lifecycle: the dashboard watches its own binary. When make install replaces it
+and the new file runs (gt version succeeds), the dashboard restarts itself in
+place: same PID, same flags, same listening socket, so the port never closes.
+Open pages reconnect and reload. If the new binary fails to run or the restart
+fails, the running build keeps serving and says so. --open fires on the first
+launch only. Not available on Windows.
+
 Examples:
   gt dashboard                 # http://127.0.0.1:8787
   gt dashboard --port 9000 --open`,
@@ -89,13 +96,19 @@ func runDashboard(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	ln, err := net.Listen("tcp", addr)
+	ln, inherited, err := dashboardListener(addr, os.Getenv(dashboardListenFDEnv))
 	if err != nil {
 		return err
 	}
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go hub.Run(ctx)
+
+	// A new gt binary on disk (make install) restarts the dashboard in place;
+	// see the lifecycle note in the command help.
+	if exe, err := os.Executable(); err == nil && dashboardCanReexec {
+		go superviseBinary(ctx, exe, ln, cmd.OutOrStdout())
+	}
 
 	srv := &http.Server{Handler: hub.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
@@ -106,7 +119,7 @@ func runDashboard(cmd *cobra.Command, _ []string) error {
 	}()
 	url := "http://" + addr
 	fmt.Fprintf(cmd.OutOrStdout(), "gt dashboard: %s (read-only, loopback only; polls only while a page is open)\n", url)
-	if dashboardOpen {
+	if dashboardOpen && !inherited { // a restart is not a second launch
 		_ = exec.Command("open", url).Start()
 	}
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
