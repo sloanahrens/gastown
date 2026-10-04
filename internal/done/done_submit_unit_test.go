@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -711,5 +713,38 @@ func TestSubmitDropsAnOverseerReview(t *testing.T) {
 	}
 	if issue := h.source(t); beads.HasLabel(issue, land.LabelOverseerReviewed) {
 		t.Errorf("labels %v still carry %s after a new submission", issue.Labels, land.LabelOverseerReviewed)
+	}
+}
+
+// TestSubmitRefusesAForgejoRemoteWithNoRemote: a rig with a Forgejo block
+// lands through its configured remote or not at all, so gt done stops before
+// fetching or pushing anything when merge_queue.forgejo.remote_url matches no
+// remote (gt-fn9e6.18). The rig's .repo.git is absent, so the read that would
+// find the remotes fails and no git process starts.
+func TestSubmitRefusesAForgejoRemoteWithNoRemote(t *testing.T) {
+	t.Parallel()
+	h := newSubmitHarness(t)
+	rigDir := filepath.Join(h.townRoot, h.r.rigName)
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const url = "https://forgejo.example/gastown/gastown.git"
+	cfg := `{"type":"rig","version":1,"name":"gastown","default_branch":"main",` +
+		`"merge_queue":{"forgejo":{"remote_url":"` + url + `"}}}`
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := h.submit()
+	if err == nil {
+		t.Fatal("submit() = nil error for a Forgejo remote_url matching no remote; want gt done refused")
+	}
+	for _, want := range []string{h.r.rigName, url} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q lacks %q", err, want)
+		}
+	}
+	if len(h.repo.pushes) != 0 {
+		t.Errorf("pushed %v; want nothing pushed when the landing remote cannot be resolved", h.repo.pushes)
 	}
 }

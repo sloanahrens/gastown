@@ -376,8 +376,15 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		return nil, fmt.Errorf("rig repository %s: %w", repo, err)
 	}
 	// The rig's configured landing remote (gt-fn9e6.9), read through the
-	// daemon's git seam so the unit tier starts no git.
-	landingRemote := rig.ResolveLandingRemoteIn(d.gitAt(repo), townRoot, rigName)
+	// daemon's git seam so the unit tier starts no git. A Forgejo block whose
+	// remote_url matches no remote fails construction, like an unusable bot
+	// token: CI is that rig's only landing path, so a fallback to origin would
+	// push candidates to GitHub and wait on a verdict that never comes
+	// (gt-fn9e6.18).
+	landingRemote, err := rig.ResolveLandingRemoteIn(d.gitAt(repo), townRoot, rigName)
+	if err != nil {
+		return nil, err
+	}
 	// Fail closed on a config.json that exists but does not decode: the file
 	// names no branch, so the rig gets no worker and no landing until it is
 	// fixed. Construction is the seam because the manager retries it every

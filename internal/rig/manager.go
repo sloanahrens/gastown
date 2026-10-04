@@ -1173,40 +1173,67 @@ type LandingRemotes interface {
 // (merge_queue.forgejo.remote_url, gt-fn9e6.3) instead of assuming origin
 // (gt-fn9e6.9). It opens the rig's bare repository itself; ResolveLandingRemoteIn
 // is the same resolution over a caller-supplied git seam.
-func ResolveLandingRemote(townRoot, rigName string) string {
+func ResolveLandingRemote(townRoot, rigName string) (string, error) {
 	return ResolveLandingRemoteIn(git.NewGit(filepath.Join(townRoot, rigName, ".repo.git")), townRoot, rigName)
 }
 
 // ResolveLandingRemoteIn is ResolveLandingRemote's rule over repo. It returns
 // the remote in the rig's bare repository whose URL is the configured one, and
-// LandingRemoteOrigin when the rig has no Forgejo block, names no URL, or has
-// no such remote — so every rig today lands through origin, whether the cutover
-// repoints origin's URL or attaches a separately named remote.
-func ResolveLandingRemoteIn(repo LandingRemotes, townRoot, rigName string) string {
+// LandingRemoteOrigin when the rig has no Forgejo block or names no URL — so
+// every rig today lands through origin, whether the cutover repoints origin's
+// URL or attaches a separately named remote. A configured URL no remote carries
+// is an error: landing through origin would push to the wrong host and wait on
+// a verdict that never comes, so the rig lands through its Forgejo remote or not
+// at all (gt-fn9e6.18).
+func ResolveLandingRemoteIn(repo LandingRemotes, townRoot, rigName string) (string, error) {
 	fc := ResolveForgejoConfig(townRoot, rigName)
 	if fc == nil || strings.TrimSpace(fc.RemoteURL) == "" {
-		return LandingRemoteOrigin
+		return LandingRemoteOrigin, nil
 	}
-	remotes, _ := repo.Remotes()
+	return resolveConfiguredLandingRemote(repo, rigName, fc.RemoteURL)
+}
+
+// resolveConfiguredLandingRemote reads repo's remotes and resolves want against
+// them, or returns the error that names what was read and what to do about it.
+func resolveConfiguredLandingRemote(repo LandingRemotes, rigName, want string) (string, error) {
+	remotes, err := repo.Remotes()
+	if err != nil {
+		return "", fmt.Errorf("rig %s: merge_queue.forgejo.remote_url %s: reading the rig's git remotes: %w", rigName, want, err)
+	}
 	urls := make(map[string]string, len(remotes))
+	var unreadable []string
 	for _, name := range remotes {
 		if url, err := repo.RemoteURL(name); err == nil {
 			urls[name] = url
+		} else {
+			unreadable = append(unreadable, name)
 		}
 	}
-	return landingRemoteForURL(remotes, urls, fc.RemoteURL)
+	if name, ok := landingRemoteForURL(remotes, urls, want); ok {
+		return name, nil
+	}
+	lookedAt := "none"
+	if len(remotes) > 0 {
+		lookedAt = strings.Join(remotes, ", ")
+	}
+	msg := fmt.Sprintf("rig %s: merge_queue.forgejo.remote_url %s matches no git remote (looked at: %s); add a remote with that URL or repoint one of them to it", rigName, want, lookedAt)
+	if len(unreadable) > 0 {
+		msg += "; could not read the URL of " + strings.Join(unreadable, ", ")
+	}
+	return "", errors.New(msg)
 }
 
 // landingRemoteForURL is ResolveLandingRemote's matching rule: the first remote
-// whose URL is want, in the repository's order, else origin. A remote whose URL
-// could not be read is skipped rather than guessed at.
-func landingRemoteForURL(remotes []string, urls map[string]string, want string) string {
+// whose URL is want, in the repository's order. found is false when none
+// matches, so the caller fails closed rather than landing through origin. A
+// remote whose URL could not be read is skipped rather than guessed at.
+func landingRemoteForURL(remotes []string, urls map[string]string, want string) (string, bool) {
 	for _, name := range remotes {
 		if url, ok := urls[name]; ok && git.SameRemoteURL(url, want) {
-			return name
+			return name, true
 		}
 	}
-	return LandingRemoteOrigin
+	return "", false
 }
 
 // LoadNamedGateCommands reads the rig-root config.json's merge_queue.gates

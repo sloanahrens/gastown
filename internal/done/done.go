@@ -1155,9 +1155,13 @@ func submitForLanding(r *doneRun) error {
 	}
 	// In fork-backed rigs the clean base is upstream/<target>, never the
 	// fork's origin/<target>. landingRemote is the rig's configured one
-	// (gt-fn9e6.9).
+	// (gt-fn9e6.9); a Forgejo remote_url no remote carries fails closed here,
+	// before anything is fetched or pushed (gt-fn9e6.18).
 	repo := r.deps.repo
-	landingRemote := rig.ResolveLandingRemote(r.townRoot, r.rigName)
+	landingRemote, err := rig.ResolveLandingRemote(r.townRoot, r.rigName)
+	if err != nil {
+		return err
+	}
 	baseRef := repo.CleanBaseRef(landingRemote, r.defaultBranch, target)
 	fetchRemote := git.RemoteForRef(baseRef, landingRemote)
 	if fetchRemote == "" {
@@ -1435,9 +1439,13 @@ func runDoneLocalGate(r *doneRun, head string) error {
 // absorbs a push that errored while the remote took the objects (gt-0opm).
 //
 // The remote is the rig's configured landing remote (gt-fn9e6.9), not an
-// assumed origin.
+// assumed origin. Its resolution can fail closed; submitForLanding reaches it
+// first (gt-fn9e6.18).
 func pushBranchForLanding(r *doneRun, sourceBD beads.Client, head, baseRef string) error {
-	remote := rig.ResolveLandingRemote(r.townRoot, r.rigName)
+	remote, err := rig.ResolveLandingRemote(r.townRoot, r.rigName)
+	if err != nil {
+		return err
+	}
 	fmt.Printf("Pushing branch to %s...\n", remote)
 	var lastPushErr error
 	attempt := func() error {

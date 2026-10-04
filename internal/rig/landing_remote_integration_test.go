@@ -34,17 +34,19 @@ func TestIntegrationResolveLandingRemote(t *testing.T) {
 	}
 
 	writeRemoteURL("https://forgejo.example/gastown/gastown")
-	if got := ResolveLandingRemote(townRoot, "gastown"); got != "forgejo" {
-		t.Errorf("ResolveLandingRemote() = %q, want forgejo (the configured URL's remote)", got)
+	if got, err := ResolveLandingRemote(townRoot, "gastown"); err != nil || got != "forgejo" {
+		t.Errorf("ResolveLandingRemote() = %q, %v; want forgejo (the configured URL's remote)", got, err)
 	}
 
 	writeRemoteURL("https://github.com/acme/gastown.git")
-	if got := ResolveLandingRemote(townRoot, "gastown"); got != "origin" {
-		t.Errorf("ResolveLandingRemote() = %q, want origin for a repointed origin", got)
+	if got, err := ResolveLandingRemote(townRoot, "gastown"); err != nil || got != "origin" {
+		t.Errorf("ResolveLandingRemote() = %q, %v; want origin for a repointed origin", got, err)
 	}
 
+	// A URL no remote carries fails closed rather than landing through origin
+	// (gt-fn9e6.18).
 	writeRemoteURL("https://forgejo.example/other/repo")
-	if got := ResolveLandingRemote(townRoot, "gastown"); got != "origin" {
-		t.Errorf("ResolveLandingRemote() = %q, want origin when no remote carries the URL", got)
+	if got, err := ResolveLandingRemote(townRoot, "gastown"); err == nil {
+		t.Errorf("ResolveLandingRemote() = %q, nil; want an error when no remote carries the URL", got)
 	}
 }
