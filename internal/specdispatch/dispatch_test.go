@@ -45,7 +45,10 @@ func TestEligible(t *testing.T) {
 		// bead's own record: no label, no assignee, and still no candidate.
 		{func(s *Spec) { s.SubmittedForLanding = true }, nil, false, "submitted for landing"},
 		{func(s *Spec) { s.Labels = append(s.Labels, "needs-human") }, nil, false, "label needs-human"},
-		{func(s *Spec) { s.Labels = append(s.Labels, "Needs-Mayor-Review") }, nil, false, "label needs-mayor-review"},
+		// The reviewer label was retired with the role (gt-rwp7z.11): a bead
+		// still carrying it is held by nothing, so it dispatches as ordinary
+		// ready work.
+		{func(s *Spec) { s.Labels = append(s.Labels, "Needs-Mayor-Review") }, nil, true, ""},
 		// The shared hold rule (dispatch.DispatchHoldFields). gt:needs-human is
 		// the spelling internal/land writes and the one excludedLabels never
 		// carried, so the bare "needs-human" case above does not cover it
@@ -64,8 +67,11 @@ func TestEligible(t *testing.T) {
 			s.Labels = append(s.Labels, "operator", "needs-pro")
 		}, []string{"needs-pro"}, false, "label operator"},
 		// A ruling in prose is a hold wherever it is written (gt-tq6l). The
-		// marker has to begin the line, decoration aside.
-		{func(s *Spec) { s.Design = "Some context.\n\nMAYOR DESIGN DECISION: park it." }, nil, false, "MAYOR DESIGN DECISION in design"},
+		// marker has to begin the line, decoration aside. The ruling the
+		// retired role wrote names its author, not a marker the dispatcher
+		// still reads, so that spelling no longer holds a bead (gt-rwp7z.11).
+		{func(s *Spec) { s.Design = "Some context.\n\n- do not redispatch: park it." }, nil, false, "do not redispatch in design"},
+		{func(s *Spec) { s.Design = "## MAYOR DESIGN DECISION: park it." }, nil, true, ""},
 		{func(s *Spec) { s.Notes = "- do not redispatch" }, nil, false, "do not redispatch in notes"},
 		// A note that only quotes the wording back is not a ruling, and an
 		// unassigned bead with no marker stays the dispatcher's (the control
@@ -98,10 +104,9 @@ func TestEligibleFollowsTheSharedHoldRule(t *testing.T) {
 	}{
 		{"gt:needs-human label", func(s *Spec) { s.Labels = []string{"gt:needs-human"} }},
 		{"bare needs-human label", func(s *Spec) { s.Labels = []string{"needs-human"} }},
-		{"needs-mayor-review label", func(s *Spec) { s.Labels = []string{"needs-mayor-review"} }},
 		{"operator label", func(s *Spec) { s.Labels = []string{"operator"} }},
 		{"pinned status", func(s *Spec) { s.Status = "pinned" }},
-		{"design ruling", func(s *Spec) { s.Design = "MAYOR DESIGN DECISION: park it." }},
+		{"design ruling", func(s *Spec) { s.Design = "do not redispatch: park it." }},
 		{"notes ruling", func(s *Spec) { s.Notes = "do not redispatch" }},
 	}
 	for _, tc := range markers {

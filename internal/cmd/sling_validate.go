@@ -42,8 +42,7 @@ func ValidateTarget(target string) error {
 				"  <rig>/polecats/<name>  specific polecat\n"+
 				"  <rig>/crew/<name>      crew worker\n"+
 				"  <rig>/witness          rig witness\n"+
-				"  <rig>/refinery         rig refinery\n"+
-				"  mayor                  town mayor",
+				"  <rig>/refinery         rig refinery",
 				target, i)
 		}
 	}
@@ -53,12 +52,6 @@ func ValidateTarget(target string) error {
 	if strings.ToLower(parts[0]) == "deacon" {
 		return fmt.Errorf("invalid target %q: the deacon and its dog pool were retired\n"+
 			"Sling to a rig to spawn a polecat instead", target)
-	}
-
-	// Mayor has no sub-agents.
-	if strings.ToLower(parts[0]) == "mayor" {
-		return fmt.Errorf("invalid target %q: mayor does not have sub-agents\n"+
-			"Use 'mayor' to target the mayor directly", target)
 	}
 
 	// Path targets: parts[0] = rig, parts[1] = role or shorthand name.

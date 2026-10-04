@@ -58,16 +58,11 @@ func sessionToAgentID(reg *session.PrefixRegistry, sessionName string) string {
 }
 
 // canonicalAssigneeAddress returns the address used for bead assignees and
-// hook-status queries. This matches the form emitted by resolveSelfTarget and
-// buildAgentIdentity: the town-level mayor gets a trailing slash.
-// session.AgentIdentity.Address() returns the bare name for that role, which
-// causes the read/write mismatch in GH#3699.
+// hook-status queries: the identity's own address, exactly as
+// session.AgentIdentity.Address() spells it. The role-specific slashed spelling
+// this used to add went with the retired role that needed it (GH#3699).
 func canonicalAssigneeAddress(identity *session.AgentIdentity) string {
-	addr := identity.Address()
-	if identity.Role == session.RoleMayor && !strings.HasSuffix(addr, "/") {
-		return addr + "/"
-	}
-	return addr
+	return identity.Address()
 }
 
 // resolveSelfTarget determines agent identity, pane, and hook root for slinging to self.
@@ -78,10 +73,7 @@ func resolveSelfTarget() (agentID string, pane string, hookRoot string, err erro
 	}
 
 	// Build agent identity from role
-	// Town-level agents use trailing slash to match addressToIdentity() normalization
 	switch roleInfo.Role {
-	case RoleMayor:
-		agentID = "mayor/"
 	case RolePolecat:
 		agentID = fmt.Sprintf("%s/polecats/%s", roleInfo.Rig, roleInfo.Polecat)
 	case RoleCrew:
@@ -225,8 +217,9 @@ func (d *slingDeps) resolveSlingTarget(target string, opts ResolveTargetOptions)
 	}
 
 	// Existing agent (with dead polecat fallback).
-	// Uses the resolveAgent collaborator — crew, mayor, and all existing agents
-	// resolve here, getting their pane for nudge delivery (gt-in7b).
+	// Uses the resolveAgent collaborator — crew, witness, refinery and every
+	// other existing agent resolve here, getting their pane for nudge delivery
+	// (gt-in7b).
 	agentID, pane, workDir, err := d.resolveAgent(target)
 	if err != nil {
 		if rigName, ok := missingPolecatTargetRigWith(target, opts.Create, opts.TownRoot, d.crewExists); ok {

@@ -109,8 +109,8 @@ orphan blocked every wrapped suite town-wide until someone removed it by hand.
 'gt slot run' now walks past debris on its own; this command is the explicit,
 evidence-printing way to actually delete it.
 
-Reaping is the mayor's and the doctor's call, not a polecat's: a polecat's slot
-token is its promise that its own suite cleans up after itself, and reaping
+Reaping is the doctor's and the operator's call, not a polecat's: a polecat's
+slot token is its promise that its own suite cleans up after itself, and reaping
 another holder's containers mid-run would break that suite. The one exception
 is a container whose owner is provably gone: nothing can be using it, so a slot
 acquisition ('gt slot run', gt done's gates, the landing worker) that checks docker,

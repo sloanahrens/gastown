@@ -49,7 +49,7 @@ func newSlingHarness(t *testing.T) *slingHarness {
 		t:              t,
 		out:            &bytes.Buffer{},
 		beads:          map[string]*beadInfo{},
-		env:            map[string]string{"GT_ROLE": "mayor"},
+		env:            map[string]string{},
 		rigs:           map[string]bool{"gastown": true},
 		formulas:       map[string]bool{},
 		dead:           map[string]bool{},
@@ -219,7 +219,7 @@ func newSlingHarness(t *testing.T) *slingHarness {
 			h.record("instantiate %s on %s vars=%s", name, id, strings.Join(vars, ","))
 			return &FormulaOnBeadResult{WispRootID: "gt-wisp-new", BeadToHook: id}, nil
 		},
-		actor: func() string { return "mayor" },
+		actor: func() string { return "gastown/crew/sloan" },
 		hookDir: func(town, _, workDir string) string {
 			if workDir != "" {
 				return workDir
@@ -305,9 +305,6 @@ func (h *slingHarness) resolveTarget(target string, opts ResolveTargetOptions) (
 			return nil, err
 		}
 		return &ResolvedTarget{Agent: agent, Pane: pane, WorkDir: root, IsSelfSling: true}, nil
-	}
-	if target == "mayor" {
-		target = "mayor/" // the town singleton's address
 	}
 	return &ResolvedTarget{Agent: target, Pane: "%9"}, nil
 }

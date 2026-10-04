@@ -78,7 +78,7 @@ type poolSession struct {
 // This is the pool's one count of itself, shared by the admission decision
 // (choosePoolAgent) and the idle-seat patrol (gt daemon dispatch-check). The
 // patrol must not count seats its own way: a nudge that named room the next
-// sling would refuse is worse than no nudge, because it spends the mayor's
+// sling would refuse is worse than no nudge, because it spends an agent's
 // attention to produce a refusal (gt-59o9).
 func poolSeatCount(pool *config.PolecatPool, sessions []poolSession) int {
 	if pool == nil || pool.OverflowAgent == "" {

@@ -349,7 +349,7 @@ func TestSpecDispatchHoldsParkedBeads(t *testing.T) {
 		// exclude list never carried.
 		{"gt:needs-human", func(s *specdispatch.Spec) { s.Labels = []string{"gt:needs-human"} }},
 		{"operator", func(s *specdispatch.Spec) { s.Labels = []string{"operator"} }},
-		{"design ruling", func(s *specdispatch.Spec) { s.Design = "MAYOR DESIGN DECISION: park it." }},
+		{"design ruling", func(s *specdispatch.Spec) { s.Design = "do not redispatch: park it." }},
 		{"notes ruling", func(s *specdispatch.Spec) { s.Notes = "do not redispatch" }},
 	}
 	for _, tc := range cases {
@@ -860,7 +860,7 @@ func TestSpecDispatchHoldsAndExclusions(t *testing.T) {
 	}
 
 	var excluded []specdispatch.Spec
-	for i, label := range []string{"gt:ready-to-land", "needs-human", "needs-mayor-review"} {
+	for i, label := range []string{"gt:ready-to-land", "needs-human"} {
 		s := cleanSpec("gt-x"+string(rune('a'+i)), 1, "2026-09-29T10:00:00Z")
 		s.Labels = append(s.Labels, label)
 		excluded = append(excluded, s)
@@ -871,6 +871,16 @@ func TestSpecDispatchHoldsAndExclusions(t *testing.T) {
 	f = newFakeSpecTown(excluded...)
 	if r := runSpecDispatchCycle(f.env()); len(f.slung) != 0 || r.Candidates != 0 {
 		t.Fatalf("excluded beads considered: slung %v report %+v", f.slung, r)
+	}
+
+	// The reviewer label was retired with the role (gt-rwp7z.11): it is on no
+	// exclusion list and routes nothing, so a bead still wearing it dispatches
+	// as ordinary ready work. An operator with held beads re-labels them.
+	retired := cleanSpec("gt-retired-label", 1, "2026-09-29T10:00:00Z")
+	retired.Labels = append(retired.Labels, "needs-mayor-review")
+	f = newFakeSpecTown(retired)
+	if r := runSpecDispatchCycle(f.env()); len(f.slung) != 1 {
+		t.Fatalf("the retired label still held a bead: slung %v report %+v", f.slung, r)
 	}
 }
 

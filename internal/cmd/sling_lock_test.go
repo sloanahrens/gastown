@@ -123,7 +123,7 @@ func TestTryAcquireSlingAssigneeLock_AgentNameSanitization(t *testing.T) {
 	agents := []string{
 		"gastown/polecats/dementus",
 		"rig:with:colons",
-		"mayor/",
+		"deacon/",
 	}
 	for _, agent := range agents {
 		release, err := tryAcquireSlingAssigneeLock(townRoot, agent)
