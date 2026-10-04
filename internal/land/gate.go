@@ -327,14 +327,15 @@ var (
 	shellTierInputsRE = regexp.MustCompile(ShellTierInputs)
 	// shellTierSummaryRE matches the shell tier's one summary line and
 	// captures the scripts it names. The log directory trails the names, and
-	// scripts/post-land-shell.sh execs the same sweep, so this is the
-	// post-land run's own line too (gt-40so9):
+	// the tier's elapsed time trails that (gt-iqzr0); scripts/post-land-shell.sh
+	// execs the same sweep, so this is the post-land run's own line too
+	// (gt-40so9):
 	//
-	//	tier-sweep: shell RED passed=5 failed=1 skipped=0 failed: scripts/x.sh (logs /tmp/tier-sweep.aB12)
+	//	tier-sweep: shell RED passed=5 failed=1 skipped=0 failed: scripts/x.sh (logs /tmp/tier-sweep.aB12) in 2m14s
 	//
 	// A script path holds no parenthesis, so the capture stops at the marker;
-	// a line without it (an older sweep) still matches.
-	shellTierSummaryRE = regexp.MustCompile(`^tier-sweep: shell RED passed=\d+ failed=\d+ skipped=\d+ failed:([^()]*?)(?: \(logs [^)]*\))?$`)
+	// a line without the marker or the duration (an older sweep) still matches.
+	shellTierSummaryRE = regexp.MustCompile(`^tier-sweep: shell RED passed=\d+ failed=\d+ skipped=\d+ failed:([^()]*?)(?: \(logs [^)]*\))?(?: in \S+)?$`)
 )
 
 // LandGate is the gate Land runs on the merged tree, one command from the
