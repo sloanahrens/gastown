@@ -31,6 +31,17 @@ func TestDoctorRegistersEditorialChecksWithRig(t *testing.T) {
 	}
 }
 
+func TestDoctorRegistersRigBDBinaryCheck(t *testing.T) {
+	t.Parallel()
+	d := newDoctorForCommand("")
+	for _, check := range d.Checks() {
+		if check.Name() == "rig-bd-binary" {
+			return
+		}
+	}
+	t.Fatal("expected the rig-bd-binary check in the default doctor set")
+}
+
 func TestDoctorCheckFlagFiltersToNamedCheck(t *testing.T) {
 	t.Parallel()
 	d := newDoctorForCommand("testrig")
