@@ -72,7 +72,7 @@ func TestIntegrationOrphanSessionDetection(t *testing.T) {
 		expectOrphan bool
 	}{
 		// Valid Gas Town sessions should NOT be detected as orphans
-		{"mayor_session", "hq-mayor", false},
+		{"overseer_session", "hq-overseer", false},
 		{"crew_session", "ga-crew-max", false},
 		{"polecat_session", "ga-abc123", false},
 
@@ -91,9 +91,8 @@ func TestIntegrationOrphanSessionDetection(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			validRigs := check.getValidRigs(townRoot)
-			mayorSession := "hq-mayor"
 
-			isValid := check.isValidSession(testPrefixRegistry(), tt.sessionName, validRigs, mayorSession)
+			isValid := check.isValidSession(testPrefixRegistry(), tt.sessionName, validRigs)
 
 			if tt.expectOrphan && isValid {
 				t.Errorf("session %q should be detected as orphan but was marked valid", tt.sessionName)
@@ -122,7 +121,7 @@ func TestIntegrationCrewSessionProtection(t *testing.T) {
 		{"crew_with_numbers", "ga-crew-worker1", true},
 		{"crew_different_rig", "nif-crew-codex1", true},
 		{"polecat_not_crew", "ga-abc", false},
-		{"mayor_not_crew", "hq-mayor", false},
+		{"overseer_not_crew", "hq-overseer", false},
 	}
 
 	for _, tt := range tests {

@@ -176,7 +176,7 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 			if !ok {
 				continue
 			}
-			// Skip town-level agents (mayor, dogs) — they don't belong to a rig
+			// Skip town-level agents — they don't belong to a rig
 			if rig == "" {
 				continue
 			}

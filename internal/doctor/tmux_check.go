@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -84,14 +83,10 @@ func (c *LinkedPaneCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	// Cache for Fix (exclude mayor session since we don't want to kill it)
-	mayorSession := session.MayorSessionName()
-
+	// Cache for Fix.
 	c.linkedSessions = nil
 	for sess := range linkedSessionSet {
-		if mayorSession == "" || sess != mayorSession {
-			c.linkedSessions = append(c.linkedSessions, sess)
-		}
+		c.linkedSessions = append(c.linkedSessions, sess)
 	}
 
 	if len(conflicts) == 0 {
@@ -114,7 +109,7 @@ func (c *LinkedPaneCheck) Run(ctx *CheckContext) *CheckResult {
 // DestructiveFix marks this repair as destructive (gt-638go.3): it kills tmux sessions with linked panes.
 func (c *LinkedPaneCheck) DestructiveFix() bool { return true }
 
-// Fix kills sessions with linked panes (except mayor session).
+// Fix kills sessions with linked panes.
 // The daemon will recreate them with independent panes.
 func (c *LinkedPaneCheck) Fix(ctx *CheckContext) error {
 	if len(c.linkedSessions) == 0 {

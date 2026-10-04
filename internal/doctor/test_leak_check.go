@@ -250,8 +250,8 @@ func eventLeaks(line string, known map[string]bool, since time.Time) []string {
 // every internal/cmd.Role and fails if RoleInfo.ActorString() produces a value
 // not listed here.
 //
-// "mayor", "deacon", "witness", "refinery", "polecat", "crew", "dog",
-// "unknown" are the bare (no-rig) actor strings for their Roles.
+// "deacon", "witness", "refinery", "polecat", "crew", "dog" and "unknown" are
+// the bare (no-rig) actor strings for their Roles.
 //
 // gt-jna: RoleBoot has two construction paths, both legitimate:
 // RoleInfo.ActorString() returns "deacon-boot" (beads attribution) and
@@ -266,7 +266,7 @@ func eventLeaks(line string, known map[string]bool, since time.Time) []string {
 //   - "convoy": a legacy "convoy/<id>" mail actor, still tolerated for
 //     messages and fixtures that carry it.
 var builtinActorPrefixes = []string{
-	"mayor", "deacon", "boot", "deacon-boot", "witness", "refinery", "polecat",
+	"deacon", "boot", "deacon-boot", "witness", "refinery", "polecat",
 	"crew", "dog", "unknown", "overseer", events.ActorGt, events.ActorDaemon, "convoy",
 }
 

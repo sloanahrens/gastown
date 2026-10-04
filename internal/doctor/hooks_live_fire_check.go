@@ -426,7 +426,6 @@ var liveFireProbeEnvKeys = []string{
 	"GT_POLECAT",
 	"GT_POLECAT_PATH",
 	"GT_CREW",
-	"GT_MAYOR",
 	"GT_DOG_NAME",
 }
 

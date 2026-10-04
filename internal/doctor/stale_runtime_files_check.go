@@ -82,7 +82,7 @@ func (c *StaleRuntimeFilesCheck) Run(ctx *CheckContext) *CheckResult {
 				continue
 			}
 			name := file.Name()
-			// PID files are named like: sw-crew-max.pid, pir-nux.pid, hq-mayor.pid
+			// PID files are named like: sw-crew-max.pid, pir-nux.pid, hq-overseer.pid
 			// Extract the rig prefix (first part before the hyphen or underscore)
 			rigPrefix := extractRigPrefix(name)
 			if rigPrefix == "" || rigPrefix == "hq" || rigPrefix == "gt" {
@@ -162,7 +162,7 @@ func (c *StaleRuntimeFilesCheck) Fix(ctx *CheckContext) error {
 }
 
 // extractRigPrefix extracts the rig prefix from a PID filename.
-// Examples: sw-nux.pid -> sw, pir-crew-dickle.pid -> pir, hq-mayor.pid -> hq
+// Examples: sw-nux.pid -> sw, pir-crew-dickle.pid -> pir, hq-overseer.pid -> hq
 func extractRigPrefix(filename string) string {
 	// Remove .pid extension
 	name := strings.TrimSuffix(filename, ".pid")

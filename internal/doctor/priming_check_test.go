@@ -1,7 +1,6 @@
 package doctor
 
 import (
-	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -542,47 +541,8 @@ func TestPrimingCheck_NoIssuesWhenCorrectlyConfigured(t *testing.T) {
 	}
 }
 
-// TestPrimingCheck_DetectsLargeClaudeMd verifies that CLAUDE.md files
-// exceeding 30 lines are flagged.
-func TestPrimingCheck_DetectsLargeClaudeMd(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-
-	// Create town-level mayor directory with large CLAUDE.md (>30 lines)
-	// The priming check looks at townRoot/mayor/CLAUDE.md for town-level mayor
-	mayorPath := filepath.Join(tmpDir, "mayor")
-	if err := os.MkdirAll(mayorPath, 0755); err != nil {
-		t.Fatal(err)
-	}
-	var largeContent strings.Builder
-	for i := 0; i < 50; i++ {
-		largeContent.WriteString("# Line " + string(rune('0'+i%10)) + "\n")
-	}
-	if err := os.WriteFile(filepath.Join(mayorPath, "CLAUDE.md"), []byte(largeContent.String()), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Run priming check
-	check := primingCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
-	result := check.Run(ctx)
-
-	// Should find large_claude_md issue
-	foundIssue := false
-	for _, detail := range result.Details {
-		if strings.Contains(detail, "CLAUDE.md has") && strings.Contains(detail, "lines") {
-			foundIssue = true
-			break
-		}
-	}
-
-	if !foundIssue {
-		t.Errorf("expected to find large CLAUDE.md issue, got details: %v", result.Details)
-	}
-}
-
 // TestPrimingCheck_DetectsStaleIntermediateFiles verifies that stale CLAUDE.md/AGENTS.md
-// at intermediate directories (crew/, polecats/, mayor/) are detected, and that
+// at intermediate directories (crew/, polecats/) are detected, and that
 // leftover refinery/ and witness/ directories from retired roles are ignored.
 func TestPrimingCheck_DetectsStaleIntermediateFiles(t *testing.T) {
 	t.Parallel()
@@ -617,17 +577,6 @@ func TestPrimingCheck_DetectsStaleIntermediateFiles(t *testing.T) {
 		}
 	}
 
-	// Also create stale mayor/CLAUDE.md and mayor/AGENTS.md
-	mayorPath := filepath.Join(tmpDir, "mayor")
-	if err := os.MkdirAll(mayorPath, 0755); err != nil {
-		t.Fatal(err)
-	}
-	for _, filename := range []string{"CLAUDE.md", "AGENTS.md"} {
-		if err := os.WriteFile(filepath.Join(mayorPath, filename), []byte("# Stale\n"), 0644); err != nil {
-			t.Fatal(err)
-		}
-	}
-
 	// Run priming check
 	check := primingCheck()
 	ctx := &CheckContext{TownRoot: tmpDir}
@@ -640,8 +589,8 @@ func TestPrimingCheck_DetectsStaleIntermediateFiles(t *testing.T) {
 		}
 	}
 
-	// Should find stale issues for all live roles + mayor
-	expectedLocations := []string{"crew", "polecats", "mayor"}
+	// Should find stale issues for all live roles
+	expectedLocations := []string{"crew", "polecats"}
 	for _, loc := range expectedLocations {
 		found := false
 		for _, detail := range result.Details {
@@ -702,19 +651,6 @@ func TestPrimingCheck_FixRemovesStaleIntermediateFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Also create stale mayor files
-	mayorPath := filepath.Join(tmpDir, "mayor")
-	if err := os.MkdirAll(mayorPath, 0755); err != nil {
-		t.Fatal(err)
-	}
-	for _, filename := range []string{"CLAUDE.md", "AGENTS.md"} {
-		filePath := filepath.Join(mayorPath, filename)
-		if err := os.WriteFile(filePath, []byte("# Stale\n"), 0644); err != nil {
-			t.Fatal(err)
-		}
-		staleFiles = append(staleFiles, filePath)
-	}
-
 	// Run priming check and fix
 	check := primingCheck()
 	ctx := &CheckContext{TownRoot: tmpDir}
@@ -740,155 +676,5 @@ func TestPrimingCheck_FixRemovesStaleIntermediateFiles(t *testing.T) {
 	townRootClaude := filepath.Join(tmpDir, "CLAUDE.md")
 	if _, err := os.Stat(townRootClaude); os.IsNotExist(err) {
 		t.Errorf("town root CLAUDE.md should NOT have been removed")
-	}
-}
-
-// TestPrimingCheck_DetectsNoPrimeHook verifies that settings.json files
-// missing 'gt prime' in SessionStart are detected.
-func TestPrimingCheck_DetectsNoPrimeHook(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	rigName := "testrig"
-
-	// Create town root CLAUDE.md identity anchor
-	if err := os.WriteFile(filepath.Join(tmpDir, "CLAUDE.md"), []byte("# Gas Town\nRun gt prime\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Set up rig with .beads and PRIME.md
-	rigBeadsDir := filepath.Join(tmpDir, rigName, ".beads")
-	if err := os.MkdirAll(rigBeadsDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(rigBeadsDir, "PRIME.md"), []byte("# PRIME\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create mayor directory with settings.json MISSING gt prime
-	mayorClaudeDir := filepath.Join(tmpDir, "mayor", ".claude")
-	if err := os.MkdirAll(mayorClaudeDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Settings with PATH but no gt prime hook
-	staleSettings := map[string]any{
-		"hooks": map[string]any{
-			"SessionStart": []any{
-				map[string]any{
-					"matcher": "",
-					"hooks": []any{
-						map[string]any{
-							"type":    "command",
-							"command": "export PATH=\"$HOME/go/bin:$HOME/bin:$PATH\"",
-						},
-					},
-				},
-			},
-		},
-	}
-	data, _ := json.MarshalIndent(staleSettings, "", "  ")
-	if err := os.WriteFile(filepath.Join(mayorClaudeDir, "settings.json"), data, 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	// Run priming check
-	check := primingCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
-	result := check.Run(ctx)
-
-	// Should detect the missing gt prime hook
-	foundIssue := false
-	for _, detail := range result.Details {
-		if strings.Contains(detail, "mayor") && strings.Contains(detail, "gt prime") {
-			foundIssue = true
-			break
-		}
-	}
-
-	if !foundIssue {
-		t.Errorf("expected no_prime_hook issue for mayor, got details: %v", result.Details)
-	}
-
-	// Issue should be fixable
-	for _, issue := range check.issues {
-		if issue.issueType == "no_prime_hook" {
-			if !issue.fixable {
-				t.Errorf("no_prime_hook issue should be fixable")
-			}
-			if issue.agentType != "mayor" {
-				t.Errorf("expected agentType 'mayor', got '%s'", issue.agentType)
-			}
-			if issue.rigName != "" {
-				t.Errorf("expected empty rigName for town-level mayor, got '%s'", issue.rigName)
-			}
-		}
-	}
-}
-
-// TestPrimingCheck_FixNoPrimeHook verifies that doctor --fix recreates
-// settings.json from template when gt prime hook is missing.
-func TestPrimingCheck_FixNoPrimeHook(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	rigName := "testrig"
-
-	// Create town root CLAUDE.md identity anchor
-	if err := os.WriteFile(filepath.Join(tmpDir, "CLAUDE.md"), []byte("# Gas Town\nRun gt prime\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Set up rig with .beads and PRIME.md
-	rigBeadsDir := filepath.Join(tmpDir, rigName, ".beads")
-	if err := os.MkdirAll(rigBeadsDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(rigBeadsDir, "PRIME.md"), []byte("# PRIME\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create mayor directory with settings.json MISSING gt prime
-	mayorClaudeDir := filepath.Join(tmpDir, "mayor", ".claude")
-	if err := os.MkdirAll(mayorClaudeDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	staleSettings := map[string]any{
-		"hooks": map[string]any{
-			"SessionStart": []any{
-				map[string]any{
-					"matcher": "",
-					"hooks": []any{
-						map[string]any{
-							"type":    "command",
-							"command": "export PATH=\"$HOME/go/bin:$HOME/bin:$PATH\"",
-						},
-					},
-				},
-			},
-		},
-	}
-	data, _ := json.MarshalIndent(staleSettings, "", "  ")
-	settingsPath := filepath.Join(mayorClaudeDir, "settings.json")
-	if err := os.WriteFile(settingsPath, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	// Run priming check and fix
-	check := primingCheck()
-	ctx := &CheckContext{TownRoot: tmpDir}
-	_ = check.Run(ctx)
-
-	if err := check.Fix(ctx); err != nil {
-		t.Fatalf("Fix() failed: %v", err)
-	}
-
-	// Verify settings.json was recreated and now has gt prime
-	newData, err := os.ReadFile(settingsPath)
-	if err != nil {
-		t.Fatalf("settings.json should exist after fix: %v", err)
-	}
-
-	if !strings.Contains(string(newData), "prime --hook") {
-		t.Errorf("recreated settings.json should contain 'prime --hook', got: %s", string(newData))
 	}
 }

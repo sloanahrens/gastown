@@ -20,11 +20,10 @@ func TestAgentBeadsExistCheck_NoRoutes(t *testing.T) {
 
 	result := check.Run(ctx)
 
-	// With no routes, only the global agent (mayor) is checked
-	// They won't exist without Dolt, so we expect error
+	// With no routes there are no rig agents to check, so the check passes.
 	t.Logf("Result: status=%v, message=%s", result.Status, result.Message)
-	if result.Status == StatusOK {
-		t.Error("expected error for missing global agent beads")
+	if result.Status != StatusOK {
+		t.Errorf("expected OK with no routes to check, got %v: %s", result.Status, result.Message)
 	}
 }
 
@@ -47,9 +46,11 @@ func TestAgentBeadsExistCheck_NoRigs(t *testing.T) {
 
 	result := check.Run(ctx)
 
-	// With empty routes, only the global agent (mayor) is checked
-	// They won't exist without Dolt, so we expect error or warning
+	// With empty routes there are no rig agents to check, so the check passes.
 	t.Logf("Result: status=%v, message=%s", result.Status, result.Message)
+	if result.Status != StatusOK {
+		t.Errorf("expected OK with empty routes, got %v: %s", result.Status, result.Message)
+	}
 }
 
 // TestAgentBeadsExistCheck_ExpectedIDs verifies the check looks for correct agent bead IDs.
@@ -223,7 +224,6 @@ func townDuplicateBD(townRoot string) *doctorTown {
 	d := newDoctorTown()
 	d.db(filepath.Join(townRoot, ".beads")).Seed(
 		beads.Issue{ID: "gs-gastown-crew-alice", Title: "Crew alice", Labels: []string{"gt:agent"}},
-		beads.Issue{ID: "hq-mayor", Title: "Mayor", Labels: []string{"gt:agent"}},
 	)
 	return d
 }
@@ -333,23 +333,15 @@ func TestAgentBeadsExistCheck_FixCreatesRigLocalBeadDespiteTownDuplicate(t *test
 			t.Errorf("expected Fix() to create %s IN THE RIG DATABASE (create running in %s) despite town duplicate, got log: %q", id, rigDir, log)
 		}
 	}
-	// Town agents exist in the town DB — Fix must NOT recreate them.
-	for _, unwanted := range []string{"create hq-mayor"} {
-		if strings.Contains(log, unwanted) {
-			t.Errorf("Fix() should not recreate existing town agent bead (%s), got log: %q", unwanted, log)
-		}
-	}
 }
 
 // legacyUnlabeledBD is a town for the legacy-bead case: the rig database
-// holds the crew agent bead, and the town database the mayor's, as plain
-// open tasks WITHOUT the gt:agent label (1.1.0-era identity beads). A
-// gt:agent list does not return them, but show finds them; the label
-// read-back reports the label present.
+// holds the crew agent bead as a plain open task WITHOUT the gt:agent label
+// (1.1.0-era identity beads). A gt:agent list does not return it, but show
+// finds it; the label read-back reports the label present.
 func legacyUnlabeledBD(townRoot string) *doctorTown {
 	d := newDoctorTown()
 	d.db(filepath.Join(townRoot, "gastown", "mayor", "rig")).Seed(beads.Issue{ID: "gs-gastown-crew-alice", Title: "gs-gastown-crew-alice", Type: "task"})
-	d.db(filepath.Join(townRoot, ".beads")).Seed(beads.Issue{ID: beads.MayorBeadIDTown(), Title: "mayor", Type: "task"})
 	d.sql = func(string) ([][]string, error) { return [][]string{{"present"}, {"1"}}, nil }
 	return d
 }

@@ -9,9 +9,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/runtime"
-	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // gitFileStatus represents the git status of a file.
@@ -37,9 +35,8 @@ type ClaudeSettingsCheck struct {
 
 type staleSettingsInfo struct {
 	path          string        // Full path to settings file
-	agentType     string        // e.g., "mayor", "crew", "polecat"
-	rigName       string        // Rig name (empty for town-level agents)
-	sessionName   string        // tmux session name for cycling
+	agentType     string        // e.g., "crew", "polecat", "rig-root", "town-root"
+	rigName       string        // Rig name (empty for town-root files)
 	missing       []string      // What's missing from the settings
 	wrongLocation bool          // True if file is in wrong location (should be deleted)
 	missingFile   bool          // True if settings.local.json doesn't exist (needs agent restart)
@@ -70,7 +67,7 @@ func (c *ClaudeSettingsCheck) Run(ctx *CheckContext) *CheckResult {
 	var hasStaleFiles bool
 
 	// Find all settings files (stale and missing)
-	settingsFiles := c.findSettingsFiles(ctx.TownRoot, ctx.prefixes())
+	settingsFiles := c.findSettingsFiles(ctx.TownRoot)
 
 	for _, sf := range settingsFiles {
 		// Missing settings.local.json files need agent restart to create
@@ -172,17 +169,18 @@ func (c *ClaudeSettingsCheck) Run(ctx *CheckContext) *CheckResult {
 // Settings are now installed in gastown-managed parent directories (crew/, polecats/)
 // and passed via --settings flag. Old settings.local.json files
 // in working directories are detected as stale.
-func (c *ClaudeSettingsCheck) findSettingsFiles(townRoot string, reg *session.PrefixRegistry) []staleSettingsInfo {
+func (c *ClaudeSettingsCheck) findSettingsFiles(townRoot string) []staleSettingsInfo {
 	var files []staleSettingsInfo
 
 	// Check for STALE settings at town root (~/gt/.claude/settings.json)
-	// This is WRONG - settings here pollute ALL child workspaces via directory traversal.
+	// This is WRONG - settings here pollute ALL child workspaces via directory
+	// traversal. There is no per-role location to recreate them at; deleting
+	// the file is the whole fix.
 	staleTownRootSettings := filepath.Join(townRoot, ".claude", "settings.json")
 	if fileExists(staleTownRootSettings) {
 		files = append(files, staleSettingsInfo{
 			path:          staleTownRootSettings,
-			agentType:     "mayor",
-			sessionName:   "hq-mayor",
+			agentType:     "town-root",
 			wrongLocation: true,
 			gitStatus:     c.getGitFileStatus(staleTownRootSettings),
 			missing:       []string{"stale settings.json at town root (should not exist)"},
@@ -193,8 +191,7 @@ func (c *ClaudeSettingsCheck) findSettingsFiles(townRoot string, reg *session.Pr
 	if fileExists(staleTownRootLocal) {
 		files = append(files, staleSettingsInfo{
 			path:          staleTownRootLocal,
-			agentType:     "mayor",
-			sessionName:   "hq-mayor",
+			agentType:     "town-root",
 			wrongLocation: true,
 			gitStatus:     c.getGitFileStatus(staleTownRootLocal),
 			missing:       []string{"stale settings.local.json at town root (should not exist)"},
@@ -202,47 +199,17 @@ func (c *ClaudeSettingsCheck) findSettingsFiles(townRoot string, reg *session.Pr
 	}
 
 	// Check for STALE CLAUDE.md at town root (~/gt/CLAUDE.md)
-	// This is WRONG if it contains Mayor-specific instructions that would be inherited
+	// This is WRONG if it contains agent instructions that would be inherited
 	// by ALL agents via directory traversal. However, a short identity anchor file
 	// (created by priming) that just says "run gt prime" is intentional and safe.
 	staleTownRootCLAUDEmd := filepath.Join(townRoot, "CLAUDE.md")
 	if fileExists(staleTownRootCLAUDEmd) && !isIdentityAnchor(staleTownRootCLAUDEmd) {
 		files = append(files, staleSettingsInfo{
 			path:          staleTownRootCLAUDEmd,
-			agentType:     "mayor",
-			sessionName:   "hq-mayor",
+			agentType:     "town-root",
 			wrongLocation: true,
 			gitStatus:     c.getGitFileStatus(staleTownRootCLAUDEmd),
-			missing:       []string{"should be at mayor/CLAUDE.md, not town root"},
-		})
-	}
-
-	// Town-level: mayor - check for stale settings.local.json (should be settings.json)
-	mayorStaleLocal := filepath.Join(townRoot, "mayor", ".claude", "settings.local.json")
-	if fileExists(mayorStaleLocal) {
-		files = append(files, staleSettingsInfo{
-			path:          mayorStaleLocal,
-			agentType:     "mayor",
-			sessionName:   "hq-mayor",
-			wrongLocation: true,
-			missing:       []string{"stale settings.local.json (should be settings.json)"},
-		})
-	}
-	// Check for correct settings.json
-	mayorSettings := filepath.Join(townRoot, "mayor", ".claude", "settings.json")
-	mayorWorkDir := filepath.Join(townRoot, "mayor")
-	if fileExists(mayorSettings) {
-		files = append(files, staleSettingsInfo{
-			path:        mayorSettings,
-			agentType:   "mayor",
-			sessionName: "hq-mayor",
-		})
-	} else if dirExists(mayorWorkDir) {
-		files = append(files, staleSettingsInfo{
-			path:        mayorSettings,
-			agentType:   "mayor",
-			sessionName: "hq-mayor",
-			missingFile: true,
+			missing:       []string{"unexpected CLAUDE.md at town root (not a Gas Town identity anchor)"},
 		})
 	}
 
@@ -312,7 +279,6 @@ func (c *ClaudeSettingsCheck) findSettingsFiles(townRoot string, reg *session.Pr
 								path:          stalePath,
 								agentType:     "crew",
 								rigName:       rigName,
-								sessionName:   session.CrewSessionName(reg.PrefixForRig(rigName), crewEntry.Name()),
 								wrongLocation: true,
 								missing:       []string{"stale settings in workdir (settings now in crew/.claude/settings.json)"},
 							})
@@ -366,7 +332,6 @@ func (c *ClaudeSettingsCheck) findSettingsFiles(townRoot string, reg *session.Pr
 							path:          stalePath,
 							agentType:     "polecat",
 							rigName:       rigName,
-							sessionName:   session.PolecatSessionName(reg.PrefixForRig(rigName), pcEntry.Name()),
 							wrongLocation: true,
 							missing:       []string{"stale settings in intermediate dir (settings now in polecats/.claude/settings.json)"},
 						})
@@ -382,7 +347,6 @@ func (c *ClaudeSettingsCheck) findSettingsFiles(townRoot string, reg *session.Pr
 								path:          stalePath,
 								agentType:     "polecat",
 								rigName:       rigName,
-								sessionName:   session.PolecatSessionName(reg.PrefixForRig(rigName), pcEntry.Name()),
 								wrongLocation: true,
 								missing:       []string{"stale settings in workdir (settings now in polecats/.claude/settings.json)"},
 							})
@@ -554,7 +518,7 @@ func (c *ClaudeSettingsCheck) hookHasPattern(hooks map[string]any, hookName, pat
 	return false
 }
 
-// DestructiveFix marks this repair as destructive (gt-638go.3): it deletes settings files and kills the mayor session.
+// DestructiveFix marks this repair as destructive (gt-638go.3): it deletes settings files.
 func (c *ClaudeSettingsCheck) DestructiveFix() bool { return true }
 
 // Fix deletes stale settings files. Agents auto-install correct settings on restart.
@@ -563,7 +527,6 @@ func (c *ClaudeSettingsCheck) Fix(ctx *CheckContext) error {
 	var errors []string
 	var skipped []string
 	var needsRestart bool
-	t := tmux.NewTmux()
 
 	for _, sf := range c.staleSettings {
 		// Skip files that aren't stale (correct settings.json files)
@@ -612,29 +575,16 @@ func (c *ClaudeSettingsCheck) Fix(ctx *CheckContext) error {
 			continue
 		}
 
-		// Handle town-root files: redirect to mayor/ instead of recreating at root.
-		// Town-root settings pollute ALL agents via directory traversal.
-		// This handles both settings.json and settings.local.json at the town root.
-		if sf.agentType == "mayor" && !strings.Contains(sf.path, "/mayor/") {
-			mayorDir := filepath.Join(ctx.TownRoot, "mayor")
-
-			if strings.HasSuffix(claudeDir, ".claude") {
-				// Town-root .claude/settings{.local}.json → recreate at mayor/.claude/
-				if err := os.MkdirAll(mayorDir, 0755); err == nil {
-					_ = runtime.EnsureSettingsForRole(mayorDir, mayorDir, "mayor")
-				}
-			}
-
-			// Town-root files were inherited by ALL agents via directory traversal.
-			// Warn user to restart agents - don't auto-kill sessions as that's too disruptive.
-			fmt.Printf("\n  %s Town-root settings were moved. Restart agents to pick up new config:\n", style.Warning.Render("⚠"))
+		// Town-root settings: just delete. They pollute ALL agents via directory
+		// traversal, and there is no per-role location to recreate them at.
+		if sf.agentType == "town-root" {
+			fmt.Printf("\n  %s Town-root settings removed. Restart agents to drop the inherited config:\n", style.Warning.Render("⚠"))
 			fmt.Printf("      gt up --restore\n\n")
 			continue
 		}
 
 		// Recreate settings at the correct location using EnsureSettingsForRole.
 		// For rig roles, compute settingsDir from role+rig path.
-		// For town-level roles (mayor), settingsDir == workDir.
 		settingsDir := filepath.Dir(claudeDir)
 		workDir := settingsDir
 		rigPath := ""
@@ -652,23 +602,6 @@ func (c *ClaudeSettingsCheck) Fix(ctx *CheckContext) error {
 		if err := runtime.EnsureSettingsForRole(settingsDir, workDir, sf.agentType); err != nil {
 			errors = append(errors, fmt.Sprintf("failed to recreate settings for %s: %v", sf.path, err))
 			continue
-		}
-
-		// Only cycle the mayor if --restart-sessions was explicitly passed.
-		// This prevents unexpected session restarts during routine gt doctor fix claude-settings runs.
-		// Crew and polecats are spawned on-demand and won't auto-restart anyway.
-		if ctx.RestartSessions {
-			if sf.agentType == "mayor" {
-				running, _ := t.HasSession(sf.sessionName)
-				if running {
-					// Cycle the agent by killing it through the supervisor and
-					// letting the daemon restart it. A refusal (parked seat,
-					// e-stop) is reported rather than dropped.
-					if err := killSessionForFix(ctx, t, sf.sessionName, "restart to apply recreated settings"); err != nil {
-						errors = append(errors, fmt.Sprintf("not restarting %s: %v", sf.sessionName, err))
-					}
-				}
-			}
 		}
 	}
 

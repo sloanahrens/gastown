@@ -447,13 +447,7 @@ func (c *OrphanedAttachmentsCheck) checkBeadsDir(ctx *CheckContext, beadsDir, to
 // Agent identities follow patterns like:
 //   - "gastown/nux" → polecat at <townRoot>/gastown/polecats/nux
 //   - "gastown/crew/joe" → crew at <townRoot>/gastown/crew/joe
-//   - "mayor" → mayor at <townRoot>/mayor
 func (c *OrphanedAttachmentsCheck) agentExists(agent, townRoot string) bool {
-	// Handle mayor
-	if agent == "mayor" {
-		return dirExists(filepath.Join(townRoot, "mayor"))
-	}
-
 	// Handle crew (rig/crew/name pattern)
 	if strings.Contains(agent, "/crew/") {
 		parts := strings.SplitN(agent, "/crew/", 2)
