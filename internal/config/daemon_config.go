@@ -2,6 +2,8 @@ package config
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"time"
 )
@@ -648,6 +650,54 @@ type LandingWorkerConfig struct {
 	// PostLandTimeoutStr bounds one run of the rig's
 	// merge_queue.post_land_command (e.g. "60m"). Default 60m.
 	PostLandTimeoutStr string `json:"post_land_timeout,omitempty"`
+
+	// Forgejo holds the town-level Forgejo facts this patrol needs, the same
+	// for every rig (gt-fn9e6.3). Nil means the defaults.
+	Forgejo *ForgejoWorkerConfig `json:"forgejo,omitempty"`
+}
+
+// ForgejoWorkerConfig is the landing worker's town-level Forgejo block. The
+// half that changes per rig — the remote URL, the gate workflow, the bot
+// logins and the mirror target — is merge_queue.forgejo, resolved by
+// rig.ResolveForgejoConfig. What is left is the same for every rig, which is
+// why it is daemon.json's and not a rig's (gt-fn9e6.3).
+type ForgejoWorkerConfig struct {
+	// TokenDir is the directory holding the per-role bot tokens, read by the
+	// Forgejo client as <token_dir>/forgejo-<role>.env, mode 600. Empty means
+	// DefaultForgejoTokenDir: $XDG_CONFIG_HOME/gt, else ~/.config/gt, the
+	// path the epic names. The key names a directory, never a token: a token
+	// value here would be a secret in config, which the design forbids.
+	TokenDir string `json:"token_dir,omitempty"`
+}
+
+// ForgejoTokenDir returns the directory the per-role Forgejo token files live
+// in: the configured directory, else DefaultForgejoTokenDir. Nil-safe.
+func (c *LandingWorkerConfig) ForgejoTokenDir() (string, error) {
+	if c != nil && c.Forgejo != nil && c.Forgejo.TokenDir != "" {
+		return c.Forgejo.TokenDir, nil
+	}
+	return DefaultForgejoTokenDir()
+}
+
+// DefaultForgejoTokenDir returns the host's default token directory:
+// $XDG_CONFIG_HOME/gt when set, else ~/.config/gt (the path the epic names
+// for forgejo-<role>.env).
+func DefaultForgejoTokenDir() (string, error) {
+	return forgejoTokenDir(os.Getenv, os.UserHomeDir)
+}
+
+// forgejoTokenDir is DefaultForgejoTokenDir with its environment injected,
+// the way config.ClaudeConfigDir is, so a test can pin the directory without
+// mutating the process environment.
+func forgejoTokenDir(getenv func(string) string, userHomeDir func() (string, error)) (string, error) {
+	if xdg := getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, "gt"), nil
+	}
+	home, err := userHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".config", "gt"), nil
 }
 
 // StewardConfig holds configuration for the steward patrol.

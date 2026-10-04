@@ -308,8 +308,60 @@ func MergeSettingsCommand(repo, local *MergeQueueConfig) *MergeQueueConfig {
 		if local.Editorial != nil {
 			result.Editorial = local.Editorial
 		}
+		if local.Forgejo != nil {
+			result.Forgejo = mergeForgejoConfig(result.Forgejo, local.Forgejo)
+		}
 	}
 	return result
+}
+
+// mergeForgejoConfig overlays a rig's Forgejo landing block on the tier below
+// it: each non-empty field of the override wins, and Bots overlays role by
+// role, so a rig-local file can re-point one bot without restating the rest
+// (gt-fn9e6.3). Editorial replaces wholesale because its single field makes
+// that indistinguishable from an overlay; these fields are independent.
+//
+// Returns nil when both inputs are nil, and otherwise a copy that owns its
+// Bots map, so a caller mutating the result cannot reach into a tier.
+func mergeForgejoConfig(base, override *ForgejoConfig) *ForgejoConfig {
+	if base == nil && override == nil {
+		return nil
+	}
+	out := &ForgejoConfig{}
+	if base != nil {
+		out.RemoteURL = base.RemoteURL
+		out.GateWorkflow = base.GateWorkflow
+		out.MirrorTarget = base.MirrorTarget
+	}
+	if override != nil {
+		if override.RemoteURL != "" {
+			out.RemoteURL = override.RemoteURL
+		}
+		if override.GateWorkflow != "" {
+			out.GateWorkflow = override.GateWorkflow
+		}
+		if override.MirrorTarget != "" {
+			out.MirrorTarget = override.MirrorTarget
+		}
+	}
+	// One fresh map whether the bots come from base, override, or both.
+	var baseBots, overrideBots map[string]string
+	if base != nil {
+		baseBots = base.Bots
+	}
+	if override != nil {
+		overrideBots = override.Bots
+	}
+	if n := len(baseBots) + len(overrideBots); n > 0 {
+		out.Bots = make(map[string]string, n)
+		for role, login := range baseBots {
+			out.Bots[role] = login
+		}
+		for role, login := range overrideBots {
+			out.Bots[role] = login
+		}
+	}
+	return out
 }
 
 // LoadRigSettings loads and validates a rig settings file.

@@ -143,6 +143,15 @@ Town-level role defaults live in `mayor/config.json` under:
 | `require_review` | `*bool` | `false` | Passed to the polecat formula as `require_review=true` |
 | `editorial.required` | `bool` | `false` | Read by the `editorial-required` doctor check only |
 | `integration_branch_polecat_enabled` | `*bool` | `true` | Polecats auto-source worktrees from integration branches |
+| `forgejo.remote_url` | `string` | `""` | The rig's Forgejo repository URL, where `gt done` and the landing worker push once the rig is cut over |
+| `forgejo.gate_workflow` | `string` | `"gate"` | The candidate gate's workflow; the required commit-status context is derived from this name, not typed twice |
+| `forgejo.bots` | `map[string]string` | `{}` | Bot role (`polecat`, `landing`, `registry`) to Forgejo login. The role names the token file `~/.config/gt/forgejo-<role>.env`, which is a host fact and never config |
+| `forgejo.mirror_target` | `string` | `""` | The rig's read-only push mirror target (its GitHub repository). A mirror failure never blocks a landing |
+
+The `forgejo.*` keys resolve through the same three tiers as the rest of
+`merge_queue`; read [Forgejo-primary landing](design/forgejo-primary-landing.md)
+before changing the landing path, and call `rig.ResolveForgejoConfig` rather
+than reading the block from one tier.
 
 Keys removed in gt-5nlvq (`enabled`, `run_tests`, `on_conflict`, `poll_interval`,
 `batch_*`, `test_verify_*` and the other refinery-era keys) now fail strict

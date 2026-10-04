@@ -1100,6 +1100,25 @@ func ResolveMergeQueueConfig(townRoot, rigName string) *config.MergeQueueConfig 
 	return config.MergeSettingsCommand(mq, localMQ)
 }
 
+// ResolveForgejoConfig resolves a rig's Forgejo landing settings
+// (merge_queue.forgejo) from the same three tiers ResolveMergeQueueConfig
+// reads: rig root config.json floor, repo-committed .gastown/settings.json,
+// then the rig-local settings/config.json override.
+//
+// It is a reader beside ResolveMergeQueueConfig, not a second precedence: it
+// delegates, so the merge stays in config.MergeSettingsCommand and the two
+// resolvers can never disagree about which tier won (gt-fn9e6.3).
+//
+// Returns nil when no tier sets a forgejo block, which is every rig until a
+// cutover slice adds one.
+func ResolveForgejoConfig(townRoot, rigName string) *config.ForgejoConfig {
+	mq := ResolveMergeQueueConfig(townRoot, rigName)
+	if mq == nil {
+		return nil
+	}
+	return mq.Forgejo
+}
+
 // LoadNamedGateCommands reads the rig-root config.json's merge_queue.gates
 // map, returning each named gate's command keyed by name (timeout and phase
 // are irrelevant to gate-set identity, so they are not read here). This is
