@@ -47,7 +47,7 @@ td.n,th.n{text-align:right}
 .hrej{background:var(--red);border-radius:2px 2px 0 0}
 .legend{display:flex;gap:12px;flex-wrap:wrap;color:var(--dim);font-size:11px;margin-top:3px}
 .sw{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:-1px}
-.kv{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:8px}
+.kv{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:6px}#spend .kv{margin-bottom:2px}
 .kv b{font-size:16px}.kv span{color:var(--dim);font-size:11px;display:block}
 .chips{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}
 .chip{cursor:pointer;border:1px solid var(--line);border-radius:999px;padding:1px 9px;font-size:11px;color:var(--dim);background:none;font:inherit;font-size:11px}
@@ -129,11 +129,11 @@ section.collapsed>h2{border-bottom:0}
 
 <div class="grid">
   <div class="col">
+    <section><h2>DeepSeek <span class="r" id="spendnote"></span></h2><div class="body" id="spend"></div></section>
     <section><h2>Polecats <span class="r" id="seatsnote"></span></h2><div class="body" id="seats"></div></section>
     <section><h2>Dispatcher <span class="r" id="dispnote"></span></h2><div class="body" id="disp"></div></section>
     <section id="trendsec" hidden><h2>Landings <span class="r" id="trendnote"></span></h2><div class="body" id="trend"></div></section>
     <section><h2>Machine <span class="r" id="machnote"></span></h2><div class="body" id="machine"></div></section>
-    <section><h2>DeepSeek <span class="r" id="spendnote"></span></h2><div class="body" id="spend"></div></section>
   </div>
   <div class="col">
     <section><h2>Alerts <span class="r" id="alertsnote"></span></h2><div class="body" id="alerts"></div></section>
@@ -532,15 +532,10 @@ function renderSpend(s) {
   const rw = d.runway_days_at_24h_pace;
   add(rw == null ? "–" : rw.toFixed(1) + "d", "runway", rw != null && rw < 3 ? "badc" : rw != null && rw < 7 ? "warnc" : "");
   box.append(kv);
-  const days = Object.entries(d.per_day || {}).slice(-7);
+  // One dim line of the last few days instead of a table, to keep the panel short.
+  const days = Object.entries(d.per_day || {}).slice(-4).reverse();
   if (days.length) {
-    const t = el("table");
-    for (const [day, v] of days.reverse()) {
-      const tr = el("tr");
-      tr.append(el("td", "", day), el("td", "n", v.spent < 0 ? "top-up" : money(v.spent)), el("td", "n title", money(v.close)));
-      t.append(tr);
-    }
-    box.append(t);
+    box.append(el("div", "title", days.map(([day, v]) => day.slice(5) + " " + (v.spent < 0 ? "top-up" : money(v.spent))).join(" · ")));
   }
   const alerts = d.alerts || [];
   if (live.ok === false) box.append(el("div", "badc", "live balance unreachable; showing the ledger"));
@@ -893,8 +888,11 @@ function pushEntry(e, stick) {
 
 function connect() {
   const es = new EventSource("/stream");
-  es.onopen = () => { $("conn").className = "on"; $("conn").textContent = "live"; };
-  es.onerror = () => { $("conn").className = "off"; $("conn").textContent = "reconnecting"; };
+  let dropped = false;
+  // The server restarts in place when the gt binary is replaced; a stream that
+  // comes back after dropping may be a new build, so take its page.
+  es.onopen = () => { if (dropped) { location.reload(); return; } $("conn").className = "on"; $("conn").textContent = "live"; };
+  es.onerror = () => { dropped = true; $("conn").className = "off"; $("conn").textContent = "reconnecting"; };
   es.addEventListener("state", ev => { state = JSON.parse(ev.data); renderAll(); });
   es.addEventListener("backlog", ev => { $("feed").replaceChildren(); for (const k of Object.keys(counts)) delete counts[k]; JSON.parse(ev.data).forEach(e => pushEntry(e, true)); });
   es.addEventListener("entry", ev => pushEntry(JSON.parse(ev.data)));

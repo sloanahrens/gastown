@@ -97,6 +97,14 @@ func runDashboard(cmd *cobra.Command, _ []string) error {
 	defer stop()
 	go hub.Run(ctx)
 
+	// A new gt binary on disk (make install) restarts the dashboard in place:
+	// same port, same flags, and the open page reloads itself on reconnect.
+	exe, _ := os.Executable()
+	reexec := false
+	if exe != "" {
+		go watchBinary(ctx, exe, dashboardBinaryPoll, func() { reexec = true; stop() })
+	}
+
 	srv := &http.Server{Handler: hub.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
@@ -111,6 +119,11 @@ func runDashboard(cmd *cobra.Command, _ []string) error {
 	}
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		return err
+	}
+	if reexec {
+		<-time.After(200 * time.Millisecond) // let Shutdown release the port
+		fmt.Fprintln(cmd.OutOrStdout(), "gt dashboard: binary changed, restarting")
+		return reexecSelf(exe)
 	}
 	return nil
 }
