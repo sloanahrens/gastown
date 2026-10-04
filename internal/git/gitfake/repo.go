@@ -27,6 +27,8 @@ type Repo interface {
 	PatchID(base, head string) (string, error)
 	FetchRefspecWithTimeout(remote, refspec string, timeout time.Duration) error
 	PushRemoteBranchTip(remote, branch string) (string, error)
+	ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error)
+	DeleteRemoteBranchIfAt(remote, branch, expectedHash string) error
 	PushForceWithLease(remote, refspec, branchRef, expectedSHA string) error
 	VerifyPushedCommit(remote, branch, commit string) error
 	WorktreeAddDetached(path, ref string) error

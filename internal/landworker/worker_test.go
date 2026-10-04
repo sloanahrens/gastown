@@ -33,6 +33,15 @@ type fakeRemote struct {
 	tipErr    error
 	tipCalls  int
 	containsN int
+
+	// The remote branch model the landing cleanup drives: full ref name to
+	// tip. beforeDelete, when set, runs before a delete's lease check so a
+	// test can move a branch after the listing that saw it.
+	remoteRefs   map[string]string
+	listErr      error
+	deleteErr    map[string]error
+	beforeDelete func(branch string)
+	deleted      []string
 }
 
 func (r *fakeRemote) BranchTip(branch string) (string, error) {
@@ -43,6 +52,36 @@ func (r *fakeRemote) BranchTip(branch string) (string, error) {
 func (r *fakeRemote) Contains(_, commit string) (bool, error) {
 	r.containsN++
 	return r.contains[commit], nil
+}
+
+func (r *fakeRemote) ListRemoteRefs(prefix string) ([]RemoteRef, error) {
+	if r.listErr != nil {
+		return nil, r.listErr
+	}
+	var out []RemoteRef
+	for name, hash := range r.remoteRefs {
+		if strings.HasPrefix(name, prefix) {
+			out = append(out, RemoteRef{Name: name, Hash: hash})
+		}
+	}
+	slices.SortFunc(out, func(a, b RemoteRef) int { return strings.Compare(a.Name, b.Name) })
+	return out, nil
+}
+
+func (r *fakeRemote) DeleteRemoteBranchIfAt(branch, expectedHash string) error {
+	if err := r.deleteErr[branch]; err != nil {
+		return err
+	}
+	if r.beforeDelete != nil {
+		r.beforeDelete(branch)
+	}
+	name := "refs/heads/" + branch
+	if r.remoteRefs[name] != expectedHash {
+		return fmt.Errorf("%s moved since it was listed", branch)
+	}
+	delete(r.remoteRefs, name)
+	r.deleted = append(r.deleted, branch)
+	return nil
 }
 
 type fakeLander struct {

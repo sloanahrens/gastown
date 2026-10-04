@@ -23,7 +23,9 @@ type Beads interface {
 	AddComment(id, text string) error
 }
 
-// Remote answers the two questions the worker asks origin before a landing.
+// Remote answers the worker's questions about origin: before a landing, where
+// a branch points; after one, which polecat branches remain for the bead and
+// the hash-guarded way to delete them.
 type Remote interface {
 	// BranchTip returns origin's tip of branch, or "" when origin has no
 	// such branch.
@@ -31,6 +33,12 @@ type Remote interface {
 	// Contains fetches target and reports whether commit is reachable from
 	// origin/<target>.
 	Contains(target, commit string) (bool, error)
+	// ListRemoteRefs returns origin's refs whose names start with prefix,
+	// each with the commit it points at.
+	ListRemoteRefs(prefix string) ([]RemoteRef, error)
+	// DeleteRemoteBranchIfAt deletes branch on origin only while it still
+	// points at expectedHash.
+	DeleteRemoteBranchIfAt(branch, expectedHash string) error
 }
 
 // Lander lands one piece of work; *land.Lander is the production one.
@@ -497,6 +505,7 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 			rep.InstallRequested = true
 		}
 		w.logf("%s: landed %s on %s (patch-id %s)", work.BeadID, short(res.LandedCommit), work.Target, short(res.PatchID))
+		w.reapBeadBranches(work.BeadID)
 		w.clearIntent(work)
 		if !wasRepair {
 			w.afterLanding(ctx, work, res)
