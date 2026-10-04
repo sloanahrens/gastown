@@ -235,11 +235,38 @@ type TrendPoint struct {
 	OMSecs   *float64  `json:"om_secs,omitempty"`
 }
 
+// LandingRow is one recent landing or rejection, with what it cost: the time
+// each landing stage took, and om's verdict and score. The page's Landings
+// table is made of these.
+type LandingRow struct {
+	At      time.Time `json:"at"`
+	Bead    string    `json:"bead"`
+	Rig     string    `json:"rig,omitempty"`
+	Title   string    `json:"title,omitempty"`
+	Polecat string    `json:"polecat,omitempty"`
+	// Outcome is "landed" or "rejected". Verdict is om's reading of a landing:
+	// "approved", "skipped" (landed with no review of its own) or "error". Kind
+	// is why a rejection was refused: review, gate, conflict, policy or empty.
+	Outcome  string   `json:"outcome"`
+	Verdict  string   `json:"verdict,omitempty"`
+	Kind     string   `json:"kind,omitempty"`
+	Score    *float64 `json:"score,omitempty"`
+	LintSecs *float64 `json:"lint_secs,omitempty"`
+	GateSecs *float64 `json:"gate_secs,omitempty"`
+	OMSecs   *float64 `json:"om_secs,omitempty"`
+	Commit   string   `json:"commit,omitempty"`
+	Route    string   `json:"route,omitempty"`
+	Risk     bool     `json:"risk,omitempty"`
+	Detail   string   `json:"detail,omitempty"`
+}
+
 // Trend is the last 24 hours as the page draws it: landings and rejections by
 // local hour, the newest landings' stage times, and the host load per hour.
 type Trend struct {
 	Hours  []TrendHour  `json:"hours"`
 	Stages []TrendPoint `json:"stages,omitempty"`
+	// Recent is the newest landings and rejections, newest first.
+	Recent []LandingRow `json:"recent,omitempty"`
 }
 
 // State is everything the page draws apart from the feed.

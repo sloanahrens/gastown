@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/dashboard"
+	"github.com/steveyegge/gastown/internal/landings"
 )
 
 func dur(d time.Duration) *time.Duration { return &d }
@@ -183,5 +185,76 @@ func TestBuildTrendLoadHistoryFile(t *testing.T) {
 	}
 	if !strings.Contains(string(after), `"load":5.5`) {
 		t.Errorf("append must write the file, got %q", after)
+	}
+}
+
+func TestBuildRecentLandingsJoinsStagesAndOrdersNewestFirst(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 3, 18, 0, 0, 0, time.UTC)
+	d := func(s int) *time.Duration { v := time.Duration(s) * time.Second; return &v }
+	recs := []omRecord{
+		{Record: landings.Record{Bead: "gt-old", Rig: "gastown", Branch: "polecat/agate/gt-old+x", LandedCommit: "0123456789abcdef", OMVerdict: "approve", OMScore: 0.8, Route: "daemon", LandedAt: now.Add(-3 * time.Hour)}},
+		{Record: landings.Record{Bead: "gt-new", Rig: "gastown", Branch: "polecat/basalt/gt-new+y", LandedCommit: "fedcba9876543210", OMVerdict: "approve", OMScore: 0.9, Route: "daemon", LandedAt: now.Add(-10 * time.Minute)}, RiskPaths: []string{"internal/git/git.go"}},
+		{Record: landings.Record{Bead: "gt-manual", Rig: "gastown", Branch: "sloan/dashboard", OMVerdict: "skipped", Route: "overseer-manual", LandedAt: now.Add(-5 * time.Hour)}},
+		{Record: landings.Record{Bead: "gt-ancient", Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-30 * time.Hour)}},
+	}
+	stages := []omStage{{At: now.Add(-11 * time.Minute), Bead: "gt-new", Lint: d(12), Gate: d(34), OM: d(100)}}
+	score := 0.55
+	rejs := []omRejection{{At: now.Add(-20 * time.Minute), Bead: "gt-new", Kind: "review", Detail: "om requested changes (score 0.55, 5 finding(s))", Score: &score}}
+
+	var asked []string
+	rows := buildRecentLandings(now, recs, stages, rejs, func(rig, id string) string { asked = append(asked, rig+"/"+id); return "title of " + id }, 30)
+
+	if len(rows) != 4 {
+		t.Fatalf("%d rows, want 4 (the 30-hour-old landing is outside the day): %+v", len(rows), rows)
+	}
+	order := []string{rows[0].Bead + ":" + rows[0].Outcome, rows[1].Bead + ":" + rows[1].Outcome, rows[2].Bead, rows[3].Bead}
+	if order[0] != "gt-new:landed" || order[1] != "gt-new:rejected" || order[2] != "gt-old" || order[3] != "gt-manual" {
+		t.Errorf("order = %v, want newest first", order)
+	}
+	r := rows[0]
+	if r.Polecat != "basalt" || r.Commit != "fedcba98" || !r.Risk || r.Verdict != "approved" || r.Title != "title of gt-new" {
+		t.Errorf("landed row = %+v", r)
+	}
+	if r.GateSecs == nil || *r.GateSecs != 34 || r.OMSecs == nil || *r.OMSecs != 100 || r.LintSecs == nil || *r.LintSecs != 12 {
+		t.Errorf("stage times not joined: %+v", r)
+	}
+	rj := rows[1]
+	if rj.Kind != "review" || rj.Rig != "gastown" || rj.Score == nil || *rj.Score != 0.55 || rj.Detail == "" {
+		t.Errorf("rejected row = %+v", rj)
+	}
+	if rows[3].Polecat != "sloan" || rows[3].Verdict != "skipped" {
+		t.Errorf("a crew landing names its builder, and landed without review: %+v", rows[3])
+	}
+	if len(asked) != 3 {
+		t.Errorf("titles asked %d times (%v), want once per bead: gt-new, gt-old, gt-manual", len(asked), asked)
+	}
+}
+
+func TestBuildRecentLandingsCapsRowsAndAsksTitlesOnlyForThoseShown(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 3, 18, 0, 0, 0, time.UTC)
+	var recs []omRecord
+	for i := 0; i < 50; i++ {
+		recs = append(recs, omRecord{Record: landings.Record{Bead: fmt.Sprintf("gt-%d", i), Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-time.Duration(i) * time.Minute)}})
+	}
+	asked := 0
+	rows := buildRecentLandings(now, recs, nil, nil, func(rig, id string) string { asked++; return "" }, 30)
+	if len(rows) != 30 || asked != 30 {
+		t.Fatalf("rows=%d title lookups=%d, want 30 and 30: a title read costs a bd call, so it is bounded by the rows shown", len(rows), asked)
+	}
+	if rows[0].Bead != "gt-0" || rows[29].Bead != "gt-29" {
+		t.Errorf("not the newest 30: first %s last %s", rows[0].Bead, rows[29].Bead)
+	}
+}
+
+func TestPolecatOfBranch(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]string{
+		"polecat/agate/gt-1+abc": "agate", "polecat/x": "", "sloan/dashboard": "sloan", "": "", "polecat/mica/gt-2.1+q": "mica", "main": "",
+	} {
+		if got := polecatOfBranch(in); got != want {
+			t.Errorf("polecatOfBranch(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
