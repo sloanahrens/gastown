@@ -32,6 +32,21 @@ const upgradeStuckAfter = 30 * time.Minute
 // check already sees the run through its gate-class container slot.
 const postLandRestartCap = 2 * time.Minute
 
+// tierSweepRestartCap is how long a pending upgrade restart waits for an
+// in-flight tier sweep cycle (gt-ccyw0). Restarting during one kills it and
+// loses its verdict, so the new daemon runs the cycle again: on 2026-10-04 an
+// install cut an even-hour integration cycle 5.5 minutes in, and the restart
+// cost ~9 minutes of rerun. The sweep's own budget is tierSweepRunBudget (2h),
+// too long to hold an install, so past the cap the daemon restarts anyway and
+// says it cut the sweep short. The cap is not in isIdleForUpgrade: it needs
+// the marker's wait time, and a sweep in the idle predicate would hold the
+// restart forever.
+const tierSweepRestartCap = 15 * time.Minute
+
+// tierSweepWaitState is upgradeWaitLogged while the restart waits on a sweep,
+// so the wait logs once and the release is distinguishable from a landing pass.
+const tierSweepWaitState = "tier-sweep"
+
 // restartPendingMarker is daemon/restart-pending.json, written by
 // scripts/install-gt.sh after a smoke-tested install. The daemon adds
 // attempted_from (its own commit) just before it exits for the marker.
@@ -330,6 +345,12 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 		d.logger.Printf("upgrade-restart: a post-land run is still in flight after %s; restarting anyway (the landing worker reruns the untested tip on start)", postLandRestartCap)
 	}
 
+	// Reached only when the daemon is otherwise idle: a running sweep cycle
+	// holds the restart here, bounded, instead of dying with the old daemon.
+	if d.tierSweepHoldsRestart(now) {
+		return false
+	}
+
 	if err := stampRestartAttempt(d.config.TownRoot, own); err != nil {
 		d.logger.Printf("upgrade-restart: could not stamp attempted_from, not restarting: %v", err)
 		return false
@@ -363,6 +384,33 @@ func (d *Daemon) logUpgradeWait(now time.Time) {
 	if bead, ok := strings.CutPrefix(state, "pass:"); ok {
 		d.logger.Printf("upgrade-restart: waiting for landing pass %s (%dm)", bead, int(now.Sub(d.upgradeWaitSince).Minutes()))
 	}
+}
+
+// tierSweepHoldsRestart reports whether a running tier sweep cycle should
+// still hold a pending upgrade restart. It is called once the daemon is
+// otherwise idle, so it alone decides. A cycle that started before the marker
+// runs in this process; restarting kills it and its verdict is never recorded
+// (gt-ccyw0). The hold ends when the cycle closes, and at tierSweepRestartCap
+// the restart proceeds anyway. New cycles do not start in between: runTierSweep
+// skips while the drain is on.
+func (d *Daemon) tierSweepHoldsRestart(now time.Time) bool {
+	if !d.tierSweepRunning.Load() {
+		if d.upgradeWaitLogged == tierSweepWaitState {
+			d.upgradeWaitLogged = ""
+			d.logger.Printf("upgrade-restart: the tier sweep closed; restarting")
+		}
+		return false
+	}
+	if now.Sub(d.upgradeWaitSince) >= tierSweepRestartCap {
+		d.upgradeWaitLogged = ""
+		d.logger.Printf("upgrade-restart: a tier sweep is still running after %s; restarting anyway and cutting the sweep short", tierSweepRestartCap)
+		return false
+	}
+	if d.upgradeWaitLogged != tierSweepWaitState {
+		d.upgradeWaitLogged = tierSweepWaitState
+		d.logger.Printf("upgrade-restart: waiting for the tier sweep that is running (%dm) instead of killing it", int(now.Sub(d.upgradeWaitSince).Minutes()))
+	}
+	return true
 }
 
 // landingPassBead is the bead of a landing pass in flight (the first rig by

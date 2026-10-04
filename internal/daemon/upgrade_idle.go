@@ -16,7 +16,10 @@ import (
 // slings, mayor dispatch or patrol watchdog run, no steward scan, plan scan or
 // job, no landing-worker pass, no scheduled_maintenance gc cycle, and no
 // install holding install-gt.lock. The Dolt goroutines are not counted: they
-// are short or restartable.
+// are short or restartable. Post-landing runs and tier sweep cycles are not
+// here either: checkUpgradeRestart holds a bounded wait for each instead
+// (postLandRestartCap, tierSweepRestartCap), and a predicate that never
+// cleared would hold a restart forever.
 func (d *Daemon) isIdleForUpgrade() bool {
 	if d.maintenanceGCRunning.Load() {
 		return false

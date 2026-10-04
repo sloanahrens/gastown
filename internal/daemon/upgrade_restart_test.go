@@ -122,6 +122,85 @@ func TestUpgradeCoveredMarkerClearedWithReceipt(t *testing.T) {
 	}
 }
 
+// gt-ccyw0: a tier sweep cycle in flight holds the restart until it closes,
+// and only up to tierSweepRestartCap.
+func TestUpgradeWaitsForARunningTierSweepUpToTheCap(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no sweep running restarts now", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: "/repo"})
+		if !d.checkUpgradeRestart(time.Now()) {
+			t.Fatal("idle daemon with no sweep running must restart")
+		}
+	})
+
+	t.Run("a sweep that closes releases the restart", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		var logs strings.Builder
+		d.logger = log.New(&logs, "", 0)
+		captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		d.tierSweepRunning.Store(true)
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: "/repo"})
+
+		now := time.Now()
+		if d.checkUpgradeRestart(now) || d.checkUpgradeRestart(now.Add(time.Minute)) {
+			t.Fatal("restarted under a running tier sweep before the cap")
+		}
+		if got := strings.Count(logs.String(), "waiting for the tier sweep that is running"); got != 1 {
+			t.Fatalf("sweep wait line logged %d times, want once per state change:\n%s", got, logs.String())
+		}
+
+		// The cycle closes; the next check restarts without waiting out the cap.
+		d.tierSweepRunning.Store(false)
+		if !d.checkUpgradeRestart(now.Add(2 * time.Minute)) {
+			t.Fatal("a closed tier sweep must not hold the restart")
+		}
+		if !strings.Contains(logs.String(), "the tier sweep closed; restarting") {
+			t.Fatalf("no release line for the closed sweep:\n%s", logs.String())
+		}
+	})
+
+	t.Run("a sweep still running at the cap is cut short", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		var logs strings.Builder
+		d.logger = log.New(&logs, "", 0)
+		keys := captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		d.tierSweepRunning.Store(true)
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: "/repo"})
+
+		now := time.Now()
+		if d.checkUpgradeRestart(now) || d.checkUpgradeRestart(now.Add(tierSweepRestartCap-time.Minute)) {
+			t.Fatal("restarted under a running tier sweep before the cap")
+		}
+		if !d.checkUpgradeRestart(now.Add(tierSweepRestartCap)) {
+			t.Fatal("a sweep still running at the cap must not hold the restart further")
+		}
+		if !strings.Contains(logs.String(), "cutting the sweep short") {
+			t.Fatalf("no cut-short line at the cap:\n%s", logs.String())
+		}
+		if len(*keys) != 0 {
+			t.Fatalf("escalated: %v", *keys)
+		}
+	})
+}
+
+// The sweep hold is a quarter hour: long enough for a normal cycle, short
+// enough that an install is not stuck behind a hung one (gt-ccyw0).
+func TestTierSweepRestartCapIsAQuarterHour(t *testing.T) {
+	t.Parallel()
+	if tierSweepRestartCap != 15*time.Minute {
+		t.Fatalf("tierSweepRestartCap = %s, want 15m", tierSweepRestartCap)
+	}
+}
+
 // The receipt's duration_s is an integer, matching the shell writer.
 func TestUpgradeReceiptDurationIsInteger(t *testing.T) {
 	t.Parallel()

@@ -122,6 +122,28 @@ func atHour(t time.Time, hour int) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day(), hour, 0, 0, 0, time.Local)
 }
 
+// A pending upgrade restart keeps a cycle from starting at all, so the sweep
+// never races the restarted daemon's own cycle (gt-ccyw0).
+func TestRunTierSweep_SkipsWhileAnUpgradeRestartIsPending(t *testing.T) {
+	t.Parallel()
+	d, rec, _, logs := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	d.upgradeRestartPending.Store(true)
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) {
+		t.Fatal("a skipped cycle must not read origin/main")
+		return "", nil
+	}
+
+	if !d.runTierSweep() {
+		t.Fatal("a skipped cycle accomplished nothing and must not defer the job")
+	}
+	if len(rec.stages) != 0 {
+		t.Fatalf("stages run = %+v, want none while a restart is pending", rec.stages)
+	}
+	if !strings.Contains(logs.String(), "an upgrade restart is pending; skipping this cycle") {
+		t.Fatalf("skip line missing:\n%s", logs.String())
+	}
+}
+
 func TestRunTierSweep_RunsShellEveryCycleAndIntegrationOnEvenHours(t *testing.T) {
 	t.Parallel()
 	now := atHour(time.Now(), 15) // odd
