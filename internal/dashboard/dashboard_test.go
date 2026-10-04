@@ -151,6 +151,41 @@ func TestPollsFillStateAndFeedReachesAPage(t *testing.T) {
 	}
 }
 
+// The Rigs panel is published from the readers the hub already polls, whichever
+// order they report in: the queue names the rigs and carries their work, the
+// summary's polecats are the seats.
+func TestRigsPanelIsJoinedFromTheQueueAndTheSeats(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 3, 16, 0, 0, 0, time.UTC)
+	h := NewHub(Config{
+		Now: func() time.Time { return now },
+		Queue: func() *Queue {
+			return &Queue{At: now, Rigs: []Rig{
+				{Name: "gastown", Ready: intp(2), Landing: intp(1)},
+				{Name: "mango", Parked: true}, // unreadable: counts stay unknown
+			}}
+		},
+		Summary: func() Summary {
+			return Summary{Polecats: []Polecat{
+				{Rig: "gastown", Name: "free", State: StateIdle},
+				{Rig: "gastown", Name: "busy", State: StateWorking},
+			}}
+		},
+	})
+	h.pollSummary() // the seats report first: the next queue poll must still join them
+	h.pollQueue()
+	rows := h.State().Rigs
+	if len(rows) != 2 {
+		t.Fatalf("rigs = %+v", rows)
+	}
+	if r := rows[0]; r.Name != "gastown" || r.Parked || *r.Seats != 1 || *r.Ready != 2 || *r.Landing != 1 {
+		t.Errorf("gastown = %+v", r)
+	}
+	if r := rows[1]; r.Name != "mango" || !r.Parked || *r.Seats != 0 || r.Ready != nil || r.Landing != nil {
+		t.Errorf("mango = %+v", r)
+	}
+}
+
 // A page that stops reading is dropped, not waited on.
 func TestSlowPageIsDropped(t *testing.T) {
 	t.Parallel()
