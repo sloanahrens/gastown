@@ -4,7 +4,11 @@
 
 Evidence base: beads `origin/main` 406540b (fetched 2026-10-03); a clean detached worktree of it for the test runs; bead texts from the `be` DB. "Landed" requires a named commit. "Resolved by evidence" means a run on 406540b, not a commit.
 
-## Propose CLOSE (needs Sloan's approval, one close per row with evidence comment)
+## Closed 2026-10-03 after Sloan's approval: be-1kk, be-bv1, be-qm8.1
+
+All three were closed with an evidence comment each. be-qm8.1's defer half was verified by reading `cmd/bd/defer.go` (per-id failures exit non-zero) plus a PASS of `TestProtocol_ClosePartialFailureExitsNonZero` (integration env). be-1kk needed `bd unclaim --force` because the stalled mutant seat held the claim (no tmux server, no process, worktree idle since 09-21). be-qm8.2 and be-qm8.4 stay open until be-xu2.5 lands (Sloan's call). New bug found while verifying: be-1r0.12 (the cmd/bd integration tier does not compile; test imports `internal/storage/backends`, deleted by be-xu2.2 eef2791).
+
+## Propose CLOSE (as drafted; the first three rows are now done)
 
 | Bead | Why | Evidence |
 |------|-----|----------|
