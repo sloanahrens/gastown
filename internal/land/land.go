@@ -727,8 +727,16 @@ func (l *Lander) landsUnreviewed(issue *beads.Issue) bool {
 }
 
 // stageTimes is one line naming each gate stage's wall time and, when om
-// ran, its own: "stages: lint 18s, gate 92s, om 2m31s".
+// ran, its own, under the host load the stages ran on: "stages: lint 18s,
+// gate 92s, om 2m31s (load1 7.4)". A host that reports no load leaves the
+// line in its old form (gt-a025o).
 func stageTimes(g GateResult, om time.Duration, omRetried bool) string {
+	return stageTimesUnderLoad(g, om, omRetried, hostLoad1)
+}
+
+// stageTimesUnderLoad is stageTimes with the load reading passed in, so a test
+// pins the sample without swapping a package variable.
+func stageTimesUnderLoad(g GateResult, om time.Duration, omRetried bool, load1 func() (float64, bool)) string {
 	parts := make([]string, 0, len(g.Steps)+1)
 	for _, st := range g.Steps {
 		t := st.Elapsed.Round(time.Second).String()
@@ -746,7 +754,11 @@ func stageTimes(g GateResult, om time.Duration, omRetried bool) string {
 		}
 		parts = append(parts, "om "+t)
 	}
-	return "stages: " + strings.Join(parts, ", ")
+	line := "stages: " + strings.Join(parts, ", ")
+	if sample, ok := load1(); ok {
+		line += fmt.Sprintf(" (load1 %.1f)", sample)
+	}
+	return line
 }
 
 // reviewErrorReasonMax bounds the review error recorded in the rejection note
