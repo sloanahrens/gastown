@@ -178,6 +178,11 @@ const (
 	// to be merged" (405) with the base unmoved: a required status is missing
 	// or red, which a retry never fixes, so a human owns it (gt-fn9e6.5).
 	RejectMergeRefused RejectionKind = "merge_refused"
+	// RejectForgedStatus is a cut-over rig's candidate that failed the merge's
+	// creator check (verifyCreators): a required status was posted by an
+	// account the merge does not trust. Tampering with the gate is escalated,
+	// never merged (gt-fn9e6.7).
+	RejectForgedStatus RejectionKind = "forged_status"
 )
 
 // Rejection is a landing refused because of the work itself. Land has
@@ -244,6 +249,19 @@ type MergeRefusedError struct {
 func (e *MergeRefusedError) Error() string { return "the merge was refused: " + e.Err.Error() }
 func (e *MergeRefusedError) Unwrap() error { return e.Err }
 
+// ForgedStatusError is the forgery check refusing the candidate: a required
+// status on it was posted by an account the merge does not trust. No retry and
+// no author lifts it, so Land leaves it for a human (gt-fn9e6.7).
+type ForgedStatusError struct {
+	// Reason names the status, the commit and the creator that failed, for the
+	// rejection note.
+	Reason string
+}
+
+func (e *ForgedStatusError) Error() string {
+	return "a required status on the candidate failed the creator check: " + e.Reason
+}
+
 // ErrLintTimeout is the cause of an *InfraError whose lint stage outlived its
 // timeout. The landing worker counts a run of them per bead and escalates
 // (gt-j8ade); it is never a rejection.
@@ -304,6 +322,19 @@ func (l *Lander) gatePlan() string {
 	return "gating the merged tree"
 }
 
+// ciGateContext is the required status context the candidate gate polled, read
+// from the CI step it recorded (a CI StepResult carries the context in
+// Command). It is "" when the local gate ran, and a merge with no context to
+// verify is a misconfiguration (gt-fn9e6.7).
+func ciGateContext(g GateResult) string {
+	for _, st := range g.Steps {
+		if st.Name == StageCI {
+			return st.Command
+		}
+	}
+	return ""
+}
+
 // candidateGate runs the Forgejo gate in place of the local one and renders
 // its verdict as a GateResult, so the red path and the landed record keep the
 // shape the local gate's had. Silence is not a verdict: it comes back as an
@@ -331,22 +362,40 @@ func (l *Lander) candidateGate(ctx context.Context, wt Repo, dir string, w Work,
 
 // Merger lands the merged candidate through a Forgejo pull request, the write
 // path a cut-over rig replaces the force-push with. It posts om's verdict as
-// the om / review commit status, opens land/<bead> -> the target, and merges
-// the PR pinned to the candidate commit (design, "om review and the om /
-// review status" and "The PR, the merge and the forgery check").
+// the om / review commit status, verifies the candidate's required statuses
+// carry the creators the merge trusts, opens land/<bead> -> the target, and
+// merges the PR pinned to the candidate commit (design, "om review and the
+// om / review status" and "The PR, the merge and the forgery check").
 // *ForgejoMerger is the production implementation; a Lander with no Merger
 // keeps the local force-push.
 type Merger interface {
-	// Merge lands w's candidate. head is the merged commit CI gated and om
-	// reviewed, and is the merge's head_commit_id. A 409 from the
-	// outdated-branch guard comes back as a *RaceError with Rebuild set.
-	Merge(ctx context.Context, w Work, head string, verdict Verdict) error
+	// Merge lands req. A 409 from the outdated-branch guard comes back as a
+	// *RaceError with Rebuild set; a required status whose creator fails the
+	// forgery check comes back as a *ForgedStatusError.
+	Merge(ctx context.Context, req MergeRequest) error
+}
+
+// MergeRequest is what Land hands its Merger once the gate is green and om has
+// a verdict.
+type MergeRequest struct {
+	// Work is the landing: its bead, its pushed branch and its target.
+	Work Work
+	// Head is the merged commit CI gated and om reviewed, and is the merge's
+	// head_commit_id.
+	Head string
+	// Verdict is om's decision, posted as the om / review status.
+	Verdict Verdict
+	// GateContext is the required status context the candidate gate polled,
+	// such as "ci / gate (push)". The creator check reads that context's
+	// statuses, so it is required.
+	GateContext string
 }
 
 // ForgejoPulls is the part of the Forgejo client the land PR uses.
 // *forgejo.Client implements it; tests pass a fake.
 type ForgejoPulls interface {
 	PostStatus(ctx context.Context, owner, repo, sha string, req forgejo.StatusRequest) (*forgejo.CommitStatus, error)
+	CombinedStatus(ctx context.Context, owner, repo, ref string) (*forgejo.CombinedStatus, error)
 	OpenPulls(ctx context.Context, owner, repo string) ([]forgejo.PullRequest, error)
 	CreatePull(ctx context.Context, owner, repo string, opt forgejo.CreatePullRequestOption) (*forgejo.PullRequest, error)
 	MergePull(ctx context.Context, owner, repo string, index int64, opt forgejo.MergePullRequestOption) error
@@ -361,6 +410,11 @@ type ForgejoMerger struct {
 	Client ForgejoPulls
 	// Owner and RepoName name the Forgejo repository that holds the PR.
 	Owner, RepoName string
+	// BotLogin is the landing bot's Forgejo login: the only account whose
+	// om / review status the merge trusts. The daemon takes it from the rig's
+	// merge_queue.forgejo.bots, and refuses to build the merger without it,
+	// because an unknown bot is a check that can never pass.
+	BotLogin string
 	// CallTimeout bounds one Forgejo call; a zero means
 	// DefaultCandidateCallTimeout.
 	CallTimeout time.Duration
@@ -368,14 +422,23 @@ type ForgejoMerger struct {
 	Out io.Writer
 }
 
-// Merge posts the review status, opens the land PR (reusing the one an earlier
-// attempt left) and merges it pinned to head.
-func (m *ForgejoMerger) Merge(parent context.Context, w Work, head string, verdict Verdict) error {
+// Merge posts the review status, verifies the candidate's creators, opens the
+// land PR (reusing the one an earlier attempt left) and merges it pinned to
+// head.
+func (m *ForgejoMerger) Merge(parent context.Context, req MergeRequest) error {
 	ctx, cancel := context.WithTimeout(parent, nonZero(m.CallTimeout, DefaultCandidateCallTimeout))
 	defer cancel()
-	if err := m.postVerdict(ctx, head, verdict); err != nil {
+	if err := m.postVerdict(ctx, req.Head, req.Verdict); err != nil {
 		return err
 	}
+	// The creator check runs after the verdict is posted and before anything
+	// is opened or merged: it reads the om / review status the post above
+	// created, and a candidate that fails it never reaches the PR.
+	if err := m.verifyCreators(ctx, req); err != nil {
+		return err
+	}
+	w := req.Work
+	head := req.Head
 	pr, err := m.pullFor(ctx, w, head)
 	if err != nil {
 		return err
@@ -419,6 +482,62 @@ func (m *ForgejoMerger) postVerdict(ctx context.Context, head string, verdict Ve
 		return &InfraError{Stage: "post om review status", Err: err}
 	}
 	return nil
+}
+
+// verifyCreators is the forgery check: any write-access user can post a commit
+// status, so the merge trusts a required status only when its creator is the
+// one that context demands. The gate status must carry no user creator — it
+// comes from the Actions run — and om / review must be posted by the landing
+// bot. Every status carrying a context is checked, so one a user posted cannot
+// hide behind the one a workflow posted; a failure comes back as a
+// *ForgedStatusError, never a merge and never a retry (gt-fn9e6.7).
+//
+// The "no user creator" half is a Forgejo behavior rather than a contract
+// (verified on 16.0.5), so a version that starts attributing Actions statuses
+// to a user blocks every merge here rather than letting one through (design,
+// "Where the epic cannot be followed exactly").
+func (m *ForgejoMerger) verifyCreators(ctx context.Context, req MergeRequest) error {
+	combined, err := m.Client.CombinedStatus(ctx, m.Owner, m.RepoName, req.Head)
+	if err != nil {
+		return &InfraError{Stage: "read the candidate's statuses", Err: err}
+	}
+	// The candidate gate read the gate context as a success moments ago, so an
+	// absent one is an anomaly rather than a verdict: it is retried, never
+	// merged, and never reported as a forgery it did not see.
+	gate := combined.StatusesFor(req.GateContext)
+	if len(gate) == 0 {
+		return &InfraError{Stage: "read the candidate's statuses",
+			Err: fmt.Errorf("no %s status is on the candidate %s", req.GateContext, shortSHA(req.Head))}
+	}
+	for _, st := range gate {
+		if st.HasUserCreator() {
+			return &ForgedStatusError{Reason: fmt.Sprintf(
+				"the %s status on the candidate %s was posted by %s, but only the workflow run posts it: a status with a user creator is a forged gate, so the landing is escalated to a human and never merged",
+				req.GateContext, shortSHA(req.Head), creatorDesc(&st))}
+		}
+	}
+	review := combined.StatusesFor(OMStatusContext)
+	if len(review) == 0 {
+		return &InfraError{Stage: "read the candidate's statuses",
+			Err: fmt.Errorf("no %s status is on the candidate %s, though the worker just posted one", OMStatusContext, shortSHA(req.Head))}
+	}
+	for _, st := range review {
+		if !st.PostedBy(m.BotLogin) {
+			return &ForgedStatusError{Reason: fmt.Sprintf(
+				"the %s status on the candidate %s was posted by %s, not by the landing bot %q: the review the merge is pinned to is not the worker's, so the landing is escalated to a human and never merged",
+				OMStatusContext, shortSHA(req.Head), creatorDesc(&st), NoteField(m.BotLogin))}
+		}
+	}
+	return nil
+}
+
+// creatorDesc names who posted a status, for a rejection note. NoteField keeps
+// an account's chosen display name from injecting a line into the note.
+func creatorDesc(s *forgejo.CommitStatus) string {
+	if login := s.CreatorLogin(); login != "" {
+		return "user " + NoteField(fmt.Sprintf("%q", login))
+	}
+	return "no user"
 }
 
 // pullFor is the open PR for w's candidate branch, or a new one. A rebuild
@@ -494,12 +613,14 @@ func (l *Lander) now() time.Time {
 // target, the merged tree gated — locally, or by CI on the pushed candidate
 // when the rig has a Candidate gate — then om review, then the target written:
 // a --force-with-lease push against the tip the merge was built on, or, on a
-// rig with a Merger, an om / review status and a land/<bead> PR merged with
-// head_commit_id. Either way the target's tip is read back, then the landings
-// file, the LANDING RECORD block and the close.
+// rig with a Merger, an om / review status, a creator check on the candidate's
+// required statuses, and a land/<bead> PR merged with head_commit_id. Either
+// way the target's tip is read back, then the landings file, the LANDING
+// RECORD block and the close.
 //
 // A 409 from the PR merge means the target moved and the candidate is rebuilt
-// through the race path; a 405 is a refusal for a human, never a race.
+// through the race path; a 405 is a refusal for a human, never a race; a
+// required status a user posted is a rejection for a human, never a merge.
 //
 // A red gate goes through the flake policy (flake.go) before it is a
 // rejection.
@@ -622,12 +743,14 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	l.stage(w, l.gateStage())
 	gateCtx, gateDone := l.Slow.watch(ctx, l, w, dir, l.gateStage())
 	var (
-		gateRes GateResult
-		gateErr error
+		gateRes   GateResult
+		gateErr   error
+		ciContext string
 	)
 	if l.Candidate != nil {
 		w.CandidateBranch, w.CandidateHead = w.Candidate(), merged
 		gateRes, gateErr = l.candidateGate(gateCtx, wt, dir, w, merged)
+		ciContext = ciGateContext(gateRes)
 	} else {
 		gateRes = l.Gate.Run(gateCtx, dir)
 	}
@@ -737,9 +860,25 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		// verdict cannot land on it (design, "The PR, the merge and the forgery
 		// check"). The merge is a fast-forward, so the target's tip is the
 		// candidate commit the read-back checks.
-		if err := l.Merger.Merge(ctx, w, merged, verdict); err != nil {
+		//
+		// The merge verifies the candidate's status creators first, so it needs
+		// the context CI reported: without a candidate gate there is no such
+		// status, which is a misconfiguration rather than a landing.
+		if ciContext == "" {
+			return Result{}, &InfraError{Stage: "merge pull request",
+				Err: errors.New("the lander has a Merger but no candidate gate reported a status context, so the merge's creator check has nothing to verify")}
+		}
+		if err := l.Merger.Merge(ctx, MergeRequest{Work: w, Head: merged, Verdict: verdict, GateContext: ciContext}); err != nil {
 			var refused *MergeRefusedError
-			if errors.As(err, &refused) {
+			var forged *ForgedStatusError
+			switch {
+			case errors.As(err, &forged):
+				// Tampering with the gate is nobody's to rework and no retry
+				// lifts it: the bead goes to a human, and the worker escalates
+				// it (classification reads Rework=false as outRejectedHuman).
+				rej := &Rejection{Kind: RejectForgedStatus, Rework: false, Reason: forged.Reason}
+				return Result{}, l.reject(issue, w, rej, nil)
+			case errors.As(err, &refused):
 				rej := &Rejection{Kind: RejectMergeRefused, Rework: false,
 					Reason: fmt.Sprintf("Forgejo refused to merge %s into %s (405, not ready to be merged): %s. A required status is missing or red, so a retry cannot converge: check that branch protection's required contexts match the gate workflow's, and that the %s status was accepted. A human decides.",
 						w.Candidate(), w.Target, elideMiddle(NoteField(refused.Err.Error()), reviewErrorReasonMax), OMStatusContext)}

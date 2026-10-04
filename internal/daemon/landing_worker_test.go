@@ -654,6 +654,11 @@ func TestNewRigLandingWorker_WiresTheForgejoLanding(t *testing.T) {
 	if merger.Owner != "gastown" || merger.RepoName != "gastown" {
 		t.Fatalf("merger %+v; want the owner/repo from merge_queue.forgejo", merger)
 	}
+	// The merge's creator check trusts om / review only from this login, so it
+	// comes from the same merge_queue.forgejo block the rest of the merger does.
+	if merger.BotLogin != "gt-landing" {
+		t.Fatalf("merger BotLogin = %q, want the landing bot from merge_queue.forgejo.bots", merger.BotLogin)
+	}
 }
 
 // TestNewRigLandingWorker_NoForgejoConfigKeepsTheLocalGate: a rig with no
