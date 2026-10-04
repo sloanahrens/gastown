@@ -16,13 +16,8 @@ func newSpawnRenderTown(t *testing.T, rigName, polecat string) (town, rigPath st
 	t.Helper()
 	town = t.TempDir()
 	rigPath = filepath.Join(town, rigName)
-	for _, d := range []string{
-		filepath.Join(rigPath, "polecats", polecat, rigName),
-		filepath.Join(town, "mayor"),
-	} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.MkdirAll(filepath.Join(rigPath, "polecats", polecat, rigName), 0o755); err != nil {
+		t.Fatal(err)
 	}
 	return town, rigPath
 }
@@ -111,7 +106,6 @@ func TestSpawnRoleContext_WorkDirsPerRole(t *testing.T) {
 	}{
 		{"polecat", "nux", filepath.Join(rigPath, "polecats", "nux", "myrig")},
 		{"crew", "sloan", filepath.Join(rigPath, "crew", "sloan")},
-		{"mayor", "", filepath.Join(town, "mayor")},
 	}
 	for _, tc := range cases {
 		ctx, err := spawnRoleContext(tc.role, town, rigPath, tc.agent)
@@ -144,6 +138,7 @@ func TestSpawnRoleContext_RejectsRolesWithoutAFile(t *testing.T) {
 	town, rigPath := newSpawnRenderTown(t, "myrig", "nux")
 	for _, tc := range []struct{ role, rig, agent string }{
 		{"dog", "", "alpha"}, // retired role (gt-ckunw)
+		{"mayor", "", ""},    // retired role (gt-rwp7z.14)
 		{"boot", "", ""},
 		{"polecat", rigPath, ""},
 		{"witness", "", ""},
@@ -154,7 +149,7 @@ func TestSpawnRoleContext_RejectsRolesWithoutAFile(t *testing.T) {
 			t.Errorf("%+v: expected an error", tc)
 		}
 	}
-	if err := renderSystemPromptFileForSpawn("mayor", town, "", "", ""); !errors.Is(err, errNoSystemPromptForRole) {
+	if err := renderSystemPromptFileForSpawn("polecat", town, "", "", ""); !errors.Is(err, errNoSystemPromptForRole) {
 		t.Fatalf("empty path must report no system prompt for the role, got %v", err)
 	}
 }

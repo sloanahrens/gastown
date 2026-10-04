@@ -112,7 +112,7 @@ func TestIntegrationRunTapGuardBdCloseInvariant(t *testing.T) {
 		// The fixture's worktree path does contain /polecats/, which
 		// isGasTownAgentContext treats as an agent context by path alone, so
 		// the case is driven from the town's plain checkout instead.
-		for _, env := range []string{"GT_POLECAT", "GT_CREW", "GT_WITNESS", "GT_REFINERY", "GT_MAYOR", "GT_DEACON", "GT_DOG_NAME"} {
+		for _, env := range []string{"GT_POLECAT", "GT_CREW", "GT_WITNESS", "GT_REFINERY", "GT_DEACON", "GT_DOG_NAME"} {
 			delete(f.env, env)
 		}
 

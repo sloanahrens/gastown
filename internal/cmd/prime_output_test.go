@@ -158,12 +158,12 @@ func TestOutputRoleDirectives(t *testing.T) {
 		if err := os.MkdirAll(townDir, 0755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(townDir, "mayor.md"), []byte("Mayor directive."), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(townDir, "crew.md"), []byte("Crew directive."), 0644); err != nil {
 			t.Fatal(err)
 		}
 
 		ctx := RoleContext{
-			Role:     RoleMayor,
+			Role:     RoleCrew,
 			TownRoot: townRoot,
 			Rig:      "",
 		}
@@ -175,7 +175,7 @@ func TestOutputRoleDirectives(t *testing.T) {
 		if !strings.Contains(out, "## Town Directives") {
 			t.Errorf("expected Town Directives header, got: %s", out)
 		}
-		if !strings.Contains(out, "Mayor directive.") {
+		if !strings.Contains(out, "Crew directive.") {
 			t.Errorf("expected directive content, got: %s", out)
 		}
 	})
@@ -201,7 +201,7 @@ func TestOutputRoleDirectives_WarnsAboutUnusedFiles(t *testing.T) {
 	// the roles most able to fix a misnamed file are the ones that have one.
 	t.Run("warns for a role that has its own directive", func(t *testing.T) {
 		t.Parallel()
-		ctx := RoleContext{Role: RoleMayor, TownRoot: writeUnusedFixture(t, "mayor"), Rig: "myrig"}
+		ctx := RoleContext{Role: RoleCrew, TownRoot: writeUnusedFixture(t, "crew"), Rig: "myrig"}
 
 		var buf bytes.Buffer
 		outputRoleDirectives(ctx, &buf, false)
@@ -240,10 +240,10 @@ func TestOutputRoleDirectives_WarnsAboutUnusedFiles(t *testing.T) {
 	t.Run("quiet when every file is named for a role", func(t *testing.T) {
 		t.Parallel()
 		townRoot := t.TempDir()
-		writeDirective(t, filepath.Join(townRoot, "directives", "mayor.md"), "Mayor policy.")
+		writeDirective(t, filepath.Join(townRoot, "directives", "crew.md"), "Crew policy.")
 		writeDirective(t, filepath.Join(townRoot, "directives", "polecat.md"), "Polecat policy.")
 
-		ctx := RoleContext{Role: RoleMayor, TownRoot: townRoot, Rig: "myrig"}
+		ctx := RoleContext{Role: RoleCrew, TownRoot: townRoot, Rig: "myrig"}
 
 		var buf bytes.Buffer
 		outputRoleDirectives(ctx, &buf, false)
@@ -253,31 +253,26 @@ func TestOutputRoleDirectives_WarnsAboutUnusedFiles(t *testing.T) {
 	})
 }
 
-// TestOutputMayorContextDropsRetiredRoles pins the mayor brief to the roles
-// that still exist. The Refinery and Witness agent roles are retired
-// (gt-4k3fj.6.1): detectRole maps <rig>/witness to RoleUnknown and nothing
-// spawns a refinery, so the delegation target is `gt sling <bead> <rig>` and
-// the lifecycle signal is the daemon's idle-seat nudge. Naming the retired
-// roles here sent the mayor looking for agents that cannot answer (gt-qzwy9).
-func TestOutputMayorContextDropsRetiredRoles(t *testing.T) {
+// TestOutputPrimeContextFallbackDropsTheMayorRole pins the mayor role's
+// retirement from the prime fallback (gt-rwp7z.14). A session still carrying
+// GT_ROLE=mayor renders the unknown-role brief — the directory list sends the
+// agent to a live role — and never a mayor brief.
+func TestOutputPrimeContextFallbackDropsTheMayorRole(t *testing.T) {
 	t.Parallel()
 
 	ctx := RoleContext{Role: RoleMayor, TownRoot: t.TempDir(), Rig: "myrig"}
 
 	var buf bytes.Buffer
-	outputMayorContext(&buf, ctx)
+	outputPrimeContextFallback(&buf, ctx)
 	out := buf.String()
 
-	for _, banned := range []string{"Refiner", "Witness", "SLOT_OPEN"} {
+	for _, banned := range []string{"Mayor Context", "You are the **Mayor**", "mayor_dispatch", "Idle-Seat Nudges"} {
 		if strings.Contains(out, banned) {
-			t.Errorf("mayor context still names %q:\n%s", banned, out)
+			t.Errorf("mayor-role fallback still renders %q:\n%s", banned, out)
 		}
 	}
-	if !strings.Contains(out, "sling <bead> <rig>") {
-		t.Errorf("mayor context should name the surviving dispatch command:\n%s", out)
-	}
-	if !strings.Contains(out, "Idle-Seat Nudges") {
-		t.Errorf("mayor context should name the surviving lifecycle signal:\n%s", out)
+	if !strings.Contains(out, "Could not determine specific role") {
+		t.Errorf("expected the unknown-role brief for the retired mayor role:\n%s", out)
 	}
 }
 
@@ -294,7 +289,7 @@ func TestOutputUnknownContextListsCrew(t *testing.T) {
 	outputUnknownContext(&buf, ctx)
 	out := buf.String()
 
-	for _, want := range []string{"<rig>/polecats/<name>/", "<rig>/crew/<name>/", "<rig>/mayor/"} {
+	for _, want := range []string{"<rig>/polecats/<name>/", "<rig>/crew/<name>/"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("unknown-role context omits navigable dir %q:\n%s", want, out)
 		}

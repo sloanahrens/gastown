@@ -34,7 +34,7 @@ This guard blocks operations that could cause irreversible damage:
     HEAD:main, <sha>:main, :main, refs/heads/main, main, --all, --mirror.
     Polecat work lands through gt done -> MR -> Refinery (gt-ibt8). A release
     or a manual plugin run pushes main legitimately; both belong to a
-    crew/mayor/refinery session, not a polecat one (gt-deff).
+    crew/refinery session, not a polecat one (gt-deff).
   - git reset --hard
   - git reset <remote-tracking-ref>  (--soft/--mixed/--hard/implicit: resetting
     onto origin/main etc. reverts everything merged since the checkout was cut
@@ -46,7 +46,7 @@ This guard blocks operations that could cause irreversible damage:
     /Library, or /opt (see gt-nqcy — an unbounded 'bfs /' froze a host)
   - the same walkers rooted at the town tree: the town root, any rig root,
     any path directly under the town root, a rig's worktree directories
-    (polecats/crew/refinery/witness/mayor), or any .repo.git — see gt-6e2l,
+    (polecats, crew, and the mayor/ clone), or any .repo.git — see gt-6e2l,
     where a dog's 'grep -R ... /Users/sloan/gt' ran unblocked and walked
     every rig and every worktree on the host. A path inside a single repo or
     worktree (e.g. ~/gt/<rig>/polecats/<name>/<repo>) is still allowed, as is
@@ -162,8 +162,7 @@ const maxDangerousNestDepth = 3
 // fragment as its own token) ever fire on it. Quoted text that is NOT one of
 // these shell-executing forms (a SQL string, a mail body, a jq/sed script)
 // deliberately stays opaque — that is where this guard's real false
-// positives have come from (mayor scope, gt-5ihs attempt 2, gt-wisp-db27
-// finding 4).
+// positives have come from (gt-5ihs attempt 2, gt-wisp-db27 finding 4).
 func evaluateDangerousCommand(command string, depth int, sess guardSession) (reason, alternative string) {
 	// Read the shell-fed bodies off the untouched command: stripHeredocBodies
 	// removes them from the text scanned below, and they come back in as
@@ -517,8 +516,8 @@ var commandSubstitutionPattern = regexp.MustCompile(`\$\(([^()]*)\)|` + "`" + `(
 
 // commandSubstitutions extracts the inner command text of every $(...) or
 // `...` command substitution in command, so evaluateDangerousCommand can
-// recurse into it the same as a bash -c/eval payload (mayor scope, gt-5ihs
-// attempt 2: "recurse into ... command substitution").
+// recurse into it the same as a bash -c/eval payload (gt-5ihs attempt 2:
+// "recurse into ... command substitution").
 func commandSubstitutions(command string) []string {
 	var out []string
 	for _, m := range commandSubstitutionPattern.FindAllStringSubmatch(command, -1) {
@@ -1497,13 +1496,13 @@ func matchesDangerousGitPush(tokens []string) string {
 // instructions by hand. Neither gets a signal because a signal an agent sets
 // for itself is a user override, not a gate - only the Refinery's merge and
 // `gt done`'s own direct merge, which gt itself sets, are gates. So the
-// allow path for both is a crew, mayor, or refinery session.
+// allow path for both is a crew or refinery session.
 const (
 	polecatMainPushReason      = "Polecats never push to main/master (use gt done)"
 	polecatMainPushAlternative = "Alternative: `gt done` pushes your polecat/<name>/<bead> branch and the Refinery " +
 		"merges it to the default branch after verification — a direct push to main skips " +
 		"the MR, the Refinery gate run, and the om review (gt-ibt8). A release, or a plugin " +
-		"script's own push, runs from a crew/mayor/refinery session instead (gt-deff)."
+		"script's own push, runs from a crew/refinery session instead (gt-deff)."
 )
 
 // polecatMainPushBranches are the destination branch names a polecat session
@@ -1794,7 +1793,7 @@ var goCleanSharedCacheFlags = map[string]bool{
 
 const goCleanSharedCacheReason = "'go clean' with -cache/-testcache/-modcache/-fuzzcache wipes the Go build cache shared by every agent on this host"
 const goCleanSharedCacheAlternative = "Alternative: use 'go test -count=1' for a cold run, or rebuild a single package; " +
-	"if you believe the cache is corrupt, mail the mayor with the evidence instead of clearing it."
+	"if you believe the cache is corrupt, escalate with the evidence instead of clearing it."
 
 // matchesGoCleanSharedCache blocks 'go clean' invocations carrying any of
 // the shared-cache flags (goCleanSharedCacheFlags), in any order and
@@ -1844,7 +1843,7 @@ const polecatFullSuiteUncachedAlternative = "Alternative: run 'make presubmit' �
 // Only the full-tree form is blocked. A plain cached 'go test ./...' (no
 // -count=1) reuses the shared cache and stays allowed; scoped uncached runs
 // (go test -count=1 ./internal/cmd/...) and -run-filtered runs stay allowed;
-// crew, refinery, mayor, and operator sessions are untouched
+// crew, refinery and operator sessions are untouched
 // (polecatSession is supplied by the caller from inPolecatSession, exactly
 // as matchesPolecatMainPush does, so the matcher stays pure and
 // table-testable).
@@ -1904,12 +1903,11 @@ func fullSuiteUncachedGoTest(rest []string) bool {
 
 // idleGateLoad1Threshold is the 1-minute load average above which a
 // full-suite start is HELD (exit 2, retryable) rather than permitted. This
-// mirrors the mayor standing rule mol-refinery-patrol's gate-load-check step
-// already tells operators to follow by hand ("do NOT start or retry a
-// full-suite gate while 1-min loadavg > 60"); the guard used to derive its
-// own, stricter threshold from load1/NumCPU, which held gates on idle,
-// many-core hosts because macOS loadavg counts uninterruptible-wait
-// processes, not just CPU-runnable ones (gt-e6xh).
+// is the standing operator rule ("do NOT start or retry a full-suite gate
+// while 1-min loadavg > 60"); the guard used to derive its own, stricter
+// threshold from load1/NumCPU, which held gates on idle, many-core hosts
+// because macOS loadavg counts uninterruptible-wait processes, not just
+// CPU-runnable ones (gt-e6xh).
 const idleGateLoad1Threshold = 60
 
 // idleGateAlternative is the HOLD banner's suggested next step.

@@ -132,8 +132,8 @@ func tapGuardContainerSuite(stdin io.Reader, stderr io.Writer, proc guardProcess
 // test invocations have repeatedly spun Dolt/testcontainers containers
 // unwrapped next to the refinery's own gt-slot-run-wrapped gate (gt-e2rs:
 // two collisions in one night, one starving the refinery for 29 minutes).
-// Other agent contexts (crew, witness, deacon, mayor) are left unguarded —
-// they don't run scoped test suites as part of their normal work.
+// Other agent contexts (crew, witness, deacon) are left unguarded — they
+// don't run scoped test suites as part of their normal work.
 func isPolecatOrRefineryContext(proc guardProcess) bool {
 	if proc.getenv("GT_POLECAT") != "" {
 		return true

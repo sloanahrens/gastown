@@ -615,7 +615,7 @@ func TestPrimeRoleFixturesFitHookBudget(t *testing.T) {
 	memories := strings.Repeat("- some-memory-key: first sentence of the memory preview\n", 120)
 
 	workFormula := map[Role]string{RolePolecat: "mol-polecat-work", RoleCrew: "mol-polecat-work"}
-	for _, role := range []Role{RolePolecat, RoleCrew, RoleMayor} {
+	for _, role := range []Role{RolePolecat, RoleCrew} {
 		role := role
 		t.Run(string(role), func(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(town, "directives", string(role)+".md"), []byte(directive), 0o644); err != nil {

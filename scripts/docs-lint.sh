@@ -192,7 +192,7 @@ check_status_conflict() {
 # guards refuse. A polecat session cannot push main: the tap guard
 # (matchesPolecatMainPush) blocks the command before git runs and
 # .githooks/pre-push refuses the push itself, both by design (gt-ibt8). The
-# allow path a release has is a crew/mayor/refinery session (gt-deff), so a
+# allow path a release has is a crew/refinery session (gt-deff), so a
 # formula that pushes main must not offer a polecat.
 #
 # Scoped to formulas. plugin.md is exempt: the plugins that push a default

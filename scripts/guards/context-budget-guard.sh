@@ -15,9 +15,12 @@
 #   GT_CONTEXT_BUDGET_SOFT_GATE=0.85           — Soft gate threshold (default: 0.85)
 #   GT_CONTEXT_BUDGET_HARD_GATE=0.92           — Hard gate threshold (default: 0.92)
 #   GT_CONTEXT_BUDGET_MAX_TOKENS=200000        — Max context tokens (default: 200000)
-#   GT_CONTEXT_BUDGET_HARD_GATE_ROLES=mayor
+#   GT_CONTEXT_BUDGET_HARD_GATE_ROLES=
 #                                              — Comma-separated roles that get blocked
-#                                                at hard gate (default shown above)
+#                                                at hard gate (default: empty, so no
+#                                                detected role is blocked; a role the
+#                                                guard cannot detect is always
+#                                                hard-gated)
 #
 # Hook configuration example (UserPromptSubmit — fires once per user turn):
 #   {
@@ -48,7 +51,7 @@ WARN="${GT_CONTEXT_BUDGET_WARN:-0.75}"
 SOFT_GATE="${GT_CONTEXT_BUDGET_SOFT_GATE:-0.85}"
 HARD_GATE="${GT_CONTEXT_BUDGET_HARD_GATE:-0.92}"
 MAX_TOKENS="${GT_CONTEXT_BUDGET_MAX_TOKENS:-200000}"
-HARD_GATE_ROLES="${GT_CONTEXT_BUDGET_HARD_GATE_ROLES:-mayor}"
+HARD_GATE_ROLES="${GT_CONTEXT_BUDGET_HARD_GATE_ROLES:-}"
 
 # ── Threshold ordering validation ───────────────────────────────────────────
 # If thresholds are inverted (e.g., WARN=0.95, HARD_GATE=0.70), reset to defaults.
@@ -115,7 +118,6 @@ MAX_K=$(( MAX_TOKENS / 1000 ))
 ROLE="${GT_ROLE:-}"
 [[ -z "$ROLE" ]] && [[ -n "${GT_POLECAT:-}" ]]   && ROLE="polecat"
 [[ -z "$ROLE" ]] && [[ -n "${GT_CREW:-}" ]]       && ROLE="crew"
-[[ -z "$ROLE" ]] && [[ -n "${GT_MAYOR:-}" ]]      && ROLE="mayor"
 ROLE=$(echo "$ROLE" | tr '[:upper:]' '[:lower:]')
 
 # Check if this role is hard-gated
