@@ -7,6 +7,14 @@ import (
 	"github.com/steveyegge/gastown/internal/doctor"
 )
 
+// retiredActorPrefixes are actor strings for roles the town has retired. The
+// role enum can still name them until the kernel slice deletes it, but nothing
+// emits them any more, so the test-leaks check no longer tolerates them and
+// this cross-check must not demand that it does.
+var retiredActorPrefixes = map[string]bool{
+	"mayor": true,
+}
+
 // TestDetectActorOutputsToleratedByTestLeakCheck cross-checks this package's Role
 // enum (the enum backing detectActor(), which most agent-originated events
 // pass to events.Log as the actor) against the gt doctor test-leaks
@@ -28,6 +36,9 @@ func TestDetectActorOutputsToleratedByTestLeakCheck(t *testing.T) {
 
 	for _, role := range AllRoles() {
 		actor := RoleInfo{Role: role}.ActorString()
+		if retiredActorPrefixes[actor] {
+			continue
+		}
 		if !known[actor] {
 			t.Errorf("Role %q produces actor %q via RoleInfo.ActorString(), which "+
 				"doctor.BuiltinActorPrefixes does not tolerate — "+
@@ -70,6 +81,9 @@ func TestGetAgentIdentityOutputsToleratedByTestLeakCheck(t *testing.T) {
 			// Empty (RoleDog, RoleUnknown: never written as an event actor —
 			// emitSessionEvent guards on actor == "") or rig-qualified: out
 			// of scope for this test, see doc comment.
+			continue
+		}
+		if retiredActorPrefixes[actor] {
 			continue
 		}
 		if !known[actor] {

@@ -11,8 +11,8 @@ import (
 
 // StaleTaskDispatchCheck detects settings.json files that still reference
 // the removed "gt tap guard task-dispatch" command. After the task-dispatch
-// guard was removed, existing Mayor settings.json files may retain stale
-// hook entries that invoke the deleted subcommand.
+// guard was removed, existing settings.json files may retain stale hook
+// entries that invoke the deleted subcommand.
 type StaleTaskDispatchCheck struct {
 	FixableCheck
 	staleTargets []hooks.Target

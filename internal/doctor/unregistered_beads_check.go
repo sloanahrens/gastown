@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // UnregisteredBeadsDirsCheck detects directories in the town root that have
@@ -31,13 +32,13 @@ func NewUnregisteredBeadsDirsCheck() *UnregisteredBeadsDirsCheck {
 // knownSystemDirs are directories at town root that are expected to exist
 // without being registered in rigs.json.
 var knownSystemDirs = map[string]bool{
-	"mayor":      true,
-	"deacon":     true, // holds only the dog kennel (deacon/dogs)
-	".beads":     true,
-	".dolt-data": true,
-	".runtime":   true,
-	".git":       true,
-	".github":    true,
+	constants.DirMayor: true,
+	"deacon":           true, // holds only the dog kennel (deacon/dogs)
+	".beads":           true,
+	".dolt-data":       true,
+	".runtime":         true,
+	".git":             true,
+	".github":          true,
 }
 
 // Run checks for unregistered directories with beads metadata.

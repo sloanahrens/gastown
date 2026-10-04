@@ -67,7 +67,7 @@ func (c *ThemeCheck) Run(ctx *CheckContext) *CheckResult {
 		if err != nil {
 			continue
 		}
-		// Old format had brackets like [Mayor] or [gastown/crew]
+		// Old format had brackets like [gastown/crew] or [gastown/polecats/nux]
 		if strings.Contains(statusLeft, "[") && strings.Contains(statusLeft, "]") {
 			needsUpdate = append(needsUpdate, session)
 		}

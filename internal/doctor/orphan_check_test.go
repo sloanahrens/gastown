@@ -126,7 +126,7 @@ func TestIsCrewSession(t *testing.T) {
 		{"bd-crew-max", true},  // beads crew (prefix: bd)
 		{"nif-crew-a", true},   // niflheim crew (prefix: nif)
 		{"gt-polecat1", false}, // polecat, not crew
-		{"hq-mayor", false},
+		{"hq-overseer", false},
 		{"other-session", false},
 		{"gt-crew", false}, // "crew" is a polecat name, not crew role (no name after crew-)
 	}
@@ -145,14 +145,13 @@ func TestOrphanSessionCheck_IsValidSession(t *testing.T) {
 	t.Parallel()
 	check := NewOrphanSessionCheck()
 	validRigs := []string{"gastown", "beads"}
-	mayorSession := "hq-mayor"
 
 	tests := []struct {
 		session string
 		want    bool
 	}{
 		// Town-level sessions
-		{"hq-mayor", true},
+		{"hq-overseer", true},
 
 		// Valid rig sessions (using rig prefixes)
 		{"gt-polecat1", true}, // gastown polecat (prefix: gt)
@@ -170,7 +169,7 @@ func TestOrphanSessionCheck_IsValidSession(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.session, func(t *testing.T) {
-			got := check.isValidSession(testPrefixRegistry(), tt.session, validRigs, mayorSession)
+			got := check.isValidSession(testPrefixRegistry(), tt.session, validRigs)
 			if got != tt.want {
 				t.Errorf("isValidSession(%q) = %v, want %v", tt.session, got, tt.want)
 			}
@@ -184,7 +183,6 @@ func TestOrphanSessionCheck_IsValidSession_EdgeCases(t *testing.T) {
 	t.Parallel()
 	check := NewOrphanSessionCheck()
 	validRigs := []string{"gastown", "niflheim", "grctool", "7thsense", "pulseflow"}
-	mayorSession := "hq-mayor"
 
 	tests := []struct {
 		name    string
@@ -259,7 +257,7 @@ func TestOrphanSessionCheck_IsValidSession_EdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := check.isValidSession(testPrefixRegistry(), tt.session, validRigs, mayorSession)
+			got := check.isValidSession(testPrefixRegistry(), tt.session, validRigs)
 			if got != tt.want {
 				t.Errorf("isValidSession(%q) = %v, want %v: %s", tt.session, got, tt.want, tt.reason)
 			}
@@ -363,7 +361,7 @@ func TestIsCrewSession_ComprehensivePatterns(t *testing.T) {
 
 		// Invalid crew patterns
 		{"gt-polecat-abc", false, "polecat name, not crew"},
-		{"hq-mayor", false, "mayor is not crew"},
+		{"hq-overseer", false, "town-level sessions are not crew"},
 		{"", false, "empty string"},
 		{"gt-morsov", false, "polecat, not crew"},
 	}
@@ -392,7 +390,7 @@ func TestOrphanSessionCheck_HQSessions(t *testing.T) {
 
 	lister := &mockSessionLister{
 		sessions: []string{
-			"hq-mayor", // valid: headquarters mayor session
+			"hq-overseer", // valid: headquarters overseer session
 		},
 	}
 	check := NewOrphanSessionCheckWithSessionLister(lister)
@@ -436,7 +434,7 @@ func TestOrphanSessionCheck_Run_Deterministic(t *testing.T) {
 			"gt-polecat1",    // valid: gastown rig exists (prefix "gt")
 			"gt-crew-max",    // valid: gastown rig exists
 			"bd-crew-joe",    // valid: beads rig exists (prefix "bd")
-			"hq-mayor",       // valid: hq-mayor is recognized
+			"hq-overseer",    // valid: town-level session
 			"zz-polecat1",    // ignored: unknown prefix, not a gastown session
 			"xx-crew-joe",    // ignored: unknown prefix, not a gastown session
 			"random-session", // ignored: unknown prefix, not a gastown session

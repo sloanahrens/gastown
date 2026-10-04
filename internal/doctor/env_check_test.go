@@ -109,13 +109,13 @@ func TestEnvVarsCheck_NonGasTownSessions(t *testing.T) {
 	}
 }
 
-func TestEnvVarsCheck_MayorCorrect(t *testing.T) {
+func TestEnvVarsCheck_OverseerCorrect(t *testing.T) {
 	t.Parallel()
-	expected := expectedEnv("mayor", "", "")
+	expected := expectedEnv("overseer", "", "")
 	reader := &mockEnvReader{
-		sessions: []string{"hq-mayor"},
+		sessions: []string{"hq-overseer"},
 		sessionEnvs: map[string]map[string]string{
-			"hq-mayor": expected,
+			"hq-overseer": expected,
 		},
 	}
 	check := NewEnvVarsCheckWithReader(reader)
@@ -126,12 +126,12 @@ func TestEnvVarsCheck_MayorCorrect(t *testing.T) {
 	}
 }
 
-func TestEnvVarsCheck_MayorMissing(t *testing.T) {
+func TestEnvVarsCheck_OverseerMissing(t *testing.T) {
 	t.Parallel()
 	reader := &mockEnvReader{
-		sessions: []string{"hq-mayor"},
+		sessions: []string{"hq-overseer"},
 		sessionEnvs: map[string]map[string]string{
-			"hq-mayor": {}, // Missing all env vars
+			"hq-overseer": {}, // Missing all env vars
 		},
 	}
 	check := NewEnvVarsCheckWithReader(reader)
@@ -216,14 +216,14 @@ func TestEnvVarsCheck_CrewCorrect(t *testing.T) {
 
 func TestEnvVarsCheck_MultipleSessions(t *testing.T) {
 	t.Parallel()
-	mayorEnv := expectedEnv("mayor", "", "")
+	overseerEnv := expectedEnv("overseer", "", "")
 	crewEnv := expectedEnv("crew", "rig1", "worker1")
 	polecatEnv := expectedEnv("polecat", "rig1", "Toast")
 
 	reader := &mockEnvReader{
-		sessions: []string{"hq-mayor", "r1-crew-worker1", "r1-Toast"},
+		sessions: []string{"hq-overseer", "r1-crew-worker1", "r1-Toast"},
 		sessionEnvs: map[string]map[string]string{
-			"hq-mayor":        mayorEnv,
+			"hq-overseer":     overseerEnv,
 			"r1-crew-worker1": crewEnv,
 			"r1-Toast":        polecatEnv,
 		},
@@ -241,12 +241,12 @@ func TestEnvVarsCheck_MultipleSessions(t *testing.T) {
 
 func TestEnvVarsCheck_MixedCorrectAndMismatch(t *testing.T) {
 	t.Parallel()
-	mayorEnv := expectedEnv("mayor", "", "")
+	overseerEnv := expectedEnv("overseer", "", "")
 
 	reader := &mockEnvReader{
-		sessions: []string{"hq-mayor", "r1-crew-worker1"},
+		sessions: []string{"hq-overseer", "r1-crew-worker1"},
 		sessionEnvs: map[string]map[string]string{
-			"hq-mayor": mayorEnv,
+			"hq-overseer": overseerEnv,
 			"r1-crew-worker1": {
 				"GT_ROLE": "crew",
 				// Missing GT_RIG and other vars
@@ -262,14 +262,15 @@ func TestEnvVarsCheck_MixedCorrectAndMismatch(t *testing.T) {
 }
 
 // TestEnvVarsCheck_RetiredRoleSessionsSkipped verifies that leftover sessions
-// of retired roles (deacon, boot, witness) are not checked: nothing
+// of retired roles (mayor, deacon, boot, witness) are not checked: nothing
 // sets their environment any more, so they must not produce mismatches.
 func TestEnvVarsCheck_RetiredRoleSessionsSkipped(t *testing.T) {
 	t.Parallel()
 	reader := &mockEnvReader{
-		sessions: []string{"hq-deacon", "hq-boot"},
+		sessions: []string{"hq-mayor", "hq-deacon", "hq-boot"},
 		sessionEnvs: map[string]map[string]string{
-			"hq-deacon": {}, // Missing all env vars
+			"hq-mayor":  {}, // Missing all env vars
+			"hq-deacon": {},
 			"hq-boot":   {},
 		},
 	}
@@ -500,9 +501,9 @@ func TestEnvVarsCheck_FixAppliesMissingVars(t *testing.T) {
 	t.Parallel()
 	mock := &mockEnvAccessor{
 		mockEnvReader: mockEnvReader{
-			sessions: []string{"hq-mayor"},
+			sessions: []string{"hq-overseer"},
 			sessionEnvs: map[string]map[string]string{
-				"hq-mayor": {}, // All env vars missing
+				"hq-overseer": {}, // All env vars missing
 			},
 		},
 	}
@@ -513,11 +514,11 @@ func TestEnvVarsCheck_FixAppliesMissingVars(t *testing.T) {
 		t.Fatalf("Fix() returned error: %v", err)
 	}
 
-	expected := expectedEnv("mayor", "", "")
+	expected := expectedEnv("overseer", "", "")
 	for key, wantVal := range expected {
-		sessionCalls, ok := mock.setCalls["hq-mayor"]
+		sessionCalls, ok := mock.setCalls["hq-overseer"]
 		if !ok {
-			t.Fatalf("Fix() made no SetEnvironment calls for hq-mayor")
+			t.Fatalf("Fix() made no SetEnvironment calls for hq-overseer")
 		}
 		gotVal, found := sessionCalls[key]
 		if !found {
@@ -530,12 +531,12 @@ func TestEnvVarsCheck_FixAppliesMissingVars(t *testing.T) {
 
 func TestEnvVarsCheck_FixSkipsCorrectVars(t *testing.T) {
 	t.Parallel()
-	expected := expectedEnv("mayor", "", "")
+	expected := expectedEnv("overseer", "", "")
 	mock := &mockEnvAccessor{
 		mockEnvReader: mockEnvReader{
-			sessions: []string{"hq-mayor"},
+			sessions: []string{"hq-overseer"},
 			sessionEnvs: map[string]map[string]string{
-				"hq-mayor": expected, // All vars already correct
+				"hq-overseer": expected, // All vars already correct
 			},
 		},
 	}

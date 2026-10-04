@@ -27,7 +27,7 @@ func leakTown(t *testing.T) string {
 	}
 	writeLeakFile(t, filepath.Join(town, "mayor", "rigs.json"), `{"version":1,"rigs":{"gastown":{}}}`)
 	writeLeakFile(t, filepath.Join(town, events.EventsFile),
-		`{"ts":"2026-09-30T11:00:00Z","source":"gt","type":"boot","actor":"mayor","visibility":"feed"}`+"\n")
+		`{"ts":"2026-09-30T11:00:00Z","source":"gt","type":"boot","actor":"deacon","visibility":"feed"}`+"\n")
 	return town
 }
 
@@ -70,7 +70,7 @@ func runLeakCheck(t *testing.T, c *TestLeakCheck, town string) *CheckResult {
 func TestTestLeakCheck_CleanTownPasses(t *testing.T) {
 	t.Parallel()
 	town := leakTown(t)
-	if r := runLeakCheck(t, newLeakCheck("hq-mayor", "gt-opal"), town); r.Status != StatusOK {
+	if r := runLeakCheck(t, newLeakCheck("hq-overseer", "gt-opal"), town); r.Status != StatusOK {
 		t.Errorf("clean town: %v %s %v", r.Status, r.Message, r.Details)
 	}
 }

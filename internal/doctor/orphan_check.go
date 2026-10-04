@@ -86,9 +86,6 @@ func (c *OrphanSessionCheck) Run(ctx *CheckContext) *CheckResult {
 	// Get list of valid rigs
 	validRigs := c.getValidRigs(ctx.TownRoot)
 
-	// Get session name for mayor
-	mayorSession := session.MayorSessionName()
-
 	// Check each session
 	var orphans []string
 	var validCount int
@@ -103,7 +100,7 @@ func (c *OrphanSessionCheck) Run(ctx *CheckContext) *CheckResult {
 			continue
 		}
 
-		if c.isValidSession(ctx.prefixes(), sess, validRigs, mayorSession) {
+		if c.isValidSession(ctx.prefixes(), sess, validRigs) {
 			validCount++
 		} else {
 			orphans = append(orphans, sess)
@@ -208,17 +205,11 @@ func (c *OrphanSessionCheck) getValidRigs(townRoot string) []string {
 
 // isValidSession checks if a session name matches expected Gas Town patterns.
 // Valid patterns:
-//   - hq-mayor (headquarters mayor session)
 //   - <prefix>-crew-<name>
 //   - <prefix>-<polecat> (where polecat is any name)
 //
 // Note: We can't verify polecat names without reading state, so we're permissive.
-func (c *OrphanSessionCheck) isValidSession(reg *session.PrefixRegistry, sess string, validRigs []string, mayorSession string) bool {
-	// Mayor session is always valid (dynamic name based on town)
-	if mayorSession != "" && sess == mayorSession {
-		return true
-	}
-
+func (c *OrphanSessionCheck) isValidSession(reg *session.PrefixRegistry, sess string, validRigs []string) bool {
 	// For rig-specific sessions, extract rig name using canonical parser
 	identity, err := session.ParseSessionNameWithRegistry(sess, reg)
 	if err != nil {

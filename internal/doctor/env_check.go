@@ -45,7 +45,6 @@ func (r *tmuxEnvReaderWriter) SetEnvironment(session, key, value string) error {
 // envCheckedRoles are the live session roles whose environment the check
 // verifies. Sessions of any other parsed role are skipped.
 var envCheckedRoles = map[session.Role]bool{
-	session.RoleMayor:    true,
 	session.RoleOverseer: true,
 	session.RoleCrew:     true,
 	session.RolePolecat:  true,
