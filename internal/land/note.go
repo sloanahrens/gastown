@@ -1,7 +1,6 @@
 package land
 
 import (
-	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -359,76 +358,13 @@ type LandingRecord struct {
 	// carries gt:overseer-review-wanted (gt-vsct7.4). Empty on a landing that
 	// touched nothing on the list.
 	RiskPaths []string `json:"risk_paths,omitempty"`
-
-	// The CI fields are the Forgejo gate's verdict on this landing's candidate,
-	// recorded when the rig ran in shadow mode (slice 8): the worker pushed
-	// land/<bead>, CI tested it, and the local gate in GateResult is what
-	// decided. They are empty on a landing no candidate gate saw, so a rate of
-	// matching verdicts is readable off the landings file.
-	CIVerdict   string `json:"ci_verdict,omitempty"`
-	CIContext   string `json:"ci_context,omitempty"`
-	CICandidate string `json:"ci_candidate,omitempty"`
-	CIBranch    string `json:"ci_branch,omitempty"`
-	CIRunStatus string `json:"ci_run_status,omitempty"`
-}
-
-// The recorded CI verdicts of a shadow-mode candidate gate (slice 8): what CI
-// said about the candidate, or why it said nothing at all.
-const (
-	// CIVerdictPassed is the required context reporting success.
-	CIVerdictPassed = "passed"
-	// CIVerdictFailed is the required context reporting anything but success.
-	CIVerdictFailed = "failed"
-	// CIVerdictSilent is no verdict: nothing posted the required context
-	// within its wait window. It says nothing about the work.
-	CIVerdictSilent = "silent"
-	// CIVerdictErrorPrefix opens a verdict the run could not reach at all
-	// ("error:<reason>"): a push, a workflow file or an API call failed.
-	CIVerdictErrorPrefix = "error:"
-)
-
-// CIVerdict is res as the landing record names it: passed, failed, silent, or
-// error:<one-line reason>.
-func CIVerdict(res CandidateResult) string {
-	switch res.State {
-	case CandidatePassed:
-		return CIVerdictPassed
-	case CandidateFailed:
-		return CIVerdictFailed
-	}
-	if res.Err != nil && !errors.Is(res.Err, ErrCISilence) {
-		return CIVerdictErrorPrefix + reviewErrorReason(res.Err)
-	}
-	return CIVerdictSilent
-}
-
-// RecordCI fills r's CI fields from a shadow-mode candidate verdict; res nil
-// leaves them empty.
-func (r *LandingRecord) RecordCI(res *CandidateResult) {
-	if res == nil {
-		return
-	}
-	r.CIVerdict = CIVerdict(*res)
-	r.CIContext = NoteField(res.Context)
-	r.CICandidate = NoteField(res.SHA)
-	r.CIBranch = NoteField(res.Branch)
-	r.CIRunStatus = NoteField(res.RunStatus)
 }
 
 // NoteBlock is the LANDING RECORD block Land appends to the work bead.
 func (r LandingRecord) NoteBlock() string {
-	note := fmt.Sprintf("%s\nlanded_commit: %s\npatch_id: %s\ntarget: %s\nbase: %s\nbranch: %s\nhead: %s\ngate_result: %s\nom_verdict: %s\nom_score: %.4f\nroute: %s\nlanded_at: %s",
+	return fmt.Sprintf("%s\nlanded_commit: %s\npatch_id: %s\ntarget: %s\nbase: %s\nbranch: %s\nhead: %s\ngate_result: %s\nom_verdict: %s\nom_score: %.4f\nroute: %s\nlanded_at: %s",
 		LandingNoteMarker, r.LandedCommit, r.PatchID, NoteField(r.Target), r.Base, NoteField(r.Branch), r.Head,
 		NoteField(r.GateResult), NoteField(r.OMVerdict), r.OMScore, NoteField(r.Route), r.LandedAt.UTC().Format(time.RFC3339))
-	if r.CIVerdict == "" {
-		return note
-	}
-	note += fmt.Sprintf("\nci_verdict: %s\nci_context: %s\nci_candidate: %s\nci_branch: %s",
-		NoteField(r.CIVerdict), NoteField(r.CIContext), NoteField(r.CICandidate), NoteField(r.CIBranch))
-	if r.CIRunStatus != "" {
-		note += "\nci_run_status: " + NoteField(r.CIRunStatus)
-	}
-	return note
 }
 
 // CloseReason is the work bead's close reason. target_branch and commit_sha

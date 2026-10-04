@@ -524,7 +524,6 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 			rep.InstallRequested = true
 		}
 		w.logf("%s: landed %s on %s (patch-id %s)", work.BeadID, short(res.LandedCommit), work.Target, short(res.PatchID))
-		w.logShadowCI(work, res)
 		w.reapBeadBranches(work.BeadID)
 		w.clearIntent(work)
 		if !wasRepair {
@@ -608,24 +607,6 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		w.countLintTimeout(work, err)
 		w.countCISilence(work, err)
 	}
-}
-
-// logShadowCI names a shadow landing's CI verdict in the pass log, so a rig
-// accumulating evidence says out loud whether CI agreed with the local gate
-// that landed the work (slice 8). It is quiet on a rig that runs one gate.
-func (w *Worker) logShadowCI(work land.Work, res land.Result) {
-	if res.CI == nil {
-		return
-	}
-	verdict := land.CIVerdict(*res.CI)
-	if verdict == land.CIVerdictFailed {
-		// CI called red a tree the local gate landed: the one result the
-		// flip/no-flip call turns on, so it is not buried among agreements.
-		w.logf("%s: shadow CI DISAGREED: it recorded %s on the candidate %s that the local gate landed",
-			work.BeadID, verdict, short(res.CI.SHA))
-		return
-	}
-	w.logf("%s: shadow CI recorded %s on the candidate %s", work.BeadID, verdict, short(res.CI.SHA))
 }
 
 // escalate calls Escalate in its own goroutine. A panic in it is logged, not

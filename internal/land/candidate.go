@@ -195,8 +195,7 @@ type Candidate interface {
 
 // CandidateGate pushes a landing's merge candidate as land/<bead> and reads
 // the gate workflow's verdict on that commit from Forgejo. It replaces the
-// local Gate once a rig has a merge_queue.forgejo block; LandGate stays built
-// because shadow mode uses it (slice 8).
+// local Gate once a rig has a merge_queue.forgejo block.
 type CandidateGate struct {
 	// Client is the Forgejo API.
 	Client CandidateStatus
