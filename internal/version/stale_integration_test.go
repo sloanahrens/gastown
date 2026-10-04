@@ -138,3 +138,47 @@ func TestIntegrationCheckEmbeddedFormulaDrift_NamesFormulaFiles(t *testing.T) {
 		t.Errorf("CommitsBehind = %d, want 3", drift.CommitsBehind)
 	}
 }
+
+// TestIntegrationCheckStaleBinary_ClassifiesTheCommitsBehind pins the
+// name-only listing the binary-affecting count parses against real git: a ref
+// advanced only by documentation leaves the binary current, and a landing that
+// merged in a code change makes it stale, the merge commit counting with the
+// commit it brought in.
+func TestIntegrationCheckStaleBinary_ClassifiesTheCommitsBehind(t *testing.T) {
+	t.Parallel()
+	dir := newRealRepo(t)
+	built := realGitCommit(t, dir, "main.go", "1")
+	realGitRun(t, dir, "branch", "-M", "main")
+	realGitCommit(t, dir, "docs/design/architecture.md", "2")
+	realGitCommit(t, dir, "internal/version/stale_test.go", "3")
+
+	c := checker{git: realGit, commit: built}
+	docsOnly := c.checkStale(dir)
+	if docsOnly.Error != nil {
+		t.Fatalf("unexpected error: %v", docsOnly.Error)
+	}
+	if docsOnly.IsStale {
+		t.Errorf("a docs-only advance reported stale: %+v", docsOnly)
+	}
+	if docsOnly.CommitsBehind != 2 || !docsOnly.BinaryAffectingKnown || docsOnly.BinaryAffecting != 0 {
+		t.Errorf("CommitsBehind=%d BinaryAffecting=%d known=%v, want 2, 0, true",
+			docsOnly.CommitsBehind, docsOnly.BinaryAffecting, docsOnly.BinaryAffectingKnown)
+	}
+
+	// A landing merge: one code commit, brought into main by a merge commit.
+	realGitRun(t, dir, "checkout", "-q", "-b", "work", built)
+	realGitCommit(t, dir, "internal/cmd/root.go", "// change")
+	realGitRun(t, dir, "checkout", "-q", "main")
+	realGitRun(t, dir, "merge", "-q", "--no-ff", "-m", "land work", "work")
+
+	merged := c.checkStale(dir)
+	if !merged.IsStale {
+		t.Fatalf("a merged code change reported fresh: %+v", merged)
+	}
+	// The merge commit's own first-parent listing counts with the commit it
+	// brought in; without it the count would read 1.
+	if merged.CommitsBehind != 4 || merged.BinaryAffecting != 2 {
+		t.Errorf("CommitsBehind=%d BinaryAffecting=%d, want 4 and 2 (2 docs, the landing, the merge)",
+			merged.CommitsBehind, merged.BinaryAffecting)
+	}
+}

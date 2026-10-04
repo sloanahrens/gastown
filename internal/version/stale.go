@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/buildpaths"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -31,9 +32,16 @@ type StaleBinaryInfo struct {
 	RepoCommit    string // Commit of the ref the binary was compared against (CompareRef)
 	CompareRef    string // The ref staleness was computed against (e.g. "main", "origin/main")
 	CommitsBehind int    // Number of commits binary is behind (0 if unknown)
-	Skipped       bool   // True if staleness could not be determined safely
-	SkipReason    string // Human-readable reason the check was skipped
-	Error         error  // Any error encountered during check
+	// BinaryAffecting is how many of the CommitsBehind commits change a path
+	// `make build` reads (buildpaths.AffectsBuild), meaningful only when
+	// BinaryAffectingKnown.
+	BinaryAffecting int
+	// BinaryAffectingKnown is false when git could not list the changed paths,
+	// leaving BinaryAffecting unknown and CommitsBehind the only evidence.
+	BinaryAffectingKnown bool
+	Skipped              bool   // True if staleness could not be determined safely
+	SkipReason           string // Human-readable reason the check was skipped
+	Error                error  // Any error encountered during check
 }
 
 type buildBranchRef struct {
@@ -71,18 +79,35 @@ func BuildCommit() string {
 // ("Binary" for gt doctor, "gt binary" for the startup warning):
 //
 //	"Binary is 3 commits behind main (built from abc123…, main at def456…)"
+//	"gt binary is 3 commits behind origin/main (1 changes the binary) (built from …)"
 //	"gt binary is stale (built from abc123…, origin/main at def456…)"
 //
 // It is only meaningful when i.IsStale; callers gate on that. A zero
 // CommitsBehind (count unknown) falls back to the "is stale" wording.
 func (i *StaleBinaryInfo) Describe(subject string) string {
 	if i.CommitsBehind > 0 {
-		return fmt.Sprintf("%s is %d commits behind %s (built from %s, %s at %s)",
+		return fmt.Sprintf("%s is %d commits behind %s%s (built from %s, %s at %s)",
 			subject, i.CommitsBehind, i.CompareRef,
+			BinaryNote(i.BinaryAffecting, i.CommitsBehind, i.BinaryAffectingKnown),
 			ShortCommit(i.BinaryCommit), i.CompareRef, ShortCommit(i.RepoCommit))
 	}
 	return fmt.Sprintf("%s is stale (built from %s, %s at %s)",
 		subject, ShortCommit(i.BinaryCommit), i.CompareRef, ShortCommit(i.RepoCommit))
+}
+
+// BinaryNote renders the binary-affecting subset of a staleness count as a
+// parenthetical, e.g. " (1 changes the binary)", for callers that print the
+// counts in their own words; it is empty when the count is unknown or every
+// commit behind affects the build.
+func BinaryNote(affecting, commitsBehind int, known bool) string {
+	if !known || affecting >= commitsBehind {
+		return ""
+	}
+	verb := "change"
+	if affecting == 1 {
+		verb = "changes"
+	}
+	return fmt.Sprintf(" (%d %s the binary)", affecting, verb)
 }
 
 // ShortCommit returns first 12 characters of a hash.
@@ -252,6 +277,17 @@ func (c checker) checkStale(repoDir string) *StaleBinaryInfo {
 		if countOutput, err := c.output(repoDir, "rev-list", "--count", binaryCommit+".."+compareCommit); err == nil {
 			if count, parseErr := fmt.Sscanf(strings.TrimSpace(string(countOutput)), "%d", &info.CommitsBehind); parseErr != nil || count != 1 {
 				info.CommitsBehind = 0
+			}
+		}
+
+		// A backlog that changes nothing `make build` reads — documentation,
+		// markdown, test sources or testdata — leaves the installed binary
+		// producing everything the build ref has, so it is not drift and the
+		// stale warning stays quiet (gt-p62ku).
+		if affecting, ok := c.binaryAffectingBehind(repoDir, binaryCommit, compareCommit, info.CommitsBehind); ok {
+			info.BinaryAffecting, info.BinaryAffectingKnown = affecting, true
+			if affecting == 0 {
+				info.IsStale = false
 			}
 		}
 	}
@@ -583,6 +619,60 @@ func (c checker) onlyBeadsChanges(repoDir, binaryCommit, compareRef string) bool
 		return false
 	}
 	return strings.TrimSpace(string(output)) == ""
+}
+
+// gitLogRecordSep separates the per-commit records of the log
+// binaryAffectingBehind reads. It is an ASCII unit separator: a byte no path
+// can contain, so it cannot be confused with a file name.
+const gitLogRecordSep = "\x1f"
+
+// gitLogFormat puts that separator, then the commit hash, at the head of each
+// record.
+const gitLogFormat = "--format=%x1f%H"
+
+// binaryAffectingBehind counts how many of the commits in from..to change a
+// path `make build` reads, classifying each commit's first-parent file list
+// with buildpaths.AffectsBuild — the rule the daemon's rebuild_gt job uses — so
+// a backlog of documentation, markdown, test sources or testdata reads as
+// needing no install (gt-p62ku).
+//
+// The range is expected to hold commitsBehind commits, the raw count already
+// taken; ok is false when git could not list the changes or listed a different
+// number of commits. A listing that does not account for every commit is not
+// evidence that none of them needs building: the caller keeps the raw count.
+func (c checker) binaryAffectingBehind(repoDir, from, to string, commitsBehind int) (int, bool) {
+	if commitsBehind <= 0 {
+		return 0, false
+	}
+	out, err := c.output(repoDir, "log", gitLogFormat, "--name-only", "--diff-merges=first-parent", from+".."+to)
+	if err != nil {
+		return 0, false
+	}
+	affecting, seen := countBinaryAffecting(out)
+	if seen != commitsBehind {
+		return 0, false
+	}
+	return affecting, true
+}
+
+// countBinaryAffecting classifies a `git log --name-only` listing whose
+// records are separated by gitLogRecordSep, counting the commits that change a
+// build path and the records it saw. Each record is the commit hash on its
+// first line followed by the paths the commit changed.
+func countBinaryAffecting(out []byte) (affecting, seen int) {
+	for _, record := range strings.Split(string(out), gitLogRecordSep) {
+		if strings.TrimSpace(record) == "" {
+			continue // the empty chunk before the first record
+		}
+		seen++
+		for _, path := range strings.Split(record, "\n")[1:] {
+			if path = strings.TrimSpace(path); path != "" && buildpaths.AffectsBuild(path) {
+				affecting++
+				break
+			}
+		}
+	}
+	return affecting, seen
 }
 
 // isBuildBranch returns true if the given branch is safe for automated rebuilds.

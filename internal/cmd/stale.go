@@ -51,9 +51,13 @@ type StaleOutput struct {
 	RepoCommit    string `json:"repo_commit"`
 	CompareRef    string `json:"compare_ref,omitempty"`
 	CommitsBehind int    `json:"commits_behind,omitempty"`
-	Skipped       bool   `json:"skipped,omitempty"`
-	SkipReason    string `json:"skip_reason,omitempty"`
-	Error         string `json:"error,omitempty"`
+	// BinaryAffecting is how many of the commits behind change what the build
+	// produces; meaningful only when BinaryAffectingKnown.
+	BinaryAffecting      int    `json:"binary_affecting,omitempty"`
+	BinaryAffectingKnown bool   `json:"binary_affecting_known,omitempty"`
+	Skipped              bool   `json:"skipped,omitempty"`
+	SkipReason           string `json:"skip_reason,omitempty"`
+	Error                string `json:"error,omitempty"`
 }
 
 func runStale(cmd *cobra.Command, args []string) error {
@@ -94,16 +98,18 @@ func runStale(cmd *cobra.Command, args []string) error {
 	// SafeToRebuild requires: stale + forward-only + on a build branch.
 	safeToRebuild := info.IsStale && info.IsForward && info.OnMainBranch
 	output := StaleOutput{
-		Stale:         info.IsStale,
-		Forward:       info.IsForward,
-		OnMainBranch:  info.OnMainBranch,
-		SafeToRebuild: safeToRebuild,
-		BinaryCommit:  info.BinaryCommit,
-		RepoCommit:    info.RepoCommit,
-		CompareRef:    info.CompareRef,
-		CommitsBehind: info.CommitsBehind,
-		Skipped:       info.Skipped,
-		SkipReason:    info.SkipReason,
+		Stale:                info.IsStale,
+		Forward:              info.IsForward,
+		OnMainBranch:         info.OnMainBranch,
+		SafeToRebuild:        safeToRebuild,
+		BinaryCommit:         info.BinaryCommit,
+		RepoCommit:           info.RepoCommit,
+		CompareRef:           info.CompareRef,
+		CommitsBehind:        info.CommitsBehind,
+		BinaryAffecting:      info.BinaryAffecting,
+		BinaryAffectingKnown: info.BinaryAffectingKnown,
+		Skipped:              info.Skipped,
+		SkipReason:           info.SkipReason,
 	}
 
 	if staleJSON {
@@ -141,7 +147,8 @@ func outputStaleText(w io.Writer, output StaleOutput) error {
 		fmt.Fprintf(w, "  Binary:   %s\n", version.ShortCommit(output.BinaryCommit))
 		fmt.Fprintf(w, "  Build ref (%s): %s\n", output.CompareRef, version.ShortCommit(output.RepoCommit))
 		if output.CommitsBehind > 0 {
-			fmt.Fprintf(w, "  %s\n", style.Dim.Render(fmt.Sprintf("(%d commits behind %s)", output.CommitsBehind, output.CompareRef)))
+			note := version.BinaryNote(output.BinaryAffecting, output.CommitsBehind, output.BinaryAffectingKnown)
+			fmt.Fprintf(w, "  %s\n", style.Dim.Render(fmt.Sprintf("(%d commits behind %s%s)", output.CommitsBehind, output.CompareRef, note)))
 		}
 		if !output.Forward {
 			fmt.Fprintf(w, "  %s %s is NOT a descendant of binary commit (diverged or older)\n", style.Error.Render("✗"), output.CompareRef)
@@ -156,10 +163,21 @@ func outputStaleText(w io.Writer, output StaleOutput) error {
 				style.Error.Render("✗"), output.Forward, output.OnMainBranch)
 		}
 	} else {
-		fmt.Fprintf(w, "%s Binary is fresh\n", style.Success.Render("✓"))
+		// Every commit the build ref is ahead changes nothing the build reads:
+		// installing would produce the same binary, so it is current for the
+		// build while still being behind the ref by the raw count (gt-p62ku).
+		nonBinaryAhead := output.CommitsBehind > 0 && output.BinaryAffectingKnown && output.BinaryAffecting == 0
+		head := "Binary is fresh"
+		if nonBinaryAhead {
+			head = "Binary is current for the build"
+		}
+		fmt.Fprintf(w, "%s %s\n", style.Success.Render("✓"), head)
 		fmt.Fprintf(w, "  Commit: %s\n", version.ShortCommit(output.BinaryCommit))
 		if output.CompareRef != "" {
 			fmt.Fprintf(w, "  %s\n", style.Dim.Render(fmt.Sprintf("(compared against %s)", output.CompareRef)))
+		}
+		if nonBinaryAhead {
+			fmt.Fprintf(w, "  %s\n", style.Dim.Render(fmt.Sprintf("(%d documentation-only commits ahead of %s)", output.CommitsBehind, output.CompareRef)))
 		}
 	}
 	return nil
