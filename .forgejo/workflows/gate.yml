@@ -7,10 +7,14 @@
 # a rename here that the derivation does not follow orphans the rule instead of
 # typing the string twice.
 #
-# runs-on is the host runner's ci-base label, the Go + Node + docker-CLI image
-# in ~/forgejo/runner-image. That image must carry everything `make gate`
-# needs; it is a host file outside this repo, so gastown's requirements are
-# called out in the landing note rather than committed here.
+# runs-on is the host runner's ci-base label, the image in
+# ~/forgejo/runner-image: Go with GOTOOLCHAIN=auto, libicu-dev for the DuckDB
+# cgo build, an unprivileged ci user whose home holds the Go cache volumes, and
+# the Node and docker CLIs. Because the image is a host file outside this repo,
+# gastown's other requirements on it are called out in the landing note rather
+# than committed here. It ships no lint tools, so `make lint-tools` installs
+# golangci-lint at the Makefile's pinned GOLANGCI_LINT_VERSION into the image's
+# PATH before the gate runs it (gt-fn9e6.17).
 #
 # fetch-depth: 0 matches this repo's GitHub gate job: parts of `make gate` read
 # the module history, and the default shallow clone turns that into a red run.
@@ -26,4 +30,5 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - run: make lint-tools
       - run: make gate
