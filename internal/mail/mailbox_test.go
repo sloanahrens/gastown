@@ -454,14 +454,12 @@ func TestNewMailboxWithBeadsDir(t *testing.T) {
 	}
 }
 
-// TestCloseInDirPassesActorMatchingAssignee guards against gt-ovem: mail
-// beads for mayor/deacon are created with assignee "mayor/"/"deacon/"
-// (trailing slash, see AddressToIdentity), but the ambient actor bd would
-// otherwise fall back to (BD_ACTOR/git user.name) is the bare role name
-// without the slash. That mismatch makes bd's assignee==actor close guard
-// reject the close, so `gt mail archive` fails for every mail-based role.
-// closeInDir must pass --actor explicitly using the mailbox's own identity
-// so the close always matches the assignee it was filed under.
+// TestCloseInDirPassesActorMatchingAssignee guards against gt-ovem: bd's
+// assignee==actor close guard rejects a close whose actor differs from the
+// bead's assignee, so `gt mail archive` fails when the ambient actor bd would
+// otherwise fall back to (BD_ACTOR/git user.name) differs from the mailbox's
+// own identity. closeInDir must pass --actor explicitly using that identity so
+// the close always matches the assignee the message was filed under.
 func TestCloseInDirPassesActorMatchingAssignee(t *testing.T) {
 	t.Parallel()
 	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
@@ -470,14 +468,14 @@ func TestCloseInDirPassesActorMatchingAssignee(t *testing.T) {
 		}
 		return "", "unexpected bd args: " + strings.Join(c.Args, " "), 1
 	}}
-	m := NewMailboxWithBeadsDir("mayor/", t.TempDir(), t.TempDir())
+	m := NewMailboxWithBeadsDir("gastown/crew/max", t.TempDir(), t.TempDir())
 	m.bd = bd.run
-	if err := m.closeInDir("hq-wisp-xv525", t.TempDir()); err != nil {
+	if err := m.closeInDir("gt-wisp-xv525", t.TempDir()); err != nil {
 		t.Fatalf("closeInDir: %v", err)
 	}
 
-	if log := strings.Join(bd.argvs(), "\n"); !strings.Contains(log, "--actor=mayor/") {
-		t.Fatalf("bd close missing --actor=mayor/ matching assignee identity; calls:\n%s", log)
+	if log := strings.Join(bd.argvs(), "\n"); !strings.Contains(log, "--actor=gastown/max") {
+		t.Fatalf("bd close missing --actor=gastown/max matching assignee identity; calls:\n%s", log)
 	}
 }
 

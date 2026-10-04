@@ -112,8 +112,8 @@ func (r *Resolver) resolveAgentAddress(address string) ([]Recipient, error) {
 	}
 
 	// Validate that the address refers to a known agent before accepting.
-	// Without this check, typos like "laser/mayor" (instead of "mayor/")
-	// silently deliver to a dead inbox with no error.
+	// Without this check, typos like "gastown/witnes" silently deliver to a
+	// dead inbox with no error.
 	// See: https://github.com/steveyegge/gastown/issues/2038
 	if err := r.validateAgentAddress(address); err != nil {
 		return nil, err
@@ -124,6 +124,25 @@ func (r *Resolver) resolveAgentAddress(address string) ([]Recipient, error) {
 		Address: address,
 		Type:    RecipientAgent,
 	}}, nil
+}
+
+// isRetiredAgentName reports whether name is a role the town no longer hires.
+// The retired mayor left its state directory behind (constants.DirMayor, the
+// town marker), so the name still exists on disk while the role does not: a
+// directory of that name is not a mailbox (gt-rwp7z.5).
+func isRetiredAgentName(name string) bool {
+	return name == constants.DirMayor
+}
+
+// isRetiredAgentAddress reports whether address ends in a retired role name,
+// in either the town form ("mayor/") or the rig-scoped form ("gastown/mayor").
+func isRetiredAgentAddress(address string) bool {
+	trimmed := strings.TrimSuffix(address, "/")
+	if trimmed == "" {
+		return false
+	}
+	parts := strings.Split(trimmed, "/")
+	return isRetiredAgentName(parts[len(parts)-1])
 }
 
 // validateAgentAddress checks that a slash-containing address corresponds to
@@ -141,12 +160,14 @@ func (r *Resolver) validateAgentAddress(address string) error {
 
 	normalized := normalizeAddress(strings.TrimSuffix(address, "/"))
 
-	// Well-known town-level singletons always valid
-	switch normalized {
-	case constants.RoleMayor + "/", constants.RoleMayor, "overseer":
+	// The overseer is the only well-known singleton address.
+	if normalized == "overseer" {
 		return nil
 	}
-	if isReservedTownSubpath(normalized) {
+	// The retired name is checked before beads and directories alike: a
+	// surviving agent bead or the kept <rig>/mayor clone directory must not
+	// resurrect an address the role no longer has.
+	if isReservedTownSubpath(normalized) || isRetiredAgentAddress(normalized) {
 		return fmt.Errorf("%w: %s", ErrUnknownRecipient, address)
 	}
 
@@ -456,11 +477,23 @@ func (r *Resolver) resolveChannel(name string) ([]Recipient, error) {
 	}}, nil
 }
 
-// AgentBeadIDToAddress converts an agent bead ID to a mail address.
-// Handles both gt- (rig agents) and hq- (town agents) prefixes:
-//   - hq-mayor → mayor/
-//   - gt-gastown-crew-max → gastown/crew/max
+// AgentBeadIDToAddress converts an agent bead ID to a mail address, or "" when
+// the bead names a retired role: a surviving hq-mayor bead must not keep an
+// address the role no longer has, or @town would resolve to it and fail the
+// whole broadcast (gt-rwp7z.5).
 func AgentBeadIDToAddress(id string) string {
+	address := agentBeadIDToAddress(id)
+	if isRetiredAgentAddress(address) {
+		return ""
+	}
+	return address
+}
+
+// agentBeadIDToAddress converts an agent bead ID to a mail address.
+// Handles both gt- (rig agents) and hq- (town agents) prefixes:
+//   - hq-deacon → deacon/
+//   - gt-gastown-crew-max → gastown/crew/max
+func agentBeadIDToAddress(id string) string {
 	var rest string
 
 	// Handle both gt- (rig agents) and hq- (town agents) prefixes
@@ -477,7 +510,7 @@ func AgentBeadIDToAddress(id string) string {
 	parts := strings.Split(rest, "-")
 
 	if len(parts) == 1 {
-		// Town-level: gt-mayor → mayor/
+		// Town-level: gt-deacon → deacon/
 		return parts[0] + "/"
 	}
 

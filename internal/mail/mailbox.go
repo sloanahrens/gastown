@@ -383,8 +383,6 @@ func parseWispTimestamp(value string) (time.Time, bool) {
 }
 
 // identityVariants returns all identity formats to query.
-// For town-level agents (mayor/, deacon/), also includes the variant without
-// trailing slash for backwards compatibility with legacy messages.
 func (m *Mailbox) identityVariants() []string {
 	return identityVariantsFor(m.identity)
 }
@@ -393,14 +391,7 @@ func (m *Mailbox) identityVariants() []string {
 // identity/address. Standalone so batch queries (see BatchMailSummaries) can
 // build a combined identity list without needing a Mailbox per address.
 func identityVariantsFor(identity string) []string {
-	variants := []string{identity}
-
-	// Town-level agents may have legacy messages without trailing slash
-	if identity == "mayor/" {
-		variants = append(variants, "mayor")
-	}
-
-	return variants
+	return []string{identity}
 }
 
 // issueBatchRow is one row from queryIssueMessagesBatch: an issue-backed
@@ -598,10 +589,9 @@ func (m *Mailbox) closeInDir(id, beadsDir string) error {
 	args := []string{"close", id}
 	// Close as the identity the message was addressed to, not whatever
 	// ambient actor bd would otherwise fall back to (BD_ACTOR/git user.name).
-	// mayor assignees are written with a trailing slash ("mayor/", see
-	// AddressToIdentity) but BD_ACTOR/GIT_AUTHOR_NAME are set to the bare
-	// role name ("mayor"), so bd's assignee==actor close guard rejects the
-	// close and archive silently fails town-wide (gt-ovem, sibling of gt-cut).
+	// When the addressed identity and the ambient actor differ, bd's
+	// assignee==actor close guard rejects the close and archive silently
+	// fails town-wide (gt-ovem, sibling of gt-cut).
 	if m.identity != "" {
 		args = append(args, "--actor="+m.identity)
 	}

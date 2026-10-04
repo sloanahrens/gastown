@@ -1,11 +1,11 @@
 package cmd
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/nudge"
 )
 
@@ -19,12 +19,31 @@ func TestExpiryObserverInstalled(t *testing.T) {
 	}
 }
 
-// TestExpiredNudgeMailTargetFallsBackToMayor covers the session that no rig
-// claims: the notice still has a mailbox to reach (gt-oexm).
-func TestExpiredNudgeMailTargetFallsBackToMayor(t *testing.T) {
+// TestExpiredNudgeMailTargetIsEmptyForUnparseableSession: the session that no
+// rig claims has no mailbox to reach, so the notice is dropped rather than
+// mailed to a dead address (gt-oexm, mayor retired by gt-rwp7z).
+func TestExpiredNudgeMailTargetIsEmptyForUnparseableSession(t *testing.T) {
 	t.Parallel()
-	if got := expiredNudgeMailTarget(nudgeTestRegistry(), "not a session name"); got != constants.RoleMayor {
-		t.Errorf("expiredNudgeMailTarget(unparseable session) = %q, want %q", got, constants.RoleMayor)
+	if got := expiredNudgeMailTarget(nudgeTestRegistry(), "not a session name"); got != "" {
+		t.Errorf("expiredNudgeMailTarget(unparseable session) = %q, want no mailbox", got)
+	}
+}
+
+// TestMailExpiredNudgeNoMailboxWarnsAndSkips: with no mailbox to reach the
+// expiry notice is not mailed at all, and the drop is reported — a silent
+// return would leave an operator reading the queue's expired/ trace as the
+// only sign that a nudge was lost (gt-oexm, gt-rwp7z).
+func TestMailExpiredNudgeNoMailboxWarnsAndSkips(t *testing.T) {
+	t.Parallel()
+	var warn bytes.Buffer
+
+	mailExpiredNudgeTo(&warn, nudge.ExpiryEvent{
+		Session: "not a session name",
+		Nudge:   nudge.QueuedNudge{Sender: "witness", Message: "status?"},
+	})
+
+	if !strings.Contains(warn.String(), "no reachable mailbox") {
+		t.Errorf("warning = %q, want a no-reachable-mailbox warning", warn.String())
 	}
 }
 

@@ -188,8 +188,8 @@ func normalizeReplySubject(subject string) string {
 }
 
 // normalizeAddress lowercases an address and trims a trailing slash so that
-// "Mayor/" and "mayor" compare equal. Matches identityVariants behavior in
-// mail.Mailbox without depending on its internals.
+// "Gastown/Toast/" and "gastown/toast" compare equal. Matches identityVariants
+// behavior in mail.Mailbox without depending on its internals.
 func normalizeAddress(addr string) string {
 	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(addr)), "/")
 }

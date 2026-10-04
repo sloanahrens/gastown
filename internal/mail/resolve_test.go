@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -55,12 +56,16 @@ func TestAgentBeadIDToAddress(t *testing.T) {
 		want string
 	}{
 		// Town-level agents (gt- prefix)
-		{"gt-mayor", "mayor/"},
 		{"gt-deacon", "deacon/"},
+		{"gt-steward", "steward/"},
 
 		// Town-level agents (hq- prefix)
-		{"hq-mayor", "mayor/"},
 		{"hq-deacon", "deacon/"},
+		{"hq-steward", "steward/"},
+
+		// Retired role: a surviving bead keeps no address (gt-rwp7z.5)
+		{"gt-mayor", ""},
+		{"hq-mayor", ""},
 
 		// Rig singletons
 		{"gt-gastown-witness", "gastown/witness"},
@@ -125,6 +130,42 @@ func TestResolverValidateAgentAddressRetiredDogs(t *testing.T) {
 				t.Fatalf("validateAgentAddress(%q) unexpected error: %v", tt.address, err)
 			}
 		})
+	}
+}
+
+// TestResolverResolve_RetiredMayorAddress covers the stale-config case: a town
+// whose config or muscle memory still addresses the retired mayor gets the
+// same "unknown recipient" failure any other dead address gets, not a silent
+// delivery to a mailbox nothing reads (gt-rwp7z).
+//
+// The fixture is the production layout, not a bare marker: a live town keeps
+// the town-root mayor/ marker AND each rig's <rig>/mayor/rig clone. The clone
+// directory is what the workspace fallback would otherwise accept as an agent,
+// so the rig-scoped address is only refused if the role decides, not the
+// directory.
+func TestResolverResolve_RetiredMayorAddress(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	for _, dir := range []string{
+		filepath.Join(townRoot, "mayor"),                   // town marker
+		filepath.Join(townRoot, "gastown", "mayor", "rig"), // kept clone directory
+	} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("creating %s: %v", dir, err)
+		}
+	}
+	resolver := NewResolver(nil, townRoot)
+
+	for _, address := range []string{"mayor/", "gastown/mayor"} {
+		t.Run(address, func(t *testing.T) {
+			if _, err := resolver.Resolve(address); !errors.Is(err, ErrUnknownRecipient) {
+				t.Fatalf("Resolve(%q) = %v, want ErrUnknownRecipient", address, err)
+			}
+		})
+	}
+	// The bare name is no address at all: it fails as an unknown name.
+	if _, err := resolver.Resolve("mayor"); err == nil {
+		t.Fatal("Resolve(\"mayor\") succeeded, want an unknown-name error")
 	}
 }
 

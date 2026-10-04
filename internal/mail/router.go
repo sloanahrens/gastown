@@ -34,7 +34,7 @@ const DefaultIdleNotifyTimeout = 3 * time.Second
 
 // Router handles message delivery via beads.
 // It routes messages to the correct beads database based on address:
-// - Town-level (mayor/, deacon/) -> {townRoot}/.beads
+// - Town-level (deacon/) -> {townRoot}/.beads
 // - Rig-level (rig/polecat) -> {townRoot}/{rig}/.beads
 type Router struct {
 	workDir  string // fallback directory to run bd commands in
@@ -309,12 +309,6 @@ func (r *Router) buildLabels(msg *Message) []string {
 	return labels
 }
 
-// isTownLevelAddress returns true if the address is for a town-level agent or the overseer.
-func isTownLevelAddress(address string) bool {
-	addr := strings.TrimSuffix(address, "/")
-	return addr == constants.RoleMayor || addr == "overseer"
-}
-
 // isGroupAddress returns true if the address is a @group address.
 // Group addresses start with @ and resolve to multiple recipients.
 func isGroupAddress(address string) bool {
@@ -344,7 +338,7 @@ type ParsedGroup struct {
 //
 // Supported patterns:
 //   - @rig/<rigname>: All agents in a rig
-//   - @town: All town-level agents (mayor, deacon)
+//   - @town: All town-level agents
 //   - @witnesses: All witnesses across rigs
 //   - @crew/<rigname>: Crew workers in a specific rig
 //   - @polecats/<rigname>: Polecats in a specific rig
@@ -396,13 +390,24 @@ type agentBead struct {
 	Labels      []string `json:"labels"`
 }
 
-// agentBeadToAddress converts an agent bead to a mail address.
+// agentBeadToAddress converts an agent bead to a mail address, or "" when the
+// bead names a retired role: a surviving hq-mayor bead must not make @town
+// resolve to an address that no longer exists and fail the whole broadcast
+// (gt-rwp7z.5).
+func agentBeadToAddress(bead *agentBead) string {
+	address := parseAgentBeadToAddress(bead)
+	if isRetiredAgentAddress(address) {
+		return ""
+	}
+	return address
+}
+
+// parseAgentBeadToAddress converts an agent bead to a mail address.
 // Handles multiple ID formats:
-//   - hq-mayor → mayor/
 //   - hq-deacon → deacon/
 //   - gt-gastown-crew-max → gastown/max (legacy)
 //   - ppf-pyspark_pipeline_framework-polecat-Toast → pyspark_pipeline_framework/Toast (rig prefix)
-func agentBeadToAddress(bead *agentBead) string {
+func parseAgentBeadToAddress(bead *agentBead) string {
 	if bead == nil {
 		return ""
 	}
@@ -411,12 +416,6 @@ func agentBeadToAddress(bead *agentBead) string {
 
 	// Handle hq- prefixed IDs (town-level format)
 	if strings.HasPrefix(id, "hq-") {
-		// Well-known town-level agents
-		if id == "hq-mayor" {
-			return "mayor/"
-		}
-
-		// For other hq- agents, fall back to description parsing
 		return parseAgentAddressFromDescription(bead.Description)
 	}
 
@@ -435,7 +434,7 @@ func agentBeadToAddress(bead *agentBead) string {
 	parts := strings.Split(rest, "-")
 
 	if len(parts) == 1 {
-		// Town-level: gt-mayor
+		// Town-level: gt-deacon
 		return parts[0] + "/"
 	}
 
@@ -629,10 +628,14 @@ func (r *Router) resolveOverseer() ([]string, error) {
 	return []string{"overseer"}, nil
 }
 
-// resolveTownAgents resolves @town to all town-level agents (mayor, deacon).
+// resolveTownAgents resolves @town to all town-level agents (agents whose
+// bead has no rig). It can resolve to nothing when the town has none.
 func (r *Router) resolveTownAgents() ([]string, error) {
 	// Town-level agents have rig=null in their description
-	agents := r.queryAgents("rig: null")
+	agents, err := r.queryAgents("rig: null")
+	if err != nil {
+		return nil, err
+	}
 
 	var addresses []string
 	for _, agent := range agents {
@@ -649,7 +652,10 @@ func (r *Router) resolveTownAgents() ([]string, error) {
 func (r *Router) resolveAgentsByRole(roleType, rig string) ([]string, error) {
 	// Build query filter
 	query := "role_type: " + roleType
-	agents := r.queryAgents(query)
+	agents, err := r.queryAgents(query)
+	if err != nil {
+		return nil, err
+	}
 
 	var addresses []string
 	for _, agent := range agents {
@@ -672,7 +678,10 @@ func (r *Router) resolveAgentsByRole(roleType, rig string) ([]string, error) {
 func (r *Router) resolveAgentsByRig(rig string) ([]string, error) {
 	// Query for agents with matching rig in description
 	query := "rig: " + rig
-	agents := r.queryAgents(query)
+	agents, err := r.queryAgents(query)
+	if err != nil {
+		return nil, err
+	}
 
 	var addresses []string
 	for _, agent := range agents {
@@ -686,35 +695,45 @@ func (r *Router) resolveAgentsByRig(rig string) ([]string, error) {
 
 // queryAgents queries agent beads using bd list with description filtering.
 // Searches both town-level and rig-level beads to find all agents.
-func (r *Router) queryAgents(descContains string) []*agentBead {
+//
+// An empty result with a nil error means the town has no matching agent; a
+// query that failed is reported as an error once nothing was found. Callers
+// that fan out (the @groups) must tell "nobody to send to" from "could not
+// ask": treating a broken query as an empty town turns a failed send into a
+// silent no-op (gt-rwp7z.5).
+func (r *Router) queryAgents(descContains string) ([]*agentBead, error) {
 	var allAgents []*agentBead
+	var queryErrors []string
 
 	// Query town-level beads
 	townBeadsDir := r.resolveBeadsDir()
 	townAgents, err := r.queryAgentsInDir(townBeadsDir, descContains)
 	if err != nil {
 		// Don't fail yet - rig beads might still have results
-		townAgents = nil
+		queryErrors = append(queryErrors, fmt.Sprintf("town beads: %v", err))
+	} else {
+		allAgents = append(allAgents, townAgents...)
 	}
-	allAgents = append(allAgents, townAgents...)
 
 	// Also query rig-level beads via routes.jsonl
 	if r.townRoot != "" {
 		routesDir := filepath.Join(r.townRoot, ".beads")
 		routes, routeErr := beads.LoadRoutes(routesDir)
-		if routeErr == nil {
-			for _, route := range routes {
-				// Skip hq- routes (town-level, already queried)
-				if strings.HasPrefix(route.Prefix, "hq-") {
-					continue
-				}
-				rigBeadsDir := filepath.Join(r.townRoot, route.Path, ".beads")
-				rigAgents, rigErr := r.queryAgentsInDir(rigBeadsDir, descContains)
-				if rigErr != nil {
-					continue // Skip rigs with errors
-				}
-				allAgents = append(allAgents, rigAgents...)
+		if routeErr != nil {
+			queryErrors = append(queryErrors, fmt.Sprintf("rig routes: %v", routeErr))
+		}
+		for _, route := range routes {
+			// Skip hq- routes (town-level, already queried)
+			if strings.HasPrefix(route.Prefix, "hq-") {
+				continue
 			}
+			rigBeadsDir := filepath.Join(r.townRoot, route.Path, ".beads")
+			rigAgents, rigErr := r.queryAgentsInDir(rigBeadsDir, descContains)
+			if rigErr != nil {
+				queryErrors = append(queryErrors, fmt.Sprintf("%s: %v", route.Path, rigErr))
+				continue
+			}
+			allAgents = append(allAgents, rigAgents...)
 		}
 	}
 
@@ -728,7 +747,13 @@ func (r *Router) queryAgents(descContains string) []*agentBead {
 		}
 	}
 
-	return unique
+	// Nothing came back and at least one query failed: the result is unknown,
+	// not empty, so say so rather than reporting a town with no agents.
+	if len(unique) == 0 && len(queryErrors) > 0 {
+		return nil, fmt.Errorf("querying agents: %s", strings.Join(queryErrors, "; "))
+	}
+
+	return unique, nil
 }
 
 // queryAgentsInDir queries agent beads in a specific beads directory with optional description filtering.
@@ -909,6 +934,11 @@ func (r *Router) sendToGroup(msg *Message) error {
 	}
 
 	if len(recipients) == 0 {
+		// @town resolves to the town-level agents that exist, which can be
+		// none: an empty town broadcast is a no-op, not a failed send.
+		if group.Type == GroupTypeTown {
+			return nil
+		}
 		return fmt.Errorf("no recipients found for group: %s", msg.To)
 	}
 
@@ -941,17 +971,12 @@ func (r *Router) validateRecipient(identity string) error {
 		return nil
 	}
 
-	// Well-known town-level singletons always valid
-	switch identity {
-	case "mayor", "mayor/":
-		return nil
-	}
 	if isReservedTownSubpath(identity) {
 		return fmt.Errorf("no agent found")
 	}
 
 	// Query agents from town-level beads
-	agents := r.queryAgents("")
+	agents, townQueryErr := r.queryAgents("")
 
 	for _, agent := range agents {
 		if agentBeadToAddress(agent) == identity {
@@ -998,6 +1023,9 @@ func (r *Router) validateRecipient(identity string) error {
 	if routeQueryErr != nil {
 		return routeQueryErr
 	}
+	if townQueryErr != nil {
+		return fmt.Errorf("no agent found (query errors: %v)", townQueryErr)
+	}
 
 	return fmt.Errorf("no agent found")
 }
@@ -1005,17 +1033,13 @@ func (r *Router) validateRecipient(identity string) error {
 // validateAgentWorkspace checks if an agent's workspace directory exists on disk.
 // Used as a fallback when the agent isn't found in the bead registry.
 func (r *Router) validateAgentWorkspace(identity string) bool {
-	if isReservedTownSubpath(identity) {
+	if isReservedTownSubpath(identity) || isRetiredAgentAddress(identity) {
 		return false
 	}
 
 	parts := strings.Split(identity, "/")
 
 	switch len(parts) {
-	case 1:
-		// Town-level singleton: "mayor"
-		name := strings.TrimSuffix(parts[0], "/")
-		return dirExists(filepath.Join(r.townRoot, name))
 	case 2:
 		rig, name := parts[0], parts[1]
 		// Singleton role: gastown/refinery
@@ -1039,10 +1063,11 @@ func (r *Router) validateAgentWorkspace(identity string) bool {
 }
 
 // isReservedTownSubpath reports whether address sits under a town-level
-// directory that holds no mailboxes of its own: mayor/<x>, and deacon/<x>,
+// directory that holds no mailboxes of its own: the mayor state directory
+// (constants.DirMayor, which the town keeps as its marker), and deacon/<x>,
 // which covers the retired deacon/dogs/<name> namespace (gt-29q6g).
 func isReservedTownSubpath(address string) bool {
-	return strings.HasPrefix(address, constants.RoleMayor+"/") ||
+	return strings.HasPrefix(address, constants.DirMayor+"/") ||
 		strings.HasPrefix(address, "deacon/")
 }
 
@@ -1619,8 +1644,8 @@ func (r *Router) BatchMailSummaries(addresses []string) (map[string]MailSummary,
 	beadsDir := r.resolveBeadsDir()
 	workDir := filepath.Dir(beadsDir)
 
-	// Map every queried identity variant (e.g. legacy "mayor" alongside
-	// "mayor/") back to the caller's original address so counts attribute
+	// Map every queried identity variant (e.g. a legacy address alongside
+	// its canonical form) back to the caller's original address so counts attribute
 	// correctly. Addresses must be normalized via AddressToIdentity before
 	// computing variants — callers pass GGT addresses like "gastown/crew/max"
 	// or "gastown/polecats/Toast", but messages are stored under the
@@ -1747,7 +1772,7 @@ func (r *Router) BatchMailSummaries(addresses []string) (map[string]MailSummary,
 // enqueued (after a configurable delay, default 30s) to prompt the recipient
 // to reply via gt mail send rather than in chat.
 //
-// Supports mayor/, deacon/, rig/crew/name, rig/polecats/name, and rig/name addresses.
+// Supports deacon/, rig/crew/name, rig/polecats/name, and rig/name addresses.
 // Respects agent DND/muted state - skips notification if recipient has DND enabled.
 func (r *Router) notifyRecipient(msg *Message) error {
 	sessionIDs := AddressToSessionIDs(r.prefixes, msg.To)
@@ -1979,7 +2004,7 @@ func senderCanReceiveReply(from string) bool {
 
 	identity := AddressToIdentity(from)
 	switch identity {
-	case "overseer", "mayor/":
+	case "overseer":
 		return true
 	}
 	if identity == "" || strings.HasPrefix(identity, "@") || strings.ContainsAny(identity, ":@") {
@@ -1992,7 +2017,12 @@ func senderCanReceiveReply(from string) bool {
 		if !validReplyAddressPart(parts[0]) || !validReplyAddressPart(parts[1]) {
 			return false
 		}
-		if parts[0] == constants.RoleMayor || parts[0] == "deacon" {
+		if parts[0] == constants.DirMayor || parts[0] == "deacon" {
+			return false
+		}
+		// rig/mayor is refused as a recipient, so a reply to it cannot
+		// reach anyone (gt-rwp7z.5).
+		if isRetiredAgentName(parts[1]) {
 			return false
 		}
 		switch parts[1] {
@@ -2061,10 +2091,6 @@ func addressToAgentBeadID(reg *session.PrefixRegistry, address string) string {
 	if address == "overseer" {
 		return "" // Overseer is a human, no agent bead
 	}
-	switch address {
-	case constants.RoleMayor, constants.RoleMayor + "/":
-		return session.MayorSessionName()
-	}
 	if isReservedTownSubpath(address) {
 		return ""
 	}
@@ -2106,11 +2132,6 @@ func AddressToSessionIDs(reg *session.PrefixRegistry, address string) []string {
 	// Overseer address: "overseer" (human operator)
 	if address == "overseer" {
 		return []string{session.OverseerSessionName()}
-	}
-
-	// Mayor address: "mayor/" or "mayor"
-	if address == constants.RoleMayor || address == constants.RoleMayor+"/" {
-		return []string{session.MayorSessionName()}
 	}
 
 	if isReservedTownSubpath(address) {
