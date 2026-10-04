@@ -51,6 +51,18 @@ type Pool struct {
 	// the rest of the town; after it the waiter competes for a shared slot
 	// as before. Values <= 0 mean DefaultMaxGateYield.
 	MaxGateYield time.Duration
+	// MaxFullSuites caps how many full-suite-class holders (IsFullSuiteRole)
+	// may run at once anywhere in the pool. A whole-tree test run is the
+	// heaviest thing a seat starts, and several at once starve the landing
+	// gate (gt-dhcmp: whole-suite runs from several seats at once pushed one
+	// landing's gate to 5m02s against a 26-39s norm). A full-suite start at
+	// the cap waits for a running one instead of competing for a free slot;
+	// ordinary package-scoped suites are unaffected. Values <= 0 mean no cap.
+	//
+	// The cap never applies to a gate-class role, and a gate never counts
+	// against it: the gate is the merge path's critical section and holds
+	// priority (see Pool.ReservedForGate).
+	MaxFullSuites int
 }
 
 // DefaultMaxGateYield is Pool.MaxGateYield's default: longer than a slow gate
@@ -92,7 +104,28 @@ var gateRoleSuffixes = []string{"/landing", "/post-land"}
 // IsGateRole reports whether role belongs to the gate class that may use
 // reserved slots and that non-gate acquisitions yield to.
 func IsGateRole(role string) bool {
-	for _, suffix := range gateRoleSuffixes {
+	return hasRoleSuffix(role, gateRoleSuffixes)
+}
+
+// fullSuiteRoleSuffixes identify the full-suite class: roles whose work is a
+// whole-tree test run. The daemon's tier sweep ("<rig>/tier-sweep") and the
+// flake sweep ("<rig>/flake-sweep") are the named ones; "/full-suite" is the
+// suffix any other caller appends when the command it wraps is a whole-tree
+// run (`gt slot run --role <rig>/<who>/full-suite -- make test`), which is how
+// a crew or operator session puts its own suite under the cap.
+var fullSuiteRoleSuffixes = []string{"/full-suite", "/tier-sweep", "/flake-sweep"}
+
+// IsFullSuiteRole reports whether role belongs to the full-suite class: a
+// whole-tree test run, which the pool caps at Pool.MaxFullSuites concurrent
+// holders townwide. It is deliberately disjoint from IsGateRole — the landing
+// gate runs the whole tree too, but it must never wait on this cap.
+func IsFullSuiteRole(role string) bool {
+	return hasRoleSuffix(role, fullSuiteRoleSuffixes)
+}
+
+// hasRoleSuffix reports whether any of suffixes is a suffix of role.
+func hasRoleSuffix(role string, suffixes []string) bool {
+	for _, suffix := range suffixes {
 		if strings.HasSuffix(role, suffix) {
 			return true
 		}
@@ -173,12 +206,10 @@ func discoverSlots(townRoot string) []int {
 	return idx
 }
 
-// othersHeld reports how many slots other than exclude are currently held,
-// by non-blocking flock probes on every known slot. Used by AcquirePool to
-// decide whether running gate containers are somebody's legitimate suite
-// (some other slot is held) or an unwrapped one (no slot held at all,
-// gt-tuiy). A probe that fails to open counts as not held.
-func othersHeld(townRoot string, pool Pool, exclude int) int {
+// knownSlotIndices returns every slot index pool defines plus every extra slot
+// that exists on disk, so a reader sees slots a larger pool or a newer binary
+// created (discoverSlots) as well as its own.
+func knownSlotIndices(townRoot string, pool Pool) []int {
 	seen := map[int]bool{}
 	var idx []int
 	for i := 0; i < pool.normalized().Slots; i++ {
@@ -190,8 +221,45 @@ func othersHeld(townRoot string, pool Pool, exclude int) int {
 			idx = append(idx, i)
 		}
 	}
+	return idx
+}
+
+// writeSlotOwner publishes slot i's holder metadata the moment the flock is
+// taken, before the acquisition does anything that can take time. The file is
+// decoration for the held/free question — the flock is the truth — but two
+// readers judge a hold by it, runningGate and liveFullSuiteHolders, and each
+// would otherwise see the claimant as absent for as long as it sits in the
+// `docker ps` cross-check (bounded by dockerPSTimeout). A write that fails is
+// deliberately not fatal: the flock is still held, and the cost of a missing
+// file is a full-suite cap that under-counts this holder (gt-dhcmp). It is also
+// nearly unreachable — the file lands in the same directory as the lock file
+// Acquire just created, so a directory an owner file cannot be written to is one
+// the flock would have failed on first.
+func writeSlotOwner(townRoot string, i int, role string, pid int, at time.Time) {
+	_ = atomicfile.EnsureDirAndWriteJSON(SlotOwnerPath(townRoot, i), Owner{
+		Role:       role,
+		PID:        pid,
+		AcquiredAt: at,
+		Slot:       i,
+	})
+}
+
+// dropSlotClaim withdraws a claim writeSlotOwner published and releases the
+// slot: a claimant that walks away from a slot must not leave an owner file
+// behind for the gate or the full-suite cap to read as a live hold.
+func dropSlotClaim(townRoot string, i int, unlock func()) {
+	_ = os.Remove(SlotOwnerPath(townRoot, i))
+	unlock()
+}
+
+// othersHeld reports how many slots other than exclude are currently held,
+// by non-blocking flock probes on every known slot. Used by AcquirePool to
+// decide whether running gate containers are somebody's legitimate suite
+// (some other slot is held) or an unwrapped one (no slot held at all,
+// gt-tuiy). A probe that fails to open counts as not held.
+func othersHeld(townRoot string, pool Pool, exclude int) int {
 	held := 0
-	for _, i := range idx {
+	for _, i := range knownSlotIndices(townRoot, pool) {
 		if i == exclude {
 			continue
 		}
@@ -368,14 +436,10 @@ func (g *Gate) acquirePool(townRoot, role string, timeout time.Duration, pool Po
 			acquiredAt: g.clock.Now(),
 			WaitedFor:  info.Waited,
 		}
-		_ = atomicfile.EnsureDirAndWriteJSON(SlotOwnerPath(townRoot, i), Owner{
-			Role:       role,
-			PID:        g.pid,
-			AcquiredAt: g.clock.Now(),
-			Slot:       i,
-		})
 		// Both acquire paths arm the marker for their own descendants; only
-		// the fast path differs between them (see AcquirePoolReal).
+		// the fast path differs between them (see AcquirePoolReal). The owner
+		// file was written when the slot was claimed (writeSlotOwner), so this
+		// package's readers saw this holder for the whole docker probe.
 		armReentrant(g.env, townRoot, i, role, g.pid)
 		if err := recordWaitResult(townRoot, role, i, g.pid, g.clock.Now(), info); err != nil {
 			fmt.Fprintf(g.probeOut, "gt slot: recording slot acquisition in history: %v\n", err)
@@ -390,6 +454,16 @@ func (g *Gate) acquirePool(townRoot, role string, timeout time.Duration, pool Po
 	// this call's total time spent yielding, bounded by MaxGateYield so no
 	// gate — hung, leaked or merely followed by another — starves it.
 	yieldApplies := pool.YieldToGate && pool.ReservedForGate > 0 && !IsGateRole(role) && !g.underGateHold(townRoot)
+
+	// The full-suite cap (Pool.MaxFullSuites, gt-dhcmp): once that many
+	// full-suite-class holders are live, a new one cedes rather than starting
+	// another whole-tree run beside them. Unlike the gate yield it is not bounded
+	// by MaxGateYield — a full-suite run is bounded work, and the caller's own
+	// timeout is the backstop — and it never applies to a gate-class role.
+	// Work nested under a full-suite hold of its own is exempt (see
+	// underFullSuiteHold): capping it would stall that hold on itself.
+	fullSuiteApplies := pool.MaxFullSuites > 0 && IsFullSuiteRole(role) && !g.underFullSuiteHold(townRoot)
+
 	var yielded time.Duration
 	yieldCapLogged := false
 
@@ -404,9 +478,18 @@ func (g *Gate) acquirePool(townRoot, role string, timeout time.Duration, pool Po
 				passReason = WaitReasonGateRunning
 			}
 		}
+		if passReason == "" && fullSuiteApplies {
+			if holders := g.liveFullSuiteHolders(townRoot, pool); len(holders) >= pool.MaxFullSuites {
+				watch.noteFullSuiteHolder(holders[0])
+				passReason = WaitReasonFullSuiteHeld
+			}
+		}
 		for _, i := range candidates {
-			if passReason == WaitReasonGateRunning {
-				// Yielding: this pass takes no slot at all.
+			// The two reasons set before the loop are decisions not to compete
+			// for a slot this pass at all. Reasons a pass sets while walking
+			// the candidates (a held token, an unwrapped suite) are not, so
+			// the walk keeps going to the next candidate.
+			if passReason == WaitReasonGateRunning || passReason == WaitReasonFullSuiteHeld {
 				break
 			}
 			unlock, ok, err := lock.FlockTryAcquire(SlotLockPath(townRoot, i))
@@ -423,6 +506,11 @@ func (g *Gate) acquirePool(townRoot, role string, timeout time.Duration, pool Po
 				}
 				continue
 			}
+			// We hold slot i — publish the claim before the docker probe
+			// below can park this acquisition for up to dockerPSTimeout, so
+			// the gate and the full-suite cap see this holder throughout
+			// (writeSlotOwner).
+			writeSlotOwner(townRoot, i, role, g.pid, g.clock.Now())
 			// We hold slot i. If somebody else holds another slot, any
 			// running gate containers are taken to be theirs and the
 			// docker probe is skipped. Residual gap, accepted for pool
@@ -447,7 +535,7 @@ func (g *Gate) acquirePool(townRoot, role string, timeout time.Duration, pool Po
 				if passReason == "" {
 					passReason = WaitReasonDaemonUnreachable
 				}
-				unlock()
+				dropSlotClaim(townRoot, i, unlock)
 			case containerErr != nil:
 				fmt.Fprintf(g.probeOut, "gt slot: docker daemon unreachable (%v); proceeding on flock alone\n", containerErr)
 				return grant(i, unlock), nil
@@ -478,7 +566,7 @@ func (g *Gate) acquirePool(townRoot, role string, timeout time.Duration, pool Po
 				if passReason == "" {
 					passReason = WaitReasonUnwrappedContainers
 				}
-				unlock()
+				dropSlotClaim(townRoot, i, unlock)
 			}
 			break
 		}
@@ -534,8 +622,24 @@ func timeoutError(timeout time.Duration, info waitInfo) error {
 // names. A marker outlives its hold in every process spawned while the hold
 // was active (gt-off9), so the marker alone is not enough.
 func (g *Gate) underGateHold(townRoot string) bool {
+	return g.underHoldOfClass(townRoot, IsGateRole)
+}
+
+// underFullSuiteHold is underGateHold for the full-suite class: this process
+// runs under a live full-suite hold of its own. The cap is skipped for such a
+// caller, because the holder the cap would make it wait for is the very
+// ancestor it runs inside — a wait that could only end when that ancestor's
+// own suite finishes, i.e. never (the gt-tuiy deadlock class, gt-off9's
+// reentrancy contract).
+func (g *Gate) underFullSuiteHold(townRoot string) bool {
+	return g.underHoldOfClass(townRoot, IsFullSuiteRole)
+}
+
+// underHoldOfClass reports whether this process inherited a marker for a live
+// ancestor hold whose role is in the class match selects.
+func (g *Gate) underHoldOfClass(townRoot string, match func(string) bool) bool {
 	m, ok := g.reentrantHolder(townRoot)
-	if !ok || !m.validAncestor(townRoot, g.pid) || !IsGateRole(m.role) {
+	if !ok || !m.validAncestor(townRoot, g.pid) || !match(m.role) {
 		return false
 	}
 	i, _ := slotIndexFromLockPath(townRoot, m.lockPath)
@@ -577,6 +681,42 @@ func (g *Gate) runningGate(townRoot string, pool Pool) (*Owner, bool) {
 		return owner, true
 	}
 	return nil, false
+}
+
+// liveFullSuiteHolders returns the owners of every live full-suite-class holder
+// in pool. AcquirePool's full-suite cap compares the count against
+// Pool.MaxFullSuites to decide whether a new one may start.
+//
+// It reads the owner files and checks the owner's pid, exactly as runningGate
+// does and for the same reasons: a probe would take the lock for an instant,
+// and a full-suite holder acquiring in that window would fall through; the
+// owner file is written right after the flock is taken and removed right
+// before it is released, so a live pid in it is a live hold, while a holder
+// that died without releasing leaves a pid that is gone.
+//
+// Every known slot is read, not just the pool's: a full-suite holder may hold
+// any slot it was allowed to take, including one a larger earlier pool left on
+// disk (knownSlotIndices).
+//
+// Residual gap, accepted for the same reason AcquirePool accepts its own: a
+// holder between its flock and its owner-file write (writeSlotOwner, called
+// with no work in between) is invisible here, so two full-suite starts landing
+// in that instant can both win the cap. The window is one syscall and one small
+// file write — not the docker probe, which the claim is published ahead of —
+// and its cost is one extra whole-tree run, not starvation: this is a load
+// bound, not a mutual-exclusion contract, and every later start sees the extra
+// holder. The alternative, a second lock file to make the cap exact, is the
+// separate lock the bead this cap implements rules out.
+func (g *Gate) liveFullSuiteHolders(townRoot string, pool Pool) []*Owner {
+	var holders []*Owner
+	for _, i := range knownSlotIndices(townRoot, pool) {
+		owner := readSlotOwner(townRoot, i)
+		if owner == nil || !IsFullSuiteRole(owner.Role) || owner.PID <= 0 || g.ownerGone(owner) {
+			continue
+		}
+		holders = append(holders, owner)
+	}
+	return holders
 }
 
 // ownerGone reports whether owner names a process that certainly no longer

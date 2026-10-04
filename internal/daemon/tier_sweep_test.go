@@ -294,7 +294,9 @@ func TestRunTierSweep_FilesOneBeadPerFailingUnitAndClosesOnGreen(t *testing.T) {
 // TestTierSweepSlotRoleIsNotGateClass pins the reentrancy contract: the
 // sweep's role is not gate-class, so it takes a shared slot and the script's
 // own `gt slot run` calls inherit that role and ride the one hold instead of
-// competing for a slot each.
+// competing for a slot each. It is full-suite class, so the sweep's whole-tree
+// run counts against the pool's full-suite cap and a second one waits for it
+// rather than piling onto the host (gt-dhcmp, acceptance 3).
 func TestTierSweepSlotRoleIsNotGateClass(t *testing.T) {
 	t.Parallel()
 	stages, _ := tierSweepStages("gastown", atHour(time.Now(), 16))
@@ -307,6 +309,9 @@ func TestTierSweepSlotRoleIsNotGateClass(t *testing.T) {
 	}
 	if slot.IsGateRole(last.role) {
 		t.Errorf("role %q is gate-class; the sweep must not take a gate-reserved slot", last.role)
+	}
+	if !slot.IsFullSuiteRole(last.role) {
+		t.Errorf("role %q is not full-suite class; the sweep's whole-tree run would not take the cap", last.role)
 	}
 }
 

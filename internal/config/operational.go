@@ -65,6 +65,7 @@ const (
 	DefaultContainerGateReservedForGate = 0
 	DefaultContainerGateYieldToGate     = true
 	DefaultContainerGateMaxGateYield    = 30 * time.Minute
+	DefaultContainerGateMaxFullSuites   = 1
 )
 
 // Dolt defaults.
@@ -139,6 +140,16 @@ func (g *ContainerGateThresholds) MaxGateYieldD() time.Duration {
 		}
 	}
 	return DefaultContainerGateMaxGateYield
+}
+
+// MaxFullSuitesV returns the configured or default cap on concurrent
+// full-suite-class holders. An explicit 0 (or a negative value) disables the
+// cap; leaving the key unset means the default of one whole-tree run at a time.
+func (g *ContainerGateThresholds) MaxFullSuitesV() int {
+	if g != nil && g.MaxFullSuites != nil {
+		return *g.MaxFullSuites
+	}
+	return DefaultContainerGateMaxFullSuites
 }
 
 // GetDoltConfig returns the Dolt thresholds, never nil.

@@ -76,3 +76,16 @@ func TestSlotHistoryReason_GateRunning(t *testing.T) {
 		t.Fatalf("slotHistoryReason without a holder = %q", got)
 	}
 }
+
+// TestSlotHistoryReason_FullSuiteHeld: a history entry for a wait behind the
+// whole-tree cap names the run it ceded to (gt-dhcmp).
+func TestSlotHistoryReason_FullSuiteHeld(t *testing.T) {
+	t.Parallel()
+	e := slot.HistoryEntry{Reason: slot.WaitReasonFullSuiteHeld, HolderRole: "gastown/tier-sweep", HolderPID: 4242}
+	if got := slotHistoryReason(e); got != "full_suite_held: gastown/tier-sweep (pid 4242)" {
+		t.Fatalf("slotHistoryReason = %q", got)
+	}
+	if got := slotHistoryReason(slot.HistoryEntry{Reason: slot.WaitReasonFullSuiteHeld}); got != "full_suite_held" {
+		t.Fatalf("slotHistoryReason without a holder = %q", got)
+	}
+}

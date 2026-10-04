@@ -12,8 +12,20 @@
 # new temp dir). The concurrency is the load gt-22hdp.19 measures
 # parallelism with.
 #
-# The sweep stays off `gt slot run`: it takes no container slot, runs no
-# GT_TEST_DOCKER=1 copy, and so may run beside a landing gate (gt-22hdp.63).
+# Run it as one whole-tree holder of the town's container-gate slot, so a
+# sweep and another whole-tree run cannot pile onto the host together
+# (gt-dhcmp):
+#
+#   gt slot run --role <rig>/flake-sweep -- bash scripts/flake-sweep.sh [ITER] [CONC]
+#
+# The role's /flake-sweep suffix is what puts the sweep in the full-suite
+# class, which the pool caps at one holder townwide; a second whole-tree start
+# waits for it and reports the wait in 'gt slot status'. The concurrent copies
+# INSIDE one sweep are the load this script exists to measure, so they are
+# untouched by that cap. The sweep still starts no container and runs no
+# GT_TEST_DOCKER=1 copy: the token it takes serializes whole-tree CPU load, not
+# Docker, and a landing gate (never capped, never counted against the cap)
+# still runs beside it.
 #
 # A run's exit code is what makes it failed; the logs are read only to name the
 # tests, never to decide the verdict. Exit 1 when any run failed, 0 when none,

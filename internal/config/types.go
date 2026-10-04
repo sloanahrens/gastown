@@ -269,6 +269,13 @@ type ContainerGateThresholds struct {
 	// gates in total, so a hung gate or back-to-back gates cannot starve it
 	// (default "30m").
 	MaxGateYield string `json:"max_gate_yield,omitempty"`
+	// MaxFullSuites caps how many full-suite-class holders may run at once
+	// townwide (default 1: one whole-tree test run at a time). A full-suite
+	// holder is one whose slot role names a whole-tree run (see
+	// slot.IsFullSuiteRole); a new one waits for the running one rather than
+	// piling a second whole-tree run onto the host. Gate-class holders are
+	// never capped and never wait on it. Set to 0 to disable the cap.
+	MaxFullSuites *int `json:"max_full_suites,omitempty"`
 }
 
 // SessionThresholds configures session management timeouts.

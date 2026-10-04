@@ -316,24 +316,31 @@ func TestYield_StatusShowsGateRunning(t *testing.T) {
 }
 
 // TestPoolFromConfig: the town's operational.container_gate block maps onto a
-// Pool, and an unset block yields to the gate by default.
+// Pool, and an unset block yields to the gate and caps whole-tree runs at one
+// by default.
 func TestPoolFromConfig(t *testing.T) {
 	t.Parallel()
-	slots, reserved, off := 4, 2, false
+	slots, reserved, off, uncapped := 4, 2, false, 0
 
 	got := PoolFromConfig(&config.ContainerGateThresholds{Slots: &slots, ReservedForGate: &reserved})
-	want := Pool{Slots: 4, ReservedForGate: 2, YieldToGate: true, MaxGateYield: config.DefaultContainerGateMaxGateYield}
+	want := Pool{Slots: 4, ReservedForGate: 2, YieldToGate: true, MaxGateYield: config.DefaultContainerGateMaxGateYield, MaxFullSuites: config.DefaultContainerGateMaxFullSuites}
 	if got != want {
 		t.Fatalf("PoolFromConfig(defaults) = %+v, want %+v", got, want)
 	}
 
 	got = PoolFromConfig(&config.ContainerGateThresholds{Slots: &slots, ReservedForGate: &reserved, YieldToGate: &off, MaxGateYield: "5m"})
-	want = Pool{Slots: 4, ReservedForGate: 2, YieldToGate: false, MaxGateYield: 5 * time.Minute}
+	want = Pool{Slots: 4, ReservedForGate: 2, YieldToGate: false, MaxGateYield: 5 * time.Minute, MaxFullSuites: config.DefaultContainerGateMaxFullSuites}
 	if got != want {
 		t.Fatalf("PoolFromConfig(overrides) = %+v, want %+v", got, want)
 	}
 
-	if got := PoolFromConfig(nil); got != (Pool{Slots: 1, YieldToGate: true, MaxGateYield: config.DefaultContainerGateMaxGateYield}) {
+	got = PoolFromConfig(&config.ContainerGateThresholds{Slots: &slots, ReservedForGate: &reserved, MaxFullSuites: &uncapped})
+	want = Pool{Slots: 4, ReservedForGate: 2, YieldToGate: true, MaxGateYield: config.DefaultContainerGateMaxGateYield, MaxFullSuites: 0}
+	if got != want {
+		t.Fatalf("PoolFromConfig(max_full_suites:0) = %+v, want no cap", got)
+	}
+
+	if got := PoolFromConfig(nil); got != (Pool{Slots: 1, YieldToGate: true, MaxGateYield: config.DefaultContainerGateMaxGateYield, MaxFullSuites: config.DefaultContainerGateMaxFullSuites}) {
 		t.Fatalf("PoolFromConfig(nil) = %+v, want the single-slot default", got)
 	}
 }
