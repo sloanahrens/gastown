@@ -238,6 +238,11 @@ type idlePolecatReuse interface {
 // past git's own check, which builds the two-worktrees-one-ref state the refusal
 // detected (gt-0kk2). With opts.Name set, only that polecat is considered and
 // any refusal stops the sling (gt-2w4f9).
+//
+// An unnamed sling of a rework bead prefers the polecat that built the branch
+// the bead came back on, resuming that branch (gt-lid6d). That preference,
+// unlike opts.Name, never stops the sling: a seat that cannot take it is
+// logged and the pool chooses as usual.
 func reuseIdlePolecatForSling(
 	polecatMgr idlePolecatReuse,
 	t *tmux.Tmux,
@@ -262,6 +267,9 @@ type idleReuseEnv struct {
 	defaultBranch     func() string
 	logSpawn          func(rigName, polecatName string)
 	step              func(name string)
+	// reworkSeat names the polecat a rework bead goes back to and the branch
+	// its rejected attempt is on, or ok=false for any other bead (gt-lid6d).
+	reworkSeat func(beadID string) (*reworkSeat, bool)
 }
 
 func realIdleReuseEnv(t *tmux.Tmux, r *rig.Rig, townRoot, rigName string, step func(name string)) idleReuseEnv {
@@ -275,7 +283,8 @@ func realIdleReuseEnv(t *tmux.Tmux, r *rig.Rig, townRoot, rigName string, step f
 		logSpawn: func(rigName, polecatName string) {
 			_ = events.LogFeed(events.TypeSpawn, events.ActorGt, events.SpawnPayload(rigName, polecatName))
 		},
-		step: step,
+		step:       step,
+		reworkSeat: func(beadID string) (*reworkSeat, bool) { return reworkSeatFor(townRoot, beadID) },
 	}
 }
 
@@ -308,6 +317,12 @@ func reuseIdlePolecatForSlingWith(
 ) (*SpawnedPolecatInfo, error) {
 	polecatName := opts.Name
 	heldIssue := "" // work the named polecat already holds, for the refusal hint
+	resumeBranch := opts.ResumeBranch
+	// allowRecovery is set for the rework preference below: the seat is being
+	// resumed on the branch its rejected attempt is already on, so the reuse
+	// gate's NEEDS_RECOVERY verdict for that attempt's commits is not a reason
+	// to refuse (gt-lid6d).
+	allowRecovery := false
 	if polecatName != "" {
 		// A named sling reuses that polecat or nothing (gt-2w4f9). An absent
 		// one returns (nil, nil) only under --create, so the caller creates
@@ -319,6 +334,21 @@ func reuseIdlePolecatForSlingWith(
 		heldIssue = named.Issue
 		fmt.Printf("Reusing named polecat: %s\n", polecatName)
 	} else {
+		// A rework goes back to the polecat that built its branch. The
+		// preference is soft: an unavailable seat says why and the pool picks,
+		// exactly as a non-rework sling does.
+		if seat, ok := reworkPreference(env, opts); ok {
+			if why := reworkSeatUnavailable(polecatMgr, seat, opts.HookBead); why != "" {
+				fmt.Printf("  Rework %s: %s; letting the pool choose\n", opts.HookBead, why)
+			} else {
+				polecatName = seat.PolecatName
+				resumeBranch = seat.Branch
+				allowRecovery = true
+				fmt.Printf("Rework %s: back to %s on %s\n", opts.HookBead, polecatName, resumeBranch)
+			}
+		}
+	}
+	if polecatName == "" {
 		idlePolecat, findErr := polecatMgr.FindIdlePolecat()
 		if findErr != nil || idlePolecat == nil {
 			return nil, nil
@@ -331,7 +361,7 @@ func reuseIdlePolecatForSlingWith(
 	// when the user (or scheduler) wants to resume an existing PR branch, we
 	// must not start from main or an integration branch.
 	baseBranch := opts.BaseBranch
-	if opts.ResumeBranch == "" {
+	if resumeBranch == "" {
 		if baseBranch == "" && opts.HookBead != "" {
 			if detected := env.integrationBranch(opts.HookBead); detected != "" {
 				baseBranch = "origin/" + detected
@@ -348,9 +378,10 @@ func reuseIdlePolecatForSlingWith(
 	// other failure allocates a fresh polecat rather than repairing this worktree
 	// destructively.
 	addOpts := polecat.AddOptions{
-		HookBead:     opts.HookBead,
-		BaseBranch:   baseBranch,
-		ResumeBranch: opts.ResumeBranch,
+		HookBead:      opts.HookBead,
+		BaseBranch:    baseBranch,
+		ResumeBranch:  resumeBranch,
+		AllowRecovery: allowRecovery,
 	}
 	if _, err := polecatMgr.ReuseIdlePolecat(polecatName, addOpts); err != nil {
 		if opts.Name != "" {
@@ -358,10 +389,13 @@ func reuseIdlePolecatForSlingWith(
 		}
 		// Only a resume can end up on a branch someone already holds: a fresh
 		// sling names a new branch, so its fallback cannot collide (gt-0kk2).
-		if errors.Is(err, polecat.ErrBranchHeld) && opts.ResumeBranch != "" {
+		if errors.Is(err, polecat.ErrBranchHeld) && resumeBranch != "" {
 			return nil, fmt.Errorf("cannot reuse idle polecat %s: %w", polecatName, err)
 		}
-		if errors.Is(err, polecat.ErrPolecatNeedsRecovery) {
+		if allowRecovery {
+			fmt.Printf("  Rework %s: could not resume %s on %s (%v); letting the pool choose\n",
+				opts.HookBead, polecatName, resumeBranch, err)
+		} else if errors.Is(err, polecat.ErrPolecatNeedsRecovery) {
 			fmt.Printf("  Idle polecat %s needs recovery before reuse: %v; allocating new...\n", polecatName, err)
 		} else {
 			fmt.Printf("  Branch-only reuse failed for idle polecat %s: %v; allocating new...\n", polecatName, err)
@@ -393,13 +427,59 @@ func reuseIdlePolecatForSlingWith(
 		BaseBranch:  resolveSpawnBaseBranch(baseBranch, env.defaultBranch()),
 		Branch:      polecatObj.Branch,
 		// A reused sandbox predates this sling: rollback keeps it. Its new
-		// branch stays checked out there, so rollback leaves that too.
+		// branch stays checked out there, so rollback leaves that too. A
+		// rework's branch predates the sling too (it is the rejected
+		// attempt), so resumeBranch — not opts.ResumeBranch — is what says
+		// whether this sling created the branch.
 		FreshSpawn:    false,
-		BranchCreated: opts.ResumeBranch == "",
+		BranchCreated: resumeBranch == "",
 		HookBead:      opts.HookBead,
 		account:       opts.Account,
 		agent:         opts.Agent,
 	}, nil
+}
+
+// reworkPreference is the seat an unnamed sling of a rework bead should try
+// first (gt-lid6d): the polecat its latest submission names, and the branch
+// that submission is on. No preference is taken for a named sling — it names
+// its own seat — nor for a sling that already names a branch to resume, nor
+// for a bead that is not rework or names no polecat.
+func reworkPreference(env idleReuseEnv, opts SlingSpawnOptions) (*reworkSeat, bool) {
+	if opts.Name != "" || opts.ResumeBranch != "" || opts.HookBead == "" || env.reworkSeat == nil {
+		return nil, false
+	}
+	return env.reworkSeat(opts.HookBead)
+}
+
+// reworkSeatUnavailable explains why the polecat a rework came back from
+// cannot take the sling, or "" when it can. Only a seat that is standing on
+// the branch being resumed, is not working and holds no hook for another bead
+// qualifies: a rework must never displace work that is in flight. The bead
+// being slung is not another bead — it is that seat's own rejected work — so
+// a seat still hooked to it may take the sling, which is how the reuse gate
+// sees it too. The branch test is what tells this seat from one another sling
+// has already started on, which has no hook to read yet (reworkResumeAllowed
+// re-checks all three under the reuse lock).
+func reworkSeatUnavailable(polecatMgr idlePolecatReuse, seat *reworkSeat, hookBead string) string {
+	p, err := polecatMgr.Get(seat.PolecatName)
+	switch {
+	case errors.Is(err, polecat.ErrPolecatNotFound):
+		return "polecat " + seat.PolecatName + " no longer exists"
+	case err != nil:
+		return fmt.Sprintf("could not read polecat %s: %v", seat.PolecatName, err)
+	case p == nil:
+		return "polecat " + seat.PolecatName + " could not be read"
+	}
+	if p.Branch != seat.Branch {
+		return fmt.Sprintf("polecat %s is not on %s", seat.PolecatName, seat.Branch)
+	}
+	if p.State == polecat.StateWorking {
+		return "polecat " + seat.PolecatName + " is working"
+	}
+	if p.Issue != "" && p.Issue != hookBead {
+		return fmt.Sprintf("polecat %s holds %s", seat.PolecatName, p.Issue)
+	}
+	return ""
 }
 
 // namedPolecatExistsForSling returns the polecat a named sling targets, or

@@ -699,6 +699,13 @@ type AddOptions struct {
 	// updating the existing PR. Mutually exclusive with BaseBranch (resume implies its
 	// own start point). When empty, normal fresh-branch behavior is used.
 	ResumeBranch string
+	// AllowRecovery reuses a seat the workstate gate reads as NEEDS_RECOVERY,
+	// for a dispatch that resumes the very branch that work is on (gt-lid6d):
+	// a rejected bead goes back to the polecat that built it, and the commits
+	// the gate refuses on are that attempt, not new work. Only a seat that is
+	// not working and holds no hook for another bead qualifies, and a parked
+	// seat is still refused. The zero value keeps the gate's verdict.
+	AllowRecovery bool
 }
 
 // Add creates a new polecat as a git worktree from the repo base.
@@ -2082,7 +2089,13 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 		}
 	}
 	if decision := m.reuseDecisionForPolecat(name, current.State); !decision.Reusable {
-		return nil, fmt.Errorf("%w: %s", ErrPolecatNeedsRecovery, decision.Reason)
+		if !reworkResumeAllowed(opts, current) {
+			return nil, fmt.Errorf("%w: %s", ErrPolecatNeedsRecovery, decision.Reason)
+		}
+		// The gate refused on work that is this dispatch's own starting
+		// point; say so once, since the seat's recorded state still reads
+		// NEEDS_RECOVERY to every other reader.
+		style.PrintWarning("reusing %s for a rework resume on %s despite %s", name, opts.ResumeBranch, decision.Reason)
 	}
 
 	// Get worktree path (must already exist for reuse)
@@ -2881,6 +2894,44 @@ func (m *Manager) ReuseDecisionForPolecat(name string, state State) SlotReuseDec
 // used by reuse, recovery, list, witness, and scheduler capacity projections.
 func (m *Manager) WorkstateDispositionForPolecat(name string, state State, issue string) WorkstateDisposition {
 	return DecideWorkstate(m.workstateInputForPolecat(name, state, issue))
+}
+
+// reworkResumeAllowed reports whether a reuse the workstate gate refused may
+// still be taken, because the dispatch resumes the branch the seat's rejected
+// work is already on (gt-lid6d, AddOptions.AllowRecovery).
+//
+// The gate's verdict is not wrong for this case, only beside the point: it
+// reads the seat's unmerged commits and its still-set hook as work in
+// flight, and for a rework both are the attempt being handed back. What the
+// exemption must not do is displace work that is genuinely in flight, so it
+// is fenced by three facts the gate would otherwise have supplied:
+//
+//   - the seat must be standing on exactly the branch being resumed. This is
+//     the strongest of the three and the one that closes a race the other two
+//     cannot: a concurrent sling that has reused this seat but not yet hooked
+//     its bead leaves it with no Issue to see, and its own branch is already
+//     checked out, so only the branch tells the two dispatches apart;
+//   - the seat must not be working;
+//   - its hook must be free or the bead being slung. A parked seat never
+//     reaches here — ReuseIdlePolecat refuses parks before the gate.
+//
+// current.Branch is the live worktree HEAD, read under the same per-polecat
+// lock as the reuse itself, so all three are re-checked against a seat no
+// other reuse can be inside.
+func reworkResumeAllowed(opts AddOptions, current *Polecat) bool {
+	if !opts.AllowRecovery || opts.ResumeBranch == "" {
+		return false
+	}
+	if current.Branch != opts.ResumeBranch {
+		return false
+	}
+	if current.State == StateWorking {
+		return false
+	}
+	if current.Issue != "" && current.Issue != opts.HookBead {
+		return false
+	}
+	return true
 }
 
 func (m *Manager) reuseDecisionForPolecat(name string, state State) SlotReuseDecision {
