@@ -204,6 +204,9 @@ func TestIntegrationLandingWorkerLandsFromTheRigBareRepo(t *testing.T) {
 	if rep.Landed != 1 {
 		t.Fatalf("pass: %s", rep)
 	}
+	if out := lwGit(t, root, "ls-remote", "--heads", origin, "refs/heads/polecat/"); out != "" {
+		t.Fatalf("origin still holds a landed bead's polecat branches: %s", out)
+	}
 	mainTip := lwGit(t, origin, "rev-parse", "refs/heads/main")
 	if lwGit(t, origin, "rev-parse", mainTip+"^2") != tip {
 		t.Fatalf("origin/main %s does not merge the branch tip %s", mainTip, tip)

@@ -866,6 +866,8 @@ type landingRemoteGit interface {
 	FetchRefspecWithTimeout(remote, refspec string, timeout time.Duration) error
 	RefExists(ref string) (bool, error)
 	IsAncestor(ancestor, descendant string) (bool, error)
+	ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error)
+	DeleteRemoteBranchIfAt(remote, branch, expectedHash string) error
 }
 
 var _ landingRemoteGit = (*git.Git)(nil)
@@ -892,6 +894,22 @@ func (r gitRemote) Contains(target, commit string) (bool, error) {
 		return false, err
 	}
 	return r.g.IsAncestor(commit, r.remote+"/"+target)
+}
+
+func (r gitRemote) ListRemoteRefs(prefix string) ([]landworker.RemoteRef, error) {
+	refs, err := r.g.ListRemoteRefsWithHashes(r.remote, prefix)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]landworker.RemoteRef, 0, len(refs))
+	for _, ref := range refs {
+		out = append(out, landworker.RemoteRef{Name: ref.Name, Hash: ref.Hash})
+	}
+	return out, nil
+}
+
+func (r gitRemote) DeleteRemoteBranchIfAt(branch, expectedHash string) error {
+	return r.g.DeleteRemoteBranchIfAt(r.remote, branch, expectedHash)
 }
 
 // landingLogWriter forwards Land's progress lines to the daemon log.
