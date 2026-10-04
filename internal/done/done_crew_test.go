@@ -1,12 +1,15 @@
 package done
 
 import (
+	"errors"
 	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/nudge"
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 // crewSubmittedRE is the landing worker's submission-comment pattern
@@ -166,6 +169,184 @@ func TestDoneIsCrewRun(t *testing.T) {
 		getenv := func(k string) string { return tc.env[k] }
 		if got := IsCrewRun(getenv, tc.cwd); got != tc.want {
 			t.Errorf("IsCrewRun(%v, %q) = %v, want %v", tc.env, tc.cwd, got, tc.want)
+		}
+	}
+}
+
+// standDownRecorder is what the crew stand-down seams saw: the live polecat
+// sessions and the nudges enqueued for them.
+type standDownRecorder struct {
+	sessions map[string]bool
+	nudges   []struct {
+		townRoot string
+		session  string
+		nudge    nudge.QueuedNudge
+	}
+	nudgeErr error
+}
+
+// installStandDown wires a crew harness to the real assignee parser over a
+// one-rig registry, the recorder's live-session set, and a captured nudge
+// seam. The prefix matches the harness's gastown rig.
+func installStandDown(h *submitHarness, sessions map[string]bool, nudgeErr error) *standDownRecorder {
+	reg := session.NewPrefixRegistry()
+	reg.Register("gt", "gastown")
+	rec := &standDownRecorder{sessions: sessions, nudgeErr: nudgeErr}
+	h.r.deps.polecatSeat = func(assignee string) (string, bool) {
+		return polecatAssigneeSeat(assignee, reg)
+	}
+	h.r.deps.sessionAlive = func(name string) bool { return rec.sessions[name] }
+	h.r.deps.enqueueNudge = func(townRoot, sessionName string, n nudge.QueuedNudge) error {
+		rec.nudges = append(rec.nudges, struct {
+			townRoot string
+			session  string
+			nudge    nudge.QueuedNudge
+		}{townRoot, sessionName, n})
+		return rec.nudgeErr
+	}
+	return rec
+}
+
+// setCrewAssignee assigns the source bead to a seat.
+func setCrewAssignee(t *testing.T, h *submitHarness, assignee string) {
+	t.Helper()
+	if err := h.bd.Update("bd-source", beads.UpdateOptions{Assignee: &assignee}); err != nil {
+		t.Fatalf("assigning bd-source to %q: %v", assignee, err)
+	}
+}
+
+// TestCrewSubmitStandsDownPolecatHolder: a crew submission of a bead a live
+// polecat still holds nudges that seat once, names the crew branch and head,
+// says not to submit, and tells it to defer. One takeover comment records it.
+func TestCrewSubmitStandsDownPolecatHolder(t *testing.T) {
+	t.Parallel()
+	h := newCrewSubmitHarness(t)
+	setCrewAssignee(t, h, "gastown/polecats/agate")
+	rec := installStandDown(h, map[string]bool{"gt-agate": true}, nil)
+
+	if err := submitCrewForLanding(h.r); err != nil {
+		t.Fatalf("crew submit: %v", err)
+	}
+	if len(rec.nudges) != 1 {
+		t.Fatalf("nudges = %+v, want exactly one", rec.nudges)
+	}
+	got := rec.nudges[0]
+	if got.session != "gt-agate" || got.townRoot != h.townRoot {
+		t.Errorf("nudged session %q in town %q, want gt-agate in %q", got.session, got.townRoot, h.townRoot)
+	}
+	if got.nudge.Sender != h.r.sender || got.nudge.Priority != nudge.PriorityNormal {
+		t.Errorf("nudge from %q priority %q, want %q/normal", got.nudge.Sender, got.nudge.Priority, h.r.sender)
+	}
+	for _, want := range []string{crewTestBranch, crewTestHead[:7], "gt done --status DEFERRED", "COMPLETED"} {
+		if !strings.Contains(got.nudge.Message, want) {
+			t.Errorf("nudge %q lacks %q", got.nudge.Message, want)
+		}
+	}
+	comments, err := h.bd.Comments("bd-source")
+	if err != nil {
+		t.Fatalf("comments: %v", err)
+	}
+	if len(comments) != 2 {
+		t.Fatalf("comments = %d, want a submission and a takeover comment", len(comments))
+	}
+	takeover := comments[1].Text
+	for _, want := range []string{"gastown/polecats/agate", crewTestBranch, crewTestHead} {
+		if !strings.Contains(takeover, want) {
+			t.Errorf("takeover comment %q lacks %q", takeover, want)
+		}
+	}
+	if !beads.HasLabel(h.source(t), land.LabelReadyToLand) {
+		t.Error("stand-down left the bead unmarked")
+	}
+}
+
+// TestCrewSubmitStandDownSkips: an empty, submitter, crew or sessionless
+// assignee gets no nudge and no takeover comment, and the submission still
+// marks the bead ready.
+func TestCrewSubmitStandDownSkips(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		assignee string
+		sender   string
+		sessions map[string]bool
+	}{
+		{"empty assignee", "", "Sloan Ahrens", map[string]bool{}},
+		{"submitter as assignee", "gastown/polecats/agate", "gastown/polecats/agate", map[string]bool{"gt-agate": true}},
+		{"non-polecat assignee", "gastown/crew/sloan", "Sloan Ahrens", map[string]bool{}},
+		{"polecat with no session", "gastown/polecats/agate", "Sloan Ahrens", map[string]bool{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newCrewSubmitHarness(t)
+			h.r.sender = tc.sender
+			if tc.assignee != "" {
+				setCrewAssignee(t, h, tc.assignee)
+			}
+			rec := installStandDown(h, tc.sessions, nil)
+			if err := submitCrewForLanding(h.r); err != nil {
+				t.Fatalf("crew submit: %v", err)
+			}
+			if len(rec.nudges) != 0 {
+				t.Errorf("nudges = %+v, want none", rec.nudges)
+			}
+			comments, err := h.bd.Comments("bd-source")
+			if err != nil {
+				t.Fatalf("comments: %v", err)
+			}
+			if len(comments) != 1 {
+				t.Errorf("comments = %d, want only the submission comment", len(comments))
+			}
+			if !beads.HasLabel(h.source(t), land.LabelReadyToLand) {
+				t.Error("skipped stand-down left the bead unmarked")
+			}
+		})
+	}
+}
+
+// TestCrewSubmitStandDownNudgeFailureStillSubmits: a nudge that errors is
+// logged, not fatal; the bead still lands and the takeover is still recorded.
+func TestCrewSubmitStandDownNudgeFailureStillSubmits(t *testing.T) {
+	t.Parallel()
+	h := newCrewSubmitHarness(t)
+	setCrewAssignee(t, h, "gastown/polecats/agate")
+	rec := installStandDown(h, map[string]bool{"gt-agate": true}, errors.New("queue full"))
+
+	if err := submitCrewForLanding(h.r); err != nil {
+		t.Fatalf("crew submit with a failing nudge: %v", err)
+	}
+	if len(rec.nudges) != 1 {
+		t.Errorf("nudge attempts = %d, want one", len(rec.nudges))
+	}
+	if !beads.HasLabel(h.source(t), land.LabelReadyToLand) {
+		t.Error("failing nudge left the bead unmarked")
+	}
+}
+
+// TestPolecatAssigneeSeat: only an explicit <rig>/polecats/<name> assignee
+// names a polecat session; the rig's prefix comes from the registry.
+func TestPolecatAssigneeSeat(t *testing.T) {
+	t.Parallel()
+	reg := session.NewPrefixRegistry()
+	reg.Register("gt", "gastown")
+	for assignee, want := range map[string]string{
+		"gastown/polecats/agate": "gt-agate",
+		"gastown/polecats/":      "",
+		"gastown/agate":          "",
+		"gastown/crew/sloan":     "",
+		"gastown/witness":        "",
+		"":                       "",
+	} {
+		got, ok := polecatAssigneeSeat(assignee, reg)
+		if want == "" {
+			if ok {
+				t.Errorf("polecatAssigneeSeat(%q) = %q, true; want no seat", assignee, got)
+			}
+			continue
+		}
+		if !ok || got != want {
+			t.Errorf("polecatAssigneeSeat(%q) = %q, %v; want %q, true", assignee, got, ok, want)
 		}
 	}
 }
