@@ -134,7 +134,7 @@ func (t *Templates) RenderSteward(d StewardData) (string, error) {
 
 // RoleNames returns the list of available role templates.
 func (t *Templates) RoleNames() []string {
-	return []string{"mayor", "polecat", "crew"}
+	return []string{"polecat", "crew"}
 }
 
 // PolecatLifecycleMarker is a unique string present in the polecat CLAUDE.md

@@ -46,7 +46,7 @@ verified not to exit on that signal.
 {{cmd}} escalate -s CRITICAL "Dolt: server unreachable"  # Total outage
 ```
 
-The Mayor receives all escalations. Critical ones also notify the Overseer.
+Every escalation is a bead. The higher severities also notify the Overseer.
 
 ### If you see test pollution
 
@@ -95,6 +95,6 @@ bd forget my-slug                      # Remove a memory
 body: the stored attribution names only you, even though the content reads as
 joint (gt-04h).
 
-### War room
-Active incidents tracked in `mayor/DOLT-WAR-ROOM.md`. Full escalation protocol
-in `gastown/mayor/rig/docs/design/escalation.md`.
+### Escalation
+Active incidents are tracked in beads. Before escalating by hand, read the full
+protocol in `gastown/mayor/rig/docs/design/escalation.md`.

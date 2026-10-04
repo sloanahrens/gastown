@@ -88,7 +88,7 @@ Parse the assignee field to extract rig and polecat name:
 gt session status <rig>/<name> --json | jq -r '.running' | grep -q true && echo ALIVE || echo DEAD
 ```
 
-If the assignee is NOT a polecat (e.g., crew, mayor), use:
+If the assignee is NOT a polecat (e.g., crew), use:
 ```bash
 gt session status <rig>/<role> --json | jq -r '.running' | grep -q true && echo ALIVE || echo DEAD
 ```
@@ -236,10 +236,11 @@ gt bead reset <issue> --reason="Recovery: work exists on branch <branch>"
 
 **4. ESCALATE orphans:**
 ```bash
-gt mail send mayor/ -s "Orphan requires escalation: <issue>" \
-  -m "Issue <id> orphaned with possible data loss.
+gt escalate "Orphan requires escalation: <issue>" -s high --stdin <<'BODY'
+Issue <id> orphaned with possible data loss.
 Details: ...
-Recommended action: ..."
+Recommended action: ...
+BODY
 ```
 
 **5. BURN orphans:**
@@ -282,10 +283,10 @@ Create summary report of orphan scan and actions.
 {{/each}}
 ```
 
-**2. Send to Mayor (if escalations):**
+**2. Report escalations (if any):**
 ```bash
 # Only if there were escalations
-gt mail send mayor/ -s "Orphan scan: {{escalate_count}} escalations" --stdin <<'BODY'
+gt escalate "Orphan scan: {{escalate_count}} escalations" -s medium --stdin <<'BODY'
 {{escalations_section}}
 BODY
 ```
@@ -326,7 +327,7 @@ description = "Number of orphans escalated (computed during execution)"
 default = ""
 
 [vars.escalations_section]
-description = "Formatted escalations section for Mayor report (computed during execution)"
+description = "Formatted escalations section for the escalation report (computed during execution)"
 default = ""
 
 [vars.id]

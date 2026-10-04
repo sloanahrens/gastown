@@ -121,11 +121,11 @@ bd show <issue-id>
 
 **3. If triggering dispatch:**
 ```bash
-# For high priority, suggest to Mayor:
-gt mail send mayor/ -s "High-priority work unblocked: <issue>" -m "..."
+# For high priority, sling it to a polecat in the rig that owns the issue:
+gt sling <issue> <rig>
 ```
 
-**Exit criteria:** Dispatch recommendations sent where appropriate."""
+**Exit criteria:** High-priority unblocked work slung where it warrants it."""
 
 [[steps]]
 id = "return-to-kennel"

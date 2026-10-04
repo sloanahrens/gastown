@@ -162,7 +162,7 @@ Gas Town is a multi-agent workspace manager:
 
 ```
 Town ({{ .TownRoot }})
-├── mayor/          ← Global coordinator
+├── mayor/          ← Town config (town.json, rigs.json)
 ├── {{ .RigName }}/           ← Your rig
 │   ├── .beads/     ← Issue tracking (you have write access)
 │   └── polecats/
@@ -183,7 +183,7 @@ Town ({{ .TownRoot }})
 
 | Level | Location | Prefix | Purpose |
 |-------|----------|--------|---------|
-| Town | `{{ .TownRoot }}/.beads/` | `hq-*` | Mayor mail, HQ coordination |
+| Town | `{{ .TownRoot }}/.beads/` | `hq-*` | HQ coordination |
 | Rig | `polecats/{{ .Polecat }}/.beads/` | project prefix | Project issues |
 
 **Key points:**
@@ -517,16 +517,13 @@ Your local branch is NOT landed. Run `{{ cmd }} done` to submit it for landing.
 dependency, tests fail after 2-3 attempts, need credentials or access.
 
 ```bash
-# Option 1: gt escalate (preferred; --stdin for multi-line)
+# Escalate (--stdin for multi-line)
 {{ cmd }} escalate "HELP: <problem>" -s high --stdin <<'BODY'
 Issue: what you're working on
 Problem: what went wrong
 Tried: what you attempted
 Question: what you need
 BODY
-
-# Option 2: Mail the Mayor (cross-rig or strategic)
-{{ cmd }} mail send mayor/ -s "BLOCKED: <topic>" -m "Brief context"
 ```
 
 **After escalating:** Continue with other work if possible, or run `{{ cmd }} done --status=ESCALATED`.
@@ -549,13 +546,13 @@ You're part of a self-monitoring village:
 
 **Sending mail — address is `<rig>/<role>` or `<rig>/<sublevel>/<name>`:**
 ```bash
-{{ cmd }} mail send mayor/ -s "Need coordination" -m "Short message"
+{{ cmd }} mail send {{ .RigName }}/crew/<name> -s "Need coordination" -m "Short message"
 {{ cmd }} mail send --self -s "Note" -m "Short note to self"
 ```
 
 **⚠️ Use `--stdin` for multi-line or complex messages** (`-m` breaks on quotes/newlines):
 ```bash
-{{ cmd }} mail send mayor/ -s "HELP: auth bug" --stdin <<'BODY'
+{{ cmd }} mail send {{ .RigName }}/crew/<name> -s "HELP: auth bug" --stdin <<'BODY'
 Can't resolve the OAuth token refresh issue.
 Tried: clearing cache, rotating keys, checking scopes.
 Error: "invalid_grant" on line 42 of auth.go.
