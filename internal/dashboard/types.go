@@ -270,12 +270,17 @@ type TierSweepStage struct {
 	Failed  []string `json:"failed,omitempty"`
 }
 
-// TierSweepRun is a sweep in flight: the stage executing now and how long it
-// has been at it.
+// TierSweepRun is a sweep in flight: the stages the cycle runs and how long it
+// has been at them. Tiers is the cycle's whole stage list, off the daemon's
+// "sweep started" line, and is empty on the fallback reading of a log from a
+// daemon that logs no start (gt-rntre); there Tier names the one stage still to
+// run. Since is the cycle's start on the first reading, the stage's on the
+// fallback.
 type TierSweepRun struct {
 	Rig        string    `json:"rig"`
 	Tier       string    `json:"tier"`
-	Since      time.Time `json:"since"` // when this stage started
+	Tiers      []string  `json:"tiers,omitempty"`
+	Since      time.Time `json:"since"`
 	ElapsedSec int64     `json:"elapsed_sec"`
 }
 
