@@ -16,7 +16,7 @@ type TownStatus struct {
 	Daemon   *ServiceInfo   `json:"daemon,omitempty"`   // Daemon status
 	Dolt     *DoltInfo      `json:"dolt,omitempty"`     // Dolt server status
 	Tmux     *TmuxInfo      `json:"tmux,omitempty"`     // Tmux server status
-	Agents   []AgentRuntime `json:"agents"`             // Global agents (the Mayor)
+	Agents   []AgentRuntime `json:"agents"`             // Town-level agents; empty, none are registered
 	Rigs     []RigStatus    `json:"rigs"`
 	Summary  StatusSum      `json:"summary"`
 	Slot     *SlotInfo      `json:"container_slot,omitempty"` // Container-suite gate slot (gt-bcsq)
@@ -103,7 +103,7 @@ type DNDInfo struct {
 
 // AgentRuntime represents the runtime state of an agent.
 type AgentRuntime struct {
-	Name              string `json:"name"`                         // Display name (e.g., "mayor", "nux")
+	Name              string `json:"name"`                         // Display name (e.g., "furiosa", "nux")
 	Address           string `json:"address"`                      // Full address (e.g., "greenplace/nux")
 	Session           string `json:"session"`                      // tmux session name
 	Role              string `json:"role"`                         // Role type

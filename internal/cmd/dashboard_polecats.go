@@ -72,7 +72,7 @@ func (l *dashLandings) get() []omRecord {
 
 // dashLabelsShown are the labels worth a badge: the ones that say a bead is
 // waiting on someone or somewhere, not the bookkeeping ones.
-var dashLabelsShown = map[string]bool{"needs-human": true, "needs-mayor-review": true, "deferred": true, "failed": true}
+var dashLabelsShown = map[string]bool{"needs-human": true, "deferred": true, "failed": true}
 
 func dashBadgeLabels(labels []string) []string {
 	var out []string

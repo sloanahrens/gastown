@@ -177,9 +177,9 @@ func TestAgentBeadNotFoundMessageWithoutClosedMatches(t *testing.T) {
 
 func TestAgentBeadNotFoundMessageWithoutRig(t *testing.T) {
 	t.Parallel()
-	got := agentBeadNotFoundMessage("mayor", "", nil)
+	got := agentBeadNotFoundMessage("refinery", "", nil)
 
-	if got != `no agent bead found for role "mayor"` {
+	if got != `no agent bead found for role "refinery"` {
 		t.Fatalf("message = %q, want no rig clause", got)
 	}
 }

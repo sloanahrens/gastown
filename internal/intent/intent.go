@@ -60,9 +60,8 @@ const (
 	DesiredSubmitted Desired = "submitted"
 )
 
-// Seat names one agent seat. Rig is empty for town-level seats (mayor,
-// deacon, dogs); Name is empty for singletons (witness, refinery, mayor,
-// deacon).
+// Seat names one agent seat. Rig is empty for town-level seats (deacon,
+// dogs); Name is empty for singletons (witness, refinery, deacon).
 type Seat struct {
 	Rig  string
 	Role string

@@ -175,7 +175,7 @@ func Gather(opts Options) (TownStatus, error) {
 	if !skipBeadsPrefetch {
 		var beadsWg sync.WaitGroup
 
-		// Fetch town-level agent beads (the Mayor) from town beads
+		// Fetch town-level agent beads from town beads
 		townBeadsPath := beads.GetTownBeadsPath(townRoot)
 		beadsWg.Add(1)
 		go func() {
@@ -264,7 +264,7 @@ func Gather(opts Options) (TownStatus, error) {
 		}
 	}
 
-	// Build status - parallel fetch global agents and rigs
+	// Build status - fetch every rig in parallel
 	var dnd *DNDInfo
 	if opts.DNDProbe != nil {
 		dnd = opts.DNDProbe(townRoot)
@@ -274,7 +274,10 @@ func Gather(opts Options) (TownStatus, error) {
 		Location: townRoot,
 		Overseer: overseerInfo,
 		DND:      dnd,
-		Rigs:     make([]RigStatus, len(rigs)),
+		// Town-level agents: none are registered, so the list is empty. It is
+		// initialized (rather than left nil) so the JSON field stays an array.
+		Agents: []AgentRuntime{},
+		Rigs:   make([]RigStatus, len(rigs)),
 	}
 	status.HealthLines, _, status.Health = HealthView(townRoot, time.Now())
 
@@ -355,13 +358,6 @@ func Gather(opts Options) (TownStatus, error) {
 
 	var wg sync.WaitGroup
 
-	// Fetch global agents in parallel with rig discovery
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		status.Agents = discoverGlobalAgents(townRoot, allSessions, allAgentBeads, allHookBeads, mailRouter, fast)
-	}()
-
 	// Process all rigs in parallel
 	rigActiveHooks := make([]int, len(rigs)) // Track hooks per rig for thread safety
 	for i, r := range rigs {
@@ -426,12 +422,6 @@ func Gather(opts Options) (TownStatus, error) {
 	wg.Wait()
 
 	// Enrich agents with runtime info — inspect actual running processes
-	for i := range status.Agents {
-		a := &status.Agents[i]
-		alias, info := resolveAgentDisplay(townSettings, a.Role, a.Session, a.Running)
-		a.AgentAlias = alias
-		a.AgentInfo = info
-	}
 	for i := range status.Rigs {
 		for j := range status.Rigs[i].Agents {
 			a := &status.Rigs[i].Agents[j]

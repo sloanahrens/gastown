@@ -358,30 +358,8 @@ func outputStatusText(w io.Writer, status townstatus.TownStatus) error {
 
 	// Role icons - uses centralized emojis from constants package
 	roleIcons := map[string]string{
-		constants.RoleMayor:   constants.EmojiMayor,
 		constants.RoleCrew:    constants.EmojiCrew,
 		constants.RolePolecat: constants.EmojiPolecat,
-		// Legacy names for backwards compatibility
-		"coordinator": constants.EmojiMayor,
-	}
-
-	// Global Agents (the Mayor)
-	for _, agent := range status.Agents {
-		icon := roleIcons[agent.Role]
-		if icon == "" {
-			icon = roleIcons[agent.Name]
-		}
-		if statusVerbose {
-			fmt.Fprintf(w, "%s %s\n", icon, style.Bold.Render(capitalizeFirst(agent.Name)))
-			renderAgentDetails(w, agent, "   ", nil, status.Location)
-			fmt.Fprintln(w)
-		} else {
-			// Compact: icon + name on one line
-			renderAgentCompact(w, agent, icon+" ", nil, status.Location)
-		}
-	}
-	if !statusVerbose && len(status.Agents) > 0 {
-		fmt.Fprintln(w)
 	}
 
 	if len(status.Rigs) == 0 {
@@ -499,10 +477,10 @@ func renderAgentDetails(w io.Writer, agent townstatus.AgentRuntime, indent strin
 	agentBeadID := "gt-" + agent.Name
 	if agent.Address != "" && agent.Address != agent.Name {
 		// Use address for full path agents like gastown/crew/joe → gt-gastown-crew-joe
-		addr := strings.TrimSuffix(agent.Address, "/") // Remove trailing slash for global agents
+		addr := strings.TrimSuffix(agent.Address, "/") // Remove trailing slash for town-level agents
 		parts := strings.Split(addr, "/")
 		if len(parts) == 1 {
-			// Global agent: mayor/ → hq-mayor
+			// Town-level agent: singletons like "deacon" → hq-deacon
 			agentBeadID = beads.AgentBeadIDWithPrefix(beads.TownBeadsPrefix, "", parts[0], "")
 		} else if len(parts) >= 2 {
 			rig := parts[0]
@@ -680,14 +658,6 @@ func truncateWithEllipsis(s string, maxLen int) string {
 		return s[:maxLen]
 	}
 	return s[:maxLen-3] + "..."
-}
-
-// capitalizeFirst capitalizes the first letter of a string
-func capitalizeFirst(s string) string {
-	if s == "" {
-		return s
-	}
-	return string(s[0]-32) + s[1:]
 }
 
 // detectCurrentDNDStatus returns DND status for the currently resolved role context.
