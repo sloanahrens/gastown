@@ -99,7 +99,7 @@ func healthTown(t *testing.T, now time.Time) (*Daemon, *labelBeads) {
 	town := t.TempDir()
 	writeJSONFile(t, filepath.Join(town, "mayor", "rigs.json"), map[string]any{"version": 1, "rigs": map[string]any{"gastown": map[string]any{}}})
 	writeJSONFile(t, StateFile(town), State{StartedAt: now.Add(-3 * time.Hour), LastHeartbeat: now.Add(-3 * time.Minute), HeartbeatCount: 12})
-	for _, p := range []string{"mayor_dispatch", "git_hygiene", "events_prune"} {
+	for _, p := range []string{"git_hygiene", "events_prune"} {
 		if err := savePatrolLastRun(town, p, now.Add(-50*time.Minute)); err != nil {
 			t.Fatal(err)
 		}
@@ -200,7 +200,6 @@ func TestWriteTownHealth_WritesTheReportFromTheTownsRecords(t *testing.T) {
 	}{
 		"dolt":                      {townhealth.Live, townhealth.Green, "p50 4ms"},
 		"daemon":                    {townhealth.Recorded, townhealth.Green, "heartbeat 3m ago"},
-		"tick:mayor_dispatch":       {townhealth.Recorded, townhealth.Green, "50m/30m"},
 		"landing/gastown":           {townhealth.Recorded, townhealth.Green, "1 pending, oldest 1m"},
 		"main/gastown":              {townhealth.Recorded, townhealth.Red, "red"},
 		"escalation":                {townhealth.Live, townhealth.Degraded, "oldest 1h"},

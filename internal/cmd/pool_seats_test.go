@@ -2,15 +2,12 @@ package cmd
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/intent"
@@ -18,108 +15,10 @@ import (
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
-func TestDispatchDecision_NudgesWhenSeatsAreFreeAndWorkExists(t *testing.T) {
-	t.Parallel()
-	// The acceptance case: seats free, and a single actionable ready bead.
-	seats := dispatchSeats{Source: "polecat_pool", Capacity: 4, Occupied: 0, Free: 4}
-	rigs := []dispatchRig{{Rig: "gastown", Ready: 1}}
-
-	nudge, msg := dispatchDecision(seats, rigs, 2)
-
-	if !nudge {
-		t.Fatalf("expected a nudge with free seats and 1 ready bead, got silence")
-	}
-	// The nudge's contract: free seats and per-rig counts, both named.
-	for _, want := range []string{"4 of 4", "gastown=1"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("nudge text does not name %q: %s", want, msg)
-		}
-	}
-}
-
-func TestDispatchDecision_SilentWhenNoSeatIsFree(t *testing.T) {
-	t.Parallel()
-	seats := dispatchSeats{Source: "polecat_pool", Capacity: 4, Occupied: 4, Free: 0}
-	rigs := []dispatchRig{{Rig: "gastown", Ready: 5}}
-
-	if nudge, msg := dispatchDecision(seats, rigs, 2); nudge {
-		t.Errorf("expected silence with every seat taken, got nudge: %s", msg)
-	}
-}
-
-func TestDispatchDecision_SilentWhenNoWorkIsReady(t *testing.T) {
-	t.Parallel()
-	seats := dispatchSeats{Source: "polecat_pool", Capacity: 4, Occupied: 3, Free: 1}
-	rigs := []dispatchRig{{Rig: "gastown", Ready: 0}, {Rig: "beads", Ready: 0}}
-
-	if nudge, msg := dispatchDecision(seats, rigs, 2); nudge {
-		t.Errorf("expected silence with no ready work, got nudge: %s", msg)
-	}
-}
-
-func TestDispatchDecision_SilentWhenNoSeatModelIsConfigured(t *testing.T) {
-	t.Parallel()
-	// A town with neither a pool nor scheduler.max_polecats has no answer to
-	// "is a seat free?", so the patrol has nothing to report.
-	seats := dispatchSeats{Source: "none"}
-	rigs := []dispatchRig{{Rig: "gastown", Ready: 5}}
-
-	if nudge, msg := dispatchDecision(seats, rigs, 2); nudge {
-		t.Errorf("expected silence with no seat model, got nudge: %s", msg)
-	}
-}
-
-func TestDispatchDecision_BackpressuredRigIsNamedButNotCounted(t *testing.T) {
-	t.Parallel()
-	seats := dispatchSeats{Source: "polecat_pool", Capacity: 4, Occupied: 2, Free: 2}
-	rigs := []dispatchRig{
-		{Rig: "om", Ready: 9, ReadyToLand: 15, LandingCeiling: 12, Backpressure: true},
-	}
-
-	// Only the held rig has work: silence, because the work could not land.
-	if nudge, msg := dispatchDecision(seats, rigs, 2); nudge {
-		t.Errorf("expected silence when every rig with work is over its ceiling, got: %s", msg)
-	}
-
-	// A second rig with work keeps the nudge, and the held rig is named with
-	// its MR depth so the mayor can tell "empty board" from "board held".
-	rigs = append(rigs, dispatchRig{Rig: "gastown", Ready: 4})
-	nudge, msg := dispatchDecision(seats, rigs, 2)
-	if !nudge {
-		t.Fatal("expected a nudge when a rig outside its ceiling has work")
-	}
-	if !strings.Contains(msg, "Held by landing-queue depth: om=15 waiting to land (ceiling 12)") {
-		t.Errorf("nudge does not say which rig is held and why: %s", msg)
-	}
-	if strings.Contains(msg, "om=9") {
-		t.Errorf("held rig's ready beads must not read as dispatchable work: %s", msg)
-	}
-}
-
-func TestDispatchDecision_NamesUrgentSubsetOnlyWhenNonZero(t *testing.T) {
-	t.Parallel()
-	seats := dispatchSeats{Source: "polecat_pool", Capacity: 4, Occupied: 0, Free: 4}
-
-	_, msg := dispatchDecision(seats, []dispatchRig{{Rig: "gastown", Ready: 200, Urgent: 0}}, 2)
-	if strings.Contains(msg, "P0/P1") {
-		t.Errorf("a rig with no P0/P1 should not carry an empty urgent clause: %s", msg)
-	}
-
-	_, msg = dispatchDecision(seats, []dispatchRig{{Rig: "gastown", Ready: 200, Urgent: 2}}, 2)
-	if !strings.Contains(msg, "gastown=200 (P0/P1 2)") {
-		t.Errorf("nudge should name the urgent subset when there is one: %s", msg)
-	}
-}
-
-func TestDispatchDecision_SkipsParkedRigs(t *testing.T) {
-	t.Parallel()
-	seats := dispatchSeats{Source: "polecat_pool", Capacity: 4, Occupied: 0, Free: 4}
-	rigs := []dispatchRig{{Rig: "mango", Ready: 7, Parked: true}}
-
-	if nudge, msg := dispatchDecision(seats, rigs, 2); nudge {
-		t.Errorf("expected silence: the only rig with work is parked, got: %s", msg)
-	}
-}
+// The dispatchable-ready-bead predicate and the pool seat picture outlive the
+// idle-seat dispatch check that introduced them (gt-rwp7z.3): the spec
+// dispatcher's roster and the pool's admission read the seat helpers, and the
+// ready board reads the predicate.
 
 func TestIsActionableReadyBead(t *testing.T) {
 	t.Parallel()
@@ -169,8 +68,8 @@ func TestIsActionableReadyBead(t *testing.T) {
 			false,
 		},
 		{
-			// The operator's own work is not dispatchable: nudge the mayor
-			// about it and the sling refuses (gt-21pl0).
+			// The operator's own work is not dispatchable: a sling of it
+			// refuses (gt-21pl0).
 			"operator-reserved bead",
 			&beads.Issue{ID: "gt-10", Title: "Hand-run audit", Priority: 1, Labels: []string{"operator"}},
 			false,
@@ -209,10 +108,10 @@ func TestIsActionableReadyBeadHonorsTheCeiling(t *testing.T) {
 }
 
 // TestIsActionableReadyBead_HoldsRedMainBeadWhileItsRevertIsInFlight is
-// gt-1fiv4: a bead the rig's red-main owner filed is not work to nudge the
-// mayor about while that owner is undoing the same breakage. The predicate is
-// specdispatch.RedMainHold's, so the patrol and the spec dispatcher hold the
-// same beads (gt-zkdwt).
+// gt-1fiv4: a bead the rig's red-main owner filed is not work to dispatch
+// while that owner is undoing the same breakage. The predicate is
+// specdispatch.RedMainHold's, so the dispatcher and the fold hold the same
+// beads (gt-zkdwt).
 func TestIsActionableReadyBead_HoldsRedMainBeadWhileItsRevertIsInFlight(t *testing.T) {
 	t.Parallel()
 	redMain := &beads.Issue{
@@ -240,7 +139,7 @@ func TestIsActionableReadyBead_HoldsRedMainBeadWhileItsRevertIsInFlight(t *testi
 
 // TestIsActionableReadyBead_AbsentRedMainStateCountsAsToday is the compat half
 // of gt-1fiv4: a rig with no red-main state file reads as no revert, so the
-// patrol counts its beads exactly as it did before the hold existed.
+// predicate counts its beads exactly as it did before the hold existed.
 func TestIsActionableReadyBead_AbsentRedMainStateCountsAsToday(t *testing.T) {
 	t.Parallel()
 	bead := &beads.Issue{
@@ -254,91 +153,6 @@ func TestIsActionableReadyBead_AbsentRedMainStateCountsAsToday(t *testing.T) {
 	}
 	if !isActionableReadyBead(bead, 2, rv) {
 		t.Error("a red-main bead is held by a rig whose red-main state file does not exist")
-	}
-}
-
-// The nudge names the ceiling the counts were taken at, so the mayor reads the
-// same number the check counted.
-func TestDispatchDecisionNamesTheCeiling(t *testing.T) {
-	t.Parallel()
-	seats := dispatchSeats{Source: "polecat_pool", Capacity: 1, Occupied: 0, Free: 1}
-	_, msg := dispatchDecision(seats, []dispatchRig{{Rig: "gastown", Ready: 2}}, 4)
-	if !strings.Contains(msg, "Actionable P0-P4 ready beads: gastown=2") {
-		t.Errorf("nudge does not name the ceiling: %s", msg)
-	}
-}
-
-// The ceiling comes from polecat_pool.max_priority in the town settings, and
-// defaults to P2 when the town sets nothing.
-func TestDispatchPriorityCeilingFromSettings(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, "settings"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	settings := `{"type":"town-settings","version":1,"polecat_pool":{"overflow_agent":"deepseek-flash","max_priority":4}}`
-	if err := os.WriteFile(config.TownSettingsPath(townRoot), []byte(settings), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	ceiling, err := dispatchPriorityCeiling(townRoot)
-	if err != nil || ceiling != 4 {
-		t.Fatalf("ceiling = %d, %v; want 4", ceiling, err)
-	}
-
-	townRoot = t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, "settings"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(config.TownSettingsPath(townRoot), []byte(`{"type":"town-settings","version":1}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if ceiling, err = dispatchPriorityCeiling(townRoot); err != nil || ceiling != config.DefaultSeatRefillMaxPriority {
-		t.Fatalf("default ceiling = %d, %v; want %d", ceiling, err, config.DefaultSeatRefillMaxPriority)
-	}
-}
-
-func TestPoolSeatPicture(t *testing.T) {
-	t.Parallel()
-	pool := &config.PolecatPool{OverflowAgent: "deepseek-flash", MaxOverflow: 3}
-	sessions := []poolSession{
-		{name: "gastown/flint", agent: "deepseek-flash"},
-		{name: "gastown/jade", agent: "deepseek-flash"},
-		{name: "beads/fury", agent: "claude-sonnet"},
-	}
-
-	seats := poolSeatPicture(pool, sessions)
-	if seats.Source != "polecat_pool" {
-		t.Errorf("source = %q, want polecat_pool", seats.Source)
-	}
-	if seats.Capacity != 3 || seats.Occupied != 2 || seats.Free != 1 || seats.Uncapped {
-		t.Errorf("seats = %+v, want capacity 3, occupied 2, free 1, capped", seats)
-	}
-
-	// No pool at all: the model has nothing to say, and says so with an empty
-	// source rather than a zero-seat town.
-	if got := poolSeatPicture(nil, sessions); got.Source != "" {
-		t.Errorf("nil pool should leave Source empty, got %+v", got)
-	}
-
-	// A pool with no overflow_agent has no seat to report.
-	if got := poolSeatPicture(&config.PolecatPool{MaxOverflow: 2}, sessions); got.Source != "" {
-		t.Errorf("pool without overflow_agent should leave Source empty, got %+v", got)
-	}
-}
-
-func TestPoolSeatPicture_UncappedSeatIsAtLeastOneFreeSeat(t *testing.T) {
-	t.Parallel()
-	// A seat with no cap is unbounded room: the pool never refuses a spawn,
-	// so a busy town must not read as a town with no seat free.
-	pool := &config.PolecatPool{OverflowAgent: "deepseek-flash"} // MaxOverflow 0 = uncapped
-	sessions := []poolSession{{name: "gastown/flint", agent: "deepseek-flash"}}
-
-	seats := poolSeatPicture(pool, sessions)
-	if !seats.Uncapped {
-		t.Fatalf("expected Uncapped for an unbounded seat, got %+v", seats)
-	}
-	if seats.Free < 1 {
-		t.Errorf("free = %d, want at least 1 while the seat is uncapped", seats.Free)
 	}
 }
 
@@ -452,10 +266,6 @@ func TestPoolSeatSessionsCountsEveryKindOfTakenSeat(t *testing.T) {
 			if n := poolSeatCount(pool, got); n != c.want {
 				t.Fatalf("seat count = %d, want %d (%+v)", n, c.want, got)
 			}
-			seats := poolSeatPicture(pool, got)
-			if seats.Occupied != c.want || seats.Free != 3-c.want {
-				t.Errorf("picture = %+v, want %d occupied and %d free", seats, c.want, 3-c.want)
-			}
 		})
 	}
 }
@@ -522,79 +332,6 @@ func TestPoolLandingSeatSkipsASeatThatIsGone(t *testing.T) {
 	}
 }
 
-// TestDispatchSeatPictureAndSpecRosterAgreeOnALandingSeat pins the acceptance
-// criterion that the picture `gt daemon dispatch-check` nudges from and the
-// roster the spec dispatcher spends seats from are one count of one pool: a
-// mid-landing seat occupies it in both, so the dispatcher does not sling a
-// second bead into a pool class that is still occupied (gt-thy6r).
-func TestDispatchSeatPictureAndSpecRosterAgreeOnALandingSeat(t *testing.T) {
-	t.Parallel()
-	pool := &config.PolecatPool{OverflowAgent: "deepseek-flash", MaxOverflow: 2}
-	ts := &config.TownSettings{RoleAgents: map[string]string{"polecat": "deepseek-flash"}}
-	town := t.TempDir()
-	writeLandingSeat(t, town, "gastown", "ruby", "gt-ruby")
-	lister := &fakeLister{sessions: map[string]map[string]string{
-		"gt-jade": {"GT_ROLE": "gastown/polecats/jade", "GT_AGENT": "deepseek-flash"},
-	}}
-
-	sessions, err := poolSeatSessionsWith(lister, town, nil, submittedWork("gt-ruby"), pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// The daemon's picture: one live polecat and one mid-landing seat fill the
-	// two seats, so the idle-seat check has nothing to nudge about.
-	seats := poolSeatPicture(pool, sessions)
-	if seats.Occupied != 2 || seats.Free != 0 {
-		t.Fatalf("dispatch picture = %+v, want both seats occupied", seats)
-	}
-
-	// The spec dispatcher's roster counts the same seats, and the seat choice
-	// it feeds spends nothing while one is landing.
-	roster := specRosterFrom(sessions, ts)
-	if got := roster.Live[pool.OverflowAgent]; got != seats.Occupied {
-		t.Fatalf("spec roster counts %d on %s; the dispatch picture counts %d", got, pool.OverflowAgent, seats.Occupied)
-	}
-	budget := specdispatch.Budget{Seats: []specdispatch.Seat{{Agent: pool.OverflowAgent, Cap: pool.MaxOverflow}}}
-	budget.SetLive(roster.Live)
-	if choice := specdispatch.ChooseSeat(budget, specdispatch.Spec{}); !choice.Skip {
-		t.Errorf("the dispatcher took a seat while one was mid-landing: %+v", choice)
-	}
-}
-
-// TestRigMergeQueueDepthReadsRigRootMergeQueue reproduces gt-xwt9:
-// rigLandingQueueDepth read max_ready_for_dispatch from rig-local settings/
-// config.json only via config.LoadRigSettings, so a rig-root-only ceiling
-// (gt-me9t's floor) was silently ignored and the dispatch patrol fell back
-// to the operator default. Routing through rig.ResolveMergeQueueConfig makes
-// the rig-root value visible with no rig-local settings/config.json present.
-func TestRigMergeQueueDepthReadsRigRootMergeQueue(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	rigName := "testrig"
-	rigPath := filepath.Join(townRoot, rigName)
-	if err := os.MkdirAll(rigPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	rigConfig := `{
-  "type": "rig",
-  "version": 1,
-  "name": "testrig",
-  "merge_queue": {"max_ready_for_dispatch": 3}
-}`
-	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(rigConfig), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	ready, ceiling := rigLandingQueueDepth(rigPath, rigName, &fakeDispatchMRLister{mrs: readyMRs(5)})
-	if ceiling != 3 {
-		t.Errorf("ceiling = %d, want 3 (rig-root merge_queue floor invisible to dispatch patrol)", ceiling)
-	}
-	if ready != 5 {
-		t.Errorf("ready = %d, want 5", ready)
-	}
-}
-
 // testServerMetadata names a database the way a tracked .beads/metadata.json
 // does in gastown's server mode.
 const testServerMetadata = `{"dolt_mode":"server","dolt_database":"beads_testrig"}`
@@ -603,83 +340,6 @@ func mkdirTestDir(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", path, err)
-	}
-}
-
-// TestReadyIssuesUnlimited_UninitializedRigHasNoReadyWork reproduces gt-ka00.
-//
-// The guard read beads.ResolveBeadsDir against "", which that function never
-// returns, so it never fired: an uninitialized rig reached the store open,
-// failed it, and dispatchRigPictures turned that into an error for the whole
-// dispatch picture, every rig included.
-//
-// The fixture is what an uninitialized rig actually looks like on disk. The
-// repo checkout supplies .beads/ (.beads/config.yaml and friends are tracked),
-// so the directory exists; what is missing is the database under it.
-func TestReadyIssuesUnlimited_UninitializedRigHasNoReadyWork(t *testing.T) {
-	t.Parallel()
-	rigPath := t.TempDir()
-	beadsDir := filepath.Join(rigPath, ".beads")
-	mkdirTestDir(t, beadsDir)
-	writeTestFile(t, filepath.Join(beadsDir, "config.yaml"), "status.custom: []\n")
-
-	issues, err := readyIssuesUnlimited(rigPath, readyBoardFor)
-	if err != nil {
-		t.Fatalf("uninitialized rig is no ready work, not a read failure: %v", err)
-	}
-	if len(issues) != 0 {
-		t.Errorf("issues = %d, want 0 from a rig with no database", len(issues))
-	}
-}
-
-// TestReadyIssuesUnlimited_ReturnsBoardPastBdDefaultLimit is the gt-59o9
-// regression test at the patrol's own seam. The board this check counts held
-// 373 ready beads on 2026-09-21; a count capped at bd's default of 100 is
-// exactly the under-report that left the mayor asleep with work to dispatch,
-// so the assertion is on the whole 373 rather than on anything smaller.
-//
-// It drives readyIssuesUnlimited through the board the patrol reads. That the
-// read is one machine-mode bd ready --limit 0 is pinned in internal/beads
-// (TestReadyAll_ReadsWholeBoardInMachineMode).
-func TestReadyIssuesUnlimited_ReturnsBoardPastBdDefaultLimit(t *testing.T) {
-	t.Parallel()
-	rigPath := t.TempDir()
-	beadsDir := filepath.Join(rigPath, ".beads")
-	mkdirTestDir(t, beadsDir)
-	writeTestFile(t, filepath.Join(beadsDir, "config.yaml"), "status.custom: []\n")
-	mkdirTestDir(t, filepath.Join(beadsDir, "dolt"))
-
-	db := beadsfake.New()
-	for i := 0; i < 373; i++ {
-		db.Seed(beads.Issue{ID: fmt.Sprintf("gt-board-%d", i), Title: fmt.Sprintf("ready bead %d", i), Status: "open", Priority: 2})
-	}
-	board := func(string) readyBoard { return db }
-
-	issues, err := readyIssuesUnlimited(rigPath, board)
-	if err != nil {
-		t.Fatalf("readyIssuesUnlimited: %v", err)
-	}
-	if len(issues) != 373 {
-		t.Fatalf("readyIssuesUnlimited returned %d issues, want the whole 373-bead board", len(issues))
-	}
-}
-
-// A redirect whose target was never created is the same empty rig by another
-// route: ResolveBeadsDir follows it out of the rig and lands somewhere with no
-// database. It must be absorbed for the same reason, not fail the check.
-func TestReadyIssuesUnlimited_DanglingRedirectHasNoReadyWork(t *testing.T) {
-	t.Parallel()
-	rigPath := t.TempDir()
-	beadsDir := filepath.Join(rigPath, ".beads")
-	mkdirTestDir(t, beadsDir)
-	writeTestFile(t, filepath.Join(beadsDir, "redirect"), "mayor/rig/.beads\n")
-
-	issues, err := readyIssuesUnlimited(rigPath, readyBoardFor)
-	if err != nil {
-		t.Fatalf("a redirect to a missing database is no ready work, not a read failure: %v", err)
-	}
-	if len(issues) != 0 {
-		t.Errorf("issues = %d, want 0 from a dangling redirect", len(issues))
 	}
 }
 

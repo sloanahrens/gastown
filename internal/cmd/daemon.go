@@ -164,7 +164,7 @@ When an agent crashes repeatedly, the daemon enters crash loop mode and
 stops restarting it. Use this command to reset the crash loop counter so
 the daemon will resume restarting the agent.
 
-The agent name is the session identity (e.g., "deacon", "mayor").
+The agent name is the session identity (e.g., "gastown/witness").
 
 Examples:
   gt daemon clear-backoff deacon   # Reset deacon crash loop`,

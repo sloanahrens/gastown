@@ -20,7 +20,7 @@ type DaemonPatrolConfig struct {
 	Heartbeat *PatrolConfig  `json:"heartbeat,omitempty"`
 	Patrols   *PatrolsConfig `json:"patrols,omitempty"`
 	// Env holds environment variables to set at startup.
-	// Propagated to all sessions spawned by the daemon and read by gt up/mayor attach.
+	// Propagated to all sessions spawned by the daemon and read by gt up.
 	// Example: {"GT_SEAT_REFILL_MAX_PRIORITY": "50"}
 	Env map[string]string `json:"env,omitempty"`
 }
@@ -32,9 +32,15 @@ type PatrolsConfig struct {
 	// daemon.json files, which the kernel decodes strictly, still load.
 	// Deprecated: remove "patrols.refinery" from mayor/daemon.json.
 	Refinery *PatrolConfig `json:"refinery,omitempty"`
-	// Mayor gates the daemon's ensure-mayor supervision: {"enabled": false} stops
-	// the daemon from restarting a missing Mayor session (default on).
-	Mayor                *PatrolConfig               `json:"mayor,omitempty"`
+	// Mayor and MayorDispatch are retired (gt-rwp7z.3): the role's supervision
+	// and the idle-seat patrol are gone and nothing reads these keys. They are
+	// declared, like the other retired keys below, so a daemon.json or
+	// settings/config.json that still carries them decodes under strict
+	// decoding and is kept verbatim through a rewrite. A retired patrol is
+	// simply absent from the schema's active fields, so it has no effect.
+	Mayor         json.RawMessage `json:"mayor,omitempty"`
+	MayorDispatch json.RawMessage `json:"mayor_dispatch,omitempty"`
+
 	Handler              *PatrolConfig               `json:"handler,omitempty"`
 	DoltServer           *DoltServerConfig           `json:"dolt_server,omitempty"`
 	JsonlGitBackup       *JsonlGitBackupConfig       `json:"jsonl_git_backup,omitempty"`
@@ -43,7 +49,6 @@ type PatrolsConfig struct {
 	CompactorDog         *CompactorDogConfig         `json:"compactor_dog,omitempty"`
 	CheckpointDog        *CheckpointDogConfig        `json:"checkpoint_dog,omitempty"`
 	ScheduledMaintenance *ScheduledMaintenanceConfig `json:"scheduled_maintenance,omitempty"`
-	MayorDispatch        *MayorDispatchConfig        `json:"mayor_dispatch,omitempty"`
 	SpecDispatch         *SpecDispatchConfig         `json:"spec_dispatch,omitempty"`
 	PatrolScan           *PatrolScanConfig           `json:"patrol_scan,omitempty"`
 	RestartTracker       *RestartTrackerConfig       `json:"restart_tracker,omitempty"`
@@ -236,7 +241,7 @@ type DoctorDogConfig struct {
 	Databases []string `json:"databases,omitempty"`
 
 	// Advisory thresholds — when exceeded, recommendations are added to the report.
-	// Agents (Mayor/Deacon) read the report and decide what actions to take.
+	// Operators read the report and decide what actions to take.
 	// Zero values mean "use default".
 
 	// LatencyAlertMs: latency threshold in ms. Default: 5000 (5s).
@@ -306,15 +311,6 @@ type ScheduledMaintenanceConfig struct {
 	Mode          string   `json:"mode,omitempty"`
 	GCMinBytes    *int64   `json:"gc_min_bytes,omitempty"`
 	GCGrowthRatio *float64 `json:"gc_growth_ratio,omitempty"`
-}
-
-// MayorDispatchConfig holds configuration for the mayor_dispatch patrol.
-type MayorDispatchConfig struct {
-	// Enabled controls whether the patrol runs.
-	Enabled bool `json:"enabled"`
-
-	// IntervalStr is how often to check, as a string (e.g., "30m").
-	IntervalStr string `json:"interval,omitempty"`
 }
 
 // EventsPruneConfig bounds the town's raw event log, .events.jsonl, which

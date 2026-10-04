@@ -33,8 +33,8 @@ type dogStep struct {
 }
 
 // dogCycle is the receipt of one daemon dog job cycle (doctor_dog,
-// wisp_reaper, jsonl_git_backup, compactor_dog, checkpoint_dog,
-// mayor_dispatch). The job records each step as it finishes, and close reports
+// wisp_reaper, jsonl_git_backup, compactor_dog, checkpoint_dog). The job
+// records each step as it finishes, and close reports
 // the cycle exactly once: a daemon log line for every cycle, plus a feed event
 // for a cycle with a failed step, so a failure reaches a reader who never sees
 // the daemon log (gt-i3rpw).

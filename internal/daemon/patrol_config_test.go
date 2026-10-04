@@ -8,8 +8,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/constants"
 )
 
 func TestLoadPatrolConfig(t *testing.T) {
@@ -21,13 +19,15 @@ func TestLoadPatrolConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Write test config
+	// Write test config. The mayor key is retired (gt-rwp7z.3): it stays in
+	// the file to pin that a stale daemon.json still loads.
 	configJSON := `{
 		"type": "daemon-patrol-config",
 		"version": 1,
 		"patrols": {
 			"mayor": {"enabled": false},
-			"witness": {"enabled": false}
+			"witness": {"enabled": false},
+			"handler": {"enabled": false}
 		}
 	}`
 	if err := os.WriteFile(filepath.Join(mayorDir, "daemon.json"), []byte(configJSON), 0644); err != nil {
@@ -41,11 +41,11 @@ func TestLoadPatrolConfig(t *testing.T) {
 	}
 
 	// Test enabled flags
-	if IsPatrolEnabled(config, "mayor") {
-		t.Error("expected mayor to be disabled")
+	if IsPatrolEnabled(config, "handler") {
+		t.Error("expected handler to be disabled by its own key")
 	}
-	if !IsPatrolEnabled(config, "handler") {
-		t.Error("expected handler to be enabled (default)")
+	if !IsPatrolEnabled(config, "spec_dispatch") {
+		t.Error("expected spec_dispatch to be enabled (default)")
 	}
 }
 
@@ -312,18 +312,31 @@ func TestShutdownBudget_HasNoRemotePushStep(t *testing.T) {
 	}
 }
 
-func TestIsPatrolActiveMayorKnob(t *testing.T) {
+// TestRetiredRolePatrolKeysAreInert pins the daemon half of the retired
+// patrol keys (gt-rwp7z.3): a daemon.json that still carries a patrols.mayor
+// or patrols.mayor_dispatch block decodes, and the block toggles nothing. The
+// config package's own test covers the strict decode; this covers the
+// behaviour a stale file gets from the running daemon.
+func TestRetiredRolePatrolKeysAreInert(t *testing.T) {
 	t.Parallel()
-	d := &Daemon{}
-	if !d.isPatrolActive(constants.RoleMayor) {
-		t.Fatal("mayor supervision must default to on with no config")
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{Mayor: &PatrolConfig{Enabled: false}}}
-	if d.isPatrolActive(constants.RoleMayor) {
-		t.Fatal("patrols.mayor.enabled=false must turn mayor supervision off")
+	body := `{"patrols":{"mayor":{"enabled":false},"mayor_dispatch":{"enabled":false,"interval":"5m"},` +
+		`"handler":{"enabled":false},"events_prune":{"enabled":true}}}`
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "daemon.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{Mayor: &PatrolConfig{Enabled: true}}}
-	if !d.isPatrolActive(constants.RoleMayor) {
-		t.Fatal("patrols.mayor.enabled=true must keep mayor supervision on")
+	cfg, err := ReadPatrolConfig(townRoot)
+	if err != nil {
+		t.Fatalf("stale daemon.json did not decode: %v", err)
+	}
+	d := &Daemon{patrolConfig: cfg}
+	if !d.isPatrolActive("events_prune") {
+		t.Error("a retired key turned a live patrol off")
+	}
+	if d.isPatrolActive("handler") {
+		t.Error("the handler key beside a retired one stopped applying")
 	}
 }

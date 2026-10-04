@@ -75,7 +75,6 @@ func TestDaemonGTExecSitesCarryTheDaemonIdentity(t *testing.T) {
 	// in process, so it contributes no gt call here.
 	d.dispatchQueuedWork()
 	_, _ = d.runSpecDispatchCommand()
-	_, _ = d.readDispatchCheck()
 	_ = d.restartPolecatSession(supervisor.SeatFor("gastown", constants.RolePolecat, "ruby"))
 	r := &execScheduledSlingRunner{townRoot: townRoot, bdPath: "bd", gtPath: "gt", execCmd: gt.run}
 	_ = r.sling(t.Context(), "gt-run1", docAuditEntry)
@@ -85,7 +84,7 @@ func TestDaemonGTExecSitesCarryTheDaemonIdentity(t *testing.T) {
 	// and the bd and tmux calls that engine makes inherit this process's
 	// environment — which PublishIdentity already gives the daemon's identity.
 	calls := gt.recorded()
-	want := []string{"spec dispatch", "daemon dispatch-check", "session restart", "sling gt-run1"}
+	want := []string{"spec dispatch", "session restart", "sling gt-run1"}
 	if len(calls) != len(want) {
 		t.Fatalf("recorded %d gt calls, want %d: %+v", len(calls), len(want), calls)
 	}

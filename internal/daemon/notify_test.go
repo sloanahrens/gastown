@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -70,31 +69,6 @@ func TestDoltServerManagerNotifierDefaultsToGtFromTheTownRoot(t *testing.T) {
 	}
 	if cli.Dir != "/town" || cli.Bin != "" {
 		t.Fatalf("CLI = %+v, want gt from PATH run from /town", cli)
-	}
-}
-
-func TestNudgeMayorGoesToTheMayor(t *testing.T) {
-	t.Parallel()
-	d, rec := daemonWithRecorder(t)
-	d.ctx = t.Context()
-
-	if err := d.nudgeMayor("2 free seats, 3 ready beads"); err != nil {
-		t.Fatal(err)
-	}
-	if got := rec.Nudges(); len(got) != 1 || got[0].Target != "mayor" || got[0].Message != "2 free seats, 3 ready beads" {
-		t.Fatalf("nudges = %+v", got)
-	}
-}
-
-func TestNudgeMayorReportsDeliveryFailure(t *testing.T) {
-	t.Parallel()
-	d, rec := daemonWithRecorder(t)
-	d.ctx = t.Context()
-	boom := errors.New("gt nudge: exit status 1 (Error: session not found)")
-	rec.Fail(notifyfake.KindNudge, boom)
-
-	if err := d.nudgeMayor("hello"); !errors.Is(err, boom) {
-		t.Fatalf("err = %v, want the delivery failure", err)
 	}
 }
 

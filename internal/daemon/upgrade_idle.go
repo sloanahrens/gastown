@@ -13,7 +13,7 @@ import (
 
 // isIdleForUpgrade reports whether restarting the daemon now would kill no
 // in-flight work: no script plugin, compactor, boot triage, scheduled
-// slings, mayor dispatch or patrol watchdog run, no steward scan, plan scan or
+// slings or patrol watchdog run, no steward scan, plan scan or
 // job, no landing-worker pass, no scheduled_maintenance gc cycle, and no
 // install holding install-gt.lock. The Dolt goroutines are not counted: they
 // are short or restartable. Post-landing runs and tier sweep cycles are not
@@ -40,7 +40,7 @@ func (d *Daemon) daemonWorkIdle() bool {
 	if compactor {
 		return false
 	}
-	if d.scheduledSlingsRunning.Load() || d.mayorDispatchRunning.Load() ||
+	if d.scheduledSlingsRunning.Load() ||
 		d.specDispatchRunning.Load() || d.patrolScanRunning.Load() ||
 		d.landingPasses.Load() > 0 || d.stewardRunning.Load() || d.stewardPlanScan.Load() {
 		return false
