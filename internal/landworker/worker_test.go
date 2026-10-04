@@ -180,6 +180,45 @@ func (h *harness) comments(t *testing.T, id string) []string {
 	return out
 }
 
+// TestPassLogsAShadowCIDissent: a shadow landing whose CI verdict is red is
+// the result the flip/no-flip call turns on, so the pass log names it as a
+// disagreement rather than leaving it to the landings file (slice 8).
+func TestPassLogsAShadowCIDissent(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	var logged []string
+	h.w.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	h.seedReady(t, "gt-abc")
+	h.lander.fn = func(int, land.Work) (land.Result, error) {
+		return land.Result{LandedCommit: "cccccccccc", PatchID: "pppppppppp", Gate: land.GateResult{Passed: true},
+			CI: &land.CandidateResult{State: land.CandidateFailed, Branch: "land/gt-abc", SHA: "cccccccccc",
+				Context: "ci / gate (push)", RunStatus: "failure"}}, nil
+	}
+
+	if rep := h.w.Pass(context.Background()); rep.Landed != 1 {
+		t.Fatalf("report %v; want the landing", rep)
+	}
+	if !slices.ContainsFunc(logged, func(line string) bool { return strings.Contains(line, "shadow CI DISAGREED") }) {
+		t.Fatalf("no shadow dissent in the pass log: %q", logged)
+	}
+}
+
+// TestLogShadowCIStaysQuietOnARigWithOneGate: the line is evidence for a rig
+// accumulating it, not noise on every landing of the town.
+func TestLogShadowCIStaysQuietOnARigWithOneGate(t *testing.T) {
+	t.Parallel()
+	var logged []string
+	w := &Worker{Rig: "gastown", Logf: func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }}
+	w.logShadowCI(land.Work{BeadID: "gt-abc"}, land.Result{LandedCommit: "c0ffee"})
+	if len(logged) != 0 {
+		t.Fatalf("logged %q for a landing with no candidate gate", logged)
+	}
+	w.logShadowCI(land.Work{BeadID: "gt-abc"}, land.Result{CI: &land.CandidateResult{State: land.CandidateSilent, SHA: "c0ffee"}})
+	if len(logged) != 1 || !strings.Contains(logged[0], "silent") {
+		t.Fatalf("logged %q; want one line naming the silent verdict", logged)
+	}
+}
+
 func TestPassLandsTheBranchTipNotThePinnedHead(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)

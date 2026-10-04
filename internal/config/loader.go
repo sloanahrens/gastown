@@ -333,6 +333,7 @@ func mergeForgejoConfig(base, override *ForgejoConfig) *ForgejoConfig {
 		out.RemoteURL = base.RemoteURL
 		out.GateWorkflow = base.GateWorkflow
 		out.MirrorTarget = base.MirrorTarget
+		out.ShadowMode = copyBool(base.ShadowMode)
 	}
 	if override != nil {
 		if override.RemoteURL != "" {
@@ -343,6 +344,9 @@ func mergeForgejoConfig(base, override *ForgejoConfig) *ForgejoConfig {
 		}
 		if override.MirrorTarget != "" {
 			out.MirrorTarget = override.MirrorTarget
+		}
+		if override.ShadowMode != nil {
+			out.ShadowMode = copyBool(override.ShadowMode)
 		}
 	}
 	// One fresh map whether the bots come from base, override, or both.
@@ -363,6 +367,16 @@ func mergeForgejoConfig(base, override *ForgejoConfig) *ForgejoConfig {
 		}
 	}
 	return out
+}
+
+// copyBool copies a tri-state flag, so the merged config owns its value
+// rather than aliasing a tier's.
+func copyBool(b *bool) *bool {
+	if b == nil {
+		return nil
+	}
+	v := *b
+	return &v
 }
 
 // StripRepoForgejo removes merge_queue.forgejo from the repo-committed tier

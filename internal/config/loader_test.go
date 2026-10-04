@@ -495,6 +495,28 @@ func TestMergeSettingsCommand_Forgejo(t *testing.T) {
 		}
 	})
 
+	t.Run("shadow_mode overrides the floor, including back to false", func(t *testing.T) {
+		t.Parallel()
+		on, off := true, false
+		floor := &MergeQueueConfig{Forgejo: &ForgejoConfig{
+			RemoteURL: "https://forgejo.example/floor/repo", ShadowMode: &on}}
+		// A tier that omits the flag carries the floor's value.
+		if !MergeSettingsCommand(floor, &MergeQueueConfig{TestCommand: "make test"}).Forgejo.IsShadowMode() {
+			t.Errorf("IsShadowMode() = false, want the floor's true to survive a tier that omits it")
+		}
+		override := &MergeQueueConfig{Forgejo: &ForgejoConfig{ShadowMode: &off}}
+		merged := MergeSettingsCommand(floor, override)
+		if merged.Forgejo.IsShadowMode() {
+			t.Errorf("IsShadowMode() = true, want the override's false to win over the floor's true")
+		}
+		// The merged block owns the value it took from the override rather than
+		// aliasing the tier's.
+		*merged.Forgejo.ShadowMode = true
+		if *override.Forgejo.ShadowMode {
+			t.Errorf("the merged ShadowMode aliases the override's")
+		}
+	})
+
 	t.Run("an overriding block gets a fresh bot map", func(t *testing.T) {
 		t.Parallel()
 		floor := &MergeQueueConfig{Forgejo: &ForgejoConfig{

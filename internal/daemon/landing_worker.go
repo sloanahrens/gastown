@@ -455,16 +455,20 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		ReviewErrorLandsLabels: []string{landworker.LabelRevert},
 	}
 	// A rig with a merge_queue.forgejo block lands through its Forgejo CI: the
-	// candidate gate replaces the local gate built above, which stays for
-	// shadow mode (slice 8), and the PR merger replaces the force-push that
-	// writes the target.
+	// candidate gate replaces the local gate built above, and the PR merger
+	// replaces the force-push that writes the target. A rig in shadow mode
+	// keeps the local gate as the authority and the local push as the write
+	// path, and only records what CI said (slice 8).
 	if forgejoCfg := rig.ResolveForgejoConfig(townRoot, rigName); forgejoCfg != nil {
 		candidate, merger, err := d.newForgejoLanding(rigName, landingRemote, forgejoCfg, repo, landings, cfg)
 		if err != nil {
 			return nil, err
 		}
 		lander.Candidate = candidate
-		lander.Merger = merger
+		lander.Shadow = forgejoCfg.IsShadowMode()
+		if !lander.Shadow {
+			lander.Merger = merger
+		}
 	}
 	run := postLandRun(repo, workRoot, d.landingLogRoot(rigName), townRoot, rigName, landingRemote, landingWorkerDuration(cfg.PostLandTimeoutStr, defaultPostLandTimeout))
 	mainState := fileMainState{path: RedMainStatePath(townRoot, rigName)}

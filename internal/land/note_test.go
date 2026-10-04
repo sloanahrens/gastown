@@ -1,6 +1,7 @@
 package land
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/landings"
 )
 
 func TestFormatRejectionNoteRefineryShape(t *testing.T) {
@@ -103,6 +105,61 @@ func TestLandingRecordNoteAndCloseReason(t *testing.T) {
 		if !strings.Contains(reason, want) {
 			t.Errorf("close reason lacks %q:\n%s", want, reason)
 		}
+	}
+}
+
+// TestShadowRecordIsReadableByTheLandingsReader pins the two halves of a
+// shadow-mode landing against each other: what Land writes is what the reader
+// that reads a rig's landings file gets back, keys included (slice 8).
+func TestShadowRecordIsReadableByTheLandingsReader(t *testing.T) {
+	t.Parallel()
+	r := LandingRecord{
+		BeadID: "gt-x", Rig: "gastown", Branch: "polecat/a/gt-x", Head: "h", Target: "main", Base: "b",
+		LandedCommit: "c0ffee", PatchID: "p", GateResult: "pass", OMVerdict: "approve", Route: "daemon",
+		LandedAt: time.Date(2026, 9, 30, 1, 2, 3, 0, time.UTC),
+	}
+	r.RecordCI(&CandidateResult{
+		State: CandidateFailed, Branch: "land/gt-x", SHA: "c0ffee", Context: "ci / gate (push)", RunStatus: "failure",
+	})
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec landings.Record
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("unmarshalling %s: %v", data, err)
+	}
+	if rec.CIVerdict != CIVerdictFailed || rec.CIContext != "ci / gate (push)" ||
+		rec.CICandidate != "c0ffee" || rec.CIBranch != "land/gt-x" || rec.CIRunStatus != "failure" {
+		t.Fatalf("the reader did not see the shadow CI fields: %+v", rec)
+	}
+	if rec.GateResult != "pass" || rec.LandedCommit != "c0ffee" {
+		t.Fatalf("the reader did not see the record itself: %+v", rec)
+	}
+	note := r.NoteBlock()
+	for _, want := range []string{"ci_verdict: failed", "ci_context: ci / gate (push)", "ci_candidate: c0ffee",
+		"ci_branch: land/gt-x", "ci_run_status: failure"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("note lacks %q:\n%s", want, note)
+		}
+	}
+}
+
+// TestLandingRecordWithoutCIKeepsTheOlderNote is the other half: a landing no
+// candidate gate saw writes the record it always did, so older readers and
+// older records stay indistinguishable (slice 8).
+func TestLandingRecordWithoutCIKeepsTheOlderNote(t *testing.T) {
+	t.Parallel()
+	r := LandingRecord{BeadID: "gt-x", LandedCommit: "c0ffee", LandedAt: time.Date(2026, 9, 30, 1, 2, 3, 0, time.UTC)}
+	if note := r.NoteBlock(); strings.Contains(note, "ci_verdict") {
+		t.Fatalf("a landing with no candidate gate carries CI fields:\n%s", note)
+	}
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "ci_") {
+		t.Fatalf("a landing with no candidate gate writes CI keys: %s", data)
 	}
 }
 
