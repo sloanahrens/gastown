@@ -91,6 +91,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.TierSweep != nil {
 		start(h.cfg.TierSweepEvery, h.pollTierSweep)
 	}
+	if h.cfg.Escalation != nil {
+		start(h.cfg.EscalationEvery, h.pollEscalation)
+	}
 	if h.cfg.Dispatch != nil {
 		start(h.cfg.DispatchEvery, h.pollDispatch)
 	}
@@ -298,6 +301,17 @@ func (h *Hub) pollTierSweep() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.TierSweep = ts
+	h.publishLocked()
+}
+
+func (h *Hub) pollEscalation() {
+	e := h.cfg.Escalation()
+	if e == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.state.Escalations = e
 	h.publishLocked()
 }
 

@@ -303,6 +303,29 @@ type TierSweep struct {
 	Unavailable bool           `json:"unavailable,omitempty"`
 }
 
+// EscalationRow is one open escalation as the pane draws it. At is when it was
+// raised, off the bead's own escalated_at (its creation time when that line is
+// missing); AgeSec is that time read against the reader's clock, and is nil
+// when the bead records no time it can be measured from.
+type EscalationRow struct {
+	ID          string    `json:"id"`
+	Title       string    `json:"title"`
+	Severity    string    `json:"severity"` // critical, high, medium, low
+	EscalatedBy string    `json:"escalated_by,omitempty"`
+	At          time.Time `json:"at"`
+	AgeSec      *int64    `json:"age_sec,omitempty"`
+}
+
+// Escalations is the open escalation beads, newest first, capped with the rest
+// counted in More. Unavailable says the read failed, which is not the same as a
+// town holding none: a pane must never show an empty list for a read it could
+// not make.
+type Escalations struct {
+	Rows        []EscalationRow `json:"rows"`
+	More        int             `json:"more,omitempty"`
+	Unavailable bool            `json:"unavailable,omitempty"`
+}
+
 // State is everything the page draws apart from the feed.
 type State struct {
 	Now       time.Time `json:"now"`
@@ -320,8 +343,11 @@ type State struct {
 	OM        *OM             `json:"om,omitempty"`
 	TierSweep *TierSweep      `json:"tiersweep,omitempty"`
 	Dispatch  *Dispatch       `json:"dispatch,omitempty"`
-	Queue     *Queue          `json:"queue,omitempty"`
-	Trend     *Trend          `json:"trend,omitempty"`
+	// Escalations is the town's open escalation beads, the same set the
+	// escalations tile counts. It is nil until the reader first reports.
+	Escalations *Escalations `json:"escalations,omitempty"`
+	Queue       *Queue       `json:"queue,omitempty"`
+	Trend       *Trend       `json:"trend,omitempty"`
 	// Alerts is the most recent alerts the alerter raised, newest last, capped
 	// at alertsKept. The page lists them whether or not alerts are switched on.
 	Alerts []Alert `json:"alerts,omitempty"`
@@ -345,6 +371,8 @@ type Config struct {
 	OM func() *OM
 	// TierSweep reads the daemon's tier sweeps from the daemon log.
 	TierSweep func() *TierSweep
+	// Escalation reads the town's open escalation beads.
+	Escalation func() *Escalations
 	// Dispatch reads the spec dispatcher's last tick from the daemon log.
 	Dispatch func() *Dispatch
 	// Queue reads the work queue lists; Bead reads one bead's text on request.
@@ -359,16 +387,17 @@ type Config struct {
 
 	Now func() time.Time
 
-	FeedEvery      time.Duration
-	SummaryEvery   time.Duration
-	HealthEvery    time.Duration
-	MachineEvery   time.Duration
-	SpendEvery     time.Duration
-	OMEvery        time.Duration
-	TierSweepEvery time.Duration
-	DispatchEvery  time.Duration
-	QueueEvery     time.Duration
-	TrendEvery     time.Duration
+	FeedEvery       time.Duration
+	SummaryEvery    time.Duration
+	HealthEvery     time.Duration
+	MachineEvery    time.Duration
+	SpendEvery      time.Duration
+	OMEvery         time.Duration
+	TierSweepEvery  time.Duration
+	EscalationEvery time.Duration
+	DispatchEvery   time.Duration
+	QueueEvery      time.Duration
+	TrendEvery      time.Duration
 
 	RingSize int // feed entries kept for a page that connects late
 }
@@ -389,6 +418,7 @@ func (c *Config) defaults() {
 	def(&c.SpendEvery, 5*time.Minute)
 	def(&c.OMEvery, 60*time.Second)
 	def(&c.TierSweepEvery, 60*time.Second)
+	def(&c.EscalationEvery, 60*time.Second)
 	def(&c.DispatchEvery, 10*time.Second)
 	def(&c.QueueEvery, 60*time.Second)
 	def(&c.TrendEvery, 60*time.Second)

@@ -112,6 +112,8 @@ section.collapsed>h2{border-bottom:0}
 .arow{border-top:1px solid var(--line);padding:4px 0;overflow-wrap:anywhere}
 .arow .t{color:var(--dim)}
 .arow .tx{color:var(--dim)}
+.esc{font-weight:700;text-transform:uppercase;font-size:10px;letter-spacing:.04em;white-space:nowrap}
+.sev-critical{color:var(--red)}.sev-high{color:var(--amber)}.sev-medium{color:var(--blue)}.sev-low{color:var(--dim)}
 </style>
 </head>
 <body>
@@ -129,6 +131,7 @@ section.collapsed>h2{border-bottom:0}
 
 <div class="grid">
   <div class="col">
+    <section><h2>Escalations <span class="r" id="escalationnote"></span></h2><div class="body" id="escalations"></div></section>
     <section><h2>Alerts <span class="r" id="alertsnote"></span></h2><div class="body" id="alerts"></div></section>
     <section><h2>DeepSeek <span class="r" id="spendnote"></span></h2><div class="body" id="spend"></div></section>
     <section><h2>Rigs <span class="r" id="rigsnote"></span></h2><div class="body" id="rigs"></div></section>
@@ -723,6 +726,39 @@ function renderDispatch(s) {
   if (d.more) box.append(el("div", "empty", "+" + d.more + " more not named in the log line"));
 }
 
+// The Escalations pane: the town's open escalation beads, newest first. An
+// alert is what the dashboard noticed; an escalation is a bead somebody raised,
+// with a severity and a raiser, that stays open until it is closed. Read-only —
+// the page never acks or closes one.
+const SEV_CLASS = {critical: "sev-critical", high: "sev-high", medium: "sev-medium", low: "sev-low"};
+function renderEscalations(s) {
+  const box = $("escalations");
+  box.replaceChildren();
+  const e = s.escalations;
+  if (!e) { box.append(el("div", "empty", "reading…")); $("escalationnote").textContent = ""; return; }
+  if (e.unavailable) { box.append(el("div", "badc", "unavailable: escalations could not be read")); $("escalationnote").textContent = ""; return; }
+  const rows = e.rows || [];
+  if (!rows.length) { box.append(el("div", "empty", "none open")); $("escalationnote").textContent = ""; return; }
+  const t = el("table");
+  const hr = el("tr");
+  [["Severity"], ["Id"], ["Title"], ["Raised by"], ["Age", "since it was raised", 1]].forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); });
+  t.append(hr);
+  for (const r of rows) {
+    const tr = el("tr");
+    tr.append(el("td", "esc " + (SEV_CLASS[r.severity] || "sev-low"), r.severity || "–"));
+    tr.append(el("td", "bead", r.id));
+    tr.append(el("td", "title", r.title || ""));
+    tr.append(el("td", "title", r.escalated_by || "–"));
+    const age = el("td", "n", fmtDur(r.age_sec));
+    if (r.age_sec != null) age.title = "raised " + new Date(r.at).toLocaleString();
+    tr.append(age);
+    t.append(tr);
+  }
+  box.append(t);
+  if (e.more) box.append(el("div", "empty", "+" + e.more + " more"));
+  $("escalationnote").textContent = rows.length + (e.more ? " of " + (rows.length + e.more) : "") + " open";
+}
+
 // Alerts. The server decides what needs attention and pushes each new one as an
 // "alert" event; the page shows a toast, marks the title, and (when the browser
 // allows it) raises a notification — but only while the operator has alerts on.
@@ -930,7 +966,7 @@ function renderQueue(s, force) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
+function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderEscalations(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));
