@@ -131,6 +131,26 @@ func TestReapVetoes(t *testing.T) {
 			e.intents = map[string]intent.Record{"onyx": {Desired: intent.DesiredPark}}
 			e.idleSince["onyx"] = now.Add(-23 * time.Hour)
 		}, true, ""},
+		{"parked reusable inside parked grace", func(e *fakeReapEnv) {
+			e.intents = map[string]intent.Record{"onyx": {Desired: intent.DesiredPark}}
+			e.idleSince["onyx"] = now.Add(-23 * time.Hour)
+			e.recovery["onyx"] = Recovery{Verdict: "SAFE_TO_NUKE", SafeToNuke: true, Reusable: true, GitStateSource: "live"}
+		}, true, ""},
+		{"parked reusable with recorded git state", func(e *fakeReapEnv) {
+			e.intents = map[string]intent.Record{"onyx": {Desired: intent.DesiredPark}}
+			e.idleSince["onyx"] = now.Add(-25 * time.Hour)
+			e.recovery["onyx"] = Recovery{Verdict: "SAFE_TO_NUKE", SafeToNuke: true, Reusable: true, GitStateSource: "recorded"}
+		}, false, OutcomeBlocked},
+		{"parked reusable needing recovery", func(e *fakeReapEnv) {
+			e.intents = map[string]intent.Record{"onyx": {Desired: intent.DesiredPark}}
+			e.idleSince["onyx"] = now.Add(-25 * time.Hour)
+			e.recovery["onyx"] = Recovery{Verdict: "NEEDS_RECOVERY", Reusable: true, Blockers: []string{"3 unpushed commits"}, GitStateSource: "live"}
+		}, false, OutcomeBlocked},
+		{"frozen parked seat", func(e *fakeReapEnv) {
+			e.intents = map[string]intent.Record{"onyx": {Desired: intent.DesiredPark, Frozen: true}}
+			e.idleSince["onyx"] = now.Add(-25 * time.Hour)
+			e.recovery["onyx"] = Recovery{Verdict: "SAFE_TO_NUKE", SafeToNuke: true, Reusable: true, GitStateSource: "live"}
+		}, true, ""},
 		{"git state only recorded", func(e *fakeReapEnv) {
 			e.recovery["onyx"] = Recovery{Verdict: "SAFE_TO_NUKE", SafeToNuke: true, GitStateSource: "recorded"}
 		}, false, OutcomeBlocked},
@@ -189,6 +209,32 @@ func TestReapGraceBoundaries(t *testing.T) {
 				t.Fatalf("reaped = %v, want %v", env.reaped, c.reaped)
 			}
 		})
+	}
+}
+
+// A parked seat whose verdict says Reusable is not reusable capacity: the
+// pause marker is read by the allocator and `gt polecat list`, not by
+// check-recovery, so the seat lands here reported reusable yet must still
+// reach would-reap (dry run) and reaped (live) once idle past ParkedGrace.
+func TestReapParkedReusableSeatIsReapable(t *testing.T) {
+	t.Parallel()
+	for _, dry := range []bool{true, false} {
+		env := eligible()
+		env.intents = map[string]intent.Record{"onyx": {Desired: intent.DesiredPark}}
+		env.idleSince["onyx"] = now.Add(-25 * time.Hour)
+		env.recovery["onyx"] = Recovery{Verdict: "SAFE_TO_NUKE", SafeToNuke: true, Reusable: true, GitStateSource: "live", Branch: "polecat/onyx/gt-1"}
+		r := reapScanner(env, ReapOptions{DryRun: dry}).Tick("gastown")
+		want := OutcomeReaped
+		if dry {
+			want = OutcomeWouldReap
+		}
+		f, ok := reapFinding(t, r, "onyx")
+		if !ok || f.Outcome != want {
+			t.Fatalf("dry=%v: finding = %+v, %v; want %s", dry, f, ok, want)
+		}
+		if reaped := len(env.reaped) == 1; reaped == dry {
+			t.Fatalf("dry=%v: reaped = %v", dry, env.reaped)
+		}
 	}
 }
 
