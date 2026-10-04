@@ -496,6 +496,118 @@ func TestDaemonSource_RigFilterKeepsLinesNamingTheRig(t *testing.T) {
 	}
 }
 
+// writeTailRoutes writes the town's routes.jsonl: one route per rig, the way
+// bd routes a bead, plus the town store's "." entry.
+func writeTailRoutes(t *testing.T, townRoot string) {
+	t.Helper()
+	dir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	routes := `{"prefix":"hq-","path":"."}
+{"prefix":"gt-","path":"gastown/mayor/rig"}
+{"prefix":"om-","path":"om/mayor/rig"}
+{"prefix":"hm-","path":"hm/mayor/rig"}
+{"prefix":"be-","path":"beads/mayor/rig"}
+`
+	if err := os.WriteFile(filepath.Join(dir, "routes.jsonl"), []byte(routes), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestDaemonSource_LabelsLinesWithTheRigTheyBelongTo: the daemon's per-rig
+// lines print under the rig they name, a "[land]" line under the rig its bead
+// routes to, and the daemon's own town-wide lines stay "town".
+func TestDaemonSource_LabelsLinesWithTheRigTheyBelongTo(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeTailRoutes(t, townRoot)
+	dir := filepath.Join(townRoot, "daemon")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	appendFile(t, filepath.Join(dir, "daemon.log"),
+		"2026/09/30 08:00:00 landing_worker: gastown: worker started\n"+
+			"2026/09/30 08:00:01 landing_worker: gastown: pass: 1 landed, 0 repaired, 0 rejected, 0 skipped, 0 failed\n"+
+			"2026/09/30 08:00:02 landing_worker: om: post-land: checking origin/main\n"+
+			"2026/09/30 08:00:03 landing_worker: hm: red-main: origin/main is red\n"+
+			"2026/09/30 08:00:04 landing_worker: [land] gt-abc: merged 0f0f onto origin/main (aaaa) as 1111aaaa\n"+
+			"2026/09/30 08:00:05 landing_worker: [land] be-1: landed 1111aaaa on origin/main\n"+
+			"2026/09/30 08:00:06 landing_worker: [land] zz-1: landed 1111aaaa on origin/main\n"+
+			"2026/09/30 08:00:07 tier_sweep: beads: sweep started a9be03e4 (shell, integration, race)\n"+
+			"2026/09/30 08:00:08 tier_sweep: no rig configured to sweep; nothing to do\n"+
+			"2026/09/30 08:00:09 tier_sweep: WARNING: no repository at /x; nothing to sweep\n"+
+			"2026/09/30 08:00:10 landing_worker: enabled (pass interval 1m0s, land timeout 30m0s)\n"+
+			"2026/09/30 08:00:11 upgrade-restart: running 2222bbbb covers marker 2222bbbb; cleared\n")
+	s := &daemonSource{dir: dir, cutoff: at("2026-09-30T12:00:00Z"), loc: tailTestLoc, now: fixedNow, rigs: loadTailRigs(townRoot)}
+	want := []string{
+		"gastown daemon landing_worker: gastown: worker started",
+		"gastown daemon landing_worker: gastown: pass: 1 landed, 0 repaired, 0 rejected, 0 skipped, 0 failed",
+		"om daemon landing_worker: om: post-land: checking origin/main",
+		"hm daemon landing_worker: hm: red-main: origin/main is red",
+		"gastown daemon landing_worker: [land] gt-abc: merged 0f0f onto origin/main (aaaa) as 1111aaaa",
+		"beads daemon landing_worker: [land] be-1: landed 1111aaaa on origin/main",
+		"town daemon landing_worker: [land] zz-1: landed 1111aaaa on origin/main",
+		"beads daemon tier_sweep: beads: sweep started a9be03e4 (shell, integration, race)",
+		"town daemon tier_sweep: no rig configured to sweep; nothing to do",
+		"town daemon tier_sweep: WARNING: no repository at /x; nothing to sweep",
+		"town daemon landing_worker: enabled (pass interval 1m0s, land timeout 30m0s)",
+		"town daemon upgrade-restart: running 2222bbbb covers marker 2222bbbb; cleared",
+	}
+	if got := texts(s.Poll()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("labeled = %q\nwant %q", got, want)
+	}
+}
+
+// TestDaemonSource_NoRoutesLeavesEveryLineTown: a town with no routes file (or
+// an unreadable one) cannot place a line, so nothing is labelled on a guess.
+func TestDaemonSource_NoRoutesLeavesEveryLineTown(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	dir := filepath.Join(townRoot, "daemon")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	appendFile(t, filepath.Join(dir, "daemon.log"),
+		"2026/09/30 08:00:00 landing_worker: gastown: worker started\n"+
+			"2026/09/30 08:00:01 landing_worker: [land] gt-abc: landed 1111aaaa on origin/main\n")
+	s := &daemonSource{dir: dir, cutoff: at("2026-09-30T12:00:00Z"), loc: tailTestLoc, now: fixedNow, rigs: loadTailRigs(townRoot)}
+	want := []string{
+		"town daemon landing_worker: gastown: worker started",
+		"town daemon landing_worker: [land] gt-abc: landed 1111aaaa on origin/main",
+	}
+	if got := texts(s.Poll()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("unrouted = %q\nwant %q", got, want)
+	}
+}
+
+// TestDaemonSource_RigFilterKeepsALineThatBelongsToTheRig: --rig gastown keeps
+// a "[land] gt-x:" line that names no rig, because the line's own rig is
+// gastown; another rig's landing line is still dropped.
+func TestDaemonSource_RigFilterKeepsALineThatBelongsToTheRig(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeTailRoutes(t, townRoot)
+	dir := filepath.Join(townRoot, "daemon")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	appendFile(t, filepath.Join(dir, "daemon.log"),
+		"2026/09/30 08:00:00 landing_worker: [land] gt-abc: landed 1111aaaa on origin/main\n"+
+			"2026/09/30 08:00:01 landing_worker: [land] om-1: landed 2222bbbb on origin/main\n"+
+			"2026/09/30 08:00:02 landing_worker: gastown: pass: 1 landed\n"+
+			"2026/09/30 08:00:03 upgrade-restart: running 3333cccc covers marker 3333cccc; cleared\n")
+	s := &daemonSource{dir: dir, cutoff: at("2026-09-30T12:00:00Z"), loc: tailTestLoc, now: fixedNow,
+		rigFilter: tailRigFilter("gastown"), rigName: "gastown", rigs: loadTailRigs(townRoot)}
+	want := []string{
+		"gastown daemon landing_worker: [land] gt-abc: landed 1111aaaa on origin/main",
+		"gastown daemon landing_worker: gastown: pass: 1 landed",
+	}
+	if got := texts(s.Poll()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("filtered = %q\nwant %q", got, want)
+	}
+}
+
 func TestDaemonSource_MissingLogSaysSoOnce(t *testing.T) {
 	t.Parallel()
 	s := &daemonSource{dir: t.TempDir(), cutoff: tailNow, loc: tailTestLoc, now: fixedNow}

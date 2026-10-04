@@ -185,6 +185,38 @@ func TestBuildTailSources_AllRigsAllKinds(t *testing.T) {
 	}
 }
 
+// TestBuildTailSources_DaemonLinesCarryTheirRig: the stream resolves a daemon
+// line's rig through the town's routes, so the landing and sweep lines print
+// under the rig they belong to and the daemon's own lines stay "town".
+func TestBuildTailSources_DaemonLinesCarryTheirRig(t *testing.T) {
+	t.Parallel()
+	o, _ := fakeTailTown(t, []string{"gastown"}, nil)
+	writeTailRoutes(t, o.townRoot)
+	appendFile(t, filepath.Join(o.townRoot, "daemon", "daemon.log"),
+		"2026/09/30 08:59:30 landing_worker: [land] gt-1: landed 1111aaaa on origin/main\n"+
+			"2026/09/30 08:59:31 landing_worker: gastown: pass: 1 landed\n"+
+			"2026/09/30 08:59:32 upgrade-restart: running 2222bbbb covers marker 2222bbbb; cleared\n")
+	o.kinds, o.cutoff = map[string]bool{tailKindDaemon: true}, at("2026-09-30T13:00:00Z")
+	sources, preface, err := buildTailSources(o)
+	if err != nil || len(preface) != 0 {
+		t.Fatalf("build: %v %v", err, preface)
+	}
+	var buf bytes.Buffer
+	if err := runTailStream(context.Background(), &buf, sources, preface, false, nil, tailView{Loc: tailTestLoc, FullSource: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"2026-09-30T08:59:10-05:00 town daemon Convoy: close detected: gt-1 (from gastown)",
+		"2026-09-30T08:59:20-05:00 town daemon hm witness restarted",
+		"2026-09-30T08:59:30-05:00 gastown daemon landing_worker: [land] gt-1: landed 1111aaaa on origin/main",
+		"2026-09-30T08:59:31-05:00 gastown daemon landing_worker: gastown: pass: 1 landed",
+		"2026-09-30T08:59:32-05:00 town daemon upgrade-restart: running 2222bbbb covers marker 2222bbbb; cleared",
+	}
+	if got := strings.Split(strings.TrimSpace(buf.String()), "\n"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("stream:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
 func TestBuildTailSources_RigAndKindFilters(t *testing.T) {
 	t.Parallel()
 	o, journals := fakeTailTown(t, []string{"gastown", "hm"}, nil)
