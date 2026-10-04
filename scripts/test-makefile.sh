@@ -17,6 +17,7 @@ bash -n scripts/docs-lint.sh
 bash scripts/docs-lint_test.sh
 bash scripts/flake-sweep_test.sh
 bash scripts/gate-vs-load_test.sh
+bash scripts/tier-sweep_test.sh
 bash -n scripts/test-makefile.sh
 bash -n scripts/lint-lock-wait.sh
 bash -n scripts/makefile-gate_test.sh

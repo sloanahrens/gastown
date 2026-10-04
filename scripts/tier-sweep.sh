@@ -46,11 +46,27 @@ skip_for() {
 }
 
 red=0
-# summary TIER PASSED FAILED SKIPPED FAILED_NAMES
+# fmt_duration SECONDS renders a whole-second duration the way the daemon logs
+# render theirs (time.Duration.String() after Round(time.Second)): 45s, 2m14s,
+# 1h1m1s. The sweep's summary line and the daemon's line for the same tier then
+# read alike in `gt tail`.
+fmt_duration() {
+	local s=$1
+	if [ "$s" -ge 3600 ]; then
+		printf '%dh%dm%ds' "$((s / 3600))" "$(((s % 3600) / 60))" "$((s % 60))"
+	elif [ "$s" -ge 60 ]; then
+		printf '%dm%ds' "$((s / 60))" "$((s % 60))"
+	else
+		printf '%ds' "$s"
+	fi
+}
+
+# summary TIER PASSED FAILED SKIPPED FAILED_NAMES SECONDS. The elapsed time
+# ends the line, so a slow or hung tier reads as such without opening its log.
 summary() {
 	local verdict=GREEN
 	[ "$3" -gt 0 ] && { verdict=RED; red=1; }
-	echo "tier-sweep: $1 $verdict passed=$2 failed=$3 skipped=$4${5:+ failed:$5} (logs $TIER_SWEEP_LOGDIR)"
+	echo "tier-sweep: $1 $verdict passed=$2 failed=$3 skipped=$4${5:+ failed:$5} (logs $TIER_SWEEP_LOGDIR) in $(fmt_duration "$6")"
 }
 
 # go_tier TIER PREFIX_CMD... :: GO_TEST_ARGS... :: PKGS... (the prefix may hold
@@ -82,6 +98,7 @@ go_tier() {
 # Package paths hold no whitespace, so the lists below split on it.
 # shellcheck disable=SC2207
 for tier in "${tiers[@]}"; do
+	tier_start=$SECONDS
 	case "$tier" in
 	shell)
 		shell_tests=${SHELL_TESTS:-scripts/test-makefile.sh}
@@ -95,18 +112,18 @@ for tier in "${tiers[@]}"; do
 			echo "tier-sweep: shell $t ..." >&2
 			if GT_TEST_DOCKER=0 bash "$t" >"$log" 2>&1; then p=$((p + 1)); else f=$((f + 1)); names="$names $t"; tail -5 "$log" | sed 's/^/    /' >&2; fi
 		done
-		summary shell "$p" "$f" 0 "$names"
+		summary shell "$p" "$f" 0 "$names" "$((SECONDS - tier_start))"
 		;;
 	integration)
 		tagged=($(git ls-files '*_test.go' | grep -v /testdata/ | xargs grep -lE '^//go:build.*(^|[^!])integration' | xargs -n1 dirname | sort -u | sed 's|^|./|'))
 		docker=($(sed -e 's/#.*//' internal/testpolicy/docker.txt | awk 'NF{print "./" $1}'))
 		read -r p1 f1 s1 n1 < <(go_tier integration gt slot run -- env GT_TEST_DOCKER=1 :: -tags integration :: "${tagged[@]}")
 		read -r p2 f2 s2 n2 < <(go_tier integration-docker gt slot run -- env GT_TEST_DOCKER=1 :: :: "${docker[@]}")
-		summary integration "$((p1 + p2))" "$((f1 + f2))" "$((s1 + s2))" "$n1${n2:+ untagged:$n2}"
+		summary integration "$((p1 + p2))" "$((f1 + f2))" "$((s1 + s2))" "$n1${n2:+ untagged:$n2}" "$((SECONDS - tier_start))"
 		;;
 	race)
 		read -r p f s names < <(go_tier race gt slot run -- env GT_TEST_DOCKER=1 :: -race -tags integration -run '^TestCommandTreeWalkIsReadOnlyUnderParallelTests$' :: ./internal/cmd)
-		summary race "$p" "$f" "$s" "$names"
+		summary race "$p" "$f" "$s" "$names" "$((SECONDS - tier_start))"
 		;;
 	*)
 		echo "tier-sweep: unknown tier $tier (want shell, integration or race)" >&2

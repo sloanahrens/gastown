@@ -701,7 +701,9 @@ func TestParseShellTierFailuresReadsTheRealSummaryLine(t *testing.T) {
 		{name: "the post-land run's line", out: postLandShellRedLine, want: []string{"scripts/test-makefile.sh"}},
 		{name: "several scripts", out: "tier-sweep: shell RED passed=8 failed=2 skipped=0 failed: scripts/a_test.sh plugins/b_test.sh (logs /tmp/tier-sweep.aB12)",
 			want: []string{"scripts/a_test.sh", "plugins/b_test.sh"}},
-		{name: "a green run names none", out: "tier-sweep: shell GREEN passed=6 failed=0 skipped=0 (logs /tmp/tier-sweep.aB12)", want: nil},
+		{name: "the elapsed time trails the names", out: "tier-sweep: shell RED passed=8 failed=2 skipped=0 failed: scripts/a_test.sh plugins/b_test.sh (logs /tmp/tier-sweep.aB12) in 2m14s",
+			want: []string{"scripts/a_test.sh", "plugins/b_test.sh"}},
+		{name: "a green run names none", out: "tier-sweep: shell GREEN passed=6 failed=0 skipped=0 (logs /tmp/tier-sweep.aB12) in 2m14s", want: nil},
 		{name: "a red run that named no script", out: "tier-sweep: shell RED passed=6 failed=1 skipped=0 (logs /tmp/tier-sweep.aB12)", want: nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

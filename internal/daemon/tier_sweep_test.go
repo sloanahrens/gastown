@@ -372,8 +372,8 @@ func TestParseTierSweepSummaries(t *testing.T) {
 	t.Parallel()
 	got := parseTierSweepSummaries(strings.Join([]string{
 		"tier-sweep: shell ...",
-		"tier-sweep: shell RED passed=5 failed=1 skipped=0 failed: scripts/x.sh (logs /tmp/tier-sweep.aB12)",
-		"tier-sweep: integration GREEN passed=29 failed=0 skipped=2",
+		"tier-sweep: shell RED passed=5 failed=1 skipped=0 failed: scripts/x.sh (logs /tmp/tier-sweep.aB12) in 2m14s",
+		"tier-sweep: integration GREEN passed=29 failed=0 skipped=2 in 45s",
 		"tier-sweep: nonexistent tier RED",
 	}, "\n"))
 	if len(got) != 2 {
@@ -386,5 +386,95 @@ func TestParseTierSweepSummaries(t *testing.T) {
 	in := got["integration"]
 	if in.Verdict != tierSweepGreen || in.Passed != 29 || len(in.FailedNames) != 0 {
 		t.Errorf("integration = %+v", in)
+	}
+}
+
+// TestRunTierSweep_LogsTheElapsedTimeOfTheSweep: a slow sweep must read as
+// slow in the daemon log without opening anything (gt-iqzr0). The clock is the
+// injected fake one and the stage seam advances it, so the test waits on no
+// real time.
+func TestRunTierSweep_LogsTheElapsedTimeOfTheSweep(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15) // odd: the shell stage alone
+	d, rec, _, logs := newTierSweepDaemon(t, now, "gastown")
+	clk := clockwork.NewFakeClockAt(now)
+	d.clock = clk
+	rec.result = func(st tierSweepStage) tierSweepStageResult {
+		// The stage's wall: 2m14s for the shell tier, the daemon log's own
+		// rounding style.
+		clk.Advance(2*time.Minute + 14*time.Second)
+		var b strings.Builder
+		for _, tier := range st.tiers {
+			fmt.Fprintf(&b, "tier-sweep: %s GREEN passed=3 failed=0 skipped=0 (logs /tmp/tier-sweep.x) in 2m14s\n", tier)
+		}
+		return tierSweepStageResult{output: b.String(), exitCode: 0, ran: true}
+	}
+	sha := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return sha, nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+
+	if !d.runTierSweep() {
+		t.Fatal("runTierSweep deferred; want a verdict")
+	}
+	out := logs.String()
+	for _, want := range []string{
+		"tier_sweep: gastown: shell finished (exit 0) in 2m14s;",
+		"tier_sweep: gastown: swept aaaaaaaa (shell GREEN) in 2m14s",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log missing %q; got:\n%s", want, out)
+		}
+	}
+}
+
+// TestRunTierSweep_SkippedSweepLogsNoDuration: nothing ran, so there is no
+// elapsed time to report and the skip line must not imply one (gt-iqzr0).
+func TestRunTierSweep_SkippedSweepLogsNoDuration(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec, _, logs := newTierSweepDaemon(t, now, "gastown")
+	sha := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return sha, nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+	// The previous cycle was green at this sha, so there is nothing to sweep.
+	if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{LastGreenSHA: sha}); err != nil {
+		t.Fatal(err)
+	}
+	if !d.runTierSweep() {
+		t.Fatal("runTierSweep deferred; want a skip")
+	}
+	if len(rec.stages) != 0 {
+		t.Fatalf("stages = %+v, want none: origin/main is unchanged", rec.stages)
+	}
+	out := logs.String()
+	if !strings.Contains(out, "unchanged since the last green sweep; skipping") {
+		t.Fatalf("log missing the skip line; got:\n%s", out)
+	}
+	if strings.Contains(out, "swept ") || strings.Contains(out, "finished (exit") {
+		t.Errorf("a skipped sweep logged a stage or sweep line; got:\n%s", out)
+	}
+}
+
+// TestRunTierSweep_DeferredSweepLogsNoDuration: no stage ran, so the cycle is
+// deferred and its line carries no elapsed time (gt-iqzr0).
+func TestRunTierSweep_DeferredSweepLogsNoDuration(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec, _, logs := newTierSweepDaemon(t, now, "gastown")
+	rec.result = func(tierSweepStage) tierSweepStageResult {
+		return tierSweepStageResult{err: context.DeadlineExceeded}
+	}
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "abc123", nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+
+	if d.runTierSweep() {
+		t.Error("runTierSweep reached a verdict; want a defer")
+	}
+	out := logs.String()
+	if !strings.Contains(out, "did not run") {
+		t.Fatalf("log missing the defer line; got:\n%s", out)
+	}
+	if strings.Contains(out, "swept ") || strings.Contains(out, "finished (exit") {
+		t.Errorf("a deferred sweep logged a stage or sweep line; got:\n%s", out)
 	}
 }

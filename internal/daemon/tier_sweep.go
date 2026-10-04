@@ -377,7 +377,11 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 	results := map[string]tierSweepTierResult{}
 	deferred := false
 	for _, st := range stages {
+		// The stage's own start, so `gt tail` shows a slow or hung stage on the
+		// line that names it (gt-iqzr0).
+		stageStart := d.clk().Now()
 		res := run(ctx, dir, st)
+		stageElapsed := d.clk().Now().Sub(stageStart)
 		if !res.ran {
 			// The stage never started (a slot the sweep could not take, say):
 			// nothing was learned about the tree, so the cycle is incomplete
@@ -406,8 +410,8 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 			ts.Log = logPath
 			results[tier] = ts
 		}
-		d.logger.Printf("tier_sweep: %s: %s finished (exit %d); last lines:\n%s",
-			rig, st.tiers[0], res.exitCode, lastLines(res.output, tierSweepLogTailLines))
+		d.logger.Printf("tier_sweep: %s: %s finished (exit %d) in %s; last lines:\n%s",
+			rig, st.tiers[0], res.exitCode, stageElapsed.Round(time.Second), lastLines(res.output, tierSweepLogTailLines))
 	}
 
 	if len(results) == 0 {
@@ -434,8 +438,9 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 		return false
 	}
 	cycle.closeStep(rig)
-	d.logger.Printf("tier_sweep: %s: swept %s (shell %s%s)", rig, shortSHA(sha),
-		results["shell"].Verdict, tierSweepVerdictSummary(results, stages))
+	d.logger.Printf("tier_sweep: %s: swept %s (shell %s%s) in %s", rig, shortSHA(sha),
+		results["shell"].Verdict, tierSweepVerdictSummary(results, stages),
+		d.clk().Now().Sub(now).Round(time.Second))
 
 	d.tierSweepRecordBeads(rig, sha, results)
 	return !deferred
@@ -567,10 +572,13 @@ func (d *Daemon) tierSweepWriteLog(rig, tier, output string) string {
 }
 
 // tierSweepSummaryRE matches the script's one summary line per tier
-// (scripts/tier-sweep.sh:53):
+// (scripts/tier-sweep.sh), whose elapsed time trails the log marker:
 //
-//	tier-sweep: shell RED passed=5 failed=1 skipped=0 failed: scripts/x.sh (logs /tmp/tier-sweep.aB12)
-var tierSweepSummaryRE = regexp.MustCompile(`^tier-sweep: (\S+) (GREEN|RED) passed=(\d+) failed=(\d+) skipped=(\d+)(?: failed:(.*?))?(?: \(logs ([^)]*)\))?\s*$`)
+//	tier-sweep: shell RED passed=5 failed=1 skipped=0 failed: scripts/x.sh (logs /tmp/tier-sweep.aB12) in 2m14s
+//
+// The elapsed group is optional so a line from an older sweep, with no
+// duration, still parses.
+var tierSweepSummaryRE = regexp.MustCompile(`^tier-sweep: (\S+) (GREEN|RED) passed=(\d+) failed=(\d+) skipped=(\d+)(?: failed:(.*?))?(?: \(logs ([^)]*)\))?(?: in (\S+))?\s*$`)
 
 // parseTierSweepSummaries reads the verdicts a stage's output reported, keyed
 // by tier.
