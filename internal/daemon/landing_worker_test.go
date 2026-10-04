@@ -614,59 +614,6 @@ func forgejoRigConfig(t *testing.T, townRoot, rigName string) string {
 	return rigPath
 }
 
-// forgejoShadowRigConfig is forgejoRigConfig with merge_queue.forgejo.shadow_mode
-// set: a rig whose CI verdict is recorded beside the local gate's, which still
-// decides (slice 8).
-func forgejoShadowRigConfig(t *testing.T, townRoot, rigName string) string {
-	t.Helper()
-	rigPath := filepath.Join(townRoot, rigName)
-	if err := os.MkdirAll(filepath.Join(rigPath, ".repo.git"), 0o755); err != nil {
-		t.Fatalf("mkdir .repo.git: %v", err)
-	}
-	writeDaemonRigConfigFile(t, rigPath, `{"type":"rig","version":1,"name":"`+rigName+`","default_branch":"main",
-		"merge_queue":{"forgejo":{"remote_url":"https://forgejo.example/gastown/gastown.git","gate_workflow":"gate","shadow_mode":true,"bots":{"landing":"gt-landing"}}}}`)
-	return rigPath
-}
-
-// TestNewRigLandingWorker_ShadowModeKeepsTheLocalGate: a rig in shadow mode
-// still pushes and records its candidate, but the local gate decides and the
-// local push writes the target, so the worker carries no PR merger.
-func TestNewRigLandingWorker_ShadowModeKeepsTheLocalGate(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	const rigName = "testrig"
-	forgejoShadowRigConfig(t, townRoot, rigName)
-
-	tokenDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(tokenDir, "forgejo-landing.env"), []byte("FORGEJO_TOKEN=secret\n"), 0o600); err != nil {
-		t.Fatalf("write token file: %v", err)
-	}
-
-	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: notifyfake.New(),
-		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{LandingWorker: &LandingWorkerConfig{
-			Forgejo: &config.ForgejoWorkerConfig{TokenDir: tokenDir}}}}}
-	f := useGitfake(t, d)
-	forgejoLandingRemote(t, f, townRoot, rigName)
-
-	w, err := d.newRigLandingWorker(rigName)
-	if err != nil {
-		t.Fatalf("newRigLandingWorker: %v", err)
-	}
-	lander, ok := w.Lander.(*land.Lander)
-	if !ok {
-		t.Fatalf("Lander = %T, want *land.Lander", w.Lander)
-	}
-	if !lander.Shadow {
-		t.Error("Shadow = false; want the rig's shadow_mode to run both gates")
-	}
-	if lander.Candidate == nil {
-		t.Error("Candidate = nil; want the candidate pushed and recorded in shadow mode")
-	}
-	if lander.Merger != nil {
-		t.Errorf("Merger = %T; shadow mode writes the target with the local push", lander.Merger)
-	}
-}
-
 // forgejoLandingRemote gives the fake world's rig repository the remote the
 // rig's Forgejo block names, so worker construction resolves it rather than
 // failing closed. A named remote carries it: origin is still the pre-cutover

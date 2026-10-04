@@ -36,15 +36,6 @@ type Record struct {
 	OMScore      float64   `json:"om_score"`
 	Route        string    `json:"route"`
 	LandedAt     time.Time `json:"landed_at"`
-	// The CI fields are the Forgejo gate's verdict on the landing's candidate,
-	// written when the rig ran in shadow mode (slice 8) with GateResult
-	// holding the local gate that decided instead. Empty on a landing no
-	// candidate gate saw.
-	CIVerdict   string `json:"ci_verdict,omitempty"`
-	CIContext   string `json:"ci_context,omitempty"`
-	CICandidate string `json:"ci_candidate,omitempty"`
-	CIBranch    string `json:"ci_branch,omitempty"`
-	CIRunStatus string `json:"ci_run_status,omitempty"`
 }
 
 // Path is <town>/.runtime/landings/<rig>.jsonl, the file the landing worker

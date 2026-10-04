@@ -156,7 +156,9 @@ landing creator check trusts, so merged repo content must not choose it. The
 other `merge_queue` fields keep their three tiers; read
 [Forgejo-primary landing](design/forgejo-primary-landing.md) before changing the
 landing path, and call `rig.ResolveForgejoConfig` rather than reading the block
-from one tier.
+from one tier. A key inside the `forgejo` block that this binary does not
+declare is ignored rather than a parse error, so a config written for another
+gt version still loads; every other block stays strict.
 
 Keys removed in gt-5nlvq (`enabled`, `run_tests`, `on_conflict`, `poll_interval`,
 `batch_*`, `test_verify_*` and the other refinery-era keys) now fail strict

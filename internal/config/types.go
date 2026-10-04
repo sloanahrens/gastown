@@ -1158,13 +1158,21 @@ type ForgejoConfig struct {
 	// MirrorTarget is the rig's read-only push mirror target, e.g. its
 	// GitHub repository URL. A mirror failure never blocks a landing.
 	MirrorTarget string `json:"mirror_target,omitempty"`
+}
 
-	// ShadowMode runs both gates on a rig that has not cut over yet: the
-	// worker pushes the merge candidate and records the required context's
-	// verdict, and the local LandGate still decides. Both verdicts reach the
-	// landing record, so the flip/no-flip call has evidence (slice 8). Nil and
-	// false both mean the candidate gate is the authority.
-	ShadowMode *bool `json:"shadow_mode,omitempty"`
+// UnmarshalJSON decodes the block, ignoring a key it does not declare: the
+// block is operator-owned and gains keys across the Forgejo rollout, so config
+// written for one gt version must not leave another unable to read the rig's
+// merge queue. Every other config block stays strict, where an undeclared key
+// is a parse error (D5).
+func (c *ForgejoConfig) UnmarshalJSON(data []byte) error {
+	type forgejo ForgejoConfig
+	var v forgejo
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	*c = ForgejoConfig(v)
+	return nil
 }
 
 // GateWorkflowName returns the configured gate workflow, or
@@ -1183,12 +1191,6 @@ func (c *ForgejoConfig) BotLogin(role string) string {
 		return ""
 	}
 	return c.Bots[role]
-}
-
-// IsShadowMode reports whether the rig runs both gates with the local one
-// deciding (slice 8). Nil-safe.
-func (c *ForgejoConfig) IsShadowMode() bool {
-	return c != nil && c.ShadowMode != nil && *c.ShadowMode
 }
 
 // IsPolecatIntegrationEnabled returns whether polecat integration branch

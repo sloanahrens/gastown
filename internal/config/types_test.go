@@ -308,3 +308,28 @@ func TestForgejoConfigDecodesItsKeys(t *testing.T) {
 		t.Errorf("MirrorTarget = %q", mq.Forgejo.MirrorTarget)
 	}
 }
+
+// TestForgejoConfigIgnoresAnUndeclaredKey: the operator-owned forgejo block
+// decodes with a key this binary does not declare, so a rig config written for
+// another gt version still loads — and the keys beside it keep their values.
+// Every other block stays strict, which the last case pins.
+func TestForgejoConfigIgnoresAnUndeclaredKey(t *testing.T) {
+	t.Parallel()
+	body := `{"type":"rig","version":1,"name":"gastown","merge_queue":{"forgejo":` +
+		`{"remote_url":"https://forgejo.example/gastown/gastown.git","retired_key":true}}}`
+	var cfg RigConfig
+	if err := DecodeJSONFile("config.json", []byte(body), &cfg); err != nil {
+		t.Fatalf("decode: %v; an undeclared key in the forgejo block must not fail the load", err)
+	}
+	if cfg.MergeQueue == nil || cfg.MergeQueue.Forgejo == nil {
+		t.Fatal("the forgejo block did not decode")
+	}
+	if got := cfg.MergeQueue.Forgejo.RemoteURL; got != "https://forgejo.example/gastown/gastown.git" {
+		t.Errorf("RemoteURL = %q, want the declared key beside the undeclared one", got)
+	}
+
+	strict := `{"type":"rig","version":1,"name":"gastown","merge_queue":{"retired_key":true}}`
+	if err := DecodeJSONFile("config.json", []byte(strict), &cfg); err == nil {
+		t.Error("an undeclared key outside the forgejo block decoded; want a parse error")
+	}
+}
