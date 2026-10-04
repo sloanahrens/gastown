@@ -1,0 +1,14 @@
+{
+  "id": 4211,
+  "status": "success",
+  "description": "make gate passed",
+  "context": "ci / gate (push)",
+  "target_url": "https://forgejo.test/gastownhall/gastown/actions/runs/91",
+  "creator": {
+    "id": 2,
+    "login": "landing-bot"
+  },
+  "created_at": "2026-10-04T19:00:05Z",
+  "updated_at": "2026-10-04T19:00:05Z",
+  "url": "https://forgejo.test/api/v1/repos/gastownhall/gastown/statuses/cafe1234"
+}

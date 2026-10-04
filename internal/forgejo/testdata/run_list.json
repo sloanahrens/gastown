@@ -1,0 +1,16 @@
+{
+  "total_count": 1,
+  "workflow_runs": [
+    {
+      "id": 91,
+      "index_in_repo": 12,
+      "title": "gate",
+      "status": "failure",
+      "event": "push",
+      "commit_sha": "cafe1234567890",
+      "prettyref": "land/gt-fn9e6.5",
+      "workflow_id": "gate.yml",
+      "html_url": "https://forgejo.test/gastownhall/gastown/actions/runs/91"
+    }
+  ]
+}

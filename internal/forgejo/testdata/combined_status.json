@@ -1,0 +1,27 @@
+{
+  "state": "success",
+  "sha": "cafe1234567890",
+  "total_count": 2,
+  "statuses": [
+    {
+      "id": 4211,
+      "status": "success",
+      "description": "make gate passed",
+      "context": "ci / gate (push)",
+      "target_url": "https://forgejo.test/gastownhall/gastown/actions/runs/91"
+    },
+    {
+      "id": 4212,
+      "status": "success",
+      "description": "approved",
+      "context": "om / review",
+      "target_url": "https://forgejo.test/gastownhall/gastown/actions/runs/91",
+      "creator": {
+        "id": 3,
+        "login": "landing-bot"
+      }
+    }
+  ],
+  "commit_url": "https://forgejo.test/gastownhall/gastown/commit/cafe1234567890",
+  "url": "https://forgejo.test/api/v1/repos/gastownhall/gastown/commits/cafe1234567890/status"
+}
