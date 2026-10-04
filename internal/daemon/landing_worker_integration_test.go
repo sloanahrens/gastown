@@ -15,9 +15,11 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/slot"
 )
 
@@ -362,5 +364,57 @@ func TestIntegrationRedMainRevertsTheCulpritThroughLand(t *testing.T) {
 	}
 	if st, err := state.Load(); err != nil || st.LastGreen != green || st.LastRun != red {
 		t.Fatalf("main state %+v %v", st, err)
+	}
+}
+
+// TestIntegrationNewRigLandingWorkerUsesTheConfiguredLandingRemote: on a rig
+// whose bare repository carries a remote matching its merge_queue.forgejo URL,
+// every remote the landing path names — the lander, the branch-tip reads the
+// worker makes through gitRemote, and the candidate gate that pushes land/<bead>
+// — is that remote rather than an assumed origin (gt-fn9e6.9). A candidate
+// pushed to origin would go to GitHub and the Forgejo gate would wait on a
+// verdict that never comes.
+func TestIntegrationNewRigLandingWorkerUsesTheConfiguredLandingRemote(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	const rigName = "testrig"
+	rigPath := forgejoRigConfig(t, townRoot, rigName)
+	bare := filepath.Join(rigPath, ".repo.git")
+	lwGit(t, townRoot, "init", "-q", "--bare", "-b", "main", bare)
+	lwGit(t, bare, "remote", "add", "origin", "https://github.com/acme/gastown.git")
+	lwGit(t, bare, "remote", "add", "forgejo", "https://forgejo.example/gastown/gastown.git")
+
+	tokenDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tokenDir, "forgejo-landing.env"), []byte("FORGEJO_TOKEN=secret\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: notifyfake.New(),
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{LandingWorker: &LandingWorkerConfig{
+			Forgejo: &config.ForgejoWorkerConfig{TokenDir: tokenDir}}}}}
+
+	w, err := d.newRigLandingWorker(rigName)
+	if err != nil {
+		t.Fatalf("newRigLandingWorker: %v", err)
+	}
+	lander, ok := w.Lander.(*land.Lander)
+	if !ok {
+		t.Fatalf("Lander = %T, want *land.Lander", w.Lander)
+	}
+	if lander.Remote != "forgejo" {
+		t.Errorf("Lander.Remote = %q, want forgejo (the URL's remote)", lander.Remote)
+	}
+	gate, ok := lander.Candidate.(*land.CandidateGate)
+	if !ok {
+		t.Fatalf("Candidate = %T; want the rig's Forgejo gate", lander.Candidate)
+	}
+	if gate.Remote != "forgejo" {
+		t.Errorf("CandidateGate.Remote = %q, want forgejo so the candidate reaches the CI that gates it", gate.Remote)
+	}
+	remote, ok := w.Remote.(gitRemote)
+	if !ok {
+		t.Fatalf("Remote = %T, want the daemon's gitRemote", w.Remote)
+	}
+	if remote.remote != "forgejo" {
+		t.Errorf("gitRemote.remote = %q, want forgejo so the branch-tip reads match what gt done pushed", remote.remote)
 	}
 }

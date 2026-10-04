@@ -1157,24 +1157,40 @@ func ResolveForgejoConfig(townRoot, rigName string) *config.ForgejoConfig {
 // no other.
 const LandingRemoteOrigin = "origin"
 
+// LandingRemotes is the git surface the landing-remote resolution reads: the
+// rig bare repository's remote names and their URLs, declared from the
+// *git.Git methods it calls so a caller whose unit tier runs no git — the
+// daemon's is git-free (internal/testpolicy/gitfree.txt) — reads the rig's
+// remotes through its own git seam instead (docs/testing.md, "Seams for
+// external tools").
+type LandingRemotes interface {
+	Remotes() ([]string, error)
+	RemoteURL(name string) (string, error)
+}
+
 // ResolveLandingRemote resolves the git remote name a rig's landing path — gt
-// done's branch push and the daemon's landing worker — should use, read from
-// the rig's Forgejo settings (merge_queue.forgejo.remote_url, gt-fn9e6.3)
-// instead of assuming origin (gt-fn9e6.9). It returns the remote in the rig's
-// bare repository whose URL is the configured one, and LandingRemoteOrigin when
-// the rig has no Forgejo block, names no URL, or has no such remote — so every
-// rig today lands through origin, whether the cutover repoints origin's URL or
-// attaches a separately named remote.
+// done's branch push — should use, read from the rig's Forgejo settings
+// (merge_queue.forgejo.remote_url, gt-fn9e6.3) instead of assuming origin
+// (gt-fn9e6.9). It opens the rig's bare repository itself; ResolveLandingRemoteIn
+// is the same resolution over a caller-supplied git seam.
 func ResolveLandingRemote(townRoot, rigName string) string {
+	return ResolveLandingRemoteIn(git.NewGit(filepath.Join(townRoot, rigName, ".repo.git")), townRoot, rigName)
+}
+
+// ResolveLandingRemoteIn is ResolveLandingRemote's rule over repo. It returns
+// the remote in the rig's bare repository whose URL is the configured one, and
+// LandingRemoteOrigin when the rig has no Forgejo block, names no URL, or has
+// no such remote — so every rig today lands through origin, whether the cutover
+// repoints origin's URL or attaches a separately named remote.
+func ResolveLandingRemoteIn(repo LandingRemotes, townRoot, rigName string) string {
 	fc := ResolveForgejoConfig(townRoot, rigName)
 	if fc == nil || strings.TrimSpace(fc.RemoteURL) == "" {
 		return LandingRemoteOrigin
 	}
-	bare := git.NewGit(filepath.Join(townRoot, rigName, ".repo.git"))
-	remotes, _ := bare.Remotes()
+	remotes, _ := repo.Remotes()
 	urls := make(map[string]string, len(remotes))
 	for _, name := range remotes {
-		if url, err := bare.RemoteURL(name); err == nil {
+		if url, err := repo.RemoteURL(name); err == nil {
 			urls[name] = url
 		}
 	}

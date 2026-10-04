@@ -56,8 +56,9 @@ type Work struct {
 	BeadID string
 	Rig    string
 	Branch string
-	// Head is the commit gt done pushed and verified on origin/<Branch>.
-	// Land merges this commit, never whatever the branch holds later.
+	// Head is the commit gt done pushed and verified on the rig's landing
+	// remote (gt-fn9e6.9), origin by default. Land merges this commit, never
+	// whatever the branch holds later.
 	Head   string
 	Target string
 	Worker string

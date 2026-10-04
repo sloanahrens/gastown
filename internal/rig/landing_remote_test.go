@@ -1,6 +1,7 @@
 package rig
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -43,6 +44,77 @@ func TestResolveLandingRemote_ConfiguredButNoRepoIsOrigin(t *testing.T) {
 	}
 	if got := ResolveLandingRemote(townRoot, "gastown"); got != "origin" {
 		t.Errorf("ResolveLandingRemote() = %q, want origin (no matching remote exists)", got)
+	}
+}
+
+// landingRemotesFake answers the two git reads ResolveLandingRemoteIn makes,
+// so the resolution is unit-testable without starting git: the daemon calls it
+// through its own git seam (gt-fn9e6.9).
+type landingRemotesFake struct {
+	remotes []string
+	urls    map[string]string
+	calls   int
+}
+
+func (f *landingRemotesFake) Remotes() ([]string, error) {
+	f.calls++
+	return f.remotes, nil
+}
+
+func (f *landingRemotesFake) RemoteURL(name string) (string, error) {
+	if url, ok := f.urls[name]; ok {
+		return url, nil
+	}
+	return "", fmt.Errorf("no such remote %q", name)
+}
+
+// TestResolveLandingRemoteIn_ReadsTheRigRemotes: the resolution reads the
+// rig's remotes through the git surface it is handed, so the daemon's git-free
+// unit tier gets the same answer the production wrapper gives (gt-fn9e6.9).
+func TestResolveLandingRemoteIn_ReadsTheRigRemotes(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigDir := filepath.Join(townRoot, "gastown")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rigConfig := `{
+  "type": "rig",
+  "version": 1,
+  "name": "gastown",
+  "default_branch": "main",
+  "merge_queue": {"forgejo": {"remote_url": "https://forgejo.example/gastown/gastown.git"}}
+}`
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(rigConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repo := &landingRemotesFake{
+		remotes: []string{"origin", "forgejo"},
+		urls: map[string]string{
+			"origin":  "https://github.com/acme/gastown.git",
+			"forgejo": "git@forgejo.example:gastown/gastown.git",
+		},
+	}
+	if got := ResolveLandingRemoteIn(repo, townRoot, "gastown"); got != "forgejo" {
+		t.Errorf("ResolveLandingRemoteIn() = %q, want forgejo (the remote whose URL is the configured one)", got)
+	}
+}
+
+// TestResolveLandingRemoteIn_UnconfiguredReadsNoRemotes: a rig with no Forgejo
+// block lands through origin, and the resolution must not read the repository
+// to learn that — the daemon's unit tier would be starting git for nothing.
+func TestResolveLandingRemoteIn_UnconfiguredReadsNoRemotes(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "gastown"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	repo := &landingRemotesFake{}
+	if got := ResolveLandingRemoteIn(repo, townRoot, "gastown"); got != "origin" {
+		t.Errorf("ResolveLandingRemoteIn() = %q, want origin", got)
+	}
+	if repo.calls != 0 {
+		t.Errorf("read the repository %d time(s) for a rig with no Forgejo block; want none", repo.calls)
 	}
 }
 

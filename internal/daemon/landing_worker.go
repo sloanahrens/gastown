@@ -375,8 +375,9 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	if _, err := os.Stat(repo); err != nil {
 		return nil, fmt.Errorf("rig repository %s: %w", repo, err)
 	}
-	// The rig's configured landing remote (gt-fn9e6.9).
-	landingRemote := rig.ResolveLandingRemote(townRoot, rigName)
+	// The rig's configured landing remote (gt-fn9e6.9), read through the
+	// daemon's git seam so the unit tier starts no git.
+	landingRemote := rig.ResolveLandingRemoteIn(d.gitAt(repo), townRoot, rigName)
 	// Fail closed on a config.json that exists but does not decode: the file
 	// names no branch, so the rig gets no worker and no landing until it is
 	// fixed. Construction is the seam because the manager retries it every
@@ -458,7 +459,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	// shadow mode (slice 8), and the PR merger replaces the force-push that
 	// writes the target.
 	if forgejoCfg := rig.ResolveForgejoConfig(townRoot, rigName); forgejoCfg != nil {
-		candidate, merger, err := d.newForgejoLanding(rigName, forgejoCfg, repo, landings, cfg)
+		candidate, merger, err := d.newForgejoLanding(rigName, landingRemote, forgejoCfg, repo, landings, cfg)
 		if err != nil {
 			return nil, err
 		}
@@ -550,7 +551,12 @@ const forgejoVerifyWindow = 20
 //
 // One client serves both halves — the same landing bot pushes the candidate,
 // posts om's verdict and merges the PR (design, "Bots and tokens").
-func (d *Daemon) newForgejoLanding(rigName string, fj *config.ForgejoConfig, repo string, landings *land.LandingsFile, cfg *LandingWorkerConfig) (*land.CandidateGate, *land.ForgejoMerger, error) {
+//
+// remote is the rig's configured landing remote (gt-fn9e6.9): the candidate
+// has to reach the Forgejo instance whose CI gates it, so an assumed origin
+// would push it to GitHub and the gate would wait on a verdict that never
+// comes (design, "`gt done` pushes to Forgejo").
+func (d *Daemon) newForgejoLanding(rigName, remote string, fj *config.ForgejoConfig, repo string, landings *land.LandingsFile, cfg *LandingWorkerConfig) (*land.CandidateGate, *land.ForgejoMerger, error) {
 	owner, repoName, err := land.RepoFromRemoteURL(fj.RemoteURL)
 	if err != nil {
 		return nil, nil, err
@@ -586,6 +592,7 @@ func (d *Daemon) newForgejoLanding(rigName string, fj *config.ForgejoConfig, rep
 		Owner:    owner,
 		RepoName: repoName,
 		Workflow: fj.GateWorkflowName(),
+		Remote:   remote,
 		Out:      out,
 	}
 	d.verifyForgejoGate(rigName, gate, repo, fj.GateWorkflowName(), landings)

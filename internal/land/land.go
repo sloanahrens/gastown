@@ -984,7 +984,8 @@ func policyRejection(issue *beads.Issue) *Rejection {
 	return nil
 }
 
-// checkHeadPushed asserts origin/<branch> carries the declared head, so Land
+// checkHeadPushed asserts <remote>/<branch> — the rig's configured landing
+// remote (gt-fn9e6.9), origin by default — carries the declared head, so Land
 // never merges a commit the author did not push (gt-sda9).
 func (l *Lander) checkHeadPushed(g Repo, w Work) (*Rejection, error) {
 	remote := l.remote()
