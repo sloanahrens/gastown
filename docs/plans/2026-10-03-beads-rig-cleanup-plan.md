@@ -1,4 +1,4 @@
-> Status: draft for Sloan's approval, 2026-10-03. Slice beads are filed only after approval. Design: `2026-10-03-beads-rig-cleanup-design.md`.
+> Status: approved 2026-10-03; implemented by the slice beads be-1r0.1 to be-1r0.12 (be rig). Historical once merged; not maintained. Design: `2026-10-03-beads-rig-cleanup-design.md`.
 
 # Beads rig cleanup: implementation plan
 
@@ -27,8 +27,8 @@ Order: A1, A3 and A4 are independent. A2 follows A1. A5 follows A4. B1 follows A
 - Any Dolt trouble: follow the town CLAUDE.md (diagnostics before any restart), not these slices.
 - No slice runs `bd sync`, removes anything under `.dolt-data`, or sets `BD_IGNORE_SCHEMA_SKEW`.
 
-## Open before filing beads
+## Added after approval
 
-1. Sloan approves the design and this plan.
-2. Sloan answers the mayor/rig hooks question.
-3. Sloan confirms or changes the Q7 thresholds.
+- be-1r0.12 (P1): the `cmd/bd` integration tier does not compile (a test imports `internal/storage/backends`, deleted by be-xu2.2). B2 (be-1r0.7) depends on it.
+- B5's acceptance carries one extra line: cherry-pick `refs/archive/ghoul-be-4mx` only if the pilot shows the pre-push hook blocks `refs/notes/om`.
+- The Q7 thresholds in the design were approved as written.

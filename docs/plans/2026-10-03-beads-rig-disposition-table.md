@@ -1,4 +1,4 @@
-> Status: DRAFT for Sloan's approval, 2026-10-03. Slice A1 (be-1r0.1). Nothing in this table has been closed yet.
+> Status: approved 2026-10-03 (slice A1, be-1r0.1); the three closes below were made, the rest is a snapshot of that day. Historical once merged; not maintained.
 
 # Beads rig: disposition of the 58 open `be-` beads
 

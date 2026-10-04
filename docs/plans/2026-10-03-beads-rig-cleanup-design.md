@@ -1,4 +1,4 @@
-> Status: draft for Sloan's approval, 2026-10-03. Nothing here has been executed except the two crew-clone fast-forwards listed under "Already done". Historical once merged; not maintained.
+> Status: approved 2026-10-03; implemented by the slice beads under be-1r0 (be rig). Historical once merged; not maintained.
 
 # Cleaning up the beads rig, and the road to turning it on
 
@@ -42,9 +42,13 @@ Sloan's intent: work toward a beads rig that works. Not ready to turn it on; unk
 - crew/sloan (beads): main fast-forwarded 9177014 to 406540b; the 99 MB executable `bd` build in it set to mode 644 (hq-4exu7 precedent). All 13 local branches have zero unmerged patches. No branches deleted.
 - crew/sloan-be-fasttests: fast-forwarded 6494999 to 406540b before Sloan had confirmed it was dormant. Reversible (reflog HEAD@{1}); the branch had no unmerged patches and a clean tree.
 
-## Open decision
+## Decided after approval (grilling round 2, 2026-10-03)
 
-mayor/rig is 96 behind and carries older-generation `.githooks/*` text. Restoring main's version (`git checkout -- .githooks .claude/settings.json`, then `git merge --ff-only origin/main`) is very likely right but changes that clone's hooks. Sloan to confirm. `bd.QUARANTINED-v66-do-not-run` stays quarantined until Sloan says otherwise.
+- **mayor/rig hooks.** The five `.githooks/*` edits were a 74-line variant without timeout validation, written 09-09 13:56, the same minute as the quarantined v66 `bd`: debris from that incident, not a deliberate edit (`HEAD` and `origin/main` have the identical 100-line version). Restored, fast-forwarded to 406540b; the discarded copies are in `~/gt/beads/.relics-20261003/mayor-rig-dirty/`. `bd.QUARANTINED-v66-do-not-run` stays quarantined, non-executable.
+- **Stale fork branches.** Nine `polecat/*` tips on the fork each had a patch `git cherry` could not match on main, though most of their beads landed through a different branch. Every tip was archived as `refs/archive/<seat>-<bead>` in the rig repo (verified by full hash) before eight remote branches were deleted. `polecat/ghoul/be-4mx+mtwcrty9` stays on the fork.
+- **be-4mx (ghoul).** Deferred. Cherry-pick `refs/archive/ghoul-be-4mx` only if the B5 pilot shows the pre-push hook blocks `refs/notes/om`.
+- **Seats.** All seven are gone (four without force; rust, vault and mutant with `--force` on Sloan's explicit approval, since the refusals were bookkeeping only). `gt rig list`: beads Polecats 0.
+- **Landing.** This design, the plan and the disposition table land as docs through the landing path, as the polecat-cleanup docs did (gt-kqzns).
 
 ## Design
 
