@@ -155,7 +155,7 @@ func (b fakeBareRepo) VerifyPushedCommit(remote, branch, commit string) error {
 func TestVerifyPushLandedFailsClosedWhenOriginLacksTheCommit(t *testing.T) {
 	t.Parallel()
 	repo := newFakeDoneRepo()
-	err := verifyPushLandedVia(repo, fakeBareRepo{origin: repo}, doneTestBranch, "feature1")
+	err := verifyPushLandedVia(repo, fakeBareRepo{origin: repo}, "origin", doneTestBranch, "feature1")
 	if err == nil {
 		t.Fatal("verifyPushLanded = nil, want failure: origin never received the commit")
 	}
@@ -172,10 +172,10 @@ func TestVerifyPushLandedPassesWhenOriginHasTheCommit(t *testing.T) {
 	t.Parallel()
 	repo := newFakeDoneRepo()
 	repo.origin[doneTestBranch] = "feature1"
-	if err := verifyPushLandedVia(repo, nil, doneTestBranch, " feature1\n"); err != nil {
+	if err := verifyPushLandedVia(repo, nil, "origin", doneTestBranch, " feature1\n"); err != nil {
 		t.Fatalf("verifyPushLanded = %v, want nil", err)
 	}
-	if err := verifyPushLandedVia(repo, nil, doneTestBranch, ""); err != nil {
+	if err := verifyPushLandedVia(repo, nil, "origin", doneTestBranch, ""); err != nil {
 		t.Fatalf("verifyPushLanded with no commit named = %v, want HEAD verified", err)
 	}
 }
@@ -188,11 +188,11 @@ func TestVerifyPushLandedFallsBackToTheBareRepo(t *testing.T) {
 	repo := newFakeDoneRepo()
 	repo.origin[doneTestBranch] = "feature1"
 	repo.verifyErr = errors.New("fatal: 'origin' does not appear to be a git repository")
-	if err := verifyPushLandedVia(repo, fakeBareRepo{origin: repo}, doneTestBranch, "feature1"); err != nil {
+	if err := verifyPushLandedVia(repo, fakeBareRepo{origin: repo}, "origin", doneTestBranch, "feature1"); err != nil {
 		t.Fatalf("verifyPushLanded = %v, want nil via the bare repo", err)
 	}
 	repo.verifyErr = errors.New("fatal: 'origin' does not appear to be a git repository")
-	if err := verifyPushLandedVia(repo, nil, doneTestBranch, "feature1"); err == nil {
+	if err := verifyPushLandedVia(repo, nil, "origin", doneTestBranch, "feature1"); err == nil {
 		t.Fatal("verifyPushLanded = nil with no way to query origin, want failure")
 	}
 }
@@ -210,12 +210,12 @@ func TestLandBranchPushProceedsWhenOriginAlreadyHasTheCommit(t *testing.T) {
 		if verifyCalls == 1 {
 			return errors.New("verified_push_failed: connection reset")
 		}
-		return verifyPushLandedVia(repo, nil, doneTestBranch, "feature1")
+		return verifyPushLandedVia(repo, nil, "origin", doneTestBranch, "feature1")
 	}
 	pushCalls := 0
 	push := func() error {
 		pushCalls++
-		return pushBranchToOrigin(repo, t.TempDir(), "gastown", doneTestBranch, "feature1", "origin/main")
+		return pushBranchToOrigin(repo, "origin", t.TempDir(), "gastown", doneTestBranch, "feature1", "origin/main")
 	}
 	recovered, err := landBranchPush(push, verify, noSleep, pushLandingRetryDelays)
 	if err != nil || !recovered {
@@ -235,9 +235,9 @@ func TestLandBranchPushRejectingRemoteStillFails(t *testing.T) {
 	townRoot := t.TempDir()
 	recovered, err := landBranchPush(
 		func() error {
-			return pushBranchToOrigin(repo, townRoot, "gastown", doneTestBranch, "feature1", "origin/main")
+			return pushBranchToOrigin(repo, "origin", townRoot, "gastown", doneTestBranch, "feature1", "origin/main")
 		},
-		func() error { return verifyPushLanded(repo, townRoot, "gastown", doneTestBranch, "feature1") },
+		func() error { return verifyPushLanded(repo, "origin", townRoot, "gastown", doneTestBranch, "feature1") },
 		noSleep,
 		pushLandingRetryDelays,
 	)
@@ -246,5 +246,25 @@ func TestLandBranchPushRejectingRemoteStillFails(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "would declare ready to land") {
 		t.Errorf("error = %q, want it to say what was not declared", err)
+	}
+}
+
+// TestLandingPushUsesTheConfiguredRemote is the gt-fn9e6.9 guard: the push and
+// the read-back name the rig's configured landing remote, not a hard-coded
+// origin, so a rig on a separately named Forgejo remote pushes there.
+func TestLandingPushUsesTheConfiguredRemote(t *testing.T) {
+	t.Parallel()
+	repo := newFakeDoneRepo()
+	if err := pushBranchToOrigin(repo, "forgejo", t.TempDir(), "gastown", doneTestBranch, "feature1", "origin/main"); err != nil {
+		t.Fatalf("pushBranchToOrigin = %v, want nil", err)
+	}
+	if len(repo.pushRemotes) != 1 || repo.pushRemotes[0] != "forgejo" {
+		t.Fatalf("push remotes = %v, want [forgejo]", repo.pushRemotes)
+	}
+	if err := verifyPushLandedVia(repo, nil, "forgejo", doneTestBranch, "feature1"); err != nil {
+		t.Fatalf("verifyPushLandedVia = %v, want nil", err)
+	}
+	if len(repo.verifyRemotes) == 0 || repo.verifyRemotes[0] != "forgejo" {
+		t.Errorf("verify remotes = %v, want the read-back to name forgejo", repo.verifyRemotes)
 	}
 }

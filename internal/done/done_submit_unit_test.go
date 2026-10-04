@@ -59,6 +59,13 @@ type fakeDoneRepo struct {
 
 	pushes   []string // "<branch> <sha> lease=<expected>"
 	verified []string // targets VerifyPushedCommitReachableFromPushTarget ran against
+
+	// pushRemotes and verifyRemotes are the remote names the push and the
+	// read-back were asked about, so a test can pin that the landing path
+	// uses the rig's configured remote rather than a hard-coded origin
+	// (gt-fn9e6.9).
+	pushRemotes   []string
+	verifyRemotes []string
 }
 
 func newFakeDoneRepo() *fakeDoneRepo {
@@ -140,6 +147,7 @@ func (f *fakeDoneRepo) VerifyPushedCommitReachableFromPushTarget(remote, branch,
 func (f *fakeDoneRepo) VerifyPushedCommit(remote, branch, commit string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.verifyRemotes = append(f.verifyRemotes, remote)
 	if f.verifyErr != nil {
 		return f.verifyErr
 	}
@@ -181,6 +189,7 @@ func (f *fakeDoneRepo) PushForceWithLease(remote, refspec, branchRef, expectedSH
 	_, dst, _ := strings.Cut(refspec, ":")
 	branch := strings.TrimPrefix(dst, "refs/heads/")
 	f.pushes = append(f.pushes, fmt.Sprintf("%s %s lease=%s", branch, f.head, expectedSHA))
+	f.pushRemotes = append(f.pushRemotes, remote)
 	if f.origin[branch] != expectedSHA {
 		return fmt.Errorf("! [rejected] %s (stale info)", branch)
 	}

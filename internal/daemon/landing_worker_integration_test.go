@@ -42,7 +42,7 @@ func TestIntegrationPostLandRunUsesAWorktreeAtTheLandedCommitUnderTheSlot(t *tes
 	lwGit(t, repo, "add", ".")
 	lwGit(t, repo, "commit", "-q", "-m", "landed")
 	commit := lwGit(t, repo, "rev-parse", "HEAD")
-	run := postLandRun(repo, filepath.Join(root, "work"), filepath.Join(root, "logs"), townRoot, "gastown", time.Minute)
+	run := postLandRun(repo, filepath.Join(root, "work"), filepath.Join(root, "logs"), townRoot, "gastown", "origin", time.Minute)
 
 	res := run(context.Background(), "cat marker && echo slow tier failed && exit 3", landworker.PostLand{BeadID: "gt-a", Commit: commit})
 	if res.Err != nil || res.ExitCode != 3 || !strings.Contains(res.Tail, "landed") || !strings.Contains(res.Tail, "slow tier failed") {
@@ -124,7 +124,7 @@ func TestIntegrationPostLandRunFetchesADirectPush(t *testing.T) {
 		t.Fatal(err)
 	}
 	stubSlotContainers()
-	run := postLandRun(bare, filepath.Join(root, "work"), filepath.Join(root, "logs"), townRoot, "gastown", time.Minute)
+	run := postLandRun(bare, filepath.Join(root, "work"), filepath.Join(root, "logs"), townRoot, "gastown", "origin", time.Minute)
 
 	res := run(context.Background(), "cat pushed.txt", landworker.PostLand{Commit: pushed, Target: "main", Direct: true, From: from})
 	if res.Err != nil || res.ExitCode != 0 || !strings.Contains(res.Tail, "direct") {
@@ -321,7 +321,7 @@ func TestIntegrationRedMainRevertsTheCulpritThroughLand(t *testing.T) {
 	state := fileMainState{path: RedMainStatePath(town, "gastown")}
 	var status []string
 	redMain := &landworker.RedMain{Rig: "gastown", Beads: bd, Logf: t.Logf, State: state, Landings: landings,
-		Revert: postLandRevert(bare, workRoot),
+		Revert: postLandRevert(bare, workRoot, "origin"),
 		// The landing's real commit range, read out of the rig's own repo as
 		// the daemon wires it: red-main only reverts a landing whose diff can
 		// have moved what failed (gt-40so9).

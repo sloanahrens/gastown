@@ -318,3 +318,48 @@ func TestRemoteRefsContaining(t *testing.T) {
 	}
 	s.noUnscripted(t)
 }
+
+// TestRemoteForRefRecognisesKnownRemotes: a rig whose landing remote is not
+// named origin must still have its remote-tracking refs read as remotes, not
+// mistaken for local branches (gt-fn9e6.9).
+func TestRemoteForRefRecognisesKnownRemotes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		ref   string
+		known []string
+		want  string
+	}{
+		{"origin/main", nil, "origin"},
+		{"upstream/main", nil, "upstream"},
+		{"forgejo/main", nil, ""},
+		{"forgejo/main", []string{"forgejo"}, "forgejo"},
+		{"feature/foo", []string{"forgejo"}, ""},
+		{"main", []string{"forgejo"}, ""},
+		{"", []string{"forgejo"}, ""},
+	}
+	for _, tc := range tests {
+		if got := RemoteForRef(tc.ref, tc.known...); got != tc.want {
+			t.Errorf("RemoteForRef(%q, %v) = %q, want %q", tc.ref, tc.known, got, tc.want)
+		}
+	}
+}
+
+// TestSameRemoteURLFoldsEquivalentForms: a rig's configured Forgejo URL is
+// matched against the URL git has stored, which may be written another way.
+func TestSameRemoteURLFoldsEquivalentForms(t *testing.T) {
+	t.Parallel()
+	same := [][2]string{
+		{"https://forgejo.example/gastown/gastown", "https://forgejo.example/gastown/gastown.git"},
+		{"https://forgejo.example/gastown/gastown/", "https://forgejo.example/gastown/gastown"},
+		{"git@forgejo.example:gastown/gastown.git", "https://forgejo.example/gastown/gastown"},
+		{"ssh://git@forgejo.example/gastown/gastown", "git@forgejo.example:gastown/gastown.git"},
+	}
+	for _, pair := range same {
+		if !SameRemoteURL(pair[0], pair[1]) {
+			t.Errorf("SameRemoteURL(%q, %q) = false, want true", pair[0], pair[1])
+		}
+	}
+	if SameRemoteURL("https://forgejo.example/gastown/gastown", "https://github.com/acme/gastown.git") {
+		t.Error("different repositories must not compare equal")
+	}
+}

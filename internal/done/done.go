@@ -1154,10 +1154,12 @@ func submitForLanding(r *doneRun) error {
 		return err
 	}
 	// In fork-backed rigs the clean base is upstream/<target>, never the
-	// fork's origin/<target>.
+	// fork's origin/<target>. landingRemote is the rig's configured one
+	// (gt-fn9e6.9).
 	repo := r.deps.repo
-	baseRef := repo.CleanBaseRef("origin", r.defaultBranch, target)
-	fetchRemote := git.RemoteForRef(baseRef)
+	landingRemote := rig.ResolveLandingRemote(r.townRoot, r.rigName)
+	baseRef := repo.CleanBaseRef(landingRemote, r.defaultBranch, target)
+	fetchRemote := git.RemoteForRef(baseRef, landingRemote)
 	if fetchRemote == "" {
 		fetchRemote = "origin"
 	}
@@ -1426,24 +1428,28 @@ func runDoneLocalGate(r *doneRun, head string) error {
 	return nil
 }
 
-// pushBranchForLanding pushes head to origin/<branch> under a lease on the
-// tip origin had, then asserts origin holds exactly head (gt-2wqt). A rebased
-// or squashed branch replaces an earlier attempt's tip; a concurrent push to
-// the branch makes the lease fail instead of being clobbered. One retry
-// absorbs a push that errored while origin took the objects (gt-0opm).
+// pushBranchForLanding pushes head to remote/<branch> under a lease on the
+// tip the remote had, then asserts the remote holds exactly head (gt-2wqt). A
+// rebased or squashed branch replaces an earlier attempt's tip; a concurrent
+// push to the branch makes the lease fail instead of being clobbered. One retry
+// absorbs a push that errored while the remote took the objects (gt-0opm).
+//
+// The remote is the rig's configured landing remote (gt-fn9e6.9), not an
+// assumed origin.
 func pushBranchForLanding(r *doneRun, sourceBD beads.Client, head, baseRef string) error {
-	fmt.Printf("Pushing branch to origin...\n")
+	remote := rig.ResolveLandingRemote(r.townRoot, r.rigName)
+	fmt.Printf("Pushing branch to %s...\n", remote)
 	var lastPushErr error
 	attempt := func() error {
-		lastPushErr = pushBranchToOrigin(r.deps.repo, r.townRoot, r.rigName, r.branch, head, baseRef)
+		lastPushErr = pushBranchToOrigin(r.deps.repo, remote, r.townRoot, r.rigName, r.branch, head, baseRef)
 		return lastPushErr
 	}
 	firstErr := attempt()
 	if firstErr != nil {
-		style.PrintWarning("push failed for branch '%s': %v — re-checking origin before treating the work as unlanded", r.branch, firstErr)
+		style.PrintWarning("push failed for branch '%s': %v — re-checking %s before treating the work as unlanded", r.branch, firstErr, remote)
 	}
 	recovered, verifyErr := landBranchPush(attempt,
-		func() error { return verifyPushLanded(r.deps.repo, r.townRoot, r.rigName, r.branch, head) },
+		func() error { return verifyPushLanded(r.deps.repo, remote, r.townRoot, r.rigName, r.branch, head) },
 		r.deps.sleep, r.deps.retryDelays)
 	if verifyErr != nil {
 		noteVerifiedPushFailure(sourceBD, r.cwd, r.issueID, r.branch, head, verifyErr)
@@ -1454,10 +1460,10 @@ func pushBranchForLanding(r *doneRun, sourceBD beads.Client, head, baseRef strin
 		return doneExit(doneExitPushUnverified, msg, verifyErr)
 	}
 	if recovered && firstErr != nil {
-		fmt.Printf("%s Branch pushed to origin (recovered: the first attempt reported an error, origin has commit %s)\n",
-			style.Bold.Render("✓"), ShortSHA(head))
+		fmt.Printf("%s Branch pushed to %s (recovered: the first attempt reported an error, %s has commit %s)\n",
+			style.Bold.Render("✓"), remote, remote, ShortSHA(head))
 	} else {
-		fmt.Printf("%s Branch pushed to origin\n", style.Bold.Render("✓"))
+		fmt.Printf("%s Branch pushed to %s\n", style.Bold.Render("✓"), remote)
 	}
 	return nil
 }
@@ -1643,20 +1649,20 @@ func noteVerifiedPushFailure(sourceBD beads.Client, cwd, issueID, branch, commit
 
 // verifyPushLanded asserts that the remote branch tip is exactly the commit
 // gt done is about to declare ready to land (gt-2wqt). It is the only source
-// of the "Branch pushed" claim: a push that exits 0 while origin keeps an older
-// tip is indistinguishable from success until ls-remote is compared against
-// HEAD.
+// of the "Branch pushed" claim: a push that exits 0 while the remote keeps an
+// older tip is indistinguishable from success until ls-remote is compared
+// against HEAD.
 //
 // Every error return is fatal to the submission: a ready mark naming a commit
-// origin does not have would make the landing worker merge a tree that lacks
-// the fix.
-func verifyPushLanded(g doneRepo, townRoot, rigName, branch, commit string) error {
+// the remote does not have would make the landing worker merge a tree that
+// lacks the fix.
+func verifyPushLanded(g doneRepo, remote, townRoot, rigName, branch, commit string) error {
 	var bare pushVerifier
 	bareRepoPath := filepath.Join(townRoot, rigName, ".repo.git")
 	if _, statErr := os.Stat(bareRepoPath); statErr == nil {
 		bare = git.NewGitWithDir(bareRepoPath, "")
 	}
-	return verifyPushLandedVia(g, bare, branch, commit)
+	return verifyPushLandedVia(g, bare, remote, branch, commit)
 }
 
 // pushVerifier asks a remote whether it holds commit on branch.
@@ -1665,8 +1671,8 @@ type pushVerifier interface {
 }
 
 // verifyPushLandedVia is verifyPushLanded with the rig's bare repo given
-// (nil when the rig has none).
-func verifyPushLandedVia(g doneRepo, bare pushVerifier, branch, commit string) error {
+// (nil when the rig has none) and the landing remote named.
+func verifyPushLandedVia(g doneRepo, bare pushVerifier, remote, branch, commit string) error {
 	commit = strings.TrimSpace(commit)
 	if commit == "" {
 		head, headErr := g.Rev("HEAD")
@@ -1675,7 +1681,7 @@ func verifyPushLandedVia(g doneRepo, bare pushVerifier, branch, commit string) e
 		}
 		commit = strings.TrimSpace(head)
 	}
-	verifyErr := g.VerifyPushedCommit("origin", branch, commit)
+	verifyErr := g.VerifyPushedCommit(remote, branch, commit)
 	if verifyErr == nil {
 		return nil
 	}
@@ -1692,42 +1698,45 @@ func verifyPushLandedVia(g doneRepo, bare pushVerifier, branch, commit string) e
 	// reported a verified push that never happened. A local ref is never
 	// evidence of a remote push; only a query of the remote is.
 	if bare != nil {
-		if bareErr := bare.VerifyPushedCommit("origin", branch, commit); bareErr == nil {
+		if bareErr := bare.VerifyPushedCommit(remote, branch, commit); bareErr == nil {
 			return nil
 		}
 	}
-	return describePushVerificationFailure(g, branch, commit, verifyErr)
+	return describePushVerificationFailure(g, remote, branch, commit, verifyErr)
 }
 
 // describePushVerificationFailure renders a failed push assertion with the full
 // local and remote SHAs (gt-2wqt): the operator has to see both to know how far
-// behind origin is before the work is re-pushed.
-func describePushVerificationFailure(g doneRepo, branch, commit string, cause error) error {
-	remoteTip, tipErr := g.PushRemoteBranchTip("origin", branch)
+// behind the landing remote is before the work is re-pushed.
+func describePushVerificationFailure(g doneRepo, remote, branch, commit string, cause error) error {
+	remoteTip, tipErr := g.PushRemoteBranchTip(remote, branch)
 	if tipErr != nil || strings.TrimSpace(remoteTip) == "" {
-		remoteTip = "(missing on origin)"
+		remoteTip = "(missing on " + remote + ")"
 	}
 	return fmt.Errorf("verified_push_failed: branch %s is not at the commit gt done would declare ready to land\n"+
 		"  local HEAD:  %s\n"+
-		"  origin/%s:  %s\n"+
-		"  %v", branch, commit, branch, remoteTip, cause)
+		"  %s/%s:  %s\n"+
+		"  %v", branch, commit, remote, branch, remoteTip, cause)
 }
 
-// pushBranchToOrigin pushes head to origin/<branch> under a lease on the tip
-// origin has now ("" = the branch must not exist yet), falling back to the
+// pushBranchToOrigin pushes head to remote/<branch> under a lease on the tip
+// the remote has now ("" = the branch must not exist yet), falling back to the
 // rig's bare repo when the worktree's git context cannot reach the remote
 // (GH #1348). A tip already at head is not re-sent. The retry in
 // landBranchPush calls this again, and it re-reads the tip each time.
 //
+// remote is the rig's configured landing remote (gt-fn9e6.9).
+//
 // A lease alone would let gt done replace any tip it had just read, including
-// another session's rework of the same branch. So when origin's tip is not an
-// ancestor of head, the change-sets are compared first (recoverDivergedPush):
-// a rebase or a rework on top of origin's commits is pushed over under the
-// lease, and real divergence is refused (gt-bf5x, gt-i0z3).
-func pushBranchToOrigin(g doneRepo, townRoot, rigName, branch, head, baseRef string) error {
-	expected, err := g.PushRemoteBranchTip("origin", branch)
+// another session's rework of the same branch. So when the remote's tip is not
+// an ancestor of head, the change-sets are compared first
+// (recoverDivergedPush): a rebase or a rework on top of the remote's commits is
+// pushed over under the lease, and real divergence is refused (gt-bf5x,
+// gt-i0z3).
+func pushBranchToOrigin(g doneRepo, remote, townRoot, rigName, branch, head, baseRef string) error {
+	expected, err := g.PushRemoteBranchTip(remote, branch)
 	if err != nil {
-		return fmt.Errorf("reading origin/%s before the push: %w", branch, err)
+		return fmt.Errorf("reading %s/%s before the push: %w", remote, branch, err)
 	}
 	if expected == head {
 		return nil
@@ -1735,19 +1744,19 @@ func pushBranchToOrigin(g doneRepo, townRoot, rigName, branch, head, baseRef str
 	refspec := "refs/heads/" + branch + ":refs/heads/" + branch
 	if expected != "" {
 		if contained, ancErr := g.IsAncestor(expected, head); ancErr != nil || !contained {
-			recovered, diagnosis, recoverErr := recoverDivergedPush(g, "origin", refspec, branch, baseRef)
+			recovered, diagnosis, recoverErr := recoverDivergedPush(g, remote, refspec, branch, baseRef)
 			switch {
 			case recovered:
-				fmt.Printf("%s Replaced origin/%s: %s\n", style.Bold.Render("✓"), branch, diagnosis)
+				fmt.Printf("%s Replaced %s/%s: %s\n", style.Bold.Render("✓"), remote, branch, diagnosis)
 				return nil
 			case recoverErr != nil:
-				return fmt.Errorf("origin/%s has diverged from this branch (%s): %w", branch, diagnosis, recoverErr)
+				return fmt.Errorf("%s/%s has diverged from this branch (%s): %w", remote, branch, diagnosis, recoverErr)
 			default:
-				return fmt.Errorf("refusing to push over origin/%s: %s", branch, diagnosis)
+				return fmt.Errorf("refusing to push over %s/%s: %s", remote, branch, diagnosis)
 			}
 		}
 	}
-	err = g.PushForceWithLease("origin", refspec, "refs/heads/"+branch, expected)
+	err = g.PushForceWithLease(remote, refspec, "refs/heads/"+branch, expected)
 	if err == nil {
 		return nil
 	}
@@ -1757,7 +1766,7 @@ func pushBranchToOrigin(g doneRepo, townRoot, rigName, branch, head, baseRef str
 		return err
 	}
 	bareGit := git.NewGitWithDir(bareRepoPath, "")
-	if bareErr := bareGit.PushForceWithLease("origin", refspec, "refs/heads/"+branch, expected); bareErr != nil {
+	if bareErr := bareGit.PushForceWithLease(remote, refspec, "refs/heads/"+branch, expected); bareErr != nil {
 		style.PrintWarning("bare repo push also failed: %v", bareErr)
 		return bareErr
 	}
