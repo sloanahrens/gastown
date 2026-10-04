@@ -89,6 +89,7 @@ func dashBadgeLabels(labels []string) []string {
 type dashSeat struct {
 	Rig, Name string
 	Session   string
+	RigParked bool // the polecat's rig is parked
 	Item      polecatInventoryItem
 	Issue     *beads.Issue // the assigned work, nil when it holds none
 }
@@ -170,7 +171,7 @@ func buildDashPolecats(in dashPolecatInputs) []dashboard.Polecat {
 
 	out := make([]dashboard.Polecat, 0, len(in.Seats))
 	for _, s := range in.Seats {
-		p := dashboard.Polecat{Rig: s.Rig, Name: s.Name, CountsTowardCapacity: s.Item.Disposition.CountsTowardCapacity}
+		p := dashboard.Polecat{Rig: s.Rig, Name: s.Name, RigParked: s.RigParked, CountsTowardCapacity: s.Item.Disposition.CountsTowardCapacity}
 		if x := record[s.Rig+"/"+s.Name]; x != nil {
 			p.Landed24h, p.Approved24h = x.landed, x.approved
 			if x.scoreN > 0 {
@@ -311,6 +312,7 @@ func dashSeats(townRoot string, sessionNames []string, sessionsKnown bool, cache
 	var seats []dashSeat
 	for _, rig := range rigs {
 		rigPath := filepath.Join(townRoot, rig)
+		rigParked := IsRigParked(townRoot, rig)
 		names, err := listPolecatDirectoryNames(rigPath)
 		if err != nil {
 			return nil, err
@@ -360,7 +362,7 @@ func dashSeats(townRoot string, sessionNames []string, sessionsKnown bool, cache
 					cache.put(id, key, item)
 				}
 			}
-			seats = append(seats, dashSeat{Rig: rig, Name: name, Session: session.PolecatSessionName(reg.PrefixForRig(rig), name), Item: item, Issue: active[name]})
+			seats = append(seats, dashSeat{Rig: rig, Name: name, Session: session.PolecatSessionName(reg.PrefixForRig(rig), name), RigParked: rigParked, Item: item, Issue: active[name]})
 		}
 	}
 	return seats, nil

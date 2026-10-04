@@ -34,6 +34,9 @@ type QueueBead struct {
 	Labels    []string  `json:"labels,omitempty"`
 	CreatedAt time.Time `json:"created_at,omitzero"`
 	BlockedBy []string  `json:"blocked_by,omitempty"`
+	// RigParked is true when the store's rig is parked: the dispatcher does not
+	// serve a parked rig, so none of its beads is dispatchable however well shaped.
+	RigParked bool `json:"rig_parked,omitempty"`
 	// Shape is the spec dispatcher's own verdict on the bead, from the same
 	// lint it runs before it allocates a seat: "ok" (it would slot it), "fix"
 	// (a required field is missing; ShapeNote names the first), "planning"
@@ -61,6 +64,8 @@ type Queue struct {
 	// Unreadable names the stores whose lists could not be read, so a store
 	// that is down does not read as an empty queue.
 	Unreadable []string `json:"unreadable,omitempty"`
+	// ParkedRigs names the stores whose rigs are parked.
+	ParkedRigs []string `json:"parked_rigs,omitempty"`
 }
 
 // SortQueueRows orders rows the way the dispatcher takes them: most urgent

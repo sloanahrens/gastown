@@ -150,3 +150,21 @@ func TestDashSeatKeyChangesWhenTheSpawnGraceEnds(t *testing.T) {
 		t.Error("a session coming up must change the key")
 	}
 }
+
+func TestBuildDashPolecatsCarriesTheRigParkedFlag(t *testing.T) {
+	t.Parallel()
+	got := buildDashPolecats(dashPolecatInputs{
+		Now: time.Now(), SessionsKnown: true,
+		Seats: []dashSeat{
+			{Rig: "beads", Name: "mutant", RigParked: true, Item: dashItem(polecat.StateIdle, polecat.WorkstateDisposition{})},
+			{Rig: "gastown", Name: "agate", Item: dashItem(polecat.StateIdle, polecat.WorkstateDisposition{})},
+		},
+	})
+	flags := map[string]bool{}
+	for _, p := range got {
+		flags[p.Name] = p.RigParked
+	}
+	if !flags["mutant"] || flags["agate"] {
+		t.Errorf("rig parked flags = %v", flags)
+	}
+}

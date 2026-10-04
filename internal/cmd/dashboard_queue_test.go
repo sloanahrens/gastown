@@ -115,3 +115,37 @@ func TestDashShapeNamesTheDispatchersVerdict(t *testing.T) {
 		}
 	}
 }
+
+// A parked rig is stood down on purpose: the dispatcher does not serve it, so a
+// well-shaped bead there is not dispatchable and must not wear the green badge.
+func TestQueueMarksBeadsInParkedRigsNotDispatchable(t *testing.T) {
+	t.Parallel()
+	shaped := "## Goal\n\ng\n\n## Constraints\n\nc\n\n## Out of scope\n\no\n\n## Gate\n\nmake gate\n\n## Size\n\none worker, one landing\n\n## Acceptance\n\n- [ ] done\n"
+	gastown := &fakeQueueStore{ready: []*beads.Issue{{ID: "gt-1", Title: "live", Type: "task", Description: shaped}}}
+	mango := &fakeQueueStore{ready: []*beads.Issue{
+		{ID: "ma-1", Title: "parked and shaped", Type: "task", Description: shaped},
+		{ID: "ma-2", Title: "parked and unshaped", Type: "task", Description: "note"},
+	}}
+	r := queueReaderOver(map[string]dashQueueStore{"gastown": gastown, "mango": mango}, "gastown", "mango")
+	r.parked = func(rig string) bool { return rig == "mango" }
+	q := r.read(time.Now())
+	byID := map[string]string{}
+	for _, b := range q.Ready {
+		byID[b.ID] = b.Shape
+		if (b.Rig == "mango") != b.RigParked {
+			t.Errorf("%s: RigParked=%v in rig %s", b.ID, b.RigParked, b.Rig)
+		}
+	}
+	if byID["gt-1"] != "ok" {
+		t.Errorf("a shaped bead in a live rig is dispatchable: %v", byID)
+	}
+	if byID["ma-1"] != "parked" {
+		t.Errorf("a shaped bead in a parked rig must read parked, not ok: %v", byID)
+	}
+	if byID["ma-2"] != "fix" {
+		t.Errorf("an unshaped bead keeps its shape verdict: %v", byID)
+	}
+	if len(q.ParkedRigs) != 1 || q.ParkedRigs[0] != "mango" {
+		t.Errorf("parked rigs = %v", q.ParkedRigs)
+	}
+}
