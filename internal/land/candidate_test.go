@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -172,9 +173,11 @@ func TestGastownGateWorkflowFixesTheRequiredContext(t *testing.T) {
 	}
 }
 
-// TestGastownGateWorkflowRunsTheMergeQueueGate holds the workflow to the same
-// command the rig's merge_queue.gate names, so the local gate and the CI job
+// TestGastownGateWorkflowRunsTheMergeQueueGate holds the workflow to the
+// targets the rig's merge_queue.gate names, so the local gate and the CI job
 // cannot drift into testing different things (design: "the same targets").
+// lint-tools runs first because the runner image carries no lint tools: without
+// it the gate's lint stage is red with "golangci-lint missing" (gt-fn9e6.17).
 func TestGastownGateWorkflowRunsTheMergeQueueGate(t *testing.T) {
 	t.Parallel()
 	root, err := filepath.Abs(filepath.Join("..", ".."))
@@ -201,8 +204,15 @@ func TestGastownGateWorkflowRunsTheMergeQueueGate(t *testing.T) {
 			runs = append(runs, step.Run)
 		}
 	}
-	if len(runs) != 1 || runs[0] != "make gate" {
-		t.Fatalf("gate job runs %q, want exactly [%q] — gastown's merge_queue.gate", runs, "make gate")
+	if want := []string{"make lint-tools", "make gate"}; !slices.Equal(runs, want) {
+		t.Fatalf("gate job runs %q, want exactly %q in that order — the lint tools, then gastown's merge_queue.gate", runs, want)
+	}
+	wf, err := ParseGateWorkflow(data)
+	if err != nil {
+		t.Fatalf("this repo's gate workflow: %v", err)
+	}
+	if got := wf.Context(); got != "ci / gate (push)" {
+		t.Fatalf("Context() = %q, want %q", got, "ci / gate (push)")
 	}
 }
 
