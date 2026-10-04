@@ -1095,9 +1095,10 @@ type MergeQueueConfig struct {
 	// docs/design/forgejo-primary-landing.md): where its remote is, which
 	// gate workflow tests a candidate, which bot logins act for it, and
 	// where main is mirrored. Nil means the rig has none, which is every rig
-	// until a cutover slice adds one. Read it through
-	// rig.ResolveForgejoConfig, which applies the same three-tier precedence
-	// the rest of merge_queue uses.
+	// until a cutover slice adds one. It is operator-only: read it through
+	// rig.ResolveForgejoConfig, which resolves the rig root config.json floor
+	// and the rig-local settings/config.json override and ignores a
+	// repo-committed block (gt-fn9e6.14).
 	Forgejo *ForgejoConfig `json:"forgejo,omitempty"`
 }
 
@@ -1116,7 +1117,8 @@ type EditorialConfig struct {
 const (
 	ForgejoRolePolecat  = "polecat"  // pushes polecat/<name>/<bead> branches
 	ForgejoRoleLanding  = "landing"  // pushes land/<bead> and merges through the API
-	ForgejoRoleRegistry = "registry" // reads the push mirrors
+	ForgejoRoleRegistry = "registry" // pushes CI images (write:package only)
+	ForgejoRoleViewer   = "viewer"   // read-only; the dashboard Forgejo panel
 )
 
 // DefaultGateWorkflow is the gate workflow a rig gets when
@@ -1126,14 +1128,14 @@ const (
 const DefaultGateWorkflow = "gate"
 
 // ForgejoConfig is the merge_queue.forgejo block: a rig's Forgejo landing
-// settings, resolved from the same three tiers as the rest of merge_queue
-// (rig root config.json floor, repo-committed .gastown/settings.json, then
-// the rig-local settings/config.json override) by
-// rig.ResolveForgejoConfig (gt-fn9e6.3).
+// settings, operator-only and resolved by rig.ResolveForgejoConfig from the
+// rig root config.json floor and the rig-local settings/config.json override
+// (gt-fn9e6.3); a repo-committed .gastown/settings.json never sets it
+// (gt-fn9e6.14).
 //
 // The block names roles and URLs, never secrets. A bot token lives in
 // ~/.config/gt/forgejo-<role>.env and is read by the Forgejo client, so no
-// token can reach a repo-committed file or settings/config.json.
+// token can reach a config file.
 type ForgejoConfig struct {
 	// RemoteURL is the rig's Forgejo repository URL, e.g.
 	// "https://forgejo.example/gastown/gastown". It is where gt done and the
@@ -1148,9 +1150,9 @@ type ForgejoConfig struct {
 	GateWorkflow string `json:"gate_workflow,omitempty"`
 
 	// Bots maps a bot role (ForgejoRolePolecat, ForgejoRoleLanding,
-	// ForgejoRoleRegistry) to that role's Forgejo login. The key is the
-	// role, which is what the token filename carries; the login is an
-	// identity, not a secret.
+	// ForgejoRoleRegistry, ForgejoRoleViewer) to that role's Forgejo login.
+	// The key is the role, which is what the token filename carries; the
+	// login is an identity, not a secret.
 	Bots map[string]string `json:"bots,omitempty"`
 
 	// MirrorTarget is the rig's read-only push mirror target, e.g. its

@@ -512,6 +512,45 @@ func TestMergeSettingsCommand_Forgejo(t *testing.T) {
 	})
 }
 
+// TestStripRepoForgejo guards the mechanism behind the operator-only rule
+// (gt-fn9e6.14): the repo tier's forgejo block is removed before the merge,
+// every other field is carried through untouched, the input is not mutated,
+// and the caller is told the block was present so it can warn once.
+func TestStripRepoForgejo(t *testing.T) {
+	t.Parallel()
+
+	if got, ok := StripRepoForgejo(nil); got != nil || ok {
+		t.Errorf("StripRepoForgejo(nil) = %+v, %v; want nil, false", got, ok)
+	}
+
+	noBlock := &MergeQueueConfig{TestCommand: "make test"}
+	if got, ok := StripRepoForgejo(noBlock); got != noBlock || ok {
+		t.Errorf("StripRepoForgejo(no forgejo) = %+v, %v; want the input unchanged and false", got, ok)
+	}
+
+	repo := &MergeQueueConfig{
+		TestCommand: "make test-repo",
+		Forgejo: &ForgejoConfig{
+			RemoteURL:    "https://forgejo.example/repo/gastown",
+			Bots:         map[string]string{ForgejoRoleLanding: "repo-landing"},
+			MirrorTarget: "git@github.com:sloanahrens/gastown.git",
+		},
+	}
+	got, ok := StripRepoForgejo(repo)
+	if !ok {
+		t.Fatal("StripRepoForgejo(forgejo block) ok = false, want true")
+	}
+	if got.Forgejo != nil {
+		t.Errorf("Forgejo = %+v, want nil after strip", got.Forgejo)
+	}
+	if got.TestCommand != "make test-repo" {
+		t.Errorf("TestCommand = %q, want the repo value carried through", got.TestCommand)
+	}
+	if repo.Forgejo == nil {
+		t.Error("StripRepoForgejo mutated its input, want a copy")
+	}
+}
+
 func TestLoadRigConfigNotFound(t *testing.T) {
 	t.Parallel()
 	_, err := LoadRigConfig("/nonexistent/path.json")

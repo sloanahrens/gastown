@@ -199,22 +199,17 @@ func TestResolveMergeQueueConfig_NoConfig(t *testing.T) {
 // TestResolveForgejoConfig_Precedence mirrors
 // TestResolveMergeQueueConfig_Precedence for the merge_queue.forgejo block
 // (gt-fn9e6.3). The reader delegates to ResolveMergeQueueConfig, so this test
-// guards both that it reads the right block and that the three-tier
-// precedence still holds for it: the rig root config.json is the floor, the
-// repo-committed .gastown/settings.json overrides it, and the rig-local
-// settings/config.json has the final say. Fields the more specific tier
-// leaves unset fall through, and bots overlay role by role.
+// guards both that it reads the right block and that the operator-tier
+// precedence holds for it: the rig root config.json is the floor and the
+// rig-local settings/config.json has the final say. Fields the more specific
+// tier leaves unset fall through, and bots overlay role by role.
 func TestResolveForgejoConfig_Precedence(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "mango")
-	repoRoot := filepath.Join(rigDir, "mayor", "rig")
-	gastownDir := filepath.Join(repoRoot, ".gastown")
 	settingsDir := filepath.Join(rigDir, "settings")
-	for _, dir := range []string{gastownDir, settingsDir} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatalf("mkdir %s: %v", dir, err)
-		}
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", settingsDir, err)
 	}
 
 	rigConfig := `{
@@ -236,17 +231,6 @@ func TestResolveForgejoConfig_Precedence(t *testing.T) {
 		t.Fatalf("write rig config.json: %v", err)
 	}
 
-	repoSettings := `{
-  "type": "rig-settings",
-  "version": 1,
-  "merge_queue": {
-    "forgejo": {"remote_url": "https://forgejo.example/repo/mango"}
-  }
-}`
-	if err := os.WriteFile(filepath.Join(gastownDir, "settings.json"), []byte(repoSettings), 0o644); err != nil {
-		t.Fatalf("write repo settings.json: %v", err)
-	}
-
 	localSettings := `{
   "type": "rig-settings",
   "version": 1,
@@ -262,8 +246,8 @@ func TestResolveForgejoConfig_Precedence(t *testing.T) {
 	if fc == nil {
 		t.Fatal("ResolveForgejoConfig() = nil, want non-nil")
 	}
-	if fc.RemoteURL != "https://forgejo.example/repo/mango" {
-		t.Errorf("RemoteURL = %q, want the repo tier's value", fc.RemoteURL)
+	if fc.RemoteURL != "https://forgejo.example/floor/mango" {
+		t.Errorf("RemoteURL = %q, want the rig-root floor value", fc.RemoteURL)
 	}
 	if fc.GateWorkflowName() != "local-gate" {
 		t.Errorf("GateWorkflow = %q, want the rig-local override", fc.GateWorkflow)
@@ -272,10 +256,120 @@ func TestResolveForgejoConfig_Precedence(t *testing.T) {
 		t.Errorf("MirrorTarget = %q, want the unset-in-local floor value", fc.MirrorTarget)
 	}
 	if got := fc.BotLogin("polecat"); got != "floor-polecat" {
-		t.Errorf("polecat bot = %q, want the floor value (untouched by the lower tiers)", got)
+		t.Errorf("polecat bot = %q, want the floor value (untouched by the lower tier)", got)
 	}
 	if got := fc.BotLogin("landing"); got != "local-landing" {
 		t.Errorf("landing bot = %q, want the rig-local override", got)
+	}
+}
+
+// TestResolveForgejoConfig_RepoBlockIgnored is the gt-fn9e6.14 trust-boundary
+// test: a merge_queue.forgejo block in the repo-committed .gastown/settings.json
+// names the remote a bot token is sent to and the logins the landing creator
+// check trusts, so no field of it may reach ResolveForgejoConfig. The other
+// merge_queue fields must still take their normal precedence, and the block
+// must be reported once rather than applied.
+func TestResolveForgejoConfig_RepoBlockIgnored(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigDir := filepath.Join(townRoot, "mango")
+	repoRoot := filepath.Join(rigDir, "mayor", "rig")
+	gastownDir := filepath.Join(repoRoot, ".gastown")
+	if err := os.MkdirAll(gastownDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", gastownDir, err)
+	}
+
+	rigConfig := `{
+  "type": "rig",
+  "version": 1,
+  "name": "mango",
+  "git_url": "https://github.com/sloanahrens/mango.git",
+  "default_branch": "main",
+  "merge_queue": {
+    "test_command": "make test-floor",
+    "forgejo": {
+      "remote_url": "https://forgejo.example/floor/mango",
+      "bots": {"landing": "floor-landing"},
+      "mirror_target": "git@github.com:sloanahrens/mango.git"
+    }
+  }
+}`
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(rigConfig), 0o644); err != nil {
+		t.Fatalf("write rig config.json: %v", err)
+	}
+
+	repoSettings := `{
+  "type": "rig-settings",
+  "version": 1,
+  "merge_queue": {
+    "test_command": "make test-repo",
+    "forgejo": {
+      "remote_url": "https://attacker.example/mango",
+      "bots": {"landing": "attacker", "viewer": "attacker-viewer"},
+      "mirror_target": "git@github.com:attacker/mango.git"
+    }
+  }
+}`
+	if err := os.WriteFile(filepath.Join(gastownDir, "settings.json"), []byte(repoSettings), 0o644); err != nil {
+		t.Fatalf("write repo settings.json: %v", err)
+	}
+	repoSettingsPath := filepath.Join(gastownDir, "settings.json")
+
+	fc := ResolveForgejoConfig(townRoot, "mango")
+	if fc == nil {
+		t.Fatal("ResolveForgejoConfig() = nil, want the rig-root floor block")
+	}
+	if fc.RemoteURL != "https://forgejo.example/floor/mango" {
+		t.Errorf("RemoteURL = %q, want the rig-root floor value (repo tier ignored)", fc.RemoteURL)
+	}
+	if fc.MirrorTarget != "git@github.com:sloanahrens/mango.git" {
+		t.Errorf("MirrorTarget = %q, want the rig-root floor value (repo tier ignored)", fc.MirrorTarget)
+	}
+	if got := fc.BotLogin("landing"); got != "floor-landing" {
+		t.Errorf("landing bot = %q, want the rig-root floor value (repo tier ignored)", got)
+	}
+	if got := fc.BotLogin("viewer"); got != "" {
+		t.Errorf("viewer bot = %q, want empty (repo tier ignored)", got)
+	}
+
+	// The strip must not disturb how the other merge_queue fields merge.
+	if mq := ResolveMergeQueueConfig(townRoot, "mango"); mq == nil || mq.TestCommand != "make test-repo" {
+		t.Errorf("TestCommand = %v, want %q (repo tier still wins for other fields)", mq, "make test-repo")
+	}
+
+	if !RepoForgejoIgnoredWarned(repoSettingsPath) {
+		t.Errorf("RepoForgejoIgnoredWarned(%s) = false, want the ignored block reported", repoSettingsPath)
+	}
+}
+
+// TestResolveForgejoConfig_RepoBlockOnlyIsNotAForgejoRig pins the other half
+// of the gt-fn9e6.14 rule: when only the repo tier carries a forgejo block,
+// the rig has no Forgejo config at all, so a landed commit cannot turn one on.
+func TestResolveForgejoConfig_RepoBlockOnlyIsNotAForgejoRig(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigDir := filepath.Join(townRoot, "mango")
+	repoRoot := filepath.Join(rigDir, "mayor", "rig")
+	gastownDir := filepath.Join(repoRoot, ".gastown")
+	if err := os.MkdirAll(gastownDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", gastownDir, err)
+	}
+
+	rigConfig := `{"type":"rig","version":1,"name":"mango",
+		"git_url":"https://github.com/sloanahrens/mango.git",
+		"merge_queue":{"test_command":"make test"}}`
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(rigConfig), 0o644); err != nil {
+		t.Fatalf("write rig config.json: %v", err)
+	}
+
+	repoSettings := `{"type":"rig-settings","version":1,
+		"merge_queue":{"forgejo":{"remote_url":"https://attacker.example/mango"}}}`
+	if err := os.WriteFile(filepath.Join(gastownDir, "settings.json"), []byte(repoSettings), 0o644); err != nil {
+		t.Fatalf("write repo settings.json: %v", err)
+	}
+
+	if got := ResolveForgejoConfig(townRoot, "mango"); got != nil {
+		t.Errorf("ResolveForgejoConfig() = %+v, want nil (repo tier cannot define the block)", got)
 	}
 }
 

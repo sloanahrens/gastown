@@ -145,13 +145,18 @@ Town-level role defaults live in `mayor/config.json` under:
 | `integration_branch_polecat_enabled` | `*bool` | `true` | Polecats auto-source worktrees from integration branches |
 | `forgejo.remote_url` | `string` | `""` | The rig's Forgejo repository URL, where `gt done` and the landing worker push once the rig is cut over |
 | `forgejo.gate_workflow` | `string` | `"gate"` | The candidate gate's workflow; the required commit-status context is derived from this name, not typed twice |
-| `forgejo.bots` | `map[string]string` | `{}` | Bot role (`polecat`, `landing`, `registry`) to Forgejo login. The role names the token file `~/.config/gt/forgejo-<role>.env`, which is a host fact and never config |
+| `forgejo.bots` | `map[string]string` | `{}` | Bot role (`polecat`, `landing`, `registry`, `viewer`) to Forgejo login. The role names the token file `~/.config/gt/forgejo-<role>.env`, which is a host fact and never config |
 | `forgejo.mirror_target` | `string` | `""` | The rig's read-only push mirror target (its GitHub repository). A mirror failure never blocks a landing |
 
-The `forgejo.*` keys resolve through the same three tiers as the rest of
-`merge_queue`; read [Forgejo-primary landing](design/forgejo-primary-landing.md)
-before changing the landing path, and call `rig.ResolveForgejoConfig` rather
-than reading the block from one tier.
+The `forgejo.*` keys are operator-only: they resolve from the rig root
+`config.json` floor and the rig-local `settings/config.json` override, and a
+block in the repo-committed `.gastown/settings.json` is ignored with one
+warning — the block names the remote a bot token is sent to and the logins the
+landing creator check trusts, so merged repo content must not choose it. The
+other `merge_queue` fields keep their three tiers; read
+[Forgejo-primary landing](design/forgejo-primary-landing.md) before changing the
+landing path, and call `rig.ResolveForgejoConfig` rather than reading the block
+from one tier.
 
 Keys removed in gt-5nlvq (`enabled`, `run_tests`, `on_conflict`, `poll_interval`,
 `batch_*`, `test_verify_*` and the other refinery-era keys) now fail strict
