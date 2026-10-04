@@ -42,14 +42,19 @@ type fakeSpecTown struct {
 	// children is each bead's direct child set, and childErrs a per-bead
 	// children read failure, for the container rule.
 	children map[string][]specdispatch.Child
-	// showOverride is the full re-read the tick sees when it differs from the
-	// board snapshot: the board lagged a note the re-read carries (gt-kr5xv).
+	// showOverride is the full read the tick sees when it differs from the
+	// board snapshot: the board lagged a note the read carries (gt-kr5xv).
 	// An id absent here falls back to specs, so the common case needs no entry.
 	showOverride map[string]specdispatch.Spec
-	childErrs    map[string]error
-	slingErrs    map[string][]error // per bead, consumed in order
-	slung        []string
-	slingSeats   []specdispatch.SeatChoice
+	// showSeq is what a bead's successive reads return, consumed in order with
+	// the last entry repeating: the first read is the tick's re-check of the
+	// board snapshot, the one before the sling is the last-moment re-read
+	// (gt-01gix). An id absent here reads from showOverride, then specs.
+	showSeq    map[string][]specRead
+	childErrs  map[string]error
+	slingErrs  map[string][]error // per bead, consumed in order
+	slung      []string
+	slingSeats []specdispatch.SeatChoice
 	// slungResume is the resume branch each sling carried, positionally with
 	// slung: "" when the dispatch started fresh.
 	slungResume []string
@@ -68,10 +73,18 @@ type fakeSpecTown struct {
 // specTestNow is the tick clock every dispatch test runs at.
 var specTestNow = time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 
+// specRead is one full read of a bead: the spec Show returns, or the error it
+// fails with, so a sequence can pin a bead that changes between the tick's
+// re-check and the sling.
+type specRead struct {
+	spec specdispatch.Spec
+	err  error
+}
+
 func newFakeSpecTown(specs ...specdispatch.Spec) *fakeSpecTown {
 	f := &fakeSpecTown{specs: map[string]specdispatch.Spec{}, rigHold: map[string]string{}, revert: map[string]*specdispatch.Revert{},
 		slingErrs: map[string][]error{}, originBranches: map[string]bool{}, notes: map[string][]string{}, labels: map[string][]string{},
-		children: map[string][]specdispatch.Child{}, childErrs: map[string]error{}}
+		children: map[string][]specdispatch.Child{}, childErrs: map[string]error{}, showSeq: map[string][]specRead{}}
 	for _, s := range specs {
 		f.specs[s.ID] = s
 	}
@@ -109,6 +122,13 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 			return specBoardRead{Candidates: out, LabeledFailed: labeled}
 		},
 		Show: func(id string) (specdispatch.Spec, error) {
+			if seq := f.showSeq[id]; len(seq) > 0 {
+				r := seq[0]
+				if len(seq) > 1 {
+					f.showSeq[id] = seq[1:]
+				}
+				return r.spec, r.err
+			}
 			if s, ok := f.showOverride[id]; ok {
 				return s, nil
 			}

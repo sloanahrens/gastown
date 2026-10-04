@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -97,5 +98,92 @@ func TestSpecLiveLandingRequestStates(t *testing.T) {
 				t.Fatalf("specLiveLandingRequest(%q) = %v, want %v", tc.notes, got, tc.want)
 			}
 		})
+	}
+}
+
+// The window the tick's own read cannot close: a bead that changes after the
+// tick read it and before the seat is spent. The last-moment re-read drops the
+// candidate, so no polecat is slung onto work that is already landing or
+// already someone else's (gt-01gix, gt-ue13q).
+func TestSpecDispatchHoldsABeadThatChangesBeforeTheSling(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		change func(specdispatch.Spec) specdispatch.Spec
+		want   string
+	}{
+		{
+			name: "a submission lands",
+			change: func(s specdispatch.Spec) specdispatch.Spec {
+				return specFromIssue(midSubmissionIssue(s.ID))
+			},
+			want: "submitted for landing",
+		},
+		{
+			name: "the ready label lands",
+			change: func(s specdispatch.Spec) specdispatch.Spec {
+				s.Labels = append(s.Labels, land.LabelReadyToLand)
+				return s
+			},
+			want: "gt:ready-to-land",
+		},
+		{
+			name: "someone else takes it",
+			change: func(s specdispatch.Spec) specdispatch.Spec {
+				s.Assignee = "gastown/polecats/malachite"
+				return s
+			},
+			want: "assigned to gastown/polecats/malachite",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			clean := cleanSpec("gt-race", 1, "2026-09-30T11:00:00Z")
+			f := newFakeSpecTown(clean)
+			f.showSeq["gt-race"] = []specRead{{spec: clean}, {spec: tc.change(clean)}}
+
+			r := runSpecDispatchCycle(f.env())
+			if len(f.slung) != 0 || len(r.Dispatched) != 0 {
+				t.Fatalf("slung a bead that changed mid-tick: slung %v report %+v", f.slung, r)
+			}
+			if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, specStaleReason) || !strings.Contains(r.Skipped[0].Line, tc.want) {
+				t.Fatalf("skipped = %+v, want %q under the stale reason", r.Skipped, tc.want)
+			}
+		})
+	}
+}
+
+// The re-read admits the same bead it read before: the extra read is a
+// precondition, not a second gate on a bead that did not move (gt-01gix).
+func TestSpecDispatchSlingsABeadTheReReadStillAdmits(t *testing.T) {
+	t.Parallel()
+	clean := cleanSpec("gt-still", 1, "2026-09-30T11:00:00Z")
+	f := newFakeSpecTown(clean)
+	f.showSeq["gt-still"] = []specRead{{spec: clean}, {spec: clean}}
+
+	r := runSpecDispatchCycle(f.env())
+	if len(f.slung) != 1 || f.slung[0] != "gt-still" || len(r.Dispatched) != 1 || len(r.Skipped) != 0 {
+		t.Fatalf("slung %v skipped %+v report %+v, want the unchanged bead taken", f.slung, r.Skipped, r)
+	}
+}
+
+// A re-read that fails leaves the bead's state unknown, and unknown is not
+// eligible: the dispatch waits for the next tick instead of slinging blind
+// (gt-01gix).
+func TestSpecDispatchHoldsWhenTheReReadFails(t *testing.T) {
+	t.Parallel()
+	clean := cleanSpec("gt-blind", 1, "2026-09-30T11:00:00Z")
+	f := newFakeSpecTown(clean)
+	f.showSeq["gt-blind"] = []specRead{{spec: clean}, {err: errors.New("beads database unreachable")}}
+
+	r := runSpecDispatchCycle(f.env())
+	if len(f.slung) != 0 || len(r.Dispatched) != 0 {
+		t.Fatalf("slung blind on a failed re-read: slung %v report %+v", f.slung, r)
+	}
+	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, specStaleReason) || !strings.Contains(r.Skipped[0].Line, "re-read failed") {
+		t.Fatalf("skipped = %+v, want the failed re-read named", r.Skipped)
+	}
+	if len(r.Errors) != 0 || len(f.labels) != 0 {
+		t.Fatalf("errors %v labels %v, want a plain skip the next tick retries", r.Errors, f.labels)
 	}
 }

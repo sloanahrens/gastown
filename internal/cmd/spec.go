@@ -85,6 +85,11 @@ const (
 	// proposal the operator files by hand (gt-4k3fj.14).
 	specPlanNeedsPlan = "needs plan"
 	specPlanProposed  = "plan proposed"
+	// specStaleReason is the skip reason for a candidate the last-moment
+	// re-read before its sling no longer admits: the board's read is a
+	// snapshot, so a submission or another holder can take the bead between
+	// that read and the seat being spent (gt-01gix).
+	specStaleReason = "the ready board read is stale"
 )
 
 var (
@@ -174,7 +179,11 @@ rig's red-main beads stay ready instead of racing the revert with a fix
 forward. The hold lifts when the revert lands or is rejected, so the next tick
 takes them again (gt-zkdwt).
 
-A clean candidate is slung onto the first free seat within the budget: the
+A clean candidate is re-read once more immediately before its sling and dropped
+if the bead has changed since the board was read — a submission in that window
+would otherwise be slung to a seat already landing it, and a re-read that fails
+holds the candidate for the next tick rather than slinging blind (gt-01gix).
+One that still holds is slung onto the first free seat within the budget: the
 pool's overflow_agent (capped by max_overflow), then the pro seat (pro_agent,
 capped by pro_max, taking only pro_label beads). The claude-sonnet hooked seat
 is off unless patrols.spec_dispatch.max_hooked is set above zero.
@@ -661,6 +670,22 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			}
 			report.Dispatched = append(report.Dispatched, entry)
 			budget.Bump(seat.Agent, budget.Now)
+			continue
+		}
+
+		// Everything the tick knows about this bead is a read from before the
+		// seat was chosen, and a submission can land in that window (gt-ue13q,
+		// gt-01gix). Re-read at the last moment and put the fresh bead through
+		// the same predicate the board drew with — the label, the READY TO LAND
+		// block through SubmittedForLanding, and an assignee all hold there. A
+		// read that fails holds too: unknown is not eligible.
+		latest, err := env.Show(id)
+		if err != nil {
+			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent, Line: fmt.Sprintf("%s: %s: re-read failed: %s", id, specStaleReason, firstErrLine(err))})
+			continue
+		}
+		if ok, why := specdispatch.Eligible(latest, env.MaxPriority, budget.ReservedLabels()); !ok {
+			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent, Line: fmt.Sprintf("%s: %s: %s", id, specStaleReason, why)})
 			continue
 		}
 
