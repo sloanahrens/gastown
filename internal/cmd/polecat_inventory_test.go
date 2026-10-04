@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -427,6 +428,116 @@ func TestBuildPolecatInventoryItemActiveWorkLookupErrorFailsClosed(t *testing.T)
 	}
 	if len(item.Disposition.Blockers) != 1 || !strings.Contains(item.Disposition.Blockers[0], "lookup_error") {
 		t.Fatalf("blockers = %v, want lookup_error", item.Disposition.Blockers)
+	}
+}
+
+// TestBuildPolecatInventoryItemTerminalBeadPreservedCommits pins gt-b9ud0 in
+// the list path, the one that measures git: a finished seat whose assigned bead
+// is already terminal and whose only remaining capacity-counting evidence is
+// commits preserved on its branch keeps its recovery verdict but stops counting
+// toward dispatch capacity.
+//
+// The terminality is only read once a live probe has answered. Attaching it to
+// an unmeasured seat would let the classifier waive a recorded dirty/stash/
+// unpushed status nobody confirmed, and `gt polecat list` would report a seat
+// with real uncommitted work as reusable and safe to nuke.
+func TestBuildPolecatInventoryItemTerminalBeadPreservedCommits(t *testing.T) {
+	t.Parallel()
+	terminalBead := &beads.Issue{ID: "gt-done", Status: string(beads.StatusClosed)}
+	unpushedProbe := polecat.LiveGitState{Branch: "polecat/topaz", UnpushedCommits: 2, Source: polecat.GitStateSourceLive}
+	stashProbe := polecat.LiveGitState{Branch: "polecat/topaz", StashCount: 1, Source: polecat.GitStateSourceLive}
+
+	tests := []struct {
+		name           string
+		cleanupStatus  string
+		sourceIssue    string
+		live           *polecat.LiveGitState
+		wantCapacity   bool
+		wantPreserved  bool
+		wantBlockerHas string
+	}{
+		{
+			name:           "measured unpushed commits with a terminal bead are exempt",
+			cleanupStatus:  string(polecat.CleanupClean),
+			sourceIssue:    "gt-done",
+			live:           &unpushedProbe,
+			wantPreserved:  true,
+			wantBlockerHas: "preserved on branch",
+		},
+		{
+			name:          "measured unpushed commits with a live bead still count",
+			cleanupStatus: string(polecat.CleanupClean),
+			live:          &unpushedProbe,
+			wantCapacity:  true,
+		},
+		{
+			name:          "a terminal bead does not excuse a measured stash",
+			cleanupStatus: string(polecat.CleanupClean),
+			sourceIssue:   "gt-done",
+			live:          &stashProbe,
+			wantCapacity:  true,
+		},
+		{
+			// No probe answered, so nothing measured the commits: the recorded
+			// hint keeps the seat counting, and the terminality is not read.
+			name:          "no probe leaves a recorded unpushed seat counting",
+			cleanupStatus: string(polecat.CleanupUnpushed),
+			sourceIssue:   "gt-done",
+			wantCapacity:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := polecatInventoryEnv{GitProbeLocalOnly: true, IssueSource: fakeIssueShower{issue: terminalBead}}
+			if tt.live != nil {
+				env.WorktreePath = filepath.Join("/rig", "polecats", "topaz", "gastown")
+				env.probe = func(path string, localOnly bool) polecat.LiveGitState { return *tt.live }
+			}
+			item := buildPolecatInventoryItem(
+				"gastown",
+				"topaz",
+				&beads.AgentFields{
+					AgentState:      string(beads.AgentStateDone),
+					CleanupStatus:   tt.cleanupStatus,
+					Branch:          "polecat/topaz",
+					LastSourceIssue: tt.sourceIssue,
+				},
+				nil,
+				polecatSessionSet{},
+				env,
+			)
+
+			d := item.Disposition
+			if !d.NeedsRecovery || d.CountsTowardCapacity != tt.wantCapacity || d.CommitsPreservedOnBranch != tt.wantPreserved {
+				t.Fatalf("disposition = %+v, want needs_recovery=true counts_toward_capacity=%v preserved=%v",
+					d, tt.wantCapacity, tt.wantPreserved)
+			}
+			if d.Reusable || d.SafeToNuke {
+				t.Fatalf("a recoverable seat must stay neither reusable nor safe to nuke: %+v", d)
+			}
+			if tt.wantBlockerHas != "" && !slices.ContainsFunc(d.Blockers, func(b string) bool {
+				return strings.Contains(b, tt.wantBlockerHas)
+			}) {
+				t.Fatalf("Blockers = %v, want %q among them", d.Blockers, tt.wantBlockerHas)
+			}
+
+			// The capacity projection is what the dispatcher's cap reads: the
+			// seat stays visible as recovery-blocked, but stops filling a seat.
+			snapshot := polecatCapacitySnapshot{}
+			applyWorkstateDispositionToCapacitySnapshot(&snapshot, item.State, d)
+			if snapshot.RecoveryBlocked != 1 {
+				t.Fatalf("RecoveryBlocked = %d, want the seat still visible as recoverable", snapshot.RecoveryBlocked)
+			}
+			wantUsed := 0
+			if tt.wantCapacity {
+				wantUsed = 1
+			}
+			if snapshot.capacityUsed != wantUsed {
+				t.Fatalf("capacityUsed = %d, want %d (snapshot %+v)", snapshot.capacityUsed, wantUsed, snapshot)
+			}
+		})
 	}
 }
 

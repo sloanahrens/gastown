@@ -169,6 +169,42 @@ func TestListPolecatSessionsExcludesDoneWithOpenMR(t *testing.T) {
 	}
 }
 
+// TestListPolecatSessionsExcludesFinishedSeatWithPreservedCommits pins gt-b9ud0:
+// a finished seat whose bead is already terminal and whose only capacity-
+// counting evidence is commits preserved on its branch does not occupy the seat
+// its session name would otherwise claim. Nuke preserves the branch, so the
+// seat's work stays recoverable without the seat filling the roster.
+func TestListPolecatSessionsExcludesFinishedSeatWithPreservedCommits(t *testing.T) {
+	t.Parallel()
+	disposition := func(rigName, polecatName string) (polecat.WorkstateDisposition, error) {
+		if polecatName == "agate" {
+			return polecat.WorkstateDisposition{
+				Verdict:                  polecat.WorkstateVerdictNeedsRecovery,
+				Reason:                   "git-unpushed",
+				NeedsRecovery:            true,
+				CommitsPreservedOnBranch: true,
+				ReuseStatus:              "idle-recovery-needed",
+			}, nil
+		}
+		// A recovery-blocked seat that still counts keeps occupying the pool.
+		return polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictNeedsRecovery, NeedsRecovery: true, CountsTowardCapacity: true}, nil
+	}
+
+	f := &fakeLister{
+		sessions: map[string]map[string]string{
+			"gt-agate":  {"GT_ROLE": "gastown/polecats/agate", "GT_AGENT": "deepseek-flash"},
+			"gt-garnet": {"GT_ROLE": "gastown/polecats/garnet", "GT_AGENT": "deepseek-flash"},
+		},
+	}
+	got, err := listPolecatSessionsWith(f, disposition, poolTestNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].name != "gt-garnet" {
+		t.Fatalf("want only garnet counted, got %+v", got)
+	}
+}
+
 // TestListPolecatSessionsFailsOpenOnDispositionError keeps a session counted
 // when the polecat's own state cannot be read: an overrun the pool exists to
 // prevent (gt-md4z) is worse than one extra refused sling.

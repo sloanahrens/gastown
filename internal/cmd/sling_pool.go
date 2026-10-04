@@ -230,13 +230,27 @@ func polecatSeatOccupied(disposition polecatDispositionFunc, rigName, polecatNam
 	if err != nil {
 		return true
 	}
-	return d.ReuseStatus != "idle-pr-open"
+	if d.ReuseStatus == "idle-pr-open" {
+		// A done seat waiting on the refinery is not spending the seat (gt-2nft).
+		return false
+	}
+	// A seat whose only capacity-counting blocker is commits preserved on its
+	// branch, and whose bead is already terminal, is not spending the seat
+	// either (gt-b9ud0): nothing is in flight, and a nuke keeps those commits
+	// recoverable from origin. It stays NEEDS_RECOVERY in `gt polecat list`, so
+	// it is still visible and recoverable — it just stops filling the roster.
+	if d.CommitsPreservedOnBranch {
+		return false
+	}
+	return true
 }
 
-// poolPolecatDisposition reads one polecat's own agent bead and classifies it
-// through the same WorkstateDisposition every other capacity model reads
-// (polecat_capacity.go, `gt polecat list`), so "done with an open MR" means
-// the same thing here as it does everywhere else.
+// poolPolecatDisposition classifies one polecat through the same
+// WorkstateDisposition every other capacity model reads (polecat_capacity.go,
+// `gt polecat list`): its agent bead, the live git facts of its worktree, and
+// the terminality of the bead it is assigned. So "done with an open MR", and
+// "finished with its leftover commits on its branch", each mean the same thing
+// here as they do everywhere else.
 func poolPolecatDisposition(townRoot, rigName, polecatName string) (polecat.WorkstateDisposition, error) {
 	prefix := beads.GetPrefixForRig(townRoot, rigName)
 	agentID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
@@ -266,6 +280,29 @@ func poolPolecatDisposition(townRoot, rigName, polecatName string) (polecat.Work
 	if activeMR := strings.TrimSpace(fields.ActiveMR); activeMR != "" {
 		facts.ActiveMR = activeMR
 		facts.ActiveMRBlocker = "active_mr=" + activeMR
+	}
+	rigPath := filepath.Join(townRoot, rigName)
+	// The same live probe the list path runs: a reuse and capacity decision
+	// comes from measured facts, not recalled ones. Without it the only trace
+	// of a finished seat's leftover commits is its recorded cleanup_status,
+	// which cannot tell the classifier the commits are preserved on the branch
+	// — so the pool would keep filling a seat the list has already stopped
+	// counting (gt-b9ud0, the gt-2nft shape of two pictures of one pool). A
+	// worktree that cannot be resolved is left unprobed, and the recorded hint
+	// stands.
+	if worktree := resolvePolecatWorktree(filepath.Join(rigPath, "polecats"), polecatName, rigName); worktree != "" {
+		polecat.ProbeLiveGitStateLocal(worktree).ApplyFacts(&facts)
+	}
+	// The assignment terminality the classifier accounts that seat with, read
+	// the way the reuse gate reads it (Manager.workstateInputForPolecat: the
+	// source-issue hint, else the hook reference), so the pool cannot disagree
+	// with the reuse gate about which bead "assigned" means. A lookup that
+	// fails answers false and the seat keeps counting: the exemption has to be
+	// proven, not assumed.
+	if hint := agentSourceIssueHint("", fields); hint != "" {
+		if issue, err := beads.New(rigPath).Show(hint); err == nil && issue != nil {
+			facts.AssignedBeadTerminal = beads.IssueStatus(issue.Status).IsTerminal()
+		}
 	}
 	return polecat.DecideWorkstate(polecat.NewWorkstateInput(facts)), nil
 }
