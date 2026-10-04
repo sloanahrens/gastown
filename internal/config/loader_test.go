@@ -1,9 +1,11 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -879,7 +881,7 @@ func TestMessagingConfigRoundTrip(t *testing.T) {
 	path := filepath.Join(dir, "config", "messaging.json")
 
 	original := NewMessagingConfig()
-	original.Lists["oncall"] = []string{"mayor/", "gastown/witness"}
+	original.Lists["oncall"] = []string{"gastown/refinery", "gastown/witness"}
 	original.Lists["cleanup"] = []string{"gastown/witness", "deacon/"}
 	original.Queues["work/gastown"] = QueueConfig{
 		Workers:   []string{"gastown/polecats/*"},
@@ -962,7 +964,7 @@ func TestMessagingConfigValidation(t *testing.T) {
 				Type:    "messaging",
 				Version: 1,
 				Lists: map[string][]string{
-					"oncall": {"mayor/", "gastown/witness"},
+					"oncall": {"gastown/refinery", "gastown/witness"},
 				},
 			},
 			wantErr: false,
@@ -1108,7 +1110,7 @@ func TestLoadOrCreateMessagingConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "messaging.json")
 	original := NewMessagingConfig()
-	original.Lists["test"] = []string{"mayor/"}
+	original.Lists["test"] = []string{"gastown/witness"}
 	if err := SaveMessagingConfig(path, original); err != nil {
 		t.Fatalf("SaveMessagingConfig: %v", err)
 	}
@@ -3483,9 +3485,9 @@ func TestEscalationConfigRoundTrip(t *testing.T) {
 		Version: CurrentEscalationVersion,
 		Routes: map[string][]string{
 			SeverityLow:      {"bead"},
-			SeverityMedium:   {"bead", "mail:mayor"},
-			SeverityHigh:     {"bead", "mail:mayor", "email:human"},
-			SeverityCritical: {"bead", "mail:mayor", "email:human", "sms:human"},
+			SeverityMedium:   {"bead"},
+			SeverityHigh:     {"bead", "mail:gastown/witness", "email:human"},
+			SeverityCritical: {"bead", "mail:gastown/witness", "email:human", "sms:human"},
 		},
 		Contacts: EscalationContacts{
 			HumanEmail: "test@example.com",
@@ -3556,15 +3558,91 @@ func TestEscalationConfigDefaults(t *testing.T) {
 		t.Errorf("MaxReescalations = %v, want %d", cfg.MaxReescalations, 2)
 	}
 
-	// Check default routes
-	if len(cfg.Routes) != 4 {
-		t.Errorf("Routes count = %d, want 4", len(cfg.Routes))
+	// Check default routes: no mail action reaches a person by default, and
+	// the retired mail:mayor action is gone (gt-rwp7z.6).
+	wantRoutes := map[string][]string{
+		SeverityLow:      {"bead"},
+		SeverityMedium:   {"bead"},
+		SeverityHigh:     {"bead", "email:human"},
+		SeverityCritical: {"bead", "email:human", "sms:human"},
 	}
-	if len(cfg.Routes[SeverityLow]) != 1 || cfg.Routes[SeverityLow][0] != "bead" {
-		t.Errorf("Routes[low] = %v, want [bead]", cfg.Routes[SeverityLow])
+	if len(cfg.Routes) != len(wantRoutes) {
+		t.Errorf("Routes count = %d, want %d", len(cfg.Routes), len(wantRoutes))
 	}
-	if len(cfg.Routes[SeverityCritical]) != 4 {
-		t.Errorf("Routes[critical] len = %d, want 4", len(cfg.Routes[SeverityCritical]))
+	for severity, want := range wantRoutes {
+		got := cfg.Routes[severity]
+		if !slices.Equal(got, want) {
+			t.Errorf("Routes[%s] = %v, want %v", severity, got, want)
+		}
+	}
+}
+
+// TestEscalationConfigStaleRetiredActionIsDropped pins the stale-config
+// contract of gt-rwp7z.6: a settings file that still names a retired route
+// action loads without error, the action is dropped from its route, the rest
+// of the list still fires, and the drop is reported once per retired action.
+func TestEscalationConfigStaleRetiredActionIsDropped(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "settings"), 0o755); err != nil {
+		t.Fatalf("creating settings dir: %v", err)
+	}
+	path := filepath.Join(dir, "settings", "escalation.json")
+	stale := `{
+  "type": "escalation",
+  "version": 1,
+  "routes": {
+    "low": ["bead"],
+    "medium": ["bead", "mail:mayor"],
+    "high": ["bead", "mail:mayor", "email:human"],
+    "critical": ["bead", "mail:mayor", "email:human", "sms:human"]
+  },
+  "contacts": {},
+  "stale_threshold": "4h"
+}
+`
+	if err := os.WriteFile(path, []byte(stale), 0o600); err != nil {
+		t.Fatalf("writing stale config: %v", err)
+	}
+
+	cfg, err := LoadEscalationConfig(path)
+	if err != nil {
+		t.Fatalf("LoadEscalationConfig: stale config must be tolerated, got %v", err)
+	}
+
+	wantRoutes := map[string][]string{
+		SeverityLow:      {"bead"},
+		SeverityMedium:   {"bead"},
+		SeverityHigh:     {"bead", "email:human"},
+		SeverityCritical: {"bead", "email:human", "sms:human"},
+	}
+	for severity, want := range wantRoutes {
+		if got := cfg.GetRouteForSeverity(severity); !slices.Equal(got, want) {
+			t.Errorf("GetRouteForSeverity(%s) = %v, want %v", severity, got, want)
+		}
+	}
+	// The retired action is reported once, not once per severity that named it.
+	var warned bytes.Buffer
+	warnRetiredEscalationActions(&warned, []string{"mail:mayor"})
+	want := `warning: ignoring retired escalation action "mail:mayor"` + "\n"
+	if got := warned.String(); got != want {
+		t.Errorf("retired-action warning = %q, want %q", got, want)
+	}
+}
+
+// TestEscalationConfigBuiltInCodeNeverFiresRetiredAction covers a config that
+// never went through the file loader: a route built in code still cannot fire
+// a retired action (gt-rwp7z.6).
+func TestEscalationConfigBuiltInCodeNeverFiresRetiredAction(t *testing.T) {
+	t.Parallel()
+	cfg := &EscalationConfig{
+		Routes: map[string][]string{
+			SeverityMedium: {"bead", "mail:mayor", "email:human"},
+		},
+	}
+	if got := cfg.GetRouteForSeverity(SeverityMedium); !slices.Equal(got, []string{"bead", "email:human"}) {
+		t.Errorf("GetRouteForSeverity(medium) = %v, want [bead email:human]", got)
 	}
 }
 
@@ -3710,7 +3788,7 @@ func TestEscalationConfigGetRouteForSeverity(t *testing.T) {
 	cfg := &EscalationConfig{
 		Routes: map[string][]string{
 			SeverityLow:    {"bead"},
-			SeverityMedium: {"bead", "mail:mayor"},
+			SeverityMedium: {"bead", "mail:gastown/witness"},
 		},
 	}
 
@@ -3719,9 +3797,9 @@ func TestEscalationConfigGetRouteForSeverity(t *testing.T) {
 		expected []string
 	}{
 		{SeverityLow, []string{"bead"}},
-		{SeverityMedium, []string{"bead", "mail:mayor"}},
-		{SeverityHigh, []string{"bead", "mail:mayor"}},     // fallback for missing
-		{SeverityCritical, []string{"bead", "mail:mayor"}}, // fallback for missing
+		{SeverityMedium, []string{"bead", "mail:gastown/witness"}},
+		{SeverityHigh, []string{"bead"}},     // fallback for missing
+		{SeverityCritical, []string{"bead"}}, // fallback for missing
 	}
 
 	for _, tt := range tests {

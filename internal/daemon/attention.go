@@ -16,7 +16,6 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
-	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
@@ -48,10 +47,6 @@ const (
 	// branch; keeping it forever would turn the queue into a history file.
 	attentionRefusalWindow = 48 * time.Hour
 )
-
-// mayorAddress is the mailbox the polecat template sends BLOCKED reports to
-// (internal/templates/roles/polecat.md.tmpl).
-const mayorAddress = "mayor/"
 
 // The landing-pipeline thresholds (gt-vsct7.3), compiled in like the queue's
 // others.
@@ -208,10 +203,9 @@ type attentionSources struct {
 	bdLatency   func(ctx context.Context) (time.Duration, error)
 
 	// refusals is gt done's refusal ledger; refusalBead reads one refused
-	// bead in its own rig; blockedMail is the mayor's unread mail.
+	// bead in its own rig.
 	refusals    func() ([]attention.Refusal, error)
 	refusalBead func(ctx context.Context, rig, id string) (*beads.Issue, error)
-	blockedMail func(ctx context.Context) ([]*mail.Message, error)
 	// landingState reads the rig's in-flight landing, the landing-stuck
 	// collector's subject.
 	landingState func(rig string) landingState
@@ -374,7 +368,6 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindSlotDeadHolder, collect: s.collectSlotDeadHolder},
 		{kind: attention.KindBDSlow, collect: s.collectBDSlow},
 		{kind: attention.KindRevertRefused, collect: s.collectRevertRefused},
-		{kind: attention.KindBlockedMail, collect: s.collectBlockedMail},
 		{kind: attention.KindLandingStuck, collect: s.collectLandingStuck},
 		{kind: attention.KindQueueStuck, collect: s.collectQueueStuck},
 		{kind: attention.KindPolecatStall, collect: s.collectPolecatStall},
@@ -441,12 +434,6 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 			return nil, err
 		}
 		return d.rigWorkBeads(rig).Show(id)
-	}
-	s.blockedMail = func(ctx context.Context) ([]*mail.Message, error) {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		return mail.NewMailboxFromAddress(mayorAddress, d.config.TownRoot).ListUnread()
 	}
 	s.landingState = d.landingStates.get
 	s.readyToLand = d.attentionReadyToLand
@@ -921,35 +908,6 @@ func head12(head string) string {
 		return head[:12]
 	}
 	return head
-}
-
-// collectBlockedMail raises one item per unread message to the mayor whose
-// subject starts with BLOCKED: — a polecat saying it cannot proceed. The mayor
-// is stopped, so these sit unread; the read never marks one read, and the item
-// clears when its message is read or closed.
-func (s *attentionSources) collectBlockedMail(ctx context.Context) ([]attention.Item, error) {
-	messages, err := s.blockedMail(ctx)
-	if err != nil {
-		return nil, err
-	}
-	var out []attention.Item
-	for _, m := range messages {
-		if m == nil || !blockedSubject(m.Subject) {
-			continue
-		}
-		out = append(out, attention.Item{
-			Key:      "blocked:" + m.ID,
-			Kind:     attention.KindBlockedMail,
-			Severity: attention.SeverityHigh,
-			Summary:  fmt.Sprintf("blocked mail from %s: %s", m.From, m.Subject),
-		})
-	}
-	return out, nil
-}
-
-// blockedSubject reports whether subject is a polecat's BLOCKED report.
-func blockedSubject(subject string) bool {
-	return strings.HasPrefix(strings.TrimSpace(subject), "BLOCKED:")
 }
 
 // doltRed returns the report's Dolt field when the report judged it red.

@@ -80,7 +80,7 @@ func TestExecuteExternalActionsContactsConfiguredChannels(t *testing.T) {
 		SlackWebhook: "https://hooks.example.com/slack",
 	}}
 	rec := &recordingSenders{}
-	statuses := executeExternalActions([]string{"bead", "mail:mayor", "email:human", "sms:human", "slack"}, cfg, "hq-e1", "critical", "db down", t.TempDir(), rec.senders())
+	statuses := executeExternalActions([]string{"bead", "mail:gastown/witness", "email:human", "sms:human", "slack"}, cfg, "hq-e1", "critical", "db down", t.TempDir(), rec.senders())
 	want := []string{"email:hq-e1:critical:db down", "sms:hq-e1:critical:db down", "slack:hq-e1:critical:db down"}
 	if strings.Join(rec.sent, "|") != strings.Join(want, "|") {
 		t.Fatalf("sent = %q, want %q", rec.sent, want)
@@ -212,13 +212,13 @@ func TestMailTargets(t *testing.T) {
 		},
 		{
 			name:    "single mail target",
-			actions: []string{"bead", "mail:mayor"},
-			want:    []string{"mayor"},
+			actions: []string{"bead", "mail:gastown/witness"},
+			want:    []string{"gastown/witness"},
 		},
 		{
 			name:    "multiple mail targets",
-			actions: []string{"bead", "mail:mayor", "mail:gastown/witness", "email:human"},
-			want:    []string{"mayor", "gastown/witness"},
+			actions: []string{"bead", "mail:gastown/witness", "mail:gastown/refinery", "email:human"},
+			want:    []string{"gastown/witness", "gastown/refinery"},
 		},
 		{
 			name:    "mail prefix with empty target ignored",
@@ -227,8 +227,8 @@ func TestMailTargets(t *testing.T) {
 		},
 		{
 			name:    "mixed actions",
-			actions: []string{"bead", "mail:mayor", "sms:human", "slack", "mail:deacon", "log"},
-			want:    []string{"mayor", "deacon"},
+			actions: []string{"bead", "mail:gastown/witness", "sms:human", "slack", "mail:deacon", "log"},
+			want:    []string{"gastown/witness", "deacon"},
 		},
 	}
 
@@ -265,7 +265,7 @@ func TestExecuteExternalActionsReportsWarningsAndFailures(t *testing.T) {
 
 func TestDeliveryStatusJSONContainsPartialFailure(t *testing.T) {
 	t.Parallel()
-	statuses := []DeliveryStatus{{Channel: "bead", Created: true}, {Channel: "mail", Target: "mayor", Error: "notify failed"}}
+	statuses := []DeliveryStatus{{Channel: "bead", Created: true}, {Channel: "mail", Target: "gastown/witness", Error: "notify failed"}}
 	hasFailure := false
 	for _, status := range statuses {
 		if status.Error != "" {
@@ -276,8 +276,8 @@ func TestDeliveryStatusJSONContainsPartialFailure(t *testing.T) {
 	result := map[string]interface{}{
 		"id":       "hq-esc1",
 		"severity": "critical",
-		"actions":  []string{"bead", "mail:mayor"},
-		"targets":  []string{"mayor"},
+		"actions":  []string{"bead", "mail:gastown/witness"},
+		"targets":  []string{"gastown/witness"},
 		"delivery": statuses,
 		"status":   map[bool]string{true: "partial_failure", false: "ok"}[hasFailure],
 	}
@@ -295,12 +295,12 @@ func TestDeliveryStatusJSONContainsPartialFailure(t *testing.T) {
 
 func TestDeliveryStatusJSONContainsSuccessfulMailPathDetails(t *testing.T) {
 	t.Parallel()
-	statuses := []DeliveryStatus{{Channel: "bead", Created: true, Severity: "critical"}, {Channel: "mail", Target: "mayor", Persisted: true, RuntimeNotified: true, Annotated: true, Severity: "critical", NotificationRoute: "mail+nudge"}}
+	statuses := []DeliveryStatus{{Channel: "bead", Created: true, Severity: "critical"}, {Channel: "mail", Target: "gastown/witness", Persisted: true, RuntimeNotified: true, Annotated: true, Severity: "critical", NotificationRoute: "mail+nudge"}}
 	result := map[string]interface{}{
 		"id":       "hq-esc2",
 		"severity": "critical",
-		"actions":  []string{"bead", "mail:mayor"},
-		"targets":  []string{"mayor"},
+		"actions":  []string{"bead", "mail:gastown/witness"},
+		"targets":  []string{"gastown/witness"},
 		"delivery": statuses,
 		"status":   "ok",
 	}

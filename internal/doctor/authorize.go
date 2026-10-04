@@ -31,7 +31,7 @@ func ValidateFixAuthorization(issue *beads.Issue, actor string) error {
 		return fmt.Errorf(`bead %s is not an authorization record: missing the %q label (gt-638go.3)
 
 A destructive doctor repair by an agent requires an authorization bead created
-by the mayor/overseer:
+by the overseer:
   bd update %s --labels=%s   # or create a new bead carrying that label`,
 			issue.ID, FixAuthLabel, issue.ID, FixAuthLabel)
 	}
@@ -40,7 +40,7 @@ by the mayor/overseer:
 			issue.ID, issue.Status)
 	}
 	if actor != "" && issue.CreatedBy == actor {
-		return fmt.Errorf("authorization bead %s was created by %s itself — self-authorization is not allowed (gt-638go.3); the bead must record a mayor/overseer decision",
+		return fmt.Errorf("authorization bead %s was created by %s itself — self-authorization is not allowed (gt-638go.3); the bead must record an overseer decision",
 			issue.ID, actor)
 	}
 	return nil

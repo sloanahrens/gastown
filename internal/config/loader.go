@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -2427,6 +2428,57 @@ func LoadEscalationConfig(path string) (*EscalationConfig, error) {
 	return &config, nil
 }
 
+// retiredEscalationActions names route actions the town no longer runs. A
+// settings file that still names one is tolerated rather than refused: the
+// action is dropped from its route and the rest of the list still fires, so a
+// raised severity cannot fail closed on a town whose config has not been
+// migrated yet (gt-rwp7z.6). To retire another action, add it here and leave
+// the parse dropping it.
+var retiredEscalationActions = map[string]bool{
+	"mail:mayor": true,
+}
+
+// warnRetiredEscalationActions writes one line per retired action a load or
+// save dropped, naming the action. The writer is a parameter so the production
+// call passes stderr and a test can pass a buffer.
+func warnRetiredEscalationActions(warn io.Writer, dropped []string) {
+	for _, action := range dropped {
+		fmt.Fprintf(warn, "warning: ignoring retired escalation action %q\n", action)
+	}
+}
+
+// withoutRetiredEscalationActions returns actions with every retired action
+// removed, preserving the order of the ones that remain.
+func withoutRetiredEscalationActions(actions []string) []string {
+	kept := make([]string, 0, len(actions))
+	for _, action := range actions {
+		if retiredEscalationActions[action] {
+			continue
+		}
+		kept = append(kept, action)
+	}
+	return kept
+}
+
+// dropRetiredEscalationActions removes every retired action from every route
+// and returns the distinct ones it saw, sorted for a stable warning. A route
+// that names none keeps its actions in their original order.
+func (c *EscalationConfig) dropRetiredEscalationActions() []string {
+	var seen []string
+	recorded := make(map[string]bool)
+	for severity, actions := range c.Routes {
+		c.Routes[severity] = withoutRetiredEscalationActions(actions)
+		for _, action := range actions {
+			if retiredEscalationActions[action] && !recorded[action] {
+				recorded[action] = true
+				seen = append(seen, action)
+			}
+		}
+	}
+	sort.Strings(seen)
+	return seen
+}
+
 // LoadOrCreateEscalationConfig loads the escalation config, creating a default if not found.
 func LoadOrCreateEscalationConfig(path string) (*EscalationConfig, error) {
 	config, err := LoadEscalationConfig(path)
@@ -2476,6 +2528,11 @@ func validateEscalationConfig(c *EscalationConfig) error {
 		c.Routes = make(map[string][]string)
 	}
 
+	// A route that still names a retired action is tolerated, not refused:
+	// drop it and say so once, so the remaining actions in the list fire
+	// (gt-rwp7z.6).
+	warnRetiredEscalationActions(os.Stderr, c.dropRetiredEscalationActions())
+
 	// Validate severity route keys
 	for severity := range c.Routes {
 		if !IsValidSeverity(severity) {
@@ -2518,13 +2575,15 @@ func (c *EscalationConfig) GetRenotifyWindow() time.Duration {
 }
 
 // GetRouteForSeverity returns the escalation route actions for a given severity.
-// Falls back to ["bead", "mail:mayor"] if no specific route is configured.
+// A retired action is filtered out even when the config was built in code
+// rather than loaded, so it never fires (gt-rwp7z.6). Falls back to ["bead"]
+// when no route is configured: an escalation with no route is still a bead.
 func (c *EscalationConfig) GetRouteForSeverity(severity string) []string {
 	if route, ok := c.Routes[severity]; ok {
-		return route
+		return withoutRetiredEscalationActions(route)
 	}
 	// Fallback to default route
-	return []string{"bead", "mail:mayor"}
+	return []string{"bead"}
 }
 
 // GetMaxReescalations returns the maximum number of re-escalations allowed.

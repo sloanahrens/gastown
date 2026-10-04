@@ -85,10 +85,10 @@ type TownSettings struct {
 	Agents map[string]*RuntimeConfig `json:"agents,omitempty"`
 
 	// RoleAgents maps role names to agent aliases for per-role model selection.
-	// Keys are role names: "mayor", "deacon", "witness", "refinery", "polecat", "crew".
+	// Keys are role names: "deacon", "witness", "refinery", "polecat", "crew".
 	// Values are agent names (built-in presets or custom agents defined in Agents).
 	// This allows cost optimization by using different models for different roles.
-	// Example: {"mayor": "claude-opus", "polecat": "claude-sonnet"}
+	// Example: {"witness": "claude-opus", "polecat": "claude-sonnet"}
 	RoleAgents map[string]string `json:"role_agents,omitempty"`
 
 	// PolecatPool, when set, runs `gt sling`'s polecats on OverflowAgent
@@ -114,7 +114,7 @@ type TownSettings struct {
 	FeedCurator json.RawMessage `json:"feed_curator,omitempty"`
 
 	// RoleEffort maps role names to effort levels for per-role effort configuration.
-	// Keys are role names: "mayor", "polecat", "crew". Keys for retired roles
+	// Keys are role names: "polecat", "crew". Keys for retired roles
 	// ("deacon", "witness", "refinery", "boot", "dog") are accepted and ignored.
 	// Values are effort levels: "low", "medium", "high", "max".
 	// Allows cost/speed optimization by using lower effort for simpler roles.
@@ -360,7 +360,7 @@ type MailThresholds struct {
 // RecoveryThresholds configures stalled-polecat recovery thresholds.
 type RecoveryThresholds struct {
 	// MaxBeadRespawns is the threshold above which a bead respawn is blocked
-	// and escalated to mayor instead of re-dispatched (default 3).
+	// and escalated instead of re-dispatched (default 3).
 	MaxBeadRespawns *int `json:"max_bead_respawns,omitempty"`
 
 	// HeartbeatStartupGrace is how long after session creation a live polecat
@@ -974,7 +974,7 @@ type TownThemeConfig struct {
 	CrewThemes map[string]string `json:"crew_themes,omitempty"`
 
 	// RoleDefaults sets default themes for roles across all rigs.
-	// Keys: "mayor", "deacon", "witness", "refinery", "crew", "polecat".
+	// Keys: "deacon", "witness", "refinery", "crew", "polecat".
 	// A value of "none" disables tmux theming for that role.
 	RoleDefaults map[string]string `json:"role_defaults,omitempty"`
 
@@ -1276,7 +1276,7 @@ type MessagingConfig struct {
 
 	// Lists are static mailing lists. Messages are fanned out to all recipients.
 	// Each recipient gets their own copy of the message.
-	// Example: {"oncall": ["mayor/", "gastown/witness"]}
+	// Example: {"oncall": ["gastown/witness", "gastown/refinery"]}
 	Lists map[string][]string `json:"lists,omitempty"`
 
 	// Queues are shared work queues. Only one copy exists; workers claim messages.
@@ -1340,7 +1340,7 @@ type EscalationConfig struct {
 	// Actions are executed in order for each escalation.
 	// Action formats:
 	//   - "bead"        → Create escalation bead (always first, implicit)
-	//   - "mail:<target>" → Send gt mail to target (e.g., "mail:mayor")
+	//   - "mail:<target>" → Send gt mail to target (e.g., "mail:gastown/witness")
 	//   - "email:human" → Send email to contacts.human_email
 	//   - "sms:human"   → Send SMS to contacts.human_sms
 	//   - "slack"       → Post to contacts.slack_webhook
@@ -1435,9 +1435,9 @@ func NewEscalationConfig() *EscalationConfig {
 		Version: CurrentEscalationVersion,
 		Routes: map[string][]string{
 			SeverityLow:      {"bead"},
-			SeverityMedium:   {"bead", "mail:mayor"},
-			SeverityHigh:     {"bead", "mail:mayor", "email:human"},
-			SeverityCritical: {"bead", "mail:mayor", "email:human", "sms:human"},
+			SeverityMedium:   {"bead"},
+			SeverityHigh:     {"bead", "email:human"},
+			SeverityCritical: {"bead", "email:human", "sms:human"},
 		},
 		Contacts:         EscalationContacts{},
 		StaleThreshold:   "4h",
@@ -1504,9 +1504,10 @@ type PolecatPool struct {
 	// the other seats leave alone. Default "needs-pro".
 	ProLabel string `json:"pro_label,omitempty"`
 	// Mode is how an empty seat was filled: "sling" dispatched the bead
-	// directly, "nudge" asked the mayor instead. Retired with the plugin: the
-	// dispatcher always slings, and the mayor it could have asked is gone
-	// (gt-4k3fj.7). Kept, validated, so an old settings file decodes.
+	// directly, "nudge" asked the retired planner instead. Retired with the
+	// plugin: the dispatcher always slings, and the planner it could have
+	// asked is gone (gt-4k3fj.7). Kept, validated, so an old settings file
+	// decodes.
 	Mode string `json:"mode,omitempty"`
 	// ShapeGate is what the dispatcher does with a candidate's shape lint
 	// (`gt spec lint`, gt-mmsr2) before it slings it: "off" runs no lint,

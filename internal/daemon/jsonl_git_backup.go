@@ -911,8 +911,8 @@ func (d *Daemon) escalate(source, message string) {
 	d.escalateAlert(escalationTitle(source, message), source, message)
 }
 
-// escalateAlert sends an escalation message to the mayor via gt escalate under
-// the given alert key. message may be multiline (e.g. full go-test output); it
+// escalateAlert files an escalation under the given alert key via gt escalate.
+// message may be multiline (e.g. full go-test output); it
 // is passed as the escalation reason via --stdin rather than embedded in the
 // title, since `gt escalate` forwards the title straight to
 // `bd create --title=...`, which rejects newlines and would otherwise drop the

@@ -19,7 +19,6 @@ import (
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
-	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
@@ -60,7 +59,6 @@ func newAttentionFixture(t *testing.T, now time.Time) *attentionFixture {
 		bdLatency:   func(context.Context) (time.Duration, error) { return 0, nil },
 		refusals:    func() ([]attention.Refusal, error) { return nil, nil },
 		refusalBead: func(context.Context, string, string) (*beads.Issue, error) { return nil, nil },
-		blockedMail: func(context.Context) ([]*mail.Message, error) { return nil, nil },
 
 		landingState:  func(string) landingState { return landingState{} },
 		readyToLand:   func(context.Context, string) (readyQueue, error) { return readyQueue{}, nil },
@@ -422,86 +420,6 @@ func TestAttentionCollector_RevertRefused(t *testing.T) {
 			t.Error("a failed ledger read returned items, want an error")
 		}
 	})
-}
-
-// TestAttentionCollector_BlockedMail (gt-vsct7.6): an unread message to the
-// mayor whose subject starts with BLOCKED: is one item; the read never marks
-// one read, and a read message or another subject is nothing.
-func TestAttentionCollector_BlockedMail(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
-
-	t.Run("an unread BLOCKED message is one item", func(t *testing.T) {
-		t.Parallel()
-		f := newAttentionFixture(t, now)
-		f.src.blockedMail = func(context.Context) ([]*mail.Message, error) {
-			return []*mail.Message{{
-				ID: "hq-msg", From: "gastown/polecats/emerald",
-				Subject: "BLOCKED: dolt is wedged", Timestamp: now,
-			}}, nil
-		}
-		items := f.collect(t, f.src.collectBlockedMail)
-		if len(items) != 1 || items[0].Key != "blocked:hq-msg" || items[0].Kind != attention.KindBlockedMail {
-			t.Fatalf("items = %+v, want blocked:hq-msg", items)
-		}
-		if !strings.Contains(items[0].Summary, "BLOCKED: dolt is wedged") {
-			t.Errorf("summary = %q, want the subject", items[0].Summary)
-		}
-	})
-
-	t.Run("a non-BLOCKED subject is not an item", func(t *testing.T) {
-		t.Parallel()
-		f := newAttentionFixture(t, now)
-		f.src.blockedMail = func(context.Context) ([]*mail.Message, error) {
-			return []*mail.Message{{ID: "hq-msg", Subject: "status report"}}, nil
-		}
-		if items := f.collect(t, f.src.collectBlockedMail); len(items) != 0 {
-			t.Errorf("items = %+v, want none for another subject", items)
-		}
-	})
-
-	t.Run("a read message is not in the unread list", func(t *testing.T) {
-		t.Parallel()
-		f := newAttentionFixture(t, now)
-		// ListUnread drops read messages, so an empty read is the read state.
-		if items := f.collect(t, f.src.collectBlockedMail); len(items) != 0 {
-			t.Errorf("items = %+v, want none", items)
-		}
-	})
-
-	t.Run("a failed list is an error", func(t *testing.T) {
-		t.Parallel()
-		f := newAttentionFixture(t, now)
-		f.src.blockedMail = func(context.Context) ([]*mail.Message, error) { return nil, os.ErrDeadlineExceeded }
-		if _, err := f.src.collectBlockedMail(context.Background()); err == nil {
-			t.Error("a failed mail read returned items, want an error")
-		}
-	})
-}
-
-// A failed mail read keeps the previous tick's blocked-mail items: an
-// unanswered read must not clear a real alarm (townhealth's UNKNOWN rule).
-func TestAttentionTick_BlockedMailFailureKeepsItsItems(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
-	f := newAttentionFixture(t, now)
-	f.src.blockedMail = func(context.Context) ([]*mail.Message, error) {
-		return []*mail.Message{{ID: "hq-msg", From: "gastown/polecats/emerald", Subject: "BLOCKED: dolt is wedged"}}, nil
-	}
-	first := f.tick(t, now)
-	if _, ok := attention.Find(first, "blocked:hq-msg"); !ok {
-		t.Fatalf("first tick = %+v, want the blocked-mail item", first.Items)
-	}
-
-	f.src.blockedMail = func(context.Context) ([]*mail.Message, error) { return nil, os.ErrDeadlineExceeded }
-	second := f.tick(t, now.Add(time.Minute))
-	kept, ok := attention.Find(second, "blocked:hq-msg")
-	if !ok {
-		t.Fatalf("second tick = %+v, want the item kept across a failed read", second.Items)
-	}
-	if !kept.FirstSeen.Equal(now) {
-		t.Errorf("FirstSeen = %v, want the first tick's time kept", kept.FirstSeen)
-	}
 }
 
 // A collector whose source fails keeps the previous tick's items of its kind:

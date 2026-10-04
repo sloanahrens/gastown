@@ -61,7 +61,7 @@ func RunNotifierContract(t *testing.T, newImpl func(t *testing.T) Subject) {
 		cases := map[string]error{
 			"mail without recipient":         n.MailSend(ctx, "  ", "subject", "body"),
 			"nudge without target":           n.Nudge(ctx, "", "message"),
-			"nudge with blank message":       n.Nudge(ctx, "mayor", " \n"),
+			"nudge with blank message":       n.Nudge(ctx, "overseer", " \n"),
 			"escalation without description": n.Escalate(ctx, notify.Escalation{Severity: "high", Reason: "r"}),
 			"multi-line description":         n.Escalate(ctx, notify.Escalation{Description: "line one\nline two"}),
 			"carriage return in description": n.Escalate(ctx, notify.Escalation{Description: "line one\rline two"}),
@@ -80,12 +80,12 @@ func RunNotifierContract(t *testing.T, newImpl func(t *testing.T) Subject) {
 		// The subject becomes the message bead's title, and bd refuses a
 		// title that starts with "-".
 		s := newImpl(t)
-		err := s.Notifier.MailSend(t.Context(), "mayor/", "-contract subject", "body")
+		err := s.Notifier.MailSend(t.Context(), "overseer", "-contract subject", "body")
 		if !errors.Is(err, notify.ErrInvalid) {
 			t.Errorf("err = %v, want notify.ErrInvalid", err)
 		}
-		if got := s.Observer.Inbox("mayor/"); len(got) != 0 {
-			t.Errorf("mayor/ inbox = %+v, want nothing delivered", got)
+		if got := s.Observer.Inbox("overseer"); len(got) != 0 {
+			t.Errorf("gastown/witness inbox = %+v, want nothing delivered", got)
 		}
 	})
 
@@ -107,8 +107,8 @@ func RunNotifierContract(t *testing.T, newImpl func(t *testing.T) Subject) {
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
 		cases := map[string]error{
-			"mail":     n.MailSend(ctx, "mayor/", "subject", "body"),
-			"nudge":    n.Nudge(ctx, "mayor", "message"),
+			"mail":     n.MailSend(ctx, "overseer", "subject", "body"),
+			"nudge":    n.Nudge(ctx, "overseer", "message"),
 			"escalate": n.Escalate(ctx, notify.Escalation{Severity: "low", Description: "contract"}),
 			"clear":    n.ClearEscalations(ctx, "cleared", "contract-key"),
 		}
@@ -141,26 +141,26 @@ func RunNotifierContract(t *testing.T, newImpl func(t *testing.T) Subject) {
 		s := newImpl(t)
 		ctx := t.Context()
 		// A dash-leading body must arrive as the body, not as a flag.
-		if err := s.Notifier.MailSend(ctx, "mayor/", "contract subject", "-contract body"); err != nil {
+		if err := s.Notifier.MailSend(ctx, "overseer", "contract subject", "-contract body"); err != nil {
 			t.Fatalf("MailSend: %v", err)
 		}
-		got := s.Observer.Inbox("mayor/")
+		got := s.Observer.Inbox("overseer")
 		if len(got) != 1 || got[0].Subject != "contract subject" || got[0].Body != "-contract body" {
-			t.Fatalf("mayor/ inbox = %+v, want the one message just sent", got)
+			t.Fatalf("gastown/witness inbox = %+v, want the one message just sent", got)
 		}
 	})
 
 	t.Run("mail options set the sender", func(t *testing.T) {
 		t.Parallel()
 		s := newImpl(t)
-		err := s.Notifier.MailSend(t.Context(), "mayor/", "relayed", "relayed body",
+		err := s.Notifier.MailSend(t.Context(), "overseer", "relayed", "relayed body",
 			notify.From("convoy/contract"), notify.NoNotify())
 		if err != nil {
 			t.Fatalf("MailSend: %v", err)
 		}
-		got := s.Observer.Inbox("mayor/")
+		got := s.Observer.Inbox("overseer")
 		if len(got) != 1 || got[0].From != "convoy/contract" || got[0].Subject != "relayed" {
-			t.Fatalf("mayor/ inbox = %+v, want one message from convoy/contract", got)
+			t.Fatalf("gastown/witness inbox = %+v, want one message from convoy/contract", got)
 		}
 	})
 

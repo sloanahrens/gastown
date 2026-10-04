@@ -448,7 +448,7 @@ func TestRunWeeklyRollupStopsBeforeMailWhenAuditCloseFails(t *testing.T) {
 	}
 }
 
-// A digest whose audit bead is recorded and closed is mailed to mayor/, and
+// A digest whose audit bead is recorded and closed is mailed to the overseer, and
 // a second run the same day finds it and sends nothing.
 func TestRunDailyDigestMailsAfterTheAuditBead(t *testing.T) {
 	t.Parallel()

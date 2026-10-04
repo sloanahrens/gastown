@@ -98,23 +98,23 @@ func TestNudgeMayorReportsDeliveryFailure(t *testing.T) {
 	}
 }
 
-func TestSendDoltAlertMailBoundsTheSend(t *testing.T) {
+func TestRaiseDoltAlertBoundsTheSend(t *testing.T) {
 	t.Parallel()
 	var deadline time.Time
-	n := deadlineSpy{onMail: func(ctx context.Context) { deadline, _ = ctx.Deadline() }}
-	sendDoltAlertMail(n, "mayor/", "s", "b", func(string, ...interface{}) {})
+	n := deadlineSpy{onEscalate: func(ctx context.Context) { deadline, _ = ctx.Deadline() }}
+	raiseDoltAlert(n, "high", "dolt:crash-loop", "s", "b", func(string, ...interface{}) {})
 	if deadline.IsZero() {
-		t.Fatal("alert mail sent without a deadline")
+		t.Fatal("alert escalation raised without a deadline")
 	}
 }
 
-// deadlineSpy reports the context each mail send ran under.
+// deadlineSpy reports the context each escalation ran under.
 type deadlineSpy struct {
 	notify.Notifier
-	onMail func(ctx context.Context)
+	onEscalate func(ctx context.Context)
 }
 
-func (s deadlineSpy) MailSend(ctx context.Context, _, _, _ string, _ ...notify.MailOption) error {
-	s.onMail(ctx)
+func (s deadlineSpy) Escalate(ctx context.Context, _ notify.Escalation) error {
+	s.onEscalate(ctx)
 	return nil
 }

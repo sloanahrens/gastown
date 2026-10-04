@@ -924,7 +924,7 @@ func runDoltCleanup(cmd *cobra.Command, args []string) error {
 
 	// GUARDRAIL (gt-61x): agents cannot force-remove databases without recorded
 	// authorization. A reaper dog once force-deleted DBs that a hold bead had
-	// explicitly parked for a human/mayor decision — the only trace was an
+	// explicitly parked for a human decision — the only trace was an
 	// ephemeral nudge. Forcing agents through --authorized-by leaves a durable
 	// audit trail on the authorizing bead.
 	if doltCleanupForce && !doltCleanupDry {
@@ -1259,7 +1259,7 @@ func checkAgentForceAuthorization(actor, authorizedBy string) error {
 	return fmt.Errorf(`agent actor %q may not run 'gt dolt cleanup --force' without recorded authorization (gt-61x)
 
 Destructive database removal by agents requires an authorization bead:
-  1. Get explicit approval from the mayor/overseer (escalate if needed)
+  1. Get explicit approval from the overseer (escalate if needed)
   2. Reference the bead that records the decision:
        gt dolt cleanup --force --authorized-by <bead-id>
 

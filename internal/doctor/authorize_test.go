@@ -25,13 +25,13 @@ func TestValidateFixAuthorization(t *testing.T) {
 		},
 		{
 			name:    "unlabeled bead is not an authorization",
-			issue:   &beads.Issue{ID: "hq-1", Status: "open", CreatedBy: "mayor/"},
+			issue:   &beads.Issue{ID: "hq-1", Status: "open", CreatedBy: "overseer"},
 			actor:   "gastown/polecats/amber",
 			wantErr: "not an authorization record",
 		},
 		{
 			name:    "closed authorization is spent",
-			issue:   &beads.Issue{ID: "hq-1", Status: "closed", CreatedBy: "mayor/", Labels: []string{FixAuthLabel}},
+			issue:   &beads.Issue{ID: "hq-1", Status: "closed", CreatedBy: "overseer", Labels: []string{FixAuthLabel}},
 			actor:   "gastown/polecats/amber",
 			wantErr: "requires an open authorization",
 		},
@@ -42,13 +42,13 @@ func TestValidateFixAuthorization(t *testing.T) {
 			wantErr: "self-authorization is not allowed",
 		},
 		{
-			name:  "an open bead the mayor created passes",
-			issue: &beads.Issue{ID: "hq-1", Status: "open", CreatedBy: "mayor/", Labels: []string{"other", FixAuthLabel}},
+			name:  "an open bead the overseer created passes",
+			issue: &beads.Issue{ID: "hq-1", Status: "open", CreatedBy: "overseer", Labels: []string{"other", FixAuthLabel}},
 			actor: "gastown/polecats/amber",
 		},
 		{
 			name:  "an unidentified actor cannot self-authorize",
-			issue: &beads.Issue{ID: "hq-1", Status: "open", CreatedBy: "mayor/", Labels: []string{FixAuthLabel}},
+			issue: &beads.Issue{ID: "hq-1", Status: "open", CreatedBy: "overseer", Labels: []string{FixAuthLabel}},
 			actor: "",
 		},
 	}

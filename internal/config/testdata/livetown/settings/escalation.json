@@ -4,21 +4,18 @@
   "routes": {
     "critical": [
       "bead",
-      "mail:mayor",
       "email:human",
       "sms:human"
     ],
     "high": [
       "bead",
-      "mail:mayor",
       "email:human"
     ],
     "low": [
       "bead"
     ],
     "medium": [
-      "bead",
-      "mail:mayor"
+      "bead"
     ]
   },
   "contacts": {},

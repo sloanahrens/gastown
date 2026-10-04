@@ -15,7 +15,7 @@ import (
 type maintenanceSeams struct {
 	// now is the clock the gc triggers and the pause marker read.
 	now func() time.Time
-	// escalate reports maintenance findings to the mayor.
+	// escalate raises maintenance findings as an escalation bead.
 	escalate func(d *Daemon, source, message string)
 	// pauseCurrent, pauseWrite and pauseRemove read, write and remove the
 	// Dolt pause marker (internal/doltpause) around each gc call.
