@@ -1,6 +1,7 @@
 package version
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -869,6 +870,195 @@ func TestGetRepoRootForTown_ReadsOnlyTheTown(t *testing.T) {
 			}
 			if got != source {
 				t.Errorf("GetRepoRootForTown = %q, want %q", got, source)
+			}
+		})
+	}
+}
+
+// TestCheckStaleBinary_DocsOnlyBacklogIsNotStale is the gt-p62ku case: a binary
+// whose only drift is documentation, markdown, test sources or testdata
+// produces everything the build ref has, so it is not stale — while the count
+// still says how far the ref moved.
+func TestCheckStaleBinary_DocsOnlyBacklogIsNotStale(t *testing.T) {
+	t.Parallel()
+	g, r := newRepo(t)
+	built := r.commit("main.go", "1")
+	r.commit("docs/design/architecture.md", "2")
+	r.commit("README.md", "3")
+	r.commit("internal/version/stale_test.go", "4")
+	r.commit("internal/daemon/testdata/fixture.txt", "5")
+
+	info := g.checker(built).checkStale(repoDir)
+	if info.Error != nil {
+		t.Fatalf("unexpected error: %v", info.Error)
+	}
+	if info.IsStale {
+		t.Errorf("a documentation-only backlog reported stale: %+v", info)
+	}
+	if info.CommitsBehind != 4 {
+		t.Errorf("CommitsBehind = %d, want 4", info.CommitsBehind)
+	}
+	if !info.BinaryAffectingKnown || info.BinaryAffecting != 0 {
+		t.Errorf("BinaryAffecting = %d (known %v), want 0 known",
+			info.BinaryAffecting, info.BinaryAffectingKnown)
+	}
+}
+
+// TestCheckStaleBinary_MixedBacklogNamesBothCounts: a backlog with both kinds
+// of commit is stale, and the warning says how much of it the binary counts.
+func TestCheckStaleBinary_MixedBacklogNamesBothCounts(t *testing.T) {
+	t.Parallel()
+	g, r := newRepo(t)
+	built := r.commit("main.go", "1")
+	r.commit("docs/design/architecture.md", "2")
+	r.commit("README.md", "3")
+	r.commit("internal/cmd/root.go", "4")
+
+	info := g.checker(built).checkStale(repoDir)
+	if info.Error != nil {
+		t.Fatalf("unexpected error: %v", info.Error)
+	}
+	if !info.IsStale {
+		t.Fatalf("a backlog that changes the build reported fresh: %+v", info)
+	}
+	if info.CommitsBehind != 3 || info.BinaryAffecting != 1 || !info.BinaryAffectingKnown {
+		t.Fatalf("CommitsBehind=%d BinaryAffecting=%d known=%v, want 3, 1, true",
+			info.CommitsBehind, info.BinaryAffecting, info.BinaryAffectingKnown)
+	}
+	want := "gt binary is 3 commits behind main (1 changes the binary)"
+	if got := info.Describe("gt binary"); !strings.HasPrefix(got, want) {
+		t.Errorf("Describe = %q, want it to start %q", got, want)
+	}
+}
+
+// TestCheckStaleBinary_BinaryOnlyBacklogKeepsTheRawWording: when every commit
+// behind changes the build, the raw count already says everything an install
+// would pick up, so the warning reads as it always has.
+func TestCheckStaleBinary_BinaryOnlyBacklogKeepsTheRawWording(t *testing.T) {
+	t.Parallel()
+	g, r := newRepo(t)
+	built := r.commit("main.go", "1")
+	r.commit("internal/version/stale.go", "2")
+	r.commit("cmd/gt/main.go", "3")
+
+	info := g.checker(built).checkStale(repoDir)
+	if info.Error != nil {
+		t.Fatalf("unexpected error: %v", info.Error)
+	}
+	if !info.IsStale {
+		t.Fatalf("a code-only backlog reported fresh: %+v", info)
+	}
+	if info.CommitsBehind != 2 || info.BinaryAffecting != 2 || !info.BinaryAffectingKnown {
+		t.Fatalf("CommitsBehind=%d BinaryAffecting=%d known=%v, want 2, 2, true",
+			info.CommitsBehind, info.BinaryAffecting, info.BinaryAffectingKnown)
+	}
+	if got := info.Describe("gt binary"); strings.Contains(got, "the binary)") {
+		t.Errorf("Describe = %q, want no binary-affecting note when every commit counts", got)
+	}
+}
+
+// TestCheckStaleBinary_EmbedDirContentIsBinaryAffecting: markdown under an
+// embed directory is compiled into the binary, so changing it is drift; a test
+// source under the same directory is not.
+func TestCheckStaleBinary_EmbedDirContentIsBinaryAffecting(t *testing.T) {
+	t.Parallel()
+	g, r := newRepo(t)
+	built := r.commit("main.go", "1")
+	r.commit("internal/templates/roles/polecat.md", "2")
+	r.commit("internal/templates/townroot_test.go", "3")
+
+	info := g.checker(built).checkStale(repoDir)
+	if info.Error != nil {
+		t.Fatalf("unexpected error: %v", info.Error)
+	}
+	if !info.IsStale {
+		t.Fatalf("embedded markdown reported fresh: %+v", info)
+	}
+	if info.CommitsBehind != 2 || info.BinaryAffecting != 1 || !info.BinaryAffectingKnown {
+		t.Fatalf("CommitsBehind=%d BinaryAffecting=%d known=%v, want 2, 1, true",
+			info.CommitsBehind, info.BinaryAffecting, info.BinaryAffectingKnown)
+	}
+}
+
+// TestCheckStaleBinary_UnlistedChangesKeepTheRawCount: git that cannot list
+// what changed is not evidence that nothing needs building, so the check keeps
+// the raw count and warns, as it did before the split.
+func TestCheckStaleBinary_UnlistedChangesKeepTheRawCount(t *testing.T) {
+	t.Parallel()
+	g, r := newRepo(t)
+	built := r.commit("main.go", "1")
+	r.commit("docs/design/architecture.md", "2")
+
+	noLog := func(ctx context.Context, dir string, args ...string) ([]byte, error) {
+		if args[0] == "log" {
+			return nil, errExit
+		}
+		return g.run(ctx, dir, args...)
+	}
+
+	info := checker{git: noLog, commit: built}.checkStale(repoDir)
+	if info.Error != nil {
+		t.Fatalf("unexpected error: %v", info.Error)
+	}
+	if !info.IsStale {
+		t.Errorf("an unlistable backlog reported fresh: %+v", info)
+	}
+	if info.BinaryAffectingKnown {
+		t.Errorf("BinaryAffectingKnown = true without a listing")
+	}
+	if info.CommitsBehind != 1 {
+		t.Errorf("CommitsBehind = %d, want the raw count 1", info.CommitsBehind)
+	}
+}
+
+// TestCheckStaleBinary_PartialListingKeepsTheRawCount: a listing that does not
+// account for every commit behind cannot clear them, so the raw count stands.
+func TestCheckStaleBinary_PartialListingKeepsTheRawCount(t *testing.T) {
+	t.Parallel()
+	g, r := newRepo(t)
+	built := r.commit("main.go", "1")
+	r.commit("docs/design/architecture.md", "2")
+	r.commit("README.md", "3")
+
+	partial := func(ctx context.Context, dir string, args ...string) ([]byte, error) {
+		if args[0] == "log" {
+			return []byte(gitLogRecordSep + "abcdef1\n\ndocs/design/architecture.md\n"), nil
+		}
+		return g.run(ctx, dir, args...)
+	}
+
+	info := checker{git: partial, commit: built}.checkStale(repoDir)
+	if !info.IsStale {
+		t.Errorf("a partial listing reported fresh: %+v", info)
+	}
+	if info.BinaryAffectingKnown {
+		t.Errorf("BinaryAffectingKnown = true from a listing of 1 of 2 commits")
+	}
+}
+
+// TestCountBinaryAffecting pins the record parsing of the name-only listing:
+// one record per commit, its first line the commit hash, the rest the paths it
+// changed.
+func TestCountBinaryAffecting(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name            string
+		out             string
+		affecting, seen int
+	}{
+		{"no commits", "", 0, 0},
+		{"a commit with no paths", gitLogRecordSep + "a1\n", 0, 1},
+		{"a docs-only commit", gitLogRecordSep + "a1\n\ndocs/x.md\nREADME.md\n", 0, 1},
+		{"one build path among docs", gitLogRecordSep + "a1\n\ndocs/x.md\ninternal/cmd/root.go\n", 1, 1},
+		{"one record per commit", gitLogRecordSep + "a1\n\ndocs/x.md\n" + gitLogRecordSep + "a2\n\nmain.go\n", 1, 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			affecting, seen := countBinaryAffecting([]byte(tt.out))
+			if affecting != tt.affecting || seen != tt.seen {
+				t.Errorf("countBinaryAffecting = (%d, %d), want (%d, %d)",
+					affecting, seen, tt.affecting, tt.seen)
 			}
 		})
 	}

@@ -202,6 +202,23 @@ func (r *fakeRepo) resolveOrFail(rev string) string {
 	return id
 }
 
+// firstParentPaths returns the paths a commit changed against its first
+// parent: the file list `git log --name-only --diff-merges=first-parent`
+// prints for it. A commit with no parents lists its whole tree, as git does
+// for a root commit.
+func (r *fakeRepo) firstParentPaths(id string) []string {
+	c := r.g.store[id]
+	if len(c.parents) == 0 {
+		paths := make([]string, 0, len(c.tree))
+		for p := range c.tree {
+			paths = append(paths, p)
+		}
+		sort.Strings(paths)
+		return paths
+	}
+	return treeDiff(r.g.store[c.parents[0]].tree, c.tree, []string{"."})
+}
+
 // resolve resolves HEAD, a full refname, a short branch name, or a hash
 // prefix of at least four characters to a commit this repo holds.
 func (r *fakeRepo) resolve(rev string) (string, bool) {
@@ -230,6 +247,20 @@ func (r *fakeRepo) resolve(rev string) (string, bool) {
 		}
 	}
 	return match, match != ""
+}
+
+// rangeCommits returns the commits reachable from to but not from from, newest
+// first, the way git log walks a range.
+func (g *fakeGit) rangeCommits(from, to string) []string {
+	exclude := g.ancestors(from)
+	var ids []string
+	for id := range g.ancestors(to) {
+		if !exclude[id] {
+			ids = append(ids, id)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return g.store[ids[i]].seq > g.store[ids[j]].seq })
+	return ids
 }
 
 // ancestors returns every commit reachable from id, id included.
@@ -306,6 +337,20 @@ func (r *fakeRepo) dispatch(args []string) (string, error) {
 			return "", errExit128
 		}
 		return strings.TrimPrefix(r.head, "refs/heads/") + "\n", nil
+
+	case len(args) == 5 && eq(args[:4], "log", gitLogFormat, "--name-only", "--diff-merges=first-parent"):
+		from, to, err := r.rangeEnds(args[4])
+		if err != nil {
+			return "", err
+		}
+		var b strings.Builder
+		for _, id := range r.g.rangeCommits(from, to) {
+			b.WriteString(gitLogRecordSep + id + "\n")
+			if paths := r.firstParentPaths(id); len(paths) > 0 {
+				b.WriteString("\n" + strings.Join(paths, "\n") + "\n")
+			}
+		}
+		return b.String(), nil
 
 	case len(args) == 4 && eq(args[:2], "merge-base", "--is-ancestor"):
 		a, okA := r.resolve(args[2])

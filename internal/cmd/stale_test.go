@@ -84,6 +84,43 @@ func TestOutputStaleText(t *testing.T) {
 			},
 		},
 		{
+			name: "stale with a mixed backlog names the binary-affecting subset",
+			output: StaleOutput{
+				Stale:                true,
+				Forward:              true,
+				OnMainBranch:         true,
+				SafeToRebuild:        true,
+				BinaryCommit:         "abc1234567890",
+				RepoCommit:           "def4567890123",
+				CompareRef:           "origin/main",
+				CommitsBehind:        3,
+				BinaryAffecting:      1,
+				BinaryAffectingKnown: true,
+			},
+			want: []string{
+				"Binary is stale",
+				"(3 commits behind origin/main (1 changes the binary))",
+			},
+		},
+		{
+			name: "fresh for the build with a documentation-only backlog",
+			output: StaleOutput{
+				Stale:                false,
+				BinaryCommit:         "abc1234567890",
+				RepoCommit:           "def4567890123",
+				CompareRef:           "origin/main",
+				CommitsBehind:        3,
+				BinaryAffectingKnown: true,
+			},
+			want: []string{
+				"Binary is current for the build",
+				"Commit: abc123456789",
+				"(compared against origin/main)",
+				"(3 documentation-only commits ahead of origin/main)",
+			},
+			notWant: []string{"Binary is stale"},
+		},
+		{
 			name: "fresh with compare ref",
 			output: StaleOutput{
 				Stale:        false,

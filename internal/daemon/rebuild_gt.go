@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+	"github.com/steveyegge/gastown/internal/buildpaths"
 	"github.com/steveyegge/gastown/internal/landworker"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/version"
@@ -425,55 +426,13 @@ func (d *Daemon) rebuildGTCycle(ctx context.Context, cycle *dogCycle, repoRoot s
 	return d.rebuildGTInstall(ctx, cycle, repoRoot, reserveTimeout)
 }
 
-// rebuildGTEmbedDirs are the package directories carrying //go:embed
-// directives: internal/cmdtree (bd-command-tree.json), internal/config (roles/
-// *.toml), internal/formula (formulas/*.formula.toml) and internal/templates
-// (roles/, launchd/, systemd/, bodies/, townroot/claude.md, polecat-CLAUDE.md).
-// What they embed is compiled into the binary, so a change anywhere under one
-// is binary-affecting even when the file itself looks like documentation.
-var rebuildGTEmbedDirs = []string{
-	"internal/cmdtree/",
-	"internal/config/",
-	"internal/formula/",
-	"internal/templates/",
-}
-
 // rebuildGTNonBinaryPath reports whether a repo-relative path can be changed
-// without changing what `make build` produces. The shapes are documentation
-// under docs/, any markdown file, test sources and testdata — and nothing under
-// a rebuildGTEmbedDirs directory, whose contents the binary carries. Everything
-// else is binary-affecting, including scripts/, plugins/ and an embed's data.
+// without changing what `make build` produces. The rule is buildpaths'
+// AffectsBuild, which `gt stale` reads too, so this job and the staleness
+// warning the user sees cannot disagree about what an install would produce
+// (gt-p62ku).
 func rebuildGTNonBinaryPath(p string) bool {
-	if !rebuildGTDocOrTestPath(p) {
-		return false
-	}
-	// A test source is never compiled into the binary, so it stays non-binary
-	// even under an embed directory.
-	if strings.HasSuffix(p, "_test.go") {
-		return true
-	}
-	for _, dir := range rebuildGTEmbedDirs {
-		if strings.HasPrefix(p, dir) {
-			return false
-		}
-	}
-	return true
-}
-
-// rebuildGTDocOrTestPath matches the documented non-binary shapes: docs/**,
-// **/*.md, **/*_test.go and **/testdata/**.
-func rebuildGTDocOrTestPath(p string) bool {
-	switch {
-	case strings.HasPrefix(p, "docs/"):
-		return true
-	case strings.HasSuffix(p, ".md"):
-		return true
-	case strings.HasSuffix(p, "_test.go"):
-		return true
-	case p == "testdata", strings.HasPrefix(p, "testdata/"), strings.Contains(p, "/testdata/"):
-		return true
-	}
-	return false
+	return !buildpaths.AffectsBuild(p)
 }
 
 // rebuildGTNonBinaryRange reports whether every path changed in from..to is
