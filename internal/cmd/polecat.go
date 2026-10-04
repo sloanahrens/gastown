@@ -1746,6 +1746,15 @@ func checkRecoveryForPolecat(bd recoveryBeads, preloadedAgentBeads map[string]*b
 	status.CleanupStatus = input.CleanupStatus
 	applyMQFactsToWorkstateInput(&input, &status, bd, p.ClonePath, targetRefs, targetRefLookupFailed, gitState, gitErr, mrForBranch, mrForBranchErr)
 	disposition := polecat.DecideWorkstate(input)
+	// The workstate verdict does not model the agentpause marker, so overlay the
+	// same park refusal `gt polecat list` applies (WithParked) or a parked seat
+	// reports reusable here while the allocator refuses it (gt-b2jk0).
+	// WithParked only clears Reusable and rewords Reason/ReuseStatus/Blockers:
+	// verdict, safe_to_nuke, needs_recovery and counts_toward_capacity stay as
+	// DecideWorkstate computed them.
+	if reason, parked := polecat.ParkedReuseBlocker(filepath.Dir(r.Path), rigName, polecatName); parked {
+		disposition = disposition.WithParked(reason)
+	}
 	applyWorkstateDispositionToRecoveryStatus(&status, disposition)
 
 	if reconcileCleanup {
