@@ -41,11 +41,15 @@ type fakeSpecTown struct {
 	revert    map[string]*specdispatch.Revert
 	// children is each bead's direct child set, and childErrs a per-bead
 	// children read failure, for the container rule.
-	children   map[string][]specdispatch.Child
-	childErrs  map[string]error
-	slingErrs  map[string][]error // per bead, consumed in order
-	slung      []string
-	slingSeats []specdispatch.SeatChoice
+	children map[string][]specdispatch.Child
+	// showOverride is the full re-read the tick sees when it differs from the
+	// board snapshot: the board lagged a note the re-read carries (gt-kr5xv).
+	// An id absent here falls back to specs, so the common case needs no entry.
+	showOverride map[string]specdispatch.Spec
+	childErrs    map[string]error
+	slingErrs    map[string][]error // per bead, consumed in order
+	slung        []string
+	slingSeats   []specdispatch.SeatChoice
 	// slungResume is the resume branch each sling carried, positionally with
 	// slung: "" when the dispatch started fresh.
 	slungResume []string
@@ -105,6 +109,9 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 			return specBoardRead{Candidates: out, LabeledFailed: labeled}
 		},
 		Show: func(id string) (specdispatch.Spec, error) {
+			if s, ok := f.showOverride[id]; ok {
+				return s, nil
+			}
 			s, ok := f.specs[id]
 			if !ok {
 				return s, errors.New("not found")
@@ -1286,9 +1293,10 @@ func specTown(t *testing.T) string {
 // specCandidates is the dispatcher's intake, so it is the place the
 // acceptance case lives: a ready, unassigned, open task/bug/feature bead
 // without the retired spec label is a candidate; the skips
-// (gt:ready-to-land, needs-human, deferred, assigned), the non-work types and
-// the operator's ceiling are not (gt-4k3fj.8.8 acceptance 1 and 2). The board
-// comes from a fake store, so this pins the filter rather than bd's own.
+// (gt:ready-to-land, a READY TO LAND block with no label yet, needs-human,
+// deferred, assigned), the non-work types and the operator's ceiling are not
+// (gt-4k3fj.8.8 acceptance 1 and 2). The board comes from a fake store, so this
+// pins the filter rather than bd's own.
 func TestSpecCandidatesFromAFakeStore(t *testing.T) {
 	t.Parallel()
 	townRoot := specTown(t)
@@ -1300,6 +1308,10 @@ func TestSpecCandidatesFromAFakeStore(t *testing.T) {
 			{ID: "gt-chore", Type: "chore", Status: "open", Priority: 1},
 			{ID: "gt-assigned", Type: "task", Status: "open", Priority: 1, Assignee: "gastown/polecats/ruby"},
 			{ID: "gt-landing", Type: "task", Status: "open", Priority: 1, Labels: []string{"gt:ready-to-land"}},
+			// The label-less half of the same window: the READY TO LAND block
+			// is written first, so an answer that lags the label still carries
+			// the block and the bead stays off the board (gt-kr5xv).
+			{ID: "gt-mid", Type: "task", Status: "open", Priority: 1, Notes: readyBlock("sloan/x", "abc1234", "main")},
 			{ID: "gt-human", Type: "task", Status: "open", Priority: 1, Labels: []string{"needs-human"}},
 			{ID: "gt-deferred", Type: "task", Status: "deferred", Priority: 1},
 			{ID: "gt-epic", Type: "epic", Status: "open", Priority: 1},

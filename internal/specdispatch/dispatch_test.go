@@ -39,6 +39,11 @@ func TestEligible(t *testing.T) {
 		{func(s *Spec) { s.Type = "docs" }, nil, false, "type docs"},
 		{func(s *Spec) { s.Labels = []string{"gt:agent"} }, nil, false, "not a work bead: label gt:agent"},
 		{func(s *Spec) { s.Labels = append(s.Labels, "gt:ready-to-land") }, nil, false, "label gt:ready-to-land"},
+		// A bead mid-submission wears the READY TO LAND block before it wears
+		// the label gt done writes second, so the block is the signal that
+		// survives a read the label write outran (gt-kr5xv). The field is the
+		// bead's own record: no label, no assignee, and still no candidate.
+		{func(s *Spec) { s.SubmittedForLanding = true }, nil, false, "submitted for landing"},
 		{func(s *Spec) { s.Labels = append(s.Labels, "needs-human") }, nil, false, "label needs-human"},
 		{func(s *Spec) { s.Labels = append(s.Labels, "Needs-Mayor-Review") }, nil, false, "label needs-mayor-review"},
 		// The shared hold rule (dispatch.DispatchHoldFields). gt:needs-human is
