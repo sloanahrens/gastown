@@ -241,3 +241,70 @@ func TestNonClaudeProviderGetsClaudeRuntime(t *testing.T) {
 		t.Errorf("backend wrapper Args = %v, want %v", wrapped.Args, want)
 	}
 }
+
+// TestForgejoConfigAccessors pins the nil-safe readers on the
+// merge_queue.forgejo block (gt-fn9e6.3): a rig that never configured
+// Forgejo must get the default workflow name and no bots rather than a panic,
+// because ResolveForgejoConfig returns a nil block for exactly that rig.
+func TestForgejoConfigAccessors(t *testing.T) {
+	t.Parallel()
+
+	var absent *ForgejoConfig
+	if got := absent.GateWorkflowName(); got != DefaultGateWorkflow {
+		t.Errorf("nil GateWorkflowName() = %q, want %q", got, DefaultGateWorkflow)
+	}
+	if got := absent.BotLogin(ForgejoRoleLanding); got != "" {
+		t.Errorf("nil BotLogin() = %q, want empty", got)
+	}
+
+	unset := &ForgejoConfig{}
+	if got := unset.GateWorkflowName(); got != DefaultGateWorkflow {
+		t.Errorf("unset GateWorkflowName() = %q, want %q", got, DefaultGateWorkflow)
+	}
+
+	full := &ForgejoConfig{
+		GateWorkflow: "heavy",
+		Bots:         map[string]string{ForgejoRoleRegistry: "gt-registry"},
+	}
+	if got := full.GateWorkflowName(); got != "heavy" {
+		t.Errorf("GateWorkflowName() = %q, want heavy", got)
+	}
+	if got := full.BotLogin(ForgejoRoleRegistry); got != "gt-registry" {
+		t.Errorf("BotLogin(registry) = %q, want gt-registry", got)
+	}
+	if got := full.BotLogin(ForgejoRolePolecat); got != "" {
+		t.Errorf("BotLogin(polecat) = %q, want empty (unset role)", got)
+	}
+}
+
+// TestForgejoConfigDecodesItsKeys pins the JSON keys the three config files
+// spell, so a rename cannot silently stop a committed .gastown/settings.json
+// from resolving.
+func TestForgejoConfigDecodesItsKeys(t *testing.T) {
+	t.Parallel()
+	const body = `{
+		"remote_url": "https://forgejo.example/gastown/gastown",
+		"gate_workflow": "gate",
+		"bots": {"polecat": "gt-polecat", "landing": "gt-landing", "registry": "gt-registry"},
+		"mirror_target": "git@github.com:sloanahrens/gastown.git"
+	}`
+	var mq MergeQueueConfig
+	if err := json.Unmarshal([]byte(`{"forgejo":`+body+`}`), &mq); err != nil {
+		t.Fatalf("decode merge_queue.forgejo: %v", err)
+	}
+	if mq.Forgejo == nil {
+		t.Fatal("Forgejo = nil, want the decoded block")
+	}
+	if mq.Forgejo.RemoteURL != "https://forgejo.example/gastown/gastown" {
+		t.Errorf("RemoteURL = %q", mq.Forgejo.RemoteURL)
+	}
+	if mq.Forgejo.GateWorkflowName() != "gate" {
+		t.Errorf("GateWorkflow = %q, want gate", mq.Forgejo.GateWorkflow)
+	}
+	if mq.Forgejo.BotLogin(ForgejoRoleLanding) != "gt-landing" {
+		t.Errorf("landing bot = %q, want gt-landing", mq.Forgejo.BotLogin(ForgejoRoleLanding))
+	}
+	if mq.Forgejo.MirrorTarget != "git@github.com:sloanahrens/gastown.git" {
+		t.Errorf("MirrorTarget = %q", mq.Forgejo.MirrorTarget)
+	}
+}

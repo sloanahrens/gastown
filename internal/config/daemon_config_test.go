@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -115,5 +116,82 @@ func TestDaemonPatrolConfigDecodesEventsPrune(t *testing.T) {
 	}
 	if absent.Patrols.EventsPrune != nil {
 		t.Errorf("absent key decoded as %+v", absent.Patrols.EventsPrune)
+	}
+}
+
+// TestForgejoTokenDir pins the landing worker's token-directory resolution
+// (gt-fn9e6.3): the configured directory wins, and an unconfigured worker
+// falls back to the host default. Tokens are never config values, so the only
+// thing daemon.json may name is this directory.
+func TestForgejoTokenDir(t *testing.T) {
+	t.Parallel()
+
+	t.Run("configured directory wins", func(t *testing.T) {
+		t.Parallel()
+		cfg := &LandingWorkerConfig{Forgejo: &ForgejoWorkerConfig{TokenDir: "/srv/gt/tokens"}}
+		got, err := cfg.ForgejoTokenDir()
+		if err != nil {
+			t.Fatalf("ForgejoTokenDir: %v", err)
+		}
+		if got != "/srv/gt/tokens" {
+			t.Errorf("ForgejoTokenDir() = %q, want the configured directory", got)
+		}
+	})
+
+	t.Run("unconfigured worker falls back to the host default", func(t *testing.T) {
+		t.Parallel()
+		want, err := DefaultForgejoTokenDir()
+		if err != nil {
+			t.Fatalf("DefaultForgejoTokenDir: %v", err)
+		}
+		for name, cfg := range map[string]*LandingWorkerConfig{
+			"nil patrol config":   nil,
+			"no forgejo block":    {},
+			"empty forgejo block": {Forgejo: &ForgejoWorkerConfig{}},
+		} {
+			got, err := cfg.ForgejoTokenDir()
+			if err != nil {
+				t.Errorf("%s: ForgejoTokenDir: %v", name, err)
+				continue
+			}
+			if got != want {
+				t.Errorf("%s: ForgejoTokenDir() = %q, want the default %q", name, got, want)
+			}
+		}
+		if want == "" {
+			t.Error("DefaultForgejoTokenDir() is empty")
+		}
+	})
+}
+
+// TestForgejoTokenDirDefault drives the default's environment through the
+// injectable core: XDG_CONFIG_HOME/gt when set, else ~/.config/gt. Reading
+// the real environment here would need t.Setenv, which the unit tier bans.
+func TestForgejoTokenDirDefault(t *testing.T) {
+	t.Parallel()
+
+	const home = "/home/sloan"
+	homeDir := func() (string, error) { return home, nil }
+
+	got, err := forgejoTokenDir(func(string) string { return "/xdg" }, homeDir)
+	if err != nil {
+		t.Fatalf("forgejoTokenDir(xdg): %v", err)
+	}
+	if got != "/xdg/gt" {
+		t.Errorf("with XDG_CONFIG_HOME = %q, want /xdg/gt", got)
+	}
+
+	got, err = forgejoTokenDir(func(string) string { return "" }, homeDir)
+	if err != nil {
+		t.Fatalf("forgejoTokenDir(home): %v", err)
+	}
+	if want := filepath.Join(home, ".config", "gt"); got != want {
+		t.Errorf("without XDG_CONFIG_HOME = %q, want %q", got, want)
+	}
+
+	boom := errors.New("no home")
+	if _, err := forgejoTokenDir(func(string) string { return "" },
+		func() (string, error) { return "", boom }); !errors.Is(err, boom) {
+		t.Errorf("forgejoTokenDir(home error) = %v, want the home error", err)
 	}
 }

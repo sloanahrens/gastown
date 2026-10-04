@@ -195,3 +195,119 @@ func TestResolveMergeQueueConfig_NoConfig(t *testing.T) {
 		t.Errorf("ResolveMergeQueueConfig() with no config files = %+v, want nil", got)
 	}
 }
+
+// TestResolveForgejoConfig_Precedence mirrors
+// TestResolveMergeQueueConfig_Precedence for the merge_queue.forgejo block
+// (gt-fn9e6.3). The reader delegates to ResolveMergeQueueConfig, so this test
+// guards both that it reads the right block and that the three-tier
+// precedence still holds for it: the rig root config.json is the floor, the
+// repo-committed .gastown/settings.json overrides it, and the rig-local
+// settings/config.json has the final say. Fields the more specific tier
+// leaves unset fall through, and bots overlay role by role.
+func TestResolveForgejoConfig_Precedence(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigDir := filepath.Join(townRoot, "mango")
+	repoRoot := filepath.Join(rigDir, "mayor", "rig")
+	gastownDir := filepath.Join(repoRoot, ".gastown")
+	settingsDir := filepath.Join(rigDir, "settings")
+	for _, dir := range []string{gastownDir, settingsDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	rigConfig := `{
+  "type": "rig",
+  "version": 1,
+  "name": "mango",
+  "git_url": "https://github.com/sloanahrens/mango.git",
+  "default_branch": "main",
+  "merge_queue": {
+    "forgejo": {
+      "remote_url": "https://forgejo.example/floor/mango",
+      "gate_workflow": "gate",
+      "bots": {"polecat": "floor-polecat", "landing": "floor-landing"},
+      "mirror_target": "git@github.com:sloanahrens/mango.git"
+    }
+  }
+}`
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(rigConfig), 0o644); err != nil {
+		t.Fatalf("write rig config.json: %v", err)
+	}
+
+	repoSettings := `{
+  "type": "rig-settings",
+  "version": 1,
+  "merge_queue": {
+    "forgejo": {"remote_url": "https://forgejo.example/repo/mango"}
+  }
+}`
+	if err := os.WriteFile(filepath.Join(gastownDir, "settings.json"), []byte(repoSettings), 0o644); err != nil {
+		t.Fatalf("write repo settings.json: %v", err)
+	}
+
+	localSettings := `{
+  "type": "rig-settings",
+  "version": 1,
+  "merge_queue": {
+    "forgejo": {"gate_workflow": "local-gate", "bots": {"landing": "local-landing"}}
+  }
+}`
+	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), []byte(localSettings), 0o644); err != nil {
+		t.Fatalf("write settings/config.json: %v", err)
+	}
+
+	fc := ResolveForgejoConfig(townRoot, "mango")
+	if fc == nil {
+		t.Fatal("ResolveForgejoConfig() = nil, want non-nil")
+	}
+	if fc.RemoteURL != "https://forgejo.example/repo/mango" {
+		t.Errorf("RemoteURL = %q, want the repo tier's value", fc.RemoteURL)
+	}
+	if fc.GateWorkflowName() != "local-gate" {
+		t.Errorf("GateWorkflow = %q, want the rig-local override", fc.GateWorkflow)
+	}
+	if fc.MirrorTarget != "git@github.com:sloanahrens/mango.git" {
+		t.Errorf("MirrorTarget = %q, want the unset-in-local floor value", fc.MirrorTarget)
+	}
+	if got := fc.BotLogin("polecat"); got != "floor-polecat" {
+		t.Errorf("polecat bot = %q, want the floor value (untouched by the lower tiers)", got)
+	}
+	if got := fc.BotLogin("landing"); got != "local-landing" {
+		t.Errorf("landing bot = %q, want the rig-local override", got)
+	}
+}
+
+// TestResolveForgejoConfig_Absent verifies that a rig with no forgejo block
+// at any tier resolves to nil, so a caller can tell "not a Forgejo rig"
+// apart from a half-configured one.
+func TestResolveForgejoConfig_Absent(t *testing.T) {
+	t.Parallel()
+	if got := ResolveForgejoConfig("", "mango"); got != nil {
+		t.Errorf("ResolveForgejoConfig(empty townRoot) = %+v, want nil", got)
+	}
+	if got := ResolveForgejoConfig("/tmp", ""); got != nil {
+		t.Errorf("ResolveForgejoConfig(empty rigName) = %+v, want nil", got)
+	}
+
+	townRoot := t.TempDir()
+	rigDir := filepath.Join(townRoot, "mango")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("mkdir rig dir: %v", err)
+	}
+	if got := ResolveForgejoConfig(townRoot, "mango"); got != nil {
+		t.Errorf("ResolveForgejoConfig() with no config files = %+v, want nil", got)
+	}
+
+	// A rig with merge_queue but no forgejo block is not a Forgejo rig.
+	rigConfig := `{"type":"rig","version":1,"name":"mango",
+		"git_url":"https://github.com/sloanahrens/mango.git",
+		"merge_queue":{"test_command":"make test"}}`
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(rigConfig), 0o644); err != nil {
+		t.Fatalf("write rig config.json: %v", err)
+	}
+	if got := ResolveForgejoConfig(townRoot, "mango"); got != nil {
+		t.Errorf("ResolveForgejoConfig() with merge_queue but no forgejo = %+v, want nil", got)
+	}
+}

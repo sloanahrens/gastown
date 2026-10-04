@@ -402,6 +402,116 @@ func TestMergeSettingsCommand_Editorial(t *testing.T) {
 	})
 }
 
+// TestMergeSettingsCommand_Forgejo guards the merge_queue.forgejo overlay
+// (gt-fn9e6.3): unlike Editorial, whose one field cannot tell a whole-block
+// replace from a field overlay, this block's fields are independent, so a
+// more specific tier sets the fields it names and leaves the rest to the
+// tier below. Bots overlays role by role, so a rig-local file can re-point
+// one bot without restating the others.
+func TestMergeSettingsCommand_Forgejo(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a tier that omits the block carries the floor through", func(t *testing.T) {
+		t.Parallel()
+		floor := &MergeQueueConfig{Forgejo: &ForgejoConfig{
+			RemoteURL:    "https://forgejo.example/gastown/gastown",
+			GateWorkflow: "gate",
+			MirrorTarget: "git@github.com:sloanahrens/gastown.git",
+			Bots:         map[string]string{ForgejoRoleLanding: "gt-landing"},
+		}}
+		result := MergeSettingsCommand(floor, &MergeQueueConfig{TestCommand: "make test-repo"})
+		if result.Forgejo == nil {
+			t.Fatal("Forgejo = nil, want the rig-root floor block")
+		}
+		if result.Forgejo.RemoteURL != "https://forgejo.example/gastown/gastown" {
+			t.Errorf("RemoteURL = %q, want the floor value", result.Forgejo.RemoteURL)
+		}
+		if result.Forgejo.BotLogin(ForgejoRoleLanding) != "gt-landing" {
+			t.Errorf("landing bot = %q, want gt-landing", result.Forgejo.BotLogin(ForgejoRoleLanding))
+		}
+	})
+
+	t.Run("non-empty fields in the override win, the rest survive", func(t *testing.T) {
+		t.Parallel()
+		floor := &MergeQueueConfig{Forgejo: &ForgejoConfig{
+			RemoteURL:    "https://forgejo.example/floor/repo",
+			GateWorkflow: "gate",
+			Bots:         map[string]string{ForgejoRolePolecat: "gt-polecat"},
+		}}
+		override := &MergeQueueConfig{Forgejo: &ForgejoConfig{
+			RemoteURL: "https://forgejo.example/local/repo",
+		}}
+		result := MergeSettingsCommand(floor, override)
+		if result.Forgejo == nil {
+			t.Fatal("Forgejo = nil, want the merged block")
+		}
+		if result.Forgejo.RemoteURL != "https://forgejo.example/local/repo" {
+			t.Errorf("RemoteURL = %q, want the override value", result.Forgejo.RemoteURL)
+		}
+		if result.Forgejo.GateWorkflow != "gate" {
+			t.Errorf("GateWorkflow = %q, want the floor value (override left it unset)", result.Forgejo.GateWorkflow)
+		}
+		if result.Forgejo.BotLogin(ForgejoRolePolecat) != "gt-polecat" {
+			t.Errorf("polecat bot = %q, want the floor value", result.Forgejo.BotLogin(ForgejoRolePolecat))
+		}
+	})
+
+	t.Run("bots overlay role by role", func(t *testing.T) {
+		t.Parallel()
+		floor := &MergeQueueConfig{Forgejo: &ForgejoConfig{Bots: map[string]string{
+			ForgejoRolePolecat: "gt-polecat",
+			ForgejoRoleLanding: "gt-landing-old",
+		}}}
+		override := &MergeQueueConfig{Forgejo: &ForgejoConfig{Bots: map[string]string{
+			ForgejoRoleLanding:  "gt-landing",
+			ForgejoRoleRegistry: "gt-registry",
+		}}}
+		result := MergeSettingsCommand(floor, override)
+		want := map[string]string{
+			ForgejoRolePolecat:  "gt-polecat",
+			ForgejoRoleLanding:  "gt-landing",
+			ForgejoRoleRegistry: "gt-registry",
+		}
+		for role, login := range want {
+			if got := result.Forgejo.BotLogin(role); got != login {
+				t.Errorf("bot %q = %q, want %q", role, got, login)
+			}
+		}
+		// The overlay must not reach back into the tier below: the floor's
+		// map still holds its own landing login.
+		if floor.Forgejo.Bots[ForgejoRoleLanding] != "gt-landing-old" {
+			t.Errorf("floor's Bots map was mutated: %v", floor.Forgejo.Bots)
+		}
+	})
+
+	t.Run("no tier sets the block: nil", func(t *testing.T) {
+		t.Parallel()
+		result := MergeSettingsCommand(&MergeQueueConfig{TestCommand: "make test-repo"},
+			&MergeQueueConfig{LintCommand: "make lint"})
+		if result.Forgejo != nil {
+			t.Errorf("Forgejo = %+v, want nil when no tier sets it", result.Forgejo)
+		}
+	})
+
+	t.Run("an overriding block gets a fresh bot map", func(t *testing.T) {
+		t.Parallel()
+		floor := &MergeQueueConfig{Forgejo: &ForgejoConfig{
+			RemoteURL: "https://forgejo.example/floor/repo",
+			Bots:      map[string]string{ForgejoRolePolecat: "gt-polecat"},
+		}}
+		// The override touches no bot, so the bots come from the floor: the
+		// merged block must still own its map rather than alias the floor's.
+		override := &MergeQueueConfig{Forgejo: &ForgejoConfig{
+			RemoteURL: "https://forgejo.example/local/repo",
+		}}
+		result := MergeSettingsCommand(floor, override)
+		result.Forgejo.Bots[ForgejoRolePolecat] = "someone-else"
+		if floor.Forgejo.Bots[ForgejoRolePolecat] != "gt-polecat" {
+			t.Errorf("floor's Bots map aliases the result: %v", floor.Forgejo.Bots)
+		}
+	})
+}
+
 func TestLoadRigConfigNotFound(t *testing.T) {
 	t.Parallel()
 	_, err := LoadRigConfig("/nonexistent/path.json")

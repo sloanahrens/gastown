@@ -1090,6 +1090,15 @@ type MergeQueueConfig struct {
 	// (gt-v4ssj.2). Empty disables it. Read only from the rig's own
 	// settings/config.json, so merged repo content cannot choose it.
 	PostLandCommand string `json:"post_land_command,omitempty"`
+
+	// Forgejo is the rig's Forgejo landing block (gt-fn9e6.3, slice 3 of
+	// docs/design/forgejo-primary-landing.md): where its remote is, which
+	// gate workflow tests a candidate, which bot logins act for it, and
+	// where main is mirrored. Nil means the rig has none, which is every rig
+	// until a cutover slice adds one. Read it through
+	// rig.ResolveForgejoConfig, which applies the same three-tier precedence
+	// the rest of merge_queue uses.
+	Forgejo *ForgejoConfig `json:"forgejo,omitempty"`
 }
 
 // EditorialConfig is the merge_queue.editorial block. Only Required is
@@ -1099,6 +1108,72 @@ type EditorialConfig struct {
 	// Required marks the rig as expecting om editorial review. Defaults to
 	// false.
 	Required bool `json:"required"`
+}
+
+// The bot roles the Forgejo landing path names, one bot per role. A role is
+// also the token filename, so a role is what config carries and never a
+// token: the client reads ~/.config/gt/forgejo-<role>.env.
+const (
+	ForgejoRolePolecat  = "polecat"  // pushes polecat/<name>/<bead> branches
+	ForgejoRoleLanding  = "landing"  // pushes land/<bead> and merges through the API
+	ForgejoRoleRegistry = "registry" // reads the push mirrors
+)
+
+// DefaultGateWorkflow is the gate workflow a rig gets when
+// merge_queue.forgejo.gate_workflow is unset. The workflow file holds one
+// job, and the file is named for it (slice 10: .forgejo/workflows/gate.yml,
+// job gate).
+const DefaultGateWorkflow = "gate"
+
+// ForgejoConfig is the merge_queue.forgejo block: a rig's Forgejo landing
+// settings, resolved from the same three tiers as the rest of merge_queue
+// (rig root config.json floor, repo-committed .gastown/settings.json, then
+// the rig-local settings/config.json override) by
+// rig.ResolveForgejoConfig (gt-fn9e6.3).
+//
+// The block names roles and URLs, never secrets. A bot token lives in
+// ~/.config/gt/forgejo-<role>.env and is read by the Forgejo client, so no
+// token can reach a repo-committed file or settings/config.json.
+type ForgejoConfig struct {
+	// RemoteURL is the rig's Forgejo repository URL, e.g.
+	// "https://forgejo.example/gastown/gastown". It is where gt done and the
+	// landing worker push once the rig is cut over.
+	RemoteURL string `json:"remote_url,omitempty"`
+
+	// GateWorkflow names the candidate gate's workflow, e.g. "gate" for
+	// .forgejo/workflows/gate.yml. Consumers derive the required commit
+	// status context from it rather than typing the name twice, so renaming
+	// the workflow cannot silently orphan the branch-protection rule (open
+	// question 1 of the design). Empty means DefaultGateWorkflow.
+	GateWorkflow string `json:"gate_workflow,omitempty"`
+
+	// Bots maps a bot role (ForgejoRolePolecat, ForgejoRoleLanding,
+	// ForgejoRoleRegistry) to that role's Forgejo login. The key is the
+	// role, which is what the token filename carries; the login is an
+	// identity, not a secret.
+	Bots map[string]string `json:"bots,omitempty"`
+
+	// MirrorTarget is the rig's read-only push mirror target, e.g. its
+	// GitHub repository URL. A mirror failure never blocks a landing.
+	MirrorTarget string `json:"mirror_target,omitempty"`
+}
+
+// GateWorkflowName returns the configured gate workflow, or
+// DefaultGateWorkflow when unset. Nil-safe.
+func (c *ForgejoConfig) GateWorkflowName() string {
+	if c == nil || c.GateWorkflow == "" {
+		return DefaultGateWorkflow
+	}
+	return c.GateWorkflow
+}
+
+// BotLogin returns the login configured for a bot role, or "" when the role
+// is unset. Nil-safe.
+func (c *ForgejoConfig) BotLogin(role string) string {
+	if c == nil {
+		return ""
+	}
+	return c.Bots[role]
 }
 
 // IsPolecatIntegrationEnabled returns whether polecat integration branch
