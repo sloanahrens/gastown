@@ -131,10 +131,9 @@ func parseAgentAddr(reg *session.PrefixRegistry, address string) (*agentAddr, er
 	// disagree (gt-ahik: a duplicated switch here once drifted from
 	// roleAndName's).
 	role, name := addr.roleAndName()
-	switch id.Role {
-	case session.RoleMayor:
-		addr.BeadID = beads.MayorBeadIDTown()
-	default:
+	// The retired mayor role owns no agent bead (gt-rwp7z); every remaining
+	// target resolves to its rig's prefixed bead.
+	if id.Role != session.RoleMayor {
 		addr.BeadID = beads.AgentBeadIDWithPrefix(reg.PrefixForRig(id.Rig), id.Rig, role, name)
 	}
 	return addr, nil

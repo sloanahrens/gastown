@@ -12,17 +12,11 @@ import (
 const TownBeadsPrefix = "hq"
 
 // Town-level agent bead IDs use the "hq-" prefix and are stored in town beads.
-// These are global agents that operate at the town level (mayor).
+// These are global agents that operate at the town level (deacon).
 //
 // The naming convention is:
-//   - hq-<role>       for singletons (mayor)
+//   - hq-<role>       for singletons (deacon)
 //   - hq-<role>-role  for role definition beads
-
-// MayorBeadIDTown returns the Mayor agent bead ID for town-level beads.
-// This uses the "hq-" prefix for town-level storage.
-func MayorBeadIDTown() string {
-	return TownBeadsPrefix + "-mayor"
-}
 
 // NamedRoles are agent roles that include a worker name (rig-level).
 var NamedRoles = []string{constants.RoleCrew, constants.RolePolecat}
@@ -43,7 +37,7 @@ func isNamedRole(s string) bool {
 // Examples:
 //   - "gt-gastown-polecat-nux" -> "gt"
 //   - "nx-nexus-polecat-nux" -> "nx"
-//   - "gt-mayor" -> "gt"
+//   - "gt-deacon" -> "gt"
 //   - "bd-beads-crew-max" -> "bd"
 func ExtractAgentPrefix(id string) string {
 	hyphenIdx := strings.Index(id, "-")
@@ -59,14 +53,14 @@ func ExtractAgentPrefix(id string) string {
 //   prefix-rig-role-name
 //
 // Examples:
-//   - gt-mayor (town-level, no rig)
+//   - gt-deacon (town-level, no rig)
 //   - gt-gastown-refinery (rig-level singleton)
 //   - gt-gastown-crew-max (rig-level named agent)
 //   - gt-gastown-polecat-Toast (rig-level named agent)
 
 // AgentBeadIDWithPrefix generates an agent bead ID using the specified prefix.
 // The prefix should NOT include the hyphen (e.g., "gt", "bd", not "gt-", "bd-").
-// For town-level agents (mayor), pass empty rig and name.
+// For town-level agents (deacon), pass empty rig and name.
 // For rig-level singletons (refinery), pass empty name.
 // For named agents (crew, polecat), pass all three.
 //
@@ -116,13 +110,11 @@ func PolecatBeadID(rig, name string) string {
 }
 
 // AgentBeadIDFor returns the agent bead that role/rig/name owns in the town at
-// townRoot: the town-level hq- bead for the mayor, and the rig's prefixed bead
-// for a named rig role. It returns "" for an identity that owns no bead, which
-// is what every caller's `agentBeadID != ""` guard is there to catch.
+// townRoot: the rig's prefixed bead for a named rig role. It returns "" for an
+// identity that owns no bead, which is what every caller's `agentBeadID != ""`
+// guard is there to catch.
 func AgentBeadIDFor(role, rig, name, townRoot string) string {
 	switch role {
-	case constants.RoleMayor:
-		return MayorBeadIDTown()
 	case constants.RolePolecat:
 		if rig == "" || name == "" {
 			return ""
@@ -163,7 +155,7 @@ func ParseAgentBeadID(id string) (rig, role, name string, ok bool) {
 		return "", "", "", false
 	}
 
-	// Single part: town-level role (gt-mayor), or unknown — returned as-is
+	// Single part: town-level role (gt-deacon), or unknown — returned as-is
 	// for backward compat.
 	if len(parts) == 1 {
 		return "", parts[0], "", true

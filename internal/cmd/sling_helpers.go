@@ -712,17 +712,12 @@ func resolveSlingActor() string {
 
 // agentIDToBeadID converts an agent ID to its corresponding agent bead ID.
 // Uses canonical naming: prefix-rig-role-name
-// Town-level agents (Mayor, Deacon) use hq- prefix and are stored in town beads.
+// Town-level agents (Deacon) use hq- prefix and are stored in town beads.
 // Rig-level agents use the rig's configured prefix (default "gt-").
 // townRoot is needed to look up the rig's configured prefix.
 func agentIDToBeadID(agentID, townRoot string) string {
 	// Normalize: strip trailing slash (resolveSelfTarget returns "mayor/" not "mayor")
 	agentID = strings.TrimSuffix(agentID, "/")
-
-	// Handle simple cases (town-level agents with hq- prefix)
-	if agentID == "mayor" {
-		return beads.MayorBeadIDTown()
-	}
 
 	// Parse path-style agent IDs
 	parts := strings.Split(agentID, "/")

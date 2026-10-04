@@ -42,8 +42,6 @@ func buildAgentBeadID(identity string, role Role, townRoot string) string {
 	// If role is unknown or empty, try to infer from identity
 	if role == RoleUnknown || role == Role("") {
 		switch {
-		case identity == "mayor":
-			return beads.MayorBeadIDTown()
 		case len(parts) == 2:
 			// Assume rig/name is a polecat
 			return beads.PolecatBeadIDWithPrefix(getPrefix(parts[0]), parts[0], parts[1])
@@ -59,8 +57,6 @@ func buildAgentBeadID(identity string, role Role, townRoot string) string {
 	}
 
 	switch role {
-	case RoleMayor:
-		return beads.MayorBeadIDTown()
 	case RolePolecat:
 		// Handle both 2-part (rig/name) and 3-part (rig/polecats/name) formats
 		if len(parts) == 3 && parts[1] == "polecats" {

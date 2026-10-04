@@ -38,8 +38,8 @@ func unlockAgentBead(fl *flock.Flock) { _ = fl.Unlock() }
 // AgentFields holds structured fields for agent beads.
 // These are stored as "key: value" lines in the description.
 type AgentFields struct {
-	RoleType          string // polecat, witness, refinery, deacon, mayor
-	Rig               string // Rig name (empty for global agents like mayor/deacon)
+	RoleType          string // polecat, witness, refinery, deacon
+	Rig               string // Rig name (empty for global agents like deacon)
 	AgentState        string // spawning, working, done, stuck, escalated, idle, running, nuked
 	HookBead          string // Currently pinned work bead ID
 	CleanupStatus     string // ZFC: polecat self-reports git state (clean, has_uncommitted, has_stash, has_unpushed)
@@ -609,7 +609,7 @@ func (b *Beads) ListAgentBeadsFromWisps() (map[string]*Issue, error) {
 //   - Full form (prefix != rig): prefix-rig-role[-name] (e.g., gt-gastown-crew-max)
 //   - Collapsed form (prefix == rig): prefix-role[-name] (e.g., bcc-crew-max)
 //
-// where role is one of: crew, polecat, mayor.
+// where role is one of: crew, polecat.
 // The collapsed form has only 2 parts for role-only IDs, so we must check
 // from parts[1:] not parts[2:].
 func isAgentBeadByID(id string) bool {
@@ -621,7 +621,7 @@ func isAgentBeadByID(id string) bool {
 	// collapsed-form (role at parts[1]) agent bead IDs.
 	for _, part := range parts[1:] {
 		switch part {
-		case constants.RoleCrew, constants.RolePolecat, constants.RoleMayor:
+		case constants.RoleCrew, constants.RolePolecat:
 			return true
 		}
 	}

@@ -4,15 +4,6 @@ import (
 	"testing"
 )
 
-// TestMayorBeadIDTown tests the town-level Mayor bead ID.
-func TestMayorBeadIDTown(t *testing.T) {
-	got := MayorBeadIDTown()
-	want := "hq-mayor"
-	if got != want {
-		t.Errorf("MayorBeadIDTown() = %q, want %q", got, want)
-	}
-}
-
 // TestAgentBeadIDWithPrefix tests agent bead ID generation, including dedup when prefix == rig.
 func TestAgentBeadIDWithPrefix(t *testing.T) {
 	tests := []struct {

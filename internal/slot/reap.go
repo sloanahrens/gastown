@@ -56,7 +56,7 @@ type ReapReport struct {
 // half is local and has already run by then, which is why the report comes
 // back alongside the error rather than being discarded.
 //
-// Reaping is the mayor's and the doctor's call. A polecat's slot token is the
+// Reaping is the operator's and the doctor's call. A polecat's slot token is the
 // promise that its own suite cleans up after itself; a polecat reaping another
 // holder's containers mid-run would break that suite.
 func Reap(townRoot string, opts ReapOptions) (ReapReport, error) {

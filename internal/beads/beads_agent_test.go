@@ -344,7 +344,7 @@ func TestIsAgentBeadByID(t *testing.T) {
 		{name: "full crew with name", id: "gt-gastown-crew-krystian", want: true},
 		{name: "full polecat with name", id: "gt-gastown-polecat-Toast", want: true},
 		{name: "full deacon", id: "sh-shippercrm-deacon", want: false}, // deacon role retired (gt-4k3fj.6.1)
-		{name: "full mayor", id: "ax-axon-mayor", want: true},
+		{name: "full mayor", id: "ax-axon-mayor", want: false},         // mayor role retired (gt-rwp7z.10)
 
 		// Collapsed-form IDs (prefix == rig): prefix-role[-name]
 		{name: "collapsed witness", id: "bcc-witness", want: false},   // witness role retired (gt-4k3fj.6.1)
@@ -362,7 +362,7 @@ func TestIsAgentBeadByID(t *testing.T) {
 
 		// Edge cases
 		{name: "role in first position", id: "witness-something", want: false},
-		{name: "beads prefix mayor", id: "bd-beads-mayor", want: true},
+		{name: "beads prefix mayor", id: "bd-beads-mayor", want: false}, // mayor role retired (gt-rwp7z.10)
 		{name: "beads crew", id: "bd-beads-crew-krystian", want: true},
 	}
 

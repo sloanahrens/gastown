@@ -569,7 +569,7 @@ func FormatMRFields(fields *MRFields) string {
 type RoleConfig struct {
 	// SessionPattern defines how to derive tmux session name.
 	// Supports placeholders: {rig}, {name}, {role}
-	// Examples: "hq-mayor", "hq-deacon", "gt-{rig}-{role}", "gt-{rig}-{name}"
+	// Examples: "hq-deacon", "gt-{rig}-{role}", "gt-{rig}-{name}"
 	SessionPattern string
 
 	// WorkDirPattern defines the working directory relative to town root.

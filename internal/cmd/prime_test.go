@@ -41,12 +41,13 @@ func TestGetAgentBeadID_UsesRigPrefix(t *testing.T) {
 		want string
 	}{
 		{
+			// The retired mayor role owns no agent bead (gt-rwp7z.10).
 			name: "mayor",
 			ctx: RoleContext{
 				Role:     RoleMayor,
 				TownRoot: townRoot,
 			},
-			want: "hq-mayor",
+			want: "",
 		},
 		{
 			name: "polecat",

@@ -964,7 +964,7 @@ func purgeOldMail(db *beadsql.DB, w Writer, dbName string, mailDeleteAge time.Du
 //     work molecules — closing one detaches live agent lifecycle. rig/agent are
 //     standing identities, event/convoy/epic are lifecycle containers whose
 //     retirement is status-driven, never staleness-driven (hq-jnap for convoys).
-//   - Protection and runtime labels (gt-2qzr): gt:agent marks every mayor,
+//   - Protection and runtime labels (gt-2qzr): gt:agent marks every
 //     deacon, dog, witness, refinery, crew, and polecat bead. They are idle by
 //     design, so staleness is meaningless for them, and closing one breaks
 //     `gt agents resolve` for that role. The rest of the list mirrors
@@ -992,7 +992,7 @@ func staleIssueEligibilityClause(dbQualifier string) string {
 			)
 		)
 		AND i.id NOT LIKE '%%-witness' AND i.id NOT LIKE '%%-refinery'
-		AND i.id NOT LIKE '%%-mayor' AND i.id NOT LIKE '%%-deacon'
+		AND i.id NOT LIKE '%%-deacon'
 		AND i.id NOT LIKE '%%-crew-%%' AND i.id NOT LIKE '%%-polecat-%%'
 		AND i.id NOT LIKE '%%-dog-%%' AND i.id NOT LIKE '%%-dogs'
 		AND i.id NOT IN (
