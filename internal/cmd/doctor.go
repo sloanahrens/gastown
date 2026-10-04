@@ -282,6 +282,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewStalledPolecatCheck())
 	d.Register(doctor.NewOrphanProcessCheck())
 	d.Register(doctor.NewDoltOrphanServersCheck()) // Detect orphaned test 'dolt sql-server' processes (gt-twil)
+	d.Register(doctor.NewRigBDBinaryCheck())       // Detect executable bd binaries left in rig worktrees (gt-r4wg5)
 	d.Register(doctor.NewWispGCCheck())
 	d.Register(doctor.NewCheckMisclassifiedWisps())
 	d.Register(doctor.NewCheckJSONLBloat())
