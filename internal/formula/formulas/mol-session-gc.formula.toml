@@ -119,8 +119,8 @@ gt doctor fix orphan-sessions
 ```
 
 A repair that kills a session needs recorded authorization when an agent runs
-it: get an authorization bead from the mayor and pass --authorized-by <bead-id>,
-or leave the session for the daemon tick that owns it.
+it: get a `doctor-fix-auth` authorization bead from the overseer and pass
+--authorized-by <bead-id>, or leave the session for the daemon tick that owns it.
 
 **2. For aggressive mode, additional cleanup:**
 ```bash

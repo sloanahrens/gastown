@@ -20,36 +20,17 @@ func TestNew(t *testing.T) {
 	}
 }
 
-func TestRenderRole_Mayor(t *testing.T) {
+// TestRenderRole_MayorGone pins the mayor role's retirement: mayor.md.tmpl is
+// deleted, so rendering the role must fail rather than resurrect it (gt-rwp7z.13).
+func TestRenderRole_MayorGone(t *testing.T) {
 	t.Parallel()
 	tmpl, err := New()
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 
-	data := RoleData{
-		Role:          "mayor",
-		TownRoot:      "/test/town",
-		TownName:      "town",
-		WorkDir:       "/test/town",
-		DefaultBranch: "main",
-		MayorSession:  "gt-town-mayor",
-	}
-
-	output, err := tmpl.RenderRole("mayor", data)
-	if err != nil {
-		t.Fatalf("RenderRole() error = %v", err)
-	}
-
-	// Check for key content
-	if !strings.Contains(output, "Mayor Context") {
-		t.Error("output missing 'Mayor Context'")
-	}
-	if !strings.Contains(output, "/test/town") {
-		t.Error("output missing town root")
-	}
-	if !strings.Contains(output, "global coordinator") {
-		t.Error("output missing role description")
+	if _, err := tmpl.RenderRole("mayor", RoleData{Role: "mayor", TownRoot: "/test/town"}); err == nil {
+		t.Error(`RenderRole("mayor") succeeded; mayor.md.tmpl should be deleted`)
 	}
 }
 
@@ -186,15 +167,6 @@ func TestRenderRole_NoHardcodedGtPath(t *testing.T) {
 			},
 		},
 		{
-			role: "mayor",
-			data: RoleData{
-				Role: "mayor", TownRoot: customTownRoot2, TownName: "instance",
-				WorkDir:       customTownRoot2,
-				DefaultBranch: "main",
-				MayorSession:  "gt-instance-mayor",
-			},
-		},
-		{
 			role: "crew",
 			data: RoleData{
 				Role: "crew", RigName: "myrig", Polecat: "TestCrew",
@@ -254,15 +226,6 @@ func TestRenderRole_NoBDCreateRepoFlag(t *testing.T) {
 			},
 		},
 		{
-			role: "mayor",
-			data: RoleData{
-				Role: "mayor", TownRoot: customTownRoot3, TownName: "instance",
-				WorkDir:       customTownRoot3,
-				DefaultBranch: "main",
-				MayorSession:  "gt-instance-mayor",
-			},
-		},
-		{
 			role: "crew",
 			data: RoleData{
 				Role: "crew", RigName: "myrig", Polecat: "TestCrew",
@@ -315,14 +278,6 @@ func TestRenderRole_TownRootInOutput(t *testing.T) {
 				Role: "polecat", RigName: "myrig", Polecat: "Sparky",
 				TownRoot: customRoot, TownName: "my-instance",
 				WorkDir: customRoot + "/myrig/polecats/Sparky", DefaultBranch: "main",
-				MayorSession: "gt-my-instance-mayor",
-			},
-		},
-		{
-			role: "mayor",
-			data: RoleData{
-				Role: "mayor", TownRoot: customRoot, TownName: "my-instance",
-				WorkDir: customRoot, DefaultBranch: "main",
 				MayorSession: "gt-my-instance-mayor",
 			},
 		},
@@ -759,7 +714,7 @@ func TestRoleNames(t *testing.T) {
 	}
 
 	names := tmpl.RoleNames()
-	expected := []string{"mayor", "polecat", "crew"}
+	expected := []string{"polecat", "crew"}
 
 	if len(names) != len(expected) {
 		t.Errorf("RoleNames() = %v, want %v", names, expected)
@@ -1127,8 +1082,8 @@ func renderPolecatForTest(t *testing.T) string {
 
 // TestRoleTemplatesCarryInterruptPolicy guards claude-9a8: the patrol and
 // work-loop roles must be told that a bare "[Request interrupted by user for
-// tool use]" is a nudge-delivery artifact, not an operator stop. Mayor and
-// crew are left out: a human may really be at those panes.
+// tool use]" is a nudge-delivery artifact, not an operator stop. Crew is left
+// out: a human may really be at those panes.
 func TestRoleTemplatesCarryInterruptPolicy(t *testing.T) {
 	t.Parallel()
 	tmpl, err := New()
@@ -1138,7 +1093,7 @@ func TestRoleTemplatesCarryInterruptPolicy(t *testing.T) {
 	const marker = "An interrupt is a delivery artifact"
 	for role, want := range map[string]bool{
 		"polecat": true,
-		"mayor":   false, "crew": false,
+		"crew":    false,
 	} {
 		data := RoleData{Role: role, RigName: "gastown", TownRoot: "/t", TownName: "t", Polecat: "p", DefaultBranch: "main"}
 		out, err := tmpl.RenderRole(role, data)

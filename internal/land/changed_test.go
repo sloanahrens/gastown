@@ -138,7 +138,7 @@ var guardTriggers = []struct {
 	trigger string
 }{
 	{"internal/testpolicy", "M\tinternal/land/gate_test.go\n"},
-	{"internal/cmdtree", "M\tinternal/templates/roles/mayor.md.tmpl\n"},
+	{"internal/cmdtree", "M\tinternal/templates/roles/polecat.md.tmpl\n"},
 	{"internal/cmd", "M\tMakefile\n"},
 	{"internal/bdgate", "M\tinternal/session/lifecycle.go\n"},
 	{"internal/polecat", "M\tinternal/daemon/patrol.go\n"},
@@ -234,7 +234,7 @@ func TestGuardSelectsRemovals(t *testing.T) {
 			// A guard that ratchets a baseline down fails on the rename away:
 			// the file it counted no longer exists.
 			"renaming away from agent prose selects cmdtree",
-			"R100\tinternal/templates/roles/mayor.md.tmpl\tinternal/templates/roles/mayor.txt\n",
+			"R100\tinternal/templates/roles/polecat.md.tmpl\tinternal/templates/roles/polecat.txt\n",
 			"internal/cmdtree",
 		},
 	}
@@ -262,7 +262,7 @@ func TestGuardSelectsRemovals(t *testing.T) {
 func TestGuardSelectsSkipsMissingPackages(t *testing.T) {
 	t.Parallel()
 	hasGo := func(string) bool { return false }
-	if got := GuardSelects("M\tinternal/templates/roles/mayor.md.tmpl\n", hasGo); got != nil {
+	if got := GuardSelects("M\tinternal/templates/roles/polecat.md.tmpl\n", hasGo); got != nil {
 		t.Errorf("GuardSelects = %v, want nil when the guard package holds no Go", got)
 	}
 }

@@ -71,7 +71,11 @@ func TestCommandTokensResolve(t *testing.T) {
 	// scheduler-run leaf (gt-638go.9) deleted the daemon's `gt scheduler run`.
 	// The seat-refill plugin's deletion (gt-4k3fj.8.8) took plugins to 5: only
 	// tool-updater still calls gt from a plugin, so the floor dropped with it.
-	floors := map[string]int{"formulas": 160, "templates": 290, "plugins": 2, "go": 17, "scripts": 22, "agent": 10}
+	// The mayor role's retirement (gt-rwp7z.13) deleted mayor.md.tmpl and
+	// mol-gastown-boot.formula.toml and rewrote the templates and formulas that
+	// addressed the role: templates fell from 338 to 279 and formulas from 216
+	// to 210. The templates floor drops by the same 59 invocations.
+	floors := map[string]int{"formulas": 160, "templates": 230, "plugins": 2, "go": 17, "scripts": 22, "agent": 10}
 	counts := map[string]int{}
 	for _, r := range refs {
 		counts[refSource(r.File)]++

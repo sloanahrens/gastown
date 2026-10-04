@@ -10,8 +10,6 @@
 # init it blocks; gt has no init verb to point at (gt-k7u3r).
 internal/cmd/memory_index.go bd kv 3
 internal/cmd/tap_guard_bd_init.go bd init 1
-internal/templates/roles/mayor.md.tmpl bd forget 1
-internal/templates/roles/mayor.md.tmpl bd memories 2
 internal/templates/townroot/claude.md bd forget 1
 internal/templates/townroot/claude.md bd memories 2
 plugins/tool-updater/run.sh bd version 1
