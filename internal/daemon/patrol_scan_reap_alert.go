@@ -35,6 +35,10 @@ import (
 // reapAlertStorePath so a restarted daemon can clear an alert whose condition
 // ended while it was down. The Ledger interface cannot hold that set — it has
 // no key listing and no delete — so the set is a second small file.
+//
+// Both pieces of state record a delivery, not an attempt: a raise or clear that
+// gt escalate dropped leaves them untouched, so the next tick retries it
+// instead of the throttle window suppressing it (gt-s3u9a).
 
 const (
 	// reapAlertSource labels every escalation this pass raises.
@@ -59,23 +63,24 @@ const (
 )
 
 // reapAlertSink is the alert side of the blocked-seat pass: raise one alert
-// under a stable key, and clear the keys whose condition went away. The
-// daemon's own escalateAlert/clearAlerts satisfy it through daemonAlertSink;
-// tests inject a recorder.
+// under a stable key, and clear the keys whose condition went away. Both return
+// the delivery outcome, because the pass records an alert as raised or cleared
+// only once gt escalate delivered it; tests inject a recorder that can fail on
+// demand.
 type reapAlertSink interface {
-	Raise(key, source, message string)
-	Clear(reason string, keys ...string)
+	Raise(key, source, message string) error
+	Clear(reason string, keys ...string) error
 }
 
 // daemonAlertSink is the production reapAlertSink.
 type daemonAlertSink struct{ d *Daemon }
 
-func (s daemonAlertSink) Raise(key, source, message string) {
-	s.d.escalateAlert(key, source, message)
+func (s daemonAlertSink) Raise(key, source, message string) error {
+	return s.d.escalateAlertErr(key, source, message)
 }
 
-func (s daemonAlertSink) Clear(reason string, keys ...string) {
-	s.d.clearAlerts(reason, keys...)
+func (s daemonAlertSink) Clear(reason string, keys ...string) error {
+	return s.d.clearAlertsErr(reason, keys...)
 }
 
 // alerts returns the sink the blocked-seat pass sends through.
@@ -199,7 +204,13 @@ func (d *Daemon) reapAlertsIfEnabled(rig string, r patrolscan.Report, ledger pat
 // keys is persisted (reapAlertState), so clearing keeps working across the
 // daemon restarts that lose the in-memory map.
 //
-// It runs inline, inside the tick: escalateAlert retries on failure, so a
+// The throttle ledger and the open-key state are written only after the sink
+// reports delivery. A raise gt escalate dropped is therefore raised again next
+// tick instead of being suppressed for the window, and a dropped clear leaves
+// its key in place to be cleared again — the two hazards the delivery-aware
+// sink exists for (gt-s3u9a).
+//
+// It runs inline, inside the tick: escalateAlertErr retries on failure, so a
 // blocked backlog costs wall-clock, but the tick is single-flight and the
 // state here is only safe while one goroutine owns it.
 func (d *Daemon) reapAlerts(rig string, r patrolscan.Report, threshold int, ledger patrolscan.Ledger) {
@@ -225,9 +236,15 @@ func (d *Daemon) reapAlerts(rig string, r patrolscan.Report, threshold int, ledg
 		prev := st.Seats[seat]
 		if prev != "" && prev != key {
 			// The blockers changed: the alert under the old key describes a
-			// condition that no longer holds. The new key is new, so it is
-			// raised below without consulting the throttle.
-			sink.Clear(fmt.Sprintf("%s is blocked by a different set of reasons now", seat), prev)
+			// condition that no longer holds. Clear it first, and only then
+			// raise the new key; a clear that did not land keeps the old key so
+			// the next tick clears it again rather than orphaning the
+			// escalation.
+			if err := sink.Clear(fmt.Sprintf("%s is blocked by a different set of reasons now", seat), prev); err != nil {
+				d.logReapAlertUndelivered("clear", seat, prev, err)
+				continue
+			}
+			delete(st.Seats, seat)
 			prev = ""
 		}
 		if prev == key && ledgerReportedWithin(ledger, key, now, window) {
@@ -235,7 +252,13 @@ func (d *Daemon) reapAlerts(rig string, r patrolscan.Report, threshold int, ledg
 			// window: a repeat now would only bump the occurrence count.
 			continue
 		}
-		sink.Raise(key, reapAlertSource, reapBlockedMessage(rig, f.Subject, f.Detail))
+		if err := sink.Raise(key, reapAlertSource, reapBlockedMessage(rig, f.Subject, f.Detail)); err != nil {
+			// A raise that did not land records nothing: the throttle entry
+			// would suppress the retry for the whole window, and the seat's
+			// state would claim an alert that never reached an operator.
+			d.logReapAlertUndelivered("raise", seat, key, err)
+			continue
+		}
 		markAlertReported(ledger, key, now)
 		st.Seats[seat] = key
 	}
@@ -260,8 +283,13 @@ func (d *Daemon) reapAlerts(rig string, r patrolscan.Report, threshold int, ledg
 		sort.Strings(stale)
 		for _, seat := range stale {
 			key := st.Seats[seat]
+			if err := sink.Clear(fmt.Sprintf("%s is no longer a blocked reap candidate", seat), key); err != nil {
+				// The escalation is still open: keep the key so the next tick
+				// clears it again instead of forgetting it.
+				d.logReapAlertUndelivered("clear", seat, key, err)
+				continue
+			}
 			delete(st.Seats, seat)
-			sink.Clear(fmt.Sprintf("%s is no longer a blocked reap candidate", seat), key)
 		}
 	}
 
@@ -269,18 +297,37 @@ func (d *Daemon) reapAlerts(rig string, r patrolscan.Report, threshold int, ledg
 	switch {
 	case len(blocked) >= threshold:
 		if !st.Threshold[rig] || !ledgerReportedWithin(ledger, thresholdKey, now, window) {
-			sink.Raise(thresholdKey, reapAlertSource, reapThresholdMessage(rig, len(blocked), threshold))
+			if err := sink.Raise(thresholdKey, reapAlertSource, reapThresholdMessage(rig, len(blocked), threshold)); err != nil {
+				d.logReapAlertUndelivered("raise", rig, thresholdKey, err)
+				break
+			}
 			markAlertReported(ledger, thresholdKey, now)
 		}
 		st.Threshold[rig] = true
 	case complete && st.Threshold[rig]:
+		if err := sink.Clear(fmt.Sprintf("%s is below the blocked reap threshold", rig), thresholdKey); err != nil {
+			d.logReapAlertUndelivered("clear", rig, thresholdKey, err)
+			break
+		}
 		delete(st.Threshold, rig)
-		sink.Clear(fmt.Sprintf("%s is below the blocked reap threshold", rig), thresholdKey)
 	}
 
 	if err := st.save(townRoot); err != nil && d.logger != nil {
 		d.logger.Printf("patrol_scan: reap alerts: saving state: %v", err)
 	}
+}
+
+// logReapAlertUndelivered records a raise or clear gt escalate did not deliver,
+// naming the seat or rig it concerned. The escalation_dropped feed line
+// escalateAlertErr writes is the durable record; this line ties the drop to the
+// key the pass will retry next tick, once per tick and key because the retry
+// itself is the next tick.
+func (d *Daemon) logReapAlertUndelivered(action, subject, key string, err error) {
+	if d.logger == nil {
+		return
+	}
+	d.logger.Printf("patrol_scan: reap alerts: %s for %s (%s) was not delivered: %v — retrying next tick",
+		action, subject, key, err)
 }
 
 // ledgerReportedWithin reports whether key was raised inside the window. The

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"io"
 	"log"
 	"regexp"
@@ -14,10 +15,15 @@ import (
 )
 
 // recordingAlerts is the reapAlertSink the tests inject: it records the calls
-// the pass would make to gt escalate instead of shelling out.
+// the pass would make to gt escalate instead of shelling out. failRaise and
+// failClear make the next calls of that kind report a dropped delivery, so a
+// test can drive the retry-on-next-tick path.
 type recordingAlerts struct {
 	raised  []alertRaise
 	cleared []alertClear
+
+	failRaise bool
+	failClear bool
 }
 
 type alertRaise struct{ key, source, message string }
@@ -27,12 +33,24 @@ type alertClear struct {
 	keys   []string
 }
 
-func (r *recordingAlerts) Raise(key, source, message string) {
+// errAlertUndelivered stands in for the error gt escalate returns when its
+// retries are exhausted (Dolt contention, slot starvation).
+var errAlertUndelivered = errors.New("gt escalate did not deliver")
+
+func (r *recordingAlerts) Raise(key, source, message string) error {
 	r.raised = append(r.raised, alertRaise{key: key, source: source, message: message})
+	if r.failRaise {
+		return errAlertUndelivered
+	}
+	return nil
 }
 
-func (r *recordingAlerts) Clear(reason string, keys ...string) {
+func (r *recordingAlerts) Clear(reason string, keys ...string) error {
 	r.cleared = append(r.cleared, alertClear{reason: reason, keys: append([]string(nil), keys...)})
+	if r.failClear {
+		return errAlertUndelivered
+	}
+	return nil
 }
 
 // alertRig is one daemon's blocked-seat alert pass over a temp town root, plus
@@ -247,6 +265,145 @@ func TestReapAlertsFailedRigReadClearsNothing(t *testing.T) {
 	r.tick("gastown", patrolscan.Report{Rig: "gastown"}, 5)
 	if n := len(clearedKeys(r.rec)); n != 2 {
 		t.Fatalf("cleared %d key(s) on the complete tick, want 2 (%v)", n, clearedKeys(r.rec))
+	}
+}
+
+// TestReapAlertsFailedRaiseIsRetried covers the raise half of gt-s3u9a: a raise
+// gt escalate dropped must leave the throttle ledger and the persisted seat
+// state untouched, so the next tick raises the alert again instead of the
+// window swallowing it.
+func TestReapAlertsFailedRaiseIsRetried(t *testing.T) {
+	t.Parallel()
+	r := newAlertRig(t, &agentconfig.WorktreeCleanupConfig{Enabled: true, Rigs: []string{"gastown"}})
+	report := blockedReport("gastown", map[string]string{"agate": "verdict PENDING_MR"})
+	key := reapBlockedKey("gastown", "agate", "verdict PENDING_MR")
+
+	r.rec.failRaise = true
+	r.tick("gastown", report, 5)
+
+	if n := len(r.rec.raised); n != 1 {
+		t.Fatalf("raise attempts after a dropped delivery = %d, want 1", n)
+	}
+	if _, ok := r.ledger.LastReported(reapAlertKeyPrefix + key); ok {
+		t.Fatalf("a dropped raise was recorded in the throttle ledger")
+	}
+
+	// A tick with the seat recovered has no key to clear: the failed raise
+	// never entered the persisted state either.
+	r.rec.failRaise = false
+	r.tick("gastown", patrolscan.Report{Rig: "gastown"}, 5)
+	if n := len(r.rec.cleared); n != 0 {
+		t.Fatalf("cleared %v after a raise that never landed", clearedKeys(r.rec))
+	}
+
+	// Delivery now works: the alert is raised, and only then throttled.
+	r.tick("gastown", report, 5)
+	if n := len(r.rec.raised); n != 2 {
+		t.Fatalf("raise attempts = %d, want the dropped raise retried", n)
+	}
+	r.tick("gastown", report, 5)
+	if n := len(r.rec.raised); n != 2 {
+		t.Fatalf("raise attempts = %d, want the landed alert throttled", n)
+	}
+}
+
+// TestReapAlertsFailedClearIsRetried covers the clear half of gt-s3u9a: a clear
+// gt escalate dropped must keep the key in the persisted state, so the next
+// tick clears the still-open escalation again instead of losing it.
+func TestReapAlertsFailedClearIsRetried(t *testing.T) {
+	t.Parallel()
+	r := newAlertRig(t, &agentconfig.WorktreeCleanupConfig{Enabled: true, Rigs: []string{"gastown"}})
+	r.tick("gastown", blockedReport("gastown", map[string]string{"agate": "verdict NEEDS_RECOVERY"}), 5)
+	key := r.rec.raised[0].key
+
+	reaped := patrolscan.Report{Rig: "gastown", Findings: []patrolscan.Finding{
+		{Kind: reapFindingKind, Subject: "agate", Outcome: patrolscan.OutcomeReaped, Detail: "idle 31m"},
+	}}
+
+	r.rec.failClear = true
+	r.tick("gastown", reaped, 5)
+	if got := clearedKeys(r.rec); !equalStrings(got, []string{key}) {
+		t.Fatalf("clear attempts = %v, want the seat's key %q", got, key)
+	}
+
+	// The clear did not land, so the key survives: the next tick clears again.
+	r.rec.failClear = false
+	r.tick("gastown", reaped, 5)
+	if got := clearedKeys(r.rec); !equalStrings(got, []string{key, key}) {
+		t.Fatalf("cleared = %v, want the key retried on the next tick", got)
+	}
+
+	// Landed: the pass forgets it and does not clear a third time.
+	r.tick("gastown", reaped, 5)
+	if n := len(r.rec.cleared); n != 2 {
+		t.Fatalf("clear attempts = %d, want 2 (no clear once it landed)", n)
+	}
+}
+
+// TestReapAlertsChangedDetailRetriesTheOldClear: when the blocker set changes,
+// the stale key is cleared before the new one is raised. A dropped clear keeps
+// the state pointing at the old key, so the next tick retries the clear and
+// raises the new key only once the old escalation is gone.
+func TestReapAlertsChangedDetailRetriesTheOldClear(t *testing.T) {
+	t.Parallel()
+	r := newAlertRig(t, &agentconfig.WorktreeCleanupConfig{Enabled: true, Rigs: []string{"gastown"}})
+	r.tick("gastown", blockedReport("gastown", map[string]string{"agate": "verdict PENDING_MR"}), 5)
+	oldKey := r.rec.raised[0].key
+	changed := blockedReport("gastown", map[string]string{"agate": "verdict NEEDS_RECOVERY"})
+
+	r.rec.failClear = true
+	r.tick("gastown", changed, 5)
+	if got := clearedKeys(r.rec); !equalStrings(got, []string{oldKey}) {
+		t.Fatalf("cleared = %v, want the stale key %q", got, oldKey)
+	}
+	if n := len(r.rec.raised); n != 1 {
+		t.Fatalf("raised = %d, want the new key held back until the clear lands", n)
+	}
+
+	r.rec.failClear = false
+	r.tick("gastown", changed, 5)
+	if got := clearedKeys(r.rec); !equalStrings(got, []string{oldKey, oldKey}) {
+		t.Fatalf("cleared = %v, want the clear retried", got)
+	}
+	if n := len(r.rec.raised); n != 2 || r.rec.raised[1].key == oldKey {
+		t.Fatalf("raised = %v, want the changed seat's new key after the clear", raisedKeys(r.rec))
+	}
+}
+
+// TestReapAlertsThresholdDeliveryGatesState covers the threshold alert's half
+// of gt-s3u9a: a dropped raise leaves the alert unopened so it is retried, and
+// a dropped clear leaves it open.
+func TestReapAlertsThresholdDeliveryGatesState(t *testing.T) {
+	t.Parallel()
+	r := newAlertRig(t, &agentconfig.WorktreeCleanupConfig{Enabled: true, Rigs: []string{"gastown"}})
+	thKey := reapThresholdKey("gastown")
+	two := blockedReport("gastown", map[string]string{"a": "d1", "b": "d2"})
+	one := blockedReport("gastown", map[string]string{"a": "d1"})
+
+	r.rec.failRaise = true
+	r.tick("gastown", two, 2)
+	if n := count(raisedKeys(r.rec), thKey); n != 1 {
+		t.Fatalf("threshold raise attempts = %d, want 1", n)
+	}
+	r.rec.failRaise = false
+	r.tick("gastown", two, 2)
+	if n := count(raisedKeys(r.rec), thKey); n != 2 {
+		t.Fatalf("threshold raises = %d, want the dropped raise retried", n)
+	}
+
+	r.rec.failClear = true
+	r.tick("gastown", one, 2)
+	if n := count(clearedKeys(r.rec), thKey); n != 1 {
+		t.Fatalf("threshold clear attempts = %d, want 1", n)
+	}
+	r.rec.failClear = false
+	r.tick("gastown", one, 2)
+	if n := count(clearedKeys(r.rec), thKey); n != 2 {
+		t.Fatalf("threshold clears = %d, want the dropped clear retried", n)
+	}
+	r.tick("gastown", one, 2)
+	if n := count(clearedKeys(r.rec), thKey); n != 2 {
+		t.Fatalf("threshold clears = %d, want no clear once it landed", n)
 	}
 }
 
