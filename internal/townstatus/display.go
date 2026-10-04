@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -14,12 +13,7 @@ import (
 // to determine what runtime and model are being used. Falls back to config
 // when the session isn't running.
 func resolveAgentDisplay(townSettings *config.TownSettings, role string, sessionName string, running bool) (alias, info string) {
-	// Map legacy role names to config role names
 	configRole := role
-	switch role {
-	case "coordinator":
-		configRole = constants.RoleMayor
-	}
 
 	// Get alias from config
 	if townSettings != nil {

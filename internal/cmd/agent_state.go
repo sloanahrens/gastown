@@ -61,16 +61,16 @@ bead's updated_at untouched on a label-only write.
 
 EXAMPLES:
   # Check current idle count
-  gt agents state hq-mayor
+  gt agents state hq-deacon
 
   # Reset idle counter after finding work
-  gt agents state hq-mayor --set idle=0
+  gt agents state hq-deacon --set idle=0
 
   # Increment idle counter on timeout
-  gt agents state hq-mayor --incr idle
+  gt agents state hq-deacon --incr idle
 
   # Get state as JSON
-  gt agents state hq-mayor --json`,
+  gt agents state hq-deacon --json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runAgentState,
 }

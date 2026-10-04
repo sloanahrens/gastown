@@ -71,7 +71,7 @@ func TestOutputStatusText_IncludesDNDSection(t *testing.T) {
 		DND: &townstatus.DNDInfo{
 			Enabled: true,
 			Level:   beads.NotifyMuted,
-			Agent:   "hq-mayor",
+			Agent:   "hq-deacon",
 		},
 	}
 
@@ -152,8 +152,8 @@ func TestValidateStatusWatch(t *testing.T) {
 	}
 }
 
-// TestBeadStatePausedStillShows pins the mayor's decision on gt-ahik/om
-// kgx0: `gt deacon pause` is a separate, existing feature that writes
+// TestBeadStatePausedStillShows pins the decision on gt-ahik/om-kgx0:
+// `gt deacon pause` is a separate, existing feature that writes
 // agent_state=paused straight to the deacon bead with no agentpause marker
 // file, so agent.Paused (the marker-driven field) never covers it. Both
 // status renderers must keep showing it via the bead-state switch, or a

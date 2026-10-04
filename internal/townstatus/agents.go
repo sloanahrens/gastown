@@ -69,96 +69,6 @@ func resolveHookFromMap(allHandoffs map[string]*beads.Issue, role, agentAddress,
 	return hook
 }
 
-// discoverGlobalAgents checks runtime state for town-level agents (the Mayor).
-// Uses parallel fetching for performance. If skipMail is true, mail lookups are skipped.
-// allSessions is a preloaded map of tmux sessions for O(1) lookup.
-// allAgentBeads is a preloaded map of agent beads for O(1) lookup.
-// allHookBeads is a preloaded map of hook beads for O(1) lookup.
-func discoverGlobalAgents(townRoot string, allSessions map[string]bool, allAgentBeads map[string]*beads.Issue, allHookBeads map[string]*beads.Issue, mailRouter *mail.Router, skipMail bool) []AgentRuntime {
-	// Get session names dynamically
-	mayorSession := session.MayorSessionName()
-
-	// Define agents to discover
-	// Note: the Mayor is a town-level agent with an hq- prefix bead ID
-	agentDefs := []struct {
-		name    string
-		address string
-		session string
-		role    string
-		beadID  string
-	}{
-		{constants.RoleMayor, constants.RoleMayor + "/", mayorSession, "coordinator", beads.MayorBeadIDTown()},
-	}
-
-	// Batch-fetch mail summaries for all agents in one pair of bd calls
-	// instead of one bd subprocess fan-out per agent (gt-978i).
-	var mailSummaries map[string]mail.MailSummary
-	if !skipMail && mailRouter != nil {
-		addresses := make([]string, len(agentDefs))
-		for i, d := range agentDefs {
-			addresses[i] = d.address
-		}
-		mailSummaries, _ = mailRouter.BatchMailSummaries(addresses)
-	}
-
-	agents := make([]AgentRuntime, len(agentDefs))
-	var wg sync.WaitGroup
-
-	for i, def := range agentDefs {
-		wg.Add(1)
-		go func(idx int, d struct {
-			name    string
-			address string
-			session string
-			role    string
-			beadID  string
-		}) {
-			defer wg.Done()
-
-			agent := AgentRuntime{
-				Name:    d.name,
-				Address: d.address,
-				Session: d.session,
-				Role:    d.role,
-			}
-
-			// Check tmux session from preloaded map (O(1))
-			agent.Running = allSessions[d.session]
-
-			// Look up agent bead from preloaded map (O(1))
-			if issue, ok := allAgentBeads[d.beadID]; ok {
-				// Prefer database columns over description parsing
-				// HookBead column is authoritative (cleared by unsling)
-				agent.HookBead = issue.HookBead
-				agent.State = beads.ResolveAgentState(issue.Description, issue.AgentState)
-				if agent.HookBead != "" {
-					agent.HasWork = true
-					// Get hook title from preloaded map
-					if pinnedIssue, ok := allHookBeads[agent.HookBead]; ok {
-						agent.WorkTitle = pinnedIssue.Title
-					}
-				}
-				// Parse description fields for notification level
-				if fields := beads.ParseAgentFields(issue.Description); fields != nil {
-					agent.NotificationLevel = fields.NotificationLevel
-				}
-			}
-
-			// Apply pre-fetched mail summary (skip if --fast)
-			if !skipMail {
-				applyMailSummary(&agent, mailSummaries[agent.Address])
-			}
-
-			applyPauseMarker(&agent, townRoot)
-
-			agents[idx] = agent
-		}(i, def)
-	}
-
-	wg.Wait()
-	return agents
-}
-
 // applyPauseMarker checks the pause marker file layer for this agent
 // (gt-ahik) and records the reason on the AgentRuntime so the status
 // line can show [paused (reason)]. File layer only — cheap, no Dolt.
@@ -180,10 +90,8 @@ func applyPauseMarker(agent *AgentRuntime, townRoot string) {
 // It goes through session.ParseAddressWithRegistry rather than splitting the
 // string (with no registry: the triple carries no prefix), so
 // every address form the rest of the system uses resolves to the same marker
-// the pauser wrote: "rig/name" and "rig/polecats/name" (polecat),
-// "rig/crew/name" — and the town-level "mayor/", whose marker lives at
-// .runtime/agents/<role>.json,
-// so they have an EMPTY rig rather than no marker (gt-wisp-6ajo).
+// the pauser wrote: "rig/name" and "rig/polecats/name" (polecat) and
+// "rig/crew/name" (gt-wisp-6ajo).
 func MarkerTriple(address string) (rig, role, name string, ok bool) {
 	id, err := session.ParseAddressWithRegistry(address, nil)
 	if err != nil {

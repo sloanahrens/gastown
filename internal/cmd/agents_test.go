@@ -82,7 +82,6 @@ func TestCategorizeSession_AllTypes(t *testing.T) {
 		input    string
 		wantType AgentType
 	}{
-		{"mayor", "hq-mayor", AgentMayor},
 		// Rig-level sessions require a registered prefix. Use "gt" which is
 		// commonly registered in the default PrefixRegistry.
 		{"crew", "gt-crew-max", AgentCrew},
@@ -180,7 +179,6 @@ func TestDisplayLabel_AllTypes(t *testing.T) {
 		agent       AgentSession
 		wantContain string
 	}{
-		{"mayor", AgentSession{Name: "hq-mayor", Type: AgentMayor}, "Mayor"},
 		{"crew", AgentSession{Name: "gt-crew-max", Type: AgentCrew, Rig: "gastown", AgentName: "max"}, "crew/max"},
 		{"polecat", AgentSession{Name: "gt-furiosa", Type: AgentPolecat, Rig: "gastown", AgentName: "furiosa"}, "furiosa"},
 	}
@@ -229,7 +227,6 @@ func TestFilterAndSortSessions_AllFiltered(t *testing.T) {
 func TestFilterAndSortSessions_PolecatFiltering(t *testing.T) {
 	t.Parallel()
 	input := []string{
-		"hq-mayor",
 		"gt-furiosa", // polecat
 		"gt-crew-max",
 	}
@@ -241,8 +238,8 @@ func TestFilterAndSortSessions_PolecatFiltering(t *testing.T) {
 			t.Errorf("polecat %q present when includePolecats=false", a.Name)
 		}
 	}
-	if len(got) != 2 {
-		t.Errorf("filterAndSortSessions(includePolecats=false) returned %d agents, want 2", len(got))
+	if len(got) != 1 {
+		t.Errorf("filterAndSortSessions(includePolecats=false) returned %d agents, want 1", len(got))
 	}
 
 	// With polecats included
@@ -256,15 +253,15 @@ func TestFilterAndSortSessions_PolecatFiltering(t *testing.T) {
 	if !hasPolecat {
 		t.Error("no polecat found when includePolecats=true")
 	}
-	if len(got) != 3 {
-		t.Errorf("filterAndSortSessions(includePolecats=true) returned %d agents, want 3", len(got))
+	if len(got) != 2 {
+		t.Errorf("filterAndSortSessions(includePolecats=true) returned %d agents, want 2", len(got))
 	}
 }
 
 func TestFilterAndSortSessions_BootSessionFiltered(t *testing.T) {
 	t.Parallel()
 	input := []string{
-		"hq-mayor",
+		"gt-crew-max",
 		"hq-boot", // should always be excluded
 		"hq-deacon",
 	}
@@ -284,7 +281,6 @@ func TestFilterAndSortSessions_SortOrder(t *testing.T) {
 	t.Parallel()
 	input := []string{
 		"gt-crew-zed",   // crew (gastown)
-		"hq-mayor",      // mayor
 		"gt-furiosa",    // polecat (gastown)
 		"mr-crew-bob",   // crew (myrig)
 		"gt-crew-alpha", // crew (gastown)
@@ -293,16 +289,14 @@ func TestFilterAndSortSessions_SortOrder(t *testing.T) {
 	got := filterAndSortSessions(cmdTestRegistry(), input, true)
 
 	// Expected order:
-	// 1. mayor (town-level)
-	// 2. gastown/crew/alpha (rig "gastown" < "myrig", alpha < zed)
-	// 3. gastown/crew/zed
-	// 4. gastown/polecat/furiosa (polecat last within rig)
-	// 5. myrig/crew/bob
+	// 1. gastown/crew/alpha (rig "gastown" < "myrig", alpha < zed)
+	// 2. gastown/crew/zed
+	// 3. gastown/polecat/furiosa (polecat last within rig)
+	// 4. myrig/crew/bob
 	wantOrder := []struct {
 		wantType AgentType
 		wantName string
 	}{
-		{AgentMayor, "hq-mayor"},
 		{AgentCrew, "gt-crew-alpha"},
 		{AgentCrew, "gt-crew-zed"},
 		{AgentPolecat, "gt-furiosa"},
@@ -326,7 +320,6 @@ func TestFilterAndSortSessions_SortOrder(t *testing.T) {
 func TestFilterAndSortSessions_CombinedFiltering(t *testing.T) {
 	t.Parallel()
 	input := []string{
-		"hq-mayor",
 		"hq-boot",        // boot: always filtered
 		"gt-furiosa",     // polecat: filtered when includePolecats=false
 		"random-session", // non-gastown: always filtered
@@ -334,19 +327,16 @@ func TestFilterAndSortSessions_CombinedFiltering(t *testing.T) {
 	}
 
 	got := filterAndSortSessions(cmdTestRegistry(), input, false)
-	if len(got) != 2 {
-		t.Fatalf("filterAndSortSessions(combined, polecats=false) returned %d agents, want 2 (mayor + crew)", len(got))
+	if len(got) != 1 {
+		t.Fatalf("filterAndSortSessions(combined, polecats=false) returned %d agents, want 1 (crew)", len(got))
 	}
-	if got[0].Type != AgentMayor {
-		t.Errorf("position 0: type = %d, want AgentMayor", got[0].Type)
-	}
-	if got[1].Type != AgentCrew {
-		t.Errorf("position 1: type = %d, want AgentCrew", got[1].Type)
+	if got[0].Type != AgentCrew {
+		t.Errorf("position 0: type = %d, want AgentCrew", got[0].Type)
 	}
 
 	got = filterAndSortSessions(cmdTestRegistry(), input, true)
-	if len(got) != 3 {
-		t.Fatalf("filterAndSortSessions(combined, polecats=true) returned %d agents, want 3 (mayor + crew + polecat)", len(got))
+	if len(got) != 2 {
+		t.Fatalf("filterAndSortSessions(combined, polecats=true) returned %d agents, want 2 (crew + polecat)", len(got))
 	}
 }
 
@@ -411,10 +401,10 @@ func TestBuildMenuAction_CrossSocket(t *testing.T) {
 		{
 			name:       "empty socket — same-server switch only",
 			townSocket: "",
-			session:    "hq-mayor",
+			session:    "hq-deacon",
 			wantContain: []string{
 				"switch-client",
-				"hq-mayor",
+				"hq-deacon",
 			},
 			wantMissing: []string{
 				"detach-client", // no cross-socket fallback needed

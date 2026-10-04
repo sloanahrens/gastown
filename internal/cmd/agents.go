@@ -22,8 +22,7 @@ import (
 type AgentType int
 
 const (
-	AgentMayor AgentType = iota
-	AgentCrew
+	AgentCrew AgentType = iota
 	AgentPolecat
 	AgentPersonal // Non-GT session (user's terminal session)
 	AgentTest     // Session on a gt-test-* socket (integration tests)
@@ -40,7 +39,6 @@ type AgentSession struct {
 
 // AgentTypeColors maps agent types to tmux color codes.
 var AgentTypeColors = map[AgentType]string{
-	AgentMayor:    "#[fg=red,bold]",
 	AgentCrew:     "#[fg=green]",
 	AgentPolecat:  "#[fg=white,dim]",
 	AgentPersonal: "#[fg=magenta]",
@@ -56,7 +54,6 @@ var rigTypeOrder = map[AgentType]int{
 // AgentTypeIcons maps agent types to display icons.
 // Uses centralized emojis from constants package.
 var AgentTypeIcons = map[AgentType]string{
-	AgentMayor:   constants.EmojiMayor,
 	AgentCrew:    constants.EmojiCrew,
 	AgentPolecat: constants.EmojiPolecat,
 }
@@ -68,7 +65,7 @@ var agentsCmd = &cobra.Command{
 	Short:   "List Gas Town agent sessions",
 	Long: `List Gas Town agent sessions to stdout.
 
-Shows the Mayor and Crew workers.
+Shows Crew workers.
 Polecats are hidden (use 'gt polecat list' to see them).
 
 Use 'gt agents menu' for an interactive tmux popup menu.`,
@@ -150,8 +147,6 @@ func categorizeSession(reg *session.PrefixRegistry, name string) *AgentSession {
 	sess.AgentName = identity.Name
 
 	switch identity.Role {
-	case session.RoleMayor:
-		sess.Type = AgentMayor
 	case session.RoleCrew:
 		sess.Type = AgentCrew
 	case session.RolePolecat:
@@ -304,18 +299,10 @@ func filterAndSortSessions(reg *session.PrefixRegistry, sessionNames []string, i
 		agents = append(agents, agent)
 	}
 
-	// Sort: mayor first, then by rig, then by type
+	// Sort: town-level sessions (empty rig) first, then by rig, then by type
 	sort.Slice(agents, func(i, j int) bool {
 		a, b := agents[i], agents[j]
 
-		// Town-level agents first
-		if a.Type == AgentMayor {
-			return true
-		}
-		if b.Type == AgentMayor {
-			return false
-		}
-		// Then by rig name
 		if a.Rig != b.Rig {
 			return a.Rig < b.Rig
 		}
@@ -358,8 +345,6 @@ func (a *AgentSession) displayLabel() string {
 	icon := AgentTypeIcons[a.Type]
 
 	switch a.Type {
-	case AgentMayor:
-		return fmt.Sprintf("%s%s Mayor#[default]", color, icon)
 	case AgentCrew:
 		return fmt.Sprintf("%s%s %s/crew/%s#[default]", color, icon, a.Rig, a.AgentName)
 	case AgentPolecat:
@@ -375,7 +360,7 @@ func (a *AgentSession) displayLabel() string {
 
 // socketDisplayName returns a human-friendly label for a tmux socket.
 // The town socket is labeled "hq" to match the session prefix convention
-// (hq-deacon, hq-mayor). Other sockets use their name as-is.
+// (hq-deacon, hq-boot). Other sockets use their name as-is.
 func socketDisplayName(socket string) string {
 	if socket == tmux.GetDefaultSocket() {
 		return "hq"
@@ -429,8 +414,8 @@ func runAgents(cmd *cobra.Command, args []string) error {
 
 	if total == 0 {
 		fmt.Println("No agent sessions running.")
-		fmt.Println("\nStart agents with:")
-		fmt.Println("  gt mayor start")
+		fmt.Println("\nStart an agent with:")
+		fmt.Println("  gt crew start <name>")
 		return nil
 	}
 
@@ -477,13 +462,12 @@ func runAgents(cmd *cobra.Command, args []string) error {
 				"", "")
 		}
 
-		// Rig sub-headers (non-selectable). The mayor is town-level and
-		// appears before any rig header.
+		// Rig sub-headers (non-selectable). Town-level sessions have no rig
+		// and appear before any rig header.
 		var currentRig string
 		for _, agent := range group.Sessions {
 			if agent.Type != AgentPersonal && agent.Type != AgentTest &&
-				agent.Rig != "" && agent.Rig != currentRig &&
-				agent.Type != AgentMayor {
+				agent.Rig != "" && agent.Rig != currentRig {
 				menuArgs = append(menuArgs,
 					fmt.Sprintf("-#[fg=white,dim]   %s", agent.Rig), "", "")
 				currentRig = agent.Rig
@@ -536,8 +520,6 @@ func runAgentsList(cmd *cobra.Command, args []string) error {
 
 		icon := AgentTypeIcons[agent.Type]
 		switch agent.Type {
-		case AgentMayor:
-			fmt.Printf("  %s Mayor\n", icon)
 		case AgentCrew:
 			fmt.Printf("  %s crew/%s\n", icon, agent.AgentName)
 		case AgentPolecat:

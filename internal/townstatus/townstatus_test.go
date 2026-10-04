@@ -348,11 +348,11 @@ func TestCountRunningAgents(t *testing.T) {
 			want:   0,
 		},
 		{
-			name: "global agents only",
+			name: "town-level agents only",
 			status: TownStatus{
 				Agents: []AgentRuntime{
-					{Name: "mayor", Running: true},
-					{Name: "deacon", Running: false},
+					{Name: "deacon", Running: true},
+					{Name: "dog", Running: false},
 				},
 			},
 			want: 1,
@@ -372,10 +372,10 @@ func TestCountRunningAgents(t *testing.T) {
 			want: 2,
 		},
 		{
-			name: "mixed global and rig agents",
+			name: "mixed town-level and rig agents",
 			status: TownStatus{
 				Agents: []AgentRuntime{
-					{Name: "mayor", Running: true},
+					{Name: "deacon", Running: true},
 				},
 				Rigs: []RigStatus{
 					{
@@ -397,7 +397,7 @@ func TestCountRunningAgents(t *testing.T) {
 			name: "all not running",
 			status: TownStatus{
 				Agents: []AgentRuntime{
-					{Name: "mayor", Running: false},
+					{Name: "deacon", Running: false},
 				},
 				Rigs: []RigStatus{
 					{
