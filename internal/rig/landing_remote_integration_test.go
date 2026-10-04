@@ -8,11 +8,11 @@ import (
 	"testing"
 )
 
-// TestResolveLandingRemote_ReadsTheConfiguredRemote runs the resolver against
-// real git: the remote in the rig's bare repository whose URL is the rig's
-// configured Forgejo URL is the one the landing path uses (gt-fn9e6.9). The
-// cutover that repoints origin's URL instead keeps the same answer, origin.
-func TestResolveLandingRemote_ReadsTheConfiguredRemote(t *testing.T) {
+// TestIntegrationResolveLandingRemote runs the resolver against real git: the
+// remote in the rig's bare repository whose URL is the rig's configured Forgejo
+// URL is the one the landing path uses (gt-fn9e6.9). The cutover that repoints
+// origin's URL instead keeps the same answer, origin.
+func TestIntegrationResolveLandingRemote(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	rigDir := filepath.Join(townRoot, "gastown")
