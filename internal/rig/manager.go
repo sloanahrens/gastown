@@ -1055,6 +1055,29 @@ func RigConfigWarned(rigPath string) bool {
 	return ok
 }
 
+// repoForgejoWarnedPaths holds repo settings paths already reported by
+// WarnRepoForgejoIgnored, so a resolution that runs on every dispatch prints
+// one line per rig rather than one per call.
+var repoForgejoWarnedPaths sync.Map
+
+// WarnRepoForgejoIgnored reports, once per repo settings path, that a
+// merge_queue.forgejo block in the repo-committed tier was ignored because the
+// block is operator-only (gt-fn9e6.14).
+func WarnRepoForgejoIgnored(path string) {
+	if _, dup := repoForgejoWarnedPaths.LoadOrStore(path, struct{}{}); dup {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "WARNING: %s sets merge_queue.forgejo, which is operator-only; ignoring it and resolving the block from the rig root config.json and the rig-local settings/config.json\n", path)
+}
+
+// RepoForgejoIgnoredWarned reports whether WarnRepoForgejoIgnored has reported
+// path, so tests can assert the ignored block is reported rather than dropped
+// silently (gt-fn9e6.14).
+func RepoForgejoIgnoredWarned(path string) bool {
+	_, ok := repoForgejoWarnedPaths.Load(path)
+	return ok
+}
+
 // ResolveMergeQueueConfig resolves a rig's merge-queue gate commands using
 // the same three-tier precedence `gt sling` uses to populate formula gate
 // vars: rig root config.json merge_queue (floor, gt-me9t) -> repo-committed
@@ -1067,6 +1090,9 @@ func RigConfigWarned(rigPath string) bool {
 // found true when nothing was bound and absent when everything ran, because
 // each path had its own copy of this resolution logic; gt-egiv: three more
 // sites were still reading settings/config.json alone).
+//
+// The repo tier's merge_queue.forgejo block is operator-only and is stripped
+// before the merge (gt-fn9e6.14); every other field keeps its tier.
 //
 // Returns nil if no merge-queue config exists at any tier.
 func ResolveMergeQueueConfig(townRoot, rigName string) *config.MergeQueueConfig {
@@ -1087,7 +1113,14 @@ func ResolveMergeQueueConfig(townRoot, rigName string) *config.MergeQueueConfig 
 	var repoMQ *config.MergeQueueConfig
 	repoRoot := filepath.Join(townRoot, rigName, "mayor", "rig")
 	if repoSettings, _ := config.LoadRepoSettings(repoRoot); repoSettings != nil {
-		repoMQ = repoSettings.MergeQueue
+		// Strip the Forgejo block: a landed commit must not choose where a
+		// bot token is sent or which login the landing creator check trusts
+		// (gt-fn9e6.14). Every other merge_queue field keeps its precedence.
+		var repoForgejo bool
+		repoMQ, repoForgejo = config.StripRepoForgejo(repoSettings.MergeQueue)
+		if repoForgejo {
+			WarnRepoForgejoIgnored(filepath.Join(repoRoot, config.RepoSettingsPath))
+		}
 	}
 
 	var localMQ *config.MergeQueueConfig
@@ -1101,9 +1134,10 @@ func ResolveMergeQueueConfig(townRoot, rigName string) *config.MergeQueueConfig 
 }
 
 // ResolveForgejoConfig resolves a rig's Forgejo landing settings
-// (merge_queue.forgejo) from the same three tiers ResolveMergeQueueConfig
-// reads: rig root config.json floor, repo-committed .gastown/settings.json,
-// then the rig-local settings/config.json override.
+// (merge_queue.forgejo) from the operator-owned tiers ResolveMergeQueueConfig
+// reads: the rig root config.json floor, then the rig-local
+// settings/config.json override. The block is operator-only, so a repo-committed
+// .gastown/settings.json never chooses it (gt-fn9e6.14).
 //
 // It is a reader beside ResolveMergeQueueConfig, not a second precedence: it
 // delegates, so the merge stays in config.MergeSettingsCommand and the two

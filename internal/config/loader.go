@@ -364,6 +364,26 @@ func mergeForgejoConfig(base, override *ForgejoConfig) *ForgejoConfig {
 	return out
 }
 
+// StripRepoForgejo removes merge_queue.forgejo from the repo-committed tier
+// before it is merged, reporting whether the block was present.
+//
+// Forgejo landing settings are operator-only (gt-fn9e6.14): forgejo.remote_url
+// is where the Forgejo client sends a bot token, and forgejo.bots feeds the
+// landing creator check, so a landed commit must never choose either.
+// ResolveMergeQueueConfig strips the block here rather than forking its
+// resolver, so ResolveForgejoConfig stays a delegated reader and the two
+// resolvers keep agreeing on every other merge_queue field.
+//
+// Returns mq unchanged (and false) when it carries no Forgejo block.
+func StripRepoForgejo(mq *MergeQueueConfig) (*MergeQueueConfig, bool) {
+	if mq == nil || mq.Forgejo == nil {
+		return mq, false
+	}
+	out := *mq
+	out.Forgejo = nil
+	return &out, true
+}
+
 // LoadRigSettings loads and validates a rig settings file.
 func LoadRigSettings(path string) (*RigSettings, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // G304: path is constructed internally, not from user input
