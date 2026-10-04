@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
@@ -449,6 +450,16 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		// A revert of a red main lands without om rather than wait on it.
 		ReviewErrorLandsLabels: []string{landworker.LabelRevert},
 	}
+	// A rig with a merge_queue.forgejo block lands through its Forgejo CI: the
+	// candidate gate replaces the local gate built above, which stays for
+	// shadow mode (slice 8).
+	if forgejoCfg := rig.ResolveForgejoConfig(townRoot, rigName); forgejoCfg != nil {
+		candidate, err := d.newForgejoCandidate(rigName, forgejoCfg, repo, landings, cfg)
+		if err != nil {
+			return nil, err
+		}
+		lander.Candidate = candidate
+	}
 	run := postLandRun(repo, workRoot, d.landingLogRoot(rigName), townRoot, rigName, landingWorkerDuration(cfg.PostLandTimeoutStr, defaultPostLandTimeout))
 	mainState := fileMainState{path: RedMainStatePath(townRoot, rigName)}
 	redMain := &landworker.RedMain{
@@ -520,6 +531,117 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 			return err
 		},
 	}, nil
+}
+
+// forgejoVerifyWindow is how many of the landings file's last records the
+// startup context check reads to find a commit the gate workflow tested.
+const forgejoVerifyWindow = 20
+
+// newForgejoCandidate builds the Forgejo gate a cut-over rig lands through and
+// checks its required context against the rig's own history. A rig whose
+// merge_queue.forgejo block is unusable (no readable remote, no landing bot
+// token) fails construction: CI is that rig's only landing path, so running
+// the local gate instead would bypass the cutover.
+func (d *Daemon) newForgejoCandidate(rigName string, fj *config.ForgejoConfig, repo string, landings *land.LandingsFile, cfg *LandingWorkerConfig) (*land.CandidateGate, error) {
+	owner, repoName, err := land.RepoFromRemoteURL(fj.RemoteURL)
+	if err != nil {
+		return nil, err
+	}
+	apiBase, err := land.APIBaseFromRemoteURL(fj.RemoteURL)
+	if err != nil {
+		return nil, err
+	}
+	tokenDir, err := cfg.ForgejoTokenDir()
+	if err != nil {
+		return nil, err
+	}
+	// The token is read from the role's file, never from config: the key names
+	// the role, and the file is what holds the secret (design, "Bots and
+	// tokens").
+	client, err := forgejo.NewClient(config.ForgejoRoleLanding,
+		forgejo.WithBaseURL(apiBase),
+		forgejo.WithTokenFile(filepath.Join(tokenDir, "forgejo-"+config.ForgejoRoleLanding+".env")))
+	if err != nil {
+		return nil, fmt.Errorf("rig %s lands through Forgejo CI and its %s bot token is unusable: %w", rigName, config.ForgejoRoleLanding, err)
+	}
+	gate := &land.CandidateGate{
+		Client:   client,
+		Owner:    owner,
+		RepoName: repoName,
+		Workflow: fj.GateWorkflowName(),
+		Out:      landingLogWriter{logf: d.logger.Printf},
+	}
+	d.verifyForgejoGate(rigName, gate, repo, fj.GateWorkflowName(), landings)
+	return gate, nil
+}
+
+// verifyForgejoGate checks the required context the workflow file derives
+// against a commit this rig landed: that commit went up as a candidate, so the
+// gate workflow tested it, and a context absent there means the workflow or
+// its job was renamed and every landing would wait on a status that never
+// arrives (design open question 1). It reports and never fails — the check is
+// evidence, and failing construction would take the rig's landings down with
+// it.
+func (d *Daemon) verifyForgejoGate(rigName string, gate *land.CandidateGate, repo, workflow string, landings *land.LandingsFile) {
+	commit := lastLandedCandidate(landings, d.logger.Printf, rigName)
+	if commit == "" {
+		d.logger.Printf("landing_worker: %s: Forgejo gate on %s; no landed candidate yet to check its required context against", rigName, land.GateWorkflowPath(workflow))
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), land.DefaultCandidateCallTimeout)
+	defer cancel()
+	data, err := git.NewGit(repo).ShowFileAtRev(commit, land.GateWorkflowPath(workflow))
+	if err != nil {
+		d.forgejoGateAlert(rigName, fmt.Sprintf("the gate workflow %s is not in the tree of the landed candidate %s, so the required status context cannot be derived: %v", land.GateWorkflowPath(workflow), shortForgejoSHA(commit), err))
+		return
+	}
+	wf, err := land.ParseGateWorkflow([]byte(data))
+	if err != nil {
+		d.forgejoGateAlert(rigName, fmt.Sprintf("the gate workflow %s at %s: %v", land.GateWorkflowPath(workflow), shortForgejoSHA(commit), err))
+		return
+	}
+	if err := gate.VerifyReported(ctx, commit, wf.Context()); err != nil {
+		d.forgejoGateAlert(rigName, fmt.Sprintf("rig %s requires the %s status to merge; %v. A renamed workflow or job orphans the branch protection, and a landing would wait on it forever.", rigName, wf.Context(), err))
+	}
+}
+
+// lastLandedCandidate is the newest commit the worker itself landed, whose
+// pushed candidate the gate workflow tested: what the context check reads.
+func lastLandedCandidate(landings *land.LandingsFile, logf func(string, ...any), rigName string) string {
+	recs, err := landings.Recent(forgejoVerifyWindow)
+	if err != nil {
+		logf("landing_worker: %s: reading the landings file for the Forgejo gate check: %v", rigName, err)
+		return ""
+	}
+	for i := len(recs) - 1; i >= 0; i-- {
+		if recs[i].Route == "" || recs[i].Route == "daemon" {
+			return recs[i].LandedCommit
+		}
+	}
+	return ""
+}
+
+// forgejoGateAlert raises the startup context check's finding: the operator
+// has to fix the workflow or the config before a landing can merge.
+func (d *Daemon) forgejoGateAlert(rigName, message string) {
+	d.logger.Printf("landing_worker: %s: forgejo gate check: %s", rigName, message)
+	d.escalateAlert("landing-forgejo-context:"+rigName, "landing_worker", message)
+}
+
+// shortForgejoSHA is a commit's first 8 characters, for a message.
+func shortForgejoSHA(sha string) string {
+	if len(sha) > 8 {
+		return sha[:8]
+	}
+	return sha
+}
+
+// landingCIBudget is the wall the candidate gate's stage may legitimately
+// take: the wait window for a verdict, plus one API call's deadline. The
+// landings of a cut-over rig wait on a Forgejo runner, so a stage judged by
+// the local gate's budget would read a healthy queue as a wedged pass.
+func landingCIBudget() time.Duration {
+	return land.DefaultCandidateWaitTimeout + land.DefaultCandidateCallTimeout
 }
 
 // landingGateBudget is the wall the merged-tree gate's stage may legitimately

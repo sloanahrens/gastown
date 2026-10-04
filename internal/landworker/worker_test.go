@@ -899,3 +899,86 @@ func TestPassReportsActiveBead(t *testing.T) {
 		t.Fatalf("Active calls = %q, want gt-a then cleared", seen)
 	}
 }
+
+func ciSilenceErr() error {
+	return &land.InfraError{Stage: "ci", Err: fmt.Errorf(
+		"%w: ci / gate (push) reported nothing on the candidate candidate (land/gt-abc) within its wait window", land.ErrCISilence)}
+}
+
+// TestClassifyCISilenceIsInfrastructure: the candidate gate reporting no
+// verdict is an infrastructure outcome, never the rework a red CI verdict is.
+func TestClassifyCISilenceIsInfrastructure(t *testing.T) {
+	t.Parallel()
+	if got := classify(context.Background(), ciSilenceErr()); got != outInfra {
+		t.Fatalf("classify(CI silence) = %v, want outInfra", got)
+	}
+	red := &land.Rejection{Kind: land.RejectGate, Rework: true, Reason: "the candidate gate ci / gate (push) failed on the merged tree"}
+	if got := classify(context.Background(), red); got != outRejectedRework {
+		t.Fatalf("classify(CI red) = %v, want outRejectedRework", got)
+	}
+}
+
+// TestPassRepeatedCISilencesEscalateOnce: DefaultCISilenceEscalateAfter
+// candidate-gate silences in a row raise one escalation naming the bead, and
+// further silences stay quiet (gt-fn9e6.5).
+func TestPassRepeatedCISilencesEscalateOnce(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	var mu sync.Mutex
+	var got []string
+	h.w.Escalate = func(beadID, message string) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, beadID+": "+message)
+	}
+	h.lander.fn = func(int, land.Work) (land.Result, error) { return land.Result{}, ciSilenceErr() }
+	attempts := DefaultCISilenceEscalateAfter + 3
+	for i := 0; i < attempts; i++ {
+		h.w.Pass(context.Background())
+		h.w.escWG.Wait()
+		mu.Lock()
+		n := len(got)
+		mu.Unlock()
+		want := 0
+		if i+1 >= DefaultCISilenceEscalateAfter {
+			want = 1
+		}
+		if n != want {
+			t.Fatalf("after %d silences: %d escalations, want %d", i+1, n, want)
+		}
+		h.now = h.now.Add(infraBackoffMax)
+	}
+	if len(h.lander.calls) != attempts {
+		t.Fatalf("landed %d times; want %d", len(h.lander.calls), attempts)
+	}
+	if !strings.HasPrefix(got[0], "gt-abc: ") || !strings.Contains(got[0], "candidate gate") {
+		t.Fatalf("escalation %q; want the bead and the candidate gate", got[0])
+	}
+}
+
+// TestPassCISilenceRunIsBrokenByAnotherOutcome: the count is of consecutive
+// silences, so a pass that fails another way restarts it.
+func TestPassCISilenceRunIsBrokenByAnotherOutcome(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	var escalations atomic.Int32
+	h.w.Escalate = func(string, string) { escalations.Add(1) }
+	h.w.CISilenceEscalateAfter = 2
+	h.lander.fn = func(n int, _ land.Work) (land.Result, error) {
+		if n == 2 {
+			return land.Result{}, &land.InfraError{Stage: "ci", Err: errors.New("connection refused")}
+		}
+		return land.Result{}, ciSilenceErr()
+	}
+	// silence, other failure, silence: never two in a row.
+	for i := 0; i < 3; i++ {
+		h.w.Pass(context.Background())
+		h.now = h.now.Add(infraBackoffMax)
+	}
+	h.w.escWG.Wait()
+	if n := escalations.Load(); n != 0 {
+		t.Fatalf("escalated %d times without %d silences in a row", n, h.w.CISilenceEscalateAfter)
+	}
+}

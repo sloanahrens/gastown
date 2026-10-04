@@ -55,6 +55,10 @@ type Repo interface {
 	MergeSquash(branch, message string) error
 	GetConflictingFiles() ([]string, error)
 	AbortMerge() error
+	// Push updates remote's branch to the refspec's source, force-updating it:
+	// the merge candidate is the worker's own branch and every retry rebuilds
+	// it.
+	Push(remote, refspec string, force bool) error
 	PushForceWithLease(remote, refspec, branchRef, expectedSHA string) error
 	VerifyPushedCommit(remote, branch, commit string) error
 }
@@ -79,12 +83,17 @@ type Lander struct {
 	// reads the rig's merge_queue.gate, and WithSlot holds the container-gate
 	// slot for the `make test` fallback only. Land does not take the slot
 	// itself.
-	Gate     Gate
-	Reviewer Reviewer
-	Beads    Beads
-	Landings *LandingsFile
-	Out      io.Writer
-	Now      func() time.Time
+	//
+	// Candidate, when set, is the Forgejo gate that runs instead: the merged
+	// tree is pushed as land/<bead> and its CI verdict decides. Gate stays
+	// built and unused on such a rig, because shadow mode runs both (slice 8).
+	Gate      Gate
+	Candidate Candidate
+	Reviewer  Reviewer
+	Beads     Beads
+	Landings  *LandingsFile
+	Out       io.Writer
+	Now       func() time.Time
 	// RangeChecks run on base..head before the merge (the landing worker
 	// passes AttributionCheck). A returned Rejection is written to the bead
 	// like any other.
@@ -240,8 +249,51 @@ func (e *RecordError) Unwrap() error { return e.Err }
 // landing's overall budget.
 const (
 	StageGate = "gate"
+	StageCI   = "ci"
 	StageOM   = "om"
 )
+
+// gateStage is the stage the gate takes: the candidate gate when one is
+// configured, else the local gate.
+func (l *Lander) gateStage() string {
+	if l.Candidate != nil {
+		return StageCI
+	}
+	return StageGate
+}
+
+// gatePlan names the gate the landing is about to run, for its log line.
+func (l *Lander) gatePlan() string {
+	if l.Candidate != nil {
+		return "pushing the merge candidate and waiting for its CI verdict"
+	}
+	return "gating the merged tree"
+}
+
+// candidateGate runs the Forgejo gate in place of the local one and renders
+// its verdict as a GateResult, so the red path and the landed record keep the
+// shape the local gate's had. Silence is not a verdict: it comes back as an
+// *InfraError, the path every other no-verdict failure takes.
+func (l *Lander) candidateGate(ctx context.Context, wt Repo, dir string, w Work, merged string) (GateResult, error) {
+	start := time.Now()
+	cres := l.Candidate.Run(ctx, wt, dir, w, merged)
+	step := StepResult{Name: StageCI, Command: cres.Context, Elapsed: time.Since(start), Tail: cres.Tail}
+	if cres.Err != nil {
+		return GateResult{}, &InfraError{Stage: StageCI, Err: cres.Err}
+	}
+	switch cres.State {
+	case CandidatePassed:
+		return GateResult{Passed: true, Steps: []StepResult{step}}, nil
+	case CandidateFailed:
+		step.ExitCode = 1
+		l.logf("%s: %s failed on the candidate %s (%s); the job log tail goes with the rework", w.BeadID, cres.Context, shortSHA(cres.SHA), cres.Branch)
+		return GateResult{Steps: []StepResult{step}}, nil
+	default:
+		return GateResult{}, &InfraError{Stage: StageCI, Err: fmt.Errorf(
+			"%w: %s reported nothing on the candidate %s (%s) within its wait window",
+			ErrCISilence, cres.Context, shortSHA(cres.SHA), cres.Branch)}
+	}
+}
 
 // stage reports the landing's current stage to the Stage hook, if one is set.
 func (l *Lander) stage(w Work, stage string) {
@@ -278,9 +330,10 @@ func (l *Lander) now() time.Time {
 }
 
 // Land lands w: the declared head merged onto a throwaway worktree of the
-// target, the merged tree gated while om reviews the same range, a
-// --force-with-lease push against the tip the merge was built on, a read-back
-// of that tip, then the landings file, the LANDING RECORD block and the close.
+// target, the merged tree gated — locally, or by CI on the pushed candidate
+// when the rig has a Candidate gate — then om review, a --force-with-lease
+// push against the tip the merge was built on, a read-back of that tip, then
+// the landings file, the LANDING RECORD block and the close.
 //
 // A red gate goes through the flake policy (flake.go) before it is a
 // rejection.
@@ -396,14 +449,26 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		return Result{}, &InfraError{Stage: "patch-id", Err: err}
 	}
 
-	l.logf("%s: merged %s onto %s/%s (%s) as %s; gating the merged tree, then om review", w.BeadID, shortSHA(w.Head), remote, w.Target, shortSHA(base), shortSHA(merged))
+	l.logf("%s: merged %s onto %s/%s (%s) as %s; %s, then om review", w.BeadID, shortSHA(w.Head), remote, w.Target, shortSHA(base), shortSHA(merged), l.gatePlan())
 	// The gate's stages (lint, then tests) run in order, and om only after
 	// they pass: om is the costly stage, and work that fails lint or tests
 	// never pays for it (gt-b5ugw).
-	l.stage(w, StageGate)
-	gateCtx, gateDone := l.Slow.watch(ctx, l, w, dir, StageGate)
-	gateRes := l.Gate.Run(gateCtx, dir)
+	l.stage(w, l.gateStage())
+	gateCtx, gateDone := l.Slow.watch(ctx, l, w, dir, l.gateStage())
+	var (
+		gateRes GateResult
+		gateErr error
+	)
+	if l.Candidate != nil {
+		w.CandidateBranch, w.CandidateHead = w.Candidate(), merged
+		gateRes, gateErr = l.candidateGate(gateCtx, wt, dir, w, merged)
+	} else {
+		gateRes = l.Gate.Run(gateCtx, dir)
+	}
 	gateDone()
+	if gateErr != nil {
+		return Result{}, gateErr
+	}
 	res := Result{LandedCommit: merged, PatchID: patchID, Base: base, Gate: gateRes, RiskPaths: riskPaths}
 	if step, ok := gateRes.TimedOutStep(); ok && ctx.Err() == nil {
 		l.logf("%s: %s", w.BeadID, stageTimes(gateRes, 0, false))
@@ -430,6 +495,9 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		}
 		if len(fv.flakes) == 0 {
 			reason, tail := "gate failed on the merged tree: "+gateRes.Summary(), gateRes.FailureTail()
+			if l.Candidate != nil && len(gateRes.Steps) > 0 {
+				reason = fmt.Sprintf("the candidate gate %s failed on the merged tree", gateRes.Steps[0].Command)
+			}
 			if fv.rerun != nil {
 				reason += "; the rerun of the failed package(s) failed too: " + fv.rerun.Summary()
 				tail = fv.rerun.FailureTail()

@@ -84,6 +84,11 @@ const (
 	// failure retried every pass, so a hung lint or a stuck lock holder would
 	// otherwise idle the bead unseen (gt-j8ade).
 	DefaultLintTimeoutEscalateAfter = 3
+	// DefaultCISilenceEscalateAfter is the run of candidate-gate silences on
+	// one bead that earns an escalation, for the same reason: the worker backs
+	// off and retries a runner that is down or hung, and only an escalation
+	// says so out loud (gt-fn9e6.5).
+	DefaultCISilenceEscalateAfter = 3
 )
 
 // Worker lands one rig's ready work, serially.
@@ -129,8 +134,12 @@ type Worker struct {
 	// LintTimeoutEscalateAfter is how many consecutive lint-stage timeouts on
 	// one bead raise a single escalation; 0 means DefaultLintTimeoutEscalateAfter.
 	LintTimeoutEscalateAfter int
-	Logf                     func(format string, args ...any)
-	Now                      func() time.Time
+	// CISilenceEscalateAfter is how many consecutive candidate-gate silences
+	// on one bead raise a single escalation; 0 means
+	// DefaultCISilenceEscalateAfter.
+	CISilenceEscalateAfter int
+	Logf                   func(format string, args ...any)
+	Now                    func() time.Time
 
 	state map[string]*beadState
 	// escWG lets a test wait for Escalate goroutines.
@@ -161,6 +170,9 @@ type beadState struct {
 	// lintTimeouts counts consecutive lint-stage timeouts; any other outcome
 	// resets it.
 	lintTimeouts int
+	// ciSilences counts consecutive candidate-gate silences; any other outcome
+	// resets it.
+	ciSilences int
 	// installNow is whether the bead carried LabelInstallNow when this pass
 	// loaded it; only a landing of it turns the flag into a report field.
 	installNow bool
@@ -468,6 +480,12 @@ func classify(ctx context.Context, err error) outcome {
 		return outReadBack
 	case ctx.Err() != nil && errors.Is(ctx.Err(), context.Canceled):
 		return outCanceled
+	case errors.Is(err, land.ErrCISilence):
+		// The candidate gate reported nothing: infrastructure, never a
+		// verdict on the work. CI red comes back as a *Rejection, so the two
+		// halves of the design's rule split here, and the silence is counted
+		// for its own escalation (countCISilence).
+		return outInfra
 	default:
 		return outInfra
 	}
@@ -491,6 +509,7 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 	oc := classify(ctx, err)
 	if oc != outInfra {
 		st.lintTimeouts = 0
+		st.ciSilences = 0
 	}
 	switch oc {
 	case outLanded:
@@ -576,6 +595,7 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 	default:
 		w.infraFailure(work.BeadID, "landing", err, rep)
 		w.countLintTimeout(work, err)
+		w.countCISilence(work, err)
 	}
 }
 
@@ -617,6 +637,28 @@ func (w *Worker) countLintTimeout(work land.Work, err error) {
 	}
 	w.escalate(work.BeadID, fmt.Sprintf("Landing of %s (%s @ %s) stuck at the lint stage: it timed out %d times in a row (%v). The worker keeps retrying and no rework is needed; look for a hung lint or a golangci-lint lock holder.",
 		work.BeadID, work.Branch, work.Head, st.lintTimeouts, err))
+}
+
+// countCISilence tracks consecutive candidate-gate silences on one bead and
+// escalates once, on reaching CISilenceEscalateAfter. The design gives CI
+// silence the infra backoff, and a forced runner outage would otherwise idle
+// the bead until the queue is read by hand.
+func (w *Worker) countCISilence(work land.Work, err error) {
+	st := w.bead(work.BeadID)
+	if !errors.Is(err, land.ErrCISilence) {
+		st.ciSilences = 0
+		return
+	}
+	st.ciSilences++
+	limit := w.CISilenceEscalateAfter
+	if limit <= 0 {
+		limit = DefaultCISilenceEscalateAfter
+	}
+	if st.ciSilences != limit {
+		return
+	}
+	w.escalate(work.BeadID, fmt.Sprintf("Landing of %s (%s @ %s) has waited on the candidate gate %d times in a row with no verdict (%v). The worker keeps retrying with backoff and no rework is needed; look for a down, busy or hung Forgejo runner.",
+		work.BeadID, work.Branch, work.Head, st.ciSilences, err))
 }
 
 // maxCommentFindings bounds the om findings one rework comment lists.
