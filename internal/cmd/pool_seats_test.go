@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
@@ -267,6 +268,134 @@ func TestPoolSeatSessionsCountsEveryKindOfTakenSeat(t *testing.T) {
 				t.Fatalf("seat count = %d, want %d (%+v)", n, c.want, got)
 			}
 		})
+	}
+}
+
+// TestPoolSeatSessionsCountsDeadHookedSeats pins gt-tldj4: a polecat whose tmux
+// session is gone but whose bead is still hooked — its supervised restart is
+// due — holds the pool's seat, the way `gt polecat list` counts it, while a
+// seat whose bead is terminal or that has no hooked bead does not (gt-b9ud0
+// unchanged). The last case is the restart transition one step on: the same
+// seat, live again, is one seat, so the restart cannot push the town over the
+// cap.
+func TestPoolSeatSessionsCountsDeadHookedSeats(t *testing.T) {
+	t.Parallel()
+	pool := &config.PolecatPool{OverflowAgent: "deepseek-flash", MaxOverflow: 3}
+
+	held := polecat.WorkstateDisposition{
+		Verdict:              polecat.WorkstateVerdictNeedsRecovery,
+		Reason:               "hook-still-set",
+		NeedsRecovery:        true,
+		CountsTowardCapacity: true,
+		ReuseStatus:          "idle-recovery-needed",
+	}
+	finished := polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictSafeToNuke}
+
+	cases := []struct {
+		name     string
+		state    poolSeatState
+		sessions map[string]map[string]string
+		want     int
+	}{
+		{
+			name:  "dead session with the bead still hooked holds the seat",
+			state: poolSeatState{Disposition: held, HookHeld: true},
+			want:  1,
+		},
+		{
+			name: "a terminal bead is not held by a dead session",
+			// CountsTowardCapacity is true on purpose: the terminal bead alone
+			// must keep the seat out, not the capacity field.
+			state: poolSeatState{Disposition: polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictNeedsRecovery, CountsTowardCapacity: true}, HookHeld: false},
+			want:  0,
+		},
+		{
+			name:  "no hooked bead is not held by a dead session",
+			state: poolSeatState{Disposition: finished, HookHeld: false},
+			want:  0,
+		},
+		{
+			name:  "a hooked seat whose state does not count toward capacity is not held",
+			state: poolSeatState{Disposition: finished, HookHeld: true},
+			want:  0,
+		},
+		{
+			name:  "the same seat live again is still exactly one seat",
+			state: poolSeatState{Disposition: held, HookHeld: true},
+			sessions: map[string]map[string]string{
+				"gt-ember": {"GT_ROLE": "gastown/polecats/ember", "GT_AGENT": "deepseek-flash"},
+			},
+			want: 1,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			writeTestRigsConfig(t, town, "gastown")
+			writeTownPolecatDir(t, town, "gastown", "ember")
+
+			disposition := func(rigName, polecatName string) (poolSeatState, error) {
+				if rigName != "gastown" || polecatName != "ember" {
+					t.Fatalf("unexpected seat read %s/%s", rigName, polecatName)
+				}
+				return c.state, nil
+			}
+			got, err := poolSeatSessionsWith(&fakeLister{sessions: c.sessions}, town, disposition, nil, pool)
+			if err != nil {
+				t.Fatalf("poolSeatSessionsWith: %v", err)
+			}
+			if n := poolSeatCount(pool, got); n != c.want {
+				t.Fatalf("seat count = %d, want %d (%+v)", n, c.want, got)
+			}
+		})
+	}
+}
+
+// TestPoolSeatSessionsRestartKeepsTheCount walks the transition the fix is for:
+// the crashed seat is counted while its session is gone, and stays counted when
+// the supervisor restarts it. The count is the same on both sides, so the
+// restart can no longer be the tick that pushes the town past its cap.
+func TestPoolSeatSessionsRestartKeepsTheCount(t *testing.T) {
+	t.Parallel()
+	pool := &config.PolecatPool{OverflowAgent: "deepseek-flash", MaxOverflow: 3}
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
+	writeTownPolecatDir(t, town, "gastown", "ember")
+
+	disposition := func(rigName, polecatName string) (poolSeatState, error) {
+		return poolSeatState{
+			Disposition: polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictNeedsRecovery, NeedsRecovery: true, CountsTowardCapacity: true},
+			HookHeld:    true,
+		}, nil
+	}
+
+	crashed, err := poolSeatSessionsWith(&fakeLister{}, town, disposition, nil, pool)
+	if err != nil {
+		t.Fatalf("poolSeatSessionsWith (crashed): %v", err)
+	}
+	if n := poolSeatCount(pool, crashed); n != 1 {
+		t.Fatalf("a crashed seat holds its seat: count = %d (%+v)", n, crashed)
+	}
+
+	restarted := &fakeLister{sessions: map[string]map[string]string{
+		"gt-ember": {"GT_ROLE": "gastown/polecats/ember", "GT_AGENT": "deepseek-flash"},
+	}}
+	after, err := poolSeatSessionsWith(restarted, town, disposition, nil, pool)
+	if err != nil {
+		t.Fatalf("poolSeatSessionsWith (restarted): %v", err)
+	}
+	if n := poolSeatCount(pool, after); n != 1 {
+		t.Fatalf("the restart must not change the count: got %d (%+v)", n, after)
+	}
+}
+
+// writeTownPolecatDir makes one rig's polecat worktree directory, the seat
+// enumeration poolDeadHookedSessions reads.
+func writeTownPolecatDir(t *testing.T, townRoot, rigName, polecatName string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(townRoot, rigName, "polecats", polecatName), 0o755); err != nil {
+		t.Fatalf("mkdir polecat %s/%s: %v", rigName, polecatName, err)
 	}
 }
 

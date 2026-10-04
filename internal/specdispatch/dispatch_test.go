@@ -257,6 +257,33 @@ func TestChooseSeat(t *testing.T) {
 	}
 }
 
+// TestBudgetPictureNamesDeadHookedSeats pins the operator surface gt-tldj4 adds:
+// a seat that holds a crashed polecat — its session gone, its bead still
+// hooked, its restart due — names that occupant, so a full seat showing fewer
+// live sessions than its number has a stated reason in the tick line and in the
+// refusal text. A seat with no dead-hooked occupant reads exactly as before.
+func TestBudgetPictureNamesDeadHookedSeats(t *testing.T) {
+	t.Parallel()
+	b := baseBudget()
+	b.SetLive(map[string]int{"deepseek-flash": 2, "claude-sonnet": 1})
+	b.SetDeadHooked(map[string]int{"deepseek-flash": 1})
+	if got, want := b.Picture(), "deepseek-flash 2/2 (1 dead-hooked), claude-sonnet 1/2"; got != want {
+		t.Fatalf("Picture() = %q, want %q", got, want)
+	}
+
+	// The refusal a full town prints carries the same note.
+	b.Seats[1].Live, b.Seats[1].Cap = 2, 2
+	if got := ChooseSeat(b, goodSpec()); !got.Skip || got.Reason != "seats full: deepseek-flash 2/2 (1 dead-hooked), claude-sonnet 2/2" {
+		t.Fatalf("ChooseSeat = %+v, want the dead-hooked seat named", got)
+	}
+
+	// SetLive resets the breakdown, so a fresh count reads as before.
+	b.SetLive(map[string]int{"deepseek-flash": 2, "claude-sonnet": 2})
+	if got, want := b.Picture(), "deepseek-flash 2/2, claude-sonnet 2/2"; got != want {
+		t.Fatalf("Picture() = %q, want %q", got, want)
+	}
+}
+
 // The pro seat: a bead carrying pro_label goes only to the seat that reserved
 // it, and a plain bead never goes to that seat (gt-tq6l, carried over from
 // seat-refill).

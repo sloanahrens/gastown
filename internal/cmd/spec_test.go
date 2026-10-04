@@ -1110,6 +1110,30 @@ func TestSpecRosterCountsByAgent(t *testing.T) {
 	}
 }
 
+// TestSpecRosterCountsDeadHookedSeats pins gt-tldj4's roster half: a seat whose
+// session is gone while its bead is still hooked counts in Live and is broken
+// out in DeadHooked, so the tick line can say why a seat reads full with fewer
+// live sessions. Its zero spawn time must not arm the stagger.
+func TestSpecRosterCountsDeadHookedSeats(t *testing.T) {
+	t.Parallel()
+	ts := config.NewTownSettings()
+	ts.RoleAgents = map[string]string{"polecat": "deepseek-flash"}
+	now := time.Now()
+	r := specRosterFrom([]poolSession{
+		{name: "gt-live", agent: "deepseek-flash", created: now.Add(-time.Hour)},
+		{name: "dead/gastown/ember", agent: "deepseek-flash", deadHooked: true},
+	}, ts)
+	if r.Live["deepseek-flash"] != 2 {
+		t.Fatalf("a dead-hooked seat counts toward the cap: %+v", r)
+	}
+	if r.DeadHooked["deepseek-flash"] != 1 {
+		t.Fatalf("the dead-hooked seat must be broken out: %+v", r)
+	}
+	if !r.Newest.Equal(now.Add(-time.Hour)) {
+		t.Fatalf("a dead seat has no spawn time and must not arm the stagger: Newest = %v", r.Newest)
+	}
+}
+
 func TestSpecLintCommandExitCodes(t *testing.T) {
 	t.Parallel()
 	tmpl := filepath.Join(t.TempDir(), "spec-template.md")

@@ -413,10 +413,14 @@ type specCandidate struct {
 
 // specRoster is the live polecat picture the budget is built from: the seats
 // the pool counts as taken per agent — live polecats, in-flight seat claims,
-// and the seats mid-landing (poolSeatSessions) — and the newest spawn.
+// the seats mid-landing, and the seats whose session is gone while their bead
+// is still hooked (poolSeatSessions) — and the newest spawn.
 type specRoster struct {
-	Live   map[string]int
-	Newest time.Time
+	Live map[string]int
+	// DeadHooked counts, per agent, the seats inside Live that no tmux session
+	// holds: a crashed polecat waiting for its supervised restart (gt-tldj4).
+	DeadHooked map[string]int
+	Newest     time.Time
 }
 
 // specDispatchEnv is every side effect a tick has, so the cycle runs on fakes
@@ -485,6 +489,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	budget := env.Budget
 	budget.Seats = append([]specdispatch.Seat(nil), env.Budget.Seats...)
 	budget.SetLive(roster.Live)
+	budget.SetDeadHooked(roster.DeadHooked)
 	budget.NewestSpawn = roster.Newest
 	report.Roster = budget.Picture()
 
@@ -856,10 +861,13 @@ func specBudgetFromConfig(ts *config.TownSettings, sd *config.SpecDispatchConfig
 }
 
 // specRosterFrom counts the seats the pool counts as taken (live polecats,
-// in-flight seat claims, and seats mid-landing) per agent. An empty GT_AGENT
-// runs the polecat role default.
+// in-flight seat claims, seats mid-landing, and dead-hooked seats) per agent.
+// An empty GT_AGENT runs the polecat role default. A dead-hooked seat also
+// counts in DeadHooked, so the picture can say why a full seat shows fewer live
+// sessions than its number (gt-tldj4); it has no spawn time, so it never arms
+// the stagger.
 func specRosterFrom(sessions []poolSession, ts *config.TownSettings) specRoster {
-	r := specRoster{Live: map[string]int{}}
+	r := specRoster{Live: map[string]int{}, DeadHooked: map[string]int{}}
 	roleDefault := ""
 	if ts != nil {
 		roleDefault = ts.RoleAgents["polecat"]
@@ -870,6 +878,9 @@ func specRosterFrom(sessions []poolSession, ts *config.TownSettings) specRoster 
 			agent = roleDefault
 		}
 		r.Live[agent]++
+		if s.deadHooked {
+			r.DeadHooked[agent]++
+		}
 		if s.created.After(r.Newest) {
 			r.Newest = s.created
 		}

@@ -197,6 +197,11 @@ type Seat struct {
 	Agent string
 	Cap   int // live polecats allowed on this agent
 	Live  int // live polecats (and in-flight claims) on this agent
+	// DeadHooked counts how many of Live hold the seat with no tmux session:
+	// their polecat crashed and is waiting for a supervised restart. They count
+	// toward Cap, and naming them explains a full seat that shows fewer live
+	// sessions than its number (gt-tldj4).
+	DeadHooked int
 	// Label, when set, reserves the seat for beads carrying it: a bead with
 	// that label is this seat's alone, and a seat without one leaves it alone
 	// (the pro seat's selector, polecat_pool.pro_label).
@@ -237,11 +242,17 @@ type Budget struct {
 	Now         time.Time
 }
 
-// Picture renders the seats for a report: "claude-sonnet 1/2, ...".
+// Picture renders the seats for a report: "claude-sonnet 1/2, ...". A seat with
+// a dead-hooked occupant names it, so a full seat has a stated reason even when
+// it shows fewer live sessions than its number (gt-tldj4).
 func (b Budget) Picture() string {
 	parts := make([]string, 0, len(b.Seats))
 	for _, s := range b.Seats {
-		parts = append(parts, fmt.Sprintf("%s %d/%d", s.Agent, s.Live, s.Cap))
+		p := fmt.Sprintf("%s %d/%d", s.Agent, s.Live, s.Cap)
+		if s.DeadHooked > 0 {
+			p += fmt.Sprintf(" (%d dead-hooked)", s.DeadHooked)
+		}
+		parts = append(parts, p)
 	}
 	if len(parts) == 0 {
 		return "no seats"
@@ -272,10 +283,20 @@ func (b Budget) ReservedLabels() []string {
 	return out
 }
 
-// SetLive fills each seat's Live from a count per agent.
+// SetLive fills each seat's Live from a count per agent. It clears DeadHooked,
+// which is a breakdown of Live and is set afterwards by SetDeadHooked.
 func (b *Budget) SetLive(live map[string]int) {
 	for i := range b.Seats {
 		b.Seats[i].Live = live[b.Seats[i].Agent]
+		b.Seats[i].DeadHooked = 0
+	}
+}
+
+// SetDeadHooked fills each seat's dead-hooked count from a count per agent,
+// after SetLive has set Live (gt-tldj4).
+func (b *Budget) SetDeadHooked(dead map[string]int) {
+	for i := range b.Seats {
+		b.Seats[i].DeadHooked = dead[b.Seats[i].Agent]
 	}
 }
 
