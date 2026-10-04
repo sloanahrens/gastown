@@ -88,6 +88,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.OM != nil {
 		start(h.cfg.OMEvery, h.pollOM)
 	}
+	if h.cfg.TierSweep != nil {
+		start(h.cfg.TierSweepEvery, h.pollTierSweep)
+	}
 	if h.cfg.Dispatch != nil {
 		start(h.cfg.DispatchEvery, h.pollDispatch)
 	}
@@ -284,6 +287,17 @@ func (h *Hub) pollOM() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.OM = om
+	h.publishLocked()
+}
+
+func (h *Hub) pollTierSweep() {
+	ts := h.cfg.TierSweep()
+	if ts == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.state.TierSweep = ts
 	h.publishLocked()
 }
 
