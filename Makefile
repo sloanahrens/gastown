@@ -459,6 +459,8 @@ test-makefile:
 	bash scripts/uninstall-gt_test.sh
 	bash -n scripts/docs-lint.sh
 	bash scripts/docs-lint_test.sh
+	bash -n scripts/forgejo-provision.sh
+	bash scripts/forgejo-provision_test.sh
 	bash -n scripts/repo-guards.sh
 	bash scripts/repo-guards_test.sh
 
