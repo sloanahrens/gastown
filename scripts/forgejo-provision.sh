@@ -546,13 +546,17 @@ if [ ${#REPOS[@]} -gt 0 ]; then
   while IFS= read -r line; do main_check_list+=("$line"); done < "$WORK/main-checks"
 
   for repo in "${REPOS[@]}"; do
-    ensure_rule "$repo" "$MAIN_BRANCH" "$main_body" "${main_check_list[@]}"
-    ensure_no_rule "$repo" "$LAND_BRANCH"
+    # Access before protection. Forgejo drops a merge_whitelist_usernames entry
+    # for a login that is not yet a collaborator with write access, so writing
+    # the rule first leaves a fresh repo with an empty merge whitelist and
+    # nobody, admins included, able to merge (gt-fn9e6.23).
     for role in "${ROLES[@]}"; do
       permission="$(collaborator_permission "$role")"
       [ -n "$permission" ] || continue
       ensure_collaborator "$role" "$repo" "$permission"
     done
+    ensure_rule "$repo" "$MAIN_BRANCH" "$main_body" "${main_check_list[@]}"
+    ensure_no_rule "$repo" "$LAND_BRANCH"
   done
 fi
 
