@@ -131,13 +131,15 @@ with one note beside it. Writers append and rotate at 1 MB (see
 docs/reference.md).
 
 A daemon line that belongs to one rig prints under that rig's tag, not "town".
-The daemon names the rig on a line it writes for one — "landing_worker:
-<rig>: ..." and "tier_sweep: <rig>: ..." — and a "[land] <bead>: ..." line
-routes the bead's prefix through the town's routes.jsonl (gt- is gastown, om-
-is om, hm- is hm, be- is beads). A prefix with no route, and the daemon's own
-town-wide lines (starting, upgrade-restart, townhealth, dispatcher ticks, the
-patrols), stay "town". Only the tag changes: the daemon log's text is what
-gt-kpi, the gt-watch scripts and the dashboard parse, and it is untouched.
+The daemon names the rig on a line it writes for one — "<component>: <rig>:
+..." for any per-rig component (landing_worker, tier_sweep, patrol_scan, the
+dogs and the scheduled jobs) — and a "[land] <bead>: ..." line routes the
+bead's prefix through the town's routes.jsonl (gt- is gastown, om- is om, hm-
+is hm, be- is beads). A line whose second token is not a registered rig, a
+prefix with no route, and the daemon's own town-wide lines (starting,
+upgrade-restart, townhealth, dispatcher ticks, the patrols), stay "town". Only
+the tag changes: the daemon log's text is what gt-kpi, the gt-watch scripts and
+the dashboard parse, and it is untouched.
 
 A bead's trip is shown too. The daemon log's own lines — the spec
 dispatcher's dispatch, the landing worker's merge and land, and the upgrade

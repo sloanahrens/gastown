@@ -559,6 +559,72 @@ func TestDaemonSource_LabelsLinesWithTheRigTheyBelongTo(t *testing.T) {
 	}
 }
 
+// TestDaemonSource_LabelsEveryPerRigComponent: the daemon's other per-rig
+// components name their rig the way landing_worker and tier_sweep do, and one
+// resolver places them all — the component is not a list it carries.
+func TestDaemonSource_LabelsEveryPerRigComponent(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeTailRoutes(t, townRoot)
+	dir := filepath.Join(townRoot, "daemon")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	appendFile(t, filepath.Join(dir, "daemon.log"),
+		"2026/09/30 08:00:00 patrol_scan: gastown: checked 8 polecat(s)\n"+
+			"2026/09/30 08:00:01 steward: om: mixing the work blend\n"+
+			"2026/09/30 08:00:02 rig_worker: hm: starting on hm/quartz\n"+
+			"2026/09/30 08:00:03 compactor_dog: beads: compacted 3 convoy(s)\n"+
+			"2026/09/30 08:00:04 git_hygiene: gastown: pruned 2 worktree(s)\n"+
+			"2026/09/30 08:00:05 jsonl_git_backup: om: pushed refs/dolt/data\n"+
+			"2026/09/30 08:00:06 scheduled_maintenance: hm: running gc\n"+
+			"2026/09/30 08:00:07 scheduled_slings: beads: slung 1 bead\n"+
+			"2026/09/30 08:00:08 wisp_reaper: gastown: reaped 4 wisp(s)\n")
+	s := &daemonSource{dir: dir, cutoff: at("2026-09-30T12:00:00Z"), loc: tailTestLoc, now: fixedNow, rigs: loadTailRigs(townRoot)}
+	want := []string{
+		"gastown daemon patrol_scan: gastown: checked 8 polecat(s)",
+		"om daemon steward: om: mixing the work blend",
+		"hm daemon rig_worker: hm: starting on hm/quartz",
+		"beads daemon compactor_dog: beads: compacted 3 convoy(s)",
+		"gastown daemon git_hygiene: gastown: pruned 2 worktree(s)",
+		"om daemon jsonl_git_backup: om: pushed refs/dolt/data",
+		"hm daemon scheduled_maintenance: hm: running gc",
+		"beads daemon scheduled_slings: beads: slung 1 bead",
+		"gastown daemon wisp_reaper: gastown: reaped 4 wisp(s)",
+	}
+	if got := texts(s.Poll()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("labeled = %q\nwant %q", got, want)
+	}
+}
+
+// TestDaemonSource_TownWideLineOfAPerRigComponentStaysTown: the same
+// components also log town-wide lines, whose second token is not a rig; they
+// stay "town" rather than taking the nearest rig name they mention.
+func TestDaemonSource_TownWideLineOfAPerRigComponentStaysTown(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeTailRoutes(t, townRoot)
+	dir := filepath.Join(townRoot, "daemon")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	appendFile(t, filepath.Join(dir, "daemon.log"),
+		"2026/09/30 08:00:00 jsonl_git_backup: not due - last run 5m0s ago\n"+
+			"2026/09/30 08:00:01 patrol_scan: no rigs to scan\n"+
+			"2026/09/30 08:00:02 steward: work blend is off\n"+
+			"2026/09/30 08:00:03 rig_worker: nothing ready to work\n")
+	s := &daemonSource{dir: dir, cutoff: at("2026-09-30T12:00:00Z"), loc: tailTestLoc, now: fixedNow, rigs: loadTailRigs(townRoot)}
+	want := []string{
+		"town daemon jsonl_git_backup: not due - last run 5m0s ago",
+		"town daemon patrol_scan: no rigs to scan",
+		"town daemon steward: work blend is off",
+		"town daemon rig_worker: nothing ready to work",
+	}
+	if got := texts(s.Poll()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("town-wide = %q\nwant %q", got, want)
+	}
+}
+
 // TestDaemonSource_NoRoutesLeavesEveryLineTown: a town with no routes file (or
 // an unreadable one) cannot place a line, so nothing is labelled on a guess.
 func TestDaemonSource_NoRoutesLeavesEveryLineTown(t *testing.T) {

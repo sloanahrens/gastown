@@ -1030,29 +1030,29 @@ func loadTailRigs(townRoot string) *tailRigs {
 // line returns the rig a daemon.log line belongs to, or "town" for the town's
 // own lines. A nil table (a source built without one) places nothing.
 //
-// The daemon names the rig on a line it writes for one rig —
-// "landing_worker: gastown: pass: 1 landed", "tier_sweep: om: swept ...". A
-// "[land] <bead>: ..." line names no rig: it carries only the bead, so its rig
-// comes from the bead's prefix. Everything else the daemon logs — enabled,
-// upgrade-restart, townhealth, dispatcher ticks — is town-wide.
+// A per-rig component names its rig first — "patrol_scan: gastown: checked 8
+// polecat(s)", "landing_worker: om: pass: 1 landed" — so the leading
+// "<component>: " is read off and the token after it looked up in the table.
+// The component is no list to keep: what makes a line per-rig is that its
+// second token is a rig the town routes to, and a town-wide line of any
+// component ("jsonl_git_backup: not due: last run 5m0s ago") stays "town".
+// A "[land] <bead>: ..." line names no rig at all: it carries only the bead,
+// so its rig comes from the bead's prefix. Everything else the daemon logs —
+// enabled, upgrade-restart, townhealth, dispatcher ticks — is town-wide.
 func (r *tailRigs) line(text string) string {
 	if r == nil {
 		return "town"
 	}
-	if rest, ok := strings.CutPrefix(text, "landing_worker: "); ok {
-		if rig := r.leadingRig(rest); rig != "" {
-			return rig
-		}
-		if rest, ok := strings.CutPrefix(rest, "[land] "); ok {
-			if bead, _, ok := strings.Cut(rest, ":"); ok {
-				return r.bead(bead)
-			}
-		}
-		return "town"
+	rest := text
+	if _, after, ok := strings.Cut(text, ": "); ok {
+		rest = after
 	}
-	if rest, ok := strings.CutPrefix(text, "tier_sweep: "); ok {
-		if rig := r.leadingRig(rest); rig != "" {
-			return rig
+	if rig := r.leadingRig(rest); rig != "" {
+		return rig
+	}
+	if rest, ok := strings.CutPrefix(rest, "[land] "); ok {
+		if bead, _, ok := strings.Cut(rest, ":"); ok {
+			return r.bead(bead)
 		}
 	}
 	return "town"
