@@ -335,6 +335,57 @@ func CloseBlockReason(issue *beads.Issue) string {
 	return ""
 }
 
+// The verdict words of a shadow-mode landing record's CI fields: what the
+// Forgejo candidate gate reported on the candidate, recorded beside the local
+// gate's gate_result so the flip/no-flip call reads a pair (slice 8). They are
+// the contract of the landings file's ci_verdict key.
+const (
+	// CIVerdictSuccess is the required context reporting success.
+	CIVerdictSuccess = "success"
+	// CIVerdictFailure is the required context reporting anything but
+	// success, on a run that judged the work.
+	CIVerdictFailure = "failure"
+	// CIVerdictNone is no verdict at all: nothing reported within the wait
+	// window, or the push, the workflow file or the API failed. Detail says
+	// which.
+	CIVerdictNone = "no-verdict"
+)
+
+// ciRecord is a landing record's CI fields: one candidate result rendered for
+// the ci_* keys. ok is false when no candidate gate ran, the only case that
+// writes none of them.
+type ciRecord struct {
+	// Context is the required commit status polled, e.g. "ci / gate (push)".
+	Context string
+	// Verdict is CIVerdictSuccess, CIVerdictFailure or CIVerdictNone.
+	Verdict string
+	// Detail is the failing run's status, or why no verdict was reached.
+	Detail string
+}
+
+// ciRecordOf renders c for the landing record. A result carrying Err never
+// reached a verdict, whatever State says (candidate.go, "A result carrying Err
+// is infrastructure whatever State says"), so it records as CIVerdictNone with
+// the reason.
+func ciRecordOf(c *CandidateResult) (ciRecord, bool) {
+	if c == nil {
+		return ciRecord{}, false
+	}
+	rec := ciRecord{Context: NoteField(c.Context), Detail: NoteField(c.RunStatus)}
+	switch {
+	case c.Err != nil:
+		rec.Verdict = CIVerdictNone
+		rec.Detail = NoteField(elideMiddle(c.Err.Error(), reviewErrorReasonMax))
+	case c.State == CandidatePassed:
+		rec.Verdict = CIVerdictSuccess
+	case c.State == CandidateFailed:
+		rec.Verdict = CIVerdictFailure
+	default:
+		rec.Verdict = CIVerdictNone
+	}
+	return rec, true
+}
+
 // LandingRecord is the durable record of one landing. It is written to the
 // rig's landings file as JSON and to the work bead as a LANDING RECORD notes
 // block (until be-u20 gives beads a typed landing verb).
@@ -358,13 +409,29 @@ type LandingRecord struct {
 	// carries gt:overseer-review-wanted (gt-vsct7.4). Empty on a landing that
 	// touched nothing on the list.
 	RiskPaths []string `json:"risk_paths,omitempty"`
+	// The CI fields are the Forgejo candidate gate's verdict on this landing,
+	// written only in shadow mode beside the local gate's GateResult: the
+	// paired verdicts the flip/no-flip call reads (slice 8). CIContext is the
+	// required commit status polled, CIVerdict is one of the CIVerdict* words,
+	// and CIDetail is the failing run's status or why no verdict was reached.
+	// All three are empty on a landing that ran no candidate gate.
+	CIContext string `json:"ci_context,omitempty"`
+	CIVerdict string `json:"ci_verdict,omitempty"`
+	CIDetail  string `json:"ci_detail,omitempty"`
 }
 
 // NoteBlock is the LANDING RECORD block Land appends to the work bead.
 func (r LandingRecord) NoteBlock() string {
-	return fmt.Sprintf("%s\nlanded_commit: %s\npatch_id: %s\ntarget: %s\nbase: %s\nbranch: %s\nhead: %s\ngate_result: %s\nom_verdict: %s\nom_score: %.4f\nroute: %s\nlanded_at: %s",
+	note := fmt.Sprintf("%s\nlanded_commit: %s\npatch_id: %s\ntarget: %s\nbase: %s\nbranch: %s\nhead: %s\ngate_result: %s\nom_verdict: %s\nom_score: %.4f\nroute: %s\nlanded_at: %s",
 		LandingNoteMarker, r.LandedCommit, r.PatchID, NoteField(r.Target), r.Base, NoteField(r.Branch), r.Head,
 		NoteField(r.GateResult), NoteField(r.OMVerdict), r.OMScore, NoteField(r.Route), r.LandedAt.UTC().Format(time.RFC3339))
+	if r.CIVerdict != "" {
+		note += fmt.Sprintf("\nci_context: %s\nci_verdict: %s", NoteField(r.CIContext), NoteField(r.CIVerdict))
+		if r.CIDetail != "" {
+			note += "\nci_detail: " + NoteField(r.CIDetail)
+		}
+	}
+	return note
 }
 
 // CloseReason is the work bead's close reason. target_branch and commit_sha

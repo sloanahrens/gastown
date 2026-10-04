@@ -261,10 +261,17 @@ func TestForgejoConfigAccessors(t *testing.T) {
 	if got := unset.GateWorkflowName(); got != DefaultGateWorkflow {
 		t.Errorf("unset GateWorkflowName() = %q, want %q", got, DefaultGateWorkflow)
 	}
+	if absent.ShadowMode() || unset.ShadowMode() {
+		t.Error("ShadowMode() = true without a shadow flag; want the flipped rig by default")
+	}
 
 	full := &ForgejoConfig{
 		GateWorkflow: "heavy",
 		Bots:         map[string]string{ForgejoRoleRegistry: "gt-registry"},
+		Shadow:       true,
+	}
+	if !full.ShadowMode() {
+		t.Error("ShadowMode() = false with shadow set")
 	}
 	if got := full.GateWorkflowName(); got != "heavy" {
 		t.Errorf("GateWorkflowName() = %q, want heavy", got)
@@ -286,7 +293,8 @@ func TestForgejoConfigDecodesItsKeys(t *testing.T) {
 		"remote_url": "https://forgejo.example/gastown/gastown",
 		"gate_workflow": "gate",
 		"bots": {"polecat": "gt-polecat", "landing": "gt-landing", "registry": "gt-registry"},
-		"mirror_target": "git@github.com:sloanahrens/gastown.git"
+		"mirror_target": "git@github.com:sloanahrens/gastown.git",
+		"shadow": true
 	}`
 	var mq MergeQueueConfig
 	if err := json.Unmarshal([]byte(`{"forgejo":`+body+`}`), &mq); err != nil {
@@ -306,5 +314,8 @@ func TestForgejoConfigDecodesItsKeys(t *testing.T) {
 	}
 	if mq.Forgejo.MirrorTarget != "git@github.com:sloanahrens/gastown.git" {
 		t.Errorf("MirrorTarget = %q", mq.Forgejo.MirrorTarget)
+	}
+	if !mq.Forgejo.ShadowMode() {
+		t.Error("shadow = false, want the decoded shadow flag")
 	}
 }

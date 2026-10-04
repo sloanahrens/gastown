@@ -214,3 +214,65 @@ func TestParseRejectionNoteIgnoresMarkersInsideLines(t *testing.T) {
 		t.Errorf("finding title = %q", got.Findings[0].Title)
 	}
 }
+
+// TestLandingRecordNoteCarriesTheCIVerdict: a shadow landing's note carries the
+// Forgejo verdict beside the local gate's, and a landing that ran no candidate
+// gate writes none of the CI lines (slice 8).
+func TestLandingRecordNoteCarriesTheCIVerdict(t *testing.T) {
+	t.Parallel()
+	shadow := LandingRecord{BeadID: "gt-x", Target: "main", LandedCommit: "c0ffee", GateResult: "pass",
+		Route: "daemon", LandedAt: time.Date(2026, 9, 30, 1, 2, 3, 0, time.UTC),
+		CIContext: "ci / gate (push)", CIVerdict: CIVerdictFailure, CIDetail: "failure"}
+	note := shadow.NoteBlock()
+	for _, want := range []string{"ci_context: ci / gate (push)", "ci_verdict: failure", "ci_detail: failure"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("note lacks %q:\n%s", want, note)
+		}
+	}
+	plain := LandingRecord{BeadID: "gt-x", Target: "main", LandedCommit: "c0ffee", GateResult: "pass", Route: "daemon"}
+	if got := plain.NoteBlock(); strings.Contains(got, "ci_") {
+		t.Errorf("a landing with no candidate gate wrote CI lines:\n%s", got)
+	}
+	// A success has no failing run to name, so it writes no detail line.
+	passthrough := shadow
+	passthrough.CIVerdict, passthrough.CIDetail = CIVerdictSuccess, ""
+	if got := passthrough.NoteBlock(); strings.Contains(got, "ci_detail:") {
+		t.Errorf("a passing CI verdict wrote a detail line:\n%s", got)
+	}
+}
+
+// TestCIRecordOf pins the candidate result to the record's CI fields: a result
+// that reached no verdict records as CIVerdictNone whatever its state says,
+// because Err is what makes it infrastructure.
+func TestCIRecordOf(t *testing.T) {
+	t.Parallel()
+	if _, ok := ciRecordOf(nil); ok {
+		t.Error("ciRecordOf(nil) reported a record; want none for a landing with no candidate gate")
+	}
+	cases := []struct {
+		name string
+		res  CandidateResult
+		want ciRecord
+	}{
+		{"pass", CandidateResult{State: CandidatePassed, Context: "ci / gate (push)", RunStatus: "success"},
+			ciRecord{Context: "ci / gate (push)", Verdict: CIVerdictSuccess, Detail: "success"}},
+		{"red", CandidateResult{State: CandidateFailed, Context: "ci / gate (push)", RunStatus: "failure"},
+			ciRecord{Context: "ci / gate (push)", Verdict: CIVerdictFailure, Detail: "failure"}},
+		{"red of a cancelled run", CandidateResult{State: CandidateFailed, Context: "ci / gate (push)", RunStatus: "cancelled"},
+			ciRecord{Context: "ci / gate (push)", Verdict: CIVerdictFailure, Detail: "cancelled"}},
+		{"silence", CandidateResult{State: CandidateSilent, Context: "ci / gate (push)", Err: ErrCISilence},
+			ciRecord{Context: "ci / gate (push)", Verdict: CIVerdictNone, Detail: ErrCISilence.Error()}},
+		{"a push that never landed", CandidateResult{State: CandidatePassed, Context: "ci / gate (push)", Err: errors.New("pushing the candidate land/gt-x: denied")},
+			ciRecord{Context: "ci / gate (push)", Verdict: CIVerdictNone, Detail: "pushing the candidate land/gt-x: denied"}},
+	}
+	for _, tc := range cases {
+		got, ok := ciRecordOf(&tc.res)
+		if !ok {
+			t.Errorf("%s: ciRecordOf reported no record", tc.name)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%s: ciRecordOf = %+v, want %+v", tc.name, got, tc.want)
+		}
+	}
+}

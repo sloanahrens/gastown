@@ -656,6 +656,58 @@ func TestNewRigLandingWorker_WiresTheForgejoLanding(t *testing.T) {
 	}
 }
 
+// shadowForgejoRigConfig is forgejoRigConfig with the rig in shadow mode: the
+// pre-flip half of the rollout, where the candidate is pushed and its verdict
+// recorded but the local gate still decides (slice 8).
+func shadowForgejoRigConfig(t *testing.T, townRoot, rigName string) string {
+	t.Helper()
+	rigPath := filepath.Join(townRoot, rigName)
+	if err := os.MkdirAll(filepath.Join(rigPath, ".repo.git"), 0o755); err != nil {
+		t.Fatalf("mkdir .repo.git: %v", err)
+	}
+	writeDaemonRigConfigFile(t, rigPath, `{"type":"rig","version":1,"name":"`+rigName+`","default_branch":"main",
+		"merge_queue":{"forgejo":{"remote_url":"https://forgejo.example/gastown/gastown.git","gate_workflow":"gate","shadow":true,"bots":{"landing":"gt-landing"}}}}`)
+	return rigPath
+}
+
+// TestNewRigLandingWorker_WiresShadowMode: a rig in shadow mode still builds
+// the candidate gate — its verdict is what the record pairs with the local
+// gate's — but keeps the local gate as the decider and the force-push as the
+// writer, so no PR merger is built (slice 8).
+func TestNewRigLandingWorker_WiresShadowMode(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	const rigName = "testrig"
+	shadowForgejoRigConfig(t, townRoot, rigName)
+
+	tokenDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tokenDir, "forgejo-landing.env"), []byte("FORGEJO_TOKEN=secret\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+
+	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: notifyfake.New(),
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{LandingWorker: &LandingWorkerConfig{
+			Forgejo: &config.ForgejoWorkerConfig{TokenDir: tokenDir}}}}}
+
+	w, err := d.newRigLandingWorker(rigName)
+	if err != nil {
+		t.Fatalf("newRigLandingWorker: %v", err)
+	}
+	lander, ok := w.Lander.(*land.Lander)
+	if !ok {
+		t.Fatalf("Lander = %T, want *land.Lander", w.Lander)
+	}
+	if _, ok := lander.Candidate.(*land.CandidateGate); !ok {
+		t.Fatalf("Candidate = %T; want the rig's Forgejo gate even in shadow mode", lander.Candidate)
+	}
+	if !lander.Shadow {
+		t.Error("Shadow = false; want the rig in shadow mode")
+	}
+	if lander.Merger != nil {
+		t.Fatalf("Merger = %T; want none: a shadow rig has not cut over and still force-pushes the target", lander.Merger)
+	}
+}
+
 // TestNewRigLandingWorker_NoForgejoConfigKeepsTheLocalGate: a rig with no
 // forgejo block keeps landing through the local gate, which is every rig
 // until a cutover adds one.

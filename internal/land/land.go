@@ -90,6 +90,13 @@ type Lander struct {
 	// built and unused on such a rig, because shadow mode runs both (slice 8).
 	Gate      Gate
 	Candidate Candidate
+	// Shadow, beside a Candidate, keeps the local Gate as the decider: the
+	// candidate is still pushed and its verdict recorded, but a red or silent
+	// verdict never rejects, delays or mis-records the landing, and the record
+	// carries both verdicts so the flip/no-flip call has evidence (slice 8).
+	// Set only for a rig in the rollout's shadow mode; meaningless without
+	// Candidate, which is the gate that produces the paired verdict.
+	Shadow bool
 	// Merger, when set, lands the merged tree through a Forgejo pull request
 	// instead of the local force-push: it posts om's verdict, opens
 	// land/<bead> -> the target and merges it pinned to the candidate commit.
@@ -160,6 +167,11 @@ type Result struct {
 	// rerun of the failed packages passed.
 	Rerun *GateResult
 	Flaky []Flake
+	// CI is the Forgejo candidate gate's verdict, set only in shadow mode:
+	// Gate is then the local gate that decided, and this is the paired verdict
+	// the flip/no-flip call reads. Nil on a rig with no candidate gate, and on
+	// a flipped rig, where the candidate verdict is Gate.
+	CI *CandidateResult
 }
 
 // RejectionKind says what about the work stopped it from landing.
@@ -287,21 +299,71 @@ const (
 	StageOM   = "om"
 )
 
-// gateStage is the stage the gate takes: the candidate gate when one is
-// configured, else the local gate.
-func (l *Lander) gateStage() string {
-	if l.Candidate != nil {
-		return StageCI
-	}
-	return StageGate
-}
-
 // gatePlan names the gate the landing is about to run, for its log line.
 func (l *Lander) gatePlan() string {
-	if l.Candidate != nil {
+	switch {
+	case l.Candidate != nil && l.Shadow:
+		return "pushing the merge candidate for its CI verdict, then gating the merged tree"
+	case l.Candidate != nil:
 		return "pushing the merge candidate and waiting for its CI verdict"
+	default:
+		return "gating the merged tree"
 	}
-	return "gating the merged tree"
+}
+
+// gate runs the landing's gate phase. A rig with a candidate gate pushes the
+// merged tree as land/<bead> and its CI verdict decides; a shadow-mode rig
+// runs both, the candidate for a verdict and the local gate to decide
+// (slice 8); every other rig runs the local gate alone.
+//
+// The returned CandidateResult is the CI half of a shadow landing's record,
+// nil otherwise. The error is the deciding gate's infrastructure failure —
+// no verdict — and never a red gate, which is a Result the caller rejects.
+//
+// A shadow landing runs both stages within one pass, so their budgets add:
+// DefaultCandidateWaitTimeout is the wait the candidate may take and the
+// local gate's own timeout follows it, both inside the worker's land timeout.
+func (l *Lander) gate(ctx context.Context, wt Repo, dir string, w Work, merged string) (GateResult, error, *CandidateResult) {
+	if l.Candidate == nil {
+		l.stage(w, StageGate)
+		gateCtx, gateDone := l.Slow.watch(ctx, l, w, dir, StageGate)
+		defer gateDone()
+		return l.Gate.Run(gateCtx, dir), nil, nil
+	}
+	w.CandidateBranch, w.CandidateHead = w.Candidate(), merged
+	if l.Shadow {
+		l.stage(w, StageCI)
+		ciCtx, ciDone := l.Slow.watch(ctx, l, w, dir, StageCI)
+		ci := l.Candidate.Run(ciCtx, wt, dir, w, merged)
+		ciDone()
+		l.logf("%s: shadow: %s on the candidate %s (%s) is %s; the local gate decides",
+			w.BeadID, ci.Context, shortSHA(ci.SHA), ci.Branch, shadowVerdict(ci))
+		l.stage(w, StageGate)
+		gateCtx, gateDone := l.Slow.watch(ctx, l, w, dir, StageGate)
+		defer gateDone()
+		return l.Gate.Run(gateCtx, dir), nil, &ci
+	}
+	l.stage(w, StageCI)
+	gateCtx, gateDone := l.Slow.watch(ctx, l, w, dir, StageCI)
+	defer gateDone()
+	gateRes, err := l.candidateGate(gateCtx, wt, dir, w, merged)
+	return gateRes, err, nil
+}
+
+// shadowVerdict is a candidate result's verdict or its no-verdict reason, for
+// the one-line shadow log.
+func shadowVerdict(c CandidateResult) string {
+	if c.Err != nil {
+		return fmt.Sprintf("no verdict (%v)", c.Err)
+	}
+	switch c.State {
+	case CandidatePassed:
+		return CIVerdictSuccess
+	case CandidateFailed:
+		return CIVerdictFailure
+	default:
+		return CIVerdictNone
+	}
 }
 
 // candidateGate runs the Forgejo gate in place of the local one and renders
@@ -619,23 +681,11 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	// The gate's stages (lint, then tests) run in order, and om only after
 	// they pass: om is the costly stage, and work that fails lint or tests
 	// never pays for it (gt-b5ugw).
-	l.stage(w, l.gateStage())
-	gateCtx, gateDone := l.Slow.watch(ctx, l, w, dir, l.gateStage())
-	var (
-		gateRes GateResult
-		gateErr error
-	)
-	if l.Candidate != nil {
-		w.CandidateBranch, w.CandidateHead = w.Candidate(), merged
-		gateRes, gateErr = l.candidateGate(gateCtx, wt, dir, w, merged)
-	} else {
-		gateRes = l.Gate.Run(gateCtx, dir)
-	}
-	gateDone()
+	gateRes, gateErr, ciRes := l.gate(ctx, wt, dir, w, merged)
 	if gateErr != nil {
 		return Result{}, gateErr
 	}
-	res := Result{LandedCommit: merged, PatchID: patchID, Base: base, Gate: gateRes, RiskPaths: riskPaths}
+	res := Result{LandedCommit: merged, PatchID: patchID, Base: base, Gate: gateRes, RiskPaths: riskPaths, CI: ciRes}
 	if step, ok := gateRes.TimedOutStep(); ok && ctx.Err() == nil {
 		l.logf("%s: %s", w.BeadID, stageTimes(gateRes, 0, false))
 		if step.Name == "lint" {
@@ -661,7 +711,10 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		}
 		if len(fv.flakes) == 0 {
 			reason, tail := "gate failed on the merged tree: "+gateRes.Summary(), gateRes.FailureTail()
-			if l.Candidate != nil && len(gateRes.Steps) > 0 {
+			// On a flipped rig the gate is the candidate's CI verdict, so name
+			// the context that failed. A shadow landing's gate is the local one
+			// and reads as it always did, whatever CI said.
+			if l.Candidate != nil && !l.Shadow && len(gateRes.Steps) > 0 {
 				reason = fmt.Sprintf("the candidate gate %s failed on the merged tree", gateRes.Steps[0].Command)
 			}
 			if fv.rerun != nil {
@@ -731,12 +784,13 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		return Result{}, &InfraError{Stage: "push", Err: err}
 	}
 
-	if l.Merger != nil {
+	if l.Merger != nil && !l.Shadow {
 		// A cut-over rig lands through Forgejo: the om status is posted and the
 		// PR merged with head_commit_id, so a candidate that moved after the
 		// verdict cannot land on it (design, "The PR, the merge and the forgery
 		// check"). The merge is a fast-forward, so the target's tip is the
-		// candidate commit the read-back checks.
+		// candidate commit the read-back checks. A shadow rig has not cut over,
+		// so it never takes this path however the two are configured.
 		if err := l.Merger.Merge(ctx, w, merged, verdict); err != nil {
 			var refused *MergeRefusedError
 			if errors.As(err, &refused) {
@@ -1215,6 +1269,9 @@ func (l *Lander) record(w Work, res Result) error {
 		LandedCommit: res.LandedCommit, PatchID: res.PatchID,
 		GateResult: gateRecord(res), OMVerdict: res.Verdict.Verdict, OMScore: res.Verdict.Score,
 		Route: route, LandedAt: l.now().UTC(), RiskPaths: res.RiskPaths,
+	}
+	if ci, ok := ciRecordOf(res.CI); ok {
+		rec.CIContext, rec.CIVerdict, rec.CIDetail = ci.Context, ci.Verdict, ci.Detail
 	}
 	if err := l.Landings.Append(rec); err != nil {
 		return fmt.Errorf("landings file: %w", err)

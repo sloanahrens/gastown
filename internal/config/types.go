@@ -1149,6 +1149,15 @@ type ForgejoConfig struct {
 	// question 1 of the design). Empty means DefaultGateWorkflow.
 	GateWorkflow string `json:"gate_workflow,omitempty"`
 
+	// Shadow is the rig's shadow-mode flag, the pre-flip half of the rollout
+	// (slice 8): the landing worker still pushes the candidate and records
+	// the Forgejo verdict, but the local gate still decides, and both
+	// verdicts land in the landing record so the flip/no-flip call has
+	// evidence. False (the zero value) is the flipped rig, where the
+	// candidate verdict decides — the state a rig reaches after about ten
+	// matching shadow landings.
+	Shadow bool `json:"shadow,omitempty"`
+
 	// Bots maps a bot role (ForgejoRolePolecat, ForgejoRoleLanding,
 	// ForgejoRoleRegistry, ForgejoRoleViewer) to that role's Forgejo login.
 	// The key is the role, which is what the token filename carries; the
@@ -1167,6 +1176,12 @@ func (c *ForgejoConfig) GateWorkflowName() string {
 		return DefaultGateWorkflow
 	}
 	return c.GateWorkflow
+}
+
+// ShadowMode reports whether the rig is in shadow mode. Nil-safe: a rig with
+// no forgejo block is not in it.
+func (c *ForgejoConfig) ShadowMode() bool {
+	return c != nil && c.Shadow
 }
 
 // BotLogin returns the login configured for a bot role, or "" when the role

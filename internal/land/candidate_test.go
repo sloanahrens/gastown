@@ -2,6 +2,7 @@ package land
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -519,4 +520,166 @@ func TestLandCandidateSilenceIsInfrastructure(t *testing.T) {
 		t.Fatalf("stage = %q, want %q", infra.Stage, StageCI)
 	}
 	f.assertUntouched(t)
+}
+
+// shadowLandingRecord is the one landing record f's file holds.
+func shadowLandingRecord(t *testing.T, f *landFixture) LandingRecord {
+	t.Helper()
+	lines := f.landingLines()
+	if len(lines) != 1 {
+		t.Fatalf("landings file has %d records, want one", len(lines))
+	}
+	var rec LandingRecord
+	if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
+		t.Fatalf("unmarshal landing record: %v", err)
+	}
+	return rec
+}
+
+// TestLandShadowModeRecordsBothVerdicts: a shadow-mode rig pushes the candidate
+// and records the Forgejo verdict, but the local gate decides and the
+// force-push still writes the target, so the record carries the pair the
+// flip/no-flip call reads (slice 8).
+func TestLandShadowModeRecordsBothVerdicts(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	l := f.lander()
+	cand := &fakeCandidate{res: CandidateResult{State: CandidatePassed, Context: "ci / gate (push)", RunStatus: "success"}}
+	l.Candidate = cand
+	l.Shadow = true
+
+	res, err := l.Land(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	if len(cand.calls) != 1 {
+		t.Fatalf("the candidate gate ran %d time(s), want once", len(cand.calls))
+	}
+	if got := cand.calls[0].CandidateBranch; got != "land/gt-abc" {
+		t.Fatalf("candidate branch = %q, want land/gt-abc", got)
+	}
+	if len(f.gate.dirs) != 1 {
+		t.Fatalf("the local gate ran %d time(s), want once: shadow mode lands on it", len(f.gate.dirs))
+	}
+	if got := f.originMain(); got != res.LandedCommit {
+		t.Fatalf("origin/main = %s, want the landed %s: a shadow rig writes the target by force-push", got, res.LandedCommit)
+	}
+	if res.CI == nil || res.CI.State != CandidatePassed || res.CI.Context != "ci / gate (push)" {
+		t.Fatalf("Result.CI = %+v; want the candidate's verdict", res.CI)
+	}
+	rec := shadowLandingRecord(t, f)
+	if rec.CIContext != "ci / gate (push)" || rec.CIVerdict != CIVerdictSuccess || rec.CIDetail != "success" {
+		t.Fatalf("record ci fields = %q/%q/%q; want the candidate's success", rec.CIContext, rec.CIVerdict, rec.CIDetail)
+	}
+	if rec.GateResult == "" {
+		t.Fatal("record carries no local gate result beside the CI verdict")
+	}
+	for _, want := range []string{"ci_context: ci / gate (push)", "ci_verdict: success"} {
+		if !strings.Contains(f.bead().Notes, want) {
+			t.Errorf("bead note lacks %q:\n%s", want, f.bead().Notes)
+		}
+	}
+}
+
+// TestLandShadowModeLandsOnTheLocalGateNotCI: a red Forgejo verdict is not a
+// verdict on the work in shadow mode; the local gate that passed lands it, and
+// the disagreement lands in the record.
+func TestLandShadowModeLandsOnTheLocalGateNotCI(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	l := f.lander()
+	l.Candidate = &fakeCandidate{res: CandidateResult{
+		State: CandidateFailed, Context: "ci / gate (push)", RunStatus: "failure", Tail: "--- FAIL: TestThing\n"}}
+	l.Shadow = true
+
+	res, err := l.Land(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	if res.Gate.Passed != true {
+		t.Fatalf("result gate = %+v; want the local gate's pass", res.Gate)
+	}
+	if got := f.originMain(); got != res.LandedCommit {
+		t.Fatalf("origin/main = %s, want the landed %s", got, res.LandedCommit)
+	}
+	rec := shadowLandingRecord(t, f)
+	if rec.CIVerdict != CIVerdictFailure || rec.CIDetail != "failure" {
+		t.Fatalf("record ci fields = %q/%q; want the candidate's failure recorded beside the local pass", rec.CIVerdict, rec.CIDetail)
+	}
+}
+
+// TestLandShadowModeReworksForTheLocalGate: a red local gate is the rework,
+// and its reason reads as the merged tree's failure, never as the candidate
+// context's.
+func TestLandShadowModeReworksForTheLocalGate(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	l := f.lander()
+	l.Candidate = &fakeCandidate{res: CandidateResult{State: CandidatePassed, Context: "ci / gate (push)"}}
+	l.Shadow = true
+	f.gate.fn = func(string) GateResult {
+		return GateResult{Steps: []StepResult{{Name: "test", Command: "make gate", ExitCode: 1, Tail: "local red"}}}
+	}
+
+	_, err := l.Land(context.Background(), f.work)
+	rej := f.assertRejected(t, err, RejectGate, LabelRework)
+	if strings.Contains(rej.Reason, "ci / gate (push)") {
+		t.Fatalf("reason %q blames the candidate context for the local gate's red", rej.Reason)
+	}
+	if !strings.Contains(f.bead().Notes, "local red") {
+		t.Fatalf("rejection note carries no local gate tail:\n%s", f.bead().Notes)
+	}
+}
+
+// TestLandShadowModeSilenceIsRecordedNotFatal: CI reporting nothing is
+// evidence the flip decision wants, not infrastructure the local gate's
+// landing pays for.
+func TestLandShadowModeSilenceIsRecordedNotFatal(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	l := f.lander()
+	l.Candidate = &fakeCandidate{res: CandidateResult{
+		State: CandidateSilent, Context: "ci / gate (push)", Err: ErrCISilence}}
+	l.Shadow = true
+
+	res, err := l.Land(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	if len(f.gate.dirs) != 1 {
+		t.Fatalf("the local gate ran %d time(s), want once: a silent candidate does not stop the landing", len(f.gate.dirs))
+	}
+	rec := shadowLandingRecord(t, f)
+	if rec.CIVerdict != CIVerdictNone || !strings.Contains(rec.CIDetail, "no verdict") {
+		t.Fatalf("record ci fields = %q/%q; want the silence recorded as no verdict", rec.CIVerdict, rec.CIDetail)
+	}
+	if got := f.originMain(); got != res.LandedCommit {
+		t.Fatalf("origin/main = %s, want the landed %s", got, res.LandedCommit)
+	}
+}
+
+// TestLandShadowModeNeverMergesThroughThePR: a rig that has not cut over must
+// not write the target through Forgejo, whatever the two are configured with.
+func TestLandShadowModeNeverMergesThroughThePR(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	l := f.lander()
+	l.Candidate = &fakeCandidate{res: CandidateResult{State: CandidatePassed, Context: "ci / gate (push)"}}
+	l.Shadow = true
+	merger := &fakeMerger{fn: func(_ Work, head string, _ Verdict) error {
+		f.git.SetRef(t, f.origin, "refs/heads/main", head)
+		return nil
+	}}
+	l.Merger = merger
+
+	res, err := l.Land(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	if len(merger.calls) != 0 {
+		t.Fatalf("the PR merge ran %d time(s) on a shadow rig, want none", len(merger.calls))
+	}
+	if got := f.originMain(); got != res.LandedCommit {
+		t.Fatalf("origin/main = %s, want the landed %s", got, res.LandedCommit)
+	}
 }

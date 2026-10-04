@@ -42,6 +42,35 @@ func TestRecord_MatchesD2LandFields(t *testing.T) {
 	}
 }
 
+// shadowLine is a landing the worker records in shadow mode (slice 8): the
+// same record with the Forgejo candidate gate's verdict beside the local
+// gate's.
+const shadowLine = `{"bead":"gt-abc","rig":"gastown","branch":"polecat/opal/gt-abc","head":"1111111111111111111111111111111111111111","target":"main","base":"2222222222222222222222222222222222222222","landed_commit":"3333333333333333333333333333333333333333","patch_id":"4444444444444444444444444444444444444444","gate_result":"pass","om_verdict":"approve","om_score":0.92,"route":"worker","landed_at":"2026-09-30T14:05:06Z","ci_context":"ci / gate (push)","ci_verdict":"success","ci_detail":"success"}`
+
+// TestRecord_MatchesTheShadowLandFields pins the shadow record's keys: the
+// reader must read every key the writer writes, the ci_* fields included, or
+// the flip/no-flip evidence goes missing behind a silent unmarshal.
+func TestRecord_MatchesTheShadowLandFields(t *testing.T) {
+	t.Parallel()
+	var rec Record
+	if err := json.Unmarshal([]byte(shadowLine), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec.CIContext != "ci / gate (push)" || rec.CIVerdict != "success" || rec.CIDetail != "success" {
+		t.Fatalf("ci fields = %q/%q/%q, want the writer's values", rec.CIContext, rec.CIVerdict, rec.CIDetail)
+	}
+	if rec.GateResult != "pass" {
+		t.Fatalf("gate_result = %q, want the local gate's verdict beside the CI one", rec.GateResult)
+	}
+	out, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keys(t, out) != keys(t, []byte(shadowLine)) {
+		t.Fatalf("key set drifted:\n got %s\nwant %s", keys(t, out), keys(t, []byte(shadowLine)))
+	}
+}
+
 func keys(t *testing.T, b []byte) string {
 	t.Helper()
 	var m map[string]json.RawMessage
