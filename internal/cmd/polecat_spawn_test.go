@@ -8,8 +8,6 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/polecat"
-	"github.com/steveyegge/gastown/internal/rig"
-	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // TestResolveSpawnBaseBranch guards gt-a8i3: resolveSpawnBaseBranch has no
@@ -124,8 +122,8 @@ func TestReuseIdlePolecatForSling_StopsOnHeldBranch(t *testing.T) {
 				polecat.ErrBranchHeld, branch)),
 	}
 
-	info, err := reuseIdlePolecatForSling(fake, tmux.NewTmux(), &rig.Rig{Name: "rig", Path: t.TempDir()},
-		t.TempDir(), "rig", SlingSpawnOptions{HookBead: "gt-next", ResumeBranch: branch}, func() {})
+	info, err := reuseIdlePolecatForSlingWith(fake, fakeIdleReuseEnv(), "rig",
+		SlingSpawnOptions{HookBead: "gt-next", ResumeBranch: branch}, func() {})
 
 	if err == nil {
 		t.Fatal("reuse refusal was swallowed and the sling continued to allocation; want the error")
@@ -151,8 +149,8 @@ func TestReuseIdlePolecatForSling_FallsBackOnRecoverableReuseFailure(t *testing.
 		reuseErr: fmt.Errorf("%w: uncommitted work in worktree", polecat.ErrPolecatNeedsRecovery),
 	}
 
-	info, err := reuseIdlePolecatForSling(fake, tmux.NewTmux(), &rig.Rig{Name: "rig", Path: t.TempDir()},
-		t.TempDir(), "rig", SlingSpawnOptions{HookBead: "gt-next"}, func() {})
+	info, err := reuseIdlePolecatForSlingWith(fake, fakeIdleReuseEnv(), "rig",
+		SlingSpawnOptions{HookBead: "gt-next"}, func() {})
 
 	if err != nil {
 		t.Fatalf("recoverable reuse failure aborted the sling: %v", err)
@@ -174,8 +172,7 @@ func TestReuseIdlePolecatForSling_NoIdlePolecat(t *testing.T) {
 		{"lookup failed", &idlePolecatReuseFake{findErr: errors.New("beads unavailable")}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			info, err := reuseIdlePolecatForSling(tt.fake, tmux.NewTmux(),
-				&rig.Rig{Name: "rig", Path: t.TempDir()}, t.TempDir(), "rig",
+			info, err := reuseIdlePolecatForSlingWith(tt.fake, fakeIdleReuseEnv(), "rig",
 				SlingSpawnOptions{HookBead: "gt-next"}, func() {})
 
 			if err != nil || info != nil {

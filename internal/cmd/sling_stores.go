@@ -82,6 +82,18 @@ func (s slingStores) children(townRoot, beadID string) ([]*beads.Issue, error) {
 	return s.pinnedAt(resolveBeadDirFromTownRoot(townRoot, beadID)).Children(beadID)
 }
 
+// comments reads beadID's comments the way show reads the bead: from the
+// database that owns it. Used to find the submission a rework bead came back
+// from (gt-lid6d).
+func (s slingStores) comments(townRoot, beadID string) ([]beads.Comment, error) {
+	if townRoot == "" {
+		if root, err := workspace.FindFromCwdOrError(); err == nil {
+			townRoot = root
+		}
+	}
+	return s.pinnedAt(resolveBeadDirFromTownRoot(townRoot, beadID)).Comments(beadID)
+}
+
 // beadInfo is show as the sling guards read it.
 func (s slingStores) beadInfo(townRoot, beadID string) (*beadInfo, error) {
 	issue, err := s.show(townRoot, beadID)
