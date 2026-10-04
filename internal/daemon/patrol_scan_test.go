@@ -126,8 +126,8 @@ func TestPatrolScanIsSubmittedMatchesPolecat(t *testing.T) {
 func TestPatrolScanOptionsUseDispatchHoldRule(t *testing.T) {
 	t.Parallel()
 	o := patrolScanOptions(nil, time.Now)
-	if why := o.HoldReason(patrolscan.Work{Status: "hooked", Labels: []string{"needs-mayor-review"}}); why == "" {
-		t.Error("needs-mayor-review work must read as held")
+	if why := o.HoldReason(patrolscan.Work{Status: "hooked", Labels: []string{"gt:needs-human"}}); why == "" {
+		t.Error("gt:needs-human work must read as held")
 	}
 	if why := o.HoldReason(patrolscan.Work{Status: "hooked"}); why != "" {
 		t.Errorf("plain hooked work read as held: %q", why)

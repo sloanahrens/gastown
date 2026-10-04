@@ -17,7 +17,10 @@ func TestValidateTarget(t *testing.T) {
 		{name: "empty target", target: "", wantErr: false},
 		{name: "self target", target: ".", wantErr: false},
 		{name: "bare rig name", target: "gastown", wantErr: false},
-		{name: "role shortcut mayor", target: "mayor", wantErr: false},
+		// A bare name is a rig name or a role shortcut, and the syntactic check
+		// does not judge it; a retired role name (the mayor, gt-rwp7z.11) is
+		// refused later, when no session resolves.
+		{name: "bare retired role name", target: "mayor", wantErr: false},
 		{name: "role shortcut deacon", target: "deacon", wantErr: false},
 		{name: "rig/polecats/name", target: "gastown/polecats/nux", wantErr: false},
 		{name: "rig/crew/name", target: "gastown/crew/burke", wantErr: false},
@@ -48,8 +51,16 @@ func TestValidateTarget(t *testing.T) {
 		// Invalid targets — too many segments
 		{name: "too many segments", target: "gastown/crew/burke/extra", wantErr: true, errMsg: "too many path segments"},
 
-		// Invalid targets — mayor sub-paths
-		{name: "mayor sub-agent", target: "mayor/something", wantErr: true, errMsg: "does not have sub-agents"},
+		// A two-segment path whose first segment is neither a role nor a rig is
+		// the <rig>/<name> shorthand the resolver tries against polecat and
+		// crew lookup. This check is syntactic and does not judge the rig name,
+		// a retired role name (gt-rwp7z.11) included: the resolver refuses the
+		// target when no session answers to it.
+		{name: "retired role sub-path is shorthand", target: "mayor/toast", wantErr: false},
+
+		// Invalid targets — a role that is not a rig has no role under it
+		// either, so a three-segment path names no known role (gt-rwp7z.11).
+		{name: "retired role sub-path", target: "mayor/something/more", wantErr: true, errMsg: "unknown role"},
 	}
 
 	for _, tc := range tests {

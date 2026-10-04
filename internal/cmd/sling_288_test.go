@@ -170,10 +170,10 @@ func TestAutoApplyLogic(t *testing.T) {
 			wantAutoApply: false,
 		},
 		{
-			name:          "mayor target - should not auto-apply",
+			name:          "town singleton target - should not auto-apply",
 			formulaName:   "",
 			hookRawBead:   false,
-			targetAgent:   "mayor",
+			targetAgent:   "deacon/",
 			wantAutoApply: false,
 		},
 	}

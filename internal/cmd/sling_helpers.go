@@ -716,7 +716,7 @@ func resolveSlingActor() string {
 // Rig-level agents use the rig's configured prefix (default "gt-").
 // townRoot is needed to look up the rig's configured prefix.
 func agentIDToBeadID(agentID, townRoot string) string {
-	// Normalize: strip trailing slash (resolveSelfTarget returns "mayor/" not "mayor")
+	// Normalize: strip a trailing slash, which a hand-typed address may carry
 	agentID = strings.TrimSuffix(agentID, "/")
 
 	// Parse path-style agent IDs
@@ -1158,9 +1158,9 @@ func (t *feederDispatchTally) result(kind, id string) error {
 }
 
 // orphanEpisodeLabels are the witness's cross-cycle memory for an orphaned
-// bead (mol-witness-patrol survey-workers step 5): the mayor was told its work
-// survives, the last survival answer was unknown, and that unknown run was
-// escalated. Each suppresses a repeat notice while present.
+// bead (mol-witness-patrol survey-workers step 5): the last holder was told
+// its work survives, the last survival answer was unknown, and that unknown
+// run was escalated. Each suppresses a repeat notice while present.
 var orphanEpisodeLabels = []string{"gt:preserved-orphan", "gt:survival-unknown", "gt:survival-escalated"}
 
 // clearOrphanEpisodeLabels removes the orphan-episode labels from a bead that

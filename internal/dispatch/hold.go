@@ -33,8 +33,8 @@ func HoldFilePath(townRoot string) string {
 // (gt-4k3fj.4); restarts and kills have theirs in internal/supervisor.
 //
 // Only automatic dispatchers consult it. An explicit `gt sling` typed by an
-// operator or the mayor is the decision the hold file defers to; an e-stop
-// refuses it too, in the sling path itself.
+// operator is the decision the hold file defers to; an e-stop refuses it too,
+// in the sling path itself.
 //
 // A hold path or ESTOP sentinel that cannot be stat'ed for any reason other
 // than not existing fails closed: the hold cannot be ruled out, and

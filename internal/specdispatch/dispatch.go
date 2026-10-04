@@ -24,15 +24,15 @@ const HostSafetyPrompt = "HOST SAFETY (spec dispatcher): any test of install or 
 // (dispatch.DispatchHoldFields). A hold this list does not name — the operator
 // label, gt:needs-human, a ruling in prose — still stops the dispatcher there,
 // and every label it does name Eligible would have refused anyway (gt-lxxo4).
-var excludedLabels = []string{"gt:ready-to-land", "needs-human", "needs-mayor-review", DispatchFailedLabel}
+var excludedLabels = []string{"gt:ready-to-land", "needs-human", DispatchFailedLabel}
 
 // ExcludedLabels returns the labels that keep a bead from the dispatcher.
 func ExcludedLabels() []string { return append([]string(nil), excludedLabels...) }
 
 // DispatchTypes are the bead types the dispatcher fills a seat with: the work
 // bead kinds. They are narrower than the ready board — a docs or chore bead is
-// real work, but it is the mayor's patrol that surfaces those, not the seat
-// filler (seat-refill's type whitelist, carried over with the plugin).
+// real work, but a seat filler takes only the work kinds (seat-refill's type
+// whitelist, carried over with the plugin).
 var dispatchTypes = []string{"task", "bug", "feature"}
 
 // IsDispatchType reports whether t names a bead type the dispatcher takes,
@@ -120,10 +120,10 @@ func Eligible(s Spec, maxPriority int, reserved []string) (bool, string) {
 	// The shared hold rule, over the bead's own fields. A decision recorded
 	// there — a routing label, gt:needs-human (the spelling internal/land
 	// writes, and the one excludedLabels never carried), the operator's
-	// reservation, or a MAYOR DESIGN DECISION / do-not-redispatch ruling in
-	// design or notes — takes the bead off every automatic dispatch path, so
-	// the dispatcher must not re-sling it (gt-lxxo4). Reading the rule here is
-	// what keeps the dispatcher's draw and the sling guard's the same line.
+	// reservation, or a do-not-redispatch ruling in design or notes — takes
+	// the bead off every automatic dispatch path, so the dispatcher must not
+	// re-sling it (gt-lxxo4). Reading the rule here is what keeps the
+	// dispatcher's draw and the sling guard's the same line.
 	// labels drops the seat-reserved ones, so a needs-pro bead reaches the pro
 	// seat instead of being held as the rule holds it for a dispatcher with no
 	// such seat.

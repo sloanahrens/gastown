@@ -171,16 +171,19 @@ func TestSessionToAgentID_Fallback(t *testing.T) {
 	}
 }
 
-// TestSessionToAgentID_TownLevel pins down GH#3699: the town-level mayor must
-// produce a trailing-slash address so writes from gt sling match
-// the form queried by gt hook / runMoleculeStatus / buildAgentIdentity.
+// TestSessionToAgentID_TownLevel pins the town-level session forms. A session
+// name converts to the identity's own address, with no trailing slash: GH#3699
+// made the retired mayor's address slashed, and the rule went with the role
+// (gt-rwp7z.11), so a leftover hq-mayor session name converts to the bare form
+// too.
 func TestSessionToAgentID_TownLevel(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		session string
 		want    string
 	}{
-		{"hq-mayor", "mayor/"},
+		{"hq-overseer", "overseer"},
+		{"hq-mayor", "mayor"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.session, func(t *testing.T) {

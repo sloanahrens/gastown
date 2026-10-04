@@ -13,8 +13,8 @@ which automatic path reads which marker.
 | `deferred`, `pinned` | status |
 | `operator` | label |
 | a person's handle (`sloan`, `Sloan Ahrens`, `overseer`) | assignee |
-| `needs-pro`, `needs-mayor-review`, `gt:needs-human` (or `needs-human`) | label |
-| `MAYOR DESIGN DECISION`, `do not redispatch` | design or notes |
+| `needs-pro`, `gt:needs-human` (or `needs-human`) | label |
+| `do not redispatch` | design or notes |
 
 The markers are machine-read, so write one exactly as listed. A label matches
 however it is typed (case-insensitive). A prose marker holds only where it is
@@ -27,9 +27,9 @@ quotes the wording does not.
 
 `operator` and a human assignee are the operator reservation: work the person
 means to do by hand. Every agent is addressed by a slash-qualified address
-(`gastown/polecats/onyx`, `gastown/crew/sloan`, `mayor/`), so any other assignee
-is a person. `gt sling` refuses one without `--force` (gt-21pl0), and the paths
-that would otherwise point the mayor at it skip it.
+(`gastown/polecats/onyx`, `gastown/crew/sloan`, `gastown/witness`), so any other
+assignee is a person. `gt sling` refuses one without `--force` (gt-21pl0), and
+every automatic dispatcher skips it.
 
 ## Who reads a hold
 

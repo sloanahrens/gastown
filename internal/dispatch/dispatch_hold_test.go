@@ -24,13 +24,20 @@ func TestDispatchHoldFields_Verdicts(t *testing.T) {
 		},
 		{
 			name:  "label",
-			issue: beads.Issue{Status: "open", Labels: []string{"needs-mayor-review"}},
-			want:  "label needs-mayor-review",
+			issue: beads.Issue{Status: "open", Labels: []string{"gt:needs-human"}},
+			want:  "label gt:needs-human",
 		},
 		{
 			name:  "label, however typed",
 			issue: beads.Issue{Status: "open", Labels: []string{"NEEDS-PRO"}},
 			want:  "label NEEDS-PRO",
+		},
+		{
+			// The reviewer label was retired with the role (gt-rwp7z.11): a
+			// bead still carrying it is held by nothing and dispatches as
+			// ordinary ready work.
+			name:  "retired review label",
+			issue: beads.Issue{Status: "open", Labels: []string{"needs-mayor-review"}},
 		},
 		{
 			name:  "deferred status",
@@ -44,8 +51,15 @@ func TestDispatchHoldFields_Verdicts(t *testing.T) {
 		},
 		{
 			name:  "decision in design",
+			issue: beads.Issue{Status: "open", Design: "## do not redispatch\npark it"},
+			want:  "do not redispatch in design",
+		},
+		{
+			// The ruling the retired role wrote is no longer a hold either: it
+			// named the decision's author, not a marker a dispatcher still
+			// reads (gt-rwp7z.11).
+			name:  "retired design ruling",
 			issue: beads.Issue{Status: "open", Design: "## MAYOR DESIGN DECISION\npark it"},
-			want:  "MAYOR DESIGN DECISION in design",
 		},
 		{
 			name:  "decision in notes",

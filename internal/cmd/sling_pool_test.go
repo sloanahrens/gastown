@@ -107,7 +107,7 @@ func TestListPolecatSessions(t *testing.T) {
 			"gt-opal":     {"GT_ROLE": "gastown/polecats/opal"},
 			"gt-witness":  {"GT_ROLE": "gastown/witness", "GT_AGENT": "local-coder-polecat"},
 			"gt-refinery": {"GT_ROLE": "gastown/refinery", "GT_AGENT": "local-coder-polecat"},
-			"hq-mayor":    {"GT_ROLE": "mayor"},
+			"hq-overseer": {"GT_ROLE": "overseer"},
 			"random":      {},
 		},
 		created: map[string]time.Time{"gt-marble": now.Add(-time.Minute), "gt-slate": now.Add(-time.Hour)},

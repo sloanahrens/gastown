@@ -16,17 +16,16 @@ import (
 // dispatchHoldProse below are that vocabulary.
 
 // dispatchHoldLabels are the routing decisions recorded as labels: needs-pro
-// wants a specific runtime, needs-mayor-review wants the mayor's eyes before
-// any work starts, and gt:needs-human (needs-human by hand) is a landing the
-// worker left for a person (om gave no verdict, a stage timed out, a policy
-// refusal, or land.MaxReworkAttempts rejections): unlike rework, no polecat
-// can settle it (gt-hpca9, gt-28ibg). Matched case-insensitively, since a
-// label is typed by hand.
+// wants a specific runtime, and gt:needs-human (needs-human by hand) is a
+// landing the worker left for a person (om gave no verdict, a stage timed out,
+// a policy refusal, or land.MaxReworkAttempts rejections): unlike rework, no
+// polecat can settle it (gt-hpca9, gt-28ibg). Matched case-insensitively, since
+// a label is typed by hand.
 // The operator reservation (OperatorReservation) is the third decision a label
 // records, and the one that also reaches through the assignee; it is applied
 // in DispatchHoldFields rather than listed here so a caller reads the same
 // rule before it spends a polecat seat.
-var dispatchHoldLabels = []string{"needs-pro", "needs-mayor-review", "gt:needs-human", "needs-human"}
+var dispatchHoldLabels = []string{"needs-pro", "gt:needs-human", "needs-human"}
 
 // dispatchHoldStatuses are the statuses beads calls CategoryFrozen, "excluded
 // from bd ready": a dispatcher that fed one would take on work the tracker
@@ -36,7 +35,7 @@ var dispatchHoldStatuses = []string{"deferred", "pinned"}
 
 // dispatchHoldProse are the keep-off decisions recorded in a bead's prose,
 // listed as they are written so the reason can quote them back.
-var dispatchHoldProse = []string{"MAYOR DESIGN DECISION", "do not redispatch"}
+var dispatchHoldProse = []string{"do not redispatch"}
 
 // DispatchHoldFields reports the hold a bead's own fields assert, or "" when
 // they assert none.
@@ -97,8 +96,8 @@ func decisionOnLine(text string, markers []string) string {
 }
 
 // stripLineDecoration drops the leading decoration a decision may be written
-// behind: "- do not redispatch", "> **MAYOR DESIGN DECISION**", "## MAYOR
-// DESIGN DECISION".
+// behind: "- do not redispatch", "> **DO NOT REDISPATCH**", "## DO NOT
+// REDISPATCH".
 func stripLineDecoration(line string) string {
 	return strings.TrimLeft(strings.TrimSpace(line), "#*->+` \t")
 }

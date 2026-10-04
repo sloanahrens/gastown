@@ -27,8 +27,12 @@ func TestOperatorReservation(t *testing.T) {
 		{name: "crew address", assignee: "gastown/crew/sloan"},
 		{name: "witness address", assignee: "gastown/witness"},
 		{name: "dog address", assignee: "deacon/dogs/boot"},
-		{name: "mayor", assignee: "mayor/"},
-		{name: "mayor, older spelling", assignee: "mayor"},
+		// The mayor's seat was retired (gt-rwp7z.11). Its slash-qualified
+		// address still parses as an agent address, but the bare older
+		// spelling no longer names one, so a bead left on it reads as the
+		// operator's and stays held until someone re-addresses it.
+		{name: "retired seat's address", assignee: "mayor/"},
+		{name: "retired seat's older spelling", assignee: "mayor", want: "assignee mayor is not an agent address"},
 		{name: "deacon", assignee: "deacon/"},
 		{name: "deacon, older spelling", assignee: "deacon"},
 

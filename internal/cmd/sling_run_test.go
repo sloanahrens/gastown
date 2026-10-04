@@ -29,7 +29,7 @@ func TestSlingRefusesPolecatsByRole(t *testing.T) {
 		{"compound polecat role", map[string]string{"GT_ROLE": "gastown/polecats/Toast"}, true},
 		{"no role, polecat name", map[string]string{"GT_POLECAT": "Toast"}, true},
 		// GH #664: a coordinator keeps a stale GT_POLECAT from spawning one.
-		{"mayor with stale GT_POLECAT", map[string]string{"GT_ROLE": "mayor", "GT_POLECAT": "Toast"}, false},
+		{"witness with stale GT_POLECAT", map[string]string{"GT_ROLE": "gastown/witness", "GT_POLECAT": "Toast"}, false},
 		{"crew", map[string]string{"GT_ROLE": "gastown/crew/sloan"}, false},
 		// gt-vsc9w: the daemon runs script plugins with GT_ROLE=daemon/plugin,
 		// and every sling such a runner made was refused as rig "daemon",
@@ -209,8 +209,8 @@ func TestSlingAlreadyAssigned(t *testing.T) {
 	t.Run("self target matches the caller", func(t *testing.T) {
 		t.Parallel()
 		h := newSlingHarness(t)
-		h.addBead(slingBead, beadInfo{Status: "pinned", Assignee: "mayor/"})
-		h.run.resolveSelf = func() (string, string, string, error) { return "mayor/", "%0", slingTestTown, nil }
+		h.addBead(slingBead, beadInfo{Status: "pinned", Assignee: "gastown/crew/sloan"})
+		h.run.resolveSelf = func() (string, string, string, error) { return "gastown/crew/sloan", "%0", slingTestTown, nil }
 		if err := h.sling(slingBead, "."); err != nil {
 			t.Fatalf("sling: %v", err)
 		}
@@ -403,11 +403,11 @@ func TestSlingRollsBackAnInlineTargetsSpawn(t *testing.T) {
 func TestSlingForcedPinnedRollbackRestoresThePin(t *testing.T) {
 	t.Parallel()
 	h := newSlingHarness(t)
-	h.addBead(slingBead, beadInfo{Status: "pinned", Assignee: "mayor/"})
+	h.addBead(slingBead, beadInfo{Status: "pinned", Assignee: "gastown/crew/sloan"})
 	h.run.opts.force = true
 	h.run.hook = func(string, string, string, string) error { return errors.New("injected") }
 	wantSlingErr(t, h.sling(slingBead, "gastown"), "injected")
-	h.wantCalls("restore pinned", "restore pinned gt-abc123 mayor/")
+	h.wantCalls("restore pinned", "restore pinned gt-abc123 gastown/crew/sloan")
 }
 
 // TestSlingDryRunWritesNothing: a dry run resolves the target and reports,
@@ -610,14 +610,15 @@ func TestSlingStoresRequestInBead(t *testing.T) {
 		t.Fatalf("stored %d field updates, want 2 (before and after the hook)", len(stored))
 	}
 	u := stored[1]
-	if !u.NoMerge || !u.ReviewOnly || u.Args != "patch release" || u.Mode == nil || *u.Mode != "ralph" || u.Dispatcher != "mayor" {
+	if !u.NoMerge || !u.ReviewOnly || u.Args != "patch release" || u.Mode == nil || *u.Mode != "ralph" || u.Dispatcher != "gastown/crew/sloan" {
 		t.Errorf("stored fields = %+v", u)
 	}
 }
 
-// TestSlingNudgesTheTarget: an existing agent is nudged in its pane, the
-// mayor also gets a queued hook notice, a fresh polecat and a self-sling are
-// not nudged.
+// TestSlingNudgesTheTarget: an existing agent is nudged in its pane, and a
+// fresh polecat and a self-sling are not nudged. No target gets a queued hook
+// notice any more: the queue existed to reach the retired town singleton
+// (gt-rwp7z.11), whose session heard about a hook change between turns.
 func TestSlingNudgesTheTarget(t *testing.T) {
 	t.Parallel()
 	t.Run("crew", func(t *testing.T) {
@@ -630,15 +631,15 @@ func TestSlingNudgesTheTarget(t *testing.T) {
 		h.wantCalls("nudge", "nudge %9 gt-abc123")
 		h.wantNo("queue nudge")
 	})
-	t.Run("mayor", func(t *testing.T) {
+	t.Run("another existing agent", func(t *testing.T) {
 		t.Parallel()
 		h := newSlingHarness(t)
 		h.addBead(slingBead, beadInfo{})
-		if err := h.sling(slingBead, "mayor/"); err != nil {
+		if err := h.sling(slingBead, "gastown/witness"); err != nil {
 			t.Fatalf("sling: %v", err)
 		}
 		h.wantCalls("nudge", "nudge %9 gt-abc123")
-		h.wantCalls("queue nudge", "queue nudge hq-mayor: Hook updated: attached bead gt-abc123")
+		h.wantNo("queue nudge")
 	})
 	t.Run("fresh polecat", func(t *testing.T) {
 		t.Parallel()

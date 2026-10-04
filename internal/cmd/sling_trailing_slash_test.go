@@ -22,7 +22,7 @@ func TestSlingTrimsTrailingSlash(t *testing.T) {
 		{"multiple trailing slashes", "slingshot///", "slingshot"},
 		{"just slashes", "///", ""},
 		{"empty string", "", ""},
-		{"mayor role", "mayor", "mayor"},
+		{"bare role name", "witness", "witness"},
 		{"deacon role", "deacon", "deacon"},
 	}
 

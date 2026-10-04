@@ -18,7 +18,6 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/lock"
-	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/style"
@@ -32,7 +31,7 @@ var slingCmd = &cobra.Command{
 	Long: `Sling work onto an agent's hook and start working immediately.
 
 This is THE command for assigning work in Gas Town. It handles:
-  - Existing agents (mayor, crew, witness, refinery)
+  - Existing agents (crew, witness, refinery)
   - Auto-spawning polecats when target is a rig
   - Formula instantiation and wisp creation
 
@@ -47,7 +46,6 @@ Target Resolution:
   gt sling gt-abc greenplace/polecats/toast --create  # ...created as toast if missing
                                         # (new names: lowercase a-z0-9-, >3 chars, not reserved)
   gt sling gt-abc gastown --crew mel    # Crew member mel in gastown
-  gt sling gt-abc mayor                 # Mayor
 
 Spawning Options (when target is a rig):
   gt sling gp-abc greenplace --create               # Create polecat if missing
@@ -81,7 +79,7 @@ Stdin Mode (for shell-quoting-safe multi-line content):
   echo "Extra context here" | gt sling gt-abc gastown --args "patch release" --stdin
 
 Formula Slinging:
-  gt sling mol-release mayor/           # Cook + wisp + attach + nudge
+  gt sling mol-release greenplace       # Cook + wisp + attach + nudge
   gt sling mol-polecat-code-review --var focus=security
 
 Formula-on-Bead (--on flag):
@@ -219,7 +217,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	defer func() { silenceUsageOnFailure(cmd, retErr) }()
 
 	// Polecats cannot sling - check early before writing anything.
-	// Check GT_ROLE first: coordinators (mayor, witness, etc.) may have a stale
+	// Check GT_ROLE first: coordinators (witness, refinery, etc.) may have a stale
 	// GT_POLECAT in their environment from spawning polecats. Only block if the
 	// parsed role is actually polecat (handles compound forms like
 	// "gastown/polecats/Toast"). If GT_ROLE is unset, fall back to GT_POLECAT.
@@ -286,7 +284,8 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	// Normalize target arguments: trim trailing slashes from target to handle tab-completion
 	// artifacts like "gt sling sl-123 slingshot/" → "gt sling sl-123 slingshot"
 	// This makes sling more forgiving without breaking existing functionality.
-	// Note: Internal agent IDs like "mayor/" are outputs, not user inputs.
+	// Note: an agent address is written without a trailing slash, so the trim
+	// only ever touches a user-typed target.
 	for i := range args {
 		args[i] = strings.TrimRight(args[i], "/")
 	}
@@ -616,8 +615,8 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	// labeled `operator`, or assigned to a person rather than to an agent
 	// address. Dispatching one spends a polecat seat on work no agent can
 	// finish, and silently reverses the operator's own assignment — a convoy
-	// feeder re-slung gt-nj23.9 to a fresh polecat minutes after the mayor had
-	// un-slung it and assigned it to the operator. The marker makes an
+	// feeder re-slung gt-nj23.9 to a fresh polecat minutes after it had been
+	// un-slung and assigned to the operator. The marker makes an
 	// automatic dispatcher read this as a deferral rather than a failure.
 	if reason := dispatch.OperatorReservation(info.Labels, info.Assignee); reason != "" && !r.opts.force {
 		return fmt.Errorf("%s %s is the operator's work (%s)\nAn agent does not take it. Use --force to sling it to one anyway",
@@ -748,9 +747,10 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		}
 	}
 
-	// What is left is a non-rig target: mayor, crew, a named polecat, or the
-	// caller itself (gt-hk555 moved the rig targets to the engine above). These
-	// the engine does not cover, so the dispatch is inline from here.
+	// What is left is a non-rig target: crew, witness, refinery, a named
+	// polecat, or the caller itself (gt-hk555 moved the rig targets to the
+	// engine above). These the engine does not cover, so the dispatch is
+	// inline from here.
 	resolved, err := r.resolveTarget(target, ResolveTargetOptions{
 		DryRun:       r.opts.dryRun,
 		Force:        force,
@@ -1054,20 +1054,6 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	// The bead is dispatched now, so later dispatches in this process should
 	// see it in the pool even though their snapshot predates this hook.
 	r.noteDispatched(townRoot, dupCandidate)
-
-	// Emit a propulsion signal if the target is the mayor, so the mayor
-	// hears about the hook change at its next turn boundary.
-	if targetAgent == "mayor/" {
-		if townRoot != "" {
-			session := "hq-mayor"
-			message := fmt.Sprintf("Hook updated: attached bead %s", beadID)
-			_ = r.enqueueNudge(townRoot, session, nudge.QueuedNudge{
-				Sender:   "sling",
-				Message:  message,
-				Priority: nudge.PriorityNormal,
-			})
-		}
-	}
 
 	fmt.Fprintf(r.out, "%s Work attached to hook (status=hooked)\n", style.Bold.Render("✓"))
 

@@ -18,9 +18,9 @@ func TestMatchesSlingTarget(t *testing.T) {
 			want:     true,
 		},
 		{
-			name:     "target with trailing slash matches mayor assignee",
-			target:   "mayor",
-			assignee: "mayor/",
+			name:     "target with trailing slash matches the slashed assignee",
+			target:   "deacon",
+			assignee: "deacon/",
 			want:     true,
 		},
 		{

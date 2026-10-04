@@ -9,7 +9,6 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
-	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -105,11 +104,11 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 	}
 
 	// Resolve the correct beads directory using prefix-based routing.
-	// Town-level agents (mayor, deacon) fall back to townRoot since their
-	// beads use hq- prefix stored at town level.
+	// Town-level agents (deacon) fall back to townRoot since their beads use
+	// the hq- prefix stored at town level.
 	rigName := strings.Split(agentID, "/")[0]
 	var fallbackPath string
-	if rigName == "mayor" || rigName == "deacon" {
+	if rigName == "deacon" {
 		fallbackPath = townRoot
 	} else {
 		fallbackPath = filepath.Join(townRoot, rigName)
@@ -238,20 +237,6 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 	// Log unhook event
 	_ = events.LogFeed(events.TypeUnhook, agentID, events.UnhookPayload(hookedBeadID))
 
-	// Emit a propulsion signal if the target is the mayor.
-	// The mayor hears about the hook change at its next turn boundary.
-	if agentID == "mayor/" {
-		if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
-			session := "hq-mayor"
-			message := fmt.Sprintf("Hook updated: cleared bead %s", hookedBeadID)
-			_ = nudge.Enqueue(townRoot, session, nudge.QueuedNudge{
-				Sender:   "unsling",
-				Message:  message,
-				Priority: nudge.PriorityNormal,
-			})
-		}
-	}
-
 	fmt.Printf("%s Work removed from hook\n", style.Bold.Render("✓"))
 	fmt.Printf("  Agent %s hook cleared (was: %s)\n", agentID, hookedBeadID)
 
@@ -377,7 +362,7 @@ func isAgentTarget(s string) bool {
 
 	// Known role names
 	switch s {
-	case constants.RoleMayor, constants.RoleCrew:
+	case constants.RoleCrew:
 		return true
 	}
 

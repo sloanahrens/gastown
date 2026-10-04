@@ -35,9 +35,8 @@ import (
 // linted and — when it clears the shape gate and a seat is free — slung through
 // executeSling in-process. The label spec and type feature are retired and
 // accepted-but-ignored (gt-mmsr2): neither admits or refuses a bead now. The
-// daemon's spec_dispatch ticker runs `gt spec dispatch --json` on its cadence,
-// the way mayor_dispatch runs `gt daemon dispatch-check` (internal/cmd imports
-// internal/daemon, so the call cannot go the other way).
+// daemon's spec_dispatch ticker runs `gt spec dispatch --json` on its cadence
+// (internal/cmd imports internal/daemon, so the call cannot go the other way).
 //
 // This is the dispatcher that replaced the seat-refill plugin (gt-4k3fj.8.8):
 // the pool's seats (overflow_agent/max_overflow, pro_*), the operator's
@@ -56,7 +55,7 @@ import (
 // (gt-gzhin.3).
 //
 // Seat accounting counts every live polecat session plus the in-flight seat
-// claims other slings hold, whoever slung them. The mayor's slings land in that
+// claims other slings hold, whoever slung them. A hand-run sling lands in that
 // same count, so the ticker never pushes past a cap another path already filled
 // — it skips the tick instead.
 
@@ -153,7 +152,7 @@ operational rig, numbered at or above polecat_pool.max_priority's ceiling
 (default 2) and ordered by priority, then created_at, then id. Epics, agent
 beads, wisps and the other runtime families are never candidates; the retired
 label spec and type feature are accepted and ignored (gt-mmsr2). Beads labeled
-gt:ready-to-land, needs-human or needs-mayor-review, or deferred, are never
+gt:ready-to-land, needs-human, or deferred, are never
 taken, and neither is a bead submitted for landing whose READY TO LAND block
 has reached the read before the label (gt-kr5xv). Each candidate is linted (see
 gt spec lint), and
