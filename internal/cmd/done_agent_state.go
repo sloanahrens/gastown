@@ -222,8 +222,8 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 			currentHead, _ := e.head()()
 			if skipReason, fatal := done.DoneSourceCloseSkipReasonForHead(hookBd, hookedBeadID, hookedBead, currentHead); skipReason != "" {
 				style.PrintWarning("%s", skipReason)
-				fmt.Fprintf(os.Stderr, "  The bead will remain open for mayor review.\n")
-				done.NotifyDoneCloseSkipped(townRoot, ctx.Rig, detectSender(), hookedBeadID, skipReason)
+				fmt.Fprintf(os.Stderr, "  The bead will remain open; the reason is recorded on it.\n")
+				done.NotifyDoneCloseSkipped(hookBd, hookedBeadID, skipReason)
 				if fatal {
 					return fmt.Errorf("cannot complete hooked work: %s", skipReason)
 				}
@@ -279,14 +279,14 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 				}
 			} else if unchecked := beads.HasUncheckedCriteria(hookedBead); unchecked > 0 {
 				style.PrintWarning("hooked bead %s has %d unchecked acceptance criteria — skipping close", hookedBeadID, unchecked)
-				fmt.Fprintf(os.Stderr, "  The bead will remain open for mayor review.\n")
+				fmt.Fprintf(os.Stderr, "  The bead will remain open; see the warning above.\n")
 			} else if skipReason := doneCloseTimeInvariantSkipReason(cwd, townRoot, ctx.Rig, hookedBeadID); skipReason != "" {
 				// gt-6hmz: refuse rather than close a bead whose branch carries
 				// commits the target lacks; only the landing worker closes
 				// work that has code to land.
 				style.PrintWarning("%s", skipReason)
-				fmt.Fprintf(os.Stderr, "  The bead will remain open for mayor review.\n")
-				done.NotifyDoneCloseSkipped(townRoot, ctx.Rig, detectSender(), hookedBeadID, skipReason)
+				fmt.Fprintf(os.Stderr, "  The bead will remain open; the reason is recorded on it.\n")
+				done.NotifyDoneCloseSkipped(hookBd, hookedBeadID, skipReason)
 			} else if err := hookBd.Close(hookedBeadID); err != nil {
 				// Non-fatal: warn but continue
 				fmt.Fprintf(os.Stderr, "Warning: couldn't close hooked bead %s: %v\n", hookedBeadID, err)

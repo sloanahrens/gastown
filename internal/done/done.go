@@ -18,7 +18,6 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
-	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/role"
@@ -1323,8 +1322,8 @@ func completeWithoutCode(r *doneRun, sub doneSubmission, target, baseRef string,
 	reviewHead, _ := repo.Rev("HEAD")
 	if skipReason, fatal := DoneSourceCloseSkipReasonForHead(bd, r.issueID, sub.sourceIssue, reviewHead); skipReason != "" {
 		style.PrintWarning("%s", skipReason)
-		fmt.Printf("  The bead will remain open for mayor review.\n")
-		NotifyDoneCloseSkipped(r.townRoot, r.rigName, r.sender, r.issueID, skipReason)
+		fmt.Printf("  The bead will remain open; the reason is recorded on it.\n")
+		NotifyDoneCloseSkipped(bd, r.issueID, skipReason)
 		if fatal {
 			return fmt.Errorf("cannot complete review-only/no-code work: %s", skipReason)
 		}
@@ -1609,28 +1608,22 @@ func forceCloseIssueWithRetrySleep(closeFn func(string, ...string) error, issueI
 	return closeErr
 }
 
-func NotifyDoneCloseSkipped(townRoot, rigName, sender, issueID, reason string) {
-	if townRoot == "" || rigName == "" || issueID == "" {
+// NotifyDoneCloseSkipped records on the skipped bead itself why gt done left it
+// open: one comment carrying the reason gt done already builds, no mail and no
+// new bead per skip (gt-zx8t4 — mailing it to the retired mayor/ role left every
+// skip as an unread dead letter in hq). A failed write warns and never fails gt
+// done, so bd must be the client routed to the skipped bead's database, not the
+// caller's.
+func NotifyDoneCloseSkipped(bd beads.Client, issueID, reason string) {
+	if bd == nil || issueID == "" {
 		return
 	}
-	if sender == "" {
-		sender = fmt.Sprintf("%s/polecat", rigName)
+	comment := fmt.Sprintf("DONE_CLOSE_SKIPPED: %s", reason)
+	if err := bd.AddComment(issueID, comment); err != nil {
+		style.PrintWarning("could not record the skipped close on %s: %v", issueID, err)
+		return
 	}
-
-	router := mail.NewRouter(townRoot, session.DefaultRegistry())
-	defer router.WaitPendingNotifications()
-	msg := &mail.Message{
-		To:      "mayor/",
-		From:    sender,
-		Subject: fmt.Sprintf("DONE_CLOSE_SKIPPED: %s", issueID),
-		Body: fmt.Sprintf("gt done skipped closing %s.\n\nReason: %s\n\nThe bead remains open for mayor review.",
-			issueID, reason),
-	}
-	if err := router.Send(msg); err != nil {
-		style.PrintWarning("could not notify the mayor about skipped close: %v", err)
-	} else {
-		fmt.Printf("%s Mayor notified: DONE_CLOSE_SKIPPED\n", style.Bold.Render("✓"))
-	}
+	fmt.Printf("%s Recorded skipped close on %s\n", style.Bold.Render("✓"), issueID)
 }
 
 func noteVerifiedPushFailure(sourceBD beads.Client, cwd, issueID, branch, commit string, verifyErr error) {
