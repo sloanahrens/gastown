@@ -6,6 +6,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/nudge"
 )
 
 // doneRepo is the git surface of gt done's submit path: the reads and writes
@@ -54,6 +55,16 @@ type doneSubmitDeps struct {
 	// retryDelays is the wait schedule before each re-attempt of the branch
 	// push (see landBranchPush).
 	retryDelays []time.Duration
+	// polecatSeat maps a bead assignee to the tmux session of the polecat seat
+	// it names; ok is false for any assignee that is not a polecat
+	// (<rig>/polecats/<name>). The crew submit path uses it to stand a holder
+	// down (gt-qmnm3).
+	polecatSeat func(assignee string) (sessionName string, ok bool)
+	// sessionAlive reports whether a tmux session name is live.
+	sessionAlive func(sessionName string) bool
+	// enqueueNudge queues a nudge to a session; nil on the polecat path, which
+	// never stands another seat down.
+	enqueueNudge func(townRoot, sessionName string, n nudge.QueuedNudge) error
 }
 
 // doneOptions are the flags and environment the submit path reads.

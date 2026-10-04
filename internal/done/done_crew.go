@@ -9,9 +9,12 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/role"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -189,8 +192,72 @@ func runDoneCrew(opts Options, exitType string, getenv func(string) string) erro
 		},
 		localGate: localGate,
 		sleep:     sleep,
+		// The town's prefix registry names the seat session the same way
+		// `gt polecat list` does; a registry that cannot be read still maps
+		// every rig to the default prefix, so the pure-Go seam stays total.
+		polecatSeat: func(assignee string) (string, bool) {
+			reg, regErr := session.BuildPrefixRegistryFromTown(townRoot)
+			if regErr != nil {
+				reg = session.NewPrefixRegistry()
+			}
+			return polecatAssigneeSeat(assignee, reg)
+		},
+		sessionAlive: func(sessionName string) bool {
+			alive, err := tmux.NewTmux().HasSession(sessionName)
+			return err == nil && alive
+		},
+		enqueueNudge: nudge.Enqueue,
 	}
 	return submitCrewForLanding(r)
+}
+
+// polecatAssigneeSeat maps a bead assignee to the tmux session of the polecat
+// seat it names. It accepts only the explicit <rig>/polecats/<name> shape; a
+// crew, two-part or empty assignee names no polecat seat. reg supplies the
+// rig's beads prefix, the same source `gt polecat list` derives its session
+// names from.
+func polecatAssigneeSeat(assignee string, reg *session.PrefixRegistry) (string, bool) {
+	parts := strings.Split(strings.TrimSpace(assignee), "/")
+	if len(parts) != 3 || parts[1] != "polecats" || parts[0] == "" || parts[2] == "" {
+		return "", false
+	}
+	return session.PolecatSessionName(reg.PrefixForRig(parts[0]), parts[2]), true
+}
+
+// standDownCrewHolder tells the polecat that still holds a bead a crew member
+// has just submitted to release its seat with `gt done --status DEFERRED`. The
+// holder cannot submit the work (a crew branch already did), and its session
+// otherwise stays up burning a seat. Every step is best-effort: a nudge or
+// comment that fails is logged and the submission still stands.
+func standDownCrewHolder(r *doneRun, issue *beads.Issue, bd beads.Client, head string) {
+	deps := r.deps
+	if deps.polecatSeat == nil || deps.sessionAlive == nil || deps.enqueueNudge == nil {
+		return
+	}
+	assignee := strings.TrimSpace(issue.Assignee)
+	if assignee == "" || assignee == r.sender {
+		return
+	}
+	sessionName, ok := deps.polecatSeat(assignee)
+	if !ok || !deps.sessionAlive(sessionName) {
+		return
+	}
+	message := fmt.Sprintf(
+		"Bead %s was submitted for landing from crew branch %s @ %s: it is landing, not yours to finish. Do not commit, push, or run gt done COMPLETED. Run gt done --status DEFERRED now to release your seat.",
+		r.issueID, r.branch, ShortSHA(head))
+	if err := deps.enqueueNudge(r.townRoot, sessionName, nudge.QueuedNudge{
+		Sender:   r.sender,
+		Message:  message,
+		Priority: nudge.PriorityNormal,
+	}); err != nil {
+		style.PrintWarning("could not nudge %s to stand down: %v", sessionName, err)
+	}
+	comment := fmt.Sprintf(
+		"Takeover: crew branch %s @ %s was submitted for landing while %s held this bead; the holder releases its seat with gt done --status DEFERRED",
+		land.NoteField(r.branch), head, assignee)
+	if err := bd.AddCommentAs(r.issueID, r.sender, comment); err != nil {
+		style.PrintWarning("could not record the takeover on %s: %v", r.issueID, err)
+	}
 }
 
 // submitCrewForLanding marks a crew branch ready to land. The branch must
@@ -269,6 +336,10 @@ func submitCrewForLanding(r *doneRun) error {
 	if err := markReadyToLand(bd, work); err != nil {
 		return doneExit(doneExitReadyFailed, fmt.Sprintf("branch %s is on origin at %s but %s could not be marked ready to land", r.branch, ShortSHA(head), r.issueID), err)
 	}
+
+	// The bead is ready to land. A polecat that still holds it must be told to
+	// release its seat rather than sit on work another branch is landing.
+	standDownCrewHolder(r, issue, bd, head)
 
 	fmt.Printf("%s Submitted for landing\n", style.Bold.Render("✓"))
 	fmt.Printf("  Bead:   %s\n", r.issueID)
