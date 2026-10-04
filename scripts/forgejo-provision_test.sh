@@ -188,6 +188,22 @@ case "$method $path" in
       send 200 "$(cat "$key")"
     fi
     ;;
+  "DELETE /repos/"*"/branch_protections/"*)
+    rest=${path#/repos/}
+    owner=${rest%%/*}
+    rest=${rest#*/}
+    repo=${rest%%/*}
+    rule=${rest#*/branch_protections/}
+    rule=${rule//%2F//}
+    rule=${rule//%2A/*}
+    key="$STUB_STATE/protections/${owner}__${repo}__${rule//\//%2F}"
+    if [ -e "$key" ]; then
+      rm -f "$key"
+      send 204 ''
+    else
+      send 404 '{"message":"not found"}'
+    fi
+    ;;
   "GET /repos/"*"/collaborators/"*)
     rest=${path#/repos/}
     owner=${rest%%/*}
@@ -270,16 +286,15 @@ for role in polecat landing registry; do
   check "token file for $role names the web URL" grep -q "^FORGEJO_URL=http://forgejo.test$" "$path"
 done
 check "the token value never reaches stdout" lacks "$STUB_TOKEN_VALUE" "$out"
-check "two protection rules are stored" test "$(find "$STATE/protections" -type f | wc -l | tr -d ' ')" = 2
+check "main is the only protected branch" test "$(find "$STATE/protections" -type f | wc -l | tr -d ' ')" = 1
 main_rule="$STATE/protections/acme__rig__main"
 land_rule="$STATE/protections/acme__rig__land%2F*"
 check "main takes no push, admins included" has_all "$main_rule" '"enable_push":false' '"apply_to_admins":true'
 check "main merges through the landing bot alone" grep -q '"merge_whitelist_usernames":\["bot-landing"\]' "$main_rule"
 check "main requires the gate and review contexts" has_all "$main_rule" 'ci / gate (push)' 'om / review'
 check "main refuses a stale candidate" grep -q '"block_on_outdated_branch":true' "$main_rule"
-check "land/** push is whitelisted to the landing bot" grep -q '"push_whitelist_usernames":\["bot-landing"\]' "$land_rule"
-check "land/** refuses a deploy-key push" grep -q '"push_whitelist_deploy_keys":false' "$land_rule"
-check "land/** takes no push beyond the whitelist" has_all "$land_rule" '"enable_push_whitelist":true' '"apply_to_admins":true'
+check "no land/* rule is created" test ! -e "$land_rule"
+check "the run reports the candidate branches unprotected" contains "no branch protection land/* on acme/rig" "$out"
 check "main refuses a deploy-key push too" grep -q '"push_whitelist_deploy_keys":false' "$main_rule"
 check "polecat mints write:repository" has_all "$STATE/mints/bot-polecat.json" '"scopes":["write:repository"]'
 check "landing mints write:repository and read:user" has_all "$STATE/mints/bot-landing.json" '"scopes":["write:repository","read:user"]'
@@ -313,7 +328,19 @@ check "the drifted main rule is patched" test "$(count_calls PATCH /branch_prote
 check "the patch restores no-push for admins too" grep -q '"enable_push":false' "$main_rule"
 check "the patch restores no deploy-key push" grep -q '"push_whitelist_deploy_keys":false' "$main_rule"
 check "the patch restores the required contexts" grep -q 'om / review' "$main_rule"
-check "the untouched land rule is not patched" test "$(count_calls PATCH /branch_protections/land)" = 0
+check "no land/* rule is created by the drift run" test "$(count_calls POST /branch_protections)" = 0
+
+echo "=== a land/* rule left by an earlier cutover is removed ==="
+mkdir -p "$STATE/protections"
+printf '{"rule_name":"land/*","enable_push":true,"apply_to_admins":true}\n' > "$STATE/protections/acme__rig__land%2F*"
+: > "$STATE/calls.log"
+out=$(run_provision --repo acme/rig); rc=$?
+if [ "$rc" = 0 ]; then pass "a run over a protected candidate branch exits 0"; else fail "a run over a protected candidate branch exits 0 (rc=$rc)" "$out"; fi
+check "the land/* rule is deleted" test "$(count_calls DELETE /branch_protections)" = 1
+check "the deletion names the encoded pattern" grep -q "DELETE /repos/acme/rig/branch_protections/land%2F\*" "$STATE/calls.log"
+check "the rule is gone from the repository" test ! -e "$STATE/protections/acme__rig__land%2F*"
+check "the removal is reported" contains "removed branch protection land/* on acme/rig" "$out"
+check "the main rule is left alone" test "$(count_calls POST /branch_protections)" = 0 -a "$(count_calls PATCH /branch_protections)" = 0
 
 echo "=== rotation replaces the token ==="
 : > "$STATE/calls.log"
@@ -332,9 +359,13 @@ echo "=== dry run writes nothing ==="
 STATE="$TMP/state-dry"
 CFG="$TMP/config-dry"
 fresh_state
+mkdir -p "$STATE/protections"
+printf '{"rule_name":"land/*","enable_push":true,"apply_to_admins":true}\n' > "$STATE/protections/acme__rig__land%2F*"
 out=$(run_provision --repo acme/rig --dry-run); rc=$?
 if [ "$rc" = 0 ]; then pass "dry run exits 0"; else fail "dry run exits 0 (rc=$rc)" "$out"; fi
 check "dry run sends no write method" test "$(count_calls POST)" = 0 -a "$(count_calls PATCH)" = 0 -a "$(count_calls DELETE)" = 0 -a "$(count_calls PUT)" = 0
+check "dry run leaves the land/* rule in place" test -e "$STATE/protections/acme__rig__land%2F*"
+check "dry run says it would remove the land/* rule" contains "would remove branch protection land/* on acme/rig" "$out"
 check "dry run creates no user" test ! -e "$STATE/users/bot-polecat"
 check "dry run writes no token file" test ! -e "$(token_file polecat)"
 check "dry run grants no collaborator access" test ! -e "$STATE/collaborators/acme__rig__bot-polecat"
@@ -358,7 +389,7 @@ echo "=== a repository with no protections yet ==="
 fresh_state
 out=$(run_provision --repo acme/rig); rc=$?
 if [ "$rc" = 0 ]; then pass "an unprotected repo provisions and exits 0"; else fail "an unprotected repo provisions and exits 0 (rc=$rc)" "$out"; fi
-check "both rules are created on it" test "$(count_calls POST /branch_protections)" = 2
+check "only the main rule is created on it" test "$(count_calls POST /branch_protections)" = 1 -a "$(count_calls DELETE /branch_protections)" = 0
 
 echo "=== an unknown repository fails loudly ==="
 fresh_state

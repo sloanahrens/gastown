@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # forgejo-provision.sh — provision the Forgejo bots, their tokens and the branch
-# protection the landing path needs (gt-fn9e6.4).
+# protection the landing path needs: main protected, the candidate branches not
+# (gt-fn9e6.4, gt-fn9e6.21).
 #
 # Live runbook: docs/forgejo-runbook.md. Design of record:
 # docs/design/forgejo-primary-landing.md.
@@ -33,9 +34,8 @@
 #   --gate-context CTX     required commit-status context; repeatable
 #                          (default: "ci / gate (push)" and "om / review")
 #   --main-branch NAME     protected landing target (default: main)
-#   --land-branch PATTERN  candidate branch pattern (default: land/*)
-#   --land-push LOGIN      extra login allowed to push the candidate branches;
-#                          repeatable
+#   --land-branch PATTERN  candidate branch pattern, which the run makes sure is
+#                          unprotected (default: land/*)
 #   --rotate               mint a new token even where a token file exists, and
 #                          revoke the previous token of the same name
 #   --dry-run              read but never write
@@ -72,7 +72,6 @@ DRY_RUN=0
 ROLES=()
 REPOS=()
 GATE_CONTEXTS=()
-LAND_PUSH=()
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -89,7 +88,6 @@ while [ $# -gt 0 ]; do
     --gate-context) [ $# -ge 2 ] || usage_die "--gate-context needs a value"; GATE_CONTEXTS+=("$2"); shift 2 ;;
     --main-branch) [ $# -ge 2 ] || usage_die "--main-branch needs a value"; MAIN_BRANCH=$2; shift 2 ;;
     --land-branch) [ $# -ge 2 ] || usage_die "--land-branch needs a value"; LAND_BRANCH=$2; shift 2 ;;
-    --land-push) [ $# -ge 2 ] || usage_die "--land-push needs a value"; LAND_PUSH+=("$2"); shift 2 ;;
     --rotate) ROTATE=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -152,9 +150,6 @@ require_json_safe "--bot-email-domain" "$BOT_EMAIL_DOMAIN"
 require_json_safe "--main-branch" "$MAIN_BRANCH"
 require_json_safe "--land-branch" "$LAND_BRANCH"
 for ctx in "${GATE_CONTEXTS[@]}"; do require_json_safe "--gate-context" "$ctx"; done
-if [ ${#LAND_PUSH[@]} -gt 0 ]; then
-  for login in "${LAND_PUSH[@]}"; do require_plain "--land-push" "$login"; done
-fi
 if [ ${#REPOS[@]} -gt 0 ]; then
   for repo in "${REPOS[@]}"; do
     case "$repo" in
@@ -453,15 +448,41 @@ main_checks() {
   done
 }
 
-# land_checks prints the fragments the candidate branches must carry: the landing
-# bot and any --land-push login may push, no deploy key may (a candidate branch
-# is written only through the landing path), and admins get no bypass.
-land_checks() {
-  printf '%s\n' '"enable_push":true' '"enable_push_whitelist":true' '"apply_to_admins":true' '"push_whitelist_deploy_keys":false'
-  local login
-  for login in "$LANDING_BOT" ${LAND_PUSH[@]+"${LAND_PUSH[@]}"}; do
-    printf '"%s"\n' "$(json_escape "$login")"
-  done
+# ensure_no_rule OWNER/REPO RULE_NAME removes the protection rule when it is
+# present and reports one already absent, so a run converges either way.
+#
+# main is the only protected branch: Forgejo refuses to delete any branch a
+# protection rule matches, admins and the landing bot included (403), so a rule
+# on the candidate branches would stop the worker deleting land/<bead> after
+# every merge, and those branches would accumulate (gt-fn9e6.21). Nothing is
+# lost by leaving them unprotected: a merge is pinned to the candidate's exact
+# commit, the merge whitelist on main still admits only the landing bot, and
+# the creator check still gates every merge.
+ensure_no_rule() {
+  local repo=$1 rule=$2
+  local owner=${repo%%/*} name=${repo#*/}
+  # The rule name is a branch glob, and the per-rule routes take it in the path:
+  # chi routes on the raw path, so "/" must arrive encoded as %2F for the
+  # handler's PathUnescape to rebuild it (go-gitea#21093).
+  local escaped=${rule//\//%2F}
+  api GET "/repos/$owner/$name/branch_protections"
+  case "$HTTP_STATUS" in
+    200) ;;
+    404) die "GET /repos/$repo/branch_protections returned 404: the repository is not on $API_URL, or the admin token cannot see it$(body_tail)" ;;
+    *) die "GET /repos/$repo/branch_protections: unexpected HTTP $HTTP_STATUS$(body_tail)" ;;
+  esac
+  if [ -z "$(json_object "$RESP_FILE" rule_name "$rule")" ]; then
+    log "no branch protection $rule on $repo: $MAIN_BRANCH is the only protected branch"
+    return 0
+  fi
+  run "remove branch protection $rule on $repo" api DELETE "/repos/$owner/$name/branch_protections/$escaped"
+  if [ "$DRY_RUN" = 1 ]; then return 0; fi
+  case "$HTTP_STATUS" in
+    204) log "removed branch protection $rule on $repo" ;;
+    # Another run may have removed it between the read and the write.
+    404) log "removed branch protection $rule on $repo (already absent)" ;;
+    *) die "DELETE .../branch_protections/$escaped: unexpected HTTP $HTTP_STATUS$(body_tail)" ;;
+  esac
 }
 
 # ensure_rule OWNER/REPO RULE_NAME BODY CHECK... creates the rule when absent and
@@ -516,11 +537,6 @@ for role in "${ROLES[@]}"; do
 done
 
 if [ ${#REPOS[@]} -gt 0 ]; then
-  land_body="$WORK/land-rule.json"
-  land_whitelist=("$LANDING_BOT" ${LAND_PUSH[@]+"${LAND_PUSH[@]}"})
-  printf '{"rule_name":"%s","enable_push":true,"enable_push_whitelist":true,"push_whitelist_usernames":%s,"push_whitelist_deploy_keys":false,"apply_to_admins":true}\n' \
-    "$(json_escape "$LAND_BRANCH")" "$(json_list "${land_whitelist[@]}")" > "$land_body"
-
   main_body="$WORK/main-rule.json"
   printf '{"rule_name":"%s","enable_push":false,"enable_push_whitelist":false,"push_whitelist_usernames":[],"push_whitelist_deploy_keys":false,"apply_to_admins":true,"enable_merge_whitelist":true,"merge_whitelist_usernames":%s,"enable_status_check":true,"status_check_contexts":%s,"block_on_outdated_branch":true}\n' \
     "$(json_escape "$MAIN_BRANCH")" "$(json_list "$LANDING_BOT")" "$(json_list "${GATE_CONTEXTS[@]}")" > "$main_body"
@@ -528,13 +544,10 @@ if [ ${#REPOS[@]} -gt 0 ]; then
   main_checks > "$WORK/main-checks"
   main_check_list=()
   while IFS= read -r line; do main_check_list+=("$line"); done < "$WORK/main-checks"
-  land_checks > "$WORK/land-checks"
-  land_check_list=()
-  while IFS= read -r line; do land_check_list+=("$line"); done < "$WORK/land-checks"
 
   for repo in "${REPOS[@]}"; do
     ensure_rule "$repo" "$MAIN_BRANCH" "$main_body" "${main_check_list[@]}"
-    ensure_rule "$repo" "$LAND_BRANCH" "$land_body" "${land_check_list[@]}"
+    ensure_no_rule "$repo" "$LAND_BRANCH"
     for role in "${ROLES[@]}"; do
       permission="$(collaborator_permission "$role")"
       [ -n "$permission" ] || continue

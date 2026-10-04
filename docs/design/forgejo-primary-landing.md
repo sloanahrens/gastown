@@ -59,8 +59,14 @@ Fixed in gt-fn9e6; change only with the operator.
 - **Protection.** `main` takes no push from anyone, including admins. The merge
   whitelist holds the landing bot only; the required contexts are
   `ci / gate (push)` and `om / review`; `block_on_outdated_branch` makes a
-  stale PR a 409 the worker answers by rebuilding the candidate. `land/**` is
-  push-whitelisted to the landing bot.
+  stale PR a 409 the worker answers by rebuilding the candidate. `main` is the
+  only protected branch. `land/**` carries no rule, because Forgejo refuses to
+  delete any branch a rule matches — admins and the landing bot included — and
+  the worker deletes `land/<bead>` after each merge (the API merge does not
+  apply the repository's delete-branch-after-merge setting, which only the web
+  UI's merge honours). Nothing is gated on that rule: a merge is pinned to the
+  candidate's exact commit, the merge whitelist still admits only the landing
+  bot, and the creator check still vets every status (gt-fn9e6.21).
 - **Forgery check.** Any write user can post a commit status, so the worker
   verifies creators before merging: the gate status must have no user creator
   (it came from Actions) and `om / review` must be posted by the landing bot.
@@ -410,8 +416,9 @@ Needs: none. Covers: "per-rig config (remote and gate workflow)".
 
 Create the bot users, mint tokens (scopes: `write:repository`), set `main`
 protection (no push for anyone, merge whitelist = landing bot, required
-contexts, `block_on_outdated_branch`), and enable `land/**` push for the
-landing bot and the push mirror. Idempotent script plus a runbook.
+contexts, `block_on_outdated_branch`), and leave `land/**` unprotected so the
+worker can delete the candidate branch after each merge. Idempotent script plus
+a runbook.
 
 Files: `scripts/forgejo-provision.sh` (new), `docs/forgejo-runbook.md` (new;
 a `> Status:` header is not used — this is a live runbook, not a historical

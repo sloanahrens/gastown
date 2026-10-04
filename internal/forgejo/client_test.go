@@ -310,6 +310,30 @@ func TestMergePull_ReportsConflict(t *testing.T) {
 	assert.NotContains(t, apiErr.Error(), "test-token")
 }
 
+func TestDeleteBranch_EscapesTheName(t *testing.T) {
+	t.Parallel()
+	rec := &recorder{status: http.StatusNoContent}
+	c := newTestClient(t, rec)
+
+	require.NoError(t, c.DeleteBranch(context.Background(), "gastownhall", "gastown", "land/gt-fn9e6.21"))
+	assert.Equal(t, http.MethodDelete, rec.req.Method)
+	// The branch route is a wildcard the server reads without unescaping, so
+	// the "/" must arrive as %2F (verified on Forgejo 16.0.5).
+	assert.Equal(t, "/api/v1/repos/gastownhall/gastown/branches/land%2Fgt-fn9e6.21", rec.req.URL.EscapedPath())
+}
+
+func TestDeleteBranch_ReportsFailure(t *testing.T) {
+	t.Parallel()
+	rec := &recorder{status: http.StatusForbidden, body: []byte(`{"message":"protected branch"}`)}
+	c := newTestClient(t, rec)
+
+	err := c.DeleteBranch(context.Background(), "gastownhall", "gastown", "land/gt-abc")
+	var apiErr *APIError
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, http.StatusForbidden, apiErr.StatusCode)
+	assert.Contains(t, apiErr.Error(), "protected branch")
+}
+
 func TestListRuns_Filters(t *testing.T) {
 	t.Parallel()
 	rec := &recorder{body: golden(t, "run_list.json")}
