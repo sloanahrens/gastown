@@ -172,6 +172,16 @@ func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
 		d.logger.Printf("checkpoint_dog: git status failed in %s/%s: %v", rigName, polecatName, err)
 		return false
 	}
+
+	// A worktree mid-merge or mid-rebase, or holding unmerged index entries,
+	// is left alone (gt-kbp1t): `git add -A` would stage the conflict markers
+	// or the half-applied operation, and the WIP commit would carry literal
+	// `<<<<<<<` lines onto the polecat's branch.
+	if reason := checkpointBlockedReason(g, status); reason != "" {
+		d.logger.Printf("checkpoint_dog: skipping %s/%s: %s", rigName, polecatName, reason)
+		return false
+	}
+
 	if status.Clean {
 		return false // Clean worktree
 	}
@@ -259,6 +269,44 @@ func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
 
 	d.logger.Printf("checkpoint_dog: created WIP checkpoint in %s/%s", rigName, polecatName)
 	return true
+}
+
+// checkpointBlockedReason reports why a worktree must not be checkpointed, or
+// "" when a checkpoint is safe: `git add -A` plus a commit in these git states
+// would record a half-finished operation as work (gt-kbp1t).
+//
+//   - unmerged index entries: a merge or rebase stopped on conflicts. The
+//     staged tree would hold the conflict markers themselves.
+//   - MERGE_HEAD in the worktree's git directory: a merge stopped before it
+//     was committed, conflict markers or not.
+//   - rebase-merge/ or rebase-apply/: a rebase (interactive or not) in
+//     progress, whose half-replayed commits are not work to keep.
+//
+// Detection reads git state, never file contents, so a file that merely
+// contains a marker is ordinary work. Nothing here resolves or alters the
+// conflict.
+//
+// A git directory that cannot be located blocks the checkpoint: a safety
+// check that could not run must not read as a check that passed.
+func checkpointBlockedReason(g daemonGit, status *gtgit.GitStatus) string {
+	if len(status.Unmerged) > 0 {
+		return fmt.Sprintf("unmerged paths: %s", strings.Join(status.Unmerged, ", "))
+	}
+
+	gitDir, err := g.GitDir()
+	if err != nil {
+		return fmt.Sprintf("cannot locate the worktree's git directory: %v", err)
+	}
+	for _, op := range []struct{ marker, name string }{
+		{"MERGE_HEAD", "merge"},
+		{"rebase-merge", "rebase"},
+		{"rebase-apply", "rebase"},
+	} {
+		if _, err := os.Stat(filepath.Join(gitDir, op.marker)); err == nil {
+			return op.name + " in progress"
+		}
+	}
+	return ""
 }
 
 // stagedPaths returns the paths of staged changes with the given status, or

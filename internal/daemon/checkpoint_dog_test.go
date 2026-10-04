@@ -358,6 +358,109 @@ func TestCheckpointWorktreeSkipsACleanWorktree(t *testing.T) {
 	}
 }
 
+// TestCheckpointWorktreeSkipsAMergeInProgress reproduces gt-kbp1t: a polecat
+// worktree stopped on a merge carries MERGE_HEAD in its git directory, and a
+// `git add -A` plus commit there would record the conflict markers — literal
+// `<<<<<<<` lines — as work on the polecat's branch.
+func TestCheckpointWorktreeSkipsAMergeInProgress(t *testing.T) {
+	t.Parallel()
+	var buf strings.Builder
+	d := &Daemon{logger: log.New(&buf, "", 0)}
+	workDir, _, g := checkpointClone(t, d, map[string]string{"a.go": "package a\n"})
+	before := headOf(t, g)
+	writeWorkFiles(t, workDir, map[string]string{"a.go": "package a\n<<<<<<< HEAD\n"})
+	if err := os.WriteFile(filepath.Join(workDir, ".git", "MERGE_HEAD"), []byte(strings.Repeat("0", 40)+"\n"), 0o644); err != nil {
+		t.Fatalf("write MERGE_HEAD: %v", err)
+	}
+
+	if d.checkpointWorktree(workDir, "rig", "polecat") {
+		t.Fatal("checkpointWorktree committed a worktree with a merge in progress")
+	}
+	if after := headOf(t, g); after != before {
+		t.Fatalf("checkpointWorktree advanced HEAD to %s, want unchanged %s", after, before)
+	}
+	wantNothingStaged(t, g)
+	if !strings.Contains(buf.String(), "skipping rig/polecat: merge in progress") {
+		t.Errorf("log = %q; want a skip line naming the merge", buf.String())
+	}
+}
+
+// TestCheckpointWorktreeSkipsARebaseInProgress covers the rebase half of
+// gt-kbp1t. Both marker directories git leaves for a rebase — rebase-merge for
+// a merge-backed rebase, rebase-apply for an apply-backed one — must stop the
+// checkpoint, since committing a half-replayed rebase lands markers or
+// half-applied history on the branch.
+func TestCheckpointWorktreeSkipsARebaseInProgress(t *testing.T) {
+	t.Parallel()
+	for _, marker := range []string{"rebase-merge", "rebase-apply"} {
+		t.Run(marker, func(t *testing.T) {
+			t.Parallel()
+			var buf strings.Builder
+			d := &Daemon{logger: log.New(&buf, "", 0)}
+			workDir, _, g := checkpointClone(t, d, map[string]string{"a.go": "package a\n"})
+			before := headOf(t, g)
+			writeWorkFiles(t, workDir, map[string]string{"a.go": "package a\n// half-replayed\n"})
+			if err := os.MkdirAll(filepath.Join(workDir, ".git", marker), 0o755); err != nil {
+				t.Fatalf("mkdir %s: %v", marker, err)
+			}
+
+			if d.checkpointWorktree(workDir, "rig", "polecat") {
+				t.Fatal("checkpointWorktree committed a worktree mid-rebase")
+			}
+			if after := headOf(t, g); after != before {
+				t.Fatalf("checkpointWorktree advanced HEAD to %s, want unchanged %s", after, before)
+			}
+			wantNothingStaged(t, g)
+			if !strings.Contains(buf.String(), "skipping rig/polecat: rebase in progress") {
+				t.Errorf("log = %q; want a skip line naming the rebase", buf.String())
+			}
+		})
+	}
+}
+
+// TestCheckpointWorktreeSkipsUnmergedIndexEntries covers the third gt-kbp1t
+// state: an index holding unmerged entries. The merge here leaves no
+// MERGE_HEAD file (the fake models the merge state only), so the skip can only
+// come from the unmerged-path check — the same set `git diff --name-only
+// --diff-filter=U` reports.
+func TestCheckpointWorktreeSkipsUnmergedIndexEntries(t *testing.T) {
+	t.Parallel()
+	var buf strings.Builder
+	d := &Daemon{logger: log.New(&buf, "", 0)}
+	f := useGitfake(t, d)
+	dir := t.TempDir()
+	origin, workDir := filepath.Join(dir, "origin.git"), filepath.Join(dir, "polecat")
+	const branch = "polecat/agate/gt-kbp1t"
+	f.InitBare(t, origin)
+	base := f.Commit(t, origin, "main", "base", map[string]string{"a.txt": "base\n"})
+	f.SetRef(t, origin, "refs/heads/"+branch, base)
+	if err := f.Open(dir).CloneBranch(origin, workDir, branch); err != nil {
+		t.Fatal(err)
+	}
+	g := f.Open(workDir)
+	// Both sides change a.txt differently, so the merge stops on a conflict.
+	f.Commit(t, workDir, branch, "ours", map[string]string{"a.txt": "ours\n"})
+	f.Commit(t, origin, "main", "theirs", map[string]string{"a.txt": "theirs\n"})
+	if err := g.FetchRefspecWithTimeout("origin", "+refs/heads/main:refs/remotes/origin/main", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.MergeNoFF("origin/main", "merge main"); err == nil {
+		t.Fatal("a conflicting merge succeeded")
+	}
+	before := headOf(t, g.(gitfake.WorkTree))
+
+	if d.checkpointWorktree(workDir, "rig", "polecat") {
+		t.Fatal("checkpointWorktree committed a worktree with unmerged index entries")
+	}
+	if after := headOf(t, g.(gitfake.WorkTree)); after != before {
+		t.Fatalf("checkpointWorktree advanced HEAD to %s, want unchanged %s", after, before)
+	}
+	wantNothingStaged(t, g.(gitfake.WorkTree))
+	if !strings.Contains(buf.String(), "skipping rig/polecat: unmerged paths: a.txt") {
+		t.Errorf("log = %q; want a skip line naming the unmerged path", buf.String())
+	}
+}
+
 // A deleted tracked file is never committed as a deletion (gt-pvx): the
 // checkpoint keeps the file and records the rest of the work.
 func TestCheckpointWorktreeNeverCommitsADeletion(t *testing.T) {
