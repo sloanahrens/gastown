@@ -111,7 +111,14 @@ func (s *Scanner) reap(rig, name string, left *int) (Finding, bool) {
 	case "WORKING", "SUBMITTED", "PENDING_MR":
 		return Finding{}, false // someone owns it
 	}
-	if rv.Reusable {
+	// A parked seat is never reusable capacity, whatever the verdict says:
+	// only the allocator and `gt polecat list` read the pause marker, so
+	// check-recovery reports Reusable true for a seat the allocator will
+	// refuse. Trusting it here would leave the parked seats whose bead landed —
+	// the case this pass exists for — un-reapable forever (gt-2knum). Safety
+	// still rests on the SAFE_TO_NUKE verdict, live git state, the vetoes
+	// above, and the longer ParkedGrace below.
+	if rv.Reusable && !parked {
 		return Finding{}, false // reusable capacity is never reaped
 	}
 
