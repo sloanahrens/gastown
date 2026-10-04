@@ -133,7 +133,9 @@ install locations. On macOS, do not install `gt` with `go install`:
 unsigned binaries may be killed by the OS. Clone the repository and use
 `make install-local` instead: it builds the checkout and swaps the binary into
 `~/.local/bin` atomically. It is for this first install only; once a town
-exists, update with `make install` (see [Updating](#updating)).
+exists, update with `make install` (see [Updating](#updating)). After that first
+macOS install, add the Developer Tools grant in
+[macOS: keep the exec tax off the landing gate](#macos-keep-the-exec-tax-off-the-landing-gate).
 
 ```bash
 brew install dolt icu4c
@@ -143,6 +145,49 @@ git clone https://github.com/steveyegge/gastown.git
 cd gastown
 make install-local
 ```
+
+### macOS: keep the exec tax off the landing gate
+
+macOS scans a binary before running it the first time. Without a grant that
+scan puts a fresh executable at 130-157 ms; with a Developer Tools grant the
+same exec costs about 5 ms. `make gate` runs one test binary per package, so the
+cost lands on every landing gate, and the daemon reports it as its `exec-tax`
+field, RED over `operational.health.exec_tax_red`.
+
+A tmux server started from Terminal.app inherits Terminal's exemption. The
+daemon does not: launchd starts it, and it is the parent of every landing gate,
+so until the grant exists each gate exec pays the full scan. What exempts it is
+a Developer Tools grant on `~/.local/bin/gt`.
+
+Add the grant once, after the first signed install:
+
+1. Open System Settings → Privacy & Security → Developer Tools.
+2. Add `~/.local/bin/gt` (`+`, then ⌘⇧G to type the path).
+
+The install signs the binary as `com.gastown.gt`, and the grant is keyed on that
+identifier rather than on the binary's hash, so it survives rebuilds. A grant
+added for an ad-hoc build is bound to that build's cdhash and stops matching at
+the next signed install, which is when the tax returns.
+
+Verify the grant:
+
+```bash
+gt status                                           # exec-tax field: ~5 ms with the grant, 130 ms or more without one
+gt status --line                                    # exit 0, and no exec-tax token while the reading is green
+codesign -dv ~/.local/bin/gt 2>&1 | grep Identifier # Identifier=com.gastown.gt
+```
+
+`gt status` prints every field; `gt status --line` prints only the one health
+line, so it carries `exec-tax` just when the reading is not green. A reading at
+130 ms or more means the grant is missing or bound to an old cdhash — re-add
+`~/.local/bin/gt` under Developer Tools.
+
+Signing runs unattended, so an install never waits at a prompt: the installer
+unlocks its own keychain and gives `codesign` thirty seconds with stdin at
+`/dev/null`. Sign by hand the same way — `timeout 30 codesign ... < /dev/null` —
+because a `codesign` that stops for a password blocks the install while it holds
+the town's lock. Keep the grant as the exemption and leave Gatekeeper at its
+shipped setting.
 
 ### Step 2: Create Your Workspace
 
