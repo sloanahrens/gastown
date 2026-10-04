@@ -614,10 +614,10 @@ func forgejoRigConfig(t *testing.T, townRoot, rigName string) string {
 	return rigPath
 }
 
-// TestNewRigLandingWorker_WiresTheForgejoCandidateGate: a rig with a
+// TestNewRigLandingWorker_WiresTheForgejoLanding: a rig with a
 // merge_queue.forgejo block lands through CI, so its worker carries the
-// candidate gate built from that block (slice 5).
-func TestNewRigLandingWorker_WiresTheForgejoCandidateGate(t *testing.T) {
+// candidate gate (slice 5) and the PR merger (slice 6) built from that block.
+func TestNewRigLandingWorker_WiresTheForgejoLanding(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	const rigName = "testrig"
@@ -647,6 +647,13 @@ func TestNewRigLandingWorker_WiresTheForgejoCandidateGate(t *testing.T) {
 	if gate.Owner != "gastown" || gate.RepoName != "gastown" || gate.Workflow != "gate" {
 		t.Fatalf("gate %+v; want the owner/repo and workflow from merge_queue.forgejo", gate)
 	}
+	merger, ok := lander.Merger.(*land.ForgejoMerger)
+	if !ok || merger == nil {
+		t.Fatalf("Merger = %T; want the rig's Forgejo PR merger", lander.Merger)
+	}
+	if merger.Owner != "gastown" || merger.RepoName != "gastown" {
+		t.Fatalf("merger %+v; want the owner/repo from merge_queue.forgejo", merger)
+	}
 }
 
 // TestNewRigLandingWorker_NoForgejoConfigKeepsTheLocalGate: a rig with no
@@ -667,8 +674,8 @@ func TestNewRigLandingWorker_NoForgejoConfigKeepsTheLocalGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newRigLandingWorker: %v", err)
 	}
-	if lander, ok := w.Lander.(*land.Lander); !ok || lander.Candidate != nil {
-		t.Fatalf("Candidate = %v; want none without a forgejo block", w.Lander)
+	if lander, ok := w.Lander.(*land.Lander); !ok || lander.Candidate != nil || lander.Merger != nil {
+		t.Fatalf("Lander = %v; want no Forgejo gate or merger without a forgejo block", w.Lander)
 	}
 }
 

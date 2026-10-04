@@ -261,6 +261,21 @@ func TestGetPull(t *testing.T) {
 	assert.True(t, got.Mergeable)
 }
 
+func TestOpenPulls(t *testing.T) {
+	t.Parallel()
+	rec := &recorder{body: []byte(`[{"number":3,"head":{"ref":"land/gt-abc"},"base":{"ref":"main"}}]`)}
+	c := newTestClient(t, rec)
+
+	got, err := c.OpenPulls(context.Background(), "gastownhall", "gastown")
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodGet, rec.req.Method)
+	assert.Equal(t, "/api/v1/repos/gastownhall/gastown/pulls", rec.req.URL.Path)
+	assert.Equal(t, "open", rec.req.URL.Query().Get("state"))
+	require.Len(t, got, 1)
+	assert.Equal(t, int64(3), got[0].Number)
+	assert.Equal(t, "land/gt-abc", got[0].Head.Ref)
+}
+
 func TestMergePull_SendsHeadCommitID(t *testing.T) {
 	t.Parallel()
 	rec := &recorder{body: []byte("{}")}

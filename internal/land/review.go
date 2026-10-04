@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/forgejo"
 )
 
 // Verdict values om writes.
@@ -28,6 +30,47 @@ const (
 	// short head sha the review covered.
 	VerdictOverseerPrefix = "overseer:"
 )
+
+// OMStatusContext is the required commit status a cut-over rig's landing posts
+// om's verdict as, beside CI's gate context. main's branch protection requires
+// both, so the merge the worker asks for is the review it posted (design, "om
+// review and the om / review status").
+const OMStatusContext = "om / review"
+
+// omStatusDescriptionMax bounds the description a status carries: the field is
+// a short line for the branch-protection UI, not the verdict's reasoning.
+const omStatusDescriptionMax = 140
+
+// OMVerdictStatus renders verdict as the commit status the landing posts on
+// the candidate. Every verdict a merge path can carry is a success, because
+// the status is what satisfies branch protection and the description keeps the
+// audit trail of why the merge was allowed: an approve and a skipped review
+// are clean, an overseer review stood in for om, and an om that could not run
+// lands with its reason recorded as the waiver it is (design: "The overseer
+// waiver ... becomes a success status with the waiver recorded"). A request
+// for changes maps to a failure, though the landing rejects on it before any
+// PR exists, so the merge path never posts that arm.
+func OMVerdictStatus(v Verdict) forgejo.StatusRequest {
+	req := forgejo.StatusRequest{Context: OMStatusContext}
+	switch {
+	case v.Verdict == VerdictRequestChanges:
+		req.State = forgejo.StateFailure
+		req.Description = elideMiddle(fmt.Sprintf("request_changes (score %.2f)", v.Score), omStatusDescriptionMax)
+	case strings.HasPrefix(v.Verdict, VerdictOverseerPrefix):
+		req.State = forgejo.StateSuccess
+		req.Description = elideMiddle("overseer-reviewed waiver "+strings.TrimPrefix(v.Verdict, VerdictOverseerPrefix), omStatusDescriptionMax)
+	case strings.HasPrefix(v.Verdict, VerdictErrorPrefix):
+		req.State = forgejo.StateSuccess
+		req.Description = elideMiddle("om did not run: "+strings.TrimPrefix(v.Verdict, VerdictErrorPrefix), omStatusDescriptionMax)
+	case v.Verdict == VerdictSkipped:
+		req.State = forgejo.StateSuccess
+		req.Description = "om review disabled"
+	default:
+		req.State = forgejo.StateSuccess
+		req.Description = elideMiddle(fmt.Sprintf("approved (score %.2f)", v.Score), omStatusDescriptionMax)
+	}
+	return req
+}
 
 // Verdict is om's decision on one range.
 type Verdict struct {

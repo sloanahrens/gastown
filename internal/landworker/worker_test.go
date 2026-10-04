@@ -554,6 +554,29 @@ func TestPassRaceRetriesNextPassWithoutBackoff(t *testing.T) {
 	}
 }
 
+// TestPassRebuildRaceIsNotAFailure: on a cut-over rig the outdated-branch
+// guard refusing the merge is the normal rebuild, so it is retried without
+// being counted as a failed landing.
+func TestPassRebuildRaceIsNotAFailure(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	h.lander.fn = func(n int, _ land.Work) (land.Result, error) {
+		if n == 1 {
+			return land.Result{}, &land.RaceError{Target: "main", Rebuild: true}
+		}
+		return land.Result{LandedCommit: "c"}, nil
+	}
+	first := h.w.Pass(context.Background())
+	if first.Failed != 0 {
+		t.Fatalf("report %v; want the rebuild not counted as a failure", first)
+	}
+	rep := h.w.Pass(context.Background())
+	if rep.Landed != 1 || len(h.lander.calls) != 2 {
+		t.Fatalf("report %v, calls %d; want the next pass to land", rep, len(h.lander.calls))
+	}
+}
+
 func TestPassReadBackBacksOffAndAnnounces(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)

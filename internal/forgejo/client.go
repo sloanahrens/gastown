@@ -87,6 +87,15 @@ func (e *APIError) Error() string {
 // answers by rebuilding the candidate rather than failing the landing.
 func (e *APIError) IsConflict() bool { return e.StatusCode == http.StatusConflict }
 
+// IsNotReadyToMerge reports the 405 a merge call gets when the pull request is
+// not mergeable for a reason other than a moved base: a required status that
+// is missing or red, the case a renamed workflow or a rejected status leaves
+// behind. It is not the outdated-branch race, and retrying it as one would
+// never converge (Forgejo 16.0.5, verified live; gt-fn9e6.5 review note).
+func (e *APIError) IsNotReadyToMerge() bool {
+	return e.StatusCode == http.StatusMethodNotAllowed
+}
+
 // repoPath builds /repos/{owner}/{repo} followed by suffix.
 func repoPath(owner, repo, suffix string) string {
 	return "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) + suffix
