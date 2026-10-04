@@ -255,6 +255,26 @@ func NewManager(r *rig.Rig, g *git.Git, t *tmux.Tmux, prefixes *session.PrefixRe
 	return m
 }
 
+// NewManagerWithStore is NewManager over an injected bead database: nil store
+// is bd, and a store answers the work-bead and agent-bead reads alike, so a
+// unit test can run a real Manager without starting bd.
+func NewManagerWithStore(r *rig.Rig, g *git.Git, t *tmux.Tmux, prefixes *session.PrefixRegistry, store Store) *Manager {
+	if store == nil {
+		return NewManager(r, g, t, prefixes)
+	}
+	var repo gitRepo
+	if g != nil {
+		repo = g
+	}
+	var probe sessionProbe
+	if t != nil {
+		probe = t
+	}
+	m := newManager(r, repo, probe, func(beadsSite) polecatStore { return store })
+	m.prefixes = prefixes
+	return m
+}
+
 // sessionName is the tmux session name of the rig's polecat name.
 func (m *Manager) sessionName(name string) string {
 	return session.PolecatSessionName(m.prefixes.PrefixForRig(m.rig.Name), name)

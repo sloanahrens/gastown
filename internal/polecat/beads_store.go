@@ -25,6 +25,13 @@ type polecatStore interface {
 	beads.Client
 }
 
+// Store is the bead database a Manager reads and writes, named so a caller
+// outside this package can inject one (NewManagerWithStore): *beads.Beads over
+// bd, or an in-memory database in a unit test, which may not start bd.
+type Store interface {
+	polecatStore
+}
+
 // beadsSite is where the Manager opens its bead store: bd's working
 // directory and the resolved .beads it reads.
 type beadsSite struct {
