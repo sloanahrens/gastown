@@ -12,15 +12,17 @@ import (
 // fakePulls records the Forgejo calls the land PR makes and answers them from
 // canned state, so no test needs a server.
 type fakePulls struct {
-	open      []forgejo.PullRequest
-	statuses  []forgejo.StatusRequest
-	created   []forgejo.CreatePullRequestOption
-	merges    []forgejo.MergePullRequestOption
-	mergePR   int64
-	statusErr error
-	listErr   error
-	createErr error
-	mergeErr  error
+	open        []forgejo.PullRequest
+	statuses    []forgejo.StatusRequest
+	created     []forgejo.CreatePullRequestOption
+	merges      []forgejo.MergePullRequestOption
+	mergePR     int64
+	combined    *forgejo.CombinedStatus
+	statusErr   error
+	combinedErr error
+	listErr     error
+	createErr   error
+	mergeErr    error
 }
 
 func (f *fakePulls) PostStatus(_ context.Context, _, _, _ string, req forgejo.StatusRequest) (*forgejo.CommitStatus, error) {
@@ -29,6 +31,18 @@ func (f *fakePulls) PostStatus(_ context.Context, _, _, _ string, req forgejo.St
 		return nil, f.statusErr
 	}
 	return &forgejo.CommitStatus{Context: req.Context, Status: req.State}, nil
+}
+
+// CombinedStatus answers the creator check's read. The canned statuses stand
+// for the commit's state after the verdict was posted.
+func (f *fakePulls) CombinedStatus(context.Context, string, string, string) (*forgejo.CombinedStatus, error) {
+	if f.combinedErr != nil {
+		return nil, f.combinedErr
+	}
+	if f.combined == nil {
+		return &forgejo.CombinedStatus{}, nil
+	}
+	return f.combined, nil
 }
 
 func (f *fakePulls) OpenPulls(context.Context, string, string) ([]forgejo.PullRequest, error) {
@@ -49,14 +63,51 @@ func (f *fakePulls) MergePull(_ context.Context, _, _ string, index int64, opt f
 	return f.mergeErr
 }
 
-func testMerger(client ForgejoPulls) *ForgejoMerger {
-	return &ForgejoMerger{Client: client, Owner: "gastown", RepoName: "gastown"}
-}
-
-const mergeHead = "0123456789abcdef0123456789abcdef01234567"
+const (
+	mergeHead = "0123456789abcdef0123456789abcdef01234567"
+	// testBotLogin and testGateContext are the two facts the creator check
+	// needs: the landing bot the rig configures and the context CI reports.
+	testBotLogin    = "gt-landing"
+	testGateContext = "ci / gate (push)"
+)
 
 func mergeWorkForTest() Work {
 	return Work{BeadID: "gt-abc", Rig: "gastown", Branch: fixtureBranch, Head: mergeHead, Target: "main", Worker: "opal"}
+}
+
+func mergeRequestForTest(verdict Verdict) MergeRequest {
+	return MergeRequest{Work: mergeWorkForTest(), Head: mergeHead, Verdict: verdict, GateContext: testGateContext}
+}
+
+// gateStatus is a status on the gate context: creator nil is how a workflow
+// run's status arrives.
+func gateStatus(creator *forgejo.User) forgejo.CommitStatus {
+	return forgejo.CommitStatus{Context: testGateContext, Status: forgejo.StateSuccess, Creator: creator}
+}
+
+// reviewStatus is the om / review status the given account posted.
+func reviewStatus(login string) forgejo.CommitStatus {
+	st := forgejo.CommitStatus{Context: OMStatusContext, Status: forgejo.StateSuccess}
+	if login != "" {
+		st.Creator = &forgejo.User{Login: login}
+	}
+	return st
+}
+
+// cleanCandidate is the statuses a candidate that passes the creator check
+// carries: the gate posted by CI, the review posted by the landing bot.
+func cleanCandidate() *forgejo.CombinedStatus {
+	return &forgejo.CombinedStatus{Statuses: []forgejo.CommitStatus{gateStatus(nil), reviewStatus(testBotLogin)}}
+}
+
+// testMerger builds the production merger over a fake client carrying the
+// statuses a clean candidate has, so a test about anything else does not have
+// to restate them.
+func testMerger(client *fakePulls) *ForgejoMerger {
+	if client.combined == nil {
+		client.combined = cleanCandidate()
+	}
+	return &ForgejoMerger{Client: client, Owner: "gastown", RepoName: "gastown", BotLogin: testBotLogin}
 }
 
 // TestForgejoMergerPostsTheVerdictAndFastForwards: the merge path posts om's
@@ -65,7 +116,7 @@ func mergeWorkForTest() Work {
 func TestForgejoMergerPostsTheVerdictAndFastForwards(t *testing.T) {
 	t.Parallel()
 	client := &fakePulls{}
-	err := testMerger(client).Merge(context.Background(), mergeWorkForTest(), mergeHead, Verdict{Verdict: VerdictApprove, Score: 0.9})
+	err := testMerger(client).Merge(context.Background(), mergeRequestForTest(Verdict{Verdict: VerdictApprove, Score: 0.9}))
 	if err != nil {
 		t.Fatalf("Merge: %v", err)
 	}
@@ -104,7 +155,7 @@ func TestForgejoMergerReusesAnOpenPullRequest(t *testing.T) {
 		{Number: 4, Head: forgejo.PRBranchInfo{Ref: "land/other"}},
 		{Number: 3, Head: forgejo.PRBranchInfo{Ref: "land/gt-abc"}},
 	}}
-	err := testMerger(client).Merge(context.Background(), mergeWorkForTest(), mergeHead, Verdict{Verdict: VerdictApprove})
+	err := testMerger(client).Merge(context.Background(), mergeRequestForTest(Verdict{Verdict: VerdictApprove}))
 	if err != nil {
 		t.Fatalf("Merge: %v", err)
 	}
@@ -121,7 +172,7 @@ func TestForgejoMergerReusesAnOpenPullRequest(t *testing.T) {
 func TestForgejoMergerConflictIsARebuild(t *testing.T) {
 	t.Parallel()
 	client := &fakePulls{mergeErr: &forgejo.APIError{Method: "POST", Path: "/x", StatusCode: 409}}
-	err := testMerger(client).Merge(context.Background(), mergeWorkForTest(), mergeHead, Verdict{Verdict: VerdictApprove})
+	err := testMerger(client).Merge(context.Background(), mergeRequestForTest(Verdict{Verdict: VerdictApprove}))
 	var race *RaceError
 	if !errors.As(err, &race) {
 		t.Fatalf("Merge error = %T %v, want a *RaceError", err, err)
@@ -137,7 +188,7 @@ func TestForgejoMergerConflictIsARebuild(t *testing.T) {
 func TestForgejoMergerNotReadyToMergeIsRefused(t *testing.T) {
 	t.Parallel()
 	client := &fakePulls{mergeErr: &forgejo.APIError{Method: "POST", Path: "/x", StatusCode: 405, Body: `{"message":"Not ready to be merged"}`}}
-	err := testMerger(client).Merge(context.Background(), mergeWorkForTest(), mergeHead, Verdict{Verdict: VerdictApprove})
+	err := testMerger(client).Merge(context.Background(), mergeRequestForTest(Verdict{Verdict: VerdictApprove}))
 	var refused *MergeRefusedError
 	if !errors.As(err, &refused) {
 		t.Fatalf("Merge error = %T %v, want a *MergeRefusedError (a 405 is not the race)", err, err)
@@ -154,7 +205,7 @@ func TestForgejoMergerNotReadyToMergeIsRefused(t *testing.T) {
 func TestForgejoMergerStatusFailureIsInfrastructure(t *testing.T) {
 	t.Parallel()
 	client := &fakePulls{statusErr: errors.New("connection refused")}
-	err := testMerger(client).Merge(context.Background(), mergeWorkForTest(), mergeHead, Verdict{Verdict: VerdictApprove})
+	err := testMerger(client).Merge(context.Background(), mergeRequestForTest(Verdict{Verdict: VerdictApprove}))
 	var infra *InfraError
 	if !errors.As(err, &infra) || infra.Stage != "post om review status" {
 		t.Fatalf("Merge error = %T %v, want an *InfraError at the status post", err, err)
@@ -196,20 +247,14 @@ func TestOMVerdictStatus(t *testing.T) {
 
 // fakeMerger stands in for the Forgejo PR merge inside Land.
 type fakeMerger struct {
-	calls []mergeCall
-	fn    func(w Work, head string, verdict Verdict) error
+	calls []MergeRequest
+	fn    func(req MergeRequest) error
 }
 
-type mergeCall struct {
-	w       Work
-	head    string
-	verdict Verdict
-}
-
-func (m *fakeMerger) Merge(_ context.Context, w Work, head string, verdict Verdict) error {
-	m.calls = append(m.calls, mergeCall{w: w, head: head, verdict: verdict})
+func (m *fakeMerger) Merge(_ context.Context, req MergeRequest) error {
+	m.calls = append(m.calls, req)
 	if m.fn != nil {
-		return m.fn(w, head, verdict)
+		return m.fn(req)
 	}
 	return nil
 }
@@ -222,10 +267,10 @@ func TestLandMergesThroughTheForgejoPR(t *testing.T) {
 	f := newLandFixture(t)
 	l := f.lander()
 	l.Candidate = &fakeCandidate{res: CandidateResult{State: CandidatePassed, Context: "ci / gate (push)"}}
-	merger := &fakeMerger{fn: func(_ Work, head string, _ Verdict) error {
+	merger := &fakeMerger{fn: func(req MergeRequest) error {
 		// Stand in for the server-side fast-forward: the target's tip becomes
 		// the candidate the worker read back.
-		f.git.SetRef(t, f.origin, "refs/heads/main", head)
+		f.git.SetRef(t, f.origin, "refs/heads/main", req.Head)
 		return nil
 	}}
 	l.Merger = merger
@@ -246,11 +291,16 @@ func TestLandMergesThroughTheForgejoPR(t *testing.T) {
 		t.Fatalf("the merger ran %d time(s), want once", len(merger.calls))
 	}
 	call := merger.calls[0]
-	if call.head != res.LandedCommit {
-		t.Fatalf("merge head = %s, want the landed %s", call.head, res.LandedCommit)
+	if call.Head != res.LandedCommit {
+		t.Fatalf("merge head = %s, want the landed %s", call.Head, res.LandedCommit)
 	}
-	if call.verdict.Verdict != VerdictApprove {
-		t.Fatalf("verdict handed to the merger = %q, want approve", call.verdict.Verdict)
+	if call.Verdict.Verdict != VerdictApprove {
+		t.Fatalf("verdict handed to the merger = %q, want approve", call.Verdict.Verdict)
+	}
+	// The merger's creator check reads the status CI posted, so the context the
+	// candidate gate polled has to reach it.
+	if call.GateContext != "ci / gate (push)" {
+		t.Fatalf("gate context handed to the merger = %q, want the one the candidate gate polled", call.GateContext)
 	}
 	if got := f.originMain(); got != res.LandedCommit {
 		t.Fatalf("origin/main = %s, want the landed %s", got, res.LandedCommit)
@@ -267,7 +317,7 @@ func TestLandMergerRefusalIsAHumanRejection(t *testing.T) {
 	f := newLandFixture(t)
 	l := f.lander()
 	l.Candidate = &fakeCandidate{res: CandidateResult{State: CandidatePassed, Context: "ci / gate (push)"}}
-	l.Merger = &fakeMerger{fn: func(Work, string, Verdict) error {
+	l.Merger = &fakeMerger{fn: func(MergeRequest) error {
 		return &MergeRefusedError{Err: errors.New("forgejo: POST /merge returned 405: Not ready to be merged")}
 	}}
 
@@ -286,7 +336,7 @@ func TestLandMergerOutdatedBranchIsARebuild(t *testing.T) {
 	f := newLandFixture(t)
 	l := f.lander()
 	l.Candidate = &fakeCandidate{res: CandidateResult{State: CandidatePassed, Context: "ci / gate (push)"}}
-	l.Merger = &fakeMerger{fn: func(Work, string, Verdict) error {
+	l.Merger = &fakeMerger{fn: func(MergeRequest) error {
 		return &RaceError{Target: "main", Rebuild: true}
 	}}
 

@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/checkpoint"
+	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
 )
 
@@ -1077,5 +1078,166 @@ func TestStageTimesEndsWithTheHostLoad1(t *testing.T) {
 	}
 	if got, want := stageTimesUnderLoad(g, 95*time.Second, false, unreadable), "stages: gate 29s, om 1m35s"; got != want {
 		t.Errorf("stageTimesUnderLoad = %q, want the line unchanged when the load is unreadable", got)
+	}
+}
+
+// The creator check, slice 7 of the Forgejo landing design: any write-access
+// user can post a commit status, so before it merges, the worker asserts the
+// gate status carries no user creator and om / review was posted by the
+// landing bot. A status failing either check is escalated, never merged.
+
+// TestForgejoMergerAcceptsACleanCandidate is the check's pass arm: the gate
+// status came from the workflow run and om / review from the landing bot, so
+// the merge goes through.
+func TestForgejoMergerAcceptsACleanCandidate(t *testing.T) {
+	t.Parallel()
+	client := &fakePulls{}
+	if err := testMerger(client).Merge(context.Background(), mergeRequestForTest(Verdict{Verdict: VerdictApprove})); err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	if len(client.merges) != 1 {
+		t.Fatalf("merged %d time(s), want once", len(client.merges))
+	}
+}
+
+// TestForgejoMergerRefusesAUserPostedGateStatus: a gate status posted by an
+// account rather than by the run is a forged gate, so the landing is refused
+// and nothing is merged.
+func TestForgejoMergerRefusesAUserPostedGateStatus(t *testing.T) {
+	t.Parallel()
+	client := &fakePulls{combined: &forgejo.CombinedStatus{Statuses: []forgejo.CommitStatus{
+		gateStatus(&forgejo.User{Login: "mallory"}),
+		reviewStatus(testBotLogin),
+	}}}
+	err := testMerger(client).Merge(context.Background(), mergeRequestForTest(Verdict{Verdict: VerdictApprove}))
+	var forged *ForgedStatusError
+	if !errors.As(err, &forged) {
+		t.Fatalf("Merge error = %T %v, want a *ForgedStatusError", err, err)
+	}
+	if !strings.Contains(forged.Reason, "mallory") || !strings.Contains(forged.Reason, testGateContext) {
+		t.Fatalf("reason %q; want it to name the posting account and the %s context", forged.Reason, testGateContext)
+	}
+	if len(client.merges) != 0 {
+		t.Fatal("a candidate whose gate status a user posted was merged")
+	}
+	if len(client.created) != 0 {
+		t.Fatal("a land pull request was opened for a candidate that failed the creator check")
+	}
+}
+
+// TestForgejoMergerRefusesAReviewNotFromTheLandingBot: om / review posted by
+// any other account is not the review the worker posted, so the merge pinned
+// to it is refused.
+func TestForgejoMergerRefusesAReviewNotFromTheLandingBot(t *testing.T) {
+	t.Parallel()
+	client := &fakePulls{combined: &forgejo.CombinedStatus{Statuses: []forgejo.CommitStatus{
+		gateStatus(nil),
+		reviewStatus("mallory"),
+	}}}
+	err := testMerger(client).Merge(context.Background(), mergeRequestForTest(Verdict{Verdict: VerdictApprove}))
+	var forged *ForgedStatusError
+	if !errors.As(err, &forged) {
+		t.Fatalf("Merge error = %T %v, want a *ForgedStatusError", err, err)
+	}
+	if !strings.Contains(forged.Reason, "mallory") || !strings.Contains(forged.Reason, testBotLogin) {
+		t.Fatalf("reason %q; want it to name the posting account and the landing bot", forged.Reason)
+	}
+	if len(client.merges) != 0 {
+		t.Fatal("a candidate whose review another account posted was merged")
+	}
+}
+
+// TestForgejoMergerRefusesAReviewWithNoCreator: a review status a workflow run
+// posted is not the landing bot's either, so it fails the check rather than
+// passing it for want of a creator to compare.
+func TestForgejoMergerRefusesAReviewWithNoCreator(t *testing.T) {
+	t.Parallel()
+	client := &fakePulls{combined: &forgejo.CombinedStatus{Statuses: []forgejo.CommitStatus{
+		gateStatus(nil),
+		reviewStatus(""),
+	}}}
+	err := testMerger(client).Merge(context.Background(), mergeRequestForTest(Verdict{Verdict: VerdictApprove}))
+	var forged *ForgedStatusError
+	if !errors.As(err, &forged) {
+		t.Fatalf("Merge error = %T %v, want a *ForgedStatusError", err, err)
+	}
+	if len(client.merges) != 0 {
+		t.Fatal("a candidate with no landing bot review was merged")
+	}
+}
+
+// TestForgejoMergerChecksEveryStatusOfAContext: the workflow's own status does
+// not vouch for a user-posted one beside it. Reading only the first status the
+// API returns would let a forged one hide behind it.
+func TestForgejoMergerChecksEveryStatusOfAContext(t *testing.T) {
+	t.Parallel()
+	client := &fakePulls{combined: &forgejo.CombinedStatus{Statuses: []forgejo.CommitStatus{
+		gateStatus(nil),
+		gateStatus(&forgejo.User{Login: "mallory"}),
+		reviewStatus(testBotLogin),
+	}}}
+	err := testMerger(client).Merge(context.Background(), mergeRequestForTest(Verdict{Verdict: VerdictApprove}))
+	var forged *ForgedStatusError
+	if !errors.As(err, &forged) {
+		t.Fatalf("Merge error = %T %v, want a *ForgedStatusError", err, err)
+	}
+	if len(client.merges) != 0 {
+		t.Fatal("a user-posted gate status was overlooked because a workflow's status came first")
+	}
+}
+
+// TestForgejoMergerMissingGateStatusIsInfrastructure: the candidate gate read
+// this context as a success moments ago, so its absence now is an anomaly
+// rather than a verdict, and the landing is retried rather than rejected or
+// merged.
+func TestForgejoMergerMissingGateStatusIsInfrastructure(t *testing.T) {
+	t.Parallel()
+	client := &fakePulls{combined: &forgejo.CombinedStatus{Statuses: []forgejo.CommitStatus{
+		reviewStatus(testBotLogin),
+	}}}
+	err := testMerger(client).Merge(context.Background(), mergeRequestForTest(Verdict{Verdict: VerdictApprove}))
+	var infra *InfraError
+	if !errors.As(err, &infra) || infra.Stage != "read the candidate's statuses" {
+		t.Fatalf("Merge error = %T %v, want an *InfraError at the status read", err, err)
+	}
+	if len(client.merges) != 0 {
+		t.Fatal("a candidate with no gate status was merged")
+	}
+}
+
+// TestForgejoMergerStatusReadFailureIsInfrastructure: a status list the API
+// will not return says nothing about the work, so the landing is retried.
+func TestForgejoMergerStatusReadFailureIsInfrastructure(t *testing.T) {
+	t.Parallel()
+	client := &fakePulls{combinedErr: errors.New("connection refused")}
+	err := testMerger(client).Merge(context.Background(), mergeRequestForTest(Verdict{Verdict: VerdictApprove}))
+	var infra *InfraError
+	if !errors.As(err, &infra) {
+		t.Fatalf("Merge error = %T %v, want an *InfraError", err, err)
+	}
+	if len(client.merges) != 0 {
+		t.Fatal("a candidate was merged without its statuses being read")
+	}
+}
+
+// TestLandForgedStatusIsAHumanRejection: the forgery check's failure reaches
+// the bead as a rejection no author can rework and no retry lifts, so the
+// landing worker escalates it (outRejectedHuman) instead of merging.
+func TestLandForgedStatusIsAHumanRejection(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	l := f.lander()
+	l.Candidate = &fakeCandidate{res: CandidateResult{State: CandidatePassed, Context: "ci / gate (push)"}}
+	l.Merger = &fakeMerger{fn: func(MergeRequest) error {
+		return &ForgedStatusError{Reason: `the ci / gate (push) status on the candidate abc1234 was posted by user "mallory"`}
+	}}
+
+	_, err := l.Land(context.Background(), f.work)
+	rej := f.assertRejected(t, err, RejectForgedStatus, LabelNeedsHuman)
+	if !strings.Contains(rej.Reason, "mallory") {
+		t.Fatalf("reason %q; want it to name the account that posted the status", rej.Reason)
+	}
+	if rej.Rework {
+		t.Fatal("a forged status was left to the author to rework; only a human can settle it")
 	}
 }

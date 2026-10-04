@@ -556,6 +556,14 @@ func (d *Daemon) newForgejoLanding(rigName string, fj *config.ForgejoConfig, rep
 	if err != nil {
 		return nil, nil, err
 	}
+	// The landing bot's login is the only account the merge trusts to have
+	// posted om / review, so a rig that does not name it has a creator check
+	// that can never pass: fail construction rather than escalate every
+	// landing (gt-fn9e6.7).
+	botLogin := fj.BotLogin(config.ForgejoRoleLanding)
+	if botLogin == "" {
+		return nil, nil, fmt.Errorf("rig %s lands through Forgejo CI but merge_queue.forgejo.bots names no %s login; the merge's creator check cannot trust a review status without it", rigName, config.ForgejoRoleLanding)
+	}
 	tokenDir, err := cfg.ForgejoTokenDir()
 	if err != nil {
 		return nil, nil, err
@@ -578,7 +586,7 @@ func (d *Daemon) newForgejoLanding(rigName string, fj *config.ForgejoConfig, rep
 		Out:      out,
 	}
 	d.verifyForgejoGate(rigName, gate, repo, fj.GateWorkflowName(), landings)
-	merger := &land.ForgejoMerger{Client: client, Owner: owner, RepoName: repoName, Out: out}
+	merger := &land.ForgejoMerger{Client: client, Owner: owner, RepoName: repoName, BotLogin: botLogin, Out: out}
 	return gate, merger, nil
 }
 
