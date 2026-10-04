@@ -22,6 +22,11 @@ type Beads interface {
 	Update(id string, opts beads.UpdateOptions) error
 	ForceCloseWithReason(reason string, ids ...string) error
 	AppendNotes(id, note string) error
+	// Children and CloseWithReason are what closing the molecule a landed
+	// bead carries needs: the walk down to its step wisps, then an unforced
+	// close of each (gt-oqz0r).
+	Children(parentID string) ([]*beads.Issue, error)
+	CloseWithReason(reason string, ids ...string) error
 }
 
 var _ Beads = beads.Client(nil)
@@ -994,5 +999,7 @@ func (l *Lander) recordBead(w Work, rec LandingRecord) error {
 			return fmt.Errorf("closing %s: %w", w.BeadID, err)
 		}
 	}
+	// The work is closed, so the workflow that carried it ends here too.
+	l.closeAttachedMolecule(w.BeadID)
 	return nil
 }
