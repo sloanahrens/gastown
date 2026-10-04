@@ -124,8 +124,10 @@ type OMReviewer struct {
 }
 
 // Review runs om once and returns its verdict. A run that produces none
-// (timeout, execution error, missing or malformed verdict) is not retried:
-// it fails, and the landing goes to a human who reviews instead (gt-is0ep).
+// (timeout, execution error, missing or malformed verdict) is not retried here:
+// it fails, and Land decides (gt-is0ep). Land retries an execution error once
+// on a tree under the size bound (gt-q241r); every other failure goes to a
+// human who reviews instead.
 func (r OMReviewer) Review(ctx context.Context, dir, base, head string) (Verdict, error) {
 	return r.reviewOnce(ctx, dir, base, head)
 }

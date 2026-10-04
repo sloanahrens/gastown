@@ -400,7 +400,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	gateDone()
 	res := Result{LandedCommit: merged, PatchID: patchID, Base: base, Gate: gateRes, RiskPaths: riskPaths}
 	if step, ok := gateRes.TimedOutStep(); ok && ctx.Err() == nil {
-		l.logf("%s: %s", w.BeadID, stageTimes(gateRes, 0))
+		l.logf("%s: %s", w.BeadID, stageTimes(gateRes, 0, false))
 		if step.Name == "lint" {
 			// A slow lint is almost always one waiting on golangci-lint's
 			// module lock behind another run: not a verdict on the tree. The
@@ -431,7 +431,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 			if names := gateRes.ShellTierFailures(); len(names) > 0 {
 				reason += "; the shell tier failed: " + strings.Join(names, " ")
 			}
-			l.logf("%s: %s", w.BeadID, stageTimes(gateRes, 0))
+			l.logf("%s: %s", w.BeadID, stageTimes(gateRes, 0, false))
 			rej := &Rejection{Kind: RejectGate, Rework: true, Reason: reason, GateTail: tail}
 			return Result{}, l.reject(issue, w, rej, nil)
 		}
@@ -447,14 +447,25 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		// not return a verdict (gt-g8t3m): record that and do not pay for om
 		// again. The gate above still ran.
 		verdict = Verdict{Verdict: VerdictOverseerPrefix + shortSHA(w.Head)}
-		l.logf("%s: %s, om skipped (overseer-reviewed)", w.BeadID, stageTimes(gateRes, 0))
+		l.logf("%s: %s, om skipped (overseer-reviewed)", w.BeadID, stageTimes(gateRes, 0, false))
 	} else {
 		reviewStart := time.Now()
 		l.stage(w, StageOM)
 		omCtx, omDone := l.Slow.watch(ctx, l, w, dir, StageOM)
 		verdict, reviewErr = l.Reviewer.Review(omCtx, dir, base, merged)
+		// One flaky om run must not cost an escalation and a hand review
+		// (gt-q241r): an execution error on an ordinary tree is retried once,
+		// inside this same om stage. A timeout, an infra error and a verdict
+		// that arrived are final, and so is an execution error on a tree past
+		// the size bound, which is deterministic and would fail the same way
+		// again.
+		omRetried := errors.Is(reviewErr, ErrOMExecution) && omCtx.Err() == nil && !l.omDiffPastBound(g, base, merged)
+		if omRetried {
+			l.logf("%s: om review returned no verdict (%s); retrying once", w.BeadID, reviewErrorReason(reviewErr))
+			verdict, reviewErr = l.Reviewer.Review(omCtx, dir, base, merged)
+		}
 		omDone()
-		l.logf("%s: %s", w.BeadID, stageTimes(gateRes, time.Since(reviewStart)))
+		l.logf("%s: %s", w.BeadID, stageTimes(gateRes, time.Since(reviewStart), omRetried))
 	}
 	res.Verdict = verdict
 	if reviewErr == nil && verdict.Verdict != VerdictApprove && verdict.Verdict != VerdictRequestChanges && verdict.Verdict != VerdictSkipped && !strings.HasPrefix(verdict.Verdict, VerdictOverseerPrefix) {
@@ -717,7 +728,7 @@ func (l *Lander) landsUnreviewed(issue *beads.Issue) bool {
 
 // stageTimes is one line naming each gate stage's wall time and, when om
 // ran, its own: "stages: lint 18s, gate 92s, om 2m31s".
-func stageTimes(g GateResult, om time.Duration) string {
+func stageTimes(g GateResult, om time.Duration, omRetried bool) string {
 	parts := make([]string, 0, len(g.Steps)+1)
 	for _, st := range g.Steps {
 		t := st.Elapsed.Round(time.Second).String()
@@ -729,7 +740,11 @@ func stageTimes(g GateResult, om time.Duration) string {
 		parts = append(parts, st.Name+" "+t)
 	}
 	if om > 0 {
-		parts = append(parts, "om "+om.Round(time.Second).String())
+		t := om.Round(time.Second).String()
+		if omRetried {
+			t += " (retried)"
+		}
+		parts = append(parts, "om "+t)
 	}
 	return "stages: " + strings.Join(parts, ", ")
 }
@@ -778,6 +793,15 @@ func (l *Lander) omDiffTooLargeLines() int {
 		return l.OMDiffTooLargeLines
 	}
 	return DefaultOMDiffTooLargeLines
+}
+
+// omDiffPastBound reports whether the merged tree changes more lines than the om
+// size bound, so an execution error on it is deterministic and a retry would
+// only buy the same failure (gt-q241r). A size the history could not be read for
+// reports false: not knowing is not evidence the diff is too large.
+func (l *Lander) omDiffPastBound(g Repo, base, merged string) bool {
+	lines, ok := mergedDiffLines(g, base, merged)
+	return ok && lines > l.omDiffTooLargeLines()
 }
 
 // reviewErrorRejectionReason is the RejectReview reason for a green merged tree

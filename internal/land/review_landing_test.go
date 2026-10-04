@@ -142,6 +142,128 @@ func TestLandExecutionErrorUnderTheBoundStaysBare(t *testing.T) {
 	}
 }
 
+// omFailsThenApprove is an om that exits with an execution error on its first
+// run and approves on the second: the flake of gt-q241r (a trailing comma in
+// the reviewer's JSON) whose hand retry passed.
+func omFailsThenApprove(f *landFixture) {
+	n := 0
+	f.review.fn = func(string) (Verdict, error) {
+		n++
+		if n == 1 {
+			return Verdict{}, omError(omStderr())
+		}
+		return Verdict{Verdict: VerdictApprove, Score: 0.9}, nil
+	}
+}
+
+// TestLandRetriesOMReviewOnceAfterAnExecutionError: one malformed om generation
+// must not cost an escalation and a hand review. The retry runs on the same
+// merged tree, the landing succeeds on the second verdict, and both the log and
+// the stages line say it was a retry so a flaky reviewer stays visible
+// (gt-q241r).
+func TestLandRetriesOMReviewOnceAfterAnExecutionError(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	omFailsThenApprove(f)
+	l := f.lander()
+	var log strings.Builder
+	l.Out = &log
+	res, err := l.Land(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("Land: %v; a retried execution error must not stop the landing", err)
+	}
+	if len(f.review.calls) != 2 {
+		t.Fatalf("review calls = %d, want 2 (the error and one retry)", len(f.review.calls))
+	}
+	if f.review.calls[0] != f.review.calls[1] {
+		t.Errorf("the retry reviewed %v, not the same tree and range as %v", f.review.calls[1], f.review.calls[0])
+	}
+	if got := f.originMain(); got != res.LandedCommit {
+		t.Errorf("origin/main is %s, want the landed commit", got)
+	}
+	for _, want := range []string{"retrying once", "(retried)"} {
+		if !strings.Contains(log.String(), want) {
+			t.Errorf("log is missing %q:\n%s", want, log.String())
+		}
+	}
+}
+
+// TestLandRetriesOMReviewOnceThenRejects: a second execution error is handled
+// as today — the landing stops with the second error, not the first, and om is
+// not run a third time.
+func TestLandRetriesOMReviewOnceThenRejects(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	n := new(int)
+	f.review.fn = func(string) (Verdict, error) {
+		*n++
+		return Verdict{}, omError(fmt.Sprintf("attempt %d: the backend exited 1", *n))
+	}
+	l := f.lander()
+	l.ReviewErrorRejects = true
+	_, err := l.Land(context.Background(), f.work)
+	rej := f.assertRejected(t, err, RejectReview, LabelNeedsHuman)
+	if len(f.review.calls) != 2 {
+		t.Fatalf("review calls = %d, want 2 (the error and exactly one retry)", len(f.review.calls))
+	}
+	if !strings.Contains(rej.Reason, "attempt 2") {
+		t.Errorf("reason = %q; want the second attempt's error", rej.Reason)
+	}
+}
+
+// TestLandDoesNotRetryANonExecutionOMError: a timeout is not a malformed
+// generation, and a second run would only spend the om budget on it.
+func TestLandDoesNotRetryANonExecutionOMError(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.review.fn = func(string) (Verdict, error) {
+		return Verdict{}, fmt.Errorf("%w after 5m", ErrOMTimeout)
+	}
+	l := f.lander()
+	l.ReviewErrorRejects = true
+	_, err := l.Land(context.Background(), f.work)
+	f.assertRejected(t, err, RejectReview, LabelNeedsHuman)
+	if len(f.review.calls) != 1 {
+		t.Errorf("review calls = %d, want 1: a timeout is not retried", len(f.review.calls))
+	}
+}
+
+// TestLandDoesNotRetryAnOversizeOMError: an execution error on a tree past the
+// size bound is deterministic, so retrying it only spends the om budget.
+func TestLandDoesNotRetryAnOversizeOMError(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.work.Head = f.git.Commit(t, f.origin, fixtureBranch, "feat: add a large b",
+		map[string]string{"b.txt": strings.Repeat("work\n", DefaultOMDiffTooLargeLines+10)})
+	f.review.fn = func(string) (Verdict, error) { return Verdict{}, omError(omStderr()) }
+	l := f.lander()
+	l.ReviewErrorRejects = true
+	_, err := l.Land(context.Background(), f.work)
+	rej := f.assertRejected(t, err, RejectReview, LabelNeedsHuman)
+	if len(f.review.calls) != 1 {
+		t.Errorf("review calls = %d, want 1: an oversize execution error is deterministic", len(f.review.calls))
+	}
+	if !strings.Contains(rej.Reason, "diff too large for om") {
+		t.Errorf("reason = %q; want it to name the size", rej.Reason)
+	}
+}
+
+// TestLandDoesNotRetryARequestChangesVerdict: om judged the diff, it simply
+// refused it. That verdict is final and goes back as rework.
+func TestLandDoesNotRetryARequestChangesVerdict(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.review.fn = func(string) (Verdict, error) {
+		return Verdict{Verdict: VerdictRequestChanges, Score: 0.4, Findings: []Finding{{ID: "f1", Title: "bad"}}}, nil
+	}
+	l := f.lander()
+	_, err := l.Land(context.Background(), f.work)
+	f.assertRejected(t, err, RejectReview, LabelRework)
+	if len(f.review.calls) != 1 {
+		t.Errorf("review calls = %d, want 1: a request for changes is a verdict, not an error", len(f.review.calls))
+	}
+}
+
 func TestOMReviewerAppliesTheRigThreshold(t *testing.T) {
 	t.Parallel()
 	tree := t.TempDir()
