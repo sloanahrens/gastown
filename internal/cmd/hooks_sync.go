@@ -97,8 +97,8 @@ func (r hooksSyncRun) run() error {
 	// aborts before any other target is touched. This is the exact gap that
 	// let a dropped 'if' field deny every polecat's Bash for 7 minutes on
 	// 2026-09-10 — no probe existed on the post-sync file to catch it before
-	// fan-out. targets[0] is always the mayor target (DiscoverTargets
-	// appends it unconditionally, first), giving a deterministic canary.
+	// fan-out. targets[0] is the canary: DiscoverTargets orders its result
+	// deterministically, so the same target is probed first every run.
 	if !r.dryRun && len(targets) > 0 {
 		canary := targets[0]
 		targets = targets[1:]

@@ -20,7 +20,7 @@ import (
 // Parameters:
 //   - settingsDir: the gastown-managed parent (passed to Claude via --settings
 //     for crew and polecats; the working directory for town-level roles).
-//   - role: the Gas Town role (e.g., "polecat", "crew", "mayor").
+//   - role: the Gas Town role (e.g., "polecat", "crew").
 //
 // It fails closed: an unparseable hooks-base.json, hooks-override file, or
 // existing settings.json aborts the install with an error naming the file,
