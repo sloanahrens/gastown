@@ -447,7 +447,9 @@ type Daemon struct {
 	rebuildGTCycleDoneFn func()
 
 	// tierSweepRunning is the tier_sweep job's single-flight guard
-	// (tier_sweep.go).
+	// (tier_sweep.go). A cycle runs on its own goroutine outside the idle
+	// predicate, so checkUpgradeRestart holds a restart for it separately, up
+	// to tierSweepRestartCap (gt-ccyw0).
 	tierSweepRunning atomic.Bool
 	// tierSweepSeams replace the tier_sweep job's outside effects in tests;
 	// the zero value is production (see tier_sweep.go).
