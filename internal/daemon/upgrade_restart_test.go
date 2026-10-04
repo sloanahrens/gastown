@@ -231,7 +231,7 @@ func TestUpgradeNewerMarkerBusyDoesNotRestart(t *testing.T) {
 	keys := captureEscalations(d)
 	withOwnCommit(d, "aaa")
 	fakeHistory(t, d, "aaa", "bbb")
-	d.mayorDispatchRunning.Store(true)
+	d.scheduledSlingsRunning.Store(true)
 	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: "/repo"})
 
 	now := time.Now()
@@ -255,7 +255,7 @@ func TestUpgradeNewerMarkerBusyDoesNotRestart(t *testing.T) {
 
 	// The idle predicate is read live: once the work finishes, the next
 	// heartbeat restarts.
-	d.mayorDispatchRunning.Store(false)
+	d.scheduledSlingsRunning.Store(false)
 	if !d.checkUpgradeRestart(now.Add(41 * time.Minute)) {
 		t.Fatal("daemon that became idle must restart on the next check")
 	}

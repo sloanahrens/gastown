@@ -7,7 +7,6 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/liveness"
-	"github.com/steveyegge/gastown/internal/mayor"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
 )
@@ -58,12 +57,6 @@ var errNoDaemonStarter = fmt.Errorf("%w: the daemon has no start path for this r
 // supervisor's restart executor, run only after the guards pass.
 func (d *Daemon) restartSeat(seat supervisor.Seat) error {
 	switch seat.Role {
-	case session.RoleMayor:
-		mgr := mayor.NewManager(d.config.TownRoot)
-		if err := mgr.Stop(); err != nil && !errors.Is(err, mayor.ErrNotRunning) {
-			return fmt.Errorf("stopping the old mayor session: %w", err)
-		}
-		return mgr.Start("")
 	case session.RolePolecat:
 		// Only the patrol_scan tick restarts polecats from the daemon
 		// (gt-4k3fj.6).
@@ -104,10 +97,6 @@ func (d *Daemon) mirrorAgentBead(seat supervisor.Seat, rec intent.Record) error 
 // agentBeadIDForSeat returns the seat's agent bead ID, or "" for a seat with
 // none.
 func (d *Daemon) agentBeadIDForSeat(seat supervisor.Seat) string {
-	switch seat.Role {
-	case session.RoleMayor:
-		return beads.MayorBeadIDTown()
-	}
 	if seat.Rig == "" {
 		return ""
 	}
@@ -155,8 +144,8 @@ func (d *Daemon) logRefusal(what string, err error) {
 }
 
 // ClearAgentBackoff clears a supervisor freeze and empties the restart
-// budget for the seat agentID names ("deacon", "mayor", "<rig>/witness",
-// "<rig>/<polecat>", ...). It backs `gt daemon clear-backoff`; an operator
+// budget for the seat agentID names ("<rig>/witness", "<rig>/<polecat>",
+// ...). It backs `gt daemon clear-backoff`; an operator
 // park is left alone (that is `gt agent resume`). reg resolves the seat's rig
 // prefix.
 func ClearAgentBackoff(reg *session.PrefixRegistry, townRoot, agentID string) error {

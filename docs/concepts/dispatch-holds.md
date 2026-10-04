@@ -61,10 +61,10 @@ between the two writes the bead is one the landing worker is already taking
 while its label is absent. The block is the half a read that misses the label
 still carries.
 
-**Idle-seat nudge.** `gt daemon dispatch-check` counts the ready beads the mayor
-could sling and skips any that `dispatch.OperatorReservation` names
-(internal/cmd/daemon_dispatch.go), so an operator-labeled or human-assigned bead
-is never named in the nudge.
+**Dispatchable-work fold.** The ready board's dispatchable-work predicate skips
+any bead `dispatch.OperatorReservation` names (internal/cmd/dispatchable_work.go),
+so an operator-labeled or human-assigned bead is never counted as work a
+dispatcher could pick up.
 
 **gt sling.** Refuses, without `--force`: a bead reserved for the operator, a
 `deferred` bead, and a `pinned`, `hooked` or `in_progress` bead whose holder's

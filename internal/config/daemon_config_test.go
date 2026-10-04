@@ -77,6 +77,33 @@ func TestDaemonPatrolConfigDecodesRetiredRoleKeys(t *testing.T) {
 	}
 }
 
+// patrols.mayor and patrols.mayor_dispatch are retired with the mayor role
+// (gt-rwp7z.3): a daemon.json (or the "daemon" section of settings/config.json)
+// that still carries them is tolerated — it decodes without error, the keys
+// have no effect, and a rewrite keeps them verbatim.
+func TestDaemonPatrolConfigDecodesRetiredMayorKeys(t *testing.T) {
+	t.Parallel()
+	body := `{"patrols":{"mayor":{"enabled":false},` +
+		`"mayor_dispatch":{"enabled":false,"interval":"5m"},` +
+		`"spec_dispatch":{"enabled":true}}}`
+	var cfg DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if cfg.Patrols.Count() != 1 || cfg.Patrols.SpecDispatch == nil {
+		t.Errorf("retired keys read as patrols: Count() = %d", cfg.Patrols.Count())
+	}
+	out, err := json.Marshal(&cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{`"mayor":{"enabled":false}`, `"mayor_dispatch":{"enabled":false,"interval":"5m"}`} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("rewrite dropped %s: %s", want, out)
+		}
+	}
+}
+
 // hookless_agent and max_hookless are retired with the hookless seat class
 // (gt-4k3fj.8.7): a spec_dispatch block that still carries them decodes and
 // keeps them on a rewrite.

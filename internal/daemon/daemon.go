@@ -313,17 +313,6 @@ type Daemon struct {
 	scheduledSlingsHold dispatch.HoldLatch
 	queuedWorkHold      dispatch.HoldLatch
 
-	// mayorDispatchRunning is the single-flight guard for the mayor_dispatch
-	// patrol, on its own goroutine: the cycle shells out to `gt daemon
-	// dispatch-check` and then nudges, either of which can take tens of
-	// seconds, and running them inline would hold the tick loop (gt-59o9).
-	mayorDispatchRunning atomic.Bool
-
-	// mayorDispatchCycles counts the cycle goroutines triggerMayorDispatch has
-	// started and not yet finished, so a caller can wait for a triggered
-	// cycle to end instead of polling mayorDispatchRunning against a clock.
-	mayorDispatchCycles sync.WaitGroup
-
 	// specDispatchRunning / specDispatchCycles are the spec_dispatch ticker's
 	// single-flight guard and cycle count (gt-4k3fj.5, spec_dispatch.go).
 	specDispatchRunning atomic.Bool
@@ -707,8 +696,8 @@ func New(config *Config) (*Daemon, error) {
 
 	// A rig whose docked/parked status cannot be read is treated as not
 	// operational, which suppresses auto-start for that rig. Escalate it, so
-	// the suppression is something the Mayor sees rather than a warning line in
-	// a log nobody reads while the rig sits dead (gt-4nu3).
+	// the suppression is visible rather than a warning line in a log nobody
+	// reads while the rig sits dead (gt-4nu3).
 	d.rigStatusAlert = d.escalateAlert
 	d.rigStatusClear = d.clearAlerts
 	d.checkpointRevertAlert = d.escalateAlert
@@ -966,30 +955,6 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Scheduled slings ticker started (tick %v, %d entries)", scheduledSlingsTickInterval, len(d.patrolConfig.Patrols.ScheduledSlings.Entries))
 	}
 
-	// Start the idle-seat dispatch check ticker if configured. The mayor is
-	// event-driven and a "no dispatch" decision opens no slot, so once it
-	// declines with no polecats running nothing wakes it again; this ticker is
-	// the timer that decision does not self-provide (gt-59o9).
-	// The ticker is a check cadence — due-ness comes from a persisted
-	// last-run time, because a run interval enforced by an in-process ticker
-	// resets on every restart (gt-ima2, gt-gxpwc).
-	var mayorDispatchTicker *time.Ticker
-	var mayorDispatchChan <-chan time.Time
-	if d.isPatrolActive("mayor_dispatch") {
-		interval := mayorDispatchInterval(d.patrolConfig)
-		mayorDispatchTicker = time.NewTicker(shortPatrolCheckTick(interval))
-		mayorDispatchChan = mayorDispatchTicker.C
-		defer mayorDispatchTicker.Stop()
-		d.logger.Printf("Mayor dispatch ticker started (check every %v, run interval %v)",
-			shortPatrolCheckTick(interval), interval)
-		// Catch up at startup (gt-ima2, gt-gxpwc). triggerMayorDispatch logs
-		// its own due-ness decision; the startup log line below just names
-		// whether this specific check kicked off a cycle.
-		if d.triggerMayorDispatch() {
-			d.logger.Printf("Mayor dispatch startup catch-up started a cycle")
-		}
-	}
-
 	// Start the spec dispatcher ticker unless mayor/daemon.json sets
 	// enabled:false (default on, gt-1gnq9).
 	var specDispatchTicker *time.Ticker
@@ -1139,16 +1104,6 @@ func (d *Daemon) Run() (err error) {
 				d.triggerScheduledSlings()
 			}
 
-		case <-mayorDispatchChan:
-			// Idle-seat dispatch check — nudges the mayor when polecat seats
-			// are free and a rig has actionable ready work. Dispatched onto its
-			// own goroutine (never awaited here): the cycle shells out to the
-			// check and then nudges, and the nudge's wait-idle mode alone can
-			// hold for 15s (gt-59o9).
-			if !d.isShutdownInProgress() {
-				d.triggerMayorDispatch()
-			}
-
 		case <-specDispatchChan:
 			// Spec dispatcher tick — lints ready spec beads and slings clean
 			// ones within the seat budget, on its own goroutine (gt-4k3fj.5).
@@ -1275,17 +1230,6 @@ var heartbeatSteps = []heartbeatStep{
 
 	// Kill ghost sessions left over from stale registry (default "gt" prefix).
 	{name: "ghost-sessions", lifecycle: true, run: (*Daemon).killDefaultPrefixGhosts},
-
-	// Ensure Mayor is running (restart if dead); patrols.mayor {"enabled": false}
-	// in mayor/daemon.json turns the supervision off (the town runs without a
-	// resident Mayor while polecats and om cover the work).
-	{name: "mayor", lifecycle: true, run: func(d *Daemon) {
-		if d.isPatrolActive(constants.RoleMayor) {
-			d.ensureMayorRunning()
-		} else {
-			d.logger.Printf("Mayor patrol disabled in config, skipping")
-		}
-	}},
 
 	// Run due plugins. Pressure-gated: a plugin run is new work the
 	// town can put off while it is loaded.
@@ -1501,38 +1445,6 @@ func (d *Daemon) logStartOutcome(role, rigName string, err error) {
 	default:
 		d.logger.Printf("Error starting %s for %s: %v", role, rigName, err)
 	}
-}
-
-// mayorDeadSamples is how many consecutive dead-agent samples the Mayor
-// needs before a restart: during a handoff its agent is briefly
-// undetectable. The count lives in the Mayor's intent record, so it
-// survives daemon restarts.
-const mayorDeadSamples = 3
-
-// mayorSeat is the Mayor's seat.
-var mayorSeat = supervisor.SeatFor("", constants.RoleMayor, "")
-
-// ensureMayorRunning keeps the Mayor running. A missing session is restarted
-// at once; a session whose agent is gone only after mayorDeadSamples
-// consecutive samples. Unknown is never acted on.
-func (d *Daemon) ensureMayorRunning() {
-	res := d.assessSeat(mayorSeat, liveness.Input{})
-	switch res.Verdict {
-	case liveness.Unknown:
-		d.logger.Printf("Mayor agent liveness unknown (%v); not counted as a zombie cycle", res.Err)
-		return
-	case liveness.Alive, liveness.Stalled:
-		return
-	}
-	if res.Reason == liveness.ReasonAgentGone && res.Sample != nil && res.Sample.DeadSamples < mayorDeadSamples {
-		d.logger.Printf("Mayor agent not detected (sample %d/%d), waiting before restart", res.Sample.DeadSamples, mayorDeadSamples)
-		return
-	}
-	if err := d.sup().Restart(mayorSeat, "mayor "+res.Reason, "daemon/ensure-mayor"); err != nil {
-		d.logStartOutcome("mayor", "town", err)
-		return
-	}
-	d.logger.Println("Mayor started successfully")
 }
 
 // killDefaultPrefixGhosts kills tmux sessions that use the default "gt" prefix

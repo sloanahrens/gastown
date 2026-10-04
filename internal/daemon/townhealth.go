@@ -187,7 +187,6 @@ func (s *healthSources) Ticks() ([]townhealth.Tick, error) {
 		{"wisp_reaper", wispReaperInterval(cfg)},
 		{"compactor_dog", compactorDogInterval(cfg)},
 		{"checkpoint_dog", checkpointDogInterval(cfg)},
-		{"mayor_dispatch", mayorDispatchInterval(cfg)},
 		{"git_hygiene", gitHygieneInterval(cfg)},
 		{"events_prune", pruneEvery},
 	}

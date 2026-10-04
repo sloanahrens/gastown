@@ -36,7 +36,6 @@ func TestEverySessionStartCallsTheGate(t *testing.T) {
 		"internal/session/lifecycle.go":       "func StartSession(",
 		"internal/polecat/session_manager.go": "func (m *SessionManager) Start(",
 		"internal/crew/manager.go":            "func (m *Manager) Start(",
-		"internal/mayor/manager.go":           "func (m *Manager) Start(",
 	} {
 		data, err := os.ReadFile(filepath.Join(root, file))
 		if err != nil {

@@ -334,47 +334,8 @@ func TestHeartbeat_EstopStillEnsuresDoltRefusesRestarts(t *testing.T) {
 	if len(ran) != len(heartbeatSteps) {
 		t.Errorf("steps without the e-stop = %v, want all %d", ran, len(heartbeatSteps))
 	}
-	if i := slices.Index(ran, "dolt"); i < 0 || i > slices.Index(ran, "mayor") {
-		t.Errorf("Dolt must be ensured before the mayor step: %v", ran)
-	}
-}
-
-// The mayor's dead-agent debounce is persisted: three consecutive dead
-// samples, even across three daemon values, before one restart. A missing
-// session is restarted at once.
-func TestEnsureMayorRunning_PersistedDebounce(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	clk := newFixedClock()
-	tm := newFakeTmux(clk)
-	tm.addSession(session.MayorSessionName(), "bash", clk.Now()) // agent gone, shell left
-	var restarts []string
-	newD := func() (*Daemon, *strings.Builder) {
-		var buf strings.Builder
-		return &Daemon{config: &Config{TownRoot: town}, logger: log.New(&buf, "", 0), tmux: tm, clock: clk,
-			restartSeatFn: func(seat supervisor.Seat) error { restarts = append(restarts, seat.SessionName()); return nil }}, &buf
-	}
-	for i := 1; i <= 2; i++ {
-		d, buf := newD()
-		d.ensureMayorRunning()
-		if len(restarts) != 0 || !strings.Contains(buf.String(), "waiting before restart") {
-			t.Fatalf("sample %d: restarts=%v log=%s", i, restarts, buf)
-		}
-		clk.Advance(3 * time.Minute)
-	}
-	d, _ := newD()
-	d.ensureMayorRunning()
-	if len(restarts) != 1 {
-		t.Fatalf("third dead sample: restarts = %v, want one", restarts)
-	}
-
-	// No session at all: no debounce.
-	_ = tm.KillSession(session.MayorSessionName())
-	clk.Advance(3 * time.Minute)
-	d, _ = newD()
-	d.ensureMayorRunning()
-	if len(restarts) != 2 {
-		t.Fatalf("missing session: restarts = %v, want a second one at once", restarts)
+	if i := slices.Index(ran, "dolt"); i < 0 || i > slices.Index(ran, "polecat-health") {
+		t.Errorf("Dolt must be ensured before the seat checks that read beads: %v", ran)
 	}
 }
 

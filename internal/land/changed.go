@@ -349,7 +349,6 @@ var sessionStartFiles = map[string]bool{
 	"internal/session/lifecycle.go":       true,
 	"internal/polecat/session_manager.go": true,
 	"internal/crew/manager.go":            true,
-	"internal/mayor/manager.go":           true,
 }
 
 // agentProse reports whether rel is a file TestAgentProseBdAllowlist reads:

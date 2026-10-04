@@ -120,7 +120,6 @@ type (
 	CompactorDogConfig         = agentconfig.CompactorDogConfig
 	CheckpointDogConfig        = agentconfig.CheckpointDogConfig
 	ScheduledMaintenanceConfig = agentconfig.ScheduledMaintenanceConfig
-	MayorDispatchConfig        = agentconfig.MayorDispatchConfig
 	SpecDispatchConfig         = agentconfig.SpecDispatchConfig
 	PatrolScanConfig           = agentconfig.PatrolScanConfig
 	RestartTrackerConfig       = agentconfig.RestartTrackerConfig
@@ -135,7 +134,7 @@ type (
 
 // PatrolConfigFile returns the path to the patrol config file.
 func PatrolConfigFile(townRoot string) string {
-	return filepath.Join(townRoot, constants.RoleMayor, "daemon.json")
+	return filepath.Join(townRoot, constants.DirMayor, "daemon.json")
 }
 
 // PatrolConfigSource names the file the patrol config was read from: on the
@@ -260,19 +259,6 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		}
 		return config.Patrols.TierSweep.Enabled
 	}
-	// mayor_dispatch defaults ON because the failure it exists for is
-	// silence. The mayor is event-driven, so a "no
-	// dispatch" decision opens no slot and wakes it again — on 2026-09-21 the
-	// town sat idle 5.5h with 362 ready beads, and no config entry in
-	// mayor/daemon.json was needed to make that happen. A patrol that has to be
-	// switched on cannot prevent the state it was written for. An explicit
-	// config entry can still disable it (gt-59o9).
-	if patrol == "mayor_dispatch" {
-		if config == nil || config.Patrols == nil || config.Patrols.MayorDispatch == nil {
-			return true
-		}
-		return config.Patrols.MayorDispatch.Enabled
-	}
 	// spec_dispatch defaults ON because the seat-refill plugin it replaced is
 	// deleted (gt-4k3fj.8.8), leaving it the only filler of a free seat: a
 	// dispatcher that must be switched on cannot prevent the idle town it was
@@ -306,10 +292,6 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 	}
 
 	switch patrol {
-	case constants.RoleMayor:
-		if config.Patrols.Mayor != nil {
-			return config.Patrols.Mayor.Enabled
-		}
 	case "handler":
 		if config.Patrols.Handler != nil {
 			return config.Patrols.Handler.Enabled
@@ -398,7 +380,7 @@ const (
 
 // LifecycleRequest represents a request from an agent to the daemon.
 type LifecycleRequest struct {
-	// From is the agent requesting the action (e.g., "mayor/", "gastown/witness").
+	// From is the agent requesting the action (e.g., "gastown/witness").
 	From string `json:"from"`
 
 	// Action is what lifecycle action to perform.

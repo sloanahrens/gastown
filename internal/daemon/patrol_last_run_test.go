@@ -115,7 +115,7 @@ func TestShortPatrolCheckTick(t *testing.T) {
 		{1 * time.Hour, 5 * time.Minute},                   // wisp_reaper: interval/4 (15m) clamped to the 5m ceiling
 		{10 * time.Minute, 2*time.Minute + 30*time.Second}, // checkpoint_dog, patrol_watchdog
 		{60 * time.Minute, 5 * time.Minute},                // main_branch_test default
-		{30 * time.Minute, 5 * time.Minute},                // mayor_dispatch: interval/4 (7.5m) clamped to 5m
+		{30 * time.Minute, 5 * time.Minute},                // 30m interval: interval/4 (7.5m) clamped to 5m
 		{2 * time.Minute, time.Minute},                     // below the 1m floor: interval/4 (30s) clamped up
 		{0, time.Minute},                                   // non-positive: floor
 	}
