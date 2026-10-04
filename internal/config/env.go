@@ -23,6 +23,32 @@ const EnvAgent = "GT_AGENT"
 // override is not a snapshot of that config and must survive (gt-di8p).
 const EnvAgentOverride = "GT_AGENT_OVERRIDE"
 
+// seatGOFLAGSParallelism is the -p a polecat session's go commands plan for
+// when the session does not already cap it. Without a cap each seat's `go
+// test` plans for every core on the host, so a few seats plus the landing
+// gate oversubscribe it: measured 2026-10-03 16:48-19:48, two to four
+// concurrent runs took 8-17 cores at load 25-43, and the gate went from about
+// 30s to 5m02s at load 45-55 (gt-v4r0x). Eight packages leaves the gate its
+// share (gt-5lyns).
+const seatGOFLAGSParallelism = 8
+
+// seatEnvGOFLAGS caps a polecat seat's go parallelism in current, the
+// operator's GOFLAGS for this spawn. An operator value that already names -p
+// is returned unchanged; any other value keeps its flags and gains the cap.
+func seatEnvGOFLAGS(current string) string {
+	capFlag := "-p=" + strconv.Itoa(seatGOFLAGSParallelism)
+	current = strings.TrimSpace(current)
+	if current == "" {
+		return capFlag
+	}
+	for _, f := range strings.Fields(current) {
+		if f == "-p" || strings.HasPrefix(f, "-p=") {
+			return current
+		}
+	}
+	return current + " " + capFlag
+}
+
 // IdentityEnvVars are agent identity env vars that must not leak across
 // process or session boundaries. Used by daemon sanitization (clearing
 // inherited vars), tmux global cleanup, and prime session env repair.
@@ -122,6 +148,10 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 		// via DOLT_MERGE. Without this, concurrent polecats cause manifest
 		// contention leading to Dolt read-only mode (gt-5cc2p).
 		env["BD_DOLT_AUTO_COMMIT"] = "off"
+		// Give this seat's go commands a share of the host (gt-5lyns). The
+		// value comes from the spawning environment, so an operator's GOFLAGS
+		// survives and one that already caps -p is left alone.
+		env["GOFLAGS"] = seatEnvGOFLAGS(getenv("GOFLAGS"))
 
 	case constants.RoleCrew:
 		env["GT_ROLE"] = fmt.Sprintf("%s/crew/%s", cfg.Rig, cfg.AgentName)
