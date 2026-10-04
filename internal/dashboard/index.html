@@ -502,19 +502,6 @@ function renderMachine(s) {
     for (const p of top) { const tr = el("tr"); tr.append(el("td", "", p.name), el("td", "n", p.cpu >= 100 ? (p.cpu / 100).toFixed(1) + " cores" : p.cpu.toFixed(0) + "%")); t.append(tr); }
     box.append(el("div", "k title", "busiest processes"), t);
   }
-  const gates = s.gates || [];
-  if (gates.length) {
-    const t = el("table");
-    const hr = el("tr");
-    ["Gate finished", "Wall", "Load then"].forEach((x, i) => hr.append(el("th", i ? "n" : "", x)));
-    t.append(hr);
-    for (const g of gates.slice(-6).reverse()) {
-      const tr = el("tr");
-      tr.append(el("td", "", clock(g.at)), el("td", "n" + (g.secs > 180 ? " warnc" : ""), fmtDur(g.secs)), el("td", "n", g.load == null ? "–" : g.load.toFixed(1)));
-      t.append(tr);
-    }
-    box.append(el("div", "k title", "landing gates"), t);
-  }
 }
 
 function renderSpend(s) {

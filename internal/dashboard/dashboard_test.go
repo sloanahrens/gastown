@@ -130,9 +130,6 @@ func TestPollsFillStateAndFeedReachesAPage(t *testing.T) {
 	if p := st.Polecats[0]; p.Title != "the title" || p.ElapsedSec != 600 {
 		t.Errorf("polecat = %+v (want its title, and 600s from the dispatch line to now)", p)
 	}
-	if len(st.Gates) != 1 || st.Gates[0].Secs != 301 || st.Gates[0].Load == nil || *st.Gates[0].Load != 7.5 {
-		t.Errorf("gates = %+v", st.Gates)
-	}
 
 	var frames []string
 	for len(page.C) > 0 {
@@ -151,20 +148,6 @@ func TestPollsFillStateAndFeedReachesAPage(t *testing.T) {
 	}
 	if !backlog {
 		t.Error("a page that connects late got no backlog")
-	}
-}
-
-// A gate older than the first load sample has no load to report.
-func TestGateBeforeAnySampleHasNoLoad(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 10, 3, 16, 0, 0, 0, time.UTC)
-	h := NewHub(Config{Feed: func() []Entry {
-		return []Entry{{At: now, Kind: "daemon", Text: "[land] gt-x: stages: lint 1s, gate 40s, om 9s"}}
-	}})
-	h.pollFeed()
-	g := h.State().Gates
-	if len(g) != 1 || g[0].Load != nil || g[0].Secs != 40 {
-		t.Fatalf("gates = %+v", g)
 	}
 }
 
