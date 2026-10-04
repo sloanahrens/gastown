@@ -71,7 +71,7 @@ The live agent and everything that starts, stops or watches it. This is the slic
 
 **Stale-config/stale-data handling:** An existing `settings/config.json` that still carries `"patrols": {"mayor": {...}, "mayor_dispatch": {...}}` is tolerated and ignored: the JSON decoder drops unknown keys and `isPatrolActive` returns false for a retired patrol. Ship the default config without the two keys. No hard error, so a shared or downgraded config still starts.
 
-**Must still pass:** `make gate`; `gt up`/`gt down` start and stop the remaining services; the daemon still supervises witness/refinery/polecat seats.
+**Must still pass:** `make gate`; `gt up`/`gt down` start and stop the remaining services; the daemon still supervises the remaining services: the landing workers, spec dispatch, the steward and the polecat seats.
 
 ### Slice 2 — Remove `mayor/` from mail, nudge and escalation routing
 
@@ -193,10 +193,11 @@ The residue: install stops minting the town mayor, and the remaining comment-onl
   (the operator, an on-call mail address, or bead-only) before the route list
   is edited.
 - **Dispatch (slices 1, 3).** The `mayor_dispatch` patrol is the only thing
-  that nudges a human-facing agent when ready work and free seats coexist. The
-  spec dispatcher slings without it, so the town keeps moving, but nothing
-  surfaces "seats are empty, work is ready" any more. Confirm the steward/plan
-  patrols cover that signal.
+  that nudges a human-facing agent when ready work and free seats coexist.
+  Once the patrol is gone, nothing surfaces "seats are empty while work is
+  ready" except the spec dispatcher's own tick line and the dashboard's seat
+  view. The town keeps moving — the spec dispatcher slings without the patrol —
+  and the loss of that nudge is accepted.
 - **Mail delivery (slice 2).** `mayor/` is a well-known address and `@town`
   resolves to the town-level agents. `@town` must still resolve (to deacon or
   to nothing) rather than becoming an unknown address that bounces.
@@ -218,6 +219,18 @@ The residue: install stops minting the town mayor, and the remaining comment-onl
 - **Generated baselines (slices 4, 6).** `internal/cmdtree/agent-bd-baseline.txt`
   and `internal/cmd/testdata/*` are generated; they fail closed when the
   source shrinks without them.
+
+## Decisions (2026-10-04)
+
+- **Escalations become bead-only.** `mail:mayor` gets no replacement: after
+  slice 2 an escalation is a bead and nothing else, with no operator or
+  on-call address substituted for the retired action. The higher severities
+  keep their `email:human`/`sms:human` actions; only `mail:mayor` is dropped.
+- **The `hq-mayor` agent bead and its nudge wisps are left to the reaper.** No
+  slice deletes the bead or migrates its wisps by hand: with the `%-mayor`
+  exemption gone, `gt reaper` collects them as stale agent beads.
+- **The `mayor/` directory name is permanent.** It stays the town marker, the
+  rig registry, the daemon config and the rig clone; no slice renames it.
 
 ## What this bead does not do
 
