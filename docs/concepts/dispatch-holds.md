@@ -53,6 +53,14 @@ selector (`polecat_pool.pro_label`), so it routes the bead to the seat that
 reserves it. `Eligible` reads the rule with the seat labels dropped, which
 means a `needs-pro` bead is held once no seat reserves the label.
 
+The dispatcher also holds a bead whose notes carry a live `READY TO LAND`
+block — one no `LANDING RECORD` and no `MERGE REJECTION` follows (gt-kr5xv).
+`gt done` writes that block before the `gt:ready-to-land` label, and a label is
+the half of a ready-board answer that has gone missing before (gt-q6zoo), so
+between the two writes the bead is one the landing worker is already taking
+while its label is absent. The block is the half a read that misses the label
+still carries.
+
 **Idle-seat nudge.** `gt daemon dispatch-check` counts the ready beads the mayor
 could sling and skips any that `dispatch.OperatorReservation` names
 (internal/cmd/daemon_dispatch.go), so an operator-labeled or human-assigned bead

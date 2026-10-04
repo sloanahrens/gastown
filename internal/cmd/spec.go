@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/specdispatch"
@@ -148,7 +149,9 @@ operational rig, numbered at or above polecat_pool.max_priority's ceiling
 beads, wisps and the other runtime families are never candidates; the retired
 label spec and type feature are accepted and ignored (gt-mmsr2). Beads labeled
 gt:ready-to-land, needs-human or needs-mayor-review, or deferred, are never
-taken. Each candidate is linted (see gt spec lint), and
+taken, and neither is a bead submitted for landing whose READY TO LAND block
+has reached the read before the label (gt-kr5xv). Each candidate is linted (see
+gt spec lint), and
 polecat_pool.shape_gate says what the verdict does:
 
   - off: no lint runs; the bead is dispatched like any other
@@ -245,7 +248,30 @@ func specFromIssue(issue *beads.Issue) specdispatch.Spec {
 		Notes:       issue.Notes,
 		Acceptance:  issue.AcceptanceCriteria,
 		Ephemeral:   issue.Ephemeral,
+
+		SubmittedForLanding: specLiveLandingRequest(issue.Notes),
 	}
+}
+
+// specLiveLandingRequest reports whether notes carry a landing request that
+// nothing later settled: a complete READY TO LAND block after the last LANDING
+// RECORD and the last MERGE REJECTION. gt done writes that block before the
+// gt:ready-to-land label (internal/done markReadyToLand), so a bead mid-write
+// has the block and no label; the label is also the half of an answer known to
+// go missing (gt-q6zoo), which leaves the notes as the signal that survives.
+// Holding on the block keeps such a bead off the candidate board and out of a
+// sling (gt-kr5xv). A land or a rejection written after the block settles it,
+// so a landed bead and a rework are left to their own paths.
+func specLiveLandingRequest(notes string) bool {
+	if _, ok := land.ParseReadyNote(notes); !ok {
+		return false
+	}
+	submitted := strings.LastIndex(notes, land.ReadyNoteMarker+"\n")
+	settled := strings.LastIndex(notes, land.LandingNoteMarker)
+	if rejected := strings.LastIndex(notes, land.MergeRejectionNoteMarker); rejected > settled {
+		settled = rejected
+	}
+	return submitted > settled
 }
 
 // showSpec reads one bead in full (bd show), routed by its prefix.

@@ -231,6 +231,14 @@ type Spec struct {
 	Design      string
 	Notes       string
 	Acceptance  string
+	// SubmittedForLanding marks a bead whose notes carry a live landing
+	// request: a READY TO LAND block that no LANDING RECORD and no MERGE
+	// REJECTION follows. gt done writes that block before the gt:ready-to-land
+	// label, and a label is the half of an answer known to go missing
+	// (gt-q6zoo), so a bead mid-submission reaches the dispatcher marked here
+	// while it wears no label (gt-kr5xv). The caller fills it from the notes;
+	// nothing in this package parses the block.
+	SubmittedForLanding bool
 	// Ephemeral marks a wisp: an ephemeral bead (a molecule, a merge
 	// request) that bd keeps out of the issues table. No wisp is work.
 	Ephemeral bool
