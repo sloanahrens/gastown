@@ -44,6 +44,12 @@ const (
 	// caller does not start a suite beside it while the pool yields to the
 	// gate (Pool.YieldToGate, gt-22hdp.29). Holder names the gate.
 	WaitReasonGateRunning WaitReason = "gate_running"
+
+	// WaitReasonFullSuiteHeld: a full-suite-class holder is already running
+	// and the pool caps them at Pool.MaxFullSuites (gt-dhcmp), so this
+	// full-suite start cedes until it releases rather than piling a second
+	// whole-tree run onto the host. Holder names the run it waits behind.
+	WaitReasonFullSuiteHeld WaitReason = "full_suite_held"
 )
 
 // waitWatch accumulates what kept one Acquire call from granting, so the
@@ -71,6 +77,9 @@ type waitWatch struct {
 	// gateHolder is the first running gate observed while yielding to it,
 	// the evidence for WaitReasonGateRunning.
 	gateHolder *Owner
+	// fullSuiteHolder is the first live full-suite holder observed while
+	// ceding to the cap, the evidence for WaitReasonFullSuiteHeld.
+	fullSuiteHolder *Owner
 }
 
 func newWaitWatch(clock clockwork.Clock) *waitWatch {
@@ -116,6 +125,12 @@ func (w *waitWatch) noteGateHolder(owner *Owner) {
 	}
 }
 
+func (w *waitWatch) noteFullSuiteHolder(owner *Owner) {
+	if w.fullSuiteHolder == nil {
+		w.fullSuiteHolder = owner
+	}
+}
+
 func (w *waitWatch) noteContainers(names []string) {
 	if len(w.containers) == 0 {
 		w.containers = names
@@ -154,12 +169,16 @@ func (w *waitWatch) info(timeout time.Duration, timedOut bool) waitInfo {
 }
 
 // attribute sets info's reason and the holder that is its evidence: the gate
-// yielded to for WaitReasonGateRunning, the token holder otherwise.
+// yielded to for WaitReasonGateRunning, the run ceded to for
+// WaitReasonFullSuiteHeld, the token holder otherwise.
 func (w *waitWatch) attribute(info *waitInfo, reason WaitReason) {
 	info.Reason = reason
 	info.Holder = w.holder
-	if reason == WaitReasonGateRunning {
+	switch reason {
+	case WaitReasonGateRunning:
 		info.Holder = w.gateHolder
+	case WaitReasonFullSuiteHeld:
+		info.Holder = w.fullSuiteHolder
 	}
 }
 
@@ -198,6 +217,11 @@ func (i waitInfo) describe() string {
 			return fmt.Sprintf("gate running: %s pid %d holds gate-reserved slot %d; non-gate suites yield to it", i.Holder.Role, i.Holder.PID, i.Holder.Slot)
 		}
 		return "gate running: a gate-reserved slot is held; non-gate suites yield to it"
+	case WaitReasonFullSuiteHeld:
+		if i.Holder != nil {
+			return fmt.Sprintf("full-suite cap: %s pid %d is already running a whole-tree suite (slot %d)", i.Holder.Role, i.Holder.PID, i.Holder.Slot)
+		}
+		return "full-suite cap: another whole-tree suite is already running"
 	default:
 		return ""
 	}
@@ -248,7 +272,8 @@ type HistoryEntry struct {
 	TimedOut bool       `json:"timed_out,omitempty"`
 	Reason   WaitReason `json:"reason,omitempty"`
 	// HolderRole/HolderPID are the token holder waited behind, for
-	// WaitReasonTokenHeld, or the gate yielded to, for WaitReasonGateRunning;
+	// WaitReasonTokenHeld, the gate yielded to, for WaitReasonGateRunning, or
+	// the full-suite run ceded to, for WaitReasonFullSuiteHeld;
 	// Containers the unwrapped suite, for
 	// WaitReasonUnwrappedContainers; DockerError the failed probe, for
 	// WaitReasonDaemonUnreachable. The overseer's gt-dc81 amendment requires the

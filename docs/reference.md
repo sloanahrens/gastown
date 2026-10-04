@@ -163,6 +163,28 @@ container suite verified at `gt done` asks for it in its own command
 slot for it. The session's own exported value is deliberately not an input: the slot
 decision and the environment the suite reads are one fact (gt-0hbm).
 
+**Whole-tree runs are capped (gt-dhcmp).** A whole-tree test run is the heaviest thing a
+seat starts, and several at once starve the landing gate: on 2026-10-03 whole-suite runs
+from several seats pushed one landing's gate to 5m02s against a 26-39s norm. The
+container-gate pool now caps the full-suite class at `container_gate.max_full_suites`
+concurrent holders townwide (default `1`; `0` disables the cap). A role is full-suite
+class when it ends in `/full-suite`, `/tier-sweep` or `/flake-sweep`, so a session
+wrapping its own whole-tree run asks for the cap by naming its role that way:
+
+```
+gt slot run --role gastown/crew/sloan/full-suite -- make test
+```
+
+A second whole-tree start waits for the running one instead of competing for a free
+slot, and reports that wait like any other: `full_suite_held` in `gt slot status`, with
+the run it ceded to named. Package-scoped suites (`go test ./internal/x/...`, a
+`-run`-filtered run, `make presubmit`) are unaffected. The landing gate is never capped,
+never counted against the cap and never waits on it: a gate is not full-suite class, so
+it takes its own slot — a gate-reserved one where the pool reserves any, any free one
+otherwise — and a gate started while a whole-tree run holds a slot proceeds at once. The daemon's tier sweep already
+takes the token as `<rig>/tier-sweep`; run the flake sweep as
+`gt slot run --role <rig>/flake-sweep -- bash scripts/flake-sweep.sh [ITER] [CONC]`.
+
 Run `gt done` **once**, then leave it alone: the gate takes minutes. If it exits non-zero it
 names what failed (exit codes 10-16, `gt done --help`) and the session stays up; fix what it
 names and run `gt done` once more. A failure you believe your change did not cause goes in a

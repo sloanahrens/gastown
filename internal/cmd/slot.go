@@ -45,6 +45,14 @@ reports the recent acquisitions with their wait durations and the reason each
 one waited — so the question "is the gate constricting the town?" can be
 answered from the status output instead of from panes.
 
+Whole-tree runs are capped separately from the slot count: at most
+container_gate.max_full_suites (default 1) full-suite-class holders run at
+once townwide, so a pile-up of whole-suite runs cannot starve the landing
+gate. A role is full-suite-class when it ends in /full-suite, /tier-sweep or
+/flake-sweep; a second whole-tree start waits for the running one and reports
+that wait like any other. The landing gate is never capped and never waits on
+this.
+
 The containers a dead suite leaves behind are a separate matter — run
 'gt slot reap' when a container the gate matches looks stale, and read
 'gt slot status' to see which containers it is judging.`,
@@ -120,7 +128,7 @@ you mean and that no live test process owns it, then run
 }
 
 func init() {
-	slotRunCmd.Flags().StringVar(&slotRunRole, "role", "", "Identifier for the holder, shown in 'gt status' (e.g. rig/role or MR id). It also scopes nesting: a wrapper nested inside another holder stays reentrant only if it names that holder's role. Omit it to inherit the ancestor's role automatically when nested; naming a different role always contends")
+	slotRunCmd.Flags().StringVar(&slotRunRole, "role", "", "Identifier for the holder, shown in 'gt status' (e.g. rig/role or MR id). It also scopes nesting: a wrapper nested inside another holder stays reentrant only if it names that holder's role. Omit it to inherit the ancestor's role automatically when nested; naming a different role always contends. End it in /full-suite when the command is a whole-tree test run: whole-tree runs are capped townwide (container_gate.max_full_suites, default one) and a start at the cap waits for the running one (see 'gt slot status')")
 	slotRunCmd.Flags().DurationVar(&slotRunTimeout, "timeout", 60*time.Minute, "Max time to wait for the slot to free up (0 = wait forever)")
 	slotRunCmd.Flags().IntVar(&slotRunNice, "nice", -1, "CPU niceness for the command (default: 10 for non-gate roles, 0 for the landing worker; 0 disables)")
 
@@ -380,6 +388,11 @@ func slotHistoryReason(e slot.HistoryEntry) string {
 			return fmt.Sprintf("gate_running: %s (pid %d)", e.HolderRole, e.HolderPID)
 		}
 		return string(slot.WaitReasonGateRunning)
+	case slot.WaitReasonFullSuiteHeld:
+		if e.HolderRole != "" {
+			return fmt.Sprintf("full_suite_held: %s (pid %d)", e.HolderRole, e.HolderPID)
+		}
+		return string(slot.WaitReasonFullSuiteHeld)
 	default:
 		return ""
 	}

@@ -20,5 +20,6 @@ func PoolFromConfig(cg *config.ContainerGateThresholds) Pool {
 		ReservedForGate: cg.ReservedForGateV(),
 		YieldToGate:     cg.YieldToGateV(),
 		MaxGateYield:    cg.MaxGateYieldD(),
+		MaxFullSuites:   cg.MaxFullSuitesV(),
 	}
 }

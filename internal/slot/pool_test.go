@@ -453,6 +453,11 @@ func TestTimeoutError_NamesTheCause(t *testing.T) {
 			waitInfo{Reason: WaitReasonGateRunning, Holder: &Owner{Role: "gastown/landing", PID: 42, Slot: 0}},
 			"gate running: gastown/landing pid 42 holds gate-reserved slot 0",
 		},
+		{
+			"the full-suite cap",
+			waitInfo{Reason: WaitReasonFullSuiteHeld, Holder: &Owner{Role: "gastown/tier-sweep", PID: 42, Slot: 2}},
+			"full-suite cap: gastown/tier-sweep pid 42 is already running a whole-tree suite (slot 2)",
+		},
 		{"no blocker", waitInfo{}, ""},
 	}
 	for _, c := range cases {
