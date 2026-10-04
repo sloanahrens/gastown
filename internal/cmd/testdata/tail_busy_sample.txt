@@ -18,7 +18,7 @@
 2026-10-02T14:00:25Z	hq	events	update hq-wisp-e0g8y7 status=open actor=daemon seq=4410
 2026-10-02T14:00:28Z	town	daemon	Handler: script plugin seat-refill skipped (exit 3 after 2s); nothing to do this run
 2026-10-02T14:00:29Z	town	daemon	dog_cycle: checkpoint_dog outcome=ran steps=[scan=done]
-2026-10-02T14:00:30Z	town	daemon	Mayor patrol disabled in config, skipping
+2026-10-02T14:00:30Z	town	daemon	Handler patrol disabled in config, skipping
 2026-10-02T14:00:31Z	town	daemon	Handler patrol disabled in config, skipping
 2026-10-02T14:00:32Z	town	daemon	Heartbeat starting (recovery-focused)
 2026-10-02T14:00:33Z	gastown	events	update gt-gastown-polecat-malachite actor=gastown/polecats/malachite seq=6908
@@ -83,7 +83,7 @@
 2026-10-02T14:03:16Z	town	daemon	patrol_scan: gastown: checked 3 polecat(s): 0 restarted, 0 refused, 0 unknown, 0 molecule(s) closed, 0 stranded reported, 0 error(s)
 2026-10-02T14:03:18Z	town	daemon	clearAlerts(doctor_dog:probe): probe succeeded
 2026-10-02T14:03:20Z	town	daemon	checkpoint_dog: not due — last run 1m ago, interval 5m
-2026-10-02T14:03:22Z	town	daemon	Mayor patrol disabled in config, skipping
+2026-10-02T14:03:22Z	town	daemon	Handler patrol disabled in config, skipping
 2026-10-02T14:03:24Z	gastown	events	update gt-ufjol status=in_progress actor=gastown/polecats/malachite seq=6928
 2026-10-02T14:03:26Z	town	daemon	Restarting for upgrade: shutting down so launchd restarts the daemon on the installed binary
 2026-10-02T14:03:28Z	town	daemon	Upgrade restart: leaving Dolt server running for the next daemon to adopt

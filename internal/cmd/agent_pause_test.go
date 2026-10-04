@@ -20,7 +20,6 @@ func TestCheckPauseGatedOnlyAllowsPolecat(t *testing.T) {
 	}
 
 	for _, role := range []session.Role{
-		session.RoleMayor,
 		session.RoleCrew,
 	} {
 		t.Run(string(role), func(t *testing.T) {
@@ -37,16 +36,13 @@ func TestCheckPauseGatedOnlyAllowsPolecat(t *testing.T) {
 
 // agentPauseAddresses are the forms an operator can hand to `gt agent
 // pause`/`resume`: polecat as either the two-segment shorthand or the
-// mail-style form, retired rig role names (now polecat names), crew, and the
-// town-level mayor.
+// mail-style form, retired rig role names (now polecat names), and crew.
 var agentPauseAddresses = []string{
 	"gastown/flint",
 	"gastown/polecats/flint",
 	"gastown/witness",
 	"gastown/refinery",
 	"gastown/crew/opal",
-	"mayor",
-	"mayor/",
 }
 
 // TestPauseTargetCoordinatesMatchStatus pins the two address parsers together:

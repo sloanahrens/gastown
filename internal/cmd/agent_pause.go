@@ -1,6 +1,6 @@
 // Per-agent sanctioned pause (gt agent pause / gt agent resume).
 //
-// A mayor/operator freeze (SIGSTOP) of a misbehaving agent is
+// An operator freeze (SIGSTOP) of a misbehaving agent is
 // indistinguishable from a stuck agent: the stuck-agent dog respawned a
 // frozen flint 20 minutes later, and the witness patrol restarted parked
 // agents (gt-ahik). This command is the
@@ -44,7 +44,7 @@ var agentCmd = &cobra.Command{
 
 Pause targets a polecat: it is only meaningful where a scanner reads the
 marker it writes. Resume accepts any agent address, including a stale
-mayor/deacon/witness/refinery/crew marker or bead mirror left by an older
+deacon/witness/refinery/crew marker or bead mirror left by an older
 build.`,
 }
 
@@ -102,7 +102,7 @@ type agentAddr struct {
 // pauseGatedRoles lists the roles at least one scanner actually consults the
 // pause marker for: the witness zombie/stall paths (DetectZombiePolecats,
 // DetectStalledPolecats, RestartPolecatSession) gate on agentpause.PauseGate,
-// and all of them only ever act on polecats. Witness, refinery, mayor, deacon, and crew restarts run
+// and all of them only ever act on polecats. Witness, refinery, deacon, and crew restarts run
 // through code that never reads this marker, so a pause written for them
 // would look like it worked and would not (gt-ahik, om kgx0).
 var pauseGatedRoles = map[session.Role]bool{
@@ -119,7 +119,7 @@ func checkPauseGated(role session.Role) error {
 }
 
 // parseAgentAddr parses an address for gt agent pause/resume.
-// Accepts <rig>/<name> (polecat), <rig>/crew/<name> and mayor.
+// Accepts <rig>/<name> (polecat) and <rig>/crew/<name>.
 func parseAgentAddr(reg *session.PrefixRegistry, address string) (*agentAddr, error) {
 	id, err := session.ParseAddressWithRegistry(address, reg)
 	if err != nil {
@@ -131,11 +131,7 @@ func parseAgentAddr(reg *session.PrefixRegistry, address string) (*agentAddr, er
 	// disagree (gt-ahik: a duplicated switch here once drifted from
 	// roleAndName's).
 	role, name := addr.roleAndName()
-	// The retired mayor role owns no agent bead (gt-rwp7z); every remaining
-	// target resolves to its rig's prefixed bead.
-	if id.Role != session.RoleMayor {
-		addr.BeadID = beads.AgentBeadIDWithPrefix(reg.PrefixForRig(id.Rig), id.Rig, role, name)
-	}
+	addr.BeadID = beads.AgentBeadIDWithPrefix(reg.PrefixForRig(id.Rig), id.Rig, role, name)
 	return addr, nil
 }
 

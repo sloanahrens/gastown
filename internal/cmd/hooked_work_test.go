@@ -35,8 +35,8 @@ func TestResolveHookLookupWorkDirUsesRouteOwnedRigDir(t *testing.T) {
 
 func TestResolveHookLookupWorkDirLeavesTownLevelTargetLocal(t *testing.T) {
 	t.Parallel()
-	workDir := filepath.Join(t.TempDir(), "mayor")
-	got := resolveHookLookupWorkDir(workDir, "mayor/", t.TempDir())
+	workDir := filepath.Join(t.TempDir(), "deacon")
+	got := resolveHookLookupWorkDir(workDir, "deacon", t.TempDir())
 	if got != workDir {
 		t.Fatalf("resolveHookLookupWorkDir() = %q, want %q", got, workDir)
 	}

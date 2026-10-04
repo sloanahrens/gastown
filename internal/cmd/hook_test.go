@@ -33,8 +33,8 @@ func TestHookPolecatEnvCheck(t *testing.T) {
 			wantBlock: true,
 		},
 		{
-			name:      "mayor with stale GT_POLECAT is NOT blocked",
-			role:      "mayor",
+			name:      "deacon with stale GT_POLECAT is NOT blocked",
+			role:      "deacon",
 			polecat:   "alpha",
 			wantBlock: false,
 		},

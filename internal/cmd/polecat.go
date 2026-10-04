@@ -15,7 +15,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -246,7 +245,7 @@ Used by the Witness to determine appropriate cleanup action:
   - NEEDS_RECOVERY: cleanup_status, active_mr, or fallback git predicates require recovery
 
 This prevents accidental data loss when cleaning up dormant polecats.
-The Witness should escalate NEEDS_RECOVERY and NEEDS_MQ_SUBMIT cases to the Mayor.
+The Witness should escalate NEEDS_RECOVERY and NEEDS_MQ_SUBMIT cases.
 
 Examples:
   gt polecat check-recovery greenplace/Toast
@@ -1857,7 +1856,7 @@ func renderCheckRecoveryText(w io.Writer, status RecoveryStatus) {
 			fmt.Fprintf(w, "  %s Cleanup refused, but this status names no blocker (reason=%q).\n", style.Warning.Render("⚠"), status.Reason)
 			fmt.Fprintln(w, "  DecideWorkstate names a blocker for every refusal, so this status did not come from it. Report the gap before acting.")
 		}
-		fmt.Fprintln(w, "  Escalate to Mayor for recovery before cleanup.")
+		fmt.Fprintln(w, "  Escalate for recovery before cleanup.")
 	case polecat.WorkstateVerdictWorking:
 		fmt.Fprintf(w, "  Verdict:         %s\n", style.Error.Render("WORKING"))
 		fmt.Fprintln(w)
@@ -1878,7 +1877,7 @@ func renderCheckRecoveryText(w io.Writer, status RecoveryStatus) {
 	default:
 		fmt.Fprintf(w, "  Verdict:         %s\n", style.Error.Render(status.Verdict))
 		fmt.Fprintln(w)
-		fmt.Fprintf(w, "  %s Unrecognized verdict %q — treating as NOT safe to nuke. Escalate to Mayor.\n", style.Warning.Render("⚠"), status.Verdict)
+		fmt.Fprintf(w, "  %s Unrecognized verdict %q — treating as NOT safe to nuke. Escalate.\n", style.Warning.Render("⚠"), status.Verdict)
 	}
 }
 
@@ -3162,8 +3161,6 @@ func nukeActorIdentity() string {
 // without a real Gas Town workspace on disk.
 func formatActorIdentity(roleInfo RoleInfo) string {
 	switch roleInfo.Role {
-	case RoleMayor:
-		return constants.RoleMayor
 	case RoleCrew:
 		return fmt.Sprintf("%s/crew/%s", roleInfo.Rig, roleInfo.Polecat)
 	case RolePolecat:

@@ -66,10 +66,10 @@ func TestIsRigNameWithTrailingSlash(t *testing.T) {
 			wantOk:   false,
 		},
 		{
-			name:     "mayor role without slash",
-			target:   "mayor",
+			name:     "crew role without slash",
+			target:   "crew",
 			wantName: "",
-			wantOk:   false, // mayor is a known role, not a rig
+			wantOk:   false, // crew is a known role, not a rig
 		},
 	}
 

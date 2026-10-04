@@ -96,7 +96,7 @@ func resolveHookLookupWorkDir(workDir, target, townRoot string) string {
 	}
 
 	rigName := strings.Split(target, "/")[0]
-	if rigName == "" || rigName == "mayor" || rigName == "deacon" {
+	if rigName == "" || rigName == "deacon" {
 		return workDir
 	}
 	if rigDir := beads.GetRigDirForName(townRoot, rigName); rigDir != "" {

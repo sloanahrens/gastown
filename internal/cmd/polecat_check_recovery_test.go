@@ -463,7 +463,6 @@ func TestFormatActorIdentity(t *testing.T) {
 		info RoleInfo
 		want string
 	}{
-		{name: "mayor", info: RoleInfo{Role: RoleMayor}, want: "mayor"},
 		{name: "polecat", info: RoleInfo{Role: RolePolecat, Rig: "gastown", Polecat: "onyx"}, want: "gastown/onyx"},
 		{name: "crew", info: RoleInfo{Role: RoleCrew, Rig: "gastown", Polecat: "toast"}, want: "gastown/crew/toast"},
 	}
