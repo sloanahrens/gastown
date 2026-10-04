@@ -114,3 +114,8 @@ func (r RetryBeads) Create(opts beads.CreateOptions) (is *beads.Issue, err error
 func (r RetryBeads) CloseWithReason(reason string, ids ...string) error {
 	return r.do(func() error { return r.Inner.CloseWithReason(reason, ids...) })
 }
+
+func (r RetryBeads) Children(parentID string) (out []*beads.Issue, err error) {
+	err = r.do(func() error { out, err = r.Inner.Children(parentID); return err })
+	return out, err
+}
