@@ -22,7 +22,6 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/formula"
-	"github.com/steveyegge/gastown/internal/mayor"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
@@ -33,7 +32,7 @@ import (
 
 // agentStartResult holds the result of starting an agent.
 type agentStartResult struct {
-	name   string // Display name like "Mayor"
+	name   string // Display name for the started agent
 	ok     bool   // Whether start succeeded
 	detail string // Status detail (session name or error)
 }
@@ -48,7 +47,7 @@ type UpOutput struct {
 // ServiceStatus represents the status of a single service.
 type ServiceStatus struct {
 	Name   string `json:"name"`
-	Type   string `json:"type"` // dolt, daemon, mayor, crew, polecat
+	Type   string `json:"type"` // dolt, daemon, crew, polecat
 	Rig    string `json:"rig,omitempty"`
 	OK     bool   `json:"ok"`
 	Detail string `json:"detail"`
@@ -112,10 +111,9 @@ infrastructure agents are running:
 
   • Dolt       - Shared SQL database server for beads
   • Daemon     - Go background process that pokes agents
-  • Mayor      - Global work coordinator
 
 Polecats are NOT started by this command - they are transient workers
-spawned on demand by the Mayor. The daemon's patrol_scan tick restarts
+spawned on demand by dispatch. The daemon's patrol_scan tick restarts
 one whose session died while it held work.
 
 Use --restore to also start:
@@ -209,19 +207,18 @@ func runUp(cmd *cobra.Command, args []string) error {
 	}
 	syncUpFormulas(townRoot, formulaOut, os.Stderr)
 
-	// Start Dolt, the daemon and the mayor in parallel
+	// Start Dolt and the daemon in parallel
 	var daemonErr error
 	var daemonPID int
 	// daemonNote is set when the town boot had to reload the supervisor job
 	// the daemon runs under, which restarts it (gt-x872).
 	var daemonNote string
-	var mayorResult agentStartResult
 	var doltOK bool
 	var doltDetail string
 	var doltSkipped bool
 
 	var startupWg sync.WaitGroup
-	startupWg.Add(3)
+	startupWg.Add(2)
 
 	// 0. Dolt server (if configured)
 	go func() {
@@ -260,23 +257,6 @@ func runUp(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	// 2. Mayor
-	go func() {
-		defer startupWg.Done()
-		mayorMgr := mayor.NewManager(townRoot)
-		// Replacing a dead Mayor session is a Respawn (gt-4k3fj.4.1).
-		superviseMayor(mayorMgr, operatorSupervisor(townRoot), operatorActor("gt up"))
-		if err := mayorMgr.Start(""); err != nil {
-			if errors.Is(err, mayor.ErrAlreadyRunning) {
-				mayorResult = agentStartResult{name: "Mayor", ok: true, detail: mayorMgr.SessionName()}
-			} else {
-				mayorResult = agentStartResult{name: "Mayor", ok: false, detail: err.Error()}
-			}
-		} else {
-			mayorResult = agentStartResult{name: "Mayor", ok: true, detail: mayorMgr.SessionName()}
-		}
-	}()
-
 	startupWg.Wait()
 
 	// Ensure beads metadata points to the Dolt server
@@ -292,7 +272,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Collect daemon/mayor results (always append daemon status)
+	// Collect the daemon result (always append daemon status)
 	if daemonErr != nil {
 		services = append(services, ServiceStatus{Name: "Daemon", Type: "daemon", OK: false, Detail: daemonErr.Error()})
 		allOK = false
@@ -305,10 +285,6 @@ func runUp(cmd *cobra.Command, args []string) error {
 			detail = fmt.Sprintf("%s (%s)", detail, daemonNote)
 		}
 		services = append(services, ServiceStatus{Name: "Daemon", Type: "daemon", OK: true, Detail: detail})
-	}
-	services = append(services, ServiceStatus{Name: mayorResult.name, Type: constants.RoleMayor, OK: mayorResult.ok, Detail: mayorResult.detail})
-	if !mayorResult.ok {
-		allOK = false
 	}
 
 	// Ensure Dolt server is fully ready before starting agents that depend on it.
@@ -373,7 +349,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 
 	// Log boot event for both JSON and text paths
 	if allOK {
-		startedServices := []string{"dolt", "daemon", "mayor"}
+		startedServices := []string{"dolt", "daemon"}
 		_ = events.LogFeed(events.TypeBoot, events.ActorGt, events.BootPayload("town", startedServices))
 	}
 
@@ -509,7 +485,7 @@ func ensureDaemon(townRoot string) (note string, err error) {
 	// (gt-3jrm: a daemon spawned here by hand leaves a KeepAlive launchd job
 	// respawn-looping against it).
 	if _, _, err := ctl.startDaemon(townRoot); err != nil {
-		// A concurrent starter (gt mayor, another gt up) may have won the
+		// A concurrent starter (another gt up) may have won the
 		// race between the check above and the start; that is success.
 		if running, _, chk := ctl.isRunning(townRoot); chk == nil && running {
 			return "", nil

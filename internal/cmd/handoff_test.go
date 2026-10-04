@@ -95,12 +95,6 @@ func TestSessionWorkDir(t *testing.T) {
 		wantErr     bool
 	}{
 		{
-			name:        "mayor runs from mayor subdirectory",
-			sessionName: "hq-mayor",
-			wantDir:     townRoot + "/mayor",
-			wantErr:     false,
-		},
-		{
 			name:        "crew runs from crew subdirectory",
 			sessionName: "gt-crew-holden",
 			wantDir:     townRoot + "/gastown/crew/holden",
@@ -834,25 +828,6 @@ func TestEnforceHandoffCooldown(t *testing.T) {
 			t.Errorf("crew should be exempt from cooldown, but waited %v", elapsed)
 		}
 	})
-
-	t.Run("no cooldown for mayor role", func(t *testing.T) {
-		t.Parallel()
-		role := "mayor"
-		tmpDir := t.TempDir()
-
-		// Create a recent handoff file that would normally trigger cooldown
-		runtimeDir := filepath.Join(tmpDir, constants.DirRuntime)
-		os.MkdirAll(runtimeDir, 0755)
-		tsPath := filepath.Join(runtimeDir, constants.FileLastHandoffTS)
-		os.WriteFile(tsPath, []byte("now"), 0644)
-
-		var elapsed time.Duration
-		enforceHandoffCooldownIn(io.Discard, role, tmpDir, func(d time.Duration) { elapsed += d })
-
-		if elapsed != 0 {
-			t.Errorf("mayor should be exempt from cooldown, but waited %v", elapsed)
-		}
-	})
 }
 
 // Regression test for the gt-layt second-session gap: when GT_AGENT is set
@@ -1243,7 +1218,7 @@ func TestBuildRestartCommand_CarriesNoParentCredentials(t *testing.T) {
 		env[k] = marker + strings.ToLower(k)
 	}
 
-	for _, sessionName := range []string{"hq-mayor", "gt-witness", "gt-refinery", "gt-crew-holden", "gt-nux"} {
+	for _, sessionName := range []string{"hq-overseer", "gt-witness", "gt-refinery", "gt-crew-holden", "gt-nux"} {
 		t.Run(sessionName, func(t *testing.T) {
 			t.Parallel()
 			cmd, err := buildTestRestartCommand(townRoot, env, sessionName)

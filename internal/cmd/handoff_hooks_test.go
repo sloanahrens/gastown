@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/runtime"
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 // A handoff or mol-step respawn syncs the successor's managed settings the
@@ -67,9 +68,9 @@ func TestBuildRestartPlan_SyncsCrewSettings(t *testing.T) {
 	}
 }
 
-// Roles without a shared settings directory (mayor, witness, ...) keep their
-// settings in the working directory, as session.StartSession does.
-func TestBuildRestartPlan_MayorSettingsInWorkDir(t *testing.T) {
+// Roles without a shared settings directory (overseer, witness, ...) keep
+// their settings in the working directory, as session.StartSession does.
+func TestBuildRestartPlan_OverseerSettingsInWorkDir(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
@@ -78,11 +79,11 @@ func TestBuildRestartPlan_MayorSettingsInWorkDir(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"gastown"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
-	plan, err := buildRestartPlan(getMayorSessionName(), restartOpts(townRoot, map[string]string{}))
+	plan, err := buildRestartPlan(session.OverseerSessionName(), restartOpts(townRoot, map[string]string{}))
 	if err != nil {
 		t.Fatalf("buildRestartPlan: %v", err)
 	}
-	if plan.Hooks == nil || plan.Hooks.Role != "mayor" || plan.Hooks.SettingsDir != townRoot+"/mayor" || plan.Hooks.WorkDir != townRoot+"/mayor" {
-		t.Errorf("mayor plan hooks = %+v", plan.Hooks)
+	if plan.Hooks == nil || plan.Hooks.Role != "overseer" || plan.Hooks.SettingsDir != townRoot || plan.Hooks.WorkDir != townRoot {
+		t.Errorf("overseer plan hooks = %+v", plan.Hooks)
 	}
 }

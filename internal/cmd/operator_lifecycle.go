@@ -17,14 +17,13 @@
 //
 //   - Stop: gt session stop, gt polecat nuke (and gt polecat stale
 //     --cleanup, which nukes), gt rig shutdown/stop/dock's polecat stops
-//     (SessionManager.StopAll), gt mayor stop. Operator verbs that end a
+//     (SessionManager.StopAll). Operator verbs that end a
 //     session, like slice 1's.
 //   - Respawn: gt handoff (self and remote) and gt handoff --cycle, gt
 //     molecule step done cycling its pane, gt session restart over a running
-//     session, gt mayor restart over a running Mayor, gt mayor attach
-//     reviving an exited runtime, and every Start over a session whose agent
-//     exited (gt session start/restart, gt up, gt sling's StartSession, gt
-//     mayor start, gt up's Mayor). A handoff or step cycle is a restart, so
+//     session, and every Start over a session whose agent
+//     exited (gt session start/restart, gt up, gt sling's StartSession,
+//     gt up's crew). A handoff or step cycle is a restart, so
 //     an e-stop refuses it and the session keeps running.
 //   - Cleanup (logged, never refused): a polecat session Start created and
 //     abandons after a failed startup, gt sling's rollback of a session that
@@ -33,7 +32,7 @@
 //     reuse or repair, an orphan session without a directory). These clear
 //     the way for a dispatch already decided on, which is where an e-stop
 //     refuses (gt sling), and end no seat's running work.
-//   - Unchanged: the daemon's restart executor (mayor Stop+Start, gt session
+//   - Unchanged: the daemon's restart executor (gt session
 //     restart --requested-by daemon/patrol-scan) runs after
 //     supervisor.Restart has guarded, budgeted and recorded the restart, so
 //     it is not routed a second time.
@@ -47,7 +46,6 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/crew"
 	"github.com/steveyegge/gastown/internal/git"
-	"github.com/steveyegge/gastown/internal/mayor"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
@@ -120,18 +118,6 @@ func supervisedPolecatManager(r *rig.Rig, g *git.Git, t *tmux.Tmux, actor string
 	m := polecat.NewManager(r, g, t, townRegistry())
 	m.SetCleanup(polecatCleanup(operatorSupervisor(filepath.Dir(r.Path)), townRegistry(), r.Name, actor))
 	return m
-}
-
-// mayorSeat is the Mayor's seat.
-var mayorSeat = supervisor.SeatFor("", string(session.RoleMayor), "")
-
-// superviseMayor routes the mayor manager's Stop through sup.Stop (gt mayor
-// stop) and its replacement of a dead session through sup.Respawn.
-func superviseMayor(m *mayor.Manager, sup *supervisor.Supervisor, actor string) {
-	m.StopKill = func(string) error { return sup.Stop(mayorSeat, "mayor stop", actor) }
-	m.Respawn = func(reason string, run func() error) error {
-		return sup.Respawn(mayorSeat, reason, actor, run)
-	}
 }
 
 // respawnSession runs run, which replaces sessionName's agent in place,

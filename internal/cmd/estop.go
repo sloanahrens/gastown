@@ -226,7 +226,6 @@ func runThaw(cmd *cobra.Command, args []string) error {
 // exemptSessions are not nudged when an E-stop clears: they coordinate the
 // stop rather than wait it out.
 var exemptSessions = map[string]bool{
-	session.MayorSessionName():    true,
 	session.OverseerSessionName(): true,
 }
 
