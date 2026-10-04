@@ -645,7 +645,8 @@ func TestNewRigLandingWorker_ShadowModeKeepsTheLocalGate(t *testing.T) {
 	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: notifyfake.New(),
 		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{LandingWorker: &LandingWorkerConfig{
 			Forgejo: &config.ForgejoWorkerConfig{TokenDir: tokenDir}}}}}
-	useGitfake(t, d)
+	f := useGitfake(t, d)
+	forgejoLandingRemote(t, f, townRoot, rigName)
 
 	w, err := d.newRigLandingWorker(rigName)
 	if err != nil {
@@ -664,6 +665,18 @@ func TestNewRigLandingWorker_ShadowModeKeepsTheLocalGate(t *testing.T) {
 	if lander.Merger != nil {
 		t.Errorf("Merger = %T; shadow mode writes the target with the local push", lander.Merger)
 	}
+}
+
+// forgejoLandingRemote gives the fake world's rig repository the remote the
+// rig's Forgejo block names, so worker construction resolves it rather than
+// failing closed. A named remote carries it: origin is still the pre-cutover
+// GitHub remote.
+func forgejoLandingRemote(t *testing.T, f *gitfake.Fake, townRoot, rigName string) {
+	t.Helper()
+	repo := filepath.Join(townRoot, rigName, ".repo.git")
+	f.InitBare(t, repo)
+	f.AddRemote(t, repo, "origin", "https://github.com/acme/gastown.git")
+	f.AddRemote(t, repo, "forgejo", "https://forgejo.example/gastown/gastown.git")
 }
 
 // TestNewRigLandingWorker_WiresTheForgejoLanding: a rig with a
@@ -685,7 +698,8 @@ func TestNewRigLandingWorker_WiresTheForgejoLanding(t *testing.T) {
 			Forgejo: &config.ForgejoWorkerConfig{TokenDir: tokenDir}}}}}
 	// The worker resolves the rig's landing remote through the daemon's git
 	// seam, so the unit tier reads a fake world rather than starting git.
-	useGitfake(t, d)
+	f := useGitfake(t, d)
+	forgejoLandingRemote(t, f, townRoot, rigName)
 
 	w, err := d.newRigLandingWorker(rigName)
 	if err != nil {
@@ -702,10 +716,11 @@ func TestNewRigLandingWorker_WiresTheForgejoLanding(t *testing.T) {
 	if gate.Owner != "gastown" || gate.RepoName != "gastown" || gate.Workflow != "gate" {
 		t.Fatalf("gate %+v; want the owner/repo and workflow from merge_queue.forgejo", gate)
 	}
-	// This rig's .repo.git is not a repository, so the configured URL matches no
-	// remote and the candidate gate keeps the origin default (gt-fn9e6.9).
-	if gate.Remote != "origin" {
-		t.Fatalf("gate.Remote = %q; want origin when no remote carries the configured URL", gate.Remote)
+	// The candidate has to reach the Forgejo instance whose CI gates it, so
+	// both the gate and the worker push to the remote carrying the configured
+	// URL, not an assumed origin (gt-fn9e6.9).
+	if gate.Remote != "forgejo" {
+		t.Fatalf("gate.Remote = %q; want forgejo, the remote carrying the configured URL", gate.Remote)
 	}
 	merger, ok := lander.Merger.(*land.ForgejoMerger)
 	if !ok || merger == nil {
@@ -718,6 +733,33 @@ func TestNewRigLandingWorker_WiresTheForgejoLanding(t *testing.T) {
 	// comes from the same merge_queue.forgejo block the rest of the merger does.
 	if merger.BotLogin != "gt-landing" {
 		t.Fatalf("merger BotLogin = %q, want the landing bot from merge_queue.forgejo.bots", merger.BotLogin)
+	}
+}
+
+// TestNewRigLandingWorker_ForgejoRemoteUnmatchedFailsClosed: a rig whose
+// Forgejo block names a URL no remote carries must not build a worker at all.
+// Building one against origin would push candidates to GitHub, and every
+// landing would wait on a Forgejo verdict that never comes (gt-fn9e6.18).
+func TestNewRigLandingWorker_ForgejoRemoteUnmatchedFailsClosed(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	const rigName = "testrig"
+	forgejoRigConfig(t, townRoot, rigName)
+
+	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: notifyfake.New()}
+	f := useGitfake(t, d)
+	repo := filepath.Join(townRoot, rigName, ".repo.git")
+	f.InitBare(t, repo)
+	f.AddRemote(t, repo, "origin", "https://github.com/acme/gastown.git")
+
+	_, err := d.newRigLandingWorker(rigName)
+	if err == nil {
+		t.Fatal("newRigLandingWorker() = nil error for a Forgejo URL no remote carries; want the rig refused")
+	}
+	for _, want := range []string{rigName, "https://forgejo.example/gastown/gastown.git", "origin"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q lacks %q", err, want)
+		}
 	}
 }
 
@@ -758,7 +800,8 @@ func TestNewRigLandingWorker_ForgejoWithoutATokenFailsClosed(t *testing.T) {
 			Forgejo: &config.ForgejoWorkerConfig{TokenDir: t.TempDir()}}}}}
 	// The worker resolves the rig's landing remote through the daemon's git
 	// seam, so the unit tier reads a fake world rather than starting git.
-	useGitfake(t, d)
+	f := useGitfake(t, d)
+	forgejoLandingRemote(t, f, townRoot, rigName)
 
 	if _, err := d.newRigLandingWorker(rigName); err == nil {
 		t.Fatal("newRigLandingWorker() = nil error without a landing bot token; want the rig refused")
