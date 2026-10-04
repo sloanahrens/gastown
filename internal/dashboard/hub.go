@@ -10,7 +10,6 @@ import (
 
 const (
 	loadHistory = 360 // samples kept: an hour at the default 10s
-	gateHistory = 30
 )
 
 // Hub polls the readers while a page is open and fans their results out.
@@ -384,8 +383,6 @@ var (
 	// is rejected, or reports its stage times.
 	gateStartRe = regexp.MustCompile(`\[land\] (\S+): merged .*gating`)
 	gateEndRe   = regexp.MustCompile(`\[land\] (\S+): (?:stages: |landed |rejected )`)
-	stagesRe    = regexp.MustCompile(`\bstages: `)
-	gateRe      = regexp.MustCompile(`\bgate ((?:\d+h)?(?:\d+m)?\d+(?:\.\d+)?s)\b`)
 )
 
 func (h *Hub) pollFeed() {
@@ -412,13 +409,6 @@ func (h *Hub) pollFeed() {
 			delete(h.gating, m[1])
 			changed = true
 		}
-		if g, ok := gatePoint(e, h.loadAtLocked(e.At)); ok {
-			h.state.Gates = append(h.state.Gates, g)
-			if n := len(h.state.Gates); n > gateHistory {
-				h.state.Gates = append([]GatePoint(nil), h.state.Gates[n-gateHistory:]...)
-			}
-			changed = true
-		}
 		h.broadcastLocked(frame("entry", e))
 	}
 	if n := len(h.ring); n > h.cfg.RingSize {
@@ -430,35 +420,4 @@ func (h *Hub) pollFeed() {
 	if changed {
 		h.publishLocked()
 	}
-}
-
-// gatePoint reads the gate's wall time off a "stages: lint 18s, gate 92s"
-// line, the one the landing worker writes for every gated merge.
-func gatePoint(e Entry, load *float64) (GatePoint, bool) {
-	if e.Kind != "daemon" && e.Kind != "landings" {
-		return GatePoint{}, false
-	}
-	m := gateRe.FindStringSubmatch(e.Text)
-	if m == nil || !stagesRe.MatchString(e.Text) {
-		return GatePoint{}, false
-	}
-	d, err := time.ParseDuration(m[1])
-	if err != nil {
-		return GatePoint{}, false
-	}
-	return GatePoint{At: e.At, Secs: d.Seconds(), Load: load, Text: e.Text}, true
-}
-
-// loadAtLocked is the load sample nearest at or before t. A gate older than
-// the first sample has no load to report, and says so with nil rather than
-// borrowing the current reading.
-func (h *Hub) loadAtLocked(t time.Time) *float64 {
-	pts := h.state.Loads
-	for i := len(pts) - 1; i >= 0; i-- {
-		if !pts[i].At.After(t) {
-			v := pts[i].Load
-			return &v
-		}
-	}
-	return nil
 }

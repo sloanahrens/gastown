@@ -131,14 +131,6 @@ type LoadPoint struct {
 	Load float64   `json:"load"`
 }
 
-// GatePoint is one landing gate's wall time and the load when it finished.
-type GatePoint struct {
-	At   time.Time `json:"at"`
-	Secs float64   `json:"secs"`
-	Load *float64  `json:"load,omitempty"` // nil when no sample covers the gate
-	Text string    `json:"text"`
-}
-
 // OMWindow is the om review's numbers over one span of time.
 type OMWindow struct {
 	Label      string   `json:"label"`
@@ -279,7 +271,6 @@ type State struct {
 	Polecats  []Polecat       `json:"polecats"`
 	Machine   Machine         `json:"machine"`
 	Loads     []LoadPoint     `json:"loads"`
-	Gates     []GatePoint     `json:"gates"`
 	Spend     json.RawMessage `json:"spend,omitempty"`
 	OM        *OM             `json:"om,omitempty"`
 	Dispatch  *Dispatch       `json:"dispatch,omitempty"`
