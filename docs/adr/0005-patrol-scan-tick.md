@@ -32,7 +32,12 @@ We decided that the daemon runs a `patrol_scan` tick (`internal/patrolscan`, hos
   work has its intent record retired to `stop` (gt-613vw): the town needs no session for a seat
   with nothing to run, and a record left at `desired=run` was what made townhealth report the
   seat dead forever. A hold and a `submitted` record are left alone, and the seat's next dispatch
-  goes through the supervisor's Respawn, which sets the record back to `run`.
+  goes through the supervisor's Respawn, which sets the record back to `run`. Before it is
+  retired, a seat the last turn left `stuck` after an `ESCALATED` exit is cleared to `idle` with
+  the exit type removed once every condition proves the escalation spent — the hook empty, no
+  session, the `last_source_issue` bead closed, and a live probe of the worktree showing it clean,
+  stashless and with nothing unpushed (gt-fn9e6.33). A seat still holding its open bead is skipped
+  as the operator's, and one whose conditions cannot all be measured is left alone.
 - **Orphaned molecules.** For hooked work whose polecat has neither a session nor a directory,
   the bonded `mol-polecat-work` root and its step wisps are force-closed, read with
   `bd show --children` so ephemeral steps are seen (gt-22hdp.36).

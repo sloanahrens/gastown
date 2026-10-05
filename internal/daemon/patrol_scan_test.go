@@ -70,19 +70,32 @@ func TestPatrolScanExitDeferredMatchesDone(t *testing.T) {
 	}
 }
 
-// AgentRecord reads the three fields that tell a finished turn from a held
-// seat off one agent bead: agent_state, the gt done exit type and the cleanup
-// status. An omitted field is empty, not an error.
+// The patrol scan repeats the ESCALATED exit type because it is the record it
+// reads to recognize a seat whose blocker is spent; a drift here would
+// silently stop clearing them (gt-fn9e6.33).
+func TestPatrolScanExitEscalatedMatchesDone(t *testing.T) {
+	t.Parallel()
+	if patrolscan.ExitEscalated != done.ExitEscalated {
+		t.Fatalf("patrolscan.ExitEscalated = %q, done.ExitEscalated = %q", patrolscan.ExitEscalated, done.ExitEscalated)
+	}
+}
+
+// AgentRecord reads the fields that tell a finished turn from a held seat off
+// one agent bead: agent_state, the gt done exit type, the cleanup status, the
+// hook reference and the source issue the turn ran on. An omitted field is
+// empty, not an error.
 func TestPatrolScanAgentRecordReadsTheBead(t *testing.T) {
 	t.Parallel()
 	bd := newWorkBD(t)
 	const id = "gt-myr-polecat-mycat"
 	bd.db.Seed(beads.Issue{ID: id, Description: beads.FormatAgentDescription("mycat", &beads.AgentFields{
-		RoleType:      constants.RolePolecat,
-		Rig:           "myr",
-		AgentState:    "stuck",
-		ExitType:      "DEFERRED",
-		CleanupStatus: "has_unpushed",
+		RoleType:        constants.RolePolecat,
+		Rig:             "myr",
+		AgentState:      "stuck",
+		ExitType:        "DEFERRED",
+		CleanupStatus:   "has_unpushed",
+		HookBead:        "gt-hooked",
+		LastSourceIssue: "gt-source",
 	})})
 	bd.db.Seed(beads.Issue{ID: "gt-myr-polecat-plain", Description: "role_type: polecat\nrig: myr\nagent_state: working\n"})
 	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, openWorkBeads: bd.open}
@@ -92,15 +105,111 @@ func TestPatrolScanAgentRecordReadsTheBead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AgentRecord: %v", err)
 	}
-	if got != (patrolscan.AgentRecord{State: "stuck", ExitType: "DEFERRED", CleanupStatus: "has_unpushed"}) {
-		t.Fatalf("AgentRecord = %+v", got)
+	want := patrolscan.AgentRecord{State: "stuck", ExitType: "DEFERRED", CleanupStatus: "has_unpushed",
+		HookBead: "gt-hooked", LastSourceIssue: "gt-source"}
+	if got != want {
+		t.Fatalf("AgentRecord = %+v, want %+v", got, want)
 	}
 	plain, err := h.AgentRecord("myr", "plain")
 	if err != nil {
 		t.Fatalf("AgentRecord(plain): %v", err)
 	}
-	if plain.State != "working" || plain.ExitType != "" || plain.CleanupStatus != "" {
+	if plain.State != "working" || plain.ExitType != "" || plain.CleanupStatus != "" ||
+		plain.HookBead != "" || plain.LastSourceIssue != "" {
 		t.Fatalf("AgentRecord(plain) = %+v, want working and no exit metadata", plain)
+	}
+}
+
+// GitState maps the live worktree probe onto the tick's facts, and turns an
+// answer the probe could not give into an error: the tick clears nothing on a
+// worktree it did not measure.
+func TestPatrolScanGitState(t *testing.T) {
+	t.Parallel()
+	var probed []string
+	h := &patrolScanHost{
+		d: &Daemon{config: &Config{TownRoot: "/town"}},
+		gitState: func(path string) polecat.LiveGitState {
+			probed = append(probed, path)
+			if filepath.Base(path) == "clean" {
+				return polecat.LiveGitState{Source: polecat.GitStateSourceLive, Branch: "polecat/clean/gt-a+x",
+					Dirty: true, StashCount: 2, UnpushedCommits: 3}
+			}
+			return polecat.LiveGitState{Source: polecat.GitStateSourceUnknown, FailedReason: "git_state=unknown path=" + path + ": not a worktree root"}
+		},
+	}
+
+	got, err := h.GitState("myr", "clean")
+	if err != nil {
+		t.Fatalf("GitState: %v", err)
+	}
+	want := patrolscan.GitState{Branch: "polecat/clean/gt-a+x", Dirty: true, StashCount: 2, UnpushedCommits: 3}
+	if got != want {
+		t.Fatalf("GitState = %+v, want %+v", got, want)
+	}
+	if _, err := h.GitState("myr", "gone"); err == nil || !strings.Contains(err.Error(), "not a worktree root") {
+		t.Fatalf("GitState(gone) = %v, want the probe's failure", err)
+	}
+	wantPaths := []string{filepath.Join("/town", "myr", "polecats", "clean"), filepath.Join("/town", "myr", "polecats", "gone")}
+	if strings.Join(probed, ",") != strings.Join(wantPaths, ",") {
+		t.Fatalf("probed %v, want %v", probed, wantPaths)
+	}
+}
+
+// ClearEscalation is the write the tick makes on a resolved escalation: the
+// agent bead goes to idle and the exit type is removed, the two fields gt
+// done's exit wrote together. The guard is the record still reading as that
+// exit, so a seat something else has moved on (a fresh sling, a human) is
+// left to it rather than overwritten with idle.
+func TestPatrolScanClearEscalation(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	db := beadsfake.New()
+	id := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(townRoot, "myr"), "myr", "mycat")
+	moved := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(townRoot, "myr"), "myr", "moved")
+	db.Seed(beads.Issue{ID: id, Description: beads.FormatAgentDescription("mycat", &beads.AgentFields{
+		RoleType: constants.RolePolecat, Rig: "myr", AgentState: "stuck", ExitType: done.ExitEscalated,
+		HookBead: "", LastSourceIssue: "be-src"})})
+	db.Seed(beads.Issue{ID: moved, Description: beads.FormatAgentDescription("moved", &beads.AgentFields{
+		RoleType: constants.RolePolecat, Rig: "myr", AgentState: "working", ExitType: done.ExitEscalated})})
+	h := &patrolScanHost{
+		d:                 &Daemon{config: &Config{TownRoot: townRoot}},
+		openRecoveryBeads: func([]string) beads.Client { return db },
+	}
+
+	changed, err := h.ClearEscalation("myr", "mycat")
+	if err != nil || !changed {
+		t.Fatalf("ClearEscalation = %v, %v; want true, nil", changed, err)
+	}
+	is, err := db.Show(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := beads.ParseAgentFields(is.Description)
+	if beads.AgentState(f.AgentState) != beads.AgentStateIdle || f.ExitType != "" {
+		t.Fatalf("agent bead = state %q exit %q, want idle and no exit type", f.AgentState, f.ExitType)
+	}
+	if f.LastSourceIssue != "be-src" {
+		t.Fatalf("last_source_issue = %q; the clear must leave the seat's history alone", f.LastSourceIssue)
+	}
+
+	// The record no longer reads as an escalated exit: nothing left to clear.
+	if changed, err := h.ClearEscalation("myr", "mycat"); err != nil || changed {
+		t.Fatalf("second ClearEscalation = %v, %v; want false, nil", changed, err)
+	}
+	// A seat whose state moved on is not the record the tick decided on.
+	if changed, err := h.ClearEscalation("myr", "moved"); err != nil || changed {
+		t.Fatalf("ClearEscalation(moved) = %v, %v; want false, nil", changed, err)
+	}
+	is, err = db.Show(moved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := beads.ParseAgentFields(is.Description).AgentState; got != "working" {
+		t.Fatalf("moved seat state = %q, want working", got)
+	}
+	// A seat with no agent bead is a failed read, never a silent success.
+	if _, err := h.ClearEscalation("myr", "absent"); err == nil {
+		t.Fatal("ClearEscalation on a seat with no bead must fail")
 	}
 }
 

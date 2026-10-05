@@ -283,6 +283,9 @@ type patrolScanHost struct {
 	// openRecoveryBeads is the routed bd client when nil: a seam for the unit
 	// tier, which cannot start bd.
 	openRecoveryBeads func(env []string) beads.Client
+	// gitState is polecat.ProbeLiveGitState when nil: a seam for the unit
+	// tier, which cannot start git.
+	gitState func(worktreePath string) polecat.LiveGitState
 	// reapBatches caches each rig's check-recovery-batch for the life of this
 	// host, which is one tick: the reap pass asks for a verdict on every
 	// session-less seat, and one bulk sweep must answer them all.
@@ -435,12 +438,84 @@ func (h *patrolScanHost) AgentRecord(rig, name string) (patrolscan.AgentRecord, 
 		// the tick would read as a free seat.
 		return patrolscan.AgentRecord{}, fmt.Errorf("bd show %s: no issue", id)
 	}
-	rec := patrolscan.AgentRecord{State: beads.ResolveAgentState(issue.Description, issue.AgentState)}
+	rec := patrolscan.AgentRecord{
+		State: beads.ResolveAgentState(issue.Description, issue.AgentState),
+		// hook_bead is written to the description; a bead from before that
+		// contract may still carry the column, and either one set reads as work
+		// the seat may still hold.
+		HookBead: issue.HookBead,
+	}
 	if f := beads.ParseAgentFields(issue.Description); f != nil {
 		rec.ExitType = f.ExitType
 		rec.CleanupStatus = f.CleanupStatus
+		rec.LastSourceIssue = f.LastSourceIssue
+		if f.HookBead != "" {
+			rec.HookBead = f.HookBead
+		}
 	}
 	return rec, nil
+}
+
+// GitState measures the seat's worktree with the live probe: the same three
+// facts the reuse verdict reads, measured now, since a recorded cleanup_status
+// says what the turn that ended saw, not what the worktree holds today.
+func (h *patrolScanHost) GitState(rig, name string) (patrolscan.GitState, error) {
+	path := filepath.Join(h.town(), rig, "polecats", name)
+	st := h.gitProbe()(path)
+	if st.Source != polecat.GitStateSourceLive {
+		reason := st.FailedReason
+		if reason == "" {
+			reason = "the probe did not answer"
+		}
+		return patrolscan.GitState{}, errors.New(reason)
+	}
+	return patrolscan.GitState{
+		Branch:          st.Branch,
+		Dirty:           st.Dirty,
+		StashCount:      st.StashCount,
+		UnpushedCommits: st.UnpushedCommits,
+	}, nil
+}
+
+// gitProbe is polecat.ProbeLiveGitState unless a test substituted one: the
+// live probe runs git, which the unit tier cannot start.
+func (h *patrolScanHost) gitProbe() func(string) polecat.LiveGitState {
+	if h.gitState != nil {
+		return h.gitState
+	}
+	return polecat.ProbeLiveGitState
+}
+
+// ClearEscalation resets the seat's agent bead to idle and removes the exit
+// type gt done's ESCALATED exit wrote beside it. The write is guarded on the
+// record still reading as that exit, so a seat something else has moved on
+// (a fresh sling, a human) is left to it rather than overwritten with idle.
+func (h *patrolScanHost) ClearEscalation(rig, name string) (bool, error) {
+	id := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(h.town(), rig), rig, name)
+	bd := h.recoveryBeads()
+	issue, err := bd.Show(id)
+	if err != nil {
+		return false, fmt.Errorf("bd show %s: %w", id, err)
+	}
+	if issue == nil {
+		return false, fmt.Errorf("bd show %s: no issue", id)
+	}
+	// The guard reads the state the tick decided on, resolved the same way
+	// AgentRecord reads it.
+	exit := ""
+	if f := beads.ParseAgentFields(issue.Description); f != nil {
+		exit = f.ExitType
+	}
+	state := beads.ResolveAgentState(issue.Description, issue.AgentState)
+	if !strings.EqualFold(strings.TrimSpace(state), "stuck") ||
+		!strings.EqualFold(strings.TrimSpace(exit), patrolscan.ExitEscalated) {
+		return false, nil
+	}
+	idle, cleared := string(beads.AgentStateIdle), ""
+	if err := beads.UpdateAgentDescriptionFields(bd, id, beads.AgentFieldUpdates{AgentState: &idle, ExitType: &cleared}); err != nil {
+		return false, fmt.Errorf("clearing %s: %w", id, err)
+	}
+	return true, nil
 }
 
 func (h *patrolScanHost) Heartbeat(rig, name string) *patrolscan.Heartbeat {
