@@ -426,8 +426,10 @@ config".
 
 The worker pushes the merge candidate as `land/<bead>`, then waits for the
 `ci / gate (push)` context on that SHA. Red is a rework carrying the failing
-job's log tail; silence is the existing infra backoff. `LandGate` is still
-built and still available, because shadow mode (slice 8) uses it.
+job's log tail; silence is the existing infra backoff. Either outcome deletes
+the branch the run pushed, best-effort, so a bead refused for good leaves none
+behind (gt-k796q). `LandGate` is still built and still available, because
+shadow mode (slice 8) uses it.
 
 Files: `internal/land/candidate.go` (new: branch naming, push, poll),
 `internal/land/land.go` (`Land` calls the candidate step before the gate),

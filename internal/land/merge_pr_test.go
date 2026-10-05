@@ -325,7 +325,8 @@ func TestLandMergesThroughTheForgejoPR(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
 	l := f.lander()
-	l.Candidate = &fakeCandidate{res: CandidateResult{State: CandidatePassed, Context: "ci / gate (push)"}}
+	cand := &fakeCandidate{res: CandidateResult{State: CandidatePassed, Context: "ci / gate (push)", Pushed: true}}
+	l.Candidate = cand
 	merger := &fakeMerger{fn: func(req MergeRequest) error {
 		// Stand in for the server-side fast-forward: the target's tip becomes
 		// the candidate the worker read back.
@@ -367,6 +368,9 @@ func TestLandMergesThroughTheForgejoPR(t *testing.T) {
 	if len(f.landingLines()) != 1 {
 		t.Fatalf("landings file has %d records, want one", len(f.landingLines()))
 	}
+	if len(cand.discarded) != 0 {
+		t.Fatalf("discarded %v; the merged candidate's branch is the merger's to delete", cand.discarded)
+	}
 }
 
 // TestLandMergerRefusalIsAHumanRejection: a PR Forgejo refuses as not ready to
@@ -389,12 +393,14 @@ func TestLandMergerRefusalIsAHumanRejection(t *testing.T) {
 
 // TestLandMergerOutdatedBranchIsARebuild: a stale candidate is not a rejection
 // and not a lost race the author pays for; nothing is written and the landing
-// is retried from the top.
+// is retried from the top — with the candidate branch intact, because the open
+// land PR the retry reuses is that branch (gt-k796q).
 func TestLandMergerOutdatedBranchIsARebuild(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
 	l := f.lander()
-	l.Candidate = &fakeCandidate{res: CandidateResult{State: CandidatePassed, Context: "ci / gate (push)"}}
+	cand := &fakeCandidate{res: CandidateResult{State: CandidatePassed, Context: "ci / gate (push)", Pushed: true}}
+	l.Candidate = cand
 	l.Merger = &fakeMerger{fn: func(MergeRequest) error {
 		return &RaceError{Target: "main", Rebuild: true}
 	}}
@@ -403,6 +409,9 @@ func TestLandMergerOutdatedBranchIsARebuild(t *testing.T) {
 	var race *RaceError
 	if !errors.As(err, &race) || !race.Rebuild {
 		t.Fatalf("Land error = %T %v, want a rebuild *RaceError", err, err)
+	}
+	if len(cand.discarded) != 0 {
+		t.Fatalf("discarded %v; the 409 rebuild path keeps the branch its open land PR is on", cand.discarded)
 	}
 	f.assertUntouched(t)
 }
