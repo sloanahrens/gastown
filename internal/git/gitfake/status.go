@@ -206,7 +206,8 @@ func (h *handle) refAgainstRef(r *repo, wt *worktree, head, ref string) (git.Bra
 // branch first, a detached HEAD's custody on any remote branch, then the
 // targets and the upstream, and the remote's default branch only when
 // nothing else is evidence. local reads the exact branch and the custody
-// from remote-tracking refs instead of the remote.
+// from remote-tracking refs instead of the remote — and, like the local level
+// there, does not refresh the default-branch tracking ref.
 func (h *handle) preservation(r *repo, wt *worktree, localBranch, remote string, targets []string, includeExact, local bool) (git.BranchPreservationStatus, error) {
 	if remote == "" {
 		remote = "origin"
@@ -243,6 +244,27 @@ func (h *handle) preservation(r *repo, wt *worktree, localBranch, remote string,
 		}
 	}
 
+	// git.Git.branchPreservationStatusWith refreshes the default-branch
+	// tracking ref from the remote before judging against it — the live level
+	// only, since the local one stays offline. Mirror that here: copy the
+	// remote's current default branch into the clone's tracking ref, once, at
+	// the same two points (before the fallback resolves its refs, and before
+	// judging a target or upstream that resolved to that ref).
+	refreshed := false
+	refreshDefault := func() {
+		if refreshed || local || remoteErr != nil {
+			return
+		}
+		refreshed = true
+		def := defaultBranchOf(r)
+		tip, ok := rr.refs["refs/heads/"+def]
+		if !ok {
+			return
+		}
+		h.f.copyObjects(r, tip)
+		r.refs["refs/remotes/"+remote+"/"+def] = tip
+	}
+
 	for _, target := range targets {
 		if ref, ok := h.comparisonRef(r, wt, target, remote); ok {
 			candidates = append(candidates, ref)
@@ -259,12 +281,8 @@ func (h *handle) preservation(r *repo, wt *worktree, localBranch, remote string,
 	}
 
 	if !hasEvidence {
-		def := "main"
-		if b := r.configMap()[remoteHeadKey("origin")]; b != "" {
-			def = b
-		} else if _, ok := r.refs["refs/remotes/origin/master"]; ok {
-			def = "master"
-		}
+		refreshDefault()
+		def := defaultBranchOf(r)
 		for _, ref := range []string{remote + "/" + def, remote + "/main", remote + "/master"} {
 			if resolved, ok := h.comparisonRef(r, wt, ref, remote); ok {
 				candidates = append(candidates, resolved)
@@ -273,6 +291,9 @@ func (h *handle) preservation(r *repo, wt *worktree, localBranch, remote string,
 	}
 
 	candidates = uniqueNonEmpty(candidates)
+	if !refreshed && candidatesAreDefault(r, candidates, remote) {
+		refreshDefault()
+	}
 	if len(candidates) == 0 {
 		if hasEvidence {
 			return result, fmt.Errorf("no target/custody refs resolved")
@@ -308,6 +329,33 @@ func (h *handle) preservation(r *repo, wt *worktree, localBranch, remote string,
 		return result, lastErr
 	}
 	return result, fmt.Errorf("no usable comparison refs")
+}
+
+// defaultBranchOf is git.Git.RemoteDefaultBranch for this clone: the branch its
+// remote HEAD records, then master, then main. It is the branch the fallback
+// compares against, and the one a live verdict refreshes first.
+func defaultBranchOf(r *repo) string {
+	if b := r.configMap()[remoteHeadKey("origin")]; b != "" {
+		return b
+	}
+	if _, ok := r.refs["refs/remotes/origin/master"]; ok {
+		return "master"
+	}
+	return "main"
+}
+
+// candidatesAreDefault is git.Git.candidatesAreDefaultBranch: whether any ref
+// about to be judged is this clone's tracking ref for the remote's default
+// branch.
+func candidatesAreDefault(r *repo, candidates []string, remote string) bool {
+	def := defaultBranchOf(r)
+	for _, candidate := range candidates {
+		switch candidate {
+		case remote + "/" + def, remote + "/main", remote + "/master":
+			return true
+		}
+	}
+	return false
 }
 
 // custody finds a remote branch holding head: a remote-tracking ref that
