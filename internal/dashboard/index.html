@@ -1131,13 +1131,13 @@ function initAlerts() {
 }
 
 let qTab = "ready";
-// The queue opens on the rig the operator works in; every other store is one
-// chip click away. Deliberately not persisted, so a reload returns here and a
-// filter left on another rig never hides this rig's work on the next load
-// (gt-fi93j).
-const DEFAULT_QRIG = "gastown";
+// The queue opens the way the operator uses it: every store, dispatchable
+// beads only (gt-x9gk4, reversing gt-fi93j). Not persisted, so a reload always
+// returns to this view rather than to a filter left on another store.
+const DEFAULT_QRIG = "all";
+const DEFAULT_QSHAPE = "ok";
 let qRig = DEFAULT_QRIG;
-let qShape = "all";
+let qShape = DEFAULT_QSHAPE;
 const qOpen = new Set();
 const qDetail = {};
 let qKey = "";
@@ -1229,7 +1229,25 @@ function renderQueue(s, force) {
     box.append(f);
   }
   const rows = all.filter(b => (qRig === "all" || b.rig === qRig) && (qTab !== "ready" || qShape === "all" || b.shape === qShape));
-  if (!rows.length) box.append(el("div", "empty", all.length ? "nothing matches these filters" : qTab === "ready" ? "nothing is waiting to be built" : qTab === "landing" ? "nothing is waiting to land" : "nothing is blocked"));
+  if (!rows.length) {
+    let msg;
+    // The pane opens on the dispatchable view, so an empty one reports what
+    // the beads are waiting on instead of "no filter matched" (gt-x9gk4).
+    if (qTab === "ready" && qShape === "ok") {
+      const inRig = all.filter(b => qRig === "all" || b.rig === qRig);
+      const shaping = inRig.filter(b => b.shape === "fix").length;
+      const held = inRig.filter(b => b.shape === "held").length;
+      const parts = [];
+      if (inRig.length) {
+        parts.push(shaping === 1 ? "1 bead needs shaping" : shaping + " beads need shaping");
+        parts.push(held === 1 ? "1 bead is held" : held + " beads are held");
+      }
+      msg = "nothing is dispatchable right now" + (parts.length ? " — " + parts.join(", ") : "");
+    } else {
+      msg = all.length ? "nothing matches these filters" : qTab === "ready" ? "nothing is waiting to be built" : qTab === "landing" ? "nothing is waiting to land" : "nothing is blocked";
+    }
+    box.append(el("div", "empty", msg));
+  }
   rows.forEach(b => {
     const id = b.rig + "/" + b.id;
     const open = qOpen.has(id);
