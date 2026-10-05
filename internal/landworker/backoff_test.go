@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/land"
 )
@@ -231,6 +232,25 @@ func TestWriteBackoffEmptyOnAHealthyRig(t *testing.T) {
 	snap := backoff.last(t)
 	if snap.Rig != "gastown" || len(snap.Beads) != 0 {
 		t.Fatalf("snapshot %+v; want an empty one for the rig", snap)
+	}
+}
+
+// TestErrorLine: the record and the health detail carry one bounded line, cut
+// on a rune boundary so a multi-byte error cannot be split into invalid text.
+func TestErrorLine(t *testing.T) {
+	t.Parallel()
+	if got := errorLine(nil); got != "" {
+		t.Errorf("errorLine(nil) = %q, want empty", got)
+	}
+	if got := errorLine(errors.New("first line\nsecond line")); got != "first line" {
+		t.Errorf("errorLine = %q, want the first line", got)
+	}
+	got := errorLine(errors.New(strings.Repeat("é", maxErrorLine+10)))
+	if n := len([]rune(got)); n != maxErrorLine {
+		t.Errorf("errorLine is %d runes, want %d", n, maxErrorLine)
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("errorLine split a rune: %q", got)
 	}
 }
 

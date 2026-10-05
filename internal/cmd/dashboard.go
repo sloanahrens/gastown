@@ -187,6 +187,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	om := newOMReader(townRoot, recs)
 	tierSweeps := newTierSweepReader(townRoot)
 	escalations := newDashEscalationReader(townRoot)
+	backoff := newDashBackoff(townRoot)
 	queue := newDashQueueReader(townRoot)
 	loads := newDashLoads(townRoot, time.Now)
 	return dashboard.NewHub(dashboard.Config{
@@ -212,7 +213,9 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 				}
 				return ""
 			})
-			tr.Recent = buildRecentLandings(now, recs.get(), stages, rejects, live, deploys.shipStatus, func(rig, id string) string { return beadReads.title(rig, id) }, recentLandingRows)
+			title := func(rig, id string) string { return beadReads.title(rig, id) }
+			recent := buildRecentLandings(now, recs.get(), stages, rejects, live, deploys.shipStatus, title, recentLandingRows)
+			tr.Recent = withBackoffRows(recent, backoff.get(), title)
 			return tr
 		},
 		LoadSample: loads.append,

@@ -230,6 +230,9 @@ func (s *healthSources) Landings(ctx context.Context, since time.Time) ([]townhe
 		if rl.Err == nil {
 			rl.Pending, rl.Oldest, rl.OldestBead, rl.Err = s.pendingLandings(rig)
 		}
+		if rl.Err == nil {
+			rl.Failing, rl.Err = s.failingLandings(rig)
+		}
 		out = append(out, rl)
 	}
 	return out, nil
@@ -253,6 +256,28 @@ func (s *healthSources) landingCount(rig string, since time.Time) (int, error) {
 		}
 	}
 	return n, nil
+}
+
+// failingLandings reads the rig's backoff snapshot, the landing worker's own
+// record of the landings that keep failing. A rig the worker has never
+// written for has nothing failing, not an unreadable field, so the file's
+// absence is not an error (gt-fn9e6.44).
+func (s *healthSources) failingLandings(rig string) ([]townhealth.FailingLanding, error) {
+	path, err := landings.BackoffPath(s.townRoot(), rig)
+	if err != nil {
+		return nil, err
+	}
+	st, err := landings.ReadBackoff(path)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]townhealth.FailingLanding, 0, len(st.Beads))
+	for _, b := range st.Beads {
+		out = append(out, townhealth.FailingLanding{
+			Bead: b.Bead, Stage: b.Stage, Failures: b.Failures, NextTry: b.NextTry, Error: b.Error,
+		})
+	}
+	return out, nil
 }
 
 // pendingLandings counts rig's actionable ready-to-land beads and finds the

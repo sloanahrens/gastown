@@ -236,6 +236,44 @@ func TestWriteTownHealth_WritesTheReportFromTheTownsRecords(t *testing.T) {
 	}
 }
 
+// A landing the worker keeps failing and backing off from degrades its rig's
+// landing field, which the queue wait alone cannot see, and the field names
+// the bead, the stage, the run of failures and the error (gt-fn9e6.44).
+func TestWriteTownHealth_FailingLandingDegradesTheLandingField(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	d, _ := healthTown(t, now)
+	backoff, err := landings.BackoffPath(d.config.TownRoot, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeJSONFile(t, backoff, landings.BackoffState{
+		Rig: "gastown", At: now,
+		Beads: []landings.BackoffRecord{{
+			Bead: "gt-failing", Stage: "push", Failures: 2,
+			NextTry: now.Add(2 * time.Minute), Error: "the pre-push hook refused land/gt-failing",
+		}},
+	})
+
+	d.writeTownHealth()
+	r, err := townhealth.Read(d.config.TownRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := healthField(t, r, "landing/gastown")
+	if got.Verdict != townhealth.Degraded {
+		t.Fatalf("landing/gastown = %+v, want degraded", got)
+	}
+	if got.Value != "1 pending, oldest 1m, 1 failing" {
+		t.Errorf("value = %q, want the failing count beside the queue", got.Value)
+	}
+	for _, want := range []string{"gt-failing", "2 times in a row", "push", "the pre-push hook refused land/gt-failing"} {
+		if !strings.Contains(got.Detail, want) {
+			t.Errorf("detail %q; want it to name %q", got.Detail, want)
+		}
+	}
+}
+
 // The promote field reads the rig's promotion record out of the main state the
 // red-main owner writes, counts the lag in the rig's repository, and stays out
 // of a rig that names no promote_target (gt-fn9e6.39).
