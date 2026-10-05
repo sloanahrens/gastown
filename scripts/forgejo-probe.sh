@@ -17,6 +17,14 @@
 # process); only the real runner counts, so the probe's whole point is that it
 # waits on the runner's own verdict.
 #
+# The push rides a throwaway worktree of the rig's own repository
+# (<town>/<rig>/.repo.git), not the clone: that is where the landing worker
+# pushes its candidate from, and core.hooksPath is a real setting there, so the
+# rig's pre-push hook runs. A clone carries no core.hooksPath and pushes with no
+# hook at all, which is how a probe went green while every landing failed at its
+# first push (gt-fn9e6.45). Where the rig's repository is absent the probe falls
+# back to the clone and says so loudly, since then the hooks were not exercised.
+#
 # Design of record: docs/design/forgejo-primary-landing.md. Runbook:
 # docs/forgejo-runbook.md. The admin token reaches curl through a mode-600
 # config file, never argv; the push rides the operator's role-keyed credential
@@ -32,6 +40,9 @@
 #   --admin-token-file F   file holding FORGEJO_ADMIN_TOKEN=... (default
 #                          $FORGEJO_ADMIN_ENV, else $HOME/forgejo/.env)
 #   --repo OWNER/NAME      the rig's Forgejo repository (required)
+#   --town-root DIR        town root holding <rig>, whose repository the probe
+#                          pushes from (default $GT_TOWN_ROOT, else $GT_ROOT,
+#                          else $HOME/gt)
 #   --github-url URL       repository to clone the copy from (default
 #                          https://github.com/OWNER/NAME.git)
 #   --git-url URL          Forgejo git remote to push to (default
@@ -70,6 +81,7 @@ REPO=""
 API_URL="${FORGEJO_API_URL:-http://127.0.0.1:3000/api/v1}"
 WEB_URL="${FORGEJO_URL:-}"
 ADMIN_TOKEN_FILE="${FORGEJO_ADMIN_ENV:-$HOME/forgejo/.env}"
+TOWN_ROOT="${GT_TOWN_ROOT:-${GT_ROOT:-$HOME/gt}}"
 GITHUB_URL=""
 GIT_URL=""
 MAIN_BRANCH="main"
@@ -83,6 +95,7 @@ while [ $# -gt 0 ]; do
     --web-url) [ $# -ge 2 ] || usage_die "--web-url needs a value"; WEB_URL=$2; shift 2 ;;
     --admin-token-file) [ $# -ge 2 ] || usage_die "--admin-token-file needs a value"; ADMIN_TOKEN_FILE=$2; shift 2 ;;
     --repo) [ $# -ge 2 ] || usage_die "--repo needs a value"; REPO=$2; shift 2 ;;
+    --town-root) [ $# -ge 2 ] || usage_die "--town-root needs a value"; TOWN_ROOT=$2; shift 2 ;;
     --github-url) [ $# -ge 2 ] || usage_die "--github-url needs a value"; GITHUB_URL=$2; shift 2 ;;
     --git-url) [ $# -ge 2 ] || usage_die "--git-url needs a value"; GIT_URL=$2; shift 2 ;;
     --main-branch) [ $# -ge 2 ] || usage_die "--main-branch needs a value"; MAIN_BRANCH=$2; shift 2 ;;
@@ -114,6 +127,7 @@ require_positive_int() { # require_positive_int LABEL VALUE
 
 [ -n "$RIG" ] || usage_die "<rig> is required"
 require_plain "<rig>" "$RIG"
+[ -n "$TOWN_ROOT" ] || usage_die "--town-root must not be empty"
 [ -n "$REPO" ] || usage_die "--repo is required"
 case "$REPO" in
   */*/*|/*|*/|'') usage_die "--repo '$REPO' must be OWNER/NAME" ;;
@@ -136,6 +150,9 @@ API_URL="${API_URL%/}"
 
 OWNER=${REPO%%/*}
 NAME=${REPO#*/}
+# The rig's own repository, what a landing pushes its candidate from: the probe
+# pushes from a worktree of it too, so the rig's hooks run (gt-fn9e6.45).
+BARE="$TOWN_ROOT/$RIG/.repo.git"
 BRANCH="land/probe-$RIG"
 # Forgejo resolves a branch name through the URL path, so the slash arrives
 # encoded (go-gitea#21093, as in scripts/forgejo-provision.sh).
@@ -151,13 +168,26 @@ command -v git >/dev/null 2>&1 || die "git is not on PATH"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/forgejo-probe.XXXXXX")"
 COPY="$WORK/copy"
+WT="$WORK/wt"
 RESP_FILE="$WORK/response.json"
 CURL_CONFIG="$WORK/curl.conf"
 BRANCH_CREATED=0
+WT_ADDED=0
 RC=0
 
 cleanup() {
   local rc=$?
+  # The worktree is unregistered before the temp directory holding it goes: rm
+  # would leave the rig's repository with a registration pointing at a path that
+  # no longer exists (gt-fn9e6.45). remove is the whole of it — an explicit
+  # prune would churn the registrations of whatever landings share that
+  # repository — so a remove that fails names prune as the operator's remedy.
+  if [ "$WT_ADDED" = 1 ]; then
+    if ! git -C "$BARE" worktree remove --force "$WT"; then
+      log "warning: the gate verdict above stands, but the probe worktree $WT could not be removed from $BARE; run 'git -C $BARE worktree prune' to clear the registration"
+      rc=1
+    fi
+  fi
   # A branch the probe cannot delete is left behind for every later run to
   # find, so it fails the run even when the gate was green.
   if [ "$BRANCH_CREATED" = 1 ]; then
@@ -380,6 +410,44 @@ clone_copy() {
   fi
 }
 
+# --- the push ----------------------------------------------------------------
+
+# push_from DIR REFSPEC pushes REFSPEC to GIT_URL from DIR. The failure carries
+# the push's own output, because a hook that refuses the branch is the finding
+# the probe exists to produce.
+push_from() {
+  local dir=$1 refspec=$2 err
+  if ! err=$(git -C "$dir" push --quiet --force "$GIT_URL" "$refspec" 2>&1); then
+    die "git push of $MAIN_BRANCH ($SHA) to $GIT_URL as $BRANCH failed from $dir${err:+: $err}"
+  fi
+}
+
+# push_candidate sends SHA to GIT_URL as BRANCH. It rides a throwaway worktree
+# of the rig's repository, where the relative core.hooksPath resolves to the
+# rig's own hooks and a pre-push that refuses land/* refuses here — the same
+# push the landing worker makes (gt-fn9e6.45). Without that repository it falls
+# back to the clone, which carries no hooks, and says so.
+push_candidate() {
+  if [ -d "$BARE" ]; then
+    # The worktree can only be cut at a commit the rig's repository holds. A
+    # rig repo behind its remote is the one case the clone cannot cover, and
+    # fetching for it would write refs into the repository the probe is
+    # inspecting, so this names the remedy instead.
+    git -C "$BARE" rev-parse --verify --quiet "$SHA^{commit}" >/dev/null \
+      || die "the rig repository $BARE has no $SHA, the $MAIN_BRANCH the probe would push; fetch $MAIN_BRANCH in $BARE and run the probe again, since the hooks it must exercise live there"
+    # GIT_LFS_SKIP_SMUDGE, as internal/git's WorktreeAddDetached sets it: the
+    # worktree is cut for its .githooks, not for a checkout of the tree.
+    GIT_LFS_SKIP_SMUDGE=1 git -C "$BARE" worktree add --detach "$WT" "$SHA" \
+      || die "could not add a worktree of $BARE at $SHA under $WT"
+    WT_ADDED=1
+    log "pushing from a throwaway worktree of $BARE, so the rig's hooks run"
+    push_from "$WT" "$SHA:refs/heads/$BRANCH"
+    return
+  fi
+  log "warning: no rig repository at $BARE, so the probe pushes from the clone and the rig's hooks were not exercised"
+  push_from "$COPY" "refs/remotes/origin/$MAIN_BRANCH:refs/heads/$BRANCH"
+}
+
 # --- probing -----------------------------------------------------------------
 
 # 1. The repository must be on this instance, and the token must see it.
@@ -423,15 +491,17 @@ SHA=$(git -C "$COPY" rev-parse --verify "refs/remotes/origin/$MAIN_BRANCH^{commi
 # interrupted probe is replaced rather than allowed to block the re-run.
 if [ "$DRY_RUN" = 1 ]; then
   log "would push $MAIN_BRANCH ($SHA) to $GIT_URL as $BRANCH"
+  if [ -d "$BARE" ]; then
+    log "would push from a throwaway worktree of $BARE, so the rig's hooks run, and remove the worktree afterwards"
+  else
+    log "warning: no rig repository at $BARE, so the probe would push from the clone and the rig's hooks would not be exercised"
+  fi
   log "would wait up to ${TIMEOUT}s for $CONTEXT on $SHA"
   log "would delete branch $BRANCH on $REPO"
   log "dry run: no push and no deletion was sent"
   exit 0
 fi
-if ! git -C "$COPY" push --quiet --force "$GIT_URL" \
-  "refs/remotes/origin/$MAIN_BRANCH:refs/heads/$BRANCH"; then
-  die "git push of $MAIN_BRANCH to $GIT_URL as $BRANCH failed"
-fi
+push_candidate
 BRANCH_CREATED=1
 log "pushed $MAIN_BRANCH ($SHA) to $REPO as $BRANCH; waiting up to ${TIMEOUT}s for $CONTEXT"
 

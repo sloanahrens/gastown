@@ -6,6 +6,12 @@
 # from a file the case chooses, which is how a copy without gate.yml is
 # modelled; the stub `curl` answers status reads from a script of states the
 # case sets, which is how pending, success, failure and silence are modelled.
+#
+# The stub `git` also models the two settings that decide whether a hook runs:
+# `worktree add` cuts a worktree of the rig's repository and installs the case's
+# hook there, and `push` runs that hook only from such a worktree — what
+# core.hooksPath being set in the rig's repository, and nowhere else, means for
+# the probe (gt-fn9e6.45).
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -20,6 +26,8 @@ WEB="http://forgejo.test"
 SHA="cafebabecafebabecafebabecafebabecafebabe"
 STATE="$TMP/state"
 CFG="$TMP/config"
+TOWN="$TMP/town"
+BARE="$TOWN/rig/.repo.git"
 
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); if [ $# -gt 1 ]; then printf '%s\n' "$2" | sed 's/^/    | /'; fi; }
@@ -30,6 +38,10 @@ check() { # check DESCRIPTION COMMAND...
 }
 contains() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
 lacks() { ! contains "$1" "$2"; }
+# norm collapses the duplicate slashes a $TMPDIR with a trailing slash leaves
+# behind, so a path the stub wrote and the same path git reported as $PWD
+# compare equal.
+norm() { printf '%s' "$1" | sed 's|//*|/|g'; }
 
 mkdir -p "$TMP/bin" "$TMP/home" "$TMP/config" "$STATE"
 printf 'FORGEJO_ADMIN_TOKEN=%s\n' "$STUB_ADMIN_TOKEN" > "$TMP/admin.env"
@@ -50,10 +62,12 @@ jobs:
       - run: make gate
 YAML
 
-# The stub git: clone makes the copy's directory, show prints the workflow the
-# case points STUB_GATE_YML at (or fails when that file is absent), rev-parse
-# prints STUB_SHA, and push records its refspec. It records a violation when the
-# admin token reaches its argv.
+# The stub git: clone makes the copy's directory and seeds it with the case's
+# hook file, show prints the workflow the case points STUB_GATE_YML at (or fails
+# when that file is absent), rev-parse prints STUB_SHA, worktree add creates a
+# worktree with that hook installed and worktree remove deletes it, and push
+# records its refspec after running the hook a worktree of the rig's repository
+# carries. It records a violation when the admin token reaches its argv.
 cat >"$TMP/bin/git" <<'STUB'
 #!/usr/bin/env bash
 set -uo pipefail
@@ -65,11 +79,24 @@ for a in "$@"; do
   esac
 done
 
-if [ "${1:-}" = "-C" ]; then shift 2; fi
+gitdir=""
+if [ "${1:-}" = "-C" ]; then gitdir=$2; shift 2; fi
 sub=${1:-}
+
+# seed_hook DIR gives DIR the case's pre-push hook, as a checkout of a tree
+# carrying .githooks/ does.
+seed_hook() {
+  local dir=$1
+  [ -n "${STUB_HOOK:-}" ] && [ -f "${STUB_HOOK:-}" ] || return 0
+  mkdir -p "$dir/.githooks"
+  cp "$STUB_HOOK" "$dir/.githooks/pre-push"
+  chmod +x "$dir/.githooks/pre-push"
+}
+
 case "$sub" in
   clone)
     mkdir -p "${!#}"
+    seed_hook "${!#}"
     ;;
   show)
     spec=${!#}
@@ -83,14 +110,52 @@ case "$sub" in
     esac
     exit 1 ;;
   rev-parse)
+    case "${!#}" in
+      *"$STUB_SHA^{commit}"*) [ -z "${STUB_REPO_LACKS_SHA:-}" ] || exit 1 ;;
+    esac
     printf '%s\n' "$STUB_SHA"
     ;;
+  worktree)
+    action=${2:-}
+    case "$action" in
+      add)
+        shift 2
+        dir=""
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            -*) ;;
+            *) if [ -z "$dir" ]; then dir=$1; else break; fi ;;
+          esac
+          shift
+        done
+        [ -n "$dir" ] || exit 1
+        mkdir -p "$dir"
+        seed_hook "$dir"
+        printf '%s\n' "$dir" >> "$STUB_STATE/worktrees"
+        ;;
+      remove)
+        dir=${!#}
+        rm -rf "$dir"
+        printf '%s\n' "$dir" >> "$STUB_STATE/worktree-removed"
+        ;;
+    esac
+    ;;
   push)
-    if [ -n "${STUB_PUSH_FAIL:-}" ]; then
-      echo "push refused by the stub" >&2
-      exit 1
+    refspec=${!#}
+    # core.hooksPath is set in the rig's repository alone, so the hook runs only
+    # when the push comes from a worktree of it and never from the clone.
+    if [ -n "$gitdir" ] && grep -qx "$gitdir" "$STUB_STATE/worktrees" 2>/dev/null \
+      && [ -x "$gitdir/.githooks/pre-push" ]; then
+      cd "$gitdir" || exit 1
+      # git reports the refspec's source as local_ref: the SHA for the probe's
+      # own refspec, the remote-tracking ref for the clone's.
+      if ! printf '%s %s %s %s\n' "${refspec%%:*}" "$STUB_SHA" "${refspec#*:}" \
+        0000000000000000000000000000000000000000 \
+        | "$gitdir/.githooks/pre-push" origin "$STUB_SHA"; then
+        exit 1
+      fi
     fi
-    printf '%s\n' "${!#}" >> "$STUB_STATE/pushes"
+    printf '%s\n' "$refspec" >> "$STUB_STATE/pushes"
     ;;
 esac
 STUB
@@ -204,6 +269,28 @@ chmod +x "$TMP/bin/curl"
 
 printf 'the failing package is named here\nFAIL\tTestGate\t0.01s\n' > "$STATE/job-log"
 
+# The rig hooks a case installs. hook-refuse is a pre-push that refuses the
+# probe's branch, as a rig's own hook may; hook-allow records that it ran.
+cat >"$TMP/hook-refuse" <<'HOOK'
+#!/bin/bash
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  case "$remote_ref" in
+    refs/heads/land/*)
+      echo "rig pre-push: refusing $remote_ref; land branches are pushed by the lander, not from here" >&2
+      exit 1 ;;
+  esac
+done
+exit 0
+HOOK
+chmod +x "$TMP/hook-refuse"
+
+cat >"$TMP/hook-allow" <<'HOOK'
+#!/bin/bash
+printf 'ran in %s\n' "$PWD" >> "$STUB_STATE/hook-ran"
+exit 0
+HOOK
+chmod +x "$TMP/hook-allow"
+
 # run_probe [ARGS...] runs the probe against the stubs, prints its combined
 # output, and returns its exit code (the callers read it from $?).
 run_probe() {
@@ -213,17 +300,19 @@ run_probe() {
     STUB_STATE="$STATE" STUB_API="$API" STUB_WEB="$WEB" STUB_SHA="$SHA" \
     STUB_ADMIN_TOKEN="$STUB_ADMIN_TOKEN" STUB_CONTEXT="${STUB_CONTEXT:-ci / gate (push)}" \
     STUB_GATE_YML="${STUB_GATE_YML:-$TMP/gate.yml}" \
-    bash "$PROBE" --api-url "$API" --web-url "$WEB" --admin-token-file "$TMP/admin.env" "$@" 2>&1)
+    STUB_HOOK="${STUB_HOOK:-}" STUB_REPO_LACKS_SHA="${STUB_REPO_LACKS_SHA:-}" \
+    bash "$PROBE" --api-url "$API" --web-url "$WEB" --admin-token-file "$TMP/admin.env" \
+    --town-root "${STUB_TOWN_ROOT:-$TOWN}" "$@" 2>&1)
   rc=$?
   printf '%s' "$out"
   return "$rc"
 }
 
 # fresh empties the stub's state and gives the case a starting status script and
-# a job log.
+# a job log. The rig's repository exists, as it does on a real host.
 fresh() {
   rm -rf "$STATE"
-  mkdir -p "$STATE"
+  mkdir -p "$STATE" "$BARE"
   : > "$STATE/calls.log"
   printf 'success\n' > "$STATE/status-plan"
   printf 'the failing package is named here\nFAIL\tTestGate\t0.01s\n' > "$STATE/job-log"
@@ -250,6 +339,9 @@ count_calls_exact() { # count_calls_exact METHOD PATH
 }
 pushes() { cat "$STATE/pushes" 2>/dev/null || true; }
 deleted() { cat "$STATE/deleted" 2>/dev/null || true; }
+worktrees_added() { cat "$STATE/worktrees" 2>/dev/null || true; }
+worktrees_removed() { cat "$STATE/worktree-removed" 2>/dev/null || true; }
+hook_ran() { cat "$STATE/hook-ran" 2>/dev/null || true; }
 
 echo "=== a green gate passes ==="
 fresh
@@ -257,13 +349,58 @@ out=$(run_probe rig --repo acme/rig --timeout 20 --poll-interval 1); rc=$?
 if [ "$rc" = 0 ]; then pass "a green probe exits 0"; else fail "a green probe exits 0 (rc=$rc)" "$out"; fi
 check "the copy is cloned in full" contains "clone" "$(cat "$STATE/git.log")"
 check "no shallow flag is used" lacks "--depth" "$(cat "$STATE/git.log")"
-check "main is pushed as the probe branch" contains "refs/remotes/origin/main:refs/heads/land/probe-rig" "$(pushes)"
+check "main is pushed as the probe branch" contains "$SHA:refs/heads/land/probe-rig" "$(pushes)"
+check "the candidate is pushed from the rig's own repository" contains "$BARE" "$(cat "$STATE/git.log")"
 check "the probe branch is deleted" test "$(deleted)" = "land/probe-rig"
 check "the deletion names the encoded branch" grep -q "DELETE /repos/acme/rig/branches/land%2Fprobe-rig" "$STATE/calls.log"
 check "the run reports the gate green" contains "green" "$out"
 check "the run names the context it waited on" contains "ci / gate (push)" "$out"
+check "the worktree is unregistered after the push" test "$(worktrees_added)" = "$(worktrees_removed)"
+check "the worktree directory is gone" test ! -d "$(worktrees_added)"
+check "the unregistration is worktree remove, not a prune of the shared repo" test ! -e "$STATE/worktree-pruned"
+check "the throwaway worktree sits in the probe's temp dir" contains "forgejo-probe." "$(worktrees_added)"
 check "the admin token never reaches the stub's argv" test ! -e "$STATE/argv-violations"
 check "the admin token never reaches the output" lacks "$STUB_ADMIN_TOKEN" "$out"
+
+echo "=== a rig hook that refuses land/* fails the probe ==="
+fresh
+out=$(STUB_HOOK="$TMP/hook-refuse" run_probe rig --repo acme/rig --timeout 20 --poll-interval 1); rc=$?
+if [ "$rc" != 0 ]; then pass "a hook that refuses the candidate fails the probe"; else fail "a hook that refuses the candidate fails the probe (rc=$rc)" "$out"; fi
+check "the refusal is the hook's own message" contains "rig pre-push: refusing refs/heads/land/probe-rig" "$out"
+check "the refused push never happens" test ! -e "$STATE/pushes"
+check "no branch is deleted for a refused push" test -z "$(deleted)"
+check "the status is never read" test "$(count_calls GET /commits/)" = 0
+check "the refused push cut a worktree" test -n "$(worktrees_added)"
+check "the refused worktree is unregistered" test "$(worktrees_added)" = "$(worktrees_removed)"
+
+echo "=== a rig hook that allows land/* runs in the push's worktree ==="
+fresh
+out=$(STUB_HOOK="$TMP/hook-allow" run_probe rig --repo acme/rig --timeout 20 --poll-interval 1); rc=$?
+if [ "$rc" = 0 ]; then pass "a hook that allows the candidate leaves the probe green"; else fail "a hook that allows the candidate leaves the probe green (rc=$rc)" "$out"; fi
+check "the rig's hook ran" contains "ran in $(norm "$(worktrees_added)")" "$(norm "$(hook_ran)")"
+check "the hook ran where the push did" contains "$SHA:refs/heads/land/probe-rig" "$(pushes)"
+check "the allowed push deletes the branch" test "$(deleted)" = "land/probe-rig"
+check "the allowed push cut a worktree" test -n "$(worktrees_added)"
+check "the allowed worktree is unregistered" test "$(worktrees_added)" = "$(worktrees_removed)"
+
+echo "=== without the rig's repository the probe warns hooks were not exercised ==="
+fresh
+out=$(STUB_TOWN_ROOT="$TMP/no-town" run_probe rig --repo acme/rig --timeout 20 --poll-interval 1); rc=$?
+if [ "$rc" = 0 ]; then pass "a rig with no repository still probes"; else fail "a rig with no repository still probes (rc=$rc)" "$out"; fi
+check "the warning names the missing repository" contains "no rig repository at $TMP/no-town/rig/.repo.git" "$out"
+check "the warning says the hooks were not exercised" contains "hooks were not exercised" "$out"
+check "the push falls back to the clone" contains "refs/remotes/origin/main:refs/heads/land/probe-rig" "$(pushes)"
+check "no worktree is cut without a repository" test ! -e "$STATE/worktrees"
+check "no hook runs without a repository" test ! -e "$STATE/hook-ran"
+check "the fallback push still deletes the branch" test "$(deleted)" = "land/probe-rig"
+
+echo "=== a rig repository without the probed commit says so ==="
+fresh
+out=$(STUB_REPO_LACKS_SHA=1 run_probe rig --repo acme/rig --timeout 5); rc=$?
+if [ "$rc" != 0 ]; then pass "a repository behind the probed commit exits non-zero"; else fail "a repository behind the probed commit exits non-zero (rc=$rc)" "$out"; fi
+check "the refusal names the repository and the remedy" contains "fetch main in $BARE" "$out"
+check "nothing is pushed for an unheld commit" test ! -e "$STATE/pushes"
+check "no worktree is cut for an unheld commit" test ! -e "$STATE/worktrees"
 
 echo "=== a pending gate is polled until it reports ==="
 fresh
@@ -387,6 +524,8 @@ check "dry run sends no delete" test ! -e "$STATE/deleted"
 check "dry run sends no status read" test "$(count_calls GET /commits/)" = 0
 check "dry run reads the repository" test "$(count_calls GET /repos/acme/rig)" = 1
 check "dry run says it would push" contains "would push" "$out"
+check "dry run names the worktree the push would ride" contains "would push from a throwaway worktree of $BARE" "$out"
+check "dry run cuts no worktree" test ! -e "$STATE/worktrees"
 check "dry run says it would delete the branch" contains "would delete branch land/probe-rig" "$out"
 check "dry run reports no write was sent" contains "no push and no deletion was sent" "$out"
 
@@ -410,6 +549,8 @@ out=$(run_probe 'bad/rig' --repo acme/rig); rc=$?
 if [ "$rc" = 2 ]; then pass "a rig name with a slash exits 2"; else fail "a rig name with a slash exits 2 (rc=$rc)" "$out"; fi
 out=$(run_probe rig --repo acme/rig --timeout 0); rc=$?
 if [ "$rc" = 2 ]; then pass "a zero timeout exits 2"; else fail "a zero timeout exits 2 (rc=$rc)" "$out"; fi
+out=$(run_probe rig --repo acme/rig --town-root); rc=$?
+if [ "$rc" = 2 ]; then pass "--town-root without a value exits 2"; else fail "--town-root without a value exits 2 (rc=$rc)" "$out"; fi
 out=$(run_probe rig --repo acme/rig --timeout soon); rc=$?
 if [ "$rc" = 2 ]; then pass "a non-numeric timeout exits 2"; else fail "a non-numeric timeout exits 2 (rc=$rc)" "$out"; fi
 out=$(run_probe rig --repo acme/rig --nope); rc=$?
