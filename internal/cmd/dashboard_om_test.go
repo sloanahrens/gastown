@@ -27,6 +27,39 @@ func TestOMStageDuration(t *testing.T) {
 	}
 }
 
+func TestOMStageTimes(t *testing.T) {
+	t.Parallel()
+	is := func(d *time.Duration, want time.Duration) bool { return d != nil && *d == want }
+
+	// A cut-over rig's candidate gate runs in CI: the ci stage IS the gate.
+	_, gate, om := omStageTimes("ci 2m46s, om 21s")
+	if !is(gate, 2*time.Minute+46*time.Second) {
+		t.Errorf("ci stage gate = %v", gate)
+	}
+	if !is(om, 21*time.Second) {
+		t.Errorf("ci stage om = %v", om)
+	}
+
+	// An old gate-only line is unchanged.
+	lint, gate, om := omStageTimes("lint 16s, gate 36s, om 1m56s")
+	if !is(lint, 16*time.Second) || !is(gate, 36*time.Second) || !is(om, 116*time.Second) {
+		t.Errorf("gate-only line = %v %v %v", lint, gate, om)
+	}
+
+	// A line that names both prefers the explicit gate, in either order.
+	if _, gate, _ := omStageTimes("gate 5s, ci 9s"); !is(gate, 5*time.Second) {
+		t.Errorf("gate before ci = %v", gate)
+	}
+	if _, gate, _ := omStageTimes("ci 9s, gate 5s"); !is(gate, 5*time.Second) {
+		t.Errorf("ci before gate = %v", gate)
+	}
+
+	// An unknown stage name is still ignored.
+	if l, g, o := omStageTimes("deploy 3s"); l != nil || g != nil || o != nil {
+		t.Errorf("unknown stage = %v %v %v", l, g, o)
+	}
+}
+
 func TestOMParseLogLine(t *testing.T) {
 	t.Parallel()
 	r := &omReader{}
@@ -45,6 +78,31 @@ func TestOMParseLogLine(t *testing.T) {
 	}
 	if r.rejects[1].Kind != "conflict" || r.rejects[1].Score != nil {
 		t.Errorf("conflict rejection = %+v", r.rejects[1])
+	}
+}
+
+// A Forgejo-path landing logs its candidate gate as a ci stage; the gate time
+// it reads must reach the Landings row and the trend series like a gate stage.
+func TestCIPathLandingCarriesItsGateTime(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 4, 18, 0, 0, 0, time.Local)
+	r := &omReader{}
+	r.parseLogLine("2026/10/04 17:58:00 landing_worker: [land] ma-7js: stages: ci 2m46s, om 21s")
+	if len(r.stages) != 1 || r.stages[0].Gate == nil || *r.stages[0].Gate != 2*time.Minute+46*time.Second {
+		t.Fatalf("ci stage = %+v, want gate 2m46s", r.stages)
+	}
+
+	stages := r.stages
+	recs := []omRecord{{Record: landings.Record{Bead: "ma-7js", Rig: "mango", Branch: "polecat/x/ma-7js+y",
+		OMVerdict: "approve", OMScore: 0.9, Route: "daemon", LandedAt: now.Add(-time.Minute)}}}
+
+	rows := buildRecentLandings(now, recs, stages, nil, nil, nil, 30)
+	if len(rows) != 1 || rows[0].GateSecs == nil || *rows[0].GateSecs != 166 {
+		t.Fatalf("landing row = %+v, want gate 166s", rows)
+	}
+	tr := buildTrend(now, nil, stages, nil, nil)
+	if len(tr.Stages) != 1 || tr.Stages[0].GateSecs != 166 {
+		t.Errorf("trend gate = %+v, want 166s", tr.Stages)
 	}
 }
 

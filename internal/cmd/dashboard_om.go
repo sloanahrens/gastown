@@ -210,6 +210,10 @@ func omStageDuration(stages string) *time.Duration {
 // omStageTimes reads each stage's duration off "lint 14s, gate 34s, om 40s".
 // A stage the line does not name comes back nil, as does one whose token is
 // not a duration; a trailing "(timed out)" after the token is ignored.
+//
+// The gate time is the ci stage on a cut-over rig: the candidate gate runs in
+// Forgejo CI (StageCI in internal/land), so its line is "ci 2m46s, om 21s". A
+// line that names both prefers the explicit gate.
 func omStageTimes(stages string) (lint, gate, om *time.Duration) {
 	for _, part := range strings.Split(stages, ", ") {
 		name, rest, ok := strings.Cut(part, " ")
@@ -226,6 +230,10 @@ func omStageTimes(stages string) (lint, gate, om *time.Duration) {
 			lint = &d
 		case "gate":
 			gate = &d
+		case "ci":
+			if gate == nil {
+				gate = &d
+			}
 		case "om":
 			om = &d
 		}
