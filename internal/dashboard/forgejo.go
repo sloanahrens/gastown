@@ -49,6 +49,11 @@ type ForgejoFeed struct {
 	// keeps a rig whose repository is invisible to the viewer from reading as a
 	// rig with no landings (gt-faml5).
 	Missing []string `json:"missing,omitempty"`
+	// Actions is the section's workflow runs, read in the same refresh as the
+	// events. It is nil when no repo answered for its runs — a reader with no
+	// repos at all, or one whose every run list failed — and then carries the
+	// last good read, exactly as the events do (gt-fn9e6.47).
+	Actions *ForgejoActions `json:"actions,omitempty"`
 }
 
 // errRepoName is a repo name that is not owner/name. The panel shows it as the
@@ -59,6 +64,7 @@ var errRepoName = errors.New("repo is not owner/name")
 type forgejoFeeds interface {
 	ListUserRepos(ctx context.Context) ([]forgejo.Repository, error)
 	ListRepoActivities(ctx context.Context, owner, repo string, limit int) ([]forgejo.Activity, error)
+	ListRuns(ctx context.Context, owner, repo string, f forgejo.RunFilter) (*forgejo.RunList, error)
 }
 
 // ForgejoReader builds the panel's feed from the viewer's repos, holding the
@@ -93,16 +99,23 @@ func (r *ForgejoReader) Read() *ForgejoFeed {
 		}
 		// The last good read keeps its own age: a pane serving it is stale, and
 		// saying when it was read is the only way the page can show that.
-		return &ForgejoFeed{Events: r.last.Events, Error: class, At: r.last.At, Missing: r.last.Missing}
+		return &ForgejoFeed{Events: r.last.Events, Error: class, At: r.last.At, Missing: r.last.Missing, Actions: r.last.Actions}
+	}
+	if feed.Actions == nil && r.last != nil {
+		// No repo answered for its runs: the Actions section keeps the last
+		// good value rather than emptying, exactly as the feed does with its
+		// events (gt-fn9e6.47).
+		feed.Actions = r.last.Actions
 	}
 	feed.At = r.now()
 	r.last = feed
 	return feed
 }
 
-// fetch reads every repo's feed under one deadline and merges them. The
-// deadline covers the whole refresh rather than each call, so the poll costs
-// the panel at most forgejoTimeout however many repos the viewer sees.
+// fetch reads every repo's feed and workflow runs under one deadline and
+// merges them. The deadline covers the whole refresh rather than each call, so
+// the poll costs the panel at most forgejoTimeout however many repos the viewer
+// sees.
 func (r *ForgejoReader) fetch() (*ForgejoFeed, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), forgejoTimeout)
 	defer cancel()
@@ -122,6 +135,7 @@ func (r *ForgejoReader) fetch() (*ForgejoFeed, error) {
 
 	var all []forgejo.Activity
 	var missing []string
+	var runs []repoRuns
 	for _, name := range names {
 		owner, repo, ok := strings.Cut(name, "/")
 		if !ok || owner == "" || repo == "" {
@@ -139,9 +153,14 @@ func (r *ForgejoReader) fetch() (*ForgejoFeed, error) {
 			return nil, err
 		}
 		all = append(all, acts...)
+		// The Actions section rides the same refresh: a repo the viewer cannot
+		// read has already been skipped above, so a runs failure here is a real
+		// one and the repo is named in the section's errors.
+		runs = append(runs, r.readRepoRuns(ctx, name, owner, repo))
 	}
 	feed := MergeForgejoActivities(all)
 	feed.Missing = missing
+	feed.Actions = mergeForgejoRuns(runs)
 	return feed, nil
 }
 

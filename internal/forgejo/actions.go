@@ -18,6 +18,16 @@ type ActionRun struct {
 	PrettyRef  string `json:"prettyref"`
 	WorkflowID string `json:"workflow_id"`
 	HTMLURL    string `json:"html_url"`
+	// Created, Started and Stopped are the run's RFC3339 timestamps as the API
+	// sends them. Started is unset until a runner picks the run up and Stopped
+	// is unset until it ends, so both read as the zero time while it waits.
+	Created string `json:"created"`
+	Started string `json:"started"`
+	Stopped string `json:"stopped"`
+	// Duration is the API's int64 nanosecond elapsed time, zero for a run that
+	// has not ended (verified against 16.0.5's swagger: Duration is Go's
+	// time.Duration, which marshals as a nanosecond count).
+	Duration int64 `json:"duration"`
 }
 
 // ActionRunJob is one job of a run; its ID addresses the job's log.

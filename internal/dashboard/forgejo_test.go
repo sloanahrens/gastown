@@ -69,6 +69,20 @@ func (s *forgejoStub) asked() []string {
 	return append([]string(nil), s.paths...)
 }
 
+// activitiesAsked is what the stub was asked for bar the Actions section's runs
+// calls, which ride the same refresh: the repo selection is asserted through
+// the rest (gt-fn9e6.47).
+func activitiesAsked(s *forgejoStub) []string {
+	var out []string
+	for _, p := range s.asked() {
+		if strings.Contains(p, "/actions/runs") {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
 // stubTransport answers each request in-process with the stub, so the reader's
 // real request building and response handling run without a socket (unit tests
 // may not open one, testpolicy rule no-network).
@@ -170,7 +184,7 @@ func TestForgejoReaderMergesTheViewersRepos(t *testing.T) {
 	feed := newForgejoTestReader(t, stub, nil).Read()
 	require.Empty(t, feed.Error)
 	require.Len(t, feed.Events, 2)
-	assert.Equal(t, []string{"/api/v1/user/repos", "/api/v1/repos/sloan/beads/activities/feeds"}, stub.asked())
+	assert.Equal(t, []string{"/api/v1/user/repos", "/api/v1/repos/sloan/beads/activities/feeds"}, activitiesAsked(stub))
 
 	// The stub echoes the feed's newest row first; the panel turns it the
 	// other way round so the newest line is the last one it appends.
@@ -247,7 +261,7 @@ func TestForgejoReaderNamesReposTheViewerCannotRead(t *testing.T) {
 	assert.Equal(t, []string{
 		"/api/v1/repos/sloan/beads/activities/feeds",
 		"/api/v1/repos/sloan/organic-mechanic/activities/feeds",
-	}, stub.asked(), "every named repo is asked for, not just the readable ones")
+	}, activitiesAsked(stub), "every named repo is asked for, not just the readable ones")
 }
 
 // The panel's poll interval rides the feed so the page can age the snapshot
@@ -279,7 +293,7 @@ func TestForgejoReaderReadsTheNamedReposInsteadOfTheViewerList(t *testing.T) {
 	stub := &forgejoStub{}
 	feed := newForgejoTestReader(t, stub, []string{"sloan/beads"}).Read()
 	require.Empty(t, feed.Error)
-	assert.Equal(t, []string{"/api/v1/repos/sloan/beads/activities/feeds"}, stub.asked())
+	assert.Equal(t, []string{"/api/v1/repos/sloan/beads/activities/feeds"}, activitiesAsked(stub))
 
 	bad := newForgejoTestReader(t, &forgejoStub{}, []string{"beads"}).Read()
 	assert.Equal(t, "bad repo name", bad.Error)
