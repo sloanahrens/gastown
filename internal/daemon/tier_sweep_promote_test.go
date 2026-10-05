@@ -302,6 +302,130 @@ func TestRunTierSweep_AFullyGreenCycleFastForwardsGitHubMain(t *testing.T) {
 	}
 }
 
+// skipFixture is a sweep that skips on unchanged main: the last complete sweep
+// was green at sha, and main is still there. The caller seeds how far the
+// promotion got with seedLastPromoted.
+func skipFixture(t *testing.T, repo promote.Repo) (*Daemon, *tierSweepRunRecorder, *tierSweepPromoteHarness, string) {
+	t.Helper()
+	d, rec, h, sha := sweepFixture(t, 14, repo)
+	if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{LastGreenSHA: sha}); err != nil {
+		t.Fatal(err)
+	}
+	return d, rec, h, sha
+}
+
+// seedLastPromoted records the commit the rig's main state last promoted, the
+// skip's test of whether the green sweep's promotion is still owed.
+func seedLastPromoted(t *testing.T, d *Daemon, sha string) {
+	t.Helper()
+	if err := (fileMainState{path: RedMainStatePath(d.config.TownRoot, "gastown")}).Save(
+		landworker.MainState{State: promote.State{LastPromoted: sha}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRunTierSweep_ASkipRetriesAnOwedPromotion: a cycle that skips because
+// origin/main is unchanged runs no tier, so the only retry left for the
+// promotion its green sweep owed -- a failed push, an unreachable target, a rig
+// whose promote_target was configured afterwards -- is the skip itself
+// (gt-fn9e6.52).
+func TestRunTierSweep_ASkipRetriesAnOwedPromotion(t *testing.T) {
+	t.Parallel()
+	repo := &tierSweepPromoteRepo{tip: "bbbb1111", ancestor: true}
+	d, rec, h, sha := skipFixture(t, repo)
+	seedLastPromoted(t, d, "cccc2222")
+
+	if !d.runTierSweep() {
+		t.Fatal("runTierSweep deferred; want a skip")
+	}
+
+	if len(rec.stages) != 0 {
+		t.Fatalf("stages = %+v, want none: origin/main is unchanged", rec.stages)
+	}
+	if len(repo.pushes) != 1 || repo.pushes[0] != sha+":"+promote.MainRef {
+		t.Fatalf("pushes = %v, want the green sweep's commit pushed to main from the skip", repo.pushes)
+	}
+	if len(h.rigs) != 1 || h.rigs[0] != "gastown" {
+		t.Errorf("promoters built for %v, want gastown once", h.rigs)
+	}
+	st, err := (fileMainState{path: RedMainStatePath(d.config.TownRoot, "gastown")}).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.LastPromoted != sha {
+		t.Errorf("LastPromoted = %q, want the retried commit %s", st.LastPromoted, sha)
+	}
+}
+
+// TestRunTierSweep_ASkipWithThePromotionAlreadyMadePromotesNothing: a skip
+// whose record already names the green sweep's commit owes nothing, so it
+// neither pushes nor builds a promoter -- no repeated work, no log noise
+// (gt-fn9e6.52).
+func TestRunTierSweep_ASkipWithThePromotionAlreadyMadePromotesNothing(t *testing.T) {
+	t.Parallel()
+	repo := &tierSweepPromoteRepo{tip: "bbbb1111", ancestor: true}
+	d, rec, h, sha := skipFixture(t, repo)
+	// The sweep's own green commit is what the target already holds.
+	seedLastPromoted(t, d, sha)
+
+	if !d.runTierSweep() {
+		t.Fatal("runTierSweep deferred; want a skip")
+	}
+
+	if len(repo.pushes) != 0 {
+		t.Errorf("pushes = %v, want none: the promotion is already made", repo.pushes)
+	}
+	if len(h.rigs) != 0 {
+		t.Errorf("promoters built for %v, want none for a skip with nothing owed", h.rigs)
+	}
+	if len(rec.stages) != 0 {
+		t.Fatalf("stages = %+v, want none: origin/main is unchanged", rec.stages)
+	}
+}
+
+// TestRunTierSweep_ASkipOnARigWithNoPromoterPromotesNothing: a rig whose
+// forgejo block names no promote_target has no promoter at all, so its skip
+// stays exactly the skip it was (gt-fn9e6.52).
+func TestRunTierSweep_ASkipOnARigWithNoPromoterPromotesNothing(t *testing.T) {
+	t.Parallel()
+	repo := &tierSweepPromoteRepo{tip: "bbbb1111", ancestor: true}
+	d, rec, _, _ := skipFixture(t, repo)
+	seedLastPromoted(t, d, "cccc2222")
+	// No test seam: resolution falls through to the daemon's own builder, and
+	// this town's rig has no config, so there is no promotion owner.
+	d.tierSweepSeams.promote = nil
+
+	if !d.runTierSweep() {
+		t.Fatal("runTierSweep deferred; want a skip")
+	}
+
+	if len(repo.pushes) != 0 {
+		t.Errorf("pushes = %v, want none without a promoter", repo.pushes)
+	}
+	if len(rec.stages) != 0 {
+		t.Fatalf("stages = %+v, want none: origin/main is unchanged", rec.stages)
+	}
+}
+
+// TestTierSweepRetryOwedPromotion_NoGreenCommitPromotesNothing: the skip guard
+// already refuses an empty LastGreenSHA, and the retry refuses it too rather
+// than treating an empty commit as owed (gt-fn9e6.52).
+func TestTierSweepRetryOwedPromotion_NoGreenCommitPromotesNothing(t *testing.T) {
+	t.Parallel()
+	repo := &tierSweepPromoteRepo{tip: "bbbb1111", ancestor: true}
+	d, _, h, _ := sweepFixture(t, 14, repo)
+	seedLastPromoted(t, d, "cccc2222")
+
+	d.tierSweepRetryOwedPromotion("gastown", "", "")
+
+	if len(repo.pushes) != 0 {
+		t.Errorf("pushes = %v, want none with no green commit recorded", repo.pushes)
+	}
+	if len(h.rigs) != 0 {
+		t.Errorf("promoters built for %v, want none with no green commit recorded", h.rigs)
+	}
+}
+
 // TestRunTierSweep_ARedCyclePromotesNothing: a red sweep files its beads and
 // reverts nothing, and promotes nothing — GitHub main keeps the last commit a
 // fully green cycle named (gt-fn9e6.38).
