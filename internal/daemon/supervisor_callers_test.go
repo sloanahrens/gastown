@@ -214,13 +214,23 @@ func TestCheckPolecatHealth_CrashFromWorkBeadWithoutAgentBead(t *testing.T) {
 	}
 }
 
-// The spawn grace comes from the work bead: sling hooks it before the
-// session exists, so a recently updated hooked bead with no session is a
-// polecat starting up (issue #1752), not a crash.
+// seedAgentState seeds the seat's agent bead with an agent_state, the way gt
+// sling writes agent_state=spawning at dispatch (and the first heartbeat moves
+// it on to working).
+func (b *workBD) seedAgentState(state string) {
+	b.db.Seed(beads.Issue{ID: "gt-myr-polecat-mycat",
+		Description: "role_type: polecat\nrig: myr\nagent_state: " + state + "\n"})
+}
+
+// The spawn grace comes from the work bead's hook and the seat's agent
+// record together: sling hooks the work bead before the session exists, so a
+// hooked bead written a minute ago with no session is a polecat starting up
+// (issue #1752), not a crash — but only while the record still says spawning.
 func TestCheckPolecatHealth_SpawnGraceFromWorkBead(t *testing.T) {
 	t.Parallel()
 	bd := newWorkBD(t)
 	bd.seed("gt-work1", "hooked", time.Now().Add(-time.Minute))
+	bd.seedAgentState("spawning")
 	d, logBuf := reaperDaemon(t, bd)
 	d.tmux = newFakeTmux(newFixedClock())
 
@@ -228,6 +238,48 @@ func TestCheckPolecatHealth_SpawnGraceFromWorkBead(t *testing.T) {
 
 	if strings.Contains(logBuf.String(), "CRASH DETECTED") {
 		t.Fatalf("a polecat inside its spawn window was called crashed: %s", logBuf)
+	}
+}
+
+// gt-6hby3: a working polecat keeps writing its own work bead, so the bead is
+// recent whenever the session dies. The daemon's crash detector held that
+// write as evidence of a dispatch, which delayed the report on every tick.
+// Only an explicit spawning agent state earns the window (issue #1752).
+func TestCheckPolecatHealth_SpawnGraceNeedsASpawningAgentState(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		state   string
+		age     time.Duration
+		crashed bool
+	}{
+		{"working seat with a work bead written 30s ago is a crash, not a dispatch", "working", 30 * time.Second, true},
+		{"spawning seat inside the window may be starting up", "spawning", 30 * time.Second, false},
+		{"spawning seat older than the window never came up", "spawning", 10 * time.Minute, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bd := newWorkBD(t)
+			bd.seed("gt-work1", "hooked", time.Now().Add(-tc.age))
+			bd.seedAgentState(tc.state)
+			d, logBuf := reaperDaemon(t, bd)
+			d.tmux = newFakeTmux(newFixedClock())
+
+			d.checkPolecatHealth("myr", "mycat")
+
+			got := strings.Contains(logBuf.String(), "CRASH DETECTED")
+			if got != tc.crashed {
+				t.Fatalf("crash detected = %v, want %v; log: %s", got, tc.crashed, logBuf)
+			}
+			// The agent bead is read only to refuse a restart inside the
+			// window; outside it the crash stands on the work bead alone
+			// (G1-01, TestCheckPolecatHealth_CrashFromWorkBeadWithoutAgentBead).
+			read := strings.Contains(bd.calls(t), "gt-myr-polecat-mycat")
+			if want := tc.age < polecatSpawnGrace; read != want {
+				t.Fatalf("agent bead read = %v (calls: %s), want %v", read, bd.calls(t), want)
+			}
+		})
 	}
 }
 

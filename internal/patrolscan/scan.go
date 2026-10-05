@@ -65,15 +65,42 @@ const ExitDeferred = "DEFERRED"
 // daemon test pins the two together.
 const ExitEscalated = "ESCALATED"
 
+// SpawningAgentState is the agent_state gt sling writes before the session and
+// the worktree exist, and the only state that reads as mid-dispatch. It is
+// beads.AgentStateSpawning, repeated here so this package stays out of the
+// beads dependency tree; a daemon test pins the two together.
+const SpawningAgentState = "spawning"
+
+// SpawnGrace reports whether a seat whose session is not up is still coming
+// up rather than crashed: its agent record says spawning, and the hook that
+// dispatched it was written inside the window.
+//
+// It is polecat.SpawnGrace's rule (gt-yteq), repeated here to keep this
+// package out of the polecat dependency tree;
+// TestPatrolScanSpawnGraceMatchesPolecat pins the two to one answer.
+//
+// Only an explicit spawning state earns the window: a running polecat keeps
+// writing its own work bead, so that write cannot stand in for a dispatch
+// (gt-6hby3). A missing fact (no window, no timestamp, no clock) returns
+// false, so a bead nobody can date never earns the grace.
+func SpawnGrace(agentState string, updatedAt, now time.Time, grace time.Duration) bool {
+	if strings.TrimSpace(agentState) != SpawningAgentState {
+		return false
+	}
+	if grace <= 0 || updatedAt.IsZero() || now.IsZero() {
+		return false
+	}
+	return now.Sub(updatedAt) < grace
+}
+
 // Defaults.
 const (
 	// DefaultDeadSamples is how many consecutive dead samples a seat needs
 	// before it is restarted. The count lives in the intent record, so a
 	// daemon restart does not reset it.
 	DefaultDeadSamples = 2
-	// DefaultSpawnGrace: gt sling hooks the work bead before the session
-	// exists, so work hooked this recently with no session is a polecat
-	// starting up.
+	// DefaultSpawnGrace is the window a dispatched seat is read as starting
+	// up rather than crashed in (SpawnGrace).
 	DefaultSpawnGrace = 5 * time.Minute
 	// DefaultReportWindow is how often one stranded bead may be commented on.
 	DefaultReportWindow = 24 * time.Hour
@@ -298,7 +325,8 @@ type Ledger interface {
 
 // Options tunes a Scanner.
 type Options struct {
-	DeadSamples    int
+	DeadSamples int
+	// SpawnGrace overrides DefaultSpawnGrace.
 	SpawnGrace     time.Duration
 	ReportWindow   time.Duration
 	HeartbeatFresh time.Duration
@@ -588,9 +616,6 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		}
 	}
 	now := s.o.Now()
-	if !work.UpdatedAt.IsZero() && now.Sub(work.UpdatedAt) < s.o.SpawnGrace {
-		return skip(fmt.Sprintf("%s hooked %s ago; polecat may be spawning", work.ID, now.Sub(work.UpdatedAt).Round(time.Second)))
-	}
 
 	// Hazard 1 (gt-x45us): a polecat that parked itself is not a crash,
 	// whatever else the record says. The agent bead is read only here, only
@@ -599,6 +624,16 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 	if err != nil {
 		return unknown("agent state unreadable", err)
 	}
+	// Spawn grace (gt-6hby3): gt sling hooks the work bead before the tmux
+	// session exists, so work hooked moments ago may be a polecat starting up
+	// rather than a crash (issue #1752). Only the agent record can say that —
+	// a running polecat keeps writing its work bead, so a recent write there
+	// is no evidence of a dispatch — so the check sits after the record read.
+	if SpawnGrace(agent.State, work.UpdatedAt, now, s.o.SpawnGrace) {
+		return skip(fmt.Sprintf("%s hooked %s ago and agent_state=%s; polecat may be spawning",
+			work.ID, now.Sub(work.UpdatedAt).Round(time.Second), SpawningAgentState))
+	}
+
 	// deferredExit records that the bead reads stuck after a DEFERRED exit:
 	// the turn ended without completing or escalating, so a successor is
 	// expected to carry the bead on. It is not a hold, and the restart below
