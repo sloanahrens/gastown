@@ -17,19 +17,22 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/townstatus"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 var (
-	dashboardPort     int
-	dashboardBind     string
-	dashboardSince    string
-	dashboardSpendCmd string
-	dashboardOpen     bool
+	dashboardPort         int
+	dashboardBind         string
+	dashboardSince        string
+	dashboardSpendCmd     string
+	dashboardForgejoRepos []string
+	dashboardOpen         bool
 )
 
 var dashboardCmd = &cobra.Command{
@@ -38,8 +41,9 @@ var dashboardCmd = &cobra.Command{
 	Short:   "Serve a read-only localhost page that shows what gt tail -f shows",
 	Long: `Serve one page on localhost that shows the town the way gt tail -f does:
 the health verdict, the queue waiting to land, the polecat seats and what they
-hold, the machine's load and what burns it, the DeepSeek spend, and the same
-default-view feed gt tail prints.
+hold, the machine's load and what burns it, the DeepSeek spend, the recent
+activity of the Forgejo repos the viewer can see, and the same default-view
+feed gt tail prints.
 
 It reads what gt tail reads — the events journals, the landings files, the
 daemon log, the watch feed, the daemon's health report — through the same
@@ -54,6 +58,13 @@ Host is not a loopback name.
 (default: ~/.claude/tools/deepseek-spend.py --json when that file exists). It
 runs every five minutes while a page is open; with none, the spend panel is
 left out.
+
+The Forgejo panel reads the viewer role's token file
+(~/.config/gt/forgejo-viewer.env) and lists the recent activity of every repo
+that token can see, every three minutes, GET only; --forgejo-repo owner/name
+narrows it to the repos named, and may be repeated. With no token file the
+panel is left out, and a refresh that fails shows the last good feed marked
+stale.
 
 Lifecycle: the dashboard watches its own binary. When make install replaces it
 and the new file runs (gt version succeeds), the dashboard restarts itself in
@@ -74,6 +85,7 @@ func init() {
 	dashboardCmd.Flags().StringVar(&dashboardBind, "bind", "127.0.0.1", "Address to bind; loopback only")
 	dashboardCmd.Flags().StringVar(&dashboardSince, "since", "2h", "How far back the feed starts (as gt tail --since)")
 	dashboardCmd.Flags().StringVar(&dashboardSpendCmd, "spend-cmd", "", "Command that prints the DeepSeek spend report as JSON (default: the ~/.claude tool when present)")
+	dashboardCmd.Flags().StringArrayVar(&dashboardForgejoRepos, "forgejo-repo", nil, "Repo (owner/name) the Forgejo panel reads; repeatable (default: every repo the viewer can see)")
 	dashboardCmd.Flags().BoolVar(&dashboardOpen, "open", false, "Open the page in the default browser")
 	rootCmd.AddCommand(dashboardCmd)
 }
@@ -178,6 +190,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Spend:      dashboardSpend(resolveSpendCmd(spendCmd)),
 		OM:         func() *dashboard.OM { return om.read(time.Now()) },
 		TierSweep:  func() *dashboard.TierSweep { return tierSweeps.read(time.Now()) },
+		Forgejo:    dashboardForgejoReader(dashboardForgejoRepos),
 		Escalation: func() *dashboard.Escalations { return escalations.read(time.Now()) },
 		Dispatch:   om.dispatch,
 		Queue:      func() *dashboard.Queue { return queue.read(time.Now()) },
@@ -347,6 +360,18 @@ func resolveSpendCmd(flagValue string) []string {
 		return nil
 	}
 	return []string{tool, "--json"}
+}
+
+// dashboardForgejoReader wires the Forgejo panel to the read-only viewer role:
+// repos, when non-empty, is the explicit owner/name list to read. No viewer
+// token file means no panel, like the spend panel with no spend command. The
+// token is read once, here, and never leaves the client.
+func dashboardForgejoReader(repos []string) func() *dashboard.ForgejoFeed {
+	client, err := forgejo.NewClient(config.ForgejoRoleViewer)
+	if err != nil {
+		return nil
+	}
+	return dashboard.NewForgejoReader(client, repos).Read
 }
 
 // dashboardSpend runs the spend command and returns its JSON, nil when it

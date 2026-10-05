@@ -350,7 +350,10 @@ type State struct {
 	Spend     json.RawMessage `json:"spend,omitempty"`
 	OM        *OM             `json:"om,omitempty"`
 	TierSweep *TierSweep      `json:"tiersweep,omitempty"`
-	Dispatch  *Dispatch       `json:"dispatch,omitempty"`
+	// Forgejo is the viewer's recent-activity feed, oldest first. It is nil for
+	// a town with no viewer token, and until the reader first reports.
+	Forgejo  *ForgejoFeed `json:"forgejo,omitempty"`
+	Dispatch *Dispatch    `json:"dispatch,omitempty"`
 	// Escalations is the town's open escalation beads, the same set the
 	// escalations tile counts. It is nil until the reader first reports.
 	Escalations *Escalations `json:"escalations,omitempty"`
@@ -379,6 +382,8 @@ type Config struct {
 	OM func() *OM
 	// TierSweep reads the daemon's tier sweeps from the daemon log.
 	TierSweep func() *TierSweep
+	// Forgejo reads the viewer's Forgejo recent-activity feed.
+	Forgejo func() *ForgejoFeed
 	// Escalation reads the town's open escalation beads.
 	Escalation func() *Escalations
 	// Dispatch reads the spec dispatcher's last tick from the daemon log.
@@ -402,6 +407,7 @@ type Config struct {
 	SpendEvery      time.Duration
 	OMEvery         time.Duration
 	TierSweepEvery  time.Duration
+	ForgejoEvery    time.Duration
 	EscalationEvery time.Duration
 	DispatchEvery   time.Duration
 	QueueEvery      time.Duration
@@ -426,6 +432,7 @@ func (c *Config) defaults() {
 	def(&c.SpendEvery, 5*time.Minute)
 	def(&c.OMEvery, 60*time.Second)
 	def(&c.TierSweepEvery, 60*time.Second)
+	def(&c.ForgejoEvery, 3*time.Minute)
 	def(&c.EscalationEvery, 60*time.Second)
 	def(&c.DispatchEvery, 10*time.Second)
 	def(&c.QueueEvery, 60*time.Second)
