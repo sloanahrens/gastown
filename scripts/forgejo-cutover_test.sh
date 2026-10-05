@@ -6,10 +6,12 @@
 # the live Forgejo. HOME points inside the temp dir, so nothing the script
 # writes can land in the real ~.
 #
-# The cases cover the two refusals (a landing in flight, a probe that is not
-# green), a full --dry-run that writes nothing, and a real cutover that writes
-# the block, backs up both config files, repoints every remote and restarts the
-# daemon.
+# The cases cover the three refusals (a landing in flight, a probe that is not
+# green, an unreadable queue), a full --dry-run that writes nothing and leaves
+# no backup behind, a real cutover that writes the block, backs up both config
+# files, repoints every remote and restarts the daemon, a hostname-form
+# --forgejo-url whose own git work still rides the admin base, and a landing
+# queued at the restart.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -22,7 +24,12 @@ FAIL=0
 STUB_ADMIN_TOKEN="stub-admin-token"
 API="http://forgejo.test/api/v1"
 WEB="http://forgejo.test"
-FORGEJO_URL="$WEB/acme/rig.git"
+# The admin base the script's own git work rides: the web root plus the repo.
+ADMIN_GIT_URL="$WEB/acme/rig.git"
+FORGEJO_URL="$ADMIN_GIT_URL"
+# The credential-helper hostname form of the same repository: what an operator
+# writes into the rig, and what the bots cannot reach before provisioning.
+HOSTNAME_GIT_URL="http://forgejo:3000/acme/rig.git"
 GITHUB_URL="git@github.com:acme/rig.git"
 TOWN="$TMP/town"
 RIG_ROOT="$TOWN/acme"
@@ -66,6 +73,11 @@ chmod +x "$TMP/provision.sh"
 # The stub git: remotes live in files named for the directory, refs in files
 # named for the URL, and an import (fetch then push) copies the fetched refs
 # into the pushed URL's file, so the comparison after the push is a real one.
+#
+# $STUB_FORGEJO_GIT_URLS lists the git URLs the Forgejo instance answers on. A
+# Forgejo URL that is not the admin one is served as a bot, and the bots have no
+# access to the repository until provisioning has run, so listing it and pushing
+# to it fail the way the live instance does (gt-fn9e6.35).
 cat >"$TMP/bin/git" <<'STUB'
 #!/usr/bin/env bash
 set -uo pipefail
@@ -81,6 +93,19 @@ url_of() { # url_of ARGS... prints the first argument that is a remote URL
   return 1
 }
 key_of() { printf '%s' "$1" | tr '/:@.' '_'; }
+# reachable URL returns 1 when URL is a Forgejo git URL the bots cannot reach,
+# printing the refusals the live instance sends.
+reachable() { # reachable URL
+  local u
+  for u in ${STUB_FORGEJO_GIT_URLS:-}; do
+    [ "$1" = "$u" ] || continue
+    [ "$1" = "${STUB_ADMIN_GIT_URL:-}" ] && return 0
+    printf 'remote: Repository not found.\n' >&2
+    printf 'fatal: repository %s not found\n' "$1" >&2
+    return 1
+  done
+  return 0
+}
 
 dir=""
 if [ "${1:-}" = "-C" ]; then dir=$2; shift 2; fi
@@ -99,14 +124,17 @@ case "$sub" in
     esac ;;
   ls-remote)
     url=$(url_of "$@" || true)
+    reachable "$url" || exit 128
     cat "$STUB_STATE/refs_$(key_of "$url")" 2>/dev/null || true ;;
   init) mkdir -p "${!#}" ;;
   fetch)
     url=$(url_of "$@" || true)
+    reachable "$url" || exit 128
     printf '%s' "$url" > "$STUB_STATE/fetched-url"
     cat "$STUB_STATE/refs_$(key_of "$url")" 2>/dev/null > "$STUB_STATE/fetched-refs" || : > "$STUB_STATE/fetched-refs" ;;
   push)
     url=$(url_of "$@" || true)
+    reachable "$url" || exit 128
     printf '%s\n' "$url" >> "$STUB_STATE/pushes"
     cp "$STUB_STATE/fetched-refs" "$STUB_STATE/refs_$(key_of "$url")" 2>/dev/null || true ;;
 esac
@@ -201,7 +229,7 @@ refs_key() { printf '%s' "$1" | tr '/:@.' '_'; }
 # fresh resets the stub state and rebuilds the rig's files, so each case starts
 # from the same pre-cutover world.
 fresh() {
-  unset STUB_MIRROR_ABSENT STUB_BD_FAIL
+  unset STUB_MIRROR_ABSENT STUB_BD_FAIL STUB_FORGEJO_EXTRA_URL
   rm -rf "$STATE" "$RIG_ROOT/settings/config.json" "$RIG_ROOT/settings/"*.bak-* 2>/dev/null
   mkdir -p "$STATE" "$RIG_ROOT/settings"
   : > "$STATE/calls.log"
@@ -255,6 +283,8 @@ run_cutover() {
     STUB_STATE="$STATE" STUB_API="$API" STUB_MIRROR_TARGET="$GITHUB_URL" \
     STUB_ADMIN_TOKEN="$STUB_ADMIN_TOKEN" STUB_MIRROR_ABSENT="${STUB_MIRROR_ABSENT:-}" \
     STUB_BD_FAIL="${STUB_BD_FAIL:-}" \
+    STUB_ADMIN_GIT_URL="$ADMIN_GIT_URL" \
+    STUB_FORGEJO_GIT_URLS="$ADMIN_GIT_URL${STUB_FORGEJO_EXTRA_URL:+ $STUB_FORGEJO_EXTRA_URL}" \
     bash "$CUTOVER" acme --town-root "$TOWN" --repo acme/rig \
     --api-url "$API" --web-url "$WEB" \
     --admin-token-file "$TMP/admin.env" --probe "$TMP/probe.sh" \
@@ -312,10 +342,15 @@ check "it prints the probe command" contains "probe.sh acme --repo acme/rig" "$o
 check "it prints the ref import" contains "ls-remote" "$out"
 check "it prints the push mirror it would create" contains "dry run: not sent" "$out"
 check "it prints the daemon restart" contains "daemon restart" "$out"
-check "it names the github Actions reminder" contains "actions/permissions -f enabled=false" "$out"
+check "it names the github Actions reminder" contains "actions/permissions -F enabled=false" "$out"
+check "it does not print the string form that 422s" lacks "actions/permissions -f enabled=false" "$out"
+check "it says it would back up, not that it did" contains "would back up" "$out"
+check "it never claims a backup it did not make" lacks "backed up" "$out"
 check "the settings file is byte-identical" [ "$(cat "$RIG_ROOT/settings/config.json")" = "$before_settings" ]
 check "town.json is byte-identical" [ "$(cat "$TOWN/mayor/town.json")" = "$before_town" ]
 check "no config backup is left" [ -z "$(backups)" ]
+check "no town.json backup exists" [ -z "$(find "$TOWN/mayor" -name 'town.json.bak-*')" ]
+check "no settings backup exists" [ -z "$(find "$RIG_ROOT/settings" -name 'config.json.bak-*')" ]
 check "the ref import changed nothing" [ "$(cat "$STATE/refs_$(refs_key "$FORGEJO_URL")")" = "$before_refs" ]
 check "no remote was set" lacks "set-url" "$(cat "$STATE/git.log")"
 check "no write call was sent" [ "$(count_calls POST)" = 0 ]
@@ -332,6 +367,9 @@ check "every GitHub ref was imported" contains "imported every GitHub ref" "$out
 check "the push mirror was created without a branch filter" contains '"branch_filter":""' "$(cat "$STATE/mirror-create-body" 2>/dev/null)"
 check "the mirror enables ssh" contains '"use_ssh":true' "$(cat "$STATE/mirror-create-body" 2>/dev/null)"
 check "the gh deploy-key command is printed" contains "gh repo deploy-key add" "$out"
+check "the import listed the admin base" contains "ls-remote --heads --tags --refs $ADMIN_GIT_URL" "$(cat "$STATE/git.log")"
+check "the import pushed to the admin base" contains "$ADMIN_GIT_URL" "$(cat "$STATE/pushes")"
+check "the probe pushed through the admin base" contains "--git-url $ADMIN_GIT_URL" "$(cat "$STATE/probe.log")"
 check "the deploy key is the mirror's" contains "AAAAMIRRORKEY" "$out"
 check "the bare repo is repointed" contains "$RIG_ROOT/.repo.git $FORGEJO_URL" "$(cat "$STATE/set-urls")"
 check "the mayor clone is repointed" contains "$RIG_ROOT/mayor/rig $FORGEJO_URL" "$(cat "$STATE/set-urls")"
@@ -360,6 +398,29 @@ check "no remote is set again" [ "$(cat "$STATE/set-urls" | grep -c 'set-url')" 
 check "town.json is unchanged" [ "$(cat "$TOWN/mayor/town.json")" = "$town_before" ]
 check "no second backup is written" [ "$(backups)" = "$backups_before" ]
 check "the block is reported already matching" contains "merge_queue.forgejo already matches" "$out"
+
+echo "=== a hostname-form --forgejo-url does the script's own git work as admin ==="
+# The operator passes the credential-helper hostname form, which every rig
+# remote and town.json entry carries, for a repository the bots cannot reach
+# until the provisioner has run. The ref listing and the import must ride the
+# admin base instead, while the hostname form is what gets written.
+fresh
+STUB_MIRROR_ABSENT=1
+STUB_FORGEJO_EXTRA_URL="$HOSTNAME_GIT_URL"
+out=$(run_cutover --forgejo-url "$HOSTNAME_GIT_URL"); rc=$?
+if [ "$rc" = 0 ]; then pass "the cutover exits 0"; else fail "the cutover exits 0 (rc=$rc)" "$out"; fi
+check "the ref listing and import succeeded" contains "imported every GitHub ref" "$out"
+check "the import listed the admin base" contains "ls-remote --heads --tags --refs $ADMIN_GIT_URL" "$(cat "$STATE/git.log")"
+check "the import pushed to the admin base" contains "$ADMIN_GIT_URL" "$(cat "$STATE/pushes")"
+check "the unreachable hostname never carried a ref listing" lacks "ls-remote --heads --tags --refs $HOSTNAME_GIT_URL" "$(cat "$STATE/git.log")"
+check "the unreachable hostname never carried a push" lacks "$HOSTNAME_GIT_URL" "$(cat "$STATE/pushes")"
+check "the probe pushed through the admin base" contains "--git-url $ADMIN_GIT_URL" "$(cat "$STATE/probe.log")"
+check "the hostname form is written to the bare remote" contains "$RIG_ROOT/.repo.git $HOSTNAME_GIT_URL" "$(cat "$STATE/set-urls")"
+check "the hostname form is written to the mayor clone" contains "$RIG_ROOT/mayor/rig $HOSTNAME_GIT_URL" "$(cat "$STATE/set-urls")"
+check "the hostname form is written to the crew clone" contains "$RIG_ROOT/crew/sloan $HOSTNAME_GIT_URL" "$(cat "$STATE/set-urls")"
+check "the hostname form is written to town.json" contains "\"git_url\": \"$HOSTNAME_GIT_URL\"" "$(cat "$TOWN/mayor/town.json")"
+check "the hostname form is written to the rig block" contains "\"remote_url\": \"$HOSTNAME_GIT_URL\"" "$(cat "$RIG_ROOT/settings/config.json")"
+check "the hostname form is written to the mirror target" contains "\"mirror_target\": \"$GITHUB_URL\"" "$(cat "$RIG_ROOT/settings/config.json")"
 
 echo "=== a landing queued at the restart is left to the operator ==="
 fresh

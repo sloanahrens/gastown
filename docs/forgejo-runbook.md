@@ -179,6 +179,13 @@ instead of running it.
 for each step. It refuses while a `gt:ready-to-land` bead is queued.
 `--dry-run` prints every command and writes nothing.
 
+When the rig's credential-helper hostname is not the admin base — the usual
+case, since it is the form every rig remote carries — pass `--forgejo-url` that
+hostname form. It is what lands in the remotes, `town.json` and the rig block;
+the script's own git work rides the admin base instead, because it runs before
+the bots have access, so leaving the flag off writes an admin URL the bots
+cannot use.
+
 The mirror carries no branch filter on purpose: Forgejo then pushes every ref
 and prunes every GitHub ref it does not hold, which is why the import step runs
 first and why skipping it loses GitHub-only branches. It syncs on commit and
@@ -190,7 +197,10 @@ Four things stay with the operator, and the script prints them at the end:
 - the `gh repo deploy-key add` command for the mirror's deploy key. Forgejo
   mints a new keypair per mirror and offers no API to replace one, so the key
   goes on GitHub by hand; until it is there the mirror syncs nothing;
-- GitHub Actions disabled on the GitHub repo;
+- GitHub Actions disabled on the GitHub repo — the script prints the exact
+  command, `gh api --method PUT repos/OWNER/NAME/actions/permissions -F
+  enabled=false`. It must be `-F` (the value is typed) and not `-f` (which sends
+  a string), or GitHub answers 422;
 - any self-hosted GitHub runner for it stopped, not removed;
 - the gate workflow unchanged in the Forgejo copy.
 
@@ -203,9 +213,9 @@ the PR merged by `bot-landing` as a fast-forward whose commit is the candidate,
 `om / review` created by the same bot, and Forgejo `main` equal to GitHub
 `main`.
 
-Every file the script edits is copied to a dated `.bak-` sibling first, and a
-second run over converged state reports each step as already converged and
-writes nothing.
+Every file the script edits is copied to a dated `.bak-` sibling first — a
+`--dry-run` prints the copy it would make and leaves none — and a second run
+over converged state reports each step as already converged and writes nothing.
 
 ## Rolling a rig back
 
