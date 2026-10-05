@@ -461,6 +461,8 @@ test-makefile:
 	bash scripts/docs-lint_test.sh
 	bash -n scripts/forgejo-provision.sh
 	bash scripts/forgejo-provision_test.sh
+	bash -n scripts/forgejo-probe.sh
+	bash scripts/forgejo-probe_test.sh
 	bash -n scripts/repo-guards.sh
 	bash scripts/repo-guards_test.sh
 
