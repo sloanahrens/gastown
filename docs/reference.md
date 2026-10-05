@@ -147,6 +147,8 @@ Town-level role defaults live in `mayor/config.json` under:
 | `forgejo.gate_workflow` | `string` | `"gate"` | The candidate gate's workflow; the required commit-status context is derived from this name, not typed twice |
 | `forgejo.bots` | `map[string]string` | `{}` | Bot role (`polecat`, `landing`, `registry`, `viewer`) to Forgejo login. The role names the token file `~/.config/gt/forgejo-<role>.env`, which is a host fact and never config |
 | `forgejo.mirror_target` | `string` | `""` | The rig's read-only push mirror target (its GitHub repository). A mirror failure never blocks a landing |
+| `forgejo.promote_target` | `string` | `""` | The GitHub repository URL a green `main` verdict fast-forwards to that verdict's commit. Empty leaves the rig with no promotion |
+| `forgejo.promote_key_file` | `string` | `""` | The private deploy key ssh pushes with, mode 600. It is a path, never the key: the path reaches ssh alone and appears in no config, log or state. Empty disables the promotion |
 
 The `forgejo.*` keys are operator-only: they resolve from the rig root
 `config.json` floor and the rig-local `settings/config.json` override, and a

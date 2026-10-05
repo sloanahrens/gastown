@@ -78,7 +78,9 @@ Fixed in gt-fn9e6; change only with the operator.
   is break-glass.
 - **Mirror.** GitHub is a read-only push mirror of `main`, per-repo SSH deploy
   key, `branch_filter main`, sync-on-commit plus a 10-minute interval. A mirror
-  failure never blocks a landing.
+  failure never blocks a landing. A rig may instead promote its green `main`
+  rather than mirror it; before cutting a rig over to promotion, read the
+  cutover procedure in [the runbook](../forgejo-runbook.md).
 - **Rollout.** mango, then hm, beads, om, gastown — gastown last, so the worker
   rewrite lands through the old path and is proven on other rigs first. Rigs
   that already have a gate run shadow mode (candidate pushed, Forgejo verdict
