@@ -5,21 +5,24 @@ import (
 	"testing"
 )
 
-// TestWorkQueueOpensOnGastown reads the embedded page (gt-fi93j): the work
-// queue is what the operator reloads all day, so it opens on the rig he works
-// in rather than on every store, with the other stores one chip away. The
-// default lives in one named constant, and the fallback that catches a rig
-// with no rows survives — a renamed or absent gastown must still show the
-// other stores rather than an empty pane.
-func TestWorkQueueOpensOnGastown(t *testing.T) {
+// TestWorkQueueOpensOnAllStoresDispatchable reads the embedded page (gt-x9gk4):
+// the work queue is what the operator reloads all day, so it opens on every
+// store with the dispatchable chip on — the view he works from — rather than
+// on one rig with every shape. Both defaults live in named constants, and the
+// fallback that catches a chosen store with no rows survives (gt-fi93j).
+func TestWorkQueueOpensOnAllStoresDispatchable(t *testing.T) {
 	t.Parallel()
 
 	page := string(indexHTML)
-	if want := `const DEFAULT_QRIG = "gastown";`; !strings.Contains(page, want) {
-		t.Fatalf("index.html has no %s", want)
-	}
-	if want := "let qRig = DEFAULT_QRIG;"; !strings.Contains(page, want) {
-		t.Errorf("the queue's rig filter does not start on DEFAULT_QRIG (want %q)", want)
+	for _, want := range []string{
+		`const DEFAULT_QRIG = "all";`,
+		`const DEFAULT_QSHAPE = "ok";`,
+		"let qRig = DEFAULT_QRIG;",
+		"let qShape = DEFAULT_QSHAPE;",
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("index.html has no %q", want)
+		}
 	}
 
 	start := strings.Index(page, "function renderQueue(")
@@ -32,6 +35,39 @@ func TestWorkQueueOpensOnGastown(t *testing.T) {
 	}
 	if want := `qRig !== "all" && !rigs[qRig]) qRig = "all";`; !strings.Contains(body, want) {
 		t.Errorf("renderQueue no longer falls back to all stores when the chosen rig has no rows")
+	}
+}
+
+// TestWorkQueueEmptyDispatchableView reads the embedded page (gt-x9gk4): the
+// pane's default view is empty whenever every ready bead is held or unshaped,
+// so the message names the counts the operator would act on rather than
+// reporting that no filter matched.
+func TestWorkQueueEmptyDispatchableView(t *testing.T) {
+	t.Parallel()
+
+	page := string(indexHTML)
+	start := strings.Index(page, "function renderQueue(")
+	if start < 0 {
+		t.Fatal("index.html has no renderQueue")
+	}
+	body := page[start:]
+	if end := strings.Index(body, "\n}\n"); end >= 0 {
+		body = body[:end]
+	}
+	start = strings.Index(body, "if (!rows.length)")
+	if start < 0 {
+		t.Fatal("renderQueue no longer branches on an empty row set")
+	}
+	body = body[start:]
+	for _, want := range []string{
+		`qTab === "ready" && qShape === "ok"`,
+		"nothing is dispatchable right now",
+		"beads need shaping",
+		"beads are held",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the empty dispatchable view has no %q", want)
+		}
 	}
 }
 
