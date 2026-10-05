@@ -43,9 +43,28 @@ const postLandRestartCap = 2 * time.Minute
 // restart forever.
 const tierSweepRestartCap = 15 * time.Minute
 
-// tierSweepWaitState is upgradeWaitLogged while the restart waits on a sweep,
-// so the wait logs once and the release is distinguishable from a landing pass.
-const tierSweepWaitState = "tier-sweep"
+// housekeepingRestartCap is how long a pending upgrade restart waits for the
+// daemon's own housekeeping — a script plugin run, a dog cycle, the
+// spec-dispatch tick, the patrol scan, a steward scan — before it restarts
+// anyway (gt-rtbbr). Each of those reruns from the new daemon: a plugin run
+// records nothing until it finishes, so an interrupted one is not due-gated and
+// starts again on the next heartbeat; a dog cycle's due-ness is the persisted
+// last-run time; the ticks and scans run again on their own tickers. Like the
+// two caps above it is measured from upgradeWaitSince rather than from the
+// moment the landing work ends, so housekeeping that was already in flight when
+// the marker appeared never adds a heartbeat to the wait.
+//
+// Two minutes is deliberately shorter than a plugin's own timeout (10m by
+// default, defaultScriptTimeout): the cap exists so one long run cannot hold an
+// install for minutes, and the run it cuts is not lost work — it restarts from
+// the new daemon with nothing recorded, and the drain means no landing is
+// competing with it.
+const housekeepingRestartCap = 2 * time.Minute
+
+// tierSweepHoldLabel is what the wait line calls a running sweep, and the value
+// upgradeWaitLogged holds while the restart waits on one, so the release line
+// is distinguishable from every other hold.
+const tierSweepHoldLabel = "the tier sweep that is running"
 
 // restartPendingMarker is daemon/restart-pending.json, written by
 // scripts/install-gt.sh after a smoke-tested install. The daemon adds
@@ -327,27 +346,14 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 	d.upgradeRestartPending.Store(true)
 
 	// Read live, immediately before deciding: never cached across heartbeats.
-	if !d.isIdleForUpgrade() {
-		d.logUpgradeWait(now)
-		if !d.upgradeWaitEscalated && now.Sub(d.upgradeWaitSince) >= upgradeStuckAfter {
-			d.upgradeWaitEscalated = true
-			d.seams.escalateUpgrade(d, "daemon:restart-pending-stuck",
-				fmt.Sprintf("Restart for upgrade to %s has waited %s for an idle daemon (running %s). Still waiting.",
-					m.Commit, now.Sub(d.upgradeWaitSince).Round(time.Minute), own))
-		}
-		return false
-	}
-
-	if d.postLandRuns.Load() > 0 {
-		if now.Sub(d.upgradeWaitSince) < postLandRestartCap {
-			return false
-		}
-		d.logger.Printf("upgrade-restart: a post-land run is still in flight after %s; restarting anyway (the landing worker reruns the untested tip on start)", postLandRestartCap)
-	}
-
-	// Reached only when the daemon is otherwise idle: a running sweep cycle
-	// holds the restart here, bounded, instead of dying with the old daemon.
-	if d.tierSweepHoldsRestart(now) {
+	// The read is upgradeHold rather than the isIdleForUpgrade predicate it is
+	// built from: the landing holds carry their own caps and are deliberately
+	// not in the predicate, and the wait's own clock is what the caps read.
+	if hold := d.upgradeHold(now); hold != nil {
+		// One line per heartbeat naming the hold: a heartbeat that finds the
+		// daemon not idle is never silent again (gt-rtbbr).
+		d.logUpgradeWait(hold.name, now)
+		d.noteStuckWait(now, m, own)
 		return false
 	}
 
@@ -360,58 +366,99 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 	return true
 }
 
+// upgradeHold reports the work that still holds a pending restart at now, or
+// nil when the restart may go. A hard hold — a landing pass, a scheduled slings
+// cycle, a steward job, the install lock, a maintenance gc cycle — is never
+// bounded and never masked by soft work that happens to be in flight with it
+// (gt-rtbbr). Work a restart can simply redo is bounded by its cap and dropped
+// here; the lines naming what it cuts are written only on the heartbeat that
+// actually restarts, so none of them claims a restart that then keeps waiting.
+// The caps are read off upgradeWaitSince, the marker's own wait clock, so a
+// hold that was already running when the marker appeared does not add a
+// heartbeat to the wait.
+func (d *Daemon) upgradeHold(now time.Time) *daemonWork {
+	waited := now.Sub(d.upgradeWaitSince)
+	if d.maintenanceGCRunning.Load() {
+		// A --full gc call is in flight on the server; the daemon does not cut
+		// it (maintenance_gc_guard.go). The 30m escalation still applies.
+		return &daemonWork{name: "the maintenance gc cycle", hard: true}
+	}
+	// daemonWorkHold is hard-first, so a hard hold is returned here, unbounded,
+	// even when soft work is in flight alongside it.
+	hold := d.daemonWorkHold()
+	if hold != nil && hold.hard {
+		return hold
+	}
+
+	postLand := d.postLandRuns.Load() > 0
+	// A running sweep cycle holds the restart, bounded, instead of dying with
+	// the old daemon.
+	sweep := d.tierSweepRunning.Load()
+
+	switch {
+	case postLand && waited < postLandRestartCap:
+		return &daemonWork{name: "the post-land run"}
+	case sweep && waited < tierSweepRestartCap:
+		return &daemonWork{name: tierSweepHoldLabel}
+	case hold != nil && waited < housekeepingRestartCap:
+		return hold
+	}
+
+	// Nothing holds the restart: it goes on this heartbeat. Say what, if
+	// anything, it is cutting or letting go — only now, when the restart is
+	// real (gt-rtbbr).
+	if postLand {
+		d.logger.Printf("upgrade-restart: a post-land run is still in flight after %s; restarting anyway (the landing worker reruns the untested tip on start)", postLandRestartCap)
+	}
+	if sweep {
+		d.logger.Printf("upgrade-restart: a tier sweep is still running after %s; restarting anyway and cutting the sweep short", tierSweepRestartCap)
+	} else if d.upgradeWaitLogged == tierSweepHoldLabel {
+		d.logger.Printf("upgrade-restart: the tier sweep closed; restarting")
+	}
+	if hold != nil {
+		d.logger.Printf("upgrade-restart: %s is still in flight after %s; restarting anyway (it reruns from the new daemon)", hold.name, housekeepingRestartCap)
+	}
+	d.upgradeWaitLogged = ""
+	return nil
+}
+
+// noteStuckWait escalates once when a pending restart has waited past
+// upgradeStuckAfter for something to clear; it keeps waiting afterwards.
+func (d *Daemon) noteStuckWait(now time.Time, m *restartPendingMarker, own string) {
+	if d.upgradeWaitEscalated || now.Sub(d.upgradeWaitSince) < upgradeStuckAfter {
+		return
+	}
+	d.upgradeWaitEscalated = true
+	d.seams.escalateUpgrade(d, "daemon:restart-pending-stuck",
+		fmt.Sprintf("Restart for upgrade to %s has waited %s for an idle daemon (running %s). Still waiting.",
+			m.Commit, now.Sub(d.upgradeWaitSince).Round(time.Minute), own))
+}
+
 // endUpgradeDrain lets the landing workers start passes again: no restart is
 // pending (marker gone, covered, or already tried without effect).
 func (d *Daemon) endUpgradeDrain() {
 	d.upgradeRestartPending.Store(false)
 	d.upgradeWaitLogged = ""
+	d.upgradeDrainLogged = false
 }
 
-// logUpgradeWait says what a pending restart is waiting on, once per state
-// change: the drain starting, then each landing pass it waits for.
-func (d *Daemon) logUpgradeWait(now time.Time) {
-	state := "draining"
-	if bead := d.landingPassBead(); bead != "" {
-		state = "pass:" + bead
-	}
-	if d.upgradeWaitLogged == state {
-		return
-	}
-	if d.upgradeWaitLogged == "" {
+// logUpgradeWait says what a pending restart is waiting on: the drain starting
+// once per marker, then one line per heartbeat naming the hold, so a wait an
+// operator is staring at always has a reason in the log (gt-rtbbr). name is
+// never empty: every caller has a hold.
+func (d *Daemon) logUpgradeWait(name string, now time.Time) {
+	if !d.upgradeDrainLogged {
+		d.upgradeDrainLogged = true
 		d.logger.Printf("upgrade-restart: draining: no new landing pass until restart")
 	}
-	d.upgradeWaitLogged = state
-	if bead, ok := strings.CutPrefix(state, "pass:"); ok {
-		d.logger.Printf("upgrade-restart: waiting for landing pass %s (%dm)", bead, int(now.Sub(d.upgradeWaitSince).Minutes()))
-	}
+	d.upgradeWaitLogged = name
+	d.logger.Printf("upgrade-restart: waiting for %s (%dm)", name, int(now.Sub(d.upgradeWaitSince).Minutes()))
 }
 
-// tierSweepHoldsRestart reports whether a running tier sweep cycle should
-// still hold a pending upgrade restart. It is called once the daemon is
-// otherwise idle, so it alone decides. A cycle that started before the marker
-// runs in this process; restarting kills it and its verdict is never recorded
-// (gt-ccyw0). The hold ends when the cycle closes, and at tierSweepRestartCap
-// the restart proceeds anyway. New cycles do not start in between: runTierSweep
-// skips while the drain is on.
-func (d *Daemon) tierSweepHoldsRestart(now time.Time) bool {
-	if !d.tierSweepRunning.Load() {
-		if d.upgradeWaitLogged == tierSweepWaitState {
-			d.upgradeWaitLogged = ""
-			d.logger.Printf("upgrade-restart: the tier sweep closed; restarting")
-		}
-		return false
-	}
-	if now.Sub(d.upgradeWaitSince) >= tierSweepRestartCap {
-		d.upgradeWaitLogged = ""
-		d.logger.Printf("upgrade-restart: a tier sweep is still running after %s; restarting anyway and cutting the sweep short", tierSweepRestartCap)
-		return false
-	}
-	if d.upgradeWaitLogged != tierSweepWaitState {
-		d.upgradeWaitLogged = tierSweepWaitState
-		d.logger.Printf("upgrade-restart: waiting for the tier sweep that is running (%dm) instead of killing it", int(now.Sub(d.upgradeWaitSince).Minutes()))
-	}
-	return true
-}
+// A tier sweep cycle that started before the marker runs in this process;
+// restarting kills it and its verdict is never recorded (gt-ccyw0). upgradeHold
+// holds for it while it runs, up to tierSweepRestartCap. New cycles do not
+// start in between: runTierSweep skips while the drain is on.
 
 // landingPassBead is the bead of a landing pass in flight (the first rig by
 // name when several), or "" when none is working on one.
@@ -452,7 +499,7 @@ func (d *Daemon) exitForUpgradeIfRequested(state *State) error {
 	// drain is still on, so this pass is the last one (gt-3cbee).
 	if d.landingPasses.Load() > 0 {
 		d.upgradeRestartRequested.Store(false)
-		d.logUpgradeWait(time.Now())
+		d.logUpgradeWait(landingHoldName(d.landingPassBead()), time.Now())
 		return nil
 	}
 	if err := stampRestartAttempt(d.config.TownRoot, own); err != nil {

@@ -289,7 +289,8 @@ type Daemon struct {
 	upgradeWaitCommit    string
 	upgradeWaitSince     time.Time
 	upgradeWaitEscalated bool
-	upgradeWaitLogged    string // last wait state logged, so a state change logs once
+	upgradeWaitLogged    string // the hold the last wait line named (tierSweepHoldLabel while a sweep holds it)
+	upgradeDrainLogged   bool   // the once-per-marker drain line has been logged
 
 	// scheduledSlingsRunning is the single-flight guard for the scheduled_slings
 	// patrol, on its own goroutine so a slow sling never

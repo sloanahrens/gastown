@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -132,15 +133,26 @@ func (r *scriptRunner) wait() {
 	r.active.Wait()
 }
 
-// runningCount reports how many script plugins are in flight. Safe on a nil
-// runner: the daemon creates it lazily (scriptsOnce).
-func (r *scriptRunner) runningCount() int {
+// inFlight lists, sorted, the plugins whose run.sh is executing. Callers read
+// it to tell whether any is running and to name it; a list rather than a count
+// because an operator staring at a stalled install wants to know which plugin
+// holds it (gt-rtbbr). Safe on a nil runner: the daemon creates it lazily
+// (scriptsOnce).
+func (r *scriptRunner) inFlight() []string {
 	if r == nil {
-		return 0
+		return nil
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return len(r.running)
+	if len(r.running) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(r.running))
+	for name := range r.running {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // scriptResult is what one run.sh execution produced.
