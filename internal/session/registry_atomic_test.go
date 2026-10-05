@@ -14,8 +14,8 @@ func TestIsKnownSession_UsesRegistryAndHQPrefix(t *testing.T) {
 	r := NewPrefixRegistry()
 	r.Register("xy", "xrig")
 
-	if !r.IsKnownSession("hq-mayor") {
-		t.Fatal("expected hq-mayor to always be known")
+	if !r.IsKnownSession("hq-deacon") {
+		t.Fatal("expected hq-deacon to always be known")
 	}
 	if !r.IsKnownSession("xy-worker") {
 		t.Fatal("expected xy-worker to be known via registry prefix")

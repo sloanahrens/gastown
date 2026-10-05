@@ -23,7 +23,6 @@ type Role string
 // GT_ROLE that names something deleted (the boot, witness and refinery roles
 // are gone).
 const (
-	Mayor   Role = "mayor"
 	Polecat Role = constants.RolePolecat
 	Crew    Role = constants.RoleCrew
 	Unknown Role = "unknown"
@@ -34,7 +33,7 @@ const (
 // a caller verify every actor string can be accounted for, instead of a
 // hand-maintained list kept in sync by hand (gt-9pn).
 func All() []Role {
-	return []Role{Mayor, Polecat, Crew, Unknown}
+	return []Role{Polecat, Crew, Unknown}
 }
 
 // Parse reads a GT_ROLE-style string and returns the role, the rig and the
@@ -42,7 +41,6 @@ func All() []Role {
 //
 // Accepted shapes:
 //
-//	"mayor"                     -> Mayor, "", ""
 //	"polecat"                   -> Polecat, "", ""   (rig and name come from GT_RIG/GT_POLECAT)
 //	"gastown/polecats/alpha"    -> Polecat, "gastown", "alpha"
 //	"gastown/crew/max"          -> Crew, "gastown", "max"
@@ -54,12 +52,6 @@ func Parse(s string) (Role, string, string) {
 		s = strings.ReplaceAll(s, "//", "/")
 	}
 	s = strings.TrimSuffix(s, "/")
-
-	// Simple roles
-	switch s {
-	case "mayor":
-		return Mayor, "", ""
-	}
 
 	// Compound roles: rig/role or rig/polecats/name or rig/crew/name
 	parts := strings.Split(s, "/")
@@ -104,12 +96,10 @@ func Parse(s string) (Role, string, string) {
 // Actor returns the actor identity string for beads attribution, matching the
 // beads created_by convention:
 //
-//   - Simple roles: "mayor"
+//   - Bare roles with no rig or worker name: "polecat", "crew"
 //   - Workers: "gastown/crew/max", "gastown/polecats/Toast"
 func Actor(r Role, rig, name string) string {
 	switch r {
-	case Mayor:
-		return "mayor"
 	case Polecat:
 		if rig != "" && name != "" {
 			return fmt.Sprintf("%s/polecats/%s", rig, name)

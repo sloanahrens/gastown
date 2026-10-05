@@ -23,7 +23,7 @@ func (m mapAgentStates) write(beadID, state string) error {
 // a stale race artifact, and resume clears it to idle.
 func TestAgentResumeStaleMirrorCleared(t *testing.T) {
 	t.Parallel()
-	target, err := parseAgentAddr(cmdTestRegistry(), "mayor")
+	target, err := parseAgentAddr(cmdTestRegistry(), "gastown/crew/sloan")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func (failingAgentStates) write(string, string) error { return errors.New("dolt 
 // is the whole job when no marker exists, so a failed write is reported.
 func TestAgentResumeStaleMirrorWriteFailureIsAnError(t *testing.T) {
 	t.Parallel()
-	target, err := parseAgentAddr(cmdTestRegistry(), "mayor")
+	target, err := parseAgentAddr(cmdTestRegistry(), "gastown/crew/sloan")
 	if err != nil {
 		t.Fatal(err)
 	}

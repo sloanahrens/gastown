@@ -138,8 +138,6 @@ func legacyCleanupPriority(sess string) int {
 	switch sess {
 	case HQPrefix + "deacon", HQPrefix + "boot":
 		return 0
-	case MayorSessionName():
-		return 1
 	}
 	if strings.HasPrefix(sess, HQPrefix+"dog-") {
 		return 2
@@ -155,7 +153,7 @@ func legacyCleanupPriority(sess string) int {
 
 func (l legacySockets) isCleanupSession(sess string) bool {
 	switch sess {
-	case MayorSessionName(), HQPrefix + "deacon", HQPrefix + "boot":
+	case HQPrefix + "deacon", HQPrefix + "boot":
 		return true
 	}
 	if strings.HasPrefix(sess, HQPrefix+"dog-") && strings.TrimPrefix(sess, HQPrefix+"dog-") != "" {

@@ -33,7 +33,7 @@ type BeaconConfig struct {
 	Recipient string
 
 	// Sender is the agent initiating the nudge.
-	// Examples: "mayor", "deacon", "self" (for handoff)
+	// Examples: "deacon", "self" (for handoff)
 	Sender string
 
 	// Topic describes why the session was started.

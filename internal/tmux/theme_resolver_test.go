@@ -98,24 +98,18 @@ func TestResolveSessionTheme_RoleOverrideNoneWins(t *testing.T) {
 	}
 }
 
-func TestResolveSessionTheme_MayorAndDeaconTownOverrides(t *testing.T) {
+func TestResolveSessionTheme_DeaconTownOverride(t *testing.T) {
 	t.Parallel()
 
 	townRoot := t.TempDir()
 	mayorCfg := config.NewMayorConfig()
 	mayorCfg.Theme = &config.TownThemeConfig{
 		RoleDefaults: map[string]string{
-			"mayor":  "forest",
 			"deacon": "plum",
 		},
 	}
 	if err := config.SaveMayorConfig(filepath.Join(townRoot, "mayor", "config.json"), mayorCfg); err != nil {
 		t.Fatalf("SaveMayorConfig: %v", err)
-	}
-
-	mayorTheme := ResolveSessionTheme(townRoot, "", "mayor", "")
-	if mayorTheme == nil || mayorTheme.Name != "forest" {
-		t.Fatalf("mayor theme = %+v, want forest", mayorTheme)
 	}
 
 	deaconTheme := ResolveSessionTheme(townRoot, "", "deacon", "")

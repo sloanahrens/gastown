@@ -46,13 +46,6 @@ var DefaultPalette = []Theme{
 	{Name: "copper", BG: "#6d4c41", FG: "#f5f5dc"},   // Warm brown
 }
 
-// MayorTheme returns the special theme for the Mayor session.
-// Uses "default" to inherit the user's terminal colors — the Mayor
-// session is the primary interactive session, so it should blend in.
-func MayorTheme() Theme {
-	return Theme{Name: "mayor", BG: "default", FG: "default"}
-}
-
 // GetThemeByName finds a theme by name from the default palette.
 // Returns nil if not found.
 func GetThemeByName(name string) *Theme {

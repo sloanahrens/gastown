@@ -113,7 +113,7 @@ func TestHasBusyIndicator(t *testing.T) {
 		{"idle footer with context pct, no arrow", "  Sonnet 5 | Context: 21%", false},
 		// gt-dq6pi: a relayed nudge quoting another pane's live spinner carries
 		// the same token-count substring but is prose, not the status line
-		// itself — the mayor read this as BUSY on every idle poll because
+		// itself — a session read this as BUSY on every idle poll because
 		// hasBusyIndicator matched the substring anywhere in the line.
 		{"transcript quoting another pane's spinner", `live turn "Sautéing… 8m16s · ↓14.6k tokens"`, false},
 		{"prose mentioning tokens without leading glyph", "the deacon nudge showed ↓14.6k tokens in the transcript", false},
@@ -131,7 +131,7 @@ func TestHasBusyIndicator(t *testing.T) {
 
 // TestShouldSendEscapeForLines guards against the regression where a nudge
 // sends the vim-mode Escape keystroke while the agent is actively generating,
-// interrupting its current turn (e.g. the Mayor). When the pane shows the busy
+// interrupting its current turn. When the pane shows the busy
 // indicator ("esc to interrupt"), the Escape must be suppressed.
 func TestShouldSendEscapeForLines(t *testing.T) {
 	t.Parallel()

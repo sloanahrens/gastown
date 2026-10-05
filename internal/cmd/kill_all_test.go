@@ -72,7 +72,9 @@ func TestKillAllTownSetsEstopAndKillsThroughTheSupervisor(t *testing.T) {
 	if err := killAll(&out, req, cmdTestRegistry(), killAllSessions, sup); err != nil {
 		t.Fatalf("killAll: %v\n%s", err, out.String())
 	}
-	if got, want := strings.Join(k.killed, ","), "hq-mayor,gt-crew-sloan,gt-flint,do-toast"; got != want {
+	// The hq-mayor fixture session is a leftover: its role retired, so it no
+	// longer names a seat and the kill-all passes over it (gt-rwp7z).
+	if got, want := strings.Join(k.killed, ","), "gt-crew-sloan,gt-flint,do-toast"; got != want {
 		t.Errorf("killed %s, want %s", got, want)
 	}
 	info := estop.Read(town)
@@ -83,8 +85,8 @@ func TestKillAllTownSetsEstopAndKillsThroughTheSupervisor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(string(data), `"verb":"kill-all"`); n != 4 {
-		t.Errorf("action log has %d kill-all lines, want 4:\n%s", n, data)
+	if n := strings.Count(string(data), `"verb":"kill-all"`); n != 3 {
+		t.Errorf("action log has %d kill-all lines, want 3:\n%s", n, data)
 	}
 	if !strings.Contains(string(data), `"actor":"gt kill-all/overseer"`) || !strings.Contains(string(data), "kill-all: runaway") {
 		t.Errorf("action log lacks actor or reason:\n%s", data)

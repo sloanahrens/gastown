@@ -12,8 +12,6 @@ import (
 // crewMember is the crew member name (e.g. "krieger"); pass "" for non-crew roles.
 // When non-empty, crew_themes config is checked before role-level fallback.
 func ResolveSessionTheme(townRoot, rigName, role, crewMember string) *Theme {
-	role = normalizeThemeRole(role)
-
 	if rigTheme := resolveRigSessionTheme(townRoot, rigName, role, crewMember); rigTheme != unresolvedTheme {
 		return rigTheme
 	}
@@ -28,17 +26,11 @@ func ResolveSessionTheme(townRoot, rigName, role, crewMember string) *Theme {
 		}
 	}
 
-	switch role {
-	case "mayor":
-		theme := MayorTheme()
-		return &theme
-	default:
-		if rigName == "" {
-			return nil
-		}
-		theme := AssignTheme(rigName)
-		return &theme
+	if rigName == "" {
+		return nil
 	}
+	theme := AssignTheme(rigName)
+	return &theme
 }
 
 var unresolvedTheme = &Theme{Name: "__unresolved__"}
@@ -75,32 +67,32 @@ func resolveTownSessionTheme(townRoot, role, crewMember string) *Theme {
 		return unresolvedTheme
 	}
 
-	mayorCfg, err := config.LoadMayorConfig(filepath.Join(townRoot, "mayor", "config.json"))
-	if err != nil || mayorCfg.Theme == nil {
+	townCfg, err := config.LoadMayorConfig(filepath.Join(townRoot, "mayor", "config.json"))
+	if err != nil || townCfg.Theme == nil {
 		return unresolvedTheme
 	}
 
 	// Per-member theme takes priority over role defaults at town level too.
-	if crewMember != "" && mayorCfg.Theme.CrewThemes != nil {
-		if resolved, ok := resolveRoleThemeName(mayorCfg.Theme.CrewThemes[crewMember]); ok {
+	if crewMember != "" && townCfg.Theme.CrewThemes != nil {
+		if resolved, ok := resolveRoleThemeName(townCfg.Theme.CrewThemes[crewMember]); ok {
 			return resolved
 		}
 	}
 
-	if mayorCfg.Theme.RoleDefaults != nil {
-		if resolved, ok := resolveRoleThemeName(mayorCfg.Theme.RoleDefaults[role]); ok {
+	if townCfg.Theme.RoleDefaults != nil {
+		if resolved, ok := resolveRoleThemeName(townCfg.Theme.RoleDefaults[role]); ok {
 			return resolved
 		}
 	}
 
-	if mayorCfg.Theme.Disabled {
+	if townCfg.Theme.Disabled {
 		return nil
 	}
-	if mayorCfg.Theme.Custom != nil {
-		return customTheme("custom", mayorCfg.Theme.Custom)
+	if townCfg.Theme.Custom != nil {
+		return customTheme("custom", townCfg.Theme.Custom)
 	}
-	if mayorCfg.Theme.Name != "" {
-		if theme := GetThemeByName(mayorCfg.Theme.Name); theme != nil {
+	if townCfg.Theme.Name != "" {
+		if theme := GetThemeByName(townCfg.Theme.Name); theme != nil {
 			return theme
 		}
 	}
@@ -151,14 +143,5 @@ func customTheme(name string, custom *config.CustomTheme) *Theme {
 		Name: themeName,
 		BG:   custom.BG,
 		FG:   custom.FG,
-	}
-}
-
-func normalizeThemeRole(role string) string {
-	switch role {
-	case "coordinator":
-		return "mayor"
-	default:
-		return role
 	}
 }

@@ -29,11 +29,11 @@ func TestParseSessionName(t *testing.T) {
 		wantPrefix string
 		wantErr    bool
 	}{
-		// Town-level roles (hq-mayor)
+		// Town-level roles (hq-overseer)
 		{
-			name:     "mayor",
-			session:  "hq-mayor",
-			wantRole: RoleMayor,
+			name:     "overseer",
+			session:  "hq-overseer",
+			wantRole: RoleOverseer,
 		},
 
 		// Rig prefix "hq" collision: hq-<polecat>
@@ -183,6 +183,25 @@ func TestParseSessionName(t *testing.T) {
 	}
 }
 
+// TestParseSessionName_RetiredMayorIsNotATownRole pins gt-rwp7z.17: with the
+// mayor role gone, hq-mayor no longer names a town-level identity. "hq" is a
+// registered rig prefix in this registry, so the name falls through to
+// rig-level parsing as a polecat named mayor — the same treatment hq-deacon
+// and hq-boot get.
+func TestParseSessionName_RetiredMayorIsNotATownRole(t *testing.T) {
+	t.Parallel()
+	reg := testRegistry()
+
+	got, err := ParseSessionNameWithRegistry("hq-mayor", reg)
+	if err != nil {
+		t.Fatalf("ParseSessionName(%q) error = %v", "hq-mayor", err)
+	}
+	if got.Role != RolePolecat {
+		t.Errorf("ParseSessionName(%q).Role = %v, want %v (the mayor role is retired)",
+			"hq-mayor", got.Role, RolePolecat)
+	}
+}
+
 func TestAgentIdentity_SessionName(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -191,9 +210,9 @@ func TestAgentIdentity_SessionName(t *testing.T) {
 		want     string
 	}{
 		{
-			name:     "mayor",
-			identity: AgentIdentity{Role: RoleMayor},
-			want:     "hq-mayor",
+			name:     "overseer",
+			identity: AgentIdentity{Role: RoleOverseer},
+			want:     "hq-overseer",
 		},
 		{
 			name:     "crew",
@@ -229,9 +248,9 @@ func TestAgentIdentity_Address(t *testing.T) {
 		want     string
 	}{
 		{
-			name:     "mayor",
-			identity: AgentIdentity{Role: RoleMayor},
-			want:     "mayor",
+			name:     "overseer",
+			identity: AgentIdentity{Role: RoleOverseer},
+			want:     "overseer",
 		},
 		{
 			name:     "crew",
@@ -260,7 +279,6 @@ func TestParseSessionName_RoundTrip(t *testing.T) {
 
 	// Test that parsing then reconstructing gives the same result
 	sessions := []string{
-		"hq-mayor",
 		"hq-deacon",
 		"gt-witness",
 		"gt-crew-max",
@@ -294,9 +312,11 @@ func TestParseAddress(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name:    "mayor",
+			// The mayor role is retired (gt-rwp7z.17): its bare address is
+			// no longer a role, just an unparseable town-level address.
+			name:    "mayor address is not a role",
 			address: "mayor/",
-			want:    AgentIdentity{Role: RoleMayor},
+			wantErr: true,
 		},
 		{
 			// Refinery role removed (gt-v4ssj.6): "<rig>/refinery" is now

@@ -14,7 +14,7 @@ import (
 
 // EnsureSettingsForRole provisions the Claude Code configuration for a role.
 // settingsDir is where .claude/settings.json is installed (passed to Claude via
-// --settings for crew and polecats; the working directory for the mayor).
+// --settings for crew and polecats).
 // workDir is the agent's working directory where slash commands are provisioned.
 //
 // Every runtime is the Claude CLI, so every role gets settings and hooks:

@@ -151,7 +151,7 @@ func TestCommandsInherited_WorkDirIsTownRoot(t *testing.T) {
 
 func TestCommandsInherited_WorkDirNestedInTownRootBeforeGitInit(t *testing.T) {
 	t.Parallel()
-	// gt install creates mayor/deacon settings before it initializes town .git.
+	// gt install creates town-role settings before it initializes town .git.
 	// Those role dirs still inherit town-level commands once install provisions them.
 	root := makeTownRoot(t)
 	mayorDir := root + "/mayor"
@@ -206,24 +206,24 @@ func TestCommandsInherited_NoGitRoot(t *testing.T) {
 
 func TestEnsureSettingsForRole_SkipsCommandsWhenInheritedFromTownRoot(t *testing.T) {
 	t.Parallel()
-	// Mayor/deacon run inside the town root git repo. Commands provisioned at the
+	// The deacon runs inside the town root git repo. Commands provisioned at the
 	// town root are inherited by Claude Code's path-hierarchy traversal, so
 	// EnsureSettingsForRole must NOT provision a duplicate copy in the role dir.
 	root := makeTownRootWithGit(t)
-	mayorDir := root + "/mayor"
-	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+	townRoleDir := root + "/mayor"
+	if err := os.MkdirAll(townRoleDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := EnsureSettingsForRole(mayorDir, mayorDir, "mayor"); err != nil {
+	if err := EnsureSettingsForRole(townRoleDir, townRoleDir, "deacon"); err != nil {
 		t.Fatalf("EnsureSettingsForRole() error = %v", err)
 	}
 
 	// Commands must NOT be provisioned inside the role dir
 	for _, cmd := range []string{"done", "handoff", "review"} {
-		path := mayorDir + "/.claude/commands/" + cmd + ".md"
+		path := townRoleDir + "/.claude/commands/" + cmd + ".md"
 		if _, err := os.Stat(path); err == nil {
-			t.Errorf("command %s.md was provisioned in mayor dir, want skipped (would duplicate town-root copy)", cmd)
+			t.Errorf("command %s.md was provisioned in town role dir, want skipped (would duplicate town-root copy)", cmd)
 		}
 	}
 }
