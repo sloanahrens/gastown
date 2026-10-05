@@ -96,7 +96,7 @@ func TestCIPathLandingCarriesItsGateTime(t *testing.T) {
 	recs := []omRecord{{Record: landings.Record{Bead: "ma-7js", Rig: "mango", Branch: "polecat/x/ma-7js+y",
 		OMVerdict: "approve", OMScore: 0.9, Route: "daemon", LandedAt: now.Add(-time.Minute)}}}
 
-	rows := buildRecentLandings(now, recs, stages, nil, nil, nil, 30)
+	rows := buildRecentLandings(now, recs, stages, nil, nil, nil, nil, 30)
 	if len(rows) != 1 || rows[0].GateSecs == nil || *rows[0].GateSecs != 166 {
 		t.Fatalf("landing row = %+v, want gate 166s", rows)
 	}

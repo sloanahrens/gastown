@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/landings"
 )
@@ -203,7 +204,7 @@ func TestBuildRecentLandingsJoinsStagesAndOrdersNewestFirst(t *testing.T) {
 	rejs := []omRejection{{At: now.Add(-20 * time.Minute), Bead: "gt-new", Kind: "review", Detail: "om requested changes (score 0.55, 5 finding(s))", Score: &score}}
 
 	var asked []string
-	rows := buildRecentLandings(now, recs, stages, rejs, nil, func(rig, id string) string { asked = append(asked, rig+"/"+id); return "title of " + id }, 30)
+	rows := buildRecentLandings(now, recs, stages, rejs, nil, nil, func(rig, id string) string { asked = append(asked, rig+"/"+id); return "title of " + id }, 30)
 
 	if len(rows) != 4 {
 		t.Fatalf("%d rows, want 4 (the 30-hour-old landing is outside the day): %+v", len(rows), rows)
@@ -239,7 +240,7 @@ func TestBuildRecentLandingsCapsRowsAndAsksTitlesOnlyForThoseShown(t *testing.T)
 		recs = append(recs, omRecord{Record: landings.Record{Bead: fmt.Sprintf("gt-%d", i), Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-time.Duration(i) * time.Minute)}})
 	}
 	asked := 0
-	rows := buildRecentLandings(now, recs, nil, nil, nil, func(rig, id string) string { asked++; return "" }, 30)
+	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, func(rig, id string) string { asked++; return "" }, 30)
 	if len(rows) != 30 || asked != 30 {
 		t.Fatalf("rows=%d title lookups=%d, want 30 and 30: a title read costs a bd call, so it is bounded by the rows shown", len(rows), asked)
 	}
@@ -276,7 +277,7 @@ func TestBuildRecentLandingsFillsShipTime(t *testing.T) {
 	}
 	rejs := []omRejection{{At: at("2026-10-03T17:15:00Z"), Bead: "gt-rejected", Kind: "review"}}
 
-	rows := buildRecentLandings(now, recs, nil, rejs, track.shipStatus, func(string, string) string { return "" }, 30)
+	rows := buildRecentLandings(now, recs, nil, rejs, nil, track.shipStatus, func(string, string) string { return "" }, 30)
 	byBead := map[string]dashboard.LandingRow{}
 	for _, r := range rows {
 		byBead[r.Bead+":"+r.Outcome] = r
@@ -302,6 +303,148 @@ func TestPolecatOfBranch(t *testing.T) {
 	} {
 		if got := polecatOfBranch(in); got != want {
 			t.Errorf("polecatOfBranch(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestRunningLandingsLifecycle drives the daemon.log merge bookkeeping through
+// the four states a bead's landing can be in: merged and still running, landed
+// (no longer running), rejected (no longer running), and merged before a
+// daemon restart (a ghost: the restart killed the pass, so nothing is running).
+func TestRunningLandingsLifecycle(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 4, 19, 40, 0, 0, time.Local)
+	since := now.Add(-trendHours * time.Hour)
+	r := &omReader{}
+	for _, line := range []string{
+		"2026/10/04 19:36:21 landing_worker: [land] gt-live: merged adbe8221 onto origin/main (2c1888b5) as c3b7fe9c; gating the merged tree, then om review",
+		"2026/10/04 19:30:27 landing_worker: [land] gt-done: merged 408a979e onto origin/main (ba00cbb7) as b11b439c; gating the merged tree, then om review",
+		"2026/10/04 19:30:29 landing_worker: [land] gt-done: landed b11b439c on origin/main (patch-id 4b174513)",
+		"2026/10/04 19:24:00 landing_worker: [land] gt-rej: merged 66ce5867 onto origin/main (c0e6fd98) as 7dc230af; pushing the merge candidate",
+		"2026/10/04 19:25:00 landing_worker: [land] gt-rej: rejected (review): om requested changes",
+		// Two merges for one bead: a requeued landing re-merges, and only its
+		// newest merge is the one in flight.
+		"2026/10/04 19:20:00 landing_worker: [land] gt-retry: merged 1111aaaa onto origin/main (ba00cbb7) as 2222bbbb; gating the merged tree",
+		"2026/10/04 19:28:00 landing_worker: [land] gt-retry: rejected (gate): gate failed on the merged tree",
+		"2026/10/04 19:33:00 landing_worker: [land] gt-retry: merged 1111aaaa onto origin/main (ba00cbb7) as 3333cccc; gating the merged tree",
+	} {
+		r.parseLogLine(line)
+	}
+	got := r.running(since)
+	if len(got) != 2 {
+		t.Fatalf("running = %+v, want the live merge and the requeued one", got)
+	}
+	if got[0].Bead != "gt-live" || got[1].Bead != "gt-retry" {
+		t.Errorf("running beads = %s, %s; want gt-live then gt-retry (newest merge first)", got[0].Bead, got[1].Bead)
+	}
+	if want := time.Date(2026, 10, 4, 19, 36, 21, 0, time.Local); !got[0].At.Equal(want) {
+		t.Errorf("gt-live merge at %v, want %v", got[0].At, want)
+	}
+
+	// A restart closes every merge in flight: the pass is gone with the process.
+	r.parseLogLine("2026/10/04 19:38:00 Daemon starting (PID 4242)")
+	if got := r.running(since); len(got) != 0 {
+		t.Errorf("running after a daemon start = %+v, want none", got)
+	}
+	// A landing merged after the start is live again.
+	r.parseLogLine("2026/10/04 19:39:00 landing_worker: [land] gt-next: merged 4444dddd onto origin/main (ba00cbb7) as 5555eeee; gating the merged tree")
+	if got := r.running(since); len(got) != 1 || got[0].Bead != "gt-next" {
+		t.Errorf("running after a fresh merge = %+v, want gt-next", got)
+	}
+}
+
+// TestRunningLandingsDropOutOfWindow keeps a merge the log still holds but the
+// table's window has passed out of the running set, so an old ghost cannot be
+// revived by a merge line that aged out of the scan.
+func TestRunningLandingsDropOutOfWindow(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 4, 19, 40, 0, 0, time.Local)
+	r := &omReader{}
+	r.parseLogLine("2026/10/03 09:00:00 landing_worker: [land] gt-old: merged 1111aaaa onto origin/main (2222bbbb) as 3333cccc; gating the merged tree")
+	if got := r.running(now.Add(-trendHours * time.Hour)); len(got) != 0 {
+		t.Errorf("running = %+v, want none: the merge is a day old", got)
+	}
+}
+
+// TestBuildRecentLandingsPutsRunningRowsOnTopUncapped is the table's contract
+// for a live landing: it is a row above every finished one, and the 30-row cap
+// counts finished landings only, so a busy day cannot hide a landing in flight.
+func TestBuildRecentLandingsPutsRunningRowsOnTopUncapped(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 4, 19, 40, 0, 0, time.UTC)
+	var recs []omRecord
+	for i := 0; i < 40; i++ {
+		recs = append(recs, omTestRec(fmt.Sprintf("gt-%d", i), "approve", 0.9, "daemon", now.Add(-time.Duration(i+1)*time.Minute)))
+	}
+	live := []dashboard.LandingRow{{At: now.Add(-time.Minute), Bead: "gt-live", Rig: "gastown", Outcome: "running"}}
+	rows := buildRecentLandings(now, recs, nil, nil, live, nil, nil, recentLandingRows)
+
+	if len(rows) != recentLandingRows+1 {
+		t.Fatalf("rows = %d, want %d: the live row is not one of the capped finished rows", len(rows), recentLandingRows+1)
+	}
+	if rows[0].Bead != "gt-live" || rows[0].Outcome != "running" {
+		t.Errorf("row 0 = %+v, want the running landing on top", rows[0])
+	}
+	for i, r := range rows[1:] {
+		if r.Outcome != "landed" {
+			t.Fatalf("row %d = %+v, want a finished landing below the live one", i+1, r)
+		}
+	}
+}
+
+// TestRunningRowsCarryRigAndPolecat checks the two facts a live row has no
+// landing record to read: the rig its bead's prefix routes to, and the polecat
+// holding the bead.
+func TestRunningRowsCarryRigAndPolecat(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 10, 4, 19, 36, 21, 0, time.Local)
+	rows := runningRows([]omMerge{{At: at, Bead: "ma-7js"}},
+		func(bead string) string { return map[string]string{"ma-7js": "mango"}[bead] },
+		func(rig, bead string) string {
+			if rig != "mango" || bead != "ma-7js" {
+				t.Errorf("polecat lookup for %s/%s, want the rig the row resolved", rig, bead)
+			}
+			return "opal"
+		})
+	if len(rows) != 1 {
+		t.Fatalf("rows = %+v", rows)
+	}
+	if r := rows[0]; r.Bead != "ma-7js" || r.Rig != "mango" || r.Polecat != "opal" || r.Outcome != "running" || !r.At.Equal(at) {
+		t.Errorf("live row = %+v, want mango/opal running at %v", r, at)
+	}
+}
+
+// TestLandingRigFollowsTheRoutesFile covers every rig with a landing worker,
+// not just the one that logs the most: the rig comes from the town's routes, so
+// a bead of any rig resolves, and one no route claims stays blank.
+func TestLandingRigFollowsTheRoutesFile(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	routes := `{"prefix":"gt-","path":"gastown/mayor/rig"}
+{"prefix":"ma-","path":"mango/mayor/rig"}
+`
+	if err := os.WriteFile(filepath.Join(beadsDir, beads.RoutesFileName), []byte(routes), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigFor := landingRig(townRoot)
+	for bead, want := range map[string]string{"gt-xeiwt": "gastown", "ma-7js": "mango", "zz-1": ""} {
+		if got := rigFor(bead); got != want {
+			t.Errorf("landingRig(%q) = %q, want %q", bead, got, want)
+		}
+	}
+}
+
+func TestPolecatOfAssignee(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]string{
+		"gastown/polecats/mica": "mica", "gastown/crew/sloan": "", "": "", "mica": "", "gastown/polecats/": "",
+	} {
+		if got := polecatOfAssignee(in); got != want {
+			t.Errorf("polecatOfAssignee(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

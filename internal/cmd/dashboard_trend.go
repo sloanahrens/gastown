@@ -112,11 +112,13 @@ func buildTrend(now time.Time, recs []omRecord, stages []omStage, rejs []omRejec
 const recentLandingRows = 30
 
 // buildRecentLandings joins the last 24 hours of landings and rejections with
-// the stage lines that say what each cost, newest first, capped at limit. The
-// title of a bead is asked for only once the rows to show are known, so the
-// lookups are bounded by limit, not by the day's traffic. ship reads a bead's
-// total ship time off the deploy tracker; a rejection never carries one.
-func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, ship func(bead string) (secs *float64, pending bool), title func(rig, bead string) string, limit int) []dashboard.LandingRow {
+// the stage lines that say what each cost, newest first, capped at limit. live
+// is the landings in flight, which go above the cap rather than inside it: a
+// landing running now is not one of the day's finished rows. The title of a
+// bead is asked for only once the rows to show are known, so the lookups are
+// bounded by limit, not by the day's traffic. ship reads a bead's total ship
+// time off the deploy tracker; a rejection never carries one.
+func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, live []dashboard.LandingRow, ship func(bead string) (secs *float64, pending bool), title func(rig, bead string) string, limit int) []dashboard.LandingRow {
 	since := now.Add(-trendHours * time.Hour)
 	var rows []dashboard.LandingRow
 	rigOf := map[string]string{} // a rejection line names no rig; a landing of the same bead does
@@ -167,6 +169,9 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 	if len(rows) > limit {
 		rows = rows[:limit]
 	}
+	if len(live) > 0 {
+		rows = append(append([]dashboard.LandingRow(nil), live...), rows...)
+	}
 	if title != nil {
 		seen := map[string]string{}
 		for i := range rows {
@@ -180,6 +185,53 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 		}
 	}
 	return rows
+}
+
+// runningRows is the landings in flight as Landings rows, newest merge first.
+// A live row carries what the merge line holds and nothing the landing has not
+// logged yet: no verdict, score or stage times, because the stages line is
+// written only once the landing ends. rigFor resolves a bead that has no
+// landings record yet to the rig its prefix routes to; polecatFor names who
+// holds the bead, read from the bead store once per live row.
+func runningRows(live []omMerge, rigFor func(bead string) string, polecatFor func(rig, bead string) string) []dashboard.LandingRow {
+	var rows []dashboard.LandingRow
+	for _, m := range live {
+		rig := ""
+		if rigFor != nil {
+			rig = rigFor(m.Bead)
+		}
+		row := dashboard.LandingRow{At: m.At, Bead: m.Bead, Rig: rig, Outcome: "running"}
+		if polecatFor != nil {
+			row.Polecat = polecatFor(rig, m.Bead)
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// polecatOfAssignee names the polecat a bead is assigned to, off the
+// "<rig>/polecats/<name>" assignee a dispatched bead carries. It is empty for
+// any other holder: a crew member, or a bead no one has taken.
+func polecatOfAssignee(assignee string) string {
+	parts := strings.Split(strings.TrimSpace(assignee), "/")
+	if len(parts) == 3 && parts[1] == "polecats" {
+		return parts[2]
+	}
+	return ""
+}
+
+// landingRig resolves a bead's rig the way a daemon.log line is routed: through
+// the town's routes table, read once by the caller and kept. A bead no route
+// claims resolves to "", leaving the row's rig blank rather than naming a rig
+// that does not hold it.
+func landingRig(townRoot string) func(bead string) string {
+	rigs := loadTailRigs(townRoot)
+	return func(bead string) string {
+		if rig := rigs.bead(bead); rig != "town" {
+			return rig
+		}
+		return ""
+	}
 }
 
 // polecatOfBranch names who built a landing from its branch: the polecat in a

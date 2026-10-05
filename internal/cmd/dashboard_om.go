@@ -29,12 +29,21 @@ const (
 	// before it. A day with no reviews still gets a row.
 	omDayRows      = 4
 	omStageJoinMin = 45 * time.Minute // a stages line this far before a landing belongs to it
+	// daemonStartMarker is what the daemon logs when it starts. A landing is
+	// one worker's pass, never resumed, so a start after a merge means that
+	// landing died with the process: the reader drops its ghost row with it.
+	daemonStartMarker = "Daemon starting (PID "
 )
 
 var (
 	omStageRe  = regexp.MustCompile(`^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) landing_worker: \[land\] (\S+): stages: (.*)$`)
 	omRejectRe = regexp.MustCompile(`^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) landing_worker: \[land\] (\S+): rejected \((\w+)\): (.*)$`)
 	omScoreRe  = regexp.MustCompile(`\bscore ([0-9.]+)`)
+	// omMergeRe and omLandedRe bracket a landing: the merge line is logged when
+	// the worker starts gating the merged tree, the landed line when it is on
+	// the target. A merge with no landed or rejected line after it is in flight.
+	omMergeRe  = regexp.MustCompile(`^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) landing_worker: \[land\] (\S+): merged `)
+	omLandedRe = regexp.MustCompile(`^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) landing_worker: \[land\] (\S+): (?:landed|already landed as) `)
 )
 
 const omLogTimeLayout = "2006/01/02 15:04:05"
@@ -56,6 +65,16 @@ type omRejection struct {
 	Kind   string
 	Detail string
 	Score  *float64
+}
+
+// omMerge is one landing in flight, off a "merged" log line: the moment the
+// worker began gating a bead's merged tree. Done is set by a later landed or
+// rejected line for the bead, or by a daemon start, after which the merge is
+// no longer live.
+type omMerge struct {
+	At   time.Time
+	Bead string
+	Done bool
 }
 
 // omRecord is a landings record plus the field the landing worker writes for
@@ -84,6 +103,7 @@ type omReader struct {
 	offset   int64
 	stages   []omStage
 	rejects  []omRejection
+	merges   map[string]omMerge  // bead -> its latest merge, live until it ends
 	lastTick *dashboard.Dispatch // the spec dispatcher's latest tick line
 }
 
@@ -166,7 +186,7 @@ func (r *omReader) scanLog() error {
 			return err
 		}
 		r.offset += int64(len(line))
-		if !strings.Contains(line, "[land]") && !strings.Contains(line, dispatchTickMarker) {
+		if !strings.Contains(line, "[land]") && !strings.Contains(line, dispatchTickMarker) && !strings.Contains(line, daemonStartMarker) {
 			continue
 		}
 		r.parseLogLine(strings.TrimRight(line, "\r\n"))
@@ -180,15 +200,31 @@ func (r *omReader) parseLogLine(line string) {
 		}
 		return
 	}
+	if strings.Contains(line, daemonStartMarker) {
+		r.endAllMerges()
+		return
+	}
+	if m := omMergeRe.FindStringSubmatch(line); m != nil {
+		if at, err := omLogAt(m[1]); err == nil {
+			r.beginMerge(m[2], at)
+		}
+		return
+	}
+	if m := omLandedRe.FindStringSubmatch(line); m != nil {
+		if at, err := omLogAt(m[1]); err == nil {
+			r.endMerge(m[2], at)
+		}
+		return
+	}
 	if m := omStageRe.FindStringSubmatch(line); m != nil {
-		if at, err := time.ParseInLocation(omLogTimeLayout, m[1], time.Local); err == nil {
+		if at, err := omLogAt(m[1]); err == nil {
 			lint, gate, om := omStageTimes(m[3])
 			r.stages = append(r.stages, omStage{At: at, Bead: m[2], Lint: lint, Gate: gate, OM: om})
 		}
 		return
 	}
 	if m := omRejectRe.FindStringSubmatch(line); m != nil {
-		if at, err := time.ParseInLocation(omLogTimeLayout, m[1], time.Local); err == nil {
+		if at, err := omLogAt(m[1]); err == nil {
 			rj := omRejection{At: at, Bead: m[2], Kind: m[3], Detail: m[4]}
 			if sm := omScoreRe.FindStringSubmatch(m[4]); sm != nil {
 				if v, err := strconv.ParseFloat(sm[1], 64); err == nil {
@@ -196,8 +232,70 @@ func (r *omReader) parseLogLine(line string) {
 				}
 			}
 			r.rejects = append(r.rejects, rj)
+			r.endMerge(m[2], at)
 		}
 	}
+}
+
+// omLogAt parses the timestamp a daemon.log line opens with. The log is
+// stamped in local time with no zone.
+func omLogAt(stamp string) (time.Time, error) {
+	return time.ParseInLocation(omLogTimeLayout, stamp, time.Local)
+}
+
+// beginMerge records that a bead's tree has been merged and its landing is in
+// flight. A landed bead with no later record is re-merged for the repair, and
+// a rejected landing can be requeued and merged again: the newest merge is the
+// live one, so it replaces whatever the bead had.
+func (r *omReader) beginMerge(bead string, at time.Time) {
+	if r.merges == nil {
+		r.merges = map[string]omMerge{}
+	}
+	r.merges[bead] = omMerge{At: at, Bead: bead}
+}
+
+// endMerge marks a bead's merge no longer in flight. A line at or before the
+// merge it would close is ignored: it belongs to an earlier attempt of the
+// same bead, and the merge being read is the newer one.
+func (r *omReader) endMerge(bead string, at time.Time) {
+	m, ok := r.merges[bead]
+	if !ok || m.At.After(at) {
+		return
+	}
+	m.Done = true
+	r.merges[bead] = m
+}
+
+// endAllMerges closes every merge in flight. The worker lands one pass and
+// exits; nothing resumes a pass, so a merge a restart followed never finished,
+// and one line ends every landing that was live when the daemon came back.
+func (r *omReader) endAllMerges() {
+	for bead, m := range r.merges {
+		m.Done = true
+		r.merges[bead] = m
+	}
+}
+
+// running returns the landings in flight at this read: every merge at or after
+// since with no landed or rejected line after it and no daemon start after it,
+// newest merge first. Merges the window has passed are dropped, so the map
+// stays the size of the window rather than the log.
+func (r *omReader) running(since time.Time) []omMerge {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_ = r.scanLog()
+	var out []omMerge
+	for bead, m := range r.merges {
+		if m.At.Before(since) {
+			delete(r.merges, bead)
+			continue
+		}
+		if !m.Done {
+			out = append(out, m)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].At.After(out[j].At) })
+	return out
 }
 
 // omStageDuration reads om's time off "lint 14s, gate 34s, om 40s"; nil when

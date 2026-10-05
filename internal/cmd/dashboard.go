@@ -143,6 +143,7 @@ func runDashboard(cmd *cobra.Command, _ []string) error {
 // newDashboardHub wires a hub to the readers gt tail -f uses.
 func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string) (*dashboard.Hub, error) {
 	beadReads := openTailBeads(townRoot)
+	rigOfBead := landingRig(townRoot)
 	deploys := newTailDeploys(time.Now, tailGitAncestry(townRoot), cutoff)
 	sources, preface, err := buildTailSources(tailOptions{
 		townRoot: townRoot, kinds: allTailKinds(), cutoff: cutoff, loc: loc, now: time.Now,
@@ -199,7 +200,13 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 			now := time.Now()
 			stages, rejects := om.trendInputs(trendWindowStart(now))
 			tr := buildTrend(now, recs.get(), stages, rejects, loads.points())
-			tr.Recent = buildRecentLandings(now, recs.get(), stages, rejects, deploys.shipStatus, func(rig, id string) string { return beadReads.title(rig, id) }, recentLandingRows)
+			live := runningRows(om.running(now.Add(-trendHours*time.Hour)), rigOfBead, func(rig, id string) string {
+				if issue := beadReads.issue(rig, id); issue != nil {
+					return polecatOfAssignee(issue.Assignee)
+				}
+				return ""
+			})
+			tr.Recent = buildRecentLandings(now, recs.get(), stages, rejects, live, deploys.shipStatus, func(rig, id string) string { return beadReads.title(rig, id) }, recentLandingRows)
 			return tr
 		},
 		LoadSample: loads.append,
