@@ -262,8 +262,12 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 					return result, fmt.Errorf("burning stale molecules: %w", err)
 				}
 			} else {
-				result.ErrMsg = "has existing molecule(s)"
-				return result, fmt.Errorf("bead %s has existing molecule(s) (use --force)", opts.BeadID)
+				// Name the molecules for the dispatcher's log: this refusal is
+				// the only record of a sling the safe-to-burn gate held back
+				// (gt-mddzp).
+				listed := strings.Join(existingMolecules, ", ")
+				result.ErrMsg = fmt.Sprintf("has existing molecule(s): %s", listed)
+				return result, fmt.Errorf("bead %s has existing molecule(s): %s (use --force)", opts.BeadID, listed)
 			}
 		}
 	}

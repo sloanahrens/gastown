@@ -204,7 +204,17 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 		// stays open/in_progress so it can be resumed on the next session.
 		// Exception: workflow step beads (*-wfs-*) are always closed — see above.
 		hookBd, _, _ := done.RoutedIssueBeadsIn(beadsPath, hookedBeadID, e.sourceOpener())
-		if hookedBead, err := hookBd.Show(hookedBeadID); err == nil && !beads.IssueStatus(hookedBead.Status).IsTerminal() {
+		hookedBead, hookedErr := hookBd.Show(hookedBeadID)
+		if hookedErr == nil && beads.IssueStatus(hookedBead.Status).IsTerminal() {
+			// The bead was closed before gt done ran — the nothing-to-implement
+			// route closes it first. The block below, which is what ends an
+			// attached molecule, is skipped for a terminal bead and no landing
+			// follows, so the molecule and its step wisps would stay open for
+			// good (gt-mddzp).
+			closeMoleculeOfClosedBead(hookBd, hookedBeadID, hookedBead)
+			goto doneStateUpdate
+		}
+		if hookedErr == nil && !beads.IssueStatus(hookedBead.Status).IsTerminal() {
 			// Guard: never close a rig identity bead. Polecats dispatched with the
 			// rig bead as their hook (via mol-polecat-work) must not close permanent
 			// infrastructure. Skip close and fall through to idle state update.
@@ -334,6 +344,36 @@ doneStateUpdate:
 	// Clear legacy checkpoints on clean exit — gt done completed successfully.
 	clearDoneCheckpoints(agentBd, agentBeadID)
 	return nil
+}
+
+// closeMoleculeOfClosedBead ends the workflow an already-closed work bead
+// carries, steps then root and unforced, so a bead closed before gt done ran
+// (the nothing-to-implement route) does not leave its molecule and step wisps
+// open for good (gt-mddzp). A root bd still refuses is reported, not forced:
+// the bead is already closed and no landing record is at stake.
+func closeMoleculeOfClosedBead(b beads.Client, beadID string, bead *beads.Issue) {
+	attachment := beads.ParseAttachmentFields(bead)
+	if attachment == nil || attachment.AttachedMolecule == "" {
+		return
+	}
+	molID := attachment.AttachedMolecule
+	// A molecule another path already ended (the landing, a burn) closes
+	// nothing here, which also keeps a second gt done on the same bead quiet.
+	if root, err := b.Show(molID); err != nil || root == nil || beads.IssueStatus(root.Status).IsTerminal() {
+		return
+	}
+	n, err := closeStepsThenRoot(b, molID, func() error {
+		if err := b.CloseWithReason("done", molID); err != nil && !errors.Is(err, beads.ErrNotFound) {
+			return err
+		}
+		return nil
+	})
+	if n > 0 {
+		fmt.Fprintf(os.Stderr, "Closed %d molecule step(s) for %s\n", n, molID)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: couldn't close attached molecule %s of already-closed bead %s: %v\n", molID, beadID, err)
+	}
 }
 
 // defaultClosedWispDeleteAge is the grace period before a closed ephemeral
