@@ -19,10 +19,8 @@ Gas Town is a workspace manager that lets you coordinate multiple Claude Code ag
 
 ```mermaid
 graph TB
-    Mayor[The Mayor<br/>AI Coordinator]
     Town[Town Workspace<br/>~/gt/]
 
-    Town --> Mayor
     Town --> Rig1[Rig: Project A]
     Town --> Rig2[Rig: Project B]
 
@@ -37,7 +35,6 @@ graph TB
     Hooks1 -.git worktree.-> GitRepo1[Git Repository]
     Hooks2 -.git worktree.-> GitRepo2[Git Repository]
 
-    style Mayor fill:#e1f5ff,color:#000000
     style Town fill:#f0f0f0,color:#000000
     style Rig1 fill:#fff4e1,color:#000000
     style Rig2 fill:#fff4e1,color:#000000
@@ -45,9 +42,12 @@ graph TB
 
 ## Core Concepts
 
-### The Mayor 🎩
+### The Operator 🧑💻
 
-Your primary AI coordinator. The Mayor is a Claude Code instance with full context about your workspace, projects, and agents. **Start here** - just tell the Mayor what you want to accomplish.
+You are the town's coordinator. Work from your own shell: file beads, order
+them with `bd dep add`, dispatch them with `gt sling`, and watch progress with
+`gt ready` and `gt agents`. A crew session gives you a persistent tmux-backed
+workspace inside a rig when you want one.
 
 ### Town 🏘️
 
@@ -89,7 +89,7 @@ When a polecat finishes, `gt done` rebases onto main, runs the fast gate, pushes
 
 ### Escalation 🚨
 
-Severity-routed issue escalation. Agents that hit blockers escalate via `gt escalate`, which creates tracked beads routed to the Mayor and (if needed) the Overseer. Severity levels: CRITICAL (P0), HIGH (P1), MEDIUM (P2). See [Escalation](docs/design/escalation.md).
+Severity-routed issue escalation. Agents that hit blockers escalate via `gt escalate`, which creates tracked beads and routes the higher severities to the operator's email or SMS. Severity levels: CRITICAL (P0), HIGH (P1), MEDIUM (P2). See [Escalation](docs/design/escalation.md).
 
 ### Scheduler ⏱️
 
@@ -111,7 +111,7 @@ Native installs require the host tools below. Docker installs only require Docke
 | Go | 1.26.2+ (see `go.mod`) | Required for the Linux and Windows paths and for macOS source builds. Not needed for `brew install gastown` or Docker setup. |
 | Beads (`bd`) | 0.57.0+ | Required for native installs. Homebrew and Docker supply it; source/native Go paths install it with `go install`. |
 | ICU4C dev headers | varies | Required for source builds that compile the ICU-backed query layer. Use `libicu-dev` on Debian/Ubuntu, `libicu-devel` on Fedora/RHEL, `icu4c` on macOS, and MSYS2 ICU packages for native Windows. |
-| tmux | 3.0+ | Required for `gt up` and the tmux-backed roles (Mayor, crew, polecats). Optional only for minimal-mode workflows where you run runtime instances manually. |
+| tmux | 3.0+ | Required for `gt up` and the tmux-backed roles (crew, polecats). Optional only for minimal-mode workflows where you run runtime instances manually. |
 | Claude Code CLI | latest | The only runtime. See [Runtime Configuration](#runtime-configuration) for wrappers and other backends. |
 
 ### Local setup
@@ -179,7 +179,7 @@ gt install ~/gt --shell --git
 cd ~/gt
 ```
 
-Start the long-lived services. `gt up` boots Dolt, the daemon and the Mayor.
+Start the long-lived services. `gt up` boots Dolt and the daemon.
 
 ```bash
 gt up
@@ -218,12 +218,14 @@ gt crew add yourname --rig myproject
 cd myproject/crew/yourname
 ```
 
-#### Start the Mayor
+#### Start a crew session
 
-The Mayor coordinates work across rigs.
+A crew session is a persistent, tmux-backed workspace inside a rig, for when
+you want to work from a session rather than your own shell.
 
 ```bash
-gt mayor attach
+gt crew start yourname --rig myproject
+gt crew at yourname
 ```
 
 ### Docker Compose setup
@@ -249,8 +251,10 @@ Inside the container, finish bootstrapping.
 gt install /gt --force --shell    # enable Gas Town and install shell integration
 gt up --restore                   # start services and restore worker settings
 gh auth login                     # optional: required for private GitHub rigs
-gt mayor attach
+gt status                         # confirm the town is up
 ```
+
+You work from the container shell: add a rig with `gt rig add`, file a bead with `bd create`, and dispatch it with `gt sling`.
 
 Do not point `FOLDER` at a host workspace that a native `gt` install is using at the same time.
 
@@ -266,9 +270,9 @@ cd ~/gt &&
 gt up &&
 gt doctor &&
 gt config agent list &&
-gt mayor attach
+gt status
 ```
-and tell the Mayor what you want to build!
+Then add a rig with `gt rig add`, file a bead with `bd create`, and dispatch it with `gt sling`.
 
 ---
 
@@ -277,52 +281,47 @@ and tell the Mayor what you want to build!
 ```mermaid
 sequenceDiagram
     participant You
-    participant Mayor
     participant Beads
     participant Agent
     participant Hook
 
-    You->>Mayor: Tell Mayor what to build
-    Mayor->>Beads: File the work; bd dep add orders it
-    Mayor->>Agent: Sling bead to agent
+    You->>Beads: File the work; bd dep add orders it
+    You->>Agent: Sling bead to agent
     Agent->>Hook: Store work state
     Agent->>Agent: Complete work
     Agent->>Beads: gt done submits the branch
-    Mayor->>You: Summary of progress
+    Beads->>You: Landed work and progress beads
 ```
 
 ### Example: Feature Development
 
 ```bash
-# 1. Start the Mayor
-gt mayor attach
-
-# 2. In the Mayor session, file the beads and order them with a dependency
+# 1. File the beads and order them with a dependency
 bd create "Feature X: API"     # → gt-abc12
 bd create "Feature X: UI"      # → gt-def34
 bd dep add gt-def34 gt-abc12   # the UI waits for the API to land
 
-# 3. Assign work to an agent
+# 2. Assign work to an agent
 gt sling gt-abc12 myproject
 
-# 4. Track progress
+# 3. Track progress
 gt ready
 
-# 5. Monitor agents
+# 4. Monitor agents
 gt agents
 ```
 
 ## Common Workflows
 
-### Mayor Workflow (Recommended)
+### Sling Workflow (Recommended)
 
 **Best for:** Coordinating complex, multi-issue work
 
 ```mermaid
 flowchart LR
-    Start([Start Mayor]) --> Tell[Tell Mayor<br/>what to build]
-    Tell --> Creates[Mayor files beads<br/>+ spawns agents]
-    Creates --> Monitor[Monitor progress<br/>via gt ready]
+    Start([File the beads]) --> Order[Order them with bd dep add]
+    Order --> Sling[Sling beads<br/>to agents]
+    Sling --> Monitor[Monitor progress<br/>via gt ready]
     Monitor --> Done{All done?}
     Done -->|No| Monitor
     Done -->|Yes| Review[Review work]
@@ -331,10 +330,7 @@ flowchart LR
 **Commands:**
 
 ```bash
-# Attach to Mayor
-gt mayor attach
-
-# In the Mayor session, describe the work; the Mayor files and slings the beads
+# Describe the work as beads from your shell; gt sling dispatches them
 # Order dependent beads first, so a slung bead is never blocked
 bd dep add gt-p9n4q gt-x7k2m
 
@@ -468,8 +464,7 @@ gt crew add <name> --rig <rig>  # Create crew workspace
 gt agents                   # List active agents
 gt sling <bead-id> <rig>    # Assign work to agent
 gt sling <bead-id> <rig> --agent claude-sonnet   # Override the agent for this sling/spawn
-gt mayor attach             # Start Mayor session
-gt mayor start --agent claude-opus      # Run Mayor with a specific agent alias
+gt crew at <name>           # Attach to your crew session
 gt prime                    # Context recovery (run inside existing session)
 gt tail -f                  # Follow what the town is doing
 gt tail --since 1h          # The last hour, then exit
@@ -544,7 +539,7 @@ gt escalate list                    # List open escalations
 gt escalate ack <bead-id>           # Acknowledge an escalation
 ```
 
-Escalations route to the Mayor and the Overseer based on severity. See [Escalation design](docs/design/escalation.md).
+Escalations are tracked as beads and routed to the operator's email or SMS by severity. See [Escalation design](docs/design/escalation.md).
 
 ## Scheduler
 
@@ -583,18 +578,6 @@ stateDiagram-v2
     Archived --> [*]
 ```
 
-### MEOW (Mayor-Enhanced Orchestration Workflow)
-
-MEOW is the recommended pattern:
-
-1. **Tell the Mayor** - Describe what you want
-2. **Mayor analyzes** - Breaks down into tasks
-3. **Bead creation** - Mayor files the work as beads and orders it with `bd dep add`
-4. **Agent spawning** - Mayor spawns appropriate agents
-5. **Work distribution** - Beads slung to agents via hooks
-6. **Progress monitoring** - Track through `gt ready` and `gt agents`
-7. **Completion** - Mayor summarizes results
-
 ## Shell Completions
 
 ```bash
@@ -612,19 +595,17 @@ gt completion fish > ~/.config/fish/completions/gt.fish
 
 | Role            | Description                          | Primary Interface    |
 | --------------- | ------------------------------------ | -------------------- |
-| **Mayor**       | AI coordinator                       | `gt mayor attach`    |
-| **Human (You)** | Crew member                          | Your crew directory  |
-| **Polecat**     | Worker agent                         | Spawned by Mayor     |
+| **Human (You)** | Operator and coordinator             | Your shell or a crew session |
+| **Polecat**     | Worker agent                         | Spawned by `gt sling` |
 | **Hook**        | Persistent storage                   | Git worktree         |
 
 ## Tips
 
-- **Always start with the Mayor** - It's designed to be your primary interface
+- **File beads from your shell** - `bd create` and `gt sling` are the primary interface
 - **Order dependent work with `bd dep add`** - A blocked bead stays out of `gt ready` until its blocker lands
 - **Leverage hooks for persistence** - Your work won't disappear
 - **Create formulas for repeated tasks** - Save time with Beads recipes
 - **Use `gt tail -f` for live monitoring** - Watch agent activity and catch stuck agents early
-- **Let the Mayor orchestrate** - It knows how to manage agents
 
 ## Design Documentation
 
@@ -662,15 +643,6 @@ Check what is unblocked and whether a session is live:
 gt ready
 gt agents
 gt doctor
-```
-
-### Mayor not responding
-
-Restart Mayor session:
-
-```bash
-gt mayor detach
-gt mayor attach
 ```
 
 ## License

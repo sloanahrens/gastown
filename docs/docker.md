@@ -39,7 +39,7 @@ The entrypoint runs `gt install /gt --git` automatically on first start. After y
 ```bash
 gt install /gt --force --shell
 gt up --restore
-gt mayor attach
+gt status
 ```
 
 `docker compose down -v` tears everything down, including the persisted Docker volumes. Run the command from the directory that holds `docker-compose.yml`.
@@ -214,7 +214,7 @@ gt up --restore     # start the daemon and restore crew and polecats
 
 After the sequence above, `gt doctor` should report mostly clean. See *Known issues* below for the `claude-settings` failure that persists in the docker setup.
 
-From here, the workflow matches a native install: `gt rig add <name> <url>`, `gt crew add <name> --rig <rig>`, and `gt mayor attach`.
+From here, the workflow matches a native install: `gt rig add <name> <url>` and `gt crew add <name> --rig <rig>`; dispatch work from the container shell with `gt sling`.
 
 For private GitHub repos, log in inside the container.
 
@@ -255,7 +255,7 @@ gt doctor fix claude-settings
 
 **The first `docker compose up` on a busy host can race.** On rare occasions, the entrypoint's `bd init` step has been observed to fail with a dynamic-linker error before Dolt's startup completes. Retrying with `docker compose down -v && docker compose up -d` resolves the failure. The race has not been reproduced under controlled conditions.
 
-**`gt up`'s daemon status reads `failed to start` for a moment.** The entrypoint already started Dolt and registered Mayor/Deacon. When you run `gt up` afterwards, the daemon-spawn check fires before the new daemon's PID file exists, producing a transient `failed to start` line. `gt daemon status` confirms the daemon is actually running. The mismatch is cosmetic.
+**`gt up`'s daemon status reads `failed to start` for a moment.** The entrypoint already started Dolt and registered the town's services. When you run `gt up` afterwards, the daemon-spawn check fires before the new daemon's PID file exists, producing a transient `failed to start` line. `gt daemon status` confirms the daemon is actually running. The mismatch is cosmetic.
 
 **Do not run a host `gt` and a container `gt` against the same workspace.** A docker container running against a `${FOLDER}` host path will spin up its own Dolt server and daemon. A native `gt` running against the same path will spin up a separate Dolt server. The two will write to the same workspace and clobber each other. Use distinct host paths if you need both installations.
 
