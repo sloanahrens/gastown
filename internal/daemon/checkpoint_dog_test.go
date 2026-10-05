@@ -128,7 +128,7 @@ func TestResolveCheckpointWorkDir_NestedLayout(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(worktree, ".git"), 0o755); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
-	got := resolveCheckpointWorkDir(polecatsDir, polecat, rig)
+	got := resolvePolecatWorktree(polecatsDir, polecat, rig)
 	if got != worktree {
 		t.Errorf("got %q, want %q", got, worktree)
 	}
@@ -146,7 +146,7 @@ func TestResolveCheckpointWorkDir_LegacyFlatLayout(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(worktree, ".git"), 0o755); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
-	got := resolveCheckpointWorkDir(polecatsDir, polecat, rig)
+	got := resolvePolecatWorktree(polecatsDir, polecat, rig)
 	if got != worktree {
 		t.Errorf("got %q, want %q (legacy flat layout)", got, worktree)
 	}
@@ -166,12 +166,12 @@ func TestResolveCheckpointWorkDir_NoGitNeitherLevel(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 	// Simulate top-level workspace .git that git would walk up to find.
-	// resolveCheckpointWorkDir must NOT return a path that lets git walk
+	// resolvePolecatWorktree must NOT return a path that lets git walk
 	// to this — it should return "" so the caller skips entirely.
 	if err := os.MkdirAll(filepath.Join(tmp, ".git"), 0o755); err != nil {
 		t.Fatalf("setup parent .git: %v", err)
 	}
-	got := resolveCheckpointWorkDir(polecatsDir, polecat, rig)
+	got := resolvePolecatWorktree(polecatsDir, polecat, rig)
 	if got != "" {
 		t.Errorf("got %q, want empty (skip — no polecat-level .git)", got)
 	}
@@ -192,7 +192,7 @@ func TestResolveCheckpointWorkDir_PrefersNestedOverFlat(t *testing.T) {
 			t.Fatalf("setup %s: %v", d, err)
 		}
 	}
-	got := resolveCheckpointWorkDir(polecatsDir, polecat, rig)
+	got := resolvePolecatWorktree(polecatsDir, polecat, rig)
 	if got != nested {
 		t.Errorf("got %q, want nested %q", got, nested)
 	}

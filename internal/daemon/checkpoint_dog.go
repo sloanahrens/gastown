@@ -149,7 +149,7 @@ func (d *Daemon) checkpointRigPolecats(rigName string) (int, int) {
 		// .git and commit "WIP: checkpoint (auto)" on the workspace's
 		// branch (usually main) instead of the polecat's branch.
 		// (gt-checkpoint-workdir fix.)
-		workDir := resolveCheckpointWorkDir(polecatsDir, polecatName, rigName)
+		workDir := resolvePolecatWorktree(polecatsDir, polecatName, rigName)
 		if workDir == "" {
 			continue // Neither layout has a usable .git — skip silently.
 		}
@@ -419,7 +419,7 @@ func isGitWorktree(dir string) bool {
 	return err == nil
 }
 
-// resolveCheckpointWorkDir picks the actual git-worktree directory for a
+// resolvePolecatWorktree picks the actual git-worktree directory for a
 // polecat, supporting both the new nested layout (polecats/<name>/<rigName>/)
 // and the legacy flat layout (polecats/<name>/) that polecat.Manager still
 // recognizes for backward compatibility. Returns "" if neither candidate is
@@ -427,7 +427,7 @@ func isGitWorktree(dir string) bool {
 // fall back to a parent directory, since git would walk up to the top-level
 // workspace's .git and commit on the wrong branch (this is the bug this
 // helper exists to prevent).
-func resolveCheckpointWorkDir(polecatsDir, polecatName, rigName string) string {
+func resolvePolecatWorktree(polecatsDir, polecatName, rigName string) string {
 	nested := filepath.Join(polecatsDir, polecatName, rigName)
 	if isGitWorktree(nested) {
 		return nested

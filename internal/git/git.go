@@ -1113,13 +1113,21 @@ func (g *Git) FetchDefaultBranchWithTimeout(remote string, timeout time.Duration
 	return err
 }
 
-// refreshRemoteDefaultBranch fetches one ref and nothing else: the remote's
-// default branch. No tags, no prune, and no change to the worktree, HEAD,
-// local branches or stash. The bound covers an unreachable remote; callers
-// ignore the error and judge whatever ref they already had, which is the
-// verdict they would have reached had the refresh never been attempted.
-func (g *Git) refreshRemoteDefaultBranch(remote string) error {
-	_, err := g.runWithTimeout(RemoteQueryTimeout, "fetch", "--no-tags", remote, g.RemoteDefaultBranch())
+// RefreshRemoteDefaultBranch fetches one ref and nothing else: remote's
+// default branch, into this clone's remote-tracking ref for it. The explicit
+// destination keeps the fetch off every other remote-tracking ref, and there
+// are no tags, no prune, and no change to the worktree, HEAD, local branches
+// or stash.
+//
+// It exists for the clone that did not see the branch move: a Forgejo landing
+// merges on the remote, so the landed seat's origin/<default> still names the
+// pre-landing commit and a reader with no live check reads landed work as
+// local-only (gt-fn9e6.55). The bound covers an unreachable remote; callers
+// judge whatever ref they already had.
+func (g *Git) RefreshRemoteDefaultBranch(remote string) error {
+	branch := g.RemoteDefaultBranch()
+	_, err := g.runWithTimeout(RemoteQueryTimeout, "fetch", "--no-tags", remote,
+		"+refs/heads/"+branch+":refs/remotes/"+remote+"/"+branch)
 	return err
 }
 
@@ -3816,7 +3824,7 @@ type detachedHeadCustodyFunc func(remote, head string) (string, bool)
 type refreshDefaultBranchFunc func(remote string) error
 
 func (g *Git) branchPreservationStatus(localBranch, remote string, targets []string, includeExactBranch bool) (BranchPreservationStatus, error) {
-	return g.branchPreservationStatusWith(localBranch, remote, targets, includeExactBranch, g.PushRemoteBranchTip, g.detachedHeadCustodyRemote, g.refreshRemoteDefaultBranch)
+	return g.branchPreservationStatusWith(localBranch, remote, targets, includeExactBranch, g.PushRemoteBranchTip, g.detachedHeadCustodyRemote, g.RefreshRemoteDefaultBranch)
 }
 
 // branchPreservationStatusWith is the shared implementation behind every

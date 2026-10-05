@@ -51,6 +51,10 @@ type daemonGit interface {
 	// Rig repository upkeep, for the git_hygiene patrol.
 	FetchPrune(remote string) error
 	RemoteDefaultBranch() string
+	// RefreshRemoteDefaultBranch fetches only remote's default branch into
+	// this clone's remote-tracking ref for it; the landing worker asks a
+	// landed bead's author seat for it (gt-fn9e6.55).
+	RefreshRemoteDefaultBranch(remote string) error
 	ListBranches(pattern string) ([]string, error)
 	DeleteBranch(name string, force bool) error
 	ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error)

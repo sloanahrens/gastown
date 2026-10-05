@@ -19,21 +19,27 @@ type RemoteRef struct {
 // landing preserves because a rework is pushed to a new branch. Best effort:
 // a failed list or delete is logged, and the landing's record is already
 // written, so nothing here fails or re-delays it.
-func (w *Worker) reapBeadBranches(beadID string) {
+//
+// It returns every branch it found for the bead, deleted or not, so the
+// landing path can also refresh the seat of each polecat that authored one
+// (gt-fn9e6.55).
+func (w *Worker) reapBeadBranches(beadID string) []string {
 	if beadID == "" {
-		return
+		return nil
 	}
 	refs, err := w.Remote.ListRemoteRefs(polecatRefPrefix)
 	if err != nil {
 		w.logf("%s: listing the polecat branches to delete: %v", beadID, err)
-		return
+		return nil
 	}
+	var found []string
 	deleted := 0
 	for _, ref := range refs {
 		if !branchForBead(ref.Name, beadID) {
 			continue
 		}
 		branch := strings.TrimPrefix(ref.Name, "refs/heads/")
+		found = append(found, branch)
 		if err := w.Remote.DeleteRemoteBranchIfAt(branch, ref.Hash); err != nil {
 			w.logf("%s: deleting %s: %v", beadID, branch, err)
 			continue
@@ -43,6 +49,25 @@ func (w *Worker) reapBeadBranches(beadID string) {
 	if deleted > 0 {
 		w.logf("%s: deleted %d stale polecat branch(es) on origin", beadID, deleted)
 	}
+	return found
+}
+
+// polecatBranchPrefix is polecatRefPrefix as a branch is named: without the
+// refs/heads/ its ref hangs under.
+const polecatBranchPrefix = "polecat/"
+
+// authorPolecat returns the polecat a polecat branch names, or "" when branch
+// is not one. A branch is polecat/<polecat>/<bead>+<mutation>.
+func authorPolecat(branch string) string {
+	rest, ok := strings.CutPrefix(branch, polecatBranchPrefix)
+	if !ok {
+		return ""
+	}
+	polecat, _, ok := strings.Cut(rest, "/")
+	if !ok {
+		return ""
+	}
+	return polecat
 }
 
 // branchForBead reports whether a full origin ref name is a polecat branch for

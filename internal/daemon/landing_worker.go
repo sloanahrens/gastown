@@ -388,6 +388,22 @@ func (d *Daemon) landingLogRoot(rigName string) string {
 	return filepath.Join(d.config.TownRoot, ".runtime", "landing-logs", rigName)
 }
 
+// refreshAuthorSeat refreshes one landed bead author's seat worktree: its
+// remote-tracking default branch, and nothing else. A Forgejo landing merges
+// on the remote and deletes the author's branch there, so the seat's
+// origin/<default> keeps the pre-landing commit and every reader that does
+// not run a live check — gt polecat list, the dashboard — reads the landed
+// work as local-only (gt-fn9e6.55). Best effort: the error is the caller's to
+// log, once, and it never fails, delays or reorders the landing.
+func (d *Daemon) refreshAuthorSeat(rigName, polecat string) error {
+	polecatsDir := filepath.Join(d.config.TownRoot, rigName, "polecats")
+	workDir := resolvePolecatWorktree(polecatsDir, polecat, rigName)
+	if workDir == "" {
+		return fmt.Errorf("no git worktree at %s", filepath.Join(polecatsDir, polecat))
+	}
+	return d.gitAt(workDir).RefreshRemoteDefaultBranch("origin")
+}
+
 // newRigLandingWorker wires the production collaborators for one rig.
 func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error) {
 	townRoot := d.config.TownRoot
@@ -510,6 +526,14 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		stuck = d.newLandingStuckWatch(rigName)
 	}
 	run := postLandRun(repo, workRoot, d.landingLogRoot(rigName), townRoot, rigName, landingRemote, landingWorkerDuration(cfg.PostLandTimeoutStr, defaultPostLandTimeout))
+	// A rig that lands through Forgejo keeps this: the merge happens on the
+	// remote, so the author seat's remote-tracking default branch is stale
+	// until something fetches it (gt-fn9e6.55). A rig on the local gate writes
+	// that ref in its own repository, where every seat already reads it.
+	var refreshAuthorSeat func(polecat string) error
+	if forgejoCfg != nil {
+		refreshAuthorSeat = func(polecat string) error { return d.refreshAuthorSeat(rigName, polecat) }
+	}
 	mainState := fileMainState{path: RedMainStatePath(townRoot, rigName)}
 	redMain := &landworker.RedMain{
 		Rig:   rigName,
@@ -564,18 +588,24 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		},
 	}
 	return &landworker.Worker{
-		Rig:         rigName,
-		Beads:       bd,
-		Remote:      gitRemote{g: git.NewGit(repo), remote: landingRemote},
-		Lander:      lander,
-		Landings:    landings,
-		Backoff:     backoff,
-		PostLand:    postLand,
-		Reverts:     redMain,
-		WatchTarget: watchBranch,
-		MainState:   mainState,
-		LandTimeout: landingRigLandTimeout(d.patrolConfig, forgejoCfg != nil),
-		Logf:        d.logger.Printf,
+		Rig:      rigName,
+		Beads:    bd,
+		Remote:   gitRemote{g: git.NewGit(repo), remote: landingRemote},
+		Lander:   lander,
+		Landings: landings,
+		Backoff:  backoff,
+		PostLand: postLand,
+		// Only a rig that lands through Forgejo needs this: its landing merges
+		// on the remote, which moves main there and leaves the author seat's
+		// remote-tracking ref for it stale. A local-gate landing writes the
+		// ref in the rig's own repository, so every seat reads it already
+		// (gt-fn9e6.55).
+		RefreshAuthorSeat: refreshAuthorSeat,
+		Reverts:           redMain,
+		WatchTarget:       watchBranch,
+		MainState:         mainState,
+		LandTimeout:       landingRigLandTimeout(d.patrolConfig, forgejoCfg != nil),
+		Logf:              d.logger.Printf,
 		Escalate: func(beadID, message string) {
 			d.escalateAlert("landing-needs-human:"+beadID, "landing_worker", message)
 		},
