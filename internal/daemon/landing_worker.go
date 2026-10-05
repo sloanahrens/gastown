@@ -63,6 +63,25 @@ func landingWorkerLandTimeout(config *DaemonPatrolConfig) time.Duration {
 	return landworker.DefaultLandTimeout
 }
 
+// landingForgejoMergeSlack is the wall a cut-over rig's landing reserves after
+// its CI wait and its om review, for the merge itself: the PR merge call, the
+// read-back that confirms it, and the record's own writes (gt-fn9e6.26).
+const landingForgejoMergeSlack = 5 * time.Minute
+
+// landingRigLandTimeout is one rig's landing deadline. A rig without a Forgejo
+// block keeps the configured flat land_timeout. A rig that lands through
+// Forgejo CI spends its candidate gate's whole CI wait before om even starts
+// and then has to merge, so its deadline is the CI wait plus the om timeout
+// plus the merge slack — 30 minutes at the defaults — rather than a flat value
+// that would cut off the wait the gate is still legitimately running
+// (gt-fn9e6.26).
+func landingRigLandTimeout(config *DaemonPatrolConfig, forgejoRig bool) time.Duration {
+	if !forgejoRig {
+		return landingWorkerLandTimeout(config)
+	}
+	return land.DefaultCandidateWaitTimeout + landingOMBudget(landingWorkerConfig(config)) + landingForgejoMergeSlack
+}
+
 const defaultPostLandTimeout = 60 * time.Minute
 
 func landingWorkerDuration(s string, def time.Duration) time.Duration {
@@ -463,8 +482,10 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	}
 	// A rig with a merge_queue.forgejo block lands through its Forgejo CI: the
 	// candidate gate replaces the local gate built above, and the PR merger
-	// replaces the force-push that writes the target.
-	if forgejoCfg := rig.ResolveForgejoConfig(townRoot, rigName); forgejoCfg != nil {
+	// replaces the force-push that writes the target. The same block decides
+	// the landing's deadline below, so it is read once, here (gt-fn9e6.26).
+	forgejoCfg := rig.ResolveForgejoConfig(townRoot, rigName)
+	if forgejoCfg != nil {
 		candidate, merger, err := d.newForgejoLanding(rigName, landingRemote, forgejoCfg, repo, landings, cfg)
 		if err != nil {
 			return nil, err
@@ -525,7 +546,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Reverts:     redMain,
 		WatchTarget: watchBranch,
 		MainState:   mainState,
-		LandTimeout: landingWorkerLandTimeout(d.patrolConfig),
+		LandTimeout: landingRigLandTimeout(d.patrolConfig, forgejoCfg != nil),
 		Logf:        d.logger.Printf,
 		Escalate: func(beadID, message string) {
 			d.escalateAlert("landing-needs-human:"+beadID, "landing_worker", message)

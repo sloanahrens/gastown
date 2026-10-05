@@ -613,6 +613,32 @@ func TestCandidateGateSilenceIsNoVerdict(t *testing.T) {
 	}
 }
 
+// TestCandidateGateWaitIs20Minutes: the CI wait is 20 minutes, a gate with no
+// wait of its own takes it, and a context that never reports inside the window
+// is ErrCISilence — the infrastructure outcome — never a verdict on the work
+// (gt-fn9e6.26). The fake client and a millisecond-scale window stand in for
+// the 20 minutes the constant names.
+func TestCandidateGateWaitIs20Minutes(t *testing.T) {
+	t.Parallel()
+	if DefaultCandidateWaitTimeout != 20*time.Minute {
+		t.Fatalf("DefaultCandidateWaitTimeout = %s, want 20m", DefaultCandidateWaitTimeout)
+	}
+	if got := (&CandidateGate{}).waitTimeout(); got != DefaultCandidateWaitTimeout {
+		t.Fatalf("waitTimeout() = %s, want the default %s", got, DefaultCandidateWaitTimeout)
+	}
+	f := newLandFixture(t)
+	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
+	// No statuses at all: the fake reports nothing however long the gate polls.
+	client := &fakeForgejo{}
+	res := fastGate(client).Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+	if res.State != CandidateSilent {
+		t.Fatalf("state = %v, want the no-verdict state", res.State)
+	}
+	if !errors.Is(res.Err, ErrCISilence) {
+		t.Fatalf("err = %v, want one wrapping ErrCISilence: a wait that outlives the window is infrastructure", res.Err)
+	}
+}
+
 // TestCandidateGateAPIFailureIsNotAVerdict: a Forgejo that answers with an
 // error fails the landing into the infra path rather than stalling it.
 func TestCandidateGateAPIFailureIsNotAVerdict(t *testing.T) {

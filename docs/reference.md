@@ -164,6 +164,16 @@ Keys removed in gt-5nlvq (`enabled`, `run_tests`, `on_conflict`, `poll_interval`
 `batch_*`, `test_verify_*` and the other refinery-era keys) now fail strict
 decoding; `gt doctor fix deprecated-merge-queue-keys` deletes them.
 
+**Landing timeouts on a Forgejo rig.** The candidate gate waits up to 20
+minutes for the required commit-status context to report; a wait that outlives
+that window is CI silence, an infrastructure outcome that retries rather than
+rejecting the work. A rig with a `merge_queue.forgejo` block gets a landing
+deadline of that CI wait plus its `patrols.landing_worker.om_timeout` (5
+minutes by default) plus 5 minutes of merge slack — 30 minutes at the defaults
+— instead of the flat `patrols.landing_worker.land_timeout`; a rig without the
+block still lands under `land_timeout`. A deadline hit is infrastructure, as CI
+silence is.
+
 See [Integration Branches](concepts/integration-branches.md) for integration branch details.
 
 **Container opt-in and the container-gate slot (`gt done`'s gate).** Container-backed
