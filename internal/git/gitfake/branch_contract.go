@@ -559,6 +559,42 @@ func RunBranchContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 			t.Errorf("ClassifyIndexSkew(nil) = %v", skew)
 		}
 	})
+
+	t.Run("live preservation refreshes the remote default branch before judging it", func(t *testing.T) {
+		t.Parallel()
+		fx, g := newWtFixture(t, newEnv(t))
+		env := fx.env.(BranchEnv)
+		// A seat's branch, with work the remote has never seen.
+		if err := g.CheckoutNewBranch("polecat/refresh", "origin/main"); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(fx.clone, "r.txt"), "r\n")
+		env.CommitWorktree(t, fx.clone, "seat work")
+
+		// The remote lands that work on main as a squash, and nothing tells
+		// this clone: its origin/main still points at the pre-landing tip,
+		// while the remote's main has moved. This is what a landing that runs
+		// on the remote (a Forgejo merge) leaves behind.
+		env.Commit(t, fx.origin, "main", "squash the seat", map[string]string{"r.txt": "r\n"})
+
+		// The local level stays offline, so it still reads the stale
+		// origin/main and calls the landed work unpushed — measured before the
+		// live probe, which refreshes the shared ref the local probe reads.
+		if st, err := g.CheckUncommittedWorkLocal(); err != nil || st.UnpushedCommits != 1 {
+			t.Errorf("local check after the landing = %+v, %v; want the stale main's one unpushed commit", st, err)
+		}
+		if st, err := g.CheckUncommittedWork(); err != nil || st.UnpushedCommits != 0 {
+			t.Errorf("live check after the landing = %+v, %v; want nothing unpushed", st, err)
+		}
+
+		// Work that is on no remote branch and not in the remote's main is
+		// still flagged: the refresh must not launder unpushed commits.
+		writeFile(t, filepath.Join(fx.clone, "only-local.txt"), "l\n")
+		env.CommitWorktree(t, fx.clone, "local only")
+		if st, err := g.CheckUncommittedWork(); err != nil || st.UnpushedCommits == 0 {
+			t.Errorf("live check of local-only work = %+v, %v; want it flagged", st, err)
+		}
+	})
 }
 
 func samePath(a, b string) bool { return resolved(a) == resolved(b) }

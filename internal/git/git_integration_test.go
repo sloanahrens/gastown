@@ -2379,6 +2379,131 @@ func TestIntegrationUnpushedCommitsDetachedHeadUnfetchedRemoteBranch(t *testing.
 	}
 }
 
+// runGitEnv runs git in dir with env appended, failing the test on error, and
+// returns its trimmed stdout. The bare-remote fixtures carry no committer
+// identity of their own, so landing on one passes it explicitly.
+func runGitEnv(t *testing.T, dir string, env []string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-c", "protocol.file.allow=always"}, args...)...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), env...)
+	out, err := cmd.Output()
+	if err != nil {
+		stderr := ""
+		if ee, ok := err.(*exec.ExitError); ok {
+			stderr = string(ee.Stderr)
+		}
+		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, stderr)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// landOnRemoteSquash is the shape a Forgejo landing leaves on the remote: the
+// work merged onto the remote's default branch as a squash (a commit with the
+// branch tip's tree, and a different id), and the branch itself deleted. The
+// seat's clone is untouched, so its origin/<default> keeps the pre-landing tip.
+func landOnRemoteSquash(t *testing.T, remoteDir, branch, mainBranch string) {
+	t.Helper()
+	ident := []string{
+		"GIT_AUTHOR_NAME=Test User", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=Test User", "GIT_COMMITTER_EMAIL=test@test.com",
+	}
+	tree := runGitEnv(t, remoteDir, nil, "rev-parse", branch+"^{tree}")
+	base := runGitEnv(t, remoteDir, nil, "rev-parse", mainBranch)
+	landed := runGitEnv(t, remoteDir, ident, "commit-tree", tree, "-p", base, "-m", "land "+branch)
+	runGit(t, remoteDir, "update-ref", "refs/heads/"+mainBranch, landed)
+	runGit(t, remoteDir, "update-ref", "-d", "refs/heads/"+branch)
+}
+
+// TestIntegrationLivePreservationRefreshesStaleDefaultBranch pins gt-fn9e6.36:
+// a Forgejo landing merges the work on the remote and deletes the seat's
+// branch, so a finished seat has no custody of its own and its verdict falls
+// back to this clone's origin/<default> — a ref nothing fetched, still
+// pointing at the pre-landing main. The live check refreshes that ref before
+// judging it, so the seat reads preserved without a manual fetch; the local
+// check stays offline and still reports the work unpushed.
+func TestIntegrationLivePreservationRefreshesStaleDefaultBranch(t *testing.T) {
+	t.Parallel()
+	localDir, remoteDir, mainBranch := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+	branch := "polecat/obsidian/gt-fn9e6+muvgoylj"
+	tip := detachAtPushedBranchTip(t, localDir, branch)
+	// The landing deletes the seat's branch, and the clone's tracking ref for
+	// it goes with it — the seat's own evidence is gone, not stale.
+	runGit(t, localDir, "update-ref", "-d", "refs/remotes/origin/"+branch)
+	landOnRemoteSquash(t, remoteDir, branch, mainBranch)
+
+	// Offline: the local level has not seen the landing and must say so. It
+	// runs before the live probe, which refreshes the ref the local level
+	// would otherwise have read.
+	unpushedLocal, err := g.UnpushedCommitsLocal()
+	if err != nil {
+		t.Fatalf("UnpushedCommitsLocal: %v", err)
+	}
+	if unpushedLocal == 0 {
+		t.Fatal("UnpushedCommitsLocal = 0, want > 0: offline, the pre-landing main does not hold the seat's work")
+	}
+
+	// Live: the refresh sees the landing and clears the seat.
+	unpushed, err := g.UnpushedCommits()
+	if err != nil {
+		t.Fatalf("UnpushedCommits: %v", err)
+	}
+	if unpushed != 0 {
+		t.Fatalf("UnpushedCommits = %d, want 0: %s is on the remote's %s after the landing", unpushed, tip, mainBranch)
+	}
+	preservation, err := g.BranchPreservationStatus("HEAD", "origin", nil)
+	if err != nil || !preservation.Preserved {
+		t.Fatalf("BranchPreservationStatus = %+v, %v; want preserved", preservation, err)
+	}
+
+	// The refresh moved refs only: HEAD is where the seat left it.
+	if head, err := g.Rev("HEAD"); err != nil || strings.TrimSpace(head) != tip {
+		t.Fatalf("HEAD after the refresh = %q, %v; want the seat's tip %s", strings.TrimSpace(head), err, tip)
+	}
+
+	// Work that is on no remote branch and not in the remote's main is still
+	// flagged: the refresh must not launder unpushed commits.
+	if err := os.WriteFile(filepath.Join(localDir, "local-only.go"), []byte("package localonly\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := g.Add("local-only.go"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := g.Commit("never pushed"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if unpushed, err := g.UnpushedCommits(); err != nil || unpushed == 0 {
+		t.Fatalf("UnpushedCommits of local-only work = %d, %v; want it flagged", unpushed, err)
+	}
+}
+
+// TestIntegrationLivePreservationUnreachableRemoteKeepsTodayVerdict is the
+// fail-closed half of the refresh: when the fetch cannot run, the live check
+// judges whatever ref it already had, exactly as it did before it could fetch,
+// and never turns the failure into a preservation claim.
+func TestIntegrationLivePreservationUnreachableRemoteKeepsTodayVerdict(t *testing.T) {
+	t.Parallel()
+	localDir, remoteDir, mainBranch := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+	branch := "polecat/obsidian/gt-fn9e6+munreachable"
+	detachAtPushedBranchTip(t, localDir, branch)
+	runGit(t, localDir, "update-ref", "-d", "refs/remotes/origin/"+branch)
+	landOnRemoteSquash(t, remoteDir, branch, mainBranch)
+
+	runGit(t, localDir, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
+
+	unpushed, err := g.UnpushedCommits()
+	if err != nil {
+		t.Fatalf("UnpushedCommits with an unreachable remote: %v", err)
+	}
+	if unpushed == 0 {
+		t.Fatal("UnpushedCommits = 0 with an unreachable remote: a failed fetch must never read as preserved")
+	}
+}
+
+// TestUnpushedCommitsDetachedHeadOffRemoteStillBlocks is the fail-closed half:
+
 // TestUnpushedCommitsDetachedHeadOffRemoteStillBlocks is the fail-closed half:
 // a detached worktree whose commits exist nowhere on the remote must keep
 // reporting unpreserved work. Without it, widening the detached-head evidence

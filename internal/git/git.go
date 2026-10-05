@@ -1103,6 +1103,16 @@ func (g *Git) FetchDefaultBranchWithTimeout(remote string, timeout time.Duration
 	return err
 }
 
+// refreshRemoteDefaultBranch fetches one ref and nothing else: the remote's
+// default branch. No tags, no prune, and no change to the worktree, HEAD,
+// local branches or stash. The bound covers an unreachable remote; callers
+// ignore the error and judge whatever ref they already had, which is the
+// verdict they would have reached had the refresh never been attempted.
+func (g *Git) refreshRemoteDefaultBranch(remote string) error {
+	_, err := g.runWithTimeout(RemoteQueryTimeout, "fetch", "--no-tags", remote, g.RemoteDefaultBranch())
+	return err
+}
+
 // FetchBranchShallow fetches a single branch with --depth 1 and creates the
 // remote tracking ref (e.g. origin/<branch>). Use this on shallow single-branch
 // clones to add a branch that wasn't included in the initial clone.
@@ -3729,7 +3739,7 @@ func (g *Git) BranchTargetStatus(localBranch, remote string, targets []string) (
 // poll). Use BranchPreservationStatus where the answer gates a single
 // irreversible action and a network round trip is affordable.
 func (g *Git) BranchPreservationStatusLocal(localBranch, remote string, targets []string) (BranchPreservationStatus, error) {
-	return g.branchPreservationStatusWith(localBranch, remote, targets, true, g.localRemoteBranchTip, g.detachedHeadCustodyLocal)
+	return g.branchPreservationStatusWith(localBranch, remote, targets, true, g.localRemoteBranchTip, g.detachedHeadCustodyLocal, nil)
 }
 
 // localRemoteBranchTip resolves a branch's tip from refs this clone already
@@ -3783,17 +3793,31 @@ type remoteBranchTipFunc func(remote, branch string) (string, error)
 // so it cannot reuse remoteBranchTipFunc.
 type detachedHeadCustodyFunc func(remote, head string) (string, bool)
 
+// refreshDefaultBranchFunc refreshes this clone's remote-tracking ref for a
+// remote's default branch from the remote itself, leaving every other ref (and
+// the worktree, HEAD, local branches and stash) alone. The live fidelity
+// supplies it; the local one passes nil and stays offline.
+//
+// It exists because the default branch is the comparison a finished seat's
+// verdict falls back to, and the one this clone is least likely to hold
+// current: a landing that merges on the remote leaves nothing here fetching
+// the new tip, so the seat is judged against a main that predates its own
+// landing (gt-fn9e6.36).
+type refreshDefaultBranchFunc func(remote string) error
+
 func (g *Git) branchPreservationStatus(localBranch, remote string, targets []string, includeExactBranch bool) (BranchPreservationStatus, error) {
-	return g.branchPreservationStatusWith(localBranch, remote, targets, includeExactBranch, g.PushRemoteBranchTip, g.detachedHeadCustodyRemote)
+	return g.branchPreservationStatusWith(localBranch, remote, targets, includeExactBranch, g.PushRemoteBranchTip, g.detachedHeadCustodyRemote, g.refreshRemoteDefaultBranch)
 }
 
 // branchPreservationStatusWith is the shared implementation behind every
-// preservation verdict — live and local alike. Only the two custody lookups
-// (the exact branch's tip, and a branch-less HEAD's) are parameterized; the
-// candidate set, the ancestry/merge-tree/cherry judging, and the fail-closed
-// ordering are identical, so the two fidelity levels cannot disagree about
-// what "preserved" means.
-func (g *Git) branchPreservationStatusWith(localBranch, remote string, targets []string, includeExactBranch bool, branchTip remoteBranchTipFunc, detachedCustody detachedHeadCustodyFunc) (BranchPreservationStatus, error) {
+// preservation verdict — live and local alike. Only the custody lookups (the
+// exact branch's tip, and a branch-less HEAD's) and the default-branch refresh
+// are parameterized; the candidate set, the ancestry/merge-tree/cherry judging,
+// and the fail-closed ordering are identical, so the two fidelity levels cannot
+// disagree about what "preserved" means. The local level passes a nil refresh
+// and so stays offline; the live one refreshes the remote's default branch
+// before judging against it.
+func (g *Git) branchPreservationStatusWith(localBranch, remote string, targets []string, includeExactBranch bool, branchTip remoteBranchTipFunc, detachedCustody detachedHeadCustodyFunc, refreshDefaultBranch refreshDefaultBranchFunc) (BranchPreservationStatus, error) {
 	if remote == "" {
 		remote = "origin"
 	}
@@ -3839,6 +3863,22 @@ func (g *Git) branchPreservationStatusWith(localBranch, remote string, targets [
 		}
 	}
 
+	// The remote's default branch is the comparison of last resort, and the one
+	// this clone is most likely to hold stale: a landing that merged the work
+	// on the remote moved that branch without anything here fetching it. The
+	// refresh is spent only when a default-branch comparison is actually about
+	// to be judged, so a check whose own branch already answered pays nothing.
+	refreshed := false
+	refreshDefault := func() {
+		if refreshed || refreshDefaultBranch == nil {
+			return
+		}
+		refreshed = true
+		// A failed fetch proves nothing, so it changes nothing: judge the ref
+		// this clone already had, and never read the failure as preservation.
+		_ = refreshDefaultBranch(remote)
+	}
+
 	for _, target := range nonEmptyUnique(targets) {
 		if ref, ok := g.resolveComparisonRef(target, remote); ok {
 			candidates = append(candidates, ref)
@@ -3871,6 +3911,11 @@ func (g *Git) branchPreservationStatusWith(localBranch, remote string, targets [
 	}
 
 	if !hasEvidence {
+		// Resolve the fallback refs against a fresh view of the remote's
+		// default branch: a ref this clone never fetched would otherwise read
+		// as absent, and a stale one would judge today's landing by the last
+		// main this clone happened to see.
+		refreshDefault()
 		for _, ref := range []string{remote + "/" + g.RemoteDefaultBranch(), remote + "/main", remote + "/master"} {
 			if resolved, ok := g.resolveComparisonRef(ref, remote); ok {
 				candidates = append(candidates, resolved)
@@ -3879,6 +3924,13 @@ func (g *Git) branchPreservationStatusWith(localBranch, remote string, targets [
 	}
 
 	candidates = nonEmptyUnique(candidates)
+	// A target or the upstream may resolve straight to the default-branch ref
+	// (a bead's base_branch names it, or a branch tracks it) without the
+	// fallback above ever being consulted. The refresh updates that ref in
+	// place, so judging after it reads the remote's tip.
+	if !refreshed && candidatesAreDefaultBranch(candidates, remote, g.RemoteDefaultBranch()) {
+		refreshDefault()
+	}
 	if len(candidates) == 0 {
 		if hasEvidence {
 			return result, fmt.Errorf("no target/custody refs resolved")
@@ -3919,6 +3971,19 @@ func (g *Git) branchPreservationStatusWith(localBranch, remote string, targets [
 		return result, lastErr
 	}
 	return result, fmt.Errorf("no usable comparison refs")
+}
+
+// candidatesAreDefaultBranch reports whether any ref about to be judged is this
+// clone's tracking ref for the remote's default branch — the refs a landing
+// moves without this clone seeing it.
+func candidatesAreDefaultBranch(candidates []string, remote, defaultBranch string) bool {
+	for _, candidate := range candidates {
+		switch candidate {
+		case remote + "/" + defaultBranch, remote + "/main", remote + "/master":
+			return true
+		}
+	}
+	return false
 }
 
 func isPolecatSelfUpstream(localBranch, remote, upstream string) bool {
