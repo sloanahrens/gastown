@@ -3,6 +3,7 @@ package land
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -58,8 +59,14 @@ type fakeForgejo struct {
 	runsErr  error
 	jobs     []forgejo.ActionRunJob
 	log      string
-	err      error
-	logErr   error
+	// fullLog answers a fetch wider than the tail cap; empty means the server
+	// returns log whatever the cap.
+	fullLog string
+	// limits is the maxBytes of every log fetch, in order: what the gate asked
+	// the server for.
+	limits []int64
+	err    error
+	logErr error
 }
 
 func (f *fakeForgejo) CombinedStatus(context.Context, string, string, string) (*forgejo.CombinedStatus, error) {
@@ -88,7 +95,13 @@ func (f *fakeForgejo) ListRunJobs(context.Context, string, string, int64) ([]for
 	return f.jobs, nil
 }
 
-func (f *fakeForgejo) JobLogsTail(context.Context, string, string, int64, int64) (string, error) {
+func (f *fakeForgejo) JobLogsTail(_ context.Context, _, _ string, _ int64, maxBytes int64) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.limits = append(f.limits, maxBytes)
+	if maxBytes > candidateTailBytes && f.fullLog != "" {
+		return f.fullLog, f.logErr
+	}
 	return f.log, f.logErr
 }
 
@@ -310,6 +323,214 @@ func TestCandidateGateRedCarriesTheJobLogTail(t *testing.T) {
 	}
 	if !strings.Contains(res.Tail, "--- FAIL: TestThing") {
 		t.Fatalf("tail %q; want the failing job's log", res.Tail)
+	}
+	if len(client.limits) != 1 || client.limits[0] != candidateTailBytes {
+		t.Fatalf("log fetches %v; a tail that names the failure needs no second fetch", client.limits)
+	}
+}
+
+// TestCandidateGateFetchesTheWholeLogWhenTheTailHidesTheFailure: the failure
+// goes in the note even when it sits far enough from the end that the byte cap
+// cuts it out. go test prints its packages in order, so a 16 KiB tail is
+// passing packages and the note would name no failure at all (gt-fn9e6.25).
+func TestCandidateGateFetchesTheWholeLogWhenTheTailHidesTheFailure(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		fullLog string
+		want    string
+	}{
+		{
+			name:    "the whole log names the failure",
+			fullLog: gateJobLog("--- FAIL: TestRunSync_KillsDescendants (0.03s)", "FAIL\tgithub.com/x/hooks\t0.4s", "ok  \tgithub.com/x/zzz\t0.1s"),
+			want:    "TestRunSync_KillsDescendants",
+		},
+		{
+			name:    "a whole log that names none leaves the tail standing",
+			fullLog: gateJobLog("ok  \tgithub.com/x/zzz\t0.1s"),
+			want:    "ok  \tgithub.com/x/zzz\t0.1s",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
+			client := &fakeForgejo{
+				statuses: []forgejo.CommitStatus{status(forgejo.StateFailure, "ci / gate (push)")},
+				runs:     []forgejo.ActionRun{{ID: 7, CommitSHA: sha, Status: "failure"}},
+				jobs:     []forgejo.ActionRunJob{{ID: 9, RunID: 7, Name: "gate", Status: "failure"}},
+				log:      gateJobLog("ok  \tgithub.com/x/zzz\t0.1s"),
+				fullLog:  tt.fullLog,
+			}
+			res := fastGate(client).Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+			if res.State != CandidateFailed {
+				t.Fatalf("state = %v, want failed (err %v)", res.State, res.Err)
+			}
+			if !strings.Contains(res.Tail, tt.want) {
+				t.Fatalf("tail %q; want it to carry %q", res.Tail, tt.want)
+			}
+			if len(client.limits) != 2 || client.limits[0] != candidateTailBytes || client.limits[1] != candidateFullLogBytes {
+				t.Fatalf("log fetches %v; want the capped tail then the whole log", client.limits)
+			}
+		})
+	}
+}
+
+// gateJobLogLine timestamps a line the way Forgejo prefixes every line of an
+// action job log, the noise the note's excerpt strips.
+func gateJobLogLine(line string) string {
+	return "2026-10-04T23:49:26.0641253Z " + line
+}
+
+// gateJobLog stamps lines and joins them into a job log body.
+func gateJobLog(lines ...string) string {
+	stamped := make([]string, len(lines))
+	for i, line := range lines {
+		stamped[i] = gateJobLogLine(line)
+	}
+	return strings.Join(stamped, "\n") + "\n"
+}
+
+// TestFailureExcerptShowsTheFailureNotTheEndOfTheLog is the be-bl8 trial
+// landing: the red was TestRunSync_KillsDescendants in internal/hooks, but the
+// note carried only the passing packages go test printed after it, so the
+// polecat reading it could not see what failed (gt-fn9e6.25).
+func TestFailureExcerptShowsTheFailureNotTheEndOfTheLog(t *testing.T) {
+	t.Parallel()
+	log := gateJobLog(
+		"ok  \tgithub.com/x/aaa\t0.1s",
+		"=== RUN   TestRunSync_KillsDescendants",
+		"    sync_test.go:42: want 3 descendants, got 1",
+		"--- FAIL: TestRunSync_KillsDescendants (0.03s)",
+		"FAIL\tgithub.com/x/hooks\t0.4s",
+		"ok  \tgithub.com/x/bbb\t0.2s",
+		"ok  \tgithub.com/x/ccc\t0.3s",
+		"ok  \tgithub.com/x/ddd\t0.2s",
+		"ok  \tgithub.com/x/eee\t0.1s",
+		"ok  \tgithub.com/x/fff\t0.2s",
+		"ok  \tgithub.com/x/ggg\t0.4s",
+		"make: *** [Makefile:290: gate] Error 1",
+	)
+	got := failureExcerpt(log, gateTailLines)
+	for _, want := range []string{
+		"TestRunSync_KillsDescendants",
+		"sync_test.go:42: want 3 descendants, got 1",
+		"make: *** [Makefile:290: gate] Error 1",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("excerpt does not carry %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "2026-10-04T") {
+		t.Errorf("excerpt keeps the Forgejo timestamps:\n%s", got)
+	}
+	if strings.Contains(got, "github.com/x/ddd") {
+		t.Errorf("excerpt keeps passing packages that explain nothing:\n%s", got)
+	}
+	if n := strings.Count(got, "\n"); n > gateTailLines {
+		t.Errorf("excerpt is %d lines, over the %d-line budget:\n%s", n, gateTailLines, got)
+	}
+	if strings.Index(got, "TestRunSync") > strings.Index(got, "make: ***") {
+		t.Errorf("excerpt is not in log order:\n%s", got)
+	}
+}
+
+// TestFailureExcerptCarriesEveryShapeOfRed: each marker a gate log can go red
+// on keeps the output that explains it (gt-fn9e6.25).
+func TestFailureExcerptCarriesEveryShapeOfRed(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		log  string
+		want []string
+	}{
+		{
+			name: "a go test failure prints its output before the --- FAIL line",
+			log:  gateJobLog("=== RUN   TestAlpha", "    a_test.go:9: want 2, got 3", "--- FAIL: TestAlpha (0.00s)", "FAIL\tgithub.com/x/a\t0.1s"),
+			want: []string{"TestAlpha", "a_test.go:9: want 2, got 3", "FAIL\tgithub.com/x/a"},
+		},
+		{
+			name: "a --- FAIL block keeps the output printed under it",
+			log:  gateJobLog("--- FAIL: TestBeta (0.01s)", "    b_test.go:5: first", "    b_test.go:6: second", "FAIL\tgithub.com/x/b\t0.1s"),
+			want: []string{"TestBeta", "b_test.go:5: first", "b_test.go:6: second"},
+		},
+		{
+			name: "a build failure keeps the compiler errors",
+			log:  gateJobLog("# github.com/x/c", "./c.go:3:2: undefined: zzz", "FAIL\tgithub.com/x/c [build failed]", "make: *** [Makefile:290: gate] Error 1"),
+			want: []string{"[build failed]", "undefined: zzz", "make: *** [Makefile:290: gate] Error 1"},
+		},
+		{
+			name: "a panic, which prints no --- FAIL line of its own",
+			log:  gateJobLog("=== RUN   TestGamma", "panic: runtime error: index out of range [3] with length 2", "goroutine 12 [running]:", "FAIL\tgithub.com/x/d\t0.2s"),
+			want: []string{"panic: runtime error: index out of range [3] with length 2", "goroutine 12 [running]:", "FAIL\tgithub.com/x/d"},
+		},
+		{
+			name: "a make error with no test output at all",
+			log:  gateJobLog("go build ./...", "make: *** [Makefile:106: build] Error 1"),
+			want: []string{"go build ./...", "make: *** [Makefile:106: build] Error 1"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := failureExcerpt(tt.log, gateTailLines)
+			for _, want := range tt.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("excerpt does not carry %q:\n%s", want, got)
+				}
+			}
+			if strings.Contains(got, "2026-10-04T") {
+				t.Errorf("excerpt keeps the Forgejo timestamps:\n%s", got)
+			}
+			if n := strings.Count(got, "\n"); n > gateTailLines {
+				t.Errorf("excerpt is %d lines, over the %d-line budget:\n%s", n, gateTailLines, got)
+			}
+		})
+	}
+}
+
+// TestFailureExcerptWithoutAMarkerIsTheTail: a log that names no failure --
+// the gate dying before it printed one -- still yields the last lines, and
+// that fallback is bounded too.
+func TestFailureExcerptWithoutAMarkerIsTheTail(t *testing.T) {
+	t.Parallel()
+	lines := make([]string, 0, 3*gateTailLines)
+	for i := range 3 * gateTailLines {
+		lines = append(lines, fmt.Sprintf("ok  \tgithub.com/x/p%03d\t0.1s", i))
+	}
+	got := failureExcerpt(gateJobLog(lines...), gateTailLines)
+	if n := strings.Count(got, "\n"); n != gateTailLines {
+		t.Errorf("excerpt is %d lines, want the %d-line tail:\n%s", n, gateTailLines, got)
+	}
+	if !strings.Contains(got, "github.com/x/p119") {
+		t.Errorf("excerpt does not end at the log's last line:\n%s", got)
+	}
+	if strings.Contains(got, "github.com/x/p079") || strings.Contains(got, "2026-10-04T") {
+		t.Errorf("excerpt is not the last %d stripped lines:\n%s", gateTailLines, got)
+	}
+}
+
+// TestFailureExcerptStaysInBudget: a log with more failures than the budget
+// holds keeps the earliest ones whole rather than every failure's name.
+func TestFailureExcerptStaysInBudget(t *testing.T) {
+	t.Parallel()
+	var lines []string
+	for i := range 2 * gateTailLines {
+		lines = append(lines,
+			fmt.Sprintf("--- FAIL: TestMany%d (0.00s)", i),
+			fmt.Sprintf("    many_test.go:1: boom %d", i),
+			fmt.Sprintf("    many_test.go:2: more %d", i),
+			"FAIL\tgithub.com/x/many\t0.5s")
+	}
+	got := failureExcerpt(gateJobLog(lines...), gateTailLines)
+	if n := strings.Count(got, "\n"); n > gateTailLines {
+		t.Errorf("excerpt is %d lines, over the %d-line budget:\n%s", n, gateTailLines, got)
+	}
+	for _, want := range []string{"TestMany0", "many_test.go:1: boom 0", "many_test.go:2: more 0"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("excerpt dropped the earliest failure's %q:\n%s", want, got)
+		}
 	}
 }
 
