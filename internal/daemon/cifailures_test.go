@@ -14,17 +14,43 @@ import (
 	"github.com/steveyegge/gastown/internal/land"
 )
 
-// fakeFailingBeads is the bead store the watch files through, holding the open
-// repair beads a test gives it and recording what the watch writes.
+// fakeFailingBeads is the bead store the watch files through, holding the
+// repair beads a test gives it and recording what the watch writes. List
+// honors the requested status filter the way bd does, so a test proves the
+// watch asks for the statuses it needs and not merely that it reads a bead.
 type fakeFailingBeads struct {
-	open     []*beads.Issue
+	stored   []*beads.Issue
 	listErr  error
 	created  []beads.CreateOptions
 	comments []string
 }
 
-func (f *fakeFailingBeads) List(beads.ListOptions) ([]*beads.Issue, error) {
-	return f.open, f.listErr
+func (f *fakeFailingBeads) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	var out []*beads.Issue
+	for _, is := range f.stored {
+		if statusMatches(opts.Status, is.Status) {
+			out = append(out, is)
+		}
+	}
+	return out, nil
+}
+
+// statusMatches is bd's --status filter: "all" (and the empty filter, which
+// the query path also reads as all) keeps everything, else the comma-joined
+// list must name the status.
+func statusMatches(filter, status string) bool {
+	if filter == "" || filter == "all" {
+		return true
+	}
+	for _, want := range strings.Split(filter, ",") {
+		if strings.TrimSpace(want) == status {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *fakeFailingBeads) Create(opts beads.CreateOptions) (*beads.Issue, error) {
@@ -133,8 +159,9 @@ func TestCITestWatchFilesOneBeadPerTest(t *testing.T) {
 	w := newWatch(t)
 	w.fail("gt-one", test("github.com/x/a", "TestAlpha"))
 	w.fail("gt-two", test("github.com/x/a", "TestAlpha"))
-	w.beads.open = append(w.beads.open, &beads.Issue{
+	w.beads.stored = append(w.beads.stored, &beads.Issue{
 		ID: "gt-flaky", Title: "failing test (gastown): github.com/x/a TestAlpha",
+		Status: string(beads.StatusOpen),
 	})
 	w.now = w.now.Add(time.Hour)
 	w.fail("gt-three", test("github.com/x/a", "TestAlpha"))
@@ -149,6 +176,56 @@ func TestCITestWatchFilesOneBeadPerTest(t *testing.T) {
 	}
 	if len(w.alerts) != 2 {
 		t.Errorf("alerts = %d, want the key re-raised on the repeat so it upserts", len(w.alerts))
+	}
+}
+
+func TestCITestWatchFindsTheRepairBeadInAnyNonClosedStatus(t *testing.T) {
+	t.Parallel()
+	for _, status := range []beads.IssueStatus{
+		beads.StatusOpen,
+		beads.StatusInProgress,
+		beads.StatusBlocked,
+		beads.IssueStatusHooked,
+		beads.StatusDeferred,
+	} {
+		t.Run(string(status), func(t *testing.T) {
+			t.Parallel()
+			w := newWatch(t)
+			w.beads.stored = append(w.beads.stored, &beads.Issue{
+				ID:     "gt-repair",
+				Title:  failingTestTitle("gastown", "github.com/x/a", "TestAlpha"),
+				Status: string(status),
+			})
+			w.fail("gt-one", test("github.com/x/a", "TestAlpha"))
+			w.fail("gt-two", test("github.com/x/a", "TestAlpha"))
+			if len(w.beads.created) != 0 {
+				t.Errorf("created = %v, want no second bead beside the %s one", w.beads.created, status)
+			}
+			if len(w.beads.comments) != 1 {
+				t.Fatalf("comments = %v, want the repeat recorded on the %s bead", w.beads.comments, status)
+			}
+			if !strings.HasPrefix(w.beads.comments[0], "gt-repair: ") {
+				t.Errorf("comment = %q, want it on the %s bead gt-repair", w.beads.comments[0], status)
+			}
+		})
+	}
+}
+
+func TestCITestWatchFilesBesideAClosedRepairBead(t *testing.T) {
+	t.Parallel()
+	w := newWatch(t)
+	w.beads.stored = append(w.beads.stored, &beads.Issue{
+		ID:     "gt-old",
+		Title:  failingTestTitle("gastown", "github.com/x/a", "TestAlpha"),
+		Status: string(beads.StatusClosed),
+	})
+	w.fail("gt-one", test("github.com/x/a", "TestAlpha"))
+	w.fail("gt-two", test("github.com/x/a", "TestAlpha"))
+	if len(w.beads.created) != 1 {
+		t.Fatalf("created = %v, want a fresh bead: a closed one does not stand in for the repair", w.beads.created)
+	}
+	if len(w.beads.comments) != 0 {
+		t.Errorf("comments = %v, want none on the closed bead", w.beads.comments)
 	}
 }
 

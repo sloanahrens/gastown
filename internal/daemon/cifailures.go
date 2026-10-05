@@ -158,7 +158,7 @@ func failingTestTitle(rig, pkg, test string) string {
 }
 
 // report raises the one escalation for t and files the one repair bead, or
-// comments on the bead already open for the test.
+// comments on the bead already filed for the test, whatever status it is in.
 func (w *ciTestWatch) report(t land.TestFailure, beadIDs []string) {
 	window := fmt.Sprintf("%.0f hours", ciFailureWindow.Hours())
 	msg := fmt.Sprintf("%s %s has failed on %d beads on rig %s within %s: %s. Nothing is retried, so this test is to be fixed or removed (gt-xvw20).",
@@ -175,7 +175,7 @@ func (w *ciTestWatch) report(t land.TestFailure, beadIDs []string) {
 	if err != nil {
 		// A failed read files a duplicate rather than leaving the repeat
 		// unreported, the way the red-main owner treats its own list.
-		w.logf("landing_worker: %s: listing open %s beads: %v", w.Rig, LabelFlakyTest, err)
+		w.logf("landing_worker: %s: listing %s beads: %v", w.Rig, LabelFlakyTest, err)
 	}
 	if open != "" {
 		if err := w.Beads.AddComment(open, detail); err != nil {
@@ -195,9 +195,18 @@ func (w *ciTestWatch) report(t land.TestFailure, beadIDs []string) {
 	}
 }
 
-// openBead is the id of the open repair bead already filed for title, or "".
+// openRepairStatuses is the status filter openBead lists with: every status a
+// repair bead can hold and still be the one already filed for the test.
+// Closed and tombstone are deliberately absent — a bead that is gone does not
+// stand in for the repair, so the test earns a fresh one (gt-0o7so).
+const openRepairStatuses = "open,in_progress,blocked,hooked,deferred,pinned"
+
+// openBead is the id of the repair bead already filed for title in any
+// non-closed status, or "". A polecat that claimed the bead (in_progress,
+// hooked) or is blocked on it must be found, or the repeat files a duplicate
+// P1 beside it (gt-0o7so).
 func (w *ciTestWatch) openBead(title string) (string, error) {
-	issues, err := w.Beads.List(beads.ListOptions{Status: "open", Label: LabelFlakyTest, Priority: -1, Limit: 0})
+	issues, err := w.Beads.List(beads.ListOptions{Status: openRepairStatuses, Label: LabelFlakyTest, Priority: -1, Limit: 0})
 	if err != nil {
 		return "", err
 	}
