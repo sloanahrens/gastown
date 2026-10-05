@@ -454,9 +454,14 @@ func TestKillStrayKillsAndLogs(t *testing.T) {
 
 func TestSeatForSession(t *testing.T) {
 	t.Parallel()
-	seat, err := SeatForSession(nil, "hq-mayor")
-	if err != nil || seat.Role != "mayor" || seat.SessionName() != "hq-mayor" {
-		t.Fatalf("SeatForSession(hq-mayor) = %+v, %v", seat, err)
+	seat, err := SeatForSession(nil, "hq-overseer")
+	if err != nil || seat.Role != "overseer" || seat.SessionName() != "hq-overseer" {
+		t.Fatalf("SeatForSession(hq-overseer) = %+v, %v", seat, err)
+	}
+	// The mayor is retired with its role: a leftover hq-mayor name is not a
+	// seat, so it is refused rather than silently kept alive (gt-rwp7z).
+	if _, err := SeatForSession(nil, "hq-mayor"); err == nil {
+		t.Fatal("SeatForSession(hq-mayor) = nil error, want the retired session refused")
 	}
 	reg := session.NewPrefixRegistry()
 	reg.Register("ga", "gastown")

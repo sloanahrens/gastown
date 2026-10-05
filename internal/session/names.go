@@ -9,7 +9,7 @@ import (
 // DefaultPrefix is the default beads prefix used when no rig-specific prefix is known.
 const DefaultPrefix = "gt"
 
-// HQPrefix is the prefix for town-level sessions (Overseer, Deacon).
+// HQPrefix is the prefix for town-level sessions (Overseer).
 const HQPrefix = "hq-"
 
 // CrewSessionName returns the session name for a crew worker in a rig.

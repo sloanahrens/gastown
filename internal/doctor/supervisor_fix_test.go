@@ -34,13 +34,16 @@ func TestZombieSessionCheck_FixHonorsAParkedSeat(t *testing.T) {
 	town := t.TempDir()
 	lister := &fakeZombieLister{alive: map[string]bool{}}
 	check := NewZombieSessionCheckWithLister(lister)
-	check.zombieSessions = []string{"hq-overseer", "hq-mayor"}
+	// The mayor session retired with its role (gt-rwp7z), so the free seat the
+	// check may kill is a rig seat; the town's only remaining session, the
+	// overseer, is the parked one.
+	check.zombieSessions = []string{"hq-overseer", "gt-flint"}
 	parkSession(t, town, "hq-overseer")
 
-	err := check.Fix(&CheckContext{TownRoot: town})
+	err := check.Fix(&CheckContext{TownRoot: town, sessionPrefixes: testPrefixRegistry()})
 
-	if len(lister.killed) != 1 || lister.killed[0] != "hq-mayor" {
-		t.Fatalf("killed = %v, want only the unparked hq-mayor", lister.killed)
+	if len(lister.killed) != 1 || lister.killed[0] != "gt-flint" {
+		t.Fatalf("killed = %v, want only the unparked gt-flint", lister.killed)
 	}
 	if err == nil || !strings.Contains(err.Error(), "parked") {
 		t.Fatalf("Fix error = %v, want the parked-seat refusal reported", err)

@@ -174,8 +174,8 @@ func TestSessionToAgentID_Fallback(t *testing.T) {
 // TestSessionToAgentID_TownLevel pins the town-level session forms. A session
 // name converts to the identity's own address, with no trailing slash: GH#3699
 // made the retired mayor's address slashed, and the rule went with the role
-// (gt-rwp7z.11), so a leftover hq-mayor session name converts to the bare form
-// too.
+// (gt-rwp7z.11). The overseer is the only town-level session left; a leftover
+// hq-mayor name is not a seat and falls back to itself (gt-rwp7z.17).
 func TestSessionToAgentID_TownLevel(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -183,7 +183,7 @@ func TestSessionToAgentID_TownLevel(t *testing.T) {
 		want    string
 	}{
 		{"hq-overseer", "overseer"},
-		{"hq-mayor", "mayor"},
+		{"hq-mayor", "hq-mayor"}, // retired with its role: no address, falls back
 	}
 	for _, tt := range tests {
 		t.Run(tt.session, func(t *testing.T) {

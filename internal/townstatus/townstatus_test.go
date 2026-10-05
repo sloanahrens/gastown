@@ -446,10 +446,10 @@ func TestExtractBaseName(t *testing.T) {
 }
 
 // TestAgentMarkerTriple covers the address → marker-coordinate mapping gt
-// status uses to read pause markers. A single-segment address is a town-level
-// agent whose marker lives at .runtime/agents/<role>.json, so it must resolve
-// to an empty rig and a real role rather than to no marker at all
-// (gt-wisp-6ajo).
+// status uses to read pause markers. Every marker-backed agent is rig-level:
+// the town-level roles the mapping was extended for (mayor, gt-wisp-6ajo;
+// deacon, gt-4k3fj.6.1) have all retired, so a bare role no longer resolves to
+// a marker at all.
 func TestAgentMarkerTriple(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -461,9 +461,9 @@ func TestAgentMarkerTriple(t *testing.T) {
 		{"gastown/polecats/flint", "gastown", constants.RolePolecat, "flint", true},
 		{"gastown/witness", "gastown", constants.RolePolecat, "witness", true}, // witness role retired
 		{"gastown/crew/opal", "gastown", constants.RoleCrew, "opal", true},
-		{"mayor/", "", "mayor", "", true},
 		// Not addressable agents: no marker, no reason to look.
 		{"overseer", "", "", "", false},
+		{"mayor/", "", "", "", false},  // mayor role retired (gt-rwp7z)
 		{"deacon/", "", "", "", false}, // deacon role retired (gt-4k3fj.6.1)
 		{"", "", "", "", false},
 	}
@@ -486,7 +486,7 @@ func TestApplyPauseMarkerNamesAgent(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 
-	if err := agentpause.Pause(townRoot, "gastown", "polecat", "flint", "filesystem scan", "mayor", ""); err != nil {
+	if err := agentpause.Pause(townRoot, "gastown", "polecat", "flint", "filesystem scan", "human", ""); err != nil {
 		t.Fatalf("Pause: %v", err)
 	}
 	agent := AgentRuntime{Address: "gastown/flint"}
@@ -495,15 +495,16 @@ func TestApplyPauseMarkerNamesAgent(t *testing.T) {
 		t.Errorf("rig agent PausedReason = %q, want %q", agent.PausedReason, "filesystem scan")
 	}
 
-	// Town-level: `gt agent pause mayor` writes agents/mayor.json with an
-	// empty rig, and the status address is "mayor/".
+	// Town-level roles have retired, so the status address "mayor/" no longer
+	// names an agent: a stale marker under the retired role must not resurface
+	// as a pause on the status line (gt-rwp7z).
 	if err := agentpause.Pause(townRoot, "", "mayor", "", "operator hold", "human", ""); err != nil {
-		t.Fatalf("Pause mayor: %v", err)
+		t.Fatalf("Pause retired mayor: %v", err)
 	}
-	mayor := AgentRuntime{Address: "mayor/"}
-	applyPauseMarker(&mayor, townRoot)
-	if mayor.PausedReason != "operator hold" {
-		t.Errorf("mayor PausedReason = %q, want %q (town-level marker not read)", mayor.PausedReason, "operator hold")
+	retired := AgentRuntime{Address: "mayor/"}
+	applyPauseMarker(&retired, townRoot)
+	if retired.PausedReason != "" {
+		t.Errorf("retired mayor PausedReason = %q, want empty (town-level role retired)", retired.PausedReason)
 	}
 
 	// An unpaused agent must not pick up a reason from anywhere.
