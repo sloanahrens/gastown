@@ -125,6 +125,7 @@ section.collapsed>h2{border-bottom:0}
 .ltable td.n,.ltable th.n{padding-left:14px}
 .ltable td:nth-child(2){overflow-wrap:anywhere}
 .good{color:var(--green)}.warnc{color:var(--amber)}.badc{color:var(--red)}
+.sweepico{font-weight:700}
 #alertsctl{cursor:pointer;background:none;font:inherit;font-size:12px;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:2px 10px}
 #alertsctl.on{color:var(--teal);border-color:var(--teal)}
 #toasts{position:fixed;top:54px;right:16px;z-index:5;display:flex;flex-direction:column;gap:6px;width:min(420px,90vw)}
@@ -161,7 +162,7 @@ section.collapsed>h2{border-bottom:0}
     <section><h2>Alerts <span class="r" id="alertsnote"></span></h2><div class="body" id="alerts"></div></section>
     <section><h2>DeepSeek <span class="r" id="spendnote"></span></h2><div class="body" id="spend"></div></section>
     <section><h2>Rigs <span class="r" id="rigsnote"></span></h2><div class="body" id="rigs"></div></section>
-    <section><h2>Tier sweeps <span class="r" id="tiersweepnote"></span></h2><div class="body" id="tiersweep"></div></section>
+    <section><h2><span class="sweepico" id="tiersweepico"></span>Tier sweeps <span class="r" id="tiersweepnote"></span></h2><div class="body" id="tiersweep"></div></section>
     <section><h2>Polecats <span class="r" id="seatsnote"></span></h2><div class="body" id="seats"></div></section>
     <section><h2>Dispatcher <span class="r" id="dispnote"></span></h2><div class="body" id="disp"></div></section>
     <section><h2>Work queue <span class="r" id="queuenote"></span></h2><div class="body" id="queue"></div></section>
@@ -610,10 +611,62 @@ function renderMachine(s) {
 // how long the whole cycle took. A tier the sweep did not run is left blank, and
 // a RED one carries the failing units its rig's record still holds.
 const TIERSWEEP_TIERS = ["shell", "integration", "race"];
+
+// The When column's reading of a sweep's stamp, shared with the icon's tooltip
+// so the two cannot disagree about which sweep a verdict came from.
+function sweepWhen(at) {
+  const d = new Date(at);
+  return d.toDateString() === new Date().toDateString() ? clock(at).slice(0, 5) : d.toLocaleDateString([], {month: "short", day: "numeric"}) + " " + clock(at).slice(0, 5);
+}
+
+// Each tier's most recent verdict, keyed by tier. This is the rule the daemon's
+// attention list holds to (internal/daemon/attention.go): a tier a sweep did
+// not run keeps the result of the sweep that last did, so a newer shell-only
+// GREEN cannot hide an integration RED still standing. The first row naming a
+// tier wins because the reader hands them over newest first
+// (dashboard_tier_sweep.go recent()).
+function tierSweepLatest(sweeps) {
+  const latest = {};
+  for (const row of sweeps || []) (row.stages || []).forEach(x => { if (!latest[x.tier]) latest[x.tier] = {verdict: x.verdict, at: row.at}; });
+  return latest;
+}
+
+// The pane's title icon, the one verdict a collapsed pane still shows. Green
+// needs every tier's most recent result GREEN and red needs one RED; a tier
+// that has never reported leaves it neutral, because an unknown result is
+// neither. A sweep in flight is not a verdict (gt-5qk83).
+function tierSweepIcon(ts) {
+  const none = {glyph: "–", cls: "", title: "no tier sweep results"};
+  if (!ts) return none;
+  if (ts.unavailable) return {glyph: "–", cls: "", title: "the daemon log could not be read"};
+  if (!(ts.sweeps || []).length) return none;
+  const latest = tierSweepLatest(ts.sweeps);
+  const title = TIERSWEEP_TIERS.map(tier => { const v = latest[tier]; return tier + " " + (v ? v.verdict + " " + sweepWhen(v.at) : "–"); }).join(", ");
+  // RED first: one red tier outranks any number of greens.
+  if (TIERSWEEP_TIERS.some(tier => latest[tier] && latest[tier].verdict === "RED")) return {glyph: "✗", cls: "badc", title};
+  if (TIERSWEEP_TIERS.every(tier => latest[tier] && latest[tier].verdict === "GREEN")) return {glyph: "✓", cls: "good", title};
+  return {glyph: "–", cls: "", title};
+}
+
+// The neutral state carries no colour class of its own, so the dash takes the
+// h2's muted tone. Green and red reuse the page's good and badc tokens, which
+// keeps colour from being the only carrier of the verdict.
+function paintTierIcon(ts) {
+  const ico = $("tiersweepico");
+  if (!ico) return;
+  const v = tierSweepIcon(ts);
+  ico.textContent = v.glyph;
+  ico.className = "sweepico" + (v.cls ? " " + v.cls : "");
+  ico.title = v.title;
+}
+
 function renderTierSweep(s) {
   const box = $("tiersweep");
   box.replaceChildren();
   const ts = s.tiersweep;
+  // Painted ahead of the empty paths' returns, so an unreadable log reads as
+  // nothing known rather than as a stale green.
+  paintTierIcon(ts);
   if (!ts) { box.append(el("div", "empty", "reading the daemon log…")); $("tiersweepnote").textContent = ""; return; }
   if (ts.unavailable) { box.append(el("div", "badc", "unavailable: the daemon log could not be read")); $("tiersweepnote").textContent = ""; return; }
   const kv = el("div", "kv");
@@ -633,11 +686,9 @@ function renderTierSweep(s) {
   const hr = el("tr");
   [["When"], ["Rig"], ["Sha"], ...TIERSWEEP_TIERS.map(x => [x]), ["Total", "the whole cycle, every stage the sweep ran", 1]].forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); });
   t.append(hr);
-  const today = new Date().toDateString();
   for (const row of rows) {
     const tr = el("tr");
-    const when = new Date(row.at);
-    tr.append(el("td", "title", when.toDateString() === today ? clock(row.at).slice(0, 5) : when.toLocaleDateString([], {month: "short", day: "numeric"}) + " " + clock(row.at).slice(0, 5)));
+    tr.append(el("td", "title", sweepWhen(row.at)));
     tr.append(el("td", "", row.rig));
     tr.append(el("td", "title", row.sha || "–"));
     const by = {};
@@ -1249,6 +1300,10 @@ function setupCollapse() {
   });
 }
 setupCollapse();
+// Painted only after setupCollapse has read each pane's name: the icon is the
+// tier title's first child, so a glyph already in it would become the pane's
+// fold key and drop the remembered one.
+paintTierIcon(null);
 // A running action's elapsed and a finished one's age drift between pushes, so
 // each of those cells carries the stamp it counts from and one ticker a second
 // moves them, without redrawing a pane the reader may be reading.
