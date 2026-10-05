@@ -1200,7 +1200,7 @@ function renderQueue(s, force) {
     tabs.append(b);
   });
   box.append(tabs);
-  const caption = {ready: "Open beads with nothing blocking them. Only the green “ready” ones are taken by the spec dispatcher: shaped, not an epic, and in a rig that is not parked. Beads in parked rigs wait until the rig is re-enabled.",
+  const caption = {ready: "Open beads with nothing blocking them. Only the green “ready” ones are taken by the spec dispatcher: shaped, unassigned, not an epic, and in a rig that is not parked. Beads held by an assignee wait for that person; beads in parked rigs wait until the rig is re-enabled.",
     landing: "Submitted by a polecat or crew and waiting for the landing worker.",
     blocked: "Open beads waiting on another bead to close."}[qTab];
   box.append(el("div", "empty", caption));
@@ -1224,6 +1224,7 @@ function renderQueue(s, force) {
       const ok = inRig.filter(b => b.shape === "ok").length;
       chip("dispatchable", ok, qShape === "ok", () => { qShape = qShape === "ok" ? "all" : "ok"; renderQueue(state, true); });
       chip("needs shaping", inRig.filter(b => b.shape === "fix").length, qShape === "fix", () => { qShape = qShape === "fix" ? "all" : "fix"; renderQueue(state, true); });
+      chip("held", inRig.filter(b => b.shape === "held").length, qShape === "held", () => { qShape = qShape === "held" ? "all" : "held"; renderQueue(state, true); });
     }
     box.append(f);
   }
@@ -1241,6 +1242,7 @@ function renderQueue(s, force) {
     const t = el("span", "t", b.title || "(no title)");
     if (b.shape === "ok") { const g = el("span", "tag good", "ready"); g.title = "the spec dispatcher would slot this bead"; t.append(document.createTextNode(" "), g); }
     else if (b.shape === "parked") { const g = el("span", "tag", "rig parked"); g.title = b.shape_note || ""; t.append(document.createTextNode(" "), g); }
+    else if (b.shape === "held") { const g = el("span", "tag", "held"); g.title = b.shape_note || ""; t.append(document.createTextNode(" "), g); }
     else if (b.shape === "fix") { const g = el("span", "tag warnc", "needs shaping"); g.title = b.shape_note || ""; t.append(document.createTextNode(" "), g); }
     else if (b.shape === "planning") { const g = el("span", "tag", "needs planning"); g.title = b.shape_note || ""; t.append(document.createTextNode(" "), g); }
     else if (unshaped[b.id]) t.append(document.createTextNode(" "), el("span", "tag warnc", "unshaped"));

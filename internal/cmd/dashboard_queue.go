@@ -134,6 +134,10 @@ func (r *dashQueueReader) read(now time.Time) *dashboard.Queue {
 			if parked && row.Shape == "ok" {
 				// well shaped, but the dispatcher does not serve a parked rig
 				row.Shape, row.ShapeNote = "parked", "the rig is parked: the dispatcher does not serve it"
+			} else if row.Assignee != "" && (row.Shape == "ok" || row.Shape == "fix") {
+				// the dispatcher takes only unassigned beads: an assignee holds this
+				// one whether or not it is shaped
+				row.Shape, row.ShapeNote = "held", "assigned to "+row.Assignee+": the dispatcher takes only unassigned beads"
 			}
 			ready = append(ready, row)
 		}

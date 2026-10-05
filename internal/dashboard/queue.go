@@ -40,7 +40,9 @@ type QueueBead struct {
 	// Shape is the spec dispatcher's own verdict on the bead, from the same
 	// lint it runs before it allocates a seat: "ok" (it would slot it), "fix"
 	// (a required field is missing; ShapeNote names the first), "planning"
-	// (it would go to the planner) or "other" (an epic or runtime record). Empty
+	// (it would go to the planner) or "other" (an epic or runtime record).
+	// "parked" and "held" are the dispatcher's exclusions rather than the
+	// lint's: the rig is parked, or an assignee already holds the bead. Empty
 	// for rows the lint was not run on.
 	Shape     string `json:"shape,omitempty"`
 	ShapeNote string `json:"shape_note,omitempty"`
