@@ -1149,6 +1149,18 @@ func submitForLanding(r *doneRun) error {
 		}
 	}
 
+	// A rework bead whose branch still sits on the head its rejection names
+	// has nothing new to submit: the gate would judge the identical commit
+	// again and reach the same verdict. Stand down before the rebase, the gate
+	// and the push; the run falls through to the close path, which prints the
+	// reason and records it on the bead (gt-3e1z4).
+	if head, headErr := r.deps.repo.Rev("HEAD"); headErr == nil {
+		if _, standDown := ReworkUnchangedHeadMessage(sub.sourceIssue, head); standDown {
+			fmt.Printf("%s Not resubmitting: the head is unchanged since the rejection\n", style.Bold.Render("→"))
+			return nil
+		}
+	}
+
 	target, err := resolveDoneTarget(r, sub.sourceIssue)
 	if err != nil {
 		return err
