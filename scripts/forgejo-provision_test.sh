@@ -329,6 +329,8 @@ check "registry mints package scopes only" has_all "$STATE/mints/bot-registry.js
 check "polecat is granted write on the repo" test "$(cat "$STATE/collaborators/acme__rig__bot-polecat")" = write
 check "landing is granted write on the repo" test "$(cat "$STATE/collaborators/acme__rig__bot-landing")" = write
 check "registry is granted no repo access" test ! -e "$STATE/collaborators/acme__rig__bot-registry"
+check "a missing viewer bot is a notice, not a failure" contains "no bot-viewer user" "$out"
+check "no viewer access is written without a viewer bot" test ! -e "$STATE/collaborators/acme__rig__bot-viewer"
 check "the collaborator grants read before they write" test "$(count_calls GET /collaborators)" = 2 -a "$(count_calls PUT /collaborators)" = 2
 grant_line=$(first_call_line PUT /collaborators)
 rule_line=$(first_call_line POST /branch_protections)
@@ -349,6 +351,35 @@ check "second run re-reads the collaborator grants" test "$(count_calls GET /col
 check "second run reports the grants as already held" contains "already has write access" "$out"
 check "second run leaves the token file alone" test "$(cat "$(token_file landing)")" = "$before"
 check "second run reports the rules as already set" contains "already set" "$out"
+
+echo "=== every repo a run provisions is readable by the panel ==="
+# The dashboard reads every rig repo through bot-viewer, so a per-repo run
+# grants it read whenever the bot exists, whatever roles the run names
+# (gt-fn9e6.49). Its own state, so the call counts above stay comparable.
+panel_state="$STATE-panel"
+panel_cfg="$CFG-panel"
+STATE="$panel_state"
+CFG="$panel_cfg"
+fresh_state
+mkdir -p "$STATE/users"
+: > "$STATE/users/bot-viewer"
+out=$(run_provision --repo acme/rig); rc=$?
+if [ "$rc" = 0 ]; then pass "a run over an existing viewer bot exits 0"; else fail "a run over an existing viewer bot exits 0 (rc=$rc)" "$out"; fi
+check "the viewer bot is granted read on the repo" test "$(cat "$STATE/collaborators/acme__rig__bot-viewer")" = read
+check "the viewer grant is reported" contains "granted bot-viewer read access to acme/rig" "$out"
+check "the viewer grant mints no token for it" test ! -e "$(token_file viewer)"
+check "the viewer grant is read before it is written" test "$(count_calls GET /collaborators)" = 3 -a "$(count_calls PUT /collaborators)" = 3
+viewer_line=$(first_call_line PUT /collaborators/bot-viewer)
+rule_line=$(first_call_line POST /branch_protections)
+check "the viewer grant lands before the protection rule" \
+  test -n "$viewer_line" -a -n "$rule_line" -a "$viewer_line" -lt "$rule_line"
+: > "$STATE/calls.log"
+out=$(run_provision --repo acme/rig); rc=$?
+if [ "$rc" = 0 ]; then pass "the second run over an existing viewer bot exits 0"; else fail "the second run over an existing viewer bot exits 0 (rc=$rc)" "$out"; fi
+check "the second run reports the viewer access as already held" contains "bot-viewer already has read access to acme/rig" "$out"
+check "the second run sends no collaborator write" test "$(count_calls PUT)" = 0
+STATE="$TMP/state"
+CFG="$TMP/config"
 
 echo "=== drift is repaired ==="
 printf '{"rule_name":"main","enable_push":true,"apply_to_admins":true}\n' > "$main_rule"
@@ -390,8 +421,9 @@ echo "=== dry run writes nothing ==="
 STATE="$TMP/state-dry"
 CFG="$TMP/config-dry"
 fresh_state
-mkdir -p "$STATE/protections"
+mkdir -p "$STATE/protections" "$STATE/users"
 printf '{"rule_name":"land/*","enable_push":true,"apply_to_admins":true}\n' > "$STATE/protections/acme__rig__land%2F*"
+: > "$STATE/users/bot-viewer"
 out=$(run_provision --repo acme/rig --dry-run); rc=$?
 if [ "$rc" = 0 ]; then pass "dry run exits 0"; else fail "dry run exits 0 (rc=$rc)" "$out"; fi
 check "dry run sends no write method" test "$(count_calls POST)" = 0 -a "$(count_calls PATCH)" = 0 -a "$(count_calls DELETE)" = 0 -a "$(count_calls PUT)" = 0
@@ -400,8 +432,10 @@ check "dry run says it would remove the land/* rule" contains "would remove bran
 check "dry run creates no user" test ! -e "$STATE/users/bot-polecat"
 check "dry run writes no token file" test ! -e "$(token_file polecat)"
 check "dry run grants no collaborator access" test ! -e "$STATE/collaborators/acme__rig__bot-polecat"
+check "dry run writes no viewer access" test ! -e "$STATE/collaborators/acme__rig__bot-viewer"
 check "dry run says what it would do" contains "would create user bot-polecat" "$out"
 check "dry run says what access it would grant" contains "would grant bot-polecat write access" "$out"
+check "dry run says what viewer access it would grant" contains "would grant bot-viewer read access" "$out"
 STATE="$TMP/state"
 CFG="$TMP/config"
 
@@ -456,6 +490,7 @@ out=$(run_provision --role viewer --repo acme/rig); rc=$?
 if [ "$rc" = 0 ]; then pass "the viewer role provisions and exits 0"; else fail "the viewer role provisions and exits 0 (rc=$rc)" "$out"; fi
 check "viewer mints read scopes only" has_all "$STATE/mints/bot-viewer.json" '"scopes":["read:repository","read:user"]'
 check "viewer is granted read on the repo" test "$(cat "$STATE/collaborators/acme__rig__bot-viewer")" = read
+check "a viewer run grants the viewer once" test "$(count_calls PUT /collaborators)" = 1
 check "the viewer run creates only its own bot" test -e "$STATE/users/bot-viewer" -a ! -e "$STATE/users/bot-polecat"
 STATE="$TMP/state"
 CFG="$TMP/config"

@@ -24,8 +24,9 @@ to repeat after a partial failure:
   scope at all; `viewer` `read:repository,read:user`. An unknown role is an
   error, not a default scope. A token minted by an earlier version keeps its
   old scope until `--rotate` replaces it;
-- for each `--repo OWNER/NAME`, each role's collaborator access and then the one
-  branch-protection rule the landing path depends on. The access comes first on
+- for each `--repo OWNER/NAME`, each role's collaborator access, the viewer
+  bot's read access, and then the one branch-protection rule the landing path
+  depends on. The access comes first on
   purpose: Forgejo drops a `merge_whitelist_usernames` entry for a login that is
   not yet a collaborator with write access, so writing the rule first leaves a
   fresh repo with an empty merge whitelist and nobody, admins included, able to
@@ -65,15 +66,16 @@ bash scripts/forgejo-provision.sh --repo OWNER/NAME      # one repo's access and
 
 With `--repo`, each role's bot is granted the access it needs — `write` for
 polecat and landing, `read` for viewer, none for registry, which works in the
-package registry alone. The grant is read before it is written and lands before
-the protection rule is created or patched, so a second run on unchanged state
-sends no write.
+package registry alone — and the viewer bot is granted its read even when the
+run does not name the viewer role, so every repo a run provisions is one the
+dashboard's pane can read. The grant is read before it is written and lands
+before the protection rule is created or patched, so a second run on unchanged
+state sends no write.
 
-The viewer role is not in the default role list, so a repo cut over before the
-dashboard's pane existed — or with a run that named no viewer — leaves the pane
-unable to read it. The pane names a repo the viewer cannot read rather than
-showing it as a rig with no landings; the grant is what makes its landings
-appear:
+The viewer bot is not in the default role list, so on an instance that has no
+`bot-viewer` yet a repo run reports a notice instead of the grant, and the pane
+names that repo as one it cannot read rather than showing it as a rig with no
+landings. One run creates the bot and its token and grants the repo:
 
 ```bash
 bash scripts/forgejo-provision.sh --role viewer --repo OWNER/NAME
