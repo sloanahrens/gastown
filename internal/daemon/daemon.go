@@ -420,6 +420,18 @@ type Daemon struct {
 	// (git_hygiene.go).
 	gitHygieneRunning atomic.Bool
 
+	// landingInfra is the landing_infra probe's last observation, read by the
+	// town health computation (townhealth.go) and written by its patrol
+	// (landing_infra.go, gt-fn9e6.11); landingInfraRunning is the patrol's
+	// single-flight guard.
+	landingInfra        landingInfraState
+	landingInfraRunning atomic.Bool
+	// landingInfraRigs lists the rigs the probe covers, and
+	// landingInfraProber makes its two HTTP calls; nil means the real ones.
+	// Test seams (landing_infra.go).
+	landingInfraRigs   func() []landingInfraTarget
+	landingInfraProber infraProber
+
 	// rebuildGTRunning is the rebuild_gt job's single-flight guard,
 	// rebuildGTRequested is the landing worker's sticky request to install at
 	// the next heartbeat, and rebuildGTBlock is how long the current "due and
@@ -929,6 +941,25 @@ func (d *Daemon) Run() (err error) {
 		d.triggerCheckpointDog()
 	}
 
+	// Start the landing-infrastructure probe ticker (gt-fn9e6.11): it tells
+	// the town health line whether the Forgejo instance the landing path uses
+	// answers and whether the rigs' CI has a runner online, so an outage is
+	// visible instead of only a landing that never finishes. It does nothing
+	// where no rig lands through Forgejo.
+	var landingInfraTicker *time.Ticker
+	var landingInfraChan <-chan time.Time
+	if d.isPatrolActive("landing_infra") {
+		interval := landingInfraInterval(d.patrolConfig)
+		landingInfraTicker = time.NewTicker(interval)
+		landingInfraChan = landingInfraTicker.C
+		defer landingInfraTicker.Stop()
+		d.logger.Printf("Landing infra probe ticker started (interval %v)", interval)
+		// Catch up at startup: the first observation is what makes the two
+		// fields appear at all, and a restart must not blank them for a whole
+		// interval (gt-fn9e6.11).
+		d.triggerLandingInfraProbe()
+	}
+
 	// Start scheduled maintenance ticker if configured.
 	// Checks periodically whether we're in the maintenance window and runs
 	// the town's one Dolt GC cycle there (scheduled_maintenance.go).
@@ -1133,6 +1164,15 @@ func (d *Daemon) Run() (err error) {
 			// goroutine (gt-4k3fj.14).
 			if !d.isShutdownInProgress() {
 				d.triggerStewardPlan()
+			}
+
+		case <-landingInfraChan:
+			// Landing-infrastructure probe — asks the Forgejo instance and the
+			// rigs' CI runners how they are, on its own goroutine: the probes
+			// are HTTP calls that can each take the probe timeout
+			// (gt-fn9e6.11).
+			if !d.isShutdownInProgress() {
+				d.triggerLandingInfraProbe()
 			}
 
 		case <-landingDrainedChan:

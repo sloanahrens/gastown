@@ -90,6 +90,9 @@ type healthSources struct {
 	backupRoot func() (string, error)
 	slots      func() (slot.Report, error)
 	dispatch   func() (townhealth.DispatchRecord, error)
+	// landingInfra reads the landing_infra probe's last observation; nil
+	// reads the daemon's own state.
+	landingInfra func() townhealth.LandingInfraReport
 	// behind counts the commits between a rig's last promoted commit and its
 	// green main; nil reads the rig's repository.
 	behind func(rigName, promoted, green string) (int, error)
@@ -109,8 +112,23 @@ func (s *healthSources) inputs(now time.Time, th townhealth.Thresholds, prev *to
 	return townhealth.Inputs{
 		Now: now, Thresholds: th, Prev: prev, DaemonStarted: s.daemonStarted(),
 		Dolt: s, ExecTax: s, Heartbeat: s, Ticks: s, Landings: s, Escalations: s, Slots: s,
-		Backups: s, Mains: s, Promotions: s, Config: s, NeedsHuman: s, Seats: s, Dispatch: s, Steward: s,
+		Backups: s, Mains: s, Promotions: s, Config: s, NeedsHuman: s, Seats: s, Dispatch: s,
+		LandingInfra: s, Steward: s,
 	}
+}
+
+// LandingInfra answers townhealth's forgejo and runner fields (gt-fn9e6.11):
+// what the landing_infra probe last observed about the Forgejo instance the
+// landing path uses and the rigs' CI runners. A town where no rig lands
+// through Forgejo reports nothing, and the fields are absent.
+func (s *healthSources) LandingInfra() townhealth.LandingInfraReport {
+	if s.landingInfra != nil {
+		return s.landingInfra()
+	}
+	if s.d == nil {
+		return townhealth.LandingInfraReport{}
+	}
+	return s.d.landingInfra.report()
 }
 
 // daemonStarted is when this daemon process began, from the state file it

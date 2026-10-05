@@ -60,6 +60,9 @@ type fake struct {
 	dispatch    DispatchRecord
 	dispatchErr error
 
+	// infra is the landing-infrastructure probe's last observation.
+	infra LandingInfraReport
+
 	// started is the daemon's start time the dispatch field reads.
 	started time.Time
 }
@@ -96,6 +99,7 @@ func (f *fake) Promotions() ([]RigPromotion, error)    { return f.promotions, f.
 func (f *fake) Validate() error                        { return f.configErr }
 func (f *fake) Seats() ([]Seat, error)                 { return f.seats, f.seatsErr }
 func (f *fake) Dispatch() (DispatchRecord, error)      { return f.dispatch, f.dispatchErr }
+func (f *fake) LandingInfra() LandingInfraReport       { return f.infra }
 func (f *fake) NeedsHuman(context.Context) (int, time.Time, error) {
 	return f.waiting, f.waitOldest, f.waitErr
 }
@@ -123,6 +127,7 @@ func inputs(f *fake) Inputs {
 		Now: now, Thresholds: DefaultThresholds(), DaemonStarted: f.started,
 		Dolt: f, ExecTax: f, Heartbeat: f, Ticks: f, Landings: f, Escalations: f, Slots: f,
 		Backups: f, Mains: f, Promotions: f, Config: f, NeedsHuman: f, Seats: f, Dispatch: f,
+		LandingInfra: f,
 	}
 }
 

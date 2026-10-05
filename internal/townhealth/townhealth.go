@@ -575,6 +575,10 @@ type Inputs struct {
 	NeedsHuman  NeedsHuman
 	Seats       Seats
 	Dispatch    Dispatcher
+	// LandingInfra is optional: nil is a town that does not probe Forgejo,
+	// and a town where no rig lands through it adds no forgejo or runner
+	// field either (gt-fn9e6.11).
+	LandingInfra LandingInfra
 	// Steward is optional: nil is a town with no steward, and adds no field.
 	Steward Steward
 }
@@ -603,6 +607,7 @@ func Compute(ctx context.Context, in Inputs) Report {
 	r.Fields = append(r.Fields, config(in), needsHuman(ctx, in))
 	r.Fields = append(r.Fields, seats(in)...)
 	r.Fields = append(r.Fields, dispatch(in))
+	r.Fields = append(r.Fields, infra(in)...)
 	if f, c := steward(ctx, in); f != nil {
 		r.Fields = append(r.Fields, *f)
 		r.Steward = c

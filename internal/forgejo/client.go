@@ -21,12 +21,16 @@ import (
 // (slice 3) overrides it through WithBaseURL.
 const defaultBaseURL = "http://127.0.0.1:3000/api/v1"
 
-// Client is an authenticated Forgejo API client.
+// Client is a Forgejo API client. It is authenticated unless WithoutToken
+// says otherwise.
 type Client struct {
 	httpClient *http.Client
 	baseURL    string
 	token      string
 	tokenFile  string
+	// noToken marks a client that sends no Authorization header, for the
+	// calls that need no account (the version probe, gt-fn9e6.11).
+	noToken bool
 }
 
 // Option configures a Client.
@@ -44,6 +48,12 @@ func WithToken(t string) Option { return func(cl *Client) { cl.token = t } }
 // WithTokenFile reads the token from path instead of the role's token file.
 func WithTokenFile(path string) Option { return func(cl *Client) { cl.tokenFile = path } }
 
+// WithoutToken makes a client that sends no Authorization header. The calls
+// that need no account use it — the version probe answers whether an instance
+// is up, and a town whose token file is missing can still be told that
+// (gt-fn9e6.11). It skips the role's token file entirely.
+func WithoutToken() Option { return func(cl *Client) { cl.noToken = true } }
+
 // NewClient builds a client for role, reading the role's token unless an
 // option supplies one.
 func NewClient(role string, opts ...Option) (*Client, error) {
@@ -51,7 +61,7 @@ func NewClient(role string, opts ...Option) (*Client, error) {
 	for _, o := range opts {
 		o(c)
 	}
-	if c.token != "" {
+	if c.token != "" || c.noToken {
 		return c, nil
 	}
 	var (
@@ -136,7 +146,9 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	if err != nil {
 		return nil, fmt.Errorf("forgejo: build %s %s: %w", method, path, err)
 	}
-	req.Header.Set("Authorization", "token "+c.token)
+	if c.token != "" {
+		req.Header.Set("Authorization", "token "+c.token)
+	}
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
