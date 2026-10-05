@@ -236,6 +236,44 @@ func TestWriteTownHealth_WritesTheReportFromTheTownsRecords(t *testing.T) {
 	}
 }
 
+// A rig with no post_land_command never runs a post-landing check, so its
+// lack of a verdict is n/a rather than UNKNOWN; configuring the command makes
+// the missing verdict an open question again. Both read the rig's own
+// settings/config.json, the file the landing worker reads (gt-fn9e6.34).
+func TestWriteTownHealth_NoPostLandCommandIsNotApplicable(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	d, _ := healthTown(t, now)
+	// The rig has never run a post-landing check: no verdict is recorded.
+	writeJSONFile(t, RedMainStatePath(d.config.TownRoot, "gastown"), landworker.MainState{})
+	d.writeTownHealth()
+
+	first, err := townhealth.Read(d.config.TownRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := healthField(t, first, "main/gastown")
+	if got.Tag != townhealth.Recorded || got.Verdict != townhealth.Green || got.Value != "n/a" {
+		t.Errorf("main/gastown with no post_land_command = %+v, want a recorded green n/a", got)
+	}
+	if !strings.Contains(got.Detail, "no post_land_command") {
+		t.Errorf("main/gastown detail = %q, want it to name the missing command", got.Detail)
+	}
+
+	// The rig configures the check: no verdict is now an unanswered question.
+	writeTownFile(t, d.config.TownRoot, filepath.Join("gastown", "settings", "config.json"),
+		`{"type":"rig-settings","version":1,"merge_queue":{"post_land_command":"make test-slow"}}`)
+	d.writeTownHealth()
+
+	second, err := townhealth.Read(d.config.TownRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := healthField(t, second, "main/gastown"); got.Verdict != townhealth.VerdictUnknown {
+		t.Errorf("main/gastown with a post_land_command and no verdict = %+v, want UNKNOWN", got)
+	}
+}
+
 // A landing the worker keeps failing and backing off from degrades its rig's
 // landing field, which the queue wait alone cannot see, and the field names
 // the bead, the stage, the run of failures and the error (gt-fn9e6.44).

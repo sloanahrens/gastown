@@ -405,7 +405,11 @@ type RigMain struct {
 	Rig       string
 	LastRun   string
 	LastGreen string
-	Err       error
+	// PostLand is whether the rig configures a merge_queue.post_land_command.
+	// A rig without one never runs a post-landing check, so having no verdict
+	// is its normal state rather than an open question (gt-fn9e6.34).
+	PostLand bool
+	Err      error
 }
 
 // Mains reports every landing rig's main state.
@@ -933,6 +937,12 @@ func mains(in Inputs) []Field {
 		switch {
 		case m.Err != nil:
 			fs = append(fs, unknown(FieldMain, m.Rig, "", m.Err))
+		case m.LastRun == "" && !m.PostLand:
+			// No check is configured, so there is nothing to have a verdict
+			// about: n/a rather than UNKNOWN, which would read as a check
+			// that should have run (gt-fn9e6.34). A rig that once ran a check
+			// keeps its recorded verdict either way.
+			fs = append(fs, Field{Name: FieldMain, Rig: m.Rig, Tag: Recorded, Verdict: Green, Value: "n/a", Detail: "no post_land_command configured"})
 		case m.LastRun == "":
 			fs = append(fs, unknown(FieldMain, m.Rig, "", errors.New("no post-landing verdict recorded")))
 		case m.LastRun != m.LastGreen:
