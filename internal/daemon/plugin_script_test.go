@@ -443,8 +443,8 @@ func TestStartScriptPlugin_FailureEscalatesAndRecoveryClears(t *testing.T) {
 	}
 	close(release)
 	d.scripts.wait()
-	if n := d.scripts.runningCount(); n != 0 {
-		t.Errorf("%d script plugins still marked running after they finished", n)
+	if names := d.scripts.inFlight(); len(names) != 0 {
+		t.Errorf("script plugins still marked running after they finished: %v", names)
 	}
 	if n := len(rec.records()); n != 4 {
 		t.Errorf("in-flight guard failed: %d records for two overlapping starts, want 4", n)

@@ -152,8 +152,10 @@ func TestUpgradeWaitsForARunningTierSweepUpToTheCap(t *testing.T) {
 		if d.checkUpgradeRestart(now) || d.checkUpgradeRestart(now.Add(time.Minute)) {
 			t.Fatal("restarted under a running tier sweep before the cap")
 		}
-		if got := strings.Count(logs.String(), "waiting for the tier sweep that is running"); got != 1 {
-			t.Fatalf("sweep wait line logged %d times, want once per state change:\n%s", got, logs.String())
+		// gt-rtbbr: one line per heartbeat that finds the daemon not idle, so
+		// a wait is never silent. Two checks, two lines, same hold.
+		if got := strings.Count(logs.String(), "waiting for the tier sweep that is running"); got != 2 {
+			t.Fatalf("sweep wait line logged %d times, want once per heartbeat:\n%s", got, logs.String())
 		}
 
 		// The cycle closes; the next check restarts without waiting out the cap.
@@ -258,6 +260,227 @@ func TestUpgradeNewerMarkerBusyDoesNotRestart(t *testing.T) {
 	d.scheduledSlingsRunning.Store(false)
 	if !d.checkUpgradeRestart(now.Add(41 * time.Minute)) {
 		t.Fatal("daemon that became idle must restart on the next check")
+	}
+}
+
+// gt-rtbbr: with the drain on, the restart follows the last landing pass at the
+// first heartbeat after it ends — housekeeping still in flight does not add a
+// heartbeat to the wait.
+func TestUpgradeRestartFollowsTheLastLandingPass(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	var logs strings.Builder
+	d.logger = log.New(&logs, "", 0)
+	captureEscalations(d)
+	withOwnCommit(d, "aaa")
+	fakeHistory(t, d, "aaa", "bbb")
+	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+	now := time.Now()
+	d.landingPasses.Add(1)
+	d.landingStates.setBead("gastown", "gt-x", now)
+	if d.checkUpgradeRestart(now) {
+		t.Fatal("restarted under a landing pass")
+	}
+
+	// The pass ends; a plugin run and a dog cycle are still in flight, past
+	// the cap that bounds them.
+	d.landingStates.endPass("gastown")
+	d.landingPasses.Add(-1)
+	d.scripts = newScriptRunner()
+	d.scripts.tryStart("hm-sync")
+	d.compactorDogRunning = true
+	if !d.checkUpgradeRestart(now.Add(3 * time.Minute)) {
+		t.Fatal("housekeeping still in flight held the restart past the first heartbeat after the landing pass")
+	}
+	if !strings.Contains(logs.String(), "a plugin run hm-sync") {
+		t.Fatalf("the cut-short line did not name the plugin run:\n%s", logs.String())
+	}
+}
+
+// gt-rtbbr: a plugin run or dog cycle is work the new daemon reruns, so it
+// holds a restart only up to housekeepingRestartCap — and the wait says which
+// one it is. The 2026-10-05 waits named nothing.
+func TestUpgradeWaitsForHousekeepingUpToTheCap(t *testing.T) {
+	t.Parallel()
+
+	t.Run("inside the cap it holds, and the wait names it", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		var logs strings.Builder
+		d.logger = log.New(&logs, "", 0)
+		captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		d.scripts = newScriptRunner()
+		d.scripts.tryStart("hm-sync")
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+		if d.checkUpgradeRestart(time.Now()) {
+			t.Fatal("restarted under a plugin run inside the cap")
+		}
+		if !strings.Contains(logs.String(), "waiting for a plugin run hm-sync (0m)") {
+			t.Fatalf("the plugin run was not named in the wait line:\n%s", logs.String())
+		}
+	})
+
+	t.Run("a dog cycle at the cap is cut short", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		var logs strings.Builder
+		d.logger = log.New(&logs, "", 0)
+		captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		d.compactorDogRunning = true
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+		now := time.Now()
+		if d.checkUpgradeRestart(now) {
+			t.Fatal("restarted under a dog cycle inside the cap")
+		}
+		if !d.checkUpgradeRestart(now.Add(housekeepingRestartCap)) {
+			t.Fatal("a dog cycle at its cap must not hold the restart further")
+		}
+		if !strings.Contains(logs.String(), "the compactor dog cycle is still in flight after 2m0s; restarting anyway") {
+			t.Fatalf("the cut-short line did not name the dog cycle:\n%s", logs.String())
+		}
+	})
+}
+
+// gt-rtbbr review (om score 0.45): daemonWorkHold is hard-first, so soft work in
+// flight with hard work can never mask it and let the restart cut at
+// housekeepingRestartCap over a landing pass, a steward job, a scheduled slings
+// cycle or a held install lock.
+func TestUpgradeHardHoldIsNotMaskedBySoftWork(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a plugin run does not hide a scheduled slings cycle", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		var logs strings.Builder
+		d.logger = log.New(&logs, "", 0)
+		captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		d.scripts = newScriptRunner()
+		d.scripts.tryStart("hm-sync")
+		d.scheduledSlingsRunning.Store(true)
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+		now := time.Now()
+		if d.checkUpgradeRestart(now) {
+			t.Fatal("restarted under a scheduled slings cycle")
+		}
+		// Past the housekeeping cap the plugin run alone would be cut; the
+		// slings cycle alongside it must keep holding.
+		if d.checkUpgradeRestart(now.Add(housekeepingRestartCap)) {
+			t.Fatal("the restart cut over a scheduled slings cycle at the housekeeping cap")
+		}
+		if !strings.Contains(logs.String(), "waiting for a scheduled slings cycle") {
+			t.Fatalf("the wait named the soft hold instead of the hard one:\n%s", logs.String())
+		}
+		if strings.Contains(logs.String(), "a scheduled slings cycle is still in flight") {
+			t.Fatalf("a hard hold was cut:\n%s", logs.String())
+		}
+
+		// The cycle ends; the plugin run alone is past the cap by now, so the
+		// restart goes rather than waiting out a fresh cap.
+		d.scheduledSlingsRunning.Store(false)
+		if !d.checkUpgradeRestart(now.Add(housekeepingRestartCap + time.Minute)) {
+			t.Fatal("the restart must go once the hard hold clears")
+		}
+	})
+
+	t.Run("a dog cycle does not hide a held install lock", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		var logs strings.Builder
+		d.logger = log.New(&logs, "", 0)
+		captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		d.compactorDogRunning = true
+		holdInstallLock(t, writeInstallLock(t, d))
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+		now := time.Now()
+		if d.checkUpgradeRestart(now) || d.checkUpgradeRestart(now.Add(housekeepingRestartCap)) {
+			t.Fatal("the restart ran over a held install lock")
+		}
+		if !strings.Contains(logs.String(), "waiting for the install lock") {
+			t.Fatalf("the wait did not name the install lock:\n%s", logs.String())
+		}
+	})
+}
+
+// gt-rtbbr review (om, minor): the tier-sweep release line must not claim a
+// restart that a soft hold then keeps waiting for. Every "restarting" line is
+// written on the heartbeat that actually restarts.
+func TestUpgradeSweepReleaseDoesNotClaimAWaitingRestart(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	var logs strings.Builder
+	d.logger = log.New(&logs, "", 0)
+	captureEscalations(d)
+	withOwnCommit(d, "aaa")
+	fakeHistory(t, d, "aaa", "bbb")
+	d.tierSweepRunning.Store(true)
+	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+	now := time.Now()
+	if d.checkUpgradeRestart(now) {
+		t.Fatal("restarted under a running tier sweep")
+	}
+
+	// The sweep closes, but a plugin run starts in the same breath, inside its
+	// cap: the heartbeat names the plugin run and claims nothing.
+	d.tierSweepRunning.Store(false)
+	d.scripts = newScriptRunner()
+	d.scripts.tryStart("hm-sync")
+	if d.checkUpgradeRestart(now.Add(time.Minute)) {
+		t.Fatal("restarted under a plugin run inside the cap")
+	}
+	if strings.Contains(logs.String(), "the tier sweep closed; restarting") {
+		t.Fatalf("the release line claimed a restart that then waited:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "waiting for a plugin run hm-sync") {
+		t.Fatalf("the plugin run was not named after the sweep closed:\n%s", logs.String())
+	}
+
+	// Once the plugin run is past its cap, the restart goes and says so.
+	if !d.checkUpgradeRestart(now.Add(housekeepingRestartCap + time.Minute)) {
+		t.Fatal("the restart must go once the plugin run is past the cap")
+	}
+	if !strings.Contains(logs.String(), "a plugin run hm-sync is still in flight after 2m0s; restarting anyway") {
+		t.Fatalf("no cut-short line naming the plugin run:\n%s", logs.String())
+	}
+}
+
+// gt-rtbbr: every heartbeat that finds the daemon not idle names the hold, not
+// just the first one — a repeated wait used to log nothing at all.
+func TestUpgradeWaitIsNamedEachHeartbeat(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	var logs strings.Builder
+	d.logger = log.New(&logs, "", 0)
+	captureEscalations(d)
+	withOwnCommit(d, "aaa")
+	fakeHistory(t, d, "aaa", "bbb")
+	d.patrolScanRunning.Store(true)
+	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+	now := time.Now()
+	if d.checkUpgradeRestart(now) || d.checkUpgradeRestart(now.Add(time.Minute)) {
+		t.Fatal("restarted under a patrol scan inside the cap")
+	}
+	if got := strings.Count(logs.String(), "waiting for a patrol scan"); got != 2 {
+		t.Fatalf("patrol scan wait line logged %d times, want one per heartbeat:\n%s", got, logs.String())
+	}
+}
+
+// The housekeeping cap is short on purpose: it must not cost a heartbeat after
+// the landing work it trails (gt-rtbbr).
+func TestHousekeepingRestartCapIsTwoMinutes(t *testing.T) {
+	t.Parallel()
+	if housekeepingRestartCap != 2*time.Minute {
+		t.Fatalf("housekeepingRestartCap = %s, want 2m", housekeepingRestartCap)
 	}
 }
 
@@ -686,8 +909,10 @@ func TestUpgradeDrainsLandingPassesThenRestarts(t *testing.T) {
 	if d.checkUpgradeRestart(now.Add(3 * time.Minute)) {
 		t.Fatal("restarted under a landing pass")
 	}
-	if got := strings.Count(logs.String(), "waiting for landing pass gt-x"); got != 1 {
-		t.Fatalf("wait line logged %d times, want once per state change:\n%s", got, logs.String())
+	// gt-rtbbr: the wait line is one per heartbeat that finds the daemon not
+	// idle (two checks above), while the drain line is once per marker.
+	if got := strings.Count(logs.String(), "waiting for landing pass gt-x"); got != 2 {
+		t.Fatalf("wait line logged %d times, want once per heartbeat:\n%s", got, logs.String())
 	}
 	if got := strings.Count(logs.String(), "upgrade-restart: draining: no new landing pass until restart"); got != 1 {
 		t.Fatalf("draining line logged %d times:\n%s", got, logs.String())

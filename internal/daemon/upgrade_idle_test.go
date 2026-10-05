@@ -112,11 +112,11 @@ func TestIsIdleForUpgrade(t *testing.T) {
 	}
 }
 
-func TestScriptRunnerRunningCountNilSafe(t *testing.T) {
+func TestScriptRunnerInFlightNilSafe(t *testing.T) {
 	t.Parallel()
 	var r *scriptRunner
-	if got := r.runningCount(); got != 0 {
-		t.Fatalf("nil runner runningCount() = %d, want 0", got)
+	if got := r.inFlight(); len(got) != 0 {
+		t.Fatalf("nil runner inFlight() = %v, want none", got)
 	}
 }
 
