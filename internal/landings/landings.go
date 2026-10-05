@@ -2,6 +2,10 @@
 // per landing, written by the D2 landing worker (gt-v4ssj.9) after the
 // target's tip is read back.
 //
+// This package also reads the rig's backoff snapshot, the landing worker's
+// record of the landings that are failing and waiting for a retry
+// (backoff.go).
+//
 // This package only reads. The writer owns the file's permissions and the
 // record's meaning; Record mirrors the writer's JSON keys, and a test pins
 // them to a line the writer produces.

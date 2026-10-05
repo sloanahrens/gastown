@@ -35,17 +35,7 @@ func RigLandingsFile(townRoot, rig string) (*LandingsFile, error) {
 // symlink, so no other account can redirect or forge the log.
 func (f *LandingsFile) Append(rec LandingRecord) error {
 	dir := filepath.Dir(f.Path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("creating landings dir: %w", err)
-	}
-	info, err := os.Lstat(dir)
-	if err != nil {
-		return fmt.Errorf("checking landings dir: %w", err)
-	}
-	if !info.IsDir() || info.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("refusing landings dir %s: mode %v is not a private directory", dir, info.Mode())
-	}
-	if err := checkOwner(dir, info); err != nil {
+	if err := ensureLandingsDir(dir); err != nil {
 		return err
 	}
 	line, err := json.Marshal(rec)

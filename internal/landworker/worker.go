@@ -89,6 +89,13 @@ const (
 	// off and retries a runner that is down or hung, and only an escalation
 	// says so out loud (gt-fn9e6.5).
 	DefaultCISilenceEscalateAfter = 3
+	// DefaultFailingEscalateAfter is the run of failures at any landing stage
+	// on one bead that earns an escalation: a landing failing repeatedly is
+	// otherwise visible only in daemon.log (gt-fn9e6.44).
+	DefaultFailingEscalateAfter = 3
+	// maxErrorLine bounds the error text a backoff record and a health detail
+	// carry, so a failure whose message is a wall of output stays one phrase.
+	maxErrorLine = 160
 )
 
 // Worker lands one rig's ready work, serially.
@@ -138,8 +145,24 @@ type Worker struct {
 	// on one bead raise a single escalation; 0 means
 	// DefaultCISilenceEscalateAfter.
 	CISilenceEscalateAfter int
-	Logf                   func(format string, args ...any)
-	Now                    func() time.Time
+	// FailingEscalate, when set, raises the escalation for a bead whose
+	// landing has failed FailingEscalateAfter times in a row at any stage. It
+	// is keyed per rig and bead, so a rerun upserts onto one escalation rather
+	// than minting another (gt-fn9e6.44). nil leaves the rule off.
+	FailingEscalate func(beadID, message string)
+	// FailingClear, when set, closes that escalation: the bead landed or was
+	// rejected, so its run of failures is over.
+	FailingClear func(beadID string)
+	// FailingEscalateAfter is how many consecutive failures at any stage on
+	// one bead raise a single escalation; 0 means
+	// DefaultFailingEscalateAfter.
+	FailingEscalateAfter int
+	// Backoff, when set, receives the rig's failing landings after each pass,
+	// which is what the dashboard and town health read them from. nil leaves
+	// them in the log alone.
+	Backoff BackoffWriter
+	Logf    func(format string, args ...any)
+	Now     func() time.Time
 
 	state map[string]*beadState
 	// escWG lets a test wait for Escalate goroutines.
@@ -167,16 +190,36 @@ type beadState struct {
 	failures  int
 	until     time.Time
 	announced string
+	// stage and lastErr are the last infrastructure failure's stage and error
+	// line, the facts the backoff snapshot carries to the dashboard and the
+	// health field (gt-fn9e6.44).
+	stage   string
+	lastErr string
 	// lintTimeouts counts consecutive lint-stage timeouts; any other outcome
 	// resets it.
 	lintTimeouts int
 	// ciSilences counts consecutive candidate-gate silences; any other outcome
 	// resets it.
 	ciSilences int
+	// escalated marks that this run of failures has raised an escalation
+	// through any rule, so a lint timeout or a CI silence that escalated at
+	// the same count does not escalate again through the general rule.
+	escalated bool
+	// failingEscalated marks that this run raised the general failing-landing
+	// escalation, the one only a landing or a rejection closes.
+	failingEscalated bool
 	// installNow is whether the bead carried LabelInstallNow when this pass
 	// loaded it; only a landing of it turns the flag into a report field.
 	installNow bool
 }
+
+// BackoffWriter records a rig's failing landings for readers outside the
+// worker; *land.BackoffFile is the production one.
+type BackoffWriter interface {
+	Write(land.BackoffState) error
+}
+
+var _ BackoffWriter = (*land.BackoffFile)(nil)
 
 // Report counts one pass's outcomes.
 type Report struct {
@@ -224,7 +267,34 @@ func (w *Worker) Pass(ctx context.Context) Report {
 	if !w.draining() {
 		w.watchTarget(ctx)
 	}
+	// After the pass, so every next-try time in the snapshot is the one the
+	// following pass will act on.
+	w.writeBackoff()
 	return rep
+}
+
+// writeBackoff records the beads whose landing is failing and waiting for a
+// retry. A bead drops out once it lands, is rejected, or its retry comes due,
+// so the file holds what the worker is actually backing off from and nothing
+// it has moved past (gt-fn9e6.44).
+func (w *Worker) writeBackoff() {
+	if w.Backoff == nil {
+		return
+	}
+	now := w.now()
+	st := land.BackoffState{Rig: w.Rig, At: now}
+	for id, s := range w.state {
+		if s.failures == 0 || !s.until.After(now) {
+			continue
+		}
+		st.Beads = append(st.Beads, land.BackoffRecord{
+			BeadID: id, Stage: s.stage, Failures: s.failures, NextTry: s.until, Error: s.lastErr,
+		})
+	}
+	sort.Slice(st.Beads, func(i, j int) bool { return st.Beads[i].BeadID < st.Beads[j].BeadID })
+	if err := w.Backoff.Write(st); err != nil {
+		w.logf("writing the backoff snapshot: %v", err)
+	}
 }
 
 func (w *Worker) draining() bool {
@@ -514,7 +584,7 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 	switch oc {
 	case outLanded:
 		delete(w.pendingRepair, work.BeadID)
-		delete(w.state, work.BeadID)
+		w.endFailureRun(work.BeadID)
 		if wasRepair {
 			rep.Repaired++
 		} else {
@@ -531,6 +601,7 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		}
 	case outRecordIncomplete:
 		// Landed: the push was read back. Only the record is unfinished.
+		w.endFailureRun(work.BeadID)
 		w.pendingRepair[work.BeadID] = work
 		rep.Landed++
 		if installNow {
@@ -552,10 +623,11 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		w.logf("%s: %v", work.BeadID, err)
 		if rej.RecordErr != nil {
 			// The label may still be on the bead: space the next attempt.
+			w.closeFailureRun(work.BeadID)
 			st.until = w.now().Add(rejectRecordBackoff)
 			return
 		}
-		delete(w.state, work.BeadID)
+		w.endFailureRun(work.BeadID)
 		if w.Reverts != nil && w.Reverts.RevertRejected(work, rej) {
 			return
 		}
@@ -572,10 +644,11 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		w.escalate(work.BeadID, fmt.Sprintf("Landing of %s (%s @ %s) left for a human (%s): %s",
 			work.BeadID, work.Branch, work.Head, rej.Kind, land.NoteField(rej.Reason)))
 		if rej.RecordErr != nil {
+			w.closeFailureRun(work.BeadID)
 			st.until = w.now().Add(rejectRecordBackoff)
 			return
 		}
-		delete(w.state, work.BeadID)
+		w.endFailureRun(work.BeadID)
 		w.clearIntent(work)
 	case outRace:
 		// Target moved during the gate: nothing written; land again next pass.
@@ -606,6 +679,7 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		w.infraFailure(work.BeadID, "landing", err, rep)
 		w.countLintTimeout(work, err)
 		w.countCISilence(work, err)
+		w.countFailingLanding(work, err)
 	}
 }
 
@@ -615,6 +689,12 @@ func (w *Worker) escalate(beadID, message string) {
 	if w.Escalate == nil {
 		return
 	}
+	w.alertAsync(beadID, func() { w.Escalate(beadID, message) })
+}
+
+// alertAsync runs one alert call — a raise or a clear — off the pass's
+// goroutine, which a slow alert path must never hold up.
+func (w *Worker) alertAsync(beadID string, call func()) {
 	w.escWG.Add(1)
 	go func() {
 		defer w.escWG.Done()
@@ -623,8 +703,32 @@ func (w *Worker) escalate(beadID, message string) {
 				w.logf("%s: escalation panicked: %v", beadID, r)
 			}
 		}()
-		w.Escalate(beadID, message)
+		call()
 	}()
+}
+
+// endFailureRun forgets a bead's run of failures: the bead landed or was
+// rejected, so the next failure starts the count again, and the escalation
+// the run raised closes.
+func (w *Worker) endFailureRun(beadID string) {
+	w.closeFailureRun(beadID)
+	delete(w.state, beadID)
+}
+
+// closeFailureRun is endFailureRun for a path that still needs the bead's
+// timing: it clears the run's facts and closes its escalation, leaving the
+// backoff the caller is about to set.
+func (w *Worker) closeFailureRun(beadID string) {
+	st := w.state[beadID]
+	if st == nil {
+		return
+	}
+	escalated := st.failingEscalated
+	st.failures, st.stage, st.lastErr = 0, "", ""
+	st.escalated, st.failingEscalated = false, false
+	if escalated && w.FailingClear != nil {
+		w.alertAsync(beadID, func() { w.FailingClear(beadID) })
+	}
 }
 
 // countLintTimeout tracks consecutive lint-stage timeouts on one bead and
@@ -645,6 +749,7 @@ func (w *Worker) countLintTimeout(work land.Work, err error) {
 	if st.lintTimeouts != limit {
 		return
 	}
+	st.escalated = true
 	w.escalate(work.BeadID, fmt.Sprintf("Landing of %s (%s @ %s) stuck at the lint stage: it timed out %d times in a row (%v). The worker keeps retrying and no rework is needed; look for a hung lint or a golangci-lint lock holder.",
 		work.BeadID, work.Branch, work.Head, st.lintTimeouts, err))
 }
@@ -667,8 +772,62 @@ func (w *Worker) countCISilence(work land.Work, err error) {
 	if st.ciSilences != limit {
 		return
 	}
+	st.escalated = true
 	w.escalate(work.BeadID, fmt.Sprintf("Landing of %s (%s @ %s) has waited on the candidate gate %d times in a row with no verdict (%v). The worker keeps retrying with backoff and no rework is needed; look for a down, busy or hung Forgejo runner.",
 		work.BeadID, work.Branch, work.Head, st.ciSilences, err))
+}
+
+// countFailingLanding escalates once for a bead whose landing has failed
+// FailingEscalateAfter times in a row at any stage. A lint timeout and a CI
+// silence each escalate on their own count; a bead that already raised one of
+// those has raised its escalation for this run, so this rule stays quiet and
+// the run raises exactly one (gt-fn9e6.44).
+func (w *Worker) countFailingLanding(work land.Work, err error) {
+	st := w.bead(work.BeadID)
+	if st.escalated {
+		return
+	}
+	limit := w.FailingEscalateAfter
+	if limit <= 0 {
+		limit = DefaultFailingEscalateAfter
+	}
+	if st.failures != limit {
+		return
+	}
+	st.escalated = true
+	if w.FailingEscalate == nil {
+		return
+	}
+	st.failingEscalated = true
+	w.alertAsync(work.BeadID, func() {
+		w.FailingEscalate(work.BeadID, fmt.Sprintf(
+			"Landing of %s (%s @ %s) has failed %d times in a row at the %s stage (%v). The worker keeps retrying with backoff and no rework is needed; read the landing worker's pass log for it.",
+			work.BeadID, work.Branch, work.Head, st.failures, st.stage, err))
+	})
+}
+
+// failureStage is the stage a landing failure names: the InfraError's own,
+// the text after "landing failed at", and fallback for an error carrying
+// none.
+func failureStage(fallback string, err error) string {
+	var ie *land.InfraError
+	if errors.As(err, &ie) && ie.Stage != "" {
+		return ie.Stage
+	}
+	return fallback
+}
+
+// errorLine is err's first line, bounded: the backoff record and the health
+// detail it feeds are one phrase each.
+func errorLine(err error) string {
+	if err == nil {
+		return ""
+	}
+	line := strings.TrimSpace(strings.SplitN(err.Error(), "\n", 2)[0])
+	if r := []rune(line); len(r) > maxErrorLine {
+		line = string(r[:maxErrorLine-1]) + "…"
+	}
+	return line
 }
 
 // maxCommentFindings bounds the om findings one rework comment lists.
@@ -706,6 +865,8 @@ func (w *Worker) infraFailure(id, stage string, err error, rep *Report) {
 	rep.Failed++
 	st := w.bead(id)
 	st.failures++
+	st.stage = failureStage(stage, err)
+	st.lastErr = errorLine(err)
 	wait := infraBackoffBase << (st.failures - 1)
 	if st.failures > 6 || wait > infraBackoffMax {
 		wait = infraBackoffMax
