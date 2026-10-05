@@ -170,13 +170,7 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 	// Use rig path for bd commands.
 	// IMPORTANT: Use the rig's directory (not polecat worktree) so bd commands
 	// work even if the polecat worktree is deleted.
-	var beadsPath string
-	switch ctx.Role {
-	case RoleMayor:
-		beadsPath = townRoot
-	default:
-		beadsPath = filepath.Join(townRoot, ctx.Rig)
-	}
+	beadsPath := filepath.Join(townRoot, ctx.Rig)
 	bd := e.routedAt(beadsPath)
 	// agentBd resolves agent beads dual-scope: their canonical (rig-local)
 	// database first, with a town fallback for legacy beads created before

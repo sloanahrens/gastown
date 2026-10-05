@@ -23,9 +23,8 @@ import (
 
 // buildAgentBeadID constructs the agent bead ID from an agent identity.
 // Uses canonical naming: prefix-rig-role-name
-// Town-level agents use hq- prefix; rig-level agents use rig's prefix.
+// Rig-level agents use the rig's prefix.
 // Examples:
-//   - "mayor" -> "hq-mayor"
 //   - "gastown/nux" (polecat) -> "gt-gastown-polecat-nux"
 //   - "gastown/crew/max" -> "gt-gastown-crew-max"
 //
@@ -345,7 +344,7 @@ func runMoleculeStatus(cmd *cobra.Command, args []string) error {
 
 	// Resolve to the agent's rig beads directory if CWD-based discovery
 	// found the wrong database. This matches runHookShow's resolution logic.
-	if !isTownLevelRole(target) && townRoot != "" {
+	if townRoot != "" {
 		workDir = resolveHookLookupWorkDir(workDir, target, townRoot)
 	}
 
@@ -382,16 +381,11 @@ func runMoleculeStatus(cmd *cobra.Command, args []string) error {
 			return nil
 		}
 
-		// For town-level roles (mayor, deacon), scan all rigs if nothing found locally
-		if len(hookedBeads) == 0 && isTownLevelRole(target) {
-			hookedBeads = scanAllRigsForHookedBeads(townRoot, target)
-		}
-
 		// For rig-level agents (polecats, crew), also search town-level beads.
-		// When the Mayor slings an hq-* bead to a polecat, the bead lives in
+		// When an hq-* bead is slung to a polecat, the bead lives in
 		// townRoot/.beads, not the rig's .beads database.
 		// See: https://github.com/steveyegge/gastown/issues/1438
-		if len(hookedBeads) == 0 && !isTownLevelRole(target) && townRoot != "" {
+		if len(hookedBeads) == 0 && townRoot != "" {
 			townB := beads.New(filepath.Join(townRoot, ".beads"))
 			if townWork, err := listAssignedActiveWork(townB, target); err == nil && len(townWork) > 0 {
 				hookedBeads = townWork
@@ -482,7 +476,7 @@ func runMoleculeStatus(cmd *cobra.Command, args []string) error {
 }
 
 // extractRoleFromIdentity extracts the role name from an agent identity string
-// for handoff bead lookup. Handles trailing slashes (e.g. "mayor/" → "mayor")
+// for handoff bead lookup. Handles trailing slashes (e.g. "crew/" → "crew")
 // and compound paths (e.g. "gastown/crew/jack" → "jack").
 func extractRoleFromIdentity(target string) string {
 	target = strings.TrimRight(target, "/")
@@ -490,13 +484,11 @@ func extractRoleFromIdentity(target string) string {
 	return parts[len(parts)-1]
 }
 
-// buildAgentIdentity constructs the agent identity string from role context.
-// Town-level agents (mayor, deacon) use trailing slash to match the format
-// used when setting assignee on hooked beads (see resolveSelfTarget in sling.go).
+// buildAgentIdentity constructs the agent identity string from role context,
+// matching the format used when setting assignee on hooked beads (see
+// resolveSelfTarget in sling.go).
 func buildAgentIdentity(ctx RoleContext) string {
 	switch ctx.Role {
-	case RoleMayor:
-		return "mayor/"
 	case RolePolecat:
 		return ctx.Rig + "/polecats/" + ctx.Polecat
 	case RoleCrew:
@@ -1103,14 +1095,6 @@ func outputMoleculeCurrent(info MoleculeCurrentInfo) error {
 	return nil
 }
 
-// isTownLevelRole returns true if the agent ID is a town-level role.
-// The mayor operates from the town root and may have pinned beads in any
-// rig's beads directory.
-// Accepts both "mayor" and "mayor/" formats for compatibility.
-func isTownLevelRole(agentID string) bool {
-	return agentID == "mayor" || agentID == "mayor/"
-}
-
 // extractMailSender extracts the sender from mail bead labels.
 // Mail beads have a "from:X" label containing the sender address.
 func extractMailSender(labels []string) string {
@@ -1120,43 +1104,4 @@ func extractMailSender(labels []string) string {
 		}
 	}
 	return ""
-}
-
-// scanAllRigsForHookedBeads scans all registered rigs for hooked beads
-// assigned to the target agent. Used for town-level roles that may have
-// work hooked in any rig.
-func scanAllRigsForHookedBeads(townRoot, target string) []*beads.Issue {
-	// Load routes from town beads
-	townBeadsDir := filepath.Join(townRoot, ".beads")
-	routes, err := beads.LoadRoutes(townBeadsDir)
-	if err != nil {
-		return nil
-	}
-
-	// Scan each rig's beads directory
-	for _, route := range routes {
-		// Handle both absolute and relative paths in routes.jsonl
-		// Go's filepath.Join doesn't replace with absolute paths like Python
-		var rigBeadsDir string
-		if filepath.IsAbs(route.Path) {
-			rigBeadsDir = route.Path
-		} else {
-			rigBeadsDir = filepath.Join(townRoot, route.Path)
-		}
-		if _, err := os.Stat(rigBeadsDir); os.IsNotExist(err) {
-			continue
-		}
-
-		b := beads.New(rigBeadsDir)
-		hookedBeads, err := listAssignedActiveWork(b, target)
-		if err != nil {
-			continue
-		}
-
-		if len(hookedBeads) > 0 {
-			return hookedBeads
-		}
-	}
-
-	return nil
 }

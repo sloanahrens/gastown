@@ -574,7 +574,7 @@ func detectSessionState(ctx RoleContext) SessionState {
 		}
 		// Town-level fallback: rig-level agents may have hooked HQ beads
 		// stored in townRoot/.beads. Matches prime.go and molecule_status.go. (gt-dtq7)
-		if !isTownLevelRole(agentID) && ctx.TownRoot != "" {
+		if ctx.TownRoot != "" {
 			townB := townBeadsNew(ctx.TownRoot, filepath.Join(ctx.TownRoot, ".beads"))
 			if townWork, err := listAssignedActiveWork(townB, agentID); err == nil && len(townWork) > 0 {
 				state.State = "autonomous"

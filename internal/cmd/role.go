@@ -88,7 +88,7 @@ func getRoleWithContextEnv(cwd, townRoot string, getenv func(string) string) (Ro
 
 	// Determine authoritative role
 	if envRole != "" {
-		// Parse env role - it might be simple ("mayor") or compound ("gastown/witness")
+		// Parse env role - it might be simple ("crew") or compound ("gastown/polecats/alpha")
 		parsedRole, rig, polecat := parseRoleString(envRole)
 		info.Role = parsedRole
 		info.Rig = rig
@@ -163,14 +163,14 @@ func detectRole(cwd, townRoot string) RoleInfo {
 	parts := strings.Split(relPath, "/")
 
 	// Town root is a neutral location — don't infer any role from it.
-	// The mayor's actual home is mayor/ (matched below).
 	if relPath == "." || relPath == "" {
 		return ctx
 	}
 
-	// Check for mayor role: mayor/ or mayor/rig/
+	// mayor/ is the town marker (mayor/town.json, mayor/rigs.json) and each
+	// rig keeps a clone at <rig>/mayor/rig. The mayor role is retired
+	// (gt-rwp7z), so the directory has no role; it is not a rig either.
 	if len(parts) >= 1 && parts[0] == "mayor" {
-		ctx.Role = RoleMayor
 		return ctx
 	}
 
@@ -187,9 +187,9 @@ func detectRole(cwd, townRoot string) RoleInfo {
 	rigName := parts[0]
 	ctx.Rig = rigName
 
-	// Check for mayor: <rig>/mayor/ or <rig>/mayor/rig/
+	// <rig>/mayor/ is the rig's kept clone of the town mayor directory: no
+	// role, like the town-level directory above.
 	if len(parts) >= 2 && parts[1] == "mayor" {
-		ctx.Role = RoleMayor
 		return ctx
 	}
 
@@ -216,7 +216,7 @@ func detectRole(cwd, townRoot string) RoleInfo {
 	return ctx
 }
 
-// parseRoleString parses a role string like "mayor", "gastown/crew/max", or
+// parseRoleString parses a role string like "crew", "gastown/crew/max", or
 // "gastown/polecats/alpha". The vocabulary and the parser live in
 // internal/role, which the command-logic packages read it from.
 func parseRoleString(s string) (Role, string, string) {
@@ -225,7 +225,7 @@ func parseRoleString(s string) (Role, string, string) {
 
 // ActorString returns the actor identity string for beads attribution.
 // Format matches beads created_by convention:
-//   - Simple roles: "mayor"
+//   - Simple roles: "crew"
 //   - Workers: "gastown/crew/max", "gastown/polecats/Toast"
 func (info RoleInfo) ActorString() string {
 	return role.Actor(info.Role, info.Rig, info.Polecat)
@@ -234,8 +234,6 @@ func (info RoleInfo) ActorString() string {
 // getRoleHome returns the canonical home directory for a role.
 func getRoleHome(role Role, rig, polecat, townRoot string) string {
 	switch role {
-	case RoleMayor:
-		return filepath.Join(townRoot, "mayor")
 	case RolePolecat:
 		if rig == "" || polecat == "" {
 			return ""

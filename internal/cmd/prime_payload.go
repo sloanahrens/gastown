@@ -290,15 +290,14 @@ const primeDirectiveMaxChars = 2000
 // primeParts are the dynamic sections of a prime, each produced on demand.
 // A nil part is skipped.
 type primeParts struct {
-	session     func() string
-	hookedWork  func() string
-	directives  func() string
-	handoff     func() string
-	checkpoint  func() string
-	memories    func() string
-	mail        func() string
-	escalations func() string
-	startup     func() string
+	session    func() string
+	hookedWork func() string
+	directives func() string
+	handoff    func() string
+	checkpoint func() string
+	memories   func() string
+	mail       func() string
+	startup    func() string
 }
 
 // assemblePrimePayload orders the prime output so the hooked work comes first
@@ -326,7 +325,6 @@ func assemblePrimePayload(parts primeParts, staticText string, includeStatic boo
 	// renders them, so dropping the section would lose mail for good.
 	p.add("mail", 5, true, call(parts.mail))
 	p.add("memories", 6, false, call(parts.memories))
-	p.add("escalations", 5, false, call(parts.escalations))
 	if !hasSlungWork {
 		p.add("startup", 9, true, call(parts.startup))
 	}

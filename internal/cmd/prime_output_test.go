@@ -255,12 +255,12 @@ func TestOutputRoleDirectives_WarnsAboutUnusedFiles(t *testing.T) {
 
 // TestOutputPrimeContextFallbackDropsTheMayorRole pins the mayor role's
 // retirement from the prime fallback (gt-rwp7z.14). A session still carrying
-// GT_ROLE=mayor renders the unknown-role brief — the directory list sends the
-// agent to a live role — and never a mayor brief.
+// GT_ROLE=mayor sets this role value and renders the unknown-role brief — the
+// directory list sends the agent to a live role — and never a mayor brief.
 func TestOutputPrimeContextFallbackDropsTheMayorRole(t *testing.T) {
 	t.Parallel()
 
-	ctx := RoleContext{Role: RoleMayor, TownRoot: t.TempDir(), Rig: "myrig"}
+	ctx := RoleContext{Role: Role("mayor"), TownRoot: t.TempDir(), Rig: "myrig"}
 
 	var buf bytes.Buffer
 	outputPrimeContextFallback(&buf, ctx)

@@ -41,10 +41,11 @@ func TestGetAgentBeadID_UsesRigPrefix(t *testing.T) {
 		want string
 	}{
 		{
-			// The retired mayor role owns no agent bead (gt-rwp7z.10).
-			name: "mayor",
+			// The retired mayor role owns no agent bead (gt-rwp7z.10). A stale
+			// GT_ROLE=mayor parses to this role value and still resolves none.
+			name: "retired mayor role",
 			ctx: RoleContext{
-				Role:     RoleMayor,
+				Role:     Role("mayor"),
 				TownRoot: townRoot,
 			},
 			want: "",
@@ -191,7 +192,7 @@ func TestDetectSessionState(t *testing.T) {
 	t.Run("normal_state", func(t *testing.T) {
 		workDir := t.TempDir()
 		ctx := RoleContext{
-			Role:     RoleMayor,
+			Role:     RoleUnknown,
 			WorkDir:  workDir,
 			TownRoot: failingTownBD(t),
 		}
@@ -201,8 +202,8 @@ func TestDetectSessionState(t *testing.T) {
 		if state.State != "normal" {
 			t.Fatalf("expected state 'normal', got %q", state.State)
 		}
-		if state.Role != RoleMayor {
-			t.Fatalf("expected role Mayor, got %q", state.Role)
+		if state.Role != RoleUnknown {
+			t.Fatalf("expected the context role back, got %q", state.Role)
 		}
 	})
 
@@ -284,18 +285,19 @@ func TestDetectSessionState(t *testing.T) {
 			t.Fatalf("write checkpoint: %v", err)
 		}
 
-		// Mayor should NOT enter crash-recovery (only polecat/crew)
+		// A non-worker role should NOT enter crash-recovery (only polecat/crew).
+		// A stale GT_ROLE=mayor is the retired case that still reaches here.
 		ctx := RoleContext{
-			Role:     RoleMayor,
+			Role:     Role("mayor"),
 			WorkDir:  workDir,
 			TownRoot: failingTownBD(t),
 		}
 
 		state := detectSessionState(ctx)
 
-		// Mayor should see normal state, not crash-recovery
+		// It should see normal state, not crash-recovery
 		if state.State != "normal" {
-			t.Fatalf("expected Mayor to have 'normal' state despite checkpoint, got %q", state.State)
+			t.Fatalf("expected a non-worker role to have 'normal' state despite checkpoint, got %q", state.State)
 		}
 	})
 }
@@ -306,7 +308,7 @@ func TestOutputState(t *testing.T) {
 	t.Run("text_output", func(t *testing.T) {
 		workDir := t.TempDir()
 		ctx := RoleContext{
-			Role:     RoleMayor,
+			Role:     RoleUnknown,
 			WorkDir:  workDir,
 			TownRoot: failingTownBD(t),
 		}
@@ -318,8 +320,8 @@ func TestOutputState(t *testing.T) {
 		if !strings.Contains(output, "state: normal") {
 			t.Fatalf("expected 'state: normal' in output, got: %s", output)
 		}
-		if !strings.Contains(output, "role: mayor") {
-			t.Fatalf("expected 'role: mayor' in output, got: %s", output)
+		if !strings.Contains(output, "role: unknown") {
+			t.Fatalf("expected 'role: unknown' in output, got: %s", output)
 		}
 	})
 
@@ -1030,12 +1032,11 @@ func TestShouldRenderMemories(t *testing.T) {
 		role string
 		want bool
 	}{
-		{string(RoleMayor), true},
 		{string(RoleCrew), true},
 		{string(RolePolecat), false},
 		{string(RoleUnknown), false},
 		{"", false},
-		{"MAYOR", true}, // role comparison is case-insensitive
+		{"CREW", true}, // role comparison is case-insensitive
 	}
 	for _, tt := range tests {
 		t.Run(tt.role, func(t *testing.T) {

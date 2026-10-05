@@ -100,14 +100,13 @@ func newFakePrimeTools(f *fakePrimeRunner) (primeTools, *clockwork.FakeClock, *b
 var primeTestEpoch = time.Date(2026, time.September, 1, 12, 0, 0, 0, time.UTC)
 
 const (
-	primeKVListCall     = "bd:kv list --json"
-	primeMailCheckCall  = "gt:mail check --inject"
-	primeEscalationCall = "bd:list --status=open --label=gt:escalation --include-infra --json"
+	primeKVListCall    = "bd:kv list --json"
+	primeMailCheckCall = "gt:mail check --inject"
 )
 
 // TestRunPrimeExternalTools_RunsMemoryAndMail pins that the two sections are
 // independent: a role that renders memories still gets its mail, both in one
-// call. The mayor is the role that gets both, so it is the subject here; the
+// call. Crew is the role that gets both, so it is the subject here; the
 // roles that get only one are covered by the two tests below.
 func TestRunPrimeExternalTools_RunsMemoryAndMail(t *testing.T) {
 	t.Parallel()
@@ -118,7 +117,7 @@ func TestRunPrimeExternalTools_RunsMemoryAndMail(t *testing.T) {
 	p, _, out := newFakePrimeTools(f)
 	workDir := t.TempDir()
 
-	p.externalTools(RoleContext{Role: RoleMayor}, workDir)
+	p.externalTools(RoleContext{Role: RoleCrew}, workDir)
 
 	for _, want := range []string{primeKVListCall, primeMailCheckCall} {
 		if !f.called(want) {
@@ -138,18 +137,17 @@ func TestRunPrimeExternalTools_RunsMemoryAndMail(t *testing.T) {
 	}
 }
 
-// TestRunPrimeExternalTools_MemoryIsMayorAndCrewOnly pins the memory role gate
+// TestRunPrimeExternalTools_MemoryIsCrewOnly pins the memory role gate
 // (gt-o51s, plan Task 8 C3). It is a separate test from
 // SkipsMailCheckForPatrolRoles because the two gates are independent: mail is
-// withheld from patrol roles, memories from everyone but mayor and crew, and a
+// withheld from patrol roles, memories from everyone but crew, and a
 // polecat is the role that gets exactly one of them.
-func TestRunPrimeExternalTools_MemoryIsMayorAndCrewOnly(t *testing.T) {
+func TestRunPrimeExternalTools_MemoryIsCrewOnly(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		role       Role
 		wantMemory bool
 	}{
-		{RoleMayor, true},
 		{RoleCrew, true},
 		{RolePolecat, false},
 	} {
@@ -193,7 +191,7 @@ func TestRunPrimeExternalTools_MemoryIsMayorAndCrewOnly(t *testing.T) {
 }
 
 // TestRunPrimeMemoryInject_BoundsTheIndex is the acceptance guard for the size
-// half of gt-o51s: at the live corpus's scale the section a mayor's prime
+// half of gt-o51s: at the live corpus's scale the section a crew prime
 // carries must fit inside memoryInjectMaxChars, which is what makes it fit
 // inside primeHookBudget alongside the hooked work at all.
 func TestRunPrimeMemoryInject_BoundsTheIndex(t *testing.T) {
@@ -206,11 +204,11 @@ func TestRunPrimeMemoryInject_BoundsTheIndex(t *testing.T) {
 	f := &fakePrimeRunner{answers: map[string]string{primeKVListCall: string(kvJSON)}}
 	p, _, buf := newFakePrimeTools(f)
 
-	p.memoryInject(RoleContext{Role: RoleMayor}, t.TempDir())
+	p.memoryInject(RoleContext{Role: RoleCrew}, t.TempDir())
 	out := buf.String()
 
 	if !strings.Contains(out, "# Agent Memories (38)") {
-		t.Fatalf("mayor rendered no index over a 38-entry corpus:\n%s", out[:min(len(out), 400)])
+		t.Fatalf("crew rendered no index over a 38-entry corpus:\n%s", out[:min(len(out), 400)])
 	}
 	if len(out) > memoryInjectMaxChars+memoryIndexFooterSlack {
 		t.Errorf("memory section = %d chars, want <= %d (cap %d + footer)",
@@ -276,11 +274,11 @@ func TestRunPrimeExternalTools_BoundsSlowMailCheck(t *testing.T) {
 	}
 	p, clk, out := newFakePrimeTools(f)
 
-	// The mayor is the subject because this test asserts that a stalled mail
+	// Crew is the subject because this test asserts that a stalled mail
 	// check leaves the memory section standing, which needs a role that
 	// renders one (see shouldRenderMemories).
 	call := waitOutWedgedTool(t, f, clk, func() {
-		p.externalTools(RoleContext{Role: RoleMayor}, t.TempDir())
+		p.externalTools(RoleContext{Role: RoleCrew}, t.TempDir())
 	})
 
 	if call.line != primeMailCheckCall {
@@ -288,79 +286,5 @@ func TestRunPrimeExternalTools_BoundsSlowMailCheck(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "remembered") {
 		t.Fatalf("a slow mail check must not suppress the memory section: %q", out.String())
-	}
-}
-
-// TestCheckPendingEscalations_BoundsSlowBdList is the escalation-query sibling
-// of TestRunPrimeExternalTools_BoundsSlowMailCheck: a bd list that outlives the
-// deadline must be abandoned, not waited out, and nothing may be shown.
-func TestCheckPendingEscalations_BoundsSlowBdList(t *testing.T) {
-	t.Parallel()
-	f := &fakePrimeRunner{block: map[string]bool{primeEscalationCall: true}}
-	p, clk, out := newFakePrimeTools(f)
-
-	call := waitOutWedgedTool(t, f, clk, func() {
-		p.pendingEscalations(RoleContext{Role: RoleMayor, WorkDir: t.TempDir()})
-	})
-
-	if call.line != primeEscalationCall {
-		t.Fatalf("wedged call = %q, want %q", call.line, primeEscalationCall)
-	}
-	if out.Len() != 0 {
-		t.Fatalf("abandoned escalation query still emitted output: %q", out.String())
-	}
-}
-
-// TestCheckPendingEscalations_SurfacesOpenEphemeralEscalation proves the
-// mayor-startup check actually displays an open escalation end to end.
-// Regression test for gt-fcsf: the original query used a nonexistent
-// `--tag=escalation` flag, which made `bd list` error on every invocation
-// (silently, by design, since the check is best-effort) — this had never
-// once surfaced a real escalation. The fixed query uses --label=gt:escalation
-// --include-infra, since escalations are ephemeral wisps that bd list hides
-// by default.
-func TestCheckPendingEscalations_SurfacesOpenEphemeralEscalation(t *testing.T) {
-	t.Parallel()
-	f := &fakePrimeRunner{answers: map[string]string{
-		primeEscalationCall: `[{"id":"hq-wisp1","title":"Dolt unreachable","priority":0,"labels":["gt:escalation"]}]`,
-	}}
-	p, _, out := newFakePrimeTools(f)
-	workDir := t.TempDir()
-
-	p.pendingEscalations(RoleContext{Role: RoleMayor, WorkDir: workDir})
-
-	if !f.called(primeEscalationCall) {
-		t.Fatalf("calls %q missing %q", f.callLines(), primeEscalationCall)
-	}
-	if f.calls[0].workDir != workDir {
-		t.Errorf("escalation query ran in %q, want %q", f.calls[0].workDir, workDir)
-	}
-	if !strings.Contains(out.String(), "PENDING ESCALATIONS") {
-		t.Fatalf("expected escalation banner in output, got: %q", out.String())
-	}
-	if !strings.Contains(out.String(), "hq-wisp1") || !strings.Contains(out.String(), "1 escalation") {
-		t.Fatalf("expected output to reflect the open escalation, got: %q", out.String())
-	}
-}
-
-// TestCheckPendingEscalations_SkipsMailDeliveryBeads mirrors the dashboard
-// fetcher's filtering (gt-kl7): escalation mail-delivery beads carry the same
-// gt:escalation label so ack/close can find them, but they aren't escalation
-// wisps themselves and must not inflate the startup count.
-func TestCheckPendingEscalations_SkipsMailDeliveryBeads(t *testing.T) {
-	t.Parallel()
-	f := &fakePrimeRunner{answers: map[string]string{
-		primeEscalationCall: `[{"id":"hq-wisp1","title":"Real escalation","priority":0,"labels":["gt:escalation"]},` +
-			`{"id":"hq-885m","title":"[HIGH] Real escalation","priority":0,"labels":["gt:escalation","gt:message"]}]`,
-	}}
-	p, _, out := newFakePrimeTools(f)
-
-	p.pendingEscalations(RoleContext{Role: RoleMayor, WorkDir: t.TempDir()})
-
-	if !strings.Contains(out.String(), "1 escalation") {
-		t.Fatalf("expected count to exclude the mail-delivery bead, got: %q", out.String())
-	}
-	if strings.Contains(out.String(), "hq-885m") {
-		t.Fatalf("mail-delivery bead should not appear in output: %q", out.String())
 	}
 }

@@ -96,8 +96,8 @@ func detectRigFromPath(townRoot, absPath string) string {
 	candidateRig := parts[0]
 
 	switch candidateRig {
-	// deacon/ is the retired deacon's directory; it holds no rig.
-	case string(RoleMayor), "deacon", ".beads", ".claude", ".git", "plugins":
+	// mayor/ and deacon/ are kept town-level directories; they hold no rig.
+	case "mayor", "deacon", ".beads", ".claude", ".git", "plugins":
 		return ""
 	}
 

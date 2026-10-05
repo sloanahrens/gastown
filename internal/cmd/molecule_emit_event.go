@@ -30,7 +30,7 @@ Per-rig channels ("refinery", "witness") have one consumer per rig, so their
 events are scoped to a rig and stored in ~/gt/events/<channel>/<rig>/. The rig
 comes from --rig, the GT_RIG environment variable, or the rig containing the
 current directory; emitting on a per-rig channel with no rig context is an
-error. Town-global channels (e.g. "mayor") ignore the rig.
+error. Town-global channels ignore the rig.
 
 The witness channel is consumed by the witness *session* rather than by an
 await-event poller — the patrol waits on await-signal (the activity feed), so a
