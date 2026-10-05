@@ -30,9 +30,13 @@ type Hub struct {
 	alerts *Alerter
 	prev   State
 
-	// wake nudges every worker when a page connects after an idle spell, so
-	// the first page does not wait out a whole interval for fresh data.
-	wake chan struct{}
+	// wake releases every parked worker when a page connects after an idle
+	// spell, so the first page does not wait out a whole interval for fresh
+	// data. Closing the channel a worker is parked on is what releases all of
+	// them; a shared channel of tokens released whichever workers happened to
+	// be parked and left the rest to their ticker (gt-faml5).
+	wakeMu sync.Mutex
+	wake   chan struct{}
 
 	detailMu    sync.Mutex
 	detailCache map[string]detailEntry
@@ -67,7 +71,9 @@ func (h *Hub) Run(ctx context.Context) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			h.work(ctx, every, fn)
+			t := time.NewTicker(every)
+			defer t.Stop()
+			h.work(ctx, t.C, every, fn)
 		}()
 	}
 	if h.cfg.Feed != nil {
@@ -112,26 +118,36 @@ func (h *Hub) Run(ctx context.Context) {
 // work runs fn every interval, but only while a page is watching. A page that
 // connects wakes the worker, which runs fn at once if its last run is a whole
 // interval old.
-func (h *Hub) work(ctx context.Context, every time.Duration, fn func()) {
+//
+// A tick is the interval itself, so it runs fn whenever a page is open. Asking
+// due there too compared the wall clock against the last run, which the tick
+// lands on within scheduler jitter: roughly every other tick fell a hair short
+// of a whole interval and was thrown away, halving every reader's real rate
+// (gt-faml5, measured live on the 10s machine worker).
+func (h *Hub) work(ctx context.Context, ticks <-chan time.Time, every time.Duration, fn func()) {
 	var last time.Time
-	t := time.NewTicker(every)
-	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
-		case <-h.wake:
-		}
-		if h.due(&last, every) {
+		case <-ticks:
+			if h.viewers() == 0 {
+				continue
+			}
+			last = h.cfg.Now()
 			fn()
+		case <-h.wakeChan():
+			if h.due(&last, every) {
+				fn()
+			}
 		}
 	}
 }
 
 // due reports whether a worker whose last run was at *last should run now,
 // and if so records the run. It is false when no page is watching, and false
-// when the last run is less than a whole interval old.
+// when the last run is less than a whole interval old. It rate-limits the wake
+// path only: a tick has already waited out its interval.
 func (h *Hub) due(last *time.Time, every time.Duration) bool {
 	if h.viewers() == 0 {
 		return false
@@ -148,6 +164,25 @@ func (h *Hub) viewers() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.subs)
+}
+
+// wakeAll releases every worker parked on the wake channel by closing it, and
+// leaves a fresh one for the next connect to close.
+func (h *Hub) wakeAll() {
+	h.wakeMu.Lock()
+	defer h.wakeMu.Unlock()
+	close(h.wake)
+	h.wake = make(chan struct{})
+}
+
+// wakeChan is the wake channel a worker parks on. Reading it under the same
+// lock as the swap is what keeps a worker from parking on a channel that was
+// already closed: the closed one is released at once, and a worker that reaches
+// this after the swap has just finished an iteration, so it is already current.
+func (h *Hub) wakeChan() <-chan struct{} {
+	h.wakeMu.Lock()
+	defer h.wakeMu.Unlock()
+	return h.wake
 }
 
 // Subscribe registers a page and returns the frames that bring it up to date.
@@ -167,15 +202,9 @@ func (h *Hub) Subscribe() (*Sub, [][]byte) {
 		initial = append(initial, frame("backlog", h.ring))
 	}
 	h.mu.Unlock()
-	// Wake every worker; a non-blocking send per worker is enough because
-	// each one re-checks its own age. The count covers the workers Config can
-	// start, with room to spare.
-	for i := 0; i < 16; i++ {
-		select {
-		case h.wake <- struct{}{}:
-		default:
-		}
-	}
+	// One close releases every worker, whatever race it is in; each re-checks
+	// its own age.
+	h.wakeAll()
 	return s, initial
 }
 
@@ -312,6 +341,9 @@ func (h *Hub) pollForgejo() {
 	if f == nil {
 		return
 	}
+	// The hub owns the poll cadence, so it is what tells the page when a
+	// snapshot has gone longer than two intervals without a refresh (gt-faml5).
+	f.EverySec = h.cfg.ForgejoEvery.Seconds()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.Forgejo = f

@@ -38,6 +38,17 @@ type ForgejoEvent struct {
 type ForgejoFeed struct {
 	Events []ForgejoEvent `json:"events"`
 	Error  string         `json:"error,omitempty"`
+	// At is when these events were read, and stays put across a failed refresh:
+	// it is the age of the snapshot, which the page needs to tell a
+	// current-but-quiet feed from a stale pane (gt-faml5).
+	At time.Time `json:"at"`
+	// EverySec is the panel's poll interval in seconds, set by the hub that
+	// polls. The page marks the snapshot stale past two of them.
+	EverySec float64 `json:"every_seconds,omitempty"`
+	// Missing names the repos the viewer could not read. Naming them is what
+	// keeps a rig whose repository is invisible to the viewer from reading as a
+	// rig with no landings (gt-faml5).
+	Missing []string `json:"missing,omitempty"`
 }
 
 // errRepoName is a repo name that is not owner/name. The panel shows it as the
@@ -56,6 +67,7 @@ type forgejoFeeds interface {
 type ForgejoReader struct {
 	api   forgejoFeeds
 	repos []string // owner/name overrides; empty reads the viewer's whole list
+	now   func() time.Time
 
 	mu   sync.Mutex
 	last *ForgejoFeed
@@ -64,12 +76,12 @@ type ForgejoReader struct {
 // NewForgejoReader builds a reader over api. A non-empty repos is the exact
 // owner/name list to read instead of every repo the viewer can see.
 func NewForgejoReader(api forgejoFeeds, repos []string) *ForgejoReader {
-	return &ForgejoReader{api: api, repos: append([]string(nil), repos...)}
+	return &ForgejoReader{api: api, repos: append([]string(nil), repos...), now: time.Now}
 }
 
 // Read refreshes the feed. A refresh that fails returns the last good feed
-// with the error class set; one that fails before any good read returns the
-// error alone.
+// with the error class set and its read time unchanged; one that fails before
+// any good read returns the error alone.
 func (r *ForgejoReader) Read() *ForgejoFeed {
 	feed, err := r.fetch()
 	r.mu.Lock()
@@ -79,8 +91,11 @@ func (r *ForgejoReader) Read() *ForgejoFeed {
 		if r.last == nil {
 			return &ForgejoFeed{Events: []ForgejoEvent{}, Error: class}
 		}
-		return &ForgejoFeed{Events: r.last.Events, Error: class}
+		// The last good read keeps its own age: a pane serving it is stale, and
+		// saying when it was read is the only way the page can show that.
+		return &ForgejoFeed{Events: r.last.Events, Error: class, At: r.last.At, Missing: r.last.Missing}
 	}
+	feed.At = r.now()
 	r.last = feed
 	return feed
 }
@@ -106,6 +121,7 @@ func (r *ForgejoReader) fetch() (*ForgejoFeed, error) {
 	}
 
 	var all []forgejo.Activity
+	var missing []string
 	for _, name := range names {
 		owner, repo, ok := strings.Cut(name, "/")
 		if !ok || owner == "" || repo == "" {
@@ -113,11 +129,31 @@ func (r *ForgejoReader) fetch() (*ForgejoFeed, error) {
 		}
 		acts, err := r.api.ListRepoActivities(ctx, owner, repo, forgejoKept)
 		if err != nil {
+			// One repo the viewer cannot read must not cost the panel the repos
+			// it can: the feeds of the read repos still merge, and the rest are
+			// named (gt-faml5).
+			if invisibleToViewer(err) {
+				missing = append(missing, name)
+				continue
+			}
 			return nil, err
 		}
 		all = append(all, acts...)
 	}
-	return MergeForgejoActivities(all), nil
+	feed := MergeForgejoActivities(all)
+	feed.Missing = missing
+	return feed, nil
+}
+
+// invisibleToViewer reports the answer Forgejo gives for a repository the token
+// is not allowed to see. Forgejo hides the repository's existence rather than
+// admitting it is there, so this is a 404 (verified against 16.0.5, gt-faml5).
+func invisibleToViewer(err error) bool {
+	var api *forgejo.APIError
+	if !errors.As(err, &api) {
+		return false
+	}
+	return api.StatusCode == http.StatusNotFound || api.StatusCode == http.StatusForbidden
 }
 
 // MergeForgejoActivities merges the activities of every repo into one feed:
