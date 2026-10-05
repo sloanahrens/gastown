@@ -636,8 +636,13 @@ func (d *Daemon) verifyForgejoGate(rigName string, gate *land.CandidateGate, rep
 	}
 }
 
-// lastLandedCandidate is the newest commit the worker itself landed, whose
-// pushed candidate the gate workflow tested: what the context check reads.
+// lastLandedCandidate is the newest commit the worker itself landed through
+// the candidate gate, whose pushed candidate the gate workflow tested: what
+// the context check reads. A landing the local gate cleared is not evidence
+// for the check — its commit never went up as a candidate, so the workflow
+// test says nothing about it. A rig that has just cut over has only such
+// records, and the check must read that as "no landed candidate yet" rather
+// than flag the workflow as missing from a pre-cutover landing (gt-fn9e6.24).
 func lastLandedCandidate(landings *land.LandingsFile, logf func(string, ...any), rigName string) string {
 	recs, err := landings.Recent(forgejoVerifyWindow)
 	if err != nil {
@@ -645,11 +650,37 @@ func lastLandedCandidate(landings *land.LandingsFile, logf func(string, ...any),
 		return ""
 	}
 	for i := len(recs) - 1; i >= 0; i-- {
-		if recs[i].Route == "" || recs[i].Route == "daemon" {
-			return recs[i].LandedCommit
+		if recs[i].Route != "" && recs[i].Route != "daemon" {
+			continue
 		}
+		if !landedThroughCandidateGate(recs[i].GateResult) {
+			continue
+		}
+		return recs[i].LandedCommit
 	}
 	return ""
+}
+
+// landedThroughCandidateGate reports whether a landing record's gate result
+// shows the candidate gate ran. The Forgejo path records exactly one gate
+// step, named ci ("pass (ci exit 0 1m30s)"), while a landing the local gate
+// cleared names lint, gate, test or shell. The record keeps only the rendered
+// summary (land.GateResult.Summary), so the step list is read back out of it.
+func landedThroughCandidateGate(gateResult string) bool {
+	open := strings.Index(gateResult, "(")
+	if open < 0 {
+		return false
+	}
+	end := strings.Index(gateResult[open:], ")")
+	if end < 0 {
+		return false
+	}
+	for _, step := range strings.Split(gateResult[open+1:open+end], ", ") {
+		if strings.HasPrefix(step, land.StageCI+" exit ") {
+			return true
+		}
+	}
+	return false
 }
 
 // forgejoGateAlert raises the startup context check's finding: the operator

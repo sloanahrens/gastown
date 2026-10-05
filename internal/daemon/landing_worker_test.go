@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -757,8 +759,16 @@ func TestNewRigLandingWorker_ForgejoWithoutATokenFailsClosed(t *testing.T) {
 	}
 }
 
+// candidateGateResult and localGateResult are the two shapes a landing
+// record's gate_result takes: the Forgejo path records one step named ci, the
+// local gate names lint and gate (gt-fn9e6.24).
+const (
+	candidateGateResult = "pass (ci exit 0 1m30s)"
+	localGateResult     = "pass (lint exit 0 16s, gate exit 0 1m44s)"
+)
+
 // TestLastLandedCandidateReadsTheWorkersOwnLandings: the startup context check
-// reads commits the worker itself landed, whose candidates CI tested.
+// reads commits the worker itself landed whose candidates CI tested.
 func TestLastLandedCandidateReadsTheWorkersOwnLandings(t *testing.T) {
 	t.Parallel()
 	landings, err := land.RigLandingsFile(t.TempDir(), "testrig")
@@ -769,15 +779,94 @@ func TestLastLandedCandidateReadsTheWorkersOwnLandings(t *testing.T) {
 		t.Fatalf("lastLandedCandidate on an empty file = %q, want empty", got)
 	}
 	for _, rec := range []land.LandingRecord{
-		{BeadID: "gt-a", Route: "daemon", LandedCommit: "aaaa"},
-		{BeadID: "gt-b", Route: "crew", LandedCommit: "bbbb"},
-		{BeadID: "gt-c", Route: "daemon", LandedCommit: "cccc"},
+		{BeadID: "gt-a", Route: "daemon", GateResult: candidateGateResult, LandedCommit: "aaaa"},
+		{BeadID: "gt-b", Route: "crew", GateResult: candidateGateResult, LandedCommit: "bbbb"},
+		{BeadID: "gt-c", Route: "daemon", GateResult: candidateGateResult, LandedCommit: "cccc"},
 	} {
 		if err := landings.Append(rec); err != nil {
 			t.Fatalf("Append: %v", err)
 		}
 	}
 	if got := lastLandedCandidate(landings, t.Logf, "testrig"); got != "cccc" {
-		t.Fatalf("lastLandedCandidate = %q, want the newest daemon landing cccc", got)
+		t.Fatalf("lastLandedCandidate = %q, want the newest daemon landing whose candidate the gate tested", got)
+	}
+}
+
+// TestLastLandedCandidateIgnoresLocalGateLandings: a rig that has just cut
+// over holds only pre-cutover records, which never went up as candidates, so
+// the check has no evidence commit and must stay quiet.
+func TestLastLandedCandidateIgnoresLocalGateLandings(t *testing.T) {
+	t.Parallel()
+	landings, err := land.RigLandingsFile(t.TempDir(), "testrig")
+	if err != nil {
+		t.Fatalf("RigLandingsFile: %v", err)
+	}
+	for _, rec := range []land.LandingRecord{
+		{BeadID: "gt-a", Route: "daemon", GateResult: localGateResult, LandedCommit: "aaaa"},
+		{BeadID: "gt-b", Route: "daemon", GateResult: localGateResult, LandedCommit: "bbbb"},
+	} {
+		if err := landings.Append(rec); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	if got := lastLandedCandidate(landings, t.Logf, "testrig"); got != "" {
+		t.Fatalf("lastLandedCandidate = %q, want empty when only local-gate landings exist", got)
+	}
+}
+
+// TestLastLandedCandidateSkipsALaterLocalGateLanding: a mixed history reads
+// the newest candidate-gate landing, not a later local-gate one: the local
+// landing's commit never went up as a candidate, so it is not evidence.
+func TestLastLandedCandidateSkipsALaterLocalGateLanding(t *testing.T) {
+	t.Parallel()
+	landings, err := land.RigLandingsFile(t.TempDir(), "testrig")
+	if err != nil {
+		t.Fatalf("RigLandingsFile: %v", err)
+	}
+	for _, rec := range []land.LandingRecord{
+		{BeadID: "gt-a", Route: "daemon", GateResult: localGateResult, LandedCommit: "aaaa"},
+		{BeadID: "gt-b", Route: "daemon", GateResult: candidateGateResult, LandedCommit: "bbbb"},
+		{BeadID: "gt-c", Route: "daemon", GateResult: localGateResult, LandedCommit: "cccc"},
+	} {
+		if err := landings.Append(rec); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	if got := lastLandedCandidate(landings, t.Logf, "testrig"); got != "bbbb" {
+		t.Fatalf("lastLandedCandidate = %q, want the candidate-gate landing bbbb, not the later local-gate cccc", got)
+	}
+}
+
+// TestVerifyForgejoGateStaysQuietWithoutACandidateLanding: a rig with only
+// local-gate records logs the existing "no landed candidate yet" line and
+// raises nothing, rather than flagging the workflow as missing from a
+// pre-cutover landing.
+func TestVerifyForgejoGateStaysQuietWithoutACandidateLanding(t *testing.T) {
+	t.Parallel()
+	landings, err := land.RigLandingsFile(t.TempDir(), "testrig")
+	if err != nil {
+		t.Fatalf("RigLandingsFile: %v", err)
+	}
+	for _, rec := range []land.LandingRecord{
+		{BeadID: "gt-a", Route: "daemon", GateResult: localGateResult, LandedCommit: "aaaa"},
+		{BeadID: "gt-b", Route: "daemon", GateResult: localGateResult, LandedCommit: "bbbb"},
+	} {
+		if err := landings.Append(rec); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+
+	rec := notifyfake.New()
+	var logged bytes.Buffer
+	d := &Daemon{logger: log.New(&logged, "", 0), notifier: rec}
+	// The no-candidate path returns before the gate is used, so a nil gate
+	// proves the check did not read the landing's tree.
+	d.verifyForgejoGate("testrig", nil, "", "gate", landings)
+
+	if !strings.Contains(logged.String(), "no landed candidate yet") {
+		t.Errorf("log %q does not say there is no landed candidate yet", logged.String())
+	}
+	if esc := rec.Escalations(); len(esc) != 0 {
+		t.Errorf("escalations = %+v, want none for a rig with no candidate-gate landing", esc)
 	}
 }
