@@ -182,20 +182,64 @@ func (d *Daemon) tierSweepCoversRig(rig string) bool {
 	return false
 }
 
+// tierSweepPromoterFor resolves rig's promotion owner: a test's seam when it
+// set one, else the daemon's own builder over the rig's repository and forgejo
+// block. Nil means the rig has no promote_target and does not promote.
+func (d *Daemon) tierSweepPromoterFor(rigName, repo string) *promote.Promoter {
+	build := d.tierSweepSeams.promote
+	if build == nil {
+		build = d.tierSweepPromoter
+	}
+	return build(rigName, repo)
+}
+
 // tierSweepPromote advances rig's GitHub main to sha, the fully green sweep's
 // commit, through the same promotion owner the post-land verdict uses: one
 // push path, one lock, one record (gt-fn9e6.38). A rig with no promote_target
 // has no promoter and nothing happens; a failure is recorded in the rig's
 // main state, exactly as it is for a green post-land verdict.
 func (d *Daemon) tierSweepPromote(rigName, repo, sha string) {
-	build := d.tierSweepSeams.promote
-	if build == nil {
-		build = d.tierSweepPromoter
+	if p := d.tierSweepPromoterFor(rigName, repo); p != nil {
+		d.tierSweepPromoteWith(rigName, p, sha)
 	}
-	p := build(rigName, repo)
+}
+
+// tierSweepRetryOwedPromotion retries the promotion a green sweep owed, from
+// the cycle that skipped on unchanged main. Such a cycle runs no tier at all,
+// so a promotion that failed when the sweep first went green - an unreachable
+// target, a rejected push, a lock another promoter held - or that the rig only
+// gained afterwards would wait for main to move, indefinitely on a quiet rig.
+// The rig's own record names the commit the target holds, so this promotes
+// exactly when it trails the sweep's LastGreenSHA; a rig that does not promote
+// and a record already at the green commit both do nothing (gt-fn9e6.52).
+func (d *Daemon) tierSweepRetryOwedPromotion(rigName, repo, sha string) {
+	if sha == "" {
+		// No green commit is recorded, so no promotion can be owed. The skip
+		// guard already refuses an empty LastGreenSHA; this keeps the retry
+		// safe on its own terms.
+		return
+	}
+	state := fileMainState{path: RedMainStatePath(d.config.TownRoot, rigName)}
+	st, err := state.Load()
+	if err != nil {
+		d.logger.Printf("tier_sweep: %s: reading the main state: %v", rigName, err)
+		return
+	}
+	if st.State.LastPromoted == sha {
+		return
+	}
+	p := d.tierSweepPromoterFor(rigName, repo)
 	if p == nil {
 		return
 	}
+	d.logger.Printf("tier_sweep: %s: promotion of %s is still owed; retrying it from the unchanged-main skip", rigName, shortSHA(sha))
+	d.tierSweepPromoteWith(rigName, p, sha)
+}
+
+// tierSweepPromoteWith runs one promotion over an already-resolved promoter
+// and records its outcome in the rig's main state. A failure stays recorded,
+// exactly as a green post-land verdict's does.
+func (d *Daemon) tierSweepPromoteWith(rigName string, p *promote.Promoter, sha string) {
 	state := fileMainState{path: RedMainStatePath(d.config.TownRoot, rigName)}
 	st, err := state.Load()
 	if err != nil {
@@ -365,6 +409,10 @@ func (d *Daemon) runTierSweepRig(ctx context.Context, cycle *dogCycle, rig strin
 		state = tierSweepState{}
 	}
 	if sha != "" && sha == state.LastGreenSHA {
+		// Nothing new to sweep, but the promotion the last green sweep named
+		// may still be outstanding: retrying it here is the only place a quiet
+		// rig would ever retry it (gt-fn9e6.52).
+		d.tierSweepRetryOwedPromotion(rig, repo, state.LastGreenSHA)
 		cycle.skipStep(rig, "origin/main "+shortSHA(sha)+" unchanged since the last green sweep")
 		d.logger.Printf("tier_sweep: %s: origin/main %s unchanged since the last green sweep; skipping", rig, shortSHA(sha))
 		return true
