@@ -467,8 +467,6 @@ test-makefile:
 	bash scripts/forgejo-resync_test.sh
 	bash -n scripts/forgejo-cutover.sh
 	bash scripts/forgejo-cutover_test.sh
-	bash -n scripts/forgejo-rollback.sh
-	bash scripts/forgejo-rollback_test.sh
 	bash -n scripts/repo-guards.sh
 	bash scripts/repo-guards_test.sh
 

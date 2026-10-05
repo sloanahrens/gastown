@@ -608,29 +608,29 @@ func TestAttentionLandingStuck(t *testing.T) {
 }
 
 // gt-84gcp, the reported incident: the alarm judges the stage the pass is
-// running, not the whole landing, so a healthy landing that has been gating
-// for eight minutes — inside the gate's own budget — is not an item, and the
-// gate's minutes do not count against the review that follows it.
+// running, not the whole landing, so a healthy landing that has been waiting
+// on CI for eight minutes — inside the CI wait's own budget — is not an item,
+// and the CI minutes do not count against the review that follows it.
 func TestAttentionLandingStuckJudgesTheStage(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
 	f := newAttentionFixture(t, now)
-	gateBudget := f.d.attentionLandingStuckBudget(land.StageGate)
+	ciBudget := f.d.attentionLandingStuckBudget(land.StageCI)
 	omBudget := f.d.attentionLandingStuckBudget(land.StageOM)
 
-	// The incident: eight minutes into the gate, the old flat threshold, is
-	// healthy — the gate may legitimately run its lint, test and shell steps.
+	// The incident: eight minutes into the CI wait, the old flat threshold, is
+	// healthy — the candidate gate may legitimately wait on the runner.
 	f.src.landingState = func(string) landingState {
-		return landingState{bead: "gt-a", since: now.Add(-8 * time.Minute), stage: land.StageGate, stageSince: now.Add(-8 * time.Minute)}
+		return landingState{bead: "gt-a", since: now.Add(-8 * time.Minute), stage: land.StageCI, stageSince: now.Add(-8 * time.Minute)}
 	}
 	if items := f.collect(t, f.src.collectLandingStuck); len(items) != 0 {
-		t.Fatalf("items = %+v, want none for a healthy gate", items)
+		t.Fatalf("items = %+v, want none for a healthy CI wait", items)
 	}
 
 	// A long pipeline is still healthy while the stage it is running is not
-	// wedged: twenty minutes of in-flight time, three of them in the gate.
+	// wedged: twenty minutes of in-flight time, three of them in the CI wait.
 	f.src.landingState = func(string) landingState {
-		return landingState{bead: "gt-a", since: now.Add(-20 * time.Minute), stage: land.StageGate, stageSince: now.Add(-3 * time.Minute)}
+		return landingState{bead: "gt-a", since: now.Add(-20 * time.Minute), stage: land.StageCI, stageSince: now.Add(-3 * time.Minute)}
 	}
 	if items := f.collect(t, f.src.collectLandingStuck); len(items) != 0 {
 		t.Fatalf("items = %+v, want none for a stage inside its budget", items)
@@ -649,27 +649,27 @@ func TestAttentionLandingStuckJudgesTheStage(t *testing.T) {
 		t.Errorf("summary = %q, want it to name the %s stage", items[0].Summary, land.StageOM)
 	}
 
-	// A gate past its own budget is the item.
+	// A CI wait past its own budget is the item.
 	f.src.landingState = func(string) landingState {
-		return landingState{bead: "gt-a", since: now.Add(-20 * time.Minute), stage: land.StageGate, stageSince: now.Add(-gateBudget - time.Minute)}
+		return landingState{bead: "gt-a", since: now.Add(-40 * time.Minute), stage: land.StageCI, stageSince: now.Add(-ciBudget - time.Minute)}
 	}
 	if items := f.collect(t, f.src.collectLandingStuck); len(items) != 1 {
-		t.Fatalf("items = %+v, want one wedged gate", items)
+		t.Fatalf("items = %+v, want one wedged CI wait", items)
 	}
 }
 
 // gt-84gcp: the stage belongs to the bead in flight. Entering a new bead
-// clears it, so the next landing's gate is not judged by the last one's.
+// clears it, so the next landing's CI wait is not judged by the last one's.
 func TestLandingStatesStageFollowsTheBead(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
 	var l landingStates
 	l.setBead("gastown", "gt-a", now)
-	l.setStage("gastown", land.StageGate, now.Add(time.Minute))
+	l.setStage("gastown", land.StageCI, now.Add(time.Minute))
 
 	p := l.get("gastown")
-	if p.stage != land.StageGate || !p.stageSince.Equal(now.Add(time.Minute)) {
-		t.Fatalf("state = %+v, want the gate stage from a minute in", p)
+	if p.stage != land.StageCI || !p.stageSince.Equal(now.Add(time.Minute)) {
+		t.Fatalf("state = %+v, want the CI stage from a minute in", p)
 	}
 
 	l.setBead("gastown", "gt-b", now.Add(2*time.Minute))

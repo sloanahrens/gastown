@@ -30,9 +30,9 @@ For COMPLETED, gt done:
    commit message (a subject line that is itself one is refused)
 3. Runs the local gate on the rebased tree: make presubmit (lint, go build
    ./..., and go test of the packages the branch changed), or the rig's
-   presubmit_command. The landing worker runs the full make gate on the
-   merged tree. A rig without go.mod runs its lint_command, build_command
-   and test_command
+   presubmit_command. The rig's Forgejo CI gate runs the full make gate on
+   the candidate branch after this. A rig without go.mod runs its
+   lint_command, build_command and test_command
 4. Pushes the branch under a lease and reads the tip back
 5. Marks the work bead ready to land (label gt:ready-to-land and a
    READY TO LAND notes block naming branch, head and target)

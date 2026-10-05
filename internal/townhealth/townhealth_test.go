@@ -372,7 +372,12 @@ func TestLandings(t *testing.T) {
 		// A fresh submission on the same quiet rig: green, because the bead
 		// is young however old the rig's last landing is.
 		{Rig: "fresh", Landed: 0, Pending: 2, Oldest: ago(time.Minute), OldestBead: "gt-fresh"},
-		// Inside the gate budget: still a landing, not a queue.
+		// A normal landing: the CI wait plus om review plus the merge takes
+		// 3 to 5 minutes, and the 20 minute CI window dominates the budget, so
+		// a five-minute wait is a healthy landing, not a stuck one
+		// (gt-fn9e6.32).
+		{Rig: "slow", Landed: 1, Pending: 1, Oldest: ago(5 * time.Minute), OldestBead: "gt-slow"},
+		// At the whole stage budget: still a landing, not a queue.
 		{Rig: "gating", Landed: 1, Pending: 1, Oldest: ago(LandingStageBudget), OldestBead: "gt-gating"},
 		// Past the budget plus a pass interval: the queue is the problem.
 		{Rig: "stuck", Landed: 1, Pending: 1, Oldest: ago(LandingWaitBudget + time.Minute), OldestBead: "gt-stuck"},
@@ -384,7 +389,7 @@ func TestLandings(t *testing.T) {
 	if !f.since.Equal(ago(24 * time.Hour)) {
 		t.Errorf("since = %v, want 24h before now", f.since)
 	}
-	for key, want := range map[string]Verdict{"landing/quiet": Green, "landing/fresh": Green, "landing/gating": Degraded, "landing/stuck": Red, "landing/unstamped": Degraded} {
+	for key, want := range map[string]Verdict{"landing/quiet": Green, "landing/fresh": Green, "landing/slow": Green, "landing/gating": Degraded, "landing/stuck": Red, "landing/unstamped": Degraded} {
 		if got := field(t, r, key); got.Verdict != want {
 			t.Errorf("%s = %+v, want %s", key, got, want)
 		}
@@ -392,11 +397,11 @@ func TestLandings(t *testing.T) {
 	if got := field(t, r, "landing/fresh"); got.Value != "2 pending, oldest 1m" {
 		t.Errorf("landing/fresh = %+v, want the oldest wait in the value", got)
 	}
-	if got := field(t, r, "landing/stuck"); !strings.Contains(got.Detail, "gt-stuck") || !strings.Contains(got.Detail, "15m") {
+	if got := field(t, r, "landing/stuck"); !strings.Contains(got.Detail, "gt-stuck") || !strings.Contains(got.Detail, "32m") {
 		t.Errorf("landing/stuck = %+v, want the bead and its wait in the detail", got)
 	}
-	if r.Landed == nil || *r.Landed != 2 {
-		t.Errorf("Landed = %v, want 2", r.Landed)
+	if r.Landed == nil || *r.Landed != 3 {
+		t.Errorf("Landed = %v, want 3", r.Landed)
 	}
 
 	f.landings = append(f.landings, RigLandings{Rig: "broken", Err: errors.New("unreadable")})

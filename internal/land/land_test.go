@@ -35,10 +35,12 @@ type landFixture struct {
 	bd       *beadsfake.Fake
 	gate     *fakeGate
 	review   *fakeReviewer
+	merger   *localMerger
 
 	realPushMain   func(name, body string) string
 	realOriginMain func() string
 	realParents    func(commit string) []string
+	realSetMain    func(commit string)
 }
 
 const fixtureBranch = "polecat/opal/gt-abc+x1"
@@ -84,6 +86,17 @@ func (f *landFixture) pushMain(name, body string) string {
 	return f.git.Commit(f.t, f.origin, "main", "main: "+name, map[string]string{name: body})
 }
 
+// setMain points origin/main at commit: the write the fixture's merger makes
+// where the real one asks Forgejo to fast-forward the target.
+func (f *landFixture) setMain(commit string) {
+	f.t.Helper()
+	if f.git == nil {
+		f.realSetMain(commit)
+		return
+	}
+	f.git.SetRef(f.t, f.origin, "refs/heads/main", commit)
+}
+
 // setBranch points the work branch on origin at a new commit on base with
 // message, carrying the branch's change, and declares it the head.
 func (f *landFixture) setBranch(message string) {
@@ -98,12 +111,63 @@ func (f *landFixture) lander() *Lander {
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	l := &Lander{Repo: f.repo, WorkRoot: f.workRoot, Gate: f.gate, Reviewer: f.review, Beads: f.bd, Landings: lf,
+	if f.merger == nil {
+		f.merger = &localMerger{f: f}
+	}
+	l := &Lander{Repo: f.repo, WorkRoot: f.workRoot, Candidate: &gateCandidate{f: f}, Merger: f.merger,
+		Reviewer: f.review, Beads: f.bd, Landings: lf,
 		Now: func() time.Time { return time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC) }}
 	if f.git != nil {
 		l.openRepo = func(dir string) Repo { return f.git.Open(dir) }
 	}
 	return l
+}
+
+// gateCandidate is the fixture's stand-in for the Forgejo gate: it runs the
+// fixture's fakeGate on the worktree the candidate was cut in and renders its
+// verdict the way a CI run would — passed, failed, or nothing reported.
+type gateCandidate struct {
+	f *landFixture
+}
+
+func (c *gateCandidate) Run(ctx context.Context, _ Repo, dir string, w Work, head string) CandidateResult {
+	res := c.f.gate.Run(ctx, dir)
+	out := CandidateResult{State: CandidatePassed, Context: "ci / gate (push)", SHA: head, Branch: w.Candidate(), Pushed: true}
+	if res.Err != nil {
+		out.State, out.Err = CandidateFailed, res.Err
+		return out
+	}
+	if !res.Passed {
+		out.State, out.Tail = CandidateFailed, res.FailureTail()
+	}
+	return out
+}
+
+func (c *gateCandidate) Discard(_ context.Context, _ Work, _ CandidateResult) {}
+
+// localMerger is the fixture's stand-in for the Forgejo PR merge: it performs
+// the fast-forward the real merger asks Forgejo for — the target's tip becomes
+// the candidate — and reports the race a target that moved under the candidate
+// produces. A test replaces fn to drive a refusal or a read-back failure.
+type localMerger struct {
+	f     *landFixture
+	fn    func(MergeRequest) error
+	calls []MergeRequest
+}
+
+func (m *localMerger) Merge(_ context.Context, req MergeRequest) error {
+	m.calls = append(m.calls, req)
+	if m.fn != nil {
+		return m.fn(req)
+	}
+	// The candidate was merged onto the target's tip, so a target that is no
+	// longer that tip moved under the candidate: the 409 the API reports for
+	// a stale candidate.
+	if got := m.f.originMain(); got != m.f.base {
+		return &RaceError{Target: req.Work.Target, Expected: m.f.base, Actual: got}
+	}
+	m.f.setMain(req.Head)
+	return nil
 }
 
 func (f *landFixture) parents(commit string) []string {
@@ -314,7 +378,7 @@ func TestLandReportsItsStages(t *testing.T) {
 	if _, err := l.Land(context.Background(), f.work); err != nil {
 		t.Fatalf("Land: %v", err)
 	}
-	if want := []string{StageGate, StageOM}; !slices.Equal(stages, want) {
+	if want := []string{StageCI, StageOM}; !slices.Equal(stages, want) {
 		t.Fatalf("stages = %v, want %v", stages, want)
 	}
 }
@@ -521,7 +585,9 @@ func TestLandReadBackFailureWritesNoRecord(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
 	l := f.lander()
-	l.afterPush = func() { f.git.SetRef(t, f.origin, "refs/heads/main", f.base) }
+	// The merge reports success but the target's tip is not the merged commit:
+	// a merge that did not take, which the read-back is there to catch.
+	f.merger.fn = func(MergeRequest) error { return nil }
 	_, err := l.Land(context.Background(), f.work)
 	if !errors.Is(err, ErrReadBack) {
 		t.Fatalf("Land error = %v, want ErrReadBack", err)
@@ -610,8 +676,8 @@ func TestLandGateInfraErrorIsNotARejection(t *testing.T) {
 	f.gate.fn = func(string) GateResult { return GateResult{Err: errors.New("container slot unavailable")} }
 	_, err := f.lander().Land(context.Background(), f.work)
 	var infra *InfraError
-	if !errors.As(err, &infra) || infra.Stage != "gate" {
-		t.Fatalf("Land error = %T %v, want *InfraError at gate", err, err)
+	if !errors.As(err, &infra) || infra.Stage != StageCI {
+		t.Fatalf("Land error = %T %v, want *InfraError at the CI stage", err, err)
 	}
 	f.assertUntouched(t)
 
@@ -655,26 +721,6 @@ func TestLandReviewsOnlyAfterTheGatePasses(t *testing.T) {
 	}
 	_, err := red.lander().Land(context.Background(), red.work)
 	red.assertRejected(t, err, RejectGate, LabelRework)
-}
-
-// TestLandStageTimeoutRejects: a test stage killed by its own timeout rejects
-// the landing as a timeout naming the stage, to a human (the author cannot
-// tell a hang from a loaded host by editing), and om never runs (gt-b5ugw).
-func TestLandStageTimeoutRejects(t *testing.T) {
-	t.Parallel()
-	f := newLandFixture(t)
-	f.gate.fn = func(string) GateResult {
-		return GateResult{Steps: []StepResult{{Name: "lint"}, {Name: "gate", Command: "make gate-test", ExitCode: -1, TimedOut: true, Timeout: 6 * time.Minute}}}
-	}
-	f.review.fn = func(string) (Verdict, error) {
-		t.Error("om ran after a timed-out stage")
-		return Verdict{Verdict: VerdictApprove}, nil
-	}
-	_, err := f.lander().Land(context.Background(), f.work)
-	rej := f.assertRejected(t, err, RejectTimeout, LabelNeedsHuman)
-	if !strings.Contains(rej.Reason, "make gate-test") || !strings.Contains(rej.Reason, "6m0s") {
-		t.Errorf("reason = %q, want the stage and its timeout named", rej.Reason)
-	}
 }
 
 // TestLandOverseerReviewedHeadSkipsOM: a bead whose exact head the overseer
@@ -724,26 +770,6 @@ func TestLandOverseerReviewedHeadSkipsOM(t *testing.T) {
 	if !reviewed {
 		t.Error("om did not run although the overseer reviewed a different head")
 	}
-}
-
-// TestLandLintTimeoutIsInfra: a lint stage over its timeout is waiting on
-// the lint lock, not judging the tree: nothing is written to the bead and the
-// next pass retries (gt-b5ugw review).
-func TestLandLintTimeoutIsInfra(t *testing.T) {
-	t.Parallel()
-	f := newLandFixture(t)
-	f.gate.fn = func(string) GateResult {
-		return GateResult{Steps: []StepResult{{Name: "lint", Command: "make gate-lint", ExitCode: -1, TimedOut: true, Timeout: 2 * time.Minute}}}
-	}
-	_, err := f.lander().Land(context.Background(), f.work)
-	var infra *InfraError
-	if !errors.As(err, &infra) || infra.Stage != "gate" {
-		t.Fatalf("Land error = %T %v, want *InfraError at gate", err, err)
-	}
-	if !errors.Is(err, ErrLintTimeout) {
-		t.Errorf("Land error = %v; want it to wrap ErrLintTimeout so the worker can count it", err)
-	}
-	f.assertUntouched(t)
 }
 
 // TestLandRevertLandsWhenOMHasNoVerdict: a revert of a red main lands a green
@@ -968,71 +994,6 @@ func TestLandRejectionRecordFailuresAreObservable(t *testing.T) {
 				t.Errorf("bead changed although the rejection write failed: status=%s labels=%v", b.Status, b.Labels)
 			}
 		})
-	}
-}
-
-// redShellGate is a merged tree whose gate stages passed and whose shell step
-// failed, naming the scripts tier-sweep reported (gt-vsct7.8).
-func redShellGate(string) GateResult {
-	return GateResult{Steps: []StepResult{
-		{Name: "lint", Command: "make gate-lint"},
-		{Name: "gate", Command: "make gate-test"},
-		{Name: ShellStepName, Command: ShellStepCommand, ExitCode: 1,
-			ShellFailures: []string{"scripts/a_test.sh", "plugins/b_test.sh"},
-			Tail:          "tier-sweep: shell RED passed=8 failed=2 skipped=0 failed: scripts/a_test.sh plugins/b_test.sh (logs /tmp/tier-sweep.aB12)\n"},
-	}}
-}
-
-// TestLandShellTierFailureRejectsAndNamesTheScripts: a red shell step rejects
-// the landing with the scripts the tier named, the flake policy reruns nothing
-// (the step named no Go package), and om never runs (gt-vsct7.8).
-func TestLandShellTierFailureRejectsAndNamesTheScripts(t *testing.T) {
-	t.Parallel()
-	f := newLandFixture(t)
-	f.gate.fn = redShellGate
-	f.review.fn = func(string) (Verdict, error) {
-		t.Error("om ran after a red shell step")
-		return Verdict{Verdict: VerdictApprove}, nil
-	}
-	reran := false
-	l := f.lander()
-	l.Rerun = func(context.Context, string, []string) GateResult {
-		reran = true
-		return GateResult{Passed: true}
-	}
-	_, err := l.Land(context.Background(), f.work)
-	rej := f.assertRejected(t, err, RejectGate, LabelRework)
-	if reran {
-		t.Error("the flake policy reran a step that named no Go package")
-	}
-	for _, want := range []string{"the shell tier failed:", "scripts/a_test.sh", "plugins/b_test.sh"} {
-		if !strings.Contains(rej.Reason, want) {
-			t.Errorf("reason = %q, want it to name %q", rej.Reason, want)
-		}
-	}
-}
-
-// TestLandShellTierTimeoutRejects: the shell step killed by its own timeout
-// takes the existing timeout path - a rejection naming the step, to a human,
-// with om never running (gt-vsct7.8).
-func TestLandShellTierTimeoutRejects(t *testing.T) {
-	t.Parallel()
-	f := newLandFixture(t)
-	f.gate.fn = func(string) GateResult {
-		return GateResult{Steps: []StepResult{
-			{Name: "lint", Command: "make gate-lint"},
-			{Name: "gate", Command: "make gate-test"},
-			{Name: ShellStepName, Command: ShellStepCommand, ExitCode: -1, TimedOut: true, Timeout: 3 * time.Minute},
-		}}
-	}
-	f.review.fn = func(string) (Verdict, error) {
-		t.Error("om ran after a timed-out shell step")
-		return Verdict{Verdict: VerdictApprove}, nil
-	}
-	_, err := f.lander().Land(context.Background(), f.work)
-	rej := f.assertRejected(t, err, RejectTimeout, LabelNeedsHuman)
-	if !strings.Contains(rej.Reason, ShellStepCommand) || !strings.Contains(rej.Reason, "3m0s") {
-		t.Errorf("reason = %q, want the shell step and its timeout named", rej.Reason)
 	}
 }
 

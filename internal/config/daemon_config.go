@@ -604,8 +604,11 @@ type LandingWorkerConfig struct {
 	// string (e.g. "60s"). Default 60s.
 	IntervalStr string `json:"interval,omitempty"`
 
-	// LandTimeoutStr bounds one landing, gate and review included (e.g.
-	// "90m"). Default 90m.
+	// LandTimeoutStr is no longer read. It bounded a landing that ran the
+	// local merged-tree gate; every rig now lands through Forgejo CI, and the
+	// deadline is derived from the CI wait, om_timeout and the merge slack
+	// (gt-fn9e6.26, gt-fn9e6.32). The key still decodes so an existing
+	// daemon.json keeps loading.
 	LandTimeoutStr string `json:"land_timeout,omitempty"`
 
 	// Rigs limits the workers to these rigs. Empty means every known rig.
@@ -626,16 +629,16 @@ type LandingWorkerConfig struct {
 	// gt:needs-human and escalates (gt-b5ugw), except a red-main revert.
 	OMTimeoutStr string `json:"om_timeout,omitempty"`
 
-	// LintTimeoutStr bounds the gate's lint stage (make gate-lint), its
-	// lint-lock wait included (e.g. "2m"). Default 2m. A lint that outlives
-	// it is an infrastructure failure (lock contention, not a verdict): the
-	// next pass retries it (gt-b5ugw).
+	// LintTimeoutStr is no longer read: it bounded the lint stage of the local
+	// merged-tree gate, which is gone (gt-fn9e6.32). A CI gate's timeout is
+	// the CI wait's own. The key still decodes so an existing daemon.json
+	// keeps loading.
 	LintTimeoutStr string `json:"lint_timeout,omitempty"`
 
-	// TestTimeoutStr bounds the gate's test stage (make gate-test: build and
-	// the unit tier), or the whole gate when the rig's gate is one command
-	// (e.g. "6m"). Default 6m. A test stage that outlives it rejects the
-	// landing as a timeout to gt:needs-human and escalates (gt-b5ugw).
+	// TestTimeoutStr is no longer read, for the same reason as
+	// LintTimeoutStr: the local gate whose test stage it bounded is gone
+	// (gt-fn9e6.32). The key still decodes so an existing daemon.json keeps
+	// loading.
 	TestTimeoutStr string `json:"test_timeout,omitempty"`
 
 	// AlarmAfterStr is how long a landing's gate or om stage runs before the

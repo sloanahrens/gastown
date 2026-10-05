@@ -145,11 +145,11 @@ func TestLandingWorkerConfigDefaults(t *testing.T) {
 	if IsPatrolEnabled(cfg, "landing_worker") {
 		t.Fatal("landing_worker enabled with no entry")
 	}
-	if landingWorkerInterval(cfg) != defaultLandingWorkerInterval || landingWorkerLandTimeout(cfg) != landworker.DefaultLandTimeout {
+	if landingWorkerInterval(cfg) != defaultLandingWorkerInterval || landingRigLandTimeout(cfg) != 30*time.Minute {
 		t.Fatal("defaults not applied")
 	}
-	cfg.Patrols.LandingWorker = &LandingWorkerConfig{Enabled: true, IntervalStr: "2m", LandTimeoutStr: "45m", Rigs: []string{"gastown"}}
-	if !IsPatrolEnabled(cfg, "landing_worker") || landingWorkerInterval(cfg) != 2*time.Minute || landingWorkerLandTimeout(cfg) != 45*time.Minute {
+	cfg.Patrols.LandingWorker = &LandingWorkerConfig{Enabled: true, IntervalStr: "2m", Rigs: []string{"gastown"}}
+	if !IsPatrolEnabled(cfg, "landing_worker") || landingWorkerInterval(cfg) != 2*time.Minute {
 		t.Fatal("configured values not applied")
 	}
 	if got := landingWorkerRigs(cfg, []string{"beads", "gastown", "hm"}); len(got) != 1 || got[0] != "gastown" {
@@ -157,27 +157,20 @@ func TestLandingWorkerConfigDefaults(t *testing.T) {
 	}
 }
 
-// TestLandingRigLandTimeout: a rig that lands through Forgejo CI gets a
-// deadline the whole pipeline fits in — the CI wait, the om review and the
-// merge — while a rig without the block keeps the flat land_timeout
-// (gt-fn9e6.26).
+// TestLandingRigLandTimeout: every rig lands through Forgejo CI, so its
+// deadline is the whole pipeline — the CI wait, the om review and the merge —
+// and follows the rig's om_timeout (gt-fn9e6.26, gt-fn9e6.32).
 func TestLandingRigLandTimeout(t *testing.T) {
 	t.Parallel()
 	cfg := &DaemonPatrolConfig{Patrols: &PatrolsConfig{
-		LandingWorker: &LandingWorkerConfig{Enabled: true, LandTimeoutStr: "20m"},
+		LandingWorker: &LandingWorkerConfig{Enabled: true},
 	}}
-	if got, want := landingRigLandTimeout(cfg, false), 20*time.Minute; got != want {
-		t.Fatalf("a rig without a Forgejo block: deadline = %s, want the flat land_timeout %s", got, want)
-	}
-	if got, want := landingRigLandTimeout(cfg, true), 30*time.Minute; got != want {
-		t.Fatalf("a Forgejo rig: deadline = %s, want %s (CI 20m + om 5m + merge slack 5m)", got, want)
+	if got, want := landingRigLandTimeout(cfg), 30*time.Minute; got != want {
+		t.Fatalf("deadline = %s, want %s (CI 20m + om 5m + merge slack 5m)", got, want)
 	}
 	cfg.Patrols.LandingWorker.OMTimeoutStr = "12m"
-	if got, want := landingRigLandTimeout(cfg, true), 37*time.Minute; got != want {
-		t.Fatalf("a Forgejo rig with om_timeout 12m: deadline = %s, want %s", got, want)
-	}
-	if got, want := landingRigLandTimeout(cfg, false), 20*time.Minute; got != want {
-		t.Fatalf("om_timeout moved a rig without a Forgejo block: deadline = %s, want %s", got, want)
+	if got, want := landingRigLandTimeout(cfg), 37*time.Minute; got != want {
+		t.Fatalf("with om_timeout 12m: deadline = %s, want %s", got, want)
 	}
 	// The candidate gate's stage budget follows the CI wait.
 	if got, want := landingCIBudget(), 20*time.Minute+land.DefaultCandidateCallTimeout; got != want {
@@ -742,10 +735,12 @@ func TestNewRigLandingWorker_ForgejoRemoteUnmatchedFailsClosed(t *testing.T) {
 	}
 }
 
-// TestNewRigLandingWorker_NoForgejoConfigKeepsTheLocalGate: a rig with no
-// forgejo block keeps landing through the local gate, which is every rig
-// until a cutover adds one.
-func TestNewRigLandingWorker_NoForgejoConfigKeepsTheLocalGate(t *testing.T) {
+// TestNewRigLandingWorker_NoForgejoConfigFailsClosed: merge_queue.forgejo is
+// mandatory for any rig that lands. The local gate and the force-push are gone
+// (gt-fn9e6.32), so a rig without the block has no landing path at all: it
+// gets no worker and one escalation naming the rig and the file to fix, rather
+// than silently falling back to a path that no longer exists.
+func TestNewRigLandingWorker_NoForgejoConfigFailsClosed(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	const rigName = "testrig"
@@ -755,13 +750,25 @@ func TestNewRigLandingWorker_NoForgejoConfigKeepsTheLocalGate(t *testing.T) {
 	}
 	writeDaemonRigConfigFile(t, rigPath, `{"type":"rig","version":1,"name":"testrig","default_branch":"main"}`)
 
-	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: notifyfake.New()}
-	w, err := d.newRigLandingWorker(rigName)
-	if err != nil {
-		t.Fatalf("newRigLandingWorker: %v", err)
+	rec := notifyfake.New()
+	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: rec}
+	_, err := d.newRigLandingWorker(rigName)
+	if err == nil {
+		t.Fatal("newRigLandingWorker() = nil error for a rig with no merge_queue.forgejo block; want the rig refused")
 	}
-	if lander, ok := w.Lander.(*land.Lander); !ok || lander.Candidate != nil || lander.Merger != nil {
-		t.Fatalf("Lander = %v; want no Forgejo gate or merger without a forgejo block", w.Lander)
+	if !strings.Contains(err.Error(), rigName) || !strings.Contains(err.Error(), "merge_queue.forgejo") {
+		t.Errorf("error %q does not name the rig and the missing block", err)
+	}
+
+	esc := rec.Escalations()
+	if len(esc) != 1 {
+		t.Fatalf("escalations = %+v, want exactly one", esc)
+	}
+	if key := "landing-rig-config:" + rigName; esc[0].Escalation.Fingerprint != key {
+		t.Errorf("escalation fingerprint = %q, want %q", esc[0].Escalation.Fingerprint, key)
+	}
+	if want := filepath.Join(rigPath, "settings", "config.json"); !strings.Contains(esc[0].Escalation.Reason, want) {
+		t.Errorf("escalation reason %q does not name the file to add the block to (%s)", esc[0].Escalation.Reason, want)
 	}
 }
 
@@ -997,39 +1004,6 @@ func TestLandingStuckAlertStaysQuietUnderTheCIWait(t *testing.T) {
 	}
 	if clears := rec.Clears(); len(clears) != 0 {
 		t.Errorf("clears = %+v, want none for an alert that never fired", clears)
-	}
-}
-
-// TestLandingStuckAlertNeedsAForgejoRig: a rig on the local gate has no CI
-// wait to be stuck in, so its landing raises nothing however long it runs
-// (gt-fn9e6.27).
-func TestLandingStuckAlertNeedsAForgejoRig(t *testing.T) {
-	t.Parallel()
-	const rigName = "testrig"
-	townRoot := t.TempDir()
-	rigPath := filepath.Join(townRoot, rigName)
-	if err := os.MkdirAll(filepath.Join(rigPath, ".repo.git"), 0o755); err != nil {
-		t.Fatalf("mkdir .repo.git: %v", err)
-	}
-	writeDaemonRigConfigFile(t, rigPath, `{"type":"rig","version":1,"name":"testrig","default_branch":"main"}`)
-
-	clk := clockwork.NewFakeClockAt(time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC))
-	rec := newSignalingNotifier()
-	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: rec, clock: clk}
-	w, err := d.newRigLandingWorker(rigName)
-	if err != nil {
-		t.Fatalf("newRigLandingWorker: %v", err)
-	}
-
-	w.Active("gt-a")
-	clk.Advance(landingStuckAfter() + time.Hour)
-	w.Active("")
-
-	if esc := rec.Escalations(); len(esc) != 0 {
-		t.Errorf("escalations = %+v, want none for a rig with no Forgejo block", esc)
-	}
-	if clears := rec.Clears(); len(clears) != 0 {
-		t.Errorf("clears = %+v, want none for a key this rig does not own", clears)
 	}
 }
 
