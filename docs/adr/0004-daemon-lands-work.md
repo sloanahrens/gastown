@@ -30,8 +30,9 @@ the bead is re-dispatched to a fresh worker at most twice, then parked with one 
 The daemon also owns red main: the integration tier runs after every landing, a failing package
 is rerun once, one bead is filed per failing package, and a landing that alone separates the last
 green from the red is reverted through `Land()` itself. A failed package that passes on one rerun
-lands and files a flake bead; a test budget overrun never reruns and blocks the landing. Nothing
-lands on a red final gate.
+is flaky and files no bead. Nothing lands on a red candidate gate: the rig's Forgejo CI gate runs
+the rig's gate command on the candidate branch, and the pre-landing flake-rerun policy was removed
+with the local gate (gt-fn9e6.32).
 
 Main is protected server-side on every repository the factory pushes to. The landing worker
 holds the only non-human token allowed to push main, workers can push branches only, and the

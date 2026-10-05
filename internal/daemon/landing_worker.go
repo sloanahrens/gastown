@@ -467,8 +467,6 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Remote:             landingRemote,
 		WorkRoot:           workRoot,
 		Route:              "daemon",
-		Rerun:              landRerun(townRoot, rigName, d.landingLogRoot(rigName)),
-		GateBeads:          landworker.GateBeads{Rig: rigName, Beads: bd},
 		Reviewer:           reviewer,
 		Beads:              bd,
 		Landings:           landings,
@@ -513,14 +511,10 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	// Active callback below touches it.
 	var stuckEnd func()
 	run := postLandRun(repo, workRoot, d.landingLogRoot(rigName), townRoot, rigName, landingRemote, landingWorkerDuration(cfg.PostLandTimeoutStr, defaultPostLandTimeout))
-	// A rig that lands through Forgejo keeps this: the merge happens on the
-	// remote, so the author seat's remote-tracking default branch is stale
-	// until something fetches it (gt-fn9e6.55). A rig on the local gate writes
-	// that ref in its own repository, where every seat already reads it.
-	var refreshAuthorSeat func(polecat string) error
-	if forgejoCfg != nil {
-		refreshAuthorSeat = func(polecat string) error { return d.refreshAuthorSeat(rigName, polecat) }
-	}
+	// Every rig that lands here does so through Forgejo, so the merge happens
+	// on the remote and the author seat's remote-tracking default branch is
+	// stale until something fetches it (gt-fn9e6.55).
+	refreshAuthorSeat := func(polecat string) error { return d.refreshAuthorSeat(rigName, polecat) }
 	mainState := fileMainState{path: RedMainStatePath(townRoot, rigName)}
 	redMain := &landworker.RedMain{
 		Rig:   rigName,
@@ -648,8 +642,8 @@ const forgejoVerifyWindow = 20
 // newForgejoLanding builds the Forgejo gate and PR merger a cut-over rig lands
 // through and checks the gate's required context against the rig's own
 // history. A rig whose merge_queue.forgejo block is unusable (no readable
-// remote, no landing bot token) fails construction: CI is that rig's only
-// landing path, so running the local gate instead would bypass the cutover.
+// remote, no landing bot token) fails construction: Forgejo CI is that rig's
+// only landing path (gt-fn9e6.32).
 //
 // One client serves both halves — the same landing bot pushes the candidate,
 // posts om's verdict and merges the PR (design, "Bots and tokens").
@@ -940,31 +934,6 @@ func landingLogDir(ctx context.Context, logRoot, dir string) string {
 		return filepath.Join(logRoot, id)
 	}
 	return filepath.Join(logRoot, filepath.Base(filepath.Dir(dir)))
-}
-
-// landRerun is Land's flake-policy rerun: only the failed packages, once,
-// in the merged tree, in the gate's tier. `make gate` is the unit tier
-// (containers off, no slot). Any other gate may have run containers, so its
-// packages rerun in the full tier under the container slot: a superset of
-// what the gate ran, never less.
-func landRerun(townRoot, rigName, logRoot string) func(context.Context, string, []string) land.GateResult {
-	return func(ctx context.Context, dir string, pkgs []string) land.GateResult {
-		mq := rig.ResolveMergeQueueConfig(townRoot, rigName)
-		gate := land.LandGate(dir, mq)
-		cmd, err := rerunCommand(!gate.UnitTier(), pkgs...)
-		if err != nil {
-			return land.GateResult{Err: err}
-		}
-		// Named "test" so WithSlot holds the container slot around it; the
-		// unit tier needs none.
-		cg := land.CommandGate{Steps: []land.Step{{Name: "test", Command: cmd}}}
-		if strings.Contains(cmd, "GT_TEST_DOCKER=1") {
-			cg = land.WithSlot(cg, townRoot, rigName+"/landing")
-		}
-		// Beside the gate's own log for this landing, as test.log.
-		cg.LogDir = filepath.Join(landingLogDir(ctx, logRoot, dir), "rerun")
-		return cg.Run(ctx, dir)
-	}
 }
 
 // rigPostLandCommand is merge_queue.post_land_command from the rig's own

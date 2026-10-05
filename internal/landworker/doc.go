@@ -8,7 +8,4 @@
 // repair of a landing whose record was left incomplete, the rework comment on
 // a rejection, the polecat's intent record, backoff after infrastructure
 // failures, and the annotations a human needs when only a human can proceed.
-//
-// The flake policy (gt-v4ssj.5) lives in Land, the one gate path; this
-// package only files its beads (GateBeads).
 package landworker

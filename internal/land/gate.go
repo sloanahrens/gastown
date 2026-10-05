@@ -23,12 +23,11 @@ import (
 
 // Gate runs the checks a tree must pass. It is the one seam both sides of a
 // landing use: gt done runs it on the author's rebased branch before pushing
-// (the local pre-submit), and Land runs it on the merged tree before pushing
-// the target. D9 replaces the step list with `make gate`; callers do not
-// change.
+// (the local pre-submit), and a cut-over rig's candidate gate runs the rig's
+// gate command on the merged tree in Forgejo CI (candidate.go). D9 replaces
+// the step list with `make gate`; callers do not change.
 //
-// A Gate never retries. Land's flake policy (flake.go) reads per-package
-// results from GateResult and decides reruns itself.
+// A Gate never retries: a red gate is the verdict.
 type Gate interface {
 	Run(ctx context.Context, dir string) GateResult
 }
@@ -52,13 +51,6 @@ type StepResult struct {
 	Tail string
 	// Packages are the Go packages the step reported as ok or FAIL, in order.
 	Packages []PackageResult
-	// FailedTests are the top-level tests go test reported as --- FAIL, each
-	// under the package whose FAIL line followed it.
-	FailedTests []FailedTest
-	// BudgetOverruns are the packages the testpolicy budget runner failed on
-	// a "BUDGET:" line (over the user-CPU budget, or CPU time unrecorded).
-	// A "BUDGET (reported only ...)" line fails nothing and is not one.
-	BudgetOverruns []BudgetOverrun
 	// Warnings are the step's "gate: WARNING" lines, in order. They name a
 	// host condition that slowed the gate without failing it (the exec-tax
 	// preflight, gt-2ycne.1); the landing record keeps them, so a slow
@@ -74,23 +66,6 @@ type StepResult struct {
 	TimedOut bool
 	// Timeout is the step's own bound, for the rejection that names it.
 	Timeout time.Duration
-}
-
-// FailedTest is one failing top-level test in `go test` output.
-type FailedTest struct {
-	Package string
-	Test    string
-	// Duration is how long the test took, from the "(0.01s)" go test printed
-	// on its "--- FAIL" line; zero when the line named no duration. A long
-	// first failure points at a setup stall rather than an independent flake
-	// (gt-cffxl).
-	Duration time.Duration
-}
-
-// BudgetOverrun is one failing "BUDGET:" line of the budget runner.
-type BudgetOverrun struct {
-	Package string
-	Line    string
 }
 
 // PackageResult is one package's line in `go test` output.
@@ -346,8 +321,8 @@ var (
 // LandGate is the landed tree's gate command, read from the rig's settings:
 // merge_queue.gate when set, else `make gate` when the Makefile has that
 // target, else `make test`. It names what the rig's Forgejo gate workflow runs
-// and what the flake policy's rerun reruns; the landing worker no longer runs
-// it itself (gt-fn9e6.32). Only the `make test` fallback needs the container
+// on the candidate branch; the landing worker no longer runs it itself
+// (gt-fn9e6.32). Only the `make test` fallback needs the container
 // slot; its step is named "test", so WithSlot puts that step under the slot
 // and nothing else. A configured gate that needs a slot holds it itself.
 //
@@ -630,19 +605,17 @@ func (g CommandGate) runStep(parent context.Context, dir string, run runFunc, s 
 		code, err = attempt()
 	}
 	out := buf.String()
-	pkgs, tests := parseGoTestOutput(out)
+	pkgs := parseGoTestOutput(out)
 	shells := parseShellTierFailures(out)
 	res.Steps = append(res.Steps, StepResult{
-		Name:           s.Name,
-		Command:        s.Command,
-		ExitCode:       code,
-		Elapsed:        time.Since(start),
-		Tail:           lastLines(out, gateTailLines),
-		Packages:       pkgs,
-		FailedTests:    tests,
-		BudgetOverruns: parseBudgetOverruns(out),
-		Warnings:       parseWarnings(out),
-		ShellFailures:  shells,
+		Name:          s.Name,
+		Command:       s.Command,
+		ExitCode:      code,
+		Elapsed:       time.Since(start),
+		Tail:          lastLines(out, gateTailLines),
+		Packages:      pkgs,
+		Warnings:      parseWarnings(out),
+		ShellFailures: shells,
 	})
 	if s.Timeout > 0 && errors.Is(ctx.Err(), context.DeadlineExceeded) && parent.Err() == nil {
 		// Its own timeout, not the landing's: the step was killed, and that
@@ -679,56 +652,22 @@ func (g CommandGate) runStep(parent context.Context, dir string, run runFunc, s 
 var packageLineRE = regexp.MustCompile(`^(ok|FAIL)\s+(\S+)(\s|$)`)
 
 // failedTestRE matches a "--- FAIL: TestName (0.01s)" line, subtests
-// (indented, "TestName/sub") included, and captures the duration go test
-// prints in parentheses (absent on some lines).
+// (indented, "TestName/sub") included. The candidate gate uses it to find a CI
+// log's failure blocks (candidate.go); the duration it captures is not read.
 var failedTestRE = regexp.MustCompile(`^\s*--- FAIL: (\S+)(?: \(([0-9.]+)s\))?`)
 
-// parseGoTestOutput reads go test's text output: each package's summary line
-// and the top-level tests that failed in it. go test (and the budget runner)
-// print a package's output in one block ending in its summary line, so a
-// --- FAIL line belongs to the next FAIL line's package.
-func parseGoTestOutput(out string) ([]PackageResult, []FailedTest) {
-	var (
-		pkgs    []PackageResult
-		tests   []FailedTest
-		pending []FailedTest
-	)
+// parseGoTestOutput reads go test's text output: each package's summary line,
+// ok or FAIL.
+func parseGoTestOutput(out string) []PackageResult {
+	var pkgs []PackageResult
 	for _, line := range strings.Split(out, "\n") {
-		if m := failedTestRE.FindStringSubmatch(line); m != nil {
-			name, _, _ := strings.Cut(m[1], "/")
-			if !slices.ContainsFunc(pending, func(ft FailedTest) bool { return ft.Test == name }) {
-				pending = append(pending, FailedTest{Test: name, Duration: parseTestDuration(m[2])})
-			}
-			continue
-		}
 		m := packageLineRE.FindStringSubmatch(line)
 		if m == nil {
 			continue
 		}
-		passed := m[1] == "ok"
-		pkgs = append(pkgs, PackageResult{Package: m[2], Passed: passed})
-		if !passed {
-			for _, ft := range pending {
-				ft.Package = m[2]
-				tests = append(tests, ft)
-			}
-		}
-		pending = nil
+		pkgs = append(pkgs, PackageResult{Package: m[2], Passed: m[1] == "ok"})
 	}
-	return pkgs, tests
-}
-
-// parseTestDuration turns the "(0.01s)" a "--- FAIL" line carried (captured
-// without its unit) into a duration; absent or unparsable is zero.
-func parseTestDuration(secs string) time.Duration {
-	if secs == "" {
-		return 0
-	}
-	d, err := time.ParseDuration(secs + "s")
-	if err != nil {
-		return 0
-	}
-	return d
+	return pkgs
 }
 
 // parseShellTierFailures is the scripts the tier sweep's summary line named,
@@ -743,10 +682,6 @@ func parseShellTierFailures(out string) []string {
 	return names
 }
 
-// budgetLineRE matches the budget runner's failing lines, "BUDGET: <pkg>
-// used ..." and "BUDGET: <pkg> passed but its CPU time was not recorded".
-var budgetLineRE = regexp.MustCompile(`^BUDGET: (\S+) `)
-
 // warningLineRE matches a step's own warnings, "gate: WARNING <text>". The
 // text after the marker is kept whole; a step that warns in another shape is
 // not a warning this reads.
@@ -760,16 +695,6 @@ func parseWarnings(out string) []string {
 		}
 	}
 	return warns
-}
-
-func parseBudgetOverruns(out string) []BudgetOverrun {
-	var over []BudgetOverrun
-	for _, line := range strings.Split(out, "\n") {
-		if m := budgetLineRE.FindStringSubmatch(line); m != nil {
-			over = append(over, BudgetOverrun{Package: m[1], Line: strings.TrimSpace(line)})
-		}
-	}
-	return over
 }
 
 func lastLines(s string, n int) string {

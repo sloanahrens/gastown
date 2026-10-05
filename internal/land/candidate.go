@@ -30,8 +30,8 @@ const (
 	// DefaultCandidateWaitTimeout bounds the whole wait for a verdict: the CI
 	// wait. A gate here takes 30 seconds to 3 minutes, so 20 minutes is a hung
 	// or lost runner, not slow work. The landing's own deadline has to outlive
-	// it (the daemon's landingWorkerLandTimeout), or this window is unreachable
-	// (gt-fn9e6.26).
+	// it (the daemon's landingRigLandTimeout: this wait, plus the om timeout,
+	// plus the merge slack), or this window is unreachable (gt-fn9e6.26).
 	DefaultCandidateWaitTimeout = 20 * time.Minute
 	// candidateTailBytes bounds the job log fetched for a red verdict; the
 	// rework note's excerpt is built from it.
@@ -215,8 +215,9 @@ type Candidate interface {
 }
 
 // CandidateGate pushes a landing's merge candidate as land/<bead> and reads
-// the gate workflow's verdict on that commit from Forgejo. It replaces the
-// local Gate once a rig has a merge_queue.forgejo block.
+// the gate workflow's verdict on that commit from Forgejo. It is the gate
+// path: the local gate it replaced was removed once every rig was cut over
+// (gt-fn9e6.32).
 type CandidateGate struct {
 	// Client is the Forgejo API.
 	Client CandidateStatus

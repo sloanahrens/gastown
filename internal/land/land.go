@@ -119,13 +119,6 @@ type Lander struct {
 	// removed) past which an om execution error is reported as the diff being
 	// too large for om. Zero means DefaultOMDiffTooLargeLines (gt-hhid7).
 	OMDiffTooLargeLines int
-	// Rerun reruns only pkgs' tests, once, in the merged tree at dir: the
-	// flake policy's rerun (flake.go). nil means a red gate is final.
-	Rerun func(ctx context.Context, dir string, pkgs []string) GateResult
-	// GateBeads files the flake policy's beads: one per flaky test (or one
-	// per package when MinPackageFlakeTests or more of its tests failed
-	// together), one per package over the test budget. nil logs them only.
-	GateBeads GateBeads
 	// Slow reports a gate or om stage that runs past its threshold; nil
 	// reports nothing (gt-lcu5p).
 	Slow *SlowAlarm
@@ -150,10 +143,6 @@ type Result struct {
 	// RiskPathsFile at Base. They label the work bead and are written to the
 	// landing record; they never reject or delay the landing (gt-vsct7.4).
 	RiskPaths []string
-	// Rerun and Flaky are set when the gate was red and the flake policy's
-	// rerun of the failed packages passed.
-	Rerun *GateResult
-	Flaky []Flake
 }
 
 // RejectionKind says what about the work stopped it from landing.
@@ -630,8 +619,7 @@ func (l *Lander) now() time.Time {
 // through the race path; a 405 is a refusal for a human, never a race; a
 // required status a user posted is a rejection for a human, never a merge.
 //
-// A red gate goes through the flake policy (flake.go) before it is a
-// rejection.
+// A red gate is a rejection: nothing lands on a red candidate (gt-fn9e6.32).
 //
 // Errors: *Rejection (written to the bead), *RaceError, *InfraError (nothing
 // written), ErrNotReady, *RecordError (landed, record incomplete).
@@ -772,26 +760,14 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		return Result{}, &InfraError{Stage: "gate", Err: gateRes.Err}
 	}
 	if !gateRes.Passed {
-		fv, err := l.applyFlakePolicy(ctx, dir, w, merged, gateRes)
-		if err != nil {
-			return Result{}, err
+		reason, tail := "gate failed on the merged tree: "+gateRes.Summary(), gateRes.FailureTail()
+		if len(gateRes.Steps) > 0 {
+			reason = fmt.Sprintf("the candidate gate %s failed on the merged tree", gateRes.Steps[0].Command)
 		}
-		if len(fv.flakes) == 0 {
-			reason, tail := "gate failed on the merged tree: "+gateRes.Summary(), gateRes.FailureTail()
-			if len(gateRes.Steps) > 0 {
-				reason = fmt.Sprintf("the candidate gate %s failed on the merged tree", gateRes.Steps[0].Command)
-			}
-			if fv.rerun != nil {
-				reason += "; the rerun of the failed package(s) failed too: " + fv.rerun.Summary()
-				tail = fv.rerun.FailureTail()
-			}
-			l.logf("%s: %s", w.BeadID, stageTimes(gateRes, 0, false))
-			l.discardCandidate(ctx, w, candRes)
-			rej := &Rejection{Kind: RejectGate, Rework: true, Reason: reason, GateTail: tail}
-			return Result{}, l.reject(issue, w, rej, nil)
-		}
-		res.Rerun, res.Flaky = fv.rerun, fv.flakes
-		l.logf("%s: the failed package(s) passed their rerun; landing with %d flake(s) filed", w.BeadID, len(fv.flakes))
+		l.logf("%s: %s", w.BeadID, stageTimes(gateRes, 0, false))
+		l.discardCandidate(ctx, w, candRes)
+		rej := &Rejection{Kind: RejectGate, Rework: true, Reason: reason, GateTail: tail}
+		return Result{}, l.reject(issue, w, rej, nil)
 	}
 	var (
 		verdict   Verdict
@@ -1318,6 +1294,13 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 		rej.RecordErr = fmt.Errorf("reopening the bead: %w", err)
 	}
 	return rej
+}
+
+// gateRecord is the gate line of a landing record: the gate's own summary and
+// the warnings it printed about the host it ran on, so a slow landing says
+// why where it is recorded.
+func gateRecord(res Result) string {
+	return strings.Join(append([]string{res.Gate.Summary()}, res.Gate.Warnings()...), "; ")
 }
 
 // record writes the landing: the rig's landings file first (the record that

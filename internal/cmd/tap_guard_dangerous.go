@@ -60,9 +60,10 @@ This guard blocks operations that could cause irreversible damage:
     package and throws the results away, saturating the shared host. Two such
     runs plus a landing gate on 10-03 drove load to 45-55 and stretched the
     gate from ~30s to 5m02s (gt-v4r0x). A seat submits with 'make presubmit',
-    which tests only the packages the branch changed; the landing worker runs
-    the full gate on the merged tree. Scoped runs (./internal/<pkg>/..., a
-    -run filter) and cached 'go test ./...' stay allowed.
+    which tests only the packages the branch changed; the rig's Forgejo CI
+    gate runs the full gate on the candidate branch. Scoped runs
+    (./internal/<pkg>/..., a -run filter) and cached 'go test ./...' stay
+    allowed.
   - a loop or watcher around 'gt done' or 'gt slot': a for/while/until block
     whose body invokes either, an xargs/watch/seq beside either, or a heredoc
     body written to a file that contains either shape. 'gt done' waits for the
@@ -1828,7 +1829,7 @@ func matchesGoCleanSharedCache(tokens []string) (reason, alternative string) {
 const polecatFullSuiteUncachedReason = "'go test -count=1' over the whole module (./...) recompiles every package from scratch and discards each result, saturating the Go build cache and this shared host"
 
 const polecatFullSuiteUncachedAlternative = "Alternative: run 'make presubmit' — it lints, builds, and tests only the packages your branch changed against origin/main " +
-	"(plus the tree-wide guard tests); the landing worker runs the full gate on the merged tree. A cached 'go test ./...' and scoped uncached runs stay allowed."
+	"(plus the tree-wide guard tests); the rig's Forgejo CI gate runs the full gate on the candidate branch. A cached 'go test ./...' and scoped uncached runs stay allowed."
 
 // matchesPolecatFullSuiteUncached blocks an uncached whole-module 'go test'
 // from a polecat session: a 'go test' with '-count=1' set and at least one

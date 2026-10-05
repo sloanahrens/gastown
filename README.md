@@ -85,7 +85,7 @@ The daemon is the only process that kills or restarts an agent. Its `patrol_scan
 
 ### Landing 🛬
 
-When a polecat finishes, `gt done` rebases onto main, runs the fast gate, pushes the branch and labels the work bead `gt:ready-to-land`. The daemon's landing worker, one per rig, merges the branch onto main in a throwaway worktree, runs the gate and review on the merged tree, pushes, and writes the landing record to the work bead. Workers never push main. See [ADR 0004](docs/adr/0004-daemon-lands-work.md).
+When a polecat finishes, `gt done` rebases onto main, runs the fast gate, pushes the branch and labels the work bead `gt:ready-to-land`. The daemon's landing worker, one per rig, builds the branch's merge candidate in a throwaway worktree, pushes it as a Forgejo CI candidate (the rig's gate runs on it), reviews it, merges its pull request, and writes the landing record to the work bead. Workers never push main. See [ADR 0004](docs/adr/0004-daemon-lands-work.md).
 
 ### Escalation 🚨
 
