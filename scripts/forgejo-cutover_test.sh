@@ -506,6 +506,9 @@ STUB_MIRROR_ABSENT=1
 out=$(run_cutover); rc=$?
 if [ "$rc" = 0 ]; then pass "the cutover exits 0"; else fail "the cutover exits 0 (rc=$rc)" "$out"; fi
 check "the probe ran for the rig" contains "acme --repo acme/rig" "$(cat "$STATE/probe.log")"
+# The provisioner that grants the panel's viewer bot read is the shared one
+# (gt-fn9e6.49).
+check "the repo is provisioned through the shared provisioner" contains "--repo acme/rig" "$(cat "$STATE/provision.log")"
 check "every GitHub ref was imported" contains "imported every GitHub ref" "$out"
 check "a default run creates no push mirror" [ "$(count_calls POST)" = 0 ]
 check "no mirror body was sent" [ ! -f "$STATE/mirror-create-body" ]

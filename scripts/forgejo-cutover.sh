@@ -835,7 +835,8 @@ probe_green
 # 2. Every GitHub ref into Forgejo, then a comparison.
 import_refs
 
-# 3. Bots, access and protection for the repo.
+# 3. Bots, access and protection for the repo, the dashboard panel's viewer read
+# grant included (gt-fn9e6.49).
 run bash "$PROVISION" --repo "$REPO" --main-branch "$MAIN_BRANCH" \
   --api-url "$API_URL" --admin-token-file "$ADMIN_TOKEN_FILE"
 

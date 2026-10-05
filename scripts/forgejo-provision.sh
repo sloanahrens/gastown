@@ -7,7 +7,9 @@
 # docs/design/forgejo-primary-landing.md.
 #
 # Each role's bot is minted only the token scopes its work needs, and with
-# --repo granted only the repository access it needs (gt-fn9e6.15).
+# --repo granted only the repository access it needs (gt-fn9e6.15). A repo also
+# grants the viewer bot read when it exists, so the dashboard's Forgejo panel
+# can read every repo a run provisions (gt-fn9e6.49).
 #
 # Idempotent: a second run against unchanged state makes no write call, and a
 # run is safe to repeat after a partial failure. The admin token never reaches
@@ -142,6 +144,13 @@ command -v curl >/dev/null 2>&1 || die "curl is not on PATH"
 for role in "${ROLES[@]}"; do
   require_plain "--role" "$role"
   role_scopes "$role" >/dev/null || usage_die "unknown role '$role' (known roles: polecat landing registry viewer)"
+done
+
+# Whether this run provisions the viewer itself, so the per-repo grant below
+# leaves the access to the role loop rather than granting it twice (gt-fn9e6.49).
+VIEWER_REQUESTED=0
+for role in "${ROLES[@]}"; do
+  if [ "$role" = viewer ]; then VIEWER_REQUESTED=1; fi
 done
 require_plain "--bot-prefix" "$BOT_PREFIX"
 require_plain "--token-name" "$TOKEN_NAME"
@@ -428,6 +437,24 @@ ensure_collaborator() {
   esac
 }
 
+# ensure_viewer_access OWNER/NAME grants the dashboard's viewer bot read on the
+# repository. The viewer is not in the default role list, so a run that does not
+# provision it may be the first on an instance: a notice replaces the grant
+# rather than failing the run, and the operator's --role viewer run creates the
+# bot (gt-fn9e6.49).
+ensure_viewer_access() {
+  local repo=$1 user="${BOT_PREFIX}viewer"
+  api GET "/users/$user"
+  case "$HTTP_STATUS" in
+    200) ;;
+    404)
+      log "no $user user; skipping its read grant on $repo (a --role viewer run creates it)"
+      return 0 ;;
+    *) die "GET /users/$user: unexpected HTTP $HTTP_STATUS$(body_tail)" ;;
+  esac
+  ensure_collaborator viewer "$repo" "$(collaborator_permission viewer)"
+}
+
 # --- branch protection -------------------------------------------------------
 
 # main_checks prints the fragments the landing target must carry: no pusher at
@@ -555,6 +582,8 @@ if [ ${#REPOS[@]} -gt 0 ]; then
       [ -n "$permission" ] || continue
       ensure_collaborator "$role" "$repo" "$permission"
     done
+    # The dashboard's Forgejo panel reads through the viewer bot (gt-fn9e6.49).
+    if [ "$VIEWER_REQUESTED" = 0 ]; then ensure_viewer_access "$repo"; fi
     ensure_rule "$repo" "$MAIN_BRANCH" "$main_body" "${main_check_list[@]}"
     ensure_no_rule "$repo" "$LAND_BRANCH"
   done
