@@ -141,3 +141,10 @@ func (h *handle) CheckUncommittedWorkLocalFailClosed() (*git.UncommittedWorkStat
 func (h *handle) PushWithTimeout(remote, refspec string, force bool, _ time.Duration) error {
 	return h.Push(remote, refspec, force)
 }
+
+// PushWithEnv is Push; the fake models no process environment, so the
+// variables git would run with (a deploy key's GIT_SSH_COMMAND) change
+// nothing here.
+func (h *handle) PushWithEnv(remote, refspec string, force bool, _ []string) error {
+	return h.Push(remote, refspec, force)
+}

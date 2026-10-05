@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/promote"
 )
 
 // LabelRevert marks a work bead the red-main owner filed to revert one
@@ -38,6 +39,11 @@ type MainState struct {
 	// dispatcher outside this process reads it to leave the rig's red-main
 	// beads alone until the revert lands (gt-zkdwt).
 	Revert *PendingRevert `json:"revert,omitempty"`
+	// promote.State is the rig's GitHub promotion record (gt-fn9e6.37),
+	// embedded so it lands in this same file: one rig, one main record, read
+	// by the red-main owner, the tier sweep and town health alike
+	// (gt-fn9e6.38).
+	promote.State
 }
 
 // PendingRevert is a revert the red-main owner has started but not finished

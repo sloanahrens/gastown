@@ -479,6 +479,23 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 			t.Errorf("fresh clone origin/main = %q, %v; want %s", id, err, merged)
 		}
 	})
+	t.Run("PushWithEnv pushes a refspec like Push, under an environment git runs with", func(t *testing.T) {
+		t.Parallel()
+		fx := newFixture(t, newEnv(t))
+		_, wt := fx.worktree(t, fx.base)
+		env := []string{"GIT_SSH_COMMAND=ssh -i /tmp/promote.key -o IdentitiesOnly=yes"}
+		if err := wt.PushWithEnv("origin", fx.head+":refs/heads/promoted", false, env); err != nil {
+			t.Fatalf("PushWithEnv: %v", err)
+		}
+		fresh := filepath.Join(fx.root, "promoted")
+		fx.env.Clone(t, fx.origin, fresh)
+		if id, err := fx.env.Open(fresh).Rev("origin/promoted"); err != nil || id != fx.head {
+			t.Errorf("origin/promoted = %q, %v; want %s", id, err, fx.head)
+		}
+		if err := wt.PushWithEnv("origin", fx.base+":refs/heads/promoted", false, nil); err == nil {
+			t.Error("a non-fast-forward PushWithEnv succeeded")
+		}
+	})
 	t.Run("a bare clone takes the remote HEAD branch alone, or the branch named", func(t *testing.T) {
 		t.Parallel()
 		fx := newFixture(t, newEnv(t))

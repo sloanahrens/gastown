@@ -7,6 +7,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/promote"
 )
 
 // LabelRedMain marks a bead the red-main owner filed for one package that
@@ -60,6 +61,9 @@ type RedMain struct {
 	// or an error, skips the revert: an unattributable red main is a human's
 	// call, never a landing spent on a guess.
 	Diff func(ctx context.Context, rec land.LandingRecord) ([]string, error)
+	// Promote fast-forwards the rig's GitHub main on a green verdict
+	// (gt-fn9e6.37). nil is a rig with no promote_target: unchanged behavior.
+	Promote *promote.Promoter
 }
 
 func (r *RedMain) logf(format string, args ...any) {
@@ -161,10 +165,12 @@ func (r *RedMain) superseded(pl PostLand, res PostLandResult) {
 		short(pl.Commit), pl.by(), fullLog(res.LogPath))
 }
 
-// Green handles a green run of cmd at pl.Commit: every open red-main bead is
-// closed, the one for a red run that named no package included.
+// Green handles a green run of cmd at pl.Commit: GitHub main is advanced to it
+// when this rig promotes, and every open red-main bead is closed, the one for
+// a red run that named no package included.
 func (r *RedMain) Green(_ context.Context, _ string, pl PostLand, _ PostLandResult) {
 	r.recordVerdict(pl, true)
+	r.promote(pl.Commit)
 	open := r.openBeads()
 	all := map[string]bool{}
 	for pkg := range open {
@@ -172,6 +178,38 @@ func (r *RedMain) Green(_ context.Context, _ string, pl PostLand, _ PostLandResu
 	}
 	r.closePassed(open, all, pl)
 	r.status(fmt.Sprintf("main GREEN at %s (%s)", short(pl.Commit), pl.by()))
+}
+
+// promote advances GitHub main to commit and records the promotion beside the
+// other main state. A failure is already recorded in the returned state, so
+// the verdict's own work (beads, status) goes on.
+func (r *RedMain) promote(commit string) {
+	if r.Promote == nil {
+		return
+	}
+	st, ok := r.loadMainState()
+	if !ok {
+		return
+	}
+	st.State = r.Promote.Promote(st.State, commit)
+	if r.State != nil {
+		if err := r.State.Save(st); err != nil {
+			r.logf("saving the promotion state: %v", err)
+		}
+	}
+}
+
+// loadMainState reads the rig's main state, reporting false when it cannot.
+func (r *RedMain) loadMainState() (MainState, bool) {
+	if r.State == nil {
+		return MainState{}, true
+	}
+	st, err := r.State.Load()
+	if err != nil {
+		r.logf("reading the main state: %v", err)
+		return MainState{}, false
+	}
+	return st, true
 }
 
 func passedPackages(res PostLandResult, flaky []string) map[string]bool {

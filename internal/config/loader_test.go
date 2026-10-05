@@ -416,10 +416,12 @@ func TestMergeSettingsCommand_Forgejo(t *testing.T) {
 	t.Run("a tier that omits the block carries the floor through", func(t *testing.T) {
 		t.Parallel()
 		floor := &MergeQueueConfig{Forgejo: &ForgejoConfig{
-			RemoteURL:    "https://forgejo.example/gastown/gastown",
-			GateWorkflow: "gate",
-			MirrorTarget: "git@github.com:sloanahrens/gastown.git",
-			Bots:         map[string]string{ForgejoRoleLanding: "gt-landing"},
+			RemoteURL:      "https://forgejo.example/gastown/gastown",
+			GateWorkflow:   "gate",
+			MirrorTarget:   "git@github.com:sloanahrens/gastown.git",
+			PromoteTarget:  "git@github.com:sloanahrens/gastown.git",
+			PromoteKeyFile: "/home/gt/.config/gt/promote-gastown.key",
+			Bots:           map[string]string{ForgejoRoleLanding: "gt-landing"},
 		}}
 		result := MergeSettingsCommand(floor, &MergeQueueConfig{TestCommand: "make test-repo"})
 		if result.Forgejo == nil {
@@ -427,6 +429,9 @@ func TestMergeSettingsCommand_Forgejo(t *testing.T) {
 		}
 		if result.Forgejo.RemoteURL != "https://forgejo.example/gastown/gastown" {
 			t.Errorf("RemoteURL = %q, want the floor value", result.Forgejo.RemoteURL)
+		}
+		if result.Forgejo.PromoteTarget != "git@github.com:sloanahrens/gastown.git" || result.Forgejo.PromoteKeyFile != "/home/gt/.config/gt/promote-gastown.key" {
+			t.Errorf("promotion = %q, %q; want the floor values", result.Forgejo.PromoteTarget, result.Forgejo.PromoteKeyFile)
 		}
 		if result.Forgejo.BotLogin(ForgejoRoleLanding) != "gt-landing" {
 			t.Errorf("landing bot = %q, want gt-landing", result.Forgejo.BotLogin(ForgejoRoleLanding))
@@ -441,7 +446,8 @@ func TestMergeSettingsCommand_Forgejo(t *testing.T) {
 			Bots:         map[string]string{ForgejoRolePolecat: "gt-polecat"},
 		}}
 		override := &MergeQueueConfig{Forgejo: &ForgejoConfig{
-			RemoteURL: "https://forgejo.example/local/repo",
+			RemoteURL:      "https://forgejo.example/local/repo",
+			PromoteKeyFile: "/home/gt/.config/gt/promote-local.key",
 		}}
 		result := MergeSettingsCommand(floor, override)
 		if result.Forgejo == nil {
@@ -449,6 +455,9 @@ func TestMergeSettingsCommand_Forgejo(t *testing.T) {
 		}
 		if result.Forgejo.RemoteURL != "https://forgejo.example/local/repo" {
 			t.Errorf("RemoteURL = %q, want the override value", result.Forgejo.RemoteURL)
+		}
+		if result.Forgejo.PromoteKeyFile != "/home/gt/.config/gt/promote-local.key" {
+			t.Errorf("PromoteKeyFile = %q, want the override value", result.Forgejo.PromoteKeyFile)
 		}
 		if result.Forgejo.GateWorkflow != "gate" {
 			t.Errorf("GateWorkflow = %q, want the floor value (override left it unset)", result.Forgejo.GateWorkflow)
