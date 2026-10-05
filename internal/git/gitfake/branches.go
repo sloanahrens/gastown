@@ -269,6 +269,15 @@ func (h *handle) FetchBranch(remote, branch string) error {
 	return h.fetchInto(r, rr, remote, strings.TrimPrefix(branch, "refs/heads/"))
 }
 
+// RefreshRemoteDefaultBranch is git.Git.RefreshRemoteDefaultBranch: fetch
+// remote's default branch into this clone's remote-tracking ref for it, and
+// nothing else.
+func (h *handle) RefreshRemoteDefaultBranch(remote string) error {
+	branch := h.RemoteDefaultBranch()
+	return h.FetchRefspecWithTimeout(remote,
+		"+refs/heads/"+branch+":refs/remotes/"+remote+"/"+branch, time.Second)
+}
+
 func (h *handle) ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error) {
 	return h.ListRemoteRefsWithHashesTimeout(remote, prefix, 0)
 }

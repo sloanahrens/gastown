@@ -151,3 +151,135 @@ func logged(lines []string, substr string) bool {
 	}
 	return false
 }
+
+// TestLandingRefreshesEachAuthorSeat: the landing that just deleted a bead's
+// origin branches refreshes the seat worktree of every polecat that authored
+// one — the landed branch's author and an earlier attempt's, which can differ
+// — and nobody else (gt-fn9e6.55).
+func TestLandingRefreshesEachAuthorSeat(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	h.remote.remoteRefs = map[string]string{
+		"refs/heads/polecat/opal/gt-abc+x1":    tipHead,  // the branch that landed
+		"refs/heads/polecat/agate/gt-abc+x0":   noteHead, // an earlier rejected attempt
+		"refs/heads/polecat/opal/gt-abc.10+x1": noteHead, // a child bead
+		"refs/heads/sloan/gt-abc+x1":           noteHead, // not a polecat branch
+		"refs/heads/main":                      noteHead,
+	}
+	var refreshed []string
+	h.w.RefreshAuthorSeat = func(polecat string) error {
+		refreshed = append(refreshed, polecat)
+		return nil
+	}
+
+	rep := h.w.Pass(context.Background())
+
+	if rep.Landed != 1 {
+		t.Fatalf("report %v; want one landing", rep)
+	}
+	if want := []string{"agate", "opal"}; strings.Join(refreshed, ",") != strings.Join(want, ",") {
+		t.Fatalf("refreshed seats %v; want %v (every author of a branch for the bead, and only those)", refreshed, want)
+	}
+}
+
+// TestLandingAuthorSeatRefreshFailureIsLoggedOnce covers the hook's best
+// effort: a seat whose worktree is missing or whose fetch fails is one log
+// line, and the landing it follows stands.
+func TestLandingAuthorSeatRefreshFailureIsLoggedOnce(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	h.remote.remoteRefs = map[string]string{"refs/heads/polecat/opal/gt-abc+x1": tipHead}
+	var logs []string
+	h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+	h.w.RefreshAuthorSeat = func(string) error { return errors.New("fetch: connection refused") }
+
+	rep := h.w.Pass(context.Background())
+
+	if rep.Landed != 1 || rep.Failed != 0 {
+		t.Fatalf("report %v; want the landing to stand", rep)
+	}
+	lines := 0
+	for _, l := range logs {
+		if strings.Contains(l, "refreshing the seat worktree of gastown/opal") {
+			lines++
+		}
+	}
+	if lines != 1 {
+		t.Fatalf("author-seat refresh log lines = %d, want 1:\n%s", lines, strings.Join(logs, "\n"))
+	}
+}
+
+// TestLandingRefreshesTheRequestsWorkerWhenTheBranchesCannotBeListed: a
+// failed listing leaves the earlier attempts unknown, and the landing
+// request's worker is the author that is still known.
+func TestLandingRefreshesTheRequestsWorkerWhenTheBranchesCannotBeListed(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	h.remote.listErr = errors.New("origin unreachable")
+	var refreshed []string
+	h.w.RefreshAuthorSeat = func(polecat string) error {
+		refreshed = append(refreshed, polecat)
+		return nil
+	}
+
+	rep := h.w.Pass(context.Background())
+
+	if rep.Landed != 1 {
+		t.Fatalf("report %v; want the landing to succeed", rep)
+	}
+	if strings.Join(refreshed, ",") != "opal" {
+		t.Fatalf("refreshed seats %v; want the landing request's worker", refreshed)
+	}
+}
+
+func TestAuthorPolecat(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		branch string
+		want   string
+	}{
+		{"polecat/opal/gt-abc+x1", "opal"},
+		{"polecat/agate/gt-abc.10+x0", "agate"},
+		{"polecat//gt-abc+x1", ""},     // no author
+		{"polecat/gt-abc+x1", ""},      // no bead segment, so no author
+		{"polecat", ""},                // the prefix alone
+		{"sloan/gt-abc+x1", ""},        // not a polecat branch
+		{"refs/heads/polecat/x+y", ""}, // a full ref, not the short name
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := authorPolecat(c.branch); got != c.want {
+			t.Errorf("authorPolecat(%q) = %q; want %q", c.branch, got, c.want)
+		}
+	}
+}
+
+// TestAuthorSeats covers the set a landing's seat refresh covers: every
+// distinct author the bead's branches name, then the landing request's
+// worker, which is the author left when no branch names one.
+func TestAuthorSeats(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		branches []string
+		worker   string
+		want     []string
+	}{
+		{"the landed branch and an earlier attempt", []string{"polecat/opal/gt-abc+x1", "polecat/agate/gt-abc+x0"}, "opal", []string{"opal", "agate"}},
+		{"the worker is not doubled", []string{"polecat/opal/gt-abc+x1"}, "opal", []string{"opal"}},
+		{"no branches listed still refreshes the request's worker", nil, "opal", []string{"opal"}},
+		{"branches that name nobody leave only the worker", []string{"main", "polecat//gt-abc+x1"}, "opal", []string{"opal"}},
+		{"nothing to refresh", nil, "", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := authorSeats(c.branches, c.worker); strings.Join(got, ",") != strings.Join(c.want, ",") {
+				t.Errorf("authorSeats(%v, %q) = %v; want %v", c.branches, c.worker, got, c.want)
+			}
+		})
+	}
+}

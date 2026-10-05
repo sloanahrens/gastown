@@ -111,6 +111,14 @@ type Worker struct {
 	// PostLand, when set, runs the rig's post-landing command after each
 	// new landing (never after a record repair).
 	PostLand PostLandTrigger
+	// RefreshAuthorSeat, when set, is called after a landing, right after the
+	// bead's origin branches are reaped, once per polecat that authored one
+	// (the landing request's worker included when no branch names it): a
+	// Forgejo landing moves the default branch on the remote, and a seat that
+	// does not fetch it reads landed work as local-only (gt-fn9e6.55). Best
+	// effort — a missing worktree or a failed fetch is logged once and never
+	// fails, delays or reorders the landing. nil skips it.
+	RefreshAuthorSeat func(polecat string) error
 	// Reverts finishes the red-main owner's reverts (*RedMain): told of each
 	// new landing and each rework rejection. nil skips it.
 	Reverts RevertHooks
@@ -594,7 +602,7 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 			rep.InstallRequested = true
 		}
 		w.logf("%s: landed %s on %s (patch-id %s)", work.BeadID, short(res.LandedCommit), work.Target, short(res.PatchID))
-		w.reapBeadBranches(work.BeadID)
+		w.refreshAuthorSeats(work, w.reapBeadBranches(work.BeadID))
 		w.clearIntent(work)
 		if !wasRepair {
 			w.afterLanding(ctx, work, res)
@@ -1000,6 +1008,43 @@ func (w *Worker) landingAt(commit string) (land.LandingRecord, bool) {
 		}
 	}
 	return land.LandingRecord{}, false
+}
+
+// refreshAuthorSeats asks for the author seat worktrees of a landing to be
+// refreshed, one call per distinct polecat: every author the bead's origin
+// branches name (a rework is pushed to a new branch by a new seat), plus the
+// landing request's worker, the author left when no branch names one. Best
+// effort — one seat's failure is logged and the next is still asked, and none
+// of it touches the landing.
+func (w *Worker) refreshAuthorSeats(work land.Work, branches []string) {
+	if w.RefreshAuthorSeat == nil {
+		return
+	}
+	for _, polecat := range authorSeats(branches, work.Worker) {
+		if err := w.RefreshAuthorSeat(polecat); err != nil {
+			w.logf("%s: refreshing the seat worktree of %s/%s: %v", work.BeadID, w.Rig, polecat, err)
+		}
+	}
+}
+
+// authorSeats names the polecats a landing's seat refresh covers: the
+// distinct authors of the bead's origin branches, then the landing request's
+// worker, in that order.
+func authorSeats(branches []string, landingWorker string) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(polecat string) {
+		if polecat == "" || seen[polecat] {
+			return
+		}
+		seen[polecat] = true
+		out = append(out, polecat)
+	}
+	for _, branch := range branches {
+		add(authorPolecat(branch))
+	}
+	add(landingWorker)
+	return out
 }
 
 func (w *Worker) clearIntent(work land.Work) {

@@ -2379,6 +2379,61 @@ func TestIntegrationUnpushedCommitsDetachedHeadUnfetchedRemoteBranch(t *testing.
 	}
 }
 
+// TestIntegrationRefreshRemoteDefaultBranchMovesOnlyThatRef pins the fetch the
+// landing worker's author-seat refresh runs after a Forgejo landing
+// (gt-fn9e6.55): exactly one ref — the remote's default branch, into this
+// clone's remote-tracking ref for it. HEAD, the local branches, the stash, a
+// remote branch this clone never fetched and the remote's tags are all where
+// the seat left them, so a landing can ask for the refresh without disturbing
+// the seat's work.
+func TestIntegrationRefreshRemoteDefaultBranchMovesOnlyThatRef(t *testing.T) {
+	t.Parallel()
+	localDir, remoteDir, mainBranch := initTestRepoWithRemote(t)
+	g := NewGit(localDir)
+	branch := "polecat/obsidian/gt-fn9e6.55+muv"
+	tip := detachAtPushedBranchTip(t, localDir, branch)
+
+	// Seat state the refresh must leave alone: a stash and a local branch.
+	if err := os.WriteFile(filepath.Join(localDir, "scratch.txt"), []byte("wip\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	runGit(t, localDir, "stash", "push", "-u", "-m", "seat wip")
+	if err := g.CreateBranch("seat-local"); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	// Refs on the remote this clone has never fetched: another branch, and a
+	// tag the fetch must not follow.
+	runGit(t, remoteDir, "update-ref", "refs/heads/elsewhere", tip)
+	runGit(t, remoteDir, "update-ref", "refs/tags/seat-tag", tip)
+
+	head := runGitEnv(t, localDir, nil, "rev-parse", "HEAD")
+	branches := runGitEnv(t, localDir, nil, "for-each-ref", "--format=%(refname)", "refs/heads")
+
+	// The Forgejo landing: the work merged onto the remote's main and the
+	// seat's branch deleted there, with nothing fetched here.
+	landOnRemoteSquash(t, remoteDir, branch, mainBranch)
+
+	if err := g.RefreshRemoteDefaultBranch("origin"); err != nil {
+		t.Fatalf("RefreshRemoteDefaultBranch: %v", err)
+	}
+
+	landed := runGitEnv(t, remoteDir, nil, "rev-parse", mainBranch)
+	if got, err := g.Rev("origin/" + mainBranch); err != nil || strings.TrimSpace(got) != landed {
+		t.Fatalf("origin/%s after the refresh = %q, %v; want the landed %s", mainBranch, got, err, landed)
+	}
+	if got := runGitEnv(t, localDir, nil, "rev-parse", "HEAD"); got != head {
+		t.Fatalf("HEAD after the refresh = %s, want the seat's %s", got, head)
+	}
+	if got := runGitEnv(t, localDir, nil, "for-each-ref", "--format=%(refname)", "refs/heads"); got != branches {
+		t.Fatalf("local branches after the refresh = %q, want %q", got, branches)
+	}
+	if n, err := g.StashCount(); err != nil || n != 1 {
+		t.Fatalf("stash count after the refresh = %d, %v; want the seat's one entry", n, err)
+	}
+	runGitTestCmdWantFailure(t, localDir, "rev-parse", "--verify", "refs/remotes/origin/elsewhere")
+	runGitTestCmdWantFailure(t, localDir, "rev-parse", "--verify", "refs/tags/seat-tag")
+}
+
 // runGitEnv runs git in dir with env appended, failing the test on error, and
 // returns its trimmed stdout. The bare-remote fixtures carry no committer
 // identity of their own, so landing on one passes it explicitly.

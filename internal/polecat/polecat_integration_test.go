@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
@@ -22,11 +23,11 @@ func seedFile(t *testing.T, path, content string) {
 	}
 }
 
-func runGit(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
+// gitEnv is the environment every git call in these tests runs under: no user
+// or system config, and a fixed identity and clock, so a commit this fixture
+// makes is the same commit on every run.
+func gitEnv() []string {
+	return append(os.Environ(),
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_CONFIG_SYSTEM=/dev/null",
 		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
@@ -34,9 +35,30 @@ func runGit(t *testing.T, dir string, args ...string) {
 		"GIT_AUTHOR_DATE=2026-01-01T00:00:00Z",
 		"GIT_COMMITTER_DATE=2026-01-01T00:00:00Z",
 	)
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = gitEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s in %s: %v\n%s", strings.Join(args, " "), dir, err, out)
 	}
+}
+
+// gitOut is runGit for a call whose output the test needs, such as one naming
+// the commit it just made or moved.
+func gitOut(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = gitEnv()
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %s in %s: %v", strings.Join(args, " "), dir, err)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // gt-ycvx: the seat verdict this probe feeds is a cleanliness check, so a
@@ -67,6 +89,78 @@ func TestIntegrationProbeLiveGitStateStagedRevertReadsDirty(t *testing.T) {
 	}
 	if !got.Dirty {
 		t.Fatalf("Dirty = false for a seat holding a staged security-fix revert (probe %+v)", got)
+	}
+}
+
+// TestIntegrationRefreshLetsTheOfflineSeatCheckJudgeALandedSeatPreserved pins
+// gt-fn9e6.55 at the seat-state level. A Forgejo landing merges the author's
+// work on the remote and deletes the author's branch there, and nothing in the
+// author's own worktree fetches the new tip: the seat's origin/<default> keeps
+// the pre-landing commit, so the offline probe `gt polecat list` runs reads
+// the landed work as unpushed — the false git-unpushed NEEDS_RECOVERY. The
+// landing worker's refresh moves that one ref in the seat, and the same
+// offline probe then judges the seat preserved, with the reader fetching
+// nothing.
+func TestIntegrationRefreshLetsTheOfflineSeatCheckJudgeALandedSeatPreserved(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	dir := filepath.Join(root, "work")
+	remote := filepath.Join(root, "remote.git")
+	runGit(t, root, "init", "--initial-branch=main", dir)
+	seedFile(t, filepath.Join(dir, "README.md"), "# Test\n")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "initial")
+	runGit(t, root, "init", "--bare", remote)
+	runGit(t, dir, "remote", "add", "origin", remote)
+	runGit(t, dir, "push", "-u", "origin", "main")
+
+	// The seat: a polecat branch carrying the fix, pushed to origin.
+	branch := "polecat/jasper/gt-fn9e6.55+muv"
+	runGit(t, dir, "checkout", "-b", branch)
+	seedFile(t, filepath.Join(dir, "fix.go"), "package fix\n")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "fix: the thing")
+	runGit(t, dir, "push", "-u", "origin", branch)
+
+	// The Forgejo landing: the work merged onto the remote's main as a
+	// squash (the branch tip's tree under a different commit), the seat's
+	// branch deleted on the remote. Nothing fetches here.
+	tree := gitOut(t, remote, "rev-parse", branch+"^{tree}")
+	base := gitOut(t, remote, "rev-parse", "main")
+	landed := gitOut(t, remote, "commit-tree", tree, "-p", base, "-m", "land "+branch)
+	runGit(t, remote, "update-ref", "refs/heads/main", landed)
+	runGit(t, remote, "update-ref", "-d", "refs/heads/"+branch)
+
+	// The seat as the landing leaves it: detached at its branch tip, the
+	// branch and its remote-tracking ref gone, so origin/main is the only
+	// evidence the offline probe has left.
+	tip := gitOut(t, dir, "rev-parse", "HEAD")
+	runGit(t, dir, "checkout", "--detach", tip)
+	runGit(t, dir, "branch", "-D", branch)
+	runGit(t, dir, "update-ref", "-d", "refs/remotes/origin/"+branch)
+
+	before := ProbeLiveGitStateLocal(dir)
+	if before.Source != GitStateSourceLive {
+		t.Fatalf("Source = %q, want %q (reason %q)", before.Source, GitStateSourceLive, before.FailedReason)
+	}
+	if before.UnpushedCommits == 0 {
+		t.Fatalf("probe = %+v; want the false git-unpushed flag: against the seat's stale origin/main the landed work looks local-only", before)
+	}
+
+	// The refresh the landing worker runs in the author's seat.
+	if err := git.NewGit(dir).RefreshRemoteDefaultBranch("origin"); err != nil {
+		t.Fatalf("RefreshRemoteDefaultBranch: %v", err)
+	}
+
+	after := ProbeLiveGitStateLocal(dir)
+	if after.Source != GitStateSourceLive {
+		t.Fatalf("Source after the refresh = %q, want %q (reason %q)", after.Source, GitStateSourceLive, after.FailedReason)
+	}
+	if after.UnpushedCommits != 0 {
+		t.Fatalf("probe after the refresh = %+v; want the seat judged preserved with no live check", after)
+	}
+	if after.Dirty || after.StashCount != 0 {
+		t.Fatalf("probe after the refresh = %+v; want the seat's work untouched", after)
 	}
 }
 
