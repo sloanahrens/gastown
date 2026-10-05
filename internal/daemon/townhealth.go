@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -85,8 +86,11 @@ type healthSources struct {
 	evidence time.Duration
 	now      time.Time
 
-	ping       func() (time.Duration, error)
-	execTax    func(ctx context.Context) (time.Duration, error)
+	ping    func() (time.Duration, error)
+	execTax func(ctx context.Context) (time.Duration, error)
+	// load1 reads the host's one-minute load average and core count, which
+	// corroborate a slow exec probe (gt-v50sn); nil reads the host.
+	load1      func() (townhealth.HostLoad, error)
 	backupRoot func() (string, error)
 	slots      func() (slot.Report, error)
 	dispatch   func() (townhealth.DispatchRecord, error)
@@ -111,7 +115,7 @@ func (s *healthSources) inputs(now time.Time, th townhealth.Thresholds, prev *to
 	s.now = now
 	return townhealth.Inputs{
 		Now: now, Thresholds: th, Prev: prev, DaemonStarted: s.daemonStarted(),
-		Dolt: s, ExecTax: s, Heartbeat: s, Ticks: s, Landings: s, Escalations: s, Slots: s,
+		Dolt: s, ExecTax: s, Load: s, Heartbeat: s, Ticks: s, Landings: s, Escalations: s, Slots: s,
 		Backups: s, Mains: s, Promotions: s, Config: s, NeedsHuman: s, Seats: s, Dispatch: s,
 		LandingInfra: s, Steward: s,
 	}
@@ -187,6 +191,16 @@ func (s *healthSources) ExecTax(ctx context.Context) (time.Duration, error) {
 		return 0, err
 	}
 	return res.Median, nil
+}
+
+// Load1 reads the host's one-minute load average and core count, so the
+// exec-tax field can tell a saturated host from a taxed program tree
+// (gt-v50sn).
+func (s *healthSources) Load1() (townhealth.HostLoad, error) {
+	if s.load1 != nil {
+		return s.load1()
+	}
+	return townhealth.HostLoad{Average: EstimateLoad1(), Cores: runtime.NumCPU()}, nil
 }
 
 func (s *healthSources) Heartbeat() (townhealth.HeartbeatRecord, error) {
