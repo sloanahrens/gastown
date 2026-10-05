@@ -138,12 +138,61 @@ func TestForgejoActionRepoCellShowsTheNameWithoutItsOwner(t *testing.T) {
 	}
 }
 
-// A row shows the commit the run tested and the run's number after the bead,
-// and the hash opens the run in a new tab, so a row can be matched to a commit
-// on main and opened from the pane. The cell is sized to hold a hash and a
-// number on one line, ahead of the took and ago columns; a run the API sent no
-// sha for draws nothing where a link would go, and the row's tooltip keeps the
-// full sha and the URL the columns ellipsized (gt-qes2r).
+// The polecat column sits right after the bead: a landing run's title names the
+// polecat in its branch, so the panel says who built what at a glance. The
+// column is a fixed width in characters — the longest name here plus a
+// character of slack, the way the repo column is sized — so a run whose title
+// names no polecat draws nothing there without shifting the columns after it,
+// and the name is truncated to the column with the whole name on the cell's
+// title (gt-qf6fx).
+func TestForgejoActionRowShowsThePolecatAfterTheBead(t *testing.T) {
+	t.Parallel()
+
+	// The longest polecat name the panel reads, so the column's width is checked
+	// against what it must hold rather than against the number in the CSS.
+	const longest = "turquoise"
+
+	cell := pageFunc(t, "actPolecat")
+	for _, want := range []string{"a.polecat", `el("span", "apolecat"`} {
+		if !strings.Contains(cell, want) {
+			t.Errorf("the polecat cell does not use %s", want)
+		}
+	}
+	if !strings.Contains(cell, `a.polecat || ""`) {
+		t.Error("a run with no polecat does not draw an empty cell")
+	}
+	if !strings.Contains(cell, "cell.title = a.polecat") {
+		t.Error("the polecat cell does not keep the whole name on hover")
+	}
+
+	row := pageFunc(t, "actRow")
+	bead := strings.Index(row, `el("span", "abead"`)
+	who := strings.Index(row, "actPolecat(a)")
+	commit := strings.Index(row, "actCommit(a)")
+	if !(bead >= 0 && who > bead && commit > who) {
+		t.Error("the polecat does not sit between the bead and the commit")
+	}
+
+	page := string(indexHTML)
+	if !strings.Contains(page, ".actsrow .an,.actsrow .apolecat{color:var(--dim)}") {
+		t.Error("the polecat is not drawn in the panel's muted text")
+	}
+	cols := regexp.MustCompile(`\n\.actsrow\{[^}]*grid-template-columns:\s*10px\s+\d+ch\s+minmax\(0,1fr\)\s+(\d+)ch\s+\d+ch\s+52px\s+46px`).FindStringSubmatch(page)
+	if cols == nil {
+		t.Fatal("the polecat column is not sized in characters between the bead and the commit")
+	}
+	if n, _ := strconv.Atoi(cols[1]); n < len(longest)+1 {
+		t.Errorf("the polecat column is %sch, too narrow for %q plus a character of slack", cols[1], longest)
+	}
+}
+
+// A row shows the commit the run tested and the run's number after the bead
+// and the polecat, and the hash opens the run in a new tab, so a row can be
+// matched to a commit on main and opened from the pane. The cell is sized to
+// hold a hash and a number on one line, ahead of the took and ago columns; a
+// run the API sent no sha for draws nothing where a link would go, and the
+// row's tooltip keeps the full sha and the URL the columns ellipsized
+// (gt-qes2r).
 func TestForgejoActionRowShowsTheCommitLinkedToTheRun(t *testing.T) {
 	t.Parallel()
 
@@ -171,7 +220,7 @@ func TestForgejoActionRowShowsTheCommitLinkedToTheRun(t *testing.T) {
 			t.Errorf("index.html has no rule %q for the commit cell", want)
 		}
 	}
-	cols := regexp.MustCompile(`\n\.actsrow\{[^}]*grid-template-columns:\s*10px\s+\d+ch\s+minmax\(0,1fr\)\s+(\d+)ch\s+52px\s+46px`).FindStringSubmatch(page)
+	cols := regexp.MustCompile(`\n\.actsrow\{[^}]*grid-template-columns:\s*10px\s+\d+ch\s+minmax\(0,1fr\)\s+\d+ch\s+(\d+)ch\s+52px\s+46px`).FindStringSubmatch(page)
 	if cols == nil {
 		t.Fatal("the commit column is not sized in characters between the bead and the took column")
 	}
