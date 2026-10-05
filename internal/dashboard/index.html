@@ -95,6 +95,13 @@ section>h2 .caret{display:inline-block;width:10px;color:var(--dim)}
 section.collapsed>:not(h2){display:none}
 section.collapsed>h2{border-bottom:0}
 #queue{max-height:70vh;overflow:auto}
+#forgejo{max-height:240px;overflow:auto}
+.fev{display:grid;grid-template-columns:52px 88px 1fr minmax(0,auto);gap:8px;align-items:baseline;padding:3px 0;border-top:1px solid var(--line)}
+.fev:first-child{border-top:0}
+.fev .t{color:var(--dim);white-space:nowrap}
+.fev .a{color:var(--teal);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fev .s{overflow-wrap:anywhere}
+.fev .rp{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ltable td{vertical-align:top}
 .ltable td.n,.ltable th.n{padding-left:14px}
 .ltable td:nth-child(2){overflow-wrap:anywhere}
@@ -141,6 +148,7 @@ section.collapsed>h2{border-bottom:0}
   </div>
   <div class="col">
     <section><h2>Machine <span class="r" id="machnote"></span></h2><div class="body" id="machine"></div></section>
+    <section><h2>Forgejo <span class="r" id="forgejonote"></span></h2><div class="body" id="forgejo"></div></section>
     <section><h2>Tier sweeps <span class="r" id="tiersweepnote"></span></h2><div class="body" id="tiersweep"></div></section>
     <section><h2>om review <span class="r" id="omnote"></span></h2><div class="body" id="om"></div></section>
     <section id="trendsec" hidden><h2>Landings <span class="r" id="trendnote"></span></h2><div class="body" id="trend"></div></section>
@@ -603,6 +611,32 @@ function renderTierSweep(s) {
   $("tiersweepnote").textContent = rows.length + " sweeps · last " + fmtDur((Date.now() - new Date(newest.at).getTime()) / 1000) + " ago";
 }
 
+// The Forgejo panel is a tail like the feed: one line per event, oldest first,
+// following its own end. Where it was scrolled is read before the lines are
+// replaced, so a reader who has scrolled up keeps their place and following
+// resumes on its own once they come back to the bottom.
+function renderForgejo(s) {
+  const box = $("forgejo");
+  const follow = box.scrollHeight - box.scrollTop - box.clientHeight <= 4;
+  box.replaceChildren();
+  $("forgejonote").textContent = "";
+  const f = s.forgejo;
+  if (!f) { box.append(el("div", "empty", "no viewer token")); return; }
+  const events = f.events || [];
+  if (!events.length) { box.append(el("div", f.error ? "badc" : "empty", f.error ? "unavailable: " + f.error : "no activity")); return; }
+  const today = new Date().toDateString();
+  for (const e of events) {
+    const when = new Date(e.at);
+    const stamp = when.toDateString() === today ? clock(e.at).slice(0, 5) : when.toLocaleDateString([], {month: "short", day: "numeric"});
+    const row = el("div", "fev");
+    row.append(el("span", "t", stamp), el("span", "a", e.actor), el("span", "s", e.summary), el("span", "rp", e.repo));
+    box.append(row);
+  }
+  const age = (Date.now() - new Date(events[events.length - 1].at).getTime()) / 1000;
+  $("forgejonote").textContent = (f.error ? "stale (" + f.error + ") · " : "") + events.length + " events · last " + fmtDur(age) + " ago";
+  if (follow) box.scrollTop = box.scrollHeight;
+}
+
 function renderSpend(s) {
   const box = $("spend");
   box.replaceChildren();
@@ -971,7 +1005,7 @@ function renderQueue(s, force) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderEscalations(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
+function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderEscalations(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));
@@ -1048,7 +1082,7 @@ setupCollapse();
 renderChips();
 connect();
 // Ages and elapsed times drift between pushes; redraw the cheap parts locally.
-setInterval(() => { if (state) { renderTiles(state); renderSeats(state); renderTierSweep(state); } }, 15000);
+setInterval(() => { if (state) { renderTiles(state); renderSeats(state); renderTierSweep(state); renderForgejo(state); } }, 15000);
 </script>
 </body>
 </html>

@@ -1,0 +1,29 @@
+[
+  {
+    "id": 578,
+    "op_type": "commit_repo",
+    "created": "2026-10-04T23:42:12Z",
+    "ref_name": "refs/heads/main",
+    "act_user": {"id": 1, "login": "bot-polecat"},
+    "repo": {"full_name": "sloan/beads"},
+    "content": "{\"Commits\":[{\"Sha1\":\"81d85d03bfcc933da986b394c8aa0980728dcbe5\",\"Message\":\"ci: add the Forgejo gate workflow (be-6px)\",\"AuthorName\":\"bot-polecat\"}],\"HeadCommit\":{\"Sha1\":\"81d85d03bfcc933da986b394c8aa0980728dcbe5\",\"Message\":\"ci: add the Forgejo gate workflow (be-6px)\",\"AuthorName\":\"bot-polecat\"},\"CompareURL\":\"sloan/beads/compare/a...b\",\"Len\":1}"
+  },
+  {
+    "id": 577,
+    "op_type": "commit_repo",
+    "created": "2026-10-04T23:41:00Z",
+    "ref_name": "refs/heads/land/be-6px",
+    "act_user": {"id": 1, "login": "bot-landing"},
+    "repo": {"full_name": "sloan/beads"},
+    "content": ""
+  },
+  {
+    "id": 576,
+    "op_type": "delete_branch",
+    "created": "2026-10-04T22:41:00Z",
+    "ref_name": "refs/heads/land/be-6px",
+    "act_user": {"id": 1, "login": "bot-landing"},
+    "repo": {"full_name": "sloan/mango"},
+    "content": ""
+  }
+]

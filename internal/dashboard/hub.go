@@ -91,6 +91,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.TierSweep != nil {
 		start(h.cfg.TierSweepEvery, h.pollTierSweep)
 	}
+	if h.cfg.Forgejo != nil {
+		start(h.cfg.ForgejoEvery, h.pollForgejo)
+	}
 	if h.cfg.Escalation != nil {
 		start(h.cfg.EscalationEvery, h.pollEscalation)
 	}
@@ -167,7 +170,7 @@ func (h *Hub) Subscribe() (*Sub, [][]byte) {
 	// Wake every worker; a non-blocking send per worker is enough because
 	// each one re-checks its own age. The count covers the workers Config can
 	// start, with room to spare.
-	for i := 0; i < 12; i++ {
+	for i := 0; i < 16; i++ {
 		select {
 		case h.wake <- struct{}{}:
 		default:
@@ -301,6 +304,17 @@ func (h *Hub) pollTierSweep() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.TierSweep = ts
+	h.publishLocked()
+}
+
+func (h *Hub) pollForgejo() {
+	f := h.cfg.Forgejo()
+	if f == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.state.Forgejo = f
 	h.publishLocked()
 }
 

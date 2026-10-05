@@ -1,0 +1,18 @@
+[
+  {
+    "id": 12,
+    "name": "beads",
+    "full_name": "sloan/beads",
+    "owner": {"id": 1, "login": "sloan"},
+    "private": true,
+    "permissions": {"admin": false, "push": false, "pull": true}
+  },
+  {
+    "id": 7,
+    "name": "mango",
+    "full_name": "sloan/mango",
+    "owner": {"id": 1, "login": "sloan"},
+    "private": true,
+    "permissions": {"admin": false, "push": false, "pull": true}
+  }
+]
