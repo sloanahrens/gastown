@@ -461,6 +461,59 @@ func TestPoolLandingSeatSkipsASeatThatIsGone(t *testing.T) {
 	}
 }
 
+// TestSpecRosterCountsACompletingSeatOnce is gt-xmcyk: `gt done` writes its
+// Submitted record and then ends the session, and for those seconds the seat
+// sits in both of the roster's sources at once. Counting both read 4/3 on a
+// full pool and refused the tick a seat it had (2026-10-04 19:17:35 and
+// 19:28:34). The roster here is the spec dispatcher's — the same
+// poolSeatSessions → specRosterFrom path the tick line prints.
+func TestSpecRosterCountsACompletingSeatOnce(t *testing.T) {
+	t.Parallel()
+	pool := &config.PolecatPool{OverflowAgent: "deepseek-flash", MaxOverflow: 3}
+	ts := config.NewTownSettings()
+	ts.RoleAgents = map[string]string{"polecat": "deepseek-flash"}
+
+	jade := map[string]map[string]string{
+		"gt-jade": {"GT_ROLE": "gastown/polecats/jade", "GT_AGENT": "deepseek-flash"},
+	}
+	threeLive := map[string]map[string]string{
+		"gt-jade":  {"GT_ROLE": "gastown/polecats/jade", "GT_AGENT": "deepseek-flash"},
+		"gt-ruby":  {"GT_ROLE": "gastown/polecats/ruby", "GT_AGENT": "deepseek-flash"},
+		"gt-ember": {"GT_ROLE": "gastown/polecats/ember", "GT_AGENT": "deepseek-flash"},
+	}
+
+	cases := []struct {
+		name     string
+		sessions map[string]map[string]string
+		landing  bool
+		want     int
+	}{
+		{"a seat live and still submitting counts once", jade, true, 1},
+		{"a seat mid-landing with no session counts once", nil, true, 1},
+		{"a live seat with no record counts once", jade, false, 1},
+		{"the roster after gt done reads 3/3 while the session exits", threeLive, true, 3},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			work := submittedWork()
+			if c.landing {
+				writeLandingSeat(t, town, "gastown", "jade", "gt-jade")
+				work = submittedWork("gt-jade")
+			}
+
+			sessions, err := poolSeatSessionsWith(&fakeLister{sessions: c.sessions}, town, nil, work, pool)
+			if err != nil {
+				t.Fatalf("poolSeatSessionsWith: %v", err)
+			}
+			if got := specRosterFrom(sessions, ts).Live["deepseek-flash"]; got != c.want {
+				t.Fatalf("roster = %d/%d, want %d/%d (%+v)", got, pool.MaxOverflow, c.want, pool.MaxOverflow, sessions)
+			}
+		})
+	}
+}
+
 // testServerMetadata names a database the way a tracked .beads/metadata.json
 // does in gastown's server mode.
 const testServerMetadata = `{"dolt_mode":"server","dolt_database":"beads_testrig"}`
