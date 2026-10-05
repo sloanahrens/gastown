@@ -35,6 +35,12 @@ type fakeEnv struct {
 	restartErr  map[string]error
 	idleErr     map[string]error
 	submitErr   map[string]error
+	// gitStates is the live worktree measurement per seat; an unset seat
+	// measures clean, the answer nothing-wrong. gitErr makes the probe fail.
+	gitStates map[string]GitState
+	gitErr    map[string]error
+	// clearSeatErr makes the agent-bead reset fail.
+	clearSeatErr map[string]error
 	// idleStopped names seats whose record already says stop, so MarkIdle
 	// reports no change.
 	idleStopped map[string]bool
@@ -57,15 +63,16 @@ type fakeEnv struct {
 	// actor reassigned them since the list read.
 	heldBeads map[string]bool
 
-	restarts  []string
-	idles     []string // polecats whose seat was retired to stop
-	submitted []string // "polecat=bead" the tick recorded as submitted
-	closed    []string
-	comments  map[string][]string
-	reads     []string // AgentState reads, to prove they are refusal-only
-	workReads []string // AssignedWork reads, to prove a skipped seat reads no Dolt
-	recorded  []string // "bead=resume_branch: <branch>" per RecordResumeBranch
-	reopened  []string // "bead=assignee" per Reopen
+	restarts    []string
+	idles       []string // polecats whose seat was retired to stop
+	escalations []string // polecats whose agent bead was reset to idle
+	submitted   []string // "polecat=bead" the tick recorded as submitted
+	closed      []string
+	comments    map[string][]string
+	reads       []string // AgentState reads, to prove they are refusal-only
+	workReads   []string // AssignedWork reads, to prove a skipped seat reads no Dolt
+	recorded    []string // "bead=resume_branch: <branch>" per RecordResumeBranch
+	reopened    []string // "bead=assignee" per Reopen
 
 	// workBeads answers WorkBead by ID; a missing ID is a gone bead (nil).
 	workBeads   map[string]*Work
@@ -87,7 +94,9 @@ func newFake() *fakeEnv {
 		notesErr: map[string]error{}, reopenErr: map[string]error{}, heldBeads: map[string]bool{},
 		comments:  map[string][]string{},
 		workBeads: map[string]*Work{}, workBeadErr: map[string]error{},
-		clearErr: map[string]error{},
+		clearErr:  map[string]error{},
+		gitStates: map[string]GitState{}, gitErr: map[string]error{},
+		clearSeatErr: map[string]error{},
 	}
 }
 
@@ -123,6 +132,19 @@ func (f *fakeEnv) AgentRecord(_, p string) (AgentRecord, error) {
 	return f.agents[p], f.stateErr[p]
 }
 func (f *fakeEnv) Heartbeat(_, p string) *Heartbeat { return f.heartbeats[p] }
+func (f *fakeEnv) GitState(_, p string) (GitState, error) {
+	if err := f.gitErr[p]; err != nil {
+		return GitState{}, err
+	}
+	return f.gitStates[p], nil
+}
+func (f *fakeEnv) ClearEscalation(_, p string) (bool, error) {
+	if err := f.clearSeatErr[p]; err != nil {
+		return false, err
+	}
+	f.escalations = append(f.escalations, p)
+	return true, nil
+}
 func (f *fakeEnv) Restart(_, p, _ string) error {
 	if err := f.restartErr[p]; err != nil {
 		return err
@@ -303,6 +325,141 @@ func TestDeferredExitSeatWaitsOutTheFirstSample(t *testing.T) {
 	}
 	if len(env.restarts) != 0 {
 		t.Fatalf("restarts = %v, want none on the first sample", env.restarts)
+	}
+}
+
+// A seat the last turn left stuck after an ESCALATED exit is the operator's,
+// and nothing ever clears it: gt done wrote agent_state=stuck and exit_type=
+// ESCALATED and no pass reads them back, so `gt polecat list` keeps reporting
+// recovery-needed on a seat with nothing at risk (gt-fn9e6.33). The case is
+// beads/rust, whose escalated bead closed when the work it was raised on
+// landed; here the seat is measured with everything resolved, and only then
+// is the record reset.
+func TestResolvedEscalationIsClearedToIdle(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	env.polecats = []string{"ruby"}
+	env.verdicts["ruby"] = dead(2)
+	env.agents["ruby"] = AgentRecord{State: "stuck", ExitType: ExitEscalated,
+		LastSourceIssue: "be-bl8", CleanupStatus: "has_unpushed"}
+	env.workBeads["be-bl8"] = &Work{ID: "be-bl8", Status: "closed"}
+	env.gitStates["ruby"] = GitState{Branch: "polecat/rust/be-bl8+muugx4hs"}
+
+	r := scanner(env, nil).Tick("gastown")
+
+	if got := strings.Join(env.escalations, ","); got != "ruby" {
+		t.Fatalf("cleared = %q, want ruby; report %v", got, r.Lines())
+	}
+	f := seatFinding(t, r, "ruby")
+	if f.Outcome != OutcomeCleared {
+		t.Fatalf("outcome = %v (%q), want cleared", f.Outcome, f.Detail)
+	}
+	for _, want := range []string{"be-bl8", "closed", "no session", "worktree clean"} {
+		if !strings.Contains(f.Detail, want) {
+			t.Errorf("detail = %q, want it to name %q", f.Detail, want)
+		}
+	}
+	if len(env.restarts) != 0 || len(env.idles) != 0 {
+		t.Fatalf("restarts = %v, idles = %v; a seat with nothing to run is neither", env.restarts, env.idles)
+	}
+}
+
+// The clear is the last resort of a chain of conditions, and each one that
+// fails leaves the seat exactly as the tick leaves it today: the operator's
+// escalation, not the tick's. The control case proves the baseline clears, so
+// a table entry that stops clearing is the condition it names.
+func TestUnresolvedEscalationIsLeftAlone(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		setup   func(env *fakeEnv)
+		outcome Outcome
+	}{
+		{"every condition met (control)", func(*fakeEnv) {}, OutcomeCleared},
+		{"source bead still open", func(env *fakeEnv) {
+			env.workBeads["gt-src"] = &Work{ID: "gt-src", Status: "in_progress"}
+		}, OutcomeIdled},
+		{"source bead gone, nothing proves it closed", func(env *fakeEnv) {
+			delete(env.workBeads, "gt-src")
+		}, OutcomeIdled},
+		{"no source issue recorded", func(env *fakeEnv) {
+			env.agents["ruby"] = AgentRecord{State: "stuck", ExitType: ExitEscalated}
+		}, OutcomeIdled},
+		{"hook still set", func(env *fakeEnv) {
+			env.agents["ruby"] = AgentRecord{State: "stuck", ExitType: ExitEscalated,
+				LastSourceIssue: "gt-src", HookBead: "gt-hook"}
+		}, OutcomeIdled},
+		{"session alive", func(env *fakeEnv) { env.sessions["ruby"] = true }, OutcomeIdled},
+		{"worktree dirty", func(env *fakeEnv) {
+			env.gitStates["ruby"] = GitState{Branch: "polecat/ruby/gt-src+x", Dirty: true}
+		}, OutcomeIdled},
+		{"stash present", func(env *fakeEnv) {
+			env.gitStates["ruby"] = GitState{Branch: "polecat/ruby/gt-src+x", StashCount: 1}
+		}, OutcomeIdled},
+		{"unpushed commit", func(env *fakeEnv) {
+			env.gitStates["ruby"] = GitState{Branch: "polecat/ruby/gt-src+x", UnpushedCommits: 1}
+		}, OutcomeIdled},
+		{"DEFERRED exit, not ESCALATED", func(env *fakeEnv) {
+			env.agents["ruby"] = AgentRecord{State: "stuck", ExitType: ExitDeferred, LastSourceIssue: "gt-src"}
+		}, OutcomeIdled},
+		{"agent state not stuck", func(env *fakeEnv) {
+			env.agents["ruby"] = AgentRecord{State: "working", ExitType: ExitEscalated, LastSourceIssue: "gt-src"}
+		}, OutcomeIdled},
+		{"agent record unreadable", func(env *fakeEnv) {
+			env.stateErr["ruby"] = errors.New("bd show: exit status 1")
+		}, OutcomeUnknown},
+		{"source bead unreadable", func(env *fakeEnv) {
+			env.workBeadErr["gt-src"] = errors.New("bd show: connection refused")
+		}, OutcomeUnknown},
+		{"worktree unmeasurable", func(env *fakeEnv) {
+			env.gitErr["ruby"] = errors.New("git state unknown: not a worktree root")
+		}, OutcomeUnknown},
+		{"the clear fails", func(env *fakeEnv) {
+			env.clearSeatErr["ruby"] = errors.New("bd update: exit status 1")
+		}, OutcomeFailed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := newFake()
+			env.polecats = []string{"ruby"}
+			env.verdicts["ruby"] = dead(2)
+			env.agents["ruby"] = AgentRecord{State: "stuck", ExitType: ExitEscalated, LastSourceIssue: "gt-src"}
+			env.workBeads["gt-src"] = &Work{ID: "gt-src", Status: "closed"}
+			env.gitStates["ruby"] = GitState{Branch: "polecat/ruby/gt-src+x"}
+			tc.setup(env)
+
+			r := scanner(env, nil).Tick("gastown")
+
+			f := seatFinding(t, r, "ruby")
+			if f.Outcome != tc.outcome {
+				t.Fatalf("outcome = %v (%q), want %v", f.Outcome, f.Detail, tc.outcome)
+			}
+			wantCleared := tc.outcome == OutcomeCleared
+			if got := len(env.escalations) > 0; got != wantCleared {
+				t.Fatalf("cleared = %v, want %v (report %v)", got, wantCleared, r.Lines())
+			}
+		})
+	}
+}
+
+// A seat still holding the bead it escalated on has not had its blocker
+// resolved, whatever its worktree measures: the open bead is the operator's,
+// and the tick leaves it exactly as it does today.
+func TestEscalatedSeatHoldingItsOpenBeadIsSkipped(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	deadWithWork(env, "ruby")
+	env.agents["ruby"] = AgentRecord{State: "stuck", ExitType: ExitEscalated, LastSourceIssue: "gt-ruby"}
+	env.workBeads["gt-ruby"] = &Work{ID: "gt-ruby", Status: "hooked"}
+
+	r := scanner(env, nil).Tick("gastown")
+
+	if f := seatFinding(t, r, "ruby"); f.Outcome != OutcomeSkipped {
+		t.Fatalf("outcome = %v (%q), want skipped", f.Outcome, f.Detail)
+	}
+	if len(env.escalations) != 0 || len(env.restarts) != 0 {
+		t.Fatalf("cleared = %v, restarts = %v; want neither", env.escalations, env.restarts)
 	}
 }
 

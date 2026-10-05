@@ -23,6 +23,9 @@
 //   - idle seats: a polecat whose session is confirmed gone and which holds
 //     no work has its record retired to stop, so nothing keeps reporting the
 //     seat dead (gt-613vw). Dispatching work to it sets the record back to run.
+//     A seat whose last turn exited ESCALATED is first cleared to idle once
+//     its blocker is provably resolved, so a spent escalation stops reading
+//     as recovery-needed work (gt-fn9e6.33); see resolvedEscalationEvidence.
 //
 // Every read that fails makes the answer Unknown, and Unknown is never acted
 // on: a failed bd read is not "no work", "not held" or "bead gone". The tick
@@ -55,6 +58,12 @@ const ReadyToLandLabel = "gt:ready-to-land"
 // out of the done package's dependency tree; a daemon test pins the two
 // together.
 const ExitDeferred = "DEFERRED"
+
+// ExitEscalated is the gt done exit type of a polecat that stopped to raise a
+// blocker for a human instead of finishing. It is done.ExitEscalated, repeated
+// here so this package stays out of the done package's dependency tree; a
+// daemon test pins the two together.
+const ExitEscalated = "ESCALATED"
 
 // Defaults.
 const (
@@ -126,6 +135,28 @@ type AgentRecord struct {
 	// CleanupStatus is the polecat's self-reported git state (clean,
 	// has_uncommitted, has_stash, has_unpushed), "" when the bead carries none.
 	CleanupStatus string
+	// HookBead is hook_bead: the work bead the record says the seat still
+	// holds, "" when it holds none.
+	HookBead string
+	// LastSourceIssue is last_source_issue: the work bead the last turn ran
+	// on, which outlives the hook_bead clear gt done writes.
+	LastSourceIssue string
+}
+
+// GitState is one polecat worktree's live git evidence. The tick measures it
+// now rather than reading back the cleanup_status gt done recorded, because
+// that record describes the turn that ended: only the worktree as it is today
+// can prove nothing is at risk in it (gt-fn9e6.33).
+type GitState struct {
+	// Branch is the worktree's branch, "" when the probe did not resolve one.
+	Branch string
+	// Dirty is true when the worktree holds uncommitted work.
+	Dirty bool
+	// StashCount is the number of stash entries.
+	StashCount int
+	// UnpushedCommits is the number of commits the probe found preserved
+	// nowhere on the rig's origin remote.
+	UnpushedCommits int
 }
 
 // Work is the slice of a work bead the tick decides on.
@@ -147,16 +178,24 @@ type Work struct {
 // detector and the polecat state readers each apply, named once here so the
 // tick cannot answer it differently — gt-xs1ni was the daemon and gt polecat
 // list disagreeing about the same seat.
-//
-// The terminal statuses repeat beads.IssueStatus.IsTerminal to keep this
-// package out of the beads dependency tree;
-// TestPatrolScanIsSubmittedMatchesPolecat pins the two to one answer.
+// TestPatrolScanIsSubmittedMatchesPolecat pins this copy to the original.
 func (w Work) IsSubmitted() bool {
-	switch strings.TrimSpace(w.Status) {
-	case "closed", "tombstone":
+	if w.IsTerminal() {
 		return false
 	}
 	return w.HasLabel(ReadyToLandLabel)
+}
+
+// IsTerminal reports whether the work is over for good: closed or tombstone.
+// It repeats beads.IssueStatus.IsTerminal to keep this package out of the
+// beads dependency tree; TestPatrolScanIsSubmittedMatchesPolecat pins the two
+// to one answer on every status a work bead can be in.
+func (w Work) IsTerminal() bool {
+	switch strings.TrimSpace(w.Status) {
+	case "closed", "tombstone":
+		return true
+	}
+	return false
 }
 
 // HasLabel reports whether the bead carries label (case-insensitive).
@@ -201,6 +240,10 @@ type Env interface {
 	// status the polecat's agent bead records. It is read only to refuse a
 	// restart, never to cause one.
 	AgentRecord(rig, polecat string) (AgentRecord, error)
+	// GitState measures the polecat's worktree live. A probe that could not
+	// answer returns an error, never a zero state: the tick reads a failed
+	// measurement as Unknown and clears nothing on it.
+	GitState(rig, polecat string) (GitState, error)
 	// Heartbeat returns the session heartbeat, nil when there is none.
 	Heartbeat(rig, polecat string) *Heartbeat
 	// Restart restarts the seat through the supervisor.
@@ -209,6 +252,11 @@ type Env interface {
 	// and it holds no work, so nothing needs it running. It reports whether
 	// the record changed.
 	MarkIdle(rig, polecat string) (bool, error)
+	// ClearEscalation resets the agent bead of a seat whose ESCALATED blocker
+	// is resolved: agent_state to idle and the exit type removed, the state
+	// and the field gt done's exit wrote together. It leaves the seat's
+	// branch and directory alone, and reports whether the bead changed.
+	ClearEscalation(rig, polecat string) (bool, error)
 	// MarkSubmitted records the seat's work bead as submitted for landing, so
 	// a seat the tick found mid-landing is read from its record on later
 	// ticks rather than from liveness.
@@ -326,6 +374,7 @@ const (
 	OutcomeClosed    Outcome = "closed"     // orphaned molecule closed
 	OutcomeReopened  Outcome = "reopened"   // dead holder's bead returned to the queue
 	OutcomeIdled     Outcome = "idled"      // idle seat's record retired to stop
+	OutcomeCleared   Outcome = "cleared"    // resolved escalation's record reset to idle
 	OutcomeReaped    Outcome = "reaped"     // finished seat's worktree removed
 	OutcomeWouldReap Outcome = "would-reap" // dry-run: a seat a real run would remove
 	OutcomeBlocked   Outcome = "blocked"    // not safe to remove, or nuke refused
@@ -493,6 +542,18 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		if samples < s.o.DeadSamples {
 			return Finding{}, false
 		}
+		// A seat the last turn left stuck after an ESCALATED exit is cleared
+		// here, before it is retired: a resolved escalation has no work left,
+		// so the agent bead is the last record still asking for recovery
+		// (gt-fn9e6.33). Reading it only once the death is confirmed keeps an
+		// alive or spawning seat free of the Dolt read.
+		agent, err := s.env.AgentRecord(rig, name)
+		if err != nil {
+			return unknown("agent state unreadable", err)
+		}
+		if f, ok := s.clearEscalation(rig, name, agent); ok {
+			return f, true
+		}
 		changed, err := s.env.MarkIdle(rig, name)
 		if err != nil {
 			f.Outcome, f.Detail = OutcomeFailed, "retiring idle seat: "+err.Error()
@@ -555,7 +616,9 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		// and the supervisor restarts the seat on its preserved branch rather
 		// than leaving the work dead until an operator notices (gt-ks62m). An
 		// ESCALATED exit is the operator's: the polecat stopped on purpose to
-		// raise a blocker, and a restart would fight it.
+		// raise a blocker, and a restart would fight it. A resolved one never
+		// arrives here — its bead is closed, so the tick reaches it with no
+		// work and clears it there (resolvedEscalationEvidence).
 		if !strings.EqualFold(strings.TrimSpace(agent.ExitType), ExitDeferred) {
 			detail := "agent_state stuck: stopped on purpose"
 			if e := strings.TrimSpace(agent.ExitType); e != "" {
@@ -607,6 +670,86 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		return f, true
 	}
 	f.Outcome, f.Detail = OutcomeRestarted, reason
+	return f, true
+}
+
+// resolvedEscalationEvidence returns the evidence that the seat the last turn
+// left stuck after an ESCALATED exit has had its blocker resolved, or "" when
+// it may not be cleared. Every condition is measured now, so a seat that fails
+// any one of them is left exactly as the tick leaves it today — the operator's
+// escalation, or an unmeasured one. An error is a condition the tick could not
+// measure, and nothing is cleared on an unknown.
+//
+// A resolved escalation also means the seat has no work: its work bead is
+// closed, so the tick reaches this from the no-work path. A seat whose bead is
+// still open is skipped further up, which is the "still the operator's" case
+// (gt-fn9e6.33).
+func (s *Scanner) resolvedEscalationEvidence(rig, name string, agent AgentRecord) (string, error) {
+	if !strings.EqualFold(strings.TrimSpace(agent.State), "stuck") ||
+		!strings.EqualFold(strings.TrimSpace(agent.ExitType), ExitEscalated) {
+		return "", nil
+	}
+	// A record still pointing at a hooked bead has not finished the turn that
+	// escalated, whatever its state says.
+	if strings.TrimSpace(agent.HookBead) != "" {
+		return "", nil
+	}
+	live, err := s.env.SessionExists(rig, name)
+	if err != nil {
+		return "", fmt.Errorf("session query: %w", err)
+	}
+	if live {
+		return "", nil
+	}
+	// The bead the turn ran on is the escalation's subject: while it is open
+	// the blocker stands, and a record naming none proves nothing.
+	source := strings.TrimSpace(agent.LastSourceIssue)
+	if source == "" {
+		return "", nil
+	}
+	work, err := s.env.WorkBead(rig, source)
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", source, err)
+	}
+	if work == nil || !work.IsTerminal() {
+		return "", nil
+	}
+	git, err := s.env.GitState(rig, name)
+	if err != nil {
+		return "", fmt.Errorf("measuring the worktree: %w", err)
+	}
+	if git.Dirty || git.StashCount > 0 || git.UnpushedCommits > 0 {
+		return "", nil
+	}
+	if git.Branch != "" {
+		return fmt.Sprintf("%s is closed; no session, no hook, worktree clean on %s", source, git.Branch), nil
+	}
+	return source + " is closed; no session, no hook, worktree clean", nil
+}
+
+// clearEscalation clears one seat's resolved ESCALATED record and reports the
+// finding to log. ok is false when the seat is left exactly as the tick would
+// have left it without this pass: no resolution proven, or a record an earlier
+// tick already cleared.
+func (s *Scanner) clearEscalation(rig, name string, agent AgentRecord) (Finding, bool) {
+	f := Finding{Kind: "seat", Subject: name}
+	evidence, err := s.resolvedEscalationEvidence(rig, name, agent)
+	if err != nil {
+		f.Outcome, f.Detail = OutcomeUnknown, "checking a resolved escalation: "+err.Error()
+		return f, true
+	}
+	if evidence == "" {
+		return Finding{}, false
+	}
+	changed, err := s.env.ClearEscalation(rig, name)
+	if err != nil {
+		f.Outcome, f.Detail = OutcomeFailed, "clearing a resolved escalation: "+err.Error()
+		return f, true
+	}
+	if !changed {
+		return Finding{}, false
+	}
+	f.Outcome, f.Detail = OutcomeCleared, "exit ESCALATED, blocker resolved ("+evidence+"); record reset to idle"
 	return f, true
 }
 
