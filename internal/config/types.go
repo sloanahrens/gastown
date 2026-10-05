@@ -1045,16 +1045,8 @@ type MergeQueueConfig struct {
 	// repo's Makefile has that target: lint, build and the tests of the
 	// changed packages only. With no such target gt done falls back to
 	// `make gate` or the lint/build/test commands. The rig's own gate on the
-	// candidate branch (Gate) is unaffected.
+	// candidate branch (merge_queue.forgejo.gate_workflow) is unaffected.
 	PresubmitCommand string `json:"presubmit_command,omitempty"`
-
-	// Gate is the one command the rig's Forgejo CI gate runs on the candidate
-	// branch, the merged tree pushed for the gate (ADR 0004); the landing
-	// worker no longer runs it itself (gt-fn9e6.32). Exit 0 lands; anything
-	// else rejects. Empty means `make gate` when the repo's Makefile has that
-	// target, else `make test`. A Docker-backed gate carries its own slot
-	// wrapper, e.g. "gt slot run --role hm/crew/sloan -- make test".
-	Gate string `json:"gate,omitempty"`
 
 	// LintCommand is the command to run for linting (used by formulas).
 	LintCommand string `json:"lint_command,omitempty"`
