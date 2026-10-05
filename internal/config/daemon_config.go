@@ -87,6 +87,13 @@ type PatrolsConfig struct {
 	// for planning work.
 	StewardPlan *StewardPlanConfig `json:"steward_plan,omitempty"`
 
+	// LandingInfra probes the Forgejo instance and CI runners a cut-over rig
+	// lands through, so an outage shows on the town health line instead of
+	// only as a landing that never finishes (internal/daemon/landing_infra.go,
+	// gt-fn9e6.11). On when absent: it only observes, and it makes no request
+	// where no rig carries merge_queue.forgejo.
+	LandingInfra *LandingInfraConfig `json:"landing_infra,omitempty"`
+
 	// TierSweep runs scripts/tier-sweep.sh against origin/main on an interval,
 	// the tiers `make gate` does not run (internal/daemon/tier_sweep.go,
 	// gt-vsct7.5). Opt-in: it runs the town's expensive suites.
@@ -694,6 +701,21 @@ func forgejoTokenDir(getenv func(string) string, userHomeDir func() (string, err
 		return "", err
 	}
 	return filepath.Join(home, ".config", "gt"), nil
+}
+
+// LandingInfraConfig configures the landing_infra probe (gt-fn9e6.11). The
+// probe exists to make a Forgejo or CI-runner outage visible; it changes
+// nothing about landing, which keeps waiting out CI silence on its own
+// infrastructure-retry path.
+type LandingInfraConfig struct {
+	// Enabled turns the probe on. Nil means on: a probe that must be switched
+	// on cannot report the outage it exists for, and it does nothing where no
+	// rig lands through Forgejo.
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// IntervalStr is the wait between probe passes, as a string (e.g.
+	// "60s"). Default 60s.
+	IntervalStr string `json:"interval,omitempty"`
 }
 
 // StewardConfig holds configuration for the steward patrol.

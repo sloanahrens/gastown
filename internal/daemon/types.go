@@ -127,6 +127,7 @@ type (
 	ScheduledSlingsConfig      = agentconfig.ScheduledSlingsConfig
 	ScheduledSlingEntry        = agentconfig.ScheduledSlingEntry
 	LandingWorkerConfig        = agentconfig.LandingWorkerConfig
+	LandingInfraConfig         = agentconfig.LandingInfraConfig
 	StewardConfig              = agentconfig.StewardConfig
 	StewardPlanConfig          = agentconfig.StewardPlanConfig
 	TierSweepConfig            = agentconfig.TierSweepConfig
@@ -270,6 +271,17 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return true
 		}
 		return config.Patrols.SpecDispatch.Enabled
+	}
+	// landing_infra defaults ON: it only observes (one request per instance
+	// and one per rig, per pass) and it makes a Forgejo or runner outage
+	// visible on the health line, so a probe that must be switched on cannot
+	// prevent the landing silence it exists to name. It does nothing where no
+	// rig lands through Forgejo (gt-fn9e6.11).
+	if patrol == "landing_infra" {
+		if config == nil || config.Patrols == nil || config.Patrols.LandingInfra == nil || config.Patrols.LandingInfra.Enabled == nil {
+			return true
+		}
+		return *config.Patrols.LandingInfra.Enabled
 	}
 	// events_prune defaults ON: .events.jsonl has no other bound, and a
 	// pruner that must be switched on leaves the file growing (gt-ori5j).
