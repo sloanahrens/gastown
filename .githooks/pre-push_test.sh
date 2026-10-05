@@ -637,6 +637,19 @@ git add file.txt && git commit -m "feature work" >/dev/null 2>&1
 assert_live_block "LIVE feature/x refused" "" "HEAD:refs/heads/feature/x"
 cleanup
 
+# Test 40: the land/* allowance from a polecat caller, run with no env vars so
+# cwd alone flags the polecat. land/* is off the default branch, so the polecat
+# guard never reaches it and the family stays allowed regardless of caller
+# (gt-fn9e6.43).
+echo "Test 40: LIVE push of a land/<bead> from a polecat caller — allowed"
+setup_repos "town/gastown/polecats/mica/gastown"
+cd "$TMPDIR/town/gastown/polecats/mica/gastown"
+echo "candidate work" >> file.txt
+git add file.txt && git commit -m "candidate work" >/dev/null 2>&1
+candidate_sha=$(get_sha HEAD)
+assert_live_pass "LIVE land candidate from a polecat caller allowed" "" "$candidate_sha:refs/heads/land/gt-fn9e6.43" "--force"
+cleanup
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 if [[ $FAIL -gt 0 ]]; then
