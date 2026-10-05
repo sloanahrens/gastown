@@ -532,23 +532,14 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	}
 	// A rig whose forgejo block names a promote_target advances GitHub main
 	// from its green verdicts (gt-fn9e6.37), instead of a push mirror that
-	// pushes every commit before the slow check runs.
-	if forgejoCfg != nil && forgejoCfg.PromoteTarget != "" {
-		if forgejoCfg.PromoteKeyFile == "" {
-			d.logger.Printf("landing_worker: %s: merge_queue.forgejo.promote_target is set but promote_key_file is not, so GitHub promotion is off until the deploy key is named", rigName)
-		} else {
-			redMain.Promote = &promote.Promoter{
-				Rig:      rigName,
-				Target:   forgejoCfg.PromoteTarget,
-				KeyFile:  forgejoCfg.PromoteKeyFile,
-				Repo:     git.NewGit(repo),
-				LockPath: promote.LockPath(townRoot, rigName),
-				Escalate: func(message string) {
-					d.escalateAlert("landing-promote-diverged:"+rigName, "landing_worker", message)
-				},
-				Logf: d.logger.Printf,
-			}
-		}
+	// pushes every commit before the slow check runs. A rig the tier sweep
+	// covers takes its candidates from the sweep alone (gt-fn9e6.38): a green
+	// post-land verdict is the tiers `make gate` already ran, and promoting on
+	// it would publish a commit before the sweep that covers the rest has run.
+	if d.tierSweepCoversRig(rigName) {
+		d.logger.Printf("landing_worker: %s: the tier sweep owns GitHub promotion for this rig, so a green post-land verdict does not promote", rigName)
+	} else {
+		redMain.Promote = d.newPromoter(rigName, repo, forgejoCfg)
 	}
 	postLand := &landworker.PostLandRunner{
 		Rig:     rigName,
@@ -1107,6 +1098,42 @@ func writeRedMainStatus(townRoot, rigName, line string, now time.Time) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// newPromoter is a rig's one GitHub promotion owner (gt-fn9e6.37): the git
+// surface reads the target's main and pushes to it from the rig's own
+// repository, the lock is the rig's, and every failure is recorded in the
+// state the caller already keeps. It returns nil when the rig does not
+// promote — no promote_target, or a target with no deploy key — so the caller
+// has nothing to wire and a rig that has not cut over is unchanged.
+func (d *Daemon) newPromoter(rigName, repo string, fj *config.ForgejoConfig) *promote.Promoter {
+	if fj == nil || fj.PromoteTarget == "" {
+		return nil
+	}
+	if fj.PromoteKeyFile == "" {
+		d.logger.Printf("promote: %s: merge_queue.forgejo.promote_target is set but promote_key_file is not, so GitHub promotion is off until the deploy key is named", rigName)
+		return nil
+	}
+	return &promote.Promoter{
+		Rig:      rigName,
+		Target:   fj.PromoteTarget,
+		KeyFile:  fj.PromoteKeyFile,
+		Repo:     git.NewGit(repo),
+		LockPath: promote.LockPath(d.config.TownRoot, rigName),
+		Escalate: func(message string) {
+			d.escalateAlert("landing-promote-diverged:"+rigName, "landing_worker", message)
+		},
+		Logf: d.logger.Printf,
+	}
+}
+
+// tierSweepPromoter is the sweep's promotion owner for a rig, built from the
+// rig's own forgejo block rather than a landing worker's captured one. It is
+// the same newPromoter the post-land verdict calls, so whichever path holds a
+// rig's green verdict, one push path, one lock and one record promote it
+// (gt-fn9e6.38).
+func (d *Daemon) tierSweepPromoter(rigName, repo string) *promote.Promoter {
+	return d.newPromoter(rigName, repo, rig.ResolveForgejoConfig(d.config.TownRoot, rigName))
 }
 
 // RedMainStatePath is the file holding a rig's last green and last tested
