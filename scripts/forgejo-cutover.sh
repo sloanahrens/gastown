@@ -8,7 +8,11 @@
 #      rig) or when the probe is not green;
 #   2. imports every GitHub ref into the rig's Forgejo copy and compares the two
 #      ref lists, so the cut-over copy already holds every GitHub ref the
-#      promotion fast-forwards from;
+#      promotion fast-forwards from. The import never forces: a ref Forgejo
+#      already has at the same commit is left alone, one touching GitHub only is
+#      pushed, one Forgejo is behind on is fast-forwarded, one Forgejo is AHEAD
+#      on is kept rather than rewound, and one whose two sides have diverged
+#      stops the run for the operator to reconcile (--accept-diverged skips it);
 #   3. runs forgejo-provision.sh for the repository (bots, access, protection);
 #   4. connects the rig to GitHub. By default it promotes: it mints an ed25519
 #      keypair (private half at promote-<rig>.key in the config dir, mode 600,
@@ -35,13 +39,17 @@
 # rather than run.
 #
 # Idempotent: every step reads before it writes. A ref import over converged
-# refs sends no update, an existing promote key is reused rather than
+# refs sends no update, nothing it does is forced — it updates a Forgejo ref
+# only where the update is a fast-forward and leaves a ref Forgejo is ahead on
+# exactly where it is — an existing promote key is reused rather than
 # regenerated, a mirror already pointing at the target is left alone, a remote
 # already at the URL is reported and skipped, and a settings file whose block
 # already matches is not rewritten (so it gains no second backup).
-# --dry-run reads and prints and writes nothing: the probe is printed rather
+# --dry-run writes nothing outside its own temp dir: the probe is printed rather
 # than run, because a probe pushes a branch to Forgejo, and ssh-keygen is
-# printed rather than run.
+# printed rather than run. The ref plan still reads both sides into that temp
+# dir, so the dry run shows every would-push and would-keep line — a rewind
+# included — before a real run touches Forgejo.
 #
 # The script's own git work — the probe's push, the Forgejo ref listing and the
 # import push — rides the admin base URL instead of --forgejo-url: WEB_URL
@@ -74,6 +82,8 @@
 #                         default promote connection (gt-fn9e6.40)
 #   --mirror-target URL   the push mirror's target, with --mirror (default: the
 #                         ssh form of --github-url)
+#   --accept-diverged     skip a ref whose two sides have diverged, leaving it
+#                         as Forgejo has it, instead of stopping the run
 #   --main-branch NAME    protected landing target (default: main)
 #   --gate-workflow NAME  gate workflow file basename (default: gate)
 #   --bot-prefix P        bot login prefix, one bot per role (default: bot-)
@@ -143,6 +153,8 @@ PROBE="$SELF_DIR/forgejo-probe.sh"
 PROVISION="$SELF_DIR/forgejo-provision.sh"
 GT_BIN="${GT_BIN:-gt}"
 DRY_RUN=0
+# Skip a diverged ref instead of stopping the import on it (see import_refs).
+ACCEPT_DIVERGED=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -162,6 +174,7 @@ while [ $# -gt 0 ]; do
     --provision) [ $# -ge 2 ] || usage_die "--provision needs a value"; PROVISION=$2; shift 2 ;;
     --gt) [ $# -ge 2 ] || usage_die "--gt needs a value"; GT_BIN=$2; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --accept-diverged) ACCEPT_DIVERGED=1; shift ;;
     -h|--help) usage; exit 0 ;;
     -*) usage_die "unknown option: $1" ;;
     *)
@@ -469,47 +482,113 @@ ls_remote() {
   git ls-remote --heads --tags --refs "$1" | awk '{print $2" "$1}' | LC_ALL=C sort
 }
 
-normalize() { if [ -n "$1" ]; then printf '%s\n' "$1"; fi; }
+# ref_names_of LISTING prints just the ref names of an "ref sha" listing, sorted.
+# It is the final comparison's key: a kept ref is present on both sides at
+# different commits, so the import checks names, not the SHAs behind them.
+ref_names_of() { printf '%s\n' "$1" | awk 'NF { print $1 }' | LC_ALL=C sort; }
 
-# report_plan prints the refs GitHub holds and Forgejo does not: those the
-# import below creates. A ref Forgejo holds and GitHub does not is left alone
-# (the import does not prune), because it may be a candidate branch a landing
-# still references.
-report_plan() {
-  local ref
-  while IFS=' ' read -r ref _; do
-    if [ -n "$ref" ]; then log "will import $ref"; fi
-  done <<<"$(comm -23 <(normalize "$1") <(normalize "$2") || true)"
-  return 0
+# sha_of LISTING REF prints REF's sha in LISTING, or nothing.
+sha_of() { # sha_of LISTING REF
+  printf '%s\n' "$1" | awk -v r="$2" '$1 == r { print $2; exit }'
+}
+
+# run_read COMMAND... prints COMMAND and runs it even under --dry-run. Only for
+# the scratch repository's own init and fetches: they write inside $WORK alone,
+# and the plan cannot tell a fast-forward from a rewind without both sides'
+# objects, so a dry run has to read them.
+run_read() {
+  local q="" a
+  for a in "$@"; do q="$q$(printf '%q' "$a") "; done
+  log "+ ${q% }"
+  "$@"
+}
+
+# is_ancestor REPO A B is true when A is B, or an ancestor of B. A false answer
+# covers both "B is ahead of A" and "the two have diverged"; the caller tells
+# them apart with the second call.
+is_ancestor() { git -C "$1" merge-base --is-ancestor "$2" "$3" 2>/dev/null; }
+
+# commits_ahead REPO A B prints the commits B has that A does not.
+commits_ahead() { # commits_ahead REPO A B
+  git -C "$1" rev-list --count "$2..$3" 2>/dev/null || printf '?'
 }
 
 # import_refs is step 2. It fetches every GitHub branch and tag into a scratch
-# bare repository and pushes them to Forgejo, then requires every GitHub ref to
-# be present in Forgejo: a mirror has no branch filter and prunes, so a GitHub
-# ref Forgejo lacks is deleted on GitHub at the next sync (--mirror), and the
-# default promotion fast-forwards GitHub main from Forgejo's, so Forgejo must
-# already hold GitHub's commits. Both Forgejo reads and the push ride the admin
-# base URL, so the import never depends on bot access the not-yet-run
-# provisioner would grant.
+# bare repository beside the same refs as Forgejo holds, then pushes each GitHub
+# ref Forgejo may take: one Forgejo has no copy of, or one whose update is a
+# fast-forward. It never forces. A ref Forgejo is ahead on is kept, and a ref
+# whose two sides have diverged stops the run before anything is pushed, because
+# only the operator can reconcile it (--accept-diverged skips it instead).
+#
+# Repointing a rig that is already cut over is exactly the rewound case this
+# guards: GitHub's main is frozen behind Forgejo's, so the old forced push would
+# have discarded every commit landed since the cutover (gt-fn9e6.51). A tag
+# whose two sides differ is never moved either — the ancestry checks do not hold
+# for a tag object, so it falls to the diverged branch rather than overwrite one.
+#
+# Both Forgejo reads and the push ride the admin base URL, so the import never
+# depends on bot access the not-yet-run provisioner would grant.
 import_refs() {
-  local scratch="$WORK/import.git" github_before forgejo_before github_after forgejo_after
-  log "importing every GitHub ref through $ADMIN_GIT_URL"
+  local scratch="$WORK/import.git"
+  local github_before forgejo_before github_after forgejo_after
+  local ref sha fj_sha n missing
+  local -a specs=() diverged=()
+
+  log "importing every GitHub ref through $ADMIN_GIT_URL without force"
   github_before=$(ls_remote "$GITHUB_URL")
   forgejo_before=$(ls_remote "$ADMIN_GIT_URL")
-  report_plan "$github_before" "$forgejo_before"
-  run git init --bare --quiet "$scratch"
-  run git -C "$scratch" fetch --quiet "$GITHUB_URL" \
+
+  run_read git init --bare --quiet "$scratch"
+  run_read git -C "$scratch" fetch --quiet "$ADMIN_GIT_URL" \
+    '+refs/heads/*:refs/forgejo/heads/*' '+refs/tags/*:refs/forgejo/tags/*'
+  run_read git -C "$scratch" fetch --quiet "$GITHUB_URL" \
     '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'
-  run git -C "$scratch" push --quiet "$ADMIN_GIT_URL" \
-    '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'
+
+  while read -r ref sha; do
+    [ -n "$ref" ] || continue
+    fj_sha=$(sha_of "$forgejo_before" "$ref")
+    if [ -z "$fj_sha" ]; then
+      log "will import $ref (Forgejo has no copy)"
+      specs+=("$ref:$ref")
+    elif [ "$sha" = "$fj_sha" ]; then
+      log "up to date: $ref is $sha on both"
+    elif is_ancestor "$scratch" "$fj_sha" "$sha"; then
+      log "will import $ref (fast-forward)"
+      specs+=("$ref:$ref")
+    elif is_ancestor "$scratch" "$sha" "$fj_sha"; then
+      n=$(commits_ahead "$scratch" "$sha" "$fj_sha")
+      log "kept: $ref — Forgejo is ahead of GitHub by $n commits (forgejo $fj_sha, github $sha)"
+    else
+      log "diverged: $ref — Forgejo and GitHub have diverged (forgejo $fj_sha, github $sha)"
+      diverged+=("$ref")
+    fi
+  done <<<"$github_before"
+
+  if [ ${#diverged[@]} -gt 0 ] && [ "$ACCEPT_DIVERGED" != 1 ]; then
+    log "ERROR: ${#diverged[@]} ref(s) have diverged between GitHub and Forgejo:"
+    for ref in "${diverged[@]}"; do log "  $ref"; done
+    die "reconcile the diverged refs, or re-run with --accept-diverged to skip them"
+  fi
+
+  if [ ${#specs[@]} -gt 0 ]; then
+    run git -C "$scratch" push --quiet "$ADMIN_GIT_URL" "${specs[@]}"
+  else
+    log "no GitHub ref needs importing"
+  fi
   if [ "$DRY_RUN" = 1 ]; then
     return 0
   fi
+
+  # Every GitHub ref NAME has to be in Forgejo before a mirror exists: a mirror
+  # has no branch filter and prunes, so a GitHub ref Forgejo lacks is deleted on
+  # GitHub at the next sync (--mirror), and the default promotion fast-forwards
+  # GitHub main from Forgejo's, so Forgejo must already hold GitHub's commits.
   github_after=$(ls_remote "$GITHUB_URL")
   forgejo_after=$(ls_remote "$ADMIN_GIT_URL")
-  if [ -n "$(comm -23 <(normalize "$github_after") <(normalize "$forgejo_after") || true)" ]; then
+  missing=$(comm -23 <(ref_names_of "$github_after") <(ref_names_of "$forgejo_after") || true)
+  if [ -n "$missing" ]; then
     log "ERROR: Forgejo is missing GitHub refs after the import; the mirror would prune them"
-    comm -23 <(normalize "$github_after") <(normalize "$forgejo_after") >&2 || true
+    printf '%s\n' "$missing" >&2
     exit 1
   fi
   log "imported every GitHub ref into $REPO ($(printf '%s\n' "$forgejo_after" | grep -c .) refs there)"

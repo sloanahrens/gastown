@@ -13,6 +13,12 @@
 # push mirror, a second cutover that reuses the key, --mirror reproducing the
 # push mirror, a hostname-form --forgejo-url whose own git work still rides the
 # admin base, and a landing queued at the restart.
+#
+# The import's own safety is its own set (gt-fn9e6.51): a Forgejo ref ahead of
+# GitHub's is kept and never rewound, a Forgejo ref behind GitHub's is
+# fast-forwarded, a missing ref is created, a diverged ref stops the run (or is
+# skipped with --accept-diverged), nothing is ever force-pushed, and --dry-run
+# shows every would-push and would-keep line without touching Forgejo.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -71,9 +77,18 @@ exit "$(cat "$STUB_STATE/provision-rc" 2>/dev/null || echo 0)"
 STUB
 chmod +x "$TMP/provision.sh"
 
-# The stub git: remotes live in files named for the directory, refs in files
-# named for the URL, and an import (fetch then push) copies the fetched refs
-# into the pushed URL's file, so the comparison after the push is a real one.
+# The stub git: remotes live in files named for the directory, each remote's
+# refs in a file named for the URL, and the scratch repository the import builds
+# in a file named for its directory. A ref file holds "ref sha" lines; ls-remote
+# prints them back the way real git does ("sha<TAB>ref"), so the script's own
+# "ref sha" parser is exercised. fetch and push apply their refspecs for real,
+# so a push moves only the refs the script asked for, and a push that would not
+# fast-forward is rejected unless it carries '+'. A '+' or --force anywhere is
+# also recorded as a force violation, so a test can prove the import never
+# forces.
+#
+# $STUB_STATE/commits holds the commit graph the ancestry checks read, one
+# "<sha> <parent>" line per commit (a root's parent is empty).
 #
 # $STUB_FORGEJO_GIT_URLS lists the git URLs the Forgejo instance answers on. A
 # Forgejo URL that is not the admin one is served as a bot, and the bots have no
@@ -108,6 +123,81 @@ reachable() { # reachable URL
   return 0
 }
 
+# is_ancestor A B: A is B, or an ancestor of B in the commits file.
+is_ancestor() {
+  local a=$1 cur=$2
+  [ "$a" = "$cur" ] && return 0
+  while [ -n "$cur" ]; do
+    cur=$(awk -v c="$cur" '$1 == c { print $2 }' "$STUB_STATE/commits" 2>/dev/null)
+    [ "$cur" = "$a" ] && return 0
+  done
+  return 1
+}
+reachable_from() { # reachable_from A prints A and its ancestors
+  local cur=$1
+  while [ -n "$cur" ]; do
+    printf '%s\n' "$cur"
+    cur=$(awk -v c="$cur" '$1 == c { print $2 }' "$STUB_STATE/commits" 2>/dev/null)
+  done
+}
+rev_count() { # rev_count A B: commits reachable from B and not from A
+  local a=$1 x n=0
+  while read -r x; do
+    is_ancestor "$x" "$a" || n=$((n + 1))
+  done <<<"$(reachable_from "$2")"
+  printf '%s' "$n"
+}
+# refspecs ARGS... prints "SRC DST" for every refspec argument, its leading '+'
+# stripped. Only a refs/... argument is a refspec: a remote URL holds a ':' too.
+refspecs() {
+  local a r
+  for a in "$@"; do
+    case "$a" in
+      +refs/*:*) r=${a#+}; printf '%s %s\n' "${r%%:*}" "${r#*:}" ;;
+      refs/*:*) printf '%s %s\n' "${a%%:*}" "${a#*:}" ;;
+    esac
+  done
+}
+# map_ref SRC DST REF rewrites REF by one refspec, or fails when SRC misses it.
+# A single '*' is the only pattern the script's specs use.
+map_ref() { # map_ref SRC DST REF
+  local src=$1 dst=$2 ref=$3 head
+  case "$src" in
+    *'*')
+      head=${src%%\*}
+      case "$ref" in
+        "$head"*) printf '%s%s' "${dst%%\*}" "${ref#"$head"}" ;;
+        *) return 1 ;;
+      esac ;;
+    *) [ "$ref" = "$src" ] && printf '%s' "$dst" || return 1 ;;
+  esac
+}
+# apply_specs SOURCE TARGET reads "SRC DST" lines on stdin and rewrites TARGET's
+# refs with the matching refs of SOURCE, the last write to a ref winning. A
+# change that would not fast-forward is rejected unless it carried '+', which is
+# how the stub refuses a force push the way a protected Forgejo branch does.
+apply_specs() { # apply_specs SOURCE TARGET
+  local source=$1 target=$2 src dst ref sha out cur have
+  : > "$target.new"
+  [ -f "$target" ] && cat "$target" >> "$target.new"
+  have=$(cat "$source" 2>/dev/null || true)
+  while read -r src dst; do
+    [ -n "$src" ] || continue
+    while read -r ref sha; do
+      [ -n "$ref" ] || continue
+      out=$(map_ref "$src" "$dst" "$ref") || continue
+      cur=$(awk -v r="$out" '$1 == r { print $2 }' "$target.new")
+      if [ -n "$cur" ] && [ "$cur" != "$sha" ] && ! is_ancestor "$cur" "$sha"; then
+        printf 'remote: branch %s is protected from force push (would not fast-forward)\n' "$out" >&2
+        exit 1
+      fi
+      printf '%s %s\n' "$out" "$sha" >> "$target.new"
+    done <<<"$have"
+  done
+  awk '{ a[$1] = $2 } END { for (r in a) print r, a[r] }' "$target.new" | LC_ALL=C sort > "$target"
+  rm -f "$target.new"
+}
+
 dir=""
 if [ "${1:-}" = "-C" ]; then dir=$2; shift 2; fi
 sub=${1:-}
@@ -126,18 +216,31 @@ case "$sub" in
   ls-remote)
     url=$(url_of "$@" || true)
     reachable "$url" || exit 128
-    cat "$STUB_STATE/refs_$(key_of "$url")" 2>/dev/null || true ;;
+    awk '{ print $2"\t"$1 }' "$STUB_STATE/refs_$(key_of "$url")" 2>/dev/null || true ;;
+  merge-base)
+    [ "${2:-}" = "--is-ancestor" ] || exit 129
+    is_ancestor "$3" "$4" && exit 0
+    exit 1 ;;
+  rev-list)
+    [ "${2:-}" = "--count" ] || exit 129
+    range=${3:-}
+    rev_count "${range%%..*}" "${range#*..}"
+    exit 0 ;;
   init) mkdir -p "${!#}" ;;
   fetch)
     url=$(url_of "$@" || true)
     reachable "$url" || exit 128
-    printf '%s' "$url" > "$STUB_STATE/fetched-url"
-    cat "$STUB_STATE/refs_$(key_of "$url")" 2>/dev/null > "$STUB_STATE/fetched-refs" || : > "$STUB_STATE/fetched-refs" ;;
+    refspecs "$@" | apply_specs "$STUB_STATE/refs_$(key_of "$url")" "$STUB_STATE/scratch_$(key_of "$dir")" ;;
   push)
     url=$(url_of "$@" || true)
     reachable "$url" || exit 128
     printf '%s\n' "$url" >> "$STUB_STATE/pushes"
-    cp "$STUB_STATE/fetched-refs" "$STUB_STATE/refs_$(key_of "$url")" 2>/dev/null || true ;;
+    for a in "$@"; do
+      case "$a" in
+        --force|--force-with-lease*|-f|+refs/*:*) printf '%s\n' "$a" >> "$STUB_STATE/force-violations" ;;
+      esac
+    done
+    refspecs "$@" | apply_specs "$STUB_STATE/scratch_$(key_of "$dir")" "$STUB_STATE/refs_$(key_of "$url")" ;;
 esac
 STUB
 chmod +x "$TMP/bin/git"
@@ -268,6 +371,8 @@ fresh() {
   : > "$STATE/ssh-keygen.log"
   printf '0\n' > "$STATE/landing-plan"
   : > "$STATE/bd-calls"
+  # No commit graph by default: the cases that need ancestry write one.
+  : > "$STATE/commits"
   printf '0\n' > "$STATE/probe-rc"
   printf '%s\n%s\n%s\n' \
     "$RIG_ROOT/.repo.git" "$RIG_ROOT/mayor/rig" "$RIG_ROOT/crew/sloan" > "$STATE/repos"
@@ -492,6 +597,96 @@ check "it says the landing queue is not empty" contains "1 open gt:ready-to-land
 check "the daemon was not restarted" [ ! -s "$STATE/gt.log" ]
 check "it prints the restart command for later" contains "gt daemon restart" "$out"
 check "the rig is still cut over" contains "\"remote_url\": \"$FORGEJO_URL\"" "$(cat "$RIG_ROOT/settings/config.json")"
+
+echo "=== Forgejo ahead of GitHub keeps its refs, never rewinding them ==="
+# A rig that is already cut over: GitHub's main is frozen at c1 while Forgejo's
+# has gone on to c3, two commits past it. The old forced import rewound it.
+fresh
+printf 'c1 \nc2 c1\nc3 c2\n' > "$STATE/commits"
+printf 'refs/heads/main c1\n' > "$STATE/refs_$(refs_key "$GITHUB_URL")"
+printf 'refs/heads/main c3\n' > "$STATE/refs_$(refs_key "$FORGEJO_URL")"
+forgejo_before=$(cat "$STATE/refs_$(refs_key "$FORGEJO_URL")")
+out=$(run_cutover); rc=$?
+if [ "$rc" = 0 ]; then pass "a second cutover of an ahead rig exits 0"; else fail "a second cutover of an ahead rig exits 0 (rc=$rc)" "$out"; fi
+check "it says Forgejo is ahead, with the count" contains "kept: refs/heads/main — Forgejo is ahead of GitHub by 2 commits" "$out"
+check "it names the Forgejo commit" contains "forgejo c3" "$out"
+check "it names the GitHub commit" contains "github c1" "$out"
+check "Forgejo main is unchanged" [ "$(cat "$STATE/refs_$(refs_key "$FORGEJO_URL")")" = "$forgejo_before" ]
+check "nothing was pushed" [ ! -f "$STATE/pushes" ]
+check "no force was used" [ ! -f "$STATE/force-violations" ]
+check "it continued to the promote step" contains "\"promote_target\": \"$GITHUB_URL\"" "$(cat "$RIG_ROOT/settings/config.json")"
+check "the daemon was restarted" contains "daemon restart" "$(cat "$STATE/gt.log")"
+
+echo "=== Forgejo behind GitHub is fast-forwarded ==="
+fresh
+printf 'c1 \nc2 c1\nc3 c2\n' > "$STATE/commits"
+printf 'refs/heads/main c3\nrefs/heads/feature c2\n' > "$STATE/refs_$(refs_key "$GITHUB_URL")"
+printf 'refs/heads/main c1\n' > "$STATE/refs_$(refs_key "$FORGEJO_URL")"
+out=$(run_cutover); rc=$?
+if [ "$rc" = 0 ]; then pass "the cutover exits 0"; else fail "the cutover exits 0 (rc=$rc)" "$out"; fi
+check "it plans the fast-forward" contains "will import refs/heads/main (fast-forward)" "$out"
+check "it plans the ref Forgejo lacks" contains "will import refs/heads/feature (Forgejo has no copy)" "$out"
+check "Forgejo main moved to GitHub's commit" contains "refs/heads/main c3" "$(cat "$STATE/refs_$(refs_key "$FORGEJO_URL")")"
+check "the new ref arrived" contains "refs/heads/feature c2" "$(cat "$STATE/refs_$(refs_key "$FORGEJO_URL")")"
+check "the push did not force" [ ! -f "$STATE/force-violations" ]
+check "no push refspec carried a force marker" lacks "+refs/" "$(grep '^push' "$STATE/git.log")"
+
+echo "=== a diverged ref stops the run before anything is pushed ==="
+fresh
+printf 'x1 \ny1 \nf1 \n' > "$STATE/commits"
+printf 'refs/heads/main x1\nrefs/heads/feature f1\n' > "$STATE/refs_$(refs_key "$GITHUB_URL")"
+printf 'refs/heads/main y1\n' > "$STATE/refs_$(refs_key "$FORGEJO_URL")"
+forgejo_before=$(cat "$STATE/refs_$(refs_key "$FORGEJO_URL")")
+out=$(run_cutover); rc=$?
+if [ "$rc" != 0 ]; then pass "a diverged ref exits non-zero"; else fail "a diverged ref exits non-zero" "$out"; fi
+check "it names the diverged ref" contains "diverged: refs/heads/main" "$out"
+check "it names both commits" contains "(forgejo y1, github x1)" "$out"
+check "it names the override" contains "--accept-diverged" "$out"
+check "nothing reached Forgejo" [ "$(cat "$STATE/refs_$(refs_key "$FORGEJO_URL")")" = "$forgejo_before" ]
+check "no push was attempted" [ ! -f "$STATE/pushes" ]
+check "the cutover stopped before the promote key" [ ! -e "$PROMOTE_KEY_FILE" ]
+
+echo "=== --accept-diverged skips that ref and imports the rest ==="
+out=$(run_cutover --accept-diverged); rc=$?
+if [ "$rc" = 0 ]; then pass "an accepted divergence exits 0"; else fail "an accepted divergence exits 0 (rc=$rc)" "$out"; fi
+check "it still reports the divergence" contains "diverged: refs/heads/main" "$out"
+check "the diverged ref is left as Forgejo has it" contains "refs/heads/main y1" "$(cat "$STATE/refs_$(refs_key "$FORGEJO_URL")")"
+check "the other ref was imported" contains "refs/heads/feature f1" "$(cat "$STATE/refs_$(refs_key "$FORGEJO_URL")")"
+check "no force was used" [ ! -f "$STATE/force-violations" ]
+
+echo "=== --dry-run shows a rewind before it can happen ==="
+fresh
+printf 'c1 \nc2 c1\nc3 c2\n' > "$STATE/commits"
+printf 'refs/heads/main c1\n' > "$STATE/refs_$(refs_key "$GITHUB_URL")"
+printf 'refs/heads/main c3\n' > "$STATE/refs_$(refs_key "$FORGEJO_URL")"
+forgejo_before=$(cat "$STATE/refs_$(refs_key "$FORGEJO_URL")")
+out=$(run_cutover --dry-run); rc=$?
+if [ "$rc" = 0 ]; then pass "the dry run exits 0"; else fail "the dry run exits 0 (rc=$rc)" "$out"; fi
+check "the dry run prints the kept line" contains "kept: refs/heads/main — Forgejo is ahead of GitHub by 2 commits" "$out"
+check "the dry run leaves Forgejo alone" [ "$(cat "$STATE/refs_$(refs_key "$FORGEJO_URL")")" = "$forgejo_before" ]
+check "the dry run pushed nothing" [ ! -f "$STATE/pushes" ]
+
+echo "=== --dry-run shows the fast-forward it would make ==="
+fresh
+printf 'c1 \nc2 c1\nc3 c2\n' > "$STATE/commits"
+printf 'refs/heads/main c3\n' > "$STATE/refs_$(refs_key "$GITHUB_URL")"
+printf 'refs/heads/main c1\n' > "$STATE/refs_$(refs_key "$FORGEJO_URL")"
+forgejo_before=$(cat "$STATE/refs_$(refs_key "$FORGEJO_URL")")
+out=$(run_cutover --dry-run); rc=$?
+if [ "$rc" = 0 ]; then pass "the dry run exits 0"; else fail "the dry run exits 0 (rc=$rc)" "$out"; fi
+check "the dry run prints the fast-forward" contains "will import refs/heads/main (fast-forward)" "$out"
+check "the dry run leaves Forgejo alone" [ "$(cat "$STATE/refs_$(refs_key "$FORGEJO_URL")")" = "$forgejo_before" ]
+check "the dry run pushed nothing" [ ! -f "$STATE/pushes" ]
+
+echo "=== --dry-run reports a divergence as the stop it would be ==="
+fresh
+printf 'x1 \ny1 \n' > "$STATE/commits"
+printf 'refs/heads/main x1\n' > "$STATE/refs_$(refs_key "$GITHUB_URL")"
+printf 'refs/heads/main y1\n' > "$STATE/refs_$(refs_key "$FORGEJO_URL")"
+out=$(run_cutover --dry-run); rc=$?
+if [ "$rc" != 0 ]; then pass "the dry run stops on the divergence"; else fail "the dry run stops on the divergence" "$out"; fi
+check "it prints the diverged line" contains "diverged: refs/heads/main" "$out"
+check "nothing was pushed" [ ! -f "$STATE/pushes" ]
 
 echo
 echo "forgejo-cutover_test: passed=$PASS failed=$FAIL"
