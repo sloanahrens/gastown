@@ -165,11 +165,15 @@ exit /b 0
 
 	t.Setenv("BD_LOG", logPath)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	// No GT_ROLE: the sling runs as a town-level caller, which is the only
-	// thing the role check cares about (a polecat role is refused).
-	t.Setenv(EnvGTRole, "")
+	// The self-sling route below (a formula on a bead, no explicit target)
+	// resolves the caller's own identity, so the test claims one: a crew
+	// member, the lowest identity a sling accepts (a polecat role is refused).
+	// The compound role carries the rig and name; the companions mirror how
+	// the runtime exports them for a simple role.
+	t.Setenv(EnvGTRole, "gastown/crew/mel")
+	t.Setenv("GT_RIG", "gastown")
+	t.Setenv("GT_CREW", "mel")
 	t.Setenv("GT_POLECAT", "")
-	t.Setenv("GT_CREW", "")
 	t.Setenv("TMUX_PANE", "") // Prevent inheriting real tmux pane from test runner
 
 	cwd, err := os.Getwd()
