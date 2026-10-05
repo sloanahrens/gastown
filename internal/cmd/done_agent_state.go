@@ -280,6 +280,14 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 			} else if unchecked := beads.HasUncheckedCriteria(hookedBead); unchecked > 0 {
 				style.PrintWarning("hooked bead %s has %d unchecked acceptance criteria — skipping close", hookedBeadID, unchecked)
 				fmt.Fprintf(os.Stderr, "  The bead will remain open; see the warning above.\n")
+			} else if message, standDown := done.ReworkUnchangedHeadMessage(hookedBead, currentHead); standDown {
+				// The submission stood down because the branch still sits on
+				// the rejected head (gt-3e1z4). The close-time invariant below
+				// would skip the close too; say why in a way that names the way
+				// forward, and record that instead of the bare refusal.
+				style.PrintWarning("%s", message)
+				fmt.Fprintf(os.Stderr, "  The bead will remain open; the reason is recorded on it.\n")
+				done.NotifyDoneCloseSkipped(hookBd, hookedBeadID, message)
 			} else if skipReason := doneCloseTimeInvariantSkipReason(cwd, townRoot, ctx.Rig, hookedBeadID); skipReason != "" {
 				// gt-6hmz: refuse rather than close a bead whose branch carries
 				// commits the target lacks; only the landing worker closes

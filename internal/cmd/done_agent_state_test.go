@@ -108,3 +108,70 @@ func TestDeferredDoneLeavesReadyToLandBeadUntouched(t *testing.T) {
 		t.Error("deferred gt done closed the bead")
 	}
 }
+
+// TestCompletedDoneOnUnchangedReworkRecordsTheRequeueHint: a completed gt done
+// on a rework bead still sitting on the head its rejection names skips the
+// close (the close-time invariant, gt-6hmz) and leaves the bead open — but the
+// reason it records is the actionable one: the head is unchanged, nothing was
+// resubmitted, and an operator can re-queue it (gt-3e1z4).
+func TestCompletedDoneOnUnchangedReworkRecordsTheRequeueHint(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	for _, dir := range []string{"mayor", filepath.Join(".beads", "locks"), "gastown"} {
+		if err := os.MkdirAll(filepath.Join(townRoot, dir), 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	routes := `{"prefix":"gt-","path":"gastown"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+
+	const head = "1111111111111111111111111111111111111111"
+	db := beadsfake.New(beadsfake.WithPrefix("gt"))
+	db.Seed(beads.Issue{
+		ID:     "gt-rework",
+		Title:  "the work",
+		Type:   "task",
+		Status: string(beads.StatusOpen),
+		Labels: []string{land.LabelRework},
+		Notes: land.FormatRejectionNote(land.RejectionNote{
+			Attempt: 1, Kind: "gate", Reason: "the gate refused it",
+			Branch: "polecat/mica/gt-rework+abc", Target: "main", MR: "gt-rework", Head: head,
+		}),
+	})
+
+	env := doneStateEnv{
+		getenv: envMap(map[string]string{"GT_ROLE": "polecat", "GT_RIG": "gastown", "GT_POLECAT": "mica"}),
+		routed: func(string) beads.Client { return db },
+		source: func(string, string) beads.Client { return db },
+		purge:  func(string, string) {},
+		reviewHead: func() (string, error) {
+			return head, nil
+		},
+	}
+	if err := updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, done.ExitCompleted, "gt-rework"); err != nil {
+		t.Fatalf("completed gt done: %v", err)
+	}
+
+	got, err := db.Show("gt-rework")
+	if err != nil {
+		t.Fatalf("show gt-rework: %v", err)
+	}
+	if got.Status == string(beads.StatusClosed) {
+		t.Error("gt done closed a rework bead whose head was unchanged")
+	}
+	comments, err := db.Comments("gt-rework")
+	if err != nil {
+		t.Fatalf("Comments: %v", err)
+	}
+	if len(comments) == 0 {
+		t.Fatal("gt done recorded nothing on the unchanged rework bead")
+	}
+	text := comments[len(comments)-1].Text
+	for _, want := range []string{"DONE_CLOSE_SKIPPED", "head unchanged since the rejection", "gt land requeue gt-rework"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("comment %q does not carry %q", text, want)
+		}
+	}
+}

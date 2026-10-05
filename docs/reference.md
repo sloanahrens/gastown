@@ -217,6 +217,19 @@ The bead comes from `--bead`, else from a branch name carrying a routed bead id;
 `BD_ACTOR` falls back to `git config user.name`. A polecat's `gt done` refuses
 `--pre-verified`.
 
+**Re-queueing a rejected landing (gt-3e1z4).** A landing the worker refuses labels the
+bead `rework` (removing `gt:ready-to-land`) and appends a `MERGE REJECTION` note naming
+the head it refused. When the polecat's branch still sits on that head the rejection
+came from something other than the diff, and nothing needs to change.
+`gt land requeue <bead> --reason "<why>"` removes `rework`, restores `gt:ready-to-land`
+and records the operator, the reason and the head as a bead comment, so the worker gates
+and merges the same head again. It refuses when the head changed (a normal `gt done`
+resubmission, which re-gates), when the bead is not in a rejected state, and when the
+branch is gone from the remote; it never re-queues a head that has not passed presubmit.
+`gt done` on a rework bead still on the rejected head does not resubmit: it stands down,
+leaves the bead open, and tells the polecat to ask for a `gt land requeue` if the
+rejection was environmental, or to make a new commit otherwise.
+
 Never poll the slot, and never script a retry around `gt done` or `gt slot`: a
 polling loop holds the gate every other agent is queued behind, one pass at a
 time (gt-7dxw). The dangerous-command guard refuses the loop shape — a
