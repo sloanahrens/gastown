@@ -62,7 +62,9 @@ type RedMain struct {
 	// call, never a landing spent on a guess.
 	Diff func(ctx context.Context, rec land.LandingRecord) ([]string, error)
 	// Promote fast-forwards the rig's GitHub main on a green verdict
-	// (gt-fn9e6.37). nil is a rig with no promote_target: unchanged behavior.
+	// (gt-fn9e6.37). nil leaves the verdict with no promotion path at all: a
+	// rig with no promote_target, or one whose tier sweep owns the promotion
+	// and promotes from its own fully green cycle instead (gt-fn9e6.38).
 	Promote *promote.Promoter
 }
 

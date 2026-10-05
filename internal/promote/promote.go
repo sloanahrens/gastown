@@ -239,7 +239,11 @@ func (p *Promoter) logf(format string, args ...any) {
 	if p.Logf == nil {
 		return
 	}
-	p.Logf("landing_worker: %s: promote: %s", p.Rig, p.scrub(fmt.Sprintf(format, args...)))
+	// "promote" is this package's own component tag, not a caller's: two
+	// callers promote (gt-fn9e6.38), so a line naming either is wrong for the
+	// other. The rig still leads the message, which is the position gt tail
+	// attributes a daemon line by.
+	p.Logf("promote: %s: %s", p.Rig, p.scrub(fmt.Sprintf(format, args...)))
 }
 
 func (p *Promoter) now() time.Time {

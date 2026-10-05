@@ -1111,7 +1111,7 @@ func (d *Daemon) newPromoter(rigName, repo string, fj *config.ForgejoConfig) *pr
 		return nil
 	}
 	if fj.PromoteKeyFile == "" {
-		d.logger.Printf("landing_worker: %s: merge_queue.forgejo.promote_target is set but promote_key_file is not, so GitHub promotion is off until the deploy key is named", rigName)
+		d.logger.Printf("promote: %s: merge_queue.forgejo.promote_target is set but promote_key_file is not, so GitHub promotion is off until the deploy key is named", rigName)
 		return nil
 	}
 	return &promote.Promoter{
