@@ -388,7 +388,7 @@ fresh() {
   "type": "rig-settings",
   "version": 1,
   "merge_queue": {
-    "gate": "make gate"
+    "test_command": "make gate"
   }
 }
 JSON
