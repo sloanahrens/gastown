@@ -32,6 +32,14 @@
 # --dry-run reads and prints and writes nothing: the probe is printed rather
 # than run, because a probe pushes a branch to Forgejo.
 #
+# The script's own git work — the probe's push, the Forgejo ref listing and the
+# import push — rides the admin base URL instead of --forgejo-url: WEB_URL
+# /OWNER/NAME.git, the web root where the operator's admin credentials apply.
+# --forgejo-url is the hostname form the rig's credential helper resolves for
+# the bots, and the bots have no access to the repository until provisioning has
+# run, so reading or pushing through it this early fails with "Repository not
+# found" (gt-fn9e6.35).
+#
 # Every edit of a config file copies it to a dated .bak- file first. The admin
 # token travels only in a mode-600 curl config file and in the environment of
 # the provisioning run, never in argv or on stdout.
@@ -47,8 +55,10 @@
 #   --repo OWNER/NAME     the rig's Forgejo repository (required)
 #   --github-url URL      the GitHub remote imported into and mirrored
 #                         (default: the rig bare repository's origin URL)
-#   --forgejo-url URL     the Forgejo git remote written to the rig and every
-#                         remote (default WEB_URL/OWNER/NAME.git)
+#   --forgejo-url URL     the Forgejo git URL written to the rig's remotes,
+#                         town.json and the rig block — the credential-helper
+#                         hostname form (default WEB_URL/OWNER/NAME.git). The
+#                         script's own git work never rides it (see below)
 #   --mirror-target URL   the push mirror's target (default: the ssh form of
 #                         --github-url)
 #   --main-branch NAME    protected landing target (default: main)
@@ -201,6 +211,14 @@ TOWN_JSON="$TOWN_ROOT/mayor/town.json"
 FORGEJO_URL="$FORGEJO_URL_OPT"
 require_json_safe "--forgejo-url" "$FORGEJO_URL"
 
+# The admin base the script's OWN git work rides: the probe's push, the Forgejo
+# ref listing and the import push. It is the web root, where the operator's
+# admin credentials apply, and never --forgejo-url, which is only what gets
+# written to the rig — that URL is the credential-helper hostname form, and the
+# bots cannot reach the repository through it until provisioning has run
+# (gt-fn9e6.35).
+ADMIN_GIT_URL="${WEB_URL%/}/$REPO.git"
+
 # block_value KEY prints KEY from the rig's existing merge_queue.forgejo block,
 # or nothing. After a cutover that block's mirror_target is the only record of
 # the GitHub URL, because the rig's origin points at Forgejo by then; before one
@@ -337,7 +355,9 @@ run() {
   "$@"
 }
 
-# backup_file FILE copies FILE to a dated .bak- sibling and prints the copy.
+# backup_file FILE copies FILE to a dated .bak- sibling and prints the copy. A
+# dry run prints the copy it would make and writes nothing: no .bak- file is
+# left behind (gt-fn9e6.35).
 backup_file() {
   local f=$1 b
   if [ ! -f "$f" ]; then
@@ -346,7 +366,11 @@ backup_file() {
   fi
   b="$f.bak-$(date +%Y%m%d-%H%M%S)"
   run cp -p "$f" "$b"
-  log "backed up $f to $b"
+  if [ "$DRY_RUN" = 1 ]; then
+    log "would back up $f to $b"
+  else
+    log "backed up $f to $b"
+  fi
 }
 
 # --- the rig's landing queue -------------------------------------------------
@@ -381,13 +405,14 @@ refuse_if_landing_in_flight() {
 
 # probe_green is step 1's second half. The probe leaves no record, so this makes
 # one: the probe script pushes the rig's main as land/probe-<rig>, waits for the
-# real gate, and deletes the branch on every path. A dry run prints the run it
-# would make instead.
+# real gate, and deletes the branch on every path. Its push rides the admin base
+# URL, not the written one: it happens before provisioning, when the bots have
+# no access yet. A dry run prints the run it would make instead.
 probe_green() {
   local -a args=("$RIG" --repo "$REPO" --main-branch "$MAIN_BRANCH"
     --api-url "$API_URL" --web-url "$WEB_URL"
     --admin-token-file "$ADMIN_TOKEN_FILE"
-    --github-url "$GITHUB_URL" --git-url "$FORGEJO_URL")
+    --github-url "$GITHUB_URL" --git-url "$ADMIN_GIT_URL")
   if [ "$DRY_RUN" = 1 ]; then
     run bash "$PROBE" "${args[@]}"
     log "(dry run: the probe was not run)"
@@ -425,22 +450,25 @@ report_plan() {
 # import_refs is step 2. It fetches every GitHub branch and tag into a scratch
 # bare repository and pushes them to Forgejo, then requires every GitHub ref to
 # be present in Forgejo: the mirror has no branch filter and prunes, so a GitHub
-# ref Forgejo lacks is deleted on GitHub at the next mirror sync.
+# ref Forgejo lacks is deleted on GitHub at the next mirror sync. Both Forgejo
+# reads and the push ride the admin base URL, so the import never depends on bot
+# access the not-yet-run provisioner would grant.
 import_refs() {
   local scratch="$WORK/import.git" github_before forgejo_before github_after forgejo_after
+  log "importing every GitHub ref through $ADMIN_GIT_URL"
   github_before=$(ls_remote "$GITHUB_URL")
-  forgejo_before=$(ls_remote "$FORGEJO_URL")
+  forgejo_before=$(ls_remote "$ADMIN_GIT_URL")
   report_plan "$github_before" "$forgejo_before"
   run git init --bare --quiet "$scratch"
   run git -C "$scratch" fetch --quiet "$GITHUB_URL" \
     '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'
-  run git -C "$scratch" push --quiet "$FORGEJO_URL" \
+  run git -C "$scratch" push --quiet "$ADMIN_GIT_URL" \
     '+refs/heads/*:refs/heads/*' '+refs/tags/*:refs/tags/*'
   if [ "$DRY_RUN" = 1 ]; then
     return 0
   fi
   github_after=$(ls_remote "$GITHUB_URL")
-  forgejo_after=$(ls_remote "$FORGEJO_URL")
+  forgejo_after=$(ls_remote "$ADMIN_GIT_URL")
   if [ -n "$(comm -23 <(normalize "$github_after") <(normalize "$forgejo_after") || true)" ]; then
     log "ERROR: Forgejo is missing GitHub refs after the import; the mirror would prune them"
     comm -23 <(normalize "$github_after") <(normalize "$forgejo_after") >&2 || true
@@ -692,7 +720,7 @@ fi
 note ""
 note "Finish the cutover by hand:"
 note "  - disable GitHub Actions on $GITHUB_SLUG:"
-note "      gh api --method PUT repos/$GITHUB_SLUG/actions/permissions -f enabled=false"
+note "      gh api --method PUT repos/$GITHUB_SLUG/actions/permissions -F enabled=false"
 note "  - stop (not remove) any self-hosted GitHub runner for $GITHUB_SLUG"
 note "  - confirm the mirror's first sync and the rig's next landing, then delete the rig's GitHub-only workflows if any remain"
 note ""
