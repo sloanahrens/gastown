@@ -42,6 +42,16 @@ type fakeRemote struct {
 	deleteErr    map[string]error
 	beforeDelete func(branch string)
 	deleted      []string
+	// listCalls counts ListRemoteRefs calls, which the sweep's interval is
+	// read from.
+	listCalls int
+
+	// The leftover sweep's questions: which branches are provably on the
+	// target, and when their tips were committed.
+	landed    map[string]bool
+	landedErr error
+	times     map[string]time.Time
+	timeErr   error
 }
 
 func (r *fakeRemote) BranchTip(branch string) (string, error) {
@@ -55,6 +65,7 @@ func (r *fakeRemote) Contains(_, commit string) (bool, error) {
 }
 
 func (r *fakeRemote) ListRemoteRefs(prefix string) ([]RemoteRef, error) {
+	r.listCalls++
 	if r.listErr != nil {
 		return nil, r.listErr
 	}
@@ -66,6 +77,24 @@ func (r *fakeRemote) ListRemoteRefs(prefix string) ([]RemoteRef, error) {
 	}
 	slices.SortFunc(out, func(a, b RemoteRef) int { return strings.Compare(a.Name, b.Name) })
 	return out, nil
+}
+
+func (r *fakeRemote) BranchLandedOn(_, branch, _ string) (bool, error) {
+	if r.landedErr != nil {
+		return false, r.landedErr
+	}
+	return r.landed[branch], nil
+}
+
+func (r *fakeRemote) CommitTime(commit string) (time.Time, error) {
+	if r.timeErr != nil {
+		return time.Time{}, r.timeErr
+	}
+	at, ok := r.times[commit]
+	if !ok {
+		return time.Time{}, fmt.Errorf("no commit %s", commit)
+	}
+	return at, nil
 }
 
 func (r *fakeRemote) DeleteRemoteBranchIfAt(branch, expectedHash string) error {

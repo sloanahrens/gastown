@@ -318,6 +318,44 @@ func TestGitRemoteReadsTheTargetOnOrigin(t *testing.T) {
 	}
 }
 
+// BranchLandedOn is the leftover sweep's merge test on origin: it brings a
+// polecat branch into the rig repo and reads its work as landed when the
+// patch is on the target even though the commit id is not (a queue that
+// rebases rewrites it), and as unproven when the repository lacks the
+// commit (gt-xz4ir).
+func TestGitRemoteBranchLandedOn(t *testing.T) {
+	t.Parallel()
+	f := gitfake.New()
+	root := t.TempDir()
+	origin, bare := filepath.Join(root, "origin.git"), filepath.Join(root, ".repo.git")
+	f.InitBare(t, origin)
+	seed := f.Commit(t, origin, "main", "seed", map[string]string{"a.txt": "a\n"})
+	if err := f.Open(root).CloneBareWithBranch(origin, bare, "main"); err != nil {
+		t.Fatal(err)
+	}
+	f.SetRef(t, origin, "refs/heads/polecat/opal/gt-abc+x1", seed)
+	branchTip := f.Commit(t, origin, "polecat/opal/gt-abc+x1", "work on the branch", map[string]string{"b.txt": "b\n"})
+	// The same work on the target, as the queue landed it: another commit id,
+	// the same patch.
+	f.Commit(t, origin, "main", "work, rebased by the queue", map[string]string{"b.txt": "b\n"})
+	f.SetRef(t, origin, "refs/heads/polecat/opal/gt-xyz+x1", seed)
+	f.Commit(t, origin, "polecat/opal/gt-xyz+x1", "work nobody landed", map[string]string{"c.txt": "c\n"})
+	r := gitRemote{g: f.Open(bare), remote: "origin"}
+
+	if on, err := r.BranchLandedOn("main", "polecat/opal/gt-abc+x1", branchTip); err != nil || !on {
+		t.Fatalf("BranchLandedOn(landed patch) = %v, %v; want true", on, err)
+	}
+	if on, err := r.BranchLandedOn("main", "polecat/opal/gt-xyz+x1", f.Ref(origin, "refs/heads/polecat/opal/gt-xyz+x1")); err != nil || on {
+		t.Fatalf("BranchLandedOn(unlanded branch) = %v, %v; want false and no error", on, err)
+	}
+	if on, err := r.BranchLandedOn("main", "polecat/opal/gt-abc+x1", strings.Repeat("e", 40)); err != nil || on {
+		t.Fatalf("BranchLandedOn(commit the repository lacks) = %v, %v; want false and no error", on, err)
+	}
+	if at, err := r.CommitTime(branchTip); err != nil || at.IsZero() {
+		t.Fatalf("CommitTime = %v, %v; want the fetched tip's committer time", at, err)
+	}
+}
+
 // A direct push is seen on origin only: the post-land run fetches the target
 // so the worktree can be added at the pushed commit (gt-p2rs0).
 func TestPostLandFetchBringsADirectPushIntoTheRigRepo(t *testing.T) {

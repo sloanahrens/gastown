@@ -1236,6 +1236,8 @@ type landingRemoteGit interface {
 	RefExists(ref string) (bool, error)
 	IsAncestor(ancestor, descendant string) (bool, error)
 	ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error)
+	CommitTime(rev string) (time.Time, error)
+	CommitLandedOnTarget(remote, target, commit string) bool
 	DeleteRemoteBranchIfAt(remote, branch, expectedHash string) error
 }
 
@@ -1275,6 +1277,29 @@ func (r gitRemote) ListRemoteRefs(prefix string) ([]landworker.RemoteRef, error)
 		out = append(out, landworker.RemoteRef{Name: ref.Name, Hash: ref.Hash})
 	}
 	return out, nil
+}
+
+// BranchLandedOn is the leftover sweep's merge test: it brings the branch
+// and the target into the rig repository, then asks whether the branch's own
+// commit is on the target by reachability or by patch-id.
+func (r gitRemote) BranchLandedOn(target, branch, commit string) (bool, error) {
+	for _, b := range []string{branch, target} {
+		if err := r.g.FetchRefspecWithTimeout(r.remote, fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", b, r.remote, b), landingRemoteFetchTimeout); err != nil {
+			return false, fmt.Errorf("fetching %s: %w", b, err)
+		}
+	}
+	// A commit the repository still lacks after the fetch was never pushed
+	// under this name, or the branch moved since it was listed: not proven
+	// landed, and not an error either, as Contains reads it.
+	exists, err := r.g.RefExists(commit + "^{commit}")
+	if err != nil || !exists {
+		return false, err
+	}
+	return r.g.CommitLandedOnTarget(r.remote, target, commit), nil
+}
+
+func (r gitRemote) CommitTime(commit string) (time.Time, error) {
+	return r.g.CommitTime(commit)
 }
 
 func (r gitRemote) DeleteRemoteBranchIfAt(branch, expectedHash string) error {
