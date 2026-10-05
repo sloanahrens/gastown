@@ -24,6 +24,10 @@ bash -n scripts/forgejo-probe.sh
 bash scripts/forgejo-probe_test.sh
 bash -n scripts/forgejo-resync.sh
 bash scripts/forgejo-resync_test.sh
+bash -n scripts/forgejo-cutover.sh
+bash scripts/forgejo-cutover_test.sh
+bash -n scripts/forgejo-rollback.sh
+bash scripts/forgejo-rollback_test.sh
 bash -n scripts/test-makefile.sh
 bash -n scripts/lint-lock-wait.sh
 bash -n scripts/makefile-gate_test.sh
