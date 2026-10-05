@@ -5,10 +5,11 @@ import (
 	"testing"
 )
 
-// The queue wants to sit beside Polecats and Dispatcher, and the landing
-// history beside om review, so the panes are placed by column in index.html
-// rather than by data. Reading the embedded page is what keeps a section that
-// drifts back to the wrong column from passing (gt-9bf2m).
+// The queue wants to sit beside Polecats and Dispatcher, the landing history
+// beside om review, and the tier sweeps beside the rigs they sweep, so the
+// panes are placed by column in index.html rather than by data. Reading the
+// embedded page is what keeps a section that drifts back to the wrong column
+// from passing (gt-9bf2m, gt-fn9e6.48).
 func TestPaneColumns(t *testing.T) {
 	t.Parallel()
 
@@ -22,11 +23,16 @@ func TestPaneColumns(t *testing.T) {
 		pane, col, before, after string
 	}{
 		{"escalationnote", "left", "", "alertsnote"},
-		{"queuenote", "left", "disp", ""},
+		{"alertsnote", "left", "escalationnote", "spendnote"},
+		{"spendnote", "left", "alertsnote", "rigsnote"},
+		{"rigsnote", "left", "spendnote", "tiersweepnote"},
+		{"tiersweepnote", "left", "rigsnote", "seatsnote"},
+		{"seatsnote", "left", "tiersweepnote", "dispnote"},
+		{"dispnote", "left", "seatsnote", "queuenote"},
+		{"queuenote", "left", "dispnote", ""},
 		{"machnote", "right", "", "forgejonote"},
-		{"forgejonote", "right", "machnote", "tiersweepnote"},
-		{"tiersweepnote", "right", "forgejonote", "omnote"},
-		{"omnote", "right", "tiersweepnote", "trendsec"},
+		{"forgejonote", "right", "machnote", "omnote"},
+		{"omnote", "right", "forgejonote", "trendsec"},
 		{"trendsec", "right", "omnote", ""},
 	} {
 		got := left
