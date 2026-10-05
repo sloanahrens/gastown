@@ -182,10 +182,15 @@ through the old path first, so Forgejo never falls back to
 
 `bash scripts/forgejo-probe.sh <rig> --repo OWNER/NAME` proves the last of
 those before anything changes: it clones the rig's GitHub `main`, pushes it to
-the rig's Forgejo copy as `land/probe-<rig>`, waits for the real gate status
-and requires green, then deletes the branch. The cutover runs the probe and
-refuses unless it is green, so a cutover that starts is one the real runner has
-already passed. A probe leaves no record, so `--dry-run` prints the probe
+the rig's Forgejo copy as `land/probe-<rig>` from a throwaway worktree of the
+rig's own repository — the same push the landing worker makes, so the rig's
+pre-push hook runs and a hook that refuses `land/*` fails the probe rather than
+the first landing — then waits for the real gate status and requires green
+before deleting the branch and the worktree. `--town-root` says which town holds
+the rig; where that repository is absent the probe pushes from the clone
+instead and warns that the hooks were not exercised. The cutover runs the probe
+and refuses unless it is green, so a cutover that starts is one the real runner
+has already passed. A probe leaves no record, so `--dry-run` prints the probe
 instead of running it.
 
 `bash scripts/forgejo-cutover.sh <rig> --repo OWNER/NAME` runs the procedure;
