@@ -148,13 +148,15 @@ func APIBaseFromRemoteURL(raw string) (string, error) {
 }
 
 // CandidateStatus is the part of the Forgejo client the candidate gate uses:
-// the required context's status, the run that posted it, and that job's log.
-// *forgejo.Client implements it; tests pass a fake.
+// the required context's status, the run that posted it, that job's log, and
+// the delete of the branch a terminal outcome leaves behind. *forgejo.Client
+// implements it; tests pass a fake.
 type CandidateStatus interface {
 	CombinedStatus(ctx context.Context, owner, repo, ref string) (*forgejo.CombinedStatus, error)
 	ListRuns(ctx context.Context, owner, repo string, f forgejo.RunFilter) (*forgejo.RunList, error)
 	ListRunJobs(ctx context.Context, owner, repo string, runID int64) ([]forgejo.ActionRunJob, error)
 	JobLogsTail(ctx context.Context, owner, repo string, jobID, maxBytes int64) (string, error)
+	DeleteBranch(ctx context.Context, owner, repo, branch string) error
 }
 
 // CandidateState is what the candidate gate saw on the pushed commit.
@@ -178,6 +180,11 @@ type CandidateResult struct {
 	// the merged commit pushed on it.
 	Branch string
 	SHA    string
+	// Pushed is set when this run put the branch on the remote and read it back
+	// at SHA. A run that failed before the push, or whose push did not take,
+	// leaves it false, and the branch that may already be there is some other
+	// landing's to delete (gt-k796q).
+	Pushed bool
 	// Context is the required commit status polled.
 	Context string
 	// Tail is the failing job's log tail, for CandidateFailed.
@@ -201,6 +208,9 @@ type Candidate interface {
 	// the gate workflow's verdict on that commit. dir is wt's tree, where the
 	// gate workflow is read from.
 	Run(ctx context.Context, wt Repo, dir string, w Work, head string) CandidateResult
+	// Discard deletes the branch res pushed, for a landing that ends without
+	// merging its candidate (gt-k796q). Best-effort.
+	Discard(ctx context.Context, w Work, res CandidateResult)
 }
 
 // CandidateGate pushes a landing's merge candidate as land/<bead> and reads
@@ -266,7 +276,28 @@ func (g *CandidateGate) Run(ctx context.Context, wt Repo, dir string, w Work, he
 		res.Err = err
 		return res
 	}
+	res.Pushed = true
 	return g.wait(ctx, wf, res)
+}
+
+// Discard deletes the candidate branch res pushed, so a landing that ends red
+// or infra does not leave it on the remote for good: only a later attempt's
+// force-push would replace it, and a bead that is rejected or abandoned never
+// gets one (gt-k796q). A result whose run never pushed the branch is left
+// alone — a branch already there belongs to whatever put it there. It is
+// best-effort: a failed delete is logged and the landing's outcome, already
+// decided, does not change.
+func (g *CandidateGate) Discard(ctx context.Context, w Work, res CandidateResult) {
+	if !res.Pushed {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, g.callTimeout())
+	defer cancel()
+	if err := g.Client.DeleteBranch(ctx, g.Owner, g.RepoName, res.Branch); err != nil {
+		g.logf("%s: could not delete the candidate %s left by the gate: %v", w.BeadID, res.Branch, err)
+		return
+	}
+	g.logf("%s: deleted the candidate %s left by the gate", w.BeadID, res.Branch)
 }
 
 // push force-updates the candidate branch to head and reads it back. The

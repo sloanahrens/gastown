@@ -340,25 +340,44 @@ func ciGateContext(g GateResult) string {
 // its verdict as a GateResult, so the red path and the landed record keep the
 // shape the local gate's had. Silence is not a verdict: it comes back as an
 // *InfraError, the path every other no-verdict failure takes.
-func (l *Lander) candidateGate(ctx context.Context, wt Repo, dir string, w Work, merged string) (GateResult, error) {
+//
+// The run's own result comes back beside the verdict: a red or infra outcome
+// ends the landing without a merge, and the candidate branch has to go with it
+// (gt-k796q), so Land needs the branch the run pushed.
+func (l *Lander) candidateGate(ctx context.Context, wt Repo, dir string, w Work, merged string) (CandidateResult, GateResult, error) {
 	start := time.Now()
 	cres := l.Candidate.Run(ctx, wt, dir, w, merged)
 	step := StepResult{Name: StageCI, Command: cres.Context, Elapsed: time.Since(start), Tail: cres.Tail}
 	if cres.Err != nil {
-		return GateResult{}, &InfraError{Stage: StageCI, Err: cres.Err}
+		return cres, GateResult{}, &InfraError{Stage: StageCI, Err: cres.Err}
 	}
 	switch cres.State {
 	case CandidatePassed:
-		return GateResult{Passed: true, Steps: []StepResult{step}}, nil
+		return cres, GateResult{Passed: true, Steps: []StepResult{step}}, nil
 	case CandidateFailed:
 		step.ExitCode = 1
 		l.logf("%s: %s failed on the candidate %s (%s); the job log tail goes with the rework", w.BeadID, cres.Context, shortSHA(cres.SHA), cres.Branch)
-		return GateResult{Steps: []StepResult{step}}, nil
+		return cres, GateResult{Steps: []StepResult{step}}, nil
 	default:
-		return GateResult{}, &InfraError{Stage: StageCI, Err: fmt.Errorf(
+		return cres, GateResult{}, &InfraError{Stage: StageCI, Err: fmt.Errorf(
 			"%w: %s reported nothing on the candidate %s (%s) within its wait window",
 			ErrCISilence, cres.Context, shortSHA(cres.SHA), cres.Branch)}
 	}
+}
+
+// discardCandidate deletes the candidate branch the gate pushed this run,
+// after a terminal red or infra outcome ends the landing without a merge: the
+// branch has no owner left, and only a later attempt's force-push would
+// replace it, so a bead that is rejected or abandoned keeps one land/<bead>
+// branch on the remote forever (gt-k796q). Nothing is discarded for a green
+// gate — the branch is the one the land PR opens on and, on the 409 rebuild
+// path, the one the retry's pullFor reuses — nor for the local gate, which
+// pushes nothing.
+func (l *Lander) discardCandidate(ctx context.Context, w Work, cres *CandidateResult) {
+	if cres == nil {
+		return
+	}
+	l.Candidate.Discard(ctx, w, *cres)
 }
 
 // Merger lands the merged candidate through a Forgejo pull request, the write
@@ -768,16 +787,21 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		gateRes   GateResult
 		gateErr   error
 		ciContext string
+		// candRes is the candidate gate's run, when that is the gate that ran:
+		// the branch it pushed is discarded if the gate ends the landing.
+		candRes *CandidateResult
 	)
 	if l.Candidate != nil {
 		w.CandidateBranch, w.CandidateHead = w.Candidate(), merged
-		gateRes, gateErr = l.candidateGate(gateCtx, wt, dir, w, merged)
+		run, verdict, err := l.candidateGate(gateCtx, wt, dir, w, merged)
+		candRes, gateRes, gateErr = &run, verdict, err
 		ciContext = ciGateContext(gateRes)
 	} else {
 		gateRes = l.Gate.Run(gateCtx, dir)
 	}
 	gateDone()
 	if gateErr != nil {
+		l.discardCandidate(ctx, w, candRes)
 		return Result{}, gateErr
 	}
 	res := Result{LandedCommit: merged, PatchID: patchID, Base: base, Gate: gateRes, RiskPaths: riskPaths}
@@ -817,6 +841,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 				reason += "; the shell tier failed: " + strings.Join(names, " ")
 			}
 			l.logf("%s: %s", w.BeadID, stageTimes(gateRes, 0, false))
+			l.discardCandidate(ctx, w, candRes)
 			rej := &Rejection{Kind: RejectGate, Rework: true, Reason: reason, GateTail: tail}
 			return Result{}, l.reject(issue, w, rej, nil)
 		}

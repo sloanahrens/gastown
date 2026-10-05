@@ -65,8 +65,11 @@ type fakeForgejo struct {
 	// limits is the maxBytes of every log fetch, in order: what the gate asked
 	// the server for.
 	limits []int64
-	err    error
-	logErr error
+	// deleted is the branch of every DeleteBranch call, in order.
+	deleted   []string
+	deleteErr error
+	err       error
+	logErr    error
 }
 
 func (f *fakeForgejo) CombinedStatus(context.Context, string, string, string) (*forgejo.CombinedStatus, error) {
@@ -103,6 +106,13 @@ func (f *fakeForgejo) JobLogsTail(_ context.Context, _, _ string, _ int64, maxBy
 		return f.fullLog, f.logErr
 	}
 	return f.log, f.logErr
+}
+
+func (f *fakeForgejo) DeleteBranch(_ context.Context, _, _, branch string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deleted = append(f.deleted, branch)
+	return f.deleteErr
 }
 
 func status(state forgejo.CommitState, context string) forgejo.CommitStatus {
@@ -327,6 +337,70 @@ func TestCandidateGateRedCarriesTheJobLogTail(t *testing.T) {
 	}
 	if len(client.limits) != 1 || client.limits[0] != candidateTailBytes {
 		t.Fatalf("log fetches %v; a tail that names the failure needs no second fetch", client.limits)
+	}
+}
+
+// TestCandidateGateDiscardDeletesTheBranchTheRunPushed: a landing that ends red
+// or infra leaves no land/<bead> behind — the gate deletes the branch its own
+// run pushed (gt-k796q).
+func TestCandidateGateDiscardDeletesTheBranchTheRunPushed(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
+	client := &fakeForgejo{
+		statuses: []forgejo.CommitStatus{status(forgejo.StateFailure, "ci / gate (push)")},
+		runs:     []forgejo.ActionRun{{ID: 7, CommitSHA: sha, Status: "failure"}},
+		jobs:     []forgejo.ActionRunJob{{ID: 9, RunID: 7, Name: "gate", Status: "failure"}},
+		log:      gateJobLog("⭐ Run Main actions/checkout@v4", "make gate", "--- FAIL: TestThing"),
+	}
+	gate := fastGate(client)
+	res := gate.Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+	if res.State != CandidateFailed || !res.Pushed {
+		t.Fatalf("result %+v; want a failed verdict on a branch the run pushed", res)
+	}
+	gate.Discard(context.Background(), f.work, res)
+	if !slices.Equal(client.deleted, []string{"land/gt-abc"}) {
+		t.Fatalf("deleted %v; want the candidate branch the run pushed", client.deleted)
+	}
+}
+
+// TestCandidateGateDiscardLeavesABranchTheRunDidNotPush: a run that never got
+// the candidate onto the remote — here the gate workflow is not in the tree it
+// reads — deletes nothing, because a branch already there is some other
+// landing's (gt-k796q).
+func TestCandidateGateDiscardLeavesABranchTheRunDidNotPush(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
+	client := &fakeForgejo{}
+	gate := fastGate(client)
+	res := gate.Run(context.Background(), f.git.Open(f.repo), t.TempDir(), f.work, sha)
+	if res.Err == nil || res.Pushed {
+		t.Fatalf("result %+v; want a run that failed before the push", res)
+	}
+	gate.Discard(context.Background(), f.work, res)
+	if len(client.deleted) != 0 {
+		t.Fatalf("deleted %v; want a branch the run did not push left alone", client.deleted)
+	}
+}
+
+// TestCandidateGateDiscardLogsAFailedDelete: the delete is best-effort. A
+// failure is logged and nothing else changes — the landing's outcome is
+// already decided when it runs (gt-k796q).
+func TestCandidateGateDiscardLogsAFailedDelete(t *testing.T) {
+	t.Parallel()
+	client := &fakeForgejo{deleteErr: errors.New("forgejo: DELETE returned 500")}
+	gate := fastGate(client)
+	var out strings.Builder
+	gate.Out = &out
+
+	gate.Discard(context.Background(), Work{BeadID: "gt-abc"}, CandidateResult{Branch: "land/gt-abc", Pushed: true})
+
+	if !slices.Equal(client.deleted, []string{"land/gt-abc"}) {
+		t.Fatalf("deleted %v; want the delete attempted", client.deleted)
+	}
+	if !strings.Contains(out.String(), "land/gt-abc") {
+		t.Fatalf("output %q; want the failed delete logged with the branch", out.String())
 	}
 }
 
@@ -693,6 +767,8 @@ type fakeCandidate struct {
 	calls []Work
 	dirs  []string
 	res   CandidateResult
+	// discarded is the branch of every Discard call Land made.
+	discarded []string
 }
 
 func (c *fakeCandidate) Run(_ context.Context, _ Repo, dir string, w Work, head string) CandidateResult {
@@ -706,6 +782,10 @@ func (c *fakeCandidate) Run(_ context.Context, _ Repo, dir string, w Work, head 
 		res.SHA = head
 	}
 	return res
+}
+
+func (c *fakeCandidate) Discard(_ context.Context, _ Work, res CandidateResult) {
+	c.discarded = append(c.discarded, res.Branch)
 }
 
 // TestLandLandsThroughTheCandidateGate: a rig with a candidate gate pushes the
@@ -727,6 +807,9 @@ func TestLandLandsThroughTheCandidateGate(t *testing.T) {
 	if len(cand.calls) != 1 {
 		t.Fatalf("the candidate gate ran %d time(s), want once", len(cand.calls))
 	}
+	if len(cand.discarded) != 0 {
+		t.Fatalf("discarded %v; a merged candidate's branch is the merger's to delete", cand.discarded)
+	}
 	if got := cand.calls[0]; got.CandidateBranch != "land/gt-abc" || got.CandidateHead != res.LandedCommit {
 		t.Fatalf("Work handed to the gate = %+v; want the candidate land/gt-abc@%s", got, res.LandedCommit)
 	}
@@ -739,13 +822,15 @@ func TestLandLandsThroughTheCandidateGate(t *testing.T) {
 }
 
 // TestLandCandidateRedIsReworkWithTheLogTail: a red CI verdict comes back as
-// a gate rework the polecat resumes from, carrying the job log.
+// a gate rework the polecat resumes from, carrying the job log, and the
+// candidate branch it pushed is deleted: the landing ended without merging it
+// (gt-k796q).
 func TestLandCandidateRedIsReworkWithTheLogTail(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
 	l := f.lander()
 	cand := &fakeCandidate{res: CandidateResult{
-		State: CandidateFailed, Context: "ci / gate (push)", Tail: "--- FAIL: TestThing\n"}}
+		State: CandidateFailed, Context: "ci / gate (push)", Tail: "--- FAIL: TestThing\n", Pushed: true}}
 	l.Candidate = cand
 
 	_, err := l.Land(context.Background(), f.work)
@@ -756,16 +841,20 @@ func TestLandCandidateRedIsReworkWithTheLogTail(t *testing.T) {
 	if !strings.Contains(f.bead().Notes, "--- FAIL: TestThing") {
 		t.Fatalf("the rejection note carries no job log tail:\n%s", f.bead().Notes)
 	}
+	if !slices.Equal(cand.discarded, []string{"land/gt-abc"}) {
+		t.Fatalf("discarded %v; want the branch the red gate pushed", cand.discarded)
+	}
 }
 
 // TestLandCandidateSilenceIsInfrastructure: CI reporting nothing is the infra
-// retry, not a rejection the polecat would be sent back to fix.
+// retry, not a rejection the polecat would be sent back to fix — and the
+// candidate branch it pushed goes with the infra outcome (gt-k796q).
 func TestLandCandidateSilenceIsInfrastructure(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
 	l := f.lander()
 	cand := &fakeCandidate{res: CandidateResult{
-		State: CandidateSilent, Context: "ci / gate (push)", Err: ErrCISilence}}
+		State: CandidateSilent, Context: "ci / gate (push)", Err: ErrCISilence, Pushed: true}}
 	l.Candidate = cand
 
 	_, err := l.Land(context.Background(), f.work)
@@ -775,6 +864,9 @@ func TestLandCandidateSilenceIsInfrastructure(t *testing.T) {
 	}
 	if infra.Stage != StageCI {
 		t.Fatalf("stage = %q, want %q", infra.Stage, StageCI)
+	}
+	if !slices.Equal(cand.discarded, []string{"land/gt-abc"}) {
+		t.Fatalf("discarded %v; want the branch the silent gate pushed", cand.discarded)
 	}
 	f.assertUntouched(t)
 }
