@@ -12,7 +12,9 @@
 # never printed) and writes promote_target and promote_key_file instead of a
 # push mirror, a second cutover that reuses the key, --mirror reproducing the
 # push mirror, a hostname-form --forgejo-url whose own git work still rides the
-# admin base, and a landing queued at the restart.
+# admin base, a landing queued at the restart, and the probe carrying the
+# cutover's --town-root, so a rig at a non-default town root still probes through
+# the worktree in its own repository, where the rig's hooks run (gt-ck1if).
 #
 # The import's own safety is its own set (gt-fn9e6.51): a Forgejo ref ahead of
 # GitHub's is kept and never rewound, a Forgejo ref behind GitHub's is
@@ -478,6 +480,7 @@ before_refs=$(cat "$STATE/refs_$(refs_key "$FORGEJO_URL")")
 out=$(run_cutover --dry-run); rc=$?
 if [ "$rc" = 0 ]; then pass "a dry run exits 0"; else fail "a dry run exits 0 (rc=$rc)" "$out"; fi
 check "it prints the probe command" contains "probe.sh acme --repo acme/rig" "$out"
+check "the printed probe carries the cutover's town root" contains "--town-root $TOWN" "$out"
 check "it prints the ref import" contains "ls-remote" "$out"
 check "it prints the key it would mint" contains "ssh-keygen" "$out"
 check "it says it would mint, not that it did" contains "dry run: no promote key was created" "$out"
@@ -506,6 +509,7 @@ STUB_MIRROR_ABSENT=1
 out=$(run_cutover); rc=$?
 if [ "$rc" = 0 ]; then pass "the cutover exits 0"; else fail "the cutover exits 0 (rc=$rc)" "$out"; fi
 check "the probe ran for the rig" contains "acme --repo acme/rig" "$(cat "$STATE/probe.log")"
+check "the probe ran with the cutover's town root" contains "--town-root $TOWN" "$(cat "$STATE/probe.log")"
 # The provisioner that grants the panel's viewer bot read is the shared one
 # (gt-fn9e6.49).
 check "the repo is provisioned through the shared provisioner" contains "--repo acme/rig" "$(cat "$STATE/provision.log")"
