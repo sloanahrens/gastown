@@ -9,7 +9,7 @@
 // names have one consumer PER RIG. Those channels are per-rig: their events live in
 // events/<channel>/<rig>/ so one rig's consumer can never read or delete
 // another rig's wake events. Town-global channels with a single consumer
-// (e.g. "mayor") keep the flat events/<channel>/ layout. This package is
+// keep the flat events/<channel>/ layout. This package is
 // the single source of truth for which channels are per-rig, so emitters
 // and await-event always agree on the event directory.
 package channelevents

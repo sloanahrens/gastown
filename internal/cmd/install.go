@@ -25,7 +25,6 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/hooks"
-	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/shell"
 	"github.com/steveyegge/gastown/internal/state"
 	"github.com/steveyegge/gastown/internal/style"
@@ -55,9 +54,9 @@ var installCmd = &cobra.Command{
 
 The HQ (headquarters) is the top-level directory where Gas Town is installed -
 the root of your workspace where all rigs and agents live. It contains:
-  - CLAUDE.md            Mayor role context (Mayor runs from HQ root)
-  - mayor/               Mayor config, state, and rig registry
-  - .beads/              Town-level beads DB (hq-* prefix for mayor mail)
+  - CLAUDE.md            Town-root identity anchor (roles come from gt prime)
+  - mayor/               Town config, state, and rig registry
+  - .beads/              Town-level beads DB (hq-* prefix for town mail)
 
 If path is omitted, uses the current directory.
 
@@ -275,7 +274,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	// Create a generic CLAUDE.md at the town root as an identity anchor.
 	// Claude Code sets its CWD to the git root (~/gt/), so mayor/CLAUDE.md is
 	// not loaded directly. This town-root file ensures agents running from within
-	// the town git tree (the Mayor) always get a baseline identity reminder.
+	// the town git tree always get a baseline identity reminder.
 	// It is NOT role-specific — role context comes from gt prime.
 	// Crew/polecats have their own nested git repos and won't inherit this.
 	if created, err := createTownRootAgentMDs(absPath); err != nil {
@@ -284,21 +283,6 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		fmt.Printf("   ✓ Created CLAUDE.md + AGENTS.md (town root identity anchor)\n")
 	} else {
 		fmt.Printf("   ✓ Preserved existing CLAUDE.md + AGENTS.md (town root identity anchor)\n")
-	}
-
-	// Create mayor settings (mayor runs from ~/gt/mayor/)
-	// IMPORTANT: Settings must be in ~/gt/mayor/.claude/, NOT ~/gt/.claude/
-	// Settings at town root would be found by ALL agents via directory traversal,
-	// causing crew/polecat/etc to cd to town root before running commands.
-	// mayorDir already defined above
-	if err := os.MkdirAll(mayorDir, 0755); err != nil {
-		fmt.Printf("   %s Could not create mayor directory: %v\n", style.Dim.Render("⚠"), err)
-	} else {
-		if err := runtime.EnsureSettingsForRole(mayorDir, mayorDir, "mayor"); err != nil {
-			fmt.Printf("   %s Could not create mayor settings: %v\n", style.Dim.Render("⚠"), err)
-		} else {
-			fmt.Printf("   ✓ Created mayor/.claude/settings.json\n")
-		}
 	}
 
 	// Create plugins directory for town-level patrol plugins.
@@ -328,7 +312,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	}
 
 	// Initialize town-level beads database (optional)
-	// Town beads (hq- prefix) stores mayor mail, cross-rig coordination, and handoffs.
+	// Town beads (hq- prefix) stores town mail, cross-rig coordination, and handoffs.
 	// Rig beads are separate and have their own prefixes.
 	if !installNoBeads {
 		port := doltserver.DefaultConfig(absPath).Port
@@ -458,8 +442,6 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  %d. Add a rig: %s\n", step, style.Dim.Render("gt rig add <name> <git-url>"))
 	step++
 	fmt.Printf("  %d. (Optional) Configure agents: %s\n", step, style.Dim.Render("gt config agent list"))
-	step++
-	fmt.Printf("  %d. Enter the Mayor's office: %s\n", step, style.Dim.Render("gt mayor attach"))
 	fmt.Println()
 	if !installNoBeads {
 		fmt.Printf("Note: Dolt server is running (stop with %s)\n", style.Dim.Render("gt dolt stop"))
@@ -581,7 +563,7 @@ func doltReinstallHint(goos string) string {
 // that look for it (e.g. OpenCode) also pick up the same content.
 //
 // Crew and polecats have their own nested git repos, so they won't inherit this.
-// Only the Mayor (which runs from within the town root git tree) sees it.
+// Only an agent running from the town root git tree itself sees it.
 //
 // Returns (created bool, error) - created is false if both files already exist.
 func createTownRootAgentMDs(townRoot string) (bool, error) {
@@ -656,7 +638,7 @@ func bdInitDoltConfig(townPath string) *doltserver.Config {
 }
 
 // initTownBeads initializes town-level beads database using bd init.
-// Town beads use the "hq-" prefix for mayor mail and cross-rig coordination.
+// Town beads use the "hq-" prefix for town mail and cross-rig coordination.
 // Uses Dolt backend in server mode (Gas Town requires a running Dolt sql-server).
 func initTownBeads(townPath string) error {
 	// Dolt server is required — wait for it to accept queries before proceeding.

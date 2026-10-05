@@ -3,9 +3,9 @@
 // scanner (witness zombie detection, patrol scan, polecat staleness
 // assessment) consults before restarting or nuking a session.
 //
-// Motivation: a mayor/operator freeze (SIGSTOP) of a misbehaving agent
+// Motivation: an operator freeze (SIGSTOP) of a misbehaving agent
 // is indistinguishable from a stuck agent. The stuck-agent dog respawned
-// a parked flint 20 minutes after the mayor froze it, and the witness
+// a parked flint 20 minutes after the operator froze it, and the witness
 // patrol restarted parked agents. gt-ahik.
 //
 // Single source of truth: the marker file, .runtime/agents/<rig>/
@@ -52,7 +52,7 @@ type State struct {
 	// PausedAt is when the agent was paused.
 	PausedAt time.Time `json:"paused_at"`
 
-	// PausedBy identifies who paused the agent (e.g. "human", "mayor").
+	// PausedBy identifies who paused the agent (e.g. "human", "supervisor").
 	PausedBy string `json:"paused_by,omitempty"`
 
 	// PriorAgentState is the agent bead's agent_state at the moment of
@@ -248,7 +248,7 @@ func AddressFromMarkerPath(path string) string {
 		// .../.runtime/agents/<rig>/<role>[.<name>].json
 		return markerAddress(rig, stem)
 	case rig == "agents":
-		// .../.runtime/agents/<role>.json — town-level (mayor, deacon).
+		// .../.runtime/agents/<role>.json — town-level (deacon).
 		return markerAddress("", stem)
 	default:
 		return "" // not a marker path
@@ -260,7 +260,7 @@ func AddressFromMarkerPath(path string) string {
 //
 //	AddressFor("gastown", "polecat", "flint") → "gastown/flint"
 //	AddressFor("gastown", "crew", "opal")     → "gastown/crew/opal"
-//	AddressFor("", "mayor", "")               → "mayor"
+//	AddressFor("", "deacon", "")              → "deacon"
 //
 // It is the exact inverse of AddressFromMarkerPath: AddressFor(rig, role,
 // name) == AddressFromMarkerPath(FilePath(townRoot, rig, role, name)) for

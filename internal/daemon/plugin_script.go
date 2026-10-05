@@ -79,7 +79,7 @@ const scriptSkippedMarker = "[plugin-result skipped]"
 // It also remembers which plugins have an escalation open, so a good run
 // closes it and a plugin that never failed costs no `gt escalate clear`.
 // The memory is the daemon's: after a restart an open escalation stays open
-// until the mayor closes it or the plugin fails and recovers again.
+// until the operator closes it or the plugin fails and recovers again.
 type scriptRunner struct {
 	mu        sync.Mutex
 	running   map[string]time.Time

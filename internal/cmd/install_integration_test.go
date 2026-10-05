@@ -72,10 +72,14 @@ func TestInstallCreatesCorrectStructure(t *testing.T) {
 		t.Errorf("rigs.json should be empty, got %d rigs", len(rigsConfig.Rigs))
 	}
 
-	// Verify Claude settings exist in mayor/.claude/ (not town root/.claude/)
-	// Mayor settings go here to avoid polluting child workspaces via directory traversal
+	// The retired mayor role mints no session and no role settings: install
+	// leaves mayor/ holding only the town state, and no .claude/ appears there.
 	mayorSettingsPath := filepath.Join(hqPath, "mayor", ".claude", "settings.json")
-	assertFileExists(t, mayorSettingsPath, "mayor/.claude/settings.json")
+	if _, err := os.Stat(mayorSettingsPath); err == nil {
+		t.Errorf("install created %s; the mayor role is retired and no role settings belong there", mayorSettingsPath)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat %s: %v", mayorSettingsPath, err)
+	}
 }
 
 // TestInstallBeadsHasCorrectPrefix validates that beads is initialized

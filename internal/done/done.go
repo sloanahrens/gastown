@@ -1636,10 +1636,9 @@ func forceCloseIssueWithRetrySleep(closeFn func(string, ...string) error, issueI
 
 // NotifyDoneCloseSkipped records on the skipped bead itself why gt done left it
 // open: one comment carrying the reason gt done already builds, no mail and no
-// new bead per skip (gt-zx8t4 — mailing it to the retired mayor/ role left every
-// skip as an unread dead letter in hq). A failed write warns and never fails gt
-// done, so bd must be the client routed to the skipped bead's database, not the
-// caller's.
+// new bead per skip (gt-zx8t4 — mailing it left every skip as an unread dead
+// letter in hq). A failed write warns and never fails gt done, so bd must be
+// the client routed to the skipped bead's database, not the caller's.
 func NotifyDoneCloseSkipped(bd beads.Client, issueID, reason string) {
 	if bd == nil || issueID == "" {
 		return
@@ -1847,7 +1846,7 @@ func unlandedPushMessage(branch string, pushErr, verifyErr error) string {
 
 // ensureAgentBeadExists recreates a missing agent bead so completion metadata,
 // checkpoints, and active_mr writes don't silently fail (hq-xu4p). Only
-// rig-level agents are handled — town agents (mayor/deacon) are owned by
+// rig-level agents are handled — town agents (deacon) are owned by
 // gt doctor. Best-effort: failures are warned, never fatal.
 func ensureAgentBeadExists(bd beads.Client, id string, ctx Agent) {
 	if id == "" {
@@ -1918,9 +1917,8 @@ func selectAssignedIssue(branchIssue string, assigned []string) (string, bool) {
 
 // findAssignedBeadsForAgent queries the same assignment locations as gt hook,
 // in the same order: the caller's own workdir, then the rig's mayor/rig
-// directory, then the town .beads store, then — for a town-level actor — a
-// scan of every rig. The assigned work bead is authoritative; agent-bead hook
-// slots are intentionally ignored.
+// directory, then the town .beads store. The assigned work bead is
+// authoritative; agent-bead hook slots are intentionally ignored.
 func findAssignedBeadsForAgent(workDir, townRoot, agentID string) []string {
 	return findAssignedBeadsForAgentIn(workDir, townRoot, agentID, func(dir string) beads.Client {
 		return beads.New(dir)
@@ -1950,7 +1948,7 @@ func findAssignedBeadsForAgentIn(workDir, townRoot, agentID string, open assigne
 	if len(parts) > 0 {
 		rigName = parts[0]
 	}
-	if rigName != "" && rigName != "mayor" && rigName != "deacon" {
+	if rigName != "" && rigName != "deacon" {
 		rigWorkDir := filepath.Join(townRoot, rigName, "mayor", "rig")
 		if rigWorkDir != workDir {
 			assigned = assignedIssueIDs(queryAssignedBeads(open(rigWorkDir), agentID))
@@ -1971,13 +1969,6 @@ func findAssignedBeadsForAgentIn(workDir, townRoot, agentID string, open assigne
 		}
 	}
 
-	// Town-level actors (the mayor) may hold their work in any rig's store;
-	// gt hook scans them all. Mirrors internal/cmd's scanAllRigsForHookedBeads,
-	// which this leaf cannot call (D10); the rig list comes from the same
-	// town routes file.
-	if isTownLevelActor(agentID) {
-		return assignedIssueIDs(scanRigBeadsForAssigned(townRoot, agentID, open))
-	}
 	return nil
 }
 
@@ -2000,37 +1991,6 @@ func doneIssueFromFlags(opts Options) string {
 // suppresses the guard exactly as --issue does (gt-638go.14 finding 4).
 func staleBranchGuardApplies(explicitIssue, branchIssue, sender string) bool {
 	return explicitIssue == "" && branchIssue != "" && sender != ""
-}
-
-// isTownLevelActor reports whether an actor id belongs to a town-level role
-// (the mayor), the only identity whose work can live in an arbitrary rig.
-// Mirrors internal/cmd's isTownLevelRole.
-func isTownLevelActor(agentID string) bool {
-	return agentID == "mayor" || agentID == "mayor/"
-}
-
-// scanRigBeadsForAssigned walks every rig in the town's route table and
-// returns the first assignment found for agentID, or nil. Mirrors
-// internal/cmd's scanAllRigsForHookedBeads (D10 keeps this leaf from calling
-// it); the routes file at <townRoot>/.beads is the same source both read.
-func scanRigBeadsForAssigned(townRoot, agentID string, open assignedBeadStore) []*beads.Issue {
-	routes, err := beads.LoadRoutes(filepath.Join(townRoot, ".beads"))
-	if err != nil {
-		return nil
-	}
-	for _, route := range routes {
-		rigBeadsDir := route.Path
-		if !filepath.IsAbs(rigBeadsDir) {
-			rigBeadsDir = filepath.Join(townRoot, rigBeadsDir)
-		}
-		if _, err := os.Stat(rigBeadsDir); err != nil {
-			continue
-		}
-		if assigned := queryAssignedBeads(open(rigBeadsDir), agentID); len(assigned) > 0 {
-			return assigned
-		}
-	}
-	return nil
 }
 
 func queryAssignedBeads(bd beads.Client, agentID string) []*beads.Issue {
@@ -2097,7 +2057,7 @@ func parseCleanupStatus(s string) polecat.CleanupStatus {
 
 // isPolecatActor checks if a BD_ACTOR value represents a polecat.
 // Polecat actors have format: rigname/polecats/polecatname
-// Non-polecat actors have formats like: gastown/crew/name, mayor, etc.
+// Non-polecat actors have formats like: gastown/crew/name, deacon, etc.
 func isPolecatActor(actor string) bool {
 	parts := strings.Split(strings.TrimSpace(actor), "/")
 	return len(parts) == 3 && parts[0] != "" && parts[1] == "polecats" && parts[2] != ""

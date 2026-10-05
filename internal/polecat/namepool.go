@@ -35,7 +35,6 @@ const (
 // These names must never be allocated to polecats.
 var ReservedInfraAgentNames = map[string]bool{
 	"witness":  true,
-	"mayor":    true,
 	"deacon":   true,
 	"refinery": true,
 	"crew":     true,

@@ -68,7 +68,7 @@ func saveBeadRespawnState(townRoot string, state *beadRespawnState) error {
 
 // ShouldBlockRespawn returns true if the bead has already been respawned
 // MaxBeadRespawns times (from operational config). When true, the caller
-// should escalate to mayor instead of sending RECOVERED_BEAD to deacon
+// should stop and escalate instead of sending RECOVERED_BEAD to deacon
 // for re-dispatch. This is the primary circuit breaker for spawn storms
 // (clown show #22).
 func ShouldBlockRespawn(workDir, beadID string) bool {
