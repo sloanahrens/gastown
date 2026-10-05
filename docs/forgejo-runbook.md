@@ -1,10 +1,12 @@
 # Forgejo runbook
 
-Read this before provisioning a rig on the local Forgejo — the bots, their
-tokens, their repository access and the branch protection — and before rotating
-a bot token. The why behind every rule the script sets is in
-[forgejo-primary-landing.md](design/forgejo-primary-landing.md); this page is
-the operations.
+Read this before provisioning a rig on the local Forgejo, cutting one over or
+rolling one back, resyncing Forgejo from GitHub, rotating a bot token, or
+acting on a landing failure. It covers the bots, their tokens, their repository
+access and the branch protection, the cutover, rollback and break-glass
+procedures, and every class of landing failure. The why behind every rule the
+script sets is in [forgejo-primary-landing.md](design/forgejo-primary-landing.md);
+this page is the operations.
 
 ## What `scripts/forgejo-provision.sh` converges
 
@@ -100,22 +102,88 @@ what reports the mismatch.
 Verify in the web UI under Repository → Settings → Branches, and under Site
 administration → User accounts.
 
+## Per-rig facts
+
+Each rig's cutover needs its GitHub repo, its gate command and the facts that
+change the procedure:
+
+| Rig | GitHub repo | Gate command | Facts that matter |
+|-----|-------------|--------------|-------------------|
+| mango | `mango` | `make gate` | cut over; no deploy possible |
+| beads | `beads`, a public fork of `gastownhall/beads` | `make gate` | cut over and parked on demand; Actions disabled; 18 upstream workflows |
+| om | `organic-mechanic` | `make gate` | Go 1.27; a self-hosted GitHub runner as a launchd service — stop it, keep it installed; 5 branches |
+| hm | `history-man` | `make lint test` (no `gate` target) | Go 1.27; shellcheck in lint; its landing gate starts containers, so the probe must confirm Docker access works for the unprivileged `ci` user or that those tests skip; a self-hosted GitHub runner; 3 branches |
+| gastown | `gastown` (public) | `make lint-tools`, then `make gate` | the gate workflow is already on `main`; about 170 branches to import; its `ci.yml` runs on a GitHub-hosted runner — disable it; it hosts the worker, so its break-glass is tested first |
+
+Every rig's precondition is the same: its gate workflow is on GitHub `main`
+(landed through the old path first, so Forgejo never falls back to
+`.github/workflows`), the probe is green, every GitHub ref is imported, the
+operator has approved the mirror's deploy key, and the operator has decided
+what to do with GitHub Actions. The runner image in `~/forgejo/runner-image` is
+part of it: Go 1.27.1, Node 20, jq, shellcheck, lsof, procps, dolt, the Docker
+CLI, an unprivileged `ci` user, job containers started with `--init`, and Go
+and npm cache volumes.
+
+## When a landing fails
+
+Every landing outcome belongs to one class, and the class decides who acts:
+
+| Class | Meaning | The system | The operator |
+|-------|---------|------------|--------------|
+| Work | the change caused a red | reworks the bead to the polecat with the failure excerpt | nothing |
+| Infrastructure | the runner, Forgejo, Docker or the network failed | retries with backoff, and escalates to a human after three in a row | fix the machinery; watch the alert |
+| Policy | `om` rejected, a forged status, a refused merge | escalates to a human with the `gt:needs-human` label | decide |
+| Operator | cutover, config, mirror or image | nothing automatic | run the procedure on this page |
+
+The failures seen on the live rigs so far, each closed or ticketed:
+
+| Failure | Class | The system | The operator |
+|---------|-------|------------|--------------|
+| CI red on a test the change touches | Work | reworks with the failure excerpt (gt-fn9e6.25) | nothing |
+| CI red on an unrelated test because the runner image is wrong (a missing tool, Go skew) | Operator | reads it as a work red — a user step ran, so the log carries no infrastructure signature | the polecat escalates; fix the image, then `gt land requeue <bead> --reason "<why>"` |
+| A job container had no init, so zombies broke a process-kill test | Operator | — | start job containers with `--init` |
+| A run was cancelled | Infrastructure | reads the run status as infrastructure, not a red (gt-fn9e6.16), and retries | watch the alert |
+| A job failed before any user step ran (image pull, container start) | Infrastructure | matches the start-failure signature — no `Run Main` marker in the job log (gt-fn9e6.30) — and retries | fix the machinery; watch the alert |
+| The runner is offline or lost, so no status arrives within the CI wait | Infrastructure | reads the missing status as CI silence and retries | bring the runner back |
+| Forgejo is unreachable | Infrastructure | the worker backs off; `gt done` fails closed and the polecat's session stays up | bring Forgejo back |
+| The landing deadline is exceeded | Infrastructure | reads the deadline as infrastructure, not a rejection | fix the machinery |
+| Three consecutive infrastructure failures | Policy | escalates to a human | decide |
+| `om / review` rejects | Policy | reworks to the polecat, or escalates when the rejection is not a rework | decide |
+| A forged status | Policy | refuses with a `forged_status` rejection and escalates | decide |
+| A merge is refused (405) | Policy | refuses with a `merge_refused` rejection and escalates | decide |
+| The branch is outdated (409) | — | rebuilds the candidate and retries | nothing |
+| A rejected head cannot be resubmitted (`gt done` ends `DONE_CLOSE_SKIPPED`) | Operator | `gt done` stands down and says why (gt-3e1z4) | `gt land requeue <bead> --reason "<why>"` |
+| A push to Forgejo has no git credentials | Operator | — | install the role-keyed credential helper (`~/forgejo/README.md`) |
+| The mirror prunes a GitHub-only ref | Operator | — | import every GitHub ref before the mirror exists (see "Cutting a rig over") |
+| A protected branch cannot be deleted | Operator | — | only `main` is protected (gt-fn9e6.21) |
+| Provisioning a fresh repo never converges | Operator | — | the collaborator grant lands before the rule (gt-fn9e6.23) |
+| The startup context check alarms after a restart | Operator | raises `landing-forgejo-context:<rig>` | `gt escalate clear --fingerprint landing-forgejo-context:<rig>` once the landing is known good (gt-fn9e6.24) |
+| A rig's new Forgejo block is read only at daemon start | Operator | — | restart the daemon when no landing is in flight (see "Cutting a rig over") |
+
 ## Cutting a rig over
 
 Before a rig's cutover its gate workflow is on the GitHub `main` — landed
 through the old path first, so Forgejo never falls back to
 `.github/workflows` — and its runner image can run that gate.
 
+`bash scripts/forgejo-probe.sh <rig> --repo OWNER/NAME` proves the last of
+those before anything changes: it clones the rig's GitHub `main`, pushes it to
+the rig's Forgejo copy as `land/probe-<rig>`, waits for the real gate status
+and requires green, then deletes the branch. The cutover runs the probe and
+refuses unless it is green, so a cutover that starts is one the real runner has
+already passed. A probe leaves no record, so `--dry-run` prints the probe
+instead of running it.
+
 `bash scripts/forgejo-cutover.sh <rig> --repo OWNER/NAME` runs the procedure;
 `--help` lists the flags, and the script header gives the order and the reason
-for each step. It refuses while a `gt:ready-to-land` bead is queued and when
-the probe it runs is not green, so a cutover that starts is one whose gate the
-real runner has already passed. `--dry-run` prints every command, the probe
-included, and writes nothing.
+for each step. It refuses while a `gt:ready-to-land` bead is queued.
+`--dry-run` prints every command and writes nothing.
 
 The mirror carries no branch filter on purpose: Forgejo then pushes every ref
 and prunes every GitHub ref it does not hold, which is why the import step runs
-first and why skipping it loses GitHub-only branches.
+first and why skipping it loses GitHub-only branches. It syncs on commit and
+every 10 minutes, and GitHub keeps a ref Forgejo has deleted until that next
+sync.
 
 Four things stay with the operator, and the script prints them at the end:
 
@@ -125,6 +193,10 @@ Four things stay with the operator, and the script prints them at the end:
 - GitHub Actions disabled on the GitHub repo;
 - any self-hosted GitHub runner for it stopped, not removed;
 - the gate workflow unchanged in the Forgejo copy.
+
+The daemon reads a rig's Forgejo block only at start, so a cutover restarts it
+(`gt daemon restart`) — but only when no landing is in flight. Restarting over
+a queued landing drops it; repointing a remote mid-landing is safe.
 
 Then watch the first landing: `ci / gate (push)` green with no user creator,
 the PR merged by `bot-landing` as a fast-forward whose commit is the candidate,
@@ -147,10 +219,31 @@ order is load-bearing: the mirror stops and the `gh repo deploy-key delete`
 command is printed before anything is repointed, because a mirror still running
 pushes every ref to GitHub and would overwrite whatever lands there.
 
-The daemon restart is the one step left to the operator when a landing is
-queued — repointing mid-landing is safe, restarting over one is not. The script
-prints the command for that case. A landing through the old path is what proves
-the rollback, as the mango rehearsal did.
+A rollback runs while landings are queued, so it obeys the daemon-restart rule
+above by printing the command instead of forcing it. A landing through the old
+path is what proves the rollback, as the mango rehearsal did.
+
+## Resyncing and break-glass
+
+`bash scripts/forgejo-resync.sh OWNER/NAME` makes a Forgejo repository's refs
+match GitHub's and restores `main` protection. Two uses:
+
+- **GitHub moved while a rig was rolled back.** A rolled-back rig lands on
+  GitHub, so Forgejo can fall behind it.
+- **Break-glass.** When the Forgejo landing path itself is broken, the fix
+  cannot land through it. Push the fix to the rig's GitHub repository, then
+  resync, and the fix becomes Forgejo's `main`.
+
+`main` refuses every push, admins included, so nothing is pushed to Forgejo
+directly. The script lifts the `main` rule (backing it up first), pushes every
+GitHub ref to Forgejo with `--prune`, and restores the rule by re-running
+`forgejo-provision.sh --repo OWNER/NAME`. The restore runs from an exit trap,
+so a push that fails still leaves `main` protected. `--dry-run` prints every
+step and writes nothing.
+
+gastown's break-glass is tested before its cutover, because it hosts the
+worker: a defect in the new path there would otherwise block the fix that
+repairs it.
 
 ## Rotating a token
 
@@ -180,6 +273,7 @@ the revoked value until it restarts.
 ## Tests
 
 `scripts/forgejo-provision_test.sh`, `scripts/forgejo-probe_test.sh`,
-`scripts/forgejo-cutover_test.sh` and `scripts/forgejo-rollback_test.sh` drive
-every path above against a stub Forgejo and a stub town held in a temp
-directory — no live instance, no network — and run under `make test-makefile`.
+`scripts/forgejo-cutover_test.sh`, `scripts/forgejo-rollback_test.sh` and
+`scripts/forgejo-resync_test.sh` drive every path above against a stub Forgejo
+and a stub town held in a temp directory — no live instance, no network — and
+run under `make test-makefile`.
