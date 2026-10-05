@@ -92,14 +92,65 @@ file.
 
 ## After the bots exist
 
-The push mirror and the gate workflow are not the script's work. The mirror is
-cutover work and the workflow lives in the rig repo, both named in the design
-doc's slice list. The protection rule names the workflow's context, so a renamed
-job orphans the requirement: re-running the script with the new context is what
-reports the mismatch.
+The gate workflow lives in the rig repo, and the push mirror is the cutover's
+work (below). The protection rule names the workflow's context, so a renamed
+job orphans the requirement: re-running the provisioner with the new context is
+what reports the mismatch.
 
 Verify in the web UI under Repository → Settings → Branches, and under Site
 administration → User accounts.
+
+## Cutting a rig over
+
+Before a rig's cutover its gate workflow is on the GitHub `main` — landed
+through the old path first, so Forgejo never falls back to
+`.github/workflows` — and its runner image can run that gate.
+
+`bash scripts/forgejo-cutover.sh <rig> --repo OWNER/NAME` runs the procedure;
+`--help` lists the flags, and the script header gives the order and the reason
+for each step. It refuses while a `gt:ready-to-land` bead is queued and when
+the probe it runs is not green, so a cutover that starts is one whose gate the
+real runner has already passed. `--dry-run` prints every command, the probe
+included, and writes nothing.
+
+The mirror carries no branch filter on purpose: Forgejo then pushes every ref
+and prunes every GitHub ref it does not hold, which is why the import step runs
+first and why skipping it loses GitHub-only branches.
+
+Four things stay with the operator, and the script prints them at the end:
+
+- the `gh repo deploy-key add` command for the mirror's deploy key. Forgejo
+  mints a new keypair per mirror and offers no API to replace one, so the key
+  goes on GitHub by hand; until it is there the mirror syncs nothing;
+- GitHub Actions disabled on the GitHub repo;
+- any self-hosted GitHub runner for it stopped, not removed;
+- the gate workflow unchanged in the Forgejo copy.
+
+Then watch the first landing: `ci / gate (push)` green with no user creator,
+the PR merged by `bot-landing` as a fast-forward whose commit is the candidate,
+`om / review` created by the same bot, and Forgejo `main` equal to GitHub
+`main`.
+
+Every file the script edits is copied to a dated `.bak-` sibling first, and a
+second run over converged state reports each step as already converged and
+writes nothing.
+
+## Rolling a rig back
+
+Rollback is an operator move, never an automatic one. Run it when Forgejo or
+the runner has been down 30 minutes with landings queued, after two
+consecutive infrastructure failures, or when a mirror error will not clear.
+
+`bash scripts/forgejo-rollback.sh <rig>` stops the mirror, removes the rig's
+Forgejo block and repoints the rig at GitHub; `--help` lists the flags. The
+order is load-bearing: the mirror stops and the `gh repo deploy-key delete`
+command is printed before anything is repointed, because a mirror still running
+pushes every ref to GitHub and would overwrite whatever lands there.
+
+The daemon restart is the one step left to the operator when a landing is
+queued — repointing mid-landing is safe, restarting over one is not. The script
+prints the command for that case. A landing through the old path is what proves
+the rollback, as the mango rehearsal did.
 
 ## Rotating a token
 
@@ -128,6 +179,7 @@ the revoked value until it restarts.
 
 ## Tests
 
-`scripts/forgejo-provision_test.sh` drives every path above against a stub
-Forgejo held in a temp directory — no live instance, no network — and runs
-under `make test-makefile`.
+`scripts/forgejo-provision_test.sh`, `scripts/forgejo-probe_test.sh`,
+`scripts/forgejo-cutover_test.sh` and `scripts/forgejo-rollback_test.sh` drive
+every path above against a stub Forgejo and a stub town held in a temp
+directory — no live instance, no network — and run under `make test-makefile`.
