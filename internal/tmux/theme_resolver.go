@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // ResolveSessionTheme returns the configured tmux theme for a session.
@@ -30,7 +29,7 @@ func ResolveSessionTheme(townRoot, rigName, role, crewMember string) *Theme {
 	}
 
 	switch role {
-	case constants.RoleMayor:
+	case "mayor":
 		theme := MayorTheme()
 		return &theme
 	default:
@@ -158,7 +157,7 @@ func customTheme(name string, custom *config.CustomTheme) *Theme {
 func normalizeThemeRole(role string) string {
 	switch role {
 	case "coordinator":
-		return constants.RoleMayor
+		return "mayor"
 	default:
 		return role
 	}

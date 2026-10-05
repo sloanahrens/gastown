@@ -12,9 +12,9 @@ func TestStaleTaskDispatchCheck_Clean(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	// Create a mayor settings.json without task-dispatch
-	mayorDir := filepath.Join(tmpDir, "mayor", ".claude")
-	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+	// Create a crew settings.json without task-dispatch
+	crewDir := filepath.Join(tmpDir, "myrig", "crew", ".claude")
+	if err := os.MkdirAll(crewDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -29,7 +29,7 @@ func TestStaleTaskDispatchCheck_Clean(t *testing.T) {
   }
 }
 `
-	if err := os.WriteFile(filepath.Join(mayorDir, "settings.json"), []byte(settings), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(crewDir, "settings.json"), []byte(settings), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -46,9 +46,9 @@ func TestStaleTaskDispatchCheck_Stale(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	// Create a mayor settings.json WITH stale task-dispatch
-	mayorDir := filepath.Join(tmpDir, "mayor", ".claude")
-	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+	// Create a crew settings.json WITH stale task-dispatch
+	crewDir := filepath.Join(tmpDir, "myrig", "crew", ".claude")
+	if err := os.MkdirAll(crewDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -67,7 +67,7 @@ func TestStaleTaskDispatchCheck_Stale(t *testing.T) {
   }
 }
 `
-	if err := os.WriteFile(filepath.Join(mayorDir, "settings.json"), []byte(settings), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(crewDir, "settings.json"), []byte(settings), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -87,9 +87,9 @@ func TestStaleTaskDispatchCheck_Fix(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	// Create a mayor settings.json WITH stale task-dispatch
-	mayorDir := filepath.Join(tmpDir, "mayor", ".claude")
-	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+	// Create a crew settings.json WITH stale task-dispatch
+	crewDir := filepath.Join(tmpDir, "myrig", "crew", ".claude")
+	if err := os.MkdirAll(crewDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -104,7 +104,7 @@ func TestStaleTaskDispatchCheck_Fix(t *testing.T) {
   }
 }
 `
-	settingsPath := filepath.Join(mayorDir, "settings.json")
+	settingsPath := filepath.Join(crewDir, "settings.json")
 	if err := os.WriteFile(settingsPath, []byte(settings), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -148,9 +148,9 @@ func TestStaleTaskDispatchCheck_FixConvergesWithOverride(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
-	// Create a mayor settings.json WITH stale task-dispatch
-	mayorDir := filepath.Join(tmpDir, "mayor", ".claude")
-	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+	// Create a crew settings.json WITH stale task-dispatch
+	crewDir := filepath.Join(tmpDir, "myrig", "crew", ".claude")
+	if err := os.MkdirAll(crewDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -165,13 +165,13 @@ func TestStaleTaskDispatchCheck_FixConvergesWithOverride(t *testing.T) {
   }
 }
 `
-	settingsPath := filepath.Join(mayorDir, "settings.json")
+	settingsPath := filepath.Join(crewDir, "settings.json")
 	if err := os.WriteFile(settingsPath, []byte(settings), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	check := NewStaleTaskDispatchCheck()
-	// A mayor hooks-override that re-injects task-dispatch.
+	// A crew hooks-override that re-injects task-dispatch.
 	check.computeExpected = func(string) (*hooks.HooksConfig, error) {
 		return &hooks.HooksConfig{PreToolUse: []hooks.HookEntry{
 			{Matcher: "Task", Hooks: []hooks.Hook{{Type: "command", Command: "gt tap guard task-dispatch"}}},

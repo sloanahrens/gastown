@@ -329,9 +329,9 @@ func HooksEqual(a, b *HooksConfig) bool {
 // Target represents a managed settings.json location.
 type Target struct {
 	Path string // Full path to .claude/settings.json
-	Key  string // Override key: "gastown/crew", "mayor", etc.
+	Key  string // Override key: "gastown/crew", "beads/polecats", etc.
 	Rig  string // Rig name or empty for town-level
-	Role string // Informational only — does NOT participate in override resolution (Key does). Singular form matching RoleSettingsDir: crew, polecat, mayor.
+	Role string // Informational only — does NOT participate in override resolution (Key does). Singular form matching RoleSettingsDir: crew, polecat.
 }
 
 // DisplayKey returns a human-readable label for the target.
@@ -531,13 +531,6 @@ func (h configHome) computeExpected(target string) (*HooksConfig, error) {
 // Returns Target structs with path, override key, rig, and role information.
 func DiscoverTargets(townRoot string) ([]Target, error) {
 	var targets []Target
-
-	// Town-level target (the mayor's cwd IS the settings dir)
-	targets = append(targets, Target{
-		Path: filepath.Join(townRoot, "mayor", ".claude", "settings.json"),
-		Key:  "mayor",
-		Role: "mayor",
-	})
 
 	// Scan rigs
 	entries, err := os.ReadDir(townRoot)
@@ -829,7 +822,7 @@ func NormalizeTarget(target string) (string, bool) {
 	}
 
 	validRoles := map[string]bool{
-		"crew": true, "polecats": true, "mayor": true,
+		"crew": true, "polecats": true,
 	}
 
 	// Simple role target
@@ -856,7 +849,7 @@ func NormalizeTarget(target string) (string, bool) {
 }
 
 // ValidTarget returns true if the target string is a valid override target.
-// Valid targets are roles (crew, polecats, mayor) or rig/role combinations.
+// Valid targets are roles (crew, polecats) or rig/role combinations.
 // Accepts singular aliases (e.g., "polecat") — use NormalizeTarget to get canonical form.
 func ValidTarget(target string) bool {
 	_, ok := NormalizeTarget(target)
@@ -964,7 +957,7 @@ func DefaultBase() *HooksConfig {
 // Examples:
 //
 //	"gastown/crew" -> ["crew", "gastown/crew"]
-//	"mayor"        -> ["mayor"]
+//	"polecats"     -> ["polecats"]
 //	"beads/polecats" -> ["polecats", "beads/polecats"]
 func GetApplicableOverrides(target string) []string {
 	parts := strings.SplitN(target, "/", 2)

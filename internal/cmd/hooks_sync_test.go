@@ -415,16 +415,19 @@ func TestRunHooksSyncFailsClosedOnIntegrityViolation(t *testing.T) {
 	home := hooks.HomeAt(tmpDir)
 
 	townRoot := filepath.Join(tmpDir, "town")
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor", ".claude"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(townRoot, "deacon"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(townRoot, "myrig", "crew", "alice"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "myrig", "crew", ".claude"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"type":"town","version":1,"name":"test"}`), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(townRoot, "mayor", ".claude", "settings.json"), []byte(`{"hooks":{"SessionStart":"bad"}}`), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(townRoot, "myrig", "crew", ".claude", "settings.json"), []byte(`{"hooks":{"SessionStart":"bad"}}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -491,6 +494,11 @@ func scaffoldSyncWorkspace(t *testing.T) (townRoot, homeDir string) {
 func TestRunHooksSyncCanaryFailurePreventsFanOut(t *testing.T) {
 	t.Parallel()
 	townRoot, home := scaffoldSyncWorkspace(t)
+	// A second rig gives fan-out a target after the canary (the first rig's
+	// crew settings, in DiscoverTargets order).
+	if err := os.MkdirAll(filepath.Join(townRoot, "zrig", "crew", "bob"), 0755); err != nil {
+		t.Fatal(err)
+	}
 	r := newHooksSyncRun(townRoot, home, false, stubLiveFire(doctor.LiveFireFail, doctor.LiveFirePass))
 	err := r.run()
 	if err == nil {
@@ -499,11 +507,11 @@ func TestRunHooksSyncCanaryFailurePreventsFanOut(t *testing.T) {
 	if !strings.Contains(err.Error(), "aborted") {
 		t.Errorf("expected an abort error naming the canary, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), filepath.Join(townRoot, "mayor", ".claude", "settings.json")) {
+	if !strings.Contains(err.Error(), filepath.Join(townRoot, "myrig", "crew", ".claude", "settings.json")) {
 		t.Errorf("expected the canary settings path in the error, got: %v", err)
 	}
 
-	crewSettings := filepath.Join(townRoot, "myrig", "crew", ".claude", "settings.json")
+	crewSettings := filepath.Join(townRoot, "zrig", "crew", ".claude", "settings.json")
 	if _, statErr := os.Stat(crewSettings); !os.IsNotExist(statErr) {
 		t.Error("fan-out target was synced despite a failed canary — fan-out should have stopped")
 	}
@@ -558,19 +566,11 @@ func TestRunHooksSyncWritesReportWithEffectiveHookSet(t *testing.T) {
 	if !report.Canary.Passed() {
 		t.Errorf("expected a passed canary, got blocked=%s allowed=%s", report.Canary.Blocked.Verdict, report.Canary.Allowed.Verdict)
 	}
-	if report.Canary.Target != "mayor" {
-		t.Errorf("expected mayor as the deterministic canary, got %q", report.Canary.Target)
+	if report.Canary.Target != "myrig/crew" {
+		t.Errorf("expected myrig/crew as the deterministic canary, got %q", report.Canary.Target)
 	}
 	if report.Timestamp.IsZero() {
 		t.Error("expected a non-zero timestamp")
-	}
-
-	mayorRole, ok := report.Roles["mayor"]
-	if !ok {
-		t.Fatal("expected the mayor role's effective hook set to be recorded")
-	}
-	if len(mayorRole.Hooks.SessionStart) == 0 {
-		t.Error("expected mayor's recorded hook set to include the base SessionStart entry")
 	}
 
 	crewRole, ok := report.Roles["myrig/crew"]

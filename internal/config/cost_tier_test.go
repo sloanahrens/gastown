@@ -55,7 +55,6 @@ func TestCostTierRoleAgents(t *testing.T) {
 			t.Errorf("standard tier has %d entries, want %d (all managed roles)", len(ra), len(TierManagedRoles))
 		}
 		expected := map[string]string{
-			"mayor":   "",
 			"polecat": "",
 			"crew":    "",
 		}
@@ -75,7 +74,6 @@ func TestCostTierRoleAgents(t *testing.T) {
 			t.Fatal("economy tier returned nil")
 		}
 		expected := map[string]string{
-			"mayor":   "claude-sonnet",
 			"polecat": "", // use default (opus)
 			"crew":    "", // use default (opus)
 		}
@@ -93,7 +91,6 @@ func TestCostTierRoleAgents(t *testing.T) {
 			t.Fatal("budget tier returned nil")
 		}
 		expected := map[string]string{
-			"mayor":   "claude-sonnet",
 			"polecat": "claude-sonnet",
 			"crew":    "claude-sonnet",
 		}
@@ -111,7 +108,6 @@ func TestCostTierRoleAgents(t *testing.T) {
 			t.Fatal("custom-groq-opus tier returned nil")
 		}
 		expected := map[string]string{
-			"mayor":   "",
 			"polecat": "groq-compound",
 			"crew":    "",
 		}
@@ -230,9 +226,6 @@ func TestApplyCostTier(t *testing.T) {
 		if settings.CostTier != "economy" {
 			t.Errorf("CostTier = %q, want %q", settings.CostTier, "economy")
 		}
-		if settings.RoleAgents["mayor"] != "claude-sonnet" {
-			t.Errorf("RoleAgents[mayor] = %q, want %q", settings.RoleAgents["mayor"], "claude-sonnet")
-		}
 		if settings.Agents["claude-sonnet"] == nil {
 			t.Error("Agents[claude-sonnet] is nil")
 		}
@@ -329,7 +322,7 @@ func TestGetCurrentTier(t *testing.T) {
 		t.Parallel()
 		settings := NewTownSettings()
 		settings.RoleAgents = map[string]string{
-			"mayor": "some-custom-agent",
+			"polecat": "some-custom-agent",
 		}
 		if got := GetCurrentTier(settings); got != "" {
 			t.Errorf("GetCurrentTier = %q, want empty string for custom config", got)
@@ -339,9 +332,9 @@ func TestGetCurrentTier(t *testing.T) {
 	t.Run("detects stale CostTier field", func(t *testing.T) {
 		t.Parallel()
 		settings := NewTownSettings()
-		settings.CostTier = "economy" // says economy
+		settings.CostTier = "budget" // says budget
 		settings.RoleAgents = map[string]string{
-			"mayor": "some-custom-agent", // but actually custom
+			"polecat": "some-custom-agent", // but actually custom
 		}
 		// Should detect mismatch and infer from RoleAgents
 		if got := GetCurrentTier(settings); got != "" {
@@ -352,13 +345,13 @@ func TestGetCurrentTier(t *testing.T) {
 	t.Run("infers tier without CostTier field", func(t *testing.T) {
 		t.Parallel()
 		settings := NewTownSettings()
-		// Set RoleAgents matching economy tier but without CostTier field
+		// Set RoleAgents matching budget tier but without CostTier field
 		settings.RoleAgents = map[string]string{
-			"mayor":    "claude-sonnet",
-			"refinery": "claude-sonnet",
+			"polecat": "claude-sonnet",
+			"crew":    "claude-sonnet",
 		}
-		if got := GetCurrentTier(settings); got != "economy" {
-			t.Errorf("GetCurrentTier = %q, want %q (inferred)", got, "economy")
+		if got := GetCurrentTier(settings); got != "budget" {
+			t.Errorf("GetCurrentTier = %q, want %q (inferred)", got, "budget")
 		}
 	})
 }
@@ -374,15 +367,15 @@ func TestTierRolesMatch(t *testing.T) {
 		}
 	})
 
-	t.Run("economy tier matches", func(t *testing.T) {
+	t.Run("budget tier matches", func(t *testing.T) {
 		t.Parallel()
 		actual := map[string]string{
-			"mayor":    "claude-sonnet",
-			"refinery": "claude-sonnet",
+			"polecat": "claude-sonnet",
+			"crew":    "claude-sonnet",
 		}
-		expected := CostTierRoleAgents(TierEconomy)
+		expected := CostTierRoleAgents(TierBudget)
 		if !tierRolesMatch(actual, expected) {
-			t.Error("economy tier assignments should match")
+			t.Error("budget tier assignments should match")
 		}
 	})
 
@@ -400,8 +393,8 @@ func TestTierRolesMatch(t *testing.T) {
 
 	t.Run("different tier-managed values don't match", func(t *testing.T) {
 		t.Parallel()
-		actual := map[string]string{"mayor": "claude-haiku"}
-		expected := CostTierRoleAgents(TierEconomy) // mayor = claude-sonnet
+		actual := map[string]string{"polecat": "claude-haiku"}
+		expected := CostTierRoleAgents(TierBudget) // polecat = claude-sonnet
 		if tierRolesMatch(actual, expected) {
 			t.Error("different tier-managed values should not match")
 		}
@@ -417,7 +410,7 @@ func TestApplyCostTier_PreservesCustomRoleAgents(t *testing.T) {
 		// Simulate a user who set a custom non-tier role
 		settings.RoleAgents["custom-role"] = "custom-agent"
 		// Also set a tier-managed role that economy would have set
-		settings.RoleAgents["mayor"] = "claude-sonnet"
+		settings.RoleAgents["polecat"] = "claude-sonnet"
 
 		if err := ApplyCostTier(settings, TierStandard); err != nil {
 			t.Fatalf("ApplyCostTier: %v", err)
@@ -428,8 +421,8 @@ func TestApplyCostTier_PreservesCustomRoleAgents(t *testing.T) {
 			t.Error("standard tier should preserve non-tier RoleAgents entry 'custom-role'")
 		}
 		// Tier-managed role should be cleared
-		if _, ok := settings.RoleAgents["mayor"]; ok {
-			t.Error("standard tier should remove tier-managed role 'mayor'")
+		if _, ok := settings.RoleAgents["polecat"]; ok {
+			t.Error("standard tier should remove tier-managed role 'polecat'")
 		}
 	})
 
@@ -444,9 +437,6 @@ func TestApplyCostTier_PreservesCustomRoleAgents(t *testing.T) {
 
 		if settings.RoleAgents["custom-role"] != "custom-agent" {
 			t.Error("economy tier should preserve non-tier RoleAgents entry 'custom-role'")
-		}
-		if settings.RoleAgents["mayor"] != "claude-sonnet" {
-			t.Errorf("economy tier mayor = %q, want claude-sonnet", settings.RoleAgents["mayor"])
 		}
 	})
 }
@@ -519,7 +509,7 @@ func TestCostTierRoleEffort(t *testing.T) {
 		}
 	})
 
-	t.Run("economy tier workers high, mayor medium", func(t *testing.T) {
+	t.Run("economy tier workers high", func(t *testing.T) {
 		t.Parallel()
 		re := CostTierRoleEffort(TierEconomy)
 		if re == nil {
@@ -531,15 +521,9 @@ func TestCostTierRoleEffort(t *testing.T) {
 				t.Errorf("economy tier role_effort[%s] = %q, want %q", role, re[role], "high")
 			}
 		}
-		// Mayor should be medium
-		for _, role := range []string{"mayor"} {
-			if re[role] != "medium" {
-				t.Errorf("economy tier role_effort[%s] = %q, want %q", role, re[role], "medium")
-			}
-		}
 	})
 
-	t.Run("budget tier workers medium, mayor low", func(t *testing.T) {
+	t.Run("budget tier workers medium", func(t *testing.T) {
 		t.Parallel()
 		re := CostTierRoleEffort(TierBudget)
 		if re == nil {
@@ -548,11 +532,6 @@ func TestCostTierRoleEffort(t *testing.T) {
 		for _, role := range []string{"polecat", "crew"} {
 			if re[role] != "medium" {
 				t.Errorf("budget tier role_effort[%s] = %q, want %q", role, re[role], "medium")
-			}
-		}
-		for _, role := range []string{"mayor"} {
-			if re[role] != "low" {
-				t.Errorf("budget tier role_effort[%s] = %q, want %q", role, re[role], "low")
 			}
 		}
 	})
@@ -592,7 +571,20 @@ func TestIsValidEffortLevel(t *testing.T) {
 func TestApplyCostTier_SetsRoleEffort(t *testing.T) {
 	t.Parallel()
 
-	t.Run("economy tier sets non-high effort levels", func(t *testing.T) {
+	t.Run("budget tier sets non-high effort levels", func(t *testing.T) {
+		t.Parallel()
+		settings := NewTownSettings()
+		if err := ApplyCostTier(settings, TierBudget); err != nil {
+			t.Fatalf("ApplyCostTier: %v", err)
+		}
+		for _, role := range []string{"polecat", "crew"} {
+			if settings.RoleEffort[role] != "medium" {
+				t.Errorf("RoleEffort[%s] = %q, want %q", role, settings.RoleEffort[role], "medium")
+			}
+		}
+	})
+
+	t.Run("economy tier leaves effort at the default", func(t *testing.T) {
 		t.Parallel()
 		settings := NewTownSettings()
 		if err := ApplyCostTier(settings, TierEconomy); err != nil {
@@ -602,12 +594,6 @@ func TestApplyCostTier_SetsRoleEffort(t *testing.T) {
 		for _, role := range []string{"polecat", "crew"} {
 			if _, ok := settings.RoleEffort[role]; ok {
 				t.Errorf("RoleEffort[%s] should not be set (high is default)", role)
-			}
-		}
-		// Mayor should have medium
-		for _, role := range []string{"mayor"} {
-			if settings.RoleEffort[role] != "medium" {
-				t.Errorf("RoleEffort[%s] = %q, want %q", role, settings.RoleEffort[role], "medium")
 			}
 		}
 	})
@@ -634,16 +620,12 @@ func TestApplyCostTier_SetsRoleEffort(t *testing.T) {
 
 func TestFormatTierRoleTable_IncludesEffort(t *testing.T) {
 	t.Parallel()
-	table := FormatTierRoleTable(TierEconomy)
+	table := FormatTierRoleTable(TierBudget)
 	if table == "" {
-		t.Fatal("FormatTierRoleTable(economy) returned empty string")
+		t.Fatal("FormatTierRoleTable(budget) returned empty string")
 	}
-	// Workers should show "effort: high"
-	if !containsSubstring(table, "effort: high") {
-		t.Error("economy tier table should contain 'effort: high' for workers")
-	}
-	// Should contain effort: medium for mayor
+	// Workers should show "effort: medium" on the budget tier
 	if !containsSubstring(table, "effort: medium") {
-		t.Error("economy tier table should contain 'effort: medium' for mayor")
+		t.Error("budget tier table should contain 'effort: medium' for workers")
 	}
 }

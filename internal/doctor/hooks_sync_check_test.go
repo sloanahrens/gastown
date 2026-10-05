@@ -18,8 +18,10 @@ func scaffoldWorkspace(t *testing.T, roleAgents map[string]string) string {
 	tmpDir := t.TempDir()
 	townRoot := filepath.Join(tmpDir, "town")
 
-	// Required workspace structure (deacon/dogs is the dog kennel)
-	for _, dir := range []string{"mayor", filepath.Join("deacon", "dogs")} {
+	// Required workspace structure (deacon/dogs is the dog kennel; the rig
+	// crew worktree is the town's one Claude settings target once the mayor
+	// role is retired).
+	for _, dir := range []string{"mayor", filepath.Join("deacon", "dogs"), filepath.Join("myrig", "crew", "alice")} {
 		if err := os.MkdirAll(filepath.Join(townRoot, dir), 0755); err != nil {
 			t.Fatal(err)
 		}
@@ -102,8 +104,8 @@ func writePassingSyncReport(t *testing.T, townRoot string) {
 	report := &hooks.SyncReport{
 		Timestamp: time.Now().UTC(),
 		Canary: hooks.SyncReportCanary{
-			Target:       "mayor",
-			SettingsPath: filepath.Join(townRoot, "mayor", ".claude", "settings.json"),
+			Target:       "myrig/crew",
+			SettingsPath: filepath.Join(townRoot, "myrig", "crew", ".claude", "settings.json"),
 			Blocked:      hooks.SyncReportShape{Verdict: hooks.SyncReportPass, Detail: "blocked ok"},
 			Allowed:      hooks.SyncReportShape{Verdict: hooks.SyncReportPass, Detail: "allowed ok"},
 		},
@@ -124,7 +126,7 @@ func TestHooksSyncCheck_ClaudeTargetInSync(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Sync ALL Claude targets (mayor, crew worktree)
+	// Sync ALL Claude targets (the crew worktree)
 	syncAllClaudeTargets(t, townRoot)
 	writePassingSyncReport(t, townRoot)
 
@@ -145,7 +147,7 @@ func TestHooksSyncCheck_ClaudeTargetMissingPromptDefaults(t *testing.T) {
 	townRoot := scaffoldWorkspace(t, nil)
 	syncAllClaudeTargets(t, townRoot)
 
-	targetPath := filepath.Join(townRoot, "mayor", ".claude", "settings.json")
+	targetPath := filepath.Join(townRoot, "myrig", "crew", ".claude", "settings.json")
 	data, err := os.ReadFile(targetPath)
 	if err != nil {
 		t.Fatal(err)
@@ -197,11 +199,11 @@ func TestHooksSyncCheck_Fix_PreservesClaudePath(t *testing.T) {
 	t.Parallel()
 	townRoot := scaffoldWorkspace(t, nil)
 
-	// Sync all Claude targets first (creates in-sync settings for mayor)
+	// Sync all Claude targets first (creates in-sync settings for the crew worktree)
 	syncAllClaudeTargets(t, townRoot)
 
-	// THEN overwrite mayor's settings with stale hooks but a custom editorMode
-	mayorClaudeDir := filepath.Join(townRoot, "mayor", ".claude")
+	// THEN overwrite the crew worktree's settings with stale hooks but a custom editorMode
+	crewClaudeDir := filepath.Join(townRoot, "myrig", "crew", ".claude")
 	stale := &hooks.SettingsJSON{
 		EditorMode: "vim",
 		Hooks: hooks.HooksConfig{
@@ -214,7 +216,7 @@ func TestHooksSyncCheck_Fix_PreservesClaudePath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(mayorClaudeDir, "settings.json"), append(data, '\n'), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(crewClaudeDir, "settings.json"), append(data, '\n'), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -233,7 +235,7 @@ func TestHooksSyncCheck_Fix_PreservesClaudePath(t *testing.T) {
 	}
 
 	// Verify editorMode was preserved (merge path, not overwrite)
-	settings, err := hooks.LoadSettings(filepath.Join(mayorClaudeDir, "settings.json"))
+	settings, err := hooks.LoadSettings(filepath.Join(crewClaudeDir, "settings.json"))
 	if err != nil {
 		t.Fatalf("LoadSettings: %v", err)
 	}
@@ -276,8 +278,8 @@ func TestHooksSyncCheck_SyncReportCanaryFailed_Warning(t *testing.T) {
 	report := &hooks.SyncReport{
 		Timestamp: time.Now().UTC(),
 		Canary: hooks.SyncReportCanary{
-			Target:       "mayor",
-			SettingsPath: filepath.Join(townRoot, "mayor", ".claude", "settings.json"),
+			Target:       "myrig/crew",
+			SettingsPath: filepath.Join(townRoot, "myrig", "crew", ".claude", "settings.json"),
 			Blocked:      hooks.SyncReportShape{Verdict: hooks.SyncReportFail, Detail: "guard failed open"},
 			Allowed:      hooks.SyncReportShape{Verdict: hooks.SyncReportPass, Detail: "allowed ok"},
 		},

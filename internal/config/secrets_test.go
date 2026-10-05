@@ -151,7 +151,7 @@ func TestBuildStartupCommand_ReadsDaemonEnvSecretAtRunTime(t *testing.T) {
 	townRoot := t.TempDir()
 	rigPath := filepath.Join(townRoot, "testrig")
 	s := NewTownSettings()
-	s.RoleAgents = map[string]string{constants.RoleMayor: "proxied"}
+	s.RoleAgents = map[string]string{constants.RoleCrew: "proxied"}
 	s.Agents["proxied"] = &RuntimeConfig{Command: "claude", Env: map[string]string{
 		"ANTHROPIC_AUTH_TOKEN":     "${DS_TOKEN}",
 		"ANTHROPIC_CUSTOM_HEADERS": "x-key: ${DS_TOKEN}",
@@ -167,7 +167,7 @@ func TestBuildStartupCommand_ReadsDaemonEnvSecretAtRunTime(t *testing.T) {
 	}
 
 	cmd, err := buildStartupCommandFromConfig(fh, AgentEnvConfig{
-		Role: constants.RoleMayor, TownRoot: townRoot, Getenv: fh.getenv,
+		Role: constants.RoleCrew, TownRoot: townRoot, Getenv: fh.getenv,
 	}, rigPath, "", "")
 	if err != nil {
 		t.Fatalf("build: %v", err)

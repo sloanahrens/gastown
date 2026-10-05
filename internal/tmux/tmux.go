@@ -4349,11 +4349,11 @@ func (t *Tmux) ApplyWindowStyle(session string, ws *WindowStyle) error {
 // Includes legacy keys ("coordinator", "health-check") for backwards compatibility.
 var roleIcons = map[string]string{
 	// Standard role names (from constants)
-	constants.RoleMayor:   constants.EmojiMayor,
+	"mayor":               "🎩",
 	constants.RoleCrew:    constants.EmojiCrew,
 	constants.RolePolecat: constants.EmojiPolecat,
 	// Legacy names (for backwards compatibility)
-	"coordinator": constants.EmojiMayor,
+	"coordinator": "🎩",
 }
 
 // SetStatusFormat configures the left side of the status bar.

@@ -23,7 +23,7 @@ type Role string
 // GT_ROLE that names something deleted (the boot, witness and refinery roles
 // are gone).
 const (
-	Mayor   Role = constants.RoleMayor
+	Mayor   Role = "mayor"
 	Polecat Role = constants.RolePolecat
 	Crew    Role = constants.RoleCrew
 	Unknown Role = "unknown"
@@ -57,7 +57,7 @@ func Parse(s string) (Role, string, string) {
 
 	// Simple roles
 	switch s {
-	case constants.RoleMayor:
+	case "mayor":
 		return Mayor, "", ""
 	}
 

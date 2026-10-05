@@ -38,7 +38,7 @@ func TestUnusedDirectiveCheck_NoUnusedFiles(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	writeDirectiveFile(t, filepath.Join(townRoot, "myrig", "config.json"), "{}")
-	writeDirectiveFile(t, filepath.Join(townRoot, "directives", "mayor.md"), "mayor policy")
+	writeDirectiveFile(t, filepath.Join(townRoot, "directives", "crew.md"), "crew policy")
 	writeDirectiveFile(t, filepath.Join(townRoot, "myrig", "directives", "polecat.md"), "rig policy")
 
 	result := NewUnusedDirectiveCheck().Run(&CheckContext{TownRoot: townRoot, RigName: "myrig"})

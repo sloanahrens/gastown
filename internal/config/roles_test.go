@@ -17,13 +17,6 @@ func TestLoadBuiltinRoleDefinition(t *testing.T) {
 		wantPreSync bool
 	}{
 		{
-			name:        "mayor",
-			role:        "mayor",
-			wantScope:   "town",
-			wantPattern: "hq-mayor",
-			wantPreSync: false,
-		},
-		{
 			name:        "polecat",
 			role:        "polecat",
 			wantScope:   "rig",
@@ -93,12 +86,11 @@ func TestLoadRoleDefinition_UnknownRole(t *testing.T) {
 func TestAllRoles(t *testing.T) {
 	t.Parallel()
 	roles := AllRoles()
-	if len(roles) != 3 {
-		t.Errorf("AllRoles() returned %d roles, want 3", len(roles))
+	if len(roles) != 2 {
+		t.Errorf("AllRoles() returned %d roles, want 2", len(roles))
 	}
 
 	expected := map[string]bool{
-		"mayor":   true,
 		"polecat": true,
 		"crew":    true,
 	}
@@ -113,8 +105,8 @@ func TestAllRoles(t *testing.T) {
 func TestTownRoles(t *testing.T) {
 	t.Parallel()
 	roles := TownRoles()
-	if len(roles) != 1 {
-		t.Errorf("TownRoles() returned %d roles, want 1", len(roles))
+	if len(roles) != 0 {
+		t.Errorf("TownRoles() returned %d roles, want 0 (no town-scoped roles remain)", len(roles))
 	}
 
 	for _, r := range roles {
@@ -229,11 +221,11 @@ func TestLoadRoleDefinition_InvalidTownOverride(t *testing.T) {
 	}
 
 	// Write invalid TOML
-	if err := os.WriteFile(rolesDir+"/mayor.toml", []byte("this is not valid [[ toml"), 0o644); err != nil {
+	if err := os.WriteFile(rolesDir+"/polecat.toml", []byte("this is not valid [[ toml"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err := LoadRoleDefinition(townRoot, "", "mayor")
+	_, err := LoadRoleDefinition(townRoot, "", "polecat")
 	if err == nil {
 		t.Fatal("expected error for invalid TOML override, got nil")
 	}
@@ -274,17 +266,17 @@ func TestLoadRoleDefinition_ValidOverride(t *testing.T) {
 	}
 
 	// Write a valid override that changes the nudge
-	override := `nudge = "custom nudge for mayor"` + "\n"
-	if err := os.WriteFile(rolesDir+"/mayor.toml", []byte(override), 0o644); err != nil {
+	override := `nudge = "custom nudge for polecat"` + "\n"
+	if err := os.WriteFile(rolesDir+"/polecat.toml", []byte(override), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	def, err := LoadRoleDefinition(townRoot, "", "mayor")
+	def, err := LoadRoleDefinition(townRoot, "", "polecat")
 	if err != nil {
 		t.Fatalf("unexpected error for valid override: %v", err)
 	}
-	if def.Nudge != "custom nudge for mayor" {
-		t.Errorf("Nudge = %q, want %q", def.Nudge, "custom nudge for mayor")
+	if def.Nudge != "custom nudge for polecat" {
+		t.Errorf("Nudge = %q, want %q", def.Nudge, "custom nudge for polecat")
 	}
 }
 

@@ -14,7 +14,7 @@ func TestBuildUpSummary(t *testing.T) {
 	services := []ServiceStatus{
 		{Name: "Daemon", Type: "daemon", OK: true, Detail: "PID 123"},
 		{Name: "Dolt", Type: "dolt", OK: true, Detail: "started (port 3306)"},
-		{Name: "Mayor", Type: constants.RoleMayor, OK: false, Detail: "failed"},
+		{Name: "Mayor", Type: "mayor", OK: false, Detail: "failed"},
 	}
 
 	summary := buildUpSummary(services)
@@ -34,7 +34,7 @@ func TestEmitUpJSON_Success(t *testing.T) {
 	services := []ServiceStatus{
 		{Name: "Dolt", Type: "dolt", OK: true, Detail: "started (port 3306)"},
 		{Name: "Daemon", Type: "daemon", OK: true, Detail: "PID 123"},
-		{Name: "Mayor", Type: constants.RoleMayor, OK: true, Detail: "hq-mayor"},
+		{Name: "Mayor", Type: "mayor", OK: true, Detail: "hq-mayor"},
 	}
 
 	var buf bytes.Buffer
@@ -63,7 +63,7 @@ func TestEmitUpJSON_FailureReturnsSilentExitAndValidJSON(t *testing.T) {
 	t.Parallel()
 	services := []ServiceStatus{
 		{Name: "Daemon", Type: "daemon", OK: true, Detail: "PID 123"},
-		{Name: "Mayor", Type: constants.RoleMayor, OK: false, Detail: "start failed"},
+		{Name: "Mayor", Type: "mayor", OK: false, Detail: "start failed"},
 	}
 
 	var buf bytes.Buffer

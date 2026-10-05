@@ -51,7 +51,7 @@ const LabelSpecDispatchFailed = "spec-dispatch-failed"
 
 // NonDispatchableBeadLabels are the "gt:" labels that mark a bead as a member
 // of a runtime family, regardless of the issue_type it carries. An escalation
-// waits on the mayor or the operator, a message on its recipient, an agent
+// waits on the operator, a message on its recipient, an agent
 // bead is a polecat's own identity, and a merge request is the refinery's
 // queue: none of them carries work a polecat can take.
 //
