@@ -300,7 +300,8 @@ func TestCandidateGatePushesTheCandidateAndTakesTheVerdict(t *testing.T) {
 }
 
 // TestCandidateGateRedCarriesTheJobLogTail: a failure verdict is the work's,
-// and the rework note carries the failing job's log.
+// and the rework note carries the failing job's log. The log carries the step
+// marker a started job prints, so no infrastructure signature claims it.
 func TestCandidateGateRedCarriesTheJobLogTail(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
@@ -309,7 +310,7 @@ func TestCandidateGateRedCarriesTheJobLogTail(t *testing.T) {
 		statuses: []forgejo.CommitStatus{status(forgejo.StateFailure, "ci / gate (push)")},
 		runs:     []forgejo.ActionRun{{ID: 7, CommitSHA: sha, Status: "failure"}},
 		jobs:     []forgejo.ActionRunJob{{ID: 9, RunID: 7, Name: "gate", Status: "failure"}},
-		log:      "make gate\n--- FAIL: TestThing\n",
+		log:      gateJobLog("⭐ Run Main actions/checkout@v4", "make gate", "--- FAIL: TestThing"),
 	}
 	res := fastGate(client).Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
 	if res.Err != nil {
@@ -342,12 +343,12 @@ func TestCandidateGateFetchesTheWholeLogWhenTheTailHidesTheFailure(t *testing.T)
 	}{
 		{
 			name:    "the whole log names the failure",
-			fullLog: gateJobLog("--- FAIL: TestRunSync_KillsDescendants (0.03s)", "FAIL\tgithub.com/x/hooks\t0.4s", "ok  \tgithub.com/x/zzz\t0.1s"),
+			fullLog: gateJobLog("⭐ Run Main actions/checkout@v4", "--- FAIL: TestRunSync_KillsDescendants (0.03s)", "FAIL\tgithub.com/x/hooks\t0.4s", "ok  \tgithub.com/x/zzz\t0.1s"),
 			want:    "TestRunSync_KillsDescendants",
 		},
 		{
 			name:    "a whole log that names none leaves the tail standing",
-			fullLog: gateJobLog("ok  \tgithub.com/x/zzz\t0.1s"),
+			fullLog: gateJobLog("⭐ Run Main actions/checkout@v4", "ok  \tgithub.com/x/zzz\t0.1s"),
 			want:    "ok  \tgithub.com/x/zzz\t0.1s",
 		},
 	}
@@ -360,7 +361,7 @@ func TestCandidateGateFetchesTheWholeLogWhenTheTailHidesTheFailure(t *testing.T)
 				statuses: []forgejo.CommitStatus{status(forgejo.StateFailure, "ci / gate (push)")},
 				runs:     []forgejo.ActionRun{{ID: 7, CommitSHA: sha, Status: "failure"}},
 				jobs:     []forgejo.ActionRunJob{{ID: 9, RunID: 7, Name: "gate", Status: "failure"}},
-				log:      gateJobLog("ok  \tgithub.com/x/zzz\t0.1s"),
+				log:      gateJobLog("⭐ Run Main actions/checkout@v4", "ok  \tgithub.com/x/zzz\t0.1s"),
 				fullLog:  tt.fullLog,
 			}
 			res := fastGate(client).Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)

@@ -243,46 +243,14 @@ const (
 	// candidateRunCancelled and candidateRunSkipped are the terminal run
 	// statuses a run reaches without judging the work. A cancel is what an
 	// operator's cancel, a runner restart or a dind recreate leaves behind
-	// (verified on Forgejo 16.0.5, gt-fn9e6.16).
+	// (verified on Forgejo 16.0.5, gt-fn9e6.16). The infrastructure signature
+	// table carries them (signatures.go).
 	candidateRunCancelled = "cancelled" //nolint:misspell // the run status Forgejo reports
 	candidateRunSkipped   = "skipped"
-	// candidateRunSuccess is terminal too, and a red context cannot come from a
-	// run that succeeded: a run that did judged something other than the work.
-	candidateRunSuccess = "success"
 	// candidateRunUnknown goes in a result whose red context's run could not be
 	// found or read.
 	candidateRunUnknown = "unknown"
 )
-
-// runVerdict is what the run behind a red required context says about the work.
-type runVerdict int
-
-const (
-	// runJudgedRed is a run that ran and failed: the red, and its job log, are
-	// the work's.
-	runJudgedRed runVerdict = iota
-	// runNeverJudged is a run that ended on a status which is not a failure.
-	// It is infrastructure, so it takes the infra backoff instead of sending
-	// the polecat a rework for a run it did not fail (gt-fn9e6.16).
-	runNeverJudged
-	// runUnread is a run whose status this rule does not read as terminal: one
-	// that could not be found or read, one still going, or one whose status
-	// names something else entirely. The red stands as it did before the rule,
-	// with the status that was seen recorded in the result.
-	runUnread
-)
-
-// verdictOf classifies a run status against a red context.
-func verdictOf(status string) runVerdict {
-	switch status {
-	case candidateRunFailure:
-		return runJudgedRed
-	case candidateRunCancelled, candidateRunSkipped, candidateRunSuccess:
-		return runNeverJudged
-	default:
-		return runUnread
-	}
-}
 
 // Run pushes head as w's candidate branch and waits for the gate workflow's
 // verdict on it.
@@ -335,8 +303,9 @@ func (g *CandidateGate) wait(parent context.Context, wf GateWorkflow, res Candid
 			res.State = CandidatePassed
 			return res
 		case state == CandidateFailed:
+			// redVerdict read the job log with the signature check; its
+			// excerpt for the rework note is already on the result.
 			res.State = CandidateFailed
-			res.Tail = g.failureTail(ctx, wf, res.SHA)
 			return res
 		}
 		g.logf("%s: %s has not reported on %s yet; checking again in %s", res.Branch, wf.Context(), shortSHA(res.SHA), g.pollInterval())
@@ -375,16 +344,18 @@ func (g *CandidateGate) state(parent context.Context, wf GateWorkflow, res *Cand
 		return CandidatePassed, nil
 	}
 	// failure, error, warning, skipped: the context is required, so anything
-	// but success is the gate not passing — unless the run behind it never
-	// judged the work.
+	// but success is the gate not passing, unless a signature in the
+	// infrastructure table claims the red (signatures.go).
 	return g.redVerdict(ctx, wf, res, status.Status)
 }
 
-// redVerdict reads the run behind a red required context. The context is
-// required, so a run that ran and failed is the work's red; a run that ended on
-// a status which is not a failure never judged the work at all, and reporting
-// that as a red verdict would send the polecat a rework for CI's downtime
-// (gt-fn9e6.16).
+// redVerdict reads the run behind a red required context and consults the
+// infrastructure signature table (signatures.go). A signature match is
+// infrastructure -- the runner or the environment failed before the work was
+// judged -- and returns ErrCISilence, so the worker takes the infra backoff
+// instead of sending the polecat a rework for a run it did not fail
+// (gt-fn9e6.16, gt-fn9e6.30). No match leaves the red a verdict on the work,
+// and the result carries the job's log for the rework note.
 func (g *CandidateGate) redVerdict(ctx context.Context, wf GateWorkflow, res *CandidateResult, contextState forgejo.CommitState) (CandidateState, error) {
 	run, err := g.runFor(ctx, res.SHA)
 	if err != nil {
@@ -395,22 +366,23 @@ func (g *CandidateGate) redVerdict(ctx context.Context, wf GateWorkflow, res *Ca
 		return CandidateFailed, nil
 	}
 	res.RunStatus = run.Status
-	if verdictOf(run.Status) == runNeverJudged {
-		return CandidateSilent, fmt.Errorf("%w: %s is %s on %s, but the run that tested it is %s: the run ended without judging the work",
-			ErrCISilence, wf.Context(), contextState, shortSHA(res.SHA), run.Status)
+	facts := gateFacts{RunStatus: run.Status}
+	log, whole, logErr := g.jobLog(ctx, wf, run)
+	if logErr != nil {
+		// No log to read: the status-only signatures still apply, and the red
+		// stands without a note when none matches.
+		g.logf("%s: the gate job log on %s could not be read: %v", wf.Context(), shortSHA(res.SHA), logErr)
+	} else {
+		facts.Log, facts.LogWhole = log, whole
+	}
+	if sig, ok := matchInfraSignature(facts); ok {
+		return CandidateSilent, fmt.Errorf("%w: %s is %s on %s; the run is %s: %s",
+			ErrCISilence, wf.Context(), contextState, shortSHA(res.SHA), run.Status, sig.name)
+	}
+	if logErr == nil {
+		res.Tail = failureExcerpt(log, gateTailLines)
 	}
 	return CandidateFailed, nil
-}
-
-// failureTail is the failing job's log tail, what the rework note carries. A
-// tail it cannot fetch is empty: the verdict stands without it.
-func (g *CandidateGate) failureTail(ctx context.Context, wf GateWorkflow, sha string) string {
-	tail, err := g.jobTail(ctx, wf, sha)
-	if err != nil {
-		g.logf("%s: the candidate gate failed on %s and its job log could not be read: %v", wf.Context(), shortSHA(sha), err)
-		return ""
-	}
-	return tail
 }
 
 // runFor is the run that tested sha: the one whose job log carries a red
@@ -432,17 +404,17 @@ func (g *CandidateGate) runFor(parent context.Context, sha string) (forgejo.Acti
 	return forgejo.ActionRun{}, fmt.Errorf("no workflow run tested %s", shortSHA(sha))
 }
 
-// jobTail is the tail of the gate job's log in the run that tested sha.
-func (g *CandidateGate) jobTail(parent context.Context, wf GateWorkflow, sha string) (string, error) {
+// jobLog reads the gate job's log in run. It returns the log and whether the
+// fetch came back whole: the server returned less than the tail cap, so the
+// head -- where the runner prints a step marker -- is in hand. A tail that names
+// no failure is widened to the whole log, still bounded, so the rework note
+// names the failure even when it sits far from the end (gt-fn9e6.25).
+func (g *CandidateGate) jobLog(parent context.Context, wf GateWorkflow, run forgejo.ActionRun) (string, bool, error) {
 	ctx, cancel := context.WithTimeout(parent, g.callTimeout())
 	defer cancel()
-	run, err := g.runFor(ctx, sha)
-	if err != nil {
-		return "", err
-	}
 	jobs, err := g.Client.ListRunJobs(ctx, g.Owner, g.RepoName, run.ID)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	jobID := int64(0)
 	for _, job := range jobs {
@@ -460,12 +432,13 @@ func (g *CandidateGate) jobTail(parent context.Context, wf GateWorkflow, sha str
 		}
 	}
 	if jobID == 0 {
-		return "", fmt.Errorf("run %d has no job %q and no failed job", run.ID, wf.Job)
+		return "", false, fmt.Errorf("run %d has no job %q and no failed job", run.ID, wf.Job)
 	}
 	log, err := g.Client.JobLogsTail(ctx, g.Owner, g.RepoName, jobID, candidateTailBytes)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
+	whole := len(log) < candidateTailBytes
 	if !logHasFailure(log) {
 		// The failure can be outside the byte cap. go test prints its packages
 		// in order, so the failing package is usually not the last one, and a
@@ -475,12 +448,12 @@ func (g *CandidateGate) jobTail(parent context.Context, wf GateWorkflow, sha str
 		full, ferr := g.Client.JobLogsTail(ctx, g.Owner, g.RepoName, jobID, candidateFullLogBytes)
 		switch {
 		case ferr != nil:
-			g.logf("%s: the tail of the gate job log on %s names no failure and the whole log could not be read: %v", wf.Context(), shortSHA(sha), ferr)
+			g.logf("%s: the tail of the gate job log on %s names no failure and the whole log could not be read: %v", wf.Context(), shortSHA(run.CommitSHA), ferr)
 		case logHasFailure(full):
 			log = full
 		}
 	}
-	return failureExcerpt(log, gateTailLines), nil
+	return log, whole, nil
 }
 
 // failureExcerpt is the rework note's excerpt of a gate job log: the failure

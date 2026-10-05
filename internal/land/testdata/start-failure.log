@@ -1,0 +1,5 @@
+2026-10-05T00:40:18.7748651Z Runner 34336565-6337-3166-6436-663033623365 (version:v13.2.0) received task 54 of job gate, triggered by event: push
+2026-10-05T00:40:18.7760173Z workflow prepared
+2026-10-05T00:40:18.8019041Z 🚀  Start image=registry.invalid/does-not-exist:1
+2026-10-05T00:40:18.8062717Z   🐳  docker pull image=registry.invalid/does-not-exist:1 platform=linux/arm64 username= forcePull=false
+2026-10-05T00:40:18.9396929Z Error response from daemon: failed to resolve reference "registry.invalid/does-not-exist:1": failed to do request: Head "https://registry.invalid/v2/does-not-exist/manifests/1": dial tcp: lookup registry.invalid on 127.0.0.11:53: no such host
