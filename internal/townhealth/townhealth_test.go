@@ -21,6 +21,9 @@ type fake struct {
 	execTax    time.Duration
 	execTaxErr error
 
+	load    HostLoad
+	loadErr error
+
 	hb    HeartbeatRecord
 	hbErr error
 
@@ -83,6 +86,7 @@ func (f *fake) Heartbeat() (HeartbeatRecord, error) { return f.hb, f.hbErr }
 func (f *fake) ExecTax(context.Context) (time.Duration, error) {
 	return f.execTax, f.execTaxErr
 }
+func (f *fake) Load1() (HostLoad, error) { return f.load, f.loadErr }
 
 func (f *fake) Ticks() ([]Tick, error) { return f.ticks, f.ticksErr }
 func (f *fake) Landings(_ context.Context, since time.Time) ([]RigLandings, error) {
@@ -107,7 +111,10 @@ func (f *fake) NeedsHuman(context.Context) (int, time.Time, error) {
 // healthy is a fake town with every field green.
 func healthy() *fake {
 	return &fake{
-		execTax:  9 * time.Millisecond,
+		execTax: 9 * time.Millisecond,
+		// A host well under its core count, so a healthy town's exec-tax
+		// reading is judged on the probe alone.
+		load:     HostLoad{Average: 1, Cores: 8},
 		hb:       HeartbeatRecord{At: ago(time.Minute), Count: 41},
 		ticks:    []Tick{{Name: "wisp_reaper", Interval: 30 * time.Minute, LastFired: ago(10 * time.Minute)}},
 		landings: []RigLandings{{Rig: "gastown", Landed: 7, Pending: 1, Oldest: ago(time.Minute), OldestBead: "gt-x"}},
@@ -125,7 +132,7 @@ func healthy() *fake {
 func inputs(f *fake) Inputs {
 	return Inputs{
 		Now: now, Thresholds: DefaultThresholds(), DaemonStarted: f.started,
-		Dolt: f, ExecTax: f, Heartbeat: f, Ticks: f, Landings: f, Escalations: f, Slots: f,
+		Dolt: f, ExecTax: f, Load: f, Heartbeat: f, Ticks: f, Landings: f, Escalations: f, Slots: f,
 		Backups: f, Mains: f, Promotions: f, Config: f, NeedsHuman: f, Seats: f, Dispatch: f,
 		LandingInfra: f,
 	}
@@ -306,6 +313,102 @@ func TestExecTax(t *testing.T) {
 	r := Compute(context.Background(), Inputs{Now: now, Thresholds: DefaultThresholds(), ExecTax: &fake{execTaxErr: errors.New("no temp dir")}})
 	if r.ExecTaxMS != nil {
 		t.Errorf("ExecTaxMS = %v with the probe failed, want nil", *r.ExecTaxMS)
+	}
+}
+
+// TestExecTaxUnderLoad is the overload reading gt-v50sn: on 2026-10-05 a 79 ms
+// exec probe under 54 load on an 8-core host read RED while the tree's grant
+// was intact, and a red that clears itself teaches everyone to ignore red. A
+// host far past its core count takes the reading down to degraded and names
+// the load; a lost grant still reads red at any load, because the probe is
+// then slow on an idle host too.
+func TestExecTaxUnderLoad(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		median  time.Duration
+		load    HostLoad
+		loadErr error
+		want    Verdict
+		value   string
+		detail  string
+	}{
+		"a saturated host is degraded, not red": {
+			median: 79 * time.Millisecond,
+			load:   HostLoad{Average: 54, Cores: 8},
+			want:   Degraded,
+			value:  "79ms/exec load 54 on 8 cores",
+			detail: "overloaded (load 54 on 8 cores)",
+		},
+		"a fractional load keeps its digits": {
+			median: 79 * time.Millisecond,
+			load:   HostLoad{Average: 6.75, Cores: 4},
+			want:   Degraded,
+			value:  "79ms/exec load 6.75 on 4 cores",
+			detail: "overloaded (load 6.75 on 4 cores)",
+		},
+		"normal load stays red": {
+			median: 79 * time.Millisecond,
+			load:   HostLoad{Average: 8, Cores: 8},
+			want:   Red,
+			value:  "79ms/exec",
+			detail: "every fresh executable in this tree pays 79ms",
+		},
+		"at the limit stays red": {
+			median: 79 * time.Millisecond,
+			load:   HostLoad{Average: 12, Cores: 8},
+			want:   Red,
+			value:  "79ms/exec",
+		},
+		"a clear probe is never rewritten": {
+			median: 4 * time.Millisecond,
+			load:   HostLoad{Average: 54, Cores: 8},
+			want:   Green,
+			value:  "4ms/exec",
+		},
+		"an unreadable host leaves the probe's verdict": {
+			median:  79 * time.Millisecond,
+			loadErr: errors.New("sysctl: not found"),
+			want:    Red,
+			value:   "79ms/exec",
+		},
+		"a host that reports no cores cannot corroborate": {
+			median: 79 * time.Millisecond,
+			load:   HostLoad{Average: 54},
+			want:   Red,
+			value:  "79ms/exec",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := healthy()
+			f.execTax, f.load, f.loadErr = tc.median, tc.load, tc.loadErr
+			r := Compute(context.Background(), inputs(f))
+			got := field(t, r, "exec-tax")
+			if got.Tag != Live || got.Verdict != tc.want || got.Value != tc.value {
+				t.Errorf("exec-tax = %+v, want LIVE %s %q", got, tc.want, tc.value)
+			}
+			if tc.detail != "" && got.Detail != tc.detail {
+				t.Errorf("exec-tax detail = %q, want %q", got.Detail, tc.detail)
+			}
+			// A downgraded verdict never hides the reading: the daemon's
+			// transition log and the dashboard both compare the number.
+			if r.ExecTaxMS == nil || *r.ExecTaxMS != float64(tc.median)/float64(time.Millisecond) {
+				t.Errorf("ExecTaxMS = %v, want the probe's %v", r.ExecTaxMS, tc.median)
+			}
+			if r.Verdict != tc.want {
+				t.Errorf("town verdict = %s, want the exec-tax field's %s (every other field is green)", r.Verdict, tc.want)
+			}
+		})
+	}
+
+	// The status line carries the probe's own reading and the load figure, so
+	// an operator reading only the one line sees both what the exec cost and
+	// why it was not called a tax.
+	f := healthy()
+	f.execTax, f.load = 79*time.Millisecond, HostLoad{Average: 54, Cores: 8}
+	r := Compute(context.Background(), inputs(f))
+	if !strings.Contains(Line(r, r.At, DefaultStaleAfter), "exec-tax=79ms/exec_load_54_on_8_cores") {
+		t.Errorf("Line = %q, want the probe reading and the load", Line(r, r.At, DefaultStaleAfter))
 	}
 }
 

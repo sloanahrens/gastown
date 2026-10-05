@@ -178,9 +178,13 @@ codesign -dv ~/.local/bin/gt 2>&1 | grep Identifier # Identifier=com.gastown.gt
 ```
 
 `gt status` prints every field; `gt status --line` prints only the one health
-line, so it carries `exec-tax` just when the reading is not green. A reading at
-130 ms or more means the grant is missing or bound to an old cdhash — re-add
-`~/.local/bin/gt` under Developer Tools.
+line, so it carries `exec-tax` just when the reading is not green. A RED
+reading at 130 ms or more means the grant is missing or bound to an old
+cdhash — re-add `~/.local/bin/gt` under Developer Tools. A YELLOW reading is
+the host, not the grant: the probe ran while the one-minute load average was
+far past the core count, so the exec paid for a run queue rather than a scan,
+and the reading clears with the load. `gt status` names it `overloaded (load
+54 on 8 cores)`.
 
 Signing runs unattended, so an install never waits at a prompt: the installer
 unlocks its own keychain and gives `codesign` thirty seconds with stdin at

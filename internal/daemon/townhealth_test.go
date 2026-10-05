@@ -158,13 +158,18 @@ func healthTown(t *testing.T, now time.Time) (*Daemon, *labelBeads) {
 }
 
 // stubHealthProbes answers the probes the unit tier cannot run: a Dolt ping, a
-// program exec, the backup root, and the slot pool. A test that needs a probe
-// of its own calls this first, so it replaces one source rather than all five.
+// program exec, the host load, the backup root, and the slot pool. A test that
+// needs a probe of its own calls this first, so it replaces one source rather
+// than all of them.
 func stubHealthProbes(s *healthSources, town string, now time.Time) {
 	s.ping = func() (time.Duration, error) { return 4 * time.Millisecond, nil }
 	// The real probe writes and execs programs; the unit tier runs no
 	// external tool, so a test that computes health answers it.
 	s.execTax = func(context.Context) (time.Duration, error) { return 9 * time.Millisecond, nil }
+	// The host load is the machine's, so a test pins it: otherwise a busy
+	// host would turn a red exec-tax reading degraded under the test
+	// (gt-v50sn).
+	s.load1 = func() (townhealth.HostLoad, error) { return townhealth.HostLoad{Average: 2, Cores: 8}, nil }
 	s.backupRoot = func() (string, error) { return filepath.Join(town, "no-backups"), nil }
 	s.slots = func() (slot.Report, error) {
 		return slot.Report{Slots: []slot.SlotState{{Index: 0, Held: true, Owner: &slot.Owner{Role: "refinery", AcquiredAt: now.Add(-40 * time.Minute)}}}}, nil
@@ -411,6 +416,8 @@ func TestWriteTownHealth_LogsTheExecTaxOnlyWhenItChanges(t *testing.T) {
 	d.townHealthSources = func(s *healthSources) {
 		s.ping = func() (time.Duration, error) { return 4 * time.Millisecond, nil }
 		s.execTax = func(context.Context) (time.Duration, error) { return median, nil }
+		// An idle host, so the 180 ms reading stays the red this test judges.
+		s.load1 = func() (townhealth.HostLoad, error) { return townhealth.HostLoad{Average: 2, Cores: 8}, nil }
 	}
 
 	// Every beat logs the health line itself; only the exec-tax line is
@@ -647,6 +654,7 @@ func TestWriteTownHealth_FailedReadsAreUnknown(t *testing.T) {
 	d.townHealthSources = func(s *healthSources) {
 		s.ping = func() (time.Duration, error) { return 0, errors.New("connection refused") }
 		s.execTax = func(context.Context) (time.Duration, error) { return 9 * time.Millisecond, nil }
+		s.load1 = func() (townhealth.HostLoad, error) { return townhealth.HostLoad{Average: 2, Cores: 8}, nil }
 		s.backupRoot = func() (string, error) { return "", errors.New("no home") }
 		s.slots = func() (slot.Report, error) { return slot.Report{}, nil }
 	}
