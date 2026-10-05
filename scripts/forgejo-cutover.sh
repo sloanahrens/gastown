@@ -7,30 +7,41 @@
 #   1. refuses when a landing is in flight (an open gt:ready-to-land bead in the
 #      rig) or when the probe is not green;
 #   2. imports every GitHub ref into the rig's Forgejo copy and compares the two
-#      ref lists, so the no-filter push mirror has nothing to prune;
+#      ref lists, so the cut-over copy already holds every GitHub ref the
+#      promotion fast-forwards from;
 #   3. runs forgejo-provision.sh for the repository (bots, access, protection);
-#   4. creates the push mirror (no branch filter) and prints the exact gh
-#      command that adds its write deploy key to GitHub — a mirror gets a NEW
-#      keypair and Forgejo has no API to update one, so the operator adds it;
+#   4. connects the rig to GitHub. By default it promotes: it mints an ed25519
+#      keypair (private half at promote-<rig>.key in the config dir, mode 600,
+#      never printed) and prints the exact gh command that adds the PUBLIC half
+#      to GitHub with write access, so a green main verdict fast-forwards GitHub
+#      main through internal/promote instead of a mirror that pushes every
+#      commit before the slow tiers (gt-fn9e6.37, gt-fn9e6.40). With --mirror it
+#      creates the push mirror (no branch filter) and prints the gh command for
+#      the deploy key Forgejo minted — a mirror gets a NEW keypair and Forgejo
+#      has no API to update one, so the operator adds it;
 #   5. repoints origin in the rig's bare repository, mayor/rig and every crew
 #      clone, and git_url in mayor/town.json;
-#   6. writes the rig's merge_queue.forgejo block into settings/config.json;
+#   6. writes the rig's merge_queue.forgejo block into settings/config.json:
+#      promote_target and promote_key_file by default, mirror_target with
+#      --mirror;
 #   7. restarts the daemon (gt daemon restart) only when no landing is in flight;
-#   8. prints the operator steps that remain (disable GitHub Actions on the
-#      GitHub repo, stop any self-hosted GitHub runner).
+#   8. prints the operator steps that remain (add the deploy key, disable GitHub
+#      Actions on the GitHub repo, stop any self-hosted GitHub runner).
 #
 # The probe leaves no record — forgejo-probe.sh deletes its branch on every path
 # and writes nothing outside its own temp dir — so a green probe is not a stored
 # fact this script can read: step 1 makes one by running the probe. The mirror's
-# deploy key (step 4) is a fact Forgejo returns, so that one is printed rather
-# than run.
+# deploy key (step 4, --mirror) is a fact Forgejo returns, so that one is printed
+# rather than run.
 #
 # Idempotent: every step reads before it writes. A ref import over converged
-# refs sends no update, a mirror already pointing at the target is left alone, a
-# remote already at the URL is reported and skipped, and a settings file whose
-# block already matches is not rewritten (so it gains no second backup).
+# refs sends no update, an existing promote key is reused rather than
+# regenerated, a mirror already pointing at the target is left alone, a remote
+# already at the URL is reported and skipped, and a settings file whose block
+# already matches is not rewritten (so it gains no second backup).
 # --dry-run reads and prints and writes nothing: the probe is printed rather
-# than run, because a probe pushes a branch to Forgejo.
+# than run, because a probe pushes a branch to Forgejo, and ssh-keygen is
+# printed rather than run.
 #
 # The script's own git work — the probe's push, the Forgejo ref listing and the
 # import push — rides the admin base URL instead of --forgejo-url: WEB_URL
@@ -53,14 +64,16 @@
 #   --town-root DIR       town root holding <rig> (default $GT_TOWN_ROOT, else
 #                         $GT_ROOT, else $HOME/gt)
 #   --repo OWNER/NAME     the rig's Forgejo repository (required)
-#   --github-url URL      the GitHub remote imported into and mirrored
+#   --github-url URL      the GitHub remote imported into and connected to
 #                         (default: the rig bare repository's origin URL)
 #   --forgejo-url URL     the Forgejo git URL written to the rig's remotes,
 #                         town.json and the rig block — the credential-helper
 #                         hostname form (default WEB_URL/OWNER/NAME.git). The
 #                         script's own git work never rides it (see below)
-#   --mirror-target URL   the push mirror's target (default: the ssh form of
-#                         --github-url)
+#   --mirror              create the read-only push mirror instead of the
+#                         default promote connection (gt-fn9e6.40)
+#   --mirror-target URL   the push mirror's target, with --mirror (default: the
+#                         ssh form of --github-url)
 #   --main-branch NAME    protected landing target (default: main)
 #   --gate-workflow NAME  gate workflow file basename (default: gate)
 #   --bot-prefix P        bot login prefix, one bot per role (default: bot-)
@@ -99,9 +112,9 @@ BOT_ROLES=(polecat landing registry)
 die() { echo "$PROG: $*" >&2; exit 1; }
 usage_die() { echo "$PROG: $*" >&2; echo "usage: $PROG --help" >&2; exit 2; }
 log() { echo "$PROG: $*" >&2; }
-# The operator's action items go to stdout: the gh command for the mirror's
-# deploy key and the reminders that no script can carry out. Everything else is
-# progress and belongs on stderr.
+# The operator's action items go to stdout: the gh command for the promote or
+# mirror deploy key and the reminders that no script can carry out. Everything
+# else is progress and belongs on stderr.
 note() { echo "$*"; }
 
 usage() { sed -n '/^# Usage:/,/^$/p' "$0" | sed 's/^# \{0,1\}//'; }
@@ -111,6 +124,9 @@ usage() { sed -n '/^# Usage:/,/^$/p' "$0" | sed 's/^# \{0,1\}//'; }
 RIG=""
 REPO=""
 TOWN_ROOT="${GT_TOWN_ROOT:-${GT_ROOT:-$HOME/gt}}"
+# The config dir the promote key lives in, the same dir the Forgejo token files
+# use (internal/forgejo/token.go): $XDG_CONFIG_HOME/gt, else ~/.config/gt.
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gt"
 API_URL="${FORGEJO_API_URL:-http://127.0.0.1:3000/api/v1}"
 WEB_URL="${FORGEJO_URL:-}"
 ADMIN_TOKEN_FILE="${FORGEJO_ADMIN_ENV:-$HOME/forgejo/.env}"
@@ -119,6 +135,9 @@ GATE_WORKFLOW="gate"
 BOT_PREFIX="bot-"
 GITHUB_URL=""
 FORGEJO_URL_OPT=""
+# Promote is the default connection to GitHub (gt-fn9e6.40); --mirror restores
+# the push mirror a rig that still uses it needs.
+MODE="promote"
 MIRROR_TARGET=""
 PROBE="$SELF_DIR/forgejo-probe.sh"
 PROVISION="$SELF_DIR/forgejo-provision.sh"
@@ -132,6 +151,7 @@ while [ $# -gt 0 ]; do
     --github-url) [ $# -ge 2 ] || usage_die "--github-url needs a value"; GITHUB_URL=$2; shift 2 ;;
     --forgejo-url) [ $# -ge 2 ] || usage_die "--forgejo-url needs a value"; FORGEJO_URL_OPT=$2; shift 2 ;;
     --mirror-target) [ $# -ge 2 ] || usage_die "--mirror-target needs a value"; MIRROR_TARGET=$2; shift 2 ;;
+    --mirror) MODE=mirror; shift ;;
     --main-branch) [ $# -ge 2 ] || usage_die "--main-branch needs a value"; MAIN_BRANCH=$2; shift 2 ;;
     --gate-workflow) [ $# -ge 2 ] || usage_die "--gate-workflow needs a value"; GATE_WORKFLOW=$2; shift 2 ;;
     --bot-prefix) [ $# -ge 2 ] || usage_die "--bot-prefix needs a value"; BOT_PREFIX=$2; shift 2 ;;
@@ -196,6 +216,9 @@ command -v curl >/dev/null 2>&1 || die "curl is not on PATH"
 command -v git >/dev/null 2>&1 || die "git is not on PATH"
 command -v bd >/dev/null 2>&1 || die "bd is not on PATH: it is how the script reads the rig's landing queue"
 command -v python3 >/dev/null 2>&1 || die "python3 is not on PATH: it is how the script edits the rig settings and town.json"
+if [ "$MODE" = promote ]; then
+  command -v ssh-keygen >/dev/null 2>&1 || die "ssh-keygen is not on PATH: it is how the promote key is minted"
+fi
 
 # --- the rig's files ---------------------------------------------------------
 
@@ -235,9 +258,14 @@ print(block.get(key, ""))
 PY
 }
 
-# The GitHub remote the rig is cut over from.
+# The GitHub remote the rig is cut over from. A block written by an earlier
+# cutover is the record of it: mirror_target from a mirror cutover, or
+# promote_target from a promotion one (gt-fn9e6.40).
 if [ -z "$GITHUB_URL" ]; then
   GITHUB_URL=$(block_value mirror_target)
+fi
+if [ -z "$GITHUB_URL" ]; then
+  GITHUB_URL=$(block_value promote_target)
 fi
 if [ -z "$GITHUB_URL" ]; then
   GITHUB_URL=$(git -C "$BARE" remote get-url origin 2>/dev/null || true)
@@ -272,6 +300,14 @@ slug() { # slug URL
 
 [ -n "$MIRROR_TARGET" ] || MIRROR_TARGET="$(ssh_form "$GITHUB_URL")"
 require_json_safe "--mirror-target" "$MIRROR_TARGET"
+
+# The promotion target is the ssh form too: internal/promote pushes with
+# `ssh -i <key>`, so the URL has to be one ssh reads (gt-fn9e6.40).
+PROMOTE_TARGET="$(ssh_form "$GITHUB_URL")"
+require_json_safe "--promote-target" "$PROMOTE_TARGET"
+PROMOTE_KEY="$CONFIG_DIR/promote-$RIG.key"
+PROMOTE_PUB="$PROMOTE_KEY.pub"
+require_json_safe "the promote key path" "$PROMOTE_KEY"
 
 GITHUB_SLUG="$(slug "$GITHUB_URL")"
 case "$GITHUB_SLUG" in
@@ -449,10 +485,12 @@ report_plan() {
 
 # import_refs is step 2. It fetches every GitHub branch and tag into a scratch
 # bare repository and pushes them to Forgejo, then requires every GitHub ref to
-# be present in Forgejo: the mirror has no branch filter and prunes, so a GitHub
-# ref Forgejo lacks is deleted on GitHub at the next mirror sync. Both Forgejo
-# reads and the push ride the admin base URL, so the import never depends on bot
-# access the not-yet-run provisioner would grant.
+# be present in Forgejo: a mirror has no branch filter and prunes, so a GitHub
+# ref Forgejo lacks is deleted on GitHub at the next sync (--mirror), and the
+# default promotion fast-forwards GitHub main from Forgejo's, so Forgejo must
+# already hold GitHub's commits. Both Forgejo reads and the push ride the admin
+# base URL, so the import never depends on bot access the not-yet-run
+# provisioner would grant.
 import_refs() {
   local scratch="$WORK/import.git" github_before forgejo_before github_after forgejo_after
   log "importing every GitHub ref through $ADMIN_GIT_URL"
@@ -477,7 +515,7 @@ import_refs() {
   log "imported every GitHub ref into $REPO ($(printf '%s\n' "$forgejo_after" | grep -c .) refs there)"
 }
 
-# --- the push mirror ---------------------------------------------------------
+# --- the push mirror (--mirror) ----------------------------------------------
 
 # mirror_public_key prints the public key Forgejo generated for the mirror, or
 # nothing. It re-reads the mirror list, which carries public_key.
@@ -541,6 +579,65 @@ create_mirror() {
   else
     log "no public key came back from the mirror API; read it under $WEB_URL/$REPO settings → mirrors and add it as a write deploy key on $GITHUB_SLUG"
   fi
+}
+
+# --- the promote key (default mode) ------------------------------------------
+
+# ensure_promote_key is step 4's default-mode half: a rig with no promote key
+# gets an ed25519 keypair, and a rig that has one keeps it (a second cutover
+# must not rotate a key GitHub already trusts). The private half is created mode
+# 600 in a directory created mode 700, and its contents are never printed; the
+# public half lands beside it as <key>.pub. A dry run prints the commands.
+ensure_promote_key() {
+  local dir
+  dir=$(dirname "$PROMOTE_KEY")
+  if [ -f "$PROMOTE_KEY" ]; then
+    log "reusing the promote key $PROMOTE_KEY"
+    if [ -f "$PROMOTE_PUB" ]; then
+      return 0
+    fi
+    # The public half is what the gh command adds. Re-derive it from the key
+    # that is already there rather than mint a keypair GitHub does not know.
+    if [ "$DRY_RUN" = 1 ]; then
+      log "+ ssh-keygen -y -f $PROMOTE_KEY > $PROMOTE_PUB (dry run: not run)"
+    else
+      chmod 600 "$PROMOTE_KEY"
+      local tmp="$PROMOTE_PUB.tmp.$$"
+      if ssh-keygen -y -f "$PROMOTE_KEY" > "$tmp"; then
+        chmod 644 "$tmp"
+        mv -f "$tmp" "$PROMOTE_PUB"
+        log "derived $PROMOTE_PUB from the existing promote key"
+      else
+        rm -f "$tmp"
+        die "could not derive the public half of $PROMOTE_KEY; remove it and re-run to mint a new keypair"
+      fi
+    fi
+    return 0
+  fi
+  if [ "$DRY_RUN" = 1 ]; then
+    log "+ mkdir -p $dir (mode 700, when absent)"
+    log "+ ssh-keygen -q -t ed25519 -N '' -C promote-$RIG -f $PROMOTE_KEY"
+    log "(dry run: no promote key was created)"
+    return 0
+  fi
+  if [ ! -d "$dir" ]; then
+    mkdir -p "$dir"
+    chmod 700 "$dir"
+  fi
+  ssh-keygen -q -t ed25519 -N "" -C "promote-$RIG" -f "$PROMOTE_KEY"
+  chmod 600 "$PROMOTE_KEY"
+  chmod 644 "$PROMOTE_PUB"
+  log "created the promote key $PROMOTE_KEY (public half $PROMOTE_PUB)"
+}
+
+# gh_promote_key_commands prints the operator's command for step 4: the public
+# half of the key this script minted is added to GitHub with write access, so
+# the promotion can push the target's main. Only the public key is named.
+gh_promote_key_commands() {
+  note ""
+  note "Add the promote key's PUBLIC half to GitHub as a write deploy key:"
+  note ""
+  note "  gh repo deploy-key add $PROMOTE_PUB --repo $GITHUB_SLUG --title promote-$RIG --allow-write"
 }
 
 # --- remotes and config ------------------------------------------------------
@@ -646,7 +743,11 @@ PY
 # --- run ---------------------------------------------------------------------
 
 resolve_admin_token
-log "cutting $RIG over to $FORGEJO_URL (GitHub $GITHUB_URL, mirror target $MIRROR_TARGET)"
+if [ "$MODE" = mirror ]; then
+  log "cutting $RIG over to $FORGEJO_URL (GitHub $GITHUB_URL, push mirror $MIRROR_TARGET)"
+else
+  log "cutting $RIG over to $FORGEJO_URL (GitHub $GITHUB_URL, promotion to $PROMOTE_TARGET)"
+fi
 
 # 1. No landing in flight, then a green probe.
 refuse_if_landing_in_flight
@@ -659,8 +760,14 @@ import_refs
 run bash "$PROVISION" --repo "$REPO" --main-branch "$MAIN_BRANCH" \
   --api-url "$API_URL" --admin-token-file "$ADMIN_TOKEN_FILE"
 
-# 4. The push mirror, and the deploy key GitHub needs by hand.
-create_mirror
+# 4. The connection to GitHub: promotion by default, the push mirror with
+# --mirror. Either way the deploy key GitHub needs is printed, not added.
+if [ "$MODE" = mirror ]; then
+  create_mirror
+else
+  ensure_promote_key
+  gh_promote_key_commands
+fi
 
 # 5. Repoint the rig's remotes and the town registry.
 repoint_remotes "$FORGEJO_URL"
@@ -685,7 +792,11 @@ for role in "${BOT_ROLES[@]}"; do
   first=0
   block="$block\"$role\":\"$BOT_PREFIX$role\""
 done
-block="$block},\"mirror_target\":\"$MIRROR_TARGET\"}"
+if [ "$MODE" = mirror ]; then
+  block="$block},\"mirror_target\":\"$MIRROR_TARGET\"}"
+else
+  block="$block},\"promote_target\":\"$PROMOTE_TARGET\",\"promote_key_file\":\"$PROMOTE_KEY\"}"
+fi
 if [ "$(settings_forgejo_matches "$block")" = same ]; then
   log "$SETTINGS: merge_queue.forgejo already matches"
 else
@@ -719,10 +830,14 @@ fi
 # 8. What no script can do for the operator.
 note ""
 note "Finish the cutover by hand:"
+if [ "$MODE" = mirror ]; then
+  note "  - confirm the mirror's first sync and the rig's next landing, then delete the rig's GitHub-only workflows if any remain"
+else
+  note "  - add the promote deploy key above, then confirm the rig's next green main verdict advances GitHub main"
+fi
 note "  - disable GitHub Actions on $GITHUB_SLUG:"
 note "      gh api --method PUT repos/$GITHUB_SLUG/actions/permissions -F enabled=false"
 note "  - stop (not remove) any self-hosted GitHub runner for $GITHUB_SLUG"
-note "  - confirm the mirror's first sync and the rig's next landing, then delete the rig's GitHub-only workflows if any remain"
 note ""
 
 log "cutover of $RIG complete"

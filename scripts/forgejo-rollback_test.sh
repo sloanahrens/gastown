@@ -8,8 +8,10 @@
 #
 # The cases cover the refusal (nothing to roll back and no --github-url), a
 # --dry-run that writes nothing, a real rollback that stops the mirror first,
-# removes the block, repoints everything and restarts the daemon, a queued
-# landing that suppresses the restart, and a second run over converged state.
+# removes the block, repoints everything and restarts the daemon, a promote
+# rollback that removes the promote fields and the key the cutover minted, a
+# queued landing that suppresses the restart, and a second run over converged
+# state.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -28,6 +30,7 @@ TOWN="$TMP/town"
 RIG_ROOT="$TOWN/acme"
 STATE="$TMP/state"
 CFG="$TMP/config"
+PROMOTE_KEY_FILE="$CFG/gt/promote-acme.key"
 
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); if [ $# -gt 1 ]; then printf '%s\n' "$2" | sed 's/^/    | /'; fi; }
@@ -160,6 +163,7 @@ fresh() {
   rm -rf "$STATE"
   mkdir -p "$STATE" "$RIG_ROOT/settings"
   rm -f "$RIG_ROOT/settings/"*.bak-* "$TOWN/mayor/"*.bak-* 2>/dev/null
+  rm -f "$PROMOTE_KEY_FILE" "$PROMOTE_KEY_FILE.pub" 2>/dev/null
   : > "$STATE/calls.log"; : > "$STATE/git.log"; : > "$STATE/bd.log"
   : > "$STATE/gt.log"; : > "$STATE/order.log"; : > "$STATE/set-urls"
   printf '0\n' > "$STATE/landing-count"
@@ -242,6 +246,57 @@ JSON
 JSON
 }
 
+# cut_over_promoting rebuilds a rig cut over by the default promote mode: a
+# block with promote_target and promote_key_file and no mirror_target, its
+# remotes on Forgejo, and the keypair the cutover minted at the default path.
+cut_over_promoting() {
+  cat > "$RIG_ROOT/settings/config.json" <<JSON
+{
+  "type": "rig-settings",
+  "version": 1,
+  "merge_queue": {
+    "gate": "make gate",
+    "forgejo": {
+      "remote_url": "$FORGEJO_URL",
+      "gate_workflow": "gate",
+      "bots": {
+        "polecat": "bot-polecat",
+        "landing": "bot-landing",
+        "registry": "bot-registry"
+      },
+      "promote_target": "$GITHUB_URL",
+      "promote_key_file": "$PROMOTE_KEY_FILE"
+    }
+  }
+}
+JSON
+  local key
+  for d in "$RIG_ROOT/.repo.git" "$RIG_ROOT/mayor/rig" "$RIG_ROOT/crew/sloan"; do
+    key=$(printf '%s' "$d" | tr '/:@.' '_')
+    printf '%s\n' "$FORGEJO_URL" > "$STATE/remote_$key"
+  done
+  cat > "$TOWN/mayor/town.json" <<JSON
+{
+  "type": "town",
+  "version": 2,
+  "registry": {
+    "version": 1,
+    "rigs": {
+      "acme": {
+        "added_at": "2026-10-01T00:00:00Z",
+        "dolt_database": "acme",
+        "git_url": "$FORGEJO_URL"
+      }
+    }
+  }
+}
+JSON
+  mkdir -p "$CFG/gt"
+  printf '%s\n' 'STUBPRIVATEKEYMATERIAL' > "$PROMOTE_KEY_FILE"
+  printf '%s\n' 'ssh-ed25519 AAAASTUBPROMOTEKEY promote-acme' > "$PROMOTE_KEY_FILE.pub"
+  chmod 600 "$PROMOTE_KEY_FILE"
+}
+
 run_rollback() {
   local out rc
   out=$(env -u FORGEJO_ADMIN_TOKEN -u FORGEJO_API_URL -u FORGEJO_URL \
@@ -316,6 +371,27 @@ check "no block is reported" contains "does not look cut over" "$out"
 check "the remotes are reported already right" contains "origin is already" "$out"
 check "no remote is set again" [ "$(grep -c 'set-url' "$STATE/set-urls")" = "$starts_before" ]
 check "no second backup is written" [ "$(backups)" = "$backups_before" ]
+
+echo "=== a rollback removes the promote fields and key ==="
+fresh
+cut_over_promoting
+out=$(run_rollback); rc=$?
+if [ "$rc" = 0 ]; then pass "the promote rollback exits 0"; else fail "the promote rollback exits 0 (rc=$rc)" "$out"; fi
+check "the block is gone" lacks "forgejo" "$(cat "$RIG_ROOT/settings/config.json")"
+check "the promote key is removed" [ ! -e "$PROMOTE_KEY_FILE" ]
+check "the promote public key is removed" [ ! -e "$PROMOTE_KEY_FILE.pub" ]
+check "the promote deploy-key removal is printed" contains "the key titled promote-acme" "$out"
+check "no mirror API call is made" [ ! -s "$STATE/calls.log" ]
+check "the bare repo is repointed back" contains "$RIG_ROOT/.repo.git $GITHUB_URL" "$(cat "$STATE/set-urls")"
+check "town.json git_url is repointed back" contains "\"git_url\": \"$GITHUB_URL\"" "$(cat "$TOWN/mayor/town.json")"
+check "the daemon was restarted" contains "daemon restart" "$(cat "$STATE/gt.log")"
+
+starts_before=$(grep -c 'set-url' "$STATE/set-urls")
+out=$(run_rollback); rc=$?
+if [ "$rc" = 0 ]; then pass "the second promote rollback exits 0"; else fail "the second promote rollback exits 0 (rc=$rc)" "$out"; fi
+check "no promote key removal is printed again" lacks "the key titled promote-acme" "$out"
+check "the second run reports nothing to roll back" contains "does not look cut over" "$out"
+check "no remote is set again" [ "$(grep -c 'set-url' "$STATE/set-urls")" = "$starts_before" ]
 
 echo "=== a queued landing suppresses the daemon restart ==="
 fresh

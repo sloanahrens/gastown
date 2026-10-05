@@ -104,9 +104,10 @@ file.
 
 ## After the bots exist
 
-The gate workflow lives in the rig repo, and the push mirror is the cutover's
-work (below). The protection rule names the workflow's context, so a renamed
-job orphans the requirement: re-running the provisioner with the new context is
+The gate workflow lives in the rig repo, and connecting the rig to GitHub — a
+promotion by default, a push mirror with `--mirror` — is the cutover's work
+(below). The protection rule names the workflow's context, so a renamed job
+orphans the requirement: re-running the provisioner with the new context is
 what reports the mismatch.
 
 Verify in the web UI under Repository → Settings → Branches, and under Site
@@ -128,8 +129,9 @@ change the procedure:
 Every rig's precondition is the same: its gate workflow is on GitHub `main`
 (landed through the old path first, so Forgejo never falls back to
 `.github/workflows`), the probe is green, every GitHub ref is imported, the
-operator has approved the mirror's deploy key, and the operator has decided
-what to do with GitHub Actions. The runner image in `~/forgejo/runner-image` is
+operator has approved the cutover's deploy key (the promote key by default, the
+mirror's with `--mirror`), and the operator has decided what to do with GitHub
+Actions. The runner image in `~/forgejo/runner-image` is
 part of it: Go 1.27.1, Node 20, jq, shellcheck, lsof, procps, dolt, the Docker
 CLI, an unprivileged `ci` user, job containers started with `--init`, and Go
 and npm cache volumes.
@@ -198,23 +200,35 @@ the script's own git work rides the admin base instead, because it runs before
 the bots have access, so leaving the flag off writes an admin URL the bots
 cannot use.
 
-The mirror carries no branch filter on purpose: Forgejo then pushes every ref
-and prunes every GitHub ref it does not hold, which is why the import step runs
-first and why skipping it loses GitHub-only branches. It syncs on commit and
-every 10 minutes, and GitHub keeps a ref Forgejo has deleted until that next
-sync.
+By default the cutover promotes: it mints an ed25519 keypair under the config
+dir (`promote-<rig>.key`, mode 600, reused on a second run and never printed)
+and writes `promote_target` and `promote_key_file` into the rig block, so a
+green main verdict fast-forwards GitHub `main` through `internal/promote`
+instead of a mirror that pushes every commit before the slow tiers. With
+`--mirror` it creates the push mirror instead, which carries no branch filter on
+purpose: Forgejo then pushes every ref and prunes every GitHub ref it does not
+hold, which is why the import step runs first and why skipping it loses
+GitHub-only branches. It syncs on commit and every 10 minutes, and GitHub keeps
+a ref Forgejo has deleted until that next sync.
 
 Four things stay with the operator, and the script prints them at the end:
 
-- the `gh repo deploy-key add` command for the mirror's deploy key. Forgejo
-  mints a new keypair per mirror and offers no API to replace one, so the key
-  goes on GitHub by hand; until it is there the mirror syncs nothing;
+- the `gh repo deploy-key add` command for the cutover's deploy key — the
+  promote key's public half by default, the mirror's key with `--mirror`. The
+  script mints the promote keypair itself; Forgejo mints a new keypair per
+  mirror and offers no API to replace one. Either key goes on GitHub by hand,
+  and until it is there a promotion cannot push and the mirror syncs nothing;
 - GitHub Actions disabled on the GitHub repo — the script prints the exact
   command, `gh api --method PUT repos/OWNER/NAME/actions/permissions -F
   enabled=false`. It must be `-F` (the value is typed) and not `-f` (which sends
   a string), or GitHub answers 422;
 - any self-hosted GitHub runner for it stopped, not removed;
 - the gate workflow unchanged in the Forgejo copy.
+
+Then prove the connection: with the default, the rig's next green main verdict
+advances GitHub `main`; with `--mirror`, the mirror's first sync and the rig's
+next landing, after which the rig's GitHub-only workflows, if any remain, can
+go.
 
 The daemon reads a rig's Forgejo block only at start, so a cutover restarts it
 (`gt daemon restart`) — but only when no landing is in flight. Restarting over
@@ -235,11 +249,13 @@ Rollback is an operator move, never an automatic one. Run it when Forgejo or
 the runner has been down 30 minutes with landings queued, after two
 consecutive infrastructure failures, or when a mirror error will not clear.
 
-`bash scripts/forgejo-rollback.sh <rig>` stops the mirror, removes the rig's
-Forgejo block and repoints the rig at GitHub; `--help` lists the flags. The
-order is load-bearing: the mirror stops and the `gh repo deploy-key delete`
-command is printed before anything is repointed, because a mirror still running
-pushes every ref to GitHub and would overwrite whatever lands there.
+`bash scripts/forgejo-rollback.sh <rig>` removes the rig's Forgejo block
+(carrying any `promote_target` and `promote_key_file` with it), deletes the
+promote keypair the cutover minted, stops a push mirror when the block names
+one, and repoints the rig at GitHub; `--help` lists the flags. The order is
+load-bearing: a running mirror stops and the `gh repo deploy-key delete` command
+is printed before anything is repointed, because a mirror still running pushes
+every ref to GitHub and would overwrite whatever lands there.
 
 A rollback runs while landings are queued, so it obeys the daemon-restart rule
 above by printing the command instead of forcing it. A landing through the old

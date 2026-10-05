@@ -8,10 +8,11 @@
 #
 # The cases cover the three refusals (a landing in flight, a probe that is not
 # green, an unreadable queue), a full --dry-run that writes nothing and leaves
-# no backup behind, a real cutover that writes the block, backs up both config
-# files, repoints every remote and restarts the daemon, a hostname-form
-# --forgejo-url whose own git work still rides the admin base, and a landing
-# queued at the restart.
+# no backup behind, a default cutover that mints the promote key (mode 600,
+# never printed) and writes promote_target and promote_key_file instead of a
+# push mirror, a second cutover that reuses the key, --mirror reproducing the
+# push mirror, a hostname-form --forgejo-url whose own git work still rides the
+# admin base, and a landing queued at the restart.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -224,6 +225,32 @@ printf '%s\n' "$*" >> "$STUB_STATE/gt.log"
 STUB
 chmod +x "$TMP/bin/gt"
 
+# The stub ssh-keygen writes a fixed keypair at the -f path, mode 644 so a test
+# can prove the script sets the private half to 600 itself, and logs its argv.
+# It never invents key material beyond a recognizable marker, so a test can
+# assert the private key does not reach stdout.
+cat >"$TMP/bin/ssh-keygen" <<'STUB'
+#!/usr/bin/env bash
+set -uo pipefail
+printf '%s\n' "$*" >> "$STUB_STATE/ssh-keygen.log"
+args=("$@")
+file=""
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case "${args[i]}" in
+    -f) file=${args[i + 1]:-} ;;
+  esac
+done
+if [ "${args[0]:-}" = "-y" ]; then
+  cat "$STUB_STATE/promote-key-private" 2>/dev/null || exit 1
+  exit 0
+fi
+[ -n "$file" ] || exit 1
+printf '%s\n' '-----BEGIN OPENSSH PRIVATE KEY-----' 'STUBPRIVATEKEYMATERIAL' '-----END OPENSSH PRIVATE KEY-----' > "$file"
+printf '%s\n' 'ssh-ed25519 AAAASTUBPROMOTEKEY promote-acme' > "$file.pub"
+chmod 644 "$file" "$file.pub"
+STUB
+chmod +x "$TMP/bin/ssh-keygen"
+
 refs_key() { printf '%s' "$1" | tr '/:@.' '_'; }
 
 # fresh resets the stub state and rebuilds the rig's files, so each case starts
@@ -231,12 +258,14 @@ refs_key() { printf '%s' "$1" | tr '/:@.' '_'; }
 fresh() {
   unset STUB_MIRROR_ABSENT STUB_BD_FAIL STUB_FORGEJO_EXTRA_URL
   rm -rf "$STATE" "$RIG_ROOT/settings/config.json" "$RIG_ROOT/settings/"*.bak-* 2>/dev/null
+  rm -f "$CFG/gt/promote-acme.key" "$CFG/gt/promote-acme.key.pub" 2>/dev/null
   mkdir -p "$STATE" "$RIG_ROOT/settings"
   : > "$STATE/calls.log"
   : > "$STATE/git.log"
   : > "$STATE/bd.log"
   : > "$STATE/gt.log"
   : > "$STATE/probe.log"
+  : > "$STATE/ssh-keygen.log"
   printf '0\n' > "$STATE/landing-plan"
   : > "$STATE/bd-calls"
   printf '0\n' > "$STATE/probe-rc"
@@ -303,6 +332,11 @@ count_calls() { # count_calls METHOD
   printf '%s' "$n"
 }
 backups() { find "$RIG_ROOT" "$TOWN/mayor" -name '*.bak-*' 2>/dev/null | sort; }
+# mode_of FILE prints a file's permission bits, GNU stat first then the BSD one,
+# so the test runs on Linux and macOS.
+mode_of() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null; }
+sk_lines() { wc -l < "$STATE/ssh-keygen.log" 2>/dev/null | tr -d ' ' || printf 0; }
+PROMOTE_KEY_FILE="$CFG/gt/promote-acme.key"
 
 echo "=== a landing in flight refuses the cutover ==="
 fresh
@@ -340,7 +374,9 @@ out=$(run_cutover --dry-run); rc=$?
 if [ "$rc" = 0 ]; then pass "a dry run exits 0"; else fail "a dry run exits 0 (rc=$rc)" "$out"; fi
 check "it prints the probe command" contains "probe.sh acme --repo acme/rig" "$out"
 check "it prints the ref import" contains "ls-remote" "$out"
-check "it prints the push mirror it would create" contains "dry run: not sent" "$out"
+check "it prints the key it would mint" contains "ssh-keygen" "$out"
+check "it says it would mint, not that it did" contains "dry run: no promote key was created" "$out"
+check "it prints the gh deploy-key command" contains "gh repo deploy-key add" "$out"
 check "it prints the daemon restart" contains "daemon restart" "$out"
 check "it names the github Actions reminder" contains "actions/permissions -F enabled=false" "$out"
 check "it does not print the string form that 422s" lacks "actions/permissions -f enabled=false" "$out"
@@ -352,6 +388,8 @@ check "no config backup is left" [ -z "$(backups)" ]
 check "no town.json backup exists" [ -z "$(find "$TOWN/mayor" -name 'town.json.bak-*')" ]
 check "no settings backup exists" [ -z "$(find "$RIG_ROOT/settings" -name 'config.json.bak-*')" ]
 check "the ref import changed nothing" [ "$(cat "$STATE/refs_$(refs_key "$FORGEJO_URL")")" = "$before_refs" ]
+check "no promote key is created" [ ! -e "$PROMOTE_KEY_FILE" ]
+check "ssh-keygen was not run" [ "$(sk_lines)" = 0 ]
 check "no remote was set" lacks "set-url" "$(cat "$STATE/git.log")"
 check "no write call was sent" [ "$(count_calls POST)" = 0 ]
 check "the daemon was not restarted" [ ! -s "$STATE/gt.log" ]
@@ -364,13 +402,18 @@ out=$(run_cutover); rc=$?
 if [ "$rc" = 0 ]; then pass "the cutover exits 0"; else fail "the cutover exits 0 (rc=$rc)" "$out"; fi
 check "the probe ran for the rig" contains "acme --repo acme/rig" "$(cat "$STATE/probe.log")"
 check "every GitHub ref was imported" contains "imported every GitHub ref" "$out"
-check "the push mirror was created without a branch filter" contains '"branch_filter":""' "$(cat "$STATE/mirror-create-body" 2>/dev/null)"
-check "the mirror enables ssh" contains '"use_ssh":true' "$(cat "$STATE/mirror-create-body" 2>/dev/null)"
-check "the gh deploy-key command is printed" contains "gh repo deploy-key add" "$out"
+check "a default run creates no push mirror" [ "$(count_calls POST)" = 0 ]
+check "no mirror body was sent" [ ! -f "$STATE/mirror-create-body" ]
+check "the promote key was minted at the default path" contains "$PROMOTE_KEY_FILE" "$(cat "$STATE/ssh-keygen.log")"
+check "the key is ed25519" contains "-t ed25519" "$(cat "$STATE/ssh-keygen.log")"
+check "the private key is mode 600" [ "$(mode_of "$PROMOTE_KEY_FILE")" = 600 ]
+check "the gh command names the public key" contains "gh repo deploy-key add $PROMOTE_KEY_FILE.pub" "$out"
+check "the gh command grants write" contains "--allow-write" "$out"
+check "the gh command titles the key for the rig" contains "--title promote-acme" "$out"
+check "the private key never reaches stdout" lacks "STUBPRIVATEKEYMATERIAL" "$out"
 check "the import listed the admin base" contains "ls-remote --heads --tags --refs $ADMIN_GIT_URL" "$(cat "$STATE/git.log")"
 check "the import pushed to the admin base" contains "$ADMIN_GIT_URL" "$(cat "$STATE/pushes")"
 check "the probe pushed through the admin base" contains "--git-url $ADMIN_GIT_URL" "$(cat "$STATE/probe.log")"
-check "the deploy key is the mirror's" contains "AAAAMIRRORKEY" "$out"
 check "the bare repo is repointed" contains "$RIG_ROOT/.repo.git $FORGEJO_URL" "$(cat "$STATE/set-urls")"
 check "the mayor clone is repointed" contains "$RIG_ROOT/mayor/rig $FORGEJO_URL" "$(cat "$STATE/set-urls")"
 check "the crew clone is repointed" contains "$RIG_ROOT/crew/sloan $FORGEJO_URL" "$(cat "$STATE/set-urls")"
@@ -378,7 +421,9 @@ check "a non-repo crew dir is skipped" contains "skip $RIG_ROOT/crew/notes" "$ou
 check "settings/config.json names the Forgejo remote" contains "$FORGEJO_URL" "$(cat "$RIG_ROOT/settings/config.json")"
 check "settings/config.json names the gate workflow" contains '"gate_workflow": "gate"' "$(cat "$RIG_ROOT/settings/config.json")"
 check "settings/config.json names the three bots" contains '"landing": "bot-landing"' "$(cat "$RIG_ROOT/settings/config.json")"
-check "settings/config.json names the mirror target" contains "\"mirror_target\": \"$GITHUB_URL\"" "$(cat "$RIG_ROOT/settings/config.json")"
+check "settings/config.json names the promote target" contains "\"promote_target\": \"$GITHUB_URL\"" "$(cat "$RIG_ROOT/settings/config.json")"
+check "settings/config.json names the promote key" contains "\"promote_key_file\": \"$PROMOTE_KEY_FILE\"" "$(cat "$RIG_ROOT/settings/config.json")"
+check "settings/config.json names no mirror target" lacks "mirror_target" "$(cat "$RIG_ROOT/settings/config.json")"
 check "town.json git_url is repointed" contains "\"git_url\": \"$FORGEJO_URL\"" "$(cat "$TOWN/mayor/town.json")"
 check "the settings file is backed up" contains "config.json.bak-" "$(backups)"
 check "town.json is backed up" contains "town.json.bak-" "$(backups)"
@@ -392,12 +437,27 @@ backups_before=$(backups)
 town_before=$(cat "$TOWN/mayor/town.json")
 out=$(run_cutover); rc=$?
 if [ "$rc" = 0 ]; then pass "the second cutover exits 0"; else fail "the second cutover exits 0 (rc=$rc)" "$out"; fi
-check "the mirror is left alone" contains "already exists" "$out"
+check "the promote key is reused" contains "reusing the promote key" "$out"
+check "the key is not regenerated" [ "$(sk_lines)" = 1 ]
 check "the remotes are reported already right" contains "origin is already" "$out"
 check "no remote is set again" [ "$(cat "$STATE/set-urls" | grep -c 'set-url')" = "$starts_before" ]
 check "town.json is unchanged" [ "$(cat "$TOWN/mayor/town.json")" = "$town_before" ]
 check "no second backup is written" [ "$(backups)" = "$backups_before" ]
 check "the block is reported already matching" contains "merge_queue.forgejo already matches" "$out"
+
+echo "=== --mirror reproduces the push mirror ==="
+fresh
+printf 'refs/heads/main abc123\n' > "$STATE/refs_$(refs_key "$FORGEJO_URL")"
+STUB_MIRROR_ABSENT=1
+out=$(run_cutover --mirror); rc=$?
+if [ "$rc" = 0 ]; then pass "the mirror cutover exits 0"; else fail "the mirror cutover exits 0 (rc=$rc)" "$out"; fi
+check "the push mirror was created without a branch filter" contains '"branch_filter":""' "$(cat "$STATE/mirror-create-body" 2>/dev/null)"
+check "the mirror enables ssh" contains '"use_ssh":true' "$(cat "$STATE/mirror-create-body" 2>/dev/null)"
+check "the mirror's deploy key is printed" contains "AAAAMIRRORKEY" "$out"
+check "the block names the mirror target" contains "\"mirror_target\": \"$GITHUB_URL\"" "$(cat "$RIG_ROOT/settings/config.json")"
+check "the block names no promote fields" lacks "promote_" "$(cat "$RIG_ROOT/settings/config.json")"
+check "no promote key is minted" [ "$(sk_lines)" = 0 ]
+check "no promote key file is left" [ ! -e "$PROMOTE_KEY_FILE" ]
 
 echo "=== a hostname-form --forgejo-url does the script's own git work as admin ==="
 # The operator passes the credential-helper hostname form, which every rig
@@ -420,7 +480,7 @@ check "the hostname form is written to the mayor clone" contains "$RIG_ROOT/mayo
 check "the hostname form is written to the crew clone" contains "$RIG_ROOT/crew/sloan $HOSTNAME_GIT_URL" "$(cat "$STATE/set-urls")"
 check "the hostname form is written to town.json" contains "\"git_url\": \"$HOSTNAME_GIT_URL\"" "$(cat "$TOWN/mayor/town.json")"
 check "the hostname form is written to the rig block" contains "\"remote_url\": \"$HOSTNAME_GIT_URL\"" "$(cat "$RIG_ROOT/settings/config.json")"
-check "the hostname form is written to the mirror target" contains "\"mirror_target\": \"$GITHUB_URL\"" "$(cat "$RIG_ROOT/settings/config.json")"
+check "the promote target is the ssh form of the GitHub URL" contains "\"promote_target\": \"$GITHUB_URL\"" "$(cat "$RIG_ROOT/settings/config.json")"
 
 echo "=== a landing queued at the restart is left to the operator ==="
 fresh

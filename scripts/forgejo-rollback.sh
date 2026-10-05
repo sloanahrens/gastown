@@ -7,21 +7,24 @@
 #
 # In order it:
 #
-#   1. stops the rig's push mirror and prints the gh command that removes its
-#      deploy key, BEFORE anything is repointed — a mirror left running pushes
-#      every ref to GitHub and would overwrite it;
-#   2. removes the rig's merge_queue.forgejo block from settings/config.json;
+#   1. stops the rig's push mirror (when it has one) and prints the gh command
+#      that removes its deploy key, BEFORE anything is repointed — a mirror left
+#      running pushes every ref to GitHub and would overwrite it — and prints the
+#      gh command that removes a promote deploy key;
+#   2. removes the rig's merge_queue.forgejo block from settings/config.json, so
+#      any promote_target and promote_key_file go with it, and deletes the
+#      promote keypair the cutover minted;
 #   3. repoints origin in the rig's bare repository, mayor/rig and every crew
 #      clone, and git_url in mayor/town.json, back to the GitHub URL;
 #   4. restarts the daemon (gt daemon restart) only when no landing is in
 #      flight — a rollback runs while landings are queued, so the restart is
 #      reported and left to the operator instead of forced over one.
 #
-# Idempotent: a run over a rig with no mirror, no block and remotes already at
-# the GitHub URL reports each of those and changes nothing. --dry-run reads and
-# prints and writes nothing. Every edit of a config file copies it to a dated
-# .bak- file first. The admin token travels only in a mode-600 curl config
-# file, never in argv or on stdout.
+# Idempotent: a run over a rig with no mirror, no block, no promote key and
+# remotes already at the GitHub URL reports each of those and changes nothing.
+# --dry-run reads and prints and writes nothing. Every edit of a config file
+# copies it to a dated .bak- file first. The admin token travels only in a
+# mode-600 curl config file, never in argv or on stdout.
 #
 # Live runbook: docs/forgejo-runbook.md. Design of record:
 # docs/design/forgejo-primary-landing.md (section 3); the no-filter mirror and
@@ -43,6 +46,10 @@
 #                         else gt)
 #   --dry-run             read and print, never write
 #   -h, --help            this text
+#
+# A promote keypair the cutover minted — promote-<rig>.key and its .pub, under
+# $XDG_CONFIG_HOME/gt else ~/.config/gt — is deleted with the block, so a
+# rollback leaves no authorised key behind.
 
 set -euo pipefail
 
@@ -55,8 +62,8 @@ READY_LABEL="gt:ready-to-land"
 die() { echo "$PROG: $*" >&2; exit 1; }
 usage_die() { echo "$PROG: $*" >&2; echo "usage: $PROG --help" >&2; exit 2; }
 log() { echo "$PROG: $*" >&2; }
-# The operator's action items go to stdout: the gh command for the mirror's
-# deploy key. Progress goes to stderr.
+# The operator's action items go to stdout: the gh command that removes the
+# mirror's or the promote deploy key. Progress goes to stderr.
 note() { echo "$*"; }
 
 usage() { sed -n '/^# Usage:/,/^$/p' "$0" | sed 's/^# \{0,1\}//'; }
@@ -65,6 +72,9 @@ usage() { sed -n '/^# Usage:/,/^$/p' "$0" | sed 's/^# \{0,1\}//'; }
 
 RIG=""
 TOWN_ROOT="${GT_TOWN_ROOT:-${GT_ROOT:-$HOME/gt}}"
+# The config dir the cutover mints the promote key in (gt-fn9e6.40), the same
+# dir the Forgejo token files use: $XDG_CONFIG_HOME/gt, else ~/.config/gt.
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gt"
 API_URL="${FORGEJO_API_URL:-http://127.0.0.1:3000/api/v1}"
 WEB_URL="${FORGEJO_URL:-}"
 ADMIN_TOKEN_FILE="${FORGEJO_ADMIN_ENV:-$HOME/forgejo/.env}"
@@ -132,9 +142,14 @@ slug() { # slug URL
   printf '%s' "${rest%.git}"
 }
 
-# block_urls prints the block's remote_url and mirror_target, tab-separated,
-# empty fields when the rig has no block.
-block_urls() {
+# block_fields prints the block's remote_url, mirror_target, promote_target and
+# promote_key_file, separated by the ASCII unit separator, empty fields when the
+# rig has no block. A promote cutover writes the promote pair and no
+# mirror_target (gt-fn9e6.40); a mirror cutover writes mirror_target and neither
+# promote field. The separator is a unit separator and not a tab because read
+# treats a run of tabs as one delimiter and drops an empty field, which is
+# exactly what a promote block has where mirror_target would be.
+block_fields() {
   python3 - "$SETTINGS" <<'PY'
 import json, os, sys
 path = sys.argv[1]
@@ -142,23 +157,32 @@ block = {}
 if os.path.exists(path):
     with open(path, encoding="utf-8") as fh:
         block = json.load(fh).get("merge_queue", {}).get("forgejo") or {}
-print("%s\t%s" % (block.get("remote_url", ""), block.get("mirror_target", "")))
+print("\x1f".join((
+    block.get("remote_url", ""),
+    block.get("mirror_target", ""),
+    block.get("promote_target", ""),
+    block.get("promote_key_file", ""),
+)))
 PY
 }
 
-IFS=$'\t' read -r BLOCK_REMOTE_URL BLOCK_MIRROR_TARGET <<<"$(block_urls)"
+IFS=$'\x1f' read -r BLOCK_REMOTE_URL BLOCK_MIRROR_TARGET BLOCK_PROMOTE_TARGET BLOCK_PROMOTE_KEY \
+  <<<"$(block_fields)"
 if [ -z "$BLOCK_REMOTE_URL" ]; then
   log "$SETTINGS has no merge_queue.forgejo block: $RIG does not look cut over"
 else
   log "$RIG is cut over to $BLOCK_REMOTE_URL"
 fi
 
-# Where the remotes go back to: --github-url, else the block's mirror_target,
-# else the rig's own origin. A rig already rolled back has no block, and its
-# origin is the GitHub URL the run would set anyway, so a second rollback is a
-# no-op that reports the state instead of refusing.
+# Where the remotes go back to: --github-url, else the block's mirror_target or
+# promote_target, else the rig's own origin. A rig already rolled back has no
+# block, and its origin is the GitHub URL the run would set anyway, so a second
+# rollback is a no-op that reports the state instead of refusing.
 if [ -z "$GITHUB_URL" ]; then
   GITHUB_URL=$BLOCK_MIRROR_TARGET
+fi
+if [ -z "$GITHUB_URL" ]; then
+  GITHUB_URL=$BLOCK_PROMOTE_TARGET
 fi
 if [ -z "$GITHUB_URL" ]; then
   GITHUB_URL=$(git -C "$BARE" remote get-url origin 2>/dev/null || true)
@@ -175,6 +199,11 @@ case "$GITHUB_SLUG" in
 esac
 
 MIRROR_TARGET="$BLOCK_MIRROR_TARGET"
+# The default path the cutover mints the promote key at. It is derived from the
+# rig, never read from the block, so a block naming some other file cannot make
+# this script delete an unrelated path (gt-fn9e6.40).
+PROMOTE_KEY="$CONFIG_DIR/promote-$RIG.key"
+PROMOTE_PUB="$PROMOTE_KEY.pub"
 OWNER=""
 NAME=""
 if [ -n "$BLOCK_REMOTE_URL" ]; then
@@ -325,8 +354,20 @@ print_deploy_key_removal() {
   note "  gh repo deploy-key delete <key-id> --repo $GITHUB_SLUG   # the key titled forgejo-mirror-$RIG"
 }
 
-# remove_settings_forgejo is step 2: drop the block, so the daemon (restarted
-# below) resolves the rig to origin again.
+# print_promote_key_removal is step 1 for a promoting rig: after the rollback
+# the rig lands on GitHub again, so the promotion's deploy key should not stay
+# authorised. It is de-authorised by hand, as it was added.
+print_promote_key_removal() {
+  note ""
+  note "Remove the promote deploy key from GitHub (the rig lands on GitHub again after the rollback, so the promotion key should not stay authorised):"
+  note ""
+  note "  gh repo deploy-key list --repo $GITHUB_SLUG"
+  note "  gh repo deploy-key delete <key-id> --repo $GITHUB_SLUG   # the key titled promote-$RIG"
+}
+
+# remove_settings_forgejo is step 2: drop the block, so the promote_target and
+# promote_key_file fields go with it and the daemon (restarted below) resolves
+# the rig to origin again.
 remove_settings_forgejo() {
   python3 - "$SETTINGS" <<'PY'
 import json, os, sys
@@ -338,6 +379,31 @@ with open(path, "w", encoding="utf-8") as fh:
     json.dump(data, fh, indent=2)
     fh.write("\n")
 PY
+}
+
+# remove_promote_key deletes the promote keypair the cutover minted at the
+# default path: the public half and the private half. The path is derived from
+# the rig, so a block naming a different promote_key_file is reported for the
+# operator to delete rather than handed to rm. rm -f keeps a second rollback a
+# no-op.
+remove_promote_key() {
+  local f
+  if [ -n "$BLOCK_PROMOTE_KEY" ] && [ "$BLOCK_PROMOTE_KEY" != "$PROMOTE_KEY" ]; then
+    log "the block names promote_key_file $BLOCK_PROMOTE_KEY; this rollback removes only the default $PROMOTE_KEY, so delete that file yourself"
+  fi
+  if [ ! -f "$PROMOTE_KEY" ] && [ ! -f "$PROMOTE_PUB" ]; then
+    log "no promote key at $PROMOTE_KEY: nothing to remove"
+    return 0
+  fi
+  for f in "$PROMOTE_PUB" "$PROMOTE_KEY"; do
+    [ -f "$f" ] || continue
+    run rm -f -- "$f"
+    if [ "$DRY_RUN" = 1 ]; then
+      log "would remove $f"
+    else
+      log "removed $f"
+    fi
+  done
 }
 
 # --- remotes and config ------------------------------------------------------
@@ -401,16 +467,20 @@ PY
 
 log "rolling $RIG back to $GITHUB_URL"
 
-# 1. The mirror first, before anything is repointed.
-if [ -n "$OWNER" ]; then
+# 1. The mirror first, before anything is repointed. A promoting rig has no
+# mirror, only a deploy key to de-authorise.
+if [ -n "$OWNER" ] && [ -n "$MIRROR_TARGET" ]; then
   resolve_admin_token
   stop_mirror
   print_deploy_key_removal
-else
-  log "no Forgejo remote in the block: no mirror to stop"
+elif [ -n "$OWNER" ]; then
+  log "the rig block names no mirror_target: no push mirror to stop"
+fi
+if [ -n "$BLOCK_PROMOTE_TARGET" ] || [ -n "$BLOCK_PROMOTE_KEY" ]; then
+  print_promote_key_removal
 fi
 
-# 2. The block.
+# 2. The block, and the promote keypair the cutover minted.
 if [ -n "$BLOCK_REMOTE_URL" ]; then
   backup_file "$SETTINGS"
   if [ "$DRY_RUN" = 1 ]; then
@@ -419,6 +489,10 @@ if [ -n "$BLOCK_REMOTE_URL" ]; then
     remove_settings_forgejo
     log "removed merge_queue.forgejo from $SETTINGS"
   fi
+fi
+if [ -n "$BLOCK_PROMOTE_TARGET" ] || [ -n "$BLOCK_PROMOTE_KEY" ] \
+  || [ -f "$PROMOTE_KEY" ] || [ -f "$PROMOTE_PUB" ]; then
+  remove_promote_key
 fi
 
 # 3. The remotes and the town registry.
