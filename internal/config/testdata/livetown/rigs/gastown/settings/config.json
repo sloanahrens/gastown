@@ -8,7 +8,6 @@
     "build_command": "make build",
     "test_command": "make gate",
     "lint_command": "",
-    "gate": "make gate",
     "post_land_command": "make test-slow"
   },
   "role_agents": {

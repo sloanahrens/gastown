@@ -31,7 +31,6 @@
         "lint_command": "golangci-lint run",
         "setup_command": "",
         "typecheck_command": "",
-        "gate": "make gate",
         "post_land_command": "make test-slow",
         "max_ready_for_dispatch": 0
     },

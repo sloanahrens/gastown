@@ -421,7 +421,9 @@ func LoadRigSettings(path string) (*RigSettings, error) {
 // target_branch and integration_branches were replaced by rig default_branch
 // and per-epic integration branch metadata. The rest configured the deleted
 // refinery and gt done's old test-verify gate; nothing read them after the
-// landing worker replaced both (gt-5nlvq).
+// landing worker replaced both (gt-5nlvq). gate named the local landing gate
+// and went with it: the rig's Forgejo gate workflow runs its own `make`
+// target, so no code reads merge_queue.gate (gt-5rt46).
 var DeprecatedMergeQueueKeys = []string{
 	"target_branch", "integration_branches",
 	"enabled", "integration_branch_refinery_enabled", "integration_branch_template",
@@ -430,6 +432,7 @@ var DeprecatedMergeQueueKeys = []string{
 	"delete_merged_branches", "retry_flaky_tests", "poll_interval", "max_concurrent",
 	"stale_claim_timeout", "judgment_enabled", "review_depth", "batch_enabled",
 	"batch_min_age", "batch_max", "batch_min_count", "cycle_session_after_merge",
+	"gate",
 }
 
 // SaveRigSettings saves rig settings to a file.

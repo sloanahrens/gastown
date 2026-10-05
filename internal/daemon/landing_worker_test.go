@@ -235,7 +235,7 @@ func TestRigPostLandCommandReadsRigSettingsOnly(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(rigPath, "settings"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	body := `{"type":"rig-settings","version":1,"merge_queue":{"gate":"make gate","post_land_command":"make test-slow"}}`
+	body := `{"type":"rig-settings","version":1,"merge_queue":{"post_land_command":"make test-slow"}}`
 	if err := os.WriteFile(filepath.Join(rigPath, "settings", "config.json"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
