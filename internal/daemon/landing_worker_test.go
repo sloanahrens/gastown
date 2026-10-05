@@ -706,6 +706,12 @@ func TestNewRigLandingWorker_WiresTheForgejoLanding(t *testing.T) {
 	if merger.BotLogin != "gt-landing" {
 		t.Fatalf("merger BotLogin = %q, want the landing bot from merge_queue.forgejo.bots", merger.BotLogin)
 	}
+	// Every red gate the worker sees goes to the CI-failure watch, which is how
+	// a test failing on a second bead raises an escalation and a repair bead
+	// (gt-xvw20).
+	if lander.CIFailure == nil {
+		t.Fatal("lander.CIFailure is nil; the rig's worker must report its red gates to the CI-failure watch")
+	}
 }
 
 // TestNewRigLandingWorker_ForgejoRemoteUnmatchedFailsClosed: a rig whose

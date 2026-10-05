@@ -504,6 +504,30 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	}
 	lander.Candidate = candidate
 	lander.Merger = merger
+	// A test that keeps failing for beads that did not touch it is the daemon's
+	// to escalate and file a repair for (gt-xvw20); the watch does that off the
+	// landing's goroutine, where a retrying alert cannot hold up a rejection.
+	ciWatch := &ciTestWatch{
+		Rig:    rigName,
+		Ledger: ciFailureLedgerPath(townRoot),
+		Beads:  bd,
+		Escalate: func(key, message string) {
+			d.escalateAlert(key, "landing_worker", message)
+		},
+		Logf: d.logger.Printf,
+		Now:  func() time.Time { return d.clk().Now() },
+		Async: func(call func()) {
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						d.logger.Printf("landing_worker: %s: ci-failure watch panicked: %v", rigName, r)
+					}
+				}()
+				call()
+			}()
+		},
+	}
+	lander.CIFailure = ciWatch.Record
 	// A cut-over rig can be stuck in the CI wait, so it gets the watch. An
 	// alert keyed per rig must have exactly one owner (gt-fn9e6.27).
 	stuck := d.newLandingStuckWatch(rigName)

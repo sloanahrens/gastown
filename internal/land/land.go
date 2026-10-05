@@ -127,6 +127,12 @@ type Lander struct {
 	// it is running rather than by the pipeline as a whole; the work before
 	// the CI wait has no stage of its own and reports nothing (gt-84gcp).
 	Stage func(beadID, stage string)
+	// CIFailure, when set, is told every red candidate-gate verdict as the
+	// gate reads it, before the rejection is written: the daemon's CI-failure
+	// watch turns a test failing on a second bead into an escalation and a
+	// repair bead (gt-xvw20). It runs on the landing's goroutine and must
+	// return promptly; the watch does its alerting off it.
+	CIFailure func(f CIFailure)
 
 	openRepo func(dir string) Repo // test seam: opens git at dir; nil means *git.Git
 }
@@ -315,6 +321,7 @@ func (l *Lander) candidateGate(ctx context.Context, wt Repo, dir string, w Work,
 		return cres, GateResult{Passed: true, Steps: []StepResult{step}}, nil
 	case CandidateFailed:
 		step.ExitCode = 1
+		l.ciFailure(w, cres)
 		l.logf("%s: %s failed on the candidate %s (%s); the job log tail goes with the rework", w.BeadID, cres.Context, shortSHA(cres.SHA), cres.Branch)
 		return cres, GateResult{Steps: []StepResult{step}}, nil
 	default:
@@ -322,6 +329,15 @@ func (l *Lander) candidateGate(ctx context.Context, wt Repo, dir string, w Work,
 			"%w: %s reported nothing on the candidate %s (%s) within its wait window",
 			ErrCISilence, cres.Context, shortSHA(cres.SHA), cres.Branch)}
 	}
+}
+
+// ciFailure hands a red candidate verdict to the CI-failure watch, with the
+// failing job's log tail parsed for the tests it names.
+func (l *Lander) ciFailure(w Work, cres CandidateResult) {
+	if l.CIFailure == nil {
+		return
+	}
+	l.CIFailure(CIFailure{Bead: w.BeadID, Tail: cres.Tail, Tests: ParseTestFailures(cres.Tail)})
 }
 
 // discardCandidate deletes the candidate branch the gate pushed this run,
