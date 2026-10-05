@@ -123,7 +123,7 @@ change the procedure:
 | beads | `beads`, a public fork of `gastownhall/beads` | `make gate` | cut over and parked on demand; Actions disabled; 18 upstream workflows |
 | om | `organic-mechanic` | `make gate` | Go 1.27; a self-hosted GitHub runner as a launchd service — stop it, keep it installed; 5 branches |
 | hm | `history-man` | `make lint test` (no `gate` target) | Go 1.27; shellcheck in lint; its landing gate starts containers, so the probe must confirm Docker access works for the unprivileged `ci` user or that those tests skip; a self-hosted GitHub runner; 3 branches |
-| gastown | `gastown` (public) | `make lint-tools`, then `make gate` | the gate workflow is already on `main`; about 170 branches to import; its `ci.yml` runs on a GitHub-hosted runner — disable it; it hosts the worker, so its break-glass is tested first |
+| gastown | `gastown` (public) | `make lint-tools`, then `make gate` | the gate workflow is already on `main`; about 170 branches to import; its `ci.yml` runs on a GitHub-hosted runner — disable it; it lands through Forgejo like the other rigs; its break-glass is the resync procedure below, and has not been rehearsed on gastown, which hosts the worker, so `bash scripts/forgejo-rollback.sh gastown` is the first move if the Forgejo path breaks |
 
 Every rig's precondition is the same: its gate workflow is on GitHub `main`
 (landed through the old path first, so Forgejo never falls back to
@@ -263,9 +263,10 @@ GitHub ref to Forgejo with `--prune`, and restores the rule by re-running
 so a push that fails still leaves `main` protected. `--dry-run` prints every
 step and writes nothing.
 
-gastown's break-glass is tested before its cutover, because it hosts the
-worker: a defect in the new path there would otherwise block the fix that
-repairs it.
+gastown lands through Forgejo like every other rig, and its break-glass is the
+resync procedure above rather than a separate one. It has not been rehearsed on
+gastown itself, which hosts the worker, so `bash scripts/forgejo-rollback.sh
+gastown` stays the first move when the Forgejo path breaks.
 
 ## Rotating a token
 
