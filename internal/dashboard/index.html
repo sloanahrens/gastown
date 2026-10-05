@@ -1136,12 +1136,18 @@ let qTab = "ready";
 // returns to this view rather than to a filter left on another store.
 const DEFAULT_QRIG = "all";
 const DEFAULT_QSHAPE = "ok";
+// The Blocked tab hides wisp rows unless the chip is on (gt-q6ed5): a retired
+// patrol or an old polecat run leaves dead step beads behind, and they outnumber
+// the real blocked work. A wisp is a row whose id carries "-wisp-".
+const DEFAULT_QWISP = false;
 let qRig = DEFAULT_QRIG;
 let qShape = DEFAULT_QSHAPE;
+let qWisp = DEFAULT_QWISP;
 const qOpen = new Set();
 const qDetail = {};
 let qKey = "";
 const QTABS = [["ready", "Ready to build", "ready_total", "ready"], ["landing", "Waiting to land", "landing_total", "landing"], ["blocked", "Blocked", "blocked_total", "blocked"]];
+const isWisp = b => b.id.indexOf("-wisp-") >= 0;
 
 function openBead(b) {
   const id = b.rig + "/" + b.id;
@@ -1202,16 +1208,17 @@ function renderQueue(s, force) {
   box.append(tabs);
   const caption = {ready: "Open beads with nothing blocking them. Only the green “ready” ones are taken by the spec dispatcher: shaped, unassigned, not an epic, and in a rig that is not parked. Beads held by an assignee wait for that person; beads in parked rigs wait until the rig is re-enabled.",
     landing: "Submitted by a polecat or crew and waiting for the landing worker.",
-    blocked: "Open beads waiting on another bead to close."}[qTab];
+    blocked: "Open beads waiting on another bead to close. Wisp steps left by retired patrols and old polecat runs are hidden by default; the wisps chip shows them."}[qTab];
   box.append(el("div", "empty", caption));
   const [, , totalKey, listKey] = QTABS.find(t => t[0] === qTab);
   const all = q[listKey] || [];
-  // filters: which store, and (for the ready list) whether the dispatcher would slot it
+  // filters: which store, (for the ready list) whether the dispatcher would
+  // slot it, and (for the blocked list) whether wisps are shown
   const rigs = Object.assign({}, q[listKey + "_rigs"] || {});
   if (!Object.keys(rigs).length) all.forEach(b => rigs[b.rig] = (rigs[b.rig] || 0) + 1);
   const rigNames = Object.keys(rigs).sort((a, b) => rigs[b] - rigs[a]);
   if (qRig !== "all" && !rigs[qRig]) qRig = "all";
-  if (rigNames.length > 1 || qTab === "ready") {
+  if (rigNames.length > 1 || qTab === "ready" || qTab === "blocked") {
     const f = el("div", "qtabs");
     const chip = (label, count, on, fn) => { const b = el("button", "chip" + (on ? " on" : ""), label); b.append(el("b", "", String(count))); b.onclick = fn; f.append(b); };
     if (rigNames.length > 1) {
@@ -1226,9 +1233,13 @@ function renderQueue(s, force) {
       chip("needs shaping", inRig.filter(b => b.shape === "fix").length, qShape === "fix", () => { qShape = qShape === "fix" ? "all" : "fix"; renderQueue(state, true); });
       chip("held", inRig.filter(b => b.shape === "held").length, qShape === "held", () => { qShape = qShape === "held" ? "all" : "held"; renderQueue(state, true); });
     }
+    if (qTab === "blocked") {
+      const inRig = all.filter(b => qRig === "all" || b.rig === qRig);
+      chip("wisps", inRig.filter(isWisp).length, qWisp, () => { qWisp = !qWisp; renderQueue(state, true); });
+    }
     box.append(f);
   }
-  const rows = all.filter(b => (qRig === "all" || b.rig === qRig) && (qTab !== "ready" || qShape === "all" || b.shape === qShape));
+  const rows = all.filter(b => (qRig === "all" || b.rig === qRig) && (qTab !== "ready" || qShape === "all" || b.shape === qShape) && (qTab !== "blocked" || qWisp || !isWisp(b)));
   if (!rows.length) {
     let msg;
     // The pane opens on the dispatchable view, so an empty one reports what
@@ -1243,6 +1254,11 @@ function renderQueue(s, force) {
         parts.push(held === 1 ? "1 bead is held" : held + " beads are held");
       }
       msg = "nothing is dispatchable right now" + (parts.length ? " — " + parts.join(", ") : "");
+    } else if (qTab === "blocked" && !qWisp) {
+      // With wisps hidden the blocked list can empty out even when the tab
+      // reports a total, so name what the chip would reveal (gt-q6ed5).
+      const wisps = all.filter(b => (qRig === "all" || b.rig === qRig) && isWisp(b)).length;
+      msg = wisps ? "nothing is blocked outside " + (wisps === 1 ? "1 wisp" : wisps + " wisps") + " — turn on the wisps chip to see them" : "nothing is blocked";
     } else {
       msg = all.length ? "nothing matches these filters" : qTab === "ready" ? "nothing is waiting to be built" : qTab === "landing" ? "nothing is waiting to land" : "nothing is blocked";
     }
