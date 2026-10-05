@@ -286,7 +286,9 @@ func TestForgejoConfigDecodesItsKeys(t *testing.T) {
 		"remote_url": "https://forgejo.example/gastown/gastown",
 		"gate_workflow": "gate",
 		"bots": {"polecat": "gt-polecat", "landing": "gt-landing", "registry": "gt-registry"},
-		"mirror_target": "git@github.com:sloanahrens/gastown.git"
+		"mirror_target": "git@github.com:sloanahrens/gastown.git",
+		"promote_target": "git@github.com:sloanahrens/gastown.git",
+		"promote_key_file": "/home/gt/.config/gt/promote-gastown.key"
 	}`
 	var mq MergeQueueConfig
 	if err := json.Unmarshal([]byte(`{"forgejo":`+body+`}`), &mq); err != nil {
@@ -306,6 +308,12 @@ func TestForgejoConfigDecodesItsKeys(t *testing.T) {
 	}
 	if mq.Forgejo.MirrorTarget != "git@github.com:sloanahrens/gastown.git" {
 		t.Errorf("MirrorTarget = %q", mq.Forgejo.MirrorTarget)
+	}
+	if mq.Forgejo.PromoteTarget != "git@github.com:sloanahrens/gastown.git" {
+		t.Errorf("PromoteTarget = %q", mq.Forgejo.PromoteTarget)
+	}
+	if mq.Forgejo.PromoteKeyFile != "/home/gt/.config/gt/promote-gastown.key" {
+		t.Errorf("PromoteKeyFile = %q", mq.Forgejo.PromoteKeyFile)
 	}
 }
 

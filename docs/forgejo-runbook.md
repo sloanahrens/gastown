@@ -170,6 +170,7 @@ The failures seen on the live rigs so far, each closed or ticketed:
 | Provisioning a fresh repo never converges | Operator | — | the collaborator grant lands before the rule (gt-fn9e6.23) |
 | The startup context check alarms after a restart | Operator | raises `landing-forgejo-context:<rig>` | `gt escalate clear --fingerprint landing-forgejo-context:<rig>` once the landing is known good (gt-fn9e6.24) |
 | A rig's new Forgejo block is read only at daemon start | Operator | — | restart the daemon when no landing is in flight (see "Cutting a rig over") |
+| GitHub `main` is not an ancestor of the green commit that wanted promoting | Operator | leaves GitHub alone and raises `landing-promote-diverged:<rig>` | reconcile GitHub `main` with Forgejo's, then `gt escalate clear --fingerprint landing-promote-diverged:<rig>` (gt-fn9e6.37) |
 
 ## Cutting a rig over
 

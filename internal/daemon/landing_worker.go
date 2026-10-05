@@ -24,6 +24,7 @@ import (
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
+	"github.com/steveyegge/gastown/internal/promote"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/version"
@@ -528,6 +529,26 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Diff: func(_ context.Context, rec land.LandingRecord) ([]string, error) {
 			return git.NewGit(repo).DiffNameOnly(rec.Base, rec.LandedCommit)
 		},
+	}
+	// A rig whose forgejo block names a promote_target advances GitHub main
+	// from its green verdicts (gt-fn9e6.37), instead of a push mirror that
+	// pushes every commit before the slow check runs.
+	if forgejoCfg != nil && forgejoCfg.PromoteTarget != "" {
+		if forgejoCfg.PromoteKeyFile == "" {
+			d.logger.Printf("landing_worker: %s: merge_queue.forgejo.promote_target is set but promote_key_file is not, so GitHub promotion is off until the deploy key is named", rigName)
+		} else {
+			redMain.Promote = &promote.Promoter{
+				Rig:      rigName,
+				Target:   forgejoCfg.PromoteTarget,
+				KeyFile:  forgejoCfg.PromoteKeyFile,
+				Repo:     git.NewGit(repo),
+				LockPath: promote.LockPath(townRoot, rigName),
+				Escalate: func(message string) {
+					d.escalateAlert("landing-promote-diverged:"+rigName, "landing_worker", message)
+				},
+				Logf: d.logger.Printf,
+			}
+		}
 	}
 	postLand := &landworker.PostLandRunner{
 		Rig:     rigName,

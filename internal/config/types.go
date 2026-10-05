@@ -1158,6 +1158,17 @@ type ForgejoConfig struct {
 	// MirrorTarget is the rig's read-only push mirror target, e.g. its
 	// GitHub repository URL. A mirror failure never blocks a landing.
 	MirrorTarget string `json:"mirror_target,omitempty"`
+
+	// PromoteTarget is the GitHub repository URL a green main verdict
+	// fast-forwards to the verdict's commit (gt-fn9e6.37): any git URL, the
+	// ssh form in production. Empty leaves the rig with no promotion, which
+	// is every rig that has not cut over.
+	PromoteTarget string `json:"promote_target,omitempty"`
+
+	// PromoteKeyFile is the path to the private deploy key ssh pushes with,
+	// mode 600. It is a path, never the key: the key's contents appear in no
+	// config, log or state, and the path itself reaches ssh alone.
+	PromoteKeyFile string `json:"promote_key_file,omitempty"`
 }
 
 // UnmarshalJSON decodes the block, ignoring a key it does not declare: the

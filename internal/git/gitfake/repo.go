@@ -30,6 +30,7 @@ type Repo interface {
 	ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error)
 	DeleteRemoteBranchIfAt(remote, branch, expectedHash string) error
 	Push(remote, refspec string, force bool) error
+	PushWithEnv(remote, refspec string, force bool, env []string) error
 	PushForceWithLease(remote, refspec, branchRef, expectedSHA string) error
 	VerifyPushedCommit(remote, branch, commit string) error
 	WorktreeAddDetached(path, ref string) error

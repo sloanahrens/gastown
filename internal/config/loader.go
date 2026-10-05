@@ -333,6 +333,8 @@ func mergeForgejoConfig(base, override *ForgejoConfig) *ForgejoConfig {
 		out.RemoteURL = base.RemoteURL
 		out.GateWorkflow = base.GateWorkflow
 		out.MirrorTarget = base.MirrorTarget
+		out.PromoteTarget = base.PromoteTarget
+		out.PromoteKeyFile = base.PromoteKeyFile
 	}
 	if override != nil {
 		if override.RemoteURL != "" {
@@ -343,6 +345,12 @@ func mergeForgejoConfig(base, override *ForgejoConfig) *ForgejoConfig {
 		}
 		if override.MirrorTarget != "" {
 			out.MirrorTarget = override.MirrorTarget
+		}
+		if override.PromoteTarget != "" {
+			out.PromoteTarget = override.PromoteTarget
+		}
+		if override.PromoteKeyFile != "" {
+			out.PromoteKeyFile = override.PromoteKeyFile
 		}
 	}
 	// One fresh map whether the bots come from base, override, or both.
