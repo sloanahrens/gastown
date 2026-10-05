@@ -53,7 +53,7 @@ Per-rig channels ("refinery", "witness") have one consumer per rig, so each
 rig watches its own subdirectory ~/gt/events/<channel>/<rig>/. The rig comes
 from --rig, the GT_RIG environment variable, or the rig containing the
 current directory; awaiting on a per-rig channel with no rig context is an
-error. Town-global channels (e.g. "mayor") ignore the rig.
+error. Town-global channels ignore the rig.
 
 EVENT FORMAT:
 Events are JSON files in ~/gt/events/<channel>[/<rig>]/*.event:

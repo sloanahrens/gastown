@@ -60,7 +60,6 @@ var primeHandoffReason string
 type Role = role.Role
 
 const (
-	RoleMayor   = role.Mayor
 	RolePolecat = role.Polecat
 	RoleCrew    = role.Crew
 	RoleUnknown = role.Unknown
@@ -84,7 +83,7 @@ var primeCmd = &cobra.Command{
 
 Role detection:
   - Town root → Neutral (no role inferred; use GT_ROLE)
-  - mayor/ or <rig>/mayor/ → Mayor context
+  - mayor/ or <rig>/mayor/ → Neutral (kept town marker and rig clone; no role)
   - <rig>/polecats/<name>/ → Polecat context
   - <rig>/crew/<name>/ → Crew context
 
@@ -216,7 +215,7 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 	if hookErr != nil {
 		// Cross-rig / unresolvable hook bead (gt-el4): the agent bead names a
 		// hook bead that bd show cannot find. Don't sit idle "pontificating" —
-		// emit a clear message, fire a HIGH escalation so the mayor sees the
+		// emit a clear message, fire a HIGH escalation so the operator sees the
 		// dead-with-active-work state, and exit non-zero instead of falling
 		// through as if no work were assigned.
 		if errors.Is(hookErr, ErrHookUnresolvable) {
@@ -234,7 +233,7 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 		fmt.Fprintf(os.Stderr, "Hook query failed: %v\n", hookErr)
 		fmt.Fprintf(os.Stderr, "This is a database connectivity error, NOT an empty hook.\n")
 		fmt.Fprintf(os.Stderr, "Your work may still be assigned. Do NOT close any beads.\n")
-		fmt.Fprintf(os.Stderr, "Escalate to mayor and wait for resolution.\n\n")
+		fmt.Fprintf(os.Stderr, "Escalate and wait for resolution.\n\n")
 	}
 
 	// Static role text (template + CONTEXT.md) goes into the role's
@@ -289,9 +288,6 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 			explain(true, "Startup directive: normal mode (no hooked work)")
 			return section(func(w io.Writer) { outputStartupDirective(w, ctx) })
 		},
-	}
-	if ctx.Role == RoleMayor {
-		parts.escalations = func() string { return section(func(w io.Writer) { primeTools{out: w}.pendingEscalations(ctx) }) }
 	}
 	payload := assemblePrimePayload(parts, staticText, includeStatic, hasSlungWork)
 	// The hook budget only helps when the static text is out of the payload;
@@ -728,20 +724,15 @@ func (p primeTools) mailInject(cwd string) {
 }
 
 // shouldRenderMemories reports whether a role's prime payload carries the
-// "# Agent Memories" index: true for the mayor and crew, the two roles that
-// hold cross-issue context from one session to the next.
+// "# Agent Memories" index: true for crew, the role that holds cross-issue
+// context from one session to the next.
 //
 // The index is the first section the hook budget evicts, and the roles that
 // do not get it carry their rules in a section that outranks memories — a
 // patrol role's attached formula, a polecat's hooked work — so spending a
 // third of the budget on a section evicted ahead of them buys nothing.
 func shouldRenderMemories(role string) bool {
-	switch strings.ToLower(role) {
-	case string(RoleMayor), string(RoleCrew):
-		return true
-	default:
-		return false
-	}
+	return strings.EqualFold(role, string(RoleCrew))
 }
 
 // runPrimeExternalCommand runs one external tool as a subprocess, bounded by
@@ -971,9 +962,9 @@ func isBeadNotFound(err error) bool {
 		strings.Contains(msg, "issue not found")
 }
 
-// firePolecatHookUnresolvableEscalation fires a HIGH escalation so the mayor
-// sees the dead-with-active-work state immediately. Best effort — logged on
-// failure but does not gate the prime exit.
+// firePolecatHookUnresolvableEscalation fires a HIGH escalation so the
+// operator sees the dead-with-active-work state immediately. Best effort —
+// logged on failure but does not gate the prime exit.
 var firePolecatHookUnresolvableEscalation = func(agentID, detail string) {
 	msg := fmt.Sprintf("polecat hook unresolvable: agent=%s detail=%s — see gt-el4", agentID, detail)
 	cmd := exec.Command("gt", "escalate", "--severity", "high", "--reason", "polecat-hook-unresolvable", msg)
@@ -1015,7 +1006,7 @@ func findAgentWorkOnce(ctx RoleContext, agentID string) (*beads.Issue, error) {
 			// This is the cross-rig dispatch failure mode (gt-el4): an `hq-`
 			// bead was handed to a polecat whose DB only resolves `gt-`. Fail
 			// fast — never pontificate. The escalation above puts the bead in
-			// front of the mayor, who decides whether to re-issue.
+			// front of the operator, who decides whether to re-issue.
 			if hookBead == nil || isBeadNotFound(showErr) {
 				staleHookErr = fmt.Errorf("%w: agent=%s hook_bead=%s cwd=%s: %v",
 					ErrHookUnresolvable, agentID, agentBead.HookBead, ctx.WorkDir, showErr)
@@ -1032,7 +1023,7 @@ func findAgentWorkOnce(ctx RoleContext, agentID string) (*beads.Issue, error) {
 	// Town-level fallback: rig-level agents (polecats, crew) may have hooked
 	// HQ beads (hq-* prefix) stored in townRoot/.beads, not the rig's database.
 	// Matches the fallback in molecule_status.go and unsling.go. (gt-dtq7)
-	if len(hookedBeads) == 0 && !isTownLevelRole(agentID) && ctx.TownRoot != "" {
+	if len(hookedBeads) == 0 && ctx.TownRoot != "" {
 		townB := beads.New(filepath.Join(ctx.TownRoot, ".beads"))
 		if townWork, err := listAssignedActiveWork(townB, agentID); err == nil && len(townWork) > 0 {
 			hookedBeads = townWork
@@ -1399,8 +1390,6 @@ func outputBeadPreview(w io.Writer, hookedBead *beads.Issue) {
 // buildRoleAnnouncement creates the role announcement string for autonomous mode.
 func buildRoleAnnouncement(ctx RoleContext) string {
 	switch ctx.Role {
-	case RoleMayor:
-		return "Mayor, checking in."
 	case RolePolecat:
 		return fmt.Sprintf("%s Polecat %s, checking in.", ctx.Rig, ctx.Polecat)
 	case RoleCrew:
@@ -1427,8 +1416,6 @@ func getAgentIdentity(ctx RoleContext) string {
 		return fmt.Sprintf("%s/crew/%s", ctx.Rig, ctx.Polecat)
 	case RolePolecat:
 		return fmt.Sprintf("%s/polecats/%s", ctx.Rig, ctx.Polecat)
-	case RoleMayor:
-		return "mayor"
 	default:
 		return ""
 	}
@@ -1439,8 +1426,6 @@ func getAgentIdentity(ctx RoleContext) string {
 // Returns an error if another agent already owns this identity.
 func acquireIdentityLock(ctx RoleContext) error {
 	// Only lock worker roles (polecat, crew)
-	// The mayor is a singleton managed by its tmux session name,
-	// so it doesn't need a file-based lock
 	if ctx.Role != RolePolecat && ctx.Role != RoleCrew {
 		return nil
 	}
@@ -1548,113 +1533,4 @@ func worktreeBeadsNeedsCleanup(workDir string) bool {
 		}
 	}
 	return false
-}
-
-// pendingEscalations queries for open escalation beads and displays them prominently.
-// This is called on Mayor startup to surface issues needing human attention.
-//
-// Escalations are created as ephemeral wisps labeled gt:escalation (gt-fcsf).
-// `--tag=escalation` is not a real bd flag — it errored on every invocation,
-// so this check silently no-op'd since the day it was written. --include-infra
-// is also required or ephemeral escalation wisps are hidden from bd list.
-func (p primeTools) pendingEscalations(ctx RoleContext) {
-	// Query for open escalations using bd list with label filter
-	stdout, _, err := p.command(ctx.WorkDir, "bd", "list", "--status=open", "--label=gt:escalation", "--include-infra", "--json")
-	if err != nil {
-		// Silently skip - escalation check is best-effort
-		return
-	}
-
-	// Parse JSON output
-	var escalations []struct {
-		ID          string   `json:"id"`
-		Title       string   `json:"title"`
-		Priority    int      `json:"priority"`
-		Description string   `json:"description"`
-		Created     string   `json:"created"`
-		Labels      []string `json:"labels"`
-	}
-
-	if err := json.Unmarshal(stdout.Bytes(), &escalations); err != nil || len(escalations) == 0 {
-		// No escalations or parse error
-		return
-	}
-
-	// Mail-delivery beads carry the same gt:escalation label so ack/close can
-	// find the routed notification (see mail.Router.buildLabels), but they
-	// aren't escalation wisps themselves — skip them so the count reflects
-	// open escalations, not deliveries.
-	filtered := escalations[:0]
-	for _, e := range escalations {
-		isDelivery := false
-		for _, label := range e.Labels {
-			if label == "gt:message" {
-				isDelivery = true
-				break
-			}
-		}
-		if !isDelivery {
-			filtered = append(filtered, e)
-		}
-	}
-	escalations = filtered
-	if len(escalations) == 0 {
-		return
-	}
-
-	// Count by severity
-	critical := 0
-	high := 0
-	medium := 0
-	for _, e := range escalations {
-		switch e.Priority {
-		case 0:
-			critical++
-		case 1:
-			high++
-		default:
-			medium++
-		}
-	}
-
-	// Display prominently
-	fmt.Fprintln(p.w())
-	fmt.Fprintf(p.w(), "%s\n\n", style.Bold.Render("## 🚨 PENDING ESCALATIONS"))
-	fmt.Fprintf(p.w(), "There are %d escalation(s) awaiting human attention:\n\n", len(escalations))
-
-	if critical > 0 {
-		fmt.Fprintf(p.w(), "  🔴 CRITICAL: %d\n", critical)
-	}
-	if high > 0 {
-		fmt.Fprintf(p.w(), "  🟠 HIGH: %d\n", high)
-	}
-	if medium > 0 {
-		fmt.Fprintf(p.w(), "  🟡 MEDIUM: %d\n", medium)
-	}
-	fmt.Fprintln(p.w())
-
-	// Show first few escalations
-	maxShow := 5
-	if len(escalations) < maxShow {
-		maxShow = len(escalations)
-	}
-	for i := 0; i < maxShow; i++ {
-		e := escalations[i]
-		severity := "MEDIUM"
-		switch e.Priority {
-		case 0:
-			severity = "CRITICAL"
-		case 1:
-			severity = "HIGH"
-		}
-		fmt.Fprintf(p.w(), "  • [%s] %s (%s)\n", severity, e.Title, e.ID)
-	}
-	if len(escalations) > maxShow {
-		fmt.Fprintf(p.w(), "  ... and %d more\n", len(escalations)-maxShow)
-	}
-	fmt.Fprintln(p.w())
-
-	fmt.Fprintln(p.w(), "**Action required:** Review escalations with `gt escalate list`")
-	fmt.Fprintln(p.w(), "Close resolved ones with `"+cli.Name()+" escalate close <id> --reason \"resolution\"`")
-	fmt.Fprintln(p.w())
 }

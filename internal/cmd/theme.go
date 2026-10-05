@@ -92,9 +92,6 @@ func runTheme(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  %-10s  %s\n", name, theme.Style())
 		}
 		fmt.Printf("  %-10s  disable tmux theming\n", "none")
-		// Also show Mayor theme
-		mayor := tmux.MayorTheme()
-		fmt.Printf("  %-10s  %s (Mayor only)\n", mayor.Name, mayor.Style())
 		return nil
 	}
 
@@ -155,35 +152,23 @@ func runThemeApply(cmd *cobra.Command, args []string) error {
 		}
 
 		// Determine theme and identity for this session
-		var theme *tmux.Theme
-		var rig, worker, role string
-
 		identity, err := session.ParseSessionNameWithRegistry(sess, reg)
 		if err != nil {
 			continue
 		}
 
-		var crewMember string
-		switch identity.Role {
-		case session.RoleMayor:
-			theme = tmux.ResolveSessionTheme(townRoot, "", string(RoleMayor), "")
-			worker = "Mayor"
-			role = string(RoleMayor)
-		default:
-			rig = identity.Rig
+		rig := identity.Rig
 
-			// Skip if not matching current rig (unless --all flag)
-			if !themeApplyAllFlag && rigName != "" && rig != rigName {
-				continue
-			}
-
-			role = string(identity.Role)
-			worker = identity.Name
-			crewMember = identity.Name
-
-			// Use role-based theme resolution (with per-member override)
-			theme = tmux.ResolveSessionTheme(townRoot, rig, role, crewMember)
+		// Skip if not matching current rig (unless --all flag)
+		if !themeApplyAllFlag && rigName != "" && rig != rigName {
+			continue
 		}
+
+		worker := identity.Name
+		role := string(identity.Role)
+
+		// Use role-based theme resolution (with per-member override)
+		theme := tmux.ResolveSessionTheme(townRoot, rig, role, worker)
 
 		// Resolve window tint from config.
 		if theme != nil {
@@ -254,7 +239,7 @@ func detectCurrentRig(reg *session.PrefixRegistry) string {
 	// Extract first path component (rig name)
 	// Patterns: <rig>/..., mayor/...
 	parts := strings.Split(rel, string(filepath.Separator))
-	if len(parts) > 0 && parts[0] != "." && parts[0] != string(RoleMayor) {
+	if len(parts) > 0 && parts[0] != "." && parts[0] != "mayor" {
 		return parts[0]
 	}
 
@@ -461,12 +446,6 @@ func detectCurrentSession(reg *session.PrefixRegistry) string {
 		if crew != "" {
 			return session.CrewSessionName(reg.PrefixForRig(rig), crew)
 		}
-	}
-
-	// Check if we're mayor (handles both bare and compound forms)
-	parsedRole, _, _ := parseRoleString(role)
-	if parsedRole == RoleMayor {
-		return session.MayorSessionName()
 	}
 
 	return ""

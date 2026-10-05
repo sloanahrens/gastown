@@ -53,9 +53,8 @@ abbreviated patrols. Town-wide events that must wake a specific agent should be
 sent as a nudge or mail to that agent, which is already matched.
 
 The scope comes from --rig, then GT_RIG, then the registered rig containing the
-current directory. With no rig context the subscription stays town-wide, so
-town-level agents (mayor, deacon) behave as before. Pass --rig town to ask for
-that explicitly.
+current directory. With no rig context the subscription stays town-wide. Pass
+--rig town to ask for that explicitly.
 
 If no relevant activity occurs within the timeout, the command returns with exit
 code 0 but sets the AWAIT_SIGNAL_REASON environment variable to "timeout".
@@ -650,8 +649,9 @@ func eventRelevantToRig(line, rig string) bool {
 }
 
 // addressInRig reports whether an actor or recipient address names rig or an
-// agent inside it: "om" and "om/witness" belong to rig om, "mayor" does not.
-// A trailing slash is tolerated because some emitters log "mayor/".
+// agent inside it: "om" and "om/crew/jack" belong to rig om, while an address
+// carrying no rig prefix does not. A trailing slash is tolerated because some
+// emitters log it.
 func addressInRig(addr, rig string) bool {
 	if addr == "" || rig == "" {
 		return false

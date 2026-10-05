@@ -501,11 +501,6 @@ func runHookShow(cmd *cobra.Command, args []string) error {
 					hookedBeads = townWork
 				}
 			}
-
-			// If still nothing found and town-level role, scan all rigs
-			if len(hookedBeads) == 0 && isTownLevelRole(target) {
-				hookedBeads = scanAllRigsForHookedBeads(townRoot, target)
-			}
 		}
 	}
 

@@ -72,7 +72,7 @@ func hasOperatorOverridePrefix(reason string) bool {
 // self-close of the hooked bead.
 //
 // Branch/target resolution failures fail OPEN (return "", allowing the
-// close): this check runs for every role (polecat, crew, mayor, deacon),
+// close): this check runs for every role (polecat and crew),
 // not just polecats mid-submit, and git state is not always meaningful in
 // every one of those contexts. Blocking on an inconclusive check would risk
 // false positives town-wide; the existing doneSourceCloseSkipReason gate

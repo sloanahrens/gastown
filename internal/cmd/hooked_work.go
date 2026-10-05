@@ -88,7 +88,7 @@ func listChildrenAcrossTables(b beads.Client, parentID string) ([]*beads.Issue, 
 
 func resolveHookLookupWorkDir(workDir, target, townRoot string) string {
 	target = strings.TrimSpace(target)
-	if townRoot == "" || isTownLevelRole(target) {
+	if townRoot == "" {
 		return workDir
 	}
 	if !safeAgentTargetPath(target) {
@@ -96,7 +96,8 @@ func resolveHookLookupWorkDir(workDir, target, townRoot string) string {
 	}
 
 	rigName := strings.Split(target, "/")[0]
-	if rigName == "" || rigName == "deacon" {
+	// deacon/ and mayor/ are kept town-level directories, not rigs.
+	if rigName == "" || rigName == "deacon" || rigName == "mayor" {
 		return workDir
 	}
 	if rigDir := beads.GetRigDirForName(townRoot, rigName); rigDir != "" {

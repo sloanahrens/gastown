@@ -134,7 +134,7 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 	// HQ beads (hq-* prefix) stored in townRoot/.beads, not the rig's database.
 	// Without this, gt unsling can't find or clear these beads, even though
 	// gt mol status / gt hook (display) can see them. (gt-dtq7)
-	if hookedBeadID == "" && !isTownLevelRole(agentID) && townRoot != "" {
+	if hookedBeadID == "" && townRoot != "" {
 		townB := beads.New(filepath.Join(townRoot, ".beads"))
 		// Search with the exact agent ID
 		if townHooked, err := townB.List(beads.ListOptions{
@@ -263,7 +263,7 @@ func cleanStaleHookedBeads(cmd *cobra.Command, b *beads.Beads, agentID, targetBe
 	// Also search town-level beads for rig-level agents (gt-dtq7).
 	// HQ beads (hq-* prefix) live in townRoot/.beads, not the rig database.
 	// Without this, stale HQ beads hooked to crew/polecats are invisible to cleanup.
-	if !isTownLevelRole(agentID) && townRoot != "" {
+	if townRoot != "" {
 		townBeadsPath := filepath.Join(townRoot, ".beads")
 		if townBeadsPath != beadsPath {
 			townB := beads.New(townBeadsPath)
