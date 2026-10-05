@@ -227,18 +227,22 @@ type TrendPoint struct {
 	OMSecs   *float64  `json:"om_secs,omitempty"`
 }
 
-// LandingRow is one recent landing or rejection, with what it cost: the time
-// each landing stage took, and om's verdict and score. The page's Landings
-// table is made of these.
+// LandingRow is one landing the page's Landings table shows: a recent landing
+// or rejection, with what it cost — the time each landing stage took, and om's
+// verdict and score — or a landing the worker is running right now, which has
+// none of those yet.
 type LandingRow struct {
 	At      time.Time `json:"at"`
 	Bead    string    `json:"bead"`
 	Rig     string    `json:"rig,omitempty"`
 	Title   string    `json:"title,omitempty"`
 	Polecat string    `json:"polecat,omitempty"`
-	// Outcome is "landed" or "rejected". Verdict is om's reading of a landing:
-	// "approved", "skipped" (landed with no review of its own) or "error". Kind
-	// is why a rejection was refused: review, gate, conflict, policy or empty.
+	// Outcome is "landed", "rejected", or "running" for a landing the worker
+	// holds right now: its At is the merge, and it carries no verdict, score or
+	// stage time, because those are logged only once the landing ends. Verdict
+	// is om's reading of a landing: "approved", "skipped" (landed with no review
+	// of its own) or "error". Kind is why a rejection was refused: review, gate,
+	// conflict, policy or empty.
 	Outcome  string   `json:"outcome"`
 	Verdict  string   `json:"verdict,omitempty"`
 	Kind     string   `json:"kind,omitempty"`
