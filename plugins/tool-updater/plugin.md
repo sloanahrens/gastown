@@ -14,9 +14,6 @@ digest = true
 
 [execution]
 type = "script"
-timeout = "10m"
-notify_on_failure = true
-severity = "medium"
 +++
 
 # Tool Updater
@@ -24,8 +21,7 @@ severity = "medium"
 Reports which Homebrew tools (`dolt`, `beads`) are outdated, and changes
 nothing.
 
-Run it directly: a manual gate keeps this script off the daemon's heartbeat,
-and `gt plugin run` does not execute script-type plugins.
+Run it directly:
 
 ```bash
 bash ~/gt/plugins/tool-updater/run.sh

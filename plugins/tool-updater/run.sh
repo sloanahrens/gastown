@@ -5,9 +5,8 @@
 
 set -euo pipefail
 
-# dolt is the only tool the town upgrades here. beads is reported for
-# visibility only: the town runs its own bd fork build, so updating it would
-# fix nothing (gt-th5it).
+# Every tool reported on, and the one an operator acts on by hand. Why beads is
+# reported but not acted on: plugin.md beside this script, "Upgrades are manual".
 TOOLS=(dolt beads)
 ACTIONABLE_TOOL=dolt
 
@@ -34,8 +33,15 @@ if ! command -v brew >/dev/null 2>&1; then
   exit 1
 fi
 
+# A failed refresh is surfaced, not swallowed: the probe below still runs, but
+# a stale formula index can miss a released version, so INDEX_STALE keeps the
+# report from claiming the confident all-clear (gt-th5it).
+INDEX_STALE=0
 log "Running brew update..."
-HOMEBREW_NO_AUTO_UPDATE=1 brew update 2>&1 | tail -3 || true
+if ! HOMEBREW_NO_AUTO_UPDATE=1 brew update 2>&1 | tail -3; then
+  INDEX_STALE=1
+  log "WARNING: brew update failed; the Homebrew formula index may be stale"
+fi
 
 # --- Report outdated tools ----------------------------------------------------
 
@@ -55,15 +61,17 @@ sys.exit(0 if isinstance(data.get("formulae"), list) else 1)
   exit 1
 fi
 
+# OUTDATED counts every tracked tool with an update, so the summary can never
+# call the report "all current" while one is behind; ACTIONABLE_TOOL only adds
+# the operator's next step (gt-th5it).
 OUTDATED=0
 for TOOL in "${TOOLS[@]}"; do
   if VERS="$(printf '%s' "$OUTDATED_JSON" | outdated_versions "$TOOL")"; then
     read -r INSTALLED AVAILABLE <<<"$VERS"
+    log "  $TOOL: update available (installed: $INSTALLED, available: $AVAILABLE)"
+    OUTDATED=$((OUTDATED + 1))
     if [[ "$TOOL" == "$ACTIONABLE_TOOL" ]]; then
-      log "  $TOOL: update available (installed: $INSTALLED, available: $AVAILABLE)"
-      OUTDATED=$((OUTDATED + 1))
-    else
-      log "  $TOOL: update available (installed: $INSTALLED, available: $AVAILABLE); no action (town runs its own bd fork)"
+      log "    to act, run by hand: brew upgrade $TOOL"
     fi
   else
     log "  $TOOL: up to date"
@@ -76,6 +84,10 @@ if [[ $OUTDATED -eq 0 ]]; then
   SUMMARY="tool-updater: all tools current"
 else
   SUMMARY="tool-updater: outdated=$OUTDATED (report-only)"
+fi
+# A stale index cannot support "all tools current", so say so in the title.
+if [[ $INDEX_STALE -eq 1 ]]; then
+  SUMMARY="$SUMMARY [formula index stale: brew update failed]"
 fi
 log ""
 log "=== Done === $SUMMARY"
