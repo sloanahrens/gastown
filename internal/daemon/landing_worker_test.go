@@ -13,10 +13,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
+	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/specdispatch"
@@ -897,4 +899,157 @@ func TestVerifyForgejoGateStaysQuietWithoutACandidateLanding(t *testing.T) {
 	if esc := rec.Escalations(); len(esc) != 0 {
 		t.Errorf("escalations = %+v, want none for a rig with no candidate-gate landing", esc)
 	}
+}
+
+// signalingNotifier is a notifyfake.Recorder that also hands each escalation
+// to the test as it lands. The stuck-landing watch raises from its own
+// goroutine, so a test awaits the alert on a channel rather than sleeping.
+type signalingNotifier struct {
+	*notifyfake.Recorder
+	escalated chan notify.Escalation
+}
+
+func newSignalingNotifier() *signalingNotifier {
+	return &signalingNotifier{Recorder: notifyfake.New(), escalated: make(chan notify.Escalation, 4)}
+}
+
+func (n *signalingNotifier) Escalate(ctx context.Context, e notify.Escalation) error {
+	err := n.Recorder.Escalate(ctx, e)
+	n.escalated <- e
+	return err
+}
+
+// forgejoLandingWorker builds one Forgejo rig's landing worker on the fake git
+// world, with its alerts recorded and its clock the caller advances.
+func forgejoLandingWorker(t *testing.T, rigName string, clk clockwork.Clock, rec notify.Notifier) *landworker.Worker {
+	t.Helper()
+	townRoot := t.TempDir()
+	forgejoRigConfig(t, townRoot, rigName)
+	tokenDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tokenDir, "forgejo-landing.env"), []byte("FORGEJO_TOKEN=secret\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: rec, clock: clk,
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{LandingWorker: &LandingWorkerConfig{
+			Forgejo: &config.ForgejoWorkerConfig{TokenDir: tokenDir}}}}}
+	f := useGitfake(t, d)
+	forgejoLandingRemote(t, f, townRoot, rigName)
+	w, err := d.newRigLandingWorker(rigName)
+	if err != nil {
+		t.Fatalf("newRigLandingWorker: %v", err)
+	}
+	return w
+}
+
+// TestLandingStuckAlertRaisesAndClears: a landing on a Forgejo rig that is
+// still in flight past the CI wait raises one landing-stuck:<rig> alert
+// naming the bead, the rig and the candidate branch the gate pushed, and the
+// alert clears when the landing leaves flight (gt-fn9e6.27).
+func TestLandingStuckAlertRaisesAndClears(t *testing.T) {
+	t.Parallel()
+	const rigName = "testrig"
+	clk := clockwork.NewFakeClockAt(time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC))
+	rec := newSignalingNotifier()
+	w := forgejoLandingWorker(t, rigName, clk, rec)
+
+	w.Active("gt-a")
+	clk.BlockUntil(1) // the watch's timer is armed before the clock moves
+	clk.Advance(landingStuckAfter() + time.Minute)
+
+	esc := <-rec.escalated
+	if want := "landing-stuck:" + rigName; esc.Fingerprint != want {
+		t.Errorf("alert fingerprint = %q, want %q", esc.Fingerprint, want)
+	}
+	for _, want := range []string{"gt-a", rigName, "land/gt-a", landingStuckAfter().String()} {
+		if !strings.Contains(esc.Reason, want) {
+			t.Errorf("alert reason %q does not name %q", esc.Reason, want)
+		}
+	}
+	if got := rec.Escalations(); len(got) != 1 {
+		t.Fatalf("escalations = %d, want one alert for one stuck landing", len(got))
+	}
+
+	w.Active("")
+	clears := rec.Clears()
+	wantKey := "landing-stuck:" + rigName
+	if len(clears) != 1 || len(clears[0].Fingerprints) != 1 || clears[0].Fingerprints[0] != wantKey {
+		t.Errorf("clears = %+v, want one under %s when the landing ends", clears, wantKey)
+	}
+}
+
+// TestLandingStuckAlertStaysQuietUnderTheCIWait: a landing still inside the
+// wait is healthy work, not an alert, and leaving flight clears nothing
+// because nothing was raised (gt-fn9e6.27).
+func TestLandingStuckAlertStaysQuietUnderTheCIWait(t *testing.T) {
+	t.Parallel()
+	const rigName = "testrig"
+	clk := clockwork.NewFakeClockAt(time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC))
+	rec := newSignalingNotifier()
+	w := forgejoLandingWorker(t, rigName, clk, rec)
+
+	w.Active("gt-a")
+	clk.BlockUntil(1)
+	clk.Advance(landingStuckAfter() - time.Minute)
+	w.Active("")
+
+	if esc := rec.Escalations(); len(esc) != 0 {
+		t.Errorf("escalations = %+v, want none before the CI wait is out", esc)
+	}
+	if clears := rec.Clears(); len(clears) != 0 {
+		t.Errorf("clears = %+v, want none for an alert that never fired", clears)
+	}
+}
+
+// TestLandingStuckAlertNeedsAForgejoRig: a rig on the local gate has no CI
+// wait to be stuck in, so its landing raises nothing however long it runs
+// (gt-fn9e6.27).
+func TestLandingStuckAlertNeedsAForgejoRig(t *testing.T) {
+	t.Parallel()
+	const rigName = "testrig"
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, rigName)
+	if err := os.MkdirAll(filepath.Join(rigPath, ".repo.git"), 0o755); err != nil {
+		t.Fatalf("mkdir .repo.git: %v", err)
+	}
+	writeDaemonRigConfigFile(t, rigPath, `{"type":"rig","version":1,"name":"testrig","default_branch":"main"}`)
+
+	clk := clockwork.NewFakeClockAt(time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC))
+	rec := newSignalingNotifier()
+	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: rec, clock: clk}
+	w, err := d.newRigLandingWorker(rigName)
+	if err != nil {
+		t.Fatalf("newRigLandingWorker: %v", err)
+	}
+
+	w.Active("gt-a")
+	clk.Advance(landingStuckAfter() + time.Hour)
+	w.Active("")
+
+	if esc := rec.Escalations(); len(esc) != 0 {
+		t.Errorf("escalations = %+v, want none for a rig with no Forgejo block", esc)
+	}
+	if clears := rec.Clears(); len(clears) != 0 {
+		t.Errorf("clears = %+v, want none for a key this rig does not own", clears)
+	}
+}
+
+// TestLandingStuckWatchSurvivesAPanickingAlert: the alert path runs on the
+// watch's own goroutine, so a panic there must neither take the daemon down
+// nor wedge the end that follows it (gt-fn9e6.27). end() blocking forever is
+// the failure this guards, so a hang here is the test failing.
+func TestLandingStuckWatchSurvivesAPanickingAlert(t *testing.T) {
+	t.Parallel()
+	clk := clockwork.NewFakeClockAt(time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC))
+	w := &landingStuckWatch{
+		rig:   "testrig",
+		clk:   clk,
+		after: landingStuckAfter(),
+		raise: func(string) { panic("the alert path is broken") },
+		clear: func() {},
+		logf:  func(string, ...any) {},
+	}
+	end := w.begin("gt-a")
+	clk.BlockUntil(1)
+	clk.Advance(landingStuckAfter() + time.Minute)
+	end()
 }

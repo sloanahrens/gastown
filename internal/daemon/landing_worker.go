@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -485,6 +486,10 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	// replaces the force-push that writes the target. The same block decides
 	// the landing's deadline below, so it is read once, here (gt-fn9e6.26).
 	forgejoCfg := rig.ResolveForgejoConfig(townRoot, rigName)
+	var stuck *landingStuckWatch
+	// stuckEnd ends the in-flight bead's watch; nil between beads and for a
+	// rig with no watch. Only the Active callback below touches it.
+	var stuckEnd func()
 	if forgejoCfg != nil {
 		candidate, merger, err := d.newForgejoLanding(rigName, landingRemote, forgejoCfg, repo, landings, cfg)
 		if err != nil {
@@ -492,6 +497,10 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		}
 		lander.Candidate = candidate
 		lander.Merger = merger
+		// Only a cut-over rig can be stuck in the CI wait: a rig on the local
+		// gate has a stage alarm and a pass deadline instead, and an alert
+		// keyed per rig must have exactly one owner (gt-fn9e6.27).
+		stuck = d.newLandingStuckWatch(rigName)
 	}
 	run := postLandRun(repo, workRoot, d.landingLogRoot(rigName), townRoot, rigName, landingRemote, landingWorkerDuration(cfg.PostLandTimeoutStr, defaultPostLandTimeout))
 	mainState := fileMainState{path: RedMainStatePath(townRoot, rigName)}
@@ -555,8 +564,22 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Active: func(id string) {
 			// The Active callback is the landing-stuck item's clock: a bead
 			// entering flight is when its in-flight time starts, and leaving
-			// it is activity (gt-vsct7.3).
+			// it is activity (gt-vsct7.3). The same window arms the
+			// stuck-landing alert, so the two never disagree about what is in
+			// flight (gt-fn9e6.27).
 			d.landingStates.setBead(rigName, id, d.clk().Now())
+			// The landworker calls Active from its own goroutine, one bead at
+			// a time, so the pending end belongs to a plain local.
+			// A bead leaving flight ends the watch, and one entering it
+			// replaces whatever was armed, so a bead whose end never came
+			// cannot alert on a landing that has already moved on.
+			if stuckEnd != nil {
+				stuckEnd()
+				stuckEnd = nil
+			}
+			if id != "" {
+				stuckEnd = stuck.begin(id)
+			}
 		},
 		ClearIntent: func(w land.Work) error {
 			seat := supervisor.IntentSeat(supervisor.SeatFor(rigName, constants.RolePolecat, w.Worker))
@@ -727,6 +750,15 @@ func landingCIBudget() time.Duration {
 	return land.DefaultCandidateWaitTimeout + land.DefaultCandidateCallTimeout
 }
 
+// landingStuckAfter is how long a landing on a Forgejo rig may stay in flight
+// before the daemon alerts: the candidate gate's CI wait, the one legitimate
+// stall of that length. A gate here takes 30 seconds to 3 minutes, so a
+// landing still in flight past the wait is waiting on a runner the operator
+// has to look at (gt-fn9e6.27).
+func landingStuckAfter() time.Duration {
+	return land.DefaultCandidateWaitTimeout
+}
+
 // landingGateBudget is the wall the merged-tree gate's stage may legitimately
 // take: its lint, test and shell steps' timeouts summed, the same numbers
 // rigLandGate arms them with. Summing the shell step even when a submission
@@ -762,6 +794,103 @@ func (d *Daemon) landingSlowAlarm(rigName string, cfg *LandingWorkerConfig) *lan
 		EvidenceDir: func(ctx context.Context, dir string) string {
 			return landingLogDir(ctx, d.landingLogRoot(rigName), dir)
 		},
+	}
+}
+
+// landingStuckWatch is one rig's stuck-landing watchdog: it raises
+// landing-stuck:<rig> while a landing has been in flight longer than the CI
+// wait, and clears it when the landing leaves flight. The alert names the
+// bead, the rig and the candidate branch the gate pushed, so the operator
+// knows which run to read (gt-fn9e6.27).
+//
+// It is a second goroutine because the landing pass is blocked for the whole
+// of a Forgejo landing — inside the CI wait, then om, then the merge — and so
+// cannot notice its own stall. Its clock is the bead's flight, not the pass:
+// a pass idling between beads is not stuck.
+type landingStuckWatch struct {
+	// rig is the rig whose landings this watch guards, for log lines.
+	rig string
+	// clk times the watch; nil means the real clock.
+	clk clockwork.Clock
+	// after is how long the landing may be in flight before the alert; <= 0
+	// turns the watch off.
+	after time.Duration
+	// raise files the alert for the bead in flight.
+	raise func(beadID string)
+	// clear closes the alert raise filed, because the landing ended.
+	clear func()
+	// logf records a panic in the alert path; nil drops the record.
+	logf func(string, ...any)
+}
+
+// newLandingStuckWatch wires one rig's watchdog to the daemon's alert path:
+// raise and clear share the landing-stuck:<rig> fingerprint, so a landing
+// stuck across a restart records an occurrence on the open escalation rather
+// than minting another bead.
+func (d *Daemon) newLandingStuckWatch(rigName string) *landingStuckWatch {
+	key := "landing-stuck:" + rigName
+	return &landingStuckWatch{
+		rig:   rigName,
+		clk:   d.clk(),
+		after: landingStuckAfter(),
+		raise: func(beadID string) {
+			// The candidate branch is land/<bead> unless the submission named
+			// its own (land.Work.CandidateRef); the alert names the default so
+			// the operator has something to look for in the Forgejo UI.
+			d.escalateAlert(key, "landing_worker", fmt.Sprintf(
+				"the landing of %s on rig %s has been in flight longer than the %s CI wait without completing: candidate branch land/%s. Read the Forgejo CI run for that branch and the landing worker's pass log for it.",
+				beadID, rigName, landingStuckAfter(), beadID))
+		},
+		clear: func() {
+			d.clearAlerts("the landing on "+rigName+" left flight", key)
+		},
+		logf: d.logger.Printf,
+	}
+}
+
+// begin arms the watch for the landing of beadID; the returned func ends it,
+// stopping the timer and clearing an alert the watch raised. end waits for a
+// raise already in flight, so the clear that closes it can never overtake it.
+// A nil watch or a disabled one returns no end func at all.
+func (w *landingStuckWatch) begin(beadID string) func() {
+	if w == nil || w.after <= 0 {
+		return nil
+	}
+	clk := w.clk
+	if clk == nil {
+		clk = clockwork.NewRealClock()
+	}
+	timer := clk.NewTimer(w.after)
+	done := make(chan struct{})
+	raised := make(chan struct{})
+	go func() {
+		defer close(raised)
+		select {
+		case <-timer.Chan():
+			// A panic in the alert path would take the whole daemon down, so
+			// it is caught here; raised still closes, so end() cannot block on
+			// an alert that never finished.
+			defer func() {
+				if r := recover(); r != nil && w.logf != nil {
+					w.logf("landing_worker: %s: stuck-landing alert for %s panicked: %v", w.rig, beadID, r)
+				}
+			}()
+			w.raise(beadID)
+		case <-done:
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			// Stop reports whether it beat the timer: a false means the watch
+			// fired, and <-raised that its alert landed, so clearing here
+			// cannot leave the alert open behind a raise still running.
+			if !timer.Stop() {
+				<-raised
+				w.clear()
+			}
+			close(done)
+		})
 	}
 }
 
