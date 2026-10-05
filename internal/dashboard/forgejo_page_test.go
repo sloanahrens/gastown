@@ -1,6 +1,8 @@
 package dashboard
 
 import (
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -96,6 +98,43 @@ func TestForgejoActionRowsCarryTheStatsAndTheStatusColours(t *testing.T) {
 		if !strings.Contains(page, want) {
 			t.Errorf("index.html has no colour rule %q", want)
 		}
+	}
+}
+
+// The repo cell shows the name after the last "/": the owner is the same for
+// every run the pane reads, and the name is what tells rigs apart. The column
+// is sized in characters — the longest repo name here plus the one a shortened
+// cell needs before the ellipsis rule can bite — and the cell keeps the full
+// owner/name on hover, which is the only place the owner survives (gt-fn9e6.54).
+func TestForgejoActionRepoCellShowsTheNameWithoutItsOwner(t *testing.T) {
+	t.Parallel()
+
+	// The longest repo name the panel reads, so the column's width is checked
+	// against what it must hold rather than against the number in the CSS.
+	const longest = "organic-mechanic"
+
+	short := pageFunc(t, "repoShort")
+	for _, want := range []string{`lastIndexOf("/")`, "slice(cut + 1)"} {
+		if !strings.Contains(short, want) {
+			t.Errorf("repoShort does not split the name off at its owner: %s", want)
+		}
+	}
+
+	row := pageFunc(t, "actRow")
+	if !strings.Contains(row, `el("span", "arepo", repo)`) {
+		t.Error("the repo cell does not hold the shortened name")
+	}
+	if !strings.Contains(row, "repoCell.title = a.repo") {
+		t.Error("the shortened cell does not keep the full owner/name on hover")
+	}
+
+	page := string(indexHTML)
+	cols := regexp.MustCompile(`\n\.actsrow\{[^}]*grid-template-columns:\s*10px\s+(\d+)ch\s`).FindStringSubmatch(page)
+	if cols == nil {
+		t.Fatal("the repo column is not sized in characters, so nothing holds it to the longest name")
+	}
+	if n, _ := strconv.Atoi(cols[1]); n < len(longest)+1 {
+		t.Errorf("the repo column is %sch, too narrow for %q plus a character of slack", cols[1], longest)
 	}
 }
 

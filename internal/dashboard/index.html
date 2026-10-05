@@ -104,7 +104,7 @@ section.collapsed>h2{border-bottom:0}
 .feedhead .caret{display:inline-block;width:10px}
 .acts{margin-bottom:6px}
 .actssum{color:var(--dim);padding:1px 0 3px}
-.actsrow{display:grid;grid-template-columns:10px 92px minmax(0,1fr) 52px 46px;gap:8px;align-items:center;height:16px;line-height:16px}
+.actsrow{display:grid;grid-template-columns:10px 17ch minmax(0,1fr) 52px 46px;gap:8px;align-items:center;height:16px;line-height:16px}
 .actsrow>*{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .actsrow .an{color:var(--dim)}
 .actsrow.act-failure,.actsrow.act-failure .an{color:var(--red)}
@@ -694,6 +694,17 @@ function actsSum(a) {
   return parts.join(" · ");
 }
 
+// repoShort is what the repo cell shows: the part after the last "/", because
+// the owner is the same for every run the panel reads and the name is the part
+// that tells rigs apart. A name already without an owner, and a trailing slash
+// with nothing after it, come back as they came — never empty (gt-fn9e6.54).
+function repoShort(name) {
+  const s = name || "";
+  const cut = s.lastIndexOf("/");
+  const short = cut >= 0 ? s.slice(cut + 1) : s;
+  return short || s;
+}
+
 // actRow is one compact action line: status dot, repo, bead, how long the run
 // took, and how long ago it finished. A run still going shows its elapsed in
 // place of the duration, ticking from its start — the start is its only stamp,
@@ -707,7 +718,12 @@ function actRow(a) {
   const row = el("div", "actsrow" + (st === "failure" ? " act-failure" : ""));
   const dot = el("span", "adot " + (ACT_CLASS[st] || ""));
   dot.title = st || "unknown status";
-  row.append(dot, el("span", "arepo", a.repo || ""), el("span", "abead", a.bead || ""));
+  const repo = repoShort(a.repo);
+  const repoCell = el("span", "arepo", repo);
+  // The shortened cell is the one whose text no longer says which owner the
+  // repo came from, so it alone carries the full name on hover.
+  if (repo !== (a.repo || "")) repoCell.title = a.repo;
+  row.append(dot, repoCell, el("span", "abead", a.bead || ""));
   const took = el("span", "an", running || a.started ? fmtDur(running ? secsSince(a.started) : a.duration_secs) : "");
   if (running && a.started) { took.dataset.since = a.started; took.title = "running for " + fmtDur(secsSince(a.started)); }
   else took.title = a.started ? "ran " + fmtDur(a.duration_secs) : "not started";
