@@ -16,9 +16,15 @@ func infraReport(rig string, fj, rn InfraProbe) LandingInfraReport {
 // healthyInfra is one probe that answered healthy.
 func healthyInfra() InfraProbe { return InfraProbe{OK: true} }
 
-// failingInfra is one probe that has been failing for age.
+// failingInfra is one version probe that has been failing for age.
 func failingInfra(age time.Duration, detail string) InfraProbe {
 	return InfraProbe{Since: ago(age), Detail: detail}
+}
+
+// waitingInfra is a runner probe whose oldest queued run has been waiting for
+// age.
+func waitingInfra(age time.Duration, runID int64) InfraProbe {
+	return InfraProbe{WaitingSince: ago(age), WaitingRun: runID}
 }
 
 // infraCompute computes a healthy town with the given landing-infrastructure
@@ -101,22 +107,26 @@ func TestForgejoFieldFollowsTheVersionProbe(t *testing.T) {
 	}
 }
 
-// TestRunnerFieldFollowsTheOnlineRunner: at least one online runner is green,
-// none online is degraded and then red on the same thresholds, and an
-// unanswerable probe is never red.
-func TestRunnerFieldFollowsTheOnlineRunner(t *testing.T) {
+// TestRunnerFieldFollowsRunPickup: the runner field reads the run queue,
+// green while nothing waits past the pickup threshold, degraded while a run is
+// late and red once one has waited InfraRunnerRedAfter. A queue the probe
+// cannot read is unknown rather than a verdict (gt-fn9e6.56).
+func TestRunnerFieldFollowsRunPickup(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
 		rn   InfraProbe
 		want Verdict
 	}{
-		{"one online", InfraProbe{OK: true, Online: 1}, Green},
-		{"none online just now", failingInfra(0, "0 of 1 runners online"), Degraded},
-		{"none online two minutes", failingInfra(2*time.Minute, "0 of 1 runners online"), Degraded},
-		{"none online five minutes", failingInfra(InfraRedAfter, "0 of 1 runners online"), Red},
+		{"empty queue", InfraProbe{}, Green},
+		{"a run just queued", waitingInfra(30*time.Second, 91), Green},
+		{"a run two minutes", waitingInfra(2*time.Minute, 91), Green},
+		{"a run three minutes", waitingInfra(InfraRunnerDegradedAfter, 91), Degraded},
+		{"a run nine minutes", waitingInfra(9*time.Minute, 91), Degraded},
+		{"a run ten minutes", waitingInfra(InfraRunnerRedAfter, 91), Red},
+		{"a run an hour", waitingInfra(time.Hour, 91), Red},
 		{"no token file", InfraProbe{Unavailable: "the landing bot's token is unusable: no such file"}, VerdictUnknown},
-		{"no base URL", InfraProbe{Unavailable: "the rig's Forgejo settings name no usable remote URL"}, VerdictUnknown},
+		{"unreadable run queue", InfraProbe{Unavailable: "the run queue could not be read: 403"}, VerdictUnknown},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -134,6 +144,41 @@ func TestRunnerFieldFollowsTheOnlineRunner(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRunnerFieldNamesTheWaitingRun: an empty queue says so, and a waiting run
+// puts its age in the value and its id and age in the detail — which is what
+// an operator opens the run with (gt-fn9e6.56).
+func TestRunnerFieldNamesTheWaitingRun(t *testing.T) {
+	t.Parallel()
+	empty := infraFieldOf(t, infraCompute(t, infraReport("gastown", healthyInfra(), InfraProbe{})), FieldRunner, "gastown")
+	if empty.Value != "no waiting runs" {
+		t.Errorf("empty queue value = %q, want %q", empty.Value, "no waiting runs")
+	}
+
+	late := infraFieldOf(t, infraCompute(t, infraReport("gastown", healthyInfra(), waitingInfra(12*time.Minute, 91))), FieldRunner, "gastown")
+	if late.Verdict != Red {
+		t.Fatalf("verdict = %s, want %s", late.Verdict, Red)
+	}
+	if !strings.Contains(late.Value, "12m") {
+		t.Errorf("value = %q, want it to carry the wait", late.Value)
+	}
+	if !strings.Contains(late.Detail, "91") || !strings.Contains(late.Detail, "12m") {
+		t.Errorf("detail = %q, want the run id and the wait", late.Detail)
+	}
+}
+
+// TestRunnerFieldGreenAgeIsNotAWait: a run queued moments ago is the queue
+// working, and the field says so without reading as a failure.
+func TestRunnerFieldGreenAgeIsNotAWait(t *testing.T) {
+	t.Parallel()
+	f := infraFieldOf(t, infraCompute(t, infraReport("gastown", healthyInfra(), waitingInfra(45*time.Second, 91))), FieldRunner, "gastown")
+	if f.Verdict != Green {
+		t.Fatalf("verdict = %s, want %s", f.Verdict, Green)
+	}
+	if !strings.Contains(f.Value, "45s") {
+		t.Errorf("value = %q, want it to carry the wait it still tolerates", f.Value)
 	}
 }
 
@@ -163,7 +208,7 @@ func TestInfraVerdictIsTheRuleTheLineShows(t *testing.T) {
 		p    InfraProbe
 		want Verdict
 	}{
-		{"healthy", InfraProbe{OK: true, Online: 2}, Green},
+		{"healthy", InfraProbe{OK: true}, Green},
 		{"failing", failingInfra(time.Minute, "boom"), Degraded},
 		{"failing past the limit", failingInfra(InfraRedAfter+time.Second, "boom"), Red},
 		{"not run yet", InfraProbe{}, Degraded},
@@ -174,6 +219,32 @@ func TestInfraVerdictIsTheRuleTheLineShows(t *testing.T) {
 			t.Parallel()
 			if got := InfraVerdict(tc.p, now); got != tc.want {
 				t.Errorf("InfraVerdict(%+v) = %s, want %s", tc.p, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestInfraRunnerVerdictIsTheRuleTheLineShows pins the exported runner rule:
+// the patrol escalates on the run pickup thresholds, not the version probe's
+// (gt-fn9e6.56).
+func TestInfraRunnerVerdictIsTheRuleTheLineShows(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		p    InfraProbe
+		want Verdict
+	}{
+		{"nothing waiting", InfraProbe{}, Green},
+		{"a short wait", waitingInfra(time.Minute, 7), Green},
+		{"a late run", waitingInfra(InfraRunnerDegradedAfter, 7), Degraded},
+		{"no pickup", waitingInfra(InfraRunnerRedAfter, 7), Red},
+		{"unavailable", InfraProbe{Unavailable: "the run queue could not be read: 403"}, VerdictUnknown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := InfraRunnerVerdict(tc.p, now); got != tc.want {
+				t.Errorf("InfraRunnerVerdict(%+v) = %s, want %s", tc.p, got, tc.want)
 			}
 		})
 	}
