@@ -23,7 +23,7 @@ func TestPauseIsPausedRoundTrip(t *testing.T) {
 	}
 
 	before := time.Now().UTC().Truncate(time.Second)
-	if err := Pause(town, "gastown", role, name, "misbehaving", "mayor", "working"); err != nil {
+	if err := Pause(town, "gastown", role, name, "misbehaving", "supervisor", "working"); err != nil {
 		t.Fatalf("Pause: %v", err)
 	}
 	after := time.Now().UTC()
@@ -38,8 +38,8 @@ func TestPauseIsPausedRoundTrip(t *testing.T) {
 	if st.Reason != "misbehaving" {
 		t.Errorf("reason = %q, want %q", st.Reason, "misbehaving")
 	}
-	if st.PausedBy != "mayor" {
-		t.Errorf("pausedBy = %q, want %q", st.PausedBy, "mayor")
+	if st.PausedBy != "supervisor" {
+		t.Errorf("pausedBy = %q, want %q", st.PausedBy, "supervisor")
 	}
 	if st.PriorAgentState != "working" {
 		t.Errorf("priorAgentState = %q, want %q", st.PriorAgentState, "working")
@@ -148,7 +148,6 @@ func TestAddressForMatchesMarkerPath(t *testing.T) {
 		{"gastown", "refinery", "", "gastown/refinery"},
 		{"gastown", "crew", "opal", "gastown/crew/opal"},
 		{"beads", "polecat", "jade", "beads/jade"},
-		{"", "mayor", "", "mayor"},
 		{"", "deacon", "", "deacon"},
 	}
 	for _, tc := range cases {
@@ -268,7 +267,7 @@ func TestPauseRepairsBrokenMarker(t *testing.T) {
 		t.Error("IsPaused returned no error for an unparseable marker; the CLI cannot detect the repair case")
 	}
 
-	if err := Pause(town, "gastown", "polecat", "flint", "the real reason", "mayor", ""); err != nil {
+	if err := Pause(town, "gastown", "polecat", "flint", "the real reason", "supervisor", ""); err != nil {
 		t.Fatalf("Pause: %v", err)
 	}
 	paused, st, err := IsPaused(town, "gastown", "polecat", "flint")
@@ -385,7 +384,7 @@ func TestListPaused(t *testing.T) {
 		t.Fatalf("empty town: got %d paused, want 0", len(got))
 	}
 
-	if err := Pause(town, "gastown", "polecat", "flint", "looping", "mayor", ""); err != nil {
+	if err := Pause(town, "gastown", "polecat", "flint", "looping", "supervisor", ""); err != nil {
 		t.Fatalf("Pause: %v", err)
 	}
 	if err := Pause(town, "gastown", "witness", "", "parked", "human", ""); err != nil {

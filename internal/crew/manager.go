@@ -425,7 +425,7 @@ func (m *Manager) syncRemotesFromRig(crewPath string) error {
 	}
 
 	for _, remote := range remotes {
-		if remote == "" || remote == "mayor" {
+		if remote == "" {
 			continue // Skip empty and local-only remotes
 		}
 
@@ -451,7 +451,7 @@ func (m *Manager) syncRemotesFromRig(crewPath string) error {
 		// Sync push URL for read-only upstream forks.
 		// Dual-source authority model: origin's push URL comes from town.json
 		// (via m.rig.PushURL, which config.json populates). Non-origin remotes
-		// get push URLs from mayor's git config. This split relies on town.json
+		// get push URLs from the rig clone's git config. This split relies on town.json
 		// and config.json staying in sync — RegisterRig writes both to ensure this.
 		if remote == "origin" {
 			configPushURL := strings.TrimSpace(m.rig.PushURL)
@@ -481,7 +481,7 @@ func (m *Manager) syncRemotesFromRig(crewPath string) error {
 					style.PrintWarning("could not sync push URL for %s: %v", remote, cfgErr)
 				}
 			} else {
-				// Mayor has no custom push URL — only clear if crew has a stale one.
+				// The rig clone has no custom push URL — only clear if crew has a stale one.
 				crewPush, cpErr := crewGit.GetPushURL(remote)
 				crewFetch, cfErr := crewGit.RemoteURL(remote)
 				if cpErr != nil || cfErr != nil {
@@ -799,7 +799,7 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 
 	// Compute environment variables BEFORE creating the session.
 	// These are passed via tmux -e flags so the initial shell inherits the correct
-	// env from the start, preventing parent env (e.g., GT_ROLE=mayor) from leaking
+	// env from the start, preventing parent env (e.g., a stale GT_ROLE) from leaking
 	// into crew sessions. See: https://github.com/steveyegge/gastown/issues/1289
 	envVars := config.AgentEnv(config.AgentEnvConfig{
 		Role:             "crew",

@@ -135,7 +135,7 @@ const (
 
 // Payload "caller" stamps for the town processes that author session events
 // from outside a test binary. Those events name the tmux session as their
-// actor ("gt-opal", "hq-mayor"), a prefix the town does not know, so gt
+// actor ("gt-opal", "hq-deacon"), a prefix the town does not know, so gt
 // doctor's test-leaks check would read the town's own housekeeping as leaked
 // test fixtures. The stamp is the whole test: a fixture actor logged with any
 // other caller is still reported (gt-d9423, gt-rqajq).

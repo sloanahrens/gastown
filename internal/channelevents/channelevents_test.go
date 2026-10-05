@@ -103,11 +103,11 @@ func TestEmitToTown_GlobalChannelIgnoresRig(t *testing.T) {
 
 	// Town-global channels (single consumer) stay flat even when the
 	// emitter runs in a rig context.
-	path, err := EmitToTown(townRoot, "mayor", "gastown", "SLOT_OPEN", nil)
+	path, err := EmitToTown(townRoot, "witness", "gastown", "SLOT_OPEN", nil)
 	if err != nil {
 		t.Fatalf("EmitToTown failed: %v", err)
 	}
-	wantDir := filepath.Join(townRoot, "events", "mayor")
+	wantDir := filepath.Join(townRoot, "events", "witness")
 	if filepath.Dir(path) != wantDir {
 		t.Errorf("event dir = %q, want %q", filepath.Dir(path), wantDir)
 	}
@@ -162,7 +162,7 @@ func TestIsPerRig(t *testing.T) {
 			t.Errorf("IsPerRig(%q) = false, want true", channel)
 		}
 	}
-	for _, channel := range []string{"mayor", "other"} {
+	for _, channel := range []string{"witness", "other"} {
 		if IsPerRig(channel) {
 			t.Errorf("IsPerRig(%q) = true, want false", channel)
 		}
@@ -176,7 +176,7 @@ func TestDir(t *testing.T) {
 	if got, want := Dir(townRoot, "refinery", "gastown"), filepath.Join(townRoot, "events", "refinery", "gastown"); got != want {
 		t.Errorf("Dir per-rig = %q, want %q", got, want)
 	}
-	if got, want := Dir(townRoot, "mayor", "gastown"), filepath.Join(townRoot, "events", "mayor"); got != want {
+	if got, want := Dir(townRoot, "witness", "gastown"), filepath.Join(townRoot, "events", "witness"); got != want {
 		t.Errorf("Dir global = %q, want %q", got, want)
 	}
 }

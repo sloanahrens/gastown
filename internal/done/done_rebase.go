@@ -66,8 +66,8 @@ func recoverDivergedPush(g divergedPushGit, remote, refspec, branch, target stri
 	// A failed push doesn't itself update the local remote-tracking ref, so
 	// without a fresh fetch here origin/<branch> could still be whatever was
 	// last observed — stale enough to misjudge the comparison below (this is
-	// also the mechanism behind the separate stale-read false alarm the
-	// mayor flagged on garnet/gt-en6o).
+	// also the mechanism behind the separate stale-read false alarm on
+	// garnet/gt-en6o).
 	if err := g.Fetch(remote); err != nil {
 		return false, "", fmt.Errorf("fetch %s before divergence check: %w", remote, err)
 	}

@@ -599,7 +599,7 @@ func TestNamePool_ReservedNamesInCustomNames(t *testing.T) {
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// Custom names that include reserved names should have them filtered out
-	custom := []string{"alpha", "witness", "beta", "mayor", "gamma"}
+	custom := []string{"alpha", "witness", "beta", "deacon", "gamma"}
 	pool := NewNamePoolWithConfig(tmpDir, "testrig", "", custom, 10)
 
 	// Allocate all names
@@ -614,8 +614,8 @@ func TestNamePool_ReservedNamesInCustomNames(t *testing.T) {
 	if allocated["witness"] {
 		t.Error("allocated reserved name 'witness' from custom names")
 	}
-	if allocated["mayor"] {
-		t.Error("allocated reserved name 'mayor' from custom names")
+	if allocated["deacon"] {
+		t.Error("allocated reserved name 'deacon' from custom names")
 	}
 	if !allocated["alpha"] || !allocated["beta"] || !allocated["gamma"] {
 		t.Errorf("expected alpha, beta, gamma to be allocated, got %v", allocated)

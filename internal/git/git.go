@@ -1239,7 +1239,7 @@ func (g *Git) RefuseForkBackedDefaultPush(remote, refspec, defaultBranch string)
 	if destination != defaultBranch || !g.ForkBackedRemote(remote) {
 		return nil
 	}
-	return fmt.Errorf("refusing direct push to %s/%s: fork/upstream rig detected; push a feature branch and use the Mayor-managed fork PR flow to upstream %s (no refs were pushed)", remote, destination, defaultBranch)
+	return fmt.Errorf("refusing direct push to %s/%s: fork/upstream rig detected; push a feature branch and use the fork PR flow to upstream %s (no refs were pushed)", remote, destination, defaultBranch)
 }
 
 func pushDestinationBranch(refspec string) string {

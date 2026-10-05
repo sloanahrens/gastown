@@ -763,8 +763,8 @@ const polecatPoolKeyHelp = `  polecat_pool.max_priority    Priority ceiling for 
                               needs-pro)
   polecat_pool.mode            Retired with the plugin; kept and ignored. The
                               dispatcher always slings: "sling" used to fill an
-                              empty seat, "nudge" asked the mayor (default:
-                              sling)
+                              empty seat, "nudge" asked a town agent to fill
+                              it (default: sling)
   polecat_pool.shape_gate      What a dispatch does with a candidate's shape
                               lint (gt spec lint): "off" runs no lint, "warn"
                               holds a refused bead with the verdict commented,

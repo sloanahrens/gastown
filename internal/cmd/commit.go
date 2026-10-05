@@ -81,7 +81,7 @@ func runCommit(cmd *cobra.Command, args []string) error {
 
 // identityToEmail converts a Gas Town identity to a git email address.
 // "gastown/crew/jack" → "gastown.crew.jack@domain"
-// "mayor/" → "mayor@domain"
+// "deacon/" → "deacon@domain"
 func identityToEmail(identity, domain string) string {
 	// Remove trailing slash if present
 	identity = strings.TrimSuffix(identity, "/")
