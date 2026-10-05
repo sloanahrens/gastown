@@ -17,11 +17,12 @@ bd -C ~/gt/wyvern/mayor/rig show wyv-123     # Wyvern rig beads
 ```
 
 **How it works**: Routes are defined in `~/gt/.beads/routes.jsonl`. Each rig's
-prefix maps to its beads location (the mayor's clone in that rig).
+prefix maps to its beads location (the rig's canonical clone at
+`<rig>/mayor/rig`).
 
 | Prefix | Routes To | Purpose |
 |--------|-----------|---------|
-| `hq-*` | `~/gt/.beads/` | Mayor mail, cross-rig coordination |
+| `hq-*` | `~/gt/.beads/` | Cross-rig coordination, agent identity |
 | `gp-*` | `~/gt/greenplace/mayor/rig/.beads/` | Greenplace project issues |
 | `wyv-*` | `~/gt/wyvern/mayor/rig/.beads/` | Wyvern project issues |
 
@@ -116,7 +117,6 @@ Town-level role defaults live in `mayor/config.json` under:
       "fg": "#eeeeee"
     },
     "role_defaults": {
-      "mayor": "forest",
       "polecat": "rust",
       "crew": "none"
     }
@@ -124,7 +124,7 @@ Town-level role defaults live in `mayor/config.json` under:
 }
 ```
 
-`role_defaults` supports `mayor`, `crew`, and `polecat`.
+`role_defaults` supports `crew` and `polecat`.
 
 **Landing and gate fields:**
 
@@ -511,7 +511,7 @@ These are set in tmux session environment when agents are spawned.
 
 | Variable | Purpose | Example |
 |----------|---------|---------|
-| `GT_ROLE` | Agent role type | `mayor`, `polecat`, `crew` |
+| `GT_ROLE` | Agent role type | `polecat`, `crew` |
 | `GT_TOWN_ROOT` | Town root directory | `/home/user/gt` |
 | `BD_ACTOR` | Agent identity for attribution | `gastown/polecats/toast` |
 | `GIT_AUTHOR_NAME` | Commit attribution (same as BD_ACTOR) | `gastown/polecats/toast` |
@@ -538,7 +538,6 @@ These are set in tmux session environment when agents are spawned.
 
 | Role | Key Variables |
 |------|---------------|
-| **Mayor** | `GT_ROLE=mayor`, `BD_ACTOR=mayor` |
 | **Polecat** | `GT_ROLE=polecat`, `GT_RIG=<rig>`, `GT_POLECAT=<name>`, `BD_ACTOR=<rig>/polecats/<name>` |
 | **Crew** | `GT_ROLE=crew`, `GT_RIG=<rig>`, `GT_CREW=<name>`, `BD_ACTOR=<rig>/crew/<name>` |
 
@@ -549,7 +548,7 @@ environment variables. Mismatches are reported as warnings:
 
 ```
 ⚠ env-vars: Found 3 env var mismatch(es) across 1 session(s)
-    hq-mayor: missing GT_TOWN_ROOT (expected "/home/user/gt")
+    gt-crew-sloan: missing GT_TOWN_ROOT (expected "/home/user/gt")
 ```
 
 Fix by restarting sessions: `gt shutdown && gt up`
@@ -563,7 +562,6 @@ Understanding this hierarchy is essential for proper configuration.
 
 | Role | Working Directory | Notes |
 |------|-------------------|-------|
-| **Mayor** | `~/gt/mayor/` | Town-level coordinator, isolated from rigs |
 | **Crew** | `~/gt/<rig>/crew/<name>/rig/` | Persistent human workspace clone |
 | **Polecat** | `~/gt/<rig>/polecats/<name>/rig/` | Polecat worktree (ephemeral sandbox) |
 
@@ -577,7 +575,6 @@ Claude Code via the `--settings` flag. This keeps customer repos clean:
 
 ```
 ~/gt/
-├── mayor/.claude/settings.json              # Mayor settings (cwd = settings dir)
 └── <rig>/
     ├── crew/.claude/settings.json           # Shared by all crew members
     └── polecats/.claude/settings.json       # Shared by all polecats
@@ -639,7 +636,7 @@ Gas Town uses two settings templates based on role type:
 
 | Type | Roles | Key Difference |
 |------|-------|----------------|
-| **Interactive** | Mayor, Crew | Mail injected on `UserPromptSubmit` hook |
+| **Interactive** | Crew | Mail injected on `UserPromptSubmit` hook |
 | **Autonomous** | Polecat | Mail injected on `SessionStart` hook |
 
 Autonomous agents may start without user input, so they need mail checked
@@ -652,7 +649,6 @@ at session start. Interactive agents wait for user prompts.
 | Agent using wrong settings | Check `gt doctor`, verify `.claude/settings.json` in role parent dir |
 | Settings not found | Run `gt install` to recreate settings, or `gt doctor fix <check>` |
 | Source repo settings leaking | Run `gt doctor fix sparse-checkout` to remove legacy sparse checkout |
-| Mayor settings affecting polecats | Mayor should run in `mayor/`, not town root |
 
 ## CLI Reference
 
@@ -776,7 +772,6 @@ gt sling <bead> <rig>                    # Dispatch to a polecat in the rig
 Agent overrides:
 
 - `gt sling <bead> <rig> --agent <alias>` honours a `polecat_pool` seat or refuses the sling; a seat that is full never spends on the other agent instead.
-- `gt mayor start|attach|restart --agent <alias>` does the same.
 - `gt crew start <name> --agent <alias>` and `gt crew at <name> --agent <alias>` override the crew worker runtime.
 
 ### Communication
