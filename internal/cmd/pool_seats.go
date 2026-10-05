@@ -38,6 +38,11 @@ import (
 // sessions alone would sling a second bead into a pool class that was still
 // occupied (gt-2z8k1). The seat is not free until the landing worker records
 // the result.
+//
+// A seat can appear in more than one source at once — the seconds between
+// `gt done` writing its Submitted record and the session exiting leave it live
+// and mid-landing together (gt-xmcyk). Each source skips the seats an earlier
+// one already named, so a seat is one seat however many of them describe it.
 func poolSeatSessions(t sessionLister, townRoot string, pool *config.PolecatPool) ([]poolSession, error) {
 	return poolSeatSessionsWith(t, townRoot, poolDispositionFor(townRoot), poolSeatWorkFor(townRoot), pool)
 }
@@ -86,11 +91,26 @@ func poolOccupiedSessions(t sessionLister, townRoot string, disposition polecatD
 	if err != nil {
 		return nil, &poolOccupancyError{err: err}
 	}
-	landing, err := poolLandingSessions(townRoot, pool, work)
+	landing, err := poolLandingSessions(townRoot, pool, work, live)
 	if err != nil {
 		return nil, &poolOccupancyError{err: err}
 	}
 	return append(append(live, dead...), landing...), nil
+}
+
+// liveSeatKeys names the seats a live session already accounts for, keyed
+// "rig/polecat". The seat sources that enumerate seats another way (the dead
+// and the landing reads) skip these, so a seat stays one seat. A session that
+// names no seat — a witness, refinery or crew session, or a claim, which
+// carries no GT_ROLE — contributes nothing: it holds no pool seat.
+func liveSeatKeys(live []poolSession) map[string]bool {
+	seats := make(map[string]bool, len(live))
+	for _, s := range live {
+		if s.rig != "" && s.polecat != "" {
+			seats[s.rig+"/"+s.polecat] = true
+		}
+	}
+	return seats
 }
 
 // poolDeadHookedSessions lists the seats whose tmux session is gone but whose
@@ -124,12 +144,7 @@ func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, dispositi
 	if townRoot == "" || pool == nil || pool.OverflowAgent == "" || disposition == nil {
 		return nil, nil
 	}
-	liveSeats := make(map[string]bool, len(live))
-	for _, s := range live {
-		if s.rig != "" && s.polecat != "" {
-			liveSeats[s.rig+"/"+s.polecat] = true
-		}
-	}
+	liveSeats := liveSeatKeys(live)
 	rigs, err := knownRigNames(townRoot)
 	if err != nil {
 		return nil, err
@@ -209,13 +224,20 @@ func poolSeatWorkFor(townRoot string) poolSeatWorkFunc {
 // A record whose polecat directory is gone is left out, the way townhealth
 // reads the same directory: the seat is gone, and its record outlived it.
 //
+// A record for a seat live names is left out too (gt-xmcyk): `gt done` writes
+// the record before its session exits, so for those seconds one seat is live
+// and mid-landing at once, and counting both read 4/3 on a full pool and
+// refused the tick a seat (2026-10-04 19:17:35). Live already holds the seat;
+// the record adds nothing while it does.
+//
 // pool is the seat the town's polecats run; a landing seat is rendered on its
 // overflow agent, the class the pool owns. A nil pool (or one with no
 // overflow_agent) owns no seat, so nothing is rendered and no bead is read.
-func poolLandingSessions(townRoot string, pool *config.PolecatPool, work poolSeatWorkFunc) ([]poolSession, error) {
+func poolLandingSessions(townRoot string, pool *config.PolecatPool, work poolSeatWorkFunc, live []poolSession) ([]poolSession, error) {
 	if townRoot == "" || pool == nil || pool.OverflowAgent == "" || work == nil {
 		return nil, nil
 	}
+	liveSeats := liveSeatKeys(live)
 
 	type landing struct{ rig, name, bead string }
 	var candidates []landing
@@ -249,6 +271,9 @@ func poolLandingSessions(townRoot string, pool *config.PolecatPool, work poolSea
 		}
 		if _, serr := os.Stat(filepath.Join(townRoot, rig, "polecats", name)); serr != nil {
 			return nil // the seat is gone; the record outlived it
+		}
+		if liveSeats[rig+"/"+name] {
+			return nil // a live session already holds the seat
 		}
 		candidates = append(candidates, landing{rig: rig, name: name, bead: rec.WorkBead})
 		return nil
