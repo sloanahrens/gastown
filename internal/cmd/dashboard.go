@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/townhealth"
 	"github.com/steveyegge/gastown/internal/townstatus"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -256,7 +258,7 @@ var dashboardVerdicts = []string{"green", "degraded", "red", "unknown"}
 // dashboardHealth is gt status --line: the daemon's report, read from disk.
 func dashboardHealth(townRoot string) dashboard.Health {
 	now := time.Now()
-	lines, v, _ := townstatus.HealthView(townRoot, now)
+	lines, v, rep := townstatus.HealthView(townRoot, now)
 	h := dashboard.Health{Verdict: "unknown", ReadAt: now}
 	if len(lines) > 0 {
 		h.Line = lines[0]
@@ -264,7 +266,40 @@ func dashboardHealth(townRoot string) dashboard.Health {
 	if code := v.ExitCode(); code >= 0 && code < len(dashboardVerdicts) {
 		h.Verdict = dashboardVerdicts[code]
 	}
+	h.Causes = dashboardHealthCauses(rep)
 	return h
+}
+
+// dashboardHealthCauseMax caps the causes the pill carries. The header has one
+// line for the first cause; the rest ride its title.
+const dashboardHealthCauseMax = 3
+
+// dashboardHealthCauses is rep's non-green fields, worst verdict first, capped
+// at dashboardHealthCauseMax. Ordering and rank match townhealth.Line, so the
+// pill's first cause is the line's first token for a reader cross-checking
+// (gt-70aa6). A missing report reads as no causes.
+func dashboardHealthCauses(rep *townhealth.Report) []dashboard.HealthCause {
+	if rep == nil {
+		return nil
+	}
+	bad := make([]townhealth.Field, 0, len(rep.Fields))
+	for _, f := range rep.Fields {
+		if f.Verdict != townhealth.Green {
+			bad = append(bad, f)
+		}
+	}
+	sort.SliceStable(bad, func(i, j int) bool { return bad[i].Verdict.ExitCode() > bad[j].Verdict.ExitCode() })
+	if len(bad) > dashboardHealthCauseMax {
+		bad = bad[:dashboardHealthCauseMax]
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	causes := make([]dashboard.HealthCause, 0, len(bad))
+	for _, f := range bad {
+		causes = append(causes, dashboard.HealthCause{Name: f.Name, Rig: f.Rig, Subject: f.Subject, Detail: f.Detail})
+	}
+	return causes
 }
 
 // dashboardSummary is the summary line's state as fields, the polecat table,

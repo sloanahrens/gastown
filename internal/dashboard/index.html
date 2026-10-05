@@ -187,11 +187,24 @@ function tile(k, v, sub, cls) {
   return t;
 }
 
+// causeText keys one non-green health field the way the health line does —
+// name, /rig, :subject — then the detail that explains it.
+function causeText(c) {
+  let k = c.name || "";
+  if (c.rig) k += "/" + c.rig;
+  if (c.subject) k += ":" + c.subject;
+  return c.detail ? k + ": " + c.detail : k;
+}
+
+// renderHealth shows the verdict and, when it is not green, the worst cause
+// beside it, so the pill answers "why" without reading the line under it.
 function renderHealth(h) {
   const v = (h && h.verdict) || "unknown";
+  const causes = (h && h.causes) || [];
   const p = $("verdict");
   p.className = "pill " + v;
-  p.textContent = v.toUpperCase();
+  p.textContent = v.toUpperCase() + (causes.length ? " · " + causeText(causes[0]) : "");
+  p.title = causes.map(causeText).join("\n");
   $("healthline").textContent = h && h.line ? h.line : "no health report";
 }
 
