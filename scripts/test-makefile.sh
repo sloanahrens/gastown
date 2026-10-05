@@ -20,6 +20,8 @@ bash scripts/gate-vs-load_test.sh
 bash scripts/tier-sweep_test.sh
 bash -n scripts/forgejo-provision.sh
 bash scripts/forgejo-provision_test.sh
+bash -n scripts/forgejo-probe.sh
+bash scripts/forgejo-probe_test.sh
 bash -n scripts/test-makefile.sh
 bash -n scripts/lint-lock-wait.sh
 bash -n scripts/makefile-gate_test.sh
