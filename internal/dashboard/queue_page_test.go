@@ -34,3 +34,22 @@ func TestWorkQueueOpensOnGastown(t *testing.T) {
 		t.Errorf("renderQueue no longer falls back to all stores when the chosen rig has no rows")
 	}
 }
+
+// TestWorkQueueMarksBeadsHeldByAnAssignee reads the embedded page (gt-j70o5):
+// the dispatcher takes only unassigned beads, so a bead someone holds has to
+// be told apart from free work — a tag on the row, a chip that filters to it —
+// and the caption has to say which way the dispatcher reads an assignee.
+func TestWorkQueueMarksBeadsHeldByAnAssignee(t *testing.T) {
+	t.Parallel()
+
+	page := string(indexHTML)
+	for _, want := range []string{
+		`else if (b.shape === "held")`,
+		`chip("held", inRig.filter(b => b.shape === "held").length`,
+		"the spec dispatcher: shaped, unassigned",
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("index.html has no %q", want)
+		}
+	}
+}

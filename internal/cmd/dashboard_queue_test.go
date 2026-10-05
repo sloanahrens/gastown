@@ -189,3 +189,42 @@ func TestQueueMarksBeadsInParkedRigsNotDispatchable(t *testing.T) {
 		t.Errorf("parked rigs = %v", q.ParkedRigs)
 	}
 }
+
+// A bead assigned to someone is theirs, not free work: the dispatcher takes
+// only unassigned beads, so an assigned bead reads held whether or not it is
+// shaped, and it stays in the list because it is work in progress rather than
+// work nobody can pick up. A parked rig still outranks the assignee.
+func TestQueueHoldsBeadsAssignedToSomeone(t *testing.T) {
+	t.Parallel()
+	shaped := "## Goal\n\ng\n\n## Constraints\n\nc\n\n## Out of scope\n\no\n\n## Gate\n\nmake gate\n\n## Size\n\none worker, one landing\n\n## Acceptance\n\n- [ ] done\n"
+	gastown := &fakeQueueStore{ready: []*beads.Issue{
+		{ID: "gt-held-shaped", Title: "someone is on it", Type: "task", Description: shaped, Assignee: "gastown/crew/sloan"},
+		{ID: "gt-held-rough", Title: "someone is shaping it", Type: "task", Description: "note", Assignee: "gastown/crew/sloan"},
+		{ID: "gt-free-shaped", Title: "free", Type: "task", Description: shaped},
+		{ID: "gt-free-rough", Title: "free and rough", Type: "task", Description: "note"},
+	}}
+	mango := &fakeQueueStore{ready: []*beads.Issue{
+		{ID: "ma-1", Title: "parked and assigned", Type: "task", Description: shaped, Assignee: "mango/crew/x"},
+	}}
+	r := queueReaderOver(map[string]dashQueueStore{"gastown": gastown, "mango": mango}, "gastown", "mango")
+	r.parked = func(rig string) bool { return rig == "mango" }
+	q := r.read(time.Now())
+	shape, note := map[string]string{}, map[string]string{}
+	for _, b := range q.Ready {
+		shape[b.ID], note[b.ID] = b.Shape, b.ShapeNote
+	}
+	for id, want := range map[string]string{
+		"gt-held-shaped": "held",
+		"gt-held-rough":  "held",
+		"gt-free-shaped": "ok",
+		"gt-free-rough":  "fix",
+		"ma-1":           "parked",
+	} {
+		if shape[id] != want {
+			t.Errorf("%s: shape = %q, want %q", id, shape[id], want)
+		}
+	}
+	if n := note["gt-held-shaped"]; !strings.Contains(n, "gastown/crew/sloan") || !strings.Contains(n, "unassigned") {
+		t.Errorf("a held row's note names the assignee and the rule: %q", n)
+	}
+}
