@@ -84,6 +84,23 @@ func TestLineFitsAndCountsTheRest(t *testing.T) {
 	}
 }
 
+// gt status renders a degraded promotion beside the rig's main line, keyed
+// promote/<rig>, with the lag as its value and the wait in the detail line
+// (gt-fn9e6.39).
+func TestLinesRenderThePromotionField(t *testing.T) {
+	t.Parallel()
+	r := Report{At: ago(time.Minute), Verdict: Degraded, Fields: []Field{
+		{Name: FieldPromote, Rig: "gastown", Tag: Recorded, Verdict: Degraded, Value: "3 behind", Detail: "green bbbb2222 unpromoted for 7h"},
+	}}
+	if got := Line(r, now, DefaultStaleAfter); got != "DEGRADED tick 1m ago: promote/gastown=3_behind[R]" {
+		t.Errorf("Line = %q", got)
+	}
+	ls := Lines(r, now, DefaultStaleAfter)
+	if len(ls) != 2 || !strings.Contains(ls[1], "promote/gastown") || !strings.Contains(ls[1], "green bbbb2222 unpromoted for 7h") {
+		t.Errorf("Lines = %q, want the field and its detail", ls)
+	}
+}
+
 func TestLinesPrintsEveryField(t *testing.T) {
 	t.Parallel()
 	r := Compute(context.Background(), inputs(healthy()))

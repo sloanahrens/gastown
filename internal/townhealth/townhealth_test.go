@@ -45,6 +45,9 @@ type fake struct {
 	mains    []RigMain
 	mainsErr error
 
+	promotions    []RigPromotion
+	promotionsErr error
+
 	configErr error
 
 	waiting    int
@@ -89,6 +92,7 @@ func (f *fake) OldestEscalation(context.Context) (time.Time, bool, error) {
 func (f *fake) SlotHolders() ([]SlotHolder, error)     { return f.holders, f.holdersErr }
 func (f *fake) NewestBackup() (time.Time, bool, error) { return f.backupAt, f.backupOK, f.backupErr }
 func (f *fake) Mains() ([]RigMain, error)              { return f.mains, f.mainsErr }
+func (f *fake) Promotions() ([]RigPromotion, error)    { return f.promotions, f.promotionsErr }
 func (f *fake) Validate() error                        { return f.configErr }
 func (f *fake) Seats() ([]Seat, error)                 { return f.seats, f.seatsErr }
 func (f *fake) Dispatch() (DispatchRecord, error)      { return f.dispatch, f.dispatchErr }
@@ -104,8 +108,9 @@ func healthy() *fake {
 		ticks:    []Tick{{Name: "wisp_reaper", Interval: 30 * time.Minute, LastFired: ago(10 * time.Minute)}},
 		landings: []RigLandings{{Rig: "gastown", Landed: 7, Pending: 1, Oldest: ago(time.Minute), OldestBead: "gt-x"}},
 		backupAt: ago(12 * time.Hour), backupOK: true,
-		mains: []RigMain{{Rig: "gastown", LastRun: "abc", LastGreen: "abc"}},
-		seats: []Seat{{Rig: "gastown", Name: "polecat/opal", Run: true, Sampled: ago(time.Minute), Changed: ago(5 * time.Minute)}},
+		mains:      []RigMain{{Rig: "gastown", LastRun: "abc", LastGreen: "abc"}},
+		promotions: []RigPromotion{{Rig: "gastown", LastPromoted: "abc", Green: "abc", GreenAt: ago(time.Hour)}},
+		seats:      []Seat{{Rig: "gastown", Name: "polecat/opal", Run: true, Sampled: ago(time.Minute), Changed: ago(5 * time.Minute)}},
 		dispatch: DispatchRecord{Active: true, Ticks: []DispatchTick{
 			{At: ago(2 * time.Minute), Candidates: 2, Seats: []DispatchSeat{{Live: 1, Cap: 2}}, Dispatched: 1},
 		}},
@@ -117,7 +122,7 @@ func inputs(f *fake) Inputs {
 	return Inputs{
 		Now: now, Thresholds: DefaultThresholds(), DaemonStarted: f.started,
 		Dolt: f, ExecTax: f, Heartbeat: f, Ticks: f, Landings: f, Escalations: f, Slots: f,
-		Backups: f, Mains: f, Config: f, NeedsHuman: f, Seats: f, Dispatch: f,
+		Backups: f, Mains: f, Promotions: f, Config: f, NeedsHuman: f, Seats: f, Dispatch: f,
 	}
 }
 
@@ -173,8 +178,8 @@ func TestUnwiredSourcesAreUnknownNeverGreen(t *testing.T) {
 			t.Errorf("field %s = %+v, want UNKNOWN with value ?", f.Key(), f)
 		}
 	}
-	if len(r.Fields) != 13 {
-		t.Errorf("got %d fields, want one per source (13)", len(r.Fields))
+	if len(r.Fields) != 14 {
+		t.Errorf("got %d fields, want one per source (14)", len(r.Fields))
 	}
 }
 
@@ -185,8 +190,9 @@ func TestFailedQueriesAreUnknown(t *testing.T) {
 	f.hbErr, f.ticksErr, f.landingsErr, f.escErr, f.holdersErr = boom, boom, boom, boom, boom
 	f.backupErr, f.mainsErr, f.waitErr, f.seatsErr = boom, boom, boom, boom
 	f.execTaxErr, f.dispatchErr = boom, boom
+	f.promotionsErr = boom
 	r := Compute(context.Background(), inputs(f))
-	for _, key := range []string{"daemon", "tick", "landing", "escalation", "slot", "backup", "main", "needs-human", "seat", "exec-tax", "dispatch"} {
+	for _, key := range []string{"daemon", "tick", "landing", "escalation", "slot", "backup", "main", "promote", "needs-human", "seat", "exec-tax", "dispatch"} {
 		got := field(t, r, key)
 		if got.Tag != Unknown || got.Detail != boom.Error() {
 			t.Errorf("%s = %+v, want UNKNOWN carrying the error", key, got)
@@ -504,6 +510,83 @@ func TestMains(t *testing.T) {
 	}
 	if got := field(t, r, "main/b"); got.Detail != "main red at 22222222" {
 		t.Errorf("main/b detail = %q", got.Detail)
+	}
+}
+
+// The promote field answers, beside main/<rig>, whether the rig's GitHub main
+// is keeping up: green with the lag when it is, DEGRADED when a promotion
+// failed or a green candidate has waited past PromoteWait, RED when the two
+// mains diverged, and UNKNOWN with a reason for the questions the record
+// cannot answer (gt-fn9e6.39).
+func TestPromotions(t *testing.T) {
+	t.Parallel()
+	f := healthy()
+	f.promotions = []RigPromotion{
+		{Rig: "current", LastPromoted: "aaaa1111", Green: "aaaa1111", GreenAt: ago(time.Hour)},
+		{Rig: "behind", LastPromoted: "aaaa1111", Green: "bbbb2222", Behind: 3, GreenAt: ago(time.Minute)},
+		{Rig: "waiting", LastPromoted: "aaaa1111", Green: "bbbb2222", Behind: 3, GreenAt: ago(DefaultPromoteWait - time.Minute)},
+		{Rig: "failed", LastPromoted: "aaaa1111", Green: "bbbb2222", Behind: 3, GreenAt: ago(time.Hour), LastError: "pushing bbbb2222: rejected"},
+		{Rig: "late", LastPromoted: "aaaa1111", Green: "bbbb2222", Behind: 3, GreenAt: ago(DefaultPromoteWait)},
+		{Rig: "diverged", LastPromoted: "aaaa1111", Green: "bbbb2222", Diverged: true, DivergedTip: "cccc3333"},
+		// A target nobody ever promoted to can still be diverged: the first
+		// attempt found a main this rig's history does not contain.
+		{Rig: "diverged-first", Green: "bbbb2222", Diverged: true, DivergedTip: "cccc3333"},
+		{Rig: "untimed", LastPromoted: "aaaa1111", Green: "bbbb2222", Behind: 3},
+		{Rig: "never", Green: "bbbb2222", GreenAt: ago(time.Hour)},
+		{Rig: "unreadable", Err: errors.New("corrupt state")},
+	}
+	r := Compute(context.Background(), inputs(f))
+	for key, want := range map[string]Verdict{
+		"promote/current":        Green,
+		"promote/behind":         Green,
+		"promote/waiting":        Green,
+		"promote/failed":         Degraded,
+		"promote/late":           Degraded,
+		"promote/diverged":       Red,
+		"promote/diverged-first": Red,
+		"promote/untimed":        VerdictUnknown,
+		"promote/never":          VerdictUnknown,
+		"promote/unreadable":     VerdictUnknown,
+	} {
+		got := field(t, r, key)
+		if got.Verdict != want {
+			t.Errorf("%s = %+v, want %s", key, got, want)
+		}
+		if got.Value != "0 behind" && got.Value != "3 behind" && want != Red && want != VerdictUnknown {
+			t.Errorf("%s value = %q, want the lag", key, got.Value)
+		}
+		if want != Green && got.Detail == "" {
+			t.Errorf("%s is %s with no detail", key, got.Verdict)
+		}
+	}
+	if got := field(t, r, "promote/behind"); got.Value != "3 behind" {
+		t.Errorf("promote/behind = %+v, want the 3 commits of lag", got)
+	}
+	if got := field(t, r, "promote/current"); got.Value != "0 behind" {
+		t.Errorf("promote/current = %+v, want no lag", got)
+	}
+	if got := field(t, r, "promote/diverged"); got.Value != "diverged" || !strings.Contains(got.Detail, "cccc3333") {
+		t.Errorf("promote/diverged = %+v, want the diverged value and the commit GitHub is at", got)
+	}
+	if got := field(t, r, "promote/late"); !strings.Contains(got.Detail, "unpromoted for 6h") {
+		t.Errorf("promote/late detail = %q, want the wait", got.Detail)
+	}
+}
+
+// A rig that promotes nothing is not listed at all, so a town with no
+// promotion grows no field (gt-fn9e6.39).
+func TestPromotionsWithoutARig(t *testing.T) {
+	t.Parallel()
+	f := healthy()
+	f.promotions = nil
+	r := Compute(context.Background(), inputs(f))
+	for _, fl := range r.Fields {
+		if fl.Name == FieldPromote {
+			t.Errorf("promote field for a town that promotes nothing: %+v", fl)
+		}
+	}
+	if r.Verdict != Green {
+		t.Errorf("verdict = %s, want green", r.Verdict)
 	}
 }
 

@@ -16,9 +16,11 @@ import (
 	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/exectax"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landings"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/townconfig"
 	"github.com/steveyegge/gastown/internal/townhealth"
@@ -88,6 +90,9 @@ type healthSources struct {
 	backupRoot func() (string, error)
 	slots      func() (slot.Report, error)
 	dispatch   func() (townhealth.DispatchRecord, error)
+	// behind counts the commits between a rig's last promoted commit and its
+	// green main; nil reads the rig's repository.
+	behind func(rigName, promoted, green string) (int, error)
 }
 
 // execTaxState is what a report said about the exec tax, for the transition
@@ -104,7 +109,7 @@ func (s *healthSources) inputs(now time.Time, th townhealth.Thresholds, prev *to
 	return townhealth.Inputs{
 		Now: now, Thresholds: th, Prev: prev, DaemonStarted: s.daemonStarted(),
 		Dolt: s, ExecTax: s, Heartbeat: s, Ticks: s, Landings: s, Escalations: s, Slots: s,
-		Backups: s, Mains: s, Config: s, NeedsHuman: s, Seats: s, Dispatch: s, Steward: s,
+		Backups: s, Mains: s, Promotions: s, Config: s, NeedsHuman: s, Seats: s, Dispatch: s, Steward: s,
 	}
 }
 
@@ -432,6 +437,53 @@ func (s *healthSources) Mains() ([]townhealth.RigMain, error) {
 		out = append(out, townhealth.RigMain{Rig: rig, LastRun: st.LastRun, LastGreen: st.LastGreen, Err: err})
 	}
 	return out, nil
+}
+
+// Promotions answers townhealth's promote field (gt-fn9e6.39): every landing
+// rig that names a promote_target, read from the promotion record the red-main
+// owner writes beside the rig's main verdict. The lag is counted in the rig's
+// repository instead of from GitHub, so the field reports where the two mains
+// stand without reaching the network at all.
+func (s *healthSources) Promotions() ([]townhealth.RigPromotion, error) {
+	var out []townhealth.RigPromotion
+	for _, rigName := range s.landingRigs() {
+		cfg := rig.ResolveForgejoConfig(s.townRoot(), rigName)
+		if cfg == nil || cfg.PromoteTarget == "" {
+			continue
+		}
+		p := townhealth.RigPromotion{Rig: rigName}
+		st, err := fileMainState{path: RedMainStatePath(s.townRoot(), rigName)}.Load()
+		if err != nil {
+			p.Err = err
+			out = append(out, p)
+			continue
+		}
+		p.LastPromoted, p.Green, p.GreenAt = st.LastPromoted, st.LastGreen, st.LastGreenAt
+		p.LastError, p.Diverged = st.LastError, st.GitHubDiverged != nil
+		if st.GitHubDiverged != nil {
+			p.DivergedTip = st.GitHubDiverged.RemoteMain
+		}
+		if p.LastPromoted != "" && p.Green != "" && p.Green != p.LastPromoted && !p.Diverged {
+			behind, err := s.promoteBehind(rigName, p.LastPromoted, p.Green)
+			if err != nil {
+				p.Err = err
+				out = append(out, p)
+				continue
+			}
+			p.Behind = behind
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// promoteBehind counts the commits between the commit a rig last promoted and
+// its green main, read in the rig's own repository.
+func (s *healthSources) promoteBehind(rigName, promoted, green string) (int, error) {
+	if s.behind != nil {
+		return s.behind(rigName, promoted, green)
+	}
+	return git.NewGit(filepath.Join(s.townRoot(), rigName, ".repo.git")).CommitsAhead(promoted, green)
 }
 
 // Validate loads the town config kernel and resolves the health block.

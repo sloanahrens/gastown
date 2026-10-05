@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/promote"
@@ -68,6 +69,35 @@ func TestRedMainGreenPromotesTheGreenCommitAndRecordsIt(t *testing.T) {
 	}
 	if st.LastRun != "bbbb2222" || st.LastGreen != "bbbb2222" {
 		t.Errorf("state = %+v, want the verdict recorded beside the promotion", st)
+	}
+}
+
+// The state stamps when a green verdict first named its commit, which is the
+// clock the townhealth promote field judges a waiting candidate by
+// (gt-fn9e6.39). A later verdict at the same commit is the same candidate and
+// leaves the stamp alone, so a restart that reruns the tip cannot make an
+// unpromoted candidate look fresh.
+func TestRedMainGreenStampsTheCandidateOnce(t *testing.T) {
+	t.Parallel()
+	h := newRedMainHarness(t)
+	state := &MemoryMainState{st: MainState{LastGreen: "bbbb2222", LastRun: "bbbb2222", LastGreenAt: time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)}}
+	h.r.State = state
+
+	pl, res := promotedGreenFile("bbbb2222")
+	h.r.Green(context.Background(), "make test-slow", pl, res)
+
+	st, err := state.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := st.LastGreenAt, time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC); !got.Equal(want) {
+		t.Errorf("LastGreenAt = %v after a repeat verdict at the same commit, want the first verdict's %v", got, want)
+	}
+
+	pl, res = promotedGreenFile("cccc3333")
+	h.r.Green(context.Background(), "make test-slow", pl, res)
+	if st, _ = state.Load(); st.LastGreenAt.IsZero() || !st.LastGreenAt.After(time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)) {
+		t.Errorf("LastGreenAt = %v, want a fresh stamp when the green commit moves", st.LastGreenAt)
 	}
 }
 

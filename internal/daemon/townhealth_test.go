@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/landings"
 	"github.com/steveyegge/gastown/internal/landworker"
+	"github.com/steveyegge/gastown/internal/promote"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
@@ -151,18 +152,23 @@ func healthTown(t *testing.T, now time.Time) (*Daemon, *labelBeads) {
 		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{
 			LandingWorker: &LandingWorkerConfig{Enabled: true},
 		}},
-		townHealthSources: func(s *healthSources) {
-			s.ping = func() (time.Duration, error) { return 4 * time.Millisecond, nil }
-			// The real probe writes and execs programs; the unit tier runs
-			// no external tool, so a test that computes health answers it.
-			s.execTax = func(context.Context) (time.Duration, error) { return 9 * time.Millisecond, nil }
-			s.backupRoot = func() (string, error) { return filepath.Join(town, "no-backups"), nil }
-			s.slots = func() (slot.Report, error) {
-				return slot.Report{Slots: []slot.SlotState{{Index: 0, Held: true, Owner: &slot.Owner{Role: "refinery", AcquiredAt: now.Add(-40 * time.Minute)}}}}, nil
-			}
-		},
+		townHealthSources: func(s *healthSources) { stubHealthProbes(s, town, now) },
 	}
 	return d, bd
+}
+
+// stubHealthProbes answers the probes the unit tier cannot run: a Dolt ping, a
+// program exec, the backup root, and the slot pool. A test that needs a probe
+// of its own calls this first, so it replaces one source rather than all five.
+func stubHealthProbes(s *healthSources, town string, now time.Time) {
+	s.ping = func() (time.Duration, error) { return 4 * time.Millisecond, nil }
+	// The real probe writes and execs programs; the unit tier runs no
+	// external tool, so a test that computes health answers it.
+	s.execTax = func(context.Context) (time.Duration, error) { return 9 * time.Millisecond, nil }
+	s.backupRoot = func() (string, error) { return filepath.Join(town, "no-backups"), nil }
+	s.slots = func() (slot.Report, error) {
+		return slot.Report{Slots: []slot.SlotState{{Index: 0, Held: true, Owner: &slot.Owner{Role: "refinery", AcquiredAt: now.Add(-40 * time.Minute)}}}}, nil
+	}
 }
 
 func healthField(t *testing.T, r townhealth.Report, key string) townhealth.Field {
@@ -227,6 +233,56 @@ func TestWriteTownHealth_WritesTheReportFromTheTownsRecords(t *testing.T) {
 			t.Logf("%s %s %s %q", f.Key(), f.Tag, f.Verdict, f.Detail)
 		}
 		t.Errorf("verdict = %s, want red", r.Verdict)
+	}
+}
+
+// The promote field reads the rig's promotion record out of the main state the
+// red-main owner writes, counts the lag in the rig's repository, and stays out
+// of a rig that names no promote_target (gt-fn9e6.39).
+func TestWriteTownHealth_PromotionField(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	d, _ := healthTown(t, now)
+	d.townHealthSources = func(s *healthSources) {
+		stubHealthProbes(s, d.config.TownRoot, now)
+		// The count is git's; the unit tier answers it.
+		s.behind = func(rigName, promoted, green string) (int, error) {
+			if rigName != "gastown" || promoted != "aaaa" || green != "bbbb" {
+				t.Errorf("behind(%q, %q, %q), want the rig and the two commits of its record", rigName, promoted, green)
+			}
+			return 3, nil
+		}
+	}
+	d.writeTownHealth()
+
+	first, err := townhealth.Read(d.config.TownRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range first.Fields {
+		if f.Name == townhealth.FieldPromote {
+			t.Fatalf("a rig with no promote_target grew a promote field: %+v", f)
+		}
+	}
+
+	// The rig cuts over: its config names the target, and its promotion
+	// record carries the last promotion, the green candidate, and the verdict
+	// time the candidate's wait is judged by.
+	writeDaemonRigConfigFile(t, filepath.Join(d.config.TownRoot, "gastown"), `{"type":"rig","version":1,"name":"gastown","default_branch":"main",
+		"merge_queue":{"forgejo":{"promote_target":"git@github.com:acme/gastown.git"}}}`)
+	writeJSONFile(t, RedMainStatePath(d.config.TownRoot, "gastown"), landworker.MainState{
+		LastGreen: "bbbb", LastRun: "bbbb", LastGreenAt: now.Add(-time.Hour),
+		State: promote.State{LastPromoted: "aaaa", LastPromotedAt: now.Add(-2 * time.Hour)},
+	})
+	d.writeTownHealth()
+
+	second, err := townhealth.Read(d.config.TownRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := healthField(t, second, "promote/gastown")
+	if got.Verdict != townhealth.Green || got.Tag != townhealth.Recorded || got.Value != "3 behind" {
+		t.Errorf("promote/gastown = %+v, want the recorded 3 commits of lag", got)
 	}
 }
 

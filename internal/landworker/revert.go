@@ -32,6 +32,11 @@ const RevertNoteMarker = "REVERT OF"
 type MainState struct {
 	// LastGreen is the newest commit a post-landing run passed at.
 	LastGreen string `json:"last_green,omitempty"`
+	// LastGreenAt is when a run first passed at LastGreen, the clock the
+	// townhealth promote field judges a waiting promotion candidate by
+	// (gt-fn9e6.39). It moves with LastGreen and never on its own, so a
+	// restarted worker re-running the same commit does not reset the wait.
+	LastGreenAt time.Time `json:"last_green_at,omitzero"`
 	// LastRun is the newest commit a post-landing run reached a verdict at.
 	// The worker reads it to tell a direct push from main it has tested.
 	LastRun string `json:"last_run,omitempty"`
@@ -145,6 +150,9 @@ func (r *RedMain) recordVerdict(pl PostLand, green bool) {
 	}
 	st.LastRun = pl.Commit
 	if green {
+		if st.LastGreen != pl.Commit {
+			st.LastGreenAt = time.Now().UTC()
+		}
 		st.LastGreen = pl.Commit
 	}
 	if err := r.State.Save(st); err != nil {
