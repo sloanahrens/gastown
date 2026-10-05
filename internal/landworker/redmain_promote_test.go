@@ -27,6 +27,10 @@ func (s *stubPromoteRepo) ListRemoteRefsWithHashes(_, _ string) ([]git.RemoteRef
 	return []git.RemoteRef{{Hash: s.tip, Name: promote.MainRef}}, nil
 }
 
+// FetchRefspecWithEnv is a no-op success: this stub models no objects, so the
+// fetch that makes the target's tip comparable changes nothing.
+func (s *stubPromoteRepo) FetchRefspecWithEnv(_, _ string, _ []string) error { return nil }
+
 func (s *stubPromoteRepo) IsAncestor(_, _ string) (bool, error) { return s.ancestor, nil }
 
 func (s *stubPromoteRepo) PushWithEnv(_, refspec string, _ bool, _ []string) error {

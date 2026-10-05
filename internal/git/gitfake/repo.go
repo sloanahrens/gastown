@@ -26,6 +26,7 @@ type Repo interface {
 	ShowFileAtRev(ref, path string) (string, error)
 	PatchID(base, head string) (string, error)
 	FetchRefspecWithTimeout(remote, refspec string, timeout time.Duration) error
+	FetchRefspecWithEnv(remote, refspec string, env []string) error
 	PushRemoteBranchTip(remote, branch string) (string, error)
 	ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error)
 	DeleteRemoteBranchIfAt(remote, branch, expectedHash string) error
@@ -411,6 +412,13 @@ func (h *handle) PatchID(base, head string) (string, error) {
 		}
 	}
 	return hex.EncodeToString(sum.Sum(nil)), nil
+}
+
+// FetchRefspecWithEnv is FetchRefspecWithTimeout; the fake models no process
+// environment, so the variables git would run with (a deploy key's
+// GIT_SSH_COMMAND) change nothing here.
+func (h *handle) FetchRefspecWithEnv(remote, refspec string, _ []string) error {
+	return h.FetchRefspecWithTimeout(remote, refspec, 0)
 }
 
 func (h *handle) FetchRefspecWithTimeout(remote, refspec string, _ time.Duration) error {
