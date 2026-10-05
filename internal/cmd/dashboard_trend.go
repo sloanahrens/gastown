@@ -108,8 +108,10 @@ func buildTrend(now time.Time, recs []omRecord, stages []omStage, rejs []omRejec
 	return tr
 }
 
-// recentLandingRows is how many landings and rejections the Landings table shows.
-const recentLandingRows = 30
+// recentLandingRows is how many finished landings and rejections the Landings
+// table shows. Ten fits the pane at a glance; the live rows, running and failing
+// in backoff, sit above it and are not counted in it.
+const recentLandingRows = 10
 
 // buildRecentLandings joins the last 24 hours of landings and rejections with
 // the stage lines that say what each cost, newest first, capped at limit. live

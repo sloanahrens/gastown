@@ -547,7 +547,7 @@ function renderTrend(s) {
     box.append(el("div", "k title", "hourly load average · peak " + peak.toFixed(1) + " · " + loads.length + " of 24 hours recorded (only while a page is open)"), chartSVG([{color: "#58a6ff", pts: loads}], t0, t1, 600, 44, 90 * 60e3), timeAxis(t0, t1));
   } else box.append(el("div", "empty", "no load history yet (it fills while a page is open)"));
 
-  // the recent landings, newest first
+  // the recent landings: live rows on top, then the last ten finished, newest first
   const rows = t.recent || [];
   if (rows.length) {
     const thr = s.om && s.om.threshold != null ? s.om.threshold : null;
@@ -589,7 +589,7 @@ function renderTrend(s) {
       tr.append(ship);
       tbl.append(tr);
     }
-    box.append(el("div", "k title", "recent landings, the ones running now and the ones failing in backoff on top (newest first; hover a row for the commit and stage times)"), tbl);
+    box.append(el("div", "k title", "landings: the ones running now and the ones failing in backoff on top, then the last 10 finished (newest first; hover a row for the commit and stage times)"), tbl);
   }
 }
 
