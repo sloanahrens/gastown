@@ -240,12 +240,12 @@ func TestBuildRecentLandingsCapsRowsAndAsksTitlesOnlyForThoseShown(t *testing.T)
 		recs = append(recs, omRecord{Record: landings.Record{Bead: fmt.Sprintf("gt-%d", i), Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-time.Duration(i) * time.Minute)}})
 	}
 	asked := 0
-	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, func(rig, id string) string { asked++; return "" }, 30)
-	if len(rows) != 30 || asked != 30 {
-		t.Fatalf("rows=%d title lookups=%d, want 30 and 30: a title read costs a bd call, so it is bounded by the rows shown", len(rows), asked)
+	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, func(rig, id string) string { asked++; return "" }, recentLandingRows)
+	if len(rows) != recentLandingRows || asked != recentLandingRows {
+		t.Fatalf("rows=%d title lookups=%d, want %d and %d: a title read costs a bd call, so it is bounded by the rows shown", len(rows), asked, recentLandingRows, recentLandingRows)
 	}
-	if rows[0].Bead != "gt-0" || rows[29].Bead != "gt-29" {
-		t.Errorf("not the newest 30: first %s last %s", rows[0].Bead, rows[29].Bead)
+	if rows[0].Bead != "gt-0" || rows[recentLandingRows-1].Bead != fmt.Sprintf("gt-%d", recentLandingRows-1) {
+		t.Errorf("not the newest %d: first %s last %s", recentLandingRows, rows[0].Bead, rows[recentLandingRows-1].Bead)
 	}
 }
 
@@ -367,8 +367,9 @@ func TestRunningLandingsDropOutOfWindow(t *testing.T) {
 }
 
 // TestBuildRecentLandingsPutsRunningRowsOnTopUncapped is the table's contract
-// for a live landing: it is a row above every finished one, and the 30-row cap
-// counts finished landings only, so a busy day cannot hide a landing in flight.
+// for a live landing: it is a row above every finished one, and the
+// recentLandingRows cap counts finished landings only, so a busy day cannot
+// hide a landing in flight. The cap keeps the newest finished rows.
 func TestBuildRecentLandingsPutsRunningRowsOnTopUncapped(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 4, 19, 40, 0, 0, time.UTC)
@@ -389,6 +390,9 @@ func TestBuildRecentLandingsPutsRunningRowsOnTopUncapped(t *testing.T) {
 		if r.Outcome != "landed" {
 			t.Fatalf("row %d = %+v, want a finished landing below the live one", i+1, r)
 		}
+	}
+	if rows[1].Bead != "gt-0" || rows[recentLandingRows].Bead != fmt.Sprintf("gt-%d", recentLandingRows-1) {
+		t.Errorf("finished rows run %s..%s, want the newest cap (gt-0..gt-%d)", rows[1].Bead, rows[recentLandingRows].Bead, recentLandingRows-1)
 	}
 }
 
