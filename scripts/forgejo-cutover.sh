@@ -32,11 +32,14 @@
 #   8. prints the operator steps that remain (add the deploy key, disable GitHub
 #      Actions on the GitHub repo, stop any self-hosted GitHub runner).
 #
-# The probe leaves no record — forgejo-probe.sh deletes its branch on every path
-# and writes nothing outside its own temp dir — so a green probe is not a stored
-# fact this script can read: step 1 makes one by running the probe. The mirror's
-# deploy key (step 4, --mirror) is a fact Forgejo returns, so that one is printed
-# rather than run.
+# Step 1 runs the probe rather than reading a stored verdict: nothing here trusts
+# an earlier green run, its own record file included. The probe is run with this
+# script's --town-root so it pushes from a worktree of <town>/<rig>/.repo.git,
+# where the rig's pre-push hook runs; another town root sends it to its clone
+# fallback, whose green says nothing about the hooks (gt-fn9e6.45, gt-ck1if). The
+# probe writes outside its temp dir only that worktree registration and the
+# green-run record beside the promote key. The mirror's deploy key (step 4,
+# --mirror) is a fact Forgejo returns, so that one is printed rather than run.
 #
 # Idempotent: every step reads before it writes. A ref import over converged
 # refs sends no update, nothing it does is forced — it updates a Forgejo ref
@@ -452,13 +455,18 @@ refuse_if_landing_in_flight() {
   log "$RIG's landing queue is empty"
 }
 
-# probe_green is step 1's second half. The probe leaves no record, so this makes
-# one: the probe script pushes the rig's main as land/probe-<rig>, waits for the
-# real gate, and deletes the branch on every path. Its push rides the admin base
-# URL, not the written one: it happens before provisioning, when the bots have
-# no access yet. A dry run prints the run it would make instead.
+# probe_green is step 1's second half. The probe script pushes the rig's main as
+# land/probe-<rig>, waits for the real gate, and deletes the branch on every
+# path. It carries this script's --town-root so the probe pushes from a worktree
+# of <town>/<rig>/.repo.git and the rig's hooks run; without it a non-default
+# town root makes the probe fall back to its clone, which pushes with no hook,
+# so a green there says nothing about the landing path (gt-ck1if).
+# Its push rides the admin base URL, not the written one: it happens before
+# provisioning, when the bots have no access yet. A dry run prints the run it
+# would make instead.
 probe_green() {
   local -a args=("$RIG" --repo "$REPO" --main-branch "$MAIN_BRANCH"
+    --town-root "$TOWN_ROOT"
     --api-url "$API_URL" --web-url "$WEB_URL"
     --admin-token-file "$ADMIN_TOKEN_FILE"
     --github-url "$GITHUB_URL" --git-url "$ADMIN_GIT_URL")
