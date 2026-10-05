@@ -216,6 +216,17 @@ hold, which is why the import step runs first and why skipping it loses
 GitHub-only branches. It syncs on commit and every 10 minutes, and GitHub keeps
 a ref Forgejo has deleted until that next sync.
 
+A rig that promotes has no push mirror for `main`: GitHub's `main` is advanced
+only by the promotion in `internal/promote`, which pushes the green commit as
+`<commit>:refs/heads/main` and only when that is a fast-forward. Promotion rides
+the two checks that call a commit green — the green post-land verdict at the
+landed commit (`internal/landworker`) and a scheduled sweep that covered every
+tier green (`internal/daemon`) — so GitHub's `main` is the last commit both a
+post-land run and the sweep called good, never a commit pushed ahead of any
+check. A target whose `main` is not an ancestor of the green commit is left
+alone and raises `landing-promote-diverged:<rig>`; before reconciling the two,
+read the divergence row in "When a landing fails".
+
 Four things stay with the operator, and the script prints them at the end:
 
 - the `gh repo deploy-key add` command for the cutover's deploy key — the
