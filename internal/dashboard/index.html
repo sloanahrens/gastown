@@ -98,6 +98,23 @@ section.collapsed>:not(h2){display:none}
 section.collapsed>h2{border-bottom:0}
 #queue{max-height:70vh;overflow:auto}
 #forgejo{max-height:240px;overflow:auto}
+#forgejo.folded{display:none}
+.feedhead{display:flex;align-items:center;gap:6px;width:100%;background:none;border:0;padding:2px 0 3px;color:var(--dim);font:inherit;font-size:11px;letter-spacing:.04em;text-align:left;cursor:pointer}
+.feedhead:hover{color:var(--text)}
+.feedhead .caret{display:inline-block;width:10px}
+.acts{margin-bottom:6px}
+.actssum{color:var(--dim);padding:1px 0 3px}
+.actsrow{display:grid;grid-template-columns:10px 92px minmax(0,1fr) 52px 46px;gap:8px;align-items:center;height:16px;line-height:16px}
+.actsrow>*{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.actsrow .an{color:var(--dim)}
+.actsrow.act-failure,.actsrow.act-failure .an{color:var(--red)}
+.actsidle{color:var(--dim);height:16px;line-height:16px}
+.actdiv{border-top:1px solid var(--line);margin:2px 0}
+.adot{width:8px;height:8px;border-radius:50%;background:currentColor;justify-self:center}
+.act-success{color:var(--green)}
+.act-failure{color:var(--red)}
+.act-running,.act-waiting,.act-blocked{color:var(--amber)}
+.act-cancelled,.act-skipped{color:var(--dim)}
 .fev{display:grid;grid-template-columns:52px 88px 1fr minmax(0,auto);gap:8px;align-items:baseline;padding:3px 0;border-top:1px solid var(--line)}
 .fev:first-child{border-top:0}
 .fev .t{color:var(--dim);white-space:nowrap}
@@ -144,14 +161,14 @@ section.collapsed>h2{border-bottom:0}
     <section><h2>Alerts <span class="r" id="alertsnote"></span></h2><div class="body" id="alerts"></div></section>
     <section><h2>DeepSeek <span class="r" id="spendnote"></span></h2><div class="body" id="spend"></div></section>
     <section><h2>Rigs <span class="r" id="rigsnote"></span></h2><div class="body" id="rigs"></div></section>
+    <section><h2>Tier sweeps <span class="r" id="tiersweepnote"></span></h2><div class="body" id="tiersweep"></div></section>
     <section><h2>Polecats <span class="r" id="seatsnote"></span></h2><div class="body" id="seats"></div></section>
     <section><h2>Dispatcher <span class="r" id="dispnote"></span></h2><div class="body" id="disp"></div></section>
     <section><h2>Work queue <span class="r" id="queuenote"></span></h2><div class="body" id="queue"></div></section>
   </div>
   <div class="col">
     <section><h2>Machine <span class="r" id="machnote"></span></h2><div class="body" id="machine"></div></section>
-    <section><h2>Forgejo <span class="r" id="forgejonote"></span></h2><div class="body" id="forgejo"></div></section>
-    <section><h2>Tier sweeps <span class="r" id="tiersweepnote"></span></h2><div class="body" id="tiersweep"></div></section>
+    <section><h2>Forgejo <span class="r" id="forgejonote"></span></h2><div class="body"><div id="forgejoacts"></div><button id="forgejofeedhead" type="button" class="feedhead" aria-controls="forgejo"></button><div id="forgejo"></div></div></section>
     <section><h2>om review <span class="r" id="omnote"></span></h2><div class="body" id="om"></div></section>
     <section id="trendsec" hidden><h2>Landings <span class="r" id="trendnote"></span></h2><div class="body" id="trend"></div></section>
     <section>
@@ -645,6 +662,83 @@ function renderTierSweep(s) {
   $("tiersweepnote").textContent = rows.length + " sweeps · last " + fmtDur((Date.now() - new Date(newest.at).getTime()) / 1000) + " ago";
 }
 
+// The Actions section's status colours, reusing the page's own tokens: success
+// green, failure red, one still waiting or running amber, cancelled or skipped
+// muted. A status the page has never seen stays muted rather than guessing.
+const ACT_CLASS = {success: "act-success", failure: "act-failure", running: "act-running", waiting: "act-waiting", blocked: "act-blocked", cancelled: "act-cancelled", skipped: "act-skipped"};
+
+// secsSince is how long ago an RFC3339 stamp is, or null when it is absent or
+// unreadable; fmtDur renders null as "–".
+function secsSince(iso) {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  return isNaN(t) ? null : (Date.now() - t) / 1000;
+}
+
+// actsSum is the section's one line: what is running or queued, then how the
+// newest completed runs went. The tally counts the runs the stats were taken
+// over — the newest twenty completed — so its denominator is what was scored,
+// not the whole history; a window of nothing but cancelled or skipped runs
+// reads "none" rather than pretending a zero.
+function actsSum(a) {
+  const st = a.stats || {};
+  const ok = st.ok || 0, failed = st.failed || 0, scored = ok + failed;
+  const tally = [];
+  if (ok) tally.push(ok + " ok");
+  if (failed) tally.push(failed + " failed");
+  const parts = [(st.running || 0) + " running", (st.queued || 0) + " queued"];
+  parts.push(scored ? "last " + scored + ": " + (tally.length ? tally.join(" ") : "none") : "no completed runs");
+  if (scored && st.median_secs > 0) parts.push("median " + fmtDur(st.median_secs));
+  const unreadable = a.errors || [];
+  if (unreadable.length) parts.push(unreadable.length + " unreadable");
+  return parts.join(" · ");
+}
+
+// actRow is one compact action line: status dot, repo, bead, how long the run
+// took, and how long ago it finished. A run still going shows its elapsed in
+// place of the duration, ticking from its start — the start is its only stamp,
+// so the age cell stays empty rather than repeating that number; a run that has
+// not started has neither stamp and leaves both time cells blank. Each cell is
+// one line with the whole value in its title, and the row's title carries the
+// line the columns ellipsized.
+function actRow(a) {
+  const st = a.status || "";
+  const running = st === "running";
+  const row = el("div", "actsrow" + (st === "failure" ? " act-failure" : ""));
+  const dot = el("span", "adot " + (ACT_CLASS[st] || ""));
+  dot.title = st || "unknown status";
+  row.append(dot, el("span", "arepo", a.repo || ""), el("span", "abead", a.bead || ""));
+  const took = el("span", "an", running || a.started ? fmtDur(running ? secsSince(a.started) : a.duration_secs) : "");
+  if (running && a.started) { took.dataset.since = a.started; took.title = "running for " + fmtDur(secsSince(a.started)); }
+  else took.title = a.started ? "ran " + fmtDur(a.duration_secs) : "not started";
+  row.append(took);
+  const ago = el("span", "an", a.stopped ? fmtDur(secsSince(a.stopped)) : "");
+  if (a.stopped) { ago.dataset.since = a.stopped; ago.title = "finished " + fmtDur(secsSince(a.stopped)) + " ago"; }
+  row.append(ago);
+  row.title = (a.repo || "") + " " + (a.bead || "") + " · " + (st || "unknown") + (a.event ? " (" + a.event + ")" : "") + (a.url ? "\n" + a.url : "");
+  return row;
+}
+
+// renderForgejoActs draws the Actions section above the feed: the stats line,
+// the runs still queued or running (or a muted idle line when there are none),
+// a thin divider, then the newest completed. It is left out entirely when the
+// server sends no actions — an older server, or a reader that has nothing to
+// report — and then the pane is the feed it was before (gt-fn9e6.48).
+function renderForgejoActs(a) {
+  const box = $("forgejoacts");
+  box.replaceChildren();
+  if (!a) return;
+  const wrap = el("div", "acts");
+  const sum = el("div", "actssum", actsSum(a));
+  if ((a.errors || []).length) sum.title = "runs unreadable in: " + a.errors.join(", ");
+  wrap.append(sum);
+  const current = a.current || [], recent = a.recent || [];
+  if (current.length) current.forEach(r => wrap.append(actRow(r)));
+  else wrap.append(el("div", "actsidle", "idle"));
+  if (recent.length) { wrap.append(el("div", "actdiv")); recent.forEach(r => wrap.append(actRow(r))); }
+  box.append(wrap);
+}
+
 // The Forgejo panel is a tail like the feed: one line per event, oldest first,
 // following its own end. Where it was scrolled is read before the lines are
 // replaced, so a reader who has scrolled up keeps their place and following
@@ -656,8 +750,11 @@ function renderForgejo(s) {
   $("forgejonote").textContent = "";
   $("forgejonote").className = "r";
   const f = s.forgejo;
-  if (!f) { box.append(el("div", "empty", "no viewer token")); return; }
+  if (!f) { renderForgejoActs(null); feedCount = null; foldFeed(false); box.append(el("div", "empty", "no viewer token")); return; }
+  renderForgejoActs(f.actions);
   const events = f.events || [];
+  feedCount = events.length;
+  foldFeed(!!f.actions);
   // A repo the viewer's token cannot read is named: silently reading a subset is
   // how a rig's landings went missing with no error anywhere (gt-faml5).
   const missing = f.missing || [];
@@ -1131,6 +1228,38 @@ function setupCollapse() {
   });
 }
 setupCollapse();
+// A running action's elapsed and a finished one's age drift between pushes, so
+// each of those cells carries the stamp it counts from and one ticker a second
+// moves them, without redrawing a pane the reader may be reading.
+setInterval(() => {
+  document.querySelectorAll("#forgejoacts [data-since]").forEach(c => { c.textContent = fmtDur(secsSince(c.dataset.since)); });
+}, 1000);
+// The activity feed folds under the Actions section, which stays visible, and
+// the choice is remembered per viewer. Storage that throws — a locked-down
+// browser, private mode — must not take the pane down: the feed then starts
+// expanded and folding still works for the session.
+let feedFolded = false, feedCount = null;
+try { feedFolded = localStorage.getItem("gt-forgejo-feed") === "folded"; } catch (e) {}
+function paintFeedHead() {
+  const h = $("forgejofeedhead");
+  h.replaceChildren(el("span", "caret", feedFolded ? "▸" : "▾"), el("span", "", feedFolded ? "activity · " + (feedCount == null ? 0 : feedCount) + " events" : "activity"));
+  h.setAttribute("aria-expanded", feedFolded ? "false" : "true");
+}
+// foldFeed applies the remembered choice. The header rides the Actions section,
+// which is the layout the fold belongs to: without one the feed is drawn as it
+// was before the section existed, expanded and with no header to click.
+function foldFeed(hasActions) {
+  $("forgejofeedhead").hidden = !hasActions;
+  $("forgejo").classList.toggle("folded", !!hasActions && feedFolded);
+  paintFeedHead();
+}
+function toggleFeed() {
+  feedFolded = !feedFolded;
+  foldFeed(true);
+  try { localStorage.setItem("gt-forgejo-feed", feedFolded ? "folded" : "open"); } catch (e) {}
+}
+$("forgejofeedhead").addEventListener("click", toggleFeed);
+foldFeed(false); // no state has arrived yet, so there is no Actions section
 renderChips();
 connect();
 // Ages and elapsed times drift between pushes; redraw the cheap parts locally.
