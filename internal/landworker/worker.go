@@ -36,6 +36,15 @@ type Remote interface {
 	// ListRemoteRefs returns origin's refs whose names start with prefix,
 	// each with the commit it points at.
 	ListRemoteRefs(prefix string) ([]RemoteRef, error)
+	// BranchLandedOn fetches origin's branch and target, then reports whether
+	// branch's tip is already on target: reachable from it, or every one of
+	// its own commits present there by patch-id (a queue that rebases
+	// preserves content, not SHAs). A branch the repository still lacks after
+	// the fetch is not proven, never an error.
+	BranchLandedOn(target, branch, commit string) (bool, error)
+	// CommitTime returns commit's committer time, which ages a leftover
+	// branch.
+	CommitTime(commit string) (time.Time, error)
 	// DeleteRemoteBranchIfAt deletes branch on origin only while it still
 	// points at expectedHash.
 	DeleteRemoteBranchIfAt(branch, expectedHash string) error
@@ -119,17 +128,24 @@ type Worker struct {
 	Reverts RevertHooks
 	// WatchTarget is the branch the worker watches for commits that reached
 	// it without a landing (a direct push); each pass that finds one runs
-	// the post-landing command for it. "" turns the watch off. MainState
-	// seeds the tip it last saw across restarts.
+	// the post-landing command for it. The leftover sweep also reads it as
+	// the branch work must be on before the sweep deletes anything. ""
+	// turns both off. MainState seeds the tip it last saw across restarts.
 	WatchTarget string
 	MainState   MainStateStore
 	// LandTimeout bounds one landing (gate included); 0 means
 	// DefaultLandTimeout.
 	LandTimeout time.Duration
+	// SweepInterval is how often the worker sweeps origin for polecat
+	// branches a landing, a restart or an abandoned bead left behind
+	// (sweepLeftoverBranches); 0 means DefaultSweepInterval. The first pass
+	// of a run sweeps whatever the interval.
+	SweepInterval time.Duration
 	// Draining, when set and true, stops the worker from starting anything
 	// new: the landing in flight finishes, no further ready bead is claimed
-	// and the watch is skipped. The daemon sets it while an upgrade restart
-	// is pending, so the restart finds an idle moment (gt-nxvpe).
+	// and the watch and the sweep are skipped. The daemon sets it while an
+	// upgrade restart is pending, so the restart finds an idle moment
+	// (gt-nxvpe).
 	Draining func() bool
 	// Active is told which bead is being landed (and "" when it ends), so
 	// the daemon can say what a pending restart is waiting for.
@@ -173,6 +189,12 @@ type Worker struct {
 	startupDone   bool
 	// lastSeen is the WatchTarget tip the worker last saw or landed.
 	lastSeen string
+	// sweptAt is when the leftover-branch sweep last ran; zero on the run's
+	// first pass, which sweeps.
+	sweptAt time.Time
+	// sweepLogged are the leftover branches the sweep has already reported
+	// this run: one line per branch, not one per hour.
+	sweepLogged map[string]bool
 }
 
 // RevertHooks is the red-main owner's side of an automatic revert.
@@ -258,11 +280,15 @@ func (w *Worker) bead(id string) *beadState {
 
 // Pass lands every ready bead once, highest priority first and, within a
 // priority, oldest submission first, then checks WatchTarget for a direct
-// push, and returns what happened. It stops early only when ctx is done.
+// push, then sweeps origin's leftover polecat branches, and returns what
+// happened. It stops early only when ctx is done.
 func (w *Worker) Pass(ctx context.Context) Report {
 	rep := w.landReady(ctx)
 	if !w.draining() {
 		w.watchTarget(ctx)
+		// Last, so a slow or failing sweep never holds up a landing this
+		// pass.
+		w.sweepIfDue(ctx)
 	}
 	// After the pass, so every next-try time in the snapshot is the one the
 	// following pass will act on.

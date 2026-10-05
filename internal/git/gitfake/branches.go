@@ -372,6 +372,32 @@ func (h *handle) Cherry(upstream, head string) (string, error) {
 	return strings.Join(lines, "\n"), nil
 }
 
+// CommitLandedOnTarget is *git.Git's verdict: the commit is the target's
+// tip, an ancestor of it, or every one of its own patches is already there
+// by patch-id (a queue that rebases preserves content, not SHAs).
+func (h *handle) CommitLandedOnTarget(remote, target, commit string) bool {
+	commit = strings.TrimSpace(commit)
+	targetRef := remote + "/" + target
+	if commit == "" {
+		return false
+	}
+	if tip, err := h.Rev(targetRef); err == nil && strings.TrimSpace(tip) == commit {
+		return true
+	}
+	if ok, err := h.IsAncestor(commit, targetRef); err == nil && ok {
+		return true
+	}
+	base, err := h.MergeBase(targetRef, commit)
+	if err != nil || base == commit {
+		return false
+	}
+	out, err := h.Cherry(targetRef, commit)
+	if err != nil {
+		return false
+	}
+	return out != "" && git.CountCherryUnmergedCommits(out) == 0
+}
+
 func (h *handle) CountCommitsBehind(ref string) (int, error) {
 	h.f.mu.Lock()
 	defer h.f.mu.Unlock()

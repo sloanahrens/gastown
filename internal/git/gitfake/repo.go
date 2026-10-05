@@ -19,6 +19,8 @@ import (
 type Repo interface {
 	Rev(ref string) (string, error)
 	IsAncestor(ancestor, descendant string) (bool, error)
+	CommitTime(rev string) (time.Time, error)
+	CommitLandedOnTarget(remote, target, commit string) bool
 	TreesIdentical(a, b string) (bool, error)
 	CommitMessages(base, head string) ([]git.CommitMessage, error)
 	CommitLineStatsInRange(revRange string, limit int) ([]git.CommitLineStats, error)

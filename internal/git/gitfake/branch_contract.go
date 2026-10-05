@@ -490,6 +490,12 @@ func RunBranchContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 		if ok, _ := g.FirstParentContains(fx.head, replay); ok {
 			t.Error("the branch head is on main's first-parent line")
 		}
+		if !g.CommitLandedOnTarget("origin", "main", fx.head) {
+			t.Error("the branch head's patch is replay's on main; want landed")
+		}
+		if g.CommitLandedOnTarget("origin", "main", extra) {
+			t.Error("the branch's extra commit is not on main; want not landed")
+		}
 		if n, err := g.CountCommitsBehind("origin/main"); err != nil || n != 1 {
 			t.Errorf("CountCommitsBehind = %d, %v; want 1", n, err)
 		}

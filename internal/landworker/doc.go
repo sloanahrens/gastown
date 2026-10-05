@@ -7,5 +7,7 @@
 // branch tip on origin at land time, never a pinned pre-rebase head), the
 // repair of a landing whose record was left incomplete, the rework comment on
 // a rejection, the polecat's intent record, backoff after infrastructure
-// failures, and the annotations a human needs when only a human can proceed.
+// failures, the sweep of polecat branches a landing, a restart or a bead
+// closed without landing left on origin (sweepLeftoverBranches), and the
+// annotations a human needs when only a human can proceed.
 package landworker

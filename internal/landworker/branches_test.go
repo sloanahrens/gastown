@@ -4,8 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 func TestBranchForBead(t *testing.T) {
@@ -150,6 +155,307 @@ func logged(lines []string, substr string) bool {
 		}
 	}
 	return false
+}
+
+// countLogs counts the lines containing substr.
+func countLogs(lines []string, substr string) int {
+	n := 0
+	for _, l := range lines {
+		if strings.Contains(l, substr) {
+			n++
+		}
+	}
+	return n
+}
+
+// seedLeftover puts one origin polecat branch for bead on the fake remote,
+// with the bead in status and the branch tipped age ago. It turns the sweep on
+// (WatchTarget) so the pass that follows sweeps.
+func (h *harness) seedLeftover(t *testing.T, branch, bead, status string, merged bool, age time.Duration) {
+	t.Helper()
+	h.w.WatchTarget = "main"
+	h.bd.Seed(beads.Issue{ID: bead, Title: "work", Status: status, Type: "task"})
+	if h.remote.remoteRefs == nil {
+		h.remote.remoteRefs = map[string]string{}
+	}
+	if h.remote.landed == nil {
+		h.remote.landed = map[string]bool{}
+	}
+	if h.remote.times == nil {
+		h.remote.times = map[string]time.Time{}
+	}
+	head := headFor(branch)
+	h.remote.remoteRefs["refs/heads/"+branch] = head
+	if merged {
+		h.remote.landed[branch] = true
+	}
+	h.remote.times[head] = h.now.Add(-age)
+}
+
+// headFor is a commit id of its own per branch, so a test can age one
+// leftover branch without aging another.
+func headFor(branch string) string {
+	sum := fnv.New64a()
+	_, _ = sum.Write([]byte(branch))
+	return fmt.Sprintf("%040x", sum.Sum64())
+}
+
+// TestSweepDeletesABranchALandingLeftBehind: the first pass of a run sweeps
+// the branch a landing left on origin when the daemon died before the
+// post-landing reap could run (gt-xz4ir). No bead is ready: the sweep is all
+// this pass does.
+func TestSweepDeletesABranchALandingLeftBehind(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedLeftover(t, "polecat/opal/gt-abc+x1", "gt-abc", "closed", true, 2*time.Hour)
+
+	rep := h.w.Pass(context.Background())
+
+	if rep.Landed != 0 || rep.Failed != 0 {
+		t.Fatalf("report %v; want an idle pass", rep)
+	}
+	if len(h.remote.deleted) != 1 || h.remote.deleted[0] != "polecat/opal/gt-abc+x1" {
+		t.Fatalf("deleted %v; want the landed bead's leftover branch", h.remote.deleted)
+	}
+}
+
+// TestSweepSweepsWhatALandingLeftBehind: the shape of the branch that
+// started this (gt-ck1if) — the landing's reap never ran because the daemon
+// restarted in the moment after the push — and the next run's first pass
+// sweeps what it left.
+func TestSweepSweepsWhatALandingLeftBehind(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.w.WatchTarget = "main"
+	h.seedReady(t, "gt-abc")
+	h.remote.remoteRefs = map[string]string{"refs/heads/polecat/opal/gt-abc+x1": tipHead}
+	h.remote.times = map[string]time.Time{tipHead: h.now.Add(-2 * time.Hour)}
+	h.remote.landed = map[string]bool{"polecat/opal/gt-abc+x1": true}
+	h.remote.listErr = errors.New("origin unreachable") // the reap cannot run
+
+	if rep := h.w.Pass(context.Background()); rep.Landed != 1 {
+		t.Fatalf("report %v; want the landing", rep)
+	}
+	if len(h.remote.deleted) != 0 {
+		t.Fatalf("deleted %v; want the reap to have failed, leaving the branch", h.remote.deleted)
+	}
+
+	// The daemon restarted before the reap could retry: the bead is closed
+	// with a landing record, and the new run's first pass sweeps.
+	h.remote.listErr = nil
+	h.w.sweptAt = time.Time{}
+	h.bd.Seed(beads.Issue{ID: "gt-abc", Title: "work", Status: "closed", Type: "task"})
+	h.files.recs = []land.LandingRecord{{BeadID: "gt-abc", LandedCommit: tipHead, Target: "main"}}
+
+	if rep := h.w.Pass(context.Background()); rep.Failed != 0 || rep.Landed != 0 {
+		t.Fatalf("report %v; want a clean sweep pass", rep)
+	}
+	if len(h.remote.deleted) != 1 || h.remote.deleted[0] != "polecat/opal/gt-abc+x1" {
+		t.Fatalf("deleted %v; want the branch the landing left", h.remote.deleted)
+	}
+}
+
+// TestSweepSweepsABeadWithALandingRecord: a bead whose landing record the
+// file holds is done even when its status was never closed (the daemon
+// stopped between the push and the close).
+func TestSweepSweepsABeadWithALandingRecord(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.files.recs = []land.LandingRecord{{BeadID: "gt-abc", LandedCommit: tipHead, Target: "main"}}
+	h.seedLeftover(t, "polecat/opal/gt-abc+x1", "gt-abc", "open", true, 2*time.Hour)
+
+	rep := h.w.Pass(context.Background())
+
+	if rep.Failed != 0 {
+		t.Fatalf("report %v; want no failure", rep)
+	}
+	if len(h.remote.deleted) != 1 {
+		t.Fatalf("deleted %v; want the recorded landing's branch", h.remote.deleted)
+	}
+}
+
+// TestSweepKeepsTheBranchOfABeadStillInPlay: a bead that is open, in
+// progress, blocked, deferred or hooked keeps its branch, whatever origin
+// holds.
+func TestSweepKeepsTheBranchOfABeadStillInPlay(t *testing.T) {
+	t.Parallel()
+	for _, status := range []string{"open", "in_progress", "blocked", "deferred", "hooked"} {
+		t.Run(status, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			h.seedLeftover(t, "polecat/opal/gt-abc+x1", "gt-abc", status, true, 2*time.Hour)
+
+			rep := h.w.Pass(context.Background())
+
+			if rep.Failed != 0 {
+				t.Fatalf("report %v; want no failure", rep)
+			}
+			if len(h.remote.deleted) != 0 {
+				t.Fatalf("deleted %v; want the %s bead's branch kept", h.remote.deleted, status)
+			}
+			if _, ok := h.remote.remoteRefs["refs/heads/polecat/opal/gt-abc+x1"]; !ok {
+				t.Fatalf("the %s bead's branch is gone from origin", status)
+			}
+		})
+	}
+}
+
+// TestSweepKeepsAnUnmergedBranchAndSaysSoOnce: work that is not on the
+// landing branch is never deleted, and the sweep says so once per run, not
+// once per interval.
+func TestSweepKeepsAnUnmergedBranchAndSaysSoOnce(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedLeftover(t, "polecat/opal/gt-abc+x1", "gt-abc", "closed", false, 2*time.Hour)
+	var logs []string
+	h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+
+	rep := h.w.Pass(context.Background())
+	h.now = h.now.Add(2 * time.Hour)
+	h.w.Pass(context.Background())
+
+	if rep.Failed != 0 {
+		t.Fatalf("report %v; want no failure", rep)
+	}
+	if len(h.remote.deleted) != 0 {
+		t.Fatalf("deleted %v; want the unmerged branch kept", h.remote.deleted)
+	}
+	if n := countLogs(logs, "kept polecat/opal/gt-abc+x1: not merged into main"); n != 1 {
+		t.Fatalf("kept lines = %d, want 1 over two sweeps:\n%s", n, strings.Join(logs, "\n"))
+	}
+}
+
+// TestSweepKeepsAYoungBranch: a branch pushed within the hour may belong to a
+// landing or a rework still in flight.
+func TestSweepKeepsAYoungBranch(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedLeftover(t, "polecat/opal/gt-abc+x1", "gt-abc", "closed", true, 10*time.Minute)
+
+	rep := h.w.Pass(context.Background())
+
+	if rep.Failed != 0 {
+		t.Fatalf("report %v; want no failure", rep)
+	}
+	if len(h.remote.deleted) != 0 {
+		t.Fatalf("deleted %v; want the young branch kept", h.remote.deleted)
+	}
+}
+
+// TestSweepKeepsABranchThatMoved: the delete is a lease on the hash the
+// listing saw, so a branch that moved in between stays.
+func TestSweepKeepsABranchThatMoved(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedLeftover(t, "polecat/opal/gt-abc+x1", "gt-abc", "closed", true, 2*time.Hour)
+	moved := strings.Repeat("9", 40)
+	h.remote.beforeDelete = func(branch string) {
+		h.remote.remoteRefs["refs/heads/"+branch] = moved
+	}
+	var logs []string
+	h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+
+	rep := h.w.Pass(context.Background())
+
+	if rep.Failed != 0 {
+		t.Fatalf("report %v; want no failure", rep)
+	}
+	if got := h.remote.remoteRefs["refs/heads/polecat/opal/gt-abc+x1"]; got != moved {
+		t.Fatalf("the branch that moved is %s; want it kept", got)
+	}
+	if !logged(logs, "moved since it was listed") {
+		t.Fatalf("logs %q; want one naming the refused delete", logs)
+	}
+}
+
+// TestSweepNeverHoldsUpALanding: a remote that refuses the sweep's questions
+// is one log line, and the landing this pass still lands.
+func TestSweepNeverHoldsUpALanding(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	h.seedLeftover(t, "polecat/old/gt-old+x1", "gt-old", "closed", true, 2*time.Hour)
+	h.remote.listErr = errors.New("origin unreachable")
+	var logs []string
+	h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+
+	rep := h.w.Pass(context.Background())
+
+	if rep.Landed != 1 || rep.Failed != 0 {
+		t.Fatalf("report %v; want the landing to stand", rep)
+	}
+	if !logged(logs, "origin unreachable") {
+		t.Fatalf("logs %q; want one naming the failed sweep", logs)
+	}
+}
+
+// TestSweepRunsAtMostOnceAnInterval: the sweep is an origin listing, so a
+// pass inside the interval does not list again.
+func TestSweepRunsAtMostOnceAnInterval(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedLeftover(t, "polecat/opal/gt-abc+x1", "gt-abc", "closed", true, 2*time.Hour)
+
+	h.w.Pass(context.Background())
+	afterFirst := h.remote.listCalls
+	if afterFirst != 1 {
+		t.Fatalf("listings after the first pass = %d, want 1", afterFirst)
+	}
+	h.w.Pass(context.Background())
+	if h.remote.listCalls != afterFirst {
+		t.Fatalf("listings after a pass inside the interval = %d, want %d", h.remote.listCalls, afterFirst)
+	}
+	h.now = h.now.Add(2 * time.Hour)
+	h.w.Pass(context.Background())
+	if h.remote.listCalls != afterFirst+1 {
+		t.Fatalf("listings after the interval = %d, want %d", h.remote.listCalls, afterFirst+1)
+	}
+}
+
+// TestSweepLeavesBranchesItCannotPlace: a branch that is not a polecat
+// branch, or that names no bead, is none of the sweep's business.
+func TestSweepLeavesBranchesItCannotPlace(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedLeftover(t, "polecat/opal/gt-abc+x1", "gt-abc", "closed", true, 2*time.Hour)
+	for _, ref := range []string{"refs/heads/main", "refs/heads/polecat/opal/nobeat", "refs/heads/polecat//gt-abc+x1"} {
+		h.remote.remoteRefs[ref] = headFor(ref)
+	}
+
+	rep := h.w.Pass(context.Background())
+
+	if rep.Failed != 0 {
+		t.Fatalf("report %v; want no failure", rep)
+	}
+	if len(h.remote.deleted) != 1 || h.remote.deleted[0] != "polecat/opal/gt-abc+x1" {
+		t.Fatalf("deleted %v; want only the polecat branch that names a done bead", h.remote.deleted)
+	}
+}
+
+func TestBeadForBranch(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		branch string
+		want   string
+	}{
+		{"polecat/opal/gt-abc+x1", "gt-abc"},
+		{"polecat/agate/gt-abc.10+x0", "gt-abc.10"},
+		{"polecat/opal/gt-abc", ""},               // no mutation suffix
+		{"polecat/opal/gt-abc+", ""},              // no mutation
+		{"polecat//gt-abc+x1", ""},                // no author
+		{"polecat/gt-abc+x1", ""},                 // no bead segment
+		{"polecat", ""},                           // the prefix alone
+		{"sloan/gt-abc+x1", ""},                   // not a polecat branch
+		{"refs/heads/polecat/opal/gt-abc+x1", ""}, // a full ref, not the name
+		{"polecat/opal/-x+y", ""},                 // a flag is not an id
+		{"polecat/opal/--read-only+y", ""},        // neither is a long one
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := beadForBranch(c.branch); got != c.want {
+			t.Errorf("beadForBranch(%q) = %q; want %q", c.branch, got, c.want)
+		}
+	}
 }
 
 // TestLandingRefreshesEachAuthorSeat: the landing that just deleted a bead's
