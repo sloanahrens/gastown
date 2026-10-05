@@ -344,9 +344,16 @@ func TestUpgradeNewerMarkerIdleRequestsRestartAndStampsAttempt(t *testing.T) {
 	if !d.upgradeRestartRequested.Load() {
 		t.Fatal("upgradeRestartRequested not set")
 	}
+	if m, _ := readRestartMarker(d.config.TownRoot); m == nil || m.AttemptedFrom != "" {
+		t.Fatalf("marker after the request = %+v, want attempted_from unset until the commit", m)
+	}
+	// The run loop commits the request: that is where the attempt is stamped.
+	if err := d.exitForUpgradeIfRequested(&State{Running: true}); !errors.Is(err, ErrRestartForUpgrade) {
+		t.Fatalf("commit err = %v, want ErrRestartForUpgrade", err)
+	}
 	m, err := readRestartMarker(d.config.TownRoot)
 	if err != nil || m == nil || m.AttemptedFrom != "aaa" {
-		t.Fatalf("marker after request = %+v (err %v), want attempted_from=aaa", m, err)
+		t.Fatalf("marker after the commit = %+v (err %v), want attempted_from=aaa", m, err)
 	}
 	data, _ := os.ReadFile(restartMarkerPath(d.config.TownRoot))
 	var raw map[string]interface{}
@@ -403,6 +410,10 @@ func TestUpgradeUnknownAncestryIsNotCovered(t *testing.T) {
 
 	if !d.checkUpgradeRestart(time.Now()) {
 		t.Fatal("unknown ancestry must not count as covered; idle daemon should restart")
+	}
+	// The commit writes attempted_from; that is what the next daemon reads.
+	if err := d.exitForUpgradeIfRequested(&State{Running: true}); !errors.Is(err, ErrRestartForUpgrade) {
+		t.Fatalf("commit err = %v, want ErrRestartForUpgrade", err)
 	}
 	if !markerExists(t, d) {
 		t.Fatal("marker must not be cleared when ancestry is unknown")
@@ -615,6 +626,13 @@ func TestExitForUpgradeIfRequested(t *testing.T) {
 				stopFn:   func() { stops++ },
 			}
 			d.upgradeRestartRequested.Store(tc.requested)
+			if tc.requested {
+				// The commit re-reads the marker: a request with nothing to
+				// restart onto is dropped rather than shut down on.
+				withOwnCommit(d, "aaa")
+				fakeHistory(t, d, "aaa", "bbb")
+				writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+			}
 			state := &State{Running: true}
 
 			err := d.exitForUpgradeIfRequested(state)
@@ -680,6 +698,81 @@ func TestUpgradeDrainsLandingPassesThenRestarts(t *testing.T) {
 	d.landingPasses.Add(-1)
 	if !d.checkUpgradeRestart(now.Add(4 * time.Minute)) {
 		t.Fatal("must restart once no pass is in flight")
+	}
+}
+
+// gt-3cbee: a landing pass that begins after the idle read lost a race with
+// the restart decision — the worker checks the drain at the top of its loop and
+// only then registers the pass. The pass must not be killed by that restart.
+func TestUpgradeRestartDefersForALandingStartedAfterTheIdleRead(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	var logs strings.Builder
+	d.logger = log.New(&logs, "", 0)
+	captureEscalations(d)
+	withOwnCommit(d, "aaa")
+	fakeHistory(t, d, "aaa", "bbb")
+	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+	if !d.checkUpgradeRestart(time.Now()) {
+		t.Fatal("an idle daemon with a pending marker must request the restart")
+	}
+
+	// The pass starts in the gap between the idle read and the restart.
+	d.landingPasses.Add(1)
+	d.landingStates.setBead("gastown", "gt-x", time.Now())
+
+	state := &State{Running: true}
+	if err := d.exitForUpgradeIfRequested(state); err != nil {
+		t.Fatalf("err = %v, want nil: the restart must wait for the pass", err)
+	}
+	if !state.Running {
+		t.Fatal("the daemon shut down on top of a landing pass that started after the idle read")
+	}
+	if d.upgradeRestartRequested.Load() {
+		t.Fatal("the request must be dropped so the next heartbeat re-reads the pass")
+	}
+	if got := strings.Count(logs.String(), "waiting for landing pass gt-x"); got != 1 {
+		t.Fatalf("deferral logged %d times, want once:\n%s", got, logs.String())
+	}
+
+	// The pass ends: the next heartbeat restarts.
+	d.landingStates.endPass("gastown")
+	d.landingPasses.Add(-1)
+	if !d.checkUpgradeRestart(time.Now().Add(time.Minute)) {
+		t.Fatal("the restart must go ahead once the pass ends")
+	}
+	if err := d.exitForUpgradeIfRequested(state); !errors.Is(err, ErrRestartForUpgrade) {
+		t.Fatalf("err = %v, want ErrRestartForUpgrade", err)
+	}
+	if state.Running {
+		t.Fatal("the restart did not shut the daemon down")
+	}
+}
+
+// gt-3cbee: with no pass in flight the requested restart commits at once.
+func TestUpgradeRestartCommitsWithNoLandingInFlight(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	var logs strings.Builder
+	d.logger = log.New(&logs, "", 0)
+	captureEscalations(d)
+	withOwnCommit(d, "aaa")
+	fakeHistory(t, d, "aaa", "bbb")
+	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+	if !d.checkUpgradeRestart(time.Now()) {
+		t.Fatal("an idle daemon with a pending marker must request the restart")
+	}
+	state := &State{Running: true}
+	if err := d.exitForUpgradeIfRequested(state); !errors.Is(err, ErrRestartForUpgrade) {
+		t.Fatalf("err = %v, want ErrRestartForUpgrade", err)
+	}
+	if state.Running {
+		t.Fatal("the daemon did not shut down for the restart")
+	}
+	if !strings.Contains(logs.String(), "Restarting for upgrade") {
+		t.Fatalf("the restart was not logged:\n%s", logs.String())
 	}
 }
 

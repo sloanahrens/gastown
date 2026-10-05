@@ -351,11 +351,11 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 		return false
 	}
 
-	if err := stampRestartAttempt(d.config.TownRoot, own); err != nil {
-		d.logger.Printf("upgrade-restart: could not stamp attempted_from, not restarting: %v", err)
-		return false
-	}
-	d.logger.Printf("upgrade-restart: idle; restarting from %s to pick up %s", own, m.Commit)
+	// The decision is taken here; the commit is exitForUpgradeIfRequested.
+	// Stamping attempted_from before the commit would make a commit that
+	// re-reads a landing pass and defers look like a restart that had no
+	// effect, which is the one state restartHadNoEffect never retries
+	// (gt-3cbee).
 	d.upgradeRestartRequested.Store(true)
 	return true
 }
@@ -425,14 +425,42 @@ func (d *Daemon) landingPassBead() string {
 	return best
 }
 
-// exitForUpgradeIfRequested is the run loop's exit after a heartbeat: nil when
-// no upgrade restart was requested; otherwise it runs the normal shutdown
-// (which leaves Dolt running) and returns ErrRestartForUpgrade for Run to
-// return, which the caller maps to exit code 75.
+// exitForUpgradeIfRequested is the commit of the restart checkUpgradeRestart
+// requested: nil when none is requested or the daemon is no longer idle, and
+// otherwise the normal shutdown (which leaves Dolt running) plus
+// ErrRestartForUpgrade for Run to return, which the caller maps to exit code
+// 75. Run-loop goroutine only.
 func (d *Daemon) exitForUpgradeIfRequested(state *State) error {
 	if !d.upgradeRestartRequested.Load() {
 		return nil
 	}
+	m, own, ok := d.loadMarkerForUpgrade()
+	if !ok {
+		// The marker went away between the decision and here (or a corrupt
+		// one was removed): there is nothing to restart onto, so end the
+		// drain instead of holding the landing workers for a heartbeat.
+		d.upgradeRestartRequested.Store(false)
+		d.endUpgradeDrain()
+		return nil
+	}
+	// The idle read behind the request raced the landing worker's own
+	// registration: the worker reads the drain at the top of its loop and
+	// only then counts the pass, so a pass can begin after the read saw none
+	// — one merged after the queue was last seen drained as easily as any
+	// other. Shutting down here would kill a gate the restart never waited
+	// for, so drop the request and let the next heartbeat see the pass. The
+	// drain is still on, so this pass is the last one (gt-3cbee).
+	if d.landingPasses.Load() > 0 {
+		d.upgradeRestartRequested.Store(false)
+		d.logUpgradeWait(time.Now())
+		return nil
+	}
+	if err := stampRestartAttempt(d.config.TownRoot, own); err != nil {
+		d.logger.Printf("upgrade-restart: could not stamp attempted_from, not restarting: %v", err)
+		d.upgradeRestartRequested.Store(false)
+		return nil
+	}
+	d.logger.Printf("upgrade-restart: idle; restarting from %s to pick up %s", own, m.Commit)
 	d.logger.Println("Restarting for upgrade: shutting down so launchd restarts the daemon on the installed binary")
 	_ = d.shutdown(state)
 	return ErrRestartForUpgrade
