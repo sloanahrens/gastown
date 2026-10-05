@@ -200,9 +200,10 @@ type CandidateResult struct {
 	Err error
 }
 
-// Candidate is the CI stand-in for the local gate on a cut-over rig.
-// *CandidateGate is the production one; tests pass a fake. A Lander with no
-// Candidate keeps today's local Gate.
+// Candidate is the rig's gate: the merged tree pushed as w's candidate branch,
+// and the rig's Forgejo CI verdict on that commit. *CandidateGate is the
+// production one; tests pass a fake. It is required on every Lander
+// (gt-fn9e6.32).
 type Candidate interface {
 	// Run pushes head as w's merge candidate from the worktree wt, then returns
 	// the gate workflow's verdict on that commit. dir is wt's tree, where the

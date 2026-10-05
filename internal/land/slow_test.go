@@ -33,10 +33,14 @@ func (b *lockedBuffer) String() string {
 	return b.buf.String()
 }
 
-// stageGate is a Gate whose run sees the stage's context.
-type stageGate func(ctx context.Context) GateResult
+// stageCandidate is a Candidate whose run sees the stage's context.
+type stageCandidate func(ctx context.Context) CandidateResult
 
-func (g stageGate) Run(ctx context.Context, _ string) GateResult { return g(ctx) }
+func (c stageCandidate) Run(ctx context.Context, _ Repo, _ string, _ Work, _ string) CandidateResult {
+	return c(ctx)
+}
+
+func (c stageCandidate) Discard(context.Context, Work, CandidateResult) {}
 
 // stageReviewer is a Reviewer whose run sees the stage's context.
 type stageReviewer func(ctx context.Context) (Verdict, error)
@@ -93,7 +97,7 @@ func newSlowRig(t *testing.T, after time.Duration) (*slowRig, *Lander) {
 	l := r.f.lander()
 	l.Out = r.out
 	// A stage whose context ends was stopped; the alarm must never do that.
-	l.Gate = stageGate(func(ctx context.Context) GateResult {
+	l.Candidate = stageCandidate(func(ctx context.Context) CandidateResult {
 		defer trackPID(ctx, 4242)()
 		close(r.gateUp)
 		select {
@@ -101,7 +105,7 @@ func newSlowRig(t *testing.T, after time.Duration) (*slowRig, *Lander) {
 		case <-ctx.Done():
 			r.stopped <- "gate"
 		}
-		return GateResult{Passed: true, Steps: []StepResult{{Name: "test"}}}
+		return CandidateResult{State: CandidatePassed, Context: "ci / gate (push)"}
 	})
 	l.Reviewer = stageReviewer(func(ctx context.Context) (Verdict, error) {
 		defer trackPID(ctx, 5151)()
@@ -182,15 +186,15 @@ func TestLandSlowStageAlarmsOncePerStage(t *testing.T) {
 	awaitClosed(t, r.gateUp)
 	r.clock.Advance(8 * time.Minute)
 	gate := r.awaitEscalation(t)
-	if gate.bead != "gt-abc" || gate.stage != "gate" {
-		t.Errorf("escalation = %+v, want the gate stage of gt-abc", gate)
+	if gate.bead != "gt-abc" || gate.stage != StageCI {
+		t.Errorf("escalation = %+v, want the CI stage of gt-abc", gate)
 	}
-	for _, want := range []string{"gt-abc", "gate stage", "8m0s", "Child pids: 4242 4243", "Nothing was killed", filepath.Join(r.evidence, "slow-gate.txt")} {
+	for _, want := range []string{"gt-abc", StageCI + " stage", "8m0s", "Child pids: 4242 4243", "Nothing was killed", filepath.Join(r.evidence, "slow-ci.txt")} {
 		if !strings.Contains(gate.message, want) {
 			t.Errorf("gate escalation lacks %q:\n%s", want, gate.message)
 		}
 	}
-	body, err := os.ReadFile(filepath.Join(r.evidence, "slow-gate.txt"))
+	body, err := os.ReadFile(filepath.Join(r.evidence, "slow-ci.txt"))
 	if err != nil {
 		t.Fatalf("gate evidence file: %v", err)
 	}
@@ -202,7 +206,7 @@ func TestLandSlowStageAlarmsOncePerStage(t *testing.T) {
 	if strings.Contains(string(body), "unrelated") || strings.Contains(string(body), "om review") {
 		t.Errorf("gate evidence lists processes outside the stage:\n%s", body)
 	}
-	if info, err := os.Stat(filepath.Join(r.evidence, "slow-gate.txt")); err != nil || info.Mode().Perm() != 0o600 {
+	if info, err := os.Stat(filepath.Join(r.evidence, "slow-ci.txt")); err != nil || info.Mode().Perm() != 0o600 {
 		t.Errorf("evidence file mode = %v, %v; want 0600", info.Mode(), err)
 	}
 	close(r.gateGo)
@@ -229,7 +233,7 @@ func TestLandSlowStageAlarmsOncePerStage(t *testing.T) {
 	default:
 	}
 	log := r.out.String()
-	for _, want := range []string{"[land] gt-abc: SLOW gate 8m0s\n", "[land] gt-abc: SLOW om 8m0s\n"} {
+	for _, want := range []string{"[land] gt-abc: SLOW " + StageCI + " 8m0s\n", "[land] gt-abc: SLOW om 8m0s\n"} {
 		if strings.Count(log, want) != 1 {
 			t.Errorf("log has %d of %q, want 1:\n%s", strings.Count(log, want), want, log)
 		}

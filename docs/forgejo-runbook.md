@@ -126,7 +126,7 @@ change the procedure:
 | beads | `beads`, a public fork of `gastownhall/beads` | `make gate` | cut over and parked on demand; Actions disabled; 18 upstream workflows |
 | om | `organic-mechanic` | `make gate` | Go 1.27; a self-hosted GitHub runner as a launchd service — stop it, keep it installed; 5 branches |
 | hm | `history-man` | `make lint test` (no `gate` target) | Go 1.27; shellcheck in lint; its landing gate starts containers, so the probe must confirm Docker access works for the unprivileged `ci` user or that those tests skip; a self-hosted GitHub runner; 3 branches |
-| gastown | `gastown` (public) | `make lint-tools`, then `make gate` | the gate workflow is already on `main`; about 170 branches to import; its `ci.yml` runs on a GitHub-hosted runner — disable it; it lands through Forgejo like the other rigs; its break-glass is the resync procedure below, and has not been rehearsed on gastown, which hosts the worker, so `bash scripts/forgejo-rollback.sh gastown` is the first move if the Forgejo path breaks |
+| gastown | `gastown` (public) | `make lint-tools`, then `make gate` | the gate workflow is already on `main`; about 170 branches to import; its `ci.yml` runs on a GitHub-hosted runner — disable it; it lands through Forgejo like the other rigs; its break-glass is the resync procedure below, which has not been rehearsed on gastown, and there is no rollback to a local gate |
 
 Every rig's precondition is the same: its gate workflow is on GitHub `main`
 (landed through the old path first, so Forgejo never falls back to
@@ -261,31 +261,28 @@ Every file the script edits is copied to a dated `.bak-` sibling first — a
 `--dry-run` prints the copy it would make and leaves none — and a second run
 over converged state reports each step as already converged and writes nothing.
 
-## Rolling a rig back
+## No rollback to a local gate
 
-Rollback is an operator move, never an automatic one. Run it when Forgejo or
-the runner has been down 30 minutes with landings queued, after two
-consecutive infrastructure failures, or when a mirror error will not clear.
+There is no rollback. Removing a rig's `merge_queue.forgejo` block leaves it
+with no landing path at all: the local gate and the force-with-lease push to
+the target were removed once every rig was cut over (gt-fn9e6.32), and the
+landing worker now refuses to run for a rig without the block. Treat a broken
+Forgejo path as something to repair, not something to route around.
 
-`bash scripts/forgejo-rollback.sh <rig>` removes the rig's Forgejo block
-(carrying any `promote_target` and `promote_key_file` with it), deletes the
-promote keypair the cutover minted, stops a push mirror when the block names
-one, and repoints the rig at GitHub; `--help` lists the flags. The order is
-load-bearing: a running mirror stops and the `gh repo deploy-key delete` command
-is printed before anything is repointed, because a mirror still running pushes
-every ref to GitHub and would overwrite whatever lands there.
+Two failures that used to be rollback triggers have their own moves:
 
-A rollback runs while landings are queued, so it obeys the daemon-restart rule
-above by printing the command instead of forcing it. A landing through the old
-path is what proves the rollback, as the mango rehearsal did.
+- **Forgejo or the runner has been down with landings queued.** The worker
+  backs off and retries; the `landing-stuck:<rig>` and CI-silence escalations
+  say so. Look for a down, busy or hung runner.
+- **GitHub and Forgejo have diverged.** This is what the resync below is for.
 
 ## Resyncing and break-glass
 
 `bash scripts/forgejo-resync.sh OWNER/NAME` makes a Forgejo repository's refs
 match GitHub's and restores `main` protection. Two uses:
 
-- **GitHub moved while a rig was rolled back.** A rolled-back rig lands on
-  GitHub, so Forgejo can fall behind it.
+- **GitHub moved while Forgejo was unreachable.** Forgejo can fall behind the
+  promoted GitHub `main`, and a rig cannot land again until the two agree.
 - **Break-glass.** When the Forgejo landing path itself is broken, the fix
   cannot land through it. Push the fix to the rig's GitHub repository, then
   resync, and the fix becomes Forgejo's `main`.
@@ -299,8 +296,8 @@ step and writes nothing.
 
 gastown lands through Forgejo like every other rig, and its break-glass is the
 resync procedure above rather than a separate one. It has not been rehearsed on
-gastown itself, which hosts the worker, so `bash scripts/forgejo-rollback.sh
-gastown` stays the first move when the Forgejo path breaks.
+gastown itself, which hosts the worker, so on gastown the resync is the first
+move when the Forgejo path breaks.
 
 ## Rotating a token
 
@@ -330,7 +327,6 @@ the revoked value until it restarts.
 ## Tests
 
 `scripts/forgejo-provision_test.sh`, `scripts/forgejo-probe_test.sh`,
-`scripts/forgejo-cutover_test.sh`, `scripts/forgejo-rollback_test.sh` and
-`scripts/forgejo-resync_test.sh` drive every path above against a stub Forgejo
-and a stub town held in a temp directory — no live instance, no network — and
-run under `make test-makefile`.
+`scripts/forgejo-cutover_test.sh` and `scripts/forgejo-resync_test.sh` drive
+every path above against a stub Forgejo and a stub town held in a temp
+directory — no live instance, no network — and run under `make test-makefile`.

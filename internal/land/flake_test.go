@@ -114,24 +114,29 @@ func redGatePackages(n int, pkgs ...string) func(string) GateResult {
 	}
 }
 
-// flakeFixture is a landing whose gate is red in flakyPkg; rerun answers
-// the rerun and records what it was asked to run.
-func flakeFixture(t *testing.T, rerun func(pkgs []string) GateResult) (*landFixture, *Lander, *fakeGateBeads, *[][]string) {
+// flakeFixture is a Lander whose red gate is redGate's; rerun answers the
+// rerun and records what it was asked to run. The policy is driven directly:
+// with the local gate gone (gt-fn9e6.32) the landing path's verdict is CI's,
+// and applyFlakePolicy is where the policy's decisions live.
+func flakeFixture(t *testing.T, rerun func(pkgs []string) GateResult) (*Lander, *fakeGateBeads, *[][]string) {
 	t.Helper()
-	f := newLandFixture(t)
-	f.gate.fn = redGate
 	gb := &fakeGateBeads{}
 	var calls [][]string
-	l := f.lander()
-	l.GateBeads = gb
-	l.Rerun = func(_ context.Context, dir string, pkgs []string) GateResult {
-		if dir != f.gate.dirs[0] {
-			t.Errorf("rerun in %s, want the gated tree %s", dir, f.gate.dirs[0])
-		}
+	var out bytes.Buffer
+	l := &Lander{GateBeads: gb, Out: &out}
+	l.Rerun = func(_ context.Context, _ string, pkgs []string) GateResult {
 		calls = append(calls, pkgs)
 		return rerun(pkgs)
 	}
-	return f, l, gb, &calls
+	return l, gb, &calls
+}
+
+// applyRedGate runs the flake policy on the fixture's red gate at the merged
+// tree "deadbeef", the way Land does when the gate comes back red.
+func applyRedGate(t *testing.T, l *Lander, gateRes GateResult) (flakeVerdict, error) {
+	t.Helper()
+	w := Work{BeadID: "gt-abc", Branch: fixtureBranch, Head: "cafe", Target: "main"}
+	return l.applyFlakePolicy(context.Background(), "/work/tree", w, "deadbeef", gateRes)
 }
 
 func passedRerun(pkgs []string) GateResult {
@@ -142,79 +147,76 @@ func passedRerun(pkgs []string) GateResult {
 	return GateResult{Passed: true, Steps: []StepResult{{Name: "test", Packages: res}}}
 }
 
-func TestLandRerunsOnlyTheFailedPackageAndLandsAFlake(t *testing.T) {
+func TestFlakePolicyRerunsOnlyTheFailedPackageAndLandsAFlake(t *testing.T) {
 	t.Parallel()
-	f, l, gb, calls := flakeFixture(t, passedRerun)
-	res, err := l.Land(context.Background(), f.work)
+	l, gb, calls := flakeFixture(t, passedRerun)
+	v, err := applyRedGate(t, l, redGate(""))
 	if err != nil {
-		t.Fatalf("Land: %v", err)
+		t.Fatalf("applyFlakePolicy: %v", err)
 	}
 	if len(*calls) != 1 || len((*calls)[0]) != 1 || (*calls)[0][0] != flakyPkg {
 		t.Fatalf("reruns = %v, want one rerun of %s alone", *calls, flakyPkg)
-	}
-	if f.originMain() != res.LandedCommit {
-		t.Fatalf("origin/main = %s, want landed %s", f.originMain(), res.LandedCommit)
 	}
 	if len(gb.filed) != 1 || gb.filed[0].Kind != GateBeadFlake || gb.filed[0].Package != flakyPkg || gb.filed[0].Test != "TestA" ||
 		!strings.Contains(gb.filed[0].Detail, "gt-abc") {
 		t.Fatalf("filed = %+v, want one flake bead for %s TestA", gb.filed, flakyPkg)
 	}
-	if len(res.Flaky) != 1 || res.Flaky[0].BeadID != "gt-flk" || res.Rerun == nil {
-		t.Errorf("result flaky = %+v rerun = %v", res.Flaky, res.Rerun)
-	}
-	if notes := f.bead().Notes; !strings.Contains(notes, "flaky: "+flakyPkg+" TestA [gt-flk]") {
-		t.Errorf("landing record does not name the flake:\n%s", notes)
+	if len(v.flakes) != 1 || v.flakes[0].BeadID != "gt-flk" || v.rerun == nil {
+		t.Errorf("verdict flakes = %+v rerun = %v", v.flakes, v.rerun)
 	}
 }
 
-func TestLandRerunStillRedIsAGateRejection(t *testing.T) {
+func TestFlakePolicyRerunStillRedIsARejection(t *testing.T) {
 	t.Parallel()
-	f, l, gb, calls := flakeFixture(t, func([]string) GateResult {
+	l, gb, calls := flakeFixture(t, func([]string) GateResult {
 		return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 1, Tail: "--- FAIL: TestA again\n", Packages: []PackageResult{{Package: flakyPkg}}}}}
 	})
-	_, err := l.Land(context.Background(), f.work)
-	rej := f.assertRejected(t, err, RejectGate, LabelRework)
+	v, err := applyRedGate(t, l, redGate(""))
+	if err != nil {
+		t.Fatalf("applyFlakePolicy: %v", err)
+	}
 	if len(*calls) != 1 || len(gb.filed) != 0 {
 		t.Errorf("reruns %v, filed %+v; want one rerun and no bead", *calls, gb.filed)
 	}
-	if !strings.Contains(rej.Reason, "rerun of the failed package(s) failed too") || !strings.Contains(rej.GateTail, "TestA again") {
-		t.Errorf("rejection = %q tail %q", rej.Reason, rej.GateTail)
+	if v.rerun == nil || len(v.flakes) != 0 {
+		t.Errorf("verdict = %+v; want the rerun recorded and no flake", v)
 	}
 }
 
 // A rerun that exits zero but does not report the package ok proves nothing.
-func TestLandRerunMustReportEveryPackageOK(t *testing.T) {
+func TestFlakePolicyRerunMustReportEveryPackageOK(t *testing.T) {
 	t.Parallel()
-	f, l, _, _ := flakeFixture(t, func([]string) GateResult {
+	l, _, _ := flakeFixture(t, func([]string) GateResult {
 		return GateResult{Passed: true, Steps: []StepResult{{Name: "test"}}}
 	})
-	_, err := l.Land(context.Background(), f.work)
-	f.assertRejected(t, err, RejectGate, LabelRework)
+	v, err := applyRedGate(t, l, redGate(""))
+	if err != nil {
+		t.Fatalf("applyFlakePolicy: %v", err)
+	}
+	if len(v.flakes) != 0 {
+		t.Errorf("flakes = %+v; an unproven rerun lands nothing", v.flakes)
+	}
 }
 
-func TestLandRerunThatCannotRunIsInfra(t *testing.T) {
+func TestFlakePolicyRerunThatCannotRunIsInfra(t *testing.T) {
 	t.Parallel()
-	f, l, _, _ := flakeFixture(t, func([]string) GateResult { return GateResult{Err: errors.New("slot unavailable")} })
-	_, err := l.Land(context.Background(), f.work)
+	l, _, _ := flakeFixture(t, func([]string) GateResult { return GateResult{Err: errors.New("slot unavailable")} })
+	_, err := applyRedGate(t, l, redGate(""))
 	var infra *InfraError
 	if !errors.As(err, &infra) || infra.Stage != "gate rerun" {
-		t.Fatalf("Land error = %T %v, want *InfraError at gate rerun", err, err)
+		t.Fatalf("applyFlakePolicy error = %T %v, want *InfraError at gate rerun", err, err)
 	}
-	f.assertUntouched(t)
 }
 
-func TestLandBudgetOverrunBlocksWithoutRerun(t *testing.T) {
+func TestFlakePolicyBudgetOverrunBlocksWithoutRerun(t *testing.T) {
 	t.Parallel()
-	f, l, gb, calls := flakeFixture(t, passedRerun)
-	f.gate.fn = func(string) GateResult {
-		res := redGate("")
-		res.Steps[0].BudgetOverruns = []BudgetOverrun{{Package: "internal/x", Line: "BUDGET: internal/x used 12s"}}
-		return res
-	}
-	_, err := l.Land(context.Background(), f.work)
+	l, gb, calls := flakeFixture(t, passedRerun)
+	red := redGate("")
+	red.Steps[0].BudgetOverruns = []BudgetOverrun{{Package: "internal/x", Line: "BUDGET: internal/x used 12s"}}
+	_, err := applyRedGate(t, l, red)
 	var infra *InfraError
 	if !errors.As(err, &infra) || !strings.Contains(err.Error(), "test budget overrun") {
-		t.Fatalf("Land error = %T %v, want a budget *InfraError", err, err)
+		t.Fatalf("applyFlakePolicy error = %T %v, want a budget *InfraError", err, err)
 	}
 	if len(*calls) != 0 {
 		t.Errorf("a budget overrun was rerun: %v", *calls)
@@ -222,38 +224,33 @@ func TestLandBudgetOverrunBlocksWithoutRerun(t *testing.T) {
 	if len(gb.filed) != 1 || gb.filed[0].Kind != GateBeadBudget || gb.filed[0].Package != "internal/x" {
 		t.Errorf("filed = %+v, want one budget bead", gb.filed)
 	}
-	f.assertUntouched(t)
-	if f.originMain() != f.base {
-		t.Error("origin/main moved on a budget overrun")
-	}
 }
 
 // A red gate that named no failing package (lint, build) has nothing to
 // rerun: it is a rejection.
-func TestLandRedGateWithoutPackagesIsNotRerun(t *testing.T) {
+func TestFlakePolicyRedGateWithoutPackagesIsNotRerun(t *testing.T) {
 	t.Parallel()
-	f, l, _, calls := flakeFixture(t, passedRerun)
-	f.gate.fn = func(string) GateResult {
-		return GateResult{Steps: []StepResult{{Name: "gate", ExitCode: 1, Tail: "gate: FAILED at build\n"}}}
+	l, _, calls := flakeFixture(t, passedRerun)
+	v, err := applyRedGate(t, l, GateResult{Steps: []StepResult{{Name: "gate", ExitCode: 1, Tail: "gate: FAILED at build\n"}}})
+	if err != nil {
+		t.Fatalf("applyFlakePolicy: %v", err)
 	}
-	_, err := l.Land(context.Background(), f.work)
-	f.assertRejected(t, err, RejectGate, LabelRework)
-	if len(*calls) != 0 {
-		t.Errorf("reruns = %v, want none", *calls)
+	if len(*calls) != 0 || len(v.flakes) != 0 || v.rerun != nil {
+		t.Errorf("verdict = %+v reruns = %v; want nothing rerun and no flake", v, *calls)
 	}
 }
 
 // A flake bead that cannot be filed never changes the verdict.
-func TestLandFlakeFilingFailureStillLands(t *testing.T) {
+func TestFlakePolicyFilingFailureStillLands(t *testing.T) {
 	t.Parallel()
-	f, l, gb, _ := flakeFixture(t, passedRerun)
+	l, gb, _ := flakeFixture(t, passedRerun)
 	gb.err = errors.New("bd down")
-	res, err := l.Land(context.Background(), f.work)
-	if err != nil || f.originMain() != res.LandedCommit {
-		t.Fatalf("Land = %v, origin/main %s", err, f.originMain())
+	v, err := applyRedGate(t, l, redGate(""))
+	if err != nil {
+		t.Fatalf("applyFlakePolicy: %v", err)
 	}
-	if len(res.Flaky) != 1 || res.Flaky[0].BeadID != "not filed" {
-		t.Errorf("flaky = %+v", res.Flaky)
+	if len(v.flakes) != 1 || v.flakes[0].BeadID != "not filed" {
+		t.Errorf("flakes = %+v", v.flakes)
 	}
 }
 
@@ -267,16 +264,15 @@ func TestFlakyTestsNamesAPackageWithoutATest(t *testing.T) {
 }
 
 // Below the threshold nothing changes: each failed test keeps its own bead.
-func TestLandFilesOneBeadPerTestBelowThePackageThreshold(t *testing.T) {
+func TestFlakePolicyFilesOneBeadPerTestBelowThePackageThreshold(t *testing.T) {
 	t.Parallel()
-	f, l, gb, _ := flakeFixture(t, passedRerun)
-	f.gate.fn = redGatePackages(MinPackageFlakeTests-1, flakyPkg)
-	res, err := l.Land(context.Background(), f.work)
+	l, gb, _ := flakeFixture(t, passedRerun)
+	v, err := applyRedGate(t, l, redGatePackages(MinPackageFlakeTests-1, flakyPkg)(""))
 	if err != nil {
-		t.Fatalf("Land: %v", err)
+		t.Fatalf("applyFlakePolicy: %v", err)
 	}
-	if len(gb.filed) != MinPackageFlakeTests-1 || len(res.Flaky) != MinPackageFlakeTests-1 {
-		t.Fatalf("filed %d %+v, res.Flaky %d; want %d beads", len(gb.filed), gb.filed, len(res.Flaky), MinPackageFlakeTests-1)
+	if len(gb.filed) != MinPackageFlakeTests-1 || len(v.flakes) != MinPackageFlakeTests-1 {
+		t.Fatalf("filed %d %+v, flakes %d; want %d beads", len(gb.filed), gb.filed, len(v.flakes), MinPackageFlakeTests-1)
 	}
 	for _, b := range gb.filed {
 		if b.Kind != GateBeadFlake || b.Package != flakyPkg || b.Test == "" || len(b.Tests) != 0 {
@@ -287,16 +283,15 @@ func TestLandFilesOneBeadPerTestBelowThePackageThreshold(t *testing.T) {
 
 // At the threshold the package's tests are one bead, listing them, with the
 // first failure and its duration so a setup stall can be told from a flake.
-func TestLandFilesOnePackageBeadAtTheThreshold(t *testing.T) {
+func TestFlakePolicyFilesOnePackageBeadAtTheThreshold(t *testing.T) {
 	t.Parallel()
-	f, l, gb, _ := flakeFixture(t, passedRerun)
-	f.gate.fn = redGatePackages(MinPackageFlakeTests, flakyPkg)
-	res, err := l.Land(context.Background(), f.work)
+	l, gb, _ := flakeFixture(t, passedRerun)
+	v, err := applyRedGate(t, l, redGatePackages(MinPackageFlakeTests, flakyPkg)(""))
 	if err != nil {
-		t.Fatalf("Land: %v", err)
+		t.Fatalf("applyFlakePolicy: %v", err)
 	}
-	if len(gb.filed) != 1 || len(res.Flaky) != 1 {
-		t.Fatalf("filed %+v, res.Flaky %+v; want one bead", gb.filed, res.Flaky)
+	if len(gb.filed) != 1 || len(v.flakes) != 1 {
+		t.Fatalf("filed %+v, flakes %+v; want one bead", gb.filed, v.flakes)
 	}
 	b := gb.filed[0]
 	if b.Kind != GateBeadFlakePackage || b.Package != flakyPkg || b.Test != "Test00" || len(b.Tests) != MinPackageFlakeTests {
@@ -307,17 +302,14 @@ func TestLandFilesOnePackageBeadAtTheThreshold(t *testing.T) {
 	}
 }
 
-// The hm-8uq sighting: 41 tests behind one container stall file one bead, and
-// the landing's log line still counts the beads filed.
-func TestLandFilesOnePackageBeadForFortyOneFailures(t *testing.T) {
+// The hm-8uq sighting: 41 tests behind one container stall file one bead, with
+// all 41 names listed in order.
+func TestFlakePolicyFilesOnePackageBeadForFortyOneFailures(t *testing.T) {
 	t.Parallel()
-	f, l, gb, _ := flakeFixture(t, passedRerun)
-	f.gate.fn = redGatePackages(41, flakyPkg)
-	var out bytes.Buffer
-	l.Out = &out
-	res, err := l.Land(context.Background(), f.work)
+	l, gb, _ := flakeFixture(t, passedRerun)
+	v, err := applyRedGate(t, l, redGatePackages(41, flakyPkg)(""))
 	if err != nil {
-		t.Fatalf("Land: %v", err)
+		t.Fatalf("applyFlakePolicy: %v", err)
 	}
 	if len(gb.filed) != 1 || gb.filed[0].Kind != GateBeadFlakePackage || len(gb.filed[0].Tests) != 41 {
 		t.Fatalf("filed %+v, want one package bead listing 41 tests", gb.filed)
@@ -327,21 +319,17 @@ func TestLandFilesOnePackageBeadForFortyOneFailures(t *testing.T) {
 			t.Fatalf("tests[%d] = %q, want %q (all names listed in order)", i, name, want)
 		}
 	}
-	if len(res.Flaky) != 1 {
-		t.Errorf("res.Flaky = %+v, want one entry", res.Flaky)
-	}
-	if !strings.Contains(out.String(), "landing with 1 flake(s) filed") {
-		t.Errorf("log does not report the bead count:\n%s", out.String())
+	if len(v.flakes) != 1 {
+		t.Errorf("flakes = %+v, want one entry", v.flakes)
 	}
 }
 
 // Two packages each over the threshold get a bead each.
-func TestLandFilesOnePackageBeadPerFailingPackage(t *testing.T) {
+func TestFlakePolicyFilesOnePackageBeadPerFailingPackage(t *testing.T) {
 	t.Parallel()
-	f, l, gb, _ := flakeFixture(t, passedRerun)
-	f.gate.fn = redGatePackages(MinPackageFlakeTests, flakyPkg, otherPkg)
-	if _, err := l.Land(context.Background(), f.work); err != nil {
-		t.Fatalf("Land: %v", err)
+	l, gb, _ := flakeFixture(t, passedRerun)
+	if _, err := applyRedGate(t, l, redGatePackages(MinPackageFlakeTests, flakyPkg, otherPkg)("")); err != nil {
+		t.Fatalf("applyFlakePolicy: %v", err)
 	}
 	if len(gb.filed) != 2 {
 		t.Fatalf("filed %+v, want two package beads", gb.filed)

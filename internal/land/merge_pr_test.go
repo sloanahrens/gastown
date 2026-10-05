@@ -334,15 +334,10 @@ func TestLandMergesThroughTheForgejoPR(t *testing.T) {
 		return nil
 	}}
 	l.Merger = merger
-	pushed := false
-	l.afterPush = func() { pushed = true }
 
 	res, err := l.Land(context.Background(), f.work)
 	if err != nil {
 		t.Fatalf("Land: %v", err)
-	}
-	if pushed {
-		t.Fatal("a cut-over rig force-pushed the target instead of merging through the pull request")
 	}
 	if len(f.gate.dirs) != 0 {
 		t.Fatalf("the local gate ran %d time(s) on a rig landing through CI", len(f.gate.dirs))

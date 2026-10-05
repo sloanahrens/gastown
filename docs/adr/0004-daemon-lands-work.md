@@ -47,6 +47,12 @@ pushed by its author, so the crew path only reads the tip back, runs the presubm
 marks the bead ready to land. `--pre-verified` skips that local gate for crew only; the
 merged-tree gate in `Land()` is never skipped, and a polecat's `gt done` still has no bypass.
 
+Amendment, 2026-10-05 (gt-fn9e6.32): the one gate run on the merged tree and the
+`--force-with-lease` push in `Land()` are gone. Every rig that lands is Forgejo-primary, so the
+merged tree is pushed as `land/<bead>`, the rig's Forgejo CI run gates that exact commit, and
+the worker merges the PR with `head_commit_id`. `merge_queue.forgejo` is mandatory: a rig
+without it gets no landing worker and fails closed. `gt done`'s presubmit gate is unchanged.
+
 ## Considered options
 
 - **The author process lands its own work.** Rejected: the push identity and the verdict record

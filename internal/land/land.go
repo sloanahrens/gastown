@@ -60,7 +60,6 @@ type Repo interface {
 	// the merge candidate is the worker's own branch and every retry rebuilds
 	// it.
 	Push(remote, refspec string, force bool) error
-	PushForceWithLease(remote, refspec, branchRef, expectedSHA string) error
 	VerifyPushedCommit(remote, branch, commit string) error
 }
 
@@ -81,21 +80,16 @@ type Lander struct {
 	// Route names who landed, for the record ("daemon" when empty).
 	Route string
 
-	// Gate runs on the merged tree. The landing worker passes
-	// WithSlot(LandGate(tree, rigMergeQueueConfig), townRoot, role): LandGate
-	// reads the rig's merge_queue.gate, and WithSlot holds the container-gate
-	// slot for the `make test` fallback only. Land does not take the slot
-	// itself.
-	//
-	// Candidate, when set, is the Forgejo gate that runs instead: the merged
-	// tree is pushed as land/<bead> and its CI verdict decides.
-	Gate      Gate
+	// Candidate is the Forgejo gate that runs on the merged tree: the tree is
+	// pushed as land/<bead> and its CI verdict decides. It is required —
+	// merge_queue.forgejo is mandatory for any rig that lands, so a Lander
+	// without one is a rig that can no longer be landed and must fail closed
+	// (gt-fn9e6.32).
 	Candidate Candidate
-	// Merger, when set, lands the merged tree through a Forgejo pull request
-	// instead of the local force-push: it posts om's verdict, opens
-	// land/<bead> -> the target and merges it pinned to the candidate commit.
-	// The daemon sets it beside Candidate for a rig with a merge_queue.forgejo
-	// block; a rig without one keeps the force-push.
+	// Merger lands the merged tree through a Forgejo pull request: it posts
+	// om's verdict, opens land/<bead> -> the target and merges it pinned to
+	// the candidate commit. It is required beside Candidate; the local
+	// force-push the two replaced is gone (gt-fn9e6.32).
 	Merger   Merger
 	Reviewer Reviewer
 	Beads    Beads
@@ -136,13 +130,12 @@ type Lander struct {
 	// reports nothing (gt-lcu5p).
 	Slow *SlowAlarm
 	// Stage, when set, is told each stage as the landing enters it, by the
-	// StageGate/StageOM names. It is how the daemon judges a pass by the stage
+	// StageCI/StageOM names. It is how the daemon judges a pass by the stage
 	// it is running rather than by the pipeline as a whole; the work before
-	// the gate has no stage of its own and reports nothing (gt-84gcp).
+	// the CI wait has no stage of its own and reports nothing (gt-84gcp).
 	Stage func(beadID, stage string)
 
-	afterPush func()                // test seam: runs between the push and the read-back
-	openRepo  func(dir string) Repo // test seam: opens git at dir; nil means *git.Git
+	openRepo func(dir string) Repo // test seam: opens git at dir; nil means *git.Git
 }
 
 // Result describes a landing.
@@ -263,11 +256,6 @@ func (e *ForgedStatusError) Error() string {
 	return "a required status on the candidate failed the creator check: " + e.Reason
 }
 
-// ErrLintTimeout is the cause of an *InfraError whose lint stage outlived its
-// timeout. The landing worker counts a run of them per bead and escalates
-// (gt-j8ade); it is never a rejection.
-var ErrLintTimeout = errors.New("lint stage timed out")
-
 // InfraError is a failure of the landing machinery (git, bd, the gate's
 // tooling, om) that says nothing about the work. Nothing was written to the
 // work bead.
@@ -297,36 +285,18 @@ func (e *RecordError) Error() string {
 func (e *RecordError) Unwrap() error { return e.Err }
 
 // The landing pipeline's stages, as Lander reports them to Stage and as the
-// slow-landing alarm labels them (gt-lcu5p). Only the two the gate and the
+// slow-landing alarm labels them (gt-lcu5p). Only the two the CI wait and the
 // review run have a timeout of their own; the rest are bounded by the
 // landing's overall budget.
 const (
-	StageGate = "gate"
-	StageCI   = "ci"
-	StageOM   = "om"
+	StageCI = "ci"
+	StageOM = "om"
 )
-
-// gateStage is the stage the gate takes: the candidate gate when one is
-// configured, else the local gate.
-func (l *Lander) gateStage() string {
-	if l.Candidate != nil {
-		return StageCI
-	}
-	return StageGate
-}
-
-// gatePlan names the gate the landing is about to run, for its log line.
-func (l *Lander) gatePlan() string {
-	if l.Candidate != nil {
-		return "pushing the merge candidate and waiting for its CI verdict"
-	}
-	return "gating the merged tree"
-}
 
 // ciGateContext is the required status context the candidate gate polled, read
 // from the CI step it recorded (a CI StepResult carries the context in
-// Command). It is "" when the local gate ran, and a merge with no context to
-// verify is a misconfiguration (gt-fn9e6.7).
+// Command). A merge with no context to verify is a misconfiguration
+// (gt-fn9e6.7).
 func ciGateContext(g GateResult) string {
 	for _, st := range g.Steps {
 		if st.Name == StageCI {
@@ -336,10 +306,10 @@ func ciGateContext(g GateResult) string {
 	return ""
 }
 
-// candidateGate runs the Forgejo gate in place of the local one and renders
-// its verdict as a GateResult, so the red path and the landed record keep the
-// shape the local gate's had. Silence is not a verdict: it comes back as an
-// *InfraError, the path every other no-verdict failure takes.
+// candidateGate runs the Forgejo gate and renders its verdict as a GateResult,
+// the shape the red path and the landed record read. Silence is not a verdict:
+// it comes back as an *InfraError, the path every other no-verdict failure
+// takes.
 //
 // The run's own result comes back beside the verdict: a red or infra outcome
 // ends the landing without a merge, and the candidate branch has to go with it
@@ -370,9 +340,8 @@ func (l *Lander) candidateGate(ctx context.Context, wt Repo, dir string, w Work,
 // branch has no owner left, and only a later attempt's force-push would
 // replace it, so a bead that is rejected or abandoned keeps one land/<bead>
 // branch on the remote forever (gt-k796q). Nothing is discarded for a green
-// gate — the branch is the one the land PR opens on and, on the 409 rebuild
-// path, the one the retry's pullFor reuses — nor for the local gate, which
-// pushes nothing.
+// gate: the branch is the one the land PR opens on and, on the 409 rebuild
+// path, the one the retry's pullFor reuses.
 func (l *Lander) discardCandidate(ctx context.Context, w Work, cres *CandidateResult) {
 	if cres == nil {
 		return
@@ -651,13 +620,11 @@ func (l *Lander) now() time.Time {
 }
 
 // Land lands w: the declared head merged onto a throwaway worktree of the
-// target, the merged tree gated — locally, or by CI on the pushed candidate
-// when the rig has a Candidate gate — then om review, then the target written:
-// a --force-with-lease push against the tip the merge was built on, or, on a
-// rig with a Merger, an om / review status, a creator check on the candidate's
-// required statuses, and a land/<bead> PR merged with head_commit_id. Either
-// way the target's tip is read back, then the landings file, the LANDING
-// RECORD block and the close.
+// target, the merged tree gated by CI on the pushed candidate, then om review,
+// then the target written through a Forgejo pull request — an om / review
+// status, a creator check on the candidate's required statuses, and a
+// land/<bead> PR merged with head_commit_id. The target's tip is read back,
+// then the landings file, the LANDING RECORD block and the close.
 //
 // A 409 from the PR merge means the target moved and the candidate is rebuilt
 // through the race path; a 405 is a refusal for a human, never a race; a
@@ -777,49 +744,30 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		return Result{}, &InfraError{Stage: "patch-id", Err: err}
 	}
 
-	l.logf("%s: merged %s onto %s/%s (%s) as %s; %s, then om review", w.BeadID, shortSHA(w.Head), remote, w.Target, shortSHA(base), shortSHA(merged), l.gatePlan())
-	// The gate's stages (lint, then tests) run in order, and om only after
-	// they pass: om is the costly stage, and work that fails lint or tests
-	// never pays for it (gt-b5ugw).
-	l.stage(w, l.gateStage())
-	gateCtx, gateDone := l.Slow.watch(ctx, l, w, dir, l.gateStage())
+	l.logf("%s: merged %s onto %s/%s (%s) as %s; pushing the merge candidate and waiting for its CI verdict, then om review", w.BeadID, shortSHA(w.Head), remote, w.Target, shortSHA(base), shortSHA(merged))
+	// The candidate's CI runs the same stages the gate always did (lint, then
+	// tests), and om runs only after it passes: om is the costly stage, and
+	// work that fails lint or tests never pays for it (gt-b5ugw).
+	l.stage(w, StageCI)
+	gateCtx, gateDone := l.Slow.watch(ctx, l, w, dir, StageCI)
 	var (
 		gateRes   GateResult
 		gateErr   error
 		ciContext string
-		// candRes is the candidate gate's run, when that is the gate that ran:
-		// the branch it pushed is discarded if the gate ends the landing.
+		// candRes is the candidate gate's run: the branch it pushed is
+		// discarded if the gate ends the landing.
 		candRes *CandidateResult
 	)
-	if l.Candidate != nil {
-		w.CandidateBranch, w.CandidateHead = w.Candidate(), merged
-		run, verdict, err := l.candidateGate(gateCtx, wt, dir, w, merged)
-		candRes, gateRes, gateErr = &run, verdict, err
-		ciContext = ciGateContext(gateRes)
-	} else {
-		gateRes = l.Gate.Run(gateCtx, dir)
-	}
+	w.CandidateBranch, w.CandidateHead = w.Candidate(), merged
+	run, ciVerdict, err := l.candidateGate(gateCtx, wt, dir, w, merged)
+	candRes, gateRes, gateErr = &run, ciVerdict, err
+	ciContext = ciGateContext(gateRes)
 	gateDone()
 	if gateErr != nil {
 		l.discardCandidate(ctx, w, candRes)
 		return Result{}, gateErr
 	}
 	res := Result{LandedCommit: merged, PatchID: patchID, Base: base, Gate: gateRes, RiskPaths: riskPaths}
-	if step, ok := gateRes.TimedOutStep(); ok && ctx.Err() == nil {
-		l.logf("%s: %s", w.BeadID, stageTimes(gateRes, 0, false))
-		if step.Name == "lint" {
-			// A slow lint is almost always one waiting on golangci-lint's
-			// module lock behind another run: not a verdict on the tree. The
-			// next pass retries it (gt-b5ugw review).
-			return Result{}, &InfraError{Stage: "gate", Err: fmt.Errorf("%w: %s did not finish within its %s timeout; nothing was judged", ErrLintTimeout, step.Command, step.Timeout)}
-		}
-		// A test stage over its bound may be a hang in the work or a loaded
-		// host; the author cannot tell which by editing, so it goes to a
-		// human rather than back as rework (gt-b5ugw review).
-		rej := &Rejection{Kind: RejectTimeout, Rework: false, GateTail: gateRes.FailureTail(),
-			Reason: fmt.Sprintf("gate stage %s (%s) did not finish within its %s timeout on the merged tree", step.Name, step.Command, step.Timeout)}
-		return Result{}, l.reject(issue, w, rej, nil)
-	}
 	if gateRes.Err != nil {
 		return Result{}, &InfraError{Stage: "gate", Err: gateRes.Err}
 	}
@@ -830,15 +778,12 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		}
 		if len(fv.flakes) == 0 {
 			reason, tail := "gate failed on the merged tree: "+gateRes.Summary(), gateRes.FailureTail()
-			if l.Candidate != nil && len(gateRes.Steps) > 0 {
+			if len(gateRes.Steps) > 0 {
 				reason = fmt.Sprintf("the candidate gate %s failed on the merged tree", gateRes.Steps[0].Command)
 			}
 			if fv.rerun != nil {
 				reason += "; the rerun of the failed package(s) failed too: " + fv.rerun.Summary()
 				tail = fv.rerun.FailureTail()
-			}
-			if names := gateRes.ShellTierFailures(); len(names) > 0 {
-				reason += "; the shell tier failed: " + strings.Join(names, " ")
 			}
 			l.logf("%s: %s", w.BeadID, stageTimes(gateRes, 0, false))
 			l.discardCandidate(ctx, w, candRes)
@@ -901,55 +846,39 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		return Result{}, &InfraError{Stage: "push", Err: err}
 	}
 
-	if l.Merger != nil {
-		// A cut-over rig lands through Forgejo: the om status is posted and the
-		// PR merged with head_commit_id, so a candidate that moved after the
-		// verdict cannot land on it (design, "The PR, the merge and the forgery
-		// check"). The merge is a fast-forward, so the target's tip is the
-		// candidate commit the read-back checks.
-		//
-		// The merge verifies the candidate's status creators first, so it needs
-		// the context CI reported: without a candidate gate there is no such
-		// status, which is a misconfiguration rather than a landing.
-		if ciContext == "" {
-			return Result{}, &InfraError{Stage: "merge pull request",
-				Err: errors.New("the lander has a Merger but no candidate gate reported a status context, so the merge's creator check has nothing to verify")}
+	// The rig lands through Forgejo: the om status is posted and the PR merged
+	// with head_commit_id, so a candidate that moved after the verdict cannot
+	// land on it (design, "The PR, the merge and the forgery check"). The merge
+	// is a fast-forward, so the target's tip is the candidate commit the
+	// read-back checks.
+	//
+	// The merge verifies the candidate's status creators first, so it needs the
+	// context CI reported: a candidate gate that reported none is a
+	// misconfiguration rather than a landing.
+	if ciContext == "" {
+		return Result{}, &InfraError{Stage: "merge pull request",
+			Err: errors.New("the candidate gate reported no status context, so the merge's creator check has nothing to verify")}
+	}
+	if err := l.Merger.Merge(ctx, MergeRequest{Work: w, Head: merged, Verdict: verdict, GateContext: ciContext}); err != nil {
+		var refused *MergeRefusedError
+		var forged *ForgedStatusError
+		switch {
+		case errors.As(err, &forged):
+			// Tampering with the gate is nobody's to rework and no retry
+			// lifts it: the bead goes to a human, and the worker escalates
+			// it (classification reads Rework=false as outRejectedHuman).
+			rej := &Rejection{Kind: RejectForgedStatus, Rework: false, Reason: forged.Reason}
+			return Result{}, l.reject(issue, w, rej, nil)
+		case errors.As(err, &refused):
+			rej := &Rejection{Kind: RejectMergeRefused, Rework: false,
+				Reason: fmt.Sprintf("Forgejo refused to merge %s into %s (405, not ready to be merged): %s. A required status is missing or red, so a retry cannot converge: check that branch protection's required contexts match the gate workflow's, and that the %s status was accepted. A human decides.",
+					w.Candidate(), w.Target, elideMiddle(NoteField(refused.Err.Error()), reviewErrorReasonMax), OMStatusContext)}
+			return Result{}, l.reject(issue, w, rej, nil)
 		}
-		if err := l.Merger.Merge(ctx, MergeRequest{Work: w, Head: merged, Verdict: verdict, GateContext: ciContext}); err != nil {
-			var refused *MergeRefusedError
-			var forged *ForgedStatusError
-			switch {
-			case errors.As(err, &forged):
-				// Tampering with the gate is nobody's to rework and no retry
-				// lifts it: the bead goes to a human, and the worker escalates
-				// it (classification reads Rework=false as outRejectedHuman).
-				rej := &Rejection{Kind: RejectForgedStatus, Rework: false, Reason: forged.Reason}
-				return Result{}, l.reject(issue, w, rej, nil)
-			case errors.As(err, &refused):
-				rej := &Rejection{Kind: RejectMergeRefused, Rework: false,
-					Reason: fmt.Sprintf("Forgejo refused to merge %s into %s (405, not ready to be merged): %s. A required status is missing or red, so a retry cannot converge: check that branch protection's required contexts match the gate workflow's, and that the %s status was accepted. A human decides.",
-						w.Candidate(), w.Target, elideMiddle(NoteField(refused.Err.Error()), reviewErrorReasonMax), OMStatusContext)}
-				return Result{}, l.reject(issue, w, rej, nil)
-			}
-			return Result{}, err
-		}
-		if err := wt.VerifyPushedCommit(remote, w.Target, merged); err != nil {
-			return Result{}, &InfraError{Stage: "read-back", Err: fmt.Errorf("%w: %v", ErrReadBack, err)}
-		}
-	} else {
-		if err := wt.PushForceWithLease(remote, "HEAD:refs/heads/"+w.Target, "refs/heads/"+w.Target, base); err != nil {
-			tip, tipErr := wt.PushRemoteBranchTip(remote, w.Target)
-			if tipErr == nil && tip != "" && tip != base {
-				return Result{}, &RaceError{Target: w.Target, Expected: base, Actual: tip}
-			}
-			return Result{}, &InfraError{Stage: "push", Err: err}
-		}
-		if l.afterPush != nil {
-			l.afterPush()
-		}
-		if err := wt.VerifyPushedCommit(remote, w.Target, merged); err != nil {
-			return Result{}, &InfraError{Stage: "read-back", Err: fmt.Errorf("%w: %v", ErrReadBack, err)}
-		}
+		return Result{}, err
+	}
+	if err := wt.VerifyPushedCommit(remote, w.Target, merged); err != nil {
+		return Result{}, &InfraError{Stage: "read-back", Err: fmt.Errorf("%w: %v", ErrReadBack, err)}
 	}
 	l.logf("%s: landed %s on %s/%s (patch-id %s)", w.BeadID, shortSHA(merged), remote, w.Target, shortSHA(patchID))
 
@@ -1003,8 +932,10 @@ func (l *Lander) validate(w Work) error {
 	switch {
 	case l.Repo == "" || l.WorkRoot == "":
 		return errors.New("lander: Repo and WorkRoot are required")
-	case l.Gate == nil || l.Reviewer == nil || l.Beads == nil || l.Landings == nil:
-		return errors.New("lander: Gate, Reviewer, Beads and Landings are required")
+	case l.Candidate == nil || l.Merger == nil:
+		return errors.New("lander: Candidate and Merger are required; merge_queue.forgejo is mandatory for any rig that lands")
+	case l.Reviewer == nil || l.Beads == nil || l.Landings == nil:
+		return errors.New("lander: Reviewer, Beads and Landings are required")
 	case w.BeadID == "" || w.Branch == "" || w.Head == "" || w.Target == "":
 		return fmt.Errorf("%w: work %+v is missing its bead, branch, head or target", ErrNotReady, w)
 	case w.Branch == w.Target:

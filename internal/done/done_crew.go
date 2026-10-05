@@ -321,7 +321,7 @@ func submitCrewForLanding(r *doneRun) error {
 	}
 
 	if r.opts.preVerified {
-		style.PrintWarning("skipping the local gate (--pre-verified); the landing worker still runs make gate on the merged tree")
+		style.PrintWarning("skipping the local gate (--pre-verified); the rig's Forgejo CI still gates the merged tree")
 	} else if err := runDoneLocalGate(r, head); err != nil {
 		return err
 	}

@@ -545,17 +545,15 @@ func (d *Daemon) attentionLandingLimits() townhealth.Limits {
 }
 
 // attentionLandingStuckBudget is how long the in-flight landing's stage may
-// run before the pass running it is wedged: the stage's own timeout — the
-// gate's lint, test and shell steps summed, om's review — plus one pass
-// interval of slack. A landing that outlives the stage it is running is
-// wedged; one that is merely farther along in a healthy pipeline is not
-// (gt-84gcp). A stage the pipeline reports no timeout for, the fast work
-// before the gate, is judged against the whole landing budget instead.
+// run before the pass running it is wedged: the stage's own timeout — the CI
+// wait, om's review — plus one pass interval of slack. A landing that
+// outlives the stage it is running is wedged; one that is merely farther along
+// in a healthy pipeline is not (gt-84gcp). A stage the pipeline reports no
+// timeout for, the fast work before the CI wait, is judged against the whole
+// landing budget instead.
 func (d *Daemon) attentionLandingStuckBudget(stage string) time.Duration {
 	cfg := landingWorkerConfig(d.patrolConfig)
 	switch stage {
-	case land.StageGate:
-		return landingGateBudget(cfg) + townhealth.LandingPassInterval
 	case land.StageCI:
 		return landingCIBudget() + townhealth.LandingPassInterval
 	case land.StageOM:

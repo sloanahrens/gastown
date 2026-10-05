@@ -79,11 +79,6 @@ const (
 	// infraAnnounceAfter is how many consecutive infrastructure failures on
 	// one bead earn it a comment saying why it is not landing.
 	infraAnnounceAfter = 3
-	// DefaultLintTimeoutEscalateAfter is the run of lint-stage timeouts on one
-	// bead that earns an escalation. A lint timeout is an infrastructure
-	// failure retried every pass, so a hung lint or a stuck lock holder would
-	// otherwise idle the bead unseen (gt-j8ade).
-	DefaultLintTimeoutEscalateAfter = 3
 	// DefaultCISilenceEscalateAfter is the run of candidate-gate silences on
 	// one bead that earns an escalation, for the same reason: the worker backs
 	// off and retries a runner that is down or hung, and only an escalation
@@ -142,13 +137,10 @@ type Worker struct {
 	// Escalate, when set, raises a rejection left for a human (gt:needs-human)
 	// to the operator, so it is not waiting unseen on a label: an om review
 	// that returned no verdict, a stage timeout, a policy refusal (gt-is0ep).
-	// It also raises a bead whose lint stage timed out LintTimeoutEscalateAfter
-	// times in a row (gt-j8ade). It runs in its own goroutine, which recovers
-	// and logs a panic; the pass does not wait.
+	// It also raises a bead whose candidate gate reported nothing
+	// CISilenceEscalateAfter times in a row. It runs in its own goroutine,
+	// which recovers and logs a panic; the pass does not wait.
 	Escalate func(beadID, message string)
-	// LintTimeoutEscalateAfter is how many consecutive lint-stage timeouts on
-	// one bead raise a single escalation; 0 means DefaultLintTimeoutEscalateAfter.
-	LintTimeoutEscalateAfter int
 	// CISilenceEscalateAfter is how many consecutive candidate-gate silences
 	// on one bead raise a single escalation; 0 means
 	// DefaultCISilenceEscalateAfter.
@@ -203,9 +195,6 @@ type beadState struct {
 	// health field (gt-fn9e6.44).
 	stage   string
 	lastErr string
-	// lintTimeouts counts consecutive lint-stage timeouts; any other outcome
-	// resets it.
-	lintTimeouts int
 	// ciSilences counts consecutive candidate-gate silences; any other outcome
 	// resets it.
 	ciSilences int
@@ -586,7 +575,6 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 	installNow := st.installNow && !wasRepair
 	oc := classify(ctx, err)
 	if oc != outInfra {
-		st.lintTimeouts = 0
 		st.ciSilences = 0
 	}
 	switch oc {
@@ -685,7 +673,6 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		w.logf("%s: stopped: %v", work.BeadID, err)
 	default:
 		w.infraFailure(work.BeadID, "landing", err, rep)
-		w.countLintTimeout(work, err)
 		w.countCISilence(work, err)
 		w.countFailingLanding(work, err)
 	}
@@ -737,29 +724,6 @@ func (w *Worker) closeFailureRun(beadID string) {
 	if escalated && w.FailingClear != nil {
 		w.alertAsync(beadID, func() { w.FailingClear(beadID) })
 	}
-}
-
-// countLintTimeout tracks consecutive lint-stage timeouts on one bead and
-// escalates once, on reaching LintTimeoutEscalateAfter. The next landing
-// outcome that is not a lint timeout clears the count (landing or rejecting
-// deletes the bead's state), so a fresh run escalates again.
-func (w *Worker) countLintTimeout(work land.Work, err error) {
-	st := w.bead(work.BeadID)
-	if !errors.Is(err, land.ErrLintTimeout) {
-		st.lintTimeouts = 0
-		return
-	}
-	st.lintTimeouts++
-	limit := w.LintTimeoutEscalateAfter
-	if limit <= 0 {
-		limit = DefaultLintTimeoutEscalateAfter
-	}
-	if st.lintTimeouts != limit {
-		return
-	}
-	st.escalated = true
-	w.escalate(work.BeadID, fmt.Sprintf("Landing of %s (%s @ %s) stuck at the lint stage: it timed out %d times in a row (%v). The worker keeps retrying and no rework is needed; look for a hung lint or a golangci-lint lock holder.",
-		work.BeadID, work.Branch, work.Head, st.lintTimeouts, err))
 }
 
 // countCISilence tracks consecutive candidate-gate silences on one bead and

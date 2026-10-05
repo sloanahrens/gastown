@@ -19,6 +19,13 @@ semantics that no CI job can carry.
 The decisions below are the epic's. This doc maps each onto the code, names the
 files, and ends with the slice list the operator files beads from.
 
+> **Superseded in part (gt-fn9e6.32).** The local gate and the
+> `--force-with-lease` push this doc kept as a fallback are removed;
+> `merge_queue.forgejo` is mandatory, `scripts/forgejo-rollback.sh` is gone, and
+> `scripts/forgejo-resync.sh` is the one recovery. Read every sentence about a
+> local gate, shadow mode or a rollback as the plan it was, not as today's
+> landing path.
+
 ## Method
 
 Every path, type and config key below was read from this tree, not from memory;

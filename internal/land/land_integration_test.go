@@ -80,6 +80,9 @@ func newRealLandFixture(t *testing.T) *landFixture {
 		gitT(t, seed, "push", "-q", "origin", "main")
 		return gitT(t, seed, "rev-parse", "HEAD")
 	}
+	// The merged commit exists in the lander's clone first; the fast-forward
+	// has to carry the object with it.
+	f.realSetMain = func(commit string) { gitT(t, f.repo, "push", "-q", "origin", commit+":refs/heads/main") }
 	f.realOriginMain = func() string { return gitT(t, f.origin, "rev-parse", "refs/heads/main") }
 	f.realParents = func(commit string) []string {
 		return strings.Fields(gitT(t, f.origin, "rev-list", "--parents", "-n", "1", commit))[1:]

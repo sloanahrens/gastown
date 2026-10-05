@@ -151,10 +151,10 @@ func TestPassRejectionEndsTheFailureRun(t *testing.T) {
 	}
 }
 
-// TestPassLintTimeoutDoesNotAlsoEscalateGenerally: a bead that escalated for
-// its lint stage has raised its escalation for this run of failures, so the
-// general rule stays quiet at the same count (gt-fn9e6.44).
-func TestPassLintTimeoutDoesNotAlsoEscalateGenerally(t *testing.T) {
+// TestPassCISilenceDoesNotAlsoEscalateGenerally: a bead that escalated for its
+// candidate gate's silence has raised its escalation for this run of failures,
+// so the general rule stays quiet at the same count (gt-fn9e6.44).
+func TestPassCISilenceDoesNotAlsoEscalateGenerally(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")
@@ -165,18 +165,18 @@ func TestPassLintTimeoutDoesNotAlsoEscalateGenerally(t *testing.T) {
 		rec.escalate = append(rec.escalate, message)
 	}
 	h.w.FailingEscalate = rec.failingRaise
-	h.lander.fn = func(int, land.Work) (land.Result, error) { return land.Result{}, lintTimeoutErr() }
+	h.lander.fn = func(int, land.Work) (land.Result, error) { return land.Result{}, ciSilenceErr() }
 
-	for i := 0; i < DefaultLintTimeoutEscalateAfter+2; i++ {
+	for i := 0; i < DefaultCISilenceEscalateAfter+2; i++ {
 		h.w.Pass(context.Background())
 		h.w.escWG.Wait()
 		h.now = h.now.Add(infraBackoffMax)
 	}
-	if got := rec.general(); len(got) != 1 || !strings.Contains(got[0], "lint") {
-		t.Fatalf("lint escalations %v; want exactly the one naming the lint stage", got)
+	if got := rec.general(); len(got) != 1 || !strings.Contains(got[0], "candidate gate") {
+		t.Fatalf("CI silence escalations %v; want exactly the one naming the candidate gate", got)
 	}
 	if got := rec.specs(); len(got) != 0 {
-		t.Fatalf("general escalations %v; want none beside the lint one", got)
+		t.Fatalf("general escalations %v; want none beside the silence one", got)
 	}
 }
 

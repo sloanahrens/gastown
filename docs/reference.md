@@ -136,7 +136,7 @@ Town-level role defaults live in `mayor/config.json` under:
 | `test_command` | `string` | `""` | Test command to run. Empty = skip. `gt done`'s default test-verify gate inherits any leading `VAR=value` assignments from it, and writes the container opt-in off for the run unless the command turns `GT_TEST_DOCKER=1` on itself (gt-wx53) — see below. |
 | `presubmit_command` | `string` | `""` | What `gt done` runs on the rebased branch before it pushes. Empty = `make presubmit` when a Go repo's Makefile has that target (lint, build, and the tests of the changed packages only), else `make gate`. The landing worker still runs the full `make gate` on the merged tree. A command that turns `GT_TEST_DOCKER=1` on is refused, as for `test_command`. |
 | `build_command` | `string` | `""` | Build command (e.g., `go build ./...`) |
-| `gate` | `string` | `""` | The command the landing worker runs on the merged tree. Empty = `make gate` when the Makefile has that target, else `make test` under the container slot. A merged tree that ships `scripts/tier-sweep.sh` also runs the shell tier, after this command, when the submission changed one of the tier's inputs (`scripts/`, `plugins/`, `.githooks/`, a `Makefile`, `internal/testpolicy/docker.txt`) against its base: the red main the post-land run finds too late is refused before the push (gt-vsct7.8). Honored from the rig root `config.json` tier only: the resolver does not overlay it from the other two. |
+| `gate` | `string` | `""` | The command the rig's candidate gate runs on the merged tree, in Forgejo CI. Empty = `make gate` when the Makefile has that target, else `make test` under the container slot. A merged tree that ships `scripts/tier-sweep.sh` also runs the shell tier, after this command, when the submission changed one of the tier's inputs (`scripts/`, `plugins/`, `.githooks/`, a `Makefile`, `internal/testpolicy/docker.txt`) against its base: the red main the post-land run finds too late is refused before the merge (gt-vsct7.8). Honored from the rig root `config.json` tier only: the resolver does not overlay it from the other two. |
 | `post_land_command` | `string` | `""` | Run once per landing at the landed commit, and at any new tip of the default branch that no landing put there (a direct push). Red-main reads the units a red run blamed out of the run's own output: its failing Go packages, and the scripts `scripts/tier-sweep.sh`'s red summary line named. A command that runs the shell tests without that sweep names no failing script, so only a Go failure is attributable there. A red run whose sole landing since the last green commit can have moved what failed is reverted through the landing worker and its bead reopened for rework. A landing that cannot have moved it leaves the red-main bead to a human: a failing script needs one of the shell tier's inputs in the landing's diff, a failing Go package a Go input (gt-40so9). State in `.runtime/red-main/<rig>.status` and `<rig>.json`; the spec dispatcher reads the revert a rig has in flight out of `<rig>.json` and holds that rig's red-main beads until it lands (gt-zkdwt). Read from `settings/config.json` only. Empty disables it. |
 | `max_ready_for_dispatch` | `int` | `0` | `gt sling` refuses new work while the rig has more ready MRs than this. 0 = guard off. |
 | `merge_strategy` | `string` | `""` | Passed to the polecat formula as `merge_strategy` |
@@ -162,19 +162,26 @@ from one tier. A key inside the `forgejo` block that this binary does not
 declare is ignored rather than a parse error, so a config written for another
 gt version still loads; every other block stays strict.
 
+**The `forgejo` block is mandatory for any rig that lands.** It is the rig's
+only landing path: the local gate and the force-with-lease push to the target
+were removed once every rig was cut over (gt-fn9e6.32). A rig with no block
+gets no landing worker at all — construction fails closed with an escalation
+naming the rig and its `settings/config.json` — rather than silently falling
+back to a path that no longer exists. `scripts/forgejo-resync.sh` is the
+recovery if the block must be removed or a Forgejo repository has to be rebuilt
+from GitHub; there is no rollback to a local gate.
+
 Keys removed in gt-5nlvq (`enabled`, `run_tests`, `on_conflict`, `poll_interval`,
 `batch_*`, `test_verify_*` and the other refinery-era keys) now fail strict
 decoding; `gt doctor fix deprecated-merge-queue-keys` deletes them.
 
-**Landing timeouts on a Forgejo rig.** The candidate gate waits up to 20
-minutes for the required commit-status context to report; a wait that outlives
-that window is CI silence, an infrastructure outcome that retries rather than
-rejecting the work. A rig with a `merge_queue.forgejo` block gets a landing
-deadline of that CI wait plus its `patrols.landing_worker.om_timeout` (5
-minutes by default) plus 5 minutes of merge slack — 30 minutes at the defaults
-— instead of the flat `patrols.landing_worker.land_timeout`; a rig without the
-block still lands under `land_timeout`. A deadline hit is infrastructure, as CI
-silence is.
+**Landing timeouts.** The candidate gate waits up to 20 minutes for the
+required commit-status context to report; a wait that outlives that window is
+CI silence, an infrastructure outcome that retries rather than rejecting the
+work. A landing's deadline is that CI wait plus the rig's
+`patrols.landing_worker.om_timeout` (5 minutes by default) plus 5 minutes of
+merge slack — 30 minutes at the defaults. A deadline hit is infrastructure, as
+CI silence is.
 
 See [Integration Branches](concepts/integration-branches.md) for integration branch details.
 

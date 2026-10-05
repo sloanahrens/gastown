@@ -199,15 +199,21 @@ batching or bisection.
 
 ```
 Polecat or crew finishes work
-  → gt done: fetch, rebase onto target, squash checkpoints, local gate
+  → gt done: fetch, rebase onto target, squash checkpoints, presubmit gate
   → Push branch under a lease, read the tip back
   → Label the work bead gt:ready-to-land
 Landing worker (one per rig, serial within a rig)
   → Throwaway worktree at origin/<target>, merge the branch
-  → Gate and review the merged tree concurrently
-  → Push with --force-with-lease, read the tip back
+  → Push the merge as land/<bead>; the rig's Forgejo workflow gates that tree
+  → om reviews the merged tree once its CI verdict is green
+  → Post om / review, merge the land/<bead> PR pinned to the candidate commit
   → Close the bead with the landing record; append to the landings file
 ```
+
+Every rig that lands is Forgejo-primary, so `merge_queue.forgejo` is mandatory:
+a rig without it has no landing worker and fails closed (gt-fn9e6.32). The
+local merged-tree gate and the force-with-lease push to the target that this
+diagram used to show are gone.
 
 A rejection is written to the work bead and the bead goes back for rework, or
 to a person at `land.MaxReworkAttempts` rejections, where the loop is the

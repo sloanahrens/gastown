@@ -196,7 +196,8 @@ func TestIntegrationLandingWorkerLandsFromTheRigBareRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(workRoot) })
-	lander := &land.Lander{Repo: bare, WorkRoot: workRoot, Gate: gate, Reviewer: approve{},
+	lander := &land.Lander{Repo: bare, WorkRoot: workRoot, Candidate: &passCandidate{gate: gate},
+		Merger: &pushMerger{t: t, repo: bare, remote: "origin"}, Reviewer: approve{},
 		Beads: bd, Landings: landings, RangeChecks: []land.RangeCheck{land.AttributionCheck}}
 	var cleared []string
 	w := &landworker.Worker{Rig: "gastown", Beads: bd, Remote: gitRemote{g: git.NewGit(bare), remote: "origin"}, Lander: lander, Landings: landings,
@@ -265,6 +266,32 @@ func (g *passGate) Run(_ context.Context, dir string) land.GateResult {
 	return land.GateResult{Passed: true, Steps: []land.StepResult{{Name: "gate"}}}
 }
 
+// passCandidate is the integration tier's stand-in for the Forgejo gate: it
+// runs passGate's check on the candidate tree and reports it passed.
+type passCandidate struct{ gate *passGate }
+
+func (c *passCandidate) Run(ctx context.Context, _ land.Repo, dir string, w land.Work, head string) land.CandidateResult {
+	c.gate.Run(ctx, dir)
+	return land.CandidateResult{State: land.CandidatePassed, Context: "ci / gate (push)", SHA: head, Branch: w.Candidate(), Pushed: true}
+}
+
+func (c *passCandidate) Discard(context.Context, land.Work, land.CandidateResult) {}
+
+// pushMerger is the integration tier's stand-in for the Forgejo PR merge: the
+// fast-forward the PR makes server-side, here a push from the clone the merged
+// commit was built in.
+type pushMerger struct {
+	t            *testing.T
+	repo, remote string
+}
+
+func (m *pushMerger) Merge(_ context.Context, req land.MergeRequest) error {
+	if err := git.NewGit(m.repo).Push(m.remote, req.Head+":refs/heads/"+req.Work.Target, false); err != nil {
+		m.t.Fatalf("fast-forward %s to %s: %v", req.Work.Target, req.Head, err)
+	}
+	return nil
+}
+
 type approve struct{}
 
 func (approve) Review(context.Context, string, string, string) (land.Verdict, error) {
@@ -318,7 +345,8 @@ func TestIntegrationRedMainRevertsTheCulpritThroughLand(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(workRoot) })
-	lander := &land.Lander{Repo: bare, WorkRoot: workRoot, Gate: &passGate{}, Reviewer: approve{},
+	lander := &land.Lander{Repo: bare, WorkRoot: workRoot, Candidate: &passCandidate{gate: &passGate{}},
+		Merger: &pushMerger{t: t, repo: bare, remote: "origin"}, Reviewer: approve{},
 		Beads: bd, Landings: landings, RangeChecks: []land.RangeCheck{land.AttributionCheck}}
 	state := fileMainState{path: RedMainStatePath(town, "gastown")}
 	var status []string

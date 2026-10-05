@@ -343,12 +343,13 @@ var (
 	shellTierSummaryRE = regexp.MustCompile(`^tier-sweep: shell RED passed=\d+ failed=\d+ skipped=\d+ failed:([^()]*?)(?: \(logs [^)]*\))?(?: in \S+)?$`)
 )
 
-// LandGate is the gate Land runs on the merged tree, one command from the
-// rig's settings: merge_queue.gate when set, else `make gate` when the
-// Makefile has that target, else `make test`. Only the `make test` fallback
-// needs the container slot; its step is named "test", so WithSlot puts that
-// step under the slot and nothing else. A configured gate that needs a slot
-// holds it itself.
+// LandGate is the landed tree's gate command, read from the rig's settings:
+// merge_queue.gate when set, else `make gate` when the Makefile has that
+// target, else `make test`. It names what the rig's Forgejo gate workflow runs
+// and what the flake policy's rerun reruns; the landing worker no longer runs
+// it itself (gt-fn9e6.32). Only the `make test` fallback needs the container
+// slot; its step is named "test", so WithSlot puts that step under the slot
+// and nothing else. A configured gate that needs a slot holds it itself.
 //
 // Every shape may append the shell tier (ShellTier): the tree's own
 // scripts/tier-sweep.sh, run for the submissions that can move its verdict,

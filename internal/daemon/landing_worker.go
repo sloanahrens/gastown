@@ -56,31 +56,17 @@ func landingWorkerInterval(config *DaemonPatrolConfig) time.Duration {
 	return defaultLandingWorkerInterval
 }
 
-func landingWorkerLandTimeout(config *DaemonPatrolConfig) time.Duration {
-	if c := landingWorkerConfig(config); c != nil && c.LandTimeoutStr != "" {
-		if d, err := time.ParseDuration(c.LandTimeoutStr); err == nil && d > 0 {
-			return d
-		}
-	}
-	return landworker.DefaultLandTimeout
-}
-
 // landingForgejoMergeSlack is the wall a cut-over rig's landing reserves after
 // its CI wait and its om review, for the merge itself: the PR merge call, the
 // read-back that confirms it, and the record's own writes (gt-fn9e6.26).
 const landingForgejoMergeSlack = 5 * time.Minute
 
-// landingRigLandTimeout is one rig's landing deadline. A rig without a Forgejo
-// block keeps the configured flat land_timeout. A rig that lands through
-// Forgejo CI spends its candidate gate's whole CI wait before om even starts
-// and then has to merge, so its deadline is the CI wait plus the om timeout
-// plus the merge slack — 30 minutes at the defaults — rather than a flat value
-// that would cut off the wait the gate is still legitimately running
-// (gt-fn9e6.26).
-func landingRigLandTimeout(config *DaemonPatrolConfig, forgejoRig bool) time.Duration {
-	if !forgejoRig {
-		return landingWorkerLandTimeout(config)
-	}
+// landingRigLandTimeout is one rig's landing deadline. A landing spends its
+// candidate gate's whole CI wait before om even starts and then has to merge,
+// so the deadline is the CI wait plus the om timeout plus the merge slack —
+// 30 minutes at the defaults — rather than a flat value that would cut off the
+// wait the gate is still legitimately running (gt-fn9e6.26).
+func landingRigLandTimeout(config *DaemonPatrolConfig) time.Duration {
 	return land.DefaultCandidateWaitTimeout + landingOMBudget(landingWorkerConfig(config)) + landingForgejoMergeSlack
 }
 
@@ -213,7 +199,7 @@ func (d *Daemon) runLandingWorkerManager(lw *landingWorkers) {
 	for {
 		if d.isPatrolActive("landing_worker") {
 			if !announced {
-				d.logger.Printf("landing_worker: enabled (pass interval %v, land timeout %v)", interval, landingWorkerLandTimeout(d.patrolConfig))
+				d.logger.Printf("landing_worker: enabled (pass interval %v, land timeout %v)", interval, landingRigLandTimeout(d.patrolConfig))
 				announced = true
 			}
 			for _, rigName := range landingWorkerRigs(d.patrolConfig, d.getKnownRigs()) {
@@ -477,15 +463,10 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		d.logger.Printf("landing_worker: %s: om review OFF (patrols.landing_worker.review=false); landings record om_verdict skipped", rigName)
 	}
 	lander := &land.Lander{
-		Repo:     repo,
-		Remote:   landingRemote,
-		WorkRoot: workRoot,
-		Route:    "daemon",
-		Gate: rigLandGate{
-			townRoot: townRoot, rig: rigName, logRoot: d.landingLogRoot(rigName),
-			lintTimeout: landingWorkerDuration(cfg.LintTimeoutStr, defaultLandLintTimeout),
-			testTimeout: landingWorkerDuration(cfg.TestTimeoutStr, defaultLandTestTimeout),
-		},
+		Repo:               repo,
+		Remote:             landingRemote,
+		WorkRoot:           workRoot,
+		Route:              "daemon",
 		Rerun:              landRerun(townRoot, rigName, d.landingLogRoot(rigName)),
 		GateBeads:          landworker.GateBeads{Rig: rigName, Beads: bd},
 		Reviewer:           reviewer,
@@ -504,27 +485,33 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		// A revert of a red main lands without om rather than wait on it.
 		ReviewErrorLandsLabels: []string{landworker.LabelRevert},
 	}
-	// A rig with a merge_queue.forgejo block lands through its Forgejo CI: the
-	// candidate gate replaces the local gate built above, and the PR merger
-	// replaces the force-push that writes the target. The same block decides
-	// the landing's deadline below, so it is read once, here (gt-fn9e6.26).
+	// A rig lands through its Forgejo CI: the candidate gate runs the merged
+	// tree and the PR merger writes the target. merge_queue.forgejo is
+	// mandatory — the local gate and the force-push were removed once every
+	// rig was cut over (gt-fn9e6.32), so a rig without the block no longer has
+	// a landing path and fails closed here rather than falling back silently.
+	// The same block decides the landing's deadline below, so it is read once,
+	// here (gt-fn9e6.26).
 	forgejoCfg := rig.ResolveForgejoConfig(townRoot, rigName)
-	var stuck *landingStuckWatch
-	// stuckEnd ends the in-flight bead's watch; nil between beads and for a
-	// rig with no watch. Only the Active callback below touches it.
-	var stuckEnd func()
-	if forgejoCfg != nil {
-		candidate, merger, err := d.newForgejoLanding(rigName, landingRemote, forgejoCfg, repo, landings, cfg)
-		if err != nil {
-			return nil, err
-		}
-		lander.Candidate = candidate
-		lander.Merger = merger
-		// Only a cut-over rig can be stuck in the CI wait: a rig on the local
-		// gate has a stage alarm and a pass deadline instead, and an alert
-		// keyed per rig must have exactly one owner (gt-fn9e6.27).
-		stuck = d.newLandingStuckWatch(rigName)
+	if forgejoCfg == nil {
+		// Keyed per rig so the manager's retries upsert onto one escalation.
+		d.escalateAlert("landing-rig-config:"+rigName, "landing_worker", fmt.Sprintf(
+			"rig %s has no merge_queue.forgejo block, so it has no landing path and nothing is landing for it: add the block to %s",
+			rigName, filepath.Join(rigPath, "settings", "config.json")))
+		return nil, fmt.Errorf("rig %s has no merge_queue.forgejo block: Forgejo is the only landing path, so the landing worker for this rig is not running until the block is added", rigName)
 	}
+	candidate, merger, err := d.newForgejoLanding(rigName, landingRemote, forgejoCfg, repo, landings, cfg)
+	if err != nil {
+		return nil, err
+	}
+	lander.Candidate = candidate
+	lander.Merger = merger
+	// A cut-over rig can be stuck in the CI wait, so it gets the watch. An
+	// alert keyed per rig must have exactly one owner (gt-fn9e6.27).
+	stuck := d.newLandingStuckWatch(rigName)
+	// stuckEnd ends the in-flight bead's watch; nil between beads. Only the
+	// Active callback below touches it.
+	var stuckEnd func()
 	run := postLandRun(repo, workRoot, d.landingLogRoot(rigName), townRoot, rigName, landingRemote, landingWorkerDuration(cfg.PostLandTimeoutStr, defaultPostLandTimeout))
 	// A rig that lands through Forgejo keeps this: the merge happens on the
 	// remote, so the author seat's remote-tracking default branch is stale
@@ -595,16 +582,13 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Landings: landings,
 		Backoff:  backoff,
 		PostLand: postLand,
-		// Only a rig that lands through Forgejo needs this: its landing merges
-		// on the remote, which moves main there and leaves the author seat's
-		// remote-tracking ref for it stale. A local-gate landing writes the
-		// ref in the rig's own repository, so every seat reads it already
-		// (gt-fn9e6.55).
+		// The landing merges on the remote, which moves main there and leaves
+		// the author seat's remote-tracking ref for it stale (gt-fn9e6.55).
 		RefreshAuthorSeat: refreshAuthorSeat,
 		Reverts:           redMain,
 		WatchTarget:       watchBranch,
 		MainState:         mainState,
-		LandTimeout:       landingRigLandTimeout(d.patrolConfig, forgejoCfg != nil),
+		LandTimeout:       landingRigLandTimeout(d.patrolConfig),
 		Logf:              d.logger.Printf,
 		Escalate: func(beadID, message string) {
 			d.escalateAlert("landing-needs-human:"+beadID, "landing_worker", message)
@@ -827,21 +811,6 @@ func landingStuckAfter() time.Duration {
 	return land.DefaultCandidateWaitTimeout
 }
 
-// landingGateBudget is the wall the merged-tree gate's stage may legitimately
-// take: its lint, test and shell steps' timeouts summed, the same numbers
-// rigLandGate arms them with. Summing the shell step even when a submission
-// does not move its inputs is the safe bound — the alarm only asks whether
-// the stage has outlived every deadline it could still be running under
-// (gt-84gcp).
-func landingGateBudget(cfg *LandingWorkerConfig) time.Duration {
-	lint, test := defaultLandLintTimeout, defaultLandTestTimeout
-	if cfg != nil {
-		lint = landingWorkerDuration(cfg.LintTimeoutStr, defaultLandLintTimeout)
-		test = landingWorkerDuration(cfg.TestTimeoutStr, defaultLandTestTimeout)
-	}
-	return lint + test + defaultLandShellTimeout
-}
-
 // landingOMBudget is the wall the review stage may legitimately take: the om
 // timeout the rig's lander arms the reviewer with (gt-84gcp).
 func landingOMBudget(cfg *LandingWorkerConfig) time.Duration {
@@ -960,37 +929,6 @@ func (w *landingStuckWatch) begin(beadID string) func() {
 			close(done)
 		})
 	}
-}
-
-// rigLandGate is the rig's merged-tree gate, resolved per landing so a
-// settings change takes effect on the next one: merge_queue.gate (gastown:
-// `make gate`), else `make gate`, else `make test` under the container slot.
-// The verdict is the exit code; nothing reads the output for it.
-type rigLandGate struct {
-	townRoot, rig, logRoot string
-	// lintTimeout and testTimeout bound the gate's stages (gt-b5ugw).
-	lintTimeout, testTimeout time.Duration
-}
-
-// Stage defaults for patrols.landing_worker lint_timeout and test_timeout:
-// several times the measured walls (lint ~20s, build and unit tier 75-100s on
-// 2026-10-01), so load does not trip them and a hang is cut short (gt-b5ugw).
-const (
-	defaultLandLintTimeout = 2 * time.Minute
-	defaultLandTestTimeout = 6 * time.Minute
-	// defaultLandShellTimeout bounds the gate's shell tier. It is compiled in
-	// rather than resolved from a rig setting: the tier is a fixed extra stage
-	// for the submissions that move its inputs, and a landing's wall should
-	// not depend on how an operator tuned the other two (gt-vsct7.8).
-	defaultLandShellTimeout = 3 * time.Minute
-)
-
-func (g rigLandGate) Run(ctx context.Context, dir string) land.GateResult {
-	mq := rig.ResolveMergeQueueConfig(g.townRoot, g.rig)
-	cg := land.WithTimeouts(land.LandGate(dir, mq), g.lintTimeout, g.testTimeout, defaultLandShellTimeout)
-	cg = land.WithSlot(cg, g.townRoot, g.rig+"/landing")
-	cg.LogDir = landingLogDir(ctx, g.logRoot, dir)
-	return cg.Run(ctx, dir)
 }
 
 // landingLogDir is one landing's log directory under logRoot: named by its
