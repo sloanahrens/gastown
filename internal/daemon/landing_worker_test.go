@@ -155,6 +155,34 @@ func TestLandingWorkerConfigDefaults(t *testing.T) {
 	}
 }
 
+// TestLandingRigLandTimeout: a rig that lands through Forgejo CI gets a
+// deadline the whole pipeline fits in — the CI wait, the om review and the
+// merge — while a rig without the block keeps the flat land_timeout
+// (gt-fn9e6.26).
+func TestLandingRigLandTimeout(t *testing.T) {
+	t.Parallel()
+	cfg := &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		LandingWorker: &LandingWorkerConfig{Enabled: true, LandTimeoutStr: "20m"},
+	}}
+	if got, want := landingRigLandTimeout(cfg, false), 20*time.Minute; got != want {
+		t.Fatalf("a rig without a Forgejo block: deadline = %s, want the flat land_timeout %s", got, want)
+	}
+	if got, want := landingRigLandTimeout(cfg, true), 30*time.Minute; got != want {
+		t.Fatalf("a Forgejo rig: deadline = %s, want %s (CI 20m + om 5m + merge slack 5m)", got, want)
+	}
+	cfg.Patrols.LandingWorker.OMTimeoutStr = "12m"
+	if got, want := landingRigLandTimeout(cfg, true), 37*time.Minute; got != want {
+		t.Fatalf("a Forgejo rig with om_timeout 12m: deadline = %s, want %s", got, want)
+	}
+	if got, want := landingRigLandTimeout(cfg, false), 20*time.Minute; got != want {
+		t.Fatalf("om_timeout moved a rig without a Forgejo block: deadline = %s, want %s", got, want)
+	}
+	// The candidate gate's stage budget follows the CI wait.
+	if got, want := landingCIBudget(), 20*time.Minute+land.DefaultCandidateCallTimeout; got != want {
+		t.Fatalf("landingCIBudget() = %s, want %s", got, want)
+	}
+}
+
 func TestPruneLandingLogs(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

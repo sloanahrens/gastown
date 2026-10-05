@@ -27,8 +27,12 @@ const (
 	DefaultCandidatePollInterval = 15 * time.Second
 	// DefaultCandidateCallTimeout bounds one Forgejo API call.
 	DefaultCandidateCallTimeout = 30 * time.Second
-	// DefaultCandidateWaitTimeout bounds the whole wait for a verdict.
-	DefaultCandidateWaitTimeout = 45 * time.Minute
+	// DefaultCandidateWaitTimeout bounds the whole wait for a verdict: the CI
+	// wait. A gate here takes 30 seconds to 3 minutes, so 20 minutes is a hung
+	// or lost runner, not slow work. The landing's own deadline has to outlive
+	// it (the daemon's landingWorkerLandTimeout), or this window is unreachable
+	// (gt-fn9e6.26).
+	DefaultCandidateWaitTimeout = 20 * time.Minute
 	// candidateTailBytes bounds the job log fetched for a red verdict; the
 	// rework note's excerpt is built from it.
 	candidateTailBytes = 16 * 1024
