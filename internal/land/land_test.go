@@ -670,7 +670,7 @@ func TestLandRefusesAParkedBead(t *testing.T) {
 	f.assertUntouched(t)
 }
 
-func TestLandGateInfraErrorIsNotARejection(t *testing.T) {
+func TestGateInfraErrorIsNotARejection(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
 	f.gate.fn = func(string) GateResult { return GateResult{Err: errors.New("container slot unavailable")} }
@@ -997,17 +997,17 @@ func TestLandRejectionRecordFailuresAreObservable(t *testing.T) {
 	}
 }
 
-// TestStageTimesReportsTheShellStep: a landing that ran the shell tier says
-// how long it took, beside the other stages (gt-vsct7.8).
-func TestStageTimesReportsTheShellStep(t *testing.T) {
+// TestStageTimesReportsEveryGateStep: a landing whose gate ran several stages
+// says how long each took, beside om (gt-vsct7.8).
+func TestStageTimesReportsEveryGateStep(t *testing.T) {
 	t.Parallel()
 	got := stageTimes(GateResult{Steps: []StepResult{
 		{Name: "lint", Elapsed: 18 * time.Second},
 		{Name: "gate", Elapsed: 92 * time.Second},
-		{Name: ShellStepName, Elapsed: 12 * time.Second},
+		{Name: "test", Elapsed: 12 * time.Second},
 	}}, 0, false)
-	if !strings.Contains(got, "shell 12s") {
-		t.Errorf("stageTimes = %q, want the shell step's wall time", got)
+	if !strings.Contains(got, "test 12s") {
+		t.Errorf("stageTimes = %q, want every step's wall time", got)
 	}
 }
 
