@@ -200,9 +200,6 @@ client, then opens and merges the PR. The overseer waiver
 with the waiver recorded, so protection is satisfied and the audit trail keeps
 the reason.
 
-om stays flash-only. The `.om.json` files that name the pro backend are drift
-from town policy and are a separate build item, not part of this doc.
-
 ### The PR, the merge and the forgery check
 
 New client calls create the PR `land/<bead> -> main` and merge it with
@@ -303,11 +300,12 @@ not enabled here. The Forgejo stack at `~/forgejo` is not changed.
   without the slot wrapper and the town's arbitration no longer covers that
   test. The epic accepts a separate CI pool; the consequence is that hm's
   landing gate and its CI no longer share a limiter.
-- **"Flash only, never pro" is not enforced in the landing code.** om picks its
-  backend from the reviewed tree's `.om.json`, and this repo's `.om.json` names
-  `claude-deepseek-pro`. Nothing in `internal/land` names a model. Honouring
-  the policy means changing `.om.json` (a separate build item) or forcing the
-  backend in the review command; this doc does not do either.
+- **"Flash only, never pro" is not enforced in the landing code.** Nothing in
+  `internal/land` names a model: om reads its backend from operator config
+  (`~/.config/om/config.json`, flash today) and ignores a `backend` key in the
+  reviewed tree's `.om.json`, so that file carries only the rubric and review
+  knobs. Forcing the backend from the review command is a separate build item
+  this doc does not take.
 - **The required context is the push context, not the PR context.** The gate
   job fires on `land/**` and reports `ci / gate (push)`. A PR opened from
   `land/<bead>` also gets a `ci / gate (pull_request)` check on the merge ref,
@@ -332,26 +330,23 @@ operator says otherwise.
 2. **Mirror credential.** The epic leaves it undecided. Recommend the
    Forgejo-generated Ed25519 deploy key on the GitHub repo, because it is
    per-repo, revocable, and needs no token rotation.
-3. **om backend drift.** The town is flash-only, but this repo's `.om.json`
-   names the pro backend. Recommend fixing `.om.json` in a separate build item
-   before gastown flips, so the om cost assumption holds.
-4. **Flake removal timing.** Recommend landing slice 2 early and town-wide: it
+3. **Flake removal timing.** Recommend landing slice 2 early and town-wide: it
    is the epic's policy, it removes code before the rewrite, and the stricter
    live path is the accepted trade.
-5. **Tags on the mirror.** `branch_filter main` mirrors branches but not tags.
+4. **Tags on the mirror.** `branch_filter main` mirrors branches but not tags.
    Recommend deciding now: if releases are cut from GitHub, mirror tags too
    (a second filter entry or a second mirror); otherwise accept no tags.
-6. **Forgejo down.** The epic lists this as not yet specified. Recommend
+5. **Forgejo down.** The epic lists this as not yet specified. Recommend
    `gt done` fails closed (the push error keeps the polecat session up) and the
    worker treats it as an infra retry, so no work is lost and no landing
    silently stalls.
-7. **Keep or delete `land/<bead>` after merge?** Recommend
+6. **Keep or delete `land/<bead>` after merge?** Recommend
    `delete_branch_after_merge`, since the polecat branch is already reaped and
    the landed SHA lives in the landings record.
-8. **Runner capacity.** The epic sets cap 3. Recommend starting there,
+7. **Runner capacity.** The epic sets cap 3. Recommend starting there,
    measuring during shadow mode, and raising before gastown — the last rig —
    flips, or CI becomes the landing rate limit.
-9. **GitHub Actions at cutover.** The epic says remove them to stop cloud
+8. **GitHub Actions at cutover.** The epic says remove them to stop cloud
    minutes, but asks first. Recommend disabling (not deleting) each rig's
    `.github/workflows/ci.yml` at cutover, so rollback can re-enable it.
 
@@ -365,7 +360,7 @@ discharges). A new test package that reaches beads or the town runs
 the gate).
 
 Landing order is not slice order: 1, 3 and 4 can land before any rig is
-onboarded; 2 changes the live path (see open question 4); 5–8 rewrite the
+onboarded; 2 changes the live path (see open question 3); 5–8 rewrite the
 worker; 9–12 are cutover. The rollout order (mango, hm, beads, om, gastown) is
 in the epic and is not repeated here.
 
