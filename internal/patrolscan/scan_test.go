@@ -282,6 +282,77 @@ func TestDeadSeatWithHookedWorkIsRestarted(t *testing.T) {
 	}
 }
 
+// gt-6hby3: a working polecat keeps writing its own work bead, so the bead is
+// recent whenever the session dies — reading that write as a dispatch held a
+// dead seat for a fresh grace window on every tick (beads/guzzle waited out a
+// restart that way). The grace belongs to the agent record's state: only a
+// seat that still says spawning is starting up.
+func TestSpawnGraceTracksTheAgentStateNotTheWorkBeadWrite(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		state string
+		age   time.Duration
+		want  Outcome
+	}{
+		{"working seat with a bead written 30s ago is a crash, not a dispatch", "working", 30 * time.Second, OutcomeRestarted},
+		{"spawning seat inside the window may be starting up", "spawning", 30 * time.Second, OutcomeSkipped},
+		{"spawning seat older than the window never came up", "spawning", 10 * time.Minute, OutcomeRestarted},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := newFake()
+			deadWithWork(env, "ruby")
+			env.agents["ruby"] = AgentRecord{State: tc.state}
+			env.work["ruby"].UpdatedAt = now.Add(-tc.age)
+
+			r := scanner(env, nil).Tick("gastown")
+
+			if got := seatFinding(t, r, "ruby").Outcome; got != tc.want {
+				t.Fatalf("outcome = %v, want %v; report %v", got, tc.want, r.Lines())
+			}
+		})
+	}
+}
+
+// SpawnGrace is the rule the tick and the daemon's crash detector both apply
+// (TestPatrolScanSpawnGraceMatchesPolecat pins the two copies): only a
+// spawning state earns the window, and every fact it is missing returns
+// false, so the seat falls through to the crash path.
+func TestSpawnGrace(t *testing.T) {
+	t.Parallel()
+	grace := 5 * time.Minute
+	cases := []struct {
+		name       string
+		agentState string
+		updatedAt  time.Time
+		now        time.Time
+		grace      time.Duration
+		want       bool
+	}{
+		{"spawning inside the window", "spawning", now.Add(-30 * time.Second), now, grace, true},
+		{"spawning at the window edge", "spawning", now.Add(-grace), now, grace, false},
+		{"spawning past the window", "spawning", now.Add(-10 * time.Minute), now, grace, false},
+		{"working", "working", now.Add(-30 * time.Second), now, grace, false},
+		{"idle", "idle", now.Add(-30 * time.Second), now, grace, false},
+		{"unknown state", "patrolling", now.Add(-30 * time.Second), now, grace, false},
+		{"no state recorded", "", now.Add(-30 * time.Second), now, grace, false},
+		{"no bead timestamp", "spawning", time.Time{}, now, grace, false},
+		{"no clock", "spawning", now.Add(-30 * time.Second), time.Time{}, grace, false},
+		{"no window", "spawning", now.Add(-30 * time.Second), now, 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := SpawnGrace(tc.agentState, tc.updatedAt, tc.now, tc.grace); got != tc.want {
+				t.Fatalf("SpawnGrace(%q, %s, %s, %s) = %v, want %v",
+					tc.agentState, tc.updatedAt, tc.now, tc.grace, got, tc.want)
+			}
+		})
+	}
+}
+
 // gt done --status DEFERRED (and gt handoff's redirect) writes
 // exit_type=DEFERRED and agent_state=stuck together, then retires the session:
 // the bead stays hooked with the polecat's commits still in the worktree. The
@@ -616,7 +687,10 @@ func TestNoRestartCases(t *testing.T) {
 			env.work["ruby"] = nil
 			env.workErr["ruby"] = errors.New("bd list: connection refused")
 		}, OutcomeUnknown},
-		{"spawn grace", func(env *fakeEnv) { env.work["ruby"].UpdatedAt = now.Add(-time.Minute) }, OutcomeSkipped},
+		{"spawn grace (agent_state spawning, hook inside the window)", func(env *fakeEnv) {
+			env.work["ruby"].UpdatedAt = now.Add(-time.Minute)
+			env.agents["ruby"] = AgentRecord{State: SpawningAgentState}
+		}, OutcomeSkipped},
 		{"first dead sample only", func(env *fakeEnv) { env.verdicts["ruby"] = dead(1) }, OutcomeWaiting},
 		{"liveness unknown", func(env *fakeEnv) {
 			env.verdicts["ruby"] = liveness.Result{Verdict: liveness.Unknown, Err: errors.New("tmux: no server")}

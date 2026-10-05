@@ -80,6 +80,32 @@ func TestPatrolScanExitEscalatedMatchesDone(t *testing.T) {
 	}
 }
 
+// The patrol scan repeats the spawn-grace rule and the spawning state it
+// turns on to stay out of the polecat package's dependency tree; this pins
+// both to the originals, on every state and age the two can be asked about.
+// A drift here would read a crashed polecat as spawning — or a spawning one
+// as crashed — at whichever site kept its own copy (gt-6hby3).
+func TestPatrolScanSpawnGraceMatchesPolecat(t *testing.T) {
+	t.Parallel()
+	if patrolscan.SpawningAgentState != string(beads.AgentStateSpawning) {
+		t.Errorf("patrolscan.SpawningAgentState = %q, beads.AgentStateSpawning = %q",
+			patrolscan.SpawningAgentState, beads.AgentStateSpawning)
+	}
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	states := []string{"spawning", "working", "idle", "stuck", "done", "patrolling", "", " spawning ", "SPAWNING"}
+	ages := []time.Duration{0, time.Second, 30 * time.Second, 5 * time.Minute, 6 * time.Minute, time.Hour}
+	for _, state := range states {
+		for _, age := range ages {
+			updated := now.Add(-age)
+			got := patrolscan.SpawnGrace(state, updated, now, 5*time.Minute)
+			want := polecat.SpawnGrace(state, updated, now, 5*time.Minute)
+			if got != want {
+				t.Errorf("SpawnGrace(%q, now-%s) = %v, polecat.SpawnGrace says %v", state, age, got, want)
+			}
+		}
+	}
+}
+
 // AgentRecord reads the fields that tell a finished turn from a held seat off
 // one agent bead: agent_state, the gt done exit type, the cleanup status, the
 // hook reference and the source issue the turn ran on. An omitted field is

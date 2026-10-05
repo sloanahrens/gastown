@@ -2228,12 +2228,12 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	// Session is dead. Find the seat's work: the intent record's work_bead
 	// when a writer set it, otherwise the work bead assigned to the polecat
 	// with status hooked or in_progress. Agent beads are display mirrors and
-	// are not read here (gt-4k3fj.1, G1-01).
+	// do not hold the work (gt-4k3fj.1, G1-01): they are read nowhere on this
+	// path except the spawn grace below, and then only to refuse.
 	hookBead := rec.WorkBead
-	var workUpdated time.Time
 	if hookBead == "" {
 		assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
-		work, updated, werr := d.assignedActiveWorkBead(rigName, assignee)
+		work, werr := d.assignedActiveWorkBead(rigName, assignee)
 		if werr != nil {
 			d.logger.Printf("UNKNOWN: crash detection for %s/%s skipped: session %s is dead and assigned work could not be read: %v",
 				rigName, polecatName, sessionName, werr)
@@ -2244,12 +2244,13 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 			// is not a crash.
 			return
 		}
-		hookBead, workUpdated = work, updated
+		hookBead = work
 	}
 
 	// Finished work: gt done closes the work bead before the session stops,
-	// so a dead session holding closed work completed normally.
-	closed, submitted := d.beadFinished(hookBead)
+	// so a dead session holding closed work completed normally. The same read
+	// dates the bead, which is what the spawn grace below measures.
+	closed, submitted, workUpdated := d.beadFinished(hookBead)
 	if closed {
 		skipped = true
 		d.crashSkipLog.logf(d.logger.Printf, rigName+"/"+polecatName, "Skipping crash detection for %s/%s: hook_bead %s is already closed (work completed normally)",
@@ -2267,15 +2268,23 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 		return
 	}
 
-	// Spawn grace: gt sling hooks the work bead before the tmux session
-	// exists, so a bead hooked moments ago with no session yet is a polecat
-	// starting up. Reporting it would double-spawn (issue #1752).
+	// Spawn grace (gt-6hby3): gt sling hooks the work bead before the tmux
+	// session exists, so a bead hooked moments ago with no session yet may be
+	// a polecat starting up, and reporting it would double-spawn (issue
+	// #1752). Only an explicit spawning agent state earns the grace
+	// (polecat.SpawnGrace): a running polecat keeps writing its own work
+	// bead, so that write says nothing about a dispatch. The agent record is
+	// read lazily, inside the window only, and never to find the work
+	// (G1-01); one that cannot be read proves no dispatch.
 	if !workUpdated.IsZero() {
 		if age := time.Since(workUpdated); age < polecatSpawnGrace {
-			skipped = true
-			d.crashSkipLog.logf(d.logger.Printf, rigName+"/"+polecatName, "Skipping crash detection for %s/%s: work %s hooked %s ago, polecat may be spawning",
-				rigName, polecatName, hookBead, age.Round(time.Second))
-			return
+			if state, ok := d.polecatAgentState(rigName, polecatName); ok &&
+				polecat.SpawnGrace(state, workUpdated, time.Now(), polecatSpawnGrace) {
+				skipped = true
+				d.crashSkipLog.logf(d.logger.Printf, rigName+"/"+polecatName, "Skipping crash detection for %s/%s: work %s hooked %s ago and agent_state=%s, polecat may be spawning",
+					rigName, polecatName, hookBead, age.Round(time.Second), state)
+				return
+			}
 		}
 	}
 
@@ -2392,16 +2401,19 @@ func (d *Daemon) workBeadsEnv(rigName string) []string {
 // detection: closed (status "closed"), or submitted for landing (label
 // gt:ready-to-land, not closed). On any error (bead not found, bd failure)
 // both are false, erring toward crash detection rather than silently
-// suppressing alerts.
-func (d *Daemon) beadFinished(beadID string) (closed, submitted bool) {
+// suppressing alerts. It also returns the bead's last write, zero when the
+// read failed or the timestamp does not parse, which is what the spawn grace
+// dates the dispatch against (gt-6hby3).
+func (d *Daemon) beadFinished(beadID string) (closed, submitted bool, updated time.Time) {
 	issue, err := d.workBeads(bdReadOnlyRoutingEnv(d.config.TownRoot), 0).Show(beadID)
 	if err != nil {
-		return false, false
+		return false, false, time.Time{}
 	}
+	updated, _ = time.Parse(time.RFC3339, issue.UpdatedAt)
 	if issue.Status == "closed" {
-		return true, false
+		return true, false, updated
 	}
-	return false, slices.Contains(issue.Labels, land.LabelReadyToLand)
+	return false, slices.Contains(issue.Labels, land.LabelReadyToLand), updated
 }
 
 // workBeadStillSubmitted reports whether the work bead a submitted record names is
@@ -2444,13 +2456,14 @@ func (d *Daemon) hasAssignedOpenWork(rigName, assignee string) bool {
 	return false
 }
 
-// assignedActiveWorkBead returns the ID and updated_at of a work bead
-// assigned to the polecat with status hooked or in_progress, read from the
-// rig's database the way hasAssignedOpenWork does, or "" when there is none.
-// A bead found by any query is returned; otherwise any failed query makes the
-// answer unknown (an error), since the failed status may be the one holding
-// the work. An updated_at that does not parse is returned as zero.
-func (d *Daemon) assignedActiveWorkBead(rigName, assignee string) (string, time.Time, error) {
+// assignedActiveWorkBead returns the ID of a work bead assigned to the
+// polecat with status hooked or in_progress, read from the rig's database the
+// way hasAssignedOpenWork does, or "" when there is none. A bead found by any
+// query is returned; otherwise any failed query makes the answer unknown (an
+// error), since the failed status may be the one holding the work. Callers
+// that need the bead's own record read it back by ID (beadFinished), which is
+// where its last write comes from.
+func (d *Daemon) assignedActiveWorkBead(rigName, assignee string) (string, error) {
 	var lastErr error
 	for _, status := range []string{"hooked", "in_progress"} {
 		issues, err := d.assignedWork(rigName, assignee, status)
@@ -2460,17 +2473,30 @@ func (d *Daemon) assignedActiveWorkBead(rigName, assignee string) (string, time.
 		}
 		for _, issue := range issues {
 			if issue.ID != "" {
-				updated, _ := time.Parse(time.RFC3339, issue.UpdatedAt)
-				return issue.ID, updated, nil
+				return issue.ID, nil
 			}
 		}
 	}
-	return "", time.Time{}, lastErr
+	return "", lastErr
 }
 
 // polecatSpawnGrace is how long after its work bead was hooked a polecat
-// with no session is taken to be starting up rather than crashed.
+// whose agent record still says spawning is taken to be starting up rather
+// than crashed.
 const polecatSpawnGrace = 5 * time.Minute
+
+// polecatAgentState reads the agent_state a seat's agent bead records, and
+// reports whether that could be read at all: false for a seat with no bead and
+// for a failed read, either of which proves no dispatch. It reads through the
+// patrol scan's own reader, so the crash detector and the tick that owns the
+// restart ask the same question of the same record (gt-6hby3).
+func (d *Daemon) polecatAgentState(rigName, polecatName string) (string, bool) {
+	rec, err := (&patrolScanHost{d: d}).AgentRecord(rigName, polecatName)
+	if err != nil {
+		return "", false
+	}
+	return rec.State, true
+}
 
 // reapIdlePolecats kills polecat tmux sessions that have been idle too long.
 // The persistent polecat model (gt-4ac) keeps sessions alive after gt done for reuse,
