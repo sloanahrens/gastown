@@ -218,7 +218,7 @@ func TestScanDirectiveFiles(t *testing.T) {
 		t.Helper()
 		townRoot := t.TempDir()
 		write(t, filepath.Join(townRoot, "myrig", "config.json"), "{}")
-		write(t, filepath.Join(townRoot, "directives", "mayor.md"), "mayor policy")
+		write(t, filepath.Join(townRoot, "directives", "crew.md"), "crew policy")
 		write(t, filepath.Join(townRoot, "directives", SharedDirectiveName+".md"), "shared policy")
 		write(t, filepath.Join(townRoot, "myrig", "directives", "polecat.md"), "rig polecat")
 		write(t, filepath.Join(townRoot, "myrig", "directives", "host-hygiene.md"), "host rules")

@@ -217,9 +217,6 @@ const (
 
 // Agent role names.
 const (
-	// RoleMayor is the mayor agent role.
-	RoleMayor = "mayor"
-
 	// RolePolecat is the polecat agent role.
 	RolePolecat = "polecat"
 
@@ -230,9 +227,6 @@ const (
 // Role emojis - centralized for easy customization.
 // These match the Gas Town visual identity (see ~/Desktop/Gas Town/ prompts).
 const (
-	// EmojiMayor is the mayor emoji (fox conductor).
-	EmojiMayor = "🎩"
-
 	// EmojiCrew is the crew emoji (established worker).
 	EmojiCrew = "👷"
 

@@ -14,7 +14,7 @@ func TestSystemPromptFilePath_PerRole(t *testing.T) {
 	cases := map[string]string{
 		"witness":  "", // role retired (gt-4k3fj.6.1)
 		"refinery": "", // role removed (gt-v4ssj.6)
-		"mayor":    "/town/mayor/.claude/system-prompt.md",
+		"mayor":    "", // role retired
 		"deacon":   "", // role retired (gt-4k3fj.6.1)
 		"dog":      "", // role retired (gt-ckunw)
 		"boot":     "",
@@ -96,7 +96,7 @@ func TestResolveRoleAgentConfig_AddsSystemPromptFlagWhenFileExists(t *testing.T)
 	if err := SaveRigSettings(filepath.Join(rig, "settings", "config.json"), NewRigSettings()); err != nil {
 		t.Fatal(err)
 	}
-	path := SystemPromptFilePath("mayor", town, rig, "")
+	path := SystemPromptFilePath("polecat", town, rig, "nux")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,10 @@ func TestResolveRoleAgentConfig_AddsSystemPromptFlagWhenFileExists(t *testing.T)
 		t.Fatal(err)
 	}
 
-	rc := ResolveRoleAgentConfig("mayor", town, rig)
+	rc, err := ResolveRoleAgentConfigWithOverride("polecat", town, rig, "", "nux")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
 	found := false
 	for _, a := range rc.Args {
 		if a == path {
@@ -156,7 +159,6 @@ func TestSystemPromptFilePath_PerAgentForPolecatAndCrew(t *testing.T) {
 		{"crew", "sloan", "/town/myrig/crew/.claude/system-prompt-sloan.md"},
 		{"polecat", "", ""}, // the template bakes in the agent's name; no shared file
 		{"crew", "", ""},
-		{"mayor", "", "/town/mayor/.claude/system-prompt.md"},
 	}
 	for _, c := range cases {
 		if got := SystemPromptFilePath(c.role, town, rig, c.agent); got != c.want {
@@ -241,22 +243,6 @@ func TestResolveRoleAgentConfigWithOverrideAppliesRoleFlags(t *testing.T) {
 		t.Errorf("env %s = %q, want %q", EnvSystemPromptFile, rc.Env[EnvSystemPromptFile], polecatPath)
 	}
 
-	// Mayor: town-level role, empty rigPath, no agent name.
-	mayorPath := SystemPromptFilePath("mayor", townRoot, "", "")
-	if err := os.MkdirAll(filepath.Dir(mayorPath), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(mayorPath, []byte("# mayor\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	rc, err = ResolveRoleAgentConfigWithOverride("mayor", townRoot, "", "deepseek-flash", "")
-	if err != nil {
-		t.Fatalf("resolve mayor: %v", err)
-	}
-	if !containsArgPair(rc.Args, "--append-system-prompt-file", mayorPath) {
-		t.Errorf("mayor override config lacks the flag: %v", rc.Args)
-	}
-
 	// Missing file: unchanged config, no error.
 	rc, err = ResolveRoleAgentConfigWithOverride("crew", townRoot, rigPath, "deepseek-flash", "max")
 	if err != nil {
@@ -267,7 +253,7 @@ func TestResolveRoleAgentConfigWithOverrideAppliesRoleFlags(t *testing.T) {
 	}
 
 	// Unknown agent: error, like ResolveAgentConfigWithOverride.
-	if _, err := ResolveRoleAgentConfigWithOverride("mayor", townRoot, "", "no-such-agent", ""); err == nil {
+	if _, err := ResolveRoleAgentConfigWithOverride("crew", townRoot, rigPath, "no-such-agent", "max"); err == nil {
 		t.Error("expected an error for an unknown agent override")
 	}
 

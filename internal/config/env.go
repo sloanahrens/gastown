@@ -76,10 +76,10 @@ var bdTargetSelectorEnvVars = []string{
 // AgentEnvConfig specifies the configuration for generating agent environment variables.
 // This is the single source of truth for all agent environment configuration.
 type AgentEnvConfig struct {
-	// Role is the agent role: mayor, deacon, witness, refinery, crew, polecat, dog, boot
+	// Role is the agent role: deacon, witness, refinery, crew, polecat, dog, boot
 	Role string
 
-	// Rig is the rig name (empty for town-level agents like mayor/deacon)
+	// Rig is the rig name (empty for town-level agents like deacon)
 	Rig string
 
 	// AgentName is the specific agent name (empty for singletons like witness/refinery)
@@ -104,7 +104,7 @@ type AgentEnvConfig struct {
 	// session table, not the process env set via exec env in the startup command).
 	Agent string
 
-	// SessionName is the tmux session name for this agent (e.g., "hq-mayor", "gt-crew-max").
+	// SessionName is the tmux session name for this agent (e.g., "gt-crew-max").
 	// Set as the GT_SESSION env var.
 	SessionName string
 
@@ -132,11 +132,6 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 	// GT_ROLE is set in compound format (e.g., "beads/crew/jane") so that
 	// beads can parse it without knowing about Gas Town role types.
 	switch cfg.Role {
-	case constants.RoleMayor:
-		env["GT_ROLE"] = constants.RoleMayor
-		env["BD_ACTOR"] = constants.RoleMayor
-		env["GIT_AUTHOR_NAME"] = constants.RoleMayor
-
 	case constants.RolePolecat:
 		env["GT_ROLE"] = fmt.Sprintf("%s/polecats/%s", cfg.Rig, cfg.AgentName)
 		env["GT_RIG"] = cfg.Rig
@@ -696,7 +691,7 @@ func psQuote(s string) string {
 }
 
 // ExportPrefix builds an export statement prefix for shell commands.
-// Returns a string like "export GT_ROLE=mayor BD_ACTOR=mayor && "
+// Returns a string like "export GT_ROLE=beads/crew/max BD_ACTOR=beads/crew/max && "
 // The keys are sorted for deterministic output.
 // Values containing special characters are properly shell-quoted.
 func ExportPrefix(env map[string]string) string {

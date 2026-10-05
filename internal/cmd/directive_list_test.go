@@ -25,7 +25,7 @@ func TestDirectiveList_FlagsFilesNoRoleLoads(t *testing.T) {
 
 	townRoot := t.TempDir()
 	writeDirective(t, filepath.Join(townRoot, "myrig", "config.json"), "{}")
-	writeDirective(t, filepath.Join(townRoot, "directives", "mayor.md"), "mayor policy")
+	writeDirective(t, filepath.Join(townRoot, "directives", "crew.md"), "crew policy")
 	writeDirective(t, filepath.Join(townRoot, "directives", config.SharedDirectiveName+".md"), "shared policy")
 	writeDirective(t, filepath.Join(townRoot, "myrig", "directives", "testing.md"), "test rules")
 
@@ -55,7 +55,7 @@ func TestDirectiveList_FlagsFilesNoRoleLoads(t *testing.T) {
 	if row := rowFor("testing"); !strings.Contains(row, "UNUSED") {
 		t.Errorf("misnamed file not flagged: %q", row)
 	}
-	if row := rowFor("mayor"); strings.Contains(row, "UNUSED") {
+	if row := rowFor("crew"); strings.Contains(row, "UNUSED") {
 		t.Errorf("role-named file flagged as unused: %q", row)
 	}
 	if row := rowFor(config.SharedDirectiveName); !strings.Contains(row, "every role") {
@@ -83,7 +83,7 @@ func TestDirectiveList_SkipsEmptyFiles(t *testing.T) {
 	t.Parallel()
 
 	townRoot := t.TempDir()
-	writeDirective(t, filepath.Join(townRoot, "directives", "mayor.md"), "   \n")
+	writeDirective(t, filepath.Join(townRoot, "directives", "crew.md"), "   \n")
 
 	entries, err := listableDirectiveFiles(townRoot)
 	if err != nil {

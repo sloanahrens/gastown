@@ -18,7 +18,7 @@ var defaultRolesFS embed.FS
 // RoleDefinition contains all configuration for a role type.
 // This replaces the role bead system with config files.
 type RoleDefinition struct {
-	// Role is the role identifier (mayor, polecat, crew).
+	// Role is the role identifier (polecat, crew).
 	Role string `toml:"role"`
 
 	// Scope is "town" or "rig" - determines where the agent runs.
@@ -44,7 +44,7 @@ type RoleDefinition struct {
 type RoleSessionConfig struct {
 	// Pattern is the tmux session name pattern.
 	// Supports placeholders: {rig}, {name}, {role}
-	// Examples: "hq-mayor", "gt-{rig}-witness", "gt-{rig}-{name}"
+	// Examples: "gt-{rig}-crew-{name}", "gt-{rig}-witness", "gt-{rig}-{name}"
 	Pattern string `toml:"pattern"`
 
 	// WorkDir is the working directory pattern.
@@ -113,12 +113,13 @@ func (d Duration) String() string {
 
 // AllRoles returns the list of all known role names.
 func AllRoles() []string {
-	return []string{"mayor", "polecat", "crew"}
+	return []string{"polecat", "crew"}
 }
 
-// TownRoles returns roles that operate at town scope.
+// TownRoles returns roles that operate at town scope. Empty: the town-scoped
+// resident role is retired.
 func TownRoles() []string {
-	return []string{"mayor"}
+	return nil
 }
 
 // RigRoles returns roles that operate at rig scope.
@@ -223,7 +224,7 @@ func mergeRoleDefinition(base, override *RoleDefinition) {
 	}
 
 	// Role and Scope are immutable
-	// (can't change a witness to a mayor via override)
+	// (can't change a crew member to a polecat via override)
 
 	// Session config
 	if override.Session.Pattern != "" {

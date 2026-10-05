@@ -7,7 +7,7 @@ import "github.com/steveyegge/gastown/internal/constants"
 // prompting and needs automatic mail injection on startup.
 //
 // Autonomous roles: polecat.
-// Interactive roles: mayor, crew (and anything else).
+// Interactive roles: crew (and anything else).
 //
 // This is the single source of truth for the autonomous/interactive
 // classification used by the hook installer (settings-autonomous.json vs

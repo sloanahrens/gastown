@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/state"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -98,7 +97,7 @@ func detectRigFromPath(townRoot, absPath string) string {
 
 	switch candidateRig {
 	// deacon/ is the retired deacon's directory; it holds no rig.
-	case constants.RoleMayor, "deacon", ".beads", ".claude", ".git", "plugins":
+	case string(RoleMayor), "deacon", ".beads", ".claude", ".git", "plugins":
 		return ""
 	}
 

@@ -1104,7 +1104,7 @@ func costTierPresetByName(name string) *RuntimeConfig {
 // If a configured agent is not found or its binary doesn't exist, a warning is
 // printed to stderr and it falls back to the default agent.
 //
-// role is one of: "mayor", "deacon", "witness", "refinery", "polecat", "crew", "boot".
+// role is one of: "deacon", "witness", "refinery", "polecat", "crew", "boot".
 // townRoot is the path to the town directory (e.g., ~/gt).
 // rigPath is the path to the rig directory (e.g., ~/gt/gastown), or empty for town-level roles.
 func ResolveRoleAgentConfig(role, townRoot, rigPath string) *RuntimeConfig {
@@ -1254,7 +1254,7 @@ func withRoleSettingsFlag(rc *RuntimeConfig, role, rigPath string) *RuntimeConfi
 
 // RoleSettingsDir returns the shared settings directory for roles whose session
 // working directory differs from their settings location. Returns empty for
-// roles where settings and session directory are the same (mayor).
+// roles where settings and session directory are the same (town-level roles).
 func RoleSettingsDir(role, rigPath string) string {
 	switch role {
 	case constants.RoleCrew:
@@ -1267,7 +1267,7 @@ func RoleSettingsDir(role, rigPath string) string {
 }
 
 func resolveRoleAgentConfigCore(reg *AgentRegistry, role, townRoot, rigPath string) *RuntimeConfig {
-	// Load rig settings (may be nil for town-level roles like mayor/deacon)
+	// Load rig settings (may be nil for town-level roles like deacon)
 	var rigSettings *RigSettings
 	if rigPath != "" {
 		var err error
@@ -1604,7 +1604,7 @@ func inferAgentName(rc *RuntimeConfig) string {
 // for starting an LLM session. It resolves the agent config and builds the command.
 func GetRuntimeCommand(rigPath string) string {
 	if rigPath == "" {
-		// Try to detect town root from cwd for town-level agents (mayor, deacon)
+		// Try to detect town root from cwd for town-level agents
 		townRoot, err := findTownRootFromCwd(processHost)
 		if err != nil {
 			return DefaultRuntimeConfig().BuildCommand()
@@ -1642,7 +1642,7 @@ func GetRuntimeCommandWithAgentOverride(rigPath, agentOverride string) (string, 
 // GetRuntimeCommandWithPrompt returns the full command with an initial prompt.
 func GetRuntimeCommandWithPrompt(rigPath, prompt string) string {
 	if rigPath == "" {
-		// Try to detect town root from cwd for town-level agents (mayor, deacon)
+		// Try to detect town root from cwd for town-level agents
 		townRoot, err := findTownRootFromCwd(processHost)
 		if err != nil {
 			return DefaultRuntimeConfig().BuildCommandWithPrompt(prompt)
@@ -1708,7 +1708,7 @@ func findTownRootFromCwd(h host) (string, error) {
 
 // ExtractSimpleRole extracts the simple role name from a GT_ROLE value.
 // GT_ROLE can be:
-//   - Simple: "mayor", "deacon"
+//   - Simple: a bare role name (e.g. "deacon")
 //   - Compound: "rig/witness", "rig/refinery", "rig/crew/name", "rig/polecats/name"
 //
 // For compound format, returns the role segment (second part), mapping the
@@ -1721,7 +1721,7 @@ func ExtractSimpleRole(gtRole string) string {
 	parts := strings.Split(gtRole, "/")
 	switch len(parts) {
 	case 1:
-		// Simple format: "mayor", "deacon"
+		// Simple format: a bare role name
 		return parts[0]
 	case 2:
 		// "rig/witness", "rig/refinery"
@@ -1778,7 +1778,7 @@ func buildStartupCommand(h host, envVars map[string]string, rigPath, prompt stri
 			rc = resolveAgentConfig(h, townRoot, rigPath)
 		}
 	} else {
-		// For town-level agents (mayor, deacon), prefer GT_TOWN_ROOT from
+		// For town-level agents, prefer GT_TOWN_ROOT from
 		// envVars (set by AgentEnv) over cwd detection. This ensures
 		// role_agents config is respected even when the daemon runs outside
 		// the town hierarchy.
@@ -2027,7 +2027,7 @@ func buildStartupCommandWithAgentOverride(h host, envVars map[string]string, rig
 			rc = resolveAgentConfig(h, townRoot, rigPath)
 		}
 	} else {
-		// For town-level agents (mayor, deacon), prefer GT_TOWN_ROOT from
+		// For town-level agents, prefer GT_TOWN_ROOT from
 		// envVars (set by AgentEnv) over cwd detection. This ensures
 		// role_agents config is respected even when the daemon runs outside
 		// the town hierarchy.
@@ -2221,7 +2221,7 @@ func buildStartupCommandFromConfig(h host, cfg AgentEnvConfig, rigPath, prompt, 
 // BuildAgentStartupCommand is a convenience function for starting agent
 // sessions. It uses AgentEnv to set all standard environment variables.
 // For rig-level roles (witness, refinery), pass the rig name and rigPath.
-// For town-level roles (mayor, deacon, boot), pass empty rig and rigPath, but
+// For town-level roles, pass empty rig and rigPath, but
 // provide townRoot.
 func BuildAgentStartupCommand(role, rig, townRoot, rigPath, prompt string) (string, error) {
 	return buildAgentStartupCommand(processHost, role, rig, townRoot, rigPath, prompt)

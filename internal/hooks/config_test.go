@@ -155,7 +155,7 @@ func TestValidTarget(t *testing.T) {
 		{"crew", true},
 		{"polecats", true},
 		{"polecat", true},
-		{"mayor", true},
+		{"mayor", false}, // role retired (gt-rwp7z)
 		{"rig", false},
 		{"gastown/rig", false},
 		{"gastown/crew", true},
@@ -188,7 +188,7 @@ func TestNormalizeTarget(t *testing.T) {
 		{"polecat", "polecats", true},
 		{"gastown/polecats", "gastown/polecats", true},
 		{"gastown/polecat", "gastown/polecats", true},
-		{"mayor", "mayor", true},
+		{"mayor", "", false}, // role retired (gt-rwp7z)
 		{"invalid", "", false},
 		{"gastown/invalid", "", false},
 	}
@@ -212,7 +212,7 @@ func TestGetApplicableOverrides(t *testing.T) {
 		target   string
 		expected []string
 	}{
-		{"mayor", []string{"mayor"}},
+		{"polecats", []string{"polecats"}},
 		{"crew", []string{"crew"}},
 		{"gastown/crew", []string{"crew", "gastown/crew"}},
 	}
@@ -1012,8 +1012,8 @@ func TestDiscoverTargets(t *testing.T) {
 		t.Fatalf("DiscoverTargets failed: %v", err)
 	}
 
-	if len(targets) != 2 {
-		t.Errorf("expected 2 targets, got %d", len(targets))
+	if len(targets) != 1 {
+		t.Errorf("expected 1 target, got %d", len(targets))
 		for _, tgt := range targets {
 			t.Logf("  target: %s (key=%s)", tgt.DisplayKey(), tgt.Key)
 		}
@@ -1024,14 +1024,14 @@ func TestDiscoverTargets(t *testing.T) {
 		found[tgt.DisplayKey()] = true
 	}
 
-	for _, expected := range []string{"mayor", "testrig/crew"} {
+	for _, expected := range []string{"testrig/crew"} {
 		if !found[expected] {
 			t.Errorf("expected target %q not found", expected)
 		}
 	}
 	// A town may still hold the deleted roles' directories: they are not
-	// settings targets (gt-4k3fj.6.1).
-	for _, retired := range []string{"deacon", "testrig/witness"} {
+	// settings targets (gt-4k3fj.6.1, gt-rwp7z).
+	for _, retired := range []string{"mayor", "deacon", "testrig/witness"} {
 		if found[retired] {
 			t.Errorf("retired role directory %q discovered as a target", retired)
 		}
@@ -1061,11 +1061,10 @@ func TestDiscoverTargets_RoleNames(t *testing.T) {
 	}
 
 	expected := map[string]string{
-		"mayor":         "mayor",
 		"rig1/crew":     "crew",
 		"rig1/polecats": "polecat",
 	}
-	for _, retired := range []string{"deacon", "rig1/witness", "rig1/refinery"} {
+	for _, retired := range []string{"mayor", "deacon", "rig1/witness", "rig1/refinery"} {
 		if _, ok := roleByKey[retired]; ok {
 			t.Errorf("retired role directory %q discovered as a target", retired)
 		}

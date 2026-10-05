@@ -9,22 +9,24 @@ import (
 	"testing"
 )
 
-func TestAgentEnv_Mayor(t *testing.T) {
+func TestAgentEnv_RetiredRoleSetsNoRoleVars(t *testing.T) {
 	t.Parallel()
 	env := AgentEnv(AgentEnvConfig{
 		Role:     "mayor",
 		TownRoot: "/town",
 	})
 
-	assertEnv(t, env, "GT_ROLE", "mayor")
-	assertEnv(t, env, "BD_ACTOR", "mayor")
-	assertEnv(t, env, "GIT_AUTHOR_NAME", "mayor")
+	// The mayor role is retired: a stale GT_ROLE=mayor must set no role
+	// identity vars, while the town-scope vars still apply.
+	assertNotSet(t, env, "GT_ROLE")
+	assertNotSet(t, env, "BD_ACTOR")
+	assertNotSet(t, env, "GIT_AUTHOR_NAME")
+	assertNotSet(t, env, "GT_RIG")
 	assertEnv(t, env, "GT_TOWN_ROOT", "/town")
 	assertEnv(t, env, "GT_ROOT", "/town")                 // the alias bd reads until it migrates (gt-syhch)
 	assertEnv(t, env, "GIT_CEILING_DIRECTORIES", "/town") // prevents git walking to umbrella
 	assertEnv(t, env, "NODE_OPTIONS", "")                 // cleared to prevent debugger inheritance
 	assertEnv(t, env, "CLAUDECODE", "")                   // cleared to prevent nested session detection
-	assertNotSet(t, env, "GT_RIG")
 }
 
 func TestAgentEnv_Polecat(t *testing.T) {

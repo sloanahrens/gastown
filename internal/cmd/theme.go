@@ -9,7 +9,6 @@ import (
 	"github.com/muesli/termenv"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -167,9 +166,9 @@ func runThemeApply(cmd *cobra.Command, args []string) error {
 		var crewMember string
 		switch identity.Role {
 		case session.RoleMayor:
-			theme = tmux.ResolveSessionTheme(townRoot, "", constants.RoleMayor, "")
+			theme = tmux.ResolveSessionTheme(townRoot, "", string(RoleMayor), "")
 			worker = "Mayor"
-			role = constants.RoleMayor
+			role = string(RoleMayor)
 		default:
 			rig = identity.Rig
 
@@ -255,7 +254,7 @@ func detectCurrentRig(reg *session.PrefixRegistry) string {
 	// Extract first path component (rig name)
 	// Patterns: <rig>/..., mayor/...
 	parts := strings.Split(rel, string(filepath.Separator))
-	if len(parts) > 0 && parts[0] != "." && parts[0] != constants.RoleMayor {
+	if len(parts) > 0 && parts[0] != "." && parts[0] != string(RoleMayor) {
 		return parts[0]
 	}
 

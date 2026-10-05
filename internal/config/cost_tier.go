@@ -11,18 +11,17 @@ type CostTier string
 const (
 	// TierStandard uses opus for all roles (default, highest quality).
 	TierStandard CostTier = "standard"
-	// TierEconomy uses sonnet for the mayor, keeps opus for workers.
+	// TierEconomy keeps the default model for workers.
 	TierEconomy CostTier = "economy"
-	// TierBudget uses sonnet for the mayor and workers.
+	// TierBudget uses sonnet for all roles.
 	TierBudget CostTier = "budget"
 	// TierCustomGroqOpus routes polecats to Groq Compound (fast + cheap)
-	// while keeping Opus for mayor and crew (quality-critical work).
+	// while keeping Opus for crew (quality-critical work).
 	// The groq-compound preset uses the claude CLI as an SDK proxy —
 	// see AgentGroqCompound in agents.go for the full wiring.
 	TierCustomGroqOpus CostTier = "custom-groq-opus"
 	// TierCustomGroqSonnet routes crew and polecats to Groq Compound (fast +
-	// cheap) while using Sonnet for mayor (quality-critical work).
-	// The groq-compound preset uses the claude CLI as an SDK proxy —
+	// cheap). The groq-compound preset uses the claude CLI as an SDK proxy —
 	// see AgentGroqCompound in agents.go for the full wiring.
 	TierCustomGroqSonnet CostTier = "custom-groq-sonnet"
 )
@@ -51,7 +50,7 @@ func IsValidTier(tier string) bool {
 // TierManagedRoles is the set of roles whose model selection is managed by cost tiers.
 // These are the only roles that ApplyCostTier modifies — any other custom RoleAgents
 // entries (e.g., user-defined roles or non-Claude agents for non-tier roles) are preserved.
-var TierManagedRoles = []string{"mayor", "polecat", "crew"}
+var TierManagedRoles = []string{"polecat", "crew"}
 
 // CostTierRoleAgents returns the role_agents mapping for a given tier.
 // All tiers explicitly map every tier-managed role. Standard tier maps roles
@@ -60,39 +59,33 @@ func CostTierRoleAgents(tier CostTier) map[string]string {
 	switch tier {
 	case TierStandard:
 		return map[string]string{
-			"mayor":   "",
 			"polecat": "",
 			"crew":    "",
 		}
 
 	case TierEconomy:
 		return map[string]string{
-			"mayor":   "claude-sonnet",
 			"polecat": "",
 			"crew":    "",
 		}
 
 	case TierBudget:
 		return map[string]string{
-			"mayor":   "claude-sonnet",
 			"polecat": "claude-sonnet",
 			"crew":    "claude-sonnet",
 		}
 
 	case TierCustomGroqOpus:
-		// Mayor and crew keep the default (opus) for highest-quality work.
+		// Crew keeps the default (opus) for highest-quality work.
 		// Polecats use Groq Compound for fast, low-cost work.
 		return map[string]string{
-			"mayor":   "", // use default (opus)
 			"polecat": "groq-compound",
 			"crew":    "", // use default (opus)
 		}
 
 	case TierCustomGroqSonnet:
-		// Mayor uses Sonnet for quality-critical work.
 		// Crew and polecats use Groq Compound for fast, low-cost work.
 		return map[string]string{
-			"mayor":   "claude-sonnet",
 			"polecat": "groq-compound",
 			"crew":    "groq-compound",
 		}
@@ -103,25 +96,22 @@ func CostTierRoleAgents(tier CostTier) map[string]string {
 }
 
 // CostTierRoleEffort returns the role_effort mapping for a given tier.
-// Workers get the highest effort for the tier; the mayor drops effort on the
-// cheaper tiers. Returns nil if the tier is invalid.
+// Workers get the highest effort for the tier. Returns nil if the tier is
+// invalid.
 func CostTierRoleEffort(tier CostTier) map[string]string {
 	switch tier {
 	case TierStandard:
 		return map[string]string{
-			"mayor":   "high",
 			"polecat": "high",
 			"crew":    "high",
 		}
 	case TierEconomy:
 		return map[string]string{
-			"mayor":   "medium",
 			"polecat": "high",
 			"crew":    "high",
 		}
 	case TierBudget:
 		return map[string]string{
-			"mayor":   "low",
 			"polecat": "medium",
 			"crew":    "medium",
 		}
@@ -209,7 +199,7 @@ func claudeHaikuPreset() *RuntimeConfig {
 // This gives you:
 //   - Groq compound-beta reasoning on polecats (low cost, fast)
 //   - Full Claude SDK hooks / session tracking / tmux detection inherited
-//   - Claude Opus on mayor and crew via the default claude preset
+//   - Claude Opus on crew via the default claude preset
 //
 // Prerequisite: export GROQ_API_KEY=gsk_... in your shell before starting gt.
 func groqCompoundPreset() *RuntimeConfig {
@@ -320,13 +310,13 @@ func TierDescription(tier CostTier) string {
 	case TierStandard:
 		return "All roles use Opus (highest quality)"
 	case TierEconomy:
-		return "Mayor uses Sonnet, workers use Opus"
+		return "Workers use Opus"
 	case TierBudget:
-		return "Mayor and workers use Sonnet"
+		return "All roles use Sonnet"
 	case TierCustomGroqOpus:
-		return "Mayor/Crew → Claude Opus; Polecat → Groq compound-beta"
+		return "Crew → Claude Opus; Polecat → Groq compound-beta"
 	case TierCustomGroqSonnet:
-		return "Mayor → Claude Sonnet; All other roles → Groq compound-beta"
+		return "All roles → Groq compound-beta"
 	default:
 		return "Unknown tier"
 	}

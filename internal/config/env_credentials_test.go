@@ -44,7 +44,6 @@ func TestSpawnCommandsCarryNoParentCredentials(t *testing.T) {
 	h := agentHost(parentEnvWithFakeCredentials())
 
 	roles := []AgentEnvConfig{
-		{Role: constants.RoleMayor, TownRoot: townRoot},
 		{Role: "deacon", TownRoot: townRoot},
 		{Role: "boot", TownRoot: townRoot},
 		{Role: "dog", AgentName: "alpha", TownRoot: townRoot},

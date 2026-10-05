@@ -1284,7 +1284,7 @@ func TestBuildAgentStartupCommand(t *testing.T) {
 
 	// Test without rig config (uses defaults)
 	// New signature: (role, rig, townRoot, rigPath, prompt)
-	cmd, err := buildAgentStartupCommand(fh, "mayor", "", "", "", "")
+	cmd, err := buildAgentStartupCommand(fh, constants.RoleCrew, "testrig", "", "", "")
 	if err != nil {
 		t.Fatalf("BuildStartupCommand returned an error: %v", err)
 	}
@@ -1293,10 +1293,10 @@ func TestBuildAgentStartupCommand(t *testing.T) {
 	if !strings.Contains(cmd, "exec env") {
 		t.Error("expected 'exec env' in command")
 	}
-	if !strings.Contains(cmd, "GT_ROLE=mayor") {
-		t.Error("expected GT_ROLE=mayor in command")
+	if !strings.Contains(cmd, "GT_ROLE=testrig/crew/") {
+		t.Error("expected GT_ROLE=testrig/crew/ in command")
 	}
-	if !strings.Contains(cmd, "BD_ACTOR=mayor") {
+	if !strings.Contains(cmd, "BD_ACTOR=testrig/crew/") {
 		t.Error("expected BD_ACTOR in command")
 	}
 	parts := strings.Fields(cmd)
@@ -1524,14 +1524,14 @@ func TestBuildAgentStartupCommandWithAgentOverride(t *testing.T) {
 
 	t.Run("empty override uses default agent", func(t *testing.T) {
 		// New signature: (role, rig, townRoot, rigPath, prompt, agentOverride)
-		cmd, err := buildAgentStartupCommandWithAgentOverride(fh, "mayor", "", "", "", "", "")
+		cmd, err := buildAgentStartupCommandWithAgentOverride(fh, constants.RoleCrew, "testrig", "", "", "", "")
 		if err != nil {
 			t.Fatalf("BuildAgentStartupCommandWithAgentOverride: %v", err)
 		}
-		if !strings.Contains(cmd, "GT_ROLE=mayor") {
+		if !strings.Contains(cmd, "GT_ROLE=testrig/crew/") {
 			t.Fatalf("expected GT_ROLE export in command: %q", cmd)
 		}
-		if !strings.Contains(cmd, "BD_ACTOR=mayor") {
+		if !strings.Contains(cmd, "BD_ACTOR=testrig/crew/") {
 			t.Fatalf("expected BD_ACTOR export in command: %q", cmd)
 		}
 		if !strings.Contains(cmd, "gemini --approval-mode yolo") {
@@ -1541,7 +1541,7 @@ func TestBuildAgentStartupCommandWithAgentOverride(t *testing.T) {
 
 	t.Run("override switches agent", func(t *testing.T) {
 		// New signature: (role, rig, townRoot, rigPath, prompt, agentOverride)
-		cmd, err := buildAgentStartupCommandWithAgentOverride(fh, "mayor", "", "", "", "", "codex")
+		cmd, err := buildAgentStartupCommandWithAgentOverride(fh, constants.RoleCrew, "testrig", "", "", "", "codex")
 		if err != nil {
 			t.Fatalf("BuildAgentStartupCommandWithAgentOverride: %v", err)
 		}
@@ -1788,7 +1788,7 @@ func TestBuildAgentStartupCommand_UsesRoleAgents(t *testing.T) {
 	townSettings := NewTownSettings()
 	townSettings.DefaultAgent = "claude"
 	townSettings.RoleAgents = map[string]string{
-		constants.RoleMayor: "codex",
+		constants.RoleCrew: "codex",
 	}
 	if err := SaveTownSettings(TownSettingsPath(townRoot), townSettings); err != nil {
 		t.Fatalf("SaveTownSettings: %v", err)
@@ -1801,15 +1801,15 @@ func TestBuildAgentStartupCommand_UsesRoleAgents(t *testing.T) {
 	}
 
 	// BuildAgentStartupCommand passes role via GT_ROLE env var (compound format)
-	cmd, err := buildAgentStartupCommand(fh, constants.RoleMayor, "", townRoot, rigPath, "")
+	cmd, err := buildAgentStartupCommand(fh, constants.RoleCrew, "testrig", townRoot, rigPath, "")
 	if err != nil {
 		t.Fatalf("BuildAgentStartupCommand returned an error: %v", err)
 	}
 	if !strings.Contains(cmd, "codex") {
-		t.Fatalf("expected codex for mayor role, got: %q", cmd)
+		t.Fatalf("expected codex for crew role, got: %q", cmd)
 	}
-	if !strings.Contains(cmd, "GT_ROLE=mayor") {
-		t.Fatalf("expected GT_ROLE=mayor in command: %q", cmd)
+	if !strings.Contains(cmd, "GT_ROLE=testrig/crew/") {
+		t.Fatalf("expected GT_ROLE=testrig/crew/ in command: %q", cmd)
 	}
 }
 
@@ -3133,7 +3133,6 @@ func TestRoleAgentConfigWithCustomAgent(t *testing.T) {
 	townSettings := NewTownSettings()
 	townSettings.DefaultAgent = "claude-opus"
 	townSettings.RoleAgents = map[string]string{
-		constants.RoleMayor:   "opencode-mayor",
 		"refinery":            "claude-haiku",
 		constants.RolePolecat: "claude-opus",
 		constants.RoleCrew:    "claude-sonnet",
@@ -3162,9 +3161,7 @@ func TestRoleAgentConfigWithCustomAgent(t *testing.T) {
 		t.Fatalf("SaveRigSettings: %v", err)
 	}
 
-	// Test mayor role gets opencode-mayor with prompt_mode: none
-
-	// Test other roles get their configured agents
+	// Test that configured roles get their agents
 	t.Run("refinery gets claude-haiku", func(t *testing.T) {
 		rc := resolveRoleAgentConfig(fh, "refinery", townRoot, rigPath)
 		if rc == nil {
@@ -3208,8 +3205,8 @@ func TestCustomClaudeVariants(t *testing.T) {
 	townSettings := NewTownSettings()
 	townSettings.DefaultAgent = "claude"
 	townSettings.RoleAgents = map[string]string{
-		constants.RoleMayor: "claude-opus",
-		"refinery":          "claude-haiku",
+		constants.RoleCrew: "claude-opus",
+		"refinery":         "claude-haiku",
 	}
 	// Define the custom variants
 	townSettings.Agents = map[string]*RuntimeConfig{
@@ -3232,7 +3229,7 @@ func TestCustomClaudeVariants(t *testing.T) {
 	}
 
 	// Test claude-opus custom agent
-	rc := resolveRoleAgentConfig(fh, constants.RoleMayor, townRoot, rigPath)
+	rc := resolveRoleAgentConfig(fh, constants.RoleCrew, townRoot, rigPath)
 	if rc == nil {
 		t.Fatal("ResolveRoleAgentConfig returned nil for claude-opus")
 	}
@@ -4330,7 +4327,7 @@ func TestBuildStartupCommand_RoleAgentsCustomAgentSetGTAgent(t *testing.T) {
 // TestBuildStartupCommand_UsesTownRootFromEnvVars verifies that when rigPath is empty
 // but GT_TOWN_ROOT is provided in envVars, the function uses GT_TOWN_ROOT to resolve
 // town settings and respects role_agents configuration. This is the path hit when the
-// daemon spawns town-level agents (deacon, mayor) where rigPath is always empty.
+// daemon spawns town-level agents (dog) where rigPath is always empty.
 // Fixes #433
 func TestBuildStartupCommand_UsesTownRootFromEnvVars(t *testing.T) {
 	t.Parallel()
@@ -4345,14 +4342,14 @@ func TestBuildStartupCommand_UsesTownRootFromEnvVars(t *testing.T) {
 		},
 	}
 	townSettings.RoleAgents = map[string]string{
-		constants.RoleMayor: "claude-sonnet",
+		"dog": "claude-sonnet",
 	}
 	if err := SaveTownSettings(TownSettingsPath(townRoot), townSettings); err != nil {
 		t.Fatalf("SaveTownSettings: %v", err)
 	}
 
 	envVars := map[string]string{
-		"GT_ROLE":      constants.RoleMayor,
+		"GT_ROLE":      "dog",
 		"GT_TOWN_ROOT": townRoot,
 	}
 	cmd, err := BuildStartupCommand(envVars, "", "")
@@ -4361,7 +4358,7 @@ func TestBuildStartupCommand_UsesTownRootFromEnvVars(t *testing.T) {
 	}
 
 	if !strings.Contains(cmd, "--model sonnet") {
-		t.Errorf("expected --model sonnet from role_agents[mayor], got: %q", cmd)
+		t.Errorf("expected --model sonnet from role_agents[dog], got: %q", cmd)
 	}
 }
 
@@ -4378,14 +4375,14 @@ func TestBuildStartupCommandWithAgentOverride_UsesTownRootFromEnvVars(t *testing
 		},
 	}
 	townSettings.RoleAgents = map[string]string{
-		constants.RoleMayor: "claude-sonnet",
+		"dog": "claude-sonnet",
 	}
 	if err := SaveTownSettings(TownSettingsPath(townRoot), townSettings); err != nil {
 		t.Fatalf("SaveTownSettings: %v", err)
 	}
 
 	envVars := map[string]string{
-		"GT_ROLE":      constants.RoleMayor,
+		"GT_ROLE":      "dog",
 		"GT_TOWN_ROOT": townRoot,
 	}
 	cmd, err := BuildStartupCommandWithAgentOverride(envVars, "", "", "")
@@ -4394,7 +4391,7 @@ func TestBuildStartupCommandWithAgentOverride_UsesTownRootFromEnvVars(t *testing
 	}
 
 	if !strings.Contains(cmd, "--model sonnet") {
-		t.Errorf("expected --model sonnet from role_agents[mayor], got: %q", cmd)
+		t.Errorf("expected --model sonnet from role_agents[dog], got: %q", cmd)
 	}
 }
 
@@ -4775,7 +4772,7 @@ func TestBuildStartupCommand_StopsOnUnsetEnvReference(t *testing.T) {
 	rigPath := filepath.Join(townRoot, "testrig")
 
 	townSettings := NewTownSettings()
-	townSettings.RoleAgents = map[string]string{constants.RoleMayor: "proxied-agent"}
+	townSettings.RoleAgents = map[string]string{constants.RoleCrew: "proxied-agent"}
 	townSettings.Agents["proxied-agent"] = &RuntimeConfig{
 		Command: "claude",
 		Env:     map[string]string{"ANTHROPIC_AUTH_TOKEN": "${GT_TEST_UNSET_TOKEN}"},
@@ -4788,7 +4785,8 @@ func TestBuildStartupCommand_StopsOnUnsetEnvReference(t *testing.T) {
 	}
 
 	_, err := buildStartupCommandFromConfig(fh, AgentEnvConfig{
-		Role:     constants.RoleMayor,
+		Role:     constants.RoleCrew,
+		Rig:      "testrig",
 		TownRoot: townRoot,
 	}, rigPath, "", "")
 	if err == nil {
@@ -4874,4 +4872,49 @@ func derefPatrol(p *PatrolConfig) PatrolConfig {
 		return PatrolConfig{}
 	}
 	return *p
+}
+
+// A settings file that still names the retired mayor role must load without
+// error and have no effect: the role-shaped key is ignored, not rejected
+// (gt-rwp7z.15, mayor-role retirement slice 7a).
+func TestStaleMayorRoleKeysAreIgnored(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+
+	// settings/config.json still naming mayor under role_agents.
+	townSettings := `{"type":"town-settings","version":1,"default_agent":"claude","role_agents":{"mayor":"claude-sonnet"}}`
+	settingsPath := TownSettingsPath(townRoot)
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, []byte(townSettings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadOrCreateTownSettings(settingsPath)
+	if err != nil {
+		t.Fatalf("a town settings file naming mayor must load without error: %v", err)
+	}
+	if IsKnownRole("mayor") {
+		t.Error("mayor is still a known role")
+	}
+	if got := loaded.RoleAgents["mayor"]; got != "claude-sonnet" {
+		t.Errorf("stale role_agents[mayor] = %q, want the key left untouched (no role reads it)", got)
+	}
+
+	// mayor/config.json still naming mayor under window_tint.role_defaults.
+	mayorCfg := `{"type":"mayor-config","version":1,"theme":{"role_defaults":{"mayor":"none"}}}`
+	mayorPath := filepath.Join(townRoot, "mayor", "config.json")
+	if err := os.MkdirAll(filepath.Dir(mayorPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mayorPath, []byte(mayorCfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mc, err := LoadMayorConfig(mayorPath)
+	if err != nil {
+		t.Fatalf("a mayor/config.json naming mayor must load without error: %v", err)
+	}
+	if mc.Theme == nil || mc.Theme.RoleDefaults["mayor"] != "none" {
+		t.Error("stale role_defaults[mayor] should survive the load, unread by any role")
+	}
 }
