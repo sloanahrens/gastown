@@ -154,6 +154,7 @@ The failures seen on the live rigs so far, each closed or ticketed:
 | Failure | Class | The system | The operator |
 |---------|-------|------------|--------------|
 | CI red on a test the change touches | Work | reworks with the failure excerpt (gt-fn9e6.25) | nothing |
+| CI red on a test that passes on a second run (a flake) | Work | reworks too: the Forgejo path reruns nothing, so a flaky test is fixed before its bead can land (zero flake tolerance, gt-ao0rg) | nothing |
 | CI red on an unrelated test because the runner image is wrong (a missing tool, Go skew) | Operator | reads it as a work red — a user step ran, so the log carries no infrastructure signature | the polecat escalates; fix the image, then `gt land requeue <bead> --reason "<why>"` |
 | A job container had no init, so zombies broke a process-kill test | Operator | — | start job containers with `--init` |
 | A run was cancelled | Infrastructure | reads the run status as infrastructure, not a red (gt-fn9e6.16), and retries | watch the alert |
