@@ -19,14 +19,14 @@ import (
 )
 
 // The landing_infra patrol is the landing worker's companion (gt-fn9e6.11).
-// A Forgejo instance that is down, or a CI runner that is offline, does not
-// change what landing does: the candidate gate waits out CI silence and the
-// worker retries it on the infrastructure path. What it does change is that
-// nothing is visibly wrong, so the town looks idle while every landing sits
-// in a wait. This patrol asks the two questions that name that state — does
-// the instance answer, does the repository have a runner online — records
-// them for the town health line, and raises one escalation per condition once
-// the failure has lasted long enough to be an outage rather than a blip.
+// A Forgejo instance that is down, or a run queue no runner is picking up,
+// does not change what landing does: the candidate gate waits out CI silence
+// and the worker retries it on the infrastructure path. What it does change is
+// that nothing is visibly wrong, so the town looks idle while every landing
+// sits in a wait. This patrol asks the two questions that name that state —
+// does the instance answer, is CI picking runs up — records them for the town
+// health line, and raises one escalation per condition once the failure has
+// lasted long enough to be an outage rather than a blip.
 
 // defaultLandingInfraInterval is how often the probe asks. A landing gate
 // waits minutes, so a minute between observations sees an outage well before
@@ -40,7 +40,9 @@ const landingInfraProbeTimeout = 5 * time.Second
 
 // The escalation fingerprints, one per condition: a condition that persists
 // across passes keeps one open escalation (gt-vwry), and a recovery can close
-// exactly the condition it names (gt-fn9e6.11).
+// exactly the condition it names (gt-fn9e6.11). The runner fingerprint is the
+// one operators already have open for the condition, so it survives the signal
+// changing from the runner listing to the run queue (gt-fn9e6.56).
 const (
 	alertKeyForgejoDown   = "landing-forgejo-down"
 	alertKeyRunnerOffline = "landing-runner-offline"
@@ -68,7 +70,7 @@ func landingInfraConfig(config *DaemonPatrolConfig) *LandingInfraConfig {
 }
 
 // landingInfraTarget is one rig the probe covers: the Forgejo instance its
-// landing path uses and the repository its CI runners serve.
+// landing path uses and the repository its CI runs are pushed to.
 //
 // It carries paths, never secrets: the token file's name, not its contents.
 // The token is read inside a pass and lives only in that pass's locals, so no
@@ -94,7 +96,7 @@ type landingInfraTarget struct {
 // merge_queue.forgejo block resolves (rig.ResolveForgejoConfig). That is the
 // same block the landing worker lands through, so the probe watches the
 // instance the rig's CI actually gates; a rig without it lands through
-// GitHub and has no runner to be offline (gt-fn9e6.11).
+// GitHub and has no CI queue to watch (gt-fn9e6.11).
 func (d *Daemon) landingInfraTargets() []landingInfraTarget {
 	if d.landingInfraRigs != nil {
 		return d.landingInfraRigs()
@@ -139,9 +141,9 @@ func (t landingInfraTarget) withRemote(remoteURL string) landingInfraTarget {
 type infraProber interface {
 	// Version asks the instance its version, the unauthenticated call.
 	Version(ctx context.Context, apiBase string) error
-	// Runners counts the runners registered to owner/repo and how many of
-	// them are online.
-	Runners(ctx context.Context, apiBase, token, owner, repo string) (online, total int, err error)
+	// Runs reports the oldest workflow run waiting to be picked up in
+	// owner/repo, the repository's run pickup state (gt-fn9e6.56).
+	Runs(ctx context.Context, apiBase, token, owner, repo string) (forgejo.RunPickup, error)
 }
 
 // forgejoProber is infraProber over the Forgejo client. Every probe call gets
@@ -167,25 +169,15 @@ func (p forgejoProber) Version(ctx context.Context, apiBase string) error {
 	return err
 }
 
-func (p forgejoProber) Runners(ctx context.Context, apiBase, token, owner, repo string) (int, int, error) {
+func (p forgejoProber) Runs(ctx context.Context, apiBase, token, owner, repo string) (forgejo.RunPickup, error) {
 	c, err := forgejo.NewClient("",
 		forgejo.WithBaseURL(apiBase),
 		forgejo.WithToken(token),
 		forgejo.WithHTTPClient(p.http))
 	if err != nil {
-		return 0, 0, err
+		return forgejo.RunPickup{}, err
 	}
-	runners, err := c.ListRepoRunners(ctx, owner, repo)
-	if err != nil {
-		return 0, 0, err
-	}
-	online := 0
-	for _, r := range runners {
-		if r.Online() {
-			online++
-		}
-	}
-	return online, len(runners), nil
+	return c.WaitingRun(ctx, owner, repo)
 }
 
 // infraResult is one probe's raw outcome for one rig, before the recorder
@@ -197,7 +189,11 @@ type infraResult struct {
 	reason    string
 	ok        bool
 	detail    string
-	online    int
+	// waitingSince is when the oldest run waiting on a runner was created;
+	// zero when nothing is waiting. waitingRun is that run's id
+	// (gt-fn9e6.56).
+	waitingSince time.Time
+	waitingRun   int64
 }
 
 // unavailable is a probe that could not be made.
@@ -221,7 +217,10 @@ func (o infraObservation) probe() townhealth.InfraProbe {
 		}
 		return townhealth.InfraProbe{Unavailable: reason}
 	}
-	return townhealth.InfraProbe{OK: o.ok, Since: o.since, Detail: o.detail, Online: o.online}
+	return townhealth.InfraProbe{
+		OK: o.ok, Since: o.since, Detail: o.detail,
+		WaitingSince: o.waitingSince, WaitingRun: o.waitingRun,
+	}
 }
 
 // landingInfraState is the probe's last observation, guarded by its own
@@ -331,7 +330,7 @@ func (d *Daemon) probeLandingInfra(now time.Time, tgts []landingInfraTarget) []i
 	runnerObs := make(map[string]infraResult, len(tgts))
 	for _, t := range tgts {
 		forgejoObs[t.Rig] = probeForgejo(prober, versions, t)
-		runnerObs[t.Rig] = probeRunners(prober, t, token, tokenErr)
+		runnerObs[t.Rig] = probeRunPickup(prober, t, token, tokenErr)
 	}
 	return d.landingInfra.record(now, tgts, forgejoObs, runnerObs)
 }
@@ -369,10 +368,12 @@ func probeForgejo(prober infraProber, versions map[string]infraResult, t landing
 	return res
 }
 
-// probeRunners asks the rig's repository for its runners and counts the
-// online ones. A rig with no registered runner is a failure, not an unknown:
-// the repository is readable and its answer is that nothing can pick a run up.
-func probeRunners(prober infraProber, t landingInfraTarget, token string, tokenErr error) infraResult {
+// probeRunPickup asks the rig's repository whether a run is waiting on a
+// runner, and for how long. A queue the token cannot read is a question nobody
+// could ask, so it reads UNKNOWN rather than a verdict: an instance-level
+// runner no repository listing contains is exactly what made the old runner
+// list answer 403 (gt-fn9e6.56).
+func probeRunPickup(prober infraProber, t landingInfraTarget, token string, tokenErr error) infraResult {
 	if t.BaseErr != nil {
 		return unavailable(fmt.Sprintf("the rig's Forgejo settings name no usable remote URL: %v", t.BaseErr))
 	}
@@ -382,25 +383,23 @@ func probeRunners(prober infraProber, t landingInfraTarget, token string, tokenE
 	if token == "" {
 		return unavailable("the landing bot's token file holds no token")
 	}
-	online, total, err := prober.Runners(context.Background(), t.APIBase, token, t.Owner, t.Repo)
+	pickup, err := prober.Runs(context.Background(), t.APIBase, token, t.Owner, t.Repo)
 	if err != nil {
-		return infraResult{available: true, detail: err.Error()}
+		return unavailable("the run queue could not be read: " + err.Error())
 	}
-	if online > 0 {
-		return infraResult{available: true, ok: true, online: online}
+	// The run and its age are the whole observation; the field names both, and
+	// its verdict is what judges them. ok stays the version probe's answer.
+	if !pickup.Waiting {
+		return infraResult{available: true}
 	}
-	detail := fmt.Sprintf("no runner is registered to %s/%s", t.Owner, t.Repo)
-	if total > 0 {
-		detail = fmt.Sprintf("%d of %d runners online", online, total)
-	}
-	return infraResult{available: true, detail: detail}
+	return infraResult{available: true, waitingSince: pickup.Since, waitingRun: pickup.ID}
 }
 
 // record folds one pass into the state and returns the escalation changes:
-// the forgejo condition is red while any covered rig's instance has failed
-// for InfraRedAfter, the runner condition while any rig has had no online
-// runner for that long. Each raises once and stays raised until the covered
-// rigs all read green again.
+// the forgejo condition is red while any covered rig's instance has failed for
+// InfraRedAfter, the runner condition while any rig has had a run waiting on a
+// runner for InfraRunnerRedAfter. Each raises once and stays raised until the
+// covered rigs all read green again.
 func (st *landingInfraState) record(now time.Time, tgts []landingInfraTarget, forgejoObs, runnerObs map[string]infraResult) []infraAlertAction {
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -412,16 +411,40 @@ func (st *landingInfraState) record(now time.Time, tgts []landingInfraTarget, fo
 	st.runner = advance(st.runner, st.rigs, runnerObs, now)
 
 	var actions []infraAlertAction
-	actions = append(actions, st.judge(now,
-		alertKeyForgejoDown, st.forgejo, &st.alertedForgejo,
-		"the Forgejo instance the landing path uses has not answered for over "+townhealth.Short(townhealth.InfraRedAfter),
-		"the Forgejo instance answers again")...)
-	actions = append(actions, st.judge(now,
-		alertKeyRunnerOffline, st.runner, &st.alertedRunner,
-		"no CI runner has been online for over "+townhealth.Short(townhealth.InfraRedAfter),
-		"a CI runner is online again")...)
+	actions = append(actions, st.judge(now, forgejoCondition, st.forgejo, &st.alertedForgejo)...)
+	actions = append(actions, st.judge(now, runPickupCondition, st.runner, &st.alertedRunner)...)
 	return actions
 }
+
+// infraConditionSpec is one condition the patrol watches: the health line's
+// field, the rule its verdicts come from, and the fingerprint and wording of
+// its escalation.
+type infraConditionSpec struct {
+	field   string
+	verdict func(townhealth.InfraProbe, time.Time) townhealth.Verdict
+	key     string
+	failing string
+	back    string
+}
+
+// The two conditions. The wording names the failing run's age from the same
+// constants the field judges by, so the escalation cannot drift from the line.
+var (
+	forgejoCondition = infraConditionSpec{
+		field:   townhealth.FieldForgejo,
+		verdict: townhealth.InfraVerdict,
+		key:     alertKeyForgejoDown,
+		failing: "the Forgejo instance the landing path uses has not answered for over " + townhealth.Short(townhealth.InfraRedAfter),
+		back:    "the Forgejo instance answers again",
+	}
+	runPickupCondition = infraConditionSpec{
+		field:   townhealth.FieldRunner,
+		verdict: townhealth.InfraRunnerVerdict,
+		key:     alertKeyRunnerOffline,
+		failing: "no CI run has been picked up for over " + townhealth.Short(townhealth.InfraRunnerRedAfter),
+		back:    "CI is picking runs up again",
+	}
+)
 
 // observeNothing empties the state when no rig lands through Forgejo: the
 // fields go absent, and an escalation still open for a condition nothing
@@ -449,15 +472,15 @@ func (st *landingInfraState) observeNothing() []infraAlertAction {
 // open, and otherwise leave it alone. A degraded or unanswerable probe is
 // neither: clearing on it would close an outage on evidence that does not say
 // the outage ended.
-func (st *landingInfraState) judge(now time.Time, key string, obs map[string]infraObservation, open *bool, why, recovered string) []infraAlertAction {
-	red, green, reds := infraCondition(obs, st.rigs, now)
+func (st *landingInfraState) judge(now time.Time, c infraConditionSpec, obs map[string]infraObservation, open *bool) []infraAlertAction {
+	red, green, reds := infraCondition(obs, st.rigs, now, c)
 	switch {
 	case red && !*open:
 		*open = true
-		return []infraAlertAction{{key: key, raise: true, detail: why + ": " + strings.Join(reds, "; ")}}
+		return []infraAlertAction{{key: c.key, raise: true, detail: c.failing + ": " + strings.Join(reds, "; ")}}
 	case !red && green && *open:
 		*open = false
-		return []infraAlertAction{{key: key, detail: recovered}}
+		return []infraAlertAction{{key: c.key, detail: c.back}}
 	default:
 		return nil
 	}
@@ -465,15 +488,16 @@ func (st *landingInfraState) judge(now time.Time, key string, obs map[string]inf
 
 // infraCondition judges every covered rig's probe: red when some rig is red,
 // green when every rig is green, and the red rigs' reasons for the alert to
-// name.
-func infraCondition(obs map[string]infraObservation, rigs []string, now time.Time) (red, green bool, reds []string) {
+// name. The reason is the field's own detail, so the escalation says what the
+// health line says.
+func infraCondition(obs map[string]infraObservation, rigs []string, now time.Time, c infraConditionSpec) (red, green bool, reds []string) {
 	green = true
 	for _, rig := range rigs {
-		o := obs[rig]
-		switch townhealth.InfraVerdict(o.probe(), now) {
+		p := obs[rig].probe()
+		switch c.verdict(p, now) {
 		case townhealth.Red:
 			red, green = true, false
-			reds = append(reds, fmt.Sprintf("%s: %s", rig, firstLine(o.detail)))
+			reds = append(reds, fmt.Sprintf("%s: %s", rig, firstLine(townhealth.InfraField(c.field, rig, p, now).Detail)))
 		case townhealth.Green:
 		default:
 			green = false

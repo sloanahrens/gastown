@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -46,38 +47,56 @@ func TestVersionNon2xxIsAnError(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, apiErr.StatusCode)
 }
 
-// TestListRepoRunnersReadsTheArray: the runner list is a bare array (Forgejo
-// 16), and a runner is online when its status is idle or active.
-func TestListRepoRunnersReadsTheArray(t *testing.T) {
+// TestWaitingRunReadsTheOldestQueuedRun: the run queue read asks for the runs
+// a runner has not picked up, and answers with the oldest one — a run that
+// started is not in the queue whatever its status (gt-fn9e6.56).
+func TestWaitingRunReadsTheOldestQueuedRun(t *testing.T) {
 	t.Parallel()
-	rec := &recorder{body: []byte(`[{"id":1,"name":"runner-1","status":"offline"},{"id":2,"name":"runner-2","status":"idle"},{"id":3,"name":"runner-3","status":"active"}]`)}
-	runners, err := newTestClient(t, rec).ListRepoRunners(context.Background(), "gastown", "gastown")
+	rec := &recorder{body: []byte(`{"workflow_runs":[
+		{"id":41,"status":"blocked","created":"2026-10-05T11:20:00Z","started":"0001-01-01T00:00:00Z"},
+		{"id":42,"status":"waiting","created":"2026-10-05T11:40:00Z","started":"0001-01-01T00:00:00Z"},
+		{"id":43,"status":"waiting","created":"2026-10-05T11:10:00Z","started":"2026-10-05T11:11:00Z"},
+		{"id":44,"status":"success","created":"2026-10-05T11:00:00Z","started":"2026-10-05T11:00:00Z"}
+	]}`)}
+	got, err := newTestClient(t, rec).WaitingRun(context.Background(), "gastown", "gastown")
 	require.NoError(t, err)
-	require.Len(t, runners, 3)
-	assert.Equal(t, "/api/v1/repos/gastown/gastown/actions/runners", rec.req.URL.Path)
-	assert.Equal(t, "token test-token", rec.req.Header.Get("Authorization"))
-	assert.Equal(t, []bool{false, true, true}, []bool{runners[0].Online(), runners[1].Online(), runners[2].Online()})
+	assert.True(t, got.Waiting)
+	assert.Equal(t, int64(41), got.ID)
+	assert.Equal(t, "2026-10-05T11:20:00Z", got.Since.UTC().Format(time.RFC3339))
+	assert.Equal(t, "/api/v1/repos/gastown/gastown/actions/runs", rec.req.URL.Path)
+	assert.Equal(t, []string{"waiting", "blocked"}, rec.req.URL.Query()["status"])
 }
 
-// TestListRepoRunnersUnknownStatusIsNotOnline: a status this code does not
-// know is not evidence that CI can pick a run up.
-func TestListRepoRunnersUnknownStatusIsNotOnline(t *testing.T) {
+// TestWaitingRunEmptyQueueIsNoWait: an empty queue is not a failure, it is
+// nothing waiting — the state the field reads green on.
+func TestWaitingRunEmptyQueueIsNoWait(t *testing.T) {
 	t.Parallel()
-	rec := &recorder{body: []byte(`[{"id":1,"name":"runner-1","status":"hibernating"}]`)}
-	runners, err := newTestClient(t, rec).ListRepoRunners(context.Background(), "gastown", "gastown")
+	rec := &recorder{body: []byte(`{"workflow_runs":[],"total_count":0}`)}
+	got, err := newTestClient(t, rec).WaitingRun(context.Background(), "gastown", "gastown")
 	require.NoError(t, err)
-	require.Len(t, runners, 1)
-	assert.False(t, runners[0].Online())
+	assert.False(t, got.Waiting)
 }
 
-// TestListRepoRunnersNotFoundIsAnError: a repository the token cannot read is
-// an error, so the probe reports a failure rather than an empty list.
-func TestListRepoRunnersNotFoundIsAnError(t *testing.T) {
+// TestWaitingRunUnreadableCreatedIsAnError: an age the probe cannot read is
+// not evidence about the queue, so it is an error rather than a verdict
+// (gt-fn9e6.56).
+func TestWaitingRunUnreadableCreatedIsAnError(t *testing.T) {
 	t.Parallel()
-	rec := &recorder{status: http.StatusNotFound, body: []byte(`{"message":"not found"}`)}
-	_, err := newTestClient(t, rec).ListRepoRunners(context.Background(), "gastown", "gastown")
+	rec := &recorder{body: []byte(`{"workflow_runs":[{"id":7,"status":"waiting","created":"yesterday"}]}`)}
+	_, err := newTestClient(t, rec).WaitingRun(context.Background(), "gastown", "gastown")
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "run 7")
+}
+
+// TestWaitingRunForbiddenIsAnError: a run list the token cannot read is an
+// error, so the probe reports an unanswerable question rather than an empty
+// queue (gt-fn9e6.56).
+func TestWaitingRunForbiddenIsAnError(t *testing.T) {
+	t.Parallel()
+	rec := &recorder{status: http.StatusForbidden, body: []byte(`{"message":"user should be the owner of the repo"}`)}
+	_, err := newTestClient(t, rec).WaitingRun(context.Background(), "gastown", "gastown")
 	var apiErr *APIError
 	require.Error(t, err)
 	assert.True(t, errors.As(err, &apiErr))
-	assert.Equal(t, http.StatusNotFound, apiErr.StatusCode)
+	assert.Equal(t, http.StatusForbidden, apiErr.StatusCode)
 }

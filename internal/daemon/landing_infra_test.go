@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
@@ -21,18 +22,21 @@ var infraNow = time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
 type fakeProber struct {
 	// versions maps an API base to the error its version probe returns.
 	versions map[string]error
-	// runners maps "owner/repo" to the runner answer.
-	runners map[string]fakeRunnerAnswer
-	// tokens is every token handed to a runner probe, in order.
+	// pickups maps "owner/repo" to the run queue answer.
+	pickups map[string]fakeRunPickup
+	// tokens is every token handed to a run queue probe, in order.
 	tokens []string
 	// bases is every API base the version probe was asked, in order.
 	bases []string
 }
 
-// fakeRunnerAnswer is one repository's runner probe result.
-type fakeRunnerAnswer struct {
-	online, total int
-	err           error
+// fakeRunPickup is one repository's run queue: the oldest run waiting on a
+// runner, or the read that failed.
+type fakeRunPickup struct {
+	waiting bool
+	since   time.Time
+	runID   int64
+	err     error
 }
 
 func (f *fakeProber) Version(_ context.Context, apiBase string) error {
@@ -40,10 +44,13 @@ func (f *fakeProber) Version(_ context.Context, apiBase string) error {
 	return f.versions[apiBase]
 }
 
-func (f *fakeProber) Runners(_ context.Context, apiBase, token, owner, repo string) (int, int, error) {
+func (f *fakeProber) Runs(_ context.Context, apiBase, token, owner, repo string) (forgejo.RunPickup, error) {
 	f.tokens = append(f.tokens, token)
-	a := f.runners[owner+"/"+repo]
-	return a.online, a.total, a.err
+	a := f.pickups[owner+"/"+repo]
+	if a.err != nil {
+		return forgejo.RunPickup{}, a.err
+	}
+	return forgejo.RunPickup{Waiting: a.waiting, Since: a.since, ID: a.runID}, nil
 }
 
 // infraDaemon is a daemon whose alerts go to a recorder and whose probe is
@@ -81,11 +88,11 @@ func infraTargets(t *testing.T) []landingInfraTarget {
 	}}
 }
 
-func TestLandingInfraProbesTheInstanceAndTheRepositoryRunners(t *testing.T) {
+func TestLandingInfraProbesTheInstanceAndTheRunQueue(t *testing.T) {
 	t.Parallel()
 	prober := &fakeProber{
 		versions: map[string]error{},
-		runners:  map[string]fakeRunnerAnswer{"gastown/gastown": {online: 1, total: 2}},
+		pickups:  map[string]fakeRunPickup{"gastown/gastown": {waiting: true, since: infraNow.Add(-30 * time.Second), runID: 91}},
 	}
 	d, fp, _ := infraDaemon(t, infraTargets(t), prober)
 
@@ -95,14 +102,20 @@ func TestLandingInfraProbesTheInstanceAndTheRepositoryRunners(t *testing.T) {
 		t.Errorf("version probe asked %v, want the rig's API base once", fp.bases)
 	}
 	if len(fp.tokens) != 1 || fp.tokens[0] != "token-from-file" {
-		t.Errorf("runner probe tokens = %v, want the token read from the file", fp.tokens)
+		t.Errorf("run queue probe tokens = %v, want the token read from the file", fp.tokens)
 	}
 	rep := d.landingInfra.report()
 	if !rep.Configured || len(rep.Rigs) != 1 || rep.Rigs[0].Rig != "gastown" {
 		t.Fatalf("report = %+v, want one configured rig", rep)
 	}
-	if !rep.Rigs[0].Forgejo.OK || !rep.Rigs[0].Runner.OK || rep.Rigs[0].Runner.Online != 1 {
-		t.Errorf("report = %+v, want both probes green with one runner online", rep.Rigs[0])
+	if !rep.Rigs[0].Forgejo.OK {
+		t.Errorf("report = %+v, want the version probe green", rep.Rigs[0])
+	}
+	if got := townhealth.InfraRunnerVerdict(rep.Rigs[0].Runner, infraNow); got != townhealth.Green {
+		t.Errorf("runner verdict = %s, want %s with a run only just queued", got, townhealth.Green)
+	}
+	if got := rep.Rigs[0].Runner.WaitingSince; !got.Equal(infraNow.Add(-30 * time.Second)) {
+		t.Errorf("runner datum = %v, want the oldest waiting run's creation", got)
 	}
 }
 
@@ -136,7 +149,7 @@ func TestLandingInfraRaisesOneEscalationWhenForgejoTurnsRed(t *testing.T) {
 	down := errors.New("dial tcp 127.0.0.1:3000: connect: connection refused")
 	prober := &fakeProber{
 		versions: map[string]error{"https://forgejo.test/api/v1": down},
-		runners:  map[string]fakeRunnerAnswer{"gastown/gastown": {online: 1, total: 1}},
+		pickups:  map[string]fakeRunPickup{},
 	}
 	d, _, rec := infraDaemon(t, infraTargets(t), prober)
 
@@ -177,33 +190,79 @@ func TestLandingInfraRaisesOneEscalationWhenForgejoTurnsRed(t *testing.T) {
 	}
 }
 
-// TestLandingInfraRaisesAndClearsTheRunnerCondition: a repository with no
-// online runner follows the same lifecycle under its own fingerprint, and a
-// healthy runner leaves the other condition alone (gt-fn9e6.11).
+// TestLandingInfraRaisesAndClearsTheRunnerCondition: a run nobody picks up
+// degrades at first, escalates once when its wait passes the red threshold,
+// does not escalate again while it holds, and is cleared when CI picks it up.
+// The escalation names the run, which is what an operator opens
+// (gt-fn9e6.56).
 func TestLandingInfraRaisesAndClearsTheRunnerCondition(t *testing.T) {
 	t.Parallel()
 	prober := &fakeProber{
 		versions: map[string]error{},
-		runners:  map[string]fakeRunnerAnswer{"gastown/gastown": {online: 0, total: 2}},
+		pickups:  map[string]fakeRunPickup{"gastown/gastown": {waiting: true, since: infraNow, runID: 91}},
 	}
 	d, _, rec := infraDaemon(t, infraTargets(t), prober)
 
-	d.runLandingInfraProbe(infraNow)
-	red := infraNow.Add(townhealth.InfraRedAfter)
+	late := infraNow.Add(townhealth.InfraRunnerDegradedAfter)
+	d.runLandingInfraProbe(late)
+	if n := len(rec.Escalations()); n != 0 {
+		t.Fatalf("escalations after a late run = %d, want 0: it is degraded, not red", n)
+	}
+	if got := infraVerdictOf(t, d, townhealth.FieldRunner, late); got != townhealth.Degraded {
+		t.Fatalf("runner verdict = %s, want %s", got, townhealth.Degraded)
+	}
+
+	red := infraNow.Add(townhealth.InfraRunnerRedAfter)
 	d.runLandingInfraProbe(red)
 	got := rec.Escalations()
 	if len(got) != 1 || got[0].Escalation.Fingerprint != alertKeyRunnerOffline {
 		t.Fatalf("escalations = %+v, want one keyed %s", got, alertKeyRunnerOffline)
 	}
+	if !strings.Contains(got[0].Escalation.Reason, "91") {
+		t.Errorf("escalation reason = %q, want it to name the waiting run", got[0].Escalation.Reason)
+	}
 	if n := len(rec.Clears()); n != 0 {
 		t.Fatalf("clears before recovery = %d, want 0", n)
 	}
 
-	prober.runners["gastown/gastown"] = fakeRunnerAnswer{online: 2, total: 2}
 	d.runLandingInfraProbe(red.Add(time.Minute))
+	if n := len(rec.Escalations()); n != 1 {
+		t.Errorf("escalations while the queue stays stalled = %d, want 1: it must not re-raise", n)
+	}
+
+	prober.pickups["gastown/gastown"] = fakeRunPickup{}
+	d.runLandingInfraProbe(red.Add(2 * time.Minute))
 	clears := rec.Clears()
 	if len(clears) != 1 || clears[0].Fingerprints[0] != alertKeyRunnerOffline {
 		t.Fatalf("clears = %+v, want one for %s", clears, alertKeyRunnerOffline)
+	}
+}
+
+// TestLandingInfraUnreadableRunQueueIsUnknown: a run list the landing bot
+// cannot read is an unanswerable question, never a runner verdict — the 403 a
+// non-owner gets on the repository runner API is exactly what this signal
+// replaced (gt-fn9e6.56).
+func TestLandingInfraUnreadableRunQueueIsUnknown(t *testing.T) {
+	t.Parallel()
+	forbidden := errors.New("forgejo: GET /repos/gastown/gastown/actions/runs returned 403: user should be the owner of the repo")
+	prober := &fakeProber{
+		versions: map[string]error{},
+		pickups:  map[string]fakeRunPickup{"gastown/gastown": {err: forbidden}},
+	}
+	d, _, rec := infraDaemon(t, infraTargets(t), prober)
+
+	d.runLandingInfraProbe(infraNow)
+	d.runLandingInfraProbe(infraNow.Add(24 * time.Hour))
+
+	if n := len(rec.Escalations()); n != 0 {
+		t.Errorf("escalations = %d, want 0: an unreadable queue is not a stalled runner", n)
+	}
+	if got := infraVerdictOf(t, d, townhealth.FieldRunner, infraNow); got != townhealth.VerdictUnknown {
+		t.Errorf("runner verdict = %s, want %s", got, townhealth.VerdictUnknown)
+	}
+	rep := d.landingInfra.report()
+	if !strings.Contains(rep.Rigs[0].Runner.Unavailable, "403") {
+		t.Errorf("runner unavailable reason = %q, want it to name the error", rep.Rigs[0].Runner.Unavailable)
 	}
 }
 
@@ -219,7 +278,7 @@ func TestLandingInfraUnanswerableProbeNeverEscalates(t *testing.T) {
 		Owner:     "gastown",
 		Repo:      "gastown",
 	}}
-	prober := &fakeProber{versions: map[string]error{}, runners: map[string]fakeRunnerAnswer{}}
+	prober := &fakeProber{versions: map[string]error{}, pickups: map[string]fakeRunPickup{}}
 	d, _, rec := infraDaemon(t, tgts, prober)
 
 	d.runLandingInfraProbe(infraNow)
@@ -275,7 +334,7 @@ func TestLandingInfraInstanceIsProbedOncePerPass(t *testing.T) {
 	}
 	prober := &fakeProber{
 		versions: map[string]error{},
-		runners:  map[string]fakeRunnerAnswer{"gastown/alpha": {online: 1, total: 1}, "gastown/beta": {online: 1, total: 1}},
+		pickups:  map[string]fakeRunPickup{"gastown/alpha": {}, "gastown/beta": {}},
 	}
 	d, fp, _ := infraDaemon(t, tgts, prober)
 
@@ -304,7 +363,7 @@ func TestLandingInfraTokenNeverLeavesThePass(t *testing.T) {
 	}}
 	prober := &fakeProber{
 		versions: map[string]error{"https://forgejo.test/api/v1": errors.New("down")},
-		runners:  map[string]fakeRunnerAnswer{"gastown/gastown": {err: errors.New("boom")}},
+		pickups:  map[string]fakeRunPickup{"gastown/gastown": {err: errors.New("boom")}},
 	}
 	d, fp, rec := infraDaemon(t, tgts, prober)
 
@@ -333,7 +392,7 @@ func TestLandingInfraEscalationClearsWhenNoRigLandsThroughForgejo(t *testing.T) 
 	t.Parallel()
 	prober := &fakeProber{
 		versions: map[string]error{"https://forgejo.test/api/v1": errors.New("down")},
-		runners:  map[string]fakeRunnerAnswer{"gastown/gastown": {online: 1, total: 1}},
+		pickups:  map[string]fakeRunPickup{"gastown/gastown": {}},
 	}
 	d, _, rec := infraDaemon(t, infraTargets(t), prober)
 	d.runLandingInfraProbe(infraNow)
@@ -395,8 +454,8 @@ func infraVerdictOf(t *testing.T, d *Daemon, name string, now time.Time) townhea
 	if len(rep.Rigs) != 1 {
 		t.Fatalf("report = %+v, want one rig", rep)
 	}
-	if name == townhealth.FieldForgejo {
-		return townhealth.InfraVerdict(rep.Rigs[0].Forgejo, now)
+	if name == townhealth.FieldRunner {
+		return townhealth.InfraRunnerVerdict(rep.Rigs[0].Runner, now)
 	}
-	return townhealth.InfraVerdict(rep.Rigs[0].Runner, now)
+	return townhealth.InfraVerdict(rep.Rigs[0].Forgejo, now)
 }
