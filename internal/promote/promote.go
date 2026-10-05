@@ -33,6 +33,15 @@ const MainRef = "refs/heads/main"
 // cannot spill the deploy key's location into a log or the state file.
 const KeyPlaceholder = "<promote-key>"
 
+// TargetMainRef is the throwaway ref a promotion fetches the target's main
+// into before judging ancestry. A target main that was pushed to directly
+// holds a commit the rig's repository does not, so merge-base cannot even name
+// it (exit 128, "Not a valid commit name"); fetching the tip first gives the
+// ancestry check an object to compare. The ref is read-only and local: the
+// fetch writes this ref alone, never another branch or a tag, and the push
+// still goes to MainRef.
+const TargetMainRef = "refs/promote/target-main"
+
 // State is what a rig's promotion remembers between verdicts. It lives inside
 // the red-main state JSON (landworker.MainState) so the main verdict's owner
 // and every reader of a rig's promotion share one record and one file
@@ -66,6 +75,7 @@ type Divergence struct {
 // a test answers it with gitfake or a stub.
 type Repo interface {
 	ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error)
+	FetchRefspecWithEnv(remote, refspec string, env []string) error
 	IsAncestor(ancestor, descendant string) (bool, error)
 	PushWithEnv(remote, refspec string, force bool, env []string) error
 }
@@ -136,7 +146,15 @@ func (p *Promoter) Promote(st State, commit string) State {
 		return st
 	}
 	if tip != "" {
-		ancestor, err := p.Repo.IsAncestor(tip, commit)
+		// The tip may be a commit this repository does not have — someone
+		// pushed to the target's main directly, or it holds history Forgejo
+		// does not. Fetch the tip into a throwaway ref so merge-base can name
+		// it; a fetch failure is an unreachable target, never a divergence.
+		if err := p.Repo.FetchRefspecWithEnv(p.Target, "+"+MainRef+":"+TargetMainRef, p.keyEnv()); err != nil {
+			p.logf("fetching %s main: %v", p.safeTarget(), err)
+			return p.recordError(st, fmt.Sprintf("fetching the target's main: %v", err))
+		}
+		ancestor, err := p.Repo.IsAncestor(TargetMainRef, commit)
 		if err != nil {
 			p.logf("checking %s against %s: %v", short(tip), short(commit), err)
 			return p.recordError(st, fmt.Sprintf("checking whether the target's main %s is an ancestor of %s: %v", short(tip), short(commit), err))
@@ -195,10 +213,13 @@ func (p *Promoter) remoteMain() (string, error) {
 	return "", nil
 }
 
-// keyEnv is the environment the push runs with: the deploy key and no other
-// identity ssh might offer (IdentitiesOnly=yes).
+// keyEnv is the environment the fetch and the push run with: the deploy key
+// and no other identity ssh might offer (IdentitiesOnly=yes). BatchMode=yes
+// makes ssh fail instead of prompting — a headless daemon has no terminal to
+// answer a host-key or passphrase question, so a prompt would hang the
+// promotion until its timeout instead of recording an unreachable target.
 func (p *Promoter) keyEnv() []string {
-	return []string{"GIT_SSH_COMMAND=ssh -i " + shellQuote(p.KeyFile) + " -o IdentitiesOnly=yes"}
+	return []string{"GIT_SSH_COMMAND=ssh -i " + shellQuote(p.KeyFile) + " -o IdentitiesOnly=yes -o BatchMode=yes"}
 }
 
 // lock takes the promotion lock, reporting false when another holder has it.

@@ -21,10 +21,17 @@ import (
 type recordingRepo struct {
 	tip         string
 	tipErr      error
+	fetchErr    error
 	ancestor    bool
 	ancestorErr error
 	pushErr     error
+	fetches     []fetchCall
 	pushes      []pushCall
+}
+
+type fetchCall struct {
+	remote, refspec string
+	env             []string
 }
 
 type pushCall struct {
@@ -41,6 +48,11 @@ func (r *recordingRepo) ListRemoteRefsWithHashes(remote, prefix string) ([]git.R
 		return nil, nil
 	}
 	return []git.RemoteRef{{Hash: r.tip, Name: MainRef}}, nil
+}
+
+func (r *recordingRepo) FetchRefspecWithEnv(remote, refspec string, env []string) error {
+	r.fetches = append(r.fetches, fetchCall{remote: remote, refspec: refspec, env: env})
+	return r.fetchErr
 }
 
 func (r *recordingRepo) IsAncestor(ancestor, descendant string) (bool, error) {
@@ -168,6 +180,71 @@ func TestPromoteRecordsAndEscalatesADivergedTargetOnce(t *testing.T) {
 	}
 }
 
+func TestPromoteRecordsAnUnknownTargetTipAsDivergedAndPushesNothing(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	f := gitfake.New()
+	rig := filepath.Join(root, "rig.git")
+	gh := filepath.Join(root, "github.git")
+	f.InitBare(t, rig)
+	f.InitBare(t, gh)
+	base := f.Commit(t, rig, "main", "main: seed", map[string]string{"a.txt": "one\n"})
+	f.SetRef(t, gh, "refs/heads/main", base)
+	// Someone pushed to GitHub main directly: this commit exists nowhere in
+	// the rig's repository, so merge-base cannot name it until it is fetched.
+	ghTip := f.Commit(t, gh, "main", "github-only", map[string]string{"github.txt": "direct\n"})
+	green := f.Commit(t, rig, "main", "green", map[string]string{"b.txt": "ok\n"})
+
+	fx := newPromoterFixture(t)
+	fx.p.Repo = f.Open(rig)
+	fx.p.Target = gh
+
+	st := fx.p.Promote(State{}, green)
+	if st.GitHubDiverged == nil {
+		t.Fatalf("GitHubDiverged = nil, want the target's unknown tip recorded as diverged; LastError = %q", st.LastError)
+	}
+	if st.GitHubDiverged.RemoteMain != ghTip || st.GitHubDiverged.Commit != green {
+		t.Errorf("GitHubDiverged = %+v, want remote %s commit %s", st.GitHubDiverged, ghTip, green)
+	}
+	if st.LastError != "" {
+		t.Errorf("LastError = %q, want it cleared: a divergence is its own condition", st.LastError)
+	}
+	if len(fx.alerts) != 1 {
+		t.Fatalf("alerts = %v, want one for the divergence", fx.alerts)
+	}
+	if got := f.Ref(gh, MainRef); got != ghTip {
+		t.Errorf("target main = %q, want %q untouched: a divergence is never pushed", got, ghTip)
+	}
+	// The same divergence on the next green verdict pages nobody again.
+	if again := fx.p.Promote(st, green); len(fx.alerts) != 1 {
+		t.Errorf("alerts = %v, want the divergence escalated once", fx.alerts)
+	} else if again.GitHubDiverged == nil {
+		t.Error("a repeat promotion dropped the divergence record")
+	}
+}
+
+func TestPromoteRecordsAFailedFetchAsAnErrorAndNotADivergence(t *testing.T) {
+	t.Parallel()
+	fx := newPromoterFixture(t)
+	fx.repo.tip = "aaaa1111"
+	fx.repo.ancestor = false
+	fx.repo.fetchErr = errors.New("fatal: Could not read from remote repository.")
+
+	st := fx.p.Promote(State{}, "bbbb2222")
+	if st.LastError == "" {
+		t.Fatal("LastError is empty after a failed fetch")
+	}
+	if st.GitHubDiverged != nil {
+		t.Errorf("GitHubDiverged = %+v, want none: an unreachable target is not a divergence", st.GitHubDiverged)
+	}
+	if len(fx.alerts) != 0 {
+		t.Errorf("alerts = %v, want none for an unreachable target", fx.alerts)
+	}
+	if len(fx.repo.pushes) != 0 {
+		t.Errorf("pushes = %+v, want none after a failed fetch", fx.repo.pushes)
+	}
+}
+
 func TestPromoteRecordsAFailedPushAndRetriesAtTheNextVerdict(t *testing.T) {
 	t.Parallel()
 	fx := newPromoterFixture(t)
@@ -218,6 +295,26 @@ func TestPromotePushesExactlyTheGreenCommitToMainWithTheDeployKey(t *testing.T) 
 	if !strings.Contains(env, "GIT_SSH_COMMAND=") || !strings.Contains(env, fx.keyFile) || !strings.Contains(env, "IdentitiesOnly=yes") {
 		t.Errorf("env = %v, want GIT_SSH_COMMAND with the key file and IdentitiesOnly=yes", got.env)
 	}
+	if !strings.Contains(env, "BatchMode=yes") {
+		t.Errorf("env = %v, want BatchMode=yes so a headless ssh never blocks on a prompt", got.env)
+	}
+
+	// The ancestry check fetched the target's tip into the throwaway ref, with
+	// the same key and no other ref: a diverged tip is only comparable once
+	// its object is local.
+	if len(fx.repo.fetches) != 1 {
+		t.Fatalf("fetches = %+v, want one before the ancestry check", fx.repo.fetches)
+	}
+	fetch := fx.repo.fetches[0]
+	if want := "+" + MainRef + ":" + TargetMainRef; fetch.refspec != want {
+		t.Errorf("fetch refspec = %q, want %q", fetch.refspec, want)
+	}
+	if fetch.remote != fx.p.Target {
+		t.Errorf("fetch remote = %q, want the promote target", fetch.remote)
+	}
+	if strings.Join(fetch.env, " ") != env {
+		t.Errorf("fetch env = %v, want the push's env %v: one identity for the fetch and the push", fetch.env, got.env)
+	}
 }
 
 func TestPromoteKeepsTheKeyFilePathOutOfLogsAndState(t *testing.T) {
@@ -246,6 +343,21 @@ func TestPromoteKeepsTheKeyFilePathOutOfLogsAndState(t *testing.T) {
 	for _, line := range append(append([]string{}, fx.logs...), string(data), st.LastError) {
 		if strings.Contains(line, fx.keyFile) || strings.Contains(line, keyContents) {
 			t.Errorf("recorded %q, want neither the key's path nor its contents", line)
+		}
+	}
+
+	// A fetch that fails before any push quotes the same key, and is scrubbed
+	// the same way.
+	fx.repo.pushErr = nil
+	fx.repo.fetchErr = errors.New(`Load key "` + fx.keyFile + `": Permission denied`)
+	fx.logs = nil
+	st = fx.p.Promote(State{}, "cccc3333")
+	if strings.Contains(st.LastError, fx.keyFile) || !strings.Contains(st.LastError, KeyPlaceholder) {
+		t.Errorf("LastError = %q, want the key path scrubbed on the fetch error path", st.LastError)
+	}
+	for _, line := range append(append([]string{}, fx.logs...), st.LastError) {
+		if strings.Contains(line, fx.keyFile) {
+			t.Errorf("recorded %q, want the key's path scrubbed on the fetch error path", line)
 		}
 	}
 }

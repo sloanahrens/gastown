@@ -1085,6 +1085,16 @@ func (g *Git) FetchRefspecWithTimeout(remote, refspec string, timeout time.Durat
 	return err
 }
 
+// FetchRefspecWithEnv fetches one refspec from remote with additional
+// environment variables (PushWithEnv's counterpart for reads), bounded by the
+// read-only remote-query timeout. A caller that authenticates with a deploy
+// key passes the same GIT_SSH_COMMAND it would push with, so a fetch and a
+// push reach the target under one identity.
+func (g *Git) FetchRefspecWithEnv(remote, refspec string, env []string) error {
+	_, err := g.runWithEnvAndTimeout([]string{"fetch", "--no-tags", remote, refspec}, env, remoteQueryTimeout)
+	return err
+}
+
 // FetchBranch fetches a specific branch from the remote.
 func (g *Git) FetchBranch(remote, branch string) error {
 	_, err := g.run("fetch", remote, branch)
