@@ -32,6 +32,14 @@
 # job's log tail is the one thing written to stdout, so it can be paged or
 # captured without the progress around it.
 #
+# A green run leaves the record the cutover reads: $XDG_CONFIG_HOME/gt, else
+# ~/.config/gt, probe-<rig>.record, mode 600, key=value lines naming the rig,
+# the repository, the probed commit, the context, the verdict and the time,
+# with epoch: as the age in seconds. It is the probe's one write outside its
+# temp dir, it holds no credential, and the next green run overwrites it. A
+# red, timed-out or refused run, and a --dry-run, write none, so the file's
+# presence is "a green probe" and its epoch: line is "from the last hour".
+#
 # Usage: forgejo-probe.sh <rig> --repo OWNER/NAME [options]
 #   --api-url URL          API root (default $FORGEJO_API_URL,
 #                          else http://127.0.0.1:3000/api/v1)
@@ -82,6 +90,9 @@ API_URL="${FORGEJO_API_URL:-http://127.0.0.1:3000/api/v1}"
 WEB_URL="${FORGEJO_URL:-}"
 ADMIN_TOKEN_FILE="${FORGEJO_ADMIN_ENV:-$HOME/forgejo/.env}"
 TOWN_ROOT="${GT_TOWN_ROOT:-${GT_ROOT:-$HOME/gt}}"
+# The operator's config dir, where the Forgejo token files and the promote key
+# live (internal/forgejo/token.go), and where the green record is written.
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gt"
 GITHUB_URL=""
 GIT_URL=""
 MAIN_BRANCH="main"
@@ -153,6 +164,9 @@ NAME=${REPO#*/}
 # The rig's own repository, what a landing pushes its candidate from: the probe
 # pushes from a worktree of it too, so the rig's hooks run (gt-fn9e6.45).
 BARE="$TOWN_ROOT/$RIG/.repo.git"
+# The green run's record, one file per rig. It is written after the branch is
+# deleted, so the file's presence means the whole run finished green.
+RECORD="$CONFIG_DIR/probe-$RIG.record"
 BRANCH="land/probe-$RIG"
 # Forgejo resolves a branch name through the URL path, so the slash arrives
 # encoded (go-gitea#21093, as in scripts/forgejo-provision.sh).
@@ -173,6 +187,7 @@ RESP_FILE="$WORK/response.json"
 CURL_CONFIG="$WORK/curl.conf"
 BRANCH_CREATED=0
 WT_ADDED=0
+PROBE_GREEN=0
 RC=0
 
 cleanup() {
@@ -193,10 +208,53 @@ cleanup() {
   if [ "$BRANCH_CREATED" = 1 ]; then
     delete_branch || rc=1
   fi
+  # Last, and only for a run that finished green: a cutover reading a record a
+  # failed probe left would refuse nothing it should have.
+  if [ "$PROBE_GREEN" = 1 ] && [ "$rc" = 0 ]; then
+    write_record || rc=1
+  fi
   rm -rf "$WORK" || true
   exit "$rc"
 }
 trap cleanup EXIT
+
+# write_record stores the green verdict as key=value lines under CONFIG_DIR. It
+# writes a temp file in that directory and renames it, so a cutover never reads
+# a half-written record. A record the run cannot write is the run failing: a
+# green probe that leaves no record refuses the cutover it was taken for.
+write_record() {
+  local tmp
+  if ! mkdir -p "$CONFIG_DIR"; then
+    log "could not create $CONFIG_DIR for the probe record"
+    return 1
+  fi
+  if ! tmp=$(mktemp "$CONFIG_DIR/.probe-$RIG.XXXXXX"); then
+    log "could not create a probe record under $CONFIG_DIR"
+    return 1
+  fi
+  if ! {
+    printf 'rig=%s\n' "$RIG"
+    printf 'repo=%s\n' "$REPO"
+    printf 'commit=%s\n' "$SHA"
+    printf 'context=%s\n' "$CONTEXT"
+    printf 'verdict=green\n'
+    printf 'time=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'epoch=%s\n' "$(date -u +%s)"
+  } > "$tmp"; then
+    rm -f "$tmp"
+    log "could not write the probe record under $CONFIG_DIR"
+    return 1
+  fi
+  # The file names a verdict, never a credential, so 600 is a floor, not a
+  # secret keeping rule; mktemp already made it 600.
+  chmod 600 "$tmp" || true
+  if ! mv "$tmp" "$RECORD"; then
+    rm -f "$tmp"
+    log "could not store the probe record at $RECORD"
+    return 1
+  fi
+  log "recorded the green probe in $RECORD"
+}
 
 # The admin token goes in a mode-600 curl config rather than an argv -H, so it
 # never shows in `ps` and never reaches a shell trace or a log line.
@@ -533,6 +591,7 @@ done
 case "$VERDICT" in
   success)
     log "$RIG's gate is green on $SHA ($CONTEXT)"
+    PROBE_GREEN=1
     ;;
   timeout)
     log "$CONTEXT reported nothing on $SHA within ${TIMEOUT}s"
