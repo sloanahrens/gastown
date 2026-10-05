@@ -93,6 +93,9 @@ const (
 	FieldConfig     = "config"
 	FieldNeedsHuman = "needs-human"
 	FieldSeat       = "seat"
+	// FieldPromote is how far a promoting rig's GitHub main is behind its
+	// green main (gt-fn9e6.39).
+	FieldPromote = "promote"
 	// FieldDispatch is the automatic dispatcher: whether it is filling the
 	// town's free seats (gt-xiw7o).
 	FieldDispatch = "dispatch"
@@ -212,7 +215,17 @@ type Thresholds struct {
 	// carry a verdict, while a dispatcher that has stopped for the whole
 	// window does.
 	DispatchWindow time.Duration
+	// PromoteWait is how long a green candidate may sit unpromoted before the
+	// promote field degrades; zero never trips it.
+	PromoteWait time.Duration
 }
+
+// DefaultPromoteWait is how long a green candidate may sit unpromoted before
+// the promote field degrades. A promotion rides the verdict that called the
+// commit green, so six hours is slack for a slow verdict, not a schedule: a
+// candidate still unpromoted after it is a promotion that is not running
+// (gt-fn9e6.39).
+const DefaultPromoteWait = 6 * time.Hour
 
 // DefaultDispatchWindow is how far back the dispatcher's ticks are judged.
 // The ticker's interval is 60s, so ten minutes is ten ticks: long enough
@@ -276,6 +289,7 @@ func DefaultThresholds() Thresholds {
 		StewardErrorRate:   0.5,
 		StewardMinJobs:     3,
 		DispatchWindow:     DefaultDispatchWindow,
+		PromoteWait:        DefaultPromoteWait,
 	}
 }
 
@@ -371,6 +385,46 @@ type RigMain struct {
 // Mains reports every landing rig's main state.
 type Mains interface {
 	Mains() ([]RigMain, error)
+}
+
+// RigPromotion is one promoting rig's GitHub main as its record stands: the
+// commits the target is behind the rig's green main by, and why it has not
+// advanced (gt-fn9e6.39).
+type RigPromotion struct {
+	Rig string
+	// LastPromoted is the commit the target's main was last advanced to; ""
+	// when the rig has never promoted.
+	LastPromoted string
+	// Green is the commit the newest green verdict called good: the promotion
+	// candidate, and the commit the lag is counted to.
+	Green string
+	// GreenAt is when that verdict was recorded, the clock a pending
+	// candidate's wait is judged by, so a candidate that appeared just after
+	// a stale promotion is not read as an old one.
+	GreenAt time.Time
+	// Behind is the commits between LastPromoted and Green, counted by the
+	// source in the rig's repository, which is why townhealth itself reads no
+	// git (gt-fn9e6.39).
+	Behind int
+	// LastError is the newest recorded failure to promote
+	// (last_promote_error); "" when the newest attempt succeeded.
+	LastError string
+	// Diverged is true when the target's main is not an ancestor of Green
+	// (github_diverged): the two mains diverged and a push could only rewrite
+	// history.
+	Diverged bool
+	// DivergedTip is the target's main tip the divergence was recorded at,
+	// the commit an operator has to reconcile by hand; "" when unknown.
+	DivergedTip string
+	// Err is a failed read of the rig's promotion record; the rest is
+	// ignored.
+	Err error
+}
+
+// Promotions lists the rigs that promote a green main to a target. A rig
+// without a promote target has no record and is not listed.
+type Promotions interface {
+	Promotions() ([]RigPromotion, error)
 }
 
 // Config validates the town config; nil means it loads.
@@ -486,6 +540,7 @@ type Inputs struct {
 	Slots       Slots
 	Backups     Backups
 	Mains       Mains
+	Promotions  Promotions
 	Config      Config
 	NeedsHuman  NeedsHuman
 	Seats       Seats
@@ -514,6 +569,7 @@ func Compute(ctx context.Context, in Inputs) Report {
 	r.Fields = append(r.Fields, fs...)
 	r.Fields = append(r.Fields, escalation(ctx, in), slot(in), backup(in))
 	r.Fields = append(r.Fields, mains(in)...)
+	r.Fields = append(r.Fields, promotions(in)...)
 	r.Fields = append(r.Fields, config(in), needsHuman(ctx, in))
 	r.Fields = append(r.Fields, seats(in)...)
 	r.Fields = append(r.Fields, dispatch(in))
@@ -797,6 +853,72 @@ func mains(in Inputs) []Field {
 		}
 	}
 	return fs
+}
+
+// promotions judges each promoting rig's GitHub main beside its main field
+// (gt-fn9e6.39): the lag behind the rig's green commit, the last failure to
+// promote, and two mains that diverged. A rig that promotes nothing is not
+// listed, so a town where no rig promotes grows no new field.
+func promotions(in Inputs) []Field {
+	if in.Promotions == nil {
+		return []Field{unknown(FieldPromote, "", "", errNotWired)}
+	}
+	ps, err := in.Promotions.Promotions()
+	if err != nil {
+		return []Field{unknown(FieldPromote, "", "", err)}
+	}
+	fs := make([]Field, 0, len(ps))
+	for _, p := range ps {
+		fs = append(fs, promoteField(in, p))
+	}
+	return fs
+}
+
+// promoteField is one rig's verdict: RED when the two mains diverged, DEGRADED
+// when the last promotion failed or a green candidate has waited past
+// PromoteWait, and otherwise green with the lag GitHub is behind by. A question
+// the record cannot answer — a rig that never promoted, a candidate with no
+// verdict time — is UNKNOWN with its reason rather than red.
+func promoteField(in Inputs, p RigPromotion) Field {
+	switch {
+	case p.Err != nil:
+		return unknown(FieldPromote, p.Rig, "", p.Err)
+	case p.Diverged:
+		// A divergence is judged before the questions below it: the first
+		// promotion attempt against a target nobody has reconciled records a
+		// divergence with no promotion behind it, and that is the loudest
+		// thing this field knows (gt-fn9e6.39).
+		where := "the target's main"
+		if p.DivergedTip != "" {
+			where += " " + short(p.DivergedTip)
+		}
+		return Field{Name: FieldPromote, Rig: p.Rig, Tag: Recorded, Verdict: Red, Value: "diverged",
+			Detail: fmt.Sprintf("%s is not an ancestor of the green commit %s; reconcile the two by hand", where, short(p.Green))}
+	case p.LastPromoted == "":
+		return unknown(FieldPromote, p.Rig, "", errors.New("never promoted to the target"))
+	case p.Green == "":
+		return unknown(FieldPromote, p.Rig, "", errors.New("no green verdict recorded"))
+	}
+	value := fmt.Sprintf("%d behind", p.Behind)
+	if p.LastError != "" {
+		return Field{Name: FieldPromote, Rig: p.Rig, Tag: Recorded, Verdict: Degraded, Value: value, Detail: p.LastError}
+	}
+	if p.Green == p.LastPromoted {
+		// The target is at the green commit: nothing is waiting to be
+		// promoted, and no age matters.
+		return Field{Name: FieldPromote, Rig: p.Rig, Tag: Recorded, Verdict: Green, Value: value}
+	}
+	if p.GreenAt.IsZero() {
+		// A candidate is pending and nobody recorded when it appeared, so the
+		// wait — the whole question this rule asks — cannot be answered.
+		return unknown(FieldPromote, p.Rig, "", fmt.Errorf("no verdict time for the green commit %s", short(p.Green)))
+	}
+	f := Field{Name: FieldPromote, Rig: p.Rig, Tag: Recorded, Verdict: Green, Value: value}
+	if waited := in.Now.Sub(p.GreenAt); in.Thresholds.PromoteWait > 0 && waited >= in.Thresholds.PromoteWait {
+		f.Verdict = Degraded
+		f.Detail = fmt.Sprintf("green %s unpromoted for %s", short(p.Green), Short(waited))
+	}
+	return f
 }
 
 func config(in Inputs) Field {
