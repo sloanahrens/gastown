@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -28,8 +30,12 @@ const (
 	// DefaultCandidateWaitTimeout bounds the whole wait for a verdict.
 	DefaultCandidateWaitTimeout = 45 * time.Minute
 	// candidateTailBytes bounds the job log fetched for a red verdict; the
-	// rework note keeps the last gateTailLines of it.
+	// rework note's excerpt is built from it.
 	candidateTailBytes = 16 * 1024
+	// candidateFullLogBytes bounds the second fetch, made only when the capped
+	// tail names no failure at all: the failure can sit far enough from the end
+	// that 16 KiB of passing packages hides it (gt-fn9e6.25).
+	candidateFullLogBytes = 2 << 20
 )
 
 // ErrCISilence is why the candidate gate reports no verdict: nothing posted
@@ -456,7 +462,172 @@ func (g *CandidateGate) jobTail(parent context.Context, wf GateWorkflow, sha str
 	if err != nil {
 		return "", err
 	}
-	return lastLines(log, gateTailLines), nil
+	if !logHasFailure(log) {
+		// The failure can be outside the byte cap. go test prints its packages
+		// in order, so the failing package is usually not the last one, and a
+		// tail of passing packages hides the reason for the red entirely: fetch
+		// the whole log once, still bounded, before falling back to the tail
+		// (gt-fn9e6.25).
+		full, ferr := g.Client.JobLogsTail(ctx, g.Owner, g.RepoName, jobID, candidateFullLogBytes)
+		switch {
+		case ferr != nil:
+			g.logf("%s: the tail of the gate job log on %s names no failure and the whole log could not be read: %v", wf.Context(), shortSHA(sha), ferr)
+		case logHasFailure(full):
+			log = full
+		}
+	}
+	return failureExcerpt(log, gateTailLines), nil
+}
+
+// failureExcerpt is the rework note's excerpt of a gate job log: the failure
+// itself, wherever it sits in the log, not just the last lines. Every failure
+// marker keeps the output printed with it -- for a "--- FAIL" line, the lines
+// the test printed under it up to the next block -- plus a few lines of
+// context, de-duplicated and in log order. A log with no marker at all falls
+// back to its last lines. The excerpt is at most budget lines, each with the
+// Forgejo timestamp prefix stripped (gt-fn9e6.25).
+func failureExcerpt(log string, budget int) string {
+	lines := logLines(log)
+	if len(lines) == 0 || budget <= 0 {
+		return ""
+	}
+	kept := failureLines(lines)
+	if len(kept) == 0 {
+		return lastLines(strings.Join(lines, "\n")+"\n", budget)
+	}
+	kept = trimToBudget(kept, budget)
+	out := make([]string, len(kept))
+	for i, at := range kept {
+		out[i] = lines[at]
+	}
+	return strings.Join(out, "\n") + "\n"
+}
+
+// logHasFailure reports whether a job log names a failure at all: what decides
+// whether a byte-capped tail is enough or the whole log has to be fetched.
+func logHasFailure(log string) bool {
+	for _, line := range logLines(log) {
+		if isFailureMarker(line) {
+			return true
+		}
+	}
+	return false
+}
+
+// failureLines is the excerpt's line indices: every failure marker with the
+// range it carries, de-duplicated and in log order.
+func failureLines(lines []string) []int {
+	keep := map[int]bool{}
+	for i, line := range lines {
+		if !isFailureMarker(line) {
+			continue
+		}
+		lo, hi := failureSpan(lines, i)
+		for j := lo; j <= hi; j++ {
+			keep[j] = true
+		}
+	}
+	if len(keep) == 0 {
+		return nil
+	}
+	idx := make([]int, 0, len(keep))
+	for i := range keep {
+		idx = append(idx, i)
+	}
+	slices.Sort(idx)
+	return idx
+}
+
+// failureSpan is the line range one failure marker carries. A "--- FAIL" block
+// runs to the next block boundary, so the test's own output comes with it; any
+// other marker takes failureContextLines either side of itself.
+func failureSpan(lines []string, at int) (int, int) {
+	lo := max(at-failureContextLines, 0)
+	if !failedTestRE.MatchString(lines[at]) {
+		return lo, min(at+failureContextLines, len(lines)-1)
+	}
+	hi := at
+	for hi+1 < len(lines) && !startsLogBlock(lines[hi+1]) {
+		hi++
+	}
+	return lo, hi
+}
+
+// startsLogBlock reports whether line begins a fresh go test or make block,
+// where a "--- FAIL" block's output ends.
+func startsLogBlock(line string) bool {
+	return failedTestRE.MatchString(line) || failLineRE.MatchString(line) ||
+		packageDoneRE.MatchString(line) || panicLineRE.MatchString(line) ||
+		makeErrorRE.MatchString(line) || strings.HasPrefix(line, "=== ") ||
+		strings.Contains(line, buildFailedMarker)
+}
+
+// trimToBudget brings an over-long excerpt back to budget lines, keeping the
+// earliest failures: it drops the last run of kept lines whole (a later
+// failure is usually the earlier one's cascade), and a single run still over
+// budget keeps its head, where the failure and the output under it are.
+func trimToBudget(idx []int, budget int) []int {
+	for len(idx) > budget {
+		if start := lastRunStart(idx); start > 0 {
+			idx = idx[:start]
+			continue
+		}
+		return idx[:budget]
+	}
+	return idx
+}
+
+// lastRunStart is where the last contiguous run of idx begins. An excerpt of
+// one failure block plus the closing make error is two runs; the gap between
+// them is the log the excerpt left out.
+func lastRunStart(idx []int) int {
+	start := len(idx) - 1
+	for start > 0 && idx[start-1]+1 == idx[start] {
+		start--
+	}
+	return start
+}
+
+// The markers that say a gate log went red: a "--- FAIL" per test and a "FAIL"
+// per package (go test, or "[build failed]" on the package line when the build
+// never ran), a bare "panic:" (a panicking test prints no "--- FAIL" line), and
+// make's closing "*** ... Error N".
+var (
+	failLineRE    = regexp.MustCompile(`^FAIL\b`)
+	packageDoneRE = regexp.MustCompile(`^(ok|PASS|SKIP)\b`)
+	panicLineRE   = regexp.MustCompile(`^panic: `)
+	makeErrorRE   = regexp.MustCompile(`^make(\[\d+\])?: \*\*\*.*Error \d+`)
+)
+
+// buildFailedMarker is what go test writes on the package line of a package
+// that never compiled.
+const buildFailedMarker = "[build failed]"
+
+// failureContextLines is how much context either side of a marker the excerpt
+// keeps without one: enough to see what the gate was doing when it stopped.
+const failureContextLines = 2
+
+func isFailureMarker(line string) bool {
+	return failedTestRE.MatchString(line) || failLineRE.MatchString(line) ||
+		panicLineRE.MatchString(line) || makeErrorRE.MatchString(line) ||
+		strings.Contains(line, buildFailedMarker)
+}
+
+// forgejoTimestampRE is the timestamp Forgejo prefixes every line of a job log
+// with.
+var forgejoTimestampRE = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z `)
+
+// logLines splits a job log into lines with the per-line timestamp stripped.
+func logLines(log string) []string {
+	log = strings.TrimRight(log, "\n")
+	if strings.TrimSpace(log) == "" {
+		return nil
+	}
+	lines := strings.Split(log, "\n")
+	for i, line := range lines {
+		lines[i] = forgejoTimestampRE.ReplaceAllString(line, "")
+	}
+	return lines
 }
 
 // VerifyReported reports whether the required context has reported on a
