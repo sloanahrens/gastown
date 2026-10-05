@@ -1097,7 +1097,7 @@ func IsRigName(target string) (string, bool) {
 
 	// Check known non-rig role names
 	switch strings.ToLower(target) {
-	case constants.RoleMayor, "may", constants.RoleCrew, "ref":
+	case constants.RoleCrew, "ref":
 		return "", false
 	}
 

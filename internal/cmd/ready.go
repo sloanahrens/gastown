@@ -544,10 +544,10 @@ func filterIdentityBeads(issues []*beads.Issue) []*beads.Issue {
 //
 // These are excluded from the Ready list for the same reason agent and rig
 // identity beads are: they have no owner and nobody can "do" them.
-// They outrank real work (a critical escalation is a P0), so when a recurring
-// condition fired on every patrol cycle they crowded the top of the list and
-// the mayor, reading it as a queue of urgent work, declined to dispatch for
-// hours. Escalations remain visible where they belong — `gt escalate list`,
+// They outrank real work (a critical escalation is a P0), so a recurring
+// condition crowds the top of the list and buries the dispatchable work
+// beneath it.
+// Escalations remain visible where they belong — `gt escalate list`,
 // the mailbox, and the source bead's comments.
 //
 // Detection is by label where labels are present, falling back to the

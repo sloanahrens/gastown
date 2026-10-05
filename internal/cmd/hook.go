@@ -12,7 +12,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/events"
-	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -74,7 +73,6 @@ var hookShowCmd = &cobra.Command{
 With no argument, shows your own hook status (auto-detected from context).
 
 Use cases:
-- Mayor checking what polecats are working on
 - Witness checking polecat status
 - Debugging coordination issues
 - Quick status overview
@@ -83,7 +81,6 @@ Examples:
   gt hook show                         # What's on MY hook? (auto-detect)
   gt hook show gastown/polecats/nux    # What's nux working on?
   gt hook show gastown/witness         # What's the witness hooked to?
-  gt hook show mayor                   # What's the mayor working on?
 
 Output format (one line):
   gastown/polecats/nux: gt-abc123 'Fix the widget bug' [in_progress]`,
@@ -268,7 +265,7 @@ func runHook(_ *cobra.Command, args []string) error {
 		}
 		rigName := strings.Split(agentID, "/")[0]
 		var fallbackPath string
-		if rigName == "mayor" || rigName == "deacon" {
+		if rigName == "deacon" {
 			fallbackPath = townRoot
 		} else {
 			fallbackPath = filepath.Join(townRoot, rigName)
@@ -378,20 +375,6 @@ func runHook(_ *cobra.Command, args []string) error {
 			return fmt.Errorf("hooking bead after %d attempts: %w", hookMaxRetries, lastHookErr)
 		}
 		break
-	}
-
-	// Emit a propulsion signal if the target is the mayor, so the mayor
-	// hears about the hook change at its next turn boundary.
-	if agentID == "mayor/" {
-		if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
-			session := "hq-mayor"
-			message := fmt.Sprintf("Hook updated: attached bead %s", beadID)
-			_ = nudge.Enqueue(townRoot, session, nudge.QueuedNudge{
-				Sender:   "hook",
-				Message:  message,
-				Priority: nudge.PriorityNormal,
-			})
-		}
 	}
 
 	if targetAgent != "" {
@@ -558,7 +541,7 @@ func runHookShow(cmd *cobra.Command, args []string) error {
 }
 
 // hookPolecatRefusal refuses gt hook in a polecat session: polecats use gt
-// done for lifecycle. GT_ROLE is checked first: coordinators (mayor, witness,
+// done for lifecycle. GT_ROLE is checked first: coordinators (witness,
 // etc.) may have a stale GT_POLECAT in their environment from spawning
 // polecats, so only a role that parses as polecat blocks (compound forms like
 // "gastown/polecats/Toast" included). With GT_ROLE unset, GT_POLECAT decides.
@@ -590,7 +573,6 @@ func ensureCurrentHookWorktreeIntegrity() error {
 // normalizeHookShowTarget resolves target aliases/shorthand to canonical agent IDs.
 // Examples:
 //   - "rig/polecat" -> "rig/polecats/polecat"
-//   - "mayor" -> "mayor"
 //
 // If resolution fails, it returns the original target unchanged.
 func normalizeHookShowTarget(reg *session.PrefixRegistry, target string) string {
@@ -624,7 +606,7 @@ func normalizeHookShowTarget(reg *session.PrefixRegistry, target string) string 
 		name := parts[1]
 		// Check for known roles — don't expand those
 		switch strings.ToLower(name) {
-		case "witness", "mayor", "deacon":
+		case "witness", "deacon":
 			// Already a valid canonical address
 		default:
 			// Check if it's a crew member by looking for the directory

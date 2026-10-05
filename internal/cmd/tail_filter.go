@@ -23,7 +23,7 @@ import (
 var tailRoutineDaemon = regexp.MustCompile(`^(` +
 	`Heartbeat (starting|complete)` +
 	`|Handler: (skipping plugin |running script plugin |script plugin \S+ skipped )` +
-	`|(Mayor|Handler) patrol disabled in config, skipping` +
+	`|Handler patrol disabled in config, skipping` +
 	`|jsonl_git_backup: ` +
 	`|checkpoint_dog: ` +
 	`|doctor_dog: all clear` +

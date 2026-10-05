@@ -41,7 +41,6 @@ func TestTailVisible_HidesRoutineKeepsTheRest(t *testing.T) {
 		{"seat-refill dispatched", dm("Handler: script plugin seat-refill ok (exit 0 after 41s)"), true},
 		{"seat-refill failed", dm("Handler: script plugin seat-refill FAILED (exit 1 after 3s); escalating"), true},
 		{"handler record failure", dm("Handler: failed to record script run for plugin seat-refill: signal: killed"), true},
-		{"mayor patrol disabled", dm("Mayor patrol disabled in config, skipping"), false},
 		{"handler patrol disabled", dm("Handler patrol disabled in config, skipping"), false},
 		{"jsonl backup not due", dm("jsonl_git_backup: not due — last run 2m1s ago, interval 15m0s"), false},
 		{"jsonl backup failed", dm("jsonl_git_backup: push failed: exit status 1"), true},
