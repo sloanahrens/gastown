@@ -11,7 +11,7 @@ func TestIsAgentSession(t *testing.T) {
 		name string
 		want bool
 	}{
-		{"hq-mayor", true},
+		{"hq-mayor", false}, // mayor role retired (gt-rwp7z.17)
 		{"rig-crew-max", true},
 		{"rig-refinery", false}, // refinery role removed (gt-v4ssj.6)
 		{"rig-witness", false},  // witness, deacon and boot roles retired (gt-4k3fj.6.1)
@@ -34,11 +34,11 @@ func TestIsAgentSession(t *testing.T) {
 func TestCountAgentSessionsCountsAgentsOnTheDaemonTmux(t *testing.T) {
 	t.Parallel()
 	tm := newFakeTmux(newFixedClock())
-	for _, name := range []string{"hq-mayor", "rig-crew-max", "rig-polecat-abc", "my-personal-session"} {
+	for _, name := range []string{"rig-crew-max", "rig-polecat-abc", "my-personal-session"} {
 		tm.addSession(name, "claude", time.Time{})
 	}
 	d := &Daemon{tmux: tm}
-	if got := d.countAgentSessions(); got != 3 {
-		t.Errorf("countAgentSessions = %d, want 3 (the personal session is not an agent)", got)
+	if got := d.countAgentSessions(); got != 2 {
+		t.Errorf("countAgentSessions = %d, want 2 (the personal session is not an agent)", got)
 	}
 }

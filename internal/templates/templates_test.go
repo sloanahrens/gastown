@@ -49,7 +49,6 @@ func TestRenderRole_Polecat(t *testing.T) {
 		WorkDir:       "/test/town/myrig/polecats/TestCat",
 		DefaultBranch: "main",
 		Polecat:       "TestCat",
-		MayorSession:  "gt-town-mayor",
 	}
 
 	output, err := tmpl.RenderRole("polecat", data)
@@ -86,7 +85,6 @@ func TestRenderRole_PolecatForkRigUsesPRWorkflow(t *testing.T) {
 		IsForkRig:     true,
 		UpstreamURL:   "https://example.com/upstream/repo.git",
 		Polecat:       "TestCat",
-		MayorSession:  "gt-town-mayor",
 	})
 	if err != nil {
 		t.Fatalf("RenderRole() error = %v", err)
@@ -121,7 +119,6 @@ func TestRenderRole_CrewForkRigUsesPRWorkflow(t *testing.T) {
 		IsForkRig:     true,
 		UpstreamURL:   "https://example.com/upstream/repo.git",
 		Polecat:       "alex",
-		MayorSession:  "gt-town-mayor",
 	})
 	if err != nil {
 		t.Fatalf("RenderRole() error = %v", err)
@@ -163,7 +160,6 @@ func TestRenderRole_NoHardcodedGtPath(t *testing.T) {
 				TownRoot: customTownRoot2, TownName: "instance",
 				WorkDir:       customTownRoot2 + "/myrig/polecats/TestCat",
 				DefaultBranch: "main",
-				MayorSession:  "gt-instance-mayor",
 			},
 		},
 		{
@@ -173,7 +169,6 @@ func TestRenderRole_NoHardcodedGtPath(t *testing.T) {
 				TownRoot: customTownRoot2, TownName: "instance",
 				WorkDir:       customTownRoot2 + "/myrig/crew/TestCrew",
 				DefaultBranch: "main",
-				MayorSession:  "gt-instance-mayor",
 			},
 		},
 	}
@@ -222,7 +217,6 @@ func TestRenderRole_NoBDCreateRepoFlag(t *testing.T) {
 				TownRoot: customTownRoot3, TownName: "instance",
 				WorkDir:       customTownRoot3 + "/myrig/polecats/TestCat",
 				DefaultBranch: "main",
-				MayorSession:  "gt-instance-mayor",
 			},
 		},
 		{
@@ -232,7 +226,6 @@ func TestRenderRole_NoBDCreateRepoFlag(t *testing.T) {
 				TownRoot: customTownRoot3, TownName: "instance",
 				WorkDir:       customTownRoot3 + "/myrig/crew/TestCrew",
 				DefaultBranch: "main",
-				MayorSession:  "gt-instance-mayor",
 			},
 		},
 	}
@@ -278,7 +271,6 @@ func TestRenderRole_TownRootInOutput(t *testing.T) {
 				Role: "polecat", RigName: "myrig", Polecat: "Sparky",
 				TownRoot: customRoot, TownName: "my-instance",
 				WorkDir: customRoot + "/myrig/polecats/Sparky", DefaultBranch: "main",
-				MayorSession: "gt-my-instance-mayor",
 			},
 		},
 		{
@@ -287,7 +279,6 @@ func TestRenderRole_TownRootInOutput(t *testing.T) {
 				Role: "crew", RigName: "myrig", Polecat: "Sparky",
 				TownRoot: customRoot, TownName: "my-instance",
 				WorkDir: customRoot + "/myrig/crew/Sparky", DefaultBranch: "main",
-				MayorSession: "gt-my-instance-mayor",
 			},
 		},
 	}
@@ -321,7 +312,6 @@ func TestRenderRole_Polecat_CwdInstruction(t *testing.T) {
 		Role: "polecat", RigName: "rig1", Polecat: "Worker",
 		TownRoot: customRoot, TownName: "gastown-ci",
 		WorkDir: customRoot + "/rig1/polecats/Worker", DefaultBranch: "main",
-		MayorSession: "gt-gastown-ci-mayor",
 	}
 
 	output, err := tmpl.RenderRole("polecat", data)
@@ -1071,8 +1061,7 @@ func renderPolecatForTest(t *testing.T) string {
 	output, err := tmpl.RenderRole("polecat", RoleData{
 		Role: "polecat", RigName: "myrig", Polecat: "TestCat",
 		TownRoot: "/test/town", TownName: "town",
-		WorkDir:      "/test/town/myrig/polecats/TestCat",
-		MayorSession: "gt-town-mayor",
+		WorkDir: "/test/town/myrig/polecats/TestCat",
 	})
 	if err != nil {
 		t.Fatalf("RenderRole() error = %v", err)

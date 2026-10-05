@@ -9,14 +9,8 @@ import (
 // DefaultPrefix is the default beads prefix used when no rig-specific prefix is known.
 const DefaultPrefix = "gt"
 
-// HQPrefix is the prefix for town-level sessions (Mayor, Overseer).
+// HQPrefix is the prefix for town-level sessions (Overseer, Deacon).
 const HQPrefix = "hq-"
-
-// MayorSessionName returns the session name for the Mayor agent.
-// One mayor per machine - multi-town requires containers/VMs for isolation.
-func MayorSessionName() string {
-	return HQPrefix + "mayor"
-}
 
 // CrewSessionName returns the session name for a crew worker in a rig.
 // rigPrefix is the rig's beads prefix (e.g., "gt" for gastown, "bd" for beads).

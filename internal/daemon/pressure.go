@@ -34,7 +34,7 @@ type PressureResult struct {
 //  2. Memory pressure: available memory vs minimum threshold.
 //  3. Session concurrency: active tmux sessions vs maximum cap.
 //
-// Infrastructure agents (deacon, witness, mayor) should NOT be gated by
+// Infrastructure agents (deacon, witness) should NOT be gated by
 // pressure—they are the monitoring/recovery layer. Only gate:
 //   - Polecats (dispatchQueuedWork, crash restarts)
 //   - Refineries
@@ -107,11 +107,10 @@ func (d *Daemon) countAgentSessions() int {
 }
 
 // isAgentSession returns true if the tmux session name looks like a Gas Town agent.
-// Agent sessions use prefixed names (e.g., "hq-mayor", "rig-crew-max", "rig-polecat-foo").
+// Agent sessions use prefixed names (e.g., "rig-crew-max", "rig-polecat-foo").
 func isAgentSession(name string) bool {
 	// Agent sessions contain role markers
 	for _, marker := range []string{
-		"mayor",
 		constants.RolePolecat,
 		constants.RoleCrew,
 	} {

@@ -489,7 +489,7 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 // variables set via -e flags. This ensures the initial shell process inherits the
 // correct environment from the session, rather than inheriting from the tmux server
 // or parent process. The -e flags set session-level environment before the shell
-// starts, preventing stale env vars (e.g., GT_ROLE from a parent mayor session)
+// starts, preventing stale env vars (e.g., GT_ROLE from a parent session)
 // from leaking into crew/polecat shells.
 //
 // The command should still use 'exec env' for WaitForCommand detection compatibility,
@@ -3848,8 +3848,7 @@ func (t *Tmux) WaitForShellReady(session string, timeout time.Duration) error {
 //
 //	Once any AI agent is running, observation should be AI-to-AI:
 //	- Deacon monitoring polecats → use patrol formula + AI analysis
-//	- Deacon restarting → Mayor watches via 'gt peek'
-//	- Mayor restarting → Deacon watches via 'gt peek'
+//	- A restarting agent → another agent watches via 'gt peek'
 
 // matchesPromptPrefix reports whether a captured pane line matches the
 // configured ready-prompt prefix. It normalizes non-breaking spaces
@@ -3977,7 +3976,7 @@ const busyCaptureLines = 20
 // Enter submits the line (GH#307). But in Claude Code Escape also cancels
 // in-flight generation; the status bar shows a busy indicator (see
 // hasBusyIndicator) while the agent is working. Sending Escape in that state
-// would interrupt the agent's current turn (e.g. the Mayor). Returns false
+// would interrupt the agent's current turn. Returns false
 // when any line shows the busy indicator so the caller suppresses the Escape.
 //
 // FRAGILITY: this depends on the agent TUI rendering one of the known busy
@@ -4346,14 +4345,9 @@ func (t *Tmux) ApplyWindowStyle(session string, ws *WindowStyle) error {
 
 // roleIcons maps role names to display icons for the status bar.
 // Uses centralized emojis from constants package.
-// Includes legacy keys ("coordinator", "health-check") for backwards compatibility.
 var roleIcons = map[string]string{
-	// Standard role names (from constants)
-	"mayor":               "🎩",
 	constants.RoleCrew:    constants.EmojiCrew,
 	constants.RolePolecat: constants.EmojiPolecat,
-	// Legacy names (for backwards compatibility)
-	"coordinator": "🎩",
 }
 
 // SetStatusFormat configures the left side of the status bar.
@@ -4363,12 +4357,11 @@ func (t *Tmux) SetStatusFormat(session, rig, worker, role string) error {
 	icon := roleIcons[role]
 
 	// Compact format - icon already identifies role
-	// Mayor: 🎩 Mayor
 	// Crew:  👷 gastown/crew/max (full path)
 	// Polecat: 😺 gastown/Toast
 	var left string
 	if rig == "" {
-		// Town-level agent (Mayor, Deacon) - keep as-is
+		// Town-level agent (Deacon, Boot) - keep as-is
 		left = fmt.Sprintf("%s %s ", icon, worker)
 	} else {
 		// Rig agents - use session name (already in prefix format: gt-crew-gus)

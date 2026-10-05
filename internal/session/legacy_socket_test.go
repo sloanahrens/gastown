@@ -74,7 +74,7 @@ func TestCleanupLegacyDefaultSocketSkipsWhenSocketIsDefault(t *testing.T) {
 func TestCleanupLegacyDefaultSocketCleansGastownSessions(t *testing.T) {
 	t.Parallel()
 	mock := &mockLegacyTmux{
-		sessions: []string{"ga-witness", "hq-mayor"},
+		sessions: []string{"ga-witness", "hq-deacon"},
 	}
 	l := fakeLegacySockets("gt-abc123", mock)
 
@@ -85,7 +85,7 @@ func TestCleanupLegacyDefaultSocketCleansGastownSessions(t *testing.T) {
 	if len(mock.killed) != 2 {
 		t.Fatalf("expected 2 killed, got %d: %v", len(mock.killed), mock.killed)
 	}
-	want := map[string]bool{"ga-witness": true, "hq-mayor": true}
+	want := map[string]bool{"ga-witness": true, "hq-deacon": true}
 	for _, k := range mock.killed {
 		if !want[k] {
 			t.Errorf("unexpected kill: %s", k)

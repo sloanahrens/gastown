@@ -57,10 +57,10 @@ func TestBeaconRecipient(t *testing.T) {
 		},
 		{
 			name:    "town-level role no rig no name",
-			role:    "mayor",
+			role:    "overseer",
 			agentNm: "",
 			rig:     "",
-			want:    "mayor",
+			want:    "overseer",
 			wantNot: []string{"/", "(rig:"},
 		},
 		{
@@ -107,7 +107,7 @@ func TestBeaconRecipientContainsNoPathSeparators(t *testing.T) {
 		{"witness", "", "gastown"},
 		{"refinery", "", "gastown"},
 		{"dog", "fido", ""},
-		{"mayor", "", ""},
+		{"overseer", "", ""},
 		{"deacon", "", ""},
 		{"boot", "", ""},
 		{"polecat", "a/b", "c/d"}, // edge case: slashes in inputs
@@ -133,9 +133,9 @@ func TestAgentIdentityBeaconAddress(t *testing.T) {
 		wantNot []string
 	}{
 		{
-			name: "mayor",
-			id:   AgentIdentity{Role: RoleMayor},
-			want: "mayor",
+			name: "overseer",
+			id:   AgentIdentity{Role: RoleOverseer},
+			want: "overseer",
 		},
 		{
 			name:    "crew",
@@ -193,7 +193,7 @@ func TestBeaconAddressVsAddress(t *testing.T) {
 	}
 
 	// Town-level roles should be identical
-	for _, role := range []Role{RoleMayor, RoleOverseer} {
+	for _, role := range []Role{RoleOverseer} {
 		id := AgentIdentity{Role: role}
 		if id.Address() != id.BeaconAddress() {
 			t.Errorf("For %v: Address()=%q != BeaconAddress()=%q", role, id.Address(), id.BeaconAddress())
@@ -233,13 +233,13 @@ func TestFormatStartupBeacon(t *testing.T) {
 			name: "cold-start no mol-id",
 			cfg: BeaconConfig{
 				Recipient: "deacon",
-				Sender:    "mayor",
+				Sender:    "human",
 				Topic:     "cold-start",
 			},
 			wantSub: []string{
 				"[GAS TOWN]",
 				"deacon",
-				"<- mayor",
+				"<- human",
 				"cold-start",
 				"Check your hook and mail",
 				"gt hook",
@@ -287,7 +287,7 @@ func TestFormatStartupBeacon(t *testing.T) {
 			name: "empty topic defaults to ready",
 			cfg: BeaconConfig{
 				Recipient: "deacon",
-				Sender:    "mayor",
+				Sender:    "human",
 			},
 			wantSub: []string{
 				"[GAS TOWN]",
@@ -332,13 +332,13 @@ func TestFormatStartupBeacon(t *testing.T) {
 		{
 			name: "attach topic includes hook/mail instructions",
 			cfg: BeaconConfig{
-				Recipient: "mayor",
+				Recipient: "deacon",
 				Sender:    "human",
 				Topic:     "attach",
 			},
 			wantSub: []string{
 				"[GAS TOWN]",
-				"mayor",
+				"deacon",
 				"attach",
 				"gt hook",
 				"gt mail inbox",

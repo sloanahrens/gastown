@@ -40,7 +40,7 @@ type Templates struct {
 
 // RoleData contains information for rendering role contexts.
 type RoleData struct {
-	Role          string // mayor, polecat, crew
+	Role          string // polecat, crew
 	RigName       string // e.g., "greenplace"
 	TownRoot      string // e.g., "/Users/steve/ai"
 	TownName      string // e.g., "ai" - the town identifier for session names
@@ -51,7 +51,6 @@ type RoleData struct {
 	Polecat       string // polecat name (for polecat role)
 	BeadsDir      string // BEADS_DIR path
 	IssuePrefix   string // beads issue prefix
-	MayorSession  string // e.g., "gt-ai-mayor" - dynamic mayor session name
 }
 
 // SupervisorData contains information for rendering supervisor templates.

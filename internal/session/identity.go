@@ -10,7 +10,6 @@ import (
 type Role string
 
 const (
-	RoleMayor    Role = "mayor"
 	RoleOverseer Role = "overseer"
 	RoleCrew     Role = "crew"
 	RolePolecat  Role = "polecat"
@@ -18,9 +17,9 @@ const (
 
 // AgentIdentity represents a parsed Gas Town agent identity.
 type AgentIdentity struct {
-	Role   Role   // mayor, overseer, crew, polecat
-	Rig    string // rig name (empty for mayor)
-	Name   string // crew/polecat name (empty for mayor)
+	Role   Role   // overseer, crew, polecat
+	Rig    string // rig name (empty for town-level roles)
+	Name   string // crew/polecat name (empty for town-level roles)
 	Prefix string // beads prefix for rig-level agents (e.g., "gt", "bd", "hop")
 }
 
@@ -36,9 +35,6 @@ func ParseAddressWithRegistry(address string, registry *PrefixRegistry) (*AgentI
 		return nil, fmt.Errorf("empty address")
 	}
 
-	if address == string(RoleMayor) || address == string(RoleMayor)+"/" {
-		return &AgentIdentity{Role: RoleMayor}, nil
-	}
 	if address == "overseer" {
 		return nil, fmt.Errorf("overseer has no session")
 	}
@@ -81,8 +77,7 @@ func ParseAddressWithRegistry(address string, registry *PrefixRegistry) (*AgentI
 // If registry is nil, an empty registry is used (prefix will not resolve to rig name).
 //
 // Session name formats:
-//   - hq-mayor → Role: mayor (town-level, one per machine)
-//   - hq-overseer → Role: overseer
+//   - hq-overseer → Role: overseer (town-level)
 //   - <prefix>-crew-<name> → Role: crew (e.g., gt-crew-max for gastown)
 //   - <prefix>-<name> → Role: polecat (e.g., gt-furiosa for gastown)
 //
@@ -102,8 +97,6 @@ func ParseSessionNameWithRegistry(session string, registry *PrefixRegistry) (*Ag
 	if strings.HasPrefix(session, HQPrefix) {
 		suffix := strings.TrimPrefix(session, HQPrefix)
 		switch suffix {
-		case string(RoleMayor):
-			return &AgentIdentity{Role: RoleMayor}, nil
 		case "overseer":
 			return &AgentIdentity{Role: RoleOverseer}, nil
 		default:
@@ -140,8 +133,6 @@ func ParseSessionNameWithRegistry(session string, registry *PrefixRegistry) (*Ag
 // SessionName returns the tmux session name for this identity.
 func (a *AgentIdentity) SessionName() string {
 	switch a.Role {
-	case RoleMayor:
-		return MayorSessionName()
 	case RoleOverseer:
 		return OverseerSessionName()
 	case RoleCrew:
@@ -166,13 +157,11 @@ func (a *AgentIdentity) prefix() string {
 // startup beacons. Unlike Address(), this format prevents LLMs from
 // misinterpreting the recipient as a filesystem path.
 // Examples:
-//   - mayor → "mayor"
+//   - overseer → "overseer"
 //   - crew → "crew max (rig: gastown)"
 //   - polecat → "polecat Toast (rig: gastown)"
 func (a *AgentIdentity) BeaconAddress() string {
 	switch a.Role {
-	case RoleMayor:
-		return "mayor"
 	case RoleOverseer:
 		return "overseer"
 	case RoleCrew:
@@ -186,13 +175,11 @@ func (a *AgentIdentity) BeaconAddress() string {
 
 // Address returns the mail-style address for this identity.
 // Examples:
-//   - mayor → "mayor"
+//   - overseer → "overseer"
 //   - crew → "gastown/crew/max"
 //   - polecat → "gastown/polecats/Toast"
 func (a *AgentIdentity) Address() string {
 	switch a.Role {
-	case RoleMayor:
-		return "mayor"
 	case RoleOverseer:
 		return "overseer"
 	case RoleCrew:

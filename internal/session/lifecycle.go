@@ -18,7 +18,7 @@ import (
 
 // SessionConfig describes how to create and start a tmux session.
 // This unifies the common startup pattern that was previously duplicated
-// across polecat, mayor, boot, deacon, witness, refinery and crew
+// across polecat, boot, deacon, witness, refinery and crew
 // session managers. Each of those managers previously had to coordinate
 // 4+ packages (config, runtime, session, tmux) manually.
 //
@@ -32,20 +32,20 @@ import (
 //	    Beacon:    session.BeaconConfig{...},
 //	})
 type SessionConfig struct {
-	// SessionID is the tmux session name (e.g., "gt-wyvern-Toast", "hq-mayor").
+	// SessionID is the tmux session name (e.g., "gt-wyvern-Toast", "gt-crew-max").
 	SessionID string
 
 	// WorkDir is the working directory for the session.
 	WorkDir string
 
-	// Role is the agent role (e.g., "polecat", "mayor", "boot", "deacon").
+	// Role is the agent role (e.g., "polecat", "crew", "deacon").
 	Role string
 
 	// TownRoot is the root of the Gas Town workspace (e.g., ~/gt).
 	TownRoot string
 
 	// RigPath is the rig directory path for config resolution.
-	// Empty for town-level agents (mayor, deacon, boot).
+	// Empty for town-level agents (deacon, boot).
 	RigPath string
 
 	// RigName is the rig name for environment variables and theming.

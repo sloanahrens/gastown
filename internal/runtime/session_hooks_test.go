@@ -43,7 +43,7 @@ func TestSyncSessionSettings_ReplacesStaleHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s, err := syncSessionSettings(home, dir, dir, "mayor")
+	s, err := syncSessionSettings(home, dir, dir, "deacon")
 	if err != nil || !s.Present {
 		t.Fatalf("status = %+v, err = %v; want present", s, err)
 	}
@@ -74,8 +74,8 @@ func TestSyncSessionSettings_AbsentWhenUnwritable(t *testing.T) {
 
 func TestHooksStatusPayload_PresentHasNoReason(t *testing.T) {
 	t.Parallel()
-	s := HooksStatus{Present: true, Role: "mayor", Path: "/town/mayor/.claude/settings.json"}
-	p := s.Payload("hq-mayor")
+	s := HooksStatus{Present: true, Role: "deacon", Path: "/town/mayor/.claude/settings.json"}
+	p := s.Payload("hq-deacon")
 	if _, ok := p["reason"]; ok || p["path"] != s.Path {
 		t.Errorf("payload = %v", p)
 	}

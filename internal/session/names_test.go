@@ -4,16 +4,6 @@ import (
 	"testing"
 )
 
-func TestMayorSessionName(t *testing.T) {
-	t.Parallel()
-	// Mayor session name is now fixed (one per machine), uses HQ prefix
-	want := "hq-mayor"
-	got := MayorSessionName()
-	if got != want {
-		t.Errorf("MayorSessionName() = %q, want %q", got, want)
-	}
-}
-
 func TestOverseerSessionName(t *testing.T) {
 	t.Parallel()
 	want := "hq-overseer"
