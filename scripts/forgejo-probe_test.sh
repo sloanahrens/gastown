@@ -42,6 +42,9 @@ lacks() { ! contains "$1" "$2"; }
 # behind, so a path the stub wrote and the same path git reported as $PWD
 # compare equal.
 norm() { printf '%s' "$1" | sed 's|//*|/|g'; }
+# mode_of prints a file's permission bits in octal; GNU stat and macOS stat
+# spell the format differently.
+mode_of() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 
 mkdir -p "$TMP/bin" "$TMP/home" "$TMP/config" "$STATE"
 printf 'FORGEJO_ADMIN_TOKEN=%s\n' "$STUB_ADMIN_TOKEN" > "$TMP/admin.env"
@@ -309,10 +312,11 @@ run_probe() {
 }
 
 # fresh empties the stub's state and gives the case a starting status script and
-# a job log. The rig's repository exists, as it does on a real host.
+# a job log. The rig's repository exists, as it does on a real host, and the
+# config dir is emptied so a case's "no record" assertions see only its run.
 fresh() {
-  rm -rf "$STATE"
-  mkdir -p "$STATE" "$BARE"
+  rm -rf "$STATE" "$CFG"
+  mkdir -p "$STATE" "$BARE" "$CFG"
   : > "$STATE/calls.log"
   printf 'success\n' > "$STATE/status-plan"
   printf 'the failing package is named here\nFAIL\tTestGate\t0.01s\n' > "$STATE/job-log"
@@ -342,6 +346,10 @@ deleted() { cat "$STATE/deleted" 2>/dev/null || true; }
 worktrees_added() { cat "$STATE/worktrees" 2>/dev/null || true; }
 worktrees_removed() { cat "$STATE/worktree-removed" 2>/dev/null || true; }
 hook_ran() { cat "$STATE/hook-ran" 2>/dev/null || true; }
+# record prints the green record for the default rig (empty when none was
+# written); record_value reads one key's value out of it.
+record() { cat "$CFG/gt/probe-rig.record" 2>/dev/null || true; }
+record_value() { sed -n "s/^$1=//p" "$CFG/gt/probe-rig.record" 2>/dev/null || true; }
 
 echo "=== a green gate passes ==="
 fresh
@@ -361,6 +369,16 @@ check "the unregistration is worktree remove, not a prune of the shared repo" te
 check "the throwaway worktree sits in the probe's temp dir" contains "forgejo-probe." "$(worktrees_added)"
 check "the admin token never reaches the stub's argv" test ! -e "$STATE/argv-violations"
 check "the admin token never reaches the output" lacks "$STUB_ADMIN_TOKEN" "$out"
+check "a green run writes the record" test -f "$CFG/gt/probe-rig.record"
+check "the record names the rig" test "$(record_value rig)" = "rig"
+check "the record names the repository" test "$(record_value repo)" = "acme/rig"
+check "the record names the probed commit" test "$(record_value commit)" = "$SHA"
+check "the record names the gate context" test "$(record_value context)" = "ci / gate (push)"
+check "the record names the green verdict" test "$(record_value verdict)" = "green"
+check "the record names the time" grep -Eq '^time=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "$CFG/gt/probe-rig.record"
+check "the record carries an epoch to age it with" grep -Eq '^epoch=[0-9]+$' "$CFG/gt/probe-rig.record"
+check "the record is mode 600" test "$(mode_of "$CFG/gt/probe-rig.record")" = "600"
+check "the record holds no token" lacks "$STUB_ADMIN_TOKEN" "$(record)"
 
 echo "=== a rig hook that refuses land/* fails the probe ==="
 fresh
@@ -372,6 +390,7 @@ check "no branch is deleted for a refused push" test -z "$(deleted)"
 check "the status is never read" test "$(count_calls GET /commits/)" = 0
 check "the refused push cut a worktree" test -n "$(worktrees_added)"
 check "the refused worktree is unregistered" test "$(worktrees_added)" = "$(worktrees_removed)"
+check "a refused probe writes no record" test ! -e "$CFG/gt/probe-rig.record"
 
 echo "=== a rig hook that allows land/* runs in the push's worktree ==="
 fresh
@@ -422,6 +441,7 @@ check "the jobs of the run are read" test "$(count_calls GET /actions/runs/12/jo
 check "the job's log is read" test "$(count_calls GET /actions/jobs/311/logs)" = 1
 check "a red verdict stops the poll" test "$(count_calls GET /commits/)" = 1
 check "the probe branch is deleted after a red" test "$(deleted)" = "land/probe-rig"
+check "a red probe writes no record" test ! -e "$CFG/gt/probe-rig.record"
 
 echo "=== a red gate prints only the log tail ==="
 fresh
@@ -449,6 +469,7 @@ check "the timeout is reported" contains "reported nothing" "$out"
 check "a silent gate reports there is no run to read" contains "no workflow run tested" "$out"
 check "the wait is bounded by the timeout" test "$(count_calls GET /commits/)" -le 4
 check "the probe branch is deleted after a timeout" test "$(deleted)" = "land/probe-rig"
+check "a timed-out probe writes no record" test ! -e "$CFG/gt/probe-rig.record"
 check "a silent gate reads no job log" test "$(count_calls GET /actions/jobs)" = 0
 
 echo "=== a stuck run's log is printed when the gate goes silent ==="
@@ -474,6 +495,7 @@ check "the refusal is named" contains "no .forgejo/workflows/gate.yml" "$out"
 check "the refusal happens before the push" test ! -e "$STATE/pushes"
 check "no branch is deleted after a refusal" test -z "$(deleted)"
 check "the status is never read" test "$(count_calls GET /commits/)" = 0
+check "a refusal before the push writes no record" test ! -e "$CFG/gt/probe-rig.record"
 
 echo "=== a workflow with more than one job refuses ==="
 fresh
@@ -528,6 +550,7 @@ check "dry run names the worktree the push would ride" contains "would push from
 check "dry run cuts no worktree" test ! -e "$STATE/worktrees"
 check "dry run says it would delete the branch" contains "would delete branch land/probe-rig" "$out"
 check "dry run reports no write was sent" contains "no push and no deletion was sent" "$out"
+check "dry run writes no record" test ! -e "$CFG/gt/probe-rig.record"
 
 echo "=== a repository the instance does not hold fails loudly ==="
 fresh
