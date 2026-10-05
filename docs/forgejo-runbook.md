@@ -69,6 +69,16 @@ package registry alone. The grant is read before it is written and lands before
 the protection rule is created or patched, so a second run on unchanged state
 sends no write.
 
+The viewer role is not in the default role list, so a repo cut over before the
+dashboard's pane existed — or with a run that named no viewer — leaves the pane
+unable to read it. The pane names a repo the viewer cannot read rather than
+showing it as a rig with no landings; the grant is what makes its landings
+appear:
+
+```bash
+bash scripts/forgejo-provision.sh --role viewer --repo OWNER/NAME
+```
+
 `--dry-run` reads the live state and prints what it would write without
 sending a write. Expect one line per action, then `provisioning complete`; a
 second run reports the users, token files, access and rules it found already in
@@ -156,6 +166,7 @@ The failures seen on the live rigs so far, each closed or ticketed:
 | A push to Forgejo has no git credentials | Operator | — | install the role-keyed credential helper (`~/forgejo/README.md`) |
 | The mirror prunes a GitHub-only ref | Operator | — | import every GitHub ref before the mirror exists (see "Cutting a rig over") |
 | A protected branch cannot be deleted | Operator | — | only `main` is protected (gt-fn9e6.21) |
+| The dashboard's Forgejo pane names a rig repo it cannot read | Operator | reads that repo's landings not at all, and says so in the panel instead of looking quiet (gt-faml5) | `bash scripts/forgejo-provision.sh --role viewer --repo OWNER/NAME` |
 | Provisioning a fresh repo never converges | Operator | — | the collaborator grant lands before the rule (gt-fn9e6.23) |
 | The startup context check alarms after a restart | Operator | raises `landing-forgejo-context:<rig>` | `gt escalate clear --fingerprint landing-forgejo-context:<rig>` once the landing is known good (gt-fn9e6.24) |
 | A rig's new Forgejo block is read only at daemon start | Operator | — | restart the daemon when no landing is in flight (see "Cutting a rig over") |

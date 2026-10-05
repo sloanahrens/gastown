@@ -640,20 +640,38 @@ function renderForgejo(s) {
   const follow = box.scrollHeight - box.scrollTop - box.clientHeight <= 4;
   box.replaceChildren();
   $("forgejonote").textContent = "";
+  $("forgejonote").className = "r";
   const f = s.forgejo;
   if (!f) { box.append(el("div", "empty", "no viewer token")); return; }
   const events = f.events || [];
-  if (!events.length) { box.append(el("div", f.error ? "badc" : "empty", f.error ? "unavailable: " + f.error : "no activity")); return; }
-  const today = new Date().toDateString();
-  for (const e of events) {
-    const when = new Date(e.at);
-    const stamp = when.toDateString() === today ? clock(e.at).slice(0, 5) : when.toLocaleDateString([], {month: "short", day: "numeric"});
-    const row = el("div", "fev");
-    row.append(el("span", "t", stamp), el("span", "a", e.actor), el("span", "s", e.summary), el("span", "rp", e.repo));
-    box.append(row);
+  // A repo the viewer's token cannot read is named: silently reading a subset is
+  // how a rig's landings went missing with no error anywhere (gt-faml5).
+  const missing = f.missing || [];
+  if (missing.length) box.append(el("div", "badc title", "not readable by the viewer: " + missing.join(", ")));
+  if (!events.length) {
+    if (!missing.length) { box.append(el("div", f.error ? "badc" : "empty", f.error ? "unavailable: " + f.error : "no activity")); return; }
+  } else {
+    const today = new Date().toDateString();
+    for (const e of events) {
+      const when = new Date(e.at);
+      const stamp = when.toDateString() === today ? clock(e.at).slice(0, 5) : when.toLocaleDateString([], {month: "short", day: "numeric"});
+      const row = el("div", "fev");
+      row.append(el("span", "t", stamp), el("span", "a", e.actor), el("span", "s", e.summary), el("span", "rp", e.repo));
+      box.append(row);
+    }
   }
-  const age = (Date.now() - new Date(events[events.length - 1].at).getTime()) / 1000;
-  $("forgejonote").textContent = (f.error ? "stale (" + f.error + ") · " : "") + events.length + " events · last " + fmtDur(age) + " ago";
+  // The note ages the SNAPSHOT, not the newest event. A quiet repo's feed is
+  // current with its newest event hours old, and a frozen pane is the other way
+  // round, so the event's age cannot tell them apart (gt-faml5).
+  const read = Date.parse(f.at || "");
+  const every = f.every_seconds || 0;
+  const age = read > 0 ? (Date.now() - read) / 1000 : null;
+  const stale = age != null && every > 0 && age > 2 * every;
+  let note = (f.error ? "stale (" + f.error + ") · " : "") + events.length + " events";
+  if (age != null) note += " · snapshot " + fmtDur(age) + " old";
+  if (stale) note += " · STALE";
+  $("forgejonote").textContent = note;
+  if (stale) $("forgejonote").className = "r badc";
   if (follow) box.scrollTop = box.scrollHeight;
 }
 

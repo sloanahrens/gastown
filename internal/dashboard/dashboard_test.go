@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -87,6 +88,66 @@ func TestWorkersRunOnlyWhileAPageIsOpenAndDue(t *testing.T) {
 	now = now.Add(time.Hour)
 	if h.due(&last, every) {
 		t.Fatal("ran after the last page left")
+	}
+}
+
+// A worker runs on every tick a page is watching. Asking the wall clock whether
+// a whole interval had passed threw the tick away whenever it landed a hair
+// short of one, which is about half of them: the live dashboard's 10s machine
+// worker sampled at an effective 16s, so the Forgejo pane's 3min refresh became
+// 5-6min and a landing could sit unseen for two intervals (gt-faml5).
+func TestWorkersRunOnEveryTickWhileAPageIsOpen(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 3, 16, 0, 0, 0, time.UTC)
+	h := NewHub(Config{Now: func() time.Time { return now }})
+	// The page is open before the worker starts, so the connect's wake cannot
+	// race the ticks: every run below comes from a tick.
+	page, _ := h.Subscribe()
+	defer h.Unsubscribe(page)
+
+	ticks := make(chan time.Time)
+	var runs atomic.Int64
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		h.work(ctx, ticks, time.Minute, func() { runs.Add(1) })
+	}()
+
+	// A send on an unbuffered channel returns only once the worker takes the
+	// tick, and the worker finishes a tick before it can select again, so once
+	// it has stopped every tick it took has run. No sleeps, no timing.
+	for i := 0; i < 5; i++ {
+		ticks <- now
+	}
+	cancel()
+	<-stopped
+
+	if got := runs.Load(); got != 5 {
+		t.Fatalf("%d runs for 5 ticks, want 5: a tick IS the interval and may not be skipped", got)
+	}
+}
+
+// A page connecting releases every worker at once. Handing one token per worker
+// down a shared channel released whichever workers happened to be parked and
+// left the rest to their ticker, so a pane could sit on a stale snapshot for a
+// whole interval after the page was opened (gt-faml5).
+func TestSubscribeReleasesEveryParkedWorker(t *testing.T) {
+	t.Parallel()
+	h := NewHub(Config{})
+	// The channel a worker captured as it parked, before the page connected.
+	parked := h.wakeChan()
+
+	page, _ := h.Subscribe()
+	defer h.Unsubscribe(page)
+
+	select {
+	case <-parked:
+	default:
+		t.Fatal("the connecting page left the parked workers waiting for their ticker")
+	}
+	if next := h.wakeChan(); next == parked {
+		t.Fatal("the wake channel was not replaced, so the next page would release nothing")
 	}
 }
 

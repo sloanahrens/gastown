@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/townhealth"
 	"github.com/steveyegge/gastown/internal/townstatus"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -62,11 +63,14 @@ runs every five minutes while a page is open; with none, the spend panel is
 left out.
 
 The Forgejo panel reads the viewer role's token file
-(~/.config/gt/forgejo-viewer.env) and lists the recent activity of every repo
-that token can see, every three minutes, GET only; --forgejo-repo owner/name
-narrows it to the repos named, and may be repeated. With no token file the
-panel is left out, and a refresh that fails shows the last good feed marked
-stale.
+(~/.config/gt/forgejo-viewer.env) and lists the recent activity of every rig
+cut over to Forgejo, every three minutes, GET only: the rigs whose
+merge_queue.forgejo block names a remote, or the repos the token can see when
+no rig has one. A rig repo the viewer's token cannot read is named in the panel
+rather than left out, so a missing rig never reads as a quiet one.
+--forgejo-repo owner/name reads exactly the repos named instead, and may be
+repeated. With no token file the panel is left out, and a refresh that fails
+shows the last good feed marked stale.
 
 Lifecycle: the dashboard watches its own binary. When make install replaces it
 and the new file runs (gt version succeeds), the dashboard restarts itself in
@@ -87,7 +91,7 @@ func init() {
 	dashboardCmd.Flags().StringVar(&dashboardBind, "bind", "127.0.0.1", "Address to bind; loopback only")
 	dashboardCmd.Flags().StringVar(&dashboardSince, "since", "2h", "How far back the feed starts (as gt tail --since)")
 	dashboardCmd.Flags().StringVar(&dashboardSpendCmd, "spend-cmd", "", "Command that prints the DeepSeek spend report as JSON (default: the ~/.claude tool when present)")
-	dashboardCmd.Flags().StringArrayVar(&dashboardForgejoRepos, "forgejo-repo", nil, "Repo (owner/name) the Forgejo panel reads; repeatable (default: every repo the viewer can see)")
+	dashboardCmd.Flags().StringArrayVar(&dashboardForgejoRepos, "forgejo-repo", nil, "Repo (owner/name) the Forgejo panel reads; repeatable (default: every rig cut over to Forgejo)")
 	dashboardCmd.Flags().BoolVar(&dashboardOpen, "open", false, "Open the page in the default browser")
 	rootCmd.AddCommand(dashboardCmd)
 }
@@ -193,7 +197,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Spend:      dashboardSpend(resolveSpendCmd(spendCmd)),
 		OM:         func() *dashboard.OM { return om.read(time.Now()) },
 		TierSweep:  func() *dashboard.TierSweep { return tierSweeps.read(time.Now()) },
-		Forgejo:    dashboardForgejoReader(dashboardForgejoRepos),
+		Forgejo:    dashboardForgejoReader(townRoot, dashboardForgejoRepos),
 		Escalation: func() *dashboard.Escalations { return escalations.read(time.Now()) },
 		Dispatch:   om.dispatch,
 		Queue:      func() *dashboard.Queue { return queue.read(time.Now()) },
@@ -405,15 +409,44 @@ func resolveSpendCmd(flagValue string) []string {
 }
 
 // dashboardForgejoReader wires the Forgejo panel to the read-only viewer role:
-// repos, when non-empty, is the explicit owner/name list to read. No viewer
-// token file means no panel, like the spend panel with no spend command. The
-// token is read once, here, and never leaves the client.
-func dashboardForgejoReader(repos []string) func() *dashboard.ForgejoFeed {
+// repos, when non-empty, is the explicit owner/name list to read, and empty
+// reads every rig that has cut over to Forgejo, so the panel names a rig repo
+// the viewer cannot see instead of silently reading a subset (gt-faml5). No
+// viewer token file means no panel, like the spend panel with no spend command.
+// The token is read once, here, and never leaves the client.
+func dashboardForgejoReader(townRoot string, repos []string) func() *dashboard.ForgejoFeed {
+	if len(repos) == 0 {
+		repos = rigForgejoRepos(townRoot)
+	}
 	client, err := forgejo.NewClient(config.ForgejoRoleViewer)
 	if err != nil {
 		return nil
 	}
 	return dashboard.NewForgejoReader(client, repos).Read
+}
+
+// rigForgejoRepos is every rig's Forgejo repository as owner/name, in rig-name
+// order: the rigs whose merge_queue.forgejo block names a remote. A rig with no
+// block, or one whose remote URL names no repository, is left out. With none
+// named the panel falls back to the repos the viewer's token can see.
+func rigForgejoRepos(townRoot string) []string {
+	names, err := knownRigNames(townRoot)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, name := range names {
+		fc := rig.ResolveForgejoConfig(townRoot, name)
+		if fc == nil || fc.RemoteURL == "" {
+			continue
+		}
+		owner, repo, err := land.RepoFromRemoteURL(fc.RemoteURL)
+		if err != nil {
+			continue
+		}
+		out = append(out, owner+"/"+repo)
+	}
+	return out
 }
 
 // dashboardSpend runs the spend command and returns its JSON, nil when it

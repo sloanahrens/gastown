@@ -214,6 +214,55 @@ func TestForgejoReaderKeepsTheLastGoodFeedWhenARefreshFails(t *testing.T) {
 	assert.Equal(t, good.Events, stale.Events, "a failed refresh shows the last good feed, marked stale")
 }
 
+// The snapshot's read time is what the page ages, so a failed refresh must not
+// reset it: the pane is serving the older read and has to be able to say so
+// (gt-faml5).
+func TestForgejoFeedKeepsItsReadTimeAcrossAFailedRefresh(t *testing.T) {
+	t.Parallel()
+	stub := &forgejoStub{}
+	reader := newForgejoTestReader(t, stub, nil)
+	at := time.Date(2026, 10, 5, 16, 0, 0, 0, time.UTC)
+	reader.now = func() time.Time { return at }
+	good := reader.Read()
+	require.Empty(t, good.Error)
+	require.Equal(t, at, good.At)
+
+	reader.now = func() time.Time { return at.Add(time.Minute) }
+	stub.setFail(http.StatusInternalServerError)
+	stale := reader.Read()
+	require.Equal(t, "http 500", stale.Error)
+	assert.Equal(t, at, stale.At, "a failed refresh leaves the snapshot's age alone")
+}
+
+// A repo the viewer's token cannot read must not cost the panel the repos it
+// can, and must be named. Reading the subset silently is how om's landings went
+// missing with no error anywhere on the pane (gt-faml5).
+func TestForgejoReaderNamesReposTheViewerCannotRead(t *testing.T) {
+	t.Parallel()
+	stub := &forgejoStub{}
+	feed := newForgejoTestReader(t, stub, []string{"sloan/beads", "sloan/organic-mechanic"}).Read()
+	require.Empty(t, feed.Error)
+	require.Len(t, feed.Events, 2, "the readable repo's feed still arrives")
+	assert.Equal(t, []string{"sloan/organic-mechanic"}, feed.Missing)
+	assert.Equal(t, []string{
+		"/api/v1/repos/sloan/beads/activities/feeds",
+		"/api/v1/repos/sloan/organic-mechanic/activities/feeds",
+	}, stub.asked(), "every named repo is asked for, not just the readable ones")
+}
+
+// The panel's poll interval rides the feed so the page can age the snapshot
+// against it: the hub owns the cadence, the page only reads it.
+func TestForgejoPollStampsTheIntervalForThePage(t *testing.T) {
+	t.Parallel()
+	h := NewHub(Config{
+		Forgejo:      func() *ForgejoFeed { return &ForgejoFeed{} },
+		ForgejoEvery: 3 * time.Minute,
+	})
+	h.pollForgejo()
+	require.NotNil(t, h.State().Forgejo)
+	assert.Equal(t, 180.0, h.State().Forgejo.EverySec)
+}
+
 // A refresh that fails before any good read has no feed to show, so the panel
 // gets the class alone.
 func TestForgejoReaderBeforeAnyGoodRead(t *testing.T) {
