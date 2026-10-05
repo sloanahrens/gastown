@@ -16,15 +16,12 @@ The overarching goal ensuring useful outcomes through orchestration of potential
 ## Environments
 
 ### Town
-The management headquarters (e.g., `~/gt/`). The Town coordinates all workers across multiple Rigs and houses town-level agents like the Mayor.
+The management headquarters (e.g., `~/gt/`). The Town coordinates all workers across multiple Rigs; the operator works from it, and town-level state (config, agent identity, cross-rig coordination) lives in its `mayor/` directory.
 
 ### Rig
 A project-specific Git repository under Gas Town management. Each Rig has its own Polecats and Crew members. Rigs are where actual development work happens.
 
 ## Town-Level Roles
-
-### Mayor
-Chief-of-staff agent responsible for coordinating work distribution and notifying users of important events. The Mayor operates from the town level and has visibility across all Rigs.
 
 ### Daemon
 The Go background process, not an agent. It is the only process that kills or restarts a session, runs the `patrol_scan` tick that restarts a dead polecat holding work, and hosts the landing worker.
@@ -98,7 +95,7 @@ A check that injects a known event through a component's own production path and
 Any status report a human or acting role consumes to make a decision — a doctor report, a patrol heartbeat, a status mail. Its fields are provenance-tagged Live, Recorded, or Unknown.
 
 ### Supervisor
-Any producer of a Summary: monitor scripts, doctor checks, the patrol scan, mayor status mails. Provenance and liveness rules apply to all of them, not just a dedicated watchdog role.
+Any producer of a Summary: monitor scripts, doctor checks, the patrol scan, the hourly report. Provenance and liveness rules apply to all of them, not just a dedicated watchdog role.
 
 ---
 
