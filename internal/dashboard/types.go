@@ -249,12 +249,13 @@ type LandingRow struct {
 	Rig     string    `json:"rig,omitempty"`
 	Title   string    `json:"title,omitempty"`
 	Polecat string    `json:"polecat,omitempty"`
-	// Outcome is "landed", "rejected", or "running" for a landing the worker
-	// holds right now: its At is the merge, and it carries no verdict, score or
-	// stage time, because those are logged only once the landing ends. Verdict
-	// is om's reading of a landing: "approved", "skipped" (landed with no review
-	// of its own) or "error". Kind is why a rejection was refused: review, gate,
-	// conflict, policy or empty.
+	// Outcome is "landed", "rejected", "running" for a landing the worker
+	// holds right now, or "backoff" for one that keeps failing and is waiting
+	// for a retry. A running row's At is the merge, and it carries no verdict,
+	// score or stage time, because those are logged only once the landing
+	// ends. Verdict is om's reading of a landing: "approved", "skipped"
+	// (landed with no review of its own) or "error". Kind is why a rejection
+	// was refused: review, gate, conflict, policy or empty.
 	Outcome  string   `json:"outcome"`
 	Verdict  string   `json:"verdict,omitempty"`
 	Kind     string   `json:"kind,omitempty"`
@@ -274,6 +275,14 @@ type LandingRow struct {
 	Route       string `json:"route,omitempty"`
 	Risk        bool   `json:"risk,omitempty"`
 	Detail      string `json:"detail,omitempty"`
+	// Stage is the landing stage a "backoff" row's last attempt failed at,
+	// the text after "landing failed at". Failures is how many attempts in a
+	// row have failed there, and NextTry when the worker tries again. The
+	// three are absent on every other outcome; Detail is a backoff row's
+	// error and a rejected row's refusal (gt-fn9e6.44).
+	Stage    string     `json:"stage,omitempty"`
+	Failures int        `json:"failures,omitempty"`
+	NextTry  *time.Time `json:"next_try,omitempty"`
 }
 
 // Trend is the last 24 hours as the page draws it: landings and rejections by

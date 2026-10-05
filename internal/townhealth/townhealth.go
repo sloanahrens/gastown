@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
@@ -341,6 +342,10 @@ type RigLandings struct {
 	Oldest time.Time
 	// OldestBead is the bead Oldest belongs to; "" when Oldest is zero.
 	OldestBead string
+	// Failing are the rig's landings that keep failing and are backing off,
+	// from the landing worker's own snapshot. Empty when none is failing,
+	// which is also what a rig the worker does not serve reports.
+	Failing []FailingLanding
 	// Err is a failed read for this rig; the rest is ignored.
 	Err error
 }
@@ -349,6 +354,27 @@ type RigLandings struct {
 type Landings interface {
 	Landings(ctx context.Context, since time.Time) ([]RigLandings, error)
 }
+
+// FailingLanding is one bead whose landing is failing in backoff: the stage
+// that failed, the run of failures behind the worker's backoff, when the next
+// try comes due, and the last error's first line (gt-fn9e6.44).
+type FailingLanding struct {
+	Bead     string
+	Stage    string
+	Failures int
+	NextTry  time.Time
+	Error    string
+}
+
+// LandingFailDegraded is the run of consecutive landing failures on one bead
+// that makes its rig's landing field degraded. One failure is an incident the
+// worker backs off and retries on its own; two in a row is a landing that is
+// not clearing.
+const LandingFailDegraded = 2
+
+// maxFailingNamed bounds how many failing landings a field's detail names
+// before it counts the rest.
+const maxFailingNamed = 3
 
 // Escalations finds the oldest open escalation; ok is false when none is
 // open.
@@ -757,12 +783,75 @@ func landings(ctx context.Context, in Inputs) (*int, []Field) {
 				}
 			}
 		}
+		if n := failingAtLeast(rl.Failing, LandingFailDegraded); n > 0 {
+			// A landing that keeps failing is a queue the wait limits cannot
+			// see: the bead is not waiting for its turn, it is being retried
+			// and losing (gt-fn9e6.44).
+			f.Value = fmt.Sprintf("%s, %d failing", f.Value, n)
+			f.Verdict = f.Verdict.Worse(Degraded)
+			f.Detail = joinDetail(f.Detail, failingDetail(rl.Failing, in.Now))
+		}
 		fs = append(fs, f)
 	}
 	if !counted {
 		return nil, fs
 	}
 	return &total, fs
+}
+
+// failingAtLeast counts the landings that have failed n or more times in a
+// row.
+func failingAtLeast(fs []FailingLanding, n int) int {
+	total := 0
+	for _, f := range fs {
+		if f.Failures >= n {
+			total++
+		}
+	}
+	return total
+}
+
+// failingDetail names the failing landings the way an operator needs them to
+// act: which bead, at which stage, how many times in a row, when the next try
+// comes due, and the last error's first line. Past maxFailingNamed it counts
+// the rest rather than naming them.
+func failingDetail(fs []FailingLanding, now time.Time) string {
+	var parts []string
+	named := 0
+	for _, f := range fs {
+		if f.Failures < LandingFailDegraded {
+			continue
+		}
+		if named == maxFailingNamed {
+			parts = append(parts, fmt.Sprintf("and %d more", failingAtLeast(fs, LandingFailDegraded)-named))
+			break
+		}
+		named++
+		parts = append(parts, fmt.Sprintf("%s failed %d times in a row at %s; %s; last: %s",
+			f.Bead, f.Failures, f.Stage, nextTry(f.NextTry, now), f.Error))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// nextTry says when a backing-off landing tries again, in the reader's terms
+// rather than as a timestamp.
+func nextTry(at, now time.Time) string {
+	switch {
+	case at.IsZero():
+		return "next try unknown"
+	case !at.After(now):
+		return "retrying now"
+	default:
+		return "next try in " + Short(at.Sub(now))
+	}
+}
+
+// joinDetail joins two field details, keeping whichever is set.
+func joinDetail(a, b string) string {
+	if a == "" {
+		return b
+	}
+	return a + "; " + b
 }
 
 func escalation(ctx context.Context, in Inputs) Field {

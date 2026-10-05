@@ -425,6 +425,12 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	if err != nil {
 		return nil, err
 	}
+	// The rig's failing landings, the snapshot the dashboard's Landings pane
+	// and the town health field read (gt-fn9e6.44).
+	backoff, err := land.RigBackoffFile(townRoot, rigName)
+	if err != nil {
+		return nil, err
+	}
 	bd := landworker.RetryBeads{Inner: beads.NewWithBeadsDir(rigPath, beads.ResolveBeadsDir(rigPath))}
 	out := landingLogWriter{logf: d.logger.Printf}
 	cfg := landingWorkerConfig(d.patrolConfig)
@@ -563,6 +569,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Remote:      gitRemote{g: git.NewGit(repo), remote: landingRemote},
 		Lander:      lander,
 		Landings:    landings,
+		Backoff:     backoff,
 		PostLand:    postLand,
 		Reverts:     redMain,
 		WatchTarget: watchBranch,
@@ -571,6 +578,17 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Logf:        d.logger.Printf,
 		Escalate: func(beadID, message string) {
 			d.escalateAlert("landing-needs-human:"+beadID, "landing_worker", message)
+		},
+		// A landing failing at any stage is its own alert, keyed per rig and
+		// bead so the retries upsert onto one escalation instead of minting
+		// one apiece, and cleared when the bead lands or is rejected
+		// (gt-fn9e6.44).
+		FailingEscalate: func(beadID, message string) {
+			d.escalateAlert(failingLandingKey(rigName, beadID), "landing_worker", message)
+		},
+		FailingClear: func(beadID string) {
+			d.clearAlerts(fmt.Sprintf("the landing of %s on %s is off the failing list", beadID, rigName),
+				failingLandingKey(rigName, beadID))
 		},
 		Draining: d.upgradeRestartPending.Load,
 		Active: func(id string) {
@@ -599,6 +617,14 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 			return err
 		},
 	}, nil
+}
+
+// failingLandingKey is the fingerprint of the alert for a bead whose landing
+// keeps failing on rig: per rig and bead, so a bead re-dispatched inside the
+// same rig lands on its own escalation, and the retries of one failure run
+// upsert onto one bead (gt-fn9e6.44).
+func failingLandingKey(rig, beadID string) string {
+	return "landing-failing:" + rig + ":" + beadID
 }
 
 // forgejoVerifyWindow is how many of the landings file's last records the
