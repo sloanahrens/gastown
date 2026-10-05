@@ -104,9 +104,11 @@ section.collapsed>h2{border-bottom:0}
 .feedhead .caret{display:inline-block;width:10px}
 .acts{margin-bottom:6px}
 .actssum{color:var(--dim);padding:1px 0 3px}
-.actsrow{display:grid;grid-template-columns:10px 17ch minmax(0,1fr) 52px 46px;gap:8px;align-items:center;height:16px;line-height:16px}
+.actsrow{display:grid;grid-template-columns:10px 17ch minmax(0,1fr) 13ch 52px 46px;gap:8px;align-items:center;height:16px;line-height:16px}
 .actsrow>*{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .actsrow .an{color:var(--dim)}
+.actsrow .acommit a{color:var(--blue);text-decoration:none}
+.actsrow .acommit a:hover{text-decoration:underline}
 .actsrow.act-failure,.actsrow.act-failure .an{color:var(--red)}
 .actsidle{color:var(--dim);height:16px;line-height:16px}
 .actdiv{border-top:1px solid var(--line);margin:2px 0}
@@ -756,13 +758,33 @@ function repoShort(name) {
   return short || s;
 }
 
-// actRow is one compact action line: status dot, repo, bead, how long the run
-// took, and how long ago it finished. A run still going shows its elapsed in
-// place of the duration, ticking from its start — the start is its only stamp,
-// so the age cell stays empty rather than repeating that number; a run that has
-// not started has neither stamp and leaves both time cells blank. Each cell is
-// one line with the whole value in its title, and the row's title carries the
-// line the columns ellipsized.
+// actCommit is the row's commit cell: the hash of the commit the run tested,
+// cut to the eight characters the Actions page shows, and the run's number
+// beside it ("645edaf6 #20"). The hash opens the run in a new tab, so a row can
+// be matched to a commit on main and opened without hunting the pane. A run the
+// API sent no sha for leaves the cell empty rather than a link to nowhere; one
+// with no URL shows the same text unlinked.
+function actCommit(a) {
+  const cell = el("span", "acommit");
+  const hash = a.hash || "";
+  if (!hash) return cell;
+  const text = hash + (a.number ? " #" + a.number : "");
+  if (!a.url) { cell.textContent = text; return cell; }
+  const link = el("a", "", text);
+  link.href = a.url;
+  link.target = "_blank";
+  link.rel = "noopener";
+  cell.append(link);
+  return cell;
+}
+
+// actRow is one compact action line: status dot, repo, bead, commit, how long
+// the run took, and how long ago it finished. A run still going shows its
+// elapsed in place of the duration, ticking from its start — the start is its
+// only stamp, so the age cell stays empty rather than repeating that number; a
+// run that has not started has neither stamp and leaves both time cells blank.
+// Each cell is one line with the whole value in its title, and the row's title
+// carries the line the columns ellipsized.
 function actRow(a) {
   const st = a.status || "";
   const running = st === "running";
@@ -774,7 +796,7 @@ function actRow(a) {
   // The shortened cell is the one whose text no longer says which owner the
   // repo came from, so it alone carries the full name on hover.
   if (repo !== (a.repo || "")) repoCell.title = a.repo;
-  row.append(dot, repoCell, el("span", "abead", a.bead || ""));
+  row.append(dot, repoCell, el("span", "abead", a.bead || ""), actCommit(a));
   const took = el("span", "an", running || a.started ? fmtDur(running ? secsSince(a.started) : a.duration_secs) : "");
   if (running && a.started) { took.dataset.since = a.started; took.title = "running for " + fmtDur(secsSince(a.started)); }
   else took.title = a.started ? "ran " + fmtDur(a.duration_secs) : "not started";
@@ -782,7 +804,7 @@ function actRow(a) {
   const ago = el("span", "an", a.stopped ? fmtDur(secsSince(a.stopped)) : "");
   if (a.stopped) { ago.dataset.since = a.stopped; ago.title = "finished " + fmtDur(secsSince(a.stopped)) + " ago"; }
   row.append(ago);
-  row.title = (a.repo || "") + " " + (a.bead || "") + " · " + (st || "unknown") + (a.event ? " (" + a.event + ")" : "") + (a.url ? "\n" + a.url : "");
+  row.title = (a.repo || "") + " " + (a.bead || "") + " · " + (st || "unknown") + (a.event ? " (" + a.event + ")" : "") + (a.sha ? "\n" + a.sha : "") + (a.url ? "\n" + a.url : "");
   return row;
 }
 

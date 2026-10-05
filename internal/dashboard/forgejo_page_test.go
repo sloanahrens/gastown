@@ -138,6 +138,48 @@ func TestForgejoActionRepoCellShowsTheNameWithoutItsOwner(t *testing.T) {
 	}
 }
 
+// A row shows the commit the run tested and the run's number after the bead,
+// and the hash opens the run in a new tab, so a row can be matched to a commit
+// on main and opened from the pane. The cell is sized to hold a hash and a
+// number on one line, ahead of the took and ago columns; a run the API sent no
+// sha for draws nothing where a link would go, and the row's tooltip keeps the
+// full sha and the URL the columns ellipsized (gt-qes2r).
+func TestForgejoActionRowShowsTheCommitLinkedToTheRun(t *testing.T) {
+	t.Parallel()
+
+	commit := pageFunc(t, "actCommit")
+	for _, want := range []string{"a.hash", "a.number", "a.url", `link.target = "_blank"`, `link.rel = "noopener"`} {
+		if !strings.Contains(commit, want) {
+			t.Errorf("the commit cell does not use %s", want)
+		}
+	}
+	if !strings.Contains(commit, "if (!hash) return cell;") {
+		t.Error("a run with no sha does not leave the cell empty, so the row draws a link to nowhere")
+	}
+
+	row := pageFunc(t, "actRow")
+	if !strings.Contains(row, "actCommit(a)") {
+		t.Error("the row does not draw the run's commit")
+	}
+	if !strings.Contains(row, "a.sha") {
+		t.Error("the row's tooltip does not carry the full sha")
+	}
+
+	page := string(indexHTML)
+	for _, want := range []string{".actsrow .acommit a{"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("index.html has no rule %q for the commit cell", want)
+		}
+	}
+	cols := regexp.MustCompile(`\n\.actsrow\{[^}]*grid-template-columns:\s*10px\s+\d+ch\s+minmax\(0,1fr\)\s+(\d+)ch\s+52px\s+46px`).FindStringSubmatch(page)
+	if cols == nil {
+		t.Fatal("the commit column is not sized in characters between the bead and the took column")
+	}
+	if n, _ := strconv.Atoi(cols[1]); n < 13 {
+		t.Errorf("the commit column is %sch, too narrow for an eight-character hash, a space and a #number", cols[1])
+	}
+}
+
 // A running row's elapsed ticks every second from the start time, and the cells
 // carry the stamp they count from so the ticker moves them without a redraw
 // (gt-fn9e6.48).

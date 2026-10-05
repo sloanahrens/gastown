@@ -157,6 +157,74 @@ func TestMergeForgejoRunsIsEmptyNotNilForAQuietRepo(t *testing.T) {
 	assert.Equal(t, ForgejoActionStats{}, got.Stats)
 }
 
+// shortSHA is the eight characters the Actions page shows: a full sha is cut,
+// and one already short enough is left as it came.
+func TestShortSHA(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, sha, want string
+	}{
+		{"a full sha is cut to eight characters", "645edaf6a1b2c3d4e5f60718293a4b5c6d7e8f90", "645edaf6"},
+		{"a sha of exactly eight characters is left alone", "645edaf6", "645edaf6"},
+		{"a shorter sha is left alone", "645eda", "645eda"},
+		{"no sha stays empty", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, shortSHA(tc.sha))
+		})
+	}
+}
+
+// A row carries the commit the run tested and the run's number, so a reader can
+// match it to a commit on main and open it: the hash is the API's sha cut to
+// eight characters, the whole sha rides along for the row's tooltip, and the
+// number is the run's index in its repo. The fields are on the JSON under their
+// own names, for a run still going and for a finished one alike (gt-qes2r).
+func TestForgejoActionCarriesTheCommitAndNumber(t *testing.T) {
+	t.Parallel()
+	const running = "645edaf6a1b2c3d4e5f60718293a4b5c6d7e8f90"
+
+	current := testRun(7, "land: polecat/mica/gt-qes2r+muvob35k (aaaa1111) onto main", "running", 1, -1, 0)
+	current.CommitSHA, current.Index = running, 20
+	finished := testRun(5, "fix: the thing (gt-abc)", "success", 0, 2, 27*time.Second)
+	finished.CommitSHA, finished.Index = "0123456789abcdef0123456789abcdef01234567", 19
+
+	got := mergeForgejoRuns([]repoRuns{doneRepo("sloan/gastown",
+		[]forgejo.ActionRun{current}, []forgejo.ActionRun{finished})})
+	require.NotNil(t, got)
+	require.Len(t, got.Current, 1)
+	require.Len(t, got.Recent, 1)
+
+	assert.Equal(t, "645edaf6", got.Current[0].Hash, "a current run's hash is its sha cut to eight")
+	assert.Equal(t, running, got.Current[0].SHA)
+	assert.Equal(t, int64(20), got.Current[0].Number)
+	assert.Equal(t, "01234567", got.Recent[0].Hash, "a finished run carries them too")
+	assert.Equal(t, int64(19), got.Recent[0].Number)
+
+	b, err := json.Marshal(got)
+	require.NoError(t, err)
+	assert.Contains(t, string(b), `"hash":"645edaf6"`)
+	assert.Contains(t, string(b), `"sha":"`+running+`"`)
+	assert.Contains(t, string(b), `"number":20`)
+}
+
+// A run the API sent no commit for carries no hash and no number rather than a
+// zero one: the page reads an absent hash as no link, and a "0" beside it would
+// name a run that does not exist (gt-qes2r).
+func TestForgejoActionWithoutACommitLeavesTheFieldsEmpty(t *testing.T) {
+	t.Parallel()
+	got := newRunRow("sloan/beads", testRun(1, "gate: the suite", "success", 0, 1, 5*time.Second)).action()
+	assert.Empty(t, got.Hash)
+	assert.Empty(t, got.SHA)
+	assert.Zero(t, got.Number)
+
+	b, err := json.Marshal(got)
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), "hash")
+	assert.NotContains(t, string(b), "number")
+}
+
 // The run's stamps reach the page as RFC3339, and a stamp the API never set is
 // absent rather than the zero time: the page reads an absent start as "not
 // started", and rendering year 1 would tick elapsed from the wrong epoch.
