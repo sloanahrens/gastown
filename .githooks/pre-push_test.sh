@@ -612,6 +612,31 @@ git add file.txt && git commit -m "docs work" >/dev/null 2>&1
 assert_live_block "LIVE unrelated branch refused" "" "HEAD:refs/heads/docs/gt-ecqx0-self-probe"
 cleanup
 
+# Test 38: LIVE push of the lander's Forgejo candidate in the candidate gate's
+# own refspec form — <sha>:refs/heads/land/<bead>, forced, as
+# internal/land/candidate.go pushes it from the lander's throwaway worktree,
+# where the relative core.hooksPath resolves to this hook. Refusing the family
+# failed a rig's first Forgejo landing at the candidate push (gt-p34tr).
+echo "Test 38: LIVE push of a land/<bead> candidate — allowed"
+setup_repos
+cd "$TMPDIR/local"
+echo "candidate work" >> file.txt
+git add file.txt && git commit -m "candidate work" >/dev/null 2>&1
+candidate_sha=$(get_sha HEAD)
+assert_live_pass "LIVE land candidate push allowed" "" "$candidate_sha:refs/heads/land/gt-p34tr" "--force"
+cleanup
+
+# Test 39: the control for the allowance above — feature/x is still refused
+# live, so land/* opened nothing else.
+echo "Test 39: LIVE push of feature/x — still refused"
+setup_repos
+cd "$TMPDIR/local"
+git checkout -b feature/x >/dev/null 2>&1
+echo "feature work" >> file.txt
+git add file.txt && git commit -m "feature work" >/dev/null 2>&1
+assert_live_block "LIVE feature/x refused" "" "HEAD:refs/heads/feature/x"
+cleanup
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 if [[ $FAIL -gt 0 ]]; then
