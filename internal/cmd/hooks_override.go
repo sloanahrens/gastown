@@ -15,8 +15,8 @@ var hooksOverrideCmd = &cobra.Command{
 	Long: `Edit hook overrides for a specific role or rig+role combination.
 
 Valid targets:
-  Role-level:  crew, witness, refinery, polecats, deacon
-  Rig+role:    gastown/crew, beads/witness, sky/polecats, etc.
+  Role-level:  crew, polecats (alias: polecat)
+  Rig+role:    gastown/crew, beads/polecats, sky/polecats, etc.
 
 Overrides are merged on top of the base config during sync.
 Hooks with the same matcher replace the base hook entirely.
@@ -41,7 +41,7 @@ func init() {
 func runHooksOverride(cmd *cobra.Command, args []string) error {
 	normalized, ok := hooks.NormalizeTarget(args[0])
 	if !ok {
-		return fmt.Errorf("invalid target %q; valid targets are roles (crew, witness, refinery, polecats, deacon) or rig/role (gastown/crew, etc.)", args[0])
+		return fmt.Errorf("invalid target %q; valid targets are roles (crew, polecats; alias: polecat) or rig/role (gastown/crew, beads/polecats, etc.)", args[0])
 	}
 	target := normalized
 
