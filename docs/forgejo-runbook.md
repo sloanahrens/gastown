@@ -193,8 +193,11 @@ before deleting the branch and the worktree. `--town-root` says which town holds
 the rig; where that repository is absent the probe pushes from the clone
 instead and warns that the hooks were not exercised. The cutover runs the probe
 and refuses unless it is green, so a cutover that starts is one the real runner
-has already passed. A probe leaves no record, so `--dry-run` prints the probe
-instead of running it.
+has already passed. A green probe records itself at
+`~/.config/gt/probe-<rig>.record`, mode 600: key=value lines naming the rig, the
+repository, the probed commit, the context, the verdict and the time, with
+`epoch:` as the age in seconds and each green run overwriting the last. A
+`--dry-run` writes no record, so it prints the probe instead of running it.
 
 `bash scripts/forgejo-cutover.sh <rig> --repo OWNER/NAME` runs the procedure;
 `--help` lists the flags, and the script header gives the order and the reason
