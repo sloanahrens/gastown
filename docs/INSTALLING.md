@@ -191,7 +191,7 @@ shipped setting.
 
 ### Step 2: Create Your Workspace
 
-Run these workspace steps on macOS, Linux, or WSL. Native Windows shells are minimal CLI-only environments; use WSL for `--shell`, `gt up`, tmux-backed roles, and Mayor sessions.
+Run these workspace steps on macOS, Linux, or WSL. Native Windows shells are minimal CLI-only environments; use WSL for `--shell`, `gt up`, tmux-backed roles, and crew sessions.
 
 ```bash
 # Set identity before --git so the initial HQ commit and Dolt config are valid
@@ -204,7 +204,7 @@ gt install ~/gt --shell --git
 # This creates:
 #   ~/gt/
 #   ├── CLAUDE.md          # Identity anchor (run gt prime)
-#   ├── mayor/             # Mayor config and state
+#   ├── mayor/             # Town config and state
 #   ├── rigs/              # Project containers (initially empty)
 #   └── .beads/            # Town-level issue tracking
 ```
@@ -218,7 +218,7 @@ gt rig add myproject https://github.com/you/repo.git
 # This clones the repo and sets up:
 #   ~/gt/myproject/
 #   ├── .beads/            # Project issue tracking
-#   ├── mayor/rig/         # Mayor's clone (canonical)
+#   ├── mayor/rig/         # Rig's working clone (canonical)
 #   ├── crew/              # Human workspaces
 #   └── polecats/          # Worker clones (created on demand)
 ```
@@ -255,7 +255,6 @@ gt config default-agent claude-haiku
 You can also override the agent per command without changing defaults:
 
 ```bash
-gt mayor start --agent claude-haiku
 gt sling gt-abc12 myproject --agent claude-haiku
 ```
 
@@ -295,8 +294,8 @@ gt sling gt-abc12 gt-def34 myproject
 # Check dispatch
 gt scheduler status
 
-# Attach to any agent session
-gt mayor attach
+# Watch an agent's session
+gt peek myproject/<polecat>
 ```
 
 **When to use**: Production workflows with multiple concurrent agents.
@@ -346,7 +345,7 @@ Gas Town is modular. Enable only what you need:
 |--------------|-------|----------|
 | **Polecats only** | Workers | Manual spawning |
 | **+ Daemon** | + Supervisor, landing worker | Dead-session restart, gated landing on main |
-| **+ Mayor** | + Coordinator | Cross-project coordination |
+| **+ Crew** | + Persistent human workspaces | Workspaces you attach to and keep |
 
 ## Troubleshooting
 
