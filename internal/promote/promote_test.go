@@ -134,22 +134,47 @@ func TestPromoteFastForwardsTheTargetsMain(t *testing.T) {
 	}
 }
 
-func TestPromoteIsANoOpWhenTheTargetIsAlreadyAtTheCommit(t *testing.T) {
+func TestPromoteRecordsTheCommitWhenTheTargetAlreadyHoldsIt(t *testing.T) {
 	t.Parallel()
 	fx := newPromoterFixture(t)
 	fx.repo.tip = "green"
 	fx.repo.pushErr = errors.New("the push must not run")
 
-	was := State{LastPromoted: "green", LastError: "a stale push failure", GitHubDiverged: &Divergence{RemoteMain: "aaaa1111", Commit: "bbbb2222"}}
+	was := State{LastError: "a stale push failure", GitHubDiverged: &Divergence{RemoteMain: "aaaa1111", Commit: "bbbb2222"}}
 	st := fx.p.Promote(was, "green")
 	if len(fx.repo.pushes) != 0 {
 		t.Fatalf("pushes = %+v, want none when the target is already at the commit", fx.repo.pushes)
 	}
 	if st.LastPromoted != "green" {
-		t.Errorf("LastPromoted = %q, want the recorded promotion kept", st.LastPromoted)
+		t.Errorf("LastPromoted = %q, want the commit the target already holds", st.LastPromoted)
+	}
+	if !st.LastPromotedAt.Equal(fx.pinnedAt) {
+		t.Errorf("LastPromotedAt = %v, want %v: a first record carries a time", st.LastPromotedAt, fx.pinnedAt)
 	}
 	if st.LastError != "" || st.GitHubDiverged != nil {
 		t.Errorf("state = %+v, want the stale error and divergence cleared: the target is at the commit", st)
+	}
+}
+
+func TestPromoteAdvancesLastPromotedWithoutRewritingThePushTime(t *testing.T) {
+	t.Parallel()
+	fx := newPromoterFixture(t)
+	fx.repo.tip = "green"
+	fx.repo.pushErr = errors.New("the push must not run")
+	// The last push, which is what LastPromotedAt dates; this promotion
+	// pushes nothing, so the time must survive untouched.
+	pushedAt := time.Date(2026, 9, 30, 8, 0, 0, 0, time.UTC)
+
+	was := State{LastPromoted: "older", LastPromotedAt: pushedAt}
+	st := fx.p.Promote(was, "green")
+	if len(fx.repo.pushes) != 0 {
+		t.Fatalf("pushes = %+v, want none when the target is already at the commit", fx.repo.pushes)
+	}
+	if st.LastPromoted != "green" {
+		t.Errorf("LastPromoted = %q, want it advanced to the target's commit", st.LastPromoted)
+	}
+	if !st.LastPromotedAt.Equal(pushedAt) {
+		t.Errorf("LastPromotedAt = %v, want %v untouched: nothing was pushed", st.LastPromotedAt, pushedAt)
 	}
 }
 

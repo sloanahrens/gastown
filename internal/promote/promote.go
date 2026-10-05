@@ -47,7 +47,10 @@ const TargetMainRef = "refs/promote/target-main"
 // and every reader of a rig's promotion share one record and one file
 // (gt-fn9e6.38).
 type State struct {
-	// LastPromoted is the commit the target's main was last advanced to.
+	// LastPromoted is the commit the target's main was last advanced to, or
+	// found already holding: a promotion that needs no push still records the
+	// commit the target is at, so a reader is not left with "never promoted"
+	// on a rig cut over with the target already green (gt-fn9e6.53).
 	LastPromoted string `json:"last_promoted,omitempty"`
 	// LastPromotedAt is when that push succeeded.
 	LastPromotedAt time.Time `json:"last_promoted_at,omitzero"`
@@ -141,6 +144,19 @@ func (p *Promoter) Promote(st State, commit string) State {
 		// The target is already at the green commit: nothing to push, and no
 		// divergence or error can still hold, so an operator's hand
 		// reconciliation stops alarming on the next green verdict.
+		//
+		// The commit is recorded anyway: a rig cut over with GitHub main
+		// already equal to its green main promotes nothing here, and an
+		// unrecorded promotion leaves townhealth reading promote as unknown
+		// until some later landing happens to push (gt-fn9e6.53).
+		//
+		// LastPromotedAt is when a push succeeded, so a first record takes
+		// the current time and an existing one is left alone: nothing was
+		// pushed, so the old push's time still stands.
+		if st.LastPromoted == "" && st.LastPromotedAt.IsZero() {
+			st.LastPromotedAt = p.now()
+		}
+		st.LastPromoted = commit
 		st.LastError = ""
 		st.GitHubDiverged = nil
 		return st
