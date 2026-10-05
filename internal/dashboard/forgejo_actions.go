@@ -47,6 +47,9 @@ type ForgejoAction struct {
 	// Bead is the bead id the run's title carries, or the title's head when it
 	// carries none.
 	Bead string `json:"bead"`
+	// Polecat is the polecat a landing run's branch names, and empty for a run
+	// whose title names none (a push run, a probe, a hand push) (gt-qf6fx).
+	Polecat string `json:"polecat"`
 	// Status and Event are the API's own words for the run, which the page
 	// colors by.
 	Status string `json:"status"`
@@ -235,6 +238,7 @@ func (r runRow) action() ForgejoAction {
 	return ForgejoAction{
 		Repo:         r.repo,
 		Bead:         forgejoRunBead(r.run.Title),
+		Polecat:      forgejoRunPolecat(r.run.Title),
 		Status:       r.run.Status,
 		Event:        r.run.Event,
 		Started:      runStamp(r.started),
@@ -309,6 +313,12 @@ var (
 	runBeadRe = regexp.MustCompile(`[a-z][a-z0-9]*-[a-z0-9][a-z0-9]*(?:\.[a-z0-9]+)*`)
 	// runParenRe is one parenthesized span of a title.
 	runParenRe = regexp.MustCompile(`\(([^()]*)\)`)
+	// runPolecatRe matches the polecat a landing run's branch names: the segment
+	// between "polecat/" and the next "/", which is the branch's own layout
+	// ("land: polecat/obsidian/gt-xvw20+muvo8ioq (950f7f88) onto main"). The
+	// closing "/" is required, so a title that mentions "polecat/" without a
+	// segment after it matches nothing rather than running to the title's end.
+	runPolecatRe = regexp.MustCompile(`polecat/([^/\s]+)/`)
 )
 
 // forgejoRunBead names the bead a run belongs to. A landing title carries the
@@ -329,6 +339,19 @@ func forgejoRunBead(title string) string {
 		return id
 	}
 	return firstRunes(title, forgejoTitleKept)
+}
+
+// forgejoRunPolecat names the polecat a landing run belongs to, so the panel
+// shows who built what beside the bead. A landing title carries it in the
+// branch the run tested ("land: polecat/obsidian/gt-xvw20+muvo8ioq (950f7f88)
+// onto main" -> "obsidian"). A title with no such segment — a push run, a probe
+// run, a hand push — yields nothing rather than an error, and the row simply
+// has no polecat to show.
+func forgejoRunPolecat(title string) string {
+	if m := runPolecatRe.FindStringSubmatch(title); m != nil {
+		return m[1]
+	}
+	return ""
 }
 
 // firstRunes is the first n runes of s, so a title with multibyte characters is

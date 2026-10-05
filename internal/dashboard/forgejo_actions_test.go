@@ -244,6 +244,50 @@ func TestForgejoActionStamps(t *testing.T) {
 	assert.Empty(t, queued.Stopped)
 }
 
+// The polecat is read off the branch a landing title names, so a row can say
+// who built what. A title with no "polecat/<name>/" segment — a push run, a
+// probe run, a hand push — yields nothing rather than an error, and a title
+// where "polecat/" has no segment after it is one of those (gt-qf6fx).
+func TestForgejoRunPolecat(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		title string
+		want  string
+	}{
+		{
+			"a landing title names the polecat in the branch it tested",
+			"land: polecat/obsidian/gt-xvw20+muvo8ioq (950f7f88) onto main (530bdc41)",
+			"obsidian",
+		},
+		{
+			"a landing of a child bead names it just the same",
+			"land: polecat/mica/gt-fn9e6.39+muvj72nn (c7210be8) onto main (dd809ca6)",
+			"mica",
+		},
+		{
+			"a push run's title is the commit subject, which names no polecat",
+			"fix: the thing (gt-abc)",
+			"",
+		},
+		{
+			"a probe run names no polecat",
+			"gate: run the whole suite",
+			"",
+		},
+		{
+			"a title where polecat/ has no segment after it yields nothing",
+			"land: polecat/ nothing (aaaa1111) onto main",
+			"",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, forgejoRunPolecat(tc.title))
+		})
+	}
+}
+
 func TestForgejoRunBead(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -419,11 +463,12 @@ func TestForgejoReaderReadsActionsWithTheFeed(t *testing.T) {
 	assert.Empty(t, a.Errors)
 
 	assert.Equal(t, ForgejoAction{
-		Repo:   "sloan/beads",
-		Bead:   "gt-fn9e6.47",
-		Status: "running",
-		Event:  "push",
-		URL:    "https://forgejo.test/runs/7",
+		Repo:    "sloan/beads",
+		Bead:    "gt-fn9e6.47",
+		Polecat: "mica",
+		Status:  "running",
+		Event:   "push",
+		URL:     "https://forgejo.test/runs/7",
 	}, a.Current[0])
 	assert.Equal(t, 27.0, a.Recent[0].DurationSecs, "27s arrives as 27000000000 nanoseconds")
 	assert.Equal(t, "gt-abc", a.Recent[0].Bead, "the bead id is parsed out of the title")
