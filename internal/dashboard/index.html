@@ -1031,7 +1031,12 @@ function initAlerts() {
 }
 
 let qTab = "ready";
-let qRig = "all";
+// The queue opens on the rig the operator works in; every other store is one
+// chip click away. Deliberately not persisted, so a reload returns here and a
+// filter left on another rig never hides this rig's work on the next load
+// (gt-fi93j).
+const DEFAULT_QRIG = "gastown";
+let qRig = DEFAULT_QRIG;
 let qShape = "all";
 const qOpen = new Set();
 const qDetail = {};
