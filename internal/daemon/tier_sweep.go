@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/promote"
 )
 
 // The tier_sweep job runs scripts/tier-sweep.sh against origin/main on an
@@ -164,6 +165,49 @@ func tierSweepRigs(config *DaemonPatrolConfig, known []string) []string {
 	return out
 }
 
+// tierSweepCoversRig reports whether the tier sweep this daemon runs sweeps
+// rig, which is what makes the sweep, not the post-land verdict, the owner of
+// the rig's GitHub promotion (gt-fn9e6.38). The patrol being off counts as no
+// sweep: a disabled sweep that still held the promotion would leave the rig
+// promoting nowhere.
+func (d *Daemon) tierSweepCoversRig(rig string) bool {
+	if !d.isPatrolActive("tier_sweep") {
+		return false
+	}
+	for _, r := range tierSweepRigs(d.patrolConfig, d.getKnownRigs()) {
+		if r == rig {
+			return true
+		}
+	}
+	return false
+}
+
+// tierSweepPromote advances rig's GitHub main to sha, the fully green sweep's
+// commit, through the same promotion owner the post-land verdict uses: one
+// push path, one lock, one record (gt-fn9e6.38). A rig with no promote_target
+// has no promoter and nothing happens; a failure is recorded in the rig's
+// main state, exactly as it is for a green post-land verdict.
+func (d *Daemon) tierSweepPromote(rigName, repo, sha string) {
+	build := d.tierSweepSeams.promote
+	if build == nil {
+		build = d.tierSweepPromoter
+	}
+	p := build(rigName, repo)
+	if p == nil {
+		return
+	}
+	state := fileMainState{path: RedMainStatePath(d.config.TownRoot, rigName)}
+	st, err := state.Load()
+	if err != nil {
+		d.logger.Printf("tier_sweep: %s: reading the main state: %v", rigName, err)
+		return
+	}
+	st.State = p.Promote(st.State, sha)
+	if err := state.Save(st); err != nil {
+		d.logger.Printf("tier_sweep: %s: saving the promotion state: %v", rigName, err)
+	}
+}
+
 // tierSweepStage is one script invocation of a cycle: the tiers the script is
 // asked for, its budget, and whether it needs the container-gate slot.
 type tierSweepStage struct {
@@ -213,6 +257,10 @@ type tierSweepSeams struct {
 	run func(ctx context.Context, dir string, st tierSweepStage) tierSweepStageResult
 	// beads opens the rig's writable bead store.
 	beads func(rig string) tierSweepBeadStore
+	// promote builds the rig's GitHub promotion owner, or nil when the rig
+	// does not promote. Nil resolves to the daemon's own builder over the
+	// rig's repository and forgejo block.
+	promote func(rig, repo string) *promote.Promoter
 }
 
 // tierSweepBeadStore is the bead store the sweep files and closes beads
@@ -446,12 +494,19 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 	// is scheduled to cover: a shell-only green says nothing about the
 	// integration tiers, and advancing on it would skip them forever on a
 	// quiet repo.
-	if !deferred && full && tierSweepAllGreen(results, stages) {
+	green := !deferred && full && tierSweepAllGreen(results, stages)
+	if green {
 		state.LastGreenSHA = sha
 	}
 	if err := writeTierSweepState(d.config.TownRoot, rig, state); err != nil {
 		d.logger.Printf("tier_sweep: %s: writing the sweep record: %v", rig, err)
 		return false
+	}
+	// A cycle that covered every tier green is the verdict that advances the
+	// rig's GitHub main (gt-fn9e6.38): it is the only check that saw every
+	// tier at this commit. A red or partial cycle promotes nothing.
+	if green {
+		d.tierSweepPromote(rig, repo, sha)
 	}
 	cycle.closeStep(rig)
 	d.logger.Printf("tier_sweep: %s: swept %s (shell %s%s) in %s", rig, shortSHA(sha),
