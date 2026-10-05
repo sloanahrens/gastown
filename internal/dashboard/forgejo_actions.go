@@ -23,6 +23,9 @@ const (
 	// forgejoTitleKept is how much of a run title stands in for the bead id
 	// when the title carries none.
 	forgejoTitleKept = 24
+	// forgejoHashKept is how much of a run's commit sha a row shows: the eight
+	// characters the Actions page's own rows carry.
+	forgejoHashKept = 8
 )
 
 // forgejoCurrentStatuses are the statuses of a run the section calls current:
@@ -55,6 +58,14 @@ type ForgejoAction struct {
 	// DurationSecs is the run's elapsed time in seconds.
 	DurationSecs float64 `json:"duration_secs"`
 	URL          string  `json:"url"`
+	// Hash is the commit the run tested, cut to the eight characters the
+	// Actions page shows, and SHA is the whole one for the row's tooltip; both
+	// are absent when the API sent no commit, which the page reads as no link.
+	Hash string `json:"hash,omitempty"`
+	SHA  string `json:"sha,omitempty"`
+	// Number is the run's index in its repo, the "#20" the Actions page shows
+	// beside the hash so a row can be named without opening it.
+	Number int64 `json:"number,omitempty"`
 }
 
 // ForgejoActionStats is the section's one-line summary. OK, Failed and
@@ -230,7 +241,20 @@ func (r runRow) action() ForgejoAction {
 		Stopped:      runStamp(r.stopped),
 		DurationSecs: r.seconds(),
 		URL:          r.run.HTMLURL,
+		Hash:         shortSHA(r.run.CommitSHA),
+		SHA:          r.run.CommitSHA,
+		Number:       r.run.Index,
 	}
+}
+
+// shortSHA is the commit as the row shows it: its first forgejoHashKept
+// characters, so a row names which commit ran without spending the cell on
+// forty. A sha the API never sent stays empty (gt-qes2r).
+func shortSHA(sha string) string {
+	if len(sha) <= forgejoHashKept {
+		return sha
+	}
+	return sha[:forgejoHashKept]
 }
 
 // rowsToActions renders rows for the page. An empty list is an empty array,
