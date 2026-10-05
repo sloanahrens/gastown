@@ -846,6 +846,53 @@ func TestLandCandidateRedIsReworkWithTheLogTail(t *testing.T) {
 	}
 }
 
+// TestLandReportsTheCIGateFailure: a red candidate verdict is handed to the
+// CI-failure watch as the gate reads it — the bead, the job log tail, and the
+// tests parsed out of the tail — and a green verdict reports nothing
+// (gt-xvw20).
+func TestLandReportsTheCIGateFailure(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	l := f.lander()
+	tail := "=== RUN   TestThing\n--- FAIL: TestThing (0.00s)\nFAIL\nFAIL\tgithub.com/x/a\t0.1s\n"
+	cand := &fakeCandidate{res: CandidateResult{
+		State: CandidateFailed, Context: "ci / gate (push)", Tail: tail, Pushed: true}}
+	l.Candidate = cand
+	var got []CIFailure
+	l.CIFailure = func(f CIFailure) { got = append(got, f) }
+
+	_, err := l.Land(context.Background(), f.work)
+	f.assertRejected(t, err, RejectGate, LabelRework)
+	if len(got) != 1 {
+		t.Fatalf("CIFailure called %d time(s), want once", len(got))
+	}
+	if got[0].Bead != "gt-abc" || got[0].Tail != tail {
+		t.Errorf("CIFailure = %+v, want the bead and the job log tail", got[0])
+	}
+	if want := []TestFailure{{Package: "github.com/x/a", Test: "TestThing"}}; !slices.Equal(got[0].Tests, want) {
+		t.Errorf("CIFailure tests = %v, want %v", got[0].Tests, want)
+	}
+}
+
+// TestLandReportsNoCIGateFailureForAGreenCandidate: only a red verdict is a
+// failure to watch; a green one reports nothing (gt-xvw20).
+func TestLandReportsNoCIGateFailureForAGreenCandidate(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	l := f.lander()
+	cand := &fakeCandidate{res: CandidateResult{State: CandidatePassed, Context: "ci / gate (push)"}}
+	l.Candidate = cand
+	var calls int
+	l.CIFailure = func(CIFailure) { calls++ }
+
+	if _, err := l.Land(context.Background(), f.work); err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	if calls != 0 {
+		t.Errorf("CIFailure called %d time(s) on a green candidate, want none", calls)
+	}
+}
+
 // TestLandCandidateSilenceIsInfrastructure: CI reporting nothing is the infra
 // retry, not a rejection the polecat would be sent back to fix — and the
 // candidate branch it pushed goes with the infra outcome (gt-k796q).
