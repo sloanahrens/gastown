@@ -247,24 +247,22 @@ func TestCommandGateRetriesAContendedLint(t *testing.T) {
 }
 
 // The -p cap gt-5lyns puts on a polecat seat's go commands must never reach
-// the landing worker's merged-tree gate: the gate is the command the cap
-// exists to leave cores for (gt-v4r0x), and it runs from the daemon's own
-// environment. A step that named GOFLAGS would cap it.
-func TestLandGateStepsCarryNoGOFLAGSEnv(t *testing.T) {
+// a gate's steps: the gate is the command the cap exists to leave cores for
+// (gt-v4r0x). A step that named GOFLAGS would cap it.
+func TestRigGateStepsCarryNoGOFLAGSEnv(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	makefile := "gate:\n\tmake gate-lint gate-test\ngate-lint:\n\t@golangci-lint run\ngate-test:\n\t@go test ./...\n"
-	if err := os.WriteFile(filepath.Join(dir, "Makefile"), []byte(makefile), 0o644); err != nil {
+	dir := writeMakefile(t, "gate:\n\tmake gate-lint gate-test\ngate-lint:\n\t@golangci-lint run\ngate-test:\n\t@go test ./...\n")
+	g, err := RigGate(dir, &config.MergeQueueConfig{}, true)
+	if err != nil {
 		t.Fatal(err)
 	}
-	g := LandGate(dir, &config.MergeQueueConfig{})
 	if len(g.Steps) == 0 {
-		t.Fatal("LandGate returned no steps")
+		t.Fatal("RigGate returned no steps")
 	}
 	for _, s := range g.Steps {
 		for _, e := range s.Env {
 			if e == "GOFLAGS" || strings.HasPrefix(e, "GOFLAGS=") {
-				t.Fatalf("landing gate step %q carries %q; the seat cap must not reach the gate", s.Name, e)
+				t.Fatalf("gate step %q carries %q; the seat cap must not reach the gate", s.Name, e)
 			}
 		}
 	}
@@ -428,34 +426,6 @@ func writeMakefile(t *testing.T, body string) string {
 	return dir
 }
 
-// Land's gate comes from the rig: merge_queue.gate, else make gate when the
-// target exists, else make test (the only step WithSlot puts under the slot).
-func TestLandGateComesFromTheRig(t *testing.T) {
-	t.Parallel()
-	withGate := writeMakefile(t, "lint:\n\ttrue\ngate: lint\n\ttrue\n")
-	noGate := writeMakefile(t, "GATE := x\ngate-docs:\n\ttrue\ntest:\n\ttrue\n")
-	hm := "gt slot run --role hm/crew/sloan -- make test"
-	for _, tc := range []struct {
-		name, dir string
-		mq        *config.MergeQueueConfig
-		want      string
-		step      string
-	}{
-		{"rig setting wins", withGate, &config.MergeQueueConfig{Gate: hm}, hm, "gate"},
-		{"make gate target", withGate, &config.MergeQueueConfig{}, "make gate", "gate"},
-		{"make test fallback", noGate, nil, "make test", "test"},
-	} {
-		g := LandGate(tc.dir, tc.mq)
-		if len(g.Steps) != 1 || g.Steps[0].Command != tc.want || g.Steps[0].Name != tc.step {
-			t.Errorf("%s: steps = %+v, want one %q step %q", tc.name, g.Steps, tc.step, tc.want)
-		}
-		underSlot := WithSlot(g, "/town", "r").Steps[0].SlotRole != ""
-		if underSlot != (tc.step == "test") {
-			t.Errorf("%s: WithSlot holds the slot=%v", tc.name, underSlot)
-		}
-	}
-}
-
 // With D9's make gate present, gt done's unit tier is that one target.
 func TestRigGateUsesMakeGateWhenPresent(t *testing.T) {
 	t.Parallel()
@@ -470,7 +440,7 @@ func TestRigGateUsesMakeGateWhenPresent(t *testing.T) {
 }
 
 // gt-ssyxd: gt done's pre-submit prefers presubmit_command, then make
-// presubmit, then make gate; Land's gate is untouched by any of them.
+// presubmit, then make gate.
 func TestRigGatePresubmitPrecedence(t *testing.T) {
 	t.Parallel()
 	both := writeMakefile(t, "presubmit:\n\ttrue\ngate:\n\ttrue\n")
@@ -508,12 +478,6 @@ func TestRigGatePresubmitPrecedence(t *testing.T) {
 	g, err = RigGate(both, &config.MergeQueueConfig{PresubmitCommand: "make my-check"}, false)
 	if err != nil || len(g.Steps) != 3 {
 		t.Fatalf("full tier = %+v, %v; want lint, build, test", g.Steps, err)
-	}
-
-	// Land's gate is make gate, whatever presubmit says.
-	lg := LandGate(both, &config.MergeQueueConfig{PresubmitCommand: "make my-check"})
-	if len(lg.Steps) != 1 || lg.Steps[0].Command != "make gate" {
-		t.Fatalf("LandGate = %+v; want make gate", lg.Steps)
 	}
 }
 
@@ -558,53 +522,9 @@ func TestCommandGateStepTimeoutLeavesFastStepsAlone(t *testing.T) {
 	}
 }
 
-// TestLandGateSplitsMakeGateIntoStages: a tree whose Makefile has gate-lint
-// and gate-test gates in those two stages, lint first; WithTimeouts bounds
-// each; the unit tier is still recognized for the flake rerun (gt-b5ugw).
-func TestLandGateSplitsMakeGateIntoStages(t *testing.T) {
-	t.Parallel()
-	dir := writeMakefile(t, "lint:\n\ttrue\ngate-lint: lint\ngate-test:\n\ttrue\ngate: gate-lint gate-test\n")
-	for _, mq := range []*config.MergeQueueConfig{nil, {Gate: "make gate"}} {
-		g := WithTimeouts(LandGate(dir, mq), time.Minute, 5*time.Minute, 3*time.Minute)
-		if len(g.Steps) != 2 || g.Steps[0].Command != "make gate-lint" || g.Steps[1].Command != "make gate-test" {
-			t.Fatalf("mq %+v: steps = %+v, want gate-lint then gate-test", mq, g.Steps)
-		}
-		if g.Steps[0].Timeout != time.Minute || g.Steps[1].Timeout != 5*time.Minute || !g.Steps[0].LockRetry {
-			t.Errorf("mq %+v: steps = %+v, want lint 1m with lock retry, tests 5m", mq, g.Steps)
-		}
-		if !g.UnitTier() {
-			t.Errorf("mq %+v: the split make gate is not read as the unit tier", mq)
-		}
-		if WithSlot(g, "/town", "r").Steps[1].SlotRole != "" {
-			t.Errorf("mq %+v: the unit tier took the container slot", mq)
-		}
-	}
-	// A rig's own gate command is one step, whatever the Makefile offers.
-	if g := LandGate(dir, &config.MergeQueueConfig{Gate: "make test"}); len(g.Steps) != 1 || g.UnitTier() {
-		t.Errorf("custom gate: steps = %+v unit=%v, want one step, not the unit tier", g.Steps, g.UnitTier())
-	}
-}
-
-// writeShellTierTree is a tree with make gate's two stages and the shell
-// tier's entry point. The script only has to exist for the gate's own check;
-// the fake runner answers the step.
-func writeShellTierTree(t *testing.T, makefile string) string {
-	t.Helper()
-	dir := writeMakefile(t, makefile)
-	if err := os.MkdirAll(filepath.Join(dir, "scripts"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, shellTierScript), []byte("true\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return dir
-}
-
-const gateStagesMakefile = "gate-lint:\n\ttrue\ngate-test:\n\ttrue\ngate: gate-lint gate-test\n"
-
-// TestShellTierInputsMatchPostLandScript: the gate's shell-tier rule is the
-// post-land run's own INPUTS set, and the Go constant is checked against the
-// script so the two cannot drift (gt-vsct7.8, gt-er6jn).
+// TestShellTierInputsMatchPostLandScript: the shell-tier rule the post-land
+// run and its revert read is the script's own INPUTS set, and the Go constant
+// is checked against the script so the two cannot drift (gt-er6jn).
 func TestShellTierInputsMatchPostLandScript(t *testing.T) {
 	t.Parallel()
 	data, err := os.ReadFile(filepath.Join("..", "..", "scripts", "post-land-shell.sh"))
@@ -623,39 +543,6 @@ func TestShellTierInputsMatchPostLandScript(t *testing.T) {
 	}
 	if want != ShellTierInputs {
 		t.Fatalf("ShellTierInputs = %q, want scripts/post-land-shell.sh's %q", ShellTierInputs, want)
-	}
-}
-
-// TestLandGateRunsTheShellTierForItsInputs: a merged tree that changed a
-// shell-tier input runs the tier as a third step, after the gate stages and
-// under its own timeout, and a red summary line names the scripts (gt-vsct7.8).
-func TestLandGateRunsTheShellTierForItsInputs(t *testing.T) {
-	t.Parallel()
-	dir := writeShellTierTree(t, gateStagesMakefile)
-	s := &scriptedRun{answers: map[string]scriptedAnswer{
-		shellTierDiffCommand: {output: "plugins/rebuild-gt\ninternal/cmd/x.go\n"},
-		ShellStepCommand:     {code: 1, output: "tier-sweep: shell RED passed=8 failed=2 skipped=0 failed: scripts/a_test.sh plugins/b_test.sh (logs /tmp/tier-sweep.aB12)\n"},
-	}}
-	g := WithTimeouts(LandGate(dir, nil), time.Minute, 5*time.Minute, 3*time.Minute)
-	g.run = s.run
-	res := g.Run(context.Background(), dir)
-	if res.Passed || res.Err != nil {
-		t.Fatalf("gate = %+v, want the shell step's failure", res)
-	}
-	if len(res.Steps) != 3 || res.Steps[2].Name != ShellStepName || res.Steps[2].Command != ShellStepCommand {
-		t.Fatalf("steps = %+v, want the two gate stages then %s", res.Steps, ShellStepCommand)
-	}
-	if res.Steps[2].ExitCode != 1 {
-		t.Errorf("shell step = %+v, want exit 1", res.Steps[2])
-	}
-	if got := res.ShellTierFailures(); !reflect.DeepEqual(got, []string{"scripts/a_test.sh", "plugins/b_test.sh"}) {
-		t.Errorf("shell failures = %v, want the scripts the summary named", got)
-	}
-	if !strings.Contains(res.Summary(), "shell exit 1") {
-		t.Errorf("summary = %q, want the shell step", res.Summary())
-	}
-	if got := strings.Join(s.calls[0].argv, " "); got != "sh -c "+shellTierDiffCommand {
-		t.Errorf("the change check ran %q, want %q", got, shellTierDiffCommand)
 	}
 }
 
@@ -712,91 +599,5 @@ func TestParseShellTierFailuresReadsTheRealSummaryLine(t *testing.T) {
 				t.Fatalf("parseShellTierFailures(%q) = %v, want %v", tc.out, got, tc.want)
 			}
 		})
-	}
-}
-
-// TestLandGateSkipsTheShellTierWithoutItsInputs: a tree that changed none of
-// the tier's inputs runs no shell step and pays no time for it, and a tree
-// that does not ship the tier never gets one, whatever it changed
-// (gt-vsct7.8).
-func TestLandGateSkipsTheShellTierWithoutItsInputs(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name, dir, diff string
-	}{
-		{"a changed Go file is not a shell input", writeShellTierTree(t, gateStagesMakefile), "internal/cmd/x.go\nREADME.md\n"},
-		{"a tree without the tier gets no step", writeMakefile(t, gateStagesMakefile), "Makefile\nscripts/a_test.sh\n"},
-	} {
-		s := &scriptedRun{answers: map[string]scriptedAnswer{shellTierDiffCommand: {output: tc.diff}}}
-		g := WithTimeouts(LandGate(tc.dir, nil), time.Minute, time.Minute, time.Minute)
-		g.run = s.run
-		res := g.Run(context.Background(), tc.dir)
-		if !res.Passed || res.Err != nil || len(res.Steps) != 2 {
-			t.Fatalf("%s: gate = %+v, want the two stages and no shell step", tc.name, res)
-		}
-		for _, c := range s.calls {
-			if c.argv[len(c.argv)-1] == ShellStepCommand {
-				t.Errorf("%s: the shell tier ran", tc.name)
-			}
-		}
-		if res.ShellTierFailures() != nil {
-			t.Errorf("%s: shell failures = %v", tc.name, res.ShellTierFailures())
-		}
-	}
-}
-
-// TestLandGateShellStepTimeoutIsItsOwn: the shell step carries the bound
-// WithTimeouts gave the gate, so its hang is killed at that bound and
-// reported as the step's own timeout (gt-vsct7.8).
-func TestLandGateShellStepTimeoutIsItsOwn(t *testing.T) {
-	t.Parallel()
-	dir := writeShellTierTree(t, gateStagesMakefile)
-	s := &scriptedRun{answers: map[string]scriptedAnswer{shellTierDiffCommand: {output: "Makefile\n"}}}
-	g := WithTimeouts(LandGate(dir, nil), time.Hour, time.Hour, 20*time.Millisecond)
-	step := s.run
-	g.run = func(ctx context.Context, d string, env, argv []string, out io.Writer) (int, error) {
-		if argv[len(argv)-1] == ShellStepCommand {
-			<-ctx.Done()
-			return -1, ctx.Err()
-		}
-		return step(ctx, d, env, argv, out)
-	}
-	res := g.Run(context.Background(), dir)
-	last, timedOut := res.TimedOutStep()
-	if res.Passed || res.Err != nil || !timedOut || last.Name != ShellStepName || last.Timeout != 20*time.Millisecond {
-		t.Fatalf("gate = %+v, want the shell step killed by its own timeout", res)
-	}
-}
-
-// TestLandGateShellTierDiffFailureIsInfra: a change check that cannot be read
-// says nothing about the tree, so it is an infrastructure error rather than a
-// silent skip or a verdict (gt-vsct7.8).
-func TestLandGateShellTierDiffFailureIsInfra(t *testing.T) {
-	t.Parallel()
-	dir := writeShellTierTree(t, gateStagesMakefile)
-	s := &scriptedRun{answers: map[string]scriptedAnswer{shellTierDiffCommand: {code: 128, output: "fatal: bad revision\n"}}}
-	g := LandGate(dir, nil)
-	g.run = s.run
-	res := g.Run(context.Background(), dir)
-	if res.Err == nil || len(res.Steps) != 0 {
-		t.Fatalf("gate = %+v, want an infrastructure error before any step", res)
-	}
-}
-
-// TestLandGateShellTierUnreadableTreeIsInfra: a tree the change check cannot
-// read is not a tree without the tier, so it stops the landing as
-// infrastructure rather than skipping the step (gt-vsct7.8).
-func TestLandGateShellTierUnreadableTreeIsInfra(t *testing.T) {
-	t.Parallel()
-	dir := writeMakefile(t, gateStagesMakefile)
-	if err := os.WriteFile(filepath.Join(dir, "scripts"), []byte("not a directory\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	s := &scriptedRun{}
-	g := LandGate(dir, nil)
-	g.run = s.run
-	res := g.Run(context.Background(), dir)
-	if res.Err == nil || len(res.Steps) != 0 {
-		t.Fatalf("gate = %+v, want an infrastructure error for an unreadable tree", res)
 	}
 }

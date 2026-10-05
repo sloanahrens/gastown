@@ -24,8 +24,10 @@ files, and ends with the slice list the operator files beads from.
 > `merge_queue.forgejo` is mandatory, `scripts/forgejo-rollback.sh` is gone, and
 > `scripts/forgejo-resync.sh` is the one recovery. The flake policy ("No flake
 > policy", Slice 2) is deleted with it: no reruns, no flake or test-budget
-> beads, and a red candidate gate is a rejection. Read every sentence about a
-> local gate, shadow mode or a rollback as the plan it was, not as today's
+> beads, and a red candidate gate is a rejection. `land.LandGate`, the local
+> gate function this doc names throughout, is deleted too (gt-8wbpp); the
+> rig's gate is the Forgejo workflow's `make` target. Read every sentence about
+> a local gate, shadow mode or a rollback as the plan it was, not as today's
 > landing path.
 
 ## Method
