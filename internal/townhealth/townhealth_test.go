@@ -493,23 +493,44 @@ func TestAgeFields(t *testing.T) {
 	}
 }
 
+// TestMains covers the per-rig main field: a recorded verdict is red or
+// green, a rig with a post-landing check and no verdict is UNKNOWN (a check
+// that should have run), and a rig with no check at all is n/a, so a
+// misconfiguration is distinguishable from nothing to check (gt-fn9e6.34).
 func TestMains(t *testing.T) {
 	t.Parallel()
 	f := healthy()
 	f.mains = []RigMain{
-		{Rig: "a", LastRun: "1111111111", LastGreen: "1111111111"},
-		{Rig: "b", LastRun: "2222222222", LastGreen: "1111111111"},
-		{Rig: "c"},
+		{Rig: "a", LastRun: "1111111111", LastGreen: "1111111111", PostLand: true},
+		{Rig: "b", LastRun: "2222222222", LastGreen: "1111111111", PostLand: true},
+		{Rig: "c", PostLand: true},
 		{Rig: "d", Err: errors.New("corrupt state")},
+		{Rig: "no-check"},
 	}
 	r := Compute(context.Background(), inputs(f))
-	for key, want := range map[string]Verdict{"main/a": Green, "main/b": Red, "main/c": VerdictUnknown, "main/d": VerdictUnknown} {
+	for key, want := range map[string]Verdict{
+		"main/a": Green, "main/b": Red, "main/c": VerdictUnknown,
+		"main/d": VerdictUnknown, "main/no-check": Green,
+	} {
 		if got := field(t, r, key); got.Verdict != want {
 			t.Errorf("%s = %+v, want %s", key, got, want)
 		}
 	}
 	if got := field(t, r, "main/b"); got.Detail != "main red at 22222222" {
 		t.Errorf("main/b detail = %q", got.Detail)
+	}
+	if got := field(t, r, "main/c"); got.Detail != "no post-landing verdict recorded" {
+		t.Errorf("main/c detail = %q, want the missing-verdict reason", got.Detail)
+	}
+	if got := field(t, r, "main/no-check"); got.Tag != Recorded || got.Value != "n/a" || got.Detail != "no post_land_command configured" {
+		t.Errorf("main/no-check = %+v, want a recorded n/a naming the missing command", got)
+	}
+	// A town whose only main is the n/a rig keeps its Health line green: an
+	// n/a field is not a complaint the line carries.
+	g := healthy()
+	g.mains = []RigMain{{Rig: "no-check"}}
+	if line := Line(Compute(context.Background(), inputs(g)), now, DefaultStaleAfter); !strings.HasPrefix(line, "GREEN") {
+		t.Errorf("Line = %q, want green for a town whose only rig has no check", line)
 	}
 }
 

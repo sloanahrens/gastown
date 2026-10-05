@@ -459,7 +459,11 @@ func (s *healthSources) Mains() ([]townhealth.RigMain, error) {
 	var out []townhealth.RigMain
 	for _, rig := range s.landingRigs() {
 		st, err := fileMainState{path: RedMainStatePath(s.townRoot(), rig)}.Load()
-		out = append(out, townhealth.RigMain{Rig: rig, LastRun: st.LastRun, LastGreen: st.LastGreen, Err: err})
+		// Read through the landing worker's own reader, so the field reports
+		// the command that worker would run, settings change and all
+		// (gt-fn9e6.34).
+		postLand := rigPostLandCommand(filepath.Join(s.townRoot(), rig)) != ""
+		out = append(out, townhealth.RigMain{Rig: rig, LastRun: st.LastRun, LastGreen: st.LastGreen, PostLand: postLand, Err: err})
 	}
 	return out, nil
 }
