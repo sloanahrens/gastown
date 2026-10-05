@@ -29,6 +29,18 @@ type Health struct {
 	Line    string    `json:"line"`
 	Verdict string    `json:"verdict"` // green, degraded, red, unknown
 	ReadAt  time.Time `json:"read_at"`
+	// Causes are the report's non-green fields, worst first, capped: the
+	// verdict's why without a gt status --line run (gt-70aa6).
+	Causes []HealthCause `json:"causes,omitempty"`
+}
+
+// HealthCause is one field that held the verdict back: the townhealth field's
+// identity, plus the phrase that explains it.
+type HealthCause struct {
+	Name    string `json:"name"`
+	Rig     string `json:"rig,omitempty"`
+	Subject string `json:"subject,omitempty"`
+	Detail  string `json:"detail,omitempty"`
 }
 
 // Polecat states. They are the town's own inventory states (what gt polecat
