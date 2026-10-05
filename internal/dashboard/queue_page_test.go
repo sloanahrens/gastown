@@ -89,3 +89,37 @@ func TestWorkQueueMarksBeadsHeldByAnAssignee(t *testing.T) {
 		}
 	}
 }
+
+// TestWorkQueueHidesWispsOnTheBlockedTab reads the embedded page (gt-q6ed5):
+// dead wisp steps outnumbered the real blocked beads, so the Blocked tab opens
+// with them filtered out. The default is a named constant, the chip carries the
+// count of the wisps in scope, and the row filter drops "-wisp-" ids while it
+// is off.
+func TestWorkQueueHidesWispsOnTheBlockedTab(t *testing.T) {
+	t.Parallel()
+
+	page := string(indexHTML)
+	for _, want := range []string{
+		`const DEFAULT_QWISP = false;`,
+		"let qWisp = DEFAULT_QWISP;",
+		`const isWisp = b => b.id.indexOf("-wisp-") >= 0;`,
+		`chip("wisps", inRig.filter(isWisp).length, qWisp,`,
+		`(qTab !== "blocked" || qWisp || !isWisp(b))`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("index.html has no %q", want)
+		}
+	}
+
+	start := strings.Index(page, "function renderQueue(")
+	if start < 0 {
+		t.Fatal("index.html has no renderQueue")
+	}
+	body := page[start:]
+	if end := strings.Index(body, "\n}\n"); end >= 0 {
+		body = body[:end]
+	}
+	if want := "nothing is blocked outside"; !strings.Contains(body, want) {
+		t.Errorf("the empty blocked view no longer names the hidden wisps")
+	}
+}
