@@ -235,6 +235,63 @@ func TestBatchCloseRunsInMachineModeAndReadsThePartialSplit(t *testing.T) {
 	}
 }
 
+// TestBatchCloseWithAMissingIDClosesTheRest: bd since be-sut resolves each
+// argument of a batch close on its own, closes the ones it can, and reports
+// the ones it cannot as not_found beside them (exit 22, error.kind
+// "partial"), instead of aborting the batch. Close must keep the work the
+// batch did and still answer not-found for the absent id.
+func TestBatchCloseWithAMissingIDClosesTheRest(t *testing.T) {
+	t.Parallel()
+	r := newRecorder(func(args []string) reply {
+		if cmdOf(args) == "close" {
+			return machinePartial("not_found", "gt-nosuch")
+		}
+		return reply{stdout: "[]"}
+	})
+	b := NewIsolated(t.TempDir())
+	b.exec = r.exec
+
+	err := b.Close("gt-a", "gt-nosuch")
+	var pe *PartialCloseError
+	if !errors.As(err, &pe) {
+		t.Fatalf("Close(a, nosuch) = %T %v, want a *PartialCloseError", err, err)
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("Close(a, nosuch) = %v, want it to wrap ErrNotFound", err)
+	}
+	if !reflect.DeepEqual(pe.Closed, []string{"gt-a"}) || !reflect.DeepEqual(pe.NotClosed, []string{"gt-nosuch"}) {
+		t.Errorf("Closed %v NotClosed %v, want [gt-a] and [gt-nosuch]", pe.Closed, pe.NotClosed)
+	}
+}
+
+// TestForcedBatchCloseWithAMissingIDClosesTheRest: --force bypasses bd's
+// policy refusals, not its resolution of each id, so a forced batch naming an
+// id bd cannot resolve closes the rest and still says which closed (be-sut);
+// the caller must not count the batch as a whole failure.
+func TestForcedBatchCloseWithAMissingIDClosesTheRest(t *testing.T) {
+	t.Parallel()
+	r := newRecorder(func(args []string) reply {
+		if cmdOf(args) == "close" {
+			return machinePartial("not_found", "gt-nosuch")
+		}
+		return reply{stdout: "[]"}
+	})
+	b := NewIsolated(t.TempDir())
+	b.exec = r.exec
+
+	err := b.ForceCloseWithReason("forced", "gt-a", "gt-nosuch")
+	var pe *PartialCloseError
+	if !errors.As(err, &pe) {
+		t.Fatalf("ForceCloseWithReason(a, nosuch) = %T %v, want a *PartialCloseError", err, err)
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("ForceCloseWithReason(a, nosuch) = %v, want it to wrap ErrNotFound", err)
+	}
+	if !reflect.DeepEqual(pe.Closed, []string{"gt-a"}) || !reflect.DeepEqual(pe.NotClosed, []string{"gt-nosuch"}) {
+		t.Errorf("Closed %v NotClosed %v, want [gt-a] and [gt-nosuch]", pe.Closed, pe.NotClosed)
+	}
+}
+
 // TestBatchCloseLegacyNonZeroExitReReads: a bd without machine mode that
 // exits 1 on a partial batch leaves no envelope; Close re-reads the batch.
 func TestBatchCloseLegacyNonZeroExitReReads(t *testing.T) {

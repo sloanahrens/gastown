@@ -32,8 +32,9 @@ func TestCloseDeliveryBeadsForcesPastRecipients(t *testing.T) {
 			t.Errorf("delivery bead %s status %q, want closed", id, got.Status)
 		}
 	}
-	// A missing bead fails the batch and counts nothing.
-	if n, err := closeDeliveryBeads(bd, []string{a.ID, "gt-nosuch"}, "hq-kl7", "gastown/witness"); !errors.Is(err, beads.ErrNotFound) || n != 0 {
-		t.Errorf("closeDeliveryBeads(missing) = %d, %v; want 0, ErrNotFound", n, err)
+	// A missing bead is not found and does not discard the batch: the beads
+	// that resolve still close and are counted (bd since be-sut).
+	if n, err := closeDeliveryBeads(bd, []string{a.ID, "gt-nosuch"}, "hq-kl7", "gastown/witness"); !errors.Is(err, beads.ErrNotFound) || n != 1 {
+		t.Errorf("closeDeliveryBeads(missing) = %d, %v; want 1, ErrNotFound", n, err)
 	}
 }

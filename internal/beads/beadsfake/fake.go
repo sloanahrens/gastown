@@ -680,20 +680,18 @@ func (f *Fake) close(reason string, force bool, ids []string) error {
 	if reason == "" {
 		reason = defaultCloseReason
 	}
-	// A missing ID fails the whole batch before anything closes, as bd does.
-	for _, id := range ids {
-		if _, ok := f.issues[id]; !ok {
-			return notFound(id)
-		}
-	}
-	// A refused issue is skipped and the rest close. The batch fails with
-	// the first refusal when every issue in it is refused (bd 1.2), and
-	// with a *beads.PartialCloseError when only some are, as *beads.Beads
-	// reports what bd left open.
+	// A missing id no longer fails the whole batch: the batch closes every
+	// id that resolves and reports the ids it could not, as bd does since
+	// be-sut. A batch of nothing but missing ids still answers not-found, so
+	// a caller naming a gone id never reads the answer as a clean close.
 	var firstRefusal error
-	var closed, refused []string
+	var missing, refused, closed []string
 	for _, id := range ids {
-		r := f.issues[id]
+		r, ok := f.issues[id]
+		if !ok {
+			missing = append(missing, id)
+			continue
+		}
 		if !force {
 			if err := f.closeRefusal(r); err != nil {
 				if firstRefusal == nil {
@@ -708,19 +706,37 @@ func (f *Fake) close(reason string, force bool, ids []string) error {
 		closed = append(closed, id)
 		f.journalWrite("close", id)
 	}
+	notClosed := append(append([]string(nil), missing...), refused...)
 	switch {
-	case len(refused) == 0:
+	case len(notClosed) == 0:
 		return nil
 	case len(closed) == 0:
+		if len(missing) > 0 && len(refused) == 0 {
+			return notFound(strings.Join(missing, ", "))
+		}
 		return firstRefusal
 	}
-	return &beads.PartialCloseError{Closed: closed, NotClosed: refused}
+	// Some ids closed and some did not: bd exits partial, keeping each
+	// failure's own kind in the error. The batch's cause is the one kind
+	// every failure shares, as *beads.Beads derives it from bd's envelope.
+	pe := &beads.PartialCloseError{Closed: closed, NotClosed: notClosed}
+	switch {
+	case len(refused) == 0:
+		pe.Err = beads.ErrNotFound
+	case len(missing) == 0:
+		pe.Err = beads.ErrCloseRefused
+	default:
+		pe.Err = firstRefusal
+	}
+	return pe
 }
 
 // Close closes ids with bd's default reason, "Closed". An issue with open
 // children or an open blocker, pinned, or assigned to someone other than the
 // actor, is refused: skipped, the rest closing, and reported in a
 // *beads.PartialCloseError (the first refusal when every issue is refused).
+// An id that is not there is reported the same way and the rest still close,
+// as bd does since be-sut; a batch of nothing but missing ids is not-found.
 func (f *Fake) Close(ids ...string) error { return f.close("", false, ids) }
 
 // CloseWithReason closes ids recording reason, with Close's refusals.

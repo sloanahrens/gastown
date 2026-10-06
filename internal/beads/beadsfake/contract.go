@@ -273,13 +273,14 @@ func contractMissing(t *testing.T, s *scope) {
 	if err := s.AddDependency(real.ID, id); !errors.Is(err, beads.ErrNotFound) {
 		t.Errorf("AddDependency(on missing) = %v, want ErrNotFound", err)
 	}
-	// A batch close naming a missing issue fails as not found and closes
-	// nothing.
+	// A batch close naming a missing issue is not found for it, and closes
+	// the ids that resolve: one unresolvable argument must not discard the
+	// rest of the batch (bd since be-sut).
 	if err := s.Close(real.ID, id); !errors.Is(err, beads.ErrNotFound) {
 		t.Errorf("Close(real, missing) = %v, want ErrNotFound", err)
 	}
-	if st := s.mustShow(t, real.ID).Status; st != "open" {
-		t.Errorf("Close(real, missing) left %s %q, want it untouched", real.ID, st)
+	if st := s.mustShow(t, real.ID).Status; st != "closed" {
+		t.Errorf("Close(real, missing) left %s %q, want it closed", real.ID, st)
 	}
 }
 
