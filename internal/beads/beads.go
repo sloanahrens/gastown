@@ -3420,9 +3420,13 @@ func (b *Beads) closeInCurrentDB(opts closeOptions, ids ...string) error {
 	// failed. Only the exit status is read on success, so the envelope's
 	// wrapping of stdout changes nothing here.
 	if _, err := b.runMachine(args...); err != nil {
-		if opts.force || len(ids) < 2 {
+		if len(ids) < 2 {
 			return err
 		}
+		// A batch splits its own failures, forced ones included: --force
+		// bypasses bd's policy refusals, not its resolution of each id, so
+		// a forced batch naming an id bd cannot resolve still closes the
+		// rest and says so (be-sut).
 		return b.batchCloseFailure(ids, err)
 	}
 	if opts.force || len(ids) < 2 {
@@ -3444,15 +3448,25 @@ func (b *Beads) batchCloseFailure(ids []string, err error) error {
 	case ok && kind == "partial":
 		notClosed := make(map[string]bool, len(failed))
 		allRefused := len(failed) > 0
+		allMissing := len(failed) > 0
 		for _, f := range failed {
 			notClosed[f.ID] = true
 			if f.Kind != "refused" {
 				allRefused = false
 			}
+			if f.Kind != "not_found" {
+				allMissing = false
+			}
 		}
 		pe := &PartialCloseError{Err: err}
-		if allRefused {
+		switch {
+		case allRefused:
 			pe.Err = errors.Join(ErrCloseRefused, err)
+		case allMissing:
+			// bd closes every id a batch can resolve and reports the ids it
+			// cannot as not_found beside them (be-sut), so a batch naming a
+			// gone id closes the rest and still answers not-found for it.
+			pe.Err = errors.Join(ErrNotFound, err)
 		}
 		for _, id := range ids {
 			if notClosed[id] {
