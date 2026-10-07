@@ -219,11 +219,21 @@ func TestGuardsFollowCdOnTheLine(t *testing.T) {
 		// after it is judged there (gt-n7ksl). A change that does not carry
 		// never reaches this shell at all, resolvable or not, so it cannot
 		// blank the directory either — and one carried by "&&" dead-ends the
-		// list, so nothing after it runs.
+		// list, so nothing inside the list after it runs.
 		{"a missing cd, then an absolute cd into the Go tree", nonGo, "cd /nonexistent/gt-n7ksl ; cd " + goRoot + " && make test", true, true},
-		{"a missing cd dead-ends the && list before that cd", nonGo, "cd /nonexistent/gt-n7ksl && cd " + goRoot + " ; make test", false, false},
+		{"a cd inside the dead list is not named, and the walk stays put", nonGo, "cd /nonexistent/gt-n7ksl && cd " + goRoot + " ; make test", false, false},
 		{"a missing cd, then an absolute cd out of the Go tree", goRoot, "cd /nonexistent/gt-n7ksl ; cd " + nonGo + " && make test", false, false},
 		{"an unresolvable cd in a pipeline keeps the Go tree", goRoot, "cd /nonexistent/gt-n7ksl | make test", true, true},
+
+		// A cd the shell refuses leaves the shell where it was, so the walk
+		// keeps the tree it had and the segment runs there (gt-34vra); the
+		// "&&" list that refusal dead-ends still ends at the ";" that follows,
+		// and the cd the walk reads from there is the one the segment is judged
+		// by.
+		{"a refused cd keeps the Go tree the walk was in", nonGo, "cd " + goRoot + " ; cd /nonexistent/gt-34vra ; make test", true, true},
+		{"a refused cd keeps the non-Go tree the walk was in", goRoot, "cd " + nonGo + " ; cd /nonexistent/gt-34vra ; make test", false, false},
+		{"the walk reads on from the semicolon after a dead list", nonGo, "cd /nonexistent/gt-34vra && true ; cd " + goRoot + " ; make test", true, true},
+		{"the same read on out of the Go tree", goRoot, "cd /nonexistent/gt-34vra && true ; cd " + nonGo + " ; make test", false, false},
 
 		// A cd whose separator does not carry runs in a subshell of its own, so
 		// it is not gt-ofj05's unplaced cd: the segment's directory is the one
