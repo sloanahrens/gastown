@@ -75,7 +75,11 @@ This guard also HOLDS (rather than permanently blocks) a full-suite start —
 'make test' and 'make build' in a Go tree, 'go test ./...' and 'go build
 ./...' — when the host is already busy, unless the command is wrapped in
 'gt slot run'. Re-running the exact same command after a short wait passes
-once the host frees up. See gt-nqcy follow-up.
+once the host frees up. See gt-nqcy follow-up. The tree a held segment is
+judged in is the one it runs in: a cd earlier on the same shell line carries
+into the segments after it ("&&"/";" only, as the shell does), so an agent
+whose cwd is a non-Go tree is held for 'cd <go tree> && make test' rather
+than stepping around the gate from outside the Go tree (gt-me4vs).
 
 The guard reads the tool input from stdin (Claude Code hook protocol)
 and exits with code 2 to block or hold an operation.
@@ -125,8 +129,7 @@ func tapGuardDangerous(stdin io.Reader, stderr io.Writer, proc guardProcess) err
 		return NewSilentExit(2)
 	}
 
-	cwd, _ := proc.getwd()
-	if load1, heldAction := evaluateIdleGate(command, cwd, proc.load1); heldAction != "" {
+	if load1, heldAction := evaluateIdleGate(proc, command, proc.load1); heldAction != "" {
 		printIdleGateHold(stderr, load1, command, heldAction)
 		return NewSilentExit(2)
 	}
@@ -140,11 +143,11 @@ func tapGuardDangerous(stdin io.Reader, stderr io.Writer, proc guardProcess) err
 // the command isn't gated or the sample failed — a failed sample fails open,
 // never holding the command). heldAction is the held invocation's own spelling
 // ("make test", "go build ./..."), returned so the HOLD banner can name what it
-// held instead of guessing; "" means the command was not held. cwd is the hook
-// process's directory, which decides whether a make target is the whole-module
-// Go action at all.
-func evaluateIdleGate(command, cwd string, hostLoad1 func() (float64, bool)) (load1 float64, heldAction string) {
-	heldAction = idleGateHeldAction(command, cwd)
+// held instead of guessing; "" means the command was not held. proc supplies
+// the working directory each segment is judged in (idleGateHeldAction), which
+// decides whether a make target is the whole-module Go action at all.
+func evaluateIdleGate(proc guardProcess, command string, hostLoad1 func() (float64, bool)) (load1 float64, heldAction string) {
+	heldAction = idleGateHeldAction(proc, command)
 	if heldAction == "" {
 		return 0, ""
 	}
@@ -1959,7 +1962,6 @@ func idleGateAlternative(heldAction string) string {
 // or a 'make test'/'make build' whose target is the whole-module Go action
 // (makeActsOnWholeGoModule — a non-Go rig's own target costs the host a
 // per-rig build, not the shared module's, so it is not gated; gt-mjfir).
-// cwd is the hook process's directory, passed through to that judgment.
 // Heredoc bodies are stripped first (stripHeredocBodies)
 // so prose written to a file — "cat > note.md <<'EOF'\nRun make test\nEOF" —
 // is never misread as a live invocation, the same rule evaluateDangerousCommand
@@ -1970,26 +1972,40 @@ func idleGateAlternative(heldAction string) string {
 // evaluateDangerousCommand, this does NOT recurse into bash -c/eval payloads
 // or command substitutions — the interim hook it replaces didn't either, and
 // no incident has required it; scope stays narrow until one does.
-func idleGateHeldAction(command, cwd string) string {
+//
+// Each segment is judged in the directory its own line runs it in — the hook
+// cwd moved by the cds earlier on the same line, by the shared walk
+// (segmentWalkRoot, over scanWalkRoot/cdTarget: "&&" and ";" carry the change,
+// an unresolvable cd resolves to nothing, and the hook cwd is the fallback).
+// Judging every segment against the hook cwd instead let an agent whose cwd is
+// a non-Go tree run the whole module suite with 'cd <go tree> && make test' —
+// the make target resolved in the non-Go tree, where it is not the module's
+// (gt-me4vs), the same hole the container-suite and test-scope rules had
+// (gt-5mc21).
+func idleGateHeldAction(proc guardProcess, command string) string {
 	tokens := shellTokenize(strings.TrimSpace(stripHeredocBodies(command)))
+	vars := shellVarAssignments(tokens)
+	cwd, _ := proc.getwd()
 	var segment []string
-	for _, tok := range tokens {
+	start := 0
+	for i, tok := range tokens {
 		if shellCommandSeparators[tok] {
-			if held := idleGateHeldSegment(segment, cwd); held != "" {
+			if held := idleGateHeldSegment(segment, segmentWalkRoot(proc, tokens, start, vars, cwd)); held != "" {
 				return held
 			}
 			segment = nil
+			start = i + 1
 			continue
 		}
 		segment = append(segment, tok)
 	}
-	return idleGateHeldSegment(segment, cwd)
+	return idleGateHeldSegment(segment, segmentWalkRoot(proc, tokens, start, vars, cwd))
 }
 
 // isIdleGatedSuiteStartCommand reports whether command contains an unwrapped
 // full-suite start, discarding the matched spelling (idleGateHeldAction).
-func isIdleGatedSuiteStartCommand(command, cwd string) bool {
-	return idleGateHeldAction(command, cwd) != ""
+func isIdleGatedSuiteStartCommand(proc guardProcess, command string) bool {
+	return idleGateHeldAction(proc, command) != ""
 }
 
 // idleGateSlotRunPrefix is the token sequence a shell segment must START

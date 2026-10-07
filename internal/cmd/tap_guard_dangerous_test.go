@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -1732,7 +1734,7 @@ func TestIsIdleGatedSuiteStartCommand(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := isIdleGatedSuiteStartCommand(tt.command, tt.cwd)
+			got := isIdleGatedSuiteStartCommand(fakeGuardProcess(nil, tt.cwd), tt.command)
 			if got != tt.gated {
 				t.Errorf("isIdleGatedSuiteStartCommand(%q, cwd %s) = %v, want %v", tt.command, tt.cwd, got, tt.gated)
 			}
@@ -1766,7 +1768,88 @@ func TestIsIdleGatedSuiteStartOutsideGoTree(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := isIdleGatedSuiteStartCommand(tt.command, tt.cwd)
+			got := isIdleGatedSuiteStartCommand(fakeGuardProcess(nil, tt.cwd), tt.command)
+			if got != tt.gated {
+				t.Errorf("isIdleGatedSuiteStartCommand(%q, cwd %s) = %v, want %v", tt.command, tt.cwd, got, tt.gated)
+			}
+		})
+	}
+}
+
+// The acceptance criterion for gt-me4vs: a segment is judged in the directory
+// it runs in, not the one the hook was invoked from. The hole was an agent
+// whose cwd is a non-Go tree running the whole module suite through
+// 'cd <go tree> && make test' — the cd carries, by the same walk the scan rule
+// uses (scanWalkRoot/cdTarget), so the make target is resolved in the Go tree
+// it actually runs in. The same line staying in the non-Go tree is left alone.
+// The compose rules (make -C, the separators that do not carry, a cd the guard
+// cannot resolve) are the walk's, shared with the container-suite and
+// test-scope rules.
+func TestIdleGateFollowsCdOnTheLine(t *testing.T) {
+	t.Parallel()
+	goRoot := fakeModule(t, "gastown/refinery/rig")
+	nonGo := nonGoTree(t)
+	// A Go tree nested inside the non-Go rig, so a relative cd has a real
+	// directory to resolve against. A go.mod under a tree does not make the
+	// tree itself a module — goModuleRoot walks up, not down — so nonGo stays
+	// outside every module.
+	nested := filepath.Join(nonGo, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "go.mod"), []byte("module example.com/nested\n"), 0o644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		cwd     string
+		command string
+		gated   bool
+	}{
+		// The hole: the non-Go tree's segment runs in the Go tree anyway.
+		{"cd into the Go tree then make test", nonGo, "cd " + goRoot + " && make test", true},
+		{"cd into the Go tree then make build", nonGo, "cd " + goRoot + " && make build", true},
+		{"cd into the Go tree after a semicolon", nonGo, "cd " + goRoot + "; make test", true},
+		{"relative cd into a nested Go tree", nonGo, "cd nested && make test", true},
+		{"chained cds, last one into the Go tree", nonGo, "cd nested && cd " + goRoot + " && make test", true},
+		{"unrelated segment before the cd", nonGo, "echo building && cd " + goRoot + " && make test", true},
+
+		// The same line in a tree the gate has nothing to hold stays allowed.
+		{"cd to the non-Go tree then make test", nonGo, "cd " + nonGo + " && make test", false},
+		{"chained cds, last one out of the Go tree", nonGo, "cd " + goRoot + " && cd " + nonGo + " && make test", false},
+
+		// Leaving the Go tree is judged where the command runs too, so the
+		// hook's own tree no longer decides a segment that left it.
+		{"cd out of the Go tree then make test", goRoot, "cd " + nonGo + " && make test", false},
+
+		// A cd and make's own -C compose: the -C is resolved against the
+		// directory the segment runs in, which the cd is what set.
+		{"cd into the Go tree, make -C back out", nonGo, "cd " + goRoot + " && make -C " + nonGo + " test", false},
+		{"cd out of the Go tree, make -C back in", nonGo, "cd " + nonGo + " && make -C " + goRoot + " test", true},
+
+		// Only "&&" and ";" carry the change — a cd in a pipeline or a
+		// background job runs in a subshell of its own, and one before "||"
+		// runs only when it failed, so in all three the segment keeps the
+		// directory the shell already had (scanWalkRoot's rule).
+		{"cd in a pipeline does not carry", nonGo, "cd " + goRoot + " | make test", false},
+		{"background cd does not carry", nonGo, "cd " + goRoot + " & make test", false},
+		{"cd before || does not carry", nonGo, "cd " + goRoot + " || make test", false},
+
+		// A cd this process cannot resolve keeps today's reading — the hook
+		// cwd — rather than guessing a directory.
+		{"unresolvable cd keeps the hook cwd, Go tree", goRoot, "cd /nonexistent/gt-me4vs && make test", true},
+		{"unresolvable cd keeps the hook cwd, non-Go tree", nonGo, "cd /nonexistent/gt-me4vs && make test", false},
+
+		// The whole-repo go forms are held wherever they run, so the cd
+		// changes nothing for them.
+		{"go test whole repo in the non-Go tree", nonGo, "go test ./...", true},
+		{"cd into the Go tree then go test whole repo", nonGo, "cd " + goRoot + " && go test ./...", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proc := fakeGuardProcess(nil, tt.cwd)
+			got := isIdleGatedSuiteStartCommand(proc, tt.command)
 			if got != tt.gated {
 				t.Errorf("isIdleGatedSuiteStartCommand(%q, cwd %s) = %v, want %v", tt.command, tt.cwd, got, tt.gated)
 			}
@@ -1799,7 +1882,7 @@ func TestEvaluateIdleGate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sample := func() (float64, bool) { return tt.sampleLoad1, tt.sampleOK }
-			_, heldAction := evaluateIdleGate(tt.command, goTree, sample)
+			_, heldAction := evaluateIdleGate(fakeGuardProcess(nil, goTree), tt.command, sample)
 			if held := heldAction != ""; held != tt.wantHeld {
 				t.Errorf("evaluateIdleGate(%q) held=%v, want %v", tt.command, held, tt.wantHeld)
 			}
@@ -1879,6 +1962,44 @@ func TestRunTapGuardDangerous_NonGoRigSuiteTargetWhileHostBusy(t *testing.T) {
 			err := tapGuardDangerous(strings.NewReader(input), &buf, proc)
 			if held := err != nil; held != tt.held {
 				t.Errorf("tapGuardDangerous(make test, cwd %s) held = %v (err %v) stderr:\n%s", tt.rigDir, held, err, buf.String())
+			}
+			if tt.held && !strings.Contains(buf.String(), "SUITE START HELD") {
+				t.Errorf("the Go tree's hold carried no banner:\n%s", buf.String())
+			}
+		})
+	}
+}
+
+// The acceptance criterion for gt-me4vs, through the real hook entry point: a
+// polecat whose cwd is a non-Go tree is held when the same line cds into a Go
+// tree first, and left alone when it stays in the non-Go tree. The hook
+// threads the guard process through, so this also pins that the segment walk
+// reads the session's own working directory rather than the guard's.
+func TestRunTapGuardDangerous_IdleGateFollowsCdOnTheLine(t *testing.T) {
+	t.Parallel()
+	busy := func() (float64, bool) { return idleGateLoad1Threshold + 15, true }
+	goRoot := fakeModule(t, "clone")
+	nonGo := nonGoTree(t)
+	for _, tt := range []struct {
+		name    string
+		command string
+		held    bool
+	}{
+		{"cd into the Go tree", "cd " + goRoot + " && make test", true},
+		{"stays in the non-Go tree", "cd " + nonGo + " && make test", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			proc := fakeGuardProcess(map[string]string{
+				"GT_POLECAT": "coral",
+				"GT_ROLE":    "fractals/polecats/coral",
+			}, nonGo)
+			proc.load1 = busy
+
+			input := `{"tool_name":"Bash","tool_input":{"command":"` + tt.command + `"}}`
+			var buf strings.Builder
+			err := tapGuardDangerous(strings.NewReader(input), &buf, proc)
+			if held := err != nil; held != tt.held {
+				t.Errorf("tapGuardDangerous(%q, cwd %s) held = %v (err %v), want %v; stderr:\n%s", tt.command, nonGo, held, err, tt.held, buf.String())
 			}
 			if tt.held && !strings.Contains(buf.String(), "SUITE START HELD") {
 				t.Errorf("the Go tree's hold carried no banner:\n%s", buf.String())
