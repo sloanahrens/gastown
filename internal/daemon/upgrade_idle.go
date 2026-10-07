@@ -75,6 +75,25 @@ func (d *Daemon) daemonWorkHold() *daemonWork {
 	return holds[0]
 }
 
+// catchUpWorkHold reports the daemon work a catch-up backup must wait for: the
+// hard hold in flight, else nil (gt-2m8sj).
+//
+// A backup is a read through the running server, so soft work — a plugin run,
+// a dog cycle, a dispatch tick, a scan — is no conflict with it and must not
+// defer it. Counting that work starved the catch-up: every check in a run-loop
+// pass shares a start time with the dispatch and patrol-scan tickers, so five
+// consecutive checks deferred with a soft hold in flight and the newest backup
+// reached 62h. The hard holds and a held container-gate slot (catchUpQuiet)
+// still defer it.
+func (d *Daemon) catchUpWorkHold() *daemonWork {
+	for _, hold := range d.daemonWorkHolds() {
+		if hold.hard {
+			return hold
+		}
+	}
+	return nil
+}
+
 // daemonWorkHolds lists the daemon work in flight, in the order the wait line
 // names it when none of it is hard. It is the one list behind daemonWorkIdle
 // and the upgrade restart's wait line; daemonWorkHold picks the hard-first

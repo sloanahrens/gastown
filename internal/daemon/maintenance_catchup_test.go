@@ -125,6 +125,77 @@ func TestBackupCatchUpRunsWithTheDispatcherParked(t *testing.T) {
 	}
 }
 
+// A backup is a read through the running server, so the soft work that shares
+// the maintenance check's run-loop pass — a dispatch tick, a patrol scan, a
+// steward scan, the dog cycle, a plugin run — must not defer a day-old
+// catch-up (gt-2m8sj: on 2026-10-05 19:30-19:46 and 2026-10-07 09:22-09:27 five
+// checks in a row deferred with a tick or a scan in flight, and the newest
+// backup reached 62h).
+func TestBackupCatchUpRunsBesideTicksScansAndDogCycles(t *testing.T) {
+	t.Parallel()
+	d, f := catchUpDaemon(t)
+	d.scripts = newScriptRunner()
+	if !d.scripts.tryStart("rebuild-gt") {
+		t.Fatal("could not mark a plugin run in flight")
+	}
+	d.compactorDogMu.Lock()
+	d.compactorDogRunning = true
+	d.compactorDogMu.Unlock()
+	d.specDispatchRunning.Store(true)
+	d.patrolScanRunning.Store(true)
+	d.stewardRunning.Store(true)
+	d.stewardPlanScan.Store(true)
+
+	d.runScheduledMaintenance()
+
+	if len(f.backupCalls) != 2 {
+		t.Errorf("backup calls = %v, want gt and hq: soft work deferred a day-old catch-up", f.backupCalls)
+	}
+}
+
+// The hard work still defers the catch-up: a backup never runs beside a
+// landing pass, a slings dispatch mid-entry, a steward's live agent session or
+// a binary mid-replacement.
+func TestBackupCatchUpStillWaitsForHardWork(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		hold string
+		set  func(t *testing.T, d *Daemon)
+	}{
+		{"landing pass", "landing pass gt-a", func(_ *testing.T, d *Daemon) {
+			d.landingStates.setBead("gastown", "gt-a", catchUpNow)
+		}},
+		{"scheduled slings cycle", "a scheduled slings cycle", func(_ *testing.T, d *Daemon) {
+			d.scheduledSlingsRunning.Store(true)
+		}},
+		{"steward job", "a steward job gt-x", func(t *testing.T, d *Daemon) {
+			t.Cleanup(startStewardJob(t, d))
+		}},
+		{"install lock", "the install lock (an install is replacing the binary)", func(t *testing.T, d *Daemon) {
+			holdInstallLock(t, writeInstallLock(t, d))
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, f := catchUpDaemon(t)
+			var buf bytes.Buffer
+			d.logger = log.New(&buf, "", 0)
+			tc.set(t, d)
+
+			d.runScheduledMaintenance()
+
+			if len(f.backupCalls) != 0 {
+				t.Fatalf("catch-up ran while %s held the daemon: %v", tc.name, f.backupCalls)
+			}
+			if want := "catch-up backup deferred: daemon has work in flight (" + tc.hold + ")"; !strings.Contains(buf.String(), want) {
+				t.Errorf("deferred line = %q, want it to carry %q", buf.String(), want)
+			}
+		})
+	}
+}
+
 // The deferred line names the hold: "work in flight" alone left an operator
 // to guess the holder from the log timeline (gt-y6ovz).
 func TestBackupCatchUpDeferralNamesTheHold(t *testing.T) {
