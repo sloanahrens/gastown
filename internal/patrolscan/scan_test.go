@@ -79,6 +79,11 @@ type fakeEnv struct {
 	workBeadErr map[string]error
 	cleared     []string // "rig/polecat=workBead" per ClearSubmission
 	clearErr    map[string]error
+
+	// raised are the escalation records the rig's polecats raised, and
+	// raisedErr makes the read fail.
+	raised    []Escalation
+	raisedErr error
 }
 
 func newFake() *fakeEnv {
@@ -132,6 +137,9 @@ func (f *fakeEnv) AgentRecord(_, p string) (AgentRecord, error) {
 	return f.agents[p], f.stateErr[p]
 }
 func (f *fakeEnv) Heartbeat(_, p string) *Heartbeat { return f.heartbeats[p] }
+func (f *fakeEnv) PolecatEscalations(string) ([]Escalation, error) {
+	return f.raised, f.raisedErr
+}
 func (f *fakeEnv) GitState(_, p string) (GitState, error) {
 	if err := f.gitErr[p]; err != nil {
 		return GitState{}, err
@@ -514,23 +522,110 @@ func TestUnresolvedEscalationIsLeftAlone(t *testing.T) {
 	}
 }
 
-// A seat still holding the bead it escalated on has not had its blocker
-// resolved, whatever its worktree measures: the open bead is the operator's,
-// and the tick leaves it exactly as it does today.
-func TestEscalatedSeatHoldingItsOpenBeadIsSkipped(t *testing.T) {
+// stoppedOnEscalation sets up polecat p as dead holding its hooked bead, with
+// the agent record gt done's ESCALATED exit leaves behind: the polecat stopped
+// on purpose to raise a blocker for a human.
+func stoppedOnEscalation(env *fakeEnv, p string) {
+	deadWithWork(env, p)
+	env.agents[p] = AgentRecord{State: "stuck", ExitType: ExitEscalated, CleanupStatus: "has_unpushed"}
+}
+
+// A polecat that stopped on an escalation (gt done --status ESCALATED) is the
+// operator's while the escalation it raised for its bead stands, and is
+// otherwise stuck forever: nothing restarts it, and its work bead is still
+// held so the no-work path never sees it. Measured on beads/guzzle 2026-10-05:
+// the operator answered the decision and closed hq-wisp-36g1ez, and the seat
+// sat skipped on every tick for 14 hours (gt-4hduq). Once the escalation that
+// turn raised for the bead is closed, the seat is resumed on its preserved
+// branch like a DEFERRED exit's.
+func TestEscalatedSeatIsReleasedByItsClosedEscalation(t *testing.T) {
 	t.Parallel()
 	env := newFake()
-	deadWithWork(env, "ruby")
-	env.agents["ruby"] = AgentRecord{State: "stuck", ExitType: ExitEscalated, LastSourceIssue: "gt-ruby"}
-	env.workBeads["gt-ruby"] = &Work{ID: "gt-ruby", Status: "hooked"}
+	stoppedOnEscalation(env, "ruby")
+	env.raised = []Escalation{{
+		ID: "hq-wisp-36g1ez", EscalatedBy: "gastown/polecats/ruby",
+		Title: "gt-ruby: a CI-tier decision the bead puts out of scope", Open: false,
+	}}
 
 	r := scanner(env, nil).Tick("gastown")
 
-	if f := seatFinding(t, r, "ruby"); f.Outcome != OutcomeSkipped {
-		t.Fatalf("outcome = %v (%q), want skipped", f.Outcome, f.Detail)
+	if got := strings.Join(env.restarts, ","); got != "ruby" {
+		t.Fatalf("restarts = %q, want ruby; report %v", got, r.Lines())
 	}
-	if len(env.escalations) != 0 || len(env.restarts) != 0 {
-		t.Fatalf("cleared = %v, restarts = %v; want neither", env.escalations, env.restarts)
+	f := seatFinding(t, r, "ruby")
+	if f.Outcome != OutcomeRestarted {
+		t.Fatalf("outcome = %v (%q), want restarted", f.Outcome, f.Detail)
+	}
+	for _, want := range []string{"ESCALATED", "hq-wisp-36g1ez", "closed"} {
+		if !strings.Contains(f.Detail, want) {
+			t.Errorf("detail = %q, want it to name %q", f.Detail, want)
+		}
+	}
+}
+
+// The release is the last step of a chain of conditions, and each one that
+// fails leaves the seat exactly as the tick leaves it today: the operator's
+// escalation, not the tick's, so a seat still holding the bead it escalated on
+// stays skipped whatever its worktree measures. The control case proves the
+// baseline releases, so a table entry that stops releasing is the condition it
+// names.
+func TestEscalatedSeatHoldsWhileItsDecisionStands(t *testing.T) {
+	t.Parallel()
+	const seat = "gastown/polecats/ruby"
+	cases := []struct {
+		name    string
+		raised  []Escalation
+		err     error
+		outcome Outcome
+	}{
+		{"closed escalation the seat raised for the bead (control)",
+			[]Escalation{{ID: "hq-wisp-1", EscalatedBy: seat, Title: "gt-ruby: a decision"}}, nil, OutcomeRestarted},
+		{"still open",
+			[]Escalation{{ID: "hq-wisp-1", EscalatedBy: seat, Title: "gt-ruby: a decision", Open: true}}, nil, OutcomeSkipped},
+		{"open beside a closed one for the same bead",
+			[]Escalation{
+				{ID: "hq-wisp-1", EscalatedBy: seat, Title: "gt-ruby: a decision"},
+				{ID: "hq-wisp-2", EscalatedBy: seat, Title: "gt-ruby: the same decision", Open: true},
+			}, nil, OutcomeSkipped},
+		{"named by related_bead rather than the title",
+			[]Escalation{{ID: "hq-wisp-1", EscalatedBy: seat, Title: "a decision", RelatedBead: "gt-ruby"}}, nil, OutcomeRestarted},
+		{"escalation names another bead",
+			[]Escalation{{ID: "hq-wisp-1", EscalatedBy: seat, Title: "gt-other: a decision"}}, nil, OutcomeSkipped},
+		{"the bead only mentioned in the title, not named",
+			[]Escalation{{ID: "hq-wisp-1", EscalatedBy: seat, Title: "escalating about gt-ruby"}}, nil, OutcomeSkipped},
+		{"another role's escalation for the bead proves nothing about the seat",
+			[]Escalation{{ID: "hq-wisp-1", EscalatedBy: "gastown/crew/sloan", Title: "gt-ruby: a decision"}}, nil, OutcomeSkipped},
+		{"another seat's escalation names the bead",
+			[]Escalation{{ID: "hq-wisp-1", EscalatedBy: "gastown/polecats/pearl", Title: "gt-ruby: a decision"}}, nil, OutcomeSkipped},
+		{"no escalation found", nil, nil, OutcomeSkipped},
+		{"the escalation read fails",
+			nil, errors.New("bd list escalations: connection refused"), OutcomeUnknown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := newFake()
+			stoppedOnEscalation(env, "ruby")
+			env.raised, env.raisedErr = tc.raised, tc.err
+
+			r := scanner(env, nil).Tick("gastown")
+
+			f := seatFinding(t, r, "ruby")
+			if f.Outcome != tc.outcome {
+				t.Fatalf("outcome = %v (%q), want %v", f.Outcome, f.Detail, tc.outcome)
+			}
+			wantRestart := tc.outcome == OutcomeRestarted
+			if got := len(env.restarts) > 0; got != wantRestart {
+				t.Fatalf("restarted = %v, want %v (report %v)", got, wantRestart, r.Lines())
+			}
+			// A held seat is left alone entirely: no agent-bead reset, no idle
+			// retirement beside a restart the tick did not make. The escalation
+			// rule only ever adds a release; it never takes a seat the
+			// operator's escalation still holds.
+			if !wantRestart && (len(env.escalations) != 0 || len(env.idles) != 0) {
+				t.Fatalf("cleared = %v, idles = %v; want nothing done", env.escalations, env.idles)
+			}
+		})
 	}
 }
 

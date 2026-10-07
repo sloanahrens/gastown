@@ -181,6 +181,59 @@ func TestPatrolScanGitState(t *testing.T) {
 	}
 }
 
+// PolecatEscalations reads the rig's seats' escalations out of the town
+// database, open and closed: the tie the tick matches a stopped seat's turn
+// against is escalated_by, so a record another role raised is not one of the
+// seat's, and a mail carrier routed for an escalation is not an escalation at
+// all (gt-4hduq).
+func TestPatrolScanPolecatEscalations(t *testing.T) {
+	t.Parallel()
+	bd := newWorkBD(t)
+	escalation := func(id, raiser, title string, status string, labels ...string) beads.Issue {
+		return beads.Issue{ID: id, Status: status, Title: title, Labels: append([]string{"gt:escalation"}, labels...),
+			Description: beads.FormatEscalationDescription(title, &beads.EscalationFields{
+				Severity: "high", EscalatedBy: raiser, RelatedBead: "be-adu"}),
+		}
+	}
+	bd.db.Seed(escalation("hq-wisp-open", "myr/polecats/mycat", "be-adu: a decision", "open"))
+	bd.db.Seed(escalation("hq-wisp-done", "myr/polecats/mycat", "be-adu: another decision", "closed"))
+	bd.db.Seed(escalation("hq-wisp-other-rig", "beads/polecats/guzzle", "be-adu: a decision", "open"))
+	bd.db.Seed(escalation("hq-wisp-other-role", "myr/crew/sloan", "be-adu: a decision", "open"))
+	bd.db.Seed(escalation("hq-wisp-carrier", "myr/polecats/mycat", "be-adu: a decision", "open", "gt:message"))
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, openWorkBeads: bd.open}
+
+	got, err := (&patrolScanHost{d: d}).PolecatEscalations("myr")
+	if err != nil {
+		t.Fatalf("PolecatEscalations: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("escalations = %+v, want the two myr/polecats ones", got)
+	}
+	byID := map[string]patrolscan.Escalation{}
+	for _, e := range got {
+		byID[e.ID] = e
+		if e.EscalatedBy != "myr/polecats/mycat" {
+			t.Errorf("escalation %s raiser = %q, want the rig's polecat", e.ID, e.EscalatedBy)
+		}
+		if e.RelatedBead != "be-adu" || !strings.HasPrefix(e.Title, "be-adu:") {
+			t.Errorf("escalation %s = %+v, want the bead it names", e.ID, e)
+		}
+	}
+	if e, ok := byID["hq-wisp-done"]; !ok || e.Open {
+		t.Errorf("closed escalation = %+v, want it read as not open", e)
+	}
+	if e, ok := byID["hq-wisp-open"]; !ok || !e.Open {
+		t.Errorf("open escalation = %+v, want it read as open", e)
+	}
+
+	// A failed read is an error, never an empty list: the tick holds a seat on
+	// an escalation it could not read.
+	bd.listErr = errors.New("bd list: connection refused")
+	if _, err := (&patrolScanHost{d: d}).PolecatEscalations("myr"); err == nil {
+		t.Fatal("a failed escalation listing must be an error")
+	}
+}
+
 // ClearEscalation is the write the tick makes on a resolved escalation: the
 // agent bead goes to idle and the exit type is removed, the two fields gt
 // done's exit wrote together. The guard is the record still reading as that
