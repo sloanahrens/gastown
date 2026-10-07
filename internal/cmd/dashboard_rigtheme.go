@@ -12,7 +12,7 @@ import (
 // cannot name a theme the rig does not name its polecats from (gt-yieek).
 
 // rigThemeSamples is how many sample names a rig row carries for the column's
-// tooltip: enough of the pool to recognise it, few enough for one title line.
+// tooltip: enough of the pool to recognize it, few enough for one title line.
 const rigThemeSamples = 5
 
 // newDashRigThemes reads a rig's effective theme and a few of its names. A rig
