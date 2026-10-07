@@ -315,9 +315,12 @@ type Daemon struct {
 	queuedWorkHold      dispatch.HoldLatch
 
 	// specDispatchRunning / specDispatchCycles are the spec_dispatch ticker's
-	// single-flight guard and cycle count (gt-4k3fj.5, spec_dispatch.go).
+	// single-flight guard and cycle count (gt-4k3fj.5, spec_dispatch.go), and
+	// specDispatchHold remembers the town hold the ticker last saw so a
+	// parked dispatcher is logged once per hold (gt-y6ovz).
 	specDispatchRunning atomic.Bool
 	specDispatchCycles  sync.WaitGroup
+	specDispatchHold    dispatch.HoldLatch
 
 	// dispatchTicks is the spec_dispatch ticker's recent tick decisions,
 	// oldest first, which townhealth's dispatch field judges to tell a
