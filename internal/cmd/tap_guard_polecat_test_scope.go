@@ -51,16 +51,16 @@ func isPolecatContext(proc guardProcess) bool {
 // Heredoc bodies are stripped before tokenizing, so a body that merely spells
 // "make test" — a bead description, a doc, a formula — is data, not a live
 // invocation. A body fed to a shell invoker is the exception and is judged as
-// the nested script it is (gt-ohe8n), in the directory its reader line cd-ed
-// into (heredocBodyDir, gt-1cvqj).
+// the nested script it is (gt-ohe8n), in the directory the shell had reached
+// when it read the body (heredocBodyDir, gt-1cvqj, gt-v02wh).
 func evaluatePolecatTestScope(proc guardProcess, command string) (reason string, matched []string) {
 	cwd, _ := proc.getwd()
 	return evaluatePolecatTestScopeDepth(proc, command, cwd, 0)
 }
 
 // evaluatePolecatTestScopeDepth judges command as a shell starting in cwd —
-// the invocation's directory, or a shell-fed heredoc body's reader-line
-// directory one level down.
+// the invocation's directory, or the directory a shell-fed heredoc's body
+// runs in, one level down.
 func evaluatePolecatTestScopeDepth(proc guardProcess, command, cwd string, depth int) (reason string, matched []string) {
 	tokens := shellTokenize(strings.TrimSpace(stripHeredocBodies(command)))
 	vars := shellVarAssignments(tokens)
@@ -85,7 +85,7 @@ func evaluatePolecatTestScopeDepth(proc guardProcess, command, cwd string, depth
 		return "", nil
 	}
 	for _, span := range shellFedHeredocSpans(command) {
-		bodyCwd := heredocBodyDir(proc, span.reader, cwd)
+		bodyCwd := heredocBodyDir(proc, command, span, cwd)
 		if r, m := evaluatePolecatTestScopeDepth(proc, span.body, bodyCwd, depth+1); r != "" {
 			return r, m
 		}

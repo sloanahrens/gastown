@@ -185,18 +185,18 @@ const maxTestGuardNestDepth = 3
 // Heredoc bodies are stripped before tokenizing (stripHeredocBodies), so a
 // body that merely spells "make test" — a bead description, a doc, a formula
 // — is data, not a live invocation. A body fed to a shell invoker is the
-// exception and is judged as the nested script it is, in the directory its
-// reader line cd-ed into (heredocBodyDir), the same distinction
-// matchesPRWorkflowCommand and evaluateDangerousCommand draw (gt-ohe8n,
-// gt-1cvqj).
+// exception and is judged as the nested script it is, in the directory the
+// shell had reached when it read the body (heredocBodyDir), the same
+// distinction matchesPRWorkflowCommand and evaluateDangerousCommand draw
+// (gt-ohe8n, gt-1cvqj, gt-v02wh).
 func evaluateContainerSuiteCommand(proc guardProcess, command, envOptIn string) (reason string, matched []string) {
 	cwd, _ := proc.getwd()
 	return evaluateContainerSuiteCommandDepth(proc, command, cwd, envOptIn, 0)
 }
 
 // evaluateContainerSuiteCommandDepth judges command as a shell starting in cwd
-// — the invocation's directory, or a shell-fed heredoc body's reader-line
-// directory one level down.
+// — the invocation's directory, or the directory a shell-fed heredoc's body
+// runs in, one level down.
 func evaluateContainerSuiteCommandDepth(proc guardProcess, command, cwd, envOptIn string, depth int) (reason string, matched []string) {
 	tokens := shellTokenize(strings.TrimSpace(stripHeredocBodies(command)))
 	// Container-backed tests are opt-in (testutil.DockerTestsEnv). A bare
@@ -233,9 +233,10 @@ func evaluateContainerSuiteCommandDepth(proc guardProcess, command, cwd, envOptI
 	}
 	// The bodies come off the untouched command: stripHeredocBodies removed
 	// them from the text above, so they are judged here once, as code, in the
-	// directory their reader line cd-ed into (heredocBodyDir, gt-1cvqj).
+	// directory the shell had reached by the time it read them
+	// (heredocBodyDir, gt-1cvqj, gt-v02wh).
 	for _, span := range shellFedHeredocSpans(command) {
-		bodyCwd := heredocBodyDir(proc, span.reader, cwd)
+		bodyCwd := heredocBodyDir(proc, command, span, cwd)
 		if r, m := evaluateContainerSuiteCommandDepth(proc, span.body, bodyCwd, envOptIn, depth+1); r != "" {
 			return r, m
 		}

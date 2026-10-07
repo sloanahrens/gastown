@@ -964,6 +964,159 @@ func TestHeredocBodyIsJudgedInReaderLineCwd(t *testing.T) {
 	}
 }
 
+// The shell keeps one working directory from one command to the next, so a cd
+// on its own line before the heredoc's reader line still decides the directory
+// the body runs in. gt-1cvqj read only the reader line, which left "cd <Go
+// tree>" + newline + "bash <<EOF" open from a non-Go rig, and the mirror image
+// — a cd out of a Go tree on an earlier line — open in the other direction
+// (gt-v02wh). The preceding text is read with its heredoc bodies stripped, so
+// the neighbours below pin that a cd the shell never runs stays data and that
+// an earlier cd the walk cannot place leaves the body where it was.
+func TestHeredocBodyIsJudgedInDirectoryOfPrecedingLines(t *testing.T) {
+	t.Parallel()
+	goTree := fakeModule(t, "gastown/refinery/rig")
+	heavyPkg := filepath.Join(goTree, "internal", "cmd")
+	nonGo := nonGoTree(t)
+	tests := []struct {
+		name         string
+		cwd          string
+		command      string
+		wantRefused  bool
+		wantScopeOut bool
+	}{
+		{
+			name:         "cd into the Go tree on the line before the reader line",
+			cwd:          nonGo,
+			command:      "cd " + goTree + "\nbash <<'EOF'\nmake test\nEOF\n",
+			wantRefused:  true,
+			wantScopeOut: true,
+		},
+		{
+			name:         "earlier lines that stay in the non-Go tree are allowed",
+			cwd:          nonGo,
+			command:      "echo starting\nbash <<'EOF'\nmake test\nEOF\n",
+			wantRefused:  false,
+			wantScopeOut: false,
+		},
+		{
+			name:         "a cd out of the Go tree on an earlier line",
+			cwd:          goTree,
+			command:      "cd " + nonGo + "\nbash <<'EOF'\nmake test\nEOF\n",
+			wantRefused:  false,
+			wantScopeOut: false,
+		},
+		{
+			name:         "an earlier cd into a heavy package feeds the cwd form",
+			cwd:          nonGo,
+			command:      "cd " + heavyPkg + "\nbash <<'EOF'\ngo test .\nEOF\n",
+			wantRefused:  false,
+			wantScopeOut: true,
+		},
+		{
+			// A cd after the body has been read must not undo the earlier one:
+			// the walk still stops at the invoker's segment.
+			name:         "a cd after the invoker does not undo an earlier one",
+			cwd:          nonGo,
+			command:      "cd " + goTree + "\nbash <<'EOF' && cd " + nonGo + "\nmake test\nEOF\n",
+			wantRefused:  true,
+			wantScopeOut: true,
+		},
+		{
+			// The bodies are stripped from the preceding text too, so a cd the
+			// shell never runs — one written inside a data body — decides
+			// nothing.
+			name:         "a cd inside a data body on an earlier line does not leak",
+			cwd:          nonGo,
+			command:      "cat > /tmp/notes.md <<'DATA'\ncd " + goTree + "\nDATA\nbash <<'EOF'\nmake test\nEOF\n",
+			wantRefused:  false,
+			wantScopeOut: false,
+		},
+		{
+			name:         "an earlier variable assignment feeds the cd the walk reads",
+			cwd:          nonGo,
+			command:      "BUILD_DIR=" + goTree + "\ncd $BUILD_DIR\nbash <<'EOF'\nmake test\nEOF\n",
+			wantRefused:  true,
+			wantScopeOut: true,
+		},
+		{
+			// The unknown-root fallback, reached through the preceding text: an
+			// unplaceable directory is not evidence the body runs in a Go tree.
+			name:         "an earlier cd the guard cannot place leaves the body where it was",
+			cwd:          nonGo,
+			command:      "cd \"$BUILD_DIR\"\nbash <<'EOF'\nmake test\nEOF\n",
+			wantRefused:  false,
+			wantScopeOut: false,
+		},
+		{
+			name:         "an earlier cd carries into a nested body",
+			cwd:          nonGo,
+			command:      "cd " + goTree + "\nbash <<'OUTER'\nbash <<'INNER'\nmake test\nINNER\nOUTER\n",
+			wantRefused:  true,
+			wantScopeOut: true,
+		},
+		{
+			// The reader line's own cd is reached through the continuation
+			// walk-back, not through the preceding text, so it must not be
+			// counted twice or dropped.
+			name:         "a cd joined to the reader line by a continuation",
+			cwd:          nonGo,
+			command:      "cd " + goTree + " && \\\nbash <<'EOF'\nmake test\nEOF\n",
+			wantRefused:  true,
+			wantScopeOut: true,
+		},
+		{
+			name:         "an earlier cd carries into a body piped to a shell",
+			cwd:          nonGo,
+			command:      "cd " + goTree + "\ncat <<'EOF' | bash\nmake test\nEOF\n",
+			wantRefused:  true,
+			wantScopeOut: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proc := fakeGuardProcess(nil, tt.cwd)
+			reason, _ := evaluateContainerSuiteCommand(proc, tt.command, "")
+			if got := reason != ""; got != tt.wantRefused {
+				t.Errorf("evaluateContainerSuiteCommand(%q) from %s blocked = %v (reason %q), want %v",
+					tt.command, tt.cwd, got, reason, tt.wantRefused)
+			}
+			scopeReason, _ := evaluatePolecatTestScope(proc, tt.command)
+			if got := scopeReason != ""; got != tt.wantScopeOut {
+				t.Errorf("evaluatePolecatTestScope(%q) from %s blocked = %v (reason %q), want %v",
+					tt.command, tt.cwd, got, scopeReason, tt.wantScopeOut)
+			}
+		})
+	}
+}
+
+// The acceptance case of gt-v02wh through the hook: the two-line form is
+// refused by both rules from a non-Go rig, and the same form whose earlier
+// lines stay in the non-Go tree is allowed.
+func TestRunTapGuardContainerSuite_HeredocEarlierLineCdRefused(t *testing.T) {
+	t.Parallel()
+	goTree := fakeModule(t, "gastown/refinery/rig")
+	nonGo := nonGoTree(t)
+	proc := fakeGuardProcess(map[string]string{
+		"GT_POLECAT": "rictus",
+		"GT_ROLE":    "gastown/polecats/rictus",
+	}, nonGo)
+
+	refused := "cd " + goTree + "\nbash <<'EOF'\nmake test\nEOF\n"
+	input := `{"tool_name":"Bash","tool_input":{"command":` + jsonQuote(refused) + `}}`
+	stderr, err := runContainerSuiteGuard(input, proc)
+	if err == nil {
+		t.Errorf("a shell-fed make test behind a cd on the previous line was allowed")
+	} else if !strings.Contains(stderr, "TEST SCOPE") || !strings.Contains(stderr, "-run") {
+		t.Errorf("the block must be the scope rule with the -run alternative, got: %s", stderr)
+	}
+
+	allowed := "echo starting\nbash <<'EOF'\nmake test\nEOF\n"
+	input = `{"tool_name":"Bash","tool_input":{"command":` + jsonQuote(allowed) + `}}`
+	if stderr, err := runContainerSuiteGuard(input, proc); err != nil {
+		t.Errorf("a shell-fed make test whose earlier lines stay in the non-Go tree was refused: %s", stderr)
+	}
+}
+
 // The acceptance case through the hook a polecat actually talks to: from a
 // non-Go rig, cd-ing into a Go tree and feeding "make test" to bash is
 // refused, while the identical body with a reader line that stays put is
