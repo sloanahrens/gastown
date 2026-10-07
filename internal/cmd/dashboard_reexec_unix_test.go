@@ -19,7 +19,7 @@ func TestFileInodeIsReadOnThisPlatform(t *testing.T) {
 		t.Fatal(err)
 	}
 	if fileInode(fi) == 0 {
-		t.Fatal("fileInode read 0: stampBinary could not tell a replaced binary from the old one by inode")
+		t.Fatal("fileInode read 0: stampFile could not tell a replaced binary from the old one by inode")
 	}
 }
 

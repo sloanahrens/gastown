@@ -72,12 +72,12 @@ rather than left out, so a missing rig never reads as a quiet one.
 repeated. With no token file the panel is left out, and a refresh that fails
 shows the last good feed marked stale.
 
-Lifecycle: the dashboard watches its own binary. When make install replaces it
-and the new file runs (gt version succeeds), the dashboard restarts itself in
-place: same PID, same flags, same listening socket, so the port never closes.
-Open pages reconnect and reload. If the new binary fails to run or the restart
-fails, the running build keeps serving and says so. --open fires on the first
-launch only. Not available on Windows.
+Lifecycle: the dashboard watches its own binary and the town registry. When make
+install replaces the binary, or a rig is added to or removed from the town, the
+dashboard restarts itself in place: same PID, same flags, same listening socket,
+so the port never closes. Open pages reconnect and reload. If the new binary
+fails to run or the restart fails, the running build keeps serving and says so.
+--open fires on the first launch only. Not available on Windows.
 
 Examples:
   gt dashboard                 # http://127.0.0.1:8787
@@ -122,10 +122,11 @@ func runDashboard(cmd *cobra.Command, _ []string) error {
 	defer stop()
 	go hub.Run(ctx)
 
-	// A new gt binary on disk (make install) restarts the dashboard in place;
-	// see the lifecycle note in the command help.
+	// A new gt binary on disk (make install) or a rig added to the town
+	// restarts the dashboard in place; see the lifecycle note in the command
+	// help.
 	if exe, err := os.Executable(); err == nil && dashboardCanReexec {
-		go superviseBinary(ctx, exe, ln, cmd.OutOrStdout())
+		go superviseRestart(ctx, exe, dashboardRegistryPath(townRoot), ln, cmd.OutOrStdout())
 	}
 
 	srv := &http.Server{Handler: hub.Handler(), ReadHeaderTimeout: 10 * time.Second}
@@ -144,6 +145,13 @@ func runDashboard(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	return nil
+}
+
+// dashboardRegistryPath is the town registry file a restart follows. The rig
+// registry is the machine config file's "registry" section (config layout.go),
+// and gt rig add rewrites that file to add or remove a rig.
+func dashboardRegistryPath(townRoot string) string {
+	return filepath.Join(townRoot, filepath.FromSlash(config.MachineConfigFile))
 }
 
 // newDashboardHub wires a hub to the readers gt tail -f uses.

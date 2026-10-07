@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	dashboardBinaryPoll    = 3 * time.Second
+	dashboardPoll          = 3 * time.Second
 	dashboardVerifyTimeout = 10 * time.Second
 
 	// dashboardListenFDEnv names the inherited listening socket a restarted
@@ -33,32 +33,53 @@ func execEnv(env []string, fd int) []string {
 	return append(out, fmt.Sprintf("%s=%d", dashboardListenFDEnv, fd))
 }
 
-// binaryStamp identifies one build of the executable on disk. make install
-// replaces the file, so a new inode, size or mtime means a new binary.
-type binaryStamp struct {
+// fileStamp identifies one version of a file on disk: a new inode, size or mtime
+// means the file was replaced. make install replaces the executable that way, a
+// rig added or removed rewrites the town registry that way, and the landing
+// panels re-read a file only once its stamp moves.
+type fileStamp struct {
 	size int64
 	mod  time.Time
 	ino  uint64
 }
 
-func stampBinary(path string) (binaryStamp, error) {
+// stampFile reads the stamp of the file at path; a file that cannot be read has
+// the zero stamp and its error.
+func stampFile(path string) (fileStamp, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
-		return binaryStamp{}, err
+		return fileStamp{}, err
 	}
-	return binaryStamp{size: fi.Size(), mod: fi.ModTime(), ino: fileInode(fi)}, nil
+	return fileStamp{size: fi.Size(), mod: fi.ModTime(), ino: fileInode(fi)}, nil
 }
 
-// watchBinary calls changed once, when stamp reports something different from
-// the baseline and keeps reporting that new value on the next tick, so a binary
-// still being written is not picked up half-copied. The baseline is read at
-// once; if that fails it is retried every tick, so a file that is briefly
-// missing when the watch starts does not switch the watcher off. A stamp error
-// later (the instant between rename and create) is not a change either.
-func watchBinary(ctx context.Context, stamp func() (binaryStamp, error), ticks <-chan time.Time, changed func()) {
-	var base, pending *binaryStamp
-	if cur, err := stamp(); err == nil {
-		base = &cur
+// watchedFile is one file a restart follows: how to stamp it, and the name the
+// restart log line calls it.
+type watchedFile struct {
+	name  string
+	stamp func() (fileStamp, error)
+}
+
+// watchPath is a watchedFile on the file at path.
+func watchPath(name, path string) watchedFile {
+	return watchedFile{name: name, stamp: func() (fileStamp, error) { return stampFile(path) }}
+}
+
+// watchFiles calls changed with the name of the first watched file whose stamp
+// reports something different from its baseline and keeps reporting that new
+// value on the next tick, so a file still being written is not picked up
+// half-written. Each file is tracked on its own, so one file mid-write does not
+// hide a settled change to another. A baseline is read at once; if that fails it
+// is retried every tick, so a file that is briefly missing when the watch starts
+// does not switch the watch off. A stamp error later (the instant between rename
+// and create) is not a change either.
+func watchFiles(ctx context.Context, files []watchedFile, ticks <-chan time.Time, changed func(name string)) {
+	base := make([]*fileStamp, len(files))
+	pending := make([]*fileStamp, len(files))
+	for i, f := range files {
+		if cur, err := f.stamp(); err == nil {
+			base[i] = &cur
+		}
 	}
 	for {
 		select {
@@ -66,42 +87,55 @@ func watchBinary(ctx context.Context, stamp func() (binaryStamp, error), ticks <
 			return
 		case <-ticks:
 		}
-		cur, err := stamp()
-		switch {
-		case err != nil:
-			pending = nil
-		case base == nil:
-			base = &cur
-		case cur == *base:
-			pending = nil
-		case pending != nil && *pending == cur:
-			changed()
-			return
-		default:
-			pending = &cur
+		for i, f := range files {
+			cur, err := f.stamp()
+			switch {
+			case err != nil:
+				pending[i] = nil
+			case base[i] == nil:
+				base[i] = &cur
+			case cur == *base[i]:
+				pending[i] = nil
+			case pending[i] != nil && *pending[i] == cur:
+				changed(f.name)
+				return
+			default:
+				pending[i] = &cur
+			}
 		}
 	}
 }
 
-// watchBinaryFile is watchBinary on the executable at path, polled every
-// interval.
-func watchBinaryFile(ctx context.Context, path string, every time.Duration, changed func()) {
+// watchFilesAt is watchFiles on the files named, polled every interval.
+func watchFilesAt(ctx context.Context, files []watchedFile, every time.Duration, changed func(name string)) {
 	tick := time.NewTicker(every)
 	defer tick.Stop()
-	watchBinary(ctx, func() (binaryStamp, error) { return stampBinary(path) }, tick.C, changed)
+	watchFiles(ctx, files, tick.C, changed)
 }
 
-// superviseBinary restarts the dashboard in place each time the executable is
-// replaced. A replacement that does not pass handoff leaves the running build
-// serving and is not retried until the file changes again.
-func superviseBinary(ctx context.Context, exe string, ln net.Listener, out io.Writer) {
+// restartWatches are the files a dashboard restart follows. The registry is
+// read once at process start (session.InitRegistry), so a dashboard that
+// predates a rig computes session names for it from an empty prefix (gt-cslma).
+func restartWatches(exe, registry string) []watchedFile {
+	return []watchedFile{
+		watchPath("binary", exe),
+		watchPath("town registry", registry),
+	}
+}
+
+// superviseRestart restarts the dashboard in place each time a watched file is
+// replaced. A change that does not pass handoff leaves the running build serving
+// and is not retried until a watched file changes again.
+func superviseRestart(ctx context.Context, exe, registry string, ln net.Listener, out io.Writer) {
+	files := restartWatches(exe, registry)
 	for ctx.Err() == nil {
-		changed := false
-		watchBinaryFile(ctx, exe, dashboardBinaryPoll, func() { changed = true })
-		if !changed {
+		what := ""
+		watchFilesAt(ctx, files, dashboardPoll, func(name string) { what = name })
+		if what == "" {
 			return
 		}
 		err := handoff(
+			what,
 			func() error { return verifyBinary(ctx, exe) },
 			func() error { return reexecSelf(exe, ln) },
 			out,
@@ -112,13 +146,14 @@ func superviseBinary(ctx context.Context, exe string, ln net.Listener, out io.Wr
 	}
 }
 
-// handoff checks the new binary can start, then replaces this process with it.
-// exec returns only on failure, and nothing has been torn down by then.
-func handoff(verify, exec func() error, out io.Writer) error {
+// handoff checks the binary still runs, announces the restart and replaces this
+// process with it. what names the change that triggered it in the log line. exec
+// returns only on failure, and nothing has been torn down by then.
+func handoff(what string, verify, exec func() error, out io.Writer) error {
 	if err := verify(); err != nil {
-		return fmt.Errorf("the new binary does not run: %w", err)
+		return fmt.Errorf("the gt binary does not run: %w", err)
 	}
-	fmt.Fprintln(out, "gt dashboard: binary changed, restarting")
+	fmt.Fprintf(out, "gt dashboard: %s changed, restarting\n", what)
 	if err := exec(); err != nil {
 		return fmt.Errorf("re-exec: %w", err)
 	}
