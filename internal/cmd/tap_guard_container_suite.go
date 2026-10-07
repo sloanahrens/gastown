@@ -180,7 +180,9 @@ const maxTestGuardNestDepth = 3
 // none is blocked. envOptIn is the hook environment's own GT_TEST_DOCKER.
 //
 // Segment directories come from segmentWalkRoot, so a polecat in a non-Go rig
-// cannot reach the whole suite by changing into a Go tree first (gt-5mc21).
+// cannot reach the whole suite by changing into a Go tree first (gt-5mc21). A
+// directory the walk cannot place is refused rather than read as a non-Go one,
+// the reading an unplaceable make -C already gets (gt-ofj05).
 //
 // Heredoc bodies are stripped before tokenizing (stripHeredocBodies), so a
 // body that merely spells "make test" — a bead description, a doc, a formula
@@ -215,7 +217,8 @@ func evaluateContainerSuiteCommandDepth(proc guardProcess, command, cwd, envOptI
 	start := 0
 	for i, tok := range tokens {
 		if shellCommandSeparators[tok] {
-			if r, m := evaluateContainerSuiteSegment(segment, dockerOn, segmentWalkRoot(proc, tokens, start, cwd, vars)); r != "" {
+			dir, known := segmentWalkRoot(proc, tokens, start, cwd, vars)
+			if r, m := evaluateContainerSuiteSegment(segment, dockerOn, dir, known); r != "" {
 				return r, m
 			}
 			segment = nil
@@ -224,7 +227,8 @@ func evaluateContainerSuiteCommandDepth(proc guardProcess, command, cwd, envOptI
 		}
 		segment = append(segment, tok)
 	}
-	if r, m := evaluateContainerSuiteSegment(segment, dockerOn, segmentWalkRoot(proc, tokens, start, cwd, vars)); r != "" {
+	dir, known := segmentWalkRoot(proc, tokens, start, cwd, vars)
+	if r, m := evaluateContainerSuiteSegment(segment, dockerOn, dir, known); r != "" {
 		return r, m
 	}
 
@@ -278,8 +282,12 @@ func commandSetsDockerTests(tokens []string, value string) bool {
 
 // evaluateContainerSuiteSegment judges a single shell segment (tokens
 // between shell operators). tokens is original-case; matching is done on a
-// lowercased copy so "Go Test" and "go test" are treated the same.
-func evaluateContainerSuiteSegment(tokens []string, dockerOn bool, cwd string) (reason string, matched []string) {
+// lowercased copy so "Go Test" and "go test" are treated the same. cwd is the
+// directory the segment runs in, and cwdKnown whether the walk could place it;
+// an unplaced one is refused where the segment's target would be read from it
+// (cwdTargetsUnplacedDir), the reading an unplaceable make -C already gets
+// (gt-ofj05).
+func evaluateContainerSuiteSegment(tokens []string, dockerOn bool, cwd string, cwdKnown bool) (reason string, matched []string) {
 	if len(tokens) == 0 {
 		return "", nil
 	}
@@ -293,7 +301,11 @@ func evaluateContainerSuiteSegment(tokens []string, dockerOn bool, cwd string) (
 	}
 
 	if i := findTestInvocation(lower, "go"); i >= 0 && dockerOn {
-		wholeRepo, pkgs := containerSuiteTarget(goTestPackageArgs(tokens[i+2:]), cwd)
+		pkgArgs := goTestPackageArgs(tokens[i+2:])
+		if cwdTargetsUnplacedDir(pkgArgs, cwdKnown) {
+			return "bare 'go test' names a directory the guard cannot place", nil
+		}
+		wholeRepo, pkgs := containerSuiteTarget(pkgArgs, cwd)
 		if wholeRepo {
 			return "bare 'go test' with a whole-repo target touches every testcontainers-backed package", nil
 		}
@@ -304,7 +316,7 @@ func evaluateContainerSuiteSegment(tokens []string, dockerOn bool, cwd string) (
 	}
 
 	if i := findTestInvocation(lower, "make"); i >= 0 {
-		if !makeActsOnWholeGoModule(tokens[i:], cwd) {
+		if !makeActsOnWholeGoModule(tokens[i:], makeTreeDir(cwd, cwdKnown)) {
 			return "", nil
 		}
 		// The Go Makefile's "test" target runs "go test ./..." after its
@@ -512,6 +524,24 @@ func normalizedPackageArgs(pkgArgs []string) []string {
 	return args
 }
 
+// cwdTargetsUnplacedDir reports whether a go test package-argument list is one
+// whose meaning rests on a directory the walk could not place. A bare "go test"
+// and an explicit "." both name the directory the command runs in
+// (normalizedPackageArgs), and the guard can no more say which package that is
+// than it can for an unplaceable make -C; every explicit package argument
+// carries its own path, so an unplaced cwd says nothing about it (gt-ofj05).
+func cwdTargetsUnplacedDir(pkgArgs []string, cwdKnown bool) bool {
+	if cwdKnown {
+		return false
+	}
+	for _, p := range normalizedPackageArgs(pkgArgs) {
+		if p == cwdPackageArg {
+			return true
+		}
+	}
+	return false
+}
+
 // containerSuitePackagesCoveredBy returns the entries of
 // containerSuitePackages that a normalized package argument reaches
 // (packageArgCovers).
@@ -627,6 +657,17 @@ func goModuleRoot(dir string) (root string, found bool, err error) {
 	}
 }
 
+// makeTreeDir is the directory to judge a segment's make invocation from: the
+// segment's directory, or "" — makeRunDir's spelling for a directory the guard
+// cannot place, which keeps the refusal — when the walk could not place it
+// (gt-ofj05).
+func makeTreeDir(cwd string, cwdKnown bool) string {
+	if !cwdKnown {
+		return ""
+	}
+	return cwd
+}
+
 // makeActsOnWholeGoModule reports whether a "make … test" or "make … build"
 // invocation runs the module-wide Go action its target name stands for. args
 // holds the invocation's tokens from the "make" word onward and cwd is the
@@ -648,7 +689,9 @@ func goModuleRoot(dir string) (root string, found bool, err error) {
 // What the invocation leaves unpinned keeps the refusal: a directory the
 // guard cannot place, a directory it cannot examine, and a makefile it cannot
 // read all leave "what does this target do here" unanswered, and "no go.mod
-// in sight" is not "there is none" (fail closed).
+// in sight" is not "there is none" (fail closed). A cwd of "" is that
+// unpinned directory: it is what the callers pass for a segment whose cd the
+// walk could not resolve (segmentWalkRoot, gt-ofj05).
 func makeActsOnWholeGoModule(args []string, cwd string) bool {
 	dir, known := makeRunDir(args, cwd)
 	if !known || strings.TrimSpace(dir) == "" {
@@ -667,7 +710,8 @@ func makeActsOnWholeGoModule(args []string, cwd string) bool {
 // --makefile, or "-" for stdin — because the target then means whatever that
 // file says, which the guard cannot read and so refuses instead of guessing.
 // It is false too when a -C cannot be placed: a relative directory under an
-// unknown cwd names nothing this process can walk.
+// unknown cwd names nothing this process can walk, and one that exists but
+// cannot be resolved (resolveMakeDir) names nothing the guard can read.
 func makeRunDir(args []string, cwd string) (dir string, known bool) {
 	dir = cwd
 	for i := 1; i < len(args); i++ {
@@ -731,17 +775,23 @@ func makeRunDir(args []string, cwd string) (dir string, known bool) {
 // ok is false when the argument cannot be placed: a relative directory is
 // relative to a cwd the guard does not know, and guessing from this process's
 // own directory would judge a tree the command never named.
+//
+// The directory returned is the one the argument really names, symlinks
+// resolved, so "-C <link to a Go tree>" is walked as that tree rather than
+// under the link's lexical parents (gt-ofj05).
 func resolveMakeDir(base, arg string) (dir string, ok bool) {
 	if arg == "" {
 		return base, false
 	}
-	if filepath.IsAbs(arg) {
-		return filepath.Clean(arg), true
-	}
-	if base == "" {
+	switch {
+	case filepath.IsAbs(arg):
+		dir = filepath.Clean(arg)
+	case base == "":
 		return "", false
+	default:
+		dir = filepath.Join(base, arg)
 	}
-	return filepath.Join(base, arg), true
+	return resolveDirSymlinks(dir)
 }
 
 // cwdPackagePath returns the module-relative package path that a "go test ."

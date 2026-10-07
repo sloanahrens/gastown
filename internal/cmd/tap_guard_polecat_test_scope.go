@@ -46,7 +46,9 @@ func isPolecatContext(proc guardProcess) bool {
 // cost of a filtered run is the compile, seconds not minutes.
 //
 // Segment directories come from segmentWalkRoot, so cd-ing into a heavy
-// package and running it there is judged in that package (gt-5mc21).
+// package and running it there is judged in that package (gt-5mc21). A
+// directory the walk cannot place is refused rather than read as a light one,
+// the reading an unplaceable make -C already gets (gt-ofj05).
 //
 // Heredoc bodies are stripped before tokenizing, so a body that merely spells
 // "make test" — a bead description, a doc, a formula — is data, not a live
@@ -68,7 +70,8 @@ func evaluatePolecatTestScopeDepth(proc guardProcess, command, cwd string, depth
 	start := 0
 	for i, tok := range tokens {
 		if shellCommandSeparators[tok] {
-			if r, m := evaluatePolecatTestScopeSegment(segment, segmentWalkRoot(proc, tokens, start, cwd, vars)); r != "" {
+			dir, known := segmentWalkRoot(proc, tokens, start, cwd, vars)
+			if r, m := evaluatePolecatTestScopeSegment(segment, dir, known); r != "" {
 				return r, m
 			}
 			segment = nil
@@ -77,7 +80,8 @@ func evaluatePolecatTestScopeDepth(proc guardProcess, command, cwd string, depth
 		}
 		segment = append(segment, tok)
 	}
-	if r, m := evaluatePolecatTestScopeSegment(segment, segmentWalkRoot(proc, tokens, start, cwd, vars)); r != "" {
+	dir, known := segmentWalkRoot(proc, tokens, start, cwd, vars)
+	if r, m := evaluatePolecatTestScopeSegment(segment, dir, known); r != "" {
 		return r, m
 	}
 
@@ -93,7 +97,7 @@ func evaluatePolecatTestScopeDepth(proc guardProcess, command, cwd string, depth
 	return "", nil
 }
 
-func evaluatePolecatTestScopeSegment(tokens []string, cwd string) (reason string, matched []string) {
+func evaluatePolecatTestScopeSegment(tokens []string, cwd string, cwdKnown bool) (reason string, matched []string) {
 	lower := make([]string, len(tokens))
 	for i, t := range tokens {
 		lower[i] = strings.ToLower(t)
@@ -101,9 +105,11 @@ func evaluatePolecatTestScopeSegment(tokens []string, cwd string) (reason string
 	// `make test` is `go test ./...` under another name (see the Makefile
 	// target) in a Go tree, and a gt slot run wrapper or an env prefix does
 	// not change what it costs the host. A rig outside every Go module has no
-	// such target, so its `make test` is left alone (gt-dieu9).
+	// such target, so its `make test` is left alone (gt-dieu9) — unless the
+	// directory cannot be placed at all, which leaves that question open
+	// (gt-ofj05).
 	if i := findTestInvocation(lower, "make"); i >= 0 {
-		if !makeActsOnWholeGoModule(tokens[i:], cwd) {
+		if !makeActsOnWholeGoModule(tokens[i:], makeTreeDir(cwd, cwdKnown)) {
 			return "", nil
 		}
 		return "polecat 'make test' runs the whole suite", nil
@@ -122,6 +128,9 @@ func evaluatePolecatTestScopeSegment(tokens []string, cwd string) (reason string
 		}
 	}
 	pkgArgs := goTestPackageArgs(rest)
+	if cwdTargetsUnplacedDir(pkgArgs, cwdKnown) {
+		return "polecat 'go test' names a directory the guard cannot place", nil
+	}
 	wholeRepo, heavy := polecatHeavyTarget(pkgArgs, cwd)
 	if wholeRepo {
 		return "polecat 'go test' of the whole repo", nil

@@ -1847,6 +1847,10 @@ func TestIdleGateFollowsCdOnTheLine(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(nested, "go.mod"), []byte("module example.com/nested\n"), 0o644); err != nil {
 		t.Fatalf("write go.mod: %v", err)
 	}
+	// Links into and out of the Go tree; the target is a package inside it, a
+	// link to the root being found by the lexical walk too (gt-ofj05).
+	goLink := symlinkedTree(t, filepath.Join(goRoot, "internal", "cmd"))
+	nonGoLink := symlinkedTree(t, nonGo)
 
 	tests := []struct {
 		name    string
@@ -1892,10 +1896,27 @@ func TestIdleGateFollowsCdOnTheLine(t *testing.T) {
 		{"a refused cd runs make in the || chain's Go tree", nonGo, "cd /nonexistent/gt-0lzdi || cd " + goRoot + " && make test", true},
 		{"an unresolvable cd does not name the || chain", goRoot, "cd - || cd " + nonGo + " && make test", true},
 
-		// A cd this process cannot resolve keeps today's reading — the hook
-		// cwd — rather than guessing a directory.
-		{"unresolvable cd keeps the hook cwd, Go tree", goRoot, "cd /nonexistent/gt-me4vs && make test", true},
-		{"unresolvable cd keeps the hook cwd, non-Go tree", nonGo, "cd /nonexistent/gt-me4vs && make test", false},
+		// A symlinked directory is judged as the tree it names, both when make
+		// changes into it and when the cd does (gt-ofj05).
+		{"make -C through a link into the Go tree", nonGo, "make -C " + goLink + " test", true},
+		{"cd through a link into the Go tree", nonGo, "cd " + goLink + " && make test", true},
+		{"symlinked session cwd in the Go tree", goLink, "make test", true},
+
+		// A cd this process cannot place leaves the directory unknown, so the
+		// hold stands rather than being answered by the hook's own cwd. A cd
+		// the shell refuses does not: it left the shell where it was
+		// (gt-ofj05).
+		{"unset variable in the cd target", nonGo, `cd "$GT_OFJ05_UNSET" && make build`, true},
+		{"command substitution in the cd target", nonGo, `cd "$(printf /x)" && make test`, true},
+		{"a refused cd keeps the hook cwd, Go tree", goRoot, "cd /nonexistent/gt-me4vs && make test", true},
+		{"a refused cd keeps the hook cwd, non-Go tree", nonGo, "cd /nonexistent/gt-me4vs && make test", false},
+
+		// The controls: a directory the walk can place is still read on its own
+		// merits, so a non-Go tree stays allowed however the line reaches it.
+		{"no cd at all, non-Go hook cwd", nonGo, "make test", false},
+		{"make -C through a link to a non-Go tree", nonGo, "make -C " + nonGoLink + " test", false},
+		{"cd through a link to a non-Go tree", nonGo, "cd " + nonGoLink + " && make test", false},
+		{"symlinked session cwd in a non-Go tree", nonGoLink, "make test", false},
 
 		// The whole-repo go forms are held wherever they run, so the cd
 		// changes nothing for them.
