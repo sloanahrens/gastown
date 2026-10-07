@@ -3,7 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
-	"strings"
+	"slices"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -57,21 +57,23 @@ func TestDashRigThemesReadEachRigsOwnTheme(t *testing.T) {
 		{"ghost", "nowhere", nil},
 		// An explicit name list has no theme to name.
 		{"legacy", "", nil},
-		{"plain", polecat.ThemeForRig("plain"), nil}, // the hash default, sampled below
+		{"plain", polecat.ThemeForRig("plain"), nil}, // no settings: the rig-name hash
 	}
 	for _, tc := range tests {
 		theme, names := themes(tc.rig)
 		if theme != tc.theme {
 			t.Errorf("%s theme = %q, want %q", tc.rig, theme, tc.theme)
 		}
-		if tc.names != nil && strings.Join(names, ",") != strings.Join(tc.names, ",") {
-			t.Errorf("%s names = %v, want %v", tc.rig, names, tc.names)
-		}
-		if tc.names == nil && len(names) > rigThemeSamples {
+		if len(names) > rigThemeSamples {
 			t.Errorf("%s carries %d names, want at most %d", tc.rig, len(names), rigThemeSamples)
 		}
-		if tc.rig == "plain" && len(names) != rigThemeSamples {
-			t.Errorf("plain names = %v, want the default theme's first %d", names, rigThemeSamples)
+		if tc.names != nil && !slices.Equal(names, tc.names) {
+			t.Errorf("%s names = %v, want %v", tc.rig, names, tc.names)
 		}
+	}
+
+	// A theme with more names than the tooltip keeps is capped, not dropped.
+	if _, names := themes("plain"); len(names) != rigThemeSamples {
+		t.Errorf("the hash-default rig samples %v, want %d", names, rigThemeSamples)
 	}
 }
