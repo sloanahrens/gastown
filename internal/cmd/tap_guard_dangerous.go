@@ -1234,6 +1234,24 @@ func scanWalkRoot(proc guardProcess, tokens []string, scanIdx int, vars map[stri
 	return root, true
 }
 
+// segmentWalkRoot resolves the directory a guarded shell segment runs in: the
+// session's working directory moved by the cds earlier on the same shell line,
+// by scanWalkRoot's rules (gt-5mc21). tokens[start] is the segment's first
+// token, so the walk reads the earlier segments' cds and only those a "&&" or
+// ";" carries — a cd in a pipeline or a background job, or before "||", is one
+// the segment does not inherit.
+//
+// fallback is the caller's own reading of the working directory, returned when
+// the walk cannot resolve one (an unresolvable cd, an unreadable cwd), so a
+// segment whose directory is unknown keeps the hook cwd's reading rather than a
+// guess.
+func segmentWalkRoot(proc guardProcess, tokens []string, start int, vars map[string]string, fallback string) string {
+	if root, ok := scanWalkRoot(proc, tokens, start, vars); ok {
+		return root
+	}
+	return fallback
+}
+
 // shellCommandStart reports whether the token at i begins a shell command
 // rather than continuing an argument list: the line's first word, the word
 // after a separator, or the word after the "(" that opens a subshell.
