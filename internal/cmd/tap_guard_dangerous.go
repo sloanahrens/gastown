@@ -416,15 +416,72 @@ func stripHeredocBodies(command string) string {
 // from the surrounding text, so they are judged once, as code.
 func shellFedHeredocBodies(command string) []string {
 	var bodies []string
+	for _, span := range shellFedHeredocSpans(command) {
+		bodies = append(bodies, span.body)
+	}
+	return bodies
+}
+
+// shellFedHeredocSpans is shellFedHeredocBodies' span-returning sibling: the
+// same shell-fed heredocs in the same order, each keeping the reader line that
+// owns it, so a caller can judge the body in the directory that line left the
+// shell in (gt-1cvqj).
+func shellFedHeredocSpans(command string) []heredocSpan {
+	var spans []heredocSpan
 	for _, span := range scanHeredocs(command) {
 		if span.bodyStart < 0 || strings.TrimSpace(span.body) == "" {
 			continue
 		}
 		if heredocReaderIsShellInvoker(span.reader) {
-			bodies = append(bodies, span.body)
+			spans = append(spans, span)
 		}
 	}
-	return bodies
+	return spans
+}
+
+// heredocBodyDir returns the directory a shell-fed heredoc's body runs in:
+// base — the directory the invocation was in — moved by the cds the reader
+// line runs before it hands the body to the shell. "cd /go/tree && bash
+// <<EOF" runs the body in /go/tree, and judging it in the hook's own
+// directory instead let that cd step around the test guards (gt-1cvqj). A cd
+// the walk cannot place leaves the body where it already was, the reading
+// scanWalkRoot gives an unknown walk root: an unplaceable directory is not
+// evidence that the body runs in a guarded tree.
+func heredocBodyDir(proc guardProcess, reader, base string) string {
+	if dir, ok := heredocBodyCwd(proc, reader, base); ok {
+		return dir
+	}
+	return base
+}
+
+// heredocBodyCwd is the resolution behind heredocBodyDir: the directory the
+// reader line leaves the shell in by the time the body is read, and whether
+// the walk could place it. Only the cds before the shell invoker's own
+// segment count — "bash <<EOF && cd /go/tree" reads the body where the line
+// started and cds afterwards — which is why the walk stops at that segment
+// rather than at the end of the line.
+func heredocBodyCwd(proc guardProcess, reader, base string) (string, bool) {
+	tokens := shellTokenize(reader)
+	return cdWalkRoot(proc, tokens, shellInvokerIndex(tokens), base, shellVarAssignments(tokens))
+}
+
+// shellInvokerIndex returns the index of the first token of the first segment
+// whose command word is a shell invoker — the segment that consumes a heredoc
+// body — or len(tokens) when no segment is one. It marks where in a reader
+// line the body is read, so the cds that decide the body's directory are the
+// ones before it.
+func shellInvokerIndex(tokens []string) int {
+	start := 0
+	for i := 0; i <= len(tokens); i++ {
+		if i < len(tokens) && !shellCommandSeparators[tokens[i]] {
+			continue
+		}
+		if word, _ := segmentCommandWord(tokens[start:i]); word != "" && shellInvokers[strings.ToLower(filepath.Base(word))] {
+			return start
+		}
+		start = i + 1
+	}
+	return len(tokens)
 }
 
 // heredocReaderIsShellInvoker reports whether a shell invoker runs anywhere on
@@ -1216,7 +1273,23 @@ func scanWalkRoot(proc guardProcess, tokens []string, scanIdx int, vars map[stri
 	if err != nil {
 		return "", false
 	}
-	for i := 0; i < scanIdx; i++ {
+	return cdWalkRoot(proc, tokens, scanIdx, root, vars)
+}
+
+// cdWalkRoot applies to base the cd segments of tokens that precede end and
+// returns the directory the shell is in at end. It is the one cd tracker the
+// guards share: scanWalkRoot is this walk with the base taken from the process,
+// segmentWalkRoot is it applied to one segment of a line, and the shell-fed
+// heredoc recursion judges a body in the directory its reader line had cd-ed
+// into (gt-1cvqj). Every caller therefore agrees on whether a given cd carries
+// forward.
+//
+// ok is false when a cd cannot be resolved (cdTarget), or when a relative one
+// has no usable base. The callers read that as an unknown directory rather
+// than a refusal — see scanWalkRoot.
+func cdWalkRoot(proc guardProcess, tokens []string, end int, base string, vars map[string]string) (string, bool) {
+	root := base
+	for i := 0; i < end; i++ {
 		if tokens[i] != "cd" || !shellCommandStart(tokens, i) {
 			continue
 		}
@@ -1229,7 +1302,7 @@ func scanWalkRoot(proc guardProcess, tokens []string, scanIdx int, vars map[stri
 		// cd in a pipeline or a background job runs in a subshell of its own,
 		// and one before "||" runs only when it failed — in all three the
 		// scan keeps the working directory the shell already had.
-		if sep := i + 1 + len(args); sep < len(tokens) && tokens[sep] != "&&" && tokens[sep] != ";" {
+		if sep := i + 1 + len(args); sep < end && tokens[sep] != "&&" && tokens[sep] != ";" {
 			continue
 		}
 		root = target
@@ -1237,22 +1310,19 @@ func scanWalkRoot(proc guardProcess, tokens []string, scanIdx int, vars map[stri
 	return root, true
 }
 
-// segmentWalkRoot resolves the directory a guarded shell segment runs in: the
-// session's working directory moved by the cds earlier on the same shell line,
-// by scanWalkRoot's rules (gt-5mc21). tokens[start] is the segment's first
-// token, so the walk reads the earlier segments' cds and only those a "&&" or
-// ";" carries — a cd in a pipeline or a background job, or before "||", is one
-// the segment does not inherit.
-//
-// fallback is the caller's own reading of the working directory, returned when
-// the walk cannot resolve one (an unresolvable cd, an unreadable cwd), so a
-// segment whose directory is unknown keeps the hook cwd's reading rather than a
-// guess.
-func segmentWalkRoot(proc guardProcess, tokens []string, start int, vars map[string]string, fallback string) string {
-	if root, ok := scanWalkRoot(proc, tokens, start, vars); ok {
+// segmentWalkRoot resolves the directory a guarded shell segment runs in: base
+// — the invocation's directory, or the directory a shell-fed heredoc's reader
+// line left the shell in — moved by the cds earlier on the same shell line, by
+// cdWalkRoot's rules (gt-5mc21). tokens[start] is the segment's first token, so
+// the walk reads the earlier segments' cds and only those a "&&" or ";" carries
+// — a cd in a pipeline or a background job, or before "||", is one the segment
+// does not inherit. A directory the walk cannot place (an unresolvable cd)
+// leaves the segment judged in base rather than in a guess (gt-1cvqj).
+func segmentWalkRoot(proc guardProcess, tokens []string, start int, base string, vars map[string]string) string {
+	if root, ok := cdWalkRoot(proc, tokens, start, base, vars); ok {
 		return root
 	}
-	return fallback
+	return base
 }
 
 // shellCommandStart reports whether the token at i begins a shell command
@@ -1270,8 +1340,11 @@ func shellCommandStart(tokens []string, i int) bool {
 // tracks. ok is false for every spelling whose result this guard cannot know:
 // `cd -`'s previous directory, a target that is not an existing directory
 // (the cd fails, and what the shell does next depends on the separator), an
-// argument this process cannot expand, or more than one operand, which the
-// shell refuses. A bare `cd` goes to the home directory.
+// argument this process cannot expand, more than one operand, which the shell
+// refuses, or a relative target under an unknown base ("", which is what an
+// unreadable working directory gives — resolving it against this process's
+// own directory would judge a tree the command never named). A bare `cd` goes
+// to the home directory.
 func cdTarget(proc guardProcess, args []string, base string, vars map[string]string) (string, bool) {
 	var operands []string
 	for _, arg := range args {
@@ -1299,6 +1372,9 @@ func cdTarget(proc guardProcess, args []string, base string, vars map[string]str
 		return "", false
 	}
 	if !filepath.IsAbs(path) {
+		if base == "" {
+			return "", false
+		}
 		path = filepath.Join(base, path)
 	}
 	path = filepath.Clean(path)
@@ -1990,7 +2066,7 @@ func idleGateHeldAction(proc guardProcess, command string) string {
 	start := 0
 	for i, tok := range tokens {
 		if shellCommandSeparators[tok] {
-			if held := idleGateHeldSegment(segment, segmentWalkRoot(proc, tokens, start, vars, cwd)); held != "" {
+			if held := idleGateHeldSegment(segment, segmentWalkRoot(proc, tokens, start, cwd, vars)); held != "" {
 				return held
 			}
 			segment = nil
@@ -1999,7 +2075,7 @@ func idleGateHeldAction(proc guardProcess, command string) string {
 		}
 		segment = append(segment, tok)
 	}
-	return idleGateHeldSegment(segment, segmentWalkRoot(proc, tokens, start, vars, cwd))
+	return idleGateHeldSegment(segment, segmentWalkRoot(proc, tokens, start, cwd, vars))
 }
 
 // isIdleGatedSuiteStartCommand reports whether command contains an unwrapped
