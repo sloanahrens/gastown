@@ -654,6 +654,7 @@ func TestMatchesUnboundedScanImplicitRoot(t *testing.T) {
 	worktree := filepath.Join(rig, "polecats", "lapis", "gastown")
 	settings := filepath.Join(rig, "settings")
 	other := t.TempDir()
+	missing := filepath.Join(other, "nope")
 	repoGit := filepath.Join(rig, ".repo.git")
 
 	tests := []struct {
@@ -732,11 +733,36 @@ func TestMatchesUnboundedScanImplicitRoot(t *testing.T) {
 		// scan on the strength of a directory the shell may never enter.
 		{"cd - has no known target", rig, "cd - && grep -rn TODO", false, ""},
 		{"cd to an unseen variable", rig, "cd $GT_NO_SUCH_DIR && grep -rn TODO", false, ""},
-		{"cd to a directory that does not exist", rig, "cd " + filepath.Join(other, "nope") + " && grep -rn TODO", false, ""},
+		{"cd to a directory that does not exist", rig, "cd " + missing + " && grep -rn TODO", false, ""},
+
+		// The walk keeps going. A cd it cannot resolve loses the directory,
+		// but a later absolute target needs no base and so names one again
+		// (gt-n7ksl); a later relative one has nothing to resolve against, and
+		// guessing the directory the failed cd left behind would be exactly
+		// that.
+		{"a missing cd, then an absolute cd into the rig root walks the rig", worktree, "cd " + missing + " ; cd " + rig + " && grep -rn TODO", true, "cwd is a rig root"},
+		{"the same cd after an && the missing cd dead-ends names nothing", worktree, "cd " + missing + " && cd " + rig + " ; grep -rn TODO", false, ""},
+		{"a missing cd, then an absolute cd out of the town bounds the scan", rig, "cd " + missing + " ; cd " + other + " && grep -rn TODO", false, ""},
+		{"a missing cd leaves a relative target with no base", rig, "cd " + missing + " ; cd polecats && grep -rn TODO", false, ""},
 
 		// A cd in a pipeline or background job runs in a subshell of its own,
-		// so the scan after it keeps the directory the shell already had.
+		// so the scan after it keeps the directory the shell already had —
+		// whether or not that cd could be resolved.
 		{"cd in a pipeline does not move the walk root", rig, "cd " + other + " | grep -rn TODO", true, "cwd is a rig root"},
+		{"an unresolvable cd in a pipeline does not blank the walk root", rig, "cd " + missing + " | grep -rn TODO", true, "cwd is a rig root"},
+		{"an unplaceable cd in a pipeline does not blank the walk root", rig, `cd "$GT_NO_SUCH_DIR" | grep -rn TODO`, true, "cwd is a rig root"},
+
+		// pushd changes the shell's directory the same way cd does, so the
+		// walk reads it the same way (gt-n7ksl). The stack it pushes onto is
+		// one the walk does not track: a popd, or a pushd with no target,
+		// leaves a directory the walk cannot place, and this rule reads that as
+		// an unknown root — not a hazard — rather than stranding the scan at
+		// the pushed tree.
+		{"pushd into the rig root walks the rig", worktree, "pushd " + rig + " && grep -rn TODO", true, "cwd is a rig root"},
+		{"pushd into one worktree bounds the scan", rig, "pushd " + worktree + " ; grep -rn TODO", false, ""},
+		{"bare pushd swaps with a stack the walk cannot read", rig, "pushd && grep -rn TODO", false, ""},
+		{"pushd then popd leaves the walk root unknown", worktree, "pushd " + rig + " && popd && grep -rn TODO", false, ""},
+		{"pushd -n leaves the directory alone", rig, "pushd -n " + worktree + " && grep -rn TODO", true, "cwd is a rig root"},
 
 		// Blocked — the working directory is the home directory, the root the
 		// shell's own "~" names.

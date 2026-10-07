@@ -213,6 +213,34 @@ func TestGuardsFollowCdOnTheLine(t *testing.T) {
 		{"make -C through a link out of the Go tree", goRoot, "make -C " + outLink + " test", false, false},
 		{"cd through a link out of the Go tree", goRoot, "cd " + outLink + " && make test", false, false},
 		{"symlinked session cwd in a non-Go tree", nonGoLink, "make test", false, false},
+
+		// The walk keeps going past a change it cannot resolve: a later
+		// absolute cd needs no base and names the tree again, so the segment
+		// after it is judged there (gt-n7ksl). A change that does not carry
+		// never reaches this shell at all, resolvable or not, so it cannot
+		// blank the directory either — and one carried by "&&" dead-ends the
+		// list, so nothing after it runs.
+		{"a missing cd, then an absolute cd into the Go tree", nonGo, "cd /nonexistent/gt-n7ksl ; cd " + goRoot + " && make test", true, true},
+		{"a missing cd dead-ends the && list before that cd", nonGo, "cd /nonexistent/gt-n7ksl && cd " + goRoot + " ; make test", false, false},
+		{"a missing cd, then an absolute cd out of the Go tree", goRoot, "cd /nonexistent/gt-n7ksl ; cd " + nonGo + " && make test", false, false},
+		{"an unresolvable cd in a pipeline keeps the Go tree", goRoot, "cd /nonexistent/gt-n7ksl | make test", true, true},
+
+		// A cd whose separator does not carry runs in a subshell of its own, so
+		// it is not gt-ofj05's unplaced cd: the segment's directory is the one
+		// the shell already had, however unplaceable the cd's target is, and
+		// the guard neither reads it as the Go tree nor refuses on it.
+		{"an unplaceable cd in a pipeline keeps the Go tree", goRoot, `cd "$GT_OFJ05_UNSET" | make test`, true, true},
+		{"an unplaceable cd in a pipeline stays exempt", nonGo, `cd "$GT_OFJ05_UNSET" | make test`, false, false},
+
+		// pushd changes the shell's directory the same way cd does (gt-n7ksl).
+		// The stack it pushes onto is one the walk does not track: a popd
+		// leaves the directory unplaced, so the guards refuse rather than judge
+		// the segment in the tree the pushd named, and a pushd -n leaves the
+		// shell where it was.
+		{"pushd into the Go tree then make test", nonGo, "pushd " + goRoot + " && make test", true, true},
+		{"pushd out of the Go tree then make test", goRoot, "pushd " + nonGo + " && make test", false, false},
+		{"pushd then popd leaves the segment refused", goRoot, "pushd " + nonGo + " && popd && make test", true, true},
+		{"pushd -n does not leave the Go tree", goRoot, "pushd -n " + nonGo + " && make test", true, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

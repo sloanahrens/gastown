@@ -78,10 +78,12 @@ This guard also HOLDS (rather than permanently blocks) a full-suite start —
 ./...' — when the host is already busy, unless the command is wrapped in
 'gt slot run'. Re-running the exact same command after a short wait passes
 once the host frees up. See gt-nqcy follow-up. The tree a held segment is
-judged in is the one it runs in: a cd earlier on the same shell line carries
-into the segments after it ("&&"/";" only, as the shell does), so an agent
-whose cwd is a non-Go tree is held for 'cd <go tree> && make test' rather
-than stepping around the gate from outside the Go tree (gt-me4vs).
+judged in is the one it runs in: a cd or pushd earlier on the same shell line
+carries into the segments after it ("&&"/";" only, as the shell does), so an
+agent whose cwd is a non-Go tree is held for 'cd <go tree> && make test'
+rather than stepping around the gate from outside the Go tree (gt-me4vs,
+gt-n7ksl). A popd takes its directory from a stack the walk does not track, so
+it leaves the directory unknown rather than naming one.
 
 The guard reads the tool input from stdin (Claude Code hook protocol)
 and exits with code 2 to block or hold an operation.
@@ -1281,21 +1283,28 @@ func hasFileOperand(args []string) bool {
 	return false
 }
 
+// dirChangeCommands names the shell builtins the walk follows — the ones that
+// leave the shell in a different directory. cd and pushd name that directory as
+// an operand; popd takes it from the directory stack, which the walk does not
+// track, so a popd loses the directory rather than naming one (gt-n7ksl).
+var dirChangeCommands = map[string]bool{"cd": true, "pushd": true, "popd": true}
+
 // scanWalkRoot resolves the directory a scan invocation walks when it names
 // no path of its own: the guard's working directory — the session's cwd —
-// moved by any cd the invocation runs before the scan (gt-3e6wa).
+// moved by any cd, pushd or popd the invocation runs before the scan (gt-3e6wa,
+// gt-n7ksl).
 //
-// tokens and scanIdx locate the scan in the invocation, so the cds read here
-// are the ones in earlier segments of the same shell line: `cd /tmp && grep
-// -rn TODO` walks /tmp, and reading the session's cwd instead would block a
-// bounded scan run from a rig root.
+// tokens and scanIdx locate the scan in the invocation, so the directory
+// changes read here are the ones in earlier segments of the same shell line:
+// `cd /tmp && grep -rn TODO` walks /tmp, and reading the session's cwd instead
+// would block a bounded scan run from a rig root.
 //
-// ok is false when the walk root cannot be known — a cd this process cannot
-// resolve, a cd whose "||" branch the line does not show, or an unreadable
-// working directory. An unknown root is not a hazard, so the caller blocks
-// nothing on it: the walk's two unnamed outcomes read the same here, and the
-// distinction cdWalkRoot draws between them is for the guards that refuse on
-// one (gt-ofj05).
+// ok is false when the walk root cannot be known — a change this process
+// cannot resolve, a cd whose "||" branch the line does not show, or an
+// unreadable working directory. An unknown root is not a hazard, so the caller
+// blocks nothing on it: the walk's two unnamed outcomes read the same here, and
+// the distinction cdWalkRoot draws between them is for the guards that refuse
+// on one (gt-ofj05).
 func scanWalkRoot(proc guardProcess, tokens []string, scanIdx int, vars map[string]string) (string, bool) {
 	root, err := proc.getwd()
 	if err != nil {
@@ -1325,64 +1334,113 @@ const (
 	cdWalkGivenUp
 )
 
-// cdWalkRoot applies to base the cd segments of tokens that precede end and
-// returns the directory the shell is in at end. It is the one cd tracker the
+// cdWalkOutcome names the walk's unnamed outcome for a change it cannot follow
+// to a directory, in the terms cdWalkRoot reports (cdWalkStatus). A change this
+// guard cannot place is an unplaced line — the shell may have changed into a
+// directory the line never names — and one the shell refuses, or leaves open
+// because it hangs off a "||" the walk cannot follow, is a give-up.
+func cdWalkOutcome(status cdStatus) cdWalkStatus {
+	if status == cdUnknown {
+		return cdWalkUnplaced
+	}
+	return cdWalkGivenUp
+}
+
+// cdWalkRoot applies to base the directory changes of tokens that precede end
+// and returns the directory the shell is in at end. It is the one tracker the
 // guards share: scanWalkRoot is this walk with the base taken from the process,
 // segmentWalkRoot is it applied to one segment of a line, and the shell-fed
 // heredoc recursion judges a body in the directory the shell had reached by the
 // time it read the body (gt-1cvqj, gt-v02wh). Every caller therefore agrees on
-// whether a given cd carries forward, and the status says which directory the
-// walk has to name, if any (cdWalkStatus).
+// whether a given change carries forward, and the status says which directory
+// the walk has to name, if any (cdWalkStatus).
+//
+// A change this process cannot resolve loses the directory from that point on
+// rather than being guessed at (gt-n7ksl): the shell may or may not have moved,
+// so what the commands after it run in is not something the walk can name. A cd
+// the shell refuses is one the walk could name instead of losing — the shell
+// stays where it was (gt-34vra). A
+// change carried by ";" or by nothing at all is where that keeps going — the
+// commands after a ";" certainly run, so a later absolute target needs no base
+// and names the directory again. A change carried by "&&" is where it stops
+// instead: that list is at its dead end, and the walk reads no change after it
+// rather than guess which of them the shell reaches (gt-34vra reads a cd the
+// next ";" carries after a dead list).
+//
+// The status is the outcome the walk reached: cdWalkPlaced with the directory
+// the shell is in, or the unnamed outcome of the change it could not resolve
+// (cdWalkOutcome). A later change that does place the directory clears it, the
+// commands after that one running in a tree the line names.
 func cdWalkRoot(proc guardProcess, tokens []string, end int, base string, vars map[string]string) (string, cdWalkStatus) {
 	root := base
+	lost := cdWalkPlaced
 	for i := 0; i < end; i++ {
-		if tokens[i] != "cd" || !shellCommandStart(tokens, i) {
+		if !dirChangeCommands[tokens[i]] || !shellCommandStart(tokens, i) {
 			continue
 		}
 		args := commandArgs(tokens, i)
 		sep := i + 1 + len(args)
-		target, status := cdTarget(proc, args, root, vars)
 		// "cd A || cd B ..." runs cd B only when cd A fails, and the walk
-		// reads cds out of branches it cannot follow. So a cd A that resolves
-		// drops the directory rather than name cd B's, which is the shell's
-		// only when the "||" was taken: `cd <go tree> || cd <safe> && make
-		// test` runs in the go tree, `cd <safe> || cd <rig root> && grep -rn
-		// TODO` in <safe>. A cd A the shell refuses did fail, so the "||" is
-		// taken and the directory the walk already had stands (gt-0lzdi).
+		// reads changes out of branches it cannot follow. So a cd A that
+		// resolves drops the directory rather than name cd B's, which is the
+		// shell's only when the "||" was taken: `cd <go tree> || cd <safe> &&
+		// make test` runs in the go tree, `cd <safe> || cd <rig root> && grep
+		// -rn TODO` in <safe>. A cd A the shell refuses did fail, so the "||"
+		// is taken and the directory the walk already had stands (gt-0lzdi).
 		if sep < end && tokens[sep] == "||" {
-			if status == cdRefused {
-				continue
+			if _, status := dirChangeTarget(proc, tokens[i], args, root, vars); status != cdRefused {
+				return "", cdWalkOutcome(status)
 			}
-			if status == cdUnknown {
-				return "", cdWalkUnplaced
-			}
-			return "", cdWalkGivenUp
-		}
-		if status == cdUnknown {
-			return "", cdWalkUnplaced
-		}
-		if status == cdRefused {
-			return "", cdWalkGivenUp
+			continue
 		}
 		// Only "&&" and ";" carry the change to the command that follows: a
-		// cd in a pipeline or a background job runs in a subshell of its own,
-		// so in both the walk keeps the working directory the shell already
-		// had.
+		// change in a pipeline or a background job runs in a subshell of its
+		// own, so the walk keeps the working directory the shell already had.
+		// Reading the separator before the target drops an unresolvable change
+		// with them: it never reaches this shell, so it cannot make the
+		// directory unknown either (gt-n7ksl).
 		if sep < end && tokens[sep] != "&&" && tokens[sep] != ";" {
 			continue
 		}
+		target, status := dirChangeTarget(proc, tokens[i], args, root, vars)
+		if status != cdResolved {
+			// The change may have run and may not have: a cd the shell refuses
+			// fails, and a spelling like `cd -` is one this walk cannot place
+			// at all. An "&&" list ends at either, so nothing after it is a
+			// directory the walk can name — `cd /nonexistent && cd /tmp ; grep`
+			// never reaches /tmp, and naming it there would judge the grep in a
+			// tree the shell stays out of. The walk reports the line's outcome
+			// rather than follow the list past its dead end.
+			if sep < end && tokens[sep] == "&&" {
+				return "", cdWalkOutcome(status)
+			}
+			// Carried by ";" or by nothing at all, the change did run in this
+			// shell, so the walk drops the directory from here on rather than
+			// guess it — but keeps walking, because a later absolute target
+			// needs no base and names the directory again (gt-n7ksl). Where it
+			// does not, this change's outcome is the line's. A change the guard
+			// cannot place is the stronger of the two, and stays the line's
+			// whatever a later refusal adds.
+			root = ""
+			if outcome := cdWalkOutcome(status); lost == cdWalkPlaced || outcome == cdWalkUnplaced {
+				lost = outcome
+			}
+			continue
+		}
 		root = target
+		lost = cdWalkPlaced
 	}
-	return root, cdWalkPlaced
+	return root, lost
 }
 
 // segmentWalkRoot resolves the directory a guarded shell segment runs in: base
 // — the invocation's directory, or the directory a shell-fed heredoc's reader
-// line left the shell in — moved by the cds earlier on the same shell line, by
-// cdWalkRoot's rules (gt-5mc21). tokens[start] is the segment's first token, so
-// the walk reads the earlier segments' cds and only those a "&&" or ";" carries
-// — a cd in a pipeline or a background job, or one whose directory a "||"
-// chain leaves open, is one the segment does not inherit.
+// line left the shell in — moved by the cd, pushd and popd segments earlier on
+// the same shell line, by cdWalkRoot's rules (gt-5mc21, gt-n7ksl). tokens[start]
+// is the segment's first token, so the walk reads the earlier segments' changes
+// and only those a "&&" or ";" carries — a change in a pipeline or a background
+// job, or one whose directory a "||" chain leaves open, is one the segment does
+// not inherit.
 //
 // The directory comes back as the tree it really names, symlinks resolved:
 // these rules ask which tree a command runs in, and a path reached through a
@@ -1421,31 +1479,61 @@ func shellCommandStart(tokens []string, i int) bool {
 	return shellCommandSeparators[tokens[i-1]] || tokens[i-1] == "("
 }
 
-// cdStatus says what the walk can tell about the directory change a cd segment
-// makes. The zero value is the reading a caller must fall back on when it can
-// tell nothing, so a new spelling added to cdTarget is unknown until it is
-// deliberately classified.
+// cdStatus says what the walk can tell about the directory change a cd or
+// pushd segment makes. The zero value is the reading a caller must fall back on
+// when it can tell nothing, so a new spelling added to dirChangeTarget is
+// unknown until it is deliberately classified.
 type cdStatus int
 
 const (
-	// cdUnknown: the guard cannot tell whether the cd succeeds — `cd -`, an
-	// argument it cannot expand, or more than one operand. Never resolved by
-	// assumption.
+	// cdUnknown: the guard cannot tell whether the change succeeds — `cd -`,
+	// a directory-stack entry, an argument it cannot expand, or more than one
+	// operand. Never resolved by assumption.
 	cdUnknown cdStatus = iota
-	// cdRefused: the shell refuses the cd — the target is not an existing
+	// cdRefused: the shell refuses the change — the target is not an existing
 	// directory — so the directory the shell was in stands, and a "||" left of
 	// it is taken.
 	cdRefused
-	// cdResolved: the target is an existing directory, so the cd succeeds.
+	// cdResolved: the target is an existing directory, so the change succeeds.
 	cdResolved
 )
 
-// cdTarget resolves the directory a cd segment changes to, relative to base —
-// the directory the shell was in when it ran — for the walk root cdWalkRoot
-// tracks. A bare `cd` goes to the home directory. The status separates a cd
-// the shell refuses from one whose result this guard cannot know, which the
-// "||" rule has to tell apart (gt-0lzdi; see the cdStatus constants).
-func cdTarget(proc guardProcess, args []string, base string, vars map[string]string) (string, cdStatus) {
+// dirChangeTarget resolves the directory a cd or pushd segment leaves the shell
+// in, relative to base — the directory the shell was in when it ran — for the
+// walk root cdWalkRoot tracks. A bare `cd` goes to the home directory, and a
+// pushd -n leaves the shell where it is. The status separates a change the
+// shell refuses from one whose result this guard cannot know, which the "||"
+// rule has to tell apart (gt-0lzdi; see the cdStatus constants).
+//
+// base is "" when the walk has already lost the directory, which is also what
+// an unreadable working directory gives, and then only an absolute target
+// resolves: a relative one has no base to be resolved against, so resolving it
+// against this process's own directory would judge a tree the command never
+// named (gt-1cvqj) — and guessing one is what this walk exists not to do
+// (gt-n7ksl).
+//
+// The status is cdUnknown for every spelling whose result this guard does not
+// name: a popd or a bare pushd, whose target is a directory-stack entry; `cd
+// -`'s previous directory; an argument this process cannot expand; or more than
+// one operand, which the walk leaves unread rather than read as the refusal a
+// "||" turns on. A target that is not an existing directory is cdRefused — the
+// change fails, and a "||" left of it is taken.
+func dirChangeTarget(proc guardProcess, name string, args []string, base string, vars map[string]string) (string, cdStatus) {
+	// A popd changes to a directory-stack entry, and the walk tracks no stack:
+	// which directory that is cannot be named, whatever operands the popd
+	// carries.
+	if name == "popd" {
+		return "", cdUnknown
+	}
+	// pushd -n pushes onto the stack without changing the directory, so the
+	// shell stays in the one the walk already knows — including when that one
+	// is itself unknown.
+	if name == "pushd" && hasExactArg(args, "-n") {
+		if base == "" {
+			return "", cdUnknown
+		}
+		return base, cdResolved
+	}
 	var operands []string
 	for _, arg := range args {
 		switch arg {
@@ -1461,6 +1549,11 @@ func cdTarget(proc guardProcess, args []string, base string, vars map[string]str
 		return "", cdUnknown
 	}
 	if len(operands) == 0 {
+		// A bare cd is the home directory; a bare pushd swaps with the
+		// directory stack, which this walk does not track.
+		if name != "cd" {
+			return "", cdUnknown
+		}
 		home, err := proc.homeDir()
 		if err != nil || home == "" {
 			return "", cdUnknown
@@ -2177,11 +2270,11 @@ func idleGateAlternative(heldAction string) string {
 // no incident has required it; scope stays narrow until one does.
 //
 // Each segment is judged in the directory its own line runs it in — the hook
-// cwd moved by the cds earlier on the same line, by the shared walk
-// (segmentWalkRoot, over cdWalkRoot/cdTarget: "&&" and ";" carry the change,
-// a "||" whose left cd resolves and a cd the shell refuses both leave the
-// directory unknown, and the hook cwd is the fallback) — and held when the
-// directory is one the walk cannot place at all (gt-ofj05).
+// cwd moved by the cd, pushd and popd segments earlier on the same line, by the
+// shared walk (segmentWalkRoot, over cdWalkRoot/dirChangeTarget: "&&" and ";"
+// carry the change, a "||" whose left cd resolves and a cd the shell refuses
+// both leave the directory unknown, and the hook cwd is the fallback) — and
+// held when the directory is one the walk cannot place at all (gt-ofj05).
 // Judging every segment against the hook cwd instead let an agent whose cwd is
 // a non-Go tree run the whole module suite with 'cd <go tree> && make test' —
 // the make target resolved in the non-Go tree, where it is not the module's

@@ -1811,6 +1811,14 @@ func TestCdWalkOrChain(t *testing.T) {
 		{"a resolved left cd alone still carries", "cd " + left + " && grep -rn TODO", left, true},
 		{"a refused cd before && keeps its unknown reading", "cd " + gone + " && grep -rn TODO", "", false},
 		{"a cd in a pipeline still does not carry", "cd " + left + " | grep -rn TODO", base, true},
+
+		// The walk keeps going past a change it cannot place, so that a later
+		// absolute cd names the directory again (gt-n7ksl) — but only where
+		// the shell still gets there: an "&&" list ends at a cd that failed or
+		// cannot be placed, and a cd after that dead end never runs.
+		{"a later absolute cd after a failed cd is not named", "cd " + gone + " && cd " + left + " ; grep -rn TODO", "", false},
+		{"the same after a cd the walk cannot place", "cd - && cd " + left + " ; grep -rn TODO", "", false},
+		{"a semicolon still carries the walk past a failed cd", "cd " + gone + " ; cd " + left + " && grep -rn TODO", left, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1827,10 +1835,10 @@ func TestCdWalkOrChain(t *testing.T) {
 // it runs in, not the one the hook was invoked from. The hole was an agent
 // whose cwd is a non-Go tree running the whole module suite through
 // 'cd <go tree> && make test' — the cd carries, by the same walk the scan rule
-// uses (scanWalkRoot/cdTarget), so the make target is resolved in the Go tree
-// it actually runs in. The same line staying in the non-Go tree is left alone.
-// The compose rules (make -C, the separators that do not carry, a cd the guard
-// cannot resolve) are the walk's, shared with the container-suite and
+// uses (scanWalkRoot/dirChangeTarget), so the make target is resolved in the Go
+// tree it actually runs in. The same line staying in the non-Go tree is left
+// alone. The compose rules (make -C, the separators that do not carry, a cd the
+// guard cannot resolve) are the walk's, shared with the container-suite and
 // test-scope rules.
 func TestIdleGateFollowsCdOnTheLine(t *testing.T) {
 	t.Parallel()
@@ -1917,6 +1925,19 @@ func TestIdleGateFollowsCdOnTheLine(t *testing.T) {
 		{"make -C through a link to a non-Go tree", nonGo, "make -C " + nonGoLink + " test", false},
 		{"cd through a link to a non-Go tree", nonGo, "cd " + nonGoLink + " && make test", false},
 		{"symlinked session cwd in a non-Go tree", nonGoLink, "make test", false},
+
+		// The walk keeps going past a change it cannot resolve, so a later
+		// absolute cd names the tree again, and a change that does not carry
+		// never blanks the directory in the first place (gt-n7ksl). pushd
+		// changes the directory the same way cd does, and its stack is one the
+		// walk does not track, so a popd leaves the segment refused.
+		{"a missing cd, then an absolute cd into the Go tree", nonGo, "cd /nonexistent/gt-n7ksl ; cd " + goRoot + " && make test", true},
+		{"an unresolvable cd in a pipeline keeps the Go tree", goRoot, "cd /nonexistent/gt-n7ksl | make test", true},
+		{"an unplaceable cd in a pipeline keeps the Go tree", goRoot, `cd "$GT_OFJ05_UNSET" | make test`, true},
+		{"an unplaceable cd in a pipeline stays exempt", nonGo, `cd "$GT_OFJ05_UNSET" | make test`, false},
+		{"pushd into the Go tree then make test", nonGo, "pushd " + goRoot + " && make test", true},
+		{"pushd then popd leaves the segment refused", goRoot, "pushd " + nonGo + " && popd && make test", true},
+		{"pushd -n does not leave the Go tree", goRoot, "pushd -n " + nonGo + " && make test", true},
 
 		// The whole-repo go forms are held wherever they run, so the cd
 		// changes nothing for them.
