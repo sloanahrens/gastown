@@ -1776,6 +1776,53 @@ func TestIsIdleGatedSuiteStartOutsideGoTree(t *testing.T) {
 	}
 }
 
+// The walk's reading of a "||" chain (gt-0lzdi): the shell runs the chain's
+// right-hand cd only when the left one fails, so the segments after the chain
+// run in that cd's directory only for a left cd the shell certainly refused.
+// One that resolves leaves the branch the "||" took unshown, and one the guard
+// cannot resolve is not assumed to have failed.
+func TestCdWalkOrChain(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	left := filepath.Join(base, "left")
+	right := filepath.Join(base, "right")
+	for _, dir := range []string{left, right} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	proc := fakeGuardProcess(map[string]string{"HOME": base}, base)
+	gone := filepath.Join(base, "gone")
+
+	tests := []struct {
+		name    string
+		command string
+		want    string
+		known   bool
+	}{
+		{"a left cd that resolves leaves the branch unshown", "cd " + left + " || cd " + right + " && grep -rn TODO", "", false},
+		{"the same with the chain followed by a semicolon", "cd " + left + " || cd " + right + " ; grep -rn TODO", "", false},
+		{"a later cd is not named on a resolved left cd", "cd " + left + " || cd " + right + " && cd " + right + " && grep -rn TODO", "", false},
+		{"a left cd the shell refuses takes the right branch", "cd " + gone + " || cd " + right + " && grep -rn TODO", right, true},
+		{"the same with a relative right-hand cd", "cd gone || cd right && grep -rn TODO", right, true},
+		{"a left cd the shell refuses, with a later cd carried", "cd " + gone + " || cd " + left + " && cd " + right + " && grep -rn TODO", right, true},
+		{"cd - is not assumed to have failed", "cd - || cd " + right + " && grep -rn TODO", "", false},
+		{"an unexpanded left cd is not assumed to have failed", "cd $GT_NO_SUCH_DIR || cd " + right + " && grep -rn TODO", "", false},
+		{"a resolved left cd alone still carries", "cd " + left + " && grep -rn TODO", left, true},
+		{"a refused cd before && keeps its unknown reading", "cd " + gone + " && grep -rn TODO", "", false},
+		{"a cd in a pipeline still does not carry", "cd " + left + " | grep -rn TODO", base, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tokens := shellTokenize(tt.command)
+			got, ok := scanWalkRoot(proc, tokens, len(tokens), shellVarAssignments(tokens))
+			if ok != tt.known || (ok && got != tt.want) {
+				t.Errorf("scanWalkRoot(%q) = (%q, %v), want (%q, %v)", tt.command, got, ok, tt.want, tt.known)
+			}
+		})
+	}
+}
+
 // The acceptance criterion for gt-me4vs: a segment is judged in the directory
 // it runs in, not the one the hook was invoked from. The hole was an agent
 // whose cwd is a non-Go tree running the whole module suite through
@@ -1829,12 +1876,21 @@ func TestIdleGateFollowsCdOnTheLine(t *testing.T) {
 		{"cd out of the Go tree, make -C back in", nonGo, "cd " + nonGo + " && make -C " + goRoot + " test", true},
 
 		// Only "&&" and ";" carry the change — a cd in a pipeline or a
-		// background job runs in a subshell of its own, and one before "||"
-		// runs only when it failed, so in all three the segment keeps the
-		// directory the shell already had (scanWalkRoot's rule).
+		// background job runs in a subshell of its own, so both keep the
+		// directory the shell already had, and one before "||" carries its
+		// own change nowhere either (scanWalkRoot's rule; gt-0lzdi).
 		{"cd in a pipeline does not carry", nonGo, "cd " + goRoot + " | make test", false},
 		{"background cd does not carry", nonGo, "cd " + goRoot + " & make test", false},
 		{"cd before || does not carry", nonGo, "cd " + goRoot + " || make test", false},
+
+		// A "||" chain runs the segment in its right-hand cd's directory only
+		// when the left cd certainly failed, so the chain neither hides the
+		// Go tree the shell is really in (gt-0lzdi) nor holds a segment that
+		// stays in the non-Go tree.
+		{"cd out of the Go tree before a || chain", goRoot, "cd " + goRoot + " || cd " + nonGo + " && make test", true},
+		{"cd into the Go tree before a || chain", nonGo, "cd " + nonGo + " || cd " + goRoot + " && make test", false},
+		{"a refused cd runs make in the || chain's Go tree", nonGo, "cd /nonexistent/gt-0lzdi || cd " + goRoot + " && make test", true},
+		{"an unresolvable cd does not name the || chain", goRoot, "cd - || cd " + nonGo + " && make test", true},
 
 		// A cd this process cannot resolve keeps today's reading — the hook
 		// cwd — rather than guessing a directory.

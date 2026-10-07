@@ -1287,8 +1287,9 @@ func hasFileOperand(args []string) bool {
 // bounded scan run from a rig root.
 //
 // ok is false when the walk root cannot be known — a cd this process cannot
-// resolve, or an unreadable working directory. An unknown root is not a
-// hazard, so the caller blocks nothing on it.
+// resolve, a cd whose "||" branch the line does not show, or an unreadable
+// working directory. An unknown root is not a hazard, so the caller blocks
+// nothing on it.
 func scanWalkRoot(proc guardProcess, tokens []string, scanIdx int, vars map[string]string) (string, bool) {
 	root, err := proc.getwd()
 	if err != nil {
@@ -1315,15 +1316,29 @@ func cdWalkRoot(proc guardProcess, tokens []string, end int, base string, vars m
 			continue
 		}
 		args := commandArgs(tokens, i)
-		target, ok := cdTarget(proc, args, root, vars)
-		if !ok {
+		sep := i + 1 + len(args)
+		target, status := cdTarget(proc, args, root, vars)
+		// "cd A || cd B ..." runs cd B only when cd A fails, and the walk
+		// reads cds out of branches it cannot follow. So a cd A that resolves
+		// drops the directory rather than name cd B's, which is the shell's
+		// only when the "||" was taken: `cd <go tree> || cd <safe> && make
+		// test` runs in the go tree, `cd <safe> || cd <rig root> && grep -rn
+		// TODO` in <safe>. A cd A the shell refuses did fail, so the "||" is
+		// taken and the directory the walk already had stands (gt-0lzdi).
+		if sep < end && tokens[sep] == "||" {
+			if status == cdRefused {
+				continue
+			}
+			return "", false
+		}
+		if status != cdResolved {
 			return "", false
 		}
 		// Only "&&" and ";" carry the change to the command that follows: a
 		// cd in a pipeline or a background job runs in a subshell of its own,
-		// and one before "||" runs only when it failed — in all three the
-		// scan keeps the working directory the shell already had.
-		if sep := i + 1 + len(args); sep < end && tokens[sep] != "&&" && tokens[sep] != ";" {
+		// so in both the walk keeps the working directory the shell already
+		// had.
+		if sep < end && tokens[sep] != "&&" && tokens[sep] != ";" {
 			continue
 		}
 		root = target
@@ -1336,9 +1351,10 @@ func cdWalkRoot(proc guardProcess, tokens []string, end int, base string, vars m
 // line left the shell in — moved by the cds earlier on the same shell line, by
 // cdWalkRoot's rules (gt-5mc21). tokens[start] is the segment's first token, so
 // the walk reads the earlier segments' cds and only those a "&&" or ";" carries
-// — a cd in a pipeline or a background job, or before "||", is one the segment
-// does not inherit. A directory the walk cannot place (an unresolvable cd)
-// leaves the segment judged in base rather than in a guess (gt-1cvqj).
+// — a cd in a pipeline or a background job, or one whose directory a "||"
+// chain leaves open, is one the segment does not inherit. A directory the walk
+// cannot place (an unresolvable cd) leaves the segment judged in base rather
+// than in a guess (gt-1cvqj).
 func segmentWalkRoot(proc guardProcess, tokens []string, start int, base string, vars map[string]string) string {
 	if root, ok := cdWalkRoot(proc, tokens, start, base, vars); ok {
 		return root
@@ -1356,17 +1372,31 @@ func shellCommandStart(tokens []string, i int) bool {
 	return shellCommandSeparators[tokens[i-1]] || tokens[i-1] == "("
 }
 
+// cdStatus says what the walk can tell about the directory change a cd segment
+// makes. The zero value is the reading a caller must fall back on when it can
+// tell nothing, so a new spelling added to cdTarget is unknown until it is
+// deliberately classified.
+type cdStatus int
+
+const (
+	// cdUnknown: the guard cannot tell whether the cd succeeds — `cd -`, an
+	// argument it cannot expand, or more than one operand. Never resolved by
+	// assumption.
+	cdUnknown cdStatus = iota
+	// cdRefused: the shell refuses the cd — the target is not an existing
+	// directory — so the directory the shell was in stands, and a "||" left of
+	// it is taken.
+	cdRefused
+	// cdResolved: the target is an existing directory, so the cd succeeds.
+	cdResolved
+)
+
 // cdTarget resolves the directory a cd segment changes to, relative to base —
-// the directory the shell was in when it ran — for the walk root scanWalkRoot
-// tracks. ok is false for every spelling whose result this guard cannot know:
-// `cd -`'s previous directory, a target that is not an existing directory
-// (the cd fails, and what the shell does next depends on the separator), an
-// argument this process cannot expand, more than one operand, which the shell
-// refuses, or a relative target under an unknown base ("", which is what an
-// unreadable working directory gives — resolving it against this process's
-// own directory would judge a tree the command never named). A bare `cd` goes
-// to the home directory.
-func cdTarget(proc guardProcess, args []string, base string, vars map[string]string) (string, bool) {
+// the directory the shell was in when it ran — for the walk root cdWalkRoot
+// tracks. A bare `cd` goes to the home directory. The status separates a cd
+// the shell refuses from one whose result this guard cannot know, which the
+// "||" rule has to tell apart (gt-0lzdi; see the cdStatus constants).
+func cdTarget(proc guardProcess, args []string, base string, vars map[string]string) (string, cdStatus) {
 	var operands []string
 	for _, arg := range args {
 		switch arg {
@@ -1374,35 +1404,35 @@ func cdTarget(proc guardProcess, args []string, base string, vars map[string]str
 			continue
 		}
 		if isFlagToken(arg) {
-			return "", false
+			return "", cdUnknown
 		}
 		operands = append(operands, arg)
 	}
 	if len(operands) > 1 {
-		return "", false
+		return "", cdUnknown
 	}
 	if len(operands) == 0 {
 		home, err := proc.homeDir()
 		if err != nil || home == "" {
-			return "", false
+			return "", cdUnknown
 		}
-		return home, true
+		return home, cdResolved
 	}
 	path, ok := expandHomePath(proc, resolveShellVar(operands[0], vars))
 	if !ok || path == "" || strings.Contains(path, "$") {
-		return "", false
+		return "", cdUnknown
 	}
 	if !filepath.IsAbs(path) {
 		if base == "" {
-			return "", false
+			return "", cdUnknown
 		}
 		path = filepath.Join(base, path)
 	}
 	path = filepath.Clean(path)
 	if st, err := os.Stat(path); err != nil || !st.IsDir() {
-		return "", false
+		return "", cdRefused
 	}
-	return path, true
+	return path, cdResolved
 }
 
 // hasExactArg reports whether any of args exactly matches one of the wanted
@@ -2072,8 +2102,9 @@ func idleGateAlternative(heldAction string) string {
 //
 // Each segment is judged in the directory its own line runs it in — the hook
 // cwd moved by the cds earlier on the same line, by the shared walk
-// (segmentWalkRoot, over scanWalkRoot/cdTarget: "&&" and ";" carry the change,
-// an unresolvable cd resolves to nothing, and the hook cwd is the fallback).
+// (segmentWalkRoot, over cdWalkRoot/cdTarget: "&&" and ";" carry the change,
+// a "||" whose left cd resolves and a cd this guard cannot resolve both leave
+// the directory unknown, and the hook cwd is the fallback).
 // Judging every segment against the hook cwd instead let an agent whose cwd is
 // a non-Go tree run the whole module suite with 'cd <go tree> && make test' —
 // the make target resolved in the non-Go tree, where it is not the module's
