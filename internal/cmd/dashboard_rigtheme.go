@@ -32,6 +32,8 @@ func newDashRigThemes(townRoot string) func(rig string) (string, []string) {
 		if len(names) > rigThemeSamples {
 			names = names[:rigThemeSamples]
 		}
-		return theme, names
+		// Copied: a built-in theme resolves to the package's own list, where
+		// these names ride in the state the page is sent.
+		return theme, append([]string(nil), names...)
 	}
 }
