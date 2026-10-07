@@ -301,14 +301,17 @@ func nestedCommands(tokens, lowerTokens []string) []string {
 var heredocStartPattern = regexp.MustCompile(`<<(-?)[ \t]*(['"]?)([A-Za-z_][A-Za-z0-9_]*)['"]?`)
 
 // heredocSpan is one heredoc redirection found by scanHeredocs: the reader
-// line that owns it (the operator line with the operator removed), the body
-// text, and the body's byte offsets. bodyStart is -1 when the operator line
-// is the command's last line, so no body follows.
+// line that owns it (the operator line with the operator removed), the offset
+// that line starts at, the body text, and the body's byte offsets. bodyStart
+// is -1 when the operator line is the command's last line, so no body follows.
+// readerStart lets a caller reach the text the shell had already run by the
+// time it reads the body, without re-finding the operator (gt-v02wh).
 type heredocSpan struct {
-	reader    string
-	body      string
-	bodyStart int
-	bodyEnd   int
+	reader      string
+	readerStart int
+	body        string
+	bodyStart   int
+	bodyEnd     int
 }
 
 // scanHeredocs returns every heredoc in command, in source order. A "<<" that
@@ -328,23 +331,24 @@ func scanHeredocs(command string) []heredocSpan {
 		}
 		allowIndent := command[m[2]:m[3]] == "-"
 		tag := command[m[6]:m[7]]
-		reader := heredocReaderLine(command, start, end)
+		reader, readerStart := heredocReaderLine(command, start, end)
 
 		nl := strings.IndexByte(command[end:], '\n')
 		if nl < 0 {
 			// No body follows on a later line (e.g. the heredoc marker is
 			// the last thing on the line with nothing after it).
-			spans = append(spans, heredocSpan{reader: reader, bodyStart: -1, bodyEnd: end})
+			spans = append(spans, heredocSpan{reader: reader, readerStart: readerStart, bodyStart: -1, bodyEnd: end})
 			stripped = end
 			continue
 		}
 		bodyStart := end + nl + 1
 		bodyEnd := heredocTerminatorEnd(command, bodyStart, tag, allowIndent)
 		spans = append(spans, heredocSpan{
-			reader:    reader,
-			body:      command[bodyStart:bodyEnd],
-			bodyStart: bodyStart,
-			bodyEnd:   bodyEnd,
+			reader:      reader,
+			readerStart: readerStart,
+			body:        command[bodyStart:bodyEnd],
+			bodyStart:   bodyStart,
+			bodyEnd:     bodyEnd,
 		})
 		stripped = bodyEnd
 	}
@@ -352,10 +356,12 @@ func scanHeredocs(command string) []heredocSpan {
 }
 
 // heredocReaderLine returns the text of the line the heredoc operator at
-// [start,end) sits on, with the operator itself removed. The text after the
-// operator stays: in "cat <<EOF | bash" the pipeline's command words, not the
-// words before the operator, decide who consumes the body.
-func heredocReaderLine(command string, start, end int) string {
+// [start,end) sits on, with the operator itself removed, and the offset that
+// line starts at. The text after the operator stays: in "cat <<EOF | bash"
+// the pipeline's command words, not the words before the operator, decide who
+// consumes the body. The offset is the start of the whole logical line, so a
+// caller can read the command text preceding it (gt-v02wh).
+func heredocReaderLine(command string, start, end int) (string, int) {
 	lineStart := strings.LastIndexByte(command[:start], '\n') + 1
 	// "bash \" + newline + "<<EOF" still hands the body to bash, so walk back
 	// over line continuations to keep the invoker on the reader line.
@@ -375,7 +381,7 @@ func heredocReaderLine(command string, start, end int) string {
 	}
 	// Drop the continuations themselves: left in place they glue onto the
 	// preceding word and hide it from the token matchers below.
-	return strings.ReplaceAll(command[lineStart:start]+" "+command[end:lineEnd], "\\\n", " ")
+	return strings.ReplaceAll(command[lineStart:start]+" "+command[end:lineEnd], "\\\n", " "), lineStart
 }
 
 // stripHeredocBodies removes heredoc body text from command before any
@@ -424,8 +430,9 @@ func shellFedHeredocBodies(command string) []string {
 
 // shellFedHeredocSpans is shellFedHeredocBodies' span-returning sibling: the
 // same shell-fed heredocs in the same order, each keeping the reader line that
-// owns it, so a caller can judge the body in the directory that line left the
-// shell in (gt-1cvqj).
+// owns it and where that line starts, so a caller can judge the body in the
+// directory the shell had reached by the time it read the body (gt-1cvqj,
+// gt-v02wh).
 func shellFedHeredocSpans(command string) []heredocSpan {
 	var spans []heredocSpan
 	for _, span := range scanHeredocs(command) {
@@ -440,29 +447,43 @@ func shellFedHeredocSpans(command string) []heredocSpan {
 }
 
 // heredocBodyDir returns the directory a shell-fed heredoc's body runs in:
-// base — the directory the invocation was in — moved by the cds the reader
-// line runs before it hands the body to the shell. "cd /go/tree && bash
-// <<EOF" runs the body in /go/tree, and judging it in the hook's own
-// directory instead let that cd step around the test guards (gt-1cvqj). A cd
-// the walk cannot place leaves the body where it already was, the reading
-// scanWalkRoot gives an unknown walk root: an unplaceable directory is not
-// evidence that the body runs in a guarded tree.
-func heredocBodyDir(proc guardProcess, reader, base string) string {
-	if dir, ok := heredocBodyCwd(proc, reader, base); ok {
+// base — the directory the invocation was in — moved by the cds the shell
+// runs before it hands the body over. "cd /go/tree && bash <<EOF" runs the
+// body in /go/tree, and judging it in the hook's own directory instead let
+// that cd step around the test guards (gt-1cvqj). A cd the walk cannot place
+// leaves the body where it already was, the reading scanWalkRoot gives an
+// unknown walk root: an unplaceable directory is not evidence that the body
+// runs in a guarded tree.
+func heredocBodyDir(proc guardProcess, command string, span heredocSpan, base string) string {
+	if dir, ok := heredocBodyCwd(proc, command, span, base); ok {
 		return dir
 	}
 	return base
 }
 
 // heredocBodyCwd is the resolution behind heredocBodyDir: the directory the
-// reader line leaves the shell in by the time the body is read, and whether
-// the walk could place it. Only the cds before the shell invoker's own
-// segment count — "bash <<EOF && cd /go/tree" reads the body where the line
-// started and cds afterwards — which is why the walk stops at that segment
-// rather than at the end of the line.
-func heredocBodyCwd(proc guardProcess, reader, base string) (string, bool) {
-	tokens := shellTokenize(reader)
-	return cdWalkRoot(proc, tokens, shellInvokerIndex(tokens), base, shellVarAssignments(tokens))
+// shell is in by the time the body is read, and whether the walk could place
+// it.
+func heredocBodyCwd(proc guardProcess, command string, span heredocSpan, base string) (string, bool) {
+	tokens := heredocBodyWalkTokens(command, span)
+	return cdWalkRoot(proc, tokens, len(tokens), base, shellVarAssignments(tokens))
+}
+
+// heredocBodyWalkTokens returns the tokens the shell has run by the time it
+// reads a heredoc body: the command text preceding the reader line — bodies
+// stripped first, so a cd written inside a data body is data and never enters
+// the walk — followed by the reader line's own words up to the shell invoker
+// that reads the body.
+//
+// The preceding text is what makes a cd on its own line count: the shell
+// keeps one working directory from one command to the next, so "cd /go/tree"
+// then "bash <<EOF" on the next line reads the body in /go/tree. Stopping at
+// the invoker is the other half: "bash <<EOF && cd /go/tree" reads the body
+// before the cd runs (gt-v02wh).
+func heredocBodyWalkTokens(command string, span heredocSpan) []string {
+	tokens := shellTokenize(stripHeredocBodies(command[:span.readerStart]))
+	reader := shellTokenize(span.reader)
+	return append(tokens, reader[:shellInvokerIndex(reader)]...)
 }
 
 // shellInvokerIndex returns the index of the first token of the first segment
@@ -1280,9 +1301,9 @@ func scanWalkRoot(proc guardProcess, tokens []string, scanIdx int, vars map[stri
 // returns the directory the shell is in at end. It is the one cd tracker the
 // guards share: scanWalkRoot is this walk with the base taken from the process,
 // segmentWalkRoot is it applied to one segment of a line, and the shell-fed
-// heredoc recursion judges a body in the directory its reader line had cd-ed
-// into (gt-1cvqj). Every caller therefore agrees on whether a given cd carries
-// forward.
+// heredoc recursion judges a body in the directory the shell had reached by the
+// time it read the body (gt-1cvqj, gt-v02wh). Every caller therefore agrees on
+// whether a given cd carries forward.
 //
 // ok is false when a cd cannot be resolved (cdTarget), or when a relative one
 // has no usable base. The callers read that as an unknown directory rather
