@@ -23,10 +23,11 @@ const maintenanceCatchUpRetry = 6 * time.Hour
 
 // maybeCatchUpBackup takes a missed nightly backup outside the window: the
 // backup only, never the gc, which stays in the window behind the full quiet
-// guard. It waits for a moment when the daemon has no work in flight and no
+// guard. It waits for a moment when no hard daemon work is in flight and no
 // container-gate slot is held, so it never runs beside a landing gate; a
-// working polecat does not block it, or a busy town would never catch up. It
-// runs on the gc cycle's goroutine and flag, so it cannot overlap a window run.
+// working polecat — or a soft hold the next tick reruns — does not block it, or
+// a town busy with its own ticks would never catch up. It runs on the gc
+// cycle's goroutine and flag, so it cannot overlap a window run.
 func (d *Daemon) maybeCatchUpBackup(now time.Time) {
 	if d.maintenanceGCRunning.Load() {
 		return
@@ -89,13 +90,15 @@ func (d *Daemon) catchUpUnknown(now time.Time, what string) {
 		"scheduled_maintenance: cannot read the Dolt backups, so a missed nightly backup cannot be caught up: %s", what))
 }
 
-// catchUpQuiet is the catch-up's guard: no daemon work in flight (a landing
-// pass, a dispatch, an install) and no container-gate slot held. It names the
-// hold it found: the deferred line is the only record of why a day-old backup
-// waited, and a bare "work in flight" left the holder to be guessed from the
-// log timeline (gt-y6ovz).
+// catchUpQuiet is the catch-up's guard: no hard daemon work in flight (a
+// landing pass, a scheduled slings cycle, a steward job, an install) and no
+// container-gate slot held. It names the hold it found: the deferred line is
+// the only record of why a day-old backup waited, and a bare "work in flight"
+// left the holder to be guessed from the log timeline (gt-y6ovz).
+//
+// Soft work is not a hold (gt-2m8sj): see catchUpWorkHold.
 func (d *Daemon) catchUpQuiet() (bool, string) {
-	if hold := d.daemonWorkHold(); hold != nil {
+	if hold := d.catchUpWorkHold(); hold != nil {
 		return false, "daemon has work in flight (" + hold.name + ")"
 	}
 	holders, err := d.maintenance().slotHolders(d.config.TownRoot)
