@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,7 +39,11 @@ This guard blocks, when running as a polecat or refinery:
                         any other target, not exempted
   - make test           in a Go tree, where it runs the module's whole
                         "go test ./..."; a non-Go rig's own make target is
-                        left alone (gt-dieu9)
+                        left alone. The tree is the one make itself runs in,
+                        so "make -C <go tree> test" is refused wherever the
+                        hook's own cwd happens to be, and a named makefile
+                        (-f) is refused outright — the guard cannot read what
+                        that target does (gt-dieu9)
 
 ...unless the command is already wrapped in 'gt slot run -- <command>', in
 which case it is allowed through untouched. Bare go test runs that only
@@ -247,7 +253,7 @@ func evaluateContainerSuiteSegment(tokens []string, dockerOn bool, cwd string) (
 	}
 
 	if i := findTestInvocation(lower, "make"); i >= 0 {
-		if !makeTestIsWholeGoSuite(cwd) {
+		if !makeTestIsWholeGoSuite(tokens[i:], cwd) {
 			return "", nil
 		}
 		// The Go Makefile's "test" target runs "go test ./..." after its
@@ -536,30 +542,45 @@ func isGastownModule(goModPath string) bool {
 // nested under plugins/, say — ends the walk: nothing under it is a
 // gastown package path, so no listed package can be there to block.
 func moduleRootFromCwd(dir string) string {
-	root, ok := goModuleRoot(dir)
-	if !ok || !isGastownModule(filepath.Join(root, "go.mod")) {
+	if dir == "" {
+		return ""
+	}
+	root, found, err := goModuleRoot(dir)
+	if err != nil || !found || !isGastownModule(filepath.Join(root, "go.mod")) {
 		return ""
 	}
 	return root
 }
 
 // goModuleRoot walks up from dir to the nearest go.mod and returns its
-// directory; ok is false when no go.mod is found before the filesystem root.
-func goModuleRoot(dir string) (root string, ok bool) {
+// directory. found is false when the walk reached the filesystem root
+// without one; err is non-nil when the walk could not be finished at all,
+// which callers read as "unknown" rather than "absent" — a directory that
+// cannot be examined (a permission error part-way up, say) is not evidence
+// that no module encloses it.
+func goModuleRoot(dir string) (root string, found bool, err error) {
 	for {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			return dir, true
+		goMod := filepath.Join(dir, "go.mod")
+		_, statErr := os.Stat(goMod)
+		switch {
+		case statErr == nil:
+			return dir, true, nil
+		case !errors.Is(statErr, fs.ErrNotExist):
+			return "", false, fmt.Errorf("stat %s: %w", goMod, statErr)
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return "", false
+			return "", false, nil
 		}
 		dir = parent
 	}
 }
 
-// makeTestIsWholeGoSuite reports whether a bare "make test" run from dir is
-// the whole Go suite the guards refuse.
+// makeTestIsWholeGoSuite reports whether a "make … test" invocation is the
+// whole Go suite the guards refuse. args holds the invocation's tokens from
+// the "make" word onward and cwd is the hook process's directory; the pair is
+// what locates the tree, because judging the hook's own cwd alone let
+// "make -C <go tree> test" run from anywhere (gt-dieu9 review).
 //
 // "make test" is "go test ./..." under another name only in a Go tree, and
 // the containers the guard protects are started by Go test binaries. A
@@ -568,14 +589,105 @@ func goModuleRoot(dir string) (root string, ok bool) {
 // prints advice that cannot apply (gt-dieu9). Every Go module keeps the
 // refusal, not just this one: the VM the slot guards is shared, and another
 // rig's suite reaches it without naming a containerSuitePackages entry
-// (beads' `make test`). An unresolvable dir keeps the refusal too: "no go.mod
-// in sight" is not "there is none" (fail closed).
-func makeTestIsWholeGoSuite(dir string) bool {
-	if strings.TrimSpace(dir) == "" {
+// (beads' `make test`).
+//
+// What the invocation leaves unpinned keeps the refusal: a directory the
+// guard cannot place, a directory it cannot examine, and a makefile it cannot
+// read all leave "what does test do here" unanswered, and "no go.mod in
+// sight" is not "there is none" (fail closed).
+func makeTestIsWholeGoSuite(args []string, cwd string) bool {
+	dir, known := makeRunDir(args, cwd)
+	if !known || strings.TrimSpace(dir) == "" {
 		return true
 	}
-	_, ok := goModuleRoot(dir)
-	return ok
+	_, found, err := goModuleRoot(dir)
+	return err != nil || found
+}
+
+// makeRunDir resolves the directory a "make … test" invocation runs in. args
+// holds the invocation's tokens from the "make" word onward; cwd is the hook
+// process's directory. A -C (--directory) is applied before make reads
+// anything, and the flags chain, so "make -C a -C b test" runs in a/b.
+//
+// known is false when the invocation names its own makefile — -f/--file/
+// --makefile, or "-" for stdin — because "test" then means whatever that file
+// says, which the guard cannot read and so refuses instead of guessing. It is
+// false too when a -C cannot be placed: a relative directory under an unknown
+// cwd names nothing this process can walk.
+func makeRunDir(args []string, cwd string) (dir string, known bool) {
+	dir = cwd
+	for i := 1; i < len(args); i++ {
+		tok := args[i]
+		if tok == "--" {
+			break // options end here; what follows is a target, not a flag
+		}
+		if tok == "-" {
+			return dir, false // "-" is a makefile read from stdin
+		}
+		if !strings.HasPrefix(tok, "-") {
+			continue
+		}
+		flag, value, hasValue := tok, "", false
+		if strings.HasPrefix(tok, "--") {
+			// A long option takes its value after "=" ("--directory=rig").
+			flag, value, hasValue = strings.Cut(tok, "=")
+		} else if len(tok) > 2 {
+			// A short one takes it attached, where the rest of the token is
+			// the value "=" and all ("-Cgo" is the directory "go", "-C=go"
+			// the directory "=go").
+			flag, value, hasValue = tok[:2], tok[2:], true
+		}
+		lower := strings.ToLower(flag)
+
+		switch lower {
+		case "-c", "--directory":
+			if !hasValue {
+				if i+1 >= len(args) {
+					return dir, false
+				}
+				i++
+				value = args[i]
+			}
+			resolved, ok := resolveMakeDir(dir, value)
+			if !ok {
+				return resolved, false
+			}
+			dir = resolved
+			continue
+		case "-f", "--file", "--makefile":
+			return dir, false
+		}
+
+		if hasValue {
+			continue
+		}
+		if makeValueFlags[lower] || (makeOptionalNumberFlags[lower] && i+1 < len(args) && isAllDigits(args[i+1])) {
+			// Another option's value; step over it so a value that looks like
+			// a flag ("-o -C dir" names the file "-C") is not read as one.
+			if i+1 >= len(args) {
+				return dir, false
+			}
+			i++
+		}
+	}
+	return dir, true
+}
+
+// resolveMakeDir applies one -C argument to the directory accumulated so far.
+// ok is false when the argument cannot be placed: a relative directory is
+// relative to a cwd the guard does not know, and guessing from this process's
+// own directory would judge a tree the command never named.
+func resolveMakeDir(base, arg string) (dir string, ok bool) {
+	if arg == "" {
+		return base, false
+	}
+	if filepath.IsAbs(arg) {
+		return filepath.Clean(arg), true
+	}
+	if base == "" {
+		return "", false
+	}
+	return filepath.Join(base, arg), true
 }
 
 // cwdPackagePath returns the module-relative package path that a "go test ."

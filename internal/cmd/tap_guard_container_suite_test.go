@@ -78,16 +78,26 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 	}
 }
 
-// The make rule's premise holds only in a Go tree: a bare "make test" outside
-// every Go module is allowed, because it cannot reach a containerSuitePackages
-// entry and the refusal's advice has nothing to say about it (gt-dieu9).
-func TestMakeTestIsWholeGoSuite(t *testing.T) {
+// assertBothGuardsJudge runs a case through both evaluators: the container
+// suite rule and the polecat scope rule read the same invocation, so both
+// must reach the same verdict.
+func assertBothGuardsJudge(t *testing.T, command, cwd string, blocked bool) {
+	t.Helper()
+	reason, _ := evaluateContainerSuiteCommand(command, cwd, "")
+	if got := reason != ""; got != blocked {
+		t.Errorf("evaluateContainerSuiteCommand(%q, cwd %s) blocked = %v (reason %q), want %v", command, cwd, got, reason, blocked)
+	}
+	scopeReason, _ := evaluatePolecatTestScope(command, cwd)
+	if got := scopeReason != ""; got != blocked {
+		t.Errorf("evaluatePolecatTestScope(%q, cwd %s) blocked = %v (reason %q), want %v", command, cwd, got, scopeReason, blocked)
+	}
+}
+
+// A Go tree keeps the refusal. These fixtures carry their own go.mod, so the
+// verdict rests on the fixture and not on where the host put its temp dir.
+func TestMakeTestInGoTreeIsRefused(t *testing.T) {
 	t.Parallel()
 	goRoot := fakeModule(t, "gastown/refinery/rig")
-	npmRoot := t.TempDir()
-	if err := os.WriteFile(filepath.Join(npmRoot, "Makefile"), []byte("test:\n\tnpm test\n"), 0o644); err != nil {
-		t.Fatalf("write Makefile: %v", err)
-	}
 	otherModule := t.TempDir()
 	if err := os.WriteFile(filepath.Join(otherModule, "go.mod"), []byte("module example.com/other\n"), 0o644); err != nil {
 		t.Fatalf("write go.mod: %v", err)
@@ -96,28 +106,106 @@ func TestMakeTestIsWholeGoSuite(t *testing.T) {
 		name    string
 		cwd     string
 		command string
-		blocked bool
 	}{
-		{"make test at the module root", goRoot, "make test", true},
-		{"make test in a package of the module", filepath.Join(goRoot, "internal", "cmd"), "make test", true},
-		{"make test with jobs flag in the module", goRoot, "make -j4 test", true},
-		{"make test in another Go module", otherModule, "make test", true},
-		{"make test in a non-Go rig", npmRoot, "make test", false},
-		{"make test with env prefix in a non-Go rig", npmRoot, "GOFLAGS=-p=8 make test", false},
-		{"make test in a slot run wrapper in a non-Go rig", npmRoot, "gt slot run --role fractals/polecats/coral -- make test", false},
+		{"make test at the module root", goRoot, "make test"},
+		{"make test in a package of the module", filepath.Join(goRoot, "internal", "cmd"), "make test"},
+		{"make test with jobs flag in the module", goRoot, "make -j4 test"},
+		{"make test in another Go module", otherModule, "make test"},
+		// A makefile the guard cannot read makes "test" unknown, so even the
+		// tree it runs in says nothing about what the target costs.
+		{"an alternate makefile", goRoot, "make -f other.mk test"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reason, _ := evaluateContainerSuiteCommand(tt.command, tt.cwd, "")
-			if got := reason != ""; got != tt.blocked {
-				t.Errorf("evaluateContainerSuiteCommand(%q, cwd %s) blocked = %v (reason %q), want %v", tt.command, tt.cwd, got, reason, tt.blocked)
-			}
-			scopeReason, _ := evaluatePolecatTestScope(tt.command, tt.cwd)
-			if got := scopeReason != ""; got != tt.blocked {
-				t.Errorf("evaluatePolecatTestScope(%q, cwd %s) blocked = %v (reason %q), want %v", tt.command, tt.cwd, got, scopeReason, tt.blocked)
-			}
+			assertBothGuardsJudge(t, tt.command, tt.cwd, true)
 		})
 	}
+}
+
+// The make rule's premise holds only in the tree make runs in, and outside
+// every Go module it does not hold at all: a bare "make test" there cannot
+// reach a containerSuitePackages entry and the refusal's advice has nothing to
+// say about it (gt-dieu9). Both directions of the -C are here, because the
+// tree that decides is the one make changes into, not the one the hook's cwd
+// names — keying on the cwd alone let "make -C <go tree> test" run from
+// anywhere (gt-dieu9 review).
+func TestMakeTestOutsideGoTree(t *testing.T) {
+	t.Parallel()
+	npmRoot := nonGoTree(t)
+	goRoot := fakeModule(t, "gastown/refinery/rig")
+	tests := []struct {
+		name    string
+		cwd     string
+		command string
+		blocked bool
+	}{
+		{"make test", npmRoot, "make test", false},
+		{"make test with env prefix", npmRoot, "GOFLAGS=-p=8 make test", false},
+		{"make test in a slot run wrapper", npmRoot, "gt slot run --role fractals/polecats/coral -- make test", false},
+		{"make -C out of the Go tree", goRoot, "make -C " + npmRoot + " test", false},
+		{"make -C into a subdirectory of the tree", npmRoot, "make -C " + filepath.Join(npmRoot, "sub") + " test", false},
+		{"make -C into the Go tree", npmRoot, "make -C " + goRoot + " test", true},
+		{"make --directory into the Go tree", npmRoot, "make --directory=" + goRoot + " test", true},
+		{"make -C attached into the Go tree", npmRoot, "make -C" + goRoot + " test", true},
+		{"make -C chaining into the Go tree", npmRoot, "make -C " + filepath.Join(goRoot, "internal") + " -C cmd test", true},
+		// "--" ends make's option processing, so what follows is a target it
+		// never reads as a flag: the tree stays the one it started in.
+		{"a -C after the end of options", npmRoot, "make -- -C " + goRoot + " test", false},
+		{"an alternate makefile", npmRoot, "make -f other.mk test", true},
+		{"an attached alternate makefile", npmRoot, "make -fother.mk test", true},
+		{"a long-form makefile", npmRoot, "make --makefile=other.mk test", true},
+		{"a makefile from stdin", npmRoot, "make - test", true},
+		{"a -C from an unknown cwd", "", "make -C . test", true},
+		{"no cwd at all", "", "make test", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assertBothGuardsJudge(t, tt.command, tt.cwd, tt.blocked)
+		})
+	}
+}
+
+// A walk that cannot finish is not evidence of absence. A directory the
+// process cannot resolve part-way up the tree used to read as "no go.mod
+// here", which exempted the command — the opposite of what an unresolvable
+// tree should do, since it may well be a Go tree the guard is protecting
+// (gt-dieu9 review). The refusal stands instead.
+func TestMakeTestUnderUnresolvableTreeIsRefused(t *testing.T) {
+	t.Parallel()
+	// A symlink loop fails the stat of anything under it with ELOOP, which
+	// the walk must not read as "no module here". An unreadable directory
+	// gives the same shape, but there is no way to make one that also holds
+	// for a root user, so the loop is the portable spelling.
+	loop := filepath.Join(t.TempDir(), "loop")
+	if err := os.Symlink("loop", loop); err != nil {
+		t.Fatalf("symlink %s: %v", loop, err)
+	}
+	nested := filepath.Join(loop, "inner")
+
+	if _, found, err := goModuleRoot(nested); err == nil {
+		t.Errorf("goModuleRoot(%s) = found %v, err nil; an unresolvable ancestor must report an error, not an answer", nested, found)
+	}
+	assertBothGuardsJudge(t, "make test", nested, true)
+}
+
+// nonGoTree materialises a rig whose test target is not a Go suite: a temp
+// directory holding the Makefile the fractals rig has. The directory has to
+// be outside every Go module for the cases built on it to mean anything, and
+// t.TempDir sits under TMPDIR, which a host may have pointed inside a
+// checkout — a tree the guard would refuse the command in too. Asserting
+// against it there would report the host's temp dir as a guard defect, so the
+// precondition is checked and the case skipped instead.
+func nonGoTree(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "Makefile"), []byte("test:\n\tnpm test\n"), 0o644); err != nil {
+		t.Fatalf("write Makefile: %v", err)
+	}
+	if _, found, err := goModuleRoot(root); found || err != nil {
+		//testpolicy:allow no-skip — t.TempDir sits under TMPDIR, so a host with TMPDIR inside a checkout has no directory outside a module to build a non-Go tree from; there the case is unbuildable, not failing
+		t.Skipf("%s is inside a Go module (found=%v err=%v); a non-Go tree needs a temp dir outside one", root, found, err)
+	}
+	return root
 }
 
 func TestContainerSuiteTarget(t *testing.T) {

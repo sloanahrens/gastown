@@ -1,8 +1,7 @@
 package cmd
 
 import (
-	"os"
-	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -114,15 +113,31 @@ func TestRunTapGuardContainerSuite_PolecatMakeTest(t *testing.T) {
 // test target is `npm test` into vitest.
 func TestRunTapGuardContainerSuite_NonGoRigMakeTest(t *testing.T) {
 	t.Parallel()
-	tree := t.TempDir()
-	if err := os.WriteFile(filepath.Join(tree, "Makefile"), []byte("test:\n\tnpm test\n"), 0o644); err != nil {
-		t.Fatalf("write Makefile: %v", err)
-	}
+	tree := nonGoTree(t)
 	cmd := `{"tool_name":"Bash","tool_input":{"command":"make test"}}`
 	proc := fakeGuardProcess(map[string]string{"GT_POLECAT": "coral", "GT_ROLE": "fractals/polecats/coral"}, tree)
 	stderr, err := runContainerSuiteGuard(cmd, proc)
 	if err != nil {
 		t.Errorf("a non-Go rig's make test must be allowed, got %v: %s", err, stderr)
+	}
+}
+
+// The same polecat cannot step into the Go tree with a -C: the hook approves
+// or refuses a command by where its work happens, so the cwd the rig sits in
+// must not be the only thing the guard reads (gt-dieu9 review).
+func TestRunTapGuardContainerSuite_NonGoRigMakeTestDashC(t *testing.T) {
+	t.Parallel()
+	tree := nonGoTree(t)
+	goRoot := fakeModule(t, "gastown/refinery/rig")
+	command := "make -C " + goRoot + " test"
+	cmd := `{"tool_name":"Bash","tool_input":{"command":` + strconv.Quote(command) + `}}`
+	proc := fakeGuardProcess(map[string]string{"GT_POLECAT": "coral", "GT_ROLE": "fractals/polecats/coral"}, tree)
+	stderr, err := runContainerSuiteGuard(cmd, proc)
+	if err == nil {
+		t.Errorf("a non-Go rig's make -C into the Go tree was allowed: %s", stderr)
+	}
+	if !strings.Contains(stderr, "TEST SCOPE") {
+		t.Errorf("block must be the scope rule, got: %s", stderr)
 	}
 }
 
