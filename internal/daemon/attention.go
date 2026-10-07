@@ -314,17 +314,19 @@ func (d *Daemon) attentionTick(ctx context.Context, src *attentionSources, prev 
 	// One line per transition, and nothing on a tick with no change: the line
 	// is the signal, not a per-beat heartbeat.
 	for _, e := range res.Events {
-		d.logger.Printf("attention: %s%s %s", attentionSign(e.State), e.Key, e.Text)
+		d.logger.Printf("attention: %s %s %s", attentionWord(e.State), e.Key, e.Text)
 	}
 	return res.State
 }
 
-// attentionSign is the transition's sign in the daemon log.
-func attentionSign(s attention.EventState) string {
+// attentionWord is the transition's word in the daemon log. A cleared line
+// repeats the raised line's text verbatim, so a bare sign reads as a fresh
+// failure (gt-t4n5r).
+func attentionWord(s attention.EventState) string {
 	if s == attention.EventCleared {
-		return "-"
+		return "cleared"
 	}
-	return "+"
+	return "raised"
 }
 
 // collectAttention runs every collector and returns the items holding now. A

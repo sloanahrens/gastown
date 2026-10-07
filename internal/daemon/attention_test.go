@@ -469,13 +469,17 @@ func TestAttentionTick_LogsOneLinePerTransitionAndNothingOnNoChange(t *testing.T
 	t.Parallel()
 	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
 	f := newAttentionFixture(t, now)
-	f.src.redMain = func(context.Context, string) ([]*beads.Issue, error) {
+	raised := func(context.Context, string) ([]*beads.Issue, error) {
 		return []*beads.Issue{{ID: "gt-red", Status: "open", Title: landworker.RedMainTitle(attentionRig, "internal/cmd")}}, nil
 	}
+	gone := func(context.Context, string) ([]*beads.Issue, error) { return nil, nil }
+	const line = "red-main:gastown:internal/cmd red main (gastown): internal/cmd"
 
+	// A new item names the transition, so the line reads on its own.
+	f.src.redMain = raised
 	f.tick(t, now)
-	want := "attention: +red-main:gastown:internal/cmd red main (gastown): internal/cmd"
-	if got := f.logs.String(); !strings.Contains(got, want) {
+	want := "attention: raised " + line + "\n"
+	if got := f.logs.String(); got != want {
 		t.Errorf("log = %q, want %q", got, want)
 	}
 
@@ -486,12 +490,23 @@ func TestAttentionTick_LogsOneLinePerTransitionAndNothingOnNoChange(t *testing.T
 		t.Errorf("log = %q, want nothing on a tick with no change", got)
 	}
 
-	// The condition clearing is one line, with the minus sign.
+	// A cleared item carries the raised item's text verbatim, so the word is
+	// the only thing distinguishing the two lines (gt-t4n5r).
 	f.logs.Reset()
-	f.src.redMain = func(context.Context, string) ([]*beads.Issue, error) { return nil, nil }
+	f.src.redMain = gone
 	f.tick(t, now.Add(2*time.Minute))
-	if got := f.logs.String(); !strings.Contains(got, "attention: -red-main:gastown:internal/cmd") {
-		t.Errorf("log = %q, want the cleared line", got)
+	want = "attention: cleared " + line + "\n"
+	if got := f.logs.String(); got != want {
+		t.Errorf("log = %q, want %q", got, want)
+	}
+
+	// The tick after a clear raises the item again, under the same word.
+	f.logs.Reset()
+	f.src.redMain = raised
+	f.tick(t, now.Add(3*time.Minute))
+	want = "attention: raised " + line + "\n"
+	if got := f.logs.String(); got != want {
+		t.Errorf("log = %q, want %q", got, want)
 	}
 }
 
@@ -563,7 +578,7 @@ func TestWriteAttention_WritesTheQueueFromTheDaemonsOwnReads(t *testing.T) {
 	if !again.FirstSeen.Equal(first.FirstSeen) {
 		t.Errorf("FirstSeen = %v, want the first tick's %v", again.FirstSeen, first.FirstSeen)
 	}
-	if strings.Count(logs.String(), "attention: +esc:hq-9") != 1 {
+	if strings.Count(logs.String(), "attention: raised esc:hq-9") != 1 {
 		t.Errorf("log = %q, want one new-item line, not one per beat", logs.String())
 	}
 }
