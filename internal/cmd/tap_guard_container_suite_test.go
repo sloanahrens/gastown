@@ -865,6 +865,131 @@ func TestContainerSuiteGuardsBoundHeredocRecursion(t *testing.T) {
 	}
 }
 
+// A shell-fed heredoc's body runs in the directory its reader line left the
+// shell in, so the cd on that line is not a way around the guards: a polecat
+// in a non-Go rig cannot cd into a Go tree and feed the suite to bash, which
+// gt-5mc21's per-segment walk does not reach (the body is not a segment of the
+// reader line) and gt-1cvqj fixes. The neighbours pin that the directory — not
+// the heredoc form — decides, and that the directory is the reader line's own:
+// a cd after the body has been read does not move it, and a body whose reader
+// line stays in the non-Go tree is still allowed.
+func TestHeredocBodyIsJudgedInReaderLineCwd(t *testing.T) {
+	t.Parallel()
+	goTree := fakeModule(t, "gastown/refinery/rig")
+	heavyPkg := filepath.Join(goTree, "internal", "cmd")
+	containers := filepath.Join(goTree, "internal", "beads")
+	nonGo := nonGoTree(t)
+	tests := []struct {
+		name         string
+		cwd          string
+		command      string
+		wantRefused  bool
+		wantScopeOut bool
+	}{
+		{
+			name:         "cd into the Go tree then feed make test to bash",
+			cwd:          nonGo,
+			command:      "cd " + goTree + " && bash <<'EOF'\nmake test\nEOF\n",
+			wantRefused:  true,
+			wantScopeOut: true,
+		},
+		{
+			name:         "the same form whose reader line stays in the non-Go tree",
+			cwd:          nonGo,
+			command:      "bash <<'EOF'\nmake test\nEOF\n",
+			wantRefused:  false,
+			wantScopeOut: false,
+		},
+		{
+			name:         "a cd out of the Go tree is judged in the non-Go tree",
+			cwd:          goTree,
+			command:      "cd " + nonGo + " && bash <<'EOF'\nmake test\nEOF\n",
+			wantRefused:  false,
+			wantScopeOut: false,
+		},
+		{
+			name:         "a cd after the body is read does not move it",
+			cwd:          nonGo,
+			command:      "bash <<'EOF' && cd " + goTree + "\nmake test\nEOF\n",
+			wantRefused:  false,
+			wantScopeOut: false,
+		},
+		{
+			name:         "cd into a heavy package then feed the cwd form",
+			cwd:          nonGo,
+			command:      "cd " + heavyPkg + " && bash <<'EOF'\ngo test .\nEOF\n",
+			wantRefused:  false,
+			wantScopeOut: true,
+		},
+		{
+			name:         "cd into a container package then feed the cwd form",
+			cwd:          nonGo,
+			command:      "cd " + containers + " && bash <<'EOF'\nGT_TEST_DOCKER=1 go test .\nEOF\n",
+			wantRefused:  true,
+			wantScopeOut: false,
+		},
+		{
+			name:         "the reader line's cd carries into a nested body",
+			cwd:          nonGo,
+			command:      "cd " + goTree + " && bash <<'OUTER'\nbash <<'INNER'\nmake test\nINNER\nOUTER\n",
+			wantRefused:  true,
+			wantScopeOut: true,
+		},
+		{
+			// The fallback for a cd the walk cannot place: the body keeps the
+			// directory the invocation already had. An unplaceable directory
+			// is not evidence that the body runs in a guarded tree, the same
+			// reading scanWalkRoot gives an unknown walk root (gt-3e6wa).
+			name:         "a cd the guard cannot place leaves the body where it was",
+			cwd:          nonGo,
+			command:      "cd \"$BUILD_DIR\" && bash <<'EOF'\nmake test\nEOF\n",
+			wantRefused:  false,
+			wantScopeOut: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proc := fakeGuardProcess(nil, tt.cwd)
+			reason, _ := evaluateContainerSuiteCommand(proc, tt.command, "")
+			if got := reason != ""; got != tt.wantRefused {
+				t.Errorf("evaluateContainerSuiteCommand(%q) from %s blocked = %v (reason %q), want %v",
+					tt.command, tt.cwd, got, reason, tt.wantRefused)
+			}
+			scopeReason, _ := evaluatePolecatTestScope(proc, tt.command)
+			if got := scopeReason != ""; got != tt.wantScopeOut {
+				t.Errorf("evaluatePolecatTestScope(%q) from %s blocked = %v (reason %q), want %v",
+					tt.command, tt.cwd, got, scopeReason, tt.wantScopeOut)
+			}
+		})
+	}
+}
+
+// The acceptance case through the hook a polecat actually talks to: from a
+// non-Go rig, cd-ing into a Go tree and feeding "make test" to bash is
+// refused, while the identical body with a reader line that stays put is
+// allowed (gt-1cvqj).
+func TestRunTapGuardContainerSuite_HeredocCdIntoGoTreeRefused(t *testing.T) {
+	t.Parallel()
+	goTree := fakeModule(t, "gastown/refinery/rig")
+	nonGo := nonGoTree(t)
+	proc := fakeGuardProcess(map[string]string{
+		"GT_POLECAT": "furiosa",
+		"GT_ROLE":    "gastown/polecats/furiosa",
+	}, nonGo)
+
+	refused := "cd " + goTree + " && bash <<'EOF'\nmake test\nEOF\n"
+	input := `{"tool_name":"Bash","tool_input":{"command":` + jsonQuote(refused) + `}}`
+	if stderr, err := runContainerSuiteGuard(input, proc); err == nil {
+		t.Errorf("a shell-fed make test behind a cd into a Go tree was allowed: %s", stderr)
+	}
+
+	allowed := "bash <<'EOF'\nmake test\nEOF\n"
+	input = `{"tool_name":"Bash","tool_input":{"command":` + jsonQuote(allowed) + `}}`
+	if stderr, err := runContainerSuiteGuard(input, proc); err != nil {
+		t.Errorf("a shell-fed make test whose reader line stays in the non-Go tree was refused: %s", stderr)
+	}
+}
+
 // The acceptance case, driven through the real hook entry point: a polecat
 // writing a file whose heredoc body quotes the bare suite invocation is
 // allowed, while the same invocation typed live on the line is not.

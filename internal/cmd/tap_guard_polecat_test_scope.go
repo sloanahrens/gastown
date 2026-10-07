@@ -51,20 +51,24 @@ func isPolecatContext(proc guardProcess) bool {
 // Heredoc bodies are stripped before tokenizing, so a body that merely spells
 // "make test" — a bead description, a doc, a formula — is data, not a live
 // invocation. A body fed to a shell invoker is the exception and is judged as
-// the nested script it is (gt-ohe8n).
+// the nested script it is (gt-ohe8n), in the directory its reader line cd-ed
+// into (heredocBodyDir, gt-1cvqj).
 func evaluatePolecatTestScope(proc guardProcess, command string) (reason string, matched []string) {
-	return evaluatePolecatTestScopeDepth(proc, command, 0)
+	cwd, _ := proc.getwd()
+	return evaluatePolecatTestScopeDepth(proc, command, cwd, 0)
 }
 
-func evaluatePolecatTestScopeDepth(proc guardProcess, command string, depth int) (reason string, matched []string) {
+// evaluatePolecatTestScopeDepth judges command as a shell starting in cwd —
+// the invocation's directory, or a shell-fed heredoc body's reader-line
+// directory one level down.
+func evaluatePolecatTestScopeDepth(proc guardProcess, command, cwd string, depth int) (reason string, matched []string) {
 	tokens := shellTokenize(strings.TrimSpace(stripHeredocBodies(command)))
 	vars := shellVarAssignments(tokens)
-	cwd, _ := proc.getwd()
 	var segment []string
 	start := 0
 	for i, tok := range tokens {
 		if shellCommandSeparators[tok] {
-			if r, m := evaluatePolecatTestScopeSegment(segment, segmentWalkRoot(proc, tokens, start, vars, cwd)); r != "" {
+			if r, m := evaluatePolecatTestScopeSegment(segment, segmentWalkRoot(proc, tokens, start, cwd, vars)); r != "" {
 				return r, m
 			}
 			segment = nil
@@ -73,15 +77,16 @@ func evaluatePolecatTestScopeDepth(proc guardProcess, command string, depth int)
 		}
 		segment = append(segment, tok)
 	}
-	if r, m := evaluatePolecatTestScopeSegment(segment, segmentWalkRoot(proc, tokens, start, vars, cwd)); r != "" {
+	if r, m := evaluatePolecatTestScopeSegment(segment, segmentWalkRoot(proc, tokens, start, cwd, vars)); r != "" {
 		return r, m
 	}
 
 	if depth >= maxTestGuardNestDepth {
 		return "", nil
 	}
-	for _, body := range shellFedHeredocBodies(command) {
-		if r, m := evaluatePolecatTestScopeDepth(proc, body, depth+1); r != "" {
+	for _, span := range shellFedHeredocSpans(command) {
+		bodyCwd := heredocBodyDir(proc, span.reader, cwd)
+		if r, m := evaluatePolecatTestScopeDepth(proc, span.body, bodyCwd, depth+1); r != "" {
 			return r, m
 		}
 	}
