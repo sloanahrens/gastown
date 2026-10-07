@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
 
@@ -81,8 +82,26 @@ type specDispatchTickReport struct {
 }
 
 // triggerSpecDispatch starts one tick on its own goroutine unless one is
-// already running. It reports whether a tick started.
+// already running or the town's automatic dispatch is parked. It reports
+// whether a tick started.
+//
+// A parked town starts no tick (gt-y6ovz): the tick would return the hold
+// report without deciding anything, and its single-flight flag is one of
+// daemonWorkHolds, which the catch-up backup's quiet check samples. The
+// maintenance tick and this one fire into the same pass of the run loop, so a
+// parked tick in flight was the usual state at a deferred catch-up check, not
+// a rare one, and a backup a day overdue starved behind a tick that did
+// nothing.
 func (d *Daemon) triggerSpecDispatch() bool {
+	if reason := d.specDispatchTownHold(); reason != "" {
+		if d.specDispatchHold.Changed(reason) {
+			d.logger.Printf("spec_dispatch: not ticking: %s", reason)
+		}
+		return false
+	}
+	if d.specDispatchHold.Changed("") {
+		d.logger.Printf("spec_dispatch: operator dispatch hold lifted; ticker resuming")
+	}
 	if !d.specDispatchRunning.CompareAndSwap(false, true) {
 		d.logger.Printf("spec_dispatch: previous tick still running, skipping")
 		return false
@@ -94,6 +113,16 @@ func (d *Daemon) triggerSpecDispatch() bool {
 		d.runSpecDispatch()
 	}()
 	return true
+}
+
+// specDispatchTownHold is the hold that parks the whole ticker: the operator
+// hold file or a town ESTOP. A rig ESTOP parks one rig's slings only, which
+// the tick itself applies to that rig's candidates.
+func (d *Daemon) specDispatchTownHold() string {
+	if d.config == nil {
+		return ""
+	}
+	return dispatch.OperatorHold(d.config.TownRoot)
 }
 
 // runSpecDispatch runs one tick and logs its outcome, one line per decision.

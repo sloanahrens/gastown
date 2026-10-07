@@ -1,13 +1,16 @@
 package daemon
 
 import (
+	"context"
 	"io"
 	"log"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
 
@@ -312,5 +315,55 @@ func TestTriggerSpecDispatchSingleFlight(t *testing.T) {
 	d.specDispatchCycles.Wait()
 	if d.specDispatchRunning.Load() {
 		t.Fatal("guard not released")
+	}
+}
+
+// A dispatcher parked by the operator hold file starts no tick: the tick
+// would decide nothing, and its in-flight flag is a daemonWorkHolds entry, so
+// a parked tick made the daemon read as busy for the catch-up backup's quiet
+// check (gt-y6ovz).
+func TestTriggerSpecDispatchParkedTicksNothing(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeOperatorHold(t, townRoot)
+	fake := newFakeCLI(nil)
+	logger, lines := lineLogger()
+	d := &Daemon{
+		config:       &Config{TownRoot: townRoot},
+		ctx:          context.Background(),
+		logger:       logger,
+		execCmd:      fake.run,
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{SpecDispatch: &SpecDispatchConfig{Enabled: true}}},
+	}
+
+	for i := 0; i < 3; i++ {
+		if d.triggerSpecDispatch() {
+			t.Fatal("a parked dispatcher started a tick")
+		}
+	}
+	if calls := fake.argvs("spec", "dispatch"); len(calls) != 0 {
+		t.Errorf("a parked dispatcher shelled out: %v", calls)
+	}
+	if !d.daemonWorkIdle() {
+		t.Error("a parked dispatcher reads as daemon work in flight")
+	}
+	if n := countContaining(lines(), "spec_dispatch: not ticking:"); n != 1 {
+		t.Errorf("park line count = %d, want one for the hold, not one per tick", n)
+	}
+
+	// Lifting the hold resumes the ticker, and the next tick leaves no hold
+	// behind it.
+	if err := os.Remove(dispatch.HoldFilePath(townRoot)); err != nil {
+		t.Fatal(err)
+	}
+	if !d.triggerSpecDispatch() {
+		t.Fatal("the ticker did not resume after the hold lifted")
+	}
+	d.specDispatchCycles.Wait()
+	if !d.daemonWorkIdle() {
+		t.Error("the daemon is not idle after the resumed tick")
+	}
+	if n := countContaining(lines(), "operator dispatch hold lifted"); n != 1 {
+		t.Errorf("lift line count = %d, want one", n)
 	}
 }

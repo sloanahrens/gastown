@@ -1,7 +1,10 @@
 package daemon
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"log"
 	"strings"
 	"testing"
 	"time"
@@ -88,6 +91,56 @@ func TestBackupCatchUpWaitsForAQuietTown(t *testing.T) {
 	d.runScheduledMaintenance()
 	if len(f.backupCalls) != 2 {
 		t.Errorf("catch-up not taken once the town went quiet: %v", f.backupCalls)
+	}
+}
+
+// The catch-up check and the dispatcher's tick fire into the same pass of the
+// run loop (gt-y6ovz: on 2026-10-05 every deferred check at 19:30:59, 19:36:13,
+// 19:40:59 and 19:46:05 had a spec_dispatch tick in flight, three of them
+// parked by the operator hold). A parked tick must not defer a backup that is
+// over a day old; the ticker starts none at all.
+func TestBackupCatchUpRunsWithTheDispatcherParked(t *testing.T) {
+	t.Parallel()
+	d, f := catchUpDaemon(t)
+	d.ctx = context.Background()
+	writeOperatorHold(t, d.config.TownRoot)
+	release := make(chan struct{})
+	fake := newFakeCLIFor(func(cliCall) cliReply {
+		<-release
+		return cliReply{stdout: `{"roster": "deepseek-flash 1/3", "candidates": 0}`}
+	})
+	d.execCmd = fake.run
+	defer func() {
+		close(release)
+		d.specDispatchCycles.Wait()
+	}()
+
+	// The maintenance tick and this tick arrive together; whatever the tick
+	// does here, it is in flight while the check runs.
+	d.triggerSpecDispatch()
+	d.runScheduledMaintenance()
+
+	if len(f.backupCalls) != 2 {
+		t.Errorf("backup calls = %v, want gt and hq: a parked dispatcher deferred a day-old catch-up", f.backupCalls)
+	}
+}
+
+// The deferred line names the hold: "work in flight" alone left an operator
+// to guess the holder from the log timeline (gt-y6ovz).
+func TestBackupCatchUpDeferralNamesTheHold(t *testing.T) {
+	t.Parallel()
+	d, f := catchUpDaemon(t)
+	var buf bytes.Buffer
+	d.logger = log.New(&buf, "", 0)
+	d.landingStates.setBead("gastown", "gt-a", catchUpNow)
+
+	d.runScheduledMaintenance()
+
+	if len(f.backupCalls) != 0 {
+		t.Fatalf("catch-up ran while a landing pass held the gate: %v", f.backupCalls)
+	}
+	if want := "catch-up backup deferred: daemon has work in flight (landing pass gt-a)"; !strings.Contains(buf.String(), want) {
+		t.Errorf("deferred line = %q, want it to carry %q", buf.String(), want)
 	}
 }
 
