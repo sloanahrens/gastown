@@ -58,7 +58,7 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 	blocked := 0
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reason, matched := evaluatePolecatTestScope(tt.command, "")
+			reason, matched := evaluatePolecatTestScope(fakeGuardProcess(nil, ""), tt.command)
 			got := reason != ""
 			if got != tt.blocked {
 				t.Errorf("evaluatePolecatTestScope(%q) blocked=%v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
@@ -138,6 +138,35 @@ func TestRunTapGuardContainerSuite_NonGoRigMakeTestDashC(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "TEST SCOPE") {
 		t.Errorf("block must be the scope rule, got: %s", stderr)
+	}
+}
+
+// The cd form of the same dodge: the -C case above is refused because the hook
+// judges a command by where its work happens, and "cd <go tree> && make test"
+// is the other way to put the work there. The rig's own tree is where the
+// segment starts, so without the cd carry it reads as the rig's harmless make
+// target (gt-5mc21).
+func TestRunTapGuardContainerSuite_NonGoRigMakeTestAfterCd(t *testing.T) {
+	t.Parallel()
+	tree := nonGoTree(t)
+	goRoot := fakeModule(t, "gastown/refinery/rig")
+	proc := fakeGuardProcess(map[string]string{"GT_POLECAT": "coral", "GT_ROLE": "fractals/polecats/coral"}, tree)
+
+	blocked := "cd " + goRoot + " && make test"
+	cmd := `{"tool_name":"Bash","tool_input":{"command":` + strconv.Quote(blocked) + `}}`
+	stderr, err := runContainerSuiteGuard(cmd, proc)
+	if err == nil {
+		t.Errorf("a non-Go rig's cd into the Go tree was allowed: %s", stderr)
+	}
+	if !strings.Contains(stderr, "TEST SCOPE") {
+		t.Errorf("block must be the scope rule, got: %s", stderr)
+	}
+
+	// The same shape inside the rig's own non-Go tree has nothing to refuse.
+	allowed := "cd " + tree + " && make test"
+	cmd = `{"tool_name":"Bash","tool_input":{"command":` + strconv.Quote(allowed) + `}}`
+	if stderr, err := runContainerSuiteGuard(cmd, proc); err != nil {
+		t.Errorf("a cd within the non-Go rig was refused, got %v: %s", err, stderr)
 	}
 }
 

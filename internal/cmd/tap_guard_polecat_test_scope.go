@@ -43,31 +43,37 @@ func isPolecatContext(proc guardProcess) bool {
 // targets the whole repo, or (b) names a heavy package with no -run filter.
 // Wrapping in gt slot run does not exempt it: the slot protects Docker, not
 // the host's CPU. A -run filter on any number of packages is allowed — the
-// cost of a filtered run is the compile, seconds not minutes. cwd is the
-// invocation's working directory ("" when unknown).
+// cost of a filtered run is the compile, seconds not minutes.
+//
+// Segment directories come from segmentWalkRoot, so cd-ing into a heavy
+// package and running it there is judged in that package (gt-5mc21).
 //
 // Heredoc bodies are stripped before tokenizing, so a body that merely spells
 // "make test" — a bead description, a doc, a formula — is data, not a live
 // invocation. A body fed to a shell invoker is the exception and is judged as
 // the nested script it is (gt-ohe8n).
-func evaluatePolecatTestScope(command, cwd string) (reason string, matched []string) {
-	return evaluatePolecatTestScopeDepth(command, cwd, 0)
+func evaluatePolecatTestScope(proc guardProcess, command string) (reason string, matched []string) {
+	return evaluatePolecatTestScopeDepth(proc, command, 0)
 }
 
-func evaluatePolecatTestScopeDepth(command, cwd string, depth int) (reason string, matched []string) {
+func evaluatePolecatTestScopeDepth(proc guardProcess, command string, depth int) (reason string, matched []string) {
 	tokens := shellTokenize(strings.TrimSpace(stripHeredocBodies(command)))
+	vars := shellVarAssignments(tokens)
+	cwd, _ := proc.getwd()
 	var segment []string
-	for _, tok := range tokens {
+	start := 0
+	for i, tok := range tokens {
 		if shellCommandSeparators[tok] {
-			if r, m := evaluatePolecatTestScopeSegment(segment, cwd); r != "" {
+			if r, m := evaluatePolecatTestScopeSegment(segment, segmentWalkRoot(proc, tokens, start, vars, cwd)); r != "" {
 				return r, m
 			}
 			segment = nil
+			start = i + 1
 			continue
 		}
 		segment = append(segment, tok)
 	}
-	if r, m := evaluatePolecatTestScopeSegment(segment, cwd); r != "" {
+	if r, m := evaluatePolecatTestScopeSegment(segment, segmentWalkRoot(proc, tokens, start, vars, cwd)); r != "" {
 		return r, m
 	}
 
@@ -75,7 +81,7 @@ func evaluatePolecatTestScopeDepth(command, cwd string, depth int) (reason strin
 		return "", nil
 	}
 	for _, body := range shellFedHeredocBodies(command) {
-		if r, m := evaluatePolecatTestScopeDepth(body, cwd, depth+1); r != "" {
+		if r, m := evaluatePolecatTestScopeDepth(proc, body, depth+1); r != "" {
 			return r, m
 		}
 	}

@@ -69,7 +69,7 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reason, _ := evaluateContainerSuiteCommand(tt.command, "", "")
+			reason, _ := evaluateContainerSuiteCommand(fakeGuardProcess(nil, ""), tt.command, "")
 			got := reason != ""
 			if got != tt.blocked {
 				t.Errorf("evaluateContainerSuiteCommand(%q) blocked = %v (reason %q), want %v", tt.command, got, reason, tt.blocked)
@@ -83,13 +83,100 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 // must reach the same verdict.
 func assertBothGuardsJudge(t *testing.T, command, cwd string, blocked bool) {
 	t.Helper()
-	reason, _ := evaluateContainerSuiteCommand(command, cwd, "")
+	proc := fakeGuardProcess(nil, cwd)
+	reason, _ := evaluateContainerSuiteCommand(proc, command, "")
 	if got := reason != ""; got != blocked {
 		t.Errorf("evaluateContainerSuiteCommand(%q, cwd %s) blocked = %v (reason %q), want %v", command, cwd, got, reason, blocked)
 	}
-	scopeReason, _ := evaluatePolecatTestScope(command, cwd)
+	scopeReason, _ := evaluatePolecatTestScope(proc, command)
 	if got := scopeReason != ""; got != blocked {
 		t.Errorf("evaluatePolecatTestScope(%q, cwd %s) blocked = %v (reason %q), want %v", command, cwd, got, scopeReason, blocked)
+	}
+}
+
+// assertGuardsJudge checks each rule's verdict separately, for the cases where
+// the two rules do not agree: the scope rule owns the whole-repo wildcard and
+// the heavy packages, the container rule owns the testcontainers packages and
+// the docker opt-in, so a shared expectation would only pin their overlap.
+func assertGuardsJudge(t *testing.T, command, cwd string, containerBlocked, scopeBlocked bool) {
+	t.Helper()
+	proc := fakeGuardProcess(nil, cwd)
+	if reason, _ := evaluateContainerSuiteCommand(proc, command, ""); (reason != "") != containerBlocked {
+		t.Errorf("evaluateContainerSuiteCommand(%q, cwd %s) blocked = %v (reason %q), want %v", command, cwd, reason != "", reason, containerBlocked)
+	}
+	if reason, _ := evaluatePolecatTestScope(proc, command); (reason != "") != scopeBlocked {
+		t.Errorf("evaluatePolecatTestScope(%q, cwd %s) blocked = %v (reason %q), want %v", command, cwd, reason != "", reason, scopeBlocked)
+	}
+}
+
+// A guarded segment is judged in the directory it runs in, not the one the
+// hook was invoked from: a cd earlier on the same shell line carries forward,
+// by the same walk (and the same rules) the scan rule uses. Without the carry
+// a polecat in a non-Go rig runs the suite in a Go tree through a cd
+// (gt-5mc21).
+func TestGuardsFollowCdOnTheLine(t *testing.T) {
+	t.Parallel()
+	goRoot := fakeModule(t, "gastown/refinery/rig")
+	nonGo := nonGoTree(t)
+	// A Go tree nested inside the non-Go rig, so a relative cd has a real
+	// directory to resolve against. A go.mod under a tree does not make the
+	// tree itself a module — goModuleRoot walks up, not down — so nonGo stays
+	// outside every module.
+	nested := filepath.Join(nonGo, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "go.mod"), []byte("module example.com/nested\n"), 0o644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	heavy := filepath.Join(goRoot, "internal", "cmd")
+	container := filepath.Join(goRoot, "internal", "beads")
+	light := filepath.Join(goRoot, "internal", "style")
+
+	tests := []struct {
+		name                           string
+		cwd, command                   string
+		containerBlocked, scopeBlocked bool
+	}{
+		// The hole: the non-Go rig's segment runs in the Go tree anyway.
+		{"cd into the Go tree then make test", nonGo, "cd " + goRoot + " && make test", true, true},
+		{"cd into the Go tree after a semicolon", nonGo, "cd " + goRoot + "; make test", true, true},
+		{"relative cd into a nested Go tree", nonGo, "cd nested && make test", true, true},
+		{"chained cds, last one into the Go tree", nonGo, "cd nested && cd " + goRoot + " && make test", true, true},
+
+		// The same line in a tree the rule has nothing to refuse stays allowed.
+		{"cd to the non-Go tree then make test", nonGo, "cd " + nonGo + " && make test", false, false},
+		{"chained cds, last one out of the Go tree", nonGo, "cd " + goRoot + " && cd " + nonGo + " && make test", false, false},
+
+		// Leaving the Go tree is judged where the command runs too, so the
+		// hook's own tree no longer decides a segment that left it.
+		{"cd out of the Go tree then make test", goRoot, "cd " + nonGo + " && make test", false, false},
+		{"cd out of the container package", container, "cd " + light + " && GT_TEST_DOCKER=1 go test .", false, false},
+		{"cd into the container package", nonGo, "cd " + container + " && GT_TEST_DOCKER=1 go test .", true, false},
+		{"cd into a heavy package", nonGo, "cd " + heavy + " && go test .", false, true},
+
+		// A cd and make's own -C compose: the -C is resolved against the
+		// directory the segment runs in, which the cd is what set.
+		{"cd into the Go tree, make -C back out", nonGo, "cd " + goRoot + " && make -C " + nonGo + " test", false, false},
+		{"cd out of the Go tree, make -C back in", nonGo, "cd " + nonGo + " && make -C " + goRoot + " test", true, true},
+
+		// Only "&&" and ";" carry the change — a cd in a pipeline or a
+		// background job runs in a subshell of its own, and one before "||"
+		// runs only when it failed, so in all three the segment keeps the
+		// directory the shell already had (scanWalkRoot's rule).
+		{"cd in a pipeline does not carry", nonGo, "cd " + goRoot + " | make test", false, false},
+		{"background cd does not carry", nonGo, "cd " + goRoot + " & make test", false, false},
+		{"cd before || does not carry", nonGo, "cd " + goRoot + " || make test", false, false},
+
+		// A cd this process cannot resolve keeps today's reading — the hook
+		// cwd — rather than guessing a directory.
+		{"unresolvable cd keeps the hook cwd, Go tree", goRoot, "cd /nonexistent/gt-5mc21 && make test", true, true},
+		{"unresolvable cd keeps the hook cwd, non-Go tree", nonGo, "cd /nonexistent/gt-5mc21 && make test", false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assertGuardsJudge(t, tt.command, tt.cwd, tt.containerBlocked, tt.scopeBlocked)
+		})
 	}
 }
 
@@ -397,7 +484,7 @@ func TestEvaluateContainerSuiteCommand_CwdStyle(t *testing.T) {
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {
 					cwd := filepath.Join(root, filepath.FromSlash(tt.relDir))
-					reason, _ := evaluateContainerSuiteCommand(tt.command, cwd, "")
+					reason, _ := evaluateContainerSuiteCommand(fakeGuardProcess(nil, cwd), tt.command, "")
 					if got := reason != ""; got != tt.blocked {
 						t.Errorf("evaluateContainerSuiteCommand(%q) from %s blocked = %v (reason %q), want %v",
 							tt.command, tt.relDir, got, reason, tt.blocked)
@@ -466,7 +553,7 @@ func TestEvaluatePolecatTestScope_CwdStyle(t *testing.T) {
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {
 					cwd := filepath.Join(root, filepath.FromSlash(tt.relDir))
-					reason, matched := evaluatePolecatTestScope(tt.command, cwd)
+					reason, matched := evaluatePolecatTestScope(fakeGuardProcess(nil, cwd), tt.command)
 					if got := reason != ""; got != tt.blocked {
 						t.Errorf("evaluatePolecatTestScope(%q) from %s blocked = %v (reason %q, matched %v), want %v",
 							tt.command, tt.relDir, got, reason, matched, tt.blocked)
@@ -515,16 +602,17 @@ func TestCwdAndArgumentFormsAgree(t *testing.T) {
 	for _, relDir := range []string{"internal", "internal/beads", "internal/beads/sub", "internal/cmd", "internal/cmd/sub", "internal/style", "cmd/gt", "."} {
 		t.Run(relDir, func(t *testing.T) {
 			cwd := filepath.Join(root, filepath.FromSlash(relDir))
+			proc := fakeGuardProcess(nil, cwd)
 
-			argForm, _ := evaluateContainerSuiteCommand("GT_TEST_DOCKER=1 go test ./"+relDir, cwd, "")
-			cwdForm, _ := evaluateContainerSuiteCommand("GT_TEST_DOCKER=1 go test .", cwd, "")
+			argForm, _ := evaluateContainerSuiteCommand(proc, "GT_TEST_DOCKER=1 go test ./"+relDir, "")
+			cwdForm, _ := evaluateContainerSuiteCommand(proc, "GT_TEST_DOCKER=1 go test .", "")
 			if (argForm != "") != (cwdForm != "") {
 				t.Errorf("container guard: ./%s blocked by argument form = %v (reason %q), by cwd form = %v (reason %q)",
 					relDir, argForm != "", argForm, cwdForm != "", cwdForm)
 			}
 
-			argReason, _ := evaluatePolecatTestScope("go test ./"+relDir, cwd)
-			scopeReason, _ := evaluatePolecatTestScope("go test .", cwd)
+			argReason, _ := evaluatePolecatTestScope(proc, "go test ./"+relDir)
+			scopeReason, _ := evaluatePolecatTestScope(proc, "go test .")
 			if (argReason != "") != (scopeReason != "") {
 				t.Errorf("polecat scope rule: ./%s blocked by argument form = %v, by cwd form = %v", relDir, argReason != "", scopeReason != "")
 			}
@@ -624,10 +712,11 @@ func TestDockerTestsEnvMatchesTestutil(t *testing.T) {
 // process without appearing in the command, so the guard reads its own env.
 func TestEvaluateContainerSuiteCommand_EnvOptIn(t *testing.T) {
 	t.Parallel()
-	if reason, _ := evaluateContainerSuiteCommand("go test ./internal/beads/...", "", "1"); reason == "" {
+	proc := fakeGuardProcess(nil, "")
+	if reason, _ := evaluateContainerSuiteCommand(proc, "go test ./internal/beads/...", "1"); reason == "" {
 		t.Error("bare go test on a container package with the opt-in exported in the environment was allowed")
 	}
-	if reason, _ := evaluateContainerSuiteCommand("go test ./internal/beads/...", "", ""); reason != "" {
+	if reason, _ := evaluateContainerSuiteCommand(proc, "go test ./internal/beads/...", ""); reason != "" {
 		t.Errorf("bare go test with the opt-in unset was blocked: %s", reason)
 	}
 }
@@ -747,11 +836,11 @@ func TestContainerSuiteGuardsStripHeredocBodies(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reason, _ := evaluateContainerSuiteCommand(tt.command, "", "")
+			reason, _ := evaluateContainerSuiteCommand(fakeGuardProcess(nil, ""), tt.command, "")
 			if got := reason != ""; got != tt.wantRefused {
 				t.Errorf("evaluateContainerSuiteCommand(%q) blocked = %v (reason %q), want %v", tt.command, got, reason, tt.wantRefused)
 			}
-			scopeReason, _ := evaluatePolecatTestScope(tt.command, "")
+			scopeReason, _ := evaluatePolecatTestScope(fakeGuardProcess(nil, ""), tt.command)
 			if got := scopeReason != ""; got != tt.wantScopeOut {
 				t.Errorf("evaluatePolecatTestScope(%q) blocked = %v (reason %q), want %v", tt.command, got, scopeReason, tt.wantScopeOut)
 			}
@@ -767,10 +856,11 @@ func TestContainerSuiteGuardsStripHeredocBodies(t *testing.T) {
 func TestContainerSuiteGuardsBoundHeredocRecursion(t *testing.T) {
 	t.Parallel()
 	command := "bash <<'L0'\nbash <<'L1'\nbash <<'L2'\nmake test\nL2\nL1\nL0\n"
-	if reason, _ := evaluateContainerSuiteCommand(command, "", ""); reason == "" {
+	proc := fakeGuardProcess(nil, "")
+	if reason, _ := evaluateContainerSuiteCommand(proc, command, ""); reason == "" {
 		t.Errorf("make test nested %d shell-fed heredocs deep was allowed", maxTestGuardNestDepth)
 	}
-	if reason, _ := evaluatePolecatTestScope(command, ""); reason == "" {
+	if reason, _ := evaluatePolecatTestScope(proc, command); reason == "" {
 		t.Errorf("scope: make test nested %d shell-fed heredocs deep was allowed", maxTestGuardNestDepth)
 	}
 }

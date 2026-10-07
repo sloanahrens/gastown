@@ -45,6 +45,11 @@ This guard blocks, when running as a polecat or refinery:
                         (-f) is refused outright — the guard cannot read what
                         that target does (gt-dieu9)
 
+The directory a segment is judged in is the one it runs in: a cd earlier on
+the same shell line carries into the segments after it ("&&"/";" only, as the
+shell does), so changing into a Go tree and running the suite there is judged
+in that tree rather than in the rig the hook was invoked from (gt-5mc21).
+
 ...unless the command is already wrapped in 'gt slot run -- <command>', in
 which case it is allowed through untouched. Bare go test runs that only
 target non-Docker packages are also allowed through.
@@ -115,7 +120,6 @@ func tapGuardContainerSuite(stdin io.Reader, stderr io.Writer, proc guardProcess
 	if !isPolecatOrRefineryContext(proc) {
 		return nil
 	}
-	cwd, _ := proc.getwd()
 
 	// The scope rule answers first for a polecat: its advice is "iterate with
 	// -run", and it must win over the container-suite rule's "run it wrapped"
@@ -123,12 +127,12 @@ func tapGuardContainerSuite(stdin io.Reader, stderr io.Writer, proc guardProcess
 	// forbids (gt-v6se: three polecats followed that line into full suites
 	// beside the refinery's gate).
 	if isPolecatContext(proc) {
-		if reason, matched := evaluatePolecatTestScope(command, cwd); reason != "" {
+		if reason, matched := evaluatePolecatTestScope(proc, command); reason != "" {
 			printPolecatTestScopeBlock(stderr, reason, command, matched)
 			return NewSilentExit(2)
 		}
 	}
-	if reason, matched := evaluateContainerSuiteCommand(command, cwd, proc.getenv(dockerTestsEnv)); reason != "" {
+	if reason, matched := evaluateContainerSuiteCommand(proc, command, proc.getenv(dockerTestsEnv)); reason != "" {
 		printContainerSuiteBlock(stderr, reason, command, matched, proc.getenv("GT_ROLE"))
 		return NewSilentExit(2)
 	}
@@ -171,8 +175,10 @@ const maxTestGuardNestDepth = 3
 // unrelated later "go test ./internal/beads/..." on the same compound line
 // are judged separately rather than one exemption covering the whole line.
 // Returns the reason for the first blocked segment found, or ("", nil) if
-// none is blocked. cwd is the invocation's working directory ("" when
-// unknown) and envOptIn the hook environment's own GT_TEST_DOCKER.
+// none is blocked. envOptIn is the hook environment's own GT_TEST_DOCKER.
+//
+// Segment directories come from segmentWalkRoot, so a polecat in a non-Go rig
+// cannot reach the whole suite by changing into a Go tree first (gt-5mc21).
 //
 // Heredoc bodies are stripped before tokenizing (stripHeredocBodies), so a
 // body that merely spells "make test" — a bead description, a doc, a formula
@@ -180,11 +186,11 @@ const maxTestGuardNestDepth = 3
 // exception and is judged as the nested script it is (shellFedHeredocBodies),
 // the same distinction matchesPRWorkflowCommand and evaluateDangerousCommand
 // draw (gt-ohe8n).
-func evaluateContainerSuiteCommand(command, cwd, envOptIn string) (reason string, matched []string) {
-	return evaluateContainerSuiteCommandDepth(command, cwd, envOptIn, 0)
+func evaluateContainerSuiteCommand(proc guardProcess, command, envOptIn string) (reason string, matched []string) {
+	return evaluateContainerSuiteCommandDepth(proc, command, envOptIn, 0)
 }
 
-func evaluateContainerSuiteCommandDepth(command, cwd, envOptIn string, depth int) (reason string, matched []string) {
+func evaluateContainerSuiteCommandDepth(proc guardProcess, command, envOptIn string, depth int) (reason string, matched []string) {
 	tokens := shellTokenize(strings.TrimSpace(stripHeredocBodies(command)))
 	// Container-backed tests are opt-in (testutil.DockerTestsEnv). A bare
 	// `go test` of a container-bearing package cannot start a container
@@ -196,19 +202,23 @@ func evaluateContainerSuiteCommandDepth(command, cwd, envOptIn string, depth int
 	// later segment. An opt-in already exported in the hook's environment
 	// counts too: the test process inherits it without it being typed.
 	dockerOn := commandEnablesDockerTests(tokens) || envOptIn == "1"
+	vars := shellVarAssignments(tokens)
+	cwd, _ := proc.getwd()
 
 	var segment []string
-	for _, tok := range tokens {
+	start := 0
+	for i, tok := range tokens {
 		if shellCommandSeparators[tok] {
-			if r, m := evaluateContainerSuiteSegment(segment, dockerOn, cwd); r != "" {
+			if r, m := evaluateContainerSuiteSegment(segment, dockerOn, segmentWalkRoot(proc, tokens, start, vars, cwd)); r != "" {
 				return r, m
 			}
 			segment = nil
+			start = i + 1
 			continue
 		}
 		segment = append(segment, tok)
 	}
-	if r, m := evaluateContainerSuiteSegment(segment, dockerOn, cwd); r != "" {
+	if r, m := evaluateContainerSuiteSegment(segment, dockerOn, segmentWalkRoot(proc, tokens, start, vars, cwd)); r != "" {
 		return r, m
 	}
 
@@ -218,7 +228,7 @@ func evaluateContainerSuiteCommandDepth(command, cwd, envOptIn string, depth int
 	// The bodies come off the untouched command: stripHeredocBodies removed
 	// them from the text above, so they are judged here once, as code.
 	for _, body := range shellFedHeredocBodies(command) {
-		if r, m := evaluateContainerSuiteCommandDepth(body, cwd, envOptIn, depth+1); r != "" {
+		if r, m := evaluateContainerSuiteCommandDepth(proc, body, envOptIn, depth+1); r != "" {
 			return r, m
 		}
 	}
