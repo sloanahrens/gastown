@@ -45,12 +45,12 @@ This guard blocks, when running as a polecat or refinery:
                         (-f) is refused outright — the guard cannot read what
                         that target does (gt-dieu9)
 
-The directory a segment is judged in is the one it runs in: a cd earlier on
-the same shell line carries into the segments after it ("&&"/";" only, as the
-shell does), so changing into a Go tree and running the suite there is judged
-in that tree rather than in the rig the hook was invoked from (gt-5mc21), and
-a heredoc body fed to a shell is judged in the directory its reader line left
-the shell in (gt-1cvqj).
+The directory a segment is judged in is the one it runs in: a cd, pushd or
+popd earlier on the same shell line carries into the segments after it
+("&&"/";" only, as the shell does), so changing into a Go tree and running the
+suite there is judged in that tree rather than in the rig the hook was invoked
+from (gt-5mc21, gt-n7ksl), and a heredoc body fed to a shell is judged in the
+directory its reader line left the shell in (gt-1cvqj).
 
 ...unless the command is already wrapped in 'gt slot run -- <command>', in
 which case it is allowed through untouched. Bare go test runs that only

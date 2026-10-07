@@ -46,8 +46,8 @@ func isPolecatContext(proc guardProcess) bool {
 // cost of a filtered run is the compile, seconds not minutes.
 //
 // Segment directories come from segmentWalkRoot, so cd-ing into a heavy
-// package and running it there is judged in that package (gt-5mc21). A
-// directory the walk cannot place is refused rather than read as a light one,
+// package and running it there is judged in that package (gt-5mc21, gt-n7ksl).
+// A directory the walk cannot place is refused rather than read as a light one,
 // the reading an unplaceable make -C already gets (gt-ofj05).
 //
 // Heredoc bodies are stripped before tokenizing, so a body that merely spells
