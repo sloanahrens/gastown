@@ -735,15 +735,22 @@ func TestMatchesUnboundedScanImplicitRoot(t *testing.T) {
 		{"cd to an unseen variable", rig, "cd $GT_NO_SUCH_DIR && grep -rn TODO", false, ""},
 		{"cd to a directory that does not exist", rig, "cd " + missing + " && grep -rn TODO", false, ""},
 
-		// The walk keeps going. A cd it cannot resolve loses the directory,
-		// but a later absolute target needs no base and so names one again
-		// (gt-n7ksl); a later relative one has nothing to resolve against, and
-		// guessing the directory the failed cd left behind would be exactly
-		// that.
+		// The walk keeps going. A cd the shell refuses leaves the shell where
+		// it was, so the walk keeps the directory it had (gt-34vra) — a later
+		// relative target resolves against it rather than against nothing —
+		// and a cd it cannot resolve loses the directory, but a later absolute
+		// target needs no base and so names one again (gt-n7ksl).
 		{"a missing cd, then an absolute cd into the rig root walks the rig", worktree, "cd " + missing + " ; cd " + rig + " && grep -rn TODO", true, "cwd is a rig root"},
-		{"the same cd after an && the missing cd dead-ends names nothing", worktree, "cd " + missing + " && cd " + rig + " ; grep -rn TODO", false, ""},
+		{"a refused cd keeps the rig the walk was in", worktree, "cd " + rig + " ; cd " + missing + " ; grep -rn TODO", true, "cwd is a rig root"},
 		{"a missing cd, then an absolute cd out of the town bounds the scan", rig, "cd " + missing + " ; cd " + other + " && grep -rn TODO", false, ""},
-		{"a missing cd leaves a relative target with no base", rig, "cd " + missing + " ; cd polecats && grep -rn TODO", false, ""},
+		{"a refused cd keeps the base a relative target resolves against", rig, "cd " + missing + " ; cd polecats && grep -rn TODO", true, "cwd is a rig's worktree dir"},
+
+		// The "&&" list a refusing cd dead-ended still ends at the ";" that
+		// follows it: a cd inside the list never runs, and the walk reads on
+		// from that ";" — the shell is in the directory the refusal kept
+		// (gt-34vra).
+		{"a cd inside the dead list is not named, and the walk stays put", worktree, "cd " + missing + " && cd " + rig + " ; grep -rn TODO", false, ""},
+		{"the walk reads on from the semicolon after a dead list", worktree, "cd " + missing + " && true ; cd " + rig + " ; grep -rn TODO", true, "cwd is a rig root"},
 
 		// A cd in a pipeline or background job runs in a subshell of its own,
 		// so the scan after it keeps the directory the shell already had —

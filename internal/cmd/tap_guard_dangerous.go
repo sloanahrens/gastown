@@ -1329,7 +1329,8 @@ const (
 	// changed into a directory the line never names.
 	cdWalkUnplaced
 	// cdWalkGivenUp: the walk has no directory to name, but no cd on the line
-	// is one the guard failed to place — a cd the shell refuses, or a "||"
+	// is one the guard failed to place — a cd the shell refuses at the dead end
+	// of an "&&" list whose remainder the walk cannot name from, or a "||"
 	// chain whose left cd resolved and so leaves the branch it took unshown.
 	cdWalkGivenUp
 )
@@ -1337,8 +1338,9 @@ const (
 // cdWalkOutcome names the walk's unnamed outcome for a change it cannot follow
 // to a directory, in the terms cdWalkRoot reports (cdWalkStatus). A change this
 // guard cannot place is an unplaced line — the shell may have changed into a
-// directory the line never names — and one the shell refuses, or leaves open
-// because it hangs off a "||" the walk cannot follow, is a give-up.
+// directory the line never names — and one the shell refuses at a dead end, or
+// leaves open because it hangs off a "||" the walk cannot follow, is a
+// give-up.
 func cdWalkOutcome(status cdStatus) cdWalkStatus {
 	if status == cdUnknown {
 		return cdWalkUnplaced
@@ -1358,14 +1360,22 @@ func cdWalkOutcome(status cdStatus) cdWalkStatus {
 // A change this process cannot resolve loses the directory from that point on
 // rather than being guessed at (gt-n7ksl): the shell may or may not have moved,
 // so what the commands after it run in is not something the walk can name. A cd
-// the shell refuses is one the walk could name instead of losing — the shell
-// stays where it was (gt-34vra). A
-// change carried by ";" or by nothing at all is where that keeps going — the
-// commands after a ";" certainly run, so a later absolute target needs no base
-// and names the directory again. A change carried by "&&" is where it stops
-// instead: that list is at its dead end, and the walk reads no change after it
-// rather than guess which of them the shell reaches (gt-34vra reads a cd the
-// next ";" carries after a dead list).
+// the shell refuses loses nothing: the shell stays where it was, so the walk
+// keeps the directory it already has and a relative target after the refusal
+// resolves against it (gt-34vra). A change carried by ";" or by nothing at all
+// is where that keeps going — the commands after a ";" certainly run, so a
+// later absolute target needs no base and names the directory again.
+//
+// An "&&" list stops at a change that does not resolve (gt-n7ksl): the list is
+// at its dead end, and no cd inside it after that point runs — `cd /nonexistent
+// && cd /tmp` never reaches /tmp. The list itself does end, at the ";" that
+// follows, and the shell reads on from there — `cd /nonexistent && true ; cd
+// /tmp` is in /tmp once the ";" is read — so the walk skips the list's
+// remainder and reads the changes from that ";" on (gt-34vra). A "||" or a
+// background "&" in that remainder is not a point it reads from: the "||"
+// turns on whether the list left of it failed and the "&" runs what follows in
+// this shell, so the walk reports the line's outcome rather than name a
+// directory out of a stretch of the line it has not followed.
 //
 // The status is the outcome the walk reached: cdWalkPlaced with the directory
 // the shell is in, or the unnamed outcome of the change it could not resolve
@@ -1403,34 +1413,63 @@ func cdWalkRoot(proc guardProcess, tokens []string, end int, base string, vars m
 			continue
 		}
 		target, status := dirChangeTarget(proc, tokens[i], args, root, vars)
-		if status != cdResolved {
-			// The change may have run and may not have: a cd the shell refuses
-			// fails, and a spelling like `cd -` is one this walk cannot place
-			// at all. An "&&" list ends at either, so nothing after it is a
-			// directory the walk can name — `cd /nonexistent && cd /tmp ; grep`
-			// never reaches /tmp, and naming it there would judge the grep in a
-			// tree the shell stays out of. The walk reports the line's outcome
-			// rather than follow the list past its dead end.
-			if sep < end && tokens[sep] == "&&" {
-				return "", cdWalkOutcome(status)
-			}
-			// Carried by ";" or by nothing at all, the change did run in this
-			// shell, so the walk drops the directory from here on rather than
-			// guess it — but keeps walking, because a later absolute target
-			// needs no base and names the directory again (gt-n7ksl). Where it
-			// does not, this change's outcome is the line's. A change the guard
-			// cannot place is the stronger of the two, and stays the line's
-			// whatever a later refusal adds.
+		if status == cdResolved {
+			root = target
+			lost = cdWalkPlaced
+			continue
+		}
+		// A cd the shell refuses is one the walk can still name: the shell
+		// stays where it was, so the directory the walk already has stands,
+		// and a later relative target resolves against it rather than against
+		// nothing (gt-34vra). A change the walk cannot place may have moved
+		// the shell into a directory the line never names, so that one drops
+		// the directory rather than be guessed at — but the walk keeps going,
+		// because a later absolute target needs no base and names the
+		// directory again (gt-n7ksl). Where it does not, this change's outcome
+		// is the line's; a change the guard cannot place is the stronger of
+		// the two, and stays the line's whatever a later refusal adds.
+		if status != cdRefused {
 			root = ""
 			if outcome := cdWalkOutcome(status); lost == cdWalkPlaced || outcome == cdWalkUnplaced {
 				lost = outcome
 			}
-			continue
 		}
-		root = target
-		lost = cdWalkPlaced
+		// An "&&" list ends at that change, so no cd after it inside the list
+		// runs — `cd /nonexistent && cd /tmp` never reaches /tmp, and naming it
+		// would judge the line in a tree the shell stays out of. The list does
+		// end, though, at the ";" that follows, and the shell reads on from
+		// there (gt-34vra), so the walk skips the list's remainder and reads
+		// from that ";" — a cd inside the remainder is not one the shell
+		// reaches, and a "||" or a background "&" in it is a point the walk
+		// cannot name a directory from (cdWalkListEnd).
+		if sep < end && tokens[sep] == "&&" {
+			resume := cdWalkListEnd(tokens, sep+1, end)
+			if resume < 0 {
+				return "", cdWalkOutcome(status)
+			}
+			i = resume
+		}
 	}
 	return root, lost
+}
+
+// cdWalkListEnd returns the index of the ";" that ends the "&&" list a cd
+// dead-ended at — the point the shell reads on from, and so the first token
+// whose changes the walk may name a directory for (gt-34vra). It returns -1
+// when the list has no end in tokens[start:end), and when a "||" or a
+// background "&" comes first: the "||" turns on whether the list left of it
+// failed, and the "&" runs what follows in this shell, so neither leaves the
+// directory the walk is carrying as the one the shell has there.
+func cdWalkListEnd(tokens []string, start, end int) int {
+	for i := start; i < end; i++ {
+		switch tokens[i] {
+		case ";":
+			return i
+		case "||", "&":
+			return -1
+		}
+	}
+	return -1
 }
 
 // segmentWalkRoot resolves the directory a guarded shell segment runs in: base

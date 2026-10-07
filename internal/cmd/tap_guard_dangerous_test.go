@@ -1815,10 +1815,32 @@ func TestCdWalkOrChain(t *testing.T) {
 		// The walk keeps going past a change it cannot place, so that a later
 		// absolute cd names the directory again (gt-n7ksl) — but only where
 		// the shell still gets there: an "&&" list ends at a cd that failed or
-		// cannot be placed, and a cd after that dead end never runs.
-		{"a later absolute cd after a failed cd is not named", "cd " + gone + " && cd " + left + " ; grep -rn TODO", "", false},
+		// cannot be placed, so no cd inside the list after that dead end runs.
+		{"a cd inside the dead list is not named", "cd " + gone + " && cd " + left + " ; grep -rn TODO", base, true},
 		{"the same after a cd the walk cannot place", "cd - && cd " + left + " ; grep -rn TODO", "", false},
 		{"a semicolon still carries the walk past a failed cd", "cd " + gone + " ; cd " + left + " && grep -rn TODO", left, true},
+
+		// A cd the shell refuses leaves the shell where it was, so the walk
+		// keeps the directory it already has rather than lose it (gt-34vra):
+		// the segment guards judge the line's commands in A, not in the hook
+		// cwd, and a relative target after the refusal resolves against A.
+		{"a refused cd keeps the directory the walk had", "cd " + left + " ; cd " + gone + " ; grep -rn TODO", left, true},
+		{"a relative target after a refused cd keeps its base", "cd " + gone + " ; cd left && grep -rn TODO", left, true},
+
+		// The "&&" list the refusal dead-ended still ends, at the ";" that
+		// follows it: the shell reads on from there, so a cd after that ";" is
+		// one the walk reads and a cd inside the list is not (gt-34vra).
+		{"the walk reads on from the semicolon after a dead list", "cd " + gone + " && true ; cd " + left + " ; grep -rn TODO", left, true},
+		{"the same into a relative tree", "cd " + gone + " && true ; cd left && grep -rn TODO", left, true},
+
+		// A "||" or a background "&" inside that dead list is a point the walk
+		// does not read from: the "||" turns on whether the list left of it
+		// failed and the "&" runs what follows in this shell, so neither
+		// leaves the directory the walk was carrying where the shell is.
+		{"a || inside the dead list is not read past", "cd " + gone + " && cd " + left + " || cd " + right + " ; grep -rn TODO", "", false},
+		{"a background cd inside the dead list is not read past", "cd " + gone + " && cd " + left + " & cd " + right + " ; grep -rn TODO", "", false},
+		{"a dead list with no semicolon after it names nothing", "cd " + gone + " && cd " + left, "", false},
+		{"a dead list with no semicolon leaves the base unnamable", "cd " + gone + " && cd " + left + " && grep -rn TODO", "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1933,6 +1955,15 @@ func TestIdleGateFollowsCdOnTheLine(t *testing.T) {
 		// walk does not track, so a popd leaves the segment refused.
 		{"a missing cd, then an absolute cd into the Go tree", nonGo, "cd /nonexistent/gt-n7ksl ; cd " + goRoot + " && make test", true},
 		{"an unresolvable cd in a pipeline keeps the Go tree", goRoot, "cd /nonexistent/gt-n7ksl | make test", true},
+
+		// A cd the shell refuses leaves the shell where it was, so the walk
+		// keeps the tree it had and the segment is judged there (gt-34vra);
+		// the "&&" list that refusal dead-ends still ends at the ";" that
+		// follows, and the cd the walk reads from there is the one that
+		// decides the segment.
+		{"a refused cd keeps the Go tree the walk was in", nonGo, "cd " + goRoot + " ; cd /nonexistent/gt-34vra ; make test", true},
+		{"a refused cd keeps the non-Go tree the walk was in", goRoot, "cd " + nonGo + " ; cd /nonexistent/gt-34vra ; make test", false},
+		{"the walk reads on from the semicolon after a dead list", nonGo, "cd /nonexistent/gt-34vra && true ; cd " + goRoot + " ; make test", true},
 		{"an unplaceable cd in a pipeline keeps the Go tree", goRoot, `cd "$GT_OFJ05_UNSET" | make test`, true},
 		{"an unplaceable cd in a pipeline stays exempt", nonGo, `cd "$GT_OFJ05_UNSET" | make test`, false},
 		{"pushd into the Go tree then make test", nonGo, "pushd " + goRoot + " && make test", true},
