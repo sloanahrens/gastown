@@ -161,12 +161,21 @@ func TestGuardsFollowCdOnTheLine(t *testing.T) {
 		{"cd out of the Go tree, make -C back in", nonGo, "cd " + nonGo + " && make -C " + goRoot + " test", true, true},
 
 		// Only "&&" and ";" carry the change — a cd in a pipeline or a
-		// background job runs in a subshell of its own, and one before "||"
-		// runs only when it failed, so in all three the segment keeps the
-		// directory the shell already had (scanWalkRoot's rule).
+		// background job runs in a subshell of its own, so both keep the
+		// directory the shell already had, and one before "||" carries its
+		// own change nowhere either (scanWalkRoot's rule; gt-0lzdi).
 		{"cd in a pipeline does not carry", nonGo, "cd " + goRoot + " | make test", false, false},
 		{"background cd does not carry", nonGo, "cd " + goRoot + " & make test", false, false},
 		{"cd before || does not carry", nonGo, "cd " + goRoot + " || make test", false, false},
+
+		// A "||" chain runs the segment in its right-hand cd's directory only
+		// when the left cd certainly failed, so the chain neither hides the
+		// Go tree the shell is really in (gt-0lzdi) nor refuses a segment that
+		// stays in the rig's own tree.
+		{"cd out of the Go tree before a || chain", goRoot, "cd " + goRoot + " || cd " + nonGo + " && make test", true, true},
+		{"cd into the Go tree before a || chain", nonGo, "cd " + nonGo + " || cd " + goRoot + " && make test", false, false},
+		{"a refused cd runs make in the || chain's Go tree", nonGo, "cd /nonexistent/gt-0lzdi || cd " + goRoot + " && make test", true, true},
+		{"an unresolvable cd does not name the || chain", goRoot, "cd - || cd " + nonGo + " && make test", true, true},
 
 		// A cd this process cannot resolve keeps today's reading — the hook
 		// cwd — rather than guessing a directory.

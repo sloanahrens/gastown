@@ -717,6 +717,16 @@ func TestMatchesUnboundedScanImplicitRoot(t *testing.T) {
 		{"cd into the rig root walks the rig", worktree, "cd " + rig + " ; grep -rn TODO", true, "cwd is a rig root"},
 		{"cd into a bounded path, then a path argument", rig, "cd " + other + " && grep -rn TODO " + worktree, false, ""},
 
+		// A "||" chain names its right-hand cd's directory only for a left cd
+		// the shell certainly refused (gt-0lzdi): the chain's own target is
+		// the shell's directory only when the left cd failed, and a left cd
+		// that resolves leaves the branch the "||" took unshown, so the walk
+		// names none.
+		{"a resolved left cd does not name the || chain's rig", worktree, "cd " + other + " || cd " + rig + " && grep -rn TODO", false, ""},
+		{"a resolved left cd does not name the || chain's town", worktree, "cd " + other + " || cd " + town + " && grep -rn TODO", false, ""},
+		{"a refused left cd names the || chain's rig", other, "cd " + filepath.Join(other, "nope") + " || cd " + rig + " && grep -rn TODO", true, "cwd is a rig root"},
+		{"a cd the walk cannot resolve does not name the || chain", worktree, "cd - || cd " + rig + " && grep -rn TODO", false, ""},
+
 		// A cd this guard cannot follow leaves the walk root unknown, and an
 		// unknown root is not a hazard: guessing one would block a bounded
 		// scan on the strength of a directory the shell may never enter.
