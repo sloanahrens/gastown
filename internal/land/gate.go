@@ -36,7 +36,11 @@ type Gate interface {
 type GateResult struct {
 	Passed bool
 	Steps  []StepResult
-	Err    error
+	// Preflight are the gate's own findings from before its steps ran, in
+	// order: the gate prints each as a "gate: WARNING" line. They fail
+	// nothing.
+	Preflight []string
+	Err       error
 }
 
 // StepResult is one step's outcome.
@@ -96,10 +100,11 @@ func (r GateResult) Summary() string {
 	return out
 }
 
-// Warnings are every step's "gate: WARNING" lines, in step order. A warning
-// is the gate's own account of the host it ran on and fails nothing.
+// Warnings are the gate's preflight findings and every step's "gate: WARNING"
+// lines, in that order. A warning is the gate's own account of the tree and
+// the host it ran on, and fails nothing.
 func (r GateResult) Warnings() []string {
-	var out []string
+	out := append([]string(nil), r.Preflight...)
 	for _, s := range r.Steps {
 		out = append(out, s.Warnings...)
 	}
@@ -162,6 +167,13 @@ type CommandGate struct {
 	// holds. It is read only for such a step, and a step with a SlotRole and
 	// no TownRoot is an error rather than a silent unguarded run.
 	TownRoot string
+	// CheckNodeDeps has the gate report, before its steps run, the Node
+	// packages installed in the tree that disagree with its
+	// package-lock.json, and never fails the gate (nodedeps, gt-wd12s). The
+	// caller whose tree it describes sets it: gt done's pre-submit does, and
+	// the landing gate does not, because that tree's node_modules belongs to
+	// the lander host.
+	CheckNodeDeps bool
 
 	run        runFunc         // nil means realRun
 	lockDelays []time.Duration // nil means lintlock.RetryDelay
@@ -382,7 +394,9 @@ func slotWaitTimeout(ctx context.Context) (time.Duration, error) {
 	return timeout, nil
 }
 
-// Run runs each step in dir and stops at the first that does not exit zero.
+// Run runs each step in dir and stops at the first that does not exit zero. A
+// gate with CheckNodeDeps reports the tree's out-of-date Node packages to Out
+// as "gate: WARNING" lines before its first step, and keeps them in the result.
 func (g CommandGate) Run(ctx context.Context, dir string) GateResult {
 	run := g.run
 	if run == nil {
@@ -400,6 +414,14 @@ func (g CommandGate) Run(ctx context.Context, dir string) GateResult {
 		}
 	}
 	var res GateResult
+	if g.CheckNodeDeps {
+		res.Preflight = nodeDepsPreflight(dir)
+		for _, w := range res.Preflight {
+			if g.Out != nil {
+				_, _ = fmt.Fprintf(g.Out, "gate: WARNING %s\n", w)
+			}
+		}
+	}
 	for _, s := range g.Steps {
 		if !g.runStep(ctx, dir, run, s, &res) {
 			return res
