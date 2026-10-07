@@ -45,8 +45,17 @@ func isPolecatContext(proc guardProcess) bool {
 // the host's CPU. A -run filter on any number of packages is allowed — the
 // cost of a filtered run is the compile, seconds not minutes. cwd is the
 // invocation's working directory ("" when unknown).
+//
+// Heredoc bodies are stripped before tokenizing, so a body that merely spells
+// "make test" — a bead description, a doc, a formula — is data, not a live
+// invocation. A body fed to a shell invoker is the exception and is judged as
+// the nested script it is (gt-ohe8n).
 func evaluatePolecatTestScope(command, cwd string) (reason string, matched []string) {
-	tokens := shellTokenize(strings.TrimSpace(command))
+	return evaluatePolecatTestScopeDepth(command, cwd, 0)
+}
+
+func evaluatePolecatTestScopeDepth(command, cwd string, depth int) (reason string, matched []string) {
+	tokens := shellTokenize(strings.TrimSpace(stripHeredocBodies(command)))
 	var segment []string
 	for _, tok := range tokens {
 		if shellCommandSeparators[tok] {
@@ -58,7 +67,19 @@ func evaluatePolecatTestScope(command, cwd string) (reason string, matched []str
 		}
 		segment = append(segment, tok)
 	}
-	return evaluatePolecatTestScopeSegment(segment, cwd)
+	if r, m := evaluatePolecatTestScopeSegment(segment, cwd); r != "" {
+		return r, m
+	}
+
+	if depth >= maxTestGuardNestDepth {
+		return "", nil
+	}
+	for _, body := range shellFedHeredocBodies(command) {
+		if r, m := evaluatePolecatTestScopeDepth(body, cwd, depth+1); r != "" {
+			return r, m
+		}
+	}
+	return "", nil
 }
 
 func evaluatePolecatTestScopeSegment(tokens []string, cwd string) (reason string, matched []string) {
