@@ -232,6 +232,9 @@ func TestRigsPanelIsJoinedFromTheQueueAndTheSeats(t *testing.T) {
 				{Rig: "gastown", Name: "busy", State: StateWorking},
 			}}
 		},
+		RigTheme: func(rig string) (string, []string) {
+			return rig + "-theme", []string{"one", "two"}
+		},
 	})
 	h.pollSummary() // the seats report first: the next queue poll must still join them
 	h.pollQueue()
@@ -241,6 +244,11 @@ func TestRigsPanelIsJoinedFromTheQueueAndTheSeats(t *testing.T) {
 	}
 	if r := rows[0]; r.Name != "gastown" || r.Parked || *r.Seats != 1 || *r.Ready != 2 || *r.Landing != 1 {
 		t.Errorf("gastown = %+v", r)
+	}
+	// The Rigs panel names each rig's theme, so the page can place a short
+	// polecat name back in its rig (gt-yieek).
+	if r := rows[0]; r.Theme != "gastown-theme" || len(r.Names) != 2 {
+		t.Errorf("gastown theme = %q %v, want the reader's theme and samples", r.Theme, r.Names)
 	}
 	if r := rows[1]; r.Name != "mango" || !r.Parked || *r.Seats != 0 || r.Ready != nil || r.Landing != nil {
 		t.Errorf("mango = %+v", r)

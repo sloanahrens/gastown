@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/lock"
+	"github.com/steveyegge/gastown/internal/rig"
 )
 
 const (
@@ -629,6 +630,36 @@ func ResolveThemeNames(townRoot, theme string) ([]string, error) {
 	}
 	path := filepath.Join(townRoot, "settings", "themes", theme+".txt")
 	return ParseThemeFile(path)
+}
+
+// EffectiveTheme returns the name theme a rig's polecats are drawn from: the
+// rig settings' namepool style, then an explicit name list, then the rig
+// config's polecat_names, and ThemeForRig's hash when none of the three is
+// set; a rig drawing from an explicit list has no theme to name and reports "".
+//
+// The dashboard labels a rig with this, so the precedence sits beside the pool
+// the manager builds (newManager) rather than in a second copy that can drift.
+func EffectiveTheme(rigPath, rigName string) string {
+	settings, err := config.LoadRigSettings(filepath.Join(rigPath, "settings", "config.json"))
+	if err == nil && settings.Namepool != nil {
+		if settings.Namepool.Style != "" {
+			return settings.Namepool.Style
+		}
+		if len(settings.Namepool.Names) > 0 {
+			return ""
+		}
+		// An empty namepool block is the pool's own default theme, not the
+		// rig-name hash (NewNamePoolWithConfig).
+		return DefaultTheme
+	}
+	// A rig config that does not decode reads as unconfigured, the fallback the
+	// pool takes too (newManager warns once per rig; a reader polling it would
+	// only repeat that warning).
+	rigCfg, _ := rig.LoadRigConfigIfPresent(rigPath)
+	if rigCfg != nil && len(rigCfg.PolecatNames) > 0 {
+		return ""
+	}
+	return ThemeForRig(rigName)
 }
 
 // SaveCustomTheme writes a custom theme file to settings/themes/<name>.txt.

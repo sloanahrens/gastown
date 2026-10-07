@@ -203,6 +203,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Dispatch:   om.dispatch,
 		Queue:      func() *dashboard.Queue { return queue.read(time.Now()) },
 		Bead:       queue.detail,
+		RigTheme:   newDashRigThemes(townRoot),
 		Trend: func() *dashboard.Trend {
 			now := time.Now()
 			stages, rejects := om.trendInputs(trendWindowStart(now))

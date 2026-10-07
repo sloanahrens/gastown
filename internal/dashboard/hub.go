@@ -381,7 +381,7 @@ func (h *Hub) pollQueue() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.Queue = q
-	h.state.Rigs = RigRows(q, h.polecats)
+	h.state.Rigs = RigRows(q, h.polecats, h.cfg.RigTheme)
 	h.publishLocked()
 }
 
@@ -415,7 +415,7 @@ func (h *Hub) pollSummary() {
 	h.state.Summary = &s
 	h.state.SummaryAt = h.cfg.Now()
 	// The seats are half of the Rigs panel: a fresh seat reading re-joins it.
-	h.state.Rigs = RigRows(h.state.Queue, h.polecats)
+	h.state.Rigs = RigRows(h.state.Queue, h.polecats, h.cfg.RigTheme)
 	h.observeLocked(nil)
 	h.publishLocked()
 }

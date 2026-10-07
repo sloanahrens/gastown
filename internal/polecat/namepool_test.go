@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/rig"
 )
 
 func TestNamePool_Allocate(t *testing.T) {
@@ -1326,5 +1328,135 @@ func TestGetNames_UnresolvableTheme_FallsBackToDefault(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected name from default theme, got %q", name)
+	}
+}
+
+// EffectiveTheme is what the dashboard labels a rig with, so each case also
+// builds the pool the manager builds for the same rig and holds the two
+// together: a theme the page names but the pool does not draw from would send
+// the operator looking in the wrong rig (gt-yieek).
+func TestEffectiveTheme(t *testing.T) {
+	t.Parallel()
+
+	settings := func(t *testing.T, rigPath, body string) {
+		t.Helper()
+		dir := filepath.Join(rigPath, "settings")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("making settings dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(body), 0o644); err != nil {
+			t.Fatalf("writing rig settings: %v", err)
+		}
+	}
+
+	tests := []struct {
+		name     string
+		rigName  string
+		write    func(t *testing.T, town, rigPath string)
+		want     string   // the theme reported; "" for an explicit name list
+		wantHash bool     // the theme is the rig-name hash
+		list     []string // the rig's own names, for the explicit-list cases
+	}{
+		{
+			name:    "built-in style",
+			rigName: "harbor",
+			write: func(t *testing.T, _, rigPath string) {
+				settings(t, rigPath, `{"namepool": {"style": "minerals"}}`)
+			},
+			want: "minerals",
+		},
+		{
+			name:    "custom theme file",
+			rigName: "harbor",
+			write: func(t *testing.T, town, rigPath string) {
+				settings(t, rigPath, `{"namepool": {"style": "harbor"}}`)
+				themes := filepath.Join(town, "settings", "themes")
+				if err := os.MkdirAll(themes, 0o755); err != nil {
+					t.Fatalf("making themes dir: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(themes, "harbor.txt"), []byte("anchor\nberth\nchannel\n"), 0o644); err != nil {
+					t.Fatalf("writing theme file: %v", err)
+				}
+			},
+			want: "harbor",
+		},
+		{
+			name:    "explicit namepool names",
+			rigName: "harbor",
+			write: func(t *testing.T, _, rigPath string) {
+				settings(t, rigPath, `{"namepool": {"names": ["anchor", "berth"]}}`)
+			},
+			list: []string{"anchor", "berth"},
+		},
+		{
+			name:    "rig config polecat_names",
+			rigName: "harbor",
+			write: func(t *testing.T, _, rigPath string) {
+				body := `{"type": "rig", "version": 1, "name": "harbor", "polecat_names": ["anchor", "berth"]}`
+				if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(body), 0o644); err != nil {
+					t.Fatalf("writing rig config: %v", err)
+				}
+			},
+			list: []string{"anchor", "berth"},
+		},
+		{
+			name:    "namepool block with nothing set",
+			rigName: "harbor",
+			write: func(t *testing.T, _, rigPath string) {
+				settings(t, rigPath, `{"namepool": {}}`)
+			},
+			want: DefaultTheme,
+		},
+		{
+			name:     "rig-name hash",
+			rigName:  "harbor",
+			write:    func(t *testing.T, _, _ string) {},
+			wantHash: true,
+		},
+		{
+			name:    "settings that do not decode",
+			rigName: "harbor",
+			write: func(t *testing.T, _, rigPath string) {
+				settings(t, rigPath, `{"namepool": {`)
+			},
+			wantHash: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			town := t.TempDir()
+			rigPath := filepath.Join(town, tc.rigName)
+			if err := os.MkdirAll(rigPath, 0o755); err != nil {
+				t.Fatalf("making rig dir: %v", err)
+			}
+			tc.write(t, town, rigPath)
+
+			want := tc.want
+			if tc.wantHash {
+				want = ThemeForRig(tc.rigName)
+			}
+			if got := EffectiveTheme(rigPath, tc.rigName); got != want {
+				t.Errorf("EffectiveTheme = %q, want %q", got, want)
+			}
+
+			pool := newManager(&rig.Rig{Name: tc.rigName, Path: rigPath}, nil, nil, nil).namePool
+			wantNames := tc.list
+			if want != "" {
+				if got := pool.GetTheme(); got != want {
+					t.Errorf("pool theme = %q, want the reported %q", got, want)
+				}
+				names, err := ResolveThemeNames(town, want)
+				if err != nil {
+					t.Fatalf("ResolveThemeNames(%q): %v", want, err)
+				}
+				wantNames = names
+			}
+			if got, wantList := strings.Join(pool.getNames(), ","), strings.Join(filterReservedNames(wantNames), ","); got != wantList {
+				t.Errorf("pool draws %q, want %q", got, wantList)
+			}
+		})
 	}
 }
