@@ -67,9 +67,13 @@ func evaluatePolecatTestScopeSegment(tokens []string, cwd string) (reason string
 		lower[i] = strings.ToLower(t)
 	}
 	// `make test` is `go test ./...` under another name (see the Makefile
-	// target); a gt slot run wrapper or an env prefix does not change what
-	// it costs the host.
-	if findTestInvocation(lower, "make") >= 0 {
+	// target) in a Go tree, and a gt slot run wrapper or an env prefix does
+	// not change what it costs the host. A rig outside every Go module has no
+	// such target, so its `make test` is left alone (gt-dieu9).
+	if i := findTestInvocation(lower, "make"); i >= 0 {
+		if !makeTestIsWholeGoSuite(tokens[i:], cwd) {
+			return "", nil
+		}
 		return "polecat 'make test' runs the whole suite", nil
 	}
 	i := findTestInvocation(lower, "go")
