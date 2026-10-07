@@ -87,13 +87,14 @@ type PolecatWorktree struct {
 // doneLocalGate is gt done's pre-submit gate: the land.Gate seam, here in its
 // unit tier (no container slot) on the rebased branch. It is `make presubmit`,
 // the changed packages only, because the rig's Forgejo CI gate runs the full
-// `make gate` on the candidate branch (gt-ssyxd, gt-fn9e6.32). Tests replace
-// this variable.
+// `make gate` on the candidate branch (gt-ssyxd, gt-fn9e6.32). CheckNodeDeps
+// is the pre-submit's own (nodedeps, gt-wd12s). Tests replace this variable.
 var doneLocalGate = func(townRoot, rigName, dir string) (land.Gate, error) {
 	g, err := land.RigGate(dir, rig.ResolveMergeQueueConfig(townRoot, rigName), true)
 	if err != nil {
 		return nil, err
 	}
+	g.CheckNodeDeps = true
 	g.Out = os.Stdout
 	g.LogDir = filepath.Join(dir, constants.DirRuntime, "done-gate")
 	return g, nil
