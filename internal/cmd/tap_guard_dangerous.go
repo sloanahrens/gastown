@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -463,10 +465,12 @@ func heredocBodyDir(proc guardProcess, command string, span heredocSpan, base st
 
 // heredocBodyCwd is the resolution behind heredocBodyDir: the directory the
 // shell is in by the time the body is read, and whether the walk could place
-// it.
+// it. The walk's two unnamed outcomes read the same here: a body whose
+// directory the walk cannot name keeps the one the invocation already had.
 func heredocBodyCwd(proc guardProcess, command string, span heredocSpan, base string) (string, bool) {
 	tokens := heredocBodyWalkTokens(command, span)
-	return cdWalkRoot(proc, tokens, len(tokens), base, shellVarAssignments(tokens))
+	dir, status := cdWalkRoot(proc, tokens, len(tokens), base, shellVarAssignments(tokens))
+	return dir, status == cdWalkPlaced
 }
 
 // heredocBodyWalkTokens returns the tokens the shell has run by the time it
@@ -1289,14 +1293,37 @@ func hasFileOperand(args []string) bool {
 // ok is false when the walk root cannot be known — a cd this process cannot
 // resolve, a cd whose "||" branch the line does not show, or an unreadable
 // working directory. An unknown root is not a hazard, so the caller blocks
-// nothing on it.
+// nothing on it: the walk's two unnamed outcomes read the same here, and the
+// distinction cdWalkRoot draws between them is for the guards that refuse on
+// one (gt-ofj05).
 func scanWalkRoot(proc guardProcess, tokens []string, scanIdx int, vars map[string]string) (string, bool) {
 	root, err := proc.getwd()
 	if err != nil {
 		return "", false
 	}
-	return cdWalkRoot(proc, tokens, scanIdx, root, vars)
+	dir, status := cdWalkRoot(proc, tokens, scanIdx, root, vars)
+	return dir, status == cdWalkPlaced
 }
+
+// cdWalkStatus says what the walk can name about the directory the shell is in
+// at the end of the cds it was given. The two outcomes without a directory are
+// separate because the callers do different things with them: a cd the guard
+// cannot place leaves the segment's targets unjudged, while the walk's other
+// give-up leaves the base standing (gt-0lzdi, gt-ofj05).
+type cdWalkStatus int
+
+const (
+	// cdWalkPlaced: dir is the directory the shell is in.
+	cdWalkPlaced cdWalkStatus = iota
+	// cdWalkUnplaced: the line carries a cd this guard cannot place — a target
+	// it cannot expand, `cd -`, more than one operand. The shell may have
+	// changed into a directory the line never names.
+	cdWalkUnplaced
+	// cdWalkGivenUp: the walk has no directory to name, but no cd on the line
+	// is one the guard failed to place — a cd the shell refuses, or a "||"
+	// chain whose left cd resolved and so leaves the branch it took unshown.
+	cdWalkGivenUp
+)
 
 // cdWalkRoot applies to base the cd segments of tokens that precede end and
 // returns the directory the shell is in at end. It is the one cd tracker the
@@ -1304,12 +1331,9 @@ func scanWalkRoot(proc guardProcess, tokens []string, scanIdx int, vars map[stri
 // segmentWalkRoot is it applied to one segment of a line, and the shell-fed
 // heredoc recursion judges a body in the directory the shell had reached by the
 // time it read the body (gt-1cvqj, gt-v02wh). Every caller therefore agrees on
-// whether a given cd carries forward.
-//
-// ok is false when a cd cannot be resolved (cdTarget), or when a relative one
-// has no usable base. The callers read that as an unknown directory rather
-// than a refusal — see scanWalkRoot.
-func cdWalkRoot(proc guardProcess, tokens []string, end int, base string, vars map[string]string) (string, bool) {
+// whether a given cd carries forward, and the status says which directory the
+// walk has to name, if any (cdWalkStatus).
+func cdWalkRoot(proc guardProcess, tokens []string, end int, base string, vars map[string]string) (string, cdWalkStatus) {
 	root := base
 	for i := 0; i < end; i++ {
 		if tokens[i] != "cd" || !shellCommandStart(tokens, i) {
@@ -1329,10 +1353,16 @@ func cdWalkRoot(proc guardProcess, tokens []string, end int, base string, vars m
 			if status == cdRefused {
 				continue
 			}
-			return "", false
+			if status == cdUnknown {
+				return "", cdWalkUnplaced
+			}
+			return "", cdWalkGivenUp
 		}
-		if status != cdResolved {
-			return "", false
+		if status == cdUnknown {
+			return "", cdWalkUnplaced
+		}
+		if status == cdRefused {
+			return "", cdWalkGivenUp
 		}
 		// Only "&&" and ";" carry the change to the command that follows: a
 		// cd in a pipeline or a background job runs in a subshell of its own,
@@ -1343,7 +1373,7 @@ func cdWalkRoot(proc guardProcess, tokens []string, end int, base string, vars m
 		}
 		root = target
 	}
-	return root, true
+	return root, cdWalkPlaced
 }
 
 // segmentWalkRoot resolves the directory a guarded shell segment runs in: base
@@ -1352,14 +1382,33 @@ func cdWalkRoot(proc guardProcess, tokens []string, end int, base string, vars m
 // cdWalkRoot's rules (gt-5mc21). tokens[start] is the segment's first token, so
 // the walk reads the earlier segments' cds and only those a "&&" or ";" carries
 // — a cd in a pipeline or a background job, or one whose directory a "||"
-// chain leaves open, is one the segment does not inherit. A directory the walk
-// cannot place (an unresolvable cd) leaves the segment judged in base rather
-// than in a guess (gt-1cvqj).
-func segmentWalkRoot(proc guardProcess, tokens []string, start int, base string, vars map[string]string) string {
-	if root, ok := cdWalkRoot(proc, tokens, start, base, vars); ok {
-		return root
+// chain leaves open, is one the segment does not inherit.
+//
+// The directory comes back as the tree it really names, symlinks resolved:
+// these rules ask which tree a command runs in, and a path reached through a
+// link carries the link's lexical parents, not the target's, so a link to a
+// package inside a Go tree would read as a non-Go directory (gt-ofj05).
+//
+// ok is false only for a cd this guard cannot place (cdWalkUnplaced), and the
+// callers refuse then, the reading an unplaceable make -C already gets: the
+// segment's directory decides what its targets name, so an unplaced one leaves
+// the question open rather than answered by the hook's cwd (gt-ofj05). The
+// walk's other unnamed outcome — a "||" whose branch is unshown, a cd the shell
+// refuses — keeps the base (gt-0lzdi). A line that never changes directory
+// resolves to base with ok true.
+func segmentWalkRoot(proc guardProcess, tokens []string, start int, base string, vars map[string]string) (string, bool) {
+	dir, status := cdWalkRoot(proc, tokens, start, base, vars)
+	switch status {
+	case cdWalkUnplaced:
+		return "", false
+	case cdWalkGivenUp:
+		dir = base
 	}
-	return base
+	resolved, ok := resolveDirSymlinks(dir)
+	if !ok {
+		return "", false
+	}
+	return resolved, true
 }
 
 // shellCommandStart reports whether the token at i begins a shell command
@@ -1433,6 +1482,33 @@ func cdTarget(proc guardProcess, args []string, base string, vars map[string]str
 		return "", cdRefused
 	}
 	return path, cdResolved
+}
+
+// resolveDirSymlinks returns path with every symlink resolved. ok is false
+// when a path that exists cannot be resolved — a link loop, an unreadable
+// component — which is a directory the guard cannot place. A path that does
+// not exist is returned unchanged with ok true: there is nothing to resolve,
+// and its callers judge a missing directory by the tree that would enclose it
+// (goModuleRoot, gt-dieu9).
+//
+// A relative path is returned unchanged as well: EvalSymlinks would answer
+// with a relative path resolved against this process's own directory, which is
+// not the one the caller meant — an empty one, from a session whose working
+// directory could not be read, would come back as "." and name this process's
+// tree.
+func resolveDirSymlinks(path string) (string, bool) {
+	if !filepath.IsAbs(path) {
+		return path, true
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	switch {
+	case err == nil:
+		return resolved, true
+	case errors.Is(err, fs.ErrNotExist):
+		return path, true
+	default:
+		return path, false
+	}
 }
 
 // hasExactArg reports whether any of args exactly matches one of the wanted
@@ -2103,8 +2179,9 @@ func idleGateAlternative(heldAction string) string {
 // Each segment is judged in the directory its own line runs it in — the hook
 // cwd moved by the cds earlier on the same line, by the shared walk
 // (segmentWalkRoot, over cdWalkRoot/cdTarget: "&&" and ";" carry the change,
-// a "||" whose left cd resolves and a cd this guard cannot resolve both leave
-// the directory unknown, and the hook cwd is the fallback).
+// a "||" whose left cd resolves and a cd the shell refuses both leave the
+// directory unknown, and the hook cwd is the fallback) — and held when the
+// directory is one the walk cannot place at all (gt-ofj05).
 // Judging every segment against the hook cwd instead let an agent whose cwd is
 // a non-Go tree run the whole module suite with 'cd <go tree> && make test' —
 // the make target resolved in the non-Go tree, where it is not the module's
@@ -2118,7 +2195,8 @@ func idleGateHeldAction(proc guardProcess, command string) string {
 	start := 0
 	for i, tok := range tokens {
 		if shellCommandSeparators[tok] {
-			if held := idleGateHeldSegment(segment, segmentWalkRoot(proc, tokens, start, cwd, vars)); held != "" {
+			dir, known := segmentWalkRoot(proc, tokens, start, cwd, vars)
+			if held := idleGateHeldSegment(segment, dir, known); held != "" {
 				return held
 			}
 			segment = nil
@@ -2127,7 +2205,8 @@ func idleGateHeldAction(proc guardProcess, command string) string {
 		}
 		segment = append(segment, tok)
 	}
-	return idleGateHeldSegment(segment, segmentWalkRoot(proc, tokens, start, cwd, vars))
+	dir, known := segmentWalkRoot(proc, tokens, start, cwd, vars)
+	return idleGateHeldSegment(segment, dir, known)
 }
 
 // isIdleGatedSuiteStartCommand reports whether command contains an unwrapped
@@ -2148,8 +2227,8 @@ var idleGateSlotRunPrefix = containerSuiteSlotRunTokens
 // isIdleGatedSuiteStartSegment judges a single shell segment (tokens
 // between shell operators), discarding the held spelling
 // (idleGateHeldSegment).
-func isIdleGatedSuiteStartSegment(tokens []string, cwd string) bool {
-	return idleGateHeldSegment(tokens, cwd) != ""
+func isIdleGatedSuiteStartSegment(tokens []string, cwd string, cwdKnown bool) bool {
+	return idleGateHeldSegment(tokens, cwd, cwdKnown) != ""
 }
 
 // idleGateHeldSegment judges a single shell segment (tokens between shell
@@ -2158,8 +2237,9 @@ func isIdleGatedSuiteStartSegment(tokens []string, cwd string) bool {
 // its flags were written) or the whole-repo go form ('go test ./...'/'go build
 // ./...'). "" means the segment is not gated. tokens is original-case; matching
 // is done on a lowercased copy so "Make Test" and "make test" are treated the
-// same. cwd locates a make invocation's tree (makeActsOnWholeGoModule).
-func idleGateHeldSegment(tokens []string, cwd string) string {
+// same. cwd and cwdKnown locate a make invocation's tree, through makeTreeDir
+// and makeActsOnWholeGoModule.
+func idleGateHeldSegment(tokens []string, cwd string, cwdKnown bool) string {
 	if len(tokens) == 0 {
 		return ""
 	}
@@ -2170,10 +2250,10 @@ func idleGateHeldSegment(tokens []string, cwd string) string {
 	if hasPrefix(lower, idleGateSlotRunPrefix) {
 		return ""
 	}
-	if i := findInvocation(lower, "make", "test"); i >= 0 && makeActsOnWholeGoModule(tokens[i:], cwd) {
+	if i := findInvocation(lower, "make", "test"); i >= 0 && makeActsOnWholeGoModule(tokens[i:], makeTreeDir(cwd, cwdKnown)) {
 		return "make test"
 	}
-	if i := findInvocation(lower, "make", "build"); i >= 0 && makeActsOnWholeGoModule(tokens[i:], cwd) {
+	if i := findInvocation(lower, "make", "build"); i >= 0 && makeActsOnWholeGoModule(tokens[i:], makeTreeDir(cwd, cwdKnown)) {
 		return "make build"
 	}
 	if i := findInvocation(lower, "go", "test"); i >= 0 && wholeRepoArgFollows(tokens, i+2) {

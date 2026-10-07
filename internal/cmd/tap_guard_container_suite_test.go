@@ -132,6 +132,16 @@ func TestGuardsFollowCdOnTheLine(t *testing.T) {
 	heavy := filepath.Join(goRoot, "internal", "cmd")
 	container := filepath.Join(goRoot, "internal", "beads")
 	light := filepath.Join(goRoot, "internal", "style")
+	// Links into and out of the Go tree. The target is a package inside the
+	// tree, not its root: a link to the root would be found by the lexical
+	// walk too, so it could not tell a resolved walk from an unresolved one.
+	goLink := symlinkedTree(t, heavy)
+	lightLink := symlinkedTree(t, light)
+	nonGoLink := symlinkedTree(t, nonGo)
+	// A link that sits in the Go tree but leaves it: resolving it must exempt
+	// the make, which a guard that merely refused every symlinked path could
+	// not do.
+	outLink := symlinkAt(t, filepath.Join(goRoot, "out-of-tree"), nonGo)
 
 	tests := []struct {
 		name                           string
@@ -177,10 +187,32 @@ func TestGuardsFollowCdOnTheLine(t *testing.T) {
 		{"a refused cd runs make in the || chain's Go tree", nonGo, "cd /nonexistent/gt-0lzdi || cd " + goRoot + " && make test", true, true},
 		{"an unresolvable cd does not name the || chain", goRoot, "cd - || cd " + nonGo + " && make test", true, true},
 
-		// A cd this process cannot resolve keeps today's reading — the hook
-		// cwd — rather than guessing a directory.
-		{"unresolvable cd keeps the hook cwd, Go tree", goRoot, "cd /nonexistent/gt-5mc21 && make test", true, true},
-		{"unresolvable cd keeps the hook cwd, non-Go tree", nonGo, "cd /nonexistent/gt-5mc21 && make test", false, false},
+		// A symlinked directory is judged as the tree it names, both when make
+		// changes into it and when the cd does (gt-ofj05).
+		{"make -C through a link into the Go tree", nonGo, "make -C " + goLink + " test", true, true},
+		{"cd through a link into the Go tree", nonGo, "cd " + goLink + " && make test", true, true},
+		{"cd through a link onto a light package", nonGo, "cd " + lightLink + " && GT_TEST_DOCKER=1 go test .", false, false},
+		{"symlinked session cwd in the Go tree", goLink, "make test", true, true},
+
+		// A cd this process cannot place leaves the directory unknown, which
+		// keeps the refusal an unplaceable make -C already gets — the hook's own
+		// cwd no longer answers for it. A cd the shell refuses does not: it left
+		// the shell where it was (gt-ofj05).
+		{"unset variable in the cd target", nonGo, `cd "$GT_OFJ05_UNSET" && make test`, true, true},
+		{"command substitution in the cd target", nonGo, `cd "$(printf /x)" && make test`, true, true},
+		{"cwd-relative go test after an unplaceable cd", nonGo, `cd "$GT_OFJ05_UNSET" && GT_TEST_DOCKER=1 go test .`, true, true},
+		{"a refused cd keeps the hook cwd, Go tree", goRoot, "cd /nonexistent/gt-5mc21 && make test", true, true},
+		{"a refused cd keeps the hook cwd, non-Go tree", nonGo, "cd /nonexistent/gt-5mc21 && make test", false, false},
+
+		// The controls: a directory the walk can place is still read on its own
+		// merits, so a non-Go tree stays exempt however the line reaches it.
+		{"no cd at all, non-Go hook cwd", nonGo, "make test", false, false},
+		{"cd to a real non-Go directory", nonGo, "cd " + nonGo + " && make test", false, false},
+		{"make -C through a link to a non-Go tree", nonGo, "make -C " + nonGoLink + " test", false, false},
+		{"cd through a link to a non-Go tree", nonGo, "cd " + nonGoLink + " && make test", false, false},
+		{"make -C through a link out of the Go tree", goRoot, "make -C " + outLink + " test", false, false},
+		{"cd through a link out of the Go tree", goRoot, "cd " + outLink + " && make test", false, false},
+		{"symlinked session cwd in a non-Go tree", nonGoLink, "make test", false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -302,6 +334,25 @@ func nonGoTree(t *testing.T) string {
 		t.Skipf("%s is inside a Go module (found=%v err=%v); a non-Go tree needs a temp dir outside one", root, found, err)
 	}
 	return root
+}
+
+// symlinkedTree returns a path that reaches target through a symlink, so a
+// case can put a tree behind a link the walk has to resolve.
+func symlinkedTree(t *testing.T, target string) string {
+	t.Helper()
+	return symlinkAt(t, filepath.Join(t.TempDir(), "link"), target)
+}
+
+// symlinkAt links link to target and returns link.
+func symlinkAt(t *testing.T, link, target string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(link), err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink %s -> %s: %v", link, target, err)
+	}
+	return link
 }
 
 func TestContainerSuiteTarget(t *testing.T) {
