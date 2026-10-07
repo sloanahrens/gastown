@@ -456,6 +456,40 @@ func (h *patrolScanHost) AgentRecord(rig, name string) (patrolscan.AgentRecord, 
 	return rec, nil
 }
 
+// PolecatEscalations reads the escalations the rig's polecat seats raised, open
+// and closed, from the town database: notify.Raise files every escalation
+// there (escalationBeads), whatever rig the raiser belongs to, so one read
+// answers for every rig. A record another role raised is dropped here, and the
+// mail carriers routed for an escalation (gt:message, which outlives it) are
+// not escalations at all (IsEscalationRecord).
+func (h *patrolScanHost) PolecatEscalations(rig string) ([]patrolscan.Escalation, error) {
+	issues, err := h.d.escalationBeads().List(beads.ListOptions{
+		Label: "gt:escalation", Status: "all", IncludeInfra: true, Priority: -1,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("bd list escalations: %w", err)
+	}
+	prefix := rig + "/polecats/"
+	out := make([]patrolscan.Escalation, 0, len(issues))
+	for _, is := range issues {
+		if !beads.IsEscalationRecord(is) {
+			continue
+		}
+		fields := beads.ParseEscalationFields(is.Description)
+		if !strings.HasPrefix(strings.TrimSpace(fields.EscalatedBy), prefix) {
+			continue
+		}
+		out = append(out, patrolscan.Escalation{
+			ID:          is.ID,
+			EscalatedBy: fields.EscalatedBy,
+			Title:       is.Title,
+			RelatedBead: fields.RelatedBead,
+			Open:        !beads.IssueStatus(is.Status).IsTerminal(),
+		})
+	}
+	return out, nil
+}
+
 // GitState measures the seat's worktree with the live probe: the same three
 // facts the reuse verdict reads, measured now, since a recorded cleanup_status
 // says what the turn that ended saw, not what the worktree holds today.

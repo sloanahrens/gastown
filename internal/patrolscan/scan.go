@@ -26,6 +26,10 @@
 //     A seat whose last turn exited ESCALATED is first cleared to idle once
 //     its blocker is provably resolved, so a spent escalation stops reading
 //     as recovery-needed work (gt-fn9e6.33); see resolvedEscalationEvidence.
+//     A seat still holding the bead it escalated on is restarted on its
+//     preserved branch once the escalation that turn raised for the bead is
+//     closed, and stays skipped while it is open or cannot be read
+//     (gt-4hduq); see SeatEscalationVerdict.
 //
 // Every read that fails makes the answer Unknown, and Unknown is never acted
 // on: a failed bd read is not "no work", "not held" or "bead gone". The tick
@@ -170,6 +174,123 @@ type AgentRecord struct {
 	LastSourceIssue string
 }
 
+// StoppedOnEscalated reports whether the record is the one gt done's ESCALATED
+// exit wrote: agent_state stuck beside exit_type ESCALATED. It is the state a
+// polecat stopped in on purpose, holding a bead it raised a blocker for, and
+// the one both the tick and the daemon's crash detector read before deciding
+// whether anything may restart the seat (gt-4hduq).
+func (r AgentRecord) StoppedOnEscalated() bool {
+	return strings.EqualFold(strings.TrimSpace(r.State), "stuck") &&
+		strings.EqualFold(strings.TrimSpace(r.ExitType), ExitEscalated)
+}
+
+// Escalation is the slice of an escalation bead the tick matches a stopped
+// seat's turn against: who raised it, which bead it names, and whether it is
+// still open.
+type Escalation struct {
+	// ID is the escalation bead's ID, named in the tick's report.
+	ID string
+	// EscalatedBy is the agent address that raised it, as gt escalate wrote it
+	// ("beads/polecats/guzzle").
+	EscalatedBy string
+	// Title is the escalation's title. The raiser's convention, and the tie
+	// that names the bead, is to prefix it with the work bead the turn ran on
+	// ("be-01x: <the decision being raised>").
+	Title string
+	// RelatedBead is the escalation's related_bead field, "" when the raiser
+	// set none.
+	RelatedBead string
+	// Open is true while the escalation has not been closed.
+	Open bool
+}
+
+// EscalationVerdict is what the escalations a seat raised for one work bead
+// say about restarting the seat that stopped on them.
+type EscalationVerdict string
+
+const (
+	// EscalationPending: the seat's escalation for the bead is still open, so
+	// the decision it stopped for is still pending and the seat is left
+	// skipped, exactly as before this rule existed (gt-fn9e6.33).
+	EscalationPending EscalationVerdict = "pending"
+	// EscalationResolved: the seat's escalation for the bead is closed and none
+	// of its escalations for that bead is open, so the turn it stopped can be
+	// resumed on its preserved branch (gt-4hduq).
+	EscalationResolved EscalationVerdict = "resolved"
+	// EscalationUnnamed: no escalation the seat raised names the bead. Nothing
+	// proves the blocker spent, so the seat is left skipped.
+	EscalationUnnamed EscalationVerdict = "unnamed"
+)
+
+// SeatEscalation is the verdict on the escalations one seat raised for one
+// work bead.
+type SeatEscalation struct {
+	Verdict EscalationVerdict
+	// ID is the escalation the verdict turns on, "" when none names the bead.
+	ID string
+	// Detail is why the seat is held, "" when the verdict is resolved.
+	Detail string
+}
+
+// SeatEscalationVerdict applies the tie between a stopped seat, its work bead
+// and the escalations the seat raised, and says whether the seat may be
+// restarted. The tie is measured, never assumed (gt-4hduq): the raiser is the
+// escalation's escalated_by, which gt escalate writes as the seat's own
+// address (rig/polecats/name), and the bead the turn ran on is the one the
+// title prefixes ("be-01x: ...") or related_bead names. An escalation someone
+// else raised about the same bead is not the seat's and proves nothing about
+// its turn; an escalation of the seat's that names no bead proves nothing
+// about this one, and either way the seat is held.
+//
+// One open escalation of the seat's for the bead holds the seat whatever else
+// exists — a decision is still pending. Only when none is open does a closed
+// one release it.
+func SeatEscalationVerdict(rig, name, bead string, raised []Escalation) SeatEscalation {
+	seat := rig + "/polecats/" + name
+	matches := make([]Escalation, 0, len(raised))
+	for _, e := range raised {
+		if !strings.EqualFold(strings.TrimSpace(e.EscalatedBy), seat) {
+			continue
+		}
+		if !escalationNamesBead(e, bead) {
+			continue
+		}
+		matches = append(matches, e)
+	}
+	// The listing order is bd's, so the verdict is taken over a sorted copy:
+	// the same set of escalations must answer the same way on every tick.
+	sort.Slice(matches, func(i, j int) bool { return matches[i].ID < matches[j].ID })
+	for _, e := range matches {
+		if e.Open {
+			return SeatEscalation{Verdict: EscalationPending, ID: e.ID,
+				Detail: "agent_state stuck: exit ESCALATED and " + e.ID + " is still open for " + bead}
+		}
+	}
+	if len(matches) > 0 {
+		return SeatEscalation{Verdict: EscalationResolved, ID: matches[0].ID}
+	}
+	return SeatEscalation{Verdict: EscalationUnnamed,
+		Detail: "agent_state stuck: exit ESCALATED and no escalation of the seat's names " + bead}
+}
+
+// escalationNamesBead reports whether one escalation names bead: its
+// related_bead field, or the work bead the raiser prefixed onto the title. A
+// title that merely mentions the bead ("escalating about be-01x") does not
+// name it, and the seat stays held.
+func escalationNamesBead(e Escalation, bead string) bool {
+	if strings.TrimSpace(bead) == "" {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(e.RelatedBead), bead) {
+		return true
+	}
+	title := strings.TrimSpace(e.Title)
+	if len(title) <= len(bead) || !strings.EqualFold(title[:len(bead)], bead) {
+		return false
+	}
+	return strings.HasPrefix(title[len(bead):], ":")
+}
+
 // GitState is one polecat worktree's live git evidence. The tick measures it
 // now rather than reading back the cleanup_status gt done recorded, because
 // that record describes the turn that ended: only the worktree as it is today
@@ -267,6 +388,11 @@ type Env interface {
 	// status the polecat's agent bead records. It is read only to refuse a
 	// restart, never to cause one.
 	AgentRecord(rig, polecat string) (AgentRecord, error)
+	// PolecatEscalations returns the escalation records raised by the rig's
+	// polecat seats, open and closed: the ones a seat that stopped on an
+	// escalation is matched against (SeatEscalationVerdict). An error means
+	// the read could not answer, and the tick holds the seat on it.
+	PolecatEscalations(rig string) ([]Escalation, error)
 	// GitState measures the polecat's worktree live. A probe that could not
 	// answer returns an error, never a zero state: the tick reads a failed
 	// measurement as Unknown and clears nothing on it.
@@ -634,11 +760,12 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 			work.ID, now.Sub(work.UpdatedAt).Round(time.Second), SpawningAgentState))
 	}
 
-	// deferredExit records that the bead reads stuck after a DEFERRED exit:
-	// the turn ended without completing or escalating, so a successor is
-	// expected to carry the bead on. It is not a hold, and the restart below
-	// says so.
-	deferredExit := false
+	// recovery names the finished turn the restart below resumes — a polecat
+	// that ended its turn without completing (gt done's DEFERRED exit), or one
+	// that stopped on an escalation whose decision has since been made — and
+	// "" is an ordinary crash. released names the escalation that released
+	// such a seat, "" when none did.
+	recovery, released := "", ""
 	switch state := strings.ToLower(strings.TrimSpace(agent.State)); state {
 	case "stuck":
 		// agent_state=stuck is not a self-park. The only writer is gt done's
@@ -649,19 +776,36 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		// turn whose worktree still holds unpushed commits and whose bead is
 		// still hooked, so it falls through to the ordinary dead-session path
 		// and the supervisor restarts the seat on its preserved branch rather
-		// than leaving the work dead until an operator notices (gt-ks62m). An
-		// ESCALATED exit is the operator's: the polecat stopped on purpose to
-		// raise a blocker, and a restart would fight it. A resolved one never
-		// arrives here — its bead is closed, so the tick reaches it with no
-		// work and clears it there (resolvedEscalationEvidence).
-		if !strings.EqualFold(strings.TrimSpace(agent.ExitType), ExitDeferred) {
+		// than leaving the work dead until an operator notices (gt-ks62m).
+		switch exit := strings.TrimSpace(agent.ExitType); {
+		case strings.EqualFold(exit, ExitDeferred):
+			recovery = ExitDeferred
+		case strings.EqualFold(exit, ExitEscalated):
+			// An ESCALATED exit is the operator's while its blocker stands:
+			// the polecat stopped on purpose to raise a blocker, and a restart
+			// would fight it. The blocker is the escalation that turn raised
+			// for this bead, so the live question is what became of it: still
+			// open, the seat is skipped as it always was; closed, the decision
+			// was made and the seat has work waiting on it that nothing else
+			// will pick up (gt-4hduq). A seat whose bead closed never arrives
+			// here — the tick reaches it with no work and clears it there
+			// (resolvedEscalationEvidence).
+			raised, err := s.env.PolecatEscalations(rig)
+			if err != nil {
+				return unknown("escalations unreadable", err)
+			}
+			v := SeatEscalationVerdict(rig, name, work.ID, raised)
+			if v.Verdict != EscalationResolved {
+				return skip(v.Detail)
+			}
+			recovery, released = ExitEscalated, v.ID
+		default:
 			detail := "agent_state stuck: stopped on purpose"
-			if e := strings.TrimSpace(agent.ExitType); e != "" {
-				detail += " (exit " + e + ")"
+			if exit != "" {
+				detail += " (exit " + exit + ")"
 			}
 			return skip(detail)
 		}
-		deferredExit = true
 	case "awaiting-gate", "paused":
 		return skip("agent_state " + state + ": held by the polecat")
 	case "done", "nuked":
@@ -685,7 +829,8 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 	}
 
 	reason := fmt.Sprintf("patrol scan: %s with %s hooked (%d dead samples)", res.Reason, work.ID, samples)
-	if deferredExit {
+	switch recovery {
+	case ExitDeferred:
 		// A restart here is a recovery, not a crash relaunch: name the turn
 		// that ended and what the worktree holds, so the reason line reads as
 		// the recovery it is (gt-ks62m).
@@ -695,6 +840,11 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		}
 		reason = fmt.Sprintf("patrol scan: %s with %s hooked after a DEFERRED exit (cleanup_status %s, %d dead samples)",
 			res.Reason, work.ID, cleanup, samples)
+	case ExitEscalated:
+		// The release, in one line: the escalation that stopped the turn is
+		// closed, so the seat is resumed on its preserved branch (gt-4hduq).
+		reason = fmt.Sprintf("patrol scan: %s with %s hooked after an ESCALATED exit (escalation %s closed, %d dead samples)",
+			res.Reason, work.ID, released, samples)
 	}
 	if err := s.env.Restart(rig, name, reason); err != nil {
 		if s.o.IsRefusal(err) {

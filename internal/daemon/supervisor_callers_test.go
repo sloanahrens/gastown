@@ -195,8 +195,9 @@ func TestReapIdlePolecat_NeverReadsAgentBeads(t *testing.T) {
 	}
 }
 
-// G1-01: crash detection finds the work from the work bead's assignee, with
-// no agent-bead read.
+// G1-01: crash detection finds the work from the work bead's assignee, and
+// an agent bead that cannot be read (or does not exist) is not evidence of
+// anything: the crash is still detected and still names the work bead.
 func TestCheckPolecatHealth_CrashFromWorkBeadWithoutAgentBead(t *testing.T) {
 	t.Parallel()
 	bd := newWorkBD(t)
@@ -209,8 +210,8 @@ func TestCheckPolecatHealth_CrashFromWorkBeadWithoutAgentBead(t *testing.T) {
 	if !strings.Contains(logBuf.String(), "CRASH DETECTED") || !strings.Contains(logBuf.String(), "gt-work1") {
 		t.Fatalf("no crash detected from the assigned work bead: %s", logBuf)
 	}
-	if calls := bd.calls(t); strings.Contains(calls, "polecat-mycat") {
-		t.Fatalf("crash detection read an agent bead:\n%s", calls)
+	if strings.Contains(logBuf.String(), "Skipping crash detection") {
+		t.Fatalf("a missing agent bead held the crash: %s", logBuf)
 	}
 }
 
@@ -272,12 +273,12 @@ func TestCheckPolecatHealth_SpawnGraceNeedsASpawningAgentState(t *testing.T) {
 			if got != tc.crashed {
 				t.Fatalf("crash detected = %v, want %v; log: %s", got, tc.crashed, logBuf)
 			}
-			// The agent bead is read only to refuse a restart inside the
-			// window; outside it the crash stands on the work bead alone
+			// The record is read once on the crash path, only to refuse a
+			// report (the spawn grace here, the seat's own escalation below);
+			// the work the crash is reported on comes from the work bead
 			// (G1-01, TestCheckPolecatHealth_CrashFromWorkBeadWithoutAgentBead).
-			read := strings.Contains(bd.calls(t), "gt-myr-polecat-mycat")
-			if want := tc.age < polecatSpawnGrace; read != want {
-				t.Fatalf("agent bead read = %v (calls: %s), want %v", read, bd.calls(t), want)
+			if !strings.Contains(bd.calls(t), "gt-myr-polecat-mycat") {
+				t.Fatalf("the crash path did not read the record it refuses on:\n%s", bd.calls(t))
 			}
 		})
 	}

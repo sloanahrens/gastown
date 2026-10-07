@@ -32,6 +32,7 @@ import (
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/notify"
+	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/reaper"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -2231,8 +2232,9 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	// Session is dead. Find the seat's work: the intent record's work_bead
 	// when a writer set it, otherwise the work bead assigned to the polecat
 	// with status hooked or in_progress. Agent beads are display mirrors and
-	// do not hold the work (gt-4k3fj.1, G1-01): they are read nowhere on this
-	// path except the spawn grace below, and then only to refuse.
+	// do not hold the work (gt-4k3fj.1, G1-01): they are read on this path only
+	// to refuse a report, first for the spawn grace below and again for a seat
+	// that stopped on its own escalation, and never to find the work.
 	hookBead := rec.WorkBead
 	if hookBead == "" {
 		assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
@@ -2299,6 +2301,19 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 		return // Session came back - no restart needed
 	}
 
+	// A polecat that stopped on purpose to raise a decision is not a crash: it
+	// exited ESCALATED, and the bead it holds is waiting on the escalation that
+	// turn raised for it (gt-4hduq). patrol_scan owns the seat and resumes it
+	// on its preserved branch once that escalation closes, so this pass says so
+	// once and stops there: reporting it every heartbeat buried the log, and
+	// nothing here restarts a seat. The record is read only to refuse.
+	if held, detail := d.seatHeldOnEscalation(rigName, polecatName, hookBead); held {
+		skipped = true
+		d.crashSkipLog.logf(d.logger.Printf, rigName+"/"+polecatName,
+			"Skipping crash detection for %s/%s: %s", rigName, polecatName, detail)
+		return
+	}
+
 	// Polecat has work but session is dead - this is a crash!
 	d.logger.Printf("CRASH DETECTED: polecat %s/%s has hook_bead=%s but session %s is dead",
 		rigName, polecatName, hookBead, sessionName)
@@ -2317,6 +2332,35 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 		return
 	}
 	d.logger.Printf("Crash of %s/%s not restarted: patrol_scan does not cover rig %s", rigName, polecatName, rigName)
+}
+
+// seatHeldOnEscalation reports whether a polecat's own record says it stopped
+// on an escalation (agent_state stuck, exit ESCALATED) that is not resolved,
+// and the line to say so: such a seat is waiting on a human decision, not
+// crashed, and patrol_scan releases it once the escalation closes (gt-4hduq).
+//
+// Anything else is not held and crash detection goes on as before: another
+// exit type, a seat that never escalated, or a record that could not be read.
+// The escalation read is the tick's own rule (patrolscan.SeatEscalationVerdict
+// over the escalations the seat raised), so the two sites cannot disagree
+// about which seat is waiting on a decision.
+func (d *Daemon) seatHeldOnEscalation(rigName, polecatName, hookBead string) (bool, string) {
+	h := &patrolScanHost{d: d}
+	rec, err := h.AgentRecord(rigName, polecatName)
+	if err != nil || !rec.StoppedOnEscalated() {
+		return false, ""
+	}
+	raised, err := h.PolecatEscalations(rigName)
+	if err != nil {
+		// An unreadable read is the tick's Unknown too: nothing is restarted or
+		// reported as a crash on a guess.
+		return true, "exit ESCALATED and its escalations could not be read: " + err.Error()
+	}
+	v := patrolscan.SeatEscalationVerdict(rigName, polecatName, hookBead, raised)
+	if v.Verdict == patrolscan.EscalationResolved {
+		return true, fmt.Sprintf("exit ESCALATED and %s for %s is closed; patrol_scan resumes the seat", v.ID, hookBead)
+	}
+	return true, v.Detail
 }
 
 // recordSessionDeath records a session death and checks for mass death pattern.

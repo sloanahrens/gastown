@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/agentpause"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/done"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
@@ -213,6 +215,120 @@ func TestCheckPolecatHealth_CrashSendsNoMail(t *testing.T) {
 	}
 	if calls := notes.Calls(); len(calls) != 0 {
 		t.Errorf("a crash sent notifications: %+v", calls)
+	}
+}
+
+// stoppedOnEscalationBD returns a work-bead database on which myr/polecats/
+// mycat's agent bead reads the record gt done's ESCALATED exit writes (stuck,
+// exit ESCALATED, holding hooked bead), beside an escalation the seat raised
+// for that bead in the given state.
+func stoppedOnEscalationBD(t *testing.T, townRoot, bead, escalation, raisedBy string, escalationOpen bool) *workBD {
+	t.Helper()
+	bd := hookedWorkBD(t, bead, time.Hour)
+	bd.db.Seed(beads.Issue{
+		ID: beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(townRoot, "myr"), "myr", "mycat"),
+		Description: beads.FormatAgentDescription("mycat", &beads.AgentFields{
+			RoleType: constants.RolePolecat, Rig: "myr", AgentState: "stuck", ExitType: done.ExitEscalated,
+			HookBead: bead, LastSourceIssue: bead,
+		}),
+	})
+	status := "open"
+	if !escalationOpen {
+		status = "closed"
+	}
+	title := bead + ": a decision the bead puts out of scope"
+	bd.db.Seed(beads.Issue{
+		ID: escalation, Status: status, Title: title, Labels: []string{"gt:escalation"},
+		Description: beads.FormatEscalationDescription(title, &beads.EscalationFields{
+			Severity: "high", EscalatedBy: raisedBy, EscalatedAt: time.Now().UTC().Format(time.RFC3339),
+		}),
+	})
+	return bd
+}
+
+// A polecat that stopped on purpose to raise a decision is not a crash: its
+// dead session with the bead still hooked is the state gt done's ESCALATED
+// exit leaves, and the patrol scan owns the seat until the escalation that
+// turn raised for the bead closes (gt-4hduq). The daemon says so once — the
+// measured case logged CRASH DETECTED every three minutes for fourteen hours —
+// and emits no session_death event.
+func TestCheckPolecatHealth_HoldsASeatWaitingOnItsEscalation(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name           string
+		raisedBy       string
+		escalationOpen bool
+		wantLog        string
+	}{
+		{"open escalation", "myr/polecats/mycat", true, "hq-wisp-1 is still open for gt-xyz"},
+		{"closed escalation", "myr/polecats/mycat", false, "hq-wisp-1 for gt-xyz is closed; patrol_scan resumes the seat"},
+		{"another role's escalation for the bead", "myr/crew/sloan", false, "no escalation of the seat's names gt-xyz"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			bd := stoppedOnEscalationBD(t, townRoot, "gt-xyz", "hq-wisp-1", tc.raisedBy, tc.escalationOpen)
+
+			var logBuf strings.Builder
+			d := &Daemon{
+				config:        &Config{TownRoot: townRoot},
+				logger:        log.New(&logBuf, "", 0),
+				tmux:          newFakeTmux(newFixedClock()),
+				notifier:      notifyfake.New(),
+				openWorkBeads: bd.open,
+				execCmd:       bd.run,
+			}
+
+			// Two passes: the hold is logged when it starts, not every pass.
+			d.checkPolecatHealth("myr", "mycat")
+			d.checkPolecatHealth("myr", "mycat")
+
+			got := logBuf.String()
+			if strings.Contains(got, "CRASH DETECTED") {
+				t.Errorf("a seat waiting on its escalation was called crashed: %q", got)
+			}
+			if n := strings.Count(got, "Skipping crash detection"); n != 1 {
+				t.Errorf("hold lines = %d, want one over two passes: %q", n, got)
+			}
+			if !strings.Contains(got, tc.wantLog) {
+				t.Errorf("log = %q, want it to say %q", got, tc.wantLog)
+			}
+			if _, err := os.Stat(filepath.Join(townRoot, events.EventsFile)); err == nil {
+				t.Error("a seat waiting on a human decision must not emit a session_death event")
+			}
+		})
+	}
+}
+
+// The control: the hold is the ESCALATED record's doing, not the escalation
+// bead's. The same seat with its escalation still open but no exit type
+// recorded is an ordinary crash, and crash detection goes on as before.
+func TestCheckPolecatHealth_HoldNeedsTheEscalatedRecord(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	bd := stoppedOnEscalationBD(t, townRoot, "gt-xyz", "hq-wisp-1", "myr/polecats/mycat", true)
+	bd.db.Seed(beads.Issue{
+		ID: beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(townRoot, "myr"), "myr", "mycat"),
+		Description: beads.FormatAgentDescription("mycat", &beads.AgentFields{
+			RoleType: constants.RolePolecat, Rig: "myr", AgentState: "working", HookBead: "gt-xyz",
+		}),
+	})
+
+	var logBuf strings.Builder
+	d := &Daemon{
+		config:        &Config{TownRoot: townRoot},
+		logger:        log.New(&logBuf, "", 0),
+		tmux:          newFakeTmux(newFixedClock()),
+		notifier:      notifyfake.New(),
+		openWorkBeads: bd.open,
+		execCmd:       bd.run,
+	}
+
+	d.checkPolecatHealth("myr", "mycat")
+
+	if got := logBuf.String(); !strings.Contains(got, "CRASH DETECTED") {
+		t.Errorf("a working polecat with a dead session is still a crash: %q", got)
 	}
 }
 
