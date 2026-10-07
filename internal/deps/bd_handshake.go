@@ -57,8 +57,12 @@ type BDRunner func(ctx context.Context, extraEnv []string, args ...string) (stdo
 // resolves the database from dir alone.
 func NewBDProcessRunner(dir string) BDRunner {
 	return func(ctx context.Context, extraEnv []string, args ...string) ([]byte, []byte, error) {
-		env := append(beads.StripBDTargetEnv(os.Environ()), extraEnv...)
+		env := bdRunnerEnv(extraEnv)
 		cmd := beads.CommandContextWithEnv(ctx, dir, env, args...)
+		// The constructor's machineEnvForCall runs after the environment it is
+		// handed and drops machine mode for `bd sql` (bdRunnerEnv); setting it
+		// again puts the runner's own environment back in charge.
+		cmd.Env = env
 		util.SetDetachedProcessGroup(cmd.Cmd)
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
@@ -66,6 +70,23 @@ func NewBDProcessRunner(dir string) BDRunner {
 		err := cmd.Run()
 		return stdout.Bytes(), stderr.Bytes(), err
 	}
+}
+
+// bdRunnerEnv is the environment NewBDProcessRunner gives bd: the inherited
+// environment with BEADS target variables stripped (so bd resolves the
+// database from the runner's dir alone), then the caller's extraEnv, then
+// machine mode.
+//
+// The last step is why it is applied to the command after
+// beads.CommandContextWithEnv rather than left to it: that constructor's
+// machineEnvForCall exempts `bd sql` from machine mode, because its rows come
+// back as JSON objects with sorted keys, losing the SELECT order the doctor's
+// csv readers index by. readDBSchemaLevel wants the opposite — machine mode is
+// what makes a schema-ahead database fail with bd's typed schema_skew exit
+// instead of prose — and asks for it in extraEnv. Neither read this runner
+// makes is a csv read.
+func bdRunnerEnv(extraEnv []string) []string {
+	return beads.WithMachineEnv(append(beads.StripBDTargetEnv(os.Environ()), extraEnv...))
 }
 
 // BDHandshake is a bd that passed: its version report and the migration
@@ -182,7 +203,11 @@ func readDBSchemaLevel(ctx context.Context, run BDRunner) (int, error) {
 		}
 		return 0, fmt.Errorf("could not read the database migration level: %v%s", err, stderrSuffix(stderr))
 	}
-	level, err := parseDBSchemaLevel(stdout)
+	// beads.LegacyPayload is gastown's one envelope reader: bd runs in machine
+	// mode (NewBDProcessRunner), so the row list is the envelope's data.
+	// Output that is not an envelope passes through, as a bd from before
+	// machine mode printed it.
+	level, err := parseDBSchemaLevel(beads.LegacyPayload(args, stdout))
 	if err != nil {
 		return 0, fmt.Errorf("could not read the database migration level: %w", err)
 	}
@@ -190,17 +215,8 @@ func readDBSchemaLevel(ctx context.Context, run BDRunner) (int, error) {
 }
 
 func parseDBSchemaLevel(out []byte) (int, error) {
-	trimmed := bytes.TrimSpace(out)
-	var envelope struct {
-		Data json.RawMessage `json:"data"`
-	}
-	if len(trimmed) > 0 && trimmed[0] == '{' {
-		if err := json.Unmarshal(trimmed, &envelope); err == nil && len(envelope.Data) > 0 {
-			trimmed = envelope.Data
-		}
-	}
 	var rows []map[string]any
-	if err := json.Unmarshal(trimmed, &rows); err != nil {
+	if err := json.Unmarshal(out, &rows); err != nil {
 		return 0, fmt.Errorf("bd sql output is not a JSON row list: %q", util.FirstLine(string(out)))
 	}
 	if len(rows) != 1 {

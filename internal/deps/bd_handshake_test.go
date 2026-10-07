@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 
@@ -233,4 +234,49 @@ func TestBdCommandTreeSnapshotMatchesContract(t *testing.T) {
 		t.Fatalf("bd-command-tree.json is from %s at contract_version %d; the handshake's newest known contract is %d (KnownBDContractVersions %v): refresh the snapshot with make bd-command-tree, or fix KnownBDContractVersions",
 			snap.Source, snap.ContractVersion, newest, KnownBDContractVersions)
 	}
+}
+
+// TestBDRunnerEnvKeepsMachineModeForSQL is the regression for the `bd sql`
+// exemption in the subprocess policy: beads.CommandContextWithEnv's
+// machineEnvForCall strips BD_MACHINE from a sql call, so bdRunnerEnv's
+// environment has to be applied over it or readDBSchemaLevel runs outside
+// machine mode and loses bd's typed schema_skew exit.
+func TestBDRunnerEnvKeepsMachineModeForSQL(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		extraEnv []string
+	}{
+		{"no extra env", nil},
+		{"the schema read's own request", []string{"BD_MACHINE=1"}},
+		{"routing the caller pinned", []string{"BEADS_DIR=/some/store", "BD_MACHINE=1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := bdRunnerEnv(tc.extraEnv)
+			if n := countEnvKey(env, "BD_MACHINE"); n != 1 {
+				t.Errorf("bdRunnerEnv(%q) has %d BD_MACHINE entries, want exactly 1: %q", tc.extraEnv, n, env)
+			}
+			if !slices.Contains(env, "BD_MACHINE=1") {
+				t.Errorf("bdRunnerEnv(%q) = %q, want BD_MACHINE=1 in it", tc.extraEnv, env)
+			}
+			for _, want := range tc.extraEnv {
+				if !slices.Contains(env, want) {
+					t.Errorf("bdRunnerEnv(%q) dropped %q", tc.extraEnv, want)
+				}
+			}
+		})
+	}
+}
+
+// countEnvKey counts the entries setting name, the way a child process sees
+// duplicates.
+func countEnvKey(env []string, name string) int {
+	n := 0
+	for _, e := range env {
+		if key, _, _ := strings.Cut(e, "="); key == name {
+			n++
+		}
+	}
+	return n
 }

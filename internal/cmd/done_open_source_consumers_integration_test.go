@@ -5,7 +5,7 @@ package cmd
 import (
 	"encoding/json"
 	"errors"
-	"os/exec"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -100,8 +100,7 @@ func TestIntegrationRunDoneLeavesSourceBeadOpenAndReadableByItsConsumers(t *test
 // beadsDir and decodes the answer.
 func showSourceBead(t *testing.T, beadsDir string) *beads.Issue {
 	t.Helper()
-	cmd := exec.Command("bd", "show", "bd-source", "--json")
-	cmd.Env = append(cmd.Environ(), "BEADS_DIR="+beadsDir)
+	cmd := beads.CommandWithEnv("", append(os.Environ(), "BEADS_DIR="+beadsDir), "show", "bd-source", "--json")
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("bd show bd-source: %v", err)
