@@ -23,7 +23,7 @@ func TestRigRowsJoinTheQueueAndTheSeats(t *testing.T) {
 		{Rig: "mango", Name: "e", State: StateIdle},
 		{Rig: "om", Name: "f", State: StateIdle}, // a rig the queue did not name gets no row
 	}
-	rows := RigRows(q, polecats)
+	rows := RigRows(q, polecats, nil)
 	if len(rows) != 2 {
 		t.Fatalf("rows = %+v, want one per queue rig", rows)
 	}
@@ -47,7 +47,7 @@ func TestRigRowsCountsAreAbsentWhenUnreadableAndZeroWhenRead(t *testing.T) {
 		{Name: "gastown", Ready: intp(0), Landing: intp(0)},
 		{Name: "beads"}, // its store could not be read
 	}}
-	b, err := json.Marshal(RigRows(q, []Polecat{}))
+	b, err := json.Marshal(RigRows(q, []Polecat{}, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestRigRowsCountsAreAbsentWhenUnreadableAndZeroWhenRead(t *testing.T) {
 func TestRigRowsLeaveSeatsUnknownWhenTheSeatReadFailed(t *testing.T) {
 	t.Parallel()
 	q := &Queue{Rigs: []Rig{{Name: "gastown", Ready: intp(1), Landing: intp(0)}}}
-	b, err := json.Marshal(RigRows(q, nil))
+	b, err := json.Marshal(RigRows(q, nil, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,35 @@ func TestRigRowsLeaveSeatsUnknownWhenTheSeatReadFailed(t *testing.T) {
 
 func TestRigRowsWithoutAQueueReading(t *testing.T) {
 	t.Parallel()
-	if rows := RigRows(nil, []Polecat{{Rig: "gastown", State: StateIdle}}); rows != nil {
+	if rows := RigRows(nil, []Polecat{{Rig: "gastown", State: StateIdle}}, nil); rows != nil {
 		t.Errorf("rows = %+v, want none before the queue reports", rows)
+	}
+}
+
+// The Names column reads the rig's own pool: the theme and a few of its names
+// ride in the row, so the page can show the theme and name the samples in its
+// tooltip without knowing where a rig keeps its settings. A rig naming from an
+// explicit list reports no theme, and an unreadable theme reports itself with
+// no samples.
+func TestRigRowsCarryTheRigsNameTheme(t *testing.T) {
+	t.Parallel()
+	q := &Queue{Rigs: []Rig{{Name: "gastown"}, {Name: "harbor"}, {Name: "legacy"}}}
+	theme := func(rig string) (string, []string) {
+		switch rig {
+		case "gastown":
+			return "mad-max", []string{"furiosa", "nux"}
+		case "harbor":
+			return "beadwork", nil // the theme is named, its file was not read
+		}
+		return "", nil
+	}
+	b, err := json.Marshal(RigRows(q, []Polecat{}, theme))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `[{"name":"gastown","seats":0,"theme":"mad-max","names":["furiosa","nux"]},` +
+		`{"name":"harbor","seats":0,"theme":"beadwork"},{"name":"legacy","seats":0}]`
+	if string(b) != want {
+		t.Errorf("payload = %s\nwant       %s", b, want)
 	}
 }

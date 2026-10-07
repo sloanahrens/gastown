@@ -416,6 +416,10 @@ type Config struct {
 	// Queue reads the work queue lists; Bead reads one bead's text on request.
 	Queue func() *Queue
 	Bead  func(rig, id string) (*BeadDetail, error)
+	// RigTheme reads one rig's effective name theme and up to five sample names
+	// from it, for the Rigs panel's Names column. Nil leaves every row's theme
+	// empty.
+	RigTheme func(rig string) (theme string, names []string)
 	// Trend reads the last 24 hours of landings, rejections, stage times and
 	// host load.
 	Trend func() *Trend

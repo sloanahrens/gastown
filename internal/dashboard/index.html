@@ -279,6 +279,27 @@ const STATE_HELP = {
 };
 let openIdle = false;
 let openParkedRig = false;
+// Names for the polecats in view. label() is the short name, because each rig
+// draws its polecats from that rig's own name theme, so the name alone places
+// the polecat — except a short name that more than one rig uses, which without
+// its rig would name none of them. rigOf() is the one rig using a short name,
+// so a cell can carry the full rig/name in its title.
+function polecatNames(polecats) {
+  const rigs = new Map();
+  for (const p of polecats || []) {
+    if (!p.name) continue;
+    let s = rigs.get(p.name);
+    if (!s) rigs.set(p.name, s = new Set());
+    s.add(p.rig || "");
+  }
+  return {
+    label: (rig, name) => {
+      const s = rigs.get(name);
+      return name && s && s.size > 1 && rig ? rig + "/" + name : (name || "");
+    },
+    rigOf: name => { const s = rigs.get(name); return s && s.size === 1 ? [...s][0] : ""; },
+  };
+}
 // One compact line per rig: whether it is parked, and where its work is. A
 // count the dashboard could not read says so rather than showing a zero.
 function renderRigs(s) {
@@ -288,7 +309,8 @@ function renderRigs(s) {
   if (!rows.length) { box.append(el("div", "empty", s.queue ? "no rigs" : "reading…")); $("rigsnote").textContent = ""; return; }
   const t = el("table");
   const hr = el("tr");
-  [["Rig"], ["State"], ["Seats", "polecats in this rig that hold nothing and are free to take work", 1],
+  [["Rig"], ["Names", "the name theme this rig draws its polecats from; hover for a few of its names", 0],
+   ["State"], ["Seats", "polecats in this rig that hold nothing and are free to take work", 1],
    ["Ready", "beads in this rig open with nothing blocking them", 1],
    ["Landing", "beads in this rig submitted and waiting to land", 1]].forEach(([h, tip, num]) => {
     const th = el("th", num ? "n" : "", h);
@@ -297,9 +319,18 @@ function renderRigs(s) {
   });
   t.append(hr);
   const cell = v => { const td = el("td", "n" + (v == null ? " title" : ""), v == null ? "unavailable" : String(v)); if (v == null) td.title = "the dashboard could not read this"; return td; };
+  // The theme names the pool a rig's polecats come from, and its samples are
+  // the names themselves, so the rig a short name belongs to can be looked up
+  // here.
+  const themeCell = r => {
+    const td = el("td", "title", r.theme || "–");
+    if (r.theme) td.title = (r.names || []).length ? r.theme + ": " + r.names.join(", ") : r.theme;
+    else td.title = "this rig's polecat names are an explicit list: it has no name theme";
+    return td;
+  };
   for (const r of rows) {
     const tr = el("tr");
-    tr.append(el("td", "", r.name));
+    tr.append(el("td", "", r.name), themeCell(r));
     const st = el("td");
     const badge = el("span", "badge st-" + (r.parked ? "parked" : "working"), r.parked ? "parked" : "active");
     if (r.parked) badge.title = "stood down by an operator: the dispatcher does not serve it";
@@ -335,7 +366,9 @@ function renderSeats(s) {
   const parkedRigPcs = pcs.filter(p => p.rig_parked).sort((x, y) => (x.state === "idle") - (y.state === "idle") || (x.rig + x.name).localeCompare(y.rig + y.name));
   const idle = pcs.filter(p => p.state === "idle" && !p.rig_parked).sort((x, y) => (y.landed_24h - x.landed_24h) || (x.rig + x.name).localeCompare(y.rig + y.name));
   const now = Date.now();
-  const name = p => p.rig === "gastown" ? p.name : p.rig + "/" + p.name;
+  const names = polecatNames(pcs);
+  // The short name places the polecat; the full rig/name stays on the cell.
+  const nameCell = p => { const td = el("td", "", names.label(p.rig, p.name)); td.title = p.rig + "/" + p.name; return td; };
   // The three right-hand columns are the polecat's last 24 hours of landings.
   const R = [
     ["Landed", "beads this polecat landed in the last 24 hours", p => p.landed_24h ? String(p.landed_24h) : "–"],
@@ -349,7 +382,7 @@ function renderSeats(s) {
     t.append(head([["Polecat"], ["State"], ["Bead"], ["On it", "time since the bead was dispatched", 1], ["Quiet", "time since its session last printed anything", 1], ...R.map(r => [r[0], r[1], 1])]));
     for (const p of list) {
       const tr = el("tr");
-      tr.append(el("td", "", name(p)));
+      tr.append(nameCell(p));
       const st = el("td"); const badge = el("span", "badge st-" + p.state, p.state); badge.title = (STATE_HELP[p.state] || "") + (p.reason && p.bead ? " — " + p.reason : ""); st.append(badge); tr.append(st);
       const bd = el("td");
       if (p.bead) {
@@ -375,7 +408,7 @@ function renderSeats(s) {
   const idleTable = list => {
     const t = el("table");
     t.append(head([["Polecat"], ...R.map(r => [r[0], r[1], 1])]));
-    for (const p of list) { const tr = el("tr"); tr.append(el("td", "", name(p))); rightCells(tr, p); t.append(tr); }
+    for (const p of list) { const tr = el("tr"); tr.append(nameCell(p)); rightCells(tr, p); t.append(tr); }
     return t;
   };
   if (busy.length) box.append(busyTable(busy));
@@ -491,6 +524,7 @@ function renderTrend(s) {
   sec.hidden = false;
   box.replaceChildren();
   const hours = t.hours;
+  const names = polecatNames(s.polecats);
   const hhmm = iso => new Date(iso).toLocaleTimeString([], {hour12: false}).slice(0, 5);
   const t0 = new Date(hours[0].hour).getTime();
   const t1 = new Date(hours[hours.length - 1].hour).getTime() + 3600e3;
@@ -575,10 +609,17 @@ function renderTrend(s) {
       const total = (r.lint_secs || 0) + (r.gate_secs || 0) + (r.om_secs || 0);
       tr.title = [r.commit ? "commit " + r.commit : null, total ? "lint " + fmtDur(r.lint_secs || 0) + " + gate " + fmtDur(r.gate_secs || 0) + " + om " + fmtDur(r.om_secs || 0) + " = " + fmtDur(total) : null, r.route ? "route " + r.route : null].filter(Boolean).join(" · ");
       tr.append(main);
-      // A live row names its rig with the holder: it is the one row whose bead
-      // may belong to any rig, and a bare polecat name does not place it.
+      // By names the holder the way the seats pane does: the short name, and
+      // its rig only where two rigs in view use that name. The row's own rig
+      // is the holder's for a live run; for a finished one it is read back from
+      // the polecat roster, so a shared short name still gets its rig.
       const who = r.polecat || (r.route ? r.route.replace(/^overseer-/, "") : "");
-      tr.append(el("td", "title", r.outcome === "running" && r.rig ? (who ? r.rig + "/" + who : r.rig) : (who || "–")));
+      const rig = r.rig || names.rigOf(who);
+      const by = el("td", "title");
+      if (who) { by.textContent = names.label(rig, who); by.title = rig ? rig + "/" + who : who; }
+      else if (r.outcome === "running" && r.rig) by.textContent = r.rig;
+      else by.textContent = "–";
+      tr.append(by);
       tr.append(el("td", "n" + (r.score != null && thr != null && r.score < thr ? " badc" : ""), r.score != null ? r.score.toFixed(2) : "–"));
       tr.append(el("td", "n" + (r.gate_secs > 180 ? " warnc" : ""), r.gate_secs != null ? fmtDur(r.gate_secs) : "–"));
       tr.append(el("td", "n" + (r.om_secs > 240 ? " warnc" : ""), r.om_secs != null ? fmtDur(r.om_secs) : "–"));
