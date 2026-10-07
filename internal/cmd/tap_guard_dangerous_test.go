@@ -1841,6 +1841,13 @@ func TestCdWalkOrChain(t *testing.T) {
 		{"a background cd inside the dead list is not read past", "cd " + gone + " && cd " + left + " & cd " + right + " ; grep -rn TODO", "", false},
 		{"a dead list with no semicolon after it names nothing", "cd " + gone + " && cd " + left, "", false},
 		{"a dead list with no semicolon leaves the base unnamable", "cd " + gone + " && cd " + left + " && grep -rn TODO", "", false},
+
+		// A brace group is not a subshell: it runs in this shell, so the cd it
+		// holds carries to the segments after it, while the same cd inside a
+		// "( ... )" group stays out of them (gt-ajyw8).
+		{"a cd inside a brace group carries", "cd " + left + " ; { cd " + right + " ; } ; grep -rn TODO", right, true},
+		{"a cd inside a brace group carries after &&", "cd " + left + " && { cd " + right + " ; } && grep -rn TODO", right, true},
+		{"a cd inside a subshell does not carry", "cd " + left + " ; (cd " + right + ") ; grep -rn TODO", left, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1969,6 +1976,15 @@ func TestIdleGateFollowsCdOnTheLine(t *testing.T) {
 		{"pushd into the Go tree then make test", nonGo, "pushd " + goRoot + " && make test", true},
 		{"pushd then popd leaves the segment refused", goRoot, "pushd " + nonGo + " && popd && make test", true},
 		{"pushd -n does not leave the Go tree", goRoot, "pushd -n " + nonGo + " && make test", true},
+
+		// A brace group runs in this shell, so a cd inside one reaches the
+		// segment after it — a subshell's does not, and the group's own closing
+		// "}" must not hide the make that follows either (gt-ajyw8).
+		{"cd into the Go tree inside a brace group", nonGo, "cd " + nonGo + " ; { cd " + goRoot + " ; } ; make test", true},
+		{"cd out of the Go tree inside a brace group", goRoot, "cd " + goRoot + " ; { cd " + nonGo + " ; } ; make test", false},
+		{"make test inside a brace group in the Go tree", nonGo, "{ cd " + goRoot + " ; make test ; }", true},
+		{"cd into the Go tree inside a subshell does not carry", nonGo, "cd " + nonGo + " ; (cd " + goRoot + ") ; make test", false},
+		{"cd out of the Go tree inside a subshell does not carry", goRoot, "cd " + goRoot + " ; (cd " + nonGo + ") ; make test", true},
 
 		// The whole-repo go forms are held wherever they run, so the cd
 		// changes nothing for them.

@@ -251,6 +251,15 @@ func TestGuardsFollowCdOnTheLine(t *testing.T) {
 		{"pushd out of the Go tree then make test", goRoot, "pushd " + nonGo + " && make test", false, false},
 		{"pushd then popd leaves the segment refused", goRoot, "pushd " + nonGo + " && popd && make test", true, true},
 		{"pushd -n does not leave the Go tree", goRoot, "pushd -n " + nonGo + " && make test", true, true},
+
+		// A brace group runs in this shell, so a cd inside one reaches the
+		// segment after it — a subshell's does not, and the group's own closing
+		// "}" must not hide the guarded command that follows either (gt-ajyw8).
+		{"cd into the Go tree inside a brace group", nonGo, "cd " + nonGo + " ; { cd " + goRoot + " ; } ; make test", true, true},
+		{"cd out of the Go tree inside a brace group", goRoot, "cd " + goRoot + " ; { cd " + nonGo + " ; } ; make test", false, false},
+		{"a guarded command inside a brace group runs in its cd", nonGo, "{ cd " + container + " ; GT_TEST_DOCKER=1 go test . ; }", true, false},
+		{"cd into the Go tree inside a subshell does not carry", nonGo, "cd " + nonGo + " ; (cd " + goRoot + ") ; make test", false, false},
+		{"cd out of the Go tree inside a subshell does not carry", goRoot, "cd " + goRoot + " ; (cd " + nonGo + ") ; make test", true, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

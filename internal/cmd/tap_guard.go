@@ -119,12 +119,21 @@ var prWorkflowCommandPrefixes = [][]string{
 // just as ; does, so leaving it out let a text-only command in front of it
 // speak for the real command behind — "echo hi & git clean -f" was judged a
 // single echo call and the clean ran unchecked (gt-wwwht).
+//
+// A "}" closing a brace group belongs here too, because the ";" that ends the
+// group's last command comes before it: the group's words would otherwise ride
+// into the following segment as "}"-prefixed tokens, hiding that segment's
+// command from every matcher keyed on its first words, and the walk would read
+// the group's cd as continuing an argument list (gt-ajyw8). The "{" that opens
+// the group is not a separator here — it must stay in the group's segment — so
+// shellCommandStart names it instead.
 var shellCommandSeparators = map[string]bool{
 	"&&": true,
 	"||": true,
 	";":  true,
 	"|":  true,
 	"&":  true,
+	"}":  true,
 }
 
 // maxPRWorkflowNestDepth bounds the shell-fed-heredoc recursion in
