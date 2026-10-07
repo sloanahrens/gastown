@@ -1409,6 +1409,10 @@ func cdWalkRoot(proc guardProcess, tokens []string, end int, base string, vars m
 		// Reading the separator before the target drops an unresolvable change
 		// with them: it never reaches this shell, so it cannot make the
 		// directory unknown either (gt-n7ksl).
+		//
+		// A brace group is no such subshell: it runs in this shell, and the ";"
+		// that must end its last command is the separator this reads, so
+		// `cd A ; { cd B ; } ; make test` runs make in B (gt-ajyw8).
 		if sep < end && tokens[sep] != "&&" && tokens[sep] != ";" {
 			continue
 		}
@@ -1510,12 +1514,15 @@ func segmentWalkRoot(proc guardProcess, tokens []string, start int, base string,
 
 // shellCommandStart reports whether the token at i begins a shell command
 // rather than continuing an argument list: the line's first word, the word
-// after a separator, or the word after the "(" that opens a subshell.
+// after a separator, or the word after the "(" or "{" that opens a group.
+// The two groups differ in what the walk does with a cd inside them — a
+// subshell's change is not the shell's, a brace group's is — but both hold a
+// command list, so the word after either opens one (gt-ajyw8).
 func shellCommandStart(tokens []string, i int) bool {
 	if i == 0 {
 		return true
 	}
-	return shellCommandSeparators[tokens[i-1]] || tokens[i-1] == "("
+	return shellCommandSeparators[tokens[i-1]] || tokens[i-1] == "(" || tokens[i-1] == "{"
 }
 
 // cdStatus says what the walk can tell about the directory change a cd or

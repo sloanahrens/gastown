@@ -771,6 +771,14 @@ func TestMatchesUnboundedScanImplicitRoot(t *testing.T) {
 		{"pushd then popd leaves the walk root unknown", worktree, "pushd " + rig + " && popd && grep -rn TODO", false, ""},
 		{"pushd -n leaves the directory alone", rig, "pushd -n " + worktree + " && grep -rn TODO", true, "cwd is a rig root"},
 
+		// A brace group runs in this shell, so a cd inside one moves the walk
+		// root for the scan after it; a "( ... )" group's cd does not, and the
+		// "}" that closes the group is what keeps the scan's own reading
+		// (gt-ajyw8).
+		{"a cd inside a brace group walks the rig", other, "{ cd " + rig + " ; } ; grep -rn TODO", true, "cwd is a rig root"},
+		{"a cd inside a brace group bounds the scan", rig, "cd " + other + " ; { cd " + other + " ; } ; grep -rn TODO", false, ""},
+		{"a cd inside a subshell does not move the walk root", rig, "cd " + other + " ; (cd " + rig + ") ; grep -rn TODO", false, ""},
+
 		// Blocked — the working directory is the home directory, the root the
 		// shell's own "~" names.
 		{"grep from the home directory", home, "grep -rn TODO", true, "cwd is the home directory"},
