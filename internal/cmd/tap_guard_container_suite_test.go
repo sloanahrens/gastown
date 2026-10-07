@@ -691,3 +691,114 @@ func TestRunTapGuardContainerSuite_RefusalNamesTheSanctionedPaths(t *testing.T) 
 		}
 	}
 }
+
+// A heredoc body is data unless a shell invoker reads it (gt-ohe8n): a bead
+// description, a doc or a formula that merely spells a suite invocation is
+// prose, while "bash <<EOF" and "cat <<EOF | bash" feed the body to a shell,
+// so that body is code and stays in scope.
+func TestContainerSuiteGuardsStripHeredocBodies(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		command      string
+		wantRefused  bool
+		wantScopeOut bool
+	}{
+		{
+			name:        "bead description quoting make test is data",
+			command:     "cat > /tmp/bead.md <<'EOF'\nreproduce with make test\nEOF\n",
+			wantRefused: false, wantScopeOut: false,
+		},
+		{
+			name:        "doc quoting the suite invocation is data",
+			command:     "cat > /tmp/notes.md <<'EOF'\nGT_TEST_DOCKER=1 go test ./internal/beads/...\nEOF\n",
+			wantRefused: false, wantScopeOut: false,
+		},
+		{
+			name:        "whole-repo and make test in one body are data",
+			command:     "cat > /tmp/notes.md <<'EOF'\nmake test\ngo test ./...\nEOF\n",
+			wantRefused: false, wantScopeOut: false,
+		},
+		{
+			name:        "live invocation after the terminator still refused",
+			command:     "cat > /tmp/notes.md <<'EOF'\nmake test\nEOF\nmake test\n",
+			wantRefused: true, wantScopeOut: true,
+		},
+		{
+			name:        "shell-fed body is a script, not data",
+			command:     "bash <<'EOF'\nmake test\nEOF\n",
+			wantRefused: true, wantScopeOut: true,
+		},
+		{
+			name:        "body piped into a shell is a script",
+			command:     "cat <<'EOF' | bash\nmake test\nEOF\n",
+			wantRefused: true, wantScopeOut: true,
+		},
+		{
+			name:        "shell-fed body may itself carry a heredoc",
+			command:     "bash <<'OUTER'\nbash <<'INNER'\nmake test\nINNER\nOUTER\n",
+			wantRefused: true, wantScopeOut: true,
+		},
+		{
+			name:        "shell-fed container run is refused",
+			command:     "bash <<'EOF'\nGT_TEST_DOCKER=1 go test ./internal/beads/...\nEOF\n",
+			wantRefused: true, wantScopeOut: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateContainerSuiteCommand(tt.command, "", "")
+			if got := reason != ""; got != tt.wantRefused {
+				t.Errorf("evaluateContainerSuiteCommand(%q) blocked = %v (reason %q), want %v", tt.command, got, reason, tt.wantRefused)
+			}
+			scopeReason, _ := evaluatePolecatTestScope(tt.command, "")
+			if got := scopeReason != ""; got != tt.wantScopeOut {
+				t.Errorf("evaluatePolecatTestScope(%q) blocked = %v (reason %q), want %v", tt.command, got, scopeReason, tt.wantScopeOut)
+			}
+		})
+	}
+}
+
+// Shell-fed heredocs are followed to a bounded depth, the same bound and the
+// same shape matchesPRWorkflowCommand places on the identical recursion:
+// maxTestGuardNestDepth levels are inspected, so an invocation three shells
+// deep is still refused and a deeper tower terminates instead of recursing
+// without end.
+func TestContainerSuiteGuardsBoundHeredocRecursion(t *testing.T) {
+	t.Parallel()
+	command := "bash <<'L0'\nbash <<'L1'\nbash <<'L2'\nmake test\nL2\nL1\nL0\n"
+	if reason, _ := evaluateContainerSuiteCommand(command, "", ""); reason == "" {
+		t.Errorf("make test nested %d shell-fed heredocs deep was allowed", maxTestGuardNestDepth)
+	}
+	if reason, _ := evaluatePolecatTestScope(command, ""); reason == "" {
+		t.Errorf("scope: make test nested %d shell-fed heredocs deep was allowed", maxTestGuardNestDepth)
+	}
+}
+
+// The acceptance case, driven through the real hook entry point: a polecat
+// writing a file whose heredoc body quotes the bare suite invocation is
+// allowed, while the same invocation typed live on the line is not.
+func TestRunTapGuardContainerSuite_HeredocBodyIsData(t *testing.T) {
+	t.Parallel()
+	// cwd "" is unresolvable and judged as a Go tree, the same convention the
+	// sibling make-test hook test uses: the live invocation below must be
+	// refused, so the only variable left is the heredoc.
+	proc := fakeGuardProcess(map[string]string{
+		"GT_POLECAT": "nux",
+		"GT_ROLE":    "gastown/polecats/nux",
+	}, "")
+
+	write := "cat > /tmp/bead.md <<'EOF'\nreproduce with make test\nEOF\n"
+	input := `{"tool_name":"Bash","tool_input":{"command":` + jsonQuote(write) + `}}`
+	var buf strings.Builder
+	if err := tapGuardContainerSuite(strings.NewReader(input), &buf, proc); err != nil {
+		t.Fatalf("writing a file whose heredoc body quotes the suite was refused: %s", buf.String())
+	}
+
+	live := "make test"
+	input = `{"tool_name":"Bash","tool_input":{"command":` + jsonQuote(live) + `}}`
+	buf.Reset()
+	if err := tapGuardContainerSuite(strings.NewReader(input), &buf, proc); err == nil {
+		t.Fatalf("live make test was allowed through the hook: %s", buf.String())
+	}
+}

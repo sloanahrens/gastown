@@ -158,6 +158,13 @@ func isPolecatOrRefineryContext(proc guardProcess) bool {
 // internal/slot and 'gt slot run --role <rig>/<name> -- <command>').
 var containerSuiteSlotRunTokens = []string{"gt", "slot", "run"}
 
+// maxTestGuardNestDepth bounds the shell-fed-heredoc recursion in
+// evaluateContainerSuiteCommand and evaluatePolecatTestScope, so a
+// pathological command nesting heredocs inside heredocs still terminates.
+// Same shape and value as maxPRWorkflowNestDepth, which bounds the identical
+// recursion in matchesPRWorkflowCommand.
+const maxTestGuardNestDepth = 3
+
 // evaluateContainerSuiteCommand splits command into shell segments (on
 // ;/&&/||/|, same as matchesPRWorkflowCommand) and evaluates each
 // independently, so a "gt slot run -- go test ./..." wrapper and an
@@ -166,8 +173,19 @@ var containerSuiteSlotRunTokens = []string{"gt", "slot", "run"}
 // Returns the reason for the first blocked segment found, or ("", nil) if
 // none is blocked. cwd is the invocation's working directory ("" when
 // unknown) and envOptIn the hook environment's own GT_TEST_DOCKER.
+//
+// Heredoc bodies are stripped before tokenizing (stripHeredocBodies), so a
+// body that merely spells "make test" — a bead description, a doc, a formula
+// — is data, not a live invocation. A body fed to a shell invoker is the
+// exception and is judged as the nested script it is (shellFedHeredocBodies),
+// the same distinction matchesPRWorkflowCommand and evaluateDangerousCommand
+// draw (gt-ohe8n).
 func evaluateContainerSuiteCommand(command, cwd, envOptIn string) (reason string, matched []string) {
-	tokens := shellTokenize(strings.TrimSpace(command))
+	return evaluateContainerSuiteCommandDepth(command, cwd, envOptIn, 0)
+}
+
+func evaluateContainerSuiteCommandDepth(command, cwd, envOptIn string, depth int) (reason string, matched []string) {
+	tokens := shellTokenize(strings.TrimSpace(stripHeredocBodies(command)))
 	// Container-backed tests are opt-in (testutil.DockerTestsEnv). A bare
 	// `go test` of a container-bearing package cannot start a container
 	// unless the command turns the switch on somewhere — as an env prefix,
@@ -190,7 +208,21 @@ func evaluateContainerSuiteCommand(command, cwd, envOptIn string) (reason string
 		}
 		segment = append(segment, tok)
 	}
-	return evaluateContainerSuiteSegment(segment, dockerOn, cwd)
+	if r, m := evaluateContainerSuiteSegment(segment, dockerOn, cwd); r != "" {
+		return r, m
+	}
+
+	if depth >= maxTestGuardNestDepth {
+		return "", nil
+	}
+	// The bodies come off the untouched command: stripHeredocBodies removed
+	// them from the text above, so they are judged here once, as code.
+	for _, body := range shellFedHeredocBodies(command) {
+		if r, m := evaluateContainerSuiteCommandDepth(body, cwd, envOptIn, depth+1); r != "" {
+			return r, m
+		}
+	}
+	return "", nil
 }
 
 // dockerTestsEnv mirrors testutil.DockerTestsEnv. It is spelled out here
