@@ -253,7 +253,7 @@ func evaluateContainerSuiteSegment(tokens []string, dockerOn bool, cwd string) (
 	}
 
 	if i := findTestInvocation(lower, "make"); i >= 0 {
-		if !makeTestIsWholeGoSuite(tokens[i:], cwd) {
+		if !makeActsOnWholeGoModule(tokens[i:], cwd) {
 			return "", nil
 		}
 		// The Go Makefile's "test" target runs "go test ./..." after its
@@ -576,26 +576,29 @@ func goModuleRoot(dir string) (root string, found bool, err error) {
 	}
 }
 
-// makeTestIsWholeGoSuite reports whether a "make … test" invocation is the
-// whole Go suite the guards refuse. args holds the invocation's tokens from
-// the "make" word onward and cwd is the hook process's directory; the pair is
-// what locates the tree, because judging the hook's own cwd alone let
-// "make -C <go tree> test" run from anywhere (gt-dieu9 review).
+// makeActsOnWholeGoModule reports whether a "make … test" or "make … build"
+// invocation runs the module-wide Go action its target name stands for. args
+// holds the invocation's tokens from the "make" word onward and cwd is the
+// hook process's directory; the pair is what locates the tree, because
+// judging the hook's own cwd alone let "make -C <go tree> test" run from
+// anywhere (gt-dieu9 review). The container-suite, polecat-scope and idle
+// rules all read the premise through this one function (gt-mjfir).
 //
 // "make test" is "go test ./..." under another name only in a Go tree, and
 // the containers the guard protects are started by Go test binaries. A
 // directory outside every Go module — the fractals rig, whose test target is
 // `npm test` into vitest — runs neither, so refusing its "make test" only
-// prints advice that cannot apply (gt-dieu9). Every Go module keeps the
-// refusal, not just this one: the VM the slot guards is shared, and another
-// rig's suite reaches it without naming a containerSuitePackages entry
-// (beads' `make test`).
+// prints advice that cannot apply (gt-dieu9). The same holds for "make
+// build", which is "go build ./..." only in a Go tree. Every Go module keeps
+// the refusal, not just this one: the VM the slot guards is shared, and
+// another rig's suite reaches it without naming a containerSuitePackages
+// entry (beads' `make test`).
 //
 // What the invocation leaves unpinned keeps the refusal: a directory the
 // guard cannot place, a directory it cannot examine, and a makefile it cannot
-// read all leave "what does test do here" unanswered, and "no go.mod in
-// sight" is not "there is none" (fail closed).
-func makeTestIsWholeGoSuite(args []string, cwd string) bool {
+// read all leave "what does this target do here" unanswered, and "no go.mod
+// in sight" is not "there is none" (fail closed).
+func makeActsOnWholeGoModule(args []string, cwd string) bool {
 	dir, known := makeRunDir(args, cwd)
 	if !known || strings.TrimSpace(dir) == "" {
 		return true
@@ -604,16 +607,16 @@ func makeTestIsWholeGoSuite(args []string, cwd string) bool {
 	return err != nil || found
 }
 
-// makeRunDir resolves the directory a "make … test" invocation runs in. args
-// holds the invocation's tokens from the "make" word onward; cwd is the hook
-// process's directory. A -C (--directory) is applied before make reads
-// anything, and the flags chain, so "make -C a -C b test" runs in a/b.
+// makeRunDir resolves the directory a "make … test"/"make … build" invocation
+// runs in. args holds the invocation's tokens from the "make" word onward; cwd
+// is the hook process's directory. A -C (--directory) is applied before make
+// reads anything, and the flags chain, so "make -C a -C b test" runs in a/b.
 //
 // known is false when the invocation names its own makefile — -f/--file/
-// --makefile, or "-" for stdin — because "test" then means whatever that file
-// says, which the guard cannot read and so refuses instead of guessing. It is
-// false too when a -C cannot be placed: a relative directory under an unknown
-// cwd names nothing this process can walk.
+// --makefile, or "-" for stdin — because the target then means whatever that
+// file says, which the guard cannot read and so refuses instead of guessing.
+// It is false too when a -C cannot be placed: a relative directory under an
+// unknown cwd names nothing this process can walk.
 func makeRunDir(args []string, cwd string) (dir string, known bool) {
 	dir = cwd
 	for i := 1; i < len(args); i++ {
