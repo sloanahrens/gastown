@@ -35,7 +35,9 @@ This guard blocks, when running as a polecat or refinery:
   - go test .          (or a bare "go test") when the directory it runs in
                         is one of those packages — the cwd is judged like
                         any other target, not exempted
-  - make test           which unconditionally runs "go test ./..."
+  - make test           in a Go tree, where it runs the module's whole
+                        "go test ./..."; a non-Go rig's own make target is
+                        left alone (gt-dieu9)
 
 ...unless the command is already wrapped in 'gt slot run -- <command>', in
 which case it is allowed through untouched. Bare go test runs that only
@@ -245,9 +247,12 @@ func evaluateContainerSuiteSegment(tokens []string, dockerOn bool, cwd string) (
 	}
 
 	if i := findTestInvocation(lower, "make"); i >= 0 {
-		// The Makefile's "test" target unconditionally runs "go test ./..."
-		// after its shell-script checks — there is no scoped form of "make
-		// test", so it always touches every testcontainers-backed package.
+		if !makeTestIsWholeGoSuite(cwd) {
+			return "", nil
+		}
+		// The Go Makefile's "test" target runs "go test ./..." after its
+		// shell-script checks — there is no scoped form of "make test", so
+		// it always touches every testcontainers-backed package.
 		return "bare 'make test' runs 'go test ./...', which always touches testcontainers-backed packages", nil
 	}
 
@@ -531,20 +536,46 @@ func isGastownModule(goModPath string) bool {
 // nested under plugins/, say — ends the walk: nothing under it is a
 // gastown package path, so no listed package can be there to block.
 func moduleRootFromCwd(dir string) string {
+	root, ok := goModuleRoot(dir)
+	if !ok || !isGastownModule(filepath.Join(root, "go.mod")) {
+		return ""
+	}
+	return root
+}
+
+// goModuleRoot walks up from dir to the nearest go.mod and returns its
+// directory; ok is false when no go.mod is found before the filesystem root.
+func goModuleRoot(dir string) (root string, ok bool) {
 	for {
-		goMod := filepath.Join(dir, "go.mod")
-		if _, err := os.Stat(goMod); err == nil {
-			if isGastownModule(goMod) {
-				return dir
-			}
-			return ""
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir, true
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return ""
+			return "", false
 		}
 		dir = parent
 	}
+}
+
+// makeTestIsWholeGoSuite reports whether a bare "make test" run from dir is
+// the whole Go suite the guards refuse.
+//
+// "make test" is "go test ./..." under another name only in a Go tree, and
+// the containers the guard protects are started by Go test binaries. A
+// directory outside every Go module — the fractals rig, whose test target is
+// `npm test` into vitest — runs neither, so refusing its "make test" only
+// prints advice that cannot apply (gt-dieu9). Every Go module keeps the
+// refusal, not just this one: the VM the slot guards is shared, and another
+// rig's suite reaches it without naming a containerSuitePackages entry
+// (beads' `make test`). An unresolvable dir keeps the refusal too: "no go.mod
+// in sight" is not "there is none" (fail closed).
+func makeTestIsWholeGoSuite(dir string) bool {
+	if strings.TrimSpace(dir) == "" {
+		return true
+	}
+	_, ok := goModuleRoot(dir)
+	return ok
 }
 
 // cwdPackagePath returns the module-relative package path that a "go test ."

@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -103,6 +105,24 @@ func TestRunTapGuardContainerSuite_PolecatMakeTest(t *testing.T) {
 		if strings.Contains(stderr, "Run it wrapped") {
 			t.Errorf("%s: block must not tell a polecat to run the suite wrapped, got: %s", name, stderr)
 		}
+	}
+}
+
+// A polecat in a non-Go rig runs its own rig's `make test` through the hook
+// (gt-dieu9): the tree is outside every Go module, so neither the scope rule
+// nor the container-suite rule has anything to refuse — the fractals rig's
+// test target is `npm test` into vitest.
+func TestRunTapGuardContainerSuite_NonGoRigMakeTest(t *testing.T) {
+	t.Parallel()
+	tree := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tree, "Makefile"), []byte("test:\n\tnpm test\n"), 0o644); err != nil {
+		t.Fatalf("write Makefile: %v", err)
+	}
+	cmd := `{"tool_name":"Bash","tool_input":{"command":"make test"}}`
+	proc := fakeGuardProcess(map[string]string{"GT_POLECAT": "coral", "GT_ROLE": "fractals/polecats/coral"}, tree)
+	stderr, err := runContainerSuiteGuard(cmd, proc)
+	if err != nil {
+		t.Errorf("a non-Go rig's make test must be allowed, got %v: %s", err, stderr)
 	}
 }
 

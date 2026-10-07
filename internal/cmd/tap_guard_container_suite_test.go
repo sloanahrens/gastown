@@ -40,7 +40,9 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 		{"bare filtered go test on internal/cmd, switch off", "go test ./internal/cmd/ -run TestFoo", false},
 		{"bare go test whole repo, switch off", "go test ./...", false},
 
-		// Blocked: bare make test (always runs go test ./... per Makefile).
+		// Blocked: bare make test. cwd here is "" (unresolvable), which the
+		// make rule treats as a Go tree; TestMakeTestIsWholeGoSuite covers
+		// the resolved cases.
 		{"make test bare", "make test", true},
 		{"GOFLAGS prefixed make test", "GOFLAGS=-p=6 make test", true},
 		{"make test with jobs flag", "make -j4 test", true},
@@ -71,6 +73,48 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 			got := reason != ""
 			if got != tt.blocked {
 				t.Errorf("evaluateContainerSuiteCommand(%q) blocked = %v (reason %q), want %v", tt.command, got, reason, tt.blocked)
+			}
+		})
+	}
+}
+
+// The make rule's premise holds only in a Go tree: a bare "make test" outside
+// every Go module is allowed, because it cannot reach a containerSuitePackages
+// entry and the refusal's advice has nothing to say about it (gt-dieu9).
+func TestMakeTestIsWholeGoSuite(t *testing.T) {
+	t.Parallel()
+	goRoot := fakeModule(t, "gastown/refinery/rig")
+	npmRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(npmRoot, "Makefile"), []byte("test:\n\tnpm test\n"), 0o644); err != nil {
+		t.Fatalf("write Makefile: %v", err)
+	}
+	otherModule := t.TempDir()
+	if err := os.WriteFile(filepath.Join(otherModule, "go.mod"), []byte("module example.com/other\n"), 0o644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	tests := []struct {
+		name    string
+		cwd     string
+		command string
+		blocked bool
+	}{
+		{"make test at the module root", goRoot, "make test", true},
+		{"make test in a package of the module", filepath.Join(goRoot, "internal", "cmd"), "make test", true},
+		{"make test with jobs flag in the module", goRoot, "make -j4 test", true},
+		{"make test in another Go module", otherModule, "make test", true},
+		{"make test in a non-Go rig", npmRoot, "make test", false},
+		{"make test with env prefix in a non-Go rig", npmRoot, "GOFLAGS=-p=8 make test", false},
+		{"make test in a slot run wrapper in a non-Go rig", npmRoot, "gt slot run --role fractals/polecats/coral -- make test", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateContainerSuiteCommand(tt.command, tt.cwd, "")
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluateContainerSuiteCommand(%q, cwd %s) blocked = %v (reason %q), want %v", tt.command, tt.cwd, got, reason, tt.blocked)
+			}
+			scopeReason, _ := evaluatePolecatTestScope(tt.command, tt.cwd)
+			if got := scopeReason != ""; got != tt.blocked {
+				t.Errorf("evaluatePolecatTestScope(%q, cwd %s) blocked = %v (reason %q), want %v", tt.command, tt.cwd, got, scopeReason, tt.blocked)
 			}
 		})
 	}
