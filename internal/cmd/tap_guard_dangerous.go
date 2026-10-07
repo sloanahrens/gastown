@@ -126,8 +126,8 @@ func tapGuardDangerous(stdin io.Reader, stderr io.Writer, proc guardProcess) err
 	}
 
 	cwd, _ := proc.getwd()
-	if load1, held := evaluateIdleGate(command, cwd, proc.load1); held {
-		printIdleGateHold(stderr, load1, command)
+	if load1, heldAction := evaluateIdleGate(command, cwd, proc.load1); heldAction != "" {
+		printIdleGateHold(stderr, load1, command, heldAction)
 		return NewSilentExit(2)
 	}
 
@@ -135,21 +135,27 @@ func tapGuardDangerous(stdin io.Reader, stderr io.Writer, proc guardProcess) err
 }
 
 // evaluateIdleGate reports whether command is a full-suite start
-// (isIdleGatedSuiteStartCommand) that should be held because the sampled
-// 1-minute load average is above idleGateLoad1Threshold. load1 is the
-// sampled value (0 when the command isn't gated or the sample failed — a
-// failed sample fails open, never holding the command). cwd is the hook
+// (idleGateHeldAction) that should be held because the sampled 1-minute load
+// average is above idleGateLoad1Threshold. load1 is the sampled value (0 when
+// the command isn't gated or the sample failed — a failed sample fails open,
+// never holding the command). heldAction is the held invocation's own spelling
+// ("make test", "go build ./..."), returned so the HOLD banner can name what it
+// held instead of guessing; "" means the command was not held. cwd is the hook
 // process's directory, which decides whether a make target is the whole-module
 // Go action at all.
-func evaluateIdleGate(command, cwd string, hostLoad1 func() (float64, bool)) (load1 float64, held bool) {
-	if !isIdleGatedSuiteStartCommand(command, cwd) {
-		return 0, false
+func evaluateIdleGate(command, cwd string, hostLoad1 func() (float64, bool)) (load1 float64, heldAction string) {
+	heldAction = idleGateHeldAction(command, cwd)
+	if heldAction == "" {
+		return 0, ""
 	}
 	load1, ok := hostLoad1()
 	if !ok {
-		return 0, false
+		return 0, ""
 	}
-	return load1, load1 > idleGateLoad1Threshold
+	if load1 <= idleGateLoad1Threshold {
+		return load1, ""
+	}
+	return load1, heldAction
 }
 
 // maxDangerousNestDepth bounds nestedCommands recursion so a pathological
@@ -1914,13 +1920,25 @@ func fullSuiteUncachedGoTest(rest []string) bool {
 // CPU-runnable ones (gt-e6xh).
 const idleGateLoad1Threshold = 60
 
-// idleGateAlternative is the HOLD banner's suggested next step.
-const idleGateAlternative = "Wait 2 minutes and re-run this exact command; it will pass once load1 <= 60. " +
-	"Avoid bare 'go test ./...' at full parallelism — use GOFLAGS=-p=8 make test."
+// idleGateAlternative is the HOLD banner's suggested next step. The first
+// sentence is true of every held command and is fixed; the second names the
+// command that was actually held (heldAction), because advice to run a
+// different target — a fixed "use GOFLAGS=-p=8 make test" — cost a polecat
+// held on 'make build' a second full-module run instead of the one it wanted
+// (gt-p7g2m). GOFLAGS=-p=8 caps go's build parallelism for either target.
+func idleGateAlternative(heldAction string) string {
+	return "Wait 2 minutes and re-run this exact command; it will pass once load1 <= 60. " +
+		fmt.Sprintf("Avoid bare '%s' at full parallelism — use GOFLAGS=-p=8 %s.", heldAction, heldAction)
+}
 
-// isIdleGatedSuiteStartCommand reports whether command contains an
-// unwrapped full-suite start: 'go test ./...', 'go build ./...', or a
-// 'make test'/'make build' whose target is the whole-module Go action
+// idleGateHeldAction reports the held invocation's own spelling ("" when the
+// command is not gated). The HOLD banner names it back to the operator: a
+// polecat held on 'make build' must not be told to run the test suite
+// (gt-p7g2m), so the advice line is built from what was actually matched
+// rather than a fixed target.
+//
+// It detects an unwrapped full-suite start: 'go test ./...', 'go build ./...',
+// or a 'make test'/'make build' whose target is the whole-module Go action
 // (makeActsOnWholeGoModule — a non-Go rig's own target costs the host a
 // per-rig build, not the shared module's, so it is not gated; gt-mjfir).
 // cwd is the hook process's directory, passed through to that judgment.
@@ -1934,20 +1952,26 @@ const idleGateAlternative = "Wait 2 minutes and re-run this exact command; it wi
 // evaluateDangerousCommand, this does NOT recurse into bash -c/eval payloads
 // or command substitutions — the interim hook it replaces didn't either, and
 // no incident has required it; scope stays narrow until one does.
-func isIdleGatedSuiteStartCommand(command, cwd string) bool {
+func idleGateHeldAction(command, cwd string) string {
 	tokens := shellTokenize(strings.TrimSpace(stripHeredocBodies(command)))
 	var segment []string
 	for _, tok := range tokens {
 		if shellCommandSeparators[tok] {
-			if isIdleGatedSuiteStartSegment(segment, cwd) {
-				return true
+			if held := idleGateHeldSegment(segment, cwd); held != "" {
+				return held
 			}
 			segment = nil
 			continue
 		}
 		segment = append(segment, tok)
 	}
-	return isIdleGatedSuiteStartSegment(segment, cwd)
+	return idleGateHeldSegment(segment, cwd)
+}
+
+// isIdleGatedSuiteStartCommand reports whether command contains an unwrapped
+// full-suite start, discarding the matched spelling (idleGateHeldAction).
+func isIdleGatedSuiteStartCommand(command, cwd string) bool {
+	return idleGateHeldAction(command, cwd) != ""
 }
 
 // idleGateSlotRunPrefix is the token sequence a shell segment must START
@@ -1960,33 +1984,43 @@ func isIdleGatedSuiteStartCommand(command, cwd string) bool {
 var idleGateSlotRunPrefix = containerSuiteSlotRunTokens
 
 // isIdleGatedSuiteStartSegment judges a single shell segment (tokens
-// between shell operators). tokens is original-case; matching is done on a
-// lowercased copy so "Make Test" and "make test" are treated the same. cwd
-// locates a make invocation's tree (makeActsOnWholeGoModule).
+// between shell operators), discarding the held spelling
+// (idleGateHeldSegment).
 func isIdleGatedSuiteStartSegment(tokens []string, cwd string) bool {
+	return idleGateHeldSegment(tokens, cwd) != ""
+}
+
+// idleGateHeldSegment judges a single shell segment (tokens between shell
+// operators) and returns the held invocation as it should be spelled back to
+// the operator — the target of a held make ('make test'/'make build', however
+// its flags were written) or the whole-repo go form ('go test ./...'/'go build
+// ./...'). "" means the segment is not gated. tokens is original-case; matching
+// is done on a lowercased copy so "Make Test" and "make test" are treated the
+// same. cwd locates a make invocation's tree (makeActsOnWholeGoModule).
+func idleGateHeldSegment(tokens []string, cwd string) string {
 	if len(tokens) == 0 {
-		return false
+		return ""
 	}
 	lower := make([]string, len(tokens))
 	for i, t := range tokens {
 		lower[i] = strings.ToLower(t)
 	}
 	if hasPrefix(lower, idleGateSlotRunPrefix) {
-		return false
+		return ""
 	}
 	if i := findInvocation(lower, "make", "test"); i >= 0 && makeActsOnWholeGoModule(tokens[i:], cwd) {
-		return true
+		return "make test"
 	}
 	if i := findInvocation(lower, "make", "build"); i >= 0 && makeActsOnWholeGoModule(tokens[i:], cwd) {
-		return true
+		return "make build"
 	}
 	if i := findInvocation(lower, "go", "test"); i >= 0 && wholeRepoArgFollows(tokens, i+2) {
-		return true
+		return "go test " + tokens[i+2]
 	}
 	if i := findInvocation(lower, "go", "build"); i >= 0 && wholeRepoArgFollows(tokens, i+2) {
-		return true
+		return "go build " + tokens[i+2]
 	}
-	return false
+	return ""
 }
 
 // hasPrefix reports whether tokens begins with prefix, element for element.
@@ -2027,8 +2061,10 @@ func actualHostLoad1() (load1 float64, ok bool) {
 
 // printIdleGateHold prints the HOLD banner to stderr — distinct from
 // printDangerousBlock's BLOCKED banner since this command is expected to
-// succeed on retry, not to be avoided entirely.
-func printIdleGateHold(w io.Writer, load1 float64, command string) {
+// succeed on retry, not to be avoided entirely. heldAction is the gated
+// invocation evaluateIdleGate matched, named in the banner's advice line so
+// the suggestion matches the command it held (gt-p7g2m).
+func printIdleGateHold(w io.Writer, load1 float64, command, heldAction string) {
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "╔══════════════════════════════════════════════════════════════════╗")
 	fmt.Fprintln(w, "║  ⏸  SUITE START HELD (host busy)                                 ║")
@@ -2038,7 +2074,7 @@ func printIdleGateHold(w io.Writer, load1 float64, command string) {
 	fmt.Fprintln(w, "║                                                                  ║")
 	fmt.Fprintln(w, "║  Another suite is running on this shared host.                  ║")
 	fmt.Fprintln(w, "╚══════════════════════════════════════════════════════════════════╝")
-	fmt.Fprintln(w, "  "+idleGateAlternative)
+	fmt.Fprintln(w, "  "+idleGateAlternative(heldAction))
 	fmt.Fprintln(w, "")
 }
 

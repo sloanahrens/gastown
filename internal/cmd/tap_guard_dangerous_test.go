@@ -1799,9 +1799,54 @@ func TestEvaluateIdleGate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sample := func() (float64, bool) { return tt.sampleLoad1, tt.sampleOK }
-			_, held := evaluateIdleGate(tt.command, goTree, sample)
-			if held != tt.wantHeld {
+			_, heldAction := evaluateIdleGate(tt.command, goTree, sample)
+			if held := heldAction != ""; held != tt.wantHeld {
 				t.Errorf("evaluateIdleGate(%q) held=%v, want %v", tt.command, held, tt.wantHeld)
+			}
+		})
+	}
+}
+
+// The acceptance criterion for gt-p7g2m, through the real hook entry point:
+// the HOLD banner's advice names the command it held. A polecat held on 'make
+// build' must not be told to run the test suite — that advice costs it a
+// second full-module run instead of the one it wanted — while a 'make test'
+// hold keeps the GOFLAGS advice.
+func TestIdleGateHoldAdviceNamesTheHeldCommand(t *testing.T) {
+	t.Parallel()
+	busy := func() (float64, bool) { return idleGateLoad1Threshold + 15, true }
+	goTree := fakeModule(t, "clone")
+
+	for _, tt := range []struct {
+		command string
+		want    string
+		notWant string
+	}{
+		{"make build", "GOFLAGS=-p=8 make build", "make test"},
+		{"make test", "GOFLAGS=-p=8 make test", "make build"},
+		{"go build ./...", "GOFLAGS=-p=8 go build ./...", "make test"},
+		{"go test ./...", "GOFLAGS=-p=8 go test ./...", "make build"},
+	} {
+		t.Run(tt.command, func(t *testing.T) {
+			proc := fakeGuardProcess(map[string]string{
+				"GT_POLECAT": "coral",
+				"GT_ROLE":    "gastown/polecats/coral",
+			}, goTree)
+			proc.load1 = busy
+
+			input := `{"tool_name":"Bash","tool_input":{"command":"` + tt.command + `"}}`
+			var buf strings.Builder
+			if err := tapGuardDangerous(strings.NewReader(input), &buf, proc); err == nil {
+				t.Fatalf("tapGuardDangerous(%q) was not held; stderr:\n%s", tt.command, buf.String())
+			}
+			if !strings.Contains(buf.String(), "SUITE START HELD") {
+				t.Fatalf("no HOLD banner for %q:\n%s", tt.command, buf.String())
+			}
+			if !strings.Contains(buf.String(), tt.want) {
+				t.Errorf("banner for %q does not advise %q:\n%s", tt.command, tt.want, buf.String())
+			}
+			if strings.Contains(buf.String(), tt.notWant) {
+				t.Errorf("banner for %q advises something it did not hold (%q):\n%s", tt.command, tt.notWant, buf.String())
 			}
 		})
 	}
