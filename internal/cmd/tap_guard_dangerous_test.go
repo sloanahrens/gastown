@@ -1690,46 +1690,85 @@ func TestPolecatFullSuiteUncachedReachesGuard(t *testing.T) {
 
 // TestIsIdleGatedSuiteStartCommand pins the gt-nqcy follow-up's detection of
 // unwrapped full-suite starts, ported from the interim host-hygiene hook:
-// 'make test', 'go test ./...', 'make build', and 'go build ./...' are
-// gated; scoped invocations, 'gt slot run'-wrapped ones, and quoted prose
-// are not.
+// 'go test ./...' and 'go build ./...' are gated wherever they run, 'make
+// test' and 'make build' in a Go tree too; scoped invocations, 'gt slot
+// run'-wrapped ones, and quoted prose are not. The non-Go tree cases live in
+// TestIsIdleGatedSuiteStartOutsideGoTree, which may not be buildable here.
 func TestIsIdleGatedSuiteStartCommand(t *testing.T) {
 	t.Parallel()
+	goTree := fakeModule(t, "clone")
 	tests := []struct {
 		name    string
 		command string
+		cwd     string
 		gated   bool
 	}{
 		// Should gate.
-		{"make test", "make test", true},
-		{"make test with env prefix", "GOFLAGS=-p=8 make test", true},
-		{"make test with -j flag", "make -j4 test", true},
-		{"make build", "make build", true},
-		{"go test whole repo", "go test ./...", true},
-		{"go test whole repo bare dots", "go test ...", true},
-		{"go build whole repo", "go build ./...", true},
-		{"go test after unrelated segment", "echo hi && go test ./...", true},
-		{"go test glued to semicolon", "cd /tmp;go test ./...", true},
+		{"make test", "make test", goTree, true},
+		{"make test with env prefix", "GOFLAGS=-p=8 make test", goTree, true},
+		{"make test with -j flag", "make -j4 test", goTree, true},
+		{"make build", "make build", goTree, true},
+		{"make -C into the Go tree", "make -C " + goTree + " build", "", true},
+		{"make test with an unreadable cwd", "make test", "", true},
+		{"go test whole repo", "go test ./...", goTree, true},
+		{"go test whole repo bare dots", "go test ...", goTree, true},
+		{"go build whole repo", "go build ./...", goTree, true},
+		{"go test after unrelated segment", "echo hi && go test ./...", goTree, true},
+		{"go test glued to semicolon", "cd /tmp;go test ./...", goTree, true},
 
 		// Should NOT gate.
-		{"scoped go test", "go test ./internal/beads/...", false},
-		{"scoped go build", "go build ./cmd/gt", false},
-		{"make lint", "make lint", false},
-		{"wrapped in gt slot run", "gt slot run -- make test", false},
-		{"wrapped go test in gt slot run", "gt slot run --role gastown/flint -- go test ./...", false},
-		{"go test with flag before target (interim adjacency)", "go test -v ./...", false},
-		{"go build with flag before target (interim adjacency)", "go build -v ./...", false},
-		{"quoted mention", `echo "run make test if idle"`, false},
-		{"no suite command at all", "echo hello", false},
-		{"prose in a heredoc body written to a file", "cat > note.md <<'EOF'\nRun make test before committing.\nEOF", false},
-		{"real command after the heredoc still gates", "cat > note.md <<'EOF'\nordinary content\nEOF\nmake test", true},
-		{"slot-run mention trailing an unwrapped command is not a real wrapper", "make test # not actually gt slot run", true},
+		{"scoped go test", "go test ./internal/beads/...", goTree, false},
+		{"scoped go build", "go build ./cmd/gt", goTree, false},
+		{"make lint", "make lint", goTree, false},
+		{"wrapped in gt slot run", "gt slot run -- make test", goTree, false},
+		{"wrapped go test in gt slot run", "gt slot run --role gastown/flint -- go test ./...", goTree, false},
+		{"go test with flag before target (interim adjacency)", "go test -v ./...", goTree, false},
+		{"go build with flag before target (interim adjacency)", "go build -v ./...", goTree, false},
+		{"quoted mention", `echo "run make test if idle"`, goTree, false},
+		{"no suite command at all", "echo hello", goTree, false},
+		{"prose in a heredoc body written to a file", "cat > note.md <<'EOF'\nRun make test before committing.\nEOF", goTree, false},
+		{"real command after the heredoc still gates", "cat > note.md <<'EOF'\nordinary content\nEOF\nmake test", goTree, true},
+		{"slot-run mention trailing an unwrapped command is not a real wrapper", "make test # not actually gt slot run", goTree, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := isIdleGatedSuiteStartCommand(tt.command)
+			got := isIdleGatedSuiteStartCommand(tt.command, tt.cwd)
 			if got != tt.gated {
-				t.Errorf("isIdleGatedSuiteStartCommand(%q) = %v, want %v", tt.command, got, tt.gated)
+				t.Errorf("isIdleGatedSuiteStartCommand(%q, cwd %s) = %v, want %v", tt.command, tt.cwd, got, tt.gated)
+			}
+		})
+	}
+}
+
+// A rig outside every Go module runs its own make targets, which are not the
+// module-wide Go suite and build the gate's premise names — the fractals rig's
+// test target is `npm test` into vitest, so holding it costs the rig its
+// suite while protecting nothing on the shared host (gt-mjfir). The tree that
+// decides is the one make runs in, so a -C into a Go tree from the non-Go rig
+// is still gated, and one out of it is not.
+func TestIsIdleGatedSuiteStartOutsideGoTree(t *testing.T) {
+	t.Parallel()
+	npmTree := nonGoTree(t)
+	goTree := fakeModule(t, "clone")
+	tests := []struct {
+		name    string
+		command string
+		cwd     string
+		gated   bool
+	}{
+		{"make test", "make test", npmTree, false},
+		{"make build", "make build", npmTree, false},
+		{"make test with env prefix", "GOFLAGS=-p=8 make test", npmTree, false},
+		{"make -C into the Go tree", "make -C " + goTree + " test", npmTree, true},
+		{"make -C out of the Go tree", "make -C " + npmTree + " test", goTree, false},
+		{"a makefile the guard cannot read", "make -f other.mk test", npmTree, true},
+		{"go test whole repo", "go test ./...", npmTree, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isIdleGatedSuiteStartCommand(tt.command, tt.cwd)
+			if got != tt.gated {
+				t.Errorf("isIdleGatedSuiteStartCommand(%q, cwd %s) = %v, want %v", tt.command, tt.cwd, got, tt.gated)
 			}
 		})
 	}
@@ -1742,6 +1781,7 @@ func TestIsIdleGatedSuiteStartCommand(t *testing.T) {
 // isn't gated at all.
 func TestEvaluateIdleGate(t *testing.T) {
 	t.Parallel()
+	goTree := fakeModule(t, "clone")
 
 	tests := []struct {
 		name        string
@@ -1759,9 +1799,44 @@ func TestEvaluateIdleGate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sample := func() (float64, bool) { return tt.sampleLoad1, tt.sampleOK }
-			_, held := evaluateIdleGate(tt.command, sample)
+			_, held := evaluateIdleGate(tt.command, goTree, sample)
 			if held != tt.wantHeld {
 				t.Errorf("evaluateIdleGate(%q) held=%v, want %v", tt.command, held, tt.wantHeld)
+			}
+		})
+	}
+}
+
+// The acceptance criterion, through the real hook entry point: a polecat in a
+// non-Go rig runs its rig's suite target while host load1 is above the idle
+// gate's threshold (gt-mjfir). The Go tree beside it shows the gate still
+// holds what it was built for, and names the reason on stderr.
+func TestRunTapGuardDangerous_NonGoRigSuiteTargetWhileHostBusy(t *testing.T) {
+	t.Parallel()
+	busy := func() (float64, bool) { return idleGateLoad1Threshold + 15, true }
+	for _, tt := range []struct {
+		name   string
+		rigDir string
+		held   bool
+	}{
+		{"non-Go rig", nonGoTree(t), false},
+		{"Go tree", fakeModule(t, "clone"), true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			proc := fakeGuardProcess(map[string]string{
+				"GT_POLECAT": "coral",
+				"GT_ROLE":    "fractals/polecats/coral",
+			}, tt.rigDir)
+			proc.load1 = busy
+
+			input := `{"tool_name":"Bash","tool_input":{"command":"make test"}}`
+			var buf strings.Builder
+			err := tapGuardDangerous(strings.NewReader(input), &buf, proc)
+			if held := err != nil; held != tt.held {
+				t.Errorf("tapGuardDangerous(make test, cwd %s) held = %v (err %v) stderr:\n%s", tt.rigDir, held, err, buf.String())
+			}
+			if tt.held && !strings.Contains(buf.String(), "SUITE START HELD") {
+				t.Errorf("the Go tree's hold carried no banner:\n%s", buf.String())
 			}
 		})
 	}

@@ -72,10 +72,10 @@ This guard blocks operations that could cause irreversible damage:
     role, every cwd.
 
 This guard also HOLDS (rather than permanently blocks) a full-suite start —
-'make test', 'go test ./...', 'make build', 'go build ./...' — when the host
-is already busy (CPU idle below 25 percent, sampled via 'top'), unless the
-command is wrapped in 'gt slot run'. Re-running the exact same command after
-a short wait passes once the host frees up. See gt-nqcy follow-up.
+'make test' and 'make build' in a Go tree, 'go test ./...' and 'go build
+./...' — when the host is already busy, unless the command is wrapped in
+'gt slot run'. Re-running the exact same command after a short wait passes
+once the host frees up. See gt-nqcy follow-up.
 
 The guard reads the tool input from stdin (Claude Code hook protocol)
 and exits with code 2 to block or hold an operation.
@@ -125,7 +125,8 @@ func tapGuardDangerous(stdin io.Reader, stderr io.Writer, proc guardProcess) err
 		return NewSilentExit(2)
 	}
 
-	if load1, held := evaluateIdleGate(command, proc.load1); held {
+	cwd, _ := proc.getwd()
+	if load1, held := evaluateIdleGate(command, cwd, proc.load1); held {
 		printIdleGateHold(stderr, load1, command)
 		return NewSilentExit(2)
 	}
@@ -137,9 +138,11 @@ func tapGuardDangerous(stdin io.Reader, stderr io.Writer, proc guardProcess) err
 // (isIdleGatedSuiteStartCommand) that should be held because the sampled
 // 1-minute load average is above idleGateLoad1Threshold. load1 is the
 // sampled value (0 when the command isn't gated or the sample failed — a
-// failed sample fails open, never holding the command).
-func evaluateIdleGate(command string, hostLoad1 func() (float64, bool)) (load1 float64, held bool) {
-	if !isIdleGatedSuiteStartCommand(command) {
+// failed sample fails open, never holding the command). cwd is the hook
+// process's directory, which decides whether a make target is the whole-module
+// Go action at all.
+func evaluateIdleGate(command, cwd string, hostLoad1 func() (float64, bool)) (load1 float64, held bool) {
+	if !isIdleGatedSuiteStartCommand(command, cwd) {
 		return 0, false
 	}
 	load1, ok := hostLoad1()
@@ -1916,8 +1919,12 @@ const idleGateAlternative = "Wait 2 minutes and re-run this exact command; it wi
 	"Avoid bare 'go test ./...' at full parallelism — use GOFLAGS=-p=8 make test."
 
 // isIdleGatedSuiteStartCommand reports whether command contains an
-// unwrapped full-suite start: 'make test', 'go test ./...', 'make build',
-// or 'go build ./...'. Heredoc bodies are stripped first (stripHeredocBodies)
+// unwrapped full-suite start: 'go test ./...', 'go build ./...', or a
+// 'make test'/'make build' whose target is the whole-module Go action
+// (makeActsOnWholeGoModule — a non-Go rig's own target costs the host a
+// per-rig build, not the shared module's, so it is not gated; gt-mjfir).
+// cwd is the hook process's directory, passed through to that judgment.
+// Heredoc bodies are stripped first (stripHeredocBodies)
 // so prose written to a file — "cat > note.md <<'EOF'\nRun make test\nEOF" —
 // is never misread as a live invocation, the same rule evaluateDangerousCommand
 // applies. The remaining text is split into shell segments (on ;/&&/||/|,
@@ -1927,12 +1934,12 @@ const idleGateAlternative = "Wait 2 minutes and re-run this exact command; it wi
 // evaluateDangerousCommand, this does NOT recurse into bash -c/eval payloads
 // or command substitutions — the interim hook it replaces didn't either, and
 // no incident has required it; scope stays narrow until one does.
-func isIdleGatedSuiteStartCommand(command string) bool {
+func isIdleGatedSuiteStartCommand(command, cwd string) bool {
 	tokens := shellTokenize(strings.TrimSpace(stripHeredocBodies(command)))
 	var segment []string
 	for _, tok := range tokens {
 		if shellCommandSeparators[tok] {
-			if isIdleGatedSuiteStartSegment(segment) {
+			if isIdleGatedSuiteStartSegment(segment, cwd) {
 				return true
 			}
 			segment = nil
@@ -1940,7 +1947,7 @@ func isIdleGatedSuiteStartCommand(command string) bool {
 		}
 		segment = append(segment, tok)
 	}
-	return isIdleGatedSuiteStartSegment(segment)
+	return isIdleGatedSuiteStartSegment(segment, cwd)
 }
 
 // idleGateSlotRunPrefix is the token sequence a shell segment must START
@@ -1954,8 +1961,9 @@ var idleGateSlotRunPrefix = containerSuiteSlotRunTokens
 
 // isIdleGatedSuiteStartSegment judges a single shell segment (tokens
 // between shell operators). tokens is original-case; matching is done on a
-// lowercased copy so "Make Test" and "make test" are treated the same.
-func isIdleGatedSuiteStartSegment(tokens []string) bool {
+// lowercased copy so "Make Test" and "make test" are treated the same. cwd
+// locates a make invocation's tree (makeActsOnWholeGoModule).
+func isIdleGatedSuiteStartSegment(tokens []string, cwd string) bool {
 	if len(tokens) == 0 {
 		return false
 	}
@@ -1966,10 +1974,10 @@ func isIdleGatedSuiteStartSegment(tokens []string) bool {
 	if hasPrefix(lower, idleGateSlotRunPrefix) {
 		return false
 	}
-	if findInvocation(lower, "make", "test") >= 0 {
+	if i := findInvocation(lower, "make", "test"); i >= 0 && makeActsOnWholeGoModule(tokens[i:], cwd) {
 		return true
 	}
-	if findInvocation(lower, "make", "build") >= 0 {
+	if i := findInvocation(lower, "make", "build"); i >= 0 && makeActsOnWholeGoModule(tokens[i:], cwd) {
 		return true
 	}
 	if i := findInvocation(lower, "go", "test"); i >= 0 && wholeRepoArgFollows(tokens, i+2) {
