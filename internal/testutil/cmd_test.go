@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"os"
 	"slices"
 	"testing"
 )
@@ -54,19 +55,25 @@ func TestCleanGTEnv_ExtraEnv(t *testing.T) {
 	}
 }
 
+// The bd helpers put bd in machine mode: their Cmd unwraps the envelope, so a
+// caller parsing bd's stdout reads the --json payload. The gt helpers run no
+// bd and inherit the process environment untouched.
 func TestNewBDCommand_InheritsEnv(t *testing.T) {
 	t.Parallel()
 	cmd := NewBDCommand("version")
-	// cmd.Env should be nil (inherits process env)
-	if cmd.Env != nil {
-		t.Error("NewBDCommand should not set cmd.Env (nil inherits process env)")
+	if !slices.Contains(cmd.Env, "BD_MACHINE=1") {
+		t.Error("NewBDCommand must put bd in machine mode")
+	}
+	if len(cmd.Env) < len(os.Environ()) {
+		t.Error("NewBDCommand dropped the inherited process environment")
 	}
 	if !slices.Equal(cmd.Args, []string{"bd", "version"}) {
 		t.Errorf("Args = %q", cmd.Args)
 	}
 }
 
-// The isolated commands carry CleanGTEnv of the process environment.
+// The isolated commands carry CleanGTEnv of the process environment; the bd
+// one adds machine mode on top.
 func TestNewIsolatedCommands_SetEnv(t *testing.T) {
 	t.Parallel()
 	for name, cmd := range map[string]interface {
@@ -76,8 +83,12 @@ func TestNewIsolatedCommands_SetEnv(t *testing.T) {
 		"bd": isolated{NewIsolatedBDCommand("version").Env, NewIsolatedBDCommand("version").Args},
 		"gt": isolated{NewIsolatedGTCommand("version").Env, NewIsolatedGTCommand("version").Args},
 	} {
-		if !slices.Equal(cmd.env(), CleanGTEnv()) {
-			t.Errorf("%s: Env is not CleanGTEnv()", name)
+		want := CleanGTEnv()
+		if name == "bd" {
+			want = append(slices.Clone(want), "BD_MACHINE=1")
+		}
+		if !slices.Equal(cmd.env(), want) {
+			t.Errorf("%s: Env = %q, want %q", name, cmd.env(), want)
 		}
 		if !slices.Equal(cmd.args(), []string{name, "version"}) {
 			t.Errorf("%s: Args = %q", name, cmd.args())

@@ -443,8 +443,7 @@ func TestIntegrationSchedulerCreatesNoConvoy(t *testing.T) {
 
 	// Verify: no convoy was created for the sling (HQ beads DB holds none).
 	listArgs := beads.MaybePrependAllowStale([]string{"list", "--label=gt:convoy", "--json"})
-	cmd := exec.Command("bd", listArgs...)
-	cmd.Dir = hqPath
+	cmd := beads.CommandWithEnv(hqPath, nil, listArgs...)
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("bd list convoys failed: %v", err)
@@ -747,8 +746,7 @@ func checkSchedulerSlingDryRun(t *testing.T, hqPath, rigPath, gtBinary string, e
 
 	// Verify: no convoy created (HQ beads DB should have no convoy issues)
 	listArgs := beads.MaybePrependAllowStale([]string{"list", "--label=gt:convoy", "--json"})
-	cmd := exec.Command("bd", listArgs...)
-	cmd.Dir = hqPath
+	cmd := beads.CommandWithEnv(hqPath, nil, listArgs...)
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("bd list convoys failed: %v", err)

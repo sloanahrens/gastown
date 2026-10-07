@@ -4,6 +4,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // CleanGTEnv returns os.Environ() with GT_* and BD_* variables removed, except:
@@ -52,13 +54,17 @@ func cleanGTEnv(base []string, extraEnv ...string) []string {
 	return append(clean, extraEnv...)
 }
 
-// NewBDCommand creates an exec.Command for the bd CLI with GT_DOLT_PORT
+// NewBDCommand creates a beads.Cmd for the bd CLI with GT_DOLT_PORT
 // automatically propagated. The command inherits the full process environment
-// (which includes GT_DOLT_PORT set by TestMain).
+// (which includes GT_DOLT_PORT set by TestMain) with machine mode on, so its
+// Output/Run/Wait hand back the --json payload a caller parses rather than the
+// machine envelope bd prints for it (internal/beads.LegacyPayload). A caller
+// that prints bd's answer for a person drops machine mode with
+// beads.WithoutMachineEnv instead.
 //
 // Use this instead of bare exec.Command("bd", ...) in tests.
-func NewBDCommand(args ...string) *exec.Cmd {
-	return exec.Command("bd", args...)
+func NewBDCommand(args ...string) *beads.Cmd {
+	return beads.CommandWithEnv("", nil, args...)
 }
 
 // NewGTCommand creates an exec.Command for the gt CLI with GT_DOLT_PORT
@@ -70,14 +76,12 @@ func NewGTCommand(args ...string) *exec.Cmd {
 	return exec.Command("gt", args...)
 }
 
-// NewIsolatedBDCommand creates an exec.Command for the bd CLI with GT_*/BD_*
-// env stripped except the passthroughs CleanGTEnv lists. Use this when you need
-// to isolate a subprocess from the parent Gas Town workspace but still route
-// to the test Dolt server.
-func NewIsolatedBDCommand(args ...string) *exec.Cmd {
-	cmd := exec.Command("bd", args...)
-	cmd.Env = CleanGTEnv()
-	return cmd
+// NewIsolatedBDCommand creates a beads.Cmd for the bd CLI with GT_*/BD_*
+// env stripped except the passthroughs CleanGTEnv lists, and machine mode on
+// as NewBDCommand does. Use this when you need to isolate a subprocess from
+// the parent Gas Town workspace but still route to the test Dolt server.
+func NewIsolatedBDCommand(args ...string) *beads.Cmd {
+	return beads.CommandWithEnv("", CleanGTEnv(), args...)
 }
 
 // NewIsolatedGTCommand creates an exec.Command for the gt CLI with GT_*/BD_*

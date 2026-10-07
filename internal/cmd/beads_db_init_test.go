@@ -174,12 +174,12 @@ func TestIntegrationBeadsDbInitAfterClone(t *testing.T) {
 		}
 
 		// NOW TRY TO USE bd - this is the key test for the bug
-		// Without the fix, the database doesn't exist and bd operations fail
-		cmd = exec.Command("bd", "--json", "-q", "create",
+		// Without the fix, the database doesn't exist and bd operations fail.
+		// CommandWithEnv puts bd in machine mode and unwraps the envelope, so
+		// the parse below reads the created issue, not the envelope.
+		bdCmd := beads.CommandWithEnv(rigDir, env, "--json", "-q", "create",
 			"--type", "task", "--title", "test-from-rig")
-		cmd.Dir = rigDir
-		cmd.Env = env
-		output, err := cmd.CombinedOutput()
+		output, err := bdCmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("bd create failed (bug!): %v\nOutput: %s\n\nThis is the bug: database doesn't exist after clone because bd init was never run", err, output)
 		}
@@ -225,11 +225,9 @@ func TestIntegrationBeadsDbInitAfterClone(t *testing.T) {
 		}
 
 		// Verify bd operations work with the configured prefix
-		cmd = exec.Command("bd", "--json", "-q", "create",
+		bdCmd := beads.CommandWithEnv(rigDir, env, "--json", "-q", "create",
 			"--type", "task", "--title", "test-from-empty-repo")
-		cmd.Dir = rigDir
-		cmd.Env = env
-		output, err := cmd.CombinedOutput()
+		output, err := bdCmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("bd create failed: %v\nOutput: %s", err, output)
 		}
@@ -302,11 +300,9 @@ func TestIntegrationBeadsDbInitAfterClone(t *testing.T) {
 		}
 
 		// Verify bd operations work - the key test is that the database was initialized
-		cmd = exec.Command("bd", "--json", "-q", "create",
+		bdCmd := beads.CommandWithEnv(rigDir, env, "--json", "-q", "create",
 			"--type", "task", "--title", "test-derived-prefix")
-		cmd.Dir = rigDir
-		cmd.Env = env
-		output, err = cmd.CombinedOutput()
+		output, err = bdCmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("bd create failed (database not initialized?): %v\nOutput: %s", err, output)
 		}

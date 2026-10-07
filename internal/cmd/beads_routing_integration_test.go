@@ -157,8 +157,9 @@ func createTestIssue(t *testing.T, dir, title string) *beads.Issue {
 
 	args := []string{"create", "--json", "--title", title, "--type", "task",
 		"--description", "Integration test issue"}
-	cmd := exec.Command("bd", args...)
-	cmd.Dir = dir
+	// CommandWithEnv puts bd in machine mode and unwraps the envelope, so the
+	// unmarshal below reads the --json payload rather than the envelope.
+	cmd := beads.CommandWithEnv(dir, nil, args...)
 	output, err := cmd.Output()
 	if err != nil {
 		combinedCmd := exec.Command("bd", args...)

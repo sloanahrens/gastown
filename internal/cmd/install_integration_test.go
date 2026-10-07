@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"gopkg.in/yaml.v3"
@@ -530,8 +531,7 @@ func assertDoltConfigPort(t *testing.T, hqPath, wantPort string) {
 
 func assertSlotValue(t *testing.T, townRoot, issueID, slot, want string) {
 	t.Helper()
-	cmd := exec.Command("bd", "--json", "slot", "show", issueID)
-	cmd.Dir = townRoot
+	cmd := beads.CommandWithEnv(townRoot, nil, "--json", "slot", "show", issueID)
 	output, err := cmd.Output()
 	if err != nil {
 		debugCmd := exec.Command("bd", "--json", "slot", "show", issueID)

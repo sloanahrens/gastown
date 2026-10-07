@@ -100,8 +100,9 @@ func createTestBead(t *testing.T, dir, title string) string {
 	t.Helper()
 	args := []string{"create", "--title=" + title, "--type=task",
 		"--description=Integration test bead", "--json"}
-	cmd := exec.Command("bd", args...)
-	cmd.Dir = dir
+	// CommandWithEnv puts bd in machine mode and unwraps the envelope, so the
+	// unmarshal below reads the --json payload rather than the envelope.
+	cmd := beads.CommandWithEnv(dir, nil, args...)
 	out, err := cmd.Output()
 	if err != nil {
 		// Capture stderr for diagnostics
@@ -127,8 +128,7 @@ func createTestBead(t *testing.T, dir, title string) string {
 func beadHasLabel(t *testing.T, beadID, label, dir string) bool {
 	t.Helper()
 	args := beads.MaybePrependAllowStale([]string{"show", beadID, "--json"})
-	cmd := exec.Command("bd", args...)
-	cmd.Dir = dir
+	cmd := beads.CommandWithEnv(dir, nil, args...)
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("bd show %s failed: %v", beadID, err)
@@ -154,8 +154,7 @@ func beadHasLabel(t *testing.T, beadID, label, dir string) bool {
 func getBeadDescription(t *testing.T, beadID, dir string) string {
 	t.Helper()
 	args := beads.MaybePrependAllowStale([]string{"show", beadID, "--json"})
-	cmd := exec.Command("bd", args...)
-	cmd.Dir = dir
+	cmd := beads.CommandWithEnv(dir, nil, args...)
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -226,8 +225,7 @@ func createTestBeadOfType(t *testing.T, dir, title, issueType string) string {
 	t.Helper()
 	args := []string{"create", "--title=" + title, "--type=" + issueType,
 		"--description=Integration test bead", "--json"}
-	cmd := exec.Command("bd", args...)
-	cmd.Dir = dir
+	cmd := beads.CommandWithEnv(dir, nil, args...)
 	out, err := cmd.Output()
 	if err != nil {
 		cmd2 := exec.Command("bd", args...)
