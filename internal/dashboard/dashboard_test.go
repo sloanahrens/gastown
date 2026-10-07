@@ -3,6 +3,7 @@ package dashboard
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -246,9 +247,17 @@ func TestRigsPanelIsJoinedFromTheQueueAndTheSeats(t *testing.T) {
 		t.Errorf("gastown = %+v", r)
 	}
 	// The Rigs panel names each rig's theme, so the page can place a short
-	// polecat name back in its rig (gt-yieek).
+	// polecat name back in its rig: the theme and its samples ride in the state
+	// the page is sent (gt-yieek).
 	if r := rows[0]; r.Theme != "gastown-theme" || len(r.Names) != 2 {
 		t.Errorf("gastown theme = %q %v, want the reader's theme and samples", r.Theme, r.Names)
+	}
+	b, err := json.Marshal(h.State())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `"theme":"gastown-theme","names":["one","two"]`; !strings.Contains(string(b), want) {
+		t.Errorf("state payload has no %s", want)
 	}
 	if r := rows[1]; r.Name != "mango" || !r.Parked || *r.Seats != 0 || r.Ready != nil || r.Landing != nil {
 		t.Errorf("mango = %+v", r)
