@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"os"
 	"sort"
 	"sync"
 
@@ -37,10 +36,7 @@ func (b *dashBackoff) get() []dashboard.LandingRow {
 		if err != nil {
 			continue
 		}
-		st := fileStamp{}
-		if info, err := os.Stat(path); err == nil {
-			st = fileStamp{info.Size(), info.ModTime()}
-		}
+		st, _ := stampFile(path)
 		next[path] = st
 		if old, ok := b.stamps[path]; !ok || old != st {
 			changed = true

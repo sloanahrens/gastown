@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -27,11 +26,6 @@ type dashLandings struct {
 	recs   []omRecord
 }
 
-type fileStamp struct {
-	size int64
-	mod  time.Time
-}
-
 func newDashLandings(townRoot string) *dashLandings {
 	return &dashLandings{townRoot: townRoot, stamps: map[string]fileStamp{}}
 }
@@ -51,10 +45,7 @@ func (l *dashLandings) get() []omRecord {
 	changed := len(paths) != len(l.stamps)
 	next := make(map[string]fileStamp, len(paths))
 	for _, p := range paths {
-		st := fileStamp{}
-		if info, err := os.Stat(p); err == nil {
-			st = fileStamp{info.Size(), info.ModTime()}
-		}
+		st, _ := stampFile(p)
 		next[p] = st
 		if old, ok := l.stamps[p]; !ok || old != st {
 			changed = true
