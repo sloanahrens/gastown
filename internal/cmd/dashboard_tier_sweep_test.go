@@ -165,6 +165,31 @@ func TestTierSweepRedNamesComeFromTheRecord(t *testing.T) {
 	}
 }
 
+// A stage the daemon started beside a busy CI runner is annotated "under load"
+// in the swept line. The annotation is not part of the verdict, so the panel
+// still reads GREEN and still attaches a RED tier's failing names (gt-5ejux).
+func TestTierSweepUnderLoadAnnotationIsNotAVerdict(t *testing.T) {
+	t.Parallel()
+	r, _ := tierSweepTestReader(t, "2026/10/04 16:00:19 tier_sweep: gastown: swept a9be03e4 (shell GREEN, integration GREEN under load, race RED under load) in 9m36s")
+	writeTierSweepRecord(t, r.stateDir, "gastown", `{"last_sha":"a9be03e4ffff","tiers":{"race":{"verdict":"RED","failed_names":["./internal/cmd"]}}}`)
+	ts := r.read(time.Date(2026, 10, 4, 16, 5, 0, 0, time.Local))
+	if len(ts.Sweeps) != 1 {
+		t.Fatalf("sweeps = %+v", ts.Sweeps)
+	}
+	stages := ts.Sweeps[0].Stages
+	if len(stages) != 3 {
+		t.Fatalf("stages = %+v", stages)
+	}
+	for i, want := range []string{"GREEN", "GREEN", "RED"} {
+		if stages[i].Verdict != want {
+			t.Errorf("stage %d verdict = %q, want %q", i, stages[i].Verdict, want)
+		}
+	}
+	if len(stages[2].Failed) != 1 || stages[2].Failed[0] != "./internal/cmd" {
+		t.Errorf("red stage = %+v, want the record's failing names", stages[2])
+	}
+}
+
 func writeTierSweepRecord(t *testing.T, dir, rig, body string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
