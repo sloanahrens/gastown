@@ -135,6 +135,18 @@ func TestSpecDispatchHoldsABeadThatChangesBeforeTheSling(t *testing.T) {
 			},
 			want: "assigned to gastown/polecats/malachite",
 		},
+		{
+			// The steward parks the bead for a person a second after the tick
+			// read it. A hold is a change like any other: the re-read has to
+			// drop the candidate, or a polecat is spawned onto work the town
+			// reserved for a human (gt-0k7kb).
+			name: "the steward holds it",
+			change: func(s specdispatch.Spec) specdispatch.Spec {
+				s.Labels = append(s.Labels, "needs-human")
+				return s
+			},
+			want: "needs-human",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

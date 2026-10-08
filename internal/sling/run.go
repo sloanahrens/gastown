@@ -435,6 +435,52 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 			return result, fmt.Errorf("storing raw sling metadata before hook: %w", err)
 		}
 	}
+	// The bead the guards above read is from before the spawn, and a spawn
+	// plus a formula takes seconds: a hold written in that window — the
+	// steward parking one for a person, a ruling added to its notes — would be
+	// taken anyway, and the hook write below would overwrite the label that
+	// carries it. Read the bead again now, under the assignee lock and with
+	// nothing left but the hook write, and give it back rather than take it
+	// (gt-0k7kb). The error carries dispatch.SlingRefusalMarker, so an
+	// automatic dispatcher defers the bead and asks again next tick instead of
+	// counting a failed dispatch.
+	//
+	// The operator's own --force stands (explicitForce, not opts.Force): a
+	// person overriding a hold by hand is the one reader this read answers to,
+	// and the dead-agent auto-force above is not a person's decision, exactly
+	// as for the deferred and operator-reservation guards.
+	if !explicitForce {
+		latest, readErr := d.BeadInfoInTown(townRoot, opts.BeadID)
+		hold := ""
+		switch {
+		case readErr != nil:
+			// Unknown is not free: a bead this dispatch cannot read is a bead
+			// it must not take, and refusing is a deferral rather than a
+			// dispatch that went wrong (gt-q6zoo's rule, read at the claim).
+			hold = "its fields cannot be re-read: " + strings.SplitN(readErr.Error(), "\n", 2)[0]
+		case latest == nil:
+			hold = "its fields cannot be re-read: the read returned no bead"
+		default:
+			// The two questions the guards above asked, asked again of the
+			// bead as it is now: the shared rule over the fields no guard at
+			// the start reads (the human labels, the prose ruling), and the
+			// deferred test, which the guard there already answers with this
+			// same --force. A hooked or pinned status is deliberately not
+			// re-read: those are the re-slings that --force, and a dead
+			// holder, are allowed to make.
+			hold = dispatch.SlingHoldFields(latest.Labels, latest.Assignee, latest.Design, latest.Notes)
+			if hold == "" && IsDeferredBead(latest) {
+				hold = "deferred"
+			}
+		}
+		if hold != "" {
+			rollbackSpawnedPolecat(beadToHook, "Bead is held")
+			result.ErrMsg = hold
+			return result, fmt.Errorf("%s %s is held (%s): the hold was written after this dispatch read the bead, so the work is not this dispatch's to take\nRelease the hold (clear the label, or set its status back) to dispatch it, or pass --force to take it anyway",
+				dispatch.SlingRefusalMarker, opts.BeadID, hold)
+		}
+	}
+
 	hookDir := d.HookDir(townRoot, beadToHook, hookWorkDir)
 	// The hook write below replaces the base bead's assignee (beadToHook is the
 	// wisp when a formula applies). Record the outgoing value on the base bead
