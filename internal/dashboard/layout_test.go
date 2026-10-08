@@ -30,8 +30,9 @@ func TestPaneColumns(t *testing.T) {
 		{"seatsnote", "left", "tiersweepnote", "dispnote"},
 		{"dispnote", "left", "seatsnote", "queuenote"},
 		{"queuenote", "left", "dispnote", ""},
-		{"machnote", "right", "", "forgejonote"},
-		{"forgejonote", "right", "machnote", "omnote"},
+		{"machnote", "right", "", "cloudnote"},
+		{"cloudnote", "right", "machnote", "forgejonote"},
+		{"forgejonote", "right", "cloudnote", "omnote"},
 		{"omnote", "right", "forgejonote", "trendsec"},
 		{"trendsec", "right", "omnote", ""},
 	} {
