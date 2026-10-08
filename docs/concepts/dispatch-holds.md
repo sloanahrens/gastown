@@ -68,7 +68,17 @@ dispatcher could pick up.
 
 **gt sling.** Refuses, without `--force`: a bead reserved for the operator, a
 `deferred` bead, and a `pinned`, `hooked` or `in_progress` bead whose holder's
-session is still live.
+session is still live. Those guards read the bead once, before the spawn, and
+a spawn plus a formula takes seconds — so the dispatch reads the bead again at
+the claim, with nothing left but the hook write, and refuses a hold written in
+that window: whatever `dispatch.SlingHoldFields` asserts over its labels,
+assignee and prose, plus the `deferred` status the guard above already tests
+under the same `--force`. Without that read the hook write overwrites the hold,
+and a polecat is hooked onto work the town reserved for a person (gt-0k7kb).
+`SlingHoldFields` reads no other status, because the guards above own those with
+`--force`'s semantics, and drops `needs-pro`: a sling is already given its
+target, so a bead wearing the selector of the seat it is going to is being
+routed, not held.
 
 ## Releases
 

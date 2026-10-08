@@ -15,17 +15,33 @@ import (
 // paths that read it. dispatchHoldLabels, dispatchHoldStatuses and
 // dispatchHoldProse below are that vocabulary.
 
-// dispatchHoldLabels are the routing decisions recorded as labels: needs-pro
-// wants a specific runtime, and gt:needs-human (needs-human by hand) is a
-// landing the worker left for a person (om gave no verdict, a stage timed out,
-// a policy refusal, or land.MaxReworkAttempts rejections): unlike rework, no
-// polecat can settle it (gt-hpca9, gt-28ibg). Matched case-insensitively, since
-// a label is typed by hand.
-// The operator reservation (OperatorReservation) is the third decision a label
-// records, and the one that also reaches through the assignee; it is applied
-// in DispatchHoldFields rather than listed here so a caller reads the same
-// rule before it spends a polecat seat.
-var dispatchHoldLabels = []string{"needs-pro", "gt:needs-human", "needs-human"}
+// routingHoldLabels and humanHoldLabels are the two kinds of decision
+// dispatchHoldLabels records, kept apart because a reader that has already
+// routed the bead reads only the second one.
+//
+// routingHoldLabels ask for a seat rather than a hold: needs-pro wants a
+// specific runtime, and a dispatcher whose seats include the one that label
+// selects (polecat_pool.pro_label) routes the bead to it instead of reading
+// the label as a hold (gt-lxxo4). A reader with no seat to match must drop
+// these rather than refuse the bead for wearing its own seat's selector
+// (SlingHoldFields).
+//
+// humanHoldLabels are the landings the worker left for a person (om gave no
+// verdict, a stage timed out, a policy refusal, or land.MaxReworkAttempts
+// rejections): unlike rework, no polecat can settle one (gt-hpca9, gt-28ibg).
+// No seat claims them, so they hold wherever they are read.
+//
+// Both are matched case-insensitively, since a label is typed by hand.
+var (
+	routingHoldLabels = []string{"needs-pro"}
+	humanHoldLabels   = []string{"gt:needs-human", "needs-human"}
+	// dispatchHoldLabels is the two lists in the order the rule reports them.
+	// The operator reservation (OperatorReservation) is the third decision a
+	// label records, and the one that also reaches through the assignee; it is
+	// applied in DispatchHoldFields rather than listed here so a caller reads
+	// the same rule before it spends a polecat seat.
+	dispatchHoldLabels = append(append([]string(nil), routingHoldLabels...), humanHoldLabels...)
+)
 
 // dispatchHoldStatuses are the statuses beads calls CategoryFrozen, "excluded
 // from bd ready": a dispatcher that fed one would take on work the tracker
@@ -55,6 +71,12 @@ func DispatchHoldFields(status string, labels []string, assignee, design, notes 
 	// The operator reservation is checked before the routing labels: a bead the
 	// operator owns is not the town's to route anywhere, and its reason is the
 	// one an operator reading the log needs named (gt-21pl0).
+	return holdFieldReason(labels, assignee, design, notes)
+}
+
+// holdFieldReason is DispatchHoldFields' body past its status arm: the hold a
+// bead's labels, assignee and prose assert, whatever its status.
+func holdFieldReason(labels []string, assignee, design, notes string) string {
 	if reason := OperatorReservation(labels, assignee); reason != "" {
 		return reason
 	}
@@ -72,6 +94,46 @@ func DispatchHoldFields(status string, labels []string, assignee, design, notes 
 		return decision + " in notes"
 	}
 	return ""
+}
+
+// SlingHoldFields reports the hold a sling must not take a bead over, or ""
+// when the bead asserts none: the fields a dispatch starting mid-flight can
+// find changed, read with routingHoldLabels dropped.
+//
+// It is the shared rule for the read a dispatch makes at the moment it takes a
+// bead — after the guards that ran when the dispatch started, by which time
+// the bead's fields may have changed. The status is not part of it: the guards
+// at the start read that one, with --force's own semantics (a pinned or hooked
+// bead is re-slingable under --force, and without it when its holder is dead),
+// and reading it again here would refuse the re-slings those guards admit. The
+// routing labels are dropped because a sling is already given its target: a
+// bead wearing the selector of the seat it is being sent to is being routed,
+// not held, and refusing it there would break the pro seat's own dispatch.
+// Every other marker holds, the human labels included — which no guard at the
+// start reads at all, so this is the read that keeps a hold written
+// mid-dispatch from being overwritten by the dispatch's own hook write
+// (gt-0k7kb).
+func SlingHoldFields(labels []string, assignee, design, notes string) string {
+	return holdFieldReason(withoutLabels(labels, routingHoldLabels), assignee, design, notes)
+}
+
+// withoutLabels returns labels with every entry of drop removed, matching as
+// the rule does (case- and space-insensitive). The input is never modified.
+func withoutLabels(labels, drop []string) []string {
+	out := make([]string, 0, len(labels))
+	for _, label := range labels {
+		kept := true
+		for _, d := range drop {
+			if strings.EqualFold(strings.TrimSpace(label), strings.TrimSpace(d)) {
+				kept = false
+				break
+			}
+		}
+		if kept {
+			out = append(out, label)
+		}
+	}
+	return out
 }
 
 // holdDecisionIn returns the keep-off decision text asserts, or "". The

@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/specdispatch"
@@ -1543,5 +1544,37 @@ func TestSpecReadyQueryAndParse(t *testing.T) {
 	}
 	if got, err := parseSpecReady([]byte("")); err != nil || got != nil {
 		t.Errorf("empty = %v %v", got, err)
+	}
+}
+
+// TestSpecDispatchDefersABeadHeldMidSling is the tick's half of gt-0k7kb: a
+// hold can land while the sling is spawning, past every read the tick makes.
+// The sling refuses at the claim (internal/sling), and the tick reads that
+// while the sling is spawning, past every read the tick makes. The sling
+// refuses at the claim (internal/sling, gt-0k7kb), and the tick reads that
+// refusal as a deferral — skipped with a reason, left ready, no failure label
+// for an operator to clear.
+func TestSpecDispatchDefersABeadHeldMidSling(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+	f.slingErrs["gt-a"] = []error{fmt.Errorf(
+		"%s gt-a is held (label needs-human): the hold was written after this dispatch read the bead",
+		dispatch.SlingRefusalMarker)}
+
+	r := runSpecDispatchCycle(f.env())
+	if len(f.slung) != 0 {
+		t.Fatalf("a bead held mid-sling was slung: %v", f.slung)
+	}
+	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, "sling deferred") {
+		t.Fatalf("report = %+v, want one deferred skip", r)
+	}
+	if len(r.Failed) != 0 || len(f.notes["gt-a"]) != 0 {
+		t.Fatalf("the refusal was handled as a failure: report %+v notes %v", r, f.notes)
+	}
+	if _, labeled := f.specs["gt-a"]; !labeled {
+		t.Fatal("the bead left the fixture")
+	}
+	if got := f.specs["gt-a"]; got.HasLabel(specdispatch.DispatchFailedLabel) {
+		t.Fatalf("the refused bead wears %s: it would leave the queue", specdispatch.DispatchFailedLabel)
 	}
 }
