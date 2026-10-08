@@ -374,7 +374,10 @@ type State struct {
 	Loads   []LoadPoint `json:"loads"`
 	// Cloud is the cloud patrol's latest report, read from the directory it
 	// writes. It is nil until the reader first reports.
-	Cloud     *Cloud          `json:"cloud,omitempty"`
+	Cloud *Cloud `json:"cloud,omitempty"`
+	// Deploys is the deploy workflow's runs, drawn inside the Cloud section
+	// under the patrol's findings. It is nil until the reader first reports.
+	Deploys   *Deploys        `json:"deploys,omitempty"`
 	Spend     json.RawMessage `json:"spend,omitempty"`
 	OM        *OM             `json:"om,omitempty"`
 	TierSweep *TierSweep      `json:"tiersweep,omitempty"`
@@ -414,6 +417,8 @@ type Config struct {
 	TierSweep func() *TierSweep
 	// Forgejo reads the viewer's Forgejo recent-activity feed.
 	Forgejo func() *ForgejoFeed
+	// Deploys reads the deploy workflow's runs from the same viewer.
+	Deploys func() *Deploys
 	// Escalation reads the town's open escalation beads.
 	Escalation func() *Escalations
 	// Dispatch reads the spec dispatcher's last tick from the daemon log.
@@ -443,6 +448,7 @@ type Config struct {
 	OMEvery         time.Duration
 	TierSweepEvery  time.Duration
 	ForgejoEvery    time.Duration
+	DeploysEvery    time.Duration
 	EscalationEvery time.Duration
 	DispatchEvery   time.Duration
 	QueueEvery      time.Duration
@@ -469,6 +475,11 @@ func (c *Config) defaults() {
 	def(&c.OMEvery, 60*time.Second)
 	def(&c.TierSweepEvery, 60*time.Second)
 	def(&c.ForgejoEvery, 3*time.Minute)
+	// The deploys block is read on its own clock rather than the feed's three
+	// minutes: a stage of a release that is running changes within seconds,
+	// and a run waiting on a runner is the one thing here worth catching
+	// promptly.
+	def(&c.DeploysEvery, 60*time.Second)
 	def(&c.EscalationEvery, 60*time.Second)
 	def(&c.DispatchEvery, 10*time.Second)
 	def(&c.QueueEvery, 60*time.Second)
