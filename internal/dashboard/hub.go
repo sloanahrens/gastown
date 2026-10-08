@@ -108,6 +108,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.Forgejo != nil {
 		start(h.cfg.ForgejoEvery, h.pollForgejo)
 	}
+	if h.cfg.Deploys != nil {
+		start(h.cfg.DeploysEvery, h.pollDeploys)
+	}
 	if h.cfg.Escalation != nil {
 		start(h.cfg.EscalationEvery, h.pollEscalation)
 	}
@@ -382,6 +385,21 @@ func (h *Hub) pollForgejo() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.Forgejo = f
+	h.publishLocked()
+}
+
+// pollDeploys reads the deploy workflow's runs. It is a poller of its own
+// rather than part of the Forgejo feed's refresh so the block keeps its own
+// 60s clock: a stage change and a run picking up a runner are the two things
+// on this page an operator watches in minutes, not three.
+func (h *Hub) pollDeploys() {
+	d := h.cfg.Deploys()
+	if d == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.state.Deploys = d
 	h.publishLocked()
 }
 

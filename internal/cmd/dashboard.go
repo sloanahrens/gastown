@@ -72,6 +72,13 @@ rather than left out, so a missing rig never reads as a quiet one.
 repeated. With no token file the panel is left out, and a refresh that fails
 shows the last good feed marked stale.
 
+The Deploys block under the Cloud panel's findings reads those same repos'
+deploy.yml runs — every run of that workflow, whatever its event — with each
+run's stages in the order their needs give, refreshed every minute. It infers
+runner trouble from the run itself: the runners API is owner-only and answers
+the viewer 403, so a run nothing has picked up, and one that has not moved, are
+said as inferences.
+
 The Cloud panel reads the report the cloud patrol writes — report.json with a
 heartbeat beside it — from /Users/Shared/gt-cloud/reports, or from the
 directory GT_CLOUD_REPORTS_DIR names. It shows when the patrol last ran,
@@ -206,6 +213,9 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	queue := newDashQueueReader(townRoot)
 	cloud := dashboard.NewCloudReader(config.CloudReportsDir())
 	loads := newDashLoads(townRoot, time.Now)
+	// The deploy block reads the same repos through the same viewer client as
+	// the Forgejo panel, so the two are wired together from one token read.
+	forgejoFeed, forgejoDeploys := dashboardForgejoReaders(townRoot, dashboardForgejoRepos)
 	return dashboard.NewHub(dashboard.Config{
 		Feed:       feed,
 		Summary:    func() dashboard.Summary { return dashboardSummary(townRoot, deploys, recs, seatCache) },
@@ -215,7 +225,8 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Spend:      dashboardSpend(resolveSpendCmd(spendCmd)),
 		OM:         func() *dashboard.OM { return om.read(time.Now()) },
 		TierSweep:  func() *dashboard.TierSweep { return tierSweeps.read(time.Now()) },
-		Forgejo:    dashboardForgejoReader(townRoot, dashboardForgejoRepos),
+		Forgejo:    forgejoFeed,
+		Deploys:    forgejoDeploys,
 		Escalation: func() *dashboard.Escalations { return escalations.read(time.Now()) },
 		Dispatch:   om.dispatch,
 		Queue:      func() *dashboard.Queue { return queue.read(time.Now()) },
@@ -429,21 +440,23 @@ func resolveSpendCmd(flagValue string) []string {
 	return []string{tool, "--json"}
 }
 
-// dashboardForgejoReader wires the Forgejo panel to the read-only viewer role:
-// repos, when non-empty, is the explicit owner/name list to read, and empty
-// reads every rig that has cut over to Forgejo, so the panel names a rig repo
-// the viewer cannot see instead of silently reading a subset (gt-faml5). No
-// viewer token file means no panel, like the spend panel with no spend command.
-// The token is read once, here, and never leaves the client.
-func dashboardForgejoReader(townRoot string, repos []string) func() *dashboard.ForgejoFeed {
+// dashboardForgejoReaders wires the two panels the viewer's token feeds — the
+// Forgejo activity feed and the Cloud section's deploy runs — to the
+// read-only viewer role: repos, when non-empty, is the explicit owner/name
+// list to read, and empty reads every rig that has cut over to Forgejo, so the
+// panels name a rig repo the viewer cannot see instead of silently reading a
+// subset (gt-faml5). No viewer token file means neither panel, like the spend
+// panel with no spend command. The token is read once, here, and never leaves
+// the client.
+func dashboardForgejoReaders(townRoot string, repos []string) (func() *dashboard.ForgejoFeed, func() *dashboard.Deploys) {
 	if len(repos) == 0 {
 		repos = rigForgejoRepos(townRoot)
 	}
 	client, err := forgejo.NewClient(config.ForgejoRoleViewer)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
-	return dashboard.NewForgejoReader(client, repos).Read
+	return dashboard.NewForgejoReader(client, repos).Read, dashboard.NewDeployReader(client, repos).Read
 }
 
 // rigForgejoRepos is every rig's Forgejo repository as owner/name, in rig-name

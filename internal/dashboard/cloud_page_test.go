@@ -45,7 +45,7 @@ func TestCloudPanelDrawsTheStateTheReaderDecided(t *testing.T) {
 	if !strings.Contains(all, "renderCloud(state)") {
 		t.Error("renderAll does not draw the Cloud panel")
 	}
-	if !strings.Contains(string(indexHTML), `<section><h2>Cloud <span class="r" id="cloudnote"></span></h2><div class="body" id="cloud"></div></section>`) {
+	if !strings.Contains(string(indexHTML), `<section><h2>Cloud <span class="r" id="cloudnote"></span></h2><div class="body" id="cloud"></div><h3 class="sub">Deploys <span class="r" id="deploysnote"></span></h3><div class="body" id="deploys"></div></section>`) {
 		t.Error("the Cloud section is not the markup its neighbours are")
 	}
 }
