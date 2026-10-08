@@ -25,6 +25,11 @@ type Hub struct {
 	gating   map[string]bool      // beads the landing worker is gating right now
 	polecats []Polecat
 
+	// cloudAt is the last cloud read and cloudMissing whether that machine had
+	// no cloud patrol, which is what re-reads one at the slow interval only.
+	cloudAt      *time.Time
+	cloudMissing bool
+
 	// alerts decides what needs the operator's attention, and prev is the
 	// snapshot it compares the next one against.
 	alerts *Alerter
@@ -87,6 +92,9 @@ func (h *Hub) Run(ctx context.Context) {
 	}
 	if h.cfg.Machine != nil {
 		start(h.cfg.MachineEvery, h.pollMachine)
+	}
+	if h.cfg.Cloud != nil {
+		start(h.cfg.CloudEvery, h.pollCloud)
 	}
 	if h.cfg.Spend != nil {
 		start(h.cfg.SpendEvery, h.pollSpend)
@@ -311,6 +319,33 @@ func (h *Hub) pollMachine() {
 	if n := len(h.state.Loads); n > loadHistory {
 		h.state.Loads = append([]LoadPoint(nil), h.state.Loads[n-loadHistory:]...)
 	}
+	h.publishLocked()
+}
+
+// cloudSlowEvery is how often the hub looks again at a machine with no cloud
+// patrol. The read itself is two stats, so the cost is not the point: the point
+// is that a page open on a machine the patrol does not run on is not told every
+// minute that nothing has changed, and the directory appearing is the only news
+// there could be.
+const cloudSlowEvery = 10 * time.Minute
+
+func (h *Hub) pollCloud() {
+	h.mu.Lock()
+	now := h.cfg.Now()
+	skip := h.cloudAt != nil && h.cloudMissing && now.Sub(*h.cloudAt) < cloudSlowEvery
+	h.mu.Unlock()
+	if skip {
+		return
+	}
+	c := h.cfg.Cloud()
+	if c == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.state.Cloud = c
+	h.cloudAt = &now
+	h.cloudMissing = c.NoPatrol
 	h.publishLocked()
 }
 

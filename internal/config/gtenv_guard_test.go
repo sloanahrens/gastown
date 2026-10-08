@@ -27,11 +27,16 @@ var gtEnvIdentity = map[string]bool{
 
 // gtEnvPreferences are the GT_ variables that carry the operator's display and
 // invocation preferences rather than a fact about the town: theme, pager,
-// agent-mode marker, command name, and the ~/.gt data home. They stay env
-// because a user sets them once for a shell and nothing resolves them.
+// agent-mode marker, command name, the ~/.gt data home, and where a patrol
+// writing outside the town keeps its report. They stay env because a user sets
+// them once for a shell and nothing resolves them.
 var gtEnvPreferences = map[string]bool{
 	"GT_THEME": true, "GT_PAGER": true, "GT_NO_PAGER": true,
 	"GT_AGENT_MODE": true, "GT_COMMAND": true, "GT_HOME": true,
+	// The dashboard's Cloud panel reads the cloud patrol's report from here.
+	// The patrol writes it under its own account, outside the town, so no config
+	// file the kernel resolves can hold it (gt-tlvco).
+	"GT_CLOUD_REPORTS_DIR": true,
 }
 
 // gtEnvInvocation are the per-invocation session and hook signals: a hook

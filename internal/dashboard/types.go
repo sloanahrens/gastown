@@ -369,9 +369,12 @@ type State struct {
 	Polecats  []Polecat `json:"polecats"`
 	// Rigs is one row per known rig, joined from the queue and the polecats
 	// (RigRows). It is nil until both readers have reported.
-	Rigs      []Rig           `json:"rigs,omitempty"`
-	Machine   Machine         `json:"machine"`
-	Loads     []LoadPoint     `json:"loads"`
+	Rigs    []Rig       `json:"rigs,omitempty"`
+	Machine Machine     `json:"machine"`
+	Loads   []LoadPoint `json:"loads"`
+	// Cloud is the cloud patrol's latest report, read from the directory it
+	// writes. It is nil until the reader first reports.
+	Cloud     *Cloud          `json:"cloud,omitempty"`
 	Spend     json.RawMessage `json:"spend,omitempty"`
 	OM        *OM             `json:"om,omitempty"`
 	TierSweep *TierSweep      `json:"tiersweep,omitempty"`
@@ -401,6 +404,8 @@ type Config struct {
 	Health func() Health
 	// Machine samples load and the busiest processes.
 	Machine func() (Machine, error)
+	// Cloud reads the cloud patrol's latest report from its reports directory.
+	Cloud func() *Cloud
 	// Spend returns the DeepSeek spend report as JSON, nil when unavailable.
 	Spend func() json.RawMessage
 	// OM reads the reviewer's record from disk.
@@ -433,6 +438,7 @@ type Config struct {
 	SummaryEvery    time.Duration
 	HealthEvery     time.Duration
 	MachineEvery    time.Duration
+	CloudEvery      time.Duration
 	SpendEvery      time.Duration
 	OMEvery         time.Duration
 	TierSweepEvery  time.Duration
@@ -458,6 +464,7 @@ func (c *Config) defaults() {
 	def(&c.SummaryEvery, 60*time.Second)
 	def(&c.HealthEvery, 5*time.Second)
 	def(&c.MachineEvery, 10*time.Second)
+	def(&c.CloudEvery, 60*time.Second)
 	def(&c.SpendEvery, 5*time.Minute)
 	def(&c.OMEvery, 60*time.Second)
 	def(&c.TierSweepEvery, 60*time.Second)

@@ -171,6 +171,7 @@ section.collapsed>h2{border-bottom:0}
   </div>
   <div class="col">
     <section><h2>Machine <span class="r" id="machnote"></span></h2><div class="body" id="machine"></div></section>
+    <section><h2>Cloud <span class="r" id="cloudnote"></span></h2><div class="body" id="cloud"></div></section>
     <section><h2>Forgejo <span class="r" id="forgejonote"></span></h2><div class="body"><div id="forgejoacts"></div><button id="forgejofeedhead" type="button" class="feedhead" aria-controls="forgejo"></button><div id="forgejo"></div></div></section>
     <section><h2>om review <span class="r" id="omnote"></span></h2><div class="body" id="om"></div></section>
     <section id="trendsec" hidden><h2>Landings <span class="r" id="trendnote"></span></h2><div class="body" id="trend"></div></section>
@@ -648,6 +649,53 @@ function renderMachine(s) {
     for (const p of top) { const tr = el("tr"); tr.append(el("td", "", p.name), el("td", "n", p.cpu >= 100 ? (p.cpu / 100).toFixed(1) + " cores" : p.cpu.toFixed(0) + "%")); t.append(tr); }
     box.append(el("div", "k title", "busiest processes"), t);
   }
+}
+
+// The Cloud panel draws what the reader stripped and capped out of another
+// account's report. Every cell goes through el(), which writes textContent, so
+// a Detail holding an HTML tag shows as that text and never as markup.
+const CLOUD_SEV = {urgent: "sev-critical", normal: "sev-medium", low: "sev-low"};
+
+function renderCloud(s) {
+  const box = $("cloud"), note = $("cloudnote");
+  box.replaceChildren();
+  const c = s.cloud;
+  if (!c) { note.className = "r"; note.textContent = ""; box.append(el("div", "empty", "reading…")); return; }
+  // The reader names the state — fresh, overdue, the error that stopped it, or
+  // why there is no report — and overdue and error take the amber the page
+  // already marks a stale reading with.
+  const stale = c.state === "overdue" || c.state === "error";
+  note.className = stale ? "r warnc" : "r";
+  note.textContent = c.note || c.state || "";
+  if (c.state === "missing" || c.state === "error") { box.append(el("div", c.state === "error" ? "badc" : "empty", c.note || c.state)); return; }
+  const projects = c.projects || [];
+  const runs = el("div", "k title", "last run " + age(c.last_run) + " ago, " + projects.length + " projects: " + (projects.length ? projects.join(", ") : "none"));
+  box.append(runs);
+  if (!c.total) { box.append(el("div", "empty", "no findings")); return; }
+  const counts = c.counts || {};
+  const kv = el("div", "kv");
+  [["urgent", counts.urgent || 0], ["normal", counts.normal || 0], ["low", counts.low || 0]].forEach(([k, n]) => {
+    const d = el("div", k === "urgent" && n ? "badc" : "");
+    d.append(el("b", "", String(n)), el("span", "", k));
+    kv.append(d);
+  });
+  // A severity the patrol does not write yet is still a finding: count it
+  // rather than dropping it.
+  if (counts.other) { const d = el("div"); d.append(el("b", "", String(counts.other)), el("span", "", "other severity")); kv.append(d); }
+  box.append(kv);
+  const t = el("table");
+  const hr = el("tr");
+  [["Severity"], ["Kind"], ["Project"], ["Resource"], ["Detail"]].forEach(h => hr.append(el("th", "", h)));
+  t.append(hr);
+  for (const f of c.findings || []) {
+    const tr = el("tr");
+    const sev = el("td", "esc " + (CLOUD_SEV[f.severity] || "sev-low"), f.severity || "–");
+    if (f.observed_at) sev.title = "observed " + new Date(f.observed_at).toLocaleString();
+    tr.append(sev, el("td", "title", f.kind || "–"), el("td", "title", f.project || "–"), el("td", "title", f.resource || "–"), el("td", "", f.detail || ""));
+    t.append(tr);
+  }
+  box.append(t);
+  if (c.more) box.append(el("div", "empty", "and " + c.more + " more"));
 }
 
 // One compact line per sweep: when, which rig and sha, a verdict per tier, and
@@ -1336,7 +1384,7 @@ function renderQueue(s, force) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderEscalations(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
+function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderEscalations(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderCloud(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));

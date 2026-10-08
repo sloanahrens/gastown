@@ -44,9 +44,9 @@ var dashboardCmd = &cobra.Command{
 	Short:   "Serve a read-only localhost page that shows what gt tail -f shows",
 	Long: `Serve one page on localhost that shows the town the way gt tail -f does:
 the health verdict, the queue waiting to land, the polecat seats and what they
-hold, the machine's load and what burns it, the DeepSeek spend, the recent
-activity of the Forgejo repos the viewer can see, and the same default-view
-feed gt tail prints.
+hold, the machine's load and what burns it, the cloud patrol's latest report
+when this machine runs one, the DeepSeek spend, the recent activity of the
+Forgejo repos the viewer can see, and the same default-view feed gt tail prints.
 
 It reads what gt tail reads — the events journals, the landings files, the
 daemon log, the watch feed, the daemon's health report — through the same
@@ -71,6 +71,13 @@ rather than left out, so a missing rig never reads as a quiet one.
 --forgejo-repo owner/name reads exactly the repos named instead, and may be
 repeated. With no token file the panel is left out, and a refresh that fails
 shows the last good feed marked stale.
+
+The Cloud panel reads the report the cloud patrol writes — report.json with a
+heartbeat beside it — from /Users/Shared/gt-cloud/reports, or from the
+directory GT_CLOUD_REPORTS_DIR names. It shows when the patrol last ran,
+whether that is overdue, the projects it watches and its open findings by
+severity, and it writes nothing there. On a machine with no reports directory
+the panel says so and is re-read at a slow interval rather than every minute.
 
 Lifecycle: the dashboard watches its own binary and the town registry. When make
 install replaces the binary, or a rig is added to or removed from the town, the
@@ -197,12 +204,14 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	escalations := newDashEscalationReader(townRoot)
 	backoff := newDashBackoff(townRoot)
 	queue := newDashQueueReader(townRoot)
+	cloud := dashboard.NewCloudReader(config.CloudReportsDir())
 	loads := newDashLoads(townRoot, time.Now)
 	return dashboard.NewHub(dashboard.Config{
 		Feed:       feed,
 		Summary:    func() dashboard.Summary { return dashboardSummary(townRoot, deploys, recs, seatCache) },
 		Health:     func() dashboard.Health { return dashboardHealth(townRoot) },
 		Machine:    dashboard.SampleMachine,
+		Cloud:      func() *dashboard.Cloud { return cloud.Read(time.Now()) },
 		Spend:      dashboardSpend(resolveSpendCmd(spendCmd)),
 		OM:         func() *dashboard.OM { return om.read(time.Now()) },
 		TierSweep:  func() *dashboard.TierSweep { return tierSweeps.read(time.Now()) },
