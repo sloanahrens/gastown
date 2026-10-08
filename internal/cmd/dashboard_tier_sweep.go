@@ -196,19 +196,18 @@ func splitTierSweepTiers(s string) []string {
 
 // parseTierSweepVerdicts reads the "(shell GREEN, integration GREEN)" part of a
 // swept line. An entry the line does not name is left out, which is how the
-// panel tells a tier that did not run from one that passed.
+// panel tells a tier that did not run from one that passed. Only the field
+// after the tier name is the verdict: the daemon annotates a stage it started
+// beside a busy CI runner, "integration GREEN under load" (gt-5ejux), and the
+// panel still has to read that as GREEN.
 func parseTierSweepVerdicts(s string) []dashboard.TierSweepStage {
 	var out []dashboard.TierSweepStage
 	for _, part := range strings.Split(s, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
+		fields := strings.Fields(part)
+		if len(fields) < 2 {
 			continue
 		}
-		tier, verdict, ok := strings.Cut(part, " ")
-		if !ok || tier == "" || verdict == "" {
-			continue
-		}
-		out = append(out, dashboard.TierSweepStage{Tier: tier, Verdict: verdict})
+		out = append(out, dashboard.TierSweepStage{Tier: fields[0], Verdict: fields[1]})
 	}
 	return out
 }

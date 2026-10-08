@@ -592,6 +592,20 @@ type TierSweepConfig struct {
 	// Rigs limits the sweep to these rigs. Empty means ["gastown"], the one
 	// rig the overseer's cron swept.
 	Rigs []string `json:"rigs,omitempty"`
+
+	// RunnerIdleCommand is a shell command that reports whether the CI runner
+	// is idle: exit 0 means idle, anything else (a command that cannot start
+	// included) means busy. The sweep runs it, through `sh -c` in the
+	// checked-out tree, before a stage that starts containers takes the
+	// container-gate slot, so a busy runner delays that stage rather than
+	// stalling its containers beside the load (gt-5ejux). Empty means no wait,
+	// the behavior without this key.
+	RunnerIdleCommand string `json:"runner_idle_command,omitempty"`
+
+	// RunnerIdleWaitStr caps the wait RunnerIdleCommand describes, as a string
+	// (e.g. "10m"). Default 10m. The stage starts anyway when the cap runs
+	// out, and the cycle's log says it ran under load.
+	RunnerIdleWaitStr string `json:"runner_idle_wait,omitempty"`
 }
 
 // LandingWorkerConfig holds configuration for the landing_worker patrol.

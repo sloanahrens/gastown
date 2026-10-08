@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -19,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/promote"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // The tier_sweep job runs scripts/tier-sweep.sh against origin/main on an
@@ -31,6 +33,11 @@ import (
 // the town root (landingWorkRoot), runs the shell tier every time and the
 // integration and race tiers on even local hours. It runs no `make gate`:
 // every landing already gates the merged tree (gt-vsct7.8).
+//
+// A cycle whose config sets runner_idle_command waits, bounded by
+// runner_idle_wait, for the CI runner to report idle before the integration
+// stage takes the container-gate slot, and starts it anyway when the cap runs
+// out, logging that it did so under load (gt-5ejux).
 //
 // Three things it deliberately does not do. It does not revert a red main: a
 // sweep RED files a bead, and the landing worker's red-main owner decides the
@@ -54,6 +61,17 @@ const (
 	// tierSweepRunBudget bounds one whole cycle: both stages, the container-gate
 	// slot wait included.
 	tierSweepRunBudget = 2 * time.Hour
+
+	// tierSweepRunnerIdlePoll is how often the pre-slot runner-idle wait asks
+	// the configured runner_idle_command again, and tierSweepRunnerIdleGrace
+	// is how long one poll's shell may outlive its output pipe before it is
+	// cut off.
+	tierSweepRunnerIdlePoll  = 15 * time.Second
+	tierSweepRunnerIdleGrace = 10 * time.Second
+
+	// defaultTierSweepRunnerIdleWait caps that wait when runner_idle_wait is
+	// unset.
+	defaultTierSweepRunnerIdleWait = 10 * time.Minute
 
 	// tierSweepLogTailLines is how much of a stage's output the daemon log
 	// keeps. The whole log is written to the state file's log path.
@@ -163,6 +181,26 @@ func tierSweepRigs(config *DaemonPatrolConfig, known []string) []string {
 		}
 	}
 	return out
+}
+
+// tierSweepRunnerIdleCommand is the configured CI-runner idle probe, or "" when
+// the sweep waits for nothing.
+func tierSweepRunnerIdleCommand(config *DaemonPatrolConfig) string {
+	if c := tierSweepConfig(config); c != nil {
+		return strings.TrimSpace(c.RunnerIdleCommand)
+	}
+	return ""
+}
+
+// tierSweepRunnerIdleWait is how long the pre-slot wait may poll, defaulting to
+// 10m and reading a value that does not parse, or is not positive, as unset.
+func tierSweepRunnerIdleWait(config *DaemonPatrolConfig) time.Duration {
+	if c := tierSweepConfig(config); c != nil && c.RunnerIdleWaitStr != "" {
+		if d, err := time.ParseDuration(c.RunnerIdleWaitStr); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultTierSweepRunnerIdleWait
 }
 
 // tierSweepCoversRig reports whether the tier sweep this daemon runs sweeps
@@ -299,6 +337,12 @@ type tierSweepSeams struct {
 	worktree func(ctx context.Context, repo, dir, sha string) (func(), error)
 	// run executes one stage in dir.
 	run func(ctx context.Context, dir string, st tierSweepStage) tierSweepStageResult
+	// runnerIdle runs one runner_idle_command poll in dir: nil means the CI
+	// runner is idle, any other error means it is busy.
+	runnerIdle func(ctx context.Context, dir, command string) error
+	// idleSleep is the pause between two runner-idle polls, and the seam a
+	// test replaces so its clock, not the wall, decides the wait.
+	idleSleep func(ctx context.Context, d time.Duration) error
 	// beads opens the rig's writable bead store.
 	beads func(rig string) tierSweepBeadStore
 	// promote builds the rig's GitHub promotion owner, or nil when the rig
@@ -453,6 +497,130 @@ func tierSweepTierList(stages []tierSweepStage) string {
 	return strings.Join(tiers, ", ")
 }
 
+// tierSweepIdleWait is what the pre-slot runner-idle wait did, for the two
+// places that report it: the stage's log line and the cycle's verdict summary.
+type tierSweepIdleWait struct {
+	// configured is true when runner_idle_command is set. A cycle with no such
+	// key waited for nothing and logs nothing about a wait.
+	configured bool
+	// waited is how long the wait polled before the runner reported idle or
+	// the cap ran out.
+	waited time.Duration
+	// underLoad is true when the cap ran out with the runner still busy: the
+	// stage starts anyway, beside that load.
+	underLoad bool
+	// lastErr is the last busy poll's error, which the under-load line names so
+	// a probe that cannot run at all is readable as such.
+	lastErr error
+}
+
+// tierSweepAwaitRunnerIdle is the bounded wait that runs before a stage which
+// takes the container-gate slot: it polls the configured runner_idle_command
+// every tierSweepRunnerIdlePoll until the command exits 0, the runner_idle_wait
+// cap runs out, or ctx is canceled (gt-5ejux). It runs before the stage, so the
+// slot is never held while the sweep waits, and a busy CI runner delays the
+// stage instead of stalling it beside the load that is already there. A
+// canceled ctx returns its error rather than the cap's verdict, so a daemon
+// drain is never held by the wait.
+func (d *Daemon) tierSweepAwaitRunnerIdle(ctx context.Context, dir string) (wait tierSweepIdleWait, err error) {
+	command := tierSweepRunnerIdleCommand(d.patrolConfig)
+	if command == "" {
+		// No probe configured: no wait at all, the behavior without the key.
+		return tierSweepIdleWait{}, nil
+	}
+	poll := d.tierSweepSeams.runnerIdle
+	if poll == nil {
+		poll = tierSweepRunnerIdle
+	}
+	pause := d.tierSweepSeams.idleSleep
+	if pause == nil {
+		pause = sleepCtx
+	}
+	wait.configured = true
+	start := d.clk().Now()
+	defer func() { wait.waited = d.clk().Now().Sub(start) }()
+	deadline := start.Add(tierSweepRunnerIdleWait(d.patrolConfig))
+	for {
+		if err := ctx.Err(); err != nil {
+			return wait, err
+		}
+		busy := poll(ctx, dir, command)
+		if busy == nil {
+			return wait, nil
+		}
+		wait.lastErr = busy
+		// Checked again here so a poll the cancel ended is read as the cancel,
+		// not as the runner being busy at the cap.
+		if err := ctx.Err(); err != nil {
+			return wait, err
+		}
+		remaining := deadline.Sub(d.clk().Now())
+		if remaining <= 0 {
+			// The cap ran out with the runner still busy: the stage starts
+			// anyway, and the cycle records that it ran under load.
+			wait.underLoad = true
+			return wait, nil
+		}
+		if remaining > tierSweepRunnerIdlePoll {
+			remaining = tierSweepRunnerIdlePoll
+		}
+		if err := pause(ctx, remaining); err != nil {
+			return wait, err
+		}
+	}
+}
+
+// tierSweepIdleLine renders one wait for the daemon log: the idle report, or
+// that the cap ran out and the stage starts under load.
+func tierSweepIdleLine(w tierSweepIdleWait) string {
+	if !w.underLoad {
+		return fmt.Sprintf("the CI runner reported idle after %s", w.waited.Round(time.Second))
+	}
+	line := fmt.Sprintf("the CI runner was still busy after %s; starting it under load", w.waited.Round(time.Second))
+	if w.lastErr != nil {
+		line += fmt.Sprintf(" (last check: %v)", w.lastErr)
+	}
+	return line
+}
+
+// tierSweepRunnerIdle runs one runner_idle_command poll in dir: exit 0 means
+// the CI runner is idle, anything else — including a command that cannot start,
+// which reads as busy rather than as a verdict about the tree — means it is
+// busy.
+func tierSweepRunnerIdle(ctx context.Context, dir, command string) error {
+	cmd := exec.CommandContext(ctx, "sh", "-c", command) //nolint:gosec // G204: the operator's own configured command
+	cmd.Dir = dir
+	// Its own process group, so a canceled poll kills what the command
+	// started, not only the shell.
+	util.SetProcessGroup(cmd)
+	cmd.WaitDelay = tierSweepRunnerIdleGrace
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	detail := strings.TrimSpace(string(out))
+	if detail == "" {
+		return err
+	}
+	return fmt.Errorf("%w: %s", err, detail)
+}
+
+// sleepCtx waits d, or returns ctx's error when the wait is canceled first, so
+// the runner-idle wait's own pause honors a cancel.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 // tierSweepRigCycle runs the stages, writes the record, and files or closes the
 // beads the verdicts imply.
 func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, repo, sha string, state tierSweepState, now time.Time) bool {
@@ -487,8 +655,33 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 		run = d.tierSweepRunStage
 	}
 	results := map[string]tierSweepTierResult{}
+	// loaded names the tiers whose stage waited its runner-idle cap out and ran
+	// anyway, for the cycle's verdict summary.
+	loaded := map[string]bool{}
 	deferred := false
 	for _, st := range stages {
+		if st.slot {
+			// The runner-idle wait runs here, before the stage: land.WithSlot
+			// takes the container-gate slot inside the stage run below, so the
+			// wait is never spent holding it (gt-5ejux).
+			wait, err := d.tierSweepAwaitRunnerIdle(ctx, dir)
+			if err != nil {
+				// The wait honors the cycle's context, so this is the cycle
+				// being canceled under it, not a verdict about the tree: the
+				// stage does not start.
+				d.logger.Printf("tier_sweep: %s: %s stage: the runner-idle wait stopped (%v); deferring", rig, st.tiers[0], err)
+				deferred = true
+				continue
+			}
+			if wait.configured {
+				d.logger.Printf("tier_sweep: %s: %s stage: %s", rig, st.tiers[0], tierSweepIdleLine(wait))
+			}
+			if wait.underLoad {
+				for _, tier := range st.tiers {
+					loaded[tier] = true
+				}
+			}
+		}
 		// The stage's own start, so `gt tail` shows a slow or hung stage on the
 		// line that names it (gt-iqzr0).
 		stageStart := d.clk().Now()
@@ -558,7 +751,7 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 	}
 	cycle.closeStep(rig)
 	d.logger.Printf("tier_sweep: %s: swept %s (shell %s%s) in %s", rig, shortSHA(sha),
-		results["shell"].Verdict, tierSweepVerdictSummary(results, stages),
+		results["shell"].Verdict, tierSweepVerdictSummary(results, stages, loaded),
 		d.clk().Now().Sub(now).Round(time.Second))
 
 	d.tierSweepRecordBeads(rig, sha, results)
@@ -578,15 +771,22 @@ func tierSweepAllGreen(results map[string]tierSweepTierResult, stages []tierSwee
 	return true
 }
 
-// tierSweepVerdictSummary renders the non-shell verdicts for the cycle log.
-func tierSweepVerdictSummary(results map[string]tierSweepTierResult, stages []tierSweepStage) string {
+// tierSweepVerdictSummary renders the non-shell verdicts for the cycle log. A
+// tier in loaded ran beside a busy CI runner, and the summary says so: a RED
+// under load has to be readable as a verdict taken under load, not as a clean
+// one (gt-5ejux).
+func tierSweepVerdictSummary(results map[string]tierSweepTierResult, stages []tierSweepStage, loaded map[string]bool) string {
 	var parts []string
 	for _, st := range stages {
 		for _, tier := range st.tiers {
 			if tier == "shell" {
 				continue
 			}
-			parts = append(parts, tier+" "+results[tier].Verdict)
+			verdict := tier + " " + results[tier].Verdict
+			if loaded[tier] {
+				verdict += " under load"
+			}
+			parts = append(parts, verdict)
 		}
 	}
 	if len(parts) == 0 {
