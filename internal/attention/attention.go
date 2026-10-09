@@ -114,8 +114,9 @@ type Ack struct {
 	At  time.Time `json:"at"`
 }
 
-// Acks is acks.json: the acknowledged keys. gt attention writes it under a
-// flock; the daemon only ever reads it.
+// Acks is acks.json: the acknowledged keys. gt attention adds to it under a
+// flock; the daemon prunes it back to the keys its current state holds
+// (PruneAcks), so an ack dies with its item.
 type Acks struct {
 	Acks []Ack `json:"acks"`
 }

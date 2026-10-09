@@ -6,7 +6,9 @@ import (
 )
 
 // Result is one reconcile's whole output: the new state, the acks that
-// survived, and the transitions to append to events.jsonl.
+// survived, and the transitions to append to events.jsonl. Acks is only as
+// fresh as the acks this call was handed, so a writer that shares acks.json
+// with another process prunes against State instead (PruneAcks).
 type Result struct {
 	State  State
 	Acks   Acks

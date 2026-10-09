@@ -178,7 +178,8 @@ func ReadAcks(townRoot string) (Acks, error) {
 }
 
 // WriteAcks replaces acks.json with acks, under the flock so it cannot race
-// gt attention ack.
+// gt attention ack. A writer that shares the file prunes with PruneAcks
+// instead: this writes the set it is given, dropping whatever it did not read.
 func WriteAcks(townRoot string, acks Acks) error {
 	unlock, err := lockAcks(townRoot)
 	if err != nil {
@@ -186,6 +187,40 @@ func WriteAcks(townRoot string, acks Acks) error {
 	}
 	defer unlock()
 	return writeAcksLocked(townRoot, acks)
+}
+
+// PruneAcks drops every ack whose key no item in state holds: an ack dies with
+// its item, so a key that cleared is acked again when it recurs rather than
+// staying hidden behind the old ack (gt-cuzjj).
+//
+// It exists because the acks a caller holds are stale by the time it would
+// write them back: the read here happens inside the flock, so an ack made
+// while the caller was working is kept. Nothing to drop means no write, so
+// acks.json is only touched when it changes.
+func PruneAcks(townRoot string, state State) error {
+	unlock, err := lockAcks(townRoot)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	acks, err := ReadAcks(townRoot)
+	if err != nil {
+		return err
+	}
+	live := make(map[string]bool, len(state.Items))
+	for _, it := range state.Items {
+		live[it.Key] = true
+	}
+	kept := make([]Ack, 0, len(acks.Acks))
+	for _, a := range acks.Acks {
+		if live[a.Key] {
+			kept = append(kept, a)
+		}
+	}
+	if len(kept) == len(acks.Acks) {
+		return nil
+	}
+	return writeAcksLocked(townRoot, Acks{Acks: kept})
 }
 
 // Acknowledge records key as acknowledged at at, under the flock. The read
