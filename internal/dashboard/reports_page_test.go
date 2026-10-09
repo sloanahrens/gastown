@@ -3,6 +3,7 @@ package dashboard
 import (
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -166,9 +167,9 @@ func TestReportLinksTheBeadIdsWhosePrefixNamesAStore(t *testing.T) {
 	for _, want := range []string{
 		`BEAD_RUN.lastIndex = 0;`,
 		`while ((m = BEAD_RUN.exec(s))) {`,
-		`if (!rig || !BEAD_TOKEN.test(part)) { plain += part; continue; }`,
-		`const b = el("button", "rbead", part);`,
-		`b.onclick = () => openReportBead(rig, part);`,
+		`if (!rig || !BEAD_TOKEN.test(id)) { plain += part; continue; }`,
+		`const b = el("button", "rbead", id);`,
+		`b.onclick = () => openReportBead(rig, id);`,
 	} {
 		if !strings.Contains(nodes, want) {
 			t.Errorf("reportNodes has no %q", want)
@@ -229,6 +230,80 @@ func TestReportLinksTheBeadIdsWhosePrefixNamesAStore(t *testing.T) {
 	// drift into two different readers of one route.
 	if q := pageFunc(t, "openBead"); !strings.Contains(q, `beadDetailFor(b.rig, b.id, qDetail, () => renderQueue(state, true));`) {
 		t.Error("the Work queue's rows no longer open a bead through the shared reader")
+	}
+}
+
+// An id written at the end of a sentence must link as the id, not as the id with
+// the sentence's full stop stuck to it: "landed gt-eorhf." used to open
+// gt-eorhf. — which /api/bead answers 502, and the failed read is remembered for
+// the life of the page (gt-1h5gx). The run the scanner finds is trimmed of the
+// dots that trail it before the id is tested and linked, and those dots go back
+// as the plain text they are; a dot inside the id (dv-1fel.4) is left alone.
+func TestReportLinksAnIdWithoutTheSentenceFullStopBehindIt(t *testing.T) {
+	t.Parallel()
+
+	// The run is trimmed to the id before the prefix is read and the token
+	// tested, the id is what the button carries and opens, and the dots the trim
+	// cut off are handed back to the plain text the button is followed by.
+	nodes := pageFunc(t, "reportNodes")
+	for _, want := range []string{
+		`const id = part.replace(/\.+$/, "");`,
+		`const p = dash > 0 ? id.slice(0, dash) : "";`,
+		`if (!rig || !BEAD_TOKEN.test(id)) { plain += part; continue; }`,
+		`const b = el("button", "rbead", id);`,
+		`b.onclick = () => openReportBead(rig, id);`,
+		`plain += part.slice(id.length);`,
+	} {
+		if !strings.Contains(nodes, want) {
+			t.Errorf("reportNodes has no %q", want)
+		}
+	}
+
+	// The page cannot be executed here, so the decision it makes about a run —
+	// which characters hold one (BEAD_RUN), what it is trimmed to, and whether
+	// that is an id (BEAD_TOKEN) — is read out of the page and driven over the
+	// ways a sentence writes an id. A change to any of those patterns fails here.
+	page := string(indexHTML)
+	lit := func(pat string) string {
+		t.Helper()
+		m := regexp.MustCompile(pat).FindStringSubmatch(page)
+		if m == nil {
+			t.Fatalf("index.html has no %s", pat)
+		}
+		return m[1]
+	}
+	runRe := regexp.MustCompile(lit(`const BEAD_RUN = /(.+)/g;`))
+	tokenRe := regexp.MustCompile(lit(`const BEAD_TOKEN = /(.+)/;`))
+	trimRe := regexp.MustCompile(lit(`part\.replace\(/(.+)/, ""\)`))
+
+	for _, c := range []struct {
+		text string
+		run  string // the run the page's scanner finds and links
+		id   string // the id that run is trimmed to
+		tail string // the dots the trim leaves to the text after the button
+	}{
+		{`landed gt-eorhf.`, "gt-eorhf.", "gt-eorhf", "."},
+		{`dv-1fel.4 shipped`, "dv-1fel.4", "dv-1fel.4", ""},
+		{`landed dv-1fel.4.`, "dv-1fel.4.", "dv-1fel.4", "."},
+		{`gt-eorhf, then read it`, "gt-eorhf", "gt-eorhf", ""},
+		{`(gt-eorhf)`, "gt-eorhf", "gt-eorhf", ""},
+		{`gt-eorhf: read it`, "gt-eorhf", "gt-eorhf", ""},
+		{`gt-eorhf; read it`, "gt-eorhf", "gt-eorhf", ""},
+	} {
+		var got []string
+		for _, part := range runRe.FindAllString(c.text, -1) {
+			id := trimRe.ReplaceAllString(part, "")
+			// A word like "then" has no hyphen and so no id shape; only the id's
+			// trimmed run is a candidate here, which is all this bead changed.
+			if !tokenRe.MatchString(id) {
+				continue
+			}
+			got = append(got, part+"/"+id+"/"+part[len(id):])
+		}
+		want := c.run + "/" + c.id + "/" + c.tail
+		if len(got) != 1 || got[0] != want {
+			t.Errorf("%q links %v, want just %q", c.text, got, want)
+		}
 	}
 }
 
