@@ -63,14 +63,15 @@ decides and reports without slinging, labeling or commenting.
    - `off` runs no lint at all;
    - `warn` (the default) holds a bead the lint refuses: it is skipped with the
      reason `unshaped: <fields>`, spends no seat, and wears one `SHAPE: ...`
-     comment, never repeated for the same verdict. A bead labeled
-     `spec-shape-waived` waives the lint and is slung anyway;
-   - `refuse` also holds it, and labels it `needs-shape` (or `needs-planning`
-     when that is the verdict) with one comment. Nothing is spawned for a bead
-     that needs planning: the tick reports its planning state, `needs plan`
-     while it waits for a proposal or `plan proposed` once a plan job has
-     written its `PLAN PROPOSAL` block for the operator to file
-     (gt-4k3fj.14). The plan jobs themselves are `patrols.steward_plan`, in
+     comment, never repeated for the same verdict. It also holds a bead that
+     needs planning — nothing is slung for it, it wears the `needs-planning`
+     label, and the tick reports its planning state, `needs plan` while it
+     waits for a proposal or `plan proposed` once a plan job has written its
+     `PLAN PROPOSAL` block for the operator to file (gt-4k3fj.14, gt-tod3q).
+     A bead labeled `spec-shape-waived` waives the lint and is slung anyway;
+   - `refuse` holds a refused bead the same way and labels it `needs-shape`;
+     a bead that needs planning is held exactly as under `warn` (gt-tod3q).
+     Under either gate the plan jobs themselves are `patrols.steward_plan`, in
      [Steward jobs](steward-jobs.md#configuration).
 4. A spec that clears the shape gate takes the first free seat and is slung
    through the shared rig-dispatch path in-process, with no auto-convoy.

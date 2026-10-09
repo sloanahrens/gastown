@@ -161,15 +161,17 @@ polecat_pool.shape_gate says what the verdict does:
   - off: no lint runs; the bead is dispatched like any other
   - warn (the default): a bead the lint refuses is held — skipped with the
     reason "unshaped: <fields>" and left ready for the next tick — and the
-    verdict is left on it as one comment (SHAPE: ...). A bead labeled
+    verdict is left on it as one comment (SHAPE: ...). A bead that needs
+    planning is held too, labeled needs-planning, and the tick names which
+    planning state it is in — "needs plan" while it waits for a plan job's
+    PLAN PROPOSAL, "plan proposed" once that block is in its notes and only
+    the operator can file the children (gt-4k3fj.14, gt-tod3q). A bead labeled
     spec-shape-waived waives the lint and dispatches anyway
-  - refuse: as warn, and a held bead also wears the needs-shape label; a bead
-    that needs planning wears the needs-planning label, and the tick names
-    which planning state it is in — "needs plan" while it waits for a plan
-    job's PLAN PROPOSAL, "plan proposed" once that block is in its notes and
-    only the operator can file the children (gt-4k3fj.14). The tick spawns no
-    planner: patrols.steward_plan in mayor/daemon.json runs the plan jobs,
-    and it is off until the operator turns it on
+  - refuse: as warn, and a refused bead also wears the needs-shape label; the
+    needs-planning bead is held exactly as under warn (gt-tod3q). Under either
+    gate the tick spawns no planner: patrols.steward_plan in
+    mayor/daemon.json runs the plan jobs, and it is off until the operator
+    turns it on
 
 Beads labeled red-main are held while the red-main owner is reverting the
 breakage they were filed for: the landing worker records a revert in flight in
@@ -235,6 +237,29 @@ func specPlanNote(key, state, reason string) string {
 		return key + ": the plan job proposed its children; nothing is filed from a proposal"
 	}
 	return fmt.Sprintf("%s: %s; a plan job proposes the children into the notes and files nothing", key, reason)
+}
+
+// specPlanHold takes a spec that needs planning off the dispatch path under
+// every gate that holds one — warn as well as refuse (gt-tod3q). The tick
+// reports the bead by its planning state, labels it needs-planning so the
+// planning patrol sees it, and comments once per state. Nothing is spawned:
+// patrols.steward_plan runs the plan jobs, and a plan job files nothing from a
+// proposal (gt-4k3fj.13, gt-4k3fj.14). The caller always skips the sling.
+func specPlanHold(report *specDispatchReport, env specDispatchEnv, c specCandidate, full specdispatch.Spec, verdict specdispatch.Verdict) {
+	state := specPlanState(full.Notes)
+	report.Planning = append(report.Planning, specDispatchEntry{Bead: full.ID, Rig: c.Rig, Line: specPlanLine(full.ID, state, verdict.Reason)})
+	if env.DryRun {
+		return
+	}
+	if !full.HasLabel(specdispatch.NeedsPlanningLabel) {
+		if err := env.AddLabel(full.ID, specdispatch.NeedsPlanningLabel); err != nil {
+			report.Errors = append(report.Errors, fmt.Sprintf("%s: label: %v", full.ID, err))
+		}
+	}
+	key := fmt.Sprintf("%s%s: %s", specDispatchNotePrefix, full.ID, state)
+	if err := env.Annotate(full.ID, key, specPlanNote(key, state, verdict.Reason)); err != nil {
+		report.Errors = append(report.Errors, fmt.Sprintf("%s: annotate: %v", full.ID, err))
+	}
 }
 
 // specFromIssue reduces a bead to the fields the lint reads.
@@ -464,10 +489,12 @@ type specDispatchEnv struct {
 
 // runSpecDispatchCycle is one tick. It never guesses: under the default warn
 // gate a bead the lint refuses is held — skipped unshaped and commented once —
-// while one that needs planning still dispatches; under refuse the held bead is
-// also labeled needs-shape, and one that needs planning is labeled and reported
-// by its planning state ("needs plan" or "plan proposed", gt-4k3fj.14) rather
-// than slung; off runs no lint. A bead labeled spec-shape-waived waives the
+// and one that needs planning is held too, labeled needs-planning and reported
+// by its planning state; under refuse the refused bead is also labeled
+// needs-shape, and the planning bead is held the same way. A planning bead is
+// never slung under either gate (gt-tod3q): it is the planner's, and the tick
+// only labels, comments and reports its state ("needs plan" or "plan proposed",
+// gt-4k3fj.14). Off runs no lint. A bead labeled spec-shape-waived waives the
 // lint and dispatches under any gate (gt-f8ppx). A container — a bead with at
 // least one open child — is held until its children close, under any gate
 // (gt-gektq). A candidate is slung only onto a free seat that takes it, and a
@@ -543,14 +570,20 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 				// one comment, in seat-refill's own note text (gt-cq5gb).
 				shapeNote = verdict.ShapeNote()
 			case env.ShapeGate == specdispatch.ShapeGateWarn:
-				// The default gate holds a bead the lint refuses rather than
-				// slinging it (gt-f8ppx): a flash polecat handed work the bead
-				// does not pin down wanders off it, so the bead waits for the
-				// operator to shape it or waive the lint. The one SHAPE note
-				// still lands so the bead's history says why; it is written
-				// here, not on the dispatch path below, because a held bead
-				// never reaches that path. A planning verdict is not a refusal
-				// and still dispatches.
+				// The default gate holds a bead the lint refuses, and one that
+				// needs planning, rather than slinging it (gt-f8ppx, gt-tod3q):
+				// a flash polecat handed work the bead does not pin down wanders
+				// off it, and a spec one worker cannot take in one MR is the
+				// planner's, not a seat's. A refused bead gets the one SHAPE
+				// note — written here, not on the dispatch path below, because a
+				// held bead never reaches that path — and stays unlabeled in
+				// warn, for the operator to shape or waive. A planning bead is
+				// labeled needs-planning and commented by specPlanHold, the same
+				// as under refuse.
+				if verdict.Route == specdispatch.RoutePlanning {
+					specPlanHold(&report, env, c, full, verdict)
+					continue
+				}
 				if reason := verdict.UnshapedReason(); reason != "" {
 					report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s", id, reason)})
 					if !env.DryRun {
@@ -585,24 +618,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 					}
 					continue
 				case specdispatch.RoutePlanning:
-					// A needs-planning spec is in one of two states, and the
-					// tick names which: waiting for a plan job's proposal, or
-					// carrying one the operator files by hand. Nothing is
-					// spawned either way — the plan patrol is the spawner
-					// (gt-4k3fj.13, gt-4k3fj.14).
-					state := specPlanState(full.Notes)
-					report.Planning = append(report.Planning, specDispatchEntry{Bead: id, Rig: c.Rig, Line: specPlanLine(id, state, verdict.Reason)})
-					if !env.DryRun {
-						if !full.HasLabel(specdispatch.NeedsPlanningLabel) {
-							if err := env.AddLabel(id, specdispatch.NeedsPlanningLabel); err != nil {
-								report.Errors = append(report.Errors, fmt.Sprintf("%s: label: %v", id, err))
-							}
-						}
-						key := fmt.Sprintf("%s%s: %s", specDispatchNotePrefix, id, state)
-						if err := env.Annotate(id, key, specPlanNote(key, state, verdict.Reason)); err != nil {
-							report.Errors = append(report.Errors, fmt.Sprintf("%s: annotate: %v", id, err))
-						}
-					}
+					specPlanHold(&report, env, c, full, verdict)
 					continue
 				}
 			}
