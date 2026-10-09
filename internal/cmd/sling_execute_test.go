@@ -191,6 +191,34 @@ func TestExecuteSlingForceStealsFromALivePolecat(t *testing.T) {
 	}
 }
 
+// TestExecuteSlingForceStealRestoresTheHolderWhenTheSpawnFails: the force-steal
+// clear runs before the spawn (so the bead never reads as hooked to the old
+// holder while the new polecat is being made), which means a spawn that fails
+// has to put the outgoing polecat's agent-bead state back — that dispatch took
+// nothing from it (gt-u0zq0).
+func TestExecuteSlingForceStealRestoresTheHolderWhenTheSpawnFails(t *testing.T) {
+	t.Parallel()
+	h := newSlingHarness(t)
+	h.addBead(slingBead, beadInfo{Status: "hooked", Assignee: "gastown/polecats/Nux"})
+	h.run.spawnPolecat = func(string, SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+		h.record("spawn gastown")
+		return nil, errors.New("no free polecat slot")
+	}
+	p := executeParams()
+	p.Force = true
+	res, err := h.run.executeSling(p)
+	wantSlingErr(t, err, "failed to spawn polecat")
+	if res == nil || res.Success {
+		t.Fatalf("result = %+v, want a failed result", res)
+	}
+	h.wantCalls("clear reassigned", "clear reassigned gastown/polecats/Nux")
+	h.wantCalls("restore reassigned", "restore reassigned gastown/polecats/Nux")
+	h.wantNo("reassign")
+	if log := strings.Join(h.log(), "\n"); strings.Index(log, "clear reassigned") > strings.Index(log, "spawn gastown") {
+		t.Errorf("spawned before the old holder was cleared:\n%s", log)
+	}
+}
+
 // TestExecuteSlingDeadHolder: a dead holder is auto-forced once the survival
 // guard finds no work to protect; its stale molecules are burned.
 func TestExecuteSlingDeadHolder(t *testing.T) {

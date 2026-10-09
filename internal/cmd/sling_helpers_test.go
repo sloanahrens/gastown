@@ -399,3 +399,56 @@ func TestVerifyFormulaTriesMolPrefixAndChecksBody(t *testing.T) {
 		t.Errorf("ghost: err = %v, want not found", err)
 	}
 }
+
+// TestClearReassignedPolecatStateRestoresOnDemand: the clear that runs before a
+// force steal's spawn must be undoable — a dispatch whose spawn then fails hands
+// the outgoing holder its hook_bead and agent_state back (gt-u0zq0).
+func TestClearReassignedPolecatStateRestoresOnDemand(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	db.Seed(doneAgentBead())
+
+	restore := clearReassignedPolecatStateIn(db, "gt-gastown-polecat-nux")
+	_, cleared, err := beads.GetAgentBead(db, "gt-gastown-polecat-nux")
+	if err != nil || cleared == nil {
+		t.Fatalf("agent bead after the clear: %+v, %v", cleared, err)
+	}
+	if cleared.HookBead != "" || cleared.AgentState != string(beads.AgentStateIdle) {
+		t.Fatalf("after the clear: hook %q state %q, want empty hook and idle", cleared.HookBead, cleared.AgentState)
+	}
+
+	restore()
+	_, back, err := beads.GetAgentBead(db, "gt-gastown-polecat-nux")
+	if err != nil || back == nil {
+		t.Fatalf("agent bead after the restore: %+v, %v", back, err)
+	}
+	if back.HookBead != "gt-base-123" || back.AgentState != "working" {
+		t.Errorf("after the restore: hook %q state %q, want gt-base-123 and working", back.HookBead, back.AgentState)
+	}
+
+	// A restore that runs twice (an error path and a rollback) is the same
+	// restore, not a second write of stale state.
+	restore()
+	_, again, err := beads.GetAgentBead(db, "gt-gastown-polecat-nux")
+	if err != nil || again == nil {
+		t.Fatalf("agent bead after the second restore: %+v, %v", again, err)
+	}
+	if again.HookBead != "gt-base-123" || again.AgentState != "working" {
+		t.Errorf("second restore: hook %q state %q, want gt-base-123 and working", again.HookBead, again.AgentState)
+	}
+}
+
+// TestClearReassignedPolecatStateWithoutABeadStillClears: a holder whose agent
+// bead cannot be read has nothing to restore; the clear still runs and the
+// returned restore is a no-op.
+func TestClearReassignedPolecatStateWithoutABeadStillClears(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "gt-other", Title: "not an agent bead", Status: "open"})
+
+	restore := clearReassignedPolecatStateIn(db, "gt-gastown-polecat-nux")
+	if restore == nil {
+		t.Fatal("clearReassignedPolecatStateIn returned no restore")
+	}
+	restore()
+}

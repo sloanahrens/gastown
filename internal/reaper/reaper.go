@@ -540,11 +540,20 @@ func Scan(db *beadsql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleI
 	moleculeStepJoin := closedMoleculeStepJoin("closed_molecule_step")
 	moleculeStepExcludeJoin := closedMoleculeStepExcludeJoin("closed_molecule_step")
 	mrJoin, mrWhere := mrProtectedJoin(DefaultMRProtectionTTL, now.Add(-DefaultMRProtectionTTL))
+	referencedIDs, err := liveAgentReferencedWispIDs(ctx, db)
+	if err != nil {
+		return nil, fmt.Errorf("compute live agent referenced ids: %w", err)
+	}
+	referencedClause, referencedArgs := wispExcludeClause(referencedIDs)
 
+	// Closed-molecule steps are counted with the same exclusions the phase that
+	// closes them carries: a step-wisp of a closed molecule can also be an MR
+	// wisp or the active_mr/hook_bead a live agent still points at, and the
+	// preview must not promise a close the sweep will refuse (gt-u0zq0).
 	moleculeStepQuery := fmt.Sprintf(
-		"SELECT COUNT(*) FROM wisps w %s WHERE %s AND w.issue_type != 'agent'",
-		moleculeStepJoin, openWispStatusWhere)
-	if err := db.QueryRowContext(ctx, moleculeStepQuery).Scan(&result.MoleculeStepCandidates); err != nil {
+		"SELECT COUNT(*) FROM wisps w %s %s WHERE %s AND w.issue_type != 'agent' AND %s%s",
+		moleculeStepJoin, mrJoin, openWispStatusWhere, mrWhere, referencedClause)
+	if err := db.QueryRowContext(ctx, moleculeStepQuery, referencedArgs...).Scan(&result.MoleculeStepCandidates); err != nil {
 		return nil, fmt.Errorf("count molecule step candidates: %w", err)
 	}
 
@@ -554,11 +563,6 @@ func Scan(db *beadsql.DB, dbName string, maxAge, purgeAge, mailDeleteAge, staleI
 	// that reap will never close.
 	// Uses LEFT JOIN anti-pattern instead of correlated EXISTS to avoid O(n*m) cost (gt-jd1z).
 	// Closed-molecule steps are counted separately above and excluded here so counts stay disjoint.
-	referencedIDs, err := liveAgentReferencedWispIDs(ctx, db)
-	if err != nil {
-		return nil, fmt.Errorf("compute live agent referenced ids: %w", err)
-	}
-	referencedClause, referencedArgs := wispExcludeClause(referencedIDs)
 	reapQuery := fmt.Sprintf(
 		"SELECT COUNT(*) FROM wisps w %s %s %s WHERE %s AND w.created_at < ? AND w.issue_type != 'agent' AND %s AND closed_molecule_step.issue_id IS NULL AND %s%s",
 		parentJoin, moleculeStepExcludeJoin, mrJoin, openWispStatusWhere, parentWhere, mrWhere, referencedClause)
@@ -683,7 +687,9 @@ func Reap(db *beadsql.DB, w Writer, dbName string, maxAge time.Duration, dryRun 
 	// Exclude live merge-queue wisps (mrWhere) and any wisp a live agent still
 	// references as active_mr or hook_bead (referencedClause) — age is never
 	// sufficient on its own to close these, since a dormant town can make a live MR
-	// look stale (gt-4okk).
+	// look stale (gt-4okk). Every phase below carries both exclusions, the two
+	// immediate ones included: the protection is about the wisp, not about how it
+	// became a candidate (gt-u0zq0).
 	// Closed-molecule steps are closed immediately through a separate path, so stale
 	// max-age counts exclude them to keep dry-run and scan counts disjoint.
 	whereClause := fmt.Sprintf(
@@ -710,17 +716,17 @@ func Reap(db *beadsql.DB, w Writer, dbName string, maxAge time.Duration, dryRun 
 
 	if dryRun {
 		moleculeStepCountQuery := fmt.Sprintf(
-			"SELECT COUNT(*) FROM wisps w %s WHERE %s AND w.issue_type != 'agent'",
-			moleculeStepJoin, openWispStatusWhere)
-		if err := db.QueryRowContext(ctx, moleculeStepCountQuery).Scan(&result.MoleculeStepsClosed); err != nil {
+			"SELECT COUNT(*) FROM wisps w %s %s WHERE %s AND w.issue_type != 'agent' AND %s%s",
+			moleculeStepJoin, mrJoin, openWispStatusWhere, mrWhere, referencedClause)
+		if err := db.QueryRowContext(ctx, moleculeStepCountQuery, referencedArgs...).Scan(&result.MoleculeStepsClosed); err != nil {
 			return nil, fmt.Errorf("dry-run molecule step count: %w", err)
 		}
 
 		// Count absent-parent candidates: open wisps whose parent molecule record is purged.
 		absentParentCountQuery := fmt.Sprintf(
-			"SELECT COUNT(*) FROM wisps w %s WHERE %s AND w.issue_type != 'agent'",
-			absentParentJoin, absentParentWhere)
-		if err := db.QueryRowContext(ctx, absentParentCountQuery).Scan(&result.AbsentParentClosed); err != nil {
+			"SELECT COUNT(*) FROM wisps w %s %s WHERE %s AND w.issue_type != 'agent' AND %s%s",
+			absentParentJoin, mrJoin, absentParentWhere, mrWhere, referencedClause)
+		if err := db.QueryRowContext(ctx, absentParentCountQuery, referencedArgs...).Scan(&result.AbsentParentClosed); err != nil {
 			return nil, fmt.Errorf("dry-run absent-parent count: %w", err)
 		}
 
@@ -736,13 +742,19 @@ func Reap(db *beadsql.DB, w Writer, dbName string, maxAge time.Duration, dryRun 
 	}
 
 	moleculeStepIDQuery := fmt.Sprintf(
-		"SELECT w.id FROM wisps w %s WHERE %s AND w.issue_type != 'agent'",
-		moleculeStepJoin, openWispStatusWhere)
+		"SELECT w.id FROM wisps w %s %s WHERE %s AND w.issue_type != 'agent' AND %s%s",
+		moleculeStepJoin, mrJoin, openWispStatusWhere, mrWhere, referencedClause)
 	// The phases run in order and stop at the first failure, as the single
 	// transaction they replace did: each later SELECT assumes the earlier
 	// phases' closes landed, and a failed phase's ids would otherwise be
 	// re-selected by the next one under a different reason.
-	moleculeStepsClosed, err := closeWispsSelected(ctx, db, w, moleculeStepIDQuery, nil,
+	//
+	// Every phase carries the MR and live-reference protections (mrWhere,
+	// referencedClause), not just the age sweep below: a step-wisp of a closed
+	// molecule can also be an MR wisp or the active_mr/hook_bead a live agent
+	// still points at, and closing it from this phase would dangle that
+	// reference exactly as the age sweep would (gt-u0zq0).
+	moleculeStepsClosed, err := closeWispsSelected(ctx, db, w, moleculeStepIDQuery, referencedArgs,
 		"reaper: parent molecule closed", "closed molecule steps")
 	result.MoleculeStepsClosed = moleculeStepsClosed
 	if err != nil {
@@ -754,9 +766,9 @@ func Reap(db *beadsql.DB, w Writer, dbName string, maxAge time.Duration, dryRun 
 	// subquery misses because INNER JOIN wisps pm requires the parent row to exist.
 	// Uses the same pattern as Scan's danglingQuery: both wisp and issue parents must be absent.
 	absentParentIDQuery := fmt.Sprintf(
-		"SELECT w.id FROM wisps w %s WHERE %s",
-		absentParentJoin, absentParentWhere)
-	absentParentClosed, err := closeWispsSelected(ctx, db, w, absentParentIDQuery, nil,
+		"SELECT w.id FROM wisps w %s %s WHERE %s AND %s%s",
+		absentParentJoin, mrJoin, absentParentWhere, mrWhere, referencedClause)
+	absentParentClosed, err := closeWispsSelected(ctx, db, w, absentParentIDQuery, referencedArgs,
 		"reaper: parent molecule purged", "absent-parent molecule steps")
 	result.AbsentParentClosed = absentParentClosed
 	if err != nil {

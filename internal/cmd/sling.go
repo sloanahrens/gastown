@@ -792,11 +792,24 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	hooked := false
 	rollbackBeadID := ""
 	rollbackReason := ""
+	// restoreOutgoing puts a force-stolen holder's agent-bead state back. The
+	// rollback below runs it, so a sling that fails after the clear leaves the
+	// holder it took the bead from as it was (gt-u0zq0). Nil until a clear runs.
+	var restoreOutgoing func()
+	restoreReassigned := func() {
+		if restoreOutgoing != nil {
+			restoreOutgoing()
+			restoreOutgoing = nil
+		}
+	}
 	rollbackSpawnedPolecat := func(reason string) {
 		if newPolecatInfo != nil {
 			fmt.Fprintf(r.out, "%s %s, rolling back spawned polecat %s...\n", style.Warning.Render("⚠"), reason, newPolecatInfo.PolecatName)
 			r.rollbackArtifacts(newPolecatInfo, r.townRoot, rollbackBeadID, hookWorkDir)
 		}
+		// The bead goes back to the holder this sling took it from, so that
+		// holder's cleared agent-bead state goes back with it (gt-u0zq0).
+		restoreReassigned()
 		if rollbackBeadID == "" {
 			return // this sling has not written to the bead: nothing to restore
 		}
@@ -870,10 +883,13 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 			fmt.Fprintf(r.out, "Would unhook %s from previous assignee\n", beadID)
 		} else {
 			// gt-skwt: clear the outgoing polecat's agent-bead state now,
-			// synchronously (see clearReassignedPolecatState).
+			// synchronously (see clearReassignedPolecatState). The restore it
+			// returns is handed to the rollback guard, which runs it if this
+			// sling fails before the bead is committed to the new holder
+			// (gt-u0zq0).
 			assigneeParts := strings.Split(info.Assignee, "/")
 			if len(assigneeParts) >= 3 && assigneeParts[1] == "polecats" {
-				r.clearReassigned(townRoot, info.Assignee)
+				restoreOutgoing = r.clearReassigned(townRoot, info.Assignee)
 			}
 
 			// Unhook the bead from old owner (set status back to open)

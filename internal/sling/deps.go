@@ -61,7 +61,14 @@ type Deps struct {
 	StartSession func(spawn *Spawn) (string, error)
 
 	// Reassignment away from a previous holder.
-	ClearReassigned    func(townRoot, assignee string)
+	//
+	// ClearReassigned clears the outgoing polecat's agent-bead state (its
+	// hook_bead and agent_state) and returns a function that puts it back. The
+	// clear happens before the spawn — the bead must not read as still hooked to
+	// the old holder while the new polecat is being created — so a spawn that
+	// then fails has to undo it, or the old holder is left with no record of the
+	// work it was on (gt-u0zq0).
+	ClearReassigned    func(townRoot, assignee string) (restore func())
 	RecordReassignment func(townRoot, beadID, from, to, requester string)
 
 	// Formula, hook and bead writes.

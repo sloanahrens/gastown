@@ -241,8 +241,8 @@ func runDoneStateUpdateWith(t *testing.T, db beads.Client, childrenErr error) *d
 		routed: func(string) beads.Client { return rec },
 		source: func(string, string) beads.Client { return rec },
 		purge:  func(string, string) { rec.purges++ },
-		reviewHead: func() (string, error) {
-			return "", errors.New("resolving current HEAD: not a git repository")
+		reviewHead: func(string) (string, error) {
+			return "", errors.New("resolving HEAD: not a git repository")
 		},
 	}
 	_ = updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, ExitCompleted, "gt-base-123")
@@ -258,8 +258,8 @@ func TestDoneStateEnvZeroValueIsTheRealProcess(t *testing.T) {
 	if got, want := reflect.ValueOf(e.lookup()).Pointer(), reflect.ValueOf(os.Getenv).Pointer(); got != want {
 		t.Error("zero doneStateEnv does not read the environment through os.Getenv")
 	}
-	if got, want := reflect.ValueOf(e.head()).Pointer(), reflect.ValueOf(done.CurrentReviewEvidenceHead).Pointer(); got != want {
-		t.Error("zero doneStateEnv does not resolve HEAD through done.CurrentReviewEvidenceHead")
+	if got, want := reflect.ValueOf(e.head()).Pointer(), reflect.ValueOf(done.CurrentReviewEvidenceHeadIn).Pointer(); got != want {
+		t.Error("zero doneStateEnv does not resolve HEAD through done.CurrentReviewEvidenceHeadIn")
 	}
 	routed := e.routedAt(t.TempDir())
 	if routed == nil {

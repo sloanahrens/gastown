@@ -196,9 +196,12 @@ func newSlingHarness(t *testing.T) *slingHarness {
 		peekNamed: func(string, string, SlingSpawnOptions) error { return nil },
 		wakeRig:   func(rig string) { h.record("wake rig %s", rig) },
 
-		requester:       func() string { return "tester" },
-		clearReassigned: func(_, assignee string) { h.record("clear reassigned %s", assignee) },
-		unhook:          func(_, id string) error { h.record("unhook %s", id); return nil },
+		requester: func() string { return "tester" },
+		clearReassigned: func(_, assignee string) func() {
+			h.record("clear reassigned %s", assignee)
+			return func() { h.record("restore reassigned %s", assignee) }
+		},
+		unhook: func(_, id string) error { h.record("unhook %s", id); return nil },
 		recordReassignment: func(_, id, from, to, _ string) {
 			h.record("reassign %s %s -> %s", id, from, to)
 		},

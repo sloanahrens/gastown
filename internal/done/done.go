@@ -574,8 +574,17 @@ var generatedCommentPrefixes = []string{
 	"mr created:",
 }
 
-func doneSourceCloseSkipReason(bd beads.Client, issueID string, issue *beads.Issue) (string, bool) {
-	currentHead, _ := CurrentReviewEvidenceHead()
+// doneSourceCloseSkipReason resolves HEAD in cwd and evaluates the close gate.
+// A HEAD that cannot be read is reported rather than silently dropped — the
+// review-only evidence check refuses on an empty head, and an operator reading
+// that refusal needs to see why the head is missing (gt-u0zq0) — and is then
+// passed on empty, which is the fail-open side this gate has always taken for
+// state it cannot inspect.
+func doneSourceCloseSkipReason(cwd string, bd beads.Client, issueID string, issue *beads.Issue) (string, bool) {
+	currentHead, err := CurrentReviewEvidenceHeadIn(cwd)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+	}
 	return DoneSourceCloseSkipReasonForHead(bd, issueID, issue, currentHead)
 }
 
@@ -662,13 +671,31 @@ func loadDoneSourceIssue(bd beads.Client, issueID string, issue *beads.Issue) (*
 	return loaded, "", false
 }
 
-func CurrentReviewEvidenceHead() (string, error) {
+// CurrentReviewEvidenceHead resolves HEAD in dir — the worktree gt done is
+// closing work for — and is what the review-evidence and rework checks compare
+// against. Without a dir the git command would run in the process working
+// directory, which need not be the polecat's worktree: a gt done that detected
+// its agent from the environment rather than the cwd would then validate
+// evidence against some other repository's HEAD (gt-u0zq0).
+func CurrentReviewEvidenceHeadIn(dir string) (string, error) {
+	dir = strings.TrimSpace(dir)
+	where := "the current directory"
 	cmd := exec.Command("git", "rev-parse", "HEAD")
+	if dir != "" {
+		cmd.Dir = dir
+		where = dir
+	}
 	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("resolving current HEAD: %w", err)
+		return "", fmt.Errorf("resolving HEAD in %s: %w", where, err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// CurrentReviewEvidenceHead is CurrentReviewEvidenceHeadIn("") — HEAD in the
+// process working directory.
+func CurrentReviewEvidenceHead() (string, error) {
+	return CurrentReviewEvidenceHeadIn("")
 }
 
 func hasFreshReviewReportEvidence(bd beads.Client, issueID string, issue *beads.Issue, assignmentAt time.Time, assignee, currentHead string) (bool, error) {

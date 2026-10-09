@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -86,8 +87,8 @@ func TestDeferredDoneLeavesReadyToLandBeadUntouched(t *testing.T) {
 		routed: func(string) beads.Client { return db },
 		source: func(string, string) beads.Client { return db },
 		purge:  func(string, string) {},
-		reviewHead: func() (string, error) {
-			return "", errors.New("resolving current HEAD: not a git repository")
+		reviewHead: func(string) (string, error) {
+			return "", errors.New("resolving HEAD: not a git repository")
 		},
 	}
 	if err := updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, done.ExitDeferred, "gt-held"); err != nil {
@@ -146,7 +147,7 @@ func TestCompletedDoneOnUnchangedReworkRecordsTheRequeueHint(t *testing.T) {
 		routed: func(string) beads.Client { return db },
 		source: func(string, string) beads.Client { return db },
 		purge:  func(string, string) {},
-		reviewHead: func() (string, error) {
+		reviewHead: func(string) (string, error) {
 			return head, nil
 		},
 	}
@@ -173,5 +174,74 @@ func TestCompletedDoneOnUnchangedReworkRecordsTheRequeueHint(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Errorf("comment %q does not carry %q", text, want)
 		}
+	}
+}
+
+// TestDoneAgentStateAsksForHeadInItsOwnCwd: the HEAD the close gate judges
+// comes from the worktree gt done was handed, not from the process working
+// directory. gt done can resolve its agent and worktree from the environment,
+// so a run standing elsewhere would otherwise validate a rework stand-down (and
+// review evidence) against another repository's head (gt-u0zq0).
+func TestDoneAgentStateAsksForHeadInItsOwnCwd(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	for _, dir := range []string{"mayor", filepath.Join(".beads", "locks"), "gastown"} {
+		if err := os.MkdirAll(filepath.Join(townRoot, dir), 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	routes := `{"prefix":"gt-","path":"gastown"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+
+	db := beadsfake.New(beadsfake.WithPrefix("gt"))
+	db.Seed(doneAgentBead(), beads.Issue{
+		ID: "gt-base-123", Title: "Base bead", Status: string(beads.StatusHooked),
+	})
+
+	var asked []string
+	env := doneStateEnv{
+		getenv: envMap(map[string]string{"GT_ROLE": "polecat", "GT_RIG": "gastown", "GT_POLECAT": "nux"}),
+		routed: func(string) beads.Client { return db },
+		source: func(string, string) beads.Client { return db },
+		purge:  func(string, string) {},
+		reviewHead: func(dir string) (string, error) {
+			asked = append(asked, dir)
+			return "", errors.New("resolving HEAD in " + dir + ": not a git repository")
+		},
+	}
+
+	cwd := filepath.Join(townRoot, "gastown")
+	if err := updateAgentStateOnDoneIn(env, cwd, townRoot, done.ExitCompleted, "gt-base-123"); err != nil {
+		t.Fatalf("completed gt done: %v", err)
+	}
+	if len(asked) == 0 {
+		t.Fatal("the close gate resolved no HEAD")
+	}
+	for _, dir := range asked {
+		if dir != cwd {
+			t.Errorf("HEAD asked for in %q, want the worktree gt done was given (%q)", dir, cwd)
+		}
+	}
+	// A HEAD that cannot be read is reported, not fatal: the close still runs,
+	// which is the fail-open side this gate takes for state it cannot inspect.
+	got, err := db.Show("gt-base-123")
+	if err != nil {
+		t.Fatalf("show gt-base-123: %v", err)
+	}
+	if got.Status != string(beads.StatusClosed) {
+		t.Errorf("gt-base-123 status = %q, want closed despite the unreadable HEAD", got.Status)
+	}
+}
+
+// TestDoneStateEnvZeroValueResolvesHeadInTheGivenDir pins the default wiring:
+// a doneStateEnv that names no resolver reads HEAD through
+// done.CurrentReviewEvidenceHeadIn, which takes the directory to read it in.
+func TestDoneStateEnvZeroValueResolvesHeadInTheGivenDir(t *testing.T) {
+	t.Parallel()
+	var e doneStateEnv
+	if got, want := reflect.ValueOf(e.head()).Pointer(), reflect.ValueOf(done.CurrentReviewEvidenceHeadIn).Pointer(); got != want {
+		t.Error("zero doneStateEnv does not resolve HEAD through done.CurrentReviewEvidenceHeadIn")
 	}
 }

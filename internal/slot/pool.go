@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/lock"
+	"github.com/steveyegge/gastown/internal/procid"
 )
 
 // Pool describes how many container-gate slots the town hands out and how
@@ -236,12 +237,34 @@ func knownSlotIndices(townRoot string, pool Pool) []int {
 // Acquire just created, so a directory an owner file cannot be written to is one
 // the flock would have failed on first.
 func writeSlotOwner(townRoot string, i int, role string, pid int, at time.Time) {
+	start, _ := procid.StartToken(pid)
 	_ = atomicfile.EnsureDirAndWriteJSON(SlotOwnerPath(townRoot, i), Owner{
 		Role:       role,
 		PID:        pid,
+		Start:      start,
 		AcquiredAt: at,
 		Slot:       i,
 	})
+}
+
+// settleSlotOwner republishes slot i's owner file once the acquisition is past
+// its `docker ps` probe, marking the claim as a holder's rather than a
+// claimant's (Owner.Settled). The claim is published at writeSlotOwner so the
+// gate and the full-suite cap see a holder throughout the probe (gt-dhcmp);
+// this second write is what tells a reader which of the two it is looking at.
+//
+// The distinction is load-bearing for othersHeld: a claimant still in its probe
+// may yet release the slot, so it must not be what excuses another acquirer
+// from probing for an unwrapped suite (gt-u0zq0). A missing or unreadable file
+// is left alone — the claim already reached its readers as far as it can, and
+// nothing here is fatal to the hold, which the flock is (writeSlotOwner).
+func settleSlotOwner(townRoot string, i int) {
+	owner := readSlotOwner(townRoot, i)
+	if owner == nil || owner.Settled {
+		return
+	}
+	owner.Settled = true
+	_ = atomicfile.EnsureDirAndWriteJSON(SlotOwnerPath(townRoot, i), *owner)
 }
 
 // dropSlotClaim withdraws a claim writeSlotOwner published and releases the
@@ -252,11 +275,28 @@ func dropSlotClaim(townRoot string, i int, unlock func()) {
 	unlock()
 }
 
-// othersHeld reports how many slots other than exclude are currently held,
-// by non-blocking flock probes on every known slot. Used by AcquirePool to
+// othersHeld reports how many slots other than exclude are held by a settled
+// holder — one that has finished its acquisition probe and is running its work
+// — by non-blocking flock probes on every known slot. Used by AcquirePool to
 // decide whether running gate containers are somebody's legitimate suite
 // (some other slot is held) or an unwrapped one (no slot held at all,
 // gt-tuiy). A probe that fails to open counts as not held.
+//
+// A claimant that holds the flock but has not settled is not counted. It is
+// still deciding whether to keep the slot, and counting it is how two
+// simultaneous acquirers each concluded the other held a slot and both skipped
+// the unwrapped-container probe, so an unwrapped suite could run beside them
+// undetected (gt-u0zq0). With only settled holders counted, both probe, which
+// is the safe side; each grants on a later pass once the other has settled. A
+// held slot whose owner file is missing or unreadable counts as not settled for
+// the same reason: an unreadable claim is not evidence of a suite already
+// running.
+//
+// Residual gap, on the same side: an owner file written by a binary that
+// predates Owner.Settled carries no flag and so reads as a claimant's, and a
+// new acquirer meets an old holder across an install rollover by probing beside
+// its suite and waiting for its containers rather than granting beside them.
+// The cost is a wait, never a grant this check exists to prevent.
 func othersHeld(townRoot string, pool Pool, exclude int) int {
 	held := 0
 	for _, i := range knownSlotIndices(townRoot, pool) {
@@ -273,6 +313,9 @@ func othersHeld(townRoot string, pool Pool, exclude int) int {
 		}
 		if ok {
 			unlock()
+			continue
+		}
+		if owner := readSlotOwner(townRoot, i); owner == nil || !owner.Settled {
 			continue
 		}
 		held++
@@ -439,7 +482,10 @@ func (g *Gate) acquirePool(townRoot, role string, timeout time.Duration, pool Po
 		// Both acquire paths arm the marker for their own descendants; only
 		// the fast path differs between them (see AcquirePoolReal). The owner
 		// file was written when the slot was claimed (writeSlotOwner), so this
-		// package's readers saw this holder for the whole docker probe.
+		// package's readers saw this holder for the whole docker probe; it is
+		// settled now, with the probe behind this grant, so a reader can tell
+		// this holder from a claimant still deciding (othersHeld).
+		settleSlotOwner(townRoot, i)
 		armReentrant(g.env, townRoot, i, role, g.pid)
 		if err := recordWaitResult(townRoot, role, i, g.pid, g.clock.Now(), info); err != nil {
 			fmt.Fprintf(g.probeOut, "gt slot: recording slot acquisition in history: %v\n", err)
@@ -721,8 +767,26 @@ func (g *Gate) liveFullSuiteHolders(townRoot string, pool Pool) []*Owner {
 
 // ownerGone reports whether owner names a process that certainly no longer
 // exists. Unknown owners are not gone.
+//
+// A pid is reused once its process dies, so a live process at the owner's pid
+// is not the same as a live owner: when the file recorded the start token the
+// pid had when it was written (Owner.Start) and the process at that pid now
+// carries a different one, this is a stranger wearing the owner's pid and the
+// owner is gone. The check is skipped when either side cannot be read — an
+// unreadable start time leaves the pid as the only evidence, which is what
+// every reader had before the token existed (gt-u0zq0).
 func (g *Gate) ownerGone(owner *Owner) bool {
-	return owner != nil && owner.PID > 0 && g.owner.gone(owner.PID)
+	if owner == nil || owner.PID <= 0 {
+		return false
+	}
+	if g.owner.gone != nil && g.owner.gone(owner.PID) {
+		return true
+	}
+	if owner.Start == "" || g.owner.startToken == nil {
+		return false
+	}
+	current, ok := g.owner.startToken(owner.PID)
+	return ok && current != owner.Start
 }
 
 // SlotState is the resolved state of one slot in a StatusPool report.
@@ -833,8 +897,14 @@ func (g *Gate) StatusPoolLocksOnly(townRoot string, pool Pool) (Report, error) {
 				return Report{}, err
 			}
 			if ok {
-				unlock()
+				// Remove the stale owner file while the flock is still held: an
+				// unlock first would let the next acquirer take the slot and
+				// write its own owner file in the window before the remove,
+				// which this then deletes — the new holder's file, gone
+				// (gt-u0zq0). A slot's file only ever belongs to its holder, so
+				// a removal under the lock removes only a dead holder's.
 				_ = os.Remove(SlotOwnerPath(townRoot, i))
+				unlock()
 			} else {
 				st.Held = true
 				st.Owner = readSlotOwner(townRoot, i)

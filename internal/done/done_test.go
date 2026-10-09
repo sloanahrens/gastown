@@ -448,7 +448,7 @@ func TestNonReviewOnlyReviewGateDoesNotChangeCriteriaHandling(t *testing.T) {
 		AcceptanceCriteria: "- [ ] still open\n",
 	}
 
-	reason, fatal := doneSourceCloseSkipReason(nil, issue.ID, issue)
+	reason, fatal := doneSourceCloseSkipReason("", nil, issue.ID, issue)
 	if reason == "" || fatal {
 		t.Fatalf("criteria gate = %q, %v; want non-fatal skip", reason, fatal)
 	}
@@ -464,7 +464,7 @@ func TestSourceCloseRejectsNonConcreteIssue(t *testing.T) {
 		Labels: []string{"gt:merge-request"},
 	}
 
-	reason, fatal := doneSourceCloseSkipReason(nil, issue.ID, issue)
+	reason, fatal := doneSourceCloseSkipReason("", nil, issue.ID, issue)
 	if reason == "" || !fatal {
 		t.Fatalf("source close gate = %q, %v; want fatal non-concrete rejection", reason, fatal)
 	}
@@ -481,7 +481,7 @@ func TestSourceCloseRejectsLocalMergeStrategy(t *testing.T) {
 		Description: "merge_strategy: local\n",
 	}
 
-	reason, fatal := doneSourceCloseSkipReason(nil, issue.ID, issue)
+	reason, fatal := doneSourceCloseSkipReason("", nil, issue.ID, issue)
 	if reason == "" || fatal {
 		t.Fatalf("local source close gate = %q, %v; want non-fatal skip", reason, fatal)
 	}

@@ -144,7 +144,7 @@ type slingDeps struct {
 
 	// Reassignment away from a previous holder.
 	requester          func() string
-	clearReassigned    func(townRoot, assignee string)
+	clearReassigned    func(townRoot, assignee string) (restore func())
 	unhook             func(townRoot, beadID string) error
 	recordReassignment func(townRoot, beadID, from, to, requester string)
 
