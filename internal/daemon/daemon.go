@@ -2006,7 +2006,7 @@ func StopDaemon(townRoot string) error {
 		return fmt.Errorf("finding process: %w", err)
 	}
 
-	// Tell the daemon this stop is deliberate before signalling it: a signal
+	// Tell the daemon this stop is deliberate before signaling it: a signal
 	// without the marker makes it exit 75 so launchd relaunches it (gt-swsqm).
 	if err := writeStopRequested(townRoot, pid, time.Now()); err != nil {
 		return fmt.Errorf("recording the stop request: %w", err)
