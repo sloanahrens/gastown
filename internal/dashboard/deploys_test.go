@@ -141,6 +141,7 @@ func TestDeployReaderDrawsARunAsStagesInNeedsOrder(t *testing.T) {
 	assert.Equal(t, "success", row.Status)
 	assert.Equal(t, "https://forgejo.test/runs/7", row.URL)
 	assert.True(t, row.At.Equal(time.Date(2026, 10, 5, 10, 30, 0, 0, time.UTC)), "the row carries the run's own creation time")
+	assert.False(t, row.StagesSkipped, "a run inside the cap had its jobs asked for")
 	assert.False(t, row.StagesUnread)
 	assert.Empty(t, row.Warn)
 	assert.Equal(t, []string{
@@ -326,7 +327,8 @@ func TestDeployReaderCapsBothWorkflowsTogether(t *testing.T) {
 	assert.Equal(t, []string{"deploy.yml", "staging.yml", "deploy.yml", "staging.yml", "deploy.yml"}, workflowsOf(d.Runs))
 	assert.Equal(t, []int64{8, 7, 6}, stub.jobsAsked, "jobs for the newest three, the two workflows sharing the cap")
 	for i, row := range d.Runs {
-		assert.Equal(t, i >= deployJobsKept, row.StagesUnread, "a run past the cap says its stages were not read")
+		assert.Equal(t, i >= deployJobsKept, row.StagesSkipped, "a run past the cap was never asked for its jobs")
+		assert.False(t, row.StagesUnread, "and nothing failed, so the two are told apart")
 	}
 }
 
@@ -439,7 +441,8 @@ func TestDeployReaderStripsAndCapsHostileStageNames(t *testing.T) {
 
 // Runs cost one call per repo and jobs cost one each, so the jobs are capped:
 // the newest runs get them and the rest carry their ref, commit, state and age
-// with the page saying their stages were not read.
+// with no stages. A run past the cap is marked skipped, which is not the mark a
+// failed jobs call leaves — the page draws the two differently (gt-egffr).
 func TestDeployReaderFetchesJobsForTheNewestRunsOnly(t *testing.T) {
 	t.Parallel()
 
@@ -457,15 +460,17 @@ func TestDeployReaderFetchesJobsForTheNewestRunsOnly(t *testing.T) {
 	assert.Equal(t, []string{"v0.7", "v0.6", "v0.5", "v0.4", "v0.3"}, refsOf(d.Runs), "newest first")
 	assert.Equal(t, []int64{8, 7, 6}, stub.jobsAsked, "jobs for the newest three, across every repo")
 	for i, row := range d.Runs {
-		assert.Equal(t, i >= deployJobsKept, row.StagesUnread, "a run past the cap says its stages were not read")
+		assert.Equal(t, i >= deployJobsKept, row.StagesSkipped, "a run past the cap was never asked for its jobs")
+		assert.False(t, row.StagesUnread, "and nothing failed, so the two are told apart")
 	}
 
-	// A jobs call that fails leaves that run saying the same, rather than an
-	// empty stage list the page would draw as a run with no stages.
+	// A jobs call that fails is a different mark on the run: its stages were
+	// asked for and did not come back, rather than never asked for at all.
 	stub.jobsErr = map[int64]error{8: io.EOF}
 	d = newDeployTestReader(stub, nil).Read()
 	require.Len(t, d.Runs, deployRunsKept)
-	assert.True(t, d.Runs[0].StagesUnread)
+	assert.True(t, d.Runs[0].StagesUnread, "the failed call is what the run says")
+	assert.False(t, d.Runs[0].StagesSkipped, "the run was inside the cap and its jobs were asked for")
 }
 
 // refsOf names the rows by ref, which is what the tests address them by.

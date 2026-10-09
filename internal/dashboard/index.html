@@ -166,7 +166,7 @@ section.collapsed>h2{border-bottom:0}
 h3.sub{display:flex;gap:10px;align-items:center;margin:0;padding:10px 12px 0;font-size:11px;font-weight:400;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
 h3.sub .r{margin-left:auto;text-transform:none;letter-spacing:0;white-space:normal;text-align:right}
 .dhead,.drow{display:flex;flex-wrap:wrap;gap:2px 8px;align-items:baseline}
-.dhead{color:var(--dim);font-size:11px;padding-bottom:2px}
+.dhead{color:var(--dim);padding-bottom:2px}
 .drow{padding:4px 0;border-top:1px solid var(--line)}
 .drepo,.dref,.dhash,.dstate,.dage{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .drepo{flex:0 0 var(--drepo,15ch)}
@@ -911,17 +911,20 @@ function renderDeploys(s) {
   note.textContent = err ? "could not read the runs: " + err : (unreadable ? unreadable + (unreadable === 1 ? " repo unreadable" : " repos unreadable") : "");
   const runs = d.runs || [];
   if (!runs.length) { box.append(el("div", err ? "badc" : "empty", err ? "no deploy runs: " + err : "no deploy runs yet")); return; }
-  // The repo column is as wide as the longest name the block lists, so no name
-  // is cut to make room for another (gt-1hob8). The ref column keeps the width
-  // it always held, and a staging run's tag rides inside it, so a list holding
-  // one takes the tag's own width as well and shows no ref narrower than it
-  // would among releases (gt-2h2lx).
+  // The repo column is as wide as the longest name the block lists, plus one
+  // character so the rounding of a name that fits does not ellipsize it, and
+  // no name is cut to make room for another (gt-1hob8, gt-egffr). The ref
+  // column keeps the width it always held, and a staging run's tag rides inside
+  // it, so a list holding one takes the tag's own width as well and shows no
+  // ref narrower than it would among releases (gt-2h2lx). Every header cell
+  // carries its column's class and the header takes the rows' font, since the
+  // widths are in ch and a ch is the drawing font's own (gt-egffr).
   let widest = 0, tags = false;
   for (const r of runs) {
     widest = Math.max(widest, repoShort(r.repo).length);
     tags = tags || r.workflow === DEPLOY_STAGING;
   }
-  box.style.setProperty("--drepo", widest + "ch");
+  box.style.setProperty("--drepo", (widest + 1) + "ch");
   box.style.setProperty("--dref", (DEPLOY_REF_CH + (tags ? DEPLOY_STAGING_TAG_CH : 0)) + "ch");
   const head = el("div", "dhead");
   [["Repo", "drepo"], ["Ref", "dref"], ["Commit", "dhash"], ["State", "dstate"], ["Age", "dage"]].forEach(([h, cls]) => head.append(el("span", cls, h)));
@@ -948,20 +951,45 @@ function deployRow(r) {
     g.title = "the staging workflow's run: a landing deployed " + (r.ref || "main") + " to staging, not a release";
     ref.append(g);
   }
-  row.append(repo, ref, el("span", "dhash", r.hash || "–"), el("span", "dstate", r.status || "–"), el("span", "dage", r.at ? age(r.at) : "–"), deployStages(r));
+  const state = el("span", "dstate", deployState(r));
+  // The cell says running for a run that is moving; the API's own word stays
+  // on its title, since that is the status the reader inferred the run's
+  // trouble from (gt-egffr).
+  if (state.textContent !== (r.status || "–")) state.title = r.status;
+  row.append(repo, ref, el("span", "dhash", r.hash || "–"), state, el("span", "dage", r.at ? age(r.at) : "–"), deployStages(r));
   if (r.warn) row.append(el("span", "dwarn warnc", r.warn));
   return row;
 }
 
+// deployState is the State cell's word. Forgejo calls a run "blocked" in the
+// moment between one job finishing and the next being picked up, so a run the
+// API calls blocked or waiting with a stage already succeeded or running is a
+// run that is moving: the cell says running. A run no stage has started in is
+// still waiting for its first stage and says what the API said (gt-egffr).
+const DEPLOY_MOVING = {blocked: true, waiting: true};
+const DEPLOY_STARTED = {success: true, running: true};
+
+function deployState(r) {
+  const raw = r.status || "–";
+  if (!DEPLOY_MOVING[raw]) return raw;
+  return (r.stages || []).some(st => DEPLOY_STARTED[st.status]) ? "running" : raw;
+}
+
 // The stage cell: one chip per stage, in the order the reader sorted the jobs'
 // needs into, each carrying its name and the glyph of the state the API
-// reported, with the state's own word on the chip's title. A run whose jobs
-// were not read says so rather than drawing a blank the operator would read as
-// a run with no stages.
+// reported, with the state's own word on the chip's title. A run the reader
+// asked for jobs of and could not have says so rather than drawing a blank the
+// operator would read as a run with no stages; one past the job-fetch cap
+// draws nothing, since a line on every capped row doubles the block's height
+// for a stage list nobody can be shown (gt-egffr).
 function deployStages(r) {
   const cell = el("span", "dstage");
   const stages = r.stages || [];
-  if (!stages.length) { cell.className += " title"; cell.textContent = r.stages_unread ? "stages not read" : "–"; return cell; }
+  if (!stages.length) {
+    if (r.stages_unread) { cell.className += " title"; cell.textContent = "stages not read"; }
+    else if (!r.stages_skipped) cell.textContent = "–";
+    return cell;
+  }
   for (const st of stages) {
     const chip = el("span", "tag " + (DEPLOY_STAGE[st.status] || "sev-low"), (st.name || "–") + " " + (DEPLOY_GLYPH[st.status] || "–"));
     chip.title = (st.name || "–") + " " + (st.status || "?");

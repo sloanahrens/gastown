@@ -107,10 +107,14 @@ type DeployRun struct {
 	URL string `json:"url,omitempty"`
 	// Stages are the run's jobs in the order their needs give.
 	Stages []DeployStage `json:"stages"`
-	// StagesUnread marks a run the block read no jobs for: one past the
-	// deployJobsKept cap, or one whose jobs call failed. The page says the
-	// stages were not read rather than drawing an empty list, which would read
-	// as a run with no stages at all.
+	// StagesSkipped marks a run past the deployJobsKept cap, whose jobs the
+	// block never asked for. The page draws no stage cell for it, so the row
+	// reads on one line; StagesUnread is the other reason a run has no stages,
+	// and the page draws that one.
+	StagesSkipped bool `json:"stages_skipped,omitempty"`
+	// StagesUnread marks a run whose jobs call failed. The page says the stages
+	// were not read rather than drawing an empty list, which would read as a
+	// run with no stages at all.
 	StagesUnread bool `json:"stages_unread,omitempty"`
 	// Warn is the runner trouble the run's own stamps and stages say, in the
 	// page's warning style: a run nothing has picked up, or one that has not
@@ -242,7 +246,7 @@ func (r *DeployReader) Read() *Deploys {
 				row.Stages = deployStages(jobs)
 			}
 		} else {
-			row.StagesUnread = true
+			row.StagesSkipped = true
 		}
 		row.Warn = r.inferWarn(dr, row, prev, next, now)
 		rows = append(rows, row)
