@@ -2,6 +2,7 @@ package doltserver
 
 import (
 	"errors"
+	"github.com/gofrs/flock"
 	"os"
 	"path/filepath"
 	"slices"
@@ -357,5 +358,63 @@ func TestEvictPortSquatterKillsVerifiedDolt(t *testing.T) {
 	}
 	if err := h.portFree(4512); err != nil {
 		t.Errorf("port still held after eviction: %v", err)
+	}
+}
+
+// A server that survives SIGKILL is still running: Stop must say so and keep
+// its pid file and state, not report a clean stop (gt-dicyp). A later Start or
+// IsRunning then still knows which process holds the data directory.
+func TestStopReportsErrorWhenServerSurvivesSIGKILL(t *testing.T) {
+	t.Parallel()
+	townRoot := testTown(t)
+	f := newFakeHost().townPort(4509)
+	h := f.host()
+	dataDir := filepath.Join(townRoot, ".dolt-data")
+	server := f.spawn(fakeProc{args: []string{"dolt", "sql-server"}, cwd: dataDir, port: 4509, ignoresTERM: true, ignoresKILL: true})
+	pidFile := writePIDFile(t, h, townRoot, server)
+
+	err := h.Stop(townRoot)
+	if err == nil {
+		t.Fatal("Stop reported success although the server survived SIGKILL")
+	}
+	if !strings.Contains(err.Error(), "still running") {
+		t.Errorf("error = %v, want it to say the server is still running", err)
+	}
+	if _, statErr := os.Stat(pidFile); statErr != nil {
+		t.Errorf("pid file removed although the server is alive: %v", statErr)
+	}
+}
+
+// An flock is released by the kernel when its holder dies, so a lock still
+// held after Start's retry window belongs to a live process (a slow start).
+// Unlinking the file and locking a fresh inode lets two starts run at once
+// (gt-dicyp): Start must give up with an error and leave the lock alone.
+func TestStartDoesNotUnlinkLockHeldByLiveStarter(t *testing.T) {
+	t.Parallel()
+	townRoot := testTown(t)
+	f := newFakeHost().townPort(4510)
+	h := f.host()
+	daemonDir := filepath.Join(townRoot, "daemon")
+	if err := os.MkdirAll(daemonDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lockFile := filepath.Join(daemonDir, "dolt.lock")
+	holder := flock.New(lockFile)
+	if ok, err := holder.TryLock(); err != nil || !ok {
+		t.Fatalf("test could not take dolt.lock: %v %v", ok, err)
+	}
+	defer holder.Unlock()
+
+	err := h.Start(townRoot)
+	if err == nil || !strings.Contains(err.Error(), "in progress") {
+		t.Fatalf("Start = %v, want an 'another start is in progress' error", err)
+	}
+	if _, statErr := os.Stat(lockFile); statErr != nil {
+		t.Errorf("dolt.lock was unlinked while held: %v", statErr)
+	}
+	probe := flock.New(lockFile)
+	if ok, _ := probe.TryLock(); ok {
+		_ = probe.Unlock()
+		t.Error("a second starter could take dolt.lock after Start gave up")
 	}
 }

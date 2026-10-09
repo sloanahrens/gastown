@@ -432,8 +432,22 @@ func (m *DoltServerManager) isRunning() (int, bool) {
 	// Verify it's actually our dolt server by checking port connectivity.
 	// More reliable than ps string matching (ZFC fix: gt-utuk).
 	if !m.isDoltServerOnPort() {
-		_ = os.Remove(m.pidFile())
-		return 0, false
+		// A live pid that misses one dial is a hung or loaded server as often
+		// as it is a reused pid. Deleting the pid file of a hung dolt leaves
+		// stopLocked with no pid, so it could never be stopped (gt-dicyp):
+		// ask who the pid is. This town's dolt is running, just not
+		// answering; provably not this town's dolt makes the file stale; an
+		// unreadable identity proves nothing, so keep the file and report not
+		// running for now.
+		switch err := m.verifyDoltSQLServer(pid); {
+		case err == nil:
+			m.logger("Dolt server PID %d is alive but not answering on %s:%d", pid, m.config.Host, m.config.Port)
+		case doltserver.IsStalePIDFileErr(err):
+			_ = os.Remove(m.pidFile())
+			return 0, false
+		default:
+			return 0, false
+		}
 	}
 
 	process, err := os.FindProcess(pid)
