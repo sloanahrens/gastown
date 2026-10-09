@@ -916,17 +916,22 @@ function reportNodes(text, prefixes) {
     const part = m[0];
     plain += s.slice(last, m.index);
     last = m.index + part.length;
-    const dash = part.indexOf("-");
-    const p = dash > 0 ? part.slice(0, dash) : "";
+    // A sentence's full stop is not the id's (gt-1h5gx): the dots that trail a
+    // run are cut before the id is tested and linked, and put back as the plain
+    // text they are. A dot inside the id — dv-1fel.4 — is the id's own.
+    const id = part.replace(/\.+$/, "");
+    const dash = id.indexOf("-");
+    const p = dash > 0 ? id.slice(0, dash) : "";
     // A prefix off Object.prototype ("constructor") is not a store's.
     const rig = p && Object.prototype.hasOwnProperty.call(map, p) ? map[p] : "";
-    if (!rig || !BEAD_TOKEN.test(part)) { plain += part; continue; }
+    if (!rig || !BEAD_TOKEN.test(id)) { plain += part; continue; }
     flush();
-    const b = el("button", "rbead", part);
+    const b = el("button", "rbead", id);
     b.type = "button";
-    b.title = "open " + rig + "/" + part;
-    b.onclick = () => openReportBead(rig, part);
+    b.title = "open " + rig + "/" + id;
+    b.onclick = () => openReportBead(rig, id);
     out.push(b);
+    plain += part.slice(id.length);
   }
   plain += s.slice(last);
   flush();
