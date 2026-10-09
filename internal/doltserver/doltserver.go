@@ -956,9 +956,7 @@ func (h *host) findDoltServerOnPort(port int) int {
 	// Try lsof — preferred when available (cross-platform).
 	// Without -sTCP:LISTEN, lsof returns client PIDs (e.g., gt daemon) first,
 	// which aren't dolt processes — causing false negatives.
-	cmd := exec.Command("lsof", "-i", fmt.Sprintf(":%d", port), "-sTCP:LISTEN", "-t")
-	setProcessGroup(cmd)
-	if output, err := h.exec(cmd); err == nil {
+	if output, err := h.probe("lsof", "-i", fmt.Sprintf(":%d", port), "-sTCP:LISTEN", "-t"); err == nil {
 		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 		if len(lines) > 0 && lines[0] != "" {
 			if pid, err := strconv.Atoi(lines[0]); err == nil {
@@ -969,9 +967,7 @@ func (h *host) findDoltServerOnPort(port int) int {
 
 	// Fall back to ss (iproute2) — standard on modern Linux, no extra packages needed.
 	// Example output line: LISTEN 0 128 *:3307 *:* users:(("dolt",pid=12345,fd=7))
-	cmd = exec.Command("ss", "-tlnp", fmt.Sprintf("sport = :%d", port))
-	setProcessGroup(cmd)
-	if output, err := h.exec(cmd); err == nil {
+	if output, err := h.probe("ss", "-tlnp", fmt.Sprintf("sport = :%d", port)); err == nil {
 		for _, line := range strings.Split(string(output), "\n") {
 			if idx := strings.Index(line, "pid="); idx >= 0 {
 				rest := line[idx+4:]
@@ -1912,7 +1908,7 @@ func (h *host) waitForPortRelease(port int, timeout time.Duration) error {
 // writeServerConfig writes a managed Dolt config.yaml from the Config struct.
 // This ensures all required settings (especially connection timeouts) are always
 // present when the server starts. The file is overwritten on each start to prevent
-// configuration drift.
+// configuration drift, atomically, so a reader never sees a partial file.
 func writeServerConfig(config *Config, configPath string) error {
 	// Build the listener host entry. Omit it when empty to use Dolt's default
 	// (binds to all interfaces), which is the backward-compatible behavior.
@@ -1993,7 +1989,9 @@ behavior:
 		systemVariablesBlock,
 	)
 
-	return os.WriteFile(configPath, []byte(content), 0600)
+	// Written atomically: townconfig reads this file strictly, so a reader
+	// must never see a half-written config (C5).
+	return atomicfile.WriteFile(configPath, []byte(content), 0600)
 }
 
 // Start starts the Dolt SQL server. It refuses while the town's Dolt pause
@@ -2176,18 +2174,16 @@ func (h *host) Start(townRoot string) error {
 	}
 
 	// Clean stale Unix socket from prior crash. Dolt creates /tmp/mysql.sock by
-	// default (or a port-specific variant). If the server crashed, the socket file
-	// persists and Dolt warns "unix socket set up failed: file already in use".
-	// Safe to remove: if a Dolt server were actually running, h.IsRunning() above
-	// would have detected it and we'd have returned already. (gh-2687)
+	// default (or a port-specific variant). If the server crashed, the socket
+	// file persists and Dolt warns "unix socket set up failed: file already in
+	// use". It goes through the lsof check (cleanStaleSocket): a socket some
+	// other process holds — an unrelated mysqld bound to port 3306, say — must
+	// survive a start. (G5, gh-2687)
 	socketPath := "/tmp/mysql.sock"
 	if config.Port != 3306 {
 		socketPath = fmt.Sprintf("/tmp/mysql.%d.sock", config.Port)
 	}
-	if _, statErr := os.Stat(socketPath); statErr == nil {
-		fmt.Fprintf(os.Stderr, "Removing stale Unix socket: %s\n", socketPath)
-		_ = os.Remove(socketPath)
-	}
+	h.cleanStaleSocket(socketPath)
 
 	// Always write a managed config.yaml from the Config struct before starting.
 	// This ensures critical settings (especially read/write timeouts) are always
@@ -2422,12 +2418,13 @@ func (h *host) cleanStaleSocket(socketPath string) {
 		return
 	}
 
-	// Check if any process holds the socket open
-	cmd := exec.Command("lsof", socketPath)
-	setProcessGroup(cmd)
-	if _, err := h.exec(cmd); err != nil {
+	// Check if any process holds the socket open. A probe that cannot answer
+	// (lsof missing, or one that timed out) is not an exit code 1, so the
+	// socket stays: removing one another process is using breaks that process.
+	if _, err := h.probe("lsof", socketPath); err != nil {
 		// lsof exit code 1 = no process holds it → stale, safe to remove
 		if exitCode(err) == 1 {
+			fmt.Fprintf(os.Stderr, "Removing stale Unix socket: %s\n", socketPath)
 			_ = os.Remove(socketPath)
 		}
 	}

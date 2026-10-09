@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -318,5 +319,92 @@ func TestCopyDir(t *testing.T) {
 	}
 	if string(data) != "world" {
 		t.Errorf("nested.txt = %q, want world", string(data))
+	}
+}
+
+// An entry named exactly "-beads" trims to the empty rig name, and the empty
+// name resolves to the town's own .beads: restoring it would overwrite the
+// town with a rig's backup. It is skipped instead (G7).
+func TestRestoreFromBackup_RejectsEmptyRigName(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+
+	townBeads := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(townBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townBeads, "metadata.json"),
+		[]byte(`{"backend": "dolt", "dolt_mode": "server"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	backupDir := filepath.Join(townRoot, "migration-backup-20260207-143022")
+	hijack := filepath.Join(backupDir, "-beads")
+	if err := os.MkdirAll(hijack, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hijack, "metadata.json"),
+		[]byte(`{"backend": "sqlite"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := RestoreFromBackup(townRoot, backupDir)
+	if err != nil {
+		t.Fatalf("RestoreFromBackup: %v", err)
+	}
+	if len(result.RestoredRigs) != 0 || result.RestoredTown {
+		t.Errorf("RestoredRigs = %v, RestoredTown = %v; want the -beads entry skipped",
+			result.RestoredRigs, result.RestoredTown)
+	}
+	data, err := os.ReadFile(filepath.Join(townBeads, "metadata.json"))
+	if err != nil {
+		t.Fatalf("the town's .beads was replaced: %v", err)
+	}
+	if !strings.Contains(string(data), "dolt_mode") {
+		t.Errorf("town metadata.json = %q, want the town's own file untouched", data)
+	}
+}
+
+// A copy that fails partway leaves the directory it was replacing intact: the
+// old .beads is what a failed restore falls back to, so it must outlive the
+// attempt (G7).
+func TestRestoreFromBackup_KeepsOldBeadsWhenTheCopyFails(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+
+	rigBeads := filepath.Join(townRoot, "gastown", ".beads")
+	if err := os.MkdirAll(rigBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigBeads, "metadata.json"),
+		[]byte(`{"backend": "dolt"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The backup promises a rig, but one entry cannot be copied: a dangling
+	// symlink. It sorts last, so the copy gets partway in before it fails.
+	backupDir := filepath.Join(townRoot, "migration-backup-20260207-143022")
+	rigBackup := filepath.Join(backupDir, "gastown-beads")
+	if err := os.MkdirAll(rigBackup, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigBackup, "metadata.json"),
+		[]byte(`{"backend": "sqlite"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(rigBackup, "missing-target"), filepath.Join(rigBackup, "zzz-dangling")); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := RestoreFromBackup(townRoot, backupDir)
+	if err == nil && len(result.SkippedRigs) == 0 {
+		t.Fatalf("the failed copy was not reported: result %+v, err %v", result, err)
+	}
+	data, err := os.ReadFile(filepath.Join(rigBeads, "metadata.json"))
+	if err != nil {
+		t.Fatalf("the existing .beads was destroyed by the failed copy: %v", err)
+	}
+	if !strings.Contains(string(data), `"dolt"`) {
+		t.Errorf("rig metadata.json = %q, want the pre-restore file untouched", data)
 	}
 }
