@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"math"
 	"os"
 	"os/exec"
@@ -75,9 +77,17 @@ const (
 
 // testPollutionPatterns matches issue IDs or titles that indicate test data leaked
 // into production exports. These records are filtered out before writing JSONL.
+//
+// The bar for a title pattern is that the sweep itself generates the form, never
+// that a title merely contains a word: a pattern that fires on real work drops
+// real beads from the offsite backup every cycle, and verifyNoPollution cannot
+// see the loss because it shares the definition (gt-q6ljl). So the generated
+// forms are matched exactly — an underscore test slug ("test_something", the
+// form the suites mint) or the "test issue <n>" titles the sweep creates — and
+// ordinary prose such as "Test coverage for X" or "test the pager" is kept.
 var testPollutionPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)^Test Issue`),           // title: "Test Issue ..."
-	regexp.MustCompile(`(?i)^test[_\s]`),            // title: "test_something" or "test something"
+	regexp.MustCompile(`(?i)^test[_\s]issue\b`),     // title: "Test issue 42", "test issue for validation"
+	regexp.MustCompile(`(?i)^test_`),                // title: "test_something" (underscore slug)
 	regexp.MustCompile(`^bd-[0-9]{1,2}$`),           // id: bd-1, bd-99 (suspiciously short IDs)
 	regexp.MustCompile(`^bd-[a-z]{3,5}[0-9]{1,2}$`), // id: bd-abc12 (test-style IDs)
 	testDatabaseIDPattern(),                         // id prefixes from test databases
@@ -273,7 +283,15 @@ func (d *Daemon) syncJsonlGitBackup() {
 	if removed > 0 {
 		d.logger.Printf("jsonl_git_backup: filtered %d total test-pollution record(s)", removed)
 		// Recount after filtering so spike detection uses accurate numbers.
-		recountAfterFilter(gitRepo, databases, counts)
+		// A recount we could not take leaves the pre-filter totals, which the
+		// spike guard must not compare against — halt rather than commit a
+		// count we know is wrong (gt-q6ljl).
+		if err := recountAfterFilter(gitRepo, databases, counts); err != nil {
+			d.logger.Printf("jsonl_git_backup: HALTING — %v", err)
+			d.escalateAlert(alertKeyJSONLSpike, "jsonl_git_backup", fmt.Sprintf("cannot recount exports after the pollution filter: %v — refusing to commit counts that were not verified", err))
+			cycle.failStep("push", err.Error())
+			return
+		}
 	}
 
 	// Post-scrub verification: re-scan output for any remaining pollution.
@@ -400,6 +418,33 @@ func (d *Daemon) exportDatabaseToJsonl(db, gitRepo, dataDir string, scrub bool) 
 	return total, nil
 }
 
+// jsonlExportCommand builds the `dolt sql` command for one JSONL export.
+//
+// The password travels in DOLT_CLI_PASSWORD, never in argv: argv is world
+// readable in `ps` on the shared host, so -p leaked the Dolt password to every
+// local user (gt-q6ljl). This is the path internal/doltserver (doltserver.go)
+// and the daemon's own dolt checks already use. An inherited DOLT_CLI_PASSWORD
+// is stripped first so the one canonical value wins, as doltCommand does
+// (dolt.go); duplicate keys would otherwise let a stale credential through.
+func jsonlExportCommand(ctx context.Context, useServer bool, host string, port int, user, password, query, dataDir string) *exec.Cmd {
+	var cmd *exec.Cmd
+	if useServer {
+		cmd = exec.CommandContext(ctx, "dolt",
+			"--host", host,
+			"--port", strconv.Itoa(port),
+			"--no-tls",
+			"-u", user,
+			"sql", "-r", "json", "-q", query)
+		cmd.Env = append(filterEnvKey(cmd.Environ(), "DOLT_CLI_PASSWORD"), "DOLT_CLI_PASSWORD="+password)
+	} else {
+		cmd = exec.CommandContext(ctx, "dolt", "sql", "-r", "json", "-q", query)
+	}
+	// Always set cmd.Dir to prevent stray .doltcfg/ creation (GH#2537).
+	cmd.Dir = dataDir
+	util.SetDetachedProcessGroup(cmd)
+	return cmd
+}
+
 // exportTableToJsonl runs a query and writes the result as JSONL to {dir}/{table}.jsonl.
 // Connects to the running Dolt server via --host/--port to get current committed data,
 // falling back to embedded mode (cmd.Dir=dataDir) if no server config is available.
@@ -433,21 +478,7 @@ func (d *Daemon) exportTableToJsonl(table string, q beadsql.Query, dir, dataDir 
 		useServer = true
 	}
 
-	var cmd *exec.Cmd
-	if useServer {
-		cmd = exec.CommandContext(ctx, "dolt",
-			"--host", host,
-			"--port", strconv.Itoa(port),
-			"--no-tls",
-			"-u", user,
-			"-p", password,
-			"sql", "-r", "json", "-q", query)
-	} else {
-		cmd = exec.CommandContext(ctx, "dolt", "sql", "-r", "json", "-q", query)
-	}
-	// Always set cmd.Dir to prevent stray .doltcfg/ creation (GH#2537).
-	cmd.Dir = dataDir
-	util.SetDetachedProcessGroup(cmd)
+	cmd := jsonlExportCommand(ctx, useServer, host, port, user, password, query, dataDir)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -1085,35 +1116,55 @@ func isTestPollution(record map[string]interface{}) bool {
 	return false
 }
 
-// filterTestPollution removes test-data records from a JSONL byte buffer.
-// Returns the filtered buffer and the number of records removed.
-func filterTestPollution(data []byte) ([]byte, int) {
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	// Increase buffer for large JSONL lines.
-	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
-
+// filterTestPollutionStream removes test-data records from a JSONL stream.
+//
+// It reads whole lines with no length cap — bufio.Scanner's is fixed, and a
+// line over it ends the scan, so every later record is silently dropped and,
+// with at least one pollution record removed, the truncated buffer is written
+// back over the export and pushed offsite (gt-q6ljl). A read error is returned,
+// never mistaken for end of input. "issues export writes description, design
+// and notes whole", so multi-megabyte lines are ordinary data.
+func filterTestPollutionStream(r io.Reader) ([]byte, int, error) {
+	reader := bufio.NewReader(r)
 	var out bytes.Buffer
 	removed := 0
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			body := trimLineEnding(line)
+			if len(body) > 0 {
+				var record map[string]interface{}
+				if jsonErr := json.Unmarshal(body, &record); jsonErr != nil {
+					// Can't parse — keep it (don't silently drop unknown data).
+					writeLine(&out, body)
+				} else if isTestPollution(record) {
+					removed++
+				} else {
+					writeLine(&out, body)
+				}
+			}
 		}
-		var record map[string]interface{}
-		if err := json.Unmarshal(line, &record); err != nil {
-			// Can't parse — keep it (don't silently drop unknown data).
-			out.Write(line)
-			out.WriteByte('\n')
-			continue
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return out.Bytes(), removed, nil
+			}
+			return nil, 0, err
 		}
-		if isTestPollution(record) {
-			removed++
-			continue
-		}
-		out.Write(line)
-		out.WriteByte('\n')
 	}
-	return out.Bytes(), removed
+}
+
+// trimLineEnding strips one trailing newline and any carriage return before it,
+// matching bufio.ScanLines, so re-emitted lines are byte-identical to the input.
+func trimLineEnding(line []byte) []byte {
+	line = bytes.TrimSuffix(line, []byte("\n"))
+	return bytes.TrimSuffix(line, []byte("\r"))
+}
+
+// writeLine appends body and a newline to out. A line that had no trailing
+// newline in the input gains one, so the export is always newline-terminated.
+func writeLine(out *bytes.Buffer, body []byte) {
+	out.Write(body)
+	out.WriteByte('\n')
 }
 
 // errNoSpikeBaseline is returned when history exists but yields no baseline:
@@ -1623,7 +1674,9 @@ func formatSpikeReport(spikes []spikeInfo) string {
 	return b.String()
 }
 
-// countFileLines counts the number of non-empty lines in a file.
+// countFileLines counts the number of non-empty lines in a file. It reads
+// whole lines with no length cap and reports a read error rather than treating
+// it as end of input, so a long line never shortens the count (gt-q6ljl).
 func countFileLines(path string) (int, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -1631,21 +1684,31 @@ func countFileLines(path string) (int, error) {
 	}
 	defer f.Close()
 
+	reader := bufio.NewReader(f)
 	count := 0
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
-	for scanner.Scan() {
-		if len(scanner.Bytes()) > 0 {
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		if len(trimLineEnding(line)) > 0 {
 			count++
 		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return count, nil
+			}
+			return 0, readErr
+		}
 	}
-	return count, scanner.Err()
 }
 
 // recountAfterFilter re-reads the issues.jsonl file for each database to get
 // accurate post-filter line counts. This is needed because counts from
 // exportDatabaseToJsonl reflect pre-filter totals.
-func recountAfterFilter(gitRepo string, databases []string, counts map[string]int) {
+//
+// A failed recount is returned rather than swallowed: the caller must not
+// commit counts it could not verify. Keeping the pre-filter total silently
+// would feed the spike guard the wrong number and anchor a poisoned baseline
+// in the commit history (gt-q6ljl).
+func recountAfterFilter(gitRepo string, databases []string, counts map[string]int) error {
 	for _, db := range databases {
 		if _, ok := counts[db]; !ok {
 			continue
@@ -1653,38 +1716,70 @@ func recountAfterFilter(gitRepo string, databases []string, counts map[string]in
 		issuesPath := filepath.Join(gitRepo, db, "issues.jsonl")
 		n, err := countFileLines(issuesPath)
 		if err != nil {
-			continue
+			return fmt.Errorf("recount %s: %w", issuesPath, err)
 		}
 		counts[db] = n
 	}
+	return nil
 }
 
 // applyPollutionFilter reads each database's issues.jsonl, filters out test
 // pollution records, and rewrites the file. Returns total records removed.
+//
+// The file is rewritten only when the read and the filter both succeed. A read
+// error means the buffer is a partial read, and writing it back would truncate
+// the export — the failure this filter exists to prevent (gt-q6ljl).
 func (d *Daemon) applyPollutionFilter(gitRepo string, databases []string) int {
 	totalRemoved := 0
 	for _, db := range databases {
 		issuesPath := filepath.Join(gitRepo, db, "issues.jsonl")
-		data, err := os.ReadFile(issuesPath)
+		removed, err := filterIssuesFile(issuesPath)
 		if err != nil {
+			// A database whose export failed has no issues.jsonl to filter;
+			// that is absence, not a read failure, and export already reported
+			// it. Anything else is a real read failure and is named.
+			if !errors.Is(err, fs.ErrNotExist) {
+				d.logger.Printf("jsonl_git_backup: %s: pollution filter skipped: %v", db, err)
+			}
 			continue
 		}
-		filtered, removed := filterTestPollution(data)
 		if removed > 0 {
 			d.logger.Printf("jsonl_git_backup: %s: filtered %d test-pollution record(s)", db, removed)
-			if err := os.WriteFile(issuesPath, filtered, 0644); err != nil {
-				d.logger.Printf("jsonl_git_backup: %s: error writing filtered file: %v", db, err)
-				continue
-			}
 			totalRemoved += removed
 		}
 	}
 	return totalRemoved
 }
 
+// filterIssuesFile filters one issues.jsonl in place and returns the number of
+// records removed. It writes the file only when the whole read succeeded, so a
+// read error leaves it byte-identical.
+func filterIssuesFile(path string) (int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	filtered, removed, err := filterTestPollutionStream(f)
+	f.Close()
+	if err != nil {
+		return 0, fmt.Errorf("read failed, issues.jsonl left untouched: %w", err)
+	}
+	if removed == 0 {
+		return 0, nil
+	}
+	if err := os.WriteFile(path, filtered, 0644); err != nil {
+		return 0, fmt.Errorf("writing filtered export: %w", err)
+	}
+	return removed, nil
+}
+
 // verifyNoPollution re-scans all exported issues.jsonl files for any remaining
 // suspicious records that survived both the SQL scrub and the regex filter.
 // Returns the total number of suspicious records found across all databases.
+//
+// The scan uses the same uncapped reader as the filter: a long line must not
+// hide the records after it from the check that shares the filter's definition
+// (gt-q6ljl).
 func (d *Daemon) verifyNoPollution(gitRepo string, databases []string) int {
 	total := 0
 	for _, db := range databases {
@@ -1693,22 +1788,21 @@ func (d *Daemon) verifyNoPollution(gitRepo string, databases []string) int {
 		if err != nil {
 			continue
 		}
-		scanner := bufio.NewScanner(bytes.NewReader(data))
-		scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			if len(line) == 0 {
-				continue
+		reader := bufio.NewReader(bytes.NewReader(data))
+		for {
+			line, readErr := reader.ReadBytes('\n')
+			body := trimLineEnding(line)
+			if len(body) > 0 {
+				var record map[string]interface{}
+				if json.Unmarshal(body, &record) == nil && isTestPollution(record) {
+					id, _ := record["id"].(string)
+					title, _ := record["title"].(string)
+					d.logger.Printf("jsonl_git_backup: VERIFY FAIL: %s: suspicious record id=%q title=%q", db, id, title)
+					total++
+				}
 			}
-			var record map[string]interface{}
-			if err := json.Unmarshal(line, &record); err != nil {
-				continue
-			}
-			if isTestPollution(record) {
-				id, _ := record["id"].(string)
-				title, _ := record["title"].(string)
-				d.logger.Printf("jsonl_git_backup: VERIFY FAIL: %s: suspicious record id=%q title=%q", db, id, title)
-				total++
+			if readErr != nil {
+				break
 			}
 		}
 	}
