@@ -38,7 +38,11 @@ var daemonStartCmd = &cobra.Command{
 	Short: "Start the daemon",
 	Long: `Start the Gas Town daemon in the background.
 
-The daemon will run until stopped with 'gt daemon stop'.`,
+The daemon will run until stopped with 'gt daemon stop'.
+
+Exit codes of 'gt daemon run': 0 after 'gt daemon stop' or 'gt down'; 75 after
+an upgrade restart or after any signal gt did not send, so a launchd job with
+KeepAlive SuccessfulExit=false relaunches it.`,
 	RunE: runDaemonStart,
 }
 
@@ -606,12 +610,14 @@ func runDaemonRotateLogs(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// daemonRunExit maps daemon.ErrRestartForUpgrade to exit code 75 so launchd
-// (KeepAlive SuccessfulExit=false) restarts the daemon on the installed
-// binary. A plain nil return would exit 0 and leave the daemon down. exit is
+// daemonRunExit maps daemon.ErrRestartForUpgrade and daemon.ErrUnrequestedStop
+// to exit code 75 so launchd (KeepAlive SuccessfulExit=false) restarts the
+// daemon: on the installed binary after an upgrade, or after a signal gt did
+// not send. A plain nil return would exit 0 and leave the daemon down. Exit
+// codes: 0 = stopped by gt daemon stop / gt down, 75 = relaunch me. exit is
 // os.Exit.
 func daemonRunExit(err error, exit func(code int)) error {
-	if errors.Is(err, daemon.ErrRestartForUpgrade) {
+	if errors.Is(err, daemon.ErrRestartForUpgrade) || errors.Is(err, daemon.ErrUnrequestedStop) {
 		exit(75)
 		return nil
 	}
