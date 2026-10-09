@@ -123,9 +123,10 @@ func TestCloudReadsAPatrolThatFoundNothing(t *testing.T) {
 	}
 }
 
-// A heartbeat older than the patrol's own run interval reads overdue, and a
+// A heartbeat older than the patrol's own late threshold reads overdue, and a
 // heartbeat still inside it does not: the boundary is what tells a late patrol
-// from one that simply has not run yet.
+// from one that simply has not run yet. The patrol runs every 30 minutes, so
+// the threshold is two hours: just under reads fresh, just over reads overdue.
 func TestCloudReadsALatePatrolAsOverdue(t *testing.T) {
 	t.Parallel()
 
@@ -134,9 +135,9 @@ func TestCloudReadsALatePatrolAsOverdue(t *testing.T) {
 		age  time.Duration
 		want string
 	}{
-		{cloudOverdue - time.Minute, CloudFresh},
+		{1*time.Hour + 59*time.Minute, CloudFresh},
 		{cloudOverdue, CloudFresh},
-		{cloudOverdue + time.Minute, CloudOverdue},
+		{2*time.Hour + time.Minute, CloudOverdue},
 		{48 * time.Hour, CloudOverdue},
 	} {
 		dir := cloudFixture(t, report, cloudNow.Add(-tc.age).Format(time.RFC3339))
@@ -355,9 +356,9 @@ func cloudTree(t *testing.T, dir string) map[string]string {
 }
 
 // The hub reads a machine with no patrol at the slow interval, and a machine
-// with one at the page's own. A patrol is installed rarely and its report
-// changes every six hours, so re-reading a directory that is not there at the
-// page's rate would only be a minute's worth of the same sentence.
+// with one at the page's own. A patrol is installed rarely, so re-reading a
+// directory that is not there at the page's rate would only be a minute's worth
+// of the same sentence.
 func TestCloudWorkerReadsAPatrolAtTheIntervalAndItsAbsenceSlowly(t *testing.T) {
 	t.Parallel()
 

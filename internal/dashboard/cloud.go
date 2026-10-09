@@ -39,8 +39,10 @@ const (
 	cloudMaxFindings = 100
 
 	// cloudOverdue is how long after its heartbeat the patrol reads as late.
-	// The patrol runs every six hours, so this leaves a run's slack.
-	cloudOverdue = 7 * time.Hour
+	// The patrol runs every 30 minutes (install-patrol.sh,
+	// GT_PATROL_INTERVAL_SECS, default 1800), so this leaves slack for a few
+	// missed runs before the panel calls it late.
+	cloudOverdue = 2 * time.Hour
 
 	// The cap on each string the page shows, in runes. Kind and Project are ids,
 	// a Resource is a path, and a Detail is the one prose field.
