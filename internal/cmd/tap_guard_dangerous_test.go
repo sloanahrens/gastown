@@ -2152,3 +2152,87 @@ func TestRunTapGuardDangerous_IdleGateFollowsCdOnTheLine(t *testing.T) {
 		})
 	}
 }
+
+// TestShellTokenizeEndsCommentsAtNewline pins gt-vonb1: a '#' that starts a
+// word is a shell comment that runs to the end of its LINE. Because the
+// tokenizer rewrites an unquoted newline to " ; " before shlex runs, shlex
+// (which also treats a word-leading '#' as a comment) used to swallow the rest
+// of the whole command, hiding every later line from every guard.
+func TestShellTokenizeEndsCommentsAtNewline(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		want    []string
+	}{
+		{"trailing comment ends at the newline", "echo ok # note\ngit reset --hard",
+			[]string{"echo", "ok", ";", "git", "reset", "--hard"}},
+		{"glued comment ends at the newline", "echo ok #note\ngit push --force",
+			[]string{"echo", "ok", ";", "git", "push", "--force"}},
+		{"comment after a separator", "ls; # x\ngit reset --hard HEAD~3",
+			[]string{"ls", ";", ";", "git", "reset", "--hard", "HEAD~3"}},
+		{"leading comment line", "# c\nrm -rf /",
+			[]string{";", "rm", "-rf", "/"}},
+		{"comment-only command has nothing to run", "# just a note",
+			[]string{}},
+		{"hash inside a word is not a comment", "echo a#b\nrm -rf /",
+			[]string{"echo", "a#b", ";", "rm", "-rf", "/"}},
+		{"hash inside double quotes is literal", "echo \"a # b\"\nls",
+			[]string{"echo", "a # b", ";", "ls"}},
+		{"hash inside single quotes is literal", "echo 'a # b'\nls",
+			[]string{"echo", "a # b", ";", "ls"}},
+		{"escaped hash is literal", "echo \\#x\nls",
+			[]string{"echo", "#x", ";", "ls"}},
+		{"parameter length is not a comment", "echo ${#x}\nls",
+			[]string{"echo", "${#x}", ";", "ls"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shellTokenize(tt.command)
+			if len(got) != len(tt.want) {
+				t.Fatalf("shellTokenize(%q) = %q, want %q", tt.command, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("shellTokenize(%q) = %q, want %q", tt.command, got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+// TestDangerousCommandBlockedAfterComment is the end-to-end form of gt-vonb1:
+// a comment on an earlier line must not let a dangerous later line through.
+func TestDangerousCommandBlockedAfterComment(t *testing.T) {
+	t.Parallel()
+	for _, command := range []string{
+		"echo ok # note\ngit reset --hard",
+		"# step 1\ngit reset --hard HEAD~3",
+		"ls; # x\ngit clean -fd",
+		"echo ok #note\ngit push --force origin main",
+	} {
+		if reason, _ := evaluateDangerousCommand(command, 0, noTownSession); reason == "" {
+			t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked", command)
+		}
+	}
+}
+
+// TestSplitSpacedCommandFailsTowardChecking pins the gt-vonb1 backstop: if
+// shlex yields no tokens for text that still has words in it, the words are
+// returned rather than silently dropped.
+func TestSplitSpacedCommandFailsTowardChecking(t *testing.T) {
+	t.Parallel()
+	got := splitSpacedCommand("# x rm -rf /", "# x rm -rf /")
+	want := []string{"#", "x", "rm", "-rf", "/"}
+	if len(got) != len(want) {
+		t.Fatalf("splitSpacedCommand = %q, want %q", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("splitSpacedCommand = %q, want %q", got, want)
+		}
+	}
+	if got := splitSpacedCommand("", " ; "); len(got) != 1 || got[0] != ";" {
+		t.Fatalf("separator-only text = %q, want [;]", got)
+	}
+}

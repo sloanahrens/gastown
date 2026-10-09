@@ -636,9 +636,20 @@ func commandSubstitutions(command string) []string {
 // parse failure fails toward still checking real risks rather than silently
 // allowing everything through.
 func shellTokenize(command string) []string {
-	tokens, err := shlex.Split(spaceOutShellOperators(command))
+	return splitSpacedCommand(command, spaceOutShellOperators(command))
+}
+
+// splitSpacedCommand runs shlex over the operator-spaced form of command.
+func splitSpacedCommand(command, spaced string) []string {
+	tokens, err := shlex.Split(spaced)
 	if err != nil {
 		return strings.Fields(command)
+	}
+	// shlex returning nothing for text that still has words in it means it
+	// swallowed them (a comment it saw but this pass did not, gt-vonb1). Fail
+	// toward checking: split naively so the matchers still see every word.
+	if len(tokens) == 0 && strings.TrimSpace(strings.Trim(spaced, " ;")) != "" {
+		return strings.Fields(spaced)
 	}
 	return tokens
 }
@@ -776,6 +787,15 @@ func spaceOutShellOperators(command string) string {
 		case r == '\'' || r == '"':
 			scopes[len(scopes)-1].quote = r
 			emit(r)
+		case r == '#' && sc.quote == 0 && startsShellWord(runes, i):
+			// An unquoted word-leading '#' is a comment that runs to the end
+			// of its LINE (gt-vonb1). Drop it here, leaving the newline for
+			// the separator rule below: left in, shlex would read the same
+			// '#' as a comment to the end of the WHOLE string — the newline
+			// already rewritten to " ; " — and swallow every later line.
+			for i+1 < len(runes) && runes[i+1] != '\n' {
+				i++
+			}
 		case r == '\n':
 			b.WriteString(" ; ")
 		case r == ';', r == '&', r == '|':
@@ -801,6 +821,21 @@ func spaceOutShellOperators(command string) string {
 		}
 	}
 	return b.String()
+}
+
+// startsShellWord reports whether runes[i] begins a new shell word: it is the
+// first character, or follows whitespace or a command-chaining operator or an
+// opening parenthesis. A '#' that merely sits inside a word (a#b, ${#x}, $#)
+// is not a comment (gt-vonb1).
+func startsShellWord(runes []rune, i int) bool {
+	if i == 0 {
+		return true
+	}
+	switch runes[i-1] {
+	case ' ', '\t', '\n', ';', '&', '|', '(':
+		return true
+	}
+	return false
 }
 
 // shellQuoteScope is one quoting scope in spaceOutShellOperators: the
