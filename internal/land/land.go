@@ -24,6 +24,10 @@ type Beads interface {
 	Update(id string, opts beads.UpdateOptions) error
 	ForceCloseWithReason(reason string, ids ...string) error
 	AppendNotes(id, note string) error
+	// Comments is how reject tells a requeued rejection from one an
+	// interrupted pass left: both leave the bead ready with the refusal label
+	// gone, and only the requeue comment separates them (gt-en9gs).
+	Comments(id string) ([]beads.Comment, error)
 	// Children and CloseWithReason are what closing the molecule a landed
 	// bead carries needs: the walk down to its step wisps, then an unforced
 	// close of each (gt-oqz0r).
@@ -1396,16 +1400,29 @@ const MaxReworkAttempts = 3
 // and puts a refusal label on. After a completed rejection the author
 // resubmits, which re-adds the ready label but leaves the refusal label
 // behind, so the block is history and a new one is written (gt-zqqcr).
-func rejectionAlreadyRecorded(issue *beads.Issue, w Work, rej *Rejection) (RejectionNote, bool) {
+//
+// A requeue restores the ready label and drops the refusal label (gt-3e1z4),
+// leaving the same shape, so the labels alone cannot tell a requeued block from
+// an interrupted one. The requeue comment names the attempt it undid: when it
+// names this block, the block is history and this rejection is the next attempt
+// (gt-en9gs).
+func (l *Lander) rejectionAlreadyRecorded(issue *beads.Issue, w Work, rej *Rejection) (RejectionNote, bool, error) {
 	if w.Head == "" || !beads.HasLabel(issue, LabelReadyToLand) ||
 		beads.HasLabel(issue, LabelRework) || beads.HasLabel(issue, LabelNeedsHuman) {
-		return RejectionNote{}, false
+		return RejectionNote{}, false, nil
 	}
 	last, ok := ParseRejectionNote(issue.Notes)
 	if !ok || last.Head != w.Head || last.Kind != string(rej.Kind) {
-		return RejectionNote{}, false
+		return RejectionNote{}, false, nil
 	}
-	return last, true
+	comments, err := l.Beads.Comments(w.BeadID)
+	if err != nil {
+		return RejectionNote{}, false, fmt.Errorf("reading %s's comments: %w", w.BeadID, err)
+	}
+	if attempt, ok := RequeuedAttempt(comments); ok && attempt == last.Attempt {
+		return RejectionNote{}, false, nil
+	}
+	return last, true, nil
 }
 
 // reject writes rej to the work bead and returns it. A rejection whose block
@@ -1414,7 +1431,11 @@ func rejectionAlreadyRecorded(issue *beads.Issue, w Work, rej *Rejection) (Rejec
 // attempt the author never saw, and at MaxReworkAttempts the bead is escalated
 // with no rework comment ever posted (gt-zqqcr).
 func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Verdict) error {
-	recorded, repeat := rejectionAlreadyRecorded(issue, w, rej)
+	recorded, repeat, err := l.rejectionAlreadyRecorded(issue, w, rej)
+	if err != nil {
+		rej.RecordErr = err
+		return rej
+	}
 	attempt := CountRejections(issue.Notes) + 1
 	if repeat {
 		attempt = recorded.Attempt
