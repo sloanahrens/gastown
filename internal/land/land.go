@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,6 +62,18 @@ type Repo interface {
 	// it.
 	Push(remote, refspec string, force bool) error
 	VerifyPushedCommit(remote, branch, commit string) error
+	// VerifyPushedCommitReachableFromPushTarget is the read-back a shared
+	// target needs: another actor's landing may have advanced the tip between
+	// the merge and the read, so the landed commit has to be found in the
+	// branch's history rather than at its tip (gt-mdet3).
+	VerifyPushedCommitReachableFromPushTarget(remote, branch, commit string) error
+	// FindCommitMatching is the newest commit reachable from ref whose
+	// message contains pattern, which is how a landing's own merge commit is
+	// found on the target when no record of it was written (gt-mdet3).
+	FindCommitMatching(ref, pattern string) (string, error)
+	// Parents is a commit's parents, for the base of a landing read back out
+	// of the target's history.
+	Parents(commit string) ([]string, error)
 }
 
 var _ Repo = (*git.Git)(nil)
@@ -142,9 +155,13 @@ type Result struct {
 	LandedCommit string
 	PatchID      string
 	// Base is the target tip the merge was built on and the lease expected.
-	Base    string
-	Gate    GateResult
-	Verdict Verdict
+	Base string
+	// Gate is the merged tree's gate result, and GateNote is the gate line the
+	// record carries in its place for a landing whose gate result was never
+	// recorded (gt-mdet3).
+	Gate     GateResult
+	GateNote string
+	Verdict  Verdict
 	// RiskPaths are the changed paths the landing touched that matched
 	// RiskPathsFile at Base. They label the work bead and are written to the
 	// landing record; they never reject or delay the landing (gt-vsct7.4).
@@ -383,6 +400,12 @@ type MergeRequest struct {
 	// such as "ci / gate (push)". The creator check reads that context's
 	// statuses, so it is required.
 	GateContext string
+	// TargetHasCommit reports whether a commit is on the merge target. A
+	// MergePull whose response was lost — a client-side timeout the server may
+	// have completed — is decided by it, because only the target says whether
+	// the merge happened. Land sets it from its Repo; a nil one leaves such a
+	// timeout reported as the failure it may be (gt-mdet3).
+	TargetHasCommit func(commit string) (bool, error)
 }
 
 // ForgejoPulls is the part of the Forgejo client the land PR uses.
@@ -419,25 +442,26 @@ type ForgejoMerger struct {
 
 // Merge posts the review status, verifies the candidate's creators, opens the
 // land PR (reusing the one an earlier attempt left) and merges it pinned to
-// head.
+// head. Each Forgejo call carries its own deadline, so one slow call neither
+// cancels the next nor turns a merge the server completed into a failure it
+// did not (gt-mdet3).
 func (m *ForgejoMerger) Merge(parent context.Context, req MergeRequest) error {
-	ctx, cancel := context.WithTimeout(parent, nonZero(m.CallTimeout, DefaultCandidateCallTimeout))
-	defer cancel()
-	if err := m.postVerdict(ctx, req.Head, req.Verdict); err != nil {
+	if err := m.postVerdict(parent, req.Head, req.Verdict); err != nil {
 		return err
 	}
 	// The creator check runs after the verdict is posted and before anything
 	// is opened or merged: it reads the om / review status the post above
 	// created, and a candidate that fails it never reaches the PR.
-	if err := m.verifyCreators(ctx, req); err != nil {
+	if err := m.verifyCreators(parent, req); err != nil {
 		return err
 	}
 	w := req.Work
 	head := req.Head
-	pr, err := m.pullFor(ctx, w, head)
+	pr, err := m.pullFor(parent, w, head)
 	if err != nil {
 		return err
 	}
+	ctx, cancel := m.callCtx(parent)
 	err = m.Client.MergePull(ctx, m.Owner, m.RepoName, pr.Number, forgejo.MergePullRequestOption{
 		// The candidate already is the merge of the work onto the target, so a
 		// fast-forward lands that exact commit — the one CI gated and om
@@ -446,7 +470,11 @@ func (m *ForgejoMerger) Merge(parent context.Context, req MergeRequest) error {
 		Style:        forgejo.MergeStyleFastForward,
 		HeadCommitID: head,
 	})
+	cancel()
 	if err != nil {
+		if mergeResponseLost(err, parent) {
+			return m.mergeAfterTimeout(parent, req, err)
+		}
 		var apiErr *forgejo.APIError
 		switch {
 		case errors.As(err, &apiErr) && apiErr.IsConflict():
@@ -467,7 +495,47 @@ func (m *ForgejoMerger) Merge(parent context.Context, req MergeRequest) error {
 		return &InfraError{Stage: "merge pull request", Err: err}
 	}
 	m.logf("%s: merged %s on %s through pull request #%d", w.BeadID, shortSHA(head), w.Target, pr.Number)
-	m.deleteCandidate(ctx, w)
+	m.deleteCandidate(parent, w)
+	return nil
+}
+
+// callCtx bounds one Forgejo call: long enough for a healthy instance, short
+// enough that a stuck call does not hold the landing.
+func (m *ForgejoMerger) callCtx(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, nonZero(m.CallTimeout, DefaultCandidateCallTimeout))
+}
+
+// mergeResponseLost reports whether err is a MergePull that timed out on this
+// side, leaving whether the server merged unknown. A timeout that is the
+// caller's own cancellation is not one: nothing about the landing is unknown
+// there, and the caller is already stopping.
+func mergeResponseLost(err error, parent context.Context) bool {
+	if parent.Err() != nil {
+		return false
+	}
+	var netErr net.Error
+	return errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout())
+}
+
+// mergeAfterTimeout decides a MergePull whose response was lost: if the target
+// carries the candidate the server merged and the landing continues, and
+// otherwise the timeout is reported as the failure it is. Without a verifier
+// the outcome stays unknown, which is reported as an error rather than read as
+// either one.
+func (m *ForgejoMerger) mergeAfterTimeout(parent context.Context, req MergeRequest, cause error) error {
+	if req.TargetHasCommit == nil {
+		return &InfraError{Stage: "merge pull request", Err: cause}
+	}
+	landed, err := req.TargetHasCommit(req.Head)
+	if err != nil {
+		return &InfraError{Stage: "verify the merge after a timeout",
+			Err: fmt.Errorf("the merge call timed out (%v) and the target could not be read to tell whether it took: %w", cause, err)}
+	}
+	if !landed {
+		return &InfraError{Stage: "merge pull request", Err: cause}
+	}
+	m.logf("%s: the merge call timed out, but %s carries %s; the merge took", req.Work.BeadID, req.Work.Target, shortSHA(req.Head))
+	m.deleteCandidate(parent, req.Work)
 	return nil
 }
 
@@ -481,8 +549,10 @@ func (m *ForgejoMerger) Merge(parent context.Context, req MergeRequest) error {
 // already succeeded and a later landing for the same bead force-updates the
 // branch anyway — and a merge that did not happen never reaches here, so the
 // branch stays for the retry.
-func (m *ForgejoMerger) deleteCandidate(ctx context.Context, w Work) {
+func (m *ForgejoMerger) deleteCandidate(parent context.Context, w Work) {
 	branch := w.Candidate()
+	ctx, cancel := m.callCtx(parent)
+	defer cancel()
 	if err := m.Client.DeleteBranch(ctx, m.Owner, m.RepoName, branch); err != nil {
 		m.logf("%s: could not delete %s after the merge: %v", w.BeadID, branch, err)
 		return
@@ -492,7 +562,9 @@ func (m *ForgejoMerger) deleteCandidate(ctx context.Context, w Work) {
 
 // postVerdict posts om's verdict as the required om / review status on the
 // candidate commit.
-func (m *ForgejoMerger) postVerdict(ctx context.Context, head string, verdict Verdict) error {
+func (m *ForgejoMerger) postVerdict(parent context.Context, head string, verdict Verdict) error {
+	ctx, cancel := m.callCtx(parent)
+	defer cancel()
 	if _, err := m.Client.PostStatus(ctx, m.Owner, m.RepoName, head, OMVerdictStatus(verdict)); err != nil {
 		return &InfraError{Stage: "post om review status", Err: err}
 	}
@@ -511,7 +583,9 @@ func (m *ForgejoMerger) postVerdict(ctx context.Context, head string, verdict Ve
 // (verified on 16.0.5), so a version that starts attributing Actions statuses
 // to a user blocks every merge here rather than letting one through (design,
 // "Where the epic cannot be followed exactly").
-func (m *ForgejoMerger) verifyCreators(ctx context.Context, req MergeRequest) error {
+func (m *ForgejoMerger) verifyCreators(parent context.Context, req MergeRequest) error {
+	ctx, cancel := m.callCtx(parent)
+	defer cancel()
 	combined, err := m.Client.CombinedStatus(ctx, m.Owner, m.RepoName, req.Head)
 	if err != nil {
 		return &InfraError{Stage: "read the candidate's statuses", Err: err}
@@ -560,9 +634,11 @@ func creatorDesc(s *forgejo.CommitStatus) string {
 // branch is force-updated and the PR follows it — so the retry reuses that PR
 // at its new head rather than failing to open a second one for the same pair
 // of branches.
-func (m *ForgejoMerger) pullFor(ctx context.Context, w Work, head string) (*forgejo.PullRequest, error) {
+func (m *ForgejoMerger) pullFor(parent context.Context, w Work, head string) (*forgejo.PullRequest, error) {
 	branch := w.Candidate()
-	pulls, err := m.Client.OpenPulls(ctx, m.Owner, m.RepoName)
+	listCtx, listCancel := m.callCtx(parent)
+	pulls, err := m.Client.OpenPulls(listCtx, m.Owner, m.RepoName)
+	listCancel()
 	if err != nil {
 		return nil, &InfraError{Stage: "list pull requests", Err: err}
 	}
@@ -571,7 +647,9 @@ func (m *ForgejoMerger) pullFor(ctx context.Context, w Work, head string) (*forg
 			return &pulls[i], nil
 		}
 	}
-	pr, err := m.Client.CreatePull(ctx, m.Owner, m.RepoName, forgejo.CreatePullRequestOption{
+	createCtx, createCancel := m.callCtx(parent)
+	defer createCancel()
+	pr, err := m.Client.CreatePull(createCtx, m.Owner, m.RepoName, forgejo.CreatePullRequestOption{
 		Title: NoteField(fmt.Sprintf("land: %s (%s)", w.BeadID, w.Branch)),
 		Body: fmt.Sprintf("Landing %s from %s at %s onto %s.\nCI gated this commit; the %s status records the review the merge is pinned to.\n",
 			w.BeadID, NoteField(w.Branch), shortSHA(head), w.Target, OMStatusContext),
@@ -689,8 +767,19 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	if already, err := g.IsAncestor(w.Head, base); err != nil {
 		return Result{}, &InfraError{Stage: "ancestry", Err: err}
 	} else if already {
-		// It reached the target by a route that left no landing record (an
-		// operator push): not the author's to rework.
+		// This lander's own merge is also already reachable when its record
+		// was never written (the daemon died between the merge and the
+		// record, or the MergePull response was lost): that landing is
+		// finished, not rejected. Anything else reached the target by a route
+		// that left no landing record (an operator push), which is not the
+		// author's to rework (gt-mdet3).
+		completed, err := l.completeUnrecordedLanding(g, w)
+		if completed != nil {
+			return *completed, err
+		}
+		if err != nil {
+			return Result{}, err
+		}
 		return Result{}, l.reject(issue, w, &Rejection{Kind: RejectEmpty, Rework: false,
 			Reason: fmt.Sprintf("empty merge: head %s is already reachable from %s/%s (%s) with no landing record; nothing to land", shortSHA(w.Head), remote, w.Target, shortSHA(base))}, nil)
 	}
@@ -851,7 +940,8 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		return Result{}, &InfraError{Stage: "merge pull request",
 			Err: errors.New("the candidate gate reported no status context, so the merge's creator check has nothing to verify")}
 	}
-	if err := l.Merger.Merge(ctx, MergeRequest{Work: w, Head: merged, Verdict: verdict, GateContext: ciContext}); err != nil {
+	if err := l.Merger.Merge(ctx, MergeRequest{Work: w, Head: merged, Verdict: verdict, GateContext: ciContext,
+		TargetHasCommit: l.targetHasCommit(g, w.Target)}); err != nil {
 		var refused *MergeRefusedError
 		var forged *ForgedStatusError
 		switch {
@@ -869,7 +959,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		}
 		return Result{}, err
 	}
-	if err := wt.VerifyPushedCommit(remote, w.Target, merged); err != nil {
+	if err := wt.VerifyPushedCommitReachableFromPushTarget(remote, w.Target, merged); err != nil {
 		return Result{}, &InfraError{Stage: "read-back", Err: fmt.Errorf("%w: %v", ErrReadBack, err)}
 	}
 	l.logf("%s: landed %s on %s/%s (patch-id %s)", w.BeadID, shortSHA(merged), remote, w.Target, shortSHA(patchID))
@@ -918,6 +1008,76 @@ func (l *Lander) repairRecord(g Repo, w Work) (*Result, error) {
 		return res, &RecordError{Result: *res, Err: err}
 	}
 	return res, nil
+}
+
+// landMergeMarker is the literal mergeWork writes into the land merge commit
+// for w: the subject up to the base, which no other landing's message carries
+// because it names this branch, head and target.
+func landMergeMarker(w Work) string {
+	return fmt.Sprintf("land: %s (%s) onto %s (", w.Branch, shortSHA(w.Head), w.Target)
+}
+
+// completeUnrecordedLanding finishes a landing this lander merged but never
+// recorded: it finds the land merge it made for w's head on the target, writes
+// the record and returns the result. It returns nil, nil when the target
+// carries no such merge, which means the head arrived by a route that left no
+// record of this lander's and is not a landing to complete.
+//
+// The target's history is the whole evidence: om's verdict and the gate's
+// result were not kept, so the record says so rather than inventing them.
+func (l *Lander) completeUnrecordedLanding(g Repo, w Work) (*Result, error) {
+	remote := l.remote()
+	merged, err := g.FindCommitMatching(remote+"/"+w.Target, landMergeMarker(w))
+	if err != nil {
+		return nil, &InfraError{Stage: "find the landing on the target", Err: err}
+	}
+	if merged == "" {
+		return nil, nil
+	}
+	parents, err := g.Parents(merged)
+	if err != nil {
+		return nil, &InfraError{Stage: "read the landing's base", Err: err}
+	}
+	if len(parents) == 0 {
+		return nil, &InfraError{Stage: "read the landing's base",
+			Err: fmt.Errorf("the land merge %s on %s/%s has no parent to base it on", shortSHA(merged), remote, w.Target)}
+	}
+	base := parents[0]
+	patchID, err := g.PatchID(base, merged)
+	if err != nil {
+		return nil, &InfraError{Stage: "patch-id of the landing", Err: err}
+	}
+	// The risk paths are recomputed rather than carried: the label a landed
+	// path puts on the bead is the same read Land does on a live landing.
+	riskPaths, err := RiskPaths(g, base, merged)
+	if err != nil {
+		l.logf("%s: reading risk paths: %v; landing unlabelled", w.BeadID, err)
+		riskPaths = nil
+	}
+	res := &Result{LandedCommit: merged, PatchID: patchID, Base: base,
+		Verdict: Verdict{Verdict: VerdictUnrecorded}, RiskPaths: riskPaths,
+		GateNote: "not recorded: this landing merged on the target before its pass could record the gate result (gt-mdet3)"}
+	l.logf("%s: %s merged %s on %s/%s but its record was never written; finishing the landing", w.BeadID, remote, shortSHA(merged), remote, w.Target)
+	if err := l.record(w, *res); err != nil {
+		return res, &RecordError{Result: *res, Err: err}
+	}
+	return res, nil
+}
+
+// targetHasCommit is the MergeRequest.TargetHasCommit Land hands its merger:
+// whether commit is on the target now, which is the question a MergePull whose
+// response was lost is answered by.
+func (l *Lander) targetHasCommit(g Repo, target string) func(commit string) (bool, error) {
+	return func(commit string) (bool, error) {
+		if err := l.fetchTarget(g, target); err != nil {
+			return false, err
+		}
+		tip, err := g.Rev(l.remote() + "/" + target)
+		if err != nil {
+			return false, err
+		}
+		return g.IsAncestor(commit, tip)
+	}
 }
 
 func (l *Lander) validate(w Work) error {
@@ -1316,6 +1476,9 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 // the warnings it printed about the host it ran on, so a slow landing says
 // why where it is recorded.
 func gateRecord(res Result) string {
+	if res.GateNote != "" {
+		return res.GateNote
+	}
 	return strings.Join(append([]string{res.Gate.Summary()}, res.Gate.Warnings()...), "; ")
 }
 
