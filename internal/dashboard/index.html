@@ -159,7 +159,7 @@ section.collapsed>h2{border-bottom:0}
 .ccrow{display:flex;gap:6px;align-items:baseline;padding-left:10px}
 .ccsection{flex:0 0 auto;white-space:nowrap;color:var(--dim)}
 .cctext{min-width:0;overflow-wrap:anywhere}
-.reptext{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;background:#10161d;border:1px solid var(--line);border-radius:6px;padding:6px 8px;max-height:280px;overflow:auto}
+.reptext{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;background:#10161d;border:1px solid var(--line);border-radius:6px;padding:6px 8px;max-height:68vh;overflow:auto}
 .reptimes{margin:2px 0 0;padding-left:18px;color:var(--dim);font-size:11px}
 .qcard{padding:4px 0;border-top:1px solid var(--line);overflow-wrap:anywhere}
 .qtext{margin:2px 0}
@@ -881,28 +881,31 @@ function renderCloud(s) {
 // and the box wraps them, so the pane shows the report the way its writer
 // shaped it.
 //
-// The pane names the one thing the reader leaves unnamed: a latest report past
-// its hour reads as overdue, in the amber the page marks every other stale
-// reading with. The writes before the latest are listed behind a disclosure, so
-// however many the town keeps the pane is one report tall.
+// The pane dates that reading in its header the way every other pane does: the
+// report's age sits beside the title, and a latest report past its hour reads
+// as overdue in the amber the page marks every other stale reading with. The
+// writes before the latest are listed behind a disclosure, so however many the
+// town keeps the pane is one report tall.
 function renderReports(s) {
   const box = $("report"), note = $("reportnote");
   box.replaceChildren();
+  note.className = "r";
+  note.textContent = "";
+  note.title = "";
   const r = s.reports;
-  if (!r) { note.className = "r"; note.textContent = ""; box.append(el("div", "empty", "reading…")); return; }
-  note.className = r.overdue ? "r warnc" : "r";
-  note.textContent = r.overdue ? "report overdue" : "";
+  if (!r) { box.append(el("div", "empty", "reading…")); return; }
   // A directory or a report the reader could not read is a named state, and
   // never an empty pane: "no reports yet" and "could not be read" must not look
-  // alike.
+  // alike. Neither state has a write to date, so its header note stays empty.
   if (r.state === "missing" || r.state === "error") {
     box.append(el("div", r.state === "error" ? "badc" : "empty", r.note || r.state));
     return;
   }
-  const head = el("div", "chead");
-  head.title = new Date(r.written).toLocaleString();
-  head.append(el("span", "title", "written " + age(r.written) + " ago"));
-  box.append(head);
+  // The pane answers "when" as well as "how long ago": the exact local time of
+  // the write stays on the note's hover.
+  note.className = r.overdue ? "r warnc" : "r";
+  note.textContent = "written " + age(r.written) + " ago" + (r.overdue ? " · overdue" : "");
+  note.title = new Date(r.written).toLocaleString();
   box.append(el("div", "reptext", r.text || ""));
   // The list the reader sends starts at the report above, so the disclosure
   // holds the timestamps that are not the one already drawn.
