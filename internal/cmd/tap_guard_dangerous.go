@@ -1800,17 +1800,35 @@ func extractCommand(input []byte) string {
 // commands like "rm -rf ./build/" are allowed. tokens must be lowercased,
 // shell-aware tokens (see shellTokenize).
 func matchesDangerousRmRf(tokens []string) string {
-	hasRm := false
-	hasRecursiveForce := false
-	for _, f := range tokens {
-		if f == "rm" {
-			hasRm = true
-		}
-		if strings.HasPrefix(f, "-") && strings.Contains(f, "r") && strings.Contains(f, "f") {
-			hasRecursiveForce = true
-		}
-		if hasRm && hasRecursiveForce && (f == "/" || f == "/*") {
-			return "filesystem destruction (rm -rf /)"
+	for _, segment := range splitShellSegments(tokens) {
+		for i, tok := range segment {
+			if filepath.Base(tok) != "rm" || !inCommandPosition(segment, i) {
+				continue
+			}
+			// Flags are read across the whole invocation: -r -f, -fr,
+			// --recursive --force and --no-preserve-root all spell the same
+			// thing (gt-pb77k).
+			recursive, force := false, false
+			for _, f := range segment[i+1:] {
+				switch {
+				case f == "--recursive":
+					recursive = true
+				case f == "--force" || f == "--no-preserve-root":
+					force = true
+				case strings.HasPrefix(f, "--"):
+				case len(f) > 1 && f[0] == '-':
+					recursive = recursive || strings.ContainsAny(f[1:], "rR")
+					force = force || strings.Contains(f[1:], "f")
+				}
+			}
+			if !recursive || !force {
+				continue
+			}
+			for _, f := range segment[i+1:] {
+				if f == "/" || f == "/*" || f == "//" || f == "/." {
+					return "filesystem destruction (rm -rf /)"
+				}
+			}
 		}
 	}
 	return ""

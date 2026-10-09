@@ -1282,6 +1282,19 @@ func isWriteCapableCommand(base string, args []string) bool {
 	if writeCommands[base] {
 		return true
 	}
+	// find deletes or runs a command on what it finds, and xargs runs one on
+	// its input; either one naming a sibling path writes there (gt-pb77k).
+	if base == "xargs" {
+		return true
+	}
+	if base == "find" {
+		for _, arg := range args {
+			switch arg {
+			case "-delete", "-exec", "-execdir", "-ok", "-okdir":
+				return true
+			}
+		}
+	}
 	if base == "sed" {
 		for _, arg := range args {
 			// "-i", "-i.bak" (backup suffix) and "--in-place[=SUFFIX]".

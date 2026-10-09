@@ -26,13 +26,14 @@ var heavyTestPackages = map[string]bool{
 // the only role this rule applies to. The refinery MUST run whole packages
 // (that is its job) and crew are operators.
 func isPolecatContext(proc guardProcess) bool {
-	if proc.getenv("GT_POLECAT") != "" {
-		return true
+	// GT_ROLE is the signal every spawn carries ("gastown/polecats/topaz") and
+	// it decides first, as it does for the rest of the guard family: a
+	// refinery or crew session whose environment still carries a GT_POLECAT
+	// from the polecat that started it is not a polecat (gt-pb77k).
+	if role := strings.TrimSpace(proc.getenv("GT_ROLE")); role != "" {
+		return strings.Contains(role, "/polecats/") || role == "polecat" || isPolecatRole(role)
 	}
-	// GT_ROLE is the signal every spawn carries ("gastown/polecats/topaz");
-	// GT_POLECAT is set by AgentEnv alongside it but a hook that inherited
-	// only the role must still recognize the polecat.
-	if role := proc.getenv("GT_ROLE"); strings.Contains(role, "/polecats/") || role == "polecat" {
+	if proc.getenv("GT_POLECAT") != "" {
 		return true
 	}
 	cwd, err := proc.getwd()

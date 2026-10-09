@@ -268,7 +268,10 @@ while read local_ref local_sha remote_ref remote_sha; do
     # local tracking refs that may linger after branch deletion.
     # Fail closed: if ls-remote fails (network error), block the push rather than
     # silently allowing unverified integration branch content through.
-    integration_refs=$(git ls-remote --quiet origin "refs/heads/integration/*" 2>&1) || {
+    # A stalled HTTP transfer is cut after 30s so a wedged remote fails closed
+    # instead of hanging the push forever (gt-pb77k).
+    integration_refs=$(GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=30 \
+      git ls-remote --quiet origin "refs/heads/integration/*" 2>&1) || {
       echo "WARNING: Cannot verify integration branches (remote unreachable)."
       echo "Push to $default_branch blocked. Retry when network is available."
       exit 1

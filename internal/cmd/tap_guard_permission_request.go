@@ -276,8 +276,13 @@ func writePermissionRequestDenial(stdout io.Writer, hook permissionRequestInput,
 func escalateParkedPromptOnce(hook permissionRequestInput, tempDir string, escalate parkedPromptEscalator) string {
 	shape := promptShape(hook)
 	marker := promptEscalationMarker(hook, shape, tempDir)
-	if _, err := os.Stat(marker); err == nil {
-		return " This call was already reported once this session."
+	if info, err := os.Stat(marker); err == nil {
+		// A marker left by a FAILED escalation suppresses retries only for
+		// parkedPromptRetryAfter, so one Dolt hiccup does not silence the
+		// shape for the rest of the session (gt-pb77k). A success is final.
+		if !markerRecordsFailure(marker) || time.Since(info.ModTime()) < parkedPromptRetryAfter {
+			return " This call was already reported once this session."
+		}
 	}
 	if err := os.WriteFile(marker, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600); err != nil {
 		return " Escalation bookkeeping failed, so a retry of this call may report it again."
@@ -285,9 +290,22 @@ func escalateParkedPromptOnce(hook permissionRequestInput, tempDir string, escal
 	subject := fmt.Sprintf("Parked prompt denied: %s", shape)
 	body := promptEscalationBody(hook, shape)
 	if !escalate(subject, body) {
+		_ = os.WriteFile(marker, []byte(parkedPromptFailedMarker+"\n"), 0o600)
 		return " Recording the escalation failed; mail the witness if this call is required."
 	}
 	return " The escalation was recorded as a bead."
+}
+
+// parkedPromptFailedMarker is the marker content that records a failed
+// escalation; parkedPromptRetryAfter is how long that failure suppresses a retry.
+const (
+	parkedPromptFailedMarker = "escalation-failed"
+	parkedPromptRetryAfter   = 5 * time.Minute
+)
+
+func markerRecordsFailure(marker string) bool {
+	data, err := os.ReadFile(marker)
+	return err == nil && strings.HasPrefix(string(data), parkedPromptFailedMarker)
 }
 
 // promptShape labels the denied call for the mail subject and the rate-limit
