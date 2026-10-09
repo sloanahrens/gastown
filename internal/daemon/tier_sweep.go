@@ -872,17 +872,50 @@ func (d *Daemon) tierSweepWorkDir(rig string) (string, error) {
 // so the checkout is reused; anything else at the path is dropped first, because
 // a stale tree there would sweep the wrong commit.
 func tierSweepCheckout(_ context.Context, repo, dir, sha string) (func(), error) {
+	return tierSweepCheckoutWith(tierSweepGit(), repo, dir, sha)
+}
+
+// tierSweepGitOps is the git surface tierSweepCheckout drives. It is a value
+// rather than direct calls so the unit tier, which runs no git, can drive the
+// recovery below (gt-9yfgm).
+type tierSweepGitOps struct {
+	moveTo func(dir, sha string) error
+	remove func(repo, dir string) error
+	prune  func(repo string) error
+	add    func(repo, dir, sha string) error
+}
+
+// tierSweepGit is the production surface: the calls tierSweepCheckout makes
+// against the rig repository.
+func tierSweepGit() tierSweepGitOps {
+	return tierSweepGitOps{
+		moveTo: func(dir, sha string) error { return git.NewGit(dir).CheckoutDetachForce(sha) },
+		remove: func(repo, dir string) error { return git.NewGit(repo).WorktreeRemove(dir, true) },
+		prune:  func(repo string) error { return git.NewGit(repo).WorktreePrune() },
+		add:    func(repo, dir, sha string) error { return git.NewGit(repo).WorktreeAddDetached(dir, sha) },
+	}
+}
+
+func tierSweepCheckoutWith(g tierSweepGitOps, repo, dir, sha string) (func(), error) {
 	if _, err := os.Stat(dir); err == nil {
-		if err := git.NewGit(dir).CheckoutDetachForce(sha); err == nil {
+		if err := g.moveTo(dir, sha); err == nil {
 			return func() {}, nil
 		}
-		_ = git.NewGit(repo).WorktreeRemove(dir, true)
-		_ = git.NewGit(repo).WorktreePrune()
+		// WorktreeRemove drops only a registered worktree, so a directory left
+		// at the path by an unclean shutdown survives it and then wedges every
+		// add with "already exists". Remove exactly this path - never its
+		// parent or a sibling - and re-add the worktree (gt-9yfgm).
+		if err := g.remove(repo, dir); err != nil {
+			if err := os.RemoveAll(dir); err != nil {
+				return nil, err
+			}
+		}
+		_ = g.prune(repo)
 	}
 	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
 		return nil, err
 	}
-	if err := git.NewGit(repo).WorktreeAddDetached(dir, sha); err != nil {
+	if err := g.add(repo, dir, sha); err != nil {
 		return nil, err
 	}
 	return func() {}, nil
