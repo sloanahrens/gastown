@@ -187,6 +187,11 @@ type Daemon struct {
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	jsonlPushFailures int
 
+	// jsonlExportFn replaces exportDatabaseToJsonl in tests, so a JSONL backup
+	// cycle's own bookkeeping (counts, failures, alerts) can be driven without
+	// running dolt; nil is the real export.
+	jsonlExportFn func(db, gitRepo, dataDir string, scrub bool) (int, error)
+
 	// dogFeedFn records a dog cycle's failed outcome in the town feed. Nil
 	// writes the real feed; tests capture the event instead.
 	dogFeedFn func(eventType string, payload map[string]interface{}) error
