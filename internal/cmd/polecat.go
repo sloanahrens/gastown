@@ -2109,20 +2109,29 @@ func activeMRGitSafeForWorktree(worktreePath string) bool {
 	return pushed && unpushed == 0
 }
 
-// hookBeadSafeForCleanup resolves a hook-bead reference to what the bead it
-// names actually is, live. The lookup stays here; the policy is
-// polecat.ClassifyHookBead, so this path cannot drift from the Manager's
-// (hookBeadSafeForWorkstate) or the nuke gate's reading of the same reference.
-func hookBeadSafeForCleanup(bd issueShower, hookBead string) polecat.HookBeadDisposition {
+// classifyHookBeadRef resolves a hook-bead reference and classifies it, handing
+// back the bead it resolved to so a caller that must act on the blocked one —
+// rename moves a live assignment — does not read it a second time. The lookup
+// stays here; the policy is polecat.ClassifyHookBead, so no path drifts from
+// the Manager's (hookBeadSafeForWorkstate) or the nuke gate's reading of the
+// same reference.
+func classifyHookBeadRef(bd issueShower, hookBead string) (*beads.Issue, polecat.HookBeadDisposition) {
 	if hookBead == "" {
-		return polecat.HookBeadDisposition{Safe: true}
+		return nil, polecat.HookBeadDisposition{Safe: true}
 	}
 	if bd == nil {
 		// Unverifiable, not absent: fail closed the way an unreadable bead does.
-		return polecat.HookBeadDisposition{Blocker: fmt.Sprintf("hook_bead=%s status=unverified", hookBead)}
+		return nil, polecat.HookBeadDisposition{Blocker: fmt.Sprintf("hook_bead=%s status=unverified", hookBead)}
 	}
 	issue, err := bd.Show(hookBead)
-	return polecat.ClassifyHookBead(hookBead, issue, err)
+	return issue, polecat.ClassifyHookBead(hookBead, issue, err)
+}
+
+// hookBeadSafeForCleanup is classifyHookBeadRef's disposition, for callers that
+// only need to know whether the reference blocks a cleanup.
+func hookBeadSafeForCleanup(bd issueShower, hookBead string) polecat.HookBeadDisposition {
+	_, disposition := classifyHookBeadRef(bd, hookBead)
+	return disposition
 }
 
 // reconcileCleanupStatusIfSafe rewrites a stale cleanup_status to clean when

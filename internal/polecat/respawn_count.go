@@ -2,7 +2,9 @@ package polecat
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -38,24 +40,41 @@ func beadRespawnStateFile(townRoot string) string {
 	return filepath.Join(townRoot, "witness", "bead-respawn-counts.json")
 }
 
-func loadBeadRespawnState(townRoot string) *beadRespawnState {
-	data, err := os.ReadFile(beadRespawnStateFile(townRoot)) //nolint:gosec // G304: path from trusted townRoot
+func emptyBeadRespawnState() *beadRespawnState {
+	return &beadRespawnState{Beads: make(map[string]*beadRespawnRecord)}
+}
+
+// loadBeadRespawnState reads the tracked respawn counts. A file that is not
+// there is an empty state; one that cannot be read or parsed is an error, an
+// empty state being what re-arms every bead's respawn budget at once — the
+// town-wide breaker wipe a truncated file used to cause (gt-u3hc1).
+func loadBeadRespawnState(townRoot string) (*beadRespawnState, error) {
+	path := beadRespawnStateFile(townRoot)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path from trusted townRoot
 	if err != nil {
-		return &beadRespawnState{Beads: make(map[string]*beadRespawnRecord)}
+		if errors.Is(err, fs.ErrNotExist) {
+			return emptyBeadRespawnState(), nil
+		}
+		return nil, fmt.Errorf("reading respawn state %s: %w", path, err)
 	}
 	var state beadRespawnState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return &beadRespawnState{Beads: make(map[string]*beadRespawnRecord)}
+		return nil, fmt.Errorf("parsing respawn state %s: %w", path, err)
 	}
 	if state.Beads == nil {
 		state.Beads = make(map[string]*beadRespawnRecord)
 	}
-	return &state
+	return &state, nil
 }
 
+// saveBeadRespawnState writes state beside its destination and renames it into
+// place, so a failed or partial write leaves the previous counts readable —
+// where truncating the file in place leaves the unparseable one that reads as
+// empty (gt-u3hc1).
 func saveBeadRespawnState(townRoot string, state *beadRespawnState) error {
 	stateFile := beadRespawnStateFile(townRoot)
-	if err := os.MkdirAll(filepath.Dir(stateFile), 0755); err != nil {
+	dir := filepath.Dir(stateFile)
+	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("creating witness dir: %w", err)
 	}
 	state.LastUpdated = time.Now().UTC()
@@ -63,7 +82,53 @@ func saveBeadRespawnState(townRoot string, state *beadRespawnState) error {
 	if err != nil {
 		return fmt.Errorf("marshaling respawn state: %w", err)
 	}
-	return os.WriteFile(stateFile, data, 0600)
+	tmp, err := os.CreateTemp(dir, ".bead-respawn-counts-*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating temp respawn state: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }() // already gone once the rename lands
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("writing respawn state: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing respawn state: %w", err)
+	}
+	if err := os.Rename(tmpName, stateFile); err != nil {
+		return fmt.Errorf("replacing respawn state: %w", err)
+	}
+	return nil
+}
+
+// respawnTownRoot resolves the town a rig path belongs to, falling back to the
+// path itself outside a workspace.
+func respawnTownRoot(workDir string) string {
+	townRoot, err := workspace.Find(workDir)
+	if err != nil || townRoot == "" {
+		return workDir
+	}
+	return townRoot
+}
+
+// lockRespawnState takes the cross-process lock guarding the respawn state.
+// The flock file sits beside the state file and flockAcquire creates no parent
+// directories, so the witness dir is created first: a first run in a fresh town
+// used to fail the open and fall through to an unlocked read-modify-write.
+//
+// A lock that cannot be taken is an error and never a silent fall-through —
+// every caller below is a read-modify-write that is only safe while holding it
+// (gt-u3hc1).
+func lockRespawnState(townRoot string) (func(), error) {
+	stateFile := beadRespawnStateFile(townRoot)
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0755); err != nil {
+		return nil, fmt.Errorf("creating witness dir: %w", err)
+	}
+	unlock, err := lock.FlockAcquire(stateFile + ".flock")
+	if err != nil {
+		return nil, fmt.Errorf("locking respawn state: %w", err)
+	}
+	return unlock, nil
 }
 
 // ShouldBlockRespawn returns true if the bead has already been respawned
@@ -71,23 +136,30 @@ func saveBeadRespawnState(townRoot string, state *beadRespawnState) error {
 // should stop and escalate instead of sending RECOVERED_BEAD to deacon
 // for re-dispatch. This is the primary circuit breaker for spawn storms
 // (clown show #22).
+//
+// State that cannot be read or locked blocks, and says so on stderr: the counts
+// are the only record that this bead is near its limit, and reading "could not
+// tell" as "never respawned" is what let a truncated file re-arm the breaker
+// town-wide (gt-u3hc1).
 func ShouldBlockRespawn(workDir, beadID string) bool {
 	respawnMu.Lock()
 	defer respawnMu.Unlock()
 
-	townRoot, err := workspace.Find(workDir)
-	if err != nil || townRoot == "" {
-		townRoot = workDir
-	}
+	townRoot := respawnTownRoot(workDir)
 	maxRespawns := config.LoadOperationalConfig(townRoot).GetRecoveryConfig().MaxBeadRespawnsV()
 
-	// Cross-process flock to serialize with other witness instances.
-	unlock, flockErr := lock.FlockAcquire(beadRespawnStateFile(townRoot) + ".flock")
-	if flockErr == nil {
-		defer unlock()
+	unlock, err := lockRespawnState(townRoot)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %v; blocking respawn of %s\n", err, beadID)
+		return true
 	}
+	defer unlock()
 
-	state := loadBeadRespawnState(townRoot)
+	state, err := loadBeadRespawnState(townRoot)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %v; blocking respawn of %s\n", err, beadID)
+		return true
+	}
 	rec, ok := state.Beads[beadID]
 	if !ok {
 		return false
@@ -95,29 +167,31 @@ func ShouldBlockRespawn(workDir, beadID string) bool {
 	return rec.Count >= maxRespawns
 }
 
-// RecordBeadRespawn increments the respawn count for beadID and returns the new count.
-// workDir is the rig path; townRoot is resolved internally via workspace.Find.
-// On state file errors the count is still incremented in memory and returned, so the
-// caller can log/warn without blocking the respawn itself.
+// RecordBeadRespawn increments the respawn count for beadID and returns the new
+// count, or an error with nothing recorded. workDir is the rig path; townRoot
+// is resolved internally via workspace.Find.
 //
 // Serialized via respawnMu (in-process) and flock (cross-process) to prevent
-// concurrent patrol cycles from racing on the load-modify-save cycle.
-func RecordBeadRespawn(workDir, beadID string) int {
+// concurrent patrol cycles from racing on the load-modify-save cycle. A count
+// that cannot be recorded is an error rather than a silent skip: the caller's
+// respawn would otherwise proceed uncounted, which is the spawn storm this
+// counter exists to stop (gt-u3hc1).
+func RecordBeadRespawn(workDir, beadID string) (int, error) {
 	respawnMu.Lock()
 	defer respawnMu.Unlock()
 
-	townRoot, err := workspace.Find(workDir)
-	if err != nil || townRoot == "" {
-		townRoot = workDir
-	}
+	townRoot := respawnTownRoot(workDir)
 
-	// Cross-process flock to serialize with other witness instances.
-	unlock, flockErr := lock.FlockAcquire(beadRespawnStateFile(townRoot) + ".flock")
-	if flockErr == nil {
-		defer unlock()
+	unlock, err := lockRespawnState(townRoot)
+	if err != nil {
+		return 0, err
 	}
+	defer unlock()
 
-	state := loadBeadRespawnState(townRoot)
+	state, err := loadBeadRespawnState(townRoot)
+	if err != nil {
+		return 0, err
+	}
 	rec, ok := state.Beads[beadID]
 	if !ok {
 		rec = &beadRespawnRecord{BeadID: beadID}
@@ -125,8 +199,10 @@ func RecordBeadRespawn(workDir, beadID string) int {
 	}
 	rec.Count++
 	rec.LastRespawn = time.Now().UTC()
-	_ = saveBeadRespawnState(townRoot, state) // Non-fatal: tracking failure must not block respawn
-	return rec.Count
+	if err := saveBeadRespawnState(townRoot, state); err != nil {
+		return 0, err
+	}
+	return rec.Count, nil
 }
 
 // ResetBeadRespawnCount resets the respawn counter for beadID to zero.
@@ -135,18 +211,18 @@ func ResetBeadRespawnCount(workDir, beadID string) error {
 	respawnMu.Lock()
 	defer respawnMu.Unlock()
 
-	townRoot, err := workspace.Find(workDir)
-	if err != nil || townRoot == "" {
-		townRoot = workDir
-	}
+	townRoot := respawnTownRoot(workDir)
 
-	// Cross-process flock to serialize with other witness instances.
-	unlock, flockErr := lock.FlockAcquire(beadRespawnStateFile(townRoot) + ".flock")
-	if flockErr == nil {
-		defer unlock()
+	unlock, err := lockRespawnState(townRoot)
+	if err != nil {
+		return err
 	}
+	defer unlock()
 
-	state := loadBeadRespawnState(townRoot)
+	state, err := loadBeadRespawnState(townRoot)
+	if err != nil {
+		return err
+	}
 	delete(state.Beads, beadID)
 	return saveBeadRespawnState(townRoot, state)
 }

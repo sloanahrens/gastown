@@ -19,6 +19,12 @@ func isHookActiveStatus(status string) bool {
 	}
 }
 
+// IsHookActiveStatus reports whether status means a bead is still the polecat's
+// live work, the set ClassifyHookBead raises a blocker for. Exported so a caller
+// acting on a blocked reference — rename moves its assignment — reaches the
+// same verdict as the classifier rather than re-deriving it (gt-u3hc1).
+func IsHookActiveStatus(status string) bool { return isHookActiveStatus(status) }
+
 // isHookInertStatus reports whether a status means the reference outlived the
 // work it named.
 //
