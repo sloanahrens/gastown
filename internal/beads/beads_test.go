@@ -29,10 +29,36 @@ func TestListOptions(t *testing.T) {
 	opts := ListOptions{
 		Status:   "open",
 		Label:    "gt:task",
-		Priority: 1,
+		Priority: PriorityP1,
 	}
 	if opts.Status != "open" {
 		t.Errorf("Status = %q, want open", opts.Status)
+	}
+	// Priority's zero value must be "no filter", not P0: it used to be a
+	// plain int whose zero value bd read as --priority=0, so a ListOptions
+	// literal that never mentioned Priority listed the P0 beads alone
+	// (gt-zdd0h).
+	if got := (ListOptions{}).Priority; got != PriorityAny {
+		t.Errorf("zero Priority = %v, want %v", got, PriorityAny)
+	}
+	if _, filters := (ListOptions{}).Priority.bd(); filters {
+		t.Error("zero Priority filters; it must keep every priority")
+	}
+	// -1, the spelling callers written before gt-zdd0h pass, means the same
+	// as the zero value.
+	if _, filters := PriorityFilter(-1).bd(); filters {
+		t.Error("Priority -1 filters; it must keep every priority")
+	}
+	for p, want := range map[PriorityFilter]int{
+		PriorityP0: 0,
+		PriorityP1: 1,
+		PriorityP2: 2,
+		PriorityP3: 3,
+		PriorityP4: 4,
+	} {
+		if got, ok := p.bd(); !ok || got != want {
+			t.Errorf("%v.bd() = %d, %v; want %d, true", p, got, ok, want)
+		}
 	}
 }
 
@@ -189,6 +215,43 @@ func TestListDurableUsesBDListFilters(t *testing.T) {
 	}
 	if strings.Contains(logOutput, "sql --json") {
 		t.Fatalf("List() should not use raw SQL\nlog:\n%s", logOutput)
+	}
+}
+
+// TestListOmitsPriorityArgumentWhenUnset pins the bd argument a List issued
+// without a priority carries: none. The field used to be a plain int whose
+// zero value reached bd as --priority=0, so a ListOptions literal that never
+// mentioned Priority silently narrowed the list to the P0 beads (gt-zdd0h).
+func TestListOmitsPriorityArgumentWhenUnset(t *testing.T) {
+	ResetBdAllowStaleCacheForTest()
+	logPath := installMockBDRecorder(t)
+
+	b := New(t.TempDir())
+	if _, err := b.List(ListOptions{Status: "open"}); err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if _, err := b.List(ListOptions{Status: "open", Priority: PriorityP0}); err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	// The wisp query is the other place a priority clause can appear.
+	if _, err := b.List(ListOptions{Ephemeral: true}); err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+
+	logOutput := readMockBDLog(t, logPath)
+	if !strings.Contains(logOutput, "list --json --status=open --limit=0") {
+		t.Fatalf("bd log missing the unfiltered list\nlog:\n%s", logOutput)
+	}
+	if !strings.Contains(logOutput, "query --json ephemeral=true --limit=0") {
+		t.Fatalf("bd log missing the unfiltered wisp query\nlog:\n%s", logOutput)
+	}
+	// The second call is the one place a priority argument may appear, and
+	// asking for P0 must still reach bd as --priority=0.
+	if want := "list --json --status=open --priority=0 --limit=0"; !strings.Contains(logOutput, want) {
+		t.Fatalf("bd log missing %q\nlog:\n%s", want, logOutput)
+	}
+	if n := strings.Count(logOutput, "--priority"); n != 1 {
+		t.Fatalf("bd log carries %d priority arguments, want 1\nlog:\n%s", n, logOutput)
 	}
 }
 

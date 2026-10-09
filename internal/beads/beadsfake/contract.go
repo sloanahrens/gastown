@@ -531,6 +531,10 @@ func contractListFilters(t *testing.T, s *scope) {
 
 	got, err := s.List(beads.ListOptions{Priority: -1})
 	s.want(t, "List{}", got, err, a.ID, b.ID)
+	// A ListOptions that never mentions Priority keeps every priority: the
+	// zero value is not a P0 filter (gt-zdd0h). a is P1 and b, cl are P3.
+	got, err = s.List(beads.ListOptions{Status: "all"})
+	s.want(t, "List{zero Priority}", got, err, a.ID, b.ID, cl.ID)
 	got, err = s.List(beads.ListOptions{Status: "all", Priority: -1})
 	s.want(t, "List{Status:all}", got, err, a.ID, b.ID, cl.ID)
 	got, err = s.List(beads.ListOptions{Status: "closed", Priority: -1})
@@ -547,7 +551,7 @@ func contractListFilters(t *testing.T, s *scope) {
 	s.want(t, "List{Assignee}", got, err, a.ID)
 	got, err = s.List(beads.ListOptions{NoAssignee: true, Priority: -1})
 	s.want(t, "List{NoAssignee}", got, err, b.ID)
-	got, err = s.List(beads.ListOptions{Priority: 3, Status: "all"})
+	got, err = s.List(beads.ListOptions{Priority: beads.PriorityP3, Status: "all"})
 	s.want(t, "List{Priority:3,all}", got, err, b.ID, cl.ID)
 	got, err = s.List(beads.ListOptions{Ephemeral: true, Priority: -1})
 	s.want(t, "List{Ephemeral}", got, err, w.ID)
@@ -555,15 +559,15 @@ func contractListFilters(t *testing.T, s *scope) {
 	kid := s.mustCreate(t, beads.CreateOptions{Title: "kid", Parent: parent.ID, Priority: -1})
 	got, err = s.List(beads.ListOptions{Parent: parent.ID, Priority: -1})
 	s.want(t, "List{Parent}", got, err, kid.ID)
-	got, err = s.List(beads.ListOptions{Status: "open,closed", Priority: 3})
+	got, err = s.List(beads.ListOptions{Status: "open,closed", Priority: beads.PriorityP3})
 	s.want(t, "List{Status:open,closed}", got, err, b.ID, cl.ID)
 	closedAt, err := time.Parse(time.RFC3339, s.mustShow(t, cl.ID).ClosedAt)
 	if err != nil {
 		t.Fatalf("closed_at of %s: %v", cl.ID, err)
 	}
-	got, err = s.List(beads.ListOptions{Status: "all", Priority: 3, ClosedAfter: closedAt.Add(-time.Hour)})
+	got, err = s.List(beads.ListOptions{Status: "all", Priority: beads.PriorityP3, ClosedAfter: closedAt.Add(-time.Hour)})
 	s.want(t, "List{ClosedAfter:before close}", got, err, cl.ID)
-	got, err = s.List(beads.ListOptions{Status: "all", Priority: 3, ClosedAfter: closedAt.Add(time.Hour)})
+	got, err = s.List(beads.ListOptions{Status: "all", Priority: beads.PriorityP3, ClosedAfter: closedAt.Add(time.Hour)})
 	s.want(t, "List{ClosedAfter:after close}", got, err)
 
 	// Labels is an AND over every one of them, on its own or alongside the
@@ -586,9 +590,9 @@ func contractListFilters(t *testing.T, s *scope) {
 	if err != nil {
 		t.Fatalf("created_at of %s: %v", ca.ID, err)
 	}
-	got, err = s.List(beads.ListOptions{Priority: 4, CreatedAfter: createdAt.Add(-time.Hour)})
+	got, err = s.List(beads.ListOptions{Priority: beads.PriorityP4, CreatedAfter: createdAt.Add(-time.Hour)})
 	s.want(t, "List{CreatedAfter:before create}", got, err, ca.ID, cb.ID)
-	got, err = s.List(beads.ListOptions{Priority: 4, CreatedAfter: createdAt.Add(time.Hour)})
+	got, err = s.List(beads.ListOptions{Priority: beads.PriorityP4, CreatedAfter: createdAt.Add(time.Hour)})
 	s.want(t, "List{CreatedAfter:after create}", got, err)
 }
 
