@@ -114,6 +114,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.Reports != nil {
 		start(h.cfg.ReportsEvery, h.pollReports)
 	}
+	if h.cfg.Questions != nil {
+		start(h.cfg.QuestionsEvery, h.pollQuestions)
+	}
 	if h.cfg.Escalation != nil {
 		start(h.cfg.EscalationEvery, h.pollEscalation)
 	}
@@ -417,6 +420,19 @@ func (h *Hub) pollReports() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.Reports = rep
+	h.publishLocked()
+}
+
+// pollQuestions reads the overseer's open questions. It runs bd per open
+// question, so it keeps the minute clock rather than the feed's three.
+func (h *Hub) pollQuestions() {
+	q := h.cfg.Questions()
+	if q == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.state.Questions = q
 	h.publishLocked()
 }
 

@@ -157,6 +157,12 @@ section.collapsed>h2{border-bottom:0}
 .cfull{padding:4px 0 8px 10px;margin-bottom:4px;border-left:2px solid var(--line);overflow-wrap:anywhere}
 .reptext{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;background:#10161d;border:1px solid var(--line);border-radius:6px;padding:6px 8px;max-height:280px;overflow:auto}
 .reptimes{margin:2px 0 0;padding-left:18px;color:var(--dim);font-size:11px}
+.qcard{padding:4px 0;border-top:1px solid var(--line);overflow-wrap:anywhere}
+.qtext{margin:2px 0}
+.qrec,.qheld{color:var(--dim);margin:2px 0}
+.qage{color:var(--dim)}
+.qstate{color:var(--dim);font-size:11px;white-space:nowrap}
+.qcmd{margin-top:3px;display:inline-block;background:#10161d;border:1px solid var(--line);border-radius:4px;padding:1px 6px;font-size:11px;user-select:all}
 h3.sub{display:flex;gap:10px;align-items:center;margin:0;padding:10px 12px 0;font-size:11px;font-weight:400;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
 h3.sub .r{margin-left:auto;text-transform:none;letter-spacing:0;white-space:normal;text-align:right}
 .dhead,.drow{display:flex;flex-wrap:wrap;gap:2px 8px;align-items:baseline}
@@ -191,6 +197,7 @@ a.drow:hover{background:#19212b}
 
 <div class="grid">
   <div class="col">
+    <section><h2>Questions <span class="r" id="questionsnote"></span></h2><div class="body" id="questions"></div></section>
     <section><h2>Escalations <span class="r" id="escalationnote"></span></h2><div class="body" id="escalations"></div></section>
     <section><h2>Alerts <span class="r" id="alertsnote"></span></h2><div class="body" id="alerts"></div></section>
     <section><h2>Report <span class="r" id="reportnote"></span></h2><div class="body" id="report"></div></section>
@@ -1368,6 +1375,62 @@ function renderDispatch(s) {
   if (d.more) box.append(el("div", "empty", "+" + d.more + " more not named in the log line"));
 }
 
+// A question that has waited four hours is the one the header marks, in the
+// amber the page carries for every other stale reading.
+const QUESTION_OLDEST_SEC = 4 * 3600;
+
+// The Questions pane: what the overseer has filed for Sloan, oldest first, so
+// the question that has waited longest is the first thing he reads. Each card
+// carries the question, the answer the overseer recommends, the work it holds
+// up, whether Sloan has answered it, and the line that answers it.
+//
+// Every cell goes through el(), which writes textContent: the question and the
+// recommended answer are the overseer's own words, and a tag in them shows as
+// that text and never as markup. The pane writes nothing — the answer is a
+// comment on the bead, from a terminal.
+function renderQuestions(s) {
+  const box = $("questions"), note = $("questionsnote");
+  box.replaceChildren();
+  const q = s.questions;
+  if (!q) { note.className = "r"; note.textContent = ""; box.append(el("div", "empty", "reading…")); return; }
+  // A read that failed is a named state, never an empty pane: "the overseer has
+  // asked nothing" and "the questions could not be read" must not look alike.
+  if (q.unavailable) { note.className = "r"; note.textContent = ""; box.append(el("div", "badc", "unavailable: questions could not be read")); return; }
+  const rows = q.rows || [];
+  // The header names the count and, past four hours, how long the oldest
+  // question has waited, in the amber the page marks every other stale reading
+  // with.
+  const ages = rows.map(r => r.age_sec).filter(a => a != null);
+  const oldest = ages.length ? Math.max(...ages) : null;
+  const stale = oldest != null && oldest > QUESTION_OLDEST_SEC;
+  note.className = stale ? "r warnc" : "r";
+  note.textContent = rows.length
+    ? rows.length + (q.more ? " of " + (rows.length + q.more) : "") + " open" + (stale ? " · oldest " + fmtDur(oldest) : "")
+    : "";
+  if (!rows.length) { box.append(el("div", "empty", "none open")); return; }
+  for (const r of rows) box.append(questionCard(r));
+  if (q.more) box.append(el("div", "empty", "+" + q.more + " more"));
+}
+
+// questionCard is one question. The state is the reader's own word: awaiting
+// you while the newest comment is the overseer's, answered, overseer acting
+// once Sloan has replied. The command line is the page's whole answer path.
+function questionCard(r) {
+  const c = el("div", "qcard");
+  const head = el("div", "chead");
+  head.append(el("span", "bead", r.id));
+  head.append(el("span", "title", r.title || ""));
+  if (r.age_sec != null) head.append(el("span", "qage", fmtDur(r.age_sec)));
+  head.append(el("span", "qstate", r.state === "answered" ? "answered, overseer acting" : "awaiting you"));
+  c.append(head);
+  if (r.question) c.append(el("div", "qtext", r.question));
+  if (r.recommended) c.append(el("div", "qrec", "Recommended: " + r.recommended));
+  if ((r.held || []).length) c.append(el("div", "qheld", "Held: " + r.held.join(", ")));
+  if (r.malformed) c.append(el("div", "badc", "the bead's description has no question and recommended answer"));
+  c.append(el("div", "qcmd", 'bd comments add ' + r.id + ' "<answer>"'));
+  return c;
+}
+
 // The Escalations pane: the town's open escalation beads, newest first. An
 // alert is what the dashboard noticed; an escalation is a bead somebody raised,
 // with a severity and a raiser, that stays open until it is closed. Read-only —
@@ -1649,7 +1712,7 @@ function renderQueue(s, force) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderEscalations(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderReports(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
+function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderQuestions(state); renderEscalations(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderReports(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));
