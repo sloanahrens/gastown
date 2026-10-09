@@ -40,6 +40,11 @@ const (
 	// tail names no failure at all: the failure can sit far enough from the end
 	// that 16 KiB of passing packages hides it (gt-fn9e6.25).
 	candidateFullLogBytes = 2 << 20
+	// candidateStatusErrorTolerance is how many consecutive status read errors
+	// the wait absorbs before it gives up. A read error says nothing about the
+	// run, so the count is consecutive and a good read resets it; the wait
+	// window still bounds the retry (gt-394h5).
+	candidateStatusErrorTolerance = 3
 )
 
 // ErrCISilence is why the candidate gate reports no verdict: nothing posted
@@ -322,41 +327,63 @@ func (g *CandidateGate) push(wt Repo, branch, head string) error {
 }
 
 // wait polls the required context until it reports, or the wait window ends
-// with nothing reported (silence).
+// with nothing reported (silence). A status read that comes back an error is
+// not a verdict on the run, so the wait retries it up to
+// candidateStatusErrorTolerance times in a row; a status that reported a
+// failure is a verdict on the first read (gt-394h5).
 func (g *CandidateGate) wait(parent context.Context, wf GateWorkflow, res CandidateResult) CandidateResult {
 	ctx, cancel := context.WithTimeout(parent, g.waitTimeout())
 	defer cancel()
+	blips := 0
 	for {
 		state, err := g.state(ctx, wf, &res)
-		switch {
-		case err != nil:
-			res.Err = err
-			return res
-		case state == CandidatePassed:
-			res.State = CandidatePassed
-			return res
-		case state == CandidateFailed:
-			// redVerdict read the job log with the signature check; its
-			// excerpt for the rework note is already on the result.
-			res.State = CandidateFailed
-			return res
+		if err != nil {
+			if ctx.Err() != nil {
+				// The window closed under the read: its error is the window's,
+				// not a blip to tolerate.
+				return g.waitedOut(parent, wf, res)
+			}
+			blips++
+			if blips > candidateStatusErrorTolerance {
+				res.Err = fmt.Errorf("%d consecutive status reads failed: %w", blips, err)
+				return res
+			}
+			g.logf("%s: reading %s on %s failed (%d of %d tolerated); %v; checking again in %s",
+				res.Branch, wf.Context(), shortSHA(res.SHA), blips, candidateStatusErrorTolerance, err, g.pollInterval())
+		} else {
+			blips = 0
+			switch state {
+			case CandidatePassed:
+				res.State = CandidatePassed
+				return res
+			case CandidateFailed:
+				// redVerdict read the job log with the signature check; its
+				// excerpt for the rework note is already on the result.
+				res.State = CandidateFailed
+				return res
+			}
+			g.logf("%s: %s has not reported on %s yet; checking again in %s", res.Branch, wf.Context(), shortSHA(res.SHA), g.pollInterval())
 		}
-		g.logf("%s: %s has not reported on %s yet; checking again in %s", res.Branch, wf.Context(), shortSHA(res.SHA), g.pollInterval())
 		timer := time.NewTimer(g.pollInterval())
 		select {
 		case <-timer.C:
 		case <-ctx.Done():
 			timer.Stop()
-			if parent.Err() != nil {
-				// The landing was canceled or ran out of time: its error, not
-				// a verdict about CI.
-				res.Err = parent.Err()
-				return res
-			}
-			res.Err = fmt.Errorf("%w: %s reported nothing on %s within %s", ErrCISilence, wf.Context(), shortSHA(res.SHA), g.waitTimeout())
-			return res
+			return g.waitedOut(parent, wf, res)
 		}
 	}
+}
+
+// waitedOut is the result of a wait whose window closed: the landing's own
+// error when it was canceled or ran out of time, ErrCISilence when only the CI
+// wait's window ended. Neither is a verdict about CI.
+func (g *CandidateGate) waitedOut(parent context.Context, wf GateWorkflow, res CandidateResult) CandidateResult {
+	if parent.Err() != nil {
+		res.Err = parent.Err()
+		return res
+	}
+	res.Err = fmt.Errorf("%w: %s reported nothing on %s within %s", ErrCISilence, wf.Context(), shortSHA(res.SHA), g.waitTimeout())
+	return res
 }
 
 // state reads the required context's status on the candidate commit. A context

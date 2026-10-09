@@ -176,7 +176,10 @@ decoding; `gt doctor fix deprecated-merge-queue-keys` deletes them.
 **Landing timeouts.** The candidate gate waits up to 20 minutes for the
 required commit-status context to report; a wait that outlives that window is
 CI silence, an infrastructure outcome that retries rather than rejecting the
-work. A landing's deadline is that CI wait plus the rig's
+work. A status read that returns an error is not a verdict either: the gate
+retries it, up to three consecutive reads (a good read resets the count), so a
+transient 502 or timeout does not discard the candidate (gt-394h5). A landing's
+deadline is that CI wait plus the rig's
 `patrols.landing_worker.om_timeout` (5 minutes by default) plus 5 minutes of
 merge slack — 30 minutes at the defaults. A deadline hit is infrastructure, as
 CI silence is.
