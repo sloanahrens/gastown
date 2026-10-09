@@ -99,6 +99,19 @@ func runDown(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
+	return runDownIn(townRoot)
+}
+
+// runDownIn tears down the town at townRoot. Split from runDown so the town
+// root is a parameter a unit test can supply without chdir (docs/testing.md).
+func runDownIn(townRoot string) error {
+	// A rigs.json we cannot read is not an empty town. Fail before any
+	// teardown, so gt down never reports success after skipping every rig's
+	// agents because their registry would not load (gt-52mgl).
+	rigsConfig, err := config.LoadRigsConfigOrEmpty(constants.MayorRigsPath(townRoot))
+	if err != nil {
+		return fmt.Errorf("loading rigs config: %w", err)
+	}
 
 	t := tmux.NewTmux()
 	if !t.IsAvailable() {
@@ -154,7 +167,7 @@ func runDown(cmd *cobra.Command, args []string) error {
 		} else {
 			fmt.Println("Stopping polecats...")
 		}
-		polecatsStopped := stopAllPolecats(t, stop, townRoot, rigs, downForce, downDryRun)
+		polecatsStopped := stopAllPolecats(t, stop, townRoot, rigsConfig, rigs, downForce, downDryRun)
 		if downDryRun {
 			if polecatsStopped > 0 {
 				printDownStatus("Polecats", true, fmt.Sprintf("%d would stop", polecatsStopped))
@@ -173,7 +186,7 @@ func runDown(cmd *cobra.Command, args []string) error {
 
 	// Phase 0.6: Stop crew member sessions.
 	// Crew sessions consume tokens and must be stopped during any shutdown.
-	crewStopped := stopAllCrew(t, stop, townRoot, rigs, downDryRun)
+	crewStopped := stopAllCrew(t, stop, townRoot, rigsConfig, rigs, downDryRun)
 	if downDryRun {
 		if crewStopped > 0 {
 			printDownStatus("Crew", true, fmt.Sprintf("%d would stop", crewStopped))
@@ -417,15 +430,10 @@ func runDown(cmd *cobra.Command, args []string) error {
 // stopAllPolecats stops all polecat sessions across all rigs.
 // Stops are performed in parallel for faster teardown.
 // Returns the number of polecats stopped (or would be stopped in dry-run).
-func stopAllPolecats(t *tmux.Tmux, stop downStop, townRoot string, rigNames []string, force bool, dryRun bool) int {
+// rigsConfig is the town's rig registry, loaded by the caller so a corrupt
+// rigs.json fails the whole shutdown before any teardown (gt-52mgl).
+func stopAllPolecats(t *tmux.Tmux, stop downStop, townRoot string, rigsConfig *config.RigsConfig, rigNames []string, force bool, dryRun bool) int {
 	stopped := 0
-
-	// Load rigs config
-	rigsConfigPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	rigsConfig, err := config.LoadRigsConfig(rigsConfigPath)
-	if err != nil {
-		rigsConfig = &config.RigsConfig{Rigs: make(map[string]config.RigEntry)}
-	}
 
 	g := git.NewGit(townRoot)
 	rigMgr := rig.NewManager(townRoot, rigsConfig, g)
@@ -501,14 +509,10 @@ func stopAllPolecats(t *tmux.Tmux, stop downStop, townRoot string, rigNames []st
 // stopAllCrew stops all crew member sessions across all rigs.
 // Stops are performed in parallel for faster teardown.
 // Returns the number of crew sessions stopped (or would be stopped in dry-run).
-func stopAllCrew(t *tmux.Tmux, stop downStop, townRoot string, rigNames []string, dryRun bool) int {
+// rigsConfig is the town's rig registry, loaded by the caller so a corrupt
+// rigs.json fails the whole shutdown before any teardown (gt-52mgl).
+func stopAllCrew(t *tmux.Tmux, stop downStop, townRoot string, rigsConfig *config.RigsConfig, rigNames []string, dryRun bool) int {
 	stopped := 0
-
-	rigsConfigPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	rigsConfig, err := config.LoadRigsConfig(rigsConfigPath)
-	if err != nil {
-		rigsConfig = &config.RigsConfig{Rigs: make(map[string]config.RigEntry)}
-	}
 
 	g := git.NewGit(townRoot)
 	rigMgr := rig.NewManager(townRoot, rigsConfig, g)

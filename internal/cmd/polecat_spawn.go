@@ -726,9 +726,9 @@ func (s slingSeatSpawn) spawn(townRoot, rigName string, opts SlingSpawnOptions) 
 // exactly the polecats a live spawn would.
 func openSlingRig(townRoot, rigName string) (*rig.Rig, *tmux.Tmux, *polecat.Manager, error) {
 	rigsConfigPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	rigsConfig, err := config.LoadRigsConfig(rigsConfigPath)
+	rigsConfig, err := config.LoadRigsConfigOrEmpty(rigsConfigPath)
 	if err != nil {
-		rigsConfig = &config.RigsConfig{Rigs: make(map[string]config.RigEntry)}
+		return nil, nil, nil, fmt.Errorf("loading rigs config: %w", err)
 	}
 
 	g := git.NewGit(townRoot)
@@ -988,9 +988,9 @@ func (s *SpawnedPolecatInfo) startSession() (string, error) {
 
 	// Load rig config
 	rigsConfigPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	rigsConfig, err := config.LoadRigsConfig(rigsConfigPath)
+	rigsConfig, err := config.LoadRigsConfigOrEmpty(rigsConfigPath)
 	if err != nil {
-		rigsConfig = &config.RigsConfig{Rigs: make(map[string]config.RigEntry)}
+		return "", fmt.Errorf("loading rigs config: %w", err)
 	}
 
 	g := git.NewGit(townRoot)

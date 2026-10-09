@@ -128,12 +128,20 @@ func runReady(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
+	return runReadyIn(townRoot)
+}
 
-	// Load rigs config
+// runReadyIn runs gt ready against the town at townRoot. Split from runReady
+// so the town root is a parameter a unit test can supply without chdir
+// (docs/testing.md).
+func runReadyIn(townRoot string) error {
+	// Load rigs config. A corrupt rigs.json is an error: gt ready carries on
+	// with the town-only view otherwise, and an empty registry is no more
+	// ready than a missing one (gt-52mgl).
 	rigsConfigPath := constants.MayorRigsPath(townRoot)
-	rigsConfig, err := config.LoadRigsConfig(rigsConfigPath)
+	rigsConfig, err := config.LoadRigsConfigOrEmpty(rigsConfigPath)
 	if err != nil {
-		rigsConfig = &config.RigsConfig{Rigs: make(map[string]config.RigEntry)}
+		return fmt.Errorf("loading rigs config: %w", err)
 	}
 
 	// Create rig manager and discover rigs

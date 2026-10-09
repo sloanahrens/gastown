@@ -55,9 +55,9 @@ func runCrewAdd(cmd *cobra.Command, args []string) error {
 
 	// Load rigs config
 	rigsConfigPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	rigsConfig, err := config.LoadRigsConfig(rigsConfigPath)
+	rigsConfig, err := config.LoadRigsConfigOrEmpty(rigsConfigPath)
 	if err != nil {
-		rigsConfig = &config.RigsConfig{Rigs: make(map[string]config.RigEntry)}
+		return fmt.Errorf("loading rigs config: %w", err)
 	}
 
 	// Determine base rig from --rig flag or first name's rig/name format

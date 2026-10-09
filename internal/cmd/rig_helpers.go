@@ -55,9 +55,9 @@ func getRig(rigName string) (string, *rig.Rig, error) {
 // getRigIn is getRig in a known town.
 func getRigIn(townRoot, rigName string) (string, *rig.Rig, error) {
 	rigsConfigPath := constants.MayorRigsPath(townRoot)
-	rigsConfig, err := config.LoadRigsConfig(rigsConfigPath)
+	rigsConfig, err := config.LoadRigsConfigOrEmpty(rigsConfigPath)
 	if err != nil {
-		rigsConfig = &config.RigsConfig{Rigs: make(map[string]config.RigEntry)}
+		return "", nil, fmt.Errorf("loading rigs config: %w", err)
 	}
 
 	g := git.NewGit(townRoot)
@@ -162,9 +162,9 @@ func rigBeadsPrefix(townRoot, rigPath, rigName string) string {
 // returns all registered rigs. Callers that don't yet have a town root
 // should use getAllRigs, which resolves it from the cwd first.
 func discoverRigsForTownRoot(townRoot string) ([]*rig.Rig, error) {
-	rigsConfig, err := config.LoadRigsConfig(constants.MayorRigsPath(townRoot))
+	rigsConfig, err := config.LoadRigsConfigOrEmpty(constants.MayorRigsPath(townRoot))
 	if err != nil {
-		rigsConfig = &config.RigsConfig{Rigs: make(map[string]config.RigEntry)}
+		return nil, fmt.Errorf("loading rigs config: %w", err)
 	}
 
 	g := git.NewGit(townRoot)
