@@ -427,6 +427,12 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	if err != nil {
 		return nil, err
 	}
+	// This file lives as long as the rig's landing worker, so a torn line it
+	// skips is worth warning about once. A reader that builds its own file per
+	// poll (the attention queue) leaves Logf nil rather than repeat it.
+	landings.Logf = func(format string, args ...any) {
+		d.logger.Printf("landing_worker: %s: %s", rigName, fmt.Sprintf(format, args...))
+	}
 	// The rig's failing landings, the snapshot the dashboard's Landings pane
 	// and the town health field read (gt-fn9e6.44).
 	backoff, err := land.RigBackoffFile(townRoot, rigName)
