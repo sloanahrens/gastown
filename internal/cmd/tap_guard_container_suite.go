@@ -149,6 +149,11 @@ func tapGuardContainerSuite(stdin io.Reader, stderr io.Writer, proc guardProcess
 // Other agent contexts (crew, witness, deacon) are left unguarded — they
 // don't run scoped test suites as part of their normal work.
 func isPolecatOrRefineryContext(proc guardProcess) bool {
+	// GT_ROLE decides first (see isPolecatContext): a stale GT_POLECAT does not
+	// make a refinery or crew session a polecat (gt-pb77k).
+	if role := strings.TrimSpace(proc.getenv("GT_ROLE")); role != "" {
+		return isPolecatContext(proc)
+	}
 	if proc.getenv("GT_POLECAT") != "" {
 		return true
 	}

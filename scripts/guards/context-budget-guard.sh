@@ -72,8 +72,11 @@ else
     command -v jq &>/dev/null || exit 0
 
     # Find Claude Code project directory for current working directory.
-    # Claude Code stores transcripts in ~/.claude/projects/<path-with-dashes>/
-    PROJECT_DIR="$HOME/.claude/projects/$(pwd | tr '/' '-')"
+    # Claude Code stores transcripts in ~/.claude/projects/<path-with-dashes>/,
+    # where every character outside [A-Za-z0-9] becomes a dash ('/', '.' and
+    # '_' included); mapping only '/' made the lookup miss and the guard fail
+    # open for any cwd with a dot or underscore in it (gt-pb77k).
+    PROJECT_DIR="$HOME/.claude/projects/$(pwd | sed 's/[^A-Za-z0-9]/-/g')"
     [[ -d "$PROJECT_DIR" ]] || exit 0
 
     # Find the most recently modified .jsonl transcript (non-recursive)

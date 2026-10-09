@@ -53,10 +53,12 @@ setup_transcript() {
     local workdir="$tmpdir/workdir"
     mkdir -p "$workdir"
 
-    # Claude Code project dir: $HOME/.claude/projects/<cwd-with-slashes-replaced-by-dashes>
-    # The guard computes: $HOME/.claude/projects/$(pwd | tr '/' '-')
+    # Claude Code project dir: $HOME/.claude/projects/<cwd with every
+    # character outside [A-Za-z0-9] replaced by a dash> (so '/', '.' and '_' all
+    # become '-'; mktemp dirs on macOS contain a '.'). The guard computes the
+    # same name from pwd (gt-pb77k).
     local project_name
-    project_name=$(echo "$workdir" | tr '/' '-')
+    project_name=$(echo "$workdir" | sed 's/[^A-Za-z0-9]/-/g')
     local project_dir="$tmpdir/.claude/projects/$project_name"
     mkdir -p "$project_dir"
 
@@ -148,6 +150,24 @@ if command -v jq &>/dev/null; then
         GT_CONTEXT_BUDGET_HARD_GATE_ROLES=deacon \
         bash -c "cd '$TEST_TMPDIR/workdir' && bash '$GUARD'" >/dev/null 2>&1 || code=$?
     assert_exit "transcript 190k/200k deacon (hard-gated) exits 2" "2" "$code"
+    cleanup "$TEST_TMPDIR"
+
+    # Test 11: a working directory with '.' and '_' in its name still finds its
+    # transcript (the guard used to map only '/', so it failed open for these)
+    echo "Test: cwd with dot and underscore finds its transcript"
+    TEST_TMPDIR=$(setup_transcript 150000 20000 20000)
+    ODD_DIR="$TEST_TMPDIR/my_proj.v2"
+    mkdir -p "$ODD_DIR"
+    ODD_PROJECT="$TEST_TMPDIR/.claude/projects/$(echo "$ODD_DIR" | sed 's/[^A-Za-z0-9]/-/g')"
+    mkdir -p "$ODD_PROJECT"
+    cp "$TEST_TMPDIR"/.claude/projects/*/session.jsonl "$ODD_PROJECT/session.jsonl" 2>/dev/null || true
+    code=0
+    env -u GT_ROLE -u GT_POLECAT -u GT_CREW -u GT_DEACON -u GT_WITNESS -u GT_REFINERY \
+        -u GT_CONTEXT_BUDGET_DISABLE -u GT_CONTEXT_BUDGET_TOKENS \
+        HOME="$TEST_TMPDIR" GT_CONTEXT_BUDGET_MAX_TOKENS=200000 GT_ROLE=deacon \
+        GT_CONTEXT_BUDGET_HARD_GATE_ROLES=deacon \
+        bash -c "cd '$ODD_DIR' && bash '$GUARD'" >/dev/null 2>&1 || code=$?
+    assert_exit "190k/200k in a my_proj.v2 cwd (hard-gated) exits 2" "2" "$code"
     cleanup "$TEST_TMPDIR"
 else
     echo "  SKIP: transcript tests (jq not available)"
