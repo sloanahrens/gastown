@@ -31,11 +31,42 @@ type dashQueueReader struct {
 	template specdispatch.Template                               // the shape the dispatcher lints against
 	parked   func(rig string) bool                               // whether a store's rig is parked (nil: none is)
 	stores   func() (map[string]dashQueueStore, []string, error) // store by name, in order
+	prefixes func(names []string) map[string]string              // beads prefix to store name
+}
+
+// storePrefixes maps each store's beads prefix back to the store's name, so a
+// bead id the page is handed as text can be opened. The town's routes file
+// records every rig's prefix; the town store itself is the "." route and its
+// ids carry "hq" like the rest of the town's beads.
+func storePrefixes(townRoot string, names []string) map[string]string {
+	known := make(map[string]bool, len(names))
+	for _, n := range names {
+		known[n] = true
+	}
+	out := map[string]string{}
+	routes, err := beads.LoadRoutes(beads.GetTownBeadsPath(townRoot))
+	if err != nil {
+		return out
+	}
+	for _, rt := range routes {
+		prefix := strings.TrimSuffix(rt.Prefix, "-")
+		rig := strings.SplitN(rt.Path, "/", 2)[0]
+		if rig == "." || rig == "" {
+			rig = "hq"
+		}
+		// A prefix a store the reader does not carry claims would only offer a
+		// link nothing can open, so it stays out.
+		if prefix != "" && known[rig] {
+			out[prefix] = rig
+		}
+	}
+	return out
 }
 
 func newDashQueueReader(townRoot string) *dashQueueReader {
 	r := &dashQueueReader{townRoot: townRoot, template: specdispatch.LoadTemplate(specdispatch.DefaultTemplatePath()),
-		parked: func(rig string) bool { return rig != "hq" && IsRigParked(townRoot, rig) }}
+		parked:   func(rig string) bool { return rig != "hq" && IsRigParked(townRoot, rig) },
+		prefixes: func(names []string) map[string]string { return storePrefixes(townRoot, names) }}
 	r.stores = func() (map[string]dashQueueStore, []string, error) {
 		rigs, err := knownRigNames(townRoot)
 		if err != nil {
@@ -98,6 +129,9 @@ func (r *dashQueueReader) read(now time.Time) *dashboard.Queue {
 		return nil
 	}
 	q := &dashboard.Queue{At: now}
+	if r.prefixes != nil {
+		q.Prefixes = r.prefixes(names)
+	}
 	var ready, landing, blocked []dashboard.QueueBead
 	// The Rigs panel lists one row per known rig; hq is the town store, not a
 	// rig, so it gets none. A store this read could not reach keeps its row and

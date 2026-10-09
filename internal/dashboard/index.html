@@ -37,6 +37,9 @@ th{color:var(--dim);font-weight:400;text-align:left;font-size:11px;padding:3px 8
 td{padding:4px 8px 4px 0;vertical-align:top;border-top:1px solid var(--line)}
 td.n,th.n{text-align:right}
 .bead{color:var(--blue)}.title{color:var(--dim)}
+.rbead{background:none;border:0;padding:0;color:var(--blue);font:inherit;cursor:pointer;text-decoration:underline;text-decoration-style:dotted}
+.rbead:hover{background:#19212b}
+.rbeadrow{margin-top:6px}
 .empty{color:var(--dim);padding:6px 0}
 .spark{width:100%;height:56px;display:block}
 .chart{width:100%;height:64px;display:block}
@@ -875,11 +878,69 @@ function renderCloud(s) {
   if (c.more) box.append(el("div", "empty", "and " + c.more + " more"));
 }
 
+// The bead ids the reader has opened in the report, and what opening one read,
+// keyed "rig/id" the way the Work queue keys its own opens.
+const rOpen = new Set();
+const rDetail = {};
+let rKey = "";
+
+// A bead id as the overseer writes one: a lowercase prefix, a hyphen, then the
+// bead's own id. A word like "re-run" has this shape too, so the shape alone is
+// not enough to link it — its prefix must also name a store the page carries.
+const BEAD_TOKEN = /^[a-z][a-z0-9]*-[a-z0-9][a-z0-9.]*$/;
+// The characters a bead id is written with, so the report's text is scanned for
+// runs that might be one and everything between them stays the text it is.
+const BEAD_RUN = /[a-z0-9][a-z0-9.-]*/g;
+
+// reportNodes is the report's text as nodes: every run that is a bead id whose
+// prefix names a store becomes a button that opens that bead, and every other
+// run stays plain text. Nothing here parses markup — the button carries the id
+// through el(), which writes textContent, and the rest is a text node — so a tag
+// written in the report is shown as that text and no element is created for it.
+function reportNodes(text, prefixes) {
+  const s = String(text || ""), map = prefixes || {}, out = [];
+  let last = 0, plain = "", m;
+  const flush = () => { if (plain) { out.push(document.createTextNode(plain)); plain = ""; } };
+  BEAD_RUN.lastIndex = 0;
+  while ((m = BEAD_RUN.exec(s))) {
+    const part = m[0];
+    plain += s.slice(last, m.index);
+    last = m.index + part.length;
+    const dash = part.indexOf("-");
+    const p = dash > 0 ? part.slice(0, dash) : "";
+    // A prefix off Object.prototype ("constructor") is not a store's.
+    const rig = p && Object.prototype.hasOwnProperty.call(map, p) ? map[p] : "";
+    if (!rig || !BEAD_TOKEN.test(part)) { plain += part; continue; }
+    flush();
+    const b = el("button", "rbead", part);
+    b.type = "button";
+    b.title = "open " + rig + "/" + part;
+    b.onclick = () => openReportBead(rig, part);
+    out.push(b);
+  }
+  plain += s.slice(last);
+  flush();
+  return out;
+}
+
+// openReportBead opens or closes a bead written in the report: the detail draws
+// under the report, and a second click on the id takes it away.
+function openReportBead(rig, id) {
+  const key = rig + "/" + id;
+  if (rOpen.has(key)) { rOpen.delete(key); renderReports(state); return; }
+  rOpen.add(key);
+  beadDetailFor(rig, id, rDetail, () => renderReports(state));
+  renderReports(state);
+}
+
 // The Report panel draws the overseer's own latest hourly report. Every cell
 // goes through el(), which writes textContent, so a tag in the report shows as
 // that text and never as markup. The report's own line breaks and tabs are kept
 // and the box wraps them, so the pane shows the report the way its writer
 // shaped it.
+//
+// A bead id in the report opens that bead under the report — the same detail
+// the Work queue's rows draw — so an id never has to be copied into a terminal.
 //
 // The pane dates that reading in its header the way every other pane does: the
 // report's age sits beside the title, and a latest report past its hour reads
@@ -906,7 +967,21 @@ function renderReports(s) {
   note.className = r.overdue ? "r warnc" : "r";
   note.textContent = "written " + age(r.written) + " ago" + (r.overdue ? " · overdue" : "");
   note.title = new Date(r.written).toLocaleString();
-  box.append(el("div", "reptext", r.text || ""));
+  // A new write is a new report: the ids opened in the one before it belong to
+  // text that is no longer on the pane, so they close with it.
+  if (rKey !== r.written) { rOpen.clear(); rKey = r.written; }
+  const prefixes = (s.queue && s.queue.prefixes) || {};
+  const rep = el("div", "reptext");
+  rep.append(...reportNodes(r.text, prefixes));
+  box.append(rep);
+  // Every open id draws its detail under the report, and a store the reader
+  // could not reach reads as the failure it was rather than as an empty pane.
+  for (const key of rOpen) {
+    const bd = el("div", "rbeadrow");
+    bd.append(el("div", "title", key));
+    bd.append(detailBlock(rDetail[key] || {loading: true}));
+    box.append(bd);
+  }
   // The list the reader sends starts at the report above, so the disclosure
   // holds the timestamps that are not the one already drawn.
   const times = (r.times || []).slice(1);
@@ -1646,17 +1721,26 @@ let qKey = "";
 const QTABS = [["ready", "Ready to build", "ready_total", "ready"], ["landing", "Waiting to land", "landing_total", "landing"], ["blocked", "Blocked", "blocked_total", "blocked"]];
 const isWisp = b => b.id.indexOf("-wisp-") >= 0;
 
+// beadDetailFor fetches one bead's text into store under "rig/id" and calls
+// done when it lands. The Work queue's rows and the Report pane's ids open a
+// bead through here, so both read the one route and draw the one detail. An
+// entry is {loading}, the detail, or {error}; a bead already in the store is
+// never fetched twice, and a failed read is remembered as the failure it was.
+function beadDetailFor(rig, id, store, done) {
+  const key = rig + "/" + id;
+  if (store[key]) return;
+  store[key] = {loading: true};
+  fetch("/api/bead?rig=" + encodeURIComponent(rig) + "&id=" + encodeURIComponent(id))
+    .then(r => r.ok ? r.json() : Promise.reject(new Error(String(r.status))))
+    .then(d => { store[key] = d; done(); })
+    .catch(() => { store[key] = {error: true}; done(); });
+}
+
 function openBead(b) {
   const id = b.rig + "/" + b.id;
   if (qOpen.has(id)) { qOpen.delete(id); renderQueue(state, true); return; }
   qOpen.add(id);
-  if (!qDetail[id]) {
-    qDetail[id] = {loading: true};
-    fetch("/api/bead?rig=" + encodeURIComponent(b.rig) + "&id=" + encodeURIComponent(b.id))
-      .then(r => r.ok ? r.json() : Promise.reject(new Error(String(r.status))))
-      .then(d => { qDetail[id] = d; renderQueue(state, true); })
-      .catch(() => { qDetail[id] = {error: true}; renderQueue(state, true); });
-  }
+  beadDetailFor(b.rig, b.id, qDetail, () => renderQueue(state, true));
   renderQueue(state, true);
 }
 
