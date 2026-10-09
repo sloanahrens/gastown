@@ -219,6 +219,64 @@ rc=$(run_install "$T" --sha "$C2_FULL" --source manual)
 [ "$rc" = "0" ] && [ ! -e "$T/daemon/restart-pending.json" ] \
   && pass "noop current daemon: exit 0, no marker" || fail "noop current daemon: rc=$rc $(cat "$T/run.out") $(cat "$T/daemon/restart-pending.json" 2>/dev/null)"
 
+# --- Case 3d: the requested commit is OLDER than the daemon's and contained by
+# it -> no marker, and a newer marker already pending is left alone. The old
+# equality check saw "daemon != commit" and re-marker-ed the older commit, which
+# the daemon read as covered, cleared, and stayed on (gt-tg5to). ---
+T=$(make_world)
+install_stub "$T" "$(cat "$T/c2")"
+C2_FULL=$(git -C "$T/origin.git" rev-parse main)
+C1_FULL=$(git -C "$T/origin.git" rev-parse main~1)
+printf '{"running": true, "pid": 1, "commit": "%s"}\n' "$C2_FULL" > "$T/daemon/state.json"
+python3 -c 'import json,sys; json.dump({"commit": sys.argv[2], "requested_at": "2026-01-01T00:00:00Z", "source": "manual", "repo": sys.argv[3]}, open(sys.argv[1], "w"))' \
+  "$T/daemon/restart-pending.json" "$C2_FULL" "$T/rig"
+rc=$(run_install "$T" --sha "$C1_FULL" --source rebuild-gt)
+[ "$rc" = "0" ] && [ ! -e "$T/make.log" ] \
+  && pass "noop contained by daemon: exit 0, no build" || fail "noop contained by daemon: rc=$rc $(cat "$T/run.out")"
+python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); assert m["commit"] == sys.argv[2], m' \
+  "$T/daemon/restart-pending.json" "$C2_FULL" \
+  && pass "noop contained by daemon: newer marker untouched" \
+  || fail "noop contained by daemon: marker is $(cat "$T/daemon/restart-pending.json" 2>/dev/null)"
+
+# --- Case 3e: the daemon does NOT contain the request, but a newer marker is
+# already pending -> that marker stays; writing this older commit over it would
+# drop the restart the newer install asked for (gt-tg5to). ---
+T=$(make_world)
+install_stub "$T" "$(cat "$T/c2")"
+C2_FULL=$(git -C "$T/origin.git" rev-parse main)
+C1_FULL=$(git -C "$T/origin.git" rev-parse main~1)
+C0_FULL=$(git -C "$T/origin.git" rev-parse main~2)
+printf '{"running": true, "pid": 1, "commit": "%s"}\n' "$C0_FULL" > "$T/daemon/state.json"
+python3 -c 'import json,sys; json.dump({"commit": sys.argv[2], "requested_at": "2026-01-01T00:00:00Z", "source": "manual", "repo": sys.argv[3]}, open(sys.argv[1], "w"))' \
+  "$T/daemon/restart-pending.json" "$C2_FULL" "$T/rig"
+rc=$(run_install "$T" --sha "$C1_FULL" --source rebuild-gt)
+[ "$rc" = "0" ] && [ ! -e "$T/make.log" ] \
+  && pass "noop behind newer marker: exit 0, no build" || fail "noop behind newer marker: rc=$rc $(cat "$T/run.out")"
+python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); assert m["commit"] == sys.argv[2], m' \
+  "$T/daemon/restart-pending.json" "$C2_FULL" \
+  && pass "noop behind newer marker: marker untouched" \
+  || fail "noop behind newer marker: marker is $(cat "$T/daemon/restart-pending.json" 2>/dev/null)"
+grep -q "leaving it in place" "$T/run.out" && pass "noop behind newer marker: the log says so" || fail "noop behind newer marker: $(cat "$T/run.out")"
+
+# --- Case 3f: an unreadable state.json keeps today's behaviour: no daemon
+# commit, no marker (gt-tg5to). ---
+T=$(make_world)
+install_stub "$T" "$(cat "$T/c2")"
+C1_FULL=$(git -C "$T/origin.git" rev-parse main~1)
+echo "not json" > "$T/daemon/state.json"
+rc=$(run_install "$T" --sha "$C1_FULL" --source rebuild-gt)
+[ "$rc" = "0" ] && [ ! -e "$T/daemon/restart-pending.json" ] \
+  && pass "noop unreadable state: exit 0, no marker" || fail "noop unreadable state: rc=$rc $(cat "$T/run.out") $(cat "$T/daemon/restart-pending.json" 2>/dev/null)"
+
+# --- Case 3g: an unresolvable daemon commit keeps today's behaviour: no marker ---
+T=$(make_world)
+install_stub "$T" "$(cat "$T/c2")"
+C1_FULL=$(git -C "$T/origin.git" rev-parse main~1)
+printf '{"running": true, "pid": 1, "commit": "%s"}\n' "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" > "$T/daemon/state.json"
+rc=$(run_install "$T" --sha "$C1_FULL" --source rebuild-gt)
+[ "$rc" = "0" ] && [ ! -e "$T/daemon/restart-pending.json" ] \
+  && pass "noop unresolvable daemon commit: exit 0, no marker" || fail "noop unresolvable daemon commit: rc=$rc $(cat "$T/run.out") $(cat "$T/daemon/restart-pending.json" 2>/dev/null)"
+
 # --- Case 4: the new binary reports an unresolvable commit -> rollback to the
 # previous binary, HIGH escalation, no marker. ---
 T=$(make_world)
