@@ -355,8 +355,18 @@ func TestIsTestPollution(t *testing.T) {
 			expected: true,
 		},
 		{
-			name:     "title starts with test space",
-			record:   map[string]interface{}{"id": "gt-ok1", "title": "test something"},
+			name:     "real bead titled test the pager",
+			record:   map[string]interface{}{"id": "gt-ok1", "title": "test the pager"},
+			expected: false,
+		},
+		{
+			name:     "real bead titled Test coverage for X",
+			record:   map[string]interface{}{"id": "gt-ok2", "title": "Test coverage for the hook dispatcher"},
+			expected: false,
+		},
+		{
+			name:     "generated test issue title",
+			record:   map[string]interface{}{"id": "gt-ok3", "title": "Test issue 3"},
 			expected: true,
 		},
 		{
@@ -401,7 +411,10 @@ func TestFilterTestPollution(t *testing.T) {
 
 	input := string(good1) + "\n" + string(bad1) + "\n" + string(good2) + "\n" + string(bad2) + "\n"
 
-	filtered, removed := filterTestPollution([]byte(input))
+	filtered, removed, err := filterTestPollutionStream(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if removed != 2 {
 		t.Errorf("expected 2 removed, got %d", removed)
@@ -431,7 +444,10 @@ func TestFilterTestPollution_NoRemoval(t *testing.T) {
 	good2, _ := json.Marshal(map[string]interface{}{"id": "gt-def2", "title": "Add feature"})
 	input := string(good1) + "\n" + string(good2) + "\n"
 
-	filtered, removed := filterTestPollution([]byte(input))
+	filtered, removed, err := filterTestPollutionStream(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if removed != 0 {
 		t.Errorf("expected 0 removed, got %d", removed)
@@ -445,13 +461,222 @@ func TestFilterTestPollution_NoRemoval(t *testing.T) {
 
 func TestFilterTestPollution_EmptyInput(t *testing.T) {
 	t.Parallel()
-	filtered, removed := filterTestPollution([]byte(""))
+	filtered, removed, err := filterTestPollutionStream(strings.NewReader(""))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if removed != 0 {
 		t.Errorf("expected 0 removed, got %d", removed)
 	}
 	if len(filtered) != 0 {
 		t.Errorf("expected empty output, got %q", filtered)
 	}
+}
+
+// longLineIssuesJSONL is an export with a 2 MiB line in the middle, one
+// pollution record before it, and real records on either side. A 1 MiB scanner
+// cap stops at the long line, so the records after it are dropped and — because
+// a pollution record was removed — the truncated buffer is written back over
+// the export (gt-q6ljl).
+func longLineIssuesJSONL() (content string, records []string) {
+	records = []string{
+		`{"id":"gt-aaa1","title":"First real bead"}`,
+		`{"id":"gt-bbb2","title":"Second real bead"}`,
+		`{"id":"gt-ddd4","title":"Long notes bead","description":"` + strings.Repeat("x", 2*1024*1024) + `"}`,
+		`{"id":"gt-eee5","title":"Last real bead"}`,
+	}
+	polluted := `{"id":"gt-ccc3","title":"test_something"}`
+
+	lines := []string{records[0], records[1], polluted, records[2], records[3]}
+	return strings.Join(lines, "\n") + "\n", records
+}
+
+func TestFilterTestPollution_LongLineKeepsEveryOtherRecord(t *testing.T) {
+	t.Parallel()
+	input, records := longLineIssuesJSONL()
+
+	filtered, removed, err := filterTestPollutionStream(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if removed != 1 {
+		t.Errorf("removed = %d, want 1", removed)
+	}
+	lines := splitNonEmpty(string(filtered))
+	if len(lines) != len(records) {
+		t.Fatalf("kept %d records, want %d — a record after the long line was dropped", len(lines), len(records))
+	}
+	for _, want := range records {
+		if !slices.Contains(lines, want) {
+			t.Errorf("record missing after filtering: %.60s", want)
+		}
+	}
+}
+
+// errAfterReader yields data, then a hard read error — a read that fails
+// mid-stream is not end of input.
+type errAfterReader struct {
+	data []byte
+	err  error
+}
+
+func (r *errAfterReader) Read(p []byte) (int, error) {
+	if len(r.data) > 0 {
+		n := copy(p, r.data)
+		r.data = r.data[n:]
+		return n, nil
+	}
+	return 0, r.err
+}
+
+func TestFilterTestPollutionStream_ReadErrorIsReported(t *testing.T) {
+	t.Parallel()
+	readErr := errors.New("input/output error")
+	r := &errAfterReader{
+		data: []byte(`{"id":"gt-aaa1","title":"First real bead"}` + "\n"),
+		err:  readErr,
+	}
+
+	filtered, _, err := filterTestPollutionStream(r)
+	if !errors.Is(err, readErr) {
+		t.Fatalf("err = %v, want %v — a read error must not read as end of input", err, readErr)
+	}
+	if filtered != nil {
+		t.Errorf("filtered = %q, want nil: a partial read is not a whole-file result", filtered)
+	}
+}
+
+func TestApplyPollutionFilter_LongLineKeepsEveryOtherRecord(t *testing.T) {
+	t.Parallel()
+	repo := filepath.Join(t.TempDir(), "backup")
+	issuesPath := filepath.Join(repo, "gt", "issues.jsonl")
+	if err := os.MkdirAll(filepath.Dir(issuesPath), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	input, records := longLineIssuesJSONL()
+	if err := os.WriteFile(issuesPath, []byte(input), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	if got := d.applyPollutionFilter(repo, []string{"gt"}); got != 1 {
+		t.Errorf("applyPollutionFilter = %d, want 1", got)
+	}
+
+	data, err := os.ReadFile(issuesPath)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	lines := splitNonEmpty(string(data))
+	if len(lines) != len(records) {
+		t.Fatalf("file has %d records, want %d — the export was truncated", len(lines), len(records))
+	}
+	for _, want := range records {
+		if !slices.Contains(lines, want) {
+			t.Errorf("record missing from the rewritten export: %.60s", want)
+		}
+	}
+}
+
+func TestApplyPollutionFilter_ReadErrorLeavesFileUntouched(t *testing.T) {
+	t.Parallel()
+	repo := filepath.Join(t.TempDir(), "backup")
+	issuesPath := filepath.Join(repo, "gt", "issues.jsonl")
+	// A directory where the file belongs: open succeeds and the first read
+	// fails, which is the mid-stream read error the filter must report rather
+	// than mistake for end of input.
+	if err := os.MkdirAll(issuesPath, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	sentinel := filepath.Join(issuesPath, "keep")
+	if err := os.WriteFile(sentinel, []byte("untouched"), 0644); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+
+	var logs strings.Builder
+	d := &Daemon{logger: log.New(&logs, "", 0)}
+	if got := d.applyPollutionFilter(repo, []string{"gt"}); got != 0 {
+		t.Errorf("applyPollutionFilter = %d, want 0 on a read error", got)
+	}
+	if !strings.Contains(logs.String(), "issues.jsonl left untouched") {
+		t.Errorf("read error was not reported; log = %q", logs.String())
+	}
+	fi, err := os.Stat(issuesPath)
+	if err != nil || !fi.IsDir() {
+		t.Fatalf("issues.jsonl was replaced on a read error (stat err=%v)", err)
+	}
+	if b, err := os.ReadFile(sentinel); err != nil || string(b) != "untouched" {
+		t.Errorf("content under issues.jsonl changed: %q (err=%v)", b, err)
+	}
+}
+
+func TestApplyPollutionFilter_MissingExportSkipsQuietly(t *testing.T) {
+	t.Parallel()
+	repo := filepath.Join(t.TempDir(), "backup")
+
+	var logs strings.Builder
+	d := &Daemon{logger: log.New(&logs, "", 0)}
+	if got := d.applyPollutionFilter(repo, []string{"gt"}); got != 0 {
+		t.Errorf("applyPollutionFilter = %d, want 0", got)
+	}
+	if logs.Len() != 0 {
+		t.Errorf("a database with no export logged: %q", logs.String())
+	}
+}
+
+func TestRecountAfterFilter_PropagatesReadError(t *testing.T) {
+	t.Parallel()
+	repo := filepath.Join(t.TempDir(), "backup")
+	issuesPath := filepath.Join(repo, "gt", "issues.jsonl")
+	if err := os.MkdirAll(issuesPath, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	counts := map[string]int{"gt": 7}
+	if err := recountAfterFilter(repo, []string{"gt"}, counts); err == nil {
+		t.Fatal("recountAfterFilter returned nil error on an unreadable export")
+	}
+	if counts["gt"] != 7 {
+		t.Errorf("counts[gt] = %d, want the untouched 7", counts["gt"])
+	}
+}
+
+func TestJSONLExportCommand_PasswordIsNotInArgv(t *testing.T) {
+	t.Parallel()
+	const secret = "s3cr3t-dolt-password"
+
+	cmd := jsonlExportCommand(context.Background(), true, "127.0.0.1", 3307, "root", secret, "SELECT 1", t.TempDir())
+
+	for _, arg := range cmd.Args {
+		if arg == secret {
+			t.Fatalf("password appears in argv: %v", cmd.Args)
+		}
+	}
+	if slices.Contains(cmd.Args, "-p") {
+		t.Errorf("argv still passes -p: %v", cmd.Args)
+	}
+	if got := envValue(cmd.Env, "DOLT_CLI_PASSWORD"); got != secret {
+		t.Errorf("DOLT_CLI_PASSWORD = %q, want the configured password", got)
+	}
+	entries := 0
+	for _, e := range cmd.Env {
+		if strings.HasPrefix(e, "DOLT_CLI_PASSWORD=") {
+			entries++
+		}
+	}
+	if entries != 1 {
+		t.Errorf("DOLT_CLI_PASSWORD appears %d times in the child env, want exactly 1", entries)
+	}
+}
+
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for _, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			return strings.TrimPrefix(e, prefix)
+		}
+	}
+	return ""
 }
 
 func TestSpikeThreshold(t *testing.T) {
@@ -1101,6 +1326,26 @@ func TestCountFileLines(t *testing.T) {
 	}
 	if got != 42 {
 		t.Errorf("expected 42 lines, got %d", got)
+	}
+}
+
+func TestCountFileLines_LongLineIsCounted(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "issues.jsonl")
+
+	long := `{"id":"gt-ddd4","title":"Long notes bead","description":"` + strings.Repeat("x", 2*1024*1024) + `"}`
+	content := `{"id":"gt-aaa1","title":"First"}` + "\n" + long + "\n" + `{"id":"gt-eee5","title":"Last"}` + "\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	got, err := countFileLines(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 3 {
+		t.Errorf("countFileLines = %d, want 3 — a long line hid the lines after it", got)
 	}
 }
 
