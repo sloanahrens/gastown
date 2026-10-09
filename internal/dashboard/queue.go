@@ -72,6 +72,11 @@ type Queue struct {
 	Unreadable []string `json:"unreadable,omitempty"`
 	// ParkedRigs names the stores whose rigs are parked.
 	ParkedRigs []string `json:"parked_rigs,omitempty"`
+	// Prefixes maps each store's beads prefix to the store's name, so the page
+	// can turn a bead id it is handed as text — one written in a report — into
+	// the store that owns it and open it. A prefix no store claims is absent,
+	// which leaves its ids as the plain text they were written as.
+	Prefixes map[string]string `json:"prefixes,omitempty"`
 	// Rigs is one row per known rig, in registry order, as the Rigs panel
 	// draws it: the rig's park state and, for a store this read reached, its
 	// ready and landing counts. The seat count is not the store's to know, so

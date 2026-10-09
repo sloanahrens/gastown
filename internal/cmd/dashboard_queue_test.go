@@ -3,6 +3,8 @@ package cmd
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -255,5 +257,68 @@ func TestQueueHoldsBeadsAssignedToSomeone(t *testing.T) {
 	}
 	if n := note["gt-held-shaped"]; !strings.Contains(n, "gastown/crew/sloan") || !strings.Contains(n, "unassigned") {
 		t.Errorf("a held row's note names the assignee and the rule: %q", n)
+	}
+}
+
+// The page links a bead id written in the overseer's report, and it can only do
+// that from the queue's payload: the reader hands it each store's beads prefix
+// beside the store's name (gt-7005n).
+func TestQueueCarriesTheStoresPrefixes(t *testing.T) {
+	t.Parallel()
+
+	r := queueReaderOver(map[string]dashQueueStore{"hq": &fakeQueueStore{}, "gastown": &fakeQueueStore{}}, "hq", "gastown")
+	r.prefixes = func(names []string) map[string]string {
+		return map[string]string{"hq": "hq", "gt": "gastown"}
+	}
+	q := r.read(time.Now())
+	if q == nil {
+		t.Fatal("no queue")
+	}
+	if q.Prefixes["hq"] != "hq" || q.Prefixes["gt"] != "gastown" || len(q.Prefixes) != 2 {
+		t.Errorf("prefixes = %v, want hq->hq and gt->gastown", q.Prefixes)
+	}
+	if b, err := json.Marshal(q); err != nil || !strings.Contains(string(b), `"prefixes":{"gt":"gastown"`) {
+		t.Errorf("the prefixes do not reach the page: %s err=%v", b, err)
+	}
+	// A reader that resolves no prefixes is left as it was: the page draws the
+	// report's ids as text rather than offering a link nothing can open.
+	if p := queueReaderOver(map[string]dashQueueStore{"gastown": &fakeQueueStore{}}, "gastown").read(time.Now()); p == nil || len(p.Prefixes) != 0 {
+		t.Errorf("a reader with no prefix source must report none: %+v", p)
+	}
+}
+
+// storePrefixes reads the town's routes file, where every rig's prefix is
+// recorded, and names the town store hq — the prefix its own ids carry — so a
+// report's "hq-…" opens too. A prefix naming a store the reader does not carry
+// is left out, since a link to it could only fail (gt-7005n).
+func TestStorePrefixesReadsTheTownRoutes(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	dir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	routes := `{"prefix":"hq-","path":"."}
+{"prefix":"gt-","path":"gastown/mayor/rig"}
+{"prefix":"dv-","path":"devops/mayor/rig"}
+{"prefix":"zz-","path":"zzz/mayor/rig"}
+`
+	if err := os.WriteFile(filepath.Join(dir, beads.RoutesFileName), []byte(routes), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := storePrefixes(townRoot, []string{"hq", "gastown", "devops"})
+	want := map[string]string{"hq": "hq", "gt": "gastown", "dv": "devops"}
+	if len(got) != len(want) {
+		t.Fatalf("prefixes = %v, want %v", got, want)
+	}
+	for prefix, rig := range want {
+		if got[prefix] != rig {
+			t.Errorf("prefix %q = %q, want %q", prefix, got[prefix], rig)
+		}
+	}
+	if _, ok := got["zz"]; ok {
+		t.Error("a prefix for a store the reader does not carry must not be offered as a link")
 	}
 }

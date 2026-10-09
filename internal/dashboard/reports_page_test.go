@@ -52,12 +52,14 @@ func TestReportPanelDrawsTheStateTheReaderDecided(t *testing.T) {
 	// The report is another tool's text, so every cell goes through el(), which
 	// writes textContent: a tag in the report shows as that text and never as
 	// markup, and the report's own line breaks are kept by the pre-wrap the box
-	// carries rather than by an element that parses anything.
+	// carries rather than by an element that parses anything. The text is split
+	// into nodes so a bead id in it can be a button (gt-7005n), and every node
+	// is still built the way the pane always built them.
 	if strings.Contains(draw, "innerHTML") {
 		t.Error("renderReports sets markup from the report's text")
 	}
-	if !strings.Contains(draw, `box.append(el("div", "reptext", r.text || ""));`) {
-		t.Errorf("renderReports has no %q", `box.append(el("div", "reptext", r.text || ""));`)
+	if !strings.Contains(draw, `rep.append(...reportNodes(r.text, prefixes));`) {
+		t.Errorf("renderReports has no %q", `rep.append(...reportNodes(r.text, prefixes));`)
 	}
 	// A full report shows without scrolling: the box is capped at the height
 	// the Feed pane uses, not the 280px that clipped a long report.
@@ -126,6 +128,101 @@ func TestReportPanelListsTheEarlierWritesBehindADisclosure(t *testing.T) {
 	}
 	if !strings.Contains(string(indexHTML), `<section><h2>Report <span class="r" id="reportnote"></span></h2><div class="body" id="report"></div></section>`) {
 		t.Error("the Report section is not the markup its neighbours are")
+	}
+}
+
+// A bead id written in the report opens that bead under the report, in the same
+// inline detail the Work queue's rows draw (gt-7005n). The report is another
+// tool's text, so the ids are found by shape — never by parsing markup — and
+// only a shape whose prefix names a store is a link: a word like "re-run" has
+// the shape of an id but no store claims it, so it stays the text it was.
+func TestReportLinksTheBeadIdsWhosePrefixNamesAStore(t *testing.T) {
+	t.Parallel()
+
+	page := string(indexHTML)
+	// The shape the report's ids are recognised by, and the characters a run of
+	// the text has to hold to be looked at as one: everything between those runs
+	// is a text node, which is where a tag in the report stops being markup.
+	for _, want := range []string{
+		`const BEAD_TOKEN = /^[a-z][a-z0-9]*-[a-z0-9][a-z0-9.]*$/;`,
+		`const BEAD_RUN = /[a-z0-9][a-z0-9.-]*/g;`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("index.html has no %q", want)
+		}
+	}
+
+	nodes := pageFunc(t, "reportNodes")
+	// In "gt-pufsj and dv-7y3" each run that is an id and whose prefix names a
+	// store becomes a button carrying the id as its text; the run between them
+	// stays text. The scanner's own position is reset, so a cached report redrawn
+	// finds the same ids.
+	for _, want := range []string{
+		`BEAD_RUN.lastIndex = 0;`,
+		`while ((m = BEAD_RUN.exec(s))) {`,
+		`if (!rig || !BEAD_TOKEN.test(part)) { plain += part; continue; }`,
+		`const b = el("button", "rbead", part);`,
+		`b.onclick = () => openReportBead(rig, part);`,
+	} {
+		if !strings.Contains(nodes, want) {
+			t.Errorf("reportNodes has no %q", want)
+		}
+	}
+	// The id is carried by el(), which writes textContent, and the text around it
+	// by createTextNode: the report's markup is never parsed, so a tag in it is
+	// shown as the text it is. Nothing here writes innerHTML.
+	if strings.Contains(nodes, "innerHTML") {
+		t.Error("reportNodes parses the report's text as markup")
+	}
+	// A prefix off Object.prototype — "constructor", say — is not a store, so the
+	// lookup may only answer for the keys the payload actually carries.
+	if !strings.Contains(nodes, "hasOwnProperty.call(map, p)") {
+		t.Error("reportNodes trusts an inherited property as a store name")
+	}
+
+	// The button opens the bead through the same fetch and the same detail block
+	// the Work queue's rows use, and a second click on the id closes it again: a
+	// failed read draws the failure detailBlock already names.
+	open := pageFunc(t, "openReportBead")
+	for _, want := range []string{
+		`if (rOpen.has(key)) { rOpen.delete(key); renderReports(state); return; }`,
+		`beadDetailFor(rig, id, rDetail, () => renderReports(state));`,
+	} {
+		if !strings.Contains(open, want) {
+			t.Errorf("openReportBead has no %q", want)
+		}
+	}
+	draw := pageFunc(t, "renderReports")
+	for _, want := range []string{
+		`rep.append(...reportNodes(r.text, prefixes));`,
+		`bd.append(detailBlock(rDetail[key] || {loading: true}));`,
+		`const prefixes = (s.queue && s.queue.prefixes) || {};`,
+	} {
+		if !strings.Contains(draw, want) {
+			t.Errorf("renderReports has no %q", want)
+		}
+	}
+	// The click reads the bead from the one route with the rig its prefix mapped
+	// to, draws what came back, and remembers a failed read as the failure
+	// detailBlock names — never as an empty detail.
+	read := pageFunc(t, "beadDetailFor")
+	for _, want := range []string{
+		`if (store[key]) return;`,
+		`fetch("/api/bead?rig=" + encodeURIComponent(rig) + "&id=" + encodeURIComponent(id))`,
+		`.then(d => { store[key] = d; done(); })`,
+		`.catch(() => { store[key] = {error: true}; done(); });`,
+	} {
+		if !strings.Contains(read, want) {
+			t.Errorf("beadDetailFor has no %q", want)
+		}
+	}
+	if !strings.Contains(page, `box.append(el("div", "badc", "could not read this bead right now"));`) {
+		t.Error("the detail a report id opens has no failed-read state")
+	}
+	// The queue's rows open through the same helper, so the two panes cannot
+	// drift into two different readers of one route.
+	if q := pageFunc(t, "openBead"); !strings.Contains(q, `beadDetailFor(b.rig, b.id, qDetail, () => renderQueue(state, true));`) {
+		t.Error("the Work queue's rows no longer open a bead through the shared reader")
 	}
 }
 
