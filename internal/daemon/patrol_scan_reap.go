@@ -15,7 +15,6 @@ import (
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/patrolscan"
-	"github.com/steveyegge/gastown/internal/util"
 )
 
 // The reap pass's host half: patrolscan decides which seats may go, this file
@@ -122,7 +121,6 @@ func (h *patrolScanHost) runRecoveryBatch(rig string) reapBatch {
 	cmd := exec.CommandContext(ctx, h.d.gtPath, "polecat", "check-recovery-batch", rig, "--json") //nolint:gosec // G204: gtPath resolved at daemon init
 	cmd.Dir = h.town()
 	cmd.Env = daemonGTEnv(os.Environ())
-	util.SetProcessGroup(cmd)
 	stdout, stderr, err := h.d.runCmd(cmd)
 	if err != nil {
 		return reapBatch{err: fmt.Errorf("gt polecat check-recovery-batch %s: %w: %s", rig, err, lastLine(string(stderr)))}
@@ -196,7 +194,6 @@ func (h *patrolScanHost) Reap(rig, polecat string) error {
 	cmd := exec.CommandContext(ctx, h.d.gtPath, "polecat", "nuke", rig+"/"+polecat) //nolint:gosec // G204: gtPath resolved at daemon init
 	cmd.Dir = h.town()
 	cmd.Env = daemonGTEnv(os.Environ())
-	util.SetProcessGroup(cmd)
 	_, stderr, err := h.d.runCmd(cmd)
 	if err == nil {
 		return nil

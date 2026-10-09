@@ -29,11 +29,6 @@ import (
 const (
 	defaultSpecDispatchInterval = 60 * time.Second
 
-	// specDispatchTimeout bounds one tick. A sling spawns a worktree and a
-	// session, and a tick slings at most max_per_tick beads (default 1), so
-	// five minutes covers a slow Dolt without stranding the ticker.
-	specDispatchTimeout = 5 * time.Minute
-
 	// dispatchTickHistory bounds the tick records the daemon keeps for
 	// townhealth's dispatch field: two hours at the default 60s interval,
 	// far past the health window (gt-xiw7o).
@@ -43,6 +38,14 @@ const (
 	// it the line says how many more it left unnamed (gt-gzav5).
 	specDispatchSkipCap = 6
 )
+
+// specDispatchTimeout bounds one tick. A sling spawns a worktree and a
+// session, and a tick slings at most max_per_tick beads (default 1), so five
+// minutes covers a slow Dolt without stranding the ticker.
+//
+// A var rather than a const so a test can drive the bound without waiting it
+// out, as ProcessGroupKillGrace is (gt-7uyfc).
+var specDispatchTimeout = 5 * time.Minute
 
 // specDispatchInterval returns the configured interval, or 60s.
 func specDispatchInterval(config *DaemonPatrolConfig) time.Duration {

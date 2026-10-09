@@ -156,6 +156,48 @@ func TestRunPluginScript_TimeoutIsReportedAsTimeout(t *testing.T) {
 	}
 }
 
+// A run the daemon's own shutdown canceled is aborted, not failed: the
+// process-group kill at shutdown ends it with no exit code of its own, and
+// reading that as the script's verdict recorded a failure and escalated it
+// every time the daemon stopped mid-run (gt-7uyfc).
+func TestRunPluginScript_DaemonShutdownAbortsTheRun(t *testing.T) {
+	t.Parallel()
+	p := scriptPlugin(t, "x", "exit 0\n")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the daemon stopped
+	killed := func(*exec.Cmd) ([]byte, []byte, error) { return nil, nil, errors.New("signal: killed") }
+	res := runPluginScript(ctx, killed, scriptEnv{}, p, "/town", 5*time.Second)
+	if !res.aborted || res.ok() {
+		t.Fatalf("expected an aborted run, got %+v", res)
+	}
+	if !strings.HasPrefix(res.status(), "aborted") {
+		t.Errorf("status = %q, want an aborted run", res.status())
+	}
+}
+
+// The abort verdict is the daemon's cancel alone. The runPluginScript timeout
+// above still reports a timeout, and a script that finished on its own exit
+// code keeps it however the run ended — the cancel landing in the same
+// instant does not rewrite a real result (gt-7uyfc).
+func TestRunPluginScript_AbortOnlyForTheDaemonsOwnCancel(t *testing.T) {
+	t.Parallel()
+	p := scriptPlugin(t, "x", "exit 0\n")
+
+	// Past its own deadline: a timeout, as before.
+	killed := func(*exec.Cmd) ([]byte, []byte, error) { return nil, nil, errors.New("signal: killed") }
+	if res := runPluginScript(context.Background(), killed, scriptEnv{}, p, "/town", -time.Second); res.aborted || !res.timedOut {
+		t.Fatalf("a spent deadline must stay a timeout, got %+v", res)
+	}
+
+	// Canceled while the script was finishing on its own: the result stands.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	bash := scriptBash(cliReply{stdout: "did the work\n"})
+	if res := runPluginScript(ctx, bash.run, scriptEnv{}, p, "/town", 5*time.Second); res.aborted || !res.ok() {
+		t.Fatalf("a clean exit keeps its result, got %+v", res)
+	}
+}
+
 func TestRunPluginScript_FailureExitCode(t *testing.T) {
 	t.Parallel()
 	p := scriptPlugin(t, "bad", "exit 3\n")
@@ -313,6 +355,42 @@ func TestCompleteScriptRun_DeferralWritesNothing(t *testing.T) {
 	}
 	if recs != 2 || escalated != 2 {
 		t.Errorf("timed-out/never-started runs must be recorded as failures: recs=%d escalated=%d", recs, escalated)
+	}
+}
+
+// A run aborted by the daemon's shutdown writes no record and escalates
+// nothing: its kill was the daemon's own, so a failure receipt would spend
+// the plugin's cooldown and a failure escalation would report the shutdown as
+// the plugin's fault (gt-7uyfc). It is not a deferral either — nothing was
+// accomplished and nothing is retried.
+func TestCompleteScriptRun_AbortedWritesNothing(t *testing.T) {
+	t.Parallel()
+	p := &plugin.Plugin{Name: "x", RigName: "gastown", Path: "/p", Execution: &plugin.Execution{AllowDeferredExit: true}}
+	recs := 0
+	escalated, good := 0, 0
+	var logs []string
+	hooks := scriptRunHooks{
+		record:    func(plugin.PluginRunRecord) error { recs++; return nil },
+		onFailure: func(*plugin.Plugin, scriptResult) { escalated++ },
+		onSuccess: func(*plugin.Plugin) { good++ },
+		logf:      func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) },
+	}
+	for _, res := range []scriptResult{
+		{aborted: true, exitCode: -1, err: errors.New("signal: killed")},
+		// An abort whose kill was read as the deferred exit code: still no
+		// retry, because the daemon ended the run rather than the script.
+		{aborted: true, exitCode: scriptExitDeferred},
+	} {
+		completeScriptRun(p, res, hooks)
+	}
+	if recs != 0 {
+		t.Errorf("an aborted run must write no run record (wrote %d)", recs)
+	}
+	if escalated != 0 || good != 0 {
+		t.Errorf("an aborted run must neither escalate nor report a good run: escalated=%d good=%d", escalated, good)
+	}
+	if len(logs) != 2 || !strings.Contains(logs[0], "aborted") || !strings.Contains(logs[0], "shutting down") {
+		t.Errorf("aborts must be logged as the daemon's own: %v", logs)
 	}
 }
 
