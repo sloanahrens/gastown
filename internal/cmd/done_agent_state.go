@@ -210,6 +210,17 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 		// Exception: workflow step beads (*-wfs-*) are always closed — see above.
 		hookBd, _, _ := done.RoutedIssueBeadsIn(beadsPath, hookedBeadID, e.sourceOpener())
 		hookedBead, hookedErr := hookBd.Show(hookedBeadID)
+		if hookedErr != nil && !errors.Is(hookedErr, beads.ErrNotFound) {
+			// A read that failed for any reason but absence leaves the bead's
+			// status unknown, and the block below is what ends an attached
+			// molecule. Falling through to doneStateUpdate on that unknown
+			// would clear the hook and mark the agent done while the work bead
+			// stays hooked or in_progress with no polecat on it — the
+			// dispatch-loop shape gt-pftz named. Fail instead, so the hook
+			// stays set and the caller hears why.
+			style.PrintWarning("could not read hooked bead %s: %v", hookedBeadID, hookedErr)
+			return fmt.Errorf("resolving hooked bead %s: %w", hookedBeadID, hookedErr)
+		}
 		if hookedErr == nil && beads.IssueStatus(hookedBead.Status).IsTerminal() {
 			// The bead was closed before gt done ran — the nothing-to-implement
 			// route closes it first. The block below, which is what ends an

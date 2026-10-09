@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,9 +12,101 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/formula"
 )
+
+// TestDispatchWorkflowStepsReportsAFailedSling: a step whose `gt sling` fails
+// never reaches a polecat, so the run must return a non-nil error naming it and
+// must not print that the workflow was dispatched. Reporting success over a
+// step nobody picked up leaves the workflow looking dispatched when the work is
+// not running (gt-abr6v).
+func TestDispatchWorkflowStepsReportsAFailedSling(t *testing.T) {
+	t.Parallel()
+
+	fake := beadsfake.New(beadsfake.WithPrefix("gt"))
+	f := &cookedFormula{Steps: []cookedStep{
+		{ID: "first", Title: "First step"},
+		{ID: "second", Title: "Second step", Needs: []string{"first"}},
+	}}
+
+	var slung int
+	run := &workflowStepRun{
+		formula:    f,
+		workflowID: "hq-wf-test",
+		rigPrefix:  "gt",
+		targetRig:  "gastown",
+		rigBd:      fake,
+		track:      func(string) error { return nil },
+		sling: func([]string) error {
+			slung++
+			return errors.New("no polecat accepted the work")
+		},
+	}
+
+	var out bytes.Buffer
+	run.createBeads(&out)
+	err := run.dispatch(&out)
+
+	if err == nil {
+		t.Fatalf("a failed sling returned no error; output:\n%s", out.String())
+	}
+	if !strings.Contains(err.Error(), "first") {
+		t.Errorf("error %q does not name the step that failed to sling", err)
+	}
+	if strings.Contains(out.String(), "Workflow dispatched") {
+		t.Errorf("a failed sling still printed the workflow dispatched:\n%s", out.String())
+	}
+	if slung != 1 {
+		t.Errorf("slinged %d step(s), want 1 — only the dependency-free step is ready", slung)
+	}
+}
+
+// TestDispatchWorkflowStepsReportsAnUnwiredStep: a step whose bead exists but
+// whose needs could not be wired is not ready, so the run must not sling it and
+// must name it in the error (gt-abr6v).
+func TestDispatchWorkflowStepsReportsAnUnwiredStep(t *testing.T) {
+	t.Parallel()
+
+	fake := beadsfake.New(beadsfake.WithPrefix("gt"))
+	// "second" needs a step the formula never declares: its bead is never
+	// created, so there is nothing to depend on.
+	f := &cookedFormula{Steps: []cookedStep{
+		{ID: "second", Title: "Second step", Needs: []string{"missing"}},
+	}}
+
+	var slung int
+	run := &workflowStepRun{
+		formula:    f,
+		workflowID: "hq-wf-test",
+		rigPrefix:  "gt",
+		targetRig:  "gastown",
+		rigBd:      fake,
+		track:      func(string) error { return nil },
+		sling: func([]string) error {
+			slung++
+			return nil
+		},
+	}
+
+	var out bytes.Buffer
+	run.createBeads(&out)
+	err := run.dispatch(&out)
+
+	if err == nil {
+		t.Fatalf("an unwired step returned no error; output:\n%s", out.String())
+	}
+	if !strings.Contains(err.Error(), "second") {
+		t.Errorf("error %q does not name the unwired step", err)
+	}
+	if slung != 0 {
+		t.Errorf("slinged %d step(s), want 0 — an unwired step is not ready", slung)
+	}
+	if strings.Contains(out.String(), "Workflow dispatched") {
+		t.Errorf("an unwired step still printed the workflow dispatched:\n%s", out.String())
+	}
+}
 
 // TestAutoInferRig verifies the rig auto-selection logic used when --rig is
 // not provided and cwd-based detection finds nothing (e.g. Deacon at HQ level

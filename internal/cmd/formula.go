@@ -3,14 +3,18 @@ package cmd
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base32"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -707,57 +711,168 @@ func executeWorkflowFormula(f *cookedFormula, formulaName, targetRig string) err
 
 	fmt.Printf("%s Created workflow: %s\n", style.Bold.Render("✓"), workflowID)
 
-	// Step 2: Create step beads and wire dependencies
-	stepBeads := make(map[string]string) // step.ID -> bead ID
+	run := &workflowStepRun{
+		formula:    f,
+		workflowID: workflowID,
+		rigPrefix:  rigPrefix,
+		targetRig:  targetRig,
+		townBeads:  townBeads,
+		rigBd:      rigBd,
+	}
+	run.createBeads(os.Stdout)
+	return run.dispatch(os.Stdout)
+}
 
-	for _, step := range f.Steps {
-		stepBeadID := fmt.Sprintf("%s-wfs-%s", rigPrefix, generateFormulaShortID())
+// runFormulaStepSlingTimeout bounds one step's `gt sling`. A wedged store or a
+// target that never answers must fail the run, not hang it forever with no way
+// to say which step never arrived (gt-abr6v).
+const runFormulaStepSlingTimeout = 2 * time.Minute
+
+// runFormulaStepSling dispatches one workflow step by running `gt sling` with
+// args, streaming its output to this process under runFormulaStepSlingTimeout.
+func runFormulaStepSling(args []string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), runFormulaStepSlingTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gt", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("gt sling timed out after %s: %w", runFormulaStepSlingTimeout, err)
+		}
+		return err
+	}
+	return nil
+}
+
+// workflowStepRun creates one workflow run's step beads and dispatches them.
+// executeWorkflowFormula resolves the town root and opens the real stores; a
+// test fills the same struct from a fake store, a no-op tracker and a scripted
+// sling, which is what exercises the dispatch without a town (gt-abr6v).
+type workflowStepRun struct {
+	formula    *cookedFormula
+	workflowID string
+	rigPrefix  string
+	targetRig  string
+	townBeads  string
+	rigBd      beads.Client
+
+	// track records a step bead against the workflow root. nil tracks through
+	// the real town store.
+	track func(stepBeadID string) error
+	// sling dispatches one step. nil runs the real `gt sling`.
+	sling func(args []string) error
+
+	stepBeads map[string]string // step.ID -> bead ID
+	failed    []string          // steps that could not be created, wired or dispatched
+}
+
+// markFailed records stepID once, in the order createBeads and dispatch reach
+// it, so the error a run returns names steps in formula order.
+func (r *workflowStepRun) markFailed(stepID string) {
+	for _, id := range r.failed {
+		if id == stepID {
+			return
+		}
+	}
+	r.failed = append(r.failed, stepID)
+}
+
+// hasFailed reports whether stepID is already recorded as failed.
+func (r *workflowStepRun) hasFailed(stepID string) bool {
+	for _, id := range r.failed {
+		if id == stepID {
+			return true
+		}
+	}
+	return false
+}
+
+// createBeads creates one bead per step and wires each step's needs. A step
+// that cannot be created, or whose needs cannot be wired, is recorded as
+// failed: dispatch must not sling a step as ready when the ordering that makes
+// it ready was never written (gt-abr6v).
+func (r *workflowStepRun) createBeads(w io.Writer) {
+	r.stepBeads = make(map[string]string)
+
+	for _, step := range r.formula.Steps {
+		stepBeadID := fmt.Sprintf("%s-wfs-%s", r.rigPrefix, generateFormulaShortID())
 		stepDescription := workflowStepDescription(step)
 
 		// The description goes in through Update, which sends it on stdin
 		// (--body-file=-): large markdown would hit CLI arg length limits
 		// and quoting issues as a create argument.
-		_, err := rigBd.Create(beads.CreateOptions{ID: stepBeadID, Title: step.Title, Priority: -1})
+		_, err := r.rigBd.Create(beads.CreateOptions{ID: stepBeadID, Title: step.Title, Priority: -1})
 		if err == nil {
-			err = rigBd.Update(stepBeadID, beads.UpdateOptions{Description: &stepDescription})
+			err = r.rigBd.Update(stepBeadID, beads.UpdateOptions{Description: &stepDescription})
 		}
 		if err != nil {
-			fmt.Printf("%s Failed to create step bead for %s: %v\n",
+			fmt.Fprintf(w, "%s Failed to create step bead for %s: %v\n",
 				style.Dim.Render("Warning:"), step.ID, err)
+			r.markFailed(step.ID)
 			continue
 		}
 
 		// Track the step with the workflow
-		_ = addTrackingRelationFn(townBeads, workflowID, stepBeadID)
+		_ = r.trackStep(stepBeadID)
 
 		// Wire dependencies: this step depends on its needs
 		for _, needID := range step.Needs {
-			depBeadID, ok := stepBeads[needID]
+			depBeadID, ok := r.stepBeads[needID]
 			if !ok {
-				fmt.Printf("%s Step '%s' needs '%s' but it has no bead (ordering issue?)\n",
+				fmt.Fprintf(w, "%s Step '%s' needs '%s' but it has no bead (ordering issue?)\n",
 					style.Dim.Render("Warning:"), step.ID, needID)
+				r.markFailed(step.ID)
 				continue
 			}
-			_ = rigBd.AddDependency(stepBeadID, depBeadID)
+			if err := r.rigBd.AddDependency(stepBeadID, depBeadID); err != nil {
+				fmt.Fprintf(w, "%s Could not wire step '%s' to its need '%s': %v\n",
+					style.Dim.Render("Warning:"), step.ID, needID, err)
+				r.markFailed(step.ID)
+			}
 		}
 
-		stepBeads[step.ID] = stepBeadID
+		r.stepBeads[step.ID] = stepBeadID
 
 		needsStr := ""
 		if len(step.Needs) > 0 {
 			needsStr = fmt.Sprintf(" (needs: %s)", strings.Join(step.Needs, ", "))
 		}
-		fmt.Printf("  %s %s: %s%s\n", style.Dim.Render("○"), step.ID, stepBeadID, needsStr)
+		fmt.Fprintf(w, "  %s %s: %s%s\n", style.Dim.Render("○"), step.ID, stepBeadID, needsStr)
 	}
+}
 
+// trackStep records stepBeadID against the workflow root.
+func (r *workflowStepRun) trackStep(stepBeadID string) error {
+	if r.track != nil {
+		return r.track(stepBeadID)
+	}
+	return addTrackingRelationFn(r.townBeads, r.workflowID, stepBeadID)
+}
+
+// dispatchStep dispatches one step.
+func (r *workflowStepRun) dispatchStep(args []string) error {
+	if r.sling != nil {
+		return r.sling(args)
+	}
+	return runFormulaStepSling(args)
+}
+
+// dispatch hooks interactive steps to the current session, slings the rest and
+// prints the run summary. It returns a non-nil error naming every step the run
+// could not dispatch, and prints no success line: a step whose bead was never
+// created, whose needs could not be wired or whose sling failed never reached a
+// polecat, so "Workflow dispatched!" over it would report a workflow that is
+// not running (gt-abr6v).
+func (r *workflowStepRun) dispatch(w io.Writer) error {
 	// Step 3: Identify and dispatch ready steps (those with no dependencies)
 	// Interactive steps are hooked to the current session; others are slung to polecats.
-	fmt.Printf("\n%s Dispatching ready steps...\n\n", style.Bold.Render("→"))
+	fmt.Fprintf(w, "\n%s Dispatching ready steps...\n\n", style.Bold.Render("→"))
 
 	// Check if any step in the workflow is interactive — if so, we'll need
 	// to handle the molecule lifecycle in the current session.
 	hasInteractive := false
-	for _, step := range f.Steps {
+	for _, step := range r.formula.Steps {
 		if step.metaBool("interactive") {
 			hasInteractive = true
 			break
@@ -766,13 +881,16 @@ func executeWorkflowFormula(f *cookedFormula, formulaName, targetRig string) err
 
 	slingCount := 0
 	interactiveCount := 0
-	for _, step := range f.Steps {
+	for _, step := range r.formula.Steps {
 		if len(step.Needs) > 0 {
 			continue // has unmet dependencies — will be auto-dispatched
 		}
 
-		stepBeadID, ok := stepBeads[step.ID]
-		if !ok {
+		stepBeadID, ok := r.stepBeads[step.ID]
+		if !ok || r.hasFailed(step.ID) {
+			// No bead, or a bead whose wiring failed. Either way the step is
+			// not ready in a sense this run can stand behind, and it is
+			// already named in the failure the run will return.
 			continue
 		}
 
@@ -780,48 +898,55 @@ func executeWorkflowFormula(f *cookedFormula, formulaName, targetRig string) err
 			// Interactive step: hook to current session instead of slinging to a polecat.
 			// The user will execute this step in their current crew session.
 			hooked := beads.StatusHooked
-			_ = rigBd.Update(stepBeadID, beads.UpdateOptions{Status: &hooked})
+			if err := r.rigBd.Update(stepBeadID, beads.UpdateOptions{Status: &hooked}); err != nil {
+				fmt.Fprintf(w, "%s Failed to hook step %s: %v\n",
+					style.Dim.Render("Warning:"), step.ID, err)
+				r.markFailed(step.ID)
+				continue
+			}
 
-			fmt.Printf("  %s %s: %s (interactive — hooked to current session)\n",
+			fmt.Fprintf(w, "  %s %s: %s (interactive — hooked to current session)\n",
 				style.Bold.Render("⇨"), step.ID, stepBeadID)
-			fmt.Printf("    %s\n", step.Title)
-			fmt.Printf("    When done: gt bead close %s\n\n", stepBeadID)
+			fmt.Fprintf(w, "    %s\n", step.Title)
+			fmt.Fprintf(w, "    When done: gt bead close %s\n\n", stepBeadID)
 			interactiveCount++
 			continue
 		}
 
 		// Non-interactive step: sling to the step's target, or to the rig's
 		// polecat pool by default.
-		stepTarget := workflowStepTarget(step, targetRig)
+		stepTarget := workflowStepTarget(step, r.targetRig)
 		slingArgs := buildWorkflowStepSlingArgs(stepBeadID, stepTarget, workflowStepDescription(step), step.Title, formulaRunAgent)
 
-		slingCmd := exec.Command("gt", slingArgs...)
-		slingCmd.Stdout = os.Stdout
-		slingCmd.Stderr = os.Stderr
-
-		if err := slingCmd.Run(); err != nil {
-			fmt.Printf("%s Failed to sling step %s: %v\n",
+		if err := r.dispatchStep(slingArgs); err != nil {
+			fmt.Fprintf(w, "%s Failed to sling step %s: %v\n",
 				style.Dim.Render("Warning:"), step.ID, err)
-			_ = rigBd.AddComment(stepBeadID, fmt.Sprintf("Failed to sling: %v", err))
+			_ = r.rigBd.AddComment(stepBeadID, fmt.Sprintf("Failed to sling: %v", err))
+			r.markFailed(step.ID)
 			continue
 		}
 
 		slingCount++
 	}
 
+	if len(r.failed) > 0 {
+		return fmt.Errorf("workflow %s: %d step(s) not dispatched: %s",
+			r.workflowID, len(r.failed), strings.Join(r.failed, ", "))
+	}
+
 	// Summary
-	blockedCount := len(f.Steps) - slingCount - interactiveCount
-	fmt.Printf("\n%s Workflow dispatched!\n", style.Bold.Render("✓"))
-	fmt.Printf("  Workflow: %s\n", workflowID)
+	blockedCount := len(r.formula.Steps) - slingCount - interactiveCount
+	fmt.Fprintf(w, "\n%s Workflow dispatched!\n", style.Bold.Render("✓"))
+	fmt.Fprintf(w, "  Workflow: %s\n", r.workflowID)
 	if interactiveCount > 0 {
-		fmt.Printf("  Steps:    %d total, %d interactive (current session), %d dispatched, %d awaiting dependencies\n",
-			len(f.Steps), interactiveCount, slingCount, blockedCount)
-		fmt.Printf("\n  This workflow has interactive steps. Work through them sequentially:\n")
-		fmt.Printf("    gt mol current                 — find current step\n")
-		fmt.Printf("    gt bead close <step-id>        — advance to next step\n")
+		fmt.Fprintf(w, "  Steps:    %d total, %d interactive (current session), %d dispatched, %d awaiting dependencies\n",
+			len(r.formula.Steps), interactiveCount, slingCount, blockedCount)
+		fmt.Fprintf(w, "\n  This workflow has interactive steps. Work through them sequentially:\n")
+		fmt.Fprintf(w, "    gt mol current                 — find current step\n")
+		fmt.Fprintf(w, "    gt bead close <step-id>        — advance to next step\n")
 	} else {
-		fmt.Printf("  Steps:    %d total, %d dispatched, %d awaiting dependencies\n",
-			len(f.Steps), slingCount, blockedCount)
+		fmt.Fprintf(w, "  Steps:    %d total, %d dispatched, %d awaiting dependencies\n",
+			len(r.formula.Steps), slingCount, blockedCount)
 	}
 
 	return nil
