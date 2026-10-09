@@ -176,7 +176,16 @@ func promoteRigSHA(deps promoteDeps, rigName, sha string) error {
 	// The record is written whatever the promotion did, exactly as the landing
 	// worker's verdict and the tier sweep write it: a divergence is raised
 	// again and only the record keeps it from paging a second time.
-	st.State = p.Promote(st.State, commit)
+	promoted := p.Promote(st.State, commit)
+	// The push above runs for seconds against the network while the landing
+	// worker's verdict and the tier sweep write this same record, so the copy
+	// loaded before it is stale by now: re-read the record and carry over only
+	// the promotion State, keeping every field a verdict written meanwhile set
+	// (gt-1ohu4).
+	if st, err = store.Load(); err != nil {
+		return fmt.Errorf("re-reading rig %s's red-main state: %w", rigName, err)
+	}
+	st.State = promoted
 	if err := store.Save(st); err != nil {
 		return fmt.Errorf("recording rig %s's promotion: %w", rigName, err)
 	}
