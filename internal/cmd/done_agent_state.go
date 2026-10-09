@@ -83,8 +83,13 @@ type doneStateEnv struct {
 	// done.OpenSourceStore.
 	source done.SourceStoreOpener
 	// purge removes the closed wisps of the store at dir; nil is bd purge.
-	purge      func(dir, townRoot string)
-	reviewHead func() (string, error)
+	purge func(dir, townRoot string)
+	// reviewHead resolves HEAD in the worktree dir the close gate is judging
+	// (nil is done.CurrentReviewEvidenceHeadIn). It takes the dir rather than
+	// reading the process working directory: gt done can close work for a
+	// worktree it is not standing in, and evidence must be validated against
+	// that worktree's head (gt-u0zq0).
+	reviewHead func(dir string) (string, error)
 }
 
 func (e doneStateEnv) routedAt(dir string) beads.Client {
@@ -116,9 +121,9 @@ func (e doneStateEnv) lookup() func(string) string {
 	return e.getenv
 }
 
-func (e doneStateEnv) head() func() (string, error) {
+func (e doneStateEnv) head() func(string) (string, error) {
 	if e.reviewHead == nil {
-		return done.CurrentReviewEvidenceHead
+		return done.CurrentReviewEvidenceHeadIn
 	}
 	return e.reviewHead
 }
@@ -223,7 +228,15 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 				goto doneStateUpdate
 			}
 
-			currentHead, _ := e.head()()
+			// HEAD in the worktree this close is judging (cwd), not in
+			// whatever directory gt done happens to run from. A head that
+			// cannot be read is reported and passed on empty: the review-only
+			// evidence check refuses on an empty head, and an operator reading
+			// that refusal needs to see why (gt-u0zq0).
+			currentHead, headErr := e.head()(cwd)
+			if headErr != nil {
+				style.PrintWarning("could not resolve HEAD in %s: %v", cwd, headErr)
+			}
 			if skipReason, fatal := done.DoneSourceCloseSkipReasonForHead(hookBd, hookedBeadID, hookedBead, currentHead); skipReason != "" {
 				style.PrintWarning("%s", skipReason)
 				fmt.Fprintf(os.Stderr, "  The bead will remain open; the reason is recorded on it.\n")

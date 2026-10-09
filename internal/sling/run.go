@@ -221,12 +221,21 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	}
 
 	// Clear the outgoing polecat's state when force-stealing a bead from it.
+	// The clear is kept for the failure path below: a spawn that does not happen
+	// leaves the old holder's state as it was (gt-u0zq0).
+	var restoreReassigned func()
 	if (info.Status == "hooked" || info.Status == "in_progress") && opts.Force && info.Assignee != "" {
 		assigneeParts := strings.Split(info.Assignee, "/")
 		if len(assigneeParts) >= 3 && assigneeParts[1] == "polecats" {
 			// gt-skwt: clear the outgoing polecat's agent-bead state now,
 			// synchronously.
-			d.ClearReassigned(townRoot, info.Assignee)
+			restoreReassigned = d.ClearReassigned(townRoot, info.Assignee)
+		}
+	}
+	restoreOutgoing := func() {
+		if restoreReassigned != nil {
+			restoreReassigned()
+			restoreReassigned = nil
 		}
 	}
 
@@ -295,6 +304,10 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	}
 	spawnInfo, err := d.SpawnPolecat(opts.RigName, spawnOpts)
 	if err != nil {
+		// No polecat took the bead, so nothing was stolen: put the outgoing
+		// holder's hook_bead and agent_state back before reporting the failure
+		// (gt-u0zq0).
+		restoreOutgoing()
 		result.ErrMsg = err.Error()
 		return result, fmt.Errorf("failed to spawn polecat: %w", err)
 	}
@@ -307,6 +320,9 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 
 	rollbackSpawnedPolecat := func(rollbackBeadID, reason string) {
 		fmt.Fprintf(d.out(), "  %s %s, rolling back spawned polecat %s...\n", style.Warning.Render("⚠"), reason, spawnInfo.PolecatName)
+		// The bead goes back to the holder this dispatch took it from, so that
+		// holder's cleared agent-bead state goes back with it (gt-u0zq0).
+		restoreOutgoing()
 		d.RollbackArtifacts(spawnInfo, townRoot, rollbackBeadID, hookWorkDir)
 		d.RestoreRawFields(rollbackBeadID, townRoot, hookWorkDir, info)
 		if opts.Force && info.Status == "pinned" {

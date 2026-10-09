@@ -236,6 +236,21 @@ func TestSlingAlreadyAssigned(t *testing.T) {
 		h.wantCalls("hook", "hook gt-abc123 "+holder)
 		h.wantNo("survival guard")
 	})
+	t.Run("force reassign restores the holder when the sling fails", func(t *testing.T) {
+		t.Parallel()
+		h := newSlingHarness(t)
+		h.addBead(slingBead, beadInfo{Status: "hooked", Assignee: holder})
+		h.run.opts.force = true
+		h.run.hook = func(_, _, _, _ string) error { return errors.New("bd is down") }
+		if err := h.sling(slingBead, holder); err == nil {
+			t.Fatal("sling succeeded, want the hook failure to roll it back")
+		}
+		// The clear ran (it must, before the bead is judged as free), and the
+		// rollback put the outgoing holder's state back with the bead
+		// (gt-u0zq0).
+		h.wantCalls("clear reassigned", "clear reassigned "+holder)
+		h.wantCalls("restore reassigned", "restore reassigned "+holder)
+	})
 	t.Run("dead holder is auto-forced after the survival guard", func(t *testing.T) {
 		t.Parallel()
 		h := newSlingHarness(t)

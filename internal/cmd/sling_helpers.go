@@ -1480,24 +1480,44 @@ func updateAgentMode(agentID, mode, workDir, townBeadsDir string) {
 }
 
 // clearReassignedPolecatState clears agent_state and hook_bead on a polecat's
-// agent bead after its work was force-reassigned to a different agent (gt-skwt).
+// agent bead after its work was force-reassigned to a different agent (gt-skwt),
+// and returns a function that puts both fields back.
 //
 // Nothing else touches these fields, so without this the outgoing polecat
 // keeps agent_state=working and hook_bead=<old bead> indefinitely, and a dead
 // session paired with an "active" agent state reads as a permanent zombie.
 // Clearing them here, synchronously, on the one code path guaranteed to run,
 // closes that gap.
-func clearReassignedPolecatState(townRoot, assignee string) {
+//
+// The restore covers the other side of the same gap: the clear runs before the
+// spawn, so a dispatch that never lands a polecat on the bead must hand the
+// outgoing holder its state back rather than leave it blank (gt-u0zq0). It is
+// called at most once and is a no-op afterwards; a holder whose file cannot be
+// read back gets a no-op restore, since there is nothing to put back.
+func clearReassignedPolecatState(townRoot, assignee string) func() {
 	if townRoot == "" {
-		return
+		return func() {}
 	}
 	agentBeadID := agentIDToBeadID(assignee, townRoot)
 	if agentBeadID == "" {
-		return
+		return func() {}
 	}
+	bd := beads.New(beads.ResolveHookDir(townRoot, agentBeadID, townRoot))
+	return clearReassignedPolecatStateIn(bd, agentBeadID)
+}
 
-	agentWorkDir := beads.ResolveHookDir(townRoot, agentBeadID, townRoot)
-	bd := beads.New(agentWorkDir)
+// clearReassignedPolecatStateIn is clearReassignedPolecatState over an open
+// agent store. It snapshots the fields it clears so the returned function can
+// put them back.
+func clearReassignedPolecatStateIn(bd beads.Client, agentBeadID string) func() {
+	noop := func() {}
+
+	// The read is best-effort: a holder with no readable bead still gets the
+	// clear, it just has nothing to restore.
+	var prior *beads.AgentFields
+	if _, fields, err := beads.GetAgentBead(bd, agentBeadID); err == nil {
+		prior = fields
+	}
 
 	emptyHook := ""
 	if err := beads.UpdateAgentDescriptionFields(bd, agentBeadID, beads.AgentFieldUpdates{HookBead: &emptyHook}); err != nil {
@@ -1506,6 +1526,21 @@ func clearReassignedPolecatState(townRoot, assignee string) {
 	idle := string(beads.AgentStateIdle)
 	if err := beads.UpdateAgentState(bd, agentBeadID, idle); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: couldn't clear agent_state on %s: %v\n", agentBeadID, err)
+	}
+	if prior == nil {
+		return noop
+	}
+
+	hook, state := prior.HookBead, prior.AgentState
+	restored := false
+	return func() {
+		if restored {
+			return
+		}
+		restored = true
+		if err := beads.UpdateAgentDescriptionFields(bd, agentBeadID, beads.AgentFieldUpdates{HookBead: &hook, AgentState: &state}); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: couldn't restore %s's agent state: %v\n", agentBeadID, err)
+		}
 	}
 }
 

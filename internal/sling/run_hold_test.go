@@ -67,7 +67,7 @@ func (f *fakeSlingDeps) deps() *Deps {
 		LockAssignee:       func(string, string) (func(), error) { return func() {}, nil },
 		AgentDead:          func(string) bool { return f.agentDead },
 		SurvivingWorkGuard: func(string, string, string) error { return nil },
-		ClearReassigned:    func(string, string) {},
+		ClearReassigned:    func(string, string) func() { return func() {} },
 		HookDir:            func(string, string, string) string { return "/town/hook" },
 		Hook:               func(string, string, string, string) error { f.hooks++; return nil },
 		RecordReassignment: func(string, string, string, string, string) {},

@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -592,7 +593,14 @@ func (l *poolSeatLedger) begin(live bool, sessions []poolSession) ([]poolSession
 		// The route is still decided, from live sessions alone — the behavior
 		// before claims existed — and the reason says the seat could not be
 		// reserved rather than passing a racy decision off as a reserved one.
+		// The fallback is deliberate (a 5s lock timeout must not fail a
+		// dispatch), but a route decided without the lock is a cap that can
+		// overfill, so it is said out loud: a warning is the only trace a
+		// contended decision leaves once the reason it fed has scrolled away
+		// (gt-u0zq0). TestResolvePoolAgentUnreservedWhenTheDecisionLockFails
+		// pins the decision this warns about.
 		d.note = "seat not reserved: " + err.Error()
+		style.PrintWarning("polecat pool seat not reserved (%v); routing on live sessions alone, which can overfill the cap", err)
 		return sessions, d, nil
 	}
 	d.unlock = unlock

@@ -1009,6 +1009,93 @@ func TestReapExcludesLiveMergeQueueWisps(t *testing.T) {
 	}
 }
 
+// TestReapProtectsMRAndReferencedStepsInEveryPhase: the closed-molecule and
+// absent-parent phases close their wisps on their own, without waiting for the
+// age sweep, and each of their SELECTs carries the same MR and live-reference
+// exclusions the sweep's does. A step-wisp of a closed molecule can itself be
+// an MR wisp, or the active_mr/hook_bead a live agent still points at; closing
+// it from one of those phases dangles the reference exactly as the age sweep
+// would (gt-u0zq0).
+func TestReapProtectsMRAndReferencedStepsInEveryPhase(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	old := now.Add(-48 * time.Hour)
+	state := &fakeReaperState{
+		wisps: map[string]*fakeWisp{
+			"mol-closed": {id: "mol-closed", status: "closed", issueType: "molecule", createdAt: old},
+			"step-mr": {
+				id: "step-mr", status: "open", issueType: "task", createdAt: old,
+				labels: []string{"gt:merge-request"},
+			},
+			"step-referenced": {id: "step-referenced", status: "open", issueType: "task", createdAt: old},
+			"step-plain":      {id: "step-plain", status: "open", issueType: "task", createdAt: old},
+			"absent-mr": {
+				id: "absent-mr", status: "open", issueType: "task", createdAt: old,
+				labels: []string{"gt:merge-request"},
+			},
+			"absent-referenced": {id: "absent-referenced", status: "open", issueType: "task", createdAt: old},
+			"absent-plain":      {id: "absent-plain", status: "open", issueType: "task", createdAt: old},
+			// The live agent those references belong to; a nuked one's would
+			// not spare them (see TestPurgeExcludesLiveAgentReferencedWisps).
+			"live-agent": {
+				id: "live-agent", status: "open", issueType: "agent", createdAt: now,
+				description: "agent_state: working\nactive_mr: step-referenced\nhook_bead: absent-referenced\n",
+			},
+		},
+		deps: []fakeDep{
+			{issueID: "step-mr", dependsOnID: "mol-closed", depType: "parent-child"},
+			{issueID: "step-referenced", dependsOnID: "mol-closed", depType: "parent-child"},
+			{issueID: "step-plain", dependsOnID: "mol-closed", depType: "parent-child"},
+			// A parent molecule record that was purged: the parent-child edge
+			// survives, the wisp it points at does not.
+			{issueID: "absent-mr", dependsOnID: "purged-molecule", depType: "parent-child"},
+			{issueID: "absent-referenced", dependsOnID: "purged-molecule", depType: "parent-child"},
+			{issueID: "absent-plain", dependsOnID: "purged-molecule", depType: "parent-child"},
+		},
+		ops: map[int][]string{},
+	}
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+
+	maxAge := 24 * time.Hour
+	scan, err := Scan(db, "testdb", maxAge, 7*24*time.Hour, 7*24*time.Hour, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if scan.MoleculeStepCandidates != 1 {
+		t.Fatalf("Scan MoleculeStepCandidates = %d, want 1 (step-plain): the preview must not promise a close the phase refuses", scan.MoleculeStepCandidates)
+	}
+
+	dryRun, err := Reap(db, state.writer(), "testdb", maxAge, true)
+	if err != nil {
+		t.Fatalf("dry-run Reap: %v", err)
+	}
+	if dryRun.MoleculeStepsClosed != 1 || dryRun.AbsentParentClosed != 1 {
+		t.Fatalf("dry run reported %d closed-molecule and %d absent-parent steps, want 1 and 1",
+			dryRun.MoleculeStepsClosed, dryRun.AbsentParentClosed)
+	}
+
+	realRun, err := Reap(db, state.writer(), "testdb", maxAge, false)
+	if err != nil {
+		t.Fatalf("real Reap: %v", err)
+	}
+	if realRun.MoleculeStepsClosed != 1 || realRun.AbsentParentClosed != 1 {
+		t.Fatalf("real Reap closed %d closed-molecule and %d absent-parent steps, want 1 and 1",
+			realRun.MoleculeStepsClosed, realRun.AbsentParentClosed)
+	}
+
+	for _, id := range []string{"step-mr", "step-referenced", "absent-mr", "absent-referenced"} {
+		if got := state.status(id); got != "open" {
+			t.Fatalf("%s status = %q, want open: an MR wisp or a live agent's reference is never closed by a phase's own candidate rule", id, got)
+		}
+	}
+	for _, id := range []string{"step-plain", "absent-plain"} {
+		if got := state.status(id); got != "closed" {
+			t.Fatalf("%s status = %q, want closed: nothing protects it in any phase", id, got)
+		}
+	}
+}
+
 // TestPurgeExcludesLiveAgentReferencedWisps is the regression test for gt-gyb6:
 // the purge sweep deleted closed MR wisps that live agent beads still named as
 // active_mr, so the polecat waited on an MR no lookup could resolve. Both rows
@@ -1400,10 +1487,16 @@ func (s *fakeReaperState) record(connID int, op string) {
 	s.ops[connID] = append(s.ops[connID], normalizeSQL(op))
 }
 
-func (s *fakeReaperState) moleculeStepCandidatesLocked() []string {
+// moleculeStepCandidatesLocked mirrors the closed-molecule phase's SELECT:
+// step-wisps whose parent molecule closed, minus the ones the query's
+// mr_protected join and live-reference NOT IN list spare. applyMRProtection is
+// read off the query text, so a phase that stops carrying the join shows up
+// here as a protected wisp handed to the phase (gt-u0zq0).
+func (s *fakeReaperState) moleculeStepCandidatesLocked(protectionCutoff time.Time, applyMRProtection bool, excluded map[string]bool) []string {
+	protected := s.reapProtectedLocked(protectionCutoff, applyMRProtection, excluded)
 	var ids []string
 	for id := range s.wisps {
-		if s.isMoleculeStepCandidateLocked(id) {
+		if s.isMoleculeStepCandidateLocked(id) && !protected[id] {
 			ids = append(ids, id)
 		}
 	}
@@ -1411,10 +1504,11 @@ func (s *fakeReaperState) moleculeStepCandidatesLocked() []string {
 	return ids
 }
 
-func (s *fakeReaperState) absentParentCandidatesLocked() []string {
+func (s *fakeReaperState) absentParentCandidatesLocked(protectionCutoff time.Time, applyMRProtection bool, excluded map[string]bool) []string {
+	protected := s.reapProtectedLocked(protectionCutoff, applyMRProtection, excluded)
 	var ids []string
 	for id, w := range s.wisps {
-		if !isOpenWispStatus(w.status) || w.issueType == "agent" {
+		if !isOpenWispStatus(w.status) || w.issueType == "agent" || protected[id] {
 			continue
 		}
 		if s.hasAbsentParentLocked(id) && !s.hasOpenParentLocked(id) {
@@ -1423,6 +1517,22 @@ func (s *fakeReaperState) absentParentCandidatesLocked() []string {
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+// reapProtectedLocked is the exclusion set every reaping phase's SELECT
+// carries: the wisps mrProtectedJoin spares (only when the query text has that
+// join) and the live-agent referenced ids the caller binds as NOT IN args.
+func (s *fakeReaperState) reapProtectedLocked(protectionCutoff time.Time, applyMRProtection bool, excluded map[string]bool) map[string]bool {
+	protected := map[string]bool{}
+	if applyMRProtection {
+		for id := range s.mrProtectedLocked(protectionCutoff) {
+			protected[id] = true
+		}
+	}
+	for id := range excluded {
+		protected[id] = true
+	}
+	return protected
 }
 
 func (s *fakeReaperState) isMoleculeStepCandidateLocked(id string) bool {
@@ -1650,7 +1760,10 @@ func (c *fakeReaperConn) QueryContext(_ context.Context, query string, args []dr
 		if err := validateMoleculeStepQuery(normalized); err != nil {
 			return nil, err
 		}
-		return fakeCountRows(len(c.state.moleculeStepCandidatesLocked())), nil
+		return fakeCountRows(len(c.state.moleculeStepCandidatesLocked(
+			namedLiteralTTLTime(normalized, c.t),
+			strings.Contains(normalized, "mr_protected.issue_id IS NULL"),
+			namedExcludedIDsWithoutCutoff(args)))), nil
 	case strings.Contains(normalized, "SELECT COUNT(*) FROM wisps WHERE status IN"):
 		return fakeCountRows(c.state.openCountLocked()), nil
 	case strings.Contains(normalized, "GROUP BY wtype"):
@@ -1672,10 +1785,22 @@ func (c *fakeReaperConn) QueryContext(_ context.Context, query string, args []dr
 		return fakeCountRows(0), nil
 	case strings.Contains(normalized, "SELECT COUNT(*) FROM wisps w") && strings.Contains(normalized, "LEFT JOIN wisp_dependencies wd") && strings.Contains(normalized, "pm.id IS NULL"):
 		// absent-parent molecule count (dry-run)
-		return fakeCountRows(len(c.state.absentParentCandidatesLocked())), nil
+		if err := validateAbsentParentQuery(normalized); err != nil {
+			return nil, err
+		}
+		return fakeCountRows(len(c.state.absentParentCandidatesLocked(
+			namedLiteralTTLTime(normalized, c.t),
+			strings.Contains(normalized, "mr_protected.issue_id IS NULL"),
+			namedExcludedIDsWithoutCutoff(args)))), nil
 	case strings.Contains(normalized, "SELECT w.id FROM wisps w") && strings.Contains(normalized, "LEFT JOIN wisp_dependencies wd") && strings.Contains(normalized, "pm.id IS NULL"):
 		// absent-parent molecule step ID query (real execution)
-		return fakeIDRows(c.state.absentParentCandidatesLocked()), nil
+		if err := validateAbsentParentQuery(normalized); err != nil {
+			return nil, err
+		}
+		return fakeIDRows(c.state.absentParentCandidatesLocked(
+			namedLiteralTTLTime(normalized, c.t),
+			strings.Contains(normalized, "mr_protected.issue_id IS NULL"),
+			namedExcludedIDsWithoutCutoff(args))), nil
 	case strings.Contains(normalized, "SELECT COUNT(*) FROM wisp_dependencies wd"):
 		return fakeCountRows(0), nil
 	case strings.Contains(normalized, "SELECT w.id FROM wisps w") && strings.Contains(normalized, "created_at <"):
@@ -1687,7 +1812,10 @@ func (c *fakeReaperConn) QueryContext(_ context.Context, query string, args []dr
 		if err := validateMoleculeStepQuery(normalized); err != nil {
 			return nil, err
 		}
-		return fakeIDRows(c.state.moleculeStepCandidatesLocked()), nil
+		return fakeIDRows(c.state.moleculeStepCandidatesLocked(
+			namedLiteralTTLTime(normalized, c.t),
+			strings.Contains(normalized, "mr_protected.issue_id IS NULL"),
+			namedExcludedIDsWithoutCutoff(args))), nil
 	default:
 		return nil, fmt.Errorf("unexpected query: %s", normalized)
 	}
@@ -1810,8 +1938,20 @@ func namedLiteralTTLTime(normalized string, t *testing.T) time.Time {
 // namedExcludedIDs returns the bind args after the age cutoff — the wisp IDs the
 // live-reference exclusion clause carries.
 func namedExcludedIDs(args []driver.NamedValue) map[string]bool {
+	return excludedIDsOf(args, 1)
+}
+
+// namedExcludedIDsWithoutCutoff is namedExcludedIDs for a query that has no age
+// cutoff to skip: the closed-molecule and absent-parent phases select without
+// one, so every bind arg is a live-reference ID.
+func namedExcludedIDsWithoutCutoff(args []driver.NamedValue) map[string]bool {
+	return excludedIDsOf(args, 0)
+}
+
+// excludedIDsOf collects the string bind args from position from as a set.
+func excludedIDsOf(args []driver.NamedValue, from int) map[string]bool {
 	excluded := map[string]bool{}
-	for _, arg := range args[1:] {
+	for _, arg := range args[from:] {
 		if id, ok := arg.Value.(string); ok {
 			excluded[id] = true
 		}
@@ -1838,6 +1978,34 @@ func validateMoleculeStepQuery(query string) error {
 		"open_dep.depends_on_external IS NOT NULL",
 		"w.issue_type != 'agent'",
 		"w.status IN ('open', 'hooked', 'in_progress')",
+		// The MR and live-reference exclusions every phase carries: a
+		// step-wisp of a closed molecule can be an MR wisp, or the active_mr
+		// a live agent still points at, and closing it dangles that reference
+		// (gt-u0zq0).
+		"mr_protected.issue_id IS NULL",
+		"wisp_labels",
+		"gt:merge-request",
+		"state:merge-requested",
+	)
+}
+
+// validateAbsentParentQuery pins the absent-parent phases' SELECT the way
+// validateMoleculeStepQuery pins the closed-molecule one, exclusions included
+// (gt-u0zq0).
+func validateAbsentParentQuery(query string) error {
+	return requireSQL(query,
+		"wd.issue_id",
+		"pm.id = wd.depends_on_wisp_id",
+		"pi.id = wd.depends_on_issue_id",
+		"wd.type = 'parent-child'",
+		"pm.id IS NULL",
+		"pi.id IS NULL",
+		"w.issue_type != 'agent'",
+		"w.status IN ('open', 'hooked', 'in_progress')",
+		"mr_protected.issue_id IS NULL",
+		"wisp_labels",
+		"gt:merge-request",
+		"state:merge-requested",
 	)
 }
 

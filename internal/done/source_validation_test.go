@@ -103,7 +103,7 @@ func TestDoneNoMRClosePathUsesRoutedSourceBeads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveSubmitSourceIssue: %v", err)
 	}
-	if skipReason, fatal := doneSourceCloseSkipReason(source.BD, "bd-source", source.Issue); skipReason != "" || fatal {
+	if skipReason, fatal := doneSourceCloseSkipReason("", source.BD, "bd-source", source.Issue); skipReason != "" || fatal {
 		t.Fatalf("doneSourceCloseSkipReason = %q, %v; want close allowed", skipReason, fatal)
 	}
 	if err := source.BD.ForceCloseWithReason("done", "bd-source"); err != nil {

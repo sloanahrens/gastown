@@ -126,6 +126,11 @@ func (g *Gate) Reap(townRoot string, opts ReapOptions) (ReapReport, error) {
 // package doc). That test is strictly stronger than asking whether the
 // recorded pid is still running: a live holder always holds the flock, and
 // pids come back around.
+//
+// The read and the removal both happen while the flock is held. Releasing it
+// first opens a window in which the next acquirer takes the slot and writes its
+// own owner file — the file this would then delete, leaving a live holder with
+// no owner file for the gate and the full-suite cap to read (gt-u0zq0).
 func reapStaleOwnerFiles(townRoot string, dryRun bool) []StaleOwnerFile {
 	var stale []StaleOwnerFile
 	for _, i := range discoverSlots(townRoot) {
@@ -139,7 +144,6 @@ func reapStaleOwnerFiles(townRoot string, dryRun bool) []StaleOwnerFile {
 			// holder, whose own Release removes it.
 			continue
 		}
-		unlock()
 
 		file := StaleOwnerFile{Slot: i, Path: path}
 		if owner := readSlotOwner(townRoot, i); owner != nil {
@@ -149,6 +153,7 @@ func reapStaleOwnerFiles(townRoot string, dryRun bool) []StaleOwnerFile {
 		if !dryRun {
 			_ = os.Remove(path)
 		}
+		unlock()
 		stale = append(stale, file)
 	}
 	return stale

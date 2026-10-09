@@ -329,6 +329,20 @@ type Owner struct {
 	Role       string    `json:"role"`
 	PID        int       `json:"pid"`
 	AcquiredAt time.Time `json:"acquired_at"`
+	// Start is the holder process's start token as the kernel reported it when
+	// the file was written (procid.StartToken): the field that tells a live
+	// holder from a stranger wearing its pid. A pid is reused once its process
+	// dies, so a pid alone is evidence of nobody. Readers that judge liveness
+	// from this file (runningGate, liveFullSuiteHolders) compare it against the
+	// start token of the process at that pid now; equal means the same process,
+	// and a mismatch means the holder is gone (gt-u0zq0). Empty on a file
+	// written where a start time cannot be read, and on files written before
+	// the field existed, where the pid is all there is.
+	Start string `json:"start,omitempty"`
+	// Settled marks a claim that is past the acquisition's docker probe, so the
+	// file describes a holder running its work rather than a claimant still
+	// deciding whether to keep the slot (see settleSlotOwner and othersHeld).
+	Settled bool `json:"settled,omitempty"`
 	// Slot is the pool index this owner holds (0 for the original single
 	// slot). Filled in by StatusPool when read back.
 	Slot int `json:"slot"`
