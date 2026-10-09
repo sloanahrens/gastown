@@ -1040,12 +1040,13 @@ func TestLandRejectionLeavesABeadThatChangedHands(t *testing.T) {
 	}
 }
 
-// failingBeads fails AppendNotes, or Show after the first call.
+// failingBeads fails AppendNotes, Update, or Show after the first call.
 type failingBeads struct {
 	*beadsfake.Fake
-	failNotes bool
-	shows     int
-	failShow  bool
+	failNotes  bool
+	failUpdate bool
+	shows      int
+	failShow   bool
 }
 
 func (b *failingBeads) AppendNotes(id, note string) error {
@@ -1053,6 +1054,13 @@ func (b *failingBeads) AppendNotes(id, note string) error {
 		return errors.New("database is locked")
 	}
 	return b.Fake.AppendNotes(id, note)
+}
+
+func (b *failingBeads) Update(id string, opts beads.UpdateOptions) error {
+	if b.failUpdate {
+		return errors.New("database is locked")
+	}
+	return b.Fake.Update(id, opts)
 }
 
 func (b *failingBeads) Show(id string) (*beads.Issue, error) {
@@ -1091,6 +1099,40 @@ func TestLandRejectionRecordFailuresAreObservable(t *testing.T) {
 				t.Errorf("bead changed although the rejection write failed: status=%s labels=%v", b.Status, b.Labels)
 			}
 		})
+	}
+}
+
+// TestLandRejectionRetryDoesNotBurnAttempts: a rejection whose block was
+// written but whose bead update failed is finished on the retry, not recorded
+// again. Otherwise each retry appends another block, the count reaches
+// MaxReworkAttempts and the bead is escalated having never told the author why
+// (gt-zqqcr).
+func TestLandRejectionRetryDoesNotBurnAttempts(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.gate.fn = func(string) GateResult { return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 1}}} }
+	l := f.lander()
+	l.Beads = &failingBeads{Fake: f.bd, failUpdate: true}
+	for round := 1; round <= MaxReworkAttempts; round++ {
+		_, err := l.Land(context.Background(), f.work)
+		var rej *Rejection
+		if !errors.As(err, &rej) {
+			t.Fatalf("round %d: Land = %T %v, want a rejection", round, err, err)
+		}
+		if rej.RecordErr == nil || !strings.Contains(rej.RecordErr.Error(), "reopening the bead") {
+			t.Fatalf("round %d: RecordErr = %v, want the failed reopen", round, rej.RecordErr)
+		}
+		// The refusal never reached the author, so no round is a new attempt.
+		if got := CountRejections(f.bead().Notes); got != 1 {
+			t.Fatalf("round %d: %d rejection block(s), want 1", round, got)
+		}
+	}
+	b := f.bead()
+	if beads.HasLabel(b, LabelNeedsHuman) || !beads.HasLabel(b, LabelReadyToLand) {
+		t.Errorf("labels after %d failed records = %v; want the bead still ready and not escalated", MaxReworkAttempts, b.Labels)
+	}
+	if strings.Contains(b.Notes, "the loop is escalated") {
+		t.Errorf("notes claim the loop escalated: %s", b.Notes)
 	}
 }
 

@@ -50,8 +50,9 @@ type RejectionNote struct {
 }
 
 // FormatRejectionNote renders n. Every agent-supplied field is collapsed onto
-// one line, and the gate tail is indented and stripped of the markers other
-// readers split on, so no output line can forge a block or a field.
+// one line, and the fields that carry free text — the reason, each finding
+// title and the gate tail — are stripped of the markers other readers split
+// on, so no output can forge a block or a field (gt-zqqcr).
 func FormatRejectionNote(n RejectionNote) string {
 	attempt := n.Attempt
 	if attempt < 1 {
@@ -61,11 +62,11 @@ func FormatRejectionNote(n RejectionNote) string {
 	if class := NoteField(n.Kind); class != "" {
 		header += class + " - "
 	}
-	note := header + NoteField(n.Reason) +
+	note := header + defuseMarkers(NoteField(n.Reason)) +
 		fmt.Sprintf("\nBranch: %s\nTarget: %s\nMR: %s", n.Branch, n.Target, n.MR)
 	for _, f := range n.Findings {
 		note += fmt.Sprintf("\n- id:%s sev:%s %s:%d — %s",
-			NoteField(f.ID), NoteField(f.Severity), NoteField(f.Path), f.Line, NoteField(f.Title))
+			NoteField(f.ID), NoteField(f.Severity), NoteField(f.Path), f.Line, defuseMarkers(NoteField(f.Title)))
 	}
 	if n.Receipt != nil {
 		note += fmt.Sprintf("\nScore: %.4f", n.Receipt.Score)
@@ -108,9 +109,12 @@ func defuseMarkers(line string) string {
 }
 
 // CountRejections is the number of MERGE REJECTION blocks in notes, the
-// attempt counter the formula and the deacon use.
+// attempt counter the formula and the deacon use. It counts the same anchored
+// headers the parser finds, so marker text quoted inside a reason or a finding
+// title — anywhere but the start of a line — is content, not a block, and does
+// not inflate the count (gt-zqqcr).
 func CountRejections(notes string) int {
-	return strings.Count(notes, MergeRejectionNoteMarker+" (attempt")
+	return len(rejectionBlockRE.FindAllStringIndex(notes, -1))
 }
 
 // rejectionBlockRE finds a rejection block's header. The marker must open a
