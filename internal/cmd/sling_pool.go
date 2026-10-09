@@ -571,20 +571,35 @@ type poolSeatDecision struct {
 	note string
 }
 
-// begin merges the claims other slings hold into sessions and opens the window
-// to claim one. The caller must call done(), error or not.
+// begin merges the claims other slings hold into the pool's occupied seats and
+// opens the window to claim one. The caller must call done(), error or not.
 //
-// A dry run merges the same claims — so it prints the route a real sling would
-// take — but neither cleans up nor claims: a preview must not change the pool's
-// state.
+// occupied reads the seats the pool already holds (poolOccupiedSessions, the
+// live sessions and the seats mid-landing), and it is called under the decision
+// lock rather than before it: a session that starts and drops its claim in the
+// window between an unlocked read and the lock appears in neither, so the count
+// names a seat free that the other sling already took and the pool runs one
+// over its cap (gt-8o35b). Locking both reads together is what makes the count
+// and the claims one atom. The move does not lengthen the read — one agent-bead
+// read per live session and per polecat directory, one batched work-bead read —
+// so the store calls the lock covers stay bounded by the town's seats.
 //
-// An error means the claims could not be read: the seats other slings hold are
-// then unknown rather than absent, and the caller must not decide as if the set
-// were empty (gt-t8q5).
-func (l *poolSeatLedger) begin(live bool, sessions []poolSession) ([]poolSession, *poolSeatDecision, error) {
+// A dry run reads the same seats and claims — so it prints the route a real
+// sling would take — but neither cleans up nor claims: a preview must not
+// change the pool's state.
+//
+// An error means the seats could not be counted: either the occupancy read
+// failed (a *poolOccupancyError naming which read) or the claims could not be
+// read. Either way the count is unknown rather than small, and the caller must
+// not decide as if the set were empty (gt-t8q5).
+func (l *poolSeatLedger) begin(live bool, occupied func() ([]poolSession, error)) ([]poolSession, *poolSeatDecision, error) {
 	d := &poolSeatDecision{ledger: l}
 	ownID := l.store.ownID()
 	if !live {
+		sessions, err := occupied()
+		if err != nil {
+			return nil, d, err
+		}
 		claims, err := l.claimSessions(ownID)
 		return append(sessions, claims...), d, err
 	}
@@ -601,10 +616,19 @@ func (l *poolSeatLedger) begin(live bool, sessions []poolSession) ([]poolSession
 		// pins the decision this warns about.
 		d.note = "seat not reserved: " + err.Error()
 		style.PrintWarning("polecat pool seat not reserved (%v); routing on live sessions alone, which can overfill the cap", err)
+		sessions, serr := occupied()
+		if serr != nil {
+			return nil, d, serr
+		}
 		return sessions, d, nil
 	}
 	d.unlock = unlock
 	l.cleanupStale()
+	sessions, err := occupied()
+	if err != nil {
+		// The lock is held, so done() releases it; the count is unknown.
+		return nil, d, err
+	}
 	claims, claimErr := l.claimSessions(ownID)
 	return append(sessions, claims...), d, claimErr
 }
@@ -901,57 +925,50 @@ func poolUncountedFallback(pool *config.PolecatPool) string {
 //
 // The count it decides from is the pool's occupied seats: the live sessions and
 // the seats mid-landing (poolOccupiedSessions, the same source the dispatch
-// picture reads), plus the claims other slings hold, folded in under the
-// seat-decision lock below. A polecat that submitted and left its seat to land
-// still holds it, so a second sling admits into a full pool only when the pool
-// has room (gt-3o7zk).
+// picture reads), plus the claims other slings hold — both read inside the one
+// seat-decision lock begin takes (gt-8o35b). A polecat that submitted and left
+// its seat to land still holds it, so a second sling admits into a full pool
+// only when the pool has room (gt-3o7zk).
 func (r *poolRouter) route(requested string, live bool) (agent, reason string, err error) {
 	pool := r.pool()
 	if pool == nil {
 		return "", "", nil
 	}
-	// The seats the pool already holds: the live sessions and the seats
-	// mid-landing, from the same occupancy source the dispatch picture reads,
-	// so a live sling counts a seat a mid-landing polecat still occupies
-	// (gt-3o7zk). The claims join the count under the lock below.
-	sessions, err := poolOccupiedSessions(r.sessions(), r.townRoot, r.disposition, r.work, pool, r.now)
-	if err != nil {
-		// A seat the pool does not own is not the pool's to override on a
-		// tmux hiccup any more than it is the pool's to admit (gt-67fj): the
-		// request stands untouched, same as choosePoolAgent.
-		if !poolOwnsAgent(pool, requested) {
-			return "", "", nil
-		}
-		// A town whose seats cannot be counted is not a town at its cap, so
-		// the cap stays off here — a refusal would otherwise stop every sling
-		// on a tmux hiccup — and the reason says so.
-		what := "count seats"
-		var oe *poolOccupancyError
-		if errors.As(err, &oe) && oe.sessions {
-			what = "list sessions"
-		}
-		return pool.OverflowAgent,
-			"pool: cannot " + what + " (" + err.Error() + "), using " + poolUncountedFallback(pool), nil
+	// Passed to begin, not called here: begin runs it under the seat-decision
+	// lock, which is where the count has to be taken (gt-8o35b).
+	occupied := func() ([]poolSession, error) {
+		return poolOccupiedSessions(r.sessions(), r.townRoot, r.disposition, r.work, pool, r.now)
 	}
 	// No release of a previous claim before counting: the store is this
 	// spawn's, and a spawn makes one decision. A claim from an earlier spawn
 	// was dropped by StartSession or the rollback that ended it, and
 	// claimSessions skips this store's own claim anyway.
-	sessions, seat, claimErr := r.seats.begin(live, sessions)
+	sessions, seat, seatErr := r.seats.begin(live, occupied)
 	defer seat.done()
-	if claimErr != nil {
-		// As above: a seat the pool does not own stands untouched rather than
-		// being overridden by a claims-read failure (gt-67fj).
+	if seatErr != nil {
+		// A seat the pool does not own is not the pool's to override on a
+		// failed read any more than it is the pool's to admit (gt-67fj): the
+		// request stands untouched, same as choosePoolAgent. Both failure
+		// paths — an occupancy read and a claims read — take it.
 		if !poolOwnsAgent(pool, requested) {
 			return "", "", nil
 		}
-		// The seats other slings hold could not be read, so the count this
-		// decision would run on is unknown — not zero. It falls back the same
-		// way a session list that cannot be read does above, and the reason
-		// names the failure rather than passing an unknown count off as a
-		// clean one (gt-t8q5). No seat is claimed on this path.
+		// A town whose seats cannot be counted is not a town at its cap, so
+		// the cap stays off here — a refusal would otherwise stop every sling
+		// on a tmux hiccup — and the reason names the read that failed rather
+		// than passing an unknown count off as a clean one (gt-t8q5, gt-67fj).
+		// No seat is claimed on either path.
+		var oe *poolOccupancyError
+		if errors.As(seatErr, &oe) {
+			what := "count seats"
+			if oe.sessions {
+				what = "list sessions"
+			}
+			return pool.OverflowAgent,
+				"pool: cannot " + what + " (" + seatErr.Error() + "), using " + poolUncountedFallback(pool), nil
+		}
 		return pool.OverflowAgent,
-			"pool: cannot read seat claims (" + claimErr.Error() + "), using " + poolUncountedFallback(pool), nil
+			"pool: cannot read seat claims (" + seatErr.Error() + "), using " + poolUncountedFallback(pool), nil
 	}
 	agent, reason, refused := choosePoolAgent(pool, requested, sessions)
 	if live && !refused {

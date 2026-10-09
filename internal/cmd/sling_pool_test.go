@@ -247,6 +247,13 @@ type testPoolTown struct {
 	// dead names the PIDs whose slings are gone; every other PID is alive.
 	dead    map[int]bool
 	lockErr error
+	// onLock runs as the decision lock is taken, standing in for another
+	// sling's session starting in the window before this sling's count. A test
+	// uses it to stage exactly the state the count has to see (gt-8o35b).
+	onLock func()
+	// locked is true while the seat decision lock is held, so a lister can
+	// report whether the count was taken under it.
+	locked  bool
 	nextPID int
 }
 
@@ -289,7 +296,11 @@ func (w *testPoolTown) process() *poolRouter {
 				if w.lockErr != nil {
 					return nil, w.lockErr
 				}
-				return func() {}, nil
+				w.locked = true
+				if w.onLock != nil {
+					w.onLock()
+				}
+				return func() { w.locked = false }, nil
 			},
 			alive: func(pid int) bool { return !w.dead[pid] },
 			pid:   w.nextPID,
@@ -318,6 +329,64 @@ func (w *testPoolTown) sling(t *testing.T) (string, string) {
 		t.Fatalf("slinging: %v", err)
 	}
 	return agent, reason
+}
+
+// lockWatchingLister is a fake tmux server that records, per listing, whether
+// the pool's seat-decision lock was held. The pool's count has to come from a
+// listing taken under that lock (gt-8o35b), and a listing is otherwise
+// indistinguishable from one taken a moment earlier — the ordering is only
+// visible from inside the read.
+type lockWatchingLister struct {
+	*fakeLister
+	town *testPoolTown
+	// under is the lock state at each ListSessions call, oldest first.
+	under []bool
+}
+
+func newLockWatchingLister(w *testPoolTown) *lockWatchingLister {
+	return &lockWatchingLister{
+		fakeLister: &fakeLister{sessions: map[string]map[string]string{}, created: map[string]time.Time{}},
+		town:       w,
+	}
+}
+
+func (l *lockWatchingLister) ListSessions() ([]string, error) {
+	l.under = append(l.under, l.town.locked)
+	return l.fakeLister.ListSessions()
+}
+
+// add puts a live polecat session on the fake tmux server, an hour old.
+func (l *lockWatchingLister) add(name, agent string) {
+	l.fakeLister.sessions[name] = map[string]string{
+		"GT_ROLE":  "gastown/polecats/" + name,
+		"GT_AGENT": agent,
+	}
+	l.fakeLister.created[name] = poolTestNow.Add(-time.Hour)
+}
+
+// listedUnderLock reports the listing the pool counted from: it must exist and
+// must have happened with the lock held. A fake lister that was never called
+// means the count came from somewhere else, which is a failure of its own.
+func (l *lockWatchingLister) listedUnderLock(t *testing.T) {
+	t.Helper()
+	if len(l.under) == 0 {
+		t.Fatal("the pool never listed the town's sessions")
+	}
+	for i, under := range l.under {
+		if !under {
+			t.Errorf("session listing %d of %d happened outside the seat-decision lock", i+1, len(l.under))
+		}
+	}
+}
+
+// decisionLockReleased reports whether the pool gave the lock back. A route
+// that has returned holds nothing: a lock left behind makes the next sling wait
+// out the 5s timeout.
+func (w *testPoolTown) decisionLockReleased(t *testing.T) {
+	t.Helper()
+	if w.locked {
+		t.Error("the seat-decision lock is still held after the route was decided")
+	}
 }
 
 // The router reads the town's pool: no pool has no opinion, a tmux failure is
@@ -428,6 +497,84 @@ func TestResolvePoolAgentUnreservedWhenTheDecisionLockFails(t *testing.T) {
 	if claims := w.claims(t); len(claims) != 0 {
 		t.Errorf("a decision taken without the lock claims no seat: %v", claims)
 	}
+}
+
+// gt-8o35b: route read the pool's occupied seats before taking the
+// seat-decision lock, so a sling that started its session and dropped its claim
+// in the window between the two was counted by neither — the claim was gone by
+// the time the lock was held, and the session was not in the snapshot taken
+// before it. The count named a seat free that the other sling had taken, and
+// the pool ran one over its cap (the 4/3 on the capped overflow agent). Both
+// reads are inside the lock now, so a seat is the session or its claim and
+// never neither.
+func TestPoolCountsASessionThatAppearsBeforeTheDecisionLock(t *testing.T) {
+	t.Parallel()
+	w := newTestPoolTown(cappedPool(2))
+	lister := newLockWatchingLister(w)
+	w.lister = lister
+	// The concurrent sling's session starts as this sling reaches the lock:
+	// after route was entered, before the count is taken.
+	w.onLock = func() { lister.add("gt-other", claimAgent) }
+
+	agent, reason, err := w.process().route("", true)
+	if err != nil {
+		t.Fatalf("the pool has room for one more: %v", err)
+	}
+	if agent != claimAgent || !strings.Contains(reason, "seat 2/2") {
+		t.Errorf("the session that appeared before the lock must hold seat 1: got %q (%s)", agent, reason)
+	}
+	lister.listedUnderLock(t)
+	w.decisionLockReleased(t)
+}
+
+// The same window with the seat already full: cap 2 and the two sessions that
+// fill it appear before the lock. The sling that reaches the lock sees a full
+// pool and is refused, rather than counting an empty town and spawning a third
+// polecat onto a two-seat cap.
+func TestPoolIsFullWhenTheCapFillsBeforeTheDecisionLock(t *testing.T) {
+	t.Parallel()
+	w := newTestPoolTown(cappedPool(2))
+	lister := newLockWatchingLister(w)
+	w.lister = lister
+	w.onLock = func() {
+		lister.add("gt-other-1", claimAgent)
+		lister.add("gt-other-2", claimAgent)
+	}
+
+	agent, reason, err := w.process().route("", true)
+	if !errors.Is(err, errPoolBackpressure) {
+		t.Fatalf("a cap filled before the lock must refuse, not spawn: got %q (%s) %v", agent, reason, err)
+	}
+	if !strings.Contains(reason, "pool: full (2/2)") {
+		t.Errorf("the refusal must count the sessions that appeared before the lock: %q", reason)
+	}
+	if claims := w.claims(t); len(claims) != 0 {
+		t.Errorf("a refused sling claims no seat: %v", claims)
+	}
+	lister.listedUnderLock(t)
+	w.decisionLockReleased(t)
+}
+
+// The failure path takes its count under the lock too, and gives the lock up on
+// the way out. route falls back to the overflow agent when it cannot list the
+// town's sessions, and that fallback is only as good as the count it is decided
+// from — the same count, so the same lock (gt-8o35b).
+func TestPoolListsUnderTheDecisionLockWhenTheListerFails(t *testing.T) {
+	t.Parallel()
+	w := newTestPoolTown(cappedPool(2))
+	lister := newLockWatchingLister(w)
+	lister.err = errors.New("no server")
+	w.lister = lister
+
+	agent, reason, err := w.process().route("", true)
+	if err != nil {
+		t.Fatalf("a lister failure routes rather than failing the sling: %v", err)
+	}
+	if agent != claimAgent || !strings.Contains(reason, "cannot list sessions") {
+		t.Errorf("the fallback names the read it could not make: %q (%s)", agent, reason)
+	}
+	lister.listedUnderLock(t)
+	w.decisionLockReleased(t)
 }
 
 // ── Seat claims (gt-eoi9) ───────────────────────────────────────────────────
