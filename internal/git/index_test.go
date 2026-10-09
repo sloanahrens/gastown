@@ -40,3 +40,16 @@ func TestWriteTreeReturnsTheTreeID(t *testing.T) {
 		t.Fatalf("WriteTree = %q, %v", got, err)
 	}
 }
+
+// CommitPaths names the paths after `--`, so the commit records only those and
+// leaves anything else staged in the shared index (gt-2czgm).
+func TestCommitPathsNamesOnlyTheGivenPaths(t *testing.T) {
+	t.Parallel()
+	s := newScripted(map[string]reply{"commit -m msg -- mayor/rigs.json .beads/routes.jsonl": ok("")})
+	if err := newTestGit(t, s).CommitPaths("msg", "mayor/rigs.json", ".beads/routes.jsonl"); err != nil {
+		t.Fatalf("CommitPaths: %v", err)
+	}
+	if !s.hasSent("commit -m msg -- mayor/rigs.json .beads/routes.jsonl") {
+		t.Fatalf("calls = %v; want the paths after --", s.sent())
+	}
+}

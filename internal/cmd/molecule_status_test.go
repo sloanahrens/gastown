@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
@@ -148,5 +149,48 @@ func TestOutputMoleculeStatus_FormulaWispShowsWorkflowContext(t *testing.T) {
 	}
 	if !strings.Contains(output, "Show the workflow steps: gt prime or gt mol current") {
 		t.Fatalf("expected workflow next action, got:\n%s", output)
+	}
+}
+
+// molStatusRecorderGit records the fetch the divergence warning makes, so a
+// test can assert it is bounded (gt-2czgm).
+type molStatusRecorderGit struct {
+	branch     string
+	fetched    bool
+	fetchURL   string
+	fetchSpec  string
+	fetchBound time.Duration
+}
+
+func (g *molStatusRecorderGit) IsRepo() bool                   { return true }
+func (g *molStatusRecorderGit) CurrentBranch() (string, error) { return g.branch, nil }
+func (g *molStatusRecorderGit) FetchRefspecWithTimeout(remote, refspec string, timeout time.Duration) error {
+	g.fetched = true
+	g.fetchURL, g.fetchSpec, g.fetchBound = remote, refspec, timeout
+	return nil
+}
+func (g *molStatusRecorderGit) CommitsAhead(base, branch string) (int, error) { return 0, nil }
+func (g *molStatusRecorderGit) CountCommitsBehind(ref string) (int, error)    { return 0, nil }
+
+// TestShowGitDivergenceWarningBoundsTheFetch: gt mol status refreshes origin
+// through a bounded fetch, not a bare `git fetch origin` that can hang on an
+// unreachable remote (gt-2czgm).
+func TestShowGitDivergenceWarningBoundsTheFetch(t *testing.T) {
+	t.Parallel()
+	g := &molStatusRecorderGit{branch: "main"}
+
+	showGitDivergenceWarningFor(g)
+
+	if !g.fetched {
+		t.Fatal("the divergence warning did not refresh origin")
+	}
+	if g.fetchURL != "origin" {
+		t.Errorf("fetched remote %q, want origin", g.fetchURL)
+	}
+	if g.fetchBound <= 0 {
+		t.Errorf("fetch bound = %v; an unbounded fetch can hang gt mol status", g.fetchBound)
+	}
+	if !strings.Contains(g.fetchSpec, "refs/heads") {
+		t.Errorf("fetch refspec %q does not refresh branch refs", g.fetchSpec)
 	}
 }

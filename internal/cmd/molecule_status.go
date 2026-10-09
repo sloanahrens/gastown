@@ -746,10 +746,26 @@ func outputMoleculeStatus(w io.Writer, status MoleculeStatusInfo, workspaceHints
 	}
 }
 
+// molStatusGit is git's surface for gt mol status's divergence check: the
+// reads it makes and the bounded fetch it uses to refresh them. *git.Git in
+// production, a recorder in a test.
+type molStatusGit interface {
+	IsRepo() bool
+	CurrentBranch() (string, error)
+	FetchRefspecWithTimeout(remote, refspec string, timeout time.Duration) error
+	CommitsAhead(base, branch string) (int, error)
+	CountCommitsBehind(ref string) (int, error)
+}
+
 // showGitDivergenceWarning fetches from origin and checks if the current branch
 // has diverged from its remote tracking branch, showing a warning if so.
 func showGitDivergenceWarning() {
-	g := git.NewGit(".")
+	showGitDivergenceWarningFor(git.NewGit("."))
+}
+
+// showGitDivergenceWarningFor is the check for one repository handle, so a
+// test can drive it without a network.
+func showGitDivergenceWarningFor(g molStatusGit) {
 	if !g.IsRepo() {
 		return
 	}
@@ -759,9 +775,12 @@ func showGitDivergenceWarning() {
 		return
 	}
 
-	// Fetch quietly to get fresh remote refs. Non-fatal if it fails
-	// (e.g., offline, no remote).
-	_ = g.Fetch("origin")
+	// Fetch quietly to get fresh remote refs. Non-fatal if it fails (e.g.,
+	// offline, no remote), but bounded: an unreachable remote must not hang
+	// gt mol status (gt-2czgm). Every branch is refreshed, as a bare
+	// `git fetch origin` would, so both origin/<branch> and origin/main are
+	// current for the checks below.
+	_ = g.FetchRefspecWithTimeout("origin", "+refs/heads/*:refs/remotes/origin/*", git.RemoteQueryTimeout)
 
 	remote := "origin/" + branch
 	ahead, aErr := g.CommitsAhead(remote, "HEAD")

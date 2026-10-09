@@ -1750,6 +1750,16 @@ func (g *Git) Commit(message string) error {
 	return err
 }
 
+// CommitPaths commits only the named paths, as `git commit -m message --
+// <paths>`: anything else staged in the shared index is left for someone else
+// to commit. A repo-wide Commit here would sweep up unrelated staged work
+// (gt-2czgm).
+func (g *Git) CommitPaths(message string, paths ...string) error {
+	args := append([]string{"commit", "-m", message, "--"}, paths...)
+	_, err := g.run(args...)
+	return err
+}
+
 // CommitAll stages all changes and commits.
 func (g *Git) CommitAll(message string) error {
 	_, err := g.run("commit", "-am", message)

@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -260,5 +261,25 @@ func TestPercentile(t *testing.T) {
 	v := []float64{10, 20, 30, 40, 50, 60, 70, 80, 90, 100}
 	if percentile(v, 0.5) != 50 || percentile(v, 0.95) != 100 || percentile(nil, 0.5) != 0 {
 		t.Errorf("percentile wrong: %v %v", percentile(v, 0.5), percentile(v, 0.95))
+	}
+}
+
+// TestReadOMRecordsReadsPastALongLine: a line longer than the scanner's buffer
+// must not hide every record after it (gt-2czgm).
+func TestReadOMRecordsReadsPastALongLine(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "om.jsonl")
+	body := `{"bead":"gt-first"}` + "\n" +
+		strings.Repeat("x", 5*1024*1024) + "\n" +
+		`{"bead":"gt-last"}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var beads []string
+	for _, rec := range readOMRecords(path) {
+		beads = append(beads, rec.Bead)
+	}
+	if len(beads) != 2 || beads[0] != "gt-first" || beads[1] != "gt-last" {
+		t.Fatalf("records = %v; a long line must not hide the records after it", beads)
 	}
 }

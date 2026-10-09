@@ -244,7 +244,7 @@ func (r runRow) action() ForgejoAction {
 		Started:      runStamp(r.started),
 		Stopped:      runStamp(r.stopped),
 		DurationSecs: r.seconds(),
-		URL:          r.run.HTMLURL,
+		URL:          deployURL(r.run.HTMLURL),
 		Hash:         shortSHA(r.run.CommitSHA),
 		SHA:          r.run.CommitSHA,
 		Number:       r.run.Index,

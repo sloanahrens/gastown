@@ -292,7 +292,17 @@ type dashLoads struct {
 
 	mu  sync.Mutex
 	pts []dashboard.LoadPoint
+	// sinceRewrite counts the appends since the file was last rewritten
+	// wholesale, so a long-lived run trims it periodically instead of
+	// appending forever (gt-2czgm).
+	sinceRewrite int
 }
+
+// loadRewriteEvery is how many appends the writer lets accumulate before it
+// rewrites the file with just the kept window. The hub samples about every
+// 10s while a page is open, so this is roughly an hour's drift past a
+// 24-hour window before the file is trimmed back.
+const loadRewriteEvery = 360
 
 func newDashLoads(townRoot string, now func() time.Time) *dashLoads {
 	l := &dashLoads{path: filepath.Join(constants.TownRuntimePath(townRoot), "dashboard-load.jsonl"), now: now}
@@ -306,11 +316,22 @@ func newDashLoads(townRoot string, now func() time.Time) *dashLoads {
 
 // append records one machine sample in memory and appends it to the file. A
 // write that fails leaves the in-memory history serving the page.
+//
+// Every loadRewriteEvery appends it rewrites the file with just the kept
+// window, so the file does not grow with every sample a long-lived dashboard
+// ever took. The hub samples about every 10s while a page is open, so the file
+// drifts at most an hour past the window before it is trimmed (gt-2czgm).
 func (l *dashLoads) append(at time.Time, load float64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.pts = l.trim(append(l.pts, dashboard.LoadPoint{At: at, Load: load}))
 	if len(l.pts) == 0 {
+		return
+	}
+	l.sinceRewrite++
+	if l.sinceRewrite >= loadRewriteEvery {
+		l.sinceRewrite = 0
+		l.rewrite(l.pts)
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(l.path), 0o755); err != nil {
@@ -363,16 +384,41 @@ func (l *dashLoads) trim(pts []dashboard.LoadPoint) []dashboard.LoadPoint {
 }
 
 // rewrite replaces the file with the kept samples, trimming what a previous
-// run left behind.
+// run left behind. The write goes to a temp file renamed over the target, so a
+// concurrent reader — a second dashboard, or a restart racing this write —
+// never sees a partially written history (gt-2czgm).
 func (l *dashLoads) rewrite(pts []dashboard.LoadPoint) {
-	if err := os.MkdirAll(filepath.Dir(l.path), 0o755); err != nil {
+	dir := filepath.Dir(l.path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return
 	}
 	var b []byte
 	for _, p := range pts {
 		b = loadLine(b, p)
 	}
-	_ = os.WriteFile(l.path, b, 0o644)
+	tmp, err := os.CreateTemp(dir, "dashboard-load-*.jsonl")
+	if err != nil {
+		return
+	}
+	name := tmp.Name()
+	if _, err := tmp.Write(b); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(name)
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(name)
+		return
+	}
+	// CreateTemp makes the file 0600; the history was 0644 and other readers
+	// (an operator, a second dashboard run by the same user) expect it.
+	if err := os.Chmod(name, 0o644); err != nil {
+		_ = os.Remove(name)
+		return
+	}
+	if err := os.Rename(name, l.path); err != nil {
+		_ = os.Remove(name)
+	}
 }
 
 func loadLine(b []byte, p dashboard.LoadPoint) []byte {

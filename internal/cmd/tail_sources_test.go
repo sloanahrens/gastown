@@ -970,9 +970,11 @@ func TestTailBeads_ConcurrentAskSharesTheInFlightRead(t *testing.T) {
 	}
 }
 
-// TestTailBeads_TitleIsReadOncePerBeadAndFailureIsSilence: one bd show per new
-// id, a failed read remembered as "no title", and never an error.
-func TestTailBeads_TitleIsReadOncePerBeadAndFailureIsSilence(t *testing.T) {
+// TestTailBeads_CachesSuccessAndRetriesFailure: one bd show per new id, a
+// failed read cached as nothing so it is retried, and never an error. A
+// failure cached forever would blank that bead's title for the life of the
+// long-lived dashboard (gt-2czgm).
+func TestTailBeads_CachesSuccessAndRetriesFailure(t *testing.T) {
 	t.Parallel()
 	store := &fakeTailStore{
 		issues: map[string]*beads.Issue{
@@ -989,37 +991,57 @@ func TestTailBeads_TitleIsReadOncePerBeadAndFailureIsSilence(t *testing.T) {
 		t.Fatalf("cached title = %q", got)
 	}
 	if n := store.readsFor("gt-1"); n != 1 {
-		t.Fatalf("gt-1 was read %d times; the run reads each bead once", n)
+		t.Fatalf("gt-1 was read %d times; a successful read is cached", n)
 	}
 	for i := 0; i < 3; i++ {
 		if got := b.title("gastown", "gt-lost"); got != "" {
 			t.Fatalf("a failed read produced %q", got)
 		}
 	}
-	if n := store.readsFor("gt-lost"); n != 1 {
-		t.Fatalf("a failed read was retried %d times; failure is remembered", n)
+	if n := store.readsFor("gt-lost"); n != 3 {
+		t.Fatalf("a failed read was attempted %d times; a failure must not be cached", n)
+	}
+	// The store recovers: the title appears on the next ask.
+	store.errs = map[string]error{}
+	store.issues["gt-lost"] = &beads.Issue{ID: "gt-lost", Title: "recovered"}
+	if got := b.title("gastown", "gt-lost"); got != "recovered" {
+		t.Fatalf("after recovery the title = %q", got)
 	}
 	if got := b.title("gastown", "gt-absent"); got != "" {
 		t.Fatalf("an unknown bead produced %q", got)
 	}
 }
 
-// TestTailBeads_TitleIsBounded: past the cap the run stops taking titles
-// rather than growing without bound, and a bounded-out bead costs no read.
-func TestTailBeads_TitleIsBounded(t *testing.T) {
+// TestTailBeads_EvictsTheLeastRecentlyUsed: past the cap the cache evicts the
+// least recently used id rather than refusing new ones, so a long-lived reader
+// keeps learning titles instead of freezing on its first max beads (gt-2czgm).
+func TestTailBeads_EvictsTheLeastRecentlyUsed(t *testing.T) {
 	t.Parallel()
-	store := &fakeTailStore{issues: map[string]*beads.Issue{}}
+	store := &fakeTailStore{issues: map[string]*beads.Issue{
+		"gt-1": {ID: "gt-1", Title: "one"},
+		"gt-2": {ID: "gt-2", Title: "two"},
+		"gt-3": {ID: "gt-3", Title: "three"},
+	}}
 	b := newTailBeads(store.show)
 	b.max = 2
-	if got := b.title("r", "gt-1"); got != "" {
-		t.Fatalf("title = %q", got)
-	}
+
+	b.title("r", "gt-1")
 	b.title("r", "gt-2")
-	if got := b.title("r", "gt-3"); got != "" {
-		t.Fatalf("a bounded-out bead produced %q", got)
+	b.title("r", "gt-2") // gt-2 is now the more recently used of the two
+
+	if got := b.title("r", "gt-3"); got != "three" {
+		t.Fatalf("a new id past the cap = %q; it must be read, not refused", got)
 	}
-	if len(store.reads) != 2 {
-		t.Fatalf("reads = %v; the cap must stop the reads too", store.reads)
+	if n := store.readsFor("gt-3"); n != 1 {
+		t.Fatalf("gt-3 was read %d times", n)
+	}
+	// gt-1 was the least recently used and was evicted, so it is read again.
+	b.title("r", "gt-1")
+	if n := store.readsFor("gt-1"); n != 2 {
+		t.Fatalf("gt-1 was read %d times; the LRU entry should have been evicted", n)
+	}
+	if n := store.readsFor("gt-2"); n != 1 {
+		t.Fatalf("gt-2 was read %d times; a recently used title stays cached", n)
 	}
 }
 

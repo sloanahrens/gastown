@@ -50,22 +50,23 @@ func (f fakeDirSource) ListChannelBeads() (map[string]*beads.ChannelFields, erro
 	return f.channels, nil
 }
 
-func mailDirectoryJSON(t *testing.T, src mailDirectorySource) []DirectoryEntry {
+func mailDirectoryJSON(t *testing.T, src mailDirectorySource) mailDirectoryReport {
 	t.Helper()
 	var out bytes.Buffer
 	if err := writeMailDirectory(&out, io.Discard, src, true); err != nil {
 		t.Fatalf("writeMailDirectory: %v", err)
 	}
-	var entries []DirectoryEntry
-	if err := json.Unmarshal(out.Bytes(), &entries); err != nil {
+	var report mailDirectoryReport
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
 		t.Fatalf("unmarshal JSON output: %v\nraw output:\n%s", err, out.String())
 	}
-	return entries
+	return report
 }
 
 // TestRunMailDirectory_WellKnownAddresses: with no beads database every
-// listing warns, and the well-known and special addresses are still listed
-// in the table.
+// listing warns, and the addresses that actually resolve are still listed
+// in the table. @crew and @witnesses have no rig to scope them and are not
+// listed (gt-2czgm).
 func TestRunMailDirectory_WellKnownAddresses(t *testing.T) {
 	t.Parallel()
 	var out, warn bytes.Buffer
@@ -73,9 +74,14 @@ func TestRunMailDirectory_WellKnownAddresses(t *testing.T) {
 		t.Fatalf("writeMailDirectory: %v", err)
 	}
 	output := out.String()
-	for _, addr := range []string{"--self", "@town", "@crew", "@witnesses", "@overseer", "ADDRESS", "TYPE", "(4 warnings)"} {
+	for _, addr := range []string{"--self", "@town", "@overseer", "ADDRESS", "TYPE", "(4 warnings)"} {
 		if !strings.Contains(output, addr) {
 			t.Errorf("output lacks %q:\n%s", addr, output)
+		}
+	}
+	for _, addr := range []string{"@crew", "@witnesses"} {
+		if strings.Contains(output, addr) {
+			t.Errorf("output lists %q, which parseGroupAddress rejects:\n%s", addr, output)
 		}
 	}
 	// gt mail send has no --human flag, so the directory must not offer it.
@@ -87,17 +93,43 @@ func TestRunMailDirectory_WellKnownAddresses(t *testing.T) {
 	}
 }
 
+// TestRunMailDirectory_JSONCarriesWarnings: --json carries the same listing
+// warnings text mode writes to stderr, so a caller that never sees stderr can
+// still tell a partial listing from a complete one (gt-2czgm).
+func TestRunMailDirectory_JSONCarriesWarnings(t *testing.T) {
+	t.Parallel()
+	report := mailDirectoryJSON(t, fakeDirSource{})
+	if len(report.Warnings) != 4 {
+		t.Errorf("warnings = %v; want one per failed listing", report.Warnings)
+	}
+	for _, w := range report.Warnings {
+		if !strings.Contains(w, "could not list") {
+			t.Errorf("warning %q does not name a listing failure", w)
+		}
+	}
+	// A town whose listings all succeed still encodes warnings as [], not null.
+	report = mailDirectoryJSON(t, fakeDirSource{
+		agents:   map[string]*beads.Issue{},
+		groups:   map[string]*beads.GroupFields{},
+		queues:   map[string]*beads.Issue{},
+		channels: map[string]*beads.ChannelFields{},
+	})
+	if report.Warnings == nil || len(report.Warnings) != 0 {
+		t.Errorf("warnings = %v, want an empty list", report.Warnings)
+	}
+}
+
 // TestRunMailDirectory_JSONOutput lists every kind of address as JSON.
 func TestRunMailDirectory_JSONOutput(t *testing.T) {
 	t.Parallel()
-	entries := mailDirectoryJSON(t, fakeDirSource{
+	report := mailDirectoryJSON(t, fakeDirSource{
 		agents:   map[string]*beads.Issue{"gt-gastown-witness": {}},
 		groups:   map[string]*beads.GroupFields{"ops": {}},
 		queues:   map[string]*beads.Issue{"hq-q1": {Description: "name: work"}, "hq-q2": {Description: ""}},
 		channels: map[string]*beads.ChannelFields{"alerts": {}},
 	})
 	got := map[string]string{}
-	for _, e := range entries {
+	for _, e := range report.Addresses {
 		got[e.Address] = e.Type
 	}
 	for addr, typ := range map[string]string{"gastown/witness": "agent", "group:ops": "group", "queue:work": "queue", "channel:alerts": "channel", "@town": "special"} {
@@ -118,14 +150,14 @@ func TestRunMailDirectory_JSONOutput(t *testing.T) {
 // duplicate the writer has to collapse.
 func TestRunMailDirectory_Deduplication(t *testing.T) {
 	t.Parallel()
-	entries := mailDirectoryJSON(t, fakeDirSource{
+	report := mailDirectoryJSON(t, fakeDirSource{
 		queues: map[string]*beads.Issue{
 			"hq-q1": {Description: "name: work"},
 			"hq-q2": {Description: "name: work"},
 		},
 	})
 	seen := map[string]int{}
-	for _, e := range entries {
+	for _, e := range report.Addresses {
 		seen[e.Address]++
 	}
 	if seen["queue:work"] != 1 {
@@ -141,12 +173,12 @@ func TestRunMailDirectory_Deduplication(t *testing.T) {
 // TestRunMailDirectory_SortOrder: entries sort by type, then address.
 func TestRunMailDirectory_SortOrder(t *testing.T) {
 	t.Parallel()
-	entries := mailDirectoryJSON(t, fakeDirSource{
+	report := mailDirectoryJSON(t, fakeDirSource{
 		agents: map[string]*beads.Issue{"gt-gastown-witness": {}, "gt-alpha-witness": {}},
 		groups: map[string]*beads.GroupFields{"zeta": {}, "alpha": {}},
 	})
-	for i := 1; i < len(entries); i++ {
-		prev, curr := entries[i-1], entries[i]
+	for i := 1; i < len(report.Addresses); i++ {
+		prev, curr := report.Addresses[i-1], report.Addresses[i]
 		if prev.Type > curr.Type || (prev.Type == curr.Type && prev.Address > curr.Address) {
 			t.Errorf("%q (%s) sorts before %q (%s)", prev.Address, prev.Type, curr.Address, curr.Type)
 		}

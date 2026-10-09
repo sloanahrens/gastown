@@ -70,6 +70,9 @@ type tierSweepStarted struct {
 type tierSweepReader struct {
 	logPath  string
 	stateDir string
+	// rigs lists the town's known rig names. A rig the log names is used in a
+	// path under stateDir only when this names it (gt-2czgm).
+	rigs func() ([]string, error)
 
 	mu     sync.Mutex
 	offset int64
@@ -85,9 +88,27 @@ func newTierSweepReader(townRoot string) *tierSweepReader {
 	return &tierSweepReader{
 		logPath:  filepath.Join(townRoot, "daemon", "daemon.log"),
 		stateDir: filepath.Join(constants.TownRuntimePath(townRoot), "tier-sweep"),
+		rigs:     func() ([]string, error) { return knownRigNames(townRoot) },
 		last:     map[string]tierSweepEvent{},
 		start:    map[string]tierSweepStarted{},
 	}
+}
+
+// knownRigs is the set of rig names the town's registry holds. A registry that
+// cannot be read names nothing, so no log-derived rig reaches a path.
+func (r *tierSweepReader) knownRigs() map[string]bool {
+	if r.rigs == nil {
+		return nil
+	}
+	names, err := r.rigs()
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]bool, len(names))
+	for _, n := range names {
+		out[n] = true
+	}
+	return out
 }
 
 // read is the panel's whole reading. A log that cannot be read at all says so;
@@ -271,8 +292,9 @@ func (r *tierSweepReader) recent() []dashboard.TierSweepRow {
 	if len(rows) > tierSweepRows {
 		rows = rows[:tierSweepRows]
 	}
+	known := r.knownRigs()
 	for i := range rows {
-		names := r.recordFailed(rows[i].Rig, rows[i].SHA)
+		names := r.recordFailed(rows[i].Rig, rows[i].SHA, known)
 		for j := range rows[i].Stages {
 			if rows[i].Stages[j].Verdict == "RED" {
 				rows[i].Stages[j].Failed = names[rows[i].Stages[j].Tier]
@@ -295,9 +317,12 @@ type tierSweepTier struct {
 
 // recordFailed is one rig's failing units by tier. A record that cannot be
 // read, or whose sha is another sweep's, says nothing: the verdict is the
-// log's, and the names are only ever a bonus.
-func (r *tierSweepReader) recordFailed(rig, sha string) map[string][]string {
-	if rig == "" || sha == "" {
+// log's, and the names are only ever a bonus. The rig comes from that same log
+// line, so it becomes a path only when the registry names it: a name the
+// registry does not hold — including one carrying a path separator — never
+// reaches outside the state directory (gt-2czgm).
+func (r *tierSweepReader) recordFailed(rig, sha string, known map[string]bool) map[string][]string {
+	if rig == "" || sha == "" || !known[rig] {
 		return nil
 	}
 	b, err := os.ReadFile(filepath.Join(r.stateDir, rig+".json"))

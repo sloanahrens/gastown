@@ -304,6 +304,61 @@ func TestCountAcceptance(t *testing.T) {
 	}
 }
 
+// A "## " line inside a fenced code block is an example, not a heading: the
+// section it would open is not a section, and the fence stays in the body of
+// the section that holds it (gt-2czgm).
+func TestSectionsIgnoresHeadingsInsideACodeFence(t *testing.T) {
+	t.Parallel()
+	markdown := "## Goal\nthe real goal\n\n```markdown\n## Not A Section\n```\n\n## Size\none worker\n"
+	sections := Sections(markdown)
+	if _, ok := sections["not a section"]; ok {
+		t.Fatalf("a fenced heading opened a section: %v", sections)
+	}
+	if got := sections["goal"]; !strings.Contains(got, "the real goal") || !strings.Contains(got, "## Not A Section") {
+		t.Errorf("goal section = %q; want the prose and the fenced example", got)
+	}
+	if got := sections["size"]; got != "one worker" {
+		t.Errorf("size section = %q, want %q", got, "one worker")
+	}
+}
+
+// Fenced example bullets and nested bullets are not acceptance criteria: only
+// top-level list items count, or a fenced example inflates the item count
+// toward the planner route (gt-2czgm).
+func TestCountAcceptanceIgnoresFencedAndNestedItems(t *testing.T) {
+	t.Parallel()
+	cases := map[string]int{
+		"- [ ] real\n```\n- [ ] example\n- [ ] example\n```\n": 1,
+		"- [ ] top\n  - [ ] nested\n\t- [ ] nested too\n":      1,
+		"~~~\n- [ ] tilde fenced\n~~~\n1. real":                1,
+		"```go\n- [ ] a\n":                                     1, // fenced to end of text
+	}
+	for in, want := range cases {
+		if got := CountAcceptance(in); got != want {
+			t.Errorf("CountAcceptance(%q) = %d, want %d", in, got, want)
+		}
+	}
+}
+
+// When both "## Acceptance" and "## Acceptance notes" exist, the exact heading
+// wins — the choice must not depend on map iteration order (gt-2czgm).
+func TestAcceptanceTextPrefersTheExactSection(t *testing.T) {
+	t.Parallel()
+	sections := map[string]string{
+		"acceptance":       "- [ ] the criterion",
+		"acceptance notes": "- [ ] not the criterion",
+	}
+	for i := 0; i < 20; i++ {
+		if got := acceptanceText(Spec{}, sections); got != "- [ ] the criterion" {
+			t.Fatalf("acceptanceText chose %q; the exact section must win regardless of iteration order", got)
+		}
+	}
+	// A prefix match with no exact heading is still read.
+	if got := acceptanceText(Spec{}, map[string]string{"acceptance criteria": "- [ ] a"}); got != "- [ ] a" {
+		t.Errorf("acceptanceText with only a prefix match = %q", got)
+	}
+}
+
 // The real template's headings must parse to the built-in list, so a town with
 // the template file lints the same shape as one without it.
 func TestParseTemplateSectionsMatchesTemplateShape(t *testing.T) {
