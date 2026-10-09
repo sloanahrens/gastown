@@ -238,8 +238,10 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	questions := newDashQuestionsReader(townRoot)
 	loads := newDashLoads(townRoot, time.Now)
 	// The deploy block reads the same repos through the same viewer client as
-	// the Forgejo panel, so the two are wired together from one token read.
-	forgejoFeed, forgejoDeploys := dashboardForgejoReaders(townRoot, dashboardForgejoRepos)
+	// the Forgejo panel, so the two are wired together from one token read;
+	// the staging ship reader dates the app rigs' landings off the same runs.
+	forgejoFeed, forgejoDeploys, stagingShip := dashboardForgejoReaders(townRoot, dashboardForgejoRepos)
+	deploys.setShipDefinitions(tailRestartRig(townRoot), rigOfBead, stagingShip)
 	return dashboard.NewHub(dashboard.Config{
 		Feed:       feed,
 		Summary:    func() dashboard.Summary { return dashboardSummary(townRoot, deploys, recs, seatCache) },
@@ -466,23 +468,52 @@ func resolveSpendCmd(flagValue string) []string {
 	return []string{tool, "--json"}
 }
 
-// dashboardForgejoReaders wires the two panels the viewer's token feeds — the
-// Forgejo activity feed and the Cloud section's deploy runs — to the
-// read-only viewer role: repos, when non-empty, is the explicit owner/name
-// list to read, and empty reads every rig that has cut over to Forgejo, so the
-// panels name a rig repo the viewer cannot see instead of silently reading a
-// subset (gt-faml5). No viewer token file means neither panel, like the spend
-// panel with no spend command. The token is read once, here, and never leaves
-// the client.
-func dashboardForgejoReaders(townRoot string, repos []string) (func() *dashboard.ForgejoFeed, func() *dashboard.Deploys) {
+// dashboardForgejoReaders wires the readers the viewer's token feeds — the
+// Forgejo activity feed, the Cloud section's deploy runs, and the staging ship
+// reader the Landings table dates an app rig's landing with — to the read-only
+// viewer role: repos, when non-empty, is the explicit owner/name list to read,
+// and empty reads every rig that has cut over to Forgejo, so the panels name a
+// rig repo the viewer cannot see instead of silently reading a subset
+// (gt-faml5). No viewer token file means none of them, like the spend panel
+// with no spend command. The token is read once, here, and never leaves the
+// client.
+func dashboardForgejoReaders(townRoot string, repos []string) (func() *dashboard.ForgejoFeed, func() *dashboard.Deploys, tailShipStaging) {
 	if len(repos) == 0 {
 		repos = rigForgejoRepos(townRoot)
 	}
 	client, err := forgejo.NewClient(config.ForgejoRoleViewer)
 	if err != nil {
-		return nil, nil
+		return nil, nil, nil
 	}
-	return dashboard.NewForgejoReader(client, repos).Read, dashboard.NewDeployReader(client, repos).Read
+	staging := dashboard.NewStagingReader(client, rigShipRepos(townRoot))
+	return dashboard.NewForgejoReader(client, repos).Read, dashboard.NewDeployReader(client, repos).Read, staging.Ship
+}
+
+// rigShipRepos is every rig's repository as rig name -> owner/name, for the
+// staging ship reader: the repository is the rig's own config.json git_url,
+// not a list kept here, so a rig added to the town is read without a code
+// change. A rig with no config, no git_url, or a URL that names no repository
+// is left out, and its landings then have no staging ship definition. gastown's
+// own URL is a repository too and is not special-cased: no staging runs are
+// read for it, and its landings ship by the daemon restart instead.
+func rigShipRepos(townRoot string) map[string]string {
+	names, err := knownRigNames(townRoot)
+	if err != nil {
+		return nil
+	}
+	out := map[string]string{}
+	for _, name := range names {
+		cfg, err := config.LoadRigConfig(filepath.Join(townRoot, name, "config.json"))
+		if err != nil || cfg.GitURL == "" {
+			continue
+		}
+		owner, repo, err := land.RepoFromRemoteURL(cfg.GitURL)
+		if err != nil {
+			continue
+		}
+		out[name] = owner + "/" + repo
+	}
+	return out
 }
 
 // rigForgejoRepos is every rig's Forgejo repository as owner/name, in rig-name

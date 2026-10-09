@@ -296,6 +296,61 @@ func TestBuildRecentLandingsFillsShipTime(t *testing.T) {
 	}
 }
 
+// TestBuildRecentLandingsShipCellPerRig covers what the Ship cell says for each
+// ship definition: gastown's restart time reads as dispatched-to-deployed, an
+// app rig's staging time as dispatched-to-staging-deployed, an app landing
+// whose staging run failed carries the run's state, and a rig with no ship
+// definition (devops) shows a dash and is never pending (gt-lqqjj).
+func TestBuildRecentLandingsShipCellPerRig(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 3, 18, 0, 0, 0, time.UTC)
+	track := newTailDeploys(func() time.Time { return now }, fakeTailAncestry("1111aaaa 2222bbbb"), now.Add(-24*time.Hour))
+	track.setShipDefinitions("gastown",
+		shipRigOf(map[string]string{
+			"gt-shipped": "gastown", "fr-shipped": "fractals", "bv-broken": "beaver", "dv-nothing": "devops",
+		}),
+		fakeStaging(map[string]dashboard.StagingShip{
+			"fractals\x00aaaa1111": {State: dashboard.StagingDeployed, At: at("2026-10-03T17:20:00Z")},
+			"beaver\x00bbbb2222":   {State: dashboard.StagingFailed, RunState: "failure"},
+		}),
+	)
+	track.observe([]tailLine{
+		daemonAt("2026-10-03T17:00:00Z", "spec_dispatch: dispatched: gt-shipped: slung to gastown/opal on x (seat 1/3)"),
+		daemonAt("2026-10-03T17:03:00Z", "landing_worker: [land] gt-shipped: landed 1111aaaa on origin/main (patch-id 9e9e)"),
+		daemonAt("2026-10-03T17:04:00Z", "upgrade-restart: running 2222bbbb covers marker 2222bbbb; cleared"),
+		daemonAt("2026-10-03T17:00:00Z", "spec_dispatch: dispatched: fr-shipped: slung to fractals/opal on x (seat 1/3)"),
+		daemonAt("2026-10-03T17:02:00Z", "landing_worker: [land] fr-shipped: landed aaaa1111 on origin/main (patch-id 1)"),
+		daemonAt("2026-10-03T17:00:00Z", "spec_dispatch: dispatched: bv-broken: slung to beaver/opal on x (seat 1/3)"),
+		daemonAt("2026-10-03T17:02:00Z", "landing_worker: [land] bv-broken: landed bbbb2222 on origin/main (patch-id 2)"),
+		daemonAt("2026-10-03T17:00:00Z", "spec_dispatch: dispatched: dv-nothing: slung to devops/opal on x (seat 1/3)"),
+		daemonAt("2026-10-03T17:02:00Z", "landing_worker: [land] dv-nothing: landed dddd3333 on origin/main (patch-id 3)"),
+	})
+	recs := []omRecord{
+		{Record: landings.Record{Bead: "gt-shipped", Rig: "gastown", OMVerdict: "approve", LandedAt: at("2026-10-03T17:03:00Z")}},
+		{Record: landings.Record{Bead: "fr-shipped", Rig: "fractals", OMVerdict: "approve", LandedAt: at("2026-10-03T17:02:00Z")}},
+		{Record: landings.Record{Bead: "bv-broken", Rig: "beaver", OMVerdict: "approve", LandedAt: at("2026-10-03T17:02:00Z")}},
+		{Record: landings.Record{Bead: "dv-nothing", Rig: "devops", OMVerdict: "approve", LandedAt: at("2026-10-03T17:02:00Z")}},
+	}
+
+	rows := buildRecentLandings(now, recs, nil, nil, nil, track.shipStatus, func(string, string) string { return "" }, 30)
+	byBead := map[string]dashboard.LandingRow{}
+	for _, r := range rows {
+		byBead[r.Bead] = r
+	}
+	if r := byBead["gt-shipped"]; r.ShipSecs == nil || r.ShipVia != "deploy" || r.ShipPending {
+		t.Errorf("gt-shipped ship = %v via %q pending %v, want a deploy time", r.ShipSecs, r.ShipVia, r.ShipPending)
+	}
+	if r := byBead["fr-shipped"]; r.ShipSecs == nil || *r.ShipSecs != 1200 || r.ShipVia != "staging" || r.ShipPending {
+		t.Errorf("fr-shipped ship = %v via %q pending %v, want 1200s via staging", r.ShipSecs, r.ShipVia, r.ShipPending)
+	}
+	if r := byBead["bv-broken"]; r.ShipSecs != nil || !r.ShipPending || !r.ShipFailed || r.ShipRunState != "failure" {
+		t.Errorf("bv-broken ship = %v pending %v failed %v state %q, want staging failed", r.ShipSecs, r.ShipPending, r.ShipFailed, r.ShipRunState)
+	}
+	if r := byBead["dv-nothing"]; r.ShipSecs != nil || r.ShipPending || r.ShipFailed || r.ShipVia != "" {
+		t.Errorf("dv-nothing ship = %+v, want a dash", r)
+	}
+}
+
 func TestPolecatOfBranch(t *testing.T) {
 	t.Parallel()
 	for in, want := range map[string]string{

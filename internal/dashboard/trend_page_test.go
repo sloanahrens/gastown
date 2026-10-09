@@ -132,3 +132,34 @@ func TestLandingsSectionShowsForAQueueAlone(t *testing.T) {
 		}
 	}
 }
+
+// The Ship cell says what the number means per rig, and says something honest
+// when there is no number: a staging deploy that failed reads as its own
+// warning, a landing waiting on staging says so rather than waiting on a
+// restart that never comes, and a rig with no ship definition shows a dash
+// (gt-lqqjj).
+func TestLandingsShipCellNamesWhatShipsEachRig(t *testing.T) {
+	t.Parallel()
+
+	tbl := pageFunc(t, "landingTable")
+	for _, want := range []string{
+		`const appRig = r.ship_via === "staging";`,
+		`ship.title = appRig ? "dispatched to staging deployed" : "dispatched to deployed";`,
+		`else if (r.ship_failed) { ship.textContent = "staging failed"; ship.title = "the staging run that covers this landing failed: " + (r.ship_run_state || "failed"); }`,
+		`else if (r.ship_pending) { ship.textContent = "pending"; ship.title = appRig ? "landed; waiting for the staging deploy" : "landed; waiting for the restart that installs it"; }`,
+		`else ship.textContent = "–";`,
+	} {
+		if !strings.Contains(tbl, want) {
+			t.Errorf("landingTable has no %q", want)
+		}
+	}
+
+	// The failed cell is drawn before the plain pending one, so a failed
+	// staging run is never overwritten by "pending".
+	if failed, pending := strings.Index(tbl, "r.ship_failed"), strings.Index(tbl, `ship.textContent = "pending"`); failed < 0 || pending < 0 || failed > pending {
+		t.Error("the staging-failed cell is not drawn before the pending one")
+	}
+	if strings.Contains(tbl, "innerHTML") {
+		t.Error("the landings table builds markup instead of text")
+	}
+}

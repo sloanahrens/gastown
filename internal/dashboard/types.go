@@ -263,18 +263,30 @@ type LandingRow struct {
 	LintSecs *float64 `json:"lint_secs,omitempty"`
 	GateSecs *float64 `json:"gate_secs,omitempty"`
 	OMSecs   *float64 `json:"om_secs,omitempty"`
-	// ShipSecs is the landing's total ship time, dispatched to deployed in
+	// ShipSecs is the landing's total ship time, dispatched to shipped in
 	// seconds: the number the Ship time tile reports as a median. It is nil for
 	// a landing with no dispatch line (hand-slung), a rejection, and a landing
-	// still waiting for the restart that installs it.
+	// still waiting for the deploy that ships it.
 	ShipSecs *float64 `json:"ship_secs,omitempty"`
-	// ShipPending marks a landing that has a dispatch line and has not been
-	// installed yet. It is false where ShipSecs is set and where neither applies.
-	ShipPending bool   `json:"ship_pending,omitempty"`
-	Commit      string `json:"commit,omitempty"`
-	Route       string `json:"route,omitempty"`
-	Risk        bool   `json:"risk,omitempty"`
-	Detail      string `json:"detail,omitempty"`
+	// ShipVia names what ships this rig's landings, so the cell's title can say
+	// what the number means: "deploy" for the daemon restart that installs
+	// gastown's commit, "staging" for the app rig whose staging workflow
+	// deploys main. It is empty, with the other ship fields, for a landing in a
+	// rig with no ship definition.
+	ShipVia string `json:"ship_via,omitempty"`
+	// ShipPending marks a landing that has a dispatch line and has not shipped
+	// yet. It is false where ShipSecs is set and where the rig has no ship
+	// definition.
+	ShipPending bool `json:"ship_pending,omitempty"`
+	// ShipFailed marks a pending landing whose newest covering staging run
+	// failed, and ShipRunState carries that run's own state for the cell's
+	// title. Both are absent on every other row.
+	ShipFailed   bool   `json:"ship_failed,omitempty"`
+	ShipRunState string `json:"ship_run_state,omitempty"`
+	Commit       string `json:"commit,omitempty"`
+	Route        string `json:"route,omitempty"`
+	Risk         bool   `json:"risk,omitempty"`
+	Detail       string `json:"detail,omitempty"`
 	// Stage is the landing stage a "backoff" row's last attempt failed at,
 	// the text after "landing failed at". Failures is how many attempts in a
 	// row have failed there, and NextTry when the worker tries again. The
