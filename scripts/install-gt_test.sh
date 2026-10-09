@@ -33,6 +33,7 @@ case "$1 ${2:-}" in
     shift 2
     while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
     [ "${1:-}" = "--" ] && shift
+    if [ -e "$T_WORLD/slot_gt_unrunnable" ]; then echo "exec format error" >&2; exit 126; fi
     if [ -e "$T_WORLD/slot_refuse" ]; then echo "timed out waiting for slot" >&2; exit 1; fi
     echo "Container-gate slot acquired (role=test, waited 0s, slot 0/2)."
     exec "$@" ;;
@@ -279,6 +280,17 @@ touch "$T/slot_refuse"
 rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt --slot-role gastown/rebuild-gt --slot-timeout 30)
 [ "$rc" = "3" ] && [ "$(last_receipt "$T" reason)" = "slot-busy" ] && [ "$(reported "$T")" = "$(cat "$T/c1")" ] \
   && pass "slot refused: exit 3, untouched" || fail "slot refused: rc=$rc"
+
+# A gt that cannot run at all (missing, not executable, 126/127) never got to
+# ask for the slot: that is a failed install, not a busy slot (gt-bqzoq). Exit 3
+# would tell the caller to retry, and a broken gt is the very thing the retry
+# would have to replace.
+T=$(make_world)
+touch "$T/slot_gt_unrunnable"
+rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source rebuild-gt --slot-role gastown/rebuild-gt --slot-timeout 30)
+[ "$rc" = "1" ] && [ "$(last_receipt "$T" reason)" = "slot-unavailable" ] \
+  && pass "unrunnable gt with a slot role: exit 1, slot-unavailable (not busy)" \
+  || fail "unrunnable gt with a slot role: rc=$rc reason=$(last_receipt "$T" reason)"
 
 # --- Case 12: the rollback itself fails -> CRITICAL ---
 T=$(make_world)
