@@ -95,6 +95,34 @@ func TestRequeueRejectedLandingRestoresTheQueue(t *testing.T) {
 	}
 }
 
+// TestRequeueRejectedLandingRecordsTheAttempt: the requeue comment names the
+// rejection attempt it undid, which is what lets the landing worker tell a
+// re-queued block from one an interrupted pass left and record the next
+// rejection as a new attempt (gt-en9gs).
+func TestRequeueRejectedLandingRecordsTheAttempt(t *testing.T) {
+	t.Parallel()
+	bd := beadsfake.New(beadsfake.WithPrefix("gt"))
+	seedReworkBead(bd, []string{land.LabelRework}, land.FormatRejectionNote(land.RejectionNote{
+		Attempt: 3, Kind: "gate", Reason: "red again",
+		Branch: requeueBranch, Target: "main", MR: "gt-3e1z4", Head: requeueHead,
+	}))
+	remote := &fakeRequeueRemote{tip: requeueHead}
+
+	if err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "x", "sloan", &bytes.Buffer{}); err != nil {
+		t.Fatalf("requeue: %v", err)
+	}
+	comments, err := bd.Comments("gt-3e1z4")
+	if err != nil {
+		t.Fatalf("Comments: %v", err)
+	}
+	if len(comments) != 1 || !strings.Contains(comments[0].Text, "Attempt: 3") {
+		t.Fatalf("requeue comment = %+v, want it to name attempt 3", comments)
+	}
+	if attempt, ok := land.RequeuedAttempt(comments); !ok || attempt != 3 {
+		t.Errorf("RequeuedAttempt = %d, %v; want 3", attempt, ok)
+	}
+}
+
 func TestRequeueRejectedLandingRefusesChangedHead(t *testing.T) {
 	t.Parallel()
 	bd := beadsfake.New(beadsfake.WithPrefix("gt"))

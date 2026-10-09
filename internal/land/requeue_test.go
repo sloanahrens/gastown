@@ -1,6 +1,10 @@
 package land
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
+)
 
 func TestRejectedHeadReadsTheLiveRejection(t *testing.T) {
 	t.Parallel()
@@ -56,6 +60,33 @@ func TestHeadsEqual(t *testing.T) {
 	} {
 		if got := HeadsEqual(tc.a, tc.b); got != tc.want {
 			t.Errorf("%s: HeadsEqual(%q, %q) = %v, want %v", name, tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+func TestRequeuedAttemptReadsTheNewestRequeue(t *testing.T) {
+	t.Parallel()
+	head := "1111111111111111111111111111111111111111"
+	comments := []beads.Comment{
+		{Text: FormatRequeueComment("sloan", "polecat/a/gt-x", head, 1, "runner fault")},
+		{Text: "commit: abc — the fix"},
+		{Text: FormatRequeueComment("sloan", "polecat/a/gt-x", head, 2, "runner fault again")},
+	}
+	if got, ok := RequeuedAttempt(comments); !ok || got != 2 {
+		t.Fatalf("RequeuedAttempt = %d, %v; want the newest requeue's 2", got, ok)
+	}
+}
+
+func TestRequeuedAttemptWithoutARequeue(t *testing.T) {
+	t.Parallel()
+	for name, comments := range map[string][]beads.Comment{
+		"no comments":      nil,
+		"none are requeue": {{Text: "commit: abc — the fix"}, {Text: "Submitted for landing"}},
+		"marker quoted":    {{Text: "the REQUEUED: comment means it went back in the queue"}},
+		"no attempt line":  {{Text: "REQUEUED: sloan re-queued this rejected landing unchanged\nBranch: b\nHead: abc\nReason: x"}},
+	} {
+		if got, ok := RequeuedAttempt(comments); ok {
+			t.Errorf("%s: RequeuedAttempt = %d, true; want ok=false", name, got)
 		}
 	}
 }

@@ -545,6 +545,136 @@ func TestLandCapsTheReworkLoop(t *testing.T) {
 	}
 }
 
+// requeue applies gt land requeue to the fixture's bead the way the command
+// does: it restores the ready label, drops the rework label, and records the
+// REQUEUED comment naming the rejection attempt it undid.
+func (f *landFixture) requeue(attempt int) {
+	f.t.Helper()
+	if err := f.bd.Update(f.work.BeadID, beads.UpdateOptions{
+		AddLabels: []string{LabelReadyToLand}, RemoveLabels: []string{LabelRework},
+	}); err != nil {
+		f.t.Fatalf("requeue: %v", err)
+	}
+	if err := f.bd.AddCommentAs(f.work.BeadID, "operator",
+		FormatRequeueComment("operator", f.work.Branch, f.work.Head, attempt, "runner fault, not the diff")); err != nil {
+		f.t.Fatalf("requeue comment: %v", err)
+	}
+}
+
+// TestLandRejectionAfterRequeueRecordsTheNextAttempt: a landing rejected,
+// re-queued unchanged and rejected again for the same kind is the next attempt,
+// not the completion of an unfinished pass. A requeue leaves the bead in the
+// same shape an interrupted pass does — ready, refusal label gone — so the
+// requeue comment naming the attempt it undid is what tells them apart; without
+// it the second block collapses into the first and the new gate tail and
+// attempt number are lost (gt-en9gs).
+func TestLandRejectionAfterRequeueRecordsTheNextAttempt(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.gate.fn = func(string) GateResult {
+		return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 1, Tail: "--- FAIL: TestFirst\n"}}}
+	}
+	l := f.lander()
+	if _, err := l.Land(context.Background(), f.work); err == nil {
+		t.Fatal("the first landing passed; want a gate rejection")
+	}
+	if got, ok := ParseRejectionNote(f.bead().Notes); !ok || got.Attempt != 1 {
+		t.Fatalf("first rejection attempt = %d, %v; want 1", got.Attempt, ok)
+	}
+	f.requeue(1)
+
+	f.gate.fn = func(string) GateResult {
+		return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 1, Tail: "--- FAIL: TestSecond\n"}}}
+	}
+	_, err := l.Land(context.Background(), f.work)
+	var rej *Rejection
+	if !errors.As(err, &rej) || rej.Kind != RejectGate || rej.RecordErr != nil {
+		t.Fatalf("second Land = %T %v, want a recorded gate rejection", err, err)
+	}
+	notes := f.bead().Notes
+	if got := CountRejections(notes); got != 2 {
+		t.Fatalf("%d rejection block(s) after the requeue, want 2:\n%s", got, notes)
+	}
+	last, ok := ParseRejectionNote(notes)
+	if !ok || last.Attempt != 2 || last.Head != f.work.Head {
+		t.Errorf("last block = attempt %d head %s, want attempt 2 of %s", last.Attempt, last.Head, f.work.Head)
+	}
+	if !strings.Contains(notes, "TestSecond") || !strings.Contains(notes, "TestFirst") {
+		t.Errorf("the requeued rejection did not carry the new gate tail:\n%s", notes)
+	}
+}
+
+// TestLandRequeueLoopStillHitsTheAttemptCap: a requeue loop is rejections like
+// any other, so MaxReworkAttempts ends it. Before the requeue comment named the
+// attempt it undid, every round after the first collapsed into the first block,
+// the count never advanced and the cap could not trip (gt-en9gs).
+func TestLandRequeueLoopStillHitsTheAttemptCap(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.gate.fn = func(string) GateResult { return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 2}}} }
+	l := f.lander()
+	for attempt := 1; attempt <= MaxReworkAttempts; attempt++ {
+		_, err := l.Land(context.Background(), f.work)
+		var rej *Rejection
+		if !errors.As(err, &rej) || rej.Kind != RejectGate {
+			t.Fatalf("attempt %d: Land = %T %v, want a gate rejection", attempt, err, err)
+		}
+		capped := attempt >= MaxReworkAttempts
+		if rej.Rework == capped {
+			t.Errorf("attempt %d: rej.Rework = %v, want %v", attempt, rej.Rework, !capped)
+		}
+		if got := CountRejections(f.bead().Notes); got != attempt {
+			t.Fatalf("attempt %d: %d rejection block(s), want %d", attempt, got, attempt)
+		}
+		if capped {
+			if b := f.bead(); !beads.HasLabel(b, LabelNeedsHuman) || beads.HasLabel(b, LabelReadyToLand) {
+				t.Errorf("the cap did not escalate: labels %v", b.Labels)
+			}
+			return
+		}
+		f.requeue(attempt)
+	}
+	t.Errorf("the requeue loop never hit MaxReworkAttempts = %d", MaxReworkAttempts)
+}
+
+// TestLandInterruptedPassAfterRequeueIsFinishedNotRepeated: a pass that writes
+// its block and then fails to reopen the bead is finished on the retry. The
+// requeue marker must not confuse that with a requeued block: the newest
+// REQUEUED comment names the earlier attempt, so the block it left unfinished
+// is still completed in place rather than appended again (gt-zqqcr, gt-en9gs).
+func TestLandInterruptedPassAfterRequeueIsFinishedNotRepeated(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.gate.fn = func(string) GateResult {
+		return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 1, Tail: "--- FAIL: TestFirst\n"}}}
+	}
+	l := f.lander()
+	if _, err := l.Land(context.Background(), f.work); err == nil {
+		t.Fatal("the first landing passed; want a gate rejection")
+	}
+	f.requeue(1)
+
+	f.gate.fn = func(string) GateResult {
+		return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 1, Tail: "--- FAIL: TestSecond\n"}}}
+	}
+	l.Beads = &failingBeads{Fake: f.bd, failUpdate: true}
+	for round := 1; round <= 2; round++ {
+		_, err := l.Land(context.Background(), f.work)
+		var rej *Rejection
+		if !errors.As(err, &rej) || rej.RecordErr == nil || !strings.Contains(rej.RecordErr.Error(), "reopening the bead") {
+			t.Fatalf("round %d: Land = %T %v, want a rejection whose reopen failed", round, err, err)
+		}
+		notes := f.bead().Notes
+		if got := CountRejections(notes); got != 2 {
+			t.Fatalf("round %d: %d rejection block(s), want 2 — the interrupted block completed, not repeated:\n%s", round, got, notes)
+		}
+		last, ok := ParseRejectionNote(notes)
+		if !ok || last.Attempt != 2 || !strings.Contains(notes, "TestSecond") {
+			t.Fatalf("round %d: unfinished block = attempt %d, %v; want attempt 2 carrying the new tail", round, last.Attempt, ok)
+		}
+	}
+}
+
 func TestLandRequestChangesRejectsWithFindings(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)

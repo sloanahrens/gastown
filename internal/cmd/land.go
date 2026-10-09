@@ -194,8 +194,7 @@ func requeueRejectedLanding(bd landRequeueBeads, remote landRequeueRemote, remot
 		return fmt.Errorf("%s does not carry %s after the requeue", beadID, land.LabelReadyToLand)
 	}
 
-	comment := fmt.Sprintf("REQUEUED: %s re-queued this rejected landing unchanged\nBranch: %s\nHead: %s\nReason: %s",
-		actor, branch, head, reason)
+	comment := land.FormatRequeueComment(actor, branch, head, note.Attempt, reason)
 	if err := bd.AddCommentAs(beadID, actor, comment); err != nil {
 		return fmt.Errorf("the landing is re-queued but recording the requeue on %s failed: %w", beadID, err)
 	}
