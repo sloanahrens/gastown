@@ -3037,6 +3037,16 @@ func (g *Git) CleanForce() error {
 	return err
 }
 
+// CleanForceIgnored removes ignored files and directories too, not just
+// untracked ones. A caller that reuses a tree it does not own - a throwaway
+// sweep worktree, say - needs this: a build artifact .gitignore hides is
+// exactly the leftover that can decide a verdict the tree's own commits did
+// not earn (gt-oyrav).
+func (g *Git) CleanForceIgnored() error {
+	_, err := g.run("clean", "-fdx")
+	return err
+}
+
 // Rev returns the commit hash for the given ref.
 func (g *Git) Rev(ref string) (string, error) {
 	return g.run("rev-parse", ref)

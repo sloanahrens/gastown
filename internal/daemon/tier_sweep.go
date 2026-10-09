@@ -880,6 +880,7 @@ func tierSweepCheckout(_ context.Context, repo, dir, sha string) (func(), error)
 // recovery below (gt-9yfgm).
 type tierSweepGitOps struct {
 	moveTo func(dir, sha string) error
+	clean  func(dir string) error
 	remove func(repo, dir string) error
 	prune  func(repo string) error
 	add    func(repo, dir, sha string) error
@@ -890,6 +891,7 @@ type tierSweepGitOps struct {
 func tierSweepGit() tierSweepGitOps {
 	return tierSweepGitOps{
 		moveTo: func(dir, sha string) error { return git.NewGit(dir).CheckoutDetachForce(sha) },
+		clean:  func(dir string) error { return git.NewGit(dir).CleanForceIgnored() },
 		remove: func(repo, dir string) error { return git.NewGit(repo).WorktreeRemove(dir, true) },
 		prune:  func(repo string) error { return git.NewGit(repo).WorktreePrune() },
 		add:    func(repo, dir, sha string) error { return git.NewGit(repo).WorktreeAddDetached(dir, sha) },
@@ -899,6 +901,15 @@ func tierSweepGit() tierSweepGitOps {
 func tierSweepCheckoutWith(g tierSweepGitOps, repo, dir, sha string) (func(), error) {
 	if _, err := os.Stat(dir); err == nil {
 		if err := g.moveTo(dir, sha); err == nil {
+			// The worktree is reused, so whatever the last cycle built is still
+			// in it: checkout --force restores tracked files only, and an
+			// ignored leftover (a stale binary, a build cache) can decide the
+			// verdict the sweep is about to take. Clean it before the sweep
+			// reads anything, and fail the cycle rather than sweep a tree that
+			// could not be cleaned (gt-oyrav).
+			if err := g.clean(dir); err != nil {
+				return nil, err
+			}
 			return func() {}, nil
 		}
 		// WorktreeRemove drops only a registered worktree, so a directory left

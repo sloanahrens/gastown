@@ -49,6 +49,7 @@ func TestTownRootMutatingGitCommandsAreBlocked(t *testing.T) {
 		{"checkout detach force", func(g *Git) error { return g.CheckoutDetachForce("polecat/safety") }},
 		{"reset hard", func(g *Git) error { return g.ResetHard("polecat/safety") }},
 		{"clean force", func(g *Git) error { return g.CleanForce() }},
+		{"clean force ignored", func(g *Git) error { return g.CleanForceIgnored() }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
