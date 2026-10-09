@@ -57,15 +57,16 @@ func TestDeploysBlockDrawsWhatTheReaderDecided(t *testing.T) {
 	}
 
 	// The repo column is measured from the runs rather than fixed (gt-1hob8),
-	// so the longest name the block lists is the width of the column, and the
-	// header cells carry the same classes as the row cells they name. The ref
-	// column keeps its width and takes the staging tag's on top of it, so a
-	// list holding one still lines its refs up with the header (gt-2h2lx).
+	// so the longest name the block lists is the width of the column, with a
+	// character of slack for the rounding of a name that fits, and the header
+	// cells carry the same classes as the row cells they name. The ref column
+	// keeps its width and takes the staging tag's on top of it, so a list
+	// holding one still lines its refs up with the header (gt-2h2lx, gt-egffr).
 	for _, want := range []string{
 		`for (const r of runs) {`,
 		`widest = Math.max(widest, repoShort(r.repo).length);`,
 		`tags = tags || r.workflow === DEPLOY_STAGING;`,
-		`box.style.setProperty("--drepo", widest + "ch");`,
+		`box.style.setProperty("--drepo", (widest + 1) + "ch");`,
 		`box.style.setProperty("--dref", (DEPLOY_REF_CH + (tags ? DEPLOY_STAGING_TAG_CH : 0)) + "ch");`,
 		`[["Repo", "drepo"], ["Ref", "dref"], ["Commit", "dhash"], ["State", "dstate"], ["Age", "dage"]]`,
 	} {
@@ -74,11 +75,27 @@ func TestDeploysBlockDrawsWhatTheReaderDecided(t *testing.T) {
 		}
 	}
 
+	// The header takes the rows' font. The widths are in ch, and a ch is the
+	// drawing cell's own font's, so a header rule that set a font size would
+	// give its columns another width and land every header left of its column
+	// (gt-egffr).
+	head := cssRule(t, ".dhead")
+	if strings.Contains(head, "font-size") {
+		t.Errorf(".dhead rule is %q: a font size of its own makes a ch-based column another width under the header than under the rows", head)
+	}
+	if !strings.Contains(head, "color:var(--dim)") {
+		t.Errorf(".dhead rule is %q: the header is no longer dim, so it reads as a row", head)
+	}
+
 	// The row is the run: every cell of it, the stages after them and the
-	// reader's warning under that.
+	// reader's warning under that. The State cell is the page's own reading of
+	// the run's status (gt-egffr).
 	row := pageFunc(t, "deployRow")
 	for _, want := range []string{
-		`row.append(repo, ref, el("span", "dhash", r.hash || "–"), el("span", "dstate", r.status || "–"), el("span", "dage", r.at ? age(r.at) : "–"), deployStages(r));`,
+		`if (repo.textContent !== r.repo) repo.title = r.repo;`,
+		`const state = el("span", "dstate", deployState(r));`,
+		`if (state.textContent !== (r.status || "–")) state.title = r.status;`,
+		`row.append(repo, ref, el("span", "dhash", r.hash || "–"), state, el("span", "dage", r.at ? age(r.at) : "–"), deployStages(r));`,
 		`if (r.warn) row.append(el("span", "dwarn warnc", r.warn));`,
 		`const row = r.url ? el("a", "drow") : el("div", "drow");`,
 		`if (r.url) { row.href = r.url; row.target = "_blank"; row.rel = "noopener"; row.title = r.url; }`,
@@ -89,11 +106,14 @@ func TestDeploysBlockDrawsWhatTheReaderDecided(t *testing.T) {
 	}
 
 	// The stage cell is the page's own chip vocabulary — the name, the glyph of
-	// the state, and the state's word on the chip's title — and a run whose jobs
-	// were not read says so rather than drawing nothing.
+	// the state, and the state's word on the chip's title — and the two ways a
+	// run's stages can be absent are drawn differently: a jobs call that failed
+	// says so, where a run past the job-fetch cap draws nothing at all
+	// (gt-egffr).
 	stages := pageFunc(t, "deployStages")
 	for _, want := range []string{
-		`cell.textContent = r.stages_unread ? "stages not read" : "–";`,
+		`if (r.stages_unread) { cell.className += " title"; cell.textContent = "stages not read"; }`,
+		`else if (!r.stages_skipped) cell.textContent = "–";`,
 		`const chip = el("span", "tag " + (DEPLOY_STAGE[st.status] || "sev-low"), (st.name || "–") + " " + (DEPLOY_GLYPH[st.status] || "–"));`,
 		`chip.title = (st.name || "–") + " " + (st.status || "?");`,
 	} {
@@ -125,6 +145,53 @@ func TestDeploysBlockDrawsWhatTheReaderDecided(t *testing.T) {
 	if all := pageFunc(t, "renderAll"); !strings.Contains(all, "renderDeploys(state)") {
 		t.Error("renderAll does not draw the Deploys block")
 	}
+}
+
+// The State cell is the page's own reading of a run's status. Forgejo calls a
+// run "blocked" between one job finishing and the next being picked up, so a
+// run with a stage already succeeded or running is running, not blocked; a run
+// no stage has started in is still waiting, and says what the API said. The
+// API's own word stays on the cell's title (gt-egffr).
+func TestDeploysBlockReadsABlockedRunWithAStageDoneAsRunning(t *testing.T) {
+	t.Parallel()
+
+	page := string(indexHTML)
+	for _, want := range []string{
+		`const DEPLOY_MOVING = {blocked: true, waiting: true};`,
+		`const DEPLOY_STARTED = {success: true, running: true};`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("index.html has no %q, so the state cell reads no status", want)
+		}
+	}
+
+	state := pageFunc(t, "deployState")
+	for _, want := range []string{
+		`const raw = r.status || "–";`,
+		`if (!DEPLOY_MOVING[raw]) return raw;`,
+		`return (r.stages || []).some(st => DEPLOY_STARTED[st.status]) ? "running" : raw;`,
+	} {
+		if !strings.Contains(state, want) {
+			t.Errorf("deployState has no %q", want)
+		}
+	}
+}
+
+// cssRule returns one rule's declarations from the page's style block, so a
+// test can hold a rule to its shape rather than to a pixel (gt-fn9e6.48).
+func cssRule(t *testing.T, sel string) string {
+	t.Helper()
+
+	page := string(indexHTML)
+	at := strings.Index(page, sel+"{")
+	if at < 0 {
+		t.Fatalf("index.html has no %s rule", sel)
+	}
+	body := page[at+len(sel)+1:]
+	if end := strings.Index(body, "}"); end >= 0 {
+		body = body[:end]
+	}
+	return body
 }
 
 // A staging run is told from a release at a glance: the reader names the
