@@ -231,7 +231,9 @@ func (a *Alerter) polecatAlerts(prev, next State, now time.Time) []Alert {
 	}
 	// The baseline is the first snapshot that has polecats in it. A snapshot
 	// taken before the summary was read lists none, and baselining on it would
-	// announce every polecat that was already stalled as a change.
+	// announce every polecat that was already stalled as a change. A failed
+	// seats read is no change at all: the hub keeps the previous list, so the
+	// snapshot here still carries it (gt-q6h8e).
 	if len(next.Polecats) == 0 {
 		return nil
 	}
@@ -319,7 +321,9 @@ func (a *Alerter) rejectionAlerts(entries []Entry, now time.Time) []Alert {
 
 // stuckQueueAlert reports a bead that has waited to land for over half an hour,
 // once per jam: the flag clears when the queue drains below the threshold, so
-// the next jam alerts again.
+// the next jam alerts again. A ready-to-land read that failed keeps the previous
+// oldest bead through the hub, so a dropped read leaves the flag standing
+// rather than re-arming the alert (gt-q6h8e).
 func (a *Alerter) stuckQueueAlert(next State, now time.Time) (Alert, bool) {
 	var oldest *time.Time
 	if next.Summary != nil {

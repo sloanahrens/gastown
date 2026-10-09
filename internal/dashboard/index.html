@@ -41,6 +41,7 @@ td.n,th.n{text-align:right}
 .rbead:hover{background:#19212b}
 .rbeadrow{margin-top:6px}
 .empty{color:var(--dim);padding:6px 0}
+.body.stale{opacity:.55}
 .spark{width:100%;height:56px;display:block}
 .chart{width:100%;height:64px;display:block}
 .hbars{display:flex;align-items:stretch;gap:2px;height:64px;margin:4px 0 2px}
@@ -250,6 +251,33 @@ const age = iso => iso ? fmtDur((Date.now() - new Date(iso).getTime()) / 1000) :
 const clock = iso => new Date(iso).toLocaleTimeString([], {hour12: false});
 const money = v => v == null ? "–" : "$" + Number(v).toFixed(2);
 
+// readOf is one poller's last read, off the per-source status the server sends.
+// A value whose read failed, or that has aged past a few of the poll's own
+// intervals, is stale: the pane keeps drawing the last good value, greyed,
+// rather than letting it pass as current. The server stamps the same thing
+// (readStaleFactor, internal/dashboard/types.go); the age is measured again here
+// because it drifts between pushes, and the two factors must agree (gt-q6h8e).
+function readOf(s, source) {
+  const x = (s && s.reads && s.reads[source]) || null;
+  if (!x) return null;
+  const ageSec = x.at ? (Date.now() - new Date(x.at).getTime()) / 1000 : null;
+  const every = x.every_sec || 0;
+  const stale = !!x.stale || ageSec == null || (every > 0 && ageSec > every * 3);
+  return {ageSec: ageSec, error: !!x.error, stale: stale};
+}
+// paintsRead greys a pane whose reading is stale and colours its caption in the
+// page's own idiom: red for a read that failed, amber for one gone old.
+function paintsRead(box, note, r) {
+  box.classList.toggle("stale", !!(r && r.stale));
+  note.className = "r" + (r && r.stale ? (r.error ? " badc" : " warnc") : "");
+}
+// readCaption joins a pane's own words with the reason its reading is not
+// current, so every pane says which of its numbers are live.
+function readCaption(r, parts) {
+  const why = r && r.stale ? (r.error ? "read failed" : "stale") : null;
+  return parts.filter(Boolean).concat(why ? [why] : []).join(" · ");
+}
+
 let state = null;
 
 function tile(k, v, sub, cls) {
@@ -284,9 +312,11 @@ function renderTiles(s) {
   const tiles = $("tiles");
   tiles.replaceChildren();
   const q = sm.ready_to_land;
+  const rr = readOf(s, "ready");
   let oldest = sm.oldest_ready ? (Date.now() - new Date(sm.oldest_ready).getTime()) / 1000 : null;
   tiles.append(tile("Waiting to land", q == null ? "–" : String(q),
-    q ? "oldest " + fmtDur(oldest) : "queue empty", q == null ? "" : (oldest > 3600 ? "bad" : oldest > 900 ? "warn" : q ? "" : "ok")));
+    q == null ? (rr && rr.stale ? "unavailable" : "queue empty") : readCaption(rr, ["oldest " + fmtDur(oldest)]),
+    rr && rr.stale ? (rr.error ? "bad" : "warn") : q == null ? "" : (oldest > 3600 ? "bad" : oldest > 900 ? "warn" : q ? "" : "ok")));
   const pcs = s.polecats || [];
   const live = pcs.filter(p => !p.rig_parked);   // a parked rig is stood down on purpose
   const n = k => live.filter(p => p.state === k).length;
@@ -357,6 +387,10 @@ function renderRigs(s) {
   const box = $("rigs");
   box.replaceChildren();
   const rows = s.rigs || [];
+  // Every row is joined from the queue read the Work queue pane uses, so the two
+  // say the same thing about the same numbers (gt-q6h8e).
+  const qr = readOf(s, "queue");
+  paintsRead(box, $("rigsnote"), qr);
   if (!rows.length) { box.append(el("div", "empty", s.queue ? "no rigs" : "reading…")); $("rigsnote").textContent = ""; return; }
   const t = el("table");
   const hr = el("tr");
@@ -392,13 +426,22 @@ function renderRigs(s) {
   box.append(t);
   const parked = rows.filter(r => r.parked).length;
   const at = s.queue && s.queue.at;
-  $("rigsnote").textContent = rows.length + " rigs" + (parked ? " · " + parked + " parked" : "") + (at ? " · read " + age(at) + " ago" : "");
+  $("rigsnote").textContent = readCaption(qr, [rows.length + " rigs" + (parked ? " · " + parked + " parked" : ""), at ? "read " + age(at) + " ago" : null]);
 }
 function renderSeats(s) {
   const box = $("seats");
   box.replaceChildren();
   const pcs = s.polecats || [];
-  if (!pcs.length) { box.append(el("div", "empty", s.summary ? "no polecats" : "reading…")); $("seatsnote").textContent = ""; return; }
+  const r = readOf(s, "seats");
+  paintsRead(box, $("seatsnote"), r);
+  if (!pcs.length) {
+    // An empty list is a town with no polecats only when the seats actually
+    // read. A read that failed says unavailable, never "no polecats" (gt-q6h8e).
+    const why = r && r.stale ? "unavailable — the seats read failed or went stale" : s.summary ? "no polecats" : "reading…";
+    box.append(el("div", "empty", why));
+    $("seatsnote").textContent = "";
+    return;
+  }
 
   const by = {};
   pcs.filter(p => !p.rig_parked).forEach(p => by[p.state] = (by[p.state] || 0) + 1);
@@ -477,7 +520,7 @@ function renderSeats(s) {
     d.append(el("summary", "title", idle.length + " idle (free to take work) · last 24h landings on the right"), idleTable(idle));
     box.append(d);
   }
-  $("seatsnote").textContent = s.summary_at ? "read " + age(s.summary_at) + " ago" : "";
+  $("seatsnote").textContent = s.summary_at ? readCaption(r, ["read " + age(s.summary_at) + " ago"]) : "";
 }
 
 function spark(points, w, h, color) {
@@ -758,11 +801,14 @@ function landingTable(s, names, rows, waiting) {
 function renderMachine(s) {
   const box = $("machine");
   box.replaceChildren();
+  const r = readOf(s, "machine");
+  paintsRead(box, $("machnote"), r);
   const m = s.machine || {};
   const loads = (s.loads || []).map(p => p.load);
   box.append(spark(loads, 400, 56, "#58a6ff"));
   const note = loads.length > 1 ? "load, last " + fmtDur((new Date(s.loads[s.loads.length - 1].at) - new Date(s.loads[0].at)) / 1000) : "";
-  $("machnote").textContent = note;
+  $("machnote").textContent = readCaption(r, [note, r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null]);
+  if (r && r.stale) box.append(el("div", "empty " + (r.error ? "badc" : "warnc"), r.error ? "the machine read failed; this is the last reading" : "this reading is stale"));
   const top = m.top || [];
   if (top.length) {
     const t = el("table");
@@ -1488,7 +1534,11 @@ function renderSpend(s) {
   const box = $("spend");
   box.replaceChildren();
   const d = s.spend;
-  if (!d) { box.append(el("div", "empty", "no spend report")); $("spendnote").textContent = ""; return; }
+  const r = readOf(s, "spend");
+  paintsRead(box, $("spendnote"), r);
+  // No spend command is configured at all — no reader, so no status either —
+  // which is not the same as one that failed or has not answered yet (gt-q6h8e).
+  if (!d) { box.append(el("div", "empty", r ? "unavailable — the spend read failed" : "no spend report")); $("spendnote").textContent = ""; return; }
   const live = d.live || {};
   const kv = el("div", "kv");
   const add = (v, k, cls) => { const x = el("div"); x.append(el("b", cls || "", v), el("span", "", k)); kv.append(x); };
@@ -1507,7 +1557,7 @@ function renderSpend(s) {
   const alerts = d.alerts || [];
   if (live.ok === false) box.append(el("div", "badc", "live balance unreachable; showing the ledger"));
   if (d.watcher_pid == null || d.watcher_pid === "") box.append(el("div", "badc", "spend watcher is not running"));
-  $("spendnote").textContent = d.last_sample ? "ledger " + d.last_sample.replace("T", " ") : "";
+  $("spendnote").textContent = readCaption(r, [d.last_sample ? "ledger " + d.last_sample.replace("T", " ") : null, r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null]);
 }
 
 function sec(v) { return v == null ? "–" : fmtDur(v); }
@@ -1515,8 +1565,16 @@ function renderOM(s) {
   const box = $("om");
   box.replaceChildren();
   const om = s.om;
-  if (!om) { box.append(el("div", "empty", "reading the landings and the daemon log…")); $("omnote").textContent = ""; return; }
-  $("omnote").textContent = [om.backend, om.depth, om.threshold != null ? "threshold " + om.threshold : null, om.timeout_s ? om.timeout_s + "s timeout" : null].filter(Boolean).join(" · ");
+  const r = readOf(s, "om");
+  paintsRead(box, $("omnote"), r);
+  if (!om) {
+    // A read that has failed says so; only a read that has not happened yet is
+    // still "reading…" (gt-q6h8e).
+    box.append(el("div", "empty", r ? "unavailable — the om records could not be read" : "reading the landings and the daemon log…"));
+    $("omnote").textContent = "";
+    return;
+  }
+  $("omnote").textContent = readCaption(r, [om.backend, om.depth, om.threshold != null ? "threshold " + om.threshold : null, om.timeout_s ? om.timeout_s + "s timeout" : null, r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null]);
 
   const t = el("table");
   const hr = el("tr");
@@ -1850,16 +1908,31 @@ function detailBlock(d) {
 function renderQueue(s, force) {
   const box = $("queue");
   const q = s.queue;
-  if (!q) { if (!box.dataset.empty) { box.replaceChildren(el("div", "empty", "reading the work queue…")); box.dataset.empty = "1"; } return; }
+  const r = readOf(s, "queue");
+  paintsRead(box, $("queuenote"), r);
+  // The note is written on every call, above the unchanged-key early return, so
+  // its age keeps moving between queue polls instead of freezing with the rows
+  // (gt-q6h8e).
+  if (q) {
+    const ok = (q.ready || []).filter(b => b.shape === "ok").length;
+    $("queuenote").textContent = readCaption(r, [(q.ready_total || 0) + " ready (" + ok + " dispatchable) · " + (q.landing_total || 0) + " landing · " + (q.blocked_total || 0) + " blocked · read " + age(q.at) + " ago"]);
+  } else {
+    $("queuenote").textContent = r ? "unavailable" : "";
+  }
+  if (!q) {
+    const msg = r ? "unavailable — the work queue could not be read" : "reading the work queue…";
+    if (box.dataset.empty !== msg) { box.replaceChildren(el("div", "empty", msg)); box.dataset.empty = msg; }
+    return;
+  }
   const unshaped = {};
   ((s.dispatch && s.dispatch.named) || []).forEach(n => { if (n.bead && /^unshaped/.test(n.reason)) unshaped[n.bead] = n.reason; });
   const key = q.at + "|" + qTab + "|" + qRig + "|" + qShape + "|" + [...qOpen].join(",") + "|" + Object.keys(qDetail).map(k => k + (qDetail[k].loading ? "L" : qDetail[k].error ? "E" : "D")).join(",") + "|" + Object.keys(unshaped).join(",");
-  if (!force && key === qKey) return;
+  // A pane still holding the placeholder from a failed read is redrawn even
+  // when the queue's own reading is unchanged (gt-q6h8e).
+  if (!force && !box.dataset.empty && key === qKey) return;
   qKey = key;
   delete box.dataset.empty;
   box.replaceChildren();
-  const okCount = (q.ready || []).filter(b => b.shape === "ok").length;
-  $("queuenote").textContent = (q.ready_total || 0) + " ready (" + okCount + " dispatchable) · " + (q.landing_total || 0) + " landing · " + (q.blocked_total || 0) + " blocked · read " + age(q.at) + " ago";
   if ((q.unreadable || []).length) box.append(el("div", "badc", "⚠ could not read: " + q.unreadable.join(", ") + " (its beads are missing below)"));
   const tabs = el("div", "qtabs");
   QTABS.forEach(([k, label, totalKey]) => {
@@ -2071,7 +2144,7 @@ foldFeed(false); // no state has arrived yet, so there is no Actions section
 renderChips();
 connect();
 // Ages and elapsed times drift between pushes; redraw the cheap parts locally.
-setInterval(() => { if (state) { renderTiles(state); renderSeats(state); renderTierSweep(state); renderForgejo(state); } }, 15000);
+setInterval(() => { if (state) { renderTiles(state); renderSeats(state); renderTierSweep(state); renderForgejo(state); renderQueue(state); } }, 15000);
 </script>
 </body>
 </html>
