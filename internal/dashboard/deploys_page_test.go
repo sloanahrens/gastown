@@ -37,7 +37,7 @@ func TestDeploysBlockSitsInsideTheCloudSectionUnderTheFindings(t *testing.T) {
 }
 
 // The block draws what the reader decided: the runs it kept, each as a row of
-// repo, ref, commit, state and age with the stages under it, the reader's own
+// repo, ref, commit, state and age with the stages after them, the reader's own
 // warning on the runs it inferred one for, and its own words for the states
 // where there is nothing to draw.
 func TestDeploysBlockDrawsWhatTheReaderDecided(t *testing.T) {
@@ -56,7 +56,20 @@ func TestDeploysBlockDrawsWhatTheReaderDecided(t *testing.T) {
 		}
 	}
 
-	// The row is the run: every cell of it, the stages under them and the
+	// The repo column is measured from the runs rather than fixed (gt-1hob8),
+	// so the longest name the block lists is the width of the column, and the
+	// header cells carry the same classes as the row cells they name.
+	for _, want := range []string{
+		`for (const r of runs) widest = Math.max(widest, repoShort(r.repo).length);`,
+		`box.style.setProperty("--drepo", widest + "ch");`,
+		`[["Repo", "drepo"], ["Ref", "dref"], ["Commit", "dhash"], ["State", "dstate"], ["Age", "dage"]]`,
+	} {
+		if !strings.Contains(draw, want) {
+			t.Errorf("renderDeploys has no %q", want)
+		}
+	}
+
+	// The row is the run: every cell of it, the stages after them and the
 	// reader's warning under that.
 	row := pageFunc(t, "deployRow")
 	for _, want := range []string{
@@ -70,15 +83,32 @@ func TestDeploysBlockDrawsWhatTheReaderDecided(t *testing.T) {
 		}
 	}
 
-	// The stage cell is the page's own chip vocabulary, and a run whose jobs
+	// The stage cell is the page's own chip vocabulary — the name, the glyph of
+	// the state, and the state's word on the chip's title — and a run whose jobs
 	// were not read says so rather than drawing nothing.
 	stages := pageFunc(t, "deployStages")
 	for _, want := range []string{
 		`cell.textContent = r.stages_unread ? "stages not read" : "–";`,
-		`el("span", "tag " + (DEPLOY_STAGE[st.status] || "sev-low"), (st.name || "–") + " " + (st.status || "?"))`,
+		`const chip = el("span", "tag " + (DEPLOY_STAGE[st.status] || "sev-low"), (st.name || "–") + " " + (DEPLOY_GLYPH[st.status] || "–"));`,
+		`chip.title = (st.name || "–") + " " + (st.status || "?");`,
 	} {
 		if !strings.Contains(stages, want) {
 			t.Errorf("deployStages has no %q", want)
+		}
+	}
+	if !strings.Contains(string(indexHTML), `const DEPLOY_GLYPH = {success: "✓", failure: "✗", running: "◌"};`) {
+		t.Error("index.html has no stage glyphs, so a chip names no state")
+	}
+
+	// The repo column takes the measured width and the stage chips sit on the
+	// row's line while they fit, wrapping under it on a panel too narrow for
+	// both (gt-1hob8).
+	for _, want := range []string{
+		`.drepo{flex:0 0 var(--drepo,15ch)}`,
+		`.dstage{flex:0 1 auto;min-width:0;display:flex;gap:4px;flex-wrap:wrap}`,
+	} {
+		if !strings.Contains(string(indexHTML), want) {
+			t.Errorf("index.html has no %q", want)
 		}
 	}
 
