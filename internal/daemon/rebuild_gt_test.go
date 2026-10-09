@@ -243,32 +243,48 @@ func TestRebuildGTCycle_DeferredInstallRetriesNextHeartbeat(t *testing.T) {
 // TestRebuildGTCycle_FailedFetchDoesNotReadAsFresh pins gt-oyrav (D4): the
 // sync used to discard a failed fetch, which leaves origin/main where it was,
 // so the fast-forward is a no-op and the staleness read after it is taken
-// against the checkout's own stale ref. A stale binary then reads as fresh and
-// the starvation alarm closes over it. Nothing was accomplished, so the cycle
-// must defer and the next heartbeat must retry.
+// against the checkout's own ref. Both verdicts the cycle can then reach are
+// wrong: a stale binary installs against an unverified main ref, and one that
+// only reads fresh because the checkout is stale closes the starvation and
+// drift alarms over work the fetch never confirmed. Nothing was accomplished,
+// so the cycle must defer and the next heartbeat must retry.
 func TestRebuildGTCycle_FailedFetchDoesNotReadAsFresh(t *testing.T) {
 	t.Parallel()
-	d, rec := rebuildGTTown(t)
-	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return staleInfo(3) }
-	d.rebuildGTGateFn = func() (string, bool) { return "", false }
-	cli := withRebuildGTCli(t, d, func(c cliCall) cliReply {
-		switch {
-		case gitSub(c, "branch"):
-			return cliReply{stdout: "main\n"}
-		case gitSub(c, "fetch"):
-			return cliReply{stderr: "fatal: could not read from remote repository\n", code: 128}
-		}
-		return cliReply{}
-	})
+	for _, tc := range []struct {
+		name  string
+		stale *version.StaleBinaryInfo
+	}{
+		{"stale", staleInfo(3)},
+		{"fresh against the checkout's own ref", &version.StaleBinaryInfo{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, rec := rebuildGTTown(t)
+			d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return tc.stale }
+			d.rebuildGTGateFn = func() (string, bool) { return "", false }
+			cli := withRebuildGTCli(t, d, func(c cliCall) cliReply {
+				switch {
+				case gitSub(c, "branch"):
+					return cliReply{stdout: "main\n"}
+				case gitSub(c, "fetch"):
+					return cliReply{stderr: "fatal: could not read from remote repository\n", code: 128}
+				}
+				return cliReply{}
+			})
 
-	if settled := d.runRebuildGT(); settled {
-		t.Fatal("a failed fetch accomplished nothing and must retry next heartbeat")
-	}
-	if installs := installCalls(cli); len(installs) != 0 {
-		t.Errorf("installed past a failed fetch, against an unverified main ref: %v", installs)
-	}
-	if esc := rec.Escalations(); len(esc) != 0 {
-		t.Errorf("a deferral escalated: %+v", esc)
+			if settled := d.runRebuildGT(); settled {
+				t.Fatal("a failed fetch accomplished nothing and must retry next heartbeat")
+			}
+			if installs := installCalls(cli); len(installs) != 0 {
+				t.Errorf("installed past a failed fetch, against an unverified main ref: %v", installs)
+			}
+			if clears := rec.Clears(); len(clears) != 0 {
+				t.Errorf("a failed fetch closed the alarms over an unverified main ref: %+v", clears)
+			}
+			if esc := rec.Escalations(); len(esc) != 0 {
+				t.Errorf("a deferral escalated: %+v", esc)
+			}
+		})
 	}
 }
 
