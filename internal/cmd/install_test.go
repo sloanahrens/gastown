@@ -3,10 +3,12 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/deps"
 )
 
@@ -327,5 +329,99 @@ func TestFormatInstallDoltError(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestEnsureEscalationConfig_CreatesDefaultsWhenMissing(t *testing.T) {
+	t.Parallel()
+	path := config.EscalationConfigPath(t.TempDir())
+
+	created, err := ensureEscalationConfig(path)
+	if err != nil {
+		t.Fatalf("ensureEscalationConfig: %v", err)
+	}
+	if !created {
+		t.Fatal("ensureEscalationConfig did not create a missing escalation config")
+	}
+
+	got, err := config.LoadEscalationConfig(path)
+	if err != nil {
+		t.Fatalf("LoadEscalationConfig: %v", err)
+	}
+	want := config.NewEscalationConfig()
+	if got.StaleThreshold != want.StaleThreshold {
+		t.Errorf("stale_threshold = %q, want %q", got.StaleThreshold, want.StaleThreshold)
+	}
+	if !reflect.DeepEqual(got.Routes, want.Routes) {
+		t.Errorf("routes = %v, want %v", got.Routes, want.Routes)
+	}
+	if got.MaxReescalations == nil || *got.MaxReescalations != *want.MaxReescalations {
+		t.Errorf("max_reescalations = %v, want %v", got.MaxReescalations, want.MaxReescalations)
+	}
+}
+
+func TestEnsureEscalationConfig_KeepsCustomizedFile(t *testing.T) {
+	t.Parallel()
+	path := config.EscalationConfigPath(t.TempDir())
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	customized := `{"type":"escalation","version":1,"routes":{"high":["bead","sms:human"]},"stale_threshold":"9h","max_reescalations":7}` + "\n"
+	if err := os.WriteFile(path, []byte(customized), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := ensureEscalationConfig(path)
+	if err != nil {
+		t.Fatalf("ensureEscalationConfig: %v", err)
+	}
+	if created {
+		t.Error("ensureEscalationConfig wrote over an existing escalation config")
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != customized {
+		t.Errorf("escalation.json = %q, want it byte-identical to %q", after, customized)
+	}
+}
+
+func TestEnsureEscalationConfig_KeepsSectionOnTwoFileTown(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	for _, dir := range []string{"mayor", "settings"} {
+		if err := os.MkdirAll(filepath.Join(townRoot, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// "registry" in the machine file marks the two-file layout, so the retired
+	// settings/escalation.json lives as a section of settings/config.json
+	// (internal/config/layout.go).
+	townPath := filepath.Join(townRoot, "mayor", "town.json")
+	if err := os.WriteFile(townPath, []byte(`{"type":"town","version":1,"registry":{"version":1,"rigs":{}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(townRoot, "settings", "config.json")
+	customized := `{"escalation":{"type":"escalation","version":1,"routes":{"high":["bead","sms:human"]},"stale_threshold":"9h"}}` + "\n"
+	if err := os.WriteFile(configPath, []byte(customized), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := ensureEscalationConfig(config.EscalationConfigPath(townRoot))
+	if err != nil {
+		t.Fatalf("ensureEscalationConfig: %v", err)
+	}
+	if created {
+		t.Error("ensureEscalationConfig wrote a section the operator already had")
+	}
+
+	after, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != customized {
+		t.Errorf("settings/config.json = %q, want it byte-identical to %q", after, customized)
 	}
 }

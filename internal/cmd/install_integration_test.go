@@ -3,6 +3,7 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"net"
 	"os"
@@ -870,4 +871,53 @@ func reapOwnedDoltOnCleanup(t testing.TB, townRoot string) {
 			t.Logf("stopped %d owned Dolt sql-server process(es)", stopped)
 		}
 	})
+}
+
+// TestInstallForcePreservesEscalationConfig validates that re-running
+// gt install --force leaves a hand-edited settings/escalation.json alone.
+func TestInstallForcePreservesEscalationConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	hqPath := filepath.Join(tmpDir, "test-hq")
+
+	gtBinary := buildGT(t)
+
+	// First install writes the defaults.
+	cmd := exec.Command(gtBinary, "install", hqPath, "--no-beads")
+	cmd.Env = append(os.Environ(), "HOME="+tmpDir)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("first install failed: %v\nOutput: %s", err, output)
+	}
+
+	escalationPath := filepath.Join(hqPath, "settings", "escalation.json")
+	defaults, err := config.LoadEscalationConfig(escalationPath)
+	if err != nil {
+		t.Fatalf("fresh install did not write a loadable escalation config: %v", err)
+	}
+	if defaults.StaleThreshold != "4h" {
+		t.Errorf("fresh install stale_threshold = %q, want the default %q", defaults.StaleThreshold, "4h")
+	}
+
+	// Hand-edit it, then re-run install with --force.
+	customized := []byte(`{"type":"escalation","version":1,"routes":{"high":["bead","sms:human"]},"stale_threshold":"9h","max_reescalations":7}` + "\n")
+	if err := os.WriteFile(escalationPath, customized, 0644); err != nil {
+		t.Fatalf("writing customized escalation.json: %v", err)
+	}
+
+	cmd = exec.Command(gtBinary, "install", hqPath, "--no-beads", "--force")
+	cmd.Env = append(os.Environ(), "HOME="+tmpDir)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("install --force failed: %v\nOutput: %s", err, output)
+	}
+	if !strings.Contains(string(output), "settings/escalation.json already exists, preserving") {
+		t.Errorf("expected the preserve message, got:\n%s", output)
+	}
+
+	after, err := os.ReadFile(escalationPath)
+	if err != nil {
+		t.Fatalf("reading escalation.json after re-install: %v", err)
+	}
+	if !bytes.Equal(after, customized) {
+		t.Errorf("escalation.json = %q, want it byte-identical to %q", after, customized)
+	}
 }
