@@ -78,7 +78,7 @@ Examples:
 }
 
 func init() {
-	installCmd.Flags().BoolVarP(&installForce, "force", "f", false, "Re-run install in existing HQ (preserves town.json and rigs.json)")
+	installCmd.Flags().BoolVarP(&installForce, "force", "f", false, "Re-run install in existing HQ (preserves town.json, rigs.json, and settings/escalation.json)")
 	installCmd.Flags().StringVarP(&installName, "name", "n", "", "Town name (defaults to directory name)")
 	installCmd.Flags().StringVar(&installOwner, "owner", "", "Owner email for entity identity (defaults to git config user.email)")
 	installCmd.Flags().StringVar(&installPublicName, "public-name", "", "Public display name (defaults to town name)")
@@ -387,12 +387,15 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Create default escalation config in settings/escalation.json
+	// Escalation config is operator data; ensureEscalationConfig leaves an
+	// existing one alone, --force included (gt-v6ze8).
 	escalationPath := config.EscalationConfigPath(absPath)
-	if err := config.SaveEscalationConfig(escalationPath, config.NewEscalationConfig()); err != nil {
+	if created, err := ensureEscalationConfig(escalationPath); err != nil {
 		fmt.Printf("   %s Could not create escalation config: %v\n", style.Dim.Render("⚠"), err)
-	} else {
+	} else if created {
 		fmt.Printf("   ✓ Created settings/escalation.json\n")
+	} else {
+		fmt.Printf("   • settings/escalation.json already exists, preserving\n")
 	}
 
 	// Provision town-level slash commands (.claude/commands/)
@@ -630,6 +633,23 @@ func stampTownDoltPort(townPath string, port int) error {
 		town.Dolt.Port = port
 		return nil
 	})
+}
+
+// ensureEscalationConfig writes the default escalation config at path when the
+// town has none, and reports whether it did. One that is already there — the
+// file, or the section settings/config.json holds for it on a two-file town —
+// is left as it is, so a re-run (--force included) keeps the operator's routes,
+// contacts and thresholds (gt-v6ze8).
+func ensureEscalationConfig(path string) (bool, error) {
+	if _, err := config.LoadEscalationConfig(path); err == nil {
+		return false, nil
+	} else if !errors.Is(err, config.ErrNotFound) {
+		return false, err
+	}
+	if err := config.SaveEscalationConfig(path, config.NewEscalationConfig()); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // buildBdInitOptions returns the `bd init` options for the town, with the
