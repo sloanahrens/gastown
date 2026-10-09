@@ -745,6 +745,15 @@ func spaceOutShellOperators(command string) string {
 	// word, so a '#' right after one is mid-word and starts no comment;
 	// startsShellWord cannot see that from the previous rune alone.
 	prevEscaped := false
+	// prevIdx is the index of the rune the shell last saw before runes[i]:
+	// runes[i-1] normally, but a backslash-newline is DELETED by the shell, so
+	// after one the rune that follows is really preceded by whatever came
+	// before the backslash and prevIdx is left pointing there rather than at
+	// the deleted newline (gt-aa1ji). It is -1 when nothing has been seen yet.
+	// startsShellWord judges a word-leading '#' against runes[prevIdx] for the
+	// same reason it takes prevEscaped: the literal rune before the '#' is not
+	// always the one the shell saw.
+	prevIdx := -1
 	emit := func(r rune) {
 		if scopes[len(scopes)-1].escapeForShlex && (r == '"' || r == '\\') {
 			b.WriteRune('\\')
@@ -768,6 +777,10 @@ func spaceOutShellOperators(command string) string {
 		r := runes[i]
 		sc := scopes[len(scopes)-1]
 		if r == '\\' && !escaped && sc.quote != '\'' && i+1 < len(runes) && runes[i+1] == '\n' {
+			// Both runes are deleted, so the rune after them is preceded by
+			// whatever came before the backslash: leave prevIdx alone rather
+			// than advancing it past the deleted continuation (gt-aa1ji).
+			// Chained continuations carry the same rune forward.
 			i++
 			continue
 		}
@@ -824,7 +837,7 @@ func spaceOutShellOperators(command string) string {
 		case r == '\'' || r == '"':
 			scopes[len(scopes)-1].quote = r
 			emit(r)
-		case r == '#' && sc.quote == 0 && startsShellWord(runes, i, prevEscaped):
+		case r == '#' && sc.quote == 0 && startsShellWord(runes, prevIdx, prevEscaped):
 			// An unquoted word-leading '#' is a comment that runs to the end
 			// of its LINE (gt-vonb1). Drop it here, leaving the newline for
 			// the separator rule below: left in, shlex would read the same
@@ -858,27 +871,34 @@ func spaceOutShellOperators(command string) string {
 		}
 		// Reset at the end of the body, not the top: the escaped branch above
 		// sets the flag and continues, so a top-of-body reset would clear it
-		// before the rune it describes (gt-w6tug).
+		// before the rune it describes (gt-w6tug). prevIdx records the rune the
+		// shell saw here too; the branches that 'continue' above skip it, which
+		// leaves the rune before a deleted backslash-newline in place (gt-aa1ji).
 		prevEscaped = false
+		prevIdx = i
 	}
 	return b.String()
 }
 
-// startsShellWord reports whether runes[i] begins a new shell word: it is the
-// first character, or follows whitespace or a command-chaining operator or an
-// opening parenthesis. prevEscaped says the rune before runes[i] was
-// backslash-escaped, which puts runes[i] inside that same word — an escaped
-// ' ' or ';' is literal text, not a boundary — so it is never a word start
-// (gt-w6tug). A '#' that merely sits inside a word (a#b, ${#x}, $#) is not a
-// comment (gt-vonb1).
-func startsShellWord(runes []rune, i int, prevEscaped bool) bool {
+// startsShellWord reports whether the rune after runes[prevIdx] begins a new
+// shell word: it is the first character of the command (prevIdx < 0), or
+// follows whitespace or a command-chaining operator or an opening parenthesis.
+// prevIdx is the index of the rune the shell last saw, which is the rune
+// literally before the one under test except across a deleted backslash-newline
+// — spaceOutShellOperators passes the rune before the backslash there, because
+// the shell deletes both and the following rune is really preceded by it
+// (gt-aa1ji). prevEscaped says the rune before was backslash-escaped, which
+// puts the next rune inside that same word — an escaped ' ' or ';' is literal
+// text, not a boundary — so it is never a word start (gt-w6tug). A '#' that
+// merely sits inside a word (a#b, ${#x}, $#) is not a comment (gt-vonb1).
+func startsShellWord(runes []rune, prevIdx int, prevEscaped bool) bool {
 	if prevEscaped {
 		return false
 	}
-	if i == 0 {
+	if prevIdx < 0 {
 		return true
 	}
-	switch runes[i-1] {
+	switch runes[prevIdx] {
 	case ' ', '\t', '\n', ';', '&', '|', '(':
 		return true
 	}
