@@ -16,12 +16,16 @@ import (
 const checkoutTestSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 // checkoutGitFake records each git call tierSweepCheckoutWith makes and answers
-// it with the error the test set. A successful add leaves the path a worktree.
+// it with the error the test set. A successful add leaves the path a worktree,
+// and a successful clean drops everything in it but the .git pointer, as
+// `git clean -fdx` does.
 type checkoutGitFake struct {
 	moveErr   error
+	cleanErr  error
 	removeErr error
 	addErr    error
 	moved     []string
+	cleaned   []string
 	removed   []string
 	added     []checkoutAdd
 	prunes    int
@@ -34,6 +38,25 @@ func (f *checkoutGitFake) ops() tierSweepGitOps {
 		moveTo: func(dir, sha string) error {
 			f.moved = append(f.moved, dir+" "+sha)
 			return f.moveErr
+		},
+		clean: func(dir string) error {
+			f.cleaned = append(f.cleaned, dir)
+			if f.cleanErr != nil {
+				return f.cleanErr
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				return err
+			}
+			for _, e := range entries {
+				if e.Name() == ".git" {
+					continue
+				}
+				if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+					return err
+				}
+			}
+			return nil
 		},
 		remove: func(_, dir string) error {
 			f.removed = append(f.removed, dir)
@@ -101,15 +124,16 @@ func TestTierSweepCheckoutDropsADirectoryThatIsNotAWorktree(t *testing.T) {
 }
 
 // A valid worktree on another sha is still reused: git moves it, so the sweep
-// neither removes nor re-creates it.
+// neither removes nor re-creates it. What the last cycle left in it does go
+// (gt-oyrav).
 func TestTierSweepCheckoutReusesAWorktreeOnAnotherSHA(t *testing.T) {
 	t.Parallel()
 	dir, repo := checkoutTestDir(t)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	kept := filepath.Join(dir, "kept.txt")
-	if err := os.WriteFile(kept, []byte("x\n"), 0o644); err != nil {
+	leftover := filepath.Join(dir, "sweep-cache")
+	if err := os.WriteFile(leftover, []byte("x\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	f := &checkoutGitFake{}
@@ -123,8 +147,33 @@ func TestTierSweepCheckoutReusesAWorktreeOnAnotherSHA(t *testing.T) {
 	if len(f.removed) != 0 || len(f.added) != 0 {
 		t.Errorf("removes = %v, adds = %v; want the reused worktree untouched", f.removed, f.added)
 	}
-	if _, err := os.Stat(kept); err != nil {
-		t.Errorf("the reused worktree's files were disturbed: %v", err)
+	if len(f.cleaned) != 1 || f.cleaned[0] != dir {
+		t.Errorf("cleans = %v, want one clean of the reused worktree", f.cleaned)
+	}
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Errorf("the last cycle's leftover survived into the sweep: %v", err)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("the reused worktree itself was removed: %v", err)
+	}
+}
+
+// A reused worktree that cannot be cleaned fails the cycle: sweeping a tree
+// that may still hold the last cycle's leftovers would take a verdict the tree
+// did not earn (gt-oyrav).
+func TestTierSweepCheckoutFailsWhenTheReusedWorktreeCannotBeCleaned(t *testing.T) {
+	t.Parallel()
+	dir, repo := checkoutTestDir(t)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f := &checkoutGitFake{cleanErr: errors.New("clean failed")}
+
+	if _, err := tierSweepCheckoutWith(f.ops(), repo, dir, checkoutTestSHA); err == nil {
+		t.Fatal("a failed clean must fail the checkout, not sweep the tree anyway")
+	}
+	if len(f.added) != 0 {
+		t.Errorf("adds = %v, want no re-add after a failed clean", f.added)
 	}
 }
 
