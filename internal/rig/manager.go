@@ -814,7 +814,7 @@ Use crew for your own workspace. Polecats are for batch work dispatch.
 	}
 
 	// Register in town config
-	m.config.Rigs[opts.Name] = config.RigEntry{
+	entry := config.RigEntry{
 		GitURL:      opts.GitURL,
 		PushURL:     opts.PushURL,
 		UpstreamURL: opts.UpstreamURL,
@@ -838,18 +838,21 @@ Use crew for your own workspace. Polecats are for batch work dispatch.
 	// The registry records the database metadata.json now names: gastown
 	// reads it from the registry, bd from metadata.json (gt-y3pgh.11).
 	if db, _ := config.RigMetadataDatabase(m.townRoot, opts.Name); db != "" {
-		entry := m.config.Rigs[opts.Name]
 		entry.DoltDatabase = db
-		m.config.Rigs[opts.Name] = entry
 	}
+	m.config.Rigs[opts.Name] = entry
 
 	// Persist rigs.json atomically before marking success.
 	// This ensures directory creation and rigs.json registration are an atomic unit:
 	// if the save fails, success remains false and the deferred cleanup removes the dir.
 	// Without this, a failure after AddRig returns (but before the caller saves) would
 	// leave a directory that is not registered in rigs.json.
+	//
+	// Only this rig's entry is written: the clone and bd init above run for
+	// minutes, and a whole-snapshot save reverts whatever another gt process
+	// registered or parked in that window (gt-4iobv).
 	rigsPath := filepath.Join(m.townRoot, "mayor", "rigs.json")
-	if err := config.SaveRigsConfig(rigsPath, m.config); err != nil {
+	if err := config.SetRigEntry(rigsPath, opts.Name, entry); err != nil {
 		return nil, fmt.Errorf("registering rig in rigs.json: %w", err)
 	}
 
