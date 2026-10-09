@@ -381,7 +381,10 @@ type State struct {
 	Deploys *Deploys `json:"deploys,omitempty"`
 	// Reports is the overseer's latest hourly report, read from the directory it
 	// writes under the town root. It is nil until the reader first reports.
+	// Questions is the overseer's open questions for Sloan, read from the town's
+	// own beads database. It is nil until the reader first reports.
 	Reports   *Reports        `json:"reports,omitempty"`
+	Questions *Questions      `json:"questions,omitempty"`
 	Spend     json.RawMessage `json:"spend,omitempty"`
 	OM        *OM             `json:"om,omitempty"`
 	TierSweep *TierSweep      `json:"tiersweep,omitempty"`
@@ -426,6 +429,8 @@ type Config struct {
 	// Reports reads the overseer's latest hourly report from the directory it
 	// writes.
 	Reports func() *Reports
+	// Questions reads the overseer's open questions for Sloan.
+	Questions func() *Questions
 	// Escalation reads the town's open escalation beads.
 	Escalation func() *Escalations
 	// Dispatch reads the spec dispatcher's last tick from the daemon log.
@@ -457,6 +462,7 @@ type Config struct {
 	ForgejoEvery    time.Duration
 	DeploysEvery    time.Duration
 	ReportsEvery    time.Duration
+	QuestionsEvery  time.Duration
 	EscalationEvery time.Duration
 	DispatchEvery   time.Duration
 	QueueEvery      time.Duration
@@ -491,6 +497,10 @@ func (c *Config) defaults() {
 	// The overseer's report is written hourly, so its own minute is a page's
 	// worth of slack: nothing there changes between one minute and the next.
 	def(&c.ReportsEvery, 60*time.Second)
+	// A question waits on a person, so it changes on the minute at the
+	// soonest: the reader runs bd per open question, and a page asks nothing
+	// faster than that.
+	def(&c.QuestionsEvery, 60*time.Second)
 	def(&c.EscalationEvery, 60*time.Second)
 	def(&c.DispatchEvery, 10*time.Second)
 	def(&c.QueueEvery, 60*time.Second)

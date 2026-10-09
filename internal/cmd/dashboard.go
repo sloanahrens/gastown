@@ -45,9 +45,9 @@ var dashboardCmd = &cobra.Command{
 	Long: `Serve one page on localhost that shows the town the way gt tail -f does:
 the health verdict, the queue waiting to land, the polecat seats and what they
 hold, the machine's load and what burns it, the cloud patrol's latest report
-when this machine runs one, the overseer's own hourly report, the DeepSeek
-spend, the recent activity of the Forgejo repos the viewer can see, and the same
-default-view feed gt tail prints.
+when this machine runs one, the overseer's own hourly report, the questions the
+overseer has filed for Sloan, the DeepSeek spend, the recent activity of the
+Forgejo repos the viewer can see, and the same default-view feed gt tail prints.
 
 It reads what gt tail reads — the events journals, the landings files, the
 daemon log, the watch feed, the daemon's health report — through the same
@@ -93,6 +93,12 @@ instant it was written, its text, and when the writes before it happened. An
 hourly report that is late is marked, the text is drawn as text and never as
 markup, and a directory the reader cannot read says so rather than reading as
 one with no reports in it. The panel writes nothing there.
+
+The Questions panel reads the town's open overseer-question beads with bd —
+each one's question, the answer the overseer recommends, the work it holds up,
+how long it has waited and whether Sloan has answered it — so he can see what is
+waiting on him and answer it by commenting on the bead. The page draws it and
+never writes: there is no form, and a question is closed from a terminal.
 
 Lifecycle: the dashboard watches its own binary and the town registry. When make
 install replaces the binary, or a rig is added to or removed from the town, the
@@ -229,6 +235,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	queue := newDashQueueReader(townRoot)
 	cloud := dashboard.NewCloudReader(config.CloudReportsDir())
 	reports := dashboard.NewReportsReader(dashboardReportsDir(townRoot))
+	questions := newDashQuestionsReader(townRoot)
 	loads := newDashLoads(townRoot, time.Now)
 	// The deploy block reads the same repos through the same viewer client as
 	// the Forgejo panel, so the two are wired together from one token read.
@@ -245,6 +252,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Forgejo:    forgejoFeed,
 		Deploys:    forgejoDeploys,
 		Reports:    func() *dashboard.Reports { return reports.Read(time.Now()) },
+		Questions:  func() *dashboard.Questions { return questions.read(time.Now()) },
 		Escalation: func() *dashboard.Escalations { return escalations.read(time.Now()) },
 		Dispatch:   om.dispatch,
 		Queue:      func() *dashboard.Queue { return queue.read(time.Now()) },
