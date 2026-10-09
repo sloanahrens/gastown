@@ -442,6 +442,45 @@ func TestPatrolScanGHGatesHonorsTheRecordedRun(t *testing.T) {
 	d.patrolScanGHGates(&patrolScanHost{d: d}, nil)
 }
 
+// TestPatrolScanGHGatesDoesNotRecordAFailedCheck pins gt-oyrav (D8): the gh
+// gate check runs on an hour cadence, so a tick whose every bd gate check
+// failed evaluated nothing but used to spend the hour anyway. The job must stay
+// due so the next tick retries it.
+func TestPatrolScanGHGatesDoesNotRecordAFailedCheck(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	d := &Daemon{logger: log.New(io.Discard, "", 0), config: &Config{TownRoot: townRoot}}
+	h := &patrolScanHost{d: d, bdGateCheck: func(string, ...string) ([]byte, error) {
+		return nil, errors.New("bd gate check: connection refused")
+	}}
+
+	d.patrolScanGHGates(h, []string{"myr"})
+
+	if !evaluatePatrolDue(townRoot, "patrol_scan_gh_gates", time.Time{}, time.Now(), ghGateInterval).due {
+		t.Fatal("a tick where every gate check failed recorded itself as run; the next tick will skip the hour")
+	}
+}
+
+// One database answering is a run: bd reads one database per call, so a rig
+// whose check failed says nothing about the town's.
+func TestPatrolScanGHGatesRecordsARunThatAnswered(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	d := &Daemon{logger: log.New(io.Discard, "", 0), config: &Config{TownRoot: townRoot}}
+	h := &patrolScanHost{d: d, bdGateCheck: func(rig string, _ ...string) ([]byte, error) {
+		if rig == "" {
+			return nil, errors.New("bd gate check: connection refused")
+		}
+		return []byte("No open gates of type 'gh' found.\n"), nil
+	}}
+
+	d.patrolScanGHGates(h, []string{"myr"})
+
+	if evaluatePatrolDue(townRoot, "patrol_scan_gh_gates", time.Time{}, time.Now(), ghGateInterval).due {
+		t.Fatal("a tick whose rig check answered did not record the run")
+	}
+}
+
 // A bead bd says does not exist is gone, not unknown: the seat's submitted
 // record outlived it and nothing is waiting to land. Any other read failure
 // is unknown, and the tick leaves the seat alone on it (gt-xs1ni).
