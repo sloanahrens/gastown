@@ -235,6 +235,123 @@ func TestDoneAgentStateAsksForHeadInItsOwnCwd(t *testing.T) {
 	}
 }
 
+// showFailsClient is a beads.Client whose Show reports err for one ID and
+// delegates the rest, so a test can fail exactly the read gt done makes to
+// resolve the hooked bead.
+type showFailsClient struct {
+	beads.Client
+	id  string
+	err error
+}
+
+func (c showFailsClient) Show(id string) (*beads.Issue, error) {
+	if id == c.id {
+		return nil, c.err
+	}
+	return c.Client.Show(id)
+}
+
+// TestDoneAgentStateLeavesTheHookOnAnUnreadableHookedBead: when the read that
+// resolves the hooked bead fails for a reason other than absence, gt done must
+// not clear hook_bead or mark the agent done. Falling through would strand the
+// work bead — hooked or in_progress, with no polecat on it and nothing in the
+// output — which is the dispatch-loop shape gt-pftz named (gt-abr6v).
+func TestDoneAgentStateLeavesTheHookOnAnUnreadableHookedBead(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	for _, dir := range []string{"mayor", filepath.Join(".beads", "locks"), "gastown"} {
+		if err := os.MkdirAll(filepath.Join(townRoot, dir), 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	routes := `{"prefix":"gt-","path":"gastown"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+
+	db := beadsfake.New(beadsfake.WithPrefix("gt"))
+	db.Seed(doneAgentBead(), beads.Issue{
+		ID: "gt-base-123", Title: "Base bead", Status: string(beads.StatusHooked),
+	})
+
+	readErr := errors.New("dial tcp 127.0.0.1:3307: connection refused")
+	env := doneStateEnv{
+		getenv: envMap(map[string]string{"GT_ROLE": "polecat", "GT_RIG": "gastown", "GT_POLECAT": "nux"}),
+		routed: func(string) beads.Client { return db },
+		source: func(string, string) beads.Client {
+			return showFailsClient{Client: db, id: "gt-base-123", err: readErr}
+		},
+		purge: func(string, string) {},
+	}
+
+	err := updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, done.ExitCompleted, "gt-base-123")
+	if err == nil {
+		t.Fatal("a failed read of the hooked bead returned no error")
+	}
+	if !errors.Is(err, readErr) {
+		t.Errorf("error %v does not carry the read failure", err)
+	}
+
+	agent, err := db.Show("gt-gastown-polecat-nux")
+	if err != nil {
+		t.Fatalf("show agent bead: %v", err)
+	}
+	fields := beads.ParseAgentFields(agent.Description)
+	if fields.HookBead != "gt-base-123" {
+		t.Errorf("hook_bead = %q, want it left at gt-base-123", fields.HookBead)
+	}
+	if fields.AgentState == string(beads.AgentStateDone) {
+		t.Error("gt done marked the agent done over a bead it could not read")
+	}
+
+	work, err := db.Show("gt-base-123")
+	if err != nil {
+		t.Fatalf("show work bead: %v", err)
+	}
+	if work.Status != string(beads.StatusHooked) {
+		t.Errorf("work bead status = %q, want it left hooked", work.Status)
+	}
+}
+
+// TestDoneAgentStateClearsTheHookWhenTheBeadIsGone pins the other side of that
+// read: absence is an answer, so a hooked bead that no longer exists still lets
+// gt done clear the hook and finish (gt-abr6v).
+func TestDoneAgentStateClearsTheHookWhenTheBeadIsGone(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	for _, dir := range []string{"mayor", filepath.Join(".beads", "locks"), "gastown"} {
+		if err := os.MkdirAll(filepath.Join(townRoot, dir), 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	routes := `{"prefix":"gt-","path":"gastown"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+
+	db := beadsfake.New(beadsfake.WithPrefix("gt"))
+	db.Seed(doneAgentBead())
+
+	env := doneStateEnv{
+		getenv: envMap(map[string]string{"GT_ROLE": "polecat", "GT_RIG": "gastown", "GT_POLECAT": "nux"}),
+		routed: func(string) beads.Client { return db },
+		source: func(string, string) beads.Client { return db },
+		purge:  func(string, string) {},
+	}
+
+	if err := updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, done.ExitCompleted, "gt-base-123"); err != nil {
+		t.Fatalf("gt done with a missing hooked bead: %v", err)
+	}
+
+	agent, err := db.Show("gt-gastown-polecat-nux")
+	if err != nil {
+		t.Fatalf("show agent bead: %v", err)
+	}
+	if fields := beads.ParseAgentFields(agent.Description); fields.HookBead != "" {
+		t.Errorf("hook_bead = %q, want it cleared for a bead that is gone", fields.HookBead)
+	}
+}
+
 // TestDoneStateEnvZeroValueResolvesHeadInTheGivenDir pins the default wiring:
 // a doneStateEnv that names no resolver reads HEAD through
 // done.CurrentReviewEvidenceHeadIn, which takes the directory to read it in.

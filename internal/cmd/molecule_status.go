@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -117,7 +118,8 @@ type MoleculeCurrentInfo struct {
 	StepsTotal    int    `json:"steps_total"`
 	CurrentStepID string `json:"current_step_id,omitempty"`
 	CurrentStep   string `json:"current_step,omitempty"`
-	Status        string `json:"status"` // "working", "naked", "complete", "blocked"
+	Status        string `json:"status"`          // "working", "naked", "complete", "blocked", "unknown"
+	Error         string `json:"error,omitempty"` // why Status is "unknown"
 }
 
 func runMoleculeProgress(cmd *cobra.Command, args []string) error {
@@ -925,14 +927,23 @@ func runMoleculeCurrent(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("finding handoff bead: %w", err)
 	}
 
-	// Build current info
+	return outputMoleculeCurrent(moleculeCurrentFrom(b, handoff, target))
+}
+
+// moleculeCurrentFrom builds the current-molecule info for target's handoff
+// bead, reading the molecule and its steps through b. A read that fails reports
+// status unknown with the error: naming the molecule working or blocked would
+// report a state no read established, and blocked is how a molecule with steps
+// nobody can see gets described as waiting on dependencies that may be closed
+// (gt-abr6v).
+func moleculeCurrentFrom(b beads.Client, handoff *beads.Issue, target string) MoleculeCurrentInfo {
 	info := MoleculeCurrentInfo{
 		Identity: target,
 	}
 
 	if handoff == nil {
 		info.Status = "naked"
-		return outputMoleculeCurrent(info)
+		return info
 	}
 
 	info.HandoffID = handoff.ID
@@ -942,7 +953,7 @@ func runMoleculeCurrent(cmd *cobra.Command, args []string) error {
 	attachment := beads.ParseAttachmentFields(handoff)
 	if attachment == nil || attachment.AttachedMolecule == "" {
 		info.Status = "naked"
-		return outputMoleculeCurrent(info)
+		return info
 	}
 
 	info.MoleculeID = attachment.AttachedMolecule
@@ -950,9 +961,13 @@ func runMoleculeCurrent(cmd *cobra.Command, args []string) error {
 	// Get the molecule root to find its title and children
 	molRoot, err := b.Show(attachment.AttachedMolecule)
 	if err != nil {
-		// Molecule not found - might be a template ID, still report what we have
-		info.Status = "working"
-		return outputMoleculeCurrent(info)
+		if errors.Is(err, beads.ErrNotFound) {
+			// Not a bead: the attachment names a template, and there is
+			// nothing more to say about it.
+			info.Status = "working"
+			return info
+		}
+		return moleculeCurrentUnknown(info, fmt.Errorf("reading molecule %s: %w", attachment.AttachedMolecule, err))
 	}
 
 	info.MoleculeTitle = molRoot.Title
@@ -964,9 +979,7 @@ func runMoleculeCurrent(cmd *cobra.Command, args []string) error {
 		Priority: -1,
 	})
 	if err != nil {
-		// No steps - just an issue, not a molecule instance
-		info.Status = "working"
-		return outputMoleculeCurrent(info)
+		return moleculeCurrentUnknown(info, fmt.Errorf("listing steps of molecule %s: %w", attachment.AttachedMolecule, err))
 	}
 
 	info.StepsTotal = len(children)
@@ -992,7 +1005,14 @@ func runMoleculeCurrent(cmd *cobra.Command, args []string) error {
 	// bd list doesn't return dependencies, but bd show does.
 	var openStepsMap map[string]*beads.Issue
 	if len(openStepIDs) > 0 {
-		openStepsMap, _ = b.ShowMultiple(openStepIDs)
+		openStepsMap, err = b.ShowMultiple(openStepIDs)
+		if err != nil {
+			// Every open step is missing from the map, so the ready scan
+			// below would find none and report the molecule blocked — a
+			// status this read did not earn.
+			return moleculeCurrentUnknown(info, fmt.Errorf("reading %d open step(s) of molecule %s: %w",
+				len(openStepIDs), attachment.AttachedMolecule, err))
+		}
 		if openStepsMap == nil {
 			openStepsMap = make(map[string]*beads.Issue)
 		}
@@ -1048,7 +1068,15 @@ func runMoleculeCurrent(cmd *cobra.Command, args []string) error {
 		info.Status = "working"
 	}
 
-	return outputMoleculeCurrent(info)
+	return info
+}
+
+// moleculeCurrentUnknown marks info unreadable and carries the read error that
+// says so.
+func moleculeCurrentUnknown(info MoleculeCurrentInfo, err error) MoleculeCurrentInfo {
+	info.Status = "unknown"
+	info.Error = err.Error()
+	return info
 }
 
 // outputMoleculeCurrent outputs the current info in the appropriate format.
@@ -1090,6 +1118,8 @@ func outputMoleculeCurrent(info MoleculeCurrentInfo) error {
 		fmt.Printf("Status:   %s\n", style.Bold.Render("complete - molecule finished"))
 	} else if info.Status == "blocked" {
 		fmt.Printf("Status:   %s\n", style.Dim.Render("blocked - waiting on dependencies"))
+	} else if info.Status == "unknown" {
+		fmt.Printf("Status:   %s\n", style.Error.Render("unknown - the molecule could not be read: "+info.Error))
 	}
 
 	return nil
