@@ -2217,6 +2217,65 @@ func TestDangerousCommandBlockedAfterComment(t *testing.T) {
 	}
 }
 
+// TestShellTokenizeEscapedCharBeforeHash pins gt-w6tug: a '#' that follows an
+// escaped character is inside the current word, not at the start of one, so it
+// starts no comment. startsShellWord used to read an escaped ' ' or ';' as a
+// word boundary, and the comment rule then dropped the rest of the LINE, so
+// "echo foo\ #x; rm -rf /tmp/p" lost the rm the shell still runs (the escaped
+// space keeps '#x' in the same word, and the ';' after it still separates).
+func TestShellTokenizeEscapedCharBeforeHash(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		want    []string
+	}{
+		{"escaped space before the hash keeps a later rm",
+			"echo foo\\ #x; rm -rf /tmp/p",
+			[]string{"echo", "foo #x", ";", "rm", "-rf", "/tmp/p"}},
+		{"escaped semicolon before the hash keeps a later rm",
+			"echo a\\;#b; rm -rf /tmp/p",
+			[]string{"echo", "a;#b", ";", "rm", "-rf", "/tmp/p"}},
+		{"a real comment after an unescaped space still hides the rm",
+			"echo foo #x; rm -rf /tmp/p",
+			[]string{"echo", "foo"}},
+		{"an escaped backslash leaves a real comment hiding the rm",
+			"echo a\\\\ #c; rm -rf /tmp/p",
+			[]string{"echo", "a\\"}},
+		{"a comment on line one still leaves line two checked",
+			"echo foo #x\ngit reset --hard",
+			[]string{"echo", "foo", ";", "git", "reset", "--hard"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shellTokenize(tt.command)
+			if len(got) != len(tt.want) {
+				t.Fatalf("shellTokenize(%q) = %q, want %q", tt.command, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("shellTokenize(%q) = %q, want %q", tt.command, got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+// TestDangerousCommandBlockedAfterEscapedHash is the end-to-end form of
+// gt-w6tug: an escaped character before a '#' must not hide a dangerous command
+// the shell still runs after the next separator.
+func TestDangerousCommandBlockedAfterEscapedHash(t *testing.T) {
+	t.Parallel()
+	for _, command := range []string{
+		"echo foo\\ #x; git reset --hard",
+		"echo a\\;#b; git reset --hard HEAD~3",
+	} {
+		if reason, _ := evaluateDangerousCommand(command, 0, noTownSession); reason == "" {
+			t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked", command)
+		}
+	}
+}
+
 // TestSplitSpacedCommandFailsTowardChecking pins the gt-vonb1 backstop: if
 // shlex yields no tokens for text that still has words in it, the words are
 // returned rather than silently dropped.

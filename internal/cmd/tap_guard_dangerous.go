@@ -709,6 +709,11 @@ func spaceOutShellOperators(command string) string {
 	b.Grow(len(command) + 8)
 	scopes := []shellQuoteScope{{}}
 	escaped := false
+	// prevEscaped records whether the rune just consumed was backslash-escaped
+	// (gt-w6tug). An escaped ' ' or ';' is literal text inside the current
+	// word, so a '#' right after one is mid-word and starts no comment;
+	// startsShellWord cannot see that from the previous rune alone.
+	prevEscaped := false
 	emit := func(r rune) {
 		if scopes[len(scopes)-1].escapeForShlex && (r == '"' || r == '\\') {
 			b.WriteRune('\\')
@@ -738,6 +743,7 @@ func spaceOutShellOperators(command string) string {
 		if escaped {
 			emit(r)
 			escaped = false
+			prevEscaped = true
 			continue
 		}
 		// "(" and ")" nest inside a substitution body: the ')' that returns
@@ -787,7 +793,7 @@ func spaceOutShellOperators(command string) string {
 		case r == '\'' || r == '"':
 			scopes[len(scopes)-1].quote = r
 			emit(r)
-		case r == '#' && sc.quote == 0 && startsShellWord(runes, i):
+		case r == '#' && sc.quote == 0 && startsShellWord(runes, i, prevEscaped):
 			// An unquoted word-leading '#' is a comment that runs to the end
 			// of its LINE (gt-vonb1). Drop it here, leaving the newline for
 			// the separator rule below: left in, shlex would read the same
@@ -819,15 +825,25 @@ func spaceOutShellOperators(command string) string {
 		default:
 			emit(r)
 		}
+		// Reset at the end of the body, not the top: the escaped branch above
+		// sets the flag and continues, so a top-of-body reset would clear it
+		// before the rune it describes (gt-w6tug).
+		prevEscaped = false
 	}
 	return b.String()
 }
 
 // startsShellWord reports whether runes[i] begins a new shell word: it is the
 // first character, or follows whitespace or a command-chaining operator or an
-// opening parenthesis. A '#' that merely sits inside a word (a#b, ${#x}, $#)
-// is not a comment (gt-vonb1).
-func startsShellWord(runes []rune, i int) bool {
+// opening parenthesis. prevEscaped says the rune before runes[i] was
+// backslash-escaped, which puts runes[i] inside that same word — an escaped
+// ' ' or ';' is literal text, not a boundary — so it is never a word start
+// (gt-w6tug). A '#' that merely sits inside a word (a#b, ${#x}, $#) is not a
+// comment (gt-vonb1).
+func startsShellWord(runes []rune, i int, prevEscaped bool) bool {
+	if prevEscaped {
+		return false
+	}
 	if i == 0 {
 		return true
 	}
