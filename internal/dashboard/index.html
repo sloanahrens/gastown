@@ -155,6 +155,10 @@ section.collapsed>h2{border-bottom:0}
 .cname{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cdetail{flex:1 1 24ch;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cfull{padding:4px 0 8px 10px;margin-bottom:4px;border-left:2px solid var(--line);overflow-wrap:anywhere}
+.ccheck{margin-bottom:4px}
+.ccrow{display:flex;gap:6px;align-items:baseline;padding-left:10px}
+.ccsection{flex:0 0 auto;white-space:nowrap;color:var(--dim)}
+.cctext{min-width:0;overflow-wrap:anywhere}
 .reptext{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;background:#10161d;border:1px solid var(--line);border-radius:6px;padding:6px 8px;max-height:280px;overflow:auto}
 .reptimes{margin:2px 0 0;padding-left:18px;color:var(--dim);font-size:11px}
 .qcard{padding:4px 0;border-top:1px solid var(--line);overflow-wrap:anywhere}
@@ -773,17 +777,60 @@ const cloudOpen = new Set();
 // reader strips control runes, so the separator cannot appear inside a key.
 const findingID = f => [f.project, f.resource, f.kind, f.detail].join("\u0000");
 
+// The pane's header note: the patrol's own state, and a fresh run's failures
+// beside it, so the operator reads one line rather than two.
+function cloudNote(c, checks) {
+  const parts = [c.note || c.state || ""];
+  if (checks && checks.state === "fresh" && checks.failed > 0) {
+    parts.push(checks.failed + (checks.failed === 1 ? " check failing" : " checks failing"));
+  }
+  return parts.filter(Boolean).join(" · ");
+}
+
+// The checks line: the cloud-check plugin's latest run, above the patrol's
+// findings. A missing file draws nothing at all (the plugin may not be
+// installed), an unreadable or misshapen one draws one dim line, a run older
+// than the plugin's own interval draws as stale in the amber, and a fresh run
+// draws its counts with the failures and warnings under it. The line's colour
+// follows the worst level it carries, and a stale run's items are not drawn,
+// since they are no longer current. The status is another process's file, so
+// every string goes through el(), which writes textContent and never markup.
+function drawCloudChecks(box, checks) {
+  if (!checks) return;
+  if (checks.state === "error") { box.append(el("div", "empty", "cloud checks: unreadable")); return; }
+  if (checks.state !== "fresh") {
+    box.append(el("div", "ccheck warnc", "cloud checks: last ran " + age(checks.at) + " ago (not running?)"));
+    return;
+  }
+  const worst = checks.failed > 0 ? "badc" : (checks.warnings > 0 ? "warnc" : "");
+  const counts = [checks.ok + " ok", checks.warnings + " warning" + (checks.warnings === 1 ? "" : "s"), checks.failed + " failed"];
+  box.append(el("div", "ccheck" + (worst ? " " + worst : ""), "checks: " + counts.join(" · ") + " · " + age(checks.at) + " ago"));
+  for (const it of checks.items || []) {
+    const row = el("div", "ccrow");
+    if (it.section) row.append(el("span", "ccsection", it.section));
+    row.append(el("span", "cctext " + (it.level === "fail" ? "badc" : "warnc"), it.text || ""));
+    box.append(row);
+  }
+}
+
 function renderCloud(s) {
   const box = $("cloud"), note = $("cloudnote");
   box.replaceChildren();
   const c = s.cloud;
   if (!c) { note.className = "r"; note.textContent = ""; box.append(el("div", "empty", "reading…")); return; }
+  // The checks line is drawn first and whatever the patrol's own state is: the
+  // checks cover what the patrol cannot see, so a missing patrol report must
+  // not hide them.
+  const checks = c.checks;
+  drawCloudChecks(box, checks);
   // The reader names the state — fresh, overdue, the error that stopped it, or
   // why there is no report — and overdue and error take the amber the page
-  // already marks a stale reading with.
+  // already marks a stale reading with. A fresh run with failures adds its own
+  // word to the same line, in the same amber.
   const stale = c.state === "overdue" || c.state === "error";
-  note.className = stale ? "r warnc" : "r";
-  note.textContent = c.note || c.state || "";
+  const failing = checks && checks.state === "fresh" && checks.failed > 0;
+  note.className = (stale || failing) ? "r warnc" : "r";
+  note.textContent = cloudNote(c, checks);
   if (c.state === "missing" || c.state === "error") { box.append(el("div", c.state === "error" ? "badc" : "empty", c.note || c.state)); return; }
   const projects = c.projects || [];
   // One header line: the run, then the counts over the whole report beside it,

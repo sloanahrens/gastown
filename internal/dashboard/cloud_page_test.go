@@ -14,7 +14,7 @@ func TestCloudPanelDrawsTheStateTheReaderDecided(t *testing.T) {
 
 	draw := pageFunc(t, "renderCloud")
 	for _, want := range []string{
-		`note.textContent = c.note || c.state || "";`,
+		`note.textContent = cloudNote(c, checks);`,
 		`c.state === "overdue" || c.state === "error"`,
 		`c.state === "missing" || c.state === "error"`,
 		`if (!c.total) { box.append(el("div", "empty", "no findings")); return; }`,

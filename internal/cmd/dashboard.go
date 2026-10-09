@@ -190,6 +190,12 @@ func dashboardReportsDir(townRoot string) string {
 	return filepath.Join(townRoot, ".runtime", "overseer", "reports")
 }
 
+// dashboardCloudChecksPath is where the devops rig's cloud-check plugin writes
+// its status inside the town: one JSON file per run, overwritten each time.
+func dashboardCloudChecksPath(townRoot string) string {
+	return filepath.Join(townRoot, ".runtime", "cloud-check", "status.json")
+}
+
 // newDashboardHub wires a hub to the readers gt tail -f uses.
 func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string) (*dashboard.Hub, error) {
 	beadReads := openTailBeads(townRoot)
@@ -233,7 +239,8 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	escalations := newDashEscalationReader(townRoot)
 	backoff := newDashBackoff(townRoot)
 	queue := newDashQueueReader(townRoot)
-	cloud := dashboard.NewCloudReader(config.CloudReportsDir())
+	cloud := dashboard.NewCloudReader(config.CloudReportsDir()).
+		WithChecks(dashboard.NewCloudChecksReader(dashboardCloudChecksPath(townRoot)))
 	reports := dashboard.NewReportsReader(dashboardReportsDir(townRoot))
 	questions := newDashQuestionsReader(townRoot)
 	loads := newDashLoads(townRoot, time.Now)
