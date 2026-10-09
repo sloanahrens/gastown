@@ -1,12 +1,36 @@
 package config
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+// overseerDetectTimeout bounds each identity detection command. Detection runs
+// inside read-only paths (gt status reaches it through LoadOrDetectOverseer),
+// so a wedged git or gh must not hang the caller (gt-ptysu).
+const overseerDetectTimeout = 5 * time.Second
+
+// runOverseerDetection runs one identity detection command in dir, cut off at
+// overseerDetectTimeout.
+func runOverseerDetection(dir, name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), overseerDetectTimeout)
+	defer cancel()
+	return runDetectionCommand(ctx, dir, name, args...)
+}
+
+// runDetectionCommand runs one detection command to completion or ctx's
+// deadline, whichever comes first.
+func runDetectionCommand(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	return cmd.Output()
+}
 
 // OverseerConfig represents the human operator's identity (mayor/overseer.json).
 // The overseer is the human who controls Gas Town, distinct from AI agents.
@@ -83,12 +107,20 @@ func validateOverseerConfig(c *OverseerConfig) error {
 //  2. Git config (user.name + user.email)
 //  3. GitHub CLI (gh api user)
 //  4. Environment ($USER or whoami)
+//
+// A config file that is there and does not parse stops detection: gt install
+// saves what this returns, so detecting over it would replace a hand-edited
+// identity (gt-ptysu).
 func DetectOverseer(townRoot string) (*OverseerConfig, error) {
 	configPath := OverseerConfigPath(townRoot)
 
 	// Priority 1: Check existing config
-	if existing, err := LoadOverseerConfig(configPath); err == nil {
+	existing, err := LoadOverseerConfig(configPath)
+	if err == nil {
 		return existing, nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return nil, err
 	}
 
 	// Priority 2: Try git config
@@ -108,10 +140,7 @@ func DetectOverseer(townRoot string) (*OverseerConfig, error) {
 // detectFromGitConfig attempts to get identity from git config.
 func detectFromGitConfig(dir string) *OverseerConfig {
 	// Try to get user.name
-	nameCmd := exec.Command("git", "config", "user.name")
-	nameCmd.Dir = dir
-
-	nameOut, err := nameCmd.Output()
+	nameOut, err := runOverseerDetection(dir, "git", "config", "user.name")
 	if err != nil {
 		return nil
 	}
@@ -128,10 +157,7 @@ func detectFromGitConfig(dir string) *OverseerConfig {
 	}
 
 	// Try to get user.email (optional)
-	emailCmd := exec.Command("git", "config", "user.email")
-	emailCmd.Dir = dir
-
-	if emailOut, err := emailCmd.Output(); err == nil {
+	if emailOut, err := runOverseerDetection(dir, "git", "config", "user.email"); err == nil {
 		config.Email = strings.TrimSpace(string(emailOut))
 	}
 
@@ -147,9 +173,7 @@ func detectFromGitConfig(dir string) *OverseerConfig {
 
 // detectFromGitHub attempts to get identity from GitHub CLI.
 func detectFromGitHub() *OverseerConfig {
-	cmd := exec.Command("gh", "api", "user", "--jq", ".login + \"|\" + .name + \"|\" + .email")
-
-	out, err := cmd.Output()
+	out, err := runOverseerDetection("", "gh", "api", "user", "--jq", ".login + \"|\" + .name + \"|\" + .email")
 	if err != nil {
 		return nil
 	}
@@ -186,9 +210,7 @@ func detectFromEnvironment() *OverseerConfig {
 	username := os.Getenv("USER")
 	if username == "" {
 		// Try whoami as last resort
-		cmd := exec.Command("whoami")
-
-		if out, err := cmd.Output(); err == nil {
+		if out, err := runOverseerDetection("", "whoami"); err == nil {
 			username = strings.TrimSpace(string(out))
 		}
 	}
@@ -206,16 +228,24 @@ func detectFromEnvironment() *OverseerConfig {
 }
 
 // LoadOrDetectOverseer loads existing config or detects and saves a new one.
+// A config file that exists and does not parse is returned as an error and
+// left alone: detection would overwrite a hand-edited identity with whatever
+// git or gh reports, from a call gt status makes (gt-ptysu).
 func LoadOrDetectOverseer(townRoot string) (*OverseerConfig, error) {
 	configPath := OverseerConfigPath(townRoot)
 
 	// Try loading existing
-	if config, err := LoadOverseerConfig(configPath); err == nil {
+	config, err := LoadOverseerConfig(configPath)
+	if err == nil {
 		return config, nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+		return nil, err
 	}
 
 	// Detect new
-	config, err := DetectOverseer(townRoot)
+	config, err = DetectOverseer(townRoot)
 	if err != nil {
 		return nil, err
 	}

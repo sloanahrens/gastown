@@ -1,8 +1,4 @@
 {
-    "_comment": "Town-level settings: ~/gt/settings/config.json",
-    "_comment2": "Controls agent selection, role mapping, and operational thresholds for all rigs.",
-    "_comment3": "Rig-level settings (below) can override any agent/role configuration.",
-
     "type": "town-settings",
     "version": 1,
 

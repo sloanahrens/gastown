@@ -867,14 +867,29 @@ func resolveAgentConfig(h host, townRoot, rigPath string) *RuntimeConfig {
 	return resolveAgentConfigInternal(agentRegistryFor(h, townRoot, rigPath), townRoot, rigPath)
 }
 
+// loadRigSettingsForResolve loads a rig's settings for agent resolution.
+// A missing file is the only silent answer: the rig inherits the town's agent,
+// which is what an unconfigured rig means. A file that is there and does not
+// parse warns, because dropping it to nil would otherwise hand the rig to the
+// town default agent — a DeepSeek-pinned rig quietly runs claude — with
+// nothing said (gt-ptysu).
+func loadRigSettingsForResolve(rigPath string) *RigSettings {
+	path := RigSettingsPath(rigPath)
+	settings, err := LoadRigSettings(path)
+	if err != nil {
+		if !errors.Is(err, ErrNotFound) {
+			fmt.Fprintf(os.Stderr, "warning: %v; the rig's agent and role_agents are ignored\n", err)
+		}
+		return nil
+	}
+	return settings
+}
+
 // resolveAgentConfigInternal is the lock-free version of ResolveAgentConfig.
 // Caller must hold resolveConfigMu.
 func resolveAgentConfigInternal(reg *AgentRegistry, townRoot, rigPath string) *RuntimeConfig {
 	// Load rig settings
-	rigSettings, err := LoadRigSettings(RigSettingsPath(rigPath))
-	if err != nil {
-		rigSettings = nil
-	}
+	rigSettings := loadRigSettingsForResolve(rigPath)
 
 	// Backwards compatibility: if Runtime is set directly, use it
 	if rigSettings != nil && rigSettings.Runtime != nil {
@@ -1285,11 +1300,7 @@ func resolveRoleAgentConfigCore(reg *AgentRegistry, role, townRoot, rigPath stri
 	// Load rig settings (may be nil for town-level roles like deacon)
 	var rigSettings *RigSettings
 	if rigPath != "" {
-		var err error
-		rigSettings, err = LoadRigSettings(RigSettingsPath(rigPath))
-		if err != nil {
-			rigSettings = nil
-		}
+		rigSettings = loadRigSettingsForResolve(rigPath)
 	}
 
 	// Load town settings
@@ -1344,11 +1355,7 @@ func ResolveRoleAgentName(role, townRoot, rigPath string) (agentName string, isR
 	// Load rig settings
 	var rigSettings *RigSettings
 	if rigPath != "" {
-		var err error
-		rigSettings, err = LoadRigSettings(RigSettingsPath(rigPath))
-		if err != nil {
-			rigSettings = nil
-		}
+		rigSettings = loadRigSettingsForResolve(rigPath)
 	}
 
 	// Load town settings
@@ -1391,9 +1398,7 @@ func ResolveAgentConfigByName(name, townRoot, rigPath string) *RuntimeConfig {
 
 	var rigSettings *RigSettings
 	if rigPath != "" {
-		if rs, err := LoadRigSettings(RigSettingsPath(rigPath)); err == nil {
-			rigSettings = rs
-		}
+		rigSettings = loadRigSettingsForResolve(rigPath)
 	}
 
 	townSettings, err := LoadOrCreateTownSettings(TownSettingsPath(townRoot))
