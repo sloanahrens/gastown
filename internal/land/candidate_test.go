@@ -70,12 +70,21 @@ type fakeForgejo struct {
 	deleteErr error
 	err       error
 	logErr    error
+	// statusErrs is the error of the first len(statusErrs) status reads, in
+	// order; reads past it fall back to err. It stands in for a Forgejo that
+	// blips a few times before it answers (gt-394h5).
+	statusErrs []error
 }
 
 func (f *fakeForgejo) CombinedStatus(context.Context, string, string, string) (*forgejo.CombinedStatus, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.polls++
+	if len(f.statusErrs) > 0 {
+		err := f.statusErrs[0]
+		f.statusErrs = f.statusErrs[1:]
+		return nil, err
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -120,11 +129,13 @@ func status(state forgejo.CommitState, context string) forgejo.CommitStatus {
 }
 
 // gate polls fast, so a test's wait window is milliseconds rather than the
-// production interval.
+// production interval. The window leaves room for the status-retry tolerance's
+// few reads even when parallel tests load the scheduler: a window that only
+// fits one read turns every blip test into a race with the silence window.
 func fastGate(client CandidateStatus) *CandidateGate {
 	return &CandidateGate{
 		Client: client, Owner: "gastown", RepoName: "gastown", Workflow: "gate",
-		PollInterval: time.Millisecond, CallTimeout: time.Second, WaitTimeout: 40 * time.Millisecond,
+		PollInterval: time.Millisecond, CallTimeout: time.Second, WaitTimeout: 200 * time.Millisecond,
 	}
 }
 
@@ -715,7 +726,8 @@ func TestCandidateGateWaitIs20Minutes(t *testing.T) {
 }
 
 // TestCandidateGateAPIFailureIsNotAVerdict: a Forgejo that answers with an
-// error fails the landing into the infra path rather than stalling it.
+// error on every read exhausts the tolerance and fails the landing into the
+// infra path rather than stalling it.
 func TestCandidateGateAPIFailureIsNotAVerdict(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
@@ -727,6 +739,155 @@ func TestCandidateGateAPIFailureIsNotAVerdict(t *testing.T) {
 	}
 	if res.State != CandidateSilent {
 		t.Fatalf("state = %v, want no verdict", res.State)
+	}
+}
+
+// TestCandidateGateAbsorbsTransientStatusErrors: a status read that comes back
+// an error is not a verdict. Two blips in a row, then the required context
+// reporting success, must still take the verdict without touching the
+// candidate (gt-394h5).
+func TestCandidateGateAbsorbsTransientStatusErrors(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
+	client := &fakeForgejo{
+		statusErrs: []error{errors.New("forgejo: GET statuses returned 502"), errors.New("context deadline exceeded")},
+		statuses:   []forgejo.CommitStatus{status(forgejo.StateSuccess, "ci / gate (push)")},
+	}
+	gate := fastGate(client)
+	var log strings.Builder
+	gate.Out = &log
+
+	res := gate.Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+	if res.Err != nil {
+		t.Fatalf("Run: %v; two blips must not end the wait", res.Err)
+	}
+	if res.State != CandidatePassed {
+		t.Fatalf("state = %v, want passed: the success after the blips is the verdict", res.State)
+	}
+	if got := f.git.Ref(f.origin, "refs/heads/land/gt-abc"); got != sha {
+		t.Fatalf("origin land/gt-abc = %s, want the pushed %s: no blip discards the candidate", got, sha)
+	}
+	if client.polls != 3 {
+		t.Fatalf("polled %d time(s), want the two blips and the success", client.polls)
+	}
+	for _, want := range []string{"502", "context deadline exceeded"} {
+		if !strings.Contains(log.String(), want) {
+			t.Fatalf("log %q; want every tolerated read error logged (%q)", log.String(), want)
+		}
+	}
+}
+
+// TestCandidateGateNonConsecutiveBlipsDoNotAddUp: a good read clears the blip
+// count, so errors separated by reads that report nothing do not add up to a
+// give-up — they are a long wait, not a broken Forgejo.
+func TestCandidateGateNonConsecutiveBlipsDoNotAddUp(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
+	// A blip on every other read, and the last read reports success. Were the
+	// count cumulative rather than consecutive, the fourth blip would have
+	// ended the wait.
+	client := &fakeForgejo{statuses: []forgejo.CommitStatus{
+		status(forgejo.StatePending, "ci / gate (push)"),
+		status(forgejo.StatePending, "ci / gate (push)"),
+		status(forgejo.StatePending, "ci / gate (push)"),
+		status(forgejo.StateSuccess, "ci / gate (push)"),
+	}}
+	gate := fastGate(&blipAfterReads{CandidateStatus: client, blipAt: map[int]error{
+		2: errors.New("forgejo: GET statuses returned 502"),
+		4: errors.New("connection reset by peer"),
+		6: errors.New("context deadline exceeded"),
+		8: errors.New("forgejo: GET statuses returned 502"),
+	}})
+	// Four blips separated by four pending reads take nine polls to play out;
+	// the window is wide enough that the interleaving, not the silence window,
+	// decides the outcome.
+	gate.WaitTimeout = 2 * time.Second
+
+	res := gate.Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+	if res.Err != nil {
+		t.Fatalf("Run: %v; non-consecutive blips must not add up", res.Err)
+	}
+	if res.State != CandidatePassed {
+		t.Fatalf("state = %v, want passed", res.State)
+	}
+}
+
+// blipAfterReads fails the nth read (1-based) with the mapped error and
+// delegates every other read to the status source it embeds. It lets a test
+// interleave errors and pending reads, which fakeForgejo's single status
+// sequence cannot.
+type blipAfterReads struct {
+	CandidateStatus
+	blipAt map[int]error
+	reads  int
+}
+
+func (b *blipAfterReads) CombinedStatus(ctx context.Context, owner, repo, ref string) (*forgejo.CombinedStatus, error) {
+	b.reads++
+	if err, ok := b.blipAt[b.reads]; ok {
+		return nil, err
+	}
+	return b.CandidateStatus.CombinedStatus(ctx, owner, repo, ref)
+}
+
+// TestCandidateGateGivesUpAfterTheTolerance: errors past the tolerance are not
+// a wait that never ends; the landing takes the infra path with the last
+// error.
+func TestCandidateGateGivesUpAfterTheTolerance(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
+	blip := errors.New("forgejo: GET statuses returned 502")
+	client := &fakeForgejo{
+		statusErrs: []error{blip, blip, blip, blip, blip},
+		statuses:   []forgejo.CommitStatus{status(forgejo.StateSuccess, "ci / gate (push)")},
+	}
+	res := fastGate(client).Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+	if res.Err == nil {
+		t.Fatal("errors past the tolerance must end the wait")
+	}
+	if !errors.Is(res.Err, blip) {
+		t.Fatalf("err = %v, want the last status read error", res.Err)
+	}
+	if !strings.Contains(res.Err.Error(), "consecutive") {
+		t.Fatalf("err = %q; want it to say the reads failed in a row", res.Err)
+	}
+	if res.State != CandidateSilent {
+		t.Fatalf("state = %v, want no verdict: a blip is never a verdict on the work", res.State)
+	}
+	if errors.Is(res.Err, ErrCISilence) {
+		t.Fatalf("err = %v; giving up on the reads is not the wait reporting nothing", res.Err)
+	}
+	if client.polls != candidateStatusErrorTolerance+1 {
+		t.Fatalf("polled %d time(s), want the tolerance plus the read that gives up", client.polls)
+	}
+}
+
+// TestCandidateGateFailedStatusEndsTheWaitImmediately: a status that reported a
+// failure is a verdict, not a blip. It is not retried, even with blips left in
+// the tolerance.
+func TestCandidateGateFailedStatusEndsTheWaitImmediately(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
+	client := &fakeForgejo{
+		statusErrs: []error{errors.New("forgejo: GET statuses returned 502")},
+		statuses:   []forgejo.CommitStatus{status(forgejo.StateFailure, "ci / gate (push)")},
+		runs:       []forgejo.ActionRun{{ID: 7, CommitSHA: sha, Status: "failure"}},
+		jobs:       []forgejo.ActionRunJob{{ID: 9, RunID: 7, Name: "gate", Status: "failure"}},
+		log:        gateJobLog("⭐ Run Main actions/checkout@v4", "make gate", "--- FAIL: TestThing"),
+	}
+	res := fastGate(client).Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+	if res.Err != nil {
+		t.Fatalf("Run: %v", res.Err)
+	}
+	if res.State != CandidateFailed {
+		t.Fatalf("state = %v, want failed: a reported failure is the verdict", res.State)
+	}
+	if client.polls != 2 {
+		t.Fatalf("polled %d time(s); want the blip then the red read that ends the wait", client.polls)
 	}
 }
 
