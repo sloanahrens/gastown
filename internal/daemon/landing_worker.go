@@ -1090,28 +1090,13 @@ func writeRedMainStatus(townRoot, rigName, line string, now time.Time) error {
 // newPromoter is a rig's one GitHub promotion owner (gt-fn9e6.37): the git
 // surface reads the target's main and pushes to it from the rig's own
 // repository, the lock is the rig's, and every failure is recorded in the
-// state the caller already keeps. It returns nil when the rig does not
-// promote — no promote_target, or a target with no deploy key — so the caller
-// has nothing to wire and a rig that has not cut over is unchanged.
+// state the caller already keeps. Like NewRigPromoter, it returns nil for a
+// rig that does not promote, so the caller has nothing to wire and a rig that
+// has not cut over is unchanged.
 func (d *Daemon) newPromoter(rigName, repo string, fj *config.ForgejoConfig) *promote.Promoter {
-	if fj == nil || fj.PromoteTarget == "" {
-		return nil
-	}
-	if fj.PromoteKeyFile == "" {
-		d.logger.Printf("promote: %s: merge_queue.forgejo.promote_target is set but promote_key_file is not, so GitHub promotion is off until the deploy key is named", rigName)
-		return nil
-	}
-	return &promote.Promoter{
-		Rig:      rigName,
-		Target:   fj.PromoteTarget,
-		KeyFile:  fj.PromoteKeyFile,
-		Repo:     git.NewGit(repo),
-		LockPath: promote.LockPath(d.config.TownRoot, rigName),
-		Escalate: func(message string) {
-			d.escalateAlert("landing-promote-diverged:"+rigName, "landing_worker", message)
-		},
-		Logf: d.logger.Printf,
-	}
+	return NewRigPromoter(d.config.TownRoot, rigName, fj, git.NewGit(repo), func(message string) {
+		d.escalateAlert(PromoteDivergedAlertKey(rigName), "landing_worker", message)
+	}, d.logger.Printf)
 }
 
 // tierSweepPromoter is the sweep's promotion owner for a rig, built from the

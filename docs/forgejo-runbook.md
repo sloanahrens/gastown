@@ -227,11 +227,25 @@ only by the promotion in `internal/promote`, which pushes the green commit as
 `<commit>:refs/heads/main` and only when that is a fast-forward. Promotion rides
 the two checks that call a commit green — the green post-land verdict at the
 landed commit (`internal/landworker`) and a scheduled sweep that covered every
-tier green (`internal/daemon`) — so GitHub's `main` is the last commit both a
-post-land run and the sweep called good, never a commit pushed ahead of any
-check. A target whose `main` is not an ancestor of the green commit is left
-alone and raises `landing-promote-diverged:<rig>`; before reconciling the two,
-read the divergence row in "When a landing fails".
+tier green (`internal/daemon`) — so GitHub's `main` is a commit Gas Town's own
+checks called good, never one pushed ahead of them. A target whose `main` is not
+an ancestor of the green commit is left alone and raises
+`landing-promote-diverged:<rig>`; before reconciling the two, read the
+divergence row in "When a landing fails".
+
+### Promoting a commit on demand
+
+`gt promote --rig <rig> --sha <commit>` advances a rig's GitHub `main` to one
+commit through the same owner, lock and record as the two promotions above, for
+a caller whose green commit Gas Town never verdicts; `gt promote --help` holds
+its exit codes and what it refuses.
+
+The `app-promote` script plugin calls it for the app rigs: it promotes the
+newest `main` commit whose Forgejo integration tier passed on the deployed
+staging stack, so GitHub's `main` tracks what staging has proven without waiting
+for a Gas Town landing (gt-5xrmp). Use the command by hand to retry one of those
+promotions after a failure, and to prove a rig's deploy key and target before
+the plugin is installed.
 
 Four things stay with the operator, and the script prints them at the end:
 
