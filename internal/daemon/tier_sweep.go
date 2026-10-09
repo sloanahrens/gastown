@@ -16,6 +16,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
@@ -209,15 +210,71 @@ func tierSweepRunnerIdleWait(config *DaemonPatrolConfig) time.Duration {
 // sweep: a disabled sweep that still held the promotion would leave the rig
 // promoting nowhere.
 func (d *Daemon) tierSweepCoversRig(rig string) bool {
-	if !d.isPatrolActive("tier_sweep") {
+	return tierSweepCovers(d.patrolConfig, d.disabledPatrols, d.getKnownRigs(), rig)
+}
+
+// tierSweepCovers is the one predicate for "the sweep owns this rig": the
+// patrol is on under the town's disabled list, and rig is one the sweep runs.
+// A caller outside the daemon (TierSweepCoverageFor, and through it gt promote)
+// shares it rather than restating the rule, so the coverage a promotion is
+// guarded by cannot drift from the sweep that performs it (gt-qk0pi).
+func tierSweepCovers(cfg *DaemonPatrolConfig, disabled map[string]bool, known []string, rig string) bool {
+	if disabled["tier_sweep"] || !IsPatrolEnabled(cfg, "tier_sweep") {
 		return false
 	}
-	for _, r := range tierSweepRigs(d.patrolConfig, d.getKnownRigs()) {
+	for _, r := range tierSweepRigs(cfg, known) {
 		if r == rig {
 			return true
 		}
 	}
 	return false
+}
+
+// TierSweepCoverage is what the town's tier sweep owns for one rig, as a
+// caller outside the daemon reads it before publishing that rig's commit.
+type TierSweepCoverage struct {
+	// Covered is true when the town's tier_sweep patrol runs for the rig.
+	Covered bool
+	// LastGreenSHA is the rig's last fully green sweep, empty until one has
+	// run: while the sweep owns the rig, no other commit is promotable
+	// (gt-qk0pi).
+	LastGreenSHA string
+}
+
+// TierSweepCoverageFor reads what the tier sweep configured for townRoot owns
+// for rig: coverage from the patrol config and the town's disabled patrols,
+// and the last green commit from the rig's record under .runtime/tier-sweep.
+// An unparseable patrol config is an error rather than "not covered": the
+// caller refuses to publish on this read, so it must not read a broken config
+// as a town that promotes freely.
+func TierSweepCoverageFor(townRoot, rig string) (TierSweepCoverage, error) {
+	cfg, err := ReadPatrolConfig(townRoot)
+	if err != nil {
+		return TierSweepCoverage{}, fmt.Errorf("reading the daemon patrol config: %w", err)
+	}
+	if !tierSweepCovers(cfg, loadDisabledPatrolsFromTownSettings(townRoot), knownRigNames(townRoot), rig) {
+		return TierSweepCoverage{}, nil
+	}
+	st, err := readTierSweepState(townRoot, rig)
+	if err != nil {
+		return TierSweepCoverage{}, err
+	}
+	return TierSweepCoverage{Covered: true, LastGreenSHA: st.LastGreenSHA}, nil
+}
+
+// knownRigNames is the town's rig list, the set tierSweepRigs intersects its
+// configured rigs with. A list that cannot be read is empty, which is what the
+// daemon's own read gives it: the sweep then covers no rig.
+func knownRigNames(townRoot string) []string {
+	parsed, err := config.LoadRigsConfig(constants.MayorRigsPath(townRoot))
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(parsed.Rigs))
+	for name := range parsed.Rigs {
+		names = append(names, name)
+	}
+	return names
 }
 
 // tierSweepPromoterFor resolves rig's promotion owner: a test's seam when it

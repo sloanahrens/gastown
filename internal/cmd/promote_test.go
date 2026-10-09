@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -145,6 +146,112 @@ func TestPromoteRefusesACommitNotOnTheRigMain(t *testing.T) {
 	}
 	if st := fx.record(t); st.LastPromoted != "" {
 		t.Errorf("record = %+v, want nothing recorded for a refused commit", st)
+	}
+}
+
+// A rig the tier sweep covers promotes only the sweep's last green commit:
+// publishing anything else would put a commit on GitHub that the town's own
+// tier checks have not covered (gt-qk0pi).
+func TestPromoteRefusesACommitPastTheSweepsLastGreen(t *testing.T) {
+	t.Parallel()
+	fx := newPromoteFixture(t)
+	green := fx.f.Commit(t, fx.forgejo, "main", "newer green", map[string]string{"d.txt": "green\n"})
+	deps := fx.deps()
+	deps.Sweep = func(string, string) (daemon.TierSweepCoverage, error) {
+		return daemon.TierSweepCoverage{Covered: true, LastGreenSHA: green}, nil
+	}
+
+	err := promoteRigSHA(deps, promoteTestRig, fx.sha)
+	if code := exitCodeForError(err); code != promoteExitNotPromotable {
+		t.Fatalf("exit code = %d (%v), want %d", code, err, promoteExitNotPromotable)
+	}
+	if !strings.Contains(err.Error(), shortSHA(green)) {
+		t.Errorf("err = %v, want it to name the sweep's last green commit %s", err, shortSHA(green))
+	}
+	if got := fx.f.Ref(fx.github, promote.MainRef); got != fx.base {
+		t.Errorf("GitHub main = %q, want %q untouched", got, fx.base)
+	}
+	if st := fx.record(t); st.LastPromoted != "" {
+		t.Errorf("record = %+v, want nothing recorded for a refused commit", st)
+	}
+}
+
+// A sweep-covered rig with no fully green cycle has nothing promotable: the
+// sweep owns the promotion from the moment it covers the rig (gt-qk0pi).
+func TestPromoteRefusesASweepCoveredRigWithNoGreenCycle(t *testing.T) {
+	t.Parallel()
+	fx := newPromoteFixture(t)
+	deps := fx.deps()
+	deps.Sweep = func(string, string) (daemon.TierSweepCoverage, error) {
+		return daemon.TierSweepCoverage{Covered: true}, nil
+	}
+
+	err := promoteRigSHA(deps, promoteTestRig, fx.sha)
+	if code := exitCodeForError(err); code != promoteExitNotPromotable {
+		t.Fatalf("exit code = %d (%v), want %d", code, err, promoteExitNotPromotable)
+	}
+	if !strings.Contains(err.Error(), "tier sweep") {
+		t.Errorf("err = %v, want it to name the tier sweep", err)
+	}
+	if got := fx.f.Ref(fx.github, promote.MainRef); got != fx.base {
+		t.Errorf("GitHub main = %q, want %q untouched", got, fx.base)
+	}
+}
+
+// The sweep's own last green commit is the one a covered rig promotes.
+func TestPromoteAllowsTheSweepsLastGreen(t *testing.T) {
+	t.Parallel()
+	fx := newPromoteFixture(t)
+	deps := fx.deps()
+	deps.Sweep = func(string, string) (daemon.TierSweepCoverage, error) {
+		return daemon.TierSweepCoverage{Covered: true, LastGreenSHA: fx.sha}, nil
+	}
+
+	if err := promoteRigSHA(deps, promoteTestRig, fx.sha); err != nil {
+		t.Fatalf("promoteRigSHA: %v", err)
+	}
+	if got := fx.f.Ref(fx.github, promote.MainRef); got != fx.sha {
+		t.Errorf("GitHub main = %q, want the promoted commit %s", got, fx.sha)
+	}
+}
+
+// A rig outside the sweep is the caller's to promote; the guard is the
+// sweep's, not a general one.
+func TestPromoteLeavesARigOutsideTheSweepToTheCaller(t *testing.T) {
+	t.Parallel()
+	fx := newPromoteFixture(t)
+	deps := fx.deps()
+	deps.Sweep = func(string, string) (daemon.TierSweepCoverage, error) {
+		return daemon.TierSweepCoverage{}, nil
+	}
+
+	if err := promoteRigSHA(deps, promoteTestRig, fx.sha); err != nil {
+		t.Fatalf("promoteRigSHA: %v", err)
+	}
+	if got := fx.f.Ref(fx.github, promote.MainRef); got != fx.sha {
+		t.Errorf("GitHub main = %q, want the promoted commit %s", got, fx.sha)
+	}
+}
+
+// A sweep that cannot be read is a failure, not a promotion: publishing past
+// an unread guard is the condition the guard exists to prevent (gt-qk0pi).
+func TestPromoteFailsWhenTheSweepCannotBeRead(t *testing.T) {
+	t.Parallel()
+	fx := newPromoteFixture(t)
+	deps := fx.deps()
+	deps.Sweep = func(string, string) (daemon.TierSweepCoverage, error) {
+		return daemon.TierSweepCoverage{}, errors.New("corrupt record")
+	}
+
+	err := promoteRigSHA(deps, promoteTestRig, fx.sha)
+	if code := exitCodeForError(err); code != promoteExitFailed {
+		t.Fatalf("exit code = %d (%v), want %d", code, err, promoteExitFailed)
+	}
+	if !strings.Contains(err.Error(), "corrupt record") {
+		t.Errorf("err = %v, want the read's own failure", err)
+	}
+	if got := fx.f.Ref(fx.github, promote.MainRef); got != fx.base {
+		t.Errorf("GitHub main = %q, want %q untouched", got, fx.base)
 	}
 }
 

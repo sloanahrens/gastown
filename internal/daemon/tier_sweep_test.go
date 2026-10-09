@@ -535,3 +535,166 @@ func TestRunTierSweep_DeferredSweepLogsNoDuration(t *testing.T) {
 		t.Errorf("a deferred sweep logged a stage or sweep line; got:\n%s", out)
 	}
 }
+
+// tierSweepCoverageTown writes the files TierSweepCoverageFor reads: a
+// mayor/rigs.json naming rigs, and, when patrols is non-empty, a
+// mayor/daemon.json whose patrols object is that JSON fragment.
+func tierSweepCoverageTown(t *testing.T, patrols string, rigs ...string) string {
+	t.Helper()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entries := make([]string, 0, len(rigs))
+	for _, r := range rigs {
+		entries = append(entries, `"`+r+`": {}`)
+	}
+	if err := os.WriteFile(filepath.Join(town, "mayor", "rigs.json"), []byte(`{"rigs":{`+strings.Join(entries, ",")+`}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if patrols != "" {
+		body := `{"type":"daemon-patrol-config","version":1,"patrols":{` + patrols + `}}`
+		if err := os.WriteFile(filepath.Join(town, "mayor", "daemon.json"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return town
+}
+
+// The sweep's coverage and its last green commit come from the town's patrol
+// config and the rig's record, and a rig the sweep runs is not the same thing
+// as a rig the town knows (gt-qk0pi).
+func TestTierSweepCoverageForReadsTheConfigAndTheRecord(t *testing.T) {
+	t.Parallel()
+	town := tierSweepCoverageTown(t, `"tier_sweep":{"enabled":true,"rigs":["gastown"]}`, "gastown", "other")
+	if err := writeTierSweepState(town, "gastown", tierSweepState{LastGreenSHA: "abc123"}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := TierSweepCoverageFor(town, "gastown")
+	if err != nil {
+		t.Fatalf("TierSweepCoverageFor: %v", err)
+	}
+	if !got.Covered || got.LastGreenSHA != "abc123" {
+		t.Errorf("coverage = %+v, want gastown covered at abc123", got)
+	}
+	if got, err := TierSweepCoverageFor(town, "other"); err != nil || got.Covered {
+		t.Errorf("other = %+v (%v), want not covered", got, err)
+	}
+}
+
+// A covered rig with no record yet is covered with no green commit, which is
+// what makes every commit unpromotable.
+func TestTierSweepCoverageForACoveredRigWithNoRecord(t *testing.T) {
+	t.Parallel()
+	town := tierSweepCoverageTown(t, `"tier_sweep":{"enabled":true}`, "gastown")
+	got, err := TierSweepCoverageFor(town, "gastown")
+	if err != nil {
+		t.Fatalf("TierSweepCoverageFor: %v", err)
+	}
+	if !got.Covered || got.LastGreenSHA != "" {
+		t.Errorf("coverage = %+v, want gastown covered with no green commit", got)
+	}
+}
+
+// Coverage needs the patrol on, the rig among the sweep's rigs, and the rig
+// known to the town. Anything less is "not covered", which leaves the
+// promotion to the caller.
+func TestTierSweepCoverageForIsOffUnlessTheSweepRunsTheRig(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		patrols string
+		rigs    []string
+		rig     string
+	}{
+		{"sweep disabled", `"tier_sweep":{"enabled":false}`, []string{"gastown"}, "gastown"},
+		{"no tier_sweep key", `"landing_worker":{"enabled":true}`, []string{"gastown"}, "gastown"},
+		{"rig not among the sweep's rigs", `"tier_sweep":{"enabled":true,"rigs":["gastown"]}`, []string{"gastown", "other"}, "other"},
+		{"rig the town does not know", `"tier_sweep":{"enabled":true,"rigs":["ghost"]}`, []string{"gastown"}, "ghost"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := tierSweepCoverageTown(t, tc.patrols, tc.rigs...)
+			got, err := TierSweepCoverageFor(town, tc.rig)
+			if err != nil {
+				t.Fatalf("TierSweepCoverageFor: %v", err)
+			}
+			if got.Covered {
+				t.Errorf("coverage = %+v, want not covered", got)
+			}
+		})
+	}
+
+	// No daemon.json at all is "no patrol config", the same as the sweep being
+	// off (IsPatrolEnabled's opt-in default).
+	got, err := TierSweepCoverageFor(tierSweepCoverageTown(t, "", "gastown"), "gastown")
+	if err != nil {
+		t.Fatalf("TierSweepCoverageFor with no daemon.json: %v", err)
+	}
+	if got.Covered {
+		t.Errorf("coverage = %+v, want not covered with no daemon.json", got)
+	}
+}
+
+// A town whose disabled_patrols names the sweep is not covered, the same
+// input the daemon's own predicate reads.
+func TestTierSweepCoverageForHonoursTheTownDisabledList(t *testing.T) {
+	t.Parallel()
+	town := tierSweepCoverageTown(t, `"tier_sweep":{"enabled":true}`, "gastown")
+	if err := os.MkdirAll(filepath.Join(town, "settings"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := `{"type":"town-settings","version":1,"disabled_patrols":["tier_sweep"]}`
+	if err := os.WriteFile(filepath.Join(town, "settings", "config.json"), []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := TierSweepCoverageFor(town, "gastown")
+	if err != nil {
+		t.Fatalf("TierSweepCoverageFor: %v", err)
+	}
+	if got.Covered {
+		t.Errorf("coverage = %+v, want not covered while the town disables the sweep", got)
+	}
+}
+
+// A patrol config that does not parse is an error, never "not covered": the
+// guard refuses to publish on this read, so it must not read a broken config
+// as a town that promotes freely.
+func TestTierSweepCoverageForRefusesAnUnreadableConfig(t *testing.T) {
+	t.Parallel()
+	town := tierSweepCoverageTown(t, "", "gastown")
+	body := `{"type":"daemon-patrol-config","version":1,"patrols":{"tier_sweep":{"enabled":true,"bogus":true}}}`
+	if err := os.WriteFile(filepath.Join(town, "mayor", "daemon.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := TierSweepCoverageFor(town, "gastown"); err == nil {
+		t.Error("TierSweepCoverageFor accepted a patrol config that does not parse")
+	}
+}
+
+// The daemon's own predicate and the reader a promotion is guarded by answer
+// from one rule, so they cannot drift (gt-qk0pi).
+func TestTierSweepCoversRigAgreesWithTierSweepCoverageFor(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, _, _, _ := newTierSweepDaemon(t, now, "gastown", "other")
+	town := d.config.TownRoot
+	patrols := `"tier_sweep":{"enabled":true,"rigs":["gastown"]}`
+	if err := os.WriteFile(filepath.Join(town, "mayor", "daemon.json"), []byte(`{"type":"daemon-patrol-config","version":1,"patrols":{`+patrols+`}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{TierSweep: &TierSweepConfig{Enabled: true, Rigs: []string{"gastown"}}}}
+
+	for _, rig := range []string{"gastown", "other"} {
+		got, err := TierSweepCoverageFor(town, rig)
+		if err != nil {
+			t.Fatalf("TierSweepCoverageFor(%s): %v", rig, err)
+		}
+		if got.Covered != d.tierSweepCoversRig(rig) {
+			t.Errorf("rig %s: TierSweepCoverageFor covered=%v, daemon predicate=%v", rig, got.Covered, d.tierSweepCoversRig(rig))
+		}
+	}
+}
