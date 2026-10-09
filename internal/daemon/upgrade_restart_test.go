@@ -585,6 +585,61 @@ func TestUpgradeNewerMarkerIdleRequestsRestartAndStampsAttempt(t *testing.T) {
 	}
 }
 
+// TestStampRestartAttemptDoesNotOverwriteANewerMarker pins gt-oyrav (D9):
+// install-gt.sh replaces daemon/restart-pending.json with a newer install's
+// marker, and this stamp reads, edits and renames the same path. A marker
+// swapped between the read and the rename must survive: renaming the older one
+// back over it would clear a request for an install the daemon has not run.
+func TestStampRestartAttemptDoesNotOverwriteANewerMarker(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	writeMarker(t, d, restartPendingMarker{Commit: "aaa", Repo: upgradeRepo})
+
+	swapped := false
+	err := stampRestartAttemptWith(func() {
+		swapped = true
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+	}, d.config.TownRoot, "aaa")
+
+	if !swapped {
+		t.Fatal("the test never swapped the marker")
+	}
+	if !errors.Is(err, errRestartMarkerMoved) {
+		t.Fatalf("err = %v, want errRestartMarkerMoved", err)
+	}
+	m, readErr := readRestartMarker(d.config.TownRoot)
+	if readErr != nil || m == nil || m.Commit != "bbb" || m.AttemptedFrom != "" {
+		t.Fatalf("marker = %+v (err %v), want the newer marker untouched", m, readErr)
+	}
+	if _, statErr := os.Stat(restartMarkerPath(d.config.TownRoot) + ".tmp"); !os.IsNotExist(statErr) {
+		t.Errorf("the abandoned temp file was left beside the marker: %v", statErr)
+	}
+}
+
+// The stamp still lands when nothing replaced the marker, and it keeps the
+// fields this daemon does not know about.
+func TestStampRestartAttemptStampsTheMarkerItRead(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	if err := os.WriteFile(restartMarkerPath(d.config.TownRoot),
+		[]byte(`{"commit":"bbb","repo":"/repo","future_field":42}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := stampRestartAttempt(d.config.TownRoot, "aaa"); err != nil {
+		t.Fatalf("stampRestartAttempt: %v", err)
+	}
+	m, err := readRestartMarker(d.config.TownRoot)
+	if err != nil || m == nil || m.Commit != "bbb" || m.AttemptedFrom != "aaa" {
+		t.Fatalf("marker = %+v (err %v), want attempted_from=aaa on commit bbb", m, err)
+	}
+	data, _ := os.ReadFile(restartMarkerPath(d.config.TownRoot))
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil || raw["future_field"] != float64(42) {
+		t.Fatalf("unknown field lost on rewrite: %s", data)
+	}
+}
+
 func TestUpgradeNoEffectRestartDoesNotLoop(t *testing.T) {
 	t.Parallel()
 	d := upgradeTestDaemon(t)

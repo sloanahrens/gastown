@@ -148,6 +148,13 @@ func readRestartMarker(townRoot string) (*restartPendingMarker, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseRestartMarker(data)
+}
+
+// parseRestartMarker parses marker JSON. A marker with no commit names no
+// install, so it is an error rather than an empty marker: nothing may act on it
+// (gt-oyrav).
+func parseRestartMarker(data []byte) (*restartPendingMarker, error) {
 	var m restartPendingMarker
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, err
@@ -158,17 +165,43 @@ func readRestartMarker(townRoot string) (*restartPendingMarker, error) {
 	return &m, nil
 }
 
+// errRestartMarkerMoved is the stamp being dropped because the marker it was
+// read from is no longer the one on disk. The daemon does not restart on it:
+// the next heartbeat reads the marker that replaced it.
+var errRestartMarkerMoved = errors.New("restart marker was replaced while stamping the attempt")
+
 // stampRestartAttempt sets attempted_from in the marker file, preserving any
 // fields this daemon does not know about. It writes through a temp file and a
 // rename, like every other writer of daemon/.
 func stampRestartAttempt(townRoot, own string) error {
+	return stampRestartAttemptWith(nil, townRoot, own)
+}
+
+// stampRestartAttemptWith is stampRestartAttempt with the window between the
+// temp file and the rename exposed: beforeRename, when non-nil, runs in it, so
+// a test can stand in for install-gt.sh replacing the marker there.
+//
+// The commit is re-read immediately before the rename because that window is
+// real: install-gt.sh writes the same path (its own temp file and a rename,
+// under the install lock, which this writer does not take), and the daemon
+// decides to restart in it. Renaming the older marker over a newer one would
+// put the wrong commit back - a commit the daemon may already cover, so the
+// newer install's request would be cleared and never restarted into
+// (gt-oyrav).
+func stampRestartAttemptWith(beforeRename func(), townRoot, own string) error {
 	path := restartMarkerPath(townRoot)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
+	// The raw map carries the fields this daemon does not know back out
+	// untouched; the typed parse is what decides which install the marker names.
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	read, err := parseRestartMarker(data)
+	if err != nil {
 		return err
 	}
 	v, err := json.Marshal(own)
@@ -184,7 +217,44 @@ func stampRestartAttempt(townRoot, own string) error {
 	if err := os.WriteFile(tmp, out, 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	// Every path below but the rename drops the temp file: nothing reads a
+	// restart-pending.json.tmp, but leaving one beside the marker is sediment.
+	stamped := false
+	defer func() {
+		if !stamped {
+			_ = os.Remove(tmp)
+		}
+	}()
+
+	if beforeRename != nil {
+		beforeRename()
+	}
+	now, err := restartMarkerCommitAt(path)
+	if err != nil {
+		return err
+	}
+	if now != read.Commit {
+		return fmt.Errorf("%w: %s replaced by %s", errRestartMarkerMoved, read.Commit, now)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	stamped = true
+	return nil
+}
+
+// restartMarkerCommitAt reads the marker file at path and returns the commit it
+// names.
+func restartMarkerCommitAt(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	m, err := parseRestartMarker(data)
+	if err != nil {
+		return "", err
+	}
+	return m.Commit, nil
 }
 
 func appendInstallReceipt(townRoot string, r installReceipt) error {
