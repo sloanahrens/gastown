@@ -143,19 +143,33 @@ section.collapsed>h2{border-bottom:0}
 .arow .tx{color:var(--dim)}
 .esc{font-weight:700;text-transform:uppercase;font-size:10px;letter-spacing:.04em;white-space:nowrap}
 .sev-critical{color:var(--red)}.sev-high{color:var(--amber)}.sev-medium{color:var(--blue)}.sev-low{color:var(--dim)}
+.chead{display:flex;gap:6px;align-items:baseline;flex-wrap:wrap;margin-bottom:4px}
+.cchips{display:flex;gap:4px;flex-wrap:wrap}
+.cchips .tag{margin-right:0}
+.crow{display:flex;gap:8px;align-items:baseline;width:100%;padding:4px 0;border:0;border-top:1px solid var(--line);background:none;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.crow:hover{background:#19212b}
+.crow .tag{margin-right:0}
+.ckind{flex:0 0 auto;white-space:nowrap}
+.cres{display:flex;gap:4px;align-items:baseline;flex:0 1 auto;min-width:0}
+.cproj{flex:0 0 auto;white-space:nowrap}
+.cname{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cdetail{flex:1 1 24ch;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cfull{padding:4px 0 8px 10px;margin-bottom:4px;border-left:2px solid var(--line);overflow-wrap:anywhere}
 h3.sub{display:flex;gap:10px;align-items:center;margin:0;padding:10px 12px 0;font-size:11px;font-weight:400;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
 h3.sub .r{margin-left:auto;text-transform:none;letter-spacing:0;white-space:normal;text-align:right}
-.dhead,.drow{display:grid;grid-template-columns:15ch 13ch 9ch 9ch 7ch;gap:8px;align-items:baseline}
+.dhead,.drow{display:flex;flex-wrap:wrap;gap:2px 8px;align-items:baseline}
 .dhead{color:var(--dim);font-size:11px;padding-bottom:2px}
 .drow{padding:4px 0;border-top:1px solid var(--line)}
-.drow>*{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.drepo,.dref,.dhash,.dstate,.dage{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.drepo{flex:0 0 var(--drepo,15ch)}
+.dref{flex:0 0 13ch}.dhash{flex:0 0 9ch}.dstate{flex:0 0 9ch}.dage{flex:0 0 7ch}
 .drow .dref,.drow .dhash,.drow .dage{color:var(--dim)}
 a.drow{color:inherit;text-decoration:none;cursor:pointer}
 a.drow:hover{background:#19212b}
-.dstage{grid-column:1 / -1;display:flex;gap:4px;flex-wrap:wrap;overflow:visible;white-space:normal}
+.dstage{flex:0 1 auto;min-width:0;display:flex;gap:4px;flex-wrap:wrap}
 .dstage .tag{margin-right:0}
 .dstage .live{font-weight:700}
-.dwarn{grid-column:1 / -1;overflow:visible;white-space:normal}
+.dwarn{flex:1 0 100%;overflow-wrap:anywhere}
 </style>
 </head>
 <body>
@@ -666,8 +680,16 @@ function renderMachine(s) {
 
 // The Cloud panel draws what the reader stripped and capped out of another
 // account's report. Every cell goes through el(), which writes textContent, so
-// a Detail holding an HTML tag shows as that text and never as markup.
+// a Detail holding an HTML tag shows as that text and never as markup. A
+// finding is one line — severity, kind, resource, then as much of the Detail as
+// the line holds — and opening the row shows the whole Detail under it. The
+// opened rows live in cloudOpen, so the refresh that redraws the list leaves
+// them open (gt-1hob8).
 const CLOUD_SEV = {urgent: "sev-critical", normal: "sev-medium", low: "sev-low"};
+const cloudOpen = new Set();
+// A finding carries no id of its own, so a row is keyed by its own text. The
+// reader strips control runes, so the separator cannot appear inside a key.
+const findingID = f => [f.project, f.resource, f.kind, f.detail].join("\u0000");
 
 function renderCloud(s) {
   const box = $("cloud"), note = $("cloudnote");
@@ -682,46 +704,63 @@ function renderCloud(s) {
   note.textContent = c.note || c.state || "";
   if (c.state === "missing" || c.state === "error") { box.append(el("div", c.state === "error" ? "badc" : "empty", c.note || c.state)); return; }
   const projects = c.projects || [];
-  const runs = el("div", "k title", "last run " + age(c.last_run) + " ago, " + projects.length + " projects: " + (projects.length ? projects.join(", ") : "none"));
-  box.append(runs);
-  if (!c.total) { box.append(el("div", "empty", "no findings")); return; }
+  // One header line: the run, then the counts over the whole report beside it,
+  // the zero counts left out. The projects the run watched ride the line's
+  // title, so naming them costs no width.
+  const head = el("div", "chead");
+  head.title = projects.length ? projects.join(", ") : "no projects in the report";
+  head.append(el("span", "title", "last run " + age(c.last_run) + " ago · " + projects.length + (projects.length === 1 ? " project" : " projects")));
   const counts = c.counts || {};
-  const kv = el("div", "kv");
+  const chips = el("span", "cchips");
   [["urgent", counts.urgent || 0], ["normal", counts.normal || 0], ["low", counts.low || 0]].forEach(([k, n]) => {
-    const d = el("div", k === "urgent" && n ? "badc" : "");
-    d.append(el("b", "", String(n)), el("span", "", k));
-    kv.append(d);
+    if (n) chips.append(el("span", "tag " + (CLOUD_SEV[k] || "sev-low"), n + " " + k));
   });
   // A severity the patrol does not write yet is still a finding: count it
   // rather than dropping it.
-  if (counts.other) { const d = el("div"); d.append(el("b", "", String(counts.other)), el("span", "", "other severity")); kv.append(d); }
-  box.append(kv);
-  const t = el("table");
-  const hr = el("tr");
-  [["Severity"], ["Kind"], ["Project"], ["Resource"], ["Detail"]].forEach(h => hr.append(el("th", "", h)));
-  t.append(hr);
-  for (const f of c.findings || []) {
-    const tr = el("tr");
-    const sev = el("td", "esc " + (CLOUD_SEV[f.severity] || "sev-low"), f.severity || "–");
+  if (counts.other) chips.append(el("span", "tag sev-low", counts.other + " other"));
+  if (chips.children.length) head.append(chips);
+  box.append(head);
+  if (!c.total) { box.append(el("div", "empty", "no findings")); return; }
+  const findings = c.findings || [];
+  // The project column is dropped when one project owns every finding — the
+  // header already names it — and otherwise rides the resource as a dim prefix
+  // that never takes a line of its own.
+  const multi = new Set(findings.map(f => f.project || "")).size > 1;
+  for (const f of findings) {
+    const id = findingID(f);
+    const open = cloudOpen.has(id);
+    const row = el("button", "crow");
+    row.setAttribute("aria-expanded", open ? "true" : "false");
+    row.title = f.detail || "";
+    const sev = el("span", "tag esc " + (CLOUD_SEV[f.severity] || "sev-low"), f.severity || "–");
     if (f.observed_at) sev.title = "observed " + new Date(f.observed_at).toLocaleString();
-    tr.append(sev, el("td", "title", f.kind || "–"), el("td", "title", f.project || "–"), el("td", "title", f.resource || "–"), el("td", "", f.detail || ""));
-    t.append(tr);
+    row.append(sev, el("span", "ckind title", f.kind || "–"));
+    const res = el("span", "cres");
+    if (multi && f.project) res.append(el("span", "cproj title", f.project));
+    res.append(el("span", "cname", f.resource || "–"));
+    row.append(res, el("span", "cdetail", f.detail || ""));
+    row.onclick = () => { open ? cloudOpen.delete(id) : cloudOpen.add(id); renderCloud(state); };
+    box.append(row);
+    if (open) box.append(el("div", "cfull", f.detail || ""));
   }
-  box.append(t);
   if (c.more) box.append(el("div", "empty", "and " + c.more + " more"));
 }
 
-// The Deploys block draws the deploy workflow's runs: repo, ref, commit, state
-// and age on one line and the stages in needs order under them. A stage name
-// and a ref are a repository's own text, so every cell goes through el() and
-// nothing here parses markup.
+// The Deploys block draws the deploy workflow's runs: repo, ref, commit, state,
+// age and the stages in needs order, on one line while the panel is wide enough
+// to hold them and wrapped when it is not. A stage name and a ref are a
+// repository's own text, so every cell goes through el() and nothing here
+// parses markup.
 //
 // The chips are the page's own colours for a job state: a stage that ran green,
 // a failure the alert red, a running stage the live colour the landing rows
 // mark a running landing with, and a stage that did not run (waiting, blocked,
-// skipped, cancelled) dim. A run nothing has picked up, and one that has not
-// moved, carry the reader's warning instead.
+// skipped, cancelled) dim. The chip carries the state's word on its title and
+// the glyph of it beside the name, so a row of chips is read at a glance. A run
+// nothing has picked up, and one that has not moved, carry the reader's warning
+// instead.
 const DEPLOY_STAGE = {success: "good", failure: "badc", running: "live", waiting: "sev-low", blocked: "sev-low", skipped: "sev-low", cancelled: "sev-low"};
+const DEPLOY_GLYPH = {success: "✓", failure: "✗", running: "◌"};
 
 function renderDeploys(s) {
   const box = $("deploys"), note = $("deploysnote");
@@ -738,18 +777,23 @@ function renderDeploys(s) {
   note.textContent = err ? "could not read the runs: " + err : (unreadable ? unreadable + (unreadable === 1 ? " repo unreadable" : " repos unreadable") : "");
   const runs = d.runs || [];
   if (!runs.length) { box.append(el("div", err ? "badc" : "empty", err ? "no deploy runs: " + err : "no deploy runs yet")); return; }
+  // The repo column is as wide as the longest name the block lists, so no name
+  // is cut to make room for another (gt-1hob8).
+  let widest = 0;
+  for (const r of runs) widest = Math.max(widest, repoShort(r.repo).length);
+  box.style.setProperty("--drepo", widest + "ch");
   const head = el("div", "dhead");
-  ["Repo", "Ref", "Commit", "State", "Age"].forEach(h => head.append(el("span", "", h)));
+  [["Repo", "drepo"], ["Ref", "dref"], ["Commit", "dhash"], ["State", "dstate"], ["Age", "dage"]].forEach(([h, cls]) => head.append(el("span", cls, h)));
   box.append(head);
   for (const r of runs) box.append(deployRow(r));
 }
 
 // deployRow is one run: the repo, ref, commit, state and age on one line, the
-// stages under them, and the reader's warning under that. The row itself is the
-// run's link, so the run the operator is reading is the one they open; a run
-// the reader kept no URL for is the same row unlinked rather than a link to
-// nowhere. The repo cell shows the shortened name with the whole one on its
-// title, the way the Actions rows name a repo.
+// stages after them while they fit on that line, and the reader's warning under
+// it. The row itself is the run's link, so the run the operator is reading is
+// the one they open; a run the reader kept no URL for is the same row unlinked
+// rather than a link to nowhere. The repo cell shows the shortened name with
+// the whole one on its title, the way the Actions rows name a repo.
 function deployRow(r) {
   const row = r.url ? el("a", "drow") : el("div", "drow");
   if (r.url) { row.href = r.url; row.target = "_blank"; row.rel = "noopener"; row.title = r.url; }
@@ -761,14 +805,19 @@ function deployRow(r) {
 }
 
 // The stage cell: one chip per stage, in the order the reader sorted the jobs'
-// needs into, each carrying its name and the state the API reported. A run
-// whose jobs were not read says so rather than drawing a blank the operator
-// would read as a run with no stages.
+// needs into, each carrying its name and the glyph of the state the API
+// reported, with the state's own word on the chip's title. A run whose jobs
+// were not read says so rather than drawing a blank the operator would read as
+// a run with no stages.
 function deployStages(r) {
   const cell = el("span", "dstage");
   const stages = r.stages || [];
   if (!stages.length) { cell.className += " title"; cell.textContent = r.stages_unread ? "stages not read" : "–"; return cell; }
-  for (const st of stages) cell.append(el("span", "tag " + (DEPLOY_STAGE[st.status] || "sev-low"), (st.name || "–") + " " + (st.status || "?")));
+  for (const st of stages) {
+    const chip = el("span", "tag " + (DEPLOY_STAGE[st.status] || "sev-low"), (st.name || "–") + " " + (DEPLOY_GLYPH[st.status] || "–"));
+    chip.title = (st.name || "–") + " " + (st.status || "?");
+    cell.append(chip);
+  }
   return cell;
 }
 
