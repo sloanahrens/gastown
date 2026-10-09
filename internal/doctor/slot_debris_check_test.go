@@ -3,10 +3,12 @@ package doctor
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/slot"
 )
 
@@ -117,5 +119,33 @@ func TestSlotDebrisCheck_FixReportsRemovalFailures(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "No such container") {
 		t.Errorf("Fix error = %q, want docker's own message", err)
+	}
+}
+
+// TestSlotDebrisCheck_HeldGateSaysSo pins that a gate held by a live suite
+// reads as held, not as "no container older than the window": the reap leaves
+// age-only debris alone while a suite runs (gt-c115n), and the clean-pass
+// wording would hide that.
+func TestSlotDebrisCheck_HeldGateSaysSo(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(slot.LockDir(townRoot), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unlock, ok, err := lock.FlockTryAcquire(slot.SlotLockPath(townRoot, 0))
+	if err != nil || !ok {
+		t.Fatalf("holding slot 0: ok=%v err=%v", ok, err)
+	}
+	defer unlock()
+
+	rt := &fakeContainers{lines: []string{dockerPSLine("ryuk-id", "testcontainers/ryuk:0.9.0", "ryuk-old",
+		time.Now().Add(-45*time.Minute), "")}}
+
+	result := debrisCheck(rt).Run(&CheckContext{TownRoot: townRoot})
+	if result.Status != StatusOK {
+		t.Fatalf("Status = %v, want StatusOK with nothing to remove: %s", result.Status, result.Message)
+	}
+	if !strings.Contains(result.Message, "holds the gate") {
+		t.Errorf("Message = %q, want it to name the held gate rather than report a clean window", result.Message)
 	}
 }

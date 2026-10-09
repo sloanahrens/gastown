@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -93,6 +94,13 @@ than the staleness window with no live testcontainers ryuk reaper for their
 session, containers whose owner labels name a test process on this host that
 is provably gone (at any age), and owner metadata files whose slot nobody
 holds anymore.
+
+Age-only debris — the first group — is left alone while any slot is held: a
+suite that has been running past the window would break if its containers were
+removed mid-run, and past the window this side of the gate cannot tell such a
+suite from a leak (gt-c115n). Owner-gone containers are removed whatever is
+held. So a reap while a suite runs reports them as kept and removes nothing;
+re-run it once the gate is free.
 
 Test containers started by internal/testutil carry gastown.test.owner-pid,
 gastown.test.owner-host and gastown.test.owner-start labels. An owner is
@@ -484,7 +492,11 @@ func printSlotReapReport(cmd *cobra.Command, report slot.ReapReport) {
 	}
 
 	if len(report.Debris) == 0 {
-		fmt.Fprintf(out, "No gate debris older than %s, and no container whose owning test process is gone.\n", report.OlderThan)
+		if held := formatSlotIndices(report.HeldSlots); held != "" {
+			fmt.Fprintf(out, "No gate container removed: slot(s) %s are held, and age-only debris is left alone while a suite runs. Re-run once it exits.\n", held)
+		} else {
+			fmt.Fprintf(out, "No gate debris older than %s, and no container whose owning test process is gone.\n", report.OlderThan)
+		}
 	} else {
 		fmt.Fprintf(out, "%s %d gate container(s) that are debris (older than %s with no live reaper, or their owning test process is gone):\n", verb, len(report.Debris), report.OlderThan)
 		for _, v := range report.Debris {
@@ -503,8 +515,18 @@ func printSlotReapReport(cmd *cobra.Command, report slot.ReapReport) {
 		fmt.Fprintf(cmd.ErrOrStderr(), "failed: %s\n", failure)
 	}
 	if len(report.Kept) > 0 {
-		fmt.Fprintf(out, "Kept %d container(s) that could still be a running suite.\n", len(report.Kept))
+		fmt.Fprintf(out, "Kept %d container(s) it could not safely remove.\n", len(report.Kept))
 	}
+}
+
+// formatSlotIndices renders slot indices the way 'gt slot status' names them,
+// and "" for no slots.
+func formatSlotIndices(indices []int) string {
+	parts := make([]string, len(indices))
+	for i, n := range indices {
+		parts[i] = strconv.Itoa(n)
+	}
+	return strings.Join(parts, ", ")
 }
 
 func printSlotReapJSON(cmd *cobra.Command, report slot.ReapReport) error {
@@ -527,9 +549,10 @@ func printSlotReapJSON(cmd *cobra.Command, report slot.ReapReport) error {
 		Failed     []string       `json:"failed,omitempty"`
 		Kept       int            `json:"kept"`
 		OwnerFiles []ownerEntry   `json:"owner_files,omitempty"`
+		HeldSlots  []int          `json:"held_slots,omitempty"`
 	}
 
-	out := jsonOut{OlderThan: report.OlderThan.String(), DryRun: report.DryRun, Kept: len(report.Kept)}
+	out := jsonOut{OlderThan: report.OlderThan.String(), DryRun: report.DryRun, Kept: len(report.Kept), HeldSlots: report.HeldSlots}
 	for _, v := range report.Debris {
 		out.Debris = append(out.Debris, removedEntry{v.Container.Display(), v.Reason, v.Container.LabelSummary()})
 	}

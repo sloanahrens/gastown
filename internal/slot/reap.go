@@ -35,9 +35,12 @@ type ReapReport struct {
 	OlderThan time.Duration
 	DryRun    bool
 
-	// Debris is every container classified as debris, with its evidence.
+	// Debris is every container Reap classifies as debris and would remove
+	// (or did remove, outside a dry run), with its evidence.
 	Debris []ContainerVerdict
-	// Kept is every container left alone, with the reason it was left.
+	// Kept is every container left alone, with the reason it was left: a live
+	// suite, an unknowable age, or age-only debris with a suite holding the
+	// gate (HeldSlots).
 	Kept []ContainerVerdict
 	// Removed names the containers actually deleted; empty on a dry run.
 	Removed []string
@@ -45,11 +48,21 @@ type ReapReport struct {
 	Failed []string
 	// OwnerFiles is every stale owner file, removed unless DryRun.
 	OwnerFiles []StaleOwnerFile
+	// HeldSlots are the slots a live holder held when Reap ran, empty when
+	// every slot was free. While one is held, age-only debris is Kept instead
+	// of removed (gt-c115n).
+	HeldSlots []int
 }
 
 // Reap removes the gate's debris: gate containers past the staleness window
 // with no live ryuk reaper for their session, and owner metadata files whose
 // slot nobody holds.
+//
+// While any slot is held, age-only debris is left in Kept rather than removed
+// (gt-c115n): past the staleness window this side of the gate cannot tell a
+// leak from a suite that is merely slow, and removing a container out from
+// under a live suite breaks it. Owner-gone debris is removed either way — the
+// owner process is provably dead, so nothing can be using the container.
 //
 // A non-nil error means the container half could not run — the list came back
 // unreadable, so nothing was classified and nothing removed. The owner-file
@@ -71,6 +84,7 @@ func (g *Gate) Reap(townRoot string, opts ReapOptions) (ReapReport, error) {
 	}
 
 	report.OwnerFiles = reapStaleOwnerFiles(townRoot, opts.DryRun)
+	report.HeldSlots = heldSlots(townRoot)
 
 	containers, err := g.gateContainers()
 	if err != nil {
@@ -78,12 +92,16 @@ func (g *Gate) Reap(townRoot string, opts ReapOptions) (ReapReport, error) {
 	}
 
 	for _, verdict := range g.owner.classify(containers, g.clock.Now(), report.OlderThan) {
-		if !verdict.Blocks() {
-			report.Debris = append(report.Debris, verdict)
-		} else {
+		if verdict.Blocks() {
 			report.Kept = append(report.Kept, verdict)
 			continue
 		}
+		if len(report.HeldSlots) > 0 && !verdict.OwnerGone {
+			verdict.Reason += "; left alone while a suite holds the gate"
+			report.Kept = append(report.Kept, verdict)
+			continue
+		}
+		report.Debris = append(report.Debris, verdict)
 		if opts.DryRun {
 			continue
 		}
@@ -134,4 +152,24 @@ func reapStaleOwnerFiles(townRoot string, dryRun bool) []StaleOwnerFile {
 		stale = append(stale, file)
 	}
 	return stale
+}
+
+// heldSlots returns every slot a live holder holds in townRoot, by the same
+// non-blocking flock probe reapStaleOwnerFiles uses: the kernel releases an
+// flock when its owner dies, so a held flock is a live holder.
+//
+// A flock that cannot be probed counts as held. Reading an unreadable lock as
+// free would license removing a live suite's containers; reading it as held
+// only postpones removal to the next reap.
+func heldSlots(townRoot string) []int {
+	var held []int
+	for _, i := range discoverSlots(townRoot) {
+		unlock, ok, err := lock.FlockTryAcquire(SlotLockPath(townRoot, i))
+		if err != nil || !ok {
+			held = append(held, i)
+			continue
+		}
+		unlock()
+	}
+	return held
 }

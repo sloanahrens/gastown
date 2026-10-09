@@ -3,9 +3,22 @@ package slot
 import (
 	"errors"
 	"os"
+	"slices"
+	"sort"
 	"testing"
 	"time"
 )
+
+// verdictNames renders a verdict slice as sorted "<container>=<verdict>"
+// strings, so a test compares two runs' decisions and not their ordering.
+func verdictNames(verdicts []ContainerVerdict) []string {
+	names := make([]string, len(verdicts))
+	for i, v := range verdicts {
+		names[i] = v.Container.Display() + "=" + string(v.Verdict)
+	}
+	sort.Strings(names)
+	return names
+}
 
 // TestReap_RemovesDebrisAndKeepsLiveSuites is Reap's contract: the orphan that
 // deadlocks the town goes, the suite somebody is actually running stays.
@@ -254,5 +267,128 @@ func TestReap_ReportsAContainerItCannotAddress(t *testing.T) {
 	}
 	if len(report.Failed) != 1 {
 		t.Fatalf("Failed = %v, want the missing id recorded", report.Failed)
+	}
+}
+
+// TestReap_HeldGateKeepsAgeOnlyDebris is gt-c115n's contract: a container past
+// the staleness window with no reaper is not removed while a suite holds the
+// gate, because past that window the gate cannot tell a leak from that suite.
+func TestReap_HeldGateKeepsAgeOnlyDebris(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
+	townRoot := t.TempDir()
+	handle := tg.mustAcquirePool(t, townRoot, "holder", DefaultPool)
+	defer release(t, handle)
+	tg.rt.setLines(
+		dockerPSLine("ryuk-id", "testcontainers/ryuk:0.9.0", "ryuk-old", tg.clk.Now().Add(-45*time.Minute), nil),
+	)
+
+	report, err := tg.Reap(townRoot, ReapOptions{})
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if len(tg.rt.removedIDs()) != 0 {
+		t.Fatalf("removed = %v, want a held gate's age-only debris left alone", tg.rt.removedIDs())
+	}
+	if len(report.Debris) != 0 {
+		t.Fatalf("Debris = %+v, want the old reaper kept rather than acted on", report.Debris)
+	}
+	if len(report.Kept) != 1 || report.Kept[0].Verdict != VerdictDebris {
+		t.Fatalf("Kept = %+v, want the old reaper kept as debris", report.Kept)
+	}
+	if !slices.Equal(report.HeldSlots, []int{0}) {
+		t.Fatalf("HeldSlots = %v, want slot 0 reported held", report.HeldSlots)
+	}
+}
+
+// TestReap_FreeGateRemovesAgeOnlyDebris is the other half: with no slot held,
+// the same container is genuinely stale and goes.
+func TestReap_FreeGateRemovesAgeOnlyDebris(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
+	townRoot := t.TempDir()
+	tg.rt.setLines(
+		dockerPSLine("ryuk-id", "testcontainers/ryuk:0.9.0", "ryuk-old", tg.clk.Now().Add(-45*time.Minute), nil),
+	)
+
+	report, err := tg.Reap(townRoot, ReapOptions{})
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if len(report.Debris) != 1 || report.Debris[0].Container.Name != "ryuk-old" {
+		t.Fatalf("Debris = %+v, want the old reaper classified", report.Debris)
+	}
+	if len(report.HeldSlots) != 0 {
+		t.Fatalf("HeldSlots = %v, want none reported on a free gate", report.HeldSlots)
+	}
+	if !slices.Equal(tg.rt.removedIDs(), []string{"ryuk-id"}) {
+		t.Fatalf("removed = %v, want the old reaper gone", tg.rt.removedIDs())
+	}
+}
+
+// TestReap_HeldGateStillRemovesOwnerGoneDebris pins the exception: a container
+// whose owning test process is provably gone is safe at any time, so a held
+// gate postpones only age-only debris.
+func TestReap_HeldGateStillRemovesOwnerGoneDebris(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
+	townRoot := t.TempDir()
+	const deadPID = 4242
+	tg.gone[deadPID] = true
+	handle := tg.mustAcquirePool(t, townRoot, "holder", DefaultPool)
+	defer release(t, handle)
+	tg.rt.setLines(
+		dockerPSLine("orphan-id", "dolthub/dolt-sql-server:2.2.0", "orphaned-suite", tg.clk.Now().Add(-5*time.Minute),
+			ownerLabels(deadPID, testHost, "sess-1")),
+	)
+
+	report, err := tg.Reap(townRoot, ReapOptions{})
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if len(report.Debris) != 1 || !report.Debris[0].OwnerGone {
+		t.Fatalf("Debris = %+v, want the owner-gone container acted on", report.Debris)
+	}
+	if !slices.Equal(tg.rt.removedIDs(), []string{"orphan-id"}) {
+		t.Fatalf("removed = %v, want the owner-gone container gone despite the held gate", tg.rt.removedIDs())
+	}
+}
+
+// TestReap_DryRunMatchesTheRealRun pins that a dry run reports exactly the
+// decisions the real run acts on, a held gate included (gt-c115n).
+func TestReap_DryRunMatchesTheRealRun(t *testing.T) {
+	t.Parallel()
+	run := func(dryRun bool) (ReapReport, []string) {
+		t.Helper()
+		tg := newTestGate(t)
+		townRoot := t.TempDir()
+		handle := tg.mustAcquirePool(t, townRoot, "holder", DefaultPool)
+		defer release(t, handle)
+		tg.rt.setLines(
+			dockerPSLine("ryuk-id", "testcontainers/ryuk:0.9.0", "ryuk-old", tg.clk.Now().Add(-45*time.Minute), nil),
+			dockerPSLine("young-id", "dolt/dolt-sql-server:2.2.0", "young-suite", tg.clk.Now().Add(-time.Minute), nil),
+		)
+		report, err := tg.Reap(townRoot, ReapOptions{DryRun: dryRun})
+		if err != nil {
+			t.Fatalf("Reap(dryRun=%t): %v", dryRun, err)
+		}
+		return report, tg.rt.removedIDs()
+	}
+
+	dry, dryRemoved := run(true)
+	real, realRemoved := run(false)
+	if !slices.Equal(verdictNames(dry.Debris), verdictNames(real.Debris)) ||
+		!slices.Equal(verdictNames(dry.Kept), verdictNames(real.Kept)) ||
+		!slices.Equal(dry.HeldSlots, real.HeldSlots) {
+		t.Fatalf("dry run decided %v/%v (held %v), real run %v/%v (held %v); want the same decisions",
+			verdictNames(dry.Debris), verdictNames(dry.Kept), dry.HeldSlots,
+			verdictNames(real.Debris), verdictNames(real.Kept), real.HeldSlots)
+	}
+	if len(dry.Debris) != 0 || len(dry.Kept) != 2 {
+		t.Fatalf("dry run decided %v/%v, want the old reaper and the young suite both kept",
+			verdictNames(dry.Debris), verdictNames(dry.Kept))
+	}
+	if len(dryRemoved) != 0 || len(realRemoved) != 0 {
+		t.Fatalf("a held gate removed something: dry %v, real %v", dryRemoved, realRemoved)
 	}
 }

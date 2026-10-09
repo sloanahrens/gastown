@@ -58,6 +58,15 @@ func (c *SlotDebrisCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	if len(report.Debris) == 0 && len(report.OwnerFiles) == 0 {
+		// A held gate leaves age-only debris in Kept, so "nothing to report"
+		// here must not read as "no container is past the window" (gt-c115n).
+		if len(report.HeldSlots) > 0 {
+			return &CheckResult{
+				Name:    c.Name(),
+				Status:  StatusOK,
+				Message: "a suite holds the gate: age-only debris is left alone until it exits",
+			}
+		}
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
@@ -74,7 +83,7 @@ func (c *SlotDebrisCheck) Run(ctx *CheckContext) *CheckResult {
 		details = append(details, fmt.Sprintf("owner file for slot %d names pid %d, which holds no flock", file.Slot, file.PID))
 	}
 	if len(report.Kept) > 0 {
-		details = append(details, fmt.Sprintf("(%d container(s) kept: still young enough to be a running suite)", len(report.Kept)))
+		details = append(details, fmt.Sprintf("(%d container(s) kept; 'gt slot reap --dry-run' prints why each was)", len(report.Kept)))
 	}
 
 	return &CheckResult{

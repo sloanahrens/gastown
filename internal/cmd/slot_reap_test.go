@@ -66,6 +66,24 @@ func TestPrintSlotReapReport(t *testing.T) {
 			t.Errorf("output = %q, want the stale owner file named", got)
 		}
 	})
+
+	// A held gate leaves age-only debris in Kept, so the report must not read
+	// as "no gate debris" (gt-c115n).
+	t.Run("held gate", func(t *testing.T) {
+		out := &bytes.Buffer{}
+		printSlotReapReport(slotTestCmd(out), slot.ReapReport{
+			OlderThan: 30 * time.Minute,
+			Kept:      []slot.ContainerVerdict{{Container: slot.GateContainer{Image: "testcontainers/ryuk:0.9.0", Name: "ryuk-old"}, Verdict: slot.VerdictDebris}},
+			HeldSlots: []int{0},
+		})
+		got := out.String()
+		if !strings.Contains(got, "slot(s) 0 are held") {
+			t.Errorf("output = %q, want the held slot named", got)
+		}
+		if strings.Contains(got, "No gate debris") {
+			t.Errorf("output = %q, want no clean-window claim while a suite holds the gate", got)
+		}
+	})
 }
 
 func TestPrintSlotReapJSON(t *testing.T) {
