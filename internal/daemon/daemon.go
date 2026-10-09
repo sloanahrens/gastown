@@ -1977,13 +1977,14 @@ func StopDaemon(townRoot string) error {
 	}
 
 	if pid <= 0 {
-		// Lock is held but PID is unknown (race: daemon starting, or stale lock).
-		// Clean up the lock file so the next gt up can start fresh.
-		lockPath := filepath.Join(townRoot, "daemon", "daemon.lock")
-		_ = os.Remove(lockPath)
-		pidFile := filepath.Join(townRoot, "daemon", "daemon.pid")
-		_ = os.Remove(pidFile)
-		return nil
+		// The lock is held, and an flock is released by the kernel when its
+		// holder dies, so a live process owns it: a daemon still starting (the
+		// lock is taken before the pid file is written) or one whose pid file
+		// is damaged. Unlinking the lock file would let the next gt up lock a
+		// fresh inode and start a second daemon beside it, so leave both files
+		// alone and let the caller retry (gt-dicyp).
+		return fmt.Errorf("daemon holds %s but its pid is not known yet (still starting, or its pid file is damaged); retry in a few seconds",
+			filepath.Join(townRoot, "daemon", "daemon.lock"))
 	}
 
 	// The lock proves a daemon is running; the pid file only claims which PID

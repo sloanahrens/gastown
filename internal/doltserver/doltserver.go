@@ -2057,15 +2057,12 @@ func (h *host) Start(townRoot string) error {
 			if already, _, _ := h.IsRunning(townRoot); already {
 				return nil
 			}
-			// POSIX flocks auto-release on process death. We timed out waiting,
-			// so forcibly remove the stale lock and retry once. (gt-tosjp)
-			fmt.Fprintf(os.Stderr, "Warning: dolt.lock held for >%s — removing stale lock\n", lockTimeout.Round(time.Second))
-			_ = os.Remove(lockFile)
-			fileLock = flock.New(lockFile)
-			locked, err = fileLock.TryLock()
-			if err != nil || !locked {
-				return fmt.Errorf("another gt dolt start is in progress (lock held after recovery attempt)")
-			}
+			// POSIX flocks auto-release on process death, so a lock still held
+			// after the whole retry window belongs to a live process: a slow
+			// start, not a stale lock. Unlinking the file and locking a fresh
+			// inode would let two starts run at once, so give up and leave the
+			// lock alone (gt-dicyp, supersedes gt-tosjp's forced removal).
+			return fmt.Errorf("another gt dolt start is in progress (dolt.lock held for >%s); retry once it finishes", lockTimeout.Round(time.Second))
 		}
 	}
 	defer func() { _ = fileLock.Unlock() }()
@@ -2523,10 +2520,22 @@ func (h *host) Stop(townRoot string) error {
 	if h.processAlive(pid) {
 		// Still running, force kill — re-verified: the PID may have exited
 		// and been reused during the wait.
-		if err := h.killVerifiedDolt(pid); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: not force-killing PID %d: %v\n", pid, err)
+		killErr := h.killVerifiedDolt(pid)
+		if killErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: not force-killing PID %d: %v\n", pid, killErr)
 		}
-		h.wait(100 * time.Millisecond)
+		// SIGKILL is asynchronous: give the kernel a moment, then look. A
+		// server that is still alive must not be reported stopped, nor have
+		// its pid file and state cleared, or the next Start or IsRunning no
+		// longer knows who holds the data directory (gt-dicyp). A PID that is
+		// provably no longer this town's dolt has been reused and is not ours
+		// to wait on.
+		for i := 0; i < 10 && h.processAlive(pid); i++ {
+			h.wait(100 * time.Millisecond)
+		}
+		if h.processAlive(pid) && !IsStalePIDFileErr(killErr) {
+			return fmt.Errorf("Dolt server (PID %d) is still running after SIGTERM and SIGKILL; pid file left in place", pid)
+		}
 	}
 
 	// Clean up PID file

@@ -58,6 +58,9 @@ type fakeProc struct {
 	port        int
 	alive       bool
 	ignoresTERM bool
+	// ignoresKILL makes the process survive even SIGKILL, the way one stuck
+	// in uninterruptible I/O does.
+	ignoresKILL bool
 }
 
 type fakeSignal struct {
@@ -302,7 +305,7 @@ func (f *fakeHost) signal(pid int, sig syscall.Signal) error {
 	if p == nil || !p.alive {
 		return errors.New("os: process already finished")
 	}
-	if sig == syscall.SIGKILL || (sig == syscall.SIGTERM && !p.ignoresTERM) {
+	if (sig == syscall.SIGKILL && !p.ignoresKILL) || (sig == syscall.SIGTERM && !p.ignoresTERM) {
 		p.alive = false
 	}
 	return nil

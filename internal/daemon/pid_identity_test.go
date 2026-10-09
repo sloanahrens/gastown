@@ -215,3 +215,53 @@ func TestNewTestManagerStubsKillImposters(t *testing.T) {
 		t.Fatal("newTestManager leaves killImpostersFn nil: an identity failure would reach doltserver.KillImposters")
 	}
 }
+
+// A live dolt that misses one port dial (hung, or under load) is still our
+// dolt: isRunning must keep its pid file and report it running, or stopLocked
+// has no pid and a hung server can never be stopped (gt-dicyp). Only proof
+// that the pid is not this town's dolt makes the pid file stale.
+func TestDoltIsRunningKeepsPIDFileOfLiveServerThatMissesTheDial(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		verifyErr   error
+		wantRunning bool
+		wantFile    bool
+	}{
+		{"verified town dolt that does not answer", nil, true, true},
+		{"identity unverified", fmt.Errorf("ps failed: %w", doltserver.ErrIdentityUnverified), false, true},
+		{"provably not dolt", fmt.Errorf("PID is sleep: %w", doltserver.ErrNotDoltSQLServer), false, false},
+		{"another town's dolt", fmt.Errorf("serves elsewhere: %w", doltserver.ErrOtherTownDolt), false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			pid := os.Getpid()
+			m, _ := newStopTestManager(t, pid)
+			m.runningFn = nil
+			m.config.Port = 13871 // nothing listens here
+			if err := os.MkdirAll(filepath.Join(m.townRoot, "daemon"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := writePIDFile(m.pidFile(), pid); err != nil {
+				t.Fatal(err)
+			}
+			m.verifyDoltFn = func(string, int) error { return c.verifyErr }
+
+			gotPID, running := m.isRunning()
+			if running != c.wantRunning {
+				t.Fatalf("isRunning = (%d, %v), want running=%v", gotPID, running, c.wantRunning)
+			}
+			if running && gotPID != pid {
+				t.Errorf("isRunning pid = %d, want %d", gotPID, pid)
+			}
+			_, statErr := os.Stat(m.pidFile())
+			if c.wantFile && statErr != nil {
+				t.Errorf("pid file removed: %v", statErr)
+			}
+			if !c.wantFile && !os.IsNotExist(statErr) {
+				t.Errorf("stale pid file kept: %v", statErr)
+			}
+		})
+	}
+}
