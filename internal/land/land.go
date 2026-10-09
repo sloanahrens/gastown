@@ -1388,9 +1388,37 @@ func mergedDiffLines(g Repo, base, head string) (int, bool) {
 // town's other circuit-breaker threshold, config.DefaultRecoveryMaxBeadRespawns.
 const MaxReworkAttempts = 3
 
-// reject writes rej to the work bead and returns it.
+// rejectionAlreadyRecorded reports whether the last MERGE REJECTION block in
+// issue's notes is the one rej would write — same head, same kind — left
+// unfinished by an earlier pass, and returns that block. A block is unfinished
+// when the bead still looks pre-rejection: the pass that wrote it failed
+// before reopening the bead, and reopening is what takes the ready label off
+// and puts a refusal label on. After a completed rejection the author
+// resubmits, which re-adds the ready label but leaves the refusal label
+// behind, so the block is history and a new one is written (gt-zqqcr).
+func rejectionAlreadyRecorded(issue *beads.Issue, w Work, rej *Rejection) (RejectionNote, bool) {
+	if w.Head == "" || !beads.HasLabel(issue, LabelReadyToLand) ||
+		beads.HasLabel(issue, LabelRework) || beads.HasLabel(issue, LabelNeedsHuman) {
+		return RejectionNote{}, false
+	}
+	last, ok := ParseRejectionNote(issue.Notes)
+	if !ok || last.Head != w.Head || last.Kind != string(rej.Kind) {
+		return RejectionNote{}, false
+	}
+	return last, true
+}
+
+// reject writes rej to the work bead and returns it. A rejection whose block
+// an earlier pass already wrote and then failed to finish is completed, never
+// recorded twice: appending a second identical block would burn a rework
+// attempt the author never saw, and at MaxReworkAttempts the bead is escalated
+// with no rework comment ever posted (gt-zqqcr).
 func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Verdict) error {
+	recorded, repeat := rejectionAlreadyRecorded(issue, w, rej)
 	attempt := CountRejections(issue.Notes) + 1
+	if repeat {
+		attempt = recorded.Attempt
+	}
 	// The attempt ceiling (gt-28ibg): the rejection count decides, before the
 	// note is written, whether this round is the last one a polecat gets.
 	capped := rej.Rework && attempt >= MaxReworkAttempts
@@ -1418,9 +1446,11 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 		note.Receipt = &Receipt{Score: verdict.Score}
 	}
 	l.logf("%s: rejected (%s): %s", w.BeadID, rej.Kind, reason)
-	if err := l.Beads.AppendNotes(w.BeadID, FormatRejectionNote(note)); err != nil {
-		rej.RecordErr = fmt.Errorf("appending the rejection note: %w", err)
-		return rej
+	if !repeat {
+		if err := l.Beads.AppendNotes(w.BeadID, FormatRejectionNote(note)); err != nil {
+			rej.RecordErr = fmt.Errorf("appending the rejection note: %w", err)
+			return rej
+		}
 	}
 	// The gate can run for an hour. A bead that changed hands meanwhile (no
 	// longer ready, closed, or claimed by someone else) keeps the note but is
