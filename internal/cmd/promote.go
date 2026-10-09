@@ -44,11 +44,16 @@ refuses a commit that is not on the rig's Forgejo main. A promotion records
 last_promoted in the rig's red-main state, so the next caller reads what the
 target holds.
 
+For a rig the town's tier_sweep patrol covers, the sweep owns the promotion:
+only the commit of its last fully green cycle is promotable, and any other is
+refused. A rig the sweep does not cover is promoted as the caller asks.
+
 Exit codes: 0 the target holds the commit (promoted now, or already); 1 the
 commit is not promotable (not on the rig's Forgejo main, the rig names no
-promote_target or key, or another promotion holds the rig's lock); 2 the
-promotion failed (a diverged target, a rejected push, or a rig main that could
-not be read).`,
+promote_target or key, another promotion holds the rig's lock, or a
+sweep-covered rig's commit is not the sweep's last green); 2 the promotion
+failed (a diverged target, a rejected push, or a rig main that could not be
+read).`,
 	RunE: runPromote,
 }
 
@@ -81,6 +86,10 @@ type promoteDeps struct {
 	State func(townRoot, rigName string) landworker.MainStateStore
 	// Escalate raises the divergence alert for a rig.
 	Escalate func(rigName, message string)
+	// Sweep reads what the town's tier sweep owns for a rig: whether the
+	// sweep covers it and its last green commit (daemon.TierSweepCoverageFor
+	// in production).
+	Sweep func(townRoot, rigName string) (daemon.TierSweepCoverage, error)
 	// Out carries the one-line outcome, Err the promoter's own log lines.
 	Out, Err io.Writer
 }
@@ -104,6 +113,7 @@ func runPromote(cmd *cobra.Command, args []string) error {
 		Repo:     func(path string) promoteGit { return git.NewGit(path) },
 		State:    daemon.RedMainStateStore,
 		Escalate: func(rigName, message string) { raisePromoteDiverged(townRoot, rigName, message) },
+		Sweep:    daemon.TierSweepCoverageFor,
 		Out:      cmd.OutOrStdout(),
 		Err:      cmd.ErrOrStderr(),
 	}, promoteRigFlag, promoteSHAFlag)
@@ -141,6 +151,9 @@ func promoteRigSHA(deps promoteDeps, rigName, sha string) error {
 	}
 	if commit == "" {
 		return promoteNotPromotable("%s is not on rig %s's Forgejo main, so it is not promotable", shortSHA(sha), rigName)
+	}
+	if err := refusePromotePastSweep(deps, rigName, commit); err != nil {
+		return err
 	}
 
 	store := deps.State(deps.TownRoot, rigName)
@@ -218,6 +231,32 @@ func commitOnRigMain(g promoteGit, forgejoURL, sha string) (string, error) {
 		return "", err
 	}
 	return commit, nil
+}
+
+// refusePromotePastSweep refuses commit when the tier sweep owns rigName's
+// promotion and its last green cycle was a different commit: for a rig the
+// sweep covers, the sweep decides which commit GitHub main may hold, so a
+// manual promotion cannot publish one the sweep has not called green
+// (gt-qk0pi). A rig outside the sweep is the caller's to promote.
+func refusePromotePastSweep(deps promoteDeps, rigName, commit string) error {
+	sweep := deps.Sweep
+	if sweep == nil {
+		sweep = daemon.TierSweepCoverageFor
+	}
+	cov, err := sweep(deps.TownRoot, rigName)
+	if err != nil {
+		return promoteFailed("reading the tier sweep's coverage of rig %s: %v", rigName, err)
+	}
+	if !cov.Covered {
+		return nil
+	}
+	if cov.LastGreenSHA == "" {
+		return promoteNotPromotable("rig %s's promotion is owned by the tier sweep, which has no fully green cycle on record yet, so no commit is promotable", rigName)
+	}
+	if cov.LastGreenSHA != commit {
+		return promoteNotPromotable("rig %s's promotion is owned by the tier sweep: only its last green commit %s is promotable, not %s", rigName, shortSHA(cov.LastGreenSHA), shortSHA(commit))
+	}
+	return nil
 }
 
 // promoteNotPromotable is a refusal under promoteExitNotPromotable: nothing
