@@ -16,13 +16,15 @@ import (
 // (exit 13 -> released=false, nil). raceTo re-assigns the bead to another
 // agent right after the first read, to model a concurrent re-sling.
 type fakeWorkReleaser struct {
-	beads     map[string][2]string
-	readErr   error
-	raceTo    string
-	released  []string
-	restored  []string
-	resets    []string
-	annotated map[string]string
+	beads      map[string][2]string
+	readErr    error
+	raceTo     string
+	restoreErr error
+	resetErr   error
+	released   []string
+	restored   []string
+	resets     []string
+	annotated  map[string]string
 }
 
 func (f *fakeWorkReleaser) HookState(beadID string) (string, string, error) {
@@ -54,6 +56,9 @@ func (f *fakeWorkReleaser) ReleaseBead(beadID, expectedAssignee string) (bool, e
 }
 
 func (f *fakeWorkReleaser) RestoreBead(beadID, expected, status, assignee string) (bool, error) {
+	if f.restoreErr != nil {
+		return false, f.restoreErr
+	}
 	if f.beads[beadID][1] != expected {
 		return false, nil
 	}
@@ -64,7 +69,7 @@ func (f *fakeWorkReleaser) RestoreBead(beadID, expected, status, assignee string
 
 func (f *fakeWorkReleaser) ResetSlot(agentID string) error {
 	f.resets = append(f.resets, agentID)
-	return nil
+	return f.resetErr
 }
 
 func (f *fakeWorkReleaser) Annotate(beadID, text string) error {
@@ -129,6 +134,17 @@ func TestReleasePolecatWorkResetsSlotOnlyWhenAsked(t *testing.T) {
 	}
 	if len(rel.released) != 0 {
 		t.Fatalf("no bead named, nothing to release: %v", rel.released)
+	}
+}
+
+// A slot reset that fails must not be reported as done: SlotReset is the
+// caller's signal that the polecat's agent bead really went idle (gt-34z9v).
+func TestReleasePolecatWorkReportsSlotResetOnlyOnSuccess(t *testing.T) {
+	t.Parallel()
+	rel := &fakeWorkReleaser{beads: map[string][2]string{}, resetErr: errors.New("dolt down")}
+	out := releasePolecatWork(rel, "gastown/polecats/basalt", "", true)
+	if out.SlotReset {
+		t.Fatal("a failed reset must not report the slot reset")
 	}
 }
 
@@ -299,6 +315,43 @@ type submittedReleaser struct {
 	*fakeWorkReleaser
 	submitted map[string]bool
 	err       error
+}
+
+// TestRestoreOriginalHoldReportsAFailedRestore covers gt-34z9v: a restore that
+// fails is returned to the caller, which then still releases the bead, instead
+// of the bead being dropped from release while it stays hooked to the polecat
+// being removed. The failure is also left on the bead as a comment.
+func TestRestoreOriginalHoldReportsAFailedRestore(t *testing.T) {
+	t.Parallel()
+	const me = "gastown/polecats/basalt"
+	for _, tc := range []struct {
+		name        string
+		restoreErr  error
+		wantHandled bool
+		wantErr     bool
+		wantComment bool
+	}{
+		{name: "restore succeeds", wantHandled: true},
+		{name: "restore fails: reported and annotated", restoreErr: errors.New("dolt down"), wantErr: true, wantComment: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rel := &fakeWorkReleaser{beads: map[string][2]string{"gt-abc": {"hooked", me}}, restoreErr: tc.restoreErr}
+			surviving := func(string, string) (string, error) { return "polecat/basalt/gt-abc+mu5wzd6q", nil }
+
+			handled, err := restoreOriginalHoldIfWorkSurvivesWith(rel, surviving, "/town", me, "gt-abc", &beadHold{Status: "hooked", Assignee: me})
+
+			if handled != tc.wantHandled {
+				t.Fatalf("handled = %v, want %v", handled, tc.wantHandled)
+			}
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, want error = %v", err, tc.wantErr)
+			}
+			if commented := rel.annotated["gt-abc"] != ""; commented != tc.wantComment {
+				t.Fatalf("comment = %q (present %v), want comment present = %v", rel.annotated["gt-abc"], commented, tc.wantComment)
+			}
+		})
+	}
 }
 
 func (s submittedReleaser) SubmittedForLanding(beadID string) (bool, error) {

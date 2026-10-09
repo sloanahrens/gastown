@@ -2340,6 +2340,68 @@ func TestReuseIdlePolecat_KillsLiveSession(t *testing.T) {
 	}
 }
 
+// TestRepairWorktreeMoveFailureClearsPolecatDirAndKeepsHook covers gt-34z9v: a
+// repair that fails once the old clone is gone leaves no clone-less polecatDir
+// behind, and the agent bead's hook is left as it was rather than cleared.
+//
+// The old structure (worktree directly at polecats/<name>) is what makes the
+// move fail: removing the old clone also removes polecatDir, so
+// WorktreeMove into polecats/<name>/<rig> has nowhere to land.
+func TestRepairWorktreeMoveFailureClearsPolecatDirAndKeepsHook(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	rigName := "testrepair"
+	rigPath := filepath.Join(townRoot, rigName)
+	mayorRig := filepath.Join(rigPath, "mayor", "rig")
+	for _, dir := range []string{mayorRig, filepath.Join(rigPath, ".beads"), filepath.Join(mayorRig, ".beads")} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "redirect"), []byte("mayor/rig/.beads\n"), 0644); err != nil {
+		t.Fatalf("write beads redirect: %v", err)
+	}
+
+	w := newWorld()
+	w.InitRepo(t, mayorRig)
+	head := w.Commit(t, mayorRig, "main", "Initial commit", map[string]string{"README.md": "# Test\n"})
+	w.checkout(t, mayorRig)
+	w.AddRemote(t, mayorRig, "origin", mayorRig)
+	w.SetRef(t, mayorRig, "refs/remotes/origin/main", head)
+	mayorGit := w.repo(mayorRig)
+
+	polecatName := "toast"
+	oldClonePath := filepath.Join(rigPath, "polecats", polecatName)
+	if err := mayorGit.WorktreeAddFromRef(oldClonePath, "old-toast", "HEAD"); err != nil {
+		t.Fatalf("create old worktree: %v", err)
+	}
+
+	db := newPolecatDB()
+	mgr := newTestManager(&rig.Rig{Name: rigName, Path: rigPath}, w, newFakeProbe(), db)
+
+	agentID := mgr.agentBeadID(polecatName)
+	db.setAgent(t, agentID, func(f *beads.AgentFields) {
+		f.AgentState = "working"
+		f.HookBead = "gt-hooked"
+	})
+
+	if _, err := mgr.RepairWorktreeWithOptions(polecatName, true, AddOptions{}); err == nil {
+		t.Fatal("expected the repair to fail when the worktree move fails")
+	}
+
+	if mgr.exists(polecatName) {
+		t.Fatalf("polecat dir %s still exists after a failed repair", oldClonePath)
+	}
+	issue, err := db.Show(agentID)
+	if err != nil {
+		t.Fatalf("read agent bead: %v", err)
+	}
+	if hook := beads.ParseAgentFields(issue.Description).HookBead; hook != "gt-hooked" {
+		t.Fatalf("hook = %q, want it left as gt-hooked after a failed repair", hook)
+	}
+}
+
 func TestRepairWorktreeWithOptions_KillsLiveSession(t *testing.T) {
 	t.Parallel()
 

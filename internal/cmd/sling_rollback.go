@@ -135,7 +135,14 @@ func (s slingRollback) cleanupSpawned(spawnInfo *SpawnedPolecatInfo, rigName, be
 	// Work that survives on a branch goes back to its pre-sling holder rather
 	// than being released (the shared work-survival rule).
 	rel := s.newReleaser(townRoot, hookWorkDir)
-	if restoreOriginalHoldIfWorkSurvivesWith(rel, s.survivingWork, townRoot, spawnInfo.AgentID(), beadID, spawnInfo.originalHold) {
+	restored, restoreErr := restoreOriginalHoldIfWorkSurvivesWith(rel, s.survivingWork, townRoot, spawnInfo.AgentID(), beadID, spawnInfo.originalHold)
+	if restoreErr != nil {
+		// The restore failed, so the bead is still hooked to the polecat being
+		// removed. Fall through and release it instead of dropping it from
+		// release and leaving it wedged (gt-34z9v).
+		fmt.Printf("  %s Restore failed, releasing instead: %v\n", style.Dim.Render("Warning:"), restoreErr)
+	}
+	if restored {
 		beadID = ""
 	}
 	releasePolecatWork(rel, spawnInfo.AgentID(), beadID, !spawnInfo.FreshSpawn)

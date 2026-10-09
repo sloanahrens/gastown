@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -167,4 +168,55 @@ func TestCloseCompletedHookedMoleculeClosesTheBead(t *testing.T) {
 	if got.Status != "closed" || got.CloseReason != "Auto-replaced by gt hook (molecule complete)" {
 		t.Fatalf("status %q reason %q, want closed with the auto-replace reason", got.Status, got.CloseReason)
 	}
+}
+
+// TestHookThenDisplaceReleasesOnlyAfterTheNewHookCommits covers gt-34z9v: the
+// bead a new hook replaces is released only once the new hook write has
+// committed, and the release clears the assignee along with the status. A hook
+// that fails must leave the previously hooked (naked) bead exactly as it was.
+func TestHookThenDisplaceReleasesOnlyAfterTheNewHookCommits(t *testing.T) {
+	t.Parallel()
+	const agent = "gastown/polecats/nux"
+	const oldID = "gt-oldhook"
+
+	seed := func(t *testing.T) *beadsfake.Fake {
+		t.Helper()
+		db := beadsfake.New()
+		db.Seed(beads.Issue{ID: oldID, Title: "previous hook", Status: string(beads.StatusHooked), Assignee: agent})
+		return db
+	}
+	release := func(db *beadsfake.Fake) func(*beads.Issue) error {
+		return func(d *beads.Issue) error { return releaseBeadToOpen(db, d.ID) }
+	}
+
+	t.Run("a failed new hook leaves the old bead hooked and assigned", func(t *testing.T) {
+		t.Parallel()
+		db := seed(t)
+		err := hookThenDisplace(&beads.Issue{ID: oldID}, func() error { return errors.New("dolt down") }, release(db))
+		if err == nil {
+			t.Fatal("a failed hook write must return its error")
+		}
+		got, err := db.Show(oldID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != string(beads.StatusHooked) || got.Assignee != agent {
+			t.Fatalf("displaced bead = status %q assignee %q, want hooked/%q", got.Status, got.Assignee, agent)
+		}
+	})
+
+	t.Run("a committed new hook releases the old bead to open with no assignee", func(t *testing.T) {
+		t.Parallel()
+		db := seed(t)
+		if err := hookThenDisplace(&beads.Issue{ID: oldID}, func() error { return nil }, release(db)); err != nil {
+			t.Fatalf("hookThenDisplace: %v", err)
+		}
+		got, err := db.Show(oldID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != string(beads.StatusOpen) || got.Assignee != "" {
+			t.Fatalf("displaced bead = status %q assignee %q, want open with no assignee", got.Status, got.Assignee)
+		}
+	})
 }

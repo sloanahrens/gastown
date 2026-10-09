@@ -290,7 +290,12 @@ func runHook(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("checking existing hooked beads: %w", err)
 	}
 
-	// If there's an existing hooked bead, check if we can auto-replace
+	// If there's an existing hooked bead, decide how the new hook replaces it.
+	// The old bead is left alone here: the new hook is written first and the
+	// replacement only carried out once that write is committed, so a hook that
+	// fails every retry leaves the previous hook exactly as it was (gt-34z9v).
+	var displaced *beads.Issue
+	var displacedByClose bool
 	if len(existingPinned) > 0 {
 		existing := existingPinned[0]
 
@@ -303,33 +308,17 @@ func runHook(_ *cobra.Command, args []string) error {
 		// Check if existing bead is complete
 		isComplete, hasAttachment := checkPinnedBeadComplete(b, existing)
 
-		if isComplete {
-			// Auto-replace completed bead
+		switch {
+		case isComplete:
+			// Auto-replace completed bead: a molecule is closed, a naked bead
+			// is only unpinned (it might still have value).
 			fmt.Printf("%s Replacing completed bead %s...\n", style.Dim.Render("ℹ"), existing.ID)
-			if !hookDryRun {
-				if hasAttachment {
-					if err := closeCompletedHookedMolecule(workDir, existing.ID); err != nil {
-						return fmt.Errorf("closing completed bead %s: %w", existing.ID, err)
-					}
-				} else {
-					// Naked bead - just unpin, don't close (might have value)
-					status := "open"
-					if err := b.Update(existing.ID, beads.UpdateOptions{Status: &status}); err != nil {
-						return fmt.Errorf("unpinning bead %s: %w", existing.ID, err)
-					}
-				}
-			}
-		} else if hookForce {
+			displaced, displacedByClose = existing, hasAttachment
+		case hookForce:
 			// Force replace incomplete bead
 			fmt.Printf("%s Force-replacing incomplete bead %s...\n", style.Dim.Render("⚠"), existing.ID)
-			if !hookDryRun {
-				// Unpin by setting status back to open
-				status := "open"
-				if err := b.Update(existing.ID, beads.UpdateOptions{Status: &status}); err != nil {
-					return fmt.Errorf("unpinning bead %s: %w", existing.ID, err)
-				}
-			}
-		} else {
+			displaced = existing
+		default:
 			// Existing incomplete bead blocks new hook
 			return fmt.Errorf("existing hooked bead %s is incomplete (%s)\n  Use --force to replace, or complete the existing work first",
 				existing.ID, existing.Title)
@@ -353,28 +342,16 @@ func runHook(_ *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Hook the bead using bd update with retry logic (discovery-based approach).
-	// Run from town root so bd can find routes.jsonl for prefix-based routing.
-	// This is essential for hooking town beads (hq-* prefix) stored in ~/gt/.beads.
-	// Dolt can fail with concurrency errors (HTTP 400) when multiple agents write
-	// simultaneously. We retry with exponential backoff, matching sling.go behavior.
-	const hookMaxRetries = 5
-	const hookBaseBackoff = 500 * time.Millisecond
-	const hookBackoffMax = 10 * time.Second
-	var lastHookErr error
-	for attempt := 1; attempt <= hookMaxRetries; attempt++ {
-		hooked := beads.StatusHooked
-		if err := pinnedBd(resolveBeadDir(beadID)).Update(beadID, beads.UpdateOptions{Status: &hooked, Assignee: &agentID}); err != nil {
-			lastHookErr = err
-			if attempt < hookMaxRetries {
-				backoff := slingBackoff(attempt, hookBaseBackoff, hookBackoffMax)
-				fmt.Printf("%s Hook attempt %d failed, retrying in %v...\n", style.Warning.Render("⚠"), attempt, backoff)
-				clockwork.NewRealClock().Sleep(backoff)
-				continue
-			}
-			return fmt.Errorf("hooking bead after %d attempts: %w", hookMaxRetries, lastHookErr)
+	// Hook the new bead first, then release the bead it displaced. Ordering is
+	// the point: a hook that fails every retry must leave the previously hooked
+	// bead exactly as it was (gt-34z9v).
+	if err := hookThenDisplace(displaced, func() error { return writeHookedBead(beadID, agentID) }, func(d *beads.Issue) error {
+		if displacedByClose {
+			return closeCompletedHookedMolecule(workDir, d.ID)
 		}
-		break
+		return releaseBeadToOpen(b, d.ID)
+	}); err != nil {
+		return err
 	}
 
 	if targetAgent != "" {
@@ -410,6 +387,58 @@ func closeCompletedHookedMolecule(workDir, beadID string) error {
 // hook's database.
 func closeCompletedHookedMoleculeIn(db beads.Client, beadID string) error {
 	return db.ForceCloseWithReason("Auto-replaced by gt hook (molecule complete)", beadID)
+}
+
+// writeHookedBead commits beadID to agentID's hook. Dolt can fail with
+// concurrency errors (HTTP 400) when multiple agents write simultaneously, so
+// the write retries with exponential backoff, matching sling.go behavior.
+func writeHookedBead(beadID, agentID string) error {
+	const maxRetries = 5
+	const baseBackoff = 500 * time.Millisecond
+	const backoffMax = 10 * time.Second
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		hooked := beads.StatusHooked
+		if err := pinnedBd(resolveBeadDir(beadID)).Update(beadID, beads.UpdateOptions{Status: &hooked, Assignee: &agentID}); err != nil {
+			lastErr = err
+			if attempt < maxRetries {
+				backoff := slingBackoff(attempt, baseBackoff, backoffMax)
+				fmt.Printf("%s Hook attempt %d failed, retrying in %v...\n", style.Warning.Render("⚠"), attempt, backoff)
+				clockwork.NewRealClock().Sleep(backoff)
+				continue
+			}
+			return fmt.Errorf("hooking bead after %d attempts: %w", maxRetries, lastErr)
+		}
+		break
+	}
+	return nil
+}
+
+// hookThenDisplace writes the new hook and, only once that write is committed,
+// releases the bead it displaced. A displaced bead that cannot be released is
+// reported, not fatal: the new hook is already live, so returning an error
+// would tell the caller the hook failed when it did not. displaced is nil when
+// nothing was hooked.
+func hookThenDisplace(displaced *beads.Issue, write func() error, release func(*beads.Issue) error) error {
+	if err := write(); err != nil {
+		return err
+	}
+	if displaced == nil {
+		return nil
+	}
+	if err := release(displaced); err != nil {
+		style.PrintWarning("could not release replaced bead %s: %v", displaced.ID, err)
+	}
+	return nil
+}
+
+// releaseBeadToOpen sets id back to open with no assignee, the same release
+// unhookFromPreviousOwner performs. The status and the assignee are cleared
+// together so a released bead does not keep naming the agent whose hook it
+// left (gt-34z9v).
+func releaseBeadToOpen(db beads.Client, id string) error {
+	open, unassigned := string(beads.StatusOpen), ""
+	return db.Update(id, beads.UpdateOptions{Status: &open, Assignee: &unassigned})
 }
 
 // hookBeadArgError rejects a first argument that does not look like a bead

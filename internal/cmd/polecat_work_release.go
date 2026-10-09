@@ -163,9 +163,10 @@ func (r bdPolecatWorkReleaser) RestoreBead(beadID, expectedAssignee, status, ass
 
 func (r bdPolecatWorkReleaser) ResetSlot(agentID string) error {
 	// Same reset a --force reassignment applies to the outgoing polecat
-	// (gt-skwt): hook_bead cleared, agent_state idle. Warn-only inside.
-	clearReassignedPolecatState(r.townRoot, agentID)
-	return nil
+	// (gt-skwt): hook_bead cleared, agent_state idle. The error is returned so
+	// the caller only reports the slot reset when it really was (gt-34z9v).
+	_, err := clearReassignedPolecatStateE(r.townRoot, agentID)
+	return err
 }
 
 func (r bdPolecatWorkReleaser) Annotate(beadID, text string) error {
@@ -183,17 +184,23 @@ var newPolecatWorkReleaserFn = func(townRoot, hookWorkDir string) polecatWorkRel
 // survival cannot be verified, the bead goes back to its pre-sling holder
 // (guarded on this polecat still holding it) instead of being released to a
 // fresh re-dispatch from main. Reports whether the bead was handled here.
-func restoreOriginalHoldIfWorkSurvives(r polecatWorkReleaser, townRoot, agentID, beadID string, orig *beadHold) bool {
+func restoreOriginalHoldIfWorkSurvives(r polecatWorkReleaser, townRoot, agentID, beadID string, orig *beadHold) (bool, error) {
 	return restoreOriginalHoldIfWorkSurvivesWith(r, survivingWorkForBeadFn, townRoot, agentID, beadID, orig)
 }
 
 // restoreOriginalHoldIfWorkSurvivesWith takes the surviving-work lookup.
-func restoreOriginalHoldIfWorkSurvivesWith(r polecatWorkReleaser, survivingWork func(townRoot, beadID string) (string, error), townRoot, agentID, beadID string, orig *beadHold) bool {
+//
+// A restore that fails reports handled=false with the error, so the caller
+// still releases the bead rather than dropping it from release: the bead is
+// hooked to a polecat that is being removed, and leaving it there is the
+// half-updated state this guards against (gt-34z9v). The failure is also left
+// on the bead so the next actor can see why it moved.
+func restoreOriginalHoldIfWorkSurvivesWith(r polecatWorkReleaser, survivingWork func(townRoot, beadID string) (string, error), townRoot, agentID, beadID string, orig *beadHold) (bool, error) {
 	if beadID == "" || orig == nil {
-		return false
+		return false, nil
 	}
 	if held, _ := heldBy(r, agentID, beadID); !held {
-		return false
+		return false, nil
 	}
 	branch, err := survivingWork(townRoot, beadID)
 	reason := ""
@@ -203,7 +210,7 @@ func restoreOriginalHoldIfWorkSurvivesWith(r polecatWorkReleaser, survivingWork 
 	case branch != "":
 		reason = "work survives on " + branch
 	default:
-		return false
+		return false, nil
 	}
 	status := orig.Status
 	if status == "" {
@@ -212,7 +219,16 @@ func restoreOriginalHoldIfWorkSurvivesWith(r polecatWorkReleaser, survivingWork 
 	restored, rerr := r.RestoreBead(beadID, agentID, status, orig.Assignee)
 	switch {
 	case rerr != nil:
+		holder := orig.Assignee
+		if holder == "" {
+			holder = "(unassigned)"
+		}
+		note := fmt.Sprintf("restore to original holder %s/%s failed: %v", status, holder, rerr)
+		if aerr := r.Annotate(beadID, note); aerr != nil {
+			fmt.Printf("  %s Could not annotate %s: %v\n", style.Dim.Render("Warning:"), beadID, aerr)
+		}
 		fmt.Printf("  %s Could not restore %s to its original holder: %v\n", style.Dim.Render("Warning:"), beadID, rerr)
+		return false, fmt.Errorf("restoring %s to its original holder: %w", beadID, rerr)
 	case restored:
 		holder := orig.Assignee
 		if holder == "" {
@@ -220,5 +236,5 @@ func restoreOriginalHoldIfWorkSurvivesWith(r polecatWorkReleaser, survivingWork 
 		}
 		fmt.Printf("  %s Restored %s to %s/%s: %s\n", style.Dim.Render("○"), beadID, status, holder, reason)
 	}
-	return true
+	return true, nil
 }
