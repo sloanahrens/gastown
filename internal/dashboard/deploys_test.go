@@ -85,6 +85,15 @@ func testDeployRun(id int64, ref, status string, created int) forgejo.ActionRun 
 	}
 }
 
+// testStagingRun builds a run of the staging workflow: the landing that
+// deploys main to staging after every merge, whose ref is the branch it
+// deployed where a release's is a tag.
+func testStagingRun(id int64, ref, status string, created int) forgejo.ActionRun {
+	run := testDeployRun(id, ref, status, created)
+	run.WorkflowID = ".forgejo/workflows/staging.yml"
+	return run
+}
+
 // testJob is one job of a run, with the needs that order it.
 func testJob(name, status string, needs ...string) forgejo.ActionRunJob {
 	return forgejo.ActionRunJob{Name: name, Status: status, Needs: needs}
@@ -242,6 +251,85 @@ func TestDeployThresholds(t *testing.T) {
 	assert.Equal(t, 40, deployTextMax, "runes of a stage name or a ref the page shows")
 }
 
+// A landing's staging deploy is a deploy the operator has to see: the block
+// follows staging.yml beside deploy.yml, names each row's workflow, and orders
+// the two together, so a landing that moved staging and a release that shipped
+// read as the one list of deploys they are (gt-2h2lx).
+func TestDeployReaderTakesTheRunsOfBothWorkflows(t *testing.T) {
+	t.Parallel()
+
+	staging := testStagingRun(2, "main", "running", 55)
+	release := testDeployRun(1, "v0.1.0", "success", 30)
+
+	stub := &deployStub{
+		repos: []string{"sloan/fractals-nextjs"},
+		runs:  map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {release, staging}},
+		jobs: map[int64][]forgejo.ActionRunJob{
+			1: {testJob("build", "success"), testJob("staging-preview", "success", "build"), testJob("prod", "success", "staging-preview")},
+			2: {testJob("build", "success"), testJob("staging", "running", "build")},
+		},
+	}
+	d := newDeployTestReader(stub, nil).Read()
+
+	require.Empty(t, d.Error)
+	require.Len(t, d.Runs, 2)
+	assert.Equal(t, []string{"main", "v0.1.0"}, refsOf(d.Runs), "newest first, across both workflows")
+	assert.Equal(t, []string{"staging.yml", "deploy.yml"}, workflowsOf(d.Runs), "the row names the workflow it came from")
+	assert.Equal(t, []string{"build success", "staging running"}, stageNames(d.Runs[0].Stages), "the staging run's own jobs")
+	assert.Equal(t, []string{"build success", "staging-preview success", "prod success"}, stageNames(d.Runs[1].Stages), "and the release's")
+	assert.Equal(t, []int64{2, 1}, stub.jobsAsked)
+}
+
+// The runner-trouble inference reads the run, not the workflow it came from: a
+// staging run nothing has picked up says so on the clock a release's does, so
+// a landing whose staging deploy never starts reaches the operator the same
+// way (gt-2h2lx).
+func TestDeployReaderSaysNoRunnerPickedUpAStagingRunThatWaited(t *testing.T) {
+	t.Parallel()
+
+	stub := &deployStub{
+		repos: []string{"sloan/fractals-nextjs"},
+		// Six minutes waiting, against the five-minute threshold.
+		runs: map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {testStagingRun(7, "main", "waiting", 54)}},
+		jobs: map[int64][]forgejo.ActionRunJob{7: {testJob("build", "waiting")}},
+	}
+	d := newDeployTestReader(stub, nil).Read()
+
+	require.Len(t, d.Runs, 1)
+	assert.Equal(t, stagingWorkflow, d.Runs[0].Workflow)
+	assert.Equal(t, "no runner picked this up for 6 min", d.Runs[0].Warn)
+}
+
+// The two workflows share every cap: a repo's staging runs compete with its
+// releases for the newest deployRunsKept rows, and every row of both competes
+// for the deployJobsKept job fetches, so a busy week of landings cannot crowd
+// the releases out of the block, or the other way round (gt-2h2lx).
+func TestDeployReaderCapsBothWorkflowsTogether(t *testing.T) {
+	t.Parallel()
+
+	var runs []forgejo.ActionRun
+	for i := 0; i < 8; i++ {
+		if i%2 == 0 {
+			runs = append(runs, testStagingRun(int64(i+1), "main", "success", i))
+			continue
+		}
+		runs = append(runs, testDeployRun(int64(i+1), "v0."+strconv.Itoa(i), "success", i))
+	}
+	stub := &deployStub{
+		repos: []string{"sloan/fractals-nextjs"},
+		runs:  map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": runs},
+	}
+	d := newDeployTestReader(stub, nil).Read()
+
+	require.Len(t, d.Runs, deployRunsKept, "the newest five of the repo's runs, of either workflow")
+	assert.Equal(t, []string{"v0.7", "main", "v0.5", "main", "v0.3"}, refsOf(d.Runs), "newest first")
+	assert.Equal(t, []string{"deploy.yml", "staging.yml", "deploy.yml", "staging.yml", "deploy.yml"}, workflowsOf(d.Runs))
+	assert.Equal(t, []int64{8, 7, 6}, stub.jobsAsked, "jobs for the newest three, the two workflows sharing the cap")
+	for i, row := range d.Runs {
+		assert.Equal(t, i >= deployJobsKept, row.StagesUnread, "a run past the cap says its stages were not read")
+	}
+}
+
 // A repo with no deploy run is a repo with no deploy run: the block says so
 // rather than failing, and a run of another workflow is not a deploy.
 func TestDeployReaderWithNoDeployRuns(t *testing.T) {
@@ -385,6 +473,16 @@ func refsOf(rows []DeployRun) []string {
 	out := make([]string, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, r.Ref)
+	}
+	return out
+}
+
+// workflowsOf names the rows by the workflow each came from, which is what the
+// tests that read both workflows address them by.
+func workflowsOf(rows []DeployRun) []string {
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.Workflow)
 	}
 	return out
 }

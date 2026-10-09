@@ -375,8 +375,9 @@ type State struct {
 	// Cloud is the cloud patrol's latest report, read from the directory it
 	// writes. It is nil until the reader first reports.
 	Cloud *Cloud `json:"cloud,omitempty"`
-	// Deploys is the deploy workflow's runs, drawn inside the Cloud section
-	// under the patrol's findings. It is nil until the reader first reports.
+	// Deploys is the deploy and staging workflows' runs, drawn inside the Cloud
+	// section under the patrol's findings. It is nil until the reader first
+	// reports.
 	Deploys   *Deploys        `json:"deploys,omitempty"`
 	Spend     json.RawMessage `json:"spend,omitempty"`
 	OM        *OM             `json:"om,omitempty"`
@@ -417,7 +418,7 @@ type Config struct {
 	TierSweep func() *TierSweep
 	// Forgejo reads the viewer's Forgejo recent-activity feed.
 	Forgejo func() *ForgejoFeed
-	// Deploys reads the deploy workflow's runs from the same viewer.
+	// Deploys reads the deploy and staging workflows' runs from the same viewer.
 	Deploys func() *Deploys
 	// Escalation reads the town's open escalation beads.
 	Escalation func() *Escalations

@@ -73,11 +73,11 @@ repeated. With no token file the panel is left out, and a refresh that fails
 shows the last good feed marked stale.
 
 The Deploys block under the Cloud panel's findings reads those same repos'
-deploy.yml runs — every run of that workflow, whatever its event — with each
-run's stages in the order their needs give, refreshed every minute. It infers
-runner trouble from the run itself: the runners API is owner-only and answers
-the viewer 403, so a run nothing has picked up, and one that has not moved, are
-said as inferences.
+deploy.yml and staging.yml runs — every run of either workflow, whatever its
+event — with a landing's staging run tagged as one, each run's stages in the
+order their needs give, refreshed every minute. It infers runner trouble from
+the run itself: the runners API is owner-only and answers the viewer 403, so a
+run nothing has picked up, and one that has not moved, are said as inferences.
 
 The Cloud panel reads the report the cloud patrol writes — report.json with a
 heartbeat beside it — from /Users/Shared/gt-cloud/reports, or from the

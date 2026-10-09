@@ -58,10 +58,15 @@ func TestDeploysBlockDrawsWhatTheReaderDecided(t *testing.T) {
 
 	// The repo column is measured from the runs rather than fixed (gt-1hob8),
 	// so the longest name the block lists is the width of the column, and the
-	// header cells carry the same classes as the row cells they name.
+	// header cells carry the same classes as the row cells they name. The ref
+	// column keeps its width and takes the staging tag's on top of it, so a
+	// list holding one still lines its refs up with the header (gt-2h2lx).
 	for _, want := range []string{
-		`for (const r of runs) widest = Math.max(widest, repoShort(r.repo).length);`,
+		`for (const r of runs) {`,
+		`widest = Math.max(widest, repoShort(r.repo).length);`,
+		`tags = tags || r.workflow === DEPLOY_STAGING;`,
 		`box.style.setProperty("--drepo", widest + "ch");`,
+		`box.style.setProperty("--dref", (DEPLOY_REF_CH + (tags ? DEPLOY_STAGING_TAG_CH : 0)) + "ch");`,
 		`[["Repo", "drepo"], ["Ref", "dref"], ["Commit", "dhash"], ["State", "dstate"], ["Age", "dage"]]`,
 	} {
 		if !strings.Contains(draw, want) {
@@ -73,7 +78,7 @@ func TestDeploysBlockDrawsWhatTheReaderDecided(t *testing.T) {
 	// reader's warning under that.
 	row := pageFunc(t, "deployRow")
 	for _, want := range []string{
-		`row.append(repo, el("span", "dref", r.ref || "–"), el("span", "dhash", r.hash || "–"), el("span", "dstate", r.status || "–"), el("span", "dage", r.at ? age(r.at) : "–"), deployStages(r));`,
+		`row.append(repo, ref, el("span", "dhash", r.hash || "–"), el("span", "dstate", r.status || "–"), el("span", "dage", r.at ? age(r.at) : "–"), deployStages(r));`,
 		`if (r.warn) row.append(el("span", "dwarn warnc", r.warn));`,
 		`const row = r.url ? el("a", "drow") : el("div", "drow");`,
 		`if (r.url) { row.href = r.url; row.target = "_blank"; row.rel = "noopener"; row.title = r.url; }`,
@@ -100,11 +105,14 @@ func TestDeploysBlockDrawsWhatTheReaderDecided(t *testing.T) {
 		t.Error("index.html has no stage glyphs, so a chip names no state")
 	}
 
-	// The repo column takes the measured width and the stage chips sit on the
-	// row's line while they fit, wrapping under it on a panel too narrow for
-	// both (gt-1hob8).
+	// The repo and ref columns take their measured widths — the ref column one
+	// that holds a staging run's tag beside its ref (gt-2h2lx) — and the stage
+	// chips sit on the row's line while they fit, wrapping under it on a panel
+	// too narrow for both (gt-1hob8).
 	for _, want := range []string{
 		`.drepo{flex:0 0 var(--drepo,15ch)}`,
+		`.dref{flex:0 0 var(--dref,13ch);display:flex;gap:4px;align-items:baseline}`,
+		`.dref .tag{flex:0 0 auto;margin-right:0}`,
 		`.dstage{flex:0 1 auto;min-width:0;display:flex;gap:4px;flex-wrap:wrap}`,
 	} {
 		if !strings.Contains(string(indexHTML), want) {
@@ -116,6 +124,38 @@ func TestDeploysBlockDrawsWhatTheReaderDecided(t *testing.T) {
 	// reader has reported: the state's field is absent until then.
 	if all := pageFunc(t, "renderAll"); !strings.Contains(all, "renderDeploys(state)") {
 		t.Error("renderAll does not draw the Deploys block")
+	}
+}
+
+// A staging run is told from a release at a glance: the reader names the
+// workflow each row came from, and the row whose workflow is staging.yml —
+// whose ref is the branch it deployed, where a release's is a tag — carries a
+// dim tag beside that ref. A release row carries none (gt-2h2lx).
+func TestDeploysBlockTagsAStagingRunAndNotARelease(t *testing.T) {
+	t.Parallel()
+
+	row := pageFunc(t, "deployRow")
+	for _, want := range []string{
+		`const ref = el("span", "dref", r.ref || "–");`,
+		`if (r.workflow === DEPLOY_STAGING) {`,
+		`const g = el("span", "tag", "staging");`,
+		`ref.append(g);`,
+	} {
+		if !strings.Contains(row, want) {
+			t.Errorf("deployRow has no %q", want)
+		}
+	}
+	if !strings.Contains(string(indexHTML), `const DEPLOY_STAGING = "staging.yml";`) {
+		t.Error("index.html does not name the staging workflow, so the tag is read off no value")
+	}
+
+	// The tag is dim by inheritance: it rides the ref cell, which the row's
+	// rule colours the way it colours a ref, and carries no colour of its own.
+	if !strings.Contains(string(indexHTML), `.drow .dref,.drow .dhash,.drow .dage{color:var(--dim)}`) {
+		t.Error("index.html does not colour the ref cell dim, so the tag beside a ref is not")
+	}
+	if !strings.Contains(string(indexHTML), `.dref .tag{flex:0 0 auto;margin-right:0}`) {
+		t.Error("index.html does not size the ref cell's tag, so a long ref could shrink it")
 	}
 }
 
