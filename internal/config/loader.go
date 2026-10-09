@@ -108,6 +108,10 @@ func LoadRigsConfig(path string) (*RigsConfig, error) {
 // Writes to a temp file in the same directory then renames into place; the
 // rename is atomic on POSIX, so concurrent readers never observe a zero-byte
 // or partially-written rigs.json.
+//
+// It replaces the whole registry, so it drops the rigs registered or parked
+// since the caller read its snapshot. A caller changing one rig writes
+// through SetRigEntry or DeleteRigEntry instead (gt-4iobv).
 func SaveRigsConfig(path string, config *RigsConfig) error {
 	if err := validateRigsConfig(config); err != nil {
 		return err

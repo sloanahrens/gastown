@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/townconfig"
 )
 
 func setupTestTown(t *testing.T) (string, *config.RigsConfig) {
@@ -1832,4 +1833,62 @@ func TestVerifyRigIdentityRoundTrip(t *testing.T) {
 			t.Errorf("verifyRigIdentity = %v, want nil when no prefix is expected", err)
 		}
 	})
+}
+
+// TestAddRig_KeepsRegistryChangesLandedDuringClone is the regression test for
+// gt-4iobv: AddRig holds the registry as it was before the clone, and saving
+// that snapshot whole dropped every rig another gt process registered or
+// parked while the clone ran.
+func TestAddRig_KeepsRegistryChangesLandedDuringClone(t *testing.T) {
+	t.Parallel()
+	root, rigsConfig := setupTestTown(t)
+	manager, f, _ := testManager(root, rigsConfig)
+	gitURL := remoteRepo(t, f, filepath.Join(t.TempDir(), "source"), nil)
+
+	// The registry as AddRig's snapshot found it: riga, not parked.
+	rigsConfig.Rigs["riga"] = config.RigEntry{GitURL: "https://example.com/a.git"}
+	rigsPath := filepath.Join(root, "mayor", "rigs.json")
+	if err := config.SaveRigsConfig(rigsPath, rigsConfig); err != nil {
+		t.Fatalf("saving the registry snapshot: %v", err)
+	}
+
+	// The clone runs for minutes. In that window gt rig park parks riga and
+	// a second gt rig add registers rigb.
+	if _, err := townconfig.Park(root, "riga", config.RigParked{By: "test", Reason: "concurrent"}); err != nil {
+		t.Fatalf("parking riga: %v", err)
+	}
+	concurrent, err := config.LoadRigsConfig(rigsPath)
+	if err != nil {
+		t.Fatalf("loading the registry: %v", err)
+	}
+	concurrent.Rigs["rigb"] = config.RigEntry{GitURL: "https://example.com/b.git"}
+	if err := config.SaveRigsConfig(rigsPath, concurrent); err != nil {
+		t.Fatalf("registering rigb: %v", err)
+	}
+
+	if _, err := manager.AddRig(AddRigOptions{
+		Name:          "rigc",
+		GitURL:        gitURL,
+		BeadsPrefix:   "rc",
+		SkipDoltCheck: true,
+	}); err != nil {
+		t.Fatalf("AddRig: %v", err)
+	}
+
+	after, err := config.LoadRigsConfig(rigsPath)
+	if err != nil {
+		t.Fatalf("loading the registry after the add: %v", err)
+	}
+	if _, ok := after.Rigs["rigb"]; !ok {
+		t.Errorf("rigb, registered while the clone ran, is gone: %v", after.Rigs)
+	}
+	parked := after.Rigs["riga"].Parked
+	if parked == nil {
+		t.Errorf("riga's park record is gone: %v", after.Rigs)
+	} else if parked.Reason != "concurrent" {
+		t.Errorf("riga's park record = %+v, want the record the concurrent park wrote", *parked)
+	}
+	if _, ok := after.Rigs["rigc"]; !ok {
+		t.Errorf("rigc, the rig this add registered, is missing: %v", after.Rigs)
+	}
 }

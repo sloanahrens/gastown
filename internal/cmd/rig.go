@@ -930,8 +930,10 @@ func runRigRemove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("removing rig: %w", err)
 	}
 
-	// Save updated config
-	if err := config.SaveRigsConfig(rigsPath, rigsConfig); err != nil {
+	// Remove only this rig's entry: rigsConfig was loaded before the session
+	// checks above, and saving it whole reverts a rig another gt process
+	// registered or parked in that window (gt-4iobv).
+	if err := config.DeleteRigEntry(rigsPath, name); err != nil {
 		return fmt.Errorf("saving rigs config: %w", err)
 	}
 
@@ -1021,8 +1023,10 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("adopting rig: %w", err)
 	}
 
-	// Save updated config
-	if err := config.SaveRigsConfig(rigsPath, rigsConfig); err != nil {
+	// Save only this rig's entry: rigsConfig was loaded before the adoption
+	// ran, and saving it whole reverts a rig another gt process registered or
+	// parked in that window (gt-4iobv).
+	if err := config.SetRigEntry(rigsPath, name, rigsConfig.Rigs[name]); err != nil {
 		return fmt.Errorf("saving rigs config: %w", err)
 	}
 

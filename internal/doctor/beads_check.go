@@ -192,20 +192,16 @@ func (c *PrefixMismatchCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 }
 
-// Fix updates rigs.json to match the prefixes in routes.jsonl.
+// Fix updates rigs.json to match the prefixes in routes.jsonl. The registry
+// is read under its own lock and only its mismatched entries change, so a rig
+// another gt process registered, removed or parked while doctor ran keeps its
+// entry (gt-4iobv).
 func (c *PrefixMismatchCheck) Fix(ctx *CheckContext) error {
 	beadsDir := filepath.Join(ctx.TownRoot, ".beads")
 
 	// Load routes.jsonl
 	routes, err := beads.LoadRoutes(beadsDir)
 	if err != nil || len(routes) == 0 {
-		return nil // Nothing to fix
-	}
-
-	// Load rigs.json
-	rigsPath := filepath.Join(ctx.TownRoot, "mayor", "rigs.json")
-	rigsConfig, err := config.LoadRigsConfig(rigsPath)
-	if err != nil {
 		return nil // Nothing to fix
 	}
 
@@ -216,32 +212,35 @@ func (c *PrefixMismatchCheck) Fix(ctx *CheckContext) error {
 		routePrefixByPath[r.Path] = prefix
 	}
 
-	// Update each rig's prefix to match routes.jsonl
-	modified := false
-	for rigName, rigEntry := range rigsConfig.Rigs {
-		expectedPath := determineRigBeadsPath(ctx.TownRoot, rigName)
-		routePrefix, hasRoute := routePrefixByPath[expectedPath]
-		if !hasRoute {
-			continue
+	rigsPath := filepath.Join(ctx.TownRoot, "mayor", "rigs.json")
+	err = config.UpdateConfigJSON(rigsPath, 0o644, func(rigsConfig *config.RigsConfig, exists bool) error {
+		if !exists {
+			return config.ErrNotFound
 		}
+		// Update each rig's prefix to match routes.jsonl
+		for rigName, rigEntry := range rigsConfig.Rigs {
+			expectedPath := determineRigBeadsPath(ctx.TownRoot, rigName)
+			routePrefix, hasRoute := routePrefixByPath[expectedPath]
+			if !hasRoute {
+				continue
+			}
 
-		// Ensure BeadsConfig exists
-		if rigEntry.BeadsConfig == nil {
-			rigEntry.BeadsConfig = &config.BeadsConfig{}
-		}
+			// Ensure BeadsConfig exists
+			if rigEntry.BeadsConfig == nil {
+				rigEntry.BeadsConfig = &config.BeadsConfig{}
+			}
 
-		if rigEntry.BeadsConfig.Prefix != routePrefix {
-			rigEntry.BeadsConfig.Prefix = routePrefix
-			rigsConfig.Rigs[rigName] = rigEntry
-			modified = true
+			if rigEntry.BeadsConfig.Prefix != routePrefix {
+				rigEntry.BeadsConfig.Prefix = routePrefix
+				rigsConfig.Rigs[rigName] = rigEntry
+			}
 		}
+		return nil
+	})
+	if errors.Is(err, config.ErrNotFound) {
+		return nil // Nothing to fix
 	}
-
-	if modified {
-		return config.SaveRigsConfig(rigsPath, rigsConfig)
-	}
-
-	return nil
+	return err
 }
 
 // dbPrefixGetter abstracts querying the database for issue_prefix.

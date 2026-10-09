@@ -254,19 +254,28 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	// Create the rig registry (only if it doesn't already exist).
 	// Re-running install must NOT clobber existing rig registrations, which
 	// on the two-file layout live in mayor/town.json (config.LoadRigsConfig
-	// finds them there).
+	// finds them there). The create runs under the registry's lock and
+	// leaves a registry another gt process wrote in the meantime alone
+	// (gt-4iobv).
 	rigsPath := filepath.Join(mayorDir, "rigs.json")
+	created := false
 	if _, err := config.LoadRigsConfig(rigsPath); errors.Is(err, config.ErrNotFound) {
-		rigsConfig := &config.RigsConfig{
-			Version: config.CurrentRigsVersion,
-			Rigs:    make(map[string]config.RigEntry),
-		}
-		if err := config.SaveRigsConfig(rigsPath, rigsConfig); err != nil {
+		if err := config.UpdateConfigJSON(rigsPath, 0o600, func(rc *config.RigsConfig, exists bool) error {
+			if exists {
+				return nil
+			}
+			created = true
+			rc.Version = config.CurrentRigsVersion
+			rc.Rigs = make(map[string]config.RigEntry)
+			return nil
+		}); err != nil {
 			return fmt.Errorf("writing rigs.json: %w", err)
 		}
-		fmt.Printf("   ✓ Created mayor/rigs.json\n")
 	} else if err != nil {
 		return fmt.Errorf("checking rigs.json: %w", err)
+	}
+	if created {
+		fmt.Printf("   ✓ Created mayor/rigs.json\n")
 	} else {
 		fmt.Printf("   • rig registry already exists, preserving\n")
 	}
