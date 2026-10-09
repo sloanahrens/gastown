@@ -5669,3 +5669,91 @@ func TestEnsureRigIssuePrefix_ReadsThroughBDAndSkipsMatchingPrefix(t *testing.T)
 		}
 	}
 }
+
+// runningRemoveFixture is a town with a live fake dolt server and one
+// database on disk, for the RemoveDatabase fail-closed tests (gt-tk99u).
+func runningRemoveFixture(t *testing.T, replies ...fakeReply) (*fakeHost, *host, string, string) {
+	t.Helper()
+	f := newFakeHost().townPort(4550)
+	h := f.host()
+	townRoot := testTown(t)
+	dbPath := setupDoltDB(t, filepath.Join(townRoot, ".dolt-data"), "orphan_db")
+	pid := f.doltServer(townRoot, 4550)
+	writePIDFile(t, h, townRoot, pid)
+	f.on("dolt *", replies...)
+	if running, _, _ := h.IsRunning(townRoot); !running {
+		t.Fatal("fixture server is not seen as running")
+	}
+	return f, h, townRoot, dbPath
+}
+
+// A failed "has user tables" probe is "unknown", not "no data": without
+// --force the directory must survive (gt-tk99u).
+func TestRemoveDatabase_RefusesWhenUserTableProbeFails(t *testing.T) {
+	t.Parallel()
+	f, h, townRoot, dbPath := runningRemoveFixture(t, fakeReply{stderr: "context deadline exceeded", code: 1})
+
+	err := h.RemoveDatabase(townRoot, "orphan_db", false)
+	if err == nil {
+		t.Fatal("RemoveDatabase succeeded although the user-table probe failed")
+	}
+	if !strings.Contains(err.Error(), "cannot verify") {
+		t.Errorf("error = %v, want it to say the contents cannot be verified", err)
+	}
+	if _, statErr := os.Stat(dbPath); statErr != nil {
+		t.Errorf("database directory was removed after a failed probe: %v", statErr)
+	}
+	if got := f.ranMatching("DROP DATABASE"); len(got) != 0 {
+		t.Errorf("DROP ran after a failed probe: %v", got)
+	}
+}
+
+// A DROP that fails for any reason but a missing database must not be
+// followed by deleting the directory of a server that may still hold it open.
+func TestRemoveDatabase_RefusesWhenDropFails(t *testing.T) {
+	t.Parallel()
+	// probe: no user tables; DROP: fails.
+	_, h, townRoot, dbPath := runningRemoveFixture(t,
+		fakeReply{stdout: "Tables_in_orphan_db\n"},
+		fakeReply{stderr: "database is locked by another connection", code: 1},
+	)
+
+	err := h.RemoveDatabase(townRoot, "orphan_db", false)
+	if err == nil {
+		t.Fatal("RemoveDatabase succeeded although DROP DATABASE failed")
+	}
+	if _, statErr := os.Stat(dbPath); statErr != nil {
+		t.Errorf("database directory was removed after a failed DROP: %v", statErr)
+	}
+}
+
+// With --force the operator has accepted the risk: a failed probe or DROP
+// keeps the old behaviour and the directory is removed.
+func TestRemoveDatabase_ForceStillRemovesWhenServerCallsFail(t *testing.T) {
+	t.Parallel()
+	_, h, townRoot, dbPath := runningRemoveFixture(t, fakeReply{stderr: "boom", code: 1})
+
+	if err := h.RemoveDatabase(townRoot, "orphan_db", true); err != nil {
+		t.Fatalf("RemoveDatabase with force: %v", err)
+	}
+	if _, statErr := os.Stat(dbPath); !os.IsNotExist(statErr) {
+		t.Error("forced removal should delete the directory")
+	}
+}
+
+// A database the server has no record of is removed as before.
+func TestRemoveDatabase_RemovesWhenServerDoesNotKnowTheDatabase(t *testing.T) {
+	t.Parallel()
+	_, h, townRoot, dbPath := runningRemoveFixture(t,
+		fakeReply{stdout: "Tables_in_orphan_db\n"},
+		fakeReply{}, // DROP DATABASE IF EXISTS on an unknown database succeeds
+		fakeReply{}, // branch control cleanup
+	)
+
+	if err := h.RemoveDatabase(townRoot, "orphan_db", false); err != nil {
+		t.Fatalf("RemoveDatabase: %v", err)
+	}
+	if _, statErr := os.Stat(dbPath); !os.IsNotExist(statErr) {
+		t.Error("an unreferenced empty database should be removed")
+	}
+}

@@ -3757,7 +3757,14 @@ func (h *host) RemoveDatabase(townRoot, dbName string, force bool) error {
 	if !force {
 		if running {
 			// Server is up — check via SQL for user tables
-			if hasData, _ := h.databaseHasUserTables(townRoot, dbName); hasData {
+			// A failed probe (timeout, wedged server, database not loaded) is
+			// "unknown", not "no data": fail closed (gt-tk99u). gt dolt cleanup
+			// runs when the server is slow, which is exactly when the probe fails.
+			hasData, probeErr := h.databaseHasUserTables(townRoot, dbName)
+			if probeErr != nil {
+				return fmt.Errorf("cannot verify whether database %q has user tables (%w) — fix the server or use --force to remove", dbName, probeErr)
+			}
+			if hasData {
 				return fmt.Errorf("database %q has user tables — use --force to remove", dbName)
 			}
 		} else {
@@ -3783,7 +3790,14 @@ func (h *host) RemoveDatabase(townRoot, dbName string, force bool) error {
 			if IsReadOnlyError(dropErr.Error()) {
 				return fmt.Errorf("DROP put server into read-only mode: %w", dropErr)
 			}
-			// Other errors (DB not loaded, etc.) — continue with filesystem removal
+			// A server that does not know the database has nothing open, so
+			// removing the directory is safe. Any other failure (timeout, lock,
+			// connection error) leaves the server possibly holding the files,
+			// so without --force stop here rather than delete them from under it
+			// (gt-tk99u).
+			if !force && !isDatabaseUnknownError(dropErr.Error()) {
+				return fmt.Errorf("DROP DATABASE %q failed, directory left in place (use --force to remove anyway): %w", dbName, dropErr)
+			}
 		}
 		// Explicitly clean up branch control entries to prevent the database from being
 		// recreated on subsequent connections. `database` is a reserved word, so backtick-quote it.
@@ -3798,6 +3812,15 @@ func (h *host) RemoveDatabase(townRoot, dbName string, force bool) error {
 	}
 
 	return nil
+}
+
+// isDatabaseUnknownError reports whether a DROP DATABASE error says the server
+// has no such database.
+func isDatabaseUnknownError(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "database not found") ||
+		strings.Contains(lower, "does not exist") ||
+		strings.Contains(lower, "no such database")
 }
 
 // RemoveDatabase is (*host).RemoveDatabase on the real machine.
