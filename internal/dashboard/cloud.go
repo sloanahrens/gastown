@@ -156,18 +156,46 @@ type Cloud struct {
 	Total    int            `json:"total"`
 	Counts   CloudCounts    `json:"counts"`
 	More     int            `json:"more,omitempty"`
+	// Checks is the cloud-check plugin's latest status, read from its own file
+	// on the same poll as the report. It is nil when the reader has no checks
+	// reader wired, or when the plugin has written no status at all.
+	Checks *CloudChecks `json:"checks,omitempty"`
 }
 
 // CloudReader reads one reports directory.
-type CloudReader struct{ dir string }
+type CloudReader struct {
+	dir string
+	// checks reads the cloud-check plugin's status, when one is wired (see
+	// WithChecks). Nil leaves Cloud.Checks nil.
+	checks *CloudChecksReader
+}
 
 // NewCloudReader returns a reader of the patrol's reports in dir. The command
 // wiring names the directory (config.CloudReportsDir); a reader reads the one
 // it is given.
 func NewCloudReader(dir string) *CloudReader { return &CloudReader{dir: dir} }
 
-// Read returns the patrol's latest report as it stands at now.
+// WithChecks attaches the cloud-check status reader, so Read fills the pane's
+// checks line from the same poll as the patrol's report. A reader with none
+// leaves the line absent.
+func (r *CloudReader) WithChecks(c *CloudChecksReader) *CloudReader {
+	r.checks = c
+	return r
+}
+
+// Read returns the patrol's latest report as it stands at now, with the
+// cloud-check status the reader was given.
 func (r *CloudReader) Read(now time.Time) *Cloud {
+	c := r.read(now)
+	if r.checks != nil {
+		c.Checks = r.checks.Read(now)
+	}
+	return c
+}
+
+// read returns the patrol's latest report alone, leaving the checks line to
+// Read so no path out of it forgets to fill it.
+func (r *CloudReader) read(now time.Time) *Cloud {
 	c := &Cloud{At: now, Projects: []string{}, Findings: []CloudFinding{}}
 	if fi, err := os.Stat(r.dir); err != nil || !fi.IsDir() {
 		c.State, c.Note, c.NoPatrol = CloudMissing, cloudNoPatrol, true
