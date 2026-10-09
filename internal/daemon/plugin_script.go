@@ -159,6 +159,7 @@ func (r *scriptRunner) inFlight() []string {
 type scriptResult struct {
 	exitCode int
 	timedOut bool
+	aborted  bool  // the daemon's own shutdown canceled the run
 	err      error // process could not be started, or a non-exit error
 	output   string
 	duration time.Duration
@@ -189,6 +190,8 @@ func (r scriptResult) deferred(p *plugin.Plugin) bool {
 // status is the one-line summary used in run records and escalations.
 func (r scriptResult) status() string {
 	switch {
+	case r.aborted:
+		return "aborted by daemon shutdown"
 	case r.timedOut:
 		return fmt.Sprintf("timed out after %s", r.duration.Round(time.Second))
 	case r.err != nil && r.exitCode == 0:
@@ -278,6 +281,14 @@ func runPluginScript(ctx context.Context, run cmdRunFunc, env scriptEnv, p *plug
 			res.err = err
 		}
 	}
+	// The daemon's own shutdown cancels this context, and the kill that ends
+	// the run is then ours rather than a verdict on the script: the run is
+	// aborted, recorded nowhere and escalated nowhere (gt-7uyfc). Only a
+	// cancel reads that way — a timeout returned above as timedOut, and a run
+	// that finished on its own exit code keeps its own result.
+	if errors.Is(ctx.Err(), context.Canceled) && !res.ok() {
+		res.aborted = true
+	}
 	return res
 }
 
@@ -310,7 +321,16 @@ type scriptRunHooks struct {
 // A deferral is the one outcome with no record: the record is what satisfies
 // the cooldown gate, and a run that accomplished nothing must not buy one
 // (see scriptExitDeferred). The log line is the whole of its trail.
+//
+// An aborted run (the daemon stopping, see scriptResult.aborted) writes
+// nothing either: its kill was the daemon's own, so it is no verdict on the
+// plugin — a failure record would spend the plugin's cooldown and a failure
+// escalation would report the shutdown as the plugin's fault (gt-7uyfc).
 func completeScriptRun(p *plugin.Plugin, res scriptResult, h scriptRunHooks) {
+	if res.aborted {
+		h.logf("Handler: script plugin %s aborted (daemon shutting down); no run recorded", p.Name)
+		return
+	}
 	if res.deferred(p) {
 		h.logf("Handler: script plugin %s deferred (%s); will retry on the next heartbeat", p.Name, res.status())
 		return
