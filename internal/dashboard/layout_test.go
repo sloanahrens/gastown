@@ -6,10 +6,11 @@ import (
 )
 
 // The queue wants to sit beside Polecats and Dispatcher, the landing history
-// beside om review, and the tier sweeps beside the rigs they sweep, so the
-// panes are placed by column in index.html rather than by data. Reading the
-// embedded page is what keeps a section that drifts back to the wrong column
-// from passing (gt-9bf2m, gt-fn9e6.48).
+// beside om review, the feed under the queue at the foot of the left column,
+// and the tier sweeps beside the rigs they sweep, so the panes are placed by
+// column in index.html rather than by data. Reading the embedded page is what
+// keeps a section that drifts back to the wrong column from passing
+// (gt-9bf2m, gt-fn9e6.48).
 func TestPaneColumns(t *testing.T) {
 	t.Parallel()
 
@@ -29,7 +30,8 @@ func TestPaneColumns(t *testing.T) {
 		{"tiersweepnote", "left", "rigsnote", "seatsnote"},
 		{"seatsnote", "left", "tiersweepnote", "dispnote"},
 		{"dispnote", "left", "seatsnote", "queuenote"},
-		{"queuenote", "left", "dispnote", ""},
+		{"queuenote", "left", "dispnote", "chips"},
+		{"chips", "left", "queuenote", ""},
 		{"machnote", "right", "", "cloudnote"},
 		{"cloudnote", "right", "machnote", "forgejonote"},
 		{"forgejonote", "right", "cloudnote", "omnote"},
