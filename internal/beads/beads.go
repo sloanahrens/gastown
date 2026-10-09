@@ -633,6 +633,49 @@ func isResolvedDependency(dep IssueDep) bool {
 	}
 }
 
+// PriorityFilter is ListOptions.Priority: the one priority a List keeps, or
+// PriorityAny — the zero value — to keep every priority (gt-zdd0h).
+//
+// The constants' values are bd's priority plus one, an implementation detail
+// that keeps each of them clear of the zero value; read them by name.
+type PriorityFilter int
+
+const (
+	// PriorityAny is the zero value: keep every priority.
+	PriorityAny PriorityFilter = iota
+
+	// PriorityP0 through PriorityP4 each keep a single priority.
+	PriorityP0
+	PriorityP1
+	PriorityP2
+	PriorityP3
+	PriorityP4
+)
+
+// bd returns the priority number to filter on and whether to filter at all.
+// PriorityAny, and the -1 callers dated before gt-zdd0h pass, mean no filter.
+func (p PriorityFilter) bd() (int, bool) {
+	if p <= PriorityAny {
+		return 0, false
+	}
+	return int(p) - 1, true
+}
+
+// Matches reports whether an issue of priority p — bd's numbering, 0-4 — is
+// one the filter keeps.
+func (p PriorityFilter) Matches(priority int) bool {
+	want, filter := p.bd()
+	return !filter || want == priority
+}
+
+// String names the filter: "any" or "P0" through "P4".
+func (p PriorityFilter) String() string {
+	if p <= PriorityAny {
+		return "any"
+	}
+	return "P" + strconv.Itoa(int(p)-1)
+}
+
 // ListOptions specifies filters for listing issues.
 type ListOptions struct {
 	Status string // "open", "closed", "all", or several joined by commas
@@ -641,14 +684,14 @@ type ListOptions struct {
 	// Labels keeps only issues carrying every one of them (bd list
 	// --label, once per label). Label, when set too, is a further AND.
 	Labels     []string
-	Priority   int    // 0-4, -1 for no filter
-	Parent     string // filter by parent ID
-	Assignee   string // filter by assignee (e.g., "gastown/Toast")
-	NoAssignee bool   // filter for issues with no assignee
-	Limit      int    // Max results (0 = unlimited, overrides bd default of 50)
-	Ephemeral  bool   // Search wisps table (ephemeral issues) instead of issues table
-	Rig        string // filter merge-request descriptions by rig before hydration
-	IssueType  string // filter by bd issue_type (e.g. "event"); Type is the deprecated label filter
+	Priority   PriorityFilter // see PriorityFilter: the zero value keeps every priority
+	Parent     string         // filter by parent ID
+	Assignee   string         // filter by assignee (e.g., "gastown/Toast")
+	NoAssignee bool           // filter for issues with no assignee
+	Limit      int            // Max results (0 = unlimited, overrides bd default of 50)
+	Ephemeral  bool           // Search wisps table (ephemeral issues) instead of issues table
+	Rig        string         // filter merge-request descriptions by rig before hydration
+	IssueType  string         // filter by bd issue_type (e.g. "event"); Type is the deprecated label filter
 	// IncludeInfra keeps bd's infrastructure types (agent, role, message),
 	// which bd list leaves out by default.
 	IncludeInfra bool
@@ -1877,8 +1920,8 @@ func (b *Beads) listIssues(opts ListOptions) ([]*Issue, error) {
 	if opts.IssueType != "" {
 		args = append(args, "--type="+opts.IssueType)
 	}
-	if opts.Priority >= 0 {
-		args = append(args, fmt.Sprintf("--priority=%d", opts.Priority))
+	if priority, filter := opts.Priority.bd(); filter {
+		args = append(args, fmt.Sprintf("--priority=%d", priority))
 	}
 	if opts.Parent != "" {
 		args = append(args, "--parent="+opts.Parent)
@@ -2037,8 +2080,8 @@ func (b *Beads) listEphemeral(opts ListOptions) ([]*Issue, error) {
 	if opts.Status != "" && opts.Status != "all" {
 		clauses = append(clauses, "status="+quoteBDQueryValue(opts.Status))
 	}
-	if opts.Priority >= 0 {
-		clauses = append(clauses, fmt.Sprintf("priority=%d", opts.Priority))
+	if priority, filter := opts.Priority.bd(); filter {
+		clauses = append(clauses, fmt.Sprintf("priority=%d", priority))
 	}
 	if opts.Parent != "" {
 		clauses = append(clauses, "parent="+quoteBDQueryValue(opts.Parent))

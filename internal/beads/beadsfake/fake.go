@@ -239,8 +239,9 @@ func hasLabel(is *beads.Issue, label string) bool {
 // List returns the issues matching opts, newest first. Ephemeral selects the
 // wisps instead of the issues. Status "" leaves out closed issues and "all"
 // keeps them; Type is read as the label "gt:<Type>"; Labels must all be
-// present; Priority -1 means any. Rig is ignored: a Fake is one database.
-// IncludeInfra changes nothing: no fake issue has an infrastructure type.
+// present; PriorityAny (the zero value) means any. Rig is ignored: a Fake is
+// one database. IncludeInfra changes nothing: no fake issue has an
+// infrastructure type.
 func (f *Fake) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -256,7 +257,7 @@ func (f *Fake) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 			!statusMatches(is.Status, opts.Status),
 			label != "" && !hasLabel(is, label),
 			!hasLabels(is, opts.Labels),
-			opts.Priority >= 0 && is.Priority != opts.Priority,
+			!opts.Priority.Matches(is.Priority),
 			opts.Parent != "" && is.Parent != opts.Parent,
 			opts.Assignee != "" && is.Assignee != opts.Assignee,
 			opts.NoAssignee && is.Assignee != "",
