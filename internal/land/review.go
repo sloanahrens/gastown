@@ -29,6 +29,10 @@ const (
 	// head the overseer reviewed in place of om (gt-g8t3m), followed by the
 	// short head sha the review covered.
 	VerdictOverseerPrefix = "overseer:"
+	// VerdictUnrecorded is recorded for a landing this lander merged but never
+	// wrote a record for: the merge on the target is the evidence, and the
+	// verdict om reached was not kept (gt-mdet3).
+	VerdictUnrecorded = "unrecorded"
 )
 
 // OMStatusContext is the required commit status a cut-over rig's landing posts

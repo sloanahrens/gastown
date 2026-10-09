@@ -3155,6 +3155,17 @@ func (g *Git) LogGrep(ref, pattern string) (bool, error) {
 	return strings.TrimSpace(out) != "", nil
 }
 
+// FindCommitMatching returns the newest commit reachable from ref whose
+// message contains pattern as a literal substring, or "" when none does. It
+// is LogGrep's SHA-returning form.
+func (g *Git) FindCommitMatching(ref, pattern string) (string, error) {
+	out, err := g.run("log", ref, "--grep="+pattern, "-F", "-1", "--format=%H")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // Cherry runs `git cherry <upstream> <head>` to list commits on head that are
 // not yet on upstream, comparing by patch-id. Each output line is prefixed with
 // "+ " (patch not on upstream) or "- " (patch already applied upstream, e.g.

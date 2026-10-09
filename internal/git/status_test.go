@@ -160,3 +160,18 @@ func TestLogGrepSearchesFixedStringOnRef(t *testing.T) {
 		t.Errorf("LogGrep(gt-none) = %v, %v; want false", found, err)
 	}
 }
+
+func TestFindCommitMatchingNamesTheCommit(t *testing.T) {
+	t.Parallel()
+	s := newScripted(map[string]reply{
+		"log origin/main --grep=Work: gt-abc -F -1 --format=%H": ok("5e06d1a1792be1930476f5a334963d4de44e8ea3\n"),
+		"log origin/main --grep=Work: gt-non -F -1 --format=%H": ok("\n"),
+	})
+	g := newTestGit(t, s)
+	if got, err := g.FindCommitMatching("origin/main", "Work: gt-abc"); err != nil || got != "5e06d1a1792be1930476f5a334963d4de44e8ea3" {
+		t.Errorf("FindCommitMatching = %q, %v; want the matching commit", got, err)
+	}
+	if got, err := g.FindCommitMatching("origin/main", "Work: gt-non"); err != nil || got != "" {
+		t.Errorf("FindCommitMatching (no match) = %q, %v; want empty", got, err)
+	}
+}

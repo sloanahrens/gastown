@@ -304,6 +304,22 @@ func (h *handle) ListRemoteRefsWithHashesTimeout(remote, prefix string, _ time.D
 	return refs, nil
 }
 
+// Parents is *git.Git's rev-list --parents -n 1: commit's parents.
+func (h *handle) Parents(commit string) ([]string, error) {
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	args := []string{"rev-list", "--parents", "-n", "1", commit}
+	r, wt, err := h.locate(args...)
+	if err != nil {
+		return nil, err
+	}
+	id, ok := h.resolve(r, wt, commit)
+	if !ok {
+		return nil, fmt.Errorf("resolve commit %s: no such object", commit)
+	}
+	return append([]string(nil), h.f.objects[id].parents...), nil
+}
+
 // FirstParentContains reports whether commit is on descendant's first-parent
 // line.
 func (h *handle) FirstParentContains(commit, descendant string) (bool, error) {

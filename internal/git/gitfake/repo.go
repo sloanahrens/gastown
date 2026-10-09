@@ -36,6 +36,9 @@ type Repo interface {
 	PushWithEnv(remote, refspec string, force bool, env []string) error
 	PushForceWithLease(remote, refspec, branchRef, expectedSHA string) error
 	VerifyPushedCommit(remote, branch, commit string) error
+	VerifyPushedCommitReachableFromPushTarget(remote, branch, commit string) error
+	FindCommitMatching(ref, pattern string) (string, error)
+	Parents(commit string) ([]string, error)
 	WorktreeAddDetached(path, ref string) error
 	WorktreeRemove(path string, force bool) error
 	WorktreePrune() error
@@ -513,6 +516,73 @@ func (h *handle) VerifyPushedCommit(remote, branch, commit string) error {
 		return fmt.Errorf("verified_push_failed: commit %s not on %s/%s (remote tip %s)", short(commit), remote, branch, short(tip))
 	}
 	return nil
+}
+
+// VerifyPushedCommitReachableFromPushTarget is *git.Git's relaxed check over
+// the push target branch: the tip, an ancestor of it, or a patch the branch
+// preserved under a rewrite.
+func (h *handle) VerifyPushedCommitReachableFromPushTarget(remote, branch, commit string) error {
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	commit = strings.TrimSpace(commit)
+	if commit == "" {
+		return fmt.Errorf("verified_push_failed: empty commit for %s/%s", remote, branch)
+	}
+	args := []string{"ls-remote", remote, "refs/heads/" + branch}
+	r, wt, err := h.locate(args...)
+	if err != nil {
+		return fmt.Errorf("verified_push_failed: unable to read %s/%s: %w", remote, branch, err)
+	}
+	rr, err := h.remoteRepo(r, remote, args...)
+	if err != nil {
+		return fmt.Errorf("verified_push_failed: unable to read %s/%s: %w", remote, branch, err)
+	}
+	tip := rr.refs["refs/heads/"+branch]
+	if tip == "" {
+		return fmt.Errorf("verified_push_failed: branch %s/%s missing after push (expected %s)", remote, branch, short(commit))
+	}
+	if tip == commit {
+		return nil
+	}
+	// The commit and the branch tip were pushed to the same remote, so the
+	// tip's history is what the fetched branch would carry.
+	if h.f.isAncestor(commit, tip) {
+		return nil
+	}
+	if status, err := h.refAgainstRef(r, wt, commit, tip); err == nil && status.Preserved {
+		return nil
+	}
+	return fmt.Errorf("verified_push_failed: commit %s not on %s/%s (remote tip %s)", short(commit), remote, branch, short(tip))
+}
+
+// FindCommitMatching is *git.Git's log --grep -F -1: the newest commit
+// reachable from ref whose message contains pattern.
+func (h *handle) FindCommitMatching(ref, pattern string) (string, error) {
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	args := []string{"log", ref, "--grep=" + pattern, "-F", "-1", "--format=%H"}
+	r, wt, err := h.locate(args...)
+	if err != nil {
+		return "", err
+	}
+	id, ok := h.resolve(r, wt, ref)
+	if !ok {
+		return "", unknownRevision(ref, args...)
+	}
+	var best *commit
+	for _, c := range h.f.ancestors(id) {
+		o := h.f.objects[c]
+		if o == nil || !strings.Contains(o.message, pattern) {
+			continue
+		}
+		if best == nil || o.seq > best.seq {
+			best = o
+		}
+	}
+	if best == nil {
+		return "", nil
+	}
+	return best.id, nil
 }
 
 func short(sha string) string {

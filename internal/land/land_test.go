@@ -902,6 +902,103 @@ func TestLandHeadAlreadyOnTargetNeedsAHuman(t *testing.T) {
 	}
 }
 
+// TestLandCompletesALandingWhoseRecordWasNeverWritten: the merge took on the
+// target but the pass never recorded it (the daemon died between the merge and
+// the record). The next pass finishes that landing — record written, bead
+// closed — instead of reading the head on the target as an operator push and
+// sending the bead to a human.
+func TestLandCompletesALandingWhoseRecordWasNeverWritten(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	l := f.lander()
+	var merged string
+	f.merger.fn = func(req MergeRequest) error {
+		merged = req.Head
+		f.setMain(req.Head)
+		return errors.New("the pass ended after the merge, before the record")
+	}
+	if _, err := l.Land(context.Background(), f.work); err == nil {
+		t.Fatal("the first pass returned a landing it never recorded")
+	}
+	if f.bead().Status == "closed" || len(f.landingLines()) != 0 {
+		t.Fatalf("the first pass left a record: status=%s lines=%v", f.bead().Status, f.landingLines())
+	}
+	if got := f.originMain(); got != merged {
+		t.Fatalf("origin/main = %s, want the merge %s", got, merged)
+	}
+
+	f.merger.fn = nil
+	res, err := f.lander().Land(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("the second pass did not finish the landing: %v", err)
+	}
+	if res.LandedCommit != merged {
+		t.Errorf("LandedCommit = %s, want the merge %s", res.LandedCommit, merged)
+	}
+	if len(f.merger.calls) != 1 {
+		t.Errorf("the merger ran %d times, want the one merge", len(f.merger.calls))
+	}
+	if len(f.gate.dirs) != 1 || len(f.review.calls) != 1 {
+		t.Errorf("the second pass gated and reviewed again: %d gate runs, %d reviews", len(f.gate.dirs), len(f.review.calls))
+	}
+	b := f.bead()
+	if b.Status != "closed" || !strings.Contains(b.Notes, LandingNoteMarker+"\nlanded_commit: "+merged) {
+		t.Errorf("bead after the finished landing: status=%s notes=%q", b.Status, b.Notes)
+	}
+	if CountRejections(b.Notes) != 0 {
+		t.Errorf("the finished landing carries a rejection:\n%s", b.Notes)
+	}
+	lines := f.landingLines()
+	if len(lines) != 1 {
+		t.Fatalf("landings lines = %d, want 1", len(lines))
+	}
+	// The record says what it does not know rather than reading a gate that
+	// never ran here as a failure.
+	if !strings.Contains(lines[0], `"om_verdict":"`+VerdictUnrecorded+`"`) || !strings.Contains(lines[0], "not recorded") {
+		t.Errorf("landing record = %s", lines[0])
+	}
+}
+
+// TestLandRecordsALandingAnotherPushMovedTheTargetPast: the target advanced
+// between the merge and the read-back. The commit is in the target's history,
+// so the landing is recorded rather than failed.
+func TestLandRecordsALandingAnotherPushMovedTheTargetPast(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	l := f.lander()
+	var merged string
+	var askedTarget func(string) (bool, error)
+	f.merger.fn = func(req MergeRequest) error {
+		merged, askedTarget = req.Head, req.TargetHasCommit
+		f.setMain(req.Head)
+		f.pushMain("c.txt", "someone else landed\n")
+		return nil
+	}
+	res, err := l.Land(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	if res.LandedCommit != merged {
+		t.Errorf("LandedCommit = %s, want the merge %s", res.LandedCommit, merged)
+	}
+	if f.originMain() == merged {
+		t.Fatal("the target did not advance; the test proves nothing")
+	}
+	if askedTarget == nil {
+		t.Fatal("the merger got no target check")
+	}
+	if ok, err := askedTarget(merged); err != nil || !ok {
+		t.Errorf("TargetHasCommit(%s) = %v, %v; want true for a commit on the target", merged, ok, err)
+	}
+	b := f.bead()
+	if b.Status != "closed" || !strings.Contains(b.Notes, "landed_commit: "+merged) {
+		t.Errorf("bead = status %s, notes %q", b.Status, b.Notes)
+	}
+	if n := len(f.landingLines()); n != 1 {
+		t.Errorf("landings lines = %d, want 1", n)
+	}
+}
+
 // TestLandUnknownVerdictIsInfra: a reviewer that returns no recognizable
 // verdict and no error produced no verdict; it is never read as a rejection.
 func TestLandUnknownVerdictIsInfra(t *testing.T) {

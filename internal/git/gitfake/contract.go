@@ -479,6 +479,59 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 			t.Errorf("fresh clone origin/main = %q, %v; want %s", id, err, merged)
 		}
 	})
+	t.Run("VerifyPushedCommitReachableFromPushTarget accepts a commit the target moved past", func(t *testing.T) {
+		t.Parallel()
+		fx := newFixture(t, newEnv(t))
+		_, wt := fx.worktree(t, fx.base)
+		if err := wt.MergeNoFF(fx.head, "land: "+fixtureBranch+" onto main"); err != nil {
+			t.Fatal(err)
+		}
+		merged, _ := wt.Rev("HEAD")
+		if err := wt.PushForceWithLease("origin", "HEAD:refs/heads/main", "refs/heads/main", fx.base); err != nil {
+			t.Fatal(err)
+		}
+		if err := wt.VerifyPushedCommitReachableFromPushTarget("origin", "main", merged); err != nil {
+			t.Errorf("reachable-from-target with the commit at the tip: %v", err)
+		}
+		// Another landing advances the target, so the commit is history now
+		// rather than the tip — which the read-back must still accept.
+		moved := fx.env.Commit(t, fx.origin, "main", "main: another landing", map[string]string{"c.txt": "next\n"})
+		if moved == "" || moved == merged {
+			t.Fatalf("the target did not advance past %s", merged)
+		}
+		if err := wt.VerifyPushedCommit("origin", "main", merged); err == nil {
+			t.Error("the exact-tip check passed with the target moved")
+		}
+		if err := wt.VerifyPushedCommitReachableFromPushTarget("origin", "main", merged); err != nil {
+			t.Errorf("reachable-from-target after the target moved: %v", err)
+		}
+		if err := wt.VerifyPushedCommitReachableFromPushTarget("origin", "gone", merged); err == nil {
+			t.Error("reachable-from-target passed on a missing branch")
+		}
+		if err := wt.VerifyPushedCommitReachableFromPushTarget("origin", "main", strings.Repeat("0", 40)); err == nil {
+			t.Error("reachable-from-target passed for a commit on no branch")
+		}
+	})
+	t.Run("FindCommitMatching names the newest commit carrying the pattern", func(t *testing.T) {
+		t.Parallel()
+		fx := newFixture(t, newEnv(t))
+		older := fx.env.Commit(t, fx.origin, "main", "land: "+fixtureBranch+" (aaaa) onto main (bbbb)\n\nWork: gt-abi", map[string]string{"c.txt": "one\n"})
+		newer := fx.env.Commit(t, fx.origin, "main", "land: "+fixtureBranch+" (cccc) onto main (dddd)\n\nWork: gt-abi", map[string]string{"d.txt": "two\n"})
+		g := fx.env.Open(fx.clone)
+		fx.fetch(t, g, "main")
+		if got, err := g.FindCommitMatching("origin/main", "Work: gt-abi"); err != nil || got != newer {
+			t.Errorf("FindCommitMatching = %q, %v; want the newest match %s", got, err, newer)
+		}
+		if got, err := g.FindCommitMatching("origin/main", "land: "+fixtureBranch+" (aaaa) onto main ("); err != nil || got != older {
+			t.Errorf("FindCommitMatching(subject) = %q, %v; want %s", got, err, older)
+		}
+		if got, err := g.FindCommitMatching("origin/main", "Work: gt-none"); err != nil || got != "" {
+			t.Errorf("FindCommitMatching with no match = %q, %v; want empty", got, err)
+		}
+		if _, err := g.FindCommitMatching("no-such-ref", "Work: gt-abi"); err == nil {
+			t.Error("FindCommitMatching on an unknown ref succeeded")
+		}
+	})
 	t.Run("PushWithEnv pushes a refspec like Push, under an environment git runs with", func(t *testing.T) {
 		t.Parallel()
 		fx := newFixture(t, newEnv(t))
