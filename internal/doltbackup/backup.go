@@ -191,11 +191,20 @@ func Rotate(root string, keep int) ([]string, error) {
 		case isDate(strings.TrimSuffix(name, partialSuffix)) && strings.HasSuffix(name, partialSuffix):
 			doomed = append(doomed, name)
 		case isDate(name):
-			if _, err := readManifest(filepath.Join(root, name)); err != nil {
-				doomed = append(doomed, name) // a dated directory with no manifest never finished
-				continue
+			_, err := readManifest(filepath.Join(root, name))
+			switch {
+			case err == nil:
+				complete = append(complete, name)
+			case errors.Is(err, fs.ErrNotExist):
+				// A dated directory with no manifest never finished.
+				doomed = append(doomed, name)
+			default:
+				// The manifest is there but unreadable — a transient read
+				// error, or content we cannot parse. Keep the night: deleting
+				// a complete backup over an error we cannot explain is worse
+				// than keeping one night too many (G8).
+				fmt.Fprintf(os.Stderr, "Warning: keeping backup %s, its manifest could not be read: %v\n", name, err)
 			}
-			complete = append(complete, name)
 		}
 	}
 	sort.Strings(complete)

@@ -177,3 +177,43 @@ func TestRotateMissingRoot(t *testing.T) {
 		t.Errorf("Rotate of a missing root = %v, %v", removed, err)
 	}
 }
+
+// A dated directory whose manifest cannot be read is not a night that never
+// finished: only a missing manifest says that. A transient read error must
+// not doom a complete backup, so the night is kept and reported (G8).
+func TestRotateKeepsABackupWithAnUnreadableManifest(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	for daysAgo := 9; daysAgo >= 0; daysAgo-- {
+		commitNight(t, root, daysAgo, "hq")
+	}
+	// The newest night's manifest is truncated, as a partial write leaves it.
+	newest := filepath.Base(Dir(root, night))
+	if err := os.WriteFile(filepath.Join(root, newest, ManifestName), []byte(`{"started":`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := Rotate(root, Keep)
+	if err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	for _, name := range removed {
+		if name == newest {
+			t.Errorf("Rotate doomed the backup %s: an unreadable manifest is not a missing one", newest)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, newest)); err != nil {
+		t.Errorf("the night with the unreadable manifest is gone: %v", err)
+	}
+	// A night with no manifest at all is still a night that never finished.
+	unfinished := "2026-09-13"
+	if err := os.MkdirAll(filepath.Join(root, unfinished), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Rotate(root, Keep); err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, unfinished)); !os.IsNotExist(err) {
+		t.Errorf("a dated directory with no manifest survived rotation: %v", err)
+	}
+}

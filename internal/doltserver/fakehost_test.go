@@ -31,12 +31,16 @@ type fakeHost struct {
 	// reaches the time given.
 	reachableFrom map[string]time.Time
 	answers       map[string][]fakeReply
-	calls         [][]string
-	signals       []fakeSignal
-	slept         time.Duration
-	now           time.Time
-	nextPID       int
-	started       []*exec.Cmd
+	// hangs holds commands (keyed like answers) that never answer until the
+	// channel is closed, so a caller that runs them can only return by
+	// timing out (hangOn).
+	hangs   map[string]chan struct{}
+	calls   [][]string
+	signals []fakeSignal
+	slept   time.Duration
+	now     time.Time
+	nextPID int
+	started []*exec.Cmd
 	// onStart, when set, runs for each process start with the new PID.
 	onStart func(pid int, cmd *exec.Cmd)
 	// startExited, when set, makes every start return a child that has
@@ -91,6 +95,7 @@ func newFakeHost() *fakeHost {
 		reachable:     map[string]bool{},
 		reachableFrom: map[string]time.Time{},
 		answers:       map[string][]fakeReply{},
+		hangs:         map[string]chan struct{}{},
 		now:           fakeEpoch,
 		nextPID:       1 << 22, // above any real PID, so never this test process
 	}
@@ -206,13 +211,33 @@ func (f *fakeHost) listener(port int) int {
 	return 0
 }
 
+// hangOn makes the command keyed by key never answer until the returned
+// channel is closed. A caller that runs it with a deadline can only return by
+// timing out; the channel is held outside the fake's lock so commands that do
+// answer still do.
+func (f *fakeHost) hangOn(key string) chan struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	release := make(chan struct{})
+	f.hangs[key] = release
+	return release
+}
+
 // run answers the process queries the adapter makes (ps and lsof, from the
 // process table) and otherwise the scripted replies. An unscripted command
 // exits 127, as a missing binary would.
 func (f *fakeHost) run(c hostCall) ([]byte, []byte, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.calls = append(f.calls, append([]string(nil), c.Args...))
+	hang := f.hangs[strings.Join(c.Args, " ")]
+	f.mu.Unlock()
+	if hang != nil {
+		<-hang // never answers until the test releases it
+		return nil, nil, fakeExit(1)
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	args := c.Args
 	joined := strings.Join(args, " ")
 	switch {
@@ -244,7 +269,11 @@ func (f *fakeHost) run(c hostCall) ([]byte, []byte, error) {
 		}
 		return nil, nil, fakeExit(1)
 	case len(args) > 0 && args[0] == "ss":
-		return nil, nil, fakeExit(1)
+		// Scriptable like any other command; unscripted it exits 1, the way ss
+		// does when it finds no listener.
+		if _, scripted := f.answers[joined]; !scripted {
+			return nil, nil, fakeExit(1)
+		}
 	}
 	key, found := joined, false
 	if _, found = f.answers[joined]; !found {

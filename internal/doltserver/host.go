@@ -2,6 +2,7 @@ package doltserver
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -33,6 +34,9 @@ type host struct {
 	// run runs a command to completion and returns what it wrote. A failure
 	// that should read as an exit status implements interface{ ExitCode() int }.
 	run func(c hostCall) (stdout, stderr []byte, err error)
+	// probeTimeout bounds probe; zero means probeTimeoutDefault. A test
+	// shortens it so a hung-probe case returns in milliseconds.
+	probeTimeout time.Duration
 	// start starts a long-running process (the sql-server) and returns it.
 	start func(cmd *exec.Cmd) (*startedProcess, error)
 	// alive reports whether pid is a running process.
@@ -163,6 +167,44 @@ func (h *host) execCombined(cmd *exec.Cmd) ([]byte, error) {
 	cmd.Stderr = &errBuf
 	out, err := h.exec(cmd)
 	return append(out, errBuf.Bytes()...), err
+}
+
+// probeTimeoutDefault bounds probe. The adapter runs its process probes (lsof,
+// ss) while it holds dolt.lock, and h.exec runs a command to completion, so a
+// hung probe would block Start — and every waiter on the lock — forever (G6).
+const probeTimeoutDefault = 5 * time.Second
+
+// probe runs the probe command name with args under a deadline and returns
+// what it wrote. On the real machine the process is killed when the deadline
+// passes; against a fake host that never answers, the wait is abandoned
+// there. A probe that exceeds the deadline returns an error, so its caller
+// falls back or leaves state alone rather than acting on a half answer.
+func (h *host) probe(name string, args ...string) ([]byte, error) {
+	timeout := h.probeTimeout
+	if timeout <= 0 {
+		timeout = probeTimeoutDefault
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	type result struct {
+		out []byte
+		err error
+	}
+	done := make(chan result, 1) // buffered: the goroutine must not block on a caller that gave up
+	go func() {
+		cmd := exec.CommandContext(ctx, name, args...)
+		setProcessGroup(cmd)
+		out, err := h.exec(cmd)
+		done <- result{out, err}
+	}()
+
+	select {
+	case r := <-done:
+		return r.out, r.err
+	case <-ctx.Done():
+		return nil, fmt.Errorf("probe %s timed out after %s: %w", name, timeout, ctx.Err())
+	}
 }
 
 // callError is a failed run whose stderr was not captured by the caller, as

@@ -5414,6 +5414,114 @@ func TestCleanStaleSocket_NoopWhenMissing(t *testing.T) {
 	h.cleanStaleSocket(filepath.Join(t.TempDir(), "nonexistent.sock"))
 }
 
+// The probes the adapter runs while it holds dolt.lock are bounded by a
+// deadline, so a hung lsof costs the search nothing: the ss fallback still
+// answers. Without the bound this hangs rather than failing (G6).
+func TestFindDoltServerOnPort_FallsBackWhenLsofHangs(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost()
+	h := f.host()
+	h.probeTimeout = 25 * time.Millisecond
+	f.on("ss -tlnp sport = :4598", fakeReply{
+		stdout: `LISTEN 0 128 *:4598 *:* users:(("dolt",pid=4242,fd=7))`,
+	})
+	release := f.hangOn("lsof -i :4598 -sTCP:LISTEN -t")
+	defer close(release)
+
+	if pid := h.findDoltServerOnPort(4598); pid != 4242 {
+		t.Errorf("findDoltServerOnPort = %d, want the PID ss reports: a hung lsof must not end the search", pid)
+	}
+}
+
+// A probe that cannot answer must not be read as "nothing holds the socket".
+// Only lsof's exit 1 says the socket is stale; a probe that times out leaves
+// the file where it is (G6).
+func TestCleanStaleSocket_LeavesTheSocketWhenTheProbeHangs(t *testing.T) {
+	t.Parallel()
+	socketPath := filepath.Join(t.TempDir(), "mysql.sock")
+	if err := os.WriteFile(socketPath, []byte{}, 0600); err != nil {
+		t.Fatal(err)
+	}
+	f := newFakeHost()
+	h := f.host()
+	h.probeTimeout = 25 * time.Millisecond
+	release := f.hangOn("lsof " + socketPath)
+	defer close(release)
+
+	h.cleanStaleSocket(socketPath)
+	if _, err := os.Stat(socketPath); err != nil {
+		t.Errorf("a probe that timed out removed the socket: %v", err)
+	}
+}
+
+// Start removes a stale socket through the lsof check, never blindly: a
+// socket some other process holds — an unrelated mysqld bound to port 3306,
+// say — must survive a start (G5).
+func TestStart_LeavesAHeldSocketAlone(t *testing.T) {
+	t.Parallel()
+	f := newFakeHost().townPort(4597)
+	h := f.host()
+
+	// The socket path Start derives from the port (doltserver.go, Start).
+	socketPath := "/tmp/mysql.4597.sock"
+	ours := false
+	if _, err := os.Stat(socketPath); err != nil {
+		if err := os.WriteFile(socketPath, nil, 0600); err != nil {
+			t.Fatalf("creating %s: %v", socketPath, err)
+		}
+		ours = true
+	}
+	t.Cleanup(func() {
+		if ours {
+			_ = os.Remove(socketPath)
+		}
+	})
+
+	// lsof succeeds: a process holds the socket open.
+	f.on("lsof "+socketPath, fakeReply{stdout: "dolt 123 me 5u unix\n"})
+
+	_ = h.Start(t.TempDir())
+	if len(f.started) == 0 {
+		t.Fatal("Start stopped before it reached the socket step: this test no longer models the bug")
+	}
+	if _, err := os.Stat(socketPath); err != nil {
+		t.Errorf("Start removed a socket another process holds: %v", err)
+	}
+}
+
+// writeServerConfig replaces config.yaml rather than writing through it: the
+// new content is staged and renamed into place, so a reader never sees a
+// half-written file and a symlink at the path is replaced, not followed (C5).
+func TestWriteServerConfig_ReplacesRatherThanWritesThrough(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	target := filepath.Join(dir, "elsewhere.yaml")
+	if err := os.WriteFile(target, []byte("untouched\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.Symlink(target, configPath); err != nil {
+		t.Fatal(err)
+	}
+
+	config := &Config{Port: 3309, DataDir: filepath.Join(dir, ".dolt-data"), LogLevel: "info"}
+	if err := writeServerConfig(config, configPath); err != nil {
+		t.Fatalf("writeServerConfig: %v", err)
+	}
+
+	if fi, err := os.Lstat(configPath); err != nil {
+		t.Fatalf("lstat config.yaml: %v", err)
+	} else if fi.Mode()&os.ModeSymlink != 0 {
+		t.Error("config.yaml is still a symlink: the write went through the link instead of replacing it")
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "untouched\n" {
+		t.Errorf("the symlink's target was written through: content %q, err %v", got, err)
+	}
+	if data, err := os.ReadFile(configPath); err != nil || !strings.Contains(string(data), "port: 3309") {
+		t.Errorf("config.yaml = %q, %v; want the new config in place", data, err)
+	}
+}
+
 // =============================================================================
 // Thundering herd fix tests (gt-nkn)
 // =============================================================================

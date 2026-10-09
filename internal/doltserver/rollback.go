@@ -142,6 +142,13 @@ func RestoreFromBackup(townRoot, backupPath string) (*RollbackResult, error) {
 		// Formula-style backup: <rigname>-beads/
 		if strings.HasSuffix(name, "-beads") {
 			rigName := strings.TrimSuffix(name, "-beads")
+			// An entry named exactly "-beads" trims to the empty rig name,
+			// which filepath.Join would resolve to the town's own .beads:
+			// refuse to restore it over the town. (G7)
+			if rigName == "" {
+				result.SkippedRigs = append(result.SkippedRigs, name)
+				continue
+			}
 			rigBeads := filepath.Join(townRoot, rigName, ".beads")
 			rigBackup := filepath.Join(backupPath, name)
 			if err := replaceDir(rigBeads, rigBackup); err != nil {
@@ -178,29 +185,55 @@ func RestoreFromBackup(townRoot, backupPath string) (*RollbackResult, error) {
 	return result, nil
 }
 
-// replaceDir removes dst (if it exists) and copies src to dst.
+// replaceDir replaces dst with a copy of src.
+//
+// The copy is staged beside dst and moved into place only once it is complete,
+// so a copy that fails partway leaves the existing dst intact (G7).
 func replaceDir(dst, src string) error {
 	// Verify source exists
 	if _, err := os.Stat(src); err != nil {
 		return fmt.Errorf("source not found: %w", err)
 	}
 
-	// Remove existing destination
-	if _, err := os.Stat(dst); err == nil {
-		if err := os.RemoveAll(dst); err != nil {
-			return fmt.Errorf("removing existing %s: %w", dst, err)
-		}
-	}
-
-	// Ensure parent directory exists
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+	parent := filepath.Dir(dst)
+	if err := os.MkdirAll(parent, 0755); err != nil {
 		return fmt.Errorf("creating parent directory: %w", err)
 	}
 
-	// Copy recursively using cp -a to preserve permissions and timestamps
-	if err := copyDir(dst, src); err != nil {
+	// Stage the copy in the destination's directory so the swap below is a
+	// rename within one filesystem.
+	stage, err := os.MkdirTemp(parent, "."+filepath.Base(dst)+".restore-*")
+	if err != nil {
+		return fmt.Errorf("staging directory for %s: %w", dst, err)
+	}
+	staged := filepath.Join(stage, filepath.Base(dst))
+	if err := copyDir(staged, src); err != nil {
+		_ = os.RemoveAll(stage)
 		return fmt.Errorf("copying %s to %s: %w", src, dst, err)
 	}
+
+	// The existing directory is at risk only now: move it aside, swap the
+	// staged copy in, and put the old one back if the swap fails.
+	previous := filepath.Join(stage, "previous")
+	havePrevious := false
+	if _, err := os.Stat(dst); err == nil {
+		if err := os.Rename(dst, previous); err != nil {
+			_ = os.RemoveAll(stage)
+			return fmt.Errorf("setting aside existing %s: %w", dst, err)
+		}
+		havePrevious = true
+	}
+	if err := os.Rename(staged, dst); err != nil {
+		if havePrevious {
+			if backErr := os.Rename(previous, dst); backErr != nil {
+				// Keep the stage: the displaced directory is still inside it.
+				return fmt.Errorf("installing %s: %w (the displaced directory is preserved at %s)", dst, err, previous)
+			}
+		}
+		_ = os.RemoveAll(stage)
+		return fmt.Errorf("installing %s: %w", dst, err)
+	}
+	_ = os.RemoveAll(stage) // the displaced directory, if there was one
 
 	return nil
 }
