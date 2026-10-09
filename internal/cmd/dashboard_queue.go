@@ -62,6 +62,9 @@ func dashQueueRow(rig string, i *beads.Issue) dashboard.QueueBead {
 	if t, err := time.Parse(time.RFC3339, i.CreatedAt); err == nil {
 		row.CreatedAt = t
 	}
+	if t, err := time.Parse(time.RFC3339, i.UpdatedAt); err == nil {
+		row.UpdatedAt = t
+	}
 	if len(row.BlockedBy) > 5 {
 		row.BlockedBy = row.BlockedBy[:5]
 	}
