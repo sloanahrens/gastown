@@ -5,6 +5,7 @@ package util
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"syscall"
 	"time"
@@ -49,6 +50,11 @@ func SetDetachedProcessGroup(cmd *exec.Cmd) {
 // leaves a shell's `make test` and test binaries running past the gate that
 // started them (gt-6t43); a negative pid is what reaches them.
 //
+// It reports os.ErrProcessDone when the group was already empty, the error
+// exec.Cmd.Cancel documents as "the process already finished": exec takes a
+// nil Cancel error as "we interrupted it" and overwrites a command that had
+// exited 0 as its context ended with the context's error (gt-7npde).
+//
 // cmd must have been started with SetProcessGroup or SetDetachedProcessGroup:
 // without Setpgid its children share the caller's process group, and this
 // would signal the caller's own.
@@ -60,20 +66,31 @@ func KillProcessGroup(cmd *exec.Cmd) error {
 }
 
 // KillProcessGroupID is KillProcessGroup for a group known only by its id,
-// such as one a previous process recorded before it died. It refuses an id
-// below 2: kill(-1) signals every process the caller may signal, and 0 is the
-// caller's own group.
+// such as one a previous process recorded before it died, and differs from it
+// on one point: an id whose group is already empty is the outcome its callers
+// asked for, so it reports nil where KillProcessGroup reports
+// os.ErrProcessDone. It refuses an id below 2: kill(-1) signals every process
+// the caller may signal, and 0 is the caller's own group.
 func KillProcessGroupID(pgid int) error {
 	if pgid < 2 {
 		return fmt.Errorf("refusing to signal process group %d", pgid)
 	}
-	return killProcessGroup(pgid)
+	err := killProcessGroup(pgid)
+	if errors.Is(err, os.ErrProcessDone) {
+		return nil
+	}
+	return err
 }
 
+// killProcessGroup signals a group and reports whether it ended one.
+// os.ErrProcessDone means the group was already empty when the first signal
+// arrived: nothing was interrupted, and for exec's cancel hook that is the
+// difference between a finished command and a canceled one.
 func killProcessGroup(pgid int) error {
-	// A group that is already empty is the outcome this function exists to
-	// produce, not a failure to produce it.
-	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
 		return err
 	}
 
