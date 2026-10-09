@@ -439,8 +439,10 @@ type Config struct {
 	// Deploys reads the deploy and staging workflows' runs from the same viewer.
 	Deploys func() *Deploys
 	// Reports reads the overseer's latest hourly report from the directory it
-	// writes.
-	Reports func() *Reports
+	// writes, and ReportsDir is that directory: the /api/report route reads an
+	// earlier report from inside it, by the timestamp its name carries.
+	Reports    func() *Reports
+	ReportsDir string
 	// Questions reads the overseer's open questions for Sloan.
 	Questions func() *Questions
 	// Escalation reads the town's open escalation beads.

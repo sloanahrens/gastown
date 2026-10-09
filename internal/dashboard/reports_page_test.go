@@ -20,7 +20,7 @@ func TestReportPanelDrawsTheStateTheReaderDecided(t *testing.T) {
 	for _, want := range []string{
 		`const r = s.reports;`,
 		`if (!r) { box.append(el("div", "empty", "reading…")); return; }`,
-		`note.className = r.overdue ? "r warnc" : "r";`,
+		`note.className = !rPick && r.overdue ? "r warnc" : "r";`,
 		`if (r.state === "missing" || r.state === "error") {`,
 		`box.append(el("div", r.state === "error" ? "badc" : "empty", r.note || r.state));`,
 	} {
@@ -31,10 +31,12 @@ func TestReportPanelDrawsTheStateTheReaderDecided(t *testing.T) {
 
 	// The report's age is the pane's header note, worded and placed like the
 	// other panes' readings ("read 25s ago"), and an overdue one carries that
-	// mark in the same amber class the pane already used for it.
+	// mark in the same amber class the pane already used for it. The note dates
+	// whichever report is shown — the latest, or the earlier one a reader chose
+	// (gt-4e065) — and only a latest report is ever the overdue one.
 	for _, want := range []string{
-		`note.textContent = "written " + age(r.written) + " ago" + (r.overdue ? " · overdue" : "");`,
-		`note.title = new Date(r.written).toLocaleString();`,
+		`note.textContent = "written " + age(shown) + " ago" + (!rPick && r.overdue ? " · overdue" : "");`,
+		`note.title = shown.toLocaleString();`,
 	} {
 		if !strings.Contains(draw, want) {
 			t.Errorf("renderReports has no %q", want)
@@ -58,8 +60,8 @@ func TestReportPanelDrawsTheStateTheReaderDecided(t *testing.T) {
 	if strings.Contains(draw, "innerHTML") {
 		t.Error("renderReports sets markup from the report's text")
 	}
-	if !strings.Contains(draw, `rep.append(...reportNodes(r.text, prefixes));`) {
-		t.Errorf("renderReports has no %q", `rep.append(...reportNodes(r.text, prefixes));`)
+	if !strings.Contains(draw, `rep.append(...reportNodes(rPick ? read.text : r.text, prefixes));`) {
+		t.Errorf("renderReports has no %q", `rep.append(...reportNodes(rPick ? read.text : r.text, prefixes));`)
 	}
 	// A full report shows without scrolling: the box is capped at the height
 	// the Feed pane uses, not the 280px that clipped a long report.
@@ -83,7 +85,7 @@ func TestReportPanelLeavesTheHeaderNoteEmptyWhenThereIsNoWrite(t *testing.T) {
 	draw := pageFunc(t, "renderReports")
 	reset := strings.Index(draw, `note.textContent = "";`)
 	state := strings.Index(draw, `if (r.state === "missing" || r.state === "error") {`)
-	dated := strings.Index(draw, `note.textContent = "written " + age(r.written) + " ago"`)
+	dated := strings.Index(draw, `note.textContent = "written " + age(shown) + " ago"`)
 	if reset < 0 || state < 0 || dated < 0 {
 		t.Fatalf("renderReports does not reset the note, name the states, and date the report: %s", draw)
 	}
@@ -98,17 +100,21 @@ func TestReportPanelLeavesTheHeaderNoteEmptyWhenThereIsNoWrite(t *testing.T) {
 // The pane is one report tall however many the town keeps: the writes before
 // the latest are listed behind a disclosure, closed until the operator opens
 // it, and the timestamps are the page's own rendering of the reader's list.
+// Each is a button — its text written through el(), which writes textContent —
+// that reads that report in place of the latest (gt-4e065).
 func TestReportPanelListsTheEarlierWritesBehindADisclosure(t *testing.T) {
 	t.Parallel()
 
 	draw := pageFunc(t, "renderReports")
 	for _, want := range []string{
-		`const times = (r.times || []).slice(1);`,
-		`if (times.length) {`,
+		`const earlier = times.slice(1);`,
+		`if (earlier.length) {`,
 		`const d = document.createElement("details");`,
-		`d.append(el("summary", "title", times.length + (times.length === 1 ? " earlier report" : " earlier reports")));`,
+		`d.append(el("summary", "title", earlier.length + (earlier.length === 1 ? " earlier report" : " earlier reports")));`,
 		`const ul = el("ul", "reptimes");`,
-		`for (const t of times) ul.append(el("li", "", new Date(t).toLocaleString()));`,
+		`for (const t of earlier) {`,
+		`const b = el("button", "rtime" + (name === rPick ? " on" : ""), new Date(t).toLocaleString());`,
+		`b.onclick = () => openReport(name);`,
 		`d.append(ul);`,
 	} {
 		if !strings.Contains(draw, want) {
@@ -194,8 +200,8 @@ func TestReportLinksTheBeadIdsWhosePrefixNamesAStore(t *testing.T) {
 	}
 	draw := pageFunc(t, "renderReports")
 	for _, want := range []string{
-		`rep.append(...reportNodes(r.text, prefixes));`,
-		`bd.append(detailBlock(rDetail[key] || {loading: true}));`,
+		`rep.append(...reportNodes(rPick ? read.text : r.text, prefixes));`,
+		`bd.append(detailBlock(rDetail[id] || {loading: true}));`,
 		`const prefixes = (s.queue && s.queue.prefixes) || {};`,
 	} {
 		if !strings.Contains(draw, want) {
@@ -260,6 +266,58 @@ func TestReportsReachTheAPIAndTheGuardStillRefusesWrites(t *testing.T) {
 		h.Handler().ServeHTTP(rec, req)
 		if rec.Code != http.StatusMethodNotAllowed {
 			t.Errorf("%s /api/state = %d, want the page to refuse it", method, rec.Code)
+		}
+	}
+}
+
+// An earlier report is read where the operator already looks: a timestamp in
+// the list is a button that fetches that report and draws it in place of the
+// latest, with a control back to the latest and a header note that dates the
+// report shown. A fetch that failed shows that failure — never the latest under
+// a header that names another report (gt-4e065).
+func TestReportPanelReadsAnEarlierReportFromItsTimestamp(t *testing.T) {
+	t.Parallel()
+
+	// The choice lives outside the drawing function, so a poll refresh redraws
+	// the report the reader picked rather than falling back to the latest.
+	page := string(indexHTML)
+	for _, want := range []string{
+		`let rPick = "";`,
+		`const rRead = {};`,
+		`function reportFile(t) {`,
+		`function reportTime(name) {`,
+		`function showLatest() { rPick = ""; renderReports(state); }`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("index.html has no %q", want)
+		}
+	}
+
+	// The click reads the report from the one route that names it, remembers a
+	// failed read as the failure it was, and does not fetch a report twice.
+	open := pageFunc(t, "openReport")
+	for _, want := range []string{
+		`fetch("/api/report?name=" + encodeURIComponent(name))`,
+		`.then(res => res.ok ? res.json() : Promise.reject(new Error(String(res.status))))`,
+		`.then(d => { rRead[name] = {text: d.text || ""}; renderReports(state); })`,
+		`.catch(() => { rRead[name] = {error: true}; renderReports(state); });`,
+	} {
+		if !strings.Contains(open, want) {
+			t.Errorf("openReport has no %q", want)
+		}
+	}
+
+	// The pane dispatches a timestamp's click to that reader, returns through
+	// its own control, and names a failed read in the body.
+	draw := pageFunc(t, "renderReports")
+	for _, want := range []string{
+		`b.onclick = () => openReport(name);`,
+		`const b = el("button", "rbead", "← back to latest");`,
+		`b.onclick = showLatest;`,
+		`box.append(el("div", read && read.error ? "badc" : "empty", read && read.error ? "could not read this report" : "reading…"));`,
+	} {
+		if !strings.Contains(draw, want) {
+			t.Errorf("renderReports has no %q", want)
 		}
 	}
 }

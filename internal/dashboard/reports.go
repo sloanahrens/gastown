@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -29,6 +30,11 @@ const (
 	// name rather than the file's own times, which a copy or a sync resets.
 	reportsNameLayout = "20060102T150405Z"
 	reportsExt        = ".md"
+
+	// reportsNameShape is the name a route may ask for, as a whole: the digits
+	// the layout above writes and nothing else, so a separator, a dot or a
+	// letter is refused before any path could be built from it.
+	reportsNameShape = `^[0-9]{8}T[0-9]{6}Z$`
 
 	// reportsMaxBytes refuses a larger report before reading it, so a file that
 	// is not one of the overseer's reports cannot be read into memory to be
@@ -71,6 +77,16 @@ const (
 var reportsOversize = fmt.Sprintf("the report is larger than %d KiB", reportsMaxBytes>>10)
 
 var errReportsOversize = errors.New("reports: report over the size cap")
+
+// errReportsNotFile is an entry the reader refuses to read as a report: a
+// symlink or anything else that is not a regular file.
+var errReportsNotFile = errors.New("reports: not a regular file")
+
+// errReportsUnlisted is a report name the reader does not list: a name of the
+// right shape for an instant the pane is not offering.
+var errReportsUnlisted = errors.New("reports: report is not one the reader lists")
+
+var reportsNameRe = regexp.MustCompile(reportsNameShape)
 
 // Reports is the overseer's latest report as the pane draws it: the report's
 // own text, when it was written, and the writes before it.
@@ -147,6 +163,57 @@ func (r *ReportsReader) Read(now time.Time) *Reports {
 	return rep
 }
 
+// ReportText is one report as the /api/report route returns it: the same text
+// field the pane draws, and nothing else.
+type ReportText struct {
+	Text string `json:"text"`
+}
+
+// reportsNameTime parses the instant a report's name carries. It accepts the
+// name's whole shape first — the layout's own parser is lenient about how many
+// digits a field has — so a name with a separator or a letter in it is refused
+// here rather than becoming a path.
+func reportsNameTime(name string) (time.Time, bool) {
+	if !reportsNameRe.MatchString(name) {
+		return time.Time{}, false
+	}
+	at, err := time.Parse(reportsNameLayout, name)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return at.UTC(), true
+}
+
+// ReadNamed returns the text of the report written at at, when at names one of
+// the reports the reader lists. The file it opens is rebuilt from the instant —
+// never joined from a caller's string — so a query can only reach a report the
+// pane already offers, and only a regular file is read.
+func (r *ReportsReader) ReadNamed(at time.Time) (string, error) {
+	entries, err := os.ReadDir(r.dir)
+	if err != nil {
+		return "", err
+	}
+	writes := reportsWrites(entries)
+	if len(writes) > reportsKept {
+		writes = writes[:reportsKept]
+	}
+	listed := false
+	for _, w := range writes {
+		if w.at.Equal(at) {
+			listed = true
+			break
+		}
+	}
+	if !listed {
+		return "", errReportsUnlisted
+	}
+	raw, err := readReportsFile(filepath.Join(r.dir, at.UTC().Format(reportsNameLayout)+reportsExt), reportsMaxBytes)
+	if err != nil {
+		return "", err
+	}
+	return reportsText(string(raw)), nil
+}
+
 // reportWrite is one report file: the instant its name carries, and the name.
 type reportWrite struct {
 	at   time.Time
@@ -204,12 +271,16 @@ func reportsText(s string) string {
 	}, s)
 }
 
-// readReportsFile reads path, refusing a file larger than max before it is
-// read.
+// readReportsFile reads path when it is a regular file no larger than max. The
+// stat is a Lstat so a symlink named like a report is refused rather than
+// followed: the writer's own output is the only thing a report may be.
 func readReportsFile(path string, max int64) ([]byte, error) {
-	fi, err := os.Stat(path)
+	fi, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, errReportsNotFile
 	}
 	if fi.Size() > max {
 		return nil, errReportsOversize

@@ -164,6 +164,10 @@ section.collapsed>h2{border-bottom:0}
 .cctext{min-width:0;overflow-wrap:anywhere}
 .reptext{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;background:#10161d;border:1px solid var(--line);border-radius:6px;padding:6px 8px;max-height:68vh;overflow:auto}
 .reptimes{margin:2px 0 0;padding-left:18px;color:var(--dim);font-size:11px}
+.rtime{background:none;border:0;padding:0;color:var(--blue);font:inherit;cursor:pointer;text-decoration:underline;text-decoration-style:dotted}
+.rtime:hover{background:#19212b}
+.rtime.on{color:var(--text)}
+.rback{margin-bottom:4px}
 .qcard{padding:4px 0;border-top:1px solid var(--line);overflow-wrap:anywhere}
 .qtext{margin:2px 0}
 .qrec,.qheld{color:var(--dim);margin:2px 0}
@@ -883,6 +887,12 @@ function renderCloud(s) {
 const rOpen = new Set();
 const rDetail = {};
 let rKey = "";
+// The earlier report the reader chose, by the name its file carries, and what
+// fetching it read. The pane shows the latest until a reader picks one and
+// keeps their choice across a poll refresh, so the report being read does not
+// fall back to the latest under them.
+let rPick = "";
+const rRead = {};
 
 // A bead id as the overseer writes one: a lowercase prefix, a hyphen, then the
 // bead's own id. A word like "re-run" has this shape too, so the shape alone is
@@ -933,11 +943,43 @@ function openReportBead(rig, id) {
   renderReports(state);
 }
 
-// The Report panel draws the overseer's own latest hourly report. Every cell
-// goes through el(), which writes textContent, so a tag in the report shows as
-// that text and never as markup. The report's own line breaks and tabs are kept
-// and the box wraps them, so the pane shows the report the way its writer
-// shaped it.
+// reportFile is the name a report's file carries: the UTC instant of its write
+// in the shape the reader lists, which is also what /api/report reads one by.
+function reportFile(t) {
+  const d = new Date(t), p = n => String(n).padStart(2, "0");
+  return d.getUTCFullYear() + p(d.getUTCMonth() + 1) + p(d.getUTCDate()) + "T" + p(d.getUTCHours()) + p(d.getUTCMinutes()) + p(d.getUTCSeconds()) + "Z";
+}
+
+// reportTime is the instant a report's name carries: the shape reportFile
+// writes, read back into the date the pane dates the shown report by.
+function reportTime(name) {
+  return new Date(name.slice(0, 4) + "-" + name.slice(4, 6) + "-" + name.slice(6, 8) + "T" + name.slice(9, 11) + ":" + name.slice(11, 13) + ":" + name.slice(13, 15) + "Z");
+}
+
+// openReport draws an earlier report in place of the latest. The route returns
+// the report's text or nothing, and a fetch that failed is remembered as the
+// failure it was; a report already read is not fetched twice.
+function openReport(name) {
+  rPick = name;
+  if (!rRead[name]) {
+    rRead[name] = {loading: true};
+    fetch("/api/report?name=" + encodeURIComponent(name))
+      .then(res => res.ok ? res.json() : Promise.reject(new Error(String(res.status))))
+      .then(d => { rRead[name] = {text: d.text || ""}; renderReports(state); })
+      .catch(() => { rRead[name] = {error: true}; renderReports(state); });
+  }
+  renderReports(state);
+}
+
+// showLatest returns the pane to the latest report, the one the hub polls.
+function showLatest() { rPick = ""; renderReports(state); }
+
+// The Report panel draws the overseer's own hourly report: the latest one the
+// hub polled, or, once a reader has chosen from the list, an earlier one. Every
+// cell goes through el(), which writes textContent, so a tag in the report
+// shows as that text and never as markup. The report's own line breaks and tabs
+// are kept and the box wraps them, so the pane shows the report the way its
+// writer shaped it.
 //
 // A bead id in the report opens that bead under the report — the same detail
 // the Work queue's rows draw — so an id never has to be copied into a terminal.
@@ -946,7 +988,8 @@ function openReportBead(rig, id) {
 // report's age sits beside the title, and a latest report past its hour reads
 // as overdue in the amber the page marks every other stale reading with. The
 // writes before the latest are listed behind a disclosure, so however many the
-// town keeps the pane is one report tall.
+// town keeps the pane is one report tall; each of those is a button that reads
+// that report in place of the latest, with a control back to it (gt-4e065).
 function renderReports(s) {
   const box = $("report"), note = $("reportnote");
   box.replaceChildren();
@@ -962,34 +1005,68 @@ function renderReports(s) {
     box.append(el("div", r.state === "error" ? "badc" : "empty", r.note || r.state));
     return;
   }
-  // The pane answers "when" as well as "how long ago": the exact local time of
-  // the write stays on the note's hover.
-  note.className = r.overdue ? "r warnc" : "r";
-  note.textContent = "written " + age(r.written) + " ago" + (r.overdue ? " · overdue" : "");
-  note.title = new Date(r.written).toLocaleString();
-  // A new write is a new report: the ids opened in the one before it belong to
-  // text that is no longer on the pane, so they close with it.
-  if (rKey !== r.written) { rOpen.clear(); rKey = r.written; }
+  const times = r.times || [];
+  // A report the pane no longer lists — it aged out of the day the list holds —
+  // is not one the route would read, so the pane falls back to the latest.
+  if (rPick && !times.some(t => reportFile(t) === rPick)) rPick = "";
+  // The pane answers "when" as well as "how long ago", for the report it is
+  // showing: the latest the hub polled, or the earlier one the reader chose,
+  // dated by its own instant so the header always says which is on the pane.
+  const shown = rPick ? reportTime(rPick) : new Date(r.written);
+  note.className = !rPick && r.overdue ? "r warnc" : "r";
+  note.textContent = "written " + age(shown) + " ago" + (!rPick && r.overdue ? " · overdue" : "");
+  note.title = shown.toLocaleString();
+  // A new report is different text, and so is a reader's switch between two of
+  // them: the ids opened in the one before belong to text no longer on the
+  // pane, so they close with it.
+  const key = rPick || String(r.written);
+  if (rKey !== key) { rOpen.clear(); rKey = key; }
+  if (rPick) {
+    const back = el("div", "rback");
+    const b = el("button", "rbead", "← back to latest");
+    b.type = "button";
+    b.onclick = showLatest;
+    back.append(b);
+    box.append(back);
+  }
   const prefixes = (s.queue && s.queue.prefixes) || {};
-  const rep = el("div", "reptext");
-  rep.append(...reportNodes(r.text, prefixes));
-  box.append(rep);
+  const read = rPick ? rRead[rPick] : null;
+  // A report still being read says so, and one that could not be read names
+  // that failure: showing the latest under a header that names another report
+  // would read as a report that had nothing to say.
+  if (rPick && !(read && read.text != null)) {
+    box.append(el("div", read && read.error ? "badc" : "empty", read && read.error ? "could not read this report" : "reading…"));
+  } else {
+    const rep = el("div", "reptext");
+    rep.append(...reportNodes(rPick ? read.text : r.text, prefixes));
+    box.append(rep);
+  }
   // Every open id draws its detail under the report, and a store the reader
   // could not reach reads as the failure it was rather than as an empty pane.
-  for (const key of rOpen) {
+  for (const id of rOpen) {
     const bd = el("div", "rbeadrow");
-    bd.append(el("div", "title", key));
-    bd.append(detailBlock(rDetail[key] || {loading: true}));
+    bd.append(el("div", "title", id));
+    bd.append(detailBlock(rDetail[id] || {loading: true}));
     box.append(bd);
   }
   // The list the reader sends starts at the report above, so the disclosure
-  // holds the timestamps that are not the one already drawn.
-  const times = (r.times || []).slice(1);
-  if (times.length) {
+  // holds the timestamps that are not the one drawn. Each is a button — its
+  // text written through el() — that reads that report in place of the latest.
+  const earlier = times.slice(1);
+  if (earlier.length) {
     const d = document.createElement("details");
-    d.append(el("summary", "title", times.length + (times.length === 1 ? " earlier report" : " earlier reports")));
+    d.append(el("summary", "title", earlier.length + (earlier.length === 1 ? " earlier report" : " earlier reports")));
     const ul = el("ul", "reptimes");
-    for (const t of times) ul.append(el("li", "", new Date(t).toLocaleString()));
+    for (const t of earlier) {
+      const name = reportFile(t);
+      const b = el("button", "rtime" + (name === rPick ? " on" : ""), new Date(t).toLocaleString());
+      b.type = "button";
+      b.title = "read this report";
+      b.onclick = () => openReport(name);
+      const li = el("li");
+      li.append(b);
+      ul.append(li);
+    }
     d.append(ul);
     box.append(d);
   }

@@ -3,6 +3,7 @@ package dashboard
 import (
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"strings"
@@ -33,6 +34,7 @@ func (h *Hub) Handler() http.Handler {
 		_ = json.NewEncoder(w).Encode(h.State())
 	})
 	mux.HandleFunc("/api/bead", h.serveBead)
+	mux.HandleFunc("/api/report", h.serveReport)
 	mux.HandleFunc("/stream", h.serveStream)
 	return guard(mux)
 }
@@ -132,4 +134,29 @@ func (h *Hub) serveBead(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(d)
+}
+
+// serveReport returns one earlier report's text for the Report pane, named by
+// the timestamp its file carries. The name has to have the shape a report's
+// name has and to be one the pane lists; the file is rebuilt from that instant,
+// so no path is taken from the query string. A name that fails either check is
+// refused before the directory is read, and a read that cannot be made says
+// only that.
+func (h *Hub) serveReport(w http.ResponseWriter, r *http.Request) {
+	at, ok := reportsNameTime(r.URL.Query().Get("name"))
+	if !ok {
+		http.Error(w, "bad report name", http.StatusBadRequest)
+		return
+	}
+	text, err := NewReportsReader(h.cfg.ReportsDir).ReadNamed(at)
+	switch {
+	case errors.Is(err, errReportsUnlisted):
+		http.Error(w, "no such report", http.StatusNotFound)
+		return
+	case err != nil:
+		http.Error(w, "report unavailable", http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(ReportText{Text: text})
 }
