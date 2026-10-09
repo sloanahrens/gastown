@@ -1,12 +1,14 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
@@ -63,6 +65,33 @@ func TestQueueReadMergesStoresAndOrdersByPriority(t *testing.T) {
 	}
 	if len(q.Unreadable) != 0 {
 		t.Errorf("unreadable = %v", q.Unreadable)
+	}
+}
+
+// A bead waiting to land is aged from its last update rather than from when it
+// was filed: the label write gt done makes is normally the bead's last write, so
+// the Landings pane reads that as the moment the wait started (gt-zc45r).
+func TestQueueRowCarriesTheBeadsLastUpdate(t *testing.T) {
+	t.Parallel()
+	st := &fakeQueueStore{landing: []*beads.Issue{{
+		ID: "gt-1", Title: "submitted", Status: "open", Labels: []string{land.LabelReadyToLand},
+		CreatedAt: "2026-10-01T00:00:00Z", UpdatedAt: "2026-10-02T03:04:05Z",
+	}}}
+	q := queueReaderOver(map[string]dashQueueStore{"gastown": st}, "gastown").read(time.Now())
+	if q == nil || len(q.Landing) != 1 {
+		t.Fatalf("landing = %+v", q)
+	}
+	row := q.Landing[0]
+	if want := time.Date(2026, 10, 2, 3, 4, 5, 0, time.UTC); !row.UpdatedAt.Equal(want) {
+		t.Errorf("updated_at = %v, want the bead's last write %v", row.UpdatedAt, want)
+	}
+	if b, err := json.Marshal(row); err != nil || !strings.Contains(string(b), `"updated_at":"2026-10-02T03:04:05Z"`) {
+		t.Errorf("a waiting row does not carry updated_at to the page: %s err=%v", b, err)
+	}
+	// A bead that records no update leaves the field out rather than sending a
+	// zero time the page would read as 1970.
+	if b, err := json.Marshal(dashboard.QueueBead{ID: "gt-2"}); err != nil || strings.Contains(string(b), "updated_at") {
+		t.Errorf("a row with no update must omit updated_at: %s err=%v", b, err)
 	}
 }
 

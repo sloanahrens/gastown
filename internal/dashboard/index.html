@@ -545,14 +545,47 @@ function backoffDetail(r) {
   return parts.join(" · ");
 }
 
+// The beads waiting for the landing worker as rows, oldest wait first: the
+// Queue reader's landing list, so a bead submitted with gt done shows in the
+// pane that watches landings. A bead the worker has already taken has a live
+// row below, so it is dropped here — the live row wins (gt-zc45r).
+const QUEUED_LANDING_MAX = 10;
+function queuedLandings(s, rows) {
+  const waiting = (s.queue && s.queue.landing) || [];
+  const taken = new Set((rows || []).map(r => r.bead));
+  const since = b => b.updated_at ? new Date(b.updated_at).getTime() : 0;
+  return waiting.filter(b => !taken.has(b.id)).sort((a, b) => since(a) - since(b));
+}
+
+// A queued bead's holder is its assignee: one naming a polecat by its store
+// ("rig/polecats/name") is shown the way the By column shows a holder, and any
+// other assignee is shown as it was written.
+function queueHolder(b) {
+  const m = /^([^/]+)\/polecats\/([^/]+)$/.exec(b.assignee || "");
+  return m ? {rig: m[1], name: m[2]} : {rig: "", name: b.assignee || ""};
+}
+
 function renderTrend(s) {
   const sec = $("trendsec"), box = $("trend");
   const t = s.trend;
-  if (!t || !(t.hours || []).length) { sec.hidden = true; box.replaceChildren(); return; }
+  const hours = (t && t.hours) || [];
+  const recent = (t && t.recent) || [];
+  // A bead waiting for the worker has no row of its own in the trend: nothing
+  // has landed. It comes from the Queue reader's list, and a queue alone is
+  // reason to show the section (gt-zc45r).
+  const waiting = queuedLandings(s, recent);
+  if (!hours.length && !waiting.length) { sec.hidden = true; box.replaceChildren(); return; }
   sec.hidden = false;
   box.replaceChildren();
-  const hours = t.hours;
   const names = polecatNames(s.polecats);
+  // Nothing has landed in the window: the pane is the queue alone, rather than
+  // the day's figures and charts drawn from a reading nobody has made yet.
+  if (!hours.length) {
+    $("trendnote").textContent = "";
+    const q = landingTable(s, names, recent, waiting);
+    if (q) box.append(q);
+    return;
+  }
   const hhmm = iso => new Date(iso).toLocaleTimeString([], {hour12: false}).slice(0, 5);
   const t0 = new Date(hours[0].hour).getTime();
   const t1 = new Date(hours[hours.length - 1].hour).getTime() + 3600e3;
@@ -609,57 +642,92 @@ function renderTrend(s) {
     box.append(el("div", "k title", "hourly load average · peak " + peak.toFixed(1) + " · " + loads.length + " of 24 hours recorded (only while a page is open)"), chartSVG([{color: "#58a6ff", pts: loads}], t0, t1, 600, 44, 90 * 60e3), timeAxis(t0, t1));
   } else box.append(el("div", "empty", "no load history yet (it fills while a page is open)"));
 
-  // the recent landings: live rows on top, then the last ten finished, newest first
-  const rows = t.recent || [];
-  if (rows.length) {
-    const thr = s.om && s.om.threshold != null ? s.om.threshold : null;
-    const tbl = el("table", "ltable");
-    const hr = el("tr");
-    [["When"], ["Landing"], ["By", "who built it: the polecat, or the crew member whose branch it was"], ["Score", "om's score", 1], ["Gate", "wall time of the gate stage", 1], ["om", "wall time of the om review", 1], ["Ship", "total ship time: dispatched to deployed, minutes", 1]].forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); });
-    tbl.append(hr);
-    const today = new Date().toDateString();
-    for (const r of rows) {
-      const tr = el("tr");
-      const when = new Date(r.at);
-      if (r.outcome === "running") tr.className = "live";
-      tr.append(el("td", "title", r.outcome === "running" ? "merging " + fmtDur((Date.now() - when.getTime()) / 1000) : r.outcome === "backoff" ? "checked " + clock(r.at).slice(0, 5) : (when.toDateString() === today ? clock(r.at).slice(0, 5) : when.toLocaleDateString([], {month: "short", day: "numeric"}) + " " + clock(r.at).slice(0, 5))));
-      const main = el("td");
-      main.append(el("span", "bead", r.bead));
-      if (r.outcome === "running") { const g = el("span", "tag live", "running"); g.title = "merged; the worker is gating the merged tree and running the om review"; main.append(document.createTextNode(" "), g); }
-      else if (r.outcome === "rejected") { const g = el("span", "tag badc", "rejected · " + (r.kind || "?")); main.append(document.createTextNode(" "), g); }
-      else if (r.outcome === "backoff") { const g = el("span", "tag badc", "failing · " + (r.stage || "?")); g.title = "the landing worker keeps retrying this landing and losing; the stage is where the last attempt failed"; main.append(document.createTextNode(" "), g); }
-      else if (r.verdict === "skipped") main.append(document.createTextNode(" "), el("span", "tag", "no review"));
-      else if (r.verdict === "error") { const g = el("span", "tag warnc", "om error"); g.title = r.detail || ""; main.append(document.createTextNode(" "), g); }
-      if (r.risk) { const g = el("span", "warnc", " ⚑"); g.title = "touched risk paths"; main.append(g); }
-      if (r.title) main.append(document.createElement("br"), el("span", "title", r.title));
-      if (r.outcome === "rejected" && r.detail) main.append(document.createElement("br"), el("span", "badc", r.detail));
-      if (r.outcome === "backoff") main.append(document.createElement("br"), el("span", "badc", backoffDetail(r)));
-      const total = (r.lint_secs || 0) + (r.gate_secs || 0) + (r.om_secs || 0);
-      tr.title = [r.commit ? "commit " + r.commit : null, total ? "lint " + fmtDur(r.lint_secs || 0) + " + gate " + fmtDur(r.gate_secs || 0) + " + om " + fmtDur(r.om_secs || 0) + " = " + fmtDur(total) : null, r.route ? "route " + r.route : null].filter(Boolean).join(" · ");
-      tr.append(main);
-      // By names the holder the way the seats pane does: the short name, and
-      // its rig only where two rigs in view use that name. The row's own rig
-      // is the holder's for a live run; for a finished one it is read back from
-      // the polecat roster, so a shared short name still gets its rig.
-      const who = r.polecat || (r.route ? r.route.replace(/^overseer-/, "") : "");
-      const rig = r.rig || names.rigOf(who);
-      const by = el("td", "title");
-      if (who) { by.textContent = names.label(rig, who); by.title = rig ? rig + "/" + who : who; }
-      else if (r.outcome === "running" && r.rig) by.textContent = r.rig;
-      else by.textContent = "–";
-      tr.append(by);
-      tr.append(el("td", "n" + (r.score != null && thr != null && r.score < thr ? " badc" : ""), r.score != null ? r.score.toFixed(2) : "–"));
-      tr.append(el("td", "n" + (r.gate_secs > 180 ? " warnc" : ""), r.gate_secs != null ? fmtDur(r.gate_secs) : "–"));
-      tr.append(el("td", "n" + (r.om_secs > 240 ? " warnc" : ""), r.om_secs != null ? fmtDur(r.om_secs) : "–"));
-      const ship = el("td", "n" + (r.ship_pending ? " warnc" : ""));
-      if (r.ship_secs != null) { ship.textContent = Math.round(r.ship_secs / 60) + "m"; ship.title = "dispatched to deployed"; }
-      else if (r.ship_pending) { ship.textContent = "pending"; ship.title = "landed; waiting for the restart that installs it"; }
-      else ship.textContent = "–";
-      tr.append(ship);
-      tbl.append(tr);
-    }
-    box.append(el("div", "k title", "landings: the ones running now and the ones failing in backoff on top, then the last 10 finished (newest first; hover a row for the commit and stage times)"), tbl);
+  const tbl = landingTable(s, names, recent, waiting);
+  if (tbl) box.append(tbl);
+}
+
+// The Landings table: waiting-to-land beads first, then the rows the worker
+// holds, then the day's finished ones. Null when there is nothing to draw.
+// Every cell goes through el(), which writes textContent, so a bead's own text
+// is never markup.
+function landingTable(s, names, rows, waiting) {
+  const shown = waiting.slice(0, QUEUED_LANDING_MAX);
+  const more = waiting.length - shown.length;
+  if (!shown.length && !rows.length) return null;
+  const wrap = el("div");
+  const thr = s.om && s.om.threshold != null ? s.om.threshold : null;
+  const tbl = el("table", "ltable");
+  const hr = el("tr");
+  [["When"], ["Landing"], ["By", "who built it: the polecat, or the crew member whose branch it was"], ["Score", "om's score", 1], ["Gate", "wall time of the gate stage", 1], ["om", "wall time of the om review", 1], ["Ship", "total ship time: dispatched to deployed, minutes", 1]].forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); });
+  tbl.append(hr);
+  const today = new Date().toDateString();
+  // No stage has run yet, so the four cost columns are dashes and the wait is
+  // aged from the bead's last update — the label write gt done makes is
+  // normally its last write. The worker's order is not known to this page, so a
+  // row says waiting and nothing about position.
+  for (const b of shown) {
+    const tr = el("tr");
+    const when = el("td", "title", b.updated_at ? "waiting " + age(b.updated_at) : "waiting");
+    when.title = "waiting since the bead's last update, which gt done moves";
+    tr.append(when);
+    const main = el("td");
+    main.append(el("span", "bead", b.id));
+    const tag = el("span", "tag", "queued");
+    tag.title = "submitted; the landing worker has not taken it yet";
+    main.append(document.createTextNode(" "), tag);
+    if (b.title) main.append(document.createElement("br"), el("span", "title", (b.rig ? b.rig + " · " : "") + b.title));
+    tr.append(main);
+    const h = queueHolder(b);
+    const by = el("td", "title");
+    if (h.name) { by.textContent = names.label(h.rig, h.name); by.title = h.rig ? h.rig + "/" + h.name : h.name; }
+    else by.textContent = "–";
+    tr.append(by, el("td", "n", "–"), el("td", "n", "–"), el("td", "n", "–"), el("td", "n", "–"));
+    tr.title = "submitted and waiting for the landing worker to take it";
+    tbl.append(tr);
   }
+  for (const r of rows) {
+    const tr = el("tr");
+    const when = new Date(r.at);
+    if (r.outcome === "running") tr.className = "live";
+    tr.append(el("td", "title", r.outcome === "running" ? "merging " + fmtDur((Date.now() - when.getTime()) / 1000) : r.outcome === "backoff" ? "checked " + clock(r.at).slice(0, 5) : (when.toDateString() === today ? clock(r.at).slice(0, 5) : when.toLocaleDateString([], {month: "short", day: "numeric"}) + " " + clock(r.at).slice(0, 5))));
+    const main = el("td");
+    main.append(el("span", "bead", r.bead));
+    if (r.outcome === "running") { const g = el("span", "tag live", "running"); g.title = "merged; the worker is gating the merged tree and running the om review"; main.append(document.createTextNode(" "), g); }
+    else if (r.outcome === "rejected") { const g = el("span", "tag badc", "rejected · " + (r.kind || "?")); main.append(document.createTextNode(" "), g); }
+    else if (r.outcome === "backoff") { const g = el("span", "tag badc", "failing · " + (r.stage || "?")); g.title = "the landing worker keeps retrying this landing and losing; the stage is where the last attempt failed"; main.append(document.createTextNode(" "), g); }
+    else if (r.verdict === "skipped") main.append(document.createTextNode(" "), el("span", "tag", "no review"));
+    else if (r.verdict === "error") { const g = el("span", "tag warnc", "om error"); g.title = r.detail || ""; main.append(document.createTextNode(" "), g); }
+    if (r.risk) { const g = el("span", "warnc", " ⚑"); g.title = "touched risk paths"; main.append(g); }
+    if (r.title) main.append(document.createElement("br"), el("span", "title", r.title));
+    if (r.outcome === "rejected" && r.detail) main.append(document.createElement("br"), el("span", "badc", r.detail));
+    if (r.outcome === "backoff") main.append(document.createElement("br"), el("span", "badc", backoffDetail(r)));
+    const total = (r.lint_secs || 0) + (r.gate_secs || 0) + (r.om_secs || 0);
+    tr.title = [r.commit ? "commit " + r.commit : null, total ? "lint " + fmtDur(r.lint_secs || 0) + " + gate " + fmtDur(r.gate_secs || 0) + " + om " + fmtDur(r.om_secs || 0) + " = " + fmtDur(total) : null, r.route ? "route " + r.route : null].filter(Boolean).join(" · ");
+    tr.append(main);
+    // By names the holder the way the seats pane does: the short name, and
+    // its rig only where two rigs in view use that name. The row's own rig
+    // is the holder's for a live run; for a finished one it is read back from
+    // the polecat roster, so a shared short name still gets its rig.
+    const who = r.polecat || (r.route ? r.route.replace(/^overseer-/, "") : "");
+    const rig = r.rig || names.rigOf(who);
+    const by = el("td", "title");
+    if (who) { by.textContent = names.label(rig, who); by.title = rig ? rig + "/" + who : who; }
+    else if (r.outcome === "running" && r.rig) by.textContent = r.rig;
+    else by.textContent = "–";
+    tr.append(by);
+    tr.append(el("td", "n" + (r.score != null && thr != null && r.score < thr ? " badc" : ""), r.score != null ? r.score.toFixed(2) : "–"));
+    tr.append(el("td", "n" + (r.gate_secs > 180 ? " warnc" : ""), r.gate_secs != null ? fmtDur(r.gate_secs) : "–"));
+    tr.append(el("td", "n" + (r.om_secs > 240 ? " warnc" : ""), r.om_secs != null ? fmtDur(r.om_secs) : "–"));
+    const ship = el("td", "n" + (r.ship_pending ? " warnc" : ""));
+    if (r.ship_secs != null) { ship.textContent = Math.round(r.ship_secs / 60) + "m"; ship.title = "dispatched to deployed"; }
+    else if (r.ship_pending) { ship.textContent = "pending"; ship.title = "landed; waiting for the restart that installs it"; }
+    else ship.textContent = "–";
+    tr.append(ship);
+    tbl.append(tr);
+  }
+  wrap.append(el("div", "k title", "landings: waiting to land first, then the ones running now and the ones failing in backoff, then the last 10 finished (newest first; hover a row for the commit and stage times)"), tbl);
+  if (more) wrap.append(el("div", "empty", "and " + more + " more waiting to land — see the Queue pane's “Waiting to land” tab"));
+  return wrap;
 }
 
 function renderMachine(s) {

@@ -33,6 +33,10 @@ type QueueBead struct {
 	Priority  int       `json:"priority"`
 	Labels    []string  `json:"labels,omitempty"`
 	CreatedAt time.Time `json:"created_at,omitzero"`
+	// UpdatedAt is the bead's last write: for a bead waiting to land, the label
+	// write gt done makes is normally its last write, so this is when the wait
+	// started, which is how the Landings pane ages it.
+	UpdatedAt time.Time `json:"updated_at,omitzero"`
 	BlockedBy []string  `json:"blocked_by,omitempty"`
 	// RigParked is true when the store's rig is parked: the dispatcher does not
 	// serve a parked rig, so none of its beads is dispatchable however well shaped.
