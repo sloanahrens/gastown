@@ -19,15 +19,34 @@ func TestReportPanelDrawsTheStateTheReaderDecided(t *testing.T) {
 	draw := pageFunc(t, "renderReports")
 	for _, want := range []string{
 		`const r = s.reports;`,
-		`if (!r) { note.className = "r"; note.textContent = ""; box.append(el("div", "empty", "reading…")); return; }`,
+		`if (!r) { box.append(el("div", "empty", "reading…")); return; }`,
 		`note.className = r.overdue ? "r warnc" : "r";`,
-		`note.textContent = r.overdue ? "report overdue" : "";`,
 		`if (r.state === "missing" || r.state === "error") {`,
 		`box.append(el("div", r.state === "error" ? "badc" : "empty", r.note || r.state));`,
 	} {
 		if !strings.Contains(draw, want) {
 			t.Errorf("renderReports has no %q", want)
 		}
+	}
+
+	// The report's age is the pane's header note, worded and placed like the
+	// other panes' readings ("read 25s ago"), and an overdue one carries that
+	// mark in the same amber class the pane already used for it.
+	for _, want := range []string{
+		`note.textContent = "written " + age(r.written) + " ago" + (r.overdue ? " · overdue" : "");`,
+		`note.title = new Date(r.written).toLocaleString();`,
+	} {
+		if !strings.Contains(draw, want) {
+			t.Errorf("renderReports has no %q", want)
+		}
+	}
+	// The body is then only the report: the age line that used to sit above it
+	// is gone, and nothing else still spells the old wording.
+	if strings.Contains(draw, "chead") {
+		t.Error("renderReports still draws a body header above the report")
+	}
+	if strings.Contains(draw, "report overdue") {
+		t.Error("renderReports still writes the old overdue wording")
 	}
 
 	// The report is another tool's text, so every cell goes through el(), which
@@ -37,16 +56,40 @@ func TestReportPanelDrawsTheStateTheReaderDecided(t *testing.T) {
 	if strings.Contains(draw, "innerHTML") {
 		t.Error("renderReports sets markup from the report's text")
 	}
-	for _, want := range []string{
-		`head.append(el("span", "title", "written " + age(r.written) + " ago"));`,
-		`box.append(el("div", "reptext", r.text || ""));`,
-	} {
-		if !strings.Contains(draw, want) {
-			t.Errorf("renderReports has no %q", want)
-		}
+	if !strings.Contains(draw, `box.append(el("div", "reptext", r.text || ""));`) {
+		t.Errorf("renderReports has no %q", `box.append(el("div", "reptext", r.text || ""));`)
 	}
+	// A full report shows without scrolling: the box is capped at the height
+	// the Feed pane uses, not the 280px that clipped a long report.
 	if !strings.Contains(string(indexHTML), `.reptext{margin:0;white-space:pre-wrap;`) {
 		t.Error("index.html has no pre-wrap box for the report's text")
+	}
+	if !strings.Contains(string(indexHTML), `max-height:68vh;overflow:auto}`) {
+		t.Error("index.html does not cap the report box at the Feed pane's 68vh")
+	}
+	if strings.Contains(string(indexHTML), `max-height:280px`) {
+		t.Error("index.html still clips a box at 280px")
+	}
+}
+
+// A state with no write to date — no report yet, or one that could not be read —
+// keeps its body text and leaves the header note empty: the pane dates a
+// reading, and there is none.
+func TestReportPanelLeavesTheHeaderNoteEmptyWhenThereIsNoWrite(t *testing.T) {
+	t.Parallel()
+
+	draw := pageFunc(t, "renderReports")
+	reset := strings.Index(draw, `note.textContent = "";`)
+	state := strings.Index(draw, `if (r.state === "missing" || r.state === "error") {`)
+	dated := strings.Index(draw, `note.textContent = "written " + age(r.written) + " ago"`)
+	if reset < 0 || state < 0 || dated < 0 {
+		t.Fatalf("renderReports does not reset the note, name the states, and date the report: %s", draw)
+	}
+	if reset > state {
+		t.Error("renderReports clears the header note only after the nameless states are decided")
+	}
+	if dated < state {
+		t.Error("renderReports dates the report before the state without a write is decided")
 	}
 }
 
