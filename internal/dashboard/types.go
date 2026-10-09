@@ -378,7 +378,10 @@ type State struct {
 	// Deploys is the deploy and staging workflows' runs, drawn inside the Cloud
 	// section under the patrol's findings. It is nil until the reader first
 	// reports.
-	Deploys   *Deploys        `json:"deploys,omitempty"`
+	Deploys *Deploys `json:"deploys,omitempty"`
+	// Reports is the overseer's latest hourly report, read from the directory it
+	// writes under the town root. It is nil until the reader first reports.
+	Reports   *Reports        `json:"reports,omitempty"`
 	Spend     json.RawMessage `json:"spend,omitempty"`
 	OM        *OM             `json:"om,omitempty"`
 	TierSweep *TierSweep      `json:"tiersweep,omitempty"`
@@ -420,6 +423,9 @@ type Config struct {
 	Forgejo func() *ForgejoFeed
 	// Deploys reads the deploy and staging workflows' runs from the same viewer.
 	Deploys func() *Deploys
+	// Reports reads the overseer's latest hourly report from the directory it
+	// writes.
+	Reports func() *Reports
 	// Escalation reads the town's open escalation beads.
 	Escalation func() *Escalations
 	// Dispatch reads the spec dispatcher's last tick from the daemon log.
@@ -450,6 +456,7 @@ type Config struct {
 	TierSweepEvery  time.Duration
 	ForgejoEvery    time.Duration
 	DeploysEvery    time.Duration
+	ReportsEvery    time.Duration
 	EscalationEvery time.Duration
 	DispatchEvery   time.Duration
 	QueueEvery      time.Duration
@@ -481,6 +488,9 @@ func (c *Config) defaults() {
 	// and a run waiting on a runner is the one thing here worth catching
 	// promptly.
 	def(&c.DeploysEvery, 60*time.Second)
+	// The overseer's report is written hourly, so its own minute is a page's
+	// worth of slack: nothing there changes between one minute and the next.
+	def(&c.ReportsEvery, 60*time.Second)
 	def(&c.EscalationEvery, 60*time.Second)
 	def(&c.DispatchEvery, 10*time.Second)
 	def(&c.QueueEvery, 60*time.Second)
