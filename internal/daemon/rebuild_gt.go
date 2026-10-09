@@ -516,9 +516,14 @@ func (d *Daemon) rebuildGTSync(ctx context.Context, repoRoot string) (rebuildGTS
 	}
 	defer func() { _ = lock.Unlock() }()
 
-	// The fetch is best-effort: a checkout that cannot reach origin still gets
-	// the fast-forward attempted against the ref it has.
-	_, _ = d.rebuildGTGit(repoRoot, "fetch", "origin", "--quiet")
+	// A fetch that failed leaves origin/main where it was, so the merge below is
+	// a no-op and the staleness read after it compares the binary against the
+	// checkout's own stale ref: a checkout that is itself behind origin then
+	// reads as fresh and closes the starvation alarm over a binary that is
+	// stale. Nothing was accomplished, so retry next heartbeat (gt-oyrav).
+	if _, err := d.rebuildGTGit(repoRoot, "fetch", "origin", "--quiet"); err != nil {
+		return rebuildGTSyncDefer, "cannot fetch origin: " + err.Error()
+	}
 	if _, err := d.rebuildGTGit(repoRoot, "merge", "--ff-only", "origin/main", "--quiet"); err != nil {
 		// rev-list --count prints a number, "0" included: a non-zero count is
 		// local commits origin/main does not have, which is a real divergence
@@ -531,7 +536,9 @@ func (d *Daemon) rebuildGTSync(ctx context.Context, repoRoot string) (rebuildGTS
 			}
 		}
 		d.logger.Printf("rebuild_gt: origin/main moved during the sync; re-fetching and re-merging once")
-		_, _ = d.rebuildGTGit(repoRoot, "fetch", "origin", "--quiet")
+		if _, err := d.rebuildGTGit(repoRoot, "fetch", "origin", "--quiet"); err != nil {
+			return rebuildGTSyncDefer, "cannot re-fetch origin: " + err.Error()
+		}
 		if _, err := d.rebuildGTGit(repoRoot, "merge", "--ff-only", "origin/main", "--quiet"); err != nil {
 			return rebuildGTSyncRefuse, "local main diverged from origin/main"
 		}
@@ -589,6 +596,19 @@ func (d *Daemon) rebuildGTInstall(ctx context.Context, cycle *dogCycle, repoRoot
 		} else {
 			code = -1
 		}
+	}
+
+	// A run the cycle's own budget killed, or one a signal killed, never printed
+	// its RESULT line: the fields read here describe no install at all, and
+	// taking them as a verdict would clear rebuildGTRequested and hold the hour
+	// over work that never happened. Deferring keeps the request armed and the
+	// next heartbeat retries. This is not an install-gt failure to escalate:
+	// the kill is the daemon's own clock, and the starvation block below is what
+	// escalates a binary that stays uninstalled (gt-oyrav).
+	if ctx.Err() != nil || code < 0 {
+		d.logger.Printf("rebuild_gt: install-gt was killed before it reported a result (ctx %v, exit %d); retrying next heartbeat", ctx.Err(), code)
+		d.rebuildGTNoteBlocked(cycle, true, "install-gt was killed before it reported a result")
+		return false
 	}
 
 	switch {

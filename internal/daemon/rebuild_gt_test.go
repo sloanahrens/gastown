@@ -240,6 +240,80 @@ func TestRebuildGTCycle_DeferredInstallRetriesNextHeartbeat(t *testing.T) {
 	}
 }
 
+// TestRebuildGTCycle_FailedFetchDoesNotReadAsFresh pins gt-oyrav (D4): the
+// sync used to discard a failed fetch, which leaves origin/main where it was,
+// so the fast-forward is a no-op and the staleness read after it is taken
+// against the checkout's own stale ref. A stale binary then reads as fresh and
+// the starvation alarm closes over it. Nothing was accomplished, so the cycle
+// must defer and the next heartbeat must retry.
+func TestRebuildGTCycle_FailedFetchDoesNotReadAsFresh(t *testing.T) {
+	t.Parallel()
+	d, rec := rebuildGTTown(t)
+	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return staleInfo(3) }
+	d.rebuildGTGateFn = func() (string, bool) { return "", false }
+	cli := withRebuildGTCli(t, d, func(c cliCall) cliReply {
+		switch {
+		case gitSub(c, "branch"):
+			return cliReply{stdout: "main\n"}
+		case gitSub(c, "fetch"):
+			return cliReply{stderr: "fatal: could not read from remote repository\n", code: 128}
+		}
+		return cliReply{}
+	})
+
+	if settled := d.runRebuildGT(); settled {
+		t.Fatal("a failed fetch accomplished nothing and must retry next heartbeat")
+	}
+	if installs := installCalls(cli); len(installs) != 0 {
+		t.Errorf("installed past a failed fetch, against an unverified main ref: %v", installs)
+	}
+	if esc := rec.Escalations(); len(esc) != 0 {
+		t.Errorf("a deferral escalated: %+v", esc)
+	}
+}
+
+// TestRebuildGTCycle_KilledInstallRetriesNextHeartbeat pins gt-oyrav (D5): an
+// install the cycle's own budget killed (exit -1, no RESULT line) is not a
+// verdict on the install, so taking it as one clears the sticky request and
+// holds the hour over work that never happened. The request must survive.
+func TestRebuildGTCycle_KilledInstallRetriesNextHeartbeat(t *testing.T) {
+	t.Parallel()
+	d, rec := rebuildGTTown(t)
+	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return staleInfo(3) }
+	d.rebuildGTGateFn = func() (string, bool) { return "", false }
+	cli := withRebuildGTCli(t, d, func(c cliCall) cliReply {
+		switch {
+		case gitSub(c, "branch"):
+			return cliReply{stdout: "main\n"}
+		case c.name == "bash":
+			return cliReply{stdout: "building gt...\n", code: -1}
+		}
+		return cliReply{}
+	})
+	// A cycle reached its verdict just now: only the drain request makes the
+	// job due again, so the request is what the kill decides.
+	if err := savePatrolLastRun(d.config.TownRoot, "rebuild_gt", d.clk().Now()); err != nil {
+		t.Fatal(err)
+	}
+	d.requestRebuildGTInstall()
+	cycleEnd := watchRebuildGTCycle(d)
+
+	d.triggerRebuildGT()
+	awaitRebuildGTIdle(t, d, cycleEnd)
+
+	if !d.rebuildGTRequested.Load() {
+		t.Fatal("a killed install cleared the request; the next heartbeat will not retry")
+	}
+	if installs := installCalls(cli); len(installs) != 1 {
+		t.Fatalf("installs = %v, want the one this cycle attempted", installs)
+	}
+	// A kill is the daemon's own clock, not an install-gt failure: escalating
+	// here would page the operator for every slow build the budget cuts.
+	if esc := rec.Escalations(); len(esc) != 0 {
+		t.Errorf("a killed install escalated: %+v", esc)
+	}
+}
+
 // TestRebuildGTCycle_FailedInstallEscalatesForInstallGt covers the failures
 // install-gt does not escalate itself: its own fingerprints cover build,
 // smoke, rollback and marker, and everything else reached nobody.
