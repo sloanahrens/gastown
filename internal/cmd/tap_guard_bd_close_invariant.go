@@ -325,12 +325,16 @@ func parseBdCloseSegment(segment []string) (bdCloseInvocation, bool) {
 	if len(tokens) < 2 {
 		return bdCloseInvocation{}, false
 	}
-	if !isBdCommandWord(tokens[0]) || tokens[1] != "close" {
+	if !isBdCommandWord(tokens[0]) {
+		return bdCloseInvocation{}, false
+	}
+	sub := bdSubcommandIndex(tokens[1:])
+	if sub < 0 || tokens[1+sub] != "close" {
 		return bdCloseInvocation{}, false
 	}
 
 	var invocation bdCloseInvocation
-	rest := tokens[2:]
+	rest := tokens[2+sub:]
 	for i := 0; i < len(rest); i++ {
 		tok := rest[i]
 		switch {
@@ -355,6 +359,29 @@ func parseBdCloseSegment(segment []string) (bdCloseInvocation, bool) {
 		}
 	}
 	return invocation, true
+}
+
+// bdGlobalOptionsWithValue are bd's global flags that consume the next token
+// (space-separated form), so `bd --db x close gt-1` still resolves to close.
+var bdGlobalOptionsWithValue = map[string]bool{
+	"--actor": true, "--database": true, "--db": true, "-C": true, "--directory": true,
+	"--dolt-auto-commit": true, "--mem-profile": true,
+}
+
+// bdSubcommandIndex returns the position of bd's subcommand in rest (the
+// tokens after "bd"), skipping global flags in both `--db x` and `--db=x`
+// forms, or -1 when rest ends before one (gt-kocid).
+func bdSubcommandIndex(rest []string) int {
+	for i := 0; i < len(rest); i++ {
+		t := rest[i]
+		if !strings.HasPrefix(t, "-") {
+			return i
+		}
+		if bdGlobalOptionsWithValue[t] {
+			i++ // skip the flag's value
+		}
+	}
+	return -1
 }
 
 // isBdCommandWord reports whether tok invokes the bd binary — either the bare

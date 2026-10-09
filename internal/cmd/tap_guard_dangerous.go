@@ -98,9 +98,6 @@ func init() {
 	tapGuardCmd.AddCommand(tapGuardDangerousCmd)
 }
 
-// safeForceFlags are git push flags that look like --force but are safe.
-var safeForceFlags = []string{"--force-with-lease", "--force-if-includes"}
-
 func runTapGuardDangerous(cmd *cobra.Command, args []string) error {
 	return tapGuardDangerous(os.Stdin, os.Stderr, realGuardProcess())
 }
@@ -269,6 +266,38 @@ func evaluateDangerousCommand(command string, depth int, sess guardSession) (rea
 // command string, not a plain argument.
 var shellInvokers = map[string]bool{"bash": true, "sh": true, "zsh": true, "dash": true, "ksh": true}
 
+// shellCPayloadIndex returns the index, within the arguments that follow a
+// shell invoker, of the command string its -c flag carries, or -1 when the
+// invocation has none. -c may sit in a short-flag cluster ("-lc", "-ec",
+// "-ic"), after other options ("-x -c", "--norc -c") or after "-o name", and
+// the invoker may be a path ("/bin/bash"). The first operand is a script file:
+// a "-c" after it belongs to that script, not to the shell (gt-kocid).
+func shellCPayloadIndex(args []string) int {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			return -1
+		case a == "-o" || a == "+o" || a == "--rcfile" || a == "--init-file":
+			i++ // the option's separate value
+		case strings.HasPrefix(a, "--"):
+			// a long option such as --norc or --login
+		case len(a) > 1 && a[0] == '+':
+			// +x style option negation
+		case len(a) > 1 && a[0] == '-':
+			if strings.Contains(a[1:], "c") {
+				if i+1 < len(args) {
+					return i + 1
+				}
+				return -1
+			}
+		default:
+			return -1
+		}
+	}
+	return -1
+}
+
 // nestedCommands extracts shell command strings embedded as arguments to
 // shell-invoking wrappers (bash -c/sh -c/zsh -c/eval) so evaluateDangerousCommand
 // can check their contents the same as a top-level command. tokens and
@@ -289,8 +318,10 @@ var shellInvokers = map[string]bool{"bash": true, "sh": true, "zsh": true, "dash
 func nestedCommands(tokens, lowerTokens []string) []string {
 	var nested []string
 	for i, lt := range lowerTokens {
-		if shellInvokers[lt] && i+1 < len(lowerTokens) && lowerTokens[i+1] == "-c" && i+2 < len(tokens) {
-			nested = append(nested, tokens[i+2])
+		if shellInvokers[filepath.Base(lt)] {
+			if idx := shellCPayloadIndex(lowerTokens[i+1:]); idx >= 0 {
+				nested = append(nested, tokens[i+1+idx])
+			}
 		}
 		if lt == "eval" && i+1 < len(tokens) {
 			nested = append(nested, strings.Join(tokens[i+1:], " "))
@@ -1885,30 +1916,50 @@ func matchesPackageInstall(tokens []string) string {
 	return ""
 }
 
-// matchesDangerousGitPush blocks "git push --force" while allowing safe
-// variants like "--force-with-lease" and "--force-if-includes". tokens must
-// be lowercased, shell-aware tokens (see shellTokenize).
+// matchesDangerousGitPush blocks a forced `git push`: --force, -f (alone or
+// in a short-flag cluster such as -fu), or a "+" refspec, any of which rewrites
+// remote history. Safe variants (--force-with-lease, --force-if-includes) pass.
+//
+// Structured like matchesGitClean: git must be running in command position
+// (a path such as /usr/bin/git counts), push must be its subcommand after any
+// global options (-C dir, -c k=v), and the flag must be among push's own
+// arguments in the same shell segment, so a "-f" belonging to a later command
+// is not misread as a force push (gt-kocid). tokens must be lowercased,
+// shell-aware tokens (see shellTokenize).
 func matchesDangerousGitPush(tokens []string) string {
-	hasPush := false
-	for i, f := range tokens {
-		if f == "push" && i > 0 && tokens[i-1] == "git" {
-			hasPush = true
-			continue
-		}
-		if !hasPush {
-			continue
-		}
-		if f == "--force" || f == "-f" {
-			return "Force push rewrites remote history and can destroy others' work"
-		}
-		// Skip safe force variants (don't accidentally match their substrings)
-		for _, safe := range safeForceFlags {
-			if f == safe {
-				break
+	for _, segment := range splitShellSegments(tokens) {
+		for i, tok := range segment {
+			if filepath.Base(tok) != "git" || !inCommandPosition(segment, i) {
+				continue
+			}
+			rest := segment[i+1:]
+			sub := gitSubcommandIndex(rest)
+			if sub < 0 || rest[sub] != "push" {
+				continue
+			}
+			for _, f := range rest[sub+1:] {
+				if isForcePushArg(f) {
+					return "Force push rewrites remote history and can destroy others' work"
+				}
 			}
 		}
 	}
 	return ""
+}
+
+// isForcePushArg reports whether one argument of `git push` forces the push.
+func isForcePushArg(f string) bool {
+	switch {
+	case f == "--force":
+		return true
+	case strings.HasPrefix(f, "--"):
+		return false // --force-with-lease, --force-if-includes and every other long option
+	case len(f) > 1 && f[0] == '+':
+		return true // a "+" refspec forces that ref
+	case len(f) > 1 && f[0] == '-':
+		return strings.Contains(f[1:], "f") // -f, or a cluster such as -fu
+	}
+	return false
 }
 
 // polecatMainPushReason and polecatMainPushAlternative are the block banner

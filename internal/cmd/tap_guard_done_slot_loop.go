@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"path/filepath"
 	"strings"
 )
 
@@ -214,7 +215,7 @@ func doneSlotLoopExecutesGate(tokens []string) bool {
 			if doneSlotLoopExecutesGate(doneSlotLoopWrapperPayload(word, args)) {
 				return true
 			}
-		case shellInvokers[word]:
+		case shellInvokers[filepath.Base(word)]:
 			if payload, ok := doneSlotLoopShellPayload(args); ok &&
 				doneSlotLoopExecutesGate(shellTokenize(payload)) {
 				return true
@@ -230,10 +231,8 @@ func doneSlotLoopExecutesGate(tokens []string) bool {
 
 // doneSlotLoopShellPayload returns the command an invoker's `-c` carries.
 func doneSlotLoopShellPayload(args []string) (string, bool) {
-	for i, arg := range args {
-		if arg == "-c" && i+1 < len(args) {
-			return args[i+1], true
-		}
+	if i := shellCPayloadIndex(args); i >= 0 {
+		return args[i], true
 	}
 	return "", false
 }
