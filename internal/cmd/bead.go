@@ -34,6 +34,7 @@ Read with 'gt show' or 'bd show'; write with these:
   gt bead claim <id>                   Claim a bead (in_progress, assigned to you)
   gt bead reset <id> --reason=...      Return an orphaned claim to open
   gt bead comment <id> "text"          Add a comment
+  gt bead review <id> PASS|FAIL        Record an overseer review of its landed head
   gt bead dep add <issue> <needs>      <issue> depends on <needs>
   gt bead dep remove <issue> <needs>   Drop that dependency
   gt bead close <id> --reason=...      Close beads
@@ -267,10 +268,11 @@ func init() {
 
 	beadResetCmd.Flags().StringVar(&beadResetReason, "reason", "", "Why: appended to the bead's notes")
 	beadCloseCmd.Flags().StringVarP(&beadCloseReason, "reason", "r", "", "Close reason")
+	beadReviewCmd.Flags().StringVar(&beadReviewSHA, "sha", "", "Review this landing of the bead instead of its newest")
 
 	beadDepCmd.AddCommand(beadDepAddCmd, beadDepRemoveCmd)
 	beadCmd.AddCommand(beadCreateCmd, beadNoteCmd, beadUpdateCmd, beadClaimCmd, beadResetCmd,
-		beadCommentCmd, beadDepCmd, beadCloseCmd, beadReopenCmd)
+		beadCommentCmd, beadReviewCmd, beadDepCmd, beadCloseCmd, beadReopenCmd)
 	rootCmd.AddCommand(beadCmd)
 }
 
@@ -283,6 +285,10 @@ type beadVerbs struct {
 	// closeRefusal returns why closing id with reason would break the
 	// gt-6hmz invariant, or "" when the close may proceed.
 	closeRefusal func(id, reason string) string
+	// reviewHead returns the landed head an overseer review of id names, from
+	// the bead's landing record (the reader gt bead review shares with the
+	// attention queue's risk-path item).
+	reviewHead func(id, sha string) (string, error)
 }
 
 // newBeadVerbs builds the verbs for this session: a client on the current
@@ -301,6 +307,13 @@ func newBeadVerbs(cmd *cobra.Command) *beadVerbs {
 		actor:        actor,
 		out:          cmd.OutOrStdout(),
 		closeRefusal: sessionCloseRefusal(cwd),
+		reviewHead: func(id, sha string) (string, error) {
+			townRoot := beads.FindTownRoot(cwd)
+			if townRoot == "" {
+				return "", fmt.Errorf("cannot read the landing record of %s: no town root above %s", id, cwd)
+			}
+			return landedOverseerHead(townRoot, id, sha)
+		},
 	}
 }
 
