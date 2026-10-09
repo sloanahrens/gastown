@@ -1142,14 +1142,31 @@ func (f fileMainState) Save(st landworker.MainState) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(f.path), 0o755); err != nil {
+	dir := filepath.Dir(f.path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	tmp := f.path + ".tmp"
-	if err := os.WriteFile(tmp, append(data, '\n'), 0o644); err != nil { //nolint:gosec // G306: two commit ids, read by humans
+	// A unique temp name: the landing worker's verdict, the tier sweep and
+	// gt promote all write this record, and one shared temp path lets two
+	// writers clobber each other's bytes before either renames (gt-1ohu4).
+	tmp, err := os.CreateTemp(dir, filepath.Base(f.path)+".tmp.*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, f.path)
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if _, err := tmp.Write(append(data, '\n')); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	// CreateTemp opens 0600; the record is two commit ids, read by humans.
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, f.path)
 }
 
 // rigDefaultBranch is the branch the landing worker watches for direct

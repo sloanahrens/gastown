@@ -412,3 +412,49 @@ func TestCommitOnRigMainResolvesAnAbbreviatedSHA(t *testing.T) {
 		t.Errorf("commit = %q, want the full id %s", got, full)
 	}
 }
+
+// midPushStore is a red-main store whose second Load returns what the daemon
+// wrote while the push ran: a verdict landing in the record after the command
+// read it and before it saves (gt-1ohu4).
+type midPushStore struct {
+	loads int
+	saved landworker.MainState
+}
+
+func (s *midPushStore) Load() (landworker.MainState, error) {
+	s.loads++
+	if s.loads == 1 {
+		return landworker.MainState{}, nil
+	}
+	return landworker.MainState{LastGreen: "green-mid-push", LastRun: "green-mid-push"}, nil
+}
+
+func (s *midPushStore) Save(st landworker.MainState) error {
+	s.saved = st
+	return nil
+}
+
+// A verdict the daemon writes while the push runs survives the promotion: the
+// command re-reads the record after the push and replaces only the promotion
+// State, so last_green written mid-push is kept rather than overwritten with
+// the copy loaded before it (gt-1ohu4).
+func TestPromoteKeepsAVerdictWrittenDuringThePush(t *testing.T) {
+	t.Parallel()
+	fx := newPromoteFixture(t)
+	store := &midPushStore{}
+	deps := fx.deps()
+	deps.State = func(string, string) landworker.MainStateStore { return store }
+
+	if err := promoteRigSHA(deps, promoteTestRig, fx.sha); err != nil {
+		t.Fatalf("promoteRigSHA: %v", err)
+	}
+	if store.loads != 2 {
+		t.Fatalf("Load calls = %d, want the record re-read after the push", store.loads)
+	}
+	if got := store.saved.LastGreen; got != "green-mid-push" {
+		t.Errorf("saved last_green = %q, want the verdict written during the push", got)
+	}
+	if got := store.saved.LastPromoted; got != fx.sha {
+		t.Errorf("saved last_promoted = %q, want the promoted commit %s", got, fx.sha)
+	}
+}
