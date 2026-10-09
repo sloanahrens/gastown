@@ -299,14 +299,22 @@ func (d *Daemon) writeAttention() {
 }
 
 // attentionTick runs the collectors, reconciles what they found against prev
-// and the acks, and writes the queue. It returns the state it wrote, so the
-// daemon can carry it into the next tick.
+// and the acks, and writes the queue — and with it the acks whose items are
+// still in the queue. It returns the state it wrote, so the daemon can carry
+// it into the next tick.
 func (d *Daemon) attentionTick(ctx context.Context, src *attentionSources, prev attention.State, acks attention.Acks, now time.Time) attention.State {
 	observed := collectAttention(ctx, prev, src.collectors(), d.logger.Printf)
 	res := attention.Reconcile(prev, observed, acks, now)
 	if err := attention.WriteState(d.config.TownRoot, res.State); err != nil {
 		d.logger.Printf("attention: writing %s: %v", attention.StateFileName, err)
 		return res.State
+	}
+	// An ack dies with its item: the reconcile dropped the keys the new state
+	// no longer holds, and the survivors are written back here. PruneAcks is
+	// handed res.State and not res.Acks, because it re-reads acks.json under
+	// the flock and so keeps an ack made while the collectors ran (gt-cuzjj).
+	if err := attention.PruneAcks(d.config.TownRoot, res.State); err != nil {
+		d.logger.Printf("attention: pruning acks: %v", err)
 	}
 	if err := attention.AppendEvents(d.config.TownRoot, res.Events); err != nil {
 		d.logger.Printf("attention: appending %s: %v", attention.EventsFileName, err)
@@ -826,23 +834,31 @@ func slotName(st slot.SlotState) string {
 	return fmt.Sprintf("slot%d", st.Index)
 }
 
-// collectBDSlow raises one item when the town's bead reads are slow: the
-// collector's own bd read took longer than attentionBDSlow, or this tick's
-// health report judged Dolt red. It is the one collector whose subject is the
-// beads plane itself, so a town whose reads have stopped answering shows up
-// in the queue before its alarms do.
+// collectBDSlow raises one item when the town's bead reads are slow: this
+// tick's health report judged Dolt red, the collector's own bd read took
+// longer than attentionBDSlow, or the read did not answer at all. It is the
+// one collector whose subject is the beads plane itself, so a town whose reads
+// have stopped answering shows up in the queue before its alarms do.
+//
+// The report is read before the timing probe, and a failed read raises the
+// item rather than returning the error: that failure is the condition this
+// collector reports — bd, or the Dolt under it, is down — and an error would
+// leave the queue silent in exactly the case it exists for (gt-cuzjj).
 func (s *attentionSources) collectBDSlow(ctx context.Context) ([]attention.Item, error) {
+	f, red := doltRed(s.report)
 	slow, err := s.bdLatency(ctx)
-	if err != nil {
-		return nil, err
-	}
 	var summary string
-	if f, ok := doltRed(s.report); ok {
+	switch {
+	case red:
 		summary = "dolt " + f.Value
 		if f.Detail != "" {
 			summary += ": " + f.Detail
 		}
-	} else if slow >= attentionBDSlow {
+	case err != nil:
+		// The error's text is not the summary: bd repeats its stderr, and a
+		// queue row is one line.
+		summary = "bd read failed"
+	case slow >= attentionBDSlow:
 		summary = "bd read took " + townhealth.Short(slow)
 	}
 	if summary == "" {

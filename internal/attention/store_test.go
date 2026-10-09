@@ -1,6 +1,7 @@
 package attention
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"sync"
@@ -148,6 +149,69 @@ func TestStoreConcurrentAckLosesNoAck(t *testing.T) {
 		if !AckedKey(acks, key) {
 			t.Errorf("ack %q was lost", key)
 		}
+	}
+}
+
+// gt-cuzjj: the daemon's prune re-reads acks.json inside the lock, so an ack
+// that lands after the daemon's own read is kept when its item is still in the
+// state. Pruning the acks that read produced would drop it.
+func TestAttentionPruneAcksKeepsAConcurrentAck(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// The daemon's read: one ack, for an item that has since cleared.
+	if err := Acknowledge(town, "red-main:gastown:internal/cmd", reconcileNow); err != nil {
+		t.Fatalf("Acknowledge: %v", err)
+	}
+	// The human acks a live item while the daemon's tick is running.
+	if err := Acknowledge(town, "esc:hq-1", reconcileNow); err != nil {
+		t.Fatalf("Acknowledge: %v", err)
+	}
+
+	state := State{Updated: reconcileNow, Items: []Item{{Key: "esc:hq-1"}}}
+	if err := PruneAcks(town, state); err != nil {
+		t.Fatalf("PruneAcks: %v", err)
+	}
+	acks, err := ReadAcks(town)
+	if err != nil {
+		t.Fatalf("ReadAcks: %v", err)
+	}
+	if !AckedKey(acks, "esc:hq-1") {
+		t.Errorf("acks = %+v, want the ack made mid-tick kept", acks.Acks)
+	}
+	if AckedKey(acks, "red-main:gastown:internal/cmd") {
+		t.Errorf("acks = %+v, want the cleared item's ack dropped", acks.Acks)
+	}
+}
+
+// A tick with nothing to drop leaves acks.json alone: the prune does not
+// create the file, and does not rewrite one whose acks all still hold.
+func TestAttentionPruneAcksWritesNothingWhenNothingIsDropped(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := PruneAcks(town, State{}); err != nil {
+		t.Fatalf("PruneAcks on an empty town: %v", err)
+	}
+	if _, err := os.Stat(AcksPath(town)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("PruneAcks wrote acks.json with nothing to prune: %v", err)
+	}
+
+	if err := Acknowledge(town, "esc:hq-1", reconcileNow); err != nil {
+		t.Fatalf("Acknowledge: %v", err)
+	}
+	before, err := os.Stat(AcksPath(town))
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := State{Updated: reconcileNow, Items: []Item{{Key: "esc:hq-1"}}}
+	if err := PruneAcks(town, state); err != nil {
+		t.Fatalf("PruneAcks: %v", err)
+	}
+	after, err := os.Stat(AcksPath(town))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Errorf("acks.json was rewritten at %v, want the %v it was written at", after.ModTime(), before.ModTime())
 	}
 }
 

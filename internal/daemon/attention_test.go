@@ -313,6 +313,84 @@ func TestAttentionCollector_BDSlow(t *testing.T) {
 			t.Fatalf("items = %+v, want none", items)
 		}
 	})
+	t.Run("a failed read still raises the item when dolt is red", func(t *testing.T) {
+		t.Parallel()
+		f := newAttentionFixture(t, now)
+		f.src.report = &townhealth.Report{Fields: []townhealth.Field{
+			{Name: townhealth.FieldDolt, Tag: townhealth.Live, Verdict: townhealth.Red, Value: "unreachable", Detail: "connection refused"},
+		}}
+		// bd is down: the probe does not answer at all. The report the same
+		// tick already made is what raises the item.
+		f.src.bdLatency = func(context.Context) (time.Duration, error) {
+			return 0, os.ErrDeadlineExceeded
+		}
+		items := f.collect(t, f.src.collectBDSlow)
+		if len(items) != 1 || items[0].Key != "bd-slow" || items[0].Kind != attention.KindBDSlow ||
+			items[0].Severity != attention.SeverityHigh {
+			t.Fatalf("items = %+v, want one high-severity bd-slow item", items)
+		}
+		if !strings.Contains(items[0].Summary, "unreachable") {
+			t.Errorf("summary = %q, want it to name the red Dolt", items[0].Summary)
+		}
+	})
+	t.Run("a failed read with no red verdict is still the item", func(t *testing.T) {
+		t.Parallel()
+		f := newAttentionFixture(t, now)
+		f.src.report = &townhealth.Report{Fields: []townhealth.Field{
+			{Name: townhealth.FieldDolt, Tag: townhealth.Live, Verdict: townhealth.Green, Value: "p50 4ms"},
+		}}
+		f.src.bdLatency = func(context.Context) (time.Duration, error) {
+			return 0, os.ErrDeadlineExceeded
+		}
+		items := f.collect(t, f.src.collectBDSlow)
+		if len(items) != 1 || items[0].Key != "bd-slow" {
+			t.Fatalf("items = %+v, want the read that did not answer to be the item", items)
+		}
+	})
+}
+
+// gt-cuzjj: the daemon writes the surviving acks back, so an ack dies with its
+// item. A key that cleared comes back unacked on a recurrence instead of
+// hiding behind the ack the previous item left behind.
+func TestAttentionTick_PrunesAcksWhoseItemCleared(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	town := f.d.config.TownRoot
+	const redKey = "red-main:gastown:internal/cmd"
+	raised := func(context.Context, string) ([]*beads.Issue, error) {
+		return []*beads.Issue{{ID: "gt-red", Status: "open", Title: landworker.RedMainTitle(attentionRig, "internal/cmd")}}, nil
+	}
+	cleared := func(context.Context, string) ([]*beads.Issue, error) { return nil, nil }
+
+	f.src.redMain = raised
+	itemByKey(t, f.tick(t, now), redKey)
+
+	if err := attention.Acknowledge(town, redKey, now); err != nil {
+		t.Fatalf("Acknowledge: %v", err)
+	}
+	if it := itemByKey(t, f.tick(t, now.Add(time.Minute)), redKey); it.AckedAt == nil {
+		t.Fatalf("item = %+v, want the ack recorded", it)
+	}
+
+	// The condition clears: the item goes, and its ack with it.
+	f.src.redMain = cleared
+	if _, ok := attention.Find(f.tick(t, now.Add(2*time.Minute)), redKey); ok {
+		t.Fatalf("item %q survived its condition clearing", redKey)
+	}
+	acks, err := attention.ReadAcks(town)
+	if err != nil {
+		t.Fatalf("ReadAcks: %v", err)
+	}
+	if attention.AckedKey(acks, redKey) {
+		t.Errorf("acks = %+v, want the cleared item's ack dropped", acks.Acks)
+	}
+
+	// A recurrence is a new item: the dead ack must not hide it.
+	f.src.redMain = raised
+	if it := itemByKey(t, f.tick(t, now.Add(3*time.Minute)), redKey); it.AckedAt != nil {
+		t.Errorf("item = %+v, want the recurrence unacked", it)
+	}
 }
 
 // refusal is one recorded gt done refusal at head, for a refusal collector
