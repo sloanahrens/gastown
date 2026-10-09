@@ -1,6 +1,9 @@
 package dashboard
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -16,6 +19,35 @@ var reportsNow = time.Date(2026, 10, 8, 15, 30, 0, 0, time.UTC)
 
 // reportName is the name the overseer's tool gives the report it writes at at.
 func reportName(at time.Time) string { return at.UTC().Format(reportsNameLayout) + reportsExt }
+
+// reportStem is that name without its .md, which is what /api/report names a
+// report by.
+func reportStem(at time.Time) string { return at.UTC().Format(reportsNameLayout) }
+
+// reportServer is a hub whose Report pane lists dir's reports, which is all the
+// /api/report route reads to serve one of them.
+func reportServer(t *testing.T, dir string) *Hub {
+	t.Helper()
+
+	now := reportsNow
+	return NewHub(Config{
+		Now:        func() time.Time { return now },
+		Reports:    func() *Reports { return NewReportsReader(dir).Read(now) },
+		ReportsDir: dir,
+	})
+}
+
+// reportGet sends one GET for a report to a hub's handler, the way the page's
+// fetch does, over loopback so the guard lets it through.
+func reportGet(t *testing.T, h *Hub, query string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	req := httptest.NewRequest("GET", "/api/report?"+query, nil)
+	req.Host = "127.0.0.1:8787"
+	rec := httptest.NewRecorder()
+	h.Handler().ServeHTTP(rec, req)
+	return rec
+}
 
 // reportsFixture writes a reports directory holding name -> text and returns
 // its path. A name that is not the overseer's is written too, which is how the
@@ -224,5 +256,92 @@ func TestReportsReaderWritesNothing(t *testing.T) {
 	NewReportsReader(filepath.Join(dir, "gone")).Read(reportsNow) // no directory
 	if after := cloudTree(t, dir); !reflect.DeepEqual(before, after) {
 		t.Errorf("a read changed the reports directory:\nbefore %v\nafter  %v", before, after)
+	}
+}
+
+// The route the pane reads an earlier report through: a name the reader lists
+// returns that report's text, the same field the pane draws, and nothing else.
+func TestReportRouteReadsAListedReport(t *testing.T) {
+	t.Parallel()
+
+	older := reportsNow.Add(-time.Hour)
+	dir := reportsFixture(t, map[string]string{
+		reportName(reportsNow.Add(-time.Minute)): "the newest report",
+		reportName(older):                        "the older report",
+	})
+
+	rec := reportGet(t, reportServer(t, dir), "name="+reportStem(older))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/report = %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Body.String(); !strings.Contains(got, `"text":"the older report"`) {
+		t.Errorf("the route did not return the listed report's text: %s", got)
+	}
+}
+
+// A name that is not the shape a report's name has is refused as a bad request,
+// and one of the right shape that the reader does not list is refused as not
+// found: neither reaches the directory, and no path is ever built from the
+// query string. "../latest" is both cases at once, and the one an attacker
+// tries first.
+func TestReportRouteRefusesNamesThatAreNotListedReports(t *testing.T) {
+	t.Parallel()
+
+	dir := reportsFixture(t, map[string]string{reportName(reportsNow.Add(-time.Minute)): "the report"})
+	h := reportServer(t, dir)
+
+	for _, tc := range []struct {
+		name string
+		code int
+	}{
+		{"../latest", http.StatusBadRequest},
+		{"latest", http.StatusBadRequest},
+		{"20261008T153000.md", http.StatusBadRequest},                     // a name, not the timestamp
+		{"20261008T15300Z", http.StatusBadRequest},                        // a digit short of the shape
+		{"2026100T153000Z", http.StatusBadRequest},                        // a digit short in the date
+		{reportStem(reportsNow.Add(-2 * time.Hour)), http.StatusNotFound}, // right shape, not listed
+	} {
+		rec := reportGet(t, h, "name="+url.QueryEscape(tc.name))
+		if rec.Code != tc.code {
+			t.Errorf("name %q = %d, want %d", tc.name, rec.Code, tc.code)
+		}
+	}
+}
+
+// A symlink named like a report is refused wherever a report is read: the
+// latest the pane shows, and an earlier one the route is asked for. The target
+// here is a real file, so following the link would have read text that is not a
+// report — the case the reader's Lstat is there for.
+func TestReportsRefuseASymlinkNamedLikeAReport(t *testing.T) {
+	t.Parallel()
+
+	at := reportsNow.Add(-time.Minute)
+	dir := reportsFixture(t, map[string]string{"elsewhere.md": "not a report"})
+	if err := os.Symlink(filepath.Join(dir, "elsewhere.md"), filepath.Join(dir, reportName(at))); err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewReportsReader(dir).Read(reportsNow)
+	if r.State != ReportsError || r.Note != reportsBadReport {
+		t.Errorf("a symlinked latest: state %q note %q, want %q %q", r.State, r.Note, ReportsError, reportsBadReport)
+	}
+
+	if rec := reportGet(t, reportServer(t, dir), "name="+reportStem(at)); rec.Code == http.StatusOK {
+		t.Errorf("the route read a symlink named like a report: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// The route is a read like every other on this page: the guard refuses a write
+// before the handler ever sees it.
+func TestReportRouteRefusesWritesThroughTheGuard(t *testing.T) {
+	t.Parallel()
+
+	dir := reportsFixture(t, map[string]string{reportName(reportsNow.Add(-time.Minute)): "the report"})
+	req := httptest.NewRequest("POST", "/api/report?name="+reportStem(reportsNow.Add(-time.Minute)), nil)
+	req.Host = "127.0.0.1:8787"
+	rec := httptest.NewRecorder()
+	reportServer(t, dir).Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("POST /api/report = %d, want the guard to refuse it", rec.Code)
 	}
 }

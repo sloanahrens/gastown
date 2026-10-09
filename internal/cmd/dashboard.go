@@ -261,6 +261,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Forgejo:    forgejoFeed,
 		Deploys:    forgejoDeploys,
 		Reports:    func() *dashboard.Reports { return reports.Read(time.Now()) },
+		ReportsDir: dashboardReportsDir(townRoot),
 		Questions:  func() *dashboard.Questions { return questions.read(time.Now()) },
 		Escalation: func() *dashboard.Escalations { return escalations.read(time.Now()) },
 		Dispatch:   om.dispatch,
