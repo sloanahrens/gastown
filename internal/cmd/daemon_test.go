@@ -116,3 +116,15 @@ func TestDaemonRunExitMapsUpgradeTo75(t *testing.T) {
 		t.Fatalf("daemonRunExit(nil) = %v, code %d; want nil and no exit", err, code)
 	}
 }
+
+func TestDaemonRunExitMapsUnrequestedStopTo75(t *testing.T) {
+	t.Parallel()
+	var code = -1
+	exit := func(c int) { code = c }
+	if err := daemonRunExit(fmt.Errorf("wrapped: %w", daemon.ErrUnrequestedStop), exit); err != nil {
+		t.Fatalf("daemonRunExit(unrequested stop) = %v, want nil", err)
+	}
+	if code != 75 {
+		t.Fatalf("exit code = %d, want 75 so launchd relaunches the daemon", code)
+	}
+}

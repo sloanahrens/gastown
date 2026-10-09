@@ -1070,7 +1070,13 @@ func (d *Daemon) Run() (err error) {
 				d.logger.Println("Received reload-restart signal: restart budgets are read from the intent records, nothing to reload")
 			} else {
 				d.logger.Printf("Received signal %v, shutting down", sig)
-				return d.shutdown(state)
+				// Exit 0 only when gt asked for this stop; any other signal
+				// exits 75 so launchd relaunches the daemon (gt-swsqm).
+				err := exitAfterSignal(d.config.TownRoot, os.Getpid(), time.Now(), d.shutdown(state))
+				if errors.Is(err, ErrUnrequestedStop) {
+					d.logger.Println("Stop was not requested through gt: exiting 75 so launchd relaunches the daemon")
+				}
+				return err
 			}
 
 		case <-doltHealthChan:
@@ -2000,8 +2006,15 @@ func StopDaemon(townRoot string) error {
 		return fmt.Errorf("finding process: %w", err)
 	}
 
+	// Tell the daemon this stop is deliberate before signaling it: a signal
+	// without the marker makes it exit 75 so launchd relaunches it (gt-swsqm).
+	if err := writeStopRequested(townRoot, pid, time.Now()); err != nil {
+		return fmt.Errorf("recording the stop request: %w", err)
+	}
+
 	// Send termination signal for graceful shutdown
 	if err := sendTermSignal(process); err != nil {
+		removeStopRequested(townRoot)
 		return fmt.Errorf("sending termination signal: %w", err)
 	}
 
