@@ -735,11 +735,24 @@ func splitSpacedCommand(command, spaced string) []string {
 // the enclosing quotes promise. Detection is not lost by that: quoted-text
 // matchers that need the body get it from the raw text instead
 // (commandSubstitutions).
+//
+// An unquoted subshell — `( list )` — has its parentheses spaced out too, so
+// each is a token of its own. A "(" is spaced where it opens a shell word (so
+// a function definition's `f()` and a quoted paren are left alone) and the
+// ")" closing the group it opened is spaced to match, which is what tells a
+// group terminator from the ")" of a `case` pattern. Glued, "(git" and
+// "main)" hid a subshell's command word and its last word from the
+// dangerous-command matchers, which find their command by name and their
+// arguments per shell segment (gt-5eniu).
 func spaceOutShellOperators(command string) string {
 	var b strings.Builder
 	b.Grow(len(command) + 8)
 	scopes := []shellQuoteScope{{}}
 	escaped := false
+	// groupDepth counts the unquoted subshell groups — `( list )` — open at
+	// this level, so a `)` can be told from a `case` pattern's (`a)`), which
+	// opens no group and must stay glued to its pattern word (gt-5eniu).
+	groupDepth := 0
 	// prevEscaped records whether the rune just consumed was backslash-escaped
 	// (gt-w6tug). An escaped ' ' or ';' is literal text inside the current
 	// word, so a '#' right after one is mid-word and starts no comment;
@@ -824,6 +837,24 @@ func spaceOutShellOperators(command string) string {
 			if scopes[len(scopes)-1].depth == 0 {
 				closeScope()
 			}
+		case r == '(' && plainGroupScope(sc) && startsShellWord(runes, prevIdx, prevEscaped):
+			// An unquoted "(" that opens a shell word begins a SUBSHELL group,
+			// which the shell runs as commands the way a brace group is. Emitted
+			// spaced so it is a token of its own and the command behind it
+			// stands in command position: glued, "(git" is one token, and every
+			// matcher that finds its command word by name (git push -f, rm -rf
+			// /, the polecat main-push) reads straight past it (gt-5eniu).
+			b.WriteString(" ( ")
+			groupDepth++
+		case r == ')' && plainGroupScope(sc) && groupDepth > 0:
+			// The ")" that closes a group opened above is spaced the same way,
+			// so the group's last word is not glued to it and hidden from the
+			// matchers — "main)" hid a push destination, "-f)" a force flag
+			// (gt-5eniu). Only a PAIRED ")" is touched, so the ")" of a `case`
+			// pattern ("a)" in `case x in a) ...`) opens no group and stays
+			// with its pattern word, which trimShellKeywords reads.
+			b.WriteString(" ) ")
+			groupDepth--
 		case sc.quote == '"':
 			if r == '\\' {
 				escaped = true
@@ -878,6 +909,16 @@ func spaceOutShellOperators(command string) string {
 		prevIdx = i
 	}
 	return b.String()
+}
+
+// plainGroupScope reports whether sc is the plain command-line quoting scope —
+// unquoted, not a command substitution or backtick body, and not a scope
+// opened inside a double-quoted word (escapeForShlex). A subshell's parentheses
+// are grouping only there: inside `$( ... )` or a backtick body they nest in
+// the substitution, and inside such a substitution's own quoted stretch they
+// are literal text (see spaceOutShellOperators, gt-n8ir, gt-5eniu).
+func plainGroupScope(sc shellQuoteScope) bool {
+	return sc.quote == 0 && !sc.subst && !sc.tick && !sc.escapeForShlex
 }
 
 // startsShellWord reports whether the rune after runes[prevIdx] begins a new
@@ -1486,7 +1527,23 @@ func cdWalkOutcome(status cdStatus) cdWalkStatus {
 func cdWalkRoot(proc guardProcess, tokens []string, end int, base string, vars map[string]string) (string, cdWalkStatus) {
 	root := base
 	lost := cdWalkPlaced
+	// subshells counts the "(" groups open at i. A subshell runs its commands
+	// in a child process, so no cd inside one is this shell's and the walk
+	// reads none of them: `cd A ; (cd B) ; make test` runs make in A. Only a
+	// "(" that opens a command is counted, so a quoted "(" used as an argument
+	// is not mistaken for one (gt-5eniu).
+	subshells := 0
 	for i := 0; i < end; i++ {
+		if subshells > 0 {
+			if tokens[i] == ")" {
+				subshells--
+			}
+			continue
+		}
+		if tokens[i] == "(" && shellCommandStart(tokens, i) {
+			subshells++
+			continue
+		}
 		if !dirChangeCommands[tokens[i]] || !shellCommandStart(tokens, i) {
 			continue
 		}
@@ -1618,8 +1675,9 @@ func segmentWalkRoot(proc guardProcess, tokens []string, start int, base string,
 // rather than continuing an argument list: the line's first word, the word
 // after a separator, or the word after the "(" or "{" that opens a group.
 // The two groups differ in what the walk does with a cd inside them — a
-// subshell's change is not the shell's, a brace group's is — but both hold a
-// command list, so the word after either opens one (gt-ajyw8).
+// subshell's change is not the shell's, a brace group's is, so cdWalkRoot
+// skips the subshell's contents — but both hold a command list, so the word
+// after either opens one (gt-ajyw8, gt-5eniu).
 func shellCommandStart(tokens []string, i int) bool {
 	if i == 0 {
 		return true
