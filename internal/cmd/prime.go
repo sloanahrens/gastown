@@ -227,13 +227,11 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 			return fmt.Errorf("polecat prime: hook unresolvable: %w", hookErr)
 		}
 		// Database error during hook query — NOT the same as "no work assigned".
-		// Emit a loud warning so the agent does NOT run gt done / close the bead.
-		// This prevents the destructive cycle: DB error → "no work" → gt done → bead lost. (GH#2638)
-		fmt.Fprintf(os.Stderr, "\n%s\n", style.Bold.Render("## ⚠️  DATABASE ERROR — DO NOT RUN gt done ⚠️"))
-		fmt.Fprintf(os.Stderr, "Hook query failed: %v\n", hookErr)
-		fmt.Fprintf(os.Stderr, "This is a database connectivity error, NOT an empty hook.\n")
-		fmt.Fprintf(os.Stderr, "Your work may still be assigned. Do NOT close any beads.\n")
-		fmt.Fprintf(os.Stderr, "Escalate and wait for resolution.\n\n")
+		// The banner that stops the agent running gt done / closing the bead
+		// travels in the payload below (stdout reaches the model, stderr does
+		// not), and the NO WORK startup directive is withheld. This prevents
+		// the destructive cycle: DB error → "no work" → gt done → bead lost.
+		// (GH#2638, gt-h7ntn)
 	}
 
 	// Static role text (template + CONTEXT.md) goes into the role's
@@ -269,6 +267,12 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 		return b.String()
 	}
 	parts := primeParts{
+		hookError: func() string {
+			if hookErr == nil {
+				return ""
+			}
+			return hookQueryErrorBanner(hookErr)
+		},
 		session: func() string {
 			explain(true, "Session metadata: always included")
 			return section(func(w io.Writer) { outputSessionMetadata(w, ctx) })
@@ -282,6 +286,9 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 		memories:   func() string { return section(func(w io.Writer) { primeTools{out: w}.memoryInject(ctx, cwd) }) },
 		mail:       func() string { return section(func(w io.Writer) { primeTools{out: w}.mailInject(cwd) }) },
 		startup: func() string {
+			if !primeStartupDirectiveAllowed(hookErr) {
+				return ""
+			}
 			if primeContinuationMode {
 				return "\n---\n\n**Continue your current task.** Context was compacted; your role text is in the system prompt and the sections above are current.\n"
 			}

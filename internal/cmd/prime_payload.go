@@ -290,6 +290,9 @@ const primeDirectiveMaxChars = 2000
 // primeParts are the dynamic sections of a prime, each produced on demand.
 // A nil part is skipped.
 type primeParts struct {
+	// hookError is the database-error banner, first and never dropped: a
+	// SessionStart hook's stderr does not reach the model (gt-h7ntn).
+	hookError  func() string
 	session    func() string
 	hookedWork func() string
 	directives func() string
@@ -313,6 +316,7 @@ func assemblePrimePayload(parts primeParts, staticText string, includeStatic boo
 		}
 		return f()
 	}
+	p.add("hook-error", 0, true, call(parts.hookError))
 	p.add("session", 0, true, call(parts.session))
 	p.add("hooked-work", 1, true, call(parts.hookedWork))
 	if includeStatic {
@@ -362,4 +366,23 @@ func primeStepFormulaName(hookedBead *beads.Issue, explicit string) string {
 		}
 	}
 	return ""
+}
+
+// hookQueryErrorBanner is the text that stops an agent from reading a failed
+// hook query as an empty hook (GH#2638). It goes into the prime payload on
+// stdout: the SessionStart hook delivers stdout to the model and stderr only to
+// the user (gt-h7ntn).
+func hookQueryErrorBanner(err error) string {
+	return "\n## \u26a0\ufe0f  DATABASE ERROR \u2014 DO NOT RUN " + cli.Name() + " done \u26a0\ufe0f\n" +
+		"Hook query failed: " + err.Error() + "\n" +
+		"This is a database connectivity error, NOT an empty hook.\n" +
+		"Your work may still be assigned. Do NOT close any beads.\n" +
+		"Escalate and wait for resolution.\n\n"
+}
+
+// primeStartupDirectiveAllowed reports whether the "no work on your hook" startup
+// directive may print: not after a failed hook query, which says nothing about
+// whether work is assigned (gt-h7ntn).
+func primeStartupDirectiveAllowed(hookErr error) bool {
+	return hookErr == nil
 }
