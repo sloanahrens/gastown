@@ -61,6 +61,25 @@ print(m.group(1) if m else "")
   echo "$c"
 }
 
+# igt_daemon_commit DAEMON_DIR — the build commit of the running daemon, from
+# state.json's commit field (the daemon writes its own build commit there), or
+# empty when there is no readable state or no commit in it.
+#
+# The installed binary can be ahead of the daemon still running the old one —
+# an install killed between install-local and the restart marker — so "is the
+# daemon on this commit?" is a question about state.json, not about the binary
+# at $GT.
+igt_daemon_commit() {
+  python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        print(json.load(f).get("commit") or "")
+except Exception:
+    print("")
+' "$1/state.json" 2>/dev/null || true
+}
+
 # igt_resolve DIR REF — full commit hash of REF inside DIR, or empty.
 igt_resolve() {
   [ -n "${2:-}" ] || { echo ""; return 0; }

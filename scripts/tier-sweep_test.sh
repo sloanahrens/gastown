@@ -59,6 +59,22 @@ else
 fi
 rm -rf "$R"
 
+# --- A tier whose list is empty is RED, not GREEN (gt-tqxdd) ---
+#
+# A repo with no integration-tagged file and no docker.txt hands the tier an
+# empty package list: nothing runs, and the sweep used to report that GREEN.
+# The line keeps the shape the daemon and the landing gate parse, so an empty
+# tier is a RED summary with no failed names.
+R=$(new_repo 0)
+run_tier "$R" integration
+line=$(grep -E '^tier-sweep: integration (GREEN|RED) ' <<<"$out")
+if [ "$rc" != 0 ] && grep -Eq '^tier-sweep: integration RED passed=0 failed=0 skipped=0 \(logs [^)]*\) in [0-9]+(h[0-9]+m[0-9]+s|m[0-9]+s|s)$' <<<"$line"; then
+  pass "empty tier: RED with no names ($line)"
+else
+  fail "empty tier: rc=$rc line=$line out=$out"
+fi
+rm -rf "$R"
+
 # --- An unknown tier runs nothing, so it prints no summary line at all ---
 R=$(new_repo 0)
 run_tier "$R" bogus

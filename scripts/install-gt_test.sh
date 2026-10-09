@@ -186,6 +186,39 @@ install_stub "$T" "$(cat "$T/c2")"
 rc=$(run_install "$T" --sha "$(cat "$T/c1")" --source rebuild-gt)
 [ "$rc" = "0" ] && [ ! -e "$T/make.log" ] && pass "noop (ancestor): exit 0, no build" || fail "noop (ancestor): rc=$rc"
 
+# --- Case 3b: an install killed between install-local's swap and the marker
+# write leaves the binary ahead of the daemon still running the old build. Its
+# retry takes the noop path (the binary already contains the commit) and must
+# still write the restart marker, or the daemon keeps the old build (gt-tqxdd).
+# The daemon's commit is state.json's, not the binary's: both would read c2. ---
+T=$(make_world)
+install_stub "$T" "$(cat "$T/c2")"
+C2_FULL=$(git -C "$T/origin.git" rev-parse main)
+printf '{"running": true, "pid": 1, "commit": "%s"}\n' "$(git -C "$T/rig" rev-parse HEAD)" > "$T/daemon/state.json"
+rc=$(run_install "$T" --sha "$C2_FULL" --source rebuild-gt)
+[ "$rc" = "0" ] && [ ! -e "$T/make.log" ] \
+  && pass "noop behind daemon: exit 0, no build" || fail "noop behind daemon: rc=$rc $(cat "$T/run.out")"
+python3 -c '
+import json, sys
+m = json.load(open(sys.argv[1]))
+assert m["commit"] == sys.argv[2], m
+assert m["source"] == "rebuild-gt", m
+assert m["repo"] == sys.argv[3], m
+' "$T/daemon/restart-pending.json" "$C2_FULL" "$T/rig" \
+  && pass "noop behind daemon: marker names the installed commit" \
+  || fail "noop behind daemon: marker wrong: $(cat "$T/daemon/restart-pending.json" 2>/dev/null)"
+[ "$(last_receipt "$T" event)" = "noop" ] && pass "noop behind daemon: noop receipt" || fail "noop behind daemon: receipt $(last_receipt "$T" event)"
+grep -q "but the daemon is running" "$T/run.out" && pass "noop behind daemon: the log names the daemon's commit" || fail "noop behind daemon: $(cat "$T/run.out")"
+
+# --- Case 3c: binary and daemon both already on the commit -> still no marker ---
+T=$(make_world)
+install_stub "$T" "$(cat "$T/c2")"
+C2_FULL=$(git -C "$T/origin.git" rev-parse main)
+printf '{"running": true, "pid": 1, "commit": "%s"}\n' "$C2_FULL" > "$T/daemon/state.json"
+rc=$(run_install "$T" --sha "$C2_FULL" --source manual)
+[ "$rc" = "0" ] && [ ! -e "$T/daemon/restart-pending.json" ] \
+  && pass "noop current daemon: exit 0, no marker" || fail "noop current daemon: rc=$rc $(cat "$T/run.out") $(cat "$T/daemon/restart-pending.json" 2>/dev/null)"
+
 # --- Case 4: the new binary reports an unresolvable commit -> rollback to the
 # previous binary, HIGH escalation, no marker. ---
 T=$(make_world)

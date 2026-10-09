@@ -63,10 +63,21 @@ fmt_duration() {
 
 # summary TIER PASSED FAILED SKIPPED FAILED_NAMES SECONDS. The elapsed time
 # ends the line, so a slow or hung tier reads as such without opening its log.
+#
+# A tier that counted nothing is RED: an empty script or package list means the
+# tier's list broke, and GREEN reports a tier as passing when nothing ran.
+# Skips alone are not RED — TIER_SWEEP_SKIP is deliberate. The line keeps the
+# shape the daemon and the landing gate parse, so an empty tier is a RED
+# summary with no names (gt-tqxdd).
 summary() {
-	local verdict=GREEN
-	[ "$3" -gt 0 ] && { verdict=RED; red=1; }
-	echo "tier-sweep: $1 $verdict passed=$2 failed=$3 skipped=$4${5:+ failed:$5} (logs $TIER_SWEEP_LOGDIR) in $(fmt_duration "$6")"
+	local total=$(( $2 + $3 + $4 ))
+	local verdict=GREEN note=""
+	if [ "$3" -gt 0 ]; then
+		verdict=RED; red=1; note="${5:+ failed:$5}"
+	elif [ "$total" -eq 0 ]; then
+		verdict=RED; red=1
+	fi
+	echo "tier-sweep: $1 $verdict passed=$2 failed=$3 skipped=$4$note (logs $TIER_SWEEP_LOGDIR) in $(fmt_duration "$6")"
 }
 
 # go_tier TIER PREFIX_CMD... :: GO_TEST_ARGS... :: PKGS... (the prefix may hold
