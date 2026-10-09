@@ -13,6 +13,9 @@ bash scripts/check-deploy-source_test.sh
 bash -n scripts/install-gt.sh
 bash -n scripts/lib/install-gt-lib.sh
 bash scripts/install-gt_test.sh
+bash -n scripts/uninstall-gt.sh
+bash scripts/uninstall-gt_test.sh
+bash scripts/install-local_test.sh
 bash -n scripts/docs-lint.sh
 bash scripts/docs-lint_test.sh
 bash scripts/flake-sweep_test.sh
@@ -26,6 +29,8 @@ bash -n scripts/forgejo-resync.sh
 bash scripts/forgejo-resync_test.sh
 bash -n scripts/forgejo-cutover.sh
 bash scripts/forgejo-cutover_test.sh
+bash -n scripts/repo-guards.sh
+bash scripts/repo-guards_test.sh
 bash -n scripts/test-makefile.sh
 bash -n scripts/lint-lock-wait.sh
 bash -n scripts/makefile-gate_test.sh

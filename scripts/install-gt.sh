@@ -169,6 +169,25 @@ refuse() {
   exit 2
 }
 
+# write_restart_marker COMMIT — write daemon/restart-pending.json for COMMIT,
+# the marker the daemon restarts into. 0 once the marker is in place, non-zero
+# when the write failed; each caller decides what that means on its own path
+# (gt-tqxdd).
+write_restart_marker() {
+  python3 - "$DAEMON_DIR/restart-pending.json" "$1" "$SOURCE" "$(cd "$RIG_DIR" && pwd)" <<'PY'
+import datetime, json, os, sys
+path, commit, source, repo = sys.argv[1:5]
+m = {"commit": commit,
+     "requested_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+     "source": source,
+     "repo": repo}
+tmp = path + ".tmp.%d" % os.getpid()
+with open(tmp, "w") as f:
+    json.dump(m, f, indent=2, sort_keys=True)
+os.replace(tmp, path)
+PY
+}
+
 # git fetch/merge can fork a detached 'gc --auto' or 'maintenance --auto' that
 # inherits the lock fd ($^F above keeps it open across exec) and would hold the
 # install lock long after this run ends; rebuild-gt closes fd 9 for the same
@@ -184,8 +203,28 @@ MERGED_AT=$(git -C "$RIG_DIR" log -1 --format=%ct "$FULL_SHA")
 PREV=$(igt_resolve "$RIG_DIR" "$(igt_binary_commit_raw "$GT" "$RIG_DIR")")
 
 # --- No-op: the installed binary already contains the commit ----------------------
+#
+# An install killed between install-local's swap and the marker write lands
+# here on its retry: the binary on disk is ahead, the daemon still runs the old
+# build, and this path used to exit without telling it to restart. The read
+# that tells the two apart is the daemon's own commit (state.json), never the
+# binary at $GT, which is the one already swapped (gt-tqxdd).
 if [ -n "$PREV" ] && git -C "$RIG_DIR" merge-base --is-ancestor "$FULL_SHA" "$PREV" 2>/dev/null; then
-  log "Installed $PREV already contains $FULL_SHA; nothing to do."
+  DAEMON_COMMIT=$(igt_daemon_commit "$DAEMON_DIR")
+  if [ -n "$DAEMON_COMMIT" ]; then
+    DAEMON_COMMIT=$(igt_resolve "$RIG_DIR" "$DAEMON_COMMIT")
+  fi
+  if [ -n "$DAEMON_COMMIT" ] && [ "$DAEMON_COMMIT" != "$FULL_SHA" ]; then
+    log "Installed $PREV already contains $FULL_SHA, but the daemon is running $DAEMON_COMMIT; writing the restart marker."
+    if ! write_restart_marker "$FULL_SHA"; then
+      escalate high install-gt:marker-write-failed "$FULL_SHA is installed at $GT and the running daemon is still on $DAEMON_COMMIT, but writing $DAEMON_DIR/restart-pending.json failed — the binary stays installed; the daemon needs a manual restart to pick it up"
+      igt_receipt failed "$FULL_SHA" "$PREV" marker-write "$MERGED_AT" "$START"
+      result_line failed "$FULL_SHA" "$PREV" marker-write
+      exit 1
+    fi
+  else
+    log "Installed $PREV already contains $FULL_SHA; nothing to do."
+  fi
   igt_receipt noop "$FULL_SHA" "$PREV" already-installed "$MERGED_AT" "$START"
   result_line noop "$FULL_SHA" "$PREV" already-installed
   exit 0
@@ -425,19 +464,7 @@ if OUT=$( (cd "$RIG_DIR" && "$GT" plugin sync) 2>&1 ); then log "$OUT"; else log
 # never trigger fail_install's rollback of a binary that is good. It is its
 # own reason (marker-write) so the receipt and escalation say plainly that
 # the binary is in force but the daemon was not told to restart into it.
-if ! python3 - "$DAEMON_DIR/restart-pending.json" "$EXPECTED" "$SOURCE" "$(cd "$RIG_DIR" && pwd)" <<'PY'
-import datetime, json, os, sys
-path, commit, source, repo = sys.argv[1:5]
-m = {"commit": commit,
-     "requested_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-     "source": source,
-     "repo": repo}
-tmp = path + ".tmp.%d" % os.getpid()
-with open(tmp, "w") as f:
-    json.dump(m, f, indent=2, sort_keys=True)
-os.replace(tmp, path)
-PY
-then
+if ! write_restart_marker "$EXPECTED"; then
   escalate high install-gt:marker-write-failed "$EXPECTED is installed and verified at $GT, but writing $DAEMON_DIR/restart-pending.json failed — the binary stays installed; the daemon needs a manual restart to pick it up"
   igt_receipt failed "$EXPECTED" "$PREV" marker-write "$MERGED_AT" "$START"
   result_line failed "$EXPECTED" "$PREV" marker-write

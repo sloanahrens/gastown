@@ -206,9 +206,11 @@ install-local: check-up-to-date check-forward-only build
 	@# that leaves the live path missing or holding a partial binary, and
 	@# exec'ing a partial Go binary is SIGKILLed on macOS (gt-0het).
 	@bash $(CURDIR)/scripts/install-binary.sh $(BUILD_DIR)/$(BINARY) $(INSTALL_DIR) $(BINARY)
-	@# Nuke any stale go-install binaries that shadow the canonical location
+	@# Nuke any stale go-install binaries that shadow the canonical location,
+	@# but never the one just installed: INSTALL_DIR=$HOME/go/bin is supported,
+	@# and that path is the first entry of this list (gt-tqxdd).
 	@for bad in $(HOME)/go/bin/$(BINARY) $(HOME)/bin/$(BINARY); do \
-		if [ -f "$$bad" ]; then \
+		if [ -f "$$bad" ] && [ "$$bad" != "$(INSTALL_DIR)/$(BINARY)" ]; then \
 			echo "Removing stale $$bad (use make install, not go install)"; \
 			rm -f "$$bad"; \
 		fi; \
@@ -448,27 +450,11 @@ test-integration-wall:
 test-timing:
 	bash scripts/test-timing.sh $(PKGS)
 
+# test-makefile runs the shell tests from scripts/test-makefile.sh, the one
+# list test-slow runs too: a second copy here drifted from it and made
+# `make test-slow` run less than this target advertised (gt-tqxdd).
 test-makefile:
-	bash scripts/check-install-path_test.sh
-	bash scripts/install-binary_test.sh
-	bash scripts/check-deploy-source_test.sh
-	bash -n scripts/install-gt.sh
-	bash -n scripts/lib/install-gt-lib.sh
-	bash scripts/install-gt_test.sh
-	bash -n scripts/uninstall-gt.sh
-	bash scripts/uninstall-gt_test.sh
-	bash -n scripts/docs-lint.sh
-	bash scripts/docs-lint_test.sh
-	bash -n scripts/forgejo-provision.sh
-	bash scripts/forgejo-provision_test.sh
-	bash -n scripts/forgejo-probe.sh
-	bash scripts/forgejo-probe_test.sh
-	bash -n scripts/forgejo-resync.sh
-	bash scripts/forgejo-resync_test.sh
-	bash -n scripts/forgejo-cutover.sh
-	bash scripts/forgejo-cutover_test.sh
-	bash -n scripts/repo-guards.sh
-	bash scripts/repo-guards_test.sh
+	GT_TEST_DOCKER=0 bash $(SHELL_TESTS)
 
 # Run e2e tests in isolated container (the only supported way to run them)
 test-e2e-container:

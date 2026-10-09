@@ -272,7 +272,11 @@ func RigGate(dir string, mq *config.MergeQueueConfig, unitOnly bool) (CommandGat
 // the post-land run's own rule and the one the post-land revert reads
 // (landworker/revert.go). TestShellTierInputsMatchPostLandScript fails when
 // this constant and the script drift.
-const ShellTierInputs = `^(scripts/|plugins/|\.githooks/|Makefile$|internal/testpolicy/docker\.txt$)`
+//
+// internal/cmd/scheduler_integration_test.go is a shell-tier input although it
+// is Go: scripts/makefile-gate_test.sh reads schedulerTownSlots out of it
+// (gt-tqxdd).
+const ShellTierInputs = `^(scripts/|plugins/|\.githooks/|Makefile$|internal/testpolicy/docker\.txt$|internal/cmd/scheduler_integration_test\.go$)`
 
 // shellTierSummaryRE matches the shell tier's one summary line and captures
 // the scripts it names. The log directory trails the names, and the tier's

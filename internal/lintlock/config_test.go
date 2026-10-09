@@ -10,15 +10,16 @@ import (
 
 // TestRepoConfigKeepsContentionVisible is the regression the om review of the
 // lint-lock work asked for (gt-kqwu): this repo's .golangci.yml must not set
-// run.allow-serial-runners.
+// run.allow-serial-runners, so the choice stays with the caller.
 //
-// The setting makes golangci-lint take the module lock on a deadline-less
-// context, so a contended lint blocks silently rather than exiting in 5s with
-// Marker, and its own run.timeout clock starts only after the lock is held, so
-// the blocked lint prints TimeoutSentinel even less. Both signals gone, Retry
-// never sees Unfinished for this rig's lint command, and a gate verdict falls
-// through to a guess about what the lint was doing. The default fail-fast keeps
-// the evidence; the waiting belongs to the callers, which retry on it.
+// The gate passes --allow-serial-runners and blocks on the lint lock
+// deliberately, waiting its turn (gt-uoppq); plain make lint keeps the
+// fail-fast evidence and retries on it (scripts/lint-lock-wait.sh). Set in the
+// config, the setting takes that choice from both: golangci-lint takes the
+// module lock on a deadline-less context, so a contended lint prints neither
+// Marker nor TimeoutSentinel (run.timeout's clock starts only once the lock is
+// held), Retry never sees Unfinished, and a gate verdict falls through to a
+// guess about what the lint was doing.
 func TestRepoConfigKeepsContentionVisible(t *testing.T) {
 	t.Parallel()
 

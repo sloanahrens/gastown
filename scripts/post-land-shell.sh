@@ -18,11 +18,17 @@
 # POST_LAND_SHELL_WINDOW (default "2 hours") is that window, in git's
 # --since syntax. A history that cannot be read runs the tier: no skip
 # without evidence.
+#
+# INPUTS is every path a shell-tier verdict can move on, internal/cmd/
+# scheduler_integration_test.go included: scripts/makefile-gate_test.sh reads
+# schedulerTownSlots out of it (gt-tqxdd). internal/land's ShellTierInputs
+# mirrors this line — the post-land revert reads it — and
+# TestShellTierInputsMatchPostLandScript fails if the two drift.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 
 WINDOW=${POST_LAND_SHELL_WINDOW:-2 hours}
-INPUTS='^(scripts/|plugins/|\.githooks/|Makefile$|internal/testpolicy/docker\.txt$)'
+INPUTS='^(scripts/|plugins/|\.githooks/|Makefile$|internal/testpolicy/docker\.txt$|internal/cmd/scheduler_integration_test\.go$)'
 
 if ! changed=$(git log --first-parent --since="$WINDOW" --name-only --format= HEAD 2>/dev/null); then
   echo "post-land-shell: cannot read main's history; running the shell tier"

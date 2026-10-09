@@ -64,6 +64,9 @@ dest="$dest_dir/$name"
 # must come off before mv (an immutable destination refuses rename(2) the
 # same way it refuses unlink/write) and go back on once the new binary is in
 # place, so the file is writable for no longer than this script's own install.
+# It comes off at the mv, never before the copy: an install that died in
+# between used to return with the live binary writable, the state gt-vya0s
+# exists to prevent (gt-tqxdd).
 clear_immutable() {
   local target="$1"
   [ -e "$target" ] || return 0
@@ -76,8 +79,6 @@ set_immutable() {
   chflags uchg "$target" 2>/dev/null && return 0
   chattr +i "$target" 2>/dev/null || true
 }
-
-clear_immutable "$dest"
 
 tmp="$(mktemp "$dest_dir/.$name.tmp.XXXXXX")"
 # Leftovers are only possible if the copy or rename below failed; never leave a
@@ -129,6 +130,10 @@ sign_tmp() {
   echo "install-binary.sh: signed $name as $identifier" >&2
 }
 sign_tmp
+
+# The flag comes off here, at the rename it would block, and not a moment
+# sooner (gt-tqxdd).
+clear_immutable "$dest"
 
 # Atomic: replaces the directory entry, so readers never observe a partial file.
 mv -f "$tmp" "$dest"

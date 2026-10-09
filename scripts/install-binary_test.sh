@@ -244,6 +244,51 @@ else
   echo "  SKIP: OS immutable-flag enforcement unavailable on this host (needs BSD chflags, or chattr with CAP_LINUX_IMMUTABLE) — gt-vya0s checks not run"
 fi
 
+# --- gt-tqxdd: a failed install leaves the live binary as immutable as it -----
+# found it. The flag used to come off before the copy and the signing, so a run
+# that died in between (here: a cp that fails) returned with the installed
+# binary writable — the hardening gt-vya0s added, undone by the very path that
+# is supposed to preserve it.
+if immutable_supported; then
+  setup
+  mkdir -p "$DEST"
+  printf 'OLD\n' > "$DEST/gt"
+  if chflags uchg "$DEST/gt" 2>/dev/null || chattr +i "$DEST/gt" 2>/dev/null; then
+    printf 'NEW\n' > "$WORK_DIR/built-gt"
+    chmod 755 "$WORK_DIR/built-gt"
+    shim="$WORK_DIR/fail-cp"
+    mkdir -p "$shim"
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$shim/cp"
+    chmod +x "$shim/cp"
+
+    rc=0
+    PATH="$shim:$PATH" bash "$INSTALLER" "$WORK_DIR/built-gt" "$DEST" gt 2>/dev/null || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+      echo "  PASS: a failed copy exits non-zero"
+      PASS=$((PASS + 1))
+    else
+      echo "  FAIL: a failed copy exits non-zero"
+      FAIL=$((FAIL + 1))
+    fi
+
+    rc=0
+    ( printf 'STUB\n' > "$DEST/gt" ) 2>/dev/null || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+      echo "  PASS: a failed copy leaves the installed binary immutable"
+      PASS=$((PASS + 1))
+    else
+      echo "  FAIL: a failed copy leaves the installed binary immutable"
+      FAIL=$((FAIL + 1))
+    fi
+    assert_eq "a failed copy leaves the installed binary unchanged" "OLD" "$(cat "$DEST/gt")"
+  else
+    echo "  SKIP: could not set the immutable flag on the fixture"
+  fi
+  cleanup
+else
+  echo "  SKIP: OS immutable-flag enforcement unavailable on this host — gt-tqxdd checks not run"
+fi
+
 # --- Signing (gt-ykots): best effort, never a failed install ------------------
 #
 # `security` and `codesign` are stubs on PATH, so no case touches a real
