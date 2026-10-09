@@ -1,11 +1,12 @@
 // Package townconfig is the town config kernel (gt-y3pgh.1, wayfinder D5).
 //
 // Load reads the town's config files once into an immutable, validated Town:
-// mayor/town.json, mayor/rigs.json, settings/config.json, mayor/daemon.json,
-// settings/daemon.env and the managed Dolt server config
-// .dolt-data/config.yaml, plus any pre-registry park records under
-// .beads-wisp/config (parked.go). Every file is decoded strictly through
-// internal/config's one parser, so an unknown key is an error.
+// mayor/town.json, mayor/rigs.json, settings/config.json, every registered
+// rig's settings/config.json, mayor/daemon.json, settings/daemon.env and the
+// managed Dolt server config .dolt-data/config.yaml, plus any pre-registry
+// park records under .beads-wisp/config (parked.go). Every file is decoded
+// strictly through internal/config's one parser, so an unknown key is an
+// error.
 //
 // On the two-file layout (gt config migrate, internal/config/layout.go)
 // mayor/rigs.json and mayor/daemon.json are sections of mayor/town.json and
@@ -112,7 +113,7 @@ func Check(root string) error {
 func load(root string) (*Town, []error) {
 	t := &Town{root: root, present: map[string]bool{}, rigs: map[string]config.RigEntry{}, daemonEnv: map[string]string{}}
 	var errs []error
-	for _, step := range []func() error{t.loadTown, t.loadRigs, t.loadLegacyParked, t.loadSettings, t.loadDaemon, t.loadDaemonEnv, t.loadDolt} {
+	for _, step := range []func() error{t.loadTown, t.loadRigs, t.loadRigSettings, t.loadLegacyParked, t.loadSettings, t.loadDaemon, t.loadDaemonEnv, t.loadDolt} {
 		if err := step(); err != nil {
 			errs = append(errs, err)
 		}
@@ -176,6 +177,26 @@ func (t *Town) loadRigs() error {
 		return fmt.Errorf("%s: %s; bead ids of one would route into the other's database", t.path(FileRigs), strings.Join(dups, "; "))
 	}
 	return nil
+}
+
+// loadRigSettings validates every registered rig's settings/config.json, the
+// sibling of the town file this kernel already reads. A rig file with an
+// unknown key decodes to nothing at resolve time, so the rig silently drops to
+// the town default agent; the load catches it instead (gt-ptysu). Absent is
+// the one silent answer — that is the default.
+func (t *Town) loadRigSettings() error {
+	var errs []error
+	for _, name := range sortedKeys(t.rigs) {
+		root := filepath.Join(t.root, name)
+		if override := t.rigs[name].LocalRepo; override != "" {
+			root = override
+		}
+		path := config.RigSettingsPath(root)
+		if _, err := config.LoadRigSettings(path); err != nil && !errors.Is(err, config.ErrNotFound) {
+			errs = append(errs, oneLine(path, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (t *Town) loadSettings() error {

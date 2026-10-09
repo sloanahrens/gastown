@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -83,13 +82,32 @@ var doltLogLevels = []string{"trace", "debug", "info", "warning", "error", "fata
 // LoadOperationalConfig loads operational config from a town root.
 // Returns a valid (possibly empty) config — never nil, never errors.
 // Callers can use accessor methods that return defaults for nil sub-configs.
+//
+// An absent settings file is the documented fallback and is silent. A file
+// that is there and does not parse warns on stderr before the defaults hold:
+// swallowing it reverts slot caps, Dolt thresholds, the respawn cap and nudge
+// settings with nothing said (gt-ptysu). LoadOperationalConfigChecked is the
+// same load with that error handed to a caller that can act on it.
 func LoadOperationalConfig(townRoot string) *OperationalConfig {
-	settingsPath := filepath.Join(townRoot, "settings", "config.json")
-	ts, err := LoadOrCreateTownSettings(settingsPath)
-	if err != nil || ts == nil || ts.Operational == nil {
-		return &OperationalConfig{}
+	cfg, err := LoadOperationalConfigChecked(townRoot)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v; operational settings fall back to their compiled-in defaults\n", err)
 	}
-	return ts.Operational
+	return cfg
+}
+
+// LoadOperationalConfigChecked loads operational config from a town root and
+// reports a settings file that exists but does not parse. An absent file is
+// nil error: the compiled-in defaults are the documented answer.
+func LoadOperationalConfigChecked(townRoot string) (*OperationalConfig, error) {
+	ts, err := LoadOrCreateTownSettings(TownSettingsPath(townRoot))
+	if err != nil {
+		return &OperationalConfig{}, err
+	}
+	if ts == nil || ts.Operational == nil {
+		return &OperationalConfig{}, nil
+	}
+	return ts.Operational, nil
 }
 
 // --- Accessor methods ---

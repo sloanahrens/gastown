@@ -1,8 +1,4 @@
 {
-    "_comment": "Rig-level settings: ~/gt/<rig>/settings/config.json",
-    "_comment2": "Overrides town-level agent/role settings for this specific rig.",
-    "_comment3": "Only include fields you want to override — omitted fields inherit from town settings.",
-
     "type": "rig-settings",
     "version": 1,
 
