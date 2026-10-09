@@ -1,6 +1,10 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -58,5 +62,56 @@ func TestIsGitRemoteURL(t *testing.T) {
 				t.Errorf("isGitRemoteURL(%q) = %v, want %v", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+// townConfigGitRecorder records what commitTownConfigChanges stages and commits.
+type townConfigGitRecorder struct {
+	added     []string
+	msg       string
+	committed []string
+}
+
+func (g *townConfigGitRecorder) Add(paths ...string) error {
+	g.added = append(g.added, paths...)
+	return nil
+}
+
+func (g *townConfigGitRecorder) CommitPaths(message string, paths ...string) error {
+	g.msg = message
+	g.committed = append([]string(nil), paths...)
+	return nil
+}
+
+// TestCommitTownConfigChangesNamesOnlyItsPaths: the town repo is shared, so the
+// config commit must name the four town files it owns rather than committing
+// whatever else is staged in that repo (gt-2czgm).
+func TestCommitTownConfigChangesNamesOnlyItsPaths(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	for _, p := range []string{"mayor/rigs.json", "mayor/town.json", ".beads/routes.jsonl"} {
+		path := filepath.Join(townRoot, filepath.FromSlash(p))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// mayor/daemon.json is intentionally absent: adopt need not create it.
+
+	rec := &townConfigGitRecorder{}
+
+	commitTownConfigChangesWith(rec, townRoot, "gastown")
+
+	want := []string{"mayor/rigs.json", "mayor/town.json", ".beads/routes.jsonl"}
+	if !slices.Equal(rec.committed, want) {
+		t.Errorf("commit named %v, want %v", rec.committed, want)
+	}
+	if !slices.Equal(rec.added, want) {
+		t.Errorf("staged %v, want %v", rec.added, want)
+	}
+	if !strings.Contains(rec.msg, "gastown") {
+		t.Errorf("commit message %q does not name the rig", rec.msg)
 	}
 }

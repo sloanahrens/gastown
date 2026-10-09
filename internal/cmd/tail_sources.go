@@ -49,12 +49,22 @@ const tailTitleCacheSize = 512
 // Every read is read-only, and every failure is silence: a title that cannot
 // be read prints no title, never an error line, because a stream about the
 // town's health must not become a stream about bd's.
+//
+// The cache lives for the process, not one poll: gt dashboard keeps one
+// tailBeads for as long as it serves. So a read that failed is NOT cached — a
+// transient failure must not blank that bead's title for the rest of the
+// process — and the cache evicts the least recently used id rather than
+// freezing once it is full (gt-2czgm).
 type tailBeads struct {
 	show func(rig, id string) (*beads.Issue, error)
 	max  int
 
 	mu     sync.Mutex
 	titles map[string]string
+	// used is the tick of each cached id's last read, so the least recently
+	// used one can be evicted when the cache is full.
+	used  map[string]uint64
+	clock uint64
 	// fetching marks the ids a read is already in flight for. The sources
 	// poll concurrently and share this cache, so two of them can ask about
 	// the same bead in the same instant; the marker keeps that from becoming
@@ -63,9 +73,15 @@ type tailBeads struct {
 	fetching map[string]bool
 }
 
-// newTailBeads wraps show with the per-run title cache.
+// newTailBeads wraps show with the process-lifetime title cache.
 func newTailBeads(show func(rig, id string) (*beads.Issue, error)) *tailBeads {
-	return &tailBeads{show: show, max: tailTitleCacheSize, titles: map[string]string{}, fetching: map[string]bool{}}
+	return &tailBeads{
+		show:     show,
+		max:      tailTitleCacheSize,
+		titles:   map[string]string{},
+		used:     map[string]uint64{},
+		fetching: map[string]bool{},
+	}
 }
 
 // issue reads one bead now, with no caching: the caller wants what the bead
@@ -81,39 +97,63 @@ func (b *tailBeads) issue(rig, id string) *beads.Issue {
 	return issue
 }
 
-// title reads one bead's title, at most once per run. A read that failed is
-// remembered as "no title", so a store that is down costs one attempt, not one
-// per line. A read already in flight answers "" rather than starting a second
-// one: the sources poll concurrently, and the town scan must not fan one
-// bead's read out into one per source.
+// title reads one bead's title, caching a successful read until it is evicted.
+// A read that failed caches nothing, so the next ask retries it. A read
+// already in flight answers "" rather than starting a second one: the sources
+// poll concurrently, and the town scan must not fan one bead's read out into
+// one per source.
 func (b *tailBeads) title(rig, id string) string {
 	if b == nil || b.show == nil || id == "" {
 		return ""
 	}
 	b.mu.Lock()
 	if title, ok := b.titles[id]; ok {
+		b.clock++
+		b.used[id] = b.clock
 		b.mu.Unlock()
 		return title
 	}
-	if b.fetching[id] || len(b.titles) >= b.max {
+	if b.fetching[id] {
 		b.mu.Unlock()
 		return ""
 	}
 	b.fetching[id] = true
 	b.mu.Unlock()
 
+	var issue *beads.Issue
 	title := ""
-	if issue := b.issue(rig, id); issue != nil {
+	if issue = b.issue(rig, id); issue != nil {
 		title = issue.Title
 	}
 
 	b.mu.Lock()
 	delete(b.fetching, id)
-	if len(b.titles) < b.max {
-		b.titles[id] = title
+	if issue != nil {
+		b.cache(id, title)
 	}
 	b.mu.Unlock()
 	return title
+}
+
+// cache stores one successfully read title, evicting the least recently used
+// id when the cache is full so a long-lived reader keeps taking new titles.
+// Caller holds b.mu.
+func (b *tailBeads) cache(id, title string) {
+	if _, ok := b.titles[id]; !ok && len(b.titles) >= b.max {
+		oldest := ""
+		for key := range b.titles {
+			if oldest == "" || b.used[key] < b.used[oldest] {
+				oldest = key
+			}
+		}
+		if oldest != "" {
+			delete(b.titles, oldest)
+			delete(b.used, oldest)
+		}
+	}
+	b.clock++
+	b.titles[id] = title
+	b.used[id] = b.clock
 }
 
 // lineTitle is the title an events line carries, "" for a line that names no

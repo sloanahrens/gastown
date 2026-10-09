@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"io"
 	"log"
 	"os"
@@ -478,6 +479,42 @@ func TestCheckpointWorktreeNeverCommitsADeletion(t *testing.T) {
 	}
 	if got := changedSince(t, g, before); !slices.Equal(got, []string{"work.go"}) {
 		t.Fatalf("checkpoint commit changed %q, want only work.go (never the deletion of keep.go)", got)
+	}
+}
+
+// unstagingFailsGit wraps a worktree's git so every ResetFiles call fails, the
+// way a transient git failure does mid-checkpoint.
+type unstagingFailsGit struct {
+	daemonGit
+}
+
+func (unstagingFailsGit) ResetFiles(pathspecs ...string) error {
+	return errors.New("git reset failed (transient)")
+}
+
+// A failure to unstage a deletion must abort the checkpoint, not fall through
+// to the commit: the commit at the end of the run records whatever is still
+// staged, so a deletion left staged by a failed reset would land on the
+// polecat's branch (gt-2czgm).
+func TestCheckpointWorktreeRefusesWhenUnstagingADeletionFails(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	workDir, f, g := checkpointClone(t, d, map[string]string{"keep.go": "package a\n", "work.go": "package a\n"})
+	before := headOf(t, g)
+	if err := os.Remove(filepath.Join(workDir, "keep.go")); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkFiles(t, workDir, map[string]string{"work.go": "package a\n// wip\n"})
+
+	d.openGitFn = func(dir string) daemonGit {
+		return unstagingFailsGit{daemonGit: f.Open(dir).(daemonGit)}
+	}
+
+	if d.checkpointWorktree(workDir, "rig", "polecat") {
+		t.Fatal("checkpointWorktree checkpointed although it could not unstage the deletion")
+	}
+	if after := headOf(t, g); after != before {
+		t.Fatalf("checkpoint advanced HEAD to %s, want it unchanged at %s", after, before)
 	}
 }
 

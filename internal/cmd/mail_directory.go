@@ -38,6 +38,14 @@ type DirectoryEntry struct {
 	Type    string `json:"type"`
 }
 
+// mailDirectoryReport is the --json shape: the addresses, and the listing
+// warnings text mode prints to stderr. A caller that never sees stderr can
+// still tell a partial listing from a complete one (gt-2czgm).
+type mailDirectoryReport struct {
+	Addresses []DirectoryEntry `json:"addresses"`
+	Warnings  []string         `json:"warnings"`
+}
+
 func init() {
 	mailDirectoryCmd.Flags().BoolVar(&mailDirJSON, "json", false, "Output as JSON")
 	mailCmd.AddCommand(mailDirectoryCmd)
@@ -80,17 +88,21 @@ func (t townDirBeads) ListChannelBeads() (map[string]*beads.ChannelFields, error
 }
 
 // writeMailDirectory writes the address directory of b to out, as JSON or a
-// table; listing failures are warnings on errOut.
+// table; listing failures are warnings on errOut, and --json carries them too.
 func writeMailDirectory(out, errOut io.Writer, b mailDirectorySource, asJSON bool) error {
 	var err error
 	var entries []DirectoryEntry
-	var warnings int
+	var warnings []string
+	warn := func(format string, args ...any) {
+		line := fmt.Sprintf(format, args...)
+		warnings = append(warnings, line)
+		fmt.Fprintln(errOut, "warning: "+line)
+	}
 
 	// 1. Agent addresses
 	agents, err := b.ListAgentBeads()
 	if err != nil {
-		fmt.Fprintf(errOut, "warning: could not list agents: %v\n", err)
-		warnings++
+		warn("could not list agents: %v", err)
 	} else {
 		for id := range agents {
 			addr := mail.AgentBeadIDToAddress(id)
@@ -103,8 +115,7 @@ func writeMailDirectory(out, errOut io.Writer, b mailDirectorySource, asJSON boo
 	// 2. Group addresses
 	groups, err := b.ListGroupBeads()
 	if err != nil {
-		fmt.Fprintf(errOut, "warning: could not list groups: %v\n", err)
-		warnings++
+		warn("could not list groups: %v", err)
 	} else {
 		for name := range groups {
 			entries = append(entries, DirectoryEntry{Address: "group:" + name, Type: "group"})
@@ -114,8 +125,7 @@ func writeMailDirectory(out, errOut io.Writer, b mailDirectorySource, asJSON boo
 	// 3. Queue addresses
 	queues, err := b.ListQueueBeads()
 	if err != nil {
-		fmt.Fprintf(errOut, "warning: could not list queues: %v\n", err)
-		warnings++
+		warn("could not list queues: %v", err)
 	} else {
 		for id, issue := range queues {
 			if issue == nil {
@@ -123,7 +133,7 @@ func writeMailDirectory(out, errOut io.Writer, b mailDirectorySource, asJSON boo
 			}
 			fields := beads.ParseQueueFields(issue.Description)
 			if fields.Name == "" {
-				fmt.Fprintf(errOut, "warning: queue %s has no name field, skipping\n", id)
+				warn("queue %s has no name field, skipping", id)
 				continue
 			}
 			entries = append(entries, DirectoryEntry{Address: "queue:" + fields.Name, Type: "queue"})
@@ -133,20 +143,20 @@ func writeMailDirectory(out, errOut io.Writer, b mailDirectorySource, asJSON boo
 	// 4. Channel addresses
 	channels, err := b.ListChannelBeads()
 	if err != nil {
-		fmt.Fprintf(errOut, "warning: could not list channels: %v\n", err)
-		warnings++
+		warn("could not list channels: %v", err)
 	} else {
 		for name := range channels {
 			entries = append(entries, DirectoryEntry{Address: "channel:" + name, Type: "channel"})
 		}
 	}
 
-	// 5. Well-known addresses
+	// 5. Well-known addresses. Every entry here resolves: gt mail send accepts
+	// --self, and parseGroupAddress accepts @town and @overseer. @crew and
+	// @witnesses have no rig to scope them and parseGroupAddress rejects them,
+	// so they are not listed as if they worked (gt-2czgm).
 	wellKnown := []DirectoryEntry{
 		{Address: "--self", Type: "well-known"},
 		{Address: "@town", Type: "special"},
-		{Address: "@crew", Type: "special"},
-		{Address: "@witnesses", Type: "special"},
 		{Address: "@overseer", Type: "special"},
 	}
 	entries = append(entries, wellKnown...)
@@ -173,7 +183,13 @@ func writeMailDirectory(out, errOut io.Writer, b mailDirectorySource, asJSON boo
 	if asJSON {
 		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
-		return enc.Encode(entries)
+		if entries == nil {
+			entries = []DirectoryEntry{}
+		}
+		if warnings == nil {
+			warnings = []string{}
+		}
+		return enc.Encode(mailDirectoryReport{Addresses: entries, Warnings: warnings})
 	}
 
 	// Text output grouped by type
@@ -185,8 +201,8 @@ func writeMailDirectory(out, errOut io.Writer, b mailDirectorySource, asJSON boo
 	if err := w.Flush(); err != nil {
 		return err
 	}
-	if warnings > 0 {
-		fmt.Fprintf(out, "\nListed %d addresses (%d warnings)\n", len(entries), warnings)
+	if len(warnings) > 0 {
+		fmt.Fprintf(out, "\nListed %d addresses (%d warnings)\n", len(entries), len(warnings))
 	} else {
 		fmt.Fprintf(out, "\nListed %d addresses\n", len(entries))
 	}

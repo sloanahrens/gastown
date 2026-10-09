@@ -127,6 +127,10 @@ func (r *omReader) read(now time.Time) *dashboard.OM {
 	return buildOM(now, recs, r.stages, r.rejects, loadOMConfig(r.cfgPath))
 }
 
+// readOMRecords reads one rig's om record file line by line. A line that is
+// not a record is skipped. A reader, not a Scanner: a line longer than the
+// scanner's buffer would make the scan stop, silently hiding every record
+// after it (gt-2czgm). A read that fails part-way returns what it read.
 func readOMRecords(path string) []omRecord {
 	f, err := os.Open(path)
 	if err != nil {
@@ -134,15 +138,19 @@ func readOMRecords(path string) []omRecord {
 	}
 	defer func() { _ = f.Close() }()
 	var out []omRecord
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for sc.Scan() {
-		var rec omRecord
-		if json.Unmarshal(sc.Bytes(), &rec) == nil && rec.Bead != "" {
-			out = append(out, rec)
+	br := bufio.NewReaderSize(f, 256*1024)
+	for {
+		line, err := br.ReadString('\n')
+		if line != "" {
+			var rec omRecord
+			if json.Unmarshal([]byte(strings.TrimRight(line, "\r\n")), &rec) == nil && rec.Bead != "" {
+				out = append(out, rec)
+			}
+		}
+		if err != nil {
+			return out
 		}
 	}
-	return out
 }
 
 func loadOMConfig(path string) omConfig {

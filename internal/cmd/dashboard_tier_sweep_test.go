@@ -21,6 +21,7 @@ func tierSweepTestReader(t *testing.T, lines ...string) (*tierSweepReader, strin
 		t.Fatal(err)
 	}
 	return &tierSweepReader{logPath: path, stateDir: filepath.Join(dir, "tier-sweep"),
+		rigs: func() ([]string, error) { return []string{"gastown"}, nil },
 		last: map[string]tierSweepEvent{}, start: map[string]tierSweepStarted{}}, path
 }
 
@@ -229,5 +230,29 @@ func TestTierSweepScanIsIncremental(t *testing.T) {
 	}
 	if ts := r.read(now); len(ts.Sweeps) != 2 {
 		t.Fatalf("a rescan adds nothing: %+v", ts.Sweeps)
+	}
+}
+
+// TestTierSweepIgnoresARigTheRegistryDoesNotKnow: the rig reaches the record
+// path straight from a daemon-log line, so a name the town's registry does not
+// hold — here one carrying a path separator — must not be turned into a path
+// (gt-2czgm).
+func TestTierSweepIgnoresARigTheRegistryDoesNotKnow(t *testing.T) {
+	t.Parallel()
+	r, _ := tierSweepTestReader(t, "2026/10/03 23:00:19 tier_sweep: ../escaped: swept a9be03e4 (shell GREEN, integration RED) in 9m36s")
+	// A record sitting one level above the state directory, where the
+	// unvalidated join would look for it.
+	body := `{"last_sha":"a9be03e4ffff","tiers":{"integration":{"verdict":"RED","failed_names":["./internal/cmd"]}}}`
+	if err := os.WriteFile(filepath.Join(filepath.Dir(r.stateDir), "escaped.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ts := r.read(time.Date(2026, 10, 3, 23, 5, 0, 0, time.Local))
+	if len(ts.Sweeps) != 1 {
+		t.Fatalf("sweeps = %+v", ts.Sweeps)
+	}
+	for _, stage := range ts.Sweeps[0].Stages {
+		if len(stage.Failed) != 0 {
+			t.Fatalf("stage %+v carries names from a record outside the state directory", stage)
+		}
 	}
 }

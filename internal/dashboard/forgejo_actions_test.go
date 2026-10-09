@@ -568,3 +568,23 @@ func TestForgejoReaderSkipsRunsForAMissingRepo(t *testing.T) {
 		assert.NotContains(t, asked, "/actions/runs", "a repo the viewer cannot read is not asked for runs")
 	}
 }
+
+// TestForgejoActionURLIsHTTPOnly: a row's link comes straight from the API
+// response, so a URL that is not http(s) — a javascript: target in a forged
+// run — leaves the row unlinked rather than becoming its href. The deploys
+// panel already passes its run URLs through the same check (gt-2czgm).
+func TestForgejoActionURLIsHTTPOnly(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ in, want string }{
+		{"https://forgejo.test/sloan/gastown/actions/runs/7", "https://forgejo.test/sloan/gastown/actions/runs/7"},
+		{"http://forgejo.test/runs/7", "http://forgejo.test/runs/7"},
+		{"javascript:alert(1)", ""},
+		{"data:text/html,<script>alert(1)</script>", ""},
+		{"", ""},
+	} {
+		run := testRun(7, "gate: the suite", "success", 0, 1, time.Second)
+		run.HTMLURL = tc.in
+		got := newRunRow("sloan/gastown", run).action()
+		assert.Equal(t, tc.want, got.URL, "HTMLURL %q", tc.in)
+	}
+}

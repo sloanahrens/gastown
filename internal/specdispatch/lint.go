@@ -379,13 +379,36 @@ func (v Verdict) Line(id string) string {
 
 var (
 	headingRe    = regexp.MustCompile(`^#{2}\s+(.+?)\s*#*\s*$`)
-	acceptItemRe = regexp.MustCompile(`^\s*(?:[-*+]\s+(?:\[[ xX]\]\s*)?|\d+[.)]\s+)(\S.*)$`)
+	acceptItemRe = regexp.MustCompile(`^(?:[-*+]\s+(?:\[[ xX]\]\s*)?|\d+[.)]\s+)(\S.*)$`)
 	oneWorkerRe  = regexp.MustCompile(`(?i)\bone\s+worker\b`)
 	planningRe   = regexp.MustCompile(`(?i)needs?[\s-]+planning|decompos|multiple\s+workers`)
 )
 
+// fenceMarker reports the code fence a line opens: three or more backticks or
+// tildes, optionally followed by an info string ("" when the line is not a
+// fence). It is the opening and the closing form alike, so one helper serves
+// both. A backtick fence's info string must not itself hold a backtick.
+func fenceMarker(trimmed string) string {
+	for _, b := range []byte{'`', '~'} {
+		n := 0
+		for n < len(trimmed) && trimmed[n] == b {
+			n++
+		}
+		if n < 3 {
+			continue
+		}
+		if b == '`' && strings.IndexByte(trimmed[n:], '`') >= 0 {
+			continue
+		}
+		return trimmed[:n]
+	}
+	return ""
+}
+
 // Sections splits markdown into "## " sections keyed by lower-case heading.
-// Deeper headings (###) stay inside their section's body.
+// Deeper headings (###) stay inside their section's body. A fenced code block
+// is body text, not structure: a "## " line inside one is an example, not a
+// section (gt-2czgm).
 func Sections(markdown string) map[string]string {
 	out := map[string]string{}
 	var current string
@@ -398,9 +421,16 @@ func Sections(markdown string) map[string]string {
 		}
 		body.Reset()
 	}
+	fence := ""
 	for _, line := range strings.Split(markdown, "\n") {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "## ") {
+		if fence != "" {
+			if marker := fenceMarker(trimmed); marker != "" && strings.HasPrefix(marker, fence) {
+				fence = ""
+			}
+		} else if fence = fenceMarker(trimmed); fence != "" {
+			// A fence line opens the block; nothing after it is structure.
+		} else if strings.HasPrefix(trimmed, "## ") {
 			if m := headingRe.FindStringSubmatch(trimmed); m != nil {
 				flush()
 				current = strings.ToLower(strings.TrimSpace(m[1]))
@@ -416,16 +446,29 @@ func Sections(markdown string) map[string]string {
 	return out
 }
 
-// CountAcceptance counts list items in an acceptance text: "- [ ] x", "- x",
-// "* x", "1. x". Free prose with no list items counts as one item when it is
-// non-empty, so a single-sentence criterion is not read as none.
+// CountAcceptance counts top-level list items in an acceptance text: "- [ ] x",
+// "- x", "* x", "1. x". A fenced code block is example text and an indented
+// item is a nested bullet, so neither counts (gt-2czgm). Free prose with no
+// list items counts as one item when it is non-empty, so a single-sentence
+// criterion is not read as none.
 func CountAcceptance(text string) int {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return 0
 	}
 	n := 0
+	fence := ""
 	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if fence != "" {
+			if marker := fenceMarker(trimmed); marker != "" && strings.HasPrefix(marker, fence) {
+				fence = ""
+			}
+			continue
+		}
+		if fence = fenceMarker(trimmed); fence != "" {
+			continue
+		}
 		if acceptItemRe.MatchString(line) {
 			n++
 		}
@@ -437,17 +480,24 @@ func CountAcceptance(text string) int {
 }
 
 // acceptanceText is the bead's acceptance field, else an "## Acceptance..."
-// section of the description.
+// section of the description. The exact "acceptance" heading wins over a
+// longer one like "## Acceptance notes", and a tie between two prefix matches
+// resolves by name so the answer never depends on map iteration order
+// (gt-2czgm).
 func acceptanceText(s Spec, sections map[string]string) string {
 	if strings.TrimSpace(s.Acceptance) != "" {
 		return s.Acceptance
 	}
-	for key, body := range sections {
-		if strings.HasPrefix(key, "acceptance") {
-			return body
+	if body, ok := sections["acceptance"]; ok {
+		return body
+	}
+	bestKey := ""
+	for key := range sections {
+		if strings.HasPrefix(key, "acceptance") && (bestKey == "" || key < bestKey) {
+			bestKey = key
 		}
 	}
-	return ""
+	return sections[bestKey]
 }
 
 // Lint validates the shape of a work bead against the template. Every failure

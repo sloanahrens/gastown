@@ -238,14 +238,30 @@ func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
 	// (additions + modifications), never commit deletions of tracked files.
 	// This prevents the bug where a polecat's working tree has a missing
 	// tracked file and the checkpoint commits the deletion (gt-pvx fix).
-	if staged, err := g.StagedChanges(); err == nil {
-		for _, f := range stagedPaths(staged, 'D') {
-			_ = g.ResetFiles(f)
+	//
+	// Both the listing and each reset must succeed: a deletion still staged
+	// here is recorded by the commit below, so a failure to read or to unstage
+	// is a reason to skip the checkpoint, not to go on (gt-2czgm).
+	staged, err = g.StagedChanges()
+	if err != nil {
+		d.logger.Printf("checkpoint_dog: git diff --cached failed in %s/%s: %v", rigName, polecatName, err)
+		return false
+	}
+	for _, f := range stagedPaths(staged, 'D') {
+		if err := g.ResetFiles(f); err != nil {
+			d.logger.Printf("checkpoint_dog: git reset deleted path %q failed in %s/%s: %v", f, rigName, polecatName, err)
+			return false
 		}
 	}
 
-	// Check if anything is staged after exclusions
-	if staged, err := g.StagedChanges(); err == nil && len(staged) == 0 {
+	// Check if anything is staged after exclusions. A listing that cannot be
+	// read must not read as "nothing to commit" (gt-2czgm).
+	staged, err = g.StagedChanges()
+	if err != nil {
+		d.logger.Printf("checkpoint_dog: git diff --cached failed in %s/%s: %v", rigName, polecatName, err)
+		return false
+	}
+	if len(staged) == 0 {
 		return false
 	}
 

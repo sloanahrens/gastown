@@ -1796,14 +1796,29 @@ func countRigSessions(reg *session.PrefixRegistry, all []string, rigName string)
 	return len(rigSessionsIn(reg, all, rigName))
 }
 
+// townConfigGit is the git surface commitTownConfigChanges uses. *git.Git in
+// production, a recorder in a test.
+type townConfigGit interface {
+	Add(paths ...string) error
+	CommitPaths(message string, paths ...string) error
+}
+
 // commitTownConfigChanges commits town-level config files (rigs.json, daemon.json,
 // routes.jsonl, and town.json, which holds the registry on the two-file layout)
 // to the town repo after rig add/adopt. Without this commit, changes are
 // silently reverted by any process that does a git restore/checkout.
 // settings/config.json is never committed: it carries agent tokens.
 func commitTownConfigChanges(townRoot, rigName string) {
-	g := git.NewGit(townRoot)
+	commitTownConfigChangesWith(git.NewGit(townRoot), townRoot, rigName)
+}
 
+// commitTownConfigChangesWith is the commit for one git handle, so a test can
+// watch which paths it names without touching the town repo.
+//
+// The commit names the town files rather than the whole index (gt-2czgm): the
+// town repo is shared, and a repo-wide commit would sweep up whatever else
+// happened to be staged in it.
+func commitTownConfigChangesWith(g townConfigGit, townRoot, rigName string) {
 	// Collect the town-level files that rig add/adopt modifies.
 	files := []string{
 		filepath.Join("mayor", "rigs.json"),
@@ -1829,7 +1844,7 @@ func commitTownConfigChanges(townRoot, rigName string) {
 	}
 
 	msg := fmt.Sprintf("chore: register rig %s in town config", rigName)
-	if err := g.Commit(msg); err != nil {
+	if err := g.CommitPaths(msg, toAdd...); err != nil {
 		// If nothing changed (already committed), git commit returns an error — that's fine.
 		if !strings.Contains(err.Error(), "nothing to commit") {
 			fmt.Fprintf(os.Stderr, "  Warning: could not commit town config files: %v\n", err)

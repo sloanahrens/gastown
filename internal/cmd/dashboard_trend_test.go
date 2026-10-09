@@ -507,3 +507,47 @@ func TestPolecatOfAssignee(t *testing.T) {
 		}
 	}
 }
+
+// TestDashLoadsTrimsTheFilePeriodically: a long-lived dashboard samples the
+// host about every 10s, so the file must not grow with every sample ever
+// taken. Past a bounded number of appends the writer rewrites it with just
+// the kept window, which is the only thing that removes a sample the window
+// has rolled past (gt-2czgm).
+func TestDashLoadsTrimsTheFilePeriodically(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	start := time.Date(2026, 10, 3, 18, 0, 0, 0, time.Local)
+	cur := start
+	l := newDashLoads(dir, func() time.Time { return cur })
+	path := filepath.Join(dir, ".runtime", "dashboard-load.jsonl")
+
+	// Three samples land inside the window.
+	stale := []time.Time{start, start.Add(-time.Hour), start.Add(-2 * time.Hour)}
+	for i, at := range stale {
+		l.append(at, float64(i)+1)
+	}
+
+	// Two days pass: those samples are now outside the 24h window, so only a
+	// rewrite can clear them from the file.
+	cur = start.Add(48 * time.Hour)
+	for i := 0; i < loadRewriteEvery; i++ {
+		l.append(cur.Add(time.Duration(i)*time.Second), 9.5)
+	}
+
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, at := range stale {
+		if strings.Contains(string(body), at.Format(time.RFC3339)) {
+			t.Errorf("the file still holds the trimmed sample %s; a periodic rewrite must drop it", at.Format(time.RFC3339))
+		}
+	}
+	// The rewrite is a temp file renamed into place, so nothing is left over.
+	if leftovers, _ := filepath.Glob(filepath.Join(dir, ".runtime", "dashboard-load-*.jsonl")); len(leftovers) != 0 {
+		t.Errorf("temp files left behind: %v", leftovers)
+	}
+	if fi, err := os.Stat(path); err == nil && fi.Mode().Perm() != 0o644 {
+		t.Errorf("file mode = %v, want 0644", fi.Mode().Perm())
+	}
+}
