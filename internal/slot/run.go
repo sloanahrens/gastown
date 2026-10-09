@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -56,6 +57,11 @@ type RunOptions struct {
 	Stdin  io.Reader
 	Stdout io.Writer
 	Stderr io.Writer
+	// gate is the gate the hold is taken from; nil means the package's own.
+	// A test injects one whose runtime never reaches the host's docker CLI,
+	// where a stray gate container on a shared host would stall the acquire
+	// for the whole timeout.
+	gate *Gate
 }
 
 // Run acquires the container-gate slot for opts.Role, runs opts.Args under it,
@@ -90,7 +96,11 @@ func Run(townRoot string, opts RunOptions) (int, error) {
 
 	fmt.Fprintf(stdout, "Waiting for container-gate slot (role=%s)...\n", opts.Role)
 	pool := opts.Pool.normalized()
-	h, err := AcquirePool(townRoot, opts.Role, opts.Timeout, pool)
+	gate := opts.gate
+	if gate == nil {
+		gate = NewGate()
+	}
+	h, err := gate.AcquirePool(townRoot, opts.Role, opts.Timeout, pool)
 	if err != nil {
 		return 0, fmt.Errorf("acquiring container-gate slot: %w", err)
 	}
@@ -115,21 +125,41 @@ func Run(townRoot string, opts RunOptions) (int, error) {
 	sub.Stdout = stdout
 	sub.Stderr = stderr
 
-	// Forward interrupts to the child so it can shut down its containers
-	// cleanly; the slot itself is released either by the ReleaseWithExit below
-	// on a graceful return, or by the kernel if we are killed outright.
+	// Forward to the child every signal that would otherwise end this process
+	// — SIGINT today, and SIGTERM and SIGHUP, which is what a daemon or tmux
+	// kill of the wrapper sends. The child shuts its containers down on SIGINT;
+	// a wrapper that died under them instead would hand the kernel back the
+	// flock while the suite it started kept running with no slot held, and the
+	// next acquirer would be granted the slot the gate exists to protect
+	// (gt-1j5rj). The hold is released by the ReleaseWithExit below, after the
+	// child has exited, or by the kernel if this process is killed outright.
+	//
+	// Delivery is registered before the child starts — so a signal arriving
+	// first waits in the channel rather than ending the process — while the
+	// relay itself starts with the child, and so reads a process that exists.
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt)
-	defer signal.Stop(sigCh)
-	go func() {
-		for range sigCh {
-			if sub.Process != nil {
-				_ = sub.Process.Signal(os.Interrupt)
-			}
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	var relay <-chan struct{}
+	defer func() {
+		// Stop delivery before closing: Stop returns only once the signal
+		// package's delivery has quiesced, and a delivery to a closed channel
+		// panics. A relay that was started has exited by the time this returns.
+		signal.Stop(sigCh)
+		close(sigCh)
+		if relay != nil {
+			<-relay
 		}
 	}()
 
-	runErr := sub.Run()
+	// Start and Wait rather than Run, so the relay can be handed the child's
+	// process — reading it from the child while Run sets it is a data race.
+	if err := sub.Start(); err != nil {
+		_ = h.Release()
+		return 0, fmt.Errorf("running %s: %w", cmdArgs[0], err)
+	}
+	relay = relayInterrupts(sigCh, sub.Process)
+
+	runErr := sub.Wait()
 	if runErr != nil {
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) {
@@ -142,6 +172,21 @@ func Run(townRoot string, opts RunOptions) (int, error) {
 	}
 	_ = h.ReleaseWithExit(0)
 	return 0, nil
+}
+
+// relayInterrupts forwards every signal received on sigCh to child as an
+// interrupt — the signal a wrapped suite shuts its containers down with — and
+// reports the channel it has finished on. The caller ends the relay by closing
+// sigCh.
+func relayInterrupts(sigCh <-chan os.Signal, child *os.Process) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range sigCh {
+			_ = child.Signal(os.Interrupt)
+		}
+	}()
+	return done
 }
 
 // RunRole is the role `gt slot run` runs under when --role is omitted. Split
