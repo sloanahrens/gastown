@@ -118,9 +118,10 @@ const recentLandingRows = 10
 // is the landings in flight, which go above the cap rather than inside it: a
 // landing running now is not one of the day's finished rows. The title of a
 // bead is asked for only once the rows to show are known, so the lookups are
-// bounded by limit, not by the day's traffic. ship reads a bead's total ship
-// time off the deploy tracker; a rejection never carries one.
-func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, live []dashboard.LandingRow, ship func(bead string) (secs *float64, pending bool), title func(rig, bead string) string, limit int) []dashboard.LandingRow {
+// bounded by limit, not by the day's traffic. ship reads a landing's ship
+// reading off the deploy tracker, by its rig because what ships a landing
+// depends on the rig; a rejection never carries one.
+func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, live []dashboard.LandingRow, ship func(rig, bead string) tailShip, title func(rig, bead string) string, limit int) []dashboard.LandingRow {
 	since := now.Add(-trendHours * time.Hour)
 	var rows []dashboard.LandingRow
 	rigOf := map[string]string{} // a rejection line names no rig; a landing of the same bead does
@@ -150,7 +151,9 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 			row.Detail = truncateRunes(rec.OMVerdict, 140)
 		}
 		if ship != nil {
-			row.ShipSecs, row.ShipPending = ship(rec.Bead)
+			s := ship(rec.Rig, rec.Bead)
+			row.ShipSecs, row.ShipPending = s.Secs, s.Pending
+			row.ShipVia, row.ShipFailed, row.ShipRunState = s.Via, s.Failed, s.RunState
 		}
 		timing(&row, omStageFor(stages, rec.Bead, rec.LandedAt))
 		rows = append(rows, row)

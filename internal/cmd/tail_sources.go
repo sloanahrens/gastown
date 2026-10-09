@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/land"
@@ -1336,25 +1337,87 @@ func (r *tailDeployRecord) dispatchTime() time.Time {
 	return r.dispatched
 }
 
-// tailDeploys tracks each bead from the spec dispatcher's sling to the daemon
-// restart that installs its commit. It reads the daemon log's four facts and
-// decides deployment by ancestry: the landed commit must be an ancestor of
-// the installed one, because a restart can install a binary built before the
-// bead landed. Every question it cannot answer leaves the bead waiting.
+// tailDeploys tracks each bead from the spec dispatcher's sling to the moment
+// it is shipped. It reads the daemon log's four facts and decides deployment
+// of a bead in the restart rig by ancestry: the landed commit must be an
+// ancestor of the installed one, because a restart can install a binary built
+// before the bead landed. Every question it cannot answer leaves the bead
+// waiting.
+//
+// A landing in an app rig is shipped by that rig's staging deploy instead, so
+// the same record is completed by the staging lookup rather than by a restart:
+// the daemon restart never installs an app rig's commit (gt-lqqjj).
 type tailDeploys struct {
 	now      func() time.Time
 	ancestor tailAncestry
 	from     time.Time // the run's cutoff: no deploy line older than this
+
+	// The town's ship definitions, unset by a tracker nobody configured —
+	// gt tail, and the tests — where every landing is shipped by a restart as
+	// it always was. restartRig is the rig whose commits the daemon restart
+	// installs; rigOf resolves a bead to the rig that holds it; staging
+	// answers what an app rig's staging workflow has done with a landing.
+	restartRig string
+	rigOf      func(bead string) string
+	staging    tailShipStaging
 
 	mu      sync.Mutex
 	records map[string]*tailDeployRecord
 	order   []string // first-seen order, which for landed beads is landing order
 }
 
+// tailShipStaging answers what a rig's staging workflow has done with a landed
+// commit. ok is false for a rig with no staging ship definition — a repository
+// that could not be read, or one with no staging runs.
+type tailShipStaging func(rig, commit string, landed time.Time) (dashboard.StagingShip, bool)
+
 // newTailDeploys returns a tracker that reads the daemon log back to the
 // run's cutoff, from the run's clock, and answers deployment with ancestor.
 func newTailDeploys(now func() time.Time, ancestor tailAncestry, from time.Time) *tailDeploys {
 	return &tailDeploys{now: now, ancestor: ancestor, from: from, records: map[string]*tailDeployRecord{}}
+}
+
+// setShipDefinitions gives the tracker the town's ship definitions: the rig
+// whose landings the daemon restart installs, how a bead resolves to its rig,
+// and the staging lookup for the app rigs. A tracker that is never given them
+// ships every landing by restart, which is what gt tail and the tests want.
+func (t *tailDeploys) setShipDefinitions(restartRig string, rigOf func(bead string) string, staging tailShipStaging) {
+	t.restartRig, t.rigOf, t.staging = restartRig, rigOf, staging
+}
+
+// inRestartRig reports whether a bead's landings ship when the daemon restart
+// installs their commits. A tracker nobody gave ship definitions says yes to
+// every bead: that is the one ship definition there was before app rigs had
+// theirs, and it is also what a town whose own checkout could not be resolved
+// keeps. A bead the routes table cannot place keeps it too — such a bead is
+// not known to be an app rig's, and taking its ship time away would be a
+// silent regression for it.
+func (t *tailDeploys) inRestartRig(bead string) bool {
+	if t.rigOf == nil || t.restartRig == "" {
+		return true
+	}
+	rig := t.rigOf(bead)
+	return rig == "" || rig == t.restartRig
+}
+
+// tailRestartRig names the rig whose landings the daemon restart installs: the
+// rig holding the town's gt source checkout, which is the code a restart
+// upgrades. A town with no checkout, or one whose checkout is not under a rig,
+// names no rig, and then the tracker keeps its old reading of every landing.
+func tailRestartRig(townRoot string) string {
+	repo, err := version.GetRepoRootForTown(townRoot)
+	if err != nil {
+		return ""
+	}
+	rel, err := filepath.Rel(townRoot, repo)
+	if err != nil {
+		return ""
+	}
+	rig, _, _ := strings.Cut(filepath.ToSlash(rel), "/")
+	if rig == "" || rig == "." || rig == ".." {
+		return ""
+	}
+	return rig
 }
 
 // logCutoff is how far back the daemon log is read to feed the tracker: the
@@ -1418,7 +1481,7 @@ func (t *tailDeploys) deployAt(at time.Time, installed string) []tailLine {
 	var out []tailLine
 	for _, bead := range t.order {
 		r := t.records[bead]
-		if r.landed.IsZero() || !r.deployed.IsZero() || r.sha == "" || r.landed.After(at) {
+		if !t.inRestartRig(bead) || r.landed.IsZero() || !r.deployed.IsZero() || r.sha == "" || r.landed.After(at) {
 			continue
 		}
 		ancestor, ok := t.ancestor(r.sha, installed)
@@ -1456,30 +1519,77 @@ func (t *tailDeploys) deployedLine(r *tailDeployRecord) tailLine {
 	}
 }
 
-// shipStatus is one bead's total ship time for the Landings table: the seconds
-// from the spec dispatcher's sling to the restart that installed its commit,
-// or a pending mark for a bead that landed with a dispatch line and has not
-// been installed yet. A bead with no dispatch line (hand-slung) has no total to
-// report, so both readings are absent and the table shows a dash.
-func (t *tailDeploys) shipStatus(bead string) (secs *float64, pending bool) {
+// tailShip is one landing's reading for the Landings table's Ship cell: what
+// the number means, and what the cell says when there is no number yet.
+type tailShip struct {
+	// Secs is the ship time in seconds from the spec dispatcher's sling to the
+	// deploy that shipped the landing, and Via is what shipped it — "deploy"
+	// for the daemon restart that installed the commit, "staging" for the app
+	// rig's staging deploy — so the cell's title can say which.
+	Secs *float64
+	Via  string
+	// Pending marks a landing with a dispatch line that has not shipped yet,
+	// in a rig that has a ship definition; a rig without one reports nothing
+	// at all and the table shows a dash. Failed marks a pending landing whose
+	// newest covering staging run failed, carrying that run's own state.
+	Pending  bool
+	Failed   bool
+	RunState string
+}
+
+// The two things a ship definition can be, as the cell's title names them.
+const (
+	tailShipViaDeploy  = "deploy"
+	tailShipViaStaging = "staging"
+)
+
+// shipStatus is one bead's reading for the Landings table. A bead in the
+// restart rig is shipped by the daemon restart that installed its commit; a
+// bead in an app rig is shipped by the staging deploy that covered it; a bead
+// in a rig with no ship definition reports nothing, and the table shows a dash
+// rather than a landing that looks about to ship. A bead with no dispatch line
+// (hand-slung) has no total to report, and neither has a landing whose rig the
+// tracker does not know.
+func (t *tailDeploys) shipStatus(rig, bead string) tailShip {
 	if t == nil {
-		return nil, false
+		return tailShip{}
 	}
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	r, ok := t.records[bead]
 	if !ok {
-		return nil, false
+		t.mu.Unlock()
+		return tailShip{}
 	}
-	dispatched := r.dispatchTime()
+	dispatched, landed, sha, deployed := r.dispatchTime(), r.landed, r.sha, r.deployed
+	t.mu.Unlock()
 	if dispatched.IsZero() {
-		return nil, false
+		return tailShip{}
 	}
-	if r.deployed.IsZero() {
-		return nil, true
+	if t.inRestartRig(bead) {
+		if deployed.IsZero() {
+			return tailShip{Pending: true, Via: tailShipViaDeploy}
+		}
+		v := deployed.Sub(dispatched).Seconds()
+		return tailShip{Secs: &v, Via: tailShipViaDeploy}
 	}
-	v := r.deployed.Sub(dispatched).Seconds()
-	return &v, false
+	if t.staging == nil || sha == "" || landed.IsZero() {
+		return tailShip{}
+	}
+	// The staging lookup is a read of the rig's repository, cached by the
+	// reader; the tracker holds no lock across it.
+	s, ok := t.staging(rig, sha, landed)
+	if !ok {
+		return tailShip{}
+	}
+	switch s.State {
+	case dashboard.StagingDeployed:
+		v := s.At.Sub(dispatched).Seconds()
+		return tailShip{Secs: &v, Via: tailShipViaStaging}
+	case dashboard.StagingFailed:
+		return tailShip{Pending: true, Failed: true, RunState: s.RunState, Via: tailShipViaStaging}
+	default:
+		return tailShip{Pending: true, Via: tailShipViaStaging}
+	}
 }
 
 // tailDeploySummary is the tracker's state for the summary line: the rolling
@@ -1511,7 +1621,11 @@ func (t *tailDeploys) snapshot() tailDeploySummary {
 	var mins []float64
 	for _, bead := range t.order {
 		r := t.records[bead]
-		if r.landed.IsZero() {
+		// The summary is the restart rig's: its ship times, its median and its
+		// waiting count are what the town's speed is measured by, and an app
+		// rig's staging deploy is a different ship definition that does not
+		// enter them for now (gt-lqqjj).
+		if r.landed.IsZero() || !t.inRestartRig(bead) {
 			continue
 		}
 		s.Landed++

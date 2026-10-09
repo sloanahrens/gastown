@@ -340,12 +340,13 @@ func TestListRuns_Filters(t *testing.T) {
 	c := newTestClient(t, rec)
 
 	got, err := c.ListRuns(context.Background(), "gastownhall", "gastown", RunFilter{
-		Event:   []string{"push"},
-		Status:  []string{"failure"},
-		HeadSHA: "cafe1234567890",
-		Ref:     "land/gt-fn9e6.5",
-		Page:    2,
-		Limit:   30,
+		Event:      []string{"push"},
+		Status:     []string{"failure"},
+		HeadSHA:    "cafe1234567890",
+		Ref:        "land/gt-fn9e6.5",
+		WorkflowID: "staging.yml",
+		Page:       2,
+		Limit:      30,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "/api/v1/repos/gastownhall/gastown/actions/runs", rec.req.URL.Path)
@@ -354,6 +355,7 @@ func TestListRuns_Filters(t *testing.T) {
 	assert.Equal(t, []string{"failure"}, q["status"])
 	assert.Equal(t, "cafe1234567890", q.Get("head_sha"))
 	assert.Equal(t, "land/gt-fn9e6.5", q.Get("ref"))
+	assert.Equal(t, "staging.yml", q.Get("workflow_id"))
 	assert.Equal(t, "2", q.Get("page"))
 	assert.Equal(t, "30", q.Get("limit"))
 

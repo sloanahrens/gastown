@@ -51,8 +51,13 @@ type RunFilter struct {
 	Status  []string
 	HeadSHA string
 	Ref     string
-	Page    int
-	Limit   int
+	// WorkflowID narrows the list to one workflow. The API matches it on the
+	// workflow's path in the repository, so its base name answers too
+	// ("staging.yml" and ".forgejo/workflows/staging.yml" are the same
+	// workflow; verified live against Forgejo 16.0.5).
+	WorkflowID string
+	Page       int
+	Limit      int
 }
 
 // values renders f as query parameters.
@@ -69,6 +74,9 @@ func (f RunFilter) values() url.Values {
 	}
 	if f.Ref != "" {
 		q.Set("ref", f.Ref)
+	}
+	if f.WorkflowID != "" {
+		q.Set("workflow_id", f.WorkflowID)
 	}
 	if f.Page > 0 {
 		q.Set("page", strconv.Itoa(f.Page))

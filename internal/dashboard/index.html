@@ -670,7 +670,7 @@ function landingTable(s, names, rows, waiting) {
   const thr = s.om && s.om.threshold != null ? s.om.threshold : null;
   const tbl = el("table", "ltable");
   const hr = el("tr");
-  [["When"], ["Landing"], ["By", "who built it: the polecat, or the crew member whose branch it was"], ["Score", "om's score", 1], ["Gate", "wall time of the gate stage", 1], ["om", "wall time of the om review", 1], ["Ship", "total ship time: dispatched to deployed, minutes", 1]].forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); });
+  [["When"], ["Landing"], ["By", "who built it: the polecat, or the crew member whose branch it was"], ["Score", "om's score", 1], ["Gate", "wall time of the gate stage", 1], ["om", "wall time of the om review", 1], ["Ship", "total ship time in minutes: dispatched to deployed, which is the staging deploy for an app rig and the daemon restart for gastown", 1]].forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); });
   tbl.append(hr);
   const today = new Date().toDateString();
   // No stage has run yet, so the four cost columns are dashes and the wait is
@@ -731,8 +731,10 @@ function landingTable(s, names, rows, waiting) {
     tr.append(el("td", "n" + (r.gate_secs > 180 ? " warnc" : ""), r.gate_secs != null ? fmtDur(r.gate_secs) : "–"));
     tr.append(el("td", "n" + (r.om_secs > 240 ? " warnc" : ""), r.om_secs != null ? fmtDur(r.om_secs) : "–"));
     const ship = el("td", "n" + (r.ship_pending ? " warnc" : ""));
-    if (r.ship_secs != null) { ship.textContent = Math.round(r.ship_secs / 60) + "m"; ship.title = "dispatched to deployed"; }
-    else if (r.ship_pending) { ship.textContent = "pending"; ship.title = "landed; waiting for the restart that installs it"; }
+    const appRig = r.ship_via === "staging";
+    if (r.ship_secs != null) { ship.textContent = Math.round(r.ship_secs / 60) + "m"; ship.title = appRig ? "dispatched to staging deployed" : "dispatched to deployed"; }
+    else if (r.ship_failed) { ship.textContent = "staging failed"; ship.title = "the staging run that covers this landing failed: " + (r.ship_run_state || "failed"); }
+    else if (r.ship_pending) { ship.textContent = "pending"; ship.title = appRig ? "landed; waiting for the staging deploy" : "landed; waiting for the restart that installs it"; }
     else ship.textContent = "–";
     tr.append(ship);
     tbl.append(tr);
