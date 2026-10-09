@@ -14,7 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/forgejo"
 )
 
-// The Deploys block: the deploy workflow's runs, one row each, with the stages
+// The Deploys block: the deploy workflows' runs, one row each, with the stages
 // the workflow's needs give. It reads what the Forgejo panel reads — the same
 // read-only viewer client and the same repos — and adds nothing of its own:
 // the run list, the run's stamps and its jobs are all the evidence it has. The
@@ -24,10 +24,12 @@ import (
 // inference.
 
 const (
-	// deployWorkflow is the workflow whose runs the block follows. The API
-	// names a workflow by its path in the repository
-	// (".forgejo/workflows/deploy.yml"), so the name is matched on the base.
-	deployWorkflow = "deploy.yml"
+	// deployWorkflow and stagingWorkflow are the workflows whose runs the block
+	// follows: a release, started by a v* tag, and the landing that deploys main
+	// to staging. The API names a workflow by its path in the repository
+	// (".forgejo/workflows/deploy.yml"), so the names are matched on the base.
+	deployWorkflow  = "deploy.yml"
+	stagingWorkflow = "staging.yml"
 
 	// deployRunPage is how many runs one repo's query asks for, so a server
 	// that honors the page bounds the window. Forgejo 16.0.5 ignores `limit`
@@ -38,9 +40,9 @@ const (
 	deployRunPage = 50
 
 	// deployRunsKept is how many of a repo's newest deploy runs the block
-	// lists, and deployJobsKept how many runs' jobs it fetches per refresh.
-	// Runs cost one call per repo; jobs cost one call each, which is what the
-	// smaller, global cap is for.
+	// lists, both workflows together, and deployJobsKept how many runs' jobs it
+	// fetches per refresh, across every repo. Runs cost one call per repo; jobs
+	// cost one call each, which is what the smaller, global cap is for.
 	deployRunsKept = 5
 	deployJobsKept = 3
 
@@ -85,6 +87,11 @@ type DeployRun struct {
 	// Ref is the run's ref as the API names it — a tag like v0.1.0, or a
 	// branch — stripped and capped.
 	Ref string `json:"ref,omitempty"`
+	// Workflow is the workflow the run belongs to, by its base name:
+	// "deploy.yml" for a release, "staging.yml" for the landing that deploys
+	// main to staging. The page tells the two apart by it, since the ref of a
+	// release is a tag and the ref of a staging run is the branch it deployed.
+	Workflow string `json:"workflow"`
 	// Hash is the commit the run tested, the eight characters the Actions
 	// page shows.
 	Hash string `json:"hash,omitempty"`
@@ -112,10 +119,10 @@ type DeployRun struct {
 }
 
 // Deploys is the Cloud section's Deploys block: the newest deploy runs the
-// viewer can see. Missing names the repos whose runs could not be read, so a
-// repo that failed is named rather than reading as a repo with no deploys;
-// Error is the class of a refresh that read no repo at all, which the block's
-// note carries.
+// viewer can see, of either workflow. Missing names the repos whose runs could
+// not be read, so a repo that failed is named rather than reading as a repo
+// with no deploys; Error is the class of a refresh that read no repo at all,
+// which the block's note carries.
 type Deploys struct {
 	Runs    []DeployRun `json:"runs"`
 	Missing []string    `json:"missing,omitempty"`
@@ -158,8 +165,8 @@ func NewDeployReader(api deployAPI, repos []string) *DeployReader {
 }
 
 // Read returns the deploy runs of the reader's repos: the newest
-// deployRunsKept per repo, newest first across them, with jobs for the newest
-// deployJobsKept of those.
+// deployRunsKept per repo across both workflows, newest first, with jobs for
+// the newest deployJobsKept of those.
 func (r *DeployReader) Read() *Deploys {
 	now := r.now()
 	// The whole refresh — the repo list, every run query and every jobs query
@@ -218,13 +225,14 @@ func (r *DeployReader) Read() *Deploys {
 	rows := make([]DeployRun, 0, len(runs))
 	for i, dr := range runs {
 		row := DeployRun{
-			Repo:   dr.repo,
-			Ref:    cloudText(dr.run.PrettyRef, deployTextMax),
-			Hash:   shortSHA(dr.run.CommitSHA),
-			Status: dr.run.Status,
-			At:     dr.created,
-			URL:    deployURL(dr.run.HTMLURL),
-			Stages: []DeployStage{},
+			Repo:     dr.repo,
+			Ref:      cloudText(dr.run.PrettyRef, deployTextMax),
+			Workflow: dr.workflow,
+			Hash:     shortSHA(dr.run.CommitSHA),
+			Status:   dr.run.Status,
+			At:       dr.created,
+			URL:      deployURL(dr.run.HTMLURL),
+			Stages:   []DeployStage{},
 		}
 		if i < deployJobsKept {
 			jobs, err := r.api.ListRunJobs(ctx, dr.owner, dr.name, dr.run.ID)
@@ -271,12 +279,13 @@ func (r *DeployReader) inferWarn(dr deployRun, row DeployRun, prev, next map[str
 	return ""
 }
 
-// deployRun is one run with the repo it belongs to and its created stamp
-// parsed once, so the ordering, the age and the inference all agree on what
-// the API sent.
+// deployRun is one run with the repo it belongs to, the workflow it came from
+// and its created stamp parsed once, so the ordering, the age and the
+// inference all agree on what the API sent.
 type deployRun struct {
 	owner, name string // the repo's two halves, which the jobs call needs
 	repo        string // owner/name, as the panel names it
+	workflow    string // the workflow's base name, which the page tags the row with
 	run         forgejo.ActionRun
 	created     time.Time
 }
@@ -286,8 +295,11 @@ type deployRun struct {
 func (dr deployRun) key() string { return dr.repo + "#" + strconv.FormatInt(dr.run.ID, 10) }
 
 // runList reads one repo's deploy runs, newest first and at most
-// deployRunsKept of them: every run of the deploy workflow whatever its event,
-// since a tag push, a manual run and a teardown run are all deploys.
+// deployRunsKept of them: every run of either deploy workflow whatever its
+// event, since a tag push, a manual run and a teardown run are all deploys,
+// and a landing's staging deploy is one the operator has to see. The two
+// workflows share the cap, so a busy week of releases cannot crowd out the
+// staging runs, or the other way round.
 func (r *DeployReader) runList(ctx context.Context, name, owner, repo string) ([]deployRun, error) {
 	list, err := r.api.ListRuns(ctx, owner, repo, forgejo.RunFilter{Limit: deployRunPage})
 	if err != nil {
@@ -295,16 +307,30 @@ func (r *DeployReader) runList(ctx context.Context, name, owner, repo string) ([
 	}
 	out := make([]deployRun, 0, len(list.Runs))
 	for _, run := range list.Runs {
-		if path.Base(run.WorkflowID) != deployWorkflow {
+		workflow := deployRunWorkflow(run.WorkflowID)
+		if workflow == "" {
 			continue
 		}
-		out = append(out, deployRun{owner: owner, name: repo, repo: name, run: run, created: parseRunStamp(run.Created)})
+		out = append(out, deployRun{owner: owner, name: repo, repo: name, workflow: workflow, run: run, created: parseRunStamp(run.Created)})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].created.After(out[j].created) })
 	if len(out) > deployRunsKept {
 		out = out[:deployRunsKept]
 	}
 	return out, nil
+}
+
+// deployRunWorkflow names the workflow a run belongs to, or "" for a run of
+// one the block does not follow. It reads the workflow by its base name, the
+// way the API names it: a path in the repository
+// (".forgejo/workflows/deploy.yml") or, for a run the API sent no path for,
+// the name alone.
+func deployRunWorkflow(id string) string {
+	switch base := path.Base(id); base {
+	case deployWorkflow, stagingWorkflow:
+		return base
+	}
+	return ""
 }
 
 // deployStages renders a run's jobs as the block's stages: in the order their

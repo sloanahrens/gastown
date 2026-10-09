@@ -162,7 +162,9 @@ h3.sub .r{margin-left:auto;text-transform:none;letter-spacing:0;white-space:norm
 .drow{padding:4px 0;border-top:1px solid var(--line)}
 .drepo,.dref,.dhash,.dstate,.dage{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .drepo{flex:0 0 var(--drepo,15ch)}
-.dref{flex:0 0 13ch}.dhash{flex:0 0 9ch}.dstate{flex:0 0 9ch}.dage{flex:0 0 7ch}
+.dref{flex:0 0 var(--dref,13ch);display:flex;gap:4px;align-items:baseline}
+.dref .tag{flex:0 0 auto;margin-right:0}
+.dhash{flex:0 0 9ch}.dstate{flex:0 0 9ch}.dage{flex:0 0 7ch}
 .drow .dref,.drow .dhash,.drow .dage{color:var(--dim)}
 a.drow{color:inherit;text-decoration:none;cursor:pointer}
 a.drow:hover{background:#19212b}
@@ -814,11 +816,11 @@ function renderCloud(s) {
   if (c.more) box.append(el("div", "empty", "and " + c.more + " more"));
 }
 
-// The Deploys block draws the deploy workflow's runs: repo, ref, commit, state,
-// age and the stages in needs order, on one line while the panel is wide enough
-// to hold them and wrapped when it is not. A stage name and a ref are a
-// repository's own text, so every cell goes through el() and nothing here
-// parses markup.
+// The Deploys block draws the deploy workflows' runs — a release and a
+// landing's staging deploy — as repo, ref, commit, state, age and the stages in
+// needs order, on one line while the panel is wide enough to hold them and
+// wrapped when it is not. A stage name and a ref are a repository's own text,
+// so every cell goes through el() and nothing here parses markup.
 //
 // The chips are the page's own colours for a job state: a stage that ran green,
 // a failure the alert red, a running stage the live colour the landing rows
@@ -829,6 +831,18 @@ function renderCloud(s) {
 // instead.
 const DEPLOY_STAGE = {success: "good", failure: "badc", running: "live", waiting: "sev-low", blocked: "sev-low", skipped: "sev-low", cancelled: "sev-low"};
 const DEPLOY_GLYPH = {success: "✓", failure: "✗", running: "◌"};
+
+// The staging workflow, as the reader names the runs of it: a landing deploys
+// main to staging, where a release run deploys a v* tag, and the tag beside a
+// staging run's ref keeps the two from reading alike.
+const DEPLOY_STAGING = "staging.yml";
+
+// The Ref column: the width it holds in the row's font, and the characters a
+// staging run's tag spends beside its ref — "staging" at the tag's 11px, plus
+// its padding, border and the gap before it. The column is measured from both,
+// so neither the ref nor the tag beside it is cut (gt-2h2lx).
+const DEPLOY_REF_CH = 13;
+const DEPLOY_STAGING_TAG_CH = 9;
 
 function renderDeploys(s) {
   const box = $("deploys"), note = $("deploysnote");
@@ -846,10 +860,17 @@ function renderDeploys(s) {
   const runs = d.runs || [];
   if (!runs.length) { box.append(el("div", err ? "badc" : "empty", err ? "no deploy runs: " + err : "no deploy runs yet")); return; }
   // The repo column is as wide as the longest name the block lists, so no name
-  // is cut to make room for another (gt-1hob8).
-  let widest = 0;
-  for (const r of runs) widest = Math.max(widest, repoShort(r.repo).length);
+  // is cut to make room for another (gt-1hob8). The ref column keeps the width
+  // it always held, and a staging run's tag rides inside it, so a list holding
+  // one takes the tag's own width as well and shows no ref narrower than it
+  // would among releases (gt-2h2lx).
+  let widest = 0, tags = false;
+  for (const r of runs) {
+    widest = Math.max(widest, repoShort(r.repo).length);
+    tags = tags || r.workflow === DEPLOY_STAGING;
+  }
   box.style.setProperty("--drepo", widest + "ch");
+  box.style.setProperty("--dref", (DEPLOY_REF_CH + (tags ? DEPLOY_STAGING_TAG_CH : 0)) + "ch");
   const head = el("div", "dhead");
   [["Repo", "drepo"], ["Ref", "dref"], ["Commit", "dhash"], ["State", "dstate"], ["Age", "dage"]].forEach(([h, cls]) => head.append(el("span", cls, h)));
   box.append(head);
@@ -861,13 +882,21 @@ function renderDeploys(s) {
 // it. The row itself is the run's link, so the run the operator is reading is
 // the one they open; a run the reader kept no URL for is the same row unlinked
 // rather than a link to nowhere. The repo cell shows the shortened name with
-// the whole one on its title, the way the Actions rows name a repo.
+// the whole one on its title, the way the Actions rows name a repo. A staging
+// run's ref is the branch the landing deployed (main), where a release's is a
+// tag, so the ref cell carries the dim tag that names the kind (gt-2h2lx).
 function deployRow(r) {
   const row = r.url ? el("a", "drow") : el("div", "drow");
   if (r.url) { row.href = r.url; row.target = "_blank"; row.rel = "noopener"; row.title = r.url; }
   const repo = el("span", "drepo", repoShort(r.repo));
   if (repo.textContent !== r.repo) repo.title = r.repo;
-  row.append(repo, el("span", "dref", r.ref || "–"), el("span", "dhash", r.hash || "–"), el("span", "dstate", r.status || "–"), el("span", "dage", r.at ? age(r.at) : "–"), deployStages(r));
+  const ref = el("span", "dref", r.ref || "–");
+  if (r.workflow === DEPLOY_STAGING) {
+    const g = el("span", "tag", "staging");
+    g.title = "the staging workflow's run: a landing deployed " + (r.ref || "main") + " to staging, not a release";
+    ref.append(g);
+  }
+  row.append(repo, ref, el("span", "dhash", r.hash || "–"), el("span", "dstate", r.status || "–"), el("span", "dage", r.at ? age(r.at) : "–"), deployStages(r));
   if (r.warn) row.append(el("span", "dwarn warnc", r.warn));
   return row;
 }

@@ -388,7 +388,7 @@ func (h *Hub) pollForgejo() {
 	h.publishLocked()
 }
 
-// pollDeploys reads the deploy workflow's runs. It is a poller of its own
+// pollDeploys reads the deploy workflows' runs. It is a poller of its own
 // rather than part of the Forgejo feed's refresh so the block keeps its own
 // 60s clock: a stage change and a run picking up a runner are the two things
 // on this page an operator watches in minutes, not three.
