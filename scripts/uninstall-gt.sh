@@ -124,6 +124,12 @@ TOWN_ROOT="${GT_TOWN_ROOT:-$(igt_town_root_above "$SCRIPT_DIR")}"
 if [ -n "$TOWN_ROOT" ] && [ ! -f "$TOWN_ROOT/mayor/town.json" ]; then
   TOWN_ROOT=""
 fi
+# A clone outside the town, with GT_TOWN_ROOT unset, finds no town above it and
+# would take the live install for a scratch one. The conventional town at
+# $HOME/gt answers for the host the install belongs to (gt-bqzoq).
+if [ -z "$TOWN_ROOT" ] && [ -f "$HOME/gt/mayor/town.json" ]; then
+  TOWN_ROOT="$HOME/gt"
+fi
 
 # daemon_running TOWN_ROOT — is this town's daemon alive right now? Best
 # effort and read-only: the pid file's first line is the pid (daemon/pidfile.go)

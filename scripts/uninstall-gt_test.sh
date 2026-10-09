@@ -167,6 +167,20 @@ assert_run "no town: a bare ~/.local/bin is removed" 0 "$rc" "$out"
 assert_eq "no town: gt removed" "gone" "$(exists "$HOME_DIR/.local/bin/gt" && echo there || echo gone)"
 unset rc
 
+# --- 4b. A clone outside the town still finds the town in HOME/gt (gt-bqzoq) ---
+# GT_TOWN_ROOT unset and the script not under a town used to mean "no town", so
+# make uninstall from a clone outside ~/gt removed the live install (the
+# 2026-09-30 incident). The conventional HOME/gt town is looked for as well.
+setup
+mkdir -p "$HOME_DIR/gt/mayor"
+printf '{"name":"fixture"}\n' > "$HOME_DIR/gt/mayor/town.json"
+out="$(run_uninstall "HOME=$HOME_DIR" "GT_TOWN_ROOT=$WORK_DIR/no-such-town" \
+  -- --install-dir "$HOME_DIR/.local/bin")" || rc=$?
+assert_run "home town: refuses with exit 2" 2 "${rc:-0}" "$out"
+assert_eq "home town: gt survives the refusal" "there" "$(exists "$HOME_DIR/.local/bin/gt" && echo there || echo gone)"
+assert_eq "home town: bd survives the refusal" "there" "$(exists "$HOME_DIR/.local/bin/bd" && echo there || echo gone)"
+unset rc
+
 # --- 5. FORCE=1 removes the live install anyway, and says so ------------------
 setup
 out="$(run_uninstall "HOME=$HOME_DIR" "GT_TOWN_ROOT=$TOWN_DIR" \

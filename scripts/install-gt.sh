@@ -352,6 +352,10 @@ if [ -n "$SLOT_ROLE" ]; then
   # Inside the container-gate slot, the way rebuild-gt builds past its
   # starvation threshold (gt-kox0). The acquired literal is slotAcquiredFormat
   # in internal/cmd/slot.go; without it the build never started.
+  if [ ! -x "$GT" ]; then
+    fail_install slot-unavailable "$GT is missing or not executable; cannot take the container-gate slot" \
+      medium install-gt:slot-unavailable failed
+  fi
   SLOT_LOG=$(mktemp)
   set +e
   (cd "$RIG_DIR" && "$GT" slot run --role "$SLOT_ROLE" --timeout "${SLOT_TIMEOUT}s" -- make SKIP_UPDATE_CHECK=1 build) 2>&1 | tee "$SLOT_LOG"
@@ -359,6 +363,14 @@ if [ -n "$SLOT_ROLE" ]; then
   set -e
   if ! grep -q "Container-gate slot acquired" "$SLOT_LOG"; then
     rm -f "$SLOT_LOG"
+    # Exit 126/127 is a gt that could not run at all (missing, not executable,
+    # wrong format), which never asked for the slot. Reporting that as busy
+    # (exit 3) tells the caller to retry, and a broken gt is what the retry
+    # would have to replace (gt-bqzoq).
+    if [ "$BUILD_RC" = "126" ] || [ "$BUILD_RC" = "127" ]; then
+      fail_install slot-unavailable "cannot run $GT slot run (exit $BUILD_RC); the container-gate slot was never requested" \
+        medium install-gt:slot-unavailable failed
+    fi
     log "Did not get the container-gate slot within ${SLOT_TIMEOUT}s."
     igt_receipt refused "$EXPECTED" "$PREV" slot-busy "$MERGED_AT" "$START"
     result_line refused "$EXPECTED" "$PREV" slot-busy
