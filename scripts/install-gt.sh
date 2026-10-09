@@ -209,18 +209,36 @@ PREV=$(igt_resolve "$RIG_DIR" "$(igt_binary_commit_raw "$GT" "$RIG_DIR")")
 # build, and this path used to exit without telling it to restart. The read
 # that tells the two apart is the daemon's own commit (state.json), never the
 # binary at $GT, which is the one already swapped (gt-tqxdd).
+#
+# Whether the daemon needs telling is an ancestry question, not an equality
+# one: a daemon already running a build that CONTAINS $FULL_SHA has nothing to
+# restart for, and an inequality answered "different, write the marker" for it
+# — marker-ing the older commit, which the daemon then read as covered, cleared
+# and stayed put, so the newer build it should have restarted into waited for
+# the next install (gt-tg5to).
 if [ -n "$PREV" ] && git -C "$RIG_DIR" merge-base --is-ancestor "$FULL_SHA" "$PREV" 2>/dev/null; then
   DAEMON_COMMIT=$(igt_daemon_commit "$DAEMON_DIR")
   if [ -n "$DAEMON_COMMIT" ]; then
     DAEMON_COMMIT=$(igt_resolve "$RIG_DIR" "$DAEMON_COMMIT")
   fi
-  if [ -n "$DAEMON_COMMIT" ] && [ "$DAEMON_COMMIT" != "$FULL_SHA" ]; then
-    log "Installed $PREV already contains $FULL_SHA, but the daemon is running $DAEMON_COMMIT; writing the restart marker."
-    if ! write_restart_marker "$FULL_SHA"; then
-      escalate high install-gt:marker-write-failed "$FULL_SHA is installed at $GT and the running daemon is still on $DAEMON_COMMIT, but writing $DAEMON_DIR/restart-pending.json failed — the binary stays installed; the daemon needs a manual restart to pick it up"
-      igt_receipt failed "$FULL_SHA" "$PREV" marker-write "$MERGED_AT" "$START"
-      result_line failed "$FULL_SHA" "$PREV" marker-write
-      exit 1
+  if [ -n "$DAEMON_COMMIT" ] && ! git -C "$RIG_DIR" merge-base --is-ancestor "$FULL_SHA" "$DAEMON_COMMIT" 2>/dev/null; then
+    # A pending marker another install left already names what the daemon will
+    # restart into. Replacing a newer marker with this older commit would drop
+    # that restart, so leave it alone (gt-tg5to).
+    PENDING_COMMIT=$(igt_pending_commit "$DAEMON_DIR")
+    if [ -n "$PENDING_COMMIT" ]; then
+      PENDING_COMMIT=$(igt_resolve "$RIG_DIR" "$PENDING_COMMIT")
+    fi
+    if [ -n "$PENDING_COMMIT" ] && git -C "$RIG_DIR" merge-base --is-ancestor "$FULL_SHA" "$PENDING_COMMIT" 2>/dev/null; then
+      log "A pending restart marker for $PENDING_COMMIT already contains $FULL_SHA; leaving it in place."
+    else
+      log "Installed $PREV already contains $FULL_SHA, but the daemon is running $DAEMON_COMMIT; writing the restart marker."
+      if ! write_restart_marker "$FULL_SHA"; then
+        escalate high install-gt:marker-write-failed "$FULL_SHA is installed at $GT and the running daemon is still on $DAEMON_COMMIT, but writing $DAEMON_DIR/restart-pending.json failed — the binary stays installed; the daemon needs a manual restart to pick it up"
+        igt_receipt failed "$FULL_SHA" "$PREV" marker-write "$MERGED_AT" "$START"
+        result_line failed "$FULL_SHA" "$PREV" marker-write
+        exit 1
+      fi
     fi
   else
     log "Installed $PREV already contains $FULL_SHA; nothing to do."

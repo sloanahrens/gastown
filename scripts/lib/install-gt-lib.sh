@@ -61,15 +61,10 @@ print(m.group(1) if m else "")
   echo "$c"
 }
 
-# igt_daemon_commit DAEMON_DIR — the build commit of the running daemon, from
-# state.json's commit field (the daemon writes its own build commit there), or
-# empty when there is no readable state or no commit in it.
-#
-# The installed binary can be ahead of the daemon still running the old one —
-# an install killed between install-local and the restart marker — so "is the
-# daemon on this commit?" is a question about state.json, not about the binary
-# at $GT.
-igt_daemon_commit() {
+# igt_json_commit FILE — the "commit" field of a JSON file, or empty when the
+# file is missing, unreadable, not JSON, or has no commit in it. The daemon's
+# state.json and the restart marker both name a build commit this way.
+igt_json_commit() {
   python3 -c '
 import json, sys
 try:
@@ -77,8 +72,23 @@ try:
         print(json.load(f).get("commit") or "")
 except Exception:
     print("")
-' "$1/state.json" 2>/dev/null || true
+' "$1" 2>/dev/null || true
 }
+
+# igt_daemon_commit DAEMON_DIR — the build commit of the running daemon, from
+# state.json's commit field (the daemon writes its own build commit there).
+#
+# The installed binary can be ahead of the daemon still running the old one —
+# an install killed between install-local and the restart marker — so "is the
+# daemon on this commit?" is a question about state.json, not about the binary
+# at $GT.
+igt_daemon_commit() { igt_json_commit "$1/state.json"; }
+
+# igt_pending_commit DAEMON_DIR — the commit a pending restart marker names, or
+# empty when there is no readable daemon/restart-pending.json. A marker already
+# in place is what the daemon will restart into; callers compare before they
+# overwrite it.
+igt_pending_commit() { igt_json_commit "$1/restart-pending.json"; }
 
 # igt_resolve DIR REF — full commit hash of REF inside DIR, or empty.
 igt_resolve() {
