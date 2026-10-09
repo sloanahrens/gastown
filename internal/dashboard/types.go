@@ -100,6 +100,42 @@ type Polecat struct {
 	AvgScore24h *float64 `json:"avg_score_24h,omitempty"`
 }
 
+// Read sources, the keys of State.Reads. They name the panes whose reader keeps
+// its last good value when a read fails.
+const (
+	SourceSeats   = "seats"
+	SourceReady   = "ready"
+	SourceMachine = "machine"
+	SourceSpend   = "spend"
+	SourceOM      = "om"
+	SourceQueue   = "queue"
+)
+
+// readStaleFactor is how many of a poll's own intervals a reading may age
+// before it reads as stale.
+const readStaleFactor = 3
+
+// ReadStatus is one poller's last read, so a pane can tell a value that is
+// current from one whose read failed or went old. A failed read keeps the last
+// good value and leaves At at the read that produced it, without which a
+// dropped read is indistinguishable from an unchanged one (gt-q6h8e).
+type ReadStatus struct {
+	At    time.Time `json:"at,omitempty"`
+	Error bool      `json:"error,omitempty"`
+	Every float64   `json:"every_sec,omitempty"`
+	Stale bool      `json:"stale,omitempty"`
+}
+
+// StaleNow reports whether the value is not current, which is true of a read
+// that failed, was never taken, or has aged past readStaleFactor of the poll's
+// intervals.
+func (r ReadStatus) StaleNow(now time.Time) bool {
+	if r.Error || r.At.IsZero() {
+		return true
+	}
+	return r.Every > 0 && now.Sub(r.At) > time.Duration(r.Every*float64(readStaleFactor)*float64(time.Second))
+}
+
 // Summary is the slow-changing state of the town. A pointer or zero field the
 // reader could not fill is left out of the page rather than shown as zero.
 type Summary struct {
@@ -120,6 +156,13 @@ type Summary struct {
 	MedianDeployMin *float64 `json:"median_deploy_min,omitempty"`
 	DeployWaiting   *int     `json:"deploy_waiting,omitempty"`
 	OldestDeploySec *int64   `json:"oldest_deploy_waiting_sec,omitempty"`
+
+	// SeatsError says the seats reader failed on this poll: Polecats holds no
+	// reading, which the hub reads as "keep the previous seats" rather than as a
+	// town with none. ReadyError says the same of the ready-to-land reader, so a
+	// dropped read is never read as a drained queue (gt-q6h8e).
+	SeatsError bool `json:"-"`
+	ReadyError bool `json:"-"`
 }
 
 // Proc is one busy process.
@@ -412,6 +455,10 @@ type State struct {
 	// Alerts is the most recent alerts the alerter raised, newest last, capped
 	// at alertsKept. The page lists them whether or not alerts are switched on.
 	Alerts []Alert `json:"alerts,omitempty"`
+	// Reads is one entry per poller that keeps a last good value, keyed by
+	// source, so the page can tell a reading that failed or went old from one
+	// that is merely unchanged. A source missing from it has not reported.
+	Reads map[string]ReadStatus `json:"reads,omitempty"`
 }
 
 // Config wires the hub to its readers. Every reader is optional; a nil reader

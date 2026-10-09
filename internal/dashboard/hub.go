@@ -255,7 +255,48 @@ func (h *Hub) stateLocked() State {
 	st.Now = h.cfg.Now()
 	st.Viewers = len(h.subs)
 	st.Polecats = h.polecatsLocked(st.Now)
+	st.Reads = h.readsLocked(st.Now)
 	return st
+}
+
+// readsLocked stamps each source's staleness against now, so a pane whose
+// poller has stopped reporting reads as stale without waiting for the next
+// publish. The map is copied, so a page serializing its snapshot cannot race a
+// poller writing the hub's own.
+func (h *Hub) readsLocked(now time.Time) map[string]ReadStatus {
+	if len(h.state.Reads) == 0 {
+		return nil
+	}
+	out := make(map[string]ReadStatus, len(h.state.Reads))
+	for source, r := range h.state.Reads {
+		r.Stale = r.StaleNow(now)
+		out[source] = r
+	}
+	return out
+}
+
+// readOKLocked records a successful read of source: the value in the state is
+// current as of now.
+func (h *Hub) readOKLocked(source string, every time.Duration) {
+	h.setReadLocked(source, ReadStatus{At: h.cfg.Now(), Every: every.Seconds()})
+}
+
+// readFailedLocked records that source's newest read failed. The last good
+// value stays in the state and At stays at the last successful read, so the
+// page ages the value it is showing instead of reading the failure as a
+// present-but-empty reading (gt-q6h8e).
+func (h *Hub) readFailedLocked(source string, every time.Duration) {
+	r := h.state.Reads[source]
+	r.Error = true
+	r.Every = every.Seconds()
+	h.setReadLocked(source, r)
+}
+
+func (h *Hub) setReadLocked(source string, r ReadStatus) {
+	if h.state.Reads == nil {
+		h.state.Reads = map[string]ReadStatus{}
+	}
+	h.state.Reads[source] = r
 }
 
 // broadcastLocked sends one frame to every page. A page whose buffer is full
@@ -315,19 +356,24 @@ func (h *Hub) pollHealth() {
 
 func (h *Hub) pollMachine() {
 	m, err := h.cfg.Machine()
-	if err != nil {
-		return
-	}
-	if h.cfg.LoadSample != nil {
+	if err == nil && h.cfg.LoadSample != nil {
 		h.cfg.LoadSample(m.At, m.Load1)
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if err != nil {
+		// A dropped sample keeps the last good one: the page ages and greys it
+		// rather than reading the failure as a calm machine (gt-q6h8e).
+		h.readFailedLocked(SourceMachine, h.cfg.MachineEvery)
+		h.publishLocked()
+		return
+	}
 	h.state.Machine = m
 	h.state.Loads = append(h.state.Loads, LoadPoint{At: m.At, Load: m.Load1})
 	if n := len(h.state.Loads); n > loadHistory {
 		h.state.Loads = append([]LoadPoint(nil), h.state.Loads[n-loadHistory:]...)
 	}
+	h.readOKLocked(SourceMachine, h.cfg.MachineEvery)
 	h.publishLocked()
 }
 
@@ -360,12 +406,15 @@ func (h *Hub) pollCloud() {
 
 func (h *Hub) pollOM() {
 	om := h.cfg.OM()
-	if om == nil {
-		return
-	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if om == nil {
+		h.readFailedLocked(SourceOM, h.cfg.OMEvery)
+		h.publishLocked()
+		return
+	}
 	h.state.OM = om
+	h.readOKLocked(SourceOM, h.cfg.OMEvery)
 	h.publishLocked()
 }
 
@@ -461,13 +510,16 @@ func (h *Hub) pollDispatch() {
 
 func (h *Hub) pollQueue() {
 	q := h.cfg.Queue()
-	if q == nil {
-		return
-	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if q == nil {
+		h.readFailedLocked(SourceQueue, h.cfg.QueueEvery)
+		h.publishLocked()
+		return
+	}
 	h.state.Queue = q
 	h.state.Rigs = RigRows(q, h.polecats, h.cfg.RigTheme)
+	h.readOKLocked(SourceQueue, h.cfg.QueueEvery)
 	h.publishLocked()
 }
 
@@ -484,22 +536,47 @@ func (h *Hub) pollTrend() {
 
 func (h *Hub) pollSpend() {
 	sp := h.cfg.Spend()
-	if len(sp) == 0 {
-		return
-	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if len(sp) == 0 {
+		h.readFailedLocked(SourceSpend, h.cfg.SpendEvery)
+		h.publishLocked()
+		return
+	}
 	h.state.Spend = sp
+	h.readOKLocked(SourceSpend, h.cfg.SpendEvery)
 	h.publishLocked()
 }
 
+// pollSummary keeps the last good seats and ready-to-land readings across a
+// failed one. Letting either empty out would read a dropped read as a town with
+// no polecats and a drained queue, and would also make the alert rules act on a
+// change that never happened: every stalled polecat announced again on
+// recovery, and the stuck-queue rule re-armed (gt-q6h8e).
 func (h *Hub) pollSummary() {
 	s := h.cfg.Summary()
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.polecats = s.Polecats
+	prev := h.state.Summary
+	if s.SeatsError {
+		h.readFailedLocked(SourceSeats, h.cfg.SummaryEvery)
+		if prev != nil {
+			s.SeatsCap = prev.SeatsCap
+		}
+	} else {
+		h.polecats = s.Polecats
+		h.state.SummaryAt = h.cfg.Now()
+		h.readOKLocked(SourceSeats, h.cfg.SummaryEvery)
+	}
+	if s.ReadyError {
+		h.readFailedLocked(SourceReady, h.cfg.SummaryEvery)
+		if prev != nil {
+			s.ReadyToLand, s.OldestReady = prev.ReadyToLand, prev.OldestReady
+		}
+	} else {
+		h.readOKLocked(SourceReady, h.cfg.SummaryEvery)
+	}
 	h.state.Summary = &s
-	h.state.SummaryAt = h.cfg.Now()
 	// The seats are half of the Rigs panel: a fresh seat reading re-joins it.
 	h.state.Rigs = RigRows(h.state.Queue, h.polecats, h.cfg.RigTheme)
 	h.observeLocked(nil)

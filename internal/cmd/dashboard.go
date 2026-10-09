@@ -376,7 +376,8 @@ func dashboardHealthCauses(rep *townhealth.Report) []dashboard.HealthCause {
 
 // dashboardSummary is the summary line's state as fields, the polecat table,
 // and the age of the oldest bead waiting to land. A reader that fails leaves
-// its fields out.
+// its fields out and flags the failure, so the hub keeps the previous reading
+// rather than showing the empty one (gt-q6h8e).
 func dashboardSummary(townRoot string, deploys *tailDeploys, recs *dashLandings, seatCache *dashSeatCache) dashboard.Summary {
 	var s dashboard.Summary
 	ready := map[string]bool{}
@@ -384,6 +385,10 @@ func dashboardSummary(townRoot string, deploys *tailDeploys, recs *dashLandings,
 		s.ReadyToLand = &n
 		s.OldestReady = oldest
 		ready = ids
+	} else {
+		// The hub keeps the previous reading and the page marks it stale: an
+		// unread queue must not read as an empty one (gt-q6h8e).
+		s.ReadyError = true
 	}
 	sessions, sessionsKnown := dashSessions()
 	names := make([]string, 0, len(sessions))
@@ -397,6 +402,10 @@ func dashboardSummary(townRoot string, deploys *tailDeploys, recs *dashLandings,
 		if max, err := configuredSchedulerMaxPolecats(townRoot); err == nil && max > 0 {
 			s.SeatsCap = &max
 		}
+	} else {
+		// Likewise the seats: the hub keeps the last good list and the page says
+		// unavailable rather than "no polecats" (gt-q6h8e).
+		s.SeatsError = true
 	}
 	if tip, installed, behind, err := tailMainPicture(townRoot); err == nil {
 		s.MainTip, s.InstalledGT, s.Behind = tip, installed, &behind
