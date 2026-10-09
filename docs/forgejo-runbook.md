@@ -243,9 +243,11 @@ its exit codes and what it refuses.
 The `app-promote` script plugin calls it for the app rigs: it promotes the
 newest `main` commit whose Forgejo integration tier passed on the deployed
 staging stack, so GitHub's `main` tracks what staging has proven without waiting
-for a Gas Town landing (gt-5xrmp). Use the command by hand to retry one of those
-promotions after a failure, and to prove a rig's deploy key and target before
-the plugin is installed.
+for a Gas Town landing (gt-5xrmp). Before installing it or adding a rig to it,
+read `plugins/app-promote/README.md`; the rig list it reads is beside it, in
+`rigs.conf`. Use the command by hand to retry one of those promotions after a
+failure, and to prove a rig's deploy key and target before the plugin is
+installed.
 
 Four things stay with the operator, and the script prints them at the end:
 
