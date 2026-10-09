@@ -1495,21 +1495,43 @@ func updateAgentMode(agentID, mode, workDir, townBeadsDir string) {
 // called at most once and is a no-op afterwards; a holder whose file cannot be
 // read back gets a no-op restore, since there is nothing to put back.
 func clearReassignedPolecatState(townRoot, assignee string) func() {
+	restore, err := clearReassignedPolecatStateE(townRoot, assignee)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+	}
+	return restore
+}
+
+// clearReassignedPolecatStateE is clearReassignedPolecatState reporting the
+// clear failures instead of only warning about them, so a caller that must know
+// whether the slot was really reset can check (gt-34z9v). The returned restore
+// closure stays best-effort.
+func clearReassignedPolecatStateE(townRoot, assignee string) (func(), error) {
 	if townRoot == "" {
-		return func() {}
+		return func() {}, nil
 	}
 	agentBeadID := agentIDToBeadID(assignee, townRoot)
 	if agentBeadID == "" {
-		return func() {}
+		return func() {}, nil
 	}
 	bd := beads.New(beads.ResolveHookDir(townRoot, agentBeadID, townRoot))
-	return clearReassignedPolecatStateIn(bd, agentBeadID)
+	return clearReassignedPolecatStateInE(bd, agentBeadID)
 }
 
-// clearReassignedPolecatStateIn is clearReassignedPolecatState over an open
-// agent store. It snapshots the fields it clears so the returned function can
-// put them back.
+// clearReassignedPolecatStateIn is clearReassignedPolecatStateInE with the
+// failures warned rather than returned.
 func clearReassignedPolecatStateIn(bd beads.Client, agentBeadID string) func() {
+	restore, err := clearReassignedPolecatStateInE(bd, agentBeadID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+	}
+	return restore
+}
+
+// clearReassignedPolecatStateInE is clearReassignedPolecatState over an open
+// agent store. It snapshots the fields it clears so the returned function can
+// put them back, and returns the first clear failure.
+func clearReassignedPolecatStateInE(bd beads.Client, agentBeadID string) (func(), error) {
 	noop := func() {}
 
 	// The read is best-effort: a holder with no readable bead still gets the
@@ -1519,16 +1541,17 @@ func clearReassignedPolecatStateIn(bd beads.Client, agentBeadID string) func() {
 		prior = fields
 	}
 
+	var clearErr error
 	emptyHook := ""
 	if err := beads.UpdateAgentDescriptionFields(bd, agentBeadID, beads.AgentFieldUpdates{HookBead: &emptyHook}); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: couldn't clear hook_bead on %s: %v\n", agentBeadID, err)
+		clearErr = fmt.Errorf("couldn't clear hook_bead on %s: %w", agentBeadID, err)
 	}
 	idle := string(beads.AgentStateIdle)
-	if err := beads.UpdateAgentState(bd, agentBeadID, idle); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: couldn't clear agent_state on %s: %v\n", agentBeadID, err)
+	if err := beads.UpdateAgentState(bd, agentBeadID, idle); err != nil && clearErr == nil {
+		clearErr = fmt.Errorf("couldn't clear agent_state on %s: %w", agentBeadID, err)
 	}
 	if prior == nil {
-		return noop
+		return noop, clearErr
 	}
 
 	hook, state := prior.HookBead, prior.AgentState
@@ -1541,7 +1564,7 @@ func clearReassignedPolecatStateIn(bd beads.Client, agentBeadID string) func() {
 		if err := beads.UpdateAgentDescriptionFields(bd, agentBeadID, beads.AgentFieldUpdates{HookBead: &hook, AgentState: &state}); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: couldn't restore %s's agent state: %v\n", agentBeadID, err)
 		}
-	}
+	}, clearErr
 }
 
 // lookupPriorAttempt checks if there are existing open MRs for the given issue.

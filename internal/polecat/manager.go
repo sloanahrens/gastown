@@ -1834,6 +1834,16 @@ func (m *Manager) RepairWorktree(name string, force bool) (*Polecat, error) {
 	return m.RepairWorktreeWithOptions(name, force, AddOptions{})
 }
 
+// removeFailedRepairWorktree tears down a repaired worktree that a failure
+// after the old clone was removed left at newClonePath, and polecatDir with it,
+// so m.exists(name) does not keep reporting a polecat whose clone is gone
+// (gt-34z9v). Best-effort: every caller is already returning the error.
+func removeFailedRepairWorktree(g gitRepo, polecatDir, newClonePath string) {
+	_ = g.WorktreeRemove(newClonePath, true)
+	_ = os.RemoveAll(newClonePath)
+	_ = os.RemoveAll(polecatDir)
+}
+
 // RepairWorktreeWithOptions repairs a stale polecat and creates a fresh worktree with options.
 // This is NOT for normal operation - see RepairWorktree for context.
 // Allows setting hook_bead atomically at repair time.
@@ -1945,8 +1955,9 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 		return nil, err
 	}
 
-	// Remove old worktree BEFORE resetting bead to prevent name collision if a new
-	// spawn sees the clean bead while the old worktree still exists.
+	// Remove old worktree. The bead is not reset until the replacement is in
+	// place, so a failed repair does not clear the hook with no clone behind it
+	// (gt-34z9v).
 	if err := repoGit.WorktreeRemove(oldClonePath, true); err != nil {
 		// Fall back to direct removal
 		if removeErr := os.RemoveAll(oldClonePath); removeErr != nil {
@@ -1957,16 +1968,6 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 		}
 	}
 
-	// Reset agent bead AFTER old worktree is confirmed removed.
-	// NOTE: We use ResetAgentBeadForReuse to avoid the close/reopen cycle
-	// that fails on Dolt backend (gt-14b8o).
-	agentID := m.agentBeadID(name)
-	if err := m.resetAgentBeadForReuse(agentID, "polecat repair"); err != nil {
-		if !errors.Is(err, beads.ErrNotFound) {
-			style.PrintWarning("could not reset old agent bead %s: %v", agentID, err)
-		}
-	}
-
 	// Prune stale worktree entries (non-fatal: cleanup only)
 	_ = repoGit.WorktreePrune()
 
@@ -1974,10 +1975,24 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 	// os.Rename breaks worktrees: the .git file and registry gitdir still
 	// reference the old temp path, leaving a broken worktree. (GH#2056)
 	if err := repoGit.WorktreeMove(tmpClonePath, newClonePath); err != nil {
-		// Clean up temp worktree if move fails
+		// The old clone is already gone, so remove polecatDir with the temp
+		// worktree rather than leave a clone-less polecat behind.
+		removeFailedRepairWorktree(repoGit, polecatDir, newClonePath)
 		_ = repoGit.WorktreeRemove(tmpClonePath, true)
 		_ = os.RemoveAll(tmpClonePath)
 		return nil, fmt.Errorf("moving repaired worktree to final path: %w", err)
+	}
+
+	// Reset the agent bead only now that the worktree is at its final path: the
+	// failure paths below remove polecatDir, so a cleared bead always has no
+	// clone-less polecatDir beside it (gt-34z9v).
+	// NOTE: We use ResetAgentBeadForReuse to avoid the close/reopen cycle
+	// that fails on Dolt backend (gt-14b8o).
+	agentID := m.agentBeadID(name)
+	if err := m.resetAgentBeadForReuse(agentID, "polecat repair"); err != nil {
+		if !errors.Is(err, beads.ErrNotFound) {
+			style.PrintWarning("could not reset old agent bead %s: %v", agentID, err)
+		}
 	}
 
 	// Provision CLAUDE.md (same as spawn path — repair creates a fresh worktree).
@@ -1988,8 +2003,7 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 
 	// Set up shared beads — fatal during repair too, same reason as spawn.
 	if err := m.setupSharedBeads(newClonePath); err != nil {
-		_ = repoGit.WorktreeRemove(newClonePath, true)
-		_ = os.RemoveAll(newClonePath)
+		removeFailedRepairWorktree(repoGit, polecatDir, newClonePath)
 		return nil, fmt.Errorf("setting up shared beads after repair: %w (polecat cannot submit MRs without shared beads)", err)
 	}
 
@@ -2005,9 +2019,7 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 
 	// NOTE: Slash commands inherited from town level - no per-workspace copies needed.
 	if err := m.runSetupCommand(newClonePath); err != nil {
-		_ = repoGit.WorktreeRemove(newClonePath, true)
-		_ = os.RemoveAll(newClonePath)
-		_ = os.RemoveAll(polecatDir)
+		removeFailedRepairWorktree(repoGit, polecatDir, newClonePath)
 		return nil, err
 	}
 
@@ -2021,12 +2033,11 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 		AgentState: "spawning",
 		HookBead:   opts.HookBead, // Set atomically at spawn time
 	}); err != nil {
-		// Hard fail — clean up the new worktree since we can't track this polecat
-		_ = repoGit.WorktreeRemove(newClonePath, true)
-		_ = os.RemoveAll(newClonePath)
-		// Remove polecatDir to prevent limbo state where m.exists(name) returns true
-		// but no valid worktree exists. Matches AddWithOptions cleanupOnError behavior.
-		_ = os.RemoveAll(polecatDir)
+		// Hard fail — clean up the new worktree since we can't track this polecat.
+		// removeFailedRepairWorktree also drops polecatDir to prevent a limbo
+		// state where m.exists(name) returns true but no valid worktree exists
+		// (gt-34z9v).
+		removeFailedRepairWorktree(repoGit, polecatDir, newClonePath)
 		return nil, fmt.Errorf("agent bead required for polecat tracking: %w", err)
 	}
 

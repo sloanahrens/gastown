@@ -125,6 +125,30 @@ func TestCleanupSpawnedPolecatWorkNeverUnhooksAnotherAssignee(t *testing.T) {
 	}
 }
 
+// A restore that fails must not drop the bead from release: the bead is still
+// hooked to the polecat being removed, so it is released instead of left
+// wedged there (gt-34z9v).
+func TestCleanupSpawnedPolecatWorkReleasesWhenRestoreFails(t *testing.T) {
+	t.Parallel()
+	const toast = "gastown/polecats/Toast"
+	rel := &fakeWorkReleaser{beads: map[string][2]string{"gt-abc": {"hooked", toast}}, restoreErr: errors.New("dolt down")}
+	f := newRollbackFixture(t, nil, rel)
+	f.r.survivingWork = func(string, string) (string, error) { return "polecat/pearl/gt-abc+mu5wzd6q", nil }
+
+	f.r.cleanupSpawned(&SpawnedPolecatInfo{RigName: "gastown", PolecatName: "Toast", FreshSpawn: true,
+		originalHold: &beadHold{Status: "hooked", Assignee: "gastown/polecats/pearl"}}, "gastown", "gt-abc", "")
+
+	if got := rel.beads["gt-abc"]; got[0] != "open" || got[1] != "" {
+		t.Fatalf("bead = %v, want open with no assignee (released, not left hooked)", got)
+	}
+	if len(rel.released) != 1 {
+		t.Fatalf("released = %v, want one release", rel.released)
+	}
+	if rel.annotated["gt-abc"] == "" {
+		t.Fatal("the failed restore must be left on the bead as a comment")
+	}
+}
+
 // The zero value is the safe one: an info built without provenance keeps the
 // sandbox and the branch.
 func TestCleanupSpawnedPolecatWorkZeroProvenanceKeepsEverything(t *testing.T) {
