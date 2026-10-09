@@ -2276,6 +2276,77 @@ func TestDangerousCommandBlockedAfterEscapedHash(t *testing.T) {
 	}
 }
 
+// TestShellTokenizeContinuationBeforeHash pins gt-aa1ji: a backslash-newline is
+// a line continuation the shell DELETES, so the rune after it is preceded by
+// whatever came before the backslash. startsShellWord used to judge the '#' by
+// the literal newline it sits behind, read it as word-leading, and drop the
+// rest of the LINE — so "echo a\<newline>#b; rm -rf /tmp/p" lost the rm the
+// shell still runs ('#b' stays inside the word "a#b", and the ';' after it
+// still separates). A real comment, one whose '#' is not preceded by a deleted
+// continuation, must still be dropped to the end of its line.
+func TestShellTokenizeContinuationBeforeHash(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		want    []string
+	}{
+		{"continuation before the hash keeps a later rm",
+			"echo a\\\n#b; rm -rf /tmp/p",
+			[]string{"echo", "a#b", ";", "rm", "-rf", "/tmp/p"}},
+		{"chained continuations keep a later rm",
+			"echo a\\\n\\\n#b; rm -rf /tmp/p",
+			[]string{"echo", "a#b", ";", "rm", "-rf", "/tmp/p"}},
+		{"continuation inside double quotes keeps a later rm",
+			"echo \"a\\\n#b\"; rm -rf /tmp/p",
+			[]string{"echo", "a#b", ";", "rm", "-rf", "/tmp/p"}},
+		{"a bare newline before the hash is still a comment",
+			"echo a\n#b; rm -rf /tmp/p",
+			[]string{"echo", "a", ";"}},
+		{"a continuation at the start of the line is still a comment",
+			"\\\n#b; rm -rf /tmp/p",
+			[]string{}},
+		{"a real comment on a later line is still dropped",
+			"echo ok # note\nrm -rf /tmp/p",
+			[]string{"echo", "ok", ";", "rm", "-rf", "/tmp/p"}},
+		{"a real comment after a continuation is still dropped",
+			"echo x\\\n#y\n# note\nrm -rf /tmp/p",
+			[]string{"echo", "x#y", ";", ";", "rm", "-rf", "/tmp/p"}},
+		{"an escaped backslash before the newline still separates",
+			"echo a\\\\\n#b; rm -rf /tmp/p",
+			[]string{"echo", `a\`, ";"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shellTokenize(tt.command)
+			if len(got) != len(tt.want) {
+				t.Fatalf("shellTokenize(%q) = %q, want %q", tt.command, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("shellTokenize(%q) = %q, want %q", tt.command, got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+// TestDangerousCommandBlockedAfterContinuationHash is the end-to-end form of
+// gt-aa1ji: a backslash-newline before a '#' must not hide a dangerous command
+// the shell still runs after the next separator.
+func TestDangerousCommandBlockedAfterContinuationHash(t *testing.T) {
+	t.Parallel()
+	for _, command := range []string{
+		"echo a\\\n#b; git reset --hard",
+		"echo a\\\n\\\n#b; rm -rf /",
+		"echo \"a\\\n#b\"; git clean -fd",
+	} {
+		if reason, _ := evaluateDangerousCommand(command, 0, noTownSession); reason == "" {
+			t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked", command)
+		}
+	}
+}
+
 // TestSplitSpacedCommandFailsTowardChecking pins the gt-vonb1 backstop: if
 // shlex yields no tokens for text that still has words in it, the words are
 // returned rather than silently dropped.
