@@ -2029,26 +2029,21 @@ func matchesPolecatMainPush(tokens []string, polecatSession bool) (reason, alter
 	if !polecatSession {
 		return "", ""
 	}
-	inPush := false
-	for i, f := range tokens {
-		if !inPush {
-			// Same argv shape as matchesDangerousGitPush: a bare
-			// "push" token directly after "git".
-			if f == "push" && i > 0 && tokens[i-1] == "git" {
-				inPush = true
+	// One invocation at a time: a ref or flag that belongs to a later command
+	// in the chain is not this push's argument (gt-yapnr).
+	for _, args := range gitSubcommandArgs(tokens, "push") {
+		for _, f := range args {
+			if f == "--all" || f == "--mirror" {
+				return polecatMainPushReason, polecatMainPushAlternative
 			}
-			continue
-		}
-		if f == "--all" || f == "--mirror" {
-			return polecatMainPushReason, polecatMainPushAlternative
-		}
-		if strings.HasPrefix(f, "-") {
-			// Flags carry no destination; --delete's target is the bare
-			// branch argument that follows it, which this loop still sees.
-			continue
-		}
-		if polecatMainPushTargetsDefault(f) {
-			return polecatMainPushReason, polecatMainPushAlternative
+			if strings.HasPrefix(f, "-") {
+				// Flags carry no destination; --delete's target is the bare
+				// branch argument that follows it, which this loop still sees.
+				continue
+			}
+			if polecatMainPushTargetsDefault(f) {
+				return polecatMainPushReason, polecatMainPushAlternative
+			}
 		}
 	}
 	return "", ""
@@ -2095,25 +2090,19 @@ var gitResetRemotePrefixes = []string{"origin/", "upstream/", "refs/remotes/"}
 // the guard scans argv shapes, and the branch content check in gt done is what
 // actually fails closed.
 func matchesDangerousGitReset(tokens []string) (reason, alternative string) {
-	inReset := false
-	for i, f := range tokens {
-		if f == "reset" && i > 0 && tokens[i-1] == "git" {
-			inReset = true
-			continue
-		}
-		if !inReset {
-			continue
-		}
-		// A bare "--" ends the revisions: everything after it is a pathspec,
-		// so "git reset -- origin/main" is unstaging a path that happens to be
-		// spelled like a ref, not resetting onto one.
-		if f == "--" {
-			return "", ""
-		}
-		for _, prefix := range gitResetRemotePrefixes {
-			if strings.HasPrefix(f, prefix) {
-				return "Reset onto a remote-tracking ref drops merged work",
-					"Alternative: `git rebase " + f + "` — rebase your CHANGES onto the remote ref; never reset your tree onto it."
+	for _, args := range gitSubcommandArgs(tokens, "reset") {
+		for _, f := range args {
+			// A bare "--" ends the revisions: everything after it is a pathspec,
+			// so "git reset -- origin/main" is unstaging a path that happens to be
+			// spelled like a ref, not resetting onto one.
+			if f == "--" {
+				break
+			}
+			for _, prefix := range gitResetRemotePrefixes {
+				if strings.HasPrefix(f, prefix) {
+					return "Reset onto a remote-tracking ref drops merged work",
+						"Alternative: `git rebase " + f + "` — rebase your CHANGES onto the remote ref; never reset your tree onto it."
+				}
 			}
 		}
 	}
@@ -2582,6 +2571,28 @@ func inCommandPosition(tokens []string, i int) bool {
 // (space-separated form), so `git -C dir push` still resolves to push.
 var gitOptionsWithValue = map[string]bool{
 	"-c": true, "-C": true, "--git-dir": true, "--work-tree": true, "--namespace": true, "--exec-path": true,
+}
+
+// gitSubcommandArgs returns, for every git invocation in tokens whose
+// subcommand is sub, the arguments that follow the subcommand — one slice per
+// invocation, each confined to its own shell segment so a later command in the
+// chain (&&, ;, |) never lends its words to an earlier one. git may be a path
+// (/usr/bin/git) and may carry global options (-C dir, -c k=v) before the
+// subcommand (gt-yapnr).
+func gitSubcommandArgs(tokens []string, sub string) [][]string {
+	var out [][]string
+	for _, segment := range splitShellSegments(tokens) {
+		for i, tok := range segment {
+			if !strings.EqualFold(filepath.Base(tok), "git") || !inCommandPosition(segment, i) {
+				continue
+			}
+			rest := segment[i+1:]
+			if at := gitSubcommandIndex(rest); at >= 0 && strings.EqualFold(rest[at], sub) {
+				out = append(out, rest[at+1:])
+			}
+		}
+	}
+	return out
 }
 
 // gitSubcommand returns the first non-option token after "git" — the
