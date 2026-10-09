@@ -547,6 +547,53 @@ func runPolecatIdentityShow(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// ensureNewIdentityAbsent reports that newBeadID names no live identity, which
+// is how a rename learns the target name is free. A failed lookup is returned
+// rather than read as absence: ignoring it is what let a transient error fall
+// through to CreateOrReopenAgentBead, which overwrites the description of the
+// bead that was there all along (gt-u3hc1).
+//
+// bd is a beads.Client rather than *beads.Beads so a fake drives it without a
+// rig or a town.
+func ensureNewIdentityAbsent(bd beads.Client, newBeadID string) error {
+	issue, _, err := beads.GetAgentBead(bd, newBeadID)
+	if err != nil {
+		return fmt.Errorf("checking new identity bead %s: %w", newBeadID, err)
+	}
+	if issue != nil && issue.Status != "closed" {
+		return fmt.Errorf("identity bead %s already exists", newBeadID)
+	}
+	return nil
+}
+
+// moveLiveHook reassigns hookBead from oldAssignee to newAssignee when the
+// reference names live work, so a renamed identity does not inherit a hook
+// still assigned to the old name (gt-u3hc1). A reference the classifier calls
+// safe — terminal, submitted, or inert — has nothing to move.
+//
+// An unreadable or unmodeled reference is an error rather than a copy, the same
+// fail-closed reading ClassifyHookBead gives it, and a claim the guard no
+// longer holds is refused: rename must not adopt work it cannot show is the
+// renamed polecat's.
+func moveLiveHook(bd beads.Client, hookBead, oldAssignee, newAssignee string) error {
+	work, disposition := classifyHookBeadRef(bd, hookBead)
+	if disposition.Safe {
+		return nil
+	}
+	if work == nil || !polecat.IsHookActiveStatus(work.Status) {
+		return fmt.Errorf("cannot rename: %s", disposition.Blocker)
+	}
+	transferred, err := bd.TransferIfAssignee(work.ID, oldAssignee, work.Status, newAssignee)
+	if err != nil {
+		return fmt.Errorf("reassigning hook_bead %s to %s: %w", work.ID, newAssignee, err)
+	}
+	if !transferred {
+		return fmt.Errorf("cannot rename: hook_bead %s is %s and held by %q, not %s",
+			work.ID, work.Status, work.Assignee, oldAssignee)
+	}
+	return nil
+}
+
 func runPolecatIdentityRename(cmd *cobra.Command, args []string) error {
 	rigName := args[0]
 	oldName := args[1]
@@ -577,9 +624,8 @@ func runPolecatIdentityRename(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check new identity doesn't exist
-	newIssue, _, _ := beads.GetAgentBead(bd, newBeadID)
-	if newIssue != nil && newIssue.Status != "closed" {
-		return fmt.Errorf("identity bead %s already exists", newBeadID)
+	if err := ensureNewIdentityAbsent(bd, newBeadID); err != nil {
+		return err
 	}
 
 	// Safety check: no active session
@@ -590,12 +636,18 @@ func runPolecatIdentityRename(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("cannot rename: polecat session %s is running", oldName)
 	}
 
+	// The reference the classifier reads is the one to carry and to move.
+	hookBead := oldIssue.HookBead
+	if hookBead == "" {
+		hookBead = oldFields.HookBead
+	}
+
 	// Create new identity bead with inherited fields
 	newFields := &beads.AgentFields{
 		RoleType:          "polecat",
 		Rig:               rigName,
 		AgentState:        oldFields.AgentState,
-		HookBead:          oldFields.HookBead,
+		HookBead:          hookBead,
 		CleanupStatus:     oldFields.CleanupStatus,
 		ActiveMR:          oldFields.ActiveMR,
 		NotificationLevel: oldFields.NotificationLevel,
@@ -605,6 +657,15 @@ func runPolecatIdentityRename(cmd *cobra.Command, args []string) error {
 	_, err = beads.CreateOrReopenAgentBead(bd, newBeadID, newTitle, newFields)
 	if err != nil {
 		return fmt.Errorf("creating new identity bead: %w", err)
+	}
+
+	// The inherited hook describes the new identity only once the work it names
+	// has followed the name.
+	if err := moveLiveHook(bd, hookBead,
+		fmt.Sprintf("%s/polecats/%s", rigName, oldName),
+		fmt.Sprintf("%s/polecats/%s", rigName, newName)); err != nil {
+		_ = bd.CloseWithReason("rename failed", newBeadID)
+		return err
 	}
 
 	// Close old bead with reference to new one
@@ -811,12 +872,15 @@ type IssueInfo struct {
 // passes beads.NewPlain, which keeps bd's environment exactly as the raw argv
 // this replaced had it: the caller's environment with machine mode on, no
 // BEADS_DIR pin and no routing, run in rigPath.
+//
+// Limit 0 is bd's --limit=0: no page at all, so a CV reports every row instead
+// of the newest 50 (gt-u3hc1).
 func queryAssignedIssues(db beads.Client, assignee, status string) ([]IssueInfo, error) {
 	issues, err := db.List(beads.ListOptions{
 		Assignee: assignee,
 		Status:   status,
 		Priority: -1, // no priority filter
-		Limit:    50, // bd list's default page, which omitting --limit gave
+		Limit:    0,  // every row, not bd's default page of 50
 	})
 	if err != nil {
 		return nil, err

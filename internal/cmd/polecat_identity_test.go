@@ -1,6 +1,9 @@
 package cmd
 
 import (
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -277,4 +280,191 @@ func TestQueryAssignedIssuesFiltersAndMaps(t *testing.T) {
 	if open.Status != string(beads.StatusOpen) {
 		t.Fatalf("open issue closed by the fixture: %+v", open)
 	}
+}
+
+// TestQueryAssignedIssuesReturnsEveryRowNotJustTheFirstPage: the CV reads all of
+// an assignee's rows. Asking bd for 50 stopped the summary at an arbitrary page
+// boundary, so a polecat with a long history reported a truncated record of it
+// (gt-u3hc1).
+func TestQueryAssignedIssuesReturnsEveryRowNotJustTheFirstPage(t *testing.T) {
+	t.Parallel()
+	const assignee = "gastown/polecats/agate"
+	const rows = 55 // one page more than bd's default 50
+	db := beadsfake.New(beadsfake.WithActor(assignee))
+
+	var newest string
+	for i := 0; i < rows; i++ {
+		is, err := db.Create(beads.CreateOptions{
+			Title: fmt.Sprintf("job %d", i), Assignee: assignee, Priority: -1,
+		})
+		if err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+		newest = is.ID
+		if err := db.Close(is.ID); err != nil {
+			t.Fatalf("close %s: %v", is.ID, err)
+		}
+	}
+
+	got, err := queryAssignedIssues(db, assignee, "closed")
+	if err != nil {
+		t.Fatalf("queryAssignedIssues: %v", err)
+	}
+	if len(got) != rows {
+		t.Fatalf("got %d issues, want %d: a capped query drops the rest of the CV", len(got), rows)
+	}
+	if got[0].ID != newest {
+		t.Errorf("got[0].ID = %s, want %s (newest first)", got[0].ID, newest)
+	}
+}
+
+// TestMoveLiveHookReassignsWorkHeldUnderTheOldName: rename inherits the hook, so
+// the work bead's assignee has to follow the new name. Copying the reference
+// alone left the renamed identity claiming a bead still assigned to the old one
+// (gt-u3hc1).
+func TestMoveLiveHookReassignsWorkHeldUnderTheOldName(t *testing.T) {
+	t.Parallel()
+	const (
+		oldAssignee = "gastown/polecats/agate"
+		newAssignee = "gastown/polecats/basalt"
+		hookBead    = "gt-hook1"
+	)
+	db := beadsfake.New(beadsfake.WithPrefix("gt"))
+	db.Seed(beads.Issue{
+		ID: hookBead, Title: "work", Status: string(beads.IssueStatusHooked), Assignee: oldAssignee,
+	})
+
+	if err := moveLiveHook(db, hookBead, oldAssignee, newAssignee); err != nil {
+		t.Fatalf("moveLiveHook: %v", err)
+	}
+	got, err := db.Show(hookBead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Assignee != newAssignee {
+		t.Errorf("assignee = %q, want %q", got.Assignee, newAssignee)
+	}
+	if got.Status != string(beads.IssueStatusHooked) {
+		t.Errorf("status = %q, want the hooked status it had", got.Status)
+	}
+}
+
+// TestMoveLiveHookRefusesWhatItCannotShowIsTheRenamedPolecatsWork: in-progress
+// work moves too, the caller's session check having established the holder is
+// gone, but a reference that cannot be read, or a claim held by someone else,
+// aborts the rename rather than being adopted by the new name.
+func TestMoveLiveHookRefusesWhatItCannotShowIsTheRenamedPolecatsWork(t *testing.T) {
+	t.Parallel()
+	const (
+		oldAssignee = "gastown/polecats/agate"
+		newAssignee = "gastown/polecats/basalt"
+	)
+	newDB := func() *beadsfake.Fake {
+		return beadsfake.New(beadsfake.WithPrefix("gt"), beadsfake.WithActor(oldAssignee))
+	}
+
+	t.Run("in-progress claim moves", func(t *testing.T) {
+		t.Parallel()
+		db := newDB()
+		db.Seed(beads.Issue{ID: "gt-hook2", Title: "work", Status: string(beads.StatusInProgress), Assignee: oldAssignee})
+		if err := moveLiveHook(db, "gt-hook2", oldAssignee, newAssignee); err != nil {
+			t.Fatalf("moveLiveHook: %v", err)
+		}
+		got, err := db.Show("gt-hook2")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Assignee != newAssignee {
+			t.Errorf("assignee = %q, want %q", got.Assignee, newAssignee)
+		}
+	})
+
+	t.Run("terminal reference carries as-is", func(t *testing.T) {
+		t.Parallel()
+		db := newDB()
+		db.Seed(beads.Issue{ID: "gt-done1", Title: "shipped", Status: string(beads.StatusClosed), Assignee: oldAssignee})
+		if err := moveLiveHook(db, "gt-done1", oldAssignee, newAssignee); err != nil {
+			t.Fatalf("moveLiveHook: %v", err)
+		}
+		got, err := db.Show("gt-done1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Assignee != oldAssignee {
+			t.Errorf("assignee = %q, want %q untouched: a closed bead is nobody's live work", got.Assignee, oldAssignee)
+		}
+	})
+
+	t.Run("unreadable reference is refused", func(t *testing.T) {
+		t.Parallel()
+		if err := moveLiveHook(newDB(), "gt-gone1", oldAssignee, newAssignee); err == nil {
+			t.Error("moveLiveHook on a missing hook bead = nil, want a refusal")
+		}
+	})
+
+	t.Run("claim held by another polecat is refused", func(t *testing.T) {
+		t.Parallel()
+		db := newDB()
+		db.Seed(beads.Issue{ID: "gt-hook3", Title: "someone else's", Status: string(beads.IssueStatusHooked), Assignee: "gastown/polecats/emerald"})
+		err := moveLiveHook(db, "gt-hook3", oldAssignee, newAssignee)
+		if err == nil {
+			t.Fatal("moveLiveHook on another polecat's claim = nil, want a refusal")
+		}
+		if !strings.Contains(err.Error(), "emerald") {
+			t.Errorf("error = %v, want it to name the holder", err)
+		}
+	})
+
+	t.Run("no hook is a no-op", func(t *testing.T) {
+		t.Parallel()
+		if err := moveLiveHook(newDB(), "", oldAssignee, newAssignee); err != nil {
+			t.Errorf("moveLiveHook(\"\") = %v, want nil", err)
+		}
+	})
+}
+
+// TestEnsureNewIdentityAbsentReportsALookupError: the rename's "is the new name
+// free" check reads the bead and must believe only a real answer. Swallowing the
+// error let a transient failure look like "no bead there", and the create that
+// followed overwrote the description of a live identity (gt-u3hc1).
+func TestEnsureNewIdentityAbsentReportsALookupError(t *testing.T) {
+	t.Parallel()
+	const newBeadID = "gt-gastown-polecat-basalt"
+
+	t.Run("failed lookup aborts", func(t *testing.T) {
+		t.Parallel()
+		db := beadsfake.New(beadsfake.WithPrefix("gt"))
+		sentinel := errors.New("dolt unreachable")
+		faulty := showFailsClient{Client: db, id: newBeadID, err: sentinel}
+
+		if err := ensureNewIdentityAbsent(faulty, newBeadID); !errors.Is(err, sentinel) {
+			t.Errorf("ensureNewIdentityAbsent = %v, want %v wrapped", err, sentinel)
+		}
+	})
+
+	t.Run("live identity is refused", func(t *testing.T) {
+		t.Parallel()
+		db := beadsfake.New(beadsfake.WithPrefix("gt"))
+		db.Seed(beads.Issue{
+			ID: newBeadID, Title: "Polecat basalt", Status: string(beads.StatusOpen),
+			Labels:      []string{"gt:agent"},
+			Description: beads.FormatAgentDescription("Polecat basalt", &beads.AgentFields{RoleType: "polecat", Rig: "gastown"}),
+		})
+		if err := ensureNewIdentityAbsent(db, newBeadID); err == nil {
+			t.Error("ensureNewIdentityAbsent on a live bead = nil, want a refusal")
+		}
+	})
+
+	t.Run("closed identity is reusable", func(t *testing.T) {
+		t.Parallel()
+		db := beadsfake.New(beadsfake.WithPrefix("gt"))
+		db.Seed(beads.Issue{
+			ID: newBeadID, Title: "Polecat basalt", Status: string(beads.StatusClosed),
+			Labels:      []string{"gt:agent"},
+			Description: beads.FormatAgentDescription("Polecat basalt", &beads.AgentFields{RoleType: "polecat", Rig: "gastown"}),
+		})
+		if err := ensureNewIdentityAbsent(db, newBeadID); err != nil {
+			t.Errorf("ensureNewIdentityAbsent on a closed bead = %v, want nil: a nuked identity is reused", err)
+		}
+	})
 }

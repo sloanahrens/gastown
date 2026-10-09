@@ -791,9 +791,15 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 	// never reached a polecat spent the bead's budget on a process someone
 	// killed: two daemon re-feeds the operator shot down mid-sling took gt-0vh
 	// to its respawn limit with only one polecat ever attached (gt-4lbz).
+	//
+	// A count that cannot be recorded is reported, not rolled back: the polecat
+	// is already attached, and ShouldBlockRespawn has already refused the sling
+	// if the state file or its lock is unreadable (gt-u3hc1).
 	recordRespawn := func() {
 		if opts.HookBead != "" && !opts.Force {
-			polecat.RecordBeadRespawn(townRoot, opts.HookBead)
+			if _, err := polecat.RecordBeadRespawn(townRoot, opts.HookBead); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: recording respawn of %s: %v\n", opts.HookBead, err)
+			}
 		}
 	}
 	if opts.HookBead != "" && !opts.Force {
