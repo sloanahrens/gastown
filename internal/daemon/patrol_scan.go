@@ -300,9 +300,7 @@ type patrolScanHost struct {
 	// tier, which cannot start git.
 	gitState func(worktreePath string) polecat.LiveGitState
 	// bdGateCheck is the raw `bd gate check` call when nil: a seam for the
-	// unit tier, which cannot start bd. The gate check is the one bd call with
-	// no machine output to type and no database a fake could model, so unlike
-	// the reads above it is injected here rather than at the client.
+	// unit tier, which cannot start bd.
 	bdGateCheck func(rig string, args ...string) ([]byte, error)
 	// reapBatches caches each rig's check-recovery-batch for the life of this
 	// host, which is one tick: the reap pass asks for a verdict on every
