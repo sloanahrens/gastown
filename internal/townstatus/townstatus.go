@@ -92,12 +92,13 @@ func Gather(opts Options) (TownStatus, error) {
 		townConfig = &config.TownConfig{Name: filepath.Base(townRoot)}
 	}
 
-	// Load rigs config
+	// Load rigs config. A missing file is an empty town; a file that does not
+	// parse is damage and must surface, not be rendered as a rigless
+	// dashboard (gt-52mgl).
 	rigsConfigPath := constants.MayorRigsPath(townRoot)
-	rigsConfig, err := config.LoadRigsConfig(rigsConfigPath)
+	rigsConfig, err := config.LoadRigsConfigOrEmpty(rigsConfigPath)
 	if err != nil {
-		// Empty config if file doesn't exist
-		rigsConfig = &config.RigsConfig{Rigs: make(map[string]config.RigEntry)}
+		return TownStatus{}, fmt.Errorf("loading rigs config: %w", err)
 	}
 
 	// Load town settings for agent display info

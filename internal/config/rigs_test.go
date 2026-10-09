@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -129,4 +130,53 @@ func TestDeleteRigEntry_MissingRegistryWritesNothing(t *testing.T) {
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("stat %s = %v, want the delete to leave no file behind", path, err)
 	}
+}
+
+// TestLoadRigsConfigOrEmpty: the helper every command reads a town's registry
+// through. A missing file is an empty town (not an error); a file that does
+// not parse is damage and must surface, never be swapped for an empty
+// registry (gt-52mgl).
+func TestLoadRigsConfigOrEmpty(t *testing.T) {
+	t.Parallel()
+
+	t.Run("missing file is the empty registry", func(t *testing.T) {
+		t.Parallel()
+		cfg, err := LoadRigsConfigOrEmpty(filepath.Join(t.TempDir(), "rigs.json"))
+		if err != nil {
+			t.Fatalf("missing file = %v, want nil error", err)
+		}
+		if cfg == nil || len(cfg.Rigs) != 0 {
+			t.Fatalf("missing file cfg = %+v, want an empty registry", cfg)
+		}
+	})
+
+	t.Run("corrupt file is an error", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "rigs.json")
+		if err := os.WriteFile(path, []byte(`{"version":1,"rigs":{`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := LoadRigsConfigOrEmpty(path)
+		if err == nil {
+			t.Fatalf("corrupt file = %+v, want an error", cfg)
+		}
+		if errors.Is(err, ErrNotFound) {
+			t.Errorf("corrupt file reported as not found: %v", err)
+		}
+	})
+
+	t.Run("valid file loads", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "rigs.json")
+		if err := SetRigEntry(path, "riga", RigEntry{GitURL: "a"}); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := LoadRigsConfigOrEmpty(path)
+		if err != nil {
+			t.Fatalf("valid file = %v, want nil error", err)
+		}
+		if _, ok := cfg.Rigs["riga"]; !ok {
+			t.Errorf("valid file cfg = %+v, want riga present", cfg)
+		}
+	})
 }

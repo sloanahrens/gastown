@@ -420,15 +420,13 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	// Load rigs config
+	// Load rigs config. A missing file is a town with no rigs yet; a file
+	// that does not parse is damage and registering a rig must not overwrite
+	// it with one entry (gt-52mgl).
 	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	rigsConfig, err := config.LoadRigsConfig(rigsPath)
+	rigsConfig, err := config.LoadRigsConfigOrEmpty(rigsPath)
 	if err != nil {
-		// Create new if doesn't exist
-		rigsConfig = &config.RigsConfig{
-			Version: 1,
-			Rigs:    make(map[string]config.RigEntry),
-		}
+		return fmt.Errorf("loading rigs config: %w", err)
 	}
 
 	// Create rig manager
@@ -977,14 +975,13 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	// Load rigs config
+	// Load rigs config. A missing file is a town with no rigs yet; a file
+	// that does not parse is damage and adopting a rig must not replace it
+	// with one entry (gt-52mgl).
 	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	rigsConfig, err := config.LoadRigsConfig(rigsPath)
+	rigsConfig, err := config.LoadRigsConfigOrEmpty(rigsPath)
 	if err != nil {
-		rigsConfig = &config.RigsConfig{
-			Version: 1,
-			Rigs:    make(map[string]config.RigEntry),
-		}
+		return fmt.Errorf("loading rigs config: %w", err)
 	}
 
 	// Create rig manager
@@ -1403,9 +1400,9 @@ func runRigShutdown(cmd *cobra.Command, args []string) error {
 
 	// Load rigs config and get rig
 	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	rigsConfig, err := config.LoadRigsConfig(rigsPath)
+	rigsConfig, err := config.LoadRigsConfigOrEmpty(rigsPath)
 	if err != nil {
-		rigsConfig = &config.RigsConfig{Rigs: make(map[string]config.RigEntry)}
+		return fmt.Errorf("loading rigs config: %w", err)
 	}
 
 	g := git.NewGit(townRoot)
@@ -1644,9 +1641,9 @@ func runRigStop(cmd *cobra.Command, args []string) error {
 
 	// Load rigs config
 	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	rigsConfig, err := config.LoadRigsConfig(rigsPath)
+	rigsConfig, err := config.LoadRigsConfigOrEmpty(rigsPath)
 	if err != nil {
-		rigsConfig = &config.RigsConfig{Rigs: make(map[string]config.RigEntry)}
+		return fmt.Errorf("loading rigs config: %w", err)
 	}
 
 	g := git.NewGit(townRoot)

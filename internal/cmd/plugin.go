@@ -230,9 +230,9 @@ func getPluginScanner() (*plugin.Scanner, string, error) {
 
 	// Load rigs config to get rig names
 	rigsConfigPath := constants.MayorRigsPath(townRoot)
-	rigsConfig, err := config.LoadRigsConfig(rigsConfigPath)
+	rigsConfig, err := config.LoadRigsConfigOrEmpty(rigsConfigPath)
 	if err != nil {
-		rigsConfig = &config.RigsConfig{Rigs: make(map[string]config.RigEntry)}
+		return nil, "", fmt.Errorf("loading rigs config: %w", err)
 	}
 
 	// Extract rig names

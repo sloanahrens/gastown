@@ -205,7 +205,7 @@ func TestAutoInferRig(t *testing.T) {
 		}
 	})
 
-	t.Run("malformed rigs.json surfaces error", func(t *testing.T) {
+	t.Run("malformed rigs.json surfaces the load error", func(t *testing.T) {
 		t.Parallel()
 		root := makeWorkspace(t)
 		path := filepath.Join(root, "mayor", "rigs.json")
@@ -213,14 +213,18 @@ func TestAutoInferRig(t *testing.T) {
 			t.Fatalf("write rigs.json: %v", err)
 		}
 
-		// discoverRigsForTownRoot silently falls back to an empty config on
-		// parse error, so autoInferRig surfaces the "no rigs registered" path.
+		// A rigs.json that does not parse is damage, not an empty registry:
+		// autoInferRig reports the load failure rather than reading the town
+		// as one with no rigs (gt-52mgl).
 		_, _, err := autoInferRig(root)
 		if err == nil {
 			t.Fatal("expected error for malformed rigs.json, got nil")
 		}
-		if !strings.Contains(err.Error(), "no rigs registered") {
-			t.Errorf("expected no-rigs error (fallback from malformed JSON), got: %v", err)
+		if strings.Contains(err.Error(), "no rigs registered") {
+			t.Errorf("malformed rigs.json read as an empty town, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "loading rigs config") {
+			t.Errorf("expected the rigs-config load error, got: %v", err)
 		}
 	})
 }

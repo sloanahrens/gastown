@@ -104,6 +104,22 @@ func LoadRigsConfig(path string) (*RigsConfig, error) {
 	return &config, nil
 }
 
+// LoadRigsConfigOrEmpty loads the rig registry at path, treating a file that
+// does not exist as the empty registry: a town with no rigs yet is not a load
+// failure. Every other error is returned as-is, so a corrupt rigs.json is
+// never silently swapped for an empty registry at the call site (gt-52mgl).
+// The returned registry is nil whenever err is non-nil.
+func LoadRigsConfigOrEmpty(path string) (*RigsConfig, error) {
+	cfg, err := LoadRigsConfig(path)
+	if err == nil {
+		return cfg, nil
+	}
+	if errors.Is(err, ErrNotFound) {
+		return &RigsConfig{Rigs: make(map[string]RigEntry)}, nil
+	}
+	return nil, err
+}
+
 // SaveRigsConfig saves a rigs registry to a file atomically.
 // Writes to a temp file in the same directory then renames into place; the
 // rename is atomic on POSIX, so concurrent readers never observe a zero-byte
