@@ -42,9 +42,10 @@ type workBD struct {
 	// opposed to a bead bd says does not exist).
 	showErr error
 
-	mu    sync.Mutex
-	reads []string
-	envs  [][]string
+	mu     sync.Mutex
+	reads  []string
+	envs   [][]string
+	bounds []time.Duration
 }
 
 func newWorkBD(t *testing.T) *workBD {
@@ -61,15 +62,24 @@ func (b *workBD) seed(id, status string, updated time.Time, labels ...string) {
 		UpdatedAt: updated.UTC().Format(time.RFC3339), Labels: labels})
 }
 
-// open is the daemon's openWorkBeads.
-func (b *workBD) open(env []string) workBeadReader {
+// open is the daemon's openWorkBeads. The fake answers at once whatever the
+// deadline, so a test that cares about the bound reads it back with boundsSeen.
+func (b *workBD) open(env []string, timeout time.Duration) workBeadReader {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.envs = append(b.envs, env)
+	b.bounds = append(b.bounds, timeout)
 	if b.onlyIn != "" && (cliCall{env: env}).getenv("BEADS_DIR") != b.onlyIn {
 		return workBDReader{b: b, db: beadsfake.New()}
 	}
 	return workBDReader{b: b, db: b.db}
+}
+
+// boundsSeen returns the deadline of every read the daemon opened.
+func (b *workBD) boundsSeen() []time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return slices.Clone(b.bounds)
 }
 
 func (b *workBD) read(what string) {

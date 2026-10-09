@@ -91,9 +91,10 @@ type Daemon struct {
 	execCmd cmdRunFunc
 
 	// openWorkBeads opens the beads client the daemon's work-bead reads go
-	// through, given bd's whole environment (see workBeads); nil is bd at
-	// bdPath run from the town root. Tests answer from a beadsfake.
-	openWorkBeads func(env []string) workBeadReader
+	// through, given bd's whole environment (see workBeads) and the deadline
+	// for one read; nil is bd at bdPath run from the town root. Tests answer
+	// from a beadsfake.
+	openWorkBeads func(env []string, timeout time.Duration) workBeadReader
 
 	// schedulerDeps are the collaborators scheduled dispatch runs on (the
 	// sling and the polecat-capacity probe, both in package cmd). Set through
@@ -2434,12 +2435,19 @@ type workBeadReader interface {
 	List(opts beads.ListOptions) ([]*beads.Issue, error)
 }
 
+// workBeadReadTimeout bounds one of the idle reaper's work-bead reads. Those
+// reads run on the daemon's per-rig pool worker, so a bd that has hung would
+// hold the whole reap tick for the rig open until it returned. At the deadline
+// bd is killed and the read fails, which the reaper reads as "unknown, do not
+// reap" (gt-vfr9r).
+const workBeadReadTimeout = 30 * time.Second
+
 // workBeads returns the client for one work-bead read: the daemon's resolved
 // bd run from the town root with exactly env, which pins or routes the read,
 // killed after timeout (zero waits).
 func (d *Daemon) workBeads(env []string, timeout time.Duration) workBeadReader {
 	if d.openWorkBeads != nil {
-		return d.openWorkBeads(env)
+		return d.openWorkBeads(env, timeout)
 	}
 	b := beads.NewPlain(d.config.TownRoot, env, beads.WithBin(d.bdPathOrDefault()))
 	if timeout > 0 {
@@ -2497,9 +2505,10 @@ func (d *Daemon) workBeadStillSubmitted(rigName, beadID string) (still, known bo
 	return polecat.IsSubmittedWork(issue), true
 }
 
-// assignedWork lists assignee's work beads in status from rigName's database.
+// assignedWork lists assignee's work beads in status from rigName's database,
+// under the reaper's read budget so a hung bd cannot hold the rig pool worker.
 func (d *Daemon) assignedWork(rigName, assignee, status string) ([]*beads.Issue, error) {
-	return d.workBeads(d.workBeadsEnv(rigName), 0).List(beads.ListOptions{Assignee: assignee, Status: status, Priority: -1})
+	return d.workBeads(d.workBeadsEnv(rigName), workBeadReadTimeout).List(beads.ListOptions{Assignee: assignee, Status: status, Priority: -1})
 }
 
 // hasAssignedOpenWork checks if any work bead is assigned to the given polecat
@@ -2508,13 +2517,24 @@ func (d *Daemon) assignedWork(rigName, assignee, status string) ([]*beads.Issue,
 // assignee on the work bead, but no longer maintains the agent bead's hook_bead
 // field (updateAgentHookBead is a no-op). Without this fallback, the idle reaper
 // kills working polecats whose agent bead hook_bead is stale.
-func (d *Daemon) hasAssignedOpenWork(rigName, assignee string) bool {
+//
+// A query that fails and finds nothing is an error, not "no work": the failed
+// status may be the one holding the work, so a caller must read the error as
+// unknown and not reap (gt-vfr9r). assignedActiveWorkBead answers by the same
+// rule. A bead found by any query is work, whatever else failed.
+func (d *Daemon) hasAssignedOpenWork(rigName, assignee string) (bool, error) {
+	var lastErr error
 	for _, status := range []string{"hooked", "in_progress", "open"} {
-		if issues, err := d.assignedWork(rigName, assignee, status); err == nil && len(issues) > 0 {
-			return true
+		issues, err := d.assignedWork(rigName, assignee, status)
+		if err != nil {
+			lastErr = fmt.Errorf("bd list --status=%s: %w", status, err)
+			continue
+		}
+		if len(issues) > 0 {
+			return true, nil
 		}
 	}
-	return false
+	return false, lastErr
 }
 
 // assignedActiveWorkBead returns the ID of a work bead assigned to the
@@ -2596,7 +2616,9 @@ func (d *Daemon) reapRigIdlePolecats(rigName string, timeout time.Duration) {
 //
 // Unfinished assigned work suspends the reap in every state. A heartbeat cannot
 // separate a finished polecat from one that is deliberately waiting, so the reap
-// reads the work bead (gt-7lwft).
+// reads the work bead (gt-7lwft). A work read that fails suspends it too: an
+// unanswerable read is unknown, and killing on unknown strands live work
+// (gt-vfr9r).
 func (d *Daemon) reapIdlePolecat(rigName, polecatName string, timeout time.Duration) {
 	sessionName := session.PolecatSessionName(d.prefixRegistry().PrefixForRig(rigName), polecatName)
 
@@ -2644,7 +2666,13 @@ func (d *Daemon) reapIdlePolecat(rigName, polecatName string, timeout time.Durat
 	// inside gt done with work on its hook waits for the crash path instead.
 	if state == polecat.HeartbeatIdle || state == polecat.HeartbeatExiting {
 		assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
-		if d.hasAssignedOpenWork(rigName, assignee) {
+		hasWork, err := d.hasAssignedOpenWork(rigName, assignee)
+		if err != nil {
+			d.logger.Printf("Not reaping %s/%s: cannot read assigned work (idle %v): %v",
+				rigName, polecatName, staleDuration.Truncate(time.Second), err)
+			return
+		}
+		if hasWork {
 			d.logger.Printf("Not reaping %s/%s: %s heartbeat but still holds assigned work (idle %v)",
 				rigName, polecatName, state, staleDuration.Truncate(time.Second))
 			return
@@ -2662,7 +2690,13 @@ func (d *Daemon) reapIdlePolecat(rigName, polecatName string, timeout time.Durat
 	// GH#3342).
 	if state == polecat.HeartbeatWorking {
 		assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
-		if d.hasAssignedOpenWork(rigName, assignee) {
+		hasWork, err := d.hasAssignedOpenWork(rigName, assignee)
+		if err != nil {
+			d.logger.Printf("Not reaping %s/%s: cannot read assigned work (idle %v): %v",
+				rigName, polecatName, staleDuration.Truncate(time.Second), err)
+			return
+		}
+		if hasWork {
 			return
 		}
 		seat := supervisor.SeatIn(d.prefixRegistry(), rigName, constants.RolePolecat, polecatName)

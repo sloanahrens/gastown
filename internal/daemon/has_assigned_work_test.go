@@ -39,8 +39,9 @@ func TestHasAssignedOpenWork_PinsTheRigDatabase(t *testing.T) {
 		execCmd:       bd.run,
 	}
 
-	if !d.hasAssignedOpenWork("gastown", "polecats/rust") {
-		t.Fatal("expected assigned work lookup to succeed")
+	has, err := d.hasAssignedOpenWork("gastown", "polecats/rust")
+	if err != nil || !has {
+		t.Fatalf("assigned work lookup = %v, %v; want true, nil", has, err)
 	}
 
 	if len(bd.envs) == 0 {

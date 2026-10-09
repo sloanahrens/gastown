@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -678,23 +679,102 @@ func TestReapIdlePolecat_SkipsPolecatHoldingWork(t *testing.T) {
 	}
 }
 
-// The control for the test above: the same stale exiting heartbeat with no
-// work assigned is still reclaimed, so the hold cannot be satisfied by "never
+// The control for the test above: the same stale exiting or idle heartbeat with
+// no work assigned is still reclaimed, so the hold cannot be satisfied by "never
 // reap a polecat in state=exiting" (gt-azmw).
 func TestReapIdlePolecat_ReapsPolecatWithoutWork(t *testing.T) {
 	t.Parallel()
 
+	for _, state := range []polecat.HeartbeatState{polecat.HeartbeatExiting, polecat.HeartbeatIdle} {
+		t.Run(string(state), func(t *testing.T) {
+			t.Parallel()
+
+			bd := newWorkBD(t)
+			d, logBuf := reaperDaemon(t, bd)
+			writePolecatHeartbeat(t, d.config.TownRoot, state, time.Hour)
+
+			d.reapIdlePolecat("myr", "mycat", 15*time.Minute)
+
+			if !strings.Contains(logBuf.String(), "Reaping idle polecat") {
+				t.Fatalf("a stale, workless, agentless polecat was not reaped: %s", logBuf)
+			}
+			if alive, _ := d.tmux.HasSession("myr-mycat"); alive {
+				t.Fatal("the reaped polecat's session is still alive")
+			}
+		})
+	}
+}
+
+// gt-vfr9r: a work read that fails is unknown, not "no work"; the idle and
+// exiting branches must not kill the session on an unanswerable lookup.
+func TestReapIdlePolecat_SkipsWhenAssignedWorkReadFails(t *testing.T) {
+	t.Parallel()
+
+	for _, state := range []polecat.HeartbeatState{polecat.HeartbeatIdle, polecat.HeartbeatExiting} {
+		t.Run(string(state), func(t *testing.T) {
+			t.Parallel()
+
+			bd := newWorkBD(t)
+			bd.listErr = errors.New("dolt: connection refused")
+			d, logBuf := reaperDaemon(t, bd)
+			writePolecatHeartbeat(t, d.config.TownRoot, state, time.Hour)
+
+			d.reapIdlePolecat("myr", "mycat", 15*time.Minute)
+
+			if alive, _ := d.tmux.HasSession("myr-mycat"); !alive {
+				t.Fatalf("reaped a %s polecat on an unreadable work lookup; log: %s", state, logBuf)
+			}
+			if !strings.Contains(logBuf.String(), "cannot read assigned work") {
+				t.Fatalf("the unreadable lookup was not logged for %s: %s", state, logBuf)
+			}
+		})
+	}
+}
+
+// The working branch answers by the same rule: a stale working heartbeat whose
+// work read failed is unknown, and the liveness probe below it must not run.
+func TestReapIdlePolecat_WorkingStaleWithFailingWorkReadIsNotReaped(t *testing.T) {
+	t.Parallel()
+
 	bd := newWorkBD(t)
+	bd.listErr = errors.New("bd list: timed out")
 	d, logBuf := reaperDaemon(t, bd)
-	writePolecatHeartbeat(t, d.config.TownRoot, polecat.HeartbeatExiting, time.Hour)
+	writePolecatHeartbeat(t, d.config.TownRoot, polecat.HeartbeatWorking, time.Hour)
 
 	d.reapIdlePolecat("myr", "mycat", 15*time.Minute)
 
-	if !strings.Contains(logBuf.String(), "Reaping idle polecat") {
-		t.Fatalf("a stale, workless, agentless polecat was not reaped: %s", logBuf)
+	if alive, _ := d.tmux.HasSession("myr-mycat"); !alive {
+		t.Fatalf("reaped a working polecat on an unreadable work lookup; log: %s", logBuf)
 	}
-	if alive, _ := d.tmux.HasSession("myr-mycat"); alive {
-		t.Fatal("the reaped polecat's session is still alive")
+	if !strings.Contains(logBuf.String(), "cannot read assigned work") {
+		t.Fatalf("the unreadable lookup was not logged: %s", logBuf)
+	}
+}
+
+// gt-vfr9r: the reap's work reads run under a bounded deadline, so a bd that
+// hangs cannot hold the rig pool worker open, and a read that dies at its
+// deadline is unknown — the session is not killed.
+func TestReapIdlePolecat_BoundsAHungWorkRead(t *testing.T) {
+	t.Parallel()
+
+	bd := newWorkBD(t)
+	bd.listErr = fmt.Errorf("bd list: timed out after %v: %w", workBeadReadTimeout, context.DeadlineExceeded)
+	d, logBuf := reaperDaemon(t, bd)
+	writePolecatHeartbeat(t, d.config.TownRoot, polecat.HeartbeatIdle, time.Hour)
+
+	d.reapIdlePolecat("myr", "mycat", 15*time.Minute)
+
+	if alive, _ := d.tmux.HasSession("myr-mycat"); !alive {
+		t.Fatalf("reaped on a work read that hit its deadline; log: %s", logBuf)
+	}
+	bounds := bd.boundsSeen()
+	if len(bounds) == 0 {
+		t.Fatal("the reaper made no work read")
+	}
+	for _, b := range bounds {
+		if b != workBeadReadTimeout {
+			t.Fatalf("a work read was opened with deadline %v, want the reaper's %v", b, workBeadReadTimeout)
+		}
 	}
 }
 

@@ -43,7 +43,7 @@ type labelBeads struct {
 	reads         []beadRead
 }
 
-func (b *labelBeads) open([]string) workBeadReader { b.opened++; return b }
+func (b *labelBeads) open([]string, time.Duration) workBeadReader { b.opened++; return b }
 func (b *labelBeads) Show(id string) (*beads.Issue, error) {
 	return nil, errors.New("not used")
 }
