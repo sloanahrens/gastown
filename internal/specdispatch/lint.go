@@ -14,6 +14,12 @@
 // It does not read the bead's type or labels to decide whether to check —
 // epics, agent beads and the town's runtime families are refused as "not a
 // work bead", and nothing else is.
+//
+// A lint returns one of three routes: dispatch, planning (well-formed, but for
+// the planner to decompose before a worker takes it), or refuse (a missing
+// section is never guessed at). The dispatcher holds a refused bead and, under
+// every gate that holds one, a planning bead too — a planning bead is labeled
+// needs-planning and commented as the planner's, never slung (gt-tod3q).
 package specdispatch
 
 import (
@@ -307,11 +313,15 @@ func refusal(failures ...Refusal) Verdict {
 // Clean reports whether the spec may be dispatched to a polecat.
 func (v Verdict) Clean() bool { return v.Route == RouteDispatch }
 
-// ShapeNote renders the verdict as the note a warn-mode shape gate leaves on a
-// bead: "SHAPE: <field>: <reason>; ..." for a refusal, "SHAPE: needs planning"
-// for a spec that must be decomposed first. It is the seat-refill plugin's own
-// comment text (gt-cq5gb), kept so the bead's history reads the same across the
-// move to the Go dispatcher. Empty when the verdict is clean.
+// ShapeNote renders the verdict as the note a shape gate leaves on a bead the
+// lint did not clear: "SHAPE: <field>: <reason>; ..." for a refusal, "SHAPE:
+// needs planning" for a spec that must be decomposed first. It is the
+// seat-refill plugin's own comment text (gt-cq5gb), kept so the bead's history
+// reads the same across the move to the Go dispatcher. A refused bead wears it
+// under every gate that holds one; a planning verdict wears it only when the
+// bead is waived and dispatched, because the dispatcher otherwise holds a
+// planning bead and comments it with its own planning note (gt-tod3q). Empty
+// when the verdict is clean.
 func (v Verdict) ShapeNote() string {
 	switch v.Route {
 	case RouteDispatch:
@@ -334,7 +344,9 @@ func (v Verdict) ShapeNote() string {
 // UnshapedReason is the dispatcher's hold reason for a bead whose shape the
 // lint refused: "unshaped: <fields>", naming every failed field in check order
 // ("unshaped: ## Goal, acceptance"). Empty when the verdict is not a refusal:
-// a planning verdict is the planner's, not an unshaped hold (gt-f8ppx).
+// a planning verdict is the planner's hold, not an unshaped one — the
+// dispatcher holds it under warn as well as refuse and names it by its
+// planning state instead (gt-f8ppx, gt-tod3q).
 func (v Verdict) UnshapedReason() string {
 	if v.Route != RouteRefuse {
 		return ""

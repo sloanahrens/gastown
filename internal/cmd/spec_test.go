@@ -539,6 +539,49 @@ func TestSpecDispatchRoutesPlanningWithoutSpawning(t *testing.T) {
 	}
 }
 
+// The default warn gate holds a spec that needs planning just as it holds one
+// the lint refuses (gt-tod3q): the planning spec is never slung, wears
+// needs-planning, and is commented by its planning state, while a shape-refused
+// spec keeps warn's old behaviour — held with one SHAPE comment and no label —
+// and a clean spec behind both still takes its seat.
+func TestSpecDispatchWarnGateHoldsPlanning(t *testing.T) {
+	t.Parallel()
+	big := cleanSpec("gt-big", 1, "2026-09-29T10:00:00Z")
+	big.Acceptance = strings.Repeat("- [ ] x\n", 8)
+	bad := cleanSpec("gt-bad", 2, "2026-09-29T10:30:00Z")
+	bad.Description = strings.Replace(bad.Description, "## Gate\nmake gate", "", 1)
+	good := cleanSpec("gt-good", 2, "2026-09-29T11:00:00Z")
+	f := newFakeSpecTown(big, bad, good)
+	env := f.env()
+	env.ShapeGate = specdispatch.ShapeGateWarn
+	env.PerTick = 2 // the two holds must not spend a seat
+	r := runSpecDispatchCycle(env)
+
+	if got := strings.Join(f.slung, " "); got != "gt-good" {
+		t.Fatalf("slung %q, want only the clean bead", got)
+	}
+	if len(r.Planning) != 1 || r.Planning[0].Bead != "gt-big" || !strings.Contains(r.Planning[0].Line, specPlanNeedsPlan) {
+		t.Fatalf("planning = %+v, want gt-big held for a plan", r.Planning)
+	}
+	if got := f.labels["gt-big"]; len(got) != 1 || got[0] != specdispatch.NeedsPlanningLabel {
+		t.Errorf("planning labels = %v, want needs-planning once", got)
+	}
+	if n := f.notes["gt-big"]; len(n) != 1 || !strings.HasPrefix(n[0], specDispatchNotePrefix+"gt-big: "+specPlanNeedsPlan) {
+		t.Errorf("planning notes = %v, want one planning note", n)
+	}
+	if got := f.labels["gt-bad"]; len(got) != 0 {
+		t.Errorf("warn labeled a shape-refused bead: %v", got)
+	}
+	if n := f.notes["gt-bad"]; len(n) != 1 || !strings.HasPrefix(n[0], "SHAPE: ## Gate: section missing") {
+		t.Errorf("shape notes = %v, want one SHAPE note", n)
+	}
+	// A second tick reports the planning bead again without a second note.
+	r = runSpecDispatchCycle(env)
+	if len(r.Planning) != 1 || len(f.notes["gt-big"]) != 1 || len(f.notes["gt-bad"]) != 1 {
+		t.Errorf("second tick planning = %+v notes %v", r.Planning, f.notes)
+	}
+}
+
 // TestSpecDispatchReportsPlanState: the tick says which of the two planning
 // states a spec is in — waiting for a plan job's proposal, or carrying one the
 // operator files — instead of naming a planner that is not built (gt-4k3fj.14).
