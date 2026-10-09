@@ -111,6 +111,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.Deploys != nil {
 		start(h.cfg.DeploysEvery, h.pollDeploys)
 	}
+	if h.cfg.Reports != nil {
+		start(h.cfg.ReportsEvery, h.pollReports)
+	}
 	if h.cfg.Escalation != nil {
 		start(h.cfg.EscalationEvery, h.pollEscalation)
 	}
@@ -400,6 +403,20 @@ func (h *Hub) pollDeploys() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.Deploys = d
+	h.publishLocked()
+}
+
+// pollReports reads the overseer's latest report. It is a poller of its own
+// rather than part of the feed's: the report is written on the hour, so its
+// clock is the hour, not the three minutes the feed keeps.
+func (h *Hub) pollReports() {
+	rep := h.cfg.Reports()
+	if rep == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.state.Reports = rep
 	h.publishLocked()
 }
 

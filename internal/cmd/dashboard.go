@@ -45,8 +45,9 @@ var dashboardCmd = &cobra.Command{
 	Long: `Serve one page on localhost that shows the town the way gt tail -f does:
 the health verdict, the queue waiting to land, the polecat seats and what they
 hold, the machine's load and what burns it, the cloud patrol's latest report
-when this machine runs one, the DeepSeek spend, the recent activity of the
-Forgejo repos the viewer can see, and the same default-view feed gt tail prints.
+when this machine runs one, the overseer's own hourly report, the DeepSeek
+spend, the recent activity of the Forgejo repos the viewer can see, and the same
+default-view feed gt tail prints.
 
 It reads what gt tail reads — the events journals, the landings files, the
 daemon log, the watch feed, the daemon's health report — through the same
@@ -85,6 +86,13 @@ directory GT_CLOUD_REPORTS_DIR names. It shows when the patrol last ran,
 whether that is overdue, the projects it watches and its open findings by
 severity, and it writes nothing there. On a machine with no reports directory
 the panel says so and is re-read at a slow interval rather than every minute.
+
+The Report panel reads the overseer's own hourly report from
+.runtime/overseer/reports under the town root: the newest file named for the
+instant it was written, its text, and when the writes before it happened. An
+hourly report that is late is marked, the text is drawn as text and never as
+markup, and a directory the reader cannot read says so rather than reading as
+one with no reports in it. The panel writes nothing there.
 
 Lifecycle: the dashboard watches its own binary and the town registry. When make
 install replaces the binary, or a rig is added to or removed from the town, the
@@ -168,6 +176,14 @@ func dashboardRegistryPath(townRoot string) string {
 	return filepath.Join(townRoot, filepath.FromSlash(config.MachineConfigFile))
 }
 
+// dashboardReportsDir is where the overseer's report tool writes inside the
+// town: one file per hourly run, named for the instant it was written, beside
+// the latest.md copy it leaves for a human to read. The dashboard only reads
+// it; the tool is outside the repo.
+func dashboardReportsDir(townRoot string) string {
+	return filepath.Join(townRoot, ".runtime", "overseer", "reports")
+}
+
 // newDashboardHub wires a hub to the readers gt tail -f uses.
 func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string) (*dashboard.Hub, error) {
 	beadReads := openTailBeads(townRoot)
@@ -212,6 +228,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	backoff := newDashBackoff(townRoot)
 	queue := newDashQueueReader(townRoot)
 	cloud := dashboard.NewCloudReader(config.CloudReportsDir())
+	reports := dashboard.NewReportsReader(dashboardReportsDir(townRoot))
 	loads := newDashLoads(townRoot, time.Now)
 	// The deploy block reads the same repos through the same viewer client as
 	// the Forgejo panel, so the two are wired together from one token read.
@@ -227,6 +244,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		TierSweep:  func() *dashboard.TierSweep { return tierSweeps.read(time.Now()) },
 		Forgejo:    forgejoFeed,
 		Deploys:    forgejoDeploys,
+		Reports:    func() *dashboard.Reports { return reports.Read(time.Now()) },
 		Escalation: func() *dashboard.Escalations { return escalations.read(time.Now()) },
 		Dispatch:   om.dispatch,
 		Queue:      func() *dashboard.Queue { return queue.read(time.Now()) },

@@ -155,6 +155,8 @@ section.collapsed>h2{border-bottom:0}
 .cname{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cdetail{flex:1 1 24ch;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cfull{padding:4px 0 8px 10px;margin-bottom:4px;border-left:2px solid var(--line);overflow-wrap:anywhere}
+.reptext{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;background:#10161d;border:1px solid var(--line);border-radius:6px;padding:6px 8px;max-height:280px;overflow:auto}
+.reptimes{margin:2px 0 0;padding-left:18px;color:var(--dim);font-size:11px}
 h3.sub{display:flex;gap:10px;align-items:center;margin:0;padding:10px 12px 0;font-size:11px;font-weight:400;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
 h3.sub .r{margin-left:auto;text-transform:none;letter-spacing:0;white-space:normal;text-align:right}
 .dhead,.drow{display:flex;flex-wrap:wrap;gap:2px 8px;align-items:baseline}
@@ -191,6 +193,7 @@ a.drow:hover{background:#19212b}
   <div class="col">
     <section><h2>Escalations <span class="r" id="escalationnote"></span></h2><div class="body" id="escalations"></div></section>
     <section><h2>Alerts <span class="r" id="alertsnote"></span></h2><div class="body" id="alerts"></div></section>
+    <section><h2>Report <span class="r" id="reportnote"></span></h2><div class="body" id="report"></div></section>
     <section><h2>DeepSeek <span class="r" id="spendnote"></span></h2><div class="body" id="spend"></div></section>
     <section><h2>Rigs <span class="r" id="rigsnote"></span></h2><div class="body" id="rigs"></div></section>
     <section><h2><span class="sweepico" id="tiersweepico"></span>Tier sweeps <span class="r" id="tiersweepnote"></span></h2><div class="body" id="tiersweep"></div></section>
@@ -814,6 +817,48 @@ function renderCloud(s) {
     if (open) box.append(el("div", "cfull", f.detail || ""));
   }
   if (c.more) box.append(el("div", "empty", "and " + c.more + " more"));
+}
+
+// The Report panel draws the overseer's own latest hourly report. Every cell
+// goes through el(), which writes textContent, so a tag in the report shows as
+// that text and never as markup. The report's own line breaks and tabs are kept
+// and the box wraps them, so the pane shows the report the way its writer
+// shaped it.
+//
+// The pane names the one thing the reader leaves unnamed: a latest report past
+// its hour reads as overdue, in the amber the page marks every other stale
+// reading with. The writes before the latest are listed behind a disclosure, so
+// however many the town keeps the pane is one report tall.
+function renderReports(s) {
+  const box = $("report"), note = $("reportnote");
+  box.replaceChildren();
+  const r = s.reports;
+  if (!r) { note.className = "r"; note.textContent = ""; box.append(el("div", "empty", "reading…")); return; }
+  note.className = r.overdue ? "r warnc" : "r";
+  note.textContent = r.overdue ? "report overdue" : "";
+  // A directory or a report the reader could not read is a named state, and
+  // never an empty pane: "no reports yet" and "could not be read" must not look
+  // alike.
+  if (r.state === "missing" || r.state === "error") {
+    box.append(el("div", r.state === "error" ? "badc" : "empty", r.note || r.state));
+    return;
+  }
+  const head = el("div", "chead");
+  head.title = new Date(r.written).toLocaleString();
+  head.append(el("span", "title", "written " + age(r.written) + " ago"));
+  box.append(head);
+  box.append(el("div", "reptext", r.text || ""));
+  // The list the reader sends starts at the report above, so the disclosure
+  // holds the timestamps that are not the one already drawn.
+  const times = (r.times || []).slice(1);
+  if (times.length) {
+    const d = document.createElement("details");
+    d.append(el("summary", "title", times.length + (times.length === 1 ? " earlier report" : " earlier reports")));
+    const ul = el("ul", "reptimes");
+    for (const t of times) ul.append(el("li", "", new Date(t).toLocaleString()));
+    d.append(ul);
+    box.append(d);
+  }
 }
 
 // The Deploys block draws the deploy workflows' runs — a release and a
@@ -1604,7 +1649,7 @@ function renderQueue(s, force) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderEscalations(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
+function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderEscalations(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderReports(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));

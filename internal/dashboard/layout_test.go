@@ -24,8 +24,9 @@ func TestPaneColumns(t *testing.T) {
 		pane, col, before, after string
 	}{
 		{"escalationnote", "left", "", "alertsnote"},
-		{"alertsnote", "left", "escalationnote", "spendnote"},
-		{"spendnote", "left", "alertsnote", "rigsnote"},
+		{"alertsnote", "left", "escalationnote", "reportnote"},
+		{"reportnote", "left", "alertsnote", "spendnote"},
+		{"spendnote", "left", "reportnote", "rigsnote"},
 		{"rigsnote", "left", "spendnote", "tiersweepnote"},
 		{"tiersweepnote", "left", "rigsnote", "seatsnote"},
 		{"seatsnote", "left", "tiersweepnote", "dispnote"},
