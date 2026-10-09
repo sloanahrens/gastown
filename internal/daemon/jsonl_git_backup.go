@@ -246,14 +246,23 @@ func (d *Daemon) syncJsonlGitBackup() {
 
 	d.logger.Printf("jsonl_git_backup: exporting %d database(s) to %s (scrub=%v)", len(databases), gitRepo, scrub)
 
+	// export is the dolt-backed per-database export, unless a test injected one
+	// (jsonlExportFn) to drive this cycle's bookkeeping without running dolt.
+	export := d.exportDatabaseToJsonl
+	if d.jsonlExportFn != nil {
+		export = d.jsonlExportFn
+	}
+
 	exported := 0
 	var failed []string
+	var failures []string
 	counts := make(map[string]int)
 	for _, db := range databases {
-		n, err := d.exportDatabaseToJsonl(db, gitRepo, dataDir, scrub)
+		n, err := export(db, gitRepo, dataDir, scrub)
 		if err != nil {
 			d.logger.Printf("jsonl_git_backup: %s: export failed: %v", db, err)
 			failed = append(failed, db)
+			failures = append(failures, fmt.Sprintf("%s: %v", db, err))
 		} else {
 			counts[db] = n
 			exported++
@@ -261,10 +270,17 @@ func (d *Daemon) syncJsonlGitBackup() {
 	}
 
 	if exported == 0 {
+		// The all-failed case escalates like the init and no-databases paths: a
+		// cycle that exports nothing is a backup an operator must hear about
+		// (gt-fxm2i).
 		d.logger.Printf("jsonl_git_backup: no databases exported successfully")
 		cycle.failStep("export", "no databases exported successfully")
+		d.escalateAlert(alertKeyJSONLExport, "jsonl_git_backup", fmt.Sprintf(
+			"every database export failed — the offsite backup exported nothing this cycle:\n%s",
+			strings.Join(failures, "\n")))
 		return
 	}
+	d.clearAlerts("database exports succeeded", alertKeyJSONLExport)
 
 	cycle.closeStep("export")
 
@@ -545,9 +561,13 @@ func capEventRowValues(row json.RawMessage, limit int) (json.RawMessage, error) 
 	return json.Marshal(fields)
 }
 
-// commitAndPushJsonlBackup stages, commits, and pushes JSONL files if changed.
-// The commit message includes counts for successful exports AND names of failed
-// databases, so partial failures are visible in git history.
+// commitAndPushJsonlBackup stages, commits, and pushes JSONL files. The commit
+// message includes counts for successful exports AND names of failed databases,
+// so partial failures are visible in git history.
+//
+// A tick with nothing to commit still pushes (see pushJsonlBackup), so an
+// earlier tick's commit that failed to reach origin is retried rather than
+// reported as success (gt-fxm2i).
 func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, counts map[string]int, failed []string) error {
 	// The three local commands below share one deadline, so a single slow one
 	// can use the whole phase without three of them stacking past a tick.
@@ -565,13 +585,13 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 	// Check if there are staged changes. A failed check is not "no
 	// changes": the commit below decides.
 	var staged []gtgit.StagedChange
+	hasStaged := true
 	if err := d.runGitIndexOp(gitRepo, "git diff --cached", func() error {
 		var err error
 		staged, err = d.backupGitAt(gitRepo, localBudget()).StagedChanges()
 		return err
 	}); err == nil && len(staged) == 0 {
-		d.logger.Printf("jsonl_git_backup: no changes to commit")
-		return nil
+		hasStaged = false
 	}
 
 	// Build commit message with counts in deterministic order.
@@ -588,11 +608,15 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 		msg += fmt.Sprintf(" [FAILED: %s]", strings.Join(failed, ", "))
 	}
 
-	// Commit.
-	if err := d.runGitIndexOp(gitRepo, "git commit", func() error {
-		return d.backupGitAt(gitRepo, localBudget()).CommitWithAuthor(msg, "Gas Town Daemon <daemon@gastown.local>")
-	}); err != nil {
-		return fmt.Errorf("git commit: %w", err)
+	if hasStaged {
+		// Commit.
+		if err := d.runGitIndexOp(gitRepo, "git commit", func() error {
+			return d.backupGitAt(gitRepo, localBudget()).CommitWithAuthor(msg, "Gas Town Daemon <daemon@gastown.local>")
+		}); err != nil {
+			return fmt.Errorf("git commit: %w", err)
+		}
+	} else {
+		d.logger.Printf("jsonl_git_backup: no changes to commit")
 	}
 
 	// The rolling spike baseline is re-derived from commit history (the subject
@@ -601,6 +625,16 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 	// place: recomputeSpikeBaseline consults it only when history carries no
 	// counts at all, so it can never outrank a committed level (gt-tj-he).
 
+	return d.pushJsonlBackup(gitRepo, hasStaged, msg)
+}
+
+// pushJsonlBackup pushes the backup repository's current branch to origin,
+// returning nil once origin carries HEAD.
+//
+// It runs whether or not this tick committed: a push-less tick still pushes an
+// earlier tick's unpushed commit, so a failed push is retried rather than
+// reported as success (gt-fxm2i).
+func (d *Daemon) pushJsonlBackup(gitRepo string, committed bool, msg string) error {
 	// Push requires a remote. This is the OFFSITE layer — a repo with commits
 	// but no remote is data sitting on the same disk it started on, which is
 	// exactly the failure this patrol exists to prevent. Treat it as a hard
@@ -609,7 +643,7 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 	// silently "succeeding" forever (gt-kme).
 	local := d.backupGitAt(gitRepo, gitCmdTimeout)
 	if _, err := local.RemoteURL("origin"); err != nil {
-		return fmt.Errorf("committed locally but no 'origin' remote configured — backup is not offsite")
+		return fmt.Errorf("no 'origin' remote configured — offsite backup cannot push")
 	}
 
 	// Detect current branch name for push (master vs main).
@@ -617,11 +651,54 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 	if err != nil || branch == "" {
 		branch = "main" // fallback
 	}
+
+	// With no commit this tick, push only if origin does not already carry HEAD.
+	if !committed {
+		if !d.jsonlBackupAheadOf(gitRepo, "origin", branch) {
+			d.logger.Printf("jsonl_git_backup: no changes to commit and origin/%s already has HEAD", branch)
+			return nil
+		}
+		d.logger.Printf("jsonl_git_backup: no new changes — retrying push of an unpushed commit to origin/%s", branch)
+	}
+
 	if err := d.backupGitAt(gitRepo, gitCmdTimeout).PushWithTimeout("origin", branch, false, gitPushTimeout); err != nil {
 		return fmt.Errorf("git push: %w", err)
 	}
-	d.logger.Printf("jsonl_git_backup: committed and pushed: %s", msg)
+	if committed {
+		d.logger.Printf("jsonl_git_backup: committed and pushed: %s", msg)
+	} else {
+		d.logger.Printf("jsonl_git_backup: pushed previously unpushed commit(s) to origin/%s", branch)
+	}
 	return nil
+}
+
+// jsonlBackupAheadOf reports whether the backup repository's HEAD holds commits
+// origin/<branch> does not — i.e. a push is needed. It reads the local
+// remote-tracking ref, so it needs no network.
+//
+// Any ref it cannot resolve (never fetched, no tracking ref, or a failed read)
+// counts as ahead: attempting a push is cheaper than skipping a commit that may
+// never have reached the remote, and a push that cannot succeed reports its own
+// error.
+func (d *Daemon) jsonlBackupAheadOf(gitRepo, remote, branch string) bool {
+	g := d.backupGitAt(gitRepo, gitCmdTimeout)
+	head, err := g.Rev("HEAD")
+	if err != nil {
+		return true
+	}
+	tip, err := g.Rev("refs/remotes/" + remote + "/" + branch)
+	if err != nil {
+		return true
+	}
+	if tip == head {
+		return false
+	}
+	// HEAD is already on origin when it is an ancestor of origin's tip.
+	contained, err := g.IsAncestor(head, tip)
+	if err != nil {
+		return true
+	}
+	return !contained
 }
 
 // ensureGitRepoInitialized makes sure gitRepo exists and is a git repository,
@@ -895,11 +972,12 @@ func escalationTitle(source, message string) string {
 // condition that persists across many patrol cycles leaves exactly one open
 // escalation behind (gt-vwry) instead of one per cycle.
 const (
-	alertKeyJSONLInit  = "jsonl_git_backup:init"
-	alertKeyJSONLNoDBs = "jsonl_git_backup:no-databases"
-	alertKeyJSONLScrub = "jsonl_git_backup:scrub-suspicious"
-	alertKeyJSONLSpike = "jsonl_git_backup:spike"
-	alertKeyJSONLPush  = "jsonl_git_backup:push"
+	alertKeyJSONLInit   = "jsonl_git_backup:init"
+	alertKeyJSONLNoDBs  = "jsonl_git_backup:no-databases"
+	alertKeyJSONLExport = "jsonl_git_backup:export"
+	alertKeyJSONLScrub  = "jsonl_git_backup:scrub-suspicious"
+	alertKeyJSONLSpike  = "jsonl_git_backup:spike"
+	alertKeyJSONLPush   = "jsonl_git_backup:push"
 )
 
 // escalate raises an alert whose key is derived from its own title, for

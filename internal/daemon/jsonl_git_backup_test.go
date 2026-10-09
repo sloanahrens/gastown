@@ -1763,12 +1763,131 @@ func TestCommitAndPushJsonlBackup_CommitsAndPushes(t *testing.T) {
 		t.Errorf("origin main = %s, want the backup commit %s", tip, head)
 	}
 
-	// Nothing new to back up: no second commit.
+	// Nothing new to back up: no second commit, and origin already has HEAD, so
+	// nothing to push either.
 	if err := d.commitAndPushJsonlBackup(gitRepo, []string{"testdb"}, map[string]int{"testdb": 5}, nil); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 	if again, _ := f.Open(gitRepo).Rev("HEAD"); again != head {
 		t.Errorf("an unchanged export committed again (%s)", again)
+	}
+}
+
+// TestCommitAndPushJsonlBackup_RetriesUnpushedCommitWhenNothingStaged is the
+// gt-fxm2i regression for the push half of the bug: a tick that committed and
+// failed to push used to be reported as success by the next tick, whose
+// identical exports staged nothing. The push must be retried, and its failure
+// still surfaced, so syncJsonlGitBackup keeps the failure counter and its alert.
+func TestCommitAndPushJsonlBackup_RetriesUnpushedCommitWhenNothingStaged(t *testing.T) {
+	t.Parallel()
+	d, f := backupTestDaemon(t)
+	root := t.TempDir()
+
+	// origin carries an unrelated history, so every push is rejected
+	// non-fast-forward — the shape of "commit made, push fails".
+	remote := filepath.Join(root, "origin.git")
+	f.InitBare(t, remote)
+	f.Commit(t, remote, "main", "remote-only", map[string]string{"remote.txt": "x\n"})
+
+	gitRepo := filepath.Join(root, "repo")
+	if err := os.MkdirAll(gitRepo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepo(t, d, gitRepo)
+	f.AddRemote(t, gitRepo, "origin", remote)
+	if err := os.MkdirAll(filepath.Join(gitRepo, "testdb"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeNLines(t, filepath.Join(gitRepo, "testdb", "issues.jsonl"), 5)
+
+	// Tick 1: commits locally, fails to push.
+	if err := d.commitAndPushJsonlBackup(gitRepo, []string{"testdb"}, map[string]int{"testdb": 5}, nil); err == nil {
+		t.Fatal("tick 1: expected the push to fail, got nil")
+	}
+	subjects := backupSubjects(t, d, gitRepo)
+	if len(subjects) != 2 || !strings.HasPrefix(subjects[0], "backup ") {
+		t.Fatalf("tick 1 subjects = %q, want an init commit and one backup commit", subjects)
+	}
+
+	// Tick 2: identical exports, nothing staged. The unpushed commit must be
+	// retried — reported as a failure, not a success.
+	if err := d.commitAndPushJsonlBackup(gitRepo, []string{"testdb"}, map[string]int{"testdb": 5}, nil); err == nil {
+		t.Fatal("tick 2: an unpushed commit must not be reported as success")
+	}
+	if again := backupSubjects(t, d, gitRepo); len(again) != len(subjects) {
+		t.Errorf("tick 2 added a commit: %q", again)
+	}
+}
+
+// TestCommitAndPushJsonlBackup_PushesUnpushedCommitWhenNothingStaged is the
+// other half of gt-fxm2i: once origin accepts the previously unpushed commit,
+// the push-less tick reports success, which is what lets syncJsonlGitBackup
+// reset its failure counter and clear the push alert.
+func TestCommitAndPushJsonlBackup_PushesUnpushedCommitWhenNothingStaged(t *testing.T) {
+	t.Parallel()
+	d, f := backupTestDaemon(t)
+	root := t.TempDir()
+	remote := filepath.Join(root, "origin.git")
+	f.InitBare(t, remote)
+	f.Commit(t, remote, "main", "seed", map[string]string{"README": "init\n"})
+	gitRepo := filepath.Join(root, "repo")
+	f.Clone(t, remote, gitRepo)
+	if err := os.MkdirAll(filepath.Join(gitRepo, "testdb"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// A backup commit that never reached origin — the state a failed push
+	// leaves behind.
+	commitBackup(t, d, gitRepo, "testdb", 5)
+	head, err := f.Open(gitRepo).Rev("HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tip := f.Ref(remote, "refs/heads/main"); tip == head {
+		t.Fatal("fixture: the backup commit should not be on origin yet")
+	}
+
+	if err := d.commitAndPushJsonlBackup(gitRepo, []string{"testdb"}, map[string]int{"testdb": 5}, nil); err != nil {
+		t.Fatalf("tick with an unpushed commit: %v", err)
+	}
+	if tip := f.Ref(remote, "refs/heads/main"); tip != head {
+		t.Errorf("origin main = %s, want the previously unpushed commit %s", tip, head)
+	}
+}
+
+// TestSyncJsonlGitBackup_AllExportsFailedEscalates is the gt-fxm2i regression
+// for the export phase: when every database fails to export, the cycle must
+// escalate, not merely log — matching the init and no-databases paths.
+func TestSyncJsonlGitBackup_AllExportsFailedEscalates(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, ".dolt-data"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	rec := notifyfake.New()
+	d := &Daemon{
+		logger:   log.New(&logs, "", 0),
+		config:   &Config{TownRoot: townRoot},
+		notifier: rec,
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+			JsonlGitBackup: &JsonlGitBackupConfig{Enabled: true, Databases: []string{"hq", "gt"}},
+		}},
+	}
+	useGitfake(t, d)
+	d.jsonlExportFn = func(db, gitRepo, dataDir string, scrub bool) (int, error) {
+		return 0, errors.New("dolt: database not found")
+	}
+
+	d.syncJsonlGitBackup()
+
+	got := rec.Escalations()
+	if len(got) != 1 || got[0].Escalation.Fingerprint != alertKeyJSONLExport {
+		t.Fatalf("escalations = %+v, want one under %s", got, alertKeyJSONLExport)
+	}
+	reason := got[0].Escalation.Reason
+	if !strings.Contains(reason, "hq") || !strings.Contains(reason, "gt") {
+		t.Errorf("escalation reason = %q, want both failed databases named", reason)
 	}
 }
 
