@@ -554,14 +554,17 @@ func ListEscalations(c Client) ([]*Issue, error) {
 // and the wisps matching opts, in one slice.
 //
 // A *Beads answers it in one bd call, because bd's --include-infra returns the
-// persistent issues and the wisps together. Any other Client (beadsfake) keeps
-// one plane per List, so the wisp read is a second call merged here — the same
-// shape ListMergeRequests uses. A failed wisp read degrades to the issues
-// alone.
+// persistent issues and the wisps together — that one call is the wisp read.
+// Any other Client (beadsfake) keeps one plane per List, so the wisp read is a
+// second call merged here — the same shape ListMergeRequests uses.
+//
+// Either read failing is an error wrapping ErrUnavailable, never the issues
+// alone: every escalation a seat raises is a wisp (gt-fcsf), and the issues
+// table beside an unreadable wisp table is not the answer (gt-oam1d).
 func listEscalationsWhere(c Client, opts ListOptions) ([]*Issue, error) {
 	issues, err := c.List(opts)
 	if err != nil {
-		return nil, err
+		return nil, markUnavailable(err)
 	}
 	if _, ok := c.(*Beads); ok {
 		return issues, nil
@@ -569,7 +572,10 @@ func listEscalationsWhere(c Client, opts ListOptions) ([]*Issue, error) {
 
 	wispOpts := opts
 	wispOpts.Ephemeral = true
-	wisps, _ := c.List(wispOpts)
+	wisps, err := c.List(wispOpts)
+	if err != nil {
+		return nil, markUnavailable(err)
+	}
 
 	seen := make(map[string]bool, len(issues))
 	for _, issue := range issues {

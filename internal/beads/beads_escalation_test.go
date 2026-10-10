@@ -1,10 +1,12 @@
 package beads
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFormatEscalationDescription(t *testing.T) {
@@ -681,5 +683,113 @@ exit 0
 	// Sanity: stdin must contain newlines (it's the multi-line description).
 	if !strings.Contains(stdin, "\n") {
 		t.Errorf("expected stdin to be multi-line, got %q", stdin)
+	}
+}
+
+// twoPlaneEscalations is a Client whose two planes are two bd calls, the shape
+// every non-*Beads store has (beadsfake keeps one plane per List). A real
+// *Beads answers both planes in one --include-infra call, so the degraded wisp
+// read listEscalationsWhere must refuse is only reachable behind a Client like
+// this one, over two recorder-backed *Beads.
+type twoPlaneEscalations struct {
+	*Beads
+	wisp *Beads
+}
+
+var _ Client = (*twoPlaneEscalations)(nil)
+
+func (t *twoPlaneEscalations) List(opts ListOptions) ([]*Issue, error) {
+	if opts.Ephemeral {
+		return t.wisp.List(opts)
+	}
+	return t.Beads.List(opts)
+}
+
+// issuesTableEscalationPayload is one open escalation in the issues table, so
+// an implementation that degrades to that plane answers with a non-empty list.
+const issuesTableEscalationPayload = `[{"id":"hq-issue1","title":"escalation in the issues table","status":"open","priority":2,"labels":["gt:escalation","severity:high"]}]`
+
+// twoPlaneWithFailedWisps returns the Client above with a readable issues plane
+// and a wisp plane answered by failure.
+func twoPlaneWithFailedWisps(t *testing.T, failure reply) *twoPlaneEscalations {
+	t.Helper()
+	issues := newRecordedBeads(t.TempDir(), newRecorder(func([]string) reply {
+		return reply{stdout: issuesTableEscalationPayload}
+	}))
+	wisps := newRecordedBeads(t.TempDir(), newRecorder(func([]string) reply {
+		return failure
+	}))
+	return &twoPlaneEscalations{Beads: issues, wisp: wisps}
+}
+
+// TestListEscalationsReturnsWispReadError covers acceptance 1: a failed wisps
+// read is an error, not the issues-table escalations alone. Both failure modes
+// are "bd could not answer" — a process failure, and a --json call that printed
+// prose (B5-05) — and both must surface as ErrUnavailable rather than as a
+// workspace with no open escalations.
+func TestListEscalationsReturnsWispReadError(t *testing.T) {
+	t.Parallel()
+	cases := map[string]reply{
+		"bd query failed":        {stderr: "connection refused", err: exitError{code: 1}},
+		"bd query printed prose": {stdout: "No wisps found.\n"},
+	}
+	for name, failure := range cases {
+		failure := failure
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			issues, err := ListEscalations(twoPlaneWithFailedWisps(t, failure))
+			if err == nil {
+				t.Fatalf("ListEscalations() = %v, nil error; an unreadable wisps table must not read as the issues alone", issues)
+			}
+			if !errors.Is(err, ErrUnavailable) {
+				t.Fatalf("ListEscalations() error = %v, want ErrUnavailable in its chain", err)
+			}
+			if len(issues) != 0 {
+				t.Fatalf("ListEscalations() returned %v beside the error, want none", issues)
+			}
+		})
+	}
+}
+
+// TestListStaleEscalationsReturnsWispReadError covers acceptance 3 for the
+// mutating caller: the re-escalation flow must not read an unreadable wisp
+// plane as "nothing is stale", or a live alert stops being re-escalated for as
+// long as the store is unreadable.
+func TestListStaleEscalationsReturnsWispReadError(t *testing.T) {
+	t.Parallel()
+	stale, err := ListStaleEscalations(twoPlaneWithFailedWisps(t, reply{stderr: "connection refused", err: exitError{code: 1}}), time.Hour)
+	if err == nil {
+		t.Fatalf("ListStaleEscalations() = %v, nil error; a failed wisps read must not read as no stale escalations", stale)
+	}
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("ListStaleEscalations() error = %v, want ErrUnavailable in its chain", err)
+	}
+}
+
+// TestListEscalationsReadFailureIsUnavailable covers the *Beads plane: bd's
+// --include-infra answers the issues and the wisps in the one call that client
+// makes, so a failed read there is the failed wisps read too. bd's machine-mode
+// failure already carries ErrUnavailable; an answer that is not JSON at all
+// (RequireJSON's error) is marked here, because it answers nothing about the
+// wisps either.
+func TestListEscalationsReadFailureIsUnavailable(t *testing.T) {
+	t.Parallel()
+	cases := map[string]reply{
+		"bd list failed":        {stderr: "connection refused", err: exitError{code: 1}},
+		"bd list printed prose": {stdout: "hq-wisp1  [open] Dolt: server unreachable\n"},
+	}
+	for name, failure := range cases {
+		failure := failure
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			b := newRecordedBeads(t.TempDir(), newRecorder(func([]string) reply { return failure }))
+			issues, err := ListEscalations(b)
+			if err == nil {
+				t.Fatalf("ListEscalations() = %v, nil error", issues)
+			}
+			if !errors.Is(err, ErrUnavailable) {
+				t.Fatalf("ListEscalations() error = %v, want ErrUnavailable in its chain", err)
+			}
+		})
 	}
 }

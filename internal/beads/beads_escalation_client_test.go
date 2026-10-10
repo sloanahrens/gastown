@@ -336,3 +336,34 @@ func TestEscalationHelpersOverClientRefuseFlagLikeTitles(t *testing.T) {
 		t.Fatal("CreateEscalationBead accepted a flag-like title")
 	}
 }
+
+// TestEscalationHelpersOverClientKeepsIssuesWhenWispsAreEmpty covers acceptance
+// 2 of gt-oam1d: a wisps plane with nothing in it is an answered read, not a
+// failed one, so the issues-table escalations still come back. Only a *failed*
+// wisp read is ErrUnavailable.
+func TestEscalationHelpersOverClientKeepsIssuesWhenWispsAreEmpty(t *testing.T) {
+	t.Parallel()
+	f := beadsfake.New()
+
+	issue, err := f.Create(beads.CreateOptions{
+		Title: "durable escalation",
+		Description: beads.FormatEscalationDescription("durable escalation", &beads.EscalationFields{
+			Severity:    "high",
+			Reason:      "raised in the issues table",
+			EscalatedBy: "daemon",
+		}),
+		Labels:   []string{"gt:escalation", "severity:high"},
+		Priority: 2,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	open, err := beads.ListEscalations(f)
+	if err != nil {
+		t.Fatalf("ListEscalations with an empty wisps plane: %v", err)
+	}
+	if len(open) != 1 || open[0].ID != issue.ID {
+		t.Errorf("ListEscalations = %v, want the issues-table escalation %s", escalationIDs(open), issue.ID)
+	}
+}
