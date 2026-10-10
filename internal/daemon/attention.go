@@ -1099,13 +1099,13 @@ func (s *attentionSources) collectPolecatStall(ctx context.Context) ([]attention
 
 // collectRiskPaths raises risk:<bead>:<head12> for each landing in the last
 // attentionRiskPathWindow whose record names a risk path, unless the work
-// bead's notes carry an "OVERSEER REVIEW <that head> PASS|FAIL" line
-// (land.HasOverseerReviewNote). It is the label land.Land writes as
+// bead's notes carry an "OVERSEER REVIEW <that head> PASS|FAIL" line, or a
+// WAIVED or AUDITED line with its reason (land.HasOverseerReviewNote). It is the label land.Land writes as
 // gt:overseer-review-wanted made visible as something to do: a landed bead is
 // closed, and the review it asks for comes after, so this item outlives the
 // close.
 //
-// Both verdicts clear the item: a FAIL says a human looked and is filing the
+// Every verdict clears the item: a FAIL says a human looked and is filing the
 // follow-up, which is not the queue's to hold (gt-vsct7.4).
 //
 // The notes read is cached per rig and bead for the tick, so a bead landed

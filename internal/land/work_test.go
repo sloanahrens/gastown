@@ -142,6 +142,13 @@ func TestHasOverseerReviewNote(t *testing.T) {
 	}{
 		{"PASS of this head", "x\n" + OverseerReviewMarker + " " + head + " PASS\n", true},
 		{"FAIL of this head", OverseerReviewMarker + " " + head + " FAIL", true},
+		{"WAIVED with a reason", OverseerReviewMarker + " " + head + " WAIVED: docs-only change", true},
+		{"AUDITED with a reason", "x\n" + OverseerReviewMarker + " " + head + " AUDITED: file-level audit", true},
+		{"WAIVED without a reason", OverseerReviewMarker + " " + head + " WAIVED", false},
+		{"WAIVED with an empty reason", OverseerReviewMarker + " " + head + " WAIVED:   ", false},
+		{"AUDITED without a colon", OverseerReviewMarker + " " + head + " AUDITED looked fine", false},
+		{"WAIVED of another head", OverseerReviewMarker + " " + other + " WAIVED: docs-only change", false},
+		{"verdict extended by a word", OverseerReviewMarker + " " + head + " WAIVEDX: why", false},
 		{"the om-bypass marker is not a review", OverseerReviewedMarker + " " + head, false},
 		{"review of another head", OverseerReviewMarker + " " + other + " PASS", false},
 		{"short sha", OverseerReviewMarker + " " + head[:8] + " PASS", false},
