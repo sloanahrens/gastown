@@ -423,8 +423,10 @@ func (h *Hub) pollOM() {
 
 // pollModels fills the header strip. The models come from the reader, but the
 // seats are the hub's own polecat list: the seats pane and the strip must count
-// the same polecats, and the one place both can read is here. Parked rigs are
-// stood down on purpose, so their polecats hold no seat.
+// the same polecats, and the one place both can read is here. A seat is held by
+// a polecat the dispatcher counts toward capacity (CountsTowardCapacity), so the
+// town's idle done polecats do not inflate the strip. Parked rigs are stood down
+// on purpose, so their polecats hold no seat either.
 func (h *Hub) pollModels() {
 	m := h.cfg.Models()
 	if m == nil {
@@ -435,7 +437,7 @@ func (h *Hub) pollModels() {
 	if h.state.Summary != nil {
 		live := 0
 		for _, p := range h.polecats {
-			if !p.RigParked {
+			if p.CountsTowardCapacity && !p.RigParked {
 				live++
 			}
 		}
