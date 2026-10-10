@@ -1401,6 +1401,12 @@ type tailDeploys struct {
 	rigOf      func(bead string) string
 	staging    tailShipStaging
 
+	// horizon is how far back the table this tracker feeds can still show a
+	// landing; the tracker reads the daemon log at least that far, so every
+	// landing the table draws has a record. Zero leaves the run's own window
+	// as the whole of the read, which is what gt tail's stream wants.
+	horizon time.Duration
+
 	mu      sync.Mutex
 	records map[string]*tailDeployRecord
 	order   []string // first-seen order, which for landed beads is landing order
@@ -1423,6 +1429,13 @@ func newTailDeploys(now func() time.Time, ancestor tailAncestry, from time.Time)
 // ships every landing by restart, which is what gt tail and the tests want.
 func (t *tailDeploys) setShipDefinitions(restartRig string, rigOf func(bead string) string, staging tailShipStaging) {
 	t.restartRig, t.rigOf, t.staging = restartRig, rigOf, staging
+}
+
+// setHorizon gives the tracker how far back the table it feeds can still show
+// a landing. A tracker nobody gives one reads no further back than the run's
+// own window, which is what gt tail's stream — bounded by --since — wants.
+func (t *tailDeploys) setHorizon(horizon time.Duration) {
+	t.horizon = horizon
 }
 
 // inRestartRig reports whether a bead's landings ship when the daemon restart
@@ -1461,12 +1474,21 @@ func tailRestartRig(townRoot string) string {
 }
 
 // logCutoff is how far back the daemon log is read to feed the tracker: the
-// run's cutoff, or an hour back when that is shorter.
+// run's cutoff, an hour back when that is shorter, or the tracker's own
+// horizon when that reaches further back than either. The read is what builds
+// a landing's record, so a landing the read does not reach reads as a dash
+// however it shipped (gt-b5hw2).
 func (t *tailDeploys) logCutoff(runCutoff time.Time) time.Time {
-	if want := t.now().Add(-tailDeployWindow); want.Before(runCutoff) {
-		return want
+	cut := runCutoff
+	if want := t.now().Add(-tailDeployWindow); want.Before(cut) {
+		cut = want
 	}
-	return runCutoff
+	if t.horizon > 0 {
+		if want := t.now().Add(-t.horizon); want.Before(cut) {
+			cut = want
+		}
+	}
+	return cut
 }
 
 func (t *tailDeploys) record(bead string) *tailDeployRecord {

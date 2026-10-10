@@ -200,7 +200,11 @@ func dashboardCloudChecksPath(townRoot string) string {
 func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string) (*dashboard.Hub, error) {
 	beadReads := openTailBeads(townRoot)
 	rigOfBead := landingRig(townRoot)
-	deploys := newTailDeploys(time.Now, tailGitAncestry(townRoot), cutoff)
+	// The deploy block reads the same repos through the same viewer client as
+	// the Forgejo panel, so the two are wired together from one token read;
+	// the staging ship reader dates the app rigs' landings off the same runs.
+	forgejoFeed, forgejoDeploys, stagingShip := dashboardForgejoReaders(townRoot, dashboardForgejoRepos)
+	deploys := dashboardDeploys(townRoot, rigOfBead, cutoff, stagingShip)
 	sources, preface, err := buildTailSources(tailOptions{
 		townRoot: townRoot, kinds: allTailKinds(), cutoff: cutoff, loc: loc, now: time.Now,
 		rigNames: knownRigNames, journalFor: openTailJournal, beads: beadReads, deploys: deploys,
@@ -245,11 +249,6 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	reports := dashboard.NewReportsReader(dashboardReportsDir(townRoot))
 	questions := newDashQuestionsReader(townRoot)
 	loads := newDashLoads(townRoot, time.Now)
-	// The deploy block reads the same repos through the same viewer client as
-	// the Forgejo panel, so the two are wired together from one token read;
-	// the staging ship reader dates the app rigs' landings off the same runs.
-	forgejoFeed, forgejoDeploys, stagingShip := dashboardForgejoReaders(townRoot, dashboardForgejoRepos)
-	deploys.setShipDefinitions(tailRestartRig(townRoot), rigOfBead, stagingShip)
 	return dashboard.NewHub(dashboard.Config{
 		Feed:       feed,
 		Summary:    func() dashboard.Summary { return dashboardSummary(townRoot, deploys, recs, seatCache) },
@@ -287,6 +286,20 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		},
 		LoadSample: loads.append,
 	}), nil
+}
+
+// dashboardDeploys builds the deploy tracker the Landings pane reads: the
+// town's ship definitions, and the horizon the pane's table needs.
+//
+// The table spans a whole day of landings while the feed's own window is the
+// --since it was started with. Without the horizon a row older than that
+// window has no record, so its Ship cell draws a dash however it shipped
+// (gt-b5hw2).
+func dashboardDeploys(townRoot string, rigOf func(bead string) string, cutoff time.Time, staging tailShipStaging) *tailDeploys {
+	deploys := newTailDeploys(time.Now, tailGitAncestry(townRoot), cutoff)
+	deploys.setShipDefinitions(tailRestartRig(townRoot), rigOf, staging)
+	deploys.setHorizon(trendHours * time.Hour)
+	return deploys
 }
 
 // dashboardEntry renders a tail line the way the stream's default view does,
