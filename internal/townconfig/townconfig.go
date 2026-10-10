@@ -187,11 +187,10 @@ func (t *Town) loadRigs() error {
 func (t *Town) loadRigSettings() error {
 	var errs []error
 	for _, name := range sortedKeys(t.rigs) {
-		root := filepath.Join(t.root, name)
-		if override := t.rigs[name].LocalRepo; override != "" {
-			root = override
-		}
-		path := config.RigSettingsPath(root)
+		// The rig directory under the town root, never local_repo: that is a
+		// reference clone for sharing git objects and holds no settings the
+		// town reads (gt-4b0i1).
+		path := config.RigSettingsPath(filepath.Join(t.root, name))
 		if _, err := config.LoadRigSettings(path); err != nil && !errors.Is(err, config.ErrNotFound) {
 			errs = append(errs, oneLine(path, err))
 		}
