@@ -27,6 +27,16 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 		{"while read re-running gt done", "while read -r x; do gt done; done < /tmp/beads", true},
 		{"nested loop", "for i in 1 2; do for j in a b; do gt done; done; done", true},
 
+		// A keyword that follows then/do/else or an opening brace or paren
+		// starts a loop as surely as one that starts the line (deep-review
+		// gt-dilqk).
+		{"loop behind then", "if true; then for i in 1 2 3; do gt done && break; sleep 30; done; fi", true},
+		{"loop in a background subshell", "(while true; do gt slot status; sleep 5; done) &", true},
+		{"loop in a brace group", "{ until gt done; do sleep 5; done; }", true},
+		{"xargs behind then", "if true; then xargs -I{} gt done; fi", true},
+		{"watch in a subshell", "(watch gt slot status)", true},
+		{"loop behind else", "if false; then :; else while true; do gt done; done; fi", true},
+
 		// Repeat wrappers, whose payload tokenizes as one quoted token.
 		{"xargs gt done", "seq 1 300 | xargs -I{} bash -c 'gt done'", true},
 		{"xargs gt slot", "seq 1 300 | xargs -I{} gt slot status", true},
@@ -97,8 +107,8 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 			}
 		})
 	}
-	if blocked != 20 {
-		t.Errorf("blocked %d of %d cases, want exactly 20", blocked, len(tests))
+	if blocked != 26 {
+		t.Errorf("blocked %d of %d cases, want exactly 26", blocked, len(tests))
 	}
 }
 

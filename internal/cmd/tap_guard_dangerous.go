@@ -811,11 +811,46 @@ func spaceOutShellOperators(command string) string {
 			paren = string(r)
 		}
 		switch {
+		case sc.quote == '$':
+			// Inside $'...' a backslash escapes the next rune, including the
+			// quote, so \' does not end the string. shlex has no such quote,
+			// so the string is re-emitted double-quoted with the escapes
+			// shlex does understand: a quote hidden in it can no longer swallow
+			// the commands behind it (deep-review gt-dilqk).
+			switch {
+			case r == '\\' && i+1 < len(runes):
+				next := runes[i+1]
+				i++
+				switch next {
+				case '\'':
+					b.WriteRune('\'')
+				case '"':
+					b.WriteString(`\"`)
+				case '\\':
+					b.WriteString(`\\`)
+				default:
+					b.WriteString(`\\`)
+					b.WriteRune(next)
+				}
+			case r == '\\':
+				b.WriteString(`\\`)
+			case r == '\'':
+				b.WriteRune('"')
+				scopes[len(scopes)-1].quote = 0
+			case r == '"':
+				b.WriteString(`\"`)
+			default:
+				b.WriteRune(r)
+			}
 		case sc.quote == '\'':
 			if r == '\'' {
 				scopes[len(scopes)-1].quote = 0
 			}
 			emit(r)
+		case r == '$' && sc.quote == 0 && !sc.escapeForShlex && i+1 < len(runes) && runes[i+1] == '\'':
+			b.WriteRune('"')
+			scopes[len(scopes)-1].quote = '$'
+			i++
 		case r == '$' && sc.quote != '\'' && i+1 < len(runes) && runes[i+1] == '(':
 			b.WriteString("$(")
 			i++
@@ -950,7 +985,7 @@ func startsShellWord(runes []rune, prevIdx int, prevEscaped bool) bool {
 // top-level command line, or the body of a command substitution, which the
 // shell re-parses as a command with quoting of its own (gt-n8ir).
 type shellQuoteScope struct {
-	quote rune // the quote open in this scope: 0, '\'' or '"'
+	quote rune // the quote open in this scope: 0, '\'', '"' or '$' (an ANSI-C $'...' string)
 	subst bool // opened by "$(" — closed by the ")" matching its own depth
 	depth int  // unmatched "(" seen inside a subst body
 	tick  bool // opened by a backtick — closed by the next backtick
@@ -2156,12 +2191,37 @@ func polecatMainPushTargetsDefault(arg string) bool {
 	if _, after, ok := strings.Cut(arg, ":"); ok {
 		dst = after
 	}
-	return polecatMainPushBranches[strings.TrimPrefix(dst, "refs/heads/")]
+	// git resolves "heads/main" and "refs/heads/main" to the same branch.
+	dst = strings.TrimPrefix(strings.TrimPrefix(dst, "refs/"), "heads/")
+	return polecatMainPushBranches[dst]
 }
 
 // gitResetRemotePrefixes are token prefixes that name a remote-tracking ref:
 // "origin/main", "upstream/main", and the long form of either.
 var gitResetRemotePrefixes = []string{"origin/", "upstream/", "refs/remotes/"}
+
+// gitResetNamesRemote reports whether one lowercased `git reset` argument names
+// a remote-tracking commit: a remote-tracking ref, a bare remote name (which
+// git reads as <remote>/HEAD), FETCH_HEAD, which a fetch points at the remote's
+// tip, or an upstream-of shorthand (@{u}, @{upstream}, @{push}, alone or after
+// a branch name).
+func gitResetNamesRemote(arg string) bool {
+	for _, prefix := range gitResetRemotePrefixes {
+		if strings.HasPrefix(arg, prefix) {
+			return true
+		}
+	}
+	switch arg {
+	case "origin", "upstream", "fetch_head":
+		return true
+	}
+	for _, suffix := range []string{"@{u}", "@{upstream}", "@{push}"} {
+		if strings.HasSuffix(arg, suffix) {
+			return true
+		}
+	}
+	return false
+}
 
 // matchesDangerousGitReset blocks `git reset <remote-tracking-ref>` in any of
 // its modes — explicit --soft/--mixed/--hard/--keep, or the implicit --mixed of
@@ -2194,11 +2254,9 @@ func matchesDangerousGitReset(tokens []string) (reason, alternative string) {
 			if f == "--" {
 				break
 			}
-			for _, prefix := range gitResetRemotePrefixes {
-				if strings.HasPrefix(f, prefix) {
-					return "Reset onto a remote-tracking ref drops merged work",
-						"Alternative: `git rebase " + f + "` — rebase your CHANGES onto the remote ref; never reset your tree onto it."
-				}
+			if gitResetNamesRemote(f) {
+				return "Reset onto a remote-tracking ref drops merged work",
+					"Alternative: `git rebase " + f + "` — rebase your CHANGES onto the remote ref; never reset your tree onto it."
 			}
 		}
 	}
