@@ -226,7 +226,10 @@ type OMReview struct {
 
 // OM is the reviewer's record, read from the landings files and the daemon log.
 type OM struct {
-	Backend   string         `json:"backend,omitempty"`
+	// Model is what the reviewer runs, not the command it runs: the model its
+	// backend configures ("sonnet"), or, for a backend that configures none,
+	// the backend's own name. The raw command line is never what the page shows.
+	Model     string         `json:"model,omitempty"`
 	Depth     string         `json:"depth,omitempty"`
 	Threshold *float64       `json:"threshold,omitempty"`
 	TimeoutS  int            `json:"timeout_s,omitempty"`
@@ -238,6 +241,35 @@ type OM struct {
 	Routes    map[string]int `json:"routes"`
 	RiskPaths int            `json:"risk_paths"` // landings that touched risk paths
 	Recent    []OMReview     `json:"recent"`
+}
+
+// Models is the header strip: what the town runs its work on, read from the
+// configs the town already keeps. Every field re-reads on each poll, so a mode
+// switched in settings shows on the page within one. A config that cannot be
+// read leaves its field empty and the page says unknown, because a town whose
+// model is unreadable is not a town running nothing.
+type Models struct {
+	// Polecat is the model the polecat role resolves to (role_agents.polecat),
+	// empty when the settings cannot be read or name none.
+	Polecat string `json:"polecat,omitempty"`
+	// SeatCap is the pool's cap on live polecats (polecat_pool.max_overflow).
+	// Zero is a pool that declares none, which is shown as the live count
+	// alone rather than as a cap of zero.
+	SeatCap int `json:"seat_cap,omitempty"`
+	// OM is the model the reviewer runs, shortened to the name a person uses
+	// for it, empty when the reviewer's config cannot be read or names none.
+	OM string `json:"om,omitempty"`
+	// Seats is the live polecat count against SeatCap. It is nil until the
+	// seats have been read once: a strip that has not read them says so
+	// instead of showing an empty town.
+	Seats *ModelsSeats `json:"seats,omitempty"`
+}
+
+// ModelsSeats is the pool's occupancy: the polecats holding a seat, and the
+// cap they are held against.
+type ModelsSeats struct {
+	Live int `json:"live"`
+	Cap  int `json:"cap,omitempty"`
 }
 
 // SkippedBead is a bead the dispatcher considered and did not sling, with the
@@ -443,6 +475,9 @@ type State struct {
 	Spend     json.RawMessage `json:"spend,omitempty"`
 	OM        *OM             `json:"om,omitempty"`
 	TierSweep *TierSweep      `json:"tiersweep,omitempty"`
+	// Models is the header strip: the polecat model, the pool's seats against
+	// its cap, and the reviewer's model. It is nil until the reader reports.
+	Models *Models `json:"models,omitempty"`
 	// Forgejo is the viewer's recent-activity feed, oldest first. It is nil for
 	// a town with no viewer token, and until the reader first reports.
 	Forgejo  *ForgejoFeed `json:"forgejo,omitempty"`
@@ -496,6 +531,8 @@ type Config struct {
 	Escalation func() *Escalations
 	// Dispatch reads the spec dispatcher's last tick from the daemon log.
 	Dispatch func() *Dispatch
+	// Models reads the header strip's models from the configs the town keeps.
+	Models func() *Models
 	// Queue reads the work queue lists; Bead reads one bead's text on request.
 	Queue func() *Queue
 	Bead  func(rig, id string) (*BeadDetail, error)
@@ -526,6 +563,7 @@ type Config struct {
 	QuestionsEvery  time.Duration
 	EscalationEvery time.Duration
 	DispatchEvery   time.Duration
+	ModelsEvery     time.Duration
 	QueueEvery      time.Duration
 	TrendEvery      time.Duration
 
@@ -564,6 +602,10 @@ func (c *Config) defaults() {
 	def(&c.QuestionsEvery, 60*time.Second)
 	def(&c.EscalationEvery, 60*time.Second)
 	def(&c.DispatchEvery, 10*time.Second)
+	// The strip's two configs are files an operator edits by hand, so it reads
+	// them on the same minute the other slow readers use: a mode switched in
+	// settings shows within one poll, and a poll is a page's worth of slack.
+	def(&c.ModelsEvery, 60*time.Second)
 	def(&c.QueueEvery, 60*time.Second)
 	def(&c.TrendEvery, 60*time.Second)
 	if c.RingSize <= 0 {

@@ -17,6 +17,7 @@ h1{font-size:15px;margin:0;letter-spacing:.08em;text-transform:uppercase;color:v
 .pill{padding:3px 10px;border-radius:999px;font-weight:700;font-size:12px;border:1px solid currentColor}
 .pill.green{color:var(--green)}.pill.degraded{color:var(--amber)}.pill.red{color:var(--red)}.pill.unknown{color:var(--dim)}
 #healthline{color:var(--dim);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#models{color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #conn{font-size:12px;color:var(--dim)}
 #conn.on::before{content:"● ";color:var(--green)}#conn.off::before{content:"● ";color:var(--red)}
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:14px 0}
@@ -199,6 +200,7 @@ a.drow:hover{background:#19212b}
   <h1>Gas Town</h1>
   <span id="verdict" class="pill unknown">UNKNOWN</span>
   <span id="healthline">waiting for the town…</span>
+  <span id="models"></span>
   <span id="conn" class="off">connecting</span>
   <button id="alertsctl" type="button">alerts: off</button>
 </header>
@@ -305,6 +307,19 @@ function renderHealth(h) {
   p.textContent = v.toUpperCase() + (causes.length ? " · " + causeText(causes[0]) : "");
   p.title = causes.map(causeText).join("\n");
   $("healthline").textContent = h && h.line ? h.line : "no health report";
+}
+
+// renderModels is the header strip: what the town runs its work on. Every
+// model comes from a config file the server re-reads on each poll, so a mode
+// switched in settings shows here within one; a field the server could not
+// read says unknown rather than leaving the strip looking like a town running
+// nothing. Seats are the polecats holding one — the pool's live polecats —
+// against the cap the pool declares; a pool that declares none shows the
+// count alone, because a cap of zero is not a cap.
+function renderModels(s) {
+  const m = s.models || {};
+  const seats = m.seats ? (m.seats.cap > 0 ? m.seats.live + "/" + m.seats.cap : String(m.seats.live)) : "–";
+  $("models").textContent = "polecats " + (m.polecat || "unknown") + " · seats " + seats + " · om " + (m.om || "unknown");
 }
 
 function renderTiles(s) {
@@ -1574,7 +1589,7 @@ function renderOM(s) {
     $("omnote").textContent = "";
     return;
   }
-  $("omnote").textContent = readCaption(r, [om.backend, om.depth, om.threshold != null ? "threshold " + om.threshold : null, om.timeout_s ? om.timeout_s + "s timeout" : null, r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null]);
+  $("omnote").textContent = readCaption(r, [om.model, om.depth, om.threshold != null ? "threshold " + om.threshold : null, om.timeout_s ? om.timeout_s + "s timeout" : null, r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null]);
 
   const t = el("table");
   const hr = el("tr");
@@ -2031,7 +2046,7 @@ function renderQueue(s, force) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderTiles(state); renderQuestions(state); renderEscalations(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderReports(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
+function renderAll() { if (!state) return; renderHealth(state.health); renderModels(state); renderTiles(state); renderQuestions(state); renderEscalations(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderReports(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));

@@ -235,6 +235,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	recs := newDashLandings(townRoot)
 	seatCache := newDashSeatCache()
 	om := newOMReader(townRoot, recs)
+	models := newModelsReader(townRoot)
 	tierSweeps := newTierSweepReader(townRoot)
 	escalations := newDashEscalationReader(townRoot)
 	backoff := newDashBackoff(townRoot)
@@ -265,6 +266,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Questions:  func() *dashboard.Questions { return questions.read(time.Now()) },
 		Escalation: func() *dashboard.Escalations { return escalations.read(time.Now()) },
 		Dispatch:   om.dispatch,
+		Models:     models.read,
 		Queue:      func() *dashboard.Queue { return queue.read(time.Now()) },
 		Bead:       queue.detail,
 		RigTheme:   newDashRigThemes(townRoot),

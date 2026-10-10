@@ -184,7 +184,7 @@ func omIf(ok bool) *OM {
 	if !ok {
 		return nil
 	}
-	return &OM{Backend: "claude"}
+	return &OM{Model: "claude"}
 }
 
 func queueIf(ok bool, now time.Time) *Queue {
