@@ -341,7 +341,17 @@ func (d *Daemon) tierSweepPromoteWith(rigName string, p *promote.Promoter, sha s
 		d.logger.Printf("tier_sweep: %s: reading the main state: %v", rigName, err)
 		return
 	}
-	st.State = p.Promote(st.State, sha)
+	promoted := p.Promote(st.State, sha)
+	// The push above runs for seconds against the network, and the landing
+	// worker writes its verdict into this same record meanwhile: re-read and
+	// carry over only the promotion State, so the verdict that landed during
+	// the push is kept rather than overwritten with the copy from before it
+	// (gt-8iq4h).
+	if st, err = state.Load(); err != nil {
+		d.logger.Printf("tier_sweep: %s: re-reading the main state: %v", rigName, err)
+		return
+	}
+	st.State = promoted
 	if err := state.Save(st); err != nil {
 		d.logger.Printf("tier_sweep: %s: saving the promotion state: %v", rigName, err)
 	}
