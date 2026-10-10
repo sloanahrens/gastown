@@ -80,12 +80,18 @@ with `gt prime --step 8 --formula mol-polecat-work`.
 **Pre-flight:** the digest comment and the `cursor:` ledger line are on
 {{issue}} (`bd show {{issue}}`); a quiet run needs only its `quiet:` note.
 
-**Run gt done once:**
+**Close the run bead, then run gt done once.** This holds on a quiet day and
+on a normal run alike. `gt done --status DEFERRED` keeps a non-workflow bead
+hooked, and the patrol reads the retired session on a hooked bead as a crash
+and restarts the seat. The close is your last action before `gt done`:
 ```bash
+gt bead close {{issue}} --reason="no-changes: report-only deep review, digest and cursor posted"
 gt done --status DEFERRED
 ```
+A failed plan took the `ESCALATED` exit
+in the work step and does not come here.
 
-**Exit criteria:** `gt done --status DEFERRED` exited 0 and the session ended.
+**Exit criteria:** {{issue}} is closed, `gt done --status DEFERRED` exited 0 and the session ended.
 """
 
 [vars]
