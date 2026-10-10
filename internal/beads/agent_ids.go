@@ -134,16 +134,22 @@ func AgentBeadIDFor(role, rig, name, townRoot string) string {
 // Returns rig, role, name, and whether parsing succeeded.
 // For town-level agents, rig will be empty.
 // For singletons, name will be empty.
-// Accepts any valid prefix (e.g., "gt-", "bd-"), not just "gt-".
+// Accepts any valid prefix (e.g., "gt-", "bd-", "mbca-"), not just "gt-".
+//
+// The prefix has no upper bound on length: a rig may be registered with a
+// four-or-more-character prefix, e.g. "mbca-my_big_cool_app-polecat-nux".
+// Anything shorter than two characters is still rejected — the components are
+// separated by hyphens, so a one-character token with nothing after it is not
+// a prefix.
 //
 // Handles the collapsed form where prefix == rig (e.g., "ff-polecat-nux" for
 // rig "ff"). In collapsed form, the prefix is returned as the rig:
 //   - "ff-polecat-nux" → rig="ff", role="polecat", name="nux"
 func ParseAgentBeadID(id string) (rig, role, name string, ok bool) {
 	// Find the prefix (everything before the first hyphen)
-	// Valid prefixes are 2-3 characters (e.g., "gt", "bd", "hq")
+	// Valid prefixes are 2 or more characters (e.g., "gt", "bd", "hq", "mbca")
 	hyphenIdx := strings.Index(id, "-")
-	if hyphenIdx < 2 || hyphenIdx > 3 {
+	if hyphenIdx < 2 {
 		return "", "", "", false
 	}
 
