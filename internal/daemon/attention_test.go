@@ -1120,6 +1120,21 @@ func TestAttentionRiskPath(t *testing.T) {
 	if items := f.collect(t, f.src.collectRiskPaths); len(items) != 0 {
 		t.Errorf("items = %+v, want a PASS review of this head to clear it", items)
 	}
+	// WAIVED and AUDITED clear it too, but only with their reason (gt-r5ne9).
+	for _, tc := range []struct {
+		notes string
+		held  bool
+	}{
+		{land.OverseerReviewMarker + " " + head + " WAIVED: docs-only", false},
+		{land.OverseerReviewMarker + " " + head + " AUDITED: file-level audit", false},
+		{land.OverseerReviewMarker + " " + head + " WAIVED", true},
+		{land.OverseerReviewMarker + " " + other + " AUDITED: file-level audit", true},
+	} {
+		notes = tc.notes
+		if items := f.collect(t, f.src.collectRiskPaths); (len(items) == 1) != tc.held || len(items) > 1 {
+			t.Errorf("notes %q: items = %+v, want held = %v", tc.notes, items, tc.held)
+		}
+	}
 }
 
 // The collector is wired into the tick, and two records naming one bead cost

@@ -17,15 +17,20 @@ import (
 // as a comment, or against the merge sha, leaves the item open. The head here
 // is read from that landing record and never taken from the caller.
 
-var beadReviewSHA string
+var beadReviewSHA, beadReviewReason string
 
 var beadReviewCmd = &cobra.Command{
-	Use:   "review <id> PASS|FAIL",
+	Use:   "review <id> PASS|FAIL|WAIVED|AUDITED",
 	Short: "Record an overseer review of a bead's landed head",
 	Long: `Record an overseer review of a landed bead as the note the attention
 queue reads: "OVERSEER REVIEW <head> PASS|FAIL", appended to the bead's
 notes. Both verdicts clear the bead's risk-path item — a FAIL says a human
 looked and is filing the follow-up.
+
+WAIVED and AUDITED clear it for a landing that was reviewed another way (a
+file-level audit) or consciously not reviewed, and need --reason: the note is
+"OVERSEER REVIEW <head> WAIVED: <reason>". Without a reason nothing is
+written. --reason is refused with PASS and FAIL.
 
 <head> is the head the bead's landing record names, never a sha you pass.
 --sha picks which head when the bead landed more than once; without it the
@@ -37,10 +42,12 @@ recording the same verdict twice writes one line.
 
 Examples:
   gt bead review gt-abc PASS
-  gt bead review gt-abc FAIL --sha=<40-hex head of an earlier landing>`,
+  gt bead review gt-abc FAIL --sha=<40-hex head of an earlier landing>
+  gt bead review gt-abc AUDITED --reason "file-level audit of the diff, no findings"
+  gt bead review gt-abc WAIVED --reason "docs-only change under a risk path"`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return newBeadVerbs(cmd).review(args[0], args[1], beadReviewSHA)
+		return newBeadVerbs(cmd).review(args[0], args[1], beadReviewSHA, beadReviewReason)
 	},
 }
 
@@ -49,11 +56,23 @@ Examples:
 var fullHead = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 // review writes the overseer review line for the bead's landed head, or
-// reports the bead as already reviewed.
-func (v *beadVerbs) review(id, verdict, sha string) error {
+// reports the bead as already reviewed. WAIVED and AUDITED carry reason into
+// the line; PASS and FAIL take none.
+func (v *beadVerbs) review(id, verdict, sha, reason string) error {
 	verdict = strings.ToUpper(strings.TrimSpace(verdict))
-	if verdict != "PASS" && verdict != "FAIL" {
-		return fmt.Errorf("review verdict must be PASS or FAIL, not %q", verdict)
+	// NoteField folds newlines, so a reason cannot start a second note line.
+	reason = land.NoteField(reason)
+	switch verdict {
+	case "PASS", "FAIL":
+		if reason != "" {
+			return fmt.Errorf("--reason applies to WAIVED and AUDITED, not %s", verdict)
+		}
+	case "WAIVED", "AUDITED":
+		if reason == "" {
+			return fmt.Errorf("a %s review needs --reason: say why the head is not getting a PASS", verdict)
+		}
+	default:
+		return fmt.Errorf("review verdict must be PASS, FAIL, WAIVED or AUDITED, not %q", verdict)
 	}
 	sha = strings.ToLower(strings.TrimSpace(sha))
 	if sha != "" && !fullHead.MatchString(sha) {
@@ -68,6 +87,9 @@ func (v *beadVerbs) review(id, verdict, sha string) error {
 		return err
 	}
 	line := land.OverseerReviewMarker + " " + head + " " + verdict
+	if reason != "" {
+		line += ": " + reason
+	}
 	if land.HasOverseerReviewNote(is.Notes, head) {
 		_, err := fmt.Fprintf(v.out, "✓ %s already records %s\n", id, line)
 		return err

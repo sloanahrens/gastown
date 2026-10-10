@@ -38,7 +38,10 @@ const (
 
 	// OverseerReviewMarker opens the note line "OVERSEER REVIEW <full head
 	// sha> PASS|FAIL" that answers a risk-path item: it names the head a
-	// human looked at, and PASS or FAIL says what they found. It is not
+	// human looked at, and PASS or FAIL says what they found. The line
+	// "OVERSEER REVIEW <head> WAIVED: <reason>" or "... AUDITED: <reason>"
+	// answers it too, for a head reviewed another way or consciously not
+	// reviewed; the reason is required. It is not
 	// OverseerReviewedMarker — that marker says om was bypassed, and must not
 	// satisfy a risk-path item (gt-vsct7.4).
 	OverseerReviewMarker = "OVERSEER REVIEW"
@@ -211,18 +214,22 @@ func OverseerReviewed(issue *beads.Issue, head string) bool {
 	return false
 }
 
-// overseerReviewLine matches "OVERSEER REVIEW <sha> PASS|FAIL", the note that
-// answers a risk-path item. The trailing \b keeps a word from extending a
-// verdict ("PASSED" is not PASS), and the sha is compared whole, so a review
-// of another head does not answer. It deliberately does not match
+// overseerReviewLine matches "OVERSEER REVIEW <sha> PASS|FAIL" or
+// "OVERSEER REVIEW <sha> WAIVED|AUDITED: <reason>", the note that answers a
+// risk-path item. The trailing \b keeps a word from extending a verdict
+// ("PASSED" is not PASS), WAIVED and AUDITED answer only with a reason after
+// the colon, and the sha is compared whole, so a review of another head does
+// not answer. It deliberately does not match
 // "OVERSEER REVIEWED ...": that marker says om was bypassed, not that a human
 // reviewed this head (gt-vsct7.4).
-var overseerReviewLine = regexp.MustCompile(`^OVERSEER REVIEW ([0-9a-f]{7,64}) (PASS|FAIL)\b`)
+var overseerReviewLine = regexp.MustCompile(`^OVERSEER REVIEW ([0-9a-f]{7,64}) (?:(?:PASS|FAIL)\b|(?:WAIVED|AUDITED): +\S)`)
 
 // HasOverseerReviewNote reports whether notes carry an "OVERSEER REVIEW <head>
-// PASS|FAIL" line naming exactly head. Both verdicts answer a risk-path item:
-// a FAIL says the head was reviewed and the overseer files the follow-up,
-// which is not the queue's to hold (gt-vsct7.4).
+// PASS|FAIL" line naming exactly head, or a WAIVED or AUDITED line with its
+// reason. Every verdict answers a risk-path item: a FAIL says the head was
+// reviewed and the overseer files the follow-up, which is not the queue's to
+// hold (gt-vsct7.4); WAIVED and AUDITED say the head was consciously left
+// unreviewed or reviewed another way, and the reason is the record (gt-r5ne9).
 func HasOverseerReviewNote(notes, head string) bool {
 	if head == "" {
 		return false
