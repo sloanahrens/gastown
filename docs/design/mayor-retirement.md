@@ -71,7 +71,7 @@ The live agent and everything that starts, stops or watches it. This is the slic
 
 **Stale-config/stale-data handling:** An existing `settings/config.json` that still carries `"patrols": {"mayor": {...}, "mayor_dispatch": {...}}` is tolerated and ignored: the JSON decoder drops unknown keys and `isPatrolActive` returns false for a retired patrol. Ship the default config without the two keys. No hard error, so a shared or downgraded config still starts.
 
-**Must still pass:** `make gate`; `gt up`/`gt down` start and stop the remaining services; the daemon still supervises the remaining services: the landing workers, spec dispatch, the steward and the polecat seats.
+**Must still pass:** `make gate`; `gt up`/`gt down` start and stop the remaining services; the daemon still supervises the remaining services: the landing workers, spec dispatch and the polecat seats.
 
 ### Slice 2 — Remove `mayor/` from mail, nudge and escalation routing
 
