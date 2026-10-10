@@ -81,8 +81,9 @@ audit's output, and a run with no edits still posts it:
 ```bash
 bd show {{issue}}    # the `doc-audit run` comment from the audit step
 ```
-Then run `gt done --status DEFERRED` (submit step) and skip self-review,
-build-check, and pre-verify: no diff means nothing to review, build, or gate.
+Then go to the submit step, which closes {{issue}} and runs
+`gt done --status DEFERRED`; skip self-review, build-check, and pre-verify,
+as there is no diff to review, build, or gate.
 
 **Exit criteria:** Working tree clean AND either (a) at least 1 commit ahead of origin/{{base_branch}}, or (b) a clean slice whose run comment is posted."""
 
@@ -217,7 +218,8 @@ Run `gt done` once and let it finish: it runs the local gate itself and needs no
 # bead ready; the landing worker runs the Docker suite on the merged tree):
 gt done --target {{base_branch}}
 
-# For report-only tasks (no commits — audits, reviews, research):
+# Clean slice (no commits): close the bead first; DEFERRED leaves it hooked.
+gt bead close {{issue}} --reason="no-changes: clean slice, doc-audit run comment posted"
 gt done --status DEFERRED
 ```
 

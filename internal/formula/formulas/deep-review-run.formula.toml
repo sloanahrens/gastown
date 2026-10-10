@@ -35,7 +35,8 @@ The plan prints `quiet=`, `landings=`, `unparsed=`, the cursors, and writes
 ```bash
 gt bead note {{issue}} "quiet: no risk-path landings since the last review"
 ```
-Then skip to the submit step (`gt done --status DEFERRED`).
+Then skip to the submit step, which closes {{issue}} and runs
+`gt done --status DEFERRED`.
 
 **3. Pick up what earlier runs left.**
 - Approvals: take the first id in `$D/runs.json` that has a digest comment and
