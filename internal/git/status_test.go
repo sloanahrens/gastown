@@ -175,3 +175,25 @@ func TestFindCommitMatchingNamesTheCommit(t *testing.T) {
 		t.Errorf("FindCommitMatching (no match) = %q, %v; want empty", got, err)
 	}
 }
+
+// The subject line carries the match: git log lists the commits whose message
+// quotes the marker — a revert of the landing, newest first — and the landing
+// itself is the one whose own subject begins with it.
+func TestFindCommitMatchingSubjectReadsTheSubject(t *testing.T) {
+	t.Parallel()
+	const marker = "land: feature (aaaa) onto main ("
+	landing := "2222222222222222222222222222222222222222"
+	s := newScripted(map[string]reply{
+		"log origin/main --grep=" + marker + " -F --format=%H%x00%s": ok(
+			"1111111111111111111111111111111111111111\x00Revert \"" + marker + "bbbb)\"\n" +
+				landing + "\x00" + marker + "bbbb)\n"),
+		"log origin/main --grep=Work: gt-abc -F --format=%H%x00%s": ok("\n"),
+	})
+	g := newTestGit(t, s)
+	if got, err := g.FindCommitMatchingSubject("origin/main", marker); err != nil || got != landing {
+		t.Errorf("FindCommitMatchingSubject = %q, %v; want the landing %s", got, err, landing)
+	}
+	if got, err := g.FindCommitMatchingSubject("origin/main", "Work: gt-abc"); err != nil || got != "" {
+		t.Errorf("FindCommitMatchingSubject on a body-only pattern = %q, %v; want empty", got, err)
+	}
+}

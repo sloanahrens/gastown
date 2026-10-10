@@ -3186,6 +3186,29 @@ func (g *Git) FindCommitMatching(ref, pattern string) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
+// FindCommitMatchingSubject returns the newest commit reachable from ref whose
+// subject line begins with prefix, or "" when none does.
+//
+// Reading only the subject keeps a message that merely quotes another's from
+// reading as the commit it quotes: a revert of a landing carries the landing's
+// subject inside Revert "land: ...", and only the landing begins with it
+// (gt-h7trd).
+func (g *Git) FindCommitMatchingSubject(ref, prefix string) (string, error) {
+	// --grep matches the whole message, so it only narrows the walk; the
+	// subject check below decides.
+	out, err := g.run("log", ref, "--grep="+prefix, "-F", "--format=%H%x00%s")
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		sha, subject, ok := strings.Cut(line, "\x00")
+		if ok && strings.HasPrefix(subject, prefix) {
+			return sha, nil
+		}
+	}
+	return "", nil
+}
+
 // Cherry runs `git cherry <upstream> <head>` to list commits on head that are
 // not yet on upstream, comparing by patch-id. Each output line is prefixed with
 // "+ " (patch not on upstream) or "- " (patch already applied upstream, e.g.

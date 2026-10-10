@@ -71,10 +71,12 @@ type Repo interface {
 	// the merge and the read, so the landed commit has to be found in the
 	// branch's history rather than at its tip (gt-mdet3).
 	VerifyPushedCommitReachableFromPushTarget(remote, branch, commit string) error
-	// FindCommitMatching is the newest commit reachable from ref whose
-	// message contains pattern, which is how a landing's own merge commit is
-	// found on the target when no record of it was written (gt-mdet3).
-	FindCommitMatching(ref, pattern string) (string, error)
+	// FindCommitMatchingSubject is the newest commit reachable from ref whose
+	// subject begins with prefix, which is how a landing's own merge commit
+	// is found on the target when no record of it was written. The subject,
+	// never the whole message: a revert of a landing quotes its subject, and
+	// reading that as the landing records the revert (gt-mdet3, gt-h7trd).
+	FindCommitMatchingSubject(ref, prefix string) (string, error)
 	// Parents is a commit's parents, for the base of a landing read back out
 	// of the target's history.
 	Parents(commit string) ([]string, error)
@@ -1014,9 +1016,11 @@ func (l *Lander) repairRecord(g Repo, w Work) (*Result, error) {
 	return res, nil
 }
 
-// landMergeMarker is the literal mergeWork writes into the land merge commit
-// for w: the subject up to the base, which no other landing's message carries
-// because it names this branch, head and target.
+// landMergeMarker is the literal mergeWork writes at the start of the land
+// merge commit's subject for w: the subject up to the base, which no other
+// landing's subject carries because it names this branch, head and target.
+// Only the subject is matched, so a commit that quotes the marker — a revert
+// of the landing — is not the landing (gt-h7trd).
 func landMergeMarker(w Work) string {
 	return fmt.Sprintf("land: %s (%s) onto %s (", w.Branch, shortSHA(w.Head), w.Target)
 }
@@ -1031,7 +1035,7 @@ func landMergeMarker(w Work) string {
 // result were not kept, so the record says so rather than inventing them.
 func (l *Lander) completeUnrecordedLanding(g Repo, w Work) (*Result, error) {
 	remote := l.remote()
-	merged, err := g.FindCommitMatching(remote+"/"+w.Target, landMergeMarker(w))
+	merged, err := g.FindCommitMatchingSubject(remote+"/"+w.Target, landMergeMarker(w))
 	if err != nil {
 		return nil, &InfraError{Stage: "find the landing on the target", Err: err}
 	}

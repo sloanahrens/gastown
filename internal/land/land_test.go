@@ -1089,6 +1089,53 @@ func TestLandCompletesALandingWhoseRecordWasNeverWritten(t *testing.T) {
 	}
 }
 
+// TestLandFinishesTheUnrecordedLandingARevertQuotes: an operator reverts the
+// landing whose record was never written, and the revert's message quotes the
+// land merge's subject, so a search of whole commit messages finds the revert
+// first. The pass still finishes the merge this lander made: the revert is not
+// the landing, and the record names the landing (gt-h7trd).
+func TestLandFinishesTheUnrecordedLandingARevertQuotes(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	l := f.lander()
+	var merged string
+	f.merger.fn = func(req MergeRequest) error {
+		merged = req.Head
+		f.setMain(req.Head)
+		return errors.New("the pass ended after the merge, before the record")
+	}
+	if _, err := l.Land(context.Background(), f.work); err == nil {
+		t.Fatal("the first pass returned a landing it never recorded")
+	}
+	subject := landMergeMarker(f.work) + shortSHA(f.base) + ")"
+	revert := f.git.Commit(f.t, f.origin, "main", "Revert \""+subject+"\"\n\nThis reverts commit "+merged+".", map[string]string{"a.txt": "reverted\n"})
+	if got := f.originMain(); got != revert {
+		t.Fatalf("origin/main = %s, want the revert %s", got, revert)
+	}
+
+	f.merger.fn = nil
+	res, err := f.lander().Land(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("the second pass did not finish the landing: %v", err)
+	}
+	if res.LandedCommit != merged {
+		t.Errorf("LandedCommit = %s, want the merge %s (the revert is %s)", res.LandedCommit, merged, revert)
+	}
+	if len(f.merger.calls) != 1 {
+		t.Errorf("the merger ran %d times, want the one merge", len(f.merger.calls))
+	}
+	b := f.bead()
+	if b.Status != "closed" || !strings.Contains(b.Notes, LandingNoteMarker+"\nlanded_commit: "+merged) {
+		t.Errorf("bead after the finished landing: status=%s notes=%q", b.Status, b.Notes)
+	}
+	if strings.Contains(b.Notes, revert) {
+		t.Errorf("the record names the revert as the landing:\n%s", b.Notes)
+	}
+	if lines := f.landingLines(); len(lines) != 1 {
+		t.Fatalf("landings lines = %d, want 1", len(lines))
+	}
+}
+
 // TestLandRecordsALandingAnotherPushMovedTheTargetPast: the target advanced
 // between the merge and the read-back. The commit is in the target's history,
 // so the landing is recorded rather than failed.

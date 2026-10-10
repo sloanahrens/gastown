@@ -38,6 +38,7 @@ type Repo interface {
 	VerifyPushedCommit(remote, branch, commit string) error
 	VerifyPushedCommitReachableFromPushTarget(remote, branch, commit string) error
 	FindCommitMatching(ref, pattern string) (string, error)
+	FindCommitMatchingSubject(ref, prefix string) (string, error)
 	Parents(commit string) ([]string, error)
 	WorktreeAddDetached(path, ref string) error
 	WorktreeRemove(path string, force bool) error
@@ -573,6 +574,38 @@ func (h *handle) FindCommitMatching(ref, pattern string) (string, error) {
 	for _, c := range h.f.ancestors(id) {
 		o := h.f.objects[c]
 		if o == nil || !strings.Contains(o.message, pattern) {
+			continue
+		}
+		if best == nil || o.seq > best.seq {
+			best = o
+		}
+	}
+	if best == nil {
+		return "", nil
+	}
+	return best.id, nil
+}
+
+// FindCommitMatchingSubject is *git.Git's log --grep -F filtered to the
+// commits whose subject line begins with prefix: the newest commit reachable
+// from ref carrying prefix at the start of its subject, never one whose
+// message merely quotes it.
+func (h *handle) FindCommitMatchingSubject(ref, prefix string) (string, error) {
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	args := []string{"log", ref, "--grep=" + prefix, "-F", "--format=%H%x00%s"}
+	r, wt, err := h.locate(args...)
+	if err != nil {
+		return "", err
+	}
+	id, ok := h.resolve(r, wt, ref)
+	if !ok {
+		return "", unknownRevision(ref, args...)
+	}
+	var best *commit
+	for _, c := range h.f.ancestors(id) {
+		o := h.f.objects[c]
+		if o == nil || !strings.HasPrefix(firstLine(o.message), prefix) {
 			continue
 		}
 		if best == nil || o.seq > best.seq {
