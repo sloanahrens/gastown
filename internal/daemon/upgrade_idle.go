@@ -13,8 +13,8 @@ import (
 
 // isIdleForUpgrade reports whether restarting the daemon now would kill no
 // in-flight work: no script plugin, compactor, boot triage, scheduled
-// slings or patrol watchdog run, no steward scan, plan scan or
-// job, no landing-worker pass, no scheduled_maintenance gc cycle, and no
+// slings or patrol watchdog run, no landing-worker pass, no
+// scheduled_maintenance gc cycle, and no
 // install holding install-gt.lock. The Dolt goroutines are not counted: they
 // are short or restartable. Post-landing runs and tier sweep cycles are not
 // here either: checkUpgradeRestart holds a bounded wait for each instead
@@ -42,8 +42,7 @@ func (d *Daemon) daemonWorkIdle() bool {
 // wait line calls it, and whether a restart must wait for it at all.
 //
 // Hard work is work a restart would destroy with nothing to redo it: a landing
-// pass owns the merged-tree gate of the bead it is landing (gt-u641b), a
-// steward job's agent has done a session's work for nothing (gt-9bioi.5), and
+// pass owns the merged-tree gate of the bead it is landing (gt-u641b), and
 // the install lock means the binary is mid-replacement, so a restart inside
 // that window execs one its own smoke check has not verified. Everything else
 // — plugin runs, dog cycles, the daemon's own ticks and scans — reruns from the
@@ -135,15 +134,6 @@ func (d *Daemon) daemonWorkHolds() []*daemonWork {
 	if d.patrolScanRunning.Load() {
 		holds = append(holds, &daemonWork{name: "a patrol scan"})
 	}
-	if d.stewardRunning.Load() {
-		holds = append(holds, &daemonWork{name: "a steward scan"})
-	}
-	if d.stewardPlanScan.Load() {
-		holds = append(holds, &daemonWork{name: "a steward plan scan"})
-	}
-	if job := d.stewardJobHold(); job != "" {
-		holds = append(holds, &daemonWork{name: job, hard: true})
-	}
 	for _, hold := range holds {
 		if hold.hard {
 			return holds
@@ -162,27 +152,6 @@ func landingHoldName(bead string) string {
 		return "a landing pass"
 	}
 	return "landing pass " + bead
-}
-
-// stewardJobHold names an in-flight steward job (the first by bead), or "" when
-// none is. A restart kills the job, and while that no longer spends the event's
-// retry, the agent has done a session's work for nothing: at merge-cadence
-// upgrades a job would rarely live long enough to finish (gt-9bioi.5).
-func (d *Daemon) stewardJobHold() string {
-	d.stewardRunnerMu.Lock()
-	runner := d.stewardRunner
-	d.stewardRunnerMu.Unlock()
-	if runner == nil {
-		return ""
-	}
-	jobs := runner.Running()
-	if len(jobs) == 0 {
-		return ""
-	}
-	if jobs[0].Bead == "" {
-		return "a steward job"
-	}
-	return "a steward job " + jobs[0].Bead
 }
 
 // installLockPath is scripts/install-gt.sh's lock:

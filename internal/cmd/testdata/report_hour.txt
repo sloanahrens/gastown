@@ -26,9 +26,6 @@ sweep
 escalations
   opened 1  closed 1
 
-steward
-  2 jobs  fail 1  pass 1
-
 attention
   1 open (1 high)  state 5s old
   high  queue-stuck  gastown  12m5s  landing queue silent 12m

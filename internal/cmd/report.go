@@ -24,7 +24,6 @@ import (
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landings"
-	"github.com/steveyegge/gastown/internal/steward"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/version"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -63,7 +62,6 @@ var reportSectionOrder = []string{
 	"seats",
 	"sweep",
 	"escalations",
-	"steward",
 	"spend",
 	"attention",
 }
@@ -94,7 +92,6 @@ var reportCmd = &cobra.Command{
   sweep              each rig's .runtime/tier-sweep/<rig>.json, or "no sweep
                      record" until the daemon's tier sweep has run
   escalations        escalations opened and closed in the window
-  steward            the steward job ledger's counts for the window
   spend              the DeepSeek reading in .runtime/watch/spend.json,
                      shown only while it is under 15 minutes old
   attention          the open items in .runtime/attention/state.json
@@ -362,7 +359,6 @@ type reportHourDoc struct {
 	Seats       *reportSeats       `json:"seats,omitempty"`
 	Sweep       []reportSweepRig   `json:"sweep,omitempty"`
 	Escalations *reportEscalations `json:"escalations,omitempty"`
-	Steward     *reportSteward     `json:"steward,omitempty"`
 	Spend       *reportSpend       `json:"spend,omitempty"`
 	Attention   *reportAttention   `json:"attention,omitempty"`
 }
@@ -437,11 +433,6 @@ type reportEscalations struct {
 	Closed int `json:"closed"`
 }
 
-type reportSteward struct {
-	Jobs     int            `json:"jobs"`
-	Outcomes map[string]int `json:"outcomes,omitempty"`
-}
-
 type reportSpend struct {
 	PerHour float64   `json:"per_hour"`
 	Balance float64   `json:"balance"`
@@ -487,7 +478,6 @@ func (r reportRun) collect() *reportHourDoc {
 	r.collectStores(doc, rigs, rigsErr)
 	r.collectSeats(doc)
 	r.collectSweep(doc, rigs, rigsErr)
-	r.collectSteward(doc)
 	r.collectSpend(doc)
 	r.collectAttention(doc)
 	if len(doc.Unavailable) == 0 {
@@ -928,27 +918,6 @@ func (r reportRun) collectSweep(doc *reportHourDoc, rigs []string, rigsErr error
 	}
 }
 
-// collectSteward counts the steward job ledger's window.
-func (r reportRun) collectSteward(doc *reportHourDoc) {
-	rows, err := steward.NewLedger(steward.LedgerPath(r.townRoot)).Read()
-	if err != nil {
-		doc.setUnavailable("steward", err)
-		return
-	}
-	stats := steward.Summarize(rows, steward.StatsOptions{Since: doc.Since, Now: r.until})
-	out := &reportSteward{Jobs: stats.Jobs}
-	for outcome, n := range stats.Outcomes {
-		if n == 0 {
-			continue
-		}
-		if out.Outcomes == nil {
-			out.Outcomes = map[string]int{}
-		}
-		out.Outcomes[string(outcome)] = n
-	}
-	doc.Steward = out
-}
-
 // reportSpendPath is the spend reading the overseer's health watch rewrites
 // every 10 minutes.
 func reportSpendPath(townRoot string) string {
@@ -1164,8 +1133,6 @@ func (r reportRun) renderSection(name string, doc *reportHourDoc) {
 		}
 	case "escalations":
 		r.row("opened %d  closed %d", doc.Escalations.Opened, doc.Escalations.Closed)
-	case "steward":
-		r.row("%d jobs%s", doc.Steward.Jobs, reportOutcomeField(doc.Steward.Outcomes))
 	case "spend":
 		r.row("DeepSeek $%.2f/h  balance $%.2f  (%s old)",
 			doc.Spend.PerHour, doc.Spend.Balance, reportAge(r.until.Sub(doc.Spend.At)))
@@ -1236,29 +1203,6 @@ func reportFailedNames(names []string) string {
 		return ""
 	}
 	return " (" + strings.Join(names, ", ") + ")"
-}
-
-// reportOutcomeField renders the steward ledger's outcomes, busiest first and
-// alphabetical within a count, so the line is stable.
-func reportOutcomeField(outcomes map[string]int) string {
-	if len(outcomes) == 0 {
-		return ""
-	}
-	keys := make([]string, 0, len(outcomes))
-	for k := range outcomes {
-		keys = append(keys, k)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		if outcomes[keys[i]] != outcomes[keys[j]] {
-			return outcomes[keys[i]] > outcomes[keys[j]]
-		}
-		return keys[i] < keys[j]
-	})
-	parts := make([]string, 0, len(keys))
-	for _, k := range keys {
-		parts = append(parts, fmt.Sprintf("%s %d", k, outcomes[k]))
-	}
-	return "  " + strings.Join(parts, "  ")
 }
 
 func reportAttentionRef(item reportAttentionItem) string {

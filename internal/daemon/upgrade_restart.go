@@ -45,7 +45,7 @@ const tierSweepRestartCap = 15 * time.Minute
 
 // housekeepingRestartCap is how long a pending upgrade restart waits for the
 // daemon's own housekeeping — a script plugin run, a dog cycle, the
-// spec-dispatch tick, the patrol scan, a steward scan — before it restarts
+// spec-dispatch tick, the patrol scan — before it restarts
 // anyway (gt-rtbbr). Each of those reruns from the new daemon: a plugin run
 // records nothing until it finishes, so an interrupted one is not due-gated and
 // starts again on the next heartbeat; a dog cycle's due-ness is the persisted
@@ -438,7 +438,7 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 
 // upgradeHold reports the work that still holds a pending restart at now, or
 // nil when the restart may go. A hard hold — a landing pass, a scheduled slings
-// cycle, a steward job, the install lock, a maintenance gc cycle — is never
+// cycle, the install lock, a maintenance gc cycle — is never
 // bounded and never masked by soft work that happens to be in flight with it
 // (gt-rtbbr). Work a restart can simply redo is bounded by its cap and dropped
 // here; the lines naming what it cuts are written only on the heartbeat that

@@ -572,7 +572,7 @@ func TestDaemonSource_LabelsEveryPerRigComponent(t *testing.T) {
 	}
 	appendFile(t, filepath.Join(dir, "daemon.log"),
 		"2026/09/30 08:00:00 patrol_scan: gastown: checked 8 polecat(s)\n"+
-			"2026/09/30 08:00:01 steward: om: mixing the work blend\n"+
+			"2026/09/30 08:00:01 spec_dispatch: om: dispatched 2 spec(s)\n"+
 			"2026/09/30 08:00:02 rig_worker: hm: starting on hm/quartz\n"+
 			"2026/09/30 08:00:03 compactor_dog: beads: compacted 3 convoy(s)\n"+
 			"2026/09/30 08:00:04 git_hygiene: gastown: pruned 2 worktree(s)\n"+
@@ -583,7 +583,7 @@ func TestDaemonSource_LabelsEveryPerRigComponent(t *testing.T) {
 	s := &daemonSource{dir: dir, cutoff: at("2026-09-30T12:00:00Z"), loc: tailTestLoc, now: fixedNow, rigs: loadTailRigs(townRoot)}
 	want := []string{
 		"gastown daemon patrol_scan: gastown: checked 8 polecat(s)",
-		"om daemon steward: om: mixing the work blend",
+		"om daemon spec_dispatch: om: dispatched 2 spec(s)",
 		"hm daemon rig_worker: hm: starting on hm/quartz",
 		"beads daemon compactor_dog: beads: compacted 3 convoy(s)",
 		"gastown daemon git_hygiene: gastown: pruned 2 worktree(s)",
@@ -611,13 +611,13 @@ func TestDaemonSource_TownWideLineOfAPerRigComponentStaysTown(t *testing.T) {
 	appendFile(t, filepath.Join(dir, "daemon.log"),
 		"2026/09/30 08:00:00 jsonl_git_backup: not due - last run 5m0s ago\n"+
 			"2026/09/30 08:00:01 patrol_scan: no rigs to scan\n"+
-			"2026/09/30 08:00:02 steward: work blend is off\n"+
+			"2026/09/30 08:00:02 spec_dispatch: no specs to dispatch\n"+
 			"2026/09/30 08:00:03 rig_worker: nothing ready to work\n")
 	s := &daemonSource{dir: dir, cutoff: at("2026-09-30T12:00:00Z"), loc: tailTestLoc, now: fixedNow, rigs: loadTailRigs(townRoot)}
 	want := []string{
 		"town daemon jsonl_git_backup: not due - last run 5m0s ago",
 		"town daemon patrol_scan: no rigs to scan",
-		"town daemon steward: work blend is off",
+		"town daemon spec_dispatch: no specs to dispatch",
 		"town daemon rig_worker: nothing ready to work",
 	}
 	if got := texts(s.Poll()); !reflect.DeepEqual(got, want) {
@@ -1065,7 +1065,7 @@ func TestTailEventsSource_TitlesTheBeadAndReadsAVerdict(t *testing.T) {
 		{Seq: 1, TS: "2026-09-30T13:50:00Z", Op: "create", IssueID: "gt-1", Actor: "sloan", Status: "open"},
 		{Seq: 2, TS: "2026-09-30T13:50:00.5Z", Op: "update", IssueID: "gt-1", Actor: "daemon", Status: "open"},
 		{Seq: 3, TS: "2026-09-30T13:51:00Z", Op: "comment", IssueID: "gt-1", Actor: "sloan"},
-		{Seq: 4, TS: "2026-09-30T13:52:00Z", Op: "comment", IssueID: "gt-2", Actor: "steward"},
+		{Seq: 4, TS: "2026-09-30T13:52:00Z", Op: "comment", IssueID: "gt-2", Actor: "witness"},
 		{Seq: 5, TS: "2026-09-30T13:53:00Z", Op: "update", IssueID: "gt-gastown-polecat-opal", Actor: "daemon"},
 	}}
 	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: newTailBeads(store.show)}
@@ -1353,7 +1353,7 @@ func TestTailEventsSource_CommentTextAndSubmittedLine(t *testing.T) {
 		{Seq: 1, TS: "2026-09-30T13:50:00Z", Op: "comment", IssueID: "gt-1", Actor: "sloan"},
 		{Seq: 2, TS: "2026-09-30T13:51:00Z", Op: "update", IssueID: "gt-2", Actor: "opal", Status: "open"},
 		{Seq: 3, TS: "2026-09-30T13:52:00Z", Op: "comment", IssueID: "gt-3", Actor: "sloan"},
-		{Seq: 4, TS: "2026-09-30T13:53:00Z", Op: "comment", IssueID: "gt-4", Actor: "steward"},
+		{Seq: 4, TS: "2026-09-30T13:53:00Z", Op: "comment", IssueID: "gt-4", Actor: "witness"},
 	}}
 	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: newTailBeads(store.show)}
 	got := s.Poll()

@@ -21,7 +21,6 @@ import (
 	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/specdispatch"
-	"github.com/steveyegge/gastown/internal/steward"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -169,9 +168,8 @@ polecat_pool.shape_gate says what the verdict does:
     spec-shape-waived waives the lint and dispatches anyway
   - refuse: as warn, and a refused bead also wears the needs-shape label; the
     needs-planning bead is held exactly as under warn (gt-tod3q). Under either
-    gate the tick spawns no planner: patrols.steward_plan in
-    mayor/daemon.json runs the plan jobs, and it is off until the operator
-    turns it on
+    gate the tick spawns no planner (the planner was retired, gt-4rizh), so a
+    held bead waits for the operator
 
 Beads labeled red-main are held while the red-main owner is reverting the
 breakage they were filed for: the landing worker records a revert in flight in
@@ -215,7 +213,7 @@ func init() {
 // PLAN PROPOSAL block in its notes means the operator's turn (gt-4k3fj.13,
 // gt-4k3fj.14).
 func specPlanState(notes string) string {
-	if steward.HasPlanProposal(notes) {
+	if specdispatch.HasPlanProposal(notes) {
 		return specPlanProposed
 	}
 	return specPlanNeedsPlan
@@ -225,7 +223,7 @@ func specPlanState(notes string) string {
 // what the state means for the next reader.
 func specPlanLine(id, state, reason string) string {
 	if state == specPlanProposed {
-		return fmt.Sprintf("%s: %s: the %s block in its notes is the operator's to file", id, state, steward.PlanProposalMarker)
+		return fmt.Sprintf("%s: %s: the %s block in its notes is the operator's to file", id, state, specdispatch.PlanProposalMarker)
 	}
 	return fmt.Sprintf("%s: %s: %s", id, state, reason)
 }
@@ -241,10 +239,10 @@ func specPlanNote(key, state, reason string) string {
 
 // specPlanHold takes a spec that needs planning off the dispatch path under
 // every gate that holds one — warn as well as refuse (gt-tod3q). The tick
-// reports the bead by its planning state, labels it needs-planning so the
-// planning patrol sees it, and comments once per state. Nothing is spawned:
-// patrols.steward_plan runs the plan jobs, and a plan job files nothing from a
-// proposal (gt-4k3fj.13, gt-4k3fj.14). The caller always skips the sling.
+// reports the bead by its planning state, labels it needs-planning, and
+// comments once per state. Nothing is spawned: the planner was retired
+// (gt-4rizh), and a planner files nothing from a proposal anyway (gt-4k3fj.13,
+// gt-4k3fj.14). The caller always skips the sling.
 func specPlanHold(report *specDispatchReport, env specDispatchEnv, c specCandidate, full specdispatch.Spec, verdict specdispatch.Verdict) {
 	state := specPlanState(full.Notes)
 	report.Planning = append(report.Planning, specDispatchEntry{Bead: full.ID, Rig: c.Rig, Line: specPlanLine(full.ID, state, verdict.Reason)})

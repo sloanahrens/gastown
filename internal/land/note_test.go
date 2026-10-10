@@ -160,9 +160,8 @@ func TestFormatRejectionNoteBoundsTailLines(t *testing.T) {
 	}
 }
 
-// TestParseRejectionNoteRoundTrips is the reader the steward's rejection
-// trigger depends on: what FormatRejectionNote writes is what comes back
-// (gt-9bioi.1).
+// TestParseRejectionNoteRoundTrips is the reader every rejection consumer
+// depends on: what FormatRejectionNote writes is what comes back (gt-9bioi.1).
 func TestParseRejectionNoteRoundTrips(t *testing.T) {
 	t.Parallel()
 	note := FormatRejectionNote(RejectionNote{

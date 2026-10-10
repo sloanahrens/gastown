@@ -348,7 +348,7 @@ func TestUpgradeWaitsForHousekeepingUpToTheCap(t *testing.T) {
 
 // gt-rtbbr review (om score 0.45): daemonWorkHold is hard-first, so soft work in
 // flight with hard work can never mask it and let the restart cut at
-// housekeepingRestartCap over a landing pass, a steward job, a scheduled slings
+// housekeepingRestartCap over a landing pass, a scheduled slings
 // cycle or a held install lock.
 func TestUpgradeHardHoldIsNotMaskedBySoftWork(t *testing.T) {
 	t.Parallel()

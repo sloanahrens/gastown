@@ -104,6 +104,45 @@ func TestDaemonPatrolConfigDecodesRetiredMayorKeys(t *testing.T) {
 	}
 }
 
+// patrols.steward and patrols.steward_plan are retired with the steward job
+// runner (gt-4rizh): the live town's settings/config.json still carries a
+// daemon.patrols.steward block, so it must decode without an error and without
+// a warning, have no effect, and survive a rewrite verbatim.
+func TestDaemonPatrolConfigDecodesRetiredStewardKeys(t *testing.T) {
+	t.Parallel()
+	body := `{"patrols":{"steward":{"enabled":false,"interval":"60s","mode":"shadow"},` +
+		`"steward_plan":{"enabled":false,"max_jobs":1},` +
+		`"spec_dispatch":{"enabled":true}}}`
+	var cfg DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if cfg.Patrols.Count() != 1 || cfg.Patrols.SpecDispatch == nil {
+		t.Errorf("retired keys read as patrols: Count() = %d", cfg.Patrols.Count())
+	}
+	out, err := json.Marshal(&cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{`"steward":{"enabled":false,"interval":"60s","mode":"shadow"}`, `"steward_plan":{"enabled":false,"max_jobs":1}`} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("rewrite dropped %s: %s", want, out)
+		}
+	}
+
+	// The two-file layout puts the same document in settings/config.json's
+	// "daemon" section, so the block has to load through TownSettings too.
+	var ts TownSettings
+	settings := `{"type":"town-settings","version":1,` +
+		`"daemon":{"patrols":{"steward":{"enabled":false},"steward_plan":{"enabled":false}}}}`
+	if err := DecodeJSONFile("settings/config.json", []byte(settings), &ts); err != nil {
+		t.Fatalf("decode settings/config.json with a daemon.patrols.steward block: %v", err)
+	}
+	if ts.Daemon == nil {
+		t.Fatal("the daemon section did not load")
+	}
+}
+
 // hookless_agent and max_hookless are retired with the hookless seat class
 // (gt-4k3fj.8.7): a spec_dispatch block that still carries them decodes and
 // keeps them on a rewrite.
