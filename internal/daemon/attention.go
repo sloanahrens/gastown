@@ -300,13 +300,33 @@ func (d *Daemon) writeAttention() {
 
 // attentionTick runs the collectors, reconciles what they found against prev
 // and the acks, and writes the queue — and with it the acks whose items are
-// still in the queue. It returns the state it wrote, so the daemon can carry
-// it into the next tick.
+// still in the queue. It returns the state the daemon carries into the next
+// tick.
+//
+// The transitions land before the state they were derived from: a state that
+// advances without its events loses them, because the next tick reconciles
+// against the state it now holds, sees no change, and emits nothing
+// (gt-2y4b7). An append that fails therefore hands back prev, and the next
+// tick re-derives the same transitions rather than losing them.
 func (d *Daemon) attentionTick(ctx context.Context, src *attentionSources, prev attention.State, acks attention.Acks, now time.Time) attention.State {
 	observed := collectAttention(ctx, prev, src.collectors(), d.logger.Printf)
 	res := attention.Reconcile(prev, observed, acks, now)
+	if err := attention.AppendEvents(d.config.TownRoot, res.Events); err != nil {
+		d.logger.Printf("attention: appending %s: %v", attention.EventsFileName, err)
+		return prev
+	}
+	// One line per transition, and nothing on a tick with no change: the line
+	// is the signal, not a per-beat heartbeat. It says what the append just
+	// made durable, so the tick that delivered nothing says nothing here.
+	for _, e := range res.Events {
+		d.logger.Printf("attention: %s %s %s", attentionWord(e.State), e.Key, e.Text)
+	}
 	if err := attention.WriteState(d.config.TownRoot, res.State); err != nil {
 		d.logger.Printf("attention: writing %s: %v", attention.StateFileName, err)
+		// The events are durable, so the cache still advances: handing back
+		// prev would re-derive every transition and append each one twice. A
+		// restart before the state write lands replays them from the stale
+		// state.json, which costs a repeated line rather than a lost event.
 		return res.State
 	}
 	// An ack dies with its item: the reconcile dropped the keys the new state
@@ -315,14 +335,6 @@ func (d *Daemon) attentionTick(ctx context.Context, src *attentionSources, prev 
 	// the flock and so keeps an ack made while the collectors ran (gt-cuzjj).
 	if err := attention.PruneAcks(d.config.TownRoot, res.State); err != nil {
 		d.logger.Printf("attention: pruning acks: %v", err)
-	}
-	if err := attention.AppendEvents(d.config.TownRoot, res.Events); err != nil {
-		d.logger.Printf("attention: appending %s: %v", attention.EventsFileName, err)
-	}
-	// One line per transition, and nothing on a tick with no change: the line
-	// is the signal, not a per-beat heartbeat.
-	for _, e := range res.Events {
-		d.logger.Printf("attention: %s %s %s", attentionWord(e.State), e.Key, e.Text)
 	}
 	return res.State
 }

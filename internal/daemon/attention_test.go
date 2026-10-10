@@ -99,6 +99,30 @@ func (f *attentionFixture) tick(t *testing.T, at time.Time) attention.State {
 	return st
 }
 
+// tickFrom runs one tick against prev, the state the daemon carries in memory
+// across heartbeats, and returns the state it hands back for the next one.
+// tick reads prev back from state.json instead, which is what a daemon
+// restarting does.
+func (f *attentionFixture) tickFrom(t *testing.T, prev attention.State, at time.Time) attention.State {
+	t.Helper()
+	acks, err := attention.ReadAcks(f.d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("ReadAcks: %v", err)
+	}
+	f.src.now = at
+	return f.d.attentionTick(context.Background(), f.src, prev, acks, at)
+}
+
+// events returns what events.jsonl holds.
+func (f *attentionFixture) events(t *testing.T) []attention.Event {
+	t.Helper()
+	events, err := attention.ReadEvents(f.d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("ReadEvents: %v", err)
+	}
+	return events
+}
+
 // collect runs one collector from the fixture's sources.
 func (f *attentionFixture) collect(t *testing.T, c func(context.Context) ([]attention.Item, error)) []attention.Item {
 	t.Helper()
@@ -586,6 +610,111 @@ func TestAttentionTick_LogsOneLinePerTransitionAndNothingOnNoChange(t *testing.T
 	if got := f.logs.String(); got != want {
 		t.Errorf("log = %q, want %q", got, want)
 	}
+}
+
+// gt-2y4b7: a write that fails must neither lose nor duplicate a transition.
+// The events land before the state they were derived from, so a tick whose
+// state write fails has already delivered them, and one whose append fails
+// hands back the state it was given — the next tick re-derives and delivers
+// the same transitions instead of reconciling them away.
+func TestAttentionTick_SurvivesAFailedWrite(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	const redKey = "red-main:gastown:internal/cmd"
+	raised := func(context.Context, string) ([]*beads.Issue, error) {
+		return []*beads.Issue{{ID: "gt-red", Status: "open", Title: landworker.RedMainTitle(attentionRig, "internal/cmd")}}, nil
+	}
+
+	t.Run("both writes land", func(t *testing.T) {
+		t.Parallel()
+		f := newAttentionFixture(t, now)
+		f.src.redMain = raised
+		next := f.tickFrom(t, attention.State{}, now)
+		if got := f.events(t); len(got) != 1 || got[0].Key != redKey || got[0].State != attention.EventNew {
+			t.Fatalf("events = %+v, want the one raise", got)
+		}
+		if st, err := attention.ReadState(f.d.config.TownRoot); err != nil || len(st.Items) != 1 {
+			t.Errorf("state = %+v, %v, want the raised item written", st, err)
+		}
+		// The same observed set reconciled against the state the tick wrote is
+		// no change: the transition is emitted once, not once per tick.
+		f.tickFrom(t, next, now.Add(time.Minute))
+		if got := f.events(t); len(got) != 1 {
+			t.Errorf("events = %+v, want the raise emitted once", got)
+		}
+	})
+
+	t.Run("the state write fails", func(t *testing.T) {
+		t.Parallel()
+		f := newAttentionFixture(t, now)
+		f.src.redMain = raised
+		// state.json is a directory: the atomic replace cannot land on it, and
+		// the events append beside it still can.
+		if err := os.MkdirAll(attention.StatePath(f.d.config.TownRoot), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		next := f.tickFrom(t, attention.State{}, now)
+		if got := f.events(t); len(got) != 1 || got[0].Key != redKey || got[0].State != attention.EventNew {
+			t.Fatalf("events = %+v, want the transition the state write failed to record", got)
+		}
+		logs := f.logs.String()
+		if !strings.Contains(logs, "attention: raised "+redKey) {
+			t.Errorf("log = %q, want the transition the events log holds reported", logs)
+		}
+		if !strings.Contains(logs, "attention: writing "+attention.StateFileName) {
+			t.Errorf("log = %q, want the failed state write named", logs)
+		}
+		// The events are durable, so the next tick reconciles against the
+		// state it wrote them from and emits nothing more.
+		f.tickFrom(t, next, now.Add(time.Minute))
+		if got := f.events(t); len(got) != 1 {
+			t.Errorf("events = %+v, want the raise not repeated", got)
+		}
+	})
+
+	t.Run("the event write fails", func(t *testing.T) {
+		t.Parallel()
+		f := newAttentionFixture(t, now)
+		f.src.redMain = raised
+		// events.jsonl is a directory: the append cannot open it.
+		if err := os.MkdirAll(attention.EventsPath(f.d.config.TownRoot), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		next := f.tickFrom(t, attention.State{}, now)
+		if !next.Updated.IsZero() {
+			t.Errorf("tick = %+v, want the state it was handed, so the next tick re-derives the raise", next)
+		}
+		if got := f.logs.String(); !strings.Contains(got, "attention: appending "+attention.EventsFileName) {
+			t.Errorf("log = %q, want the failed append named", got)
+		}
+		if got := f.logs.String(); strings.Contains(got, "attention: raised") {
+			t.Errorf("log = %q, want a transition the events log does not hold left unreported", got)
+		}
+		// The state only lands with the events: a state that advanced here
+		// would leave the next tick reconciling against a raise it never
+		// delivered.
+		if st, err := attention.ReadState(f.d.config.TownRoot); err != nil || len(st.Items) != 0 {
+			t.Errorf("state = %+v, %v, want the state write held back with the append", st, err)
+		}
+
+		// The append path is clear: the next tick delivers the held-back
+		// raise, once.
+		if err := os.Remove(attention.EventsPath(f.d.config.TownRoot)); err != nil {
+			t.Fatal(err)
+		}
+		f.logs.Reset()
+		next = f.tickFrom(t, next, now.Add(time.Minute))
+		if got := f.events(t); len(got) != 1 || got[0].Key != redKey || got[0].State != attention.EventNew {
+			t.Fatalf("events = %+v, want the held-back raise delivered", got)
+		}
+		if got, want := f.logs.String(), "attention: raised "+redKey+" red main (gastown): internal/cmd\n"; got != want {
+			t.Errorf("log = %q, want %q", got, want)
+		}
+		f.tickFrom(t, next, now.Add(2*time.Minute))
+		if got := f.events(t); len(got) != 1 {
+			t.Errorf("events = %+v, want the raise delivered once", got)
+		}
+	})
 }
 
 // writeAttention is the heartbeat step: it reads the daemon's own sources and
