@@ -444,13 +444,21 @@ func isGitWorktree(dir string) bool {
 // workspace's .git and commit on the wrong branch (this is the bug this
 // helper exists to prevent).
 func resolvePolecatWorktree(polecatsDir, polecatName, rigName string) string {
-	nested := filepath.Join(polecatsDir, polecatName, rigName)
-	if isGitWorktree(nested) {
-		return nested
-	}
-	flat := filepath.Join(polecatsDir, polecatName)
-	if isGitWorktree(flat) {
-		return flat
+	for _, dir := range polecatWorktreeCandidates(polecatsDir, polecatName, rigName) {
+		if isGitWorktree(dir) {
+			return dir
+		}
 	}
 	return ""
+}
+
+// polecatWorktreeCandidates lists the directories resolvePolecatWorktree
+// considers, in the order it prefers them. A caller with no worktree to
+// resolve names these in its error, so the layout rule stays here rather than
+// being spelled out a second time at the call site.
+func polecatWorktreeCandidates(polecatsDir, polecatName, rigName string) []string {
+	return []string{
+		filepath.Join(polecatsDir, polecatName, rigName),
+		filepath.Join(polecatsDir, polecatName),
+	}
 }
