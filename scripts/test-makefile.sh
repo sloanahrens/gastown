@@ -18,6 +18,8 @@ bash scripts/uninstall-gt_test.sh
 bash scripts/install-local_test.sh
 bash -n scripts/docs-lint.sh
 bash scripts/docs-lint_test.sh
+bash -n scripts/deep-review.sh
+bash scripts/deep-review_test.sh
 bash scripts/flake-sweep_test.sh
 bash scripts/gate-vs-load_test.sh
 bash scripts/tier-sweep_test.sh
