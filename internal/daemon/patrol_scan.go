@@ -512,8 +512,19 @@ func (h *patrolScanHost) PolecatEscalations(rig string) ([]patrolscan.Escalation
 // GitState measures the seat's worktree with the live probe: the same three
 // facts the reuse verdict reads, measured now, since a recorded cleanup_status
 // says what the turn that ended saw, not what the worktree holds today.
+//
+// The probe runs in the seat's git worktree, resolved the same way the reuse
+// verdict and the checkpoint dog resolve it. Probing the polecats/<name>
+// container instead — which is not a git worktree — never answered, so a seat
+// whose escalation had been resolved could not reach the clean verdict and
+// stayed DEGRADED (gt-okk50).
 func (h *patrolScanHost) GitState(rig, name string) (patrolscan.GitState, error) {
-	path := filepath.Join(h.town(), rig, "polecats", name)
+	polecatsDir := filepath.Join(h.town(), rig, "polecats")
+	path := resolvePolecatWorktree(polecatsDir, name, rig)
+	if path == "" {
+		return patrolscan.GitState{}, fmt.Errorf("no git worktree for polecat %s: tried %s",
+			name, strings.Join(polecatWorktreeCandidates(polecatsDir, name, rig), ", "))
+	}
 	st := h.gitProbe()(path)
 	if st.Source != polecat.GitStateSourceLive {
 		reason := st.FailedReason

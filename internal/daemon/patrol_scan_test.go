@@ -149,35 +149,74 @@ func TestPatrolScanAgentRecordReadsTheBead(t *testing.T) {
 // GitState maps the live worktree probe onto the tick's facts, and turns an
 // answer the probe could not give into an error: the tick clears nothing on a
 // worktree it did not measure.
+//
+// The probe must be handed the seat's git worktree, not the polecats/<name>
+// container the nested layout puts it inside: the container is not a worktree,
+// so probing it never answered and a seat whose escalation had been resolved
+// could not reach the clean verdict (gt-okk50). A seat with no worktree at
+// all is an error naming what was tried, never a silent clean.
 func TestPatrolScanGitState(t *testing.T) {
 	t.Parallel()
+	town := t.TempDir()
+	worktree := func(name, inner string) string {
+		dir := filepath.Join(town, "myr", "polecats", name)
+		if inner != "" {
+			dir = filepath.Join(dir, inner)
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: /elsewhere\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	nested := worktree("nested", "myr") // the container holds the worktree
+	legacy := worktree("legacy", "")    // polecats/<name> is the worktree
+	if err := os.MkdirAll(filepath.Join(town, "myr", "polecats", "empty", "myr"), 0o755); err != nil {
+		t.Fatal(err) // a container with no .git anywhere: no worktree
+	}
+
 	var probed []string
 	h := &patrolScanHost{
-		d: &Daemon{config: &Config{TownRoot: "/town"}},
+		d: &Daemon{config: &Config{TownRoot: town}},
 		gitState: func(path string) polecat.LiveGitState {
 			probed = append(probed, path)
-			if filepath.Base(path) == "clean" {
-				return polecat.LiveGitState{Source: polecat.GitStateSourceLive, Branch: "polecat/clean/gt-a+x",
+			switch path {
+			case nested:
+				return polecat.LiveGitState{Source: polecat.GitStateSourceLive, Branch: "polecat/nested/gt-a+x",
 					Dirty: true, StashCount: 2, UnpushedCommits: 3}
+			case legacy:
+				return polecat.LiveGitState{Source: polecat.GitStateSourceLive, Branch: "polecat/legacy/gt-b+x"}
 			}
 			return polecat.LiveGitState{Source: polecat.GitStateSourceUnknown, FailedReason: "git_state=unknown path=" + path + ": not a worktree root"}
 		},
 	}
 
-	got, err := h.GitState("myr", "clean")
+	got, err := h.GitState("myr", "nested")
 	if err != nil {
 		t.Fatalf("GitState: %v", err)
 	}
-	want := patrolscan.GitState{Branch: "polecat/clean/gt-a+x", Dirty: true, StashCount: 2, UnpushedCommits: 3}
+	want := patrolscan.GitState{Branch: "polecat/nested/gt-a+x", Dirty: true, StashCount: 2, UnpushedCommits: 3}
 	if got != want {
 		t.Fatalf("GitState = %+v, want %+v", got, want)
 	}
-	if _, err := h.GitState("myr", "gone"); err == nil || !strings.Contains(err.Error(), "not a worktree root") {
-		t.Fatalf("GitState(gone) = %v, want the probe's failure", err)
+	if got, err := h.GitState("myr", "legacy"); err != nil || got.Branch != "polecat/legacy/gt-b+x" {
+		t.Fatalf("GitState(legacy) = %+v, %v; want the flat layout's worktree", got, err)
 	}
-	wantPaths := []string{filepath.Join("/town", "myr", "polecats", "clean"), filepath.Join("/town", "myr", "polecats", "gone")}
-	if strings.Join(probed, ",") != strings.Join(wantPaths, ",") {
-		t.Fatalf("probed %v, want %v", probed, wantPaths)
+	// A container exists but holds no worktree, and one holds nothing at all:
+	// both are errors, and neither reaches the probe.
+	for _, name := range []string{"empty", "gone"} {
+		_, err := h.GitState("myr", name)
+		dir := filepath.Join(town, "myr", "polecats", name)
+		if err == nil || !strings.Contains(err.Error(), filepath.Join(dir, "myr")) ||
+			!strings.Contains(err.Error(), dir) {
+			t.Fatalf("GitState(%s) = %v, want an error naming both paths tried", name, err)
+		}
+	}
+	wantProbed := []string{nested, legacy}
+	if strings.Join(probed, ",") != strings.Join(wantProbed, ",") {
+		t.Fatalf("probed %v, want %v", probed, wantProbed)
 	}
 }
 
