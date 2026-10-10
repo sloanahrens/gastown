@@ -53,6 +53,9 @@ func (b *Beads) AppendNotes(id, note string) error {
 			return target.AppendNotes(id, note)
 		}
 	}
+	// A dash-leading note needs no separator: bd takes the next argument as
+	// --append-notes' value whatever it looks like, unlike a bare positional
+	// (gt-1q9nl).
 	_, err := b.run("update", id, "--append-notes", note)
 	return err
 }
