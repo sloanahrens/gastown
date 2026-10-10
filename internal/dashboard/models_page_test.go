@@ -48,7 +48,9 @@ func TestTheModelsStripReadsAsOneLine(t *testing.T) {
 
 // The strip reads the models from the configs, but the seats are the polecats
 // the rest of the page counts: a strip that counted its own would be a second
-// reading of the town, and free to disagree with the seats pane (gt-bj47s).
+// reading of the town, and free to disagree with the seats pane. A seat is held
+// by the polecats the dispatcher counts toward capacity, not by every polecat
+// the town has: the idle done ones are not sitting in a seat (gt-nkvrk).
 func TestTheHeaderStripCountsTheSeatsThePageCounts(t *testing.T) {
 	t.Parallel()
 
@@ -58,10 +60,16 @@ func TestTheHeaderStripCountsTheSeatsThePageCounts(t *testing.T) {
 		Models: func() *Models { return &Models{Polecat: "deepseek-flash", SeatCap: 4, OM: "sonnet"} },
 		Summary: func() Summary {
 			return Summary{Polecats: []Polecat{
-				{Rig: "gastown", Name: "agate"},
-				{Rig: "gastown", Name: "basalt"},
-				// A parked rig is stood down on purpose: it holds no seat.
-				{Rig: "old", Name: "ceded", RigParked: true},
+				{Rig: "gastown", Name: "agate", CountsTowardCapacity: true},
+				{Rig: "gastown", Name: "basalt", CountsTowardCapacity: true},
+				// Three polecats the dispatcher does not count: idle, done, no
+				// work. They hold no seat.
+				{Rig: "gastown", Name: "chert"},
+				{Rig: "gastown", Name: "dolomite"},
+				{Rig: "gastown", Name: "epidote"},
+				// A parked rig is stood down on purpose: even a
+				// capacity-counting polecat there holds no seat.
+				{Rig: "old", Name: "ceded", CountsTowardCapacity: true, RigParked: true},
 			}}
 		},
 	})
