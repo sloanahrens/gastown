@@ -71,8 +71,8 @@ decides and reports without slinging, labeling or commenting.
      A bead labeled `spec-shape-waived` waives the lint and is slung anyway;
    - `refuse` holds a refused bead the same way and labels it `needs-shape`;
      a bead that needs planning is held exactly as under `warn` (gt-tod3q).
-     Under either gate the plan jobs themselves are `patrols.steward_plan`, in
-     [Steward jobs](steward-jobs.md#configuration).
+     Under either gate the tick spawns no planner (gt-4rizh), so a held bead
+     waits for the operator.
 4. A spec that clears the shape gate takes the first free seat and is slung
    through the shared rig-dispatch path in-process, with no auto-convoy.
 

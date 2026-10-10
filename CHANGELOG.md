@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **The steward job runner** (gt-4rizh, gt-m7ffk) — the daemon-side patrol that
+  spawned one headless job per landing-queue event, its ledger and monitoring,
+  and the plan jobs behind `patrols.steward_plan`. It was already off
+  (`daemon.patrols.steward.enabled: false`), so `internal/steward` and
+  `docs/guides/steward-jobs.md` were dead code and are gone. The retired
+  `patrols.steward` and `patrols.steward_plan` keys are still tolerated and
+  ignored, so a stale `mayor/daemon.json` or `settings/config.json` loads
+  cleanly; the dispatcher spawns no planner and holds a needs-planning spec
+  for the operator.
+
 - **`rebuild-gt` plugin** (gt-4k3fj.8.6) — the lifecycle-shaped `run.sh` plugin
   that brought the installed `gt` in force from `main`. It is now the daemon's
   `rebuild_gt` job (below). Its replacement is not a deletion into nothing:
