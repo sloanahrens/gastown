@@ -2,12 +2,30 @@ package atomicfile
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 )
+
+// onlyEntry fails unless dir holds exactly the named entry.
+func onlyEntry(t *testing.T, dir, name string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	names := make([]string, len(entries))
+	for i, e := range entries {
+		names[i] = e.Name()
+	}
+	if len(entries) != 1 || entries[0].Name() != name {
+		t.Errorf("dir holds %v, want only %q (a temp file survived)", names, name)
+	}
+}
 
 func TestWriteJSON(t *testing.T) {
 	t.Parallel()
@@ -535,4 +553,145 @@ func TestWriteFileConcurrentIntegrity(t *testing.T) {
 			t.Fatalf("Data corruption at byte %d: expected %d, got %d (cross-writer contamination)", i, expected, b)
 		}
 	}
+}
+
+// TestWriteFileSyncOrder: the temp file is synced before the rename and the
+// parent directory after it, so the destination does not exist yet when the
+// file sync runs and already holds the new bytes when the directory sync runs
+// (gt-9rrnq).
+func TestWriteFileSyncOrder(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	target := filepath.Join(tmpDir, "ordered.txt")
+
+	var events []string
+	syncFile := func(f *os.File) error {
+		events = append(events, "file")
+		if _, err := os.Stat(target); !os.IsNotExist(err) {
+			t.Errorf("destination visible during the file sync (stat err = %v); the rename ran first", err)
+		}
+		return osSyncFile(f)
+	}
+	syncDir := func(dir string) error {
+		events = append(events, "dir")
+		got, err := os.ReadFile(target)
+		if err != nil {
+			t.Errorf("destination unreadable during the directory sync: %v", err)
+		} else if string(got) != "durable" {
+			t.Errorf("destination during the directory sync = %q, want %q; the rename ran after the sync", got, "durable")
+		}
+		return osSyncDir(dir)
+	}
+
+	if err := writeFile(target, []byte("durable"), 0644, syncFile, syncDir); err != nil {
+		t.Fatalf("writeFile error: %v", err)
+	}
+
+	want := []string{"file", "dir"}
+	if len(events) != len(want) || events[0] != want[0] || events[1] != want[1] {
+		t.Errorf("sync order = %v, want %v", events, want)
+	}
+	content, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile error: %v", err)
+	}
+	if string(content) != "durable" {
+		t.Errorf("content = %q, want %q", content, "durable")
+	}
+	onlyEntry(t, tmpDir, "ordered.txt")
+}
+
+// TestWriteFileFileSyncFailurePreservesDestination: a failed file sync returns
+// the error, removes the temp file and leaves the previous contents in place,
+// so the caller can retry (gt-9rrnq).
+func TestWriteFileFileSyncFailurePreservesDestination(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	target := filepath.Join(tmpDir, "kept.txt")
+	if err := os.WriteFile(target, []byte("previous"), 0644); err != nil {
+		t.Fatalf("seed destination: %v", err)
+	}
+
+	syncErr := errors.New("sync: simulated failure")
+	err := writeFile(target, []byte("new"), 0644,
+		func(*os.File) error { return syncErr },
+		func(string) error {
+			t.Error("directory sync ran after the file sync failed; the rename should not have happened")
+			return nil
+		},
+	)
+	if !errors.Is(err, syncErr) {
+		t.Fatalf("writeFile error = %v, want the sync error %v", err, syncErr)
+	}
+	content, readErr := os.ReadFile(target)
+	if readErr != nil {
+		t.Fatalf("ReadFile error: %v", readErr)
+	}
+	if string(content) != "previous" {
+		t.Errorf("destination = %q, want the old contents %q", content, "previous")
+	}
+	onlyEntry(t, tmpDir, "kept.txt")
+}
+
+// TestWriteFileUnsupportedDirSyncIgnored: a filesystem that will not sync a
+// directory (EINVAL on macOS and the BSDs, ENOTSUP where it is stated) is not
+// a failed write — the rename is still atomic and the new contents stand
+// (gt-9rrnq).
+func TestWriteFileUnsupportedDirSyncIgnored(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"EINVAL", syscall.EINVAL},
+		{"ENOTSUP", syscall.ENOTSUP},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tmpDir := t.TempDir()
+			target := filepath.Join(tmpDir, "unsupported.txt")
+
+			err := writeFile(target, []byte("written"), 0644,
+				func(f *os.File) error { return f.Sync() },
+				func(string) error { return tc.err },
+			)
+			if err != nil {
+				t.Fatalf("writeFile error = %v, want nil for an unsupported directory sync", err)
+			}
+			content, err := os.ReadFile(target)
+			if err != nil {
+				t.Fatalf("ReadFile error: %v", err)
+			}
+			if string(content) != "written" {
+				t.Errorf("content = %q, want %q", content, "written")
+			}
+			onlyEntry(t, tmpDir, "unsupported.txt")
+		})
+	}
+}
+
+// TestWriteFileDirSyncErrorReturned: any other directory sync failure is
+// reported, not swallowed, so the caller learns the rename may not survive a
+// power loss (gt-9rrnq).
+func TestWriteFileDirSyncErrorReturned(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	target := filepath.Join(tmpDir, "reported.txt")
+
+	syncErr := errors.New("dir sync: simulated failure")
+	err := writeFile(target, []byte("written"), 0644,
+		func(f *os.File) error { return f.Sync() },
+		func(string) error { return syncErr },
+	)
+	if !errors.Is(err, syncErr) {
+		t.Fatalf("writeFile error = %v, want the directory sync error %v", err, syncErr)
+	}
+	content, readErr := os.ReadFile(target)
+	if readErr != nil {
+		t.Fatalf("ReadFile error: %v", readErr)
+	}
+	if string(content) != "written" {
+		t.Errorf("content = %q, want %q", content, "written")
+	}
+	onlyEntry(t, tmpDir, "reported.txt")
 }
