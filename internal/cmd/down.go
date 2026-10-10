@@ -102,20 +102,63 @@ func runDown(cmd *cobra.Command, args []string) error {
 	return runDownIn(townRoot)
 }
 
+// downServices is gt down's teardown of the town-level services: the daemon,
+// Dolt, and the stray Dolt servers around them. None of it reads the rig
+// registry or needs tmux, so a town whose rigs.json will not load still gets
+// all of it (gt-sjtps). The fields are the seam a unit test replaces to watch
+// that happen without signaling the host's real daemon and Dolt, and without
+// reading the host's process table (docs/testing.md).
+type downServices struct {
+	daemonRunning    func(townRoot string) (bool, int, error)
+	stopDaemon       func(townRoot string) error
+	doltRunning      func(townRoot string) (bool, int, error)
+	stopDolt         func(townRoot string) error
+	killImposters    func(townRoot string) error
+	findIdleMonitors func(townRoot string) []int
+	findOrphans      func(townRoot string) []int
+}
+
+// realDownServices is downServices on the running host.
+func realDownServices() downServices {
+	return downServices{
+		daemonRunning:    daemon.IsRunning,
+		stopDaemon:       daemon.StopDaemon,
+		doltRunning:      doltserver.IsRunning,
+		stopDolt:         doltserver.Stop,
+		killImposters:    doltserver.KillImposters,
+		findIdleMonitors: doltserver.FindIdleMonitorProcesses,
+		findOrphans:      findOrphanDoltServers,
+	}
+}
+
 // runDownIn tears down the town at townRoot. Split from runDown so the town
 // root is a parameter a unit test can supply without chdir (docs/testing.md).
 func runDownIn(townRoot string) error {
-	// A rigs.json we cannot read is not an empty town. Fail before any
-	// teardown, so gt down never reports success after skipping every rig's
-	// agents because their registry would not load (gt-52mgl).
-	rigsConfig, err := config.LoadRigsConfigOrEmpty(constants.MayorRigsPath(townRoot))
-	if err != nil {
-		return fmt.Errorf("loading rigs config: %w", err)
-	}
+	return runDownWith(townRoot, realDownServices())
+}
 
-	t := tmux.NewTmux()
-	if !t.IsAvailable() {
-		return fmt.Errorf("tmux not available (is tmux installed and on PATH?)")
+// runDownWith is runDownIn with the town-level services supplied.
+//
+// A rigs.json that will not load is not an empty town, and it is not a reason
+// to leave the town running either. The registry is only what names a rig's
+// sessions, so without it the session phases are skipped, reported, and the
+// shutdown still stops the daemon and Dolt, which need neither the registry
+// nor tmux, and still exits non-zero naming the load error (gt-52mgl,
+// gt-sjtps).
+func runDownWith(townRoot string, svc downServices) error {
+	rigsConfig, rigsErr := config.LoadRigsConfigOrEmpty(constants.MayorRigsPath(townRoot))
+
+	// The session phases read tmux, and the registry is what names the
+	// sessions they stop. A registry that will not load leaves nothing to
+	// name, so gt down does not open tmux for it: the legacy-socket sweep,
+	// --all's verification and --nuke go with the per-rig stops, and the
+	// services below are stopped without tmux (gt-sjtps).
+	var t *tmux.Tmux
+	if rigsConfig != nil {
+		t = tmux.NewTmux()
+		if !t.IsAvailable() {
+			return fmt.Errorf("tmux not available (is tmux installed and on PATH?)")
+		}
 	}
 
 	// Phase 0: Acquire shutdown lock (skip for dry-run)
@@ -143,7 +186,9 @@ func runDownIn(townRoot string) error {
 		// By default, tmux exits when there are no sessions (exit-empty on).
 		// This ensures the server stays running for subsequent `gt up`.
 		// Ignore errors - if there's no server, nothing to configure.
-		_ = t.SetExitEmpty(false)
+		if t != nil {
+			_ = t.SetExitEmpty(false)
+		}
 	}
 	allOK := true
 
@@ -154,63 +199,232 @@ func runDownIn(townRoot string) error {
 
 	rigs := discoverRigs(townRoot)
 
-	// Every session gt down ends goes through the supervisor's operator
-	// stop: logged with the actor, and not refused by an e-stop, since an
-	// operator shutting the town down is what an e-stop asks for
-	// (gt-4k3fj.4.1).
-	stop := downStop{tmux: t, sup: operatorSupervisor(townRoot), townRoot: townRoot, actor: operatorActor("gt down"), force: downForce}
-
-	// Phase 0.5: Stop polecats if --polecats
-	if downPolecats {
-		if downDryRun {
-			fmt.Println("Would stop polecats...")
-		} else {
-			fmt.Println("Stopping polecats...")
-		}
-		polecatsStopped := stopAllPolecats(t, stop, townRoot, rigsConfig, rigs, downForce, downDryRun)
-		if downDryRun {
-			if polecatsStopped > 0 {
-				printDownStatus("Polecats", true, fmt.Sprintf("%d would stop", polecatsStopped))
-			} else {
-				printDownStatus("Polecats", true, "none running")
-			}
-		} else {
-			if polecatsStopped > 0 {
-				printDownStatus("Polecats", true, fmt.Sprintf("%d stopped", polecatsStopped))
-			} else {
-				printDownStatus("Polecats", true, "none running")
-			}
-		}
-		fmt.Println()
-	}
-
-	// Phase 0.6: Stop crew member sessions.
-	// Crew sessions consume tokens and must be stopped during any shutdown.
-	crewStopped := stopAllCrew(t, stop, townRoot, rigsConfig, rigs, downDryRun)
-	if downDryRun {
-		if crewStopped > 0 {
-			printDownStatus("Crew", true, fmt.Sprintf("%d would stop", crewStopped))
-		}
+	// Phases 0.5 and 0.6: the per-rig agent sessions, polecats and crew. No
+	// registry means no tmux was opened for them, so they are reported as
+	// skipped and the services below still run (gt-sjtps).
+	crewStopped := 0
+	if t == nil {
+		reportRigSessionsSkipped(rigs, rigsErr)
 	} else {
-		if crewStopped > 0 {
-			printDownStatus("Crew", true, fmt.Sprintf("%d stopped", crewStopped))
+		// Every session gt down ends goes through the supervisor's operator
+		// stop: logged with the actor, and not refused by an e-stop, since an
+		// operator shutting the town down is what an e-stop asks for
+		// (gt-4k3fj.4.1).
+		stop := downStop{tmux: t, sup: operatorSupervisor(townRoot), townRoot: townRoot, actor: operatorActor("gt down"), force: downForce}
+
+		// Phase 0.5: Stop polecats if --polecats
+		if downPolecats {
+			if downDryRun {
+				fmt.Println("Would stop polecats...")
+			} else {
+				fmt.Println("Stopping polecats...")
+			}
+			polecatsStopped := stopAllPolecats(t, stop, townRoot, rigsConfig, rigs, downForce, downDryRun)
+			if downDryRun {
+				if polecatsStopped > 0 {
+					printDownStatus("Polecats", true, fmt.Sprintf("%d would stop", polecatsStopped))
+				} else {
+					printDownStatus("Polecats", true, "none running")
+				}
+			} else {
+				if polecatsStopped > 0 {
+					printDownStatus("Polecats", true, fmt.Sprintf("%d stopped", polecatsStopped))
+				} else {
+					printDownStatus("Polecats", true, "none running")
+				}
+			}
+			fmt.Println()
+		}
+
+		// Phase 0.6: Stop crew member sessions.
+		// Crew sessions consume tokens and must be stopped during any shutdown.
+		crewStopped = stopAllCrew(t, stop, townRoot, rigsConfig, rigs, downDryRun)
+		if downDryRun {
+			if crewStopped > 0 {
+				printDownStatus("Crew", true, fmt.Sprintf("%d would stop", crewStopped))
+			}
+		} else {
+			if crewStopped > 0 {
+				printDownStatus("Crew", true, fmt.Sprintf("%d stopped", crewStopped))
+			}
 		}
 	}
+
+	// Phases 4 and 4b: the town-level services. They need neither the registry
+	// nor tmux, so they are stopped whether or not the session phases above
+	// ran (gt-sjtps).
+	if !stopTownServices(townRoot, svc, downDryRun) {
+		allOK = false
+	}
+
+	// The tail of the shutdown reads tmux: the legacy-socket sweep, --all's
+	// verification and --nuke. A town whose registry would not load has no
+	// tmux open (see above), and the run already reports that and exits
+	// non-zero (gt-sjtps).
+	if t != nil {
+		// Phase 4c: Clean up legacy socket sessions.
+		// Old binaries created sessions on the "default" tmux socket or on the
+		// basename-only socket (e.g., "gt" instead of "gt-a1b2c3"). After
+		// transitioning to path-hashed sockets, ghost sessions on old sockets
+		// persist and cause split-brain.
+		if !downDryRun {
+			cleaned := cleanupLegacyDefaultSocket()
+			if cleaned > 0 {
+				printDownStatus("Legacy sessions", true, fmt.Sprintf("cleaned %d from 'default' socket", cleaned))
+			}
+			cleaned = cleanupLegacyBaseSocket(townRoot)
+			if cleaned > 0 {
+				printDownStatus("Legacy sessions", true, fmt.Sprintf("cleaned %d from old basename socket", cleaned))
+			}
+		} else {
+			count := countLegacyDefaultSocketSessions()
+			if count > 0 {
+				printDownStatus("Legacy sessions", true, fmt.Sprintf("%d would be cleaned from 'default' socket", count))
+			}
+			count = countLegacyBaseSocketSessions(townRoot)
+			if count > 0 {
+				printDownStatus("Legacy sessions", true, fmt.Sprintf("%d would be cleaned from old basename socket", count))
+			}
+		}
+
+		// Phase 5: Orphan cleanup and verification (--all or --force)
+		if (downAll || downForce) && !downDryRun {
+			fmt.Println()
+
+			// Kill any processes tracked via PID files (defense-in-depth for
+			// processes that survived normal session teardown).
+			killed, pidErrs := session.KillTrackedPIDs(townRoot)
+			if killed > 0 {
+				fmt.Printf("  Killed %d tracked orphan process(es) via PID files\n", killed)
+			}
+			for _, e := range pidErrs {
+				fmt.Printf("  PID cleanup warning: %s\n", e)
+			}
+
+			fmt.Println("Cleaning up orphaned Claude processes...")
+			cleanupOrphanedClaude(defaultDownOrphanGraceSecs)
+
+			clockwork.NewRealClock().Sleep(500 * time.Millisecond)
+			respawned := verifyShutdown(townRegistry(), t, townRoot)
+			if len(respawned) > 0 {
+				fmt.Println()
+				fmt.Printf("%s Warning: Some processes may have respawned:\n", style.Bold.Render("⚠"))
+				for _, r := range respawned {
+					fmt.Printf("  • %s\n", r)
+				}
+				fmt.Println()
+				fmt.Printf("This may indicate a process manager is respawning agents.\n")
+				fmt.Printf("Check with:\n")
+				fmt.Printf("  %s\n", style.Dim.Render("ps aux | grep claude  # Find respawned processes"))
+				fmt.Printf("  %s\n", style.Dim.Render("gt status             # Verify town state"))
+				allOK = false
+			}
+		}
+
+		// Phase 6: Nuke tmux server (--nuke only)
+		// Each town uses a per-town tmux socket derived from a hash of the town's
+		// canonical path (see registry.go townSocketName), so --nuke only affects
+		// this town's server. Users may also have opened custom windows/panes, so
+		// we require confirmation.
+		if downNuke {
+			socket := tmux.GetDefaultSocket()
+			socketLabel := "default"
+			if socket != "" {
+				socketLabel = socket
+			}
+			if downDryRun {
+				printDownStatus("Tmux server", true, fmt.Sprintf("would kill (socket: %s)", socketLabel))
+			} else if !downNukeAck {
+				fmt.Println()
+				fmt.Printf("%s The --nuke flag kills this town's tmux server (socket: %s).\n",
+					style.Bold.Render("⚠ BLOCKED:"), socketLabel)
+				fmt.Printf("This will destroy all tmux sessions on this socket, including any custom windows you opened.\n")
+				fmt.Println()
+				fmt.Printf("To proceed, run with: %s\n", style.Bold.Render("gt down --nuke --nuke-acknowledged"))
+				allOK = false
+			} else {
+				if err := t.KillServer(); err != nil {
+					printDownStatus("Tmux server", false, err.Error())
+					allOK = false
+				} else {
+					printDownStatus("Tmux server", true, fmt.Sprintf("killed (socket: %s)", socketLabel))
+				}
+			}
+		}
+	}
+
+	// Summary
+	fmt.Println()
+	if rigsErr != nil {
+		// An unreadable registry is a failure with its own cause — the
+		// town-level services may well have stopped cleanly — so name it and
+		// the agents it left running, not "some services failed" (gt-sjtps).
+		// A dry run is included: it must not exit 0 over a town that a real
+		// run could not read.
+		fmt.Printf("%s Rig registry unreadable\n", style.Bold.Render("✗"))
+		return fmt.Errorf("%s not stopped: loading rigs config: %w", rigAgentsNotStopped(rigs), rigsErr)
+	}
+
+	if downDryRun {
+		fmt.Println("═══ DRY RUN COMPLETE (no changes made) ═══")
+		return nil
+	}
+
+	if !allOK {
+		fmt.Printf("%s Some services failed to stop\n", style.Bold.Render("✗"))
+		return fmt.Errorf("not all services stopped")
+	}
+
+	fmt.Printf("%s All services stopped\n", style.Bold.Render("✓"))
+	stoppedServices := []string{"dolt", "daemon"}
+	if crewStopped > 0 {
+		stoppedServices = append(stoppedServices, "crew")
+	}
+	if downPolecats {
+		stoppedServices = append(stoppedServices, "polecats")
+	}
+	if downAll {
+		stoppedServices = append(stoppedServices, "bd-processes")
+	}
+	if downNuke {
+		stoppedServices = append(stoppedServices, "tmux-server")
+	}
+	_ = events.LogFeed(events.TypeHalt, events.ActorGt, events.HaltPayload(stoppedServices))
+
+	return nil
+}
+
+// reportRigSessionsSkipped warns that the session teardown was skipped because
+// the rig registry would not load, and why. It is the operator's notice that
+// the town stopped but the rigs did not (gt-sjtps).
+func reportRigSessionsSkipped(rigNames []string, rigsErr error) {
+	printDownStatus("Rig sessions", false,
+		fmt.Sprintf("%s not stopped: %v", rigAgentsNotStopped(rigNames), rigsErr))
+}
+
+// stopTownServices stops the services that need neither the rig registry nor
+// tmux: the daemon, Dolt, and the stray Dolt servers around them, plus the
+// .beads/dolt directories that would respawn one. It reports each phase as it
+// goes and returns whether every service it acted on reached the state it
+// wanted, so a town whose registry will not load stops the same services as
+// any other (gt-sjtps).
+func stopTownServices(townRoot string, svc downServices, dryRun bool) bool {
+	ok := true
 
 	// Phase 4: Stop Daemon
-	running, pid, daemonErr := daemon.IsRunning(townRoot)
+	running, pid, daemonErr := svc.daemonRunning(townRoot)
 	if daemonErr != nil {
 		printDownStatus("Daemon", false, fmt.Sprintf("status check failed: %v", daemonErr))
-		allOK = false
-	} else if downDryRun {
+		ok = false
+	} else if dryRun {
 		if running {
 			printDownStatus("Daemon", true, fmt.Sprintf("would stop (PID %d)", pid))
 		}
 	} else {
 		if running {
-			if err := daemon.StopDaemon(townRoot); err != nil {
+			if err := svc.stopDaemon(townRoot); err != nil {
 				printDownStatus("Daemon", false, err.Error())
-				allOK = false
+				ok = false
 			} else if pid > 0 {
 				printDownStatus("Daemon", true, fmt.Sprintf("stopped (was PID %d)", pid))
 			} else {
@@ -225,9 +439,9 @@ func runDownIn(townRoot string) error {
 	// These background processes respawn per-agent Dolt servers after they're
 	// terminated, creating a race condition where rogues grab the port before
 	// the canonical server can restart. Must be stopped BEFORE Dolt shutdown.
-	idleMonitors := doltserver.FindIdleMonitorProcesses(townRoot)
+	idleMonitors := svc.findIdleMonitors(townRoot)
 	if len(idleMonitors) > 0 {
-		if downDryRun {
+		if dryRun {
 			printDownStatus("Dolt idle-monitors", true, fmt.Sprintf("%d would stop", len(idleMonitors)))
 		} else {
 			stopped := stopIdleMonitors(idleMonitors)
@@ -240,19 +454,19 @@ func runDownIn(townRoot string) error {
 	// Phase 4b-ii: Stop Dolt server
 	doltCfg := doltserver.DefaultConfig(townRoot)
 	if _, statErr := os.Stat(doltCfg.DataDir); statErr == nil {
-		doltRunning, doltPid, doltErr := doltserver.IsRunning(townRoot)
+		doltRunning, doltPid, doltErr := svc.doltRunning(townRoot)
 		if doltErr != nil {
 			printDownStatus("Dolt", false, fmt.Sprintf("status check failed: %v", doltErr))
-			allOK = false
-		} else if downDryRun {
+			ok = false
+		} else if dryRun {
 			if doltRunning {
 				printDownStatus("Dolt", true, fmt.Sprintf("would stop (PID %d)", doltPid))
 			}
 		} else {
 			if doltRunning {
-				if err := doltserver.Stop(townRoot); err != nil {
+				if err := svc.stopDolt(townRoot); err != nil {
 					printDownStatus("Dolt", false, err.Error())
-					allOK = false
+					ok = false
 				} else {
 					printDownStatus("Dolt", true, fmt.Sprintf("stopped (was PID %d)", doltPid))
 				}
@@ -267,12 +481,12 @@ func runDownIn(townRoot string) error {
 	// from .beads/dolt/ directories may still be running. KillImposters only
 	// catches servers on our port, so also scan for any dolt sql-server
 	// processes rooted in this town's directory tree.
-	if !downDryRun {
-		if err := doltserver.KillImposters(townRoot); err != nil {
+	if !dryRun {
+		if err := svc.killImposters(townRoot); err != nil {
 			printDownStatus("Dolt imposters", false, err.Error())
-			allOK = false
+			ok = false
 		}
-		orphanDolts := findOrphanDoltServers(townRoot)
+		orphanDolts := svc.findOrphans(townRoot)
 		if len(orphanDolts) > 0 {
 			stopped := stopOrphanDoltServers(orphanDolts)
 			if stopped > 0 {
@@ -284,7 +498,7 @@ func runDownIn(townRoot string) error {
 		if conflictPID > 0 {
 			printDownStatus("Dolt imposters", true, fmt.Sprintf("would stop imposter (PID %d)", conflictPID))
 		}
-		orphanDolts := findOrphanDoltServers(townRoot)
+		orphanDolts := svc.findOrphans(townRoot)
 		if len(orphanDolts) > 0 {
 			printDownStatus("Dolt orphans", true, fmt.Sprintf("%d rogue server(s) would stop", len(orphanDolts)))
 		}
@@ -296,7 +510,7 @@ func runDownIn(townRoot string) error {
 	// Data has already been migrated to .dolt-data/ by gt dolt migrate.
 	beadsDoltDirs := findBeadsDoltDirs(townRoot)
 	if len(beadsDoltDirs) > 0 {
-		if downDryRun {
+		if dryRun {
 			printDownStatus("Beads dolt dirs", true, fmt.Sprintf("%d would remove", len(beadsDoltDirs)))
 		} else {
 			removed := removeBeadsDoltDirs(beadsDoltDirs)
@@ -306,132 +520,25 @@ func runDownIn(townRoot string) error {
 		}
 	}
 
-	// Phase 4c: Clean up legacy socket sessions.
-	// Old binaries created sessions on the "default" tmux socket or on the
-	// basename-only socket (e.g., "gt" instead of "gt-a1b2c3"). After
-	// transitioning to path-hashed sockets, ghost sessions on old sockets
-	// persist and cause split-brain.
-	if !downDryRun {
-		cleaned := cleanupLegacyDefaultSocket()
-		if cleaned > 0 {
-			printDownStatus("Legacy sessions", true, fmt.Sprintf("cleaned %d from 'default' socket", cleaned))
-		}
-		cleaned = cleanupLegacyBaseSocket(townRoot)
-		if cleaned > 0 {
-			printDownStatus("Legacy sessions", true, fmt.Sprintf("cleaned %d from old basename socket", cleaned))
-		}
-	} else {
-		count := countLegacyDefaultSocketSessions()
-		if count > 0 {
-			printDownStatus("Legacy sessions", true, fmt.Sprintf("%d would be cleaned from 'default' socket", count))
-		}
-		count = countLegacyBaseSocketSessions(townRoot)
-		if count > 0 {
-			printDownStatus("Legacy sessions", true, fmt.Sprintf("%d would be cleaned from old basename socket", count))
-		}
+	return ok
+}
+
+// rigAgentsNotStopped names the per-rig agents gt down left running, for the
+// messages an operator reads. An empty list means the town directory named no
+// rig, which is what a town with a damaged registry and no rig directories
+// leaves behind.
+func rigAgentsNotStopped(rigNames []string) string {
+	if len(rigNames) == 0 {
+		return "the per-rig agents"
 	}
-
-	// Phase 5: Orphan cleanup and verification (--all or --force)
-	if (downAll || downForce) && !downDryRun {
-		fmt.Println()
-
-		// Kill any processes tracked via PID files (defense-in-depth for
-		// processes that survived normal session teardown).
-		killed, pidErrs := session.KillTrackedPIDs(townRoot)
-		if killed > 0 {
-			fmt.Printf("  Killed %d tracked orphan process(es) via PID files\n", killed)
-		}
-		for _, e := range pidErrs {
-			fmt.Printf("  PID cleanup warning: %s\n", e)
-		}
-
-		fmt.Println("Cleaning up orphaned Claude processes...")
-		cleanupOrphanedClaude(defaultDownOrphanGraceSecs)
-
-		clockwork.NewRealClock().Sleep(500 * time.Millisecond)
-		respawned := verifyShutdown(townRegistry(), t, townRoot)
-		if len(respawned) > 0 {
-			fmt.Println()
-			fmt.Printf("%s Warning: Some processes may have respawned:\n", style.Bold.Render("⚠"))
-			for _, r := range respawned {
-				fmt.Printf("  • %s\n", r)
-			}
-			fmt.Println()
-			fmt.Printf("This may indicate a process manager is respawning agents.\n")
-			fmt.Printf("Check with:\n")
-			fmt.Printf("  %s\n", style.Dim.Render("ps aux | grep claude  # Find respawned processes"))
-			fmt.Printf("  %s\n", style.Dim.Render("gt status             # Verify town state"))
-			allOK = false
-		}
-	}
-
-	// Phase 6: Nuke tmux server (--nuke only)
-	// Each town uses a per-town tmux socket derived from a hash of the town's
-	// canonical path (see registry.go townSocketName), so --nuke only affects
-	// this town's server. Users may also have opened custom windows/panes, so
-	// we require confirmation.
-	if downNuke {
-		socket := tmux.GetDefaultSocket()
-		socketLabel := "default"
-		if socket != "" {
-			socketLabel = socket
-		}
-		if downDryRun {
-			printDownStatus("Tmux server", true, fmt.Sprintf("would kill (socket: %s)", socketLabel))
-		} else if !downNukeAck {
-			fmt.Println()
-			fmt.Printf("%s The --nuke flag kills this town's tmux server (socket: %s).\n",
-				style.Bold.Render("⚠ BLOCKED:"), socketLabel)
-			fmt.Printf("This will destroy all tmux sessions on this socket, including any custom windows you opened.\n")
-			fmt.Println()
-			fmt.Printf("To proceed, run with: %s\n", style.Bold.Render("gt down --nuke --nuke-acknowledged"))
-			allOK = false
-		} else {
-			if err := t.KillServer(); err != nil {
-				printDownStatus("Tmux server", false, err.Error())
-				allOK = false
-			} else {
-				printDownStatus("Tmux server", true, fmt.Sprintf("killed (socket: %s)", socketLabel))
-			}
-		}
-	}
-
-	// Summary
-	fmt.Println()
-	if downDryRun {
-		fmt.Println("═══ DRY RUN COMPLETE (no changes made) ═══")
-		return nil
-	}
-
-	if allOK {
-		fmt.Printf("%s All services stopped\n", style.Bold.Render("✓"))
-		stoppedServices := []string{"dolt", "daemon"}
-		if crewStopped > 0 {
-			stoppedServices = append(stoppedServices, "crew")
-		}
-		if downPolecats {
-			stoppedServices = append(stoppedServices, "polecats")
-		}
-		if downAll {
-			stoppedServices = append(stoppedServices, "bd-processes")
-		}
-		if downNuke {
-			stoppedServices = append(stoppedServices, "tmux-server")
-		}
-		_ = events.LogFeed(events.TypeHalt, events.ActorGt, events.HaltPayload(stoppedServices))
-	} else {
-		fmt.Printf("%s Some services failed to stop\n", style.Bold.Render("✗"))
-		return fmt.Errorf("not all services stopped")
-	}
-
-	return nil
+	return "per-rig agents of " + strings.Join(rigNames, ", ")
 }
 
 // stopAllPolecats stops all polecat sessions across all rigs.
 // Stops are performed in parallel for faster teardown.
 // Returns the number of polecats stopped (or would be stopped in dry-run).
-// rigsConfig is the town's rig registry, loaded by the caller so a corrupt
-// rigs.json fails the whole shutdown before any teardown (gt-52mgl).
+// rigsConfig is the town's rig registry; the caller skips this phase when it
+// is nil, which is what an unreadable rigs.json leaves it (gt-52mgl, gt-sjtps).
 func stopAllPolecats(t *tmux.Tmux, stop downStop, townRoot string, rigsConfig *config.RigsConfig, rigNames []string, force bool, dryRun bool) int {
 	stopped := 0
 
@@ -509,8 +616,8 @@ func stopAllPolecats(t *tmux.Tmux, stop downStop, townRoot string, rigsConfig *c
 // stopAllCrew stops all crew member sessions across all rigs.
 // Stops are performed in parallel for faster teardown.
 // Returns the number of crew sessions stopped (or would be stopped in dry-run).
-// rigsConfig is the town's rig registry, loaded by the caller so a corrupt
-// rigs.json fails the whole shutdown before any teardown (gt-52mgl).
+// rigsConfig is the town's rig registry; the caller skips this phase when it
+// is nil, which is what an unreadable rigs.json leaves it (gt-52mgl, gt-sjtps).
 func stopAllCrew(t *tmux.Tmux, stop downStop, townRoot string, rigsConfig *config.RigsConfig, rigNames []string, dryRun bool) int {
 	stopped := 0
 
