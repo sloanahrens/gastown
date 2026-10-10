@@ -3284,9 +3284,17 @@ func TestParseAgentBeadID(t *testing.T) {
 		{"bd-beads-witness", "beads", "witness", "", true},            // bd prefix rig-level singleton
 		{"bd-beads-polecat-pearl", "beads", "polecat", "pearl", true}, // bd prefix rig-level named
 		{"hq-mayor", "", "mayor", "", true},                           // hq prefix town-level
+		// Prefixes longer than three characters (gt-7h6z7): a rig registered
+		// with a long prefix keeps its full rig name, hyphens and all.
+		{"mbca-my_big_cool_app-polecat-nux", "my_big_cool_app", "polecat", "nux", true},
+		{"mbca-my_big_cool_app-crew-dave", "my_big_cool_app", "crew", "dave", true},
+		{"mbca-my_big_cool_app-witness", "my_big_cool_app", "witness", "", true},
+		{"mbca-mayor", "", "mayor", "", true},                // long prefix, town-level
+		{"mbca-polecat-nux", "mbca", "polecat", "nux", true}, // long prefix, collapsed form
 		// Truly invalid patterns
-		{"x-mayor", "", "", "", false},    // Prefix too short (1 char)
-		{"abcd-mayor", "", "", "", false}, // Prefix too long (4 chars)
+		{"x-mayor", "", "", "", false},              // Prefix too short (1 char)
+		{"mbca_my_big_cool_app", "", "", "", false}, // Long prefix with no hyphen separator
+		{"mbca_polecat_nux", "", "", "", false},     // Long prefix, underscores, no separator
 		{"", "", "", "", false},
 	}
 
