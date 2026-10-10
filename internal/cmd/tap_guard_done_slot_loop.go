@@ -57,6 +57,20 @@ var doneSlotLoopKeywords = map[string]bool{"for": true, "while": true, "until": 
 // quoted argument, where no command-word walk can see it.
 var doneSlotLoopRepeaters = map[string]bool{"xargs": true, "watch": true}
 
+// doneSlotLoopLeadWords open a clause or group and are followed by a command:
+// `then for ...`, `else while ...`, `{ until ...; }`, `( watch ... )`. The
+// command behind them is a segment's command word for this rule, so a loop or
+// repeater placed there is policed like one that starts the line (gt-dilqk).
+var doneSlotLoopLeadWords = map[string]bool{"then": true, "do": true, "else": true, "elif": true, "{": true, "(": true}
+
+// doneSlotLoopSkipLead drops the clause and group openers a segment begins with.
+func doneSlotLoopSkipLead(segment []string) []string {
+	for len(segment) > 0 && doneSlotLoopLeadWords[strings.ToLower(segment[0])] {
+		segment = segment[1:]
+	}
+	return segment
+}
+
 // doneSlotLoopWrapperValueFlags names the wrapper flags that take the next
 // token as their value, so payload matching skips `-n 5` whole and still sees
 // the command behind it. An attached value is a single token (`-I{}`, `-n5`,
@@ -168,7 +182,7 @@ func doneSlotLoopHasBlockingLoop(tokens, lowerTokens []string) bool {
 // gate nowhere (gt-7dxw review).
 func doneSlotLoopHasRepeater(tokens []string) bool {
 	for _, segment := range splitShellSegments(tokens) {
-		word, args := segmentCommandWord(segment)
+		word, args := segmentCommandWord(doneSlotLoopSkipLead(segment))
 		word = strings.ToLower(word)
 		if !doneSlotLoopRepeaters[word] {
 			continue
@@ -205,7 +219,7 @@ func doneSlotLoopExecutesGate(tokens []string) bool {
 		return doneSlotLoopExecutesGate(shellTokenize(tokens[0]))
 	}
 	for _, segment := range splitShellSegments(tokens) {
-		word, args := segmentCommandWord(doneSlotLoopLower(segment))
+		word, args := segmentCommandWord(doneSlotLoopLower(doneSlotLoopSkipLead(segment)))
 		switch {
 		case word == "gt":
 			if doneSlotLoopPoliteGtArgs(args) {
@@ -360,7 +374,7 @@ func doneSlotLoopSegmentCommandWords(tokens []string) map[int]bool {
 		}
 		j := i
 		for j < len(tokens) && !shellCommandSeparators[tokens[j]] {
-			if isEnvAssignment(tokens[j]) {
+			if isEnvAssignment(tokens[j]) || doneSlotLoopLeadWords[strings.ToLower(tokens[j])] {
 				j++
 				continue
 			}

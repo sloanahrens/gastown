@@ -119,6 +119,14 @@ func TestParseBdCloseInvocations(t *testing.T) {
 			command: "subd close gt-arno",
 			want:    nil,
 		},
+		{name: "subshell", command: "(bd close gt-arno)", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		{name: "brace group", command: "{ bd close gt-arno; }", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		{name: "behind then", command: "if x; then bd close gt-arno; fi", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		{name: "behind timeout", command: "timeout 30 bd close gt-arno", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		{name: "behind timeout with a flag", command: "timeout -s KILL 30 bd close gt-arno", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		{name: "inside bash -c", command: "bash -c 'bd close gt-arno'", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		{name: "inside bash -lc", command: `bash -lc "bd close -r 'cancel: x' gt-arno"`, want: []bdCloseInvocation{{IDs: []string{"gt-arno"}, Reason: "cancel: x"}}},
+		{name: "a bash -c payload that is not a close", command: "bash -c 'echo bd close gt-arno'", want: nil},
 		{
 			// A variable id is unreadable, so it cannot match a branch and
 			// cannot be judged. It is still reported as an invocation, so

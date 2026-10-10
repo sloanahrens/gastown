@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -108,6 +109,11 @@ func TestMatchesDangerousGitReset(t *testing.T) {
 		{"reset --soft origin/main", "git reset --soft origin/main", true},
 		{"reset --mixed origin/main", "git reset --mixed origin/main", true},
 		{"reset --hard origin/main", "git reset --hard origin/main", true},
+		{"reset --soft FETCH_HEAD", "git fetch origin && git reset --soft FETCH_HEAD", true},
+		{"reset --soft @{u}", "git reset --soft @{u}", true},
+		{"reset --soft @{upstream}", "git reset --soft @{upstream}", true},
+		{"reset --soft main@{upstream}", "git reset --soft main@{upstream}", true},
+		{"reset onto the bare remote name", "git reset --hard origin", true},
 		{"bare reset origin/main (implicit --mixed)", "git reset origin/main", true},
 		{"reset onto upstream/main", "git reset --soft upstream/main", true},
 		{"reset onto long-form remote ref", "git reset --soft refs/remotes/origin/main", true},
@@ -705,6 +711,8 @@ func TestMatchesPolecatMainPush(t *testing.T) {
 		{"HEAD:main", "git push origin HEAD:main", true, true},
 		{"sha:main", "git push origin 8f2a1b3:main", true, true},
 		{"refs/heads form", "git push origin HEAD:refs/heads/main", true, true},
+		{"heads short form", "git push origin HEAD:heads/main", true, true},
+		{"heads short form, master", "git push origin HEAD:heads/master", true, true},
 		{"full ref source and dest", "git push origin refs/heads/main", true, true},
 		{"delete via empty source", "git push origin :main", true, true},
 		{"delete via flag", "git push origin --delete main", true, true},
@@ -2364,5 +2372,38 @@ func TestSplitSpacedCommandFailsTowardChecking(t *testing.T) {
 	}
 	if got := splitSpacedCommand("", " ; "); len(got) != 1 || got[0] != ";" {
 		t.Fatalf("separator-only text = %q, want [;]", got)
+	}
+}
+
+// $'...' is an ANSI-C string in which a backslash escapes the quote: the \' in
+// $'\'a' does not end the string. Read as a plain single quote it did, and the
+// quote that followed swallowed the commands behind it (deep-review gt-dilqk).
+func TestANSICQuotedStringKeepsTheCommandsBehindIt(t *testing.T) {
+	t.Parallel()
+	tokens := []struct {
+		name    string
+		command string
+		want    []string
+	}{
+		{"escaped quote stays inside the string", `echo $'\'a' ; rm -rf / ; echo \'`, []string{"echo", "'a", ";", "rm", "-rf", "/", ";", "echo", "'"}},
+		{"words in the string stay one token", `echo $'a b' c`, []string{"echo", "a b", "c"}},
+		{"an apostrophe in the string", `echo $'it\'s' ok`, []string{"echo", "it's", "ok"}},
+		{"an escaped backslash ends the string normally", `echo $'\\' ; ls`, []string{"echo", `\`, ";", "ls"}},
+		{"a double quote in the string", `echo $'say "hi"' x`, []string{"echo", `say "hi"`, "x"}},
+		{"a plain single quote is unchanged", `echo 'a $b' c`, []string{"echo", "a $b", "c"}},
+	}
+	for _, tt := range tokens {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := shellTokenize(tt.command); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("shellTokenize(%q) = %q, want %q", tt.command, got, tt.want)
+			}
+		})
+	}
+	if reason, _ := evaluateDangerousCommand(`echo $'\'a' ; rm -rf / ; echo \'`, 0, noTownSession); reason == "" {
+		t.Error("rm -rf / behind an ANSI-C string with an escaped quote is not blocked")
+	}
+	if reason, _ := evaluateDangerousCommand(`echo $'rm -rf /'`, 0, noTownSession); reason != "" {
+		t.Errorf("rm -rf / inside an ANSI-C string is only text, but was blocked (%q)", reason)
 	}
 }

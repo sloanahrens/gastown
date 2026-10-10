@@ -306,6 +306,7 @@ func parseBdCloseInvocations(command string) []bdCloseInvocation {
 		if invocation, ok := parseBdCloseSegment(segment); ok {
 			invocations = append(invocations, invocation)
 		}
+		invocations = append(invocations, parseBdCloseShellPayload(segment)...)
 		segment = nil
 	}
 	for _, tok := range tokens {
@@ -321,7 +322,7 @@ func parseBdCloseInvocations(command string) []bdCloseInvocation {
 
 // parseBdCloseSegment parses one shell segment as a possible `bd close`.
 func parseBdCloseSegment(segment []string) (bdCloseInvocation, bool) {
-	tokens := stripLeadingEnvAssignments(segment)
+	tokens := bdCloseCommandTokens(segment)
 	if len(tokens) < 2 {
 		return bdCloseInvocation{}, false
 	}
@@ -392,6 +393,66 @@ func isBdCommandWord(tok string) bool {
 		return true
 	}
 	return strings.HasSuffix(tok, "/bd")
+}
+
+// bdCloseLeadWords open a clause or group and are followed by a command, as in
+// `then bd close X` and `( bd close X )`; bdCloseLaunchers run the command that
+// follows them. Both are looked through so the close behind them is judged
+// (deep-review gt-dilqk).
+var (
+	bdCloseLeadWords = map[string]bool{"then": true, "do": true, "else": true, "elif": true, "{": true, "(": true, "!": true}
+	bdCloseLaunchers = map[string]bool{"time": true, "nohup": true, "exec": true, "sudo": true, "nice": true, "stdbuf": true, "timeout": true}
+)
+
+// bdCloseCommandTokens returns the segment from its command word on: clause and
+// group openers, env assignments and launchers (with their own flags and the
+// duration or priority they take) are dropped from the front, and a group's
+// closing ) or } from the back.
+func bdCloseCommandTokens(segment []string) []string {
+	tokens := segment
+	for len(tokens) > 0 {
+		before := len(tokens)
+		tokens = stripLeadingEnvAssignments(tokens)
+		if len(tokens) > 0 && bdCloseLeadWords[tokens[0]] {
+			tokens = tokens[1:]
+		}
+		if len(tokens) > 0 && bdCloseLaunchers[filepath.Base(tokens[0])] {
+			launcher := filepath.Base(tokens[0])
+			tokens = tokens[1:]
+			for len(tokens) > 0 && strings.HasPrefix(tokens[0], "-") {
+				flag := tokens[0]
+				tokens = tokens[1:]
+				if (launcher == "timeout" && (flag == "-s" || flag == "-k")) || (launcher == "nice" && flag == "-n") {
+					if len(tokens) > 0 {
+						tokens = tokens[1:]
+					}
+				}
+			}
+			if launcher == "timeout" && len(tokens) > 0 {
+				tokens = tokens[1:] // the duration
+			}
+		}
+		if len(tokens) == before {
+			break
+		}
+	}
+	for len(tokens) > 0 && (tokens[len(tokens)-1] == ")" || tokens[len(tokens)-1] == "}") {
+		tokens = tokens[:len(tokens)-1]
+	}
+	return tokens
+}
+
+// parseBdCloseShellPayload reads the closes inside a `bash -c '...'` payload.
+func parseBdCloseShellPayload(segment []string) []bdCloseInvocation {
+	tokens := bdCloseCommandTokens(segment)
+	if len(tokens) < 3 || !shellInvokers[filepath.Base(tokens[0])] {
+		return nil
+	}
+	i := shellCPayloadIndex(tokens[1:])
+	if i < 0 {
+		return nil
+	}
+	return parseBdCloseInvocations(tokens[1+i])
 }
 
 // stripLeadingEnvAssignments drops leading VAR=value tokens (and the
