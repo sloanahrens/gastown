@@ -156,3 +156,60 @@ func TestMainStateCarriesThePromotionRecordInTheSameFile(t *testing.T) {
 		t.Errorf("old state = %+v, want the old fields and a zero promotion record", old)
 	}
 }
+
+// verdictDuringPushRepo is a promotion target whose push writes the verdict
+// another writer of the record leaves while the push runs: the record's
+// last_green and last_run (gt-8iq4h).
+type verdictDuringPushRepo struct {
+	stubPromoteRepo
+	state MainStateStore
+	green string
+}
+
+func (r *verdictDuringPushRepo) PushWithEnv(_, refspec string, _ bool, _ []string) error {
+	r.pushes = append(r.pushes, refspec)
+	st, err := r.state.Load()
+	if err != nil {
+		return err
+	}
+	st.LastGreen, st.LastRun = r.green, r.green
+	return r.state.Save(st)
+}
+
+// TestRedMainPromoteKeepsAVerdictWrittenDuringThePush: the promotion push runs
+// for seconds against the network while the tier sweep and another verdict
+// write this same record, so the worker re-reads the record after the push and
+// replaces only the promotion State — a verdict written while it ran stays
+// (gt-8iq4h).
+func TestRedMainPromoteKeepsAVerdictWrittenDuringThePush(t *testing.T) {
+	t.Parallel()
+	h := newRedMainHarness(t)
+	state := &MemoryMainState{}
+	repo := &verdictDuringPushRepo{
+		stubPromoteRepo: stubPromoteRepo{tip: "aaaa1111", ancestor: true},
+		state:           state,
+		green:           "cccc3333",
+	}
+	h.r.State = state
+	h.r.Promote = &promote.Promoter{
+		Rig:     "gastown",
+		Target:  "git@github.com:example/gastown.git",
+		KeyFile: "/tmp/promote-gastown.key",
+		Repo:    repo,
+		Logf:    t.Logf,
+	}
+
+	pl, res := promotedGreenFile("bbbb2222")
+	h.r.Green(context.Background(), "make test-slow", pl, res)
+
+	st, err := state.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.LastGreen != "cccc3333" || st.LastRun != "cccc3333" {
+		t.Errorf("state = %+v, want the verdict written during the push kept", st)
+	}
+	if st.LastPromoted != "bbbb2222" {
+		t.Errorf("LastPromoted = %q, want the green commit recorded beside it", st.LastPromoted)
+	}
+}

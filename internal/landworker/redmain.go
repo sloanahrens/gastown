@@ -193,11 +193,20 @@ func (r *RedMain) promote(commit string) {
 	if !ok {
 		return
 	}
-	st.State = r.Promote.Promote(st.State, commit)
-	if r.State != nil {
-		if err := r.State.Save(st); err != nil {
-			r.logf("saving the promotion state: %v", err)
-		}
+	promoted := r.Promote.Promote(st.State, commit)
+	if r.State == nil {
+		return
+	}
+	// The push above runs for seconds against the network while the tier
+	// sweep and another verdict write this same record: re-read it and carry
+	// over only the promotion State, so a verdict written during the push
+	// survives this save (gt-8iq4h).
+	if st, ok = r.loadMainState(); !ok {
+		return
+	}
+	st.State = promoted
+	if err := r.State.Save(st); err != nil {
+		r.logf("saving the promotion state: %v", err)
 	}
 }
 
