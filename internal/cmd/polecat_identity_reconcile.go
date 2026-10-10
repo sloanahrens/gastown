@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -32,6 +33,10 @@ Dry-run (default) prints a field table: rig value, town value, winner.
 full town row to <town>/.beads/archive/agent-bead-legacy.jsonl, (3) deletes
 the town row, (4) re-reads both stores and fails loudly on any mismatch.
 Run it one ID at a time from an operator session; never from a patrol.
+
+If bd cannot say whether a hook_bead or active_mr target exists (a Dolt
+timeout, say), the table shows that field as unknown and --apply refuses
+before step 1; it never clears a field because bd could not answer.
 
 The positional argument accepts:
   <rig>/<name>        polecat worker (backward compat default)
@@ -121,8 +126,9 @@ type reconcileStores struct {
 	// local opens the database of dir alone; nil is beads.NewRigLocal.
 	local func(dir string) reconcileStore
 	// exists reports whether ref is a bead, routing by prefix from the
-	// town; nil is a bd show from townRoot.
-	exists func(townRoot, ref string) bool
+	// town; nil is a bd show from townRoot. It returns (false, nil) only
+	// when the store says ref is absent; any other failure is an error.
+	exists func(townRoot, ref string) (bool, error)
 }
 
 func (s reconcileStores) localAt(dir string) reconcileStore {
@@ -132,10 +138,13 @@ func (s reconcileStores) localAt(dir string) reconcileStore {
 	return s.local(dir)
 }
 
-func (s reconcileStores) beadExists(townRoot, ref string) bool {
+func (s reconcileStores) beadExists(townRoot, ref string) (bool, error) {
 	if s.exists == nil {
 		_, err := beads.NewWithBeadsDir(townRoot, "").Show(ref)
-		return err == nil
+		if errors.Is(err, beads.ErrNotFound) {
+			return false, nil
+		}
+		return err == nil, err
 	}
 	return s.exists(townRoot, ref)
 }
@@ -191,10 +200,11 @@ func runReconcile(out io.Writer, stores reconcileStores, townRoot, id string, ap
 	}
 
 	var updates beads.AgentFieldUpdates
+	var mergeErr error
 	if !deleteOnly {
-		exists := func(ref string) bool { return stores.beadExists(townRoot, ref) }
+		exists := func(ref string) (bool, error) { return stores.beadExists(townRoot, ref) }
 		var rows []beads.ReconcileRow
-		updates, rows = beads.MergeLegacyAgentBead(rigIssue, townIssue, exists)
+		updates, rows, mergeErr = beads.MergeLegacyAgentBead(rigIssue, townIssue, exists)
 
 		tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 		fmt.Fprintf(tw, "field\trig\ttown\twinner\n")
@@ -208,6 +218,15 @@ func runReconcile(out io.Writer, stores reconcileStores, townRoot, id string, ap
 		_ = tw.Flush()
 	} else {
 		fmt.Fprintln(out, "delete-only: skipping merge; archive + delete + verify only.")
+	}
+
+	// A read error is not an answer: refuse before any write rather than
+	// clear a field because bd could not say whether its bead exists.
+	if mergeErr != nil {
+		if apply {
+			return fmt.Errorf("refusing --apply, nothing written: %w", mergeErr)
+		}
+		fmt.Fprintf(out, "warning: %v; --apply would refuse until bd answers.\n", mergeErr)
 	}
 
 	if !apply {

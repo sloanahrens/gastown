@@ -1,6 +1,8 @@
 package beads
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -68,9 +70,9 @@ func TestMergeLegacyAgentBead_NewerRowWinsPerField(t *testing.T) {
 	older, newer := time.Date(2026, 9, 8, 18, 55, 0, 0, time.UTC), time.Date(2026, 9, 9, 1, 7, 0, 0, time.UTC)
 	rig := agentIssue("agent_state: spawning\nhook_bead: gt-911\nbranch: polecat/old\n", older)
 	town := agentIssue("agent_state: done\nhook_bead: null\nbranch: polecat/new\n", newer)
-	exists := func(string) bool { return true }
+	exists := func(string) (bool, error) { return true, nil }
 
-	updates, rows := MergeLegacyAgentBead(rig, town, exists)
+	updates, rows, _ := MergeLegacyAgentBead(rig, town, exists)
 	if updates.AgentState == nil || *updates.AgentState != "done" {
 		t.Fatalf("agent_state: newer town value must win, got %v", updates.AgentState)
 	}
@@ -90,9 +92,9 @@ func TestMergeLegacyAgentBead_GhostReferencesAreClearedNeverCopied(t *testing.T)
 	// rig row is NEWER and carries a ghost active_mr; town says null.
 	rig := agentIssue("agent_state: done\nactive_mr: gt-wisp-0yhh\n", newer)
 	town := agentIssue("agent_state: done\nactive_mr: null\n", older)
-	exists := func(id string) bool { return id != "gt-wisp-0yhh" }
+	exists := func(id string) (bool, error) { return id != "gt-wisp-0yhh", nil }
 
-	updates, rows := MergeLegacyAgentBead(rig, town, exists)
+	updates, rows, _ := MergeLegacyAgentBead(rig, town, exists)
 	if updates.ActiveMR == nil || *updates.ActiveMR != "" {
 		t.Fatalf("active_mr referencing a missing bead must be cleared, got %v", updates.ActiveMR)
 	}
@@ -106,12 +108,12 @@ func TestMergeLegacyAgentBead_GhostReferencesAreClearedNeverCopied(t *testing.T)
 // clearing one; severity decides.
 func TestMergeLegacyAgentBead_CleanupStatusReconcilesBySeverityNotRecency(t *testing.T) {
 	older, newer := time.Date(2026, 9, 8, 18, 55, 0, 0, time.UTC), time.Date(2026, 9, 9, 1, 7, 0, 0, time.UTC)
-	exists := func(string) bool { return true }
+	exists := func(string) (bool, error) { return true, nil }
 
 	// newer 'clean' must NOT overwrite older blocking 'has_unpushed'
 	rig := agentIssue("cleanup_status: has_unpushed\n", older)
 	town := agentIssue("cleanup_status: clean\n", newer)
-	updates, rows := MergeLegacyAgentBead(rig, town, exists)
+	updates, rows, _ := MergeLegacyAgentBead(rig, town, exists)
 	if updates.CleanupStatus != nil {
 		t.Fatalf("newer 'clean' must not overwrite blocking 'has_unpushed'; got update %q", *updates.CleanupStatus)
 	}
@@ -122,7 +124,7 @@ func TestMergeLegacyAgentBead_CleanupStatusReconcilesBySeverityNotRecency(t *tes
 	// newer unknown (empty / null) DOES beat older 'clean': unknown fails closed
 	rig2 := agentIssue("cleanup_status: clean\n", older)
 	town2 := agentIssue("cleanup_status: null\n", newer)
-	updates2, _ := MergeLegacyAgentBead(rig2, town2, exists)
+	updates2, _, _ := MergeLegacyAgentBead(rig2, town2, exists)
 	if updates2.CleanupStatus == nil || *updates2.CleanupStatus != "" {
 		t.Fatalf("unknown must beat clean (fail closed); got %v", updates2.CleanupStatus)
 	}
@@ -130,7 +132,7 @@ func TestMergeLegacyAgentBead_CleanupStatusReconcilesBySeverityNotRecency(t *tes
 	// older blocking on the TOWN side also wins over newer rig 'clean'
 	rig3 := agentIssue("cleanup_status: clean\n", newer)
 	town3 := agentIssue("cleanup_status: has_stash\n", older)
-	updates3, _ := MergeLegacyAgentBead(rig3, town3, exists)
+	updates3, _, _ := MergeLegacyAgentBead(rig3, town3, exists)
 	if updates3.CleanupStatus == nil || *updates3.CleanupStatus != "has_stash" {
 		t.Fatalf("blocking town value must win over newer rig 'clean'; got %v", updates3.CleanupStatus)
 	}
@@ -140,8 +142,61 @@ func TestMergeLegacyAgentBead_IdenticalRowsProduceNoUpdates(t *testing.T) {
 	ts := time.Date(2026, 9, 9, 4, 43, 0, 0, time.UTC)
 	rig := agentIssue("agent_state: done\ncleanup_status: clean\n", ts)
 	town := agentIssue("agent_state: done\ncleanup_status: clean\n", ts)
-	updates, rows := MergeLegacyAgentBead(rig, town, func(string) bool { return true })
+	updates, rows, _ := MergeLegacyAgentBead(rig, town, func(string) (bool, error) { return true, nil })
 	if updates != (AgentFieldUpdates{}) || len(rows) != 0 {
 		t.Fatalf("identical rows must produce no updates; got %+v / %+v", updates, rows)
+	}
+}
+
+// A bd read error is not evidence that the bead is gone: the merge produces
+// no updates, marks the field unknown, and returns an ErrUnavailable error.
+func TestMergeLegacyAgentBead_ExistenceErrorProducesNoUpdates(t *testing.T) {
+	older, newer := time.Date(2026, 9, 8, 18, 55, 0, 0, time.UTC), time.Date(2026, 9, 9, 1, 7, 0, 0, time.UTC)
+	// A differing agent_state alongside the ref proves the whole merge is
+	// refused, not only the unanswerable field.
+	rig := agentIssue("agent_state: spawning\nhook_bead: gt-911\nactive_mr: gt-wisp-0yhh\n", newer)
+	town := agentIssue("agent_state: done\nhook_bead: null\nactive_mr: null\n", older)
+	exists := func(string) (bool, error) { return false, fmt.Errorf("dolt timeout: %w", ErrUnavailable) }
+
+	updates, rows, err := MergeLegacyAgentBead(rig, town, exists)
+	if err == nil || !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("err = %v, want one wrapping ErrUnavailable", err)
+	}
+	if updates != (AgentFieldUpdates{}) {
+		t.Fatalf("a read error must produce no updates, got %+v", updates)
+	}
+	unknown := map[string]bool{}
+	for _, r := range rows {
+		if r.Winner == ReconcileUnknownWinner {
+			unknown[r.Field] = true
+		}
+		if r.Winner == "clear" {
+			t.Fatalf("field %s cleared on a read error: %+v", r.Field, r)
+		}
+	}
+	if !unknown["hook_bead"] || !unknown["active_mr"] {
+		t.Fatalf("hook_bead and active_mr must read unknown, rows = %+v", rows)
+	}
+}
+
+// Not-found is an answer, so the reference is cleared; the error from a
+// different reference still refuses the merge.
+func TestMergeLegacyAgentBead_ErrorNeverMasksBehindAnAbsentAnswer(t *testing.T) {
+	older, newer := time.Date(2026, 9, 8, 18, 55, 0, 0, time.UTC), time.Date(2026, 9, 9, 1, 7, 0, 0, time.UTC)
+	rig := agentIssue("hook_bead: gt-gone\nactive_mr: gt-unreadable\n", newer)
+	town := agentIssue("hook_bead: null\nactive_mr: null\n", older)
+	exists := func(id string) (bool, error) {
+		if id == "gt-gone" {
+			return false, nil
+		}
+		return false, ErrUnavailable
+	}
+
+	updates, _, err := MergeLegacyAgentBead(rig, town, exists)
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("err = %v, want ErrUnavailable", err)
+	}
+	if updates != (AgentFieldUpdates{}) {
+		t.Fatalf("no updates may escape a refused merge, got %+v", updates)
 	}
 }
