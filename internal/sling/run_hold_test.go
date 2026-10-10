@@ -11,10 +11,10 @@ import (
 )
 
 // holdMidDispatch is the incident of gt-0k7kb: an automatic dispatcher read a
-// bead, found it clean and started the sling, and a steward wrote the hold in
+// bead, found it clean and started the sling, and a person wrote the hold in
 // the seconds the sling spent spawning a polecat. The dispatch's guards had
 // all run before that write and never read the human hold labels at all, so
-// the hook write below overwrote the steward's status and hooked work the town
+// the hook write below overwrote that status and hooked work the town
 // had reserved for a person.
 //
 // These tests drive Run itself, since the read has to sit at the claim — after
@@ -132,7 +132,7 @@ func TestRunRefusesAHoldWrittenMidDispatch(t *testing.T) {
 // TestRunRefusesAHoldItCannotRead: the hold that lands mid-dispatch is
 // exactly the one a lagging read can catch, so a re-read that fails is a
 // deferral too. Unknown is not free — taking the bead blind is what the
-// steward's hold exists to prevent.
+// hold exists to prevent.
 func TestRunRefusesAHoldItCannotRead(t *testing.T) {
 	t.Parallel()
 	f := &fakeSlingDeps{reads: []holdTestRead{
@@ -185,7 +185,7 @@ func TestRunForceTakesAHeldBead(t *testing.T) {
 }
 
 // TestRunRefusesABeadDeferredMidDispatch: the status is half of the hold a
-// steward writes (deferred, plus the label), and a status alone lands in the
+// person writes (deferred, plus the label), and a status alone lands in the
 // same window. The claim read runs the same deferred test the guard at the
 // start ran, so the half that arrived with no label is caught too.
 func TestRunRefusesABeadDeferredMidDispatch(t *testing.T) {

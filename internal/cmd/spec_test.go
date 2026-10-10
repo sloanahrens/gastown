@@ -17,7 +17,6 @@ import (
 	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/specdispatch"
-	"github.com/steveyegge/gastown/internal/steward"
 )
 
 const specTestDescription = "## Goal\nA thing.\n\n## Constraints\nGo.\n\n## Out of scope\nNone.\n\n## Gate\nmake gate\n\n## Size\none worker, one MR"
@@ -591,7 +590,7 @@ func TestSpecDispatchReportsPlanState(t *testing.T) {
 	waiting.Labels = append(waiting.Labels, "needs-planning")
 	proposed := cleanSpec("gt-done", 1, "2026-09-29T11:00:00Z")
 	proposed.Labels = append(proposed.Labels, "needs-planning")
-	proposed.Notes = steward.PlanProposalMarker + "\nSpec: gt-done\nChildren: 2\n"
+	proposed.Notes = specdispatch.PlanProposalMarker + "\nSpec: gt-done\nChildren: 2\n"
 	f := newFakeSpecTown(waiting, proposed)
 	r := runSpecDispatchCycle(f.env())
 	if len(r.Planning) != 2 {

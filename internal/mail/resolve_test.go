@@ -57,11 +57,11 @@ func TestAgentBeadIDToAddress(t *testing.T) {
 	}{
 		// Town-level agents (gt- prefix)
 		{"gt-deacon", "deacon/"},
-		{"gt-steward", "steward/"},
+		{"gt-boot", "boot/"},
 
 		// Town-level agents (hq- prefix)
 		{"hq-deacon", "deacon/"},
-		{"hq-steward", "steward/"},
+		{"hq-boot", "boot/"},
 
 		// Retired role: a surviving bead keeps no address (gt-rwp7z.5)
 		{"gt-mayor", ""},

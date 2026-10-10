@@ -147,9 +147,6 @@ type Report struct {
 	// answer. The exec-tax field carries its verdict; this is the number a
 	// reader compares between reports (gt-2ycne.1).
 	ExecTaxMS *float64 `json:"exec_tax_ms,omitempty"`
-	// Steward is the steward job ledger over the last hour; nil when the town
-	// runs no steward or its ledger could not be read (gt-9bioi.3).
-	Steward *StewardCounters `json:"steward,omitempty"`
 }
 
 // Limits is a degraded and a red threshold. A zero limit never trips.
@@ -205,12 +202,6 @@ type Thresholds struct {
 	// SeatEvidence is how old a seat's last sample may be before its stall
 	// evidence is UNKNOWN; zero never expires it.
 	SeatEvidence time.Duration
-	// StewardErrorRate is the share of the last hour's attempted steward jobs
-	// that may end in error or timeout before the steward field is degraded;
-	// zero never trips. StewardMinJobs is how many attempts the hour needs
-	// before the share means anything.
-	StewardErrorRate float64
-	StewardMinJobs   int
 	// DispatchWindow is how far back the dispatcher's ticks are judged. The
 	// dispatcher ticks every 60s, so a window this long sees many ticks: one
 	// slow tick, a transient hold, or a single skipped candidate does not
@@ -291,8 +282,6 @@ func DefaultThresholds() Thresholds {
 		NeedsHuman:         Limits{Red: 24 * time.Hour},
 		SeatStall:          Limits{Degraded: 30 * time.Minute, Red: 2 * time.Hour},
 		SeatEvidence:       30 * time.Minute,
-		StewardErrorRate:   0.5,
-		StewardMinJobs:     3,
 		DispatchWindow:     DefaultDispatchWindow,
 		PromoteWait:        DefaultPromoteWait,
 	}
@@ -598,8 +587,6 @@ type Inputs struct {
 	// and a town where no rig lands through it adds no forgejo or runner
 	// field either (gt-fn9e6.11).
 	LandingInfra LandingInfra
-	// Steward is optional: nil is a town with no steward, and adds no field.
-	Steward Steward
 }
 
 // errNotWired is the detail of a field whose source is nil.
@@ -627,10 +614,6 @@ func Compute(ctx context.Context, in Inputs) Report {
 	r.Fields = append(r.Fields, seats(in)...)
 	r.Fields = append(r.Fields, dispatch(in))
 	r.Fields = append(r.Fields, infra(in)...)
-	if f, c := steward(ctx, in); f != nil {
-		r.Fields = append(r.Fields, *f)
-		r.Steward = c
-	}
 	r.Verdict = Green
 	for _, f := range r.Fields {
 		r.Verdict = r.Verdict.Worse(f.Verdict)

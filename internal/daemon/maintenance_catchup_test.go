@@ -126,8 +126,8 @@ func TestBackupCatchUpRunsWithTheDispatcherParked(t *testing.T) {
 }
 
 // A backup is a read through the running server, so the soft work that shares
-// the maintenance check's run-loop pass — a dispatch tick, a patrol scan, a
-// steward scan, the dog cycle, a plugin run — must not defer a day-old
+// the maintenance check's run-loop pass — a dispatch tick, a patrol scan, the
+// dog cycle, a plugin run — must not defer a day-old
 // catch-up (gt-2m8sj: on 2026-10-05 19:30-19:46 and 2026-10-07 09:22-09:27 five
 // checks in a row deferred with a tick or a scan in flight, and the newest
 // backup reached 62h).
@@ -143,8 +143,6 @@ func TestBackupCatchUpRunsBesideTicksScansAndDogCycles(t *testing.T) {
 	d.compactorDogMu.Unlock()
 	d.specDispatchRunning.Store(true)
 	d.patrolScanRunning.Store(true)
-	d.stewardRunning.Store(true)
-	d.stewardPlanScan.Store(true)
 
 	d.runScheduledMaintenance()
 
@@ -154,8 +152,7 @@ func TestBackupCatchUpRunsBesideTicksScansAndDogCycles(t *testing.T) {
 }
 
 // The hard work still defers the catch-up: a backup never runs beside a
-// landing pass, a slings dispatch mid-entry, a steward's live agent session or
-// a binary mid-replacement.
+// landing pass, a slings dispatch mid-entry or a binary mid-replacement.
 func TestBackupCatchUpStillWaitsForHardWork(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -168,9 +165,6 @@ func TestBackupCatchUpStillWaitsForHardWork(t *testing.T) {
 		}},
 		{"scheduled slings cycle", "a scheduled slings cycle", func(_ *testing.T, d *Daemon) {
 			d.scheduledSlingsRunning.Store(true)
-		}},
-		{"steward job", "a steward job gt-x", func(t *testing.T, d *Daemon) {
-			t.Cleanup(startStewardJob(t, d))
 		}},
 		{"install lock", "the install lock (an install is replacing the binary)", func(t *testing.T, d *Daemon) {
 			holdInstallLock(t, writeInstallLock(t, d))

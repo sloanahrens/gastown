@@ -419,7 +419,6 @@ func tailTrimEventFields(ln tailLine, gitUser string) tailLine {
 var tailVerdictMarkers = []string{
 	"OVERSEER REVIEW",
 	"OVERSEER RULING",
-	"STEWARD",
 	"MERGE REJECTION",
 }
 

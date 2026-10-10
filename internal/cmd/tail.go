@@ -116,7 +116,7 @@ block a polecat's gt done writes, shown once per head while the bead waits to
 land.
 
 The review loop's own words win over the comment text. A comment or a note
-that opens with OVERSEER REVIEW, OVERSEER RULING, STEWARD or MERGE REJECTION
+that opens with OVERSEER REVIEW, OVERSEER RULING or MERGE REJECTION
 prints its first 100 characters after the line, green for a PASS, red for a
 FAIL, a REFUSED or a REJECTION, and yellow for a "(shadow)" verdict. Every
 other comment prints only its first 60 characters.

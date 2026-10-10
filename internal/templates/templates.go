@@ -101,10 +101,10 @@ func (t *Templates) render(role string, data any) (string, error) {
 	return buf.String(), nil
 }
 
-// StewardData is what a steward job's instructions are rendered from: the
-// landing-queue event and the seat the job runs in (gt-9bioi.2).
-type StewardData struct {
-	Kind            string // "review", "rejection" or "plan"
+// JobData is what a headless job's instructions are rendered from: the
+// landing-queue event and the seat the job runs in.
+type JobData struct {
+	Kind            string // the job kind the template is chosen for
 	Rig             string
 	Bead            string
 	Branch          string
@@ -115,20 +115,17 @@ type StewardData struct {
 	RejectionDetail string
 	ResultFile      string // the verdict file the job writes
 	Final           bool   // true when no further job runs for this event
-	Shadow          bool   // true when the job decides and comments but changes nothing (gt-9bioi.4)
+	Shadow          bool   // true when the job decides and comments but changes nothing
 	// PlanMarker is the line that opens the block a plan job appends to a
 	// spec's notes; empty for the other kinds (gt-4k3fj.13).
 	PlanMarker string
 }
 
-// RenderSteward renders the instructions of the steward job d.Kind names.
-func (t *Templates) RenderSteward(d StewardData) (string, error) {
-	switch d.Kind {
-	case "review", "rejection", "plan":
-	default:
-		return "", fmt.Errorf("steward job kind %q is none of review, rejection and plan", d.Kind)
-	}
-	return t.render("steward-"+d.Kind, d)
+// RenderJob renders the instruction template named name with a headless job's
+// facts. The caller names the template — a job kind no template answers to is
+// an error rather than a silently empty prompt.
+func (t *Templates) RenderJob(name string, d JobData) (string, error) {
+	return t.render(name, d)
 }
 
 // RoleNames returns the list of available role templates.

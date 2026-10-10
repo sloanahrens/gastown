@@ -1087,7 +1087,7 @@ func TestTownGroupSendSkipsRetiredMayorBead(t *testing.T) {
 		if strings.HasPrefix(strings.Join(c.Args, " "), "list --label=gt:agent") {
 			return `[
 				{"id":"hq-mayor","title":"Mayor","description":"Mayor\n\nrole_type: mayor\nrig: null","status":"open","issue_type":"agent","labels":["gt:agent"]},
-				{"id":"hq-steward","title":"Steward","description":"Steward\n\nrole_type: steward\nrig: null","status":"open","issue_type":"agent","labels":["gt:agent"]}
+				{"id":"hq-deacon","title":"Deacon","description":"Deacon\n\nrole_type: deacon\nrig: null","status":"open","issue_type":"agent","labels":["gt:agent"]}
 			]`, "", 0
 		}
 		return "[]", "", 0
@@ -1100,8 +1100,8 @@ func TestTownGroupSendSkipsRetiredMayorBead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveTownAgents: %v", err)
 	}
-	if len(got) != 1 || got[0] != "steward/" {
-		t.Fatalf("resolveTownAgents() = %q, want [steward/] — the surviving retired bead must be skipped", got)
+	if len(got) != 1 || got[0] != "deacon/" {
+		t.Fatalf("resolveTownAgents() = %q, want [deacon/] — the surviving retired bead must be skipped", got)
 	}
 }
 
@@ -1258,8 +1258,8 @@ func TestParseAgentAddressFromDescription(t *testing.T) {
 		},
 		{
 			name: "town-level agent no rig",
-			desc: "Steward\n\nrole_type: steward\nrig: null",
-			want: "steward/",
+			desc: "Deacon\n\nrole_type: deacon\nrig: null",
+			want: "deacon/",
 		},
 		{
 			name: "empty description",

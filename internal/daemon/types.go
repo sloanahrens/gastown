@@ -128,8 +128,6 @@ type (
 	ScheduledSlingEntry        = agentconfig.ScheduledSlingEntry
 	LandingWorkerConfig        = agentconfig.LandingWorkerConfig
 	LandingInfraConfig         = agentconfig.LandingInfraConfig
-	StewardConfig              = agentconfig.StewardConfig
-	StewardPlanConfig          = agentconfig.StewardPlanConfig
 	TierSweepConfig            = agentconfig.TierSweepConfig
 )
 
@@ -226,23 +224,6 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.ScheduledMaintenance.Enabled
-	}
-	// steward is opt-in: its jobs act on submitted work, so only an explicit
-	// enabled:true turns it on (gt-9bioi.1).
-	if patrol == "steward" {
-		if config == nil || config.Patrols == nil || config.Patrols.Steward == nil {
-			return false
-		}
-		return config.Patrols.Steward.Enabled
-	}
-	// steward_plan is opt-in on its own key: a plan job spends an LLM session
-	// to propose a spec's breakdown, and a town scanning the landing queue has
-	// not asked for planning work (gt-4k3fj.14).
-	if patrol == "steward_plan" {
-		if config == nil || config.Patrols == nil || config.Patrols.StewardPlan == nil {
-			return false
-		}
-		return config.Patrols.StewardPlan.Enabled
 	}
 	// landing_worker is opt-in: it pushes main, so only an explicit
 	// enabled:true turns it on (gt-v4ssj.2).

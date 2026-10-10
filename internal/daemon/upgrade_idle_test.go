@@ -1,57 +1,19 @@
 package daemon
 
 import (
-	"context"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 
 	"github.com/gofrs/flock"
-
-	"github.com/steveyegge/gastown/internal/steward"
 )
 
 func idleTestDaemon(t *testing.T) *Daemon {
 	return &Daemon{
 		config: &Config{TownRoot: t.TempDir()},
 		logger: log.New(io.Discard, "", 0),
-	}
-}
-
-// holdSpawner keeps a steward job running until release is closed.
-type holdSpawner struct{ release chan struct{} }
-
-func (h holdSpawner) Spawn(_ context.Context, _ steward.SpawnRequest) steward.SpawnResult {
-	<-h.release
-	return steward.SpawnResult{Verdict: &steward.Result{Outcome: steward.OutcomePass}}
-}
-
-// startStewardJob gives d a runner with one job in flight and returns the
-// function that lets it finish. That function waits for the runner: the job's
-// goroutine appends its ledger row only after Spawn returns, so releasing the
-// job and walking away leaves that write racing t.TempDir's RemoveAll
-// (gt-qmdbt).
-func startStewardJob(t *testing.T, d *Daemon) (release func()) {
-	t.Helper()
-	hold := holdSpawner{release: make(chan struct{})}
-	d.stewardRunner = &steward.Runner{
-		Ledger:  steward.NewLedger(steward.LedgerPath(d.config.TownRoot)),
-		Spawn:   hold,
-		WorkDir: t.TempDir(),
-	}
-	ev := steward.Event{Kind: steward.KindReview, Rig: "gastown", Bead: "gt-x", Head: "c0ffee"}
-	if !d.stewardRunner.Start(context.Background(), ev, "m", "p") {
-		t.Fatal("the steward job did not start")
-	}
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			close(hold.release)
-			d.stewardRunner.Wait()
-		})
 	}
 }
 
@@ -81,19 +43,6 @@ func TestIsIdleForUpgrade(t *testing.T) {
 			d.landingPasses.Add(1)
 			d.landingPasses.Add(-1)
 		}, true},
-		// gt-9bioi.5: a restart kills the job's agent, so upgrades wait.
-		{"steward job running", func(t *testing.T, d *Daemon) {
-			release := startStewardJob(t, d)
-			t.Cleanup(release)
-		}, false},
-		{"steward job finished", func(t *testing.T, d *Daemon) {
-			release := startStewardJob(t, d)
-			release()
-		}, true},
-		{"steward scan in flight", func(_ *testing.T, d *Daemon) { d.stewardRunning.Store(true) }, false},
-		// gt-4k3fj.14: the plan scan is the steward runner's other producer,
-		// and a restart mid-scan loses the jobs it was about to start.
-		{"steward plan scan in flight", func(_ *testing.T, d *Daemon) { d.stewardPlanScan.Store(true) }, false},
 		{"install lock file present, not held", func(t *testing.T, d *Daemon) {
 			writeInstallLock(t, d)
 		}, true},

@@ -335,7 +335,7 @@ func TestRunTailStream_DefaultViewGolden(t *testing.T) {
 		{Seq: 2, TS: "2026-09-30T13:50:05Z", Op: "update", IssueID: "gt-1", Actor: "gastown/polecats/opal", Status: "in_progress"},
 		{Seq: 3, TS: "2026-09-30T13:50:10Z", Op: "update", IssueID: "gt-1", Actor: "gastown/polecats/opal", Status: "open"},
 		{Seq: 4, TS: "2026-09-30T13:51:00Z", Op: "comment", IssueID: "gt-1", Actor: "sloan"},
-		{Seq: 5, TS: "2026-09-30T13:52:00Z", Op: "comment", IssueID: "gt-3", Actor: "steward"},
+		{Seq: 5, TS: "2026-09-30T13:52:00Z", Op: "comment", IssueID: "gt-3", Actor: "witness"},
 		{Seq: 6, TS: "2026-09-30T13:53:00Z", Op: "update", IssueID: "gt-2", Actor: "gastown/polecats/quartz", Status: "open"},
 		{Seq: 7, TS: "2026-09-30T13:53:30Z", Op: "create", IssueID: "gt-4", Actor: "sloan", Status: "open"},
 	}}

@@ -77,15 +77,13 @@ type PatrolsConfig struct {
 	// rig (ADR 0004, gt-v4ssj.2). Opt-in: absent or enabled=false never lands.
 	LandingWorker *LandingWorkerConfig `json:"landing_worker,omitempty"`
 
-	// Steward spawns one headless job per landing-queue event, the daemon side
-	// of gt-9bioi. Opt-in: the jobs act on submitted work.
-	Steward *StewardConfig `json:"steward,omitempty"`
-
-	// StewardPlan spawns the plan job for a needs-planning spec
-	// (internal/daemon/steward.go, gt-4k3fj.14). Opt-in and separate from
-	// patrols.steward: a town that scans the landing queue is not also asking
-	// for planning work.
-	StewardPlan *StewardPlanConfig `json:"steward_plan,omitempty"`
+	// Steward and StewardPlan are the retired job-runner patrols' keys: the
+	// job runner was removed (gt-4rizh) and nothing reads them. Declared as
+	// raw values, like the other retired keys above, so a daemon.json or
+	// settings/config.json that still carries a patrols.steward block decodes
+	// under strict decoding and is kept verbatim through a rewrite.
+	Steward     json.RawMessage `json:"steward,omitempty"`
+	StewardPlan json.RawMessage `json:"steward_plan,omitempty"`
 
 	// LandingInfra probes the Forgejo instance and CI runners a cut-over rig
 	// lands through, so an outage shows on the town health line instead of
@@ -733,74 +731,6 @@ type LandingInfraConfig struct {
 	// IntervalStr is the wait between probe passes, as a string (e.g.
 	// "60s"). Default 60s.
 	IntervalStr string `json:"interval,omitempty"`
-}
-
-// StewardConfig holds configuration for the steward patrol.
-type StewardConfig struct {
-	// Enabled turns the jobs on. Defaults to false: a job acts on submitted
-	// work, so the operator opts in.
-	Enabled bool `json:"enabled"`
-
-	// IntervalStr is the wait between landing-queue scans (e.g. "60s").
-	// Default 60s.
-	IntervalStr string `json:"interval,omitempty"`
-
-	// MaxJobs caps jobs running at once across every rig (default 2).
-	MaxJobs int `json:"max_jobs,omitempty"`
-
-	// JobTimeoutStr bounds one job, agent session included (e.g. "45m").
-	// Default 45m.
-	JobTimeoutStr string `json:"job_timeout,omitempty"`
-
-	// RoutineAgent is the preset routine jobs run on (default
-	// "deepseek-flash": Sloan's Q3 call to try flash first).
-	RoutineAgent string `json:"routine_agent,omitempty"`
-
-	// HardAgent is the preset a job retries on after a routine failure, and
-	// the one a conflict job starts on (default "deepseek-pro": the town runs fully on DeepSeek, Claude is only the human-run overseer).
-	HardAgent string `json:"hard_agent,omitempty"`
-
-	// Mode is "shadow" or "live" (default shadow). In shadow a job reviews
-	// and decides but posts only "STEWARD (shadow)" comments: it pushes,
-	// requeues, re-slings and escalates nothing, so the overseer can compare
-	// its verdicts with its own before live lets it act (gt-9bioi.4).
-	Mode string `json:"mode,omitempty"`
-
-	// Kinds limits the scan to these event kinds: "rejection" and "review".
-	// Empty means [rejection]: a review job repeats what om and the overseer
-	// already decide, so it is opt-in. An unknown kind is refused at the
-	// scan, which then runs the default (gt-9bioi.7).
-	Kinds []string `json:"kinds,omitempty"`
-
-	// Rigs limits the scans to these rigs. Empty means every known rig.
-	Rigs []string `json:"rigs,omitempty"`
-
-	// WorkRoot is where a job's throwaway worktree is created (a <rig>
-	// directory under it, 0700). It must not be under the town root: the git
-	// guard refuses worktrees there. Empty means $TMPDIR/gt-steward-<uid>.
-	WorkRoot string `json:"work_root,omitempty"`
-}
-
-// StewardPlanConfig holds configuration for the steward's plan jobs: one
-// planner session for a needs-planning spec, which proposes the child beads
-// and files nothing (gt-4k3fj.14). It is a separate patrol from
-// patrols.steward so planning is opt-in on its own.
-type StewardPlanConfig struct {
-	// Enabled turns plan jobs on. Defaults to false: a plan job spawns an LLM
-	// session, so the operator opts in.
-	Enabled bool `json:"enabled"`
-
-	// IntervalStr is the wait between scans for needs-planning specs (e.g.
-	// "60s"). Default 60s.
-	IntervalStr string `json:"interval,omitempty"`
-
-	// MaxJobs caps plan jobs running at once (default 1). Plan jobs run in
-	// the steward roster beside the review and rejection jobs, so this caps
-	// the plan seat, not the roster (internal/daemon/steward.go).
-	MaxJobs int `json:"max_jobs,omitempty"`
-
-	// Rigs limits the scans to these rigs. Empty means every known rig.
-	Rigs []string `json:"rigs,omitempty"`
 }
 
 // RolePatrol returns the patrol entry for a role-shaped patrol ("handler"),

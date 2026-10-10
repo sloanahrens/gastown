@@ -208,8 +208,7 @@ func reportRunFor(t *testing.T, townRoot string, store func(string) (reportStore
 }
 
 // reportGoldenTown is the fixture town the golden test reads: one rig with a
-// daemon log, a landings file, a steward ledger, an attention state and a
-// stale spend reading.
+// daemon log, a landings file, an attention state and a stale spend reading.
 func reportGoldenTown(t *testing.T) string {
 	t.Helper()
 	return reportTown(t, map[string]string{
@@ -233,12 +232,6 @@ func reportGoldenTown(t *testing.T) string {
 			`{"bead":"gt-abc","rig":"gastown","branch":"polecat/emerald/gt-abc+m1","head":"9a8b7c6d","target":"main","base":"5e6f7a8b","landed_commit":"9a8b7c6d","patch_id":"11223344","gate_result":"pass","om_verdict":"pass","om_score":0.92,"route":"normal","landed_at":"2026-10-02T17:58:40Z"}`,
 			`{"bead":"gt-jkl","rig":"gastown","branch":"polecat/agate/gt-jkl+m2","head":"ffff0000","target":"main","base":"aaaa1111","landed_commit":"ffff0000","patch_id":"55667788","gate_result":"pass","om_verdict":"pass","om_score":0.75,"route":"normal","landed_at":"2026-10-02T18:30:00Z"}`,
 			`{"bead":"gt-outside","rig":"gastown","branch":"polecat/opal/gt-outside+m3","head":"0f0f0f0f","target":"main","base":"1f1f1f1f","landed_commit":"0f0f0f0f","patch_id":"2f2f2f2f","gate_result":"pass","om_verdict":"pass","om_score":0.5,"route":"normal","landed_at":"2026-10-02T10:00:00Z"}`,
-			"",
-		}, "\n"),
-		".runtime/steward/jobs.jsonl": strings.Join([]string{
-			`{"id":"j1","event":"end","bead":"gt-abc","rig":"gastown","model":"deepseek-flash","started":"2026-10-02T17:50:00Z","ended":"2026-10-02T18:00:00Z","outcome":"pass"}`,
-			`{"id":"j2","event":"end","bead":"gt-def","rig":"gastown","model":"deepseek-flash","started":"2026-10-02T18:10:00Z","ended":"2026-10-02T18:30:00Z","outcome":"fail"}`,
-			`{"id":"j3","event":"end","bead":"gt-old","rig":"gastown","model":"deepseek-flash","started":"2026-10-02T16:00:00Z","ended":"2026-10-02T17:00:00Z","outcome":"pass"}`,
 			"",
 		}, "\n"),
 		".runtime/attention/state.json": `{"updated":"2026-10-02T18:52:00Z","items":[` +
@@ -523,7 +516,7 @@ func TestReportHourJSON(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("--json output is not JSON: %v\n%s", err, out)
 	}
-	for _, key := range []string{"since", "until", "mains", "landings", "rejections", "queue_depth", "seats", "sweep", "escalations", "steward", "attention"} {
+	for _, key := range []string{"since", "until", "mains", "landings", "rejections", "queue_depth", "seats", "sweep", "escalations", "attention"} {
 		if _, ok := got[key]; !ok {
 			t.Errorf("--json is missing %q: %v", key, got)
 		}

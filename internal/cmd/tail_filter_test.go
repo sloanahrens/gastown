@@ -545,13 +545,13 @@ func TestTailVerdictText(t *testing.T) {
 		t.Errorf("a close record carries no note text = %q", got)
 	}
 	// The marker has to open the text, and a long one is cut to the width.
-	long := "STEWARD " + strings.Repeat("x", 200)
+	long := "MERGE REJECTION " + strings.Repeat("x", 200)
 	issue := &beads.Issue{Comments: []beads.Comment{{Text: long}}}
 	got := tailVerdictText(issue, "comment")
 	if !strings.HasSuffix(got, "…") || len([]rune(got)) != tailVerdictWidth+1 {
 		t.Errorf("a long verdict = %q (%d runes)", got, len([]rune(got)))
 	}
-	quoted := &beads.Issue{Comments: []beads.Comment{{Text: "note: STEWARD said no"}}}
+	quoted := &beads.Issue{Comments: []beads.Comment{{Text: "note: MERGE REJECTION said no"}}}
 	if got := tailVerdictText(quoted, "comment"); got != "" {
 		t.Errorf("a marker that does not open the text = %q", got)
 	}
@@ -566,11 +566,11 @@ func TestTailVerdictClass(t *testing.T) {
 		want tailClass
 	}{
 		{"OVERSEER REVIEW aaaa PASS: reads well", tailClassSuccess},
-		{"STEWARD REVIEW PASS", tailClassSuccess},
-		{"STEWARD (shadow) REVIEW PASS", tailClassWarning},
-		{"STEWARD (shadow) ESCALATE", tailClassWarning},
+		{"OVERSEER RULING cccc PASS: ship it", tailClassSuccess},
+		{"OVERSEER REVIEW (shadow) PASS", tailClassWarning},
+		{"OVERSEER RULING (shadow) ESCALATE", tailClassWarning},
 		{"OVERSEER RULING bbbb FAIL: the gate is red", tailClassFailure},
-		{"STEWARD FIX: rebased and repushed", tailClassPlain},
+		{"OVERSEER REVIEW aaaa: neither a pass nor a fail", tailClassPlain},
 		{"MERGE REJECTION (attempt 2): gate-failed - make gate is red", tailClassFailure},
 		{"OVERSEER REVIEW cccc REFUSED: no test", tailClassFailure},
 	}

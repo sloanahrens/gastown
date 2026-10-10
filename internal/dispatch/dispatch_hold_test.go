@@ -104,7 +104,7 @@ func TestDispatchHoldFields_Verdicts(t *testing.T) {
 // TestSlingHoldFields_Verdicts pins the read a sling makes at the moment it
 // takes a bead (gt-0k7kb): the fields a dispatch starting mid-flight can find
 // changed, less the routing labels. A hold written while a dispatch was
-// spawning — the steward parking a bead for a person, a ruling added to its
+// spawning — the operator parking a bead for themselves, a ruling added to its
 // notes — is the read's to catch, a selector the sling's own target reserves
 // is not, and the status is the guards' at the start.
 func TestSlingHoldFields_Verdicts(t *testing.T) {

@@ -91,7 +91,7 @@ func (d *Daemon) catchUpUnknown(now time.Time, what string) {
 }
 
 // catchUpQuiet is the catch-up's guard: no hard daemon work in flight (a
-// landing pass, a scheduled slings cycle, a steward job, an install) and no
+// landing pass, a scheduled slings cycle, an install) and no
 // container-gate slot held. It names the hold it found: the deferred line is
 // the only record of why a day-old backup waited, and a bare "work in flight"
 // left the holder to be guessed from the log timeline (gt-y6ovz).
