@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -107,7 +108,7 @@ func (w *reconcileTown) stores() reconcileStores {
 			}
 			return w.town
 		},
-		exists: func(_, ref string) bool { return ref != "gt-wisp-0yhh" },
+		exists: func(_, ref string) (bool, error) { return ref != "gt-wisp-0yhh", nil },
 	}
 }
 
@@ -293,5 +294,56 @@ func TestResolveReconcileID(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// bd failing to answer whether a referenced bead exists must not read as
+// "absent": --apply refuses before step 1 and both rows stay untouched.
+func TestReconcile_ApplyRefusesWhenExistenceCheckErrors(t *testing.T) {
+	t.Parallel()
+	w := setupReconcileTown(t,
+		"agent_state: done\nactive_mr: gt-wisp-0yhh\n",
+		"agent_state: done\nactive_mr: null\n")
+	stores := w.stores()
+	stores.exists = func(_, _ string) (bool, error) {
+		return false, fmt.Errorf("dolt timeout: %w", beads.ErrUnavailable)
+	}
+
+	var out bytes.Buffer
+	err := runReconcile(&out, stores, w.townRoot, garnetID, true, false)
+	if err == nil || !errors.Is(err, beads.ErrUnavailable) {
+		t.Fatalf("apply must fail with ErrUnavailable, got %v", err)
+	}
+	if log := w.logText(); log != "" {
+		t.Fatalf("a read error must not write; log:\n%s", log)
+	}
+	if _, statErr := os.Stat(filepath.Join(w.townRoot, ".beads", "archive", "agent-bead-legacy.jsonl")); statErr == nil {
+		t.Fatal("a read error must not archive the town row")
+	}
+	if !strings.Contains(out.String(), beads.ReconcileUnknownWinner) {
+		t.Fatalf("table must show the field as unknown:\n%s", out.String())
+	}
+}
+
+// The dry run stays readable and succeeds: it prints the unknown field and a
+// warning, and writes nothing.
+func TestReconcile_DryRunShowsUnknownWhenExistenceCheckErrors(t *testing.T) {
+	t.Parallel()
+	w := setupReconcileTown(t,
+		"agent_state: done\nactive_mr: gt-wisp-0yhh\n",
+		"agent_state: done\nactive_mr: null\n")
+	stores := w.stores()
+	stores.exists = func(_, _ string) (bool, error) { return false, beads.ErrUnavailable }
+
+	var out bytes.Buffer
+	if err := runReconcile(&out, stores, w.townRoot, garnetID, false, false); err != nil {
+		t.Fatalf("dry-run: %v", err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "active_mr") || !strings.Contains(text, beads.ReconcileUnknownWinner) || !strings.Contains(text, "warning") {
+		t.Fatalf("dry-run must show active_mr unknown with a warning:\n%s", text)
+	}
+	if log := w.logText(); log != "" {
+		t.Fatalf("dry-run must not write; log:\n%s", log)
 	}
 }
