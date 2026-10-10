@@ -252,7 +252,7 @@ type Models struct {
 	// Polecat is the model the polecat role resolves to (role_agents.polecat),
 	// empty when the settings cannot be read or name none.
 	Polecat string `json:"polecat,omitempty"`
-	// SeatCap is the pool's cap on live polecats (polecat_pool.max_overflow).
+	// SeatCap is the pool's cap on live polecats (polecat_pool.max_seats).
 	// Zero is a pool that declares none, which is shown as the live count
 	// alone rather than as a cap of zero.
 	SeatCap int `json:"seat_cap,omitempty"`

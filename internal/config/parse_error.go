@@ -47,8 +47,21 @@ func (e *ParseError) Unwrap() error { return e.Err }
 // object key declared by v's type. Any failure is a *ParseError naming the
 // file, the offset turned into a line and column, and for unknown keys every
 // undeclared key path.
+//
+// A type that declares applyDeprecatedKeys folds retired key spellings into
+// the fields that replaced them once the decode succeeds, so every reader —
+// including the writer, which re-marshals what it decoded — sees the current
+// names (PolecatPool.applyDeprecatedKeys).
 func DecodeJSONFile(path string, data []byte, v any) error {
-	return decodeJSONStrict(path, data, v)
+	if err := decodeJSONStrict(path, data, v); err != nil {
+		return err
+	}
+	if a, ok := v.(deprecatedKeyApplier); ok {
+		for _, k := range a.applyDeprecatedKeys() {
+			seatPoolKeyWarn.warn(k.old, k.current)
+		}
+	}
+	return nil
 }
 
 // lineColumn converts a decoder offset (bytes consumed, so the failing byte is

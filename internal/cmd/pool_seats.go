@@ -133,15 +133,15 @@ func liveSeatKeys(live []poolSession) map[string]bool {
 // seats are already counted, and counting every unreadable directory would let
 // a bead-database hiccup fill every seat and refuse every sling.
 //
-// The seat is rendered on the pool's overflow agent. No per-polecat agent
+// The seat is rendered on the pool's own agent. No per-polecat agent
 // survives its session's death — the agent is the tmux session's GT_AGENT, and
 // `gt polecat list` leaves the field empty for a seat with no live session — so
-// the overflow seat, the one the town cap bounds, is the seat such a polecat is
-// counted against. On a pool that also runs a pro seat, a dead pro occupant is
-// counted on the overflow seat instead; that can only over-count it, refusing a
-// sling rather than admitting past the cap.
+// the pool's own seat, the one the town cap bounds, is the seat such a polecat
+// is counted against. On a pool that also runs a pro seat, a dead pro occupant
+// is counted on the pool's seat instead; that can only over-count it, refusing
+// a sling rather than admitting past the cap.
 func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, disposition polecatDispositionFunc, live []poolSession) ([]poolSession, error) {
-	if townRoot == "" || pool == nil || pool.OverflowAgent == "" || disposition == nil {
+	if townRoot == "" || pool == nil || pool.Agent == "" || disposition == nil {
 		return nil, nil
 	}
 	liveSeats := liveSeatKeys(live)
@@ -165,7 +165,7 @@ func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, dispositi
 			}
 			out = append(out, poolSession{
 				name:       "dead/" + rigName + "/" + name,
-				agent:      pool.OverflowAgent,
+				agent:      pool.Agent,
 				rig:        rigName,
 				polecat:    name,
 				deadHooked: true,
@@ -231,10 +231,10 @@ func poolSeatWorkFor(townRoot string) poolSeatWorkFunc {
 // the record adds nothing while it does.
 //
 // pool is the seat the town's polecats run; a landing seat is rendered on its
-// overflow agent, the class the pool owns. A nil pool (or one with no
-// overflow_agent) owns no seat, so nothing is rendered and no bead is read.
+// agent, the seat the pool owns. A nil pool (or one with no agent) owns no
+// seat, so nothing is rendered and no bead is read.
 func poolLandingSessions(townRoot string, pool *config.PolecatPool, work poolSeatWorkFunc, live []poolSession) ([]poolSession, error) {
-	if townRoot == "" || pool == nil || pool.OverflowAgent == "" || work == nil {
+	if townRoot == "" || pool == nil || pool.Agent == "" || work == nil {
 		return nil, nil
 	}
 	liveSeats := liveSeatKeys(live)
@@ -309,7 +309,7 @@ func poolLandingSessions(townRoot string, pool *config.PolecatPool, work poolSea
 		// created is left zero on purpose: a landing seat is not a spawn, and
 		// the spec dispatcher's stagger (min_spawn_gap) must not arm from a
 		// submission.
-		out = append(out, poolSession{name: "landing/" + c.rig + "/" + c.name, agent: pool.OverflowAgent})
+		out = append(out, poolSession{name: "landing/" + c.rig + "/" + c.name, agent: pool.Agent})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
 	return out, nil

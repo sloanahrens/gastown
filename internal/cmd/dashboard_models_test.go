@@ -74,7 +74,7 @@ func TestModelsReaderReadsTheTownAndTheReviewer(t *testing.T) {
 	t.Parallel()
 
 	town := t.TempDir()
-	writeModelsSettings(t, town, `{"role_agents":{"polecat":"deepseek-flash"},"polecat_pool":{"overflow_agent":"deepseek-flash","max_overflow":4}}`)
+	writeModelsSettings(t, town, `{"role_agents":{"polecat":"deepseek-flash"},"polecat_pool":{"agent":"deepseek-flash","max_seats":4}}`)
 	r := &modelsReader{townRoot: town, omPath: writeOMConfig(t, `{"backend":["/Users/x/.local/bin/claude","-p","--model","sonnet"],"depth":"standard"}`)}
 
 	m := r.read()
@@ -82,7 +82,7 @@ func TestModelsReaderReadsTheTownAndTheReviewer(t *testing.T) {
 		t.Errorf("polecat model = %q, want deepseek-flash", m.Polecat)
 	}
 	if m.SeatCap != 4 {
-		t.Errorf("seat cap = %d, want the pool's max_overflow", m.SeatCap)
+		t.Errorf("seat cap = %d, want the pool's max_seats", m.SeatCap)
 	}
 	if m.OM != "sonnet" {
 		t.Errorf("om model = %q, want sonnet", m.OM)
@@ -90,7 +90,7 @@ func TestModelsReaderReadsTheTownAndTheReviewer(t *testing.T) {
 
 	// A mode switch is a file the reader has not read yet: the next read is
 	// the new model, with no cache in between.
-	writeModelsSettings(t, town, `{"role_agents":{"polecat":"claude-sonnet"},"polecat_pool":{"overflow_agent":"deepseek-flash","max_overflow":2}}`)
+	writeModelsSettings(t, town, `{"role_agents":{"polecat":"claude-sonnet"},"polecat_pool":{"agent":"deepseek-flash","max_seats":2}}`)
 	r.omPath = writeOMConfig(t, `{"backend":["/x/claude-deepseek-flash","-p"]}`)
 	m = r.read()
 	if m.Polecat != "claude-sonnet" || m.SeatCap != 2 || m.OM != "flash" {

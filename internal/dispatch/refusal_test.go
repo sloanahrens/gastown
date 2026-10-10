@@ -12,8 +12,8 @@ func TestSlingRefusalReason(t *testing.T) {
 	}{
 		{
 			name:   "pool full, wrapped by cobra and the spawn path",
-			stderr: "Error: spawning polecat: sling refused: every local seat is taken (2/2); raise polecat_pool.max_local/max_overflow to spawn\n",
-			want:   "sling refused: every local seat is taken (2/2); raise polecat_pool.max_local/max_overflow to spawn",
+			stderr: "Error: spawning polecat: sling refused: pool: full (2/2) -> no seat for deepseek-flash; raise polecat_pool.max_seats to spawn\n",
+			want:   "sling refused: pool: full (2/2) -> no seat for deepseek-flash; raise polecat_pool.max_seats to spawn",
 			wantOK: true,
 		},
 		{

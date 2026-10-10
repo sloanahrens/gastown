@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
@@ -91,8 +93,8 @@ type TownSettings struct {
 	// Example: {"witness": "claude-opus", "polecat": "claude-sonnet"}
 	RoleAgents map[string]string `json:"role_agents,omitempty"`
 
-	// PolecatPool, when set, runs `gt sling`'s polecats on OverflowAgent
-	// instead of role_agents.polecat, at most MaxOverflow at a time; a sling
+	// PolecatPool, when set, runs `gt sling`'s polecats on the pool's agent
+	// instead of role_agents.polecat, at most max_seats at a time; a sling
 	// past the cap is refused. An --agent the pool does not own is left alone.
 	PolecatPool *PolecatPool `json:"polecat_pool,omitempty"`
 
@@ -1479,14 +1481,19 @@ type PolecatPool struct {
 	// MinSpawnGap is the minimum time between two spec-dispatcher spawns
 	// (e.g. "4m").
 	MinSpawnGap string `json:"min_spawn_gap,omitempty"`
-	// OverflowAgent is the agent the pool's polecats run. Empty means the
-	// pool has no seat and the normal role_agents resolution applies. The key
-	// keeps its overflow_ name from the retired local seat so existing
-	// settings files still load.
-	OverflowAgent string `json:"overflow_agent,omitempty"`
-	// MaxOverflow is the number of live polecat sessions allowed on
-	// OverflowAgent. Zero leaves the seat uncapped.
-	MaxOverflow int `json:"max_overflow,omitempty"`
+	// Agent is the agent the pool's polecats run. Empty means the pool has no
+	// seat and the normal role_agents resolution applies.
+	Agent string `json:"agent,omitempty"`
+	// MaxSeats is the number of live polecat sessions allowed on Agent. Zero
+	// leaves the seat uncapped.
+	MaxSeats int `json:"max_seats,omitempty"`
+	// DeprecatedOverflowAgent and DeprecatedMaxOverflow are the retired
+	// spellings of Agent and MaxSeats, declared so a settings file written
+	// before the rename (gt-plk1z) loads. applyDeprecatedKeys folds them into
+	// the fields above at decode time and clears them here, so no writer emits
+	// them.
+	DeprecatedOverflowAgent *string `json:"overflow_agent,omitempty"`
+	DeprecatedMaxOverflow   *int    `json:"max_overflow,omitempty"`
 
 	// The keys below are the spec dispatcher's dispatch policy
 	// (internal/cmd/spec.go), read from here so a policy change is one edit in
@@ -1696,8 +1703,82 @@ func (p *PolecatPool) MinSpawnGapD() time.Duration {
 	return d
 }
 
-// OverflowCapped reports whether the pool bounds live polecats on
-// OverflowAgent: max_overflow set, and an agent whose sessions to count.
-func (p *PolecatPool) OverflowCapped() bool {
-	return p != nil && p.MaxOverflow > 0 && p.OverflowAgent != ""
+// SeatsCapped reports whether the pool bounds live polecats on Agent:
+// max_seats set, and an agent whose sessions to count.
+func (p *PolecatPool) SeatsCapped() bool {
+	return p != nil && p.MaxSeats > 0 && p.Agent != ""
 }
+
+// applyDeprecatedKeys folds the retired polecat_pool key spellings into the
+// fields that replaced them, so every reader downstream sees one set of values
+// whether the file is old or new, and returns the retired keys that supplied a
+// value so the caller can report them. DecodeJSONFile calls it on every load
+// (deprecatedKeyApplier). The current key wins when a file carries both, and
+// either way the retired fields are cleared, so nothing writes them back out.
+func (p *PolecatPool) applyDeprecatedKeys() []retiredSeatKey {
+	if p == nil {
+		return nil
+	}
+	var used []retiredSeatKey
+	if p.Agent == "" && p.DeprecatedOverflowAgent != nil {
+		p.Agent = *p.DeprecatedOverflowAgent
+		used = append(used, retiredSeatKey{old: "overflow_agent", current: "agent"})
+	}
+	if p.MaxSeats == 0 && p.DeprecatedMaxOverflow != nil {
+		p.MaxSeats = *p.DeprecatedMaxOverflow
+		used = append(used, retiredSeatKey{old: "max_overflow", current: "max_seats"})
+	}
+	p.DeprecatedOverflowAgent, p.DeprecatedMaxOverflow = nil, nil
+	return used
+}
+
+// applyDeprecatedKeys folds the town file's retired keys into their current
+// fields (PolecatPool.applyDeprecatedKeys).
+func (s *TownSettings) applyDeprecatedKeys() []retiredSeatKey {
+	if s == nil {
+		return nil
+	}
+	return s.PolecatPool.applyDeprecatedKeys()
+}
+
+// deprecatedKeyApplier is the hook a config type uses to fold retired key
+// spellings into the fields that replaced them: it returns the retired keys it
+// read so the caller can warn about each. DecodeJSONFile runs it after a
+// successful decode, so old and new spellings arrive at every reader as one set
+// of values.
+type deprecatedKeyApplier interface {
+	applyDeprecatedKeys() []retiredSeatKey
+}
+
+// retiredSeatKey is one retired polecat_pool key a settings file used, with the
+// key that replaced it.
+type retiredSeatKey struct {
+	old     string
+	current string
+}
+
+// retiredKeyWarnings reports each retired key at most once per process: one
+// warning points an operator at the new name without a daemon that reads the
+// file on every pass repeating the line forever.
+type retiredKeyWarnings struct {
+	mu   sync.Mutex
+	out  io.Writer
+	seen map[string]bool
+}
+
+// warn writes oldKey's retirement line, unless an earlier call already did.
+func (w *retiredKeyWarnings) warn(oldKey, newKey string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.seen[oldKey] {
+		return
+	}
+	if w.seen == nil {
+		w.seen = map[string]bool{}
+	}
+	w.seen[oldKey] = true
+	fmt.Fprintf(w.out, "warning: polecat_pool.%s is retired; the value loaded as polecat_pool.%s, which replaces it\n", oldKey, newKey)
+}
+
+// seatPoolKeyWarn carries the retired polecat_pool spellings' warnings.
+var seatPoolKeyWarn = &retiredKeyWarnings{out: os.Stderr}
