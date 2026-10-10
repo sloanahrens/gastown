@@ -173,7 +173,7 @@ var (
 // the agent picks (lowercase letters, digits, hyphens), convoy and
 // resolved_issue are bead ids, and the rest are slugs and counts the operator
 // configures. None can carry human prose.
-var machineShapedShellVar = regexp.MustCompile(`\{\{(review_id|convoy|resolved_issue|repo|patrol_label|slice_docs|slice_go|max_open_beads|scan_interval_seconds)\}\}`)
+var machineShapedShellVar = regexp.MustCompile(`\{\{(review_id|convoy|resolved_issue|repo|patrol_label|slice_docs|slice_go|slice_files|max_open_beads|scan_interval_seconds)\}\}`)
 
 // The *_command vars are the operator's own command lines: rendering one into a
 // shell block is the formula's purpose, so they are exempt rather than bound.
