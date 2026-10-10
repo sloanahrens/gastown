@@ -404,10 +404,27 @@ var (
 	bdCloseLaunchers = map[string]bool{"time": true, "nohup": true, "exec": true, "sudo": true, "nice": true, "stdbuf": true, "timeout": true}
 )
 
+// bdCloseLauncherValueFlags names, per launcher, the flags that consume the
+// next token as their value. Without this table the value is left behind as the
+// command word and the close behind it is never parsed: `sudo -u alice bd close
+// gt-x` stopped at "alice" (gt-2bvyy). The table is per launcher because the
+// same short letter means different things to different programs — nice's -n is
+// a priority, sudo's -h a host — and naming a flag the launcher does not take
+// would swallow a token that is really the next argument. A launcher flag not
+// listed here is dropped on its own, which is what every launcher did before, so
+// the table can only ever reveal more closes (gt-gzz4j's review flagged the
+// residual this closes).
+var bdCloseLauncherValueFlags = map[string]map[string]bool{
+	"sudo":    {"-u": true, "-g": true, "-h": true, "-p": true, "-C": true, "-D": true, "-R": true, "-T": true, "-U": true},
+	"stdbuf":  {"-i": true, "-o": true, "-e": true},
+	"timeout": {"-s": true, "-k": true},
+	"nice":    {"-n": true},
+}
+
 // bdCloseCommandTokens returns the segment from its command word on: clause and
 // group openers, env assignments and launchers (with their own flags and the
-// duration or priority they take) are dropped from the front, and a group's
-// closing ) or } from the back.
+// values those flags take) are dropped from the front, and a group's closing )
+// or } from the back.
 func bdCloseCommandTokens(segment []string) []string {
 	tokens := segment
 	for len(tokens) > 0 {
@@ -419,10 +436,11 @@ func bdCloseCommandTokens(segment []string) []string {
 		if len(tokens) > 0 && bdCloseLaunchers[filepath.Base(tokens[0])] {
 			launcher := filepath.Base(tokens[0])
 			tokens = tokens[1:]
+			valueFlags := bdCloseLauncherValueFlags[launcher]
 			for len(tokens) > 0 && strings.HasPrefix(tokens[0], "-") {
 				flag := tokens[0]
 				tokens = tokens[1:]
-				if (launcher == "timeout" && (flag == "-s" || flag == "-k")) || (launcher == "nice" && flag == "-n") {
+				if valueFlags[flag] {
 					if len(tokens) > 0 {
 						tokens = tokens[1:]
 					}
