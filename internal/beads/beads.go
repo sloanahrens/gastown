@@ -3351,7 +3351,17 @@ func (b *Beads) AddCommentAs(id, author, comment string) error {
 		}
 	}
 
-	_, err := b.run("comments", "add", id, comment, "--author", author)
+	// --author leads the comment because the separator below needs the text
+	// last: everything after "--" is positional, so --author would be read as
+	// another argument.
+	args := []string{"comments", "add", id, "--author", author}
+	if strings.HasPrefix(comment, "-") {
+		// A bare argument starting with a dash is read as flags, which failed
+		// the call with "unknown shorthand flag: ' '". "--" ends flag parsing
+		// and leaves the comment positional (gt-1q9nl).
+		args = append(args, "--")
+	}
+	_, err := b.run(append(args, comment)...)
 	return err
 }
 
