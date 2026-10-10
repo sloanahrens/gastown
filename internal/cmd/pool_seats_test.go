@@ -230,7 +230,7 @@ func submittedWork(ids ...string) poolSeatWorkFunc {
 // free (gt-thy6r, gt-59o9, gt-t8q5).
 func TestPoolSeatSessionsCountsEveryKindOfTakenSeat(t *testing.T) {
 	t.Parallel()
-	pool := &config.PolecatPool{OverflowAgent: "deepseek-flash", MaxOverflow: 3}
+	pool := &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3}
 	live := &fakeLister{sessions: map[string]map[string]string{
 		"gt-jade": {"GT_ROLE": "gastown/polecats/jade", "GT_AGENT": "deepseek-flash"},
 	}}
@@ -253,7 +253,7 @@ func TestPoolSeatSessionsCountsEveryKindOfTakenSeat(t *testing.T) {
 			town := t.TempDir()
 			work := submittedWork()
 			if c.claim {
-				writeSeatClaim(t, town, "claim-1", pool.OverflowAgent)
+				writeSeatClaim(t, town, "claim-1", pool.Agent)
 			}
 			if c.landing {
 				writeLandingSeat(t, town, "gastown", "ruby", "gt-ruby")
@@ -280,7 +280,7 @@ func TestPoolSeatSessionsCountsEveryKindOfTakenSeat(t *testing.T) {
 // cap.
 func TestPoolSeatSessionsCountsDeadHookedSeats(t *testing.T) {
 	t.Parallel()
-	pool := &config.PolecatPool{OverflowAgent: "deepseek-flash", MaxOverflow: 3}
+	pool := &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3}
 
 	held := polecat.WorkstateDisposition{
 		Verdict:              polecat.WorkstateVerdictNeedsRecovery,
@@ -358,7 +358,7 @@ func TestPoolSeatSessionsCountsDeadHookedSeats(t *testing.T) {
 // restart can no longer be the tick that pushes the town past its cap.
 func TestPoolSeatSessionsRestartKeepsTheCount(t *testing.T) {
 	t.Parallel()
-	pool := &config.PolecatPool{OverflowAgent: "deepseek-flash", MaxOverflow: 3}
+	pool := &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3}
 	town := t.TempDir()
 	writeTestRigsConfig(t, town, "gastown")
 	writeTownPolecatDir(t, town, "gastown", "ember")
@@ -406,7 +406,7 @@ func writeTownPolecatDir(t *testing.T, townRoot, rigName, polecatName string) {
 // free rather than held for a wait that is over.
 func TestPoolLandingSeatEndsWithTheLabel(t *testing.T) {
 	t.Parallel()
-	pool := &config.PolecatPool{OverflowAgent: "deepseek-flash", MaxOverflow: 3}
+	pool := &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3}
 	town := t.TempDir()
 	writeLandingSeat(t, town, "gastown", "ruby", "gt-ruby")
 
@@ -442,7 +442,7 @@ func TestPoolLandingSeatEndsWithTheLabel(t *testing.T) {
 // polecat's — a witness, refinery or crew seat — hold no pool seat either.
 func TestPoolLandingSeatSkipsASeatThatIsGone(t *testing.T) {
 	t.Parallel()
-	pool := &config.PolecatPool{OverflowAgent: "deepseek-flash", MaxOverflow: 3}
+	pool := &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3}
 	town := t.TempDir()
 
 	// A submitted record with no polecat directory behind it.
@@ -469,7 +469,7 @@ func TestPoolLandingSeatSkipsASeatThatIsGone(t *testing.T) {
 // poolSeatSessions → specRosterFrom path the tick line prints.
 func TestSpecRosterCountsACompletingSeatOnce(t *testing.T) {
 	t.Parallel()
-	pool := &config.PolecatPool{OverflowAgent: "deepseek-flash", MaxOverflow: 3}
+	pool := &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3}
 	ts := config.NewTownSettings()
 	ts.RoleAgents = map[string]string{"polecat": "deepseek-flash"}
 
@@ -508,7 +508,7 @@ func TestSpecRosterCountsACompletingSeatOnce(t *testing.T) {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
 			if got := specRosterFrom(sessions, ts).Live["deepseek-flash"]; got != c.want {
-				t.Fatalf("roster = %d/%d, want %d/%d (%+v)", got, pool.MaxOverflow, c.want, pool.MaxOverflow, sessions)
+				t.Fatalf("roster = %d/%d, want %d/%d (%+v)", got, pool.MaxSeats, c.want, pool.MaxSeats, sessions)
 			}
 		})
 	}

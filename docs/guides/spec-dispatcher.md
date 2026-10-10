@@ -116,11 +116,11 @@ Seats, in order:
 
 | Seat | Cap | Takes |
 |---|---|---|
-| `polecat_pool.overflow_agent` | `polecat_pool.max_overflow`, 2 when unset | every candidate |
+| `polecat_pool.agent` | `polecat_pool.max_seats`, 2 when unset | every candidate |
 | `polecat_pool.pro_agent` | `polecat_pool.pro_max`, 0 drops the seat | only beads carrying `polecat_pool.pro_label` |
 
 The pro seat is reserved: a bead carrying `pro_label` is slung only there, and
-the overflow seat leaves it alone. A `spec_dispatch.max_hooked > 0` adds the
+the pool's own seat leaves it alone. A `spec_dispatch.max_hooked > 0` adds the
 `hooked_agent` seat (default `claude-sonnet`) with that cap — off by default,
 because a seat nobody asked for is a seat the dispatcher must not spend;
 `prefer_hooked` moves it first.

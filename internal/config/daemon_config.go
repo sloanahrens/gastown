@@ -497,7 +497,7 @@ type SpecDispatchConfig struct {
 	// compatibility.
 
 	// HookedAgent is the agent seat the dispatcher may use beside the pool's
-	// overflow_agent. Default "claude-sonnet".
+	// own agent (polecat_pool.agent). Default "claude-sonnet".
 	HookedAgent string `json:"hooked_agent,omitempty"`
 
 	// MaxHooked caps live polecats on HookedAgent (default 2). Zero means
@@ -511,8 +511,8 @@ type SpecDispatchConfig struct {
 	HooklessAgent json.RawMessage `json:"hookless_agent,omitempty"`
 	MaxHookless   json.RawMessage `json:"max_hookless,omitempty"`
 
-	// PreferHooked puts the HookedAgent seat first. Default: the pool's
-	// overflow_agent first (capped by polecat_pool.max_overflow, default 2
+	// PreferHooked puts the HookedAgent seat first. Default: the pool's seat
+	// first (polecat_pool.agent, capped by polecat_pool.max_seats, default 2
 	// when unset), then HookedAgent.
 	PreferHooked bool `json:"prefer_hooked,omitempty"`
 

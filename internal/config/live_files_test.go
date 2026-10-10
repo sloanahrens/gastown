@@ -22,7 +22,10 @@ import (
 // operational.daemon.boot_spawn_cooldown and the rest) and the mail:mayor
 // route action gt-rwp7z.6 retired from the defaults: a
 // live file must lose such a key before a binary carrying the deletion is
-// installed, or the startup gate refuses the town.
+// installed, or the startup gate refuses the town. The one rename: gt-plk1z
+// moved polecat_pool.overflow_agent/max_overflow to agent/max_seats, and the
+// fixture carries the new names — a file still holding the old ones loads
+// through PolecatPool.applyDeprecatedKeys (types_test.go).
 // Strict decoding must accept every key they carry: a kernel that refused the
 // live town would stop it the moment it shipped.
 const liveTown = "testdata/livetown"
@@ -61,6 +64,37 @@ func TestLiveTownFilesDecodeStrictly(t *testing.T) {
 		if err := DecodeJSONFile(path, data, tc.into()); err != nil {
 			t.Errorf("live %s: %v", tc.file, err)
 		}
+	}
+}
+
+// TestLiveTownPolecatPoolSeat: the town's own settings/config.json names the
+// seat pool's agent and cap, and those are the values the pool's admission and
+// the spec dispatcher read. The live town runs its polecats on one agent with a
+// cap of one, so a decode that dropped either key would show up here as an
+// uncapped pool or a pool with no seat at all.
+func TestLiveTownPolecatPoolSeat(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(liveTown, "settings/config.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ts TownSettings
+	if err := DecodeJSONFile(path, data, &ts); err != nil {
+		t.Fatalf("DecodeJSONFile: %v", err)
+	}
+	pool := ts.PolecatPool
+	if pool == nil {
+		t.Fatal("the live town's polecat_pool did not load")
+	}
+	if pool.Agent != "deepseek-flash" {
+		t.Errorf("polecat_pool.agent = %q, want deepseek-flash", pool.Agent)
+	}
+	if pool.MaxSeats != 1 {
+		t.Errorf("polecat_pool.max_seats = %d, want 1", pool.MaxSeats)
+	}
+	if !pool.SeatsCapped() {
+		t.Error("a pool with an agent and max_seats 1 is capped")
 	}
 }
 

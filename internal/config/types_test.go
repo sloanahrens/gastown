@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -171,8 +172,10 @@ func TestTownSettings_DisabledPatrols_OmitemptyWhenNil(t *testing.T) {
 
 // TestTownSettings_RetiredLocalPoolKeysStillLoad: the live town config still
 // carries the retired local-model seat (local_agent, max_local, idle_fill,
-// D4). It must decode under strict decoding, keep the live seat (overflow_agent,
-// max_overflow, min_spawn_gap), and write the retired keys back verbatim.
+// D4) beside the seat pool's retired key spellings (overflow_agent,
+// max_overflow). All of it must decode under strict decoding; the retired seat
+// keys must load the pool's agent and max_seats, and the local-seat keys must
+// be written back verbatim.
 func TestTownSettings_RetiredLocalPoolKeysStillLoad(t *testing.T) {
 	t.Parallel()
 	settingsJSON := `{
@@ -198,11 +201,11 @@ func TestTownSettings_RetiredLocalPoolKeysStillLoad(t *testing.T) {
 		t.Fatalf("LoadOrCreateTownSettings: %v", err)
 	}
 	pool := ts.PolecatPool
-	if pool == nil || pool.OverflowAgent != "deepseek-flash" || pool.MaxOverflow != 3 || pool.MinSpawnGapD() != 4*time.Minute {
+	if pool == nil || pool.Agent != "deepseek-flash" || pool.MaxSeats != 3 || pool.MinSpawnGapD() != 4*time.Minute {
 		t.Fatalf("live pool keys not loaded: %+v", pool)
 	}
-	if !pool.OverflowCapped() {
-		t.Error("pool with max_overflow 3 must be capped")
+	if !pool.SeatsCapped() {
+		t.Error("pool with max_seats 3 must be capped")
 	}
 
 	if err := SaveTownSettings(path, ts); err != nil {
@@ -216,6 +219,160 @@ func TestTownSettings_RetiredLocalPoolKeysStillLoad(t *testing.T) {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("saved settings dropped retired key %s:\n%s", want, raw)
 		}
+	}
+	// The rewrite is the writer's merge against the file, and the writer keeps
+	// text it did not author: the retired keys stay exactly as the operator
+	// wrote them, the same way the local seat's keys above do. gt reads them as
+	// the pool's agent and max_seats from then on. Moving a live file onto the
+	// current names is a migration, not a side effect of a save.
+	ts.PolecatPool.ShapeGate = "refuse"
+	if err := SaveTownSettings(path, ts); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+	raw, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"shape_gate": "refuse"`) {
+		t.Errorf("the edit did not reach the file:\n%s", raw)
+	}
+	again, err := LoadOrCreateTownSettings(path)
+	if err != nil {
+		t.Fatalf("reload after the save: %v", err)
+	}
+	if p := again.PolecatPool; p == nil || p.Agent != "deepseek-flash" || p.MaxSeats != 3 {
+		t.Errorf("the retired keys stopped loading after a save: %+v", p)
+	}
+}
+
+// TestPolecatPool_WritesOnlyTheCurrentKeys: gt never authors the retired seat
+// spellings. A settings file written from a pool carries agent and max_seats,
+// which is what makes the rename a rename rather than a second name for the
+// same seat.
+func TestPolecatPool_WritesOnlyTheCurrentKeys(t *testing.T) {
+	t.Parallel()
+	ts := NewTownSettings()
+	ts.PolecatPool = &PolecatPool{Agent: "deepseek-flash", MaxSeats: 2}
+	data, err := json.Marshal(ts)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	for _, want := range []string{`"agent":"deepseek-flash"`, `"max_seats":2`} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("marshalled settings missing %s:\n%s", want, data)
+		}
+	}
+	for _, gone := range []string{"overflow_agent", "max_overflow"} {
+		if strings.Contains(string(data), gone) {
+			t.Errorf("marshalled settings carry the retired key %s:\n%s", gone, data)
+		}
+	}
+}
+
+// TestPolecatPool_SeatKeyRename: the seat pool's keys are polecat_pool.agent
+// and polecat_pool.max_seats. A file carrying the retired spellings
+// (overflow_agent, max_overflow) loads the same values, and the current key wins
+// when a file carries both.
+func TestPolecatPool_SeatKeyRename(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		poolJSON string
+		want     PolecatPool
+	}{
+		{
+			name:     "the current keys",
+			poolJSON: `{"agent":"deepseek-flash","max_seats":2}`,
+			want:     PolecatPool{Agent: "deepseek-flash", MaxSeats: 2},
+		},
+		{
+			name:     "the retired keys still load",
+			poolJSON: `{"overflow_agent":"deepseek-flash","max_overflow":2}`,
+			want:     PolecatPool{Agent: "deepseek-flash", MaxSeats: 2},
+		},
+		{
+			name:     "the current key wins when both are present",
+			poolJSON: `{"agent":"claude-sonnet","max_seats":5,"overflow_agent":"deepseek-flash","max_overflow":2}`,
+			want:     PolecatPool{Agent: "claude-sonnet", MaxSeats: 5},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var ts TownSettings
+			if err := DecodeJSONFile("settings/config.json",
+				[]byte(`{"type":"town-settings","version":1,"polecat_pool":`+tc.poolJSON+`}`), &ts); err != nil {
+				t.Fatalf("DecodeJSONFile: %v", err)
+			}
+			pool := ts.PolecatPool
+			if pool == nil {
+				t.Fatal("polecat_pool did not load")
+			}
+			if pool.Agent != tc.want.Agent || pool.MaxSeats != tc.want.MaxSeats {
+				t.Errorf("pool = {agent: %q, max_seats: %d}, want {agent: %q, max_seats: %d}",
+					pool.Agent, pool.MaxSeats, tc.want.Agent, tc.want.MaxSeats)
+			}
+			if pool.DeprecatedOverflowAgent != nil || pool.DeprecatedMaxOverflow != nil {
+				t.Errorf("retired fields survived the load: %+v", pool)
+			}
+		})
+	}
+}
+
+// TestPolecatPool_SeatKeyRenameReportsTheRetiredKey: the fold reports the
+// retired key it read and the one that replaced it, which is what the load
+// warns about — the retired keys and nothing else, so a file naming both keys
+// stays quiet about a spelling it did not need.
+func TestPolecatPool_SeatKeyRenameReportsTheRetiredKey(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		poolJSON string
+		want     []retiredSeatKey
+	}{
+		{
+			name:     "the retired keys report both",
+			poolJSON: `{"overflow_agent":"deepseek-flash","max_overflow":2}`,
+			want:     []retiredSeatKey{{old: "overflow_agent", current: "agent"}, {old: "max_overflow", current: "max_seats"}},
+		},
+		{
+			name:     "the current keys report nothing",
+			poolJSON: `{"agent":"deepseek-flash","max_seats":2}`,
+		},
+		{
+			name:     "a shadowed retired key reports nothing",
+			poolJSON: `{"agent":"claude-sonnet","max_seats":5,"overflow_agent":"deepseek-flash","max_overflow":2}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var pool PolecatPool
+			if err := json.Unmarshal([]byte(tc.poolJSON), &pool); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			if got := pool.applyDeprecatedKeys(); !slices.Equal(got, tc.want) {
+				t.Errorf("applyDeprecatedKeys() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRetiredKeyWarnings_OnePerProcess: a daemon reads the settings file on
+// every pass, so a retired key must not repeat its line. The first use warns,
+// every use after it stays quiet, and each retired key has its own line.
+func TestRetiredKeyWarnings_OnePerProcess(t *testing.T) {
+	t.Parallel()
+	var out strings.Builder
+	w := &retiredKeyWarnings{out: &out}
+	w.warn("overflow_agent", "agent")
+	w.warn("overflow_agent", "agent")
+	if got := strings.Count(out.String(), "\n"); got != 1 {
+		t.Errorf("%d lines for one retired key read twice, want 1:\n%s", got, out.String())
+	}
+	w.warn("max_overflow", "max_seats")
+	if got := strings.Count(out.String(), "\n"); got != 2 {
+		t.Errorf("%d lines after a second retired key, want 2:\n%s", got, out.String())
 	}
 }
 

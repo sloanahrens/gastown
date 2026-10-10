@@ -279,7 +279,7 @@
     "max_local": 0,
     "idle_fill": true,
     "min_spawn_gap": "4m",
-    "overflow_agent": "deepseek-flash",
-    "max_overflow": 1
+    "agent": "deepseek-flash",
+    "max_seats": 1
   }
 }

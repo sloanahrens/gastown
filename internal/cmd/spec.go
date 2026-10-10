@@ -39,7 +39,7 @@ import (
 // (internal/cmd imports internal/daemon, so the call cannot go the other way).
 //
 // This is the dispatcher that replaced the seat-refill plugin (gt-4k3fj.8.8):
-// the pool's seats (overflow_agent/max_overflow, pro_*), the operator's
+// the pool's seats (agent/max_seats, pro_*), the operator's
 // ceiling (polecat_pool.max_priority) and the shape gate
 // (polecat_pool.shape_gate) all come from the same keys the plugin read, so the
 // town dispatches the same beads it did before the move.
@@ -65,12 +65,12 @@ const (
 	// defaultSpecHookedAgent is the agent the optional hooked seat runs when
 	// spec_dispatch.max_hooked names a cap but no agent.
 	defaultSpecHookedAgent = "claude-sonnet"
-	// defaultSpecOverflowCap caps the pool's overflow seat when the pool leaves
-	// max_overflow unset. The pool itself reads an unset max_overflow as
-	// uncapped, but an uncapped dispatcher seat is an unbounded run of paid
-	// sessions, so the dispatcher gives itself a cap it can defend rather than
-	// treating the pool's silence as infinite room.
-	defaultSpecOverflowCap  = 2
+	// defaultSpecSeatCap caps the pool's seat when the pool leaves max_seats
+	// unset. The pool itself reads an unset max_seats as uncapped, but an
+	// uncapped dispatcher seat is an unbounded run of paid sessions, so the
+	// dispatcher gives itself a cap it can defend rather than treating the
+	// pool's silence as infinite room.
+	defaultSpecSeatCap      = 2
 	defaultSpecMaxPerTick   = 1
 	specLintExitRefused     = 1
 	specLintExitNeedsPlan   = 2
@@ -185,15 +185,15 @@ if the bead has changed since the board was read — a submission in that window
 would otherwise be slung to a seat already landing it, and a re-read that fails
 holds the candidate for the next tick rather than slinging blind (gt-01gix).
 One that still holds is slung onto the first free seat within the budget: the
-pool's overflow_agent (capped by max_overflow), then the pro seat (pro_agent,
-capped by pro_max, taking only pro_label beads). The claude-sonnet hooked seat
-is off unless patrols.spec_dispatch.max_hooked is set above zero.
+pool's agent (capped by max_seats), then the pro seat (pro_agent, capped by
+pro_max, taking only pro_label beads). The claude-sonnet hooked seat is off
+unless patrols.spec_dispatch.max_hooked is set above zero.
 
 Every dispatch's sling args tell the polecat to test install paths in a
 temporary INSTALL_DIR.
 
-Budget comes from polecat_pool in settings/config.json (overflow_agent,
-max_overflow, min_spawn_gap, pro_agent, pro_max, pro_label) and
+Budget comes from polecat_pool in settings/config.json (agent, max_seats,
+min_spawn_gap, pro_agent, pro_max, pro_label) and
 patrols.spec_dispatch in mayor/daemon.json (hooked_agent, max_hooked,
 prefer_hooked, max_per_tick).
 The operator hold file and ESTOP stop the tick.`,
@@ -816,8 +816,8 @@ func firstErrLine(err error) string {
 // specBudgetFromConfig builds the seat list from polecat_pool and
 // patrols.spec_dispatch. Each seat is one agent with its own cap:
 //
-//   - the pool's overflow_agent, capped at max_overflow (the dispatcher's own
-//     defaultSpecOverflowCap when the pool leaves it unset)
+//   - the pool's agent, capped at max_seats (the dispatcher's own
+//     defaultSpecSeatCap when the pool leaves it unset)
 //   - the pro seat: pro_agent, capped at pro_max, taking only pro_label beads
 //
 // The hooked seat (spec_dispatch.hooked_agent, claude-sonnet by default) is
@@ -833,12 +833,12 @@ func specBudgetFromConfig(ts *config.TownSettings, sd *config.SpecDispatchConfig
 	}
 	if pool != nil {
 		b.MinSpawnGap = pool.MinSpawnGapD()
-		if pool.OverflowAgent != "" {
-			capacity := pool.MaxOverflow
+		if pool.Agent != "" {
+			capacity := pool.MaxSeats
 			if capacity <= 0 {
-				capacity = defaultSpecOverflowCap
+				capacity = defaultSpecSeatCap
 			}
-			b.Seats = append(b.Seats, specdispatch.Seat{Agent: pool.OverflowAgent, Cap: capacity})
+			b.Seats = append(b.Seats, specdispatch.Seat{Agent: pool.Agent, Cap: capacity})
 		}
 		if pool.GetProMax() > 0 {
 			b.Seats = append(b.Seats, specdispatch.Seat{

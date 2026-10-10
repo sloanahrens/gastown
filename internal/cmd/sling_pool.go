@@ -23,14 +23,14 @@ import (
 
 // Polecat seat pool (gt-md4z, gt-jzr1).
 //
-// polecat_pool caps how many polecats run on the pool's agent (overflow_agent)
-// at once: max_overflow live sessions, after which a sling is refused rather
-// than spawning an unbounded run of paid sessions (10 polecats on a 3+3 town,
-// spend pace $2.62/h). The pool once also ran a bounded local-model seat
-// (local_agent, max_local) with bead-shape routing between the two; the local
-// model was retired on 2026-09-27 and its seat with it (D4), so the overflow
-// seat is the pool's only seat. The key keeps its overflow_agent name so
-// existing settings files still load.
+// polecat_pool caps how many polecats run on the pool's agent (agent) at once:
+// max_seats live sessions, after which a sling is refused rather than spawning
+// an unbounded run of paid sessions (10 polecats on a 3+3 town, spend pace
+// $2.62/h). The pool once also ran a bounded local-model seat (local_agent,
+// max_local) with bead-shape routing between the two; the local model was
+// retired on 2026-09-27 and its seat with it (D4), so the pool's agent seat is
+// its only seat. The keys carried the local seat's names until gt-plk1z, and a
+// settings file still carrying them loads unchanged.
 
 // reworkLabel marks a bead whose MR came back with findings. The landing-queue
 // backpressure guard lets a rework through a full queue (sling_backpressure.go).
@@ -74,7 +74,7 @@ type poolSession struct {
 }
 
 // poolSeatCount counts the live polecat sessions sitting on the pool's seat. A
-// nil pool, or one with no overflow_agent, has no seat to count.
+// nil pool, or one with no agent, has no seat to count.
 //
 // This is the pool's one count of itself, shared by the admission decision
 // (choosePoolAgent) and the idle-seat patrol (gt daemon dispatch-check). The
@@ -82,12 +82,12 @@ type poolSession struct {
 // sling would refuse is worse than no nudge, because it spends an agent's
 // attention to produce a refusal (gt-59o9).
 func poolSeatCount(pool *config.PolecatPool, sessions []poolSession) int {
-	if pool == nil || pool.OverflowAgent == "" {
+	if pool == nil || pool.Agent == "" {
 		return 0
 	}
 	n := 0
 	for _, s := range sessions {
-		if s.agent == pool.OverflowAgent {
+		if s.agent == pool.Agent {
 			n++
 		}
 	}
@@ -101,7 +101,7 @@ func poolSeatCount(pool *config.PolecatPool, sessions []poolSession) int {
 // question — a seat the pool never owned is not the pool's to override on a
 // hiccup any more than it is the pool's to admit (gt-67fj, gt-gcrk).
 func poolOwnsAgent(pool *config.PolecatPool, requested string) bool {
-	return requested == "" || requested == pool.OverflowAgent
+	return requested == "" || requested == pool.Agent
 }
 
 // choosePoolAgent decides the agent for a new polecat given the pool, the agent
@@ -119,19 +119,19 @@ func choosePoolAgent(pool *config.PolecatPool, requested string, sessions []pool
 	switch {
 	case pool == nil:
 		return "", "pool: no polecat pool configured", false
-	case pool.OverflowAgent == "":
-		return "", "pool: polecat_pool has no overflow_agent; using the role default", false
+	case pool.Agent == "":
+		return "", "pool: polecat_pool has no agent; using the role default", false
 	case !poolOwnsAgent(pool, requested):
 		return "", "", false
 	}
 	n := poolSeatCount(pool, sessions)
-	if !pool.OverflowCapped() {
-		return pool.OverflowAgent, fmt.Sprintf("pool: seat %d (uncapped) -> %s", n+1, pool.OverflowAgent), false
+	if !pool.SeatsCapped() {
+		return pool.Agent, fmt.Sprintf("pool: seat %d (uncapped) -> %s", n+1, pool.Agent), false
 	}
-	if n >= pool.MaxOverflow {
-		return pool.OverflowAgent, fmt.Sprintf("pool: full (%d/%d%s) -> no seat for %s", n, pool.MaxOverflow, deadHookedNote(pool, sessions), pool.OverflowAgent), true
+	if n >= pool.MaxSeats {
+		return pool.Agent, fmt.Sprintf("pool: full (%d/%d%s) -> no seat for %s", n, pool.MaxSeats, deadHookedNote(pool, sessions), pool.Agent), true
 	}
-	return pool.OverflowAgent, fmt.Sprintf("pool: seat %d/%d -> %s", n+1, pool.MaxOverflow, pool.OverflowAgent), false
+	return pool.Agent, fmt.Sprintf("pool: seat %d/%d -> %s", n+1, pool.MaxSeats, pool.Agent), false
 }
 
 // deadHookedNote names the dead-hooked seats inside the pool's live count, so a
@@ -142,7 +142,7 @@ func choosePoolAgent(pool *config.PolecatPool, requested string, sessions []pool
 func deadHookedNote(pool *config.PolecatPool, sessions []poolSession) string {
 	n := 0
 	for _, s := range sessions {
-		if s.deadHooked && s.agent == pool.OverflowAgent {
+		if s.deadHooked && s.agent == pool.Agent {
 			n++
 		}
 	}
@@ -208,7 +208,7 @@ func poolDispositionFor(townRoot string) polecatDispositionFunc {
 // a beat later than the polecat's own agent_state write) does not mean the
 // polecat is still spending the seat: a done polecat sitting on an open MR
 // is idle, waiting on the refinery, not on the flash API (gt-2nft
-// — a 4/3 overflow refusal with only two live sessions, the third and fourth
+// — a 4/3 seat-cap refusal with only two live sessions, the third and fourth
 // "occupants" both done with their MR still in the queue). polecatSeatOccupied
 // reads the polecat's own bead state, the same signal `gt polecat list` and
 // scheduler.max_polecats (polecat_capacity.go) already trust over a session's
@@ -265,7 +265,7 @@ func parsePolecatRole(role string) (rig, name string, ok bool) {
 // on a lookup error or a caller with no way to read the state (a townRoot-less
 // listPolecatSessions): a pool that cannot read a polecat's state is not a pool
 // that knows the seat is free, and undercounting risks the overrun the pool
-// exists to prevent (gt-md4z) rather than the overflow-refusal this fix targets.
+// exists to prevent (gt-md4z) rather than the seat refusal this fix targets.
 func polecatSeatOccupied(disposition polecatDispositionFunc, rigName, polecatName string) bool {
 	if disposition == nil {
 		return true
@@ -639,7 +639,7 @@ func (d *poolSeatDecision) claimFor(agent string, pool *config.PolecatPool, bead
 	if d.unlock == nil || pool == nil {
 		return
 	}
-	if agent != pool.OverflowAgent || !pool.OverflowCapped() {
+	if agent != pool.Agent || !pool.SeatsCapped() {
 		return
 	}
 	claim, err := d.ledger.write(agent, beadID)
@@ -896,26 +896,26 @@ var errPoolBackpressure = errors.New("polecat pool backpressure")
 // automated path that carries --force for the safety guards it also needs opens
 // the cap with that same flag, so a cap that --force opens is a cap no
 // automated path is actually held by: that is the spawn (a 4th flash session
-// with max_overflow 3) this guard exists to stop. Capacity is a property of
-// the town, so it is raised where it is declared — polecat_pool.max_overflow —
+// with max_seats 3) this guard exists to stop. Capacity is a property of
+// the town, so it is raised where it is declared — polecat_pool.max_seats —
 // which the pool reads on every sling.
 type poolBackpressureError struct {
 	Reason string
 }
 
 func (e *poolBackpressureError) Error() string {
-	return dispatch.SlingRefusalMarker + " " + e.Reason + "; raise polecat_pool.max_overflow to spawn"
+	return dispatch.SlingRefusalMarker + " " + e.Reason + "; raise polecat_pool.max_seats to spawn"
 }
 
 func (e *poolBackpressureError) Unwrap() error { return errPoolBackpressure }
 
 // poolUncountedFallback names the agent a decision falls back to when it cannot
-// count something it decides from: the overflow agent, or the role default when
+// count something it decides from: the pool's agent, or the role default when
 // the pool has none, which the caller resolves. The reason line names whichever
 // it was, so a fallback never reads as a deliberate route.
 func poolUncountedFallback(pool *config.PolecatPool) string {
-	if pool.OverflowAgent != "" {
-		return pool.OverflowAgent
+	if pool.Agent != "" {
+		return pool.Agent
 	}
 	return "the role default"
 }
@@ -964,10 +964,10 @@ func (r *poolRouter) route(requested string, live bool) (agent, reason string, e
 			if oe.sessions {
 				what = "list sessions"
 			}
-			return pool.OverflowAgent,
+			return pool.Agent,
 				"pool: cannot " + what + " (" + seatErr.Error() + "), using " + poolUncountedFallback(pool), nil
 		}
-		return pool.OverflowAgent,
+		return pool.Agent,
 			"pool: cannot read seat claims (" + seatErr.Error() + "), using " + poolUncountedFallback(pool), nil
 	}
 	agent, reason, refused := choosePoolAgent(pool, requested, sessions)

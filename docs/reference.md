@@ -278,8 +278,13 @@ The spec dispatcher's policy lives in the town's `settings/config.json`, under
 candidate bead's number (the daemon's idle-seat check counts to the same
 number), `pro_max`, `pro_agent` and `pro_label` configure the pro seat, and
 `shape_gate` is what a dispatch does with a candidate's shape lint
-(`gt spec lint`): off, warn or refuse. `overflow_agent` and `max_overflow` are
-the pool's own seat, and `min_spawn_gap` staggers its spawns.
+(`gt spec lint`): off, warn or refuse. `agent` and `max_seats` are the pool's
+own seat — the agent its polecats run, up to `max_seats` live sessions, refused
+past the cap — and `min_spawn_gap` staggers its spawns. The seat's keys were
+`overflow_agent` and `max_overflow` until gt-plk1z: a file still carrying those
+loads the same values, warns once per process, and keeps the old keys as the
+operator wrote them — gt reads them but writes only the new names, so delete the
+old pair by hand.
 `gt config get --help` lists the keys with their defaults; `gt config get
 polecat_pool.<key>` prints the effective value. Edit the file by hand, or `gt
 config set polecat_pool.<key> <value>`.

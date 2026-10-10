@@ -962,7 +962,7 @@ func TestSpecDispatchRetriesDoltContention(t *testing.T) {
 func TestSpecDispatchPoolRefusalIsASkip(t *testing.T) {
 	t.Parallel()
 	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
-	f.slingErrs["gt-a"] = []error{&poolBackpressureError{Reason: "pool: overflow full (2/2) -> no seat"}}
+	f.slingErrs["gt-a"] = []error{&poolBackpressureError{Reason: "pool: seat full (2/2) -> no seat"}}
 	r := runSpecDispatchCycle(f.env())
 	if len(r.Skipped) != 1 || len(r.Failed) != 0 || len(f.notes["gt-a"]) != 0 || f.sleeps != 0 {
 		t.Fatalf("pool refusal handled as failure: %+v notes %v", r, f.notes)
@@ -1064,9 +1064,9 @@ func TestSpecBudgetFromConfig(t *testing.T) {
 	t.Parallel()
 	ts := config.NewTownSettings()
 	ts.RoleAgents = map[string]string{"polecat": "deepseek-flash"}
-	ts.PolecatPool = &config.PolecatPool{OverflowAgent: "deepseek-flash", MaxOverflow: 3, MinSpawnGap: "4m"}
+	ts.PolecatPool = &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3, MinSpawnGap: "4m"}
 
-	// The pool's seats: the overflow seat at max_overflow, then the pro seat at
+	// The pool's seats: the pool's own seat at max_seats, then the pro seat at
 	// its own cap. No claude-sonnet seat is in the budget (gt-4k3fj.8.8).
 	b := specBudgetFromConfig(ts, nil)
 	if got := b.Picture(); got != "deepseek-flash 0/3, deepseek-pro 0/1" || b.MinSpawnGap != 4*time.Minute {
@@ -1091,13 +1091,13 @@ func TestSpecBudgetFromConfig(t *testing.T) {
 	}
 	ts.PolecatPool.ProMax = nil
 
-	// max_overflow unset: the dispatcher caps the seat itself rather than
+	// max_seats unset: the dispatcher caps the seat itself rather than
 	// treating the pool's silence as unlimited room.
-	ts.PolecatPool.MaxOverflow = 0
+	ts.PolecatPool.MaxSeats = 0
 	if got := specBudgetFromConfig(ts, nil).Picture(); got != "deepseek-flash 0/2, deepseek-reasoner 0/1" {
-		t.Fatalf("unset max_overflow = %q", got)
+		t.Fatalf("unset max_seats = %q", got)
 	}
-	ts.PolecatPool.MaxOverflow = 3
+	ts.PolecatPool.MaxSeats = 3
 	ts.PolecatPool.ProAgent, ts.PolecatPool.ProLabel = "", ""
 }
 
@@ -1107,7 +1107,7 @@ func TestSpecBudgetFromConfig(t *testing.T) {
 func TestSpecBudgetHookedSeatIsOptIn(t *testing.T) {
 	t.Parallel()
 	ts := config.NewTownSettings()
-	ts.PolecatPool = &config.PolecatPool{OverflowAgent: "deepseek-flash", MaxOverflow: 3}
+	ts.PolecatPool = &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3}
 
 	enabled := &config.SpecDispatchConfig{Enabled: true}
 	for _, sd := range []*config.SpecDispatchConfig{nil, enabled, {Enabled: true, MaxHooked: -1}} {
@@ -1132,7 +1132,7 @@ func TestSpecBudgetHookedSeatIsOptIn(t *testing.T) {
 	}
 }
 
-// A pool with no overflow_agent has no seat for the dispatcher to fill: the
+// A pool with no agent has no seat for the dispatcher to fill: the
 // pool's own admission point says the same (choosePoolAgent).
 func TestSpecBudgetWithoutAPoolSeat(t *testing.T) {
 	t.Parallel()
@@ -1140,9 +1140,9 @@ func TestSpecBudgetWithoutAPoolSeat(t *testing.T) {
 	if got := specBudgetFromConfig(ts, nil).Picture(); got != "no seats" {
 		t.Errorf("nil pool = %q, want no seats", got)
 	}
-	ts.PolecatPool = &config.PolecatPool{MaxOverflow: 3}
+	ts.PolecatPool = &config.PolecatPool{MaxSeats: 3}
 	if got := specBudgetFromConfig(ts, nil).Picture(); got != "deepseek-pro 0/1" {
-		t.Errorf("pool without overflow_agent = %q", got)
+		t.Errorf("pool without an agent = %q", got)
 	}
 }
 

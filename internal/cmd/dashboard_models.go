@@ -36,8 +36,8 @@ func (r *modelsReader) read() *dashboard.Models {
 	// parse is an error, and then the town's model is not something to guess.
 	if ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(r.townRoot)); err == nil && ts != nil {
 		m.Polecat = strings.TrimSpace(ts.RoleAgents["polecat"])
-		if ts.PolecatPool != nil && ts.PolecatPool.MaxOverflow > 0 {
-			m.SeatCap = ts.PolecatPool.MaxOverflow
+		if ts.PolecatPool != nil && ts.PolecatPool.MaxSeats > 0 {
+			m.SeatCap = ts.PolecatPool.MaxSeats
 		}
 	}
 	m.OM = omModelName(loadOMConfig(r.omPath).Backend)

@@ -425,6 +425,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The seat pool's config keys are renamed** (gt-plk1z) — `polecat_pool`'s
+  `overflow_agent` and `max_overflow` are now `agent` and `max_seats`. The
+  "overflow" name came from the retired local-model seat the pool was born
+  beside, and it outlived the name: every polecat runs on that seat now. A
+  settings file that still carries the old pair loads the same values, warns
+  once per process, and keeps the old keys as written — gt reads them but
+  authors only the new names, so move them by hand. The Go API follows:
+  `PolecatPool.Agent`, `.MaxSeats`, `.SeatsCapped()`.
+
 - **One town-root reader** (gt-y3pgh.2, G3-22) — `workspace.TownRootFromEnv`
   is the only code that reads the town root from the environment:
   `GT_TOWN_ROOT`, then `GT_ROOT`. Walking up from the working directory

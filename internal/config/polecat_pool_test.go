@@ -40,7 +40,7 @@ func TestPolecatPool_SeatRefillPolicy(t *testing.T) {
 			"type": "town-settings",
 			"version": 1,
 			"polecat_pool": {
-				"overflow_agent": "deepseek-flash",
+				"agent": "deepseek-flash",
 				"max_priority": 3,
 				"top_candidates": 5,
 				"empty_seconds": 60,
