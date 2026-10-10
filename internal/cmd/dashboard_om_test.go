@@ -166,8 +166,10 @@ func TestBuildOM(t *testing.T) {
 	thr := 0.6
 	om := buildOM(now, recs, stages, rejs, omConfig{Backend: []string{"/x/claude-deepseek-flash", "-p"}, Threshold: &thr, Depth: "standard", Timeout: 300})
 
-	if om.Backend != "claude-deepseek-flash" || om.Depth != "standard" {
-		t.Errorf("config = %q %q", om.Backend, om.Depth)
+	// The backend is a command line; the panel names the model it runs, which
+	// for this wrapper is the family in its own name (gt-bj47s).
+	if om.Model != "flash" || om.Depth != "standard" {
+		t.Errorf("config = %q %q", om.Model, om.Depth)
 	}
 	d, all := om.Windows[2], om.Windows[4]
 	if d.Label != "24h" || d.Landed != 4 || d.Approved != 1 || d.Skipped != 2 || d.Errors != 1 || d.Rejected != 2 {

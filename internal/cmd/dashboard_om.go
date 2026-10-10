@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/landings"
@@ -85,11 +86,75 @@ type omRecord struct {
 }
 
 // omConfig is the reviewer's own config: what backend, how deep, how strict.
+// Backend is the argv om runs the review with, whose model — not whose
+// command — is what the panel and the header strip name.
 type omConfig struct {
 	Backend   []string `json:"backend"`
 	Threshold *float64 `json:"threshold"`
 	Depth     string   `json:"depth"`
 	Timeout   int      `json:"timeout"`
+}
+
+// omModelFamilies are the model names a reviewer's backend is read as, in the
+// order a longer name is given up for one of them: a name carrying "sonnet",
+// "flash" or "pro" is that family, whatever release prefix its vendor puts on
+// it. The short name is what an operator reads off the header, and a release
+// number is not what they are looking for when they ask what the town reviews
+// with.
+var omModelFamilies = []string{"sonnet", "opus", "haiku", "flash", "pro"}
+
+// omModelName names the model a reviewer's backend runs, in the short form an
+// operator uses for it. The backend is an argv — ["/<home>/.local/bin/claude",
+// "-p", "--model", "sonnet"] is the reviewer's own config — so the model is
+// what its --model flag names, and a backend run under a wrapper that names
+// none is read from the wrapper's own name ("claude-deepseek-flash" is flash).
+// A backend that is neither shows under its command name, which is all the
+// town knows about it. What no backend shows is its raw command line.
+func omModelName(backend []string) string {
+	if len(backend) == 0 {
+		return ""
+	}
+	name := backendModel(backend)
+	if name == "" {
+		name = filepath.Base(backend[0])
+	}
+	for _, family := range omModelFamilies {
+		if modelWord(name, family) {
+			return family
+		}
+	}
+	return name
+}
+
+// backendModel returns the model a backend's argv names: the value of --model
+// or -m, in either the separate or the --model= spelling. A flag with no value
+// after it names nothing.
+func backendModel(argv []string) string {
+	for i, arg := range argv {
+		switch {
+		case arg == "--model" || arg == "-m":
+			if i+1 < len(argv) {
+				return argv[i+1]
+			}
+		case strings.HasPrefix(arg, "--model="):
+			return strings.TrimPrefix(arg, "--model=")
+		}
+	}
+	return ""
+}
+
+// modelWord reports whether word is one of name's own words, for a name split
+// on anything that is not a letter or a digit: "flash" matches deepseek-flash
+// and claude-flash-2026, and never flashback.
+func modelWord(name, word string) bool {
+	for _, w := range strings.FieldsFunc(strings.ToLower(name), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}) {
+		if w == word {
+			return true
+		}
+	}
+	return false
 }
 
 // omReader keeps the daemon-log scan between polls, so a poll reads only what
@@ -108,11 +173,18 @@ type omReader struct {
 }
 
 func newOMReader(townRoot string, landings *dashLandings) *omReader {
-	cfg := ""
-	if home, err := os.UserHomeDir(); err == nil {
-		cfg = filepath.Join(home, ".config", "om", "config.json")
+	return &omReader{landings: landings, logPath: filepath.Join(townRoot, "daemon", "daemon.log"), cfgPath: omConfigPath()}
+}
+
+// omConfigPath is the reviewer's own config, in the home of whoever runs the
+// dashboard: what backend it reviews with, how deep, how strict. Empty when
+// there is no home to look in, which every reader of it reads as "no config".
+func omConfigPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
 	}
-	return &omReader{landings: landings, logPath: filepath.Join(townRoot, "daemon", "daemon.log"), cfgPath: cfg}
+	return filepath.Join(home, ".config", "om", "config.json")
 }
 
 // read is the panel's whole reading. A reader that fails leaves its part out;
@@ -363,9 +435,7 @@ func omOutcome(verdict string) string {
 // buildOM folds the records, stages and rejections into the panel's numbers.
 func buildOM(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, cfg omConfig) *dashboard.OM {
 	om := &dashboard.OM{Rejects: map[string]int{}, Routes: map[string]int{}}
-	if len(cfg.Backend) > 0 {
-		om.Backend = filepath.Base(cfg.Backend[0])
-	}
+	om.Model = omModelName(cfg.Backend)
 	om.Depth, om.TimeoutS, om.Threshold = cfg.Depth, cfg.Timeout, cfg.Threshold
 
 	type win struct {

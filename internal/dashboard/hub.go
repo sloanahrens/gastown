@@ -123,6 +123,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.Dispatch != nil {
 		start(h.cfg.DispatchEvery, h.pollDispatch)
 	}
+	if h.cfg.Models != nil {
+		start(h.cfg.ModelsEvery, h.pollModels)
+	}
 	if h.cfg.Queue != nil {
 		start(h.cfg.QueueEvery, h.pollQueue)
 	}
@@ -415,6 +418,30 @@ func (h *Hub) pollOM() {
 	}
 	h.state.OM = om
 	h.readOKLocked(SourceOM, h.cfg.OMEvery)
+	h.publishLocked()
+}
+
+// pollModels fills the header strip. The models come from the reader, but the
+// seats are the hub's own polecat list: the seats pane and the strip must count
+// the same polecats, and the one place both can read is here. Parked rigs are
+// stood down on purpose, so their polecats hold no seat.
+func (h *Hub) pollModels() {
+	m := h.cfg.Models()
+	if m == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.state.Summary != nil {
+		live := 0
+		for _, p := range h.polecats {
+			if !p.RigParked {
+				live++
+			}
+		}
+		m.Seats = &ModelsSeats{Live: live, Cap: m.SeatCap}
+	}
+	h.state.Models = m
 	h.publishLocked()
 }
 
