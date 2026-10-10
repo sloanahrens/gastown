@@ -932,7 +932,7 @@ func (b *Beads) ActingAs(actor string) *Beads {
 		beadsDir:   b.beadsDir,
 		isolated:   b.isolated,
 		serverPort: b.serverPort,
-		townRoot:   b.townRoot,
+		townRoot:   b.getTownRoot(),
 		noRoute:    b.noRoute,
 		agentScope: b.agentScope,
 		exec:       b.exec,
@@ -1260,7 +1260,7 @@ func (b *Beads) forIssueID(id string) *Beads {
 		beadsDir:   resolved,
 		isolated:   b.isolated,
 		serverPort: b.serverPort,
-		townRoot:   b.townRoot,
+		townRoot:   b.getTownRoot(),
 		noRoute:    true,
 		exec:       b.exec,
 		bin:        b.bin,
@@ -2998,7 +2998,13 @@ func (b *Beads) ShowMultiple(ids []string) (map[string]*Issue, error) {
 			for targetDir, groupIDs := range groups {
 				target := b
 				if targetDir != fallbackDir {
-					target = newBeads(beadsFields{workDir: filepath.Dir(targetDir), beadsDir: targetDir, exec: b.exec, bin: b.bin, baseEnv: b.baseEnv, actor: b.actor})
+					// pinnedToBeadsDir supplies the missing-parent workDir
+					// fallback and carries isolation, the server port and the
+					// town root; hand-rolling the wrapper dropped all three, so
+					// a group whose rig was never checked out failed the whole
+					// hydration on a chdir into a directory that does not exist
+					// (gt-m0fvn).
+					target = b.pinnedToBeadsDir(targetDir)
 				}
 				issues, err := target.showMultipleLocal(groupIDs)
 				if err != nil {
@@ -3325,7 +3331,15 @@ func (b *Beads) AddComment(id, comment string) error {
 		}
 	}
 
-	_, err := b.run("comments", "add", id, comment)
+	args := []string{"comments", "add", id}
+	if strings.HasPrefix(comment, "-") {
+		// bd reads a bare argument that starts with a dash as flags, so
+		// "- [ ] x" failed the call with "unknown shorthand flag: ' '".
+		// The separator ends flag parsing; everything after it is positional,
+		// so bd takes the text as the comment (gt-m0fvn).
+		args = append(args, "--")
+	}
+	_, err := b.run(append(args, comment)...)
 	return err
 }
 
