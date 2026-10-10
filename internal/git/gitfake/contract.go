@@ -532,6 +532,30 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 			t.Error("FindCommitMatching on an unknown ref succeeded")
 		}
 	})
+	t.Run("FindCommitMatchingSubject reads the subject, not a message quoting it", func(t *testing.T) {
+		t.Parallel()
+		fx := newFixture(t, newEnv(t))
+		marker := "land: " + fixtureBranch + " (aaaa) onto main ("
+		landed := fx.env.Commit(t, fx.origin, "main", marker+"bbbb)\n\nWork: gt-abi", map[string]string{"c.txt": "one\n"})
+		fx.env.Commit(t, fx.origin, "main", "Revert \""+marker+"bbbb)\"\n\nThis reverts commit "+landed+".", map[string]string{"d.txt": "two\n"})
+		g := fx.env.Open(fx.clone)
+		fx.fetch(t, g, "main")
+		if got, err := g.FindCommitMatchingSubject("origin/main", marker); err != nil || got != landed {
+			t.Errorf("FindCommitMatchingSubject = %q, %v; want the landing %s", got, err, landed)
+		}
+		// The whole-message grep is the shape the case guards against: it is
+		// the newest commit quoting the marker, which here is the revert.
+		if got, err := g.FindCommitMatching("origin/main", marker); err != nil || got == landed {
+			t.Errorf("FindCommitMatching = %q, %v; want the newer commit that quotes the marker", got, err)
+		}
+		if got, err := g.FindCommitMatchingSubject("origin/main", "Work: gt-abi"); err != nil || got != "" {
+			t.Errorf("FindCommitMatchingSubject on a body-only pattern = %q, %v; want empty", got, err)
+		}
+		if _, err := g.FindCommitMatchingSubject("no-such-ref", marker); err == nil {
+			t.Error("FindCommitMatchingSubject on an unknown ref succeeded")
+		}
+	})
+
 	t.Run("PushWithEnv pushes a refspec like Push, under an environment git runs with", func(t *testing.T) {
 		t.Parallel()
 		fx := newFixture(t, newEnv(t))
