@@ -557,7 +557,7 @@ func ListEscalations(c Client) ([]*Issue, error) {
 // persistent issues and the wisps together. Any other Client (beadsfake) keeps
 // one plane per List, so the wisp read is a second call merged here — the same
 // shape ListMergeRequests uses. A failed wisp read degrades to the issues
-// alone, as it does there.
+// alone.
 func listEscalationsWhere(c Client, opts ListOptions) ([]*Issue, error) {
 	issues, err := c.List(opts)
 	if err != nil {

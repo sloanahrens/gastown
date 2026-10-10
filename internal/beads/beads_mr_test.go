@@ -2,6 +2,7 @@ package beads
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -649,4 +650,81 @@ func firstUnresolvedBlockerID(issue *Issue) string {
 		return ""
 	}
 	return ids[0]
+}
+
+// failingWispsRecorder answers every bd call but the wisps read: the issues
+// half is empty and the wisps read fails the way failure gives it. A merge
+// request lives in the wisps table, so that read is the whole answer, and an
+// empty issues table beside it is not a shorter one (gt-i9wzx).
+func failingWispsRecorder(failure reply) *recorder {
+	return newRecorder(func(args []string) reply {
+		for _, arg := range args {
+			if arg == "sql" {
+				return failure
+			}
+		}
+		return reply{stdout: "[]"}
+	})
+}
+
+// TestListMergeRequestsReturnsWispReadError covers acceptance 1: a failed
+// wisps read is an error, not the issues-table results alone. Both failure
+// modes are "bd could not answer" — a process failure, and a --json call that
+// printed prose (B5-05) — and both must surface as ErrUnavailable rather than
+// as a merge queue that reads empty.
+func TestListMergeRequestsReturnsWispReadError(t *testing.T) {
+	t.Parallel()
+	cases := map[string]reply{
+		"bd sql failed":        {stderr: "connection refused", err: exitError{code: 1}},
+		"bd sql printed prose": {stdout: "No wisps found.\n"},
+	}
+	for name, failure := range cases {
+		failure := failure
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			b := newRecordedBeads(t.TempDir(), failingWispsRecorder(failure))
+			issues, err := b.ListMergeRequests(ListOptions{Label: "gt:merge-request", Status: "open", Priority: -1})
+			if err == nil {
+				t.Fatalf("ListMergeRequests() = %d issues, nil error; an unreadable wisps table must not read as no open merge request", len(issues))
+			}
+			if !errors.Is(err, ErrUnavailable) {
+				t.Fatalf("ListMergeRequests() error = %v, want ErrUnavailable in its chain", err)
+			}
+		})
+	}
+}
+
+// TestPreloadMergeRequestsDoesNotCacheFailedRead covers acceptance 2: the
+// cached answer is Loaded only when the read that fills it succeeded, so a
+// caller cannot be handed a hole as the merge queue.
+func TestPreloadMergeRequestsDoesNotCacheFailedRead(t *testing.T) {
+	t.Parallel()
+	b := newRecordedBeads(t.TempDir(), failingWispsRecorder(reply{stderr: "connection refused", err: exitError{code: 1}}))
+
+	if err := b.PreloadMergeRequests(); err == nil {
+		t.Fatal("PreloadMergeRequests() = nil error, want the wisps read failure")
+	}
+	if b.mrCache != nil {
+		t.Fatalf("mrCache = %+v, want nil: a failed read must not be cached as loaded", b.mrCache)
+	}
+	if _, err := b.FindMRForBranchAny("polecat/nux/gt-blocker"); err == nil {
+		t.Fatal("FindMRForBranchAny answered from a cache the failed read never warmed")
+	}
+}
+
+// TestMergeRequestReadFailureKeepsReadersBlocked covers acceptance 3: the two
+// readers hold their blocker rather than reporting a cleared one. The nuke
+// gate (internal/cmd/polecat_helpers.go) turns FindMRForBranch's error into its
+// open_mr_lookup_error reason; the dispatch gate (merge_pending.go) turns
+// OpenMRsBySourceIssue's error into DependencyMergeUnknown.
+func TestMergeRequestReadFailureKeepsReadersBlocked(t *testing.T) {
+	t.Parallel()
+	b := newRecordedBeads(t.TempDir(), failingWispsRecorder(reply{stderr: "connection refused", err: exitError{code: 1}}))
+
+	if _, err := FindMRForBranch(b, "polecat/nux/gt-blocker"); err == nil {
+		t.Fatal("FindMRForBranch = nil error; the nuke gate would read a polecat with an unreadable queue as having no open MR")
+	}
+	if _, err := OpenMRsBySourceIssue(b); err == nil {
+		t.Fatal("OpenMRsBySourceIssue = nil error; a dependent would read its blocker as landed")
+	}
 }
