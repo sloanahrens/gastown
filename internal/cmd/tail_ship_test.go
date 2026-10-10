@@ -264,3 +264,138 @@ func writeTownFile(t *testing.T, path, data string) {
 	}
 	writeFile(t, path, data)
 }
+
+// --- the Ship column reads a whole table of landings, not just a window: the
+// tracker is fed by the daemon log's read, so a landing older than the feed's
+// --since window has no record, and a record is what the cell reads
+// (gt-b5hw2) ---
+
+// The daemon's own lines for one landing, as the log wrote them: gt-4b0i1
+// landed as its own merge 720b2c05, and the restart that shipped it installed
+// 9820f431, the merge that carries it.
+const (
+	realShipDispatch = "spec_dispatch: dispatched: gt-4b0i1: slung to gastown/dementus on claude-sonnet (seat claude-sonnet 2/2)"
+	realShipMerged   = "landing_worker: [land] gt-4b0i1: merged fce5f9f6 onto origin/main (97a96e99) as 720b2c05; pushing the merge candidate and waiting for its CI verdict, then om review"
+	realShipLanded   = "landing_worker: [land] gt-4b0i1: landed 720b2c05 on origin/main (patch-id c3e4e1ec)"
+	realShipRestart  = "upgrade-restart: running 9820f431f26472d6ccdab9679e5cfd486ffe5077 covers marker 9820f431f26472d6ccdab9679e5cfd486ffe5077; cleared"
+)
+
+// shipDeployTracker is a tracker wired the way the dashboard wires it: the
+// town's ship definitions and a horizon that reaches the Landings table's
+// whole day, over a run whose own window is the two hours before from.
+func shipDeployTracker(ancestor tailAncestry, table map[string]string, ships map[string]dashboard.StagingShip, from time.Time) *tailDeploys {
+	track := newTailDeploys(fixedNow, ancestor, from)
+	track.setShipDefinitions("gastown", shipRigOf(table), fakeStaging(ships))
+	track.setHorizon(trendHours * time.Hour)
+	return track
+}
+
+// shipSource is the daemon source the dashboard feeds its tracker through: the
+// lines it reads are the tracker's, the lines it returns are the stream's.
+func shipSource(dir string, track *tailDeploys, from time.Time) *tailDeploySource {
+	return &tailDeploySource{
+		inner: &daemonSource{dir: dir, cutoff: track.logCutoff(from), loc: tailTestLoc, now: fixedNow},
+		track: track, from: from,
+	}
+}
+
+// TestTailDeploys_ShipsARestartCoveredLandingOlderThanTheRunsWindow: the
+// landing the 01:00 restart installed is inside the table but outside the
+// feed's window, and its ship time still reads — the stream stays bounded by
+// the window, the record does not.
+func TestTailDeploys_ShipsARestartCoveredLandingOlderThanTheRunsWindow(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	appendFile(t, filepath.Join(dir, "daemon.log"),
+		"2026/09/30 03:00:00 "+realShipDispatch+"\n"+
+			"2026/09/30 03:03:00 "+realShipMerged+"\n"+
+			"2026/09/30 03:04:00 "+realShipLanded+"\n"+
+			"2026/09/30 03:10:00 "+realShipRestart+"\n")
+
+	from := at("2026-09-30T12:00:00Z") // the run's --since: two hours back
+	track := shipDeployTracker(
+		fakeTailAncestry("720b2c05 9820f431f26472d6ccdab9679e5cfd486ffe5077"),
+		map[string]string{"gt-4b0i1": "gastown"}, nil, from,
+	)
+	if got := texts(shipSource(dir, track, from).Poll()); len(got) != 0 {
+		t.Fatalf("stream = %q; the landing is older than the run's window", got)
+	}
+	ship := track.shipStatus("gastown", "gt-4b0i1")
+	if ship.Secs == nil || *ship.Secs != 600 || ship.Pending || ship.Via != tailShipViaDeploy {
+		t.Fatalf("ship = %+v; want 600s via deploy", ship)
+	}
+}
+
+// TestTailDeploys_ShipsAnAppLandingOlderThanTheRunsWindow: an app rig's
+// landing, staged long before the run's window starts, still reads the staging
+// run that shipped it.
+func TestTailDeploys_ShipsAnAppLandingOlderThanTheRunsWindow(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	appendFile(t, filepath.Join(dir, "daemon.log"),
+		"2026/09/30 03:00:00 spec_dispatch: dispatched: fr-1: slung to fractals/opal on x (seat 1/3)\n"+
+			"2026/09/30 03:05:00 landing_worker: [land] fr-1: landed aaaaaaaa on origin/main (patch-id 1)\n")
+
+	from := at("2026-09-30T12:00:00Z")
+	track := shipDeployTracker(
+		fakeTailAncestry(),
+		map[string]string{"fr-1": "fractals"},
+		map[string]dashboard.StagingShip{"fractals\x00aaaaaaaa": {State: dashboard.StagingDeployed, At: at("2026-09-30T08:20:00Z")}},
+		from,
+	)
+	shipSource(dir, track, from).Poll()
+	ship := track.shipStatus("fractals", "fr-1")
+	if ship.Secs == nil || *ship.Secs != 1200 || ship.Via != tailShipViaStaging {
+		t.Fatalf("ship = %+v; want 1200s via staging", ship)
+	}
+}
+
+// TestTailDeploys_WaitingLandingOlderThanTheRunsWindowIsPending: a landing with
+// a dispatch line and no deploy yet reads as pending however long ago it was
+// dispatched, never as a rig with no ship definition.
+func TestTailDeploys_WaitingLandingOlderThanTheRunsWindowIsPending(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	appendFile(t, filepath.Join(dir, "daemon.log"),
+		"2026/09/30 03:00:00 "+realShipDispatch+"\n"+
+			"2026/09/30 03:04:00 "+realShipLanded+"\n")
+
+	from := at("2026-09-30T12:00:00Z")
+	track := shipDeployTracker(fakeTailAncestry(), map[string]string{"gt-4b0i1": "gastown"}, nil, from)
+	shipSource(dir, track, from).Poll()
+	ship := track.shipStatus("gastown", "gt-4b0i1")
+	if ship.Secs != nil || !ship.Pending || ship.Failed || ship.Via != tailShipViaDeploy {
+		t.Fatalf("ship = %+v; want pending via deploy", ship)
+	}
+}
+
+// TestTailDeploys_LogCutoffReachesTheHorizon: the tracker reads the daemon log
+// back to the table's horizon, and no further than the run's own window when
+// nobody gives it one.
+func TestTailDeploys_LogCutoffReachesTheHorizon(t *testing.T) {
+	t.Parallel()
+	from := at("2026-09-30T12:00:00Z") // two hours before fixedNow
+	track := newTailDeploys(fixedNow, fakeTailAncestry(), from)
+	if got, want := track.logCutoff(from), from; !got.Equal(want) {
+		t.Fatalf("logCutoff without a horizon = %v; want the run's window %v", got, want)
+	}
+	track.setHorizon(trendHours * time.Hour)
+	if got, want := track.logCutoff(from), fixedNow().Add(-trendHours*time.Hour); !got.Equal(want) {
+		t.Fatalf("logCutoff = %v; want the table's horizon %v", got, want)
+	}
+}
+
+// TestDashboardDeploys_ReadsBackToTheLandingsTable: the tracker the Landings
+// pane is served by is the one given the table's horizon — the wiring, not
+// just the tracker, is what keeps the Ship column off a dash.
+func TestDashboardDeploys_ReadsBackToTheLandingsTable(t *testing.T) {
+	t.Parallel()
+	cutoff := time.Now().Add(-2 * time.Hour)
+	track := dashboardDeploys(t.TempDir(), shipRigOf(nil), cutoff, nil)
+	if got := track.horizon; got != trendHours*time.Hour {
+		t.Fatalf("horizon = %v; want the Landings table's %v", got, trendHours*time.Hour)
+	}
+	if age := time.Since(track.logCutoff(cutoff)); age < trendHours*time.Hour-time.Minute || age > trendHours*time.Hour+time.Minute {
+		t.Fatalf("logCutoff = %v back; want the table's whole %v", age, trendHours*time.Hour)
+	}
+}
