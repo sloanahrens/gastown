@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 )
 
 // Exit statuses bd's machine mode reserves for typed failures (beads
@@ -40,6 +41,16 @@ func bdSaidNotFound(exitCode int, stdout []byte) bool {
 		} `json:"error"`
 	}
 	return json.Unmarshal(trimmed, &env) == nil && env.Error != nil && env.Error.Kind == "not_found"
+}
+
+// markUnavailable returns err carrying ErrUnavailable, so a caller cannot read
+// a failed read as an empty one. An error that already carries ErrUnavailable
+// comes back unchanged.
+func markUnavailable(err error) error {
+	if err == nil || errors.Is(err, ErrUnavailable) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrUnavailable, err)
 }
 
 // exitCodeOf returns err's process exit status, or -1 when it has none.

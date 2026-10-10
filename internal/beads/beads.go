@@ -2285,7 +2285,9 @@ func isJSONBytes(b []byte) bool {
 // and the wisps table. MRs are created as ephemeral (wisps) by gt mq submit,
 // but bd list only queries the issues table. This method queries the wisps
 // table via bd sql --json, then hydrates each MR with bd show detail so
-// dependency readiness fields are consistent for display and selection.
+// dependency readiness fields are consistent for display and selection. An
+// unreadable wisps table is an error wrapping ErrUnavailable, never a shorter
+// list.
 func (b *Beads) ListMergeRequests(opts ListOptions) ([]*Issue, error) {
 	// 1. Query issues table (bd list) — don't use Ephemeral since bd query
 	// can't parse colons in label values like "gt:merge-request".
@@ -2311,9 +2313,11 @@ func (b *Beads) ListMergeRequests(opts ListOptions) ([]*Issue, error) {
 		var wispErr error
 		wisps, wispErr = b.listWispsByLabels([]string{label})
 		if wispErr != nil {
-			// Degrade to issues-table-only results, matching the previous
-			// silently-ignored sqlErr behavior.
-			wisps = nil
+			// An MR *is* the wisp carrying the label, so a failed wisps read is
+			// an unreadable merge queue, not an empty one. Degrading to the
+			// issues table would drop every live MR and read as no open merge
+			// request (gt-i9wzx).
+			return nil, markUnavailable(wispErr)
 		}
 	}
 	return finishMergeRequests(b, issueResults, wisps, opts)

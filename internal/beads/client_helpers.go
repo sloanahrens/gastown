@@ -36,7 +36,8 @@ import (
 // issues and wisps alike, hydrated with their full details. opts.Label
 // defaults to gt:merge-request for the wisps; a wisp's status matches
 // opts.Status, with "" meaning open and "all" any. opts.Rig drops MRs whose
-// description names another rig.
+// description names another rig. A failed wisp read is an error wrapping
+// ErrUnavailable, never a shorter list.
 func ListMergeRequests(c Client, opts ListOptions) ([]*Issue, error) {
 	if b, ok := c.(*Beads); ok {
 		return b.ListMergeRequests(opts)
@@ -50,8 +51,12 @@ func ListMergeRequests(c Client, opts ListOptions) ([]*Issue, error) {
 	if label == "" {
 		label = "gt:merge-request"
 	}
-	// As on *Beads, a failed wisp read degrades to the issues alone.
-	wisps, _ := c.List(ListOptions{Label: label, Status: "all", Priority: -1, Ephemeral: true})
+	// As on *Beads, an unreadable wisps table is an unknown answer: every
+	// merge request lives there, so the issues alone would hide a live one.
+	wisps, err := c.List(ListOptions{Label: label, Status: "all", Priority: -1, Ephemeral: true})
+	if err != nil {
+		return nil, markUnavailable(err)
+	}
 	return finishMergeRequests(c, issues, wisps, opts)
 }
 
