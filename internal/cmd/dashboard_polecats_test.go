@@ -151,6 +151,34 @@ func TestDashSeatKeyChangesWhenTheSpawnGraceEnds(t *testing.T) {
 	}
 }
 
+// The seat's record of the hook is carried to the pane, which falls back to it
+// when the feed holds no dispatch line for the bead (gt-jwmxo). A seat holding
+// no work has no bead to date, so the time is not carried.
+func TestBuildDashPolecatsCarriesTheSeatsHookTime(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 11, 18, 0, 0, 0, time.UTC)
+	hooked := now.Add(-2 * time.Hour)
+	got := buildDashPolecats(dashPolecatInputs{
+		Now: now, SessionsKnown: true,
+		Seats: []dashSeat{
+			{Rig: "gastown", Name: "working", HookedAt: hooked,
+				Item: dashItem(polecat.StateWorking, polecat.WorkstateDisposition{}), Issue: &beads.Issue{ID: "gt-1"}},
+			{Rig: "gastown", Name: "idle", HookedAt: hooked,
+				Item: dashItem(polecat.StateIdle, polecat.WorkstateDisposition{Reusable: true})},
+		},
+	})
+	byName := map[string]dashboard.Polecat{}
+	for _, p := range got {
+		byName[p.Name] = p
+	}
+	if p := byName["working"]; p.Hooked == nil || !p.Hooked.Equal(hooked) {
+		t.Errorf("working = %+v (want the seat's hook time)", p)
+	}
+	if p := byName["idle"]; p.Hooked != nil {
+		t.Errorf("idle = %+v (a seat holding no work has no bead to date)", p)
+	}
+}
+
 func TestBuildDashPolecatsCarriesTheRigParkedFlag(t *testing.T) {
 	t.Parallel()
 	got := buildDashPolecats(dashPolecatInputs{

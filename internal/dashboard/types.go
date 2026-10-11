@@ -81,8 +81,17 @@ type Polecat struct {
 	Priority *int     `json:"priority,omitempty"`
 	Labels   []string `json:"labels,omitempty"`
 
-	Slung      *time.Time `json:"slung,omitempty"` // when a dispatch line named the bead
+	// Slung is when the bead went onto this polecat's hook — the feed's
+	// dispatch line, else Hooked — and ElapsedSec is that time read against
+	// the hub's clock. The hub fills both.
+	Slung      *time.Time `json:"slung,omitempty"`
 	ElapsedSec int64      `json:"elapsed_sec,omitempty"`
+	// Hooked is the seat's own record of putting the bead on its hook: the
+	// agent bead's last write, which gt sling makes. The pane's On it falls
+	// back to it for a bead the feed has no dispatch line for (gt-jwmxo). A
+	// later write on that bead — a submit, a patrol clearing the hook — dates
+	// the seat rather than the hook, so the reading can only be too short.
+	Hooked     *time.Time `json:"hooked,omitempty"`
 	HasSession bool       `json:"has_session"`
 	LastActive *time.Time `json:"last_active,omitempty"`
 	QuietSec   int64      `json:"quiet_sec,omitempty"`

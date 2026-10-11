@@ -83,6 +83,11 @@ type dashSeat struct {
 	RigParked bool // the polecat's rig is parked
 	Item      polecatInventoryItem
 	Issue     *beads.Issue // the assigned work, nil when it holds none
+	// HookedAt is the seat's own record of when Issue went on its hook: the
+	// agent bead's last write, which gt sling makes as it hooks the bead. The
+	// pane's On it falls back to it for a bead the feed has no dispatch line
+	// for; zero when the agent bead is missing or undated (gt-jwmxo).
+	HookedAt time.Time
 }
 
 // dashPolecatInputs is everything the polecat table is built from, so the
@@ -184,6 +189,12 @@ func buildDashPolecats(in dashPolecatInputs) []dashboard.Polecat {
 			p.Priority = &pr
 			labels = s.Issue.Labels
 			p.Labels = dashBadgeLabels(labels)
+			// The seat's record of the hook dates the bead for the pane when
+			// the feed has no dispatch line for it (gt-jwmxo).
+			if !s.HookedAt.IsZero() {
+				at := s.HookedAt
+				p.Hooked = &at
+			}
 		}
 		p.State, p.Reason = dashPolecatState(s.Item, hasWork, hasWork && in.Ready[p.Bead], labels)
 		if !in.SessionsKnown && p.State == dashboard.StateStalled {
@@ -333,7 +344,10 @@ func dashSeats(townRoot string, sessionNames []string, sessionsKnown bool, cache
 			if active[name] != nil {
 				activeID = active[name].ID
 			}
-			key := dashSeatKey(polecat.AgentBeadUpdatedAt(agentBead), now, spawnWindow, activeID, running)
+			// The agent bead's last write is both the spawn grace's clock and
+			// the hook time the pane's On it falls back to.
+			hookedAt := polecat.AgentBeadUpdatedAt(agentBead)
+			key := dashSeatKey(hookedAt, now, spawnWindow, activeID, running)
 			id := rig + "/" + name
 			// A classification made without a session list is not the polecat's:
 			// it is neither read from nor written to the cache.
@@ -353,7 +367,7 @@ func dashSeats(townRoot string, sessionNames []string, sessionsKnown bool, cache
 					cache.put(id, key, item)
 				}
 			}
-			seats = append(seats, dashSeat{Rig: rig, Name: name, Session: session.PolecatSessionName(reg.PrefixForRig(rig), name), RigParked: rigParked, Item: item, Issue: active[name]})
+			seats = append(seats, dashSeat{Rig: rig, Name: name, Session: session.PolecatSessionName(reg.PrefixForRig(rig), name), RigParked: rigParked, Item: item, Issue: active[name], HookedAt: hookedAt})
 		}
 	}
 	return seats, nil
