@@ -485,3 +485,102 @@ func TestRevertGuardRefusesAPathNamedOnlyInsideALongerOne(t *testing.T) {
 		t.Errorf("notes = %v, want none on a refusal", bd.notes)
 	}
 }
+
+// TestNamedInDescriptionDirectories (gt-vpjtk): a directory written with its
+// trailing slash names every file under it, at any depth, on a path boundary
+// only. A directory without the slash, or a sibling file, names nothing under it.
+func TestNamedInDescriptionDirectories(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		description string
+		path        string
+		want        bool
+	}{
+		{"directory names a file under it", "Delete internal/foo/ entirely.", "internal/foo/a.go", true},
+		{"directory names a nested file", "Delete internal/foo/ entirely.", "internal/foo/sub/deep/a.go", true},
+		{"directory in backticks", "Delete `internal/foo/` entirely.", "internal/foo/a.go", true},
+		{"directory before a sentence period", "Delete internal/foo/.", "internal/foo/a.go", true},
+		{"directory before a sentence comma", "Delete internal/foo/, then rebuild.", "internal/foo/a.go", true},
+		{"directory at the start of the text", "docs/ goes.", "docs/x.go", true},
+		{"nested directory names its own files", "Delete internal/foo/sub/.", "internal/foo/sub/a.go", true},
+		{"nested directory does not name the parent's files", "Delete internal/foo/sub/.", "internal/foo/a.go", false},
+		{"prefixed directory does not name it", "Delete mydocs/ now.", "docs/x.go", false},
+		{"directory under another does not name a top-level one", "Delete sub/docs/ now.", "docs/x.go", false},
+		{"top-level directory does not name a nested one", "Delete docs/ now.", "sub/docs/x.go", false},
+		{"top-level directory does not name a prefixed one", "Delete docs/ now.", "mydocs/x.go", false},
+		{"directory without a slash names nothing under it", "Delete internal/foo entirely.", "internal/foo/a.go", false},
+		{"directory without a slash before a period names nothing", "Delete internal/foo.", "internal/foo/a.go", false},
+		{"a file under the directory does not name its siblings", "Delete internal/foo/a.go.", "internal/foo/b.go", false},
+		{"a file still has to be named whole", "Delete internal/foo/a.go.bak.", "internal/foo/a.go", false},
+		{"a longer directory name does not name it", "Delete internal/foo/bar/.", "internal/foo/a.go", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := namedInDescription(tc.description, tc.path); got != tc.want {
+				t.Errorf("namedInDescription(%q, %q) = %v, want %v", tc.description, tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRevertGuardWaivesALabeledDirectoryDeletion (gt-vpjtk): a description that
+// names the directory with a trailing slash waives the deletion of the files
+// under it, and the notes line still lists each file.
+func TestRevertGuardWaivesALabeledDirectoryDeletion(t *testing.T) {
+	t.Parallel()
+	bd := &fakeNotesClient{}
+	issue := &beads.Issue{
+		ID:          "gt-x",
+		Labels:      []string{"deletes-by-spec"},
+		Description: "Delete the dead package internal/old/ and keep the rest.",
+	}
+	r := waivedRun(t.TempDir(), issue, bd)
+	g := fakeRevertGit{subjects: map[string]string{"aaaaaaaaaaaa": "old work"}}
+	reverted := []git.RevertedMerge{{Commit: "aaaaaaaaaaaa", Paths: []string{"internal/old/a.go", "internal/old/sub/b.go"}}}
+
+	var warn strings.Builder
+	if err := reportRevertedMergesRecordingTo(&warn, r, g, detected(git.RevertReport{Reverted: reverted}, nil), "origin/main"); err != nil {
+		t.Fatalf("a directory the description names was refused: %v", err)
+	}
+	want := "revert guard waived by deletes-by-spec for 2 path(s): internal/old/a.go, internal/old/sub/b.go"
+	if len(bd.notes) != 1 || bd.notes[0] != want {
+		t.Errorf("notes = %v, want one line %q", bd.notes, want)
+	}
+}
+
+// TestRevertGuardRefusesADirectoryNamedOffItsBoundary (gt-vpjtk): docs/ does not
+// waive mydocs/x.go or sub/docs/x.go, and a directory named without its slash
+// waives nothing. The refusal names what stayed unnamed and tells the author the
+// directory form is accepted.
+func TestRevertGuardRefusesADirectoryNamedOffItsBoundary(t *testing.T) {
+	t.Parallel()
+	for _, description := range []string{
+		"Delete docs/ only.",
+		"Delete the docs directory, docs and everything in it.",
+	} {
+		bd := &fakeNotesClient{}
+		issue := &beads.Issue{ID: "gt-x", Labels: []string{"deletes-by-spec"}, Description: description}
+		r := waivedRun(t.TempDir(), issue, bd)
+		g := fakeRevertGit{subjects: map[string]string{"aaaaaaaaaaaa": "old work"}}
+		reverted := []git.RevertedMerge{{Commit: "aaaaaaaaaaaa", Paths: []string{"docs/x.go", "mydocs/x.go", "sub/docs/x.go"}}}
+
+		var warn strings.Builder
+		err := reportRevertedMergesRecordingTo(&warn, r, g, detected(git.RevertReport{Reverted: reverted}, nil), "origin/main")
+		if err == nil {
+			t.Fatalf("description %q: a directory named off its boundary was waived", description)
+		}
+		for _, want := range []string{"unnamed: mydocs/x.go", "unnamed: sub/docs/x.go", "trailing slash"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("description %q: refusal lacks %q:\n%s", description, want, err)
+			}
+		}
+		if strings.Contains(description, "docs/ only") && strings.Contains(err.Error(), "unnamed: docs/x.go") {
+			t.Errorf("description %q: refusal lists docs/x.go, which docs/ names:\n%s", description, err)
+		}
+		if len(bd.notes) != 0 {
+			t.Errorf("description %q: notes = %v, want none on a refusal", description, bd.notes)
+		}
+	}
+}

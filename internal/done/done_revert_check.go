@@ -158,24 +158,45 @@ func revertedPaths(reverted []git.RevertedMerge, description string) (all, unnam
 	return all, unnamed
 }
 
-// namedInDescription reports whether description names path as a whole path
-// rather than as a run of characters inside a longer one (gt-j5q4i). A
-// substring match only counts when path characters do not touch it, so
-// "docs/README.md" does not name "README.md" and "internal/x.go.bak" does not
-// name "internal/x.go" — a short top-level path is not named by the longer path
+// namedInDescription reports whether description names path: whole, or through
+// a directory above it written with its trailing slash. A directory spares the
+// description from listing every file under it, so "internal/old/" names
+// "internal/old/a.go" and "internal/old/sub/b.go". The slash is what makes it a
+// directory: "internal/old" names no file under it, and "internal/old/a.go"
+// names that file only.
+//
+// Either form must stand as a whole path rather than as a run of characters
+// inside a longer one (gt-j5q4i). A substring match only counts when path
+// characters do not touch it, so "docs/README.md" does not name "README.md",
+// "internal/x.go.bak" does not name "internal/x.go", and "docs/" does not name
+// "mydocs/x.go" or "sub/docs/x.go" — a short path is not named by a longer one
 // that ends with it. A sentence's trailing period or comma closes the name, so
 // "internal/x.go." and "internal/x.go, which we replaced" both name it.
 func namedInDescription(description, path string) bool {
 	if path == "" {
 		return false
 	}
-	for from := 0; from+len(path) <= len(description); {
-		at := strings.Index(description[from:], path)
+	if mentionedWhole(description, path) {
+		return true
+	}
+	for i := 0; i < len(path); i++ {
+		if path[i] == '/' && mentionedWhole(description, path[:i+1]) {
+			return true
+		}
+	}
+	return false
+}
+
+// mentionedWhole reports whether description carries name as a whole path, not
+// inside a longer one (nameBoundary).
+func mentionedWhole(description, name string) bool {
+	for from := 0; from+len(name) <= len(description); {
+		at := strings.Index(description[from:], name)
 		if at < 0 {
 			return false
 		}
 		at += from
-		if nameBoundary(description, at, at+len(path)) {
+		if nameBoundary(description, at, at+len(name)) {
 			return true
 		}
 		from = at + 1
@@ -350,7 +371,8 @@ func revertedMergeRefusal(g revertReportGit, target string, found []git.Reverted
 	}
 	if len(unnamed) > 0 {
 		b.WriteString("\nThe bead carries deletes-by-spec, which waives a directed deletion only when " +
-			"the description names every path being deleted. It does not name:\n")
+			"the description names every path being deleted: each file whole, or a directory with a " +
+			"trailing slash (internal/old/ names every file under it). It does not name:\n")
 		for _, path := range unnamed {
 			fmt.Fprintf(&b, "  unnamed: %s\n", path)
 		}
