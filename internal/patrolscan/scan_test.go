@@ -146,11 +146,19 @@ func (f *fakeEnv) GitState(_, p string) (GitState, error) {
 	}
 	return f.gitStates[p], nil
 }
-func (f *fakeEnv) ClearEscalation(_, p string) (bool, error) {
+func (f *fakeEnv) ClearStuckExit(_, p, exit string) (bool, error) {
 	if err := f.clearSeatErr[p]; err != nil {
 		return false, err
 	}
 	f.escalations = append(f.escalations, p)
+	// The write gt done's exit is undone by: state idle, exit type removed,
+	// the rest of the record (source issue, cleanup status) left as it was.
+	rec := f.agents[p]
+	if !strings.EqualFold(rec.State, "stuck") || !strings.EqualFold(rec.ExitType, exit) {
+		return false, nil
+	}
+	rec.State, rec.ExitType = "idle", ""
+	f.agents[p] = rec
 	return true, nil
 }
 func (f *fakeEnv) Restart(_, p, _ string) error {
@@ -478,8 +486,19 @@ func TestUnresolvedEscalationIsLeftAlone(t *testing.T) {
 		{"unpushed commit", func(env *fakeEnv) {
 			env.gitStates["ruby"] = GitState{Branch: "polecat/ruby/gt-src+x", UnpushedCommits: 1}
 		}, OutcomeIdled},
-		{"DEFERRED exit, not ESCALATED", func(env *fakeEnv) {
+		{"DEFERRED exit, its bead closed (report-only)", func(env *fakeEnv) {
 			env.agents["ruby"] = AgentRecord{State: "stuck", ExitType: ExitDeferred, LastSourceIssue: "gt-src"}
+		}, OutcomeCleared},
+		{"DEFERRED exit, source bead still open", func(env *fakeEnv) {
+			env.agents["ruby"] = AgentRecord{State: "stuck", ExitType: ExitDeferred, LastSourceIssue: "gt-src"}
+			env.workBeads["gt-src"] = &Work{ID: "gt-src", Status: "in_progress"}
+		}, OutcomeIdled},
+		{"DEFERRED exit, commits left unpushed", func(env *fakeEnv) {
+			env.agents["ruby"] = AgentRecord{State: "stuck", ExitType: ExitDeferred, LastSourceIssue: "gt-src"}
+			env.gitStates["ruby"] = GitState{Branch: "polecat/ruby/gt-src+x", UnpushedCommits: 2}
+		}, OutcomeIdled},
+		{"exit type neither ESCALATED nor DEFERRED", func(env *fakeEnv) {
+			env.agents["ruby"] = AgentRecord{State: "stuck", ExitType: "COMPLETED", LastSourceIssue: "gt-src"}
 		}, OutcomeIdled},
 		{"agent state not stuck", func(env *fakeEnv) {
 			env.agents["ruby"] = AgentRecord{State: "working", ExitType: ExitEscalated, LastSourceIssue: "gt-src"}
@@ -519,6 +538,74 @@ func TestUnresolvedEscalationIsLeftAlone(t *testing.T) {
 				t.Fatalf("cleared = %v, want %v (report %v)", got, wantCleared, r.Lines())
 			}
 		})
+	}
+}
+
+// A report-only job (mol-deep-review) closes its bead and then exits gt done
+// --status DEFERRED, which writes agent_state=stuck and exit_type=DEFERRED. The
+// seat has no work, so the tick used to retire only its intent record to stop
+// and leave the agent bead stuck, which `gt polecat list` kept reporting as
+// recovery-needed until the seat was nuked by hand (gt-oa6du, dementus on
+// gt-yx415, 2026-10-11). The first tick clears the record to idle; the next
+// retires the seat, and the agent bead reads idle throughout.
+func TestFinishedReportOnlyDeferredExitReturnsToIdle(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	env.polecats = []string{"dementus"}
+	env.verdicts["dementus"] = dead(2)
+	env.agents["dementus"] = AgentRecord{State: "stuck", ExitType: ExitDeferred,
+		LastSourceIssue: "gt-yx415", CleanupStatus: "clean"}
+	env.workBeads["gt-yx415"] = &Work{ID: "gt-yx415", Status: "closed"}
+	env.gitStates["dementus"] = GitState{Branch: "polecat/dementus/gt-yx415+x"}
+	sc := scanner(env, nil)
+
+	r := sc.Tick("gastown")
+	f := seatFinding(t, r, "dementus")
+	if f.Outcome != OutcomeCleared {
+		t.Fatalf("first tick = %v (%q), want cleared", f.Outcome, f.Detail)
+	}
+	for _, want := range []string{"DEFERRED", "gt-yx415", "closed", "worktree clean"} {
+		if !strings.Contains(f.Detail, want) {
+			t.Errorf("detail = %q, want it to name %q", f.Detail, want)
+		}
+	}
+	if got := env.agents["dementus"]; got.State != "idle" || got.ExitType != "" {
+		t.Fatalf("agent record = %+v, want idle with no exit type", got)
+	}
+
+	r = sc.Tick("gastown")
+	f = seatFinding(t, r, "dementus")
+	if f.Outcome != OutcomeIdled {
+		t.Fatalf("second tick = %v (%q), want idled", f.Outcome, f.Detail)
+	}
+	if got := env.agents["dementus"]; got.State != "idle" {
+		t.Fatalf("agent record = %+v after the idle retire, want it still idle", got)
+	}
+	if len(env.restarts) != 0 {
+		t.Fatalf("restarts = %v; a finished report-only seat is never restarted", env.restarts)
+	}
+}
+
+// The clear must not touch a DEFERRED exit that still has work behind it: the
+// bead is hooked, so the seat is restarted on its preserved branch as before
+// (gt-ks62m) and its record stays stuck until the successor's turn starts.
+func TestDeferredExitWithHookedBeadIsStillRestartedNotCleared(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	deadWithWork(env, "ruby")
+	env.agents["ruby"] = AgentRecord{State: "stuck", ExitType: ExitDeferred,
+		LastSourceIssue: "gt-ruby", CleanupStatus: "has_unpushed"}
+	env.workBeads["gt-ruby"] = &Work{ID: "gt-ruby", Status: "closed"} // a stale source must not matter
+	env.gitStates["ruby"] = GitState{Branch: "polecat/ruby/gt-ruby+x", UnpushedCommits: 1}
+
+	r := scanner(env, nil).Tick("gastown")
+
+	f := seatFinding(t, r, "ruby")
+	if f.Outcome != OutcomeRestarted {
+		t.Fatalf("outcome = %v (%q), want restarted", f.Outcome, f.Detail)
+	}
+	if len(env.escalations) != 0 {
+		t.Fatalf("cleared = %v, want nothing cleared on a seat with work hooked", env.escalations)
 	}
 }
 
