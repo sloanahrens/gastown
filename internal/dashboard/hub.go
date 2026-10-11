@@ -624,10 +624,18 @@ func (h *Hub) polecatsLocked(now time.Time) []Polecat {
 		if p.Bead == "" {
 			continue
 		}
-		if at, ok := h.slung[p.Bead]; ok {
-			at := at
-			p.Slung = &at
-			if d := now.Sub(at); d > 0 {
+		// A dispatch line dates the bead exactly, so it wins. The feed holds
+		// only its own window, though: a polecat dispatched before it opened
+		// has no line, and its On it would stay blank however long it worked.
+		// The seat's own record of the hook stands in — see Polecat.Hooked.
+		at := p.Hooked
+		if logged, ok := h.slung[p.Bead]; ok {
+			at = &logged
+		}
+		if at != nil {
+			when := *at
+			p.Slung = &when
+			if d := now.Sub(when); d > 0 {
 				p.ElapsedSec = int64(d / time.Second)
 			}
 		}
@@ -648,11 +656,28 @@ func (h *Hub) polecatsLocked(now time.Time) []Polecat {
 
 var (
 	slungRe = regexp.MustCompile(`([A-Za-z0-9][\w.-]*):? slung to `)
+	// The scheduled slings patrol logs its dispatch in its own shape —
+	// "scheduled_slings: <name>: created <bead>, slinging <formula> to <rig>"
+	// — which slungRe does not read (gt-jwmxo).
+	scheduledSlingRe = regexp.MustCompile(`scheduled_slings: \S+: created ([A-Za-z0-9][\w.-]*), slinging `)
 	// A bead is gated from the worker's "merged ... gating" line until it lands,
 	// is rejected, or reports its stage times.
 	gateStartRe = regexp.MustCompile(`\[land\] (\S+): merged .*gating`)
 	gateEndRe   = regexp.MustCompile(`\[land\] (\S+): (?:stages: |landed |rejected )`)
 )
+
+// dispatchBead reads the bead a feed line reports dispatching, false for a line
+// that dispatched nothing. slungRe keeps the pattern and the matches it had;
+// the scheduled slings patrol's line is the one other shape (gt-jwmxo).
+func dispatchBead(text string) (string, bool) {
+	if m := slungRe.FindStringSubmatch(text); m != nil {
+		return m[1], true
+	}
+	if m := scheduledSlingRe.FindStringSubmatch(text); m != nil {
+		return m[1], true
+	}
+	return "", false
+}
 
 func (h *Hub) pollFeed() {
 	entries := h.cfg.Feed()
@@ -667,8 +692,8 @@ func (h *Hub) pollFeed() {
 		entries[i].Seq = h.seq
 		e := entries[i]
 		h.ring = append(h.ring, e)
-		if m := slungRe.FindStringSubmatch(e.Text); m != nil {
-			h.slung[m[1]] = e.At
+		if id, ok := dispatchBead(e.Text); ok {
+			h.slung[id] = e.At
 			changed = true
 		}
 		if m := gateStartRe.FindStringSubmatch(e.Text); m != nil {
