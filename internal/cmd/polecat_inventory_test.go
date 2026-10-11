@@ -718,3 +718,78 @@ func TestBuildPolecatInventoryItemStaleAgentState(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildPolecatInventoryItemProtectiveAgentState is the list half of
+// gt-gdm14: a finished seat left agent_state=stuck (or awaiting_gate) read
+// NEEDS_RECOVERY reason active-work, while check-recovery, which never reads
+// agent_state, called the same seat SAFE_TO_NUKE. The state stops blocking once
+// no session is up and the hook names nothing at risk. Everything that is at
+// risk still blocks through its own fact: a live hook, unpushed commits, a
+// dirty tree, a running session, or a hook the list cannot read.
+func TestBuildPolecatInventoryItemProtectiveAgentState(t *testing.T) {
+	t.Parallel()
+	closedHook := fakeIssueShower{issue: &beads.Issue{ID: "gt-review", Status: string(beads.StatusClosed)}}
+	liveHook := fakeIssueShower{issue: &beads.Issue{ID: "gt-review", Status: string(beads.StatusOpen)}}
+	cleanGit := polecat.LiveGitState{Branch: "polecat/dementus/gt-review", Source: polecat.GitStateSourceLive}
+
+	tests := []struct {
+		name         string
+		agentState   beads.AgentState
+		source       polecat.IssueReader
+		git          polecat.LiveGitState
+		running      bool
+		wantSafe     bool
+		wantBlockers string
+	}{
+		{name: "stuck, closed hook, clean git", agentState: beads.AgentStateStuck, source: closedHook, git: cleanGit, wantSafe: true},
+		{name: "awaiting gate, closed hook, clean git", agentState: beads.AgentStateAwaitingGate, source: closedHook, git: cleanGit, wantSafe: true},
+		{name: "escalated, closed hook, clean git", agentState: beads.AgentStateEscalated, source: closedHook, git: cleanGit, wantSafe: true},
+		{
+			name: "stuck, closed hook, unpushed commits", agentState: beads.AgentStateStuck, source: closedHook,
+			git:          polecat.LiveGitState{Branch: cleanGit.Branch, Source: polecat.GitStateSourceLive, UnpushedCommits: 2},
+			wantBlockers: "unpushed",
+		},
+		{
+			name: "stuck, closed hook, dirty tree", agentState: beads.AgentStateStuck, source: closedHook,
+			git:          polecat.LiveGitState{Branch: cleanGit.Branch, Source: polecat.GitStateSourceLive, Dirty: true, DirtyReason: "uncommitted changes"},
+			wantBlockers: "uncommitted",
+		},
+		{name: "stuck, open hook", agentState: beads.AgentStateStuck, source: liveHook, git: cleanGit, wantBlockers: "agent_state=stuck"},
+		{name: "stuck, unreadable hook", agentState: beads.AgentStateStuck, source: fakeIssueShower{err: errors.New("bd exploded")}, git: cleanGit, wantBlockers: "agent_state=stuck"},
+		{name: "stuck, no issue source", agentState: beads.AgentStateStuck, git: cleanGit, wantBlockers: "agent_state=stuck"},
+		{name: "stuck with a live session", agentState: beads.AgentStateStuck, source: closedHook, git: cleanGit, running: true, wantBlockers: "agent_state=stuck"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sessions := polecatSessionSet{}
+			if tt.running {
+				sessions = newPolecatSessionSet(polecatTestRegistry(), []string{"gt-running"})
+			}
+			env := polecatInventoryEnv{
+				WorktreePath: filepath.Join("/rig", "polecats", "running", "gastown"),
+				IssueSource:  tt.source,
+				probe:        func(string, bool) polecat.LiveGitState { return tt.git },
+			}
+			item := buildPolecatInventoryItem(
+				"gastown", "running",
+				&beads.AgentFields{
+					AgentState: string(tt.agentState), CleanupStatus: string(polecat.CleanupClean),
+					HookBead: "gt-review", Branch: tt.git.Branch,
+				},
+				nil, sessions, env,
+			)
+			d := item.Disposition
+			if tt.wantSafe {
+				if !d.SafeToNuke || d.NeedsRecovery || d.Reason == "active-work" {
+					t.Fatalf("a finished seat must be safe to nuke without active-work: %+v", d)
+				}
+				return
+			}
+			if d.SafeToNuke || !strings.Contains(strings.Join(d.Blockers, "\n"), tt.wantBlockers) {
+				t.Fatalf("want a seat that is not safe to nuke with blocker %q: %+v", tt.wantBlockers, d)
+			}
+		})
+	}
+}

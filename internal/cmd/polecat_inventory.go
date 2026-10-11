@@ -372,7 +372,7 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 
 	if !activeWorkEvidence.BlocksCleanup && fields != nil {
 		activeWorkEvidence = assessPolecatAgentStateWork(beads.AgentState(strings.TrimSpace(fields.AgentState)))
-		if activeWorkEvidence.CountsTowardCapacity && !running && !spawning && agentStateOutlivesWork(fields, env) {
+		if !running && !spawning && agentStateOutlivesWork(fields, env) {
 			activeWorkEvidence = polecatActiveWorkEvidence{}
 		}
 	}
@@ -993,13 +993,20 @@ func assessPolecatAgentStateWork(state beads.AgentState) polecatActiveWorkEviden
 	return polecatActiveWorkEvidence{}
 }
 
-// agentStateOutlivesWork reports whether an active agent_state (working,
-// running, patrolling, or spawning past its grace) is a record that outlived
-// its work: no session is up, no live bead is assigned to the seat, and the
-// hook reference the agent bead still carries names nothing at risk. A session
+// agentStateOutlivesWork reports whether an agent_state that blocks cleanup
+// (working, running, patrolling, or spawning past its grace; or a protective
+// stuck, awaiting_gate, paused or escalated) is a record that outlived its
+// work: no session is up, no live bead is assigned to the seat, and the hook
+// reference the agent bead still carries names nothing at risk. A session
 // that died without gt done leaves the state behind, and reading it as live
 // work makes the seat a stall the witness may restart, raising a session on
 // debris (gt-is9jb, the agent_state counterpart of gt-eqiid).
+//
+// A protective state is waived on the same evidence: `gt polecat check-recovery`
+// never reads agent_state, so a finished seat left stuck read SAFE_TO_NUKE
+// there and NEEDS_RECOVERY active-work here (gt-gdm14). Waiving the state
+// drops only the agent_state blocker; dirty files, unpushed commits and a live
+// hook bead still block through their own facts.
 //
 // It answers from the same ClassifyHookBead the hook-reference check reads, so
 // the two cannot disagree about what a hook names. Without an issue source the
