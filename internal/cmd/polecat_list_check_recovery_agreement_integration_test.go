@@ -1,8 +1,8 @@
+//go:build integration
+
 package cmd
 
 import (
-	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -12,72 +12,15 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
-// listRecoveryDB is the beads seam both commands read in the agreement test:
-// the fake's Client surface plus the one finder check-recovery adds.
-type listRecoveryDB struct{ *beadsfake.Fake }
-
-func (db *listRecoveryDB) FindMRForBranchAny(string) (*beads.Issue, error) { return nil, nil }
-
-// newAgreementSeatRepo makes a worktree on a polecat branch cut from main, with
-// origin set up so the live probe has a remote to measure against. Nothing is
-// ahead of main until the caller commits.
-func newAgreementSeatRepo(t *testing.T, branch string) string {
-	t.Helper()
-	root := t.TempDir()
-	remote := filepath.Join(root, "remote.git")
-	repo := filepath.Join(root, "repo")
-	git := func(dir string, args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		cmd.Env = append(os.Environ(),
-			"GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.com",
-			"GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@example.com",
-			"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	git(root, "init", "--bare", "-b", "main", remote)
-	git(root, "init", "-b", "main", repo)
-	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("base\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	git(repo, "add", "README.md")
-	git(repo, "commit", "-m", "base")
-	git(repo, "remote", "add", "origin", remote)
-	git(repo, "push", "-u", "origin", "main")
-	git(repo, "switch", "-c", branch, "main")
-	git(repo, "push", "-u", "origin", branch)
-	return repo
-}
-
-func commitInAgreementSeatRepo(t *testing.T, repo string) {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(repo, "work.txt"), []byte("work\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	for _, args := range [][]string{{"add", "work.txt"}, {"commit", "-m", "work"}} {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = repo
-		cmd.Env = append(os.Environ(),
-			"GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.com",
-			"GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@example.com",
-			"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-}
-
-// TestPolecatListAgreesWithCheckRecoveryOnAFinishedStuckSeat is gt-gdm14.
-// dementus, a finished deep-review seat, was left agent_state=stuck with its
-// bead closed and nothing ahead of main. check-recovery never reads agent_state
-// and said SAFE_TO_NUKE; the list read the state as active-work and said
-// NEEDS_RECOVERY, which the dashboard pane then showed. Both commands are driven
-// from one fixture, and the control rows pin that agreeing did not mean
-// clearing: unpushed commits and an open bead still need recovery in both.
-func TestPolecatListAgreesWithCheckRecoveryOnAFinishedStuckSeat(t *testing.T) {
+// TestIntegrationPolecatListAgreesWithCheckRecoveryOnAFinishedStuckSeat is
+// gt-gdm14. dementus, a finished deep-review seat, was left agent_state=stuck
+// with its bead closed and nothing ahead of main. check-recovery never reads
+// agent_state and said SAFE_TO_NUKE; the list read the state as active-work and
+// said NEEDS_RECOVERY, which the dashboard pane then showed. Both commands are
+// driven from one fixture (a real repository, a beadsfake), and the control
+// rows pin that agreeing did not mean clearing: unpushed commits and a live
+// bead still need recovery in both.
+func TestIntegrationPolecatListAgreesWithCheckRecoveryOnAFinishedStuckSeat(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -131,19 +74,24 @@ func TestPolecatListAgreesWithCheckRecoveryOnAFinishedStuckSeat(t *testing.T) {
 
 			r := &rig.Rig{Name: rigName, Path: filepath.Join(t.TempDir(), rigName)}
 			agentBeadID := polecatBeadIDForRig(r, rigName, polecatName)
-			repo := newAgreementSeatRepo(t, branch)
+
+			repo := setupGitStateRemoteRepo(t)
+			runGitCmd(t, repo, "switch", "-c", branch, "main")
+			runGitCmd(t, repo, "push", "-u", "origin", branch)
 			if tt.unpushed {
-				commitInAgreementSeatRepo(t, repo)
+				writeTestFile(t, filepath.Join(repo, "work.txt"), "work\n")
+				runGitCmd(t, repo, "add", "work.txt")
+				runGitCmd(t, repo, "commit", "-m", "work")
 			}
 
-			db := &listRecoveryDB{Fake: beadsfake.New()}
-			description := "role_type: polecat\nrig: " + rigName +
-				"\nagent_state: " + string(tt.agentState) +
-				"\nhook_bead: " + beadID +
-				"\ncleanup_status: clean\nactive_mr: null\nbranch: " + branch + "\n"
+			db := &recoveryDB{Fake: beadsfake.New()}
 			db.Seed(beads.Issue{
 				ID: agentBeadID, Title: "Polecat " + polecatName, Status: "open",
-				Labels: []string{"gt:agent"}, Description: description,
+				Labels: []string{"gt:agent"},
+				Description: "role_type: polecat\nrig: " + rigName +
+					"\nagent_state: " + string(tt.agentState) +
+					"\nhook_bead: " + beadID +
+					"\ncleanup_status: clean\nactive_mr: null\nbranch: " + branch + "\n",
 			})
 			db.Seed(beads.Issue{
 				ID: beadID, Title: "deep review", Status: tt.beadStatus,
@@ -157,8 +105,9 @@ func TestPolecatListAgreesWithCheckRecoveryOnAFinishedStuckSeat(t *testing.T) {
 				Branch:        branch,
 			}
 			item := buildPolecatInventoryItem(rigName, polecatName, fields, nil, polecatSessionSet{}, polecatInventoryEnv{
-				WorktreePath: repo,
-				IssueSource:  db,
+				WorktreePath:      repo,
+				GitProbeLocalOnly: true,
+				IssueSource:       db,
 			})
 
 			p := &polecat.Polecat{
