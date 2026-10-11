@@ -210,6 +210,18 @@ func TestBuildPolecatInventoryItem(t *testing.T) {
 			wantReusable: true,
 		},
 		{
+			// The seat a report-only job leaves after the patrol clears its
+			// finished DEFERRED exit (gt-oa6du): idle, hook empty, the source
+			// issue and branch of the finished turn still on the record.
+			name:        "idle after a cleared deferred exit is reusable",
+			polecatName: "cleared",
+			fields: &beads.AgentFields{AgentState: string(beads.AgentStateIdle), CleanupStatus: string(polecat.CleanupClean),
+				LastSourceIssue: "gt-yx415", Branch: "polecat/cleared/gt-yx415+x"},
+			wantState:    polecat.StateIdle,
+			wantVerdict:  polecat.WorkstateVerdictSafeToNuke,
+			wantReusable: true,
+		},
+		{
 			name:         "hooked running is working capacity",
 			polecatName:  "running",
 			fields:       &beads.AgentFields{AgentState: string(beads.AgentStateIdle), CleanupStatus: string(polecat.CleanupClean)},

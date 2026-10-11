@@ -273,12 +273,12 @@ func TestPatrolScanPolecatEscalations(t *testing.T) {
 	}
 }
 
-// ClearEscalation is the write the tick makes on a resolved escalation: the
+// ClearStuckExit is the write the tick makes on a resolved escalation: the
 // agent bead goes to idle and the exit type is removed, the two fields gt
 // done's exit wrote together. The guard is the record still reading as that
 // exit, so a seat something else has moved on (a fresh sling, a human) is
 // left to it rather than overwritten with idle.
-func TestPatrolScanClearEscalation(t *testing.T) {
+func TestPatrolScanClearStuckExit(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	db := beadsfake.New()
@@ -294,9 +294,9 @@ func TestPatrolScanClearEscalation(t *testing.T) {
 		openRecoveryBeads: func([]string) beads.Client { return db },
 	}
 
-	changed, err := h.ClearEscalation("myr", "mycat")
+	changed, err := h.ClearStuckExit("myr", "mycat", done.ExitEscalated)
 	if err != nil || !changed {
-		t.Fatalf("ClearEscalation = %v, %v; want true, nil", changed, err)
+		t.Fatalf("ClearStuckExit = %v, %v; want true, nil", changed, err)
 	}
 	is, err := db.Show(id)
 	if err != nil {
@@ -311,12 +311,12 @@ func TestPatrolScanClearEscalation(t *testing.T) {
 	}
 
 	// The record no longer reads as an escalated exit: nothing left to clear.
-	if changed, err := h.ClearEscalation("myr", "mycat"); err != nil || changed {
-		t.Fatalf("second ClearEscalation = %v, %v; want false, nil", changed, err)
+	if changed, err := h.ClearStuckExit("myr", "mycat", done.ExitEscalated); err != nil || changed {
+		t.Fatalf("second ClearStuckExit = %v, %v; want false, nil", changed, err)
 	}
 	// A seat whose state moved on is not the record the tick decided on.
-	if changed, err := h.ClearEscalation("myr", "moved"); err != nil || changed {
-		t.Fatalf("ClearEscalation(moved) = %v, %v; want false, nil", changed, err)
+	if changed, err := h.ClearStuckExit("myr", "moved", done.ExitEscalated); err != nil || changed {
+		t.Fatalf("ClearStuckExit(moved) = %v, %v; want false, nil", changed, err)
 	}
 	is, err = db.Show(moved)
 	if err != nil {
@@ -326,8 +326,41 @@ func TestPatrolScanClearEscalation(t *testing.T) {
 		t.Fatalf("moved seat state = %q, want working", got)
 	}
 	// A seat with no agent bead is a failed read, never a silent success.
-	if _, err := h.ClearEscalation("myr", "absent"); err == nil {
-		t.Fatal("ClearEscalation on a seat with no bead must fail")
+	if _, err := h.ClearStuckExit("myr", "absent", done.ExitEscalated); err == nil {
+		t.Fatal("ClearStuckExit on a seat with no bead must fail")
+	}
+}
+
+// A DEFERRED exit is cleared the same way (gt-oa6du), and only as the exit the
+// tick decided on: a record that reads DEFERRED is not cleared by a tick that
+// measured an ESCALATED one.
+func TestPatrolScanClearStuckExitDeferred(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	db := beadsfake.New()
+	id := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(townRoot, "myr"), "myr", "mycat")
+	db.Seed(beads.Issue{ID: id, Description: beads.FormatAgentDescription("mycat", &beads.AgentFields{
+		RoleType: constants.RolePolecat, Rig: "myr", AgentState: "stuck", ExitType: done.ExitDeferred,
+		LastSourceIssue: "be-src"})})
+	h := &patrolScanHost{
+		d:                 &Daemon{config: &Config{TownRoot: townRoot}},
+		openRecoveryBeads: func([]string) beads.Client { return db },
+	}
+
+	if changed, err := h.ClearStuckExit("myr", "mycat", done.ExitEscalated); err != nil || changed {
+		t.Fatalf("ClearStuckExit(ESCALATED) on a DEFERRED record = %v, %v; want false, nil", changed, err)
+	}
+	if changed, err := h.ClearStuckExit("myr", "mycat", done.ExitDeferred); err != nil || !changed {
+		t.Fatalf("ClearStuckExit(DEFERRED) = %v, %v; want true, nil", changed, err)
+	}
+	is, err := db.Show(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := beads.ParseAgentFields(is.Description)
+	if beads.AgentState(f.AgentState) != beads.AgentStateIdle || f.ExitType != "" || f.LastSourceIssue != "be-src" {
+		t.Fatalf("agent bead = state %q exit %q source %q, want idle, no exit type, source kept",
+			f.AgentState, f.ExitType, f.LastSourceIssue)
 	}
 }
 

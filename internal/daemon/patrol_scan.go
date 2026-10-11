@@ -550,11 +550,12 @@ func (h *patrolScanHost) gitProbe() func(string) polecat.LiveGitState {
 	return polecat.ProbeLiveGitState
 }
 
-// ClearEscalation resets the seat's agent bead to idle and removes the exit
-// type gt done's ESCALATED exit wrote beside it. The write is guarded on the
-// record still reading as that exit, so a seat something else has moved on
+// ClearStuckExit resets the seat's agent bead to idle and removes the exit
+// type gt done's ESCALATED or DEFERRED exit wrote beside it (updateAgentStateOnDone
+// writes stuck for every exit but COMPLETED). The write is guarded on the
+// record still reading as the exit the tick decided on, so a seat something else has moved on
 // (a fresh sling, a human) is left to it rather than overwritten with idle.
-func (h *patrolScanHost) ClearEscalation(rig, name string) (bool, error) {
+func (h *patrolScanHost) ClearStuckExit(rig, name, wantExit string) (bool, error) {
 	id := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(h.town(), rig), rig, name)
 	bd := h.recoveryBeads()
 	issue, err := bd.Show(id)
@@ -572,7 +573,7 @@ func (h *patrolScanHost) ClearEscalation(rig, name string) (bool, error) {
 	}
 	state := beads.ResolveAgentState(issue.Description, issue.AgentState)
 	if !strings.EqualFold(strings.TrimSpace(state), "stuck") ||
-		!strings.EqualFold(strings.TrimSpace(exit), patrolscan.ExitEscalated) {
+		!strings.EqualFold(strings.TrimSpace(exit), strings.TrimSpace(wantExit)) {
 		return false, nil
 	}
 	idle, cleared := string(beads.AgentStateIdle), ""
