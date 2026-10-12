@@ -135,11 +135,29 @@ func TestMatchesDangerousGitReset(t *testing.T) {
 		{"soft to origin/main~1", "git reset --soft origin/main~1", true},
 		{"soft to branch@{upstream}~1", "git reset --soft main@{upstream}~1", true},
 
+		// Blocked — a peel suffix (gt-fxqs2) names the same commit the bare
+		// revision does, whichever of git's two spellings it uses: "^{}" peels
+		// to the commit, "^{<type>}" to an object it reaches.
+		{"soft to a peeled @{u}", "git reset --soft @{u}^{}", true},
+		{"soft to a commit-peeled FETCH_HEAD", "git reset --soft FETCH_HEAD^{commit}", true},
+		{"soft to a peeled @{upstream}", "git reset --soft @{upstream}^{}", true},
+		{"soft to a peeled branch@{upstream}", "git reset --soft main@{upstream}^{commit}", true},
+		{"soft to a peeled origin/main", "git reset --soft origin/main^{commit}", true},
+		{"soft to a peeled bare remote name", "git reset --soft origin^{}", true},
+		{"soft to a peeled long-form remote ref", "git reset --soft refs/remotes/origin/main^{tree}", true},
+		{"peel after an ancestry suffix", "git reset --soft FETCH_HEAD~1^{commit}", true},
+		{"ancestry suffix after a peel", "git reset --soft @{u}^{commit}~2", true},
+		{"doubled peel", "git reset --soft @{u}^{}^{}", true},
+		{"mixed onto a peeled remote ref", "git reset --mixed origin/main^{commit}", true},
+
 		// Allowed — local targets, pathspecs, and quoted prose.
 		{"soft to a local commit", "git reset --soft HEAD~1", false},
 		{"soft to a local commit by caret", "git reset --soft HEAD^", false},
 		{"soft to a local branch with suffix", "git reset --soft feature/x~3", false},
 		{"soft to a local ref ending in digits", "git reset --soft release1", false},
+		{"soft to a peeled local commit", "git reset --soft HEAD^{commit}", false},
+		{"soft to a peeled local branch", "git reset --soft feature/x^{}", false},
+		{"soft to a local reflog entry", "git reset --soft main@{1}", false},
 		{"mixed to a local branch", "git reset --mixed feature/x", false},
 		{"reset a pathspec named like a ref", "git reset -- origin/main", false},
 		{"unstage a file", "git reset HEAD file.go", false},

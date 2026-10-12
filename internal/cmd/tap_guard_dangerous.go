@@ -2204,9 +2204,10 @@ var gitResetRemotePrefixes = []string{"origin/", "upstream/", "refs/remotes/"}
 // a remote-tracking commit: a remote-tracking ref, a bare remote name (which
 // git reads as <remote>/HEAD), FETCH_HEAD, which a fetch points at the remote's
 // tip, or an upstream-of shorthand (@{u}, @{upstream}, @{push}, alone or after
-// a branch name). A trailing ancestry suffix (~, ~N, ^, ^N, in any run) does
-// not change which commit the base names, so it is stripped for this check
-// only: "fetch_head~1" and "@{u}^" reset onto the remote's history all the same.
+// a branch name). A trailing revision operator (~, ~N, ^, ^N or a ^{...} peel,
+// in any run) does not change which revision the base names, so it is stripped
+// for this check only: "fetch_head~1", "@{u}^" and "@{u}^{}" all reset onto the
+// remote's history.
 func gitResetNamesRemote(arg string) bool {
 	arg = trimRevisionSuffix(arg)
 	for _, prefix := range gitResetRemotePrefixes {
@@ -2226,20 +2227,34 @@ func gitResetNamesRemote(arg string) bool {
 	return false
 }
 
-// trimRevisionSuffix drops a trailing run of git ancestry operators from a
-// revision: "~", "~N", "^" and "^N", repeated ("fetch_head~2^", "@{u}^^").
-// Only digits after the operator are consumed, so a "^{commit}" peel is left
-// as it is, and a revision with no operator keeps its trailing digits.
+// trimRevisionSuffix drops a trailing run of git revision operators from a
+// revision: the ancestry operators "~", "~N", "^" and "^N", repeated
+// ("fetch_head~2^", "@{u}^^"), and the peel operator "^{...}" in both of its
+// spellings — "^{}" (peel to the commit) and "^{<type>}" ("@{u}^{commit}",
+// "origin/main^{tree}"), in any order relative to an ancestry operator
+// ("FETCH_HEAD~1^{commit}", "@{u}^{commit}~2"). None of them changes which
+// revision the base names, so a guard that reads the base must read through
+// them all. Only digits after an ancestry operator and the braced remainder of
+// a "^" are consumed, so a revision with no operator keeps its trailing digits
+// ("release1") and a name whose own syntax ends in a brace ("@{u}", the reflog
+// entry "main@{1}") is left as it is.
 func trimRevisionSuffix(rev string) string {
 	for {
 		i := len(rev)
 		for i > 0 && rev[i-1] >= '0' && rev[i-1] <= '9' {
 			i--
 		}
-		if i == 0 || (rev[i-1] != '~' && rev[i-1] != '^') {
-			return rev
+		if i > 0 && (rev[i-1] == '~' || rev[i-1] == '^') {
+			rev = rev[:i-1]
+			continue
 		}
-		rev = rev[:i-1]
+		if i > 0 && rev[i-1] == '}' {
+			if open := strings.LastIndexByte(rev[:i-1], '{'); open > 0 && rev[open-1] == '^' {
+				rev = rev[:open-1]
+				continue
+			}
+		}
+		return rev
 	}
 }
 
