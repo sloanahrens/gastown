@@ -1429,6 +1429,13 @@ func leakedWisp(id, p, status string, age time.Duration) Wisp {
 	return Wisp{ID: id, Status: status, Assignee: "gastown/polecats/" + p, CreatedAt: now.Add(-age)}
 }
 
+// stepUnderRoot is a wisp held by polecat p, hanging under the root gt-root.
+func stepUnderRoot(id, p, status string, age time.Duration) Wisp {
+	w := leakedWisp(id, p, status, age)
+	w.Parent = "gt-root"
+	return w
+}
+
 func wispClosed(env *fakeEnv, id string) bool {
 	for _, w := range env.wisps {
 		if w.ID == id {
@@ -1585,6 +1592,128 @@ func TestLeakedWispTreeIsClosedOnce(t *testing.T) {
 	}
 	if !wispClosed(env, "gt-step1") || !wispClosed(env, "gt-step2") {
 		t.Fatalf("steps left open: %+v", env.wisps)
+	}
+}
+
+// leakedRoot is a molecule root no seat was assigned, created age ago.
+func leakedRoot(id, status string, age time.Duration) Wisp {
+	return Wisp{ID: id, Status: status, CreatedAt: now.Add(-age)}
+}
+
+// The steps of a molecule whose root was never assigned leak under that root:
+// the root has no holder for the rule to read, so the steps decide and the
+// root closes with them (gt-0tead).
+func TestLeakedStepsUnderAnUnassignedRootCloseWithTheRoot(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	env.wisps = []Wisp{leakedRoot("gt-root", "open", 48*time.Hour)}
+	for _, id := range []string{"gt-step1", "gt-step2"} {
+		step := leakedWisp(id, "onyx", "pinned", 48*time.Hour)
+		step.Parent = "gt-root"
+		env.wisps = append(env.wisps, step)
+	}
+	// A step of a step too: the whole tree is read before the root closes.
+	sub := leakedWisp("gt-sub", "onyx", "open", 48*time.Hour)
+	sub.Parent = "gt-step2"
+	env.wisps = append(env.wisps, sub)
+
+	r := scanner(env, nil).Tick("gastown")
+	if got := strings.Join(env.closed, ","); got != "gt-root" {
+		t.Fatalf("closed = %q, want one call on gt-root; report %v", got, r.Lines())
+	}
+	for _, id := range []string{"gt-step1", "gt-step2", "gt-sub"} {
+		if !wispClosed(env, id) {
+			t.Errorf("%s is still not closed", id)
+		}
+	}
+	if want := "Leaked wisp tree: molecule root has no holder (patrol scan)"; env.closeReasons[0] != want {
+		t.Errorf("reason = %q, want %q", env.closeReasons[0], want)
+	}
+	if r.Count(OutcomeClosed) != 1 || r.Count(OutcomeUnknown) != 0 {
+		t.Fatalf("report %v", r.Lines())
+	}
+}
+
+func TestLeakedRootGuards(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		setup       func(env *fakeEnv)
+		wantUnknown bool
+	}{
+		{"a step held by a live seat", func(env *fakeEnv) {
+			env.dirs["ruby"] = true
+			env.wisps = append(env.wisps, stepUnderRoot("gt-other", "ruby", "in_progress", 48*time.Hour))
+		}, false},
+		{"a younger step", func(env *fakeEnv) {
+			env.wisps = append(env.wisps, stepUnderRoot("gt-other", "onyx", "open", time.Hour))
+		}, false},
+		// Nothing holds the extra step either, so the tree is not the leak
+		// shape the rule closes.
+		{"a step with no assignee", func(env *fakeEnv) {
+			env.wisps = append(env.wisps, Wisp{ID: "gt-other", Status: "open", Parent: "gt-root", CreatedAt: now.Add(-48 * time.Hour)})
+		}, false},
+		{"the root is younger than 24 hours", func(env *fakeEnv) {
+			env.wisps[0].CreatedAt = now.Add(-time.Hour)
+		}, false},
+		{"the root is pinned", func(env *fakeEnv) { env.wisps[0].Status = "pinned" }, false},
+		{"the root is in progress", func(env *fakeEnv) { env.wisps[0].Status = "in_progress" }, false},
+		{"the root's age is unknown", func(env *fakeEnv) { env.wisps[0].CreatedAt = time.Time{} }, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := newFake()
+			env.wisps = []Wisp{leakedRoot("gt-root", "open", 48*time.Hour), stepUnderRoot("gt-step", "onyx", "pinned", 48*time.Hour)}
+			tc.setup(env)
+			r := scanner(env, nil).Tick("gastown")
+			if len(env.closed) != 0 {
+				t.Fatalf("closed %v; want nothing closed", env.closed)
+			}
+			if got := r.Count(OutcomeUnknown) > 0; got != tc.wantUnknown {
+				t.Fatalf("unknown findings = %v, want %v; report %v", got, tc.wantUnknown, r.Lines())
+			}
+		})
+	}
+}
+
+// A step whose root is left standing waits for the root: closing it alone
+// would clear the wisp the next tick reads the tree from.
+func TestLeakedStepUnderAKeptRootStaysOpen(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	env.wisps = []Wisp{
+		leakedRoot("gt-root", "open", 48*time.Hour),
+		stepUnderRoot("gt-step", "onyx", "pinned", 48*time.Hour),
+	}
+	env.dirs["ruby"] = true
+	env.wisps = append(env.wisps, stepUnderRoot("gt-other", "ruby", "in_progress", 48*time.Hour))
+	r := scanner(env, nil).Tick("gastown")
+	if len(env.closed) != 0 || r.Count(OutcomeClosed) != 0 {
+		t.Fatalf("closed %v; report %v", env.closed, r.Lines())
+	}
+}
+
+func TestLeakedRootsCountTowardThePerTickCap(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	for i := 0; i < 21; i++ {
+		root := leakedRoot(fmt.Sprintf("gt-root-%02d", i), "open", 48*time.Hour)
+		step := leakedWisp(fmt.Sprintf("gt-step-%02d", i), "onyx", "pinned", 48*time.Hour)
+		step.Parent = root.ID
+		env.wisps = append(env.wisps, root, step)
+	}
+	sc := scanner(env, nil)
+	r := sc.Tick("gastown")
+	if len(env.closed) != 20 {
+		t.Fatalf("first tick closed %d, want 20", len(env.closed))
+	}
+	if r.Count(OutcomeSkipped) != 1 {
+		t.Fatalf("report %v", r.Lines())
+	}
+	sc.Tick("gastown")
+	if len(env.closed) != 21 {
+		t.Fatalf("after the second tick closed %d, want 21", len(env.closed))
 	}
 }
 
