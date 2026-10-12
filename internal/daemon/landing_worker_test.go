@@ -300,7 +300,7 @@ func TestGitRemoteReadsTheTargetOnOrigin(t *testing.T) {
 		t.Fatal(err)
 	}
 	landed := f.Commit(t, origin, "main", "landed", map[string]string{"b.txt": "b\n"})
-	r := gitRemote{g: f.Open(bare), remote: "origin"}
+	r := gitRemote{g: f.OpenBranchRepo(bare), remote: "origin"}
 
 	if tip, err := r.BranchTip("main"); err != nil || tip != landed {
 		t.Fatalf("BranchTip(main) = %q, %v; want origin's tip %s", tip, err, landed)
@@ -340,7 +340,7 @@ func TestGitRemoteBranchLandedOn(t *testing.T) {
 	f.Commit(t, origin, "main", "work, rebased by the queue", map[string]string{"b.txt": "b\n"})
 	f.SetRef(t, origin, "refs/heads/polecat/opal/gt-xyz+x1", seed)
 	f.Commit(t, origin, "polecat/opal/gt-xyz+x1", "work nobody landed", map[string]string{"c.txt": "c\n"})
-	r := gitRemote{g: f.Open(bare), remote: "origin"}
+	r := gitRemote{g: f.OpenBranchRepo(bare), remote: "origin"}
 
 	if on, err := r.BranchLandedOn("main", "polecat/opal/gt-abc+x1", branchTip); err != nil || !on {
 		t.Fatalf("BranchLandedOn(landed patch) = %v, %v; want true", on, err)
@@ -353,6 +353,58 @@ func TestGitRemoteBranchLandedOn(t *testing.T) {
 	}
 	if at, err := r.CommitTime(branchTip); err != nil || at.IsZero() {
 		t.Fatalf("CommitTime = %v, %v; want the fetched tip's committer time", at, err)
+	}
+}
+
+// gitRemote reaps a landed branch from the rig repository itself, and refuses
+// the two it must: a branch the repository has not merged and the branches a
+// worktree — or the repository's own HEAD — has checked out (gt-kne58).
+func TestGitRemoteDeleteLocalBranch(t *testing.T) {
+	t.Parallel()
+	f := gitfake.New()
+	root := t.TempDir()
+	origin, bare := filepath.Join(root, "origin.git"), filepath.Join(root, ".repo.git")
+	wt := filepath.Join(root, "worktree")
+	f.InitBare(t, origin)
+	f.Commit(t, origin, "main", "seed", map[string]string{"a.txt": "a\n"})
+	if err := f.Open(root).CloneBareWithBranch(origin, bare, "main"); err != nil {
+		t.Fatal(err)
+	}
+	// The work that landed, as a merge into the repository's own main: the
+	// branch tip is contained, so a merged-only delete takes it.
+	landed := f.Commit(t, bare, "main", "landed work", map[string]string{"b.txt": "b\n"})
+	f.SetRef(t, bare, "refs/heads/polecat/opal/gt-abc+x1", landed)
+	// Work nobody landed: not on main, so only a forced delete takes it.
+	f.Commit(t, bare, "polecat/opal/gt-xyz+x1", "work nobody landed", map[string]string{"c.txt": "c\n"})
+	g := f.OpenBranchRepo(bare)
+	if err := g.WorktreeAddFromRef(wt, "polecat/opal/gt-wt+x1", "main"); err != nil {
+		t.Fatal(err)
+	}
+	r := gitRemote{g: g, remote: "origin"}
+
+	if deleted, err := r.DeleteLocalBranch("polecat/opal/gt-abc+x1", false); err != nil || !deleted {
+		t.Fatalf("DeleteLocalBranch(merged) = %v, %v; want the branch deleted", deleted, err)
+	}
+	if have, _ := g.RefExists("refs/heads/polecat/opal/gt-abc+x1"); have {
+		t.Error("the reaped branch is still in the rig repository")
+	}
+	if deleted, err := r.DeleteLocalBranch("polecat/opal/gt-abc+x1", false); err != nil || deleted {
+		t.Errorf("DeleteLocalBranch(a branch already gone) = %v, %v; want a no-op, never an error", deleted, err)
+	}
+	if deleted, err := r.DeleteLocalBranch("polecat/opal/gt-xyz+x1", false); err == nil || deleted {
+		t.Errorf("DeleteLocalBranch(unmerged) = %v, %v; want it kept", deleted, err)
+	}
+	if deleted, err := r.DeleteLocalBranch("polecat/opal/gt-xyz+x1", true); err != nil || !deleted {
+		t.Errorf("DeleteLocalBranch(unmerged, forced) = %v, %v; want it deleted", deleted, err)
+	}
+	if deleted, err := r.DeleteLocalBranch("main", true); err == nil || deleted {
+		t.Errorf("DeleteLocalBranch(main) = %v, %v; want the repository's own branch kept", deleted, err)
+	}
+	if deleted, err := r.DeleteLocalBranch("polecat/opal/gt-wt+x1", true); err == nil || deleted {
+		t.Errorf("DeleteLocalBranch(checked out) = %v, %v; want it kept", deleted, err)
+	}
+	if have, _ := g.RefExists("refs/heads/polecat/opal/gt-wt+x1"); !have {
+		t.Error("a branch a worktree has checked out was deleted")
 	}
 }
 
@@ -369,7 +421,7 @@ func TestPostLandFetchBringsADirectPushIntoTheRigRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 	pushed := f.Commit(t, origin, "main", "direct push", map[string]string{"b.txt": "b\n"})
-	g := f.Open(bare)
+	g := f.OpenBranchRepo(bare)
 	if have, _ := g.RefExists(pushed + "^{commit}"); have {
 		t.Fatal("fixture: the rig repo already has the pushed commit")
 	}

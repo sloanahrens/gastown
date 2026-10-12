@@ -20,9 +20,11 @@ type RemoteRef struct {
 
 // reapBeadBranches deletes origin's branches for a bead that has just landed:
 // the branch it landed and every earlier attempt for the bead, which no later
-// landing preserves because a rework is pushed to a new branch. Best effort:
-// a failed list or delete is logged, and the landing's record is already
-// written, so nothing here fails or re-delays it.
+// landing preserves because a rework is pushed to a new branch. The rig
+// repository's own copy of each goes with it (deleteLocalBranch, gt-kne58):
+// reaping origin alone left every branch the rig ever pushed in its
+// refs/heads forever. Best effort: a failed list or delete is logged, and the
+// landing's record is already written, so nothing here fails or re-delays it.
 //
 // It returns every branch it found for the bead, deleted or not, so the
 // landing path can also refresh the seat of each polecat that authored one
@@ -45,15 +47,66 @@ func (w *Worker) reapBeadBranches(beadID string) []string {
 		branch := strings.TrimPrefix(ref.Name, "refs/heads/")
 		found = append(found, branch)
 		if err := w.Remote.DeleteRemoteBranchIfAt(branch, ref.Hash); err != nil {
-			w.logf("%s: deleting %s: %v", beadID, branch, err)
-			continue
+			w.logf("%s: deleting %s on origin: %v", beadID, branch, err)
+		} else {
+			deleted++
 		}
-		deleted++
+		// The local half runs whether or not origin's delete did: a branch
+		// already gone from origin is exactly one the rig still holds.
+		w.deleteLocalBranch(beadID, branch, ref.Hash)
 	}
 	if deleted > 0 {
 		w.logf("%s: deleted %d stale polecat branch(es) on origin", beadID, deleted)
 	}
 	return found
+}
+
+// deleteLocalBranch deletes the rig repository's copy of a polecat branch
+// whose origin copy the reap has just dealt with (gt-kne58), keeping the
+// branch unless its work is proven landed.
+//
+// git branch -d reads merged-ness against the repository's own HEAD branch,
+// which a landing leaves behind — a landing moves the target on the remote,
+// not here — so a merged-only delete refuses work that demonstrably landed.
+// The landing ledger is the proof that survives that: a record for the bead
+// says its work is on the target whatever the branch tip's ancestry shows,
+// which is why it alone earns a forced delete. Without a record, a tip
+// contained in origin's target goes merged-only, and one that is neither is
+// kept and logged. Every lookup failure keeps the branch too: an unmerged
+// branch deleted by mistake is the one outcome nothing here can undo.
+func (w *Worker) deleteLocalBranch(beadID, branch, hash string) {
+	force := false
+	if w.Landings != nil {
+		_, found, err := w.Landings.LatestForBead(beadID)
+		if err != nil {
+			w.logf("%s: keeping the local %s: reading the landings file: %v", beadID, branch, err)
+			return
+		}
+		force = found
+	}
+	if !force {
+		if w.WatchTarget == "" {
+			w.logf("%s: keeping the local %s: no landing record and no branch to have merged it into", beadID, branch)
+			return
+		}
+		merged, err := w.Remote.Contains(w.WatchTarget, hash)
+		if err != nil {
+			w.logf("%s: keeping the local %s: testing it against %s: %v", beadID, branch, w.WatchTarget, err)
+			return
+		}
+		if !merged {
+			w.logf("%s: kept local %s: not merged", beadID, branch)
+			return
+		}
+	}
+	deleted, err := w.Remote.DeleteLocalBranch(branch, force)
+	if err != nil {
+		w.logf("%s: deleting the local %s: %v", beadID, branch, err)
+		return
+	}
+	if deleted {
+		w.logf("%s: deleted the local polecat branch %s", beadID, branch)
+	}
 }
 
 // polecatBranchPrefix is polecatRefPrefix as a branch is named: without the

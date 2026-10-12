@@ -1247,6 +1247,11 @@ type landingRemoteGit interface {
 	CommitTime(rev string) (time.Time, error)
 	CommitLandedOnTarget(remote, target, commit string) bool
 	DeleteRemoteBranchIfAt(remote, branch, expectedHash string) error
+	// The repository's own branches, for the local half of the reap
+	// (gt-kne58).
+	CurrentBranch() (string, error)
+	WorktreeList() ([]git.Worktree, error)
+	DeleteBranch(name string, force bool) error
 }
 
 var _ landingRemoteGit = (*git.Git)(nil)
@@ -1312,6 +1317,44 @@ func (r gitRemote) CommitTime(commit string) (time.Time, error) {
 
 func (r gitRemote) DeleteRemoteBranchIfAt(branch, expectedHash string) error {
 	return r.g.DeleteRemoteBranchIfAt(r.remote, branch, expectedHash)
+}
+
+// DeleteLocalBranch deletes the rig repository's own branch of that name.
+// The two branches a reap must never take are guarded here rather than left
+// to git: the one HEAD names, which is the default branch this repository
+// lands onto, and any branch a worktree has checked out, which is a polecat
+// still working in it.
+func (r gitRemote) DeleteLocalBranch(branch string, force bool) (bool, error) {
+	if branch == "" {
+		return false, errors.New("no branch name to delete")
+	}
+	exists, err := r.g.RefExists("refs/heads/" + branch)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return false, nil
+	}
+	head, err := r.g.CurrentBranch()
+	if err != nil {
+		return false, err
+	}
+	if head == branch {
+		return false, fmt.Errorf("%s is the branch this repository has checked out", branch)
+	}
+	trees, err := r.g.WorktreeList()
+	if err != nil {
+		return false, err
+	}
+	for _, wt := range trees {
+		if wt.Branch == branch {
+			return false, fmt.Errorf("%s is checked out in the worktree at %s", branch, wt.Path)
+		}
+	}
+	if err := r.g.DeleteBranch(branch, force); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // landingLogWriter forwards Land's progress lines to the daemon log.
