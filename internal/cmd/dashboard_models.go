@@ -102,10 +102,11 @@ func modelSeatRows(townRoot string, ts *config.TownSettings, tsErr error, patrol
 		}
 	}
 
-	// The pro seat reads as the dispatcher reads it (specBudgetFromConfig), so
-	// a row is open here exactly when a seat is dispatched there: no
-	// polecat_pool section or a pro_max of 0 is closed, an unset pro_max is the
-	// dispatcher's own default of 1, and an unset pro_agent its default agent.
+	// The pro seat's open/closed decision and its defaults are the
+	// dispatcher's (specBudgetFromConfig): no polecat_pool section or a pro_max
+	// of 0 is a closed seat, an unset pro_max is its own default of 1 with the
+	// default pro agent. A seat it drops for repeating an earlier seat's agent
+	// still gets a row here (gt-6oxrj).
 	pro := dashboard.ModelSeat{Seat: "pro", Key: proKey}
 	switch {
 	case tsErr != nil:
@@ -113,11 +114,11 @@ func modelSeatRows(townRoot string, ts *config.TownSettings, tsErr error, patrol
 	case ts == nil || ts.PolecatPool == nil:
 		pro.Closed = true
 	default:
-		if cap := ts.PolecatPool.GetProMax(); cap <= 0 {
+		if proCap := ts.PolecatPool.GetProMax(); proCap <= 0 {
 			pro.Closed = true
 		} else {
 			pro.Agent = strings.TrimSpace(ts.PolecatPool.GetProAgent())
-			pro.Cap = cap
+			pro.Cap = proCap
 			pro.CapDefault = ts.PolecatPool.ProMax == nil
 		}
 	}
