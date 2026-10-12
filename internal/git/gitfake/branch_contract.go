@@ -31,6 +31,7 @@ type BranchRepo interface {
 	CurrentBranch() (string, error)
 	ListBranches(pattern string) ([]string, error)
 	DeleteBranch(name string, force bool) error
+	DeleteLocalBranchIfAt(branch, expectedHash string) error
 	RemoteDefaultBranch() string
 
 	Fetch(remote string) error
@@ -317,6 +318,29 @@ func RunBranchContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 		}
 		if err := env.OpenBranchRepo(fx.root).GC(); err == nil {
 			t.Error("GC outside a repository succeeded")
+		}
+	})
+
+	t.Run("lease-guarded local delete takes the branch's old value", func(t *testing.T) {
+		t.Parallel()
+		fx, g := newWtFixture(t, newEnv(t))
+		if err := g.CheckoutNewBranch("at-head", "main"); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.DeleteLocalBranchIfAt("at-head", fx.head); err == nil {
+			t.Error("deleting a branch at another commit succeeded")
+		}
+		if ok, _ := g.RefExists("refs/heads/at-head"); !ok {
+			t.Error("the refused delete took the branch anyway")
+		}
+		if err := g.DeleteLocalBranchIfAt("at-head", fx.base); err != nil {
+			t.Errorf("deleting a branch at its own tip: %v", err)
+		}
+		if ok, _ := g.RefExists("refs/heads/at-head"); ok {
+			t.Error("the branch deleted at its own tip is still there")
+		}
+		if err := g.DeleteLocalBranchIfAt("gone", fx.base); err == nil {
+			t.Error("deleting a branch the repository lacks succeeded")
 		}
 	})
 

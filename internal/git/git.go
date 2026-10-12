@@ -3006,6 +3006,15 @@ func (g *Git) DeleteBranch(name string, force bool) error {
 	return err
 }
 
+// DeleteLocalBranchIfAt deletes the local branch only while it still points
+// at expectedHash: update-ref -d takes the old value as a precondition, so a
+// branch that moved since the caller read it fails the delete instead of
+// losing the commits that moved it.
+func (g *Git) DeleteLocalBranchIfAt(branch, expectedHash string) error {
+	_, err := g.run("update-ref", "-d", "refs/heads/"+branch, expectedHash)
+	return err
+}
+
 // ListBranches returns all local branches matching a pattern.
 // Pattern uses git's pattern matching (e.g., "polecat/*" matches all polecat branches).
 // Returns branch names without the refs/heads/ prefix.

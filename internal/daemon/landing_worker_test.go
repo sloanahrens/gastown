@@ -357,8 +357,9 @@ func TestGitRemoteBranchLandedOn(t *testing.T) {
 }
 
 // gitRemote reaps a landed branch from the rig repository itself, and refuses
-// the two it must: a branch the repository has not merged and the branches a
-// worktree — or the repository's own HEAD — has checked out (gt-kne58).
+// the three it must: a branch that is not at the commit the reap proved, and
+// the branches a worktree — or the repository's own HEAD — has checked out
+// (gt-kne58, gt-xpmr7).
 func TestGitRemoteDeleteLocalBranch(t *testing.T) {
 	t.Parallel()
 	f := gitfake.New()
@@ -370,11 +371,11 @@ func TestGitRemoteDeleteLocalBranch(t *testing.T) {
 	if err := f.Open(root).CloneBareWithBranch(origin, bare, "main"); err != nil {
 		t.Fatal(err)
 	}
-	// The work that landed, as a merge into the repository's own main: the
-	// branch tip is contained, so a merged-only delete takes it.
+	// The commit that landed, on the repository's own main as a landing
+	// leaves it.
 	landed := f.Commit(t, bare, "main", "landed work", map[string]string{"b.txt": "b\n"})
 	f.SetRef(t, bare, "refs/heads/polecat/opal/gt-abc+x1", landed)
-	// Work nobody landed: not on main, so only a forced delete takes it.
+	// A branch that is not at the commit the reap proved.
 	f.Commit(t, bare, "polecat/opal/gt-xyz+x1", "work nobody landed", map[string]string{"c.txt": "c\n"})
 	g := f.OpenBranchRepo(bare)
 	if err := g.WorktreeAddFromRef(wt, "polecat/opal/gt-wt+x1", "main"); err != nil {
@@ -382,25 +383,45 @@ func TestGitRemoteDeleteLocalBranch(t *testing.T) {
 	}
 	r := gitRemote{g: g, remote: "origin"}
 
-	if deleted, err := r.DeleteLocalBranch("polecat/opal/gt-abc+x1", false); err != nil || !deleted {
-		t.Fatalf("DeleteLocalBranch(merged) = %v, %v; want the branch deleted", deleted, err)
+	if tip, err := r.LocalBranchTip("polecat/opal/gt-abc+x1"); err != nil || tip != landed {
+		t.Fatalf("LocalBranchTip = %q, %v; want %s", tip, err, landed)
+	}
+	if tip, err := r.LocalBranchTip("polecat/opal/gt-gone+x1"); err != nil || tip != "" {
+		t.Errorf("LocalBranchTip of a branch the repository lacks = %q, %v; want empty", tip, err)
+	}
+
+	if deleted, err := r.DeleteLocalBranch("polecat/opal/gt-abc+x1", landed); err != nil || !deleted {
+		t.Fatalf("DeleteLocalBranch(at the proven commit) = %v, %v; want the branch deleted", deleted, err)
 	}
 	if have, _ := g.RefExists("refs/heads/polecat/opal/gt-abc+x1"); have {
 		t.Error("the reaped branch is still in the rig repository")
 	}
-	if deleted, err := r.DeleteLocalBranch("polecat/opal/gt-abc+x1", false); err != nil || deleted {
+	if deleted, err := r.DeleteLocalBranch("polecat/opal/gt-abc+x1", landed); err != nil || deleted {
 		t.Errorf("DeleteLocalBranch(a branch already gone) = %v, %v; want a no-op, never an error", deleted, err)
 	}
-	if deleted, err := r.DeleteLocalBranch("polecat/opal/gt-xyz+x1", false); err == nil || deleted {
-		t.Errorf("DeleteLocalBranch(unmerged) = %v, %v; want it kept", deleted, err)
+	// The branch's own tip, read before the delete, is the pin: a branch
+	// that moved onto another commit is kept, not dropped.
+	moved, err := r.LocalBranchTip("polecat/opal/gt-xyz+x1")
+	if err != nil || moved == "" || moved == landed {
+		t.Fatalf("LocalBranchTip of the moved branch = %q, %v", moved, err)
 	}
-	if deleted, err := r.DeleteLocalBranch("polecat/opal/gt-xyz+x1", true); err != nil || !deleted {
-		t.Errorf("DeleteLocalBranch(unmerged, forced) = %v, %v; want it deleted", deleted, err)
+	if deleted, err := r.DeleteLocalBranch("polecat/opal/gt-xyz+x1", landed); err == nil || deleted {
+		t.Errorf("DeleteLocalBranch(not at the proven commit) = %v, %v; want it kept", deleted, err)
 	}
-	if deleted, err := r.DeleteLocalBranch("main", true); err == nil || deleted {
+	if have, _ := g.RefExists("refs/heads/polecat/opal/gt-xyz+x1"); !have {
+		t.Error("a branch that is not at the proven commit was deleted")
+	}
+	if deleted, err := r.DeleteLocalBranch("polecat/opal/gt-xyz+x1", moved); err != nil || !deleted {
+		t.Errorf("DeleteLocalBranch(at its own tip) = %v, %v; want it deleted", deleted, err)
+	}
+	if deleted, err := r.DeleteLocalBranch("main", landed); err == nil || deleted {
 		t.Errorf("DeleteLocalBranch(main) = %v, %v; want the repository's own branch kept", deleted, err)
 	}
-	if deleted, err := r.DeleteLocalBranch("polecat/opal/gt-wt+x1", true); err == nil || deleted {
+	held, err := r.LocalBranchTip("polecat/opal/gt-wt+x1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted, err := r.DeleteLocalBranch("polecat/opal/gt-wt+x1", held); err == nil || deleted {
 		t.Errorf("DeleteLocalBranch(checked out) = %v, %v; want it kept", deleted, err)
 	}
 	if have, _ := g.RefExists("refs/heads/polecat/opal/gt-wt+x1"); !have {
