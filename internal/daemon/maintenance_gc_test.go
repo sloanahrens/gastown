@@ -318,20 +318,20 @@ func recordRun(t *testing.T, d *Daemon, db string, daysAgo int, oldGen int64) {
 	}
 }
 
-func TestMaintenanceGCCycleCollectsDueSmallestFirstUnderPause(t *testing.T) {
+func TestMaintenanceGCCycleCollectsDueLargestFirstUnderPause(t *testing.T) {
 	t.Parallel()
 	d, logs := gcTestDaemon(t)
 	f := withGCFakes(t, d)
 	f.sizes = map[string]gcMeasure{"gt": {633 * mib, 300 * mib}, "hq": {631 * mib, 500 * mib}}
 	f.shrinkTo = map[string]gcMeasure{"gt": {480 * mib, 307 * mib}, "hq": {97 * mib, 90 * mib}}
 
-	out := d.maintenanceGCCycle([]string{"gt", "hq"}, "/unused")
+	out := d.maintenanceGCCycle([]string{"hq", "gt"}, "/unused")
 
 	if out.outcome != gcOutcomeCompleted {
 		t.Fatalf("outcome = %v, want completed", out.outcome)
 	}
-	// Smallest first, each gc between its own marker write and remove.
-	want := "write hq,gc hq,remove,write gt,gc gt,remove"
+	// Largest first, each gc between its own marker write and remove.
+	want := "write gt,gc gt,remove,write hq,gc hq,remove"
 	if got := strings.Join(f.events, ","); got != want {
 		t.Errorf("events = %s, want %s", got, want)
 	}
@@ -373,6 +373,34 @@ func TestMaintenanceGCCycleCollectsDueSmallestFirstUnderPause(t *testing.T) {
 	}
 }
 
+// Equal sizes go by name, whatever order discovery handed them over in.
+func TestMaintenanceGCCycleLargestFirstTiesByName(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{
+		"hq": {700 * mib, 0},
+		"gt": {700 * mib, 0},
+		"om": {700 * mib, 0},
+		"sl": {100 * mib, 0},
+	}
+
+	d.maintenanceGCCycle([]string{"sl", "om", "hq", "gt"}, "/unused")
+
+	if got := strings.Join(f.gcCalls, ","); got != "gt,hq,om,sl" {
+		t.Errorf("gc calls = %s, want gt,hq,om,sl — ties by name, then the smaller database last", got)
+	}
+}
+
+// candidateNames renders the pending databases of a deferral, in order.
+func candidateNames(cs []gcCandidate) string {
+	var names []string
+	for _, c := range cs {
+		names = append(names, c.name)
+	}
+	return strings.Join(names, ",")
+}
+
 func TestMaintenanceGCCycleWeeklyAndOldGenTriggers(t *testing.T) {
 	t.Parallel()
 	d, _ := gcTestDaemon(t)
@@ -389,8 +417,8 @@ func TestMaintenanceGCCycleWeeklyAndOldGenTriggers(t *testing.T) {
 	if out := d.maintenanceGCCycle([]string{"grown", "steady", "weekly"}, "/unused"); out.outcome != gcOutcomeCompleted {
 		t.Fatalf("outcome = %v, want completed", out.outcome)
 	}
-	if got := strings.Join(f.gcCalls, ","); got != "grown,weekly" {
-		t.Errorf("gc calls = %s, want grown,weekly (steady is neither a week old nor >20%% grown)", got)
+	if got := strings.Join(f.gcCalls, ","); got != "weekly,grown" {
+		t.Errorf("gc calls = %s, want weekly,grown largest first (steady is neither a week old nor >20%% grown)", got)
 	}
 }
 
@@ -414,15 +442,18 @@ func TestMaintenanceGCCycleDefersWhenNotQuiet(t *testing.T) {
 	d, logs := gcTestDaemon(t)
 	f := withGCFakes(t, d)
 	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}, "gt": {600 * mib, 0}, "om": {700 * mib, 0}}
-	f.quietUntil = 1 // quiet before hq, busy before gt
+	f.quietUntil = 1 // quiet before om, busy before gt
 
 	out := d.maintenanceGCCycle([]string{"hq", "gt", "om"}, "/unused")
 
 	if out.outcome != gcOutcomeDeferred {
 		t.Fatalf("outcome = %v, want deferred", out.outcome)
 	}
-	if got := strings.Join(f.gcCalls, ","); got != "hq" {
-		t.Errorf("gc calls = %s, want hq only — the run must stop when the town gets busy", got)
+	if got := strings.Join(f.gcCalls, ","); got != "om" {
+		t.Errorf("gc calls = %s, want om only — the run must stop when the town gets busy", got)
+	}
+	if got := candidateNames(out.pending); got != "gt,hq" {
+		t.Errorf("pending = %s, want gt,hq — the ones the deferral left, largest first", got)
 	}
 	if len(f.escalations) != 0 {
 		t.Errorf("a deferral escalated: %v", f.escalations)
@@ -466,8 +497,8 @@ func TestMaintenanceGCCycleStopsEscalatesAndUnpausesOnError(t *testing.T) {
 	if out.outcome != gcOutcomeFailed {
 		t.Fatalf("outcome = %v, want failed", out.outcome)
 	}
-	if got := strings.Join(f.gcCalls, ","); got != "hq,gt" {
-		t.Errorf("gc calls = %s, want hq,gt — a failure must stop the run", got)
+	if got := strings.Join(f.gcCalls, ","); got != "om,gt" {
+		t.Errorf("gc calls = %s, want om,gt — a failure must stop the run", got)
 	}
 	if f.marker != nil || f.events[len(f.events)-1] != "remove" {
 		t.Errorf("failed gc left the pause marker: events=%v", f.events)
@@ -484,8 +515,36 @@ func TestMaintenanceGCCycleStopsEscalatesAndUnpausesOnError(t *testing.T) {
 	if _, ok := st.LastGC["gt"]; ok {
 		t.Error("a failed gc recorded a run")
 	}
-	if _, ok := st.LastGC["hq"]; !ok {
-		t.Error("hq's successful gc was not recorded")
+	if _, ok := st.LastGC["om"]; !ok {
+		t.Error("om's successful gc was not recorded")
+	}
+	if _, ok := st.LastGC["hq"]; ok {
+		t.Error("hq ran after a failure — the run must stop at the failed database")
+	}
+}
+
+// A failure on the first database stops the run before any other is touched.
+func TestMaintenanceGCCycleFirstDatabaseFailureStopsTheRest(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}, "gt": {600 * mib, 0}, "om": {700 * mib, 0}}
+	f.gcErr["om"] = errors.New("Error 1105: gc failed: boom")
+
+	out := d.maintenanceGCCycle([]string{"hq", "om", "gt"}, "/unused")
+
+	if out.outcome != gcOutcomeFailed {
+		t.Fatalf("outcome = %v, want failed", out.outcome)
+	}
+	if got := strings.Join(f.gcCalls, ","); got != "om" {
+		t.Errorf("gc calls = %s, want om only — the largest database failed first and nothing followed it", got)
+	}
+	if len(f.escalations) != 1 {
+		t.Errorf("escalations = %d, want exactly 1: %v", len(f.escalations), f.escalations)
+	}
+	st, _ := loadMaintenanceGCState(d.config.TownRoot)
+	if len(st.LastGC) != 0 {
+		t.Errorf("a failed first gc recorded runs: %+v", st.LastGC)
 	}
 }
 

@@ -350,8 +350,8 @@ func TestScheduledMaintenanceGCUsesDiscoveryNotCompactorList(t *testing.T) {
 	d.patrolConfig = gcModeConfig()
 
 	d.runScheduledMaintenance()
-	if strings.Join(f.gcCalls, ",") != "hq,gt" {
-		t.Errorf("gc calls = %v, want hq,gt from discovery", f.gcCalls)
+	if strings.Join(f.gcCalls, ",") != "gt,hq" {
+		t.Errorf("gc calls = %v, want gt,hq from discovery, largest first", f.gcCalls)
 	}
 }
 

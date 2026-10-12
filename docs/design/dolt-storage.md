@@ -367,7 +367,9 @@ skipped-window streak, and leaves the next window's backup and gc untouched. A
 failed backup or gc escalates once and is not retried for 6 hours. Restore:
 `docs/dolt-restore.md`.
 
-Due databases run smallest first, one at a time, each bounded by 10 minutes.
+Due databases run largest first, ties by name, one at a time, each bounded by 10
+minutes: a run that stops early must not cut off the database that needs the
+most time.
 Before each database the patrol re-checks a quiet-window guard: the daemon's
 upgrade-idle predicate, no container-gate slot or in-flight marker held by
 anyone, no polecat with a fresh `working` heartbeat, and no pause marker held
