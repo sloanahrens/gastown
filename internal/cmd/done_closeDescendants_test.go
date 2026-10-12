@@ -116,7 +116,7 @@ func TestCloseDescendantsMoleculeNotFound(t *testing.T) {
 
 // TestDoneStateUpdateMarksAgentDone: after a completed exit the agent bead's
 // hook_bead is cleared, its agent_state is done, and the closed wisps were
-// purged.
+// purged — the rig's directory and the town (hq) database's (gt-j4rxz).
 func TestDoneStateUpdateMarksAgentDone(t *testing.T) {
 	t.Parallel()
 	db := doneMoleculeDB(true)
@@ -128,8 +128,8 @@ func TestDoneStateUpdateMarksAgentDone(t *testing.T) {
 	if fields.AgentState != string(beads.AgentStateDone) || fields.HookBead != "" {
 		t.Errorf("agent fields = state %q hook %q, want done and no hook", fields.AgentState, fields.HookBead)
 	}
-	if rec.purges != 1 {
-		t.Errorf("purges = %d, want 1", rec.purges)
+	if rec.purges != 2 {
+		t.Errorf("purges = %d, want the rig's directory and the town's", rec.purges)
 	}
 }
 

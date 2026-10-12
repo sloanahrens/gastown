@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -81,4 +82,12 @@ type recordingPurger struct{ olderThan []string }
 func (p *recordingPurger) PurgeClosedEphemeral(olderThan string) (string, error) {
 	p.olderThan = append(p.olderThan, olderThan)
 	return "0", nil
+}
+
+// failingPurger fails every purge, standing in for the Dolt serialization
+// conflict a concurrent client's commit produces.
+type failingPurger struct{}
+
+func (failingPurger) PurgeClosedEphemeral(string) (string, error) {
+	return "", errors.New("serialization failure: concurrent commit")
 }
