@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
@@ -104,22 +106,28 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 		Hold: func() string { return f.hold },
 		Candidates: func() specBoardRead {
 			var list []specdispatch.Spec
+			var skipped []specDispatchEntry
 			labeled := 0
 			for _, s := range f.specs {
 				if s.HasLabel(specdispatch.DispatchFailedLabel) {
 					labeled++
 					continue
 				}
-				if ok, _ := specdispatch.Eligible(s, 2, budget.ReservedLabels()); ok {
+				if ok, why := specdispatch.Eligible(s, 2, budget.ReservedLabels()); ok {
 					list = append(list, s)
+				} else if specdispatch.BoardCarried(s) {
+					// specCandidates reports a board-carried refusal rather
+					// than dropping it unseen (gt-k1g3e).
+					skipped = append(skipped, specDispatchEntry{Bead: s.ID, Rig: "gastown", Line: fmt.Sprintf("%s: not eligible (%s)", s.ID, why)})
 				}
 			}
 			specdispatch.Order(list)
+			sort.Slice(skipped, func(i, j int) bool { return skipped[i].Bead < skipped[j].Bead })
 			out := make([]specCandidate, 0, len(list))
 			for _, s := range list {
 				out = append(out, specCandidate{Spec: s, Rig: "gastown"})
 			}
-			return specBoardRead{Candidates: out, LabeledFailed: labeled}
+			return specBoardRead{Candidates: out, LabeledFailed: labeled, Skipped: skipped}
 		},
 		Show: func(id string) (specdispatch.Spec, error) {
 			if seq := f.showSeq[id]; len(seq) > 0 {
@@ -1453,6 +1461,84 @@ func TestSpecCandidatesFromAFakeStore(t *testing.T) {
 	}
 }
 
+// A ready, shaped bead the deep-review formula labeled crew-only is skipped,
+// and the read says so: the skip line names the label, so the tick log and the
+// dry run show an operator why the bead never took a seat instead of dropping
+// it unseen. Its unlabelled twin, same type and priority, still dispatches
+// (gt-k1g3e).
+func TestSpecCandidatesSkipsCrewOnlyLabel(t *testing.T) {
+	t.Parallel()
+	townRoot := specTown(t)
+	fakeBoard := func(string) ([]*beads.Issue, error) {
+		return []*beads.Issue{
+			{ID: "gt-crew", Type: "bug", Status: "open", Priority: 2, Labels: []string{specdispatch.CrewOnlyLabel}},
+			{ID: "gt-open", Type: "bug", Status: "open", Priority: 2},
+		}, nil
+	}
+
+	got := specCandidates(townRoot, 2, fakeBoard, nil)
+	if len(got.Errors) != 0 {
+		t.Fatalf("errors = %v", got.Errors)
+	}
+	var ids []string
+	for _, c := range got.Candidates {
+		ids = append(ids, c.Spec.ID)
+	}
+	if joined := strings.Join(ids, " "); joined != "gt-open" {
+		t.Errorf("candidates = %q, want the unlabelled twin alone", joined)
+	}
+	if len(got.Skipped) != 1 {
+		t.Fatalf("skipped = %+v, want the one crew-only refusal", got.Skipped)
+	}
+	e := got.Skipped[0]
+	if e.Bead != "gt-crew" || e.Rig != "gastown" {
+		t.Errorf("skip entry = %+v, want gt-crew in gastown", e)
+	}
+	if !strings.Contains(e.Line, specdispatch.CrewOnlyLabel) {
+		t.Errorf("skip line %q does not name %s", e.Line, specdispatch.CrewOnlyLabel)
+	}
+}
+
+// A board-carried refusal reaches the tick's skip lines, which is where the
+// operator reads the dispatcher's decision: the daemon logs them from the
+// report's skipped list and prints them under --dry-run
+// (internal/daemon.SpecDispatchTickLine). A crew-only bead is never slung
+// under either (gt-k1g3e).
+func TestSpecDispatchReportsCrewOnlySkip(t *testing.T) {
+	t.Parallel()
+	crew := cleanSpec("gt-crew", 1, "2026-09-29T10:00:00Z")
+	crew.Labels = []string{specdispatch.CrewOnlyLabel}
+	for _, dryRun := range []bool{false, true} {
+		f := newFakeSpecTown(crew, cleanSpec("gt-open", 2, "2026-09-29T11:00:00Z"))
+		env := f.env()
+		env.DryRun = dryRun
+		r := runSpecDispatchCycle(env)
+		var found bool
+		for _, e := range r.Skipped {
+			if e.Bead == "gt-crew" && strings.Contains(e.Line, specdispatch.CrewOnlyLabel) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("dry-run=%v skipped = %+v, want a line naming %s", dryRun, r.Skipped, specdispatch.CrewOnlyLabel)
+		}
+		for _, id := range f.slung {
+			if id == "gt-crew" {
+				t.Fatalf("dry-run=%v slung the crew-only bead", dryRun)
+			}
+		}
+		// The tick's own printout is the operator's view: the same report under
+		// both flags has to carry the line.
+		var out bytes.Buffer
+		cmd := &cobra.Command{}
+		cmd.SetOut(&out)
+		printSpecDispatchReport(cmd, r)
+		if !strings.Contains(out.String(), specdispatch.CrewOnlyLabel) {
+			t.Errorf("dry-run=%v report output %q does not name %s", dryRun, out.String(), specdispatch.CrewOnlyLabel)
+		}
+	}
+}
+
 // capturedSpecBoard is the board the dispatcher reads, as the dispatcher reads
 // it: the bytes of testdata/spec_ready_labels.json — a `bd ready --json`
 // response captured from the live gastown rig on 2026-10-02 with the exact
@@ -1542,6 +1628,32 @@ func TestSpecCandidatesCountsTheLabeledFailedFromACapturedBoard(t *testing.T) {
 	}
 }
 
+// The crew-only skip is read off the same board as everything else, so it
+// depends on bd's ready JSON carrying labels — the gap om found in the
+// LabeledFailed count (gt-q6zoo attempt 1). Here the board is decoded from
+// bd's own JSON shape, not handed over as a Go struct with Labels filled in,
+// so a read path that lost the array would fail this test.
+func TestSpecCandidatesSkipsCrewOnlyFromBdJSON(t *testing.T) {
+	t.Parallel()
+	townRoot := specTown(t)
+	crewed := `{"id":"gt-crew","title":"crew one","status":"open","priority":2,"issue_type":"bug","labels":["crew-only"]}`
+	twin := `{"id":"gt-open","title":"twin","status":"open","priority":2,"issue_type":"bug"}`
+	board := func(string) ([]*beads.Issue, error) {
+		return parseSpecReady([]byte(`{"issues":[` + crewed + `,` + twin + `]}`))
+	}
+
+	got := specCandidates(townRoot, 2, board, nil)
+	if len(got.Errors) != 0 {
+		t.Fatalf("errors = %v", got.Errors)
+	}
+	if len(got.Candidates) != 1 || got.Candidates[0].Spec.ID != "gt-open" {
+		t.Errorf("candidates = %+v, want the unlabelled twin alone", got.Candidates)
+	}
+	if len(got.Skipped) != 1 || !strings.Contains(got.Skipped[0].Line, specdispatch.CrewOnlyLabel) {
+		t.Errorf("skipped = %+v, want a line naming %s", got.Skipped, specdispatch.CrewOnlyLabel)
+	}
+}
+
 // jsonEscape escapes a string for the JSON test fixtures above.
 func jsonEscape(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`).Replace(s)
@@ -1566,11 +1678,14 @@ func TestSpecReadyQueryAndParse(t *testing.T) {
 			t.Errorf("ready args %q missing %q", args, want)
 		}
 	}
-	// spec-dispatch-failed is not excluded server-side: the board carries the
-	// beads the label holds so the tick can count them, and Eligible keeps
-	// them out of the candidate set (gt-q6zoo).
-	if strings.Contains(args, "spec-dispatch-failed") {
-		t.Errorf("ready args %q still exclude spec-dispatch-failed; the tick cannot count what it never reads", args)
+	// spec-dispatch-failed and crew-only are not excluded server-side: the
+	// board carries the beads those labels hold so the tick can count them and
+	// name them in its skip line, and Eligible keeps them out of the candidate
+	// set (gt-q6zoo, gt-k1g3e).
+	for _, carried := range []string{specdispatch.DispatchFailedLabel, specdispatch.CrewOnlyLabel} {
+		if strings.Contains(args, carried) {
+			t.Errorf("ready args %q still exclude %s; the tick cannot report what it never reads", args, carried)
+		}
 	}
 	// The retired label spec and type feature must not gate the board.
 	for _, unwanted := range []string{"--label spec", "--type feature"} {

@@ -45,6 +45,11 @@ func TestEligible(t *testing.T) {
 		// bead's own record: no label, no assignee, and still no candidate.
 		{func(s *Spec) { s.SubmittedForLanding = true }, nil, false, "submitted for landing"},
 		{func(s *Spec) { s.Labels = append(s.Labels, "needs-human") }, nil, false, "label needs-human"},
+		// The deep-review formula's crew-only label: a person lands those beads,
+		// so no seat takes one (gt-k1g3e). The label is read before the ceiling,
+		// so the refusal names the label even for the P3 a deep review files.
+		{func(s *Spec) { s.Labels = append(s.Labels, CrewOnlyLabel) }, nil, false, "label crew-only"},
+		{func(s *Spec) { s.Labels = append(s.Labels, "Crew-Only"); s.Priority = 3 }, nil, false, "label crew-only"},
 		// The reviewer label was retired with the role (gt-rwp7z.11): a bead
 		// still carrying it is held by nothing, so it dispatches as ordinary
 		// ready work.
@@ -117,6 +122,54 @@ func TestEligibleFollowsTheSharedHoldRule(t *testing.T) {
 		}
 		if ok, why := Eligible(s, 2, nil); ok {
 			t.Errorf("%s: Eligible = true (%q), want a hold", tc.name, why)
+		}
+	}
+}
+
+// The ready query filters the excluded labels the tick does not have to
+// report, and carries the rest: a board-carried label's bead reaches the tick
+// so its skip line names the label, and every other excluded label is filtered
+// server-side. A label in neither list would be fetched and refused for
+// nothing; one in both would never reach the skip line (gt-q6zoo, gt-k1g3e).
+func TestExcludedLabelsSplitIntoFilteredAndCarried(t *testing.T) {
+	t.Parallel()
+	carried := BoardCarriedLabels()
+	ready := ReadyQueryLabels()
+	for _, l := range ExcludedLabels() {
+		inCarried := hasLabel(carried, l)
+		inReady := hasLabel(ready, l)
+		if inCarried == inReady {
+			t.Errorf("%s: board-carried %v, ready-query filtered %v; want exactly one", l, inCarried, inReady)
+		}
+	}
+	if !hasLabel(carried, CrewOnlyLabel) {
+		t.Errorf("carried = %v, want %s: the tick has to name the refusal", carried, CrewOnlyLabel)
+	}
+	if len(carried)+len(ready) != len(ExcludedLabels()) {
+		t.Errorf("carried %v + ready %v do not make up ExcludedLabels %v", carried, ready, ExcludedLabels())
+	}
+}
+
+// A board-carried label is what makes a refusal reportable, and only a bead
+// wearing one: the read has to leave every other refusal a silent drop
+// (gt-k1g3e).
+func TestBoardCarriedFollowsTheLabels(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		labels []string
+		want   bool
+	}{
+		{nil, false},
+		{[]string{"review-deep"}, false},
+		{[]string{CrewOnlyLabel}, true},
+		{[]string{"Crew-Only"}, true},
+		{[]string{"needs-human", CrewOnlyLabel}, true},
+		{[]string{DispatchFailedLabel}, true},
+	} {
+		s := goodSpec()
+		s.Labels = tc.labels
+		if got := BoardCarried(s); got != tc.want {
+			t.Errorf("BoardCarried(%v) = %v, want %v", tc.labels, got, tc.want)
 		}
 	}
 }

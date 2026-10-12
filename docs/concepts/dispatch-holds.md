@@ -44,9 +44,10 @@ omits them).
 filters its candidates in `specdispatch.Eligible`
 (internal/specdispatch/dispatch.go): a bead is held when its status is not
 `open` (so `deferred`, `pinned`, `hooked` and `in_progress`), when it carries
-any assignee, when it wears `gt:ready-to-land`, `spec-dispatch-failed` or a
-runtime-family label, or when `dispatch.DispatchHoldFields` asserts a hold on
-its fields — the table above, read rather than copied (gt-lxxo4).
+any assignee, when it wears `gt:ready-to-land`, `spec-dispatch-failed`,
+`crew-only` (a person lands the deep-review findings) or a runtime-family
+label, or when `dispatch.DispatchHoldFields` asserts a hold on its fields — the
+table above, read rather than copied (gt-lxxo4).
 
 One marker in that table is not a hold here: `needs-pro` is the pro seat's
 selector (`polecat_pool.pro_label`), so it routes the bead to the seat that
