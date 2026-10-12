@@ -300,6 +300,7 @@ type Daemon struct {
 	// no-effect alarms. Run-loop goroutine only (startup and heartbeat).
 	upgradeWaitCommit    string
 	upgradeWaitSince     time.Time
+	upgradeGCHoldSince   time.Time // when the drain first saw the maintenance gc cycle in flight (zero = none)
 	upgradeWaitEscalated bool
 	upgradeWaitLogged    string // the hold the last wait line named (tierSweepHoldLabel while a sweep holds it)
 	upgradeDrainLogged   bool   // the once-per-marker drain line has been logged

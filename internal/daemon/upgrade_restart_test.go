@@ -194,6 +194,121 @@ func TestUpgradeWaitsForARunningTierSweepUpToTheCap(t *testing.T) {
 	})
 }
 
+// gt-oucgn: a maintenance gc cycle in flight holds a pending upgrade restart —
+// a shutdown cancels the gc call's context, so the restart aborts the call with
+// nothing recorded and the database stays due — but only up to the gc's own
+// bound, so a stuck gc cannot hold an install forever.
+func TestUpgradeWaitsForAMaintenanceGCUpToItsOwnBound(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a gc in flight holds, and the wait names it", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		var logs strings.Builder
+		d.logger = log.New(&logs, "", 0)
+		captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		d.maintenanceGCRunning.Store(true)
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+		now := time.Now()
+		if d.checkUpgradeRestart(now) {
+			t.Fatal("restarted over a maintenance gc call")
+		}
+		if d.checkUpgradeRestart(now.Add(maintenanceGCRestartCap - time.Minute)) {
+			t.Fatal("the gc was cut before its own bound")
+		}
+		if !strings.Contains(logs.String(), "waiting for the maintenance gc cycle") {
+			t.Fatalf("the gc hold was not named in the wait line:\n%s", logs.String())
+		}
+		if strings.Contains(logs.String(), "the maintenance gc cycle has been in flight") {
+			t.Fatalf("the release line claimed a restart that kept waiting:\n%s", logs.String())
+		}
+	})
+
+	t.Run("the gc finishing lets the restart go", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		d.maintenanceGCRunning.Store(true)
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+		now := time.Now()
+		if d.checkUpgradeRestart(now) {
+			t.Fatal("restarted over a maintenance gc call")
+		}
+		d.maintenanceGCRunning.Store(false)
+		if !d.checkUpgradeRestart(now.Add(time.Minute)) {
+			t.Fatal("the restart must go once the gc finishes")
+		}
+	})
+
+	t.Run("a stuck gc stops holding at the bound, and the log says so", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		var logs strings.Builder
+		d.logger = log.New(&logs, "", 0)
+		captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		d.maintenanceGCRunning.Store(true)
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+		now := time.Now()
+		if d.checkUpgradeRestart(now) || d.checkUpgradeRestart(now.Add(maintenanceGCRestartCap-time.Minute)) {
+			t.Fatal("restarted under a running gc before the bound")
+		}
+		if !d.checkUpgradeRestart(now.Add(maintenanceGCRestartCap)) {
+			t.Fatal("a gc stuck past its own bound must not hold the restart further")
+		}
+		if !strings.Contains(logs.String(), "the maintenance gc cycle has been in flight for") ||
+			!strings.Contains(logs.String(), "restarting anyway") {
+			t.Fatalf("no release line for the stuck gc:\n%s", logs.String())
+		}
+	})
+
+	// The bound is the gc hold's own clock, not the marker's: a marker that has
+	// already waited out a tier sweep must not cut a gc that just started. With
+	// the marker's clock the check below would restart a gc that is a minute in.
+	t.Run("a gc that starts late in the wait still gets its own bound", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		d.tierSweepRunning.Store(true)
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+		now := time.Now()
+		if d.checkUpgradeRestart(now) {
+			t.Fatal("restarted under a running tier sweep")
+		}
+		gcStarted := now.Add(tierSweepRestartCap - time.Minute)
+		d.maintenanceGCRunning.Store(true)
+		if d.checkUpgradeRestart(gcStarted) {
+			t.Fatal("restarted on the heartbeat the gc started")
+		}
+		if d.checkUpgradeRestart(gcStarted.Add(maintenanceGCRestartCap - time.Minute)) {
+			t.Fatal("the gc was cut before its own bound although the marker had waited past it")
+		}
+		if !d.checkUpgradeRestart(gcStarted.Add(maintenanceGCRestartCap)) {
+			t.Fatal("the gc's own bound elapsed and the restart still did not go")
+		}
+	})
+}
+
+// The gc hold's bound is the gc's own: one call is cut off at
+// maintenanceGCTimeout and its pause marker outlives it by maintenancePauseSlack
+// (gt-oucgn).
+func TestMaintenanceGCRestartCapMatchesTheGCsOwnBound(t *testing.T) {
+	t.Parallel()
+	if want := maintenanceGCTimeout + maintenancePauseSlack; maintenanceGCRestartCap != want {
+		t.Fatalf("maintenanceGCRestartCap = %s, want %s", maintenanceGCRestartCap, want)
+	}
+	if maintenanceGCRestartCap != 15*time.Minute {
+		t.Fatalf("maintenanceGCRestartCap = %s, want 15m", maintenanceGCRestartCap)
+	}
+}
+
 // The sweep hold is a quarter hour: long enough for a normal cycle, short
 // enough that an install is not stuck behind a hung one (gt-ccyw0).
 func TestTierSweepRestartCapIsAQuarterHour(t *testing.T) {
