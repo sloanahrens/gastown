@@ -31,7 +31,7 @@ func TestScheduledMaintenanceBacksUpBeforeGCUnderPause(t *testing.T) {
 	// and every copy is done before the first gc.
 	want := "write nightly backup of gt,backup gt,remove," +
 		"write nightly backup of hq,backup hq,remove," +
-		"write hq,gc hq,remove,write gt,gc gt,remove"
+		"write gt,gc gt,remove,write hq,gc hq,remove"
 	if got := strings.Join(f.events, ","); got != want {
 		t.Errorf("events = %s\nwant     %s", got, want)
 	}

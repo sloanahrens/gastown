@@ -457,7 +457,7 @@ type maintenanceGCResult struct {
 	pending []gcCandidate
 }
 
-// maintenanceGCCycle measures every database, gc's the due ones smallest
+// maintenanceGCCycle measures every database, gc's the due ones largest
 // first, and re-checks the quiet-window guard and the pause marker before
 // each.
 func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string) maintenanceGCResult {
@@ -486,9 +486,16 @@ func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string) maintena
 		d.logger.Printf("scheduled_maintenance: no database needs gc")
 		return maintenanceGCResult{outcome: gcOutcomeCompleted}
 	}
-	// Smallest first: the cheap databases finish before the town can get
-	// busy, and the operator runbook proved the order on prod.
-	sort.SliceStable(eligible, func(i, j int) bool { return eligible[i].before.total < eligible[j].before.total })
+	// Largest first: the run stops when the town gets busy or a gc fails, so
+	// the database that costs the most and reclaims the most takes the first
+	// quiet slot instead of being the one cut off (gt-ykyy6). Ties go by
+	// name, so the order never depends on discovery order.
+	sort.Slice(eligible, func(i, j int) bool {
+		if eligible[i].before.total != eligible[j].before.total {
+			return eligible[i].before.total > eligible[j].before.total
+		}
+		return eligible[i].name < eligible[j].name
+	})
 
 	parent := d.ctx
 	if parent == nil {
