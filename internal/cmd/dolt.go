@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/testdb"
 	"github.com/steveyegge/gastown/internal/ui"
+	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -490,6 +491,7 @@ func runDoltStatus(cmd *cobra.Command, args []string) error {
 					style.Bold.Render("SERVER IS READ-ONLY — contact the remote server admin"))
 			}
 		}
+		printStrayWorkspaceServerWarning(townRoot)
 		return nil
 	}
 
@@ -595,7 +597,60 @@ func runDoltStatus(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	printStrayWorkspaceServerWarning(townRoot)
 	return nil
+}
+
+// printStrayWorkspaceServerWarning names any running Dolt server a beads
+// workspace started for itself on a port other than the town's, and is silent
+// when there is none.
+//
+// Such a server serves that workspace alone, and the port file beside its
+// config sends later bd calls there, where they fail with "database not found"
+// while the town's server is healthy (gt-4js4f). This prints, and never stops a
+// server.
+func printStrayWorkspaceServerWarning(townRoot string) {
+	servers, err := util.FindDoltServers()
+	if err != nil {
+		return // the status printed above stands; a scan failure is not a finding
+	}
+
+	townPort := doltserver.DefaultConfig(townRoot).Port
+	strays := strayWorkspaceServerLabels(servers, townPort)
+	if len(strays) == 0 {
+		return
+	}
+
+	townPortText := "none"
+	if townPort > 0 {
+		townPortText = strconv.Itoa(townPort)
+	}
+	fmt.Printf("\n  %s %d stray Dolt server(s) started by a beads workspace: %s — not the town's (port %s); stop a stray with 'kill <pid>'\n",
+		style.Bold.Render("!"), len(strays), strings.Join(strays, ", "), townPortText)
+}
+
+// strayWorkspaceServerLabels names each running Dolt server that belongs to a
+// beads workspace rather than the town: one "PID <pid> on port <port>" per
+// server whose --config lies under a .beads directory, except one pointed at
+// the town's own port (which is what the town wants).
+func strayWorkspaceServerLabels(servers []util.DoltServerProcess, townPort int) []string {
+	var labels []string
+	for _, s := range servers {
+		if _, _, ok := util.BeadsDirFromConfigPath(s.ConfigPath); !ok {
+			continue // the town's own server runs from .dolt-data, not a .beads dir
+		}
+		// A workspace pointed at the town's own port is what the town wants;
+		// an unreadable port (0) is not the town's, so it is named too.
+		if townPort > 0 && s.Port == townPort {
+			continue
+		}
+		port := "unknown"
+		if s.Port > 0 {
+			port = strconv.Itoa(s.Port)
+		}
+		labels = append(labels, fmt.Sprintf("PID %d on port %s", s.PID, port))
+	}
+	return labels
 }
 
 // statusDatabases picks the database list to display in `gt dolt status` and
