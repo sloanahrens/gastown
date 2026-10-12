@@ -77,6 +77,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`gt pool show` and `gt pool set <agent> <n>`** (gt-yrjfg) — read the
+  polecat seat caps and change them in one command. `n` of 0 closes the seat by
+  removing its keys; the write keeps keys it does not own and leaves a
+  timestamped backup beside the file.
 - **Test-pollution sweep** (gt-4k3fj.6.2) — the retired deacon's
   test-pollution-cleanup step, as one daemon job on the doctor dog's cadence.
   It reaps orphaned embedded `dolt sql-server` processes and the temp

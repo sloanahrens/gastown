@@ -125,6 +125,12 @@ the pool's own seat leaves it alone. A `spec_dispatch.max_hooked > 0` adds the
 because a seat nobody asked for is a seat the dispatcher must not spend;
 `prefer_hooked` moves it first.
 
+To read or change the pool seat and the `hooked_agent` seat, run `gt pool show`
+or `gt pool set <agent> <n>` instead of editing the files: `n` of 0 closes the
+seat by removing its keys, where a hand-written `max_seats: 0` would mean
+uncapped to sling and the default cap here. The `hooked_agent` seat is read at
+daemon start, so a change to it needs a daemon kickstart.
+
 Occupancy is every live polecat session plus the seat claims in-flight slings
 hold, counted per agent from the session's `GT_AGENT`. An empty `GT_AGENT`
 counts as the polecat role default. `polecat_pool.min_spawn_gap` applies to the

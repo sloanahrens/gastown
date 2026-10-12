@@ -159,6 +159,17 @@ func SourcePath(path string) string {
 	return sectionLabel(host, key)
 }
 
+// WritePath is the file a write through path lands in: the host file for a
+// retired file whose section the host carries, path itself otherwise. A
+// caller that backs a file up before writing it backs up this one.
+func WritePath(path string) string {
+	host, _, ok, _, err := sectionFor(path)
+	if err != nil || !ok {
+		return path
+	}
+	return host
+}
+
 // SourcePathRel is SourcePath phrased for a message that names files
 // relative to the town root: "mayor/rigs.json" while the registry is read
 // from its own file, `mayor/town.json (section "registry")` once it lives in
