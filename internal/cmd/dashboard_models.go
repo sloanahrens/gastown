@@ -78,12 +78,14 @@ func loadDashPatrols(townRoot string) (*config.PatrolsConfig, error) {
 	return pc.Patrols, nil
 }
 
-// modelSeatRows is the panel's seat table: the pool seat and the second seat,
-// the same two gt pool show prints, each with the key it was read from. A seat
-// nothing may fill is closed, not a row of zeros. The live counts are the
-// hub's.
+// modelSeatRows is the panel's seat table: the pool seat, the pro seat and the
+// second seat, the same three gt pool show prints, each with the key it was
+// read from. A seat nothing may fill is closed, not a row of zeros. The live
+// counts are the hub's.
 func modelSeatRows(townRoot string, ts *config.TownSettings, tsErr error, patrols *config.PatrolsConfig, patrolsErr error) []dashboard.ModelSeat {
-	poolKey := "polecat_pool.agent, max_seats (" + filepath.Base(config.TownSettingsPath(townRoot)) + ")"
+	settings := filepath.Base(config.TownSettingsPath(townRoot))
+	poolKey := "polecat_pool.agent, max_seats (" + settings + ")"
+	proKey := "polecat_pool.pro_agent, polecat_pool.pro_max (" + settings + ")"
 	secondKey := "patrols.spec_dispatch.hooked_agent, max_hooked (" + config.DaemonPatrolConfigFileName + ")"
 
 	pool := dashboard.ModelSeat{Seat: "pool", Key: poolKey}
@@ -100,6 +102,27 @@ func modelSeatRows(townRoot string, ts *config.TownSettings, tsErr error, patrol
 		}
 	}
 
+	// The pro seat's open/closed decision and its defaults are the
+	// dispatcher's (specBudgetFromConfig): no polecat_pool section or a pro_max
+	// of 0 is a closed seat, an unset pro_max is its own default of 1 with the
+	// default pro agent. A seat it drops for repeating an earlier seat's agent
+	// still gets a row here (gt-6oxrj).
+	pro := dashboard.ModelSeat{Seat: "pro", Key: proKey}
+	switch {
+	case tsErr != nil:
+		pro.Unknown = true
+	case ts == nil || ts.PolecatPool == nil:
+		pro.Closed = true
+	default:
+		if proCap := ts.PolecatPool.GetProMax(); proCap <= 0 {
+			pro.Closed = true
+		} else {
+			pro.Agent = strings.TrimSpace(ts.PolecatPool.GetProAgent())
+			pro.Cap = proCap
+			pro.CapDefault = ts.PolecatPool.ProMax == nil
+		}
+	}
+
 	second := dashboard.ModelSeat{Seat: "second", Key: secondKey}
 	switch {
 	case patrolsErr != nil:
@@ -113,7 +136,7 @@ func modelSeatRows(townRoot string, ts *config.TownSettings, tsErr error, patrol
 		}
 		second.Cap = patrols.SpecDispatch.MaxHooked
 	}
-	return []dashboard.ModelSeat{pool, second}
+	return []dashboard.ModelSeat{pool, pro, second}
 }
 
 // modelTable is the town model table, settings/models.json: the profile each
