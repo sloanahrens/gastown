@@ -89,6 +89,15 @@ func WriteState(townRoot string, s State) error {
 // rotation cap is written in one piece per file; a failure after the first of
 // those leaves that piece, which belongs to the rotated file.
 func AppendEvents(townRoot string, events []Event) error {
+	return appendEvents(townRoot, events, osWrite)
+}
+
+// writeFunc is the write one append makes; a test hands appendEvents one that fails.
+type writeFunc func(f *os.File, b []byte) (int, error)
+
+func osWrite(f *os.File, b []byte) (int, error) { return f.Write(b) }
+
+func appendEvents(townRoot string, events []Event, write writeFunc) error {
 	if len(events) == 0 {
 		return nil
 	}
@@ -120,7 +129,7 @@ func AppendEvents(townRoot string, events []Event) error {
 			chunk = append(chunk, lines[n]...)
 			n++
 		}
-		if err := appendAtomic(path, chunk); err != nil {
+		if err := appendAtomic(path, chunk, write); err != nil {
 			return err
 		}
 		lines = lines[n:]
@@ -128,12 +137,9 @@ func AppendEvents(townRoot string, events []Event) error {
 	return nil
 }
 
-// appendWrite is the write appendAtomic makes; a test swaps it to fail one.
-var appendWrite = func(f *os.File, b []byte) (int, error) { return f.Write(b) }
-
 // appendAtomic appends data to path in a single write. If the write fails
 // part way, it cuts the file back to its earlier length so no prefix stays.
-func appendAtomic(path string, data []byte) error {
+func appendAtomic(path string, data []byte, write writeFunc) error {
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644) //nolint:gosec // G304: a path built from the town root
 	if err != nil {
 		return err
@@ -142,7 +148,7 @@ func appendAtomic(path string, data []byte) error {
 	if fi, err := f.Stat(); err == nil {
 		before = fi.Size()
 	}
-	n, werr := appendWrite(f, data)
+	n, werr := write(f, data)
 	if werr != nil && n > 0 && before >= 0 {
 		// Cut only our own partial write: if another process appended since,
 		// the file is longer than before+n and truncating would eat its lines.
