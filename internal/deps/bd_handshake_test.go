@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/cmdtree"
 )
@@ -152,11 +153,6 @@ func TestCheckBDHandshake_Refusals(t *testing.T) {
 			wantParts: []string{"database schema is ahead of this bd"},
 		},
 		{
-			name:      "database unreadable",
-			bd:        &fakeBD{version: bdVersionDa4983e, sqlErr: fakeExit(25), sqlStderr: "store unavailable"},
-			wantParts: []string{"could not read the database migration level", "store unavailable"},
-		},
-		{
 			name:      "database answer not JSON",
 			bd:        &fakeBD{version: bdVersionDa4983e, sqlOut: "No rows."},
 			wantParts: []string{"could not read the database migration level", "No rows."},
@@ -200,6 +196,119 @@ func TestCheckBDHandshake_Refusals(t *testing.T) {
 			}
 			if tc.noDBRead && len(tc.bd.calls) > 1 {
 				t.Errorf("database was read after the version was refused: %v", tc.bd.calls)
+			}
+		})
+	}
+}
+
+// flakyStoreBD is a bd whose store is unavailable for the first downReads
+// schema reads and answers after that: the shape of a cold boot, where the
+// daemon starts before Dolt accepts connections (gt-2gctr).
+type flakyStoreBD struct {
+	*fakeBD
+	downReads int
+	reads     int
+}
+
+func (f *flakyStoreBD) run(ctx context.Context, env []string, args ...string) ([]byte, []byte, error) {
+	if args[0] == "sql" {
+		f.reads++
+		if f.reads <= f.downReads {
+			f.calls = append(f.calls, args)
+			return nil, []byte("store unavailable"), fakeExit(bdStoreUnavailableExit)
+		}
+	}
+	return f.fakeBD.run(ctx, env, args...)
+}
+
+// storeRetryNow is the retry interval the handshake tests run with: the
+// checks are the loop, not the wait, so they drive it as fast as they can.
+const storeRetryNow = time.Millisecond
+
+// TestCheckBDHandshake_WaitsOutAColdStore is the gt-2gctr regression for the
+// cold boot: while bd reports the store unavailable the handshake waits and
+// tries again, and passes once Dolt answers.
+func TestCheckBDHandshake_WaitsOutAColdStore(t *testing.T) {
+	t.Parallel()
+	f := &flakyStoreBD{fakeBD: &fakeBD{version: bdVersionDa4983e, sqlOut: dbLevel(66)}, downReads: 3}
+	hs, err := checkBDHandshake(context.Background(), "/bin/bd", f.run, storeRetryNow)
+	if err != nil {
+		t.Fatalf("CheckBDHandshake: %v", err)
+	}
+	if hs.DBSchema != 66 || hs.Found.BuildID != "da4983e" {
+		t.Fatalf("handshake = %+v", hs)
+	}
+	if f.reads != 4 {
+		t.Errorf("schema reads = %d, want 4: three store_unavailable failures, then the pass", f.reads)
+	}
+}
+
+// TestCheckBDHandshake_StoreDownNamesDolt is the other half of gt-2gctr: with
+// the store still down when the budget runs out, the refusal names Dolt and
+// the Dolt commands. The bd is fine, so nothing in it may point at the bd
+// version or at reinstalling bd.
+func TestCheckBDHandshake_StoreDownNamesDolt(t *testing.T) {
+	t.Parallel()
+	f := &flakyStoreBD{fakeBD: &fakeBD{version: bdVersionDa4983e}, downReads: 1 << 30}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := checkBDHandshake(ctx, "/usr/local/bin/bd", f.run, storeRetryNow)
+	if err == nil {
+		t.Fatal("want refusal, got nil")
+	}
+	if !errors.Is(err, ErrBDHandshake) || !errors.Is(err, ErrDoltUnreachable) {
+		t.Errorf("refusal must wrap ErrBDHandshake and ErrDoltUnreachable: %v", err)
+	}
+	msg := err.Error()
+	for _, want := range []string{"Dolt is not reachable", "gt dolt status", "gt dolt start", "/usr/local/bin/bd", "store unavailable"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal lacks %q:\n%s", want, msg)
+		}
+	}
+	for _, unwanted := range []string{"make safe-install", "required:", "contract 1", "1.2.2"} {
+		if strings.Contains(msg, unwanted) {
+			t.Errorf("refusal must not blame bd with %q:\n%s", unwanted, msg)
+		}
+	}
+	if f.reads < 1 {
+		t.Error("the handshake refused without reading the database")
+	}
+}
+
+// TestWaitForStoreRetryEndsWithTheBudget pins the bound on the retry loop: an
+// ended context stops it, and one with budget left lets the next attempt run.
+func TestWaitForStoreRetryEndsWithTheBudget(t *testing.T) {
+	t.Parallel()
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	if waitForStoreRetry(ended, time.Second) {
+		t.Error("waitForStoreRetry let the loop continue after the context ended")
+	}
+	if !waitForStoreRetry(context.Background(), time.Millisecond) {
+		t.Error("waitForStoreRetry stopped a loop with budget left")
+	}
+}
+
+// TestCheckBDHandshake_OnlyStoreUnavailableIsRetried: bd's other failures are
+// bd answering, so they refuse on the first read (gt-2gctr).
+func TestCheckBDHandshake_OnlyStoreUnavailableIsRetried(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		sqlErr    error
+		sqlStderr string
+	}{
+		{"schema skew", fakeExit(bdSchemaSkewExit), "schema skew"},
+		{"other bd failure", fakeExit(2), "boom"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeBD{version: bdVersionDa4983e, sqlErr: tc.sqlErr, sqlStderr: tc.sqlStderr}
+			if _, err := checkBDHandshake(context.Background(), "/bin/bd", f.run, storeRetryNow); err == nil {
+				t.Fatal("want refusal, got nil")
+			}
+			if len(f.calls) != 2 {
+				t.Errorf("bd calls = %v, want one version read and one schema read", f.calls)
 			}
 		})
 	}

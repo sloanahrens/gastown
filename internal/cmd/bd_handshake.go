@@ -57,7 +57,9 @@ var bdHandshakeNotTownRunning = map[string]string{
 	"gt dolt restart":     "restarts the Dolt server, which recovery needs when bd is broken",
 }
 
-// bdHandshakeTimeout bounds the handshake's two bd calls.
+// bdHandshakeTimeout bounds the whole handshake: the version and schema reads,
+// and the retries the schema read makes while Dolt is still starting
+// (gt-2gctr).
 const bdHandshakeTimeout = 30 * time.Second
 
 // townStartGate is the startup gate for town-running commands and agent
