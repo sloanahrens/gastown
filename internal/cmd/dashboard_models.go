@@ -80,8 +80,10 @@ func loadDashPatrols(townRoot string) (*config.PatrolsConfig, error) {
 
 // modelSeatRows is the panel's seat table: the pool seat, the pro seat and the
 // second seat, the same three gt pool show prints, each with the key it was
-// read from. A seat nothing may fill is closed, not a row of zeros. The live
-// counts are the hub's.
+// read from. A seat nothing may fill is closed, not a row of zeros, and a seat
+// the dispatcher drops for a repeated agent is no row at all: the table is the
+// dispatcher's seat list, and a seat it never dispatches is a cap that spends
+// nothing (gt-6oxrj). The live counts are the hub's.
 func modelSeatRows(townRoot string, ts *config.TownSettings, tsErr error, patrols *config.PatrolsConfig, patrolsErr error) []dashboard.ModelSeat {
 	settings := filepath.Base(config.TownSettingsPath(townRoot))
 	poolKey := "polecat_pool.agent, max_seats (" + settings + ")"
@@ -105,8 +107,7 @@ func modelSeatRows(townRoot string, ts *config.TownSettings, tsErr error, patrol
 	// The pro seat's open/closed decision and its defaults are the
 	// dispatcher's (specBudgetFromConfig): no polecat_pool section or a pro_max
 	// of 0 is a closed seat, an unset pro_max is its own default of 1 with the
-	// default pro agent. A seat it drops for repeating an earlier seat's agent
-	// still gets a row here (gt-6oxrj).
+	// default pro agent.
 	pro := dashboard.ModelSeat{Seat: "pro", Key: proKey}
 	switch {
 	case tsErr != nil:
@@ -136,7 +137,29 @@ func modelSeatRows(townRoot string, ts *config.TownSettings, tsErr error, patrol
 		}
 		second.Cap = patrols.SpecDispatch.MaxHooked
 	}
-	return []dashboard.ModelSeat{pool, pro, second}
+	// The seats in the order the dispatcher appends them — pool, pro, second,
+	// with spec_dispatch prefer_hooked moving the second seat first — because
+	// an agent named twice keeps the seat that comes first there, the same rule
+	// that names the seat gt pool show prints (gt-6oxrj).
+	ordered := []dashboard.ModelSeat{pool, pro, second}
+	if second.Agent != "" && patrols != nil && patrols.SpecDispatch != nil && patrols.SpecDispatch.PreferHooked {
+		ordered = []dashboard.ModelSeat{second, pool, pro}
+	}
+	// One agent is one seat to the dispatcher, whatever caps the two name: a
+	// seat whose agent an earlier one names is one it never dispatches, so it
+	// is not a row. A closed seat names no agent, and stays a row.
+	rows := make([]dashboard.ModelSeat, 0, len(ordered))
+	seen := map[string]bool{}
+	for _, seat := range ordered {
+		if seat.Agent != "" {
+			if seen[seat.Agent] {
+				continue
+			}
+			seen[seat.Agent] = true
+		}
+		rows = append(rows, seat)
+	}
+	return rows
 }
 
 // modelTable is the town model table, settings/models.json: the profile each
