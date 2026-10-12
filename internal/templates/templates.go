@@ -419,7 +419,7 @@ func (h supervisorHost) launchdPlistPath() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("finding home directory: %w", err)
 	}
-	return filepath.Join(homeDir, "Library", "LaunchAgents", "com.gastown.daemon.plist"), nil
+	return filepath.Join(homeDir, "Library", "LaunchAgents", launchdPlistName), nil
 }
 
 // SystemdUnitPath returns the path where the systemd user unit is (or would

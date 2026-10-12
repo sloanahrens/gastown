@@ -306,19 +306,38 @@ func TestRespawnLoop(t *testing.T) {
 	}
 }
 
-// The recovery is the one launchd needs and gt never runs, and it is spelled
-// with the job file this host would load.
+// The recovery is the one launchd needs and gt never runs. The host's own
+// reading of it is pinned first, then the same repair on both host kinds: the
+// Linux gate runner replays this reading with no LaunchAgents directory at all
+// and must still be handed the repair (gt-92qx3).
 func TestSupervisorRepair(t *testing.T) {
 	t.Parallel()
 	got := SupervisorRepair("launchd")
-	if !strings.HasPrefix(got, "launchctl bootout gui/"+strconv.Itoa(os.Getuid())+"/"+LaunchdLabel+" && launchctl bootstrap gui/") {
+	if !strings.Contains(got, "launchctl bootout gui/") || !strings.Contains(got, "launchctl bootstrap gui/") {
 		t.Errorf("SupervisorRepair(launchd) = %q, want the bootout and bootstrap of the daemon job", got)
-	}
-	if path, _ := SupervisorFilePath(); path == "" || !strings.HasSuffix(got, path) {
-		t.Errorf("SupervisorRepair(launchd) = %q, want it to name %q", got, path)
 	}
 	if got := SupervisorRepair("systemd"); got != "" {
 		t.Errorf("SupervisorRepair(systemd) = %q, want no recovery named", got)
+	}
+
+	for _, goos := range []string{"darwin", "linux"} {
+		t.Run(goos, func(t *testing.T) {
+			t.Parallel()
+			h := fakeHost(t, goos) // its home holds no plist, and its probe is never called
+			home, err := h.homeDir()
+			if err != nil {
+				t.Fatal(err)
+			}
+			uid := strconv.Itoa(os.Getuid())
+			want := "launchctl bootout gui/" + uid + "/" + LaunchdLabel + " && launchctl bootstrap gui/" + uid +
+				" " + filepath.Join(home, "Library", "LaunchAgents", launchdPlistName)
+			if got := h.repair("launchd"); got != want {
+				t.Errorf("repair(launchd) on %s = %q, want %q", goos, got, want)
+			}
+			if got := h.repair("systemd"); got != "" {
+				t.Errorf("repair(systemd) on %s = %q, want no recovery named", goos, got)
+			}
+		})
 	}
 }
 

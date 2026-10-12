@@ -13,6 +13,10 @@ import (
 // LaunchdLabel is the launchd job label the rendered plist carries.
 const LaunchdLabel = "com.gastown.daemon"
 
+// launchdPlistName is the file that label is installed as, under
+// ~/Library/LaunchAgents.
+const launchdPlistName = LaunchdLabel + ".plist"
+
 // SystemdUnit is the unit name the rendered systemd unit file carries.
 const SystemdUnit = "gastown-daemon.service"
 
@@ -168,13 +172,27 @@ func (s SupervisorState) RespawnLoop() bool {
 // kind: launchd has to boot the failed job out and bootstrap it again, which
 // gt names and never runs. "" for a kind with no such recovery.
 func SupervisorRepair(kind string) string {
-	path, pathKind := SupervisorFilePath()
-	if kind != "launchd" || pathKind != kind || path == "" {
+	return realHost.repair(kind)
+}
+
+// repair spells the launchd recovery from the label, the uid and the plist
+// path alone. Nothing here varies with the host's own kind: the caller has
+// already read a launchd job, so a repair that depended on this host being
+// darwin — or on the plist being installed — would name the repair on the
+// machine that found the loop and name nothing at all where the same reading
+// is replayed, which is how the Linux gate run of the respawn check came back
+// with an empty FixHint (gt-92qx3).
+func (h supervisorHost) repair(kind string) string {
+	if kind != "launchd" {
+		return ""
+	}
+	home, err := h.homeDir()
+	if err != nil || home == "" {
 		return ""
 	}
 	uid := os.Getuid()
 	return fmt.Sprintf("launchctl bootout gui/%d/%s && launchctl bootstrap gui/%d %s",
-		uid, LaunchdLabel, uid, path)
+		uid, LaunchdLabel, uid, filepath.Join(home, "Library", "LaunchAgents", launchdPlistName))
 }
 
 // SupervisorRespawn reads what the host's supervisor is doing with the job
