@@ -219,6 +219,105 @@ func TestSweepDeletesABranchALandingLeftBehind(t *testing.T) {
 	}
 }
 
+// TestSweepDeletesTheRigReposCopyToo: the branch the sweep deletes on origin
+// goes from the rig repository with it. The sweep reaped origin alone, so the
+// rig's own copy of a branch its landing never reaped stayed there for good
+// (gt-4j1pl).
+func TestSweepDeletesTheRigReposCopyToo(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedLeftover(t, branch, "gt-abc", "closed", true, 2*time.Hour)
+	h.remote.localBranches = map[string]string{branch: headFor(branch)}
+	// No landing record, so the local half rests on the containment the
+	// sweep proved to itself already.
+	h.remote.contains[headFor(branch)] = true
+
+	rep := h.w.Pass(context.Background())
+
+	if rep.Failed != 0 {
+		t.Fatalf("report %v; want no failure", rep)
+	}
+	if len(h.remote.deleted) != 1 || h.remote.deleted[0] != branch {
+		t.Fatalf("deleted %v; want origin's copy gone", h.remote.deleted)
+	}
+	if _, ok := h.remote.localBranches[branch]; ok {
+		t.Fatal("the rig repository still has the branch the sweep deleted on origin")
+	}
+}
+
+// TestSweepDeletesTheLocalCopyOfARecordedLanding: a landing record is proof
+// the bead's work is on the target whatever its tip's ancestry shows, so the
+// sweep's local half takes that branch on the ledger alone (gt-4j1pl).
+func TestSweepDeletesTheLocalCopyOfARecordedLanding(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.files.recs = []land.LandingRecord{{BeadID: "gt-abc", LandedCommit: tipHead, Target: "main"}}
+	h.seedLeftover(t, branch, "gt-abc", "open", true, 2*time.Hour)
+	h.remote.localBranches = map[string]string{branch: headFor(branch)}
+
+	rep := h.w.Pass(context.Background())
+
+	if rep.Failed != 0 {
+		t.Fatalf("report %v; want no failure", rep)
+	}
+	if _, ok := h.remote.localBranches[branch]; ok {
+		t.Fatal("the rig repository kept the branch of a recorded landing")
+	}
+	if len(h.remote.localForced) != 1 || h.remote.localForced[0] != branch {
+		t.Fatalf("forced local deletes %v; want the recorded landing's branch", h.remote.localForced)
+	}
+}
+
+// TestSweepKeepsTheRigReposCopyOfABranchItKeeps: one it keeps is kept in both
+// places (gt-4j1pl).
+func TestSweepKeepsTheRigReposCopyOfABranchItKeeps(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedLeftover(t, branch, "gt-abc", "closed", true, 10*time.Minute)
+	h.remote.localBranches = map[string]string{branch: headFor(branch)}
+
+	rep := h.w.Pass(context.Background())
+
+	if rep.Failed != 0 {
+		t.Fatalf("report %v; want no failure", rep)
+	}
+	if len(h.remote.deleted) != 0 {
+		t.Fatalf("deleted %v; want the young branch kept on origin", h.remote.deleted)
+	}
+	if _, ok := h.remote.localBranches[branch]; !ok {
+		t.Fatal("the rig repository lost a branch the sweep kept on origin")
+	}
+}
+
+// TestSweepLogsALocalDeleteFailureOnce: the local half is best effort like the
+// rest of the pass — a failure leaves the branch and is reported through the
+// sweep's once-a-run line, never as a failure of the pass (gt-4j1pl).
+func TestSweepLogsALocalDeleteFailureOnce(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedLeftover(t, branch, "gt-abc", "closed", true, 2*time.Hour)
+	h.remote.contains[headFor(branch)] = true
+	h.remote.localBranches = map[string]string{branch: headFor(branch)}
+	h.remote.localErr = map[string]error{branch: errors.New("checked out in a worktree")}
+	var logs []string
+	h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+
+	rep := h.w.Pass(context.Background())
+
+	if rep.Failed != 0 {
+		t.Fatalf("report %v; want the local failure to stay out of it", rep)
+	}
+	if _, ok := h.remote.localBranches[branch]; !ok {
+		t.Fatal("a branch whose local delete failed is gone from the rig repository")
+	}
+	if !logged(logs, "checked out in a worktree") {
+		t.Fatalf("logs %q; want one naming the failed local delete", logs)
+	}
+	if !h.w.sweepLogged[branch] {
+		t.Error("the local-delete failure skipped the sweep's once-a-run log")
+	}
+}
+
 // TestSweepSweepsWhatALandingLeftBehind: the shape of the branch that
 // started this (gt-ck1if) — the landing's reap never ran because the daemon
 // restarted in the moment after the push — and the next run's first pass
@@ -731,8 +830,8 @@ func TestLocalReapTwiceIsANoOp(t *testing.T) {
 	var logs []string
 	h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
 
-	h.w.deleteLocalBranch("gt-abc", branch, tipHead)
-	h.w.deleteLocalBranch("gt-abc", branch, tipHead)
+	h.w.deleteLocalBranch("gt-abc", branch, tipHead, h.w.logf)
+	h.w.deleteLocalBranch("gt-abc", branch, tipHead, h.w.logf)
 
 	if got := strings.Join(h.remote.localDeleted, ","); got != branch {
 		t.Fatalf("deleted %q; want %q once", got, branch)
@@ -752,7 +851,7 @@ func TestLocalDeleteKeepsTheBranchWhenTheLedgerCannotBeRead(t *testing.T) {
 	var logs []string
 	h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
 
-	h.w.deleteLocalBranch("gt-abc", branch, tipHead)
+	h.w.deleteLocalBranch("gt-abc", branch, tipHead, h.w.logf)
 
 	if _, ok := h.remote.localBranches[branch]; !ok {
 		t.Fatal("the branch was deleted without the record that proves it landed")
