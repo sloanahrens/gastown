@@ -117,6 +117,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.Questions != nil {
 		start(h.cfg.QuestionsEvery, h.pollQuestions)
 	}
+	if h.cfg.DeepReview != nil {
+		start(h.cfg.DeepReviewEvery, h.pollDeepReview)
+	}
 	if h.cfg.Escalation != nil {
 		start(h.cfg.EscalationEvery, h.pollEscalation)
 	}
@@ -525,6 +528,20 @@ func (h *Hub) pollQuestions() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.Questions = q
+	h.publishLocked()
+}
+
+// pollDeepReview reads the scheduled deep review's standing and last runs. It
+// runs bd per listed run, so it keeps the minute clock rather than the feed's
+// three.
+func (h *Hub) pollDeepReview() {
+	d := h.cfg.DeepReview()
+	if d == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.state.DeepReview = d
 	h.publishLocked()
 }
 

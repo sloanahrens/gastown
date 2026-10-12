@@ -217,6 +217,7 @@ a.drow:hover{background:#19212b}
 <div class="grid">
   <div class="col">
     <section><h2>Questions <span class="r" id="questionsnote"></span></h2><div class="body" id="questions"></div></section>
+    <section><h2>Deep review <span class="r" id="deepreviewnote"></span></h2><div class="body" id="deepreview"></div></section>
     <section><h2>Escalations <span class="r" id="escalationnote"></span></h2><div class="body" id="escalations"></div></section>
     <section><h2>Alerts <span class="r" id="alertsnote"></span></h2><div class="body" id="alerts"></div></section>
     <section><h2>Report <span class="r" id="reportnote"></span></h2><div class="body" id="report"></div></section>
@@ -1790,6 +1791,57 @@ function questionCard(r) {
   return c;
 }
 
+// The Deep review pane: when the scheduled deep review is next due, or why the
+// town holds it, and the last ten runs, newest first. Read-only: a run is
+// triggered, paused and edited from a terminal.
+//
+// The standing line is the reader's own word. A held town starts no run
+// whatever the interval says, so "paused" replaces the due time rather than
+// sitting beside it. Every cell goes through el(), which writes textContent:
+// the run's bead id and the hold's reason are text and never markup. The
+// digest column is a reference — the bead and its comment count — and never the
+// digest's text.
+function renderDeepReview(s) {
+  const box = $("deepreview"), note = $("deepreviewnote");
+  box.replaceChildren();
+  const d = s.deepreview;
+  note.className = "r"; note.textContent = "";
+  if (!d) { box.append(el("div", "empty", "reading…")); return; }
+  // A read that failed is a named state, never an empty pane: "no deep review
+  // has run" and "the runs could not be read" must not look alike.
+  if (d.unavailable) { box.append(el("div", "badc", "unavailable: deep reviews could not be read")); return; }
+  const standing = d.paused ? "paused: " + d.paused : (d.next ? "next: " + d.next : "");
+  const kv = el("div", "kv");
+  const line = el("div");
+  line.append(el("b", d.paused ? "warnc" : "", d.paused ? "paused" : "next"), el("span", "", d.paused ? d.paused : (d.next || "–")));
+  kv.append(line);
+  box.append(kv);
+  note.className = d.paused ? "r warnc" : "r";
+  note.textContent = d.paused ? "paused" : (d.next || "");
+  note.title = standing;
+  const rows = d.rows || [];
+  if (!rows.length) { box.append(el("div", "empty", "no runs yet")); return; }
+  const t = el("table");
+  const hr = el("tr");
+  [["Run"], ["Status"], ["Took", "closed minus created", 1], ["Found", "finding: lines in the run's notes", 1], ["Filed", "findings that named a bead", 1], ["Queued", "queued: lines in the run's notes", 1], ["Digest"]]
+    .forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); });
+  t.append(hr);
+  for (const r of rows) {
+    const tr = el("tr");
+    const id = el("td", "title", r.id);
+    if (r.unparsed) { const b = el("span", "badge warnc", "unparsed"); b.title = "a finding:, queued: or cursor: line in the notes is missing its fields"; id.append(document.createTextNode(" "), b); }
+    tr.append(id);
+    tr.append(el("td", r.status === "open" ? "warnc" : "", r.status));
+    tr.append(el("td", "n", r.duration_sec == null ? "–" : fmtDur(r.duration_sec)));
+    tr.append(el("td", "n", String(r.findings)));
+    tr.append(el("td", "n", String(r.filed)));
+    tr.append(el("td", "n", String(r.queued)));
+    tr.append(el("td", "title", r.digest || "–"));
+    t.append(tr);
+  }
+  box.append(t);
+}
+
 // The Escalations pane: the town's open escalation beads, newest first. An
 // alert is what the dashboard noticed; an escalation is a bead somebody raised,
 // with a severity and a raiser, that stays open until it is closed. Read-only —
@@ -2095,7 +2147,7 @@ function renderQueue(s, force) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderModels(state); renderModelsPanel(state); renderTiles(state); renderQuestions(state); renderEscalations(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderReports(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
+function renderAll() { if (!state) return; renderHealth(state.health); renderModels(state); renderModelsPanel(state); renderTiles(state); renderQuestions(state); renderDeepReview(state); renderEscalations(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderReports(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));

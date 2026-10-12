@@ -532,11 +532,15 @@ type State struct {
 	// writes under the town root. It is nil until the reader first reports.
 	// Questions is the overseer's open questions for Sloan, read from the town's
 	// own beads database. It is nil until the reader first reports.
-	Reports   *Reports        `json:"reports,omitempty"`
-	Questions *Questions      `json:"questions,omitempty"`
-	Spend     json.RawMessage `json:"spend,omitempty"`
-	OM        *OM             `json:"om,omitempty"`
-	TierSweep *TierSweep      `json:"tiersweep,omitempty"`
+	Reports   *Reports   `json:"reports,omitempty"`
+	Questions *Questions `json:"questions,omitempty"`
+	// DeepReview is the scheduled deep review's next run and last ten runs,
+	// read from the gastown rig's beads database. It is nil until the reader
+	// first reports.
+	DeepReview *DeepReview     `json:"deepreview,omitempty"`
+	Spend      json.RawMessage `json:"spend,omitempty"`
+	OM         *OM             `json:"om,omitempty"`
+	TierSweep  *TierSweep      `json:"tiersweep,omitempty"`
 	// Models is the header strip: the polecat model, the pool's seats against
 	// its cap, and the reviewer's model. It is nil until the reader reports.
 	Models *Models `json:"models,omitempty"`
@@ -589,6 +593,8 @@ type Config struct {
 	ReportsDir string
 	// Questions reads the overseer's open questions for Sloan.
 	Questions func() *Questions
+	// DeepReview reads the scheduled deep review's next run and last runs.
+	DeepReview func() *DeepReview
 	// Escalation reads the town's open escalation beads.
 	Escalation func() *Escalations
 	// Dispatch reads the spec dispatcher's last tick from the daemon log.
@@ -623,6 +629,7 @@ type Config struct {
 	DeploysEvery    time.Duration
 	ReportsEvery    time.Duration
 	QuestionsEvery  time.Duration
+	DeepReviewEvery time.Duration
 	EscalationEvery time.Duration
 	DispatchEvery   time.Duration
 	ModelsEvery     time.Duration
@@ -662,6 +669,9 @@ func (c *Config) defaults() {
 	// soonest: the reader runs bd per open question, and a page asks nothing
 	// faster than that.
 	def(&c.QuestionsEvery, 60*time.Second)
+	// A deep review runs about daily, so the minute is slack to spare; the
+	// reader lists beads and runs bd per listed run for its comment count.
+	def(&c.DeepReviewEvery, 60*time.Second)
 	def(&c.EscalationEvery, 60*time.Second)
 	def(&c.DispatchEvery, 10*time.Second)
 	// The strip's two configs are files an operator edits by hand, so it reads
