@@ -23,9 +23,9 @@ type Beads interface {
 	AddComment(id, text string) error
 }
 
-// Remote answers the worker's questions about origin: before a landing, where
-// a branch points; after one, which polecat branches remain for the bead and
-// the hash-guarded way to delete them.
+// Remote is the worker's hand on the two repositories it lands through: the
+// rig's own, where the leftover local polecat branches live, and origin,
+// whose tip it lands and whose polecat branches it reaps.
 type Remote interface {
 	// BranchTip returns origin's tip of branch, or "" when origin has no
 	// such branch.
@@ -48,6 +48,13 @@ type Remote interface {
 	// DeleteRemoteBranchIfAt deletes branch on origin only while it still
 	// points at expectedHash.
 	DeleteRemoteBranchIfAt(branch, expectedHash string) error
+	// DeleteLocalBranch deletes branch from the rig's own repository — the
+	// local half of reaping it on origin — and reports whether a branch was
+	// there to delete, an absent one being (false, nil). force deletes a
+	// branch the repository has not merged into the branch HEAD names. The
+	// repository's HEAD branch and any branch checked out in a worktree are
+	// never deleted, and an error says so.
+	DeleteLocalBranch(branch string, force bool) (bool, error)
 }
 
 // Lander lands one piece of work; *land.Lander is the production one.

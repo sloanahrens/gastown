@@ -52,6 +52,15 @@ type fakeRemote struct {
 	landedErr error
 	times     map[string]time.Time
 	timeErr   error
+
+	// The rig repository's own branches, which the landing's local reap
+	// drives (gt-kne58): the branches it holds and the tip of each, the ones
+	// a worktree has checked out, and what it deleted.
+	localBranches map[string]string
+	checkedOut    map[string]bool
+	localErr      map[string]error
+	localDeleted  []string
+	localForced   []string
 }
 
 func (r *fakeRemote) BranchTip(branch string) (string, error) {
@@ -111,6 +120,33 @@ func (r *fakeRemote) DeleteRemoteBranchIfAt(branch, expectedHash string) error {
 	delete(r.remoteRefs, name)
 	r.deleted = append(r.deleted, branch)
 	return nil
+}
+
+// DeleteLocalBranch deletes a branch of the rig's own repository, refusing
+// what the worker must: an absent branch is a no-op, and a checked out one,
+// or one the target does not contain, is an error. Real git reads "merged"
+// against the repository's own HEAD, which this model leaves to
+// internal/daemon's gitRemote test.
+func (r *fakeRemote) DeleteLocalBranch(branch string, force bool) (bool, error) {
+	if err := r.localErr[branch]; err != nil {
+		return false, err
+	}
+	tip, ok := r.localBranches[branch]
+	if !ok {
+		return false, nil
+	}
+	if r.checkedOut[branch] {
+		return false, fmt.Errorf("%s is checked out in a worktree", branch)
+	}
+	if !force && !r.contains[tip] {
+		return false, fmt.Errorf("the branch %s is not fully merged", branch)
+	}
+	delete(r.localBranches, branch)
+	r.localDeleted = append(r.localDeleted, branch)
+	if force {
+		r.localForced = append(r.localForced, branch)
+	}
+	return true, nil
 }
 
 type fakeLander struct {
