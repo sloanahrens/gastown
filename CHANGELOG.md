@@ -77,6 +77,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A launchd respawn loop is a doctor finding and a red health line**
+  (gt-92qx3) — when launchd cannot initialize the daemon job it respawns it
+  every `ThrottleInterval` without the program ever running: `launchctl print`
+  reports no pid, a climbing `runs` count and `last exit code = 78`
+  (EX_CONFIG), and nothing reaches `daemon.log`. `gt doctor`'s `daemon-respawn`
+  check names that state and the repair, and `gt status --line` renders the
+  daemon field RED rather than UNKNOWN, both off the same read-only
+  `launchctl print`. The repair — `launchctl bootout` then `launchctl
+  bootstrap` — is the operator's: gt never boots out or bootstraps a job.
+
 - **A total cap on live polecats, beside the per-agent caps** (gt-bcpj5) —
   `polecat_pool.max_total` bounds live polecats across every seat, where
   `max_seats`, `pro_max` and `max_hooked` each bound one agent. Two agents each

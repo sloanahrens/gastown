@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/slot"
+	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/townhealth"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -48,21 +49,95 @@ func strayDoltInfos(orphans []util.DoltOrphanServer, townPort int, townDataDir s
 	return out
 }
 
+// supervisorProbe reads the host's supervisor for a job it is failing to
+// spawn. It is the one live probe in this otherwise file-backed view: in that
+// state the daemon is not running, so the health file is stale or absent and
+// nothing on disk names the cause (gt-92qx3). A test passes its own.
+type supervisorProbe func(townRoot string) (templates.SupervisorState, bool)
+
+// hostSupervisorRespawn asks launchctl what it is doing with the daemon's job.
+func hostSupervisorRespawn(townRoot string) (templates.SupervisorState, bool) {
+	return templates.SupervisorRespawn(townRoot, templates.SupervisorJobState)
+}
+
 // HealthView reads the health file the daemon writes every tick
 // (gt-s3rec.2) and renders it at now: the one line, then one line per
 // field. A file that is missing, unreadable or stale is UNKNOWN; a broken
 // operational.health block falls back to the default stale age (the
-// report's config field already says so).
+// report's config field already says so). A supervisor that cannot spawn the
+// daemon is the one state the file cannot carry, so it is read live and
+// renders the daemon field RED (gt-92qx3).
 func HealthView(townRoot string, now time.Time) (lines []string, v townhealth.Verdict, rep *townhealth.Report) {
+	return healthView(townRoot, now, hostSupervisorRespawn)
+}
+
+// healthView is HealthView over an injected supervisor probe.
+func healthView(townRoot string, now time.Time, supervisor supervisorProbe) (lines []string, v townhealth.Verdict, rep *townhealth.Report) {
 	_, stale, err := config.LoadOperationalConfig(townRoot).GetHealthSettings().Resolve()
 	if err != nil {
 		stale = townhealth.DefaultStaleAfter
 	}
-	r, err := townhealth.Read(townRoot)
-	if err != nil {
-		return []string{fmt.Sprintf("UNKNOWN no health report: %v", err)}, townhealth.VerdictUnknown, nil
+	r, readErr := townhealth.Read(townRoot)
+	if st, looping := supervisor(townRoot); looping {
+		out := daemonRespawnReport(r, readErr, st, now, stale)
+		return townhealth.Lines(out, now, stale), townhealth.Effective(out, now, stale), &out
+	}
+	if readErr != nil {
+		return []string{fmt.Sprintf("UNKNOWN no health report: %v", readErr)}, townhealth.VerdictUnknown, nil
 	}
 	return townhealth.Lines(r, now, stale), townhealth.Effective(r, now, stale), &r
+}
+
+// daemonRespawnReport is the report for a town whose supervisor is failing
+// every spawn of the daemon: read as it was found, with its daemon field
+// replaced by the live supervisor failure. A read that is absent or stale
+// cannot date the line — the daemon that writes it is the one not running — so
+// the report is dated now and carries the live field alone.
+func daemonRespawnReport(read townhealth.Report, readErr error, st templates.SupervisorState, now time.Time, staleAfter time.Duration) townhealth.Report {
+	f := daemonRespawnField(st, readErr)
+	if readErr != nil || now.Sub(read.At) >= staleAfter {
+		return townhealth.Report{At: now, Verdict: townhealth.Red, Fields: []townhealth.Field{f}}
+	}
+	return withDaemonField(read, f)
+}
+
+// daemonRespawnField is the daemon field for a supervisor that never gets the
+// program started, and the repair an operator has to run by hand.
+func daemonRespawnField(st templates.SupervisorState, readErr error) townhealth.Field {
+	detail := fmt.Sprintf("%s has no process for the job after %d spawns, last exit code %d; repair: %s",
+		st.Kind, st.Runs, st.LastExit, templates.SupervisorRepair(st.Kind))
+	if readErr != nil {
+		detail = fmt.Sprintf("%s; no health report (%v)", detail, readErr)
+	}
+	return townhealth.Field{
+		Name:    townhealth.FieldDaemon,
+		Tag:     townhealth.Live,
+		Verdict: townhealth.Red,
+		Value:   fmt.Sprintf("%s respawn loop, no pid, runs %d, last exit code %d", st.Kind, st.Runs, st.LastExit),
+		Detail:  detail,
+	}
+}
+
+// withDaemonField returns r with its daemon field replaced by f, appended when
+// it has none, and its verdict recomputed.
+func withDaemonField(r townhealth.Report, f townhealth.Field) townhealth.Report {
+	fields := make([]townhealth.Field, 0, len(r.Fields)+1)
+	replaced := false
+	for _, g := range r.Fields {
+		if g.Name == townhealth.FieldDaemon {
+			g, replaced = f, true
+		}
+		fields = append(fields, g)
+	}
+	if !replaced {
+		fields = append(fields, f)
+	}
+	r.Fields = fields
+	r.Verdict = townhealth.Green
+	for _, g := range fields {
+		r.Verdict = r.Verdict.Worse(g.Verdict)
+	}
+	return r
 }
 
 // gatePool resolves the town's container-gate pool from

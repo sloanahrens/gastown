@@ -13,8 +13,18 @@ import (
 // LaunchdLabel is the launchd job label the rendered plist carries.
 const LaunchdLabel = "com.gastown.daemon"
 
+// launchdPlistName is the file that label is installed as, under
+// ~/Library/LaunchAgents.
+const launchdPlistName = LaunchdLabel + ".plist"
+
 // SystemdUnit is the unit name the rendered systemd unit file carries.
 const SystemdUnit = "gastown-daemon.service"
+
+// LaunchdExitConfig is the exit status launchd reports for a spawn that could
+// not initialize the service (EX_CONFIG, 78): the job's own log says "Service
+// could not initialize", the program never runs, and launchctl kickstart
+// cannot clear it (gt-92qx3).
+const LaunchdExitConfig = 78
 
 // SupervisorReader reads the live state of the supervisor job of the given
 // kind ("launchd" / "systemd"); SupervisorJobState in production.
@@ -147,6 +157,72 @@ func (h supervisorHost) statusLine(townRoot string, lockPID int, read Supervisor
 		return "none" // installed for another town; this one has no supervisor
 	}
 	return read(kind).StatusLine(lockPID)
+}
+
+// RespawnLoop reports whether the supervisor is failing every spawn of the
+// program without ever running it: it knows the job, has no process for it,
+// and its last run exited with EX_CONFIG (LaunchdExitConfig). The daemon is
+// down for as long as this lasts, no spawn reaches its own log, and
+// SupervisorRepair is the recovery (gt-92qx3).
+func (s SupervisorState) RespawnLoop() bool {
+	return s.Err == nil && s.Loaded && s.PID == 0 && s.LastExit == LaunchdExitConfig
+}
+
+// SupervisorRepair is the operator's recovery for a respawn loop of the given
+// kind: launchd has to boot the failed job out and bootstrap it again, which
+// gt names and never runs. "" for a kind with no such recovery.
+func SupervisorRepair(kind string) string {
+	return realHost.repair(kind)
+}
+
+// repair spells the launchd recovery from the label, the uid and the plist
+// path alone. Nothing here varies with the host's own kind: the caller has
+// already read a launchd job, so a repair that depended on this host being
+// darwin — or on the plist being installed — would name the repair on the
+// machine that found the loop and name nothing at all where the same reading
+// is replayed, which is how the Linux gate run of the respawn check came back
+// with an empty FixHint (gt-92qx3).
+func (h supervisorHost) repair(kind string) string {
+	if kind != "launchd" {
+		return ""
+	}
+	home, err := h.homeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	uid := os.Getuid()
+	return fmt.Sprintf("launchctl bootout gui/%d/%s && launchctl bootstrap gui/%d %s",
+		uid, LaunchdLabel, uid, filepath.Join(home, "Library", "LaunchAgents", launchdPlistName))
+}
+
+// SupervisorRespawn reads what the host's supervisor is doing with the job
+// serving the town at townRoot and reports whether it is a respawn loop
+// (RespawnLoop on the returned state). A state that could not be read comes
+// back with Err set and is not a loop: an unreadable probe is not evidence
+// either way. read may be nil.
+func SupervisorRespawn(townRoot string, read SupervisorReader) (SupervisorState, bool) {
+	return realHost.respawn(townRoot, read)
+}
+
+func (h supervisorHost) respawn(townRoot string, read SupervisorReader) (SupervisorState, bool) {
+	path, kind := h.filePath()
+	if kind != "launchd" {
+		return SupervisorState{Kind: kind, LastExit: -1}, false
+	}
+	isFor, err := SupervisorFileIsFor(path, townRoot)
+	switch {
+	case err != nil:
+		return SupervisorState{Kind: kind, LastExit: -1, Err: err}, false
+	case !isFor:
+		// A job for another town's daemon: reporting its spawns as this
+		// town's would name the wrong culprit.
+		return SupervisorState{Kind: kind, LastExit: -1}, false
+	}
+	if read == nil {
+		read = h.jobState
+	}
+	st := read(kind)
+	return st, st.RespawnLoop()
 }
 
 // StatusLine renders the "Supervised:" value for a daemon holding lockPID;

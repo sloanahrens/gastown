@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -270,4 +271,136 @@ func writeFileAt(t *testing.T, path, body string) {
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// launchdPrintRespawnLoop is 'launchctl print gui/501/com.gastown.daemon' for
+// a job launchd cannot initialize: loaded, counting runs, never a pid, and
+// EX_CONFIG as the last exit code (gt-92qx3).
+const launchdPrintRespawnLoop = "gui/501/com.gastown.daemon = {\n" +
+	"\tactive count = 0\n" +
+	"\tstate = spawn scheduled\n" +
+	"\truns = 49\n" +
+	"\tlast exit code = 78\n"
+
+func TestRespawnLoop(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		state SupervisorState
+		want  bool
+	}{
+		{"no pid, exit 78", SupervisorState{Kind: "launchd", Loaded: true, Runs: 49, LastExit: LaunchdExitConfig}, true},
+		{"running", SupervisorState{Kind: "launchd", Loaded: true, PID: 64604, Runs: 53, LastExit: 0}, false},
+		{"no pid, another exit", SupervisorState{Kind: "launchd", Loaded: true, Runs: 58, LastExit: 1}, false},
+		{"unreported exit", SupervisorState{Kind: "launchd", Loaded: true, Runs: 58, LastExit: -1}, false},
+		{"not loaded", SupervisorState{Kind: "launchd", LastExit: 78}, false},
+		{"unreadable", SupervisorState{Kind: "launchd", Loaded: true, LastExit: 78, Err: errors.New("boom")}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.state.RespawnLoop(); got != tt.want {
+				t.Errorf("RespawnLoop() = %v, want %v for %+v", got, tt.want, tt.state)
+			}
+		})
+	}
+}
+
+// The recovery is the one launchd needs and gt never runs. The host's own
+// reading of it is pinned first, then the same repair on both host kinds: the
+// Linux gate runner replays this reading with no LaunchAgents directory at all
+// and must still be handed the repair (gt-92qx3).
+func TestSupervisorRepair(t *testing.T) {
+	t.Parallel()
+	got := SupervisorRepair("launchd")
+	if !strings.Contains(got, "launchctl bootout gui/") || !strings.Contains(got, "launchctl bootstrap gui/") {
+		t.Errorf("SupervisorRepair(launchd) = %q, want the bootout and bootstrap of the daemon job", got)
+	}
+	if got := SupervisorRepair("systemd"); got != "" {
+		t.Errorf("SupervisorRepair(systemd) = %q, want no recovery named", got)
+	}
+
+	for _, goos := range []string{"darwin", "linux"} {
+		t.Run(goos, func(t *testing.T) {
+			t.Parallel()
+			h := fakeHost(t, goos) // its home holds no plist, and its probe is never called
+			home, err := h.homeDir()
+			if err != nil {
+				t.Fatal(err)
+			}
+			uid := strconv.Itoa(os.Getuid())
+			want := "launchctl bootout gui/" + uid + "/" + LaunchdLabel + " && launchctl bootstrap gui/" + uid +
+				" " + filepath.Join(home, "Library", "LaunchAgents", launchdPlistName)
+			if got := h.repair("launchd"); got != want {
+				t.Errorf("repair(launchd) on %s = %q, want %q", goos, got, want)
+			}
+			if got := h.repair("systemd"); got != "" {
+				t.Errorf("repair(systemd) on %s = %q, want no recovery named", goos, got)
+			}
+		})
+	}
+}
+
+// SupervisorRespawn reads the job file before it probes: a job for another
+// town's daemon must not be probed, let alone reported as this town's failure.
+// The probe itself answers with a canned 'launchctl print'.
+func TestSupervisorRespawn(t *testing.T) {
+	t.Parallel()
+	town, other := t.TempDir(), t.TempDir()
+
+	t.Run("looping job of this town", func(t *testing.T) {
+		t.Parallel()
+		h := fakeHost(t, "darwin")
+		writeSupervisorFile(t, h, town)
+		h = probeAnswers(h, launchdPrintRespawnLoop, nil)
+
+		st, looping := h.respawn(town, nil)
+		if !looping || st.Runs != 49 || st.LastExit != LaunchdExitConfig {
+			t.Errorf("respawn = (%+v, %v), want the loop of this town's job", st, looping)
+		}
+	})
+
+	t.Run("job of another town is not probed", func(t *testing.T) {
+		t.Parallel()
+		h := fakeHost(t, "darwin") // its probe fails the test if called
+		writeSupervisorFile(t, h, other)
+
+		st, looping := h.respawn(town, nil)
+		if looping || st.Err != nil || st.Kind != "launchd" {
+			t.Errorf("respawn = (%+v, %v), want the launchd kind, no loop and no error", st, looping)
+		}
+	})
+
+	t.Run("no job file", func(t *testing.T) {
+		t.Parallel()
+		h := fakeHost(t, "darwin")
+
+		st, looping := h.respawn(town, nil)
+		if looping || st.Err != nil || st.Kind != "launchd" {
+			t.Errorf("respawn = (%+v, %v), want the launchd kind, no loop and no error", st, looping)
+		}
+	})
+
+	t.Run("job file that names no town", func(t *testing.T) {
+		t.Parallel()
+		h := fakeHost(t, "darwin")
+		path, _ := h.filePath()
+		writeFileAt(t, path, "<plist/>")
+
+		st, looping := h.respawn(town, nil)
+		if looping || st.Err == nil {
+			t.Errorf("respawn = (%+v, %v), want an error rather than a verdict", st, looping)
+		}
+	})
+
+	t.Run("systemd is not this check's job", func(t *testing.T) {
+		t.Parallel()
+		h := fakeHost(t, "linux")
+		writeSupervisorFile(t, h, town)
+
+		st, looping := h.respawn(town, nil)
+		if looping || st.Kind != "systemd" {
+			t.Errorf("respawn = (%+v, %v), want the systemd kind and no loop", st, looping)
+		}
+	})
 }

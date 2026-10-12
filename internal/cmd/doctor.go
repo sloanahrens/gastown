@@ -254,6 +254,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewClaudeSettingsCheck())
 	d.Register(doctor.NewDaemonCheck())
 	d.Register(doctor.NewDaemonLivenessCheck()) // Verify daemon heartbeat is fresh AND advancing, not just fresh
+	d.Register(doctor.NewDaemonRespawnCheck())  // Verify the supervisor is not failing every spawn before the daemon can log
 	d.Register(doctor.NewTmuxGlobalEnvCheck())
 	d.Register(doctor.NewTownBeadsConfigCheck())
 	d.Register(doctor.NewCustomTypesCheck())
