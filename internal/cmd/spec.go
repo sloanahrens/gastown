@@ -38,7 +38,8 @@ import (
 // (internal/cmd imports internal/daemon, so the call cannot go the other way).
 //
 // This is the dispatcher that replaced the seat-refill plugin (gt-4k3fj.8.8):
-// the pool's seats (agent/max_seats, pro_*), the operator's
+// the pool's seats (agent/max_seats, pro_*) and the town's total
+// (polecat_pool.max_total, gt-bcpj5), the operator's
 // ceiling (polecat_pool.max_priority) and the shape gate
 // (polecat_pool.shape_gate) all come from the same keys the plugin read, so the
 // town dispatches the same beads it did before the move.
@@ -826,6 +827,10 @@ func firstErrLine(err error) string {
 // town's seats, and a seat nobody asked for is a seat the dispatcher must not
 // spend. Order is the list above; prefer_hooked moves the hooked seat first.
 // An agent named twice keeps its first seat.
+//
+// polecat_pool.max_total, when set, caps the seats together on top of each
+// seat's own cap: a town whose two agents are each inside their cap still has
+// the total to answer to (gt-bcpj5).
 func specBudgetFromConfig(ts *config.TownSettings, sd *config.SpecDispatchConfig) specdispatch.Budget {
 	var b specdispatch.Budget
 	var pool *config.PolecatPool
@@ -834,6 +839,7 @@ func specBudgetFromConfig(ts *config.TownSettings, sd *config.SpecDispatchConfig
 	}
 	if pool != nil {
 		b.MinSpawnGap = pool.MinSpawnGapD()
+		b.MaxTotal = pool.GetMaxTotal()
 		if pool.Agent != "" {
 			capacity := pool.MaxSeats
 			if capacity <= 0 {

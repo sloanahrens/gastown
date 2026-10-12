@@ -70,6 +70,9 @@ type fakeSpecTown struct {
 	// seats overrides the tick's budget seats; nil is the default pool, which
 	// reserves no label and so holds a needs-pro bead (gt-lxxo4).
 	seats []specdispatch.Seat
+	// maxTotal is polecat_pool.max_total as the tick reads it: 0 is a town
+	// with no total cap, which is what the budget tests without one get.
+	maxTotal int
 }
 
 // specTestNow is the tick clock every dispatch test runs at.
@@ -101,7 +104,7 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 			{Agent: "claude-sonnet", Cap: 2},
 		}
 	}
-	budget := specdispatch.Budget{Seats: seats}
+	budget := specdispatch.Budget{Seats: seats, MaxTotal: f.maxTotal}
 	return specDispatchEnv{
 		Hold: func() string { return f.hold },
 		Candidates: func() specBoardRead {
@@ -1064,6 +1067,61 @@ func TestSpecDispatchDryRunTouchesNothing(t *testing.T) {
 	}
 	if len(r.Dispatched) != 1 || !strings.Contains(r.Dispatched[0].Line, "would sling") {
 		t.Fatalf("dry run report = %+v", r)
+	}
+}
+
+// TestSpecDispatchHoldsAtTheTownTotal is the town cap on top of the seats'
+// own (gt-bcpj5): the pool seat has room and the other seat is full, and the
+// town's total is what holds the bead — the state two agents each inside their
+// own cap produced, 5 live polecats where 3 was wanted. The picture the tick
+// reports names the total, so the operator reads the cap that held it.
+func TestSpecDispatchHoldsAtTheTownTotal(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+	f.maxTotal = 3
+	f.roster = specRoster{Live: map[string]int{"deepseek-flash": 1, "claude-sonnet": 2}}
+	r := runSpecDispatchCycle(f.env())
+	if len(f.slung) != 0 {
+		t.Fatalf("slung %v, want none: the town is at its total", f.slung)
+	}
+	if len(r.Skipped) != 1 || r.Skipped[0].Line != "gt-a: no seat: over the town total: 3/3 live polecats across every seat" {
+		t.Fatalf("skipped = %+v, want the town total named", r.Skipped)
+	}
+	if r.Roster != "deepseek-flash 1/2, claude-sonnet 2/2, total 3/3" {
+		t.Errorf("roster = %q, want the total in the picture", r.Roster)
+	}
+
+	// One polecat leaves, and the seat that has room spends it: the total is
+	// the only thing that was holding the bead.
+	f.roster = specRoster{Live: map[string]int{"deepseek-flash": 1, "claude-sonnet": 1}}
+	r = runSpecDispatchCycle(f.env())
+	if len(f.slung) != 1 || len(r.Skipped) != 0 {
+		t.Fatalf("slung %v skipped %+v, want the dispatch a town under its total takes", f.slung, r.Skipped)
+	}
+}
+
+// The town's total reaches the tick's budget from polecat_pool.max_total
+// (gt-bcpj5). An absent key and a written 0 are the same town — one with no
+// total cap — which is why every reader tests the value above zero.
+func TestSpecBudgetCarriesTheTownTotal(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		maxTotal *int
+		want     int
+	}{
+		{"absent", nil, 0},
+		{"0", intPtr(0), 0},
+		{"4", intPtr(4), 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ts := config.NewTownSettings()
+			ts.PolecatPool = &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3, MaxTotal: tc.maxTotal}
+			if got := specBudgetFromConfig(ts, nil).MaxTotal; got != tc.want {
+				t.Errorf("budget MaxTotal = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }
 

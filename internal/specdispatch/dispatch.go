@@ -282,6 +282,14 @@ func (s Seat) reason() string {
 type Budget struct {
 	// Seats in preference order. A spec takes the first free seat.
 	Seats []Seat
+	// MaxTotal caps live polecats across every seat, where a Seat's Cap caps
+	// one agent's. 0 is no total cap (polecat_pool.max_total absent).
+	MaxTotal int
+	// LiveTotal is the count across every agent. Seats' Live is per agent and
+	// a town's live polecats are not all on a seat, so the total is counted
+	// from the roster rather than summed from the seats. SetLive fills it and
+	// Bump adds to it, so the total moves with the seats.
+	LiveTotal int
 	// NewestSpawn and MinSpawnGap are the stagger: no dispatch while the
 	// newest polecat is younger than the gap.
 	NewestSpawn time.Time
@@ -291,7 +299,9 @@ type Budget struct {
 
 // Picture renders the seats for a report: "claude-sonnet 1/2, ...". A seat with
 // a dead-hooked occupant names it, so a full seat has a stated reason even when
-// it shows fewer live sessions than its number (gt-tldj4).
+// it shows fewer live sessions than its number (gt-tldj4). A town with a total
+// cap names it too, so the picture a full town is reported with holds the cap
+// that held it rather than only the seats under it.
 func (b Budget) Picture() string {
 	parts := make([]string, 0, len(b.Seats))
 	for _, s := range b.Seats {
@@ -303,6 +313,9 @@ func (b Budget) Picture() string {
 	}
 	if len(parts) == 0 {
 		return "no seats"
+	}
+	if b.MaxTotal > 0 {
+		parts = append(parts, fmt.Sprintf("total %d/%d", b.LiveTotal, b.MaxTotal))
 	}
 	return strings.Join(parts, ", ")
 }
@@ -330,13 +343,20 @@ func (b Budget) ReservedLabels() []string {
 	return out
 }
 
-// SetLive fills each seat's Live from a count per agent. It clears DeadHooked,
-// which is a breakdown of Live and is set afterwards by SetDeadHooked.
+// SetLive fills each seat's Live from a count per agent, and LiveTotal from the
+// whole count: a live polecat on an agent the seats do not name is still a live
+// polecat, so a total cap has to see it. It clears DeadHooked, which is a
+// breakdown of Live and is set afterwards by SetDeadHooked.
 func (b *Budget) SetLive(live map[string]int) {
+	total := 0
 	for i := range b.Seats {
 		b.Seats[i].Live = live[b.Seats[i].Agent]
 		b.Seats[i].DeadHooked = 0
 	}
+	for _, n := range live {
+		total += n
+	}
+	b.LiveTotal = total
 }
 
 // SetDeadHooked fills each seat's dead-hooked count from a count per agent,
@@ -354,6 +374,7 @@ func (b *Budget) Bump(agent string, now time.Time) {
 			b.Seats[i].Live++
 		}
 	}
+	b.LiveTotal++
 	b.NewestSpawn = now
 }
 
@@ -368,12 +389,20 @@ type SeatChoice struct {
 }
 
 // ChooseSeat picks the first free seat that may take spec within the budget.
-// It never exceeds a cap: a seat at its cap is not a seat. A seat reserved for
-// a label (the pro seat) takes only beads carrying it, and a bead carrying a
-// reserved label is left for that seat — a needs-pro bead is not slung onto the
-// pool's plain seat. A seat existing without room for this bead is a skip, not
-// a refusal: the bead stays ready and the next tick asks again.
+// It never exceeds a cap: a seat at its cap is not a seat, and a town at its
+// total is a town with no free seat at all. A seat reserved for a label (the
+// pro seat) takes only beads carrying it, and a bead carrying a reserved label
+// is left for that seat — a needs-pro bead is not slung onto the pool's plain
+// seat. A seat existing without room for this bead is a skip, not a refusal:
+// the bead stays ready and the next tick asks again.
 func ChooseSeat(b Budget, spec Spec) SeatChoice {
+	// The town's total is asked before the seats are, because it caps every
+	// seat at once: a town at its total has no free seat whatever the seats
+	// say, and the skip names the cap the operator set rather than a seat's
+	// (gt-bcpj5).
+	if b.MaxTotal > 0 && b.LiveTotal >= b.MaxTotal {
+		return SeatChoice{Skip: true, Reason: fmt.Sprintf("over the town total: %d/%d live polecats across every seat", b.LiveTotal, b.MaxTotal)}
+	}
 	if b.MinSpawnGap > 0 && !b.NewestSpawn.IsZero() {
 		if age := b.Now.Sub(b.NewestSpawn); age < b.MinSpawnGap {
 			return SeatChoice{Skip: true, Reason: fmt.Sprintf("min_spawn_gap: newest polecat %s old (< %s)", age.Round(time.Second), b.MinSpawnGap)}

@@ -1467,8 +1467,8 @@ func NewEscalationConfig() *EscalationConfig {
 	}
 }
 
-// PolecatPool bounds how many polecats run at once on the pool's agent. See
-// TownSettings.PolecatPool.
+// PolecatPool bounds how many polecats run at once on the pool's agent, and
+// optionally across the town's seats together. See TownSettings.PolecatPool.
 type PolecatPool struct {
 	// LocalAgent, MaxLocal and IdleFill are retired with the local-model seat
 	// (D4; the local model was retired 2026-09-27): nothing reads them. They
@@ -1487,6 +1487,12 @@ type PolecatPool struct {
 	// MaxSeats is the number of live polecat sessions allowed on Agent. Zero
 	// leaves the seat uncapped.
 	MaxSeats int `json:"max_seats,omitempty"`
+	// MaxTotal caps live polecats across every seat — Agent's, the pro seat's
+	// and the second seat's alike — where MaxSeats caps one agent's seat
+	// alone. Absent (or 0) is the town's silence: no total cap. Two agents
+	// each inside their own cap then exceed what the town wants (5 live where
+	// 3 was meant), which is what this key bounds.
+	MaxTotal *int `json:"max_total,omitempty"`
 	// DeprecatedOverflowAgent and DeprecatedMaxOverflow are the retired
 	// spellings of Agent and MaxSeats, declared so a settings file written
 	// before the rename (gt-plk1z) loads. applyDeprecatedKeys folds them into
@@ -1617,6 +1623,17 @@ func (p *PolecatPool) GetProMax() int {
 	return intOr(p.ProMax, DefaultSeatRefillProMax)
 }
 
+// GetMaxTotal returns the cap on live polecats across every seat, or 0 for a
+// town with no total cap: an absent max_total is the town's silence rather than
+// a cap of zero, and a written 0 says the same thing, so every reader tests the
+// value above zero.
+func (p *PolecatPool) GetMaxTotal() int {
+	if p == nil {
+		return 0
+	}
+	return intOr(p.MaxTotal, 0)
+}
+
 // GetProAgent returns the pro seat's agent, or its default.
 func (p *PolecatPool) GetProAgent() string {
 	if p == nil || p.ProAgent == "" {
@@ -1670,6 +1687,7 @@ func (p *PolecatPool) Validate() error {
 		{"nudge_seconds", p.NudgeSeconds},
 		{"dispatch_empty_seconds", p.DispatchEmptySeconds},
 		{"pro_max", p.ProMax},
+		{"max_total", p.MaxTotal},
 	} {
 		if k.v != nil && *k.v < 0 {
 			errs = append(errs, fmt.Errorf("polecat_pool.%s = %d: must be >= 0", k.key, *k.v))
