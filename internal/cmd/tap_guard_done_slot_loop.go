@@ -365,6 +365,10 @@ func doneSlotLoopRedirectsStdout(reader string) bool {
 // launchers that carry the real command behind them (env VAR=x cmd, time cmd,
 // ...). Mirrors segmentCommandWord, which returns the word rather than its
 // index.
+//
+// A case-arm pattern is skipped the same way: `a) for ...` is a pattern and
+// then a command, so a loop behind it is policed like one that starts the line.
+// The first arm shares its segment with `case WORD in`, so that prefix goes too.
 func doneSlotLoopSegmentCommandWords(tokens []string) map[int]bool {
 	words := make(map[int]bool)
 	for i := 0; i < len(tokens); {
@@ -377,6 +381,16 @@ func doneSlotLoopSegmentCommandWords(tokens []string) map[int]bool {
 			if isEnvAssignment(tokens[j]) || doneSlotLoopLeadWords[strings.ToLower(tokens[j])] {
 				j++
 				continue
+			}
+			if doneSlotLoopIsCaseArmPattern(tokens[j]) {
+				j++
+				continue
+			}
+			if strings.ToLower(tokens[j]) == "case" {
+				if arm := doneSlotLoopFirstCaseArmEnd(tokens, j); arm > j {
+					j = arm + 1
+					continue
+				}
 			}
 			switch tokens[j] {
 			case "!", "time", "sudo", "command", "nohup", "env", "nice", "stdbuf":
@@ -393,6 +407,29 @@ func doneSlotLoopSegmentCommandWords(tokens []string) map[int]bool {
 		}
 	}
 	return words
+}
+
+// doneSlotLoopIsCaseArmPattern reports whether a segment-leading token is a
+// case-arm pattern such as `a)` or `*)`. A token holding an opening paren is a
+// command substitution or a subshell, not a pattern.
+func doneSlotLoopIsCaseArmPattern(token string) bool {
+	return strings.HasSuffix(token, ")") && !strings.Contains(token, "(")
+}
+
+// doneSlotLoopFirstCaseArmEnd returns the index of the pattern token that
+// closes the first arm of the `case WORD in PATTERN)` that begins at tokens[i],
+// or -1 when the segment does not reach one.
+func doneSlotLoopFirstCaseArmEnd(tokens []string, i int) int {
+	inAt := -1
+	for k := i + 1; k < len(tokens) && !shellCommandSeparators[tokens[k]]; k++ {
+		switch {
+		case inAt < 0 && strings.ToLower(tokens[k]) == "in":
+			inAt = k
+		case inAt >= 0 && doneSlotLoopIsCaseArmPattern(tokens[k]):
+			return k
+		}
+	}
+	return -1
 }
 
 // doneSlotLoopIsCommandWord reports whether tokens[i] begins its segment.
