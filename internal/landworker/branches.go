@@ -79,19 +79,19 @@ func (w *Worker) deleteLocalBranch(beadID, branch, hash string) {
 	if w.Landings != nil {
 		_, found, err := w.Landings.LatestForBead(beadID)
 		if err != nil {
-			w.logf("%s: keeping the local %s: reading the landings file: %v", beadID, branch, err)
+			w.logf("%s: kept local %s: reading the landings file: %v", beadID, branch, err)
 			return
 		}
 		force = found
 	}
 	if !force {
 		if w.WatchTarget == "" {
-			w.logf("%s: keeping the local %s: no landing record and no branch to have merged it into", beadID, branch)
+			w.logf("%s: kept local %s: no landing record and no branch to have merged it into", beadID, branch)
 			return
 		}
 		merged, err := w.Remote.Contains(w.WatchTarget, hash)
 		if err != nil {
-			w.logf("%s: keeping the local %s: testing it against %s: %v", beadID, branch, w.WatchTarget, err)
+			w.logf("%s: kept local %s: testing it against %s: %v", beadID, branch, w.WatchTarget, err)
 			return
 		}
 		if !merged {
