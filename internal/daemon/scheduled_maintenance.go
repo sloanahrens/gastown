@@ -153,12 +153,18 @@ func (d *Daemon) runScheduledMaintenance() {
 	}
 
 	if !isInMaintenanceWindow(now, window) {
-		// Outside the window the only work is a missed backup (gt-wne04);
-		// otherwise a silent skip (this fires every 5 minutes).
+		// Outside the window the work is a missed backup (gt-wne04) and, for a
+		// database whose windows kept deferring, the gc that never ran
+		// (gt-uux5b). A database with nothing else to do is a silent skip (this
+		// fires every 5 minutes).
 		// A malformed window also reads as "outside"; it must not enable
 		// catch-ups and hide that the window (and its gc) never runs.
 		if _, _, err := maintenanceWindowBounds(now, window); err == nil {
 			d.maybeCatchUpBackup(now)
+			// The gc's own freshness check still wants a backup, so a
+			// catch-up one dispatched just above defers the gc to a later
+			// tick rather than letting it run uncovered.
+			d.maybeCatchUpGC(now)
 		}
 		return
 	}

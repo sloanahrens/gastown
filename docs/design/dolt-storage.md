@@ -354,10 +354,17 @@ the working set, dolt_ignored tables included, so the server never stops. The
 backup comes first because the gc is the step that has correlated with a Dolt
 panic: a failed backup escalates and skips that night's gc. A night already on
 disk is not taken again when a deferred gc retries. If the daemon was down
-across the window, the 5-minute check outside it takes a catch-up backup (the
-backup only, never the gc) once the newest backup is older than 24h plus the
-window length and the town is quiet (no daemon work, no gate slot held); a
-failed catch-up escalates and is not retried for 6 hours (gt-wne04). Restore:
+across the window, the 5-minute check outside it catches up: a backup once the
+newest one is older than 24h plus the window length, with no hard daemon work in
+flight and no gate slot held — a working polecat does not defer a read
+(gt-wne04) — and then the gc, for a database with no recorded gc or a last one
+older than eight days (gt-uux5b). The gc never runs without a backup younger
+than the catch-up age on disk, and it waits for the full quiet guard, the one
+the window's own cycle re-checks per database; a window that does not parse, an
+external server and an unreadable state file all mean no catch-up. A blocked or
+deferred catch-up retries on the next tick, counts toward no window's
+skipped-window streak, and leaves the next window's backup and gc untouched. A
+failed backup or gc escalates once and is not retried for 6 hours. Restore:
 `docs/dolt-restore.md`.
 
 Due databases run smallest first, one at a time, each bounded by 10 minutes.
