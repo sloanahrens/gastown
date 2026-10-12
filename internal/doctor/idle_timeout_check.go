@@ -80,9 +80,9 @@ func (c *IdleTimeoutCheck) Run(ctx *CheckContext) *CheckResult {
 			continue
 		}
 
-		content := string(data)
-		if !strings.Contains(content, "dolt.idle-timeout:") ||
-			!strings.Contains(content, "dolt.idle-timeout: \"0\"") {
+		// A commented-out line is not configuration: strings.Contains on the raw
+		// bytes read one as present, so the fix was never offered (gt-mz4zb).
+		if value, ok := beads.ConfigYAMLValue(string(data), "dolt.idle-timeout:"); !ok || value != "0" {
 			missing = append(missing, rigName)
 		}
 		checked++

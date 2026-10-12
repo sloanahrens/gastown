@@ -168,6 +168,32 @@ func TestEnsureConfigYAMLValue(t *testing.T) {
 	}
 }
 
+func TestConfigYAMLValue(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		key     string
+		want    string
+		wantOK  bool
+	}{
+		{"double quoted", "dolt.idle-timeout: \"0\"\n", "dolt.idle-timeout:", "0", true},
+		{"bare", "dolt.idle-timeout: 0\n", "dolt.idle-timeout:", "0", true},
+		{"missing", "prefix: hq\n", "dolt.idle-timeout:", "", false},
+		{"comment only", "# dolt.idle-timeout: \"0\"\n", "dolt.idle-timeout:", "", false},
+		{"indented comment", "  # dolt.idle-timeout: \"0\"\n", "dolt.idle-timeout:", "", false},
+		{"active after comment", "# dolt.idle-timeout: \"0\"\ndolt.idle-timeout: \"0\"\n", "dolt.idle-timeout:", "0", true},
+		{"crlf", "dolt.idle-timeout: '0'\r\n", "dolt.idle-timeout:", "0", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := ConfigYAMLValue(tt.content, tt.key)
+			if got != tt.want || ok != tt.wantOK {
+				t.Fatalf("ConfigYAMLValue() = (%q, %v), want (%q, %v)", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
 func TestConfigYAMLDisablesAutoExport(t *testing.T) {
 	tests := []struct {
 		name    string
