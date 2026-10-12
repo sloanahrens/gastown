@@ -2,16 +2,19 @@ package daemon
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
 // compactorDogTestDaemon builds a daemon rooted at townRoot with the
@@ -286,5 +289,432 @@ func TestCompactorDogBringsDoltUpBeforeItsCycle(t *testing.T) {
 
 	if len(got) != 2 || got[0] != "dolt" || got[1] != "cycle" {
 		t.Fatalf("cycle order = %v, want the Dolt bring-up before the cycle", got)
+	}
+}
+
+// --- the database set, the two lines, and the size measure --------------------
+
+// compactorRunDaemon builds a daemon whose compactor cycle files its alarms
+// into a recorder rather than running gt, so a whole cycle is observable
+// offline: no SQL, no server, no escalation beads.
+func compactorRunDaemon(townRoot string, logBuf *bytes.Buffer) (*Daemon, *notifyfake.Recorder) {
+	d := compactorDogTestDaemon(townRoot, logBuf)
+	rec := notifyfake.New()
+	d.notifier = rec
+	return d, rec
+}
+
+// TestCompactorDogFindingsChecksEveryDatabase is the case the patrol was
+// missing: a database whose commit count is over the line, a database whose
+// store is over the size line, and one under both, all in a single cycle. The
+// database that is clean sits one byte under the size line, so "none below it
+// do" is tested at the boundary rather than with a comfortable margin.
+//
+// The size line is compactorSizeThreshold itself, the constant production
+// passes (runCompactorDogWith), so what is pinned here is the real 1 GiB line
+// and not a stand-in.
+func TestCompactorDogFindingsChecksEveryDatabase(t *testing.T) {
+	t.Parallel()
+	const commitThreshold = 20000
+
+	// The commit count the patrol never reported: hq on 2026-10-12 (gt-7yejc).
+	const commits = 31335
+
+	p := compactorProbes{
+		databases: func() ([]string, error) { return []string{"busy", "fat", "fine"}, nil },
+		commits: func(db string) (int, error) {
+			if db == "busy" {
+				return commits, nil
+			}
+			return 10, nil
+		},
+		size: func(db string) (int64, error) {
+			if db == "fat" {
+				return compactorSizeThreshold, nil
+			}
+			return compactorSizeThreshold - 1, nil
+		},
+	}
+
+	rep := compactorDogFindings(p, commitThreshold, compactorSizeThreshold)
+
+	if got := slices.Sorted(slices.Values(compactorAlarmKeys(rep.raised))); !slices.Equal(got, []string{
+		"compactor_dog:busy:commits",
+		"compactor_dog:fat:size",
+	}) {
+		t.Errorf("raised = %v", got)
+	}
+	if got := slices.Sorted(slices.Values(compactorAlarmKeys(rep.cleared))); !slices.Equal(got, []string{
+		"compactor_dog:busy:size",
+		"compactor_dog:fat:commits",
+		"compactor_dog:fine:commits",
+		"compactor_dog:fine:size",
+	}) {
+		t.Errorf("cleared = %v", got)
+	}
+	if !slices.Equal(rep.names, []string{"busy", "fat", "fine"}) {
+		t.Errorf("checked = %v, want every discovered database", rep.names)
+	}
+	if len(rep.unread) != 0 || rep.sizeUnchecked || rep.discoveryErr != nil {
+		t.Errorf("report carries a failure: %+v", rep)
+	}
+}
+
+// TestCompactorDogFindingsReportsUnreadableDatabase pins the other half of the
+// contract: a database the cycle cannot read is reported, not skipped in
+// silence. Its alarms must also survive — an unread measurement is not
+// evidence the condition cleared, and withdrawing the alarm would hide exactly
+// the database that needs looking at.
+func TestCompactorDogFindingsReportsUnreadableDatabase(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("connection refused")
+
+	p := compactorProbes{
+		databases: func() ([]string, error) { return []string{"broken", "checked"}, nil },
+		commits: func(db string) (int, error) {
+			if db == "broken" {
+				return 0, boom
+			}
+			return 10, nil
+		},
+		size: func(string) (int64, error) { return 1024, nil },
+	}
+
+	rep := compactorDogFindings(p, 20000, compactorSizeThreshold)
+
+	if len(rep.unread) != 1 || !strings.Contains(rep.unread[0], "broken") ||
+		!strings.Contains(rep.unread[0], boom.Error()) {
+		t.Errorf("unread = %v, want broken named with its error", rep.unread)
+	}
+	if got := compactorAlarmKeys(rep.cleared); slices.Contains(got, "compactor_dog:broken:commits") {
+		t.Errorf("cleared = %v: an unread commit count must not clear its alarm", got)
+	}
+	// The measurement that did read is still reported and still clears.
+	if !slices.Contains(compactorAlarmKeys(rep.cleared), "compactor_dog:checked:commits") {
+		t.Errorf("cleared = %v, want checked:commits", compactorAlarmKeys(rep.cleared))
+	}
+}
+
+// TestCompactorDogFindingsSaysWhenSizesAreUnreadable is the report side of a
+// cycle with no size probe: commits are still checked, no size alarm exists to
+// raise or withdraw, and the absence is recorded rather than reading as "no
+// database is large". Which town takes that branch is pinned by the probes
+// tests below.
+func TestCompactorDogFindingsSaysWhenSizesAreUnreadable(t *testing.T) {
+	t.Parallel()
+	p := compactorProbes{
+		databases: func() ([]string, error) { return []string{"hq"}, nil },
+		commits:   func(string) (int, error) { return 900, nil },
+		size:      nil,
+	}
+
+	rep := compactorDogFindings(p, 20000, compactorSizeThreshold)
+
+	if !rep.sizeUnchecked {
+		t.Error("sizeUnchecked = false although no size was read")
+	}
+	if got := compactorAlarmKeys(rep.cleared); !slices.Equal(got, []string{"compactor_dog:hq:commits"}) {
+		t.Errorf("cleared = %v: with no size read there is no size alarm to withdraw", got)
+	}
+}
+
+// TestCompactorDogCycleRaisesAndWithdrawsAlarms runs two cycles end to end —
+// one with a database over the commit line, one with it under — and checks the
+// escalation and the withdrawal that reach gt. The escalation carries the
+// per-database key `gt escalate` dedupes on, so the same condition over
+// successive cycles leaves one open escalation, not one per cycle (gt-vwry).
+func TestCompactorDogCycleRaisesAndWithdrawsAlarms(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	d, rec := compactorRunDaemon(t.TempDir(), &buf)
+
+	probes := func(commits int) compactorProbes {
+		return compactorProbes{
+			databases: func() ([]string, error) { return []string{"hq"}, nil },
+			commits:   func(string) (int, error) { return commits, nil },
+			size:      func(string) (int64, error) { return 1024, nil },
+		}
+	}
+
+	if ok := d.runCompactorDogWith(probes(31335)); !ok {
+		t.Fatalf("a cycle that read every database reported itself unclean; log:\n%s", buf.String())
+	}
+
+	got := rec.Escalations()
+	if len(got) != 1 {
+		t.Fatalf("escalations = %+v, want one", got)
+	}
+	if key := got[0].Escalation.Fingerprint; key != "compactor_dog:hq:commits" {
+		t.Errorf("escalation key = %q, want compactor_dog:hq:commits", key)
+	}
+	if !strings.Contains(got[0].Escalation.Reason, "31335 commits") {
+		t.Errorf("escalation reason = %q, want the count in it", got[0].Escalation.Reason)
+	}
+
+	// The size line was read and not met, so its alarm is withdrawn; the
+	// commit alarm stays open.
+	clears := rec.Clears()
+	if len(clears) != 1 || !slices.Equal(clears[0].Fingerprints, []string{"compactor_dog:hq:size"}) {
+		t.Errorf("clears = %+v, want the size key alone", clears)
+	}
+
+	// Second cycle: back under the commit line, so both alarms are withdrawn
+	// and nothing new is filed.
+	if ok := d.runCompactorDogWith(probes(900)); !ok {
+		t.Fatalf("second cycle reported itself unclean; log:\n%s", buf.String())
+	}
+	if got := rec.Escalations(); len(got) != 1 {
+		t.Errorf("escalations after the second cycle = %d, want the first cycle's one", len(got))
+	}
+	clears = rec.Clears()
+	if len(clears) != 2 {
+		t.Fatalf("clears = %+v, want a second cycle's one", clears)
+	}
+	if want := []string{"compactor_dog:hq:commits", "compactor_dog:hq:size"}; !slices.Equal(clears[1].Fingerprints, want) {
+		t.Errorf("second cycle cleared %v, want %v", clears[1].Fingerprints, want)
+	}
+
+	// The cycle's own log line names the size line it applied: production
+	// passes compactorSizeThreshold, not a test's value.
+	if !strings.Contains(buf.String(), "size_threshold=1024.0MiB") {
+		t.Errorf("cycle does not log the 1 GiB size line; log:\n%s", buf.String())
+	}
+}
+
+// TestCompactorDogCycleFailsOnDiscoveredFailure checks that a cycle which
+// could not inspect everything reports itself unclean, so runCompactorDog's
+// caller does not record a last-run time and the next check retries rather
+// than waiting out the interval (gt-4uxs).
+func TestCompactorDogCycleFailsOnDiscoveredFailure(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	d, _ := compactorRunDaemon(t.TempDir(), &buf)
+
+	p := compactorProbes{
+		databases: func() ([]string, error) { return []string{"hq"}, nil },
+		commits:   func(string) (int, error) { return 0, errors.New("connection refused") },
+		size:      func(string) (int64, error) { return 1024, nil },
+	}
+
+	if ok := d.runCompactorDogWith(p); ok {
+		t.Error("a cycle with an unreadable database reported itself clean")
+	}
+	if !strings.Contains(buf.String(), "UNREAD") || !strings.Contains(buf.String(), "connection refused") {
+		t.Errorf("the unreadable database is not reported; log:\n%s", buf.String())
+	}
+
+	// A discovery failure is not an empty town either.
+	p.databases = func() ([]string, error) { return nil, errors.New("no such directory") }
+	if ok := d.runCompactorDogWith(p); ok {
+		t.Error("a cycle that could not discover any database reported itself clean")
+	}
+}
+
+// TestCompactorDatabasesDiscoversAndFiltersScratch pins the database set: the
+// discovered databases, minus test cruft, and a configured list left alone.
+func TestCompactorDatabasesDiscoversAndFiltersScratch(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	d := compactorDogTestDaemon(townRoot, nil)
+
+	d.maint.gcDatabases = func(string) ([]string, error) {
+		return []string{"beads_pt_x", "hq", "testdb_9f2c"}, nil
+	}
+	got, err := d.compactorDatabases()
+	if err != nil {
+		t.Fatalf("compactorDatabases: %v", err)
+	}
+	if !slices.Equal(got, []string{"hq"}) {
+		t.Errorf("discovered = %v, want hq alone (scratch databases dropped)", got)
+	}
+
+	// Discovery failure reaches the caller; it is not an empty database set.
+	d.maint.gcDatabases = func(string) ([]string, error) { return nil, errors.New("boom") }
+	if _, err := d.compactorDatabases(); err == nil {
+		t.Error("a discovery failure was swallowed")
+	}
+
+	// An operator's own list is used as given, and it is the whole answer: the
+	// server list is not consulted for a server whose storage is elsewhere
+	// either (a config that names databases is an instruction).
+	d.patrolConfig.Patrols.CompactorDog.Databases = []string{"hq", "beads"}
+	got, err = d.compactorDatabases()
+	if err != nil {
+		t.Fatalf("compactorDatabases: %v", err)
+	}
+	if !slices.Equal(got, []string{"hq", "beads"}) {
+		t.Errorf("configured = %v, want the configured list", got)
+	}
+	got, err = d.compactorServerDatabases()
+	if err != nil {
+		t.Fatalf("compactorServerDatabases: %v", err)
+	}
+	if !slices.Equal(got, []string{"hq", "beads"}) {
+		t.Errorf("configured server list = %v, want the configured list", got)
+	}
+}
+
+// writeDoltDB lays out a Dolt database directory under dataDir: a .dolt/noms
+// holding a table file of storeBytes and, when journalBytes is non-zero, the
+// live journal of that size.
+func writeDoltDB(t *testing.T, dataDir, db string, storeBytes, journalBytes int) {
+	t.Helper()
+	noms := filepath.Join(dataDir, db, ".dolt", "noms")
+	if err := os.MkdirAll(noms, 0o755); err != nil {
+		t.Fatalf("create %s: %v", noms, err)
+	}
+	write := func(name string, size int) {
+		if err := os.WriteFile(filepath.Join(noms, name), bytes.Repeat([]byte("x"), size), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	write("4vrlfm9eipve1in8d57vm4t5s2po57jq.darc", storeBytes)
+	if journalBytes > 0 {
+		write(doltJournalFileName, journalBytes)
+		write(doltJournalIndexFileName, 128)
+	}
+}
+
+// TestCompactorDogSizeLineReadsTheStoreNotTheJournal is the 2026-10-12 reading
+// (gt-7yejc) as a test. It walks the production path — discovery of the data
+// directory, the maintenance size measure, the 1 GiB line — over a temp tree,
+// so the databases are found the way a real cycle finds them and measured by
+// the code that read 1,708.9 MiB against hq's 235 MB on disk.
+//
+// journalled holds a 4 MiB journal over a 64-byte table file: over the 1 MiB
+// line this test applies, and under it in every part that is actually the
+// store. It must not raise. big is the converse, and must.
+//
+// The line is scaled from compactorSizeThreshold because the alternative is a
+// gigabyte file; the threshold is a parameter of compactorDogFindings for
+// exactly this reason, and TestCompactorDogFindingsChecksEveryDatabase pins
+// the real value at the boundary.
+func TestCompactorDogSizeLineReadsTheStoreNotTheJournal(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	dataDir := filepath.Join(townRoot, ".dolt-data")
+
+	writeDoltDB(t, dataDir, "big", 2*int(mib), 0)
+	writeDoltDB(t, dataDir, "journalled", 64, 4*int(mib))
+
+	d := compactorDogTestDaemon(townRoot, nil)
+	p := d.compactorDogProbes()
+	p.commits = func(string) (int, error) { return 10, nil } // no SQL in a test
+
+	rep := compactorDogFindings(p, 20000, mib)
+
+	if rep.discoveryErr != nil {
+		t.Fatalf("discovery: %v", rep.discoveryErr)
+	}
+	if !slices.Equal(rep.names, []string{"big", "journalled"}) {
+		t.Fatalf("discovered = %v, want both databases under the data directory", rep.names)
+	}
+	if got := compactorAlarmKeys(rep.raised); !slices.Equal(got, []string{"compactor_dog:big:size"}) {
+		t.Errorf("raised = %v, want big's size alarm alone — journalled is a journal, not a store", got)
+	}
+	// The measured bytes themselves, not the rounded log line: journalled is
+	// its 64-byte table file and nothing else.
+	for _, tc := range []struct {
+		db   string
+		want int64
+	}{
+		{"big", 2 * mib},
+		{"journalled", 64},
+	} {
+		got, err := p.size(tc.db)
+		if err != nil {
+			t.Fatalf("size(%s): %v", tc.db, err)
+		}
+		if got != tc.want {
+			t.Errorf("size(%s) = %d, want %d", tc.db, got, tc.want)
+		}
+	}
+}
+
+// TestCompactorDogProbesTakeTheDatabaseListFromTheServerWhenTheDataDirIsNotHere
+// is the regression test for the pairing this patrol nearly shipped: with the
+// size probe dropped for a server whose storage is not this host's, the
+// database list still came from a walk of the data directory — the directory
+// that is not here. The walk failed, the cycle failed with it, no run was
+// recorded, and the commit alarm this patrol exists to raise was never
+// evaluated: the patrol would have retried every 15 minutes forever.
+func TestCompactorDogProbesTakeTheDatabaseListFromTheServerWhenTheDataDirIsNotHere(t *testing.T) {
+	t.Parallel()
+	local := func() ([]string, error) { return []string{"from-the-data-dir"}, nil }
+	server := func() ([]string, error) { return []string{"from-the-server"}, nil }
+	commits := func(string) (int, error) { return 0, nil }
+	size := func(string) (int64, error) { return 1, nil }
+	sources := compactorDatabaseSources{local: local, server: server}
+
+	here := compactorProbesFor(false, sources, commits, size)
+	got, err := here.databases()
+	if err != nil {
+		t.Fatalf("storage on this host: %v", err)
+	}
+	if !slices.Equal(got, []string{"from-the-data-dir"}) {
+		t.Errorf("storage on this host: databases = %v, want the data directory's list", got)
+	}
+	if here.size == nil {
+		t.Error("storage on this host: no size probe")
+	}
+
+	elsewhere := compactorProbesFor(true, sources, commits, size)
+	got, err = elsewhere.databases()
+	if err != nil {
+		t.Fatalf("storage elsewhere: %v", err)
+	}
+	if !slices.Equal(got, []string{"from-the-server"}) {
+		t.Errorf("storage elsewhere: databases = %v, want the server's own list", got)
+	}
+	if elsewhere.size != nil {
+		t.Error("storage elsewhere: a size probe for a disk this host cannot read")
+	}
+}
+
+// TestCompactorDogProbesSkipSizesForAnExternalServer drives the wiring that
+// chooses between the two branches. The databases probe is not called — it
+// would open a connection — so this pins the shape, and the branch above pins
+// what each shape reads.
+func TestCompactorDogProbesSkipSizesForAnExternalServer(t *testing.T) {
+	t.Parallel()
+	d := compactorDogTestDaemon(t.TempDir(), nil)
+	d.doltServer = &DoltServerManager{config: &DoltServerConfig{Enabled: true, External: true}}
+
+	if p := d.compactorDogProbes(); p.size != nil {
+		t.Error("size probe present although the server's storage is not on this host")
+	}
+}
+
+// TestCompactorRealDatabasesDropsCatalogsAndScratch covers the names no alarm
+// may carry, from either source: the server's own catalogs, and test cruft.
+func TestCompactorRealDatabasesDropsCatalogsAndScratch(t *testing.T) {
+	t.Parallel()
+	got := compactorRealDatabases([]string{
+		"information_schema", "mysql", "dolt_cluster", "hq", "testdb_9f2c", "beads_pt_x",
+	})
+	if !slices.Equal(got, []string{"hq"}) {
+		t.Errorf("compactorRealDatabases = %v, want hq alone", got)
+	}
+}
+
+// TestCompactorDogCycleSaysWhenSizesWereNotChecked pins the one line that
+// distinguishes the two reports a cycle with no size probe could otherwise
+// give: "no database is large" and "no size was read" look identical in the
+// counts, and only one of them is news.
+func TestCompactorDogCycleSaysWhenSizesWereNotChecked(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	d, _ := compactorRunDaemon(t.TempDir(), &buf)
+
+	p := compactorProbes{
+		databases: func() ([]string, error) { return []string{"hq"}, nil },
+		commits:   func(string) (int, error) { return 900, nil },
+	}
+
+	if ok := d.runCompactorDogWith(p); !ok {
+		t.Fatalf("a commit-only cycle reported itself unclean; log:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "sizes=unchecked") {
+		t.Errorf("cycle did not report the unchecked sizes; log:\n%s", buf.String())
 	}
 }

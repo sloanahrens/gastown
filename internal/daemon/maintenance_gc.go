@@ -233,8 +233,9 @@ func recordMaintenanceGCRun(townRoot, db string, before, after gcMeasure, at tim
 
 // maintenanceMeasure measures <dataDir>/<db> on disk: its total size and the
 // old generation under .dolt/noms/oldgen that only gc --full writes. A
-// database with no oldgen directory has an old-gen size of 0. It only stats;
-// it never opens a file inside .dolt.
+// database with no oldgen directory has an old-gen size of 0. The total is the
+// store's size, with Dolt's journal files left out (see dirSize). It only
+// stats; it never opens a file inside .dolt.
 func maintenanceMeasure(dataDir, db string) (gcMeasure, error) {
 	if err := validMaintenanceDBName(db); err != nil {
 		return gcMeasure{}, err
@@ -254,7 +255,32 @@ func maintenanceMeasure(dataDir, db string) (gcMeasure, error) {
 	return gcMeasure{total: total, oldGen: oldGen}, nil
 }
 
-// dirSize sums the regular files under root, which must exist.
+// Dolt's journal files, under <dataDir>/<db>/.dolt/noms. JournalFileID is the
+// append-only journal itself — Dolt's chunks.JournalFileID, a fixed-capacity
+// memory-mapped file whose base name is 32 v's — and the index beside it.
+// Both are excluded from the size measure; see dirSize.
+const (
+	doltJournalFileName      = "vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv"
+	doltJournalIndexFileName = "journal.idx"
+)
+
+// isDoltJournalFile reports whether a directory entry's name is one of Dolt's
+// journal files.
+func isDoltJournalFile(name string) bool {
+	return name == doltJournalFileName || name == doltJournalIndexFileName
+}
+
+// dirSize sums the regular files under root, which must exist, skipping Dolt's
+// journal files (doltJournalFileName and its index). It is the size gc and the
+// compactor dog both reason about, so the number in a gc log line and the
+// number an alarm fires on are the same number.
+//
+// The journal is the one thing the walk must not count: it is the append-only
+// buffer of writes already in the table files, a gc replaces it wholesale, and
+// it is a fixed-capacity mapping, so its size measures how long it has been
+// since the last truncation rather than what a database holds. Counting it
+// read hq at 1,708.9 MiB against 235 MB on disk, and made each before/after
+// pair a measure of the journal rather than of the gc (gt-7yejc).
 func dirSize(root string) (int64, error) {
 	if _, err := os.Stat(root); err != nil {
 		return 0, err
@@ -267,6 +293,10 @@ func dirSize(root string) (int64, error) {
 				return nil
 			}
 			return err
+		}
+		if isDoltJournalFile(entry.Name()) {
+			// A journal file has no children; skipping the entry is enough.
+			return nil
 		}
 		if !entry.Type().IsRegular() {
 			return nil

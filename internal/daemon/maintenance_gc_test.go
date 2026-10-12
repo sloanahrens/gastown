@@ -808,3 +808,51 @@ func TestWorkingPolecatsFromHeartbeats(t *testing.T) {
 		t.Errorf("workingPolecats() = %v, want [%s/fresh]", got, rig)
 	}
 }
+
+// TestDirSizeIgnoresDoltJournalFiles pins the size measure the gc trigger and
+// the compactor dog both read: Dolt's journal files are not part of the store.
+//
+// The journal is the append-only buffer of writes already in the table files,
+// replaced wholesale by a gc, and a fixed-capacity mapping besides — so it
+// tracks how long it has been since the last truncation, not what a database
+// holds. Counting it read hq at 1,708.9 MiB against 235 MB on disk (gt-7yejc).
+func TestDirSizeIgnoresDoltJournalFiles(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	noms := filepath.Join(root, ".dolt", "noms")
+	for _, dir := range []string{noms, filepath.Join(noms, "oldgen")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeFile := func(path string, size int) {
+		t.Helper()
+		if err := os.WriteFile(path, bytes.Repeat([]byte("x"), size), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	writeFile(filepath.Join(noms, "4vrlfm9eipve1in8d57vm4t5s2po57jq.darc"), 700)
+	// A live journal far larger than the store it belongs to.
+	writeFile(filepath.Join(noms, doltJournalFileName), int(4*mib))
+	writeFile(filepath.Join(noms, doltJournalIndexFileName), 128)
+	writeFile(filepath.Join(noms, "oldgen", "aaaa"), 300)
+
+	got, err := dirSize(root)
+	if err != nil {
+		t.Fatalf("dirSize: %v", err)
+	}
+	if want := int64(1000); got != want {
+		t.Errorf("dirSize = %d, want %d (table file plus old gen, journal files out)", got, want)
+	}
+
+	// The old-gen measure walks the same helper: a journal there would be as
+	// foreign as one in the store.
+	got, err = dirSize(filepath.Join(noms, "oldgen"))
+	if err != nil {
+		t.Fatalf("dirSize(oldgen): %v", err)
+	}
+	if want := int64(300); got != want {
+		t.Errorf("dirSize(oldgen) = %d, want %d", got, want)
+	}
+}
