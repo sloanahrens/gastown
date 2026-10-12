@@ -346,13 +346,20 @@ function renderModelsPanel(s) {
     t.append(head, ...rows);
     return t;
   };
+  // Each seat is named as gt pool show names it, and a key this page does not
+  // know is shown as the server sent it rather than as some other seat.
+  const seatNames = {pool: "pool seat", pro: "pro seat", second: "second seat"};
+  const capDefaultWhy = {
+    pool: "max_seats is unset: sling leaves the seat uncapped and the dispatcher holds it to ",
+    pro: "pro_max is unset: the dispatcher runs the pro seat at its own default of ",
+  };
   const seatRows = seats.map(sr => {
     const tr = el("tr");
-    const name = el("td", "", sr.seat === "pool" ? "pool seat" : "second seat"); name.title = sr.key; tr.append(name);
+    const name = el("td", "", seatNames[sr.seat] || sr.seat); name.title = sr.key; tr.append(name);
     tr.append(el("td", sr.closed || sr.unknown ? "title" : "", sr.unknown ? "unknown" : sr.closed ? "closed" : sr.agent));
     const open = !sr.closed && !sr.unknown;
     const c = el("td", "n", open ? (sr.live != null ? sr.live : "–") + "/" + sr.cap + (sr.cap_default ? "*" : "") : "");
-    if (sr.cap_default) c.title = "max_seats is unset: sling leaves the seat uncapped and the dispatcher holds it to " + sr.cap;
+    if (sr.cap_default) c.title = (capDefaultWhy[sr.seat] || "the seat's cap is unset and the dispatcher holds it to ") + sr.cap;
     tr.append(c);
     return tr;
   });

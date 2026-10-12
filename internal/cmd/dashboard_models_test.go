@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dashboard"
 )
 
@@ -173,29 +174,39 @@ func panelRole(t *testing.T, roles []dashboard.ModelRole, role string) dashboard
 	return dashboard.ModelRole{}
 }
 
-// The panel lists both polecat seats the way gt pool show does: an open seat
-// with its agent and cap, a seat nothing may fill as closed (gt-lqa6p).
+// The panel lists every polecat seat the way gt pool show does: an open seat
+// with its agent and cap, a seat nothing may fill as closed (gt-lqa6p). The pro
+// seat is read the way the dispatcher reads it, so a row is open here exactly
+// when a seat is dispatched there (gt-u8usx).
 func TestModelsReaderListsEachSeat(t *testing.T) {
 	t.Parallel()
 
 	town := t.TempDir()
-	writeModelsSettings(t, town, `{"polecat_pool":{"agent":"deepseek-flash","max_seats":3}}`)
+	writeModelsSettings(t, town, `{"polecat_pool":{"agent":"deepseek-flash","max_seats":3,"pro_agent":"deepseek-reasoner","pro_max":2}}`)
 	writePanelFile(t, town, "mayor/daemon.json", panelDaemon)
 	om := writeOMConfig(t, `{"backend":["claude","-p","--model","sonnet"]}`)
 
 	rows := (&modelsReader{townRoot: town, omPath: om}).read().SeatRows
-	if len(rows) != 2 {
-		t.Fatalf("seat rows = %+v, want the pool seat and the second seat", rows)
+	if len(rows) != 3 {
+		t.Fatalf("seat rows = %+v, want the pool seat, the pro seat and the second seat", rows)
 	}
-	pool, second := rows[0], rows[1]
+	pool, pro, second := rows[0], rows[1], rows[2]
 	if pool.Seat != "pool" || pool.Agent != "deepseek-flash" || pool.Cap != 3 || pool.Closed || pool.CapDefault {
 		t.Errorf("pool seat = %+v", pool)
+	}
+	if pro.Seat != "pro" || pro.Agent != "deepseek-reasoner" || pro.Cap != 2 || pro.Closed || pro.CapDefault {
+		t.Errorf("pro seat = %+v", pro)
 	}
 	if second.Seat != "second" || second.Agent != "claude-sonnet" || second.Cap != 2 || second.Closed {
 		t.Errorf("second seat = %+v", second)
 	}
-	if pool.Key == "" || second.Key == "" {
-		t.Error("a seat does not name the config it was read from")
+	for _, s := range rows {
+		if s.Key == "" {
+			t.Errorf("seat %q does not name the config it was read from", s.Seat)
+		}
+	}
+	if !strings.Contains(pro.Key, "pro_agent") || !strings.Contains(pro.Key, "pro_max") {
+		t.Errorf("the pro seat's key = %q, want the keys it was read from", pro.Key)
 	}
 
 	// A pool with no max_seats is the dispatcher's default cap, marked as such.
@@ -204,14 +215,47 @@ func TestModelsReaderListsEachSeat(t *testing.T) {
 		t.Errorf("an unset max_seats = %+v, want the default cap marked", pool)
 	}
 
-	// No pool agent and no max_hooked: both seats are closed.
+	// A pro seat with neither pro_agent nor pro_max is the dispatcher's own
+	// seat at its own defaults: the default agent, the default cap of 1 marked
+	// as a default.
+	writeModelsSettings(t, town, `{"polecat_pool":{"agent":"deepseek-flash","max_seats":1}}`)
+	pro = (&modelsReader{townRoot: town, omPath: om}).read().SeatRows[1]
+	if pro.Closed || pro.Unknown || pro.Agent != config.DefaultSeatRefillProAgent ||
+		pro.Cap != config.DefaultSeatRefillProMax || !pro.CapDefault {
+		t.Errorf("an unset pro seat = %+v, want the dispatcher's defaults marked", pro)
+	}
+
+	// pro_max 0 is the closed pro seat, and the only way to close it: an absent
+	// key is the default of 1.
+	writeModelsSettings(t, town, `{"polecat_pool":{"agent":"deepseek-flash","max_seats":1,"pro_max":0}}`)
+	pro = (&modelsReader{townRoot: town, omPath: om}).read().SeatRows[1]
+	if !pro.Closed || pro.Agent != "" || pro.Cap != 0 {
+		t.Errorf("pro_max 0 = %+v, want a closed pro seat", pro)
+	}
+
+	// No pool agent and no max_hooked: the pool seat and the second seat are
+	// closed, and a polecat_pool section with no pro_max still holds the
+	// dispatcher's pro seat, which the panel shows the same way.
 	closed := t.TempDir()
 	writeModelsSettings(t, closed, `{"polecat_pool":{}}`)
 	writePanelFile(t, closed, "mayor/daemon.json", `{"type":"daemon-patrol-config","version":1,"patrols":{"spec_dispatch":{"enabled":true}}}`)
-	for _, s := range (&modelsReader{townRoot: closed, omPath: om}).read().SeatRows {
-		if !s.Closed || s.Agent != "" || s.Cap != 0 {
+	rows = (&modelsReader{townRoot: closed, omPath: om}).read().SeatRows
+	for _, i := range []int{0, 2} {
+		if s := rows[i]; !s.Closed || s.Agent != "" || s.Cap != 0 {
 			t.Errorf("seat %q = %+v, want closed", s.Seat, s)
 		}
+	}
+	if pro := rows[1]; pro.Closed || pro.Agent != config.DefaultSeatRefillProAgent || pro.Cap != config.DefaultSeatRefillProMax {
+		t.Errorf("a polecat_pool section with no pro_max = %+v, want the dispatcher's pro seat", pro)
+	}
+
+	// A town with no polecat_pool section at all has no pro seat: the
+	// dispatcher reads none, and no row is invented for it.
+	noPool := t.TempDir()
+	writeModelsSettings(t, noPool, `{"role_agents":{"polecat":"deepseek-flash"}}`)
+	writePanelFile(t, noPool, "mayor/daemon.json", panelDaemon)
+	if pro := (&modelsReader{townRoot: noPool, omPath: om}).read().SeatRows[1]; !pro.Closed || pro.Agent != "" {
+		t.Errorf("no polecat_pool section = %+v, want a closed pro seat", pro)
 	}
 
 	// A patrol config that does not parse is not a closed seat.
@@ -219,8 +263,12 @@ func TestModelsReaderListsEachSeat(t *testing.T) {
 	writeModelsSettings(t, broken, `{"polecat_pool":{"agent":"a","max_seats":1}}`)
 	writePanelFile(t, broken, "mayor/daemon.json", `{"patrols":`)
 	rows = (&modelsReader{townRoot: broken, omPath: om}).read().SeatRows
-	if rows[0].Unknown || rows[0].Closed || !rows[1].Unknown || rows[1].Closed {
+	if rows[0].Unknown || rows[0].Closed || !rows[2].Unknown || rows[2].Closed {
 		t.Errorf("an unreadable daemon.json: %+v", rows)
+	}
+	// The settings file, though, was read: its pro seat stands.
+	if rows[1].Unknown || rows[1].Closed {
+		t.Errorf("an unreadable daemon.json took the pro seat with it: %+v", rows[1])
 	}
 }
 

@@ -109,7 +109,11 @@ func TestTheModelsPanelSitsUnderTheHeaderStrip(t *testing.T) {
 		t.Error("the page's redraw does not include the panel")
 	}
 	body := pageFunc(t, "renderModelsPanel")
-	for _, want := range []string{`"drift"`, `rr.model || "unknown"`, `"closed"`, "sr.key", "rr.key", "rr.drift"} {
+	for _, want := range []string{`"drift"`, `rr.model || "unknown"`, `"closed"`, "sr.key", "rr.key", "rr.drift",
+		// Every seat the panel draws is named as gt pool show names it
+		// (gt-u8usx): a pro row labelled "second seat" is a row an operator
+		// reads as the wrong seat.
+		`"pool seat", pro: "pro seat", second: "second seat"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("renderModelsPanel does not draw %s", want)
 		}
