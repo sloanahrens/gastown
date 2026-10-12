@@ -410,7 +410,7 @@ func dashboardSummary(townRoot string, deploys *tailDeploys, recs *dashLandings,
 	for n := range sessions {
 		names = append(names, n)
 	}
-	if seats, err := dashSeats(townRoot, names, sessionsKnown, seatCache); err == nil {
+	if seats, err := dashSeats(townRoot, names, sessionsKnown, seatCache, newPoolSessionLister()); err == nil {
 		s.Polecats = buildDashPolecats(dashPolecatInputs{
 			Now: time.Now(), Seats: seats, Ready: ready, Sessions: sessions, SessionsKnown: sessionsKnown, Records: recs.get(),
 		})

@@ -196,3 +196,30 @@ func TestBuildDashPolecatsCarriesTheRigParkedFlag(t *testing.T) {
 		t.Errorf("rig parked flags = %v", flags)
 	}
 }
+
+// Each polecat row carries the agent its own session was started with, so a
+// session left over from before a model switch shows its own model beside one
+// started after it (gt-lqa6p).
+func TestBuildDashPolecatsCarriesEachPolecatsAgent(t *testing.T) {
+	t.Parallel()
+	cap1 := polecat.WorkstateDisposition{CountsTowardCapacity: true}
+	old := dashItem(polecat.StateWorking, cap1)
+	old.Agent = "deepseek-flash"
+	fresh := dashItem(polecat.StateWorking, cap1)
+	fresh.Agent = "claude-sonnet"
+	pcs := buildDashPolecats(dashPolecatInputs{
+		Now:           time.Now(),
+		SessionsKnown: true,
+		Seats: []dashSeat{
+			{Rig: "gastown", Name: "leftover", Item: old, Issue: &beads.Issue{ID: "gt-1", Title: "one"}},
+			{Rig: "gastown", Name: "newer", Item: fresh, Issue: &beads.Issue{ID: "gt-2", Title: "two"}},
+		},
+	})
+	got := map[string]string{}
+	for _, p := range pcs {
+		got[p.Name] = p.Agent
+	}
+	if got["leftover"] != "deepseek-flash" || got["newer"] != "claude-sonnet" {
+		t.Errorf("polecat agents = %v, want each session's own", got)
+	}
+}

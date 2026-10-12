@@ -74,6 +74,10 @@ type Polecat struct {
 	Title  string `json:"title,omitempty"`
 	State  string `json:"state"`
 	Reason string `json:"reason,omitempty"` // why the town's inventory put it in this state
+	// Agent is the agent the polecat's live session was started with (its
+	// recorded GT_AGENT), so a session left over from before a model switch
+	// shows its own model. Empty when it has no session or none was recorded.
+	Agent string `json:"agent,omitempty"`
 	// CountsTowardCapacity is the dispatcher's own accounting: this polecat
 	// occupies one of the roster's seats.
 	CountsTowardCapacity bool `json:"counts_toward_capacity"`
@@ -272,6 +276,55 @@ type Models struct {
 	// seats have been read once: a strip that has not read them says so
 	// instead of showing an empty town.
 	Seats *ModelsSeats `json:"seats,omitempty"`
+	// SeatRows is the models panel's seat table: both polecat seats, an open
+	// one with its agent, cap and live count and a closed one marked closed.
+	SeatRows []ModelSeat `json:"seat_rows,omitempty"`
+	// Roles is the panel's model-per-role table, each row naming the config
+	// key it was read from.
+	Roles []ModelRole `json:"roles,omitempty"`
+}
+
+// ModelSeat is one of the town's two polecat seats: the pool seat
+// (polecat_pool.agent capped by max_seats) and the second seat (spec_dispatch
+// hooked_agent capped by max_hooked).
+type ModelSeat struct {
+	// Seat is "pool" or "second".
+	Seat  string `json:"seat"`
+	Agent string `json:"agent,omitempty"`
+	// Cap is the seat's cap. CapDefault marks a pool seat whose max_seats is
+	// unset: sling leaves it uncapped and the dispatcher holds it to its own
+	// default, which is the number shown.
+	Cap        int  `json:"cap,omitempty"`
+	CapDefault bool `json:"cap_default,omitempty"`
+	// Closed is a seat nothing may fill: the pool with no agent, the second
+	// seat with no max_hooked above zero.
+	Closed bool `json:"closed,omitempty"`
+	// Unknown is a seat whose config could not be read: neither open nor
+	// closed, as far as the page can tell.
+	Unknown bool `json:"unknown,omitempty"`
+	// Live is the polecats holding the seat, filled by the hub from the same
+	// polecat list the seats pane counts; nil until that list has been read.
+	Live *int `json:"live,omitempty"`
+	// Key is the config the seat was read from.
+	Key string `json:"key"`
+}
+
+// ModelRole is the model one role runs on.
+type ModelRole struct {
+	// Role is polecat, om-review, deep-review or crew.
+	Role string `json:"role"`
+	// Model is empty when the config could not be read or names none: the page
+	// says unknown, never a value nobody read.
+	Model string `json:"model,omitempty"`
+	// Key is the config key the model was read from.
+	Key string `json:"key"`
+	// Note says why Model is empty, when the key alone does not.
+	Note string `json:"note,omitempty"`
+	// Drift is what the town model table (settings/models.json) says this
+	// role should run, set only when the live setting differs from it; empty
+	// when they agree, or when the table says nothing about the role or
+	// cannot be read.
+	Drift string `json:"drift,omitempty"`
 }
 
 // ModelsSeats is the pool's occupancy: the polecats holding a seat, and the

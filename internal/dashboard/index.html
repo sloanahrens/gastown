@@ -18,6 +18,9 @@ h1{font-size:15px;margin:0;letter-spacing:.08em;text-transform:uppercase;color:v
 .pill.green{color:var(--green)}.pill.degraded{color:var(--amber)}.pill.red{color:var(--red)}.pill.unknown{color:var(--dim)}
 #healthline{color:var(--dim);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #models{color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#modelspanel{display:flex;gap:32px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--line)}
+#modelspanel:empty{display:none}
+#modelspanel table{width:auto;min-width:260px}
 #conn{font-size:12px;color:var(--dim)}
 #conn.on::before{content:"● ";color:var(--green)}#conn.off::before{content:"● ";color:var(--red)}
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:14px 0}
@@ -205,6 +208,8 @@ a.drow:hover{background:#19212b}
   <button id="alertsctl" type="button">alerts: off</button>
 </header>
 
+<div id="modelspanel"></div>
+
 <div id="toasts"></div>
 
 <div class="tiles" id="tiles"></div>
@@ -320,6 +325,49 @@ function renderModels(s) {
   const m = s.models || {};
   const seats = m.seats ? (m.seats.cap > 0 ? m.seats.live + "/" + m.seats.cap : String(m.seats.live)) : "–";
   $("models").textContent = "polecats " + (m.polecat || "unknown") + " · seats " + seats + " · om " + (m.om || "unknown");
+}
+
+// renderModelsPanel is the table under the header strip: each polecat seat
+// with its agent, cap and live count, and the model each role runs on with the
+// config key it came from. A role whose live setting differs from the town
+// model table wears a drift badge naming what the table says. Like the strip,
+// every field is a fresh read of the configs, and one the server could not
+// read says unknown, never a blank that looks like a value.
+function renderModelsPanel(s) {
+  const box = $("modelspanel");
+  const m = s.models;
+  box.replaceChildren();
+  const seats = (m && m.seat_rows) || [], roles = (m && m.roles) || [];
+  if (!seats.length && !roles.length) return;
+  const table = (cols, rows) => {
+    const t = el("table"), head = el("tr");
+    cols.forEach(([h, num]) => head.append(el("th", num ? "n" : "", h)));
+    t.append(head, ...rows);
+    return t;
+  };
+  const seatRows = seats.map(sr => {
+    const tr = el("tr");
+    const name = el("td", "", sr.seat === "pool" ? "pool seat" : "second seat"); name.title = sr.key; tr.append(name);
+    tr.append(el("td", sr.closed || sr.unknown ? "title" : "", sr.unknown ? "unknown" : sr.closed ? "closed" : sr.agent));
+    const open = !sr.closed && !sr.unknown;
+    const c = el("td", "n", open ? (sr.live != null ? sr.live : "–") + "/" + sr.cap + (sr.cap_default ? "*" : "") : "");
+    if (sr.cap_default) c.title = "max_seats is unset: sling leaves the seat uncapped and the dispatcher holds it to " + sr.cap;
+    tr.append(c);
+    return tr;
+  });
+  const roleRows = roles.map(rr => {
+    const tr = el("tr");
+    const role = el("td", "", rr.role); role.title = rr.key; tr.append(role);
+    const model = el("td"); model.title = rr.note || rr.key;
+    model.append(el("span", rr.model ? "" : "title", rr.model || "unknown"));
+    if (rr.drift) {
+      const b = el("span", "badge warnc", "drift"); b.title = "the town model table (settings/models.json) says " + rr.drift;
+      model.append(document.createTextNode(" "), b);
+    }
+    tr.append(model);
+    return tr;
+  });
+  box.append(table([["Seat"], ["Agent"], ["Live / cap", 1]], seatRows), table([["Role"], ["Model"]], roleRows));
 }
 
 function renderTiles(s) {
@@ -488,11 +536,12 @@ function renderSeats(s) {
   const rightCells = (tr, p) => R.forEach(([, , f]) => tr.append(el("td", "n", f(p))));
   const busyTable = list => {
     const t = el("table");
-    t.append(head([["Polecat"], ["State"], ["Bead"], ["On it", "time since the bead was dispatched", 1], ["Quiet", "time since its session last printed anything", 1], ...R.map(r => [r[0], r[1], 1])]));
+    t.append(head([["Polecat"], ["State"], ["Model", "the agent this polecat's session was started with"], ["Bead"], ["On it", "time since the bead was dispatched", 1], ["Quiet", "time since its session last printed anything", 1], ...R.map(r => [r[0], r[1], 1])]));
     for (const p of list) {
       const tr = el("tr");
       tr.append(nameCell(p));
       const st = el("td"); const badge = el("span", "badge st-" + p.state, p.state); badge.title = (STATE_HELP[p.state] || "") + (p.reason && p.bead ? " — " + p.reason : ""); st.append(badge); tr.append(st);
+      tr.append(el("td", p.agent ? "" : "title", p.agent || (p.has_session ? "–" : "")));
       const bd = el("td");
       if (p.bead) {
         bd.append(el("span", "bead", p.bead));
@@ -2046,7 +2095,7 @@ function renderQueue(s, force) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderModels(state); renderTiles(state); renderQuestions(state); renderEscalations(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderReports(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
+function renderAll() { if (!state) return; renderHealth(state.health); renderModels(state); renderModelsPanel(state); renderTiles(state); renderQuestions(state); renderEscalations(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderReports(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));

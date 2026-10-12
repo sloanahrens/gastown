@@ -436,12 +436,26 @@ func (h *Hub) pollModels() {
 	defer h.mu.Unlock()
 	if h.state.Summary != nil {
 		live := 0
+		byAgent := map[string]int{}
 		for _, p := range h.polecats {
 			if p.CountsTowardCapacity && !p.RigParked {
 				live++
+				// A session with no recorded agent runs the polecat role's
+				// own, the way the dispatcher's roster counts it.
+				agent := p.Agent
+				if agent == "" {
+					agent = m.Polecat
+				}
+				byAgent[agent]++
 			}
 		}
 		m.Seats = &ModelsSeats{Live: live, Cap: m.SeatCap}
+		for i := range m.SeatRows {
+			if !m.SeatRows[i].Closed {
+				n := byAgent[m.SeatRows[i].Agent]
+				m.SeatRows[i].Live = &n
+			}
+		}
 	}
 	h.state.Models = m
 	h.publishLocked()
