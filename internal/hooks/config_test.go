@@ -784,7 +784,7 @@ func TestComputeExpectedQuestionToolGuardIsScopedToUnattendedRoles(t *testing.T)
 	}
 
 	// The attended roles keep their question dialog, on every event.
-	for _, target := range []string{"crew", "mayor", "witness", "refinery", "deacon", "boot"} {
+	for _, target := range []string{"crew", "mayor", "witness", "refinery", "deacon"} {
 		cfg, err := home.computeExpected(target)
 		if err != nil {
 			t.Fatalf("home.computeExpected(%s): %v", target, err)
@@ -857,7 +857,7 @@ func TestComputeExpectedPermissionRequestGuardReachesGeneratedSettings(t *testin
 
 	// Interactive roles must carry no PermissionRequest entry at all — their
 	// prompts stay with the person at the pane (gt-8stz).
-	for _, target := range []string{"crew", "mayor", "witness", "refinery", "deacon", "boot"} {
+	for _, target := range []string{"crew", "mayor", "witness", "refinery", "deacon"} {
 		cfg, err := home.computeExpected(target)
 		if err != nil {
 			t.Fatalf("home.computeExpected(%s): %v", target, err)
@@ -1082,26 +1082,6 @@ func TestDiscoverTargets_RoleNames(t *testing.T) {
 	}
 }
 
-func TestDiscoverTargets_BootAbsent(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-
-	os.MkdirAll(filepath.Join(tmpDir, "mayor"), 0755)
-	os.MkdirAll(filepath.Join(tmpDir, "deacon"), 0755)
-	// No deacon/dogs/boot directory
-
-	targets, err := DiscoverTargets(tmpDir)
-	if err != nil {
-		t.Fatalf("DiscoverTargets failed: %v", err)
-	}
-
-	for _, tgt := range targets {
-		if tgt.Key == "boot" {
-			t.Errorf("expected no boot target when deacon/dogs/boot/ absent, got one: %+v", tgt)
-		}
-	}
-}
-
 func TestTargetDisplayKey(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1268,7 +1248,7 @@ func TestNoPreToolUseMatcherContainsParenthesis(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	home := configHome{home: tmpDir}
-	for _, target := range []string{"mayor", "crew", "witness", "refinery", "deacon", "polecats", "boot", "gastown/crew", "gastown/witness"} {
+	for _, target := range []string{"mayor", "crew", "witness", "refinery", "deacon", "polecats", "gastown/crew", "gastown/witness"} {
 		expected, err := home.computeExpected(target)
 		if err != nil {
 			t.Fatalf("home.computeExpected(%s) failed: %v", target, err)

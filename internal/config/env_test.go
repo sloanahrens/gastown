@@ -837,7 +837,6 @@ func TestAgentEnv_IncludesNodeOptionsClearing(t *testing.T) {
 	}{
 		{"mayor", "", ""},
 		{"deacon", "", ""},
-		{"boot", "", ""},
 		{"witness", "myrig", ""},
 		{"refinery", "myrig", ""},
 		{"polecat", "myrig", "Toast"},
@@ -868,7 +867,6 @@ func TestAgentEnv_IncludesClaudeCodeClearing(t *testing.T) {
 	}{
 		{"mayor", "", ""},
 		{"deacon", "", ""},
-		{"boot", "", ""},
 		{"witness", "myrig", ""},
 		{"refinery", "myrig", ""},
 		{"polecat", "myrig", "Toast"},
@@ -922,7 +920,6 @@ func TestAgentEnv_DisablesBdBackup(t *testing.T) {
 	}{
 		{"mayor", "", ""},
 		{"deacon", "", ""},
-		{"boot", "", ""},
 		{"witness", "myrig", ""},
 		{"refinery", "myrig", ""},
 		{"polecat", "myrig", "Toast"},

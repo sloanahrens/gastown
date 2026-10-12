@@ -262,16 +262,15 @@ func TestEnvVarsCheck_MixedCorrectAndMismatch(t *testing.T) {
 }
 
 // TestEnvVarsCheck_RetiredRoleSessionsSkipped verifies that leftover sessions
-// of retired roles (mayor, deacon, boot, witness) are not checked: nothing
-// sets their environment any more, so they must not produce mismatches.
+// of retired roles (mayor, deacon, witness) are not checked: nothing sets
+// their environment any more, so they must not produce mismatches.
 func TestEnvVarsCheck_RetiredRoleSessionsSkipped(t *testing.T) {
 	t.Parallel()
 	reader := &mockEnvReader{
-		sessions: []string{"hq-mayor", "hq-deacon", "hq-boot"},
+		sessions: []string{"hq-mayor", "hq-deacon"},
 		sessionEnvs: map[string]map[string]string{
 			"hq-mayor":  {}, // Missing all env vars
 			"hq-deacon": {},
-			"hq-boot":   {},
 		},
 	}
 	check := NewEnvVarsCheckWithReader(reader)

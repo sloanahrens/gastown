@@ -52,7 +52,7 @@ func TestBuildPrompt_BeaconOnly(t *testing.T) {
 	t.Parallel()
 	cfg := SessionConfig{
 		Beacon: BeaconConfig{
-			Recipient: "boot",
+			Recipient: "deacon",
 			Sender:    "daemon",
 			Topic:     "triage",
 		},
@@ -70,14 +70,14 @@ func TestBuildPrompt_WithInstructions(t *testing.T) {
 	t.Parallel()
 	cfg := SessionConfig{
 		Beacon: BeaconConfig{
-			Recipient: "boot",
+			Recipient: "deacon",
 			Sender:    "daemon",
 			Topic:     "triage",
 		},
-		Instructions: "Run gt boot triage now.",
+		Instructions: "Run the startup checks now.",
 	}
 	prompt := buildPrompt(cfg)
-	if !contains(prompt, "Run gt boot triage now.") {
+	if !contains(prompt, "Run the startup checks now.") {
 		t.Errorf("prompt should contain instructions: %s", prompt)
 	}
 	if !contains(prompt, "[GAS TOWN]") {
@@ -88,7 +88,7 @@ func TestBuildPrompt_WithInstructions(t *testing.T) {
 func TestBuildCommand_DefaultAgent(t *testing.T) {
 	t.Parallel()
 	cfg := SessionConfig{
-		Role:     "boot",
+		Role:     "deacon",
 		TownRoot: "/tmp/town",
 	}
 	cmd, err := buildCommand(cfg, "test prompt")
@@ -103,7 +103,7 @@ func TestBuildCommand_DefaultAgent(t *testing.T) {
 func TestBuildCommand_WithAgentOverride(t *testing.T) {
 	t.Parallel()
 	cfg := SessionConfig{
-		Role:          "boot",
+		Role:          "deacon",
 		TownRoot:      "/tmp/town",
 		AgentOverride: "claude",
 	}

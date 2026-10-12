@@ -12,7 +12,6 @@ func TestManagedTargetKey(t *testing.T) {
 		{"polecat", "/town/gastown/polecats", "gastown/polecats"},
 		{"crew", "/town/gastown/crew", "gastown/crew"},
 		{"mayor", "/town/mayor", "mayor"},
-		{"boot", "/town/deacon/dogs/boot", "boot"},
 		{"polecat", "polecats", "polecats"},
 	} {
 		if got := ManagedTargetKey(tt.role, tt.settingsDir); got != tt.want {

@@ -73,12 +73,6 @@ the hook payload and evaluates the same predicate, refusing exactly what
 close can carry. Only ids naming the bead the current branch was cut for are
 judged; other closes and unresolvable input pass.
 
-The `boot` override adds the raw-tmux-send-keys guard (`gt tap guard
-boot-sendkeys`, gt-3mp1) on the `Bash|Monitor` matcher: a raw `tmux send-keys`
-into another pane can leave text staged but unsubmitted, so boot uses
-`gt nudge --mode=immediate` instead. The guard reads `tool_input.command` off
-stdin and blocks only a genuine tmux send-keys invocation.
-
 Settings are passed to Claude Code via `--settings <path>`, which loads them as
 a separate priority tier that merges additively with project settings.
 
@@ -169,7 +163,7 @@ the matcher kind (gt-5ihs):
   a deny hook gated by a leading-`*` glob fires on unrelated commands. A
   guard that needs to discriminate on the command text reads
   `tool_input.command` off stdin and exits 2 only when it recognizes its
-  own forbidden shape (`tap_guard_boot_sendkeys.go`,
+  own forbidden shape (`tap_guard_polecat_paths.go`,
   `tap_guard_pr_workflow.go`, `tap_guard_dangerous.go`). The field remains
   available for operator-supplied overrides;
   `TestBuiltinHooksNeverUseIf` asserts no built-in config sets it.

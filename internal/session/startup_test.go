@@ -109,7 +109,6 @@ func TestBeaconRecipientContainsNoPathSeparators(t *testing.T) {
 		{"dog", "fido", ""},
 		{"overseer", "", ""},
 		{"deacon", "", ""},
-		{"boot", "", ""},
 		{"polecat", "a/b", "c/d"}, // edge case: slashes in inputs
 	}
 	for _, c := range cases {

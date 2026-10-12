@@ -23,10 +23,10 @@ func TestDrainSessionNudgesNoTmuxSession(t *testing.T) {
 
 // TestPrintSessionNudgesGoesToStderrNotStdout is the gt-dekkl regression: a
 // queued nudge must reach the agent while staying out of the stdout that
-// mol-refinery-patrol (MR=$(gt mq next <rig> --quiet)), stuck-work-dog and
-// mol-boot-triage parse as machine output. On stdout the nudge block breaks
-// the parse AND, because the drain already removed it from the queue, is lost
-// with nothing legible delivered. writeSessionNudges is handed stderr only.
+// mol-refinery-patrol (MR=$(gt mq next <rig> --quiet)) and stuck-work-dog
+// parse as machine output. On stdout the nudge block breaks the parse AND,
+// because the drain already removed it from the queue, is lost with nothing
+// legible delivered. writeSessionNudges is handed stderr only.
 func TestPrintSessionNudgesGoesToStderrNotStdout(t *testing.T) {
 	t.Parallel()
 	const session = "gt-gastown-refinery"

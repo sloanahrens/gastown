@@ -62,7 +62,7 @@ func (d *Daemon) restartSeat(seat supervisor.Seat) error {
 		// (gt-4k3fj.6).
 		return d.restartPolecatSession(seat)
 	default:
-		// The deacon, boot, witness and dog roles were deleted
+		// The deacon, witness and dog roles were deleted
 		// (gt-4k3fj.6.1, gt-ckunw).
 		return fmt.Errorf("%w: %s", errNoDaemonStarter, seat.SessionName())
 	}

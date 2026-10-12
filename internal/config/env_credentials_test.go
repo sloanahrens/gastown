@@ -45,7 +45,6 @@ func TestSpawnCommandsCarryNoParentCredentials(t *testing.T) {
 
 	roles := []AgentEnvConfig{
 		{Role: "deacon", TownRoot: townRoot},
-		{Role: "boot", TownRoot: townRoot},
 		{Role: "dog", AgentName: "alpha", TownRoot: townRoot},
 		{Role: "witness", Rig: "gastown", TownRoot: townRoot},
 		{Role: "refinery", Rig: "gastown", TownRoot: townRoot},

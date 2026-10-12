@@ -258,22 +258,21 @@ func TestFilterAndSortSessions_PolecatFiltering(t *testing.T) {
 	}
 }
 
-func TestFilterAndSortSessions_BootSessionFiltered(t *testing.T) {
+func TestFilterAndSortSessions_RetiredSessionFiltered(t *testing.T) {
 	t.Parallel()
 	input := []string{
 		"gt-crew-max",
-		"hq-boot", // should always be excluded
-		"hq-deacon",
+		"hq-deacon", // retired role session: should always be excluded
 	}
 
 	got := filterAndSortSessions(cmdTestRegistry(), input, true)
 	for _, a := range got {
-		if a.Name == "hq-boot" {
-			t.Error("hq-boot session should be filtered out")
+		if a.Name == "hq-deacon" {
+			t.Error("hq-deacon session should be filtered out")
 		}
 	}
 	if len(got) != 1 {
-		t.Errorf("filterAndSortSessions with boot returned %d agents, want 1 (retired deacon/boot sessions are not agents)", len(got))
+		t.Errorf("filterAndSortSessions with a retired deacon session returned %d agents, want 1 (retired sessions are not agents)", len(got))
 	}
 }
 
@@ -320,7 +319,7 @@ func TestFilterAndSortSessions_SortOrder(t *testing.T) {
 func TestFilterAndSortSessions_CombinedFiltering(t *testing.T) {
 	t.Parallel()
 	input := []string{
-		"hq-boot",        // boot: always filtered
+		"hq-deacon",      // retired role session: always filtered
 		"gt-furiosa",     // polecat: filtered when includePolecats=false
 		"random-session", // non-gastown: always filtered
 		"gt-crew-max",

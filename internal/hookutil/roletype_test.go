@@ -11,9 +11,9 @@ func TestIsAutonomousRole(t *testing.T) {
 		}
 	}
 
-	// refinery (gt-v4ssj.6), dog (gt-ckunw) and witness, deacon and boot
+	// refinery (gt-v4ssj.6), dog (gt-ckunw) and witness and deacon
 	// (gt-4k3fj.6.1) roles removed.
-	interactive := []string{"mayor", "crew", "refinery", "dog", "witness", "deacon", "boot", "unknown", ""}
+	interactive := []string{"mayor", "crew", "refinery", "dog", "witness", "deacon", "unknown", ""}
 	for _, role := range interactive {
 		if IsAutonomousRole(role) {
 			t.Errorf("IsAutonomousRole(%q) = true, want false", role)

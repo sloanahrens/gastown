@@ -18,7 +18,7 @@ import (
 
 // SessionConfig describes how to create and start a tmux session.
 // This unifies the common startup pattern that was previously duplicated
-// across polecat, boot, deacon, witness, refinery and crew
+// across polecat, deacon, witness, refinery and crew
 // session managers. Each of those managers previously had to coordinate
 // 4+ packages (config, runtime, session, tmux) manually.
 //
@@ -45,7 +45,7 @@ type SessionConfig struct {
 	TownRoot string
 
 	// RigPath is the rig directory path for config resolution.
-	// Empty for town-level agents (deacon, boot).
+	// Empty for town-level agents (deacon).
 	RigPath string
 
 	// RigName is the rig name for environment variables and theming.
@@ -65,7 +65,7 @@ type SessionConfig struct {
 	Beacon BeaconConfig
 
 	// Instructions are appended after the beacon in the startup prompt.
-	// Used by roles like Boot and Deacon that need explicit instructions.
+	// Used by roles like Deacon that need explicit instructions.
 	// Ignored if Command is non-empty.
 	Instructions string
 

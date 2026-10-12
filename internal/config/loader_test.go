@@ -1320,7 +1320,7 @@ func TestExtractSimpleRole(t *testing.T) {
 		"":                       "",
 		"mayor":                  "mayor",
 		"deacon":                 "deacon",
-		"deacon/boot":            "boot",
+		"gastown/crew":           "crew",
 		"gastown/witness":        "witness",
 		"gastown/refinery":       "refinery",
 		"gastown/crew/sloan":     "crew",

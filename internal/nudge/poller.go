@@ -95,8 +95,8 @@ func (pp pollerProcs) startPoller(townRoot, session string, executable func() (s
 	if strings.HasSuffix(gtBin, ".test") || strings.HasSuffix(gtBin, ".test.exe") {
 		// Under `go test` the executable is the test binary; exec'ing it as
 		// the poller would run the whole suite again, detached, and every
-		// StartPoller site in that run would spawn another (same guard as
-		// the daemon's boot triage).
+		// StartPoller site in that run would spawn another. Refusing before
+		// Start breaks the chain.
 		return 0, fmt.Errorf("refusing to run %s as nudge-poller: executable is a test binary", filepath.Base(gtBin))
 	}
 

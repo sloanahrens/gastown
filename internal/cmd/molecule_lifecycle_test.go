@@ -30,7 +30,6 @@ func TestExtractRoleFromIdentity(t *testing.T) {
 		{"gastown/polecats/nux", "nux"},
 		{"mayor/", "mayor"},
 		{"deacon/", "deacon"},
-		{"deacon/boot", "boot"},
 		{"refinery", "refinery"},
 	}
 	for _, tc := range tests {

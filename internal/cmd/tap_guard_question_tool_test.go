@@ -79,7 +79,7 @@ func TestQuestionToolGuardBlocksUnattendedSession(t *testing.T) {
 // verdict for every attended role.
 func TestQuestionToolGuardKeepsQuestionForInteractiveSession(t *testing.T) {
 	t.Parallel()
-	roles := []string{"gastown/crew/sloan", "gastown/witness", "gastown/refinery", "mayor", "deacon", "boot", ""}
+	roles := []string{"gastown/crew/sloan", "gastown/witness", "gastown/refinery", "mayor", "deacon", ""}
 	for _, role := range roles {
 		t.Run(role, func(t *testing.T) {
 			err := runQuestionToolGuard(t, questionToolPayload("/Users/sloan/gt/gastown/crew"), map[string]string{"GT_ROLE": role})

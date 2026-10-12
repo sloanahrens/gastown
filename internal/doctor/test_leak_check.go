@@ -253,11 +253,13 @@ func eventLeaks(line string, known map[string]bool, since time.Time) []string {
 // "deacon", "witness", "refinery", "polecat", "crew", "dog" and "unknown" are
 // the bare (no-rig) actor strings for their Roles.
 //
-// gt-jna: RoleBoot has two construction paths, both legitimate:
-// RoleInfo.ActorString() returns "deacon-boot" (beads attribution) and
-// getAgentIdentity() returns "boot" (the session_start actor Boot's gt prime
-// writes). Both stay; TestGetAgentIdentityOutputsToleratedByTestLeakCheck
-// covers the second path.
+// gt-jna: the "boot" and "deacon-boot" entries below are historical tolerance,
+// not a live role. The boot agent was retired (gt-4k3fj.6.1); nothing emits
+// either spelling any more, but rows written while it ran still sit in
+// .events.jsonl — "deacon-boot" from RoleInfo.ActorString() (beads
+// attribution) and bare "boot" from getAgentIdentity() — so the check keeps
+// tolerating them.
+// TestGetAgentIdentityOutputsToleratedByTestLeakCheck covers the second path.
 //
 // The rest come from other construction paths:
 //   - "overseer": detectSender()'s fallback mail actor (internal/cmd/mail_identity.go).

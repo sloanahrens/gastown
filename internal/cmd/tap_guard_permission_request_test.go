@@ -99,7 +99,7 @@ func TestPermissionRequestDeniesForAutonomousSession(t *testing.T) {
 // prompt, so the guard reports no decision for every attended role.
 func TestPermissionRequestKeepsPromptForInteractiveSession(t *testing.T) {
 	t.Parallel()
-	roles := []string{"gastown/crew/sloan", "gastown/witness", "gastown/refinery", "mayor", "deacon", "boot", ""}
+	roles := []string{"gastown/crew/sloan", "gastown/witness", "gastown/refinery", "mayor", "deacon", ""}
 	for _, role := range roles {
 		t.Run(role, func(t *testing.T) {
 			if unattendedPromptRole(role) {
@@ -137,7 +137,7 @@ func TestUnattendedPromptSessionPrefersRole(t *testing.T) {
 func TestUnattendedPromptRole(t *testing.T) {
 	t.Parallel()
 	unattended := []string{"gastown/polecats/obsidian", "polecat"}
-	attended := []string{"gastown/crew/sloan", "gastown/witness", "gastown/refinery", "mayor", "deacon", "boot", ""}
+	attended := []string{"gastown/crew/sloan", "gastown/witness", "gastown/refinery", "mayor", "deacon", ""}
 	for _, role := range unattended {
 		if !unattendedPromptRole(role) {
 			t.Errorf("role %q must be treated as unattended", role)

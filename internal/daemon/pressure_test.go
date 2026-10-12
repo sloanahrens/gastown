@@ -14,10 +14,9 @@ func TestIsAgentSession(t *testing.T) {
 		{"hq-mayor", false}, // mayor role retired (gt-rwp7z.17)
 		{"rig-crew-max", true},
 		{"rig-refinery", false}, // refinery role removed (gt-v4ssj.6)
-		{"rig-witness", false},  // witness, deacon and boot roles retired (gt-4k3fj.6.1)
+		{"rig-witness", false},  // witness role retired (gt-4k3fj.6.1)
 		{"rig-polecat-abc", true},
 		{"hq-deacon", false},
-		{"hq-boot", false},
 		{"hq-dog-fido", false}, // dog role retired (gt-29q6g)
 		{"my-personal-session", false},
 		{"", false},

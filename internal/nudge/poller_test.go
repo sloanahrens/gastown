@@ -243,9 +243,8 @@ func TestBuildPollerCommand_UsesDetachedProcessGroup(t *testing.T) {
 
 // Under `go test` os.Executable() is the test binary. Exec'ing it as the
 // nudge-poller runs the whole suite again, detached, and every StartPoller
-// site inside that run spawns another — the same recursion the daemon's
-// boot-triage guard exists for (gt-0mbw found it through a fake tmux that
-// made a Deacon look alive). StartPoller must refuse before Start.
+// site inside that run spawns another (gt-0mbw found it through a fake tmux
+// that made a Deacon look alive). StartPoller must refuse before Start.
 func TestStartPoller_RefusesTestBinary(t *testing.T) {
 	t.Parallel()
 	for _, name := range []string{"daemon.test", "daemon.test.exe"} {

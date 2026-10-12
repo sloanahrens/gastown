@@ -76,7 +76,7 @@ var bdTargetSelectorEnvVars = []string{
 // AgentEnvConfig specifies the configuration for generating agent environment variables.
 // This is the single source of truth for all agent environment configuration.
 type AgentEnvConfig struct {
-	// Role is the agent role: deacon, witness, refinery, crew, polecat, dog, boot
+	// Role is the agent role: deacon, witness, refinery, crew, polecat, dog
 	Role string
 
 	// Rig is the rig name (empty for town-level agents like deacon)
