@@ -223,27 +223,99 @@ func TestIntegrationPruneLocalPolecatBranchBacklogKeepsTheReposOwnHeadBranch(t *
 	}
 }
 
-// TestIntegrationRealLocalPruneRepoNeverForcesADelete pins the delete the
-// sweep is allowed to make: a branch git itself refuses to delete must
-// survive, which a force delete (`git branch -D`) would not. The branch is
-// created without an upstream on purpose — `-d` accepts a branch merged into
-// its upstream, so a tracked branch is not a case it refuses.
-func TestIntegrationRealLocalPruneRepoNeverForcesADelete(t *testing.T) {
+// TestIntegrationRealLocalPruneRepoDeletesOnlyTheTipItWasGiven pins the
+// precondition the delete runs under now that it is `git update-ref -d` rather
+// than `git branch -d`: the branch is removed only while it still points at
+// the commit the caller judged, so one that moved in between is refused
+// instead of losing commits nobody checked (gt-fz90j).
+func TestIntegrationRealLocalPruneRepoDeletesOnlyTheTipItWasGiven(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	remoteDir := initLocalSweepOrigin(t, tmp)
-	repoDir := filepath.Join(tmp, "unmergedrig", ".repo.git")
+	repoDir := filepath.Join(tmp, "movedrig", ".repo.git")
 	initLocalSweepRigRepo(t, repoDir, remoteDir)
-	unmerged := "polecat/unmerged/gt-8+hh"
-	runGit(t, repoDir, "branch", "--no-track", unmerged, "refs/remotes/origin/work")
+	moved := "polecat/moved/gt-8+hh"
+	runGit(t, repoDir, "branch", "--no-track", moved, "refs/remotes/origin/main")
 
+	repoGit := git.NewGitWithDir(repoDir, "")
 	repo := openRealLocalPruneRepo(repoDir)
-	if err := repo.DeleteBranch(unmerged); err == nil {
-		t.Errorf("DeleteBranch(%s) succeeded on a branch that is not merged into origin/main", unmerged)
+
+	judged, err := repo.BranchTip(moved)
+	if err != nil {
+		t.Fatalf("BranchTip(%s): %v", moved, err)
 	}
-	if !localSweepBranchExists(t, git.NewGitWithDir(repoDir, ""), unmerged) {
-		t.Errorf("a failed delete of %s still removed it", unmerged)
+	// The branch moves on to a commit the sweep never looked at.
+	runGit(t, repoDir, "branch", "-f", "--no-track", moved, "refs/remotes/origin/work")
+
+	if err := repo.DeleteBranch(moved, judged); err == nil {
+		t.Errorf("DeleteBranch(%s) deleted at a stale tip, want the delete refused", moved)
 	}
+	if !localSweepBranchExists(t, repoGit, moved) {
+		t.Errorf("the refused delete still removed %s", moved)
+	}
+
+	current, err := repo.BranchTip(moved)
+	if err != nil {
+		t.Fatalf("BranchTip(%s) after the move: %v", moved, err)
+	}
+	if err := repo.DeleteBranch(moved, current); err != nil {
+		t.Errorf("DeleteBranch(%s) at its current tip: %v", moved, err)
+	}
+	if localSweepBranchExists(t, repoGit, moved) {
+		t.Errorf("%s survived a delete at its current tip", moved)
+	}
+}
+
+// TestIntegrationPruneLocalPolecatBranchBacklogDeletesWhenLocalMainLags pins
+// the bug the sweep is fixed for: a rig repo whose local main was left behind
+// by an origin/main that has since advanced still loses its merged polecat
+// branches. The ancestry check is against origin/<default>, and the delete has
+// to agree with it — `git branch -d` compares against that local main instead,
+// refuses, and leaves the backlog the sweep was run to clear (gt-fz90j).
+func TestIntegrationPruneLocalPolecatBranchBacklogDeletesWhenLocalMainLags(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	remoteDir := initLocalSweepOrigin(t, tmp)
+	repoDir := filepath.Join(tmp, "laggingrig", ".repo.git")
+	initLocalSweepRigRepo(t, repoDir, remoteDir)
+
+	// origin/main advances after the rig repo last fetched it, so the rig's
+	// local main is behind the base the sweep judges against.
+	advanceLocalSweepOriginMain(t, tmp)
+	runGit(t, repoDir, "fetch", "origin")
+	lagging := "polecat/lagging/gt-9+ii"
+	runGit(t, repoDir, "branch", "--no-track", lagging, "refs/remotes/origin/main")
+
+	repoGit := git.NewGitWithDir(repoDir, "")
+	merged, err := repoGit.IsAncestor(lagging, "origin/main")
+	if err != nil || !merged {
+		t.Fatalf("%s is not merged into origin/main (merged=%v, err=%v); the test needs that", lagging, merged, err)
+	}
+	if behind, err := repoGit.IsAncestor(lagging, "main"); err != nil || behind {
+		t.Fatalf("%s is an ancestor of local main (behind=%v, err=%v); the rig's main must lag for this test to mean anything", lagging, behind, err)
+	}
+
+	var out bytes.Buffer
+	totals := pruneLocalPolecatBranchBacklog(&out, []localPruneTarget{{Name: "laggingrig", RepoDir: repoDir}}, openRealLocalPruneRepo, true)
+
+	if totals != (localPruneTotals{Deleted: 1}) {
+		t.Fatalf("totals %+v, want the merged branch deleted with no failures; report %q", totals, out.String())
+	}
+	if localSweepBranchExists(t, repoGit, lagging) {
+		t.Errorf("local main behind origin/main kept %s: report %q", lagging, out.String())
+	}
+}
+
+// advanceLocalSweepOriginMain pushes one more commit onto the origin's main,
+// the way a landing worker does between a rig's fetches.
+func advanceLocalSweepOriginMain(t *testing.T, tmp string) {
+	t.Helper()
+	seedDir := filepath.Join(tmp, "seed")
+	runGit(t, seedDir, "checkout", "main")
+	writePolecatPruneTestFile(t, filepath.Join(seedDir, "landed.txt"), "landed\n")
+	runGit(t, seedDir, "add", "landed.txt")
+	runGit(t, seedDir, "commit", "-m", "landed on main")
+	runGit(t, seedDir, "push", "origin", "main")
 }
 
 // TestIntegrationRunPolecatPruneAllRigsSweepsEveryRigInTheTownConfig pins the

@@ -27,8 +27,13 @@ type localPruneRepo interface {
 	// HeldBranches returns every branch a live checkout holds: those checked
 	// out in a worktree, plus the repo's own HEAD branch.
 	HeldBranches() (map[string]bool, error)
-	// DeleteBranch removes a branch; the implementation never forces.
-	DeleteBranch(name string) error
+	// BranchTip returns the commit a branch points at right now.
+	BranchTip(name string) (string, error)
+	// DeleteBranch removes a branch, and only while it still points at tip.
+	// It does not ask whether the branch is merged or held: the sweep judges
+	// both before calling, and the tip is what keeps the delete on the commit
+	// it judged.
+	DeleteBranch(name, tip string) error
 }
 
 // realLocalPruneRepo is localPruneRepo over a rig's real repo.
@@ -80,13 +85,29 @@ func (r realLocalPruneRepo) HeldBranches() (map[string]bool, error) {
 	return out, nil
 }
 
-// DeleteBranch passes force=false. -d is a second gate, not the main one: it
-// refuses a branch merged into neither HEAD nor its own upstream, so a branch
-// merged into its upstream passes it even when that work is nowhere near
-// origin/<default>. The ancestry check above it is what actually decides, and
-// -D would delete whatever it is handed.
-func (r realLocalPruneRepo) DeleteBranch(name string) error {
-	return r.git.DeleteBranch(name, false)
+func (r realLocalPruneRepo) BranchTip(name string) (string, error) {
+	return r.git.Rev("refs/heads/" + name)
+}
+
+// DeleteBranch removes the ref itself, at the commit the sweep judged.
+//
+// `git branch -d` cannot be used here: it decides by ancestry against the
+// repo's own HEAD, and a rig repo is bare, so its HEAD is a local main that
+// tracks origin/main only as often as something fetched it. With local main
+// behind, -d refuses a branch merged into origin/main — the exact backlog the
+// sweep exists to clear — and the sweep reports those branches as failures
+// (gt-fz90j). The ancestry check in the sweep is the decision; this is the
+// delete.
+//
+// update-ref -d takes the old value as a precondition, so the delete lands
+// only while the branch still points at the commit that was checked: a branch
+// that moved since then is refused rather than losing commits the sweep never
+// saw. In exchange it drops -d's two incidental guards — that a branch is
+// merged, and that nothing has it checked out — which is why the sweep reads
+// the worktree list before it deletes anything and skips a whole rig whose
+// worktree list it cannot read.
+func (r realLocalPruneRepo) DeleteBranch(name, tip string) error {
+	return r.git.DeleteLocalBranchIfAt(name, tip)
 }
 
 // localPruneRigResult is one rig's sweep outcome. A non-empty SkippedReason
@@ -140,6 +161,15 @@ func pruneLocalPolecatBranches(repo localPruneRepo, apply bool) localPruneRigRes
 			res.Held = append(res.Held, branch)
 			continue
 		}
+		// The tip is read before the ancestry check, never after it: the
+		// delete is gated on the branch still pointing at the commit that was
+		// checked, so reading it second could hand the delete a commit the
+		// check never saw (gt-fz90j).
+		tip, err := repo.BranchTip(branch)
+		if err != nil {
+			res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", branch, err))
+			continue
+		}
 		merged, err := repo.IsAncestor(branch, base)
 		if err != nil {
 			res.Failures = append(res.Failures, fmt.Sprintf("%s: %v", branch, err))
@@ -150,7 +180,7 @@ func pruneLocalPolecatBranches(repo localPruneRepo, apply bool) localPruneRigRes
 			continue
 		}
 		if apply {
-			if err := repo.DeleteBranch(branch); err != nil {
+			if err := repo.DeleteBranch(branch, tip); err != nil {
 				res.Failures = append(res.Failures, fmt.Sprintf("deleting %s: %v", branch, err))
 				continue
 			}
