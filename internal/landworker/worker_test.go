@@ -55,12 +55,18 @@ type fakeRemote struct {
 
 	// The rig repository's own branches, which the landing's local reap
 	// drives (gt-kne58): the branches it holds and the tip of each, the ones
-	// a worktree has checked out, and what it deleted.
+	// a worktree has checked out, the ones its own HEAD branch has merged,
+	// and what it deleted.
 	localBranches map[string]string
 	checkedOut    map[string]bool
-	localErr      map[string]error
-	localDeleted  []string
-	localForced   []string
+	// localMerged are the branches the repository's own HEAD branch
+	// contains: what git branch -d's merged test reads, and what a landing
+	// leaves stale, so a reap that left that test to git keeps a branch
+	// whose work landed (gt-22ewa).
+	localMerged  map[string]bool
+	localErr     map[string]error
+	localDeleted []string
+	localForced  []string
 }
 
 func (r *fakeRemote) BranchTip(branch string) (string, error) {
@@ -123,22 +129,22 @@ func (r *fakeRemote) DeleteRemoteBranchIfAt(branch, expectedHash string) error {
 }
 
 // DeleteLocalBranch deletes a branch of the rig's own repository, refusing
-// what the worker must: an absent branch is a no-op, and a checked out one,
-// or one the target does not contain, is an error. Real git reads "merged"
-// against the repository's own HEAD, which this model leaves to
-// internal/daemon's gitRemote test.
+// what the worker must: an absent branch is a no-op, and a checked out one an
+// error. The merged test is git's own, and localMerged is what it reads — the
+// repository's HEAD branch, never the target — so a branch the target
+// contains but the repository's own main does not is refused unless the
+// delete is forced, which is the case the reap's proof exists for (gt-22ewa).
 func (r *fakeRemote) DeleteLocalBranch(branch string, force bool) (bool, error) {
 	if err := r.localErr[branch]; err != nil {
 		return false, err
 	}
-	tip, ok := r.localBranches[branch]
-	if !ok {
+	if _, ok := r.localBranches[branch]; !ok {
 		return false, nil
 	}
 	if r.checkedOut[branch] {
 		return false, fmt.Errorf("%s is checked out in a worktree", branch)
 	}
-	if !force && !r.contains[tip] {
+	if !force && !r.localMerged[branch] {
 		return false, fmt.Errorf("the branch %s is not fully merged", branch)
 	}
 	delete(r.localBranches, branch)
