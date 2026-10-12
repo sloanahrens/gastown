@@ -272,6 +272,50 @@ func TestModelsReaderListsEachSeat(t *testing.T) {
 	}
 }
 
+// panelPreferHooked is panelDaemon with prefer_hooked, which moves the second
+// seat first in the dispatcher's own seat order (gt-6oxrj).
+const panelPreferHooked = `{"type":"daemon-patrol-config","version":1,"patrols":{
+  "spec_dispatch":{"enabled":true,"hooked_agent":"claude-sonnet","max_hooked":2,"prefer_hooked":true},
+  "scheduled_slings":{"enabled":true,"entries":[{"name":"deep-review","rig":"gastown","formula":"mol-deep-review","agent":"claude-sonnet","interval":"24h"}]}}}`
+
+// An agent the town gives two seats is one seat to the dispatcher, so the panel
+// prints one row for it: the seat that comes first in the dispatcher's order,
+// whose cap is the one it spends (gt-6oxrj).
+func TestModelsReaderSkipsASeatRepeatingAnEarlierSeatsAgent(t *testing.T) {
+	t.Parallel()
+
+	om := writeOMConfig(t, `{"backend":["claude","-p","--model","sonnet"]}`)
+
+	// polecat_pool.agent is the pro seat's default agent, so the pool seat
+	// keeps it and the pro seat is no row: one seat, not two.
+	town := t.TempDir()
+	writeModelsSettings(t, town, `{"polecat_pool":{"agent":"deepseek-pro","max_seats":3}}`)
+	writePanelFile(t, town, "mayor/daemon.json", panelDaemon)
+	rows := (&modelsReader{townRoot: town, omPath: om}).read().SeatRows
+	if len(rows) != 2 {
+		t.Fatalf("seat rows = %+v, want the pool seat and the second seat", rows)
+	}
+	if rows[0].Seat != "pool" || rows[0].Agent != "deepseek-pro" || rows[0].Cap != 3 {
+		t.Errorf("pool seat = %+v, want the seat the dispatcher's order reaches first", rows[0])
+	}
+	if rows[1].Seat != "second" {
+		t.Errorf("seat rows = %+v, want the second seat after the pool seat", rows)
+	}
+
+	// prefer_hooked moves the second seat first, so the seat it shares with the
+	// pool seat is the second seat's and the pool seat is the row dropped.
+	preferring := t.TempDir()
+	writeModelsSettings(t, preferring, `{"polecat_pool":{"agent":"claude-sonnet","max_seats":3,"pro_agent":"deepseek-reasoner","pro_max":2}}`)
+	writePanelFile(t, preferring, "mayor/daemon.json", panelPreferHooked)
+	rows = (&modelsReader{townRoot: preferring, omPath: om}).read().SeatRows
+	if len(rows) != 2 || rows[0].Seat != "second" || rows[1].Seat != "pro" {
+		t.Fatalf("seat rows = %+v, want the second seat then the pro seat", rows)
+	}
+	if rows[0].Agent != "claude-sonnet" || rows[0].Cap != 2 {
+		t.Errorf("second seat = %+v, want the seat prefer_hooked moves first", rows[0])
+	}
+}
+
 // Each role names its model and the key it was read from, and a config the
 // town cannot read leaves its role unknown rather than empty (gt-lqa6p).
 func TestModelsReaderListsTheModelPerRole(t *testing.T) {
