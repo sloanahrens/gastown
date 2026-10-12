@@ -113,14 +113,39 @@ func catchUpGCDue(now time.Time, databases []string, st maintenanceGCState) []st
 	return due
 }
 
+// catchUpBackedUp splits the due databases into the ones a catch-up gc may run
+// and the ones it may not. A database is ready only when a backup holds it and
+// that backup is younger than maintenanceCatchUpAge: the age applied to the
+// newest backup says a backup ran, not that it holds the database in question.
+// Only the catch-up has that gap — the window takes its backup from the
+// databases it is about to gc — and the catch-up reuses a backup that may
+// predate a database created since, so gc'ing one with no backup of it is
+// exactly what the backup-first rule exists to prevent (gt-i95fv). A backup
+// that is absent, one past the age and one holding something else all land in
+// unbacked: skip that database and let the rest of the pass run.
+func catchUpBackedUp(now time.Time, root string, due []string) (ready, unbacked []string) {
+	for _, db := range due {
+		b, ok, err := doltbackup.LastFor(root, db)
+		if err != nil || !ok || b.Age(now) >= maintenanceCatchUpAge {
+			unbacked = append(unbacked, db)
+			continue
+		}
+		ready = append(ready, db)
+	}
+	return ready, unbacked
+}
+
 // maybeCatchUpGC runs the gc outside the window for the databases whose last gc
 // is older than maintenanceCatchUpGCAge (gt-uux5b). It exists for the town
 // whose windows kept deferring — 03:00 is the hour the town is asleep or down,
 // and a database can wait weeks on "daemon has work in flight" alone — so it
 // runs the very cycle the window runs (maintenanceGCCycle, unchanged) once the
 // full maintenanceQuiet guard allows it and a backup younger than
-// maintenanceCatchUpAge is on disk. The backup still comes first: the gc never
-// runs without one.
+// maintenanceCatchUpAge is on disk. That age is the whole backup's, not one
+// database's: the gc is per database, so each database it takes also needs a
+// backup holding it (catchUpBackedUp, gt-i95fv), and one the backup does not
+// hold — created since the last nightly backup — waits for a pass that has one.
+// The backup still comes first: the gc never runs without one.
 //
 // Fail closed. A window that does not parse, an external server, an unreadable
 // state file, a quiet probe that cannot answer or a backup older than the
@@ -174,6 +199,17 @@ func (d *Daemon) maybeCatchUpGC(now time.Time) {
 	due := catchUpGCDue(now, databases, st)
 	if len(due) == 0 {
 		return // nothing stale; this check fires every 5 minutes
+	}
+	// A fresh backup on disk is not a backup of a database created after it: a
+	// database no backup holds is logged and skipped, and the rest still run
+	// (gt-i95fv).
+	due, unbacked := catchUpBackedUp(now, root, due)
+	if len(unbacked) > 0 {
+		d.logger.Printf("scheduled_maintenance: catch-up gc skips %d database(s) no backup younger than %v holds: %s",
+			len(unbacked), maintenanceCatchUpAge, strings.Join(unbacked, ", "))
+	}
+	if len(due) == 0 {
+		return
 	}
 	// The full guard, asked once before the cycle so a busy town is logged as
 	// waiting rather than as a dispatched cycle that only deferred; the cycle

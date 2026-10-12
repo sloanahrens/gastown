@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -357,6 +358,93 @@ func TestCatchUpGCOnlyTakesStaleDatabases(t *testing.T) {
 	d.runScheduledMaintenance()
 	if got := strings.Join(f.gcCalls, ","); got != "gt" {
 		t.Errorf("gc calls = %q, want gt alone", got)
+	}
+}
+
+// A database created after the last nightly backup is in no backup: the
+// catch-up skips it for this pass, logs it, and still gc's the databases the
+// backup holds (gt-i95fv).
+func TestCatchUpGCSkipsADatabaseTheBackupDoesNotHold(t *testing.T) {
+	t.Parallel()
+	d, f := catchUpGCDaemon(t)
+	var buf bytes.Buffer
+	d.logger = log.New(&buf, "", 0)
+	// A database that appeared after this morning's backup: on disk, never
+	// gc'd, in no backup at all.
+	f.sizes["newdb"] = gcMeasure{633 * mib, 0}
+	catchUpGCStale(t, d, "gt")
+
+	d.runScheduledMaintenance()
+
+	if got := strings.Join(f.gcCalls, ","); got != "gt" {
+		t.Errorf("gc calls = %q, want gt alone: no backup holds newdb", got)
+	}
+	var skipped string
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(line, "catch-up gc skips") {
+			skipped = line
+		}
+	}
+	if !strings.HasSuffix(skipped, ": newdb") || !strings.Contains(skipped, "1 database(s)") {
+		t.Errorf("skip line = %q, want it to name newdb alone", skipped)
+	}
+}
+
+// Which due databases a catch-up gc may take: only the ones a backup younger
+// than the catch-up age holds. A database in no backup at all is out, one only
+// an older backup holds is out once that backup is past the age, and a listing
+// that cannot be read or found leaves nothing (gt-i95fv).
+func TestCatchUpGCBackedUp(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	// commitBackup writes one complete night holding databases, as the nightly
+	// backup leaves it on disk.
+	commitBackup := func(databases []string, at time.Time) {
+		t.Helper()
+		if err := os.MkdirAll(doltbackup.PartialDir(root, at), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := doltbackup.Commit(root, doltbackup.Manifest{
+			Started: at, Finished: at, Databases: databases,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// This morning's backup: gt, and not the database created after it.
+	commitBackup([]string{"gt"}, catchUpNow.Add(-2*time.Hour))
+	// A night past the catch-up age holds "old", but is too old to cover a gc.
+	commitBackup([]string{"old"}, catchUpNow.Add(-maintenanceCatchUpAge-24*time.Hour))
+	// A root holding a file where a backup root belongs: no listing can read it.
+	unreadable := filepath.Join(t.TempDir(), "not-a-root")
+	if err := os.WriteFile(unreadable, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name     string
+		root     string
+		due      []string
+		ready    string
+		unbacked string
+	}{
+		{"held by the fresh backup", root, []string{"gt"}, "gt", ""},
+		{"in no backup", root, []string{"newdb"}, "", "newdb"},
+		{"held only by a backup past the age", root, []string{"old"}, "", "old"},
+		{"some held, some not", root, []string{"gt", "newdb"}, "gt", "newdb"},
+		{"unreadable listing", unreadable, []string{"gt", "newdb"}, "", "gt,newdb"},
+		{"missing root", filepath.Join(root, "gone"), []string{"gt"}, "", "gt"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ready, unbacked := catchUpBackedUp(catchUpNow, tc.root, tc.due)
+			if got := strings.Join(ready, ","); got != tc.ready {
+				t.Errorf("ready = %q, want %q", got, tc.ready)
+			}
+			if got := strings.Join(unbacked, ","); got != tc.unbacked {
+				t.Errorf("unbacked = %q, want %q", got, tc.unbacked)
+			}
+		})
 	}
 }
 
