@@ -100,6 +100,13 @@ how long it has waited and whether Sloan has answered it — so he can see what 
 waiting on him and answer it by commenting on the bead. The page draws it and
 never writes: there is no form, and a question is closed from a terminal.
 
+The Deep review panel reads the gastown rig's scheduled:deep-review beads with
+bd — when the next run is due by the schedule's interval, or "paused: <reason>"
+while a hold file or ESTOP parks dispatch, and the last ten runs with their
+status, duration, findings, beads filed and a reference to the digest. A read
+that fails says so rather than reading as no runs. The panel never writes and
+never draws a digest's text.
+
 Lifecycle: the dashboard watches its own binary and the town registry. When make
 install replaces the binary, or a rig is added to or removed from the town, the
 dashboard restarts itself in place: same PID, same flags, same listening socket,
@@ -248,6 +255,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		WithChecks(dashboard.NewCloudChecksReader(dashboardCloudChecksPath(townRoot)))
 	reports := dashboard.NewReportsReader(dashboardReportsDir(townRoot))
 	questions := newDashQuestionsReader(townRoot)
+	deepReview := newDashDeepReviewReader(townRoot)
 	loads := newDashLoads(townRoot, time.Now)
 	return dashboard.NewHub(dashboard.Config{
 		Feed:       feed,
@@ -263,6 +271,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Reports:    func() *dashboard.Reports { return reports.Read(time.Now()) },
 		ReportsDir: dashboardReportsDir(townRoot),
 		Questions:  func() *dashboard.Questions { return questions.read(time.Now()) },
+		DeepReview: func() *dashboard.DeepReview { return deepReview.read(time.Now()) },
 		Escalation: func() *dashboard.Escalations { return escalations.read(time.Now()) },
 		Dispatch:   om.dispatch,
 		Models:     models.read,
