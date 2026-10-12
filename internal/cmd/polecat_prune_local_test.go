@@ -12,7 +12,8 @@ import (
 
 // fakeLocalPruneRepo is one rig's repo in memory: the branches it holds, the
 // ones a live checkout holds, the ones merged into its base ref, and the
-// failures a test wants the sweep to hit. It records what the sweep deleted.
+// failures a test wants the sweep to hit. It records what the sweep deleted
+// and the tip each delete was gated on.
 type fakeLocalPruneRepo struct {
 	branches    []string
 	merged      []string
@@ -22,8 +23,10 @@ type fakeLocalPruneRepo struct {
 	listErr     error
 	worktreeErr error
 	ancestryErr map[string]error
+	tipErr      map[string]error
 	deleteErr   map[string]error
 	deleted     []string
+	deletedTips map[string]string
 }
 
 func (f *fakeLocalPruneRepo) LocalPolecatBranches() ([]string, error) {
@@ -61,10 +64,23 @@ func (f *fakeLocalPruneRepo) HeldBranches() (map[string]bool, error) {
 	return out, nil
 }
 
-func (f *fakeLocalPruneRepo) DeleteBranch(name string) error {
+// BranchTip stands in for rev-parse: a branch's tip is its own name, so a
+// test reads the value back out of what the sweep recorded.
+func (f *fakeLocalPruneRepo) BranchTip(name string) (string, error) {
+	if err := f.tipErr[name]; err != nil {
+		return "", err
+	}
+	return "tip-of-" + name, nil
+}
+
+func (f *fakeLocalPruneRepo) DeleteBranch(name, tip string) error {
 	if err := f.deleteErr[name]; err != nil {
 		return err
 	}
+	if f.deletedTips == nil {
+		f.deletedTips = make(map[string]string)
+	}
+	f.deletedTips[name] = tip
 	f.deleted = append(f.deleted, name)
 	return nil
 }
@@ -100,6 +116,11 @@ func TestPruneLocalPolecatBranchesSeparatesMergedCheckedOutAndUnmerged(t *testin
 		if apply {
 			if !slices.Equal(repo.deleted, wantDeleted) {
 				t.Errorf("applied run deleted %v, want %v", repo.deleted, wantDeleted)
+			}
+			// The delete is gated on the tip the sweep itself read, so a
+			// branch that moved under it is refused rather than deleted.
+			if got := repo.deletedTips["polecat/a/gt-1+1"]; got != "tip-of-polecat/a/gt-1+1" {
+				t.Errorf("deleted %s at tip %q, want the tip the sweep read", "polecat/a/gt-1+1", got)
 			}
 		} else if len(repo.deleted) != 0 {
 			t.Errorf("dry run deleted %v, want nothing", repo.deleted)
@@ -192,7 +213,18 @@ func TestPruneLocalPolecatBranchesReportsFailedBranchAndSweepsTheRest(t *testing
 			repo: &fakeLocalPruneRepo{
 				branches:  []string{"polecat/a/gt-1+1", "polecat/b/gt-2+2"},
 				merged:    []string{"polecat/a/gt-1+1", "polecat/b/gt-2+2"},
-				deleteErr: map[string]error{"polecat/a/gt-1+1": errors.New("branch is not fully merged")},
+				deleteErr: map[string]error{"polecat/a/gt-1+1": errors.New("cannot lock ref: is at other but expected tip")},
+			},
+			want: "polecat/a/gt-1+1",
+		},
+		{
+			// No tip means no precondition the delete can name, so the branch
+			// is reported rather than deleted on a commit nobody read.
+			name: "tip unreadable",
+			repo: &fakeLocalPruneRepo{
+				branches: []string{"polecat/a/gt-1+1", "polecat/b/gt-2+2"},
+				merged:   []string{"polecat/a/gt-1+1", "polecat/b/gt-2+2"},
+				tipErr:   map[string]error{"polecat/a/gt-1+1": errors.New("rev-parse failed")},
 			},
 			want: "polecat/a/gt-1+1",
 		},
