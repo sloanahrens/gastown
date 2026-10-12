@@ -15,15 +15,24 @@ import (
 // certainly missed (gt-wne04).
 const maintenanceCatchUpAge = 24*time.Hour + maintenanceWindowLength
 
-// maintenanceCatchUpRetry is the shortest gap between two catch-up attempts.
-// The in-window path escalates a failed backup once and stops until the next
-// window; outside it the check fires every 5 minutes, so without this a
-// failing backup would rerun and re-escalate on every tick.
+// maintenanceCatchUpRetry is the shortest gap between two catch-up attempts,
+// for the backup and for the gc. The in-window path
+// escalates a failed backup once and stops until the next window; outside it
+// the check fires every 5 minutes, so without this a failing backup would rerun
+// and re-escalate on every tick. Each catch-up throttles on its own attempt
+// timestamp, so a stuck gc cannot delay the backup.
 const maintenanceCatchUpRetry = 6 * time.Hour
 
-// maybeCatchUpBackup takes a missed nightly backup outside the window: the
-// backup only, never the gc, which stays in the window behind the full quiet
-// guard. It waits for a moment when no hard daemon work is in flight and no
+// maintenanceCatchUpGCAge is how stale a database's last patrol gc may be,
+// outside the window, before the catch-up gc runs that database: the weekly
+// interval plus a missed window of slack. A database with no recorded gc is
+// due. The old-gen trigger is not consulted out of window — the option removed
+// is the one that fires on growth, and the window remains where a gc runs on
+// schedule (gt-uux5b).
+const maintenanceCatchUpGCAge = 8 * 24 * time.Hour
+
+// maybeCatchUpBackup takes a missed nightly backup outside the window. It waits
+// for a moment when no hard daemon work is in flight and no
 // container-gate slot is held, so it never runs beside a landing gate; a
 // working polecat — or a soft hold the next tick reruns — does not block it, or
 // a town busy with its own ticks would never catch up. It runs on the gc
@@ -88,6 +97,108 @@ func (d *Daemon) catchUpUnknown(now time.Time, what string) {
 	d.logger.Printf("scheduled_maintenance: catch-up: cannot tell the newest backup's age: %s", what)
 	d.maintenance().escalate(d, "scheduled_maintenance", fmt.Sprintf(
 		"scheduled_maintenance: cannot read the Dolt backups, so a missed nightly backup cannot be caught up: %s", what))
+}
+
+// catchUpGCDue lists the databases a catch-up gc should run: those with no
+// recorded gc, or a last one older than maintenanceCatchUpGCAge. The weekly and
+// old-gen triggers are not consulted — a database this stale is already past
+// the weekly interval, and growth alone is what the window is for.
+func catchUpGCDue(now time.Time, databases []string, st maintenanceGCState) []string {
+	var due []string
+	for _, db := range databases {
+		if last := st.LastGC[db]; last.IsZero() || now.Sub(last) >= maintenanceCatchUpGCAge {
+			due = append(due, db)
+		}
+	}
+	return due
+}
+
+// maybeCatchUpGC runs the gc outside the window for the databases whose last gc
+// is older than maintenanceCatchUpGCAge (gt-uux5b). It exists for the town
+// whose windows kept deferring — 03:00 is the hour the town is asleep or down,
+// and a database can wait weeks on "daemon has work in flight" alone — so it
+// runs the very cycle the window runs (maintenanceGCCycle, unchanged) once the
+// full maintenanceQuiet guard allows it and a backup younger than
+// maintenanceCatchUpAge is on disk. The backup still comes first: the gc never
+// runs without one.
+//
+// Fail closed. A window that does not parse, an external server, an unreadable
+// state file, a quiet probe that cannot answer or a backup older than the
+// catch-up age all mean no gc; the check fires every 5 minutes, so a deferral
+// simply retries on a later tick. Only a cycle that ran to its end sets the
+// retry gap, and only a failed one escalates (maintenanceGCCycle does that).
+// Nothing here counts toward the skipped-window streak and nothing sets the
+// cycle-completion time the window folds into lastMaintenanceRun: the next
+// window still takes its own backup and runs its own gc.
+func (d *Daemon) maybeCatchUpGC(now time.Time) {
+	if d.maintenanceGCRunning.Load() {
+		// A window run, a catch-up backup or a catch-up gc holds the cycle.
+		return
+	}
+	if last := d.catchUpGCAttemptAt.Load(); last != 0 && now.Sub(time.Unix(0, last)) < maintenanceCatchUpRetry {
+		return
+	}
+	// Every condition below is one maybeCatchUpBackup looks at on this same
+	// tick and reports itself — a backup root it cannot read, a backup list it
+	// cannot parse, a backup too old, an external server, no databases — so the
+	// gc fails closed in silence rather than repeating it every 5 minutes.
+	s := d.maintenance()
+	root, err := s.backupRoot()
+	if err != nil {
+		return
+	}
+	newest, ok, err := doltbackup.Newest(root)
+	if err != nil {
+		return
+	}
+	if !ok || newest.Age(now) >= maintenanceCatchUpAge {
+		// The catch-up backup above is what puts one there; in production that
+		// runs on its own goroutine, so the gc waits for a later tick.
+		return
+	}
+	if external, _ := s.gcExternal(d); external {
+		return
+	}
+	dataDir := d.maintenanceDataDir()
+	databases, err := s.gcDatabases(dataDir)
+	if err != nil || len(databases) == 0 {
+		return
+	}
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		// Unlike the window's cycle, which treats unreadable state as "never
+		// gc'd", the catch-up cannot tell which databases are due: no gc.
+		d.logger.Printf("scheduled_maintenance: catch-up gc skipped: cannot read %s: %v", maintenanceGCStateFileName, err)
+		return
+	}
+	due := catchUpGCDue(now, databases, st)
+	if len(due) == 0 {
+		return // nothing stale; this check fires every 5 minutes
+	}
+	// The full guard, asked once before the cycle so a busy town is logged as
+	// waiting rather than as a dispatched cycle that only deferred; the cycle
+	// re-checks it per database.
+	if quiet, why := s.quiet(d); !quiet {
+		d.logger.Printf("scheduled_maintenance: catch-up gc deferred: %s", why)
+		return
+	}
+	if !d.maintenanceGCRunning.CompareAndSwap(false, true) {
+		return
+	}
+	d.logger.Printf("scheduled_maintenance: catch-up gc outside the window: %d database(s) past %v since their last gc: %s",
+		len(due), maintenanceCatchUpGCAge, strings.Join(due, ", "))
+	s.dispatch(func() {
+		defer d.maintenanceGCRunning.Store(false)
+		res := d.maintenanceGCCycle(due, dataDir)
+		d.logger.Printf("scheduled_maintenance: catch-up gc cycle %s", res.outcome)
+		if res.outcome == gcOutcomeDeferred {
+			// The town went busy behind the guard. The next 5-minute tick
+			// retries, as the window's own deferral does, so the throttle
+			// stays reserved for a run that failed.
+			return
+		}
+		d.catchUpGCAttemptAt.Store(d.maintenance().now().UnixNano())
+	})
 }
 
 // catchUpQuiet is the catch-up's guard: no hard daemon work in flight (a

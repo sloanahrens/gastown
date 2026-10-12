@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -28,8 +29,39 @@ func catchUpDaemon(t *testing.T) (*Daemon, *gcFakes) {
 	return d, f
 }
 
+// recordCatchUpGC seeds a database's last patrol gc at.
+func recordCatchUpGC(t *testing.T, d *Daemon, db string, at time.Time) {
+	t.Helper()
+	if err := recordMaintenanceGCRun(d.config.TownRoot, db, gcMeasure{}, gcMeasure{}, at); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// catchUpGCDaemon is catchUpDaemon with a two-hour-old backup on disk and both
+// databases gc'd two hours ago: the catch-up gc has nothing to wait for but a
+// stale database. A test marks one stale with catchUpGCStale.
+func catchUpGCDaemon(t *testing.T) (*Daemon, *gcFakes) {
+	t.Helper()
+	d, f := catchUpDaemon(t)
+	at := catchUpNow.Add(-2 * time.Hour)
+	d.maint.now = func() time.Time { return at }
+	d.maintenanceBackup([]string{"gt", "hq"})
+	d.maint.now = func() time.Time { return catchUpNow }
+	recordCatchUpGC(t, d, "gt", at)
+	recordCatchUpGC(t, d, "hq", at)
+	f.backupCalls, f.events = nil, nil
+	return d, f
+}
+
+// catchUpGCStale moves db's last gc past the catch-up age.
+func catchUpGCStale(t *testing.T, d *Daemon, db string) {
+	t.Helper()
+	recordCatchUpGC(t, d, db, catchUpNow.Add(-maintenanceCatchUpGCAge-time.Hour))
+}
+
 // A daemon that was down across the window takes the missed backup on the next
-// check outside it: the backup only, never the gc, which stays in the window.
+// check outside it, and a database whose windows kept deferring is gc'd after
+// it (gt-uux5b).
 func TestBackupCatchUpTakesMissedBackupOutsideWindow(t *testing.T) {
 	t.Parallel()
 	d, f := catchUpDaemon(t)
@@ -39,11 +71,6 @@ func TestBackupCatchUpTakesMissedBackupOutsideWindow(t *testing.T) {
 	if len(f.backupCalls) != 2 {
 		t.Fatalf("backup calls = %v, want gt and hq", f.backupCalls)
 	}
-	for _, e := range f.events {
-		if strings.HasPrefix(e, "gc ") {
-			t.Errorf("catch-up ran a gc outside the window: %v", f.events)
-		}
-	}
 	b, ok, err := doltbackup.Newest(f.backupRoot)
 	if err != nil || !ok {
 		t.Fatalf("no backup committed: %v", err)
@@ -51,11 +78,28 @@ func TestBackupCatchUpTakesMissedBackupOutsideWindow(t *testing.T) {
 	if b.Path != doltbackup.Dir(f.backupRoot, catchUpNow) {
 		t.Errorf("backup = %s, want today's %s", b.Path, doltbackup.Dir(f.backupRoot, catchUpNow))
 	}
+	// Both databases have no recorded gc, so the catch-up gc follows the
+	// backup in the same pass — the backup is never the last word.
+	backed, gc := -1, -1
+	for i, e := range f.events {
+		if backed < 0 && strings.HasPrefix(e, "backup ") {
+			backed = i
+		}
+		if gc < 0 && strings.HasPrefix(e, "gc ") {
+			gc = i
+		}
+	}
+	if len(f.gcCalls) != 2 || backed < 0 || gc < 0 || gc < backed {
+		t.Errorf("gc calls = %v after backup calls %v: the gc must follow the backup", f.gcCalls, f.backupCalls)
+	}
 
-	// One catch-up: the next check finds today's backup and takes nothing.
+	// One catch-up: the next check finds today's backup and a recorded gc.
 	d.runScheduledMaintenance()
 	if len(f.backupCalls) != 2 {
 		t.Errorf("second check took another backup: %v", f.backupCalls)
+	}
+	if len(f.gcCalls) != 2 {
+		t.Errorf("second check gc'd again: %v", f.gcCalls)
 	}
 }
 
@@ -263,5 +307,226 @@ func TestBackupCatchUpIgnoredWithMalformedWindow(t *testing.T) {
 
 	if len(f.backupCalls) != 0 {
 		t.Errorf("catch-up ran with a malformed window: %v", f.backupCalls)
+	}
+	if len(f.gcCalls) != 0 {
+		t.Errorf("catch-up gc ran with a malformed window: %v", f.gcCalls)
+	}
+}
+
+// --- the catch-up gc (gt-uux5b) -----------------------------------------------
+
+// Which databases a catch-up gc takes: past the catch-up age, or never gc'd.
+// The window's weekly trigger is not enough out of window — a database a week
+// off its gc waits for the window.
+func TestCatchUpGCDue(t *testing.T) {
+	t.Parallel()
+	st := maintenanceGCState{LastGC: map[string]time.Time{
+		"never":  {},
+		"fresh":  catchUpNow.Add(-48 * time.Hour),
+		"weekly": catchUpNow.Add(-maintenanceGCWeekly - time.Hour),
+		"stale":  catchUpNow.Add(-maintenanceCatchUpGCAge - time.Minute),
+		"exact":  catchUpNow.Add(-maintenanceCatchUpGCAge),
+	}}
+	got := catchUpGCDue(catchUpNow, []string{"never", "fresh", "weekly", "stale", "exact"}, st)
+	if want := "never,stale,exact"; strings.Join(got, ",") != want {
+		t.Errorf("catchUpGCDue = %v, want %s", got, want)
+	}
+}
+
+// A database whose last gc is younger than the catch-up age is left to the
+// window; marking one stale is what the catch-up takes.
+func TestCatchUpGCOnlyTakesStaleDatabases(t *testing.T) {
+	t.Parallel()
+	d, f := catchUpGCDaemon(t)
+
+	d.runScheduledMaintenance()
+	if len(f.gcCalls) != 0 {
+		t.Fatalf("gc ran with every database recently gc'd: %v", f.gcCalls)
+	}
+
+	// A week since the last gc is due in the window (the weekly trigger) and
+	// not yet due to the catch-up: the age is what decides, so the same
+	// database that the window would gc waits here.
+	recordCatchUpGC(t, d, "gt", catchUpNow.Add(-7*24*time.Hour))
+	d.runScheduledMaintenance()
+	if len(f.gcCalls) != 0 {
+		t.Fatalf("gc ran on a database inside the catch-up age: %v", f.gcCalls)
+	}
+
+	catchUpGCStale(t, d, "gt")
+	d.runScheduledMaintenance()
+	if got := strings.Join(f.gcCalls, ","); got != "gt" {
+		t.Errorf("gc calls = %q, want gt alone", got)
+	}
+}
+
+// The catch-up gc waits for the full quiet guard the window's cycle uses, not
+// the looser one a read-only backup allows: a held gate slot or a working
+// polecat means no gc. A deferral is not recorded — the skipped-window streak
+// counts windows.
+func TestCatchUpGCWaitsForAQuietTown(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		busy func(d *Daemon)
+		want string
+	}{
+		{"gate slot held", func(d *Daemon) {
+			d.maint.slotHolders = func(string) ([]string, error) { return []string{"gastown/landing"}, nil }
+		}, "slot held by gastown/landing"},
+		{"polecat working", func(d *Daemon) {
+			d.maint.workingPolecats = func(*Daemon) ([]string, error) { return []string{"gastown/furiosa"}, nil }
+		}, "polecats working: gastown/furiosa"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, f := catchUpGCDaemon(t)
+			// The real guard, over the seams the case sets.
+			d.maint.quiet = (*Daemon).maintenanceQuiet
+			var buf bytes.Buffer
+			d.logger = log.New(&buf, "", 0)
+			catchUpGCStale(t, d, "gt")
+			tc.busy(d)
+
+			d.runScheduledMaintenance()
+
+			if len(f.gcCalls) != 0 {
+				t.Fatalf("gc ran while %s: %v", tc.name, f.gcCalls)
+			}
+			if want := "catch-up gc deferred: " + tc.want; !strings.Contains(buf.String(), want) {
+				t.Errorf("log = %q, want it to carry %q", buf.String(), want)
+			}
+			st, err := loadMaintenanceGCState(d.config.TownRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.PendingDeferral != nil || st.ConsecutiveDeferredWindows != 0 || len(st.DeferralReasons) != 0 {
+				t.Errorf("a catch-up deferral was recorded: %+v", st)
+			}
+		})
+	}
+}
+
+// A gc that fails escalates once, and the catch-up does not rerun it on every
+// 5-minute tick: its own attempt timestamp bounds it to one per retry gap, and
+// the backup catch-up keeps its own.
+func TestCatchUpGCErrorEscalatesOnceAndIsThrottled(t *testing.T) {
+	t.Parallel()
+	d, f := catchUpGCDaemon(t)
+	catchUpGCStale(t, d, "gt")
+	f.gcErr["gt"] = errors.New("dolt_gc --full: connection refused")
+
+	d.runScheduledMaintenance()
+	if len(f.gcCalls) != 1 || len(f.escalations) != 1 {
+		t.Fatalf("calls=%v escalations=%v, want one attempt and one escalation", f.gcCalls, f.escalations)
+	}
+
+	d.maint.now = func() time.Time { return catchUpNow.Add(5 * time.Minute) }
+	d.runScheduledMaintenance()
+	if len(f.gcCalls) != 1 || len(f.escalations) != 1 {
+		t.Errorf("retried within the gap: calls=%v escalations=%v", f.gcCalls, f.escalations)
+	}
+
+	d.maint.now = func() time.Time { return catchUpNow.Add(maintenanceCatchUpRetry + time.Minute) }
+	d.runScheduledMaintenance()
+	if len(f.gcCalls) != 2 || len(f.escalations) != 2 {
+		t.Errorf("no retry after the gap: calls=%v escalations=%v", f.gcCalls, f.escalations)
+	}
+	// The backup catch-up was not starved by the failing gc: its throttle is
+	// its own, so a backup stale by age is still taken.
+	f.backupCalls = nil
+	d.maint.now = func() time.Time { return catchUpNow.Add(maintenanceCatchUpAge + time.Hour) }
+	d.runScheduledMaintenance()
+	if len(f.backupCalls) == 0 {
+		t.Error("the failing gc blocked the backup catch-up")
+	}
+}
+
+// A catch-up whose cycle defers behind the guard — the town went busy between
+// the check and the per-database call — is not throttled: the next tick gives
+// it the town's next quiet moment. Only a cycle that ran out waits for the gap.
+func TestCatchUpGCDeferralRetriesNextTick(t *testing.T) {
+	t.Parallel()
+	d, f := catchUpGCDaemon(t)
+	catchUpGCStale(t, d, "gt")
+	f.quietUntil = 1 // quiet for the check, busy for the cycle's re-check
+
+	d.runScheduledMaintenance()
+	if len(f.gcCalls) != 0 {
+		t.Fatalf("gc ran while the town was busy: %v", f.gcCalls)
+	}
+
+	f.quietUntil = -1 // town goes quiet
+	d.runScheduledMaintenance()
+	if got := strings.Join(f.gcCalls, ","); got != "gt" {
+		t.Errorf("after a deferral the next tick gc'd %q, want gt", got)
+	}
+}
+
+// A state file the daemon cannot read is no basis for a gc: the catch-up
+// cannot tell which databases are stale, so it runs none.
+func TestCatchUpGCUnreadableStateRunsNoGC(t *testing.T) {
+	t.Parallel()
+	d, f := catchUpGCDaemon(t)
+	catchUpGCStale(t, d, "gt")
+	path := maintenanceGCStatePath(d.config.TownRoot)
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d.runScheduledMaintenance()
+
+	if len(f.gcCalls) != 0 {
+		t.Errorf("gc ran on an unreadable state file: %v", f.gcCalls)
+	}
+}
+
+// The gc never runs without a backup younger than the catch-up age: a backup
+// that failed leaves nothing on disk, and the next tick retries the backup.
+func TestCatchUpGCSkipsWithoutAFreshBackup(t *testing.T) {
+	t.Parallel()
+	d, f := catchUpDaemon(t)
+	f.backupErr["gt"] = errors.New("disk full")
+
+	d.runScheduledMaintenance()
+
+	if len(f.gcCalls) != 0 {
+		t.Errorf("gc ran with no backup on disk: %v", f.gcCalls)
+	}
+}
+
+// A gc cycle already in flight (a window run, another catch-up) owns the
+// databases; the catch-up stands down and takes its turn once it is clear.
+func TestCatchUpGCSkipsWhileAGCCycleIsRunning(t *testing.T) {
+	t.Parallel()
+	d, f := catchUpGCDaemon(t)
+	catchUpGCStale(t, d, "gt")
+	d.maintenanceGCRunning.Store(true)
+
+	d.runScheduledMaintenance()
+	if len(f.gcCalls) != 0 {
+		t.Fatalf("a second cycle started while one was running: %v", f.gcCalls)
+	}
+
+	d.maintenanceGCRunning.Store(false)
+	d.runScheduledMaintenance()
+	if got := strings.Join(f.gcCalls, ","); got != "gt" {
+		t.Errorf("gc calls = %q, want gt once the cycle is clear", got)
+	}
+}
+
+// An externally managed server, or one off this host, has a data dir this host
+// cannot measure: no catch-up gc.
+func TestCatchUpGCSkipsWithAnExternalServer(t *testing.T) {
+	t.Parallel()
+	d, f := catchUpGCDaemon(t)
+	catchUpGCStale(t, d, "gt")
+	d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
+
+	d.runScheduledMaintenance()
+
+	if len(f.gcCalls) != 0 {
+		t.Errorf("gc ran against an external server: %v", f.gcCalls)
 	}
 }
