@@ -106,6 +106,83 @@ dolt.idle-timeout: "0"
 	}
 }
 
+// TestIdleTimeoutCheck_Run_CommentedOut pins the fix for a commented-out
+// dolt.idle-timeout line counting as present. Run scanned the raw bytes with
+// strings.Contains, so a rig that had disabled the setting by commenting it out
+// passed the check and never got offered the fix.
+func TestIdleTimeoutCheck_Run_CommentedOut(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+
+	townBeads := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(townBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+	routesContent := `{"prefix":"gt-","path":"gastown"}
+{"prefix":"bd-","path":"beads"}
+`
+	if err := os.WriteFile(filepath.Join(townBeads, "routes.jsonl"), []byte(routesContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// gastown's only occurrence of the key is commented out.
+	fixtures := map[string]string{
+		"gastown": "# dolt.idle-timeout: \"0\"\nprefix: gt\nissue-prefix: gt\n",
+		"beads":   "prefix: bd\nissue-prefix: bd\n#dolt.idle-timeout: \"0\"\ndolt.idle-timeout: \"0\"\n",
+	}
+	for rig, content := range fixtures {
+		rigBeads := filepath.Join(townRoot, rig, ".beads")
+		if err := os.MkdirAll(rigBeads, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(rigBeads, "config.yaml"), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result := NewIdleTimeoutCheck().Run(&CheckContext{TownRoot: townRoot})
+
+	if result.Status != StatusWarning {
+		t.Fatalf("expected StatusWarning for the commented-out rig, got %v: %s", result.Status, result.Message)
+	}
+	if len(result.Details) != 1 || result.Details[0] != "gastown" {
+		t.Errorf("expected only 'gastown' reported missing, got %v", result.Details)
+	}
+}
+
+func TestIdleTimeoutCheck_Run_ValueOtherThanZero(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+
+	townBeads := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(townBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+	routesContent := `{"prefix":"gt-","path":"gastown"}
+`
+	if err := os.WriteFile(filepath.Join(townBeads, "routes.jsonl"), []byte(routesContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigBeads := filepath.Join(townRoot, "gastown", ".beads")
+	if err := os.MkdirAll(rigBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+	config := "prefix: gt\nissue-prefix: gt\ndolt.idle-timeout: \"5\"\n"
+	if err := os.WriteFile(filepath.Join(rigBeads, "config.yaml"), []byte(config), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := NewIdleTimeoutCheck().Run(&CheckContext{TownRoot: townRoot})
+
+	if result.Status != StatusWarning {
+		t.Fatalf("expected StatusWarning for a nonzero timeout, got %v: %s", result.Status, result.Message)
+	}
+	if len(result.Details) != 1 || result.Details[0] != "gastown" {
+		t.Errorf("expected 'gastown' reported missing, got %v", result.Details)
+	}
+}
+
 func TestIdleTimeoutCheck_Fix(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()

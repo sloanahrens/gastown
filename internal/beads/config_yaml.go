@@ -129,21 +129,28 @@ func normalizeDoltDatabasePrefix(dbName string) string {
 	return name
 }
 
-// ConfigYAMLDisablesAutoExport reports whether config.yaml content explicitly
-// disables bd's post-run auto-export. Comments do not count as configuration.
-func ConfigYAMLDisablesAutoExport(content string) bool {
+// ConfigYAMLValue reports the unquoted value of the first active setting whose
+// trimmed line starts with key, and whether that setting exists. Comments do
+// not count as configuration, so a commented-out line reads as absent.
+func ConfigYAMLValue(content, key string) (string, bool) {
 	for _, line := range strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		if strings.HasPrefix(trimmed, "export.auto:") {
-			value := strings.TrimSpace(strings.TrimPrefix(trimmed, "export.auto:"))
-			value = strings.Trim(value, `"'`)
-			return strings.EqualFold(value, "false")
+		if strings.HasPrefix(trimmed, key) {
+			value := strings.TrimSpace(strings.TrimPrefix(trimmed, key))
+			return strings.Trim(value, `"'`), true
 		}
 	}
-	return false
+	return "", false
+}
+
+// ConfigYAMLDisablesAutoExport reports whether config.yaml content explicitly
+// disables bd's post-run auto-export.
+func ConfigYAMLDisablesAutoExport(content string) bool {
+	value, ok := ConfigYAMLValue(content, "export.auto:")
+	return ok && strings.EqualFold(value, "false")
 }
 
 func ensureConfigYAML(beadsDir, prefix string, onlyIfMissing bool) error {
