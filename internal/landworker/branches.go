@@ -53,7 +53,7 @@ func (w *Worker) reapBeadBranches(beadID string) []string {
 		}
 		// The local half runs whether or not origin's delete did: a branch
 		// already gone from origin is exactly one the rig still holds.
-		w.deleteLocalBranch(beadID, branch, ref.Hash)
+		w.deleteLocalBranch(beadID, branch, ref.Hash, w.logf)
 	}
 	if deleted > 0 {
 		w.logf("%s: deleted %d stale polecat branch(es) on origin", beadID, deleted)
@@ -62,8 +62,11 @@ func (w *Worker) reapBeadBranches(beadID string) []string {
 }
 
 // deleteLocalBranch deletes the rig repository's copy of a polecat branch
-// whose origin copy the reap has just dealt with (gt-kne58), keeping the
-// branch unless its work is proven landed.
+// whose origin copy has just been deleted (gt-kne58), keeping the branch
+// unless its work is proven landed. The landing reap and the leftover sweep
+// both come through here, so the rig repository loses a branch only by one
+// rule; logf is the caller's, because the sweep reports a branch at most once
+// a run and the reap reports every bead once.
 //
 // git branch -d reads merged-ness against the repository's own HEAD branch,
 // which a landing leaves behind — a landing moves the target on the remote,
@@ -74,38 +77,38 @@ func (w *Worker) reapBeadBranches(beadID string) []string {
 // contained in origin's target goes merged-only, and one that is neither is
 // kept and logged. Every lookup failure keeps the branch too: an unmerged
 // branch deleted by mistake is the one outcome nothing here can undo.
-func (w *Worker) deleteLocalBranch(beadID, branch, hash string) {
+func (w *Worker) deleteLocalBranch(beadID, branch, hash string, logf func(format string, args ...any)) {
 	force := false
 	if w.Landings != nil {
 		_, found, err := w.Landings.LatestForBead(beadID)
 		if err != nil {
-			w.logf("%s: kept local %s: reading the landings file: %v", beadID, branch, err)
+			logf("%s: kept local %s: reading the landings file: %v", beadID, branch, err)
 			return
 		}
 		force = found
 	}
 	if !force {
 		if w.WatchTarget == "" {
-			w.logf("%s: kept local %s: no landing record and no branch to have merged it into", beadID, branch)
+			logf("%s: kept local %s: no landing record and no branch to have merged it into", beadID, branch)
 			return
 		}
 		merged, err := w.Remote.Contains(w.WatchTarget, hash)
 		if err != nil {
-			w.logf("%s: kept local %s: testing it against %s: %v", beadID, branch, w.WatchTarget, err)
+			logf("%s: kept local %s: testing it against %s: %v", beadID, branch, w.WatchTarget, err)
 			return
 		}
 		if !merged {
-			w.logf("%s: kept local %s: not merged", beadID, branch)
+			logf("%s: kept local %s: not merged", beadID, branch)
 			return
 		}
 	}
 	deleted, err := w.Remote.DeleteLocalBranch(branch, force)
 	if err != nil {
-		w.logf("%s: deleting the local %s: %v", beadID, branch, err)
+		logf("%s: deleting the local %s: %v", beadID, branch, err)
 		return
 	}
 	if deleted {
-		w.logf("%s: deleted the local polecat branch %s", beadID, branch)
+		logf("%s: deleted the local polecat branch %s", beadID, branch)
 	}
 }
 
@@ -197,19 +200,21 @@ func (w *Worker) sweepIfDue(ctx context.Context) {
 	w.sweepLeftoverBranches(ctx)
 }
 
-// sweepLeftoverBranches deletes origin's polecat branches for work that is
-// finished and landed, whatever left them there: reapBeadBranches runs only
-// in the moment right after a landing, so a restart in that window, a bead
-// closed without a landing, and branches pushed as transport before the
-// Forgejo cut-over keep their branch on origin forever (gt-xz4ir).
+// sweepLeftoverBranches deletes a bead's polecat branch on origin and in the
+// rig repository for work that is finished and landed, whatever left them
+// there: reapBeadBranches runs only in the moment right after a landing, so a
+// restart in that window, a bead closed without a landing, and branches
+// pushed as transport before the Forgejo cut-over keep their branch forever
+// (gt-xz4ir, gt-4j1pl).
 //
 // Deleting is the riskier half, so a branch goes only when every rule holds:
 // its bead is closed or has a landing record, its work is provably on the
 // branch the worker lands (WatchTarget), and its tip is older than
 // leftoverBranchMinAge. Anything else stays; a branch that is not provably
-// merged is reported once per run for a human. Best effort throughout, like
-// reapBeadBranches: a failed list, fetch, check or delete is logged and the
-// pass goes on.
+// merged is reported once per run for a human. The rig repository's own copy
+// follows origin's through the reap's local half, so both halves go by one
+// rule. Best effort throughout, like reapBeadBranches: a failed list, fetch,
+// check or delete is logged and the pass goes on.
 func (w *Worker) sweepLeftoverBranches(ctx context.Context) {
 	refs, err := w.Remote.ListRemoteRefs(polecatRefPrefix)
 	if err != nil {
@@ -257,6 +262,13 @@ func (w *Worker) sweepLeftoverBranches(ctx context.Context) {
 		}
 		w.logf("deleted the leftover polecat branch %s (bead %s)", branch, bead)
 		deleted++
+		// The rig repository's own copy goes with origin's, through the
+		// landing reap's local half so one rule decides what the rig loses:
+		// a branch the sweep got this far on is proven done and on the
+		// target, which is what that rule asks (gt-4j1pl).
+		w.deleteLocalBranch(bead, branch, ref.Hash, func(format string, args ...any) {
+			w.sweepLog(branch, format, args...)
+		})
 	}
 	if deleted > 0 {
 		w.logf("swept %d leftover polecat branch(es) on origin", deleted)
