@@ -823,3 +823,56 @@ func TestPoolShowNamesTheProSeatAndTheDefaultItReads(t *testing.T) {
 		t.Errorf("a file that names pro_max was shown the default:\n%s", out.String())
 	}
 }
+
+// TestPoolShowNamesTheDeadHookedSeatsInTheCount is gt-bc9b6's display half: the
+// page an operator reads must show the crashed seat inside the live count, the
+// way the tick line and the sling refusal do, so a pool that is full with fewer
+// live sessions than its number says why. The seat is the 2026-10-12 shape — a
+// DEFERRED exit that cleared the agent bead's hook_bead while the work bead
+// stayed assigned — and the picture it is counted in is the real one: the real
+// rig and seat enumeration, the real seat read, canned beads reads and a canned
+// tmux server (the unit tier starts no tmux; docs/testing.md).
+func TestPoolShowNamesTheDeadHookedSeatsInTheCount(t *testing.T) {
+	t.Parallel()
+	root := poolTestTown(t, `{"type":"town-settings","version":1,"polecat_pool":{"agent":"deepseek-flash","max_seats":3,"max_total":4}}`, "")
+	writeTestRigsConfig(t, root, "gastown")
+	writeTownPolecatDir(t, root, "gastown", "ember")
+	reads := poolSeatReadsAnswering(t, deferredExitFields(), assignedActiveWork("gt-held"))
+
+	view, err := loadPoolSeats(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := poolLiveForWith(root, func(pool *config.PolecatPool) ([]poolSession, error) {
+		return poolSeatSessionsWith(&fakeLister{}, root, poolDispositionAnswering(root, reads), nil, pool)
+	})
+
+	var out bytes.Buffer
+	if err := renderPoolShow(&out, root, view, live); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"pool seat    deepseek-flash  cap 3  live 1/3 (1 dead-hooked)",
+		"total        cap 4 (max_total): live polecats across every seat  live 1/4",
+	} {
+		if got := out.String(); !strings.Contains(got, want) {
+			t.Errorf("show output lacks %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestPoolShowReadsNoSeatPictureWithoutARigRegistry pins the guard that keeps
+// the page off the tmux server where there is nothing to count: a town whose rig
+// registry is missing names no live column at all, rather than a partial count
+// (the unit tier starts no tmux).
+func TestPoolShowReadsNoSeatPictureWithoutARigRegistry(t *testing.T) {
+	t.Parallel()
+	root := poolTestTown(t, `{"type":"town-settings","version":1,"polecat_pool":{"agent":"deepseek-flash","max_seats":3}}`, "")
+	var out bytes.Buffer
+	if err := runPoolShow(&out, root); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); strings.Contains(got, "live ") {
+		t.Errorf("a town with no rigs has no polecats to count:\n%s", got)
+	}
+}

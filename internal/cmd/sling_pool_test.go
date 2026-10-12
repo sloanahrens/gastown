@@ -10,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/polecat"
 )
 
@@ -31,6 +33,10 @@ func TestChoosePoolAgent(t *testing.T) {
 	// sonnet at 1 of 2 — and whose total of 3 is therefore the cap in force.
 	totaled := &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3, MaxTotal: intPtr(3)}
 	underTotal := []poolSession{s("deepseek-flash"), s("deepseek-flash"), s("claude-sonnet")}
+	// The town's total with one of the three seats filled by a crashed polecat
+	// whose restart is due: max_total bounds the polecats, not the live sessions,
+	// so this is a town with no room left (gt-bc9b6).
+	totaledCrashed := []poolSession{{name: "dead/gastown/ember", agent: "deepseek-flash", deadHooked: true}, s("deepseek-flash"), s("claude-sonnet")}
 
 	cases := []struct {
 		name        string
@@ -53,6 +59,7 @@ func TestChoosePoolAgent(t *testing.T) {
 		{"max_seats 0 leaves the seat uncapped", uncapped, "", full, "deepseek-flash", "pool: seat 3 (uncapped) -> deepseek-flash", false, ""},
 		{"retired local keys change nothing", retiredLocal, "", oneTaken, "deepseek-flash", "pool: seat 2/2 -> deepseek-flash", false, ""},
 		{"a seat with room answers to the town's total", totaled, "", underTotal, "deepseek-flash", "pool: total full (3/3 across every seat) -> no seat for deepseek-flash", true, "polecat_pool.max_total"},
+		{"the town's total counts a dead-hooked seat, so a restart cannot push past it", totaled, "", totaledCrashed, "deepseek-flash", "pool: total full (3/3 across every seat) -> no seat for deepseek-flash", true, "polecat_pool.max_total"},
 		{"the town's total answers a request for another agent", totaled, "claude-sonnet", underTotal, "claude-sonnet", "pool: total full (3/3 across every seat) -> no seat for claude-sonnet", true, "polecat_pool.max_total"},
 		{"under the total the per-agent cap decides", totaled, "", oneTaken, "deepseek-flash", "pool: seat 2/3 -> deepseek-flash", false, ""},
 		{"the town's total holds a pool with no agent", &config.PolecatPool{MaxTotal: intPtr(1)}, "", full, "the role default", "pool: total full (2/1 across every seat) -> no seat for the role default", true, "polecat_pool.max_total"},
@@ -1252,5 +1259,357 @@ func TestRouteRefusesASeatMidLanding(t *testing.T) {
 	}
 	if len(claims) != 0 {
 		t.Errorf("a refused sling must not claim a seat: %v", claims)
+	}
+}
+
+// fakeAssignedIssues answers the direct-tracking read (assignedIssueLookup)
+// without a database, and records the assignee it was asked for.
+type fakeAssignedIssues struct {
+	issue *beads.Issue
+	err   error
+	seen  string
+}
+
+func (f *fakeAssignedIssues) GetAssignedIssue(assignee string) (*beads.Issue, error) {
+	f.seen = assignee
+	return f.issue, f.err
+}
+
+// TestPoolAssignedWorkEvidence pins the pool's read of the seat's own work: the
+// bead assigned to the polecat, assessed exactly as `gt polecat list` assesses
+// it (gt-tldj4's no-second-definition rule), and fail-closed when the read
+// cannot be made. The read is the one that survives a hand-off: gt done clears
+// the agent bead's hook_bead slot while the work bead stays assigned, so a seat
+// whose turn ended DEFERRED is visible here and nowhere in the slot (gt-bc9b6).
+func TestPoolAssignedWorkEvidence(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		issue      *beads.Issue
+		err        error
+		wantBlocks bool
+		wantCounts bool
+		wantSub    bool
+		wantIssue  string
+	}{
+		{
+			name:       "an assigned in_progress bead holds the seat and counts",
+			issue:      &beads.Issue{ID: "gt-held", Status: string(beads.StatusInProgress), Assignee: "gastown/polecats/ember"},
+			wantBlocks: true, wantCounts: true, wantIssue: "gt-held",
+		},
+		{
+			name:       "an assigned hooked bead counts the same way",
+			issue:      &beads.Issue{ID: "gt-held", Status: string(beads.IssueStatusHooked), Assignee: "gastown/polecats/ember"},
+			wantBlocks: true, wantCounts: true, wantIssue: "gt-held",
+		},
+		{
+			name:       "an unassigned seat has no evidence",
+			issue:      nil,
+			wantBlocks: false, wantCounts: false,
+		},
+		{
+			name:       "a terminal assignment is no evidence",
+			issue:      &beads.Issue{ID: "gt-done", Status: string(beads.StatusClosed), Assignee: "gastown/polecats/ember"},
+			wantBlocks: false, wantCounts: false,
+		},
+		{
+			name:       "a read that fails is the list path's fail-closed evidence",
+			err:        errors.New("bd list: boom"),
+			wantBlocks: true, wantCounts: false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			bd := &fakeAssignedIssues{issue: c.issue, err: c.err}
+			got := poolAssignedWorkEvidence(bd, "gastown", "ember")
+			if bd.seen != "gastown/polecats/ember" {
+				t.Errorf("assignee = %q, want gastown/polecats/ember", bd.seen)
+			}
+			if got.BlocksCleanup != c.wantBlocks {
+				t.Errorf("BlocksCleanup = %v, want %v (%+v)", got.BlocksCleanup, c.wantBlocks, got)
+			}
+			if got.CountsTowardCapacity != c.wantCounts {
+				t.Errorf("CountsTowardCapacity = %v, want %v (%+v)", got.CountsTowardCapacity, c.wantCounts, got)
+			}
+			if got.Submitted != c.wantSub {
+				t.Errorf("Submitted = %v, want %v (%+v)", got.Submitted, c.wantSub, got)
+			}
+			if got.AssignedIssue != c.wantIssue {
+				t.Errorf("AssignedIssue = %q, want %q (%+v)", got.AssignedIssue, c.wantIssue, got)
+			}
+			if got.BlocksCleanup && got.Blocker == "" {
+				t.Error("evidence that blocks cleanup must name its blocker")
+			}
+		})
+	}
+}
+
+// TestPoolAssignedWorkEvidenceMarksSubmittedWork is the half that keeps one
+// seat one seat: a bead carrying gt:ready-to-land is the landing worker's, and
+// poolLandingSessions counts the seat from its own record. Evidence that did not
+// say so here would let the dead-hooked read count the same seat twice
+// (gt-xmcyk, the gt-2nft shape).
+func TestPoolAssignedWorkEvidenceMarksSubmittedWork(t *testing.T) {
+	t.Parallel()
+	bd := &fakeAssignedIssues{issue: &beads.Issue{
+		ID:       "gt-held",
+		Status:   string(beads.IssueStatusHooked),
+		Assignee: "gastown/polecats/ember",
+		Labels:   []string{land.LabelReadyToLand},
+	}}
+	got := poolAssignedWorkEvidence(bd, "gastown", "ember")
+	if !got.Submitted {
+		t.Fatalf("a ready-to-land assignment must read as submitted: %+v", got)
+	}
+	if !got.BlocksCleanup || !got.CountsTowardCapacity {
+		t.Fatalf("a submitted assignment still blocks cleanup and counts: %+v", got)
+	}
+}
+
+// TestPoolSeatWorkFacts pins the fold that decides whether a seat with no live
+// session still holds one (gt-bc9b6, gt-tldj4). The case that mattered on
+// 2026-10-12 18:31: dispatcher read 2/3 at 18:32:11 with furiosa dead and
+// gt-92qx3 still assigned, slung fr-r1h, and the restart at 18:33:43 read 4/3.
+// gt done had cleared the agent bead's hook_bead on the DEFERRED exit, so the
+// slot named nothing while the work bead was still assigned and in_progress.
+func TestPoolSeatWorkFacts(t *testing.T) {
+	t.Parallel()
+	anAssignment := polecatActiveWorkEvidence{
+		BlocksCleanup:        true,
+		RequiresRestart:      true,
+		CountsTowardCapacity: true,
+		Blocker:              "assigned_work=gt-held status=in_progress",
+		AssignedIssue:        "gt-held",
+	}
+	submitted := polecatActiveWorkEvidence{
+		BlocksCleanup:        true,
+		RequiresRestart:      true,
+		CountsTowardCapacity: true,
+		Blocker:              "assigned_work=gt-held status=hooked",
+		AssignedIssue:        "gt-held",
+		Submitted:            true,
+	}
+	unreadable := polecatActiveWorkEvidence{
+		BlocksCleanup: true,
+		Blocker:       "assigned_work status=lookup_error: bd list: boom",
+	}
+	aHook := polecat.HookBeadDisposition{Blocker: "hook_bead=gt-held status=in_progress"}
+
+	cases := []struct {
+		name       string
+		hd         polecat.HookBeadDisposition
+		assigned   polecatActiveWorkEvidence
+		wantHeld   bool
+		wantBlk    string
+		wantCounts bool
+		wantSubm   bool
+	}{
+		{
+			name:       "a cleared hook reference with the bead still assigned holds the seat",
+			hd:         polecat.HookBeadDisposition{Safe: true},
+			assigned:   anAssignment,
+			wantHeld:   true,
+			wantBlk:    anAssignment.Blocker,
+			wantCounts: true,
+		},
+		{
+			name:       "a hook reference holds the seat when no assignment is read",
+			hd:         aHook,
+			wantHeld:   true,
+			wantBlk:    aHook.Blocker,
+			wantCounts: true,
+		},
+		{
+			name:       "a submitted assignment is the landing worker's, not a held seat",
+			hd:         polecat.HookBeadDisposition{Safe: true},
+			assigned:   submitted,
+			wantHeld:   false,
+			wantBlk:    submitted.Blocker,
+			wantCounts: true,
+		},
+		{
+			name:       "an unreadable assignment keeps the seat without counting it",
+			hd:         polecat.HookBeadDisposition{Safe: true},
+			assigned:   unreadable,
+			wantHeld:   true,
+			wantBlk:    unreadable.Blocker,
+			wantCounts: false,
+		},
+		{
+			name:     "a submitted hook reference is not a held seat",
+			hd:       polecat.HookBeadDisposition{Safe: true, Submitted: true},
+			wantHeld: false,
+			wantSubm: true,
+		},
+		{
+			name:     "neither source names work: a finished seat is free",
+			hd:       polecat.HookBeadDisposition{Safe: true},
+			wantHeld: false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			facts := polecat.WorkstateFacts{}
+			held := poolSeatWorkFacts(&facts, c.hd, c.assigned)
+			if held != c.wantHeld {
+				t.Errorf("held = %v, want %v", held, c.wantHeld)
+			}
+			if facts.ActiveWorkBlocker != c.wantBlk {
+				t.Errorf("ActiveWorkBlocker = %q, want %q", facts.ActiveWorkBlocker, c.wantBlk)
+			}
+			if facts.ActiveWorkCountsTowardCapacity != c.wantCounts {
+				t.Errorf("ActiveWorkCountsTowardCapacity = %v, want %v", facts.ActiveWorkCountsTowardCapacity, c.wantCounts)
+			}
+			if facts.HookBeadSubmitted != c.wantSubm {
+				t.Errorf("HookBeadSubmitted = %v, want %v", facts.HookBeadSubmitted, c.wantSubm)
+			}
+		})
+	}
+}
+
+// poolSeatReadsAnswering is the seat read's collaborators with the polecat's
+// agent bead and its assigned work answered from canned values. The by-id lookup
+// fails the test if it is reached: the agent bead these reads answer with
+// carries neither a hook reference nor a source-issue hint, so a seat read that
+// asks for one is not reading the case under test.
+func poolSeatReadsAnswering(t *testing.T, fields *beads.AgentFields, assigned polecatActiveWorkEvidence) poolSeatReads {
+	t.Helper()
+	return poolSeatReads{
+		agentBead: func(beads.Client, string) (*beads.Issue, *beads.AgentFields, error) {
+			return &beads.Issue{ID: "gt-gastown-polecat-ember"}, fields, nil
+		},
+		assigned: func(assignedIssueLookup, string, string) polecatActiveWorkEvidence {
+			return assigned
+		},
+		show: func(_ beads.Client, id string) (*beads.Issue, error) {
+			t.Errorf("unexpected beads read of %s: the canned agent bead names no hook and no source issue", id)
+			return nil, beads.ErrNotFound
+		},
+	}
+}
+
+// poolDispositionAnswering is the seat read poolSeatSessions takes, over the
+// canned reads: the whole read — the disposition the roster counts and the work
+// that holds a crashed seat — runs for real, with no database.
+func poolDispositionAnswering(town string, reads poolSeatReads) polecatDispositionFunc {
+	return func(rigName, polecatName string) (poolSeatState, error) {
+		return poolPolecatSeatStateWith(town, rigName, polecatName, reads)
+	}
+}
+
+// deferredExitFields is the agent bead a polecat leaves behind when its turn
+// ends with `gt done --status DEFERRED` (or the hand-off that redirects to it):
+// agent_state=stuck, the recorded cleanup status has_unpushed, and — the fact
+// this bead is about — hook_bead cleared by gt done on the way out.
+func deferredExitFields() *beads.AgentFields {
+	return &beads.AgentFields{AgentState: "stuck", HookBead: "", CleanupStatus: string(polecat.CleanupUnpushed)}
+}
+
+// assignedActiveWork is the evidence a seat's assigned, in-progress bead
+// produces (assessPolecatAssignedIssueWork): it blocks cleanup, counts toward
+// capacity, and holds the seat while the work is in flight.
+func assignedActiveWork(bead string) polecatActiveWorkEvidence {
+	return polecatActiveWorkEvidence{
+		BlocksCleanup:        true,
+		RequiresRestart:      true,
+		CountsTowardCapacity: true,
+		Blocker:              "assigned_work=" + bead + " status=in_progress",
+		AssignedIssue:        bead,
+	}
+}
+
+// TestPoolRosterCountsADeferredExitSeatsWork is gt-bc9b6 end to end through the
+// roster the spec dispatcher ticks on: a real town directory, the real rig and
+// seat enumeration, the real seat read, with only the two beads reads stubbed.
+//
+// On 2026-10-12 furiosa's turn ended DEFERRED with gt-92qx3 still assigned. The
+// roster read 2/3 at 18:32:11 and slung fr-r1h; patrol_scan restarted the seat
+// at 18:33:43 and the town read 4/3 at 18:34:38. A seat read that trusts the
+// agent bead's hook_bead slot alone finds nothing there, because gt done clears
+// it on every exit — the work bead, assigned and active, is what still holds
+// the seat, and it is the read the other three consumers of this question
+// (daemon crash detection, patrol_scan's AssignedWork, `gt polecat list`)
+// already make.
+func TestPoolRosterCountsADeferredExitSeatsWork(t *testing.T) {
+	t.Parallel()
+	// A single-seat pool, so the held seat is the whole cap: what the roster
+	// counts and what the next sling is refused on are the same seat.
+	pool := &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 1}
+	ts := config.NewTownSettings()
+	ts.RoleAgents = map[string]string{"polecat": "deepseek-flash"}
+
+	stillAssigned := assignedActiveWork("gt-92qx3")
+	submitted := stillAssigned
+	submitted.Submitted = true
+
+	cases := []struct {
+		name     string
+		assigned polecatActiveWorkEvidence
+		// wantSeats is the roster's Live count and the pool's own seat count;
+		// wantDead is the dead-hooked breakdown the tick line names.
+		wantSeats int
+		wantDead  int
+	}{
+		{"a bead still assigned holds the crashed seat", stillAssigned, 1, 1},
+		{"a seat with no work at all is free", polecatActiveWorkEvidence{}, 0, 0},
+		{"a submitted bead is the landing worker's seat, counted from its record", submitted, 0, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			writeTestRigsConfig(t, town, "gastown")
+			writeTownPolecatDir(t, town, "gastown", "ember")
+			reads := poolSeatReadsAnswering(t, deferredExitFields(), c.assigned)
+
+			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, poolDispositionAnswering(town, reads), nil, pool)
+			if err != nil {
+				t.Fatalf("poolSeatSessionsWith: %v", err)
+			}
+			r := specRosterFrom(sessions, ts)
+			if r.Live["deepseek-flash"] != c.wantSeats {
+				t.Fatalf("roster = %d/%d, want %d/%d (%+v)", r.Live["deepseek-flash"], pool.MaxSeats, c.wantSeats, pool.MaxSeats, sessions)
+			}
+			if r.DeadHooked["deepseek-flash"] != c.wantDead {
+				t.Fatalf("dead-hooked = %d, want %d (%+v)", r.DeadHooked["deepseek-flash"], c.wantDead, sessions)
+			}
+			if n := poolSeatCount(pool, sessions); n != c.wantSeats {
+				t.Fatalf("pool seat count = %d, want %d (%+v)", n, c.wantSeats, sessions)
+			}
+			// A sling next to this seat must be refused while the crashed
+			// polecat's restart is coming, and its line must name the seat that
+			// filled the pool (gt-bc9b6, acceptance 2 and 3).
+			_, reason, refused, raise := choosePoolAgent(pool, "", sessions)
+			if refused != (c.wantSeats > 0) {
+				t.Fatalf("refused = %v, want %v (%s)", refused, c.wantSeats > 0, reason)
+			}
+			if c.wantSeats > 0 && (!strings.Contains(reason, "pool: full (1/1, 1 dead-hooked)") || raise != "polecat_pool.max_seats") {
+				t.Fatalf("the refusal names the dead-hooked seat: %q raise=%q", reason, raise)
+			}
+		})
+	}
+}
+
+// TestPoolRosterHoldsADeferredExitSeatUnderTheTownTotal is gt-bc9b6's second
+// acceptance: max_total bounds the polecats, not the live sessions, so a town
+// whose seats each have room but whose total is filled by a crashed polecat
+// refuses the next dispatch too.
+func TestPoolRosterHoldsADeferredExitSeatUnderTheTownTotal(t *testing.T) {
+	t.Parallel()
+	pool := &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3, MaxTotal: intPtr(1)}
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
+	writeTownPolecatDir(t, town, "gastown", "ember")
+	reads := poolSeatReadsAnswering(t, deferredExitFields(), assignedActiveWork("gt-92qx3"))
+
+	sessions, err := poolSeatSessionsWith(&fakeLister{}, town, poolDispositionAnswering(town, reads), nil, pool)
+	if err != nil {
+		t.Fatalf("poolSeatSessionsWith: %v", err)
+	}
+	_, reason, refused, raise := choosePoolAgent(pool, "", sessions)
+	if !refused || raise != "polecat_pool.max_total" {
+		t.Fatalf("the town's total must refuse with the dead seat counted: refused=%v raise=%q (%s)", refused, raise, reason)
 	}
 }

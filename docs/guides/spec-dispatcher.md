@@ -140,8 +140,11 @@ uncapped to sling and the default cap here. `gt pool set-total <n>` sets the
 total the same way, 0 removing it. The `hooked_agent` seat is read at daemon
 start, so a change to it needs a daemon kickstart.
 
-Occupancy is every live polecat session plus the seat claims in-flight slings
-hold, counted per agent from the session's `GT_AGENT`. An empty `GT_AGENT`
+Occupancy is every live polecat session, the seats whose session is gone while
+their work is still assigned (a crashed polecat waiting for its supervised
+restart) or still landing, and the seat claims in-flight slings hold, counted
+per agent from the session's `GT_AGENT`; `gt pool show` prints that count beside
+each seat's cap, naming the seats no session holds. An empty `GT_AGENT`
 counts as the polecat role default. `polecat_pool.min_spawn_gap` applies to the
 newest polecat on any seat. At most `max_per_tick` (default 1) beads are slung
 per tick. A full seat is skipped, never overfilled, and the bead stays ready

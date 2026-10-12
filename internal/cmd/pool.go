@@ -263,16 +263,99 @@ func runPoolShow(w io.Writer, townRoot string) error {
 	if err != nil {
 		return err
 	}
+	return renderPoolShow(w, townRoot, v, poolLiveFor(townRoot))
+}
+
+// renderPoolShow prints one page: each open seat with its agent and cap, the
+// occupancy beside it, and the town's total. The occupancy is a parameter rather
+// than a read here so the page's wording can be pinned against a seat picture a
+// test builds (docs/testing.md).
+func renderPoolShow(w io.Writer, townRoot string, v poolSeatView, live poolShowLive) error {
 	for _, s := range v.seats {
-		fmt.Fprintf(w, "%-13s%s  %s\n", seatName(s.seat), s.agent, v.capText(s))
+		fmt.Fprintf(w, "%-13s%s  %s%s\n", seatName(s.seat), s.agent, v.capText(s), live.seatNote(s.agent, s.cap))
 	}
-	fmt.Fprintf(w, "%-13s%s\n", "total", v.totalText())
+	fmt.Fprintf(w, "%-13s%s%s\n", "total", v.totalText(), live.totalNote(v.totalCap))
 	if len(v.seats) == 0 {
 		fmt.Fprintln(w, "no open seat: polecat_pool has no agent, the pro seat is closed (no polecat_pool section, or pro_max 0), and spec_dispatch max_hooked is not above 0")
 	}
 	fmt.Fprintf(w, "read: %s (polecat_pool.agent, polecat_pool.max_seats, polecat_pool.pro_agent, polecat_pool.pro_max, polecat_pool.max_total), %s (daemon.patrols.spec_dispatch.hooked_agent, max_hooked)\n",
 		config.TownSettingsPath(townRoot), config.DaemonPatrolConfigPath(townRoot))
 	return nil
+}
+
+// poolShowLive is the occupancy show prints beside the caps, read from the same
+// seat picture the dispatcher and the sling decide on (poolSeatSessions →
+// specRosterFrom), so the page cannot disagree with the count a refusal names
+// (gt-bc9b6). A picture that could not be read is no count at all: the page
+// prints the caps without one rather than inventing an occupancy.
+type poolShowLive struct {
+	live  map[string]int
+	dead  map[string]int
+	total int
+	ok    bool
+}
+
+func poolLiveFor(townRoot string) poolShowLive {
+	return poolLiveForWith(townRoot, func(pool *config.PolecatPool) ([]poolSession, error) {
+		return poolSeatSessions(newPoolSessionLister(), townRoot, pool)
+	})
+}
+
+// poolLiveForWith is poolLiveFor with the town's seat read passed in, the way
+// the rest of the pool's reads take their collaborators: a test builds the count
+// from canned sessions and canned beads reads.
+func poolLiveForWith(townRoot string, readSeats func(pool *config.PolecatPool) ([]poolSession, error)) poolShowLive {
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
+	if err != nil {
+		return poolShowLive{}
+	}
+	// A town whose rig registry is unreadable has no polecats to count, and the
+	// seat picture needs it: the read stops here rather than listing the tmux
+	// server for a count it could not complete (the dead-hooked half of the
+	// picture enumerates polecat directories per rig).
+	rigs, err := knownRigNames(townRoot)
+	if err != nil || len(rigs) == 0 {
+		return poolShowLive{}
+	}
+	sessions, err := readSeats(ts.PolecatPool)
+	if err != nil {
+		return poolShowLive{}
+	}
+	r := specRosterFrom(sessions, ts)
+	out := poolShowLive{live: r.Live, dead: r.DeadHooked, ok: true}
+	for _, n := range r.Live {
+		out.total += n
+	}
+	return out
+}
+
+// seatNote is one seat's occupancy: the polecats the dispatcher counts on that
+// seat's agent, over the seat's cap, with the seat's dead-hooked occupants
+// named. A seat that reads full with fewer live sessions than its number then
+// says why (gt-tldj4). Empty for a seat with no agent, which has no polecats to
+// count.
+func (l poolShowLive) seatNote(agent string, cap int) string {
+	if !l.ok || agent == "" {
+		return ""
+	}
+	note := fmt.Sprintf("  live %d/%d", l.live[agent], cap)
+	if n := deadHookedCount(l.dead[agent]); n != "" {
+		note += " (" + n + ")"
+	}
+	return note
+}
+
+// totalNote is the town's occupancy: every seat's polecats together, the number
+// max_total bounds. Without a total cap there is no denominator to print, so
+// the count stands alone.
+func (l poolShowLive) totalNote(totalCap int) string {
+	if !l.ok {
+		return ""
+	}
+	if totalCap > 0 {
+		return fmt.Sprintf("  live %d/%d", l.total, totalCap)
+	}
+	return fmt.Sprintf("  live %d", l.total)
 }
 
 // totalText is the total cap as show prints it: the cap both the dispatcher
