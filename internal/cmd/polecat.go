@@ -284,6 +284,8 @@ var (
 	polecatStaleDryRun    bool
 	polecatPruneDryRun    bool
 	polecatPruneRemote    bool
+	polecatPruneAllRigs   bool
+	polecatPruneApply     bool
 )
 
 var polecatStaleCmd = &cobra.Command{
@@ -312,7 +314,7 @@ Examples:
 }
 
 var polecatPruneCmd = &cobra.Command{
-	Use:   "prune <rig>",
+	Use:   "prune [rig]",
 	Short: "Prune stale polecat branches (local and remote)",
 	Long: `Prune stale polecat branches in a rig.
 
@@ -327,11 +329,29 @@ Also cleans up remote polecat branches that are fully merged.
 Use --dry-run to preview what would be pruned.
 Use --remote to also prune remote polecat branches on origin.
 
+--all-rigs sweeps the local polecat branches of every rig in the town config
+instead of one rig. It deletes only branches already merged into that rig's
+origin/<default branch>, keeps any branch checked out in one of its
+worktrees, and lists the unmerged ones it keeps. It is a dry run until
+--apply is given, and a rig it cannot read is reported and skipped.
+
 Examples:
   gt polecat prune greenplace
   gt polecat prune greenplace --dry-run
-  gt polecat prune greenplace --remote`,
-	Args: cobra.ExactArgs(1),
+  gt polecat prune greenplace --remote
+  gt polecat prune --all-rigs
+  gt polecat prune --all-rigs --apply`,
+	// --all-rigs replaces the rig argument rather than adding to it: the
+	// sweep takes its rigs from the town config.
+	Args: func(cmd *cobra.Command, args []string) error {
+		if polecatPruneAllRigs {
+			if len(args) > 0 {
+				return fmt.Errorf("--all-rigs takes no rig argument, got %q", args[0])
+			}
+			return nil
+		}
+		return cobra.ExactArgs(1)(cmd, args)
+	},
 	RunE: runPolecatPrune,
 }
 
@@ -404,6 +424,8 @@ func init() {
 	// Prune flags
 	polecatPruneCmd.Flags().BoolVar(&polecatPruneDryRun, "dry-run", false, "Show what would be pruned without doing it")
 	polecatPruneCmd.Flags().BoolVar(&polecatPruneRemote, "remote", false, "Also prune remote polecat branches on origin")
+	polecatPruneCmd.Flags().BoolVar(&polecatPruneAllRigs, "all-rigs", false, "Sweep the local polecat branches of every rig (dry run unless --apply)")
+	polecatPruneCmd.Flags().BoolVar(&polecatPruneApply, "apply", false, "With --all-rigs, delete the merged branches instead of listing them")
 
 	// Pool-init flags
 	polecatPoolInitCmd.Flags().BoolVar(&polecatPoolInitDryRun, "dry-run", false, "Show what would be created without doing it")
@@ -3419,6 +3441,22 @@ func runPolecatStale(cmd *cobra.Command, args []string) error {
 }
 
 func runPolecatPrune(cmd *cobra.Command, args []string) error {
+	// The all-rigs sweep is a separate path by design: it must not inherit
+	// the single-rig form's delete-by-default behavior or its no-remote rule,
+	// and it answers a contradicting flag instead of quietly ignoring it.
+	if polecatPruneAllRigs {
+		switch {
+		case polecatPruneRemote:
+			return fmt.Errorf("--remote is not supported with --all-rigs: the sweep only reads local refs")
+		case polecatPruneApply && polecatPruneDryRun:
+			return fmt.Errorf("--apply and --dry-run contradict each other")
+		}
+		return runPolecatPruneAllRigs(os.Stdout, polecatPruneApply)
+	}
+	if polecatPruneApply {
+		return fmt.Errorf("--apply requires --all-rigs")
+	}
+
 	rigName := args[0]
 
 	mgr, r, err := getPolecatManager(rigName)
