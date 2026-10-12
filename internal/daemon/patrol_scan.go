@@ -645,6 +645,54 @@ func (h *patrolScanHost) MoleculeStatus(id string) (string, error) {
 	return issue.Status, nil
 }
 
+// leakedWispStatuses are the statuses of a wisp that is not closed. The
+// work-bead reads never ask for pinned, which holds most of the leaks.
+var leakedWispStatuses = []string{"open", "in_progress", "pinned", "hooked"}
+
+// LeakedWisps lists the rig's non-closed wisps, from the wisps table (bd
+// query, which also reports each wisp's parent). Any failed status makes the
+// whole answer an error: the failed status may be the one holding the leak.
+// A wisp whose created_at does not parse comes back with a zero CreatedAt,
+// which the pass reads as an unknown age.
+func (h *patrolScanHost) LeakedWisps(rig string) ([]patrolscan.Wisp, error) {
+	var out []patrolscan.Wisp
+	seen := map[string]bool{}
+	for _, status := range leakedWispStatuses {
+		batch, err := h.readBeads(rig).List(beads.ListOptions{Status: status, Ephemeral: true, Priority: -1})
+		if err != nil {
+			return nil, fmt.Errorf("listing %s wisps: %w", status, err)
+		}
+		for _, is := range batch {
+			if is == nil || is.ID == "" || seen[is.ID] {
+				continue
+			}
+			seen[is.ID] = true
+			w := patrolscan.Wisp{ID: is.ID, Status: is.Status, Assignee: is.Assignee, Parent: is.Parent}
+			if t, err := time.Parse(time.RFC3339, is.CreatedAt); err == nil {
+				w.CreatedAt = t
+			}
+			out = append(out, w)
+		}
+	}
+	return out, nil
+}
+
+// WispStatus reads the status of the wisp or bead id names. A bead bd says is
+// not found is gone, not an unknown: the root a leaked step names was reaped.
+func (h *patrolScanHost) WispStatus(id string) (string, error) {
+	issue, err := h.readBeads("").Show(id)
+	if errors.Is(err, beads.ErrNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if issue == nil {
+		return "", nil
+	}
+	return issue.Status, nil
+}
+
 // CloseMolecule force-closes the molecule root and every step wisp under it,
 // deepest first. The children are read with `bd show --children`, which sees
 // the parent-child edges of a bonded ephemeral molecule (gt-43t7,

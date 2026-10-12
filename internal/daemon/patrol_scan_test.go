@@ -696,3 +696,103 @@ func TestPatrolScanRecoveryWrites(t *testing.T) {
 		t.Fatalf("notes = %q", is.Notes)
 	}
 }
+
+// wispReader is a workBeadReader that answers a wisp listing per status and
+// records the options of every list.
+type wispReader struct {
+	byStatus map[string][]*beads.Issue
+	listErr  map[string]error
+	show     map[string]*beads.Issue
+	showErr  error
+	lists    []beads.ListOptions
+}
+
+func (r *wispReader) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	r.lists = append(r.lists, opts)
+	if err := r.listErr[opts.Status]; err != nil {
+		return nil, err
+	}
+	return r.byStatus[opts.Status], nil
+}
+
+func (r *wispReader) Show(id string) (*beads.Issue, error) {
+	if r.showErr != nil {
+		return nil, r.showErr
+	}
+	if is, ok := r.show[id]; ok {
+		return is, nil
+	}
+	return nil, beads.ErrNotFound
+}
+
+func wispHost(t *testing.T, r *wispReader) *patrolScanHost {
+	t.Helper()
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, openWorkBeads: func([]string, time.Duration) workBeadReader { return r }}
+	return &patrolScanHost{d: d}
+}
+
+// LeakedWisps asks the wisps table for every status a leak can sit in,
+// pinned included, and reads each wisp's parent and creation time. One status
+// that cannot be listed fails the whole read, and a creation time that does
+// not parse reads as unknown rather than as very old.
+func TestPatrolScanLeakedWisps(t *testing.T) {
+	t.Parallel()
+	created := time.Date(2026, 10, 2, 0, 25, 24, 0, time.UTC)
+	r := &wispReader{byStatus: map[string][]*beads.Issue{
+		"pinned": {
+			{ID: "gt-wisp-a", Status: "pinned", Assignee: "gastown/polecats/basalt", CreatedAt: created.Format(time.RFC3339)},
+			{ID: "gt-wisp-b", Status: "pinned", Assignee: "gastown/polecats/basalt", Parent: "gt-wisp-root", CreatedAt: "not a time"},
+		},
+		"in_progress": {
+			{ID: "gt-wisp-a", Status: "in_progress", Assignee: "gastown/polecats/basalt", CreatedAt: created.Format(time.RFC3339)},
+			nil,
+			{Status: "in_progress"},
+		},
+	}}
+	got, err := wispHost(t, r).LeakedWisps("gastown")
+	if err != nil {
+		t.Fatalf("LeakedWisps: %v", err)
+	}
+	var statuses []string
+	for _, o := range r.lists {
+		if !o.Ephemeral {
+			t.Errorf("list %q did not ask the wisps table", o.Status)
+		}
+		statuses = append(statuses, o.Status)
+	}
+	if want := "open,in_progress,pinned,hooked"; strings.Join(statuses, ",") != want {
+		t.Errorf("statuses listed = %v, want %s", statuses, want)
+	}
+	if len(got) != 2 {
+		t.Fatalf("wisps = %+v, want gt-wisp-a once and gt-wisp-b", got)
+	}
+	if got[0].ID != "gt-wisp-a" || got[0].Status != "in_progress" || !got[0].CreatedAt.Equal(created) {
+		t.Errorf("first wisp = %+v", got[0])
+	}
+	if got[1].ID != "gt-wisp-b" || got[1].Parent != "gt-wisp-root" || !got[1].CreatedAt.IsZero() {
+		t.Errorf("second wisp = %+v, want its parent and a zero creation time", got[1])
+	}
+
+	r.listErr = map[string]error{"hooked": errors.New("bd query: timeout")}
+	if _, err := wispHost(t, r).LeakedWisps("gastown"); err == nil {
+		t.Fatal("a status that failed to list must fail the whole read")
+	}
+}
+
+// WispStatus reads the parent a leaked wisp names: a root bd says does not
+// exist is gone, which is not an unknown.
+func TestPatrolScanWispStatus(t *testing.T) {
+	t.Parallel()
+	r := &wispReader{show: map[string]*beads.Issue{"gt-wisp-root": {ID: "gt-wisp-root", Status: "open"}}}
+	h := wispHost(t, r)
+	if got, err := h.WispStatus("gt-wisp-root"); err != nil || got != "open" {
+		t.Fatalf("WispStatus(live) = %q, %v; want open", got, err)
+	}
+	if got, err := h.WispStatus("gt-wisp-gone"); err != nil || got != "" {
+		t.Fatalf("WispStatus(gone) = %q, %v; want empty and no error", got, err)
+	}
+	r.showErr = errors.New("bd show: timeout")
+	if _, err := h.WispStatus("gt-wisp-root"); err == nil {
+		t.Fatal("a failed read must be an error, not a gone parent")
+	}
+}
