@@ -341,11 +341,13 @@ doneStateUpdate:
 		fmt.Fprintf(os.Stderr, "Warning: couldn't clear hook_bead on %s: %v\n", agentBeadID, err)
 	}
 
-	// Purge closed ephemeral beads (wisps) accumulated during this and prior sessions.
-	// Without this, closed wisps from mol-polecat-work steps etc. accumulate
-	// across sessions and pollute bd ready/list output (hq-6161m).
+	// Purge closed ephemeral beads (wisps) accumulated during this and prior
+	// sessions; without this, closed wisps from mol-polecat-work steps etc.
+	// accumulate across sessions and pollute bd ready/list output (hq-6161m).
 	// Best-effort: failures are non-fatal since the work is already done.
-	e.purgeClosedWisps(beadsPath, townRoot)
+	for _, dir := range wispPurgeDirs(beadsPath, townRoot) {
+		e.purgeClosedWisps(dir, townRoot)
+	}
 
 	// Completion metadata (exit_type, MR ID, branch) remains on the agent bead
 	// for audit purposes.
@@ -427,6 +429,18 @@ func closedWispDeleteAge(townRoot string) string {
 // ephemeralPurger is the purge purgeClosedEphemeralBeads asks of a bead store.
 type ephemeralPurger interface {
 	PurgeClosedEphemeral(olderThan string) (string, error)
+}
+
+// wispPurgeDirs returns the beads directories gt done purges on completion:
+// the finishing rig's, then the town (hq) database's. Closed wisps accumulate
+// in both — the town's come from plugin runs — and nothing else reclaims the
+// town's, since wisp_reaper is enabled nowhere (gt-j4rxz). A rig whose
+// directory IS the town root has one database, not two, and is listed once.
+func wispPurgeDirs(beadsPath, townRoot string) []string {
+	if filepath.Clean(beadsPath) == filepath.Clean(townRoot) {
+		return []string{beadsPath}
+	}
+	return []string{beadsPath, townRoot}
 }
 
 // purgeClosedEphemeralBeads removes closed ephemeral beads (wisps) that accumulated

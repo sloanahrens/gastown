@@ -362,3 +362,140 @@ func TestDoneStateEnvZeroValueResolvesHeadInTheGivenDir(t *testing.T) {
 		t.Error("zero doneStateEnv does not resolve HEAD through done.CurrentReviewEvidenceHeadIn")
 	}
 }
+
+// TestDoneAgentStatePurgesTheTownDatabaseToo: gt done's self-clean purges the
+// closed wisps of the finishing rig's database, and of the town (hq) database
+// as well. Nothing else reclaims the town's: wisp_reaper, the patrol that
+// would, is enabled in no rig, so the plugin-run wisps accumulated there at
+// ~90 a day until an operator purged 9,488 of them by hand on 2026-10-12
+// (gt-j4rxz). Each directory is purged once, for the configured grace period.
+func TestDoneAgentStatePurgesTheTownDatabaseToo(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	for _, dir := range []string{"mayor", filepath.Join(".beads", "locks"), "gastown"} {
+		if err := os.MkdirAll(filepath.Join(townRoot, dir), 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	routes := `{"prefix":"gt-","path":"gastown"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+	daemonJSON := `{"type":"daemon-patrol-config","version":1,"patrols":{"wisp_reaper":{"enabled":true,"delete_age":"48h"}}}`
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "daemon.json"), []byte(daemonJSON), 0644); err != nil {
+		t.Fatalf("write daemon.json: %v", err)
+	}
+
+	db := beadsfake.New(beadsfake.WithPrefix("gt"))
+	db.Seed(doneAgentBead(), beads.Issue{
+		ID: "gt-base-123", Title: "Base bead", Status: string(beads.StatusHooked),
+	})
+
+	var purged []string
+	env := doneStateEnv{
+		getenv: envMap(map[string]string{"GT_ROLE": "polecat", "GT_RIG": "gastown", "GT_POLECAT": "nux"}),
+		routed: func(string) beads.Client { return db },
+		source: func(string, string) beads.Client { return db },
+		purge: func(dir, root string) {
+			purged = append(purged, dir)
+			// The grace period comes from closedWispDeleteAge(root), read by
+			// the real purge; record what each directory was asked for.
+			var rec recordingPurger
+			purgeClosedEphemeralBeads(&rec, root)
+			if len(rec.olderThan) != 1 || rec.olderThan[0] != "48h" {
+				t.Errorf("purge of %s asked for grace period %q, want 48h", dir, rec.olderThan)
+			}
+		},
+		reviewHead: func(string) (string, error) {
+			return "", errors.New("resolving HEAD: not a git repository")
+		},
+	}
+	if err := updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, done.ExitCompleted, "gt-base-123"); err != nil {
+		t.Fatalf("completed gt done: %v", err)
+	}
+
+	want := []string{filepath.Join(townRoot, "gastown"), townRoot}
+	if !reflect.DeepEqual(purged, want) {
+		t.Errorf("gt done purged %v, want %v", purged, want)
+	}
+}
+
+// TestDoneAgentStateToleratesAFailingTownPurge: the town purge is best-effort
+// like the rig's. A Dolt serialization conflict — another client committing at
+// that moment — must leave gt done's result and the agent state untouched
+// (gt-j4rxz).
+func TestDoneAgentStateToleratesAFailingTownPurge(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	for _, dir := range []string{"mayor", filepath.Join(".beads", "locks"), "gastown"} {
+		if err := os.MkdirAll(filepath.Join(townRoot, dir), 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	routes := `{"prefix":"gt-","path":"gastown"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+
+	db := beadsfake.New(beadsfake.WithPrefix("gt"))
+	db.Seed(doneAgentBead(), beads.Issue{
+		ID: "gt-base-123", Title: "Base bead", Status: string(beads.StatusHooked),
+	})
+
+	rigDir := filepath.Join(townRoot, "gastown")
+	env := doneStateEnv{
+		getenv: envMap(map[string]string{"GT_ROLE": "polecat", "GT_RIG": "gastown", "GT_POLECAT": "nux"}),
+		routed: func(string) beads.Client { return db },
+		source: func(string, string) beads.Client { return db },
+		purge: func(dir, root string) {
+			if dir == root {
+				// The real purge path, against a store that conflicts.
+				purgeClosedEphemeralBeads(failingPurger{}, root)
+			}
+		},
+		reviewHead: func(string) (string, error) {
+			return "", errors.New("resolving HEAD: not a git repository")
+		},
+	}
+	if err := updateAgentStateOnDoneIn(env, rigDir, townRoot, done.ExitCompleted, "gt-base-123"); err != nil {
+		t.Fatalf("gt done with a failing town purge: %v", err)
+	}
+
+	agent, err := db.Show("gt-gastown-polecat-nux")
+	if err != nil {
+		t.Fatalf("show agent bead: %v", err)
+	}
+	fields := beads.ParseAgentFields(agent.Description)
+	if fields.AgentState != string(beads.AgentStateDone) {
+		t.Errorf("agent_state = %q, want %q despite the failing town purge", fields.AgentState, beads.AgentStateDone)
+	}
+	if fields.HookBead != "" {
+		t.Errorf("hook_bead = %q, want it cleared despite the failing town purge", fields.HookBead)
+	}
+}
+
+// TestWispPurgeDirs: gt done purges the rig's beads directory and the town
+// (hq) database's. A rig whose beads directory IS the town directory has one
+// database, not two, and is listed once — the alternative, two entries for one
+// directory, is a second bd purge on a database nothing changed (gt-j4rxz).
+func TestWispPurgeDirs(t *testing.T) {
+	t.Parallel()
+	townRoot := "/town"
+
+	t.Run("rig and town", func(t *testing.T) {
+		got := wispPurgeDirs(filepath.Join(townRoot, "gastown"), townRoot)
+		want := []string{filepath.Join(townRoot, "gastown"), townRoot}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("wispPurgeDirs() = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("the rig is the town", func(t *testing.T) {
+		for _, beadsPath := range []string{townRoot, filepath.Join(townRoot, "."), townRoot + "/"} {
+			got := wispPurgeDirs(beadsPath, townRoot)
+			if len(got) != 1 || got[0] != beadsPath {
+				t.Errorf("wispPurgeDirs(%q, %q) = %v, want that directory once", beadsPath, townRoot, got)
+			}
+		}
+	})
+}
