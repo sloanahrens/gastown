@@ -167,7 +167,7 @@ func buildDashPolecats(in dashPolecatInputs) []dashboard.Polecat {
 
 	out := make([]dashboard.Polecat, 0, len(in.Seats))
 	for _, s := range in.Seats {
-		p := dashboard.Polecat{Rig: s.Rig, Name: s.Name, RigParked: s.RigParked, CountsTowardCapacity: s.Item.Disposition.CountsTowardCapacity}
+		p := dashboard.Polecat{Rig: s.Rig, Name: s.Name, RigParked: s.RigParked, Agent: s.Item.Agent, CountsTowardCapacity: s.Item.Disposition.CountsTowardCapacity}
 		if x := record[s.Rig+"/"+s.Name]; x != nil {
 			p.Landed24h, p.Approved24h = x.landed, x.approved
 			if x.scoreN > 0 {
@@ -302,13 +302,15 @@ func (c *dashSeatCache) put(id, key string, item polecatInventoryItem) {
 // seats and wrong for describing them.) Sessions are the tmux names read once
 // by the caller. A rig whose beads cannot be read is an error, not a rig of
 // idle polecats: a store that is down must not read as a quiet town.
-func dashSeats(townRoot string, sessionNames []string, sessionsKnown bool, cache *dashSeatCache) ([]dashSeat, error) {
+func dashSeats(townRoot string, sessionNames []string, sessionsKnown bool, cache *dashSeatCache, lister sessionLister) ([]dashSeat, error) {
 	rigs, err := knownRigNames(townRoot)
 	if err != nil {
 		return nil, err
 	}
 	reg := townRegistry()
-	sessions := newPolecatSessionSet(reg, sessionNames)
+	// The lister reads each live session's recorded GT_AGENT, which the pane
+	// names as the polecat's model.
+	sessions := newPolecatSessionSetFromNames(reg, lister, sessionNames)
 	spawnWindow := polecatSpawnGraceWindow(townRoot)
 	now := time.Now()
 	var seats []dashSeat
@@ -366,6 +368,13 @@ func dashSeats(townRoot string, sessionNames []string, sessionsKnown bool, cache
 				if sessionsKnown {
 					cache.put(id, key, item)
 				}
+			}
+			// The agent is the live session's own record, read on every poll
+			// and never taken from the cache, so a session left over from
+			// before a model switch keeps showing its own model.
+			item.Agent = ""
+			if entry, ok := sessions.session(rig, name); ok {
+				item.Agent = entry.Agent
 			}
 			seats = append(seats, dashSeat{Rig: rig, Name: name, Session: session.PolecatSessionName(reg.PrefixForRig(rig), name), RigParked: rigParked, Item: item, Issue: active[name], HookedAt: hookedAt})
 		}

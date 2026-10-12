@@ -3,7 +3,10 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/dashboard"
 )
 
 // The header strip names the model a reviewer runs, not the command that runs
@@ -135,5 +138,168 @@ func TestModelsReaderLeavesAnUnreadableConfigUnknown(t *testing.T) {
 	// A town with no pool declares no cap, which is not a cap of zero.
 	if m.SeatCap != 0 {
 		t.Errorf("a town with no pool declared a cap: %+v", m)
+	}
+}
+
+func writePanelFile(t *testing.T, townRoot, rel, body string) {
+	t.Helper()
+
+	path := filepath.Join(townRoot, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const panelDaemon = `{"type":"daemon-patrol-config","version":1,"patrols":{
+  "spec_dispatch":{"enabled":true,"hooked_agent":"claude-sonnet","max_hooked":2},
+  "scheduled_slings":{"enabled":true,"entries":[{"name":"deep-review","rig":"gastown","formula":"mol-deep-review","agent":"claude-sonnet","interval":"24h"}]}}}`
+
+const panelTable = `{"version":1,"profiles":{
+  "flash":{"preset":"deepseek-flash","om_backend":["~/.local/bin/claude-deepseek-flash","-p"]},
+  "sonnet":{"preset":"claude-sonnet","om_backend":["~/.local/bin/claude","-p","--model","sonnet"]}},
+  "default":"flash","roles":{"polecat":"sonnet","om-review":"sonnet","deep-review":"sonnet"}}`
+
+func panelRole(t *testing.T, roles []dashboard.ModelRole, role string) dashboard.ModelRole {
+	t.Helper()
+	for _, r := range roles {
+		if r.Role == role {
+			return r
+		}
+	}
+	t.Fatalf("no %s row in %+v", role, roles)
+	return dashboard.ModelRole{}
+}
+
+// The panel lists both polecat seats the way gt pool show does: an open seat
+// with its agent and cap, a seat nothing may fill as closed (gt-lqa6p).
+func TestModelsReaderListsEachSeat(t *testing.T) {
+	t.Parallel()
+
+	town := t.TempDir()
+	writeModelsSettings(t, town, `{"polecat_pool":{"agent":"deepseek-flash","max_seats":3}}`)
+	writePanelFile(t, town, "mayor/daemon.json", panelDaemon)
+	om := writeOMConfig(t, `{"backend":["claude","-p","--model","sonnet"]}`)
+
+	rows := (&modelsReader{townRoot: town, omPath: om}).read().SeatRows
+	if len(rows) != 2 {
+		t.Fatalf("seat rows = %+v, want the pool seat and the second seat", rows)
+	}
+	pool, second := rows[0], rows[1]
+	if pool.Seat != "pool" || pool.Agent != "deepseek-flash" || pool.Cap != 3 || pool.Closed || pool.CapDefault {
+		t.Errorf("pool seat = %+v", pool)
+	}
+	if second.Seat != "second" || second.Agent != "claude-sonnet" || second.Cap != 2 || second.Closed {
+		t.Errorf("second seat = %+v", second)
+	}
+	if pool.Key == "" || second.Key == "" {
+		t.Error("a seat does not name the config it was read from")
+	}
+
+	// A pool with no max_seats is the dispatcher's default cap, marked as such.
+	writeModelsSettings(t, town, `{"polecat_pool":{"agent":"deepseek-flash"}}`)
+	if pool := (&modelsReader{townRoot: town, omPath: om}).read().SeatRows[0]; pool.Cap != defaultSpecSeatCap || !pool.CapDefault {
+		t.Errorf("an unset max_seats = %+v, want the default cap marked", pool)
+	}
+
+	// No pool agent and no max_hooked: both seats are closed.
+	closed := t.TempDir()
+	writeModelsSettings(t, closed, `{"polecat_pool":{}}`)
+	writePanelFile(t, closed, "mayor/daemon.json", `{"type":"daemon-patrol-config","version":1,"patrols":{"spec_dispatch":{"enabled":true}}}`)
+	for _, s := range (&modelsReader{townRoot: closed, omPath: om}).read().SeatRows {
+		if !s.Closed || s.Agent != "" || s.Cap != 0 {
+			t.Errorf("seat %q = %+v, want closed", s.Seat, s)
+		}
+	}
+
+	// A patrol config that does not parse is not a closed seat.
+	broken := t.TempDir()
+	writeModelsSettings(t, broken, `{"polecat_pool":{"agent":"a","max_seats":1}}`)
+	writePanelFile(t, broken, "mayor/daemon.json", `{"patrols":`)
+	rows = (&modelsReader{townRoot: broken, omPath: om}).read().SeatRows
+	if rows[0].Unknown || rows[0].Closed || !rows[1].Unknown || rows[1].Closed {
+		t.Errorf("an unreadable daemon.json: %+v", rows)
+	}
+}
+
+// Each role names its model and the key it was read from, and a config the
+// town cannot read leaves its role unknown rather than empty (gt-lqa6p).
+func TestModelsReaderListsTheModelPerRole(t *testing.T) {
+	t.Parallel()
+
+	town := t.TempDir()
+	writeModelsSettings(t, town, `{"role_agents":{"polecat":"claude-sonnet","crew":"claude-opus"}}`)
+	writePanelFile(t, town, "mayor/daemon.json", panelDaemon)
+	om := writeOMConfig(t, `{"backend":["/x/claude","-p","--model","sonnet"]}`)
+
+	roles := (&modelsReader{townRoot: town, omPath: om}).read().Roles
+	for role, want := range map[string]string{"polecat": "claude-sonnet", "om-review": "sonnet", "deep-review": "claude-sonnet", "crew": "claude-opus"} {
+		r := panelRole(t, roles, role)
+		if r.Model != want {
+			t.Errorf("%s model = %q, want %q", role, r.Model, want)
+		}
+		if r.Key == "" {
+			t.Errorf("%s does not name the config key it was read from", role)
+		}
+	}
+
+	// Nothing readable: every role is unknown, none is an empty value passed
+	// off as a model, and no key goes unnamed.
+	bad := t.TempDir()
+	writeModelsSettings(t, bad, `{"role_agents":`)
+	writePanelFile(t, bad, "mayor/daemon.json", `{"patrols":`)
+	for _, r := range (&modelsReader{townRoot: bad, omPath: filepath.Join(bad, "nope.json")}).read().Roles {
+		if r.Model != "" || r.Note == "" || r.Key == "" {
+			t.Errorf("%s with nothing readable = %+v, want unknown with a note", r.Role, r)
+		}
+		if r.Drift != "" {
+			t.Errorf("%s is called drifted by a table that was not read: %+v", r.Role, r)
+		}
+	}
+}
+
+// A role whose live setting differs from the town model table wears a drift
+// mark naming the table's value, the check gt-models.sh show makes; a table
+// nobody can read marks nothing (gt-lqa6p).
+func TestModelsReaderMarksDriftFromTheModelTable(t *testing.T) {
+	t.Parallel()
+
+	om := writeOMConfig(t, `{"backend":["/x/claude-deepseek-flash","-p"]}`)
+	town := t.TempDir()
+	writeModelsSettings(t, town, `{"role_agents":{"polecat":"claude-sonnet","crew":"deepseek-flash"}}`)
+	writePanelFile(t, town, "mayor/daemon.json", strings.Replace(panelDaemon, `"agent":"claude-sonnet"`, `"agent":"deepseek-flash"`, 1))
+	writePanelFile(t, town, "settings/models.json", panelTable)
+
+	roles := (&modelsReader{townRoot: town, omPath: om}).read().Roles
+	if r := panelRole(t, roles, "polecat"); r.Drift != "" {
+		t.Errorf("polecat matches the table and is marked: %+v", r)
+	}
+	if r := panelRole(t, roles, "om-review"); r.Drift != "sonnet" {
+		t.Errorf("om-review runs flash against a sonnet table and drift = %q", r.Drift)
+	}
+	if r := panelRole(t, roles, "deep-review"); r.Drift != "claude-sonnet" {
+		t.Errorf("deep-review drift = %q, want claude-sonnet", r.Drift)
+	}
+	// The table says nothing about crew.
+	if r := panelRole(t, roles, "crew"); r.Drift != "" {
+		t.Errorf("crew is not in the table and is marked: %+v", r)
+	}
+
+	// The table's "~/" path is the live absolute one: the same backend is not
+	// drift.
+	home, _ := os.UserHomeDir()
+	same := writeOMConfig(t, `{"backend":["`+filepath.Join(home, ".local/bin/claude")+`","-p","--model","sonnet"]}`)
+	if r := panelRole(t, (&modelsReader{townRoot: town, omPath: same}).read().Roles, "om-review"); r.Drift != "" {
+		t.Errorf("a backend equal to the table's, once ~ is expanded, is marked: %+v", r)
+	}
+
+	// An unreadable table has no opinion.
+	writePanelFile(t, town, "settings/models.json", `{"profiles":`)
+	for _, r := range (&modelsReader{townRoot: town, omPath: om}).read().Roles {
+		if r.Drift != "" {
+			t.Errorf("%s drifted from a table that did not parse: %+v", r.Role, r)
+		}
 	}
 }

@@ -95,3 +95,83 @@ func TestTheHeaderStripCountsTheSeatsThePageCounts(t *testing.T) {
 		t.Errorf("strip = %+v", st.Models)
 	}
 }
+
+// The models panel is a small table under the header strip, which stays as it
+// is (gt-lqa6p).
+func TestTheModelsPanelSitsUnderTheHeaderStrip(t *testing.T) {
+	t.Parallel()
+
+	page := string(indexHTML)
+	if strings.Index(page, `id="modelspanel"`) < strings.Index(page, "</header>") {
+		t.Error("the models panel is not below the header")
+	}
+	if !strings.Contains(page, "renderModels(state); renderModelsPanel(state);") {
+		t.Error("the page's redraw does not include the panel")
+	}
+	body := pageFunc(t, "renderModelsPanel")
+	for _, want := range []string{`"drift"`, `rr.model || "unknown"`, `"closed"`, "sr.key", "rr.key", "rr.drift"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("renderModelsPanel does not draw %s", want)
+		}
+	}
+	// The strip itself is untouched.
+	if !strings.Contains(pageFunc(t, "renderModels"), `"polecats " + (m.polecat || "unknown") + " · seats " + seats + " · om " + (m.om || "unknown")`) {
+		t.Error("the header strip's text changed")
+	}
+}
+
+// A working polecat's row names the model its session runs (gt-lqa6p).
+func TestThePolecatPaneNamesEachPolecatsModel(t *testing.T) {
+	t.Parallel()
+
+	if !strings.Contains(pageFunc(t, "renderSeats"), "p.agent") {
+		t.Error("the polecat pane does not show the polecat's agent")
+	}
+}
+
+// The panel's live count is the polecats the seats pane counts, on each seat's
+// agent: one on an old model does not fill a seat it does not hold, and a
+// closed seat has no count (gt-lqa6p).
+func TestTheModelsPanelCountsLivePolecatsPerSeat(t *testing.T) {
+	t.Parallel()
+
+	h := NewHub(Config{
+		Now: func() time.Time { return time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC) },
+		Models: func() *Models {
+			return &Models{Polecat: "claude-sonnet", SeatRows: []ModelSeat{
+				{Seat: "pool", Agent: "claude-sonnet", Cap: 3},
+				{Seat: "second", Agent: "deepseek-flash", Cap: 2},
+				{Seat: "extra", Closed: true},
+			}}
+		},
+		Summary: func() Summary {
+			return Summary{Polecats: []Polecat{
+				{Rig: "gastown", Name: "a", Agent: "claude-sonnet", CountsTowardCapacity: true},
+				// No recorded agent: the polecat role's own.
+				{Rig: "gastown", Name: "b", CountsTowardCapacity: true},
+				{Rig: "gastown", Name: "c", Agent: "deepseek-flash", CountsTowardCapacity: true},
+				{Rig: "gastown", Name: "d", Agent: "deepseek-flash"},
+				{Rig: "old", Name: "e", Agent: "claude-sonnet", CountsTowardCapacity: true, RigParked: true},
+			}}
+		},
+	})
+
+	h.pollModels()
+	for _, s := range h.State().Models.SeatRows {
+		if s.Live != nil {
+			t.Fatalf("seat %q has a live count before the polecats were read", s.Seat)
+		}
+	}
+	h.pollSummary()
+	h.pollModels()
+	rows := h.State().Models.SeatRows
+	if rows[0].Live == nil || *rows[0].Live != 2 {
+		t.Errorf("pool seat live = %v, want 2", rows[0].Live)
+	}
+	if rows[1].Live == nil || *rows[1].Live != 1 {
+		t.Errorf("second seat live = %v, want 1", rows[1].Live)
+	}
+	if rows[2].Live != nil {
+		t.Errorf("a closed seat has a live count: %d", *rows[2].Live)
+	}
+}
