@@ -19,7 +19,9 @@ import (
 // are short or restartable. Post-landing runs and tier sweep cycles are not
 // here either: checkUpgradeRestart holds a bounded wait for each instead
 // (postLandRestartCap, tierSweepRestartCap), and a predicate that never
-// cleared would hold a restart forever.
+// cleared would hold a restart forever. The maintenance gc cycle is the one
+// hold both places carry: the flag here, and the drain's bounded wait
+// (maintenanceGCRestartCap) in upgradeHold (gt-oucgn).
 //
 // checkUpgradeRestart reads the named form instead — upgradeHold, which is
 // this predicate with each hold's cap and the wait line's name on it

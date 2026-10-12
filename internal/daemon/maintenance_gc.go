@@ -61,6 +61,15 @@ const (
 	// that lapses on its own at this horizon.
 	maintenancePauseSlack = 5 * time.Minute
 
+	// maintenanceGCRestartCap is how long a pending upgrade restart waits for
+	// a maintenance gc cycle in flight before it restarts anyway (gt-oucgn).
+	// It is the gc's own bound, not an invented one: one CALL
+	// dolt_gc('--full') is cut off at maintenanceGCTimeout, and the pause
+	// marker that covers it outlives the call by maintenancePauseSlack. A
+	// cycle still in flight past that is stuck — a prod --full gc takes
+	// seconds — and a stuck gc must not hold an install forever.
+	maintenanceGCRestartCap = maintenanceGCTimeout + maintenancePauseSlack
+
 	// maintenancePauseActor is the actor the gc's pause marker names.
 	maintenancePauseActor = "daemon/scheduled_maintenance"
 
@@ -620,4 +629,27 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time) {
 		d.resetGCDeferralStreak()
 		d.maintenanceGCFinishedAt.Store(d.maintenance().now().UnixNano())
 	})
+}
+
+// maintenanceGCUpgradeHold reports whether a maintenance gc cycle is in flight
+// and, when it is, how long a pending upgrade restart has held for it
+// (gt-oucgn). The gc call's context is the daemon's (maintenanceGCCycle), so a
+// restart inside a cycle cancels the call: an aborted gc records nothing and
+// leaves the database due, which is why the restart waits for it at all.
+//
+// The wait is the hold's own clock — started at the first heartbeat that sees
+// the cycle, cleared when it ends — rather than the marker's, so the bound the
+// drain compares it against is the gc's own and a gc that starts a minute ago
+// gets its full bound however long the marker has waited.
+//
+// Run-loop goroutine only, like the drain state it reads and writes.
+func (d *Daemon) maintenanceGCUpgradeHold(now time.Time) (time.Duration, bool) {
+	if !d.maintenanceGCRunning.Load() {
+		d.upgradeGCHoldSince = time.Time{}
+		return 0, false
+	}
+	if d.upgradeGCHoldSince.IsZero() {
+		d.upgradeGCHoldSince = now
+	}
+	return now.Sub(d.upgradeGCHoldSince), true
 }

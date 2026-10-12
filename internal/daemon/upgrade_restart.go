@@ -66,6 +66,10 @@ const housekeepingRestartCap = 2 * time.Minute
 // is distinguishable from every other hold.
 const tierSweepHoldLabel = "the tier sweep that is running"
 
+// maintenanceGCHoldLabel is what the wait line calls a maintenance gc cycle in
+// flight (gt-oucgn).
+const maintenanceGCHoldLabel = "the maintenance gc cycle"
+
 // restartPendingMarker is daemon/restart-pending.json, written by
 // scripts/install-gt.sh after a smoke-tested install. The daemon adds
 // attempted_from (its own commit) just before it exits for the marker.
@@ -437,8 +441,8 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 }
 
 // upgradeHold reports the work that still holds a pending restart at now, or
-// nil when the restart may go. A hard hold — a landing pass, a scheduled slings
-// cycle, the install lock, a maintenance gc cycle — is never
+// nil when the restart may go. A hard hold — a landing pass, a scheduled
+// slings cycle, the install lock — is never
 // bounded and never masked by soft work that happens to be in flight with it
 // (gt-rtbbr). Work a restart can simply redo is bounded by its cap and dropped
 // here; the lines naming what it cuts are written only on the heartbeat that
@@ -446,18 +450,29 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 // The caps are read off upgradeWaitSince, the marker's own wait clock, so a
 // hold that was already running when the marker appeared does not add a
 // heartbeat to the wait.
+//
+// A maintenance gc cycle holds a restart like hard work, but bounded by the
+// gc's own clock rather than the marker's (maintenanceGCRestartCap): its
+// context comes from the daemon's, so a restart inside the cycle aborts the
+// call, and a stuck gc must not hold an install forever (gt-oucgn).
 func (d *Daemon) upgradeHold(now time.Time) *daemonWork {
 	waited := now.Sub(d.upgradeWaitSince)
-	if d.maintenanceGCRunning.Load() {
-		// A --full gc call is in flight on the server; the daemon does not cut
-		// it (maintenance_gc_guard.go). The 30m escalation still applies.
-		return &daemonWork{name: "the maintenance gc cycle", hard: true}
-	}
+	gcWaited, gcRunning := d.maintenanceGCUpgradeHold(now)
+
 	// daemonWorkHold is hard-first, so a hard hold is returned here, unbounded,
 	// even when soft work is in flight alongside it.
 	hold := d.daemonWorkHold()
 	if hold != nil && hold.hard {
 		return hold
+	}
+
+	// A --full gc call is in flight on the server; the daemon does not cut it
+	// (maintenance_gc_guard.go), so the restart waits for the cycle to close —
+	// up to the gc's own bound, past which the call is stuck (gt-oucgn). Its
+	// wait is read off the hold's own clock, not the marker's, so a gc that
+	// starts late in a wait still gets its full bound.
+	if gcRunning && gcWaited < maintenanceGCRestartCap {
+		return &daemonWork{name: maintenanceGCHoldLabel, hard: true}
 	}
 
 	postLand := d.postLandRuns.Load() > 0
@@ -477,6 +492,10 @@ func (d *Daemon) upgradeHold(now time.Time) *daemonWork {
 	// Nothing holds the restart: it goes on this heartbeat. Say what, if
 	// anything, it is cutting or letting go — only now, when the restart is
 	// real (gt-rtbbr).
+	if gcRunning {
+		d.logger.Printf("upgrade-restart: the maintenance gc cycle has been in flight for %s, past its %s bound; restarting anyway and the shutdown cancels it",
+			gcWaited.Round(time.Second), maintenanceGCRestartCap)
+	}
 	if postLand {
 		d.logger.Printf("upgrade-restart: a post-land run is still in flight after %s; restarting anyway (the landing worker reruns the untested tip on start)", postLandRestartCap)
 	}
@@ -510,6 +529,7 @@ func (d *Daemon) endUpgradeDrain() {
 	d.upgradeRestartPending.Store(false)
 	d.upgradeWaitLogged = ""
 	d.upgradeDrainLogged = false
+	d.upgradeGCHoldSince = time.Time{}
 }
 
 // logUpgradeWait says what a pending restart is waiting on: the drain starting

@@ -722,6 +722,12 @@ func TestMaintenanceGCRunningBlocksUpgradeButNotItsOwnQuietProbe(t *testing.T) {
 	if quiet, reason := d.maintenanceQuiet(); !quiet {
 		t.Errorf("maintenanceQuiet() = false (%s) — the cycle is blocking itself", reason)
 	}
+	// gt-oucgn: the hold is the cycle, not the flag; a finished cycle leaves
+	// the daemon idle again.
+	d.maintenanceGCRunning.Store(false)
+	if !d.isIdleForUpgrade() {
+		t.Error("isIdleForUpgrade() = false after the gc cycle finished")
+	}
 }
 
 // writeTestRigsJSON registers rigs in <town>/mayor/rigs.json.
