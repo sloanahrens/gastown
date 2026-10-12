@@ -2204,8 +2204,11 @@ var gitResetRemotePrefixes = []string{"origin/", "upstream/", "refs/remotes/"}
 // a remote-tracking commit: a remote-tracking ref, a bare remote name (which
 // git reads as <remote>/HEAD), FETCH_HEAD, which a fetch points at the remote's
 // tip, or an upstream-of shorthand (@{u}, @{upstream}, @{push}, alone or after
-// a branch name).
+// a branch name). A trailing ancestry suffix (~, ~N, ^, ^N, in any run) does
+// not change which commit the base names, so it is stripped for this check
+// only: "fetch_head~1" and "@{u}^" reset onto the remote's history all the same.
 func gitResetNamesRemote(arg string) bool {
+	arg = trimRevisionSuffix(arg)
 	for _, prefix := range gitResetRemotePrefixes {
 		if strings.HasPrefix(arg, prefix) {
 			return true
@@ -2221,6 +2224,23 @@ func gitResetNamesRemote(arg string) bool {
 		}
 	}
 	return false
+}
+
+// trimRevisionSuffix drops a trailing run of git ancestry operators from a
+// revision: "~", "~N", "^" and "^N", repeated ("fetch_head~2^", "@{u}^^").
+// Only digits after the operator are consumed, so a "^{commit}" peel is left
+// as it is, and a revision with no operator keeps its trailing digits.
+func trimRevisionSuffix(rev string) string {
+	for {
+		i := len(rev)
+		for i > 0 && rev[i-1] >= '0' && rev[i-1] <= '9' {
+			i--
+		}
+		if i == 0 || (rev[i-1] != '~' && rev[i-1] != '^') {
+			return rev
+		}
+		rev = rev[:i-1]
+	}
 }
 
 // matchesDangerousGitReset blocks `git reset <remote-tracking-ref>` in any of
