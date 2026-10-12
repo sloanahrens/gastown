@@ -1741,6 +1741,24 @@ func (s *TownSettings) applyDeprecatedKeys() []retiredSeatKey {
 	return s.PolecatPool.applyDeprecatedKeys()
 }
 
+// retiredPoolSeatKey is one retired polecat_pool spelling: the object holding it
+// in a settings file, the spelling itself, and the key it was folded into.
+type retiredPoolSeatKey struct {
+	// parent is the object the spelling sits in, from the file's top level.
+	parent []string
+	// old is the retired key, current the key that replaced it.
+	old, current string
+}
+
+// retiredPoolSeatKeys is the retired polecat_pool spellings applyDeprecatedKeys
+// folds, with the object each sits in so the config writer can rewrite them
+// onto the current keys on a write that changes the seat (writer.go
+// foldRetiredKeys, gt-aq7zo).
+var retiredPoolSeatKeys = []retiredPoolSeatKey{
+	{parent: []string{"polecat_pool"}, old: "overflow_agent", current: "agent"},
+	{parent: []string{"polecat_pool"}, old: "max_overflow", current: "max_seats"},
+}
+
 // deprecatedKeyApplier is the hook a config type uses to fold retired key
 // spellings into the fields that replaced them: it returns the retired keys it
 // read so the caller can warn about each. DecodeJSONFile runs it after a

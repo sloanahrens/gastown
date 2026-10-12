@@ -209,7 +209,7 @@ func runPoolSet(w io.Writer, townRoot, agent string, n int) error {
 			}
 			setPoolSeat(ts, agent, n)
 			return ts.PolecatPool.Validate()
-		})
+		}, config.FoldRetiredPoolSeatKeys())
 	case secondSeat:
 		path := config.DaemonPatrolConfigPath(townRoot)
 		err = config.UpdateConfigJSON(path, 0o644, func(pc *config.DaemonPatrolConfig, exists bool) error {
@@ -246,7 +246,10 @@ func seatName(k poolSeatKey) string {
 
 // setPoolSeat opens the pool seat on agent at n, or closes it for n of 0 by
 // removing both keys: a max_seats of 0 reads as uncapped to sling and as the
-// default cap to the dispatcher, so a zero is never written.
+// default cap to the dispatcher, so a zero is never written. The write folds
+// the retired spellings of both keys onto them
+// (config.FoldRetiredPoolSeatKeys), so a file that carried overflow_agent does
+// not keep supplying the seat.
 func setPoolSeat(ts *config.TownSettings, agent string, n int) {
 	if n == 0 {
 		if ts.PolecatPool != nil {
