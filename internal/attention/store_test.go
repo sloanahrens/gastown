@@ -229,3 +229,74 @@ func TestStoreStale(t *testing.T) {
 		t.Error("a one-minute-old state is not stale")
 	}
 }
+
+// failingWrite swaps appendWrite for one that writes half the data and then
+// fails, the way a full disk does. Tests using it must not run in parallel.
+func failingWrite(t *testing.T) {
+	t.Helper()
+	orig := appendWrite
+	appendWrite = func(f *os.File, b []byte) (int, error) {
+		n, _ := f.Write(b[:len(b)/2])
+		return n, errors.New("disk full")
+	}
+	t.Cleanup(func() { appendWrite = orig })
+}
+
+func TestStoreAppendEventsFailedBatchLeavesFileUnchanged(t *testing.T) {
+	town := t.TempDir()
+	first := Event{TS: reconcileNow, Class: KindEscalation, Severity: SeverityHigh, Text: "one", Key: "esc:hq-1", State: EventNew}
+	if err := AppendEvents(town, []Event{first}); err != nil {
+		t.Fatalf("AppendEvents: %v", err)
+	}
+	before, err := os.ReadFile(EventsPath(town))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	failingWrite(t)
+	batch := []Event{
+		{TS: reconcileNow, Class: KindRedMain, Severity: SeverityLow, Text: "a", Key: "k1", State: EventNew},
+		{TS: reconcileNow, Class: KindRedMain, Severity: SeverityLow, Text: "b", Key: "k2", State: EventNew},
+	}
+	if err := AppendEvents(town, batch); err == nil {
+		t.Fatal("AppendEvents succeeded, want the write error")
+	}
+	after, err := os.ReadFile(EventsPath(town))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("events.jsonl changed by a failed batch:\nbefore %q\nafter  %q", before, after)
+	}
+}
+
+func TestStoreAppendEventsRetryWritesEachEventOnce(t *testing.T) {
+	town := t.TempDir()
+	batch := []Event{
+		{TS: reconcileNow, Class: KindRedMain, Severity: SeverityLow, Text: "a", Key: "k1", State: EventNew},
+		{TS: reconcileNow, Class: KindRedMain, Severity: SeverityLow, Text: "b", Key: "k2", State: EventNew},
+		{TS: reconcileNow, Class: KindRedMain, Severity: SeverityLow, Text: "c", Key: "k3", State: EventNew},
+	}
+
+	failingWrite(t)
+	if err := AppendEvents(town, batch); err == nil {
+		t.Fatal("AppendEvents succeeded, want the write error")
+	}
+	appendWrite = func(f *os.File, b []byte) (int, error) { return f.Write(b) }
+
+	if err := AppendEvents(town, batch); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	got, err := ReadEvents(town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(batch) {
+		t.Fatalf("events = %d after a failed batch and a retry, want %d: %+v", len(got), len(batch), got)
+	}
+	for i, e := range got {
+		if e.Key != batch[i].Key {
+			t.Errorf("event %d = %s, want %s", i, e.Key, batch[i].Key)
+		}
+	}
+}

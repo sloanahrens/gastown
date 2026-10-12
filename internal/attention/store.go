@@ -83,37 +83,78 @@ func WriteState(townRoot string, s State) error {
 
 // AppendEvents appends each event as one JSON line to events.jsonl, rotating
 // the file to events.jsonl.1 first once it has reached EventsMaxBytes.
+//
+// The lines go out as one O_APPEND write per file, so a failed batch leaves
+// nothing behind for the caller's retry to duplicate. A batch that crosses the
+// rotation cap is written in one piece per file; a failure after the first of
+// those leaves that piece, which belongs to the rotated file.
 func AppendEvents(townRoot string, events []Event) error {
 	if len(events) == 0 {
 		return nil
+	}
+	lines := make([][]byte, len(events))
+	for i, e := range events {
+		data, err := json.Marshal(e)
+		if err != nil {
+			return fmt.Errorf("encoding event %s: %w", e.Key, err)
+		}
+		lines[i] = append(data, '\n')
 	}
 	if err := os.MkdirAll(Dir(townRoot), 0o755); err != nil {
 		return err
 	}
 	path := EventsPath(townRoot)
 	rotated := RotatedEventsPath(townRoot)
-	for _, e := range events {
+	for len(lines) > 0 {
 		if err := rotateIfFull(path, rotated, EventsMaxBytes); err != nil {
 			return err
 		}
-		data, err := json.Marshal(e)
-		if err != nil {
-			return fmt.Errorf("encoding event %s: %w", e.Key, err)
+		// A line is written while the file is under the cap, so the last one
+		// may carry it over; take lines the same way, then write them at once.
+		size := int64(0)
+		if fi, err := os.Stat(path); err == nil {
+			size = fi.Size()
 		}
-		f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644) //nolint:gosec // G304: a path built from the town root
-		if err != nil {
+		n, chunk := 0, []byte(nil)
+		for n < len(lines) && (n == 0 || size+int64(len(chunk)) < EventsMaxBytes) {
+			chunk = append(chunk, lines[n]...)
+			n++
+		}
+		if err := appendAtomic(path, chunk); err != nil {
 			return err
 		}
-		_, werr := f.Write(append(data, '\n'))
-		cerr := f.Close()
-		if werr != nil {
-			return werr
-		}
-		if cerr != nil {
-			return cerr
-		}
+		lines = lines[n:]
 	}
 	return nil
+}
+
+// appendWrite is the write appendAtomic makes; a test swaps it to fail one.
+var appendWrite = func(f *os.File, b []byte) (int, error) { return f.Write(b) }
+
+// appendAtomic appends data to path in a single write. If the write fails
+// part way, it cuts the file back to its earlier length so no prefix stays.
+func appendAtomic(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644) //nolint:gosec // G304: a path built from the town root
+	if err != nil {
+		return err
+	}
+	before := int64(-1)
+	if fi, err := f.Stat(); err == nil {
+		before = fi.Size()
+	}
+	n, werr := appendWrite(f, data)
+	if werr != nil && n > 0 && before >= 0 {
+		// Cut only our own partial write: if another process appended since,
+		// the file is longer than before+n and truncating would eat its lines.
+		if fi, err := f.Stat(); err == nil && fi.Size() == before+int64(n) {
+			_ = f.Truncate(before)
+		}
+	}
+	cerr := f.Close()
+	if werr != nil {
+		return werr
+	}
+	return cerr
 }
 
 // rotateIfFull renames path to rotated when it has reached max bytes. A file
