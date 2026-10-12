@@ -341,6 +341,23 @@ an older `gt` and reload the job from it, so expect the daemon to restart once
 at the first of those commands after an upgrade. Only that value is repaired
 this way; re-provision anything else with `gt daemon enable-supervisor`.
 
+A job launchd cannot initialize respawns forever without the daemon ever
+reaching `daemon.log`. `launchctl print` reports no pid, a `runs` count that
+keeps climbing and `last exit code = 78` (EX_CONFIG, "Service could not
+initialize"), and `launchctl kickstart` does not clear it — the failure is in
+launchd's own load of the job, before the program starts. `gt doctor`'s
+`daemon-respawn` check and `gt status --line` both name that state; neither
+repairs it. Boot the job out, bootstrap it again, and confirm launchd took it:
+
+```bash
+launchctl bootout gui/$(id -u)/com.gastown.daemon
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.gastown.daemon.plist
+launchctl print gui/$(id -u)/com.gastown.daemon | grep -E 'spawn type|pid '
+```
+
+`spawn type = daemon (3)` with a pid is the job running the daemon again;
+`runs` stops climbing.
+
 ### Choosing Roles
 
 Gas Town is modular. Enable only what you need:
