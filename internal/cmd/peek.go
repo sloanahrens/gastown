@@ -35,7 +35,7 @@ The nudge/peek pair provides the canonical interface for agent sessions:
 Supports polecats, crew workers, and town-level agents:
   - Polecats: rig/name format (e.g., greenplace/furiosa)
   - Crew: rig/crew/name format (e.g., beads/crew/dave)
-  - Town-level: deacon, boot (or hq/deacon, hq/boot)
+  - Town-level: deacon (or hq/deacon)
 
 Examples:
   gt peek greenplace/furiosa         # Polecat: last 100 lines (default)
@@ -45,6 +45,15 @@ Examples:
   gt peek deacon -n 50               # Deacon: last 50 lines`,
 	Args: cobra.RangeArgs(1, 2),
 	RunE: runPeek,
+}
+
+// townAgentSessions maps the spellings gt peek accepts for a town-level agent
+// to its tmux session name. Only live town roles belong here: a role that was
+// deleted has no session to capture, so its spelling must fall through to
+// parseAddress and fail there.
+var townAgentSessions = map[string]string{
+	"deacon":    "hq-deacon",
+	"hq/deacon": "hq-deacon",
 }
 
 func runPeek(cmd *cobra.Command, args []string) error {
@@ -60,14 +69,8 @@ func runPeek(cmd *cobra.Command, args []string) error {
 		lines = n
 	}
 
-	// Handle town-level agents: deacon, boot
+	// Handle town-level agents: deacon.
 	// These use session names like "hq-deacon" but have no rig.
-	townAgentSessions := map[string]string{
-		"deacon":    "hq-deacon",
-		"hq/deacon": "hq-deacon",
-		"boot":      "hq-boot",
-		"hq/boot":   "hq-boot",
-	}
 	if sessionName, ok := townAgentSessions[address]; ok {
 		_, err := workspace.FindFromCwdOrError()
 		if err != nil {

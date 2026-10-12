@@ -1150,7 +1150,7 @@ func costTierPresetByName(name string) *RuntimeConfig {
 // If a configured agent is not found or its binary doesn't exist, a warning is
 // printed to stderr and it falls back to the default agent.
 //
-// role is one of: "deacon", "witness", "refinery", "polecat", "crew", "boot".
+// role is one of: "deacon", "witness", "refinery", "polecat", "crew".
 // townRoot is the path to the town directory (e.g., ~/gt).
 // rigPath is the path to the rig directory (e.g., ~/gt/gastown), or empty for town-level roles.
 func ResolveRoleAgentConfig(role, townRoot, rigPath string) *RuntimeConfig {

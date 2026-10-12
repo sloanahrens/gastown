@@ -360,7 +360,7 @@ func (a *AgentSession) displayLabel() string {
 
 // socketDisplayName returns a human-friendly label for a tmux socket.
 // The town socket is labeled "hq" to match the session prefix convention
-// (hq-deacon, hq-boot). Other sockets use their name as-is.
+// (hq-deacon). Other sockets use their name as-is.
 func socketDisplayName(socket string) string {
 	if socket == tmux.GetDefaultSocket() {
 		return "hq"

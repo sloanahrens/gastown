@@ -172,8 +172,8 @@ followed by `Run gt prime --hook and begin work on your hook.`
 Report whether you saw this witness nudge in your conversation. PASS if yes.
 
 **2. Deacon boot:**
-Check if the deacon (boot agent) sent you a message or ran any commands in
-your session before you started. The deacon handles initial session setup.
+Check if the deacon sent you a message or ran any commands in your session
+before you started. The deacon handles initial session setup.
 
 Report whether deacon activity was visible. PASS if yes, SKIP if not seen
 (the deacon may run silently or be disabled).

@@ -187,7 +187,7 @@ func TestParseSessionName(t *testing.T) {
 // mayor role gone, hq-mayor no longer names a town-level identity. "hq" is a
 // registered rig prefix in this registry, so the name falls through to
 // rig-level parsing as a polecat named mayor — the same treatment hq-deacon
-// and hq-boot get.
+// gets.
 func TestParseSessionName_RetiredMayorIsNotATownRole(t *testing.T) {
 	t.Parallel()
 	reg := testRegistry()

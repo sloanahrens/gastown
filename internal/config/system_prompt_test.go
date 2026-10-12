@@ -17,7 +17,6 @@ func TestSystemPromptFilePath_PerRole(t *testing.T) {
 		"mayor":    "", // role retired
 		"deacon":   "", // role retired (gt-4k3fj.6.1)
 		"dog":      "", // role retired (gt-ckunw)
-		"boot":     "",
 	}
 	for role, want := range cases {
 		if got := SystemPromptFilePath(role, town, rig, ""); got != want {
@@ -457,8 +456,6 @@ func TestWithRoleSystemPromptFlag_RendererNotCalledWithoutAFile(t *testing.T) {
 
 	// The retired dog role has no file.
 	withRoleSystemPromptFlag(reg, &RuntimeConfig{Command: "claude"}, "dog", town, "", "")
-	// Boot has no system prompt file at all.
-	withRoleSystemPromptFlag(reg, &RuntimeConfig{Command: "claude"}, "boot", town, "", "")
 	// A polecat without a name has no per-agent file.
 	withRoleSystemPromptFlag(reg, &RuntimeConfig{Command: "claude"}, "polecat", town, filepath.Join(town, "myrig"), "")
 

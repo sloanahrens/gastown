@@ -48,7 +48,7 @@ func drainNudgesFor(errOut io.Writer, townRoot, sessionName string) []nudge.Queu
 //
 // stderr, not stdout: those commands' stdout is machine-read — the refinery
 // patrol used to do MR=$(gt mq next <rig> --quiet), plugins pipe
-// `gt mq list --json` into jq, boot-triage pipes `gt mail inbox --json` into
+// `gt mq list --json` into jq, plugins pipe `gt mail inbox --json` into
 // python — so a nudge block on stdout corrupts the parse, and the drain has
 // already dropped the nudge from the queue by then, losing it outright.
 //

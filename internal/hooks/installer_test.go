@@ -146,7 +146,7 @@ func TestInstallForRole_ClaudeCurrentTemplatePreservesExistingSettings(t *testin
 
 // TestInstallForRole_PolecatClaudeSettingsUseManagedHooks pins gt-8stz: a
 // polecat's settings.json is produced by the JSON merge path
-// (SyncManagedClaudeSettings), same as boot/dog, so a hook config change
+// (SyncManagedClaudeSettings), same as dog, so a hook config change
 // (e.g. the PermissionRequest guard) reaches an existing settings file
 // instead of the install being a silent no-op.
 func TestInstallForRole_PolecatClaudeSettingsUseManagedHooks(t *testing.T) {

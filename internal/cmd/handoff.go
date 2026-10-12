@@ -579,7 +579,7 @@ func getCurrentTmuxSession() (string, error) {
 	// Prefer GT_ROLE for session resolution. BuildCommand uses -L <town-socket>,
 	// but the calling process may live on the default socket (e.g., Claude Code
 	// spawned by tmux on the default server). In that case, display-message on
-	// the town socket returns an arbitrary session (often hq-boot) instead of
+	// the town socket returns an arbitrary session instead of
 	// the caller's actual session.
 	if role := os.Getenv("GT_ROLE"); role != "" {
 		resolved, err := resolveRoleToSession(townRegistry(), role)

@@ -57,11 +57,13 @@ func TestDetectActorOutputsToleratedByTestLeakCheck(t *testing.T) {
 // above only ever cross-checked RoleInfo.ActorString(). gt-9pn wrongly assumed
 // that was the only place agent-originated actor strings come from, and its
 // fix replaced builtinActorPrefixes' literal "boot" entry with "deacon-boot"
-// (ActorString()'s value for RoleBoot) on the theory that "boot" never
-// matched anything real. It does: getAgentIdentity() returns bare "boot" for
-// RoleBoot, and emitSessionEvent writes it to .events.jsonl on every `gt
-// prime` Boot runs — 97 times in one night, at the daemon's boot-spawn
-// cooldown cadence — which the "fixed" tripwire then flagged as leaks.
+// (ActorString()'s value for the boot role) on the theory that "boot" never
+// matched anything real. It did: getAgentIdentity() returned bare "boot" for
+// the boot role, and emitSessionEvent wrote it to .events.jsonl on every `gt
+// prime` that role ran — 97 times in one night, at the daemon's boot-spawn
+// cooldown cadence — which the "fixed" tripwire then flagged as leaks. The
+// role is retired now (gt-4k3fj.6.1), so both entries are historical
+// tolerance for the rows it already wrote, not a live construction path.
 //
 // This test only checks roles whose getAgentIdentity() output is a bare (no
 // "/") string. Rig-qualified roles (polecat, crew, witness, refinery) embed

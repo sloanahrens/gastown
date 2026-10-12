@@ -139,7 +139,6 @@ func TestSpawnRoleContext_RejectsRolesWithoutAFile(t *testing.T) {
 	for _, tc := range []struct{ role, rig, agent string }{
 		{"dog", "", "alpha"}, // retired role (gt-ckunw)
 		{"mayor", "", ""},    // retired role (gt-rwp7z.14)
-		{"boot", "", ""},
 		{"polecat", rigPath, ""},
 		{"witness", "", ""},
 		{"deacon", "", ""},
