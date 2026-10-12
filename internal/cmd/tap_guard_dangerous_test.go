@@ -119,8 +119,27 @@ func TestMatchesDangerousGitReset(t *testing.T) {
 		{"reset onto long-form remote ref", "git reset --soft refs/remotes/origin/main", true},
 		{"glued to a shell operator", "git add -A; git reset --soft origin/main", true},
 
+		// Blocked — an ancestry suffix does not turn a remote target into a local one.
+		{"soft to FETCH_HEAD~1", "git reset --soft FETCH_HEAD~1", true},
+		{"mixed to FETCH_HEAD~1", "git reset --mixed FETCH_HEAD~1", true},
+		{"soft to FETCH_HEAD^", "git reset --soft FETCH_HEAD^", true},
+		{"mixed to FETCH_HEAD^", "git reset --mixed FETCH_HEAD^", true},
+		{"soft to @{u}~1", "git reset --soft @{u}~1", true},
+		{"mixed to @{u}~1", "git reset --mixed @{u}~1", true},
+		{"soft to @{upstream}^", "git reset --soft @{upstream}^", true},
+		{"soft to FETCH_HEAD~2", "git reset --soft FETCH_HEAD~2", true},
+		{"soft to FETCH_HEAD^2", "git reset --soft FETCH_HEAD^2", true},
+		{"soft to a stacked suffix", "git reset --soft FETCH_HEAD~2^", true},
+		{"soft to a doubled caret", "git reset --soft @{u}^^", true},
+		{"soft to bare remote name with suffix", "git reset --soft origin~1", true},
+		{"soft to origin/main~1", "git reset --soft origin/main~1", true},
+		{"soft to branch@{upstream}~1", "git reset --soft main@{upstream}~1", true},
+
 		// Allowed — local targets, pathspecs, and quoted prose.
 		{"soft to a local commit", "git reset --soft HEAD~1", false},
+		{"soft to a local commit by caret", "git reset --soft HEAD^", false},
+		{"soft to a local branch with suffix", "git reset --soft feature/x~3", false},
+		{"soft to a local ref ending in digits", "git reset --soft release1", false},
 		{"mixed to a local branch", "git reset --mixed feature/x", false},
 		{"reset a pathspec named like a ref", "git reset -- origin/main", false},
 		{"unstage a file", "git reset HEAD file.go", false},
