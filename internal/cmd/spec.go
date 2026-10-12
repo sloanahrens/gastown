@@ -521,6 +521,9 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	report.Errors = append(report.Errors, read.Errors...)
 	report.Candidates = len(read.Candidates)
 	report.LabeledFailed = read.LabeledFailed
+	// The read's own skips are the board-carried refusals: the tick and the
+	// dry run print them beside the ones the tick finds itself (gt-k1g3e).
+	report.Skipped = append(report.Skipped, read.Skipped...)
 	perTick := env.PerTick
 	if perTick <= 0 {
 		perTick = defaultSpecMaxPerTick
@@ -1094,7 +1097,12 @@ type specBoardRead struct {
 	// label is cleared, and the count is the operator's signal that a bead is
 	// stuck there (gt-q6zoo).
 	LabeledFailed int
-	Errors        []string
+	// Skipped are the refusals of the board-carried labels
+	// (specdispatch.BoardCarriedLabels): a bead the dispatcher leaves alone for
+	// a reason the operator has to read, reported instead of dropped unseen
+	// (gt-k1g3e). The tick appends them to its own skip lines.
+	Skipped []specDispatchEntry
+	Errors  []string
 }
 
 // specCandidates reads every operational rig's ready work beads and keeps the
@@ -1139,8 +1147,14 @@ func specCandidates(townRoot string, maxPriority int, board specBoard, reserved 
 				continue
 			}
 			// The ready board is a snapshot: the full bead is re-read before
-			// any decision.
-			if ok, _ := specdispatch.Eligible(s, maxPriority, reserved); !ok {
+			// any decision. A refusal is dropped here, and a refusal of a
+			// board-carried label is reported instead: the operator's label is
+			// what holds the bead, so the tick log and the dry run say so
+			// rather than leaving the bead an unexplained absence (gt-k1g3e).
+			if ok, why := specdispatch.Eligible(s, maxPriority, reserved); !ok {
+				if specdispatch.BoardCarried(s) {
+					read.Skipped = append(read.Skipped, specDispatchEntry{Bead: s.ID, Rig: name, Line: fmt.Sprintf("%s: not eligible (%s)", s.ID, why)})
+				}
 				continue
 			}
 			if _, dup := rigOf[s.ID]; dup {
@@ -1165,10 +1179,10 @@ func specCandidates(townRoot string, maxPriority int, board specBoard, reserved 
 // queried on (gt-mmsr2); the non-work types (an epic, the runtime families)
 // are excluded instead, so the board holds work beads only.
 //
-// spec-dispatch-failed is deliberately not among the excluded labels: the
-// board must carry the beads it holds so the tick can count them and the
-// health line can show the count (gt-q6zoo). Eligible still keeps them out of
-// the candidate set.
+// A board-carried label is deliberately not among the server-side exclusions:
+// the board must carry the beads it holds so the tick can count them and name
+// them in its skip line, and the health line can show the count (gt-q6zoo,
+// gt-k1g3e). Eligible still keeps them out of the candidate set.
 //
 // The count is read from this board, not a second query, because `bd ready
 // --json` hydrates each issue's labels array. That is the CLI's own answer for
@@ -1181,12 +1195,7 @@ func specCandidates(townRoot string, maxPriority int, board specBoard, reserved 
 // captured board whose labeled bead is the one the dispatcher itself labeled.
 func specReadyArgs() []string {
 	exclude := append([]string(nil), constants.NonDispatchableBeadLabels...)
-	for _, l := range specdispatch.ExcludedLabels() {
-		if strings.EqualFold(l, specdispatch.DispatchFailedLabel) {
-			continue
-		}
-		exclude = append(exclude, l)
-	}
+	exclude = append(exclude, specdispatch.ReadyQueryLabels()...)
 	return []string{
 		"ready", "--json",
 		"--unassigned",

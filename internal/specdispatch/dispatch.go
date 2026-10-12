@@ -17,17 +17,71 @@ const HostSafetyPrompt = "HOST SAFETY (spec dispatcher): any test of install or 
 	"INSTALL_DIR (mktemp -d) and never the real ~/.local/bin. Never run make install, gt dolt cleanup, " +
 	"or rm -rf outside your worktree on this host."
 
-// excludedLabels is the pre-filter the ready board is read with (`bd ready
-// --exclude-label`), so a bead the dispatcher would never take is not fetched
-// at all. It is not the dispatcher's verdict: the verdict is Eligible's, on the
+// CrewOnlyLabel marks a bead only a person lands: the deep-review formula puts
+// it on every finding that cites a guard or a lifecycle path
+// (internal/formula/formulas/deep-review-run.formula.toml), so no seat is ever
+// spent on one (gt-k1g3e).
+const CrewOnlyLabel = "crew-only"
+
+// excludedLabels are the labels that keep a candidate out of the dispatcher's
+// queue. It is not the dispatcher's verdict: the verdict is Eligible's, on the
 // full bead, and it reads every routing decision through the shared hold rule
 // (dispatch.DispatchHoldFields). A hold this list does not name — the operator
 // label, gt:needs-human, a ruling in prose — still stops the dispatcher there,
 // and every label it does name Eligible would have refused anyway (gt-lxxo4).
-var excludedLabels = []string{"gt:ready-to-land", "needs-human", DispatchFailedLabel}
+var excludedLabels = []string{"gt:ready-to-land", "needs-human", DispatchFailedLabel, CrewOnlyLabel}
 
 // ExcludedLabels returns the labels that keep a bead from the dispatcher.
 func ExcludedLabels() []string { return append([]string(nil), excludedLabels...) }
+
+// boardCarriedLabels are the excludedLabels whose beads the ready board must
+// still carry. The tick reports the refusal of a bead wearing one, and it
+// cannot report a bead the board never fetched: these are the labels whose
+// refusal the operator reads in the tick log, the rest is a silent pre-filter
+// (gt-q6zoo, gt-k1g3e). Every one of them is still refused by Eligible.
+var boardCarriedLabels = []string{DispatchFailedLabel, CrewOnlyLabel}
+
+// BoardCarriedLabels returns the excluded labels whose beads the ready board
+// must still carry. Before adding one, check that the tick reports it: a
+// label here whose refusal nothing reads is noise on every tick.
+func BoardCarriedLabels() []string { return append([]string(nil), boardCarriedLabels...) }
+
+// ReadyQueryLabels are the excluded labels the ready query filters server-side
+// (`bd ready --exclude-label`): ExcludedLabels minus the board-carried ones, so
+// a bead the dispatcher would never take is not fetched at all (gt-q6zoo,
+// gt-k1g3e).
+func ReadyQueryLabels() []string {
+	carried := BoardCarriedLabels()
+	out := make([]string, 0, len(excludedLabels))
+	for _, l := range ExcludedLabels() {
+		if !hasLabel(carried, l) {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// BoardCarried reports whether s wears a label in BoardCarriedLabels(), which
+// is what makes its refusal a line the operator sees rather than a drop.
+func BoardCarried(s Spec) bool {
+	for _, l := range BoardCarriedLabels() {
+		if s.HasLabel(l) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasLabel reports whether labels carries label, matching as HasLabel does
+// (case- and space-insensitive).
+func hasLabel(labels []string, label string) bool {
+	for _, l := range labels {
+		if strings.EqualFold(strings.TrimSpace(l), strings.TrimSpace(label)) {
+			return true
+		}
+	}
+	return false
+}
 
 // DispatchTypes are the bead types the dispatcher fills a seat with: the work
 // bead kinds. They are narrower than the ready board — a docs or chore bead is
@@ -145,14 +199,7 @@ func withoutLabels(labels, drop []string) []string {
 	}
 	out := make([]string, 0, len(labels))
 	for _, l := range labels {
-		keep := true
-		for _, d := range drop {
-			if strings.EqualFold(strings.TrimSpace(l), strings.TrimSpace(d)) {
-				keep = false
-				break
-			}
-		}
-		if keep {
+		if !hasLabel(drop, l) {
 			out = append(out, l)
 		}
 	}
