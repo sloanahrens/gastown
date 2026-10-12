@@ -75,7 +75,6 @@ func (c *IdleTimeoutCheck) Run(ctx *CheckContext) *CheckResult {
 
 		data, err := os.ReadFile(configPath)
 		if err != nil {
-			// Config file missing - will be created by EnsureConfigYAML
 			missing = append(missing, fmt.Sprintf("%s (config.yaml missing)", rigName))
 			checked++
 			continue
@@ -134,9 +133,11 @@ func (c *IdleTimeoutCheck) Fix(ctx *CheckContext) error {
 		// The .beads directory is within the rig path
 		rigBeadsPath := filepath.Join(rigPath, ".beads")
 
-		// Use EnsureConfigYAML to add idle-timeout if missing
-		// This is idempotent - won't modify if already correct
-		if err := beads.EnsureConfigYAML(rigBeadsPath, ""); err != nil {
+		// EnsureConfigYAMLValue leaves prefix and issue-prefix alone; this check
+		// has no prefix to supply, and EnsureConfigYAML would blank both (gt-nahfx).
+		// A missing config.yaml is created holding only the idle-timeout key, so
+		// bd falls back to the Dolt database prefix rather than a guessed one.
+		if err := beads.EnsureConfigYAMLValue(rigBeadsPath, "dolt.idle-timeout", `"0"`); err != nil {
 			return fmt.Errorf("fixing %s: %w", rigName, err)
 		}
 	}
