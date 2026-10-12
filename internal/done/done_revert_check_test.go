@@ -486,9 +486,10 @@ func TestRevertGuardRefusesAPathNamedOnlyInsideALongerOne(t *testing.T) {
 	}
 }
 
-// TestNamedInDescriptionDirectories (gt-vpjtk): a directory written with its
-// trailing slash names every file under it, at any depth, on a path boundary
-// only. A directory without the slash, or a sibling file, names nothing under it.
+// TestNamedInDescriptionDirectories (gt-vpjtk, gt-vjdkl): a directory of at
+// least two components written with its trailing slash names every file under
+// it, at any depth, on a path boundary only. A directory without the slash, a
+// single top-level directory, or a sibling file, names nothing under it.
 func TestNamedInDescriptionDirectories(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -502,13 +503,17 @@ func TestNamedInDescriptionDirectories(t *testing.T) {
 		{"directory in backticks", "Delete `internal/foo/` entirely.", "internal/foo/a.go", true},
 		{"directory before a sentence period", "Delete internal/foo/.", "internal/foo/a.go", true},
 		{"directory before a sentence comma", "Delete internal/foo/, then rebuild.", "internal/foo/a.go", true},
-		{"directory at the start of the text", "docs/ goes.", "docs/x.go", true},
+		{"two-component directory at the start of the text", "internal/foo/ goes.", "internal/foo/a.go", true},
+		{"top-level directory at the start of the text names nothing", "docs/ goes.", "docs/x.go", false},
+		{"top-level directory in backticks names nothing", "Rework `internal/` later.", "internal/done/x.go", false},
+		{"top-level directory before a period names nothing", "Retire docs/.", "docs/a/b.go", false},
 		{"nested directory names its own files", "Delete internal/foo/sub/.", "internal/foo/sub/a.go", true},
 		{"nested directory does not name the parent's files", "Delete internal/foo/sub/.", "internal/foo/a.go", false},
 		{"prefixed directory does not name it", "Delete mydocs/ now.", "docs/x.go", false},
 		{"directory under another does not name a top-level one", "Delete sub/docs/ now.", "docs/x.go", false},
 		{"top-level directory does not name a nested one", "Delete docs/ now.", "sub/docs/x.go", false},
 		{"top-level directory does not name a prefixed one", "Delete docs/ now.", "mydocs/x.go", false},
+		{"a two-component directory does not name a sibling top-level one", "Delete internal/foo/.", "internal/x.go", false},
 		{"directory without a slash names nothing under it", "Delete internal/foo entirely.", "internal/foo/a.go", false},
 		{"directory without a slash before a period names nothing", "Delete internal/foo.", "internal/foo/a.go", false},
 		{"a file under the directory does not name its siblings", "Delete internal/foo/a.go.", "internal/foo/b.go", false},
@@ -557,30 +562,68 @@ func TestRevertGuardWaivesALabeledDirectoryDeletion(t *testing.T) {
 func TestRevertGuardRefusesADirectoryNamedOffItsBoundary(t *testing.T) {
 	t.Parallel()
 	for _, description := range []string{
-		"Delete docs/ only.",
-		"Delete the docs directory, docs and everything in it.",
+		"Delete internal/foo/ only.",
+		"Delete the internal/foo directory, internal/foo and everything in it.",
 	} {
 		bd := &fakeNotesClient{}
 		issue := &beads.Issue{ID: "gt-x", Labels: []string{"deletes-by-spec"}, Description: description}
 		r := waivedRun(t.TempDir(), issue, bd)
 		g := fakeRevertGit{subjects: map[string]string{"aaaaaaaaaaaa": "old work"}}
-		reverted := []git.RevertedMerge{{Commit: "aaaaaaaaaaaa", Paths: []string{"docs/x.go", "mydocs/x.go", "sub/docs/x.go"}}}
+		reverted := []git.RevertedMerge{{Commit: "aaaaaaaaaaaa", Paths: []string{"internal/foo/x.go", "myinternal/foo/x.go", "sub/internal/foo/x.go"}}}
 
 		var warn strings.Builder
 		err := reportRevertedMergesRecordingTo(&warn, r, g, detected(git.RevertReport{Reverted: reverted}, nil), "origin/main")
 		if err == nil {
 			t.Fatalf("description %q: a directory named off its boundary was waived", description)
 		}
-		for _, want := range []string{"unnamed: mydocs/x.go", "unnamed: sub/docs/x.go", "trailing slash"} {
+		for _, want := range []string{"unnamed: myinternal/foo/x.go", "unnamed: sub/internal/foo/x.go", "trailing slash"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("description %q: refusal lacks %q:\n%s", description, want, err)
 			}
 		}
-		if strings.Contains(description, "docs/ only") && strings.Contains(err.Error(), "unnamed: docs/x.go") {
-			t.Errorf("description %q: refusal lists docs/x.go, which docs/ names:\n%s", description, err)
+		if strings.Contains(description, "internal/foo/ only") && strings.Contains(err.Error(), "unnamed: internal/foo/x.go") {
+			t.Errorf("description %q: refusal lists internal/foo/x.go, which internal/foo/ names:\n%s", description, err)
 		}
 		if len(bd.notes) != 0 {
 			t.Errorf("description %q: notes = %v, want none on a refusal", description, bd.notes)
 		}
+	}
+}
+
+// TestRevertGuardRefusesATopLevelDirectoryWaiver (gt-vjdkl): a prose mention of
+// a top-level directory names no file under it, so internal/ in a description
+// waives nothing — the bead's real scope is narrower than the whole tree, and
+// the refusal lists every reverted path. A file or a directory of at least two
+// components still waives, which TestRevertGuardWaivesALabeledDirectoryDeletion
+// and the boundary table cover.
+func TestRevertGuardRefusesATopLevelDirectoryWaiver(t *testing.T) {
+	t.Parallel()
+	bd := &fakeNotesClient{}
+	issue := &beads.Issue{
+		ID:          "gt-x",
+		Labels:      []string{"deletes-by-spec"},
+		Description: "Rework internal/ for the new layout and keep the rest.",
+	}
+	r := waivedRun(t.TempDir(), issue, bd)
+	g := fakeRevertGit{subjects: map[string]string{"aaaaaaaaaaaa": "old work"}}
+	reverted := []git.RevertedMerge{{Commit: "aaaaaaaaaaaa", Paths: []string{
+		"internal/done/done_revert_check.go", "internal/old/a.go",
+	}}}
+
+	var warn strings.Builder
+	err := reportRevertedMergesRecordingTo(&warn, r, g, detected(git.RevertReport{Reverted: reverted}, nil), "origin/main")
+	if err == nil {
+		t.Fatal("a top-level directory in prose waived its whole tree")
+	}
+	for _, want := range []string{
+		"unnamed: internal/done/done_revert_check.go",
+		"unnamed: internal/old/a.go",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal lacks %q:\n%s", want, err)
+		}
+	}
+	if len(bd.notes) != 0 {
+		t.Errorf("notes = %v, want none on a refusal", bd.notes)
 	}
 }

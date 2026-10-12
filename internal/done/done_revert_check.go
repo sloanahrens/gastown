@@ -165,6 +165,12 @@ func revertedPaths(reverted []git.RevertedMerge, description string) (all, unnam
 // directory: "internal/old" names no file under it, and "internal/old/a.go"
 // names that file only.
 //
+// The directory must be at least two components deep (gt-vjdkl). "internal/"
+// names nothing under it: a single top-level directory is prose, not a
+// directed deletion — a description that happens to say "rework internal/"
+// would otherwise waive the revert guard for the whole tree, far past the
+// bead's real scope.
+//
 // Either form must stand as a whole path rather than as a run of characters
 // inside a longer one (gt-j5q4i). A substring match only counts when path
 // characters do not touch it, so "docs/README.md" does not name "README.md",
@@ -179,8 +185,16 @@ func namedInDescription(description, path string) bool {
 	if mentionedWhole(description, path) {
 		return true
 	}
+	components := 0
 	for i := 0; i < len(path); i++ {
-		if path[i] == '/' && mentionedWhole(description, path[:i+1]) {
+		if path[i] != '/' {
+			continue
+		}
+		components++
+		if components < 2 {
+			continue
+		}
+		if mentionedWhole(description, path[:i+1]) {
 			return true
 		}
 	}
@@ -371,8 +385,9 @@ func revertedMergeRefusal(g revertReportGit, target string, found []git.Reverted
 	}
 	if len(unnamed) > 0 {
 		b.WriteString("\nThe bead carries deletes-by-spec, which waives a directed deletion only when " +
-			"the description names every path being deleted: each file whole, or a directory with a " +
-			"trailing slash (internal/old/ names every file under it). It does not name:\n")
+			"the description names every path being deleted: each file whole, or a directory of at " +
+			"least two components with a trailing slash (internal/old/ names every file under it; " +
+			"a top-level internal/ names nothing). It does not name:\n")
 		for _, path := range unnamed {
 			fmt.Fprintf(&b, "  unnamed: %s\n", path)
 		}
