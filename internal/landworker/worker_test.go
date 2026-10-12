@@ -55,18 +55,15 @@ type fakeRemote struct {
 
 	// The rig repository's own branches, which the landing's local reap
 	// drives (gt-kne58): the branches it holds and the tip of each, the ones
-	// a worktree has checked out, the ones its own HEAD branch has merged,
-	// and what it deleted.
+	// a worktree has checked out, and what it deleted.
 	localBranches map[string]string
 	checkedOut    map[string]bool
-	// localMerged are the branches the repository's own HEAD branch
-	// contains: what git branch -d's merged test reads, and what a landing
-	// leaves stale, so a reap that left that test to git keeps a branch
-	// whose work landed (gt-22ewa).
-	localMerged  map[string]bool
-	localErr     map[string]error
-	localDeleted []string
-	localForced  []string
+	localErr      map[string]error
+	localTipErr   map[string]error
+	// localBeforeDelete, when set, runs before a local delete's pin check so
+	// a test can move a branch after the reap read it.
+	localBeforeDelete func(branch string)
+	localDeleted      []string
 }
 
 func (r *fakeRemote) BranchTip(branch string) (string, error) {
@@ -130,11 +127,9 @@ func (r *fakeRemote) DeleteRemoteBranchIfAt(branch, expectedHash string) error {
 
 // DeleteLocalBranch deletes a branch of the rig's own repository, refusing
 // what the worker must: an absent branch is a no-op, and a checked out one an
-// error. The merged test is git's own, and localMerged is what it reads — the
-// repository's HEAD branch, never the target — so a branch the target
-// contains but the repository's own main does not is refused unless the
-// delete is forced, which is the case the reap's proof exists for (gt-22ewa).
-func (r *fakeRemote) DeleteLocalBranch(branch string, force bool) (bool, error) {
+// error. The delete is pinned at expectedHash as git update-ref -d is, so a
+// branch that is not at the commit the reap proved it to be stays (gt-xpmr7).
+func (r *fakeRemote) DeleteLocalBranch(branch, expectedHash string) (bool, error) {
 	if err := r.localErr[branch]; err != nil {
 		return false, err
 	}
@@ -144,15 +139,28 @@ func (r *fakeRemote) DeleteLocalBranch(branch string, force bool) (bool, error) 
 	if r.checkedOut[branch] {
 		return false, fmt.Errorf("%s is checked out in a worktree", branch)
 	}
-	if !force && !r.localMerged[branch] {
-		return false, fmt.Errorf("the branch %s is not fully merged", branch)
+	if r.localBeforeDelete != nil {
+		r.localBeforeDelete(branch)
+	}
+	tip, ok := r.localBranches[branch]
+	if !ok {
+		return false, nil
+	}
+	if tip != expectedHash {
+		return false, fmt.Errorf("%s is at %s, not at the proven %s", branch, short(tip), short(expectedHash))
 	}
 	delete(r.localBranches, branch)
 	r.localDeleted = append(r.localDeleted, branch)
-	if force {
-		r.localForced = append(r.localForced, branch)
-	}
 	return true, nil
+}
+
+// LocalBranchTip is the branch the rig's own repository holds under that
+// name, empty when it holds none.
+func (r *fakeRemote) LocalBranchTip(branch string) (string, error) {
+	if err := r.localTipErr[branch]; err != nil {
+		return "", err
+	}
+	return r.localBranches[branch], nil
 }
 
 type fakeLander struct {

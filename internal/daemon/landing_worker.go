@@ -1251,7 +1251,8 @@ type landingRemoteGit interface {
 	// (gt-kne58).
 	CurrentBranch() (string, error)
 	WorktreeList() ([]git.Worktree, error)
-	DeleteBranch(name string, force bool) error
+	Rev(ref string) (string, error)
+	DeleteLocalBranchIfAt(branch, expectedHash string) error
 }
 
 var _ landingRemoteGit = (*git.Git)(nil)
@@ -1319,12 +1320,23 @@ func (r gitRemote) DeleteRemoteBranchIfAt(branch, expectedHash string) error {
 	return r.g.DeleteRemoteBranchIfAt(r.remote, branch, expectedHash)
 }
 
-// DeleteLocalBranch deletes the rig repository's own branch of that name.
-// The two branches a reap must never take are guarded here rather than left
-// to git: the one HEAD names, which is the default branch this repository
-// lands onto, and any branch a worktree has checked out, which is a polecat
-// still working in it.
-func (r gitRemote) DeleteLocalBranch(branch string, force bool) (bool, error) {
+// LocalBranchTip reads the rig repository's own branch of that name.
+func (r gitRemote) LocalBranchTip(branch string) (string, error) {
+	ref := "refs/heads/" + branch
+	exists, err := r.g.RefExists(ref)
+	if err != nil || !exists {
+		return "", err
+	}
+	return r.g.Rev(ref)
+}
+
+// DeleteLocalBranch deletes the rig repository's own branch of that name,
+// which update-ref does only while the branch is still at expectedHash. The
+// two branches a reap must never take are guarded here rather than left to
+// git: the one HEAD names, which is the default branch this repository lands
+// onto, and any branch a worktree has checked out, which is a polecat still
+// working in it.
+func (r gitRemote) DeleteLocalBranch(branch, expectedHash string) (bool, error) {
 	if branch == "" {
 		return false, errors.New("no branch name to delete")
 	}
@@ -1351,7 +1363,7 @@ func (r gitRemote) DeleteLocalBranch(branch string, force bool) (bool, error) {
 			return false, fmt.Errorf("%s is checked out in the worktree at %s", branch, wt.Path)
 		}
 	}
-	if err := r.g.DeleteBranch(branch, force); err != nil {
+	if err := r.g.DeleteLocalBranchIfAt(branch, expectedHash); err != nil {
 		return false, err
 	}
 	return true, nil

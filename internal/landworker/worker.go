@@ -48,13 +48,18 @@ type Remote interface {
 	// DeleteRemoteBranchIfAt deletes branch on origin only while it still
 	// points at expectedHash.
 	DeleteRemoteBranchIfAt(branch, expectedHash string) error
+	// LocalBranchTip returns the rig repository's own tip of branch, or ""
+	// when it holds no such branch.
+	LocalBranchTip(branch string) (string, error)
 	// DeleteLocalBranch deletes branch from the rig's own repository — the
 	// local half of reaping it on origin — and reports whether a branch was
-	// there to delete, an absent one being (false, nil). force deletes a
-	// branch the repository has not merged into the branch HEAD names. The
-	// repository's HEAD branch and any branch checked out in a worktree are
-	// never deleted, and an error says so.
-	DeleteLocalBranch(branch string, force bool) (bool, error)
+	// there to delete, an absent one being (false, nil). The delete is pinned
+	// at expectedHash, the commit the caller proved the branch to be: a
+	// branch that is not at that commit, or that moves onto another one first,
+	// is kept and the error says so, so nothing a branch holds past the
+	// proven commit is dropped. The repository's HEAD branch and any branch
+	// checked out in a worktree are never deleted, and an error says so.
+	DeleteLocalBranch(branch, expectedHash string) (bool, error)
 }
 
 // Lander lands one piece of work; *land.Lander is the production one.

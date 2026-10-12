@@ -144,6 +144,30 @@ func (h *handle) DeleteBranch(name string, force bool) error {
 	return nil
 }
 
+// DeleteLocalBranchIfAt mirrors git update-ref -d: the old value is a
+// precondition, so a branch that is not at it is an error and stays.
+func (h *handle) DeleteLocalBranchIfAt(branch, expectedHash string) error {
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	args := []string{"update-ref", "-d", "refs/heads/" + branch, expectedHash}
+	r, _, err := h.locate(args...)
+	if err != nil {
+		return err
+	}
+	ref := "refs/heads/" + branch
+	id, ok := r.refs[ref]
+	if !ok {
+		return gitErr(1, fmt.Sprintf("error: cannot lock ref '%s': reference is missing but expected %s", ref, expectedHash), args...)
+	}
+	if id != expectedHash {
+		return gitErr(1, fmt.Sprintf("error: cannot lock ref '%s': is at %s but expected %s", ref, id, expectedHash), args...)
+	}
+	delete(r.refs, ref)
+	delete(r.configMap(), "branch."+branch+".remote")
+	delete(r.configMap(), "branch."+branch+".merge")
+	return nil
+}
+
 func (h *handle) RemoteDefaultBranch() string {
 	h.f.mu.Lock()
 	defer h.f.mu.Unlock()

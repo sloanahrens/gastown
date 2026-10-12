@@ -246,14 +246,11 @@ func TestSweepDeletesTheRigReposCopyToo(t *testing.T) {
 	if _, ok := h.remote.localBranches[branch]; ok {
 		t.Fatal("the rig repository still has the branch the sweep deleted on origin")
 	}
-	if len(h.remote.localForced) != 1 || h.remote.localForced[0] != branch {
-		t.Fatalf("forced local deletes %v; want the sweep's own proof to force it", h.remote.localForced)
-	}
 }
 
 // TestSweepDeletesTheLocalCopyOfARecordedLanding: a landing record is proof
 // the bead's work is on the target whatever its tip's ancestry shows, so the
-// sweep's local half takes that branch on the ledger alone (gt-4j1pl).
+// sweep's local half takes that branch too (gt-4j1pl).
 func TestSweepDeletesTheLocalCopyOfARecordedLanding(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
@@ -268,9 +265,6 @@ func TestSweepDeletesTheLocalCopyOfARecordedLanding(t *testing.T) {
 	}
 	if _, ok := h.remote.localBranches[branch]; ok {
 		t.Fatal("the rig repository kept the branch of a recorded landing")
-	}
-	if len(h.remote.localForced) != 1 || h.remote.localForced[0] != branch {
-		t.Fatalf("forced local deletes %v; want the recorded landing's branch", h.remote.localForced)
 	}
 }
 
@@ -694,11 +688,12 @@ func TestAuthorSeats(t *testing.T) {
 	}
 }
 
-// A landing reaps the bead's branches in the rig's own repository as well as
-// on origin: the ledger's record is what proves the work landed, so its
-// delete is forced (a squash or rebase merge leaves the tip outside main's
-// ancestry) (gt-kne58).
-func TestLandingDeletesTheBeadsLocalPolecatBranches(t *testing.T) {
+// A landing reaps the branch that landed from the rig's own repository as
+// well as from origin, and leaves the bead's other branches there: the
+// ledger's record names one head, so it proves the branch at that head and,
+// of the bead's other branches, an earlier attempt the landing never took is
+// kept whatever it holds (gt-kne58, gt-xpmr7).
+func TestLandingDeletesOnlyTheBeadsLocalBranchAtTheLandedHead(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")
@@ -713,17 +708,21 @@ func TestLandingDeletesTheBeadsLocalPolecatBranches(t *testing.T) {
 		"sloan/gt-abc+x1":         noteHead,
 	}
 	h.files.recs = []land.LandingRecord{{BeadID: "gt-abc", Head: tipHead, LandedCommit: "cccccccccc"}}
+	var logs []string
+	h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
 
 	rep := h.w.Pass(context.Background())
 	if rep.Landed != 1 {
 		t.Fatalf("report %v; want one landing", rep)
 	}
-	const want = "polecat/agate/gt-abc+x0,polecat/opal/gt-abc+x1"
-	if got := strings.Join(h.remote.localDeleted, ","); got != want {
-		t.Fatalf("deleted locally %q; want %q", got, want)
+	if got := strings.Join(h.remote.localDeleted, ","); got != "polecat/opal/gt-abc+x1" {
+		t.Fatalf("deleted locally %q; want only the branch at the landed head", got)
 	}
-	if got := strings.Join(h.remote.localForced, ","); got != want {
-		t.Errorf("forced locally %q; want the ledger's record to force each delete", got)
+	if _, ok := h.remote.localBranches["polecat/agate/gt-abc+x0"]; !ok {
+		t.Error("the local copy of an earlier unlanded attempt was deleted with the landed branch")
+	}
+	if !logged(logs, "kept local polecat/agate/gt-abc+x0: its tip") {
+		t.Fatalf("logs %q; want the kept branch named with the tip that kept it", logs)
 	}
 	if _, ok := h.remote.localBranches["sloan/gt-abc+x1"]; !ok {
 		t.Error("a branch that is not a polecat branch of the bead was deleted")
@@ -753,22 +752,18 @@ func TestLandingDeletesTheLocalBranchTheTargetContains(t *testing.T) {
 	if len(h.remote.localDeleted) != 1 {
 		t.Fatalf("deleted locally %v; want the branch whose tip the target contains", h.remote.localDeleted)
 	}
-	if len(h.remote.localForced) != 1 {
-		t.Fatalf("forced %v; want the proof to force it past the repository's own main, which has not merged the branch", h.remote.localForced)
-	}
 }
 
-// A branch only the repository's own main has merged stays: its merge is the
-// repository's, not the target's, and the reap asks for the target's
-// (gt-22ewa).
-func TestLandingKeepsALocalBranchOnlyTheReposOwnMainHasMerged(t *testing.T) {
+// A seat that committed past the head it landed keeps that branch: those
+// commits are on no target, and with origin's copy reaped the rig
+// repository's is the only one left (gt-xpmr7).
+func TestLandingKeepsALocalBranchAheadOfTheLandedHead(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")
-	h.w.WatchTarget = "main"
-	h.remote.remoteRefs = map[string]string{"refs/heads/polecat/opal/gt-abc+x1": tipHead}
-	h.remote.localBranches = map[string]string{"polecat/opal/gt-abc+x1": tipHead}
-	h.remote.localMerged = map[string]bool{"polecat/opal/gt-abc+x1": true}
+	h.remote.remoteRefs = map[string]string{"refs/heads/polecat/opal/gt-abc+x1": noteHead}
+	h.remote.localBranches = map[string]string{"polecat/opal/gt-abc+x1": noteHead}
+	h.files.recs = []land.LandingRecord{{BeadID: "gt-abc", Head: tipHead, LandedCommit: "cccccccccc"}}
 	var logs []string
 	h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
 
@@ -776,10 +771,33 @@ func TestLandingKeepsALocalBranchOnlyTheReposOwnMainHasMerged(t *testing.T) {
 		t.Fatalf("report %v; want the landing to succeed", rep)
 	}
 	if _, ok := h.remote.localBranches["polecat/opal/gt-abc+x1"]; !ok {
-		t.Fatal("a branch only the repository's own main had merged was deleted")
+		t.Fatal("a branch whose tip is past the landed head was deleted")
 	}
-	if !logged(logs, "kept local polecat/opal/gt-abc+x1: not merged") {
-		t.Fatalf("logs %q; want the kept branch named", logs)
+	if !logged(logs, "kept local polecat/opal/gt-abc+x1: its tip") {
+		t.Fatalf("logs %q; want the kept branch named with the tip that kept it", logs)
+	}
+}
+
+// A landing record that names no head proves no branch: the reap keeps the
+// branch rather than reading the missing head as any head (gt-xpmr7).
+func TestLandingKeepsTheLocalBranchWhenTheRecordNamesNoHead(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	h.remote.remoteRefs = map[string]string{"refs/heads/polecat/opal/gt-abc+x1": tipHead}
+	h.remote.localBranches = map[string]string{"polecat/opal/gt-abc+x1": tipHead}
+	h.files.recs = []land.LandingRecord{{BeadID: "gt-abc", LandedCommit: "cccccccccc"}}
+	var logs []string
+	h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+
+	if rep := h.w.Pass(context.Background()); rep.Landed != 1 {
+		t.Fatalf("report %v; want the landing to succeed", rep)
+	}
+	if _, ok := h.remote.localBranches["polecat/opal/gt-abc+x1"]; !ok {
+		t.Fatal("a record naming no head was taken as proof of the branch")
+	}
+	if !logged(logs, "names no head") {
+		t.Fatalf("logs %q; want the record named as the reason", logs)
 	}
 }
 
@@ -860,7 +878,7 @@ func TestLocalReapTwiceIsANoOp(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.remote.localBranches = map[string]string{branch: tipHead}
-	h.files.recs = []land.LandingRecord{{BeadID: "gt-abc"}}
+	h.files.recs = []land.LandingRecord{{BeadID: "gt-abc", Head: tipHead}}
 	var logs []string
 	h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
 
@@ -892,5 +910,48 @@ func TestLocalDeleteKeepsTheBranchWhenTheLedgerCannotBeRead(t *testing.T) {
 	}
 	if !logged(logs, "permission denied") {
 		t.Fatalf("logs %q; want one naming the unreadable ledger", logs)
+	}
+}
+
+// A branch that moves between the reap's read of it and the delete stays: the
+// delete is pinned at the head the reap read, so the pin and not luck is what
+// keeps whatever commits moved it (gt-xpmr7).
+func TestLocalDeleteKeepsABranchThatMovedUnderIt(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.remote.localBranches = map[string]string{branch: tipHead}
+	h.remote.localBeforeDelete = func(string) { h.remote.localBranches[branch] = noteHead }
+	h.files.recs = []land.LandingRecord{{BeadID: "gt-abc", Head: tipHead}}
+	var logs []string
+	h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+
+	h.w.deleteLocalBranch("gt-abc", branch, tipHead, false, h.w.logf)
+
+	if got := h.remote.localBranches[branch]; got != noteHead {
+		t.Fatalf("the branch is at %q; want the commit that moved it kept", got)
+	}
+	if !logged(logs, "not at the proven") {
+		t.Fatalf("logs %q; want the pin named as the reason", logs)
+	}
+}
+
+// A branch the reap cannot read is a keep: the branch it cannot read is one it
+// cannot prove is the landed head (gt-xpmr7).
+func TestLocalDeleteKeepsTheBranchItCannotRead(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.remote.localBranches = map[string]string{branch: tipHead}
+	h.remote.localTipErr = map[string]error{branch: errors.New("repository is locked")}
+	h.files.recs = []land.LandingRecord{{BeadID: "gt-abc", Head: tipHead}}
+	var logs []string
+	h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+
+	h.w.deleteLocalBranch("gt-abc", branch, tipHead, false, h.w.logf)
+
+	if _, ok := h.remote.localBranches[branch]; !ok {
+		t.Fatal("a branch the reap could not read was deleted")
+	}
+	if !logged(logs, "repository is locked") {
+		t.Fatalf("logs %q; want one naming the unreadable branch", logs)
 	}
 }

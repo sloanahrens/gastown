@@ -2,6 +2,7 @@ package landworker
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -21,9 +22,11 @@ type RemoteRef struct {
 // reapBeadBranches deletes origin's branches for a bead that has just landed:
 // the branch it landed and every earlier attempt for the bead, which no later
 // landing preserves because a rework is pushed to a new branch. The rig
-// repository's own copy of each goes with it (deleteLocalBranch, gt-kne58):
-// reaping origin alone left every branch the rig ever pushed in its
-// refs/heads forever. Best effort: a failed list or delete is logged, and the
+// repository's copy of the branch that landed goes with it, and only that one
+// (deleteLocalBranch, gt-kne58, gt-xpmr7): reaping origin alone left every
+// branch the rig ever pushed in its refs/heads forever, and taking the rig's
+// copy of an earlier attempt would drop whatever the seat made past the head
+// that landed. Best effort: a failed list or delete is logged, and the
 // landing's record is already written, so nothing here fails or re-delays it.
 //
 // It returns every branch it found for the bead, deleted or not, so the
@@ -62,55 +65,93 @@ func (w *Worker) reapBeadBranches(beadID string) []string {
 }
 
 // deleteLocalBranch deletes the rig repository's copy of a polecat branch
-// whose origin copy has just been deleted (gt-kne58), keeping the branch
-// unless its work is proven landed. The landing reap and the leftover sweep
-// both come through here, so the rig repository loses a branch only by one
-// rule; logf is the caller's, because the sweep reports a branch at most once
-// a run and the reap reports every bead once.
+// whose origin copy has just been reaped (gt-kne58), keeping the branch
+// unless it is still a copy of the commit that landed. The landing reap and
+// the leftover sweep both come through here, so the rig repository loses a
+// branch only by one rule; logf is the caller's, because the sweep reports a
+// branch at most once a run and the reap reports every bead once.
 //
-// provenByCaller is a proof the caller already holds — the sweep passes the
-// BranchLandedOn it reached here on, which reads the target's content — and a
-// caller with none passes false to have one looked for: the landing ledger's
-// record for the bead, or, where there is no record, the tip's containment in
-// the branch the worker lands. Either proof earns a forced delete, because
-// git's merged test cannot: git branch -d reads the repository's own HEAD
-// branch, which here is the rig repository's main, and a landing moves the
-// target on the remote, not here (gt-22ewa). Everything else keeps the
-// branch, every lookup failure included: an unmerged branch deleted by
-// mistake is the one outcome nothing here can undo.
+// A branch goes only while its tip is the landed head — the commit whose
+// content the landing took, so the delete drops nothing the target does not
+// already hold — and the delete is pinned at that head: a seat that committed
+// past the head it landed carries work no landing took, and the rig
+// repository's copy is then the only one left, while a branch that moves
+// between the check and the delete fails the pin and is kept (gt-xpmr7).
+// Git's own merged test can stand in for neither:
+// git branch -d reads the repository's own HEAD branch, which here is the rig
+// repository's main, and a landing moves the target on the remote, not here
+// (gt-22ewa). Everything else keeps the branch, every lookup failure
+// included: an unmerged branch deleted by mistake is the one outcome nothing
+// here can undo.
 func (w *Worker) deleteLocalBranch(beadID, branch, hash string, provenByCaller bool, logf func(format string, args ...any)) {
-	proven := provenByCaller
-	if !proven && w.Landings != nil {
-		_, found, err := w.Landings.LatestForBead(beadID)
-		if err != nil {
-			logf("%s: kept local %s: reading the landings file: %v", beadID, branch, err)
-			return
-		}
-		proven = found
+	head, unproven := w.landedHead(beadID, hash, provenByCaller)
+	if unproven != "" {
+		logf("%s: kept local %s: %s", beadID, branch, unproven)
+		return
 	}
-	if !proven {
-		if w.WatchTarget == "" {
-			logf("%s: kept local %s: no landing record and no branch to have merged it into", beadID, branch)
-			return
-		}
-		merged, err := w.Remote.Contains(w.WatchTarget, hash)
-		if err != nil {
-			logf("%s: kept local %s: testing it against %s: %v", beadID, branch, w.WatchTarget, err)
-			return
-		}
-		if !merged {
-			logf("%s: kept local %s: not merged", beadID, branch)
-			return
-		}
-	}
-	deleted, err := w.Remote.DeleteLocalBranch(branch, true)
+	tip, err := w.Remote.LocalBranchTip(branch)
 	if err != nil {
-		logf("%s: deleting the local %s: %v", beadID, branch, err)
+		logf("%s: kept local %s: reading it: %v", beadID, branch, err)
+		return
+	}
+	if tip == "" {
+		// Already gone: a branch reaped twice has nothing to take again, and
+		// that is not an error (gt-kne58).
+		return
+	}
+	if tip != head {
+		logf("%s: kept local %s: its tip %s is not the landed head %s", beadID, branch, short(tip), short(head))
+		return
+	}
+	deleted, err := w.Remote.DeleteLocalBranch(branch, head)
+	if err != nil {
+		logf("%s: keeping the local %s: %v", beadID, branch, err)
 		return
 	}
 	if deleted {
 		logf("%s: deleted the local polecat branch %s", beadID, branch)
 	}
+}
+
+// landedHead is the commit a polecat branch of beadID is a copy of: the head
+// that landed there, which alone earns the branch its delete. head is "" and
+// unproven says what stopped the search when nothing proves one.
+//
+// provenByCaller is a proof the caller already holds — the sweep passes the
+// hash it reached here on, having read the target's content — and a caller
+// with none passes false to have one looked for: the head the landings file's
+// latest record for the bead names, or, where there is no record, the hash
+// itself, where the branch the worker lands contains it. The record's head
+// and not the record (gt-xpmr7): the bead having landed somewhere says
+// nothing about the branch in hand, which may be an earlier attempt the
+// landing never took.
+func (w *Worker) landedHead(beadID, hash string, provenByCaller bool) (head, unproven string) {
+	if provenByCaller {
+		return hash, ""
+	}
+	if w.Landings != nil {
+		rec, found, err := w.Landings.LatestForBead(beadID)
+		if err != nil {
+			return "", fmt.Sprintf("reading the landings file: %v", err)
+		}
+		if found {
+			if rec.Head == "" {
+				return "", "its landing record names no head"
+			}
+			return rec.Head, ""
+		}
+	}
+	if w.WatchTarget == "" {
+		return "", "no landing record and no branch to have merged it into"
+	}
+	merged, err := w.Remote.Contains(w.WatchTarget, hash)
+	if err != nil {
+		return "", fmt.Sprintf("testing it against %s: %v", w.WatchTarget, err)
+	}
+	if !merged {
+		return "", "not merged"
+	}
+	return hash, ""
 }
 
 // polecatBranchPrefix is polecatRefPrefix as a branch is named: without the
