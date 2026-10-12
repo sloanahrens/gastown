@@ -136,6 +136,12 @@ type maintenanceGCState struct {
 	// streak. It counts attempts, not windows: a busy window can defer on
 	// every 5-minute tick, so one window can add up to ~12 to a reason.
 	DeferralReasons map[string]int `json:"deferral_reasons,omitempty"`
+
+	// StaleGCAlerts is the set of stale-gc alert keys left open
+	// (maintenance_gc_stale.go). It is persisted because a daemon restarts
+	// every few hours and an alert whose condition ended while it was down
+	// still has to be cleared (gt-g49yk).
+	StaleGCAlerts map[string]bool `json:"stale_gc_alerts,omitempty"`
 }
 
 // gcDeferral records one window's deferral: when the window closes, why the
@@ -168,6 +174,7 @@ func loadMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
 		PostGCOldGenBytes: map[string]int64{},
 		ReclaimedBytes:    map[string]int64{},
 		LastGC:            map[string]time.Time{},
+		StaleGCAlerts:     map[string]bool{},
 	}
 	data, err := os.ReadFile(maintenanceGCStatePath(townRoot))
 	if err != nil {
@@ -196,6 +203,9 @@ func loadMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
 	st.ConsecutiveDeferredWindows = parsed.ConsecutiveDeferredWindows
 	st.LastDeferralReason = parsed.LastDeferralReason
 	st.DeferralReasons = parsed.DeferralReasons
+	for k, v := range parsed.StaleGCAlerts {
+		st.StaleGCAlerts[k] = v
+	}
 	return st, nil
 }
 
