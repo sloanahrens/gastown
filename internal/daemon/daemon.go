@@ -234,6 +234,10 @@ type Daemon struct {
 	// maintenanceGCOverdueEscalated latches the one overdue-gc escalation per
 	// call.
 	maintenanceGCOverdueEscalated atomic.Bool
+	// gcStateUnreadableRaised is set while this process holds the
+	// dolt-gc-state-unreadable alert open; the state file that would record it
+	// is the one that cannot be read (maintenance_gc_stale.go).
+	gcStateUnreadableRaised atomic.Bool
 	// doltMaintMu serializes a gc call (write side, TryLock) against the
 	// daemon's own Dolt tasks (read side, TryRLock via tryDoltTask). Nobody
 	// blocks on it; see maintenance_gc_guard.go.

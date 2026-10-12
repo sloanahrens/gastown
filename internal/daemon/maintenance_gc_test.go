@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/doltpause"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 )
@@ -302,9 +303,13 @@ func withGCFakes(t *testing.T, d *Daemon) *gcFakes {
 func gcTestDaemon(t *testing.T) (*Daemon, *bytes.Buffer) {
 	t.Helper()
 	var buf bytes.Buffer
+	// Escalations go to a recorder, never to the gt CLI: a maintenance reading
+	// that alerts (the stale-gc check, maintenance_gc_stale.go) must not spawn
+	// a real gt from the unit tier (docs/testing.md, "The rules").
 	return &Daemon{
-		config: &Config{TownRoot: t.TempDir()},
-		logger: log.New(&buf, "", 0),
+		config:   &Config{TownRoot: t.TempDir()},
+		logger:   log.New(&buf, "", 0),
+		notifier: notifyfake.New(),
 	}, &buf
 }
 

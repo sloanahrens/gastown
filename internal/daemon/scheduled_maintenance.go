@@ -132,19 +132,26 @@ func shouldRunMaintenanceCycle(now, lastRun time.Time) bool {
 
 // runScheduledMaintenance checks if we're in the maintenance window and, once
 // per window, dispatches a backup-then-gc cycle over every database in the
-// data dir.
+// data dir. Every tick also settles the stale-gc alerts, in the window or not
+// (maintenance_gc_stale.go).
 func (d *Daemon) runScheduledMaintenance() {
 	if !d.isPatrolActive("scheduled_maintenance") {
 		return
 	}
+
+	now := d.maintenance().now()
+
+	// The stale-gc check rides every tick, in the window and out of it: the
+	// failure it exists for is the window never opening at all, which an
+	// in-window check would sleep through (gt-2l9zd). It reads the state file,
+	// not the window, so it runs before the window is parsed.
+	d.checkStaleMaintenanceGC(now)
 
 	window := maintenanceWindow(d.patrolConfig)
 	if window == "" {
 		d.logger.Printf("scheduled_maintenance: no window configured, skipping")
 		return
 	}
-
-	now := d.maintenance().now()
 
 	// Count a window that closed with gc still deferred (and escalate a
 	// streak) before anything else, including outside the window.
