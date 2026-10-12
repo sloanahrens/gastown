@@ -37,6 +37,15 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 		{"watch in a subshell", "(watch gt slot status)", true},
 		{"loop behind else", "if false; then :; else while true; do gt done; done; fi", true},
 
+		// A case-arm pattern is not the command word: the loop behind it is
+		// (gt-vjrpj).
+		{"loop behind a later case arm", "case $x in a) true ;; b) for i in 1 2 3; do gt done; done ;; esac", true},
+		{"loop behind a wildcard case arm", "case $x in a) true ;; *) while true; do gt done; sleep 5; done ;; esac", true},
+		{"loop behind the first case arm", "case $x in a) for i in 1 2 3; do gt done; done ;; esac", true},
+		{"loop behind an alternation case arm", "case $x in a|b) until gt done; do sleep 5; done ;; esac", true},
+		{"slot poll behind a case arm", "case $x in a) true ;; b) while true; do gt slot status; done ;; esac", true},
+		{"xargs behind a case arm", "case $x in a) true ;; b) seq 1 5 | xargs gt done ;; esac", true},
+
 		// Repeat wrappers, whose payload tokenizes as one quoted token.
 		{"xargs gt done", "seq 1 300 | xargs -I{} bash -c 'gt done'", true},
 		{"xargs gt slot", "seq 1 300 | xargs -I{} gt slot status", true},
@@ -67,6 +76,13 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 		{"a quoted for is not a block", `grep -rn "for" --include="*.go" .`, false},
 		{"seq with no gate command", "seq 1 5", false},
 		{"xargs with no gate command", "seq 1 5 | xargs -I{} echo {}", false},
+
+		// A case arm that holds no gate loop is not flagged, and a gate after
+		// the case is the sanctioned one (gt-vjrpj).
+		{"case arm with a loop that has no gate", "case $x in a) true ;; b) for f in 1 2; do echo $f; done ;; esac", false},
+		{"first case arm with a loop that has no gate", "case $x in a) for f in 1 2; do echo $f; done ;; esac", false},
+		{"case arm with a single gt done", "case $x in a) true ;; b) gt done ;; esac", false},
+		{"case arm closed loop then gt done", "case $x in a) true ;; b) for f in 1 2; do echo $f; done; gt done ;; esac", false},
 
 		// A repeat wrapper is judged on its OWN payload. The gate after the
 		// pipeline runs once, and a pipeline that merely names the gate in an
@@ -107,8 +123,8 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 			}
 		})
 	}
-	if blocked != 26 {
-		t.Errorf("blocked %d of %d cases, want exactly 26", blocked, len(tests))
+	if blocked != 32 {
+		t.Errorf("blocked %d of %d cases, want exactly 32", blocked, len(tests))
 	}
 }
 
