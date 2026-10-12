@@ -223,14 +223,17 @@ func TestSweepDeletesABranchALandingLeftBehind(t *testing.T) {
 // goes from the rig repository with it. The sweep reaped origin alone, so the
 // rig's own copy of a branch its landing never reaped stayed there for good
 // (gt-4j1pl).
+//
+// The proof is the sweep's own: BranchLandedOn saw the work on the target by
+// content, which is what a squash merge leaves and what the repository's own
+// main — and so git's merged test — would refuse (gt-22ewa). No landing
+// record is seeded, and the target's containment is no help either, so the
+// branch goes on nothing but the proof the caller passed down.
 func TestSweepDeletesTheRigReposCopyToo(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.seedLeftover(t, branch, "gt-abc", "closed", true, 2*time.Hour)
 	h.remote.localBranches = map[string]string{branch: headFor(branch)}
-	// No landing record, so the local half rests on the containment the
-	// sweep proved to itself already.
-	h.remote.contains[headFor(branch)] = true
 
 	rep := h.w.Pass(context.Background())
 
@@ -242,6 +245,9 @@ func TestSweepDeletesTheRigReposCopyToo(t *testing.T) {
 	}
 	if _, ok := h.remote.localBranches[branch]; ok {
 		t.Fatal("the rig repository still has the branch the sweep deleted on origin")
+	}
+	if len(h.remote.localForced) != 1 || h.remote.localForced[0] != branch {
+		t.Fatalf("forced local deletes %v; want the sweep's own proof to force it", h.remote.localForced)
 	}
 }
 
@@ -296,7 +302,6 @@ func TestSweepLogsALocalDeleteFailureOnce(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.seedLeftover(t, branch, "gt-abc", "closed", true, 2*time.Hour)
-	h.remote.contains[headFor(branch)] = true
 	h.remote.localBranches = map[string]string{branch: headFor(branch)}
 	h.remote.localErr = map[string]error{branch: errors.New("checked out in a worktree")}
 	var logs []string
@@ -725,10 +730,15 @@ func TestLandingDeletesTheBeadsLocalPolecatBranches(t *testing.T) {
 	}
 }
 
-// With no landing record the reap falls back to the merge test: a tip
-// origin's target contains goes, merged-only, and one it does not is kept
-// and logged (gt-kne58).
-func TestLandingDeletesTheLocalBranchMergedOnTheTarget(t *testing.T) {
+// With no landing record the reap falls back to the target's containment: a
+// tip origin's target contains goes, and one it does not is kept and logged
+// (gt-kne58).
+//
+// That fallback is the accepted case of gt-22ewa: the branch's work reached
+// origin's target and the repository's own main has not merged it — nothing
+// writes that main — so the proof, and not git's merged test, has to be what
+// the delete rests on.
+func TestLandingDeletesTheLocalBranchTheTargetContains(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")
@@ -743,8 +753,33 @@ func TestLandingDeletesTheLocalBranchMergedOnTheTarget(t *testing.T) {
 	if len(h.remote.localDeleted) != 1 {
 		t.Fatalf("deleted locally %v; want the branch whose tip the target contains", h.remote.localDeleted)
 	}
-	if len(h.remote.localForced) != 0 {
-		t.Errorf("forced %v; want a merged-only delete with no landing record", h.remote.localForced)
+	if len(h.remote.localForced) != 1 {
+		t.Fatalf("forced %v; want the proof to force it past the repository's own main, which has not merged the branch", h.remote.localForced)
+	}
+}
+
+// A branch only the repository's own main has merged stays: its merge is the
+// repository's, not the target's, and the reap asks for the target's
+// (gt-22ewa).
+func TestLandingKeepsALocalBranchOnlyTheReposOwnMainHasMerged(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	h.w.WatchTarget = "main"
+	h.remote.remoteRefs = map[string]string{"refs/heads/polecat/opal/gt-abc+x1": tipHead}
+	h.remote.localBranches = map[string]string{"polecat/opal/gt-abc+x1": tipHead}
+	h.remote.localMerged = map[string]bool{"polecat/opal/gt-abc+x1": true}
+	var logs []string
+	h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+
+	if rep := h.w.Pass(context.Background()); rep.Landed != 1 {
+		t.Fatalf("report %v; want the landing to succeed", rep)
+	}
+	if _, ok := h.remote.localBranches["polecat/opal/gt-abc+x1"]; !ok {
+		t.Fatal("a branch only the repository's own main had merged was deleted")
+	}
+	if !logged(logs, "kept local polecat/opal/gt-abc+x1: not merged") {
+		t.Fatalf("logs %q; want the kept branch named", logs)
 	}
 }
 
@@ -825,13 +860,12 @@ func TestLocalReapTwiceIsANoOp(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.remote.localBranches = map[string]string{branch: tipHead}
-	h.remote.contains[tipHead] = true
 	h.files.recs = []land.LandingRecord{{BeadID: "gt-abc"}}
 	var logs []string
 	h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
 
-	h.w.deleteLocalBranch("gt-abc", branch, tipHead, h.w.logf)
-	h.w.deleteLocalBranch("gt-abc", branch, tipHead, h.w.logf)
+	h.w.deleteLocalBranch("gt-abc", branch, tipHead, false, h.w.logf)
+	h.w.deleteLocalBranch("gt-abc", branch, tipHead, false, h.w.logf)
 
 	if got := strings.Join(h.remote.localDeleted, ","); got != branch {
 		t.Fatalf("deleted %q; want %q once", got, branch)
@@ -851,7 +885,7 @@ func TestLocalDeleteKeepsTheBranchWhenTheLedgerCannotBeRead(t *testing.T) {
 	var logs []string
 	h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
 
-	h.w.deleteLocalBranch("gt-abc", branch, tipHead, h.w.logf)
+	h.w.deleteLocalBranch("gt-abc", branch, tipHead, false, h.w.logf)
 
 	if _, ok := h.remote.localBranches[branch]; !ok {
 		t.Fatal("the branch was deleted without the record that proves it landed")
