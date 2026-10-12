@@ -1185,8 +1185,9 @@ const (
 //   - no hooked or in_progress work bead is assigned to that seat, because
 //     molecule and recover own that work;
 //   - it is older than leakedWispMinAge;
-//   - its parent is absent, closed, or a listed wisp of the same seat that
-//     this rule closes too.
+//   - its parent is absent, closed, a listed wisp of the same seat that this
+//     rule closes too, or an open molecule root with no holder whose listed
+//     wisps all pass the rule; the root is closed with them.
 //
 // A wisp is also left open while any listed wisp under it fails the rule,
 // because CloseMolecule closes the whole tree under the wisp it is given.
@@ -1257,6 +1258,12 @@ func (s *Scanner) leakedWisps(rig string, r *Report) {
 		if !p.closable(id) || p.coveredBy(w, closed) {
 			continue
 		}
+		// A wisp under an unassigned root goes with the root or not at all:
+		// the root is what a leaked tree is closed from, and a root left
+		// open (a live or a young wisp under it) leaves its steps alone.
+		if p.unassignedAncestor(id) != "" {
+			continue
+		}
 		if calls >= leakedWispMaxPerTick {
 			r.Findings = append(r.Findings, Finding{Kind: "wisp", Subject: id, Outcome: OutcomeSkipped,
 				Detail: fmt.Sprintf("closed %d this tick; the rest wait for the next", leakedWispMaxPerTick)})
@@ -1264,6 +1271,9 @@ func (s *Scanner) leakedWisps(rig string, r *Report) {
 		}
 		name := strings.TrimPrefix(w.Assignee, prefix)
 		reason := fmt.Sprintf("Leaked wisp: holder %s no longer exists (patrol scan)", name)
+		if w.Assignee == "" {
+			reason = "Leaked wisp tree: molecule root has no holder (patrol scan)"
+		}
 		calls++
 		n, err := s.env.CloseMolecule(id, reason)
 		f := Finding{Kind: "wisp", Subject: id}
@@ -1273,7 +1283,11 @@ func (s *Scanner) leakedWisps(rig string, r *Report) {
 			continue
 		}
 		closed[id] = true
-		f.Outcome, f.Detail = OutcomeClosed, fmt.Sprintf("%d wisp(s) closed; %s, held by %s", n, w.Status, name)
+		detail := fmt.Sprintf("%d wisp(s) closed; %s, held by %s", n, w.Status, name)
+		if w.Assignee == "" {
+			detail = fmt.Sprintf("%d wisp(s) closed; %s molecule root, no holder", n, w.Status)
+		}
+		f.Outcome, f.Detail = OutcomeClosed, detail
 		r.Findings = append(r.Findings, f)
 	}
 }
@@ -1345,6 +1359,9 @@ func (p *wispPass) ok(id string) bool {
 }
 
 func (p *wispPass) check(w Wisp) bool {
+	if w.Assignee == "" {
+		return p.orphanRoot(w)
+	}
 	if !strings.HasPrefix(w.Assignee, p.prefix) || !p.seatGone(strings.TrimPrefix(w.Assignee, p.prefix)) {
 		return false
 	}
@@ -1358,14 +1375,32 @@ func (p *wispPass) check(w Wisp) bool {
 	return p.parentOK(w)
 }
 
-// parentOK reports whether the wisp's parent is absent, closed, or a listed
-// wisp of the same seat that the rule closes too.
+// orphanRoot reports whether w is an open molecule root and nothing holds it.
+// The steps of a molecule whose root was never assigned hang there, so the
+// root is the wisp that carries the leak; closable adds the condition that
+// every listed wisp under it passes the rule, because closing the root
+// closes that whole tree.
+func (p *wispPass) orphanRoot(w Wisp) bool {
+	if w.Parent != "" || !strings.EqualFold(strings.TrimSpace(w.Status), "open") {
+		return false
+	}
+	if w.CreatedAt.IsZero() {
+		p.unknown(w.ID, "created_at unreadable")
+		return false
+	}
+	return p.now.Sub(w.CreatedAt) > leakedWispMinAge
+}
+
+// parentOK reports whether the wisp's parent is absent, closed, a listed
+// wisp of the same seat that the rule closes too, or a listed wisp with no
+// assignee that the rule closes too (an unassigned root: the loop never
+// closes a step under one on its own).
 func (p *wispPass) parentOK(w Wisp) bool {
 	if w.Parent == "" {
 		return true
 	}
 	if parent, listed := p.byID[w.Parent]; listed {
-		return parent.Assignee == w.Assignee && p.ok(parent.ID)
+		return (parent.Assignee == w.Assignee || parent.Assignee == "") && p.ok(parent.ID)
 	}
 	if v, seen := p.parents[w.Parent]; seen {
 		return v
@@ -1409,6 +1444,25 @@ func (p *wispPass) depth(id string) int {
 		seen[parent.ID] = true
 		id = parent.ID
 		n++
+	}
+}
+
+// unassignedAncestor returns the nearest listed ancestor of id that has no
+// assignee, "" when the chain above id has none. A wisp under one is closed
+// with that ancestor, which the loop reaches first: closing a step on its
+// own would clear the very wisp the next tick reads the tree from.
+func (p *wispPass) unassignedAncestor(id string) string {
+	seen := map[string]bool{id: true}
+	for {
+		parent, listed := p.byID[p.byID[id].Parent]
+		if !listed || seen[parent.ID] {
+			return ""
+		}
+		if parent.Assignee == "" {
+			return parent.ID
+		}
+		seen[parent.ID] = true
+		id = parent.ID
 	}
 }
 
