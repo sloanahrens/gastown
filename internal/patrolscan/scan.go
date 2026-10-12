@@ -1,6 +1,6 @@
 // Package patrolscan is the deterministic half of the witness patrol, run by
 // the daemon as the patrol_scan tick (ADR 0005, gt-4k3fj.6). One tick scans one
-// rig and does four things:
+// rig and does five things:
 //
 //   - restart: a polecat whose session is confirmed dead while it holds
 //     unfinished, unheld work is restarted through the supervisor, which
@@ -31,7 +31,10 @@
 //     A seat still holding the bead it escalated on is restarted on its
 //     preserved branch once the escalation that turn raised for the bead is
 //     closed, and stays skipped while it is open or cannot be read
-//     (gt-4hduq); see SeatEscalationVerdict.
+//     (gt-4hduq); see SeatEscalationVerdict;
+//   - leaked wisps: a wisp a gone polecat still holds, whether it is pinned,
+//     open or in_progress, is closed once it is a day old and its root is
+//     gone or closed too; see leakedWisps.
 //
 // Every read that fails makes the answer Unknown, and Unknown is never acted
 // on: a failed bd read is not "no work", "not held" or "bead gone". The tick
@@ -358,6 +361,21 @@ func (w Work) HasLabel(label string) bool {
 	return false
 }
 
+// Wisp is the slice of a non-closed wisp the leaked-wisp pass decides on.
+type Wisp struct {
+	ID       string
+	Status   string
+	Assignee string
+	// Parent is the root or step this wisp hangs under, "" for none.
+	Parent string
+	// CreatedAt is when the wisp was created; zero when the host could not
+	// read it, which the pass reads as an unknown age.
+	CreatedAt time.Time
+}
+
+// IsClosed reports whether the wisp is over for good: closed or tombstone.
+func (w Wisp) IsClosed() bool { return Work{Status: w.Status}.IsTerminal() }
+
 // Heartbeat is a polecat's self-reported session heartbeat (heartbeat v2).
 type Heartbeat struct {
 	State string // working, idle, exiting, stuck
@@ -431,8 +449,16 @@ type Env interface {
 	// means the root is gone (reaped).
 	MoleculeStatus(id string) (string, error)
 	// CloseMolecule closes a molecule root and its step wisps, returning how
-	// many closed.
+	// many closed. It closes a pinned wisp too.
 	CloseMolecule(id, reason string) (int, error)
+	// LeakedWisps lists the rig's wisps that are not closed: open,
+	// in_progress, pinned and hooked. A status that cannot be listed fails
+	// the whole read, since it may be the one holding the leak.
+	LeakedWisps(rig string) ([]Wisp, error)
+	// WispStatus returns the status of the wisp or bead id names; "" with no
+	// error means it is gone (reaped). It reads the parent a listed wisp
+	// names.
+	WispStatus(id string) (string, error)
 	// SurvivingBranch returns the polecat branch for beadID that is present
 	// on the rig's origin remote, "" when none is; an error means unknown.
 	SurvivingBranch(rig, beadID string) (string, error)
@@ -620,6 +646,7 @@ func (s *Scanner) Tick(rig string) Report {
 		}
 	}
 	s.orphans(rig, &r)
+	s.leakedWisps(rig, &r)
 	return r
 }
 
@@ -1137,4 +1164,266 @@ func ReopenedComment(w Work, rig, holder, branch string) string {
 		b.WriteString(" No polecat branch carries unlanded work for it.")
 	}
 	return b.String()
+}
+
+const (
+	// leakedWispMinAge is how old a wisp must be before the leaked-wisp pass
+	// closes it: a seat that was just torn down may still be finishing.
+	leakedWispMinAge = 24 * time.Hour
+	// leakedWispMaxPerTick caps the closes one tick makes; the rest wait for
+	// the next tick.
+	leakedWispMaxPerTick = 20
+)
+
+// leakedWisps closes wisps held by a polecat seat that no longer exists.
+// orphans reaches only the wisps bonded to a hooked or in_progress work bead,
+// so a pinned wisp, or a step whose root is gone, stays open for good.
+//
+// A wisp is closed only when all of these hold:
+//   - its assignee is <rig>/polecats/<name>, holderGone says the seat has no
+//     directory and no session, and its intent record is not held;
+//   - no hooked or in_progress work bead is assigned to that seat, because
+//     molecule and recover own that work;
+//   - it is older than leakedWispMinAge;
+//   - its parent is absent, closed, or a listed wisp of the same seat that
+//     this rule closes too.
+//
+// A wisp is also left open while any listed wisp under it fails the rule,
+// because CloseMolecule closes the whole tree under the wisp it is given.
+// Every read that fails yields Unknown and no write.
+func (s *Scanner) leakedWisps(rig string, r *Report) {
+	unknown := func(subject, why string) {
+		r.Findings = append(r.Findings, Finding{Kind: "wisp", Subject: subject, Outcome: OutcomeUnknown, Detail: why})
+	}
+	prefix := rig + "/polecats/"
+	wisps, err := s.env.LeakedWisps(rig)
+	if err != nil {
+		unknown(rig, "listing wisps: "+err.Error())
+		return
+	}
+	held := false
+	for _, w := range wisps {
+		if strings.HasPrefix(w.Assignee, prefix) {
+			held = true
+			break
+		}
+	}
+	if !held {
+		return // the usual tick: no polecat holds a wisp, so read nothing else
+	}
+	active, err := s.env.ActiveWork(rig)
+	if err != nil {
+		unknown(rig, "listing active work: "+err.Error())
+		return
+	}
+	p := &wispPass{
+		s: s, rig: rig, prefix: prefix, now: s.o.Now(), unknown: unknown,
+		byID: map[string]Wisp{}, children: map[string][]string{},
+		busy: map[string]bool{}, seats: map[string]bool{},
+		eligible: map[string]bool{}, visiting: map[string]bool{},
+		tree: map[string]bool{}, parents: map[string]bool{},
+	}
+	for _, a := range active {
+		if strings.HasPrefix(a.Assignee, prefix) {
+			p.busy[strings.TrimPrefix(a.Assignee, prefix)] = true
+		}
+	}
+	for _, w := range wisps {
+		if w.ID == "" || w.IsClosed() {
+			continue
+		}
+		p.byID[w.ID] = w
+		if w.Parent != "" {
+			p.children[w.Parent] = append(p.children[w.Parent], w.ID)
+		}
+	}
+
+	// Roots before the steps under them: closing a root closes its steps, so
+	// a step whose ancestor was just closed is not closed a second time.
+	ids := make([]string, 0, len(p.byID))
+	for id := range p.byID {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		if di, dj := p.depth(ids[i]), p.depth(ids[j]); di != dj {
+			return di < dj
+		}
+		return ids[i] < ids[j]
+	})
+	closed := map[string]bool{}
+	calls := 0 // failed closes count: a bd that errors is not retried 20 times a tick
+	for _, id := range ids {
+		w := p.byID[id]
+		if !p.closable(id) || p.coveredBy(w, closed) {
+			continue
+		}
+		if calls >= leakedWispMaxPerTick {
+			r.Findings = append(r.Findings, Finding{Kind: "wisp", Subject: id, Outcome: OutcomeSkipped,
+				Detail: fmt.Sprintf("closed %d this tick; the rest wait for the next", leakedWispMaxPerTick)})
+			return
+		}
+		name := strings.TrimPrefix(w.Assignee, prefix)
+		reason := fmt.Sprintf("Leaked wisp: holder %s no longer exists (patrol scan)", name)
+		calls++
+		n, err := s.env.CloseMolecule(id, reason)
+		f := Finding{Kind: "wisp", Subject: id}
+		if err != nil {
+			f.Outcome, f.Detail = OutcomeFailed, fmt.Sprintf("closed %d, then: %v", n, err)
+			r.Findings = append(r.Findings, f)
+			continue
+		}
+		closed[id] = true
+		f.Outcome, f.Detail = OutcomeClosed, fmt.Sprintf("%d wisp(s) closed; %s, held by %s", n, w.Status, name)
+		r.Findings = append(r.Findings, f)
+	}
+}
+
+// wispPass is the state of one leakedWisps run: the listing, and the answers
+// each rule has already given, so a seat or a parent is read once.
+type wispPass struct {
+	s       *Scanner
+	rig     string
+	prefix  string
+	now     time.Time
+	unknown func(subject, why string)
+
+	byID     map[string]Wisp
+	children map[string][]string // listed wisps under each parent ID
+	busy     map[string]bool     // seats with a hooked or in_progress work bead
+	seats    map[string]bool     // seat -> its wisps may be closed
+	eligible map[string]bool     // wisp -> the rule holds for it alone
+	visiting map[string]bool     // wisps on the parent chain being walked
+	tree     map[string]bool     // wisp -> eligible, as is every listed wisp under it
+	parents  map[string]bool     // unlisted parent -> absent or closed
+}
+
+// seatGone reports whether the seat's wisps may be closed: it holds no work
+// bead, has neither directory nor session, and is not parked or frozen. A
+// read that fails is reported once per seat.
+func (p *wispPass) seatGone(name string) bool {
+	if ok, seen := p.seats[name]; seen {
+		return ok
+	}
+	ok := p.readSeat(name)
+	p.seats[name] = ok
+	return ok
+}
+
+func (p *wispPass) readSeat(name string) bool {
+	if name == "" || strings.Contains(name, "/") || p.busy[name] {
+		return false
+	}
+	gone, why := p.s.holderGone(p.rig, name)
+	if why != "" {
+		p.unknown(name, "wisps held by "+name+": "+why)
+		return false
+	}
+	if !gone {
+		return false
+	}
+	rec, err := p.s.env.Intent(p.rig, name)
+	if err != nil {
+		p.unknown(name, "wisps held by "+name+": holder record unreadable: "+err.Error())
+		return false
+	}
+	return !rec.Held() // parked or frozen: the operator's, silently
+}
+
+// ok reports whether the rule holds for the wisp alone.
+func (p *wispPass) ok(id string) bool {
+	if v, seen := p.eligible[id]; seen {
+		return v
+	}
+	if p.visiting[id] {
+		return false // a parent cycle has no root to close from
+	}
+	p.visiting[id] = true
+	defer delete(p.visiting, id)
+	v := p.check(p.byID[id])
+	p.eligible[id] = v
+	return v
+}
+
+func (p *wispPass) check(w Wisp) bool {
+	if !strings.HasPrefix(w.Assignee, p.prefix) || !p.seatGone(strings.TrimPrefix(w.Assignee, p.prefix)) {
+		return false
+	}
+	if w.CreatedAt.IsZero() {
+		p.unknown(w.ID, "created_at unreadable")
+		return false
+	}
+	if p.now.Sub(w.CreatedAt) <= leakedWispMinAge {
+		return false
+	}
+	return p.parentOK(w)
+}
+
+// parentOK reports whether the wisp's parent is absent, closed, or a listed
+// wisp of the same seat that the rule closes too.
+func (p *wispPass) parentOK(w Wisp) bool {
+	if w.Parent == "" {
+		return true
+	}
+	if parent, listed := p.byID[w.Parent]; listed {
+		return parent.Assignee == w.Assignee && p.ok(parent.ID)
+	}
+	if v, seen := p.parents[w.Parent]; seen {
+		return v
+	}
+	status, err := p.s.env.WispStatus(w.Parent)
+	if err != nil {
+		p.unknown(w.ID, "parent "+w.Parent+" unreadable: "+err.Error())
+		return false // not cached: the next wisp under it asks again
+	}
+	v := status == "" || strings.EqualFold(strings.TrimSpace(status), "closed")
+	p.parents[w.Parent] = v
+	return v
+}
+
+// closable reports whether the wisp passes the rule and so does every listed
+// wisp under it.
+func (p *wispPass) closable(id string) bool {
+	if v, seen := p.tree[id]; seen {
+		return v
+	}
+	v := p.ok(id)
+	for _, c := range p.children[id] {
+		if !v {
+			break
+		}
+		v = p.closable(c)
+	}
+	p.tree[id] = v
+	return v
+}
+
+// depth counts the listed wisps above id, stopping at a cycle.
+func (p *wispPass) depth(id string) int {
+	seen := map[string]bool{id: true}
+	n := 0
+	for {
+		parent, listed := p.byID[p.byID[id].Parent]
+		if !listed || seen[parent.ID] {
+			return n
+		}
+		seen[parent.ID] = true
+		id = parent.ID
+		n++
+	}
+}
+
+// coveredBy reports whether a listed ancestor of w was closed this tick.
+func (p *wispPass) coveredBy(w Wisp, closed map[string]bool) bool {
+	seen := map[string]bool{w.ID: true}
+	for {
+		parent, listed := p.byID[w.Parent]
+		if !listed || seen[parent.ID] {
+			return false
+		}
+		if closed[parent.ID] {
+			return true
+		}
+		seen[parent.ID] = true
+		w = parent
+	}
 }

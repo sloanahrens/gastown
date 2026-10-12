@@ -2,6 +2,7 @@ package patrolscan
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,11 +55,19 @@ type fakeEnv struct {
 	molStatus  map[string]string
 	molErr     map[string]error
 	closeErr   error
-	branches   map[string]string
-	branchErr  map[string]error
-	commentErr error
-	notesErr   map[string]error
-	reopenErr  map[string]error
+	// wisps are the rig's wisps. CloseMolecule closes a listed wisp and every
+	// listed wisp under it whatever their status, as beads.CloseWispTree
+	// does (it skips only closed ones), and LeakedWisps lists the rest.
+	wisps         []Wisp
+	wispsErr      error
+	wispStatus    map[string]string
+	wispStatusErr map[string]error
+	closeReasons  []string
+	branches      map[string]string
+	branchErr     map[string]error
+	commentErr    error
+	notesErr      map[string]error
+	reopenErr     map[string]error
 	// heldBeads names beads whose guarded release no longer holds: another
 	// actor reassigned them since the list read.
 	heldBeads map[string]bool
@@ -95,7 +104,7 @@ func newFake() *fakeEnv {
 		idleStopped: map[string]bool{},
 		dirs:        map[string]bool{}, dirErr: map[string]error{},
 		sessions: map[string]bool{}, sessionErr: map[string]error{}, molStatus: map[string]string{},
-		molErr: map[string]error{}, branches: map[string]string{}, branchErr: map[string]error{},
+		molErr: map[string]error{}, wispStatus: map[string]string{}, wispStatusErr: map[string]error{}, branches: map[string]string{}, branchErr: map[string]error{},
 		notesErr: map[string]error{}, reopenErr: map[string]error{}, heldBeads: map[string]bool{},
 		comments:  map[string][]string{},
 		workBeads: map[string]*Work{}, workBeadErr: map[string]error{},
@@ -196,12 +205,54 @@ func (f *fakeEnv) SessionExists(_, p string) (bool, error) {
 	return f.sessions[p], f.sessionErr[p]
 }
 func (f *fakeEnv) MoleculeStatus(id string) (string, error) { return f.molStatus[id], f.molErr[id] }
-func (f *fakeEnv) CloseMolecule(id, _ string) (int, error) {
+func (f *fakeEnv) CloseMolecule(id, reason string) (int, error) {
 	if f.closeErr != nil {
 		return 0, f.closeErr
 	}
 	f.closed = append(f.closed, id)
+	f.closeReasons = append(f.closeReasons, reason)
+	for _, w := range f.wisps {
+		if w.ID == id {
+			return f.closeTree(id), nil
+		}
+	}
 	return 9, nil
+}
+
+// closeTree closes the listed wisp id and the listed wisps under it that are
+// not closed already, and returns how many it closed.
+func (f *fakeEnv) closeTree(id string) int {
+	n := 0
+	for i := range f.wisps {
+		w := &f.wisps[i]
+		if w.ID == id && w.Status != "closed" {
+			w.Status = "closed"
+			n++
+			for _, c := range f.wisps {
+				if c.Parent == id {
+					n += f.closeTree(c.ID)
+				}
+			}
+		}
+	}
+	return n
+}
+
+func (f *fakeEnv) LeakedWisps(string) ([]Wisp, error) {
+	if f.wispsErr != nil {
+		return nil, f.wispsErr
+	}
+	var open []Wisp
+	for _, w := range f.wisps {
+		if w.Status != "closed" {
+			open = append(open, w)
+		}
+	}
+	return open, nil
+}
+
+func (f *fakeEnv) WispStatus(id string) (string, error) {
+	return f.wispStatus[id], f.wispStatusErr[id]
 }
 func (f *fakeEnv) SurvivingBranch(_, id string) (string, error) {
 	return f.branches[id], f.branchErr[id]
@@ -1370,5 +1421,209 @@ func TestFileLedgerUnreadableSuppressesAndRefusesOverwrite(t *testing.T) {
 	}
 	if err := l.MarkReported("gastown/gt-a", now); err == nil {
 		t.Fatal("overwrote an unreadable ledger")
+	}
+}
+
+// leakedWisp is a wisp held by polecat p, created age ago.
+func leakedWisp(id, p, status string, age time.Duration) Wisp {
+	return Wisp{ID: id, Status: status, Assignee: "gastown/polecats/" + p, CreatedAt: now.Add(-age)}
+}
+
+func wispClosed(env *fakeEnv, id string) bool {
+	for _, w := range env.wisps {
+		if w.ID == id {
+			return w.Status == "closed"
+		}
+	}
+	return false
+}
+
+func TestLeakedWispsOfAGoneSeatAreClosed(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	env.wisps = []Wisp{
+		leakedWisp("gt-wisp-a", "onyx", "pinned", 10*24*time.Hour),
+		leakedWisp("gt-wisp-b", "onyx", "in_progress", 9*24*time.Hour),
+		leakedWisp("gt-wisp-c", "onyx", "open", 25*time.Hour),
+		leakedWisp("gt-wisp-d", "onyx", "hooked", 25*time.Hour),
+	}
+	r := scanner(env, nil).Tick("gastown")
+	if got := strings.Join(env.closed, ","); got != "gt-wisp-a,gt-wisp-b,gt-wisp-c,gt-wisp-d" {
+		t.Fatalf("closed = %q; report %v", got, r.Lines())
+	}
+	for _, id := range []string{"gt-wisp-a", "gt-wisp-b", "gt-wisp-c", "gt-wisp-d"} {
+		if !wispClosed(env, id) {
+			t.Errorf("%s is still not closed", id)
+		}
+	}
+	for _, reason := range env.closeReasons {
+		if want := "Leaked wisp: holder onyx no longer exists (patrol scan)"; reason != want {
+			t.Errorf("reason = %q, want %q", reason, want)
+		}
+	}
+	if r.Count(OutcomeClosed) != 4 {
+		t.Fatalf("report %v", r.Lines())
+	}
+}
+
+func TestLeakedWispGuards(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	cases := []struct {
+		name        string
+		setup       func(env *fakeEnv)
+		wantUnknown bool
+	}{
+		{"holder directory exists", func(env *fakeEnv) { env.dirs["onyx"] = true }, false},
+		{"holder session alive", func(env *fakeEnv) { env.sessions["onyx"] = true }, false},
+		{"directory unreadable", func(env *fakeEnv) { env.dirErr["onyx"] = boom }, true},
+		{"session query failed", func(env *fakeEnv) { env.sessionErr["onyx"] = boom }, true},
+		{"intent record unreadable", func(env *fakeEnv) { env.intentErr["onyx"] = boom }, true},
+		{"seat parked", func(env *fakeEnv) { env.intents["onyx"] = intent.Record{Desired: intent.DesiredPark} }, false},
+		{"seat frozen", func(env *fakeEnv) { env.intents["onyx"] = intent.Record{Frozen: true} }, false},
+		// recover owns a gone seat's work bead; here it cannot release it, so
+		// the seat still holds work when the wisp pass reads.
+		{"seat holds a hooked bead", func(env *fakeEnv) {
+			env.active = []Work{{ID: "gt-a", Status: "hooked", Assignee: "gastown/polecats/onyx"}}
+			env.heldBeads["gt-a"] = true
+		}, false},
+		{"seat holds an in_progress bead", func(env *fakeEnv) {
+			env.active = []Work{{ID: "gt-a", Status: "in_progress", Assignee: "gastown/polecats/onyx"}}
+			env.heldBeads["gt-a"] = true
+		}, false},
+		{"active work unreadable", func(env *fakeEnv) { env.activeErr = boom }, true},
+		{"wisp listing failed", func(env *fakeEnv) { env.wispsErr = boom }, true},
+		{"24 hours old exactly", func(env *fakeEnv) { env.wisps[0].CreatedAt = now.Add(-24 * time.Hour) }, false},
+		{"age unknown", func(env *fakeEnv) { env.wisps[0].CreatedAt = time.Time{} }, true},
+		{"no assignee", func(env *fakeEnv) { env.wisps[0].Assignee = "" }, false},
+		{"crew assignee", func(env *fakeEnv) { env.wisps[0].Assignee = "gastown/crew/sloan" }, false},
+		{"other rig's polecat", func(env *fakeEnv) { env.wisps[0].Assignee = "beads/polecats/onyx" }, false},
+		{"nested assignee", func(env *fakeEnv) { env.wisps[0].Assignee = "gastown/polecats/onyx/x" }, false},
+		{"parent still open", func(env *fakeEnv) {
+			env.wisps[0].Parent = "gt-root"
+			env.wispStatus["gt-root"] = "open"
+		}, false},
+		{"parent blocked", func(env *fakeEnv) {
+			env.wisps[0].Parent = "gt-root"
+			env.wispStatus["gt-root"] = "blocked"
+		}, false},
+		{"parent unreadable", func(env *fakeEnv) {
+			env.wisps[0].Parent = "gt-root"
+			env.wispStatusErr["gt-root"] = boom
+		}, true},
+		{"parent listed for a live seat", func(env *fakeEnv) {
+			env.wisps[0].Parent = "gt-root"
+			env.dirs["ruby"] = true
+			env.wisps = append(env.wisps, leakedWisp("gt-root", "ruby", "open", 48*time.Hour))
+		}, false},
+		{"parent listed with another assignee", func(env *fakeEnv) {
+			env.wisps[0].Parent = "gt-root"
+			env.wisps = append(env.wisps, leakedWisp("gt-root", "opal", "open", 48*time.Hour))
+		}, false},
+		{"a younger step under it", func(env *fakeEnv) {
+			step := leakedWisp("gt-step", "onyx", "open", time.Hour)
+			step.Parent = "gt-wisp-a"
+			env.wisps = append(env.wisps, step)
+		}, false},
+		{"parent cycle", func(env *fakeEnv) {
+			env.wisps[0].Parent = "gt-wisp-b"
+			b := leakedWisp("gt-wisp-b", "onyx", "open", 48*time.Hour)
+			b.Parent = "gt-wisp-a"
+			env.wisps = append(env.wisps, b)
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := newFake()
+			env.wisps = []Wisp{leakedWisp("gt-wisp-a", "onyx", "pinned", 48*time.Hour)}
+			tc.setup(env)
+			r := scanner(env, nil).Tick("gastown")
+			if len(env.closed) != 0 {
+				t.Fatalf("closed %v; want nothing closed", env.closed)
+			}
+			if got := r.Count(OutcomeUnknown) > 0; got != tc.wantUnknown {
+				t.Fatalf("unknown findings = %v, want %v; report %v", got, tc.wantUnknown, r.Lines())
+			}
+		})
+	}
+}
+
+// A step whose root was reaped, or closed, hangs under nothing live.
+func TestLeakedWispWithAGoneOrClosedParentIsClosed(t *testing.T) {
+	t.Parallel()
+	for name, status := range map[string]string{"reaped": "", "closed": "closed"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env := newFake()
+			w := leakedWisp("gt-step", "onyx", "pinned", 48*time.Hour)
+			w.Parent = "gt-root"
+			env.wisps = []Wisp{w}
+			env.wispStatus["gt-root"] = status
+			scanner(env, nil).Tick("gastown")
+			if got := strings.Join(env.closed, ","); got != "gt-step" {
+				t.Fatalf("closed = %q, want gt-step", got)
+			}
+		})
+	}
+}
+
+// Closing a root closes its steps, so the pass makes one call for the tree.
+func TestLeakedWispTreeIsClosedOnce(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	root := leakedWisp("gt-root", "onyx", "open", 48*time.Hour)
+	env.wisps = []Wisp{root}
+	for _, id := range []string{"gt-step1", "gt-step2"} {
+		step := leakedWisp(id, "onyx", "pinned", 48*time.Hour)
+		step.Parent = "gt-root"
+		env.wisps = append(env.wisps, step)
+	}
+	r := scanner(env, nil).Tick("gastown")
+	if got := strings.Join(env.closed, ","); got != "gt-root" {
+		t.Fatalf("closed = %q, want one call on gt-root; report %v", got, r.Lines())
+	}
+	if !wispClosed(env, "gt-step1") || !wispClosed(env, "gt-step2") {
+		t.Fatalf("steps left open: %+v", env.wisps)
+	}
+}
+
+func TestLeakedWispsCapClosesPerTick(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	for i := 0; i < 25; i++ {
+		env.wisps = append(env.wisps, leakedWisp(fmt.Sprintf("gt-wisp-%02d", i), "onyx", "pinned", 48*time.Hour))
+	}
+	sc := scanner(env, nil)
+	sc.Tick("gastown")
+	if len(env.closed) != 20 {
+		t.Fatalf("first tick closed %d, want 20", len(env.closed))
+	}
+	sc.Tick("gastown")
+	if len(env.closed) != 25 {
+		t.Fatalf("after the second tick closed %d, want 25", len(env.closed))
+	}
+}
+
+func TestLeakedWispCloseFailureIsReported(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	env.wisps = []Wisp{leakedWisp("gt-wisp-a", "onyx", "pinned", 48*time.Hour)}
+	env.closeErr = errors.New("bd close: timeout")
+	r := scanner(env, nil).Tick("gastown")
+	if r.Count(OutcomeFailed) != 1 || r.Count(OutcomeClosed) != 0 || wispClosed(env, "gt-wisp-a") {
+		t.Fatalf("report %v", r.Lines())
+	}
+}
+
+// With no polecat holding a wisp the pass reads nothing past the listing.
+func TestLeakedWispsQuietWhenNoPolecatHoldsOne(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	env.wisps = []Wisp{{ID: "gt-wisp-a", Status: "open", CreatedAt: now.Add(-48 * time.Hour)}}
+	env.activeErr = errors.New("would fail if read")
+	r := scanner(env, nil).Tick("gastown")
+	if len(env.closed) != 0 || r.Count(OutcomeUnknown) != 0 {
+		t.Fatalf("closed %v; report %v", env.closed, r.Lines())
 	}
 }
