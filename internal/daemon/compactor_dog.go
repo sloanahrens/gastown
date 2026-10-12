@@ -7,7 +7,8 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/steveyegge/gastown/internal/reaper"
+	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/testdb"
 )
 
 const (
@@ -22,11 +23,22 @@ const (
 	// patrol forever. The 2000 default is the buffer against that loop.
 	// Configurable via daemon.json (patrols.compactor_dog.threshold).
 	//
-	// Commit count is not the disk cost. scheduled_maintenance's gc handles
-	// disk; this threshold only guards history-query latency, and this town
-	// sets it near 20000 (measurements:
+	// Commit count is not the disk cost, which is why the size line below is a
+	// second, independent alarm: this one guards history-query latency and the
+	// town sets it near 20000 (measurements:
 	// docs/plans/2026-09-25-dolt-gc-maintenance-design.md, Problem).
+	// scheduled_maintenance's gc is what actually reclaims disk; both of these
+	// lines only decide when an operator is told.
 	defaultCompactorCommitThreshold = 2000
+	// compactorSizeThreshold is the on-disk size at which this patrol
+	// escalates: 1 GiB, ahead of the 2 GB line past which flattening is the
+	// offline operator procedure (docs/dolt-history-offline.md). Half the
+	// trigger's value leaves a maintenance window of headroom at this town's
+	// write rate, so the alert arrives while the cheap options are open.
+	//
+	// Escalation only, like the commit line above: it decides when an operator
+	// is told, never what is rewritten. A database can sit above it.
+	compactorSizeThreshold = int64(1) << 30
 	// compactorQueryTimeout is the timeout for individual SQL queries.
 	compactorQueryTimeout = 30 * time.Second
 )
@@ -203,93 +215,288 @@ func compactorDogThreshold(config *DaemonPatrolConfig) int {
 	return defaultCompactorCommitThreshold
 }
 
-// runCompactorDog checks each production database's commit count and escalates
-// for every database at or above the threshold. It never rewrites history.
+// compactorCondition names one measured property of one database. The pair
+// (database, condition) is an alarm's stable identity.
+type compactorCondition string
+
+const (
+	compactorCommits compactorCondition = "commits"
+	compactorSize    compactorCondition = "size"
+)
+
+// compactorAlertKey is one database-condition's alert key: what `gt escalate`
+// records a repeat of the condition onto, and what `gt escalate clear` closes.
+// It is per database and per condition so that one database back under its
+// size line withdraws its size alarm without touching its commit alarm, or
+// anyone else's (gt-vwry).
+func compactorAlertKey(db string, condition compactorCondition) string {
+	return fmt.Sprintf("compactor_dog:%s:%s", db, condition)
+}
+
+// compactorAlarm is one alarm a cycle raises or withdraws. message is set on a
+// raise; a withdrawal carries the cycle's shared reason instead.
+type compactorAlarm struct {
+	key       string
+	db        string
+	condition compactorCondition
+	message   string
+}
+
+// compactorProbes are the measurements behind one monitoring cycle: which
+// databases exist, each one's commit count, and its size on disk. They are
+// functions so every branch is reachable without a Dolt server or a real data
+// directory (doctorProbes' shape).
+//
+// size is nil when sizes are not readable from this host at all — the server's
+// data directory is not here. The cycle then checks commits alone, which it
+// can, over SQL.
+type compactorProbes struct {
+	// databases lists the databases to check.
+	databases func() ([]string, error)
+	// commits counts one database's dolt_log commits.
+	commits func(db string) (int, error)
+	// size measures one database's on-disk store, Dolt's journal excluded.
+	size func(db string) (int64, error)
+}
+
+// compactorReport is everything one monitoring cycle measured and decided.
+type compactorReport struct {
+	// names are the databases checked, in discovery order.
+	names []string
+	// readings is one line per database: what was measured against what line.
+	readings []string
+	// unread is one line per measurement that could not be taken. An
+	// unreadable database is reported, never skipped in silence: a monitor
+	// whose silence could mean either "fine" or "could not look" is the
+	// failure this patrol exists to prevent.
+	unread []string
+	// raised and cleared are the alarms to file and to withdraw.
+	raised  []compactorAlarm
+	cleared []compactorAlarm
+	// discoveryErr is set when the database list itself could not be read.
+	discoveryErr error
+	// sizeUnchecked is true when no size was read at all — no data directory
+	// on this host. The cycle then has no size alarms at all, which is not the
+	// same report as every database being small.
+	sizeUnchecked bool
+}
+
+// compactorDogFindings inspects every database against both lines and decides
+// each alarm. Every measurement comes from the probes and the thresholds are
+// parameters, so a cycle over any number of databases is testable with temp
+// directories and fake counters.
+//
+// It only decides. Filing an escalation is a `gt` subprocess that can take a
+// minute under load, so the caller does that.
+func compactorDogFindings(p compactorProbes, commitThreshold int, sizeThreshold int64) compactorReport {
+	var r compactorReport
+	if p.size == nil {
+		r.sizeUnchecked = true
+	}
+
+	databases, err := p.databases()
+	if err != nil {
+		r.discoveryErr = err
+		return r
+	}
+
+	// A measurement under its line withdraws that alarm. A withdraw for a
+	// condition that was never raised is a no-op — `gt escalate clear` treats
+	// an unknown key as success — so a database that merely stopped tripping a
+	// line this cycle is not remembered here.
+	for _, db := range databases {
+		r.names = append(r.names, db)
+
+		reading := db + ":"
+
+		commits, err := p.commits(db)
+		switch {
+		case err != nil:
+			r.unread = append(r.unread, fmt.Sprintf("%s: counting commits: %v", db, err))
+			reading += " commits unread"
+		case commits >= commitThreshold:
+			r.raised = append(r.raised, compactorAlarm{
+				key: compactorAlertKey(db, compactorCommits), db: db, condition: compactorCommits,
+				message: fmt.Sprintf("Commit threshold exceeded for %s: %d commits (threshold %d). "+
+					"Nothing rewrites history routinely: flatten is an offline operator procedure "+
+					"(docs/dolt-history-offline.md), triggered only by a database past 2 GB.",
+					db, commits, commitThreshold),
+			})
+			reading += fmt.Sprintf(" %d commits OVER line %d", commits, commitThreshold)
+		default:
+			r.cleared = append(r.cleared, compactorAlarm{
+				key: compactorAlertKey(db, compactorCommits), db: db, condition: compactorCommits,
+			})
+			reading += fmt.Sprintf(" %d commits ok (line %d)", commits, commitThreshold)
+		}
+
+		if p.size != nil {
+			size, err := p.size(db)
+			switch {
+			case err != nil:
+				r.unread = append(r.unread, fmt.Sprintf("%s: measuring size: %v", db, err))
+				reading += "; size unread"
+			case size >= sizeThreshold:
+				r.raised = append(r.raised, compactorAlarm{
+					key: compactorAlertKey(db, compactorSize), db: db, condition: compactorSize,
+					message: fmt.Sprintf("Size threshold exceeded for %s: %s on disk (threshold %s). "+
+						"Flattening is the offline operator procedure once a database passes 2 GB "+
+						"(docs/dolt-history-offline.md); this is the alert with a gigabyte of room "+
+						"before it. Nothing rewrites history routinely.",
+						db, formatBytes(size), formatBytes(sizeThreshold)),
+				})
+				reading += fmt.Sprintf("; %s OVER line %s", formatBytes(size), formatBytes(sizeThreshold))
+			default:
+				r.cleared = append(r.cleared, compactorAlarm{
+					key: compactorAlertKey(db, compactorSize), db: db, condition: compactorSize,
+				})
+				reading += fmt.Sprintf("; %s ok (line %s)", formatBytes(size), formatBytes(sizeThreshold))
+			}
+		}
+
+		r.readings = append(r.readings, reading)
+	}
+	return r
+}
+
+// runCompactorDog checks every production database's commit count and on-disk
+// size, and escalates for each database at or above either line. It never
+// rewrites history.
 //
 // Rewriting history is not a routine path at all: it is an offline operator
 // procedure (docs/dolt-history-offline.md) with a single trigger, a database
-// past 2 GB.
+// past 2 GB. The size alarm is the advance warning of that line.
 //
 // Returns whether the cycle completed cleanly — false when there was nothing
-// to inspect or every inspection errored, so the caller knows not to record
-// this as a completed run (gt-4uxs).
+// to inspect or something could not be inspected, so the caller knows not to
+// record this as a completed run (gt-4uxs).
 func (d *Daemon) runCompactorDog() bool {
+	return d.runCompactorDogWith(d.compactorDogProbes())
+}
+
+// runCompactorDogWith runs one monitoring cycle over the measurements in p.
+// Split out from runCompactorDog so a test drives the whole cycle, alarms
+// included, from probes it controls — offline, with no Dolt server.
+func (d *Daemon) runCompactorDogWith(p compactorProbes) bool {
 	if !d.isPatrolActive("compactor_dog") {
 		return true
 	}
 
-	threshold := compactorDogThreshold(d.patrolConfig)
-	d.logger.Printf("compactor_dog: starting monitoring cycle (threshold=%d)", threshold)
+	commitThreshold := compactorDogThreshold(d.patrolConfig)
+	d.logger.Printf("compactor_dog: starting monitoring cycle (commit_threshold=%d size_threshold=%s)",
+		commitThreshold, formatBytes(compactorSizeThreshold))
 
 	warnDeprecatedCompactorConfig(d, compactorDogConfig(d.patrolConfig))
 
 	cycle := d.startDogCycle("compactor_dog")
 	defer cycle.close()
 
-	databases := d.compactorDatabases()
-	if len(databases) == 0 {
+	rep := compactorDogFindings(p, commitThreshold, compactorSizeThreshold)
+
+	// Step "inspect": read every database. A cycle that could not look at
+	// something is not a clean cycle — it must not be recorded as a completed
+	// run, or the failure waits out the full interval instead of retrying on
+	// the next 15-minute check (gt-4uxs).
+	switch {
+	case rep.discoveryErr != nil:
+		d.logger.Printf("compactor_dog: cannot discover databases: %v", rep.discoveryErr)
+		cycle.failStep("inspect", fmt.Sprintf("database discovery: %v", rep.discoveryErr))
+		return false
+	case len(rep.names) == 0:
 		d.logger.Printf("compactor_dog: no databases to check")
 		cycle.failStep("inspect", "no databases found")
 		return false
 	}
-
-	// Step "inspect": count commits per database. The step is closed exactly
-	// once, after the loop that performs the inspection — counting errors are
-	// inspection errors, so they are attributed here rather than to a later
-	// step.
-	type candidate struct {
-		name    string
-		commits int
+	// The readings first, then what could not be read: the UNREAD lines are
+	// the ones a reader is looking for, and a database missing from the
+	// readings above is what sent them there.
+	for _, line := range rep.readings {
+		d.logger.Printf("compactor_dog: %s", line)
 	}
-	var candidates []candidate
-	belowThreshold := 0
-	errors := 0
-
-	for _, dbName := range databases {
-		commitCount, err := d.compactorCountCommits(dbName)
-		if err != nil {
-			d.logger.Printf("compactor_dog: %s: error counting commits: %v", dbName, err)
-			errors++
-			continue
-		}
-
-		if commitCount >= threshold {
-			candidates = append(candidates, candidate{name: dbName, commits: commitCount})
-		} else {
-			d.logger.Printf("compactor_dog: %s: %d commits (below threshold %d), OK",
-				dbName, commitCount, threshold)
-			belowThreshold++
-		}
+	for _, line := range rep.unread {
+		d.logger.Printf("compactor_dog: UNREAD %s", line)
 	}
-
-	if errors > 0 {
-		cycle.failStep("inspect", fmt.Sprintf("%d databases had errors", errors))
+	if len(rep.unread) > 0 {
+		cycle.failStep("inspect", fmt.Sprintf("%d measurement(s) unreadable", len(rep.unread)))
 	} else {
 		cycle.closeStep("inspect")
 	}
 
-	// Step "monitor": escalate. This step does not fail — escalation is the
-	// happy path for a database over threshold, not an error condition.
-	for _, c := range candidates {
-		d.logger.Printf("compactor_dog: %s: %d commits (threshold %d) — ESCALATING",
-			c.name, c.commits, threshold)
-		d.escalateAlert("compactor_dog:"+c.name, "compactor_dog", fmt.Sprintf(
-			"Commit threshold exceeded for %s: %d commits (threshold %d). "+
-				"Nothing rewrites history routinely: flatten is an offline operator procedure "+
-				"(docs/dolt-history-offline.md), triggered only by a database past 2 GB.",
-			c.name, c.commits, threshold))
+	// Step "monitor": file and withdraw. Neither is a failure — an alarm over
+	// a line is this patrol working, and a withdrawal is it working again.
+	for _, a := range rep.raised {
+		d.logger.Printf("compactor_dog: %s: %s — ESCALATING", a.db, a.condition)
+		d.escalateAlert(a.key, "compactor_dog", a.message)
+	}
+	if keys := compactorAlarmKeys(rep.cleared); len(keys) > 0 {
+		d.clearAlerts("compactor_dog: back below threshold", keys...)
 	}
 	cycle.closeStep("monitor")
 
-	d.logger.Printf("compactor_dog: cycle complete — above_threshold=%d below_threshold=%d errors=%d",
-		len(candidates), belowThreshold, errors)
+	sizes := ""
+	if rep.sizeUnchecked {
+		// Says so on the cycle's own line: "no database is large" and "no size
+		// was read" are different reports, and only one of them is news.
+		sizes = " sizes=unchecked"
+	}
+	d.logger.Printf("compactor_dog: cycle complete — checked=%d raised=%d cleared=%d unread=%d%s",
+		len(rep.names), len(rep.raised), len(rep.cleared), len(rep.unread), sizes)
 	cycle.closeStep("report")
 
-	// A cycle that inspected every database without error is the only kind
-	// clean enough to record as a completed run; a partial or total inspection
-	// failure must leave the last-run time alone so the next check retries
-	// instead of waiting out the full interval (gt-4uxs).
-	return errors == 0
+	return len(rep.unread) == 0
+}
+
+// compactorAlarmKeys collects the alert keys of the alarms to withdraw.
+func compactorAlarmKeys(alarms []compactorAlarm) []string {
+	keys := make([]string, 0, len(alarms))
+	for _, a := range alarms {
+		keys = append(keys, a.key)
+	}
+	return keys
+}
+
+// compactorDogProbes wires compactorProbes to the live town.
+func (d *Daemon) compactorDogProbes() compactorProbes {
+	external, why := d.maintenance().gcExternal(d)
+	if external {
+		d.logger.Printf("compactor_dog: sizes unchecked — %s", why)
+	}
+	dataDir := d.maintenanceDataDir()
+	measure := d.maintenance().measure
+
+	return compactorProbesFor(external,
+		compactorDatabaseSources{local: d.compactorDatabases, server: d.compactorServerDatabases},
+		d.compactorCountCommits, func(db string) (int64, error) {
+			m, err := measure(dataDir, db)
+			return m.total, err
+		})
+}
+
+// compactorDatabaseSources are the two places a cycle's database list can come
+// from. They are named at the probe-building call site because picking the
+// wrong one is silent: the cycle reports an empty or failing inspection either
+// way (gt-7yejc).
+type compactorDatabaseSources struct {
+	// local walks the server's data directory, which must be on this host.
+	local func() ([]string, error)
+	// server asks the running server over SQL.
+	server func() ([]string, error)
+}
+
+// compactorProbesFor is compactorDogProbes' choice of measurements, kept apart
+// from the town so a test drives both branches with no server and no data
+// directory.
+//
+// externalServer means the server's storage is not on this host: there is no
+// size to read here, and the database list must come from the server as well,
+// because the data directory under this town root is not the one serving (and
+// usually does not exist). Walking it fails the whole cycle and leaves the
+// commit alarm unevaluated on every tick.
+func compactorProbesFor(externalServer bool, sources compactorDatabaseSources, commits func(db string) (int, error), size func(db string) (int64, error)) compactorProbes {
+	if externalServer {
+		return compactorProbes{databases: sources.server, commits: commits}
+	}
+	return compactorProbes{databases: sources.local, commits: commits, size: size}
 }
 
 // warnDeprecatedCompactorConfig logs a warning when daemon.json still carries
@@ -308,22 +515,90 @@ func warnDeprecatedCompactorConfig(d *Daemon, cd *CompactorDogConfig) {
 		cd.Mode, cd.KeepRecent)
 }
 
-// compactorDatabases returns the list of databases to check.
-// Checks its own config first, falls back to wisp_reaper config, then auto-discovery.
-func (d *Daemon) compactorDatabases() []string {
-	if d.patrolConfig != nil && d.patrolConfig.Patrols != nil {
-		if cd := d.patrolConfig.Patrols.CompactorDog; cd != nil {
-			if len(cd.Databases) > 0 {
-				return cd.Databases
-			}
-		}
-		if d.patrolConfig.Patrols.WispReaper != nil {
-			if dbs := d.patrolConfig.Patrols.WispReaper.Databases; len(dbs) > 0 {
-				return dbs
-			}
+// compactorDatabases lists the databases to check: patrols.compactor_dog's own
+// list when an operator set one, else every database the maintenance code
+// discovers under the server's data directory on this host.
+//
+// Discovery, not a fixed list: a database the list does not name is never
+// checked, which is how a 31,335-commit database went unreported (gt-7yejc).
+// It is the same walk gc does, so both patrols hold the same database set.
+func (d *Daemon) compactorDatabases() ([]string, error) {
+	if configured := compactorConfiguredDatabases(d.patrolConfig); len(configured) > 0 {
+		return configured, nil
+	}
+
+	databases, err := d.maintenance().gcDatabases(d.maintenanceDataDir())
+	if err != nil {
+		return nil, err
+	}
+	return compactorRealDatabases(databases), nil
+}
+
+// compactorConfiguredDatabases returns the database list an operator set for
+// this patrol, or nil when the config names none. It is used as given: an
+// explicit list is an instruction, and filtering it would leave a database the
+// operator asked for unchecked without saying so.
+func compactorConfiguredDatabases(config *DaemonPatrolConfig) []string {
+	if config != nil && config.Patrols != nil {
+		if cd := config.Patrols.CompactorDog; cd != nil && len(cd.Databases) > 0 {
+			return cd.Databases
 		}
 	}
-	return reaper.DefaultDatabases
+	return nil
+}
+
+// compactorServerDatabases lists the databases the Dolt server itself reports,
+// over SQL. It is the source when the server's data directory is not on this
+// host; a remote server answers here where a directory walk cannot.
+func (d *Daemon) compactorServerDatabases() ([]string, error) {
+	if configured := compactorConfiguredDatabases(d.patrolConfig); len(configured) > 0 {
+		return configured, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), compactorQueryTimeout)
+	defer cancel()
+
+	// No default database: SHOW DATABASES is catalog-wide, and naming one would
+	// fail on a server where that database has been dropped.
+	db, err := d.compactorOpenDB("")
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	rows, err := db.QueryContext(ctx, "SHOW DATABASES")
+	if err != nil {
+		return nil, fmt.Errorf("show databases: %w", err)
+	}
+	defer rows.Close()
+
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("show databases: %w", err)
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("show databases: %w", err)
+	}
+	return compactorRealDatabases(names), nil
+}
+
+// compactorRealDatabases drops the names no alarm should carry: the server's
+// own catalogs, and the scratch databases test cruft leaves behind
+// (internal/testdb). An alarm about either is noise an operator learns to
+// ignore, and noise is how a real alarm gets missed.
+func compactorRealDatabases(databases []string) []string {
+	real := make([]string, 0, len(databases))
+	for _, db := range databases {
+		if doltserver.IsSystemDatabase(db) || testdb.IsTestDatabaseName(db) {
+			continue
+		}
+		real = append(real, db)
+	}
+	return real
 }
 
 // compactorCountCommits counts the number of commits in the database's dolt_log.
