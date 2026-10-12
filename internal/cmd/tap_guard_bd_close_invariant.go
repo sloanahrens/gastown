@@ -396,11 +396,11 @@ func isBdCommandWord(tok string) bool {
 }
 
 // bdCloseLeadWords open a clause or group and are followed by a command, as in
-// `then bd close X` and `( bd close X )`; bdCloseLaunchers run the command that
+// `then bd close X`, `if bd close X; then ...; fi` and `( bd close X )`; bdCloseLaunchers run the command that
 // follows them. Both are looked through so the close behind them is judged
 // (deep-review gt-dilqk).
 var (
-	bdCloseLeadWords = map[string]bool{"then": true, "do": true, "else": true, "elif": true, "{": true, "(": true, "!": true}
+	bdCloseLeadWords = map[string]bool{"then": true, "do": true, "else": true, "elif": true, "if": true, "while": true, "until": true, "{": true, "(": true, "!": true}
 	bdCloseLaunchers = map[string]bool{"time": true, "nohup": true, "exec": true, "sudo": true, "nice": true, "stdbuf": true, "timeout": true}
 )
 
