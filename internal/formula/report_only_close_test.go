@@ -53,3 +53,35 @@ func TestDeepReviewQuietDayReachesTheClosingSubmitStep(t *testing.T) {
 		t.Error("deep-review-run's quiet-day path still names a bare gt done --status DEFERRED")
 	}
 }
+
+// TestDeepReviewFilesEveryConfirmedFinding guards gt-j6phl: the run files each
+// confirmed finding itself, so no severity waits on a human approval, and the
+// queued ledger line carries every severity the filing step does.
+func TestDeepReviewFilesEveryConfirmedFinding(t *testing.T) {
+	t.Parallel()
+	raw, err := GetEmbeddedFormulaContent("deep-review-run")
+	if err != nil {
+		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
+	}
+	text := string(raw)
+	for _, retired := range []string{
+		"P3: digest only",     // the tier that left a confirmed finding unfiled
+		"P3 for approval",     // its digest section
+		"file 1,3,4",          // the comment a human approved it with
+		"filed from approval", // and how the next run picked it up
+	} {
+		if strings.Contains(text, retired) {
+			t.Errorf("deep-review-run still carries the retired approval path: %q", retired)
+		}
+	}
+	for _, want := range []string{
+		"File every CONFIRMED finding",
+		"-p <1|2|3>",
+		"-l crew-only", // filed, never slung
+		"queued: <fingerprint> <P1|P2|P3> <file:line> <claim>",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("deep-review-run lacks %q", want)
+		}
+	}
+}
