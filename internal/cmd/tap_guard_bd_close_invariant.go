@@ -422,9 +422,9 @@ var bdCloseLauncherValueFlags = map[string]map[string]bool{
 }
 
 // bdCloseCommandTokens returns the segment from its command word on: clause and
-// group openers, env assignments and launchers (with their own flags and the
-// values those flags take) are dropped from the front, and a group's closing )
-// or } from the back.
+// group openers, env assignments, launchers (with their own flags and the
+// values those flags take) and case-arm labels are dropped from the front, and
+// a group's closing ) or } from the back.
 func bdCloseCommandTokens(segment []string) []string {
 	tokens := segment
 	for len(tokens) > 0 {
@@ -432,6 +432,12 @@ func bdCloseCommandTokens(segment []string) []string {
 		tokens = stripLeadingEnvAssignments(tokens)
 		if len(tokens) > 0 && bdCloseLeadWords[tokens[0]] {
 			tokens = tokens[1:]
+		}
+		if end := bdCloseCaseHeaderEnd(tokens); end >= 0 {
+			tokens = tokens[end:]
+		}
+		if end := bdCloseCaseArmLabelEnd(tokens); end >= 0 {
+			tokens = tokens[end+1:]
 		}
 		if len(tokens) > 0 && bdCloseLaunchers[filepath.Base(tokens[0])] {
 			launcher := filepath.Base(tokens[0])
@@ -458,6 +464,64 @@ func bdCloseCommandTokens(segment []string) []string {
 		tokens = tokens[:len(tokens)-1]
 	}
 	return tokens
+}
+
+// bdCloseCaseHeaderEnd returns the index just past the `in` that ends a
+// `case WORD in` header at the front of tokens, or -1 when tokens opens with
+// no such header.
+//
+// A case arm is `case WORD in PATTERN) LIST`, so the header shares its segment
+// with the first arm's label and the LIST's command is never the segment's
+// first word. Without dropping the header, a `bd close` in the first arm is
+// invisible to the invariant where the same command outside a case is judged
+// (gt-37k43). A `case` whose `in` this scan does not reach leaves the segment
+// alone, which is the same "not a bd close" answer as before.
+func bdCloseCaseHeaderEnd(tokens []string) int {
+	if len(tokens) == 0 || tokens[0] != "case" {
+		return -1
+	}
+	for i := 1; i < len(tokens); i++ {
+		if tokens[i] == "in" {
+			return i + 1
+		}
+	}
+	return -1
+}
+
+// bdCloseCaseArmLabelEnd returns the index of the token ending a case-arm label
+// at the front of tokens — the `)` of `a)` or of `( a|b )` — or -1 when no
+// label is there.
+//
+// `;;` ends an arm and its two `;` tokens reach the caller as separators, so
+// after the first arm every segment opens with its own label. A glued label
+// (`a)`) arrives as one token; the tokenizer spaces a parenthesised one
+// (`(a)`), so its `)` arrives alone after the `(` opener has already been
+// dropped. Both are found by scanning to the first token that ends in `)` —
+// the shape test doneSlotLoopIsCaseArmPattern applies to the same labels
+// (gt-vjrpj).
+//
+// Two shapes must not read as a label. A group's own `)` is the last token of
+// its segment — everything behind a group is a separator, which splits the
+// segment — so only a `)` with words after it closes a label. And a bd command
+// word already in command position means the segment is a subshell that HOLDS
+// the close (`( bd close gt-x ) 2>/dev/null`), not an arm label in front of it
+// — stripping to that `)` there would hide the close. A token carrying an
+// opening paren is a function definition or a substitution, so it opens no
+// label either.
+func bdCloseCaseArmLabelEnd(tokens []string) int {
+	for i, tok := range tokens {
+		if isBdCommandWord(tok) {
+			return -1
+		}
+		if !strings.HasSuffix(tok, ")") || strings.Contains(tok, "(") {
+			continue
+		}
+		if i == len(tokens)-1 {
+			return -1
+		}
+		return i
+	}
+	return -1
 }
 
 // parseBdCloseShellPayload reads the closes inside a `bash -c '...'` payload.

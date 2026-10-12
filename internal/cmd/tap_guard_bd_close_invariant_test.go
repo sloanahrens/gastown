@@ -128,6 +128,34 @@ func TestParseBdCloseInvocations(t *testing.T) {
 		{name: "behind until", command: "until bd close gt-arno; do sleep 1; done", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
 		{name: "behind elif", command: "if x; then y; elif bd close gt-arno; then z; fi", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
 		{name: "an if of something else is not a close", command: "if bd update gt-arno --status=open; then echo ok; fi", want: nil},
+
+		// A case arm is `PATTERN) LIST`. The label is not the command word, so
+		// the close in the arm is the one the invariant must judge — whichever
+		// arm it sits in, and in every label spelling the shell accepts
+		// (gt-37k43).
+		{name: "inside the first case arm", command: "case $x in a) bd close gt-arno ;; esac", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		{name: "inside a parenthesised case label", command: "case $x in (a) bd close gt-arno ;; esac", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		{name: "alongside a case label alternation", command: "case $x in a|b) bd close gt-arno ;; esac", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		{name: "behind a case wildcard label", command: "case $x in (*) bd close gt-arno ;; esac", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		{name: "inside a later case arm", command: "case $x in a) true ;; b) bd close gt-arno ;; esac", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		{name: "inside a later parenthesised case arm", command: "case $x in a) true ;; (b) bd close gt-arno ;; esac", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		{name: "case arm carrying a reason", command: `case $x in a) bd close -r "cancel: x" gt-arno ;; esac`, want: []bdCloseInvocation{{IDs: []string{"gt-arno"}, Reason: "cancel: x"}}},
+		{name: "one close per case arm", command: "case $x in a) bd close gt-arno ;; b) bd close gt-other ;; esac", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}, {IDs: []string{"gt-other"}}}},
+		{name: "nested case", command: "case $x in a) case $y in b) bd close gt-arno ;; esac ;; esac", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		{name: "case inside a loop", command: "while read -r x; do case $x in a) bd close gt-arno ;; esac; done", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		{name: "subshell inside a case arm", command: "case $x in a) ( bd close gt-arno ) ;; esac", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		{name: "case inside a bash -c payload", command: "bash -c 'case $x in a) bd close gt-arno ;; esac'", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		{name: "case arm with a command that is not bd", command: "case $x in a) true ;; b) echo bd close gt-arno ;; esac", want: nil},
+		{name: "case arm with a non-close bd subcommand", command: "case $x in a) bd update gt-arno --status=open ;; esac", want: nil},
+		{name: "case arm with no close at all", command: "case $x in a) true ;; esac", want: nil},
+		// A group's own `)` closes the segment, so the close in a subshell is
+		// still the command word rather than a label's tail. Every non-flag
+		// token after `close` is an id, so the `)` and the redirect land here
+		// beside the real one; only an id that names the branch is judged.
+		{name: "subshell holding the close keeps it", command: "( bd close gt-arno ) 2>/dev/null", want: []bdCloseInvocation{{IDs: []string{"gt-arno", ")", "2>/dev/null"}}}},
+		{name: "function body is not a case arm", command: "foo() { bd close gt-arno; }", want: nil},
+		{name: "case inside a quoted argument", command: `echo "case $x in a) bd close gt-arno ;; esac"`, want: nil},
+		{name: "case written into a heredoc is data", command: "cat > /tmp/f.sh <<'EOF'\ncase $x in a) bd close gt-arno ;; esac\nEOF", want: nil},
 		{name: "behind timeout", command: "timeout 30 bd close gt-arno", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
 		{name: "behind timeout with a flag", command: "timeout -s KILL 30 bd close gt-arno", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
 		{name: "behind timeout with a kill-after", command: "timeout -k 5 30 bd close gt-arno", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
