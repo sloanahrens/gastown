@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Tests for scripts/deep-review.sh: quiet detection, a quiet verdict that fails
 # closed on unreadable input, timestamp ordering, the cursor ledger, the
-# rotation slice on a production-sized tree, and fingerprint lookup.
+# rotation slice on a production-sized tree, fingerprint lookup, and the queued
+# ledger line's severity.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -173,6 +174,18 @@ queued: c.go:C:z P2 c.go:3 third
 N
 assert_eq "filed ones and repeats drop out" "queued: a.go:A:x P1 a.go:1 first claim|queued: c.go:C:z P2 c.go:3 third" "$("$DR" queued --prev-notes "$TMP/n9.txt" | paste -sd'|' -)"
 assert_eq "none queued" "" "$("$DR" queued --prev-notes "$TMP/none.txt")"
+
+echo "queued: P3 is a severity, a line without one fails closed"
+printf 'queued: a.go:A:x P3 a.go:1 low claim\n' > "$TMP/q3.txt"
+assert_eq "P3 carried through" "queued: a.go:A:x P3 a.go:1 low claim" "$("$DR" queued --prev-notes "$TMP/q3.txt")"
+queued_rc() { local rc=0; "$DR" queued --prev-notes "$1" > "$TMP/queued.out" 2> "$TMP/queued.err" || rc=$?; echo "$rc"; }
+printf 'queued: a.go:A:x a.go:1 no severity\n' > "$TMP/qbad1.txt"
+assert_eq "severity missing" "3" "$(queued_rc "$TMP/qbad1.txt")"
+assert_eq "the failure names the line" "1" "$(grep -c 'malformed queued line: queued: a.go:A:x a.go:1 no severity' "$TMP/queued.err" || true)"
+printf 'queued: a.go:A:x P4 a.go:1 unknown severity\n' > "$TMP/qbad2.txt"
+assert_eq "severity not P1-P3" "3" "$(queued_rc "$TMP/qbad2.txt")"
+printf 'queued: a.go:A:x P2 a.go:1\n' > "$TMP/qbad3.txt"
+assert_eq "claim missing" "3" "$(queued_rc "$TMP/qbad3.txt")"
 
 echo ""
 echo "passed: $PASS failed: $FAIL"

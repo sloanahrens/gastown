@@ -1,6 +1,7 @@
 description = """
 Daily, skip-if-quiet deep review of gastown: recent risk-path landings plus a
-rotating slice of files, read-only, filing shaped beads for confirmed findings.
+rotating slice of files, read-only, filing a shaped bead for every confirmed
+finding with no approval step.
 
 You are a polecat. The skeleton is mol-polecat-work, but this run is
 report-only: you edit nothing and `gt done --status DEFERRED` ends it. The

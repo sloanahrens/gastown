@@ -10,10 +10,13 @@
 # Ledger lines, written into the run bead's notes by the formula:
 #   cursor: <RFC3339 landed_at of the newest landing covered> <last slice path>
 #   finding: <fingerprint> <bead id | digest-only>
-#   queued: <fingerprint> <P1|P2> <file:line> <claim>
+#   queued: <fingerprint> <P1|P2|P3> <file:line> <claim>
 # --prev-notes is the notes of recent run beads in any order. The cursor line
 # with the newest timestamp wins, so the order and status of the run beads do
 # not matter. A queued finding stays pending until a finding line names it.
+# A queued line that does not carry a severity and a claim stops queued with
+# exit 3: the run that would file it reads a truncated queue as a short one,
+# and a lost finding is worse than a run that stops and escalates.
 #
 # Exit codes: 2 usage, 3 an input the script cannot trust. Never read a
 # non-zero exit as a quiet day.
@@ -79,7 +82,11 @@ cmd_queued() {
   awk '
     NR == FNR { if (index($0, "finding: ") == 1) { split(substr($0, 10), f, " "); filed[f[1]] = 1 } next }
     index($0, "queued: ") == 1 {
-      split(substr($0, 9), f, " ")
+      n = split(substr($0, 9), f, " ")
+      if (n < 4 || f[2] !~ /^(P1|P2|P3)$/) {
+        printf "deep-review.sh: malformed queued line: %s\n", $0 > "/dev/stderr"
+        exit 3
+      }
       if (!(f[1] in filed) && !(f[1] in shown)) { shown[f[1]] = 1; print }
     }
   ' "$notes" "$notes"
