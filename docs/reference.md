@@ -280,7 +280,10 @@ number), `pro_max`, `pro_agent` and `pro_label` configure the pro seat, and
 `shape_gate` is what a dispatch does with a candidate's shape lint
 (`gt spec lint`): off, warn or refuse. `agent` and `max_seats` are the pool's
 own seat — the agent its polecats run, up to `max_seats` live sessions, refused
-past the cap — and `min_spawn_gap` staggers its spawns. The seat's keys were
+past the cap — and `min_spawn_gap` staggers its spawns. `max_total` caps live
+polecats across every seat, for a town whose two agents are each inside their
+own cap and over the number wanted; `gt pool set-total <n>` sets it, and an
+absent key (or 0) is no total cap. The seat's keys were
 `overflow_agent` and `max_overflow` until gt-plk1z: a file still carrying those
 loads the same values, warns once per process, and keeps the old keys as the
 operator wrote them — gt reads them but writes only the new names, so delete the

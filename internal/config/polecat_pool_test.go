@@ -96,6 +96,50 @@ func TestPolecatPool_SeatRefillPolicy(t *testing.T) {
 	})
 }
 
+// max_total is the cap beside the per-agent ones (gt-bcpj5): it bounds live
+// polecats across every seat, an absent key and a written 0 both read as a town
+// with no total cap, and a file that names it loads it and keeps it.
+func TestPolecatPool_MaxTotal(t *testing.T) {
+	t.Parallel()
+	var absent *PolecatPool
+	if got := absent.GetMaxTotal(); got != 0 {
+		t.Errorf("a nil pool reads as no total cap, got %d", got)
+	}
+	zero, three := 0, 3
+	if got := (&PolecatPool{MaxTotal: &zero}).GetMaxTotal(); got != 0 {
+		t.Errorf("max_total 0 = %d, want no total cap", got)
+	}
+	if got := (&PolecatPool{MaxTotal: &three}).GetMaxTotal(); got != 3 {
+		t.Errorf("max_total 3 = %d, want 3", got)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	settingsJSON := `{"type":"town-settings","version":1,"polecat_pool":{"agent":"deepseek-flash","max_seats":3,"max_total":2}}`
+	if err := os.WriteFile(path, []byte(settingsJSON), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	ts, err := LoadOrCreateTownSettings(path)
+	if err != nil {
+		t.Fatalf("LoadOrCreateTownSettings: %v", err)
+	}
+	if got := ts.PolecatPool.GetMaxTotal(); got != 2 {
+		t.Fatalf("loaded max_total = %d, want 2", got)
+	}
+	if err := ts.PolecatPool.Validate(); err != nil {
+		t.Fatalf("a set max_total must validate: %v", err)
+	}
+	if err := SaveTownSettings(path, ts); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(saved), `"max_total": 2`) {
+		t.Errorf("a rewrite dropped max_total:\n%s", saved)
+	}
+}
+
 func TestPolecatPool_ValidateSeatRefillPolicy(t *testing.T) {
 	t.Parallel()
 	neg := -1
@@ -111,6 +155,7 @@ func TestPolecatPool_ValidateSeatRefillPolicy(t *testing.T) {
 		{"nudge_seconds below zero", &PolecatPool{NudgeSeconds: &neg}, "polecat_pool.nudge_seconds"},
 		{"dispatch_empty_seconds below zero", &PolecatPool{DispatchEmptySeconds: &neg}, "polecat_pool.dispatch_empty_seconds"},
 		{"pro_max below zero", &PolecatPool{ProMax: &neg}, "polecat_pool.pro_max"},
+		{"max_total below zero", &PolecatPool{MaxTotal: &neg}, "polecat_pool.max_total"},
 		{"top_candidates zero", &PolecatPool{TopCandidates: &zero}, "polecat_pool.top_candidates"},
 		{"an unknown mode", &PolecatPool{Mode: "ask-the-mayor"}, "polecat_pool.mode"},
 		{"an unknown shape gate", &PolecatPool{ShapeGate: "block"}, "polecat_pool.shape_gate"},
@@ -121,7 +166,8 @@ func TestPolecatPool_ValidateSeatRefillPolicy(t *testing.T) {
 		{"nudge_seconds 0 drops the repeat cap", &PolecatPool{NudgeSeconds: &zero}, ""},
 		{"an empty pro agent reads as the default", &PolecatPool{ProMax: &one}, ""},
 		{"a dropped pro seat is still valid", &PolecatPool{ProMax: &zero}, ""},
-		{"everything at its floor validates", &PolecatPool{MaxPriority: &zero, TopCandidates: &one, EmptySeconds: &zero, NudgeSeconds: &zero, DispatchEmptySeconds: &zero, ProMax: &zero}, ""},
+		{"max_total 0 is a town with no total cap", &PolecatPool{MaxTotal: &zero}, ""},
+		{"everything at its floor validates", &PolecatPool{MaxPriority: &zero, TopCandidates: &one, EmptySeconds: &zero, NudgeSeconds: &zero, DispatchEmptySeconds: &zero, ProMax: &zero, MaxTotal: &zero}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

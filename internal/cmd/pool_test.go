@@ -65,6 +65,17 @@ func poolTestTown(t *testing.T, settings, daemon string) string {
 // poolTestBudget is what the dispatcher would run with after the change.
 func poolTestBudget(t *testing.T, root string) map[string]int {
 	t.Helper()
+	caps := map[string]int{}
+	for _, s := range poolTestTownBudget(t, root).Seats {
+		caps[s.Agent] = s.Cap
+	}
+	return caps
+}
+
+// poolTestTownBudget is the dispatcher's whole budget after the change, the
+// town's total included.
+func poolTestTownBudget(t *testing.T, root string) specdispatch.Budget {
+	t.Helper()
 	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(root))
 	if err != nil {
 		t.Fatal(err)
@@ -73,11 +84,17 @@ func poolTestBudget(t *testing.T, root string) map[string]int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	caps := map[string]int{}
-	for _, s := range specBudgetFromConfig(ts, sd).Seats {
-		caps[s.Agent] = s.Cap
+	return specBudgetFromConfig(ts, sd)
+}
+
+// poolTestSetTotal runs the total cap the way the command does.
+func poolTestSetTotal(t *testing.T, root string, n int) string {
+	t.Helper()
+	var out bytes.Buffer
+	if err := runPoolSetTotal(&out, root, n); err != nil {
+		t.Fatalf("set-total %d: %v", n, err)
 	}
-	return caps
+	return out.String()
 }
 
 func poolTestSet(t *testing.T, root, agent string, n int) string {
@@ -198,6 +215,122 @@ func TestPoolShowOmitsClosedSeatsAndNamesTheDispatcherDefault(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "no open seat") {
 		t.Errorf("a town with no seat did not say so:\n%s", out.String())
+	}
+}
+
+// show prints the town's total beside the seats, because it is the cap in
+// force when the seats each have room (gt-bcpj5). A key the file does not carry
+// is named as unset, the way an absent pro_max is, and a written 0 as itself.
+func TestPoolShowPrintsTheTownTotal(t *testing.T) {
+	t.Parallel()
+	root := poolTestTown(t, `{"type":"town-settings","version":1,"polecat_pool":{"agent":"claude-opus","max_seats":3,"max_total":4}}`, "")
+	var out bytes.Buffer
+	if err := runPoolShow(&out, root); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "total        cap 4 (max_total): live polecats across every seat") {
+		t.Errorf("show did not print the total cap the dispatcher and sling read:\n%s", got)
+	}
+	if !strings.Contains(got, "polecat_pool.max_total") {
+		t.Errorf("show did not name the key it read:\n%s", got)
+	}
+
+	for _, tc := range []struct {
+		settings string
+		want     string
+	}{
+		{`{"type":"town-settings","version":1,"polecat_pool":{"agent":"claude-opus"}}`, "total        no cap (max_total unset)"},
+		{`{"type":"town-settings","version":1,"polecat_pool":{"agent":"claude-opus","max_total":0}}`, "total        no cap (max_total 0)"},
+		{`{"type":"town-settings","version":1}`, "total        no cap (max_total unset)"},
+	} {
+		root := poolTestTown(t, tc.settings, "")
+		out.Reset()
+		if err := runPoolShow(&out, root); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), tc.want) {
+			t.Errorf("show of %s lacks %q:\n%s", tc.settings, tc.want, out.String())
+		}
+	}
+}
+
+// set-total writes polecat_pool.max_total, which the dispatcher's next tick
+// reads, and 0 removes the key: an absent max_total is no cap and a written 0
+// would say the same, so a zero is never left on the page (gt-bcpj5).
+func TestPoolSetTotalSetsAndRemovesTheCap(t *testing.T) {
+	t.Parallel()
+	root := poolTestTown(t, `{"type":"town-settings","version":1,"polecat_pool":{"agent":"claude-opus","max_seats":3,"min_spawn_gap":"4m"}}`, "")
+
+	out := poolTestSetTotal(t, root, 4)
+	if got := poolTestTownBudget(t, root).MaxTotal; got != 4 {
+		t.Errorf("budget total cap = %d, want 4", got)
+	}
+	if pool := poolTestPoolSection(t, root); pool["max_total"] != float64(4) {
+		t.Errorf("polecat_pool = %v, want max_total 4", pool)
+	}
+	if !strings.Contains(out, "cap 4 live polecats across every seat") {
+		t.Errorf("set-total output = %q, want the cap it wrote", out)
+	}
+
+	out = poolTestSetTotal(t, root, 0)
+	if got := poolTestTownBudget(t, root).MaxTotal; got != 0 {
+		t.Errorf("budget total cap = %d after removing it, want 0", got)
+	}
+	pool := poolTestPoolSection(t, root)
+	if v, ok := pool["max_total"]; ok {
+		t.Errorf("polecat_pool.max_total = %v was left behind, want the key gone", v)
+	}
+	for key, want := range map[string]any{"agent": "claude-opus", "max_seats": float64(3), "min_spawn_gap": "4m"} {
+		if pool[key] != want {
+			t.Errorf("removing the total cap moved polecat_pool.%s to %v, want %v", key, pool[key], want)
+		}
+	}
+	if !strings.Contains(out, "total cap removed (max_total)") {
+		t.Errorf("set-total 0 output = %q, want the removal named", out)
+	}
+}
+
+// The total is a cap on a town rather than on a seat, so it can be set on a
+// pool that has no agent: the dispatcher holds and sling refuses at it either
+// way (gt-bcpj5). Setting it opens the section the key lives in, and removing
+// it on a town that has no section writes nothing to invent one.
+func TestPoolSetTotalWithoutAPoolSeat(t *testing.T) {
+	t.Parallel()
+	root := poolTestTown(t, `{"type":"town-settings","version":1}`, "")
+	poolTestSetTotal(t, root, 2)
+	if got := poolTestTownBudget(t, root).MaxTotal; got != 2 {
+		t.Errorf("budget total cap = %d, want 2 on a town with no pool seat", got)
+	}
+	if got := poolTestPoolSection(t, root)["max_total"]; got != float64(2) {
+		t.Errorf("polecat_pool.max_total = %v, want 2", got)
+	}
+
+	bare := poolTestTown(t, `{"type":"town-settings","version":1}`, "")
+	poolTestSetTotal(t, bare, 0)
+	if _, ok := poolTestPoolSection(t, bare)["max_total"]; ok {
+		t.Error("set-total 0 invented a max_total key")
+	}
+}
+
+// The write path is the seat sets' path: a backup beside the file, keys the
+// command does not own left alone (gt-bcpj5).
+func TestPoolSetTotalBacksUpTheFile(t *testing.T) {
+	t.Parallel()
+	root := poolTestTown(t, poolTestSettings, poolTestDaemon)
+	poolTestSetTotal(t, root, 2)
+	baks, _ := filepath.Glob(config.TownSettingsPath(root) + ".bak-*")
+	if len(baks) != 1 {
+		t.Fatalf("settings backups = %v, want one", baks)
+	}
+	if got, _ := os.ReadFile(baks[0]); string(got) != poolTestSettings {
+		t.Errorf("backup = %q, want the settings file as it was", got)
+	}
+	raw, _ := os.ReadFile(config.TownSettingsPath(root))
+	for _, want := range []string{`"max_total": 2`, `"feed_curator"`, `"min_spawn_gap": "4m"`, `"local_agent": "retired-local"`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("settings lost %s:\n%s", want, raw)
+		}
 	}
 }
 

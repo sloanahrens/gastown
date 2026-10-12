@@ -262,6 +262,61 @@ func TestChooseSeat(t *testing.T) {
 	}
 }
 
+// TestChooseSeatTownTotal pins the cap beside the per-agent ones (gt-bcpj5):
+// max_total bounds the seats together, so two agents each inside their own cap
+// are still refused when the town is at its total — the 5 live polecats two
+// agents under their own caps produced where 3 was wanted. A town without a
+// total dispatches exactly as before.
+func TestChooseSeatTownTotal(t *testing.T) {
+	t.Parallel()
+	b := baseBudget() // flash at 2, sonnet at 2: room on both seats
+	b.MaxTotal = 2
+	b.SetLive(map[string]int{"deepseek-flash": 1, "claude-sonnet": 1})
+	got := ChooseSeat(b, goodSpec())
+	if !got.Skip {
+		t.Fatalf("two seats under their own caps filled the town total: %+v", got)
+	}
+	if want := "over the town total: 2/2 live polecats across every seat"; got.Reason != want {
+		t.Fatalf("reason = %q, want %q", got.Reason, want)
+	}
+	if got, want := b.Picture(), "deepseek-flash 1/2, claude-sonnet 1/2, total 2/2"; got != want {
+		t.Errorf("Picture() = %q, want %q", got, want)
+	}
+
+	// A seat frees: the total is the only thing holding the dispatch.
+	b.SetLive(map[string]int{"deepseek-flash": 1})
+	if got := ChooseSeat(b, goodSpec()); got.Skip || got.Agent != "deepseek-flash" {
+		t.Fatalf("a town under its total dispatches: %+v", got)
+	}
+
+	// The count is the town's, not the seats': a polecat on an agent no seat
+	// names fills the total like any other.
+	b.SetLive(map[string]int{"gpt-5": 1, "deepseek-flash": 1})
+	if got := ChooseSeat(b, goodSpec()); !got.Skip || !strings.Contains(got.Reason, "2/2") {
+		t.Fatalf("a live polecat off the seats must count toward the town's total: %+v", got)
+	}
+
+	// max_total 0 is the pool's silence, not a cap of zero.
+	b.MaxTotal = 0
+	b.SetLive(map[string]int{"deepseek-flash": 1, "claude-sonnet": 1})
+	if got := ChooseSeat(b, goodSpec()); got.Skip || got.Agent != "deepseek-flash" {
+		t.Fatalf("max_total 0 must not cap the town: %+v", got)
+	}
+
+	// Bump moves the total with the seat, so a tick that slings twice counts
+	// two polecats and not one.
+	b.MaxTotal = 3
+	b.SetLive(map[string]int{})
+	b.Bump("deepseek-flash", b.Now)
+	b.Bump("claude-sonnet", b.Now)
+	if b.LiveTotal != 2 {
+		t.Fatalf("LiveTotal = %d after two bumps, want 2", b.LiveTotal)
+	}
+	if got := ChooseSeat(b, goodSpec()); got.Skip {
+		t.Fatalf("two polecats under a total of 3: %+v", got)
+	}
+}
+
 // TestBudgetPictureNamesDeadHookedSeats pins the operator surface gt-tldj4 adds:
 // a seat that holds a crashed polecat — its session gone, its bead still
 // hooked, its restart due — names that occupant, so a full seat showing fewer

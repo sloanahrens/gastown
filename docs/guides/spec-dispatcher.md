@@ -125,11 +125,17 @@ the pool's own seat leaves it alone. A `spec_dispatch.max_hooked > 0` adds the
 because a seat nobody asked for is a seat the dispatcher must not spend;
 `prefer_hooked` moves it first.
 
+`polecat_pool.max_total`, when set, caps the seats together: the pool's own cap
+is per agent, so two agents each inside their own can still run more polecats
+than the town wants. A town at its total is skipped whatever room the seats
+show. Absent or 0 means no total cap.
+
 To read or change the pool seat and the `hooked_agent` seat, run `gt pool show`
 or `gt pool set <agent> <n>` instead of editing the files: `n` of 0 closes the
 seat by removing its keys, where a hand-written `max_seats: 0` would mean
-uncapped to sling and the default cap here. The `hooked_agent` seat is read at
-daemon start, so a change to it needs a daemon kickstart.
+uncapped to sling and the default cap here. `gt pool set-total <n>` sets the
+total the same way, 0 removing it. The `hooked_agent` seat is read at daemon
+start, so a change to it needs a daemon kickstart.
 
 Occupancy is every live polecat session plus the seat claims in-flight slings
 hold, counted per agent from the session's `GT_AGENT`. An empty `GT_AGENT`

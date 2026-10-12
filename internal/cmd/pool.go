@@ -25,6 +25,10 @@ import (
 // dispatcher's default cap, so closing the pool seat means removing its keys,
 // while pro_max of 0 is the closed pro seat, since an absent pro_max is the
 // dispatcher's default of 1.
+//
+// It also reads and sets the cap beside the seats rather than on one: max_total
+// bounds live polecats across every seat (gt pool set-total). An absent
+// max_total, like a written 0, is no cap.
 
 var poolCmd = &cobra.Command{
 	Use:     "pool",
@@ -81,8 +85,38 @@ The file is written atomically and the previous copy is kept beside it as
 	},
 }
 
+var poolSetTotalCmd = &cobra.Command{
+	Use:   "set-total <n>",
+	Short: "Cap live polecats across every seat; 0 removes the cap",
+	Long: `Set polecat_pool.max_total, the cap on live polecats across every seat: the
+pool seat, the pro seat and the second seat together. It is the cap beside the
+per-agent ones, for a town whose two agents are each inside their own cap and
+still exceed the number of polecats wanted (5 live where 3 was intended).
+
+n above 0 sets the cap; 0 removes the key, because an absent max_total is no
+total cap and a written 0 would say the same thing. The spec dispatcher skips a
+dispatch and gt sling refuses one while the town is at its cap, whichever
+agents the live polecats run on.
+
+The change takes effect at the dispatcher's next tick and on the next sling.
+The file is written atomically and the previous copy is kept beside it as
+<file>.bak-<timestamp>. Keys gt pool does not own are left as they are.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		n, err := strconv.Atoi(args[0])
+		if err != nil || n < 0 {
+			return fmt.Errorf("cap %q: want a whole number, 0 or more (0 removes the cap)", args[0])
+		}
+		townRoot, err := workspace.FindFromCwdOrError()
+		if err != nil {
+			return err
+		}
+		return runPoolSetTotal(cmd.OutOrStdout(), townRoot, n)
+	},
+}
+
 func init() {
-	poolCmd.AddCommand(poolShowCmd, poolSetCmd)
+	poolCmd.AddCommand(poolShowCmd, poolSetCmd, poolSetTotalCmd)
 	rootCmd.AddCommand(poolCmd)
 }
 
@@ -117,6 +151,11 @@ type poolSeatView struct {
 	hookedCap    int
 	preferHooked bool
 	seats        []poolListedSeat
+	// totalCap is max_total, the cap on live polecats across every seat, and
+	// totalCapSet whether the file names the key: absent and 0 both read as no
+	// cap, and show prints which of them the file holds.
+	totalCap    int
+	totalCapSet bool
 }
 
 // poolListedSeat is one seat as show prints it: the seat it came from, the
@@ -137,6 +176,8 @@ func poolSeatsOf(ts *config.TownSettings, sd *config.SpecDispatchConfig) poolSea
 		v.poolCap = ts.PolecatPool.MaxSeats
 		v.proAgent = ts.PolecatPool.GetProAgent()
 		v.proMaxSet = ts.PolecatPool.ProMax != nil
+		v.totalCap = ts.PolecatPool.GetMaxTotal()
+		v.totalCapSet = ts.PolecatPool.MaxTotal != nil
 	}
 	if sd != nil {
 		if sd.HookedAgent != "" {
@@ -225,12 +266,28 @@ func runPoolShow(w io.Writer, townRoot string) error {
 	for _, s := range v.seats {
 		fmt.Fprintf(w, "%-13s%s  %s\n", seatName(s.seat), s.agent, v.capText(s))
 	}
+	fmt.Fprintf(w, "%-13s%s\n", "total", v.totalText())
 	if len(v.seats) == 0 {
 		fmt.Fprintln(w, "no open seat: polecat_pool has no agent, the pro seat is closed (no polecat_pool section, or pro_max 0), and spec_dispatch max_hooked is not above 0")
 	}
-	fmt.Fprintf(w, "read: %s (polecat_pool.agent, polecat_pool.max_seats, polecat_pool.pro_agent, polecat_pool.pro_max), %s (daemon.patrols.spec_dispatch.hooked_agent, max_hooked)\n",
+	fmt.Fprintf(w, "read: %s (polecat_pool.agent, polecat_pool.max_seats, polecat_pool.pro_agent, polecat_pool.pro_max, polecat_pool.max_total), %s (daemon.patrols.spec_dispatch.hooked_agent, max_hooked)\n",
 		config.TownSettingsPath(townRoot), config.DaemonPatrolConfigPath(townRoot))
 	return nil
+}
+
+// totalText is the total cap as show prints it: the cap both the dispatcher
+// and sling read, or that the town has none. A file that names max_total 0 is
+// named as the file, not as a read that fell back, even though both mean no
+// cap — set-total 0 removes the key, so a 0 on the page is one someone wrote.
+func (v poolSeatView) totalText() string {
+	switch {
+	case v.totalCap > 0:
+		return fmt.Sprintf("cap %d (max_total): live polecats across every seat", v.totalCap)
+	case v.totalCapSet:
+		return "no cap (max_total 0)"
+	default:
+		return "no cap (max_total unset)"
+	}
 }
 
 // capText is how a seat's cap is printed, naming the default a read fell back
@@ -330,6 +387,42 @@ func seatName(k poolSeatKey) string {
 		return "second seat"
 	}
 	return "pool seat"
+}
+
+// runPoolSetTotal writes polecat_pool.max_total: the cap on live polecats
+// across every seat. It lands on the pool's own seat's section, so a seat set
+// is not the only command that reaches it.
+func runPoolSetTotal(w io.Writer, townRoot string, n int) error {
+	err := writeTownSeats(townRoot, time.Now().UTC().Format("20060102T150405Z"), func(ts *config.TownSettings) error {
+		setMaxTotal(ts, n)
+		return ts.PolecatPool.Validate()
+	})
+	if err != nil {
+		return fmt.Errorf("writing the total cap: %w", err)
+	}
+	if n == 0 {
+		fmt.Fprintln(w, "total cap removed (max_total): live polecats across every seat are uncapped again")
+	} else {
+		fmt.Fprintf(w, "total: cap %d live polecats across every seat\n", n)
+	}
+	return nil
+}
+
+// setMaxTotal sets the town's total cap, or removes max_total for 0: an absent
+// key is no cap and a written 0 reads the same, so a zero is never written
+// (the same reason setPoolSeat removes max_seats rather than writing a 0).
+func setMaxTotal(ts *config.TownSettings, n int) {
+	if ts.PolecatPool == nil {
+		if n == 0 {
+			return
+		}
+		ts.PolecatPool = &config.PolecatPool{}
+	}
+	if n == 0 {
+		ts.PolecatPool.MaxTotal = nil
+		return
+	}
+	ts.PolecatPool.MaxTotal = &n
 }
 
 // writeTownSeats changes the town settings under the file's lock, keeping a

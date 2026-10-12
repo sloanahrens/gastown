@@ -77,6 +77,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A total cap on live polecats, beside the per-agent caps** (gt-bcpj5) —
+  `polecat_pool.max_total` bounds live polecats across every seat, where
+  `max_seats`, `pro_max` and `max_hooked` each bound one agent. Two agents each
+  inside their own cap could run more polecats than the town wanted (5 live
+  where 3 was intended) and no key said otherwise. Once the town is at its
+  total the spec dispatcher skips the dispatch and `gt sling` refuses one,
+  whichever agents the live polecats run on — the total is a property of the
+  town, not of a seat, so unlike `max_seats` it also answers a request for an
+  agent the pool does not own. The lower of the total and the per-agent cap
+  wins. `gt pool set-total <n>` sets it and 0 removes the key (an absent key and
+  a written 0 are both no total cap); `gt pool show` prints it. `gt sling`'s
+  refusal names `polecat_pool.max_total` as the key to raise, not `max_seats`.
+
 - **`gt pool show` and `gt pool set <agent> <n>`** (gt-yrjfg) — read the
   polecat seat caps and change them in one command. `n` of 0 closes the seat by
   removing its keys; the write keeps keys it does not own and leaves a
