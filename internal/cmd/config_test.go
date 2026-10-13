@@ -262,6 +262,108 @@ func TestConfigAgentSet(t *testing.T) {
 			t.Errorf("Command = %q, want 'new-command'", agent.Command)
 		}
 	})
+
+	t.Run("keeps the other runtime fields of an existing agent", func(t *testing.T) {
+		townRoot := setupTestTownForConfig(t)
+		settingsPath := config.TownSettingsPath(townRoot)
+
+		settings := &config.TownSettings{
+			Type:         "town-settings",
+			Version:      config.CurrentTownSettingsVersion,
+			DefaultAgent: "claude",
+			Agents: map[string]*config.RuntimeConfig{
+				"deepseek-flash": {
+					Provider:      "claude",
+					Command:       "old-command",
+					Args:          []string{"--old"},
+					Env:           map[string]string{"ANTHROPIC_BASE_URL": "https://backend.example", "ANTHROPIC_AUTH_TOKEN": "$DEEPSEEK_KEY"},
+					InitialPrompt: "hello",
+					Session:       &config.RuntimeSessionConfig{SessionIDEnv: "MY_SESSION_ID"},
+					Tmux:          &config.RuntimeTmuxConfig{ProcessNames: []string{"node"}, ReadyDelayMs: 500},
+					Instructions:  &config.RuntimeInstructionsConfig{File: "AGENTS.md"},
+					ExecWrapper:   []string{"exitbox", "run", "--"},
+				},
+			},
+		}
+		if err := config.SaveTownSettings(settingsPath, settings); err != nil {
+			t.Fatalf("save initial settings: %v", err)
+		}
+
+		args := []string{"deepseek-flash", "new-command --new"}
+		if err := configAgentSet(townConfigCmdEnv(townRoot, io.Discard), args); err != nil {
+			t.Fatalf("configAgentSet failed: %v", err)
+		}
+
+		loaded, err := config.LoadOrCreateTownSettings(settingsPath)
+		if err != nil {
+			t.Fatalf("load settings: %v", err)
+		}
+		agent := loaded.Agents["deepseek-flash"]
+		if agent == nil {
+			t.Fatal("agent missing after set")
+		}
+		if agent.Command != "new-command" || len(agent.Args) != 1 || agent.Args[0] != "--new" {
+			t.Errorf("Command/Args = %q %v, want new-command [--new]", agent.Command, agent.Args)
+		}
+		if agent.Provider != "claude" {
+			t.Errorf("Provider = %q, want existing 'claude' kept", agent.Provider)
+		}
+		if len(agent.Env) != 2 ||
+			agent.Env["ANTHROPIC_BASE_URL"] != "https://backend.example" ||
+			agent.Env["ANTHROPIC_AUTH_TOKEN"] != "$DEEPSEEK_KEY" {
+			t.Errorf("Env block changed: %v", agent.Env)
+		}
+		if agent.InitialPrompt != "hello" {
+			t.Errorf("InitialPrompt = %q, want 'hello'", agent.InitialPrompt)
+		}
+		if agent.Session == nil || agent.Session.SessionIDEnv != "MY_SESSION_ID" {
+			t.Errorf("Session changed: %+v", agent.Session)
+		}
+		if agent.Tmux == nil || len(agent.Tmux.ProcessNames) != 1 || agent.Tmux.ReadyDelayMs != 500 {
+			t.Errorf("Tmux changed: %+v", agent.Tmux)
+		}
+		if agent.Instructions == nil || agent.Instructions.File != "AGENTS.md" {
+			t.Errorf("Instructions changed: %+v", agent.Instructions)
+		}
+		if len(agent.ExecWrapper) != 3 {
+			t.Errorf("ExecWrapper changed: %v", agent.ExecWrapper)
+		}
+	})
+
+	t.Run("explicit provider replaces the existing one", func(t *testing.T) {
+		townRoot := setupTestTownForConfig(t)
+		settingsPath := config.TownSettingsPath(townRoot)
+
+		settings := &config.TownSettings{
+			Type:         "town-settings",
+			Version:      config.CurrentTownSettingsVersion,
+			DefaultAgent: "claude",
+			Agents: map[string]*config.RuntimeConfig{
+				"my-agent": {Provider: "claude", Command: "old", Env: map[string]string{"K": "v"}},
+			},
+		}
+		if err := config.SaveTownSettings(settingsPath, settings); err != nil {
+			t.Fatalf("save initial settings: %v", err)
+		}
+
+		e := townConfigCmdEnv(townRoot, io.Discard)
+		e.agentSetProvider = "codex"
+		if err := configAgentSet(e, []string{"my-agent", "new"}); err != nil {
+			t.Fatalf("configAgentSet failed: %v", err)
+		}
+
+		loaded, err := config.LoadOrCreateTownSettings(settingsPath)
+		if err != nil {
+			t.Fatalf("load settings: %v", err)
+		}
+		agent := loaded.Agents["my-agent"]
+		if agent.Provider != "codex" {
+			t.Errorf("Provider = %q, want 'codex'", agent.Provider)
+		}
+		if agent.Env["K"] != "v" {
+			t.Errorf("Env = %v, want K=v kept", agent.Env)
+		}
+	})
 }
 
 func TestConfigAgentSetProviderInference(t *testing.T) {
