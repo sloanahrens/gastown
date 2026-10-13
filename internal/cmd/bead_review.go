@@ -38,7 +38,9 @@ newest landing is reviewed. A --sha that is not a full 40-hex head in one of
 that bead's landing records is refused.
 
 A bead whose notes already carry a review of that head is left alone, so
-recording the same verdict twice writes one line.
+recording the same verdict twice writes one line. Requesting a different
+verdict for that head writes nothing and exits 1, naming the verdict on
+record: the first review of a head stands.
 
 Examples:
   gt bead review gt-abc PASS
@@ -55,8 +57,9 @@ Examples:
 // carry it: lowercase 40-hex.
 var fullHead = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
-// review writes the overseer review line for the bead's landed head, or
-// reports the bead as already reviewed. WAIVED and AUDITED carry reason into
+// review writes the overseer review line for the bead's landed head, reports
+// the bead as already reviewed, or refuses when the head's existing review
+// holds a different verdict. WAIVED and AUDITED carry reason into
 // the line; PASS and FAIL take none.
 func (v *beadVerbs) review(id, verdict, sha, reason string) error {
 	verdict = strings.ToUpper(strings.TrimSpace(verdict))
@@ -90,8 +93,11 @@ func (v *beadVerbs) review(id, verdict, sha, reason string) error {
 	if reason != "" {
 		line += ": " + reason
 	}
-	if land.HasOverseerReviewNote(is.Notes, head) {
-		_, err := fmt.Fprintf(v.out, "✓ %s already records %s\n", id, line)
+	if recorded, ok := land.OverseerReviewVerdict(is.Notes, head); ok {
+		if recorded != verdict {
+			return fmt.Errorf("%s already records %s %s %s; %s was not recorded", id, land.OverseerReviewMarker, head, recorded, verdict)
+		}
+		_, err := fmt.Fprintf(v.out, "✓ %s already records %s %s %s\n", id, land.OverseerReviewMarker, head, recorded)
 		return err
 	}
 	if err := v.client.AppendNotes(id, line); err != nil {

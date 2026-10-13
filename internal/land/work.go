@@ -222,7 +222,7 @@ func OverseerReviewed(issue *beads.Issue, head string) bool {
 // not answer. It deliberately does not match
 // "OVERSEER REVIEWED ...": that marker says om was bypassed, not that a human
 // reviewed this head (gt-vsct7.4).
-var overseerReviewLine = regexp.MustCompile(`^OVERSEER REVIEW ([0-9a-f]{7,64}) (?:(?:PASS|FAIL)\b|(?:WAIVED|AUDITED): +\S)`)
+var overseerReviewLine = regexp.MustCompile(`^OVERSEER REVIEW ([0-9a-f]{7,64}) (?:(PASS|FAIL)\b|(WAIVED|AUDITED): +\S)`)
 
 // HasOverseerReviewNote reports whether notes carry an "OVERSEER REVIEW <head>
 // PASS|FAIL" line naming exactly head, or a WAIVED or AUDITED line with its
@@ -231,13 +231,21 @@ var overseerReviewLine = regexp.MustCompile(`^OVERSEER REVIEW ([0-9a-f]{7,64}) (
 // hold (gt-vsct7.4); WAIVED and AUDITED say the head was consciously left
 // unreviewed or reviewed another way, and the reason is the record (gt-r5ne9).
 func HasOverseerReviewNote(notes, head string) bool {
+	_, ok := OverseerReviewVerdict(notes, head)
+	return ok
+}
+
+// OverseerReviewVerdict returns the verdict (PASS, FAIL, WAIVED or AUDITED)
+// of the first review line in notes that names exactly head, and whether there
+// is one. It reads the lines HasOverseerReviewNote answers to.
+func OverseerReviewVerdict(notes, head string) (string, bool) {
 	if head == "" {
-		return false
+		return "", false
 	}
 	for _, line := range strings.Split(notes, "\n") {
 		if m := overseerReviewLine.FindStringSubmatch(strings.TrimSpace(line)); m != nil && m[1] == head {
-			return true
+			return m[2] + m[3], true
 		}
 	}
-	return false
+	return "", false
 }

@@ -163,3 +163,32 @@ func TestHasOverseerReviewNote(t *testing.T) {
 		t.Error("an empty head must not be answered")
 	}
 }
+
+// OverseerReviewVerdict names the verdict of the first review line for the
+// head, whatever other heads' lines come before it (gt-j84bq).
+func TestOverseerReviewVerdict(t *testing.T) {
+	t.Parallel()
+	head := "0123456789abcdef0123456789abcdef01234567"
+	other := "0123456789abcdef0123456789abcdef01234568"
+	for _, tc := range []struct {
+		name  string
+		notes string
+		want  string
+		ok    bool
+	}{
+		{"PASS", OverseerReviewMarker + " " + head + " PASS", "PASS", true},
+		{"FAIL after another head's PASS", OverseerReviewMarker + " " + other + " PASS\n" + OverseerReviewMarker + " " + head + " FAIL", "FAIL", true},
+		{"WAIVED", OverseerReviewMarker + " " + head + " WAIVED: docs only", "WAIVED", true},
+		{"AUDITED", OverseerReviewMarker + " " + head + " AUDITED: file-level audit", "AUDITED", true},
+		{"only another head", OverseerReviewMarker + " " + other + " PASS", "", false},
+		{"WAIVED without a reason", OverseerReviewMarker + " " + head + " WAIVED", "", false},
+	} {
+		got, ok := OverseerReviewVerdict(tc.notes, head)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("%s: OverseerReviewVerdict = %q, %v; want %q, %v", tc.name, got, ok, tc.want, tc.ok)
+		}
+	}
+	if _, ok := OverseerReviewVerdict(OverseerReviewMarker+" "+head+" PASS", ""); ok {
+		t.Error("an empty head must not be answered")
+	}
+}
