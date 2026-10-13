@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -255,6 +256,42 @@ func TestOMReviewerRecordsAnUnreadableVersionAsUnknown(t *testing.T) {
 	}
 	if !strings.Contains(log.String(), "could not read the version") {
 		t.Errorf("log = %q, want the unreadable version named", log.String())
+	}
+}
+
+// TestOMReviewerRecordsTheVersionOfTheOMThatRanTheReview: an install that swaps
+// the om binary while a review runs must not rename the reviewer, so the
+// verdict carries the version read before the review, not the one the path
+// answers after it (gt-f3da3).
+func TestOMReviewerRecordsTheVersionOfTheOMThatRanTheReview(t *testing.T) {
+	t.Parallel()
+	bin := omBinary(t)
+	const swappedVersion = "v1.0.0-1-gfeed456"
+	current := stubOMVersion
+	stub := &omStub{t: t, help: omHelpWithBead, bead: "gt-abc"}
+	r := omStubbed(t, bin, stub)
+	r.run = func(ctx context.Context, dir string, env []string, argv []string, out io.Writer) (int, error) {
+		if omSubcommand(argv) == "version" {
+			_, _ = io.WriteString(out, "om version "+current+"\n")
+			return 0, nil
+		}
+		code, err := stub.run(ctx, dir, env, argv, out)
+		if omSubcommand(argv) == "review" && !slices.Contains(argv, "--help") {
+			// install-om.sh renames the new build over the path mid-review.
+			current = swappedVersion
+			if werr := os.WriteFile(bin, []byte("a newer, larger om binary\n"), 0o600); werr != nil {
+				t.Error(werr)
+			}
+		}
+		return code, err
+	}
+	v, err := r.ReviewBead(context.Background(),
+		ReviewInput{Dir: t.TempDir(), Base: "aaa", Head: "bbb", BeadID: "gt-abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Version != stubOMVersion {
+		t.Errorf("version = %q, want %q: the om that ran the review, not the one installed after it", v.Version, stubOMVersion)
 	}
 }
 

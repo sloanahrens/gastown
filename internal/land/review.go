@@ -234,11 +234,14 @@ func (r OMReviewer) Review(ctx context.Context, dir, base, head string) (Verdict
 // named on the argv as --criteria-file, so om reads the criteria the bead was
 // dispatched with rather than inferring them (gt-yl7n4).
 func (r OMReviewer) ReviewBead(ctx context.Context, in ReviewInput) (Verdict, error) {
-	v, told, err := r.reviewOnce(ctx, in)
 	// The verdict names the om behind it, and a review that produced none is
 	// exactly when the binary is worth naming, so this is read whatever the
-	// review did (gt-uebmq).
-	v.Version = r.omVersion(ctx, in)
+	// review does (gt-uebmq). It is read before the review runs: an install
+	// that renames a new om over the path mid-review would otherwise have the
+	// verdict name a binary that did not reach it (gt-f3da3).
+	version := r.omVersion(ctx, in)
+	v, told, err := r.reviewOnce(ctx, in)
+	v.Version = version
 	if err != nil {
 		return v, err
 	}
