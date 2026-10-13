@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -67,6 +68,22 @@ func TestStopMarkerGarbageIsNotARequest(t *testing.T) {
 	}
 	if consumeStopRequested(town, 42, time.Now()) {
 		t.Fatal("garbage was read as a stop request")
+	}
+}
+
+// TestUnrequestedStopLogLineDoesNotPromiseARelaunch is the gt-2gctr
+// regression: the daemon logs this line after a signal gt did not send, and a
+// launchctl bootout — one of the ways that happens — unloads the job, so no
+// launchd relaunch follows it.
+func TestUnrequestedStopLogLineDoesNotPromiseARelaunch(t *testing.T) {
+	t.Parallel()
+	if strings.Contains(unrequestedStopLogLine, "so launchd relaunches") {
+		t.Errorf("the unrequested-stop line still promises a relaunch:\n%s", unrequestedStopLogLine)
+	}
+	for _, want := range []string{"bootout", "KeepAlive"} {
+		if !strings.Contains(unrequestedStopLogLine, want) {
+			t.Errorf("the unrequested-stop line lacks %q:\n%s", want, unrequestedStopLogLine)
+		}
 	}
 }
 

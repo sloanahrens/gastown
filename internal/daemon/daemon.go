@@ -747,6 +747,12 @@ func (d *Daemon) cleanupLegacySocketSessions() {
 	})
 }
 
+// unrequestedStopLogLine is what the daemon logs when it shuts down on a
+// signal gt did not send. A launchctl bootout unloads the job, so nothing
+// relaunches after one: only KeepAlive {SuccessfulExit: false} does, and only
+// for a job still loaded (gt-2gctr, gt-swsqm).
+const unrequestedStopLogLine = "Stop was not requested through gt: exiting 75; this was a bootout or a signal from outside gt, and launchd relaunches only under KeepAlive"
+
 // Run starts the daemon main loop.
 func (d *Daemon) Run() (err error) {
 	pid := os.Getpid()
@@ -1037,10 +1043,11 @@ func (d *Daemon) Run() (err error) {
 			} else {
 				d.logger.Printf("Received signal %v, shutting down", sig)
 				// Exit 0 only when gt asked for this stop; any other signal
-				// exits 75 so launchd relaunches the daemon (gt-swsqm).
+				// exits 75, which launchd turns into a relaunch only for a
+				// job still loaded under KeepAlive (gt-swsqm, gt-2gctr).
 				err := exitAfterSignal(d.config.TownRoot, os.Getpid(), time.Now(), d.shutdown(state))
 				if errors.Is(err, ErrUnrequestedStop) {
-					d.logger.Println("Stop was not requested through gt: exiting 75 so launchd relaunches the daemon")
+					d.logger.Println(unrequestedStopLogLine)
 				}
 				return err
 			}
