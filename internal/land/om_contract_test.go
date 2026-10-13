@@ -1,3 +1,5 @@
+//go:build !windows
+
 package land
 
 import (
@@ -8,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -59,9 +60,6 @@ func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) 
 // with a reviewer that runs it through the real process runner.
 func newFakeOM(t *testing.T, spec fakeOMSpec) *fakeOMRun {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("the fake om is a /bin/sh script")
-	}
 	dir := t.TempDir()
 	f := &fakeOMRun{
 		path:   filepath.Join(dir, "om"),
@@ -70,6 +68,7 @@ func newFakeOM(t *testing.T, spec fakeOMSpec) *fakeOMRun {
 		outDir: filepath.Join(t.TempDir(), "verdicts"),
 	}
 	var b strings.Builder
+	//testpolicy:allow no-exec-files — the test is the process boundary: the real runner execs a fake om script and gastown reads its argv, exit code and verdict file
 	b.WriteString("#!/bin/sh\n")
 	fmt.Fprintf(&b, "log=%s\n", shQuote(f.log))
 	b.WriteString("{ printf '%s\\n' '--'; for a in \"$@\"; do printf '%s\\n' \"$a\"; done; } >> \"$log\"\n")
@@ -93,6 +92,7 @@ func newFakeOM(t *testing.T, spec fakeOMSpec) *fakeOMRun {
 	}
 	b.WriteString("echo 'om: reviewing'\n")
 	fmt.Fprintf(&b, "exit %d\n", spec.exit)
+	//testpolicy:allow no-exec-files — the fake om must be executable for the real runner to start it
 	if err := os.WriteFile(f.path, []byte(b.String()), 0o755); err != nil { //nolint:gosec // G306: the fake om must be executable
 		t.Fatal(err)
 	}
