@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -290,24 +291,88 @@ func TestBeadReviewRefusesAReasonWithPassOrFail(t *testing.T) {
 	}
 }
 
-// Recording the same WAIVED or AUDITED verdict twice writes one line, and a
-// second verdict for a head that already has one is left alone, as for PASS.
-func TestBeadReviewWaivedAndAuditedAreIdempotentPerHead(t *testing.T) {
+// Recording the same WAIVED verdict twice writes one line, even with a
+// different reason: the first review of a head stands.
+func TestBeadReviewWaivedIsIdempotentPerHead(t *testing.T) {
 	t.Parallel()
 	town := reviewTestTown(t)
 	v, is := testReviewVerbs(t, town, "gt-r5ne9")
 	landBead(t, town, is.ID, secondHead, time.Now())
 
-	for i := 0; i < 2; i++ {
-		if err := v.review(is.ID, "WAIVED", "", "docs only"); err != nil {
+	for _, reason := range []string{"docs only", "docs only, again"} {
+		if err := v.review(is.ID, "WAIVED", "", reason); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if err := v.review(is.ID, "AUDITED", "", "audited later"); err != nil {
-		t.Fatal(err)
 	}
 	want := land.OverseerReviewMarker + " " + secondHead + " WAIVED: docs only"
 	if notes := mustShowBead(t, v.client, is.ID).Notes; notes != want {
 		t.Errorf("notes = %q, want one line %q", notes, want)
+	}
+}
+
+// A different verdict for a head that already has a review is refused with
+// exit 1 naming the verdict on record, and nothing is written. The verb never
+// prints that the requested verdict is recorded when the notes hold another
+// (gt-j84bq).
+func TestBeadReviewRefusesADifferentVerdictForAReviewedHead(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, first, reason, second, secondReason string
+	}{
+		{"FAIL after PASS", "PASS", "", "FAIL", ""},
+		{"PASS after FAIL", "FAIL", "", "PASS", ""},
+		{"AUDITED after WAIVED", "WAIVED", "docs only", "AUDITED", "audited later"},
+		{"FAIL after WAIVED", "WAIVED", "docs only", "FAIL", ""},
+	} {
+		town := reviewTestTown(t)
+		v, is := testReviewVerbs(t, town, "gt-j84bq")
+		landBead(t, town, is.ID, secondHead, time.Now())
+		if err := v.review(is.ID, tc.first, "", tc.reason); err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		before := mustShowBead(t, v.client, is.ID).Notes
+		out := v.out.(*bytes.Buffer)
+		out.Reset()
+
+		err := v.review(is.ID, tc.second, "", tc.secondReason)
+		if err == nil {
+			t.Fatalf("%s: review succeeded", tc.name)
+		}
+		if code := exitCodeForError(err); code != 1 {
+			t.Errorf("%s: exit code %d, want 1", tc.name, code)
+		}
+		wantOnRecord := land.OverseerReviewMarker + " " + secondHead + " " + tc.first
+		if !strings.Contains(err.Error(), wantOnRecord) || !strings.Contains(err.Error(), tc.second+" was not recorded") {
+			t.Errorf("%s: err = %q, want the verdict on record %q and %q not recorded", tc.name, err, wantOnRecord, tc.second)
+		}
+		if out.Len() != 0 {
+			t.Errorf("%s: printed %q on a refused review", tc.name, out.String())
+		}
+		if notes := mustShowBead(t, v.client, is.ID).Notes; notes != before {
+			t.Errorf("%s: notes = %q, want unchanged %q", tc.name, notes, before)
+		}
+	}
+}
+
+// A repeat of the recorded verdict is a no-op that says what the notes hold.
+func TestBeadReviewRepeatNamesTheRecordedVerdict(t *testing.T) {
+	t.Parallel()
+	town := reviewTestTown(t)
+	v, is := testReviewVerbs(t, town, "gt-j84bq")
+	landBead(t, town, is.ID, secondHead, time.Now())
+	out := v.out.(*bytes.Buffer)
+
+	for i := 0; i < 2; i++ {
+		out.Reset()
+		if err := v.review(is.ID, "FAIL", "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := "already records " + land.OverseerReviewMarker + " " + secondHead + " FAIL"
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("output = %q, want it to contain %q", out.String(), want)
+	}
+	if notes := mustShowBead(t, v.client, is.ID).Notes; notes != land.OverseerReviewMarker+" "+secondHead+" FAIL" {
+		t.Errorf("notes = %q, want one line", notes)
 	}
 }
