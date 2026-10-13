@@ -1,30 +1,40 @@
 package polecat
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 )
 
-func TestRecordBeadRespawn_Increments(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	// Create the witness subdirectory so the state file path is valid.
-	if err := os.MkdirAll(filepath.Join(tmpDir, "witness"), 0755); err != nil {
+// respawnStatePath and legacyRespawnStatePath spell the two paths out rather
+// than calling the production helpers: a helper that drifts off .runtime/ or
+// off the legacy witness/ file has to fail a test, not move it (gt-la690).
+func respawnStatePath(townRoot string) string {
+	return filepath.Join(townRoot, ".runtime", "bead-respawn-counts.json")
+}
+
+func legacyRespawnStatePath(townRoot string) string {
+	return filepath.Join(townRoot, "witness", "bead-respawn-counts.json")
+}
+
+// writeRespawnStateFile plants a state file the production code did not write,
+// for fixtures that start from counts already on disk.
+func writeRespawnStateFile(t *testing.T, path string, state *beadRespawnState) {
+	t.Helper()
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	count := mustRecord(t, tmpDir, "bead-1")
-	if count != 1 {
-		t.Errorf("first RecordBeadRespawn = %d, want 1", count)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
 	}
-
-	count = mustRecord(t, tmpDir, "bead-1")
-	if count != 2 {
-		t.Errorf("second RecordBeadRespawn = %d, want 2", count)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -38,12 +48,31 @@ func mustRecord(t *testing.T, townRoot, beadID string) int {
 	return count
 }
 
+func TestRecordBeadRespawn_Increments(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	count := mustRecord(t, tmpDir, "bead-1")
+	if count != 1 {
+		t.Errorf("first RecordBeadRespawn = %d, want 1", count)
+	}
+
+	count = mustRecord(t, tmpDir, "bead-1")
+	if count != 2 {
+		t.Errorf("second RecordBeadRespawn = %d, want 2", count)
+	}
+
+	if _, err := os.Stat(respawnStatePath(tmpDir)); err != nil {
+		t.Errorf("state not at .runtime/bead-respawn-counts.json: %v", err)
+	}
+	if _, err := os.Stat(legacyRespawnStatePath(tmpDir)); err == nil {
+		t.Error("wrote the legacy witness/ state file")
+	}
+}
+
 func TestShouldBlockRespawn_Threshold(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(tmpDir, "witness"), 0755); err != nil {
-		t.Fatal(err)
-	}
 
 	// Below threshold.
 	for i := 0; i < config.DefaultRecoveryMaxBeadRespawns-1; i++ {
@@ -63,9 +92,6 @@ func TestShouldBlockRespawn_Threshold(t *testing.T) {
 func TestResetBeadRespawnCount(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(tmpDir, "witness"), 0755); err != nil {
-		t.Fatal(err)
-	}
 
 	mustRecord(t, tmpDir, "bead-3")
 	mustRecord(t, tmpDir, "bead-3")
@@ -88,9 +114,6 @@ func TestResetBeadRespawnCount(t *testing.T) {
 func TestRecordBeadRespawn_ConcurrentSafe(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(tmpDir, "witness"), 0755); err != nil {
-		t.Fatal(err)
-	}
 
 	const goroutines = 20
 	var wg sync.WaitGroup
@@ -123,12 +146,204 @@ func TestRecordBeadRespawn_ConcurrentSafe(t *testing.T) {
 func TestShouldBlockRespawn_UnknownBead(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(tmpDir, "witness"), 0755); err != nil {
-		t.Fatal(err)
-	}
 
 	if ShouldBlockRespawn(tmpDir, "nonexistent") {
 		t.Error("ShouldBlockRespawn = true for unknown bead")
+	}
+}
+
+// TestRespawnReadsTheLegacyStateBeforeAnyMigration: the first read of a town
+// built before the move happens before anything writes the new file, and it
+// must already see the witness/ counts — reading them as absent hands every
+// bead its respawn budget back (gt-la690).
+func TestRespawnReadsTheLegacyStateBeforeAnyMigration(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	writeRespawnStateFile(t, legacyRespawnStatePath(tmpDir), &beadRespawnState{
+		Beads: map[string]*beadRespawnRecord{
+			"bead-blocked": {BeadID: "bead-blocked", Count: config.DefaultRecoveryMaxBeadRespawns},
+			"bead-legacy":  {BeadID: "bead-legacy", Count: 2},
+		},
+	})
+
+	if !ShouldBlockRespawn(tmpDir, "bead-blocked") {
+		t.Error("ShouldBlockRespawn = false for a legacy count at the threshold")
+	}
+
+	state, err := loadBeadRespawnState(tmpDir)
+	if err != nil {
+		t.Fatalf("loadBeadRespawnState: %v", err)
+	}
+	if rec := state.Beads["bead-legacy"]; rec == nil || rec.Count != 2 {
+		t.Errorf("legacy count read as %+v, want bead-legacy 2", rec)
+	}
+
+	// A read moves nothing: only a completed write clears the old file.
+	if _, err := os.Stat(legacyRespawnStatePath(tmpDir)); err != nil {
+		t.Errorf("the read-only path deleted the legacy state: %v", err)
+	}
+	if _, err := os.Stat(respawnStatePath(tmpDir)); err == nil {
+		t.Error("the read-only path wrote the new state file")
+	}
+}
+
+// TestRespawnMigrationMergesAndClearsTheLegacyFile: both files can hold real
+// increments — the town ran the old and the new binary across the move — so the
+// first write merges them per bead and only then clears witness/ (gt-la690).
+func TestRespawnMigrationMergesAndClearsTheLegacyFile(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	older := time.Unix(1000, 0).UTC()
+	newer := time.Unix(2000, 0).UTC()
+
+	writeRespawnStateFile(t, respawnStatePath(tmpDir), &beadRespawnState{
+		Beads: map[string]*beadRespawnRecord{
+			"bead-a": {BeadID: "bead-a", Count: 2, LastRespawn: newer},
+			"bead-b": {BeadID: "bead-b", Count: 1, LastRespawn: older},
+		},
+	})
+	legacy := legacyRespawnStatePath(tmpDir)
+	writeRespawnStateFile(t, legacy, &beadRespawnState{
+		Beads: map[string]*beadRespawnRecord{
+			"bead-a": {BeadID: "bead-a", Count: 5, LastRespawn: older},
+			"bead-c": {BeadID: "bead-c", Count: 4, LastRespawn: older},
+		},
+	})
+	if err := os.WriteFile(legacy+".flock", nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Another file in witness/, so the directory itself is not the migration's
+	// to remove.
+	keep := filepath.Join(tmpDir, "witness", "keep.txt")
+	if err := os.WriteFile(keep, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// bead-b is on both sides of the merge and incremented here: the write that
+	// migrates is also the write that records.
+	if count := mustRecord(t, tmpDir, "bead-b"); count != 2 {
+		t.Errorf("RecordBeadRespawn on the migrating write = %d, want 2", count)
+	}
+
+	state, err := loadBeadRespawnState(tmpDir)
+	if err != nil {
+		t.Fatalf("loadBeadRespawnState after migration: %v", err)
+	}
+	if rec := state.Beads["bead-a"]; rec == nil || rec.Count != 5 || !rec.LastRespawn.Equal(newer) {
+		t.Errorf("bead-a after merge = %+v, want count 5 and the later last_respawn", rec)
+	}
+	if rec := state.Beads["bead-c"]; rec == nil || rec.Count != 4 || !rec.LastRespawn.Equal(older) {
+		t.Errorf("bead-c after merge = %+v, want the legacy record carried over", rec)
+	}
+	if rec := state.Beads["bead-b"]; rec == nil || rec.Count != 2 {
+		t.Errorf("bead-b after merge = %+v, want count 2", rec)
+	}
+
+	if _, err := os.Stat(legacy); err == nil {
+		t.Error("the legacy state file survived the migration")
+	}
+	if _, err := os.Stat(legacy + ".flock"); err == nil {
+		t.Error("the legacy flock file survived the migration")
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Errorf("the migration removed a file it does not own: %v", err)
+	}
+
+	// The second write reads the new file alone and counts on from the merge.
+	if count := mustRecord(t, tmpDir, "bead-b"); count != 3 {
+		t.Errorf("RecordBeadRespawn after migration = %d, want 3", count)
+	}
+}
+
+// TestRespawnMigrationRemovesTheEmptyWitnessDir: witness/ is empty once the
+// state file and its flock are gone, and the migration is what makes the
+// retired directory deletable (gt-la690).
+func TestRespawnMigrationRemovesTheEmptyWitnessDir(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	writeRespawnStateFile(t, legacyRespawnStatePath(tmpDir), &beadRespawnState{
+		Beads: map[string]*beadRespawnRecord{
+			"bead-legacy": {BeadID: "bead-legacy", Count: 2},
+		},
+	})
+
+	if count := mustRecord(t, tmpDir, "bead-legacy"); count != 3 {
+		t.Errorf("RecordBeadRespawn over a legacy-only town = %d, want 3", count)
+	}
+
+	if _, err := os.Stat(filepath.Dir(legacyRespawnStatePath(tmpDir))); err == nil {
+		t.Error("the empty witness directory survived the migration")
+	}
+}
+
+// TestRespawnCorruptStateDeletesNothing: a file that will not parse stops the
+// read-modify-write and leaves both files exactly as they were. Merging what
+// could be read and deleting the rest would drop the counts that did not parse
+// — the bead-budget reset the migration exists to prevent (gt-la690).
+func TestRespawnCorruptStateDeletesNothing(t *testing.T) {
+	t.Parallel()
+
+	newState := func() *beadRespawnState {
+		return &beadRespawnState{Beads: map[string]*beadRespawnRecord{
+			"bead-1": {BeadID: "bead-1", Count: 2},
+		}}
+	}
+
+	cases := map[string]func(t *testing.T, townRoot string){
+		"corrupt new file": func(t *testing.T, townRoot string) {
+			if err := os.MkdirAll(filepath.Dir(respawnStatePath(townRoot)), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(respawnStatePath(townRoot), []byte(`{"beads":{"bead-1":{"count":3`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			writeRespawnStateFile(t, legacyRespawnStatePath(townRoot), newState())
+		},
+		"corrupt legacy file": func(t *testing.T, townRoot string) {
+			writeRespawnStateFile(t, respawnStatePath(townRoot), newState())
+			if err := os.MkdirAll(filepath.Dir(legacyRespawnStatePath(townRoot)), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(legacyRespawnStatePath(townRoot), []byte(`{"beads":{"bead-1":{"count":3`), 0600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+
+	for name, corrupt := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			corrupt(t, townRoot)
+			before := map[string][]byte{}
+			for _, path := range []string{respawnStatePath(townRoot), legacyRespawnStatePath(townRoot)} {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				before[path] = data
+			}
+
+			if _, err := loadBeadRespawnState(townRoot); err == nil {
+				t.Error("loadBeadRespawnState = nil error, want a parse error")
+			}
+			if _, err := RecordBeadRespawn(townRoot, "bead-1"); err == nil {
+				t.Error("RecordBeadRespawn = nil error, want a refusal")
+			}
+			if err := ResetBeadRespawnCount(townRoot, "bead-1"); err == nil {
+				t.Error("ResetBeadRespawnCount = nil error, want a refusal")
+			}
+
+			for path, want := range before {
+				got, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatalf("%s was deleted: %v", path, err)
+				}
+				if string(got) != string(want) {
+					t.Errorf("%s was rewritten: got %s, want %s", path, got, want)
+				}
+			}
+		})
 	}
 }
 
@@ -139,9 +354,6 @@ func TestShouldBlockRespawn_UnknownBead(t *testing.T) {
 func TestRespawnStateTreatsATruncatedFileAsCorruption(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(tmpDir, "witness"), 0755); err != nil {
-		t.Fatal(err)
-	}
 	for i := 0; i < config.DefaultRecoveryMaxBeadRespawns; i++ {
 		mustRecord(t, tmpDir, "bead-corrupt")
 	}
@@ -150,7 +362,7 @@ func TestRespawnStateTreatsATruncatedFileAsCorruption(t *testing.T) {
 	}
 
 	// The half-written file a crash between truncate and write leaves behind.
-	stateFile := filepath.Join(tmpDir, "witness", "bead-respawn-counts.json")
+	stateFile := respawnStatePath(tmpDir)
 	if err := os.WriteFile(stateFile, []byte(`{"beads":{"bead-corrupt":{"count":3`), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -173,15 +385,12 @@ func TestRespawnStateTreatsATruncatedFileAsCorruption(t *testing.T) {
 func TestRespawnStateFailsClosedWhenTheLockCannotBeTaken(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(tmpDir, "witness"), 0755); err != nil {
-		t.Fatal(err)
-	}
 	if err := saveBeadRespawnState(tmpDir, emptyBeadRespawnState()); err != nil {
 		t.Fatal(err)
 	}
 	// A directory where the lock file belongs: flockAcquire opens it read-write
 	// and gets EISDIR. Unlike a mode, that fails for every uid.
-	if err := os.MkdirAll(beadRespawnStateFile(tmpDir)+".flock", 0755); err != nil {
+	if err := os.MkdirAll(respawnStatePath(tmpDir)+".flock", 0755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -203,10 +412,10 @@ func TestRespawnStateFailsClosedWhenTheLockCannotBeTaken(t *testing.T) {
 func TestSaveBeadRespawnStateReplacesInPlaceOfTruncating(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(tmpDir, "witness"), 0755); err != nil {
+	stateFile := respawnStatePath(tmpDir)
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0755); err != nil {
 		t.Fatal(err)
 	}
-	stateFile := filepath.Join(tmpDir, "witness", "bead-respawn-counts.json")
 	if err := os.WriteFile(stateFile, []byte("{}"), 0400); err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +444,7 @@ func TestSaveBeadRespawnStateReplacesInPlaceOfTruncating(t *testing.T) {
 	if rec := reloaded.Beads["bead-1"]; rec == nil || rec.Count != 2 {
 		t.Errorf("reloaded bead-1 = %+v, want count 2", rec)
 	}
-	leftovers, err := filepath.Glob(filepath.Join(tmpDir, "witness", ".bead-respawn-counts-*.tmp"))
+	leftovers, err := filepath.Glob(filepath.Join(filepath.Dir(stateFile), ".bead-respawn-counts-*.tmp"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,17 +453,17 @@ func TestSaveBeadRespawnStateReplacesInPlaceOfTruncating(t *testing.T) {
 	}
 }
 
-// TestRespawnStateCreatesTheWitnessDir: the flock file's open creates no parent
+// TestRespawnStateCreatesTheStateDir: the flock file's open creates no parent
 // directories, so a first run in a fresh town failed to take the lock at all.
 // The lock file standing beside the state file is what shows the lock was
 // taken rather than skipped (gt-u3hc1).
-func TestRespawnStateCreatesTheWitnessDir(t *testing.T) {
+func TestRespawnStateCreatesTheStateDir(t *testing.T) {
 	t.Parallel()
-	tmpDir := t.TempDir() // no witness/ subdirectory
+	tmpDir := t.TempDir() // no .runtime/ subdirectory
 
 	mustRecord(t, tmpDir, "bead-fresh")
 
-	flock := filepath.Join(tmpDir, "witness", "bead-respawn-counts.json.flock")
+	flock := respawnStatePath(tmpDir) + ".flock"
 	if _, err := os.Stat(flock); err != nil {
 		t.Errorf("no lock file after the first record, so the lock was never taken: %v", err)
 	}
