@@ -20,8 +20,10 @@ We decided that the daemon runs a `patrol_scan` tick (`internal/patrolscan`, hos
   is parked, frozen or `submitted`; the work carries `gt:ready-to-land` or a dispatch hold; the
   work was hooked within the spawn grace; the agent bead says `awaiting-gate`, `paused`, `done` or
   `nuked`, or says `stuck` after an `ESCALATED` exit whose escalation for the bead is not resolved;
-  or the heartbeat says `stuck` or a fresh `exiting`. The supervisor still enforces e-stop,
-  shutdown and the 3-per-hour budget.
+  or the heartbeat says `stuck` or a fresh `exiting`. A crash restart also waits for a free seat:
+  it raises a live session, so it answers to the pool's cap the way a sling does, and a town at
+  `polecat_pool.max_seats` or `max_total` leaves the seat hooked until one frees (gt-02tcp). The
+  supervisor still enforces e-stop, shutdown and the 3-per-hour budget.
 
   `agent_state=stuck` is not a hold, so it is read with the exit type beside it. The only writer is
   `gt done`'s own exit path, which sets it for every non-COMPLETED exit; a live polecat that is

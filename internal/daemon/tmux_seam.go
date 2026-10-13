@@ -13,6 +13,7 @@ import (
 type sessionTmux interface {
 	HasSession(name string) (bool, error)
 	ListSessions() ([]string, error)
+	GetEnvironment(session, key string) (string, error)
 	KillSession(name string) error
 	KillSessionWithProcesses(name string) error
 	IsAgentAliveChecked(session string) (bool, error)

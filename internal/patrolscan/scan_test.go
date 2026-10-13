@@ -93,6 +93,11 @@ type fakeEnv struct {
 	// raisedErr makes the read fail.
 	raised    []Escalation
 	raisedErr error
+
+	// seatCap is the polecat_pool cap a crash restart answers to; a zero
+	// Limit is no cap. seatCapErr makes the read fail.
+	seatCap    SeatCap
+	seatCapErr error
 }
 
 func newFake() *fakeEnv {
@@ -304,6 +309,7 @@ func scanner(env *fakeEnv, ledger Ledger) *Scanner {
 	return New(env, ledger, Options{
 		Now:       func() time.Time { return now },
 		IsRefusal: func(err error) bool { return errors.Is(err, errRefused) },
+		SeatCap:   func() (SeatCap, error) { return env.seatCap, env.seatCapErr },
 		HoldReason: func(w Work) string {
 			if w.HasLabel("needs-human") {
 				return "label needs-human"
@@ -347,6 +353,175 @@ func TestDeadSeatWithHookedWorkIsRestarted(t *testing.T) {
 	if f := seatFinding(t, r, "ruby"); f.Outcome != OutcomeRestarted {
 		t.Fatalf("outcome = %v, want restarted", f)
 	}
+}
+
+// gt-02tcp: a crash restart raises a live session, so it spends a seat exactly
+// as a sling does. At the pool's cap the seat stays hooked and waits, with the
+// cap named in the skip line.
+func TestCrashRestartWaitsAtThePoolCap(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	deadWithWork(env, "ruby")
+	env.seatCap = SeatCap{Live: 3, Limit: 3, Key: "polecat_pool.max_seats"}
+
+	r := scanner(env, nil).Tick("gastown")
+
+	if len(env.restarts) != 0 {
+		t.Fatalf("restarts = %v, want none while the pool is full", env.restarts)
+	}
+	f := seatFinding(t, r, "ruby")
+	if f.Outcome != OutcomeSkipped {
+		t.Fatalf("outcome = %v (%q), want skipped", f.Outcome, f.Detail)
+	}
+	for _, want := range []string{"gt-ruby", "polecat_pool.max_seats", "3/3"} {
+		if !strings.Contains(f.Detail, want) {
+			t.Errorf("detail = %q, want it to name %q", f.Detail, want)
+		}
+	}
+}
+
+// The total cap (polecat_pool.max_total) holds a restart the same way, and
+// names itself rather than the seat cap the operator would raise in vain.
+func TestCrashRestartWaitsAtTheTotalCap(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	deadWithWork(env, "ruby")
+	env.seatCap = SeatCap{Live: 2, Limit: 2, Key: "polecat_pool.max_total"}
+
+	r := scanner(env, nil).Tick("gastown")
+
+	if len(env.restarts) != 0 {
+		t.Fatalf("restarts = %v, want none while the town is at its total", env.restarts)
+	}
+	f := seatFinding(t, r, "ruby")
+	if f.Outcome != OutcomeSkipped || !strings.Contains(f.Detail, "polecat_pool.max_total") {
+		t.Fatalf("outcome = %v (%q), want skipped naming polecat_pool.max_total", f.Outcome, f.Detail)
+	}
+}
+
+// The wait is not a decision against the seat: it is deferred to the first
+// tick that finds a live seat freed, and it does not reset the dead samples
+// the restart was already waiting on — the seat restarts on the very next scan
+// once the cap has room.
+func TestCrashRestartGoesAheadOnceASeatIsFree(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	deadWithWork(env, "ruby")
+	env.seatCap = SeatCap{Live: 3, Limit: 3, Key: "polecat_pool.max_seats"}
+
+	if r := scanner(env, nil).Tick("gastown"); len(env.restarts) != 0 {
+		t.Fatalf("restarts = %v, want none while the pool is full; report %v", env.restarts, r.Lines())
+	}
+
+	// A live polecat's session ended: the census drops one and the restart
+	// goes ahead on the next scan.
+	env.seatCap = SeatCap{Live: 2, Limit: 3, Key: "polecat_pool.max_seats"}
+
+	r := scanner(env, nil).Tick("gastown")
+
+	if got := strings.Join(env.restarts, ","); got != "ruby" {
+		t.Fatalf("restarts = %q, want ruby once a seat is free; report %v", got, r.Lines())
+	}
+	if f := seatFinding(t, r, "ruby"); f.Outcome != OutcomeRestarted {
+		t.Fatalf("outcome = %v (%q), want restarted", f.Outcome, f.Detail)
+	}
+}
+
+// Under the cap nothing moved: the two-dead-sample rule still gates the
+// restart, so the first sample waits and the second restarts exactly as it did
+// before gt-02tcp, and an uncapped pool is never full.
+func TestCrashRestartUnderTheCapKeepsItsTiming(t *testing.T) {
+	t.Parallel()
+	const key = "polecat_pool.max_seats"
+	cases := []struct {
+		name    string
+		cap     SeatCap
+		samples int
+		restart bool
+	}{
+		{"under the seat cap, first sample", SeatCap{Live: 1, Limit: 3, Key: key}, 1, false},
+		{"under the seat cap, second sample", SeatCap{Live: 1, Limit: 3, Key: key}, 2, true},
+		{"at the cap less one, second sample", SeatCap{Live: 2, Limit: 3, Key: key}, 2, true},
+		{"no cap read at all", SeatCap{}, 2, true},
+		{"a written zero is no cap", SeatCap{Live: 5, Limit: 0, Key: key}, 2, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := newFake()
+			deadWithWork(env, "ruby")
+			env.verdicts["ruby"] = dead(tc.samples)
+			env.seatCap = tc.cap
+
+			scanner(env, nil).Tick("gastown")
+
+			if got := len(env.restarts) == 1; got != tc.restart {
+				t.Fatalf("restarted = %v, want %v (restarts %v)", got, tc.restart, env.restarts)
+			}
+		})
+	}
+}
+
+// A cap that cannot be read is an unknown, not a full pool and not a free one:
+// a restart taken on an unread cap is a session raised past a limit nobody
+// measured, so the seat waits and the tick says why.
+func TestUnreadableSeatCapLeavesTheSeatHooked(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	deadWithWork(env, "ruby")
+	env.seatCapErr = errors.New("reading town settings: permission denied")
+
+	r := scanner(env, nil).Tick("gastown")
+
+	if len(env.restarts) != 0 {
+		t.Fatalf("restarts = %v, want none on an unread cap", env.restarts)
+	}
+	f := seatFinding(t, r, "ruby")
+	if f.Outcome != OutcomeUnknown || !strings.Contains(f.Detail, "seat cap unreadable") {
+		t.Fatalf("outcome = %v (%q), want unknown naming the seat cap", f.Outcome, f.Detail)
+	}
+}
+
+// A DEFERRED or ESCALATED turn's restart is a recovery of work the town
+// already holds, not a crash relaunch, and keeps the handling its own bead
+// gave it: the cap that holds a crashed seat does not hold these (gt-02tcp
+// acceptance).
+func TestRecoveryRestartsAreNotHeldByThePoolCap(t *testing.T) {
+	t.Parallel()
+	t.Run("DEFERRED", func(t *testing.T) {
+		t.Parallel()
+		env := newFake()
+		deadWithWork(env, "ruby")
+		env.agents["ruby"] = AgentRecord{State: "stuck", ExitType: ExitDeferred, CleanupStatus: "has_unpushed"}
+		env.seatCap = SeatCap{Live: 3, Limit: 3, Key: "polecat_pool.max_seats"}
+
+		r := scanner(env, nil).Tick("gastown")
+
+		if got := strings.Join(env.restarts, ","); got != "ruby" {
+			t.Fatalf("restarts = %q, want ruby; report %v", got, r.Lines())
+		}
+		if f := seatFinding(t, r, "ruby"); f.Outcome != OutcomeRestarted {
+			t.Fatalf("outcome = %v (%q), want restarted", f.Outcome, f.Detail)
+		}
+	})
+	t.Run("ESCALATED", func(t *testing.T) {
+		t.Parallel()
+		env := newFake()
+		stoppedOnEscalation(env, "ruby")
+		env.raised = []Escalation{{
+			ID: "hq-wisp-36g1ez", EscalatedBy: "gastown/polecats/ruby", Title: "gt-ruby: a decision",
+		}}
+		env.seatCap = SeatCap{Live: 3, Limit: 3, Key: "polecat_pool.max_seats"}
+
+		r := scanner(env, nil).Tick("gastown")
+
+		if got := strings.Join(env.restarts, ","); got != "ruby" {
+			t.Fatalf("restarts = %q, want ruby; report %v", got, r.Lines())
+		}
+		if f := seatFinding(t, r, "ruby"); f.Outcome != OutcomeRestarted {
+			t.Fatalf("outcome = %v (%q), want restarted", f.Outcome, f.Detail)
+		}
+	})
 }
 
 // gt-6hby3: a working polecat keeps writing its own work bead, so the bead is
