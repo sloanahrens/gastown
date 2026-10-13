@@ -157,7 +157,16 @@ func (d *Daemon) rebuildOMCycle(ctx context.Context, cycle *dogCycle) bool {
 
 	// Ahead of the busy gate: an om the clone does not show as behind is not
 	// waiting on a quiet town, so it must not age toward a starved alert.
-	if !d.rebuildOMBehind(src, installed, head) {
+	behind, err := d.rebuildOMBehind(src, installed, head)
+	if err != nil {
+		// Not a verdict: a git that failed to run says nothing about ancestry, so
+		// the block and the starved alert stay as they were and the next tick asks again.
+		cycle.skipStep("ancestry", "the ancestry check failed: "+err.Error())
+		d.logger.Printf("rebuild_om: cannot tell whether the installed om %s is behind origin/main %s (%v); deferring",
+			shortOMSHA(installed), shortOMSHA(head), err)
+		return false
+	}
+	if !behind {
 		d.rebuildOMBlock.clear()
 		d.clearAlerts("the installed om is not behind origin/main", alertKeyRebuildOMStarved)
 		cycle.skipStep("ancestry", fmt.Sprintf("the installed om %s is not an ancestor of origin/main %s: ahead of it or unknown to the clone, left in place",
@@ -194,9 +203,20 @@ func rebuildOMInForce(installed, head string) bool {
 // rebuild_gt leaves a binary that would be a downgrade. Git's exit 1 and its
 // failure to resolve the sha both read as not behind: an install that cannot be
 // shown to move forward is not made.
-func (d *Daemon) rebuildOMBehind(src, installed, head string) bool {
+//
+// Any other failure (a timeout, a killed git, exit 128 on a broken clone) is
+// no answer about ancestry: it comes back as err so the cycle defers instead of
+// recording a verdict that holds the interval.
+func (d *Daemon) rebuildOMBehind(src, installed, head string) (bool, error) {
 	_, err := d.rebuildOMGit(rebuildOMGitTimeout, "-C", src, "merge-base", "--is-ancestor", installed, head)
-	return err == nil
+	if err == nil {
+		return true, nil
+	}
+	var gitErr *rebuildOMGitError
+	if errors.As(err, &gitErr) && gitErr.answersNotAncestor() {
+		return false, nil
+	}
+	return false, err
 }
 
 // rebuildOMEnsureClone makes sure the job's clone exists, cloning it from the
@@ -428,8 +448,34 @@ func (d *Daemon) rebuildOMReachedForce(cycle *dogCycle, reason string) {
 	d.clearAlerts("the installed om is in force", alertKeyRebuildOMStarved, alertKeyRebuildOMInstallFail)
 }
 
+// rebuildOMGitError is a failed git command. It reads as git's own message (or
+// the exec error when git printed none) and keeps the exit status, which is -1
+// when git never exited on its own: a timeout, a signal, a failure to start.
+type rebuildOMGitError struct {
+	msg  string
+	code int
+}
+
+func (e *rebuildOMGitError) Error() string { return e.msg }
+
+// answersNotAncestor reports whether a failed `merge-base --is-ancestor` is
+// git's answer rather than a failure to ask: exit 1 says "not an ancestor",
+// and exit 128 with an unresolvable sha says the clone has never seen the
+// commit. Any other 128 (not a repository, a corrupt object store) is not.
+func (e *rebuildOMGitError) answersNotAncestor() bool {
+	switch e.code {
+	case 1:
+		return true
+	case 128:
+		msg := strings.ToLower(e.msg)
+		return strings.Contains(msg, "not a valid commit name") || strings.Contains(msg, "not a valid object name")
+	}
+	return false
+}
+
 // rebuildOMGit runs one git command, returning stdout. It never prompts: the
-// daemon has no terminal to answer a credential request.
+// daemon has no terminal to answer a credential request. A failure is a
+// *rebuildOMGitError.
 func (d *Daemon) rebuildOMGit(timeout time.Duration, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -441,7 +487,12 @@ func (d *Daemon) rebuildOMGit(timeout time.Duration, args ...string) (string, er
 		if msg == "" {
 			msg = err.Error()
 		}
-		return string(stdout), errors.New(msg)
+		code := -1
+		var exitErr interface{ ExitCode() int }
+		if errors.As(err, &exitErr) {
+			code = exitErr.ExitCode()
+		}
+		return string(stdout), &rebuildOMGitError{msg: msg, code: code}
 	}
 	return string(stdout), nil
 }
