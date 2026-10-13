@@ -105,6 +105,75 @@ func TestAttachmentFormulaVarsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAttachmentArgsMultilineRoundTrip(t *testing.T) {
+	args := "Step 1: do X\nno_merge: true\nmode: ralph\n  \"quoted\" <b> & tail"
+	formatted := FormatAttachmentFields(&AttachmentFields{AttachedFormula: "mol-polecat-work", AttachedArgs: args})
+	if strings.Count(formatted, "\n") != 1 {
+		t.Fatalf("attached_args leaked continuation lines:\n%s", formatted)
+	}
+
+	parsed := ParseAttachmentFields(&Issue{Description: formatted})
+	if parsed == nil {
+		t.Fatal("round-trip parse returned nil")
+	}
+	if parsed.AttachedArgs != args {
+		t.Fatalf("AttachedArgs = %q, want %q", parsed.AttachedArgs, args)
+	}
+	if parsed.NoMerge || parsed.Mode != "" {
+		t.Fatalf("continuation lines became fields: NoMerge=%v Mode=%q", parsed.NoMerge, parsed.Mode)
+	}
+}
+
+func TestSetAttachmentFieldsReplacesMultilineArgs(t *testing.T) {
+	first := SetAttachmentFields(&Issue{Description: "Body text"}, &AttachmentFields{
+		AttachedMolecule: "gt-wisp-1",
+		AttachedArgs:     "Step 1: do X\nStep 2: do Y\nno_merge: true",
+	})
+	second := SetAttachmentFields(&Issue{Description: first}, &AttachmentFields{
+		AttachedMolecule: "gt-wisp-2",
+		AttachedArgs:     "fresh args",
+	})
+
+	for _, stale := range []string{"Step 1", "Step 2", "no_merge", "gt-wisp-1"} {
+		if strings.Contains(second, stale) {
+			t.Fatalf("stale %q left in description:\n%s", stale, second)
+		}
+	}
+	parsed := ParseAttachmentFields(&Issue{Description: second})
+	if parsed == nil || parsed.AttachedArgs != "fresh args" || parsed.NoMerge {
+		t.Fatalf("parsed = %+v, want AttachedArgs %q and NoMerge unset", parsed, "fresh args")
+	}
+	if !strings.Contains(second, "Body text") {
+		t.Fatalf("prose lost:\n%s", second)
+	}
+}
+
+func TestParseAttachmentArgsLegacyRawLine(t *testing.T) {
+	for _, raw := range []string{
+		"Fix the flaky test",
+		`"half quoted and then more`,
+		`"quoted" then text`,
+		`{"json": "like"}`,
+	} {
+		parsed := ParseAttachmentFields(&Issue{Description: "attached_args: " + raw})
+		if parsed == nil || parsed.AttachedArgs != raw {
+			t.Errorf("legacy %q parsed to %+v", raw, parsed)
+		}
+	}
+}
+
+func TestAttachmentArgsSingleLineStaysRaw(t *testing.T) {
+	formatted := FormatAttachmentFields(&AttachmentFields{AttachedArgs: "plain args"})
+	if formatted != "attached_args: plain args" {
+		t.Fatalf("single-line args should stay raw, got %q", formatted)
+	}
+	quoted := `"already" quoted`
+	parsed := ParseAttachmentFields(&Issue{Description: FormatAttachmentFields(&AttachmentFields{AttachedArgs: quoted})})
+	if parsed == nil || parsed.AttachedArgs != quoted {
+		t.Fatalf("quote-leading args round trip = %+v, want %q", parsed, quoted)
+	}
+}
+
 func TestParseAttachmentFieldsDoesNotConsumeAdjacentKeyValueLines(t *testing.T) {
 	desc := "formula_vars: feature=Bug to fix\nissue=gt-abc123\nbase_branch=main\nexample=value\nmode: ralph"
 	fields := ParseAttachmentFields(&Issue{Description: desc})
