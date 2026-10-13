@@ -8,6 +8,7 @@ import (
 )
 
 func TestDecideOverrun(t *testing.T) {
+	t.Parallel()
 	slung := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
 	const nudgeAt, stopAt = 12 * time.Minute, 20 * time.Minute
 
@@ -48,6 +49,7 @@ func TestDecideOverrun(t *testing.T) {
 }
 
 func TestOverrunStateRoundTrip(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 
 	t.Run("missing file is the zero state", func(t *testing.T) {
