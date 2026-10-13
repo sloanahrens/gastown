@@ -236,10 +236,15 @@ func newSlingHarness(t *testing.T) *slingHarness {
 			h.record("store fields %s", id)
 			return nil
 		},
-		hook: func(id, agent, _, _ string) error {
+		// The hook write carries the attachment fields when it is given them,
+		// so they are logged as part of "hook" and not as a "store fields" write.
+		hook: func(id, agent, _, _ string, fields *beadFieldUpdates) error {
 			h.mu.Lock()
 			if b := h.beads[id]; b != nil {
 				b.Status, b.Assignee = "hooked", agent
+			}
+			if fields != nil {
+				h.stored[id] = append(h.stored[id], *fields)
 			}
 			h.mu.Unlock()
 			h.record("hook %s %s", id, agent)

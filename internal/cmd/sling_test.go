@@ -702,7 +702,7 @@ func TestHookBeadWithRetryWritesHookDirDatabase(t *testing.T) {
 	db.Seed(beads.Issue{ID: "gt-test123", Title: "t", Status: "open"})
 	stores := dirSlingStores(map[string]*beadsfake.Fake{beads.ResolveBeadsDir(hookDir): db}, beadsfake.New())
 
-	if err := stores.hookWithRetry(nil, "gt-test123", "gastown/polecats/toast", hookDir); err != nil {
+	if err := stores.hookWithRetry(nil, "gt-test123", "gastown/polecats/toast", hookDir, nil); err != nil {
 		t.Fatalf("hookBeadWithRetry: %v", err)
 	}
 	got, err := db.Show("gt-test123")
@@ -711,6 +711,88 @@ func TestHookBeadWithRetryWritesHookDirDatabase(t *testing.T) {
 	}
 	if got.Status != "hooked" || got.Assignee != "gastown/polecats/toast" {
 		t.Fatalf("hooked bead = status %q assignee %q", got.Status, got.Assignee)
+	}
+}
+
+// countingUpdates counts the Update calls that reach the wrapped store: each
+// is one bd update, and one Dolt commit on a pinned store.
+type countingUpdates struct {
+	slingStore
+	updates *[]beads.UpdateOptions
+}
+
+func (c countingUpdates) Update(id string, opts beads.UpdateOptions) error {
+	*c.updates = append(*c.updates, opts)
+	return c.slingStore.Update(id, opts)
+}
+
+// TestHookWithRetryBatchesFieldsWithTheHook: the hook and the attachment
+// fields (dispatcher, attached molecule, formula) land in one bd update, so a
+// sling costs one Dolt commit for them, and the read-back still sees the hook.
+func TestHookWithRetryBatchesFieldsWithTheHook(t *testing.T) {
+	t.Parallel()
+	hookDir := t.TempDir()
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "gt-test123", Title: "t", Status: "open", Description: "Goal: do it"})
+	var updates []beads.UpdateOptions
+	stores := slingStores{pinned: func(string) slingStore { return countingUpdates{slingFake{db}, &updates} }}
+	verified := 0
+	verify := func(id string) (*beadInfo, error) {
+		verified++
+		issue, err := db.Show(id)
+		if err != nil {
+			return nil, err
+		}
+		return beadInfoOf(issue), nil
+	}
+
+	fields := beadFieldUpdates{
+		Dispatcher:       "daemon/spec-dispatch",
+		AttachedMolecule: "gt-wisp-abc",
+		AttachedFormula:  "mol-polecat-work",
+	}
+	if err := stores.hookWithRetry(verify, "gt-test123", "gastown/polecats/toast", hookDir, &fields); err != nil {
+		t.Fatalf("hookWithRetry: %v", err)
+	}
+
+	if len(updates) != 1 {
+		t.Fatalf("%d bd updates, want 1 for the hook and the fields together", len(updates))
+	}
+	if u := updates[0]; u.Status == nil || *u.Status != "hooked" || u.Assignee == nil || u.Description == nil {
+		t.Fatalf("update = %+v, want status, assignee and description", u)
+	}
+	if verified != 1 {
+		t.Errorf("hook read back %d times, want 1", verified)
+	}
+	got, err := db.Show("gt-test123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "hooked" || got.Assignee != "gastown/polecats/toast" {
+		t.Errorf("hooked bead = status %q assignee %q", got.Status, got.Assignee)
+	}
+	af := beads.ParseAttachmentFields(got)
+	if af == nil || af.AttachedMolecule != "gt-wisp-abc" || af.AttachedFormula != "mol-polecat-work" || af.DispatchedBy != "daemon/spec-dispatch" {
+		t.Errorf("attachment fields = %+v", af)
+	}
+	if !strings.Contains(got.Description, "Goal: do it") {
+		t.Errorf("description lost its body: %q", got.Description)
+	}
+}
+
+// TestHookWithRetryWithoutFieldsLeavesTheDescription: a hook given no fields
+// (raw metadata already stored, or a wisp) writes status and assignee alone.
+func TestHookWithRetryWithoutFieldsLeavesTheDescription(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "gt-test123", Title: "t", Status: "open"})
+	var updates []beads.UpdateOptions
+	stores := slingStores{pinned: func(string) slingStore { return countingUpdates{slingFake{db}, &updates} }}
+	if err := stores.hookWithRetry(nil, "gt-test123", "gastown/polecats/toast", t.TempDir(), nil); err != nil {
+		t.Fatalf("hookWithRetry: %v", err)
+	}
+	if len(updates) != 1 || updates[0].Description != nil {
+		t.Fatalf("updates = %+v, want one without a description", updates)
 	}
 }
 

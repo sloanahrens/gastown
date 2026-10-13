@@ -73,12 +73,15 @@ type Deps struct {
 	Cook               func(formulaName, workDir, townRoot string) error
 	InstantiateFormula func(ctx context.Context, formulaName, beadID, title, hookWorkDir, townRoot string, extraVars []string) (*FormulaResult, error)
 	HookDir            func(townRoot, beadID, workDir string) string
-	Hook               func(beadID, targetAgent, hookDir, townRoot string) error
-	StoreFields        func(townRoot, beadID string, updates FieldUpdates) error
-	ClearOrphanLabels  func(townRoot, beadID, workDir string)
-	UpdateAgentHook    func(agentID, beadID, workDir, townBeadsDir string)
-	UpdateAgentMode    func(agentID, mode, workDir, townBeadsDir string)
-	LogFeed            func(eventType, actor string, payload map[string]interface{}) error
+	// Hook hooks beadID to targetAgent. A non-nil fields is written in the same
+	// bd update as the hook, so the hook and the attachment fields cost one
+	// Dolt commit; nil writes the hook alone.
+	Hook              func(beadID, targetAgent, hookDir, townRoot string, fields *FieldUpdates) error
+	StoreFields       func(townRoot, beadID string, updates FieldUpdates) error
+	ClearOrphanLabels func(townRoot, beadID, workDir string)
+	UpdateAgentHook   func(agentID, beadID, workDir, townBeadsDir string)
+	UpdateAgentMode   func(agentID, mode, workDir, townBeadsDir string)
+	LogFeed           func(eventType, actor string, payload map[string]interface{}) error
 
 	// Undoing a partial dispatch.
 	RollbackArtifacts func(spawn *Spawn, townRoot, beadID, hookWorkDir string)

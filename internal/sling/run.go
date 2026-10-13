@@ -424,7 +424,11 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		return result, fmt.Errorf("serializing hook write for %s: %w", targetAgent, assigneeLockErr)
 	}
 	defer assigneeUnlock()
+	// The fields ride on the hook write, one bd update and one Dolt commit,
+	// unless raw metadata was stored ahead of it (then they are already there).
+	hookFields := &fieldUpdates
 	if attachedMoleculeID == "" && (opts.NoMerge || opts.ReviewOnly) {
+		hookFields = nil
 		if err := d.StoreFields(townRoot, beadToHook, fieldUpdates); err != nil {
 			// The dispatch never reached a hookable bead, so there is nothing
 			// for a later dispatch to pick up and everything to unwind
@@ -490,7 +494,7 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		requester = d.Requester()
 	}
 	d.RecordReassignment(townRoot, opts.BeadID, info.Assignee, targetAgent, requester)
-	if err := d.Hook(beadToHook, targetAgent, hookDir, townRoot); err != nil {
+	if err := d.Hook(beadToHook, targetAgent, hookDir, townRoot, hookFields); err != nil {
 		// Clean up all partial dispatch state, including raw metadata stored before hook.
 		rollbackSpawnedPolecat(beadToHook, "Hook failed")
 		result.ErrMsg = "hook failed"
@@ -511,11 +515,8 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	// 8. Update agent hook_bead state
 	d.UpdateAgentHook(targetAgent, beadToHook, hookWorkDir, beadsDir)
 
-	// 9. Store fields in bead (dispatcher, args, attached_molecule, no_merge, mode)
-	// Use beadToHook for the update target (may differ from beadID when formula-on-bead)
-	if err := d.StoreFields(townRoot, beadToHook, fieldUpdates); err != nil {
-		fmt.Fprintf(d.out(), "  %s Could not store fields in bead: %v\n", style.Dim.Render("Warning:"), err)
-	}
+	// 9. The bead's fields (dispatcher, args, attached_molecule, no_merge,
+	// mode) were written with the hook in step 6.
 
 	// Update agent bead mode for stuck-detector Ralph thresholds. Reuse/reset clears stale mode.
 	if opts.Mode != "" {
