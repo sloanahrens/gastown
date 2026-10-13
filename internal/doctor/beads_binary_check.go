@@ -23,6 +23,9 @@ type BeadsBinaryCheck struct {
 	run deps.BDRunner
 	// lookPath finds bd for the report; nil is exec.LookPath.
 	lookPath func(string) (string, error)
+	// handshakeTimeout budgets the handshake; 0 is bdHandshakeTimeout. A test
+	// shrinks it so a Dolt that never answers spends the budget, not the test.
+	handshakeTimeout time.Duration
 }
 
 // NewBeadsBinaryCheck creates the bd handshake check.
@@ -49,7 +52,11 @@ func (c *BeadsBinaryCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 	path, _ := lookPath("bd")
 
-	hctx, cancel := context.WithTimeout(context.Background(), bdHandshakeTimeout)
+	timeout := c.handshakeTimeout
+	if timeout == 0 {
+		timeout = bdHandshakeTimeout
+	}
+	hctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	hs, err := deps.CheckBDHandshake(hctx, path, run)
 	if err == nil {
@@ -65,12 +72,21 @@ func (c *BeadsBinaryCheck) Run(ctx *CheckContext) *CheckResult {
 		Name:    c.Name(),
 		Status:  StatusError,
 		Message: strings.TrimPrefix(lines[0], deps.ErrBDHandshake.Error()+": "),
+		// Only a refusal with no fix line falls back to this.
 		FixHint: deps.BDInstallHint,
 	}
 	for _, l := range lines[1:] {
-		if l = strings.TrimSpace(l); l != "" && !strings.HasPrefix(l, "fix:") {
-			result.Details = append(result.Details, l)
+		l = strings.TrimSpace(l)
+		if l == "" {
+			continue
 		}
+		// The refusal carries the remedy for itself: the bd install for a bd
+		// problem, the Dolt commands for a Dolt that did not answer (gt-j572r).
+		if fix, ok := strings.CutPrefix(l, "fix:"); ok {
+			result.FixHint = strings.TrimSpace(fix)
+			continue
+		}
+		result.Details = append(result.Details, l)
 	}
 	if !errors.Is(err, deps.ErrBDHandshake) {
 		result.Details = append(result.Details, msg)
