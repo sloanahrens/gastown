@@ -10,11 +10,33 @@ import (
 	"time"
 )
 
+// stubOMVersion is the version every reviewer stub answers `om version` with:
+// a binary that names one, so a test about argv or flags is not also a test of
+// the version probe.
+const stubOMVersion = "v0.9.1-3-gabc1234"
+
+// stubVersionLine is what a stub writes for `om version`.
+func stubVersionLine() string { return "om version " + stubOMVersion + "\n" }
+
+// omSubcommand is the subcommand an argv names — "review" or "version" — and
+// "" for a call that names neither.
+func omSubcommand(argv []string) string {
+	if len(argv) > 1 {
+		return argv[1]
+	}
+	return ""
+}
+
 // fakeOM answers one om invocation: it writes verdict (when non-empty) to the
-// --out file and exits with code.
+// --out file and exits with code. The version probe is answered too, and is
+// not what gotArgv keeps.
 func fakeOM(t *testing.T, verdict string, code int, runErr error, gotArgv *[]string) runFunc {
 	t.Helper()
 	return func(_ context.Context, _ string, _ []string, argv []string, out io.Writer) (int, error) {
+		if omSubcommand(argv) == "version" {
+			_, _ = io.WriteString(out, stubVersionLine())
+			return 0, nil
+		}
 		*gotArgv = argv
 		if runErr != nil {
 			return -1, runErr
@@ -155,10 +177,107 @@ func TestOMReviewerDoesNotRetryAVerdict(t *testing.T) {
 	inner := fakeOM(t, `{"score":0.3,"verdict":"request_changes"}`, 1, nil, &argv)
 	r := OMReviewer{OutDir: t.TempDir()}
 	r.run = func(ctx context.Context, dir string, unset []string, av []string, out io.Writer) (int, error) {
-		calls++
+		if omSubcommand(av) != "version" {
+			calls++
+		}
 		return inner(ctx, dir, unset, av, out)
 	}
 	if v, err := r.Review(context.Background(), "/wt", "a", "b"); err != nil || v.Verdict != VerdictRequestChanges || calls != 1 {
 		t.Fatalf("Review = %+v, %v after %d runs; want request_changes from one run", v, err, calls)
+	}
+}
+
+// TestOMReviewerRecordsTheVersionOnTheVerdict: the verdict names the om behind
+// it, read from the binary rather than from om's verdict file (gt-uebmq).
+func TestOMReviewerRecordsTheVersionOnTheVerdict(t *testing.T) {
+	t.Parallel()
+	stub := &omStub{t: t, help: omHelpWithBead, bead: "gt-abc"}
+	v, err := omStubbed(t, omBinary(t), stub).ReviewBead(context.Background(),
+		ReviewInput{Dir: t.TempDir(), Base: "aaa", Head: "bbb", BeadID: "gt-abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Version != stubOMVersion {
+		t.Errorf("version = %q, want %q", v.Version, stubOMVersion)
+	}
+	if stub.versions != 1 {
+		t.Errorf("version probes = %d, want 1", stub.versions)
+	}
+}
+
+// TestOMReviewerRecordsTheVersionOfAReviewThatFailed: a review that produced no
+// verdict is exactly when the binary is worth naming, so the version is read
+// either way (gt-uebmq).
+func TestOMReviewerRecordsTheVersionOfAReviewThatFailed(t *testing.T) {
+	t.Parallel()
+	stub := &criteriaStub{t: t, help: omHelpWithCriteria, fail: errors.New("exec: om: not found")}
+	v, err := criteriaStubbed(t, omBinary(t), stub).ReviewBead(context.Background(),
+		ReviewInput{Dir: t.TempDir(), Base: "aaa", Head: "bbb", BeadID: "gt-abc"})
+	if err == nil {
+		t.Fatal("a failed review returned no error")
+	}
+	if v.Version != stubOMVersion {
+		t.Errorf("version = %q, want %q", v.Version, stubOMVersion)
+	}
+}
+
+// TestOMReviewerProbesTheVersionOncePerBinary: the version is a property of the
+// installed binary, so later verdicts in this process read the cache the help
+// probe shares (gt-uebmq).
+func TestOMReviewerProbesTheVersionOncePerBinary(t *testing.T) {
+	t.Parallel()
+	stub := &omStub{t: t, help: omHelpWithBead, bead: "gt-abc"}
+	r := omStubbed(t, omBinary(t), stub)
+	for i := 0; i < 3; i++ {
+		if _, err := r.ReviewBead(context.Background(),
+			ReviewInput{Dir: t.TempDir(), Base: "aaa", Head: "bbb", BeadID: "gt-abc"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if stub.versions != 1 {
+		t.Errorf("version probes = %d, want 1: an installed om keeps its version", stub.versions)
+	}
+}
+
+// TestOMReviewerRecordsAnUnreadableVersionAsUnknown: an om that names no
+// version is still a reviewer, and the verdict says so (gt-uebmq).
+func TestOMReviewerRecordsAnUnreadableVersionAsUnknown(t *testing.T) {
+	t.Parallel()
+	stub := &omStub{t: t, help: omHelpWithBead, bead: "gt-abc", noVersion: true}
+	var log strings.Builder
+	v, err := omStubbed(t, omBinary(t), stub).ReviewBead(context.Background(),
+		ReviewInput{Dir: t.TempDir(), Base: "aaa", Head: "bbb", BeadID: "gt-abc", Logf: logfTo(&log)})
+	if err != nil {
+		t.Fatalf("ReviewBead: %v; a version-less om is still a reviewer", err)
+	}
+	if v.Version != omVersionUnknown {
+		t.Errorf("version = %q, want %q", v.Version, omVersionUnknown)
+	}
+	if !strings.Contains(log.String(), "could not read the version") {
+		t.Errorf("log = %q, want the unreadable version named", log.String())
+	}
+}
+
+// TestParseOMVersion: the version is the sha on `om version`'s own line, and
+// an output without one names no version.
+func TestParseOMVersion(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		out  string
+		want string
+	}{
+		{"the version line", "om version 9f8e7d6\n", "9f8e7d6"},
+		{"a line after other output", "warning: no .om.json\nom version 9f8e7d6\n", "9f8e7d6"},
+		{"a version line with none", "om version\n", ""},
+		{"another tool's version", "om 0.2.0\n", ""},
+		{"no output", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := parseOMVersion(tc.out); got != tc.want {
+				t.Errorf("parseOMVersion(%q) = %q, want %q", tc.out, got, tc.want)
+			}
+		})
 	}
 }

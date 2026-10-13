@@ -26,8 +26,14 @@ type Beads interface {
 	AppendNotes(id, note string) error
 	// Comments is how reject tells a requeued rejection from one an
 	// interrupted pass left: both leave the bead ready with the refusal label
-	// gone, and only the requeue comment separates them (gt-en9gs).
+	// gone, and only the requeue comment separates them (gt-en9gs), and how
+	// the verdict comment is checked for one this attempt already wrote
+	// (gt-uebmq).
 	Comments(id string) ([]beads.Comment, error)
+	// AddComment writes the review record every landing leaves on its work
+	// bead: a rejection's note is not the only trace a review should leave,
+	// and an approved or waived landing has none otherwise (gt-uebmq).
+	AddComment(id, text string) error
 	// Children and CloseWithReason are what closing the molecule a landed
 	// bead carries needs: the walk down to its step wisps, then an unforced
 	// close of each (gt-oqz0r).
@@ -896,6 +902,10 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		verdict   Verdict
 		reviewErr error
 	)
+	// reviewStart opens the window the review leaves on the work bead: it
+	// covers the overseer check and the om attempt alike, so a waiver is
+	// timed like a review (gt-uebmq).
+	reviewStart := time.Now()
 	if OverseerReviewed(issue, w.Head) {
 		// The overseer reviewed this exact head in place of om, which could
 		// not return a verdict (gt-g8t3m): record that and do not pay for om
@@ -903,7 +913,6 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		verdict = Verdict{Verdict: VerdictOverseerPrefix + shortSHA(w.Head)}
 		l.logf("%s: %s, om skipped (overseer-reviewed)", w.BeadID, stageTimes(gateRes, 0, false))
 	} else {
-		reviewStart := time.Now()
 		l.stage(w, StageOM)
 		omCtx, omDone := l.Slow.watch(ctx, l, w, dir, StageOM)
 		criteria := CriteriaText(issue)
@@ -935,10 +944,15 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 				Reason: l.reviewErrorRejectionReason(wt, base, merged, reviewErr)}
 			return Result{}, l.reject(issue, w, rej, nil)
 		}
-		verdict = Verdict{Verdict: VerdictErrorPrefix + reviewErrorReason(reviewErr)}
+		verdict = Verdict{Verdict: VerdictErrorPrefix + reviewErrorReason(reviewErr), Version: verdict.Version}
 		res.Verdict = verdict
 		l.logf("%s: WARNING om review did not run (%v); the merged tree is green, so it lands with om_verdict %q", w.BeadID, reviewErr, verdict.Verdict)
-	} else if verdict.Verdict == VerdictRequestChanges {
+	}
+	// The review is over and this is its verdict, whatever the branches below
+	// do with the landing: the work bead gets the one line that ties it to the
+	// review, written before either the rejection or the merge (gt-uebmq).
+	l.commentVerdict(w, verdict, reviewStart, time.Now())
+	if verdict.Verdict == VerdictRequestChanges {
 		rej := &Rejection{Kind: RejectReview, Rework: true, Reason: fmt.Sprintf("om requested changes (score %.2f, %d finding(s))", verdict.Score, len(verdict.Findings))}
 		return Result{}, l.reject(issue, w, rej, &verdict)
 	}
