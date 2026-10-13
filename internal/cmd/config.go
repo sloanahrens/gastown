@@ -1473,7 +1473,7 @@ type configCmdEnv struct {
 
 func cwdConfigCmdEnv() configCmdEnv {
 	return configCmdEnv{
-		findTown:         workspace.FindFromCwd,
+		findTown:         workspace.FindFromCwdOrError,
 		out:              os.Stdout,
 		agentSetProvider: configAgentSetProvider,
 	}
