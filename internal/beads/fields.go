@@ -67,7 +67,7 @@ func ParseAttachmentFields(issue *Issue) *AttachmentFields {
 			fields.AttachedAt = value
 			hasFields = true
 		case "attached_args", "attached-args", "attachedargs":
-			fields.AttachedArgs = value
+			fields.AttachedArgs = parseAttachedArgs(value)
 			hasFields = true
 		case "attached_vars", "attached-vars", "attachedvars":
 			fields.AttachedVars = parseAttachedVars(value)
@@ -121,7 +121,7 @@ func FormatAttachmentFields(fields *AttachmentFields) string {
 		lines = append(lines, "attached_at: "+fields.AttachedAt)
 	}
 	if fields.AttachedArgs != "" {
-		lines = append(lines, "attached_args: "+fields.AttachedArgs)
+		lines = append(lines, "attached_args: "+formatAttachedArgs(fields.AttachedArgs))
 	}
 	if len(fields.AttachedVars) > 0 {
 		lines = append(lines, "attached_vars: "+formatAttachedVars(fields.AttachedVars))
@@ -235,6 +235,36 @@ func SetAttachmentFields(issue *Issue, fields *AttachmentFields) string {
 	}
 
 	return formatted + "\n\n" + strings.Join(otherLines, "\n")
+}
+
+// formatAttachedArgs renders attached_args as one description line. Args that
+// span lines (gt sling --stdin) or open with a double quote are written as a
+// JSON string, as formula_vars is, so the parser's line-by-line scan reads
+// them back whole and no continuation line such as "no_merge: true" becomes
+// an attachment field. Other args stay raw, the form older descriptions use.
+func formatAttachedArgs(args string) string {
+	if !strings.ContainsAny(args, "\r\n") && !strings.HasPrefix(args, `"`) {
+		return args
+	}
+	var buf strings.Builder
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(args); err != nil {
+		return strings.NewReplacer("\r", " ", "\n", " ").Replace(args)
+	}
+	return strings.TrimSuffix(buf.String(), "\n")
+}
+
+// parseAttachedArgs reverses formatAttachedArgs. A value that is not a whole
+// JSON string is a legacy raw line and is returned unchanged.
+func parseAttachedArgs(raw string) string {
+	if strings.HasPrefix(raw, `"`) {
+		var args string
+		if err := json.Unmarshal([]byte(raw), &args); err == nil {
+			return args
+		}
+	}
+	return raw
 }
 
 func formatAttachedVars(vars []string) string {
