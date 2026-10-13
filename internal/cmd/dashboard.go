@@ -245,7 +245,16 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	}
 	recs := newDashLandings(townRoot)
 	seatCache := newDashSeatCache()
-	om := newOMReader(townRoot, recs)
+	// Who holds a bead, read once per row: the Landings pane's live rows and
+	// the om panel's running reviews both name a landing's polecat, and they
+	// ask the same reader for it.
+	polecatFor := func(rig, id string) string {
+		if issue := beadReads.issue(rig, id); issue != nil {
+			return polecatOfAssignee(issue.Assignee)
+		}
+		return ""
+	}
+	om := newOMReader(townRoot, recs, polecatFor)
 	models := newModelsReader(townRoot)
 	tierSweeps := newTierSweepReader(townRoot)
 	escalations := newDashEscalationReader(townRoot)
@@ -282,12 +291,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 			now := time.Now()
 			stages, rejects := om.trendInputs(trendWindowStart(now))
 			tr := buildTrend(now, recs.get(), stages, rejects, loads.points())
-			live := runningRows(om.running(now.Add(-trendHours*time.Hour)), rigOfBead, func(rig, id string) string {
-				if issue := beadReads.issue(rig, id); issue != nil {
-					return polecatOfAssignee(issue.Assignee)
-				}
-				return ""
-			})
+			live := runningRows(om.running(now.Add(-trendHours*time.Hour)), rigOfBead, polecatFor)
 			title := func(rig, id string) string { return beadReads.title(rig, id) }
 			recent := buildRecentLandings(now, recs.get(), stages, rejects, live, deploys.shipStatus, title, recentLandingRows)
 			tr.Recent = withBackoffRows(recent, backoff.get(), title)

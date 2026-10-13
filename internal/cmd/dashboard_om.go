@@ -2,10 +2,14 @@ package cmd
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -22,10 +26,20 @@ import (
 // The om panel reads two things the town already writes: each rig's landings
 // file (one record per landed bead, with om's verdict and score) and the
 // daemon log (om's wall time per review, and every rejection with its kind).
-// It runs no om and no bd.
+// It runs no om and no bd. What om is running right now it reads from the
+// processes on the host, through the same panel's one ps read.
 
 const (
 	omRecentRows = 15
+	// omLastRows is how many of the newest reviews om actually ran the panel
+	// lists at its top. The bead's redesign asks for five there.
+	omLastRows = 5
+	// omProcTimeout bounds the process list a read lists: a ps that hangs on a
+	// wedged host must not hold the panel's read open.
+	omProcTimeout = 2 * time.Second
+	// omProcOutput caps how much of ps's listing is kept. A process with a
+	// runaway argv is not worth reading past the first processes.
+	omProcOutput = 512 * 1024
 	// The by-day table is a fixed window: today and the three calendar days
 	// before it. A day with no reviews still gets a row.
 	omDayRows      = 4
@@ -43,7 +57,17 @@ var (
 	// omMergeRe and omLandedRe bracket a landing: the merge line is logged when
 	// the worker starts gating the merged tree, the landed line when it is on
 	// the target. A merge with no landed or rejected line after it is in flight.
-	omMergeRe  = regexp.MustCompile(`^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) landing_worker: \[land\] (\S+): merged `)
+	//
+	// The merge line carries the landing's three commits — the branch head it
+	// merged, the target's tip it merged onto, and the merge candidate both
+	// produced ("merged <head> onto <remote>/<target> (<tip>) as <cand>") — and
+	// the candidate is the commit om is handed as --head
+	// (internal/land/review.go builds "om review -C <dir> --base <base> --head
+	// <head>"), which is what joins a running review back to its landing
+	// (gt-7qz2h). They are read as an optional tail: a merge line that does not
+	// name them still begins a merge, so a wording change costs the join rather
+	// than every running row.
+	omMergeRe  = regexp.MustCompile(`^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) landing_worker: \[land\] (\S+): merged (?:([0-9a-f]+) onto \S+ \(([0-9a-f]+)\) as ([0-9a-f]+))?`)
 	omLandedRe = regexp.MustCompile(`^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) landing_worker: \[land\] (\S+): (?:landed|already landed as) `)
 )
 
@@ -69,12 +93,16 @@ type omRejection struct {
 }
 
 // omMerge is one landing in flight, off a "merged" log line: the moment the
-// worker began gating a bead's merged tree. Done is set by a later landed or
-// rejected line for the bead, or by a daemon start, after which the merge is
-// no longer live.
+// worker began gating a bead's merged tree, and the three commits the line
+// names — the branch head, the target's tip it merged onto, and the merge
+// candidate om reviews. Done is set by a later landed or rejected line for the
+// bead, or by a daemon start, after which the merge is no longer live.
 type omMerge struct {
 	At   time.Time
 	Bead string
+	Head string // the branch head merged
+	Tip  string // the target tip it was merged onto
+	Cand string // the merge candidate, the commit om is handed as --head
 	Done bool
 }
 
@@ -157,12 +185,208 @@ func modelWord(name, word string) bool {
 	return false
 }
 
+// omProc is one process running on the host, off the ps line that listed it:
+// its pid, how long it has been running, and its argv.
+type omProc struct {
+	PID     int
+	Elapsed time.Duration
+	Args    []string
+}
+
+// omProcLister lists the processes running on the host. It is injected rather
+// than reached for, so a test lists the reviews it wants and a host that
+// cannot list processes costs the panel its running rows and nothing else.
+type omProcLister func(ctx context.Context) ([]omProc, error)
+
+// listOMProcs is the process lister the dashboard reads: every process on the
+// host as pid, elapsed time and argv, under a timeout and an output cap. A
+// platform with no ps answers with no processes rather than an error — a host
+// that cannot list its processes has no review running to show, which is what
+// the panel draws — while any other failure is the reader's to drop.
+func listOMProcs(ctx context.Context) ([]omProc, error) {
+	ctx, cancel := context.WithTimeout(ctx, omProcTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ps", "-axo", "pid=,etime=,args=")
+	out := &capWriter{n: omProcOutput}
+	cmd.Stdout = out
+	if err := cmd.Run(); err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return parseOMProcs(out.buf.Bytes()), nil
+}
+
+// capWriter keeps the first n bytes written to it and drains the rest, so a
+// command whose output runs away cannot grow the read. Write always reports
+// every byte consumed: what is past the cap is dropped, not refused, or the
+// copy feeding the writer would fail the command with it.
+type capWriter struct {
+	buf bytes.Buffer
+	n   int
+}
+
+func (w *capWriter) Write(p []byte) (int, error) {
+	if room := w.n - w.buf.Len(); room > 0 {
+		keep := p
+		if len(keep) > room {
+			keep = keep[:room]
+		}
+		w.buf.Write(keep)
+	}
+	return len(p), nil
+}
+
+// parseOMProcs reads ps's listing: one "pid etime argv..." line per process. A
+// line that does not open with a pid and an elapsed time is dropped, and with
+// it, whatever it said.
+func parseOMProcs(out []byte) []omProc {
+	var procs []omProc
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 3 {
+			continue
+		}
+		pid, err := strconv.Atoi(f[0])
+		if err != nil {
+			continue
+		}
+		elapsed, err := parsePsEtime(f[1])
+		if err != nil {
+			continue
+		}
+		procs = append(procs, omProc{PID: pid, Elapsed: elapsed, Args: f[2:]})
+	}
+	return procs
+}
+
+// parsePsEtime reads the elapsed time ps prints for a process, "[[dd-]hh:]mm:ss".
+// Any other token is an error, and its line goes with it.
+func parsePsEtime(tok string) (time.Duration, error) {
+	rest, days := tok, 0
+	if d, tail, ok := strings.Cut(tok, "-"); ok {
+		n, err := strconv.Atoi(d)
+		if err != nil {
+			return 0, fmt.Errorf("elapsed time %q", tok)
+		}
+		days, rest = n, tail
+	}
+	parts := strings.Split(rest, ":")
+	if len(parts) < 2 || len(parts) > 3 {
+		return 0, fmt.Errorf("elapsed time %q", tok)
+	}
+	nums := make([]int, len(parts))
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 {
+			return 0, fmt.Errorf("elapsed time %q", tok)
+		}
+		nums[i] = n
+	}
+	h := 0
+	if len(nums) == 3 {
+		h = nums[0]
+	}
+	return time.Duration(days)*24*time.Hour + time.Duration(h)*time.Hour +
+		time.Duration(nums[len(nums)-2])*time.Minute + time.Duration(nums[len(nums)-1])*time.Second, nil
+}
+
+// omReviewArgv is a running process read as an om review: the worktree it was
+// pointed at, the rig that worktree names, and the commits it was handed.
+type omReviewArgv struct {
+	Dir  string
+	Rig  string
+	Base string
+	Head string
+}
+
+// omReviewArgvOf reads a process's argv as an om review's, for the argv
+// internal/land/review.go builds: "om review -C <dir> --base <base> --head
+// <head> --out <file>". A process that is not one — no "review" argument, no
+// -C with a directory after it, or a -C outside the landing worker's work
+// roots — is not a review and comes back false. A review that has not reached
+// its --head yet is one, with no head: it is running, not malformed.
+func omReviewArgvOf(args []string) (omReviewArgv, bool) {
+	var a omReviewArgv
+	review := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "review":
+			review = true
+		case "-C":
+			if i+1 < len(args) {
+				a.Dir, i = args[i+1], i+1
+			}
+		case "--base":
+			if i+1 < len(args) {
+				a.Base, i = args[i+1], i+1
+			}
+		case "--head":
+			if i+1 < len(args) {
+				a.Head, i = args[i+1], i+1
+			}
+		}
+	}
+	rig, ok := omLandingRig(a.Dir)
+	if !review || !ok {
+		return omReviewArgv{}, false
+	}
+	a.Rig = rig
+	return a, true
+}
+
+// omLandingRig is the rig a landing worktree belongs to. The landing worker
+// roots a rig's throwaway worktrees at <work_root>/<rig> and makes each one a
+// "land-*" directory under it, and the default work_root is
+// $TMPDIR/gt-landing-<uid> (internal/daemon/landing_worker.go), so the rig is
+// the path element after the gt-landing- one. Neither the uid nor the directory
+// is hard-coded: the root is matched by the gt-landing- prefix the worker
+// builds it from, whatever TMPDIR that worker ran with.
+func omLandingRig(dir string) (string, bool) {
+	parts := strings.Split(dir, "/")
+	for i, part := range parts {
+		if !strings.HasPrefix(part, "gt-landing-") || i+1 == len(parts) {
+			continue
+		}
+		if rig := parts[i+1]; rig != "" {
+			return rig, true
+		}
+	}
+	return "", false
+}
+
+// omMergeCand is the bead a running review is gated for: the merge line whose
+// candidate commit the process was handed as --head. The log writes the
+// candidate eight characters short of om's argv, so either may be the prefix
+// of the other. No match is no bead: the daemon has not logged this merge yet,
+// and the review is still running.
+func omMergeCand(cands map[string]string, head string) string {
+	if head == "" {
+		return ""
+	}
+	if bead, ok := cands[head]; ok {
+		return bead
+	}
+	for cand, bead := range cands {
+		if strings.HasPrefix(head, cand) || strings.HasPrefix(cand, head) {
+			return bead
+		}
+	}
+	return ""
+}
+
 // omReader keeps the daemon-log scan between polls, so a poll reads only what
 // the log gained, and re-reads the small landings files whole.
 type omReader struct {
 	landings *dashLandings
 	logPath  string
 	cfgPath  string
+	// procs lists the host's processes, and polecatFor names who holds a bead,
+	// read from the bead store by the caller: the om panel's running rows and
+	// the Landings pane's live rows ask that one question of the same reader.
+	procs      omProcLister
+	polecatFor func(rig, bead string) string
 
 	mu       sync.Mutex
 	offset   int64
@@ -172,8 +396,11 @@ type omReader struct {
 	lastTick *dashboard.Dispatch // the spec dispatcher's latest tick line
 }
 
-func newOMReader(townRoot string, landings *dashLandings) *omReader {
-	return &omReader{landings: landings, logPath: filepath.Join(townRoot, "daemon", "daemon.log"), cfgPath: omConfigPath()}
+func newOMReader(townRoot string, landings *dashLandings, polecatFor func(rig, bead string) string) *omReader {
+	return &omReader{
+		landings: landings, logPath: filepath.Join(townRoot, "daemon", "daemon.log"), cfgPath: omConfigPath(),
+		procs: listOMProcs, polecatFor: polecatFor,
+	}
 }
 
 // omConfigPath is the reviewer's own config, in the home of whoever runs the
@@ -189,14 +416,76 @@ func omConfigPath() string {
 
 // read is the panel's whole reading. A reader that fails leaves its part out;
 // nothing is ever shown as zero for want of a read.
+//
+// The two slow things a read does — listing the host's processes, and reading
+// a bead store for each running row's holder — are done outside r.mu, which
+// the trend and dispatch reads share: neither is worth stalling another
+// panel's poll for.
 func (r *omReader) read(now time.Time) *dashboard.OM {
+	procs := r.listProcs()
+	om, cands := r.readPanelLocked(now)
+	if om == nil {
+		return nil
+	}
+	om.Running = r.runningRows(cands, procs, now)
+	return om
+}
+
+// readPanelLocked is the panel's numbers off the log and the landings files,
+// and the merges in flight as the candidate-commit join a running review is
+// found under. r.mu is held; nil, nil is a read the log gave nothing to.
+func (r *omReader) readPanelLocked(now time.Time) (*dashboard.OM, map[string]string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err := r.scanLog(); err != nil && len(r.stages) == 0 && len(r.rejects) == 0 {
+		return nil, nil
+	}
+	om := buildOM(now, r.landings.get(), r.stages, r.rejects, loadOMConfig(r.cfgPath))
+	cands := make(map[string]string, len(r.merges))
+	for _, m := range r.merges {
+		if m.Cand != "" {
+			cands[m.Cand] = m.Bead
+		}
+	}
+	return om, cands
+}
+
+// listProcs lists the host's processes once, off the lock: ps is the slowest
+// thing a read does, and a lister that fails leaves the panel its rows.
+func (r *omReader) listProcs() []omProc {
+	if r.procs == nil {
 		return nil
 	}
-	recs := r.landings.get()
-	return buildOM(now, recs, r.stages, r.rejects, loadOMConfig(r.cfgPath))
+	procs, err := r.procs(context.Background())
+	if err != nil {
+		return nil
+	}
+	return procs
+}
+
+// runningRows is the om reviews running right now, off the processes on the
+// host: each review's argv gives the worktree it reads and the commits it was
+// handed, and the worktree's rig and the caller's bead read name the rest. A
+// review is joined to its bead through the merge line whose candidate is the
+// head the process was handed, and one no merge line names yet is still
+// listed, with no bead. Newest first.
+func (r *omReader) runningRows(cands map[string]string, procs []omProc, now time.Time) []dashboard.OMRunning {
+	var rows []dashboard.OMRunning
+	for _, p := range procs {
+		a, ok := omReviewArgvOf(p.Args)
+		if !ok {
+			continue
+		}
+		row := dashboard.OMRunning{Rig: a.Rig, Started: now.Add(-p.Elapsed),
+			Base: shortSHA(a.Base), Head: shortSHA(a.Head), PID: p.PID}
+		row.Bead = omMergeCand(cands, a.Head)
+		if row.Bead != "" && r.polecatFor != nil {
+			row.Polecat = r.polecatFor(row.Rig, row.Bead)
+		}
+		rows = append(rows, row)
+	}
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Started.After(rows[j].Started) })
+	return rows
 }
 
 // readOMRecords reads one rig's om record file line by line. A line that is
@@ -286,7 +575,7 @@ func (r *omReader) parseLogLine(line string) {
 	}
 	if m := omMergeRe.FindStringSubmatch(line); m != nil {
 		if at, err := omLogAt(m[1]); err == nil {
-			r.beginMerge(m[2], at)
+			r.beginMerge(omMerge{At: at, Bead: m[2], Head: m[3], Tip: m[4], Cand: m[5]})
 		}
 		return
 	}
@@ -327,11 +616,19 @@ func omLogAt(stamp string) (time.Time, error) {
 // flight. A landed bead with no later record is re-merged for the repair, and
 // a rejected landing can be requeued and merged again: the newest merge is the
 // live one, so it replaces whatever the bead had.
-func (r *omReader) beginMerge(bead string, at time.Time) {
+func (r *omReader) beginMerge(m omMerge) {
 	if r.merges == nil {
 		r.merges = map[string]omMerge{}
 	}
-	r.merges[bead] = omMerge{At: at, Bead: bead}
+	// A merge line that names no commits must not erase the ones the bead's
+	// landing began with: a rig whose landing merges through a pull request
+	// logs a second line for it ("merged <cand> on main through pull request
+	// #N", the daemon log of 2026-10-12), and the commits — the candidate a
+	// running review is joined by — came from the first.
+	if old, ok := r.merges[m.Bead]; ok && m.Cand == "" && old.Cand != "" {
+		m.Head, m.Tip, m.Cand = old.Head, old.Tip, old.Cand
+	}
+	r.merges[m.Bead] = m
 }
 
 // endMerge marks a bead's merge no longer in flight. A line at or before the
@@ -497,9 +794,26 @@ func buildOM(now time.Time, recs []omRecord, stages []omStage, rejs []omRejectio
 			first = at
 		}
 	}
+	// omSecs is om's own wall time for a landing, off the stages line the
+	// review wrote; nil when no line for it names an om stage.
+	omSecs := func(bead string, at time.Time) *float64 {
+		if st := omStageFor(stages, bead, at); st != nil && st.OM != nil {
+			s := st.OM.Seconds()
+			return &s
+		}
+		return nil
+	}
+	// byBead is a bead's last landing record, for the facts a rejection's own
+	// log line does not carry: the rig that holds it and its route.
+	byBead := make(map[string]omRecord, len(recs))
+	// omRan collects the reviews om actually ran, newest first once sorted:
+	// what Last lists, as against Recent's longer tail of everything the review
+	// loop decided.
+	var omRan []dashboard.OMReview
 
 	var recent []dashboard.OMReview
 	for _, rec := range recs {
+		byBead[rec.Bead] = rec
 		note(rec.LandedAt)
 		oc := omOutcome(rec.OMVerdict)
 		om.Routes[rec.Route]++
@@ -547,11 +861,14 @@ func buildOM(now time.Time, recs []omRecord, stages []omStage, rejs []omRejectio
 		if oc == "error" {
 			rv.Detail = truncateRunes(rec.OMVerdict, 120)
 		}
-		if st := omStageFor(stages, rec.Bead, rec.LandedAt); st != nil && st.OM != nil {
-			s := st.OM.Seconds()
-			rv.Secs = &s
-		}
+		rv.Secs = omSecs(rec.Bead, rec.LandedAt)
 		recent = append(recent, rv)
+		if oc != "skipped" {
+			// om ran this landing: it approved it, or the review errored on
+			// it. A skipped landing is one nothing reviewed (an operator
+			// route), and belongs only in the tail.
+			omRan = append(omRan, rv)
+		}
 	}
 
 	for _, rj := range rejs {
@@ -574,6 +891,20 @@ func buildOM(now time.Time, recs []omRecord, stages []omStage, rejs []omRejectio
 		}
 		recent = append(recent, dashboard.OMReview{At: rj.At, Bead: rj.Bead, Outcome: "rejected", Kind: rj.Kind,
 			Score: rj.Score, Detail: truncateRunes(rj.Detail, 140)})
+		if rj.Kind == "review" {
+			// om ran this landing too, and asked for changes: a review
+			// rejection is a review that ran. A gate, conflict, policy or
+			// empty rejection was decided before om ran, and belongs only in
+			// the tail. The rig and route are the ones the bead's own landing
+			// record names, and a rejection without a score is still a
+			// review that ran.
+			rv := dashboard.OMReview{At: rj.At, Bead: rj.Bead, Outcome: "rejected", Kind: rj.Kind,
+				Score: rj.Score, Secs: omSecs(rj.Bead, rj.At), Detail: truncateRunes(rj.Detail, 140)}
+			if rec, ok := byBead[rj.Bead]; ok {
+				rv.Rig, rv.Route = rec.Rig, rec.Route
+			}
+			omRan = append(omRan, rv)
+		}
 	}
 
 	for _, st := range stages {
@@ -627,6 +958,12 @@ func buildOM(now time.Time, recs []omRecord, stages []omStage, rejs []omRejectio
 		recent = recent[:omRecentRows]
 	}
 	om.Recent = recent
+
+	sort.SliceStable(omRan, func(i, j int) bool { return omRan[i].At.After(omRan[j].At) })
+	if len(omRan) > omLastRows {
+		omRan = omRan[:omLastRows]
+	}
+	om.Last = omRan
 	return om
 }
 

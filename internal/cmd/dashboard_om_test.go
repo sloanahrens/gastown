@@ -1,14 +1,324 @@
 package cmd
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/landings"
 )
+
+// omTestMergeLine is the merge line the landing worker logs when it starts
+// gating a merged tree, with the three commits it names (internal/land/land.go
+// logs "merged <head> onto <remote>/<target> (<tip>) as <cand>"). om is handed
+// the candidate as --head (internal/land/review.go), so the candidate is what
+// joins a running review back to its bead.
+const omTestMergeLine = "2026/10/12 19:57:31 landing_worker: [land] gt-7qz2h: merged 49f6dbfd onto origin/main (8d0d9b28) as 1a2b3c4d; pushing the merge candidate and waiting for its CI verdict, then om review"
+
+// omTestProc is a process as ps lists it: pid, elapsed time, argv.
+func omTestProc(pid int, elapsed time.Duration, argv string) omProc {
+	return omProc{PID: pid, Elapsed: elapsed, Args: strings.Fields(argv)}
+}
+
+func TestParsePsEtime(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		tok  string
+		want time.Duration
+		ok   bool
+	}{
+		{"00:03:12", 3*time.Minute + 12*time.Second, true},
+		{"02:27:05", 2*time.Hour + 27*time.Minute + 5*time.Second, true},
+		{"12:34", 12*time.Minute + 34*time.Second, true},
+		{"3-02:03:04", 3*24*time.Hour + 2*time.Hour + 3*time.Minute + 4*time.Second, true},
+		{"", 0, false},
+		{"not-a-time", 0, false},
+		{"1:2:3:4", 0, false},
+		{"-1", 0, false},
+	}
+	for _, c := range cases {
+		got, err := parsePsEtime(c.tok)
+		if c.ok && (err != nil || got != c.want) {
+			t.Errorf("parsePsEtime(%q) = %v, %v; want %v", c.tok, got, err, c.want)
+		}
+		if !c.ok && err == nil {
+			t.Errorf("parsePsEtime(%q) = %v; want an error", c.tok, got)
+		}
+	}
+}
+
+// A ps listing is untrusted text: a line that is not a process, and a line
+// whose elapsed time is not one, are dropped rather than read as rows.
+func TestParseOMProcsDropsWhatIsNotAProcess(t *testing.T) {
+	t.Parallel()
+	out := []byte("    1 02:27:05 /sbin/launchd\n" +
+		"  501 00:03:12 om review -C /tmp/gt-landing-501/fractals/land-1/wt --head 1a2b3c4d\n" +
+		"not a process line\n" +
+		"  502 not-a-time om review -C /x\n" +
+		"  503 3-02:03:04 om review\n")
+	procs := parseOMProcs(out)
+	if len(procs) != 3 {
+		t.Fatalf("procs = %+v, want the three whole lines", procs)
+	}
+	if procs[0].PID != 1 || procs[0].Elapsed != 2*time.Hour+27*time.Minute+5*time.Second {
+		t.Errorf("procs[0] = %+v", procs[0])
+	}
+	if procs[1].PID != 501 || procs[1].Elapsed != 3*time.Minute+12*time.Second {
+		t.Errorf("procs[1] = %+v", procs[1])
+	}
+	if len(procs[1].Args) != 6 || procs[1].Args[0] != "om" || procs[1].Args[1] != "review" {
+		t.Errorf("procs[1] argv = %v", procs[1].Args)
+	}
+	if procs[2].PID != 503 || procs[2].Elapsed != 3*24*time.Hour+2*time.Hour+3*time.Minute+4*time.Second {
+		t.Errorf("procs[2] = %+v", procs[2])
+	}
+}
+
+// The merge line names the landing's three commits. The candidate is the one
+// om is handed as --head, so the reader keeps all three.
+func TestOMMergeLineKeepsTheLandingsCommits(t *testing.T) {
+	t.Parallel()
+	r := &omReader{}
+	r.parseLogLine(omTestMergeLine)
+	m, ok := r.merges["gt-7qz2h"]
+	if !ok {
+		t.Fatalf("merges = %+v", r.merges)
+	}
+	if m.Head != "49f6dbfd" || m.Tip != "8d0d9b28" || m.Cand != "1a2b3c4d" {
+		t.Errorf("merge = %+v, want head/tip/cand", m)
+	}
+	if m.Done {
+		t.Error("a merge with no landed line after it is still in flight")
+	}
+	// A merge line that does not name them still begins a merge: the running
+	// row survives a wording change, only the join is lost.
+	r.parseLogLine("2026/10/12 19:58:00 landing_worker: [land] gt-other: merged something else entirely")
+	if m := r.merges["gt-other"]; m.Bead != "gt-other" || m.Cand != "" || m.Done {
+		t.Errorf("merge without the commit tail = %+v", m)
+	}
+	// A rig that lands through a pull request logs a second line for the same
+	// landing, naming no commits. It must not erase the candidate the first
+	// line named: the running review is joined by it.
+	r.parseLogLine("2026/10/12 19:59:00 landing_worker: [land] gt-7qz2h: merged 1a2b3c4d on main through pull request #213")
+	if m := r.merges["gt-7qz2h"]; m.Head != "49f6dbfd" || m.Tip != "8d0d9b28" || m.Cand != "1a2b3c4d" {
+		t.Errorf("the pull-request line erased the landing's commits: %+v", m)
+	}
+}
+
+// A running review is read off its process's argv, and a process that is not
+// one om review is not a review.
+func TestOMReviewArgvOf(t *testing.T) {
+	t.Parallel()
+	a, ok := omReviewArgvOf(strings.Fields("om review -C /tmp/gt-landing-501/fractals/land-1/wt --base 8d0d9b28 --head 1a2b3c4d --out /tmp/v.json"))
+	if !ok || a.Rig != "fractals" || a.Dir != "/tmp/gt-landing-501/fractals/land-1/wt" || a.Base != "8d0d9b28" || a.Head != "1a2b3c4d" {
+		t.Errorf("review argv = %+v, %v", a, ok)
+	}
+	notReviews := []string{
+		"om dashboard",
+		"om review --base a --head b",      // no -C
+		"om review -C /tmp/wt --head b",    // not a landing worktree
+		"om review -C /tmp/gt-landing-501", // a root with no rig under it
+		"om review -C",                     // a -C left without a value
+		"/sbin/launchd",
+	}
+	for _, argv := range notReviews {
+		if a, ok := omReviewArgvOf(strings.Fields(argv)); ok {
+			t.Errorf("omReviewArgvOf(%q) = %+v; want not a review", argv, a)
+		}
+	}
+	// A review still in flight to its flags carries no head yet, and is
+	// listed with none: it is a review running, not a malformed line.
+	if a, ok := omReviewArgvOf(strings.Fields("om review -C /tmp/gt-landing-501/x")); !ok || a.Head != "" || a.Rig != "x" {
+		t.Errorf("a review with no --head yet = %+v, %v", a, ok)
+	}
+}
+
+// omTestLogFile is a daemon.log holding lines, for a reader to scan.
+func omTestLogFile(t *testing.T, lines ...string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "daemon.log")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// A running review is listed from the process that runs it: the rig and the
+// commits off its argv, the bead off the merge line that names its --head as
+// the merge candidate, and the polecat off the caller's bead read. A review no
+// merge line names yet is still listed, with no bead. One ps read serves the
+// whole panel read, and the rows ride in its JSON.
+func TestOMReadListsTheReviewsRunningNow(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 12, 20, 0, 0, 0, time.Local)
+	calls := 0
+	r := &omReader{
+		logPath:  omTestLogFile(t, omTestMergeLine),
+		landings: &dashLandings{},
+		procs: func(context.Context) ([]omProc, error) {
+			calls++
+			return []omProc{
+				omTestProc(501, 3*time.Minute, "om review -C /tmp/gt-landing-501/fractals/land-1/wt --base 8d0d9b28c1e2f3a4 --head 1a2b3c4d5e6f7081 --out /tmp/v.json"),
+				omTestProc(502, 90*time.Second, "om review -C /var/folders/xy/T/gt-landing-501/gastown/land-2/wt --base aaaa --head bbbb --out /tmp/v.json"),
+				omTestProc(7, 10*time.Hour, "/sbin/launchd"),
+			}, nil
+		},
+		polecatFor: func(rig, bead string) string { return rig + ":" + bead },
+	}
+	om := r.read(now)
+	if om == nil {
+		t.Fatal("the log has a merge line; the read must not come back empty")
+	}
+	if calls != 1 {
+		t.Fatalf("the lister was called %d times; one read lists the processes once", calls)
+	}
+	rows := om.Running
+	if len(rows) != 2 {
+		t.Fatalf("running = %+v, want the two reviews and not launchd", rows)
+	}
+	// Newest first: the minute-and-a-half review started after the other.
+	unmatched := rows[0]
+	if unmatched.PID != 502 || unmatched.Rig != "gastown" || unmatched.Bead != "" || unmatched.Polecat != "" {
+		t.Errorf("unmatched review = %+v; want its rig, no bead and no polecat", unmatched)
+	}
+	if unmatched.Started != now.Add(-90*time.Second) || unmatched.Base != "aaaa" || unmatched.Head != "bbbb" {
+		t.Errorf("unmatched review = %+v", unmatched)
+	}
+	joined := rows[1]
+	if joined.PID != 501 || joined.Bead != "gt-7qz2h" || joined.Rig != "fractals" || joined.Polecat != "fractals:gt-7qz2h" {
+		t.Errorf("joined review = %+v; want the merge line's bead", joined)
+	}
+	if joined.Started != now.Add(-3*time.Minute) || joined.Base != "8d0d9b28" || joined.Head != "1a2b3c4d" {
+		t.Errorf("joined review = %+v; the row names what om was handed, short", joined)
+	}
+	b, err := json.Marshal(om)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"running":[`) {
+		t.Errorf("the running reviews are missing from the JSON: %s", b)
+	}
+	// Nothing reviewed in this read, so the panel's last-five list is left out
+	// rather than drawn empty.
+	if strings.Contains(string(b), `"last":`) {
+		t.Errorf("a panel with no review ran must leave last out: %s", b)
+	}
+}
+
+// A host with no ps, one whose ps fails, and a reader that lists nothing cost
+// the panel its running rows and nothing else: the rest of the om read is
+// still the panel.
+func TestOMRunningRowsSurviveAListerFailure(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 12, 20, 0, 0, 0, time.Local)
+	logPath := omTestLogFile(t, omTestMergeLine)
+	r := &omReader{logPath: logPath, landings: &dashLandings{},
+		procs: func(context.Context) ([]omProc, error) { return nil, errors.New("ps: not found") }}
+	if om := r.read(now); om == nil || len(om.Running) != 0 {
+		t.Errorf("a failed lister must leave the panel and drop only its rows: %+v", om)
+	}
+	r = &omReader{logPath: logPath, landings: &dashLandings{}}
+	if om := r.read(now); om == nil || len(om.Running) != 0 {
+		t.Errorf("a reader with no lister must still read the panel: %+v", om)
+	}
+	if rows := (&omReader{}).runningRows(map[string]string{"abc12345": "gt-1"}, nil, now); len(rows) != 0 {
+		t.Errorf("rows = %+v, want none", rows)
+	}
+}
+
+// Last is the newest reviews om actually ran, newest first and capped: a
+// skipped landing was never reviewed, and is not one.
+func TestOMLastListsOnlyReviewsOmRan(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 12, 18, 0, 0, 0, time.Local)
+	at := func(min int) time.Time { return now.Add(-time.Duration(min) * time.Minute) }
+	recs := []omRecord{
+		omTestRec("gt-skip", "skipped", 0, "overseer-manual", at(1)),
+		omTestRec("gt-1", "approve", 0.9, "daemon", at(2)),
+		omTestRec("gt-2", "approve", 0.4, "daemon", at(3)),
+		omTestRec("gt-3", "error:om review did not run", 0, "daemon", at(4)),
+		omTestRec("gt-4", "approve", 0.7, "daemon", at(5)),
+		omTestRec("gt-5", "approve", 0.7, "daemon", at(6)),
+		omTestRec("gt-6", "approve", 0.7, "daemon", at(7)),
+	}
+	om := buildOM(now, recs, nil, nil, omConfig{})
+	if len(om.Last) != omLastRows {
+		t.Fatalf("last = %+v, want %d rows", om.Last, omLastRows)
+	}
+	var beads []string
+	for _, rv := range om.Last {
+		beads = append(beads, rv.Bead)
+	}
+	want := []string{"gt-1", "gt-2", "gt-3", "gt-4", "gt-5"}
+	if strings.Join(beads, ",") != strings.Join(want, ",") {
+		t.Errorf("last = %v, want %v (newest first, no skip, no sixth)", beads, want)
+	}
+	if len(om.Recent) != len(recs) {
+		t.Errorf("recent = %d rows; every landing is still in the tail", len(om.Recent))
+	}
+}
+
+// A review rejection is a review that ran: it is listed with the rig its bead's
+// landing record names and om's own wall time, and one with no score is still
+// listed. A rejection decided before om ran is not a review that ran.
+func TestOMLastGivesARejectionItsRigAndSeconds(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 12, 18, 0, 0, 0, time.Local)
+	landed := omTestRec("gt-rej", "approve", 0.5, "daemon", now.Add(-time.Hour))
+	landed.Rig = "fractals"
+	om90 := 90 * time.Second
+	stages := []omStage{{At: now.Add(-31 * time.Minute), Bead: "gt-rej", OM: &om90}}
+	score := 0.55
+	rejs := []omRejection{
+		{At: now.Add(-30 * time.Minute), Bead: "gt-rej", Kind: "review", Score: &score},
+		{At: now.Add(-25 * time.Minute), Bead: "gt-noscore", Kind: "review"},
+		{At: now.Add(-20 * time.Minute), Bead: "gt-gate", Kind: "gate"},
+	}
+	om := buildOM(now, []omRecord{landed}, stages, rejs, omConfig{})
+	byBead := map[string]dashboard.OMReview{}
+	for _, rv := range om.Last {
+		byBead[rv.Bead+"/"+rv.Outcome] = rv
+	}
+	if len(om.Last) != 3 {
+		t.Fatalf("last = %+v, want the landing and the two reviews", om.Last)
+	}
+	if om.Last[0].Bead != "gt-noscore" || !om.Last[0].At.Equal(now.Add(-25*time.Minute)) {
+		t.Errorf("last[0] = %+v; the newest review ran 25 minutes ago", om.Last[0])
+	}
+	if rj := byBead["gt-rej/rejected"]; rj.Rig != "fractals" || rj.Route != "daemon" || rj.Score == nil || *rj.Score != 0.55 {
+		t.Errorf("review rejection = %+v; want its rig, route and score", rj)
+	} else if rj.Secs == nil || *rj.Secs != 90 {
+		t.Errorf("review rejection secs = %v, want om's 90s", rj.Secs)
+	}
+	if rj := byBead["gt-noscore/rejected"]; rj.Score != nil || rj.Rig != "" || rj.Secs != nil {
+		t.Errorf("a rejection without a score is still a review that ran: %+v", rj)
+	}
+	if _, ok := byBead["gt-gate/rejected"]; ok {
+		t.Error("a gate rejection was decided before om ran, and is not the panel's last")
+	}
+	if _, ok := byBead["gt-rej/approved"]; !ok {
+		t.Error("the landing itself is a review om ran too")
+	}
+	// Recent keeps its longer tail, and its rejection rows are unchanged.
+	found := false
+	for _, rv := range om.Recent {
+		if rv.Bead == "gt-rej" && rv.Outcome == "rejected" {
+			found = true
+			if rv.Rig != "" || rv.Route != "" {
+				t.Errorf("recent rejection row = %+v; the tail row is unchanged", rv)
+			}
+		}
+	}
+	if !found {
+		t.Error("the rejection is missing from the tail")
+	}
+}
 
 func omTestRec(bead, verdict string, score float64, route string, at time.Time) omRecord {
 	return omRecord{Record: landings.Record{Bead: bead, Rig: "gastown", OMVerdict: verdict, OMScore: score, Route: route, LandedAt: at}}
