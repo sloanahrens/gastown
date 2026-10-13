@@ -44,8 +44,8 @@ func TestIntegrationRunDoneWithRoutedIssueIgnoresCurrentRigMirror(t *testing.T) 
 
 	log := readSubmitSourceBDLog(t, logPath)
 	assertBDLogContains(t, log, ownerBeadsDir, "show bd-source --json")
-	assertBDLogContains(t, log, ownerBeadsDir, "update bd-source --append-notes READY TO LAND")
-	assertBDLogContains(t, log, ownerBeadsDir, "update bd-source --add-label=gt:ready-to-land")
+	assertBDLogContains(t, log, ownerBeadsDir, "update bd-source --append-notes=READY TO LAND")
+	readyToLandUpdate(t, log)
 	if strings.Contains(log, "gt:merge-request") {
 		t.Fatalf("gt done created an MR wisp:\n%s", log)
 	}

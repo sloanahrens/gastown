@@ -112,21 +112,54 @@ func showSourceBead(t *testing.T, beadsDir string) *beads.Issue {
 	return issues[0]
 }
 
+// bdLogCalls splits the bd recorder's log into one entry per call. The log is
+// one tab-separated line per call, so a multi-line argument runs until the next
+// line that has a tab in it.
+func bdLogCalls(bdLog string) []string {
+	var calls []string
+	for _, line := range strings.Split(strings.TrimRight(bdLog, "\n"), "\n") {
+		if strings.Contains(line, "\t") || len(calls) == 0 {
+			calls = append(calls, line)
+			continue
+		}
+		calls[len(calls)-1] += "\n" + line
+	}
+	return calls
+}
+
+// readyToLandUpdate returns the one bd update that marks bd-source ready to
+// land. gt done writes the READY TO LAND note and the gt:ready-to-land label in
+// that single call (gt-uhdbi), so a note without the label, or the label in its
+// own call, leaves a window where the landing worker sees half a submission.
+func readyToLandUpdate(t *testing.T, bdLog string) string {
+	t.Helper()
+	var updates []string
+	for _, call := range bdLogCalls(bdLog) {
+		_, args, _ := strings.Cut(call, "\t")
+		if !strings.HasPrefix(args, "update bd-source ") {
+			continue
+		}
+		if strings.Contains(args, "--append-notes=READY TO LAND") || strings.Contains(args, "--add-label=gt:ready-to-land") {
+			updates = append(updates, args)
+		}
+	}
+	if len(updates) != 1 {
+		t.Fatalf("want exactly one bd update carrying the READY TO LAND note and the ready label, got %d:\n%s", len(updates), bdLog)
+	}
+	for _, want := range []string{"--append-notes=READY TO LAND", "--add-label=gt:ready-to-land"} {
+		if !strings.Contains(updates[0], want) {
+			t.Fatalf("the ready-to-land update lacks %q, so note and label are not written together:\n%s", want, updates[0])
+		}
+	}
+	return updates[0]
+}
+
 // appendedNotes returns the text gt done appended to the source bead's notes,
-// as the bd recorder logged it. The log is one tab-separated line per call, so
-// a multi-line note runs until the next line that has a tab in it.
+// as the bd recorder logged it. The note is the --append-notes= value, which
+// runs to the label flags that follow its last line.
 func appendedNotes(t *testing.T, bdLog string) string {
 	t.Helper()
-	_, rest, ok := strings.Cut(bdLog, "update bd-source --append-notes ")
-	if !ok {
-		t.Fatalf("gt done appended no notes to bd-source:\n%s", bdLog)
-	}
-	var note []string
-	for _, line := range strings.Split(rest, "\n") {
-		if strings.Contains(line, "\t") {
-			break
-		}
-		note = append(note, line)
-	}
-	return strings.Join(note, "\n") + "\n"
+	_, note, _ := strings.Cut(readyToLandUpdate(t, bdLog), "--append-notes=")
+	note, _, _ = strings.Cut(note, " --add-label=")
+	return note + "\n"
 }
