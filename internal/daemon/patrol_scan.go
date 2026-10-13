@@ -132,7 +132,12 @@ func (d *Daemon) runPatrolScan() {
 	}
 	env := &patrolScanHost{d: d}
 	ledger := patrolscan.NewFileLedger(patrolscan.LedgerPath(d.config.TownRoot), 7*24*time.Hour)
-	scanner := patrolscan.New(env, ledger, patrolScanOptions(d.patrolConfig, d.clk().Now))
+	opts := patrolScanOptions(d.patrolConfig, d.clk().Now)
+	// The pool's cap, read here rather than in patrolScanOptions: it needs the
+	// host's tmux reading, and it is the same cap a sling answers to
+	// (gt-02tcp).
+	opts.SeatCap = env.seatCap
+	scanner := patrolscan.New(env, ledger, opts)
 	rigs := d.getPatrolRigs("patrol_scan")
 	for _, rigName := range rigs {
 		if d.ctx != nil && d.ctx.Err() != nil {

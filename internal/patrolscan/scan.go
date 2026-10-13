@@ -361,6 +361,32 @@ func (w Work) HasLabel(label string) bool {
 	return false
 }
 
+// SeatCap is the polecat_pool cap a crash restart answers to and the live
+// census behind it (gt-02tcp).
+//
+// The census counts live polecats, not the seats the pool calls occupied: the
+// crashed seat is one of those, and counting it would leave the restart
+// waiting on the seat it is about to fill.
+//
+// The zero value is no cap holding the restart: a pool with none, or a cap
+// with room.
+type SeatCap struct {
+	// Live is how many polecats are live now.
+	Live int
+	// Limit is the cap they are counted against: polecat_pool.max_seats for
+	// the pool's own seat, or polecat_pool.max_total across every seat. Zero
+	// is no cap, which is the answer when the pool has none.
+	Limit int
+	// Key names the polecat_pool key Limit came from — the key the operator
+	// raises — so the wait names what holds it: "polecat_pool.max_seats" or
+	// "polecat_pool.max_total". Empty when there is no cap.
+	Key string
+}
+
+// Full reports whether the cap has no room for one more live polecat. A cap of
+// zero is no cap, so it is never full.
+func (c SeatCap) Full() bool { return c.Limit > 0 && c.Live >= c.Limit }
+
 // Wisp is the slice of a non-closed wisp the leaked-wisp pass decides on.
 type Wisp struct {
 	ID       string
@@ -493,6 +519,11 @@ type Options struct {
 	// IsRefusal reports whether a Restart error is the supervisor refusing
 	// (parked, frozen, e-stop, budget) rather than failing.
 	IsRefusal func(error) bool
+	// SeatCap reads the polecat_pool cap a crash restart answers to. Nil
+	// leaves the tick uncapped, the behavior before gt-02tcp. An error means
+	// the cap could not be read, which is Unknown: a restart taken on an
+	// unread cap is a session raised past a limit nobody measured.
+	SeatCap func() (SeatCap, error)
 	// Reap enables the worktree reap pass. Nil leaves it off, and it does
 	// nothing unless the Env also implements ReapEnv.
 	Reap *ReapOptions
@@ -859,6 +890,24 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		f.Outcome = OutcomeWaiting
 		f.Detail = fmt.Sprintf("%s with %s hooked; dead sample %d of %d", res.Reason, work.ID, samples, s.o.DeadSamples)
 		return f, true
+	}
+
+	// The restart below raises a live session, so it spends a seat as a sling
+	// does and waits for a free one rather than pushing the town over its cap.
+	// Only the crash relaunch answers to the cap: the switch below is the
+	// DEFERRED and ESCALATED turns, recoveries of work the town already holds,
+	// which keep the handling their own beads gave them. The dead samples
+	// accrued are untouched, so the restart goes ahead on the first later tick
+	// that finds a free seat (gt-02tcp).
+	if recovery == "" && s.o.SeatCap != nil {
+		cap, err := s.o.SeatCap()
+		if err != nil {
+			return unknown("seat cap unreadable", err)
+		}
+		if cap.Full() {
+			return skip(fmt.Sprintf("%s stays hooked: %s full (%d/%d polecats live), waiting for a free seat",
+				work.ID, cap.Key, cap.Live, cap.Limit))
+		}
 	}
 
 	reason := fmt.Sprintf("patrol scan: %s with %s hooked (%d dead samples)", res.Reason, work.ID, samples)
