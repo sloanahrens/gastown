@@ -231,7 +231,7 @@ func (r compactReportRun) dailyDigest() error {
 
 	// Send to the overseer only; the audit bead is the permanent record.
 	if err := r.mail(fmt.Sprintf("Wisp Compaction: %s", dateStr), markdown); err != nil {
-		return fmt.Errorf("sending digest: %w", err)
+		return withdrawAuditBead(r.events(), beadID, fmt.Errorf("sending digest: %w", err))
 	}
 
 	fmt.Fprintf(r.out, "%s Compaction digest sent for %s\n", style.Success.Render("✓"), dateStr)
@@ -419,6 +419,20 @@ func createAuditEvent(db beads.Client, title, kind, payload, markdown, closeReas
 	return issue.ID, nil
 }
 
+// withdrawAuditBead deletes the audit bead of a report whose mail failed and
+// returns sendErr. The idempotency checks read closed audit events as "already
+// sent", so a bead left behind would make every later run skip the report that
+// never went out. If the delete fails too, the error says the bead must go.
+func withdrawAuditBead(db beads.Client, beadID string, sendErr error) error {
+	if beadID == "" {
+		return sendErr
+	}
+	if err := db.DeleteIssues(beadID); err != nil {
+		return fmt.Errorf("%w (audit bead %s was not withdrawn and will suppress the resend until deleted: %v)", sendErr, beadID, err)
+	}
+	return sendErr
+}
+
 // --- Weekly Rollup ---
 
 func (r compactReportRun) weeklyRollup() error {
@@ -495,7 +509,7 @@ func (r compactReportRun) weeklyRollup() error {
 	// Send to the overseer.
 	subject := fmt.Sprintf("Weekly Wisp Compaction: %s to %s", weekStart, weekEnd)
 	if err := r.mail(subject, markdown); err != nil {
-		return fmt.Errorf("sending weekly rollup: %w", err)
+		return withdrawAuditBead(r.events(), beadID, fmt.Errorf("sending weekly rollup: %w", err))
 	}
 
 	fmt.Fprintf(r.out, "%s Weekly compaction rollup sent to the overseer (%s to %s)\n",

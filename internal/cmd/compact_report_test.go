@@ -472,6 +472,79 @@ func TestRunDailyDigestMailsAfterTheAuditBead(t *testing.T) {
 	}
 }
 
+// failMailOnce makes the first mail fail; later mails are recorded.
+func (fx *compactReportFixture) failMailOnce() {
+	attempts := 0
+	fx.r.mail = func(subject, body string) error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("smtp down")
+		}
+		fx.mails = append(fx.mails, subject)
+		return nil
+	}
+}
+
+// A failed send must not leave the day marked as sent: the next run sends it.
+func TestRunDailyDigestResendsAfterFailedMail(t *testing.T) {
+	t.Parallel()
+	fx := newCompactReportFixture(t, time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC))
+	fx.failMailOnce()
+
+	err := fx.r.dailyDigest()
+	if err == nil || !strings.Contains(err.Error(), "sending digest") {
+		t.Fatalf("error = %v, want the send failure", err)
+	}
+	if n := len(fx.events(t)); n != 0 {
+		t.Fatalf("audit beads = %d after a failed send, want none", n)
+	}
+	if err := fx.r.dailyDigest(); err != nil {
+		t.Fatalf("second dailyDigest: %v", err)
+	}
+	if len(fx.mails) != 1 || fx.mails[0] != "Wisp Compaction: 2026-05-15" {
+		t.Fatalf("mails = %v, want the digest sent on the second run", fx.mails)
+	}
+	if err := fx.r.dailyDigest(); err != nil {
+		t.Fatalf("third dailyDigest: %v", err)
+	}
+	if len(fx.mails) != 1 {
+		t.Fatalf("mails = %v, want the third run to report already sent", fx.mails)
+	}
+}
+
+func TestRunWeeklyRollupResendsAfterFailedMail(t *testing.T) {
+	t.Parallel()
+	fx := newCompactReportFixture(t, time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC))
+	fx.failMailOnce()
+
+	if err := fx.r.weeklyRollup(); err == nil || !strings.Contains(err.Error(), "sending weekly rollup") {
+		t.Fatalf("error = %v, want the send failure", err)
+	}
+	if err := fx.r.weeklyRollup(); err != nil {
+		t.Fatalf("second weeklyRollup: %v", err)
+	}
+	if len(fx.mails) != 1 {
+		t.Fatalf("mails = %v, want the rollup sent on the second run", fx.mails)
+	}
+}
+
+// deleteFails is a beads.Client whose deletes all fail.
+type deleteFails struct{ beads.Client }
+
+func (deleteFails) DeleteIssues(...string) error { return errors.New("delete failed") }
+
+func TestRunDailyDigestNamesTheStuckAuditBeadWhenWithdrawFails(t *testing.T) {
+	t.Parallel()
+	fx := newCompactReportFixture(t, time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC))
+	fx.failMailOnce()
+	fx.r.db = deleteFails{fx.db}
+
+	err := fx.r.dailyDigest()
+	if err == nil || !strings.Contains(err.Error(), "smtp down") || !strings.Contains(err.Error(), "hq-f1 was not withdrawn") {
+		t.Fatalf("error = %v, want the send failure and the stuck bead", err)
+	}
+}
+
 func TestQueryCompactionReportsReadsPayloadField(t *testing.T) {
 	t.Parallel()
 	db := beadsfake.New()
