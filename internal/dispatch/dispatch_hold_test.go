@@ -28,6 +28,11 @@ func TestDispatchHoldFields_Verdicts(t *testing.T) {
 			want:  "label gt:needs-human",
 		},
 		{
+			name:  "needs-split label",
+			issue: beads.Issue{Status: "open", Labels: []string{"needs-split"}},
+			want:  "label needs-split",
+		},
+		{
 			name:  "label, however typed",
 			issue: beads.Issue{Status: "open", Labels: []string{"NEEDS-PRO"}},
 			want:  "label NEEDS-PRO",

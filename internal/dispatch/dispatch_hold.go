@@ -29,12 +29,15 @@ import (
 // humanHoldLabels are the landings the worker left for a person (om gave no
 // verdict, a stage timed out, a policy refusal, or land.MaxReworkAttempts
 // rejections): unlike rework, no polecat can settle one (gt-hpca9, gt-28ibg).
-// No seat claims them, so they hold wherever they are read.
+// needs-split is the same kind of hold: a polecat was stopped on the bead for
+// running past its time, and the bead is cut smaller before anyone takes it
+// again (polecat.HandBack). No seat claims them, so they hold wherever they
+// are read.
 //
 // Both are matched case-insensitively, since a label is typed by hand.
 var (
 	routingHoldLabels = []string{"needs-pro"}
-	humanHoldLabels   = []string{"gt:needs-human", "needs-human"}
+	humanHoldLabels   = []string{"gt:needs-human", "needs-human", "needs-split"}
 	// dispatchHoldLabels is the two lists in the order the rule reports them.
 	// The operator reservation (OperatorReservation) is the third decision a
 	// label records, and the one that also reaches through the assignee; it is
