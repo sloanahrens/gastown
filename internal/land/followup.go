@@ -264,7 +264,7 @@ func followupBody(w Work, res Result, findings []FollowupCandidate) string {
 	}
 	b.WriteString("\n## Constraints\nOnly the files the findings name. Keep the rig's gate green. Do not widen the change.\n")
 	b.WriteString("\n## Out of scope\nAnything the findings do not name.\n")
-	b.WriteString("\n## Gate\nmake gate\n")
+	b.WriteString("\n## Gate\ngt done presubmit; the landing runs make gate\n")
 	b.WriteString("\n## Size\none worker, one landing\n")
 	b.WriteString("\n## Acceptance\n")
 	for _, item := range acceptanceItems(findings) {
