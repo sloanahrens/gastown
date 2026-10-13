@@ -251,9 +251,9 @@ func ReadDBSchemaLevel(ctx context.Context, run BDRunner) (int, error) {
 
 // readDBSchemaLevel asks bd for the highest applied migration. It runs in
 // machine mode so a database ahead of bd fails with bd's typed schema_skew
-// exit rather than prose. A store bd cannot reach is reported as
-// ErrDoltUnreachable, so the caller can tell Dolt being down from bd being
-// wrong.
+// exit rather than prose. A store bd cannot reach, or a bd sql that ctx ended
+// while it waited, is reported as ErrDoltUnreachable, so the caller can tell
+// Dolt being down from bd being wrong.
 func readDBSchemaLevel(ctx context.Context, run BDRunner) (int, error) {
 	args, err := beadsql.SchemaLevel().BdArgs("--json")
 	if err != nil {
@@ -271,6 +271,15 @@ func readDBSchemaLevel(ctx context.Context, run BDRunner) (int, error) {
 				// other failures are its own answer (beads bd_failure.go).
 				return 0, fmt.Errorf("%w: bd exit %d%s", ErrDoltUnreachable, bdStoreUnavailableExit, stderrSuffix(stderr))
 			}
+		}
+		// A context that ended while bd sql was in flight killed it (exec's
+		// CommandContext), which reads as a bd exit of -1. bd was waiting on a
+		// Dolt that did not answer in time, so blaming bd would send the
+		// operator to reinstall it. A bd that exited on its own with the
+		// context still live is bd's own failure and falls through.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return 0, fmt.Errorf("%w: the handshake budget ended (%v) while bd sql waited on the database (%v)%s",
+				ErrDoltUnreachable, ctxErr, err, stderrSuffix(stderr))
 		}
 		return 0, fmt.Errorf("could not read the database migration level: %v%s", err, stderrSuffix(stderr))
 	}

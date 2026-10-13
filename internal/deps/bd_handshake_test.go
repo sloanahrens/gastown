@@ -275,6 +275,67 @@ func TestCheckBDHandshake_StoreDownNamesDolt(t *testing.T) {
 	}
 }
 
+// TestCheckBDHandshake_DeadlineKillNamesDolt is the gt-3lvv0 regression: a bd
+// sql still waiting on Dolt when the budget ends is killed by the context, and
+// exec reports that as exit -1. The refusal must name Dolt, not send the
+// operator to reinstall a bd whose version check passed.
+func TestCheckBDHandshake_DeadlineKillNamesDolt(t *testing.T) {
+	t.Parallel()
+	f := &fakeBD{version: bdVersionDa4983e}
+	hung := func(ctx context.Context, env []string, args ...string) ([]byte, []byte, error) {
+		if args[0] != "sql" {
+			return f.run(ctx, env, args...)
+		}
+		<-ctx.Done()
+		return nil, []byte("signal: killed"), fakeExit(-1)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := checkBDHandshake(ctx, "/usr/local/bin/bd", hung, storeRetryNow)
+	if err == nil {
+		t.Fatal("want refusal, got nil")
+	}
+	if !errors.Is(err, ErrBDHandshake) || !errors.Is(err, ErrDoltUnreachable) {
+		t.Errorf("refusal must wrap ErrBDHandshake and ErrDoltUnreachable: %v", err)
+	}
+	msg := err.Error()
+	for _, want := range []string{"Dolt is not reachable", "gt dolt status", "gt dolt start", "deadline exceeded"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal lacks %q:\n%s", want, msg)
+		}
+	}
+	for _, unwanted := range []string{"make safe-install", "required:", "could not read the database migration level"} {
+		if strings.Contains(msg, unwanted) {
+			t.Errorf("refusal must not blame bd with %q:\n%s", unwanted, msg)
+		}
+	}
+}
+
+// TestCheckBDHandshake_BDFailureBeforeDeadlineBlamesBD: the deadline reading
+// of an exit applies only once the context has ended. A bd that exits non-zero
+// with budget left is bd's own failure and keeps the bd refusal.
+func TestCheckBDHandshake_BDFailureBeforeDeadlineBlamesBD(t *testing.T) {
+	t.Parallel()
+	f := &fakeBD{version: bdVersionDa4983e, sqlErr: fakeExit(1), sqlStderr: "boom"}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	_, err := checkBDHandshake(ctx, "/usr/local/bin/bd", f.run, storeRetryNow)
+	if err == nil {
+		t.Fatal("want refusal, got nil")
+	}
+	if !errors.Is(err, ErrBDHandshake) || errors.Is(err, ErrDoltUnreachable) {
+		t.Errorf("refusal must wrap ErrBDHandshake and not ErrDoltUnreachable: %v", err)
+	}
+	for _, want := range []string{"could not read the database migration level", "make safe-install"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal lacks %q:\n%s", want, err)
+		}
+	}
+	if len(f.calls) != 2 {
+		t.Errorf("bd calls = %d, want 2 (version, one sql read): a bd failure is not retried", len(f.calls))
+	}
+}
+
 // TestWaitForStoreRetryEndsWithTheBudget pins the bound on the retry loop: an
 // ended context stops it, and one with budget left lets the next attempt run.
 func TestWaitForStoreRetryEndsWithTheBudget(t *testing.T) {
