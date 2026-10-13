@@ -245,7 +245,7 @@ func runDoneStateUpdateWith(t *testing.T, db beads.Client, childrenErr error) *d
 			return "", errors.New("resolving HEAD: not a git repository")
 		},
 	}
-	_ = updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, ExitCompleted, "gt-base-123")
+	_, _ = updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, ExitCompleted, "gt-base-123", beads.AgentFieldUpdates{})
 	return rec
 }
 

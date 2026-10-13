@@ -531,15 +531,23 @@ func selfReportCleanupStatus(g cleanupStatusGit, branch string, updater beads.Cl
 		style.PrintWarning("no agent bead ID for this polecat; cleanup_status not recorded — the slot will read as cleanup_status=<missing> and cannot be reclaimed")
 		return
 	}
+	status := cleanupStatusToReport(g, branch, doneCleanupStatus)
+	if err := beads.UpdateAgentCleanupStatus(updater, agentBeadID, status); err != nil {
+		// Non-fatal: the rest of gt done still runs (za-o9e)
+		fmt.Fprintf(os.Stderr, "Warning: couldn't update agent %s cleanup status: %v\n", agentBeadID, err)
+	}
+}
+
+// cleanupStatusToReport is the value selfReportCleanupStatus records: the
+// computed status, else a freshly observed one, else "unknown". Total, like the
+// report itself. A run that folds the report into a larger agent-bead write
+// resolves it here.
+func cleanupStatusToReport(g cleanupStatusGit, branch, doneCleanupStatus string) string {
 	observed := ""
 	if parseCleanupStatus(doneCleanupStatus) == polecat.CleanupUnknown {
 		observed = observeCleanupStatus(g, branch)
 	}
-	status := resolveCleanupStatusForSelfReport(doneCleanupStatus, observed)
-	if err := beads.UpdateAgentCleanupStatus(updater, agentBeadID, string(status)); err != nil {
-		// Non-fatal: the rest of gt done still runs (za-o9e)
-		fmt.Fprintf(os.Stderr, "Warning: couldn't update agent %s cleanup status: %v\n", agentBeadID, err)
-	}
+	return string(resolveCleanupStatusForSelfReport(doneCleanupStatus, observed))
 }
 
 func cleanupStatusFromWorkState(workStatus *git.UncommittedWorkStatus, branchPushed bool, unpushedCount int, branchPushedErr error) string {
@@ -853,7 +861,7 @@ type doneRun struct {
 	env   func(string) string
 	// recordAgentState is the CLI layer's agent-bead state write; nil when the
 	// caller has no agent bead to write.
-	recordAgentState func(cwd, townRoot, exitType, issueID string) error
+	recordAgentState func(cwd, townRoot, exitType, issueID string, pending beads.AgentFieldUpdates) (bool, error)
 	// sourceIssue and sourceBD are the same pair doneSubmission carries; the
 	// revert guard reads the bead's label and description from here and appends
 	// the deletes-by-spec waiver through its client.
@@ -1565,24 +1573,40 @@ func markReadyToLand(bd beads.Client, w land.Work) error {
 // session. Only runs that succeeded reach it.
 func reportDone(r *doneRun, exitType string) error {
 	// Completion metadata on the agent bead is the audit trail for
-	// anomalies and crash recovery (gt-1qlg).
+	// anomalies and crash recovery (gt-1qlg), and cleanup_status (ZFC #10) is
+	// the self-report that decides whether the slot may be reclaimed. Both are
+	// gathered here and written with the hook clear and the final agent_state
+	// below: each agent-bead write is a Dolt commit, and one gt done used to
+	// make four.
 	fmt.Printf("\nRecording completion...\n")
+	var pending beads.AgentFieldUpdates
 	if r.agentBeadID != "" {
-		completionBd := beads.ForAgentBead(beads.New(r.cwd))
 		meta := &beads.CompletionMetadata{
 			ExitType:       exitType,
 			Branch:         r.branch,
 			HookBead:       r.issueID,
 			CompletionTime: time.Now().UTC().Format(time.RFC3339),
 		}
-		if err := beads.UpdateAgentCompletion(completionBd, r.agentBeadID, meta); err != nil {
+		pending = beads.CompletionUpdates(meta)
+		cleanup := cleanupStatusToReport(r.g, r.branch, r.cleanupStatus)
+		pending.CleanupStatus = &cleanup
+	} else {
+		style.PrintWarning("no agent bead ID for this polecat; cleanup_status not recorded — the slot will read as cleanup_status=<missing> and cannot be reclaimed")
+	}
+	// flushPending writes pending when the state callback did not. It is
+	// addressed through the rig directory so it still resolves if the worktree
+	// is already gone.
+	consumed := false
+	flushPending := func() {
+		if consumed || r.agentBeadID == "" {
+			return
+		}
+		rigBd := beads.ForAgentBead(beads.New(filepath.Join(r.townRoot, r.rigName)))
+		if err := beads.UpdateAgentDescriptionFields(rigBd, r.agentBeadID, pending); err != nil {
 			style.PrintWarning("could not write completion metadata to agent bead: %v", err)
 		}
+		consumed = true
 	}
-
-	// Self-report cleanup_status (ZFC #10), addressed through the rig
-	// directory so it still resolves if the worktree is already gone.
-	selfReportCleanupStatus(r.g, r.branch, beads.ForAgentBead(beads.New(filepath.Join(r.townRoot, r.rigName))), r.agentBeadID, r.cleanupStatus)
 
 	if err := events.LogFeed(events.TypeDone, r.sender, events.DonePayload(r.issueID, r.branch)); err != nil {
 		style.PrintWarning("could not log done event: %v", err)
@@ -1592,10 +1616,14 @@ func reportDone(r *doneRun, exitType string) error {
 	// in the CLI layer (it closes the hooked bead against the close
 	// invariants); a caller with no agent bead leaves it nil.
 	if r.recordAgentState != nil {
-		if err := r.recordAgentState(r.cwd, r.townRoot, exitType, r.issueID); err != nil {
+		var err error
+		consumed, err = r.recordAgentState(r.cwd, r.townRoot, exitType, r.issueID, pending)
+		if err != nil {
+			flushPending()
 			return err
 		}
 	}
+	flushPending()
 
 	getenv := r.env
 	fromHandoff := getenv(EnvFromHandoff) == "1"

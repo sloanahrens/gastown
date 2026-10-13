@@ -91,7 +91,7 @@ func TestDeferredDoneLeavesReadyToLandBeadUntouched(t *testing.T) {
 			return "", errors.New("resolving HEAD: not a git repository")
 		},
 	}
-	if err := updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, done.ExitDeferred, "gt-held"); err != nil {
+	if _, err := updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, done.ExitDeferred, "gt-held", beads.AgentFieldUpdates{}); err != nil {
 		t.Fatalf("deferred gt done: %v", err)
 	}
 
@@ -151,7 +151,7 @@ func TestCompletedDoneOnUnchangedReworkRecordsTheRequeueHint(t *testing.T) {
 			return head, nil
 		},
 	}
-	if err := updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, done.ExitCompleted, "gt-rework"); err != nil {
+	if _, err := updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, done.ExitCompleted, "gt-rework", beads.AgentFieldUpdates{}); err != nil {
 		t.Fatalf("completed gt done: %v", err)
 	}
 
@@ -213,7 +213,7 @@ func TestDoneAgentStateAsksForHeadInItsOwnCwd(t *testing.T) {
 	}
 
 	cwd := filepath.Join(townRoot, "gastown")
-	if err := updateAgentStateOnDoneIn(env, cwd, townRoot, done.ExitCompleted, "gt-base-123"); err != nil {
+	if _, err := updateAgentStateOnDoneIn(env, cwd, townRoot, done.ExitCompleted, "gt-base-123", beads.AgentFieldUpdates{}); err != nil {
 		t.Fatalf("completed gt done: %v", err)
 	}
 	if len(asked) == 0 {
@@ -284,7 +284,7 @@ func TestDoneAgentStateLeavesTheHookOnAnUnreadableHookedBead(t *testing.T) {
 		purge: func(string, string) {},
 	}
 
-	err := updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, done.ExitCompleted, "gt-base-123")
+	_, err := updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, done.ExitCompleted, "gt-base-123", beads.AgentFieldUpdates{})
 	if err == nil {
 		t.Fatal("a failed read of the hooked bead returned no error")
 	}
@@ -339,7 +339,7 @@ func TestDoneAgentStateClearsTheHookWhenTheBeadIsGone(t *testing.T) {
 		purge:  func(string, string) {},
 	}
 
-	if err := updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, done.ExitCompleted, "gt-base-123"); err != nil {
+	if _, err := updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, done.ExitCompleted, "gt-base-123", beads.AgentFieldUpdates{}); err != nil {
 		t.Fatalf("gt done with a missing hooked bead: %v", err)
 	}
 
@@ -410,7 +410,7 @@ func TestDoneAgentStatePurgesTheTownDatabaseToo(t *testing.T) {
 			return "", errors.New("resolving HEAD: not a git repository")
 		},
 	}
-	if err := updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, done.ExitCompleted, "gt-base-123"); err != nil {
+	if _, err := updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, done.ExitCompleted, "gt-base-123", beads.AgentFieldUpdates{}); err != nil {
 		t.Fatalf("completed gt done: %v", err)
 	}
 
@@ -457,7 +457,7 @@ func TestDoneAgentStateToleratesAFailingTownPurge(t *testing.T) {
 			return "", errors.New("resolving HEAD: not a git repository")
 		},
 	}
-	if err := updateAgentStateOnDoneIn(env, rigDir, townRoot, done.ExitCompleted, "gt-base-123"); err != nil {
+	if _, err := updateAgentStateOnDoneIn(env, rigDir, townRoot, done.ExitCompleted, "gt-base-123", beads.AgentFieldUpdates{}); err != nil {
 		t.Fatalf("gt done with a failing town purge: %v", err)
 	}
 

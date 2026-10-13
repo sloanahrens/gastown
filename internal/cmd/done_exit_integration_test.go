@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/done"
 )
 
@@ -34,7 +35,9 @@ func TestIntegrationRunDoneWithRoutedIssueIgnoresCurrentRigMirror(t *testing.T) 
 
 	doneIssue = "bd-source"
 	doneCleanupStatus = "unpushed"
-	updateAgentStateOnDoneFn = func(cwd, townRoot, exitType, issueID string) error { return nil }
+	updateAgentStateOnDoneFn = func(cwd, townRoot, exitType, issueID string, pending beads.AgentFieldUpdates) (bool, error) {
+		return false, nil
+	}
 	if err := runDone(nil, nil); err != nil {
 		t.Fatalf("runDone: %v", err)
 	}
@@ -73,7 +76,9 @@ func TestIntegrationRunDoneReworkBranchRecordsActualWorkerNotBranchName(t *testi
 
 	doneIssue = "bd-source"
 	doneCleanupStatus = "unpushed"
-	updateAgentStateOnDoneFn = func(cwd, townRoot, exitType, issueID string) error { return nil }
+	updateAgentStateOnDoneFn = func(cwd, townRoot, exitType, issueID string, pending beads.AgentFieldUpdates) (bool, error) {
+		return false, nil
+	}
 	if err := runDone(nil, nil); err != nil {
 		t.Fatalf("runDone: %v", err)
 	}
@@ -112,7 +117,9 @@ func runDoneForExitCode(t *testing.T, branchSetup func(t *testing.T, workDir str
 
 	doneIssue = "bd-source"
 	doneCleanupStatus = "unpushed"
-	updateAgentStateOnDoneFn = func(cwd, townRoot, exitType, issueID string) error { return nil }
+	updateAgentStateOnDoneFn = func(cwd, townRoot, exitType, issueID string, pending beads.AgentFieldUpdates) (bool, error) {
+		return false, nil
+	}
 	return runDone(nil, nil)
 }
 

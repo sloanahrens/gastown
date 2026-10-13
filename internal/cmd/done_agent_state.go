@@ -64,8 +64,16 @@ func clearDoneCheckpoints(bd beads.Client, agentBeadID string) {
 // BUG FIX (hq-3xaxy): This function must be resilient to working directory deletion.
 // If the polecat's worktree is deleted before gt done finishes, we use env vars as fallback.
 // All errors are warnings, not failures - gt done must complete even if bead ops fail.
-func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string) error {
-	return updateAgentStateOnDoneIn(doneStateEnv{}, cwd, townRoot, exitType, issueID)
+//
+// pending is the completion metadata and cleanup_status gt done gathered for
+// the same bead. It goes out in the one write that also clears hook_bead and
+// sets the final agent_state: each agent-bead write is a Dolt commit, and the
+// four it replaces were most of a polecat run's agent-bead churn. consumed
+// reports that pending was written, including when this function fails after
+// resolving the bead; false means it never addressed the bead and the caller
+// owes the write.
+func updateAgentStateOnDone(cwd, townRoot, exitType, issueID string, pending beads.AgentFieldUpdates) (bool, error) {
+	return updateAgentStateOnDoneIn(doneStateEnv{}, cwd, townRoot, exitType, issueID, pending)
 }
 
 // doneStateEnv is what updateAgentStateOnDone reads beyond its arguments:
@@ -128,34 +136,41 @@ func (e doneStateEnv) head() func(string) (string, error) {
 	return e.reviewHead
 }
 
-func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID string) error {
+// doneRoleInfo resolves the role gt done's agent-state write addresses, trying
+// multiple sources for resilience. When detection fails it falls back to the
+// environment, which handles the case where cwd is deleted but env vars are
+// set. ok is false, with a warning, when neither names a role.
+func doneRoleInfo(getenv func(string) string, cwd, townRoot string) (info RoleInfo, ok bool) {
+	info, err := getRoleWithContextEnv(cwd, townRoot, getenv)
+	if err == nil {
+		return info, true
+	}
+	envRole := getenv("GT_ROLE")
+	envRig := getenv("GT_RIG")
+	envPolecat := getenv("GT_POLECAT")
+	if envRole == "" || envRig == "" {
+		style.PrintWarning("could not determine role for agent state update (env: GT_ROLE=%q, GT_RIG=%q)", envRole, envRig)
+		return RoleInfo{}, false
+	}
+
+	// Parse role string to get Role type
+	parsedRole, _, _ := parseRoleString(envRole)
+	return RoleInfo{
+		Role:     parsedRole,
+		Rig:      envRig,
+		Polecat:  envPolecat,
+		TownRoot: townRoot,
+		WorkDir:  cwd,
+		Source:   "env-fallback",
+	}, true
+}
+
+func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID string, pending beads.AgentFieldUpdates) (consumed bool, err error) {
 	getenv := e.lookup()
-	// Get role context - try multiple sources for resilience
-	roleInfo, err := getRoleWithContextEnv(cwd, townRoot, getenv)
-	if err != nil {
-		// Fallback: try to construct role info from environment variables
-		// This handles the case where cwd is deleted but env vars are set
-		envRole := getenv("GT_ROLE")
-		envRig := getenv("GT_RIG")
-		envPolecat := getenv("GT_POLECAT")
-
-		if envRole == "" || envRig == "" {
-			// Can't determine role, skip agent state update
-			style.PrintWarning("could not determine role for agent state update (env: GT_ROLE=%q, GT_RIG=%q)", envRole, envRig)
-			return nil
-		}
-
-		// Parse role string to get Role type
-		parsedRole, _, _ := parseRoleString(envRole)
-
-		roleInfo = RoleInfo{
-			Role:     parsedRole,
-			Rig:      envRig,
-			Polecat:  envPolecat,
-			TownRoot: townRoot,
-			WorkDir:  cwd,
-			Source:   "env-fallback",
-		}
+	roleInfo, ok := doneRoleInfo(getenv, cwd, townRoot)
+	if !ok {
+		// Can't determine role, skip agent state update
+		return false, nil
 	}
 
 	ctx := RoleContext{
@@ -169,7 +184,7 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 	agentBeadID := getAgentBeadID(ctx)
 	if agentBeadID == "" {
 		style.PrintWarning("no agent bead ID found for %s/%s, skipping agent state update", ctx.Rig, ctx.Polecat)
-		return nil
+		return false, nil
 	}
 
 	// Use rig path for bd commands.
@@ -181,6 +196,22 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 	// database first, with a town fallback for legacy beads created before
 	// the rig-local migration. See beads.ForAgentBead docstring (gt-8we).
 	agentBd := beads.ForAgentBead(bd)
+
+	// pending rides out with the final agent_state write below. A return that
+	// never reaches it (the fatal close refusals) still owes the completion
+	// metadata and cleanup_status, which is what a slot's reclaim reads, so
+	// they go out alone on the way out. Declared before the first goto: Go
+	// refuses a jump over a declaration.
+	stateWritten := false
+	defer func() {
+		if stateWritten || pending == (beads.AgentFieldUpdates{}) {
+			return
+		}
+		if werr := beads.UpdateAgentDescriptionFields(agentBd, agentBeadID, pending); werr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: couldn't record completion on %s: %v\n", agentBeadID, werr)
+		}
+		consumed = true
+	}()
 
 	// Find the hooked bead to close. Use issueID directly instead of reading
 	// agent bead's hook_bead slot (hq-l6mm5: direct bead tracking).
@@ -219,7 +250,7 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 			// dispatch-loop shape gt-pftz named. Fail instead, so the hook
 			// stays set and the caller hears why.
 			style.PrintWarning("could not read hooked bead %s: %v", hookedBeadID, hookedErr)
-			return fmt.Errorf("resolving hooked bead %s: %w", hookedBeadID, hookedErr)
+			return false, fmt.Errorf("resolving hooked bead %s: %w", hookedBeadID, hookedErr)
 		}
 		if hookedErr == nil && beads.IssueStatus(hookedBead.Status).IsTerminal() {
 			// The bead was closed before gt done ran — the nothing-to-implement
@@ -253,7 +284,7 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 				fmt.Fprintf(os.Stderr, "  The bead will remain open; the reason is recorded on it.\n")
 				done.NotifyDoneCloseSkipped(hookBd, hookedBeadID, skipReason)
 				if fatal {
-					return fmt.Errorf("cannot complete hooked work: %s", skipReason)
+					return false, fmt.Errorf("cannot complete hooked work: %s", skipReason)
 				}
 				goto doneStateUpdate
 			}
@@ -331,16 +362,6 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 	}
 
 doneStateUpdate:
-	// Clear hook_bead on the agent bead (gt-qbh). The hq-l6mm5 refactor made
-	// SetHookBead/ClearHookBead no-ops, but the daemon's crash detection
-	// still reads the hook_bead field from the agent bead. If the hooked bead
-	// is a wisp that gets reaped, it can't verify it was closed and flags the
-	// polecat as crashed. Clearing hook_bead prevents this false positive.
-	emptyHook := ""
-	if err := beads.UpdateAgentDescriptionFields(agentBd, agentBeadID, beads.AgentFieldUpdates{HookBead: &emptyHook}); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: couldn't clear hook_bead on %s: %v\n", agentBeadID, err)
-	}
-
 	// Purge closed ephemeral beads (wisps) accumulated during this and prior
 	// sessions; without this, closed wisps from mol-polecat-work steps etc.
 	// accumulate across sessions and pollute bd ready/list output (hq-6161m).
@@ -349,27 +370,41 @@ doneStateUpdate:
 		e.purgeClosedWisps(dir, townRoot)
 	}
 
-	// Completion metadata (exit_type, MR ID, branch) remains on the agent bead
-	// for audit purposes.
+	// One write for everything the agent bead owes at the end of the run:
+	// hook_bead cleared, the final agent_state, and the completion metadata
+	// (exit_type, MR ID, branch) and cleanup_status that remain on the bead
+	// for audit and reclaim. Each was its own Dolt commit.
+	//
+	// Clearing hook_bead (gt-qbh): the hq-l6mm5 refactor made
+	// SetHookBead/ClearHookBead no-ops, but the daemon's crash detection still
+	// reads hook_bead from the agent bead. If the hooked bead is a wisp that
+	// gets reaped, it can't verify it was closed and flags the polecat as
+	// crashed. Clearing hook_bead prevents this false positive.
+	//
+	// agent_state lives in the description (gt-ulom).
+	//
+	// cleanup_status is ZFC #10's self-report. reportDone gathers it, and
+	// runDone's failure path writes it alone, so a failed submission records it
+	// too: the case where polecat reclaim needs "has_unpushed".
+	emptyHook := ""
 	doneState := string(beads.AgentStateDone)
 	if exitType != done.ExitCompleted {
 		doneState = "stuck"
 	}
-	// agent_state lives in the description (gt-ulom).
-	if err := beads.UpdateAgentDescriptionFields(agentBd, agentBeadID, beads.AgentFieldUpdates{AgentState: &doneState}); err != nil {
+	final := pending
+	final.HookBead = &emptyHook
+	final.AgentState = &doneState
+	if err := beads.UpdateAgentDescriptionFields(agentBd, agentBeadID, final); err != nil {
+		// stateWritten stays false: the deferred write retries pending alone.
 		fmt.Fprintf(os.Stderr, "Warning: couldn't set agent %s to %s: %v\n", agentBeadID, doneState, err)
+	} else {
+		stateWritten = true
+		consumed = true
 	}
-
-	// ZFC #10 cleanup_status self-report moved to reportDone and runDone's
-	// failure path (selfReportCleanupStatus): this function only ever ran when
-	// the submission succeeded, so a failed submission recorded nothing at
-	// all — the exact case where polecat reclaim needs "has_unpushed". The report
-	// also used to be skipped whenever the status was empty/unknown, leaving
-	// cleanup_status=<missing> on a slot that can never be reclaimed.
 
 	// Clear legacy checkpoints on clean exit — gt done completed successfully.
 	clearDoneCheckpoints(agentBd, agentBeadID)
-	return nil
+	return consumed, nil
 }
 
 // closeMoleculeOfClosedBead ends the workflow an already-closed work bead

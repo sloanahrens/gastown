@@ -2242,15 +2242,12 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 		return nil, err
 	}
 
-	// Reset agent bead for reuse
+	// Create or reopen the agent bead with hook_bead set atomically. The reopen
+	// rewrites the whole description (agent_state=spawning, hook_bead, and no
+	// completion metadata, cleanup_status or active_mr from the last run), so
+	// the bead needs no separate reset write first: one Dolt commit, not
+	// reset, rewrite and a state sync.
 	agentID := m.agentBeadID(name)
-	if err := m.resetAgentBeadForReuse(agentID, "idle polecat reuse"); err != nil {
-		if !errors.Is(err, beads.ErrNotFound) {
-			style.PrintWarning("could not reset agent bead %s: %v", agentID, err)
-		}
-	}
-
-	// Create or reopen agent bead with hook_bead set atomically
 	if err = m.createAgentBeadWithRetry(agentID, &beads.AgentFields{
 		RoleType:   "polecat",
 		Rig:        m.rig.Name,
@@ -2258,16 +2255,6 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 		HookBead:   opts.HookBead,
 	}); err != nil {
 		return nil, fmt.Errorf("agent bead required for polecat tracking: %w", err)
-	}
-
-	// Sync agent_state column to "spawning" (gt-ulom).
-	// createAgentBeadWithRetry sets agent_state in the description only.
-	// The column stays stale (e.g., "idle" from previous gt done) until
-	// StartSession sets it to "working". Without this, the column and
-	// description diverge, and readers of either see incorrect state.
-	// Agent beads live in town DB — bypass prefix routing.
-	if err := beads.UpdateAgentState(m.agentBeads(), agentID, "spawning"); err != nil {
-		style.PrintWarning("could not sync agent_state column to spawning: %v", err)
 	}
 
 	now := time.Now()

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/done"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
@@ -78,7 +79,9 @@ func runDoneSubmitWithFlags(t *testing.T, gate land.Gate, setFlags func(), branc
 	if setFlags != nil {
 		setFlags()
 	}
-	updateAgentStateOnDoneFn = func(cwd, townRoot, exitType, issueID string) error { return nil }
+	updateAgentStateOnDoneFn = func(cwd, townRoot, exitType, issueID string, pending beads.AgentFieldUpdates) (bool, error) {
+		return false, nil
+	}
 	err := runDone(nil, nil)
 	bdLog, _ := os.ReadFile(logPath)
 	return doneSubmitRun{workDir: workDir, bdLog: string(bdLog), err: err}
