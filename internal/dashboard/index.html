@@ -431,6 +431,19 @@ const STATE_HELP = {
 };
 let openIdle = false;
 let openParkedRig = false;
+// The om panel's Stats and Scores sections start closed and keep the viewer's
+// choice across the periodic redraw and a reload, keyed by section name. Storage
+// that throws — a locked-down browser, private mode — leaves them closed and
+// folding still works for the session.
+let openOMStats = false, openOMScores = false;
+try {
+  const saved = JSON.parse(localStorage.getItem("gt-om-open") || "{}");
+  openOMStats = !!(saved && saved.stats);
+  openOMScores = !!(saved && saved.scores);
+} catch (e) {}
+function saveOMOpen() {
+  try { localStorage.setItem("gt-om-open", JSON.stringify({stats: openOMStats, scores: openOMScores})); } catch (e) {}
+}
 // Names for the polecats in view. label() is the short name, because each rig
 // draws its polecats from that rig's own name theme, so the name alone places
 // the polecat — except a short name that more than one rig uses, which without
@@ -1648,11 +1661,70 @@ function renderOM(s) {
   }
   $("omnote").textContent = readCaption(r, [om.model, om.depth, om.threshold != null ? "threshold " + om.threshold : null, om.timeout_s ? om.timeout_s + "s timeout" : null, r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null]);
 
+  // Running now, then the last five om ran, above both folds. A server that
+  // sends neither list draws neither block.
+  const cell = (tr, cls, text, title) => { const c = el("td", cls, text); if (title) c.title = title; tr.append(c); };
+  const running = Array.isArray(om.running) ? om.running : [];
+  if (running.length) {
+    box.append(el("div", "k title", "running now"));
+    const runT = el("table");
+    for (const x of running) {
+      const tr = el("tr");
+      if (!x || typeof x !== "object") { cell(tr, "warnc", "unparsed"); runT.append(tr); continue; }
+      cell(tr, x.bead ? "bead" : "title", x.bead || "unknown bead");
+      cell(tr, "", x.rig || "–");
+      cell(tr, "", x.polecat || "–");
+      const took = el("td", "n", fmtDur(secsSince(x.started)));
+      if (x.started) { took.dataset.since = x.started; took.title = "running since " + x.started; }
+      tr.append(took);
+      const shas = x.base || x.head ? String(x.base || "").slice(0, 7) + ".." + String(x.head || "").slice(0, 7) : "–";
+      cell(tr, "title", shas, (x.base || "") + ".." + (x.head || ""));
+      runT.append(tr);
+    }
+    box.append(runT);
+  }
+  const last = Array.isArray(om.last) ? om.last : [];
+  if (last.length) {
+    box.append(el("div", "k title", "last " + last.length + " om ran"));
+    const lt = el("table");
+    for (const x of last) {
+      const tr = el("tr");
+      if (!x || typeof x !== "object" || !x.bead || !x.outcome || isNaN(Date.parse(x.at))) {
+        cell(tr, "warnc", "unparsed");
+        lt.append(tr);
+        continue;
+      }
+      cell(tr, "title", clock(x.at), x.at);
+      cell(tr, "bead", x.bead);
+      cell(tr, "", x.rig || "–");
+      cell(tr, x.outcome === "rejected" ? "badc" : x.outcome === "error" ? "warnc" : "", x.outcome === "rejected" && x.kind ? "rejected · " + x.kind : x.outcome, x.detail || "");
+      cell(tr, "n", typeof x.score === "number" ? x.score.toFixed(2) : "–");
+      cell(tr, "n", sec(x.secs));
+      cell(tr, "title", x.route || "–");
+      lt.append(tr);
+    }
+    box.append(lt);
+  }
+
+  // fold builds one section the way the polecats panel builds its idle line: a
+  // details element whose open state lives in a module variable, so the redraw
+  // that rebuilds it puts it back as the viewer left it.
+  const fold = (title, isOpen, setOpen, ...kids) => {
+    const d = document.createElement("details");
+    d.open = isOpen;
+    d.ontoggle = () => { setOpen(d.open); saveOMOpen(); };
+    d.append(el("summary", "title", title), ...kids);
+    box.append(d);
+  };
+
+  // Stats: the windows table and the rejected, routes and risk-paths chips.
+  const wins = om.windows || [];
+  const day = wins.find(w => w.label === "24h") || wins[0];
   const t = el("table");
   const hr = el("tr");
   ["", "Landed", "Approved", "No review", "Errors", "Rejected", "Avg score", "om median", "om p95"].forEach((x, i) => hr.append(el("th", i ? "n" : "", x)));
   t.append(hr);
-  for (const w of om.windows || []) {
+  for (const w of wins) {
     const tr = el("tr");
     tr.append(el("td", "", w.label));
     const rej = w.rejected, err = w.errors;
@@ -1660,9 +1732,20 @@ function renderOM(s) {
     tr.append(el("td", "n", w.avg_score == null ? "–" : w.avg_score.toFixed(2)), el("td", "n", sec(w.median_secs)), el("td", "n" + (w.p95_secs > 240 ? " warnc" : ""), sec(w.p95_secs)));
     t.append(tr);
   }
-  box.append(t);
+  const meta = el("div", "", "");
+  meta.style.margin = "8px 0";
+  const rj = Object.entries(om.rejects || {}).sort((a, b) => b[1] - a[1]);
+  meta.append(el("span", "title", "rejected: "));
+  if (!rj.length) meta.append(el("span", "", "none"));
+  rj.forEach(([k, n]) => meta.append(el("span", "tag", k + " " + n)));
+  const rt = Object.entries(om.routes || {}).sort((a, b) => b[1] - a[1]);
+  meta.append(document.createElement("br"), el("span", "title", "routes: "));
+  rt.forEach(([k, n]) => meta.append(el("span", "tag", k + " " + n)));
+  if (om.risk_paths) meta.append(document.createElement("br"), el("span", "title", "touched risk paths: "), el("span", "warnc", om.risk_paths + " landings"));
+  fold("Stats" + (day ? " · " + day.label + ": " + day.landed + " landed, " + day.rejected + " rejected" : ""), openOMStats, v => { openOMStats = v; }, t, meta);
 
-  // score histogram: approvals and review rejections by decile; red below the threshold
+  // Scores: the score histogram (approvals and review rejections by decile; red
+  // below the threshold) and the by-day table.
   const scores = om.scores || [];
   const max = Math.max(1, ...scores);
   const bars = el("div", "bars");
@@ -1675,20 +1758,7 @@ function renderOM(s) {
   if (om.threshold != null) { const th = el("div", "thr"); th.style.left = (om.threshold * 100) + "%"; bars.append(th); }
   const kd = el("div", "k title", "score distribution (approvals + review rejections)");
   const axis = el("div", "axis"); ["0.0", "0.5", "1.0"].forEach(x => axis.append(el("span", "", x)));
-  box.append(kd, bars, axis);
-
-  const meta = el("div", "", "");
-  meta.style.margin = "8px 0";
-  const rj = Object.entries(om.rejects || {}).sort((a, b) => b[1] - a[1]);
-  meta.append(el("span", "title", "rejected: "));
-  if (!rj.length) meta.append(el("span", "", "none"));
-  rj.forEach(([k, n]) => meta.append(el("span", "tag", k + " " + n)));
-  const rt = Object.entries(om.routes || {}).sort((a, b) => b[1] - a[1]);
-  meta.append(document.createElement("br"), el("span", "title", "routes: "));
-  rt.forEach(([k, n]) => meta.append(el("span", "tag", k + " " + n)));
-  if (om.risk_paths) meta.append(document.createElement("br"), el("span", "title", "touched risk paths: "), el("span", "warnc", om.risk_paths + " landings"));
-  box.append(meta);
-
+  const scoreKids = [kd, bars, axis];
   const days = om.days || [];
   if (days.length) {
     const dt = el("table");
@@ -1707,9 +1777,10 @@ function renderOM(s) {
       tr.append(el("td", "n", sec(d.avg_secs)));
       dt.append(tr);
     }
-    box.append(el("div", "k title", "by day"), dt);
+    scoreKids.push(el("div", "k title", "by day"), dt);
   }
-
+  const scored = day && day.avg_score != null ? day : wins.find(w => w.avg_score != null);
+  fold("Scores" + (scored ? " · avg " + scored.avg_score.toFixed(2) : ""), openOMScores, v => { openOMScores = v; }, ...scoreKids);
 }
 
 function renderDispatch(s) {
@@ -2237,6 +2308,7 @@ paintTierIcon(null);
 // moves them, without redrawing a pane the reader may be reading.
 setInterval(() => {
   document.querySelectorAll("#forgejoacts [data-since]").forEach(c => { c.textContent = fmtDur(secsSince(c.dataset.since)); });
+  document.querySelectorAll("#om [data-since]").forEach(c => { c.textContent = fmtDur(secsSince(c.dataset.since)); });
 }, 1000);
 // The activity feed folds under the Actions section, which stays visible, and
 // the choice is remembered per viewer. Storage that throws — a locked-down
