@@ -427,6 +427,18 @@ func TestTemplateSkeleton(t *testing.T) {
 		}
 	})
 
+	t.Run("gate hint names what the landing gate runs", func(t *testing.T) {
+		t.Parallel()
+		got := LoadTemplate(filepath.Join(dir, "missing.md")).Skeleton("gt-x")
+		want := "## Gate\nwhat the landing gate runs for this bead, plus any extra test only this diff needs\n"
+		if !strings.Contains(got, want) {
+			t.Errorf("skeleton gate hint is not the landing-gate wording:\n%s", got)
+		}
+		if strings.Contains(got, "the command that must pass") {
+			t.Errorf("skeleton still carries the old gate hint:\n%s", got)
+		}
+	})
+
 	t.Run("template file's own sections", func(t *testing.T) {
 		t.Parallel()
 		got := LoadTemplate(path).Skeleton("gt-x")

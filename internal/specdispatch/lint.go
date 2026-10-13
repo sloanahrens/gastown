@@ -178,7 +178,7 @@ var sectionHints = map[string]string{
 	"goal":         "what the bead must achieve",
 	"constraints":  "files, limits and rules the work must respect",
 	"out of scope": "what this bead does not do",
-	"gate":         "the command that must pass",
+	"gate":         "what the landing gate runs for this bead, plus any extra test only this diff needs",
 	"size":         "one worker, one landing",
 }
 
