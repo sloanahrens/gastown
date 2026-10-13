@@ -8,21 +8,27 @@ id = "review"
 title = "Review recent risk-path landings and a rotating slice"
 description = """
 You orchestrate; subagents read. Nothing in this step edits the repository.
-Each Bash call starts a fresh shell, so begin every block with
-`D=/tmp/deep-review-{{issue}}`.
+Each Bash call starts a fresh shell, so a block that only reads the run
+directory begins with `D=/tmp/deep-review-{{issue}}`. A block that creates it or
+redirects into it writes the literal path, because the polecat-paths guard
+refuses a target built from `$D`.
 
 **1. Load the ledger and plan. The script decides; you do not.**
 ```bash
-D=/tmp/deep-review-{{issue}}; mkdir -p $D
-bd list -l scheduled:deep-review --all --limit 60 --json > $D/runs.json &&
-  jq -r '.[] | select(.id != "{{issue}}") | .notes // empty' $D/runs.json > $D/prev-notes.txt &&
-  cat "${GT_TOWN_ROOT:-$HOME/gt}/.runtime/landings/gastown.jsonl" > $D/landings-all.jsonl &&
+mkdir -p /tmp/deep-review-{{issue}}
+bd list -l scheduled:deep-review --all --limit 60 --json > /tmp/deep-review-{{issue}}/runs.json &&
+  jq -r '(if type == "object" then .data else . end)[] | select(.id != "{{issue}}") | .notes // empty' /tmp/deep-review-{{issue}}/runs.json > /tmp/deep-review-{{issue}}/prev-notes.txt &&
+  cat "${GT_TOWN_ROOT:-$HOME/gt}/.runtime/landings/gastown.jsonl" > /tmp/deep-review-{{issue}}/landings-all.jsonl &&
   git fetch origin {{base_branch}} &&
-  bash scripts/deep-review.sh plan --landings $D/landings-all.jsonl \\
-    --prev-notes $D/prev-notes.txt --repo . --ref origin/{{base_branch}} \\
-    --slice {{slice_files}} --out $D > $D/plan.txt
-echo "plan exit: $?"; cat $D/plan.txt
+  bash scripts/deep-review.sh plan --landings /tmp/deep-review-{{issue}}/landings-all.jsonl \\
+    --prev-notes /tmp/deep-review-{{issue}}/prev-notes.txt --repo . --ref origin/{{base_branch}} \\
+    --slice {{slice_files}} --out /tmp/deep-review-{{issue}} > /tmp/deep-review-{{issue}}/plan.txt
+echo "plan exit: $?"; cat /tmp/deep-review-{{issue}}/plan.txt
 ```
+This block writes the literal path: the polecat-paths guard refuses a `mkdir`
+or a redirect whose target is built from a variable. The jq reads both shapes of
+`bd --json`: the bare array and the `BD_MACHINE=1` envelope with its `data`
+array. Run the block as written.
 A plan that exits non-zero is a failure, never a quiet day: the script's
 stderr says why (exit 3 is an input it cannot trust). Run
 `gt escalate "deep-review plan failed: <stderr>" --severity medium`, then
@@ -82,8 +88,8 @@ Crew-only paths: `internal/cmd/tap_guard*`, `scripts/guards/`, data deletion in
 `internal/daemon/`, `internal/supervisor/`, `internal/estop/`, and the install
 scripts.
 
-Write the bead body to a file with a quoted heredoc (no backticks or code in
-double-quoted text). It needs `## Goal`, `## Constraints`, `## Out of scope`,
+Write the bead body to `/tmp/deep-review-{{issue}}/body.md` (the literal path)
+with a quoted heredoc (no backticks or code in double-quoted text). It needs `## Goal`, `## Constraints`, `## Out of scope`,
 `## Gate`, `## Size`, and `## Acceptance` with 1-6 checkbox items:
 ```bash
 gt bead create "<one line>" --type bug -p <1|2|3> -l review-deep -q \\
