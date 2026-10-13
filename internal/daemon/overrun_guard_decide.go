@@ -46,10 +46,30 @@ func decideOverrun(in overrunInput) overrunAction {
 }
 
 // overrunState is what the guard remembers about one bead between ticks.
+//
+// The stop's progress is kept here too, one stamp per step, because every
+// step after the pause outlives the seat's visibility: once the session is
+// gone the seat is no longer a working seat, so a step that fails is retried
+// from this record (pendingOverrunStops), not from the seat list.
 type overrunState struct {
-	Bead      string    `json:"bead"`
-	NudgedAt  time.Time `json:"nudged_at,omitzero"`
-	StoppedAt time.Time `json:"stopped_at,omitzero"`
+	Bead     string    `json:"bead"`
+	NudgedAt time.Time `json:"nudged_at,omitzero"`
+
+	// Rig, Polecat and Branch name the seat the stop acts on; Elapsed is how
+	// long it had held the bead when the stop began.
+	Rig     string        `json:"rig,omitempty"`
+	Polecat string        `json:"polecat,omitempty"`
+	Branch  string        `json:"branch,omitempty"`
+	Elapsed time.Duration `json:"elapsed,omitempty"`
+
+	// StopBeganAt is when the pause marker went down, SessionStoppedAt when
+	// the session was confirmed gone, CheckpointedAt when the worktree
+	// checkpoint step finished. StoppedAt is set last, once the bead is handed
+	// back; with it set the stop does not run again for this sling.
+	StopBeganAt      time.Time `json:"stop_began_at,omitzero"`
+	SessionStoppedAt time.Time `json:"session_stopped_at,omitzero"`
+	CheckpointedAt   time.Time `json:"checkpointed_at,omitzero"`
+	StoppedAt        time.Time `json:"stopped_at,omitzero"`
 }
 
 // overrunStatePath is <town>/.runtime/overrun-guard/<bead>.json. A bead id
@@ -113,4 +133,29 @@ func writeOverrunState(townRoot string, s overrunState) error {
 		return fmt.Errorf("replace overrun state: %w", err)
 	}
 	return nil
+}
+
+// pendingOverrunStops lists the beads whose stop began but did not finish: the
+// pause marker is down and the bead is not yet handed back. A state file that
+// cannot be read is skipped; its bead is judged again from the seat list.
+func pendingOverrunStops(townRoot string) []overrunState {
+	dir := filepath.Join(townRoot, ".runtime", "overrun-guard")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []overrunState
+	for _, e := range entries {
+		bead, ok := strings.CutSuffix(e.Name(), ".json")
+		if !ok || e.IsDir() {
+			continue
+		}
+		st, err := readOverrunState(townRoot, bead)
+		if err != nil || st.StopBeganAt.IsZero() || !st.StoppedAt.IsZero() {
+			continue
+		}
+		st.Bead = bead
+		out = append(out, st)
+	}
+	return out
 }

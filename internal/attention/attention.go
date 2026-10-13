@@ -48,6 +48,9 @@ const (
 	KindRevertRefused Kind = "revert-refused"
 	// KindBlockedMail: a polecat reported itself BLOCKED by mail.
 	KindBlockedMail Kind = "blocked-mail"
+	// KindOverrunStopped: the overrun guard stopped a polecat at the
+	// 20-minute rule and handed its bead back to be split.
+	KindOverrunStopped Kind = "overrun-stopped"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -57,7 +60,7 @@ func Kinds() []Kind {
 		KindRiskPath, KindRedMain, KindRejectedTwice, KindEscalation,
 		KindPolecatStall, KindLandingStuck, KindQueueStuck, KindDirectPush,
 		KindSlotHeld, KindSlotDeadHolder, KindBDSlow, KindTierSweepRed,
-		KindRevertRefused, KindBlockedMail,
+		KindRevertRefused, KindBlockedMail, KindOverrunStopped,
 	}
 }
 

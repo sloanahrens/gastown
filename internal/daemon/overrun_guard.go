@@ -18,9 +18,10 @@ import (
 // The overrun_guard patrol watches how long each polecat seat has held its
 // bead. It nudges the seat once when the bead runs long, asking for a split
 // proposal in the bead notes, and past the stop threshold it stops the
-// session. This file is the patrol's config, ticker entry, dry-run and nudge;
-// the stop only logs for now. The pure decision is decideOverrun and the
-// per-bead memory is overrunState (overrun_guard_decide.go).
+// session and hands the bead back. This file is the patrol's config, ticker
+// entry, dry-run and nudge; the stop is overrunStop (overrun_guard_stop.go).
+// The pure decision is decideOverrun and the per-bead memory is overrunState
+// (overrun_guard_decide.go).
 
 const (
 	defaultOverrunGuardInterval   = time.Minute
@@ -50,8 +51,17 @@ type overrunSeams struct {
 	slungAt func(bead, rig, polecat string) (time.Time, bool)
 	// nudge delivers msg to the seat's session.
 	nudge func(seat overrunSeat, msg string) error
-	// stop ends the seat's session after elapsed.
-	stop func(seat overrunSeat, elapsed time.Duration) error
+
+	// The stop's side effects, called in this order by overrunStop:
+	// pause writes the seat's pause marker, stopSession ends its session,
+	// checkpoint commits its worktree, handBack returns its bead to the pool
+	// after elapsed. clearPause removes the marker again when the session
+	// would not stop.
+	pause       func(seat overrunSeat) error
+	clearPause  func(seat overrunSeat) error
+	stopSession func(seat overrunSeat) error
+	checkpoint  func(seat overrunSeat) error
+	handBack    func(seat overrunSeat, elapsed time.Duration) error
 }
 
 // overrunGuardConfig returns the patrol's config, or nil when absent.
@@ -152,8 +162,16 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 	}
 	now := s.now()
 
+	// Stops that began on an earlier tick and did not finish go first. Their
+	// seats are no longer working seats (the session is gone or the seat is
+	// parked), so the seat list below cannot find them.
+	var resumed map[string]bool
+	if !dry {
+		resumed = d.resumeOverrunStops(s)
+	}
+
 	for _, seat := range seats {
-		if seat.Submitted || seat.Parked || seat.Bead == "" {
+		if seat.Submitted || seat.Parked || seat.Bead == "" || resumed[seat.Bead] {
 			continue
 		}
 		who := seat.Rig + "/" + seat.Polecat
@@ -196,22 +214,26 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 			}
 			d.logger.Printf("overrun_guard: nudged %s on %s after %s", who, seat.Bead, elapsed.Round(time.Second))
 		case overrunStop:
+			// The stop ran for this sling already: the bead is back in the
+			// pool (and if it was slung to this seat again, the sling is
+			// newer than StoppedAt and falls through to a fresh clock).
+			if !state.StoppedAt.IsZero() && !state.StoppedAt.Before(slung) {
+				continue
+			}
 			if dry {
 				d.logger.Printf("overrun_guard: dry run: would stop %s on %s after %s", who, seat.Bead, elapsed.Round(time.Second))
 				continue
 			}
-			if err := s.stop(seat, elapsed); err != nil {
-				d.logger.Printf("overrun_guard: stop %s on %s failed: %v", who, seat.Bead, err)
-			}
+			d.overrunStop(s, seat, state, elapsed)
 		}
 	}
 }
 
 // overrunProdSeams returns the production seams: the daemon's rigs, event
-// log and notifier. The stop only logs until the real stop is built.
+// log and notifier, and the stop's pause, session, checkpoint and hand-back.
 func (d *Daemon) overrunProdSeams() overrunSeams {
 	sl := &overrunSlungReader{d: d}
-	return overrunSeams{
+	return d.overrunStopSeams(overrunSeams{
 		now:          time.Now,
 		workingSeats: d.overrunWorkingSeats,
 		slungAt:      sl.slungAt,
@@ -220,12 +242,7 @@ func (d *Daemon) overrunProdSeams() overrunSeams {
 			defer cancel()
 			return d.notify().Nudge(ctx, seat.Rig+"/"+seat.Polecat, msg)
 		},
-		stop: func(seat overrunSeat, elapsed time.Duration) error {
-			d.logger.Printf("overrun_guard: %s/%s on %s is past the stop threshold (%s); stopping is not built yet",
-				seat.Rig, seat.Polecat, seat.Bead, elapsed.Round(time.Second))
-			return nil
-		},
-	}
+	})
 }
 
 // overrunWorkingSeats lists every polecat with a live session that holds a
