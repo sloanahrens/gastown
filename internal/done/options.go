@@ -86,7 +86,14 @@ type Options struct {
 	// bead and closes its hooked work bead. internal/cmd owns those writes
 	// (role detection, the close invariants, the wisp purge); nil skips them,
 	// which is what a caller with no agent bead wants.
-	RecordAgentState func(cwd, townRoot, exitType, issueID string) error
+	//
+	// pending is the completion metadata and cleanup_status the run has to
+	// record on the same bead. The callback folds it into its own agent-bead
+	// write, so the run's terminal state is one Dolt commit rather than four,
+	// and returns consumed=true once it has written pending (on a failure after
+	// the bead was resolved too). consumed=false means the callback could not
+	// address the bead and the run writes pending itself.
+	RecordAgentState func(cwd, townRoot, exitType, issueID string, pending beads.AgentFieldUpdates) (consumed bool, err error)
 
 	// LocalGate builds the local pre-submit gate for a rig. Nil is the real
 	// land gate. The command layer supplies its own indirection so cmd-level

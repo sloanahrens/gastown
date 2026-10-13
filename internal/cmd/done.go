@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/done"
 	"github.com/steveyegge/gastown/internal/land"
 )
@@ -138,8 +139,8 @@ func runDone(cmd *cobra.Command, args []string) error {
 		Env:                 os.Getenv,
 		Getwd:               os.Getwd,
 		Detect:              detectDoneAgent,
-		RecordAgentState: func(cwd, townRoot, exitType, issueID string) error {
-			return updateAgentStateOnDoneFn(cwd, townRoot, exitType, issueID)
+		RecordAgentState: func(cwd, townRoot, exitType, issueID string, pending beads.AgentFieldUpdates) (bool, error) {
+			return updateAgentStateOnDoneFn(cwd, townRoot, exitType, issueID, pending)
 		},
 		LocalGate:   doneLocalGate,
 		RetryDelays: pushLandingRetryDelays,

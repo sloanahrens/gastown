@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -408,7 +409,13 @@ func TestClearReassignedPolecatStateRestoresOnDemand(t *testing.T) {
 	db := beadsfake.New()
 	db.Seed(doneAgentBead())
 
-	restore := clearReassignedPolecatStateIn(db, "gt-gastown-polecat-nux")
+	// The clear is one agent-bead write, not one per field (gt-f77fr).
+	var updates atomic.Int32
+	counted := updateCountingClient{Client: db, id: "gt-gastown-polecat-nux", updates: &updates}
+	restore := clearReassignedPolecatStateIn(counted, "gt-gastown-polecat-nux")
+	if got := updates.Load(); got != 1 {
+		t.Errorf("the clear wrote the agent bead %d times, want 1", got)
+	}
 	_, cleared, err := beads.GetAgentBead(db, "gt-gastown-polecat-nux")
 	if err != nil || cleared == nil {
 		t.Fatalf("agent bead after the clear: %+v, %v", cleared, err)

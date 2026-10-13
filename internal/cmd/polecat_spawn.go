@@ -1059,17 +1059,15 @@ func (s *SpawnedPolecatInfo) startSession() (string, error) {
 		style.PrintWarning("runtime may not be fully ready: %v", err)
 	}
 
-	// Update agent state with retry logic (gt-94llt7: fail-safe Dolt writes).
-	// Note: warn-only, not fail-hard. The tmux session is already started above,
-	// so returning an error here would leave an orphaned session with no cleanup path.
-	// The polecat can still function without the agent state update — it only affects
-	// monitoring visibility, not correctness. Compare with createAgentBeadWithRetry
-	// which fails hard because a polecat without an agent bead is untrackable.
+	// The agent bead keeps the agent_state=spawning the spawn wrote with its
+	// hook_bead; it is not rewritten to "working" here. That write was a Dolt
+	// commit of its own whose only reader-visible effect is leaving the spawn
+	// grace, and the readers that matter derive "working" from the hooked work
+	// bead and the live session instead (loadFromBeads). A spawning bead past
+	// the grace window with a dead session reads as stalled, the same verdict a
+	// working one gets. gt done writes the terminal state.
 	polecatGit := git.NewGit(r.Path)
 	polecatMgr := polecat.NewManager(r, polecatGit, t, townRegistry())
-	if err := polecatMgr.SetAgentStateWithRetry(s.PolecatName, "working"); err != nil {
-		style.PrintWarning("could not update agent state after retries: %v", err)
-	}
 
 	// Update issue status from hooked to in_progress.
 	// Also warn-only for the same reason: session is already running.

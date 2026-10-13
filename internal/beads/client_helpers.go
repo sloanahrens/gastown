@@ -270,9 +270,17 @@ func GetAgentNotificationLevel(c Client, id string) (string, error) {
 // read-modify-write: the completion state gt done records for the witness to
 // read instead of POLECAT_DONE mail (gt-x7t9).
 func UpdateAgentCompletion(c Client, id string, meta *CompletionMetadata) error {
+	return UpdateAgentDescriptionFields(c, id, CompletionUpdates(meta))
+}
+
+// CompletionUpdates is the field set UpdateAgentCompletion writes, for a caller
+// that folds the completion metadata into a larger agent-bead write of its own:
+// every UpdateAgentDescriptionFields call is one Dolt commit, so gt done sends
+// the metadata, cleanup_status, the hook clear and the final agent_state as one.
+func CompletionUpdates(meta *CompletionMetadata) AgentFieldUpdates {
 	mrFailed := meta.MRFailed
 	pushFailed := meta.PushFailed
-	return UpdateAgentDescriptionFields(c, id, AgentFieldUpdates{
+	return AgentFieldUpdates{
 		ExitType:        &meta.ExitType,
 		MRID:            &meta.MRID,
 		Branch:          &meta.Branch,
@@ -280,7 +288,7 @@ func UpdateAgentCompletion(c Client, id string, meta *CompletionMetadata) error 
 		MRFailed:        &mrFailed,
 		PushFailed:      &pushFailed,
 		CompletionTime:  &meta.CompletionTime,
-	})
+	}
 }
 
 // ClearAgentCompletion removes every completion metadata field, resetting an

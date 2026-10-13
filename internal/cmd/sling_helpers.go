@@ -1561,14 +1561,12 @@ func clearReassignedPolecatStateInE(bd beads.Client, agentBeadID string) (func()
 		prior = fields
 	}
 
+	// hook_bead and agent_state are cleared in one write: one Dolt commit.
 	var clearErr error
 	emptyHook := ""
-	if err := beads.UpdateAgentDescriptionFields(bd, agentBeadID, beads.AgentFieldUpdates{HookBead: &emptyHook}); err != nil {
-		clearErr = fmt.Errorf("couldn't clear hook_bead on %s: %w", agentBeadID, err)
-	}
 	idle := string(beads.AgentStateIdle)
-	if err := beads.UpdateAgentState(bd, agentBeadID, idle); err != nil && clearErr == nil {
-		clearErr = fmt.Errorf("couldn't clear agent_state on %s: %w", agentBeadID, err)
+	if err := beads.UpdateAgentDescriptionFields(bd, agentBeadID, beads.AgentFieldUpdates{HookBead: &emptyHook, AgentState: &idle}); err != nil {
+		clearErr = fmt.Errorf("couldn't clear hook_bead and agent_state on %s: %w", agentBeadID, err)
 	}
 	if prior == nil {
 		return noop, clearErr
