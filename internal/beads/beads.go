@@ -3740,7 +3740,7 @@ description:
 ## Goal          what changes and why, in two or three sentences
 ## Constraints   files and packages to touch, rules to keep, what must not change
 ## Out of scope  what this bead must not do
-## Gate          the command that proves it (usually ` + "`make gate`" + `)
+## Gate          what the landing gate runs for this bead, plus any extra test only this diff needs
 ## Size          one worker, one landing
 ## Acceptance    1-6 checkbox items (3-6 preferred), each checkable
 ` + "```" + `

@@ -234,8 +234,8 @@ it reads as if the commit introduced that problem (gt-hphli).**
 If you find bugs or improvements outside your scope, file them in the shape the
 spec dispatcher lints, so the bead is dispatchable instead of held unshaped:
 Goal (what exists after it lands), Constraints (the files to change, and what
-must not change), Out of scope (what the bead is not), Gate (the command that
-proves it) and Size (one worker, one landing), plus at least one acceptance
+must not change), Out of scope (what the bead is not), Gate (what the landing
+gate runs for this bead, plus any extra test only this diff needs) and Size (one worker, one landing), plus at least one acceptance
 item. `--acceptance` sets that item in the same command:
 ```bash
 desc="$(cat <<'BEAD'
@@ -246,7 +246,7 @@ desc="$(cat <<'BEAD'
 ## Out of scope
 <what this bead is not>
 ## Gate
-<the command that proves it>
+<what the landing gate runs for this bead, plus any extra test only this diff needs>
 ## Size
 one worker, one landing
 BEAD

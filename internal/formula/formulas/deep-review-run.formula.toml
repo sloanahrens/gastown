@@ -90,7 +90,8 @@ scripts.
 
 Write the bead body to `/tmp/deep-review-{{issue}}/body.md` (the literal path)
 with a quoted heredoc (no backticks or code in double-quoted text). It needs `## Goal`, `## Constraints`, `## Out of scope`,
-`## Gate`, `## Size`, and `## Acceptance` with 1-6 checkbox items:
+`## Gate` (what the landing gate runs for this bead, plus any extra test only
+this diff needs), `## Size`, and `## Acceptance` with 1-6 checkbox items:
 ```bash
 gt bead create "<one line>" --type bug -p <1|2|3> -l review-deep -q \\
   -d "$(cat $D/body.md)"
