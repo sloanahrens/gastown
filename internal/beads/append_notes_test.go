@@ -61,3 +61,48 @@ func TestAppendEmptyNoteSendsNothing(t *testing.T) {
 		t.Errorf("AppendNotes(\"\") ran bd %v", c.args)
 	}
 }
+
+// TestUpdateAppendNotesIsOneBdCall: a note and the label changes that go with
+// it are one bd update, which is one Dolt commit. The note rides in the joined
+// --append-notes=<text> form, so a dash-leading note cannot be read as a flag.
+func TestUpdateAppendNotesIsOneBdCall(t *testing.T) {
+	t.Parallel()
+	r := newRecorder(nil)
+	b := NewIsolated(t.TempDir())
+	b.exec = r.exec
+	err := b.Update("gt-x", UpdateOptions{
+		AppendNotes:  "- a note\nof two lines",
+		AddLabels:    []string{"gt:new"},
+		RemoveLabels: []string{"gt:old"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := r.calls()
+	if len(calls) != 1 {
+		t.Fatalf("%d bd calls, want 1", len(calls))
+	}
+	want := []string{"update", "gt-x", "--append-notes=- a note\nof two lines", "--add-label=gt:new", "--remove-label=gt:old"}
+	if got := calls[0].args[len(calls[0].args)-len(want):]; !reflect.DeepEqual(got, want) {
+		t.Errorf("argv = %q, want %q", got, want)
+	}
+}
+
+// TestUpdateWithoutAppendNotesSendsNoNotesFlag: an empty AppendNotes appends
+// nothing; bd would add a bare newline to the existing notes.
+func TestUpdateWithoutAppendNotesSendsNoNotesFlag(t *testing.T) {
+	t.Parallel()
+	r := newRecorder(nil)
+	b := NewIsolated(t.TempDir())
+	b.exec = r.exec
+	if err := b.Update("gt-x", UpdateOptions{AddLabels: []string{"gt:new"}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range r.calls() {
+		for _, a := range c.args {
+			if strings.HasPrefix(a, "--append-notes") {
+				t.Errorf("bd %v carries %s with no note to append", c.args, a)
+			}
+		}
+	}
+}

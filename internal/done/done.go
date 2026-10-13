@@ -1529,21 +1529,19 @@ func recordSubmittedIntent(r *doneRun) {
 	}
 }
 
-// markReadyToLand writes the READY TO LAND block, then the label the landing
-// worker picks by, then reads the bead back. The block goes first so a bead
-// that carries the label always says what to land. The block carries the
-// submission time, which is what the landing worker orders the queue by
-// (gt-t2jhf).
+// markReadyToLand writes the READY TO LAND block and the label the landing
+// worker picks by in one bd update, then reads the bead back. One update is
+// one Dolt commit, and a bead that carries the label always says what to
+// land: a crash cannot split the two. The block carries the submission time,
+// which is what the landing worker orders the queue by (gt-t2jhf).
 func markReadyToLand(bd beads.Client, w land.Work) error {
 	if bd == nil {
 		return errors.New("no beads client for the work bead")
 	}
 	w.Submitted = time.Now().UTC()
-	if err := bd.AppendNotes(w.BeadID, land.FormatReadyNote(w)); err != nil {
-		return fmt.Errorf("writing the READY TO LAND note: %w", err)
-	}
 	if err := bd.Update(w.BeadID, beads.UpdateOptions{
-		AddLabels: []string{land.LabelReadyToLand},
+		AppendNotes: land.FormatReadyNote(w),
+		AddLabels:   []string{land.LabelReadyToLand},
 		// An overseer review covers one head; a submission brings a new one,
 		// so it must face om again (gt-g8t3m).
 		RemoveLabels: []string{land.LabelRework, land.LabelOverseerReviewed},

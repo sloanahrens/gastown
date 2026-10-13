@@ -745,6 +745,13 @@ type UpdateOptions struct {
 	// with '- [x]' on it (gt-n623a).
 	Acceptance *string
 
+	// AppendNotes is appended to the existing notes, bd's own --append-notes
+	// semantics (a newline separates it from what is there). It rides in the
+	// same bd update as the label and field changes, so a note and the state
+	// change that goes with it are one Dolt commit instead of two. Empty
+	// appends nothing.
+	AppendNotes string
+
 	// Force passes bd's --force, overriding the two fences a plain update
 	// enforces: Assignee overwriting another actor's live in_progress claim,
 	// and Status moving a bead to closed past open children or a live
@@ -3304,6 +3311,10 @@ func (b *Beads) Update(id string, opts UpdateOptions) error {
 	}
 	if opts.Acceptance != nil {
 		args = append(args, "--acceptance="+*opts.Acceptance)
+	}
+	if opts.AppendNotes != "" {
+		// The joined form takes a dash-leading note as the value (gt-1q9nl).
+		args = append(args, "--append-notes="+opts.AppendNotes)
 	}
 	// Label operations: set-labels replaces all, otherwise use add/remove
 	if len(opts.SetLabels) > 0 {

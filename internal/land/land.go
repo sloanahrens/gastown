@@ -1603,23 +1603,22 @@ func (l *Lander) recordBead(w Work, rec LandingRecord) error {
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", w.BeadID, err)
 	}
-	if !strings.Contains(issue.Notes, LandingNoteMarker+"\nlanded_commit: "+rec.LandedCommit) {
-		if err := l.Beads.AppendNotes(w.BeadID, rec.NoteBlock()); err != nil {
-			return fmt.Errorf("landing record note on %s: %w", w.BeadID, err)
-		}
-	}
-	// The label goes on in the same update that takes the ready label off: a
-	// risky landing is one state change, not two a crash can split.
+	// The note and the label changes go out in one update: one Dolt commit,
+	// and a crash cannot leave the record without its label changes or the
+	// reverse. A risky landing is one state change, not two.
 	update := beads.UpdateOptions{}
+	if !strings.Contains(issue.Notes, LandingNoteMarker+"\nlanded_commit: "+rec.LandedCommit) {
+		update.AppendNotes = rec.NoteBlock()
+	}
 	if beads.HasLabel(issue, LabelReadyToLand) {
 		update.RemoveLabels = []string{LabelReadyToLand}
 	}
 	if len(rec.RiskPaths) > 0 && !beads.HasLabel(issue, LabelOverseerReviewWanted) {
 		update.AddLabels = []string{LabelOverseerReviewWanted}
 	}
-	if len(update.RemoveLabels) > 0 || len(update.AddLabels) > 0 {
+	if update.AppendNotes != "" || len(update.RemoveLabels) > 0 || len(update.AddLabels) > 0 {
 		if err := l.Beads.Update(w.BeadID, update); err != nil {
-			return fmt.Errorf("updating %s after landing: %w", w.BeadID, err)
+			return fmt.Errorf("recording the landing on %s: %w", w.BeadID, err)
 		}
 	}
 	if !beads.IssueStatus(strings.TrimSpace(issue.Status)).IsTerminal() {

@@ -646,6 +646,12 @@ func (f *Fake) Update(id string, opts beads.UpdateOptions) error {
 	if opts.Acceptance != nil {
 		is.AcceptanceCriteria = *opts.Acceptance
 	}
+	if opts.AppendNotes != "" {
+		if is.Notes != "" {
+			is.Notes += "\n"
+		}
+		is.Notes += opts.AppendNotes
+	}
 	if opts.Persistent {
 		is.Ephemeral = false
 	}

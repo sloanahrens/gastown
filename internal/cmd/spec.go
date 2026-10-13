@@ -287,12 +287,11 @@ func specFromIssue(issue *beads.Issue) specdispatch.Spec {
 
 // specLiveLandingRequest reports whether notes carry a landing request that
 // nothing later settled: a complete READY TO LAND block after the last LANDING
-// RECORD and the last MERGE REJECTION. gt done writes that block before the
-// gt:ready-to-land label (internal/done markReadyToLand), so a bead mid-write
-// has the block and no label; the label is also the half of an answer known to
-// go missing (gt-q6zoo), which leaves the notes as the signal that survives.
-// Holding on the block keeps such a bead off the candidate board and out of a
-// sling (gt-kr5xv). A land or a rejection written after the block settles it,
+// RECORD and the last MERGE REJECTION. gt done writes that block with the
+// gt:ready-to-land label in one update (internal/done markReadyToLand); the
+// label is the half of an answer known to go missing (gt-q6zoo), which leaves
+// the notes as the signal that survives. Holding on the block keeps such a
+// bead off the candidate board and out of a sling (gt-kr5xv). A land or a rejection written after the block settles it,
 // so a landed bead and a rework are left to their own paths.
 func specLiveLandingRequest(notes string) bool {
 	if _, ok := land.ParseReadyNote(notes); !ok {

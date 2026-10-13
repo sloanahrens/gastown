@@ -1518,3 +1518,82 @@ func TestLandForgedStatusIsAHumanRejection(t *testing.T) {
 		t.Fatal("a forged status was left to the author to rework; only a human can settle it")
 	}
 }
+
+// writeCountingBeads counts the writes made on the work bead; each is a Dolt
+// commit.
+type writeCountingBeads struct {
+	*beadsfake.Fake
+	notes, updates, closes int
+}
+
+func (b *writeCountingBeads) AppendNotes(id, note string) error {
+	b.notes++
+	return b.Fake.AppendNotes(id, note)
+}
+
+func (b *writeCountingBeads) Update(id string, opts beads.UpdateOptions) error {
+	b.updates++
+	return b.Fake.Update(id, opts)
+}
+
+func (b *writeCountingBeads) ForceCloseWithReason(reason string, ids ...string) error {
+	b.closes++
+	return b.Fake.ForceCloseWithReason(reason, ids...)
+}
+
+// TestLandRecordsTheBeadInTwoWrites: a landing writes the LANDING RECORD note
+// and the ready label's removal in one update, then the close: two Dolt
+// commits on the work bead, with the READY TO LAND write before them making
+// three from submission to close (gt-uhdbi).
+func TestLandRecordsTheBeadInTwoWrites(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	bd := &writeCountingBeads{Fake: f.bd}
+	l := f.lander()
+	l.Beads = bd
+	if _, err := l.Land(context.Background(), f.work); err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	if bd.notes != 0 || bd.updates != 1 || bd.closes != 1 {
+		t.Errorf("writes = %d notes, %d updates, %d closes; want 0, 1, 1", bd.notes, bd.updates, bd.closes)
+	}
+	b := f.bead()
+	if b.Status != "closed" || beads.HasLabel(b, LabelReadyToLand) || strings.Count(b.Notes, LandingNoteMarker) != 1 {
+		t.Errorf("after landing: status=%s labels=%v notes=%q", b.Status, b.Labels, b.Notes)
+	}
+}
+
+// TestLandRepairWritesNoSecondRecord: a pass that finds the record and the
+// label change already written (only the close failed) writes just the
+// close, not the note again.
+func TestLandRepairWritesNoSecondRecord(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	bd := &writeCountingBeads{Fake: f.bd}
+	l := f.lander()
+	l.Beads = &countingFlaky{flakyCloseBeads: flakyCloseBeads{Fake: f.bd}, count: bd}
+	if _, err := l.Land(context.Background(), f.work); err == nil {
+		t.Fatal("first Land: want the failed close reported")
+	}
+	if _, err := l.Land(context.Background(), f.work); err != nil {
+		t.Fatalf("repair Land: %v", err)
+	}
+	if bd.updates != 1 {
+		t.Errorf("updates = %d, want 1: the repair pass found the record written and rewrote it", bd.updates)
+	}
+	if n := strings.Count(f.bead().Notes, LandingNoteMarker); n != 1 {
+		t.Errorf("%d landing records after the repair, want 1", n)
+	}
+}
+
+// countingFlaky fails the first close and counts the updates that reach the
+// bead.
+type countingFlaky struct {
+	flakyCloseBeads
+	count *writeCountingBeads
+}
+
+func (b *countingFlaky) Update(id string, opts beads.UpdateOptions) error {
+	b.count.updates++
+	return b.Fake.Update(id, opts)
+}

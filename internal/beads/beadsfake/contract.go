@@ -84,6 +84,7 @@ var contractCases = []contractCase{
 	{"batch close refusal", contractBatchCloseRefusal},
 	{"batch close of a blocks chain in reverse order", contractBatchCloseChain},
 	{"append notes", contractAppendNotes},
+	{"update append notes", contractUpdateAppendNotes},
 	{"guarded transfer", contractGuardedTransfer},
 	{"guard and note edges", contractGuardEdges},
 	{"merge request blockers", contractMergeRequestBlockers},
@@ -1060,6 +1061,26 @@ func contractAppendNotes(t *testing.T, s *scope) {
 	}
 	if err := s.AppendNotes("gt-nosuch", "x"); !errors.Is(err, beads.ErrNotFound) {
 		t.Errorf("AppendNotes(missing) = %v, want ErrNotFound", err)
+	}
+}
+
+// contractUpdateAppendNotes: UpdateOptions.AppendNotes lands in the same
+// update as the label changes, joined to existing notes by a newline, and a
+// dash-leading note is a note, not a flag.
+func contractUpdateAppendNotes(t *testing.T, s *scope) {
+	is := s.mustCreate(t, beads.CreateOptions{Title: "update notes", Priority: -1, Labels: []string{"gt:old"}})
+	mustDo(t, "update with note", s.Update(is.ID, beads.UpdateOptions{
+		AppendNotes:  "first line",
+		AddLabels:    []string{"gt:new"},
+		RemoveLabels: []string{"gt:old"},
+	}))
+	got := s.mustShow(t, is.ID)
+	if got.Notes != "first line" || !beads.HasLabel(got, "gt:new") || beads.HasLabel(got, "gt:old") {
+		t.Errorf("after one update: notes %q labels %v, want the note and the label swap together", got.Notes, got.Labels)
+	}
+	mustDo(t, "update with dash note", s.Update(is.ID, beads.UpdateOptions{AppendNotes: "- second\nline"}))
+	if n := s.mustShow(t, is.ID).Notes; n != "first line\n- second\nline" {
+		t.Errorf("notes after two updates = %q, want them joined by a newline", n)
 	}
 }
 
