@@ -138,9 +138,10 @@ func TestIntegrationRunDoneRebasesGatesPushesAndMarksReady(t *testing.T) {
 	if len(gate.heads) != 1 || gate.heads[0] != head {
 		t.Errorf("gate ran on %v, want exactly the pushed head %s", gate.heads, head)
 	}
-	for _, want := range []string{"update bd-source --append-notes READY TO LAND", "Head: " + head, "Worker: refuge", "--add-label=gt:ready-to-land"} {
-		if !strings.Contains(r.bdLog, want) {
-			t.Errorf("bd log lacks %q:\n%s", want, r.bdLog)
+	ready := readyToLandUpdate(t, r.bdLog)
+	for _, want := range []string{"Head: " + head, "Worker: refuge"} {
+		if !strings.Contains(ready, want) {
+			t.Errorf("the ready-to-land update lacks %q:\n%s", want, ready)
 		}
 	}
 	if strings.Contains(r.bdLog, "gt:merge-request") {

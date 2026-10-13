@@ -282,7 +282,6 @@ exit /b 0
 	gotTargetDBCheck := false
 	gotFormulaShow := false
 	gotHook := false
-	gotMetadata := false
 	gotReviewOnlyMetadata := false
 	assertTargetRig := func(kind, dir, beadsDir, database, beadsDB, bdDB, dataDir, gtData, args string) {
 		t.Helper()
@@ -354,12 +353,14 @@ exit /b 0
 			}
 			assertTargetRig("mol bond", dir, beadsDir, database, beadsDB, bdDB, dataDir, gtData, args)
 		case strings.Contains(args, "update "+newBeadID) && strings.Contains(args, "--status=hooked"):
-			gotHook = true
+			// The attachment fields ride on the hook update itself (gt-4wct3).
+			if strings.Contains(args, "--description=<attached-molecule-and-formula-fields>") {
+				gotHook = true
+			}
 			lastHookIndex = i
 			assertTargetRig("hook update", dir, beadsDir, database, beadsDB, bdDB, dataDir, gtData, args)
 		case strings.Contains(args, "update "+newBeadID) && strings.Contains(args, "--description=<attached-molecule-and-formula-fields>"):
-			gotMetadata = true
-			assertTargetRig("metadata update", dir, beadsDir, database, beadsDB, bdDB, dataDir, gtData, args)
+			t.Fatalf("sling fields written by a separate metadata update, want them on the hook update: %q", line)
 		case strings.Contains(args, "update "+newBeadID) && strings.Contains(args, "--description=<review-only-fields>"):
 			gotReviewOnlyMetadata = true
 			if firstReviewOnlyMetadataIndex == -1 {
@@ -376,9 +377,9 @@ exit /b 0
 		}
 	}
 
-	if !gotCreate || !gotTargetDBCheck || !gotFormulaShow || !gotPolecatCook || !gotReviewCook || gotBondCount < 2 || !gotHook || !gotMetadata || !gotReviewOnlyMetadata {
-		t.Fatalf("missing expected bd commands: create=%v targetDBCheck=%v formulaShow=%v polecatCook=%v reviewCook=%v bondCount=%d hook=%v metadata=%v reviewOnlyMetadata=%v (log: %q)",
-			gotCreate, gotTargetDBCheck, gotFormulaShow, gotPolecatCook, gotReviewCook, gotBondCount, gotHook, gotMetadata, gotReviewOnlyMetadata, string(logBytes))
+	if !gotCreate || !gotTargetDBCheck || !gotFormulaShow || !gotPolecatCook || !gotReviewCook || gotBondCount < 2 || !gotHook || !gotReviewOnlyMetadata {
+		t.Fatalf("missing expected bd commands: create=%v targetDBCheck=%v formulaShow=%v polecatCook=%v reviewCook=%v bondCount=%d hookWithSlingFields=%v reviewOnlyMetadata=%v (log: %q)",
+			gotCreate, gotTargetDBCheck, gotFormulaShow, gotPolecatCook, gotReviewCook, gotBondCount, gotHook, gotReviewOnlyMetadata, string(logBytes))
 	}
 	if firstReviewOnlyMetadataIndex == -1 || lastHookIndex == -1 || firstReviewOnlyMetadataIndex > lastHookIndex {
 		t.Fatalf("review-only metadata must be stored before raw hook assignment: metadataIndex=%d hookIndex=%d log: %q", firstReviewOnlyMetadataIndex, lastHookIndex, string(logBytes))
