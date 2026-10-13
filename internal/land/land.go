@@ -32,7 +32,8 @@ type Beads interface {
 	Comments(id string) ([]beads.Comment, error)
 	// AddComment writes the review record every landing leaves on its work
 	// bead: a rejection's note is not the only trace a review should leave,
-	// and an approved or waived landing has none otherwise (gt-uebmq).
+	// and an approved or waived landing has none otherwise (gt-uebmq), and the
+	// line a repeat of an already-filed finding leaves on its bead (gt-s01pn).
 	AddComment(id, text string) error
 	// Children and CloseWithReason are what closing the molecule a landed
 	// bead carries needs: the walk down to its step wisps, then an unforced
@@ -121,6 +122,12 @@ type Lander struct {
 	Landings *LandingsFile
 	Out      io.Writer
 	Now      func() time.Time
+	// Followups, when set, is the beads surface the post-landing follow-up
+	// feed files through: a landing om approved in the band gets one shaped
+	// bead for the findings that were not worth blocking on, or a comment on
+	// the bead an earlier landing filed for one (gt-s01pn). Nil means off, and
+	// off means nothing in the feed runs.
+	Followups FollowupBeads
 	// RangeChecks run on base..head before the merge (the landing worker
 	// passes AttributionCheck). A returned Rejection is written to the bead
 	// like any other.
@@ -1000,6 +1007,9 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	if err := l.record(w, res); err != nil {
 		return res, &RecordError{Result: res, Err: err}
 	}
+	// The landing is recorded, so the feed runs after it and cannot change it
+	// (gt-s01pn).
+	l.fileFollowups(dir, w, res)
 	return res, nil
 }
 

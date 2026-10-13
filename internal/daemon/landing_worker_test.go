@@ -8,12 +8,15 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/land"
@@ -241,6 +244,100 @@ func TestRigPostLandCommandReadsRigSettingsOnly(t *testing.T) {
 	}
 	if got := rigPostLandCommand(rigPath); got != "make test-slow" {
 		t.Fatalf("post_land_command = %q", got)
+	}
+}
+
+// TestRigFollowupsEnabledReadsRigSettingsOnly: the follow-up feed files beads,
+// so it is off unless the rig's own settings/config.json turns it on (gt-s01pn).
+func TestRigFollowupsEnabledReadsRigSettingsOnly(t *testing.T) {
+	t.Parallel()
+	write := func(t *testing.T, rigPath, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(rigPath, "settings"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(rigPath, "settings", "config.json"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Run("no settings file", func(t *testing.T) {
+		t.Parallel()
+		if rigFollowupsEnabled(t.TempDir()) {
+			t.Fatal("the feed is on with no settings file")
+		}
+	})
+	t.Run("settings without a landing block", func(t *testing.T) {
+		t.Parallel()
+		rigPath := t.TempDir()
+		write(t, rigPath, `{"type":"rig-settings","version":1,"merge_queue":{"post_land_command":"make test-slow"}}`)
+		if rigFollowupsEnabled(rigPath) {
+			t.Fatal("the feed is on without a landing block")
+		}
+	})
+	t.Run("an empty landing block", func(t *testing.T) {
+		t.Parallel()
+		rigPath := t.TempDir()
+		write(t, rigPath, `{"type":"rig-settings","version":1,"landing":{}}`)
+		if rigFollowupsEnabled(rigPath) {
+			t.Fatal("the feed is on with landing.followups unset")
+		}
+	})
+	t.Run("landing.followups true", func(t *testing.T) {
+		t.Parallel()
+		rigPath := t.TempDir()
+		write(t, rigPath, `{"type":"rig-settings","version":1,"landing":{"followups":true}}`)
+		if !rigFollowupsEnabled(rigPath) {
+			t.Fatal("the feed is off with landing.followups true")
+		}
+	})
+}
+
+// TestFollowupBeadsFilesAndListsOverTheClient: the adapter is the whole bridge
+// between the feed's own types and bd's — a spec becomes one create, and the
+// list returns the labeled beads of every status, which is the set the next
+// landing de-duplicates against (gt-s01pn).
+func TestFollowupBeadsFilesAndListsOverTheClient(t *testing.T) {
+	t.Parallel()
+	bd := beadsfake.New(beadsfake.WithPrefix("gt"))
+	var feed land.FollowupBeads = followupBeads{client: bd}
+	bd.Seed(
+		beads.Issue{ID: "gt-closed", Title: "Found: an older finding", Status: "closed", Type: "task",
+			Labels: []string{land.FollowUpLabel}},
+		beads.Issue{ID: "gt-other", Title: "not a follow-up", Status: "open", Type: "task", Labels: []string{"gt:bug"}},
+	)
+	id, err := feed.CreateFollowup(land.FollowupSpec{
+		Title: "Found: swap the nil check", Body: "## Goal\nthe nil check is swapped\n",
+		Labels: []string{land.FollowUpLabel, land.Fingerprint("internal/land/note.go", "swap the nil check")}, Priority: 3,
+	})
+	if err != nil {
+		t.Fatalf("CreateFollowup: %v", err)
+	}
+	issue, err := bd.Show(id)
+	if err != nil {
+		t.Fatalf("Show(%s): %v", id, err)
+	}
+	if issue.Title != "Found: swap the nil check" || issue.Priority != 3 || issue.Status != "open" {
+		t.Errorf("filed bead = %+v, want the spec's title at priority 3, open", issue)
+	}
+	if !beads.HasLabel(issue, land.FollowUpLabel) {
+		t.Errorf("filed bead labels = %v, want %s", issue.Labels, land.FollowUpLabel)
+	}
+	existing, err := feed.ListFollowups(land.FollowUpLabel)
+	if err != nil {
+		t.Fatalf("ListFollowups: %v", err)
+	}
+	var got []string
+	for _, e := range existing {
+		got = append(got, e.ID)
+	}
+	slices.Sort(got)
+	if want := []string{"gt-closed", id}; !slices.Equal(got, want) {
+		t.Errorf("ListFollowups ids = %v, want %v (open and closed, and nothing unlabeled)", got, want)
+	}
+	for _, e := range existing {
+		if e.ID == "gt-closed" && e.Status != "closed" {
+			t.Errorf("closed bead came back as %q", e.Status)
+		}
 	}
 }
 
