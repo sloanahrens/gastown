@@ -160,6 +160,15 @@ from one tier. A key inside the `forgejo` block that this binary does not
 declare is ignored rather than a parse error, so a config written for another
 gt version still loads; every other block stays strict.
 
+**Landing fields** (`landing` block):
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `followups` | `bool` | `false` | File one shaped `om-followup` bead, priority 3, for the major and minor findings of a landing om approved in the band: scored at or above the rig's `.om.json` threshold and below 0.9. A finding matching an existing follow-up by fingerprint, or by the same path with a similar title, comments `seen again on <bead>` there instead. 30 or more open `om-followup` beads stop the feed until the count falls back. Every read, comment and file is fail-soft and bounded at 20s: the landing is recorded first, and the feed never changes its result. |
+
+Read from the rig's own `settings/config.json` only, like `rigPostLandCommand`:
+the feed files beads, and merged repo content must not choose that.
+
 **The `forgejo` block is mandatory for any rig that lands.** It is the rig's
 only landing path: the local gate and the force-with-lease push to the target
 were removed once every rig was cut over (gt-fn9e6.32). A rig with no block

@@ -343,7 +343,7 @@ func setNestedValue(obj interface{}, keyPath string, value interface{}) error {
 				// List all valid top-level keys from RigSettings
 				validKeys := []string{
 					"type", "version",
-					"merge_queue", "theme", "namepool", "crew", "workflow",
+					"merge_queue", "landing", "theme", "namepool", "crew", "workflow",
 					"runtime", "agent", "agents", "role_agents",
 				}
 				return fmt.Errorf("unknown key %q (valid top-level keys: %s)", keyPath, strings.Join(validKeys, ", "))

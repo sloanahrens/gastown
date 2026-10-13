@@ -532,6 +532,7 @@ type RigSettings struct {
 	Type       string            `json:"type"`                  // "rig-settings"
 	Version    int               `json:"version"`               // schema version
 	MergeQueue *MergeQueueConfig `json:"merge_queue,omitempty"` // merge queue settings
+	Landing    *LandingConfig    `json:"landing,omitempty"`     // post-landing work the worker runs (gt-s01pn)
 	Theme      *ThemeConfig      `json:"theme,omitempty"`       // tmux theme settings
 	Namepool   *NamepoolConfig   `json:"namepool,omitempty"`    // polecat name pool settings
 	Crew       *CrewConfig       `json:"crew,omitempty"`        // crew startup settings
@@ -1020,6 +1021,17 @@ func BuiltinRoleThemes() map[string]string {
 		"refinery": "plum", // Purple - processing, refining
 		// crew and polecat use rig theme by default (no override)
 	}
+}
+
+// LandingConfig represents the landing worker's post-landing settings for a
+// rig. It is read from the rig's own settings/config.json, never from merged
+// repo content, because it decides what the daemon does after a landing.
+type LandingConfig struct {
+	// Followups enables the follow-up feed: a landing om approved in the band
+	// gets one shaped om-followup bead for the findings that were not worth
+	// blocking on, de-duplicated against the beads earlier landings filed
+	// (gt-s01pn). False leaves the feed off, and off means nothing in it runs.
+	Followups bool `json:"followups,omitempty"`
 }
 
 // MergeQueueConfig represents merge queue settings for a rig.

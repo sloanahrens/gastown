@@ -513,6 +513,12 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	}
 	lander.Candidate = candidate
 	lander.Merger = merger
+	// The follow-up feed files beads nobody is waiting on, so it runs only for
+	// a rig whose own settings turn it on (gt-s01pn).
+	if rigFollowupsEnabled(rigPath) {
+		lander.Followups = followupBeads{client: bd}
+		d.logger.Printf("landing_worker: %s: om follow-up feed on (landing.followups)", rigName)
+	}
 	// A test that keeps failing for beads that did not touch it is the daemon's
 	// to escalate and file a repair for (gt-xvw20); the watch does that off the
 	// landing's goroutine, where a retrying alert cannot hold up a rejection.
@@ -978,6 +984,63 @@ func rigPostLandCommand(rigPath string) string {
 		return ""
 	}
 	return strings.TrimSpace(settings.MergeQueue.PostLandCommand)
+}
+
+// rigFollowupsEnabled is landing.followups from the rig's own
+// settings/config.json only, for the reason rigPostLandCommand reads its file:
+// the feed files beads, so which rig feeds is the operator's call and never
+// merged repo content's (gt-s01pn).
+func rigFollowupsEnabled(rigPath string) bool {
+	settings, err := config.LoadRigSettings(config.RigSettingsPath(rigPath))
+	if err != nil || settings == nil || settings.Landing == nil {
+		return false
+	}
+	return settings.Landing.Followups
+}
+
+// followupBeads is the daemon's land.FollowupBeads over the beads client the
+// landing worker already holds: the feed's read is one bounded list across
+// open and closed beads, and its write is one create. The client is the
+// retrying wrapper, so a Dolt serialization failure retries like every other
+// bead write the worker makes (gt-s01pn).
+type followupBeads struct {
+	client followupClient
+}
+
+// followupClient is the beads surface the follow-up feed is made of.
+type followupClient interface {
+	List(opts beads.ListOptions) ([]*beads.Issue, error)
+	Create(opts beads.CreateOptions) (*beads.Issue, error)
+}
+
+var _ land.FollowupBeads = followupBeads{}
+
+func (b followupBeads) CreateFollowup(spec land.FollowupSpec) (string, error) {
+	issue, err := b.client.Create(beads.CreateOptions{
+		Title:       spec.Title,
+		Description: spec.Body,
+		Labels:      spec.Labels,
+		Priority:    spec.Priority,
+	})
+	if err != nil {
+		return "", err
+	}
+	return issue.ID, nil
+}
+
+func (b followupBeads) ListFollowups(label string) ([]land.ExistingFollowup, error) {
+	issues, err := b.client.List(beads.ListOptions{Status: "all", Label: label, Limit: land.FollowUpListLimit})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]land.ExistingFollowup, 0, len(issues))
+	for _, issue := range issues {
+		out = append(out, land.ExistingFollowup{
+			ID: issue.ID, Title: issue.Title, Description: issue.Description,
+			Status: issue.Status, Labels: issue.Labels,
+		})
+	}
+	return out, nil
 }
 
 // postLandRun runs the post-landing command in a throwaway worktree of repo
