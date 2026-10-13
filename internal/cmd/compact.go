@@ -100,6 +100,12 @@ func loadTTLConfig(townRoot, rigName string) map[string]time.Duration {
 
 // loadTTLConfigWithRole is the testable version of loadTTLConfig.
 func loadTTLConfigWithRole(townRoot, rigName string) map[string]time.Duration {
+	return loadTTLConfigWithBeads(townRoot, rigName, openRigIdentityBeads)
+}
+
+// loadTTLConfigWithBeads builds the TTL map, reading the rig identity bead
+// through open.
+func loadTTLConfigWithBeads(townRoot, rigName string, open rigBeadsOpener) map[string]time.Duration {
 	// Layer 1: Hardcoded defaults (lowest precedence)
 	ttls := make(map[string]time.Duration)
 	for k, v := range defaultTTLs {
@@ -128,25 +134,51 @@ func loadTTLConfigWithRole(townRoot, rigName string) map[string]time.Duration {
 		}
 
 		// Layer 2b: Rig identity bead labels (wisp_ttl_*:value)
-		applyRigBeadTTLOverrides(ttls, townRoot, rigName)
+		applyRigBeadTTLOverrides(ttls, townRoot, rigName, open)
 	}
 
 	return ttls
 }
 
-// applyRigBeadTTLOverrides reads wisp_ttl_* labels from the rig identity bead
-// and applies them as overrides.
-func applyRigBeadTTLOverrides(ttls map[string]time.Duration, townRoot, rigName string) {
-	beadsDir := beads.ResolveBeadsDir(townRoot)
-	bd := townBeadsWithDir(townRoot, townRoot, beadsDir)
+// rigBeadsOpener returns the beads client for a rig's own database, given the
+// rig's directory.
+type rigBeadsOpener func(townRoot, rigPath string) beads.Client
 
-	rigBeadID := beads.RigBeadIDWithPrefix("gt", rigName)
-	issue, err := bd.Show(rigBeadID)
+// openRigIdentityBeads opens the database `gt rig add` writes the rig identity
+// bead to: the rig's own, at its resolved beads directory.
+func openRigIdentityBeads(townRoot, rigPath string) beads.Client {
+	return townBeadsWithDir(townRoot, rigPath, beads.ResolveBeadsDir(rigPath))
+}
+
+// applyRigBeadTTLOverrides reads wisp_ttl_* labels from the rig identity bead
+// and applies them as overrides. The bead lives in the rig's own database
+// under the rig's own prefix, as `gt rig add` creates it. A rig that is not
+// registered, or has no identity bead, keeps the TTLs it was given.
+func applyRigBeadTTLOverrides(ttls map[string]time.Duration, townRoot, rigName string, open rigBeadsOpener) {
+	rigs, err := discoverRigsForTownRoot(townRoot)
 	if err != nil {
 		return
 	}
+	for _, r := range rigs {
+		if r.Name != rigName {
+			continue
+		}
+		prefix := "gt"
+		if r.Config != nil && r.Config.Prefix != "" {
+			prefix = strings.TrimSuffix(r.Config.Prefix, "-")
+		}
+		issue, err := open(townRoot, r.Path).Show(beads.RigBeadIDWithPrefix(prefix, rigName))
+		if err != nil {
+			return
+		}
+		applyTTLLabels(ttls, issue.Labels)
+		return
+	}
+}
 
-	for _, label := range issue.Labels {
+// applyTTLLabels applies the wisp_ttl_<type>:<duration> labels to ttls.
+func applyTTLLabels(ttls map[string]time.Duration, labels []string) {
+	for _, label := range labels {
 		colonIdx := strings.Index(label, ":")
 		if colonIdx == -1 {
 			continue

@@ -491,3 +491,52 @@ func TestResolveRigPathNoTownRoot(t *testing.T) {
 		t.Error("expected error when town root is unknown, got nil")
 	}
 }
+
+// TestLoadTTLConfigReadsEachRigsOwnIdentityBead is the regression test for
+// gt-afaoi: the wisp_ttl label lives on the rig's identity bead, in the rig's
+// own database under the rig's own prefix, so a rig whose prefix is not "gt"
+// must have its override read, and must not pick up another rig's.
+func TestLoadTTLConfigReadsEachRigsOwnIdentityBead(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	// writeTestRigsConfig registers each rig with the first two letters of its
+	// name as its prefix: alpha -> "al", beta -> "be".
+	writeTestRigsConfig(t, townRoot, "alpha", "beta")
+
+	alpha := beadsfake.New()
+	alpha.Seed(beads.Issue{ID: "al-rig-alpha", Title: "alpha", Labels: []string{"wisp_ttl_patrol:2h"}})
+	beta := beadsfake.New()
+	beta.Seed(beads.Issue{ID: "be-rig-beta", Title: "beta", Labels: []string{"wisp_ttl_patrol:30m"}})
+	dbs := map[string]beads.Client{
+		filepath.Join(townRoot, "alpha"): alpha,
+		filepath.Join(townRoot, "beta"):  beta,
+	}
+	open := func(_, rigPath string) beads.Client { return dbs[rigPath] }
+
+	if got := loadTTLConfigWithBeads(townRoot, "alpha", open)["patrol"]; got != 2*time.Hour {
+		t.Errorf("alpha patrol TTL = %v, want 2h", got)
+	}
+	if got := loadTTLConfigWithBeads(townRoot, "beta", open)["patrol"]; got != 30*time.Minute {
+		t.Errorf("beta patrol TTL = %v, want 30m", got)
+	}
+}
+
+// TestLoadTTLConfigWithoutIdentityBeadKeepsDefaults pins that a rig whose
+// database holds no identity bead (or is not registered) compacts on the
+// default TTLs without error.
+func TestLoadTTLConfigWithoutIdentityBeadKeepsDefaults(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeTestRigsConfig(t, townRoot, "alpha")
+	empty := beadsfake.New()
+	open := func(_, _ string) beads.Client { return empty }
+
+	for _, rigName := range []string{"alpha", "unregistered"} {
+		ttls := loadTTLConfigWithBeads(townRoot, rigName, open)
+		for k, want := range defaultTTLs {
+			if got := ttls[k]; got != want {
+				t.Errorf("rig %q TTLs[%q] = %v, want default %v", rigName, k, got, want)
+			}
+		}
+	}
+}
