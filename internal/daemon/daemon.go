@@ -2289,14 +2289,17 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	// (polecat.SpawnGrace): a running polecat keeps writing its own work
 	// bead, so that write says nothing about a dispatch. The agent record is
 	// read lazily, inside the window only, and never to find the work
-	// (G1-01); one that cannot be read proves no dispatch.
+	// (G1-01); one that cannot be read proves no dispatch. Its own last write
+	// dates the spawn, so a record left at spawning by a polecat that has run
+	// longer than the window earns nothing (gt-i3ky2).
 	if !workUpdated.IsZero() {
 		if age := time.Since(workUpdated); age < polecatSpawnGrace {
-			if state, ok := d.polecatAgentState(rigName, polecatName); ok &&
-				polecat.SpawnGrace(state, workUpdated, time.Now(), polecatSpawnGrace) {
+			if rec, ok := d.polecatAgentRecord(rigName, polecatName); ok &&
+				polecat.SpawnGrace(rec.State, workUpdated, time.Now(), polecatSpawnGrace) &&
+				polecat.SpawnGrace(rec.State, rec.UpdatedAt, time.Now(), polecatSpawnGrace) {
 				skipped = true
 				d.crashSkipLog.logf(d.logger.Printf, rigName+"/"+polecatName, "Skipping crash detection for %s/%s: work %s hooked %s ago and agent_state=%s, polecat may be spawning",
-					rigName, polecatName, hookBead, age.Round(time.Second), state)
+					rigName, polecatName, hookBead, age.Round(time.Second), rec.State)
 				return
 			}
 		}
@@ -2560,17 +2563,17 @@ func (d *Daemon) assignedActiveWorkBead(rigName, assignee string) (string, error
 // than crashed.
 const polecatSpawnGrace = 5 * time.Minute
 
-// polecatAgentState reads the agent_state a seat's agent bead records, and
-// reports whether that could be read at all: false for a seat with no bead and
-// for a failed read, either of which proves no dispatch. It reads through the
-// patrol scan's own reader, so the crash detector and the tick that owns the
-// restart ask the same question of the same record (gt-6hby3).
-func (d *Daemon) polecatAgentState(rigName, polecatName string) (string, bool) {
+// polecatAgentRecord reads a seat's agent bead, and reports whether that could
+// be read at all: false for a seat with no bead and for a failed read, either
+// of which proves no dispatch. It reads through the patrol scan's own reader,
+// so the crash detector and the tick that owns the restart ask the same
+// question of the same record (gt-6hby3).
+func (d *Daemon) polecatAgentRecord(rigName, polecatName string) (patrolscan.AgentRecord, bool) {
 	rec, err := (&patrolScanHost{d: d}).AgentRecord(rigName, polecatName)
 	if err != nil {
-		return "", false
+		return patrolscan.AgentRecord{}, false
 	}
-	return rec.State, true
+	return rec, true
 }
 
 // reapIdlePolecats kills polecat tmux sessions that have been idle too long.

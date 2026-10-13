@@ -177,6 +177,10 @@ type AgentRecord struct {
 	// LastSourceIssue is last_source_issue: the work bead the last turn ran
 	// on, which outlives the hook_bead clear gt done writes.
 	LastSourceIssue string
+	// UpdatedAt is the record's last write, zero when it carries none. Nothing
+	// writes the agent bead between the spawn and gt done, so while the state
+	// still says spawning this is the spawn time (gt-i3ky2).
+	UpdatedAt time.Time
 }
 
 // StoppedOnEscalated reports whether the record is the one gt done's ESCALATED
@@ -819,7 +823,11 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 	// rather than a crash (issue #1752). Only the agent record can say that —
 	// a running polecat keeps writing its work bead, so a recent write there
 	// is no evidence of a dispatch — so the check sits after the record read.
-	if SpawnGrace(agent.State, work.UpdatedAt, now, s.o.SpawnGrace) {
+	// The record's own write dates the spawn: a seat that says spawning but was
+	// last written longer ago than the window never left that state, and the
+	// dispatch it names is over (gt-i3ky2).
+	if SpawnGrace(agent.State, work.UpdatedAt, now, s.o.SpawnGrace) &&
+		SpawnGrace(agent.State, agent.UpdatedAt, now, s.o.SpawnGrace) {
 		return skip(fmt.Sprintf("%s hooked %s ago and agent_state=%s; polecat may be spawning",
 			work.ID, now.Sub(work.UpdatedAt).Round(time.Second), SpawningAgentState))
 	}
