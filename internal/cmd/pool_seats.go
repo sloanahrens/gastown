@@ -126,8 +126,10 @@ func liveSeatKeys(live []poolSession) map[string]bool {
 // enumerate them — the polecat directories under each rig (listPolecatDirectoryNames)
 // — less the seats a live session already accounts for. The decision is the
 // shared seat-state read (polecatDispositionFunc), so a seat whose bead is
-// terminal, or whose hook names nothing live, is not counted here any more than
-// it is by a live session (gt-b9ud0).
+// terminal, or whose work names nothing live — the bead assigned to it and the
+// hook reference its agent bead carries, read the way the list path reads both
+// (gt-bc9b6) — is not counted here any more than it is by a live session
+// (gt-b9ud0).
 //
 // A seat whose state cannot be read is skipped: it is not proven held, the live
 // seats are already counted, and counting every unreadable directory would let

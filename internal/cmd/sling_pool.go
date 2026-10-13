@@ -183,7 +183,19 @@ func deadHookedNote(pool *config.PolecatPool, sessions []poolSession) string {
 	if n == 0 {
 		return ""
 	}
-	return fmt.Sprintf(", %d dead-hooked", n)
+	return ", " + deadHookedCount(n)
+}
+
+// deadHookedCount names the seats inside a count that no tmux session holds:
+// their polecat crashed with work still in hand and is waiting for its
+// supervised restart. Empty when none is inside it. One wording for every count
+// an operator reads — the sling refusal, and `gt pool show`'s live column — so
+// the same number reads the same wherever it is met.
+func deadHookedCount(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d dead-hooked", n)
 }
 
 // sessionLister is the slice of tmux the pool reads; a var so tests can
@@ -200,14 +212,33 @@ var newPoolSessionLister = func() sessionLister { return tmux.NewTmux() }
 // func is a pool that cannot read any polecat's state.
 type polecatDispositionFunc func(rigName, polecatName string) (poolSeatState, error)
 
+// poolSeatReads is the town's beads reads one seat read makes, passed in rather
+// than reached for so the read can be driven with no database (docs/testing.md):
+// the polecat's agent bead, the work bead assigned to it, and the by-id lookup
+// the hook reference and the source-issue hint need. poolSeatReadsFor wires the
+// real ones; every other input of the seat read is a directory.
+type poolSeatReads struct {
+	agentBead func(bd beads.Client, agentID string) (*beads.Issue, *beads.AgentFields, error)
+	assigned  func(bd assignedIssueLookup, rigName, polecatName string) polecatActiveWorkEvidence
+	show      func(bd beads.Client, id string) (*beads.Issue, error)
+}
+
+func poolSeatReadsFor() poolSeatReads {
+	return poolSeatReads{
+		agentBead: beads.GetAgentBead,
+		assigned:  poolAssignedWorkEvidence,
+		show:      func(bd beads.Client, id string) (*beads.Issue, error) { return bd.Show(id) },
+	}
+}
+
 // poolSeatState is one polecat's own seat read for the pool: the canonical
-// workstate disposition, plus whether its agent bead still names hooked,
-// non-terminal work.
+// workstate disposition, plus whether the seat still holds live work.
 //
 // HookHeld is what tells a crashed seat from a finished one. A polecat whose
-// tmux session died with its bead still hooked is waiting for its supervised
-// restart and still owns the seat (gt-tldj4); one whose hook names nothing live
-// — submitted, terminal or inert — has no work in flight to wait for.
+// tmux session died with work still in flight is waiting for its supervised
+// restart and still owns the seat (gt-tldj4); one whose work names nothing live
+// — submitted, terminal or inert — has nothing to wait for. It is decided from
+// the seat's work, not from one reference to it (gt-bc9b6).
 type poolSeatState struct {
 	Disposition polecat.WorkstateDisposition
 	HookHeld    bool
@@ -327,27 +358,39 @@ func polecatSeatOccupied(disposition polecatDispositionFunc, rigName, polecatNam
 // poolPolecatSeatState classifies one polecat through the same
 // WorkstateDisposition every other capacity model reads (polecat_capacity.go,
 // `gt polecat list`): its agent bead, the live git facts of its worktree, the
-// terminality of the bead it is assigned, and what its hook names. So "done
+// terminality of the bead it is assigned, and what its work names. So "done
 // with an open MR", "finished with its leftover commits on its branch", and
 // "crashed with the bead still hooked" each mean the same thing here as they do
 // everywhere else.
 //
-// The hook is read because a seat with no live session is only a held seat
-// while its hooked bead is still live work (poolSeatState.HookHeld), and the
-// disposition it is counted with has to say the same: the hook adds the
-// capacity-counting blocker the list path's active-work read adds (gt-tldj4).
+// The seat's work is read from both places the rest of the town reads it: the
+// bead assigned to the polecat (the direct-tracking model the daemon's crash
+// detection, patrol_scan's AssignedWork and `gt polecat list` all decide from,
+// hq-l6mm5/gt-4k3fj.1) and the hook reference its agent bead carries. The
+// assignment is what holds a crashed seat whose reference was emptied on the
+// way out (gt-bc9b6), and the disposition the seat is counted with has to say
+// the same, which is why it adds the capacity-counting blocker the list path's
+// active-work read adds (gt-tldj4).
 func poolPolecatSeatState(townRoot, rigName, polecatName string) (poolSeatState, error) {
+	return poolPolecatSeatStateWith(townRoot, rigName, polecatName, poolSeatReadsFor())
+}
+
+// poolPolecatSeatStateWith is poolPolecatSeatState with the town's beads reads
+// passed in: a test drives the whole seat read — the disposition the roster
+// counts and the work that holds a crashed seat — with no database.
+func poolPolecatSeatStateWith(townRoot, rigName, polecatName string, reads poolSeatReads) (poolSeatState, error) {
 	prefix := beads.GetPrefixForRig(townRoot, rigName)
 	agentID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
 	rigPath := filepath.Join(townRoot, rigName)
-	_, fields, err := beads.GetAgentBead(beads.New(rigPath), agentID)
+	bd := beads.New(rigPath)
+	_, fields, err := reads.agentBead(bd, agentID)
 	if err != nil {
 		return poolSeatState{}, err
 	}
 	if fields == nil {
 		// No agent bead: nothing to read, and safest read is "still occupied"
 		// (see polecatSeatOccupied's fail-open note) rather than a disposition
-		// that happens to read as idle-pr-open by construction. No hook is
+		// that happens to read as idle-pr-open by construction. No work is
 		// named, so a seat with no live session is not a held one either.
 		return poolSeatState{Disposition: polecat.WorkstateDisposition{ReuseStatus: ""}}, nil
 	}
@@ -379,49 +422,97 @@ func poolPolecatSeatState(townRoot, rigName, polecatName string) (poolSeatState,
 	if worktree := resolvePolecatWorktree(filepath.Join(rigPath, "polecats"), polecatName, rigName); worktree != "" {
 		polecat.ProbeLiveGitStateLocal(worktree).ApplyFacts(&facts)
 	}
+	// The work the seat was dispatched for, read before the hook reference: the
+	// bead the seat holds, read the way the list path reads it
+	// (listActivePolecatWorkByName, assessPolecatAssignedIssueWork), so a seat
+	// the pool counts is a seat `gt polecat list` counts.
+	assigned := reads.assigned(bd, rigName, polecatName)
+
 	// The hook, read the way the list path reads it: a submitted or terminal
 	// reference names no work in flight, while an actively assigned (or
-	// unreadable) one is a blocker that counts toward capacity. This is the
-	// fact that decides whether a seat with no live session is still held. The
-	// hint's own lookup doubles as the hook's when they name the same bead, so
-	// the common case pays no second read.
+	// unreadable) one is a blocker that counts toward capacity. The hint's own
+	// lookup doubles as the hook's when they name the same bead, so the common
+	// case pays no second read.
 	hint := agentSourceIssueHint("", fields)
 	hookBead := strings.TrimSpace(fields.HookBead)
 	var hookIssue *beads.Issue
 	var hookErr error
 	if hookBead != "" {
 		if hint == hookBead {
-			hookIssue, hookErr = beads.New(rigPath).Show(hint)
+			hookIssue, hookErr = reads.show(bd, hint)
 		} else {
-			hookIssue, hookErr = beads.New(townRoot).Show(hookBead)
+			hookIssue, hookErr = reads.show(beads.New(townRoot), hookBead)
 		}
 	}
 	hd := polecat.ClassifyHookBead(hookBead, hookIssue, hookErr)
-	held := false
+	held := poolSeatWorkFacts(&facts, hd, assigned)
+	// The assignment terminality the classifier accounts that seat with, read
+	// the way the list path reads it (assignedBeadTerminalForInventory: the
+	// live assigned issue, else the recorded hint — the hook itself when the
+	// hint names it, else the hint's own issue). A lookup that fails answers
+	// false and the seat keeps counting: the exemption has to be proven, not
+	// assumed.
+	switch {
+	case hint == "":
+	case hint == hookBead:
+		facts.AssignedBeadTerminal = hd.Terminal
+	default:
+		if issue, err := reads.show(bd, hint); err == nil && issue != nil {
+			facts.AssignedBeadTerminal = beads.IssueStatus(issue.Status).IsTerminal()
+		}
+	}
+	d := polecat.DecideWorkstate(polecat.NewWorkstateInput(facts))
+	return poolSeatState{Disposition: d, HookHeld: held}, nil
+}
+
+// poolAssignedWorkEvidence reads the work bead assigned to one polecat and
+// assesses it the way the list path assesses it, so the pool's reading of a
+// seat cannot drift from `gt polecat list`'s (gt-tldj4).
+//
+// The assignment is the authority for what a seat holds (gt-4k3fj.1: agent
+// beads are display mirrors and do not hold the work), and it is the read that
+// survives a hand-off: gt done empties the agent bead's hook_bead slot on every
+// exit — the DEFERRED exit that leaves the bead hooked included — so the slot
+// alone reads a crashed seat as holding nothing (gt-bc9b6). The daemon's crash
+// detection (assignedActiveWorkBead), patrol_scan (AssignedWork) and the list
+// path all decide this question from this same bead.
+//
+// A read that fails is the list path's fail-closed evidence
+// (polecatActiveWorkLookupError): the seat blocks cleanup without counting
+// toward capacity, so a database hiccup frees nothing.
+func poolAssignedWorkEvidence(bd assignedIssueLookup, rigName, polecatName string) polecatActiveWorkEvidence {
+	issue, err := bd.GetAssignedIssue(rigName + "/polecats/" + polecatName)
+	if err != nil {
+		return polecatActiveWorkLookupError(err)
+	}
+	return assessPolecatAssignedIssueWork(issue)
+}
+
+// poolSeatWorkFacts folds the two readings of a seat's work into the facts the
+// shared classifier decides from, and reports whether the seat still holds live
+// work.
+//
+// The assignment comes first, exactly as it does in the list path
+// (buildPolecatInventoryItemFromEvidence): it is the bead the seat holds, and
+// the hook reference is consulted only when the assignment names nothing. A
+// submitted assignment is deliberately not held work here — that seat mid-landing
+// is counted by poolLandingSessions from the seat's own record, and both reads
+// counting it would fill two seats with one polecat (gt-xmcyk).
+func poolSeatWorkFacts(facts *polecat.WorkstateFacts, hd polecat.HookBeadDisposition, assigned polecatActiveWorkEvidence) (held bool) {
+	if assigned.BlocksCleanup {
+		facts.ActiveWorkBlocker = assigned.Blocker
+		facts.ActiveWorkCountsTowardCapacity = assigned.CountsTowardCapacity
+		return !assigned.Submitted
+	}
 	switch {
 	case hd.Submitted:
 		facts.HookBeadSubmitted = true
 	case hd.Blocker != "":
 		facts.ActiveWorkBlocker = hd.Blocker
 		facts.ActiveWorkCountsTowardCapacity = true
-		held = true
+		return true
 	}
-	// The assignment terminality the classifier accounts that seat with, read
-	// the way the list path reads it (assignedBeadTerminalForInventory: the
-	// hook itself when the hint names it, else the hint's own issue). A lookup
-	// that fails answers false and the seat keeps counting: the exemption has
-	// to be proven, not assumed.
-	switch {
-	case hint == "":
-	case hint == hookBead:
-		facts.AssignedBeadTerminal = hd.Terminal
-	default:
-		if issue, err := beads.New(rigPath).Show(hint); err == nil && issue != nil {
-			facts.AssignedBeadTerminal = beads.IssueStatus(issue.Status).IsTerminal()
-		}
-	}
-	d := polecat.DecideWorkstate(polecat.NewWorkstateInput(facts))
-	return poolSeatState{Disposition: d, HookHeld: held}, nil
+	return false
 }
 
 // Seat claims (gt-eoi9).
