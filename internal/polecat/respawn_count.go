@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -33,10 +34,18 @@ type beadRespawnState struct {
 	LastUpdated time.Time                     `json:"last_updated"`
 }
 
-// beadRespawnStateFile stays under <town>/witness/ although the witness role
-// is retired (gt-4k3fj.6.1): the live counts are there, and moving the file
-// without a migration would reset every bead's respawn budget.
+// beadRespawnStateFile is the live location of the respawn counts, in
+// <town>/.runtime/ rather than the retired witness directory (gt-4k3fj.6.1).
+// The witness/ copy is migrated here on first use (gt-la690).
 func beadRespawnStateFile(townRoot string) string {
+	return filepath.Join(townRoot, constants.DirRuntime, "bead-respawn-counts.json")
+}
+
+// legacyBeadRespawnStateFile is where the counts sat while the witness role
+// owned them. The file is live state in towns built before the move, and
+// discarding it would hand every bead its full respawn budget back at once, so
+// it is read and merged into beadRespawnStateFile on first use (gt-la690).
+func legacyBeadRespawnStateFile(townRoot string) string {
 	return filepath.Join(townRoot, "witness", "bead-respawn-counts.json")
 }
 
@@ -44,16 +53,15 @@ func emptyBeadRespawnState() *beadRespawnState {
 	return &beadRespawnState{Beads: make(map[string]*beadRespawnRecord)}
 }
 
-// loadBeadRespawnState reads the tracked respawn counts. A file that is not
-// there is an empty state; one that cannot be read or parsed is an error, an
-// empty state being what re-arms every bead's respawn budget at once — the
-// town-wide breaker wipe a truncated file used to cause (gt-u3hc1).
-func loadBeadRespawnState(townRoot string) (*beadRespawnState, error) {
-	path := beadRespawnStateFile(townRoot)
+// readBeadRespawnStateFile returns the state in path, or nil when the file is
+// not there. A file that cannot be read or parsed is an error, an empty state
+// being what re-arms every bead's respawn budget at once — the town-wide
+// breaker wipe a truncated file used to cause (gt-u3hc1).
+func readBeadRespawnStateFile(path string) (*beadRespawnState, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // G304: path from trusted townRoot
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return emptyBeadRespawnState(), nil
+			return nil, nil
 		}
 		return nil, fmt.Errorf("reading respawn state %s: %w", path, err)
 	}
@@ -67,15 +75,63 @@ func loadBeadRespawnState(townRoot string) (*beadRespawnState, error) {
 	return &state, nil
 }
 
+// loadBeadRespawnState reads the tracked respawn counts, folding in the legacy
+// witness/ file while it is still there: a bead must never read as never
+// respawned just because the read happened before the migration's first write.
+// A missing file is an empty state; one that cannot be read or parsed is an
+// error (gt-u3hc1).
+func loadBeadRespawnState(townRoot string) (*beadRespawnState, error) {
+	state, err := readBeadRespawnStateFile(beadRespawnStateFile(townRoot))
+	if err != nil {
+		return nil, err
+	}
+	if state == nil {
+		state = emptyBeadRespawnState()
+	}
+	legacy, err := readBeadRespawnStateFile(legacyBeadRespawnStateFile(townRoot))
+	if err != nil {
+		return nil, err
+	}
+	mergeBeadRespawnStates(state, legacy)
+	return state, nil
+}
+
+// mergeBeadRespawnStates folds src into dst per bead, keeping the larger count
+// and the later last_respawn: both files hold real increments, and a merge that
+// preferred either side outright would drop the other's.
+func mergeBeadRespawnStates(dst, src *beadRespawnState) {
+	if src == nil {
+		return
+	}
+	for id, rec := range src.Beads {
+		if rec == nil {
+			continue
+		}
+		existing, ok := dst.Beads[id]
+		if !ok {
+			copied := *rec
+			dst.Beads[id] = &copied
+			continue
+		}
+		if rec.Count > existing.Count {
+			existing.Count = rec.Count
+		}
+		if rec.LastRespawn.After(existing.LastRespawn) {
+			existing.LastRespawn = rec.LastRespawn
+		}
+	}
+}
+
 // saveBeadRespawnState writes state beside its destination and renames it into
 // place, so a failed or partial write leaves the previous counts readable —
 // where truncating the file in place leaves the unparseable one that reads as
-// empty (gt-u3hc1).
+// empty (gt-u3hc1). Once the rename lands the legacy witness/ copy is cleared
+// (gt-la690).
 func saveBeadRespawnState(townRoot string, state *beadRespawnState) error {
 	stateFile := beadRespawnStateFile(townRoot)
 	dir := filepath.Dir(stateFile)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("creating witness dir: %w", err)
+		return fmt.Errorf("creating runtime dir: %w", err)
 	}
 	state.LastUpdated = time.Now().UTC()
 	data, err := json.MarshalIndent(state, "", "  ")
@@ -98,7 +154,21 @@ func saveBeadRespawnState(townRoot string, state *beadRespawnState) error {
 	if err := os.Rename(tmpName, stateFile); err != nil {
 		return fmt.Errorf("replacing respawn state: %w", err)
 	}
+	removeLegacyBeadRespawnState(townRoot)
 	return nil
+}
+
+// removeLegacyBeadRespawnState clears the retired witness/ copy and its flock.
+// Its failures are dropped rather than returned: the merged counts are already
+// on disk, and a respawn that goes unrecorded because a stale file would not
+// delete is the spawn storm this counter exists to stop. The directory removal
+// fails whenever the operator's witness/ still holds anything else, which is
+// the point of trying it here rather than by hand (gt-la690).
+func removeLegacyBeadRespawnState(townRoot string) {
+	legacy := legacyBeadRespawnStateFile(townRoot)
+	_ = os.Remove(legacy)
+	_ = os.Remove(legacy + ".flock")
+	_ = os.Remove(filepath.Dir(legacy))
 }
 
 // respawnTownRoot resolves the town a rig path belongs to, falling back to the
@@ -113,7 +183,7 @@ func respawnTownRoot(workDir string) string {
 
 // lockRespawnState takes the cross-process lock guarding the respawn state.
 // The flock file sits beside the state file and flockAcquire creates no parent
-// directories, so the witness dir is created first: a first run in a fresh town
+// directories, so the state dir is created first: a first run in a fresh town
 // used to fail the open and fall through to an unlocked read-modify-write.
 //
 // A lock that cannot be taken is an error and never a silent fall-through —
@@ -122,7 +192,7 @@ func respawnTownRoot(workDir string) string {
 func lockRespawnState(townRoot string) (func(), error) {
 	stateFile := beadRespawnStateFile(townRoot)
 	if err := os.MkdirAll(filepath.Dir(stateFile), 0755); err != nil {
-		return nil, fmt.Errorf("creating witness dir: %w", err)
+		return nil, fmt.Errorf("creating runtime dir: %w", err)
 	}
 	unlock, err := lock.FlockAcquire(stateFile + ".flock")
 	if err != nil {
