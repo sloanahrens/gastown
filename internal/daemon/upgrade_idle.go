@@ -33,9 +33,11 @@ func (d *Daemon) isIdleForUpgrade() bool {
 	return d.daemonWorkIdle()
 }
 
-// daemonWorkIdle is isIdleForUpgrade without the gc cycle's own flag, so the
-// gc cycle's quiet-window guard (maintenanceQuiet) can reuse the predicate
-// without reading itself as busy.
+// daemonWorkIdle is isIdleForUpgrade without the gc cycle's own flag: whoever
+// asks accounts for the cycle separately (upgradeHold waits it out at
+// maintenanceGCRestartCap), so this reads only what else is in flight. The gc's
+// own quiet guard needs no such flag — it asks the hard holds alone
+// (maintenanceQuiet, through catchUpWorkHold).
 func (d *Daemon) daemonWorkIdle() bool {
 	return d.daemonWorkHold() == nil
 }
@@ -96,15 +98,15 @@ func (d *Daemon) catchUpWorkHold() *daemonWork {
 }
 
 // daemonWorkHolds lists the daemon work in flight, in the order the wait line
-// names it when none of it is hard. It is the one list behind daemonWorkIdle
-// and the upgrade restart's wait line; daemonWorkHold picks the hard-first
-// entry from it.
+// names it when none of it is hard. It is the one list behind daemonWorkIdle,
+// the upgrade restart's wait line and the gc's quiet guard (catchUpWorkHold);
+// daemonWorkHold picks the hard-first entry from it.
 //
 // The install-lock probe is last and only runs when nothing else, or only soft
 // work, is in flight. It is the one check that touches the filesystem
-// (daemonWorkHold is called from maintenanceQuiet on every gc quiet check), and
-// a hard hold already in hand decides daemonWorkHold's answer whatever the
-// probe would say.
+// (daemonWorkHold is called on every upgrade heartbeat, catchUpWorkHold on
+// every gc quiet check), and a hard hold already in hand decides
+// daemonWorkHold's answer whatever the probe would say.
 func (d *Daemon) daemonWorkHolds() []*daemonWork {
 	var holds []*daemonWork
 	if names := d.scripts.inFlight(); len(names) > 0 {

@@ -359,8 +359,8 @@ newest one is older than 24h plus the window length, with no hard daemon work in
 flight and no gate slot held — a working polecat does not defer a read
 (gt-wne04) — and then the gc, for a database with no recorded gc or a last one
 older than eight days (gt-uux5b). The gc never runs without a backup younger
-than the catch-up age on disk, and it waits for the full quiet guard, the one
-the window's own cycle re-checks per database; a window that does not parse, an
+than the catch-up age on disk, and it waits for the same hard-hold guard the
+window's own cycle re-checks per database; a window that does not parse, an
 external server and an unreadable state file all mean no catch-up. A blocked or
 deferred catch-up retries on the next tick, counts toward no window's
 skipped-window streak, and leaves the next window's backup and gc untouched. A
@@ -370,13 +370,24 @@ failed backup or gc escalates once and is not retried for 6 hours. Restore:
 Due databases run largest first, ties by name, one at a time, each bounded by 10
 minutes: a run that stops early must not cut off the database that needs the
 most time.
-Before each database the patrol re-checks a quiet-window guard: the daemon's
-upgrade-idle predicate, no container-gate slot or in-flight marker held by
-anyone, no polecat with a fresh `working` heartbeat, and no pause marker held
-by another actor. If the town is busy it logs why and stops; the next 5-minute
-tick in the window retries, and databases already gc'd drop out. A gc error
-stops the run, logs, and escalates once; the patrol does not retry until the
-next window. It never flattens, never pushes and never restarts Dolt.
+Before each database the patrol re-checks the guard: no hard daemon work in
+flight — a landing pass, a scheduled slings cycle, the install lock, the same
+hard-hold test the catch-up backup uses — no container-gate slot or in-flight
+marker held by anyone, and no pause marker held by another actor. If a hold is
+in flight it logs which one and stops; the next 5-minute tick in the window
+retries, and databases already gc'd drop out. A gc error stops the run, logs,
+and escalates once; the patrol does not retry until the next window. It never
+flattens, never pushes and never restarts Dolt.
+
+The town does not have to be idle (gt-mdejo). Soft work — plugin runs, dog
+cycles, the daemon's own ticks and scans — reruns from the next tick, and a
+working polecat is a reader of a gc that takes seconds: 51 `bd list` reads and
+21 `bd comments add` writes went through a `--full` gc with the slowest call
+about a second and none failed. Requiring an idle town instead left this
+database 17 days without a gc, with the stale-gc alarm (gt-2l9zd) firing on
+it. Each run logs what it ran beside — how many polecats held a fresh
+`working` heartbeat and which soft daemon work was in flight — and nothing in
+that line gates the run.
 
 Around each database's gc the patrol also:
 

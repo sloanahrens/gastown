@@ -74,7 +74,7 @@ const (
 	maintenancePauseActor = "daemon/scheduled_maintenance"
 
 	// maintenancePolecatFreshness is how recent a polecat's "working"
-	// heartbeat must be to count as work in flight. Polecats renew it on
+	// heartbeat must be to count in the gc's demand line. Polecats renew it on
 	// every gt sub-command; an older one is a stalled or finished session.
 	maintenancePolecatFreshness = 15 * time.Minute
 
@@ -357,20 +357,31 @@ func maintenanceSlotHolders(townRoot string) ([]string, error) {
 	return holders, nil
 }
 
-// --- quiet-window guard -----------------------------------------------------------
+// --- the gc's guard ----------------------------------------------------------------
 
 // maintenanceQuiet reports whether gc may run now, with the reason when not.
 // A --full gc is the one step that has correlated with a Dolt panic (design
-// doc, Problem), so it runs only when nothing else in the town is doing work:
-//   - the daemon's own in-flight work is idle (the upgrade-restart predicate),
+// doc, Problem), so it waits for what a restart would also wait for, and for
+// nothing else:
+//   - no hard daemon work in flight — the same hard-hold test the catch-up
+//     backup uses (catchUpWorkHold): a landing pass owns the merged-tree gate
+//     of the bead it is landing, a scheduled slings cycle is a dispatcher a cut
+//     can leave half-done, and the install lock means the binary is
+//     mid-replacement,
 //   - no container-gate slot or in-flight marker held by anyone (refinery gate,
-//     batch gate, polecat verification suite, review),
-//   - no polecat with a fresh "working" heartbeat.
+//     batch gate, polecat verification suite, review).
+//
+// The town does not have to be idle (gt-mdejo): soft work — plugin runs, dog
+// cycles, the daemon's own ticks and scans — reruns from the next tick, and a
+// working polecat is a reader of a gc that takes seconds (51 bd reads and 21
+// writes through a --full gc, slowest about a second, none failed). Demanding
+// an idle town cost this database 17 days without a gc.
+// maintenanceGCDemand records what ran beside each cycle.
 //
 // A probe that cannot answer counts as busy.
 func (d *Daemon) maintenanceQuiet() (bool, string) {
-	if !d.daemonWorkIdle() {
-		return false, "daemon has work in flight (scripts, compactor, triage, slings, dispatch, watchdog or install)"
+	if hold := d.catchUpWorkHold(); hold != nil {
+		return false, "daemon has work in flight (" + hold.name + ")"
 	}
 	holders, err := d.maintenance().slotHolders(d.config.TownRoot)
 	if err != nil {
@@ -379,23 +390,45 @@ func (d *Daemon) maintenanceQuiet() (bool, string) {
 	if len(holders) > 0 {
 		return false, "slot held by " + strings.Join(holders, ", ")
 	}
-	working, err := d.maintenance().workingPolecats(d)
-	if err != nil {
-		return false, fmt.Sprintf("cannot list polecats: %v", err)
-	}
-	if len(working) > 0 {
-		return false, "polecats working: " + strings.Join(working, ", ")
-	}
 	return true, ""
+}
+
+// maintenanceGCDemand describes the town the gc ran beside: how many polecats
+// had a fresh "working" heartbeat and which soft daemon work was in flight.
+// Both used to defer the gc and no longer do (gt-mdejo), so this line is the
+// only trace they leave — it reports, and gates nothing.
+func (d *Daemon) maintenanceGCDemand() string {
+	var what []string
+	working, err := d.maintenance().workingPolecats(d)
+	switch {
+	case err != nil:
+		what = append(what, fmt.Sprintf("cannot count working polecats: %v", err))
+	case len(working) == 0:
+		what = append(what, "no polecats working")
+	default:
+		what = append(what, fmt.Sprintf("%d polecats working: %s", len(working), strings.Join(working, ", ")))
+	}
+	var soft []string
+	for _, hold := range d.daemonWorkHolds() {
+		if !hold.hard {
+			soft = append(soft, hold.name)
+		}
+	}
+	if len(soft) == 0 {
+		return strings.Join(what, "; ") + "; no soft daemon work in flight"
+	}
+	return strings.Join(what, "; ") + "; soft work in flight: " + strings.Join(soft, ", ")
 }
 
 // workingPolecats lists "<rig>/<polecat>" for every polecat worktree whose
 // session heartbeat says working and is fresher than
 // maintenancePolecatFreshness. File reads only — no tmux, no bd.
 //
+// A working polecat does not defer a gc (gt-mdejo): its caller is
+// maintenanceGCDemand, which puts the count in the log line and gates nothing.
+//
 // A rig with no polecats directory has no polecats. Any other listing error
-// is returned: the caller cannot tell whether a polecat is working in that
-// rig, so it must count the town as busy.
+// is returned so the log line can say the count is unknown.
 func (d *Daemon) workingPolecats() ([]string, error) {
 	var out []string
 	now := time.Now()
@@ -547,7 +580,7 @@ func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string) maintena
 		for _, r := range eligible[i:] {
 			rest = append(rest, r.name)
 		}
-		d.logger.Printf("scheduled_maintenance: town not quiet (%s) — deferring gc of %s to a later tick",
+		d.logger.Printf("scheduled_maintenance: gc held: %s — deferring gc of %s to a later tick",
 			why, strings.Join(rest, ", "))
 		return maintenanceGCResult{outcome: gcOutcomeDeferred, reason: why, pending: eligible[i:]}
 	}
@@ -604,8 +637,8 @@ func (d *Daemon) maintenanceGCOne(parent context.Context, dataDir string, c gcCa
 		}
 	}()
 
-	d.logger.Printf("scheduled_maintenance: gc %s: CALL dolt_gc('--full') (before %s, old-gen %s)",
-		c.name, formatBytes(c.before.total), formatBytes(c.before.oldGen))
+	d.logger.Printf("scheduled_maintenance: gc %s: %s; CALL dolt_gc('--full') (before %s, old-gen %s)",
+		c.name, d.maintenanceGCDemand(), formatBytes(c.before.total), formatBytes(c.before.oldGen))
 	d.maintenanceGCOverdueEscalated.Store(false)
 	d.maintenanceGCCallStartedAt.Store(time.Now().UnixNano())
 	ctx, cancel := context.WithTimeout(parent, maintenanceGCTimeout)
