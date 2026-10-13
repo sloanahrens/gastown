@@ -226,11 +226,12 @@ func TestCheckPolecatHealth_CrashFromWorkBeadWithoutAgentBead(t *testing.T) {
 }
 
 // seedAgentState seeds the seat's agent bead with an agent_state, the way gt
-// sling writes agent_state=spawning at dispatch (and the first heartbeat moves
-// it on to working).
-func (b *workBD) seedAgentState(state string) {
+// sling writes agent_state=spawning at dispatch. updated is the bead's last
+// write, which for a polecat that is up is still the spawn (gt-i3ky2).
+func (b *workBD) seedAgentState(state string, updated time.Time) {
 	b.db.Seed(beads.Issue{ID: "gt-myr-polecat-mycat",
-		Description: "role_type: polecat\nrig: myr\nagent_state: " + state + "\n"})
+		Description: "role_type: polecat\nrig: myr\nagent_state: " + state + "\n",
+		UpdatedAt:   updated.UTC().Format(time.RFC3339)})
 }
 
 // The spawn grace comes from the work bead's hook and the seat's agent
@@ -241,7 +242,7 @@ func TestCheckPolecatHealth_SpawnGraceFromWorkBead(t *testing.T) {
 	t.Parallel()
 	bd := newWorkBD(t)
 	bd.seed("gt-work1", "hooked", time.Now().Add(-time.Minute))
-	bd.seedAgentState("spawning")
+	bd.seedAgentState("spawning", time.Now().Add(-time.Minute))
 	d, logBuf := reaperDaemon(t, bd)
 	d.tmux = newFakeTmux(newFixedClock())
 
@@ -259,21 +260,26 @@ func TestCheckPolecatHealth_SpawnGraceFromWorkBead(t *testing.T) {
 func TestCheckPolecatHealth_SpawnGraceNeedsASpawningAgentState(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name    string
-		state   string
-		age     time.Duration
-		crashed bool
+		name     string
+		state    string
+		age      time.Duration
+		agentAge time.Duration
+		crashed  bool
 	}{
-		{"working seat with a work bead written 30s ago is a crash, not a dispatch", "working", 30 * time.Second, true},
-		{"spawning seat inside the window may be starting up", "spawning", 30 * time.Second, false},
-		{"spawning seat older than the window never came up", "spawning", 10 * time.Minute, true},
+		{"working seat with a work bead written 30s ago is a crash, not a dispatch", "working", 30 * time.Second, 30 * time.Second, true},
+		{"spawning seat inside the window may be starting up", "spawning", 30 * time.Second, 30 * time.Second, false},
+		{"spawning seat older than the window never came up", "spawning", 10 * time.Minute, 10 * time.Minute, true},
+		// gt-i3ky2: the record stays spawning while the polecat works, so
+		// a recent work-bead write must not revive the grace once the record
+		// itself is older than the window.
+		{"spawning record 15 minutes old with a work bead written 30s ago is a crash", "spawning", 30 * time.Second, 15 * time.Minute, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			bd := newWorkBD(t)
 			bd.seed("gt-work1", "hooked", time.Now().Add(-tc.age))
-			bd.seedAgentState(tc.state)
+			bd.seedAgentState(tc.state, time.Now().Add(-tc.agentAge))
 			d, logBuf := reaperDaemon(t, bd)
 			d.tmux = newFakeTmux(newFixedClock())
 

@@ -532,22 +532,28 @@ func TestRecoveryRestartsAreNotHeldByThePoolCap(t *testing.T) {
 func TestSpawnGraceTracksTheAgentStateNotTheWorkBeadWrite(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name  string
-		state string
-		age   time.Duration
-		want  Outcome
+		name     string
+		state    string
+		workAge  time.Duration
+		agentAge time.Duration
+		want     Outcome
 	}{
-		{"working seat with a bead written 30s ago is a crash, not a dispatch", "working", 30 * time.Second, OutcomeRestarted},
-		{"spawning seat inside the window may be starting up", "spawning", 30 * time.Second, OutcomeSkipped},
-		{"spawning seat older than the window never came up", "spawning", 10 * time.Minute, OutcomeRestarted},
+		{"working seat with a bead written 30s ago is a crash, not a dispatch", "working", 30 * time.Second, 30 * time.Second, OutcomeRestarted},
+		{"spawning seat inside the window may be starting up", "spawning", 30 * time.Second, 30 * time.Second, OutcomeSkipped},
+		{"spawning seat older than the window never came up", "spawning", 10 * time.Minute, 10 * time.Minute, OutcomeRestarted},
+		// gt-i3ky2: nothing moves the record off spawning once the session is
+		// up, so a polecat that has run for 15 minutes and just wrote its
+		// work bead still says spawning. The record's own age is the spawn
+		// time, and it has outlived the window.
+		{"spawning record from 15 minutes ago with a work bead written 30s ago is a crash", "spawning", 30 * time.Second, 15 * time.Minute, OutcomeRestarted},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			env := newFake()
 			deadWithWork(env, "ruby")
-			env.agents["ruby"] = AgentRecord{State: tc.state}
-			env.work["ruby"].UpdatedAt = now.Add(-tc.age)
+			env.agents["ruby"] = AgentRecord{State: tc.state, UpdatedAt: now.Add(-tc.agentAge)}
+			env.work["ruby"].UpdatedAt = now.Add(-tc.workAge)
 
 			r := scanner(env, nil).Tick("gastown")
 
@@ -1097,7 +1103,7 @@ func TestNoRestartCases(t *testing.T) {
 		}, OutcomeUnknown},
 		{"spawn grace (agent_state spawning, hook inside the window)", func(env *fakeEnv) {
 			env.work["ruby"].UpdatedAt = now.Add(-time.Minute)
-			env.agents["ruby"] = AgentRecord{State: SpawningAgentState}
+			env.agents["ruby"] = AgentRecord{State: SpawningAgentState, UpdatedAt: now.Add(-time.Minute)}
 		}, OutcomeSkipped},
 		{"first dead sample only", func(env *fakeEnv) { env.verdicts["ruby"] = dead(1) }, OutcomeWaiting},
 		{"liveness unknown", func(env *fakeEnv) {

@@ -12,7 +12,10 @@ import (
 // is not up yet should still be read as spawning rather than stalled.
 //
 // gt sling writes agent_state=spawning into the agent bead before the sandbox
-// and session exist; the first heartbeat moves the bead on to working. Query
+// and session exist, and nothing rewrites it until gt done: the bead stays
+// spawning for the whole run (gt-f77fr dropped the working write), so its
+// last write dates the spawn and callers pass that as updatedAt, never a work
+// bead's write, which a running polecat keeps refreshing (gt-i3ky2). Query
 // paths that synthesize "stalled" from "work assigned, no live session" would
 // otherwise call that polecat stalled within seconds of dispatch, and the
 // restart paths would chase a session that is still booting (gt-yteq). The

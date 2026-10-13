@@ -467,7 +467,8 @@ func (h *patrolScanHost) AgentRecord(rig, name string) (patrolscan.AgentRecord, 
 		// hook_bead is written to the description; a bead from before that
 		// contract may still carry the column, and either one set reads as work
 		// the seat may still hold.
-		HookBead: issue.HookBead,
+		HookBead:  issue.HookBead,
+		UpdatedAt: polecat.AgentBeadUpdatedAt(issue),
 	}
 	if f := beads.ParseAgentFields(issue.Description); f != nil {
 		rec.ExitType = f.ExitType
