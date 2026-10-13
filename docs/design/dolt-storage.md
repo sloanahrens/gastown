@@ -316,7 +316,7 @@ size is commit history, not garbage, so a routine rewrite bought little and
 risked the history `bd history` reads. Flatten is an offline operator
 procedure with a single trigger, a database past 2 GB:
 [dolt-history-offline.md](../dolt-history-offline.md). The Compactor patrol
-counts commits and escalates as a history-query latency tripwire.
+counts commits and measures store size, escalating on either.
 
 **The one GC actor.** `scheduled_maintenance` (scheduled_maintenance.go,
 maintenance_gc.go) is the only path in gt that runs a manual gc. Dolt's own
@@ -335,10 +335,10 @@ latency break stuck-agent-dog at 863 MiB under the old 2x size trigger; 20%
 of old-gen keeps a gc well inside that.
 
 The databases are every directory with a `.dolt` subdirectory under the
-Dolt data dir (discovered each run), not the `compactor_dog` /
-`wisp_reaper` database lists, whose fallback is `hq` alone. The patrol is
-skipped (logged) when the server is externally managed or not on a loopback
-host: the trigger reads the data dir from this host's disk.
+Dolt data dir (discovered each run), not the `wisp_reaper` database list,
+whose fallback is `hq` alone. The patrol is skipped (logged) when the
+server is externally managed or not on a loopback host: the trigger reads
+the data dir from this host's disk.
 
 Per database, `daemon/maintenance_state.json` (atomic write) records
 `last_gc`, `post_gc_bytes`, `post_gc_oldgen_bytes` (the growth baseline) and
@@ -417,8 +417,9 @@ policy, not settings. The retired keys (`interval`, `threshold`, `mode`,
 them decodes strictly, and the daemon logs them as ignored.
 
 `patrols.compactor_dog.threshold` is an escalation line only; the compactor
-patrol never compacts and only guards history-walking query latency. This
-town sets it to 20000 rather than the 2000 default.
+patrol never compacts, and it escalates on store size as well as on commit
+count. This town sets the commit threshold to 20000 rather than the 2000
+default.
 
 All compaction operations are safe on a running server — no downtime
 needed. Can also be wired as a Dolt scheduled event (MySQL-style cron):
