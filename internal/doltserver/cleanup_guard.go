@@ -94,7 +94,7 @@ func ValidateForceAuthorization(issue *beads.Issue, actor string) error {
 		return fmt.Errorf(`bead %s is not an authorization record: missing the %q label (gt-2oy)
 
 An authorization bead must be created by the overseer with:
-  bd update %s --labels=%s   # or create a new bead carrying that label`,
+  bd update %s --add-label %s  # or create a new bead carrying that label`,
 			issue.ID, ForceAuthLabel, issue.ID, ForceAuthLabel)
 	}
 	if beads.IssueStatus(issue.Status).IsTerminal() {

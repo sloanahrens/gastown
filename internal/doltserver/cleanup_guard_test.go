@@ -95,6 +95,13 @@ func TestValidateForceAuthorization(t *testing.T) {
 		if !strings.Contains(err.Error(), ForceAuthLabel) {
 			t.Errorf("error should name the required label, got: %v", err)
 		}
+		// bd update has --add-label, not --labels (gt-ch732).
+		if want := "bd update hq-auth1 --add-label " + ForceAuthLabel; !strings.Contains(err.Error(), want) {
+			t.Errorf("error should show %q, got: %v", want, err)
+		}
+		if strings.Contains(err.Error(), "--labels") {
+			t.Errorf("error must not suggest the nonexistent bd update --labels flag, got: %v", err)
+		}
 	})
 
 	t.Run("closed bead refused", func(t *testing.T) {

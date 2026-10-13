@@ -32,7 +32,7 @@ func ValidateFixAuthorization(issue *beads.Issue, actor string) error {
 
 A destructive doctor repair by an agent requires an authorization bead created
 by the overseer:
-  bd update %s --labels=%s   # or create a new bead carrying that label`,
+  bd update %s --add-label %s  # or create a new bead carrying that label`,
 			issue.ID, FixAuthLabel, issue.ID, FixAuthLabel)
 	}
 	if beads.IssueStatus(issue.Status).IsTerminal() {
