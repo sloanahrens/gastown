@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -174,6 +175,61 @@ func TestRebuildOMCycle_InstalledOmNotBehindIsLeftInPlace(t *testing.T) {
 			}
 			if esc := rec.Escalations(); len(esc) != 0 {
 				t.Errorf("a deliberate newer om escalated: %+v", esc)
+			}
+		})
+	}
+}
+
+// TestRebuildOMCycle_AncestryCheckFailureDefers pins that a merge-base that
+// failed to run says nothing about ancestry: the cycle defers, leaves the
+// starvation block open and the starved alert uncleared, and logs git's error.
+func TestRebuildOMCycle_AncestryCheckFailureDefers(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		reply cliReply
+		logs  string
+	}{
+		"exit 128 on a broken clone": {cliReply{stderr: "fatal: not a git repository", code: 128}, "fatal: not a git repository"},
+		"killed by the timeout":      {cliReply{code: -1}, "exit status -1"},
+		"any other exit":             {cliReply{stderr: "error: object file is empty", code: 2}, "error: object file is empty"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			d, rec, clk := rebuildOMTown(t)
+			var logs strings.Builder
+			d.logger = log.New(&logs, "", 0)
+			cli := withRebuildGTCli(t, d, func(c cliCall) cliReply {
+				switch {
+				case gitSub(c, "merge-base"):
+					return tc.reply
+				case gitSub(c, "rev-parse"):
+					return cliReply{stdout: rebuildOMHeadSHA + "\n"}
+				case c.name == "bash":
+					return omInstalled(rebuildOMHeadSHA)
+				}
+				return cliReply{}
+			})
+			d.rebuildOMBlock.open(clk.Now().Add(-time.Hour))
+
+			if settled := d.runRebuildOM(); settled {
+				t.Fatal("a failed ancestry check is no verdict and must retry on the next heartbeat")
+			}
+
+			if len(gitCalls(cli, "merge-base")) == 0 {
+				t.Fatal("no ancestry check ran")
+			}
+			if installs := installCalls(cli); len(installs) != 0 {
+				t.Errorf("an om not shown to be behind was replaced: %v", installs)
+			}
+			if age, open := d.rebuildOMBlock.openFor(clk.Now()); !open || age != time.Hour {
+				t.Errorf("block = (%v, open=%v), want it left open at its hour", age, open)
+			}
+			if clears := rec.Clears(); len(clears) != 0 {
+				t.Errorf("a failed ancestry check cleared alerts: %+v", clears)
+			}
+			if !strings.Contains(logs.String(), tc.logs) {
+				t.Errorf("log does not name the git error %q:\n%s", tc.logs, logs.String())
 			}
 		})
 	}
