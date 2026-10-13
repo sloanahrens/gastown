@@ -70,3 +70,81 @@ func TestIdentityToEmail(t *testing.T) {
 		})
 	}
 }
+
+func TestCommitIdentity(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		env  map[string]string
+		cwd  string
+		want string
+	}{
+		{
+			name: "no env in crew dir passes through",
+			cwd:  "/home/u/gt/gastown/crew/max",
+			want: "",
+		},
+		{
+			name: "no env in polecat dir passes through",
+			cwd:  "/home/u/gt/gastown/polecats/slit/gastown",
+			want: "",
+		},
+		{
+			name: "no env in witness dir passes through",
+			cwd:  "/home/u/gt/gastown/witness",
+			want: "",
+		},
+		{
+			name: "GT_POLECAT alone passes through",
+			env:  map[string]string{"GT_POLECAT": "slit", "GT_RIG": "gastown"},
+			cwd:  "/home/u/gt/gastown/polecats/slit/gastown",
+			want: "",
+		},
+		{
+			name: "BD_ACTOR alone passes through",
+			env:  map[string]string{"BD_ACTOR": "daemon"},
+			cwd:  "/home/u/gt/gastown/crew/max",
+			want: "",
+		},
+		{
+			name: "GT_ROLE crew with env",
+			env:  map[string]string{"GT_ROLE": "crew", "GT_RIG": "gastown", "GT_CREW": "max"},
+			cwd:  "/elsewhere",
+			want: "gastown/crew/max",
+		},
+		{
+			name: "GT_ROLE polecat with env",
+			env:  map[string]string{"GT_ROLE": "polecat", "GT_RIG": "gastown", "GT_POLECAT": "slit"},
+			cwd:  "/elsewhere",
+			want: "gastown/slit",
+		},
+		{
+			name: "GT_ROLE full address",
+			env:  map[string]string{"GT_ROLE": "gastown/crew/jack"},
+			cwd:  "/elsewhere",
+			want: "gastown/crew/jack",
+		},
+		{
+			name: "GT_ROLE simple name falls back to cwd",
+			env:  map[string]string{"GT_ROLE": "crew"},
+			cwd:  "/home/u/gt/gastown/crew/max",
+			want: "gastown/crew/max",
+		},
+		{
+			name: "GT_ROLE that resolves to no agent passes through",
+			env:  map[string]string{"GT_ROLE": "crew"},
+			cwd:  "/elsewhere",
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			getenv := func(k string) string { return tt.env[k] }
+			if got := commitIdentity(getenv, tt.cwd); got != tt.want {
+				t.Errorf("commitIdentity(%v, %q) = %q, want %q", tt.env, tt.cwd, got, tt.want)
+			}
+		})
+	}
+}

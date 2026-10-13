@@ -51,11 +51,14 @@ func runCommit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Detect agent identity
-	identity := detectSender()
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = ""
+	}
 
-	// If overseer (human), just pass through to git commit
-	if identity == "overseer" {
+	// No agent identity (a human at a terminal): pass through to git commit
+	identity := commitIdentity(os.Getenv, cwd)
+	if identity == "" {
 		return runGitCommit(args, "", "")
 	}
 
@@ -77,6 +80,23 @@ func runCommit(cmd *cobra.Command, args []string) error {
 	name := identity
 
 	return runGitCommit(args, name, email)
+}
+
+// commitIdentity returns the agent identity to author a commit as, or "" when
+// the commit should pass through to plain git unchanged. Only GT_ROLE marks an
+// agent session: detectSenderWith also infers an identity from GT_POLECAT,
+// BD_ACTOR and the cwd path, which would author a human working in an agent
+// directory (say ~/gt/gastown/crew/max) as that agent. A GT_ROLE that resolves
+// to no agent address passes through too.
+func commitIdentity(getenv func(string) string, cwd string) string {
+	if getenv("GT_ROLE") == "" {
+		return ""
+	}
+	identity := detectSenderWith(getenv, cwd)
+	if identity == "overseer" {
+		return ""
+	}
+	return identity
 }
 
 // identityToEmail converts a Gas Town identity to a git email address.
