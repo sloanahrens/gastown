@@ -239,7 +239,7 @@ type Spec struct {
 	Acceptance  string
 	// SubmittedForLanding marks a bead whose notes carry a live landing
 	// request: a READY TO LAND block that no LANDING RECORD and no MERGE
-	// REJECTION follows. gt done writes that block before the gt:ready-to-land
+	// REJECTION follows. gt done writes that block with the gt:ready-to-land
 	// label, and a label is the half of an answer known to go missing
 	// (gt-q6zoo), so a bead mid-submission reaches the dispatcher marked here
 	// while it wears no label (gt-kr5xv). The caller fills it from the notes;

@@ -123,9 +123,9 @@ const (
 // record (dispatch.DispatchHoldFields): a bead parked for a person or by a
 // ruling is a skip here, not a sling the guard has to refuse every tick
 // (gt-lxxo4). A bead mid-submission is a skip for the reason the label alone
-// cannot give: gt done writes the READY TO LAND block before the
-// gt:ready-to-land label, and the block is the half a lagging read keeps
-// (gt-kr5xv). The
+// cannot give: gt done writes the READY TO LAND block and the
+// gt:ready-to-land label in one update, and the block is the half that
+// survives a label that goes missing (gt-kr5xv). The
 // label spec and type feature are retired and accepted-but-ignored (gt-mmsr2),
 // so neither gates a candidate: the retired type name is not what admits a
 // feature bead, the type whitelist is. The shape lint runs later, on the full
@@ -163,11 +163,11 @@ func Eligible(s Spec, maxPriority int, reserved []string) (bool, string) {
 			return false, "label " + l
 		}
 	}
-	// A bead mid-submission: gt done writes the READY TO LAND block before the
-	// gt:ready-to-land label (internal/done markReadyToLand), so a read that
-	// caught the block but not the label would otherwise sling work the landing
-	// worker already owns. The hold reads the record gt done writes first,
-	// which is the one a lagging read still carries (gt-kr5xv).
+	// A bead mid-submission: gt done writes the READY TO LAND block with the
+	// gt:ready-to-land label (internal/done markReadyToLand), but a read that
+	// caught the block and not the label (a lagging read, or a label that went
+	// missing) would otherwise sling work the landing worker already owns. The
+	// hold reads the block, the half that survives (gt-kr5xv).
 	if s.SubmittedForLanding {
 		return false, "submitted for landing"
 	}
