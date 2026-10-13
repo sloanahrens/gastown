@@ -35,6 +35,26 @@ func TestDaemonPatrolConfigIsTheDaemonsSchema(t *testing.T) {
 	}
 }
 
+func TestDaemonPatrolConfigDecodesRebuildOM(t *testing.T) {
+	t.Parallel()
+	var cfg DaemonPatrolConfig
+	body := `{"patrols":{"rebuild_om":{"enabled":true,"interval":"30m"}}}`
+	if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
+		t.Fatalf("patrols.rebuild_om = %v", err)
+	}
+	if got := cfg.Patrols.RebuildOM; got == nil || !got.Enabled || got.Interval != "30m" {
+		t.Fatalf("decoded %+v", got)
+	}
+	// Absent is nil, which the daemon reads as off.
+	var empty DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(`{"patrols":{}}`), &empty); err != nil {
+		t.Fatal(err)
+	}
+	if empty.Patrols.RebuildOM != nil {
+		t.Errorf("an absent rebuild_om decoded as %+v", empty.Patrols.RebuildOM)
+	}
+}
+
 func TestDaemonPatrolConfigRejectsUnknownPatrolKeys(t *testing.T) {
 	t.Parallel()
 	for _, body := range []string{
