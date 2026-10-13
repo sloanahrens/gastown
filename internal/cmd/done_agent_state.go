@@ -136,34 +136,41 @@ func (e doneStateEnv) head() func(string) (string, error) {
 	return e.reviewHead
 }
 
+// doneRoleInfo resolves the role gt done's agent-state write addresses, trying
+// multiple sources for resilience. When detection fails it falls back to the
+// environment, which handles the case where cwd is deleted but env vars are
+// set. ok is false, with a warning, when neither names a role.
+func doneRoleInfo(getenv func(string) string, cwd, townRoot string) (info RoleInfo, ok bool) {
+	info, err := getRoleWithContextEnv(cwd, townRoot, getenv)
+	if err == nil {
+		return info, true
+	}
+	envRole := getenv("GT_ROLE")
+	envRig := getenv("GT_RIG")
+	envPolecat := getenv("GT_POLECAT")
+	if envRole == "" || envRig == "" {
+		style.PrintWarning("could not determine role for agent state update (env: GT_ROLE=%q, GT_RIG=%q)", envRole, envRig)
+		return RoleInfo{}, false
+	}
+
+	// Parse role string to get Role type
+	parsedRole, _, _ := parseRoleString(envRole)
+	return RoleInfo{
+		Role:     parsedRole,
+		Rig:      envRig,
+		Polecat:  envPolecat,
+		TownRoot: townRoot,
+		WorkDir:  cwd,
+		Source:   "env-fallback",
+	}, true
+}
+
 func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID string, pending beads.AgentFieldUpdates) (consumed bool, err error) {
 	getenv := e.lookup()
-	// Get role context - try multiple sources for resilience
-	roleInfo, err := getRoleWithContextEnv(cwd, townRoot, getenv)
-	if err != nil {
-		// Fallback: try to construct role info from environment variables
-		// This handles the case where cwd is deleted but env vars are set
-		envRole := getenv("GT_ROLE")
-		envRig := getenv("GT_RIG")
-		envPolecat := getenv("GT_POLECAT")
-
-		if envRole == "" || envRig == "" {
-			// Can't determine role, skip agent state update
-			style.PrintWarning("could not determine role for agent state update (env: GT_ROLE=%q, GT_RIG=%q)", envRole, envRig)
-			return false, nil
-		}
-
-		// Parse role string to get Role type
-		parsedRole, _, _ := parseRoleString(envRole)
-
-		roleInfo = RoleInfo{
-			Role:     parsedRole,
-			Rig:      envRig,
-			Polecat:  envPolecat,
-			TownRoot: townRoot,
-			WorkDir:  cwd,
-			Source:   "env-fallback",
-		}
+	roleInfo, ok := doneRoleInfo(getenv, cwd, townRoot)
+	if !ok {
+		// Can't determine role, skip agent state update
+		return false, nil
 	}
 
 	ctx := RoleContext{
