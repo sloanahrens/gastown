@@ -396,6 +396,7 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindDirectPush, collect: s.collectDirectPush},
 		{kind: attention.KindRiskPath, collect: s.collectRiskPaths},
 		{kind: attention.KindTierSweepRed, collect: s.collectTierSweepRed},
+		{kind: attention.KindOverrunStopped, collect: s.collectOverrunStopped},
 	}
 }
 

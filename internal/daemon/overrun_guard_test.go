@@ -76,8 +76,21 @@ type overrunFake struct {
 	seats    []overrunSeat
 	slung    map[string]time.Time // by bead
 	nudges   []string             // "<rig>/<polecat>"
-	stops    []string
+	stops    []string             // seats whose session was stopped
 	nudgeErr error
+
+	// calls is the ordered log of the stop's side effects, "<step> <rig>/<polecat>";
+	// failOn makes the named step return its error each time it runs.
+	calls  []string
+	failOn map[string]error
+	// handedBack lists the beads handBack received, with the branch it was given.
+	handedBack []string
+}
+
+// step logs one stop step and returns the error injected for it.
+func (f *overrunFake) step(name string, seat overrunSeat) error {
+	f.calls = append(f.calls, name+" "+seat.Rig+"/"+seat.Polecat)
+	return f.failOn[name]
 }
 
 func (f *overrunFake) seams() overrunSeams {
@@ -95,8 +108,21 @@ func (f *overrunFake) seams() overrunSeams {
 			f.nudges = append(f.nudges, seat.Rig+"/"+seat.Polecat)
 			return nil
 		},
-		stop: func(seat overrunSeat, elapsed time.Duration) error {
+		pause:      func(seat overrunSeat) error { return f.step("pause", seat) },
+		clearPause: func(seat overrunSeat) error { return f.step("clear-pause", seat) },
+		stopSession: func(seat overrunSeat) error {
+			if err := f.step("stop", seat); err != nil {
+				return err
+			}
 			f.stops = append(f.stops, seat.Rig+"/"+seat.Polecat)
+			return nil
+		},
+		checkpoint: func(seat overrunSeat) error { return f.step("checkpoint", seat) },
+		handBack: func(seat overrunSeat, elapsed time.Duration) error {
+			if err := f.step("hand-back", seat); err != nil {
+				return err
+			}
+			f.handedBack = append(f.handedBack, seat.Bead+" "+seat.Branch+" "+elapsed.String())
 			return nil
 		},
 	}
