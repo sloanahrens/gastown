@@ -80,7 +80,8 @@ func TestOMSkewMismatchRaisesOnceThenClears(t *testing.T) {
 }
 
 // TestOMSkewEqualReadsLeaveNoAlert: an om in step with origin/main raises
-// nothing and clears nothing (gt-pdyzk acceptance 1).
+// nothing, and clears once, on the process's first reading, for an alert a
+// previous process may have left open (gt-pdyzk acceptance 1, gt-rg2xc).
 func TestOMSkewEqualReadsLeaveNoAlert(t *testing.T) {
 	t.Parallel()
 	d, rec := omSkewDaemon(t)
@@ -88,13 +89,73 @@ func TestOMSkewEqualReadsLeaveNoAlert(t *testing.T) {
 
 	d.omSkewOnce()
 	d.omSkewOnce()
+	d.omSkewOnce()
 
 	if esc := rec.Escalations(); len(esc) != 0 {
 		t.Errorf("escalations = %+v, want none for an om at origin/main", esc)
 	}
-	if clears := rec.Clears(); len(clears) != 0 {
-		t.Errorf("clears = %+v, want none for an alert that never fired", clears)
+	clears := rec.Clears()
+	if len(clears) != 1 || !slices.Contains(clears[0].Fingerprints, omSkewAlertKey) {
+		t.Errorf("clears = %+v, want exactly one under %s across three matching readings", clears, omSkewAlertKey)
 	}
+}
+
+// TestOMSkewClearsAnAlertOpenAcrossARestart: the raised flag lives in the
+// process, so a daemon that restarts with om-skew open starts unraised. Its
+// first matching reading clears the key; it does not re-raise it while the
+// skew persists (gt-rg2xc).
+func TestOMSkewClearsAnAlertOpenAcrossARestart(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a fresh judge clears on a matching reading", func(t *testing.T) {
+		t.Parallel()
+		d, rec := omSkewDaemon(t) // raised = false, as after a restart
+		d.omHeadFn = func(string) (string, error) { return omSkewInstalledSHA, nil }
+
+		d.omSkewOnce()
+
+		clears := rec.Clears()
+		if len(clears) != 1 || !slices.Contains(clears[0].Fingerprints, omSkewAlertKey) {
+			t.Fatalf("clears = %+v, want the one open-across-restart alert cleared under %s", clears, omSkewAlertKey)
+		}
+		if esc := rec.Escalations(); len(esc) != 0 {
+			t.Errorf("escalations = %+v, want none", esc)
+		}
+	})
+
+	t.Run("a fresh judge does not re-raise an open skew", func(t *testing.T) {
+		t.Parallel()
+		d, rec := omSkewDaemon(t)
+		d.omSkewOnce() // the skew persists; this process raises it itself
+		d.omSkewOnce()
+
+		if clears := rec.Clears(); len(clears) != 0 {
+			t.Errorf("clears = %+v, want none while the skew persists", clears)
+		}
+		if esc := rec.Escalations(); len(esc) != 1 {
+			t.Errorf("escalations = %+v, want the one raise", esc)
+		}
+	})
+
+	t.Run("a clear that does not reach the town is retried next check", func(t *testing.T) {
+		t.Parallel()
+		d, rec := omSkewDaemon(t)
+		d.omHeadFn = func(string) (string, error) { return omSkewInstalledSHA, nil }
+		rec.Fail(notifyfake.KindClear, errors.New("gt escalate: Dolt is unreachable"))
+
+		d.omSkewOnce()
+		rec.Fail(notifyfake.KindClear, nil)
+		d.omSkewOnce()
+		d.omSkewOnce()
+
+		clears := rec.Clears()
+		if len(clears) != 2 {
+			t.Fatalf("clears = %+v, want the dropped attempt and one retry, then quiet", clears)
+		}
+		if clears[1].Err != nil {
+			t.Errorf("the retry failed too: %v", clears[1].Err)
+		}
+	})
 }
 
 // TestOMSkewUnreadableReadingChangesNothingAndLogs: an om that cannot be
