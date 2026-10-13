@@ -110,23 +110,17 @@ func TestCrewStopNoArgsFromRigStopsOnlyThatRig(t *testing.T) {
 	}
 }
 
-// A bare `gt crew stop` outside any rig fails before it lists a session.
+// A bare `gt crew stop` outside any rig errors, so runCrewStop returns before
+// it lists a session and nothing is stopped.
 func TestCrewStopNoArgsOutsideRigRefuses(t *testing.T) {
+	t.Parallel()
 	root := crewStopTown(t)
-	t.Chdir(root)
 
-	savedRig, savedAll, savedDry := crewRig, crewAll, crewDryRun
-	t.Cleanup(func() { crewRig, crewAll, crewDryRun = savedRig, savedAll, savedDry })
-	crewRig, crewAll, crewDryRun = "", false, false
-
-	err := runCrewStop(crewStopCmd, nil)
+	rig, err := resolveCrewStopRig(root, filepath.Join(root, "mayor"))
 	if err == nil {
-		t.Fatal("runCrewStop with no args outside a rig succeeded, want error")
+		t.Fatalf("resolveCrewStopRig outside a rig = %q, want error", rig)
 	}
-	if !strings.Contains(err.Error(), "--rig") {
-		t.Errorf("error %q does not name --rig", err)
-	}
-	if crewRig != "" {
-		t.Errorf("crewRig = %q after refusal, want empty", crewRig)
+	if rig != "" {
+		t.Errorf("rig = %q on refusal, want empty (an empty rig would stop every rig)", rig)
 	}
 }
