@@ -119,6 +119,7 @@ type (
 	DoctorDogConfig            = agentconfig.DoctorDogConfig
 	CompactorDogConfig         = agentconfig.CompactorDogConfig
 	CheckpointDogConfig        = agentconfig.CheckpointDogConfig
+	OverrunGuardConfig         = agentconfig.OverrunGuardConfig
 	ScheduledMaintenanceConfig = agentconfig.ScheduledMaintenanceConfig
 	SpecDispatchConfig         = agentconfig.SpecDispatchConfig
 	PatrolScanConfig           = agentconfig.PatrolScanConfig
@@ -218,6 +219,14 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.CheckpointDog.Enabled
+	}
+	// overrun_guard is opt-in: it nudges and stops polecat sessions, so only
+	// an explicit enabled:true turns it on.
+	if patrol == "overrun_guard" {
+		if config == nil || config.Patrols == nil || config.Patrols.OverrunGuard == nil {
+			return false
+		}
+		return config.Patrols.OverrunGuard.Enabled
 	}
 	if patrol == "scheduled_maintenance" {
 		if config == nil || config.Patrols == nil || config.Patrols.ScheduledMaintenance == nil {

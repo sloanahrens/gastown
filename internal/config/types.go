@@ -148,7 +148,7 @@ type TownSettings struct {
 	// This provides a simple way to turn off individual daemon patrol dogs
 	// without editing mayor/daemon.json. Patrol names match the keys used
 	// in daemon.json patrols section (e.g., "deacon", "witness", "refinery",
-	// "doctor_dog", "compactor_dog", "checkpoint_dog", "wisp_reaper",
+	// "doctor_dog", "compactor_dog", "checkpoint_dog", "overrun_guard", "wisp_reaper",
 	// "jsonl_git_backup", "scheduled_maintenance",
 	// "landing_worker", "events_prune", "handler").
 	// Example: ["doctor_dog", "compactor_dog"]

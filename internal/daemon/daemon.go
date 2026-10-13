@@ -422,6 +422,10 @@ type Daemon struct {
 	wispReaperRunning     atomic.Bool
 	checkpointDogRunning  atomic.Bool
 
+	// overrunGuardRunning is the overrun_guard patrol's single-flight guard
+	// (overrun_guard.go).
+	overrunGuardRunning atomic.Bool
+
 	// gitHygieneRunning is the git_hygiene patrol's single-flight guard
 	// (git_hygiene.go).
 	gitHygieneRunning atomic.Bool
@@ -961,6 +965,21 @@ func (d *Daemon) Run() (err error) {
 		d.triggerCheckpointDog()
 	}
 
+	// Start the overrun guard ticker if configured. It nudges a polecat whose
+	// bead runs long and, once stopping is built, stops one that runs over.
+	// Due-ness comes from the persisted last-run time, as for checkpoint_dog.
+	var overrunGuardTicker *time.Ticker
+	var overrunGuardChan <-chan time.Time
+	if d.isPatrolActive("overrun_guard") {
+		interval := overrunGuardInterval(d.patrolConfig)
+		overrunGuardTicker = time.NewTicker(shortPatrolCheckTick(interval))
+		overrunGuardChan = overrunGuardTicker.C
+		defer overrunGuardTicker.Stop()
+		d.logger.Printf("Overrun guard ticker started (check every %v, run interval %v)",
+			shortPatrolCheckTick(interval), interval)
+		d.triggerOverrunGuard()
+	}
+
 	// Start the landing-infrastructure probe ticker (gt-fn9e6.11): it tells
 	// the town health line whether the Forgejo instance the landing path uses
 	// answers and whether the rigs' CI has a runner online, so an outage is
@@ -1121,6 +1140,13 @@ func (d *Daemon) Run() (err error) {
 			// (gt-ima2, gt-gxpwc).
 			if !d.isShutdownInProgress() {
 				d.triggerCheckpointDog()
+			}
+
+		case <-overrunGuardChan:
+			// Overrun guard — nudges polecats whose bead runs long. Fires
+			// only when the persisted last run is a full interval old.
+			if !d.isShutdownInProgress() {
+				d.triggerOverrunGuard()
 			}
 
 		case <-scheduledMaintenanceChan:

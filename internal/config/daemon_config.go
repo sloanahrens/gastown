@@ -48,6 +48,7 @@ type PatrolsConfig struct {
 	DoctorDog            *DoctorDogConfig            `json:"doctor_dog,omitempty"`
 	CompactorDog         *CompactorDogConfig         `json:"compactor_dog,omitempty"`
 	CheckpointDog        *CheckpointDogConfig        `json:"checkpoint_dog,omitempty"`
+	OverrunGuard         *OverrunGuardConfig         `json:"overrun_guard,omitempty"`
 	ScheduledMaintenance *ScheduledMaintenanceConfig `json:"scheduled_maintenance,omitempty"`
 	SpecDispatch         *SpecDispatchConfig         `json:"spec_dispatch,omitempty"`
 	PatrolScan           *PatrolScanConfig           `json:"patrol_scan,omitempty"`
@@ -293,6 +294,28 @@ type CheckpointDogConfig struct {
 
 	// IntervalStr is how often to run, as a string (e.g., "10m").
 	IntervalStr string `json:"interval,omitempty"`
+}
+
+// OverrunGuardConfig holds configuration for the overrun_guard patrol, which
+// nudges a polecat once when its bead runs long and stops the session when it
+// runs over. Off unless Enabled is true.
+type OverrunGuardConfig struct {
+	// Enabled controls whether the overrun guard runs.
+	Enabled bool `json:"enabled"`
+
+	// IntervalStr is how often to run, as a string (e.g., "1m"). Default 1m.
+	IntervalStr string `json:"interval,omitempty"`
+
+	// NudgeAfter is how long after a bead was slung to its seat the one split
+	// nudge goes out (e.g., "12m"). Default 12m.
+	NudgeAfter string `json:"nudge_after,omitempty"`
+
+	// StopAfter is how long after the sling the seat is stopped (e.g., "20m").
+	// Default 20m.
+	StopAfter string `json:"stop_after,omitempty"`
+
+	// DryRun logs what a stop would do and sends nothing.
+	DryRun bool `json:"dry_run,omitempty"`
 }
 
 // ScheduledMaintenanceConfig holds configuration for the scheduled_maintenance
