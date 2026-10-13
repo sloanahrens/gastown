@@ -694,6 +694,17 @@ func (l *Lander) logf(format string, args ...any) {
 	}
 }
 
+// review runs the landing's reviewer over the merged tree, naming the work bead
+// when the reviewer can carry it, so om can echo the id back and a mismatch
+// reaches the landing log (gt-pwvv4). A reviewer that implements only Review is
+// called exactly as before.
+func (l *Lander) review(ctx context.Context, beadID, dir, base, head string) (Verdict, error) {
+	if br, ok := l.Reviewer.(BeadReviewer); ok {
+		return br.ReviewBead(ctx, ReviewInput{Dir: dir, Base: base, Head: head, BeadID: beadID, Logf: l.logf})
+	}
+	return l.Reviewer.Review(ctx, dir, base, head)
+}
+
 func (l *Lander) open(dir string) Repo {
 	if l.openRepo != nil {
 		return l.openRepo(dir)
@@ -894,7 +905,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		reviewStart := time.Now()
 		l.stage(w, StageOM)
 		omCtx, omDone := l.Slow.watch(ctx, l, w, dir, StageOM)
-		verdict, reviewErr = l.Reviewer.Review(omCtx, dir, base, merged)
+		verdict, reviewErr = l.review(omCtx, w.BeadID, dir, base, merged)
 		// One flaky om run must not cost an escalation and a hand review
 		// (gt-q241r): an execution error on an ordinary tree is retried once,
 		// inside this same om stage. A timeout, an infra error and a verdict
@@ -904,7 +915,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		omRetried := errors.Is(reviewErr, ErrOMExecution) && omCtx.Err() == nil && !l.omDiffPastBound(g, base, merged)
 		if omRetried {
 			l.logf("%s: om review returned no verdict (%s); retrying once", w.BeadID, reviewErrorReason(reviewErr))
-			verdict, reviewErr = l.Reviewer.Review(omCtx, dir, base, merged)
+			verdict, reviewErr = l.review(omCtx, w.BeadID, dir, base, merged)
 		}
 		omDone()
 		l.logf("%s: %s", w.BeadID, stageTimes(gateRes, time.Since(reviewStart), omRetried))

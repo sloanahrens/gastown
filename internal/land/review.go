@@ -9,8 +9,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"time"
+	"unicode"
 
 	"github.com/steveyegge/gastown/internal/forgejo"
 )
@@ -78,9 +81,13 @@ func OMVerdictStatus(v Verdict) forgejo.StatusRequest {
 
 // Verdict is om's decision on one range.
 type Verdict struct {
-	Verdict  string    `json:"verdict"`
-	Score    float64   `json:"score"`
-	Summary  string    `json:"summary,omitempty"`
+	Verdict string  `json:"verdict"`
+	Score   float64 `json:"score"`
+	Summary string  `json:"summary,omitempty"`
+	// Bead is the work bead om echoed back when it was told which bead the
+	// diff belongs to (OMReviewer.ReviewBead). It is read for the mismatch
+	// check and stored nowhere (gt-pwvv4).
+	Bead     string    `json:"bead,omitempty"`
 	Findings []Finding `json:"findings"`
 }
 
@@ -100,6 +107,24 @@ type Finding struct {
 // verdict exists; it is never read as approval.
 type Reviewer interface {
 	Review(ctx context.Context, dir, base, head string) (Verdict, error)
+}
+
+// ReviewInput is one review that names the work bead the diff belongs to.
+type ReviewInput struct {
+	// Dir is the tree under review; Base and Head are the range reviewed in it.
+	Dir, Base, Head string
+	// BeadID is the work bead the landed diff belongs to.
+	BeadID string
+	// Logf receives the reviewer's warning lines; nil drops them.
+	Logf func(format string, args ...any)
+}
+
+// BeadReviewer is a Reviewer that can be told which work bead the diff belongs
+// to, so om can echo the id back in its verdict. Land calls it when its
+// Reviewer implements it and Reviewer.Review otherwise, so SkipReviewer and
+// test fakes need no change (gt-pwvv4).
+type BeadReviewer interface {
+	ReviewBead(ctx context.Context, in ReviewInput) (Verdict, error)
 }
 
 // SkipReviewer reviews nothing and records VerdictSkipped.
@@ -157,6 +182,9 @@ var ErrOMExecution = errors.New("om review execution error")
 // om exits 0 for approve, 1 for request_changes and 2 for an execution error.
 // The exit code decides; the verdict file must agree with it and supplies the
 // score and findings.
+//
+// ReviewBead adds `--bead <id>` when the installed om accepts it (see
+// omBeadFlag), so om knows which bead it is reviewing.
 type OMReviewer struct {
 	// Path is the om binary; "" means "om" on PATH.
 	Path string
@@ -176,11 +204,33 @@ type OMReviewer struct {
 // on a tree under the size bound (gt-q241r); every other failure goes to a
 // human who reviews instead.
 func (r OMReviewer) Review(ctx context.Context, dir, base, head string) (Verdict, error) {
-	return r.reviewOnce(ctx, dir, base, head)
+	v, _, err := r.reviewOnce(ctx, ReviewInput{Dir: dir, Base: base, Head: head})
+	return v, err
 }
 
-// reviewOnce runs om once, bounded by Timeout, and returns its verdict.
-func (r OMReviewer) reviewOnce(ctx context.Context, dir, base, head string) (Verdict, error) {
+// ReviewBead runs om once with the work bead named, and checks the id om echoes
+// back. A verdict naming another bead, or none at all, is logged and otherwise
+// ignored: the landing's bead is the one the queue dispatched, and a reviewer
+// that doubts it does not decide a landing (gt-pwvv4).
+func (r OMReviewer) ReviewBead(ctx context.Context, in ReviewInput) (Verdict, error) {
+	v, told, err := r.reviewOnce(ctx, in)
+	if err != nil {
+		return v, err
+	}
+	switch {
+	case !told:
+	case v.Bead == "":
+		r.warnf(in, "om did not echo the work bead though it was passed --bead %s; the verdict stands", in.BeadID)
+	case v.Bead != in.BeadID:
+		r.warnf(in, "WARNING om's verdict names bead %s but the landing is %s; the verdict stands", v.Bead, in.BeadID)
+	}
+	return v, nil
+}
+
+// reviewOnce runs om once, bounded by Timeout, and returns its verdict and
+// whether om was told which bead it reviewed.
+func (r OMReviewer) reviewOnce(ctx context.Context, in ReviewInput) (Verdict, bool, error) {
+	dir, base, head := in.Dir, in.Base, in.Head
 	path := r.Path
 	if path == "" {
 		path = "om"
@@ -190,14 +240,14 @@ func (r OMReviewer) reviewOnce(ctx context.Context, dir, base, head string) (Ver
 		run = realRun
 	}
 	if r.OutDir == "" {
-		return Verdict{}, fmt.Errorf("om review: no verdict directory configured")
+		return Verdict{}, false, fmt.Errorf("om review: no verdict directory configured")
 	}
 	if err := os.MkdirAll(r.OutDir, 0o700); err != nil {
-		return Verdict{}, fmt.Errorf("om review: creating verdict dir: %w", err)
+		return Verdict{}, false, fmt.Errorf("om review: creating verdict dir: %w", err)
 	}
 	f, err := os.CreateTemp(r.OutDir, "om-verdict-*.json")
 	if err != nil {
-		return Verdict{}, fmt.Errorf("om review: creating verdict file: %w", err)
+		return Verdict{}, false, fmt.Errorf("om review: creating verdict file: %w", err)
 	}
 	outPath := f.Name()
 	_ = f.Close()
@@ -208,6 +258,9 @@ func (r OMReviewer) reviewOnce(ctx context.Context, dir, base, head string) (Ver
 	if r.Out != nil {
 		w = io.MultiWriter(&buf, r.Out)
 	}
+	// The probe is bounded by its own timeout, before the attempt clock starts:
+	// an om that cannot describe its own flags must not spend the review's.
+	told := in.BeadID != "" && r.omBeadFlag(ctx, in, path, run)
 	timeout := r.Timeout
 	if timeout <= 0 {
 		timeout = DefaultOMTimeout
@@ -215,40 +268,140 @@ func (r OMReviewer) reviewOnce(ctx context.Context, dir, base, head string) (Ver
 	rctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	argv := []string{path, "review", "-C", dir, "--base", base, "--head", head, "--out", outPath}
+	if told {
+		argv = append(argv, "--bead", in.BeadID)
+	}
 	code, runErr := run(rctx, dir, omUnsetEnv, argv, w)
 	if runErr != nil && errors.Is(rctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-		return Verdict{}, fmt.Errorf("%w after %s", ErrOMTimeout, timeout)
+		return Verdict{}, told, fmt.Errorf("%w after %s", ErrOMTimeout, timeout)
 	}
 	if runErr != nil {
-		return Verdict{}, fmt.Errorf("om review did not run: %w", runErr)
+		return Verdict{}, told, fmt.Errorf("om review did not run: %w", runErr)
 	}
 	if code != 0 && code != 1 {
-		return Verdict{}, fmt.Errorf("%w: exited %d: %s", ErrOMExecution, code, strings.TrimSpace(lastLines(buf.String(), 10)))
+		return Verdict{}, told, fmt.Errorf("%w: exited %d: %s", ErrOMExecution, code, strings.TrimSpace(lastLines(buf.String(), 10)))
 	}
 	data, err := os.ReadFile(outPath) //nolint:gosec // G304: path is the temp file created above
 	if err != nil || len(bytes.TrimSpace(data)) == 0 {
-		return Verdict{}, fmt.Errorf("om review exited %d but wrote no verdict", code)
+		return Verdict{}, told, fmt.Errorf("om review exited %d but wrote no verdict", code)
 	}
 	var v Verdict
 	if err := json.Unmarshal(data, &v); err != nil {
-		return Verdict{}, fmt.Errorf("om review verdict is not JSON: %w", err)
+		return Verdict{}, told, fmt.Errorf("om review verdict is not JSON: %w", err)
 	}
 	want := VerdictApprove
 	if code == 1 {
 		want = VerdictRequestChanges
 	}
 	if v.Verdict != want {
-		return Verdict{}, fmt.Errorf("om review exited %d but its verdict file says %q", code, v.Verdict)
+		return Verdict{}, told, fmt.Errorf("om review exited %d but its verdict file says %q", code, v.Verdict)
 	}
 	// The rig's own threshold decides too: an approve scored below it is a
 	// request for changes, whatever om's exit code said.
 	threshold, err := OMThreshold(dir)
 	if err != nil {
-		return Verdict{}, fmt.Errorf("om review: %w", err)
+		return Verdict{}, told, fmt.Errorf("om review: %w", err)
 	}
 	if v.Verdict == VerdictApprove && v.Score < threshold {
 		v.Verdict = VerdictRequestChanges
 		v.Summary = strings.TrimSpace(fmt.Sprintf("score %.2f is below the rig's .om.json threshold %.2f. %s", v.Score, threshold, v.Summary))
 	}
-	return v, nil
+	return v, told, nil
+}
+
+// omHelpTimeout bounds one `om review --help` probe: om that cannot answer a
+// help request in ten seconds is treated as one without the flag.
+const omHelpTimeout = 10 * time.Second
+
+// omBeadFlag reports whether the om binary at path accepts --bead <id>, read
+// from `om review --help` once per binary identity per process. A failed probe
+// — a run error, a timeout, or an exit with no help text — keeps the flag off
+// the argv and is retried on the next review rather than cached, so a transient
+// failure never becomes "this om has no --bead".
+//
+// om exits 2 for --help and prints its usage to stderr, so the exit code alone
+// decides nothing; only help text listing the flag counts.
+func (r OMReviewer) omBeadFlag(ctx context.Context, in ReviewInput, path string, run runFunc) bool {
+	id, identifiable := omBinaryIdentity(path)
+	if identifiable {
+		// The lock is held for the probe itself, so landings that ask at the
+		// same moment share one probe rather than racing two.
+		omBeadProbe.mu.Lock()
+		defer omBeadProbe.mu.Unlock()
+		if supported, cached := omBeadProbe.supported[id]; cached {
+			return supported
+		}
+	}
+	var buf bytes.Buffer
+	pctx, cancel := context.WithTimeout(ctx, omHelpTimeout)
+	defer cancel()
+	code, runErr := run(pctx, in.Dir, omUnsetEnv, []string{path, "review", "--help"}, &buf)
+	help := buf.String()
+	if runErr != nil || strings.TrimSpace(help) == "" {
+		r.warnf(in, "could not probe %s for --bead (%s); om runs without the flag", path, probeFailure(runErr, pctx, code))
+		return false
+	}
+	supported := omHelpListsFlag(help, "--bead")
+	if identifiable {
+		omBeadProbe.supported[id] = supported
+	}
+	return supported
+}
+
+// probeFailure names why a help probe reported no help text.
+func probeFailure(runErr error, pctx context.Context, code int) string {
+	switch {
+	case runErr == nil:
+		return fmt.Sprintf("exited %d with no help text", code)
+	case errors.Is(pctx.Err(), context.DeadlineExceeded):
+		return fmt.Sprintf("timed out after %s", omHelpTimeout)
+	default:
+		return runErr.Error()
+	}
+}
+
+// omHelpListsFlag reports whether help lists flag as a word of its own, so
+// --bead-id and --beads never read as --bead.
+func omHelpListsFlag(help, flag string) bool {
+	notFlagRune := func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '-' && r != '_'
+	}
+	return slices.ContainsFunc(strings.FieldsFunc(help, notFlagRune), func(f string) bool { return f == flag })
+}
+
+// warnf writes one reviewer warning to the landing log Land supplied, falling
+// back to this reviewer's own output writer.
+func (r OMReviewer) warnf(in ReviewInput, format string, args ...any) {
+	line := fmt.Sprintf("om review: "+format, args...)
+	switch {
+	case in.Logf != nil:
+		in.Logf("%s", line)
+	case r.Out != nil:
+		_, _ = fmt.Fprintln(r.Out, line)
+	}
+}
+
+// omBeadProbe caches each installed om's answer about --bead.
+var omBeadProbe = struct {
+	mu        sync.Mutex
+	supported map[omBinaryID]bool
+}{supported: map[omBinaryID]bool{}}
+
+// omBinaryID identifies one installed om the way a reinstall changes it, so an
+// om replaced under a running daemon is probed again.
+type omBinaryID struct {
+	path string
+	size int64
+	mod  time.Time
+}
+
+// omBinaryIdentity identifies the om at path. The second result is false for a
+// path that cannot be stat'ed — a bare "om" resolved on PATH, say — whose
+// answer can then be used but not cached.
+func omBinaryIdentity(path string) (omBinaryID, bool) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return omBinaryID{}, false
+	}
+	return omBinaryID{path: path, size: fi.Size(), mod: fi.ModTime()}, true
 }
