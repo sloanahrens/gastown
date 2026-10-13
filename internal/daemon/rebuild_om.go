@@ -155,6 +155,18 @@ func (d *Daemon) rebuildOMCycle(ctx context.Context, cycle *dogCycle) bool {
 		return true
 	}
 
+	// Ahead of the busy gate: an om the clone does not show as behind is not
+	// waiting on a quiet town, so it must not age toward a starved alert.
+	if !d.rebuildOMBehind(src, installed, head) {
+		d.rebuildOMBlock.clear()
+		d.clearAlerts("the installed om is not behind origin/main", alertKeyRebuildOMStarved)
+		cycle.skipStep("ancestry", fmt.Sprintf("the installed om %s is not an ancestor of origin/main %s: ahead of it or unknown to the clone, left in place",
+			shortOMSHA(installed), shortOMSHA(head)))
+		d.logger.Printf("rebuild_om: the installed om %s is not behind origin/main %s (ahead of it or unknown to the clone); leaving it in place",
+			shortOMSHA(installed), shortOMSHA(head))
+		return true
+	}
+
 	if busy := d.rebuildOMBusy(); busy != "" {
 		d.rebuildOMNoteBlocked(cycle, "not quiet: "+busy)
 		return false
@@ -173,6 +185,18 @@ func (d *Daemon) rebuildOMCycle(ctx context.Context, cycle *dogCycle) bool {
 // stamps the full sha, but a short one still counts when it prefixes the tip.
 func rebuildOMInForce(installed, head string) bool {
 	return strings.HasPrefix(head, installed) || strings.HasPrefix(installed, head)
+}
+
+// rebuildOMBehind reports whether the installed om is an ancestor of head in
+// the job's clone, the one case where installing origin/main moves om forward.
+// An om that is ahead of origin/main (an operator's hotfix not yet landed),
+// diverged from it, or a commit the clone has never seen is left alone, as
+// rebuild_gt leaves a binary that would be a downgrade. Git's exit 1 and its
+// failure to resolve the sha both read as not behind: an install that cannot be
+// shown to move forward is not made.
+func (d *Daemon) rebuildOMBehind(src, installed, head string) bool {
+	_, err := d.rebuildOMGit(rebuildOMGitTimeout, "-C", src, "merge-base", "--is-ancestor", installed, head)
+	return err == nil
 }
 
 // rebuildOMEnsureClone makes sure the job's clone exists, cloning it from the

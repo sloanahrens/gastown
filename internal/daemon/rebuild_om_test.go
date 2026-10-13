@@ -114,11 +114,68 @@ func TestRebuildOMCycle_StaleAndQuietInstallsOnce(t *testing.T) {
 	if got := env.getenv("GT_TOWN_ROOT"); got != d.config.TownRoot {
 		t.Errorf("GT_TOWN_ROOT = %q, want %q", got, d.config.TownRoot)
 	}
+	if mb := gitCalls(cli, "merge-base"); len(mb) != 1 {
+		t.Errorf("ancestry checks = %v, want one before the install (the installed om is an ancestor of origin/main)", mb)
+	}
 	if merges := gitCalls(cli, "merge"); len(merges) != 1 || !slices.Contains(merges[0], "--ff-only") {
 		t.Errorf("merges = %v, want one fast-forward of the clone before the install", merges)
 	}
 	if esc := rec.Escalations(); len(esc) != 0 {
 		t.Errorf("a clean install escalated: %+v", esc)
+	}
+}
+
+// TestRebuildOMCycle_InstalledOmNotBehindIsLeftInPlace pins the downgrade
+// guard: an installed om the clone does not show as an ancestor of origin/main
+// (a hotfix ahead of it, a diverged build, a sha the clone never fetched) is
+// not replaced, however many cycles run, and the skip is not a starvation.
+func TestRebuildOMCycle_InstalledOmNotBehindIsLeftInPlace(t *testing.T) {
+	t.Parallel()
+	cases := map[string]cliReply{
+		"installed is a descendant of origin/main": {code: 1},
+		"installed is unknown to the clone":        {stderr: "fatal: Not a valid commit name", code: 128},
+	}
+	for name, ancestry := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			d, rec, clk := rebuildOMTown(t)
+			d.landingPasses.Store(1) // a busy town must not age this into a starved alert
+			cli := withRebuildGTCli(t, d, func(c cliCall) cliReply {
+				switch {
+				case gitSub(c, "merge-base"):
+					return ancestry
+				case gitSub(c, "rev-parse"):
+					return cliReply{stdout: rebuildOMHeadSHA + "\n"}
+				case c.name == "bash":
+					return omInstalled(rebuildOMHeadSHA)
+				}
+				return cliReply{}
+			})
+
+			clk.Advance(rebuildOMStarveAfter + time.Minute)
+			for range 2 {
+				if settled := d.runRebuildOM(); !settled {
+					t.Fatal("leaving an om that is not behind in place is a verdict and holds the interval")
+				}
+			}
+
+			if installs := installCalls(cli); len(installs) != 0 {
+				t.Errorf("an om that is not behind origin/main was replaced: %v", installs)
+			}
+			if merges := gitCalls(cli, "merge"); len(merges) != 0 {
+				t.Errorf("a skipped cycle moved the clone's checkout: %v", merges)
+			}
+			mb := gitCalls(cli, "merge-base")
+			if len(mb) == 0 {
+				t.Fatal("no ancestry check ran")
+			}
+			if got := strings.Join(mb[0][len(mb[0])-3:], " "); got != "--is-ancestor "+rebuildOMStaleSHA+" "+rebuildOMHeadSHA {
+				t.Errorf("ancestry asked %q, want installed then origin/main", got)
+			}
+			if esc := rec.Escalations(); len(esc) != 0 {
+				t.Errorf("a deliberate newer om escalated: %+v", esc)
+			}
+		})
 	}
 }
 
