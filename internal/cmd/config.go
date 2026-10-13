@@ -458,12 +458,21 @@ func configAgentSet(e configCmdEnv, args []string) error {
 		}
 	}
 
-	// Create or update the agent
-	townSettings.Agents[name] = &config.RuntimeConfig{
-		Provider: provider,
-		Command:  parts[0],
-		Args:     parts[1:],
+	// Create or update the agent. An existing agent keeps every runtime field
+	// this command has no flag for (env, session, tmux, instructions, ...):
+	// the settings writer deletes keys absent from the struct, so a fresh
+	// RuntimeConfig would drop them from disk.
+	agent := &config.RuntimeConfig{}
+	if existing := townSettings.Agents[name]; existing != nil {
+		copied := *existing
+		agent = &copied
 	}
+	if provider != "" {
+		agent.Provider = provider
+	}
+	agent.Command = parts[0]
+	agent.Args = parts[1:]
+	townSettings.Agents[name] = agent
 
 	// Save settings
 	if err := config.SaveTownSettings(settingsPath, townSettings); err != nil {
