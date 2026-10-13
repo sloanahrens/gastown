@@ -291,6 +291,9 @@ func withGCFakes(t *testing.T, d *Daemon) *gcFakes {
 		}
 		return true, ""
 	}
+	// The demand line's polecat count: a file read over the town's temp root
+	// in production, stubbed here so a case can set the count.
+	d.maint.workingPolecats = func(*Daemon) ([]string, error) { return nil, nil }
 	d.maint.escalate = func(_ *Daemon, source, message string) {
 		f.escalations = append(f.escalations, source+"|"+message)
 	}
@@ -724,29 +727,45 @@ func TestScheduledMaintenanceSkipsWhileCycleRunning(t *testing.T) {
 	}
 }
 
-// --- the quiet-window probe ---------------------------------------------------
+// --- the gc's guard ----------------------------------------------------------
 
+// The gc waits for the hard holds only (gt-mdejo): a landing pass, a scheduled
+// slings cycle, a held install lock, a held container-gate slot. Soft work and
+// a working polecat do not defer it — every case here runs with a polecat
+// working, and the ones marked soft run beside the daemon's own ticks too.
 func TestMaintenanceQuiet(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
-		name     string
-		set      func(d *Daemon)
-		slots    func(string) ([]string, error)
-		polecats func(*Daemon) ([]string, error)
-		want     bool
-		reason   string
+		name   string
+		set    func(t *testing.T, d *Daemon)
+		slots  func(string) ([]string, error)
+		want   bool
+		reason string
 	}{
-		{"all clear", func(*Daemon) {}, nil, nil, true, ""},
-		{"compactor running", func(d *Daemon) { d.compactorDogRunning = true }, nil, nil, false, "daemon"},
-		{"gate slot held", func(*Daemon) {},
-			func(string) ([]string, error) { return []string{"gastown/refinery"}, nil }, nil, false, "gastown/refinery"},
-		{"slot probe fails", func(*Daemon) {},
-			func(string) ([]string, error) { return nil, errors.New("flock: permission denied") }, nil, false, "slot"},
-		{"polecat working", func(*Daemon) {}, nil,
-			func(*Daemon) ([]string, error) { return []string{"gastown/opal"}, nil }, false, "gastown/opal"},
-		{"polecat probe fails", func(*Daemon) {}, nil,
-			func(*Daemon) ([]string, error) { return nil, errors.New("rig gastown: permission denied") }, false, "cannot list polecats"},
+		{"all clear", func(*testing.T, *Daemon) {}, nil, true, ""},
+		{"soft work: plugin run, compactor, dispatch, scan", func(_ *testing.T, d *Daemon) {
+			d.scripts = newScriptRunner()
+			d.scripts.tryStart("rebuild-gt")
+			d.compactorDogMu.Lock()
+			d.compactorDogRunning = true
+			d.compactorDogMu.Unlock()
+			d.specDispatchRunning.Store(true)
+			d.patrolScanRunning.Store(true)
+		}, nil, true, ""},
+		{"gate slot held", func(*testing.T, *Daemon) {},
+			func(string) ([]string, error) { return []string{"gastown/refinery"}, nil }, false, "slot held by gastown/refinery"},
+		{"slot probe fails", func(*testing.T, *Daemon) {},
+			func(string) ([]string, error) { return nil, errors.New("flock: permission denied") }, false, "slot"},
+		{"landing pass in flight", func(_ *testing.T, d *Daemon) {
+			d.landingStates.setBead("gastown", "gt-a", gcTestNow)
+		}, nil, false, "daemon has work in flight (landing pass gt-a)"},
+		{"scheduled slings cycle", func(_ *testing.T, d *Daemon) {
+			d.scheduledSlingsRunning.Store(true)
+		}, nil, false, "daemon has work in flight (a scheduled slings cycle)"},
+		{"install lock held", func(t *testing.T, d *Daemon) {
+			holdInstallLock(t, writeInstallLock(t, d))
+		}, nil, false, "daemon has work in flight (the install lock"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -756,11 +775,11 @@ func TestMaintenanceQuiet(t *testing.T) {
 			if tc.slots != nil {
 				d.maint.slotHolders = tc.slots
 			}
-			d.maint.workingPolecats = func(*Daemon) ([]string, error) { return nil, nil }
-			if tc.polecats != nil {
-				d.maint.workingPolecats = tc.polecats
-			}
-			tc.set(d)
+			// The guard must not read a working polecat, so the seam answers
+			// with one in every case: a quiet verdict here is a verdict reached
+			// without asking.
+			d.maint.workingPolecats = func(*Daemon) ([]string, error) { return []string{"gastown/opal"}, nil }
+			tc.set(t, d)
 			quiet, reason := d.maintenanceQuiet()
 			if quiet != tc.want {
 				t.Fatalf("maintenanceQuiet() = %v (%s), want %v", quiet, reason, tc.want)
@@ -778,7 +797,6 @@ func TestMaintenanceGCRunningBlocksUpgradeButNotItsOwnQuietProbe(t *testing.T) {
 	t.Parallel()
 	d := idleTestDaemon(t)
 	d.maint.slotHolders = func(string) ([]string, error) { return nil, nil }
-	d.maint.workingPolecats = func(*Daemon) ([]string, error) { return nil, nil }
 	d.maintenanceGCRunning.Store(true)
 	if d.isIdleForUpgrade() {
 		t.Error("isIdleForUpgrade() = true while a gc cycle runs")
@@ -810,37 +828,60 @@ func writeTestRigsJSON(t *testing.T, town string, rigNames ...string) {
 	}
 }
 
-// A rig whose polecats directory cannot be listed (here: it is a file, so
-// ReadDir fails with ENOTDIR rather than not-exist) must make the town read
-// busy: the guard cannot tell whether a polecat is working there. A rig with
-// no polecats directory at all is simply a rig without polecats.
-func TestMaintenanceQuietFailsClosedWhenPolecatListingFails(t *testing.T) {
+// The cycle runs in a town that is only soft-busy: two polecats working with a
+// plugin run and the compactor dog in flight no longer defer it, and the run's
+// own line says what it ran beside (gt-mdejo).
+func TestMaintenanceGCRunsBesideSoftWorkAndWorkingPolecats(t *testing.T) {
 	t.Parallel()
-	d := idleTestDaemon(t)
+	d, logs := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"hq": {631 * mib, 0}}
+	d.patrolConfig = gcModeConfig()
+	// The real guard over the seams the fakes set.
+	d.maint.quiet = (*Daemon).maintenanceQuiet
 	d.maint.slotHolders = func(string) ([]string, error) { return nil, nil }
-	town := d.config.TownRoot
-	writeTestRigsJSON(t, town, "broken", "nopolecats")
-	if err := os.MkdirAll(filepath.Join(town, "broken"), 0o755); err != nil {
-		t.Fatal(err)
+	d.maint.workingPolecats = func(*Daemon) ([]string, error) {
+		return []string{"gastown/dementus", "gastown/furiosa"}, nil
 	}
-	if err := os.WriteFile(filepath.Join(town, "broken", "polecats"), []byte("not a dir"), 0o644); err != nil {
-		t.Fatal(err)
+	d.scripts = newScriptRunner()
+	d.scripts.tryStart("rebuild-gt")
+	d.compactorDogMu.Lock()
+	d.compactorDogRunning = true
+	d.compactorDogMu.Unlock()
+
+	d.runScheduledMaintenance()
+
+	if got := strings.Join(f.gcCalls, ","); got != "hq" {
+		t.Fatalf("gc calls = %q, want hq: soft work and working polecats must not defer it", got)
+	}
+	want := "gc hq: 2 polecats working: gastown/dementus, gastown/furiosa; " +
+		"soft work in flight: a plugin run rebuild-gt, the compactor dog cycle; CALL dolt_gc('--full')"
+	if !strings.Contains(logs.String(), want) {
+		t.Errorf("log = %q, want it to carry %q", logs.String(), want)
+	}
+}
+
+// A polecat listing the daemon cannot read leaves the count unknown, and only
+// the count: the gc still runs (gt-mdejo).
+func TestMaintenanceGCDemandCountIsNotAGate(t *testing.T) {
+	t.Parallel()
+	d, logs := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"hq": {631 * mib, 0}}
+	d.patrolConfig = gcModeConfig()
+	d.maint.quiet = (*Daemon).maintenanceQuiet
+	d.maint.slotHolders = func(string) ([]string, error) { return nil, nil }
+	d.maint.workingPolecats = func(*Daemon) ([]string, error) {
+		return nil, errors.New("rig gastown: permission denied")
 	}
 
-	quiet, reason := d.maintenanceQuiet()
-	if quiet {
-		t.Fatal("maintenanceQuiet() = true although a rig's polecats could not be listed; want fail closed")
-	}
-	if !strings.Contains(reason, "broken") {
-		t.Errorf("reason %q does not name the rig that could not be listed", reason)
-	}
+	d.runScheduledMaintenance()
 
-	// The not-exist case alone stays quiet.
-	d2 := idleTestDaemon(t)
-	d2.maint.slotHolders = d.maint.slotHolders
-	writeTestRigsJSON(t, d2.config.TownRoot, "nopolecats")
-	if quiet, reason := d2.maintenanceQuiet(); !quiet {
-		t.Errorf("maintenanceQuiet() = false (%s) for a rig with no polecats directory", reason)
+	if got := strings.Join(f.gcCalls, ","); got != "hq" {
+		t.Fatalf("gc calls = %q, want hq: an unreadable polecat listing must not defer", got)
+	}
+	if want := "cannot count working polecats: rig gastown: permission denied"; !strings.Contains(logs.String(), want) {
+		t.Errorf("log = %q, want it to carry %q", logs.String(), want)
 	}
 }
 

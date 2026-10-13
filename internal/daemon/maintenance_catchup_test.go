@@ -448,23 +448,38 @@ func TestCatchUpGCBackedUp(t *testing.T) {
 	}
 }
 
-// The catch-up gc waits for the full quiet guard the window's cycle uses, not
-// the looser one a read-only backup allows: a held gate slot or a working
-// polecat means no gc. A deferral is not recorded — the skipped-window streak
-// counts windows.
-func TestCatchUpGCWaitsForAQuietTown(t *testing.T) {
+// The catch-up gc waits for the hard holds the window's cycle also waits for —
+// a held gate slot, a landing pass, a held install lock — and for nothing else:
+// soft work and a working polecat are no reason to defer a gc of seconds
+// (gt-mdejo). A deferral is not recorded — the skipped-window streak counts
+// windows.
+func TestCatchUpGCWaitsForHardHoldsOnly(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
-		busy func(d *Daemon)
+		busy func(t *testing.T, d *Daemon)
+		gc   bool
 		want string
 	}{
-		{"gate slot held", func(d *Daemon) {
+		{"gate slot held", func(_ *testing.T, d *Daemon) {
 			d.maint.slotHolders = func(string) ([]string, error) { return []string{"gastown/landing"}, nil }
-		}, "slot held by gastown/landing"},
-		{"polecat working", func(d *Daemon) {
+		}, false, "catch-up gc deferred: slot held by gastown/landing"},
+		{"landing pass in flight", func(_ *testing.T, d *Daemon) {
+			d.landingStates.setBead("gastown", "gt-a", catchUpNow)
+		}, false, "catch-up gc deferred: daemon has work in flight (landing pass gt-a)"},
+		{"install lock held", func(t *testing.T, d *Daemon) {
+			holdInstallLock(t, writeInstallLock(t, d))
+		}, false, "catch-up gc deferred: daemon has work in flight (the install lock"},
+		{"polecat working", func(_ *testing.T, d *Daemon) {
 			d.maint.workingPolecats = func(*Daemon) ([]string, error) { return []string{"gastown/furiosa"}, nil }
-		}, "polecats working: gastown/furiosa"},
+		}, true, ""},
+		{"soft work in flight", func(_ *testing.T, d *Daemon) {
+			d.scripts = newScriptRunner()
+			d.scripts.tryStart("rebuild-gt")
+			d.compactorDogMu.Lock()
+			d.compactorDogRunning = true
+			d.compactorDogMu.Unlock()
+		}, true, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -475,22 +490,24 @@ func TestCatchUpGCWaitsForAQuietTown(t *testing.T) {
 			var buf bytes.Buffer
 			d.logger = log.New(&buf, "", 0)
 			catchUpGCStale(t, d, "gt")
-			tc.busy(d)
+			tc.busy(t, d)
 
 			d.runScheduledMaintenance()
 
-			if len(f.gcCalls) != 0 {
-				t.Fatalf("gc ran while %s: %v", tc.name, f.gcCalls)
+			if got := len(f.gcCalls) > 0; got != tc.gc {
+				t.Fatalf("gc ran = %v, want %v (calls %v); log: %s", got, tc.gc, f.gcCalls, buf.String())
 			}
-			if want := "catch-up gc deferred: " + tc.want; !strings.Contains(buf.String(), want) {
-				t.Errorf("log = %q, want it to carry %q", buf.String(), want)
-			}
-			st, err := loadMaintenanceGCState(d.config.TownRoot)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if st.PendingDeferral != nil || st.ConsecutiveDeferredWindows != 0 || len(st.DeferralReasons) != 0 {
-				t.Errorf("a catch-up deferral was recorded: %+v", st)
+			if !tc.gc {
+				if !strings.Contains(buf.String(), tc.want) {
+					t.Errorf("log = %q, want it to carry %q", buf.String(), tc.want)
+				}
+				st, err := loadMaintenanceGCState(d.config.TownRoot)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if st.PendingDeferral != nil || st.ConsecutiveDeferredWindows != 0 || len(st.DeferralReasons) != 0 {
+					t.Errorf("a catch-up deferral was recorded: %+v", st)
+				}
 			}
 		})
 	}

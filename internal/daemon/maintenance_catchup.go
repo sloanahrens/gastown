@@ -140,11 +140,12 @@ func catchUpBackedUp(now time.Time, root string, due []string) (ready, unbacked 
 // whose windows kept deferring — 03:00 is the hour the town is asleep or down,
 // and a database can wait weeks on "daemon has work in flight" alone — so it
 // runs the very cycle the window runs (maintenanceGCCycle, unchanged) once the
-// full maintenanceQuiet guard allows it and a backup younger than
-// maintenanceCatchUpAge is on disk. That age is the whole backup's, not one
-// database's: the gc is per database, so each database it takes also needs a
-// backup holding it (catchUpBackedUp, gt-i95fv), and one the backup does not
-// hold — created since the last nightly backup — waits for a pass that has one.
+// hard-hold guard the window's cycle re-checks per database allows it and a
+// backup younger than maintenanceCatchUpAge is on disk. That age is the whole
+// backup's, not one database's: the gc is per database, so each database it
+// takes also needs a backup holding it (catchUpBackedUp, gt-i95fv), and one the
+// backup does not hold — created since the last nightly backup — waits for a
+// pass that has one.
 // The backup still comes first: the gc never runs without one.
 //
 // Fail closed. A window that does not parse, an external server, an unreadable
@@ -243,7 +244,10 @@ func (d *Daemon) maybeCatchUpGC(now time.Time) {
 // the only record of why a day-old backup waited, and a bare "work in flight"
 // left the holder to be guessed from the log timeline (gt-y6ovz).
 //
-// Soft work is not a hold (gt-2m8sj): see catchUpWorkHold.
+// Soft work is not a hold (gt-2m8sj): see catchUpWorkHold. The window gc's own
+// guard (maintenanceQuiet) asks this same question with the same predicate — a
+// polecat working or soft work in flight does not defer a gc of seconds either
+// (gt-mdejo) — and the two lines differ only in the wording each caller logs.
 func (d *Daemon) catchUpQuiet() (bool, string) {
 	if hold := d.catchUpWorkHold(); hold != nil {
 		return false, "daemon has work in flight (" + hold.name + ")"

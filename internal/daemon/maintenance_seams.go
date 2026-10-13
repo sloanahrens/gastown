@@ -39,7 +39,8 @@ type maintenanceSeams struct {
 	quiet func(d *Daemon) (bool, string)
 	// slotHolders lists the roles holding a container-gate slot.
 	slotHolders func(townRoot string) ([]string, error)
-	// workingPolecats lists polecats with a fresh "working" heartbeat.
+	// workingPolecats lists polecats with a fresh "working" heartbeat. It
+	// feeds the gc's log line only; it gates nothing (gt-mdejo).
 	workingPolecats func(d *Daemon) ([]string, error)
 	// dispatch runs fn off the calling goroutine: a gc cycle, which can hold
 	// a --full gc for up to maintenanceGCTimeout per database and would freeze
