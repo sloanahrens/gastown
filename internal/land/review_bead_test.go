@@ -50,19 +50,28 @@ func logfTo(w io.Writer) func(format string, args ...any) {
 	}
 }
 
-// omStub answers both calls om sees: the `review --help` probe with help, and
-// the review itself with an approve verdict echoing Bead. It counts the probes
-// and keeps the review's argv.
+// omStub answers every call om sees: the `review --help` probe with help, the
+// review itself with an approve verdict echoing Bead, and `om version` with a
+// version. It counts the probes and keeps the review's argv.
 type omStub struct {
-	t      *testing.T
-	help   string // what `review --help` prints
-	fail   int    // help probes to fail with a run error before answering
-	bead   string // the bead the verdict echoes; "" echoes none
-	probes int
-	argv   []string
+	t         *testing.T
+	help      string // what `review --help` prints
+	fail      int    // help probes to fail with a run error before answering
+	bead      string // the bead the verdict echoes; "" echoes none
+	noVersion bool   // an om whose `version` call prints nothing
+	probes    int
+	versions  int
+	argv      []string
 }
 
 func (s *omStub) run(_ context.Context, _ string, _ []string, argv []string, out io.Writer) (int, error) {
+	if omSubcommand(argv) == "version" {
+		s.versions++
+		if !s.noVersion {
+			_, _ = io.WriteString(out, stubVersionLine())
+		}
+		return 0, nil
+	}
 	if slices.Contains(argv, "--help") {
 		s.probes++
 		if s.probes <= s.fail {
@@ -248,7 +257,7 @@ func TestOMReviewerRetriesAProbeWithNoHelpText(t *testing.T) {
 	if stub.probes != 2 {
 		t.Errorf("probed %d times, want 2: a help-less probe is not cached", stub.probes)
 	}
-	if !strings.Contains(log.String(), "no help text") {
+	if !strings.Contains(log.String(), "no output") {
 		t.Errorf("log = %q, want the missing help named", log.String())
 	}
 }
@@ -342,16 +351,17 @@ func TestOMHelpListsFlagMatchesWholeWords(t *testing.T) {
 // one deleted line away from this test.
 type recordBeadReviewer struct {
 	verdict Verdict
+	err     error
 	inputs  []ReviewInput
 }
 
 func (r *recordBeadReviewer) Review(context.Context, string, string, string) (Verdict, error) {
-	return r.verdict, nil
+	return r.verdict, r.err
 }
 
 func (r *recordBeadReviewer) ReviewBead(_ context.Context, in ReviewInput) (Verdict, error) {
 	r.inputs = append(r.inputs, in)
-	return r.verdict, nil
+	return r.verdict, r.err
 }
 
 // TestLandNamesTheWorkBeadToTheReviewer: the landing gives the reviewer the bead

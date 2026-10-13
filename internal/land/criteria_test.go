@@ -96,13 +96,14 @@ Flags:
   --head string   the head of the range
 `
 
-// criteriaStub answers the help probe and the review, reading the
-// --criteria-file while the review runs — the only moment its contents are
-// supposed to exist.
+// criteriaStub answers the help probe, the version probe and the review,
+// reading the --criteria-file while the review runs — the only moment its
+// contents are supposed to exist.
 type criteriaStub struct {
 	t        *testing.T
 	help     string
 	probes   int
+	versions int
 	argv     []string
 	critPath string
 	text     string
@@ -113,6 +114,11 @@ type criteriaStub struct {
 }
 
 func (s *criteriaStub) run(ctx context.Context, _ string, _ []string, argv []string, out io.Writer) (int, error) {
+	if omSubcommand(argv) == "version" {
+		s.versions++
+		_, _ = io.WriteString(out, stubVersionLine())
+		return 0, nil
+	}
 	if slices.Contains(argv, "--help") {
 		s.probes++
 		_, _ = io.WriteString(out, s.help)

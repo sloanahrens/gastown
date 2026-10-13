@@ -89,6 +89,11 @@ type Verdict struct {
 	// check and stored nowhere (gt-pwvv4).
 	Bead     string    `json:"bead,omitempty"`
 	Findings []Finding `json:"findings"`
+	// Version is the om that reached the verdict, read from `om version` and
+	// never from om's verdict file. A landing records it on the work bead
+	// beside the verdict, so a bead names the reviewer that judged it
+	// (gt-uebmq).
+	Version string `json:"-"`
 }
 
 // Approved reports whether the verdict lets the work land.
@@ -228,6 +233,10 @@ func (r OMReviewer) Review(ctx context.Context, dir, base, head string) (Verdict
 // dispatched with rather than inferring them (gt-yl7n4).
 func (r OMReviewer) ReviewBead(ctx context.Context, in ReviewInput) (Verdict, error) {
 	v, told, err := r.reviewOnce(ctx, in)
+	// The verdict names the om behind it, and a review that produced none is
+	// exactly when the binary is worth naming, so this is read whatever the
+	// review did (gt-uebmq).
+	v.Version = r.omVersion(ctx, in)
 	if err != nil {
 		return v, err
 	}
@@ -245,14 +254,7 @@ func (r OMReviewer) ReviewBead(ctx context.Context, in ReviewInput) (Verdict, er
 // whether om was told which bead it reviewed.
 func (r OMReviewer) reviewOnce(ctx context.Context, in ReviewInput) (Verdict, bool, error) {
 	dir, base, head := in.Dir, in.Base, in.Head
-	path := r.Path
-	if path == "" {
-		path = "om"
-	}
-	run := r.run
-	if run == nil {
-		run = realRun
-	}
+	path, run := r.omInvocation()
 	if r.OutDir == "" {
 		return Verdict{}, false, fmt.Errorf("om review: no verdict directory configured")
 	}
@@ -389,6 +391,73 @@ func (r OMReviewer) omReviewHelp(ctx context.Context, in ReviewInput, path strin
 	return help, true
 }
 
+// omVersionTimeout bounds one `om version` probe, like the help read's: an om
+// that cannot name its version in ten seconds has none to report.
+const omVersionTimeout = 10 * time.Second
+
+// omVersionUnknown is the version a verdict carries when the om behind it
+// could not be read. It is a value rather than an empty string so the work
+// bead's verdict comment always names a version.
+const omVersionUnknown = "unknown"
+
+// omVersion returns the version of the om at path, the sha `om version`
+// prints, read once per binary identity per process from the same cache the
+// help probe fills: both are properties of one installed binary (gt-uebmq).
+//
+// A probe that fails — a run error, a timeout, an exit with no version line —
+// reports omVersionUnknown and is not cached, so a transient failure never
+// becomes "this om has no version".
+func (r OMReviewer) omVersion(ctx context.Context, in ReviewInput) string {
+	path, run := r.omInvocation()
+	id, identifiable := omBinaryIdentity(path)
+	if identifiable {
+		omHelpProbe.mu.Lock()
+		defer omHelpProbe.mu.Unlock()
+		if version, cached := omHelpProbe.version[id]; cached {
+			return version
+		}
+	}
+	var buf bytes.Buffer
+	pctx, cancel := context.WithTimeout(ctx, omVersionTimeout)
+	defer cancel()
+	code, runErr := run(pctx, in.Dir, omUnsetEnv, []string{path, "version"}, &buf)
+	version := parseOMVersion(buf.String())
+	if runErr != nil || code != 0 || version == "" {
+		r.warnf(in, "could not read the version of %s (%s); the verdict comment records it as %s",
+			path, probeFailure(runErr, pctx, code), omVersionUnknown)
+		return omVersionUnknown
+	}
+	if identifiable {
+		omHelpProbe.version[id] = version
+	}
+	return version
+}
+
+// omInvocation is how this reviewer runs om: the binary the review and its
+// probes are run through, and the process runner they share.
+func (r OMReviewer) omInvocation() (string, runFunc) {
+	path := r.Path
+	if path == "" {
+		path = "om"
+	}
+	run := r.run
+	if run == nil {
+		run = realRun
+	}
+	return path, run
+}
+
+// parseOMVersion reads the version out of `om version`'s output, the line "om
+// version <sha>", and "" when it carries none.
+func parseOMVersion(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if fields := strings.Fields(line); len(fields) >= 3 && fields[0] == "om" && fields[1] == "version" {
+			return fields[2]
+		}
+	}
+	return ""
+}
+
 // writeCriteria writes the review's acceptance text to a 0600 temp file in
 // OutDir, beside the verdict file, and returns its path. The caller removes it
 // after the run; a text that cannot be written is not a reason to skip the
@@ -411,11 +480,12 @@ func (r OMReviewer) writeCriteria(in ReviewInput) (string, error) {
 	return name, nil
 }
 
-// probeFailure names why a help probe reported no help text.
+// probeFailure names why an om probe reported nothing: no output, no answer in
+// time, or a process that would not start.
 func probeFailure(runErr error, pctx context.Context, code int) string {
 	switch {
 	case runErr == nil:
-		return fmt.Sprintf("exited %d with no help text", code)
+		return fmt.Sprintf("exited %d with no output", code)
 	case errors.Is(pctx.Err(), context.DeadlineExceeded):
 		return fmt.Sprintf("timed out after %s", omHelpTimeout)
 	default:
@@ -444,12 +514,14 @@ func (r OMReviewer) warnf(in ReviewInput, format string, args ...any) {
 	}
 }
 
-// omHelpProbe caches each installed om's `review --help` text: the one read
-// both --bead and --criteria-file are answered from.
+// omHelpProbe caches what one installed om is: the `review --help` text both
+// --bead and --criteria-file are answered from, and the `version` a verdict
+// comment records.
 var omHelpProbe = struct {
-	mu   sync.Mutex
-	help map[omBinaryID]string
-}{help: map[omBinaryID]string{}}
+	mu      sync.Mutex
+	help    map[omBinaryID]string
+	version map[omBinaryID]string
+}{help: map[omBinaryID]string{}, version: map[omBinaryID]string{}}
 
 // omBinaryID identifies one installed om the way a reinstall changes it, so an
 // om replaced under a running daemon is probed again.
