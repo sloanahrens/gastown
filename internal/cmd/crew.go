@@ -318,7 +318,7 @@ to skip capture for faster shutdown).
 
 Examples:
   gt crew stop beads                        # Stop all crew in beads rig
-  gt crew stop                              # Stop all crew (rig inferred from cwd)
+  gt crew stop                              # Stop all crew in the rig inferred from cwd (errors outside a rig)
   gt crew stop beads/emma                   # Stop specific crew member
   gt crew stop dave                         # Stop dave in current rig
   gt crew stop --all                        # Stop all running crew sessions

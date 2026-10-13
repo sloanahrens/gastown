@@ -545,8 +545,16 @@ func runCrewStop(cmd *cobra.Command, args []string) error {
 		return runCrewStopAll()
 	}
 
-	// Handle 0 args: default to all in inferred rig
+	// Handle 0 args: stop all crew in the rig inferred from cwd. Never fall
+	// through to a town-wide stop; that takes an explicit --all.
 	if len(args) == 0 {
+		if crewRig == "" {
+			rigName, err := crewStopRigFromCwd()
+			if err != nil {
+				return err
+			}
+			crewRig = rigName
+		}
 		return runCrewStopAll()
 	}
 
@@ -645,6 +653,50 @@ func runCrewStop(cmd *cobra.Command, args []string) error {
 	return lastErr
 }
 
+// crewStopRigFromCwd resolves the rig for a bare `gt crew stop`.
+func crewStopRigFromCwd() (string, error) {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return "", fmt.Errorf("not in a Gas Town workspace (use --rig <rig> or --all): %w", err)
+	}
+	cwd, err := filepath.Abs(".")
+	if err != nil {
+		return "", err
+	}
+	return resolveCrewStopRig(townRoot, cwd)
+}
+
+// resolveCrewStopRig returns the registered rig that dir sits in. A directory
+// outside any rig (the town root, mayor/, a stray folder) is an error naming
+// --rig, so a bare stop can never widen to every rig.
+func resolveCrewStopRig(townRoot, dir string) (string, error) {
+	if inferred, err := inferRigFromDir(townRoot, dir); err == nil {
+		rigsCfg, cfgErr := config.LoadRigsConfig(constants.MayorRigsPath(townRoot))
+		if cfgErr == nil && rigsCfg != nil {
+			if _, ok := rigsCfg.Rigs[inferred]; ok {
+				return inferred, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("not inside a rig directory: use --rig <rig> to stop one rig's crew, or --all to stop every rig's")
+}
+
+// crewStopTargets picks the crew sessions to stop: crew only, and only rig's
+// when rig is set.
+func crewStopTargets(agents []*AgentSession, rig string) []*AgentSession {
+	var targets []*AgentSession
+	for _, agent := range agents {
+		if agent.Type != AgentCrew {
+			continue
+		}
+		if rig != "" && agent.Rig != rig {
+			continue
+		}
+		targets = append(targets, agent)
+	}
+	return targets
+}
+
 // runCrewStopAll stops all running crew sessions.
 // If crewRig is set, only stops crew in that rig.
 func runCrewStopAll() error {
@@ -654,18 +706,7 @@ func runCrewStopAll() error {
 		return fmt.Errorf("listing sessions: %w", err)
 	}
 
-	// Filter to crew agents only
-	var targets []*AgentSession
-	for _, agent := range agents {
-		if agent.Type != AgentCrew {
-			continue
-		}
-		// Filter by rig if specified
-		if crewRig != "" && agent.Rig != crewRig {
-			continue
-		}
-		targets = append(targets, agent)
-	}
+	targets := crewStopTargets(agents, crewRig)
 
 	if len(targets) == 0 {
 		fmt.Println("No running crew sessions to stop.")
