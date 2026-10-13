@@ -64,6 +64,11 @@ type PatrolsConfig struct {
 	// staleness it exists for (gt-oqbw).
 	RebuildGT *PatrolConfig `json:"rebuild_gt,omitempty"`
 
+	// RebuildOM keeps the installed om at the om origin's main
+	// (internal/daemon/rebuild_om.go). Opt-in: it builds and swaps a binary
+	// the landing worker execs, so the operator turns it on.
+	RebuildOM *PatrolConfig `json:"rebuild_om,omitempty"`
+
 	// MainBranchTest is the deleted main_branch_test patrol's key
 	// (gt-v4ssj.4: the landing worker's post-landing run owns red main). It is
 	// accepted and ignored so a daemon.json that still carries it parses.

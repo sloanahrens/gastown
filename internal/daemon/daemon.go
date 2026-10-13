@@ -453,6 +453,14 @@ type Daemon struct {
 	// goroutine is scheduled. It must not block; nil in production.
 	rebuildGTCycleDoneFn func()
 
+	// rebuildOMRunning is the rebuild_om job's single-flight guard, and
+	// rebuildOMBlock is how long the current "om stale and not installed"
+	// episode has run (rebuild_om.go). rebuildOMCycleDoneFn is the test seam
+	// rebuildGTCycleDoneFn is for rebuild_gt.
+	rebuildOMRunning     atomic.Bool
+	rebuildOMBlock       rebuildGTBlock
+	rebuildOMCycleDoneFn func()
+
 	// tierSweepRunning is the tier_sweep job's single-flight guard
 	// (tier_sweep.go). A cycle runs on its own goroutine outside the idle
 	// predicate, so checkUpgradeRestart holds a restart for it separately, up
@@ -1309,6 +1317,10 @@ var heartbeatSteps = []heartbeatStep{
 	// (was the rebuild-gt plugin, gt-4k3fj.8.6). lifecycle: the install makes
 	// the daemon restart, which the town E-stop holds.
 	{name: "rebuild-gt", lifecycle: true, run: (*Daemon).triggerRebuildGT},
+
+	// Keep the installed om at the om origin's main (gt-0f228). lifecycle: an
+	// install changes a binary on the machine, which the town E-stop holds.
+	{name: "rebuild-om", lifecycle: true, run: (*Daemon).triggerRebuildOM},
 
 	// Sweep the tiers `make gate` does not run against origin/main
 	// (gt-vsct7.5). Non-lifecycle: it runs tests and files beads, and an

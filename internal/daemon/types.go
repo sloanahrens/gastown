@@ -272,6 +272,14 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		}
 		return config.Patrols.EventsPrune.Enabled
 	}
+	// rebuild_om is opt-in: it swaps the om binary the landing worker execs,
+	// so only an explicit enabled:true turns it on (gt-0f228).
+	if patrol == "rebuild_om" {
+		if config == nil || config.Patrols == nil || config.Patrols.RebuildOM == nil {
+			return false
+		}
+		return config.Patrols.RebuildOM.Enabled
+	}
 	// patrol_scan defaults OFF: it restarts polecats on its own, so the
 	// operator opts in (gt-4k3fj.6, ADR 0005).
 	if patrol == "patrol_scan" {
