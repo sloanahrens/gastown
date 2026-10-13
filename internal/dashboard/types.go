@@ -237,6 +237,19 @@ type OMReview struct {
 	Detail  string    `json:"detail,omitempty"`
 }
 
+// OMRunning is one om review running right now, read off the process that runs
+// it. Bead, Rig and Polecat name the landing it reviews; a review whose merge
+// the daemon has not logged yet is still listed, with no bead.
+type OMRunning struct {
+	Bead    string    `json:"bead,omitempty"`
+	Rig     string    `json:"rig,omitempty"`
+	Polecat string    `json:"polecat,omitempty"`
+	Started time.Time `json:"started"`
+	Base    string    `json:"base,omitempty"`
+	Head    string    `json:"head,omitempty"`
+	PID     int       `json:"pid,omitempty"`
+}
+
 // OM is the reviewer's record, read from the landings files and the daemon log.
 type OM struct {
 	// Model is what the reviewer runs, not the command it runs: the model its
@@ -253,7 +266,12 @@ type OM struct {
 	Rejects   map[string]int `json:"rejects"`
 	Routes    map[string]int `json:"routes"`
 	RiskPaths int            `json:"risk_paths"` // landings that touched risk paths
-	Recent    []OMReview     `json:"recent"`
+	// Running is the om reviews running right now and Last the newest five om
+	// actually ran: the two lists the panel opens with, over Recent's longer
+	// tail of every landing and rejection. Both are left out when empty.
+	Running []OMRunning `json:"running,omitempty"`
+	Last    []OMReview  `json:"last,omitempty"`
+	Recent  []OMReview  `json:"recent"`
 }
 
 // Models is the header strip: what the town runs its work on, read from the
