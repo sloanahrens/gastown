@@ -202,6 +202,9 @@ func (d *Daemon) runLandingWorkerManager(lw *landingWorkers) {
 				d.logger.Printf("landing_worker: enabled (pass interval %v, land timeout %v)", interval, landingRigLandTimeout(d.patrolConfig))
 				announced = true
 			}
+			// The om the workers review with is a per-daemon reading, not a
+			// per-rig one, and it lives off this loop's goroutine (om_skew.go).
+			d.startOMSkewMonitor()
 			for _, rigName := range landingWorkerRigs(d.patrolConfig, d.getKnownRigs()) {
 				lw.mu.Lock()
 				if !lw.running[rigName] {

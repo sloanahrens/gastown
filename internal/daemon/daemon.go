@@ -202,6 +202,17 @@ type Daemon struct {
 	rebuildGTStaleFn func(repoRoot string) *version.StaleBinaryInfo
 	rebuildGTGateFn  func() (busy string, reservable bool)
 
+	// omVersionFn reads the installed om's version sha and omHeadFn reads the
+	// om rig's origin/main tip, the two readings the om-skew check compares
+	// (see om_skew.go); nil is the real `om version` call and the real git
+	// reads. Tests answer both, so no binary and no remote runs.
+	omVersionFn func(omPath string) (string, error)
+	omHeadFn    func(townRoot string) (string, error)
+
+	// omSkew is the om-skew monitor's start guard and alert state (see
+	// om_skew.go).
+	omSkew omSkewMonitor
+
 	// lastDoltWarningTime is when Dolt health warnings were last reported.
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	lastDoltWarningTime time.Time
