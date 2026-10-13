@@ -60,6 +60,12 @@ type omSkewMonitor struct {
 	// raised is true while an om-skew alert is open. It is what keeps the
 	// hourly check from re-raising a condition the operator already holds.
 	raised bool
+	// settled is true once this process has closed any om-skew alert a
+	// previous process left open. raised lives only in memory, so a fresh
+	// daemon starts unraised whatever the town holds; the first matching
+	// reading therefore clears once, and settled keeps every later one from
+	// repeating it.
+	settled bool
 	// lastReadErr is the error last logged, so an offline town logs once per
 	// change rather than once an hour.
 	lastReadErr string
@@ -126,7 +132,8 @@ func (d *Daemon) omSkewRead(townRoot string) omSkewReading {
 }
 
 // omSkewJudge applies one reading to the alert state: a mismatch raises
-// om-skew once, an equal pair clears an open one, and a reading that could not
+// om-skew once, an equal pair clears an open one (one a previous daemon
+// process left open too: this process's first equal pair clears once), and a reading that could not
 // be taken does neither — an unreadable om or an unreachable remote is not
 // evidence that a skew ended.
 func (d *Daemon) omSkewJudge(r omSkewReading) {
@@ -146,7 +153,7 @@ func (d *Daemon) omSkewJudge(r omSkewReading) {
 	m.lastReadErr = ""
 
 	if r.installed == r.remote {
-		if !m.raised {
+		if !m.raised && m.settled {
 			return
 		}
 		if err := d.clearAlertsErr("the installed om matches the om rig's origin/main", omSkewAlertKey); err != nil {
@@ -156,6 +163,7 @@ func (d *Daemon) omSkewJudge(r omSkewReading) {
 			return
 		}
 		m.raised = false
+		m.settled = true
 		return
 	}
 
