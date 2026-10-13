@@ -106,6 +106,8 @@ type Finding struct {
 	Path     string `json:"path,omitempty"`
 	Line     int    `json:"line,omitempty"`
 	Title    string `json:"title,omitempty"`
+	// Detail is om's longer account of the finding (gt-q52sv).
+	Detail string `json:"detail,omitempty"`
 }
 
 // Reviewer reviews the diff base..head in the tree at dir. An error means no
