@@ -1262,7 +1262,7 @@ func reassignRequester() string {
 // Fails fast on configuration/initialization errors (gt-2ra).
 // See: https://github.com/steveyegge/gastown/issues/148
 func hookBeadWithRetry(beadID, targetAgent, hookDir string) error {
-	return hookBeadWithRetryWithTownRoot(beadID, targetAgent, hookDir, "")
+	return hookBeadWithRetryWithTownRoot(beadID, targetAgent, hookDir, "", nil)
 }
 
 // hookVerifyFn builds the read-back verifier hookBeadWithRetryWithTownRoot
@@ -1273,14 +1273,20 @@ var hookVerifyFn = func(townRoot string) func(beadID string) (*beadInfo, error) 
 	return func(id string) (*beadInfo, error) { return getBeadInfoFromTownRoot(townRoot, id) }
 }
 
-func hookBeadWithRetryWithTownRoot(beadID, targetAgent, hookDir, townRoot string) error {
-	return slingStores{}.hookWithRetry(hookVerifyFn(townRoot), beadID, targetAgent, hookDir)
+// hookBeadWithRetryWithTownRoot hooks beadID and, when fields is non-nil,
+// writes those attachment fields in the same bd update, so the hook and the
+// description land as one Dolt commit.
+func hookBeadWithRetryWithTownRoot(beadID, targetAgent, hookDir, townRoot string, fields *beadFieldUpdates) error {
+	return slingStores{}.hookWithRetry(hookVerifyFn(townRoot), beadID, targetAgent, hookDir, fields)
 }
 
 // hookWithRetry is hookBeadWithRetryWithTownRoot with the hook written to
 // hookDir's database in s's stores (pinned, so the write auto-commits) and
-// each landed write read back by verify (nil: no read-back).
-func (s slingStores) hookWithRetry(verify func(beadID string) (*beadInfo, error), beadID, targetAgent, hookDir string) error {
+// each landed write read back by verify (nil: no read-back). A non-nil fields
+// is applied to the bead's description as read from that same database on each
+// attempt, so a retry never writes back a description it read before another
+// writer changed it.
+func (s slingStores) hookWithRetry(verify func(beadID string) (*beadInfo, error), beadID, targetAgent, hookDir string, fields *beadFieldUpdates) error {
 	const maxRetries = 10
 	const baseBackoff = 500 * time.Millisecond
 	const maxBackoff = 30 * time.Second
@@ -1288,7 +1294,21 @@ func (s slingStores) hookWithRetry(verify func(beadID string) (*beadInfo, error)
 	hooked := "hooked"
 	var lastErr error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		err := s.pinnedAt(hookDir).Update(beadID, beads.UpdateOptions{Status: &hooked, Assignee: &targetAgent})
+		store := s.pinnedAt(hookDir)
+		opts := beads.UpdateOptions{Status: &hooked, Assignee: &targetAgent}
+		var err error
+		if fields != nil {
+			var issue *beads.Issue
+			if issue, err = store.Show(beadID); err == nil {
+				desc := applyBeadFieldUpdates(issue, *fields)
+				opts.Description = &desc
+			} else {
+				err = fmt.Errorf("reading bead for hook fields: %w", err)
+			}
+		}
+		if err == nil {
+			err = store.Update(beadID, opts)
+		}
 		if err != nil {
 			lastErr = err
 			// Fail fast on config/init errors — retrying won't help (gt-2ra)

@@ -154,7 +154,7 @@ type slingDeps struct {
 	actor              func() string
 	hookDir            func(townRoot, beadID, workDir string) string
 	storeFields        func(townRoot, beadID string, updates beadFieldUpdates) error
-	hook               func(beadID, targetAgent, hookDir, townRoot string) error
+	hook               func(beadID, targetAgent, hookDir, townRoot string, fields *beadFieldUpdates) error
 	clearOrphanLabels  func(townRoot, beadID, workDir string)
 	updateAgentHook    func(agentID, beadID, workDir, townBeadsDir string)
 	updateAgentMode    func(agentID, mode, workDir, townBeadsDir string)

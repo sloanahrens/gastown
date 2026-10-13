@@ -213,7 +213,7 @@ func TestSlingAlreadyAssigned(t *testing.T) {
 		h := newSlingHarness(t)
 		h.addBead(slingBead, beadInfo{Status: "hooked", Assignee: holder})
 		h.run.opts.force = true
-		h.run.hook = func(_, _, _, _ string) error { return errors.New("bd is down") }
+		h.run.hook = func(_, _, _, _ string, _ *beadFieldUpdates) error { return errors.New("bd is down") }
 		if err := h.sling(slingBead, holder); err == nil {
 			t.Fatal("sling succeeded, want the hook failure to roll it back")
 		}
@@ -327,7 +327,7 @@ func TestSlingRollsBackOnlyWhatItSpawned(t *testing.T) {
 		{name: "hook fails", wantErr: "injected failure", wantRollback: "rollback Toast bead=gt-abc123",
 			inject: func(h *slingHarness) {
 				h.run.opts.hookRawBead = true
-				h.run.hook = func(string, string, string, string) error { return injected }
+				h.run.hook = func(string, string, string, string, *beadFieldUpdates) error { return injected }
 			}},
 		{name: "session start fails", wantErr: "starting polecat session", wantRollback: "rollback Toast bead=gt-abc123",
 			inject: func(h *slingHarness) {
@@ -378,7 +378,7 @@ func TestSlingRollsBackAnInlineTargetsSpawn(t *testing.T) {
 		spawn := h.newSpawn("gastown")
 		return &ResolvedTarget{Agent: spawn.AgentID(), WorkDir: spawn.ClonePath, NewPolecatInfo: spawn}, nil
 	}
-	h.run.hook = func(string, string, string, string) error { return errors.New("injected failure") }
+	h.run.hook = func(string, string, string, string, *beadFieldUpdates) error { return errors.New("injected failure") }
 	err := h.sling(slingBead, "gastown/polecats/Toast")
 	wantSlingErr(t, err, "injected failure")
 	h.wantCalls("rollback", "rollback Toast bead=gt-abc123")
@@ -392,7 +392,7 @@ func TestSlingForcedPinnedRollbackRestoresThePin(t *testing.T) {
 	h := newSlingHarness(t)
 	h.addBead(slingBead, beadInfo{Status: "pinned", Assignee: "gastown/crew/sloan"})
 	h.run.opts.force = true
-	h.run.hook = func(string, string, string, string) error { return errors.New("injected") }
+	h.run.hook = func(string, string, string, string, *beadFieldUpdates) error { return errors.New("injected") }
 	wantSlingErr(t, h.sling(slingBead, "gastown"), "injected")
 	h.wantCalls("restore pinned", "restore pinned gt-abc123 gastown/crew/sloan")
 }
@@ -442,6 +442,8 @@ func TestSlingWritesInOrder(t *testing.T) {
 		}
 		at = i
 	}
+	// The fields ride on the hook write: no separate store follows it.
+	h.wantNo("store fields")
 	stored := h.stored[slingBead]
 	if len(stored) != 1 || stored[0].AttachedMolecule != "gt-wisp-new" || stored[0].AttachedFormula != "mol-polecat-work" {
 		t.Errorf("stored fields = %+v, want the wisp and formula attached", stored)
@@ -593,10 +595,10 @@ func TestSlingStoresRequestInBead(t *testing.T) {
 	}
 	h.wantCalls("agent mode", "agent mode gastown/polecats/Toast ralph")
 	stored := h.stored[slingBead]
-	if len(stored) != 2 {
-		t.Fatalf("stored %d field updates, want 2 (before and after the hook)", len(stored))
+	if len(stored) != 1 {
+		t.Fatalf("stored %d field updates, want 1 (before the hook, none after)", len(stored))
 	}
-	u := stored[1]
+	u := stored[0]
 	if !u.NoMerge || !u.ReviewOnly || u.Args != "patch release" || u.Mode == nil || *u.Mode != "ralph" || u.Dispatcher != "gastown/crew/sloan" {
 		t.Errorf("stored fields = %+v", u)
 	}
@@ -808,7 +810,7 @@ func TestSlingClearsOrphanEpisodeLabelsOnHook(t *testing.T) {
 			h.run.startSession = func(*SpawnedPolecatInfo) (string, error) { return "", errors.New("injected") }
 		}, true},
 		{"hook fails", func(h *slingHarness) {
-			h.run.hook = func(string, string, string, string) error { return errors.New("injected") }
+			h.run.hook = func(string, string, string, string, *beadFieldUpdates) error { return errors.New("injected") }
 		}, false},
 		{"fails before the hook", func(h *slingHarness) {
 			h.run.lockAssignee = func(string, string) (func(), error) { return nil, errors.New("injected") }

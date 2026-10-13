@@ -161,7 +161,6 @@ func TestExecuteSlingSuccess(t *testing.T) {
 		"clear orphan labels gt-abc123",
 		"feed sling",
 		"agent hook gastown/polecats/Toast gt-abc123",
-		"store fields gt-abc123",
 		"agent mode gastown/polecats/Toast ralph",
 		"start session Toast",
 		"unlock assignee gastown/polecats/Toast",
@@ -278,7 +277,7 @@ func TestExecuteSlingRollsBackAfterTheSpawn(t *testing.T) {
 			},
 			errSub: "storing raw sling metadata", undo: "rollback Toast bead=gt-abc123", restore: true},
 		{name: "hook fails", inject: func(h *slingHarness) {
-			h.run.hook = func(string, string, string, string) error { return injected }
+			h.run.hook = func(string, string, string, string, *beadFieldUpdates) error { return injected }
 		}, errSub: "failed to hook bead", undo: "rollback Toast bead=gt-abc123", restore: true},
 		{name: "session fails", inject: func(h *slingHarness) {
 			h.run.startSession = func(*SpawnedPolecatInfo) (string, error) { return "", injected }

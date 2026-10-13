@@ -192,7 +192,7 @@ func TestHookBeadWithRetryFailsFastOnBdStderr(t *testing.T) {
 	store := updateFailsStore{slingFake{beadsfake.New()}, fmt.Errorf("bd update gt-work: Dolt circuit breaker is open: server appears down"), &calls}
 	stores := slingStores{pinned: func(string) slingStore { return store }}
 
-	err := stores.hookWithRetry(nil, "gt-work", "gastown/polecats/rust", t.TempDir())
+	err := stores.hookWithRetry(nil, "gt-work", "gastown/polecats/rust", t.TempDir(), nil)
 	if err == nil {
 		t.Fatal("hookBeadWithRetry error = nil, want fail-fast error")
 	}

@@ -1031,7 +1031,11 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		return fmt.Errorf("serializing hook write for %s: %w", targetAgent, assigneeLockErr)
 	}
 	defer assigneeUnlock()
+	// The fields ride on the hook write, one bd update and one Dolt commit,
+	// unless raw metadata was stored ahead of it (then they are already there).
+	hookFields := &fieldUpdates
 	if attachedMoleculeID == "" && (r.opts.noMerge || r.opts.reviewOnly) {
+		hookFields = nil
 		if err := r.storeFields(townRoot, beadID, fieldUpdates); err != nil {
 			rollbackReason = rawSlingMetadataRollbackReason
 			return fmt.Errorf("storing raw sling metadata before hook: %w", err)
@@ -1042,7 +1046,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	// first: assignee keeps only the last writer, so afterwards the previous
 	// polecat's branch is unreachable from the bead (gt-zd7c).
 	r.recordReassignment(townRoot, beadID, originalAssignee, targetAgent, r.requester())
-	if err := r.hook(beadID, targetAgent, hookDir, ""); err != nil {
+	if err := r.hook(beadID, targetAgent, hookDir, "", hookFields); err != nil {
 		rollbackReason = "Hook failed"
 		return err
 	}
@@ -1067,22 +1071,17 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		r.updateAgentHook(targetAgent, beadID, hookWorkDir, townBeadsDir)
 	}
 
-	// Store all attachment fields in a single read-modify-write cycle.
-	// This eliminates the race condition where sequential independent updates
-	// (dispatcher, args, no_merge, attached_molecule) could overwrite each other.
-	if err := r.storeFields(townRoot, beadID, fieldUpdates); err != nil {
-		// Warn but don't fail - polecat will still complete work
-		fmt.Fprintf(r.out, "%s Could not store fields in bead: %v\n", style.Dim.Render("Warning:"), err)
-	} else {
-		if r.opts.argsText != "" {
-			fmt.Fprintf(r.out, "%s Args stored in bead (durable)\n", style.Bold.Render("✓"))
-		}
-		if r.opts.noMerge {
-			fmt.Fprintf(r.out, "%s No-merge mode enabled (work stays on feature branch)\n", style.Bold.Render("✓"))
-		}
-		if r.opts.reviewOnly {
-			fmt.Fprintf(r.out, "%s Review-only mode: assignee must evaluate and report back, NOT merge/commit/push\n", style.Bold.Render("⚠"))
-		}
+	// All attachment fields (dispatcher, args, no_merge, attached_molecule)
+	// were stored in one read-modify-write with the hook, so sequential
+	// independent updates cannot overwrite each other.
+	if r.opts.argsText != "" {
+		fmt.Fprintf(r.out, "%s Args stored in bead (durable)\n", style.Bold.Render("✓"))
+	}
+	if r.opts.noMerge {
+		fmt.Fprintf(r.out, "%s No-merge mode enabled (work stays on feature branch)\n", style.Bold.Render("✓"))
+	}
+	if r.opts.reviewOnly {
+		fmt.Fprintf(r.out, "%s Review-only mode: assignee must evaluate and report back, NOT merge/commit/push\n", style.Bold.Render("⚠"))
 	}
 	if mode != "" {
 		r.updateAgentMode(targetAgent, mode, hookWorkDir, townBeadsDir)

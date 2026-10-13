@@ -69,7 +69,7 @@ func (f *fakeSlingDeps) deps() *Deps {
 		SurvivingWorkGuard: func(string, string, string) error { return nil },
 		ClearReassigned:    func(string, string) func() { return func() {} },
 		HookDir:            func(string, string, string) string { return "/town/hook" },
-		Hook:               func(string, string, string, string) error { f.hooks++; return nil },
+		Hook:               func(string, string, string, string, *FieldUpdates) error { f.hooks++; return nil },
 		RecordReassignment: func(string, string, string, string, string) {},
 		ClearOrphanLabels:  func(string, string, string) {},
 		NoteDispatched:     func(string, *Duplicate) {},
