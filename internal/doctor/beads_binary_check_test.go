@@ -6,6 +6,9 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/deps"
 )
 
 type fakeExitStatus int
@@ -83,9 +86,49 @@ func TestBeadsBinaryCheck_Refusals(t *testing.T) {
 			if !strings.Contains(details, "found:") || !strings.Contains(details, "required:") {
 				t.Errorf("details must name found vs required:\n%s", details)
 			}
-			if !strings.Contains(result.FixHint, "make safe-install") || strings.Contains(result.FixHint, "go install") {
-				t.Errorf("fix hint = %q, want make safe-install and never go install", result.FixHint)
+			if result.FixHint != deps.BDInstallHint {
+				t.Errorf("fix hint = %q, want %q byte for byte", result.FixHint, deps.BDInstallHint)
 			}
 		})
+	}
+}
+
+// TestBeadsBinaryCheck_DoltUnreachableNamesDolt is the refusal when bd passed
+// its version check and the database did not answer: the report names Dolt and
+// its commands, and never sends the operator to install bd (gt-j572r).
+func TestBeadsBinaryCheck_DoltUnreachableNamesDolt(t *testing.T) {
+	t.Parallel()
+	c := NewBeadsBinaryCheck()
+	c.lookPath = func(string) (string, error) { return "/opt/bd", nil }
+	c.handshakeTimeout = 50 * time.Millisecond
+	c.run = func(_ context.Context, _ []string, args ...string) ([]byte, []byte, error) {
+		if args[0] == "version" {
+			return []byte(forkVersionJSON), nil, nil
+		}
+		return nil, []byte("Error: store unavailable"), fakeExitStatus(25)
+	}
+	result := c.Run(&CheckContext{TownRoot: t.TempDir()})
+	if result.Status != StatusError {
+		t.Fatalf("status = %v, want StatusError: %s", result.Status, result.Message)
+	}
+	if !strings.Contains(result.Message, "Dolt is not reachable") {
+		t.Errorf("message %q does not name Dolt", result.Message)
+	}
+	for _, want := range []string{"gt dolt status", "gt dolt start"} {
+		if !strings.Contains(result.FixHint, want) {
+			t.Errorf("fix hint %q lacks %q", result.FixHint, want)
+		}
+	}
+	if strings.Contains(result.FixHint, "make safe-install") {
+		t.Errorf("fix hint %q sends the operator to install bd", result.FixHint)
+	}
+	details := strings.Join(result.Details, "\n")
+	if !strings.Contains(details, "passed its version check") {
+		t.Errorf("details must say the bd on PATH is not the problem:\n%s", details)
+	}
+	for _, unwanted := range []string{"make safe-install", "required:"} {
+		if strings.Contains(details, unwanted) {
+			t.Errorf("details must not blame bd with %q:\n%s", unwanted, details)
+		}
 	}
 }
