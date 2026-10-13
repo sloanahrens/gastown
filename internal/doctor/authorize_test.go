@@ -7,6 +7,22 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
+// TestValidateFixAuthorizationHint pins the remedy the unlabeled-bead error
+// shows the operator: bd update has --add-label, not --labels (gt-ch732).
+func TestValidateFixAuthorizationHint(t *testing.T) {
+	t.Parallel()
+	err := ValidateFixAuthorization(&beads.Issue{ID: "hq-1", Status: "open", CreatedBy: "overseer"}, "gastown/polecats/amber")
+	if err == nil {
+		t.Fatal("ValidateFixAuthorization() = nil, want error")
+	}
+	if want := "bd update hq-1 --add-label " + FixAuthLabel; !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %v, want it to contain %q", err, want)
+	}
+	if strings.Contains(err.Error(), "--labels") {
+		t.Errorf("error = %v, must not suggest the nonexistent bd update --labels flag", err)
+	}
+}
+
 // TestValidateFixAuthorization covers the gt-638go.3 guard: a destructive
 // repair by an agent needs a real authorization record, not any bead ID.
 func TestValidateFixAuthorization(t *testing.T) {
