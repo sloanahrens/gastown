@@ -559,10 +559,14 @@ type State struct {
 	// DeepReview is the scheduled deep review's next run and last ten runs,
 	// read from the gastown rig's beads database. It is nil until the reader
 	// first reports.
-	DeepReview *DeepReview     `json:"deepreview,omitempty"`
-	Spend      json.RawMessage `json:"spend,omitempty"`
-	OM         *OM             `json:"om,omitempty"`
-	TierSweep  *TierSweep      `json:"tiersweep,omitempty"`
+	DeepReview *DeepReview `json:"deepreview,omitempty"`
+	// Usage is the town's spend over the last day, folded from the records the
+	// usage scan writes under the town root. It is nil until the reader first
+	// reports.
+	Usage     *Usage          `json:"usage,omitempty"`
+	Spend     json.RawMessage `json:"spend,omitempty"`
+	OM        *OM             `json:"om,omitempty"`
+	TierSweep *TierSweep      `json:"tiersweep,omitempty"`
 	// Models is the header strip: the polecat model, the pool's seats against
 	// its cap, and the reviewer's model. It is nil until the reader reports.
 	Models *Models `json:"models,omitempty"`
@@ -617,6 +621,9 @@ type Config struct {
 	Questions func() *Questions
 	// DeepReview reads the scheduled deep review's next run and last runs.
 	DeepReview func() *DeepReview
+	// Usage reads the town's spend over the last day from the usage scan's
+	// records.
+	Usage func() *Usage
 	// Escalation reads the town's open escalation beads.
 	Escalation func() *Escalations
 	// Dispatch reads the spec dispatcher's last tick from the daemon log.
@@ -652,6 +659,7 @@ type Config struct {
 	ReportsEvery    time.Duration
 	QuestionsEvery  time.Duration
 	DeepReviewEvery time.Duration
+	UsageEvery      time.Duration
 	EscalationEvery time.Duration
 	DispatchEvery   time.Duration
 	ModelsEvery     time.Duration
@@ -694,6 +702,10 @@ func (c *Config) defaults() {
 	// A deep review runs about daily, so the minute is slack to spare; the
 	// reader lists beads and runs bd per listed run for its comment count.
 	def(&c.DeepReviewEvery, 60*time.Second)
+	// The scan writes a record when a run ends, so the payload changes on the
+	// hour at its fastest, and the reader re-decodes only the files whose mtime
+	// moved: a poll is little more than a directory listing.
+	def(&c.UsageEvery, 60*time.Second)
 	def(&c.EscalationEvery, 60*time.Second)
 	def(&c.DispatchEvery, 10*time.Second)
 	// The strip's two configs are files an operator edits by hand, so it reads

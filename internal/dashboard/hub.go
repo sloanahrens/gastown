@@ -132,6 +132,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.DeepReview != nil {
 		start(h.cfg.DeepReviewEvery, h.pollDeepReview)
 	}
+	if h.cfg.Usage != nil {
+		start(h.cfg.UsageEvery, h.pollUsage)
+	}
 	if h.cfg.Escalation != nil {
 		start(h.cfg.EscalationEvery, h.pollEscalation)
 	}
@@ -562,6 +565,20 @@ func (h *Hub) pollDeepReview() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.DeepReview = d
+	h.publishLocked()
+}
+
+// pollUsage reads the town's spend over the last day from the usage scan's
+// records. It only reads files, so it keeps the minute clock the other slow
+// readers use rather than the feed's three seconds.
+func (h *Hub) pollUsage() {
+	u := h.cfg.Usage()
+	if u == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.state.Usage = u
 	h.publishLocked()
 }
 

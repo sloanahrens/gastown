@@ -277,6 +277,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	reports := dashboard.NewReportsReader(dashboardReportsDir(townRoot))
 	questions := newDashQuestionsReader(townRoot)
 	deepReview := newDashDeepReviewReader(townRoot)
+	usage := newDashUsageReader(townRoot)
 	loads := newDashLoads(townRoot, time.Now)
 	return dashboard.NewHub(dashboard.Config{
 		Feed:       feed,
@@ -293,6 +294,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		ReportsDir: dashboardReportsDir(townRoot),
 		Questions:  func() *dashboard.Questions { return questions.read(time.Now()) },
 		DeepReview: func() *dashboard.DeepReview { return deepReview.read(time.Now()) },
+		Usage:      func() *dashboard.Usage { return usage.read(time.Now()) },
 		Escalation: func() *dashboard.Escalations { return escalations.read(time.Now()) },
 		Dispatch:   om.dispatch,
 		Models:     models.read,
