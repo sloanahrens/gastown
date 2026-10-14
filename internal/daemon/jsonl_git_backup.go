@@ -238,7 +238,7 @@ func (d *Daemon) syncJsonlGitBackup() {
 	}
 
 	// Get database list. The shipped default config has no explicit Databases
-	// list (see mayor/daemon.json), so falling through to a bare skip here
+	// list (see the "daemon" section of settings/config.json), so falling through to a bare skip here
 	// meant this patrol did nothing on every single tick regardless of the
 	// git-repo fix above — the documented "auto-discovers from dolt server"
 	// behavior (types.go) was never implemented (gt-kme).

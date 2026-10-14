@@ -18,7 +18,7 @@ const (
 )
 
 // eventsPruneSettings resolves the patrol's interval and prune bounds from
-// daemon.json, falling back to the defaults for absent or invalid values.
+// the daemon patrol config, falling back to the defaults for absent or invalid values.
 func eventsPruneSettings(config *DaemonPatrolConfig) (time.Duration, events.PruneOptions) {
 	interval := defaultEventsPruneInterval
 	opts := events.PruneOptions{MaxAge: defaultEventsPruneMaxAge, MaxBytes: defaultEventsPruneMaxBytes}

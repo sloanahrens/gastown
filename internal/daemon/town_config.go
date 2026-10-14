@@ -6,7 +6,8 @@ import (
 
 // CheckTownConfig reports every town config file that exists but does not
 // load: it is the config kernel's Check (townconfig.Load over mayor/town.json,
-// mayor/rigs.json, settings/config.json, mayor/daemon.json,
+// mayor/rigs.json, settings/config.json, the daemon patrol config (its "daemon"
+// section, or the legacy mayor/daemon.json on an unmigrated town),
 // settings/daemon.env and .dolt-data/config.yaml), one line per broken file.
 //
 // The town fails closed on a failure (gt-fcxe9.10, gt-y3pgh.1): the daemon

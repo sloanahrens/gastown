@@ -21,7 +21,8 @@ const (
 	// commits. A low threshold would let one busy 24h cycle push the commit
 	// count back over the line with its own escalations, re-triggering the
 	// patrol forever. The 2000 default is the buffer against that loop.
-	// Configurable via daemon.json (patrols.compactor_dog.threshold).
+	// Configurable via the "daemon" section of settings/config.json
+	// (patrols.compactor_dog.threshold).
 	//
 	// Commit count is not the disk cost, which is why the size line below is a
 	// second, independent alarm: this one guards history-query latency and the
@@ -499,11 +500,12 @@ func compactorProbesFor(externalServer bool, sources compactorDatabaseSources, c
 	return compactorProbes{databases: sources.local, commits: commits, size: size}
 }
 
-// warnDeprecatedCompactorConfig logs a warning when daemon.json still carries
-// compactor_dog config keys that the patrol no longer honors. Removing the
-// fields outright would make a stale config silently inert; keeping them parsed
-// means an operator who set mode or keep_recent is told the setting is dead
-// instead of quietly getting different behavior than the file implies.
+// warnDeprecatedCompactorConfig logs a warning when the daemon patrol config
+// (the "daemon" section of settings/config.json) still carries compactor_dog
+// config keys that the patrol no longer honors. Removing the fields outright
+// would make a stale config silently inert; keeping them parsed means an
+// operator who set mode or keep_recent is told the setting is dead instead of
+// quietly getting different behavior than the file implies.
 func warnDeprecatedCompactorConfig(d *Daemon, cd *CompactorDogConfig) {
 	if cd == nil || (cd.Mode == "" && cd.KeepRecent == 0) {
 		return

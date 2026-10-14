@@ -221,7 +221,7 @@ func normalizeDoltServerConfig(townRoot string, config *DoltServerConfig) *DoltS
 		return nil
 	}
 	// The endpoint is the town's (config.ResolveDoltEndpoint), never
-	// daemon.json's: zero when the town names none (gt-y3pgh.9).
+	// the daemon patrol config's: zero when the town names none (gt-y3pgh.9).
 	normalized := *config
 	ep, _ := agentconfig.ResolveDoltEndpoint(townRoot)
 	normalized.Host = ep.Host

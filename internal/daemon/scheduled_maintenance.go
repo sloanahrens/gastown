@@ -99,7 +99,7 @@ func maintenanceWindowEnd(now time.Time, window string) time.Time {
 }
 
 // deprecatedMaintenanceKeys names the retired scheduled_maintenance keys a
-// daemon.json still sets. They are parsed and ignored.
+// daemon patrol config still sets. They are parsed and ignored.
 func deprecatedMaintenanceKeys(config *DaemonPatrolConfig) []string {
 	if config == nil || config.Patrols == nil || config.Patrols.ScheduledMaintenance == nil {
 		return nil

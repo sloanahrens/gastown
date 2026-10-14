@@ -32,7 +32,7 @@ import (
 // each tick's first evaluation reads the bead itself, so a dock lands within one
 // tick - the cadence the daemon decides auto-start on anyway - while the call
 // sites within a tick share one read. (`gt rig dock` stops the rig's witness and
-// refinery itself and drops the rig from daemon.json's patrols, so this read is
+// refinery itself and drops the rig from the daemon patrol config's patrols, so this read is
 // the backstop, not the mechanism.)
 const rigOperationalCacheTTL = 60 * time.Second
 
