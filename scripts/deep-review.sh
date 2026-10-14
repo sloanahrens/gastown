@@ -7,6 +7,11 @@
 #   seen    whether a finding fingerprint is already in the ledger
 #   queued  confirmed findings an earlier run recorded but never filed
 #   batches unfiled P3 findings grouped per package, ready to file as one bead
+#   gate    whether the risky-landings job has anything to do (no LLM)
+#
+# plan --mode splits the run into two jobs: slice (the hourly rotation slice,
+# no landings, no cursor moved) and landings (the risky landings, no slice).
+# The default, both, is the original single run.
 #
 # Ledger lines, written into the run bead's notes by the formula:
 #   cursor: <RFC3339 landed_at of the newest landing covered> <last slice path>
@@ -39,6 +44,8 @@ DEFAULT_SLICE_BYTES=150000
 DEFAULT_BATCH_MIN=3
 DEFAULT_BATCH_MAX_AGE_DAYS=7
 DEFAULT_BATCH_MAX=6
+DEFAULT_GATE_MIN_COUNT=3
+DEFAULT_GATE_MIN_AGE_MIN=20
 REVIEW_COOLDOWN_DAYS=21
 RISK_HISTORY="60.days.ago"
 
@@ -47,7 +54,9 @@ usage() {
 usage:
   deep-review.sh plan --landings FILE --prev-notes FILE --repo DIR
                       [--ref REF] [--slice N] [--slice-bytes N] [--now RFC3339]
-                      [--out DIR]
+                      [--out DIR] [--mode slice|landings|both]
+  deep-review.sh gate --landings FILE --label LABEL [--repo DIR] [--ref REF]
+                      [--now RFC3339] [--min-count N] [--min-age-min M]
   deep-review.sh seen --prev-notes FILE FINGERPRINT
   deep-review.sh queued --prev-notes FILE
   deep-review.sh batches --prev-notes FILE [--now RFC3339] [--min N]
@@ -264,45 +273,27 @@ build_slice() {
   awk -v today="$today" '{ print "reviewed: " today " " $0 }' "$out/slice.txt" > "$out/reviewed-lines.txt"
 }
 
-cmd_plan() {
-  local landings="" notes="" repo="" ref="HEAD" slice="$DEFAULT_SLICE" slice_bytes="$DEFAULT_SLICE_BYTES" now="" out=""
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --landings) landings="${2:-}"; shift 2 || usage ;;
-      --prev-notes) notes="${2:-}"; shift 2 || usage ;;
-      --repo) repo="${2:-}"; shift 2 || usage ;;
-      --ref) ref="${2:-}"; shift 2 || usage ;;
-      --slice) slice="${2:-}"; shift 2 || usage ;;
-      --slice-bytes) slice_bytes="${2:-}"; shift 2 || usage ;;
-      --now) now="${2:-}"; shift 2 || usage ;;
-      --out) out="${2:-}"; shift 2 || usage ;;
-      *) usage ;;
-    esac
-  done
-  [ -f "$landings" ] && [ -f "$notes" ] && [ -d "$repo" ] || usage
-  case "$slice" in ''|*[!0-9]*) usage ;; esac
-  [ "$slice" -gt 0 ] || usage
-  case "$slice_bytes" in ''|*[!0-9]*) usage ;; esac
-  [ "$slice_bytes" -gt 0 ] || usage
-  [ -n "$now" ] || now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  valid_ts "$now" || die "--now is not RFC3339: $now"
-  [ -n "$out" ] || out="$(mktemp -d)"
-  mkdir -p "$out"
-
-  local entry since cursor
+# ledger_since NOTES NOW: sets SINCE (the newest cursor's timestamp, or NOW minus
+# the default window) and CURSOR (that cursor's path, empty without one).
+ledger_since() {
+  local notes="$1" now="$2" entry
   entry="$(newest_cursor "$notes")" || die "unreadable cursor in $notes"
   if [ -n "$entry" ]; then
-    since="${entry%%$'\t'*}"
-    cursor="${entry#*$'\t'}"
+    SINCE="${entry%%$'\t'*}"
+    CURSOR="${entry#*$'\t'}"
   else
-    since="$(jq -n -r --arg now "$now" "$JQ_TS"'($now | ts)[0] - '"$DEFAULT_WINDOW_SECONDS"' | todate')"
-    cursor=""
+    SINCE="$(jq -n -r --arg now "$now" "$JQ_TS"'($now | ts)[0] - '"$DEFAULT_WINDOW_SECONDS"' | todate')"
+    CURSOR=""
   fi
+}
 
-  # Classify every landings line. A quiet verdict is only as good as the
-  # parse behind it, so a line that is JSON but lacks a usable landed_at (the
-  # record shape changed) or has a malformed risk_paths stops the plan. A line
-  # that is not JSON is tolerated only as the last line, a torn append.
+# classify_landings LANDINGS OUT: writes $OUT/classified.jsonl and sets LD_OK and
+# LD_BAD. A quiet verdict is only as good as the parse behind it, so a line that
+# is JSON but lacks a usable landed_at (the record shape changed) or has a
+# malformed risk_paths stops the caller. A line that is not JSON is tolerated
+# only as the last line, a torn append.
+classify_landings() {
+  local landings="$1" out="$2" total drift stray
   jq -R -c "$JQ_TS"'
     input_line_number as $n
     | if test("^[[:space:]]*$") then empty
@@ -317,43 +308,90 @@ cmd_plan() {
       end
   ' "$landings" > "$out/classified.jsonl" || die "cannot parse $landings"
 
-  local total ok drift bad stray
   total="$(awk 'END { print NR }' "$landings")"
-  ok="$(jq -s '[.[] | select(.k == "ok")] | length' "$out/classified.jsonl")"
+  LD_OK="$(jq -s '[.[] | select(.k == "ok")] | length' "$out/classified.jsonl")"
   drift="$(jq -s '[.[] | select(.k == "drift")] | length' "$out/classified.jsonl")"
-  bad="$(jq -s '[.[] | select(.k == "bad")] | length' "$out/classified.jsonl")"
+  LD_BAD="$(jq -s '[.[] | select(.k == "bad")] | length' "$out/classified.jsonl")"
   stray="$(jq -s --argjson last "$total" '[.[] | select(.k == "bad" and .n != $last)] | length' "$out/classified.jsonl")"
   [ "$drift" -eq 0 ] || die "$drift line(s) of $landings are JSON without a usable landed_at or risk_paths; the record shape may have changed"
   [ "$stray" -eq 0 ] || die "$stray line(s) of $landings before the last are not JSON"
-  [ "$ok" -gt 0 ] || die "$landings holds no readable landing record"
+  [ "$LD_OK" -gt 0 ] || die "$landings holds no readable landing record"
+}
 
-  # Risky landings after the cursor, oldest first.
+# risky_landings OUT SINCE: writes $OUT/landings.jsonl, the classified landings
+# with risk paths that landed after SINCE, oldest first. Shared by plan and gate
+# so the gate's count is the count the review job will see.
+risky_landings() {
+  local out="$1" since="$2"
   jq -c --arg since "$since" "$JQ_TS"'
     select(.k == "ok" and (.risk_paths | length) > 0 and (.landed_at | ts) > ($since | ts))
     | {bead, head, landed_commit, landed_at, risk_paths}
   ' "$out/classified.jsonl" | jq -s -c "$JQ_TS"'sort_by(.landed_at | ts) | .[]' > "$out/landings.jsonl"
+}
 
-  local n newest
-  n="$(awk 'END { print NR }' "$out/landings.jsonl")"
-  if [ "$n" -gt 0 ]; then
-    newest="$(jq -s -r "$JQ_TS"'max_by(.landed_at | ts) | .landed_at' "$out/landings.jsonl")"
-    echo "quiet=false"
-  else
-    newest="$since"
-    echo "quiet=true"
+# plan runs as two independent jobs. --mode slice builds only the rotation
+# slice: it never reads the landings, and reviewed_until_new is the cursor it
+# started from, so no landing cursor moves. --mode landings builds only the
+# risky-landings list and an empty slice. --mode both (the default) is the
+# original single run: the slice is skipped on a quiet day.
+cmd_plan() {
+  local landings="" notes="" repo="" ref="HEAD" slice="$DEFAULT_SLICE" slice_bytes="$DEFAULT_SLICE_BYTES" now="" out="" mode="both"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --landings) landings="${2:-}"; shift 2 || usage ;;
+      --prev-notes) notes="${2:-}"; shift 2 || usage ;;
+      --repo) repo="${2:-}"; shift 2 || usage ;;
+      --ref) ref="${2:-}"; shift 2 || usage ;;
+      --slice) slice="${2:-}"; shift 2 || usage ;;
+      --slice-bytes) slice_bytes="${2:-}"; shift 2 || usage ;;
+      --now) now="${2:-}"; shift 2 || usage ;;
+      --out) out="${2:-}"; shift 2 || usage ;;
+      --mode) mode="${2:-}"; shift 2 || usage ;;
+      *) usage ;;
+    esac
+  done
+  case "$mode" in slice|landings|both) ;; *) usage ;; esac
+  [ -f "$notes" ] || usage
+  if [ "$mode" != slice ]; then [ -f "$landings" ] || usage; fi
+  if [ "$mode" != landings ]; then [ -d "$repo" ] || usage; fi
+  case "$slice" in ''|*[!0-9]*) usage ;; esac
+  [ "$slice" -gt 0 ] || usage
+  case "$slice_bytes" in ''|*[!0-9]*) usage ;; esac
+  [ "$slice_bytes" -gt 0 ] || usage
+  [ -n "$now" ] || now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  valid_ts "$now" || die "--now is not RFC3339: $now"
+  [ -n "$out" ] || out="$(mktemp -d)"
+  mkdir -p "$out"
+
+  ledger_since "$notes" "$now"
+  local since="$SINCE" cursor="$CURSOR" n=0 newest="$SINCE" ok=0 bad=0 quiet=false
+  : > "$out/landings.jsonl"
+  if [ "$mode" != slice ]; then
+    classify_landings "$landings" "$out"
+    ok="$LD_OK"; bad="$LD_BAD"
+    risky_landings "$out" "$since"
+    n="$(awk 'END { print NR }' "$out/landings.jsonl")"
+    if [ "$n" -gt 0 ]; then
+      newest="$(jq -s -r "$JQ_TS"'max_by(.landed_at | ts) | .landed_at' "$out/landings.jsonl")"
+    else
+      quiet=true
+    fi
   fi
+  echo "mode=$mode"
+  echo "quiet=$quiet"
   echo "landings=$n"
   echo "records=$ok"
   echo "unparsed=$bad"
   echo "reviewed_until_old=$since"
   echo "reviewed_until_new=$newest"
 
-  # Rotation slice, skipped on a quiet day. The cursor path no longer picks
-  # files; it is echoed so the ledger's cursor: line keeps its shape.
+  # Rotation slice: skipped in landings mode and, in both mode, on a quiet day.
+  # The cursor path no longer picks files; it is echoed so the ledger's cursor:
+  # line keeps its shape.
   : > "$out/slice.txt"
   : > "$out/slice-rows.txt"
   : > "$out/reviewed-lines.txt"
-  if [ "$n" -gt 0 ]; then
+  if [ "$mode" = slice ] || { [ "$mode" = both ] && [ "$n" -gt 0 ]; }; then
     build_slice "$repo" "$ref" "$notes" "$now" "$out" "$slice" "$slice_bytes"
     echo "rotation_cursor_old=$cursor"
     echo "rotation_cursor_new=$(tail -n 1 "$out/slice.txt")"
@@ -363,6 +401,64 @@ cmd_plan() {
   echo "out=$out"
 }
 
+# gate: does the landings job have anything to do? Reads the run history itself
+# (bd list, both shapes of bd --json as the formula's step 1 does), finds the
+# risky landings after the newest cursor with the code plan uses, and decides
+# from their count and the age of the oldest. Exit 0 run, 1 skip, 3 an input it
+# cannot trust. --ref is accepted so a caller can pass plan's flags; the gate
+# reads no tree. --repo is the directory bd runs in.
+cmd_gate() {
+  local landings="" label="" repo="." now="" min_count="$DEFAULT_GATE_MIN_COUNT" min_age="$DEFAULT_GATE_MIN_AGE_MIN"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --landings) landings="${2:-}"; shift 2 || usage ;;
+      --label) label="${2:-}"; shift 2 || usage ;;
+      --repo) repo="${2:-}"; shift 2 || usage ;;
+      --ref) [ $# -ge 2 ] || usage; shift 2 ;;
+      --now) now="${2:-}"; shift 2 || usage ;;
+      --min-count) min_count="${2:-}"; shift 2 || usage ;;
+      --min-age-min) min_age="${2:-}"; shift 2 || usage ;;
+      *) usage ;;
+    esac
+  done
+  [ -f "$landings" ] && [ -n "$label" ] && [ -d "$repo" ] || usage
+  case "$min_count" in ''|*[!0-9]*) usage ;; esac
+  case "$min_age" in ''|*[!0-9]*) usage ;; esac
+  [ -n "$now" ] || now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  valid_ts "$now" || die "--now is not RFC3339: $now"
+
+  # global, not local: the EXIT trap runs after this function has returned
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  (cd "$repo" && bd list -l "$label" --all --limit 60 --json) > "$tmp/runs.json" || die "bd list -l $label failed"
+  # slurped, so an empty output is an error and not an empty history
+  jq -r -s '
+    (if length == 1 then .[0] else error("expected one JSON document") end)
+    | (if type == "object" then .data else . end)
+    | if type == "array" then . else error("run history is not a list") end
+    | .[] | (.notes // "") | if type == "string" then . else error("notes is not a string") end
+  ' "$tmp/runs.json" > "$tmp/prev-notes.txt" || die "unreadable run history from bd list -l $label"
+
+  ledger_since "$tmp/prev-notes.txt" "$now"
+  classify_landings "$landings" "$tmp"
+  risky_landings "$tmp" "$SINCE"
+
+  local n oldest=0
+  n="$(awk 'END { print NR }' "$tmp/landings.jsonl")"
+  if [ "$n" -gt 0 ]; then
+    oldest="$(jq -s -r --arg now "$now" "$JQ_TS"'
+      def secs: .[0] + ((.[1] | tonumber) / 1000000000);
+      (($now | ts | secs) - (min_by(.landed_at | ts) | .landed_at | ts | secs)) as $s
+      | (if $s < 0 then 0 else $s end) / 60 | floor' "$tmp/landings.jsonl")"
+  fi
+  if [ "$n" -gt 0 ] && { [ "$oldest" -ge "$min_age" ] || [ "$n" -ge "$min_count" ]; }; then
+    echo "gate: run n=$n oldest=${oldest}m"
+  else
+    echo "gate: skip n=$n oldest=${oldest}m"
+    exit 1
+  fi
+}
+
 [ $# -ge 1 ] || usage
 sub="$1"; shift
 case "$sub" in
@@ -370,5 +466,6 @@ case "$sub" in
   seen) cmd_seen "$@" ;;
   queued) cmd_queued "$@" ;;
   batches) cmd_batches "$@" ;;
+  gate) cmd_gate "$@" ;;
   *) usage ;;
 esac
