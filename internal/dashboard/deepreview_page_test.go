@@ -11,8 +11,9 @@ import (
 var deepReviewPageNow = time.Date(2026, 10, 12, 15, 0, 0, 0, time.UTC)
 
 // The Deep review pane draws what the reader decided: an unreadable list is
-// named rather than drawn as "no runs", a hold replaces the due time, and the
-// rows are drawn cell by cell through el(), which writes textContent.
+// named rather than drawn as "no runs", a hold replaces the schedules' due
+// times, the standing is one cell per schedule, and the rows are drawn cell by
+// cell through el(), which writes textContent.
 func TestDeepReviewPanelDrawsTheStateTheReaderDecided(t *testing.T) {
 	t.Parallel()
 
@@ -20,10 +21,13 @@ func TestDeepReviewPanelDrawsTheStateTheReaderDecided(t *testing.T) {
 	for _, want := range []string{
 		`const d = s.deepreview;`,
 		`box.append(el("div", "badc", "unavailable: deep reviews could not be read"))`,
-		`d.paused ? d.paused : (d.next || "–")`,
+		`const nexts = d.next || [];`,
+		`cell.append(el("b", "warnc", "paused"), el("span", "", d.paused))`,
+		`cell.append(el("b", "", n.text), el("span", "", n.name || "deep review"))`,
 		`const rows = d.rows || [];`,
 		`box.append(el("div", "empty", "no runs yet"))`,
 		`el("span", "badge warnc", "unparsed")`,
+		`el("td", "title", r.kind || "–")`,
 		`r.duration_sec == null ? "–" : fmtDur(r.duration_sec)`,
 		`el("td", "title", r.digest || "–")`,
 	} {
@@ -66,7 +70,7 @@ func TestDeepReviewReachesTheAPI(t *testing.T) {
 	t.Parallel()
 
 	reads := []*DeepReview{
-		{Next: "in 3h 20m", Rows: []DeepReviewRow{{ID: "gt-run1", Status: DeepReviewClosed, Findings: 2, Filed: 1}}},
+		{Next: []DeepReviewNext{{Name: "deep-review-slice", Text: "in 3h 20m"}}, Rows: []DeepReviewRow{{ID: "gt-run1", Kind: DeepReviewKindSlice, Status: DeepReviewClosed, Findings: 2, Filed: 1}}},
 		{Unavailable: true},
 	}
 	for _, d := range reads {
@@ -107,11 +111,11 @@ func TestDeepReviewNilReadKeepsTheLastState(t *testing.T) {
 	if h.State().DeepReview != nil {
 		t.Fatal("a nil read set the panel")
 	}
-	next = &DeepReview{Next: "due now"}
+	next = &DeepReview{Next: []DeepReviewNext{{Name: "deep-review-slice", Text: "due now"}}}
 	h.pollDeepReview()
 	next = nil
 	h.pollDeepReview()
-	if got := h.State().DeepReview; got == nil || got.Next != "due now" {
+	if got := h.State().DeepReview; got == nil || len(got.Next) != 1 || got.Next[0].Text != "due now" {
 		t.Errorf("a nil read replaced the last state with %+v", got)
 	}
 }

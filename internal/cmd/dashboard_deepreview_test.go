@@ -22,8 +22,12 @@ var deepReviewNow = time.Date(2026, 10, 12, 15, 0, 0, 0, time.UTC)
 
 const deepReviewInterval = "24h"
 
-// fakeDeepReview answers a dashDeepReviewReader from fixtures.
+// fakeDeepReview answers a dashDeepReviewReader from fixtures. slice, risk and
+// issues hold the beads the reader lists under each schedule's own label:
+// issues is the legacy schedule's runs, which most of these cases use.
 type fakeDeepReview struct {
+	slice       []*beads.Issue
+	risk        []*beads.Issue
 	issues      []*beads.Issue
 	listErr     error
 	comments    map[string][]beads.Comment
@@ -32,14 +36,18 @@ type fakeDeepReview struct {
 	patrolsErr  error
 	townRoot    string
 	reads       []string
+	// labels are the labels the reader listed, in order.
+	labels []string
 }
 
-// scheduled is a patrols config carrying the deep-review schedule.
+// scheduledPatrols is a patrols config carrying the review's schedules, each at
+// one interval.
 func scheduledPatrols(enabled bool, interval string) *config.PatrolsConfig {
-	return &config.PatrolsConfig{ScheduledSlings: &config.ScheduledSlingsConfig{
-		Enabled: enabled,
-		Entries: []config.ScheduledSlingEntry{{Name: deepReviewSchedule, Rig: deepReviewRig, IntervalStr: interval}},
-	}}
+	entries := make([]config.ScheduledSlingEntry, 0, len(deepReviewPaths))
+	for _, path := range deepReviewPaths {
+		entries = append(entries, config.ScheduledSlingEntry{Name: path.name, Rig: deepReviewRig, IntervalStr: interval})
+	}
+	return &config.PatrolsConfig{ScheduledSlings: &config.ScheduledSlingsConfig{Enabled: enabled, Entries: entries}}
 }
 
 func newFakeDeepReview(t *testing.T) *fakeDeepReview {
@@ -50,7 +58,25 @@ func newFakeDeepReview(t *testing.T) *fakeDeepReview {
 func (f *fakeDeepReview) reader() *dashDeepReviewReader {
 	return &dashDeepReviewReader{
 		townRoot: f.townRoot,
-		list:     func() ([]*beads.Issue, error) { return f.issues, f.listErr },
+		list: func(label string) ([]*beads.Issue, error) {
+			f.labels = append(f.labels, label)
+			if f.listErr != nil {
+				return nil, f.listErr
+			}
+			// The label is the wire name the patrol files runs under, so the
+			// fake serves it by name rather than by the paths variable: a
+			// reader that lists any other label gets an error, not an empty
+			// list that would hide the mistake.
+			switch label {
+			case "scheduled:" + deepReviewPaths[0].name:
+				return f.slice, nil
+			case "scheduled:" + deepReviewPaths[1].name:
+				return f.risk, nil
+			case "scheduled:" + deepReviewPaths[2].name:
+				return f.issues, nil
+			}
+			return nil, fmt.Errorf("the reader listed an unknown label %q", label)
+		},
 		comments: func(id string) ([]beads.Comment, error) {
 			f.reads = append(f.reads, id)
 			if f.commentsErr != nil {
@@ -95,25 +121,61 @@ func runIDs(rows []dashboard.DeepReviewRow) []string {
 	return out
 }
 
-// The panel's query names the label, every status, and no priority filter:
-// ListOptions' zero value is Priority 0, which bd reads as "P0 only", so a run
-// at any other priority would vanish from a pane that asked that way.
-func TestDeepReviewListAsksForEveryRun(t *testing.T) {
+// nextTexts is the panel's next-run lines keyed by the schedule's name, which
+// makes the one nameless line a town with no schedule carries an entry of its
+// own under the empty name.
+func nextTexts(next []dashboard.DeepReviewNext) map[string]string {
+	out := make(map[string]string, len(next))
+	for _, n := range next {
+		out[n.Name] = n.Text
+	}
+	return out
+}
+
+const (
+	sliceSchedule = "deep-review-slice"
+	riskSchedule  = "deep-review-risk"
+)
+
+// The panel's query names every status and no priority filter: ListOptions'
+// zero value is Priority 0, which bd reads as "P0 only", so a run at any other
+// priority would vanish from a pane that asked that way. The label is the
+// schedule's, so the reader lists once per schedule: a run bead carries one
+// label, and asking for three at once would find none of them.
+func TestDeepReviewListAsksForEveryRunOfEverySchedule(t *testing.T) {
 	t.Parallel()
 
 	o := deepReviewListOptions
-	if o.Label != "scheduled:deep-review" || o.Status != "all" || o.Priority != -1 || o.Limit != 0 {
+	if o.Label != "" || o.Status != "all" || o.Priority != -1 || o.Limit != 0 {
 		t.Errorf("the panel's query is %+v", o)
+	}
+	f := newFakeDeepReview(t)
+	f.reader().read(deepReviewNow)
+	want := []string{"scheduled:" + sliceSchedule, "scheduled:" + riskSchedule, "scheduled:" + deepReviewSchedule}
+	if !reflect.DeepEqual(f.labels, want) {
+		t.Errorf("the panel listed %v, want %v", f.labels, want)
 	}
 }
 
-func TestDeepReviewRowsAreTheNewestTen(t *testing.T) {
+// The three schedules' runs are one list on the pane, newest first, and each
+// row says which schedule filed it.
+func TestDeepReviewRowsAreTheNewestTenWithTheirKind(t *testing.T) {
 	t.Parallel()
 
 	f := newFakeDeepReview(t)
-	// Twelve closed runs, listed oldest first so the sort has work to do.
+	// Twelve closed runs, four per schedule, listed oldest first so the sort
+	// has work to do. i%3 picks the schedule: every third run is a slice, the
+	// next a risk, the rest legacy.
 	for i := 12; i >= 1; i-- {
-		f.issues = append(f.issues, runBead(fmt.Sprintf("gt-r%02d", i), i*24, 30, goodNotes))
+		run := runBead(fmt.Sprintf("gt-r%02d", i), i*24, 30, goodNotes)
+		switch i % 3 {
+		case 0:
+			f.slice = append(f.slice, run)
+		case 1:
+			f.risk = append(f.risk, run)
+		default:
+			f.issues = append(f.issues, run)
+		}
 	}
 	f.comments = map[string][]beads.Comment{
 		"gt-r01": {{Text: "the digest, never drawn"}},
@@ -125,6 +187,15 @@ func TestDeepReviewRowsAreTheNewestTen(t *testing.T) {
 	want := []string{"gt-r01", "gt-r02", "gt-r03", "gt-r04", "gt-r05", "gt-r06", "gt-r07", "gt-r08", "gt-r09", "gt-r10"}
 	if ids := runIDs(got.Rows); !reflect.DeepEqual(ids, want) {
 		t.Fatalf("rows = %v, want %v", ids, want)
+	}
+	for _, tc := range []struct{ id, kind string }{
+		{"gt-r01", dashboard.DeepReviewKindRisk},
+		{"gt-r02", dashboard.DeepReviewKindLegacy},
+		{"gt-r03", dashboard.DeepReviewKindSlice},
+	} {
+		if row := rowFor(t, got.Rows, tc.id); row.Kind != tc.kind {
+			t.Errorf("%s drew kind %q, want %q", tc.id, row.Kind, tc.kind)
+		}
 	}
 	r := got.Rows[0]
 	if r.Status != dashboard.DeepReviewClosed || r.DurationSec == nil || *r.DurationSec != 30*60 {
@@ -148,6 +219,19 @@ func TestDeepReviewRowsAreTheNewestTen(t *testing.T) {
 	}
 }
 
+func rowFor(t *testing.T, rows []dashboard.DeepReviewRow, id string) dashboard.DeepReviewRow {
+	t.Helper()
+	for _, r := range rows {
+		if r.ID == id {
+			return r
+		}
+	}
+	t.Fatalf("no row for %s in %v", id, runIDs(rows))
+	return dashboard.DeepReviewRow{}
+}
+
+// Every configured schedule has a run of its own to draw from: a schedule with
+// none is due now, and one schedule's runs say nothing about another's.
 func TestDeepReviewEmpty(t *testing.T) {
 	t.Parallel()
 
@@ -155,8 +239,13 @@ func TestDeepReviewEmpty(t *testing.T) {
 	if got.Unavailable || got.Rows == nil || len(got.Rows) != 0 {
 		t.Errorf("an empty list read as %+v, want an empty, available panel", got)
 	}
-	if got.Next != "due now" {
-		t.Errorf("a schedule with no run yet is %q, want due now", got.Next)
+	for name, text := range nextTexts(got.Next) {
+		if text != deepReviewDueNow {
+			t.Errorf("a schedule with no run yet is %q for %s, want due now", text, name)
+		}
+	}
+	if len(got.Next) != len(deepReviewPaths) {
+		t.Errorf("next = %+v, want one line per configured schedule", got.Next)
 	}
 }
 
@@ -167,8 +256,14 @@ func TestDeepReviewOneOpenRun(t *testing.T) {
 	f.issues = []*beads.Issue{openRunBead("gt-live", 1), runBead("gt-old", 48, 20, "")}
 	got := f.reader().read(deepReviewNow)
 
-	if got.Next != "running" {
-		t.Errorf("next = %q, want running", got.Next)
+	// The open run is the legacy schedule's, so only its line reads running:
+	// the other schedules never filed a run.
+	texts := nextTexts(got.Next)
+	if texts[deepReviewSchedule] != deepReviewRunning {
+		t.Errorf("next for the legacy schedule = %q, want running", texts[deepReviewSchedule])
+	}
+	if texts[sliceSchedule] != deepReviewDueNow || texts[riskSchedule] != deepReviewDueNow {
+		t.Errorf("next = %+v, want the schedules with no run due now", got.Next)
 	}
 	r := got.Rows[0]
 	if r.ID != "gt-live" || r.Status != dashboard.DeepReviewOpen || r.DurationSec != nil {
@@ -177,7 +272,8 @@ func TestDeepReviewOneOpenRun(t *testing.T) {
 }
 
 // A run's bead the patrol closed because the sling failed is not a run: it
-// neither counts as the last one nor draws as one.
+// neither counts as the last one nor draws as one, and it does not hold its
+// schedule's next line back.
 func TestDeepReviewFailedSlingBeadIsIgnored(t *testing.T) {
 	t.Parallel()
 
@@ -191,8 +287,8 @@ func TestDeepReviewFailedSlingBeadIsIgnored(t *testing.T) {
 		t.Errorf("rows = %v, want only the real run", ids)
 	}
 	// Ten hours into a 24h interval: due in 14h, not 23h from the failed bead.
-	if got.Next != "in 14h 0m" {
-		t.Errorf("next = %q, want in 14h 0m", got.Next)
+	if text := nextTexts(got.Next)[deepReviewSchedule]; text != "in 14h 0m" {
+		t.Errorf("next = %q, want in 14h 0m", text)
 	}
 
 	// A failed-sling bead that is still open is not "running" either: the
@@ -233,22 +329,60 @@ func TestDeepReviewNextDueMirrorsTheDaemonsDecision(t *testing.T) {
 	}
 }
 
-func TestDeepReviewScheduleThatCannotBeRead(t *testing.T) {
+// A schedule whose gate decides whether a run happens has no countdown to draw:
+// the interval no longer says when the next run is, so its line says the gate
+// does. That is the risk path's whole point — it runs when there is something
+// to review, not every interval (gt-zzdge).
+func TestDeepReviewGatedScheduleDrawsItsGate(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeDeepReview(t)
+	scheduledSling(f.patrols, riskSchedule).GateCommand = "gt deep-review gate --mode risk"
+	f.issues = []*beads.Issue{runBead("gt-r1", 5, 10, "")}
+
+	texts := nextTexts(f.reader().read(deepReviewNow).Next)
+	if texts[riskSchedule] != deepReviewGated {
+		t.Errorf("the gated schedule drew %q, want %q", texts[riskSchedule], deepReviewGated)
+	}
+	// The schedules without a gate keep their countdowns: five hours into the
+	// legacy schedule's 24h interval is due in 19h, and the slice schedule has
+	// no run at all.
+	if texts[deepReviewSchedule] != "in 19h 0m" {
+		t.Errorf("the legacy schedule drew %q, want in 19h 0m", texts[deepReviewSchedule])
+	}
+	if texts[sliceSchedule] != deepReviewDueNow {
+		t.Errorf("the ungated slice schedule drew %q, want due now", texts[sliceSchedule])
+	}
+
+	// An open run is running whatever the gate says: the gate let that run
+	// through, and it is the one the pane is watching.
+	f.risk = []*beads.Issue{openRunBead("gt-live", 1)}
+	if texts := nextTexts(f.reader().read(deepReviewNow).Next); texts[riskSchedule] != deepReviewRunning {
+		t.Errorf("a gated schedule with an open run drew %q, want running", texts[riskSchedule])
+	}
+
+	// A blank gate is no gate: the whitespace is a config that says nothing.
+	scheduledSling(f.patrols, riskSchedule).GateCommand = "  "
+	f.risk = nil
+	if texts := nextTexts(f.reader().read(deepReviewNow).Next); texts[riskSchedule] != deepReviewDueNow {
+		t.Errorf("a blank gate drew %q, want the schedule's own due time", texts[riskSchedule])
+	}
+}
+
+// A town with no schedule configured, or a patrols config that cannot be read,
+// has the one nameless line the pane drew before the split; the runs still show.
+func TestDeepReviewNoScheduleConfigured(t *testing.T) {
 	t.Parallel()
 
 	for name, set := range map[string]func(*fakeDeepReview){
-		"bad interval":      func(f *fakeDeepReview) { f.patrols = scheduledPatrols(true, "soon") },
-		"zero interval":     func(f *fakeDeepReview) { f.patrols = scheduledPatrols(true, "0s") },
-		"negative interval": func(f *fakeDeepReview) { f.patrols = scheduledPatrols(true, "-1h") },
-		"empty interval":    func(f *fakeDeepReview) { f.patrols = scheduledPatrols(true, "") },
-		"disabled":          func(f *fakeDeepReview) { f.patrols = scheduledPatrols(false, "24h") },
-		"no patrols":        func(f *fakeDeepReview) { f.patrols = nil },
+		"disabled":   func(f *fakeDeepReview) { f.patrols = scheduledPatrols(false, deepReviewInterval) },
+		"no patrols": func(f *fakeDeepReview) { f.patrols = nil },
 		"no scheduled_slings": func(f *fakeDeepReview) {
 			f.patrols = &config.PatrolsConfig{}
 		},
 		"another entry": func(f *fakeDeepReview) {
-			f.patrols = scheduledPatrols(true, "24h")
-			f.patrols.ScheduledSlings.Entries[0].Name = "doc-audit"
+			f.patrols = scheduledPatrols(true, deepReviewInterval)
+			f.patrols.ScheduledSlings.Entries = []config.ScheduledSlingEntry{{Name: "doc-audit", Rig: deepReviewRig, IntervalStr: deepReviewInterval}}
 		},
 		"config unreadable": func(f *fakeDeepReview) { f.patrolsErr = errors.New("bad json") },
 	} {
@@ -256,11 +390,56 @@ func TestDeepReviewScheduleThatCannotBeRead(t *testing.T) {
 		set(f)
 		f.issues = []*beads.Issue{runBead("gt-r1", 5, 10, goodNotes)}
 		got := f.reader().read(deepReviewNow)
-		if got.Next != "not scheduled" {
-			t.Errorf("%s: next = %q, want not scheduled", name, got.Next)
+		if want := []dashboard.DeepReviewNext{{Text: deepReviewNotScheduled}}; !reflect.DeepEqual(got.Next, want) {
+			t.Errorf("%s: next = %+v, want the one nameless line", name, got.Next)
 		}
 		if got.Unavailable || len(got.Rows) != 1 {
 			t.Errorf("%s: the rows are %+v, want the run still shown", name, got)
+		}
+	}
+}
+
+// A schedule the config carries but whose interval is unusable is not scheduled,
+// and the schedules beside it still draw their own lines.
+func TestDeepReviewScheduleWithNoUsableInterval(t *testing.T) {
+	t.Parallel()
+
+	for _, interval := range []string{"soon", "0s", "-1h", ""} {
+		f := newFakeDeepReview(t)
+		f.patrols = scheduledPatrols(true, interval)
+		f.issues = []*beads.Issue{runBead("gt-r1", 5, 10, goodNotes)}
+		got := f.reader().read(deepReviewNow)
+		if len(got.Next) != len(deepReviewPaths) {
+			t.Fatalf("interval %q: next = %+v, want one line per configured schedule", interval, got.Next)
+		}
+		for _, n := range got.Next {
+			if n.Text != deepReviewNotScheduled {
+				t.Errorf("interval %q: %s drew %q, want not scheduled", interval, n.Name, n.Text)
+			}
+		}
+		if got.Unavailable || len(got.Rows) != 1 {
+			t.Errorf("interval %q: the rows are %+v, want the run still shown", interval, got)
+		}
+	}
+}
+
+// A schedule the config no longer carries has no line, and the ones it does
+// carry keep theirs: the panel reads what the town is configured to run.
+func TestDeepReviewScheduleMissingFromTheConfig(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeDeepReview(t)
+	f.patrols.ScheduledSlings.Entries = []config.ScheduledSlingEntry{
+		{Name: sliceSchedule, Rig: deepReviewRig, IntervalStr: deepReviewInterval},
+		{Name: deepReviewSchedule, Rig: deepReviewRig, IntervalStr: deepReviewInterval},
+	}
+	got := f.reader().read(deepReviewNow)
+	if len(got.Next) != 2 {
+		t.Fatalf("next = %+v, want the two configured schedules", got.Next)
+	}
+	for _, n := range got.Next {
+		if n.Name == riskSchedule {
+			t.Errorf("next = %+v, want no line for the schedule the config dropped", got.Next)
 		}
 	}
 }
@@ -303,6 +482,8 @@ func TestDeepReviewHeld(t *testing.T) {
 	}
 }
 
+// One schedule's list failing leaves the panel with a partial picture of the
+// review, which is worse than saying the picture could not be read.
 func TestDeepReviewListErrorIsUnavailable(t *testing.T) {
 	t.Parallel()
 
@@ -310,7 +491,7 @@ func TestDeepReviewListErrorIsUnavailable(t *testing.T) {
 	f.listErr = errors.New("bd: dolt down")
 	f.issues = []*beads.Issue{runBead("gt-r1", 5, 10, "")}
 	got := f.reader().read(deepReviewNow)
-	if !got.Unavailable || len(got.Rows) != 0 || got.Next != "" {
+	if !got.Unavailable || len(got.Rows) != 0 || len(got.Next) != 0 {
 		t.Errorf("a failed list read as %+v, want unavailable and nothing else", got)
 	}
 }
