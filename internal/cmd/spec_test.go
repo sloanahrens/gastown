@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/patrolscan"
@@ -52,10 +54,18 @@ type fakeSpecTown struct {
 	// the last entry repeating: the first read is the tick's re-check of the
 	// board snapshot, the one before the sling is the last-moment re-read
 	// (gt-01gix). An id absent here reads from showOverride, then specs.
-	showSeq    map[string][]specRead
-	childErrs  map[string]error
-	slingErrs  map[string][]error // per bead, consumed in order
-	slung      []string
+	showSeq   map[string][]specRead
+	childErrs map[string]error
+	// held is what a rig's working seats already hold, and heldErr a failed
+	// held read, for the pre-dispatch overlap hold (gt-z80p9).
+	held    map[string][]specdispatch.HeldBead
+	heldErr map[string]error
+	// heldRigs counts the held reads per rig, so a test can pin the tick's
+	// one-read-per-rig memo.
+	heldRigs  map[string]int
+	slingErrs map[string][]error // per bead, consumed in order
+	slung     []string
+	// slingSeats is the seat each sling went to, positionally with slung.
 	slingSeats []specdispatch.SeatChoice
 	// slungResume is the resume branch each sling carried, positionally with
 	// slung: "" when the dispatch started fresh.
@@ -89,7 +99,8 @@ type specRead struct {
 func newFakeSpecTown(specs ...specdispatch.Spec) *fakeSpecTown {
 	f := &fakeSpecTown{specs: map[string]specdispatch.Spec{}, rigHold: map[string]string{}, revert: map[string]*specdispatch.Revert{},
 		slingErrs: map[string][]error{}, originBranches: map[string]bool{}, notes: map[string][]string{}, labels: map[string][]string{},
-		children: map[string][]specdispatch.Child{}, childErrs: map[string]error{}, showSeq: map[string][]specRead{}}
+		children: map[string][]specdispatch.Child{}, childErrs: map[string]error{}, showSeq: map[string][]specRead{},
+		held: map[string][]specdispatch.HeldBead{}, heldErr: map[string]error{}, heldRigs: map[string]int{}}
 	for _, s := range specs {
 		f.specs[s.ID] = s
 	}
@@ -154,6 +165,13 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 				return nil, err
 			}
 			return f.children[id], nil
+		},
+		Held: func(rig string) ([]specdispatch.HeldBead, error) {
+			f.heldRigs[rig]++
+			if err := f.heldErr[rig]; err != nil {
+				return nil, err
+			}
+			return f.held[rig], nil
 		},
 		RigHold:        func(rig string) string { return f.rigHold[rig] },
 		RevertInFlight: func(rig string) *specdispatch.Revert { return f.revert[rig] },
@@ -477,6 +495,108 @@ func TestSpecDispatchOpenChildrenHoldTheContainer(t *testing.T) {
 			t.Fatalf("errors = %+v, want one children-read failure", r.Errors)
 		}
 	})
+}
+
+// The pre-dispatch overlap hold (gt-z80p9), replayed from the gt-t61ft /
+// gt-wikw1 pair: two beads on one defect, filed minutes apart, naming the same
+// file and sharing no test name.
+func TestSpecDispatchHoldsASecondFilingOfHeldWork(t *testing.T) {
+	t.Parallel()
+	const guard = "internal/daemon/overrun_guard.go"
+	// The candidate is the second filing; its text names the file the held
+	// bead names too.
+	secondFiling := func(id string, created string) specdispatch.Spec {
+		s := cleanSpec(id, 2, created)
+		s.Title = "overrun guard nudge uses wait-idle under a 30s context"
+		s.Description = specTestDescription + "\n\nToday internal/daemon/overrun_guard.go (~254) calls Nudge with a 30 s context."
+		return s
+	}
+	heldBead := specdispatch.HeldBead{ID: "gt-t61ft", Paths: []string{guard}}
+
+	t.Run("a shared path holds and names the bead it overlaps", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(secondFiling("gt-wikw1", "2026-09-29T10:03:45Z"))
+		f.held["gastown"] = []specdispatch.HeldBead{heldBead}
+		r := runSpecDispatchCycle(f.env())
+		if len(f.slung) != 0 || len(r.Dispatched) != 0 {
+			t.Fatalf("slung a second filing of held work: slung %v report %+v", f.slung, r)
+		}
+		want := "gt-wikw1: held: gt-t61ft is already hooked to a working seat and names " + guard + "; the hold lifts when that bead closes"
+		if len(r.Skipped) != 1 || r.Skipped[0].Line != want {
+			t.Fatalf("skipped = %+v, want %q", r.Skipped, want)
+		}
+	})
+
+	t.Run("a candidate no held bead names a path of still slings", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(
+			secondFiling("gt-wikw1", "2026-09-29T10:03:45Z"),
+			secondFiling("gt-other", "2026-09-29T10:04:00Z"),
+		)
+		// What the seats hold names paths these candidates do not.
+		f.held["gastown"] = []specdispatch.HeldBead{{ID: "gt-t61ft", Paths: []string{"internal/notify/cli.go"}}}
+		env := f.env()
+		env.PerTick = 2
+		r := runSpecDispatchCycle(env)
+		if got := strings.Join(f.slung, " "); got != "gt-wikw1 gt-other" {
+			t.Fatalf("slung %q with no overlapping held bead", got)
+		}
+		if len(r.Dispatched) != 2 {
+			t.Fatalf("dispatched = %+v", r.Dispatched)
+		}
+		if f.heldRigs["gastown"] != 1 {
+			t.Errorf("held reads = %d, want one read for the rig's two candidates", f.heldRigs["gastown"])
+		}
+	})
+
+	t.Run("an unreadable held set holds the candidate", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(secondFiling("gt-wikw1", "2026-09-29T10:03:45Z"))
+		f.heldErr["gastown"] = errors.New("bd list: boom")
+		r := runSpecDispatchCycle(f.env())
+		if len(f.slung) != 0 {
+			t.Fatalf("slung a candidate whose held set could not be read: %v", f.slung)
+		}
+		if len(r.Errors) != 1 || !strings.Contains(r.Errors[0], "cannot read the beads the seats hold") {
+			t.Fatalf("errors = %+v, want one held-read failure", r.Errors)
+		}
+	})
+}
+
+// The held read is the rig's own beads: the two statuses a working seat holds,
+// with the paths their own text names — description and notes both, as the
+// sling-time guard reads them (gt-z80p9).
+func TestSpecHeldBeadsFromAStore(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	db.Seed(
+		beads.Issue{ID: "gt-hooked", Status: beads.StatusHooked, Assignee: "gastown/polecats/capable",
+			Description: "internal/daemon/overrun_guard.go (~254) calls Nudge with a 30 s context."},
+		beads.Issue{ID: "gt-claimed", Status: string(beads.StatusInProgress), Notes: "the fix lands in internal/notify/cli.go"},
+		beads.Issue{ID: "gt-ready", Status: "open", Description: "internal/daemon/overrun_guard.go"},
+		beads.Issue{ID: "gt-landed", Status: "closed", Description: "internal/daemon/overrun_guard.go"},
+		beads.Issue{ID: "gt-wordless", Status: beads.StatusHooked, Description: "no path at all"},
+	)
+	got, err := heldBeadsFrom(db, func(string, error) {}, t.TempDir())
+	if err != nil {
+		t.Fatalf("heldBeadsFrom: %v", err)
+	}
+	paths := map[string][]string{}
+	for _, h := range got {
+		paths[h.ID] = h.Paths
+	}
+	if len(paths) != 3 {
+		t.Fatalf("held = %+v, want the three beads a seat holds", got)
+	}
+	if want := []string{"internal/daemon/overrun_guard.go"}; !reflect.DeepEqual(paths["gt-hooked"], want) {
+		t.Errorf("gt-hooked paths = %v, want %v", paths["gt-hooked"], want)
+	}
+	if want := []string{"internal/notify/cli.go"}; !reflect.DeepEqual(paths["gt-claimed"], want) {
+		t.Errorf("gt-claimed paths = %v, want %v (notes are read too)", paths["gt-claimed"], want)
+	}
+	if len(paths["gt-wordless"]) != 0 {
+		t.Errorf("gt-wordless paths = %v, want none", paths["gt-wordless"])
+	}
 }
 
 // --dry-run holds an unshaped bead too: it reports the unshaped reason and

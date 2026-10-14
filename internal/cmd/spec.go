@@ -179,6 +179,12 @@ rig's red-main beads stay ready instead of racing the revert with a fix
 forward. The hold lifts when the revert lands or is rejected, so the next tick
 takes them again (gt-zkdwt).
 
+A candidate is held when its own text names a path a bead already hooked to a
+working seat names: two beads on one defect filed inside a dispatch window
+share no wording but do share the files that carry the fix, and the second seat
+would duplicate the first (gt-z80p9). The held bead is the record — no state
+file remembers a dispatch — and the hold lifts when that bead closes.
+
 A clean candidate is re-read once more immediately before its sling and dropped
 if the bead has changed since the board was read — a submission in that window
 would otherwise be slung to a seat already landing it, and a re-read that fails
@@ -456,7 +462,11 @@ type specDispatchEnv struct {
 	// (gt-gektq). The set is read here and handed to specdispatch, which never
 	// queries.
 	Children func(beadID string) ([]specdispatch.Child, error)
-	RigHold  func(rig string) string
+	// Held reads the beads a working seat already holds in a rig, for the
+	// pre-dispatch overlap hold (gt-z80p9). The record is the rig's own open
+	// beads; nothing here keeps a state file of what it slung.
+	Held    func(rig string) ([]specdispatch.HeldBead, error)
+	RigHold func(rig string) string
 	// RevertInFlight is the revert the rig's red-main owner has building or
 	// queued, from the state the landing worker writes; nil is none. It holds
 	// that rig's red-main beads, never any other bead (gt-zkdwt).
@@ -496,8 +506,10 @@ type specDispatchEnv struct {
 // gt-4k3fj.14). Off runs no lint. A bead labeled spec-shape-waived waives the
 // lint and dispatches under any gate (gt-f8ppx). A container — a bead with at
 // least one open child — is held until its children close, under any gate
-// (gt-gektq). A candidate is slung only onto a free seat that takes it, and a
-// skip leaves it ready for the next tick.
+// (gt-gektq), and so is a candidate whose own text names a path a bead already
+// hooked to a working seat names: the same defect filed twice inside one
+// dispatch window (gt-z80p9). A candidate is slung only onto a free seat that
+// takes it, and a skip leaves it ready for the next tick.
 func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	report := specDispatchReport{Template: env.Template.Source}
 	if hold := env.Hold(); hold != "" {
@@ -533,6 +545,9 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	// candidate's, so a rig with several red-main beads still logs it once
 	// (gt-wgyca).
 	staleNoted := map[string]bool{}
+	// One read per rig per tick of what the working seats already hold, which
+	// every candidate of that rig is compared against (gt-z80p9).
+	heldReads := map[string]heldRead{}
 
 	for _, c := range read.Candidates {
 		id := c.Spec.ID
@@ -624,6 +639,18 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 					continue
 				}
 			}
+		}
+
+		// The beads the working seats hold are the record of the work already
+		// in flight: a candidate whose own text names a path one of them names
+		// is that work's defect filed a second time, and a seat spent on it
+		// duplicates a session already on the fix (gt-z80p9).
+		if why, err := specHeldHold(env, c.Rig, full, heldReads); err != nil {
+			report.Errors = append(report.Errors, err.Error())
+			continue
+		} else if why != "" {
+			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: held: %s", id, why)})
+			continue
 		}
 
 		// A bead whose children are open is a container, not a unit of work:
@@ -774,6 +801,77 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		}
 	}
 	return report
+}
+
+// heldRead is one rig's held-bead read, memoized for the tick so a rig with
+// several candidates reads its held set once.
+type heldRead struct {
+	beads []specdispatch.HeldBead
+	err   error
+}
+
+// specHeldHold is the pre-dispatch overlap hold: the reason a candidate is the
+// same defect a working seat already holds, empty when it is not, and an error
+// when the held set could not be read — an unreadable set is not an empty one,
+// so the candidate waits for the next tick rather than duplicating a seat
+// (gt-z80p9). A candidate naming no path cannot be caught this way, so it never
+// pays for the read.
+func specHeldHold(env specDispatchEnv, rig string, full specdispatch.Spec, reads map[string]heldRead) (string, error) {
+	paths := extractContentRefs(full.Title, full.Description, full.Design, full.Notes).Files
+	if len(paths) == 0 {
+		return "", nil
+	}
+	read, ok := reads[rig]
+	if !ok {
+		beads, err := env.Held(rig)
+		read = heldRead{beads: beads, err: err}
+		reads[rig] = read
+	}
+	if read.err != nil {
+		return "", fmt.Errorf("%s: cannot read the beads the seats hold: %v", full.ID, read.err)
+	}
+	return specdispatch.HeldOverlap(paths, read.beads), nil
+}
+
+// specHeldStatuses are the statuses that mean a working seat holds the bead:
+// the sling hooks it, and the polecat's claim makes it in_progress.
+var specHeldStatuses = []string{beads.StatusHooked, string(beads.StatusInProgress)}
+
+// heldBeadsFrom reduces the beads one store holds to the fields the overlap
+// rule reads. It reads the same refs the sling-time duplicate guard compares
+// (listDuplicateCandidates), so the dispatcher and the guard cannot disagree
+// about what a bead's text names (gt-z80p9).
+//
+// The read is fresh, not the guard's cached pool: that cache can predate the
+// bead being hooked, and the burst path files a just-dispatched bead under its
+// pre-sling status (noteSlingCandidateDispatched), which is the one case this
+// hold exists for.
+func heldBeadsFrom(store beads.Client, warn func(beadsDir string, err error), beadsDir string) ([]specdispatch.HeldBead, error) {
+	cands, err := listDuplicateCandidates(store, warn, beadsDir, specHeldStatuses, time.Time{})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]specdispatch.HeldBead, 0, len(cands))
+	for _, c := range cands {
+		out = append(out, specdispatch.HeldBead{ID: c.ID, Paths: c.Refs.Files})
+	}
+	return out, nil
+}
+
+// specHeldBeads reads the beads a working seat already holds in one rig, as the
+// paths their own text names (gt-z80p9). The record is the rig's own open
+// beads, never a state file of what the dispatcher slung, and the rig is the
+// candidate's: a sling is a rig's own.
+//
+// A bead a crashed seat left hooked reads as held here too. The patrol readies
+// that work, which clears the hold, so the cost of being wrong is a delayed
+// dispatch rather than a duplicated session.
+func specHeldBeads(townRoot, rig string) ([]specdispatch.HeldBead, error) {
+	if rig == "" {
+		return nil, nil
+	}
+	beadsDir := beads.ResolveBeadsDir(filepath.Join(townRoot, rig))
+	return heldBeadsFrom(beads.NewPinned(beadsDir), warnDuplicateEnrichmentFailed, beadsDir)
 }
 
 // specResumeNote names the branch a dispatch continues, or the recorded
@@ -959,6 +1057,7 @@ func runSpecDispatch(cmd *cobra.Command, _ []string) error {
 		},
 		Show:     func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) },
 		Children: func(id string) ([]specdispatch.Child, error) { return specChildren(townRoot, id) },
+		Held:     func(rig string) ([]specdispatch.HeldBead, error) { return specHeldBeads(townRoot, rig) },
 		RigHold:  func(rig string) string { return dispatch.RigHold(townRoot, rig) },
 		RevertInFlight: func(rig string) *specdispatch.Revert {
 			return rigRevertInFlightPinned(townRoot, rig)
