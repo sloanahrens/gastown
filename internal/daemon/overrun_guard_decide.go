@@ -57,6 +57,11 @@ const (
 	// refusal such as a mid-rebase worktree does not clear while the seat is
 	// stopped, so retrying past a few ticks only keeps the bead on a dead seat.
 	overrunCheckpointMaxAttempts = 5
+	// overrunPushMaxAttempts is how many failed pushes of the kept branch a stop
+	// tolerates, one per tick, before it hands the bead back with a note that the
+	// branch exists only in the worktree. A remote that refuses the branch for
+	// good would otherwise hold the bead on a paused seat with a log line per tick.
+	overrunPushMaxAttempts = 5
 )
 
 // nudgeFailures is how many nudges have failed for the sling at slung.
@@ -113,9 +118,18 @@ type overrunState struct {
 	// stop. At overrunCheckpointMaxAttempts the stop hands the bead back
 	// without a checkpoint and sets CheckpointGaveUp, so a worktree that
 	// refuses every attempt does not hold the bead for good.
-	CheckpointFailures int       `json:"checkpoint_failures,omitempty"`
-	CheckpointGaveUp   bool      `json:"checkpoint_gave_up,omitempty"`
-	StoppedAt          time.Time `json:"stopped_at,omitzero"`
+	CheckpointFailures int  `json:"checkpoint_failures,omitempty"`
+	CheckpointGaveUp   bool `json:"checkpoint_gave_up,omitempty"`
+
+	// PushFailures counts the failed pushes of the kept branch in this stop.
+	// At overrunPushMaxAttempts, or at once for a non-fast-forward rejection,
+	// the stop hands the bead back with a note and sets PushGaveUp;
+	// PushFailure is why the last push failed, kept for the note.
+	PushFailures int    `json:"push_failures,omitempty"`
+	PushGaveUp   bool   `json:"push_gave_up,omitempty"`
+	PushFailure  string `json:"push_failure,omitempty"`
+
+	StoppedAt time.Time `json:"stopped_at,omitzero"`
 }
 
 // overrunStatePath is <town>/.runtime/overrun-guard/<bead>.json. A bead id

@@ -5,13 +5,151 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/git"
 )
+
+// pushTick runs one guard tick a minute after the last, without the seat list
+// (a stopped seat is no longer listed; the pending stop resumes from its state).
+func pushTick(d *Daemon, f *overrunFake) {
+	f.seats, f.calls = nil, nil
+	f.now = f.now.Add(time.Minute)
+	d.runOverrunGuard(f.seams())
+}
+
+// Failures short of the cap that end in a good push hand the bead back with no
+// note and release the seat as before (gt-bcgyj).
+func TestStop_PushThatRecoversBeforeTheCapDoesNotGiveUp(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.failOn = map[string]error{"push": errors.New("remote unreachable")}
+	d.runOverrunGuard(f.seams())
+	for i := 2; i < overrunPushMaxAttempts; i++ {
+		pushTick(d, f)
+	}
+	if st, _ := readOverrunState(d.config.TownRoot, "gt-aaa11"); st.PushFailures != overrunPushMaxAttempts-1 || st.PushGaveUp {
+		t.Fatalf("state %+v, want %d failures and no give-up", st, overrunPushMaxAttempts-1)
+	}
+
+	f.failOn = nil
+	pushTick(d, f)
+
+	if len(f.handBackNotes) != 1 || f.handBackNotes[0] != "" {
+		t.Errorf("notes = %q, want one empty note", f.handBackNotes)
+	}
+	want := []string{"recheck gastown/capable", "push gastown/capable", "hand-back gastown/capable", "reset-agent-bead gastown/capable", "clear-pause gastown/capable"}
+	if !reflect.DeepEqual(f.calls, want) {
+		t.Errorf("calls = %q, want %q (seat released)", f.calls, want)
+	}
+	if st, _ := readOverrunState(d.config.TownRoot, "gt-aaa11"); st.PushedAt.IsZero() || st.PushGaveUp || st.StoppedAt.IsZero() {
+		t.Errorf("state %+v, want pushed, not gave up, stopped", st)
+	}
+}
+
+// A push refused on every tick is bounded: after overrunPushMaxAttempts the
+// bead is handed back with a note naming the worktree and the cause, the pause
+// stays down and the agent bead is left alone, and the stop does not run again.
+func TestStop_PersistentlyFailedPushIsGivenUpOnAndHandedBack(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.failOn = map[string]error{"push": errors.New("remote: permission\ndenied")}
+
+	d.runOverrunGuard(f.seams())
+	for i := 2; i < overrunPushMaxAttempts; i++ {
+		pushTick(d, f)
+		if len(f.handedBack) != 0 {
+			t.Fatalf("tick %d: handed back before the cap: %q", i, f.handedBack)
+		}
+	}
+	pushTick(d, f)
+
+	want := []string{"recheck gastown/capable", "push gastown/capable", "hand-back gastown/capable"}
+	if !reflect.DeepEqual(f.calls, want) {
+		t.Fatalf("calls at the cap = %q, want %q (no reset, no clear-pause: the seat stays parked)", f.calls, want)
+	}
+	if len(f.handedBack) != 1 || len(f.handBackNotes) != 1 {
+		t.Fatalf("hand-backs = %q notes = %q, want one each", f.handedBack, f.handBackNotes)
+	}
+	worktree := filepath.Join(d.config.TownRoot, "gastown", "polecats", "capable")
+	for _, w := range []string{
+		"exists only in the seat's worktree (" + worktree + ")",
+		"could not be pushed to origin (remote: permission denied)",
+		"gastown/capable stays paused", "gt agent resume",
+	} {
+		if !strings.Contains(f.handBackNotes[0], w) {
+			t.Errorf("hand-back note %q lacks %q", f.handBackNotes[0], w)
+		}
+	}
+	if !strings.Contains(buf.String(), "giving up on the push of branch polecat/capable/gt-aaa11+x1 after 5 attempt(s)") {
+		t.Errorf("log lacks the give-up line:\n%s", buf.String())
+	}
+	st, _ := readOverrunState(d.config.TownRoot, "gt-aaa11")
+	if st.StoppedAt.IsZero() || !st.PushedAt.IsZero() || !st.PushGaveUp || st.PushFailures != overrunPushMaxAttempts {
+		t.Errorf("state %+v, want stopped, not pushed, gave up after %d failures", st, overrunPushMaxAttempts)
+	}
+
+	pushTick(d, f)
+	if len(f.calls) != 0 || len(f.handedBack) != 1 {
+		t.Errorf("a finished stop ran again: calls %q hand-backs %q", f.calls, f.handedBack)
+	}
+}
+
+// A rejection no retry can change, an origin that holds other history for the
+// branch, gives up on the first tick and reports the origin sha.
+func TestStop_NonFastForwardPushGivesUpAtOnceWithTheOriginSha(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.failOn = map[string]error{"push": &overrunPushDivergedError{
+		Branch: stopSeat.Branch, OriginSHA: "9f8e7d6", Err: errors.New("rejected (non-fast-forward)"),
+	}}
+
+	d.runOverrunGuard(f.seams())
+
+	want := []string{"pause gastown/capable", "stop gastown/capable", "checkpoint gastown/capable", "push gastown/capable", "hand-back gastown/capable"}
+	if !reflect.DeepEqual(f.calls, want) {
+		t.Fatalf("calls = %q, want %q (one push, then the hand-back, seat left paused)", f.calls, want)
+	}
+	if len(f.handBackNotes) != 1 || !strings.Contains(f.handBackNotes[0], "origin holds a different history for this branch (origin sha 9f8e7d6)") {
+		t.Errorf("notes = %q, want the different-history note with the origin sha", f.handBackNotes)
+	}
+	st, _ := readOverrunState(d.config.TownRoot, "gt-aaa11")
+	if st.StoppedAt.IsZero() || !st.PushGaveUp || st.PushFailures != 1 {
+		t.Errorf("state %+v, want stopped and gave up after one failure", st)
+	}
+}
+
+// Both caps can trip in one stop: the comment carries both notes.
+func TestStop_GivenUpCheckpointAndPushBothAreNoted(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	f := newOverrunFake(22*time.Minute, stopSeat)
+	f.failOn = map[string]error{"checkpoint": errors.New("refused"), "push": errors.New("no route")}
+	d.runOverrunGuard(f.seams())
+	for i := 1; i < overrunCheckpointMaxAttempts+overrunPushMaxAttempts; i++ {
+		pushTick(d, f)
+	}
+
+	if len(f.handBackNotes) != 1 {
+		t.Fatalf("notes = %q, want one hand-back", f.handBackNotes)
+	}
+	for _, w := range []string{"could not be checkpointed", "exists only in the seat's worktree"} {
+		if !strings.Contains(f.handBackNotes[0], w) {
+			t.Errorf("note %q lacks %q", f.handBackNotes[0], w)
+		}
+	}
+	if len(f.agentBeadsReset) != 0 {
+		t.Errorf("agent bead reset %q although the seat stays parked", f.agentBeadsReset)
+	}
+}
 
 // The push comes after the checkpoint and before the hand-back, and a push that
 // fails stops the stop there: the bead is not handed back (its comment would
@@ -199,6 +337,13 @@ type pushStubGit struct {
 	branch, sha string
 	pushErr     error
 	pushes      []string
+	// originRefs is what ls-remote answers; originErr fails it.
+	originRefs []git.RemoteRef
+	originErr  error
+}
+
+func (g *pushStubGit) ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error) {
+	return g.originRefs, g.originErr
 }
 
 func (g *pushStubGit) CurrentBranch() (string, error) { return g.branch, nil }
@@ -253,5 +398,50 @@ func TestOverrunPushBranch_PushesTheBranchTipToOrigin(t *testing.T) {
 	other.Polecat = "gone"
 	if err := d.overrunPushBranch(other); err != nil {
 		t.Errorf("seat with no worktree: %v, want nil", err)
+	}
+}
+
+// An unforced push origin rejects as non-fast-forward comes back as the typed
+// divergence error carrying origin's sha for the branch (read exactly, not by
+// prefix), so the stop gives up on it; any other refusal stays a plain error.
+func TestOverrunPushBranch_NonFastForwardReportsTheOriginSha(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	worktree := filepath.Join(d.config.TownRoot, "gastown", "polecats", "capable", "gastown")
+	if err := os.MkdirAll(filepath.Join(worktree, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	g := &pushStubGit{branch: stopSeat.Branch, sha: "abc123", originRefs: []git.RemoteRef{
+		{Hash: "1111111", Name: "refs/heads/" + stopSeat.Branch + "-other"},
+		{Hash: "9f8e7d6", Name: "refs/heads/" + stopSeat.Branch},
+	}}
+	d.openGitFn = func(string) daemonGit { return g }
+
+	for _, stderr := range []string{
+		" ! [rejected]  abc123 -> branch (non-fast-forward)",
+		" ! [rejected]  abc123 -> branch (fetch first)",
+	} {
+		g.pushErr = &git.GitError{Command: "push", Stderr: stderr, Err: errors.New("exit status 1")}
+		var diverged *overrunPushDivergedError
+		if err := d.overrunPushBranch(stopSeat); !errors.As(err, &diverged) || diverged.OriginSHA != "9f8e7d6" {
+			t.Errorf("stderr %q: error = %v, want the divergence error at origin sha 9f8e7d6", stderr, err)
+		}
+	}
+	if slices.Contains(g.pushes, "FORCED") {
+		t.Errorf("pushes %q include a force push", g.pushes)
+	}
+
+	// Origin cannot be asked: still a divergence, sha unknown.
+	g.originErr = errors.New("unreachable")
+	var diverged *overrunPushDivergedError
+	if err := d.overrunPushBranch(stopSeat); !errors.As(err, &diverged) || diverged.OriginSHA != "" ||
+		!strings.Contains(pushFailureReason(err), "origin sha unknown") {
+		t.Errorf("error = %v, want a divergence error with no sha", err)
+	}
+
+	// Any other refusal is retried like before.
+	g.pushErr = &git.GitError{Command: "push", Stderr: "remote: permission denied", Err: errors.New("exit status 1")}
+	if err := d.overrunPushBranch(stopSeat); err == nil || errors.As(err, &diverged) {
+		t.Errorf("error = %v, want a plain push error", err)
 	}
 }
