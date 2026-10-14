@@ -67,7 +67,9 @@ type Daemon struct {
 
 	// disabledPatrols is loaded from town settings (disabled_patrols field).
 	// Provides a simple way to disable individual patrol dogs without editing
-	// mayor/daemon.json. Checked by isPatrolActive alongside patrolConfig.
+	// the daemon patrol config (settings/config.json's "daemon" section on a
+	// two-file town, mayor/daemon.json on a five-file one). Checked by
+	// isPatrolActive alongside patrolConfig.
 	disabledPatrols map[string]bool
 
 	// Mass death detection: track recent session deaths
@@ -294,10 +296,12 @@ type Daemon struct {
 	// per-rig context timeouts so one slow rig cannot block all others.
 	rigPool *RigWorkerPool
 
-	// knownRigsCache memoizes the result of reading mayor/rigs.json for the
-	// duration of a single heartbeat tick. ~10 call sites per tick otherwise
-	// re-read and re-parse the same file. Invalidated at the start of each
-	// heartbeat so rigs.json changes between ticks are picked up.
+	// knownRigsCache memoizes the result of reading the rig registry
+	// (mayor/town.json's "registry" section on a two-file town,
+	// mayor/rigs.json on a five-file one) for the duration of a single
+	// heartbeat tick. ~10 call sites per tick otherwise re-read and re-parse
+	// the same document. Invalidated at the start of each heartbeat so
+	// registry changes between ticks are picked up.
 	//
 	// knownRigsMu guards both fields. The memo is per-tick, but background
 	// patrols run on their own goroutines (gt-uvxy) and read the cache, so
@@ -637,10 +641,12 @@ func New(config *Config) (*Daemon, error) {
 		_ = t.UnsetGlobalEnvironment(k)
 	}
 
-	// Load patrol config from mayor/daemon.json, ensuring lifecycle defaults
-	// are populated for any missing data maintenance tickers. Without this,
-	// opt-in patrols (compactor, reaper, doctor, JSONL backup, dolt backup)
-	// remain disabled if the file was created before they were implemented.
+	// Load the daemon patrol config (settings/config.json's "daemon" section
+	// on a two-file town, mayor/daemon.json on a five-file one), ensuring
+	// lifecycle defaults are populated for any missing data maintenance
+	// tickers. Without this, opt-in patrols (compactor, reaper, doctor, JSONL
+	// backup, dolt backup) remain disabled if the config was created before
+	// they were implemented.
 	if err := EnsureLifecycleConfigFile(config.TownRoot); err != nil {
 		if errors.Is(err, agentconfig.ErrUnparseable) {
 			cancel()
@@ -1031,8 +1037,10 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Scheduled slings ticker started (tick %v, %d entries)", scheduledSlingsTickInterval, len(d.patrolConfig.Patrols.ScheduledSlings.Entries))
 	}
 
-	// Start the spec dispatcher ticker unless mayor/daemon.json sets
-	// enabled:false (default on, gt-1gnq9).
+	// Start the spec dispatcher ticker unless the daemon patrol config
+	// (settings/config.json's "daemon" section on a two-file town,
+	// mayor/daemon.json on a five-file one) sets enabled:false (default on,
+	// gt-1gnq9).
 	var specDispatchTicker *time.Ticker
 	var specDispatchChan <-chan time.Time
 	if d.isPatrolActive("spec_dispatch") {
@@ -1598,8 +1606,9 @@ func (d *Daemon) prefixRegistry() *session.PrefixRegistry {
 
 // getKnownRigs returns list of registered rig names.
 // Results are memoized per heartbeat tick to coalesce the ~10 per-tick callers
-// into a single mayor/rigs.json read. The cache is invalidated at the start of
-// each heartbeat. Callable from any goroutine (gt-f18v).
+// into a single rig registry read (mayor/town.json's "registry" section on a
+// two-file town, mayor/rigs.json on a five-file one). The cache is invalidated
+// at the start of each heartbeat. Callable from any goroutine (gt-f18v).
 //
 // The lock is held across the disk read rather than only around the fields:
 // the file is a few hundred bytes, the callers are a handful per tick, and a
@@ -1616,7 +1625,7 @@ func (d *Daemon) getKnownRigs() []string {
 }
 
 // invalidateKnownRigsCache clears the per-tick cache so the next
-// getKnownRigs() call re-reads mayor/rigs.json from disk.
+// getKnownRigs() call re-reads the rig registry from disk.
 func (d *Daemon) invalidateKnownRigsCache() {
 	d.knownRigsMu.Lock()
 	defer d.knownRigsMu.Unlock()
@@ -1624,7 +1633,8 @@ func (d *Daemon) invalidateKnownRigsCache() {
 	d.knownRigsCacheValid = false
 }
 
-// readKnownRigsFromDisk reads and parses mayor/rigs.json.
+// readKnownRigsFromDisk reads and parses the rig registry: mayor/town.json's
+// "registry" section on a two-file town, mayor/rigs.json on a five-file one.
 func (d *Daemon) readKnownRigsFromDisk() []string {
 	parsed, err := d.loadRigsConfig()
 	if err != nil {
@@ -1667,10 +1677,12 @@ func (d *Daemon) getPatrolRigs(patrol string) []string {
 // Returns true if the rig can have agents auto-started.
 // Returns false (with reason) if the rig is parked, docked, or has auto_restart blocked/disabled.
 //
-// Parked is the rig's record in mayor/rigs.json, read through the config
-// kernel on every call (a few small files, no subprocess), so `gt rig park`
-// takes effect on the next evaluation. It fails closed: a rig whose park
-// state cannot be read is not operational (gt-y3pgh.4).
+// Parked is the rig's record in the rig registry (mayor/town.json's
+// "registry" section on a two-file town, mayor/rigs.json on a five-file
+// one), read through the config kernel on every call (a few small files, no
+// subprocess), so `gt rig park` takes effect on the next evaluation. It
+// fails closed: a rig whose park state cannot be read is not operational
+// (gt-y3pgh.4).
 //
 // Docked is the identity bead's status:docked label, and reading it costs a
 // bd subprocess, so that read is memoized for a short window
@@ -1774,7 +1786,9 @@ func (d *Daemon) queryRigBead(rigName string) (string, rigBeadVerdict, error) {
 	if rigCfg != nil && rigCfg.Beads != nil {
 		prefix = rigCfg.Beads.Prefix
 	} else {
-		// Fall back to registry (mayor/rigs.json) when config.json is missing
+		// Fall back to the rig registry (mayor/town.json's "registry"
+		// section on a two-file town, mayor/rigs.json on a five-file one)
+		// when the rig's config.json is missing
 		prefix = agentconfig.GetRigPrefix(d.config.TownRoot, rigName)
 	}
 

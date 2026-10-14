@@ -32,7 +32,9 @@ func runDetectionCommand(ctx context.Context, dir, name string, args ...string) 
 	return cmd.Output()
 }
 
-// OverseerConfig represents the human operator's identity (mayor/overseer.json).
+// OverseerConfig represents the human operator's identity: mayor/town.json's
+// "overseer" section on a two-file town, mayor/overseer.json on a five-file
+// one.
 // The overseer is the human who controls Gas Town, distinct from AI agents.
 type OverseerConfig struct {
 	Type     string `json:"type"`               // "overseer"

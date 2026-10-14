@@ -8,12 +8,16 @@ import (
 	"time"
 )
 
-// The mayor/daemon.json schema (gt-y3pgh.1). It lives here, not in
-// internal/daemon, so the config kernel decodes daemon.json strictly with
-// the same types the daemon runs on; internal/daemon aliases them. Comments
-// that name functions ("see maintenance_gc.go") refer to internal/daemon.
+// The daemon patrol schema (gt-y3pgh.1): settings/config.json's "daemon"
+// section on a two-file town, mayor/daemon.json on a five-file one. It lives
+// here, not in internal/daemon, so the config kernel decodes that document
+// strictly with the same types the daemon runs on; internal/daemon aliases
+// them. Comments that name functions ("see maintenance_gc.go") refer to
+// internal/daemon.
 
-// DaemonPatrolConfig is the structure of mayor/daemon.json.
+// DaemonPatrolConfig is the structure of the daemon patrol config:
+// settings/config.json's "daemon" section on a two-file town,
+// mayor/daemon.json on a five-file one.
 type DaemonPatrolConfig struct {
 	Type      string         `json:"type"`
 	Version   int            `json:"version"`
@@ -30,7 +34,9 @@ type PatrolsConfig struct {
 	// Refinery is ignored: the refinery was deleted (gt-v4ssj.6) and the
 	// landing worker replaced it. It stays in the schema only so existing
 	// daemon.json files, which the kernel decodes strictly, still load.
-	// Deprecated: remove "patrols.refinery" from mayor/daemon.json.
+	// Deprecated: remove "patrols.refinery" from the daemon patrol config
+	// (settings/config.json's "daemon" section on a two-file town,
+	// mayor/daemon.json on a five-file one).
 	Refinery *PatrolConfig `json:"refinery,omitempty"`
 	// Mayor and MayorDispatch are retired (gt-rwp7z.3): the role's supervision
 	// and the idle-seat patrol are gone and nothing reads these keys. They are
