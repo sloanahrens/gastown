@@ -1713,6 +1713,22 @@ func NotifyDoneCloseSkipped(bd beads.Client, issueID, reason string) {
 	fmt.Printf("%s Recorded skipped close on %s\n", style.Bold.Render("✓"), issueID)
 }
 
+// NotifyDoneEscalated records on the hooked bead that gt done --status
+// ESCALATED stopped the turn on a blocker, so the open bead says why it is
+// held (gt-tdxsx). The blocker itself is the escalation the polecat raised
+// with gt escalate; this comment is the pointer from the bead to that stop.
+func NotifyDoneEscalated(bd beads.Client, issueID string) {
+	if bd == nil || issueID == "" {
+		return
+	}
+	comment := "ESCALATED: the polecat stopped on a blocker that needs human intervention; the bead stays open until the escalation is resolved"
+	if err := bd.AddComment(issueID, comment); err != nil {
+		style.PrintWarning("could not record the escalation on %s: %v", issueID, err)
+		return
+	}
+	fmt.Printf("%s Recorded escalation on %s\n", style.Bold.Render("✓"), issueID)
+}
+
 func noteVerifiedPushFailure(sourceBD beads.Client, cwd, issueID, branch, commit string, verifyErr error) {
 	if issueID == "" || cwd == "" {
 		return

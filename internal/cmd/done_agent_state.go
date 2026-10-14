@@ -229,7 +229,16 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 	// paused for resumption". Close them on DEFERRED so the workflow can advance.
 	isWorkflowStep := strings.Contains(hookedBeadID, "-wfs-")
 
-	if hookedBeadID != "" && (exitType != done.ExitDeferred || isWorkflowStep) {
+	// An ESCALATED exit keeps the bead for the operator: the polecat stopped on
+	// a blocker, so the bead stays open with the blocker on it and the molecule
+	// stays attached for the resumed seat (gt-tdxsx). Unlike DEFERRED, a
+	// workflow step is not complete either — the blocker stands.
+	if hookedBeadID != "" && exitType == done.ExitEscalated {
+		hookBd, _, _ := done.RoutedIssueBeadsIn(beadsPath, hookedBeadID, e.sourceOpener())
+		done.NotifyDoneEscalated(hookBd, hookedBeadID)
+	}
+
+	if hookedBeadID != "" && exitType != done.ExitEscalated && (exitType != done.ExitDeferred || isWorkflowStep) {
 		// BUG FIX (gt-pftz): Close hooked bead unless already terminal (closed/tombstone).
 		// Previously checked hookedBead.Status == StatusHooked, but polecats update
 		// their work bead to in_progress during work. The exact-match check caused
