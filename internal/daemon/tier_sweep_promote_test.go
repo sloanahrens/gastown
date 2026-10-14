@@ -451,27 +451,24 @@ func TestRunTierSweep_ARedCyclePromotesNothing(t *testing.T) {
 	}
 }
 
-// TestRunTierSweep_APartialGreenCyclePromotesNothing: the odd-hour cycle runs
-// the shell tier alone, so its green says nothing about the integration tiers
-// and is not a promotion candidate (gt-fn9e6.38).
-func TestRunTierSweep_APartialGreenCyclePromotesNothing(t *testing.T) {
+// TestRunTierSweep_AnOddHourGreenCyclePromotesItsCommit: every cycle runs every
+// tier whatever the hour, so a green cycle at an odd hour is as complete a
+// verdict as one at an even hour and promotes its commit (gt-fn9e6.38).
+func TestRunTierSweep_AnOddHourGreenCyclePromotesItsCommit(t *testing.T) {
 	t.Parallel()
 	repo := &tierSweepPromoteRepo{tip: "bbbb1111", ancestor: true}
-	d, rec, h, _ := sweepFixture(t, 15, repo)
+	d, rec, _, sha := sweepFixture(t, 15, repo)
 	rec.green()
 
 	if !d.runTierSweep() {
 		t.Fatal("runTierSweep deferred; want a verdict")
 	}
 
-	if len(rec.stages) != 1 {
-		t.Fatalf("stages = %v, want the shell tier alone on an odd hour", rec.stages)
+	if len(rec.stages) != 2 {
+		t.Fatalf("stages = %v, want shell then integration on an odd hour", rec.stages)
 	}
-	if len(repo.pushes) != 0 {
-		t.Errorf("pushes = %v, want none for a shell-only green", repo.pushes)
-	}
-	if len(h.rigs) != 0 {
-		t.Errorf("promoters built for %v, want none for a shell-only green", h.rigs)
+	if len(repo.pushes) != 1 || repo.pushes[0] != sha+":"+promote.MainRef {
+		t.Errorf("pushes = %v, want the swept commit pushed to main", repo.pushes)
 	}
 }
 

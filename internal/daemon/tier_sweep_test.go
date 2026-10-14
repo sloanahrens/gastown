@@ -117,8 +117,8 @@ func tierSweepTestState(t *testing.T, d *Daemon, rig string) tierSweepState {
 	return st
 }
 
-// at builds a fake-clock time at the given local hour so the even-hour
-// selection is decided the same way production decides it.
+// at builds a fake-clock time at the given local hour, so a test can show the
+// hour of day changes nothing about what a cycle runs.
 func atHour(t time.Time, hour int) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day(), hour, 0, 0, 0, time.Local)
 }
@@ -228,7 +228,40 @@ func TestTriggerTierSweep_SkipLoggedOncePerPendingRestart(t *testing.T) {
 	}
 }
 
-func TestRunTierSweep_RunsShellEveryCycleAndIntegrationOnEvenHours(t *testing.T) {
+// TestTierSweepStages_EveryHourRunsEveryTier: the hour of day decides nothing,
+// so each of the day's 24 hours plans the shell stage and then the integration
+// and race stage, and the cycle's "sweep started" line names all three tiers.
+func TestTierSweepStages_EveryHourRunsEveryTier(t *testing.T) {
+	t.Parallel()
+	for hour := 0; hour < 24; hour++ {
+		t.Run(fmt.Sprintf("hour %02d", hour), func(t *testing.T) {
+			t.Parallel()
+			now := atHour(time.Now(), hour)
+			d, rec, _, logs := newTierSweepDaemon(t, now, "gastown")
+			rec.green()
+			sha := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+			d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return sha, nil }
+			d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+
+			if !d.runTierSweep() {
+				t.Fatal("runTierSweep deferred; want a verdict")
+			}
+			if len(rec.stages) != 2 ||
+				strings.Join(rec.stages[0].tiers, " ") != "shell" ||
+				strings.Join(rec.stages[1].tiers, " ") != "integration race" {
+				t.Fatalf("stages = %+v, want shell then integration race", rec.stages)
+			}
+			if want := "sweep started aaaaaaaa (shell, integration, race)"; !strings.Contains(logs.String(), want) {
+				t.Errorf("log missing %q; got:\n%s", want, logs.String())
+			}
+			if got := tierSweepTestState(t, d, "gastown").LastGreenSHA; got != sha {
+				t.Errorf("LastGreenSHA = %q, want %s: a green cycle at hour %d was a full cycle", got, sha, hour)
+			}
+		})
+	}
+}
+
+func TestRunTierSweep_RunsEveryTierEveryCycle(t *testing.T) {
 	t.Parallel()
 	now := atHour(time.Now(), 15) // odd
 	d, rec, _, _ := newTierSweepDaemon(t, now, "gastown")
@@ -240,26 +273,8 @@ func TestRunTierSweep_RunsShellEveryCycleAndIntegrationOnEvenHours(t *testing.T)
 	if !d.runTierSweep() {
 		t.Fatal("runTierSweep deferred; want a verdict")
 	}
-	if got := len(rec.stages); got != 1 || strings.Join(rec.stages[0].tiers, " ") != "shell" {
-		t.Fatalf("odd-hour stages = %+v, want one shell stage", rec.stages)
-	}
-	st := tierSweepTestState(t, d, "gastown")
-	if st.LastSHA != sha || st.Tiers["shell"].Verdict != tierSweepGreen {
-		t.Errorf("state = %+v, want a green shell at %s", st, sha)
-	}
-	if st.LastGreenSHA != "" {
-		t.Errorf("LastGreenSHA = %q after a shell-only run, want empty: integration was not covered", st.LastGreenSHA)
-	}
-
-	// The same sha on an even hour: the integration stage is due and runs,
-	// because no complete sweep has been green at this sha yet.
-	rec.stages = nil
-	d.clock = clockwork.NewFakeClockAt(atHour(now, 16))
-	if !d.runTierSweep() {
-		t.Fatal("runTierSweep deferred on the even hour")
-	}
 	if got := len(rec.stages); got != 2 {
-		t.Fatalf("even-hour stages = %+v, want shell then integration", rec.stages)
+		t.Fatalf("stages = %+v, want shell then integration", rec.stages)
 	}
 	if strings.Join(rec.stages[1].tiers, " ") != "integration race" {
 		t.Errorf("second stage tiers = %v, want integration race", rec.stages[1].tiers)
@@ -272,14 +287,14 @@ func TestRunTierSweep_RunsShellEveryCycleAndIntegrationOnEvenHours(t *testing.T)
 			t.Errorf("stage command %q runs make gate; landings already gate the merged tree", st.command())
 		}
 	}
-	st = tierSweepTestState(t, d, "gastown")
-	if st.LastGreenSHA != sha {
-		t.Errorf("LastGreenSHA = %q, want %s after a complete green sweep", st.LastGreenSHA, sha)
+	st := tierSweepTestState(t, d, "gastown")
+	if st.LastSHA != sha || st.LastGreenSHA != sha {
+		t.Errorf("state = %+v, want LastSHA and LastGreenSHA %s after a green cycle", st, sha)
 	}
 
 	// With a complete green sweep at this sha, the next cycle is silent.
 	rec.stages = nil
-	d.clock = clockwork.NewFakeClockAt(atHour(now, 17))
+	d.clock = clockwork.NewFakeClockAt(atHour(now, 16))
 	if !d.runTierSweep() {
 		t.Fatal("runTierSweep deferred on an unchanged sha")
 	}
@@ -287,18 +302,19 @@ func TestRunTierSweep_RunsShellEveryCycleAndIntegrationOnEvenHours(t *testing.T)
 		t.Fatalf("stages = %+v, want none: origin/main is unchanged since the last green sweep", rec.stages)
 	}
 
-	// A moved sha runs again, shell only on an odd hour.
+	// A moved sha runs every tier again, at an odd hour too.
 	moved := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return moved, nil }
+	d.clock = clockwork.NewFakeClockAt(atHour(now, 17))
 	if !d.runTierSweep() {
 		t.Fatal("runTierSweep deferred after a moved sha")
 	}
-	if len(rec.stages) != 1 || strings.Join(rec.stages[0].tiers, " ") != "shell" {
-		t.Fatalf("stages after a moved sha = %+v, want one shell stage", rec.stages)
+	if len(rec.stages) != 2 {
+		t.Fatalf("stages after a moved sha = %+v, want shell then integration", rec.stages)
 	}
 	st = tierSweepTestState(t, d, "gastown")
-	if st.LastSHA != moved || st.LastGreenSHA != sha {
-		t.Errorf("state = %+v, want LastSHA %s and LastGreenSHA %s", st, moved, sha)
+	if st.LastSHA != moved || st.LastGreenSHA != moved {
+		t.Errorf("state = %+v, want LastSHA and LastGreenSHA %s", st, moved)
 	}
 }
 
@@ -359,15 +375,23 @@ func TestRunTierSweep_FilesOneBeadPerFailingUnitAndClosesOnGreen(t *testing.T) {
 
 	d.runTierSweep()
 
-	if len(bd.created) != 2 {
-		t.Fatalf("created = %+v, want one bead per failing package", bd.created)
+	// Two failing packages in each of the shell, integration and race tiers.
+	if len(bd.created) != 6 {
+		t.Fatalf("created = %+v, want one bead per failing package per tier", bd.created)
 	}
-	if got := bd.created[0].Title; got != "tier sweep (gastown): shell: ./internal/cmd" {
-		t.Errorf("title = %q", got)
-	}
+	// The tiers are filed from a map, so the order is not fixed.
+	titles := map[string]bool{}
 	for _, c := range bd.created {
+		titles[c.Title] = true
 		if len(c.Labels) != 1 || c.Labels[0] != tierSweepRedLabel {
 			t.Errorf("labels = %v, want %s", c.Labels, tierSweepRedLabel)
+		}
+	}
+	for _, tier := range []string{"shell", "integration", "race"} {
+		for _, pkg := range []string{"./internal/cmd", "./internal/daemon"} {
+			if want := "tier sweep (gastown): " + tier + ": " + pkg; !titles[want] {
+				t.Errorf("no bead titled %q; got %v", want, titles)
+			}
 		}
 	}
 
@@ -376,12 +400,16 @@ func TestRunTierSweep_FilesOneBeadPerFailingUnitAndClosesOnGreen(t *testing.T) {
 	bd.open = []*beads.Issue{
 		{ID: "gt-1", Title: "tier sweep (gastown): shell: ./internal/cmd"},
 		{ID: "gt-2", Title: "tier sweep (gastown): shell: ./internal/daemon"},
+		{ID: "gt-3", Title: "tier sweep (gastown): integration: ./internal/cmd"},
+		{ID: "gt-4", Title: "tier sweep (gastown): integration: ./internal/daemon"},
+		{ID: "gt-5", Title: "tier sweep (gastown): race: ./internal/cmd"},
+		{ID: "gt-6", Title: "tier sweep (gastown): race: ./internal/daemon"},
 	}
 	d.runTierSweep()
 	if len(bd.created) != 0 {
 		t.Errorf("created = %+v, want comments on the open beads instead", bd.created)
 	}
-	if len(bd.comments) != 2 {
+	if len(bd.comments) != 6 {
 		t.Errorf("comments = %v, want one per open bead", bd.comments)
 	}
 
@@ -392,8 +420,13 @@ func TestRunTierSweep_FilesOneBeadPerFailingUnitAndClosesOnGreen(t *testing.T) {
 		{ID: "gt-9", Title: "tier sweep (gastown): integration: ./internal/cmd"},
 	}
 	d.runTierSweep()
-	if len(bd.closed) != 1 || !strings.HasPrefix(bd.closed[0], "gt-1 ") {
-		t.Errorf("closed = %v, want only the shell tier's bead", bd.closed)
+	if len(bd.closed) != 2 {
+		t.Fatalf("closed = %v, want the shell and integration tiers' beads", bd.closed)
+	}
+	for _, id := range []string{"gt-1 ", "gt-9 "} {
+		if !strings.HasPrefix(bd.closed[0], id) && !strings.HasPrefix(bd.closed[1], id) {
+			t.Errorf("closed = %v, want %sclosed", bd.closed, id)
+		}
 	}
 }
 
@@ -405,7 +438,7 @@ func TestRunTierSweep_FilesOneBeadPerFailingUnitAndClosesOnGreen(t *testing.T) {
 // rather than piling onto the host (gt-dhcmp, acceptance 3).
 func TestTierSweepSlotRoleIsNotGateClass(t *testing.T) {
 	t.Parallel()
-	stages, _ := tierSweepStages("gastown", atHour(time.Now(), 16))
+	stages := tierSweepStages("gastown")
 	last := stages[len(stages)-1]
 	if !last.slot {
 		t.Fatal("the integration stage must hold the container-gate slot")
@@ -501,7 +534,7 @@ func TestParseTierSweepSummaries(t *testing.T) {
 // real time.
 func TestRunTierSweep_LogsTheElapsedTimeOfTheSweep(t *testing.T) {
 	t.Parallel()
-	now := atHour(time.Now(), 15) // odd: the shell stage alone
+	now := atHour(time.Now(), 15)
 	d, rec, _, logs := newTierSweepDaemon(t, now, "gastown")
 	clk := clockwork.NewFakeClockAt(now)
 	d.clock = clk
@@ -525,7 +558,8 @@ func TestRunTierSweep_LogsTheElapsedTimeOfTheSweep(t *testing.T) {
 	out := logs.String()
 	for _, want := range []string{
 		"tier_sweep: gastown: shell finished (exit 0) in 2m14s;",
-		"tier_sweep: gastown: swept aaaaaaaa (shell GREEN) in 2m14s",
+		"tier_sweep: gastown: integration finished (exit 0) in 2m14s;",
+		"tier_sweep: gastown: swept aaaaaaaa (shell GREEN, integration GREEN, race GREEN) in 4m28s",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log missing %q; got:\n%s", want, out)
@@ -543,7 +577,7 @@ func TestRunTierSweep_LogsSweepStarted(t *testing.T) {
 		hour int
 		want string
 	}{
-		{"odd hour runs the shell tier alone", 15, "tier_sweep: gastown: sweep started aaaaaaaa (shell)"},
+		{"odd hour runs shell then the integration suite", 15, "tier_sweep: gastown: sweep started aaaaaaaa (shell, integration, race)"},
 		{"even hour runs shell then the integration suite", 14, "tier_sweep: gastown: sweep started aaaaaaaa (shell, integration, race)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
