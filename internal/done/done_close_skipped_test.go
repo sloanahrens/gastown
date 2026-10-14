@@ -61,32 +61,56 @@ type commentFailingClient struct {
 
 func (f commentFailingClient) AddComment(id, comment string) error { return f.err }
 
-// TestCompleteWithoutCodeCommentsSkippedClose runs the refusal through the
-// real no-code submit path: a bead whose acceptance criteria are unchecked is
-// left open, the reason is recorded on it, and submit still succeeds (the
-// skip is policy, not a failed submit).
-func TestCompleteWithoutCodeCommentsSkippedClose(t *testing.T) {
+// TestCompleteWithoutCodeCriteria runs the unchecked-criteria gate through the
+// real no-code submit path: unchecked boxes are refused before anything is
+// closed or written, every box ticked still closes, and merge_strategy=local
+// keeps the bead open with the reason recorded and no error.
+func TestCompleteWithoutCodeCriteria(t *testing.T) {
 	t.Parallel()
-	h := newSubmitHarness(t)
-	h.repo.ahead = 0
-	h.r.opts.cleanupStatus = "clean"
-	seedCriteria(h, "- [ ] unit tests pass")
+	for _, tc := range []struct {
+		name        string
+		criteria    string
+		description string
+		wantErr     string
+		wantClosed  bool
+		wantComment string
+	}{
+		{name: "unchecked refuses", criteria: criteriaOneTicked, wantErr: "1 unchecked acceptance criteria"},
+		{name: "all ticked closes", criteria: criteriaAllTicked, wantClosed: true},
+		{name: "merge_strategy=local keeps open", criteria: "- [ ] unit tests pass",
+			description: "merge_strategy: local\n", wantComment: "merge_strategy=local"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newSubmitHarness(t)
+			h.repo.ahead = 0
+			h.repo.origin[doneTestBranch] = "feature1"
+			h.repo.reachable["main"] = map[string]bool{"feature1": true}
+			h.r.opts.cleanupStatus = "clean"
+			h.bd.Seed(beads.Issue{ID: "bd-source", Title: "the work", Type: "task",
+				Status: string(beads.StatusHooked), AcceptanceCriteria: tc.criteria, Description: tc.description})
 
-	if err := h.submit(); err != nil {
-		t.Fatalf("submit: %v", err)
-	}
-	comments, err := h.bd.Comments("bd-source")
-	if err != nil {
-		t.Fatalf("Comments: %v", err)
-	}
-	if len(comments) != 1 {
-		t.Fatalf("wrote %d comments, want 1: %+v", len(comments), comments)
-	}
-	if !strings.Contains(comments[0].Text, "unchecked acceptance criteria") {
-		t.Errorf("comment %q does not name the skip reason", comments[0].Text)
-	}
-	if issue := h.source(t); issue.Status == string(beads.StatusClosed) {
-		t.Error("a skipped close closed the bead anyway")
+			err := h.submit()
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("submit: %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("submit = %v, want an error containing %q", err, tc.wantErr)
+			}
+			if closed := h.source(t).Status == string(beads.StatusClosed); closed != tc.wantClosed {
+				t.Errorf("closed = %v, want %v", closed, tc.wantClosed)
+			}
+			comments, cerr := h.bd.Comments("bd-source")
+			if cerr != nil {
+				t.Fatalf("Comments: %v", cerr)
+			}
+			if tc.wantComment == "" && len(comments) != 0 {
+				t.Errorf("wrote comments %+v, want none", comments)
+			}
+			if tc.wantComment != "" && (len(comments) != 1 || !strings.Contains(comments[0].Text, tc.wantComment)) {
+				t.Errorf("comments %+v, want one naming %q", comments, tc.wantComment)
+			}
+		})
 	}
 }
 
@@ -98,7 +122,8 @@ func TestCompleteWithoutCodeSurvivesAFailedComment(t *testing.T) {
 	h.repo.ahead = 0
 	h.r.opts.cleanupStatus = "clean"
 	h.client = commentFailingClient{Client: h.bd, err: errors.New("dolt unavailable")}
-	seedCriteria(h, "- [ ] unit tests pass")
+	h.bd.Seed(beads.Issue{ID: "bd-source", Title: "the work", Type: "task",
+		Status: string(beads.StatusHooked), Description: "merge_strategy: local\n"})
 
 	if err := h.submit(); err != nil {
 		t.Fatalf("submit failed on an unwritable comment: %v", err)
