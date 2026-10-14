@@ -153,6 +153,15 @@ func TestInitSlotsFourHoldersTwelveWaiters(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	// queued gets one event per waiter that found the pool full and began to
+	// wait; entered gets one per admitted waiter; admitted waiters then park on
+	// proceed, so the test decides when each holds its slot rather than a sleep.
+	queued := make(chan struct{}, waiters)
+	s.blocked = queued
+	entered := make(chan struct{}, waiters)
+	proceed := make(chan struct{})
+	var unpark sync.Once
+	defer unpark.Do(func() { close(proceed) }) // a failed check must not strand parked waiters
 	var admitted, inFlight, peak atomic.Int32
 	var wg sync.WaitGroup
 	errs := make(chan error, waiters)
@@ -174,18 +183,38 @@ func TestInitSlotsFourHoldersTwelveWaiters(t *testing.T) {
 					break
 				}
 			}
-			time.Sleep(5 * time.Millisecond)
+			entered <- struct{}{}
+			<-proceed
 			inFlight.Add(-1)
 		}()
 	}
 
-	time.Sleep(100 * time.Millisecond)
+	for i := 0; i < waiters; i++ {
+		select {
+		case <-queued:
+		case <-ctx.Done():
+			t.Fatalf("only %d of %d waiters queued on the full pool", i, waiters)
+		}
+	}
 	if n := admitted.Load(); n != 0 {
 		t.Fatalf("%d waiters got through while all %d slots were held", n, holders)
 	}
 	for _, release := range held {
 		release()
 	}
+	// Exactly the freed slots fill, and with those holders parked the pool is
+	// empty, so no further waiter can be admitted until proceed closes.
+	for i := 0; i < holders; i++ {
+		select {
+		case <-entered:
+		case <-ctx.Done():
+			t.Fatalf("only %d of %d freed slots were taken", i, holders)
+		}
+	}
+	if n := len(s.tokens); n != 0 {
+		t.Errorf("pool holds %d tokens while %d waiters hold slots, want 0", n, holders)
+	}
+	unpark.Do(func() { close(proceed) })
 
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
