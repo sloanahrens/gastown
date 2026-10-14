@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/supervisor"
 )
 
 // The town's polecat-seat picture: which seats a spawn could take. The spec
@@ -113,6 +114,27 @@ func liveSeatKeys(live []poolSession) map[string]bool {
 	return seats
 }
 
+// polecatIntentSeat is the intent-record key of a polecat seat, built through
+// the same constructor the writers use (supervisor.SeatFor), so the reader of a
+// seat's record names it the way the writer does.
+func polecatIntentSeat(rigName, polecatName string) intent.Seat {
+	return supervisor.IntentSeat(supervisor.SeatFor(rigName, constants.RolePolecat, polecatName))
+}
+
+// slungAgent is the agent a sessionless seat is counted on: the one its sling
+// recorded (intent.MarkSlung), or fallback when the record names none.
+//
+// fallback is the pool's own agent, which is what these seats were counted on
+// before the record existed: a seat slung before then, or one a sling left on
+// the role default — which the record stores as no agent at all — reads exactly
+// as it did (gt-2q283).
+func slungAgent(rec intent.Record, fallback string) string {
+	if agent := strings.TrimSpace(rec.Agent); agent != "" {
+		return agent
+	}
+	return fallback
+}
+
 // poolDeadHookedSessions lists the seats whose tmux session is gone but whose
 // agent bead still names hooked, non-terminal work: a polecat that crashed and
 // whose supervised restart is due (gt-tldj4). Such a seat keeps holding the
@@ -135,13 +157,18 @@ func liveSeatKeys(live []poolSession) map[string]bool {
 // seats are already counted, and counting every unreadable directory would let
 // a bead-database hiccup fill every seat and refuse every sling.
 //
-// The seat is rendered on the pool's own agent. No per-polecat agent
-// survives its session's death — the agent is the tmux session's GT_AGENT, and
-// `gt polecat list` leaves the field empty for a seat with no live session — so
-// the pool's own seat, the one the town cap bounds, is the seat such a polecat
-// is counted against. On a pool that also runs a pro seat, a dead pro occupant
-// is counted on the pool's seat instead; that can only over-count it, refusing
-// a sling rather than admitting past the cap.
+// The seat is rendered on the agent it was slung on, read from the seat's
+// intent record (intent.MarkSlung) — a dead seat's tmux session is what carried
+// its GT_AGENT, and the record is the copy that outlives it. A seat whose
+// record names no agent keeps the pool's own seat, which is what every dead
+// seat was counted on before the record existed: a seat slung before then, or
+// one a sling left on the role default, reads as it did (gt-2q283).
+//
+// The agent read is best-effort where the seat-state read above is not: it
+// decides only which seat the polecat is counted against, never whether it
+// counts, so a record that cannot be read falls back rather than failing the
+// picture. The fallback is the pool's own seat, which can only over-count it —
+// a refused sling rather than an admitted one.
 func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, disposition polecatDispositionFunc, live []poolSession) ([]poolSession, error) {
 	if townRoot == "" || pool == nil || pool.Agent == "" || disposition == nil {
 		return nil, nil
@@ -165,9 +192,12 @@ func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, dispositi
 			if err != nil || !state.HookHeld || !state.Disposition.CountsTowardCapacity {
 				continue
 			}
+			// The seat's own record, read after the seat is known to hold
+			// one: only an occupant's agent is worth a read.
+			rec, _ := intent.Read(townRoot, polecatIntentSeat(rigName, name))
 			out = append(out, poolSession{
 				name:       "dead/" + rigName + "/" + name,
-				agent:      pool.Agent,
+				agent:      slungAgent(rec, pool.Agent),
 				rig:        rigName,
 				polecat:    name,
 				deadHooked: true,
@@ -232,16 +262,21 @@ func poolSeatWorkFor(townRoot string) poolSeatWorkFunc {
 // refused the tick a seat (2026-10-04 19:17:35). Live already holds the seat;
 // the record adds nothing while it does.
 //
-// pool is the seat the town's polecats run; a landing seat is rendered on its
-// agent, the seat the pool owns. A nil pool (or one with no agent) owns no
-// seat, so nothing is rendered and no bead is read.
+// pool is the seat the town's polecats run, and the record's own agent field is
+// the agent the seat was slung on — which is the seat a landing polecat is
+// counted against, whatever the pool runs (gt-2q283). A record that names no
+// agent, from a seat slung before that field existed, keeps the pool's own seat
+// as it read then. A nil pool (or one with no agent) owns no seat, so nothing
+// is rendered and no bead is read.
 func poolLandingSessions(townRoot string, pool *config.PolecatPool, work poolSeatWorkFunc, live []poolSession) ([]poolSession, error) {
 	if townRoot == "" || pool == nil || pool.Agent == "" || work == nil {
 		return nil, nil
 	}
 	liveSeats := liveSeatKeys(live)
 
-	type landing struct{ rig, name, bead string }
+	type landing struct {
+		rig, name, bead, agent string
+	}
 	var candidates []landing
 	dir := filepath.Join(constants.TownRuntimePath(townRoot), "agents")
 	err := filepath.WalkDir(dir, func(path string, e os.DirEntry, err error) error {
@@ -277,7 +312,12 @@ func poolLandingSessions(townRoot string, pool *config.PolecatPool, work poolSea
 		if liveSeats[rig+"/"+name] {
 			return nil // a live session already holds the seat
 		}
-		candidates = append(candidates, landing{rig: rig, name: name, bead: rec.WorkBead})
+		candidates = append(candidates, landing{
+			rig:   rig,
+			name:  name,
+			bead:  rec.WorkBead,
+			agent: slungAgent(rec, pool.Agent),
+		})
 		return nil
 	})
 	if err != nil {
@@ -311,7 +351,7 @@ func poolLandingSessions(townRoot string, pool *config.PolecatPool, work poolSea
 		// created is left zero on purpose: a landing seat is not a spawn, and
 		// the spec dispatcher's stagger (min_spawn_gap) must not arm from a
 		// submission.
-		out = append(out, poolSession{name: "landing/" + c.rig + "/" + c.name, agent: pool.Agent})
+		out = append(out, poolSession{name: "landing/" + c.rig + "/" + c.name, agent: c.agent})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
 	return out, nil

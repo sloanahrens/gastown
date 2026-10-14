@@ -1016,8 +1016,19 @@ func (s *SpawnedPolecatInfo) startSession() (string, error) {
 	// New work for the seat ends a submitted state left by its last gt done
 	// (gt-obbx2); a stale one would make the supervisor refuse every restart
 	// of this dispatch. Warn-only: the label on the bead is authoritative.
-	if err := intent.ClearSubmitted(townRoot, supervisor.IntentSeat(supervisor.SeatFor(s.RigName, constants.RolePolecat, s.PolecatName)), "gt sling", time.Now()); err != nil {
+	seat := supervisor.IntentSeat(supervisor.SeatFor(s.RigName, constants.RolePolecat, s.PolecatName))
+	if err := intent.ClearSubmitted(townRoot, seat, "gt sling", time.Now()); err != nil {
 		style.PrintWarning("could not clear the submitted intent for %s/%s: %v", s.RigName, s.PolecatName, err)
+	}
+
+	// The seat's agent, recorded here because this is the last moment it is
+	// known: the session below carries it as GT_AGENT and takes it away when it
+	// ends, and a seat that has no session — mid-landing, or waiting for its
+	// supervised restart — is still counted per agent by the dispatcher's
+	// roster (gt-2q283). An empty agent is the role default and is recorded as
+	// no agent at all, which that reader falls back to anyway.
+	if err := intent.MarkSlung(townRoot, seat, s.agent, "gt sling", time.Now()); err != nil {
+		style.PrintWarning("could not record the agent for %s/%s: %v", s.RigName, s.PolecatName, err)
 	}
 
 	// Start session

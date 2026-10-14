@@ -514,6 +514,126 @@ func TestSpecRosterCountsACompletingSeatOnce(t *testing.T) {
 	}
 }
 
+// TestSessionlessSeatsCountOnTheAgentTheyWereSlung is gt-2q283: a seat with no
+// tmux session — mid-landing after `gt done`, or dead-hooked and waiting for its
+// supervised restart — is counted on the agent it was slung on, read from its
+// intent record, rather than under the pool's own agent. The town is the shape
+// of 2026-10-14: a two-seat claude-sonnet pool (claude-sonnet is also the
+// polecat role default) and a two-seat deepseek-flash hooked seat. A finished
+// flash seat waiting to land read as Sonnet then, which made the tick line
+// claude-sonnet 4/2 (1 dead-hooked), deepseek-flash 0/2 with two Sonnet sessions
+// in the town.
+func TestSessionlessSeatsCountOnTheAgentTheyWereSlung(t *testing.T) {
+	t.Parallel()
+	// The pool's seat, and the role default an unrecorded seat falls back to.
+	pool := &config.PolecatPool{Agent: "claude-sonnet", MaxSeats: 2, MaxTotal: intPtr(4)}
+	ts := config.NewTownSettings()
+	ts.RoleAgents = map[string]string{"polecat": "claude-sonnet"}
+
+	cases := []struct {
+		name string
+		// deadHooked stages the seat as a crashed polecat whose bead is still
+		// hooked instead of one mid-landing; one is no session at all and the
+		// other is a session that ended.
+		deadHooked bool
+		// slungAgent is the agent the seat's record names. Empty is a seat
+		// slung before the record existed, or one the sling left on the role
+		// default.
+		slungAgent string
+		want       string
+	}{
+		{
+			name:       "a seat mid-landing slung on deepseek-flash counts on deepseek-flash",
+			slungAgent: "deepseek-flash",
+			want:       "deepseek-flash",
+		},
+		{
+			name:       "a dead-hooked seat counts on the agent it was slung on",
+			deadHooked: true,
+			slungAgent: "deepseek-flash",
+			want:       "deepseek-flash",
+		},
+		{
+			name: "a sessionless seat with no agent record falls back to the role default",
+			want: "claude-sonnet",
+		},
+		{
+			name:       "a dead-hooked seat with no agent record falls back to the role default",
+			deadHooked: true,
+			want:       "claude-sonnet",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			writeTestRigsConfig(t, town, "gastown")
+			writeTownPolecatDir(t, town, "gastown", "jade")
+
+			seat := intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "jade"}
+			rec := intent.Record{Agent: c.slungAgent}
+			var disposition polecatDispositionFunc
+			var work poolSeatWorkFunc
+			if c.deadHooked {
+				// A crashed polecat whose bead is still hooked: the seat-state
+				// read is what holds it, and the record adds only the agent.
+				disposition = func(_, _ string) (poolSeatState, error) {
+					return poolSeatState{
+						Disposition: polecat.WorkstateDisposition{
+							Verdict:              polecat.WorkstateVerdictNeedsRecovery,
+							NeedsRecovery:        true,
+							CountsTowardCapacity: true,
+						},
+						HookHeld: true,
+					}, nil
+				}
+			} else {
+				rec.Desired = intent.DesiredSubmitted
+				rec.WorkBead = "gt-jade"
+				work = submittedWork("gt-jade")
+			}
+			writeIntentRecord(t, seat, town, rec)
+
+			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, disposition, work, pool)
+			if err != nil {
+				t.Fatalf("poolSeatSessionsWith: %v", err)
+			}
+			r := specRosterFrom(sessions, ts)
+			if got := r.Live[c.want]; got != 1 {
+				t.Fatalf("roster counted the seat %d times on %s, want 1 (%+v)\nthe sessionless seat read as: %+v",
+					got, c.want, r.Live, sessions)
+			}
+			// Neither seat counted anywhere else: one seat is one seat, and the
+			// pool's own seat is not where a seat another agent runs belongs.
+			for agent, n := range r.Live {
+				if n > 1 || (agent != c.want && n != 0) {
+					t.Fatalf("the seat was counted on %s as well: %+v", agent, r.Live)
+				}
+			}
+			if c.deadHooked && r.DeadHooked[c.want] != 1 {
+				t.Fatalf("the dead-hooked breakdown lost the seat: %+v", r.DeadHooked)
+			}
+			// The pool's own seat cap is the count of polecats on its agent,
+			// and cap arithmetic is unchanged: a seat another agent runs is
+			// simply not one of its seats. The town's total still sees it.
+			wantOnPoolSeat := 0
+			if c.want == pool.Agent {
+				wantOnPoolSeat = 1
+			}
+			if n := poolSeatCount(pool, sessions); n != wantOnPoolSeat {
+				t.Fatalf("pool seat count = %d, want %d (%+v)", n, wantOnPoolSeat, sessions)
+			}
+			total := 0
+			for _, n := range r.Live {
+				total += n
+			}
+			if total != 1 {
+				t.Fatalf("the town's total = %d, want 1 (%+v)", total, r.Live)
+			}
+		})
+	}
+}
+
 // testServerMetadata names a database the way a tracked .beads/metadata.json
 // does in gastown's server mode.
 const testServerMetadata = `{"dolt_mode":"server","dolt_database":"beads_testrig"}`
