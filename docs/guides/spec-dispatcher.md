@@ -137,8 +137,12 @@ To read or change the pool seat and the `hooked_agent` seat, run `gt pool show`
 or `gt pool set <agent> <n>` instead of editing the files: `n` of 0 closes the
 seat by removing its keys, where a hand-written `max_seats: 0` would mean
 uncapped to sling and the default cap here. `gt pool set-total <n>` sets the
-total the same way, 0 removing it. The `hooked_agent` seat is read at daemon
-start, so a change to it needs a daemon kickstart.
+total the same way, 0 removing it. `gt pool set-second <agent> <n>` sets the
+`hooked_agent` seat's agent and cap in one write, which `gt pool set` cannot: it
+takes only an agent a seat already holds. The `hooked_agent` seat is read at
+daemon start, so a change to it needs a daemon kickstart. The dispatcher keeps one
+seat per agent: a second seat on the pool's agent never runs, and `gt pool show`
+prints it as `not run`.
 
 Occupancy is every live polecat session, the seats whose session is gone while
 their work is still assigned (a crashed polecat waiting for its supervised

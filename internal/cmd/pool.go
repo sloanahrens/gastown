@@ -6,7 +6,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -27,6 +29,10 @@ import (
 // dispatcher's default cap, so closing the pool seat means removing its keys,
 // while pro_max of 0 is the closed pro seat, since an absent pro_max is the
 // dispatcher's default of 1.
+//
+// gt pool set-second sets the second seat's agent and cap together: set takes
+// only the agent a seat already holds, so the second seat's agent was otherwise
+// a hand edit of the patrol config.
 //
 // It also reads and sets the cap beside the seats rather than on one: max_total
 // bounds live polecats across every seat (gt pool set-total). An absent
@@ -119,8 +125,46 @@ The file is written atomically and the previous copy is kept beside it as
 	},
 }
 
+var poolSetSecondCmd = &cobra.Command{
+	Use:   "set-second <agent> <n>",
+	Short: "Set the second seat's agent and cap together; 0 closes the seat",
+	Long: `Set the second seat's agent (spec_dispatch hooked_agent) and cap (max_hooked)
+in one write. gt pool set only moves the cap of an agent a seat already holds,
+so this is the verb for changing which agent the second seat runs: two
+claude-sonnet seats and two deepseek-flash seats is gt pool set claude-sonnet 2
+for the pool seat and gt pool set-second deepseek-flash 2.
+
+<agent> must be a known preset: a built-in one, one in the town's
+settings/agents.json, or a custom agent in settings/config.json (gt config agent
+list names them). n above 0 sets the cap; 0 closes the seat but still records
+the agent. An n above polecat_pool.max_total is refused, since the town could
+never fill the seat: raise the total with gt pool set-total first.
+
+The dispatcher runs one seat per agent, so an agent that already holds the pool
+seat or the pro seat leaves the second seat idle; gt pool show and this command
+say so.
+
+The second seat is read when the daemon starts, so a change to it needs a daemon
+kickstart. The patrol config is the "daemon" section of settings/config.json on
+a two-file town and mayor/daemon.json on a five-file one. It is written
+atomically and the previous copy is kept beside it as <file>.bak-<timestamp>.
+Keys gt pool does not own are left as they are.`,
+	Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		n, err := strconv.Atoi(args[1])
+		if err != nil || n < 0 {
+			return fmt.Errorf("cap %q: want a whole number, 0 or more (0 closes the seat)", args[1])
+		}
+		townRoot, err := workspace.FindFromCwdOrError()
+		if err != nil {
+			return err
+		}
+		return runPoolSetSecond(cmd.OutOrStdout(), townRoot, args[0], n)
+	},
+}
+
 func init() {
-	poolCmd.AddCommand(poolShowCmd, poolSetCmd, poolSetTotalCmd)
+	poolCmd.AddCommand(poolShowCmd, poolSetCmd, poolSetSecondCmd, poolSetTotalCmd)
 	rootCmd.AddCommand(poolCmd)
 }
 
@@ -221,6 +265,23 @@ func (v poolSeatView) seatPrecedence() []poolSeatKey {
 	return []poolSeatKey{poolSeat, proSeat, secondSeat}
 }
 
+// shadowedSecondSeat reports an open second seat the dispatcher does not run
+// because its agent already holds an earlier seat: specBudgetFromConfig keeps
+// one seat per agent, so the seats list omits it. Show names it anyway, so a
+// second seat set to the pool's agent is not mistaken for the pool seat, or for
+// a seat that is running. holder is the seat that keeps the agent.
+func (v poolSeatView) shadowedSecondSeat() (holder poolSeatKey, shadowed bool) {
+	if v.hookedCap <= 0 {
+		return 0, false
+	}
+	for _, s := range v.seats {
+		if s.agent == v.hookedAgent {
+			return s.seat, s.seat != secondSeat
+		}
+	}
+	return 0, false
+}
+
 // agentOn is the agent the seat runs: the empty string for a pool seat whose
 // agent is unset, which no named agent can match.
 func (v poolSeatView) agentOn(k poolSeatKey) string {
@@ -277,6 +338,10 @@ func runPoolShow(w io.Writer, townRoot string) error {
 func renderPoolShow(w io.Writer, townRoot string, v poolSeatView, live poolShowLive) error {
 	for _, s := range v.seats {
 		fmt.Fprintf(w, "%-13s%s  %s%s\n", seatName(s.seat), s.agent, v.capText(s), live.seatNote(s.agent, s.cap))
+	}
+	if holder, ok := v.shadowedSecondSeat(); ok {
+		fmt.Fprintf(w, "%-13s%s  cap %d, not run: the %s already holds %s (one seat per agent)\n",
+			seatName(secondSeat), v.hookedAgent, v.hookedCap, seatName(holder), v.hookedAgent)
 	}
 	fmt.Fprintf(w, "%-13s%s%s\n", "total", v.totalText(), live.totalNote(v.totalCap))
 	if len(v.seats) == 0 {
@@ -448,21 +513,20 @@ func runPoolSet(w io.Writer, townRoot, agent string, n int) error {
 			return ts.PolecatPool.Validate()
 		})
 	case secondSeat:
-		path := config.DaemonPatrolConfigPath(townRoot)
-		err = config.UpdateConfigJSON(path, 0o644, func(pc *config.DaemonPatrolConfig, exists bool) error {
-			if !exists {
-				pc.Type, pc.Version = "daemon-patrol-config", config.CurrentDaemonPatrolConfigVersion
-			}
-			if err := backupConfigFile(config.WritePath(path), stamp); err != nil {
-				return err
-			}
+		err = writePatrolSeats(townRoot, stamp, func(pc *config.DaemonPatrolConfig) {
 			setSecondSeat(pc, n)
-			return nil
 		})
 	}
 	if err != nil {
 		return fmt.Errorf("writing the %s: %w", seatName(seat), err)
 	}
+	printSeatChange(w, seat, agent, n)
+	return nil
+}
+
+// printSeatChange reports a seat write, with the kickstart note for the one seat
+// the daemon reads only at start.
+func printSeatChange(w io.Writer, seat poolSeatKey, agent string, n int) {
 	if n == 0 {
 		fmt.Fprintf(w, "closed the %s (%s)\n", seatName(seat), agent)
 	} else {
@@ -471,7 +535,71 @@ func runPoolSet(w io.Writer, townRoot, agent string, n int) error {
 	if seat == secondSeat {
 		fmt.Fprintln(w, "spec_dispatch is read at daemon start: kickstart the daemon for this to take effect")
 	}
+}
+
+// runPoolSetSecond writes the second seat's agent and cap in one patrol-config
+// write. The agent is checked against the presets the town can launch, and the
+// cap against max_total, before anything is written.
+func runPoolSetSecond(w io.Writer, townRoot, agent string, n int) error {
+	if agent == "" {
+		return fmt.Errorf("agent name is empty")
+	}
+	if err := checkKnownAgent(townRoot, agent); err != nil {
+		return err
+	}
+	v, err := loadPoolSeats(townRoot)
+	if err != nil {
+		return err
+	}
+	if v.totalCap > 0 && n > v.totalCap {
+		return fmt.Errorf("cap %d is above polecat_pool.max_total %d, so the town could never fill the seat: raise the total with gt pool set-total, or lower the cap", n, v.totalCap)
+	}
+	stamp := time.Now().UTC().Format("20060102T150405Z")
+	err = writePatrolSeats(townRoot, stamp, func(pc *config.DaemonPatrolConfig) {
+		setSecondSeatAgent(pc, agent, n)
+	})
+	if err != nil {
+		return fmt.Errorf("writing the %s: %w", seatName(secondSeat), err)
+	}
+	printSeatChange(w, secondSeat, agent, n)
+	// The dispatcher keeps one seat per agent: say so when the new agent already
+	// holds an earlier seat, since the second seat then never runs.
+	if after, err := loadPoolSeats(townRoot); err == nil {
+		if holder, shadowed := after.shadowedSecondSeat(); shadowed {
+			fmt.Fprintf(w, "warning: the %s already runs %s and the dispatcher keeps one seat per agent, so the second seat will not run\n",
+				seatName(holder), agent)
+		}
+	}
 	return nil
+}
+
+// checkKnownAgent refuses an agent the town cannot launch, naming the ones it
+// can: the built-in presets, the town's settings/agents.json and the custom
+// agents in settings/config.json (what gt config agent list prints).
+func checkKnownAgent(townRoot, agent string) error {
+	registry, regErr := config.LoadAgentRegistryFor(townRoot, "")
+	known := map[string]bool{}
+	for _, name := range registry.Names() {
+		known[name] = true
+	}
+	if ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot)); err == nil {
+		for name := range ts.Agents {
+			known[name] = true
+		}
+	}
+	if known[agent] {
+		return nil
+	}
+	names := make([]string, 0, len(known))
+	for name := range known {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	msg := fmt.Sprintf("unknown agent %q: the known presets are %s", agent, strings.Join(names, ", "))
+	if regErr != nil {
+		msg += fmt.Sprintf(" (settings/agents.json was not fully read: %v)", regErr)
+	}
+	return errors.New(msg)
 }
 
 func seatName(k poolSeatKey) string {
@@ -568,20 +696,49 @@ func setProSeat(ts *config.TownSettings, n int) {
 	ts.PolecatPool.ProMax = &n
 }
 
-// setSecondSeat sets spec_dispatch's max_hooked to n, removing it for 0. A
-// spec_dispatch section made here is enabled: the ticker is on only while the
-// section is absent or says so, and a section without "enabled" turns it off.
+// writePatrolSeats changes the daemon patrol config under the file's lock,
+// keeping a backup first. The second seat lives there, not in the town settings.
+func writePatrolSeats(townRoot, stamp string, change func(*config.DaemonPatrolConfig)) error {
+	path := config.DaemonPatrolConfigPath(townRoot)
+	return config.UpdateConfigJSON(path, 0o644, func(pc *config.DaemonPatrolConfig, exists bool) error {
+		if !exists {
+			pc.Type, pc.Version = "daemon-patrol-config", config.CurrentDaemonPatrolConfigVersion
+		}
+		if err := backupConfigFile(config.WritePath(path), stamp); err != nil {
+			return err
+		}
+		change(pc)
+		return nil
+	})
+}
+
+// setSecondSeat sets spec_dispatch's max_hooked to n, removing it for 0.
 func setSecondSeat(pc *config.DaemonPatrolConfig, n int) {
 	if n == 0 && (pc.Patrols == nil || pc.Patrols.SpecDispatch == nil) {
 		return
 	}
+	specDispatchOf(pc).MaxHooked = n
+}
+
+// setSecondSeatAgent sets the second seat's agent and cap together. Unlike
+// setSecondSeat it makes the section for a cap of 0 too, so the agent is
+// recorded for the day the seat is reopened.
+func setSecondSeatAgent(pc *config.DaemonPatrolConfig, agent string, n int) {
+	sd := specDispatchOf(pc)
+	sd.HookedAgent, sd.MaxHooked = agent, n
+}
+
+// specDispatchOf returns pc's spec_dispatch section, making it when absent. A
+// section made here is enabled: the ticker is on only while the section is
+// absent or says so, and a section without "enabled" turns it off.
+func specDispatchOf(pc *config.DaemonPatrolConfig) *config.SpecDispatchConfig {
 	if pc.Patrols == nil {
 		pc.Patrols = &config.PatrolsConfig{}
 	}
 	if pc.Patrols.SpecDispatch == nil {
 		pc.Patrols.SpecDispatch = &config.SpecDispatchConfig{Enabled: true}
 	}
-	pc.Patrols.SpecDispatch.MaxHooked = n
+	return pc.Patrols.SpecDispatch
 }
 
 // backupConfigFile copies path to path.bak-<stamp> before a write replaces it.
