@@ -80,11 +80,60 @@ func TestCrewListItems_AggregatesAcrossRigs(t *testing.T) {
 
 func TestPrintCrewList_Empty(t *testing.T) {
 	t.Parallel()
-	var out strings.Builder
-	if err := printCrewList(&out, nil, true); err != nil {
-		t.Fatal(err)
+	for _, tc := range []struct {
+		name  string
+		items []CrewListItem
+	}{
+		{"nil", nil},
+		{"empty", []CrewListItem{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var js strings.Builder
+			if err := printCrewList(&js, tc.items, true); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.TrimSpace(js.String()); got != "[]" {
+				t.Errorf("json output = %q, want []", js.String())
+			}
+
+			var text strings.Builder
+			if err := printCrewList(&text, tc.items, false); err != nil {
+				t.Fatal(err)
+			}
+			if text.String() != "No crew workspaces found.\n" {
+				t.Errorf("text output = %q", text.String())
+			}
+		})
 	}
-	if !strings.Contains(out.String(), "No crew workspaces found.") {
-		t.Errorf("output = %q", out.String())
+}
+
+func TestPrintCrewStatus_Empty(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		items []CrewStatusItem
+	}{
+		{"nil", nil},
+		{"empty", []CrewStatusItem{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var js strings.Builder
+			if err := printCrewStatus(&js, tc.items, true); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.TrimSpace(js.String()); got != "[]" {
+				t.Errorf("json output = %q, want []", js.String())
+			}
+
+			var text strings.Builder
+			if err := printCrewStatus(&text, tc.items, false); err != nil {
+				t.Fatal(err)
+			}
+			if text.String() != "No crew workspaces found.\n" {
+				t.Errorf("text output = %q", text.String())
+			}
+		})
 	}
 }

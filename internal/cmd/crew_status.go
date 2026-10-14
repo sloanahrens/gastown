@@ -1,8 +1,8 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -99,21 +99,23 @@ func runCrewStatus(cmd *cobra.Command, args []string) error {
 		items = append(items, buildCrewStatusItems(reg, r, workers, t)...)
 	}
 
+	return printCrewStatus(os.Stdout, items, crewJSON)
+}
+
+// printCrewStatus writes items to w as JSON or as the operator's status listing.
+func printCrewStatus(w io.Writer, items []CrewStatusItem, asJSON bool) error {
+	if asJSON {
+		return encodeCrewJSON(w, items)
+	}
+
 	if len(items) == 0 {
-		fmt.Println("No crew workspaces found.")
+		fmt.Fprintln(w, "No crew workspaces found.")
 		return nil
 	}
 
-	if crewJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(items)
-	}
-
-	// Text output
 	for i, item := range items {
 		if i > 0 {
-			fmt.Println()
+			fmt.Fprintln(w)
 		}
 
 		sessionStatus := style.Dim.Render("○ stopped")
@@ -121,26 +123,26 @@ func runCrewStatus(cmd *cobra.Command, args []string) error {
 			sessionStatus = style.Bold.Render("● running")
 		}
 
-		fmt.Printf("%s %s/%s\n", sessionStatus, item.Rig, item.Name)
-		fmt.Printf("  Path:   %s\n", item.Path)
-		fmt.Printf("  Branch: %s\n", item.Branch)
+		fmt.Fprintf(w, "%s %s/%s\n", sessionStatus, item.Rig, item.Name)
+		fmt.Fprintf(w, "  Path:   %s\n", item.Path)
+		fmt.Fprintf(w, "  Branch: %s\n", item.Branch)
 
 		if item.GitClean {
-			fmt.Printf("  Git:    %s\n", style.Dim.Render("clean"))
+			fmt.Fprintf(w, "  Git:    %s\n", style.Dim.Render("clean"))
 		} else {
-			fmt.Printf("  Git:    %s\n", style.Bold.Render("dirty"))
+			fmt.Fprintf(w, "  Git:    %s\n", style.Bold.Render("dirty"))
 			if len(item.GitModified) > 0 {
-				fmt.Printf("          Modified: %s\n", strings.Join(item.GitModified, ", "))
+				fmt.Fprintf(w, "          Modified: %s\n", strings.Join(item.GitModified, ", "))
 			}
 			if len(item.GitUntracked) > 0 {
-				fmt.Printf("          Untracked: %s\n", strings.Join(item.GitUntracked, ", "))
+				fmt.Fprintf(w, "          Untracked: %s\n", strings.Join(item.GitUntracked, ", "))
 			}
 		}
 
 		if item.MailUnread > 0 {
-			fmt.Printf("  Mail:   %d unread / %d total\n", item.MailUnread, item.MailTotal)
+			fmt.Fprintf(w, "  Mail:   %d unread / %d total\n", item.MailUnread, item.MailTotal)
 		} else {
-			fmt.Printf("  Mail:   %s\n", style.Dim.Render(fmt.Sprintf("%d messages", item.MailTotal)))
+			fmt.Fprintf(w, "  Mail:   %s\n", style.Dim.Render(fmt.Sprintf("%d messages", item.MailTotal)))
 		}
 	}
 
