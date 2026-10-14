@@ -66,8 +66,10 @@ const (
 	// It is the gc's own bound, not an invented one: one CALL
 	// dolt_gc('--full') is cut off at maintenanceGCTimeout, and the pause
 	// marker that covers it outlives the call by maintenancePauseSlack. A
-	// cycle still in flight past that is stuck — a prod --full gc takes
-	// seconds — and a stuck gc must not hold an install forever.
+	// call still running past that is stuck — a prod --full gc takes
+	// seconds — and a stuck gc must not hold an install forever. It bounds
+	// the call, not the cycle: the cycle's backup phase does not count
+	// (maintenanceGCUpgradeHold).
 	maintenanceGCRestartCap = maintenanceGCTimeout + maintenancePauseSlack
 
 	// maintenancePauseActor is the actor the gc's pause marker names.
@@ -712,24 +714,48 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time) {
 }
 
 // maintenanceGCUpgradeHold reports whether a maintenance gc cycle is in flight
-// and, when it is, how long a pending upgrade restart has held for it
-// (gt-oucgn). The gc call's context is the daemon's (maintenanceGCCycle), so a
-// restart inside a cycle cancels the call: an aborted gc records nothing and
+// and, when it is, how long the gc call in it has held a pending upgrade
+// restart (gt-oucgn). The gc call's context is the daemon's (maintenanceGCCycle),
+// so a restart inside a call cancels it: an aborted gc records nothing and
 // leaves the database due, which is why the restart waits for it at all.
 //
-// The wait is the hold's own clock — started at the first heartbeat that sees
-// the cycle, cleared when it ends — rather than the marker's, so the bound the
-// drain compares it against is the gc's own and a gc that starts a minute ago
-// gets its full bound however long the marker has waited.
+// The wait is one dolt_gc call's, which is what maintenanceGCRestartCap bounds:
+// it starts at the call's own start (maintenanceGCCallStartedAt), not at the
+// cycle's. A cycle that is in flight with no call yet — its backup phase, or
+// the stretch between two databases — reports a wait of zero and holds on its
+// own timeouts, so a 14-minute backup does not cut the healthy gc after it a
+// minute in. Time while a hard hold defers the restart is not counted either:
+// the gc is not what the restart waited on then, and the gc runs through it.
+// hardHeld says whether this heartbeat is deferred by a hard hold.
 //
 // Run-loop goroutine only, like the drain state it reads and writes.
-func (d *Daemon) maintenanceGCUpgradeHold(now time.Time) (time.Duration, bool) {
+func (d *Daemon) maintenanceGCUpgradeHold(now time.Time, hardHeld bool) (time.Duration, bool) {
 	if !d.maintenanceGCRunning.Load() {
-		d.upgradeGCHoldSince = time.Time{}
+		d.resetUpgradeGCHold()
 		return 0, false
 	}
-	if d.upgradeGCHoldSince.IsZero() {
-		d.upgradeGCHoldSince = now
+	started := d.maintenanceGCCallStartedAt.Load()
+	if started == 0 {
+		d.resetUpgradeGCHold()
+		return 0, true
 	}
-	return now.Sub(d.upgradeGCHoldSince), true
+	if started != d.upgradeGCCallStart {
+		// A call this drain has not seen: it has run since its own start, hold
+		// or no hold.
+		d.upgradeGCCallStart = started
+		d.upgradeGCHoldSince = time.Unix(0, started)
+	} else if hardHeld {
+		// The interval since the last heartbeat was under a hard hold: the
+		// clock starts that much later.
+		d.upgradeGCHoldSince = d.upgradeGCHoldSince.Add(now.Sub(d.upgradeGCBeat))
+	}
+	d.upgradeGCBeat = now
+	return max(now.Sub(d.upgradeGCHoldSince), 0), true
+}
+
+// resetUpgradeGCHold forgets the gc call the drain was timing.
+func (d *Daemon) resetUpgradeGCHold() {
+	d.upgradeGCHoldSince = time.Time{}
+	d.upgradeGCCallStart = 0
+	d.upgradeGCBeat = time.Time{}
 }

@@ -212,6 +212,7 @@ func TestUpgradeWaitsForAMaintenanceGCUpToItsOwnBound(t *testing.T) {
 		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
 
 		now := time.Now()
+		d.maintenanceGCCallStartedAt.Store(now.UnixNano())
 		if d.checkUpgradeRestart(now) {
 			t.Fatal("restarted over a maintenance gc call")
 		}
@@ -221,7 +222,7 @@ func TestUpgradeWaitsForAMaintenanceGCUpToItsOwnBound(t *testing.T) {
 		if !strings.Contains(logs.String(), "waiting for the maintenance gc cycle") {
 			t.Fatalf("the gc hold was not named in the wait line:\n%s", logs.String())
 		}
-		if strings.Contains(logs.String(), "the maintenance gc cycle has been in flight") {
+		if strings.Contains(logs.String(), "the maintenance gc call has run for") {
 			t.Fatalf("the release line claimed a restart that kept waiting:\n%s", logs.String())
 		}
 	})
@@ -255,13 +256,14 @@ func TestUpgradeWaitsForAMaintenanceGCUpToItsOwnBound(t *testing.T) {
 		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
 
 		now := time.Now()
+		d.maintenanceGCCallStartedAt.Store(now.UnixNano())
 		if d.checkUpgradeRestart(now) || d.checkUpgradeRestart(now.Add(maintenanceGCRestartCap-time.Minute)) {
 			t.Fatal("restarted under a running gc before the bound")
 		}
 		if !d.checkUpgradeRestart(now.Add(maintenanceGCRestartCap)) {
 			t.Fatal("a gc stuck past its own bound must not hold the restart further")
 		}
-		if !strings.Contains(logs.String(), "the maintenance gc cycle has been in flight for") ||
+		if !strings.Contains(logs.String(), "the maintenance gc call has run for") ||
 			!strings.Contains(logs.String(), "restarting anyway") {
 			t.Fatalf("no release line for the stuck gc:\n%s", logs.String())
 		}
@@ -284,6 +286,7 @@ func TestUpgradeWaitsForAMaintenanceGCUpToItsOwnBound(t *testing.T) {
 		}
 		gcStarted := now.Add(tierSweepRestartCap - time.Minute)
 		d.maintenanceGCRunning.Store(true)
+		d.maintenanceGCCallStartedAt.Store(gcStarted.UnixNano())
 		if d.checkUpgradeRestart(gcStarted) {
 			t.Fatal("restarted on the heartbeat the gc started")
 		}
@@ -292,6 +295,107 @@ func TestUpgradeWaitsForAMaintenanceGCUpToItsOwnBound(t *testing.T) {
 		}
 		if !d.checkUpgradeRestart(gcStarted.Add(maintenanceGCRestartCap)) {
 			t.Fatal("the gc's own bound elapsed and the restart still did not go")
+		}
+	})
+
+	// gt-763ux: the bound is one dolt_gc call's, not the cycle's. The cycle sets
+	// its flag before the backup phase, which can run ten minutes per database;
+	// counting it cut a healthy gc a minute in.
+	t.Run("a long backup phase before the gc call does not count against the bound", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		var logs strings.Builder
+		d.logger = log.New(&logs, "", 0)
+		captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		d.maintenanceGCRunning.Store(true)
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+		// The cycle is in its backup phase: flag set, no call yet.
+		now := time.Now()
+		if d.checkUpgradeRestart(now) {
+			t.Fatal("restarted under a cycle in its backup phase")
+		}
+		if d.checkUpgradeRestart(now.Add(maintenanceGCRestartCap - time.Minute)) {
+			t.Fatal("the backup phase was counted against the gc bound")
+		}
+
+		// The backup ends at minute 14 and the first call starts.
+		callStarted := now.Add(maintenanceGCRestartCap - time.Minute)
+		d.maintenanceGCCallStartedAt.Store(callStarted.UnixNano())
+		if d.checkUpgradeRestart(callStarted.Add(time.Minute)) {
+			t.Fatal("a healthy gc call was cut a minute in by the time the cycle had spent on backup")
+		}
+		if d.checkUpgradeRestart(callStarted.Add(maintenanceGCRestartCap - time.Minute)) {
+			t.Fatal("the gc call was cut before it had run for the bound")
+		}
+		if strings.Contains(logs.String(), "restarting anyway") {
+			t.Fatalf("a release line was logged for a restart that kept waiting:\n%s", logs.String())
+		}
+		if !d.checkUpgradeRestart(callStarted.Add(maintenanceGCRestartCap)) {
+			t.Fatal("a call that has run for the bound must not hold the restart further")
+		}
+	})
+
+	t.Run("each database's call gets its own bound", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		d.maintenanceGCRunning.Store(true)
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+		now := time.Now()
+		d.maintenanceGCCallStartedAt.Store(now.UnixNano())
+		if d.checkUpgradeRestart(now) || d.checkUpgradeRestart(now.Add(10*time.Minute)) {
+			t.Fatal("restarted under a running gc call")
+		}
+		// The first call ends; the second database's starts ten minutes later.
+		d.maintenanceGCCallStartedAt.Store(0)
+		second := now.Add(10 * time.Minute)
+		d.maintenanceGCCallStartedAt.Store(second.UnixNano())
+		if d.checkUpgradeRestart(second.Add(maintenanceGCRestartCap - time.Minute)) {
+			t.Fatal("the second call was cut at the first call's bound")
+		}
+	})
+
+	// gt-763ux: a hard hold defers the restart whatever the gc is doing, so the
+	// time it holds is not time the gc was waited on. The gc runs through it.
+	t.Run("a hard hold in force does not advance the gc wait clock", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		d.maintenanceGCRunning.Store(true)
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+		now := time.Now()
+		d.maintenanceGCCallStartedAt.Store(now.UnixNano())
+		if d.checkUpgradeRestart(now) {
+			t.Fatal("restarted under a running gc call")
+		}
+
+		// A landing pass holds the restart for twenty minutes, well past the cap.
+		d.landingPasses.Add(1)
+		d.landingStates.setBead("gastown", "gt-x", now)
+		for m := 1; m <= 20; m++ {
+			if d.checkUpgradeRestart(now.Add(time.Duration(m) * time.Minute)) {
+				t.Fatal("restarted under a landing pass")
+			}
+		}
+		if got, _ := d.maintenanceGCUpgradeHold(now.Add(20*time.Minute), true); got != 0 {
+			t.Fatalf("the gc wait clock ran %s while a hard hold deferred the restart", got)
+		}
+		d.landingStates.endPass("gastown")
+		d.landingPasses.Add(-1)
+
+		// The pass ends: the gc still gets its bound, counted from here.
+		end := now.Add(20 * time.Minute)
+		if d.checkUpgradeRestart(end.Add(maintenanceGCRestartCap - time.Minute)) {
+			t.Fatal("the time under the hard hold was counted against the gc bound")
+		}
+		if !d.checkUpgradeRestart(end.Add(maintenanceGCRestartCap)) {
+			t.Fatal("the gc has waited its bound outside the hard hold and the restart still did not go")
 		}
 	})
 }
