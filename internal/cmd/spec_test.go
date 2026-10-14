@@ -70,6 +70,11 @@ type fakeSpecTown struct {
 	// slungResume is the resume branch each sling carried, positionally with
 	// slung: "" when the dispatch started fresh.
 	slungResume []string
+	// slungRuns is the formula, vars and actor each sling carried, positionally
+	// with slung (gt-j5cr2).
+	slungRuns []specdispatch.FormulaRun
+	// missingFormulas names the formulas FormulaExists refuses.
+	missingFormulas map[string]bool
 	// originBranches is what BranchOnOrigin finds, keyed "rig/branch"; an
 	// absent key is a branch that is gone from origin.
 	originBranches map[string]bool
@@ -181,6 +186,12 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 			}
 			return f.originBranches[rig+"/"+branch], nil
 		},
+		FormulaExists: func(_, name string) error {
+			if f.missingFormulas[name] {
+				return errors.New("formula not found")
+			}
+			return nil
+		},
 		Roster: func() (specRoster, error) { return f.roster, f.rosterErr },
 		Annotate: func(id, key, text string) error {
 			for _, n := range f.notes[id] {
@@ -208,6 +219,7 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 			f.slung = append(f.slung, c.Spec.ID)
 			f.slingSeats = append(f.slingSeats, seat)
 			f.slungResume = append(f.slungResume, resumeBranch)
+			f.slungRuns = append(f.slungRuns, c.Run)
 			s := f.specs[c.Spec.ID]
 			s.Status, s.Assignee = "hooked", "gastown/polecats/p"
 			f.specs[c.Spec.ID] = s
@@ -767,6 +779,115 @@ func TestSpecSlingParams(t *testing.T) {
 	p = specSlingParams("/town", "/town/gastown/.beads", "mol-polecat-work", c, "polecat/mica/gt-a+mu1", specdispatch.SeatChoice{Agent: "claude-sonnet"})
 	if p.ResumeBranch != "polecat/mica/gt-a+mu1" {
 		t.Errorf("ResumeBranch = %q, want the recorded branch", p.ResumeBranch)
+	}
+}
+
+// formulaSpecBead is a clean spec that declares its formula (gt-j5cr2).
+func formulaSpecBead(id string, labels []string, vars string) specdispatch.Spec {
+	s := cleanSpec(id, 1, "2026-09-29T10:00:00Z")
+	s.Labels = labels
+	if vars != "" {
+		s.Description += "\n\n## Formula vars\n" + vars
+	}
+	return s
+}
+
+// TestSpecDispatchSlingsADeclaredFormula: a bead labelled formula:<name> is
+// slung with that formula and its vars, a scheduled one under the scheduler's
+// actor, and a bead without the label is slung exactly as before (gt-j5cr2).
+func TestSpecDispatchSlingsADeclaredFormula(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(
+		formulaSpecBead("gt-plain", []string{"formula:mol-deep-review"}, "scope=all\n# note\nrig=gastown"),
+		func() specdispatch.Spec {
+			s := formulaSpecBead("gt-sched", []string{"formula:mol-deep-review", "scheduled:deep-review"}, "scope=week")
+			s.CreatedAt = "2026-09-29T11:00:00Z"
+			return s
+		}(),
+		func() specdispatch.Spec {
+			s := cleanSpec("gt-none", 1, "2026-09-29T12:00:00Z")
+			s.Description += "\n\n## Formula vars\nignored=without-a-label"
+			return s
+		}(),
+	)
+	env := f.env()
+	env.PerTick = 3
+	r := runSpecDispatchCycle(env)
+	if got := strings.Join(f.slung, " "); got != "gt-plain gt-sched gt-none" {
+		t.Fatalf("slung %q; report = %+v", got, r)
+	}
+	want := []specdispatch.FormulaRun{
+		{Formula: "mol-deep-review", Vars: []string{"scope=all", "rig=gastown"}},
+		{Formula: "mol-deep-review", Vars: []string{"scope=week"}, Actor: "daemon/scheduled:deep-review"},
+		{},
+	}
+	if !reflect.DeepEqual(f.slungRuns, want) {
+		t.Errorf("runs = %+v, want %+v", f.slungRuns, want)
+	}
+	if !strings.Contains(r.Dispatched[0].Line, ", formula mol-deep-review") || strings.Contains(r.Dispatched[2].Line, "formula") {
+		t.Errorf("lines = %q", []string{r.Dispatched[0].Line, r.Dispatched[2].Line})
+	}
+
+	// The params the production Sling closure builds carry them to the engine.
+	p := specSlingParams("/town", "/town/gastown/.beads", "mol-polecat-work", specCandidate{Spec: f.specs["gt-sched"], Rig: "gastown", Run: want[1]}, "", specdispatch.SeatChoice{Agent: "claude-sonnet"})
+	if p.FormulaName != "mol-deep-review" || p.Actor != "daemon/scheduled:deep-review" || !reflect.DeepEqual(p.Vars, []string{"scope=week"}) ||
+		!strings.Contains(p.Args, "temporary INSTALL_DIR") || !p.FormulaFailFatal {
+		t.Errorf("params = %+v", p)
+	}
+	p = specSlingParams("/town", "/town/gastown/.beads", "mol-polecat-work", specCandidate{Spec: f.specs["gt-none"], Rig: "gastown"}, "", specdispatch.SeatChoice{Agent: "claude-sonnet"})
+	if p.FormulaName != "mol-polecat-work" || p.Actor != "" || len(p.Vars) != 0 {
+		t.Errorf("unlabelled params = %+v", p)
+	}
+}
+
+// TestSpecDispatchSkipsABadFormulaDeclaration: a declaration the tick cannot
+// read, or a formula the rig lacks, is a skip with its reason; the bead is not
+// slung, not labelled failed, and stays ready (gt-j5cr2).
+func TestSpecDispatchSkipsABadFormulaDeclaration(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(
+		formulaSpecBead("gt-badvars", []string{"formula:mol-deep-review"}, "scope=all\noops"),
+		formulaSpecBead("gt-nokey", []string{"formula:mol-deep-review"}, "=x"),
+		formulaSpecBead("gt-nofm", []string{"formula:mol-gone"}, "a=1"),
+	)
+	f.missingFormulas = map[string]bool{"mol-gone": true}
+	env := f.env()
+	env.PerTick = 3
+	r := runSpecDispatchCycle(env)
+	if len(f.slung) != 0 || len(r.Dispatched) != 0 || len(r.Failed) != 0 {
+		t.Fatalf("slung %v; report = %+v", f.slung, r)
+	}
+	lines := map[string]string{}
+	for _, e := range r.Skipped {
+		lines[e.Bead] = e.Line
+	}
+	for id, want := range map[string]string{
+		"gt-badvars": "gt-badvars: bad formula vars: oops",
+		"gt-nokey":   "gt-nokey: bad formula vars: =x",
+		"gt-nofm":    "gt-nofm: unknown formula: mol-gone",
+	} {
+		if lines[id] != want {
+			t.Errorf("%s skip = %q, want %q", id, lines[id], want)
+		}
+		if len(f.labels[id]) != 0 {
+			t.Errorf("%s labelled %v, want none: a skipped bead is never lost", id, f.labels[id])
+		}
+	}
+}
+
+// TestSpecDispatchDryRunShowsTheFormula: the dry run names the formula beside
+// the seat (gt-j5cr2).
+func TestSpecDispatchDryRunShowsTheFormula(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(formulaSpecBead("gt-a", []string{"formula:mol-deep-review"}, "k=v"))
+	env := f.env()
+	env.DryRun = true
+	r := runSpecDispatchCycle(env)
+	if len(r.Dispatched) != 1 || len(f.slung) != 0 {
+		t.Fatalf("slung %v; report = %+v", f.slung, r)
+	}
+	if got := r.Dispatched[0].Line; !strings.Contains(got, "would sling to gastown on deepseek-flash (seat deepseek-flash 1/2), formula mol-deep-review") {
+		t.Errorf("line = %q", got)
 	}
 }
 
