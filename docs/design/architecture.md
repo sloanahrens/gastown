@@ -92,10 +92,9 @@ worker ([ADR 0004](../adr/0004-daemon-lands-work.md)).
 ├── mayor/                      Mayor agent home
 │   ├── town.json               Town configuration
 │   ├── rigs.json               Rig registry
-│   ├── daemon.json             Daemon patrol config
 │   └── accounts.json           Claude Code account management
 ├── settings/                   Town-level settings
-│   ├── config.json             Town settings (agents, themes)
+│   ├── config.json             Town settings (agents, themes, daemon patrols)
 │   └── escalation.json         Escalation routes and contacts
 ├── directives/                 Town-level role directives (operator policy)
 │   └── <role>.md               Markdown injected at prime time
@@ -297,12 +296,12 @@ The Go binary is the primary distribution vehicle. It embeds:
 - **Role templates** — Agent priming context, served by `gt prime`
 - **Formula definitions** — Workflow molecules, served by `bd mol`
 - **Doctor checks** — Health diagnostics, including migration checks
-- **Default configs** — `daemon.json` lifecycle defaults, operational thresholds
+- **Default configs** — daemon patrol lifecycle defaults (`daemon.patrols` in `settings/config.json`), operational thresholds
 
 This means upgrading the binary automatically propagates most fixes. Files that
 are NOT embedded (and require `gt doctor` or `gt upgrade` to update):
 - Town-root `CLAUDE.md` (created at `gt install` time)
-- `daemon.json` patrol entries (created at install, extended by `EnsureLifecycleDefaults`)
+- `daemon.patrols` entries in `settings/config.json` (created at install, extended by `EnsureLifecycleDefaults`)
 - Claude Code hooks (`.claude/settings.json` managed sections)
 - Dolt schema (migrations run on first `bd` command after upgrade)
 

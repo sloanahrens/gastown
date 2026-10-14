@@ -58,7 +58,7 @@ rig's `.beads/config.yaml` (`dolt.port`, `dolt.host`) through
 The exported variables are outputs for bd; setting them in a shell does not
 move gt. gt no longer exports `GT_DOLT_HOST` or `GT_DOLT_PORT` (gt-y3pgh.9):
 nothing read them. The daemon ignores `patrols.dolt_server.port` and `.host`
-in `daemon.json` for the same reason: the town's endpoint is the one source.
+under `daemon.patrols` in `settings/config.json` for the same reason: the town's endpoint is the one source.
 
 **Remote Dolt servers**: If Dolt runs on a different machine (e.g., over
 Tailscale), set `"host"` in `town.json`'s `dolt` block. gt exports it as
@@ -280,7 +280,7 @@ monitors and escalates. GC runs in scheduled_maintenance (maintenance_gc.go).
 FLATTEN has no command: it is an offline operator procedure with one trigger,
 a database past 2 GB (gt-8z769.3).
 All lifecycle tickers are populated by `EnsureLifecycleDefaults()`
-(lifecycle_defaults.go), which auto-writes missing patrol blocks to daemon.json
+(lifecycle_defaults.go), which auto-writes missing patrol blocks to the `daemon` section of settings/config.json
 on `gt init` or `gt up` and never overwrites existing ones. There is no Dolt
 remote push patrol any more (see "No Dolt Remote Sync" below).
 
@@ -422,11 +422,11 @@ Settings (`daemon.patrols.scheduled_maintenance` in `settings/config.json`):
 "scheduled_maintenance": { "enabled": true, "window": "03:00" }
 ```
 
-or `gt config set maintenance.window 03:00`. A town that has not run
-`gt config migrate` still keeps that patrol block in `mayor/daemon.json`. The
+or `gt config set maintenance.window 03:00`. Before
+`gt config migrate` (historical layout) that patrol block lived in `mayor/daemon.json`. The
 schedule and trigger are
 policy, not settings. The retired keys (`interval`, `threshold`, `mode`,
-`gc_min_bytes`, `gc_growth_ratio`) still parse, so a daemon.json carrying
+`gc_min_bytes`, `gc_growth_ratio`) still parse, so a `daemon` section carrying
 them decodes strictly, and the daemon logs them as ignored.
 
 `patrols.compactor_dog.threshold` is an escalation line only; the compactor
@@ -610,8 +610,8 @@ Prevention is layered:
 
 All these daemon patrols are enabled by default via `EnsureLifecycleDefaults()` in
 lifecycle_defaults.go. The daemon auto-populates missing patrol entries
-in daemon.json on startup (`gt init` / `gt up`). To disable a specific
-patrol, set `"enabled": false` in its daemon.json section — the auto-populate
+in the `daemon` section of settings/config.json on startup (`gt init` / `gt up`). To disable a specific
+patrol, set `"enabled": false` in its `daemon.patrols` entry — the auto-populate
 logic preserves explicitly configured entries.
 
 ### Communication Hygiene (Reducing Commit Volume)
@@ -758,6 +758,6 @@ Dolt server stays up throughout.
 │   ├── dolt.pid                 Server PID (daemon-managed)
 │   ├── dolt.log                 Server log
 │   └── dolt-state.json          Server state
-└── mayor/
-    └── daemon.json              Daemon config (dolt_server section)
+└── settings/
+    └── config.json              Operator config (daemon.patrols.dolt_server)
 ```
