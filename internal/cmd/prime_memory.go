@@ -116,7 +116,7 @@ func recallLogPath(townRoot string) string {
 // Best-effort by contract — the caller is prime, which must not fail, wait or
 // grow a dependency on an audit log, so a write error is one stderr line and
 // nothing else.
-func (p primeTools) appendRecall(ctx RoleContext, beadID string, rows []beadMemory, sectionBytes int) {
+func (p primeTools) appendRecall(ctx RoleContext, beadID string, rows []memrecall.Ranked, sectionBytes int) {
 	if ctx.TownRoot == "" {
 		return
 	}
@@ -134,10 +134,10 @@ func (p primeTools) appendRecall(ctx RoleContext, beadID string, rows []beadMemo
 
 // recalledKeys returns the keys the section carries, in the order it carries
 // them.
-func recalledKeys(rows []beadMemory) []string {
+func recalledKeys(rows []memrecall.Ranked) []string {
 	keys := make([]string, 0, len(rows))
-	for _, row := range selectedInOrder(rows) {
-		keys = append(keys, row.mem.Key)
+	for _, row := range selectedRows(rows) {
+		keys = append(keys, row.Memory.Key)
 	}
 	return keys
 }
@@ -169,9 +169,8 @@ func appendRecallRecord(path string, rec recallRecord) error {
 }
 
 // memoryCorpus returns the rig kv's memories in key order, so the same corpus
-// always selects the same section. It reads both memory namespaces
-// (isMemoryKey), the same corpus the crew index renders, and skips a bare
-// namespace key, which names no memory.
+// always selects the same section, and always the same statistics memrecall's
+// keyword weights are measured against.
 //
 // The rig kv is the polecat's whole readable corpus: a town-scope memory is
 // stored in the town database, which this command cannot read, so no scope
@@ -179,7 +178,7 @@ func appendRecallRecord(path string, rec recallRecord) error {
 func memoryCorpus(kvs map[string]string) []memrecall.Memory {
 	keys := make([]string, 0, len(kvs))
 	for k := range kvs {
-		if _, short := parseMemoryKey(k); isMemoryKey(k) && short != "" {
+		if liveMemoryKey(k) {
 			keys = append(keys, k)
 		}
 	}
@@ -192,79 +191,66 @@ func memoryCorpus(kvs map[string]string) []memrecall.Memory {
 	return mems
 }
 
-// beadMemoryRows scores every candidate memory in corpus against bead's query
-// and returns them ranked by final score, then key.
+// liveMemoryKey reports whether a kv key names a memory the section may select.
+// It reads the key alone, through the parsing the crew memory index uses
+// (isMemoryKey, parseMemoryKey):
 //
-// The section itself renders memrecall.Select's order, which each selected
-// row carries as order; this ranking is the diagnostic one, shared by the
-// footer and --explain-memory.
+//   - a key under the operator's archive namespace (archive.…) is a retired
+//     memory, and the rig kv holds hundreds of them: counted as candidates
+//     they would be most of the pool, and every weight would be measured
+//     against memories the operator has already taken out of service;
+//   - a key in neither memory namespace is not a memory at all, and the rig kv
+//     also holds schema and dispatch keys;
+//   - a key that names no slug (gt., memory., gt.feedback.) names no memory.
+func liveMemoryKey(key string) bool {
+	if strings.HasPrefix(key, archiveMemoryPrefix) {
+		return false
+	}
+	if !isMemoryKey(key) {
+		return false
+	}
+	_, short := parseMemoryKey(key)
+	return short != ""
+}
+
+// archiveMemoryPrefix is the namespace the operator archives a retired memory
+// into.
+const archiveMemoryPrefix = "archive."
+
+// beadMemoryRows scores every memory in corpus against bead's query and returns
+// the pool ranked by score, then newer verification, then key.
 //
-// A candidate is a memory Select would carry were the budget unlimited. That
-// is the scored memories and the pinned ones Select takes up to its per-scope
-// cap, so a pinned memory the cap turns away is no candidate: Select never
-// weighed it, and calling it a match would have the footer and
-// --explain-memory report a memory that was never in the running.
-func beadMemoryRows(corpus []memrecall.Memory, bead *beads.Issue, now time.Time) []beadMemory {
+// Every pool memory comes back, not only the candidates: --explain-memory
+// reports each one with the reason it was dropped. The section's own readers
+// are the two filters below, and a row carries the section's order as Order.
+func beadMemoryRows(corpus []memrecall.Memory, bead *beads.Issue, now time.Time) []memrecall.Ranked {
 	q, paths := beadMemoryQuery(bead)
-	selected := memrecall.Select(q, paths, corpus, now, memrecall.Budget)
-	order := make(map[string]int, len(selected))
-	texts := make(map[string]string, len(selected))
-	for i, s := range selected {
-		order[s.Key] = i
-		texts[s.Key] = s.Text
-	}
-	candidates := make(map[string]struct{}, len(corpus))
-	for _, s := range memrecall.Select(q, paths, corpus, now, unlimitedBudget) {
-		candidates[s.Key] = struct{}{}
-	}
-
-	rows := make([]beadMemory, 0, len(candidates))
-	for _, m := range corpus {
-		if _, ok := candidates[m.Key]; !ok {
-			continue
-		}
-		raw, score := memrecall.Score(q, paths, m, now)
-		text, kept := texts[m.Key]
-		rows = append(rows, beadMemory{mem: m, raw: raw, score: score, text: text, selected: kept, order: order[m.Key]})
-	}
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].score != rows[j].score {
-			return rows[i].score > rows[j].score
-		}
-		return rows[i].mem.Key < rows[j].mem.Key
-	})
-	return rows
+	return memrecall.Rank(q, paths, corpus, now, memrecall.Budget)
 }
 
-// beadMemory is one candidate memory with the scores both readers report.
-type beadMemory struct {
-	mem   memrecall.Memory
-	raw   float64
-	score float64
-	// text is the memory's rendered contribution, empty when Select had no
-	// room for it.
-	text string
-	// selected reports whether the section carries the memory.
-	selected bool
-	// order is the memory's position in Select's output, the order the section
-	// renders in. It means nothing unless selected.
-	order int
-}
-
-// unlimitedBudget stands in for "no budget" when asking Select which memories
-// are candidates; a non-positive budget would mean memrecall.Budget instead.
-const unlimitedBudget = 1 << 30
-
-// selectedInOrder returns the rows the section carries, in the order it
-// renders them: memrecall.Select's, pinned memories first.
-func selectedInOrder(rows []beadMemory) []beadMemory {
-	var out []beadMemory
+// selectedRows returns the rows the section carries, in the order it renders
+// them: memrecall's, pinned memories first.
+func selectedRows(rows []memrecall.Ranked) []memrecall.Ranked {
+	var out []memrecall.Ranked
 	for _, row := range rows {
-		if row.selected {
+		if row.Carried {
 			out = append(out, row)
 		}
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].order < out[j].order })
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Order < out[j].Order })
+	return out
+}
+
+// droppedRows returns the rows that matched the bead and that the section still
+// does not carry: the score cut, the cap of 3 and the byte budget are the only
+// reasons left, so these are the memories the footer counts.
+func droppedRows(rows []memrecall.Ranked) []memrecall.Ranked {
+	var out []memrecall.Ranked
+	for _, row := range rows {
+		if row.Matched() && !row.Carried {
+			out = append(out, row)
+		}
+	}
 	return out
 }
 
@@ -398,60 +384,50 @@ func hasSourceRootPrefix(tok string) bool {
 	return false
 }
 
-// renderBeadMemorySection renders the section: memrecall's selected texts in
-// Select's order, then a line naming the candidates that scored but did not
-// fit, so the agent knows what matched its bead beyond what it carries.
-// beadID is the bead the section was built for; the footer points at it.
+// renderBeadMemorySection renders the section: memrecall's carried texts in its
+// order, then a line naming the memories that matched but did not fit, so the
+// agent knows what matched its bead beyond what it carries. beadID is the bead
+// the section was built for; the footer points at it.
 //
-// It returns "" when nothing is a candidate, which is what omits the section,
-// and a header over the footer alone when candidates exist but none fit.
-func renderBeadMemorySection(rows []beadMemory, beadID string) string {
-	if len(rows) == 0 {
+// It returns "" when no memory matched, which is what omits the section, and a
+// header over the footer alone when memories matched but none fit.
+func renderBeadMemorySection(rows []memrecall.Ranked, beadID string) string {
+	if len(droppedRows(rows)) == 0 && len(selectedRows(rows)) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n%s\n\n", beadMemoryHeading)
 
 	selectedBytes := 0
-	for _, row := range selectedInOrder(rows) {
-		b.WriteString(row.text)
+	for _, row := range selectedRows(rows) {
+		b.WriteString(row.Text)
 		b.WriteString("\n")
-		selectedBytes += len(row.text)
+		selectedBytes += len(row.Text)
 	}
-	var dropped []beadMemory
-	for _, row := range rows {
-		if !row.selected {
-			dropped = append(dropped, row)
-		}
-	}
-	if footer := beadMemoryFooter(dropped, beadID, memrecall.Budget-selectedBytes); footer != "" {
+	if footer := beadMemoryFooter(droppedRows(rows), beadID, memrecall.Budget-selectedBytes); footer != "" {
 		b.WriteString("\n")
 		b.WriteString(footer)
 	}
 	return b.String()
 }
 
-// beadMemoryFooter counts the candidates that scored but did not fit and points
+// beadMemoryFooter counts the memories that matched but did not fit and points
 // at the command that prints them: `gt prime --explain-memory <beadID>`.
 //
-// The key list is a courtesy after that command. It names the
-// highest-scoring beadMemoryFooterLookups of the dropped candidates, and only
-// when the line fits in room, the bytes memrecall's budget has left after the
-// selected texts. Select fills the budget with text first, so on a crowded bead
-// the keys are what gives way and the count and the command stay.
+// The key list is a courtesy after that command. It names the highest-scoring
+// beadMemoryFooterLookups of the dropped memories, and only when the line fits
+// in room, the bytes memrecall's budget has left after the carried texts. Rank
+// fills the budget with text first, so on a crowded bead the keys are what
+// gives way and the count and the command stay: a bead can match more memories
+// than this section, which shares the hook budget with the hooked work, has
+// room to name.
 //
 // Prime's output is agent prose, which may name only the bd commands in
 // cmdtree.AgentBdAllowed (TestAgentProseBdAllowlist, gt-7iwy0.6), and the bd
 // key-value reads are not among them; the lookup is a gt command so the footer
-// can name it.
-// --explain-memory prints each candidate's key and scores, not its text.
-//
-// The count is the whole truth. The rig corpus is 241 memories and the query is
-// a bead's whole Goal and Constraints text, so most of them score above
-// memrecall's floor: naming them all would cost ~15 KB of the 9000-byte hook
-// budget that this section is meant to leave to the hooked work (measured with
-// `gt prime --explain-memory gt-jhf24`, 2026-10-14).
-func beadMemoryFooter(dropped []beadMemory, beadID string, room int) string {
+// can name it. --explain-memory prints each memory's key and scores, not its
+// text.
+func beadMemoryFooter(dropped []memrecall.Ranked, beadID string, room int) string {
 	if len(dropped) == 0 {
 		return ""
 	}
@@ -463,7 +439,7 @@ func beadMemoryFooter(dropped []beadMemory, beadID string, room int) string {
 	}
 	keys := make([]string, 0, len(named))
 	for _, d := range named {
-		keys = append(keys, d.mem.Key)
+		keys = append(keys, d.Memory.Key)
 	}
 	list := strings.Join(keys, ", ")
 	if rest := len(dropped) - len(named); rest > 0 {
@@ -499,29 +475,39 @@ func runPrimeExplainMemory(out io.Writer, ctx RoleContext, beadID string) error 
 	return err
 }
 
-// explainMemoryReport is the text --explain-memory prints.
+// explainMemoryReport is the text --explain-memory prints: one line per rig
+// memory with the idf-weighted raw score, the score the section ranks by, the
+// distinctive hits that qualified it and, when the section does not carry it,
+// why.
 func explainMemoryReport(bead *beads.Issue, corpus []memrecall.Memory, now time.Time) string {
 	rows := beadMemoryRows(corpus, bead, now)
-
-	kept := 0
+	matched, kept := 0, 0
 	for _, row := range rows {
-		if row.selected {
+		if row.Matched() {
+			matched++
+		}
+		if row.Carried {
 			kept++
 		}
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "explain-memory %s: %d rig memories, %d candidates, %d selected (budget %d bytes, floor %.1f)\n",
-		bead.ID, len(corpus), len(rows), kept, memrecall.Budget, memrecall.CandidateFloor)
+	fmt.Fprintf(&b, "explain-memory %s: %d rig memories, %d matched, %d selected (budget %d bytes, floor %.1f, distinctive df/N <= %.1f or a key or anchor hit in a pool under %d, keep >= %.0f%% of the top score, cap %d)\n",
+		bead.ID, len(corpus), matched, kept, memrecall.Budget, memrecall.CandidateFloor,
+		memrecall.DistinctiveShare, memrecall.SmallPool, memrecall.KeepShare*100, memrecall.MaxScored)
 	for _, row := range rows {
-		state := "not-selected"
-		if row.selected {
-			state = "selected    "
+		state := "selected"
+		if !row.Carried {
+			state = "dropped: " + string(row.Dropped)
 		}
-		fmt.Fprintf(&b, "  %s  raw %.1f  final %.1f  %s\n", state, row.raw, row.score, row.mem.Key)
+		fmt.Fprintf(&b, "  %-30s  raw %5.1f  final %5.1f  %s", state, row.Raw, row.Score, row.Memory.Key)
+		if len(row.Distinctive) > 0 {
+			fmt.Fprintf(&b, "  [%s]", strings.Join(row.Distinctive, ", "))
+		}
+		b.WriteString("\n")
 	}
-	if len(rows) == 0 {
-		fmt.Fprintf(&b, "  no candidate: no rig memory is always-and-durable, and none scored raw %.1f or more\n",
+	if matched == 0 {
+		fmt.Fprintf(&b, "  no match: no rig memory matched a distinctive keyword and scored raw %.1f or more\n",
 			memrecall.CandidateFloor)
 	}
 	return b.String()
