@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
+	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
@@ -78,6 +80,58 @@ func scheduledSpecBody(e ScheduledSlingEntry) (description, acceptance string) {
 	return b.String(), acceptance
 }
 
+// scheduledSpecUntakenFloor is the least time a spec-dispatched run bead may
+// wait for the dispatcher before the patrol reads it as never taken. The wait
+// is normally the pool's queue, so the entry's interval is the bound (the run
+// is still unclaimed when the next one is due) and this floor keeps a
+// short-interval entry from escalating on an ordinary busy pool.
+const scheduledSpecUntakenFloor = 6 * time.Hour
+
+// specDispatchCeiling is the highest priority number the spec dispatcher takes:
+// polecat_pool.max_priority from the town settings, or its default when the
+// settings are unreadable (a missing file already yields the defaults).
+func (d *Daemon) specDispatchCeiling() int {
+	ts, err := agentconfig.LoadOrCreateTownSettings(agentconfig.TownSettingsPath(d.config.TownRoot))
+	if err != nil {
+		d.logger.Printf("scheduled_slings: reading polecat_pool.max_priority: %v (using the default P%d)", err, agentconfig.DefaultSeatRefillMaxPriority)
+		return agentconfig.DefaultSeatRefillMaxPriority
+	}
+	return max(ts.PolecatPool.GetMaxPriority(), 0)
+}
+
+// scheduledSpecPriority is the run bead's priority: the entry's, held at the
+// dispatcher's ceiling. A bead numbered above the ceiling is backlog to the
+// dispatcher (specdispatch.Eligible), so the default P3 would leave the run
+// open and never slung.
+func scheduledSpecPriority(e ScheduledSlingEntry, ceiling int) int {
+	return min(scheduledSlingPriority(e), ceiling)
+}
+
+// untakenSpecBound is how long a spec run bead may stay open before it counts
+// as never taken.
+func untakenSpecBound(e ScheduledSlingEntry) time.Duration {
+	return max(scheduledSlingInterval(e), scheduledSpecUntakenFloor)
+}
+
+// reportUntakenSpecRuns turns a queued spec run that outlived its bound into a
+// failed tick. A spec entry never retires or re-dispatches around an open run
+// (the dispatcher owns it), so without this a run the dispatcher will not take
+// reads as skip-open on every tick, resets the failure counter, and the entry
+// stays silently dead. The returned error counts toward the escalation.
+func reportUntakenSpecRuns(runs []scheduledBead, e ScheduledSlingEntry, now time.Time) error {
+	var untaken []scheduledBead
+	for _, b := range runs {
+		if isOpenUnhooked(b) && !b.CreatedAt.IsZero() && now.Sub(b.CreatedAt) > untakenSpecBound(e) {
+			untaken = append(untaken, b)
+		}
+	}
+	if len(untaken) == 0 {
+		return nil
+	}
+	return fmt.Errorf("spec-dispatched run bead(s) %s open and not taken by the spec dispatcher for over %s; check the run's priority against polecat_pool.max_priority, and its labels and shape",
+		staleRunIDs(untaken), untakenSpecBound(e))
+}
+
 // createSpecDispatchedRun creates the entry's run bead and returns: no sling,
 // so the sling failure counter has nothing to count. The bead carries the
 // identity label that the skip-open and skip-recent decisions read and the
@@ -89,7 +143,7 @@ func (d *Daemon) createSpecDispatchedRun(ctx context.Context, r scheduledSlingRu
 		Labels:      []string{scheduledSlingLabel(e), specdispatch.FormulaLabelPrefix + e.Formula},
 		Description: desc,
 		Acceptance:  acceptance,
-		Priority:    scheduledSlingPriority(e),
+		Priority:    scheduledSpecPriority(e, d.specDispatchCeiling()),
 	})
 	if err != nil {
 		return err
