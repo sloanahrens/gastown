@@ -78,12 +78,11 @@ fingerprint, file:line, claim (one line), failure scenario, severity P1|P2|P3.
 Hand each verifier up to three findings, with the job of refuting each: read the
 cited code, trace the scenario, and answer CONFIRMED or REFUTED with the lines
 that decide it. Drop REFUTED. Drop a finding whose fix is already on
-origin/{{base_branch}}. Capacity is three findings times the verifiers you may
-run. When reviewers and step 3 return more findings than that, hand them out in
-priority order, all P1, then all P2, then all P3 (a finding from step 3 ahead of
-a new one of the same severity). A finding left past capacity is never dropped:
-it is unverified, and step 7 records it. Count `total` (findings verified),
-`refuted` and `unverified` (findings left past capacity) for the digest.
+origin/{{base_branch}}. When findings exceed that capacity, hand them out in
+priority order, all P1, then all P2, then all P3 (step 3's findings first within
+a severity). A finding left past capacity is never dropped: it is unverified,
+and step 7 records it. Count `total` (findings verified), `refuted` and
+`unverified` for the digest.
 
 **6. File the CONFIRMED findings.** Each P1 and P2 finding, P1 first, becomes one
 shaped bead labelled `review-deep` with the finding's priority, whatever path it
@@ -140,10 +139,9 @@ one wrote for a finding it filed no bead for: such a line stays as written, and
 the fingerprint is `seen`, so the finding is not re-filed.
 
 A finding the verifiers had no capacity for takes a `queued:` line with its own
-severity, whatever that is. A P3 gets one too: it has no `p3:` line until a
-verifier confirms it, and a `p3:` line is a confirmed finding that `batches`
-files as it stands. The next run's step 3 sends the queued finding through step
-5 ahead of new ones, so it is verified within a day. Never leave a finding
+severity, whatever that is. A P3 gets one too: a `p3:` line is a confirmed
+finding that `batches` files as it stands. Step 3 of the next run verifies the
+queued finding. Never leave a finding
 unrecorded because it is a P3 or looks cheap to find again: the 21-day file
 skip means a later run does not re-read its file. The digest has:
 landings reviewed (bead, commit), `unparsed=` from the plan, slice files read,
