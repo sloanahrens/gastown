@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -46,7 +47,7 @@ func (c *EventsLogCheck) Run(ctx *CheckContext) *CheckResult {
 			Status:  StatusWarning,
 			Message: fmt.Sprintf(".events.jsonl is %s", size),
 			Details: []string{"The daemon's events_prune patrol keeps it under 16 MB by default; it looks off or failing."},
-			FixHint: `Check daemon.log for "events_prune" and patrols.events_prune in mayor/daemon.json`,
+			FixHint: `Check daemon.log for "events_prune" and patrols.events_prune in ` + agentconfig.SourcePathRel(ctx.TownRoot, agentconfig.DaemonPatrolConfigPath(ctx.TownRoot)),
 		}
 	}
 	return &CheckResult{Name: c.Name(), Status: StatusOK, Message: fmt.Sprintf(".events.jsonl is %s", size)}

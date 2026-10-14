@@ -3,7 +3,6 @@ package doctor
 import (
 	"errors"
 	"net"
-	"path/filepath"
 	"strconv"
 	"time"
 
@@ -13,7 +12,8 @@ import (
 
 // DoltServerPatrolCheck detects the silent Dolt-outage gap: the Dolt SQL
 // server is not reachable AND the daemon's dolt_server patrol (which owns
-// Dolt lifecycle detection and restart) is not enabled in mayor/daemon.json.
+// Dolt lifecycle detection and restart) is not enabled in the daemon patrol
+// config.
 //
 // This is detection only — it never starts, stops, or restarts Dolt. When the
 // condition is present it surfaces a config gap that would otherwise be silent:
@@ -82,7 +82,7 @@ func (c *DoltServerPatrolCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	// The gap: Dolt is down and nothing is watching it.
-	relPath, _ := filepath.Rel(ctx.TownRoot, cfgPath)
+	relPath := config.SourcePathRel(ctx.TownRoot, cfgPath)
 	return &CheckResult{
 		Name:   c.Name(),
 		Status: StatusWarning,

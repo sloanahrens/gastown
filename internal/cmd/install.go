@@ -306,9 +306,9 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	// Create daemon.json patrol config.
 	// This avoids gt doctor warning on fresh install.
 	if err := config.EnsureDaemonPatrolConfig(absPath); err != nil {
-		fmt.Printf("   %s Could not create daemon.json: %v\n", style.Dim.Render("⚠"), err)
+		fmt.Printf("   %s Could not create the daemon patrol config: %v\n", style.Dim.Render("⚠"), err)
 	} else {
-		fmt.Printf("   ✓ Created mayor/daemon.json\n")
+		fmt.Printf("   ✓ Created %s\n", config.SourcePathRel(absPath, config.DaemonPatrolConfigPath(absPath)))
 	}
 
 	// Initialize git BEFORE beads so that bd can compute repository fingerprint.

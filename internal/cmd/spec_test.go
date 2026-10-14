@@ -2034,3 +2034,18 @@ func TestSpecDispatchDefersABeadHeldMidSling(t *testing.T) {
 		t.Fatalf("the refused bead wears %s: it would leave the queue", specdispatch.DispatchFailedLabel)
 	}
 }
+
+// TestSpecLintHelpNamesTheDaemonSection: the template default lives in the
+// "daemon" section of settings/config.json once gt config migrate has run.
+func TestSpecLintHelpNamesTheDaemonSection(t *testing.T) {
+	t.Parallel()
+	usage := specLintCmd.Flags().Lookup("template").Usage
+	for name, text := range map[string]string{"Long": specLintCmd.Long, "--template": usage} {
+		if strings.Contains(text, "daemon.json") {
+			t.Errorf("gt spec lint %s help names the retired daemon.json: %q", name, text)
+		}
+		if !strings.Contains(text, "settings/config.json") {
+			t.Errorf("gt spec lint %s help must name settings/config.json: %q", name, text)
+		}
+	}
+}

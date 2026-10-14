@@ -45,8 +45,10 @@ func parseReaperAge(flag, value string) (time.Duration, error) {
 	return d, nil
 }
 
-// reaperAutoCloseDisarmed reports whether daemon.json disarms the wisp_reaper
-// auto-close step, and where that config lives for the message. Checked here as
+// reaperAutoCloseDisarmed reports whether the daemon patrol config disarms the
+// wisp_reaper auto-close step, and where that config lives for the message
+// (the file it was read from, so a two-file town is told settings/config.json
+// and not a retired mayor/daemon.json). Checked here as
 // well as in the daemon so a hand-run sweep cannot auto-close either: the
 // disarm has to hold on every path that reaches the write.
 func reaperAutoCloseDisarmed() (bool, string) {
@@ -55,7 +57,7 @@ func reaperAutoCloseDisarmed() (bool, string) {
 		return false, ""
 	}
 	return daemon.WispReaperAutoCloseDisarmed(daemon.LoadPatrolConfig(townRoot)),
-		daemon.PatrolConfigFile(townRoot)
+		daemon.PatrolConfigSource(townRoot)
 }
 
 // reaperWriter returns the bd writer a live reaper run against dbName writes
@@ -616,7 +618,8 @@ Four guards apply, the first three answering the 2026-09-16 mis-close that swept
     notice is the refusal rather than a stop. --force lifts the floor.
   - more than --max-closes candidates in one database refuses the whole run
     (nothing is closed) unless --force.
-  - auto-close disarmed in daemon.json (patrols.wisp_reaper.auto_close=false)
+  - auto-close disarmed in the daemon patrol config (daemon.patrols.wisp_reaper.auto_close=false
+    in settings/config.json)
     is refused unless --force.
   - a live run with no --preview hash is refused (nothing is closed) unless
     --force: the sweep only closes a set a dry run already showed. The dry run
@@ -970,7 +973,7 @@ func init() {
 		cmd.Flags().IntVar(&reaperMaxCloses, "max-closes", reaper.DefaultAutoCloseMaxPerRun,
 			"Refuse the run if a database has more than this many auto-close candidates")
 		cmd.Flags().BoolVar(&reaperForce, "force", false,
-			"Override the stale-age floor, the per-run cap, the preview hash requirement, and the daemon.json auto-close disarm")
+			"Override the stale-age floor, the per-run cap, the preview hash requirement, and the daemon patrol config's auto-close disarm")
 	}
 
 	// --preview is auto-close's own: `gt reaper run` previews in-process before

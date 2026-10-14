@@ -92,7 +92,7 @@ Routing checks (fixable):
   - database-prefix          Detect database vs routes.jsonl prefix mismatches (fixable)
 
 Lifecycle checks (fixable):
-  - lifecycle-defaults          Ensure daemon.json has all lifecycle patrol entries (fixable)
+  - lifecycle-defaults          Ensure the daemon patrol config has all lifecycle patrol entries (fixable)
 
 Formula overlay checks (fixable):
   - overlay-health           Check formula overlay step IDs are valid (fixable)
