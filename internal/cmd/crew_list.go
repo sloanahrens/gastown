@@ -116,15 +116,13 @@ func crewListItems(reg *session.PrefixRegistry, rigs []*rig.Rig, probe crewWorke
 
 // printCrewList writes items to w as JSON or as the operator's listing.
 func printCrewList(w io.Writer, items []CrewListItem, asJSON bool) error {
+	if asJSON {
+		return encodeCrewJSON(w, items)
+	}
+
 	if len(items) == 0 {
 		fmt.Fprintln(w, "No crew workspaces found.")
 		return nil
-	}
-
-	if asJSON {
-		enc := json.NewEncoder(w)
-		enc.SetIndent("", "  ")
-		return enc.Encode(items)
 	}
 
 	// Text output
@@ -146,4 +144,15 @@ func printCrewList(w io.Writer, items []CrewListItem, asJSON bool) error {
 	}
 
 	return nil
+}
+
+// encodeCrewJSON writes items as an indented JSON array. A nil slice encodes
+// as [] rather than null so jq pipelines see an array when no crew exist.
+func encodeCrewJSON[T any](w io.Writer, items []T) error {
+	if items == nil {
+		items = []T{}
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(items)
 }
