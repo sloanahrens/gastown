@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -129,5 +130,80 @@ func TestQuiesceResumeRestartsTheRunUnlessTheParentEnded(t *testing.T) {
 	case <-starts:
 		t.Fatal("resume started the run after its parent ended")
 	default:
+	}
+}
+
+// fakeChildren stands in for the processes a poll starts: start registers one
+// and returns the channel its death closes; kill ends every live one, as
+// KillChildren does, and says how many.
+type fakeChildren struct {
+	mu   sync.Mutex
+	live []chan struct{}
+}
+
+func (f *fakeChildren) start() <-chan struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c := make(chan struct{})
+	f.live = append(f.live, c)
+	return c
+}
+
+func (f *fakeChildren) kill() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := len(f.live)
+	for _, c := range f.live {
+		close(c)
+	}
+	f.live = nil
+	return n
+}
+
+// A poll that starts a second child after the first kill pass is not stranded:
+// the repeat kills that child too, the poll returns, and the log counts both.
+// The repeat is driven by a channel the test feeds, so no clock is read.
+func TestQuiesceKillsAgainForAChildStartedAfterTheFirstPass(t *testing.T) {
+	t.Parallel()
+	var kids fakeChildren
+	firstUp := make(chan struct{})
+	secondUp := make(chan struct{})
+	s := StartStoppable(context.Background(), func(context.Context) {
+		first := kids.start()
+		close(firstUp)
+		<-first // the first child, killed by the first pass
+		second := kids.start()
+		close(secondUp)
+		<-second // the second, killed only by a repeat
+	})
+	<-firstUp // the first child exists before Quiesce kills
+
+	ticks := make(chan time.Time, 1)
+	stopped := false
+	s.newTicker = func(d time.Duration) (<-chan time.Time, func()) {
+		if d != killInterval {
+			t.Errorf("ticker interval = %s, want %s", d, killInterval)
+		}
+		return ticks, func() { stopped = true }
+	}
+	go func() {
+		<-secondUp
+		ticks <- time.Time{}
+	}()
+
+	var l logs
+	s.Quiesce(QuiesceBounds{Drain: time.Millisecond, Kill: never}, kids.kill, l.logf)
+
+	if want := "killed 2 child process(es)"; !strings.Contains(l.text(), want) {
+		t.Fatalf("log = %q, want it to say %q", l.text(), want)
+	}
+	if strings.Contains(l.text(), "restarting anyway") {
+		t.Fatalf("log = %q: said it gave up on a run the repeat released", l.text())
+	}
+	if !stopped {
+		t.Fatal("Quiesce left its ticker running")
+	}
+	if n := kids.kill(); n != 0 {
+		t.Fatalf("%d child(ren) still alive after Quiesce returned", n)
 	}
 }
