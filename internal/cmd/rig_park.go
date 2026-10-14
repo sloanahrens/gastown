@@ -28,17 +28,17 @@ var rigParkCmd = &cobra.Command{
 	Long: `Park rigs to take them out of service.
 
 Parking a rig writes a "parked" record {since, by, reason} into the rig's
-entry in mayor/rigs.json. Dispatch (gt sling, gt dispatch) refuses
+entry in mayor/town.json (registry). Dispatch (gt sling, gt dispatch) refuses
 the rig and the daemon auto-starts nothing for it until 'gt rig unpark'.
 A rig that is already parked keeps its original record.
 
 gt rig park and gt rig unpark are the only writers of that record. Every
-reader fails closed: if mayor/rigs.json (or any town config file) does not
-load, every rig reads as parked.
+reader fails closed: if the rig registry in mayor/town.json (or any town
+config file) does not load, every rig reads as parked.
 
 --migrate moves park records left by older gt versions (a "status" value in
-.beads-wisp/config/<rig>.json) into mayor/rigs.json and removes them. Until
-it runs, such a rig reads as parked.
+.beads-wisp/config/<rig>.json) into mayor/town.json (registry) and removes
+them. Until it runs, such a rig reads as parked.
 
 Examples:
   gt rig park gastown --reason "rubric rework"
@@ -52,9 +52,9 @@ var rigUnparkCmd = &cobra.Command{
 	Short: "Unpark one or more rigs (allow dispatch and daemon auto-start)",
 	Long: `Unpark rigs to resume normal operation.
 
-Unparking a rig removes its "parked" record from mayor/rigs.json (and any
-legacy record in .beads-wisp/config/<rig>.json). It does NOT start agents;
-use 'gt rig start' for that.
+Unparking a rig removes its "parked" record from mayor/town.json (registry),
+and any legacy record in .beads-wisp/config/<rig>.json. It does NOT start
+agents; use 'gt rig start' for that.
 
 Examples:
   gt rig unpark gastown
@@ -64,8 +64,8 @@ Examples:
 }
 
 func init() {
-	rigParkCmd.Flags().StringVar(&rigParkReason, "reason", "", "Why the rig is parked (recorded in mayor/rigs.json)")
-	rigParkCmd.Flags().BoolVar(&rigParkMigrate, "migrate", false, "Move legacy .beads-wisp park records into mayor/rigs.json")
+	rigParkCmd.Flags().StringVar(&rigParkReason, "reason", "", "Why the rig is parked, recorded in mayor/town.json (registry)")
+	rigParkCmd.Flags().BoolVar(&rigParkMigrate, "migrate", false, "Move legacy .beads-wisp park records into mayor/town.json (registry)")
 	rigCmd.AddCommand(rigParkCmd)
 	rigCmd.AddCommand(rigUnparkCmd)
 }
@@ -160,11 +160,15 @@ func unparkRigs(w io.Writer, townRoot string, rigNames []string, journal rigJour
 	return nil
 }
 
-// migrateParkedRigs moves legacy wisp park records into mayor/rigs.json.
+// migrateParkedRigs moves legacy wisp park records into the registry in
+// mayor/town.json. The line it prints names the file the records landed in,
+// which layout.go resolves: the registry section of mayor/town.json on a
+// two-file town, mayor/rigs.json on a five-file one.
 func migrateParkedRigs(w io.Writer, townRoot, by string) error {
 	migrated, err := townconfig.MigrateLegacyParked(townRoot, by)
 	if len(migrated) > 0 {
-		fmt.Fprintf(w, "%s Migrated park records into mayor/rigs.json: %s\n", style.Success.Render("✓"), strings.Join(migrated, ", "))
+		registry := config.SourcePathRel(townRoot, filepath.Join(townRoot, "mayor", "rigs.json"))
+		fmt.Fprintf(w, "%s Migrated park records into %s: %s\n", style.Success.Render("✓"), registry, strings.Join(migrated, ", "))
 	} else if err == nil {
 		fmt.Fprintf(w, "%s No legacy park records to migrate\n", style.Dim.Render("○"))
 	}
@@ -172,8 +176,8 @@ func migrateParkedRigs(w io.Writer, townRoot, by string) error {
 }
 
 // IsRigParked reports whether a rig is parked, failing closed: a rig whose
-// park state cannot be read is parked. The record lives in mayor/rigs.json
-// and is read through the config kernel (townconfig.IsParked).
+// park state cannot be read is parked. The record lives in the registry in
+// mayor/town.json and is read through the config kernel (townconfig.IsParked).
 func IsRigParked(townRoot, rigName string) bool {
 	parked, _ := townconfig.IsParked(townRoot, rigName)
 	return parked

@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 func TestIsGitRemoteURL(t *testing.T) {
@@ -113,5 +116,56 @@ func TestCommitTownConfigChangesNamesOnlyItsPaths(t *testing.T) {
 	}
 	if !strings.Contains(rec.msg, "gastown") {
 		t.Errorf("commit message %q does not name the rig", rec.msg)
+	}
+}
+
+// TestRigHelpNamesTheRegistrysRealHome: the rig commands an operator reads
+// help for must name where the registry lives — the "registry" section of
+// mayor/town.json on a two-file town — and not the retired mayor/rigs.json,
+// which a two-file town does not have (gt-51bdr).
+func TestRigHelpNamesTheRegistrysRealHome(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		cmd  *cobra.Command
+	}{
+		{"add", rigAddCmd},
+		{"remove", rigRemoveCmd},
+		{"park", rigParkCmd},
+		{"unpark", rigUnparkCmd},
+	} {
+		help := strings.Join([]string{tc.cmd.Short, tc.cmd.Long, tc.cmd.Flags().FlagUsages()}, "\n")
+		if strings.Contains(help, "mayor/rigs.json") {
+			t.Errorf("gt rig %s help still names the retired mayor/rigs.json:\n%s", tc.name, help)
+		}
+		if !strings.Contains(help, "mayor/town.json") || !strings.Contains(help, "registry") {
+			t.Errorf("gt rig %s help does not name the registry in mayor/town.json:\n%s", tc.name, help)
+		}
+	}
+}
+
+// TestMigrateParkedRigsNamesTheRegistryItWroteTo: the --migrate line names the
+// file the records landed in, so a two-file town is told the registry section
+// of mayor/town.json and never mayor/rigs.json, which is not there (gt-51bdr).
+func TestMigrateParkedRigsNamesTheRegistryItWroteTo(t *testing.T) {
+	t.Parallel()
+	entry := `{"git_url":"x","added_at":"2026-09-07T00:00:00Z","beads":{"repo":"","prefix":"tr"}}`
+	town := writeTownFiles(t, map[string]string{
+		"mayor/town.json":                 `{"type":"town","version":2,"name":"t","registry":{"version":1,"rigs":{"testrig":` + entry + `}}}`,
+		".beads-wisp/config/testrig.json": `{"rig":"testrig","values":{"status":"parked"}}`,
+	})
+	var out bytes.Buffer
+	if err := migrateParkedRigs(&out, town, "sloan"); err != nil {
+		t.Fatalf("migrateParkedRigs = %v\n%s", err, out.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "testrig") {
+		t.Fatalf("migrate output does not name the migrated rig: %q", got)
+	}
+	if strings.Contains(got, "mayor/rigs.json") {
+		t.Errorf("migrate output names the retired mayor/rigs.json: %q", got)
+	}
+	if want := `mayor/town.json (section "registry")`; !strings.Contains(got, want) {
+		t.Errorf("migrate output = %q, want it to name %q", got, want)
 	}
 }

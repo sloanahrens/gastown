@@ -66,7 +66,7 @@ The command also:
 Use --adopt to register an existing directory instead of creating new:
   - Reads existing config.json if present
   - Auto-detects git URL from origin remote (git-url argument not required)
-  - Adds entry to mayor/rigs.json
+  - Adds an entry to mayor/town.json (registry)
 
 For a repo you don't own, use fork mode (fetch upstream, push to fork).
 See docs/guides/fork-rig-setup.md for setup, verification, and recovery.
@@ -103,7 +103,7 @@ var rigRemoveCmd = &cobra.Command{
 	Short: "Remove a rig from the registry (does not delete files)",
 	Long: `Remove a rig from the Gas Town registry.
 
-This only removes the rig entry from mayor/rigs.json and cleans up
+This only removes the rig entry from mayor/town.json (registry) and cleans up
 the beads route. The rig's files on disk are NOT deleted.
 
 If the rig has running tmux sessions (polecats, crew),

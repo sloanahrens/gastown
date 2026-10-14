@@ -102,15 +102,15 @@ func slingBlocked(townRoot, rigName string, estopOn func(townRoot, rigName strin
 // entry point for all dispatch paths (sling, polecat spawn, the daemon,
 // gt spec) to check rig availability.
 //
-// Parked is the rig's record in mayor/rigs.json, read through the config
-// kernel, and fails closed: a rig whose park state cannot be read is parked
-// (gt-y3pgh.4). Docked is the rig identity bead's status:docked label.
+// Parked is the rig's record in mayor/town.json (registry), read through the
+// config kernel, and fails closed: a rig whose park state cannot be read is
+// parked (gt-y3pgh.4). Docked is the rig identity bead's status:docked label.
 func IsRigParkedOrDocked(townRoot, rigName string) (bool, string) {
 	if IsRigParked(townRoot, rigName) {
 		return true, "parked"
 	}
 
-	// Look up the beads prefix from rigs.json (the rig registry), with fallback
+	// Look up the beads prefix from the rig registry, with fallback
 	// to the rig's own config.json for isolated/test scenarios.
 	rigPath := filepath.Join(townRoot, rigName)
 	prefix := rigBeadsPrefix(townRoot, rigPath, rigName)

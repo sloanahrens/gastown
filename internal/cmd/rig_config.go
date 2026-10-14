@@ -248,8 +248,8 @@ func rigConfigUnset(e rigCmdEnv, args []string) error {
 }
 
 // refuseStatusKey keeps rig config from writing a rig's operational status.
-// Parked lives in mayor/rigs.json and gt rig park / unpark are its only
-// writers; docked is gt rig dock / undock (gt-y3pgh.4).
+// Parked lives in mayor/town.json (registry) and gt rig park / unpark are
+// its only writers; docked is gt rig dock / undock (gt-y3pgh.4).
 func refuseStatusKey(key string) error {
 	if key == "status" {
 		return fmt.Errorf("status is not a rig config key: use gt rig park / gt rig unpark, or gt rig dock / gt rig undock")
