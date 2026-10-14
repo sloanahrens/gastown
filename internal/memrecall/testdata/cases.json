@@ -1,0 +1,31 @@
+{
+  "keywords": [
+    {
+      "key": "memory.gt-done-runs-presubmit-once",
+      "body": "gt done runs the rig presubmit gate once.\nMore text.",
+      "expect": ["done", "runs", "presubmit", "once", "rig", "gate"]
+    },
+    {
+      "key": "gt.feedback.absence-is-not-evidence",
+      "body": "Before treating an absence as evidence, check.",
+      "expect": ["absence", "evidence", "before", "treating", "check"]
+    }
+  ],
+  "overlap": [
+    {
+      "a": ["dolt", "gc", "window"],
+      "b": ["dolt", "gc", "window", "quiet", "town"],
+      "expect": 1.0
+    },
+    {
+      "a": ["dolt", "gc"],
+      "b": ["gc", "town"],
+      "expect": 0.5
+    },
+    {
+      "a": [],
+      "b": ["x"],
+      "expect": 0.0
+    }
+  ]
+}
