@@ -4,7 +4,8 @@
 # risk-ranked rotation slice (score, 21-day exclusion, count and byte caps,
 # reviewed lines, cursor) on a production-sized tree, fingerprint lookup, and
 # the queued ledger line's severity, and the P3 batches (threshold, age, filed,
-# cap, seen, malformed).
+# cap, seen, malformed), plan --mode slice|landings|both, and the gate
+# subcommand (count and age thresholds, both bd --json shapes, untrusted input).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -415,6 +416,150 @@ assert_eq "--min 0 is usage" "2" "$(batches_rc "$TMP/b1.txt" --min 0)"
 assert_eq "--max-per-batch 0 is usage" "2" "$(batches_rc "$TMP/b1.txt" --max-per-batch 0)"
 assert_eq "non-numeric --max-age-days is usage" "2" "$(batches_rc "$TMP/b1.txt" --max-age-days soon)"
 assert_eq "unknown flag is usage" "2" "$(batches_rc "$TMP/b1.txt" --bogus 1)"
+
+# earlier tests dirtied $REPO, so the mode and gate tests run on a clean one
+REPO="$TMP/mrepo"
+mkrepo "$REPO" internal/a/one.go internal/a/two.go internal/a/two_test.go internal/b/three.go internal/b/four.go cmd/main.go
+
+echo "plan --mode slice: only the slice, never the landings, no landing cursor moves"
+printf 'cursor: 2026-10-10T03:00:00.123456Z internal/a/two.go\n' > "$TMP/n20.txt"
+rc="$(plan_rc --mode slice --prev-notes "$TMP/n20.txt" --repo "$REPO" --slice 2 --now "$NOW" --out "$TMP/m1")"
+assert_eq "exit 0 without a landings file" "0" "$rc"
+assert_eq "mode echoed" "slice" "$(field mode)"
+assert_eq "a slice is never a quiet day" "false" "$(field quiet)"
+assert_eq "no landings" "0" "$(field landings)"
+assert_eq "landings file empty" "0" "$(wc -c < "$TMP/m1/landings.jsonl" | tr -d ' ')"
+assert_eq "reviewed_until_old is the cursor" "2026-10-10T03:00:00.123456Z" "$(field reviewed_until_old)"
+assert_eq "reviewed_until_new is unchanged" "2026-10-10T03:00:00.123456Z" "$(field reviewed_until_new)"
+assert_eq "the slice is the risk-ranked top" "internal/a/one.go internal/b/four.go" "$(joined "$TMP/m1/slice.txt")"
+assert_eq "slice_files" "2" "$(field slice_files)"
+assert_eq "reviewed lines written" "2" "$(awk 'END { print NR }' "$TMP/m1/reviewed-lines.txt")"
+assert_eq "rotation cursor echoed" "internal/b/four.go" "$(field rotation_cursor_new)"
+rc="$(plan_rc --mode slice --prev-notes "$TMP/none.txt" --repo "$REPO" --now "$NOW" --out "$TMP/m2")"
+assert_eq "no cursor: both ends are the window start" "2026-10-09T10:00:00Z/2026-10-09T10:00:00Z" "$(field reviewed_until_old)/$(field reviewed_until_new)"
+rc="$(plan_rc --mode slice --landings "$TMP/drift.jsonl" --prev-notes "$TMP/none.txt" --repo "$REPO" --now "$NOW" --out "$TMP/m3")"
+assert_eq "a drifted landings file is not read by the slice job" "0" "$rc"
+assert_eq "slice mode needs the repo" "2" "$(plan_rc --mode slice --prev-notes "$TMP/none.txt" --now "$NOW" --out "$TMP/m4")"
+assert_eq "bad cursor still stops the slice job" "3" "$(plan_rc --mode slice --prev-notes "$TMP/badcur.txt" --repo "$REPO" --now "$NOW" --out "$TMP/m5")"
+
+echo "plan --mode landings: only the risky landings, an empty slice"
+rc="$(plan_rc --mode landings --landings "$LANDINGS" --prev-notes "$TMP/none.txt" --now "$NOW" --out "$TMP/m6")"
+assert_eq "exit 0 without a repo" "0" "$rc"
+assert_eq "mode echoed" "landings" "$(field mode)"
+assert_eq "not quiet" "false" "$(field quiet)"
+assert_eq "two risky landings" "2" "$(field landings)"
+assert_eq "landings oldest first" "gt-1 gt-3" "$(jq -r .bead "$TMP/m6/landings.jsonl" | tr '\n' ' ' | sed 's/ $//')"
+assert_eq "cursor moves to the newest landing" "2026-10-10T03:00:00.123456Z" "$(field reviewed_until_new)"
+assert_eq "empty slice" "0" "$(field slice_files)"
+assert_eq "no slice bytes" "0" "$(field slice_bytes)"
+assert_eq "slice file empty" "0" "$(wc -c < "$TMP/m6/slice.txt" | tr -d ' ')"
+assert_eq "no rotation cursor" "" "$(grep '^rotation_cursor' "$TMP/plan.out" || true)"
+rc="$(plan_rc --mode landings --landings "$LANDINGS" --prev-notes "$TMP/n2.txt" --now "$NOW" --out "$TMP/m7")"
+assert_eq "nothing after the cursor is quiet" "true" "$(field quiet)"
+assert_eq "cursor stays" "2026-10-10T03:00:00.123456Z" "$(field reviewed_until_new)"
+assert_eq "drifted landings fail closed" "3" "$(plan_rc --mode landings --landings "$TMP/drift.jsonl" --prev-notes "$TMP/none.txt" --now "$NOW" --out "$TMP/m8")"
+assert_eq "landings mode needs the landings file" "2" "$(plan_rc --mode landings --prev-notes "$TMP/none.txt" --now "$NOW" --out "$TMP/m9")"
+
+echo "plan --mode both is the default"
+rc="$(plan_rc --mode both --landings "$LANDINGS" --prev-notes "$TMP/n3.txt" --repo "$REPO" --slice 2 --now "$NOW" --out "$TMP/m10")"
+assert_eq "same slice as the default" "internal/a/one.go internal/b/four.go" "$(joined "$TMP/m10/slice.txt")"
+assert_eq "one landing" "1" "$(field landings)"
+rc="$(plan_rc --mode both --landings "$LANDINGS" --prev-notes "$TMP/n2.txt" --repo "$REPO" --now "$NOW" --out "$TMP/m11")"
+assert_eq "both mode still skips the slice on a quiet day" "true/0" "$(field quiet)/$(field slice_files)"
+assert_eq "unknown mode is usage" "2" "$(plan_rc --mode hourly --landings "$LANDINGS" --prev-notes "$TMP/none.txt" --repo "$REPO" --now "$NOW" --out "$TMP/m12")"
+
+echo "gate: a stub bd feeds the run history"
+mkdir -p "$TMP/bin" "$TMP/rig"
+cat > "$TMP/bin/bd" <<'STUB'
+#!/usr/bin/env bash
+echo "$(pwd -P) $*" > "$BD_STUB_ARGS"
+cat "$BD_STUB_OUT"
+exit "${BD_STUB_RC:-0}"
+STUB
+chmod +x "$TMP/bin/bd"
+export BD_STUB_ARGS="$TMP/bd.args" BD_STUB_OUT="$TMP/bd.out"
+gate_rc() {
+  local rc=0
+  PATH="$TMP/bin:$PATH" "$DR" gate "$@" > "$TMP/gate.out" 2> "$TMP/gate.err" || rc=$?
+  echo "$rc"
+}
+gate_out() { cat "$TMP/gate.out"; }
+LBL="scheduled:deep-review"
+echo '[]' > "$BD_STUB_OUT"
+
+echo "gate: no history, two landings in the 24h window, the oldest is old enough"
+assert_eq "exit 0 (run)" "0" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --now "$NOW")"
+assert_eq "output" "gate: run n=2 oldest=539m" "$(gate_out)"
+assert_eq "bd is asked for the label's whole history" "list -l scheduled:deep-review --all --limit 60 --json" "$(cut -d' ' -f2- "$BD_STUB_ARGS")"
+assert_eq "too few and too young: skip" "1" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --now "$NOW" --min-age-min 540)"
+assert_eq "skip output" "gate: skip n=2 oldest=539m" "$(gate_out)"
+assert_eq "enough of them is enough" "0" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --now "$NOW" --min-age-min 540 --min-count 2)"
+assert_eq "--ref and --repo are accepted; bd runs in --repo" "0" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --now "$NOW" --ref origin/main --repo "$TMP/rig")"
+assert_eq "bd's working directory" "$(cd "$TMP/rig" && pwd -P)" "$(cut -d' ' -f1 "$BD_STUB_ARGS")"
+
+echo "gate: the newest cursor in any run's notes decides what is new"
+printf '[{"id":"gt-r1","notes":"cursor: 2026-10-01T00:00:00Z internal/a/one.go"},{"id":"gt-r2","notes":"reviewed: 2026-10-10 internal/a/one.go\\ncursor: 2026-10-10T03:00:00.123456Z internal/a/two.go"},{"id":"gt-r3"},{"id":"gt-r4","notes":null}]\n' > "$BD_STUB_OUT"
+assert_eq "nothing after the cursor: skip" "1" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --now "$NOW")"
+assert_eq "output" "gate: skip n=0 oldest=0m" "$(gate_out)"
+printf '{"data":[{"id":"gt-r1","notes":"cursor: 2026-10-10T01:00:00.5Z internal/a/one.go"}]}\n' > "$BD_STUB_OUT"
+assert_eq "BD_MACHINE envelope: one landing, 419m old" "0" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --now "$NOW")"
+assert_eq "output" "gate: run n=1 oldest=419m" "$(gate_out)"
+assert_eq "19m 59s old is 19m: skip" "1" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --now 2026-10-10T03:19:59.123456Z)"
+assert_eq "skip output" "gate: skip n=1 oldest=19m" "$(gate_out)"
+assert_eq "exactly 20m: run" "0" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --now 2026-10-10T03:20:00.123456Z)"
+assert_eq "output" "gate: run n=1 oldest=20m" "$(gate_out)"
+assert_eq "a landing in the future is 0m old, not negative" "gate: skip n=1 oldest=0m" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --now 2026-10-10T02:00:00Z >/dev/null; gate_out)"
+
+echo "gate: three young landings are enough"
+cat > "$TMP/young.jsonl" <<'J'
+{"bead":"gt-a","landed_at":"2026-10-10T09:50:00Z","risk_paths":["x"]}
+{"bead":"gt-b","landed_at":"2026-10-10T09:52:00Z","risk_paths":["x"]}
+{"bead":"gt-c","landed_at":"2026-10-10T09:55:00Z","risk_paths":["x"]}
+{"bead":"gt-d","landed_at":"2026-10-10T09:56:00Z"}
+J
+echo '[]' > "$BD_STUB_OUT"
+assert_eq "three at 10m: run" "0" "$(gate_rc --landings "$TMP/young.jsonl" --label "$LBL" --now "$NOW")"
+assert_eq "output (the landing without risk paths is not counted)" "gate: run n=3 oldest=10m" "$(gate_out)"
+assert_eq "--min-count 4: skip" "1" "$(gate_rc --landings "$TMP/young.jsonl" --label "$LBL" --now "$NOW" --min-count 4)"
+assert_eq "skip output" "gate: skip n=3 oldest=10m" "$(gate_out)"
+rc="$(plan_rc --mode landings --landings "$TMP/young.jsonl" --prev-notes "$TMP/none.txt" --now "$NOW" --out "$TMP/g1")"
+assert_eq "plan --mode landings counts the same three" "3" "$(field landings)"
+
+echo "gate: an input it cannot trust is exit 3, never a skip"
+assert_eq "bd fails" "3" "$(BD_STUB_RC=1 gate_rc --landings "$LANDINGS" --label "$LBL" --now "$NOW")"
+echo 'not json' > "$BD_STUB_OUT"
+assert_eq "bd prints something that is not JSON" "3" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --now "$NOW")"
+: > "$BD_STUB_OUT"
+assert_eq "bd prints nothing" "3" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --now "$NOW")"
+echo '{"error":"x"}' > "$BD_STUB_OUT"
+assert_eq "an object without a data list" "3" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --now "$NOW")"
+echo '{"data":{"id":"gt-r1"}}' > "$BD_STUB_OUT"
+assert_eq "data is not a list" "3" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --now "$NOW")"
+echo '[1,2]' > "$BD_STUB_OUT"
+assert_eq "rows are not objects" "3" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --now "$NOW")"
+echo '[{"id":"gt-r1","notes":7}]' > "$BD_STUB_OUT"
+assert_eq "notes is not a string" "3" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --now "$NOW")"
+echo '[{"id":"gt-r1","notes":"cursor: not-a-time internal/a/one.go"}]' > "$BD_STUB_OUT"
+assert_eq "cursor with a bad timestamp" "3" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --now "$NOW")"
+assert_eq "nothing on stdout for any of them" "" "$(gate_out)"
+echo '[]' > "$BD_STUB_OUT"
+assert_eq "empty landings file" "3" "$(gate_rc --landings "$TMP/empty.jsonl" --label "$LBL" --now "$NOW")"
+assert_eq "landed_at renamed" "3" "$(gate_rc --landings "$TMP/drift.jsonl" --label "$LBL" --now "$NOW")"
+assert_eq "risk_paths is not a list" "3" "$(gate_rc --landings "$TMP/drift3.jsonl" --label "$LBL" --now "$NOW")"
+assert_eq "a non-JSON line before the last" "3" "$(gate_rc --landings "$TMP/mid.jsonl" --label "$LBL" --now "$NOW")"
+assert_eq "bad --now" "3" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --now tomorrow)"
+assert_eq "the failure says why" "1" "$(grep -c 'is not RFC3339' "$TMP/gate.err" || true)"
+assert_eq "a torn last line is tolerated" "0" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --now "$NOW")"
+
+echo "gate: usage"
+assert_eq "missing landings file" "2" "$(gate_rc --landings "$TMP/absent" --label "$LBL")"
+assert_eq "no --landings" "2" "$(gate_rc --label "$LBL")"
+assert_eq "no --label" "2" "$(gate_rc --landings "$LANDINGS")"
+assert_eq "missing --repo directory" "2" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --repo "$TMP/absent")"
+assert_eq "non-numeric --min-count" "2" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --min-count few)"
+assert_eq "non-numeric --min-age-min" "2" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --min-age-min soon)"
+assert_eq "unknown flag" "2" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --bogus 1)"
+assert_eq "flag without a value" "2" "$(gate_rc --landings "$LANDINGS" --label)"
 
 echo ""
 echo "passed: $PASS failed: $FAIL"
