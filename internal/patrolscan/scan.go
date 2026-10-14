@@ -368,9 +368,10 @@ func (w Work) HasLabel(label string) bool {
 // SeatCap is the polecat_pool cap a crash restart answers to and the live
 // census behind it (gt-02tcp).
 //
-// The census counts live polecats, not the seats the pool calls occupied: the
-// crashed seat is one of those, and counting it would leave the restart
-// waiting on the seat it is about to fill.
+// The census counts live polecats, not the seats the pool calls occupied, and
+// it leaves out the session of the seat being restarted: a polecat whose agent
+// died with its tmux session kept is restarted in that session, one for one,
+// so the restart adds no live polecat and must not wait on itself (gt-zwiww).
 //
 // The zero value is no cap holding the restart: a pool with none, or a cap
 // with room.
@@ -523,11 +524,13 @@ type Options struct {
 	// IsRefusal reports whether a Restart error is the supervisor refusing
 	// (parked, frozen, e-stop, budget) rather than failing.
 	IsRefusal func(error) bool
-	// SeatCap reads the polecat_pool cap a crash restart answers to. Nil
-	// leaves the tick uncapped, the behavior before gt-02tcp. An error means
-	// the cap could not be read, which is Unknown: a restart taken on an
-	// unread cap is a session raised past a limit nobody measured.
-	SeatCap func() (SeatCap, error)
+	// SeatCap reads the polecat_pool cap a crash restart of rig/name answers
+	// to, counting every live polecat session but name's own: that session,
+	// if it still exists, is the one the restart replaces. Nil leaves the
+	// tick uncapped, the behavior before gt-02tcp. An error means the cap
+	// could not be read, which is Unknown: a restart taken on an unread cap
+	// is a session raised past a limit nobody measured.
+	SeatCap func(rig, name string) (SeatCap, error)
 	// Reap enables the worktree reap pass. Nil leaves it off, and it does
 	// nothing unless the Env also implements ReapEnv.
 	Reap *ReapOptions
@@ -908,7 +911,7 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 	// accrued are untouched, so the restart goes ahead on the first later tick
 	// that finds a free seat (gt-02tcp).
 	if recovery == "" && s.o.SeatCap != nil {
-		cap, err := s.o.SeatCap()
+		cap, err := s.o.SeatCap(rig, name)
 		if err != nil {
 			return unknown("seat cap unreadable", err)
 		}

@@ -22,9 +22,16 @@ import (
 // its own seat is the dispatcher's rule, not a town cap.
 
 // seatCap implements patrolscan's seat-cap read over the town's settings and
-// its live sessions. A pool with neither cap set answers "no cap" without
-// listing tmux: there is nothing to count it against.
-func (h *patrolScanHost) seatCap() (patrolscan.SeatCap, error) {
+// its live sessions, for a restart of rig/name. A pool with neither cap set
+// answers "no cap" without listing tmux: there is nothing to count it against.
+//
+// The census leaves out rig/name's own session. A polecat whose agent died but
+// whose session stayed up (liveness ReasonAgentGone) is restarted in that
+// session, so the restart adds no live polecat; counting it would hold a full
+// pool's own crashed seat on itself, every tick (gt-zwiww). A seat whose
+// session is gone has nothing to leave out, and its restart still answers to
+// the cap.
+func (h *patrolScanHost) seatCap(rig, name string) (patrolscan.SeatCap, error) {
 	ts, err := agentconfig.LoadOrCreateTownSettings(agentconfig.TownSettingsPath(h.town()))
 	if err != nil {
 		return patrolscan.SeatCap{}, fmt.Errorf("reading town settings: %w", err)
@@ -33,7 +40,7 @@ func (h *patrolScanHost) seatCap() (patrolscan.SeatCap, error) {
 	if pool == nil || (pool.GetMaxTotal() <= 0 && !pool.SeatsCapped()) {
 		return patrolscan.SeatCap{}, nil
 	}
-	byAgent, total, err := h.livePolecatCensus()
+	byAgent, total, err := h.livePolecatCensus(rig + "/polecats/" + name)
 	if err != nil {
 		return patrolscan.SeatCap{}, err
 	}
@@ -60,8 +67,9 @@ func (h *patrolScanHost) seatCap() (patrolscan.SeatCap, error) {
 // is about to take. Those cannot be counted here — the seat this check is
 // about is one of them, and counting it would read the restart as spending a
 // seat it already holds, leaving it to wait on itself forever. The cap bounds
-// live sessions, and a restart is one more of them.
-func (h *patrolScanHost) livePolecatCensus() (map[string]int, int, error) {
+// live sessions, and a restart that replaces one adds none: skipRole, the
+// GT_ROLE of the seat being restarted, names the session left out.
+func (h *patrolScanHost) livePolecatCensus(skipRole string) (map[string]int, int, error) {
 	names, err := h.d.tmux.ListSessions()
 	if err != nil {
 		return nil, 0, fmt.Errorf("listing tmux sessions: %w", err)
@@ -72,6 +80,9 @@ func (h *patrolScanHost) livePolecatCensus() (map[string]int, int, error) {
 		role, err := h.d.tmux.GetEnvironment(name, "GT_ROLE")
 		if err != nil || !strings.Contains(role, "/polecats/") {
 			continue // not a polecat session, or a session that cannot say
+		}
+		if strings.TrimSpace(role) == skipRole {
+			continue // the seat being restarted: its restart replaces this session
 		}
 		agent, _ := h.d.tmux.GetEnvironment(name, "GT_AGENT")
 		byAgent[strings.TrimSpace(agent)]++
