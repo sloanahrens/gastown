@@ -333,7 +333,9 @@ type ModelSeat struct {
 
 // ModelRole is the model one role runs on.
 type ModelRole struct {
-	// Role is polecat, om-review, deep-review or crew.
+	// Role is polecat, om-review or crew, or a deep-review schedule's name
+	// (deep-review-slice, deep-review-risk, deep-review): the review gets one
+	// row per schedule, each with its own agent.
 	Role string `json:"role"`
 	// Model is empty when the config could not be read or names none: the page
 	// says unknown, never a value nobody read.

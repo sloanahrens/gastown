@@ -216,6 +216,11 @@ type modelRoleInputs struct {
 // deepReviewSchedule is the scheduled sling that runs the daily deep review.
 const deepReviewSchedule = "deep-review"
 
+// deepReviewModelSchedules are the scheduled slings the models panel reads the
+// deep-review agent from: the same three the Deep review panel lists runs for,
+// the slice and risk schedules and the legacy one they replace.
+var deepReviewModelSchedules = []string{"deep-review-slice", "deep-review-risk", deepReviewSchedule}
+
 // modelRoleRows is the panel's model-per-role table. Each role is read from
 // its own key; one whose config cannot be read has no model, which the page
 // calls unknown, and is never checked against the table. A role the table
@@ -250,21 +255,7 @@ func modelRoleRows(in modelRoleInputs) []dashboard.ModelRole {
 		}
 	}
 
-	deep := dashboard.ModelRole{Role: "deep-review", Key: "patrols.scheduled_slings[" + deepReviewSchedule + "].agent (" + patrolConfigLocation(in.townRoot) + ")"}
-	switch {
-	case in.patrolsErr != nil:
-		deep.Note = patrolConfigLocation(in.townRoot) + " could not be read"
-	default:
-		entry := scheduledSling(in.patrols, deepReviewSchedule)
-		if entry == nil {
-			deep.Note = "no scheduled sling named " + deepReviewSchedule
-		} else if deep.Model = strings.TrimSpace(entry.Agent); deep.Model == "" {
-			deep.Note = "the schedule names no agent"
-		}
-	}
-	if want := in.table.wantAgent("deep-review"); deep.Model != "" && want != "" && want != deep.Model {
-		deep.Drift = want
-	}
+	deepRows := deepReviewRoleRows(in)
 
 	crew := dashboard.ModelRole{Role: "crew", Key: "role_agents.crew (" + settings + ")"}
 	crew.Model, crew.Note = roleAgent("crew")
@@ -274,7 +265,49 @@ func modelRoleRows(in modelRoleInputs) []dashboard.ModelRole {
 	if want := in.table.wantAgent("crew"); crew.Model != "" && want != "" && want != crew.Model {
 		crew.Drift = want
 	}
-	return []dashboard.ModelRole{polecat, om, deep, crew}
+	rows := append([]dashboard.ModelRole{polecat, om}, deepRows...)
+	return append(rows, crew)
+}
+
+// deepReviewRoleRows is the deep-review role's rows, one per configured
+// schedule that runs the review, each naming that schedule's own agent. The
+// review runs as the slice and risk schedules, and the legacy single schedule
+// until its config entry is dropped; a row's Role is the schedule's name, so
+// the legacy schedule keeps the row name it always had. Every row is checked
+// against the table's one deep-review entry. A config that cannot be read, or
+// that names none of the schedules, is one row saying so.
+func deepReviewRoleRows(in modelRoleInputs) []dashboard.ModelRole {
+	location := patrolConfigLocation(in.townRoot)
+	key := func(name string) string {
+		return "patrols.scheduled_slings[" + name + "].agent (" + location + ")"
+	}
+	anyKey := key(strings.Join(deepReviewModelSchedules, "|"))
+
+	if in.patrolsErr != nil {
+		return []dashboard.ModelRole{{Role: "deep-review", Key: anyKey, Note: location + " could not be read"}}
+	}
+	var rows []dashboard.ModelRole
+	for _, name := range deepReviewModelSchedules {
+		entry := scheduledSling(in.patrols, name)
+		if entry == nil {
+			continue
+		}
+		row := dashboard.ModelRole{Role: name, Key: key(name)}
+		if row.Model = strings.TrimSpace(entry.Agent); row.Model == "" {
+			row.Note = "the schedule names no agent"
+		}
+		if want := in.table.wantAgent("deep-review"); row.Model != "" && want != "" && want != row.Model {
+			row.Drift = want
+		}
+		rows = append(rows, row)
+	}
+	if len(rows) == 0 {
+		rows = []dashboard.ModelRole{{
+			Role: "deep-review", Key: anyKey,
+			Note: "no scheduled sling named " + strings.Join(deepReviewModelSchedules, ", "),
+		}}
+	}
+	return rows
 }
 
 // scheduledSling returns the named entry of the scheduled_slings patrol, nil

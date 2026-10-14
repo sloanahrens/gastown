@@ -434,3 +434,78 @@ func TestDashboardModelsNamesTheRealPatrolConfigLocation(t *testing.T) {
 		})
 	}
 }
+
+// deepReviewRows is the deep-review rows of a role list.
+func deepReviewRows(roles []dashboard.ModelRole) []dashboard.ModelRole {
+	var rows []dashboard.ModelRole
+	for _, r := range roles {
+		if strings.HasPrefix(r.Role, "deep-review") {
+			rows = append(rows, r)
+		}
+	}
+	return rows
+}
+
+// The review runs as two schedules, so the panel names each one's agent, checks
+// each against the table, and keeps the legacy schedule's row while its entry
+// is still configured (gt-m9oj7).
+func TestModelsReaderNamesTheAgentOfEachDeepReviewSchedule(t *testing.T) {
+	t.Parallel()
+
+	const split = `{"type":"daemon-patrol-config","version":1,"patrols":{
+  "scheduled_slings":{"enabled":true,"entries":[
+    {"name":"deep-review-slice","rig":"gastown","formula":"mol-deep-review","agent":"claude-sonnet","interval":"24h"},
+    {"name":"deep-review-risk","rig":"gastown","formula":"mol-deep-review","agent":"deepseek-pro","interval":"24h"},
+    {"name":"nightly-other","rig":"gastown","formula":"mol-other","agent":"claude-opus","interval":"24h"}]}}}`
+	const both = `{"type":"daemon-patrol-config","version":1,"patrols":{
+  "scheduled_slings":{"enabled":true,"entries":[
+    {"name":"deep-review","rig":"gastown","formula":"mol-deep-review","agent":"claude-sonnet","interval":"24h"},
+    {"name":"deep-review-slice","rig":"gastown","formula":"mol-deep-review","interval":"24h"}]}}}`
+
+	om := writeOMConfig(t, `{"backend":["claude","-p","--model","sonnet"]}`)
+	roles := func(daemon string) []dashboard.ModelRole {
+		town := t.TempDir()
+		writeModelsSettings(t, town, `{"role_agents":{"polecat":"claude-sonnet"}}`)
+		writePanelFile(t, town, "mayor/daemon.json", daemon)
+		writePanelFile(t, town, "settings/models.json", panelTable)
+		return (&modelsReader{townRoot: town, omPath: om}).read().Roles
+	}
+
+	deep := deepReviewRows(roles(split))
+	if len(deep) != 2 || deep[0].Role != "deep-review-slice" || deep[1].Role != "deep-review-risk" {
+		t.Fatalf("deep-review rows = %+v, want the slice row then the risk row", deep)
+	}
+	if deep[0].Model != "claude-sonnet" || deep[0].Drift != "" {
+		t.Errorf("slice row = %+v, want claude-sonnet with no drift", deep[0])
+	}
+	if deep[1].Model != "deepseek-pro" || deep[1].Drift != "claude-sonnet" {
+		t.Errorf("risk row = %+v, want deepseek-pro drifted from claude-sonnet", deep[1])
+	}
+	for _, r := range deep {
+		if !strings.Contains(r.Key, "["+r.Role+"]") {
+			t.Errorf("%s key = %q, want it to name its own schedule", r.Role, r.Key)
+		}
+	}
+
+	// The legacy schedule configured next to a new one is a row of its own,
+	// and a schedule that names no agent says so.
+	r := roles(both)
+	if s := panelRole(t, r, "deep-review-slice"); s.Model != "" || s.Note != "the schedule names no agent" || s.Drift != "" {
+		t.Errorf("slice row with no agent = %+v", s)
+	}
+	if l := panelRole(t, r, "deep-review"); l.Model != "claude-sonnet" {
+		t.Errorf("legacy row = %+v, want claude-sonnet", l)
+	}
+
+	// None of the review's schedules, and a config that cannot be read, are
+	// each one deep-review row that says so.
+	for name, tc := range map[string]struct{ daemon, note string }{
+		"none":       {`{"patrols":{"scheduled_slings":{"enabled":true,"entries":[]}}}`, "no scheduled sling named"},
+		"unreadable": {`{"patrols":`, "could not be read"},
+	} {
+		rows := deepReviewRows(roles(tc.daemon))
+		if len(rows) != 1 || rows[0].Role != "deep-review" || rows[0].Model != "" || !strings.Contains(rows[0].Note, tc.note) || rows[0].Drift != "" {
+			t.Errorf("%s: deep-review rows = %+v, want one unknown row noting %q", name, rows, tc.note)
+		}
+	}
+}
