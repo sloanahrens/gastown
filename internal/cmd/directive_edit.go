@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -98,22 +97,5 @@ func runDirectiveEditIn(out io.Writer, townRoot, cwd, explicitRig, role string, 
 
 	fmt.Fprintf(out, "Directive updated: %s\n", path)
 	fmt.Fprintln(out, "Changes take effect at next 'gt prime'.")
-	return nil
-}
-
-// openInEditor runs $EDITOR (vi when unset) on path and waits for it to exit.
-func openInEditor(path string) error {
-	editor := os.Getenv("EDITOR")
-	if editor == "" {
-		editor = "vi"
-	}
-
-	editorCmd := exec.Command(editor, path)
-	editorCmd.Stdin = os.Stdin
-	editorCmd.Stdout = os.Stdout
-	editorCmd.Stderr = os.Stderr
-	if err := editorCmd.Run(); err != nil {
-		return fmt.Errorf("running editor: %w", err)
-	}
 	return nil
 }

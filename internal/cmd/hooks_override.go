@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"os/exec"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/hooks"
@@ -69,17 +68,8 @@ func runHooksOverride(cmd *cobra.Command, args []string) error {
 
 	// Open in editor
 	path := hooks.OverridePath(target)
-	editor := os.Getenv("EDITOR")
-	if editor == "" {
-		editor = "vi"
-	}
-
-	editorCmd := exec.Command(editor, path)
-	editorCmd.Stdin = os.Stdin
-	editorCmd.Stdout = os.Stdout
-	editorCmd.Stderr = os.Stderr
-	if err := editorCmd.Run(); err != nil {
-		return fmt.Errorf("running editor: %w", err)
+	if err := openInEditor(path); err != nil {
+		return err
 	}
 
 	// Validate after editing
