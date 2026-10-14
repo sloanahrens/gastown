@@ -41,6 +41,13 @@ type BeadWriter interface {
 // is closed or assigned to anyone but assignee, the stopped polecat's bead
 // assignee. An empty assignee is the half-released bead and is finished.
 func HandBack(ctx context.Context, w BeadWriter, beadID, assignee, branch string, elapsed time.Duration) error {
+	return HandBackNoted(ctx, w, beadID, assignee, branch, elapsed, "")
+}
+
+// HandBackNoted is HandBack with note appended to the comment: the caller's
+// warning to the next reader, such as that the worktree could not be
+// checkpointed and may hold uncommitted work. An empty note adds nothing.
+func HandBackNoted(ctx context.Context, w BeadWriter, beadID, assignee, branch string, elapsed time.Duration, note string) error {
 	status, current, err := w.State(ctx, beadID)
 	if err != nil {
 		return fmt.Errorf("hand back %s: read bead: %w", beadID, err)
@@ -62,6 +69,9 @@ func HandBack(ctx context.Context, w BeadWriter, beadID, assignee, branch string
 	}
 	text := fmt.Sprintf("polecat stopped after %s; work kept on branch %s. Split the bead, then remove the %s label.",
 		elapsed.Round(time.Second), branch, NeedsSplitLabel)
+	if note != "" {
+		text += " " + note
+	}
 	if err := w.Comment(ctx, beadID, text); err != nil {
 		return fmt.Errorf("hand back %s: comment: %w", beadID, err)
 	}
