@@ -54,7 +54,8 @@ func TestUsagePanelNamesItsStates(t *testing.T) {
 		`none("no usage in the last " + (u.window || "24h"))`,
 		`none("no deep review runs")`,
 		`none("no beads in the last " + (u.window || "24h"))`,
-		`none("none in the last week")`,
+		`none("none in the last 48h")`,
+		`section("Over 20 minutes (48h)", over.length`,
 	} {
 		if !strings.Contains(draw, want) {
 			t.Errorf("renderUsage has no %q", want)

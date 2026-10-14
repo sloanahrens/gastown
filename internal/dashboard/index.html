@@ -1955,7 +1955,7 @@ function renderUsage(s) {
   const est = byClass.filter(r => isDeepSeek(r.model)).reduce((sum, r) => sum + (r.est_cost_usd || 0), 0);
   note.className = over.length ? "r warnc" : "r";
   note.textContent = "est. " + money(est) + " · " + over.length + " over 20m";
-  note.title = "estimated DeepSeek spend over the last " + (u.window || "24h") + "; beads that ran over twenty minutes in the last week";
+  note.title = "estimated DeepSeek spend over the last " + (u.window || "24h") + "; beads that ran over twenty minutes in the last 48 hours";
 
   // How old the records are: the scan runs on a schedule, so an old AsOf means
   // the numbers below are a past day's, and the pane says so beside them.
@@ -2007,11 +2007,11 @@ function renderUsage(s) {
         [r.bead], [r.class, "title"], [fmtDur(r.wall_s), "n"],
         [r.est_cost_usd ? "est. " + money(r.est_cost_usd) : fmtTokens(r.uncached) + " tokens", "n"]]))
     : none("no beads in the last " + (u.window || "24h")));
-  section("Over 20 minutes", over.length
+  section("Over 20 minutes (48h)", over.length
     ? table([["Bead"], ["Rig"], ["Took", 1], ["Tests", 1]], over.map(r => [
         [r.bead, "warnc"], [r.rig, "title"], [fmtDur(r.wall_s), "n warnc"],
         [r.test_runs + " runs, " + r.failed_test_runs + " failed", "n" + (r.failed_test_runs ? " badc" : "")]]))
-    : none("none in the last week"));
+    : none("none in the last 48h"));
   d.append(el("div", "empty", (u.unmatched || 0) + " unmatched · " + (u.incomplete || 0) + " incomplete · " + (u.skipped || 0) + " skipped"));
   box.append(d);
 }
