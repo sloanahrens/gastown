@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/jonboulle/clockwork"
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/reaper"
 )
@@ -330,5 +332,21 @@ func TestReportReaperRunOpenWispsWithoutATownRoot(t *testing.T) {
 	})
 	if out.Len() != 0 {
 		t.Fatalf("output = %q, want nothing", out.String())
+	}
+}
+
+// TestReaperHelpNamesTheDaemonPatrolConfig: gt config migrate retires
+// mayor/daemon.json, so the reaper's help must not send the operator to it.
+func TestReaperHelpNamesTheDaemonPatrolConfig(t *testing.T) {
+	t.Parallel()
+	for _, cmd := range []*cobra.Command{reaperAutoCloseCmd, reaperRunCmd} {
+		text := cmd.Long
+		cmd.Flags().VisitAll(func(f *pflag.Flag) { text += "\n" + f.Usage })
+		if strings.Contains(text, "daemon.json") {
+			t.Errorf("gt reaper %s help names the retired daemon.json:\n%s", cmd.Name(), text)
+		}
+	}
+	if !strings.Contains(reaperAutoCloseCmd.Long, "daemon patrol config") {
+		t.Errorf("auto-close help must name the daemon patrol config:\n%s", reaperAutoCloseCmd.Long)
 	}
 }

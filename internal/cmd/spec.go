@@ -112,7 +112,7 @@ var specLintCmd = &cobra.Command{
 spec dispatcher runs before it allocates a seat.
 
 The required "## " sections are the template file's when that file exists:
-daemon.json patrols.spec_dispatch.template, else
+daemon.patrols.spec_dispatch.template in settings/config.json, else
 ~/.claude/docs/agents/spec-template.md. No such file is needed — with no
 template file, or one carrying no "## " heading, the built-in sections are
 checked instead: Goal, Constraints, Out of scope, Gate and Size.
@@ -209,7 +209,7 @@ The operator hold file and ESTOP stop the tick.`,
 }
 
 func init() {
-	specLintCmd.Flags().StringVar(&specLintTemplate, "template", "", "Spec template path (default daemon.json patrols.spec_dispatch.template, else ~/.claude/docs/agents/spec-template.md)")
+	specLintCmd.Flags().StringVar(&specLintTemplate, "template", "", "Spec template path (default daemon.patrols.spec_dispatch.template in settings/config.json, else ~/.claude/docs/agents/spec-template.md)")
 	specLintCmd.Flags().BoolVar(&specLintJSON, "json", false, "Print {id, ok, needs_planning, refusals[]} instead of one line")
 	specDispatchCmd.Flags().BoolVar(&specDispatchJSON, "json", false, "Output the tick report as JSON")
 	specDispatchCmd.Flags().BoolVar(&specDispatchDryRun, "dry-run", false, "Decide and report without slinging, labeling or commenting")

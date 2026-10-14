@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/daemon"
@@ -18,10 +19,33 @@ func TestLifecycleDefaultsCheck_NoConfig(t *testing.T) {
 	result := check.Run(ctx)
 
 	if result.Status != StatusWarning {
-		t.Errorf("expected Warning for missing daemon.json, got %s", result.Status)
+		t.Errorf("expected Warning for missing daemon patrol config, got %s", result.Status)
 	}
-	if result.Message != "daemon.json not found" {
+	if result.Message != "mayor/daemon.json not found" {
 		t.Errorf("unexpected message: %s", result.Message)
+	}
+}
+
+// TestLifecycleDefaultsCheck_TwoFileTownNamesTheDaemonSection: once gt config
+// migrate has run mayor/daemon.json no longer exists, so the check must send
+// the operator to the "daemon" section of settings/config.json instead.
+func TestLifecycleDefaultsCheck_TwoFileTownNamesTheDaemonSection(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeDoctorTownFile(t, town, "mayor/town.json", `{"registry":{}}`)
+	writeDoctorTownFile(t, town, "settings/config.json", `{"daemon":{"type":"daemon-patrol-config","version":1}}`)
+
+	result := NewLifecycleDefaultsCheck().Run(&CheckContext{TownRoot: town})
+
+	if result.Status != StatusWarning {
+		t.Fatalf("status = %s, want Warning for a daemon section with no patrols", result.Status)
+	}
+	want := `settings/config.json (section "daemon") missing patrols section`
+	if result.Message != want {
+		t.Errorf("message = %q, want %q", result.Message, want)
+	}
+	if strings.Contains(result.Message, "daemon.json") {
+		t.Errorf("message %q names the retired daemon.json", result.Message)
 	}
 }
 
@@ -147,7 +171,7 @@ func TestLifecycleDefaultsCheck_NilPatrolsSection(t *testing.T) {
 	if result.Status != StatusWarning {
 		t.Errorf("expected Warning for nil patrols, got %s", result.Status)
 	}
-	if result.Message != "daemon.json missing patrols section" {
+	if result.Message != "mayor/daemon.json missing patrols section" {
 		t.Errorf("unexpected message: %s", result.Message)
 	}
 }

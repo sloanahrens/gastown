@@ -80,6 +80,30 @@ func TestDoltServerPatrolCheck_DownPatrolDisabled(t *testing.T) {
 	}
 }
 
+// TestDoltServerPatrolCheck_TwoFileTownNamesTheDaemonSection: on a town that has
+// run gt config migrate mayor/daemon.json is gone, so the hint must send the
+// operator to the "daemon" section of settings/config.json.
+func TestDoltServerPatrolCheck_TwoFileTownNamesTheDaemonSection(t *testing.T) {
+	t.Parallel()
+	townRoot := endpointTown(t)
+	writeDoctorTownFile(t, townRoot, "mayor/town.json", `{"registry":{}}`)
+	writeDoctorTownFile(t, townRoot, "settings/config.json",
+		`{"daemon":{"type":"daemon-patrol-config","version":1,"patrols":{"doctor_dog":{"enabled":true}}}}`)
+
+	result := patrolCheck(t, false).Run(&CheckContext{TownRoot: townRoot})
+
+	if result.Status != StatusWarning {
+		t.Fatalf("expected WARNING for the config gap, got %s (%s)", result.Status, result.Message)
+	}
+	text := result.FixHint + " " + strings.Join(result.Details, " ")
+	if !strings.Contains(text, `settings/config.json (section "daemon")`) {
+		t.Errorf("hint and details %q must name the daemon section of settings/config.json", text)
+	}
+	if strings.Contains(text, "daemon.json") {
+		t.Errorf("hint and details %q name the retired daemon.json", text)
+	}
+}
+
 func TestDoltServerPatrolCheck_DownPatrolEnabled(t *testing.T) {
 	t.Parallel()
 	townRoot := endpointTown(t)

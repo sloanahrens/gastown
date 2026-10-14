@@ -4,11 +4,12 @@ import (
 	"fmt"
 	"strings"
 
+	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
 )
 
-// LifecycleDefaultsCheck detects missing lifecycle patrol entries in daemon.json
-// and auto-populates them with sensible defaults.
+// LifecycleDefaultsCheck detects missing lifecycle patrol entries in the daemon
+// patrol config and auto-populates them with sensible defaults.
 //
 // Existing towns that upgraded may be missing entries for newer Dogs
 // (Compactor, JSONL backup, scheduled maintenance, etc.). This check
@@ -24,16 +25,19 @@ func NewLifecycleDefaultsCheck() *LifecycleDefaultsCheck {
 		FixableCheck: FixableCheck{
 			BaseCheck: BaseCheck{
 				CheckName:        "lifecycle-defaults",
-				CheckDescription: "Check daemon.json has all lifecycle patrol entries",
+				CheckDescription: "Check the daemon patrol config has all lifecycle patrol entries",
 				CheckCategory:    CategoryConfig,
 			},
 		},
 	}
 }
 
-// Run checks for missing lifecycle patrol entries in daemon.json.
+// Run checks for missing lifecycle patrol entries in the daemon patrol config.
+// Messages name the place the config lives (settings/config.json's "daemon"
+// section once gt config migrate has run, mayor/daemon.json before it).
 func (c *LifecycleDefaultsCheck) Run(ctx *CheckContext) *CheckResult {
 	c.missing = nil
+	where := agentconfig.SourcePathRel(ctx.TownRoot, agentconfig.DaemonPatrolConfigPath(ctx.TownRoot))
 
 	config, err := daemon.ReadPatrolConfig(ctx.TownRoot)
 	if err != nil {
@@ -43,16 +47,16 @@ func (c *LifecycleDefaultsCheck) Run(ctx *CheckContext) *CheckResult {
 			Name:    c.Name(),
 			Status:  StatusError,
 			Message: err.Error(),
-			FixHint: "Fix mayor/daemon.json by hand; gt never rewrites a file it cannot parse",
+			FixHint: "Fix " + where + " by hand; gt never rewrites a file it cannot parse",
 		}
 	}
 	if config == nil {
-		// No daemon.json at all — EnsureLifecycleConfigFile handles creation.
+		// No daemon patrol config at all — EnsureLifecycleConfigFile handles creation.
 		// Report as warning so gt doctor fix lifecycle-defaults can create it.
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusWarning,
-			Message: "daemon.json not found",
+			Message: where + " not found",
 			FixHint: "Run 'gt doctor fix lifecycle-defaults' to create with defaults",
 		}
 	}
@@ -62,7 +66,7 @@ func (c *LifecycleDefaultsCheck) Run(ctx *CheckContext) *CheckResult {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusWarning,
-			Message: "daemon.json missing patrols section",
+			Message: where + " missing patrols section",
 			FixHint: "Run 'gt doctor fix lifecycle-defaults' to populate defaults",
 		}
 	}
