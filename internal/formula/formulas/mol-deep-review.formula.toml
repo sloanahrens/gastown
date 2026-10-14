@@ -16,8 +16,9 @@ review; the ledger in the previous runs' bead notes says where to resume.
 | issue | hook_bead | The run bead you are assigned |
 | base_branch | sling vars | Branch to review (default: main) |
 | dry_run | sling vars | `true` files nothing and queues what it would file (default: true) |
-| slice_files | sling vars | Rotation slice size (default 15) |
-| max_reviewers, max_verifiers, max_beads | sling vars | Caps per run (4, 2, 5) |
+| slice_bytes | sling vars | Byte budget of the rotation slice (default 250000) |
+| slice_files | sling vars | Safety cap on slice files (default 40); the byte budget is the main limit |
+| max_reviewers, max_verifiers, max_beads | sling vars | Caps per run (4, 4, 5) |
 
 ## Hard limits
 
@@ -100,17 +101,21 @@ in the work step and does not come here.
 description = "true files nothing and queues what it would file"
 default = "true"
 
+[vars.slice_bytes]
+description = "Byte budget of the rotation slice"
+default = "250000"
+
 [vars.slice_files]
-description = "Number of non-test Go files in the rotation slice"
-default = "15"
+description = "Safety cap on non-test Go files in the rotation slice; slice_bytes is the main limit"
+default = "40"
 
 [vars.max_reviewers]
 description = "Cap on reviewer subagents per run"
 default = "4"
 
 [vars.max_verifiers]
-description = "Cap on verifier subagents per run"
-default = "2"
+description = "Cap on verifier subagents per run (one per three findings)"
+default = "4"
 
 [vars.max_beads]
 description = "Cap on beads filed per run"
