@@ -275,6 +275,9 @@ func renderFormulaStep(formulaName string, steps []checklistStep, n int) (string
 		sb.WriteString(desc)
 		sb.WriteString("\n")
 	}
+	// The next step is handed to the session reading this, so the step text
+	// says where it is worked (gt-qgq55).
+	sb.WriteString("\nFinish this step with `gt mol step done <step-id>`: the next one is handed to this session, where you keep working.\n")
 	return sb.String(), nil
 }
 

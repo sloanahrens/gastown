@@ -292,6 +292,23 @@ func TestRenderFormulaStep_OneStepBody(t *testing.T) {
 	}
 }
 
+// The step an agent reads is where it learns what gt mol step done does with
+// its session: the next step arrives in this one, so a session does not wait
+// for a successor that never starts (gt-qgq55).
+func TestRenderFormulaStep_SaysWhereTheNextStepRuns(t *testing.T) {
+	t.Parallel()
+	out, err := renderFormulaStep("mol-test-work", threeStepFormula().checklist(), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "gt mol step done") || !strings.Contains(out, "this session") {
+		t.Fatalf("step text must say the next step is handed to this session:\n%s", out)
+	}
+	if strings.Contains(out, "espawn") {
+		t.Fatalf("step text must not claim a respawn:\n%s", out)
+	}
+}
+
 // An attachment with no poured molecule renders its formula as bd cooks it.
 func TestShowChecklist_NoMoleculeRendersCookedChecklist(t *testing.T) {
 	t.Parallel()

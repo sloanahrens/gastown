@@ -1091,6 +1091,23 @@ func TestPrimeOutputNamesNoRetiredRoles(t *testing.T) {
 	}
 }
 
+// The molecule directive is the step text a hooked polecat reads before it
+// works a step. It must say where the next step runs: a session told a
+// successor is coming stops and waits for one (gt-qgq55).
+func TestMoleculeDirectiveSaysTheNextStepRunsHere(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	ctx := RoleContext{Role: RolePolecat, Rig: "myrig", TownRoot: t.TempDir(), Polecat: "scout"}
+	outputAutonomousDirective(&buf, ctx, &beads.Issue{ID: "gt-test", Title: "test"}, true)
+	out := buf.String()
+	if !strings.Contains(out, "hands the next one to this session") {
+		t.Errorf("molecule directive must say the next step is worked in this session:\n%s", out)
+	}
+	if strings.Contains(out, "espawn") {
+		t.Errorf("molecule directive must not claim a respawn:\n%s", out)
+	}
+}
+
 func TestPolecatQuickReferenceNamesLandingWorker(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer

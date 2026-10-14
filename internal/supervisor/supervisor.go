@@ -363,7 +363,7 @@ const (
 
 // Respawn replaces the seat's running agent in place for an explicit verb:
 // gt crew restart, gt crew start --resume, gt crew at reviving an exited
-// runtime, gt handoff, a molecule step cycling its session (gt-4k3fj.4.1).
+// runtime, gt handoff.
 // run does the kill and the new start. It is refused like Restart by the
 // seat's hold, an e-stop and a gt down in progress (an e-stop means no
 // restarts); it spends no restart budget, since an operator or agent asking
