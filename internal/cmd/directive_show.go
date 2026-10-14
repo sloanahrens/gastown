@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -74,15 +75,36 @@ func resolveDirectiveContext(explicitRig string) (townRoot, rigName string, err 
 		return "", "", fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	rigName = explicitRig
-	if rigName == "" {
-		cwd, err := os.Getwd()
-		if err == nil {
-			rigName = detectRigFromPath(townRoot, cwd)
+	if explicitRig != "" {
+		if err := validateDirectiveRig(townRoot, explicitRig); err != nil {
+			return "", "", err
 		}
+		return townRoot, explicitRig, nil
 	}
 
+	if cwd, err := os.Getwd(); err == nil {
+		rigName = detectRigFromPath(townRoot, cwd)
+	}
 	return townRoot, rigName, nil
+}
+
+// validateDirectiveRig rejects an explicit --rig that cannot name a directory
+// the loaders read. The name is joined into a path, so a separator or ".."
+// would write outside the town, and a name missing from the registry (a typo)
+// would write a file no agent ever loads.
+func validateDirectiveRig(townRoot, rigName string) error {
+	if strings.ContainsAny(rigName, `/\`) || strings.Contains(rigName, "..") {
+		return fmt.Errorf("invalid rig name %q: must be a registered rig name, not a path", rigName)
+	}
+
+	rigsConfig, err := config.LoadRigsConfigOrEmpty(constants.MayorRigsPath(townRoot))
+	if err != nil {
+		return fmt.Errorf("loading rigs config: %w", err)
+	}
+	if _, ok := rigsConfig.Rigs[rigName]; !ok {
+		return fmt.Errorf("rig %q is not a registered rig of this town; run 'gt rig list' to see the rigs", rigName)
+	}
+	return nil
 }
 
 // isValidRole reports whether role can name a directive file: a known agent

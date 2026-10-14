@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,9 +52,14 @@ func runDirectiveEdit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Determine which file to edit
+	return editDirective(cmd.OutOrStdout(), townRoot, rigName, role, directiveEditTown)
+}
+
+// editDirective creates the directive file for role if it is missing and opens
+// it in $EDITOR. rigName must already have passed resolveDirectiveContext.
+func editDirective(out io.Writer, townRoot, rigName, role string, townLevel bool) error {
 	var path string
-	if directiveEditTown || rigName == "" {
+	if townLevel || rigName == "" {
 		path = filepath.Join(townRoot, "directives", role+".md")
 	} else {
 		path = filepath.Join(townRoot, rigName, "directives", role+".md")
@@ -75,7 +81,7 @@ func runDirectiveEdit(cmd *cobra.Command, args []string) error {
 		if err := os.WriteFile(path, []byte(initial), 0644); err != nil {
 			return fmt.Errorf("creating directive file: %w", err)
 		}
-		fmt.Printf("Created new directive: %s\n", path)
+		fmt.Fprintf(out, "Created new directive: %s\n", path)
 	}
 
 	// Open in editor
@@ -92,7 +98,7 @@ func runDirectiveEdit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("running editor: %w", err)
 	}
 
-	fmt.Printf("Directive updated: %s\n", path)
-	fmt.Println("Changes take effect at next 'gt prime'.")
+	fmt.Fprintf(out, "Directive updated: %s\n", path)
+	fmt.Fprintln(out, "Changes take effect at next 'gt prime'.")
 	return nil
 }
