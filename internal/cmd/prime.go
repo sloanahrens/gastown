@@ -680,6 +680,10 @@ type primeTools struct {
 	run   primeRunFunc
 	clock clockwork.Clock
 	out   io.Writer
+	// errs is where a best-effort step reports the failure it swallowed. It
+	// is stderr, not the payload: a warning about a section that could not be
+	// recorded is not context the agent should carry.
+	errs io.Writer
 	// skipDupes turns off the pre-work duplicate check: set in continuation
 	// and dry-run primes.
 	skipDupes bool
@@ -704,6 +708,13 @@ func (p primeTools) w() io.Writer {
 		return os.Stdout
 	}
 	return p.out
+}
+
+func (p primeTools) errW() io.Writer {
+	if p.errs == nil {
+		return os.Stderr
+	}
+	return p.errs
 }
 
 // command runs one external tool bounded by primeExternalToolTimeout.

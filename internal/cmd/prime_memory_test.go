@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/memrecall"
 )
 
@@ -445,6 +448,176 @@ func TestPrimeExplainMemory_ReportsNoCandidates(t *testing.T) {
 	}
 	if !strings.Contains(report, "no candidate:") {
 		t.Errorf("report does not explain the empty selection:\n%s", report)
+	}
+}
+
+// recallLogRecords reads the town's recall log back as records, one per line.
+func recallLogRecords(t *testing.T, townRoot string) []recallRecord {
+	t.Helper()
+	data, err := os.ReadFile(recallLogPath(townRoot))
+	if err != nil {
+		t.Fatalf("read recall log: %v", err)
+	}
+	body := strings.TrimSuffix(string(data), "\n")
+	if body == "" {
+		return nil
+	}
+	var recs []recallRecord
+	for i, line := range strings.Split(body, "\n") {
+		var rec recallRecord
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("recall log line %d is not a record: %v (%q)", i+1, err, line)
+		}
+		recs = append(recs, rec)
+	}
+	return recs
+}
+
+// TestPrimeMemoryRecallLog_RecordsTheInjection pins the line's content: one
+// valid record per injection, naming the bead, the rig, the memories that
+// reached the section and the bytes it cost.
+func TestPrimeMemoryRecallLog_RecordsTheInjection(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writePrimeMemorySettings(t, townRoot, true)
+
+	corpus := map[string]string{}
+	key, value := primeMemoryKVEntry("feedback", "prime-budget", "2026-08-20",
+		"A polecat's gt prime spends its hook budget on the hooked work first.")
+	corpus[key] = value
+	f := &fakePrimeRunner{answers: map[string]string{primeKVListCall: primeMemoryKV(t, corpus)}}
+	ctx := RoleContext{Role: RolePolecat, Rig: "gastown", TownRoot: townRoot}
+
+	section, _ := primeMemorySection(t, f, ctx, t.TempDir(), primeMemoryBead())
+
+	recs := recallLogRecords(t, townRoot)
+	if len(recs) != 1 {
+		t.Fatalf("one injection wrote %d lines, want 1: %+v", len(recs), recs)
+	}
+	rec := recs[0]
+	if want := primeTestEpoch.Format(time.RFC3339); rec.TS != want {
+		t.Errorf("ts = %q, want the injected clock in UTC, %q", rec.TS, want)
+	}
+	if rec.Bead != "gt-test1" || rec.Rig != "gastown" {
+		t.Errorf("record names bead %q rig %q, want gt-test1 and gastown", rec.Bead, rec.Rig)
+	}
+	if want := recalledKeys(beadMemoryRows(memoryCorpus(corpus), primeMemoryBead(), primeTestEpoch)); !reflect.DeepEqual(rec.Keys, want) {
+		t.Errorf("keys = %v, want the section's memories %v", rec.Keys, want)
+	}
+	if len(rec.Keys) == 0 {
+		t.Error("record names no memory, so nothing about the selection is logged")
+	}
+	if rec.Bytes != len(section) {
+		t.Errorf("bytes = %d, want the %d-byte section", rec.Bytes, len(section))
+	}
+}
+
+// TestPrimeMemoryRecallLog_AppendsOnlyWhenTheSectionRenders pins both halves of
+// the write rule: a prime that renders no section logs nothing, and every
+// section appends its own line without touching the ones before it.
+func TestPrimeMemoryRecallLog_AppendsOnlyWhenTheSectionRenders(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writePrimeMemorySettings(t, townRoot, true)
+
+	key, value := primeMemoryKVEntry("feedback", "prime-budget", "2026-08-20",
+		"A polecat's gt prime spends its hook budget on the hooked work first.")
+	f := &fakePrimeRunner{answers: map[string]string{primeKVListCall: primeMemoryKV(t, map[string]string{key: value})}}
+	ctx := RoleContext{Role: RolePolecat, Rig: "gastown", TownRoot: townRoot}
+
+	// A line another writer left behind survives every later append.
+	if err := appendRecallRecord(recallLogPath(townRoot), recallRecord{TS: "earlier", Bead: "gt-earlier"}); err != nil {
+		t.Fatalf("seed the recall log: %v", err)
+	}
+
+	// The omission shapes: the flag off, and a corpus nothing scores against.
+	flagOff := RoleContext{Role: RolePolecat, Rig: "gastown", TownRoot: t.TempDir()}
+	if out, _ := primeMemorySection(t, f, flagOff, t.TempDir(), primeMemoryBead()); out != "" {
+		t.Fatalf("the flag off rendered %q, want no section", out)
+	}
+	unrelated := &fakePrimeRunner{answers: map[string]string{primeKVListCall: primeMemoryKV(t, map[string]string{
+		"gt.project.garden-mulch": "type: project\nverified: 2026-08-20\n\nSpread mulch on the beds in spring.\n",
+	})}}
+	primeMemorySection(t, unrelated, ctx, t.TempDir(), primeMemoryBead())
+
+	for i := 0; i < 2; i++ {
+		primeMemorySection(t, f, ctx, t.TempDir(), primeMemoryBead())
+	}
+
+	recs := recallLogRecords(t, townRoot)
+	if len(recs) != 3 {
+		t.Fatalf("two injections over a seeded log wrote %d lines, want 3: %+v", len(recs), recs)
+	}
+	if recs[0].TS != "earlier" || recs[0].Bead != "gt-earlier" {
+		t.Errorf("first line = %+v, want the seeded record untouched", recs[0])
+	}
+	for i, rec := range recs[1:] {
+		if rec.Bead != "gt-test1" || rec.Rig != "gastown" || len(rec.Keys) == 0 {
+			t.Errorf("line %d = %+v, want the injected bead, rig and keys", i+2, rec)
+		}
+	}
+}
+
+// TestPrimeMemoryRecallLog_FailureIsNonFatal pins the best-effort contract: a
+// recall log that cannot be written — here because .runtime is a file — costs
+// one stderr line and leaves the section, and prime, untouched.
+func TestPrimeMemoryRecallLog_FailureIsNonFatal(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writePrimeMemorySettings(t, townRoot, true)
+	// A file where the log's directory belongs makes the write fail.
+	if err := os.WriteFile(constants.TownRuntimePath(townRoot), []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("block the runtime directory: %v", err)
+	}
+
+	key, value := primeMemoryKVEntry("feedback", "prime-budget", "2026-08-20",
+		"A polecat's gt prime spends its hook budget on the hooked work first.")
+	f := &fakePrimeRunner{answers: map[string]string{primeKVListCall: primeMemoryKV(t, map[string]string{key: value})}}
+	p, _, out := newFakePrimeTools(f)
+	var warnings strings.Builder
+	p.errs = &warnings
+
+	owned := p.polecatBeadMemories(RoleContext{Role: RolePolecat, Rig: "gastown", TownRoot: townRoot}, t.TempDir(), primeMemoryBead())
+
+	if !owned {
+		t.Error("a failed recall write gave up the section's ownership")
+	}
+	if !strings.Contains(out.String(), beadMemoryHeading) {
+		t.Errorf("failed recall write cost the section its heading:\n%s", out.String())
+	}
+	if lines := strings.Count(warnings.String(), "\n"); lines != 1 {
+		t.Errorf("recall failure printed %d warning lines, want 1: %q", lines, warnings.String())
+	}
+	if !strings.Contains(warnings.String(), "gt prime: memory recall log:") {
+		t.Errorf("warning does not name what failed: %q", warnings.String())
+	}
+}
+
+// TestPrimeMemoryRecallLog_FileAndDirModes pins the log's on-disk shape: the
+// file is 0600 and the directory this feature creates is 0700.
+func TestPrimeMemoryRecallLog_FileAndDirModes(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writePrimeMemorySettings(t, townRoot, true)
+
+	key, value := primeMemoryKVEntry("feedback", "prime-budget", "2026-08-20",
+		"A polecat's gt prime spends its hook budget on the hooked work first.")
+	f := &fakePrimeRunner{answers: map[string]string{primeKVListCall: primeMemoryKV(t, map[string]string{key: value})}}
+	primeMemorySection(t, f, RoleContext{Role: RolePolecat, Rig: "gastown", TownRoot: townRoot}, t.TempDir(), primeMemoryBead())
+
+	info, err := os.Stat(recallLogPath(townRoot))
+	if err != nil {
+		t.Fatalf("stat recall log: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("recall log mode = %o, want 600", got)
+	}
+	dir, err := os.Stat(constants.TownRuntimePath(townRoot))
+	if err != nil {
+		t.Fatalf("stat runtime dir: %v", err)
+	}
+	if got := dir.Mode().Perm(); got != 0o700 {
+		t.Errorf("runtime dir mode = %o, want 700", got)
 	}
 }
 
