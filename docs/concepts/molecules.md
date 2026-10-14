@@ -115,7 +115,7 @@ by the daemon: its `scheduled_slings` patrol slings the formula on an interval
 (internal/daemon/scheduled_slings.go), and `patrol_scan` restarts a session that
 died still holding the run. The session works the checklist and starts the next
 cycle by reopening the cycle's own step beads
-(internal/formula/formulas/mol-pr-feedback-patrol.toml, `loop-or-exit`); a
+(internal/formula/formulas/mol-pr-feedback-patrol.formula.toml, `loop-or-exit`); a
 session near its context limit hands off instead (`gt handoff`).
 
 ## Best Practices
