@@ -63,6 +63,15 @@ They deny the question tool too (`gt tap guard question-tool`, gt-163k8, matcher
 `AskUserQuestion`): it parks the session while it reads as running — a polecat
 sat 4h26m on one.
 
+It also carries `gt tap nudge-drain` (gt-drwph) as a `PostToolUse` hook on the
+empty `""` matcher, so it runs after every tool call: it drains the session's
+queued nudges, hands them to the model once as hook `additionalContext` (a
+drained nudge leaves the queue) and exits 0. The `UserPromptSubmit` hook below
+is the only other drain and never fires while a seat runs tool turns, so the
+overrun guard's queued split-proposal nudge expired unseen. Hooks arrive only in
+the `--settings` file, a Claude CLI flag: the Claude CLI is the only runtime
+(gt-be0z).
+
 The `bd-close-invariant` guard (`gt tap guard bd-close-invariant`, gt-arno) runs
 on the `Bash|Monitor` matcher for every role, from `DefaultBase()`. It is the
 town-wide half of the gt-6hmz close-time invariant: `gt done` applies that
@@ -90,28 +99,28 @@ Each takes `--help` for its flags.
 | `gt hooks init [--dry-run]` | Bootstrap base and overrides from existing settings files; only when no base exists |
 | `gt hooks registry` / `gt hooks install <id>` | Browse the registry / copy a hook into the base config |
 
-## Current Registry Hooks
+## Shipped hooks
 
-The registry (`~/gt/hooks/registry.toml`) defines 7 hooks, 5 enabled by default:
+No registry file ships with the repo: `~/gt/hooks/registry.toml` is an optional
+town-local catalog. A settings file's hooks come from `DefaultBase()` for every
+role plus `DefaultOverrides()` (`internal/hooks/config.go`), each with the
+town's own overrides layered on top:
 
-| Hook | Event | Enabled | Roles |
-|---|---|---|---|
-| pr-workflow-guard | PreToolUse | Yes | crew, polecat |
-| session-prime | SessionStart | Yes | all |
-| pre-compact-prime | PreCompact | Yes | all |
-| mail-check | UserPromptSubmit | Yes | all |
-| costs-record | Stop | Yes | crew, polecat |
-| clone-guard | PreToolUse | No | crew, polecat |
-| dangerous-command-guard | PreToolUse | Yes | crew, polecat |
+| Hook | Event | Roles |
+|---|---|---|
+| pr-workflow, dangerous-command, container-suite, bd-close-invariant guards | PreToolUse | all |
+| session-prime (`gt prime --hook`) | SessionStart | all |
+| pre-compact-prime (`gt prime --hook`) | PreCompact | all |
+| mail-check (`gt mail check --inject`) | UserPromptSubmit | all |
+| nudge-drain | PostToolUse | polecats |
+| polecat-stop-check | Stop | polecats |
+| polecat-paths, question-tool guards | PreToolUse | polecats |
+| permission-request guard | PermissionRequest | polecats |
+| crew compaction handoff (`gt handoff --cycle --reason compaction`) | PreCompact (replaces) | crew |
 
-Additional hooks exist in settings.json files but are not yet in the registry:
-
-- **bd init guard** (gastown/crew, beads/crew) - blocks `bd init*` inside `.beads/`
-- **mol patrol guards** (gastown roles) - blocks persistent patrol molecules
-- **polecat-paths guard** (polecats) - what it blocks: the `polecats` override
-  paragraph above
-- **tmux clear-history** (gastown root) - clears terminal history on session start
-- **SessionStart .beads/ validation** (gastown/crew, beads/crew) - validates CWD
+Not in that table: guards the tap surface carries that no default installs
+(bd-init, mol-patrol), and any hook a town adds to its own settings files.
+`gt tap list` and the settings files on disk are the live list.
 
 ## Registry is a catalog, not the source of truth
 
@@ -215,11 +224,3 @@ Override for polecat:
 
 Result: Polecats get `gt prime --explain` instead of `gt prime`
 (same `""` matcher = replace).
-
-## Default base config
-
-When no base config exists, the system uses sensible defaults:
-
-- **SessionStart**: PATH setup + `gt prime --hook`
-- **PreCompact**: PATH setup + `gt prime --hook`
-- **UserPromptSubmit**: PATH setup + `gt mail check --inject`
