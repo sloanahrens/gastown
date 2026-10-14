@@ -282,10 +282,14 @@ func (r *execScheduledSlingRunner) sling(ctx context.Context, beadID string, e S
 }
 
 // slingErrorLine is the one-line summary of a failed sling's output: the
-// first line that is not a step timing line (sling.StepPrefix, internal/sling/
-// timer.go), falling back to the first line so a failure is never logged as an
-// empty string.
+// refusal line when sling refused the bead (so isScheduledSlingRefusal sees the
+// marker whatever precedes it), else the first line that is not a step timing
+// line (sling.StepPrefix, internal/sling/timer.go), falling back to the first
+// line so a failure is never logged as an empty string.
 func slingErrorLine(output string) string {
+	if reason, ok := dispatch.SlingRefusalReason(output); ok {
+		return reason
+	}
 	first := ""
 	for i, l := range strings.Split(output, "\n") {
 		if i == 0 {
@@ -296,6 +300,27 @@ func slingErrorLine(output string) string {
 		}
 	}
 	return first
+}
+
+// scheduledSlingDeferred is the error runScheduledSlingEntry returns for a
+// sling that refused the run bead because the town is at capacity: the seat
+// pool or the merge queue said not now. It is not a failed run, so the patrol
+// logs it as a deferral and leaves the failure counter alone.
+type scheduledSlingDeferred struct{ cause error }
+
+func (e *scheduledSlingDeferred) Error() string { return e.cause.Error() }
+func (e *scheduledSlingDeferred) Unwrap() error { return e.cause }
+
+// isScheduledSlingRefusal reports whether a failed sling was a refusal rather
+// than a break. The patrol runs `gt sling` as a subprocess, so the refusal
+// marker in its output is the contract (dispatch.SlingRefusalReason); the spec
+// dispatcher classifies the same refusals (isSpecSlingRefusal in internal/cmd).
+func isScheduledSlingRefusal(err error) bool {
+	if err == nil {
+		return false
+	}
+	_, ok := dispatch.SlingRefusalReason(err.Error())
+	return ok
 }
 
 func (d *Daemon) scheduledRunner() scheduledSlingRunner {
@@ -374,6 +399,14 @@ func (d *Daemon) runScheduledSlings() {
 		cancel()
 		if err == nil {
 			d.scheduledSlingFailures[e.Name] = 0
+			continue
+		}
+		var deferred *scheduledSlingDeferred
+		if errors.As(err, &deferred) {
+			// Capacity, not failure: the entry is retried next tick. The
+			// counter is neither advanced nor reset, so failures on either
+			// side of a deferral still add up.
+			d.logger.Printf("scheduled_slings: %s: deferred: %v", e.Name, deferred)
 			continue
 		}
 		d.scheduledSlingFailures[e.Name]++
@@ -465,6 +498,10 @@ func (d *Daemon) runScheduledSlingEntry(ctx context.Context, e ScheduledSlingEnt
 		// error so this tick counts toward the escalation.
 		if cerr := r.closeBead(ctx, e.Rig, id, scheduledSlingFailureReason); cerr != nil {
 			d.logger.Printf("scheduled_slings: %s: closing failed run %s: %v", e.Name, id, cerr)
+		}
+		// A refusal retires the bead the same way but is not a failed tick.
+		if isScheduledSlingRefusal(err) {
+			return &scheduledSlingDeferred{cause: err}
 		}
 		return err
 	}

@@ -442,6 +442,98 @@ func TestRunScheduledSlingEntry_ClosesBeadWhenSlingFails(t *testing.T) {
 	}
 }
 
+// capacityRefusals are the lines gt sling prints when it will not take a bead
+// for lack of room, as the pool guard and the merge-queue guard word them.
+var capacityRefusals = map[string]string{
+	"pool full":    "gt sling gt-x: exit status 1: sling refused: polecat pool full (2/2 claude-sonnet seats); raise polecat_pool.max_seats to spawn",
+	"total full":   "gt sling gt-x: exit status 1: sling refused: polecat pool total full (4/4 seats); raise polecat_pool.max_total to spawn",
+	"merge queue":  "gt sling gt-x: exit status 1: sling refused: merge queue has 5 ready; raise merge_queue.max_ready_for_dispatch",
+	"cobra prefix": "gt sling gt-x: exit status 1: Error: sling refused: polecat pool full (2/2 seats); raise polecat_pool.max_seats to spawn",
+}
+
+func TestRunScheduledSlingEntry_CapacityRefusalIsADeferralAndRetiresTheBead(t *testing.T) {
+	t.Parallel()
+	for name, refusal := range capacityRefusals {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeScheduledRunner{createID: "gt-x", slingErr: errors.New(refusal), now: time.Now()}
+			d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
+			err := d.runScheduledSlingEntry(context.Background(), docAuditEntry, time.Now())
+			var deferred *scheduledSlingDeferred
+			if !errors.As(err, &deferred) {
+				t.Fatalf("a capacity refusal must come back as a deferral, got %v", err)
+			}
+			if len(f.closedIDs) != 1 || f.closedIDs[0] != "gt-x" || !strings.HasPrefix(f.closedWhy[0], scheduledSlingFailureMarker) {
+				t.Fatalf("the refused run bead must still be retired with the failure marker, closed %v for %v", f.closedIDs, f.closedWhy)
+			}
+			if got := decideScheduledSling(f.beads, scheduledSlingInterval(docAuditEntry), 0, time.Now()).action; got != scheduledDispatch {
+				t.Errorf("the next tick after a refused sling = %v, want dispatch", got)
+			}
+		})
+	}
+}
+
+func TestRunScheduledSlingEntry_NonCapacitySlingFailureIsNotADeferral(t *testing.T) {
+	t.Parallel()
+	f := &fakeScheduledRunner{createID: "gt-x", slingErr: errors.New("gt sling gt-x: exit status 1: worktree verification failed"), now: time.Now()}
+	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
+	err := d.runScheduledSlingEntry(context.Background(), docAuditEntry, time.Now())
+	var deferred *scheduledSlingDeferred
+	if err == nil || errors.As(err, &deferred) {
+		t.Fatalf("a real sling failure must stay a failure, got %v", err)
+	}
+}
+
+func TestRunScheduledSlings_CapacityRefusalDoesNotCountOrEscalate(t *testing.T) {
+	t.Parallel()
+	f := &fakeScheduledRunner{createID: "gt-x", slingErr: errors.New(capacityRefusals["pool full"]), now: time.Now()}
+	d, esc := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
+	for i := 1; i <= scheduledSlingEscalateAfter+1; i++ {
+		d.runScheduledSlings()
+		if got := d.scheduledSlingFailures["doc-audit"]; got != 0 {
+			t.Fatalf("after refused tick %d: failure count = %d, want 0", i, got)
+		}
+	}
+	if len(*esc) != 0 {
+		t.Fatalf("capacity refusals must not escalate, got %v", *esc)
+	}
+	if len(f.slungIDs) != scheduledSlingEscalateAfter+1 {
+		t.Errorf("the entry must be retried every tick, slung %d times", len(f.slungIDs))
+	}
+	if len(f.closedIDs) != len(f.slungIDs) {
+		t.Errorf("every refused run bead must be retired, closed %v", f.closedIDs)
+	}
+}
+
+func TestRunScheduledSlings_ADeferralLeavesTheFailureCountAlone(t *testing.T) {
+	t.Parallel()
+	f := &fakeScheduledRunner{createID: "gt-x", slingErr: errors.New("boom"), now: time.Now()}
+	d, esc := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
+	d.runScheduledSlings()
+	f.slingErr = errors.New(capacityRefusals["total full"])
+	d.runScheduledSlings()
+	if got := d.scheduledSlingFailures["doc-audit"]; got != 1 {
+		t.Fatalf("a deferral between failures must neither add nor reset, count = %d, want 1", got)
+	}
+	f.slingErr = errors.New("boom")
+	d.runScheduledSlings()
+	d.runScheduledSlings()
+	if len(*esc) != 1 {
+		t.Fatalf("three real failures around a deferral must escalate once, got %v", *esc)
+	}
+}
+
+func TestSlingErrorLineKeepsTheRefusalLine(t *testing.T) {
+	t.Parallel()
+	stderr := "[sling] step admission took 1s (total 1s)\n" +
+		"warning: stale hook file ignored\n" +
+		"Error: sling refused: polecat pool full (2/2 seats); raise polecat_pool.max_seats to spawn\n"
+	got := slingErrorLine(stderr)
+	if !isScheduledSlingRefusal(errors.New(got)) {
+		t.Fatalf("summary %q lost the refusal marker", got)
+	}
+}
+
 func TestRunScheduledSlings_InvalidEntryIsSkippedNotFatal(t *testing.T) {
 	t.Parallel()
 	f := &fakeScheduledRunner{createID: "gt-ok", now: time.Now()}
