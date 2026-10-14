@@ -41,7 +41,7 @@ SEVERITY LEVELS:
 WORKFLOW:
   1. Agent encounters blocking issue
   2. Runs: gt escalate "Description" --severity high --reason "details"
-  3. Escalation is routed based on settings/escalation.json
+  3. Escalation is routed by the "escalation" section of settings/config.json
   4. Recipient acknowledges with: gt escalate ack <id>
   5. After resolution: gt escalate close <id> --reason "fixed"
 
@@ -59,11 +59,13 @@ RECURRING ALERTS:
   cycle after the condition goes away.
 
 CONFIGURATION:
-  Routing is configured in ~/gt/settings/escalation.json:
-  - routes: Map severity to action lists (bead, mail:gastown/witness, email:human, sms:human)
+  Routing is configured under "escalation" in ~/gt/settings/config.json:
+  - routes: Map severity to action lists (bead, mail:<address>, email:human, sms:human)
   - contacts: Human email/SMS for external notifications
   - stale_threshold: When unacked escalations are re-escalated (default: 4h)
   - max_reescalations: How many times to bump severity (default: 2)
+  A town not yet migrated to the two-file layout keeps the same document in
+  settings/escalation.json; gt config migrate folds it into settings/config.json.
 
 Examples:
   gt escalate "Build failing" --severity critical --reason "CI blocked"
@@ -154,7 +156,7 @@ When run without --dry-run, this command:
 
 Respects max_reescalations from config (default: 2) to prevent infinite escalation.
 
-The threshold is configured in settings/escalation.json.
+The threshold is stale_threshold under "escalation" in settings/config.json.
 
 Examples:
   gt escalate stale              # Re-escalate stale escalations
