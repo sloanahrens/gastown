@@ -141,7 +141,7 @@ All three sessions are the **same polecat**. The sandbox persists throughout.
 The sandbox is the **git worktree**—the polecat's working directory:
 
 ```
-~/gt/gastown/polecats/Toast/
+~/gt/gastown/polecats/Toast/gastown/
 ```
 
 This worktree:
@@ -159,7 +159,7 @@ When work completes, `gt done` leaves the feature branch and the bead's landing 
 
 ```bash
 # Handled by gt done
-git push origin polecat/<name>/<issue>@<suffix>
+git push origin polecat/<name>/<issue>+<suffix>
 # Branch and metadata remain available to the landing worker and cleanup
 ```
 
@@ -183,8 +183,8 @@ The slot is the **name allocation** from the polecat pool:
 ```
 
 The slot:
-- Determines the sandbox path (`polecats/Toast/`)
-- Maps to a tmux session (`gt-gastown-Toast`)
+- Determines the sandbox path (`polecats/Toast/gastown/`)
+- Maps to a tmux session (`gt-Toast`)
 - Appears in attribution (`gastown/polecats/Toast`)
 - Persists until explicit nuke
 
