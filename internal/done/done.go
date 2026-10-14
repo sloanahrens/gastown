@@ -604,7 +604,7 @@ func DoneSourceCloseSkipReasonForHead(bd beads.Client, issueID string, issue *be
 	if err := validateConcreteSourceIssue(issueID, issue); err != nil {
 		return err.Error(), true
 	}
-	if attachment := beads.ParseAttachmentFields(issue); attachment != nil && strings.EqualFold(strings.TrimSpace(attachment.MergeStrategy), "local") {
+	if keepsOpenForLocalMerge(issue) {
 		return fmt.Sprintf("issue %s has merge_strategy=local — skipping close", issueID), false
 	}
 	if skipReason, fatal := doneReviewOnlyCloseSkipReasonForHead(bd, issueID, issue, currentHead); skipReason != "" {
@@ -614,6 +614,13 @@ func DoneSourceCloseSkipReasonForHead(bd beads.Client, issueID string, issue *be
 		return fmt.Sprintf("issue %s has %d unchecked acceptance criteria — skipping close", issueID, unchecked), false
 	}
 	return "", false
+}
+
+// keepsOpenForLocalMerge reports a bead whose merge_strategy=local keeps it
+// open on purpose: gt done leaves it alone rather than closing or refusing it.
+func keepsOpenForLocalMerge(issue *beads.Issue) bool {
+	attachment := beads.ParseAttachmentFields(issue)
+	return attachment != nil && strings.EqualFold(strings.TrimSpace(attachment.MergeStrategy), "local")
 }
 
 func doneReviewOnlyCloseSkipReason(bd beads.Client, issueID string, issue *beads.Issue) (string, bool) {
@@ -1386,6 +1393,16 @@ func completeWithoutCode(r *doneRun, sub doneSubmission, target, baseRef string,
 	bd := sub.sourceBD
 	if bd == nil {
 		bd = beads.New(r.cwd)
+	}
+	// Unchecked criteria leave the bead open with the session retired and gt
+	// done exiting 0, so refuse while the session is up, as the commits-ahead
+	// path does. A bead kept open for merge_strategy=local is left alone; a
+	// closed one has nothing left to leave open.
+	if source, _, _ := loadDoneSourceIssue(bd, r.issueID, sub.sourceIssue); source != nil &&
+		source.Status != string(beads.StatusClosed) && !keepsOpenForLocalMerge(source) {
+		if err := refuseUncheckedCriteria(r.issueID, source); err != nil {
+			return err
+		}
 	}
 	reviewHead, _ := repo.Rev("HEAD")
 	if skipReason, fatal := DoneSourceCloseSkipReasonForHead(bd, r.issueID, sub.sourceIssue, reviewHead); skipReason != "" {
