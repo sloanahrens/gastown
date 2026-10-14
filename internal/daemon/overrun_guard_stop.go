@@ -33,23 +33,28 @@ const (
 //  2. stop its session (a failed stop clears the pause again and does nothing
 //     else, the gt-fojqs ordering: a live seat must not stay parked);
 //  3. checkpoint the worktree;
-//  4. hand the bead back (status open, assignee cleared, needs-split) so the
+//  4. push the kept branch to origin; a failed push is retried every tick,
+//     and the hand-back waits for it, so its comment never names a branch that
+//     exists only in the worktree;
+//  5. hand the bead back (status open, assignee cleared, needs-split) so the
 //     roster no longer counts the seat; a bead found closed or re-slung to
 //     another polecat is left alone. The attention item for the stop is
 //     derived from that hand-back (collectOverrunStopped);
-//  5. release the seat: clear the pause, so the polecat name and its worktree
-//     can take new work. The kept branch is safe without the park: the
-//     bead's comment names it and the worktree is not touched.
+//  6. release the seat: reset its agent bead (hook_bead cleared, so the roster
+//     stops counting it as dead-hooked), then clear the pause, so the polecat
+//     name and its worktree can take new work. The kept branch is safe without
+//     the park: it is on origin, the bead's comment names it, and the worktree
+//     is not touched.
 //
 // submittedNow is read before step 1 and before step 4: a seat that has
 // submitted (gt done running, or gt:ready-to-land) is not stopped, and a bead
 // that gained gt:ready-to-land mid-stop is not handed back.
 //
 // A refused checkpoint fails step 3 and is retried once per tick. After
-// overrunCheckpointMaxAttempts failures the stop gives up on it: step 4 runs
-// with a note in the comment that the worktree may hold uncommitted work, and
-// step 5 is skipped, so the seat stays paused (and the worktree unreused)
-// until an operator looks. The hand-back's needs-split label raises the
+// overrunCheckpointMaxAttempts failures the stop gives up on it: steps 4 and 5
+// run (the push keeps what was committed), the comment carrying a note that the
+// worktree may hold uncommitted work, and step 6 is skipped, so the seat stays
+// paused (and the worktree unreused) until an operator looks. The hand-back's needs-split label raises the
 // attention item. A stop resumed past step 2 first checks
 // the pause is still down and no session runs on the seat; if not, the seat
 // was taken back and the stop ends without a hand-back.
@@ -127,7 +132,7 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 
 	// A stop resumed after its session was stopped may find the seat taken
 	// back: an operator lifted the pause, or a new session started on it.
-	// Steps 3 and 4 then act on a bead that session holds, so the stop ends.
+	// Steps 3 to 5 then act on a bead that session holds, so the stop ends.
 	if resumed && s.stopLapsed != nil {
 		why, err := s.stopLapsed(seat)
 		if err != nil {
@@ -169,8 +174,8 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 		}
 	}
 
-	// 4. Hand the bead back, unless the work was submitted while the stop ran:
-	// a bead that is gt:ready-to-land must not also carry needs-split. The seat
+	// Steps 4 and 5 run unless the work was submitted while the stop ran: a
+	// bead that is gt:ready-to-land must not also carry needs-split. The seat
 	// is stopped and its work checkpointed, so release the pause and finish.
 	if s.submittedNow != nil && s.submittedNow(seat) {
 		if err := s.clearPause(seat); err != nil {
@@ -182,6 +187,24 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 		d.logger.Printf("overrun_guard: %s on %s submitted during the stop; not handed back", who, st.Bead)
 		return
 	}
+
+	// 4. Push the kept branch, so the comment below never names a branch that
+	// exists only in the worktree and the seat reads recoverable. A failed
+	// push is retried every tick: the hand-back waits for it.
+	if st.PushedAt.IsZero() && s.push != nil {
+		pushSeat := seat
+		pushSeat.Bead, pushSeat.Branch = st.Bead, st.Branch
+		if err := s.push(pushSeat); err != nil {
+			d.logger.Printf("overrun_guard: stop %s on %s: push of branch %s failed, retrying next tick: %v", who, st.Bead, branch, err)
+			return
+		}
+		st.PushedAt = now
+		if !save() {
+			return
+		}
+	}
+
+	// 5. Hand the bead back.
 	handed := seat
 	handed.Bead, handed.Branch = st.Bead, branch
 	note := ""
@@ -195,7 +218,7 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 		return
 	}
 	if st.CheckpointGaveUp {
-		// 5 is skipped: the park is what keeps the name, and the worktree
+		// 6 is skipped: the park is what keeps the name, and the worktree
 		// under it, from taking new work while it holds uncommitted state.
 		st.StoppedAt = now
 		if !save() {
@@ -206,11 +229,22 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 			who, st.Bead, elapsed.Round(time.Second), branch)
 		return
 	}
-	// 5. Release the seat. The bead no longer names it, so nothing restarts it
+	// 6. Release the seat. The bead no longer names it, so nothing restarts it
 	// on this sling; leaving the pause would make parkedReuseBlocker refuse the
 	// name until an operator ran gt agent resume, with no notice that it was
 	// parked. A failed clear leaves the stop pending, so the next tick repeats
 	// the hand-back (HandBack finishes a bead it already released) and the clear.
+	// The agent bead is reset first, while the pause still keeps a new sling off
+	// the name: one that still names the handed-back bead reads as a dead-hooked
+	// seat to the pool roster.
+	if s.resetAgentBead != nil {
+		reset := seat
+		reset.Bead = st.Bead
+		if err := s.resetAgentBead(reset); err != nil {
+			d.logger.Printf("overrun_guard: WARNING: %s: agent bead not reset after the hand-back of %s: %v", who, st.Bead, err)
+			return
+		}
+	}
 	if err := s.clearPause(seat); err != nil {
 		d.logger.Printf("overrun_guard: WARNING: %s: pause marker not cleared after the hand-back of %s: %v", who, st.Bead, err)
 		return
@@ -267,6 +301,8 @@ func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 		return nil
 	}
 	s.stopLapsed = d.overrunStopLapsed
+	s.push = d.overrunPushBranch
+	s.resetAgentBead = d.overrunResetAgentBead
 	s.handBack = func(seat overrunSeat, elapsed time.Duration, note string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), overrunHandBackTimeout)
 		defer cancel()
@@ -282,6 +318,62 @@ func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 		return err
 	}
 	return s
+}
+
+// overrunPushBranch pushes the seat's kept branch to origin at the commit the
+// local branch holds (git push origin <sha>:refs/heads/<branch>), never forced.
+// A seat with no worktree or no branch has nothing to push; a branch that
+// cannot be read or pushed is an error, so the stop retries it.
+func (d *Daemon) overrunPushBranch(seat overrunSeat) error {
+	polecatsDir := filepath.Join(d.config.TownRoot, seat.Rig, "polecats")
+	workDir := resolvePolecatWorktree(polecatsDir, seat.Polecat, seat.Rig)
+	if workDir == "" {
+		d.logger.Printf("overrun_guard: %s/%s: no worktree to push", seat.Rig, seat.Polecat)
+		return nil
+	}
+	g := d.gitAt(workDir)
+	branch := seat.Branch
+	if branch == "" {
+		current, err := g.CurrentBranch()
+		if err != nil {
+			return fmt.Errorf("read branch: %w", err)
+		}
+		branch = current
+	}
+	if branch == "" || branch == "HEAD" {
+		d.logger.Printf("overrun_guard: %s/%s: no branch to push", seat.Rig, seat.Polecat)
+		return nil
+	}
+	sha, err := g.Rev("refs/heads/" + branch)
+	if err != nil {
+		return fmt.Errorf("resolve branch %s: %w", branch, err)
+	}
+	if err := g.Push("origin", sha+":refs/heads/"+branch, false); err != nil {
+		return fmt.Errorf("push %s: %w", branch, err)
+	}
+	return nil
+}
+
+// overrunResetAgentBead resets the stopped seat's agent bead the way gt polecat
+// nuke does (hook_bead cleared, agent_state nuked), so the pool roster stops
+// counting the seat as dead-hooked. A bead that is missing or no longer names
+// seat.Bead is left alone: it was reset already, or the seat took new work.
+func (d *Daemon) overrunResetAgentBead(seat overrunSeat) error {
+	id := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(d.config.TownRoot, seat.Rig), seat.Rig, seat.Polecat)
+	return resetOverrunAgentBead(beads.New(d.config.TownRoot), id, seat.Bead)
+}
+
+// resetOverrunAgentBead is overrunResetAgentBead over c: it resets agent bead
+// id only while its hook_bead is still bead.
+func resetOverrunAgentBead(c beads.Client, id, bead string) error {
+	_, fields, err := beads.GetAgentBead(c, id)
+	if err != nil {
+		return fmt.Errorf("read agent bead %s: %w", id, err)
+	}
+	if fields == nil || fields.HookBead != bead {
+		return nil
+	}
+	return beads.ResetAgentBeadForReuse(c, id, "overrun stop")
 }
 
 // overrunStopLapsed reports why a stop that began on an earlier tick no longer

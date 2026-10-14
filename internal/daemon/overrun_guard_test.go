@@ -87,6 +87,10 @@ type overrunFake struct {
 	failOn map[string]error
 	// handedBack lists the beads handBack received, with the branch it was given.
 	handedBack []string
+	// pushed lists the bead and branch each push received; agentBeadsReset the
+	// bead each agent-bead reset was for.
+	pushed          []string
+	agentBeadsReset []string
 	// handBackNotes lists the note each handBack call carried, in the same order.
 	handBackNotes []string
 
@@ -134,6 +138,20 @@ func (f *overrunFake) seams() overrunSeams {
 			return nil
 		},
 		checkpoint: func(seat overrunSeat) error { return f.step("checkpoint", seat) },
+		push: func(seat overrunSeat) error {
+			if err := f.step("push", seat); err != nil {
+				return err
+			}
+			f.pushed = append(f.pushed, seat.Bead+" "+seat.Branch)
+			return nil
+		},
+		resetAgentBead: func(seat overrunSeat) error {
+			if err := f.step("reset-agent-bead", seat); err != nil {
+				return err
+			}
+			f.agentBeadsReset = append(f.agentBeadsReset, seat.Bead)
+			return nil
+		},
 		stopLapsed: func(seat overrunSeat) (string, error) {
 			f.calls = append(f.calls, "recheck "+seat.Rig+"/"+seat.Polecat)
 			return f.lapsed, f.lapsedErr
