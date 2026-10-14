@@ -75,17 +75,28 @@ func resolveDirectiveContext(explicitRig string) (townRoot, rigName string, err 
 		return "", "", fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	if explicitRig != "" {
-		if err := validateDirectiveRig(townRoot, explicitRig); err != nil {
-			return "", "", err
-		}
-		return townRoot, explicitRig, nil
-	}
-
-	if cwd, err := os.Getwd(); err == nil {
-		rigName = detectRigFromPath(townRoot, cwd)
+	cwd, _ := os.Getwd() // an unreadable cwd only turns off rig auto-detection
+	rigName, err = resolveDirectiveRigIn(townRoot, explicitRig, cwd)
+	if err != nil {
+		return "", "", err
 	}
 	return townRoot, rigName, nil
+}
+
+// resolveDirectiveRigIn is the rig half of resolveDirectiveContext in a known
+// town: an explicit rig must pass validateDirectiveRig, otherwise the rig is
+// the one cwd sits in, if any.
+func resolveDirectiveRigIn(townRoot, explicitRig, cwd string) (string, error) {
+	if explicitRig != "" {
+		if err := validateDirectiveRig(townRoot, explicitRig); err != nil {
+			return "", err
+		}
+		return explicitRig, nil
+	}
+	if cwd == "" {
+		return "", nil
+	}
+	return detectRigFromPath(townRoot, cwd), nil
 }
 
 // validateDirectiveRig rejects an explicit --rig that cannot name a directory
