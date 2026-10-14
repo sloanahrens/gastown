@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -338,7 +339,18 @@ func TestCheckStaleMaintenanceGCDoesNotWaitOnEscalations(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	d, rec := staleGCTestDaemon(t, town)
-	d.maint.dispatch = nil // the production default: a goroutine
+	// The production dispatch, a goroutine, with a count of what it started and
+	// a signal for each one that finished. A hang here is caught by the gate's
+	// -timeout: the unit tier allows no timers.
+	var dispatched atomic.Int32
+	finished := make(chan struct{}, 4)
+	d.maint.dispatch = func(fn func()) {
+		dispatched.Add(1)
+		go func() {
+			fn()
+			finished <- struct{}{}
+		}()
+	}
 	stuck := &stuckEscalateNotifier{Notifier: rec, entered: make(chan struct{}, 16), release: make(chan struct{})}
 	d.notifier = stuck
 	var releaseOnce sync.Once
@@ -349,39 +361,22 @@ func TestCheckStaleMaintenanceGCDoesNotWaitOnEscalations(t *testing.T) {
 	}
 	discoverStaleGCDatabases(d, "gt", "hq", "om")
 
-	tick := func() {
-		t.Helper()
-		returned := make(chan struct{})
-		go func() {
-			d.checkStaleMaintenanceGC(gcTestNow)
-			close(returned)
-		}()
-		select {
-		case <-returned:
-		case <-time.After(5 * time.Second):
-			t.Fatal("the stale-gc check waited on a hung escalation instead of handing it off")
-		}
-	}
+	// The tick returns while the first escalation is still stuck: had it waited
+	// on the delivery, this call would never come back.
+	d.checkStaleMaintenanceGC(gcTestNow)
+	<-stuck.entered // The delivery is under way, off this goroutine.
 
-	tick()
-	select {
-	case <-stuck.entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the delivery never reached gt escalate off the loop")
+	// Still stuck on the first alert: this tick starts no second delivery.
+	d.checkStaleMaintenanceGC(gcTestNow)
+	if n := dispatched.Load(); n != 1 {
+		t.Errorf("dispatched %d deliveries across two ticks, want 1", n)
 	}
-	tick() // Still stuck on the first alert: this one must start no second delivery.
 	if n := len(stuck.entered); n != 0 {
 		t.Errorf("a tick during a stuck delivery started %d more escalation(s), want 0", n)
 	}
 
 	release()
-	deadline := time.Now().Add(5 * time.Second)
-	for d.staleGCCheckRunning.Load() {
-		if time.Now().After(deadline) {
-			t.Fatal("the delivery never finished after escalations were released")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	<-finished
 	if n := len(rec.Escalations()); n != 3 {
 		t.Errorf("escalations = %d, want one per stale database (3)", n)
 	}
