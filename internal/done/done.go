@@ -1347,20 +1347,28 @@ func resolveDoneTarget(r *doneRun, source *beads.Issue) (string, error) {
 // the rig default): the already-landed check and the close record use it, so
 // work bound for a non-default branch is verified there, not on the default.
 // Polecats must have at least one commit unless the work is non-code
-// (gastown#1484). The error text must not mention --cleanup-status=clean:
-// agents read errors and self-bypass.
+// (gastown#1484). Only an explicit --cleanup-status clean, or a bead the
+// polecat already closed, passes that guard: the observed "clean" of a fresh
+// branch is what a polecat that did nothing reports too. The error text must
+// not mention --cleanup-status=clean: agents read errors and self-bypass.
 func completeWithoutCode(r *doneRun, sub doneSubmission, target, baseRef string, isNoMergeTask bool) error {
 	repo := r.deps.repo
-	if r.opts.polecatEnv && r.cleanupStatus != "clean" && !isNoMergeTask {
+	alreadyClosed := sub.sourceIssue != nil && sub.sourceIssue.Status == string(beads.StatusClosed)
+	if r.opts.polecatEnv && r.opts.cleanupStatus != "clean" && !isNoMergeTask && !alreadyClosed {
 		// A branch already pushed with its work whose target has since moved
 		// on is not empty-handed (GH#wd7).
+		// BranchPushedToRemote alone is not proof: with no remote branch it
+		// compares HEAD against origin's default branch, which a fresh
+		// branch trivially satisfies, so origin must hold the branch.
 		pushed, unpushed, pushErr := repo.BranchPushedToRemote(r.branch, "origin")
-		if pushErr != nil || !pushed || unpushed != 0 {
+		remoteTip, tipErr := repo.PushRemoteBranchTip("origin", r.branch)
+		if pushErr != nil || tipErr != nil || remoteTip == "" || !pushed || unpushed != 0 {
 			return fmt.Errorf("cannot complete: no commits on branch ahead of %s\n"+
 				"Polecats must have at least 1 commit to submit.\n"+
+				"If the bead has nothing to implement: gt bead close %s --reason=\"no-changes: <why>\", then gt done\n"+
 				"If the bug was already fixed upstream: gt done --status DEFERRED\n"+
 				"If you're blocked: gt done --status ESCALATED",
-				baseRef)
+				baseRef, r.issueID)
 		}
 	}
 

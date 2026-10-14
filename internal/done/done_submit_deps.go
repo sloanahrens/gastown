@@ -75,6 +75,10 @@ type doneOptions struct {
 	// polecatEnv is GT_POLECAT being set: a polecat must bring at least one
 	// commit unless the branch is already pushed or the work is non-code.
 	polecatEnv bool
+	// cleanupStatus is --cleanup-status as the caller passed it, empty when
+	// gt done observed the worktree. The zero-commit guard trusts only this:
+	// an observed "clean" is also what a branch that did nothing reports.
+	cleanupStatus string
 	// preVerified skips the local gate. Only the crew path honors it.
 	preVerified bool
 }
@@ -112,6 +116,7 @@ func (r *doneRun) useRealSubmitDeps(o Options) {
 		allowReverts:        o.AllowReverts,
 		allowThrowawayPaths: o.AllowThrowawayPaths,
 		polecatEnv:          r.env("GT_POLECAT") != "",
+		cleanupStatus:       o.CleanupStatus,
 	}
 
 	localGate, sleep, delays := submitSeams(o)
