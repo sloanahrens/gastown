@@ -405,8 +405,9 @@ func TestIntegrationDetectRevertedMerges_UnresolvableTargetFailsClosed(t *testin
 
 // TestReportRevertedMerges_RefusesStaleBranch checks the operator-facing half:
 // a refusal naming the undone commit, the files the rewrite cause would touch,
-// both remedies and the override, and the branch's diff stat printed so the
-// polecat can see whose files are in its diff.
+// both remedies — the override is offered without the flag that buys it — and
+// the branch's diff stat printed so the polecat can see whose files are in its
+// diff.
 func TestIntegrationReportRevertedMerges_RefusesStaleBranch(t *testing.T) {
 	t.Parallel()
 	s := newRevertScenario(t)
@@ -428,12 +429,15 @@ func TestIntegrationReportRevertedMerges_RefusesStaleBranch(t *testing.T) {
 		"merged: other work",
 		"git fetch origin && git rebase origin/main",
 		"beside it in ",
-		"gt done --allow-reverts",
+		"or ask for an override",
 		"git diff --stat origin/main...HEAD",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("refusal message missing %q:\n%s", want, msg)
 		}
+	}
+	if strings.Contains(msg, "--allow-reverts") {
+		t.Errorf("refusal message advertises the override flag — agents read refusal text and self-bypass:\n%s", msg)
 	}
 	// The rewrite remedy names the files the guard flagged, so the branch that
 	// hit that cause reads which of its lines matched (gt-tceuf).

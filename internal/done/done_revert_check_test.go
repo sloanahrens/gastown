@@ -49,9 +49,10 @@ func detected(r git.RevertReport, err error) func() (git.RevertReport, error) {
 
 // TestReportRevertedMergesRefusesWorkThatUndoesMergedCommits (gt-63sz): the
 // refusal names each undone commit and path, gives both causes the diff can
-// have with the remedy for each, and names the override the way gt done's help
-// and flag do, so a polecat whose own rewrite of a line was read as a revert is
-// not sent to rebase a tree that is already current (gt-tceuf).
+// have with the remedy for each, and never mentions the override flag, since
+// agents read refusal text and self-bypass. A polecat whose own rewrite of a
+// line was read as a revert is sent to the rewrite remedy, not to rebase a tree
+// that is already current (gt-tceuf).
 func TestReportRevertedMergesRefusesWorkThatUndoesMergedCommits(t *testing.T) {
 	t.Parallel()
 	g := fakeRevertGit{stat: " keep.txt | 1 -\n", subjects: map[string]string{"aaaaaaaaaaaa": "merged: other work"}}
@@ -67,8 +68,7 @@ func TestReportRevertedMergesRefusesWorkThatUndoesMergedCommits(t *testing.T) {
 		"undoes: new.txt",
 		"looks like it undoes recent work",
 		"git fetch origin && git rebase origin/main",
-		"beside it in keep.txt, new.txt",
-		"gt done --allow-reverts",
+		"beside it in keep.txt, new.txt, or ask for an override",
 		"git diff --stat origin/main...HEAD",
 	} {
 		if !strings.Contains(err.Error(), want) {
@@ -79,6 +79,9 @@ func TestReportRevertedMergesRefusesWorkThatUndoesMergedCommits(t *testing.T) {
 	// the stale one as the reader's case (gt-tceuf).
 	if strings.Contains(err.Error(), "Your working tree is older than") {
 		t.Errorf("refusal states the tree is stale as fact:\n%s", err)
+	}
+	if strings.Contains(err.Error(), "--allow-reverts") {
+		t.Errorf("refusal advertises the override flag — agents read refusal text and self-bypass:\n%s", err)
 	}
 }
 

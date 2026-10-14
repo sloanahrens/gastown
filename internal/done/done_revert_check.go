@@ -361,11 +361,14 @@ func relocatedMergesNote(g revertReportGit, relocated []git.RevertedMerge) strin
 }
 
 // revertedMergeRefusal builds the refusal error for a branch that undoes merged
-// work. Two shapes produce the same detection — a tree stale against its base,
-// and a deliberate rewrite of a line a recent commit added — so the message
-// gives both causes and the remedy for each rather than asserting the stale one
-// (gt-tceuf). unnamed is the reverted paths a deletes-by-spec waiver could not
-// cover, and is empty unless the bead carries that label.
+// work. The message deliberately does not name the flag that overrides it:
+// agents read refusal text and self-bypass, so the text says what to do about
+// the branch, or to ask for an override, instead. Two shapes produce the same
+// detection — a tree stale against its base, and a deliberate rewrite of a line
+// a recent commit added — so the message gives both causes and the remedy for
+// each rather than asserting the stale one (gt-tceuf). unnamed is the reverted
+// paths a deletes-by-spec waiver could not cover, and is empty unless the bead
+// carries that label.
 func revertedMergeRefusal(g revertReportGit, target string, found []git.RevertedMerge, unnamed []string) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "refusing to submit: this branch undoes work already merged to %s\n\n", target)
@@ -398,9 +401,8 @@ func revertedMergeRefusal(g revertReportGit, target string, found []git.Reverted
 		"(your tree) - (that base): a revert of every commit merged in between, plus your own "+
 		"change, which deletes other people's merged work. Integrate with:\n"+
 		"      git fetch origin && git rebase %s\n\n", target)
-	fmt.Fprintf(&b, "  A deliberate rewrite of a line one of those commits added. %s, or override "+
-		"the refusal:\n"+
-		"      gt done --allow-reverts\n\n", rewritesLineRemedy(found))
+	fmt.Fprintf(&b, "  A deliberate rewrite of a line one of those commits added. %s, or ask "+
+		"for an override.\n\n", rewritesLineRemedy(found))
 	fmt.Fprintf(&b, "Confirm the branch lists only YOUR files and re-run gt done:\n"+
 		"  git diff --stat %s...HEAD", target)
 	return fmt.Errorf("%s", b.String())
