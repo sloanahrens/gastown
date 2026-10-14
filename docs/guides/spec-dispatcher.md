@@ -134,7 +134,12 @@ shaped, report-only bead labeled `scheduled:<name>` and `formula:<formula>`, wit
 the entry's `vars` sorted in a `## Formula vars` section, and does not sling. The
 entry must leave `agent` empty, since the dispatcher picks the seat. The open
 bead is the queue: the entry's skip-open rule holds the next run, and the patrol
-never retires it as stalled however long a full pool keeps it waiting.
+never retires it as stalled however long a full pool keeps it waiting. The bead's
+priority is the entry's `priority` (3 when unset), held at
+`polecat_pool.max_priority`, so a default entry is created at P2 and the
+dispatcher accepts it. A run still open and unhooked after the entry's `interval`
+(at least 6 hours) counts as a failed tick, so the third in a row escalates
+instead of the entry skipping the open run forever.
 
 ## Seats and budget
 

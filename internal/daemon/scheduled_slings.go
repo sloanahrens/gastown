@@ -490,7 +490,8 @@ func (d *Daemon) runScheduledSlingEntry(ctx context.Context, e ScheduledSlingEnt
 	}
 	// A spec-dispatched run bead is open and unhooked for as long as the
 	// dispatcher queues it, so the sling budget says nothing about its age: a
-	// zero staleAfter recovers nothing and a queued run stays skip-open.
+	// zero staleAfter recovers nothing and a queued run stays skip-open, until
+	// reportUntakenSpecRuns reads one the dispatcher never takes as a failure.
 	staleAfter := d.scheduledStaleRunAfter()
 	if e.Dispatch == scheduledDispatchSpec {
 		staleAfter = 0
@@ -504,6 +505,9 @@ func (d *Daemon) runScheduledSlingEntry(ctx context.Context, e ScheduledSlingEnt
 	}
 	if plan.action != scheduledDispatch {
 		d.logger.Printf("scheduled_slings: %s: %s", e.Name, plan.action)
+		if plan.action == scheduledSkipOpen && e.Dispatch == scheduledDispatchSpec {
+			return reportUntakenSpecRuns(beadsForLabel, e, now)
+		}
 		return nil
 	}
 	// A gated or failed gate is not a failed run: no bead exists, the sling

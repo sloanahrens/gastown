@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"log"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
@@ -73,11 +76,99 @@ func TestRunScheduledSlingEntry_SpecDispatchCreatesOneLabelledBeadAndNeverSlings
 	if want := []string{"scheduled:deep-review", "formula:mol-deep-review"}; !slices.Equal(run.Labels, want) {
 		t.Errorf("labels = %v, want %v", run.Labels, want)
 	}
-	if run.Priority != defaultScheduledSlingPriority {
-		t.Errorf("priority = %d, want the default %d", run.Priority, defaultScheduledSlingPriority)
+	if want := config.DefaultSeatRefillMaxPriority; run.Priority != want {
+		t.Errorf("priority = %d, want the dispatcher ceiling %d (the entry sets none)", run.Priority, want)
 	}
 	if run.Acceptance == "" {
 		t.Error("the acceptance field must be set")
+	}
+}
+
+// specRunOf is the bead createSpecDispatchedRun makes, as the dispatcher's
+// candidate filter sees it once the board hands it over open and unassigned.
+func specRunOf(t *testing.T, d *Daemon, f *fakeScheduledRunner, e ScheduledSlingEntry) specdispatch.Spec {
+	t.Helper()
+	if err := d.runScheduledSlingEntry(context.Background(), e, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.runs) != 1 {
+		t.Fatalf("created = %+v", f.runs)
+	}
+	s := specSpecOf(f.runs[0])
+	s.ID, s.Type, s.Status = "gt-run1", "task", "open"
+	return s
+}
+
+// The run the scheduler creates must clear the dispatcher's own filter under
+// the default polecat_pool.max_priority; a P3 bead was backlog to it and was
+// never slung.
+func TestRunScheduledSlingEntry_SpecDispatchRunIsDispatchable(t *testing.T) {
+	t.Parallel()
+	for name, prio := range map[string]int{"no priority": 0, "above the ceiling": 4, "below the ceiling": 1} {
+		e := specAuditEntry
+		e.Priority = prio
+		f := &fakeScheduledRunner{createID: "gt-run1", now: time.Now()}
+		d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{e}, f)
+		s := specRunOf(t, d, f, e)
+		if ok, why := specdispatch.Eligible(s, config.DefaultSeatRefillMaxPriority, nil); !ok {
+			t.Errorf("%s: priority %d not dispatchable under the default config: %s", name, s.Priority, why)
+		}
+	}
+}
+
+// A configured ceiling is the bound, not the built-in P2.
+func TestRunScheduledSlingEntry_SpecDispatchFollowsConfiguredCeiling(t *testing.T) {
+	t.Parallel()
+	for _, ceiling := range []int{0, 1, 3} {
+		f := &fakeScheduledRunner{createID: "gt-run1", now: time.Now()}
+		d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{specAuditEntry}, f)
+		ts := config.NewTownSettings()
+		ts.PolecatPool = &config.PolecatPool{MaxPriority: &ceiling}
+		if err := os.MkdirAll(filepath.Join(d.config.TownRoot, "settings"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := config.SaveTownSettings(config.TownSettingsPath(d.config.TownRoot), ts); err != nil {
+			t.Fatal(err)
+		}
+		s := specRunOf(t, d, f, specAuditEntry)
+		if want := min(defaultScheduledSlingPriority, ceiling); s.Priority != want {
+			t.Errorf("ceiling %d: priority = %d, want %d", ceiling, s.Priority, want)
+		}
+		if ok, why := specdispatch.Eligible(s, ceiling, nil); !ok {
+			t.Errorf("ceiling %d: not dispatchable: %s", ceiling, why)
+		}
+	}
+}
+
+// A spec run the dispatcher never takes is a failed tick, so the third one
+// escalates; a run still inside its bound, or already hooked, is not.
+func TestRunScheduledSlingEntry_SpecDispatchUntakenRunEscalates(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-untakenSpecBound(specAuditEntry) - time.Hour)
+
+	f := &fakeScheduledRunner{beads: []scheduledBead{{ID: "gt-run1", Status: "open", CreatedAt: old}}}
+	d, escalations := newScheduledTestDaemon(t, []ScheduledSlingEntry{specAuditEntry}, f)
+	for range scheduledSlingEscalateAfter + 1 {
+		d.runScheduledSlings()
+	}
+	if len(*escalations) != 1 || !strings.Contains((*escalations)[0], "gt-run1") {
+		t.Errorf("escalations = %v, want one naming gt-run1", *escalations)
+	}
+	if len(f.runs) != 0 || len(f.closedIDs) != 0 {
+		t.Errorf("an untaken spec run must be neither replaced nor closed: created %v closed %v", f.runs, f.closedIDs)
+	}
+
+	for name, b := range map[string]scheduledBead{
+		"queued inside the bound": {ID: "gt-run2", Status: "open", CreatedAt: now.Add(-time.Hour)},
+		"hooked past the bound":   {ID: "gt-run3", Status: "hooked", CreatedAt: old},
+		"in progress":             {ID: "gt-run4", Status: "in_progress", CreatedAt: old},
+	} {
+		f := &fakeScheduledRunner{beads: []scheduledBead{b}}
+		d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{specAuditEntry}, f)
+		if err := d.runScheduledSlingEntry(context.Background(), specAuditEntry, now); err != nil {
+			t.Errorf("%s: err = %v, want skip-open", name, err)
+		}
 	}
 }
 
