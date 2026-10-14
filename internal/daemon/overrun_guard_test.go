@@ -86,6 +86,11 @@ type overrunFake struct {
 	failOn map[string]error
 	// handedBack lists the beads handBack received, with the branch it was given.
 	handedBack []string
+
+	// submitted is what the submittedNow re-check answers from the start;
+	// readyAfterStop makes it answer true once the session has been stopped,
+	// the bead gaining gt:ready-to-land between the listing and the hand-back.
+	submitted, readyAfterStop bool
 }
 
 // step logs one stop step and returns the error injected for it.
@@ -108,6 +113,9 @@ func (f *overrunFake) seams() overrunSeams {
 			}
 			f.nudges = append(f.nudges, seat.Rig+"/"+seat.Polecat)
 			return nil
+		},
+		submittedNow: func(overrunSeat) bool {
+			return f.submitted || (f.readyAfterStop && len(f.stops) > 0)
 		},
 		pause:      func(seat overrunSeat) error { return f.step("pause", seat) },
 		clearPause: func(seat overrunSeat) error { return f.step("clear-pause", seat) },
