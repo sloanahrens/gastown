@@ -16,6 +16,20 @@ type recordingStore struct {
 	ids      []string
 	comments []string
 	err      error
+	// issue is what Show returns; the zero value reads as the stopped seat's
+	// hooked bead.
+	issue beads.Issue
+}
+
+func (r *recordingStore) Show(id string) (*beads.Issue, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
+	is := r.issue
+	if is.Status == "" {
+		is.Status, is.Assignee = "hooked", stoppedSeat
+	}
+	return &is, nil
 }
 
 func (r *recordingStore) Update(id string, opts beads.UpdateOptions) error {
@@ -34,7 +48,7 @@ func TestBeadWriter_HandBackWritesTheReleaseCalls(t *testing.T) {
 	store := &recordingStore{}
 	w := NewBeadWriter(store, "overrun_guard")
 
-	if err := HandBack(context.Background(), w, "gt-abc", "polecat/nux/gt-abc+x1", 21*time.Minute); err != nil {
+	if err := HandBack(context.Background(), w, "gt-abc", stoppedSeat, "polecat/nux/gt-abc+x1", 21*time.Minute); err != nil {
 		t.Fatalf("HandBack: %v", err)
 	}
 
@@ -63,11 +77,23 @@ func TestBeadWriter_HandBackWritesTheReleaseCalls(t *testing.T) {
 	}
 }
 
+func TestBeadWriter_StateReadsStatusAndAssignee(t *testing.T) {
+	t.Parallel()
+	store := &recordingStore{issue: beads.Issue{ID: "gt-abc", Status: "open", Assignee: "gastown/polecats/capable"}}
+	status, assignee, err := NewBeadWriter(store, "overrun_guard").State(context.Background(), "gt-abc")
+	if err != nil || status != "open" || assignee != "gastown/polecats/capable" {
+		t.Errorf("State = %q, %q, %v; want open, gastown/polecats/capable, nil", status, assignee, err)
+	}
+}
+
 func TestBeadWriter_ErrorsAndCancelledContext(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("bd down")
 	store := &recordingStore{err: boom}
 	w := NewBeadWriter(store, "overrun_guard")
+	if _, _, err := w.State(context.Background(), "gt-abc"); !errors.Is(err, boom) {
+		t.Errorf("State error = %v, want the store's", err)
+	}
 	if err := w.SetStatus(context.Background(), "gt-abc", "open"); !errors.Is(err, boom) {
 		t.Errorf("SetStatus error = %v, want the store's", err)
 	}

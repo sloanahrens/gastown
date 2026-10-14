@@ -233,9 +233,21 @@ func TestNudge_MessageAsksForSplitProposal(t *testing.T) {
 
 // bdFake is an in-memory bead behind the production BeadWriter: HandBack runs
 // over it for real, so a test can read the bead the roster would read.
-type bdFake struct{ issue beads.Issue }
+type bdFake struct {
+	issue beads.Issue
+	// failLabel makes the needs-split label write fail, the partial hand-back.
+	failLabel bool
+}
+
+func (b *bdFake) Show(id string) (*beads.Issue, error) {
+	is := b.issue
+	return &is, nil
+}
 
 func (b *bdFake) Update(id string, opts beads.UpdateOptions) error {
+	if len(opts.AddLabels) > 0 && b.failLabel {
+		return errors.New("bd down")
+	}
 	if opts.Status != nil {
 		b.issue.Status = *opts.Status
 	}
@@ -255,7 +267,7 @@ func TestStop_HandBackLeavesTheBeadUnhooked(t *testing.T) {
 	}}
 	w := polecat.NewBeadWriter(bd, overrunActor)
 
-	if err := polecat.HandBack(context.Background(), w, "gt-aaa11", "polecat/capable/gt-aaa11+x1", 20*time.Minute); err != nil {
+	if err := polecat.HandBack(context.Background(), w, "gt-aaa11", "gastown/polecats/capable", "polecat/capable/gt-aaa11+x1", 20*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 
@@ -264,6 +276,69 @@ func TestStop_HandBackLeavesTheBeadUnhooked(t *testing.T) {
 	}
 	if !reflect.DeepEqual(bd.issue.Labels, []string{polecat.NeedsSplitLabel}) {
 		t.Errorf("labels = %v, want [needs-split]", bd.issue.Labels)
+	}
+}
+
+// The first hand-back opened and unassigned the bead but failed at the label;
+// the dispatcher slung it on, or it was closed. The retry must not reopen it or
+// clear the new polecat's assignee.
+func TestStop_HandBackRetryLeavesAReSlungOrClosedBeadAlone(t *testing.T) {
+	t.Parallel()
+	const stopped = "gastown/polecats/capable"
+	for _, tc := range []struct {
+		name, status, assignee string
+	}{
+		{"re-slung to another polecat", string(beads.IssueStatusHooked), "gastown/polecats/nux"},
+		{"re-slung and started", "in_progress", "gastown/polecats/nux"},
+		{"closed", "closed", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bd := &bdFake{
+				issue:     beads.Issue{ID: "gt-aaa11", Status: string(beads.IssueStatusHooked), Assignee: stopped},
+				failLabel: true,
+			}
+			w := polecat.NewBeadWriter(bd, overrunActor)
+			err := polecat.HandBack(context.Background(), w, "gt-aaa11", stopped, "b", 20*time.Minute)
+			if err == nil || errors.Is(err, polecat.ErrHandBackSkipped) {
+				t.Fatalf("first hand-back err = %v, want the label failure", err)
+			}
+			if bd.issue.Status != "open" || bd.issue.Assignee != "" {
+				t.Fatalf("partial hand-back left %q assigned to %q, want open and unassigned", bd.issue.Status, bd.issue.Assignee)
+			}
+
+			// Between the ticks: the dispatcher re-slings it, or it lands.
+			bd.issue.Status, bd.issue.Assignee, bd.failLabel = tc.status, tc.assignee, false
+			err = polecat.HandBack(context.Background(), w, "gt-aaa11", stopped, "b", 20*time.Minute)
+			if !errors.Is(err, polecat.ErrHandBackSkipped) {
+				t.Errorf("retry err = %v, want ErrHandBackSkipped", err)
+			}
+			if bd.issue.Status != tc.status || bd.issue.Assignee != tc.assignee || len(bd.issue.Labels) != 0 {
+				t.Errorf("retry changed the bead to %q assigned to %q labels %v, want %q assigned to %q untouched",
+					bd.issue.Status, bd.issue.Assignee, bd.issue.Labels, tc.status, tc.assignee)
+			}
+		})
+	}
+}
+
+// With nobody else on the bead the retry finishes the half-released hand-back.
+func TestStop_HandBackRetryFinishesAnUntouchedPartialHandBack(t *testing.T) {
+	t.Parallel()
+	const stopped = "gastown/polecats/capable"
+	bd := &bdFake{
+		issue:     beads.Issue{ID: "gt-aaa11", Status: string(beads.IssueStatusHooked), Assignee: stopped},
+		failLabel: true,
+	}
+	w := polecat.NewBeadWriter(bd, overrunActor)
+	if err := polecat.HandBack(context.Background(), w, "gt-aaa11", stopped, "b", 20*time.Minute); err == nil {
+		t.Fatal("first hand-back succeeded, want the label failure")
+	}
+	bd.failLabel = false
+	if err := polecat.HandBack(context.Background(), w, "gt-aaa11", stopped, "b", 20*time.Minute); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if bd.issue.Status != "open" || bd.issue.Assignee != "" || !reflect.DeepEqual(bd.issue.Labels, []string{polecat.NeedsSplitLabel}) {
+		t.Errorf("bead = %q assigned to %q labels %v, want open, unassigned, [needs-split]", bd.issue.Status, bd.issue.Assignee, bd.issue.Labels)
 	}
 }
 

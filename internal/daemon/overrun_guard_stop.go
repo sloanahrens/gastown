@@ -33,7 +33,8 @@ const (
 //     else, the gt-fojqs ordering: a live seat must not stay parked);
 //  3. checkpoint the worktree;
 //  4. hand the bead back (status open, assignee cleared, needs-split) so the
-//     roster no longer counts the seat. The attention item for the stop is
+//     roster no longer counts the seat; a bead found closed or re-slung to
+//     another polecat is left alone. The attention item for the stop is
 //     derived from that hand-back (collectOverrunStopped).
 //
 // Progress is saved after each step, so a step that fails is logged and
@@ -171,7 +172,14 @@ func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 		defer cancel()
 		store := beads.NewPlain(d.config.TownRoot, bdMutationRoutingEnv(d.config.TownRoot),
 			beads.WithBin(d.bdPathOrDefault())).WithTimeout(overrunHandBackTimeout)
-		return polecat.HandBack(ctx, polecat.NewBeadWriter(store, overrunActor), seat.Bead, seat.Branch, elapsed)
+		err := polecat.HandBack(ctx, polecat.NewBeadWriter(store, overrunActor), seat.Bead,
+			seat.Rig+"/polecats/"+seat.Polecat, seat.Branch, elapsed)
+		if errors.Is(err, polecat.ErrHandBackSkipped) {
+			// The bead is no longer this seat's: nothing to release, nothing to repeat.
+			d.logger.Printf("overrun_guard: %s/%s: %v", seat.Rig, seat.Polecat, err)
+			return nil
+		}
+		return err
 	}
 	return s
 }
