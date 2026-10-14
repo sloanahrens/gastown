@@ -493,7 +493,7 @@ func handleMoleculeComplete(cwd, townRoot, moleculeID string, dryRun bool) error
 
 	if dryRun {
 		fmt.Printf("[dry-run] Would unpin work for %s\n", agentID)
-		fmt.Printf("[dry-run] Would send POLECAT_DONE to witness\n")
+		fmt.Printf("[dry-run] Would run gt done --status DEFERRED\n")
 		return nil
 	}
 
@@ -519,7 +519,7 @@ func handleMoleculeComplete(cwd, townRoot, moleculeID string, dryRun bool) error
 
 	// For polecats, use gt done to signal completion
 	if roleCtx.Role == RolePolecat {
-		fmt.Printf("%s Signaling completion to witness...\n", style.Bold.Render("📤"))
+		fmt.Printf("%s Running gt done --status DEFERRED...\n", style.Bold.Render("📤"))
 
 		doneCmd := exec.Command("gt", "done", "--status", "DEFERRED")
 		doneCmd.Stdout = os.Stdout

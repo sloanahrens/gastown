@@ -1455,7 +1455,7 @@ func (m *Manager) removeWithOptionsLocked(name string, opts RemoveOptions) error
 	// fails closed the same way recovery/listing do.
 	if !opts.Force {
 		if activeMR, blocker := m.ActiveMRRemovalBlocker(name); blocker != "" {
-			return fmt.Errorf("cannot remove polecat %s: MR %s is still pending in merge queue (%s)\nRefinery will process the MR and clean up after merge\nUse --force to override (risks data loss)", name, activeMR, blocker)
+			return fmt.Errorf("cannot remove polecat %s: MR %s is still pending in merge queue (%s)\nThe landing worker lands the MR; clean up after it merges\nUse --force to override (risks data loss)", name, activeMR, blocker)
 		}
 	}
 

@@ -275,8 +275,8 @@ func TestResolveReconcileID(t *testing.T) {
 		{name: "raw id override", rawID: "gt-gastown-witness", want: "gt-gastown-witness"},
 		{name: "id and arg mutually exclusive", rawID: "gt-gastown-witness", arg: "gastown/witness", wantErr: "mutually exclusive"},
 		{name: "missing both", wantErr: "expected"},
-		{name: "crew without name", arg: "gastown/crew/", wantErr: "expected"},
-		{name: "too many segments", arg: "gastown/crew/sloan/extra", wantErr: "expected"},
+		{name: "crew without name", arg: "gastown/crew/", wantErr: "expected <rig>/<name> or <rig>/crew/<name>"},
+		{name: "too many segments", arg: "gastown/crew/sloan/extra", wantErr: "expected <rig>/<name> or <rig>/crew/<name>"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -284,6 +284,11 @@ func TestResolveReconcileID(t *testing.T) {
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+				}
+				// <rig>/refinery parses as a polecat named refinery; the
+				// message must not offer it as a distinct form.
+				if strings.Contains(err.Error(), "refinery") {
+					t.Fatalf("error names the retired refinery role: %v", err)
 				}
 				return
 			}

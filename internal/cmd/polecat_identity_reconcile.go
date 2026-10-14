@@ -104,11 +104,11 @@ func resolveReconcileID(townRoot, rawID, arg string) (string, error) {
 		return beads.PolecatBeadIDWithPrefix(prefix, rig, parts[1]), nil
 	case 3:
 		if parts[1] != constants.RoleCrew || parts[2] == "" {
-			return "", fmt.Errorf("expected <rig>/<name>, <rig>/refinery, or <rig>/crew/<name>, got %q", arg)
+			return "", fmt.Errorf("expected <rig>/<name> or <rig>/crew/<name>, got %q", arg)
 		}
 		return beads.CrewBeadIDWithPrefix(prefix, rig, parts[2]), nil
 	default:
-		return "", fmt.Errorf("expected <rig>/<name>, <rig>/refinery, or <rig>/crew/<name>, got %q", arg)
+		return "", fmt.Errorf("expected <rig>/<name> or <rig>/crew/<name>, got %q", arg)
 	}
 }
 

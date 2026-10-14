@@ -214,8 +214,8 @@ func printPolecatTestScopeBlock(w io.Writer, reason, command string, matched []s
 		fmt.Fprintf(w, "  packages: %s\n", strings.Join(matched, " "))
 	}
 	fmt.Fprintf(w, "  command:  %s\n", command)
-	fmt.Fprintln(w, "  Whole-package runs of internal/cmd, daemon, polecat or refinery take 3-10 minutes")
-	fmt.Fprintln(w, "  each and there is no need for one: the refinery runs the full suite once per")
+	fmt.Fprintln(w, "  Whole-package runs of internal/cmd, daemon or polecat take 3-10 minutes")
+	fmt.Fprintln(w, "  each and there is no need for one: the landing worker runs the full suite once per")
 	fmt.Fprintln(w, "  submission (gt done covers the light changed packages). Iterate on what you touched:")
 	fmt.Fprintln(w, "    go test ./internal/<pkg>/ -run 'TestOne|TestTwo'")
 	fmt.Fprintln(w, "  (gt-pxlg)")

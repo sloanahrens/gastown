@@ -291,7 +291,7 @@ func escalateParkedPromptOnce(hook permissionRequestInput, tempDir string, escal
 	body := promptEscalationBody(hook, shape)
 	if !escalate(subject, body) {
 		_ = os.WriteFile(marker, []byte(parkedPromptFailedMarker+"\n"), 0o600)
-		return " Recording the escalation failed; mail the witness if this call is required."
+		return " Recording the escalation failed; run gt escalate if this call is required."
 	}
 	return " The escalation was recorded as a bead."
 }
