@@ -106,6 +106,8 @@ type overrunState struct {
 	StopBeganAt      time.Time `json:"stop_began_at,omitzero"`
 	SessionStoppedAt time.Time `json:"session_stopped_at,omitzero"`
 	CheckpointedAt   time.Time `json:"checkpointed_at,omitzero"`
+	// PushedAt is when the kept branch reached origin; the hand-back waits for it.
+	PushedAt time.Time `json:"pushed_at,omitzero"`
 
 	// CheckpointFailures counts the checkpoint attempts that failed in this
 	// stop. At overrunCheckpointMaxAttempts the stop hands the bead back

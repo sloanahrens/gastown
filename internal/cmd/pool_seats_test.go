@@ -758,3 +758,53 @@ func TestHasBeadsDatabase(t *testing.T) {
 		}
 	})
 }
+
+// TestPoolSeatSessionsDropsAnOverrunStoppedSeatOnceItsAgentBeadIsReset pins
+// gt-2u3pv: the overrun guard hands the bead back (open, unassigned) and stops
+// the session, but the polecat's agent bead kept naming it as hook_bead, so the
+// roster counted the seat as dead-hooked until an operator reset it by hand.
+// The stop now resets the agent bead the way a nuke does; the same seat read
+// over that bead counts nothing.
+func TestPoolSeatSessionsDropsAnOverrunStoppedSeatOnceItsAgentBeadIsReset(t *testing.T) {
+	t.Parallel()
+	pool := &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3}
+	handedBack := &beads.Issue{ID: "gt-0pt32", Status: "open", Labels: []string{polecat.NeedsSplitLabel}}
+
+	cases := []struct {
+		name   string
+		fields *beads.AgentFields
+		want   int
+	}{
+		{"agent bead still names the handed-back bead", &beads.AgentFields{AgentState: "working", HookBead: "gt-0pt32"}, 1},
+		{"agent bead reset by the stop", &beads.AgentFields{AgentState: string(beads.AgentStateNuked)}, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			writeTestRigsConfig(t, town, "gastown")
+			writeTownPolecatDir(t, town, "gastown", "nux")
+			reads := poolSeatReads{
+				agentBead: func(beads.Client, string) (*beads.Issue, *beads.AgentFields, error) {
+					return &beads.Issue{ID: "gt-gastown-polecat-nux"}, c.fields, nil
+				},
+				assigned: func(assignedIssueLookup, string, string) polecatActiveWorkEvidence {
+					return polecatActiveWorkEvidence{}
+				},
+				show: func(_ beads.Client, id string) (*beads.Issue, error) {
+					if id != handedBack.ID {
+						return nil, beads.ErrNotFound
+					}
+					return handedBack, nil
+				},
+			}
+			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, poolDispositionAnswering(town, reads), nil, pool)
+			if err != nil {
+				t.Fatalf("poolSeatSessionsWith: %v", err)
+			}
+			if n := poolSeatCount(pool, sessions); n != c.want {
+				t.Fatalf("pool seat count = %d, want %d (%+v)", n, c.want, sessions)
+			}
+		})
+	}
+}

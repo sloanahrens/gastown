@@ -83,6 +83,14 @@ type overrunSeams struct {
 	checkpoint  func(seat overrunSeat) error
 	handBack    func(seat overrunSeat, elapsed time.Duration, note string) error
 
+	// push puts the seat's kept branch on origin, after the checkpoint and
+	// before handBack, so the comment never names a branch that exists only
+	// in the worktree. resetAgentBead clears the seat's agent bead of the
+	// handed-back bead, in the release step before clearPause. nil means no
+	// push / no reset.
+	push           func(seat overrunSeat) error
+	resetAgentBead func(seat overrunSeat) error
+
 	// stopLapsed re-reads, before a resumed stop runs its checkpoint or
 	// hand-back, whether the stop still owns the seat. It returns why not
 	// (the pause marker is gone, a session is running) or "" when it does; an
