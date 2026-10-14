@@ -1,41 +1,39 @@
-description = "mol-deep-review's work step: a daily, skip-if-quiet, read-only review of recent risk-path landings plus a rotating slice. Expands mol-polecat-work's implement step."
+description = "mol-deep-review's work step: a read-only review of recent risk-path landings, a rotating slice with its living docs, or both, by mode. Expands mol-polecat-work's implement step."
 formula = "deep-review-run"
 type = "expansion"
 version = 2
 
 [[template]]
 id = "review"
-title = "Review recent risk-path landings and a rotating slice"
+title = "Review risk-path landings, a rotating slice and its docs"
 description = """
 You orchestrate; subagents read. Nothing in this step edits the repository.
-Each Bash call starts a fresh shell, so a block that only reads the run
-directory begins with `D=/tmp/deep-review-{{issue}}`. A block that creates it or
-redirects into it writes the literal path, because the polecat-paths guard
+A block that only reads the run directory begins with
+`D=/tmp/deep-review-{{issue}}` (each Bash call starts a fresh shell). A block that
+creates it or redirects into it writes the literal path: the polecat-paths guard
 refuses a target built from `$D`.
 
 **1. Load the ledger and plan. The script decides; you do not.**
 ```bash
 mkdir -p /tmp/deep-review-{{issue}}
-bd list -l scheduled:deep-review --all --limit 60 --json > /tmp/deep-review-{{issue}}/runs.json &&
+bd list -l {{run_label}} --all --limit 60 --json > /tmp/deep-review-{{issue}}/runs.json &&
   jq -r '(if type == "object" then .data else . end)[] | select(.id != "{{issue}}") | .notes // empty' /tmp/deep-review-{{issue}}/runs.json > /tmp/deep-review-{{issue}}/prev-notes.txt &&
   cat "${GT_TOWN_ROOT:-$HOME/gt}/.runtime/landings/gastown.jsonl" > /tmp/deep-review-{{issue}}/landings-all.jsonl &&
   git fetch origin {{base_branch}} &&
   bash scripts/deep-review.sh plan --landings /tmp/deep-review-{{issue}}/landings-all.jsonl \\
-    --prev-notes /tmp/deep-review-{{issue}}/prev-notes.txt --repo . --ref origin/{{base_branch}} \\
+    --prev-notes /tmp/deep-review-{{issue}}/prev-notes.txt --repo . --ref origin/{{base_branch}} --mode {{mode}} \\
     --slice {{slice_files}} --slice-bytes {{slice_bytes}} --out /tmp/deep-review-{{issue}} > /tmp/deep-review-{{issue}}/plan.txt
 echo "plan exit: $?"; cat /tmp/deep-review-{{issue}}/plan.txt
 ```
-This block writes the literal path: the polecat-paths guard refuses a `mkdir`
-or a redirect whose target is built from a variable. The jq reads both shapes of
-`bd --json`: the bare array and the `BD_MACHINE=1` envelope with its `data`
-array. Run the block as written.
-A plan that exits non-zero is a failure, never a quiet day: the script's
-stderr says why (exit 3 is an input it cannot trust). Run
+The jq reads the bare array and the `BD_MACHINE=1` envelope. A plan that exits non-zero is a failure, never a quiet day (exit 3 is
+an input the script cannot trust): run
 `gt escalate "deep-review plan failed: <stderr>" --severity medium`, then
 `gt done --status ESCALATED`.
 
 The plan prints `quiet=`, `landings=`, `unparsed=`, the cursors, and writes
-`$D/landings.jsonl` and `$D/slice.txt`.
+`$D/landings.jsonl`, `$D/slice.txt` and `$D/docs.txt`, leaving empty what mode
+`{{mode}}` skips: the landings in `slice`, the slice and docs in `landings`.
+Mode `slice` also skips step 8 and step 9's `cursor:` line: no landing cursor moves.
 
 **2. A quiet day ends here.** If `quiet=true`:
 ```bash
@@ -47,38 +45,40 @@ Then skip to the submit step, which closes {{issue}} and runs
 **3. Pick up what earlier runs left.** `bash scripts/deep-review.sh queued
 --prev-notes $D/prev-notes.txt` prints confirmed findings an earlier run
 recorded but did not file (over the cap, a dry run, or past the verifiers'
-capacity and so unverified). Send each through step 5
-again, then file it as step 6 describes, ahead of this run's new findings. A
-non-zero exit from that command is a ledger the script cannot trust, not an
-empty queue: escalate as step 1 does and exit `ESCALATED`.
+capacity and so unverified). Send each through step 5 again, then file it as
+step 6 describes, ahead of this run's new findings. A non-zero exit is a ledger
+the script cannot trust, not an empty queue: escalate as step 1 does.
 
 **4. Review (at most {{max_reviewers}} subagents, read-only).** The tree is
 `origin/{{base_branch}}`, not the worktree: reviewers read a file with
-`git show origin/{{base_branch}}:<path>`. Split the work by area, not by count:
+`git show origin/{{base_branch}}:<path>`. Split the work by area:
 - each landing in `$D/landings.jsonl`: review `git diff <landed_commit>^1
   <landed_commit>` (land commits are merges; the first parent is main)
-  against the code on origin/{{base_branch}}. Group landings that touch the
-  same package under one reviewer.
+  against the code on origin/{{base_branch}}. Group landings that touch one
+  package under one reviewer.
 - the files in `$D/slice.txt`: read each file whole. Open a test file only by
   grepping it (`git show origin/{{base_branch}}:<test path> | grep -n <symbol>`)
-  for the symbols under review, and read the matching test functions, not the
-  whole test file.
+  for the symbols under review, and read only the matching test functions.
+- the docs in `$D/docs.txt`: check every behavioral claim, command, flag and
+  path against the code on origin/{{base_branch}}. A contradiction is a finding of
+  kind `doc-drift`, severity P3, fingerprint `<doc>:<short claim anchor>:doc-drift`,
+  `file:line` the contradicting code, its claim one line naming the stale text
+  and ending `-> <exact replacement text>`. Docs under docs/plans, docs/design,
+  docs/adr and docs/research are historical: never review them for drift.
 
 Every reviewer prompt carries: read-only; never fetch or pull in
 mayor/rig; cite file:line on origin/{{base_branch}}; report a finding only
-with a concrete failure scenario (input or state, wrong behavior); skip style;
-skip anything the ledger already holds, an earlier run's `digest-only` line
-included (`bash scripts/deep-review.sh seen --prev-notes $D/prev-notes.txt
-<fingerprint>` exits 0). A fingerprint is
-`<file>:<symbol>:<kind>`, for example
+with a concrete failure scenario (input or state, wrong behavior); skip style
+and anything the ledger already holds, `digest-only` lines included (`bash scripts/deep-review.sh seen --prev-notes $D/prev-notes.txt
+<fingerprint>` exits 0). A fingerprint is `<file>:<symbol>:<kind>`, such as
 `internal/daemon/daemon.go:StopDaemon:held-lock-unlinked`. Each finding returns:
 fingerprint, file:line, claim (one line), failure scenario, severity P1|P2|P3.
 
 **5. Verify (one subagent per three findings, at most {{max_verifiers}}).**
-Hand each verifier up to three findings, with the job of refuting each: read the
-cited code, trace the scenario, and answer CONFIRMED or REFUTED with the lines
-that decide it. Drop REFUTED. Drop a finding whose fix is already on
-origin/{{base_branch}}. When findings exceed that capacity, hand them out in
+Each verifier takes up to three findings and tries to refute each: read the
+cited code, trace the scenario, answer CONFIRMED or REFUTED with the lines
+that decide it. Drop REFUTED, and any finding whose fix is already on
+origin/{{base_branch}}. Past capacity, hand them out in
 priority order, all P1, then all P2, then all P3 (step 3's findings first within
 a severity). A finding left past capacity is never dropped: it is unverified,
 and step 7 records it. Count `total` (findings verified), `refuted` and
@@ -86,45 +86,47 @@ and step 7 records it. Count `total` (findings verified), `refuted` and
 
 **6. File the CONFIRMED findings.** Each P1 and P2 finding, P1 first, becomes one
 shaped bead labelled `review-deep` with the finding's priority, whatever path it
-cites: polecats fix it, and om review and the landing gate still gate the
-landing. A P3 finding (a queued P3 from step 3 included) is not filed alone.
+cites: om review and the landing gate still gate the landing. A P3 finding (a queued P3 from step 3 included) is not filed alone.
 Record it, add the same line to the ledger file (this run's notes are not in
-it yet), then list the batches that are ready:
+it), then list the ready batches:
 ```bash
 D=/tmp/deep-review-{{issue}}
 gt bead note {{issue}} "p3: <YYYY-MM-DD> <fingerprint> <file:line> <claim>"
 echo "p3: <YYYY-MM-DD> <fingerprint> <file:line> <claim>" >> /tmp/deep-review-{{issue}}/prev-notes.txt
 bash scripts/deep-review.sh batches --prev-notes $D/prev-notes.txt
 ```
-`batches` prints `batch <package dir>` and then that package's p3 lines. File
-one bead per `batch` block: label `review-deep`, priority 3, a title naming the
+`batches` prints `batch <package dir>`, then that package's p3 lines. File one
+bead per `batch` block: label `review-deep`, priority 3, a title naming the
 package, `## Goal` listing each finding as file:line and claim, one
-`## Acceptance` checkbox per finding, and `## Size` one worker.
+`## Acceptance` checkbox per finding, and `## Size` one worker. A block holding
+both kinds files two beads, `doc-drift` findings apart. A `doc-drift` bead's
+`## Goal` lists each doc, the claim, the file:line that contradicts it and the
+replacement text; `## Gate` says docs-only change; `## Constraints` forbid touching code.
 - A finding that cites a guard (`internal/cmd/tap_guard*`, `scripts/guards/`),
   Dolt data deletion (`internal/doltserver/`, `internal/doltbackup/`), process
   lifecycle (`internal/daemon/`, `internal/supervisor/`, `internal/estop/`) or
-  an install script: the bead body names that risk path in `## Constraints`, so
-  the reviewer reads the diff with care.
+  an install script: the bead body names that risk path in `## Constraints`.
 - Cap: at most {{max_beads}} beads per run, batch beads included. A P1 or P2
-  finding past the cap is `queued` in step 7, and the next run files it first;
-  a batch past the cap stays unfiled, and the next `batches` lists it again.
+  finding past the cap is `queued` in step 7 and the next run files it first;
+  a batch past the cap stays unfiled for the next `batches`.
 
 Write the bead body to `/tmp/deep-review-{{issue}}/body.md` (the literal path)
-with a quoted heredoc (no backticks or code in double-quoted text). It needs `## Goal`, `## Constraints`, `## Out of scope`,
-`## Gate` (what the landing gate runs for this bead, plus any extra test only
-this diff needs), `## Size`, and `## Acceptance` with 1-6 checkbox items:
+with a quoted heredoc. It needs `## Goal`, `## Constraints`, `## Out of scope`,
+`## Gate` (what the landing gate runs, plus any extra test only this diff
+needs), `## Size`, and `## Acceptance` with 1-6 checkbox items:
 ```bash
 gt bead create "<one line>" --type bug -p <1|2|3> -l review-deep -q \\
   -d "$(cat $D/body.md)"
 gt spec lint <new id>          # must exit 0; fix the body until it does
 ```
-With `{{dry_run}}` `true`, file nothing: every confirmed finding is `queued` and
-the digest lists it under `would file`.
+With `{{dry_run}}` `true`, file nothing: every confirmed finding is `queued`,
+listed in the digest under `would file`.
 
 **7. Record the findings, before any cursor.** A `finding:` line per finding a
 bead covers (a batch bead covers each of its findings), a `queued:` line per P1
 or P2 finding past the cap, a `queued:` line per unverified finding (below), and a `reviewed:` note per line of
-`$D/reviewed-lines.txt` (each line is already `reviewed: <date> <path>`):
+`$D/reviewed-lines.txt` (each is already `reviewed: <date> <path>`) and per doc in
+`$D/docs.txt` (`reviewed: <date> <doc>`, dated as those lines are):
 ```bash
 gt bead note {{issue}} "finding: <fingerprint> <bead id | digest-only>"
 gt bead note {{issue}} "queued: <fingerprint> <P1|P2|P3> <file:line> <claim>"
@@ -132,37 +134,33 @@ gt bead note {{issue}} "<one line of reviewed-lines.txt>"
 gt bead comment {{issue}} "$(cat $D/digest.md)"
 ```
 A filed bead takes a `finding:` line naming it; a P1 or P2 finding past the
-cap, and every one of a dry run, takes a `queued:` line, which later runs pick up
-in step 3 until a `finding:` line names it. A P3 finding has its `p3:` line from
-step 6 and takes a `finding:` line once a batch bead covers it. `digest-only` is what a run before this
-one wrote for a finding it filed no bead for: such a line stays as written, and
-the fingerprint is `seen`, so the finding is not re-filed.
+cap, and every one of a dry run, takes a `queued:` line, which step 3 of a later
+run picks up until a `finding:` line names it. A P3 finding has its `p3:` line
+from step 6 and takes a `finding:` line once a batch bead covers it. An older
+run's `digest-only` line stays as written and makes the fingerprint `seen`.
 
 A finding the verifiers had no capacity for takes a `queued:` line with its own
-severity, whatever that is. A P3 gets one too: a `p3:` line is a confirmed
-finding that `batches` files as it stands. Step 3 of the next run verifies the
-queued finding. Never leave a finding
+severity, whatever that is; step 3 of the next run verifies it. Never leave a finding
 unrecorded because it is a P3 or looks cheap to find again: the 21-day file
 skip means a later run does not re-read its file. The digest has:
-landings reviewed (bead, commit), `unparsed=` from the plan, slice files read,
-reviewers and verifiers used, then numbered `filed`, `would file` and
-`queued` lists, `refuted=<n> of <total>` and `unverified=<n>`, the findings left
-past the verifiers' capacity (0 when none). When total >= 5 and refuted = 0,
+landings reviewed (bead, commit), `unparsed=` from the plan, slice files and docs
+read, reviewers and verifiers used, then numbered `filed`, `would file` and
+`queued` lists, `refuted=<n> of <total>` and `unverified=<n>` (the findings past
+the verifiers' capacity, 0 when none). When total >= 5 and refuted = 0,
 add the line `UNCHALLENGED: no finding was refuted`.
 
 **8. Clear the risk-path items you covered** (live runs only; skip when
-`{{dry_run}}` is `true`). For each reviewed landing: `gt bead review <bead>
-PASS` when no CONFIRMED finding cites its paths, `gt bead review <bead> FAIL`
-when one does.
+`{{dry_run}}` is `true` or the mode is `slice`). For each reviewed landing run
+`gt bead review <bead> PASS`, or `FAIL` when a CONFIRMED finding cites its paths.
 
-**9. Commit the cursor, last.** This line is what tells the next run these
+**9. Commit the cursor, last** (not in mode `slice`). It tells the next run these
 landings are covered, so it follows every line above:
 ```bash
 gt bead note {{issue}} "cursor: <reviewed_until_new from the plan> <rotation_cursor_new from the plan>"
 ```
 
-**Done when:** the plan exited 0, the digest comment, every `finding:` and
-`queued:`, `reviewed:` and `p3:` line and then the `cursor:` line are on
-{{issue}} (`bd show {{issue}}`), and (live runs) every filed bead passed
-`gt spec lint`.
+**Done when:** the plan exited 0, the digest comment, every `finding:`,
+`queued:`, `reviewed:` and `p3:` line and then the `cursor:` line (none in mode
+`slice`) are on {{issue}} (`bd show {{issue}}`), and (live runs) every filed bead
+passed `gt spec lint`.
 """

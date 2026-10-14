@@ -187,7 +187,7 @@ func TestDeepReviewSpendsFewerTokensPerFinding(t *testing.T) {
 		}
 	}
 	// The cursor stays the last ledger line, after the reviewed: notes.
-	if strings.Index(text, "reviewed-lines.txt") > strings.Index(text, "**9. Commit the cursor, last.**") {
+	if strings.Index(text, "reviewed-lines.txt") > strings.Index(text, "**9. Commit the cursor, last**") {
 		t.Error("deep-review-run writes the reviewed: lines after the cursor")
 	}
 
@@ -216,5 +216,89 @@ func TestDeepReviewSpendsFewerTokensPerFinding(t *testing.T) {
 	}
 	if !strings.Contains(string(mol), "| slice_bytes |") {
 		t.Error("mol-deep-review's variable table lacks slice_bytes")
+	}
+}
+
+// TestDeepReviewRunsAsSliceOrLandingsJob guards gt-32nag: one formula serves
+// two scheduled jobs. The mode and run_label vars reach the plan and the
+// ledger read, a slice run moves no landing cursor, and the run bead's label
+// comes from the sling, not from the formula.
+func TestDeepReviewRunsAsSliceOrLandingsJob(t *testing.T) {
+	t.Parallel()
+	raw, err := GetEmbeddedFormulaContent("deep-review-run")
+	if err != nil {
+		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
+	}
+	text := string(raw)
+	if strings.Contains(text, "scheduled:deep-review") {
+		t.Error("deep-review-run hardcodes the run label instead of {{run_label}}")
+	}
+	for _, want := range []string{
+		"bd list -l {{run_label}} --all",
+		"--mode {{mode}}",
+		"Mode `slice` also skips step 8 and step 9's `cursor:` line: no landing cursor moves.",
+		"`{{dry_run}}` is `true` or the mode is `slice`",
+		"**9. Commit the cursor, last** (not in mode `slice`)",
+		"the `cursor:` line (none in mode\n`slice`)",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("deep-review-run lacks %q", want)
+		}
+	}
+
+	mol, err := GetEmbeddedFormulaContent("mol-deep-review")
+	if err != nil {
+		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
+	}
+	var f struct {
+		Vars map[string]struct {
+			Default string `toml:"default"`
+		} `toml:"vars"`
+	}
+	if _, err := toml.Decode(string(mol), &f); err != nil {
+		t.Fatalf("decode mol-deep-review: %v", err)
+	}
+	for name, want := range map[string]string{
+		"mode":      "both",
+		"run_label": "scheduled:deep-review",
+	} {
+		if got := f.Vars[name].Default; got != want {
+			t.Errorf("mol-deep-review var %s default = %q, want %q", name, got, want)
+		}
+		if !strings.Contains(string(mol), "| "+name+" |") {
+			t.Errorf("mol-deep-review's variable table lacks %s", name)
+		}
+	}
+}
+
+// TestDeepReviewReviewsLivingDocsForDrift guards gt-32nag: the slice run reads
+// the docs the plan chose, reports each contradiction as a P3 doc-drift
+// finding that carries its replacement text, never reviews a historical doc,
+// files doc-drift findings as a docs-only batch, and notes each doc it read.
+func TestDeepReviewReviewsLivingDocsForDrift(t *testing.T) {
+	t.Parallel()
+	raw, err := GetEmbeddedFormulaContent("deep-review-run")
+	if err != nil {
+		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
+	}
+	text := string(raw)
+	for _, want := range []string{
+		"the docs in `$D/docs.txt`",
+		"every behavioral claim, command, flag and\n  path against the code on origin/{{base_branch}}",
+		"kind `doc-drift`, severity P3, fingerprint `<doc>:<short claim anchor>:doc-drift`",
+		"`-> <exact replacement text>`",
+		"docs/plans, docs/design,\n  docs/adr and docs/research are historical: never review them for drift",
+		"A `doc-drift` bead's",
+		"`## Gate` says docs-only change; `## Constraints` forbid touching code",
+		"the file:line that contradicts it and the\nreplacement text",
+		"`reviewed: <date> <doc>`",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("deep-review-run lacks %q", want)
+		}
+	}
+	// The doc reviewed: notes are written before the cursor, as the code ones are.
+	if strings.Index(text, "`reviewed: <date> <doc>`") > strings.Index(text, "**9. Commit the cursor, last**") {
+		t.Error("deep-review-run notes the reviewed docs after the cursor")
 	}
 }
