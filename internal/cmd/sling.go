@@ -31,7 +31,7 @@ var slingCmd = &cobra.Command{
 	Long: `Sling work onto an agent's hook and start working immediately.
 
 This is THE command for assigning work in Gas Town. It handles:
-  - Existing agents (crew, witness, refinery)
+  - Existing agents (crew members and named polecats)
   - Auto-spawning polecats when target is a rig
   - Formula instantiation and wisp creation
 
@@ -148,7 +148,7 @@ func init() {
 	slingCmd.Flags().StringVar(&slingAgent, "agent", "", "Override agent for this sling (e.g., claude, claude-haiku, or custom alias). A polecat_pool seat is honored or the sling is refused; the pool never swaps in the other seat")
 	slingCmd.Flags().BoolVar(&slingHookRawBead, "hook-raw-bead", false, "Hook raw bead without default formula (expert mode)")
 	slingCmd.Flags().BoolVar(&slingNoMerge, "no-merge", false, "Skip merge queue on completion (keep work on feature branch for review)")
-	slingCmd.Flags().BoolVar(&slingNoBoot, "no-boot", false, "Skip rig boot after polecat spawn (avoids witness/refinery lock contention)")
+	slingCmd.Flags().BoolVar(&slingNoBoot, "no-boot", false, "Skip rig boot after polecat spawn (avoids lock contention)")
 	slingCmd.Flags().IntVar(&slingMaxConcurrent, "max-concurrent", 0, "Throttle spawn rate: spawn N polecats, pause, then spawn N more (0 = no throttle). Does not limit total concurrent polecats")
 	slingCmd.Flags().StringVar(&slingBaseBranch, "base-branch", "", "Override base branch for polecat worktree (e.g., 'develop', 'release/v2')")
 	slingCmd.Flags().StringVar(&slingResumeBranch, "branch", "", "Resume work on an existing branch instead of creating a fresh polecat branch (use to fix an existing PR)")
