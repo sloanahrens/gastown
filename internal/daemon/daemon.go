@@ -339,6 +339,10 @@ type Daemon struct {
 	// first use) and a fake in tests.
 	scheduledSlingRunner scheduledSlingRunner
 
+	// scheduledSlingTimeout overrides scheduledSlingCommandTimeout; tests set
+	// it so a sling can hit its deadline without waiting five minutes.
+	scheduledSlingTimeout time.Duration
+
 	// scheduledSlingFailures counts consecutive failures per entry name; the
 	// third escalates once, success resets. Touched only by the patrol goroutine.
 	scheduledSlingFailures map[string]int

@@ -3,6 +3,11 @@ package daemon
 import (
 	"context"
 	"errors"
+	"github.com/steveyegge/gastown/internal/agentpause"
+	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/session"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -68,7 +73,7 @@ func TestStop_FailedReleaseAfterHandBackKeepsTheStopPending(t *testing.T) {
 	f.now = f.now.Add(time.Minute)
 	d.runOverrunGuard(f.seams())
 
-	want := []string{"hand-back gastown/capable", "clear-pause gastown/capable"}
+	want := []string{"recheck gastown/capable", "hand-back gastown/capable", "clear-pause gastown/capable"}
 	if !reflect.DeepEqual(f.calls, want) {
 		t.Errorf("resumed call order = %q, want %q", f.calls, want)
 	}
@@ -194,7 +199,7 @@ func TestStop_FailedCheckpointRetriesWithoutRepeatingEarlierSteps(t *testing.T) 
 	f.seats, f.calls, f.failOn = nil, nil, nil
 	f.now = f.now.Add(time.Minute)
 	d.runOverrunGuard(f.seams())
-	want = []string{"checkpoint gastown/capable", "hand-back gastown/capable", "clear-pause gastown/capable"}
+	want = []string{"recheck gastown/capable", "checkpoint gastown/capable", "hand-back gastown/capable", "clear-pause gastown/capable"}
 	if !reflect.DeepEqual(f.calls, want) {
 		t.Errorf("retry calls = %q, want %q", f.calls, want)
 	}
@@ -219,7 +224,7 @@ func TestStop_FailedHandBackRetriesAndStaysUnfinished(t *testing.T) {
 	f.seats, f.calls, f.failOn = nil, nil, nil
 	f.now = f.now.Add(time.Minute)
 	d.runOverrunGuard(f.seams())
-	if want := []string{"hand-back gastown/capable", "clear-pause gastown/capable"}; !reflect.DeepEqual(f.calls, want) {
+	if want := []string{"recheck gastown/capable", "hand-back gastown/capable", "clear-pause gastown/capable"}; !reflect.DeepEqual(f.calls, want) {
 		t.Errorf("retry calls = %q, want the hand-back and the release", f.calls)
 	}
 	st, _ = readOverrunState(d.config.TownRoot, "gt-aaa11")
@@ -520,5 +525,172 @@ func TestGtDoneInFlight_ReadsTheHeartbeatFile(t *testing.T) {
 	polecat.TouchSessionHeartbeatWithState(d.config.TownRoot, sess, polecat.HeartbeatExiting, "gt done", "gt-aaa11")
 	if !d.gtDoneInFlight(sess) {
 		t.Error("a fresh exiting heartbeat not read as gt done")
+	}
+}
+
+// A checkpoint the worktree refuses (mid-rebase, a failed git add) fails step 3:
+// the hand-back comment names the branch as holding the work, so no hand-back
+// runs until a retry commits it (gt-0frud).
+func TestStop_RefusedCheckpointKeepsTheStopPendingAndIsRetried(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	f := newOverrunFake(22*time.Minute, stopSeat)
+	f.failOn = map[string]error{"checkpoint": errors.New("checkpoint refused; uncommitted work may remain in the worktree")}
+
+	d.runOverrunGuard(f.seams())
+	if len(f.handedBack) != 0 {
+		t.Fatalf("handed back past a refused checkpoint: %q", f.handedBack)
+	}
+	if !strings.Contains(buf.String(), "checkpoint failed: checkpoint refused") {
+		t.Errorf("log lacks the refusal:\n%s", buf.String())
+	}
+	if st, _ := readOverrunState(d.config.TownRoot, "gt-aaa11"); !st.CheckpointedAt.IsZero() || !st.StoppedAt.IsZero() {
+		t.Errorf("state %+v counts a refused checkpoint as done", st)
+	}
+
+	f.seats, f.calls, f.failOn = nil, nil, nil
+	f.now = f.now.Add(time.Minute)
+	d.runOverrunGuard(f.seams())
+	if len(f.handedBack) != 1 {
+		t.Errorf("hand-backs after the retried checkpoint = %q, want one", f.handedBack)
+	}
+}
+
+// A resumed stop whose seat was taken back is abandoned: the bead belongs to
+// whoever holds it now (gt-0frud).
+func TestStop_ResumedStopOnATakenBackSeatIsAbandoned(t *testing.T) {
+	t.Parallel()
+	for _, why := range []string{"the pause marker is gone", "a session is running on the seat"} {
+		t.Run(why, func(t *testing.T) {
+			d, buf := newOverrunDaemon(t, false)
+			f := newOverrunFake(22*time.Minute, stopSeat)
+			f.failOn = map[string]error{"checkpoint": errors.New("git busy")}
+			d.runOverrunGuard(f.seams())
+
+			f.seats, f.calls, f.failOn = nil, nil, nil
+			f.lapsed = why
+			f.now = f.now.Add(time.Minute)
+			d.runOverrunGuard(f.seams())
+
+			if want := []string{"recheck gastown/capable"}; !reflect.DeepEqual(f.calls, want) {
+				t.Errorf("calls = %q, want only the re-check (no checkpoint, hand-back or pause change)", f.calls)
+			}
+			if len(f.handedBack) != 0 {
+				t.Errorf("handed back a bead whose seat was taken back: %q", f.handedBack)
+			}
+			if !strings.Contains(buf.String(), "abandoning the stop") || !strings.Contains(buf.String(), why) {
+				t.Errorf("log lacks the abandon line naming %q:\n%s", why, buf.String())
+			}
+			if st, _ := readOverrunState(d.config.TownRoot, "gt-aaa11"); st.StoppedAt.IsZero() {
+				t.Error("StoppedAt not saved; the next tick would resume the abandoned stop")
+			}
+
+			f.calls = nil
+			f.lapsed = ""
+			f.now = f.now.Add(time.Minute)
+			d.runOverrunGuard(f.seams())
+			if len(f.calls) != 0 {
+				t.Errorf("an abandoned stop ran again: %q", f.calls)
+			}
+		})
+	}
+}
+
+// A re-check that cannot read the seat keeps the stop pending.
+func TestStop_ResumedStopRetriesWhenTheSeatCannotBeRead(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	f := newOverrunFake(22*time.Minute, stopSeat)
+	f.failOn = map[string]error{"checkpoint": errors.New("git busy")}
+	d.runOverrunGuard(f.seams())
+
+	f.seats, f.calls, f.failOn = nil, nil, nil
+	f.lapsedErr = errors.New("tmux down")
+	f.now = f.now.Add(time.Minute)
+	d.runOverrunGuard(f.seams())
+	if want := []string{"recheck gastown/capable"}; !reflect.DeepEqual(f.calls, want) || len(f.handedBack) != 0 {
+		t.Fatalf("calls = %q handed back %q, want the re-check only", f.calls, f.handedBack)
+	}
+
+	f.calls, f.lapsedErr = nil, nil
+	f.now = f.now.Add(time.Minute)
+	d.runOverrunGuard(f.seams())
+	if len(f.handedBack) != 1 {
+		t.Errorf("hand-backs once the seat could be read = %q, want one", f.handedBack)
+	}
+}
+
+// A stop that is not resumed does not re-check: it has just stopped the session.
+func TestStop_FirstRunDoesNotRecheckTheSeat(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	f := newOverrunFake(22*time.Minute, stopSeat)
+	f.lapsed = "a session is running on the seat"
+	d.runOverrunGuard(f.seams())
+	if len(f.handedBack) != 1 {
+		t.Errorf("a first-run stop was abandoned: calls %q", f.calls)
+	}
+}
+
+// checkpointSeat builds a polecat worktree under the daemon's town and returns
+// the checkout.
+func checkpointSeat(t *testing.T, d *Daemon, files map[string]string) string {
+	t.Helper()
+	f := useGitfake(t, d)
+	base := t.TempDir()
+	origin := filepath.Join(base, "origin.git")
+	workDir := filepath.Join(d.config.TownRoot, stopSeat.Rig, "polecats", stopSeat.Polecat, stopSeat.Rig)
+	f.InitBare(t, origin)
+	f.Commit(t, origin, "main", "initial", files)
+	f.Clone(t, origin, workDir)
+	return workDir
+}
+
+// The production checkpoint seam fails a refused checkpoint and passes a
+// created one and a clean worktree.
+func TestOverrunCheckpointSeam_FailsOnlyARefusedCheckpoint(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	workDir := checkpointSeat(t, d, map[string]string{"a.go": "package a\n"})
+	seam := d.overrunStopSeams(overrunSeams{}).checkpoint
+
+	if err := seam(stopSeat); err != nil {
+		t.Errorf("clean worktree: %v", err)
+	}
+	writeWorkFiles(t, workDir, map[string]string{"a.go": "package a\n// work\n"})
+	if err := seam(stopSeat); err != nil {
+		t.Errorf("created checkpoint: %v", err)
+	}
+	writeWorkFiles(t, workDir, map[string]string{"a.go": "package a\n// more work\n"})
+	if err := os.WriteFile(filepath.Join(workDir, ".git", "MERGE_HEAD"), []byte(strings.Repeat("0", 40)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := seam(stopSeat); err == nil {
+		t.Error("a worktree mid-merge must fail the checkpoint step")
+	}
+}
+
+// The production re-check reads the pause marker and then the session.
+func TestOverrunStopLapsed_ReadsThePauseMarkerAndTheSession(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	tm := newFakeTmux(newFixedClock())
+	d.tmux = tm
+
+	if why, err := d.overrunStopLapsed(stopSeat); err != nil || why != "the pause marker is gone" {
+		t.Errorf("no marker: got %q, %v", why, err)
+	}
+
+	if err := agentpause.Pause(d.config.TownRoot, stopSeat.Rig, constants.RolePolecat, stopSeat.Polecat, overrunPauseReason, overrunActor, ""); err != nil {
+		t.Fatal(err)
+	}
+	if why, err := d.overrunStopLapsed(stopSeat); err != nil || why != "" {
+		t.Errorf("paused, no session: got %q, %v; want the stop to still own the seat", why, err)
+	}
+
+	name := session.PolecatSessionName(d.prefixRegistry().PrefixForRig(stopSeat.Rig), stopSeat.Polecat)
+	tm.addSession(name, "node", time.Now())
+	if why, err := d.overrunStopLapsed(stopSeat); err != nil || why != "a session is running on the seat" {
+		t.Errorf("paused with a live session: got %q, %v", why, err)
 	}
 }

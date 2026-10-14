@@ -140,6 +140,20 @@ type fakeScheduledRunner struct {
 	gateAnswers   []gateAnswer
 	gateCalls     []string // entry names, in order
 	gateDeadlines []time.Duration
+
+	// slingBudgets records the time left on each sling's context; slingHook
+	// replaces slingErr when set, to act as a sling that ran into its deadline.
+	slingBudgets []time.Duration
+	slingHook    func(ctx context.Context, f *fakeScheduledRunner, beadID string) error
+}
+
+// setStatus moves a run bead to status, as gt sling hooking it would.
+func (f *fakeScheduledRunner) setStatus(id, status string) {
+	for i := range f.beads {
+		if f.beads[i].ID == id {
+			f.beads[i].Status = status
+		}
+	}
 }
 
 // gateAnswer is one scripted gate run. timedOut makes the fake behave as a
@@ -183,9 +197,15 @@ func (f *fakeScheduledRunner) createBead(_ context.Context, _, title, _, _ strin
 	return f.createID, nil
 }
 
-func (f *fakeScheduledRunner) sling(_ context.Context, beadID string, e ScheduledSlingEntry) error {
+func (f *fakeScheduledRunner) sling(ctx context.Context, beadID string, e ScheduledSlingEntry) error {
 	f.slungIDs = append(f.slungIDs, beadID)
 	f.slung = append(f.slung, e)
+	if dl, ok := ctx.Deadline(); ok {
+		f.slingBudgets = append(f.slingBudgets, time.Until(dl))
+	}
+	if f.slingHook != nil {
+		return f.slingHook(ctx, f, beadID)
+	}
 	return f.slingErr
 }
 

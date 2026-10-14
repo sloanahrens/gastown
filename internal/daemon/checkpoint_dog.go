@@ -161,16 +161,35 @@ func (d *Daemon) checkpointRigPolecats(rigName string) (int, int) {
 	return scanned, checkpointed
 }
 
+// checkpointOutcome is how one checkpoint attempt ended.
+type checkpointOutcome int
+
+const (
+	// checkpointClean: no work to keep, so none is at risk.
+	checkpointClean checkpointOutcome = iota
+	// checkpointCreated: the work is in a WIP commit on the branch.
+	checkpointCreated
+	// checkpointRefused: git failed or the worktree is mid-merge or mid-rebase,
+	// so the work may exist only as dirty files.
+	checkpointRefused
+)
+
 // checkpointWorktree creates a WIP checkpoint commit for a single worktree.
 // Returns true if a checkpoint was created.
 func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
+	return d.checkpointWorktreeOutcome(workDir, rigName, polecatName) == checkpointCreated
+}
+
+// checkpointWorktreeOutcome is checkpointWorktree with a clean worktree told
+// apart from a refused checkpoint; the overrun guard retries only the latter.
+func (d *Daemon) checkpointWorktreeOutcome(workDir, rigName, polecatName string) checkpointOutcome {
 	g := d.gitAt(workDir)
 
 	// Check git status (exclude runtime dirs from consideration)
 	status, err := g.Status()
 	if err != nil {
 		d.logger.Printf("checkpoint_dog: git status failed in %s/%s: %v", rigName, polecatName, err)
-		return false
+		return checkpointRefused
 	}
 
 	// A worktree mid-merge or mid-rebase, or holding unmerged index entries,
@@ -179,17 +198,17 @@ func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
 	// `<<<<<<<` lines onto the polecat's branch.
 	if reason := checkpointBlockedReason(g, status); reason != "" {
 		d.logger.Printf("checkpoint_dog: skipping %s/%s: %s", rigName, polecatName, reason)
-		return false
+		return checkpointRefused
 	}
 
 	if status.Clean {
-		return false // Clean worktree
+		return checkpointClean
 	}
 
 	// Stage everything
 	if err := g.Add("-A"); err != nil {
 		d.logger.Printf("checkpoint_dog: git add -A failed in %s/%s: %v", rigName, polecatName, err)
-		return false
+		return checkpointRefused
 	}
 
 	// Unstage runtime/ephemeral artifacts using the same centralized policy as
@@ -198,12 +217,12 @@ func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
 	staged, err := g.StagedChanges()
 	if err != nil {
 		d.logger.Printf("checkpoint_dog: git diff --cached failed in %s/%s: %v", rigName, polecatName, err)
-		return false
+		return checkpointRefused
 	}
 	for _, pathspec := range gtgit.RuntimeArtifactPathspecs(stagedPaths(staged, 0)) {
 		if err := g.ResetFiles(pathspec); err != nil {
 			d.logger.Printf("checkpoint_dog: git reset runtime artifact %q failed in %s/%s: %v", pathspec, rigName, polecatName, err)
-			return false
+			return checkpointRefused
 		}
 	}
 
@@ -224,12 +243,12 @@ func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
 	staged, err = g.StagedChanges()
 	if err != nil {
 		d.logger.Printf("checkpoint_dog: git diff --cached --diff-filter=A failed in %s/%s: %v", rigName, polecatName, err)
-		return false
+		return checkpointRefused
 	}
 	for _, path := range checkpoint.ThrowawayPaths(stagedPaths(staged, 'A')) {
 		if err := g.ResetFiles(path); err != nil {
 			d.logger.Printf("checkpoint_dog: git reset throwaway path %q failed in %s/%s: %v", path, rigName, polecatName, err)
-			return false
+			return checkpointRefused
 		}
 		d.logger.Printf("checkpoint_dog: skipping throwaway path %q in %s/%s (left untracked)", path, rigName, polecatName)
 	}
@@ -245,12 +264,12 @@ func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
 	staged, err = g.StagedChanges()
 	if err != nil {
 		d.logger.Printf("checkpoint_dog: git diff --cached failed in %s/%s: %v", rigName, polecatName, err)
-		return false
+		return checkpointRefused
 	}
 	for _, f := range stagedPaths(staged, 'D') {
 		if err := g.ResetFiles(f); err != nil {
 			d.logger.Printf("checkpoint_dog: git reset deleted path %q failed in %s/%s: %v", f, rigName, polecatName, err)
-			return false
+			return checkpointRefused
 		}
 	}
 
@@ -259,10 +278,10 @@ func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
 	staged, err = g.StagedChanges()
 	if err != nil {
 		d.logger.Printf("checkpoint_dog: git diff --cached failed in %s/%s: %v", rigName, polecatName, err)
-		return false
+		return checkpointRefused
 	}
 	if len(staged) == 0 {
-		return false
+		return checkpointClean
 	}
 
 	// Refuse to checkpoint a revert of already-merged work (gt-2bp8): a
@@ -274,17 +293,17 @@ func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
 	// check needs the tree the pending commit would actually record.
 	if blocked, reason := d.checkpointRevertGuard(workDir, rigName, polecatName); blocked {
 		d.logger.Printf("checkpoint_dog: refusing checkpoint in %s/%s: %s", rigName, polecatName, reason)
-		return false
+		return checkpointRefused
 	}
 
 	// Commit the checkpoint
 	if err := g.Commit("WIP: checkpoint (auto)"); err != nil {
 		d.logger.Printf("checkpoint_dog: git commit failed in %s/%s: %v", rigName, polecatName, err)
-		return false
+		return checkpointRefused
 	}
 
 	d.logger.Printf("checkpoint_dog: created WIP checkpoint in %s/%s", rigName, polecatName)
-	return true
+	return checkpointCreated
 }
 
 // checkpointBlockedReason reports why a worktree must not be checkpointed, or

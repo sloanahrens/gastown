@@ -92,6 +92,10 @@ type overrunFake struct {
 	// readyAfterStop makes it answer true once the session has been stopped,
 	// the bead gaining gt:ready-to-land between the listing and the hand-back.
 	submitted, readyAfterStop bool
+
+	// lapsed and lapsedErr are what the resumed-stop re-check answers.
+	lapsed    string
+	lapsedErr error
 }
 
 // step logs one stop step and returns the error injected for it.
@@ -128,6 +132,10 @@ func (f *overrunFake) seams() overrunSeams {
 			return nil
 		},
 		checkpoint: func(seat overrunSeat) error { return f.step("checkpoint", seat) },
+		stopLapsed: func(seat overrunSeat) (string, error) {
+			f.calls = append(f.calls, "recheck "+seat.Rig+"/"+seat.Polecat)
+			return f.lapsed, f.lapsedErr
+		},
 		handBack: func(seat overrunSeat, elapsed time.Duration) error {
 			if err := f.step("hand-back", seat); err != nil {
 				return err

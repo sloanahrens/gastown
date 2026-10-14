@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -158,7 +159,9 @@ type scheduledSlingRunner interface {
 const (
 	scheduledSlingsTickInterval  = 15 * time.Minute
 	scheduledSlingCommandTimeout = 5 * time.Minute
-	scheduledSlingEscalateAfter  = 3
+	// scheduledSlingLookupTimeout bounds the bead read after a sling timed out.
+	scheduledSlingLookupTimeout = 30 * time.Second
+	scheduledSlingEscalateAfter = 3
 )
 
 type execScheduledSlingRunner struct {
@@ -337,6 +340,27 @@ func (d *Daemon) runScheduledSlings() {
 	}
 }
 
+// scheduledRunMayHaveStarted reports whether a run bead whose sling timed out
+// is past "open": gt sling hooks the bead before it spawns the polecat. A bead
+// that cannot be read counts as started, since a duplicate run costs more than
+// a stalled one that the failure count surfaces.
+func (d *Daemon) scheduledRunMayHaveStarted(ctx context.Context, r scheduledSlingRunner, e ScheduledSlingEntry, id string) bool {
+	// The sling's own context is spent; look again on a fresh one.
+	lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledSlingLookupTimeout)
+	defer cancel()
+	runs, err := r.listBeads(lctx, e.Rig, scheduledSlingLabel(e))
+	if err != nil {
+		d.logger.Printf("scheduled_slings: %s: cannot read run %s after the sling timed out: %v", e.Name, id, err)
+		return true
+	}
+	for _, b := range runs {
+		if b.ID == id {
+			return b.Status != "open"
+		}
+	}
+	return true
+}
+
 // runScheduledSlingEntry evaluates one entry and dispatches when due.
 func (d *Daemon) runScheduledSlingEntry(ctx context.Context, e ScheduledSlingEntry, now time.Time) error {
 	r := d.scheduledRunner()
@@ -354,6 +378,10 @@ func (d *Daemon) runScheduledSlingEntry(ctx context.Context, e ScheduledSlingEnt
 	if !d.scheduledGateAllows(ctx, r, e) {
 		return nil
 	}
+	// The gate ran on its own clock; create and sling start a full budget, so a
+	// slow gate does not cut gt sling short.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), d.scheduledSlingBudget())
+	defer cancel()
 	title := fmt.Sprintf("%s %s", e.Name, now.UTC().Format("2006-01-02"))
 	desc := fmt.Sprintf("Scheduled run of formula %s on rig %s, created by the daemon's scheduled_slings patrol. Label %s is the run's identity; while this bead is open no second run is dispatched.", e.Formula, e.Rig, scheduledSlingLabel(e))
 	id, err := r.createBead(ctx, e.Rig, title, scheduledSlingLabel(e), desc, scheduledSlingPriority(e))
@@ -362,6 +390,12 @@ func (d *Daemon) runScheduledSlingEntry(ctx context.Context, e ScheduledSlingEnt
 	}
 	d.logger.Printf("scheduled_slings: %s: created %s, slinging %s to %s (agent %q)", e.Name, id, e.Formula, e.Rig, e.Agent)
 	if err := r.sling(ctx, id, e); err != nil {
+		// A sling killed by its deadline may already have hooked the bead and
+		// spawned the polecat; failure-closing it would dispatch the same run
+		// again next tick (gt-0frud).
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) && d.scheduledRunMayHaveStarted(ctx, r, e, id) {
+			return fmt.Errorf("%w (run bead %s kept open: the polecat may have started)", err, id)
+		}
 		// The run never started, so its bead must not stay open: every later
 		// tick would read it as skip-open, report success, reset the failure
 		// counter, and leave the entry silently dead. Close it with the failure
@@ -373,4 +407,12 @@ func (d *Daemon) runScheduledSlingEntry(ctx context.Context, e ScheduledSlingEnt
 		return err
 	}
 	return nil
+}
+
+// scheduledSlingBudget is the time one entry's create and sling may take.
+func (d *Daemon) scheduledSlingBudget() time.Duration {
+	if d.scheduledSlingTimeout > 0 {
+		return d.scheduledSlingTimeout
+	}
+	return scheduledSlingCommandTimeout
 }
