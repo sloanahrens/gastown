@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"errors"
+	"log"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -313,16 +315,21 @@ func TestRunScheduledSlings_InvalidEntryIsSkippedNotFatal(t *testing.T) {
 
 func TestTriggerScheduledSlings_SingleFlight(t *testing.T) {
 	t.Parallel()
-	d := &Daemon{logger: discardLogger} // patrol inactive: a started cycle returns at once
+	var logs strings.Builder
+	d := &Daemon{logger: log.New(&logs, "", 0)} // patrol inactive: a started cycle returns at once
+	const skipped = "previous cycle still running"
 	d.scheduledSlingsRunning.Store(true)
 	d.triggerScheduledSlings()
-	time.Sleep(50 * time.Millisecond)
-	if !d.scheduledSlingsRunning.Load() {
-		t.Fatal("a trigger must skip while a cycle is running; a cycle it started would have cleared the flag")
+	if !strings.Contains(logs.String(), skipped) {
+		t.Error("a trigger must skip while a cycle is running")
 	}
+	logs.Reset()
 	d.scheduledSlingsRunning.Store(false)
 	d.triggerScheduledSlings()
 	awaitScheduledSlingsIdle(t, d)
+	if strings.Contains(logs.String(), skipped) {
+		t.Error("a trigger with no cycle running should start one")
+	}
 }
 
 func TestExecScheduledRunner_SlingArgv(t *testing.T) {
@@ -439,7 +446,7 @@ func awaitScheduledSlingsIdle(t *testing.T, d *Daemon) {
 		if time.Now().After(deadline) {
 			t.Fatal("scheduled_slings cycle did not finish")
 		}
-		time.Sleep(time.Millisecond)
+		runtime.Gosched()
 	}
 }
 
