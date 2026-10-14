@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -28,8 +27,30 @@ type CrewStatusItem struct {
 	GitClean     bool     `json:"git_clean"`
 	GitModified  []string `json:"git_modified,omitempty"`
 	GitUntracked []string `json:"git_untracked,omitempty"`
-	MailTotal    int      `json:"mail_total"`
-	MailUnread   int      `json:"mail_unread"`
+	// MailTotal and MailUnread are nil (JSON null) when the mailbox could not
+	// be read; MailError then says why. A failed read never reports 0.
+	MailTotal  *int   `json:"mail_total"`
+	MailUnread *int   `json:"mail_unread"`
+	MailError  string `json:"mail_error,omitempty"`
+}
+
+// crewMailCounter returns the total and unread message counts for a mailbox
+// address. Tests pass a stub in place of countCrewBeadsMail so no live Dolt
+// server is needed.
+type crewMailCounter func(address string) (total, unread int, err error)
+
+// countCrewBeadsMail counts mail through the router's beads mailbox, the same
+// store gt mail send writes to, rather than the legacy <clone>/mail inbox file.
+func countCrewBeadsMail(address string) (total, unread int, err error) {
+	workDir, err := findMailWorkDir()
+	if err != nil {
+		return 0, 0, fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+	mailbox, err := mail.NewRouter(workDir, townRegistry()).GetMailbox(address)
+	if err != nil {
+		return 0, 0, fmt.Errorf("getting mailbox: %w", err)
+	}
+	return mailbox.Count()
 }
 
 func runCrewStatus(cmd *cobra.Command, args []string) error {
@@ -139,14 +160,33 @@ func printCrewStatus(w io.Writer, items []CrewStatusItem, asJSON bool) error {
 			}
 		}
 
-		if item.MailUnread > 0 {
-			fmt.Fprintf(w, "  Mail:   %d unread / %d total\n", item.MailUnread, item.MailTotal)
-		} else {
-			fmt.Fprintf(w, "  Mail:   %s\n", style.Dim.Render(fmt.Sprintf("%d messages", item.MailTotal)))
-		}
+		fmt.Fprintf(w, "  Mail:   %s\n", crewMailSummary(item))
 	}
 
 	return nil
+}
+
+// crewMailCounts reads a crew member's beads mail counts. Non-fatal: a failed
+// read returns nil counts and the error text, so the status shows the count as
+// unknown instead of a false 0.
+func crewMailCounts(count crewMailCounter, rigName, crewName string) (total, unread *int, errText string) {
+	t, u, err := count(fmt.Sprintf("%s/crew/%s", rigName, crewName))
+	if err != nil {
+		return nil, nil, err.Error()
+	}
+	return &t, &u, ""
+}
+
+// crewMailSummary renders the Mail line of the text output.
+func crewMailSummary(item CrewStatusItem) string {
+	switch {
+	case item.MailTotal == nil || item.MailUnread == nil:
+		return style.Dim.Render("unknown (" + item.MailError + ")")
+	case *item.MailUnread > 0:
+		return fmt.Sprintf("%d unread / %d total", *item.MailUnread, *item.MailTotal)
+	default:
+		return style.Dim.Render(fmt.Sprintf("%d messages", *item.MailTotal))
+	}
 }
 
 func listCrewStatusItems(reg *session.PrefixRegistry, r *rig.Rig, t *tmux.Tmux) ([]CrewStatusItem, error) {
@@ -179,13 +219,7 @@ func buildCrewStatusItems(reg *session.PrefixRegistry, r *rig.Rig, workers []*cr
 			untracked = gitStatus.Untracked
 		}
 
-		// Mail status (non-fatal: display defaults to 0 if count fails)
-		mailDir := filepath.Join(w.ClonePath, "mail")
-		mailTotal, mailUnread := 0, 0
-		if _, err := os.Stat(mailDir); err == nil {
-			mailbox := mail.NewMailbox(mailDir)
-			mailTotal, mailUnread, _ = mailbox.Count()
-		}
+		mailTotal, mailUnread, mailErr := crewMailCounts(countCrewBeadsMail, r.Name, w.Name)
 
 		item := CrewStatusItem{
 			Name:         w.Name,
@@ -198,6 +232,7 @@ func buildCrewStatusItems(reg *session.PrefixRegistry, r *rig.Rig, workers []*cr
 			GitUntracked: untracked,
 			MailTotal:    mailTotal,
 			MailUnread:   mailUnread,
+			MailError:    mailErr,
 		}
 		if hasSession {
 			item.SessionID = sessionID
