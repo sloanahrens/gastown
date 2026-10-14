@@ -32,28 +32,21 @@ func runCrewRename(cmd *cobra.Command, args []string) error {
 
 	// Kill any running session for the old name, through the supervisor (an
 	// operator stop: logged, not refused by an e-stop; gt-4k3fj.4.1).
-	t := tmux.NewTmux()
-	oldSessionID := crewSessionName(townRegistry(), r.Name, oldName)
-	if hasSession, _ := t.HasSession(oldSessionID); hasSession {
+	stopOld := func() error {
+		t := tmux.NewTmux()
+		oldSessionID := crewSessionName(townRegistry(), r.Name, oldName)
+		if hasSession, _ := t.HasSession(oldSessionID); !hasSession {
+			return nil
+		}
 		sup := operatorSupervisor(filepath.Dir(r.Path))
 		if err := sup.StopSession(oldSessionID, "crew rename to "+newName, operatorActor("gt crew rename")); err != nil {
 			return fmt.Errorf("killing old session: %w", err)
 		}
 		fmt.Printf("Killed session %s\n", oldSessionID)
+		return nil
 	}
-
-	// Perform the rename
-	if err := crewMgr.Rename(oldName, newName); err != nil {
-		if errors.Is(err, crew.ErrInvalidCrewName) {
-			return fmt.Errorf("invalid new name '%s': %w", newName, err)
-		}
-		if err == crew.ErrCrewNotFound {
-			return fmt.Errorf("crew workspace '%s' not found", oldName)
-		}
-		if err == crew.ErrCrewExists {
-			return fmt.Errorf("crew workspace '%s' already exists", newName)
-		}
-		return fmt.Errorf("renaming crew workspace: %w", err)
+	if err := renameCrewWorkspace(crewMgr, oldName, newName, stopOld); err != nil {
+		return err
 	}
 
 	fmt.Printf("%s Renamed crew workspace: %s/%s → %s/%s\n",
@@ -61,6 +54,34 @@ func runCrewRename(cmd *cobra.Command, args []string) error {
 	fmt.Printf("New session will be: %s\n", style.Dim.Render(crewSessionName(townRegistry(), r.Name, newName)))
 
 	return nil
+}
+
+// renameCrewWorkspace renames oldName to newName, calling stopOld between the
+// up-front checks and the rename itself. A rename the checks refuse returns
+// before stopOld runs, so it never costs the member a live session.
+func renameCrewWorkspace(mgr *crew.Manager, oldName, newName string, stopOld func() error) error {
+	if err := mgr.CheckRename(oldName, newName); err != nil {
+		return crewRenameError(oldName, newName, err)
+	}
+	if err := stopOld(); err != nil {
+		return err
+	}
+	if err := mgr.Rename(oldName, newName); err != nil {
+		return crewRenameError(oldName, newName, err)
+	}
+	return nil
+}
+
+func crewRenameError(oldName, newName string, err error) error {
+	switch {
+	case errors.Is(err, crew.ErrInvalidCrewName):
+		return fmt.Errorf("invalid new name '%s': %w", newName, err)
+	case errors.Is(err, crew.ErrCrewNotFound):
+		return fmt.Errorf("crew workspace '%s' not found", oldName)
+	case errors.Is(err, crew.ErrCrewExists):
+		return fmt.Errorf("crew workspace '%s' already exists", newName)
+	}
+	return fmt.Errorf("renaming crew workspace: %w", err)
 }
 
 func runCrewPristine(cmd *cobra.Command, args []string) error {

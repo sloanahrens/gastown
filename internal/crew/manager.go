@@ -626,6 +626,24 @@ func (m *Manager) loadState(name string) (*CrewWorker, error) {
 	return &crew, nil
 }
 
+// CheckRename reports the error Rename would return for oldName and newName
+// from the checks that need no write: newName is valid, oldName exists and
+// newName does not. It takes no lock, so it is advisory; Rename repeats the
+// checks under its locks. Callers use it to refuse a doomed rename before
+// they stop the old session.
+func (m *Manager) CheckRename(oldName, newName string) error {
+	if err := validateCrewName(newName); err != nil {
+		return err
+	}
+	if !m.exists(oldName) {
+		return ErrCrewNotFound
+	}
+	if m.exists(newName) {
+		return ErrCrewExists
+	}
+	return nil
+}
+
 // Rename renames a crew worker from oldName to newName.
 func (m *Manager) Rename(oldName, newName string) error {
 	if err := validateCrewName(newName); err != nil {
