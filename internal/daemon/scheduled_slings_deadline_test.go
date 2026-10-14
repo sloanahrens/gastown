@@ -105,3 +105,43 @@ func TestRunScheduledSlingEntry_SlingKilledWithUnreadableRunKeepsTheBeadOpen(t *
 		t.Errorf("a run that cannot be read back is kept open, closed %v", f.closedIDs)
 	}
 }
+
+// Keeping the bead open is the fail-safe for a run that may have started, but
+// when the sling never hooked it the bead is a leftover, and a later tick has
+// to recover it: the timeout path leaves exactly the open, unhooked bead that
+// used to read as skip-open forever (gt-g16z2).
+func TestRunScheduledSlingEntry_ATimedOutSlingThatNeverHookedIsRecovered(t *testing.T) {
+	t.Parallel()
+	f := &fakeScheduledRunner{createID: "gt-run1", now: time.Now()}
+	f.slingHook = func(ctx context.Context, f *fakeScheduledRunner, id string) error {
+		<-ctx.Done()
+		f.listErr = errors.New("dolt down")
+		return errors.New("gt sling: signal: killed")
+	}
+	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
+	d.scheduledSlingTimeout = 20 * time.Millisecond
+
+	if err := d.runScheduledSlingEntry(context.Background(), docAuditEntry, time.Now()); err == nil {
+		t.Fatal("a failed sling must be reported")
+	}
+
+	// The read works again and the bead is still open and unhooked, as it is
+	// when the sling died before hooking it.
+	f.listErr = nil
+	f.beads[0].CreatedAt = time.Now().Add(-d.scheduledStaleRunAfter() - time.Minute)
+	err := d.runScheduledSlingEntry(context.Background(), docAuditEntry, time.Now())
+	if err == nil || !strings.Contains(err.Error(), "left open and unhooked") {
+		t.Fatalf("error = %v, want the stalled bead recovered and reported", err)
+	}
+	if len(f.closedIDs) != 1 || f.closedIDs[0] != "gt-run1" || !strings.HasPrefix(f.closedWhy[0], scheduledSlingFailureMarker) {
+		t.Fatalf("the stalled bead must be retired with the failure marker: closed %v %v", f.closedIDs, f.closedWhy)
+	}
+
+	f.slingHook, f.createID = nil, "gt-run2" // the retry slings a fresh bead
+	if err := d.runScheduledSlingEntry(context.Background(), docAuditEntry, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.slungIDs) != 2 || f.slungIDs[1] != "gt-run2" {
+		t.Errorf("the tick after the recovery must run the entry again, slung %v", f.slungIDs)
+	}
+}

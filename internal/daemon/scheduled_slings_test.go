@@ -48,25 +48,72 @@ func TestDecideScheduledSling(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
 	week := 168 * time.Hour
+	const staleAfter = 20 * time.Minute
 	cases := []struct {
 		name  string
 		beads []scheduledBead
 		want  scheduledAction
 	}{
 		{"no beads", nil, scheduledDispatch},
-		{"open bead", []scheduledBead{{ID: "gt-1", Status: "open", CreatedAt: now.Add(-30 * 24 * time.Hour)}}, scheduledSkipOpen},
-		{"in_progress bead", []scheduledBead{{ID: "gt-1", Status: "in_progress", CreatedAt: now.Add(-2 * time.Hour)}}, scheduledSkipOpen},
 		{"closed recent", []scheduledBead{{ID: "gt-1", Status: "closed", CreatedAt: now.Add(-2 * 24 * time.Hour)}}, scheduledSkipRecent},
 		{"closed old", []scheduledBead{{ID: "gt-1", Status: "closed", CreatedAt: now.Add(-8 * 24 * time.Hour)}}, scheduledDispatch},
-		{"mixed: newest closed old, older open", []scheduledBead{
+		{"mixed: newest closed old, older run in flight", []scheduledBead{
 			{ID: "gt-1", Status: "closed", CreatedAt: now.Add(-8 * 24 * time.Hour)},
-			{ID: "gt-0", Status: "open", CreatedAt: now.Add(-20 * 24 * time.Hour)},
+			{ID: "gt-0", Status: "hooked", CreatedAt: now.Add(-20 * 24 * time.Hour)},
 		}, scheduledSkipOpen},
 		{"exactly one interval ago", []scheduledBead{{ID: "gt-1", Status: "closed", CreatedAt: now.Add(-week)}}, scheduledDispatch},
 	}
 	for _, c := range cases {
-		if got := decideScheduledSling(c.beads, week, now); got != c.want {
+		if got := decideScheduledSling(c.beads, week, staleAfter, now).action; got != c.want {
 			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// Status is the whole signal for staleness: gt sling hooks the bead before it
+// spawns the polecat, so an open run bead is one no sling ever started. Past
+// the sling budget nothing is left to hook it, and the bead must be retired
+// rather than read as a run in flight forever (gt-g16z2).
+func TestDecideScheduledSling_StaleOpenBeadIsRecoveredNotSkipped(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
+	week := 168 * time.Hour
+	const staleAfter = 20 * time.Minute
+	bead := func(status string, age time.Duration) scheduledBead {
+		return scheduledBead{ID: "gt-run", Status: status, CreatedAt: now.Add(-age)}
+	}
+	cases := []struct {
+		name  string
+		beads []scheduledBead
+		want  scheduledAction
+		stale []string
+	}{
+		{"open past the budget plus a tick", []scheduledBead{bead("open", 30*24*time.Hour)}, scheduledRecoverStale, []string{"gt-run"}},
+		{"open exactly at the threshold", []scheduledBead{bead("open", staleAfter)}, scheduledSkipOpen, nil},
+		{"open inside the budget", []scheduledBead{bead("open", 10*time.Minute)}, scheduledSkipOpen, nil},
+		{"hooked past the budget", []scheduledBead{bead("hooked", 30*24*time.Hour)}, scheduledSkipOpen, nil},
+		{"in_progress past the budget", []scheduledBead{bead("in_progress", 30*24*time.Hour)}, scheduledSkipOpen, nil},
+		{"open with no readable created_at", []scheduledBead{{ID: "gt-run", Status: "open"}}, scheduledSkipOpen, nil},
+		{"two stale open beads", []scheduledBead{
+			{ID: "gt-a", Status: "open", CreatedAt: now.Add(-time.Hour)},
+			{ID: "gt-b", Status: "open", CreatedAt: now.Add(-2 * time.Hour)},
+		}, scheduledRecoverStale, []string{"gt-a", "gt-b"}},
+		{"a young open bead keeps both in flight", []scheduledBead{
+			bead("open", 30*24*time.Hour),
+			{ID: "gt-young", Status: "open", CreatedAt: now.Add(-time.Minute)},
+		}, scheduledSkipOpen, nil},
+	}
+	for _, c := range cases {
+		dec := decideScheduledSling(c.beads, week, staleAfter, now)
+		if dec.action != c.want {
+			t.Errorf("%s: action = %v want %v", c.name, dec.action, c.want)
+		}
+		var got []string
+		for _, b := range dec.stale {
+			got = append(got, b.ID)
+		}
+		if strings.Join(got, ",") != strings.Join(c.stale, ",") {
+			t.Errorf("%s: stale beads = %v want %v", c.name, got, c.stale)
 		}
 	}
 }
@@ -101,19 +148,20 @@ func TestDecideScheduledSling_IgnoresRunsThatFailedToSling(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
 	week := 168 * time.Hour
+	const staleAfter = 20 * time.Minute
 	failed := scheduledBead{ID: "gt-bad", Status: "closed", CloseReason: scheduledSlingFailureReason, CreatedAt: now.Add(-time.Minute)}
-	if got := decideScheduledSling([]scheduledBead{failed}, week, now); got != scheduledDispatch {
+	if got := decideScheduledSling([]scheduledBead{failed}, week, staleAfter, now).action; got != scheduledDispatch {
 		t.Errorf("a run whose sling failed must not hold the interval: got %v", got)
 	}
 	// The match is by prefix so a bd-normalized reason still counts.
 	normalized := failed
 	normalized.CloseReason = scheduledSlingFailureMarker + " (normalized by bd)"
-	if got := decideScheduledSling([]scheduledBead{normalized}, week, now); got != scheduledDispatch {
+	if got := decideScheduledSling([]scheduledBead{normalized}, week, staleAfter, now).action; got != scheduledDispatch {
 		t.Errorf("prefix-matched failure reason must be ignored: got %v", got)
 	}
 	// A run that actually completed still gates the interval.
 	done := scheduledBead{ID: "gt-ok", Status: "closed", CloseReason: "audit complete", CreatedAt: now.Add(-2 * time.Hour)}
-	if got := decideScheduledSling([]scheduledBead{done}, week, now); got != scheduledSkipRecent {
+	if got := decideScheduledSling([]scheduledBead{done}, week, staleAfter, now).action; got != scheduledSkipRecent {
 		t.Errorf("a completed run must still hold the interval: got %v", got)
 	}
 }
@@ -131,6 +179,7 @@ type fakeScheduledRunner struct {
 	slungIDs  []string
 	slung     []ScheduledSlingEntry
 	slingErr  error
+	closeErr  error
 	closedIDs []string
 	closedWhy []string
 	now       time.Time
@@ -212,6 +261,9 @@ func (f *fakeScheduledRunner) sling(ctx context.Context, beadID string, e Schedu
 func (f *fakeScheduledRunner) closeBead(_ context.Context, _, beadID, reason string) error {
 	f.closedIDs = append(f.closedIDs, beadID)
 	f.closedWhy = append(f.closedWhy, reason)
+	if f.closeErr != nil {
+		return f.closeErr
+	}
 	for i := range f.beads {
 		if f.beads[i].ID == beadID {
 			f.beads[i].Status = "closed"
@@ -258,15 +310,84 @@ func TestRunScheduledSlingEntry_DispatchesWhenDue(t *testing.T) {
 	}
 }
 
+// A young open bead is a sling still running: the tick leaves both it and the
+// entry alone. (An old one is recovered — see the recovery tests below.)
 func TestRunScheduledSlingEntry_SkipsWhileOpen(t *testing.T) {
 	t.Parallel()
-	f := &fakeScheduledRunner{beads: []scheduledBead{{ID: "gt-old", Status: "open", CreatedAt: time.Now().Add(-10 * 24 * time.Hour)}}}
+	f := &fakeScheduledRunner{beads: []scheduledBead{{ID: "gt-old", Status: "open", CreatedAt: time.Now().Add(-time.Minute)}}}
 	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
 	if err := d.runScheduledSlingEntry(context.Background(), docAuditEntry, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.created) != 0 || len(f.slungIDs) != 0 {
 		t.Errorf("expected no dispatch while a run bead is open, got create=%v sling=%v", f.created, f.slungIDs)
+	}
+	if len(f.closedIDs) != 0 {
+		t.Errorf("a young open bead must be left alone, closed %v", f.closedIDs)
+	}
+}
+
+// The entry dies of the daemon going away between creating the run bead and
+// slinging it: no process is left to take the failure-close branch, so the bead
+// stays open, and before this fix every later tick read it as skip-open,
+// reported success and reset the counter — the entry stayed dead until an
+// operator closed the bead by hand and no escalation ever fired (gt-g16z2).
+func TestRunScheduledSlings_RecoversTheRunBeadADeadCycleLeftOpen(t *testing.T) {
+	t.Parallel()
+	f := &fakeScheduledRunner{
+		createID: "gt-next",
+		now:      time.Now(),
+		beads:    []scheduledBead{{ID: "gt-crashed", Status: "open", CreatedAt: time.Now().Add(-2 * time.Hour)}},
+	}
+	d, esc := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
+
+	d.runScheduledSlings()
+	if len(f.created) != 0 || len(f.slungIDs) != 0 {
+		t.Errorf("the tick must retire the stalled bead before dispatching, created %v slung %v", f.created, f.slungIDs)
+	}
+	if len(f.closedIDs) != 1 || f.closedIDs[0] != "gt-crashed" {
+		t.Fatalf("a run bead left open past the budget must be retired, closed %v", f.closedIDs)
+	}
+	if !strings.HasPrefix(f.closedWhy[0], scheduledSlingFailureMarker) {
+		t.Errorf("close reason %q must carry the failure marker, or the retired bead gates the interval", f.closedWhy[0])
+	}
+	if got := d.scheduledSlingFailures["doc-audit"]; got != 1 {
+		t.Errorf("retiring a stalled bead must count as a failure, got %d", got)
+	}
+
+	// The retired bead is ignored, so the next tick runs the entry again.
+	d.runScheduledSlings()
+	if len(f.slungIDs) != 1 || f.slungIDs[0] != "gt-next" {
+		t.Fatalf("the tick after the recovery must dispatch, slung %v", f.slungIDs)
+	}
+	if got := d.scheduledSlingFailures["doc-audit"]; got != 0 {
+		t.Errorf("a successful dispatch resets the count, got %d", got)
+	}
+	if len(*esc) != 0 {
+		t.Errorf("a single recovery is not three failures, escalated %v", *esc)
+	}
+}
+
+// A stalled bead the patrol cannot retire (the close write fails) leaves the
+// entry dead as before, but no longer silently: every tick counts a failure and
+// the third escalates. Before this fix a skip reset the count, so exactly this
+// case never reached an operator.
+func TestRunScheduledSlings_AStalledBeadItCannotRetireStillEscalates(t *testing.T) {
+	t.Parallel()
+	f := &fakeScheduledRunner{createID: "gt-next", now: time.Now(), closeErr: errors.New("dolt down")}
+	d, esc := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
+	for i := 1; i <= 3; i++ {
+		f.beads = []scheduledBead{{ID: "gt-stalled", Status: "open", CreatedAt: time.Now().Add(-time.Hour)}}
+		d.runScheduledSlings()
+		if got := d.scheduledSlingFailures["doc-audit"]; got != i {
+			t.Fatalf("after tick %d: consecutive failures = %d, want %d", i, got, i)
+		}
+		if len(f.slungIDs) != 0 {
+			t.Fatalf("tick %d dispatched beside a bead still open: slung %v", i, f.slungIDs)
+		}
+	}
+	if len(*esc) != 1 {
+		t.Fatalf("expected the third stalled tick to escalate, got %d: %v", len(*esc), *esc)
 	}
 }
 
@@ -314,7 +435,7 @@ func TestRunScheduledSlingEntry_ClosesBeadWhenSlingFails(t *testing.T) {
 	if !strings.HasPrefix(f.closedWhy[0], scheduledSlingFailureMarker) {
 		t.Errorf("close reason %q must carry the failure marker", f.closedWhy[0])
 	}
-	if got := decideScheduledSling(f.beads, scheduledSlingInterval(docAuditEntry), time.Now()); got != scheduledDispatch {
+	if got := decideScheduledSling(f.beads, scheduledSlingInterval(docAuditEntry), 0, time.Now()).action; got != scheduledDispatch {
 		t.Errorf("the next tick after a failed sling = %v, want dispatch", got)
 	}
 }
