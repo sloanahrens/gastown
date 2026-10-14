@@ -3,7 +3,8 @@
 # closed on unreadable input, timestamp ordering, the cursor ledger, the
 # risk-ranked rotation slice (score, 21-day exclusion, count and byte caps,
 # reviewed lines, cursor) on a production-sized tree, fingerprint lookup, and
-# the queued ledger line's severity.
+# the queued ledger line's severity, and the P3 batches (threshold, age, filed,
+# cap, seen, malformed).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -322,6 +323,98 @@ printf 'queued: a.go:A:x P4 a.go:1 unknown severity\n' > "$TMP/qbad2.txt"
 assert_eq "severity not P1-P3" "3" "$(queued_rc "$TMP/qbad2.txt")"
 printf 'queued: a.go:A:x P2 a.go:1\n' > "$TMP/qbad3.txt"
 assert_eq "claim missing" "3" "$(queued_rc "$TMP/qbad3.txt")"
+
+echo "batches: a package is listed at MIN unfiled P3 lines or when its oldest is MAX_AGE days old"
+batches() { "$DR" batches --prev-notes "$1" --now "$NOW" "${@:2}" | paste -sd'|' -; }
+batches_rc() { local rc=0; "$DR" batches --prev-notes "$1" --now "$NOW" "${@:2}" > "$TMP/batches.out" 2> "$TMP/batches.err" || rc=$?; echo "$rc"; }
+cat > "$TMP/b1.txt" <<'N'
+p3: 2026-10-10 internal/daemon/a.go:A:x internal/daemon/a.go:1 claim a
+p3: 2026-10-10 internal/daemon/b.go:B:y internal/daemon/b.go:2 claim b
+p3: 2026-10-10 internal/daemon/c.go:C:z internal/daemon/c.go:3 claim c
+p3: 2026-10-10 internal/land/d.go:D:x internal/land/d.go:4 claim d
+p3: 2026-10-10 internal/land/e.go:E:x internal/land/e.go:5 claim e
+N
+assert_eq "three fresh lines in one package are a batch; two are not" \
+  "batch internal/daemon|p3: 2026-10-10 internal/daemon/a.go:A:x internal/daemon/a.go:1 claim a|p3: 2026-10-10 internal/daemon/b.go:B:y internal/daemon/b.go:2 claim b|p3: 2026-10-10 internal/daemon/c.go:C:z internal/daemon/c.go:3 claim c" "$(batches "$TMP/b1.txt")"
+assert_eq "--min 2 lists both packages" "batch internal/daemon|batch internal/land" "$("$DR" batches --prev-notes "$TMP/b1.txt" --now "$NOW" --min 2 | grep '^batch ' | paste -sd'|' -)"
+assert_eq "--min 2: five p3 lines under the two headers" "7" "$("$DR" batches --prev-notes "$TMP/b1.txt" --now "$NOW" --min 2 | awk 'END { print NR }')"
+assert_eq "--min 4 lists none" "" "$(batches "$TMP/b1.txt" --min 4)"
+assert_eq "no p3 lines, nothing" "" "$(batches "$TMP/none.txt")"
+assert_eq "unrelated ledger lines are ignored" "" "$(batches "$TMP/n9.txt")"
+cat > "$TMP/b2.txt" <<'N'
+p3: 2026-10-03 internal/old/a.go:A:x internal/old/a.go:1 seven days
+p3: 2026-10-04 internal/six/b.go:B:y internal/six/b.go:2 six days
+N
+assert_eq "oldest exactly 7 days old lists a lone line; 6 days does not" \
+  "batch internal/old|p3: 2026-10-03 internal/old/a.go:A:x internal/old/a.go:1 seven days" "$(batches "$TMP/b2.txt")"
+assert_eq "--max-age-days 6 lists both" \
+  "batch internal/old|p3: 2026-10-03 internal/old/a.go:A:x internal/old/a.go:1 seven days|batch internal/six|p3: 2026-10-04 internal/six/b.go:B:y internal/six/b.go:2 six days" "$(batches "$TMP/b2.txt" --max-age-days 6)"
+assert_eq "--max-age-days 8 lists none" "" "$(batches "$TMP/b2.txt" --max-age-days 8)"
+assert_eq "a later --now ages the six-day line" \
+  "batch internal/old|p3: 2026-10-03 internal/old/a.go:A:x internal/old/a.go:1 seven days|batch internal/six|p3: 2026-10-04 internal/six/b.go:B:y internal/six/b.go:2 six days" \
+  "$("$DR" batches --prev-notes "$TMP/b2.txt" --now 2026-10-11T00:00:00Z | paste -sd'|' -)"
+printf 'p3: 2026-10-03 main.go:M:x main.go:1 file at the repo root\n' > "$TMP/b2r.txt"
+assert_eq "a file at the repo root is package ." "batch .|p3: 2026-10-03 main.go:M:x main.go:1 file at the repo root" "$(batches "$TMP/b2r.txt")"
+
+echo "batches: a finding line files a P3, which is then no longer listed"
+cp "$TMP/b1.txt" "$TMP/b3.txt"
+printf 'finding: internal/daemon/b.go:B:y gt-55\n' >> "$TMP/b3.txt"
+assert_eq "two left in the package is below the threshold" "" "$(batches "$TMP/b3.txt")"
+printf 'finding: internal/land/d.go:D:x digest-only\nfinding: nothing:here:x gt-1\n' >> "$TMP/b3.txt"
+assert_eq "digest-only also names it; an unrelated finding changes nothing" "batch internal/daemon" "$("$DR" batches --prev-notes "$TMP/b3.txt" --now "$NOW" --min 2 | grep '^batch ' | paste -sd'|' -)"
+printf 'p3: 2026-10-10 internal/daemon/f.go:F:x internal/daemon/f.go:6 claim f\n' >> "$TMP/b3.txt"
+assert_eq "a new one restores the count without the filed one" \
+  "batch internal/daemon|p3: 2026-10-10 internal/daemon/a.go:A:x internal/daemon/a.go:1 claim a|p3: 2026-10-10 internal/daemon/c.go:C:z internal/daemon/c.go:3 claim c|p3: 2026-10-10 internal/daemon/f.go:F:x internal/daemon/f.go:6 claim f" "$(batches "$TMP/b3.txt")"
+cat > "$TMP/b4.txt" <<'N'
+p3: 2026-10-10 internal/q/a.go:A:x internal/q/a.go:1 mentions finding: internal/q/b.go:B:y gt-1 in its claim
+p3: 2026-10-10 internal/q/b.go:B:y internal/q/b.go:2 claim b
+p3: 2026-10-10 internal/q/c.go:C:z internal/q/c.go:3 claim c
+finding: internal/q/a.go:A:xx gt-2
+N
+assert_eq "text inside a claim and a longer fingerprint do not file anything" "3" "$(batches "$TMP/b4.txt" | awk -F'|' '{ print NF - 1 }')"
+cat > "$TMP/b5.txt" <<'N'
+p3: 2026-10-10 internal/q/a.go:A:x internal/q/a.go:1 first
+p3: 2026-10-08 internal/q/a.go:A:x internal/q/a.go:1 older record
+p3: 2026-10-10 internal/q/a.go:A:x internal/q/a.go:1 third
+p3: 2026-10-10 internal/q/b.go:B:y internal/q/b.go:2 claim b
+N
+assert_eq "a repeated fingerprint counts once, at its oldest line, so the package stays below 3" "" "$(batches "$TMP/b5.txt")"
+assert_eq "and below the age line" "batch internal/q|p3: 2026-10-08 internal/q/a.go:A:x internal/q/a.go:1 older record|p3: 2026-10-10 internal/q/b.go:B:y internal/q/b.go:2 claim b" "$(batches "$TMP/b5.txt" --max-age-days 2)"
+
+echo "batches: at most MAX_PER lines per batch, oldest first; the rest wait"
+{ for i in 1 2 3 4 5 6 7 8; do printf 'p3: 2026-10-0%d internal/cap/f%d.go:F:x internal/cap/f%d.go:%d claim %d\n' "$((10 - i))" "$i" "$i" "$i" "$i"; done; } > "$TMP/b6.txt"
+assert_eq "default cap is 6, oldest dates first (f8 is the oldest, f1 and f2 wait)" \
+  "batch internal/cap|f8 f7 f6 f5 f4 f3" "$("$DR" batches --prev-notes "$TMP/b6.txt" --now "$NOW" | awk 'NR == 1 { printf "%s|", $0; next } { split($3, a, ":"); sub(/.*\//, "", a[1]); sub(/\.go$/, "", a[1]); printf "%s%s", sep, a[1]; sep = " " }')"
+assert_eq "--max-per-batch 2" "3" "$("$DR" batches --prev-notes "$TMP/b6.txt" --now "$NOW" --max-per-batch 2 | awk 'END { print NR }')"
+assert_eq "--max-per-batch 9 lists all eight" "9" "$("$DR" batches --prev-notes "$TMP/b6.txt" --now "$NOW" --max-per-batch 9 | awk 'END { print NR }')"
+{ cat "$TMP/b6.txt"; printf 'finding: internal/cap/f8.go:F:x gt-1\n'; } > "$TMP/b6b.txt"
+assert_eq "a filed line frees its slot for the one that waited" "1" "$("$DR" batches --prev-notes "$TMP/b6b.txt" --now "$NOW" | grep -c 'f2.go:F:x internal/cap/f2.go:2' || true)"
+{ cat "$TMP/b1.txt"; for i in 1 2 3; do printf 'p3: 2026-10-10 cmd/gt/f%d.go:F:x cmd/gt/f%d.go:%d claim\n' "$i" "$i" "$i"; done; } > "$TMP/b7.txt"
+assert_eq "blocks come out in directory order" "batch cmd/gt|batch internal/daemon" "$("$DR" batches --prev-notes "$TMP/b7.txt" --now "$NOW" | grep '^batch ' | paste -sd'|' -)"
+
+echo "seen: a fingerprint on a p3 line is seen"
+printf 'p3: 2026-10-10 p3.go:P:x p3.go:1 claim finding: inner.go:I:x gt-1\n' > "$TMP/n10.txt"
+seen_p3() { if "$DR" seen --prev-notes "$TMP/n10.txt" "$1"; then echo yes; else echo no; fi; }
+assert_eq "p3 fingerprint" "yes" "$(seen_p3 p3.go:P:x)"
+assert_eq "prefix of it" "no" "$(seen_p3 p3.go:P)"
+assert_eq "the file:line field" "no" "$(seen_p3 p3.go:1)"
+assert_eq "the date" "no" "$(seen_p3 2026-10-10)"
+assert_eq "text inside the claim" "no" "$(seen_p3 inner.go:I:x)"
+
+echo "batches: a malformed p3 line fails closed and prints nothing"
+for bad in 'p3: 2026-10-10 a/b.go:B:x a/b.go:1' 'p3: yesterday a/b.go:B:x a/b.go:1 claim' 'p3: 2026-10-10 a/b.go a/b.go:1 claim' 'p3: 2026-10-10 a/b.go:B a/b.go:1 claim' 'p3: 2026-10-10' 'p3: 2026-10-10 :B:x a/b.go:1 claim'; do
+  { cat "$TMP/b1.txt"; printf '%s\n' "$bad"; } > "$TMP/bbad.txt"
+  assert_eq "exit 3: $bad" "3" "$(batches_rc "$TMP/bbad.txt")"
+  assert_eq "nothing on stdout" "0" "$(wc -c < "$TMP/batches.out" | tr -d ' ')"
+done
+assert_eq "the failure names the line" "1" "$(grep -c 'malformed p3 line: p3: 2026-10-10 :B:x a/b.go:1 claim' "$TMP/batches.err" || true)"
+assert_eq "bad --now" "3" "$(batches_rc "$TMP/b1.txt" --now tomorrow)"
+assert_eq "missing notes file is usage" "2" "$("$DR" batches --prev-notes "$TMP/absent" > /dev/null 2>&1 || echo $?)"
+assert_eq "no --prev-notes is usage" "2" "$("$DR" batches > /dev/null 2>&1 || echo $?)"
+assert_eq "--min 0 is usage" "2" "$(batches_rc "$TMP/b1.txt" --min 0)"
+assert_eq "--max-per-batch 0 is usage" "2" "$(batches_rc "$TMP/b1.txt" --max-per-batch 0)"
+assert_eq "non-numeric --max-age-days is usage" "2" "$(batches_rc "$TMP/b1.txt" --max-age-days soon)"
+assert_eq "unknown flag is usage" "2" "$(batches_rc "$TMP/b1.txt" --bogus 1)"
 
 echo ""
 echo "passed: $PASS failed: $FAIL"
