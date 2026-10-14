@@ -31,7 +31,45 @@ func TestPatrolScanSeatCap(t *testing.T) {
 		sessions []sessionEnv
 		want     patrolscan.SeatCap
 		wantErr  bool
+		// restart is the seat the read is for, "rig/name"; empty is a seat
+		// with no session of its own among sessions.
+		restart string
 	}{
+		{
+			// gt-zwiww: an agent-gone seat keeps its session, and its restart
+			// replaces that session, so it is not counted against the cap.
+			name:     "the restarting seat's own session is the only one live",
+			settings: pool(`"agent":"` + poolAgent + `","max_seats":1`),
+			sessions: []sessionEnv{polecat("gastown", "ruby", poolAgent)},
+			restart:  "gastown/ruby",
+		},
+		{
+			name:     "the restarting seat's own session is left out of the total too",
+			settings: pool(`"agent":"` + poolAgent + `","max_seats":3,"max_total":2`),
+			sessions: []sessionEnv{
+				polecat("gastown", "ruby", poolAgent),
+				polecat("gastown", "pearl", "deepseek-pro"),
+			},
+			restart: "gastown/ruby",
+		},
+		{
+			name:     "other live seats still fill the cap against the restarting one",
+			settings: pool(`"agent":"` + poolAgent + `","max_seats":2`),
+			sessions: []sessionEnv{
+				polecat("gastown", "ruby", poolAgent),
+				polecat("gastown", "pearl", poolAgent),
+				polecat("gastown", "onyx", poolAgent),
+			},
+			restart: "gastown/ruby",
+			want:    patrolscan.SeatCap{Live: 2, Limit: 2, Key: poolSeat},
+		},
+		{
+			name:     "a polecat of the same name in another rig is another seat",
+			settings: pool(`"agent":"` + poolAgent + `","max_seats":1`),
+			sessions: []sessionEnv{polecat("beads", "ruby", poolAgent)},
+			restart:  "gastown/ruby",
+			want:     patrolscan.SeatCap{Live: 1, Limit: 1, Key: poolSeat},
+		},
 		{
 			name:     "the pool seat is full",
 			settings: pool(`"agent":"` + poolAgent + `","max_seats":3`),
@@ -101,7 +139,12 @@ func TestPatrolScanSeatCap(t *testing.T) {
 			}
 			h := &patrolScanHost{d: &Daemon{config: &Config{TownRoot: town}, tmux: tm}}
 
-			got, err := h.seatCap()
+			restart := tc.restart
+			if restart == "" {
+				restart = "gastown/nova" // a seat none of the sessions belong to
+			}
+			rig, name, _ := strings.Cut(restart, "/")
+			got, err := h.seatCap(rig, name)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("seatCap = %+v, want an error for unreadable settings", got)

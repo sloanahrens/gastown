@@ -98,6 +98,27 @@ type fakeEnv struct {
 	// Limit is no cap. seatCapErr makes the read fail.
 	seatCap    SeatCap
 	seatCapErr error
+	// census, when set, answers SeatCap the way the daemon does: the live
+	// polecat sessions by name, counted against censusLimit with the asked
+	// seat's own session left out (gt-zwiww). It replaces seatCap.
+	census      map[string]bool
+	censusLimit int
+	capAsked    []string // "rig/name" per SeatCap read
+}
+
+// seatCapFor is the SeatCap read the scanner is given.
+func (f *fakeEnv) seatCapFor(rig, name string) (SeatCap, error) {
+	f.capAsked = append(f.capAsked, rig+"/"+name)
+	if f.census == nil {
+		return f.seatCap, f.seatCapErr
+	}
+	live := 0
+	for p, up := range f.census {
+		if up && p != name {
+			live++
+		}
+	}
+	return SeatCap{Live: live, Limit: f.censusLimit, Key: "polecat_pool.max_seats"}, nil
 }
 
 func newFake() *fakeEnv {
@@ -309,7 +330,7 @@ func scanner(env *fakeEnv, ledger Ledger) *Scanner {
 	return New(env, ledger, Options{
 		Now:       func() time.Time { return now },
 		IsRefusal: func(err error) bool { return errors.Is(err, errRefused) },
-		SeatCap:   func() (SeatCap, error) { return env.seatCap, env.seatCapErr },
+		SeatCap:   env.seatCapFor,
 		HoldReason: func(w Work) string {
 			if w.HasLabel("needs-human") {
 				return "label needs-human"
@@ -424,6 +445,51 @@ func TestCrashRestartGoesAheadOnceASeatIsFree(t *testing.T) {
 	}
 	if f := seatFinding(t, r, "ruby"); f.Outcome != OutcomeRestarted {
 		t.Fatalf("outcome = %v (%q), want restarted", f.Outcome, f.Detail)
+	}
+}
+
+// gt-zwiww: a polecat whose agent died with its tmux session kept (liveness
+// ReasonAgentGone) is restarted in that session, one for one. At max_seats=1
+// with that session the only live polecat, the seat must restart: its own
+// session is not a seat the restart has to wait for.
+func TestAgentGoneSeatRestartsAtACapItsOwnSessionFills(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	deadWithWork(env, "ruby")
+	env.verdicts["ruby"] = liveness.Result{Verdict: liveness.Dead, Reason: liveness.ReasonAgentGone,
+		Sample: &intent.Progress{DeadSamples: 2}}
+	env.census, env.censusLimit = map[string]bool{"ruby": true}, 1
+
+	r := scanner(env, nil).Tick("gastown")
+
+	if got := strings.Join(env.restarts, ","); got != "ruby" {
+		t.Fatalf("restarts = %q, want ruby; report %v", got, r.Lines())
+	}
+	if f := seatFinding(t, r, "ruby"); f.Outcome != OutcomeRestarted {
+		t.Fatalf("outcome = %v (%q), want restarted", f.Outcome, f.Detail)
+	}
+	if got := strings.Join(env.capAsked, ","); got != "gastown/ruby" {
+		t.Fatalf("seat cap asked for %q, want the seat being restarted", got)
+	}
+}
+
+// The exclusion is the seat's own session and nothing more: with the cap full
+// of other live seats, a dead seat whose session is gone would add one, so it
+// still waits for a free seat.
+func TestSessionGoneSeatStillWaitsAtACapFullOfOthers(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	deadWithWork(env, "ruby")
+	env.census, env.censusLimit = map[string]bool{"onyx": true}, 1
+
+	r := scanner(env, nil).Tick("gastown")
+
+	if len(env.restarts) != 0 {
+		t.Fatalf("restarts = %v, want none while other seats fill the cap", env.restarts)
+	}
+	f := seatFinding(t, r, "ruby")
+	if f.Outcome != OutcomeSkipped || !strings.Contains(f.Detail, "1/1") {
+		t.Fatalf("outcome = %v (%q), want skipped at 1/1", f.Outcome, f.Detail)
 	}
 }
 
