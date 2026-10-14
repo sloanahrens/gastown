@@ -1090,7 +1090,9 @@ func outputAutonomousDirective(w io.Writer, ctx RoleContext, hookedBead *beads.I
 	}
 
 	// Polecats MUST call gt done — this is the single most important instruction.
-	// Without it, work lands but sessions accumulate and the landing worker never sees the branch.
+	// Without it the branch is never submitted for landing (no gt:ready-to-land label, so the
+	// landing worker never merges it) and the session stays up holding its seat until patrol
+	// or an operator stops it.
 	if ctx.Role == RolePolecat {
 		fmt.Fprintln(w)
 		if isForkRig {
