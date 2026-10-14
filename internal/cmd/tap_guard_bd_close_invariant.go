@@ -302,7 +302,12 @@ func parseBdCloseInvocations(command string) []bdCloseInvocation {
 
 	var invocations []bdCloseInvocation
 	var segment []string
+	caseDepth := 0
 	flush := func() {
+		caseDepth += bdCloseCaseDepthChange(segment)
+		if caseDepth > 0 {
+			segment = bdCloseUnglueArmLabel(segment)
+		}
 		if invocation, ok := parseBdCloseSegment(segment); ok {
 			invocations = append(invocations, invocation)
 		}
@@ -522,6 +527,65 @@ func bdCloseCaseArmLabelEnd(tokens []string) int {
 		return i
 	}
 	return -1
+}
+
+// bdCloseUnglueArmLabel splits a case-arm label glued to its command word
+// (`a)bd`, `*)bd`) at the front of a segment inside a case statement, so the
+// command word stands alone for the matchers that follow. Bash accepts `case
+// a in a)echo hit;; esac`, and spaceOutShellOperators leaves a case pattern's
+// `)` attached to the word behind it, so the segment's command word arrived as
+// `a)bd` and the close behind it went unjudged (gt-5toy9). Only the first `)`
+// ends the label, and a token with `(` before it is a substitution or function
+// definition, not a label. A label with nothing behind it (`a)`) is
+// bdCloseCaseArmLabelEnd's. The caller passes only segments inside a case, so
+// a word like `a)bd` in an ordinary command is never split.
+func bdCloseUnglueArmLabel(segment []string) []string {
+	start := 0
+	for start < len(segment) {
+		tok := segment[start]
+		switch {
+		case bdCloseLeadWords[tok]:
+			start++
+			continue
+		case tok == "case":
+			// Skip the `case WORD in` header; no `in` leaves the segment alone.
+			end := bdCloseCaseHeaderEnd(segment[start:])
+			if end < 0 {
+				return segment
+			}
+			start += end
+			continue
+		}
+		break
+	}
+	if start >= len(segment) {
+		return segment
+	}
+	i := strings.Index(segment[start], ")")
+	if i <= 0 || i == len(segment[start])-1 || strings.ContainsAny(segment[start][:i], "(`") {
+		return segment
+	}
+	out := append([]string{}, segment[:start]...)
+	out = append(out, segment[start][:i+1], segment[start][i+1:])
+	return append(out, segment[start+1:]...)
+}
+
+// bdCloseCaseDepthChange returns how far a segment moves the case-statement
+// depth: +1 when it opens with a `case` header, -1 when its command word is
+// `esac`. Only the command position counts, so `echo case` and `echo esac`
+// leave the depth alone.
+func bdCloseCaseDepthChange(segment []string) int {
+	tokens := stripLeadingEnvAssignments(segment)
+	for len(tokens) > 0 && bdCloseLeadWords[tokens[0]] {
+		tokens = tokens[1:]
+	}
+	switch {
+	case bdCloseCaseHeaderEnd(tokens) >= 0:
+		return 1
+	case len(tokens) > 0 && tokens[0] == "esac":
+		return -1
+	}
+	return 0
 }
 
 // parseBdCloseShellPayload reads the closes inside a `bash -c '...'` payload.

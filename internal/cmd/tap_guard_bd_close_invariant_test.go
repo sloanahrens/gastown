@@ -148,6 +148,19 @@ func TestParseBdCloseInvocations(t *testing.T) {
 		{name: "case arm with a command that is not bd", command: "case $x in a) true ;; b) echo bd close gt-arno ;; esac", want: nil},
 		{name: "case arm with a non-close bd subcommand", command: "case $x in a) bd update gt-arno --status=open ;; esac", want: nil},
 		{name: "case arm with no close at all", command: "case $x in a) true ;; esac", want: nil},
+		// A label glued to its command (`a)bd`) is the same arm as the spaced
+		// form; bash accepts it (gt-5toy9).
+		{name: "glued first case arm", command: "case $x in a)bd close gt-arno ;; esac", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		{name: "glued wildcard case arm", command: "case $x in *)bd close gt-arno ;; esac", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		{name: "glued alternation case arm", command: "case $x in a|b)bd close gt-arno ;; esac", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		{name: "glued later case arm", command: "case $x in a) true ;; b)bd close gt-arno ;; esac", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		{name: "glued parenthesised case arm", command: "case $x in (a)bd close gt-arno ;; esac", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		{name: "glued case arm carrying a reason", command: `case $x in a)bd close -r "cancel: x" gt-arno ;; esac`, want: []bdCloseInvocation{{IDs: []string{"gt-arno"}, Reason: "cancel: x"}}},
+		{name: "glued case arm in a bash -c payload", command: "bash -c 'case $x in a)bd close gt-arno ;; esac'", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		{name: "glued case arm with a command that is not bd", command: "case $x in a)echo bd close gt-arno ;; esac", want: nil},
+		{name: "glued word outside a case is not an arm", command: "a)bd close gt-arno", want: nil},
+		{name: "glued word after a finished case is not an arm", command: "case $x in a) true ;; esac; a)bd close gt-arno", want: nil},
+		{name: "glued word as an argument is not an arm", command: "echo a)bd close gt-arno", want: nil},
 		// A group's own `)` closes the segment, so the close in a subshell is
 		// still the command word rather than a label's tail. Every non-flag
 		// token after `close` is an id, so the `)` and the redirect land here
