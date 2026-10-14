@@ -236,11 +236,11 @@ func TestAggregateUsageRanksTopBeadsByUncachedTokens(t *testing.T) {
 	}
 }
 
-// A bead over twenty minutes is named for a week, since that is how long a
+// A bead over twenty minutes is named for 48 hours, since that is how long a
 // stall stays worth chasing. The list is work records only — the reviewer's
 // om records are a different kind — and it carries what the session was doing:
 // a long bead that ran no tests reads differently from one that failed them.
-func TestAggregateUsageNamesSlowWorkBeadsForAWeek(t *testing.T) {
+func TestAggregateUsageNamesSlowWorkBeadsFor48Hours(t *testing.T) {
 	t.Parallel()
 
 	slow := usageWorkRec("gt-slow", usageNow.Add(-time.Hour), 100)
@@ -248,22 +248,26 @@ func TestAggregateUsageNamesSlowWorkBeadsForAWeek(t *testing.T) {
 	slow.Activity = UsageActivity{ToolCalls: 90, Edits: 4, TestRuns: 6, FailedTestRuns: 2}
 	edge := usageWorkRec("gt-edge", usageNow.Add(-time.Hour), 100)
 	edge.WallS = 1200 // exactly twenty minutes is not over it
-	old := usageWorkRec("gt-old", usageNow.Add(-7*24*time.Hour-time.Second), 100)
+	in47 := usageWorkRec("gt-47h", usageNow.Add(-47*time.Hour), 100)
+	in47.WallS = 4000
+	out49 := usageWorkRec("gt-49h", usageNow.Add(-49*time.Hour), 100)
+	out49.WallS = 5000
+	old := usageWorkRec("gt-old", usageNow.Add(-48*time.Hour-time.Second), 100)
 	old.WallS = 5000
-	weekEdge := usageWorkRec("gt-week", usageNow.Add(-7*24*time.Hour), 100)
-	weekEdge.WallS = 5000
+	windowEdge := usageWorkRec("gt-edge48", usageNow.Add(-48*time.Hour), 100)
+	windowEdge.WallS = 5000
 	review := usageWorkRec("gt-om", usageNow.Add(-time.Hour), 100)
 	review.Kind = UsageKindOM
 	review.Class = UsageClassOMReview
 	review.WallS = 9000
 
-	u := AggregateUsage([]UsageRecord{slow, edge, old, weekEdge, review}, usageNow, 0)
+	u := AggregateUsage([]UsageRecord{slow, edge, in47, out49, old, windowEdge, review}, usageNow, 0)
 
 	got := []string{}
 	for _, r := range u.Over20 {
 		got = append(got, r.Bead)
 	}
-	want := []string{"gt-week", "gt-slow"} // slowest first
+	want := []string{"gt-edge48", "gt-47h", "gt-slow"} // slowest first
 	if len(got) != len(want) {
 		t.Fatalf("Over20 = %v, want %v", got, want)
 	}
@@ -272,7 +276,7 @@ func TestAggregateUsageNamesSlowWorkBeadsForAWeek(t *testing.T) {
 			t.Fatalf("Over20 = %v, want %v", got, want)
 		}
 	}
-	if r := u.Over20[1]; r.Rig != "gastown" || r.WallS != 1201 || r.TestRuns != 6 || r.FailedTestRuns != 2 {
+	if r := u.Over20[2]; r.Rig != "gastown" || r.WallS != 1201 || r.TestRuns != 6 || r.FailedTestRuns != 2 {
 		t.Errorf("Over20 row = %+v, want the record's rig, wall and test counts", r)
 	}
 }

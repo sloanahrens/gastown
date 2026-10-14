@@ -32,9 +32,9 @@ const (
 	// usageWindow is usageWindowName as a duration.
 	usageWindow = 24 * time.Hour
 	// usageSlowWindow is how far back the Over20 list reaches. A bead that
-	// took over twenty minutes is worth naming for a week; older than that it
-	// is history, not a current drag on the town.
-	usageSlowWindow = 7 * 24 * time.Hour
+	// took over twenty minutes is worth naming for two days; older than that
+	// it is history, not a current drag on the town.
+	usageSlowWindow = 48 * time.Hour
 	// usageSlowWallS is the wall seconds above which a work record is slow.
 	// Twenty minutes is where a bead stops looking like work and starts
 	// looking like a stall, and it is what names the list.
@@ -192,7 +192,7 @@ func AggregateUsage(recs []UsageRecord, now time.Time, unmatched int) Usage {
 		TopBeads:       []UsageTopBead{},
 		Over20:         []UsageOver20Bead{},
 	}
-	dayAgo, weekAgo := now.Add(-usageWindow), now.Add(-usageSlowWindow)
+	dayAgo, slowFrom := now.Add(-usageWindow), now.Add(-usageSlowWindow)
 
 	type classModel struct{ class, model string }
 	spend := map[classModel]*UsageClassModelRow{}
@@ -219,7 +219,7 @@ func AggregateUsage(recs []UsageRecord, now time.Time, unmatched int) Usage {
 		// against its own window rather than inheriting the day's. A work bead
 		// is what the record's own kind says it is; the om reviewer's records
 		// are a different kind, and a deep review's run is a work record.
-		if r.Kind == UsageKindWork && r.WallS > usageSlowWallS && inWindow(r.End, weekAgo, now) {
+		if r.Kind == UsageKindWork && r.WallS > usageSlowWallS && inWindow(r.End, slowFrom, now) {
 			u.Over20 = append(u.Over20, UsageOver20Bead{
 				Bead:           r.Bead,
 				Rig:            r.Rig,
