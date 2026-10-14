@@ -156,6 +156,14 @@ func runDashboard(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	if inherited {
+		// A child the replaced image stranded (a poll hung past the kill bound)
+		// is ours now and defunct; no Wait will ever claim it. Reap it before
+		// the hub starts any child of its own.
+		if n := procutil.ReapZombieChildren(); n > 0 {
+			dashboardLogf(cmd.OutOrStdout())("reaped %d defunct child(ren) inherited from the previous image", n)
+		}
+	}
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	run := procutil.StartStoppable(ctx, hub.Run)
