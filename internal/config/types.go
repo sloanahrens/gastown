@@ -34,7 +34,8 @@ type TownConfig struct {
 	// marks the two-file layout. Read it with LoadRigsConfig on the
 	// mayor/rigs.json path, which follows it here.
 	Registry *RigsConfig `json:"registry,omitempty"`
-	// Overseer is mayor/overseer.json's document on the two-file layout.
+	// Overseer is the overseer identity document: mayor/town.json's
+	// "overseer" section on the two-file layout.
 	Overseer *OverseerConfig `json:"overseer,omitempty"`
 }
 
@@ -146,20 +147,23 @@ type TownSettings struct {
 
 	// DisabledPatrols lists patrol names to disable at the town level.
 	// This provides a simple way to turn off individual daemon patrol dogs
-	// without editing mayor/daemon.json. Patrol names match the keys used
-	// in daemon.json patrols section (e.g., "deacon", "witness", "refinery",
+	// without editing the daemon patrol config (settings/config.json's
+	// "daemon" section on a two-file town, mayor/daemon.json on a five-file
+	// one). Patrol names match the keys used in that config's patrols
+	// section (e.g., "deacon", "witness", "refinery",
 	// "doctor_dog", "compactor_dog", "checkpoint_dog", "overrun_guard", "wisp_reaper",
 	// "jsonl_git_backup", "scheduled_maintenance",
 	// "landing_worker", "events_prune", "handler").
 	// Example: ["doctor_dog", "compactor_dog"]
 	DisabledPatrols []string `json:"disabled_patrols,omitempty"`
 
-	// Daemon is mayor/daemon.json's whole document (heartbeat, patrols) on
-	// the two-file layout (layout.go, gt-y3pgh.7). Read it with
-	// LoadDaemonPatrolConfig on the mayor/daemon.json path.
+	// Daemon is the daemon patrol document (heartbeat, patrols):
+	// settings/config.json's "daemon" section on the two-file layout
+	// (layout.go, gt-y3pgh.7). Read it with LoadDaemonPatrolConfig on the
+	// mayor/daemon.json path.
 	Daemon *DaemonPatrolConfig `json:"daemon,omitempty"`
-	// Escalation is settings/escalation.json's document on the two-file
-	// layout.
+	// Escalation is the escalation routing document:
+	// settings/config.json's "escalation" section on the two-file layout.
 	Escalation *EscalationConfig `json:"escalation,omitempty"`
 }
 
@@ -441,7 +445,8 @@ const CurrentMayorConfigVersion = 1
 // DefaultCrewName is the default name for crew workspaces when not overridden.
 const DefaultCrewName = "max"
 
-// RigsConfig represents the rigs registry (mayor/rigs.json).
+// RigsConfig represents the rigs registry: mayor/town.json's "registry"
+// section on a two-file town, mayor/rigs.json on a five-file one.
 type RigsConfig struct {
 	Version int                 `json:"version"`
 	Rigs    map[string]RigEntry `json:"rigs"`
@@ -1363,7 +1368,9 @@ func NewMessagingConfig() *MessagingConfig {
 	}
 }
 
-// EscalationConfig represents escalation routing configuration (settings/escalation.json).
+// EscalationConfig represents escalation routing configuration:
+// settings/config.json's "escalation" section on a two-file town,
+// settings/escalation.json on a five-file one.
 // This defines severity-based routing for escalations to different channels.
 type EscalationConfig struct {
 	Type    string `json:"type"`    // "escalation"

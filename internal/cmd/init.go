@@ -97,8 +97,10 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 	// Auto-configure the six-stage Dolt lifecycle with sensible defaults.
 	// This sets up reaper, compactor, doctor, backup, and maintenance patrols
-	// in mayor/daemon.json so they run automatically. Only fills in missing
-	// config — never overwrites existing user settings.
+	// in the daemon patrol config (settings/config.json's "daemon" section on
+	// a two-file town, mayor/daemon.json on a five-file one) so they run
+	// automatically. Only fills in missing config — never overwrites existing
+	// user settings.
 	if townRoot, err := workspace.FindFromCwd(); err == nil {
 		if err := daemon.EnsureLifecycleConfigFile(townRoot); err != nil {
 			fmt.Printf("   %s Could not configure lifecycle defaults: %v\n",
