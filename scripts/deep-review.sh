@@ -6,12 +6,14 @@
 #           slice to read, from the ledger the previous runs left in bead notes
 #   seen    whether a finding fingerprint is already in the ledger
 #   queued  confirmed findings an earlier run recorded but never filed
+#   batches unfiled P3 findings grouped per package, ready to file as one bead
 #
 # Ledger lines, written into the run bead's notes by the formula:
 #   cursor: <RFC3339 landed_at of the newest landing covered> <last slice path>
 #   reviewed: <YYYY-MM-DD> <path>
 #   finding: <fingerprint> <bead id | digest-only>
 #   queued: <fingerprint> <P1|P2|P3> <file:line> <claim>
+#   p3: <YYYY-MM-DD> <fingerprint> <file:line> <claim>
 # --prev-notes is the notes of recent run beads in any order. The cursor line
 # with the newest timestamp wins, so the order and status of the run beads do
 # not matter. The rotation slice is ranked by risk, not by the cursor path: a
@@ -20,7 +22,12 @@
 # ignored, because the worst outcome is a file read twice. A queued finding stays pending until a finding line names it.
 # A queued line that does not carry a severity and a claim stops queued with
 # exit 3: the run that would file it reads a truncated queue as a short one,
-# and a lost finding is worse than a run that stops and escalates.
+# and a lost finding is worse than a run that stops and escalates. A p3: line
+# is a P3 finding held back so a run does not file one bead per P3. batches
+# groups the ones no finding: line names yet by package directory (the dirname
+# of the file in the fingerprint), and lists a package once it holds enough of
+# them or its oldest has waited long enough. A malformed p3: line stops
+# batches with exit 3 for the same reason.
 #
 # Exit codes: 2 usage, 3 an input the script cannot trust. Never read a
 # non-zero exit as a quiet day.
@@ -29,6 +36,9 @@ set -euo pipefail
 DEFAULT_WINDOW_SECONDS=86400
 DEFAULT_SLICE=15
 DEFAULT_SLICE_BYTES=150000
+DEFAULT_BATCH_MIN=3
+DEFAULT_BATCH_MAX_AGE_DAYS=7
+DEFAULT_BATCH_MAX=6
 REVIEW_COOLDOWN_DAYS=21
 RISK_HISTORY="60.days.ago"
 
@@ -40,6 +50,8 @@ usage:
                       [--out DIR]
   deep-review.sh seen --prev-notes FILE FINGERPRINT
   deep-review.sh queued --prev-notes FILE
+  deep-review.sh batches --prev-notes FILE [--now RFC3339] [--min N]
+                         [--max-age-days D] [--max-per-batch M]
 EOF
   exit 2
 }
@@ -74,6 +86,7 @@ cmd_seen() {
   FP="$1" awk '
     BEGIN { a = "finding: " ENVIRON["FP"] " "; b = "queued: " ENVIRON["FP"] " " }
     index($0, a) == 1 || index($0, b) == 1 { found = 1 }
+    index($0, "p3: ") == 1 { split(substr($0, 5), f, " "); if (f[2] == ENVIRON["FP"]) found = 1 }
     END { exit !found }
   ' "$notes"
 }
@@ -98,6 +111,75 @@ cmd_queued() {
       if (!(f[1] in filed) && !(f[1] in shown)) { shown[f[1]] = 1; print }
     }
   ' "$notes" "$notes"
+}
+
+# batches: unfiled p3: lines grouped by package directory. A p3: line is filed
+# once a finding: line names its fingerprint. A fingerprint on several p3: lines
+# counts once, at its oldest date. A directory is listed when it holds MIN
+# unfiled lines or its oldest is at least MAX_AGE days old (dates are UTC days,
+# so "at least D days old" is a date on or before today minus D). Within a
+# batch the oldest lines come first and only MAX_PER lines are printed; the rest
+# wait for the next run. Blocks come out in directory byte order.
+cmd_batches() {
+  local notes="" now="" min="$DEFAULT_BATCH_MIN" max_age="$DEFAULT_BATCH_MAX_AGE_DAYS" max_per="$DEFAULT_BATCH_MAX"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --prev-notes) notes="${2:-}"; shift 2 || usage ;;
+      --now) now="${2:-}"; shift 2 || usage ;;
+      --min) min="${2:-}"; shift 2 || usage ;;
+      --max-age-days) max_age="${2:-}"; shift 2 || usage ;;
+      --max-per-batch) max_per="${2:-}"; shift 2 || usage ;;
+      *) usage ;;
+    esac
+  done
+  [ -f "$notes" ] || usage
+  case "$min" in ''|*[!0-9]*) usage ;; esac
+  case "$max_age" in ''|*[!0-9]*) usage ;; esac
+  case "$max_per" in ''|*[!0-9]*) usage ;; esac
+  [ "$min" -gt 0 ] && [ "$max_per" -gt 0 ] || usage
+  [ -n "$now" ] || now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  valid_ts "$now" || die "--now is not RFC3339: $now"
+
+  local cutoff rows
+  cutoff="$(jq -n -r --arg now "$now" "$JQ_TS"'(($now | ts)[0] - '"$max_age"' * 86400) | strftime("%Y-%m-%d")')"
+  # Rows are held until the whole file has parsed, so a malformed line prints nothing.
+  rows="$(awk '
+    NR == FNR { if (index($0, "finding: ") == 1) { split(substr($0, 10), f, " "); filed[f[1]] = 1 } next }
+    index($0, "p3: ") == 1 {
+      n = split(substr($0, 5), f, " ")
+      if (n < 4 || f[1] !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/ || f[2] !~ /^[^:]+:.+:[^:]+$/) {
+        printf "deep-review.sh: malformed p3 line: %s\n", $0 > "/dev/stderr"
+        bad = 1; exit 3
+      }
+      fp = f[2]
+      if (fp in filed) next
+      if (!(fp in date)) order[++count] = fp
+      if (!(fp in date) || f[1] < date[fp]) { date[fp] = f[1]; line[fp] = $0 }
+    }
+    END {
+      if (bad) exit 3
+      for (i = 1; i <= count; i++) {
+        fp = order[i]
+        file = substr(fp, 1, index(fp, ":") - 1)
+        dir = (file ~ /\//) ? file : "./" file
+        sub(/\/[^\/]*$/, "", dir)
+        printf "%s\t%s\t%d\t%s\n", dir, date[fp], i, line[fp]
+      }
+    }
+  ' "$notes" "$notes")" || exit 3
+  [ -n "$rows" ] || return 0
+  printf '%s\n' "$rows" | LC_ALL=C sort -t "$(printf '\t')" -k1,1 -k2,2 -k3,3n | awk -F'\t' -v min="$min" -v cap="$max_per" -v cutoff="$cutoff" '
+    function flush(   i) {
+      if (!have) return
+      if (cnt >= min || oldest <= cutoff) {
+        print "batch " dir
+        for (i = 1; i <= cnt && i <= cap; i++) print kept[i]
+      }
+    }
+    $1 != dir || !have { flush(); have = 1; dir = $1; oldest = $2; cnt = 0 }
+    { cnt++; kept[cnt] = $0; sub(/^[^\t]*\t[^\t]*\t[^\t]*\t/, "", kept[cnt]) }
+    END { flush() }
+  '
 }
 
 # newest cursor line in the notes: prints "<timestamp>\t<path>", or nothing
@@ -287,5 +369,6 @@ case "$sub" in
   plan) cmd_plan "$@" ;;
   seen) cmd_seen "$@" ;;
   queued) cmd_queued "$@" ;;
+  batches) cmd_batches "$@" ;;
   *) usage ;;
 esac
