@@ -19,8 +19,8 @@ supervision decision.
 
 - **Written by:** `gt mol await-signal` and `gt mol await-event` on each wake
   (`updateAgentHeartbeatVia` in `internal/cmd/molecule_await_signal.go`), and
-  by every `gt agents state` write. A label rewrite is used because
-  `bd agent heartbeat` was never shipped (steveyegge/beads#2828).
+  by every `gt agents state` write. A label rewrite is used because beads never
+  shipped an agent-heartbeat command (steveyegge/beads#2828).
 - **Read by:** nothing that acts on it. The patrol agents that aged this label
   out went with the retired witness and deacon roles.
 

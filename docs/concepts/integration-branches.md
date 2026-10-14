@@ -8,11 +8,11 @@ the sibling work already landed there, and its `gt done` targets the
 integration branch instead of main.
 
 No `gt` command creates, reports on or lands an integration branch. The
-`gt mq integration` commands went with the merge queue (ADR 0004), and
-integration landing was removed before that because it never landed anything
-(gt-fcxe9.4). Moving the work from an integration branch to main is a human
-decision made outside gt, and the pre-push hook blocks the obvious ways of
-doing it by accident (see [Safety Guardrails](#safety-guardrails)).
+merge-queue command group that managed them is gone with the merge queue
+(ADR 0004), and integration landing was removed before that because it never
+landed anything (gt-fcxe9.4). Moving the work from an integration branch to
+main is a human decision made outside gt, and the pre-push hook blocks the
+obvious ways of doing it by accident (see [Safety Guardrails](#safety-guardrails)).
 
 ## How a Branch Is Found
 

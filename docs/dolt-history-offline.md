@@ -7,9 +7,9 @@ three weeks before removal, and a command an agent can reach is a command an
 agent will eventually run. These are operator procedures. Run them by hand,
 with the town parked, after a backup.
 
-Nothing rewrites history unattended. `gt maintain` and the compactor-dog
-plugin, the last routine flatten paths, were deleted with gt-8z769.3, and the
-daemon's `scheduled_maintenance` patrol is now the town's one GC actor: a
+Nothing rewrites history unattended. The routine flatten paths, the
+compactor-dog plugin among them, were deleted with gt-8z769.3, and the daemon's
+`scheduled_maintenance` patrol is now the town's one GC actor: a
 history-preserving `CALL dolt_gc('--full')`, never a rewrite (see "The GC
 actor" below).
 

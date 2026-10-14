@@ -498,7 +498,7 @@ with = "macro-formula"
 
 > For the full lifecycle diagram and detailed command reference, see [concepts/molecules.md](concepts/molecules.md).
 
-**Summary**: Formula (TOML) --`bd cook`--> Protomolecule --`bd mol pour`--> Mol (persistent) or Wisp (ephemeral) --`bd squash`--> Digest.
+**Summary**: Formula (TOML) --`bd cook`--> Protomolecule --`bd mol pour`--> Mol (persistent) or Wisp (ephemeral) --`bd mol squash`--> Digest.
 
 | Operation | bd (data) | gt (agent) |
 |-----------|-----------|------------|
@@ -968,8 +968,8 @@ bd dep add <child> <parent>  # child depends on parent
 
 `bd history <id>` prints one snapshot per retained Dolt commit. A flatten
 (the offline procedure in [dolt-history-offline.md](dolt-history-offline.md), or
-the routine flattening `gt maintain` and compactor-dog did before it was
-removed) discards those commits, and the command does not say so — a bead whose
+the routine flattening the compactor-dog plugin did before it was removed)
+discards those commits, and the command does not say so — a bead whose
 snapshots begin at the flatten reads exactly like one whose snapshots begin at
 its creation, so a field showing a single value looks like a field that never
 changed.
