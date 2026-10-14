@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
@@ -30,6 +31,10 @@ const (
 	defaultOverrunGuardNudgeAfter = 12 * time.Minute
 	defaultOverrunGuardStopAfter  = 20 * time.Minute
 )
+
+// overrunNudgeTimeout bounds one nudge. Queue mode only writes a file, so it
+// is generous.
+const overrunNudgeTimeout = 30 * time.Second
 
 // overrunNudgeMessage is what the seat reads at the nudge threshold.
 const overrunNudgeMessage = "This bead has run longer than expected. Write a split proposal in the bead notes now " +
@@ -217,8 +222,21 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 				d.logger.Printf("overrun_guard: dry run: would nudge %s on %s after %s", who, seat.Bead, elapsed.Round(time.Second))
 				continue
 			}
+			if state.nudgeHeld(slung, now) {
+				continue
+			}
 			if err := s.nudge(seat, overrunNudgeMessage); err != nil {
-				d.logger.Printf("overrun_guard: nudge %s on %s failed: %v", who, seat.Bead, err)
+				state.NudgeFailures = state.nudgeFailures(slung) + 1
+				state.NudgeFailedAt = now
+				d.logger.Printf("overrun_guard: nudge %s on %s failed (attempt %d of %d): %v",
+					who, seat.Bead, state.NudgeFailures, overrunNudgeMaxAttempts, err)
+				if state.NudgeFailures >= overrunNudgeMaxAttempts {
+					d.logger.Printf("overrun_guard: nudge to %s on %s abandoned after %d failed attempts; the stop at %s still applies",
+						who, seat.Bead, state.NudgeFailures, stopAfter)
+				}
+				if err := writeOverrunState(d.config.TownRoot, state); err != nil {
+					d.logger.Printf("overrun_guard: WARNING: %s nudge failure on %s not saved (%v) — it may be retried next tick", who, seat.Bead, err)
+				}
 				continue
 			}
 			state.NudgedAt = now
@@ -252,9 +270,12 @@ func (d *Daemon) overrunProdSeams() overrunSeams {
 		workingSeats: d.overrunWorkingSeats,
 		slungAt:      sl.slungAt,
 		nudge: func(seat overrunSeat, msg string) error {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), overrunNudgeTimeout)
 			defer cancel()
-			return d.notify().Nudge(ctx, seat.Rig+"/"+seat.Polecat, msg)
+			// Queue mode: the message can wait for the seat's next turn. The
+			// default waits up to 15 s for an idle prompt and then watches the
+			// busy seat for 60 s more, which outlasts this context.
+			return d.notify().Nudge(ctx, seat.Rig+"/"+seat.Polecat, msg, notify.Queue())
 		},
 	})
 }

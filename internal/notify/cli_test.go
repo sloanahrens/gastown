@@ -80,6 +80,18 @@ func TestCLINudgeArgv(t *testing.T) {
 	}
 }
 
+func TestCLINudgeQueueArgv(t *testing.T) {
+	t.Parallel()
+	r := &recordedRun{}
+	if err := newTestCLI(r).Nudge(t.Context(), "gastown/furiosa", "split it", Queue()); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"nudge", "--mode=queue", "--", "gastown/furiosa", "split it"}
+	if got := r.only(t).Args; !reflect.DeepEqual(got, want) {
+		t.Fatalf("args = %q, want %q", got, want)
+	}
+}
+
 // TestCLIEscalateArgv pins the mapping onto gt escalate's flags. The reason
 // travels on stdin: it may be multi-line go-test output, which an argv flag
 // would carry but bd's title would not.

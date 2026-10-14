@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/nudge/deliver"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -22,6 +23,7 @@ type nudgeTmux struct {
 	sessions map[string]bool
 	sent     map[string][]string
 	hang     bool
+	busy     bool // a wait for idle times out, as on a seat that is mid-turn
 	release  chan struct{}
 }
 
@@ -54,6 +56,9 @@ func (f *nudgeTmux) IsBusy(string) bool { return false }
 func (f *nudgeTmux) WaitForIdle(session string, _ time.Duration) error {
 	if f.hang {
 		<-f.release
+	}
+	if f.busy {
+		return tmux.ErrIdleTimeout
 	}
 	if ok, _ := f.HasSession(session); !ok {
 		return tmux.ErrSessionNotFound
@@ -190,6 +195,52 @@ func TestTownNudgerReturnsAtTheDeadlineWhenTmuxHangs(t *testing.T) {
 	}
 	if got := ft.sentTo("gt-crew-max"); len(got) != 0 {
 		t.Errorf("sent = %q, want nothing", got)
+	}
+}
+
+// TestTownNudgerQueueOptionDeliversToABusySeat is the overrun guard's nudge
+// (gt-t61ft). The default mode queues the nudge for a seat that is mid-turn
+// and then watches the seat for WatchTimeout, so a caller whose deadline is
+// shorter is told the deadline passed although the nudge is queued. Queue
+// mode writes the queue and returns without waiting on the seat.
+func TestTownNudgerQueueOptionDeliversToABusySeat(t *testing.T) {
+	t.Parallel()
+	const session = "gt-crew-max"
+	cases := []struct {
+		name    string
+		opts    []NudgeOption
+		wantErr error
+	}{
+		{"default waits out the watch", nil, context.DeadlineExceeded},
+		{"queue option returns at once", []NudgeOption{Queue()}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := nudgeTown(t)
+			ft := newNudgeTmux(session)
+			ft.busy = true
+			n := townNudger(root, nil, ft, &sent{})
+			build := n.town
+			n.town = func(townRoot string) *deliver.Town {
+				town := build(townRoot)
+				town.Delivery.WatchTimeout = time.Minute // the real watch outlasts the caller's deadline
+				return town
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+			defer cancel()
+
+			err := n.Nudge(ctx, session, "split proposal", tc.opts...)
+			if !errors.Is(err, tc.wantErr) || (tc.wantErr == nil && err != nil) {
+				t.Fatalf("Nudge = %v, want %v", err, tc.wantErr)
+			}
+			if got := nudge.QueueLen(root, session); got != 1 {
+				t.Errorf("queue holds %d nudges, want the one just sent", got)
+			}
+			if got := ft.sentTo(session); len(got) != 0 {
+				t.Errorf("typed into a busy seat: %q", got)
+			}
+		})
 	}
 }
 
