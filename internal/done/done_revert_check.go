@@ -363,8 +363,12 @@ func relocatedMergesNote(g revertReportGit, relocated []git.RevertedMerge) strin
 // revertedMergeRefusal builds the refusal error for a branch that undoes merged
 // work. The message deliberately does not name the flag that overrides it:
 // agents read refusal text and self-bypass, so the text says what to do about
-// the branch instead. unnamed is the reverted paths a deletes-by-spec waiver
-// could not cover, and is empty unless the bead carries that label.
+// the branch, or to ask for an override, instead. Two shapes produce the same
+// detection — a tree stale against its base, and a deliberate rewrite of a line
+// a recent commit added — so the message gives both causes and the remedy for
+// each rather than asserting the stale one (gt-tceuf). unnamed is the reverted
+// paths a deletes-by-spec waiver could not cover, and is empty unless the bead
+// carries that label.
 func revertedMergeRefusal(g revertReportGit, target string, found []git.RevertedMerge, unnamed []string) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "refusing to submit: this branch undoes work already merged to %s\n\n", target)
@@ -392,14 +396,38 @@ func revertedMergeRefusal(g revertReportGit, target string, found []git.Reverted
 			fmt.Fprintf(&b, "  unnamed: %s\n", path)
 		}
 	}
-	b.WriteString("\nYour working tree is older than the base your commit claims to sit on, " +
-		"so the commit records (your tree) - (that base): a revert of every commit merged " +
-		"in between, plus your own change. Submitting it would delete other people's merged work.\n\n")
-	fmt.Fprintf(&b, "Integrate with:\n"+
-		"  git fetch origin && git rebase %s\n\n", target)
-	fmt.Fprintf(&b, "Then confirm the branch lists only YOUR files and re-run gt done:\n"+
+	b.WriteString("\nThe commit looks like it undoes recent work. Two shapes produce that diff; check the first, then the second:\n\n")
+	fmt.Fprintf(&b, "  A working tree older than the base your commit claims to sit on records "+
+		"(your tree) - (that base): a revert of every commit merged in between, plus your own "+
+		"change, which deletes other people's merged work. Integrate with:\n"+
+		"      git fetch origin && git rebase %s\n\n", target)
+	fmt.Fprintf(&b, "  A deliberate rewrite of a line one of those commits added. %s, or ask "+
+		"for an override.\n\n", rewritesLineRemedy(found))
+	fmt.Fprintf(&b, "Confirm the branch lists only YOUR files and re-run gt done:\n"+
 		"  git diff --stat %s...HEAD", target)
 	return fmt.Errorf("%s", b.String())
+}
+
+// rewritesLineRemedy is the refusal's second cause: what to do when the diff is
+// a deliberate rewrite of a line a recent commit added rather than a stale tree
+// (gt-tceuf). It caps the path list at revertPathsPerCommit so a wide change
+// cannot flood the refusal, and a report carrying no path still reads as a
+// sentence.
+func rewritesLineRemedy(found []git.RevertedMerge) string {
+	paths, _ := revertedPaths(found, "")
+	if len(paths) == 0 {
+		return "Keep the old line and add the new one in the same change"
+	}
+	where := strings.Join(paths, ", ")
+	if extra := len(paths) - revertPathsPerCommit; extra > 0 {
+		noun := "files"
+		if extra == 1 {
+			noun = "file"
+		}
+		where = fmt.Sprintf("%s and %d more %s",
+			strings.Join(paths[:revertPathsPerCommit], ", "), extra, noun)
+	}
+	return "Keep the old line and add the new one beside it in " + where
 }
 
 // commitSubjectOrUnavailable names a commit for a report line, standing in for

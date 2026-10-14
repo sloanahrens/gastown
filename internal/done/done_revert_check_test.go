@@ -48,8 +48,11 @@ func detected(r git.RevertReport, err error) func() (git.RevertReport, error) {
 }
 
 // TestReportRevertedMergesRefusesWorkThatUndoesMergedCommits (gt-63sz): the
-// refusal names each undone commit and path, says how to integrate, and never
-// mentions the override flag, since agents read refusals and self-bypass.
+// refusal names each undone commit and path, gives both causes the diff can
+// have with the remedy for each, and never mentions the override flag, since
+// agents read refusal text and self-bypass. A polecat whose own rewrite of a
+// line was read as a revert is sent to the rewrite remedy, not to rebase a tree
+// that is already current (gt-tceuf).
 func TestReportRevertedMergesRefusesWorkThatUndoesMergedCommits(t *testing.T) {
 	t.Parallel()
 	g := fakeRevertGit{stat: " keep.txt | 1 -\n", subjects: map[string]string{"aaaaaaaaaaaa": "merged: other work"}}
@@ -58,13 +61,55 @@ func TestReportRevertedMergesRefusesWorkThatUndoesMergedCommits(t *testing.T) {
 	if err == nil {
 		t.Fatal("a branch that reverts merged work was accepted")
 	}
-	for _, want := range []string{"refusing to submit", "aaaaaaaa merged: other work", "undoes: keep.txt", "undoes: new.txt", "git rebase origin/main", "git diff --stat origin/main...HEAD"} {
+	for _, want := range []string{
+		"refusing to submit",
+		"aaaaaaaa merged: other work",
+		"undoes: keep.txt",
+		"undoes: new.txt",
+		"looks like it undoes recent work",
+		"git fetch origin && git rebase origin/main",
+		"beside it in keep.txt, new.txt, or ask for an override",
+		"git diff --stat origin/main...HEAD",
+	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal lacks %q:\n%s", want, err)
 		}
 	}
+	// Detection cannot tell the two shapes apart, so the refusal may not assert
+	// the stale one as the reader's case (gt-tceuf).
+	if strings.Contains(err.Error(), "Your working tree is older than") {
+		t.Errorf("refusal states the tree is stale as fact:\n%s", err)
+	}
 	if strings.Contains(err.Error(), "--allow-reverts") {
-		t.Errorf("refusal advertises the override flag:\n%s", err)
+		t.Errorf("refusal advertises the override flag — agents read refusal text and self-bypass:\n%s", err)
+	}
+}
+
+// TestReportRevertedMergesNamesTheRewriteRemedy: the second cause names the
+// flagged files, caps the list the way the commit list is capped, and still
+// reads as a sentence when the report carries no path to name.
+func TestReportRevertedMergesNamesTheRewriteRemedy(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		reverted []git.RevertedMerge
+		want     string
+	}{
+		{"one file", []git.RevertedMerge{{Commit: "a", Paths: []string{"docs/design/x.md"}}},
+			"Keep the old line and add the new one beside it in docs/design/x.md"},
+		{"a file two commits touched", []git.RevertedMerge{{Commit: "a", Paths: []string{"x.go"}}, {Commit: "b", Paths: []string{"x.go"}}},
+			"Keep the old line and add the new one beside it in x.go"},
+		{"one past the cap", []git.RevertedMerge{{Commit: "a", Paths: []string{"a", "b", "c", "d", "e"}}},
+			"Keep the old line and add the new one beside it in a, b, c, d and 1 more file"},
+		{"past the cap", []git.RevertedMerge{{Commit: "a", Paths: []string{"a", "b", "c", "d", "e", "f"}}},
+			"Keep the old line and add the new one beside it in a, b, c, d and 2 more files"},
+		{"nothing named", []git.RevertedMerge{{Commit: "a"}},
+			"Keep the old line and add the new one in the same change"},
+	}
+	for _, tc := range cases {
+		if got := rewritesLineRemedy(tc.reverted); got != tc.want {
+			t.Errorf("%s: remedy = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
 

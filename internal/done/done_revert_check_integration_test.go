@@ -404,8 +404,10 @@ func TestIntegrationDetectRevertedMerges_UnresolvableTargetFailsClosed(t *testin
 }
 
 // TestReportRevertedMerges_RefusesStaleBranch checks the operator-facing half:
-// a refusal, with the undone commit named and the rebase remedy stated, and the
-// branch's diff stat printed so the polecat can see whose files are in its diff.
+// a refusal naming the undone commit, the files the rewrite cause would touch,
+// both remedies — the override is offered without the flag that buys it — and
+// the branch's diff stat printed so the polecat can see whose files are in its
+// diff.
 func TestIntegrationReportRevertedMerges_RefusesStaleBranch(t *testing.T) {
 	t.Parallel()
 	s := newRevertScenario(t)
@@ -422,13 +424,39 @@ func TestIntegrationReportRevertedMerges_RefusesStaleBranch(t *testing.T) {
 		t.Fatal("reportRevertedMerges accepted a branch that reverts merged work")
 	}
 	msg := err.Error()
-	for _, want := range []string{"refusing to submit", "merged: other work", "git rebase origin/main", "git diff --stat origin/main...HEAD"} {
+	for _, want := range []string{
+		"refusing to submit",
+		"merged: other work",
+		"git fetch origin && git rebase origin/main",
+		"beside it in ",
+		"or ask for an override",
+		"git diff --stat origin/main...HEAD",
+	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("refusal message missing %q:\n%s", want, msg)
 		}
 	}
 	if strings.Contains(msg, "--allow-reverts") {
 		t.Errorf("refusal message advertises the override flag — agents read refusal text and self-bypass:\n%s", msg)
+	}
+	// The rewrite remedy names the files the guard flagged, so the branch that
+	// hit that cause reads which of its lines matched (gt-tceuf).
+	remedyAt := strings.Index(msg, "beside it in ")
+	if remedyAt < 0 {
+		t.Fatalf("refusal states the rewrite cause without naming a file:\n%s", msg)
+	}
+	remedy := msg[remedyAt:]
+	flagged, _ := revertedPaths(detectRevertedMerges(t, s.polecat).Reverted, "")
+	if len(flagged) == 0 {
+		t.Fatal("the scenario flagged no path to name")
+	}
+	if len(flagged) > revertPathsPerCommit {
+		flagged = flagged[:revertPathsPerCommit]
+	}
+	for _, path := range flagged {
+		if !strings.Contains(remedy, path) {
+			t.Errorf("rewrite remedy does not name the flagged %s:\n%s", path, msg)
+		}
 	}
 
 	// A clean branch must be accepted, so the check cannot be passing by
