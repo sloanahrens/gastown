@@ -24,7 +24,6 @@ This is set automatically when agents are spawned and used for all attribution.
 
 | Role Type | Format | Example |
 |-----------|--------|---------|
-| **Mayor** | `mayor` | `mayor` |
 | **Crew** | `{rig}/crew/{name}` | `gastown/crew/joe` |
 | **Polecat** | `{rig}/polecats/{name}` | `gastown/polecats/toast` |
 
@@ -63,7 +62,7 @@ abc123 Fix bug (gastown/crew/joe <steve@example.com>)
 {
   "id": "gt-xyz",
   "created_by": "gastown/crew/joe",
-  "updated_by": "mayor"
+  "updated_by": "gastown/polecats/toast"
 }
 ```
 
@@ -134,7 +133,6 @@ The format supports programmatic parsing:
 
 | Input | Parsed Components |
 |-------|-------------------|
-| `mayor` | role=mayor |
 | `gastown/crew/joe` | rig=gastown, role=crew, name=joe |
 | `gastown/polecats/toast` | rig=gastown, role=polecat, name=toast |
 

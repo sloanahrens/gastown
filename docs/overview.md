@@ -27,7 +27,6 @@ These roles manage the Gas Town system itself:
 
 | Role | Description | Lifecycle |
 |------|-------------|-----------|
-| **Mayor** | Global coordinator at mayor/ | Singleton |
 | **Daemon** | Go process: supervises agents, lands work | Singleton, persistent |
 
 The daemon is not an agent. It is the only process that kills or restarts a
@@ -106,7 +105,8 @@ gt sling bd-xyz beads
 
 ## Directory Structure
 
-The town root (`~/gt/`) contains the `mayor/` directory and per-project rigs.
+The town root (`~/gt/`) contains the `mayor/` directory (a path name kept from the
+retired mayor role; no mayor process runs) and per-project rigs.
 Each rig holds a bare repo (`.repo.git/`), a canonical beads database
 (`mayor/rig/.beads/`), and agent directories (`crew/`, `polecats/`).
 
