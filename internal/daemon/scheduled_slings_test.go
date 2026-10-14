@@ -171,19 +171,20 @@ func TestDecideScheduledSling_IgnoresRunsThatFailedToSling(t *testing.T) {
 // fakeScheduledRunner models production bead state: a created bead is open
 // until closeBead retires it, so each tick sees what a real tick would see.
 type fakeScheduledRunner struct {
-	beads     []scheduledBead
-	listErr   error
-	created   []string // bead titles, in order
-	runs      []scheduledRunBead
-	createID  string
-	createErr error
-	slungIDs  []string
-	slung     []ScheduledSlingEntry
-	slingErr  error
-	closeErr  error
-	closedIDs []string
-	closedWhy []string
-	now       time.Time
+	beads         []scheduledBead
+	listErr       error
+	created       []string // bead titles, in order
+	runs          []scheduledRunBead
+	createID      string
+	createErr     error
+	slungIDs      []string
+	slungBranches []string // the branch each sling resumed, "" for a fresh run
+	slung         []ScheduledSlingEntry
+	slingErr      error
+	closeErr      error
+	closedIDs     []string
+	closedWhy     []string
+	now           time.Time
 
 	// gate answers: the n-th runGate call returns gateAnswers[n], the last one
 	// repeating. gateDeadlines records the time left on each call's context.
@@ -248,8 +249,9 @@ func (f *fakeScheduledRunner) createBead(_ context.Context, _ string, run schedu
 	return f.createID, nil
 }
 
-func (f *fakeScheduledRunner) sling(ctx context.Context, beadID string, e ScheduledSlingEntry) error {
+func (f *fakeScheduledRunner) sling(ctx context.Context, beadID, branch string, e ScheduledSlingEntry) error {
 	f.slungIDs = append(f.slungIDs, beadID)
+	f.slungBranches = append(f.slungBranches, branch)
 	f.slung = append(f.slung, e)
 	if dl, ok := ctx.Deadline(); ok {
 		f.slingBudgets = append(f.slingBudgets, time.Until(dl))
@@ -390,6 +392,140 @@ func TestRunScheduledSlings_AStalledBeadItCannotRetireStillEscalates(t *testing.
 	}
 	if len(*esc) != 1 {
 		t.Fatalf("expected the third stalled tick to escalate, got %d: %v", len(*esc), *esc)
+	}
+}
+
+// A run that started and lost its polecat is returned to open by the dead-holder
+// recovery with its created_at untouched and the surviving branch in its notes.
+// It must not read as a run no sling ever hooked: retiring it as stalled would
+// dispatch a second run from main and orphan the branch (gt-k6kea).
+func TestRunScheduledSlings_AReopenedRunResumesItsBranchInsteadOfBeingRetired(t *testing.T) {
+	t.Parallel()
+	f := &fakeScheduledRunner{createID: "gt-next", now: time.Now()}
+	d, esc := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
+	f.slingHook = func(_ context.Context, f *fakeScheduledRunner, id string) error {
+		f.setStatus(id, "hooked") // gt sling hooks the bead before it spawns the polecat
+		return nil
+	}
+
+	// started: hooked at creation, then reopened by the recovery two hours later.
+	created := time.Now().Add(-2 * time.Hour)
+	f.beads = []scheduledBead{{ID: "gt-run", Status: "hooked", CreatedAt: created}}
+	d.runScheduledSlings()
+	if len(f.slungIDs) != 0 || len(f.closedIDs) != 0 {
+		t.Fatalf("a hooked run is in flight: slung %v closed %v", f.slungIDs, f.closedIDs)
+	}
+	f.beads[0].Status = "open"
+	f.beads[0].ResumeBranch = "polecat/nux/gt-run+abc"
+
+	d.runScheduledSlings()
+	if len(f.closedIDs) != 0 {
+		t.Fatalf("a reopened run must not be retired as stalled, closed %v (%v)", f.closedIDs, f.closedWhy)
+	}
+	if len(f.created) != 0 {
+		t.Errorf("a reopened run must not be replaced by a fresh run, created %v", f.created)
+	}
+	if len(f.slungIDs) != 1 || f.slungIDs[0] != "gt-run" || f.slungBranches[0] != "polecat/nux/gt-run+abc" {
+		t.Fatalf("the reopened run must be slung again on its preserved branch, slung %v on %v", f.slungIDs, f.slungBranches)
+	}
+	if got := d.scheduledSlingFailures["doc-audit"]; got != 0 {
+		t.Errorf("a resumed run is not a failure, got %d", got)
+	}
+
+	// Hooked again, the run is in flight: the next tick leaves it alone.
+	d.runScheduledSlings()
+	if len(f.slungIDs) != 1 || len(f.closedIDs) != 0 || len(f.created) != 0 {
+		t.Errorf("the resumed run is in flight: slung %v closed %v created %v", f.slungIDs, f.closedIDs, f.created)
+	}
+	if len(*esc) != 0 {
+		t.Errorf("nothing failed, escalated %v", *esc)
+	}
+}
+
+// A resume that fails leaves the reopened bead open and counts toward the
+// escalation. Closing it with the failure marker would send the next tick to a
+// fresh run from main and strand the branch again.
+func TestRunScheduledSlings_AFailedResumeKeepsTheBeadAndEscalates(t *testing.T) {
+	t.Parallel()
+	f := &fakeScheduledRunner{createID: "gt-next", now: time.Now(), slingErr: errors.New("branch not found")}
+	d, esc := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
+	f.beads = []scheduledBead{{ID: "gt-run", Status: "open", CreatedAt: time.Now().Add(-time.Hour), ResumeBranch: "polecat/nux/gt-run+abc"}}
+	for i := 1; i <= 3; i++ {
+		d.runScheduledSlings()
+		if got := d.scheduledSlingFailures["doc-audit"]; got != i {
+			t.Fatalf("after tick %d: consecutive failures = %d, want %d", i, got, i)
+		}
+	}
+	if len(f.closedIDs) != 0 || len(f.created) != 0 {
+		t.Errorf("a failed resume must keep the bead and start no fresh run: closed %v created %v", f.closedIDs, f.created)
+	}
+	if len(*esc) != 1 || !strings.Contains((*esc)[0], "polecat/nux/gt-run+abc") {
+		t.Errorf("the third failure must escalate naming the branch, got %v", *esc)
+	}
+}
+
+// A capacity refusal of the resume is a deferral, not a failure: the bead stays
+// open and the next tick asks again.
+func TestRunScheduledSlings_ARefusedResumeIsADeferral(t *testing.T) {
+	t.Parallel()
+	f := &fakeScheduledRunner{createID: "gt-next", now: time.Now(), slingErr: errors.New(capacityRefusals["pool full"])}
+	d, esc := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
+	f.beads = []scheduledBead{{ID: "gt-run", Status: "open", CreatedAt: time.Now().Add(-time.Hour), ResumeBranch: "polecat/nux/gt-run+abc"}}
+	for i := 0; i < 3; i++ {
+		d.runScheduledSlings()
+	}
+	if got := d.scheduledSlingFailures["doc-audit"]; got != 0 || len(*esc) != 0 {
+		t.Errorf("a refusal must leave the failure count alone: count %d escalated %v", got, *esc)
+	}
+	if len(f.closedIDs) != 0 {
+		t.Errorf("a refused resume keeps the bead, closed %v", f.closedIDs)
+	}
+}
+
+// The decision half: a reopened run is resumed at any age, a bead no sling
+// hooked is still retired, and a spec-dispatched entry (staleAfter 0) leaves
+// the reopened bead to the dispatcher.
+func TestDecideScheduledSling_ReopenedRunIsResumedNotRetired(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
+	week := 168 * time.Hour
+	const staleAfter = 20 * time.Minute
+	old := now.Add(-30 * 24 * time.Hour)
+	reopened := scheduledBead{ID: "gt-reopened", Status: "open", CreatedAt: old, ResumeBranch: "polecat/nux/x"}
+	neverStarted := scheduledBead{ID: "gt-never", Status: "open", CreatedAt: old}
+	cases := []struct {
+		name       string
+		beads      []scheduledBead
+		staleAfter time.Duration
+		want       scheduledAction
+		resume     string
+		stale      int
+	}{
+		{"reopened past the budget", []scheduledBead{reopened}, staleAfter, scheduledResume, "gt-reopened", 0},
+		{"reopened inside the budget", []scheduledBead{{ID: "gt-r", Status: "open", CreatedAt: now.Add(-time.Minute), ResumeBranch: "b"}}, staleAfter, scheduledResume, "gt-r", 0},
+		{"never started still retires", []scheduledBead{neverStarted}, staleAfter, scheduledRecoverStale, "", 1},
+		{"reopened beside a never-started bead", []scheduledBead{neverStarted, reopened}, staleAfter, scheduledResume, "gt-reopened", 0},
+		{"reopened with no readable created_at", []scheduledBead{{ID: "gt-r", Status: "open", ResumeBranch: "b"}}, staleAfter, scheduledResume, "gt-r", 0},
+		{"hooked with a stale note is in flight", []scheduledBead{{ID: "gt-h", Status: "hooked", CreatedAt: old, ResumeBranch: "b"}}, staleAfter, scheduledSkipOpen, "", 0},
+		{"a young run in flight beside a reopened one", []scheduledBead{{ID: "gt-h", Status: "hooked", CreatedAt: now}, reopened}, staleAfter, scheduledSkipOpen, "", 0},
+		{"spec entry leaves it to the dispatcher", []scheduledBead{reopened}, 0, scheduledSkipOpen, "", 0},
+	}
+	for _, c := range cases {
+		dec := decideScheduledSling(c.beads, week, c.staleAfter, now)
+		if dec.action != c.want || dec.resume.ID != c.resume || len(dec.stale) != c.stale {
+			t.Errorf("%s: got action %v resume %q stale %d, want %v %q %d", c.name, dec.action, dec.resume.ID, len(dec.stale), c.want, c.resume, c.stale)
+		}
+	}
+}
+
+func TestScheduledBeadsOf_ReadsTheResumeBranchNote(t *testing.T) {
+	t.Parallel()
+	got := scheduledBeadsOf([]*beads.Issue{
+		{ID: "gt-a", Status: "open", Notes: "spec-dispatch: x\nresume_branch: polecat/nux/gt-a+1\nresume_branch: polecat/nux/gt-a+2"},
+		{ID: "gt-b", Status: "open"},
+	})
+	if got[0].ResumeBranch != "polecat/nux/gt-a+2" || got[1].ResumeBranch != "" {
+		t.Errorf("resume branches = %q, %q; want the newest note's branch and none", got[0].ResumeBranch, got[1].ResumeBranch)
 	}
 }
 
@@ -572,10 +708,17 @@ func TestExecScheduledRunner_SlingArgv(t *testing.T) {
 	r := &execScheduledSlingRunner{townRoot: "/town", bdPath: "bd", gtPath: "gt"}
 	e := docAuditEntry
 	e.Vars = map[string]string{"slice_docs": "8"}
-	got := r.slingArgs("gt-run1", e)
+	got := r.slingArgs("gt-run1", "", e)
 	want := []string{"sling", "gt-run1", "gastown", "--formula=mol-doc-audit", "--agent=deepseek-pro", "--actor=daemon/scheduled:doc-audit", "--no-boot", "--var", "slice_docs=8"}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Errorf("argv\n got %v\nwant %v", got, want)
+	}
+
+	// A resume adds --branch beside the agent flag, before the actor.
+	got = r.slingArgs("gt-run1", "polecat/nux/x", e)
+	want = []string{"sling", "gt-run1", "gastown", "--formula=mol-doc-audit", "--agent=deepseek-pro", "--branch=polecat/nux/x", "--actor=daemon/scheduled:doc-audit", "--no-boot", "--var", "slice_docs=8"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("resume argv\n got %v\nwant %v", got, want)
 	}
 }
 

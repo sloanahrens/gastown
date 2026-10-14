@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/util"
 )
@@ -63,12 +64,14 @@ func scheduledSlingPriority(e ScheduledSlingEntry) int {
 // scheduledBead is the slice of a run bead the decision needs. CreatedAt is
 // parsed from bd's string timestamp (see parseScheduledBeads); CloseReason
 // distinguishes a run that completed from one the patrol closed because it
-// could not be slung.
+// could not be slung. ResumeBranch is the branch the dead-holder recovery
+// recorded when it returned the run to open ("" for a bead it never reopened).
 type scheduledBead struct {
-	ID          string
-	Status      string
-	CloseReason string
-	CreatedAt   time.Time
+	ID           string
+	Status       string
+	CloseReason  string
+	CreatedAt    time.Time
+	ResumeBranch string
 }
 
 // scheduledSlingFailureMarker prefixes the close reason the patrol writes on a
@@ -99,6 +102,7 @@ const (
 	scheduledSkipOpen     scheduledAction = iota // a run is in flight or its MR is queued
 	scheduledSkipRecent                          // the newest run started less than an interval ago
 	scheduledRecoverStale                        // an unhooked run bead outlived the sling budget
+	scheduledResume                              // a run the dead-holder recovery reopened is slung again on its branch
 	scheduledDispatch
 )
 
@@ -110,6 +114,8 @@ func (a scheduledAction) String() string {
 		return "skip-recent"
 	case scheduledRecoverStale:
 		return "recover-stale"
+	case scheduledResume:
+		return "resume"
 	default:
 		return "dispatch"
 	}
@@ -122,16 +128,29 @@ type scheduledDecision struct {
 	// stale holds every open, unhooked run bead past staleAfter. Only
 	// scheduledRecoverStale sets it.
 	stale []scheduledBead
+	// resume is the reopened run bead scheduledResume slings again.
+	resume scheduledBead
 }
 
-// isOpenUnhooked reports whether the bead records a run that was created but
-// never started. gt sling moves the bead to hooked before it spawns the
-// polecat, so "open" is the only status such a bead has.
+// isOpenUnhooked reports whether the bead is open with no sling holding it.
+// gt sling moves the bead to hooked before it spawns the polecat, so a run that
+// never started is open. So is a run that did start and lost its polecat: the
+// dead-holder recovery returns it to open (isReopenedRun tells the two apart).
 func isOpenUnhooked(b scheduledBead) bool { return b.Status == string(beads.StatusOpen) }
+
+// isReopenedRun reports whether the bead is a run that started and was handed
+// back: the dead-holder recovery records the branch the work survives on before
+// it reopens the bead, and leaves created_at alone, so age cannot tell this
+// bead from one no sling ever hooked. A recovery that found no surviving branch
+// leaves no note, and none is needed: there is no work to resume, so retiring
+// the bead and running again from main loses nothing.
+func isReopenedRun(b scheduledBead) bool { return isOpenUnhooked(b) && b.ResumeBranch != "" }
 
 // decideScheduledSling is pure: the beads carrying the entry's label, the
 // entry's interval, the age past which an open run bead is a leftover rather
-// than a sling in progress (staleAfter), and now. Any bead that could still be
+// than a sling in progress (staleAfter), and now. A zero staleAfter marks an entry
+// the spec dispatcher feeds: it recovers and resumes nothing, because the
+// dispatcher resumes a reopened bead itself. Any bead that could still be
 // a live run wins over recency, so a run whose MR is still in the queue is
 // never doubled. A run that failed to sling is neither: it never started, so
 // it must not block the retry. Neither is an unhooked bead past staleAfter,
@@ -141,12 +160,21 @@ func decideScheduledSling(beads []scheduledBead, interval, staleAfter time.Durat
 	var (
 		newest time.Time
 		stale  []scheduledBead
+		resume *scheduledBead
 	)
 	for _, b := range beads {
 		if isFailedScheduledRun(b) {
 			continue
 		}
 		if b.Status != "closed" {
+			// A reopened run is not stale at any age: its polecat died, and
+			// the branch it left is work to continue, not a leftover to close.
+			if isReopenedRun(b) && staleAfter > 0 {
+				if resume == nil {
+					resume = &b
+				}
+				continue
+			}
 			// A bead with no readable created_at has no age to judge, and a
 			// duplicate run costs more than a stalled one, so it counts as a
 			// run in flight. A zero staleAfter is the same answer, so a caller
@@ -160,6 +188,9 @@ func decideScheduledSling(beads []scheduledBead, interval, staleAfter time.Durat
 		if b.CreatedAt.After(newest) {
 			newest = b.CreatedAt
 		}
+	}
+	if resume != nil {
+		return scheduledDecision{action: scheduledResume, resume: *resume}
 	}
 	if len(stale) > 0 {
 		// The beads must be retired before the entry can run again, and they
@@ -182,10 +213,11 @@ func scheduledBeadsOf(issues []*beads.Issue) []scheduledBead {
 	out := make([]scheduledBead, 0, len(issues))
 	for _, is := range issues {
 		out = append(out, scheduledBead{
-			ID:          is.ID,
-			Status:      is.Status,
-			CloseReason: is.CloseReason,
-			CreatedAt:   beads.ParseIssueTime(is.CreatedAt),
+			ID:           is.ID,
+			Status:       is.Status,
+			CloseReason:  is.CloseReason,
+			CreatedAt:    beads.ParseIssueTime(is.CreatedAt),
+			ResumeBranch: patrolscan.ResumeBranchFromNotes(is.Notes),
 		})
 	}
 	return out
@@ -196,7 +228,10 @@ func scheduledBeadsOf(issues []*beads.Issue) []scheduledBead {
 type scheduledSlingRunner interface {
 	listBeads(ctx context.Context, rig, label string) ([]scheduledBead, error)
 	createBead(ctx context.Context, rig string, run scheduledRunBead) (string, error)
-	sling(ctx context.Context, beadID string, e ScheduledSlingEntry) error
+	// sling hooks beadID and spawns the polecat. A non-empty branch resumes the
+	// work on that existing branch (gt sling --branch) instead of starting
+	// from main.
+	sling(ctx context.Context, beadID, branch string, e ScheduledSlingEntry) error
 	closeBead(ctx context.Context, rig, beadID, reason string) error
 	// runGate runs the entry's gate_command under ctx's deadline and returns
 	// its combined output and run error (see scheduledGateAllows).
@@ -253,10 +288,13 @@ func (r *execScheduledSlingRunner) createBead(_ context.Context, rig string, run
 	return issue.ID, nil
 }
 
-func (r *execScheduledSlingRunner) slingArgs(beadID string, e ScheduledSlingEntry) []string {
+func (r *execScheduledSlingRunner) slingArgs(beadID, branch string, e ScheduledSlingEntry) []string {
 	args := []string{"sling", beadID, e.Rig, "--formula=" + e.Formula}
 	if e.Agent != "" {
 		args = append(args, "--agent="+e.Agent)
+	}
+	if branch != "" {
+		args = append(args, "--branch="+branch)
 	}
 	args = append(args, "--actor=daemon/scheduled:"+e.Name, "--no-boot")
 	keys := make([]string, 0, len(e.Vars))
@@ -270,8 +308,8 @@ func (r *execScheduledSlingRunner) slingArgs(beadID string, e ScheduledSlingEntr
 	return args
 }
 
-func (r *execScheduledSlingRunner) sling(ctx context.Context, beadID string, e ScheduledSlingEntry) error {
-	cmd := exec.CommandContext(ctx, r.gtPath, r.slingArgs(beadID, e)...)
+func (r *execScheduledSlingRunner) sling(ctx context.Context, beadID, branch string, e ScheduledSlingEntry) error {
+	cmd := exec.CommandContext(ctx, r.gtPath, r.slingArgs(beadID, branch, e)...)
 	cmd.Dir = r.townRoot
 	cmd.Env = daemonGTEnv(bdMutationRoutingEnv(r.townRoot))
 	util.SetProcessGroup(cmd)
@@ -461,6 +499,9 @@ func (d *Daemon) runScheduledSlingEntry(ctx context.Context, e ScheduledSlingEnt
 	if plan.action == scheduledRecoverStale {
 		return d.retireStalledScheduledRuns(ctx, r, e, plan.stale, now)
 	}
+	if plan.action == scheduledResume {
+		return d.resumeReopenedScheduledRun(ctx, r, e, plan.resume)
+	}
 	if plan.action != scheduledDispatch {
 		d.logger.Printf("scheduled_slings: %s: %s", e.Name, plan.action)
 		return nil
@@ -484,7 +525,7 @@ func (d *Daemon) runScheduledSlingEntry(ctx context.Context, e ScheduledSlingEnt
 		return err
 	}
 	d.logger.Printf("scheduled_slings: %s: created %s, slinging %s to %s (agent %q)", e.Name, id, e.Formula, e.Rig, e.Agent)
-	if err := r.sling(ctx, id, e); err != nil {
+	if err := r.sling(ctx, id, "", e); err != nil {
 		// A sling killed by its deadline may already have hooked the bead and
 		// spawned the polecat; failure-closing it would dispatch the same run
 		// again next tick (gt-0frud).
@@ -504,6 +545,26 @@ func (d *Daemon) runScheduledSlingEntry(ctx context.Context, e ScheduledSlingEnt
 			return &scheduledSlingDeferred{cause: err}
 		}
 		return err
+	}
+	return nil
+}
+
+// resumeReopenedScheduledRun slings a reopened run bead again on the branch the
+// dead-holder recovery preserved, so the formula continues where it stopped
+// instead of running twice from main beside an orphaned branch. A failed sling
+// leaves the bead open and is returned, so the next tick retries it and the
+// failures count toward the escalation: closing it with the failure marker
+// would send the next tick to a fresh run and strand the branch again.
+func (d *Daemon) resumeReopenedScheduledRun(ctx context.Context, r scheduledSlingRunner, e ScheduledSlingEntry, b scheduledBead) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), d.scheduledSlingBudget())
+	defer cancel()
+	d.logger.Printf("scheduled_slings: %s: run %s was reopened after its polecat died; slinging %s to %s again on branch %s",
+		e.Name, b.ID, e.Formula, e.Rig, b.ResumeBranch)
+	if err := r.sling(ctx, b.ID, b.ResumeBranch, e); err != nil {
+		if isScheduledSlingRefusal(err) {
+			return &scheduledSlingDeferred{cause: err}
+		}
+		return fmt.Errorf("resuming reopened run %s on branch %s: %w", b.ID, b.ResumeBranch, err)
 	}
 	return nil
 }

@@ -77,7 +77,7 @@ func TestDaemonGTExecSitesCarryTheDaemonIdentity(t *testing.T) {
 	_, _ = d.runSpecDispatchCommand()
 	_ = d.restartPolecatSession(supervisor.SeatFor("gastown", constants.RolePolecat, "ruby"))
 	r := &execScheduledSlingRunner{townRoot: townRoot, bdPath: "bd", gtPath: "gt", execCmd: gt.run}
-	_ = r.sling(t.Context(), "gt-run1", docAuditEntry)
+	_ = r.sling(t.Context(), "gt-run1", "", docAuditEntry)
 
 	// The convoy feeder's dispatch is the one gt the daemon used to run that no
 	// longer runs at all: it goes through the in-process engine (gt-638go.7),
