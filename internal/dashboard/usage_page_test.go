@@ -112,3 +112,56 @@ func TestUsagePanelSetsNoMarkup(t *testing.T) {
 		t.Error("renderUsage does not draw its cells through el()")
 	}
 }
+
+// The Deep reviews table shows what a run's tokens bought: the findings the
+// Deep review pane counted for the same bead, and the uncached tokens per
+// finding. The two lists come from different readers, so the page joins them by
+// bead id and does no new read.
+func TestUsagePanelJoinsDeepReviewFindings(t *testing.T) {
+	t.Parallel()
+
+	draw := pageFunc(t, "renderUsage")
+	for _, want := range []string{
+		// The join: the Deep review pane's rows keyed by their id, read off the
+		// same state the Usage payload rides in.
+		`const found = new Map(((s.deepreview && s.deepreview.rows) || []).map(r => [r.id, r.findings]));`,
+		`const f = found.get(r.bead);`,
+		`["Findings", 1], ["Tokens per finding", 1]`,
+		// Findings: the count, and "-" for a run the Deep review pane does not list.
+		`[f == null ? "-" : String(f), "n"]`,
+		// Tokens per finding: uncached over findings, in the other token cells'
+		// format, and "-" for zero or unknown findings.
+		`[f ? fmtTokens(Math.round(r.uncached / f)) : "-", "n"]`,
+	} {
+		if !strings.Contains(draw, want) {
+			t.Errorf("renderUsage has no %q", want)
+		}
+	}
+}
+
+// A run the Deep review pane does not list, a run it lists with no findings and
+// a state with no deep review at all each draw "-" rather than a number, and
+// the quotient is guarded by the count, so no case divides by zero. The page is
+// data-driven, so these tests hold its expressions to those cases.
+func TestUsagePanelDeepReviewColumnsHandleMissingAndZero(t *testing.T) {
+	t.Parallel()
+
+	draw := pageFunc(t, "renderUsage")
+	// No deep review in the state, or one that carried no rows, joins to an
+	// empty map: every run then draws "-" in both columns.
+	if !strings.Contains(draw, `(s.deepreview && s.deepreview.rows) || []`) {
+		t.Error("renderUsage joins without guarding a missing deepreview or rows")
+	}
+	// Unknown findings (no entry) is told apart from zero findings (an entry of
+	// 0): the first draws "-", the second draws "0".
+	if !strings.Contains(draw, `f == null ? "-" : String(f)`) {
+		t.Error("the Findings cell does not tell a missing run from a run with none")
+	}
+	// The quotient only runs for a truthy count: both undefined and 0 draw "-".
+	if !strings.Contains(draw, `f ? fmtTokens(Math.round(r.uncached / f)) : "-"`) {
+		t.Error("the Tokens per finding cell does not guard a zero or unknown count")
+	}
+	if strings.Count(draw, "r.uncached / ") != 1 {
+		t.Error("renderUsage divides uncached tokens somewhere other than the guarded cell")
+	}
+}

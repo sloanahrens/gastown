@@ -1990,9 +1990,17 @@ function renderUsage(s) {
         [r.class], [r.model, "title"], [String(r.calls), "n"],
         [isDeepSeek(r.model) ? "est. " + money(r.est_cost_usd) : fmtTokens(r.uncached) + " tokens", "n"]]))
     : none("no usage in the last " + (u.window || "24h")));
+  // What a run's tokens bought: its findings, joined by bead id from the Deep
+  // review pane's rows. A run that pane does not list has no count ("-"), and a
+  // run with none has no per-finding figure to divide into.
+  const found = new Map(((s.deepreview && s.deepreview.rows) || []).map(r => [r.id, r.findings]));
   section("Deep reviews", deep.length
-    ? table([["Run"], ["Ended"], ["Took", 1], ["Tokens", 1], ["In subagents", 1]], deep.map(r => [
-        [r.bead], [age(r.end) + " ago", "title"], [fmtDur(r.wall_s), "n"], [fmtTokens(r.uncached), "n"], [Math.round((r.subagent_share || 0) * 100) + "%", "n"]]))
+    ? table([["Run"], ["Ended"], ["Took", 1], ["Tokens", 1], ["In subagents", 1], ["Findings", 1], ["Tokens per finding", 1]], deep.map(r => {
+        const f = found.get(r.bead);
+        return [
+          [r.bead], [age(r.end) + " ago", "title"], [fmtDur(r.wall_s), "n"], [fmtTokens(r.uncached), "n"], [Math.round((r.subagent_share || 0) * 100) + "%", "n"],
+          [f == null ? "-" : String(f), "n"], [f ? fmtTokens(Math.round(r.uncached / f)) : "-", "n"]];
+      }))
     : none("no deep review runs"));
   section("Top beads", top.length
     ? table([["Bead"], ["Class"], ["Took", 1], ["Spend", 1]], top.map(r => [
