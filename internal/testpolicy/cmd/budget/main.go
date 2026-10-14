@@ -63,7 +63,7 @@ func run() int {
 	budget := flag.Duration("budget", 10*time.Second, "per-package user CPU limit for converted packages (the test binary and the processes it waited for)")
 	list := flag.String("unconverted", "internal/testpolicy/unconverted.txt", "packages exempt from the budget; they run through plain go test, with its result cache")
 	overList := flag.String("overbudget", "internal/testpolicy/overbudget.txt", "converted packages exempt from the budget while a bead tracks their overrun; their times are reported on every run")
-	fastTier := flag.Bool("fast-tier", false, "check the unit tier's wall time (make gate): warn about any package that ran longer than testpolicy.FastTierMaxWall")
+	fastTier := flag.Bool("fast-tier", false, "check the unit tier's wall time (make tier-check): warn about any package that ran longer than testpolicy.FastTierMaxWall")
 	strictWall := flag.Bool("strict-wall", false, "with -fast-tier, fail a package over testpolicy.FastTierMaxWall of wall time instead of warning (make tier-check)")
 	flag.Parse()
 
@@ -171,12 +171,11 @@ func run() int {
 	return code
 }
 
-// reportIdle prints the gate's "packages mostly waiting" warning. A tier
-// whose packages ran long without computing was waiting on the host -- a
-// macOS scan per executable, a throttled process, a lock -- and its wall time
-// says nothing about the tree (gt-2ycne.1). The warning fails nothing: make
-// gate is judged by its exit code, and a loaded host is not a defect in the
-// branch under test.
+// reportIdle prints the "packages mostly waiting" warning. A tier whose
+// packages ran long without computing was waiting on the host -- a macOS scan
+// per executable, a throttled process, a lock -- and its wall time says
+// nothing about the tree (gt-2ycne.1). The warning fails nothing: a loaded
+// host is not a defect in the branch under test.
 func reportIdle(times []testpolicy.PkgTime) {
 	rep := testpolicy.IdleJudged(times)
 	if !rep.Waiting {
@@ -224,8 +223,8 @@ func reportOver(w io.Writer, over []testpolicy.Overrun, budget time.Duration, en
 // that ran longer than testpolicy.FastTierMaxWall is named on a TIER: line,
 // and the check returns 1 for it only when strictWall is set. Wall time
 // depends on host load (a package measured at 13.9 s took 37.7 s beside six
-// other gates), and a landing must not be refused for contention, so `make
-// gate` only warns and `make tier-check` fails. Output it cannot read fails
+// other gates), and a landing must not be refused for contention, so a run
+// without strictWall only warns and `make tier-check` fails. Output it cannot read fails
 // closed either way: a run whose output yields no wall time and no cached
 // package, or a summary line it cannot read, returns 1, because silence there
 // would read as every package being fast.
@@ -249,7 +248,7 @@ func checkFastTier(probe *summaryLines, summary io.Reader, ran int, strictWall b
 		code = 1
 	}
 	for _, o := range testpolicy.WallOverruns(sum.Walls, testpolicy.FastTierMaxWall) {
-		note := "warning only, since wall time depends on host load and make gate never fails on it; make tier-check does"
+		note := "warning only, since wall time depends on host load and a landing never fails on it; make tier-check does"
 		if strictWall {
 			note = "failing: make tier-check judges wall time"
 		}

@@ -12,12 +12,12 @@ import (
 // gt-ik4a1.9 there is no slow tier beside it (internal/cmd and internal/beads,
 // its last members, measured 12s and 11s). `make tier-check` fails any package
 // whose wall time exceeds FastTierMaxWall, so a package that grows slow cannot
-// do so silently; `make gate` only warns, because wall time depends on host
-// load and a landing must not be refused for contention.
+// do so silently; `make gate` does not measure wall time, because it depends
+// on host load and a landing must not be refused for contention.
 
 // FastTierMaxWall is the one definition of the per-package wall limit: the
 // most wall time one unit-tier package may take before `make tier-check`
-// fails it (and `make gate` warns). The budget runner's -fast-tier flag reads
+// fails it. The budget runner's -fast-tier flag reads
 // it; nothing else restates the number.
 const FastTierMaxWall = 30 * time.Second
 
