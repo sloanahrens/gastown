@@ -19,7 +19,9 @@ import (
 // (polecat_pool.agent capped by max_seats, in settings/config.json), the pro
 // seat (polecat_pool.pro_agent capped by pro_max, which takes only beads
 // carrying pro_label), and the second seat (spec_dispatch hooked_agent capped
-// by max_hooked, in the daemon patrol config). Each is a cap-per-agent knob a
+// by max_hooked, in the daemon patrol config: the "daemon" section of
+// settings/config.json on a two-file town, mayor/daemon.json on a five-file
+// one). Each is a cap-per-agent knob a
 // hand edit gets wrong, and the two seats in the settings file disagree on
 // what a zero means: max_seats of 0 reads as uncapped to sling and as the
 // dispatcher's default cap, so closing the pool seat means removing its keys,
@@ -60,7 +62,9 @@ writes pro_max 0, because an absent pro_max is the dispatcher's default of 1.
 
 <agent> must be the pool agent (polecat_pool.agent), the pro seat's agent
 (polecat_pool.pro_agent, deepseek-pro when unset), or the second seat's agent
-(spec_dispatch hooked_agent, claude-sonnet when unset). When the pool has no
+(spec_dispatch hooked_agent, claude-sonnet when unset; the daemon patrol
+config, which is the "daemon" section of settings/config.json on a two-file
+town and mayor/daemon.json on a five-file one). When the pool has no
 agent, an agent holding none of those seats becomes the pool agent; the pro
 seat's agent is never that agent, so naming it sets the pro seat whether or
 not the pro seat is open. Any other agent is refused.
@@ -278,9 +282,17 @@ func renderPoolShow(w io.Writer, townRoot string, v poolSeatView, live poolShowL
 	if len(v.seats) == 0 {
 		fmt.Fprintln(w, "no open seat: polecat_pool has no agent, the pro seat is closed (no polecat_pool section, or pro_max 0), and spec_dispatch max_hooked is not above 0")
 	}
-	fmt.Fprintf(w, "read: %s (polecat_pool.agent, polecat_pool.max_seats, polecat_pool.pro_agent, polecat_pool.pro_max, polecat_pool.max_total), %s (daemon.patrols.spec_dispatch.hooked_agent, max_hooked)\n",
-		config.TownSettingsPath(townRoot), config.DaemonPatrolConfigPath(townRoot))
+	fmt.Fprintf(w, "read: %s (polecat_pool.agent, polecat_pool.max_seats, polecat_pool.pro_agent, polecat_pool.pro_max, polecat_pool.max_total), %s (patrols.spec_dispatch.hooked_agent, max_hooked)\n",
+		config.TownSettingsPath(townRoot), patrolConfigLocation(townRoot))
 	return nil
+}
+
+// patrolConfigLocation names where the daemon's patrol config really lives:
+// `settings/config.json (section "daemon")` on a two-file town, where
+// mayor/daemon.json no longer exists, and mayor/daemon.json on a five-file
+// one. It is the text only; the loader and the writer resolve the same path.
+func patrolConfigLocation(townRoot string) string {
+	return config.SourcePathRel(townRoot, config.DaemonPatrolConfigPath(townRoot))
 }
 
 // poolShowLive is the occupancy show prints beside the caps, read from the same

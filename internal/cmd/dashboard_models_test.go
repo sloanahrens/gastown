@@ -395,3 +395,42 @@ func TestModelsReaderMarksDriftFromTheModelTable(t *testing.T) {
 		}
 	}
 }
+
+// The seat table and the deep-review row name the file the patrol settings
+// really live in: the "daemon" section of settings/config.json on a two-file
+// town, mayor/daemon.json on a five-file one (gt-nk9qk).
+func TestDashboardModelsNamesTheRealPatrolConfigLocation(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		migrate bool
+		want    string
+		notWant string
+	}{
+		{"five-file", false, "(mayor/daemon.json)", `section "daemon"`},
+		{"two-file", true, `(settings/config.json (section "daemon"))`, "mayor/daemon.json"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			writeModelsSettings(t, town, `{"polecat_pool":{"agent":"deepseek-flash","max_seats":3}}`)
+			writePanelFile(t, town, "mayor/daemon.json", panelDaemon)
+			if tc.migrate {
+				writePanelFile(t, town, "mayor/town.json", `{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z"}`)
+				if _, err := config.MigrateLayout(town); err != nil {
+					t.Fatal(err)
+				}
+			}
+			m := (&modelsReader{townRoot: town, omPath: writeOMConfig(t, `{"backend":["claude","-p","--model","sonnet"]}`)}).read()
+			second, deep := m.SeatRows[2], panelRole(t, m.Roles, "deep-review")
+			for what, key := range map[string]string{"second seat": second.Key, "deep-review": deep.Key} {
+				if !strings.Contains(key, tc.want) {
+					t.Errorf("%s key = %q, want it to name %q", what, key, tc.want)
+				}
+				if strings.Contains(key, tc.notWant) {
+					t.Errorf("%s key = %q names %q", what, key, tc.notWant)
+				}
+			}
+		})
+	}
+}

@@ -185,7 +185,7 @@ func TestPoolShowPrintsEachOpenSeatAndTheKeysRead(t *testing.T) {
 		"pool seat    claude-opus  cap 3",
 		"second seat  claude-sonnet  cap 2",
 		"polecat_pool.agent", "polecat_pool.max_seats",
-		"daemon.patrols.spec_dispatch.hooked_agent", "max_hooked",
+		"patrols.spec_dispatch.hooked_agent", "max_hooked",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("show output lacks %q:\n%s", want, got)
@@ -874,5 +874,59 @@ func TestPoolShowReadsNoSeatPictureWithoutARigRegistry(t *testing.T) {
 	}
 	if got := out.String(); strings.Contains(got, "live ") {
 		t.Errorf("a town with no rigs has no polecats to count:\n%s", got)
+	}
+}
+
+// A two-file town (gt config migrate) has no mayor/daemon.json: the patrol
+// settings are the "daemon" section of settings/config.json. show must name
+// that, not the retired file, and a five-file town still gets the old path
+// (gt-nk9qk).
+func TestPoolShowNamesTheRealPatrolConfigLocation(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		migrate bool
+		want    string
+		notWant string
+	}{
+		{"five-file", false, "mayor/daemon.json (patrols.spec_dispatch.hooked_agent, max_hooked)", `section "daemon"`},
+		{"two-file", true, `settings/config.json (section "daemon") (patrols.spec_dispatch.hooked_agent, max_hooked)`, "mayor/daemon.json"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := poolTestTown(t, poolTestSettings, poolTestDaemon)
+			if tc.migrate {
+				poolTestMigrate(t, root)
+			}
+			var out bytes.Buffer
+			if err := runPoolShow(&out, root); err != nil {
+				t.Fatal(err)
+			}
+			got := out.String()
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("show output lacks %q:\n%s", tc.want, got)
+			}
+			if strings.Contains(got, tc.notWant) {
+				t.Errorf("show output names %q:\n%s", tc.notWant, got)
+			}
+		})
+	}
+}
+
+// poolTestMigrate moves a pool test town to the two-file layout.
+func poolTestMigrate(t *testing.T, root string) {
+	t.Helper()
+	townJSON := filepath.Join(root, "mayor", "town.json")
+	if err := os.MkdirAll(filepath.Dir(townJSON), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(townJSON, []byte(`{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.MigrateLayout(root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(config.DaemonPatrolConfigPath(root)); !os.IsNotExist(err) {
+		t.Fatalf("mayor/daemon.json survived the migration: %v", err)
 	}
 }
