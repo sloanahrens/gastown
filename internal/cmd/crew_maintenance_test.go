@@ -33,9 +33,12 @@ func TestCrewPristineScope(t *testing.T) {
 	}
 }
 
-// TestCrewPristineResolvesPrefixRig: rig/name acts on that rig's member from
-// inside another rig and from the town root; a bare name stays in the cwd rig.
+// TestCrewPristineResolvesPrefixRig: rig/name acts on that rig's member, whichever
+// rig or the town root the command runs from; a bare name takes the rig the
+// caller's cwd inferred. A non-empty rig name never consults the cwd, so the
+// town-root case needs no chdir.
 func TestCrewPristineResolvesPrefixRig(t *testing.T) {
+	t.Parallel()
 	root := crewStopTown(t)
 	for _, rigName := range []string{"beads", "gastown"} {
 		if err := os.MkdirAll(filepath.Join(root, rigName, "crew", "emma"), 0755); err != nil {
@@ -55,13 +58,18 @@ func TestCrewPristineResolvesPrefixRig(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Chdir(tt.cwd)
 			rigName, name := crewPristineScope("", []string{tt.arg})
-			mgr, r, err := getCrewManager(rigName)
-			if err != nil {
-				t.Fatalf("getCrewManager(%q): %v", rigName, err)
+			if rigName == "" {
+				var err error
+				if rigName, err = inferRigFromDir(root, tt.cwd); err != nil {
+					t.Fatalf("inferRigFromDir(%q): %v", tt.cwd, err)
+				}
 			}
-			w, err := mgr.Get(name)
+			_, r, err := getRigIn(root, rigName)
+			if err != nil {
+				t.Fatalf("getRigIn(%q): %v", rigName, err)
+			}
+			w, err := newCrewManager(r).Get(name)
 			if err != nil {
 				t.Fatalf("Get(%q): %v", name, err)
 			}
