@@ -88,7 +88,8 @@ func modelSeatRows(townRoot string, ts *config.TownSettings, tsErr error, patrol
 	settings := filepath.Base(config.TownSettingsPath(townRoot))
 	poolKey := "polecat_pool.agent, max_seats (" + settings + ")"
 	proKey := "polecat_pool.pro_agent, polecat_pool.pro_max (" + settings + ")"
-	secondKey := "patrols.spec_dispatch.hooked_agent, max_hooked (" + config.DaemonPatrolConfigFileName + ")"
+	patrolFile := patrolConfigLocation(townRoot)
+	secondKey := "patrols.spec_dispatch.hooked_agent, max_hooked (" + patrolFile + ")"
 
 	pool := dashboard.ModelSeat{Seat: "pool", Key: poolKey}
 	switch {
@@ -249,10 +250,10 @@ func modelRoleRows(in modelRoleInputs) []dashboard.ModelRole {
 		}
 	}
 
-	deep := dashboard.ModelRole{Role: "deep-review", Key: "patrols.scheduled_slings[" + deepReviewSchedule + "].agent (" + config.DaemonPatrolConfigFileName + ")"}
+	deep := dashboard.ModelRole{Role: "deep-review", Key: "patrols.scheduled_slings[" + deepReviewSchedule + "].agent (" + patrolConfigLocation(in.townRoot) + ")"}
 	switch {
 	case in.patrolsErr != nil:
-		deep.Note = config.DaemonPatrolConfigFileName + " could not be read"
+		deep.Note = patrolConfigLocation(in.townRoot) + " could not be read"
 	default:
 		entry := scheduledSling(in.patrols, deepReviewSchedule)
 		if entry == nil {
