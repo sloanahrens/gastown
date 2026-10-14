@@ -453,7 +453,8 @@ func getRepoGitForRig(rigPath string) *git.Git {
 
 // deletePolecatBranch deletes a local git branch for a polecat.
 // Remote branch is never deleted during nuke — the refinery owns remote
-// branch cleanup after successful merge (gt mq post-merge). (gt-v5ku)
+// branch cleanup after a successful merge (formerly gt mq post-merge, now
+// removed). (gt-v5ku)
 //
 // The branch tip is checked for reachability from a remote ref BEFORE the
 // local branch is deleted: this path never pushes, so the old unconditional

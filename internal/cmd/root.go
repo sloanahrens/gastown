@@ -154,15 +154,6 @@ func persistentPreRun(cmd *cobra.Command, args []string) error {
 	// determine liveness without PID signal probing.
 	touchPolecatHeartbeat()
 
-	// Touch Deacon heartbeat on every gt command (gt-13z).
-	// Previously the Deacon's 20-minute liveness heartbeat only refreshed at a
-	// handful of explicit "gt deacon heartbeat" checkpoints embedded in patrol
-	// formula prose. A step that genuinely investigates (running many gt/bd
-	// commands without hitting the next checkpoint) could exceed the daemon's
-	// kill threshold before checking in again, killing a healthy Deacon mid-step.
-	// Decoupling liveness from step duration: any gt command counts as evidence
-	// of life.
-
 	// Skip beads check for exempt commands
 	if beadsExempt {
 		return nil

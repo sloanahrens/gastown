@@ -42,15 +42,17 @@ func drainNudgesFor(errOut io.Writer, townRoot, sessionName string) []nudge.Queu
 // printSessionNudges drains this session's queued nudges and writes them to
 // stderr as a system-reminder block, or nothing when the queue is empty.
 //
-// It serves the per-cycle touch points a refinery gating MRs back to back
-// actually hits — gt mq list, gt mq next, gt mail inbox — which are not
-// step boundaries drainSessionNudges already covers (gt-dekkl).
+// It serves the per-cycle touch point a session polling its inbox actually
+// hits — gt mail inbox — which is not a step boundary drainSessionNudges
+// already covers (gt-dekkl). It was written for a refinery gating MRs back to
+// back, also through gt mq list and gt mq next; gt mq is removed, so only gt
+// mail inbox calls it now.
 //
-// stderr, not stdout: those commands' stdout is machine-read — the refinery
-// patrol used to do MR=$(gt mq next <rig> --quiet), plugins pipe
-// `gt mq list --json` into jq, plugins pipe `gt mail inbox --json` into
-// python — so a nudge block on stdout corrupts the parse, and the drain has
-// already dropped the nudge from the queue by then, losing it outright.
+// stderr, not stdout: that command's stdout is machine-read — plugins pipe
+// `gt mail inbox --json` into python, and the retired refinery patrol did
+// MR=$(gt mq next <rig> --quiet) — so a nudge block on stdout corrupts the
+// parse, and the drain has already dropped the nudge from the queue by then,
+// losing it outright.
 //
 // Best-effort: a no-op outside a workspace, and a drain failure goes to stderr
 // rather than failing the command that carried it.
