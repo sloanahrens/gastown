@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -11,7 +12,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -27,11 +27,11 @@ This command handles the step-to-step transition for polecats:
 2. Extracts the molecule ID from the step
 3. Finds the next ready step (dependency-aware)
 4. If next step exists:
-   - Updates the hook to point to the next step
-   - Respawns the pane for a fresh session
+   - Assigns the next step to this session
+   - Says so, since the step is worked here
 5. If molecule complete:
    - Clears the hook
-   - Sends POLECAT_DONE to witness
+   - Runs gt done --status DEFERRED
    - Exits the session
 
 IMPORTANT: This is the canonical way to complete molecule steps. Do NOT manually
@@ -285,7 +285,8 @@ func findAllReadySteps(b *beads.Beads, moleculeID string) ([]*beads.Issue, bool,
 	return readySteps, false, nil
 }
 
-// handleStepContinue handles continuing to the next step.
+// handleStepContinue hands the next step to the session running this command,
+// which assigns it and tells that session to work it here (gt-qgq55).
 func handleStepContinue(cwd, townRoot string, nextStep *beads.Issue, dryRun bool) error {
 	fmt.Printf("\n%s Next step: %s\n", style.Bold.Render("→"), nextStep.ID)
 	fmt.Printf("  %s\n", nextStep.Title)
@@ -316,76 +317,46 @@ func handleStepContinue(cwd, townRoot string, nextStep *beads.Issue, dryRun bool
 
 	if dryRun {
 		fmt.Printf("\n[dry-run] Would assign next step: %s\n", nextStep.ID)
-		fmt.Printf("[dry-run] Would respawn pane\n")
+		fmt.Printf("[dry-run] Would hand the next step to this session\n")
 		return nil
 	}
 
-	// Hand the next step to the session that will run it as an assignment
-	// (in_progress, assigned to this agent), the status a claim leaves. Pinned
-	// is the status for beads that never get closed, and bd refuses to close a
-	// pinned issue, so pinning here stranded the successor on the step it was
-	// handed (gt-tiv2x).
+	return handNextStep(os.Stdout, beads.NewPlain(gitRoot, nil), nextStep, agentID)
+}
+
+// stepAssigner is the beads write surface handing the next step over needs.
+type stepAssigner interface {
+	Update(id string, opts beads.UpdateOptions) error
+}
+
+// handNextStep assigns nextStep to agent, then tells the session reading w
+// where that step is worked: here. The command runs inside the pane it would
+// have to replace, and killing that pane's processes ends this process before
+// it can respawn anything, so the step it announces stays with a session that
+// is still running (gt-qgq55).
+func handNextStep(w io.Writer, assigner stepAssigner, nextStep *beads.Issue, agentID string) error {
+	// in_progress, assigned to this agent, is the status a claim leaves.
+	// Pinned is the status for beads that never get closed, and bd refuses to
+	// close a pinned issue, so pinning here stranded the successor on the step
+	// it was handed (gt-tiv2x).
 	assigned := string(beads.StatusInProgress)
-	if err := beads.NewPlain(gitRoot, nil).Update(nextStep.ID, beads.UpdateOptions{Status: &assigned, Assignee: &agentID}); err != nil {
+	if err := assigner.Update(nextStep.ID, beads.UpdateOptions{Status: &assigned, Assignee: &agentID}); err != nil {
 		return fmt.Errorf("assigning next step: %w", err)
 	}
 
-	fmt.Printf("%s Next step assigned: %s\n", style.Bold.Render("→"), nextStep.ID)
+	fmt.Fprintf(w, "%s Next step assigned: %s\n", style.Bold.Render("→"), nextStep.ID)
+	announceStepContinuation(w, nextStep)
+	return nil
+}
 
-	// Respawn the pane
-	if !tmux.IsInsideTmux() {
-		// Not in tmux - just print next action
-		fmt.Printf("\n%s Not in tmux - start new session with 'gt prime'\n",
-			style.Dim.Render("ℹ"))
-		return nil
-	}
-
-	pane := os.Getenv("TMUX_PANE")
-	if pane == "" {
-		return fmt.Errorf("TMUX_PANE not set")
-	}
-
-	// Get current session for restart command
-	currentSession, err := getCurrentTmuxSession()
-	if err != nil {
-		return fmt.Errorf("getting session name: %w", err)
-	}
-
-	plan, err := buildRestartPlan(currentSession, buildRestartCommandOpts{Registry: townRegistry()})
-	if err != nil {
-		return fmt.Errorf("building restart command: %w", err)
-	}
-
-	fmt.Printf("\n%s Respawning for next step...\n", style.Bold.Render("🔄"))
-
-	t := tmux.NewTmux()
-
-	// Refresh the tmux session env, which liveness checks read, so it names the
-	// agent the respawned pane is about to run (gt-di8p).
-	updateSessionEnvForHandoff(townRegistry(), t, currentSession)
-
-	// Cycling the session for the next step is a restart: the supervisor's
-	// Respawn, which an e-stop, a park or a gt down in progress refuses
-	// (gt-4k3fj.4.1), and records before the kill below ends this process.
-	return superviseHandoff(currentSession, "gt mol step done", "molecule step: respawn for the next step", func() error {
-		// The successor starts on the managed settings, as a first start
-		// does (gt-4k3fj.8.4); sync before the kill can end this process.
-		plan.syncSettings()
-
-		// Kill all processes in the pane before respawning to prevent process leaks
-		if err := t.KillPaneProcesses(pane); err != nil {
-			// Non-fatal but log the warning
-			style.PrintWarning("could not kill pane processes: %v", err)
-		}
-
-		// Clear history before respawn
-		if err := t.ClearHistory(pane); err != nil {
-			// Non-fatal
-			style.PrintWarning("could not clear history: %v", err)
-		}
-
-		return t.RespawnPane(pane, plan.Command)
-	})
+// announceStepContinuation says where the next step is worked, since a session
+// told a successor is coming waits for one instead of working the step
+// (gt-qgq55).
+func announceStepContinuation(w io.Writer, nextStep *beads.Issue) {
+	fmt.Fprintf(w, "\n%s Continue in the same session: %s is yours now.\n",
+		style.Bold.Render("→"), nextStep.ID)
+	fmt.Fprintf(w, "  This session keeps running - work the step here.\n")
+	fmt.Fprintf(w, "  Finish it with 'gt mol step done %s'.\n", nextStep.ID)
 }
 
 // handleParallelSteps handles executing multiple steps concurrently (fan-out pattern).

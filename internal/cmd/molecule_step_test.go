@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"reflect"
@@ -603,6 +604,88 @@ func TestCloseStepReleasesPinFirst(t *testing.T) {
 			}
 			if !reflect.DeepEqual(w.calls, tt.wantCalls) {
 				t.Errorf("calls = %v, want %v", w.calls, tt.wantCalls)
+			}
+		})
+	}
+}
+
+// TestHandNextStepKeepsTheSession covers the branch a stalled deep-review run
+// took: gt mol step done announced a respawn that never happened, and the
+// agent stopped to wait for the successor session. The transition hands the
+// step over and says it is worked here instead (gt-qgq55).
+func TestHandNextStepKeepsTheSession(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		updateErr error
+		wantErr   bool
+	}{
+		{name: "the assignment lands and the session is told to carry on"},
+		{name: "a failed assignment is reported, not silently continued", updateErr: errors.New("bd unreachable"), wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			w := &recordingStepWriter{updateErr: tt.updateErr}
+			nextStep := makeStepIssue("gt-mol.2", "Set up working branch", "gt-mol", "open", nil)
+
+			err := handNextStep(&buf, w, nextStep, "gastown/polecats/scout")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("handNextStep error = %v, want error %v", err, tt.wantErr)
+			}
+			out := buf.String()
+			if tt.wantErr {
+				if out != "" {
+					t.Errorf("a failed assignment must not announce the next step:\n%s", out)
+				}
+				return
+			}
+			if calls := w.calls; !reflect.DeepEqual(calls, []string{"update gt-mol.2 in_progress"}) {
+				t.Errorf("calls = %v, want the step claimed as in_progress", calls)
+			}
+			if !strings.Contains(out, "Continue in the same session") {
+				t.Errorf("the transition must send the agent on in this session:\n%s", out)
+			}
+			for _, claim := range []string{"Respawning", "respawn", "fresh session"} {
+				if strings.Contains(out, claim) {
+					t.Errorf("the transition claims a session change (%q) that does not happen:\n%s", claim, out)
+				}
+			}
+		})
+	}
+}
+
+// TestAnnounceStepContinuation pins the one thing gt mol step done tells a
+// session about itself: the next step is worked here. The command used to
+// announce a respawn it could not perform, and a session that reads that sits
+// at its prompt waiting for a successor that never starts (gt-qgq55).
+func TestAnnounceStepContinuation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		stepID string
+	}{
+		{name: "poured molecule step", stepID: "gt-mol.2"},
+		{name: "wisp step", stepID: "gt-wisp-zw4di"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			announceStepContinuation(&buf, makeStepIssue(tt.stepID, "Set up working branch", "gt-mol", "open", nil))
+			out := buf.String()
+
+			if !strings.Contains(out, "Continue in the same session") {
+				t.Errorf("announcement must tell the session to continue in it:\n%s", out)
+			}
+			if !strings.Contains(out, "gt mol step done "+tt.stepID) {
+				t.Errorf("announcement must name how to finish %s:\n%s", tt.stepID, out)
+			}
+			for _, claim := range []string{"Respawning", "respawn", "fresh session"} {
+				if strings.Contains(out, claim) {
+					t.Errorf("announcement claims a session change (%q) that does not happen:\n%s", claim, out)
+				}
 			}
 		})
 	}

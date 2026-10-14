@@ -263,8 +263,8 @@ func TestSessionRestartRespawnRefusedByEstop(t *testing.T) {
 	}
 }
 
-// gt handoff and gt mol step done cycle a session through respawnSession: an
-// e-stop refuses the cycle before run, so the session keeps running.
+// gt handoff cycles a session through respawnSession: an e-stop refuses the
+// cycle before run, so the session keeps running.
 func TestHandoffRespawnRefusedByEstop(t *testing.T) {
 	t.Parallel()
 	for _, scope := range []string{"town", "rig"} {
@@ -279,7 +279,7 @@ func TestHandoffRespawnRefusedByEstop(t *testing.T) {
 			t.Fatal(err)
 		}
 		sup := opSupervisor(town, newOpTmux())
-		for _, reason := range []string{"handoff", "handoff --cycle", "handoff (remote)", "molecule step: respawn for the next step"} {
+		for _, reason := range []string{"handoff", "handoff --cycle", "handoff (remote)"} {
 			ran := false
 			err := respawnSession(sup, cmdTestRegistry(), "gt-crew-max", reason, "gt handoff/overseer", func() error { ran = true; return nil })
 			if !errors.Is(err, supervisor.ErrEstop) || ran {
