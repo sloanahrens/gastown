@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -133,14 +134,97 @@ func TestRunTierSweep_SkipsWhileAnUpgradeRestartIsPending(t *testing.T) {
 		return "", nil
 	}
 
-	if !d.runTierSweep() {
-		t.Fatal("a skipped cycle accomplished nothing and must not defer the job")
+	if d.runTierSweep() {
+		t.Fatal("a skipped cycle accomplished nothing and must report no verdict, so the job stays due")
 	}
 	if len(rec.stages) != 0 {
 		t.Fatalf("stages run = %+v, want none while a restart is pending", rec.stages)
 	}
 	if !strings.Contains(logs.String(), "an upgrade restart is pending; skipping this cycle") {
 		t.Fatalf("skip line missing:\n%s", logs.String())
+	}
+}
+
+// waitTierSweepIdle blocks until the goroutine triggerTierSweep spawned has
+// finished its cycle.
+func waitTierSweepIdle(t *testing.T, d *Daemon) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	for d.tierSweepRunning.Load() {
+		if ctx.Err() != nil {
+			t.Fatal("tier_sweep cycle did not finish")
+		}
+		runtime.Gosched()
+	}
+}
+
+// A cycle skipped for a pending upgrade restart must not record the hour as
+// done: the patrol is still due on the next heartbeat, and once the flag
+// clears the next trigger runs the sweep.
+func TestTriggerTierSweep_PendingRestartDefersWithoutConsumingTheHour(t *testing.T) {
+	t.Parallel()
+	d, rec, _, logs := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	rec.green()
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "abc123", nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+	d.upgradeRestartPending.Store(true)
+
+	d.triggerTierSweep()
+	waitTierSweepIdle(t, d)
+	if _, found, err := loadPatrolLastRun(d.config.TownRoot, "tier_sweep"); err != nil || found {
+		t.Fatalf("last run after a skipped cycle: found=%v err=%v, want none recorded", found, err)
+	}
+	if dec := evaluatePatrolDue(d.config.TownRoot, "tier_sweep", time.Time{}, d.clk().Now(), tierSweepInterval(d.patrolConfig)); !dec.due {
+		t.Fatal("tier_sweep is not due after a skipped cycle; the skip consumed the hour")
+	}
+	if len(rec.stages) != 0 {
+		t.Fatalf("stages = %+v, want none while a restart is pending", rec.stages)
+	}
+
+	d.upgradeRestartPending.Store(false)
+	d.triggerTierSweep()
+	waitTierSweepIdle(t, d)
+	if len(rec.stages) == 0 {
+		t.Fatal("the sweep did not run once the restart cleared")
+	}
+	if _, found, err := loadPatrolLastRun(d.config.TownRoot, "tier_sweep"); err != nil || !found {
+		t.Fatalf("last run after the sweep: found=%v err=%v, want it recorded", found, err)
+	}
+	if n := strings.Count(logs.String(), "an upgrade restart is pending"); n != 1 {
+		t.Errorf("skip line logged %d times, want once:\n%s", n, logs.String())
+	}
+}
+
+// The skip line is written once per pending restart, not on every heartbeat,
+// and a later restart logs it again.
+func TestTriggerTierSweep_SkipLoggedOncePerPendingRestart(t *testing.T) {
+	t.Parallel()
+	d, _, _, logs := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	count := func() int { return strings.Count(logs.String(), "an upgrade restart is pending") }
+
+	d.upgradeRestartPending.Store(true)
+	for i := 0; i < 3; i++ {
+		d.triggerTierSweep()
+		waitTierSweepIdle(t, d)
+	}
+	if got := count(); got != 1 {
+		t.Fatalf("skip line logged %d times over three heartbeats, want 1:\n%s", got, logs.String())
+	}
+
+	// The flag clears (a heartbeat sees it clear), then a second restart.
+	d.upgradeRestartPending.Store(false)
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "abc123", nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+	d.triggerTierSweep()
+	waitTierSweepIdle(t, d)
+	d.upgradeRestartPending.Store(true)
+	// The sweep above recorded the hour; step past the interval so it is due.
+	d.clock = clockwork.NewFakeClockAt(d.clk().Now().Add(3 * time.Hour))
+	d.triggerTierSweep()
+	waitTierSweepIdle(t, d)
+	if got := count(); got != 2 {
+		t.Fatalf("skip line logged %d times across two restarts, want 2:\n%s", got, logs.String())
 	}
 }
 

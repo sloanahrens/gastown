@@ -434,6 +434,10 @@ func (d *Daemon) triggerTierSweep() {
 	if !d.isPatrolActive("tier_sweep") {
 		return
 	}
+	if !d.upgradeRestartPending.Load() {
+		// No restart pending: the next one logs its skip again.
+		d.tierSweepSkipLogged.Store(false)
+	}
 	now := d.clk().Now()
 	dec := evaluatePatrolDue(d.config.TownRoot, "tier_sweep", time.Time{}, now, tierSweepInterval(d.patrolConfig))
 	if !dec.due {
@@ -460,10 +464,15 @@ func (d *Daemon) triggerTierSweep() {
 
 // runTierSweep is one cycle over every configured rig. It reports whether the
 // cycle reached a verdict, as opposed to deferring with nothing accomplished.
+// A pending upgrade restart defers the cycle: the job stays due and the next
+// heartbeat retries, so the restart does not cost the hour.
 func (d *Daemon) runTierSweep() bool {
 	if d.upgradeRestartPending.Load() {
-		d.logger.Printf("tier_sweep: an upgrade restart is pending; skipping this cycle")
-		return true
+		// Once per pending restart, not once per heartbeat.
+		if d.tierSweepSkipLogged.CompareAndSwap(false, true) {
+			d.logger.Printf("tier_sweep: an upgrade restart is pending; skipping this cycle")
+		}
+		return false
 	}
 	rigs := tierSweepRigs(d.patrolConfig, d.getKnownRigs())
 	if len(rigs) == 0 {
