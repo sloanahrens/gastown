@@ -666,8 +666,9 @@ func runSessionRestart(cmd *cobra.Command, args []string) error {
 
 		// Start fresh session
 		fmt.Printf("Starting session for %s/%s...\n", rigName, polecatName)
-		opts := polecat.SessionStartOptions{}
-		if err := polecatMgr.Start(polecatName, opts); err != nil {
+		// The seat comes back on the agent its sling recorded, not the role
+		// default (gt-rsrnr).
+		if err := restartPolecatOnSlungAgent(polecatMgr, filepath.Dir(seat.r.Path), rigName, polecatName, polecat.SessionStartOptions{}); err != nil {
 			return fmt.Errorf("starting session: %w", err)
 		}
 		return nil
