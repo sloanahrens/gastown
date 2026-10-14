@@ -79,7 +79,7 @@ func (p primeTools) polecatBeadMemories(ctx RoleContext, cwd string, hookedBead 
 	}
 
 	rows := beadMemoryRows(memoryCorpus(kvs), hookedBead, p.clk().Now())
-	section := renderBeadMemorySection(rows)
+	section := renderBeadMemorySection(rows, hookedBead.ID)
 	if section == "" {
 		return true
 	}
@@ -336,10 +336,11 @@ func hasSourceRootPrefix(tok string) bool {
 // renderBeadMemorySection renders the section: memrecall's selected texts in
 // Select's order, then a line naming the candidates that scored but did not
 // fit, so the agent knows what matched its bead beyond what it carries.
+// beadID is the bead the section was built for; the footer points at it.
 //
 // It returns "" when nothing is a candidate, which is what omits the section,
 // and a header over the footer alone when candidates exist but none fit.
-func renderBeadMemorySection(rows []beadMemory) string {
+func renderBeadMemorySection(rows []beadMemory, beadID string) string {
 	if len(rows) == 0 {
 		return ""
 	}
@@ -347,6 +348,7 @@ func renderBeadMemorySection(rows []beadMemory) string {
 	fmt.Fprintf(&b, "\n%s\n\n", beadMemoryHeading)
 
 	var dropped []beadMemory
+	selectedBytes := 0
 	for _, row := range rows {
 		if !row.selected {
 			dropped = append(dropped, row)
@@ -354,46 +356,56 @@ func renderBeadMemorySection(rows []beadMemory) string {
 		}
 		b.WriteString(row.text)
 		b.WriteString("\n")
+		selectedBytes += len(row.text)
 	}
-	if footer := beadMemoryFooter(dropped); footer != "" {
+	if footer := beadMemoryFooter(dropped, beadID, memrecall.Budget-selectedBytes); footer != "" {
 		b.WriteString("\n")
 		b.WriteString(footer)
 	}
 	return b.String()
 }
 
-// beadMemoryFooter counts the candidates that scored but did not fit and names
-// the highest-scoring beadMemoryFooterLookups of them.
+// beadMemoryFooter counts the candidates that scored but did not fit and points
+// at the command that prints them: `gt prime --explain-memory <beadID>`.
 //
-// It names the keys without the command that reads them: prime's output is
-// agent prose, which may name only the bd commands in cmdtree.AgentBdAllowed
-// (TestAgentProseBdAllowlist, gt-7iwy0.6). The memory reads gt prime points at
-// are the one family in that contract no gt verb covers, so they wait on an
-// allowlist decision (gt-7iwy0.8, agent-bd-baseline.txt) instead of being
-// named from a new file. The keys alone still tell the agent what else matched
-// its bead.
+// The key list is a courtesy after that command. It names the
+// highest-scoring beadMemoryFooterLookups of the dropped candidates, and only
+// when the line fits in room, the bytes memrecall's budget has left after the
+// selected texts. Select fills the budget with text first, so on a crowded bead
+// the keys are what gives way and the count and the command stay.
+//
+// Prime's output is agent prose, which may name only the bd commands in
+// cmdtree.AgentBdAllowed (TestAgentProseBdAllowlist, gt-7iwy0.6), and the bd
+// key-value reads are not among them; the lookup is a gt command so the footer
+// can name it.
+// --explain-memory prints each candidate's key and scores, not its text.
 //
 // The count is the whole truth. The rig corpus is 241 memories and the query is
 // a bead's whole Goal and Constraints text, so most of them score above
 // memrecall's floor: naming them all would cost ~15 KB of the 9000-byte hook
 // budget that this section is meant to leave to the hooked work (measured with
 // `gt prime --explain-memory gt-jhf24`, 2026-10-14).
-func beadMemoryFooter(dropped []beadMemory) string {
+func beadMemoryFooter(dropped []beadMemory, beadID string, room int) string {
 	if len(dropped) == 0 {
 		return ""
 	}
+	line := fmt.Sprintf("%d more matched: gt prime --explain-memory %s", len(dropped), beadID)
+
 	named := dropped
 	if len(named) > beadMemoryFooterLookups {
 		named = named[:beadMemoryFooterLookups]
 	}
-
 	keys := make([]string, 0, len(named))
 	for _, d := range named {
 		keys = append(keys, d.mem.Key)
 	}
-	line := fmt.Sprintf("%d more matched: %s", len(dropped), strings.Join(keys, ", "))
+	list := strings.Join(keys, ", ")
 	if rest := len(dropped) - len(named); rest > 0 {
-		line += fmt.Sprintf(", and %d more", rest)
+		list += fmt.Sprintf(", and %d more", rest)
+	}
+	withKeys := line + " (" + list + ")\n"
+	if len(withKeys) <= room {
+		return withKeys
 	}
 	return line + "\n"
 }
