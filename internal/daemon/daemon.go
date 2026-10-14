@@ -2471,15 +2471,23 @@ func (d *Daemon) workBeadsEnv(rigName string) []string {
 // read failed or the timestamp does not parse, which is what the spawn grace
 // dates the dispatch against (gt-6hby3).
 func (d *Daemon) beadFinished(beadID string) (closed, submitted bool, updated time.Time) {
+	closed, submitted, updated, _ = d.beadFinishedLabels(beadID)
+	return closed, submitted, updated
+}
+
+// beadFinishedLabels is beadFinished plus the bead's labels, from the same
+// read, for a caller that also needs to know what kind of bead it is. The
+// labels are nil when the read failed.
+func (d *Daemon) beadFinishedLabels(beadID string) (closed, submitted bool, updated time.Time, labels []string) {
 	issue, err := d.workBeads(bdReadOnlyRoutingEnv(d.config.TownRoot), 0).Show(beadID)
 	if err != nil {
-		return false, false, time.Time{}
+		return false, false, time.Time{}, nil
 	}
 	updated, _ = time.Parse(time.RFC3339, issue.UpdatedAt)
 	if issue.Status == "closed" {
-		return true, false, updated
+		return true, false, updated, issue.Labels
 	}
-	return false, slices.Contains(issue.Labels, land.LabelReadyToLand), updated
+	return false, slices.Contains(issue.Labels, land.LabelReadyToLand), updated, issue.Labels
 }
 
 // workBeadStillSubmitted reports whether the work bead a submitted record names is
