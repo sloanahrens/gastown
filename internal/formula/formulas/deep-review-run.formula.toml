@@ -46,7 +46,8 @@ Then skip to the submit step, which closes {{issue}} and runs
 
 **3. Pick up what earlier runs left.** `bash scripts/deep-review.sh queued
 --prev-notes $D/prev-notes.txt` prints confirmed findings an earlier run
-recorded but did not file (over the cap, or a dry run). Send each through step 5
+recorded but did not file (over the cap, a dry run, or past the verifiers'
+capacity and so unverified). Send each through step 5
 again, then file it as step 6 describes, ahead of this run's new findings. A
 non-zero exit from that command is a ledger the script cannot trust, not an
 empty queue: escalate as step 1 does and exit `ESCALATED`.
@@ -77,9 +78,11 @@ fingerprint, file:line, claim (one line), failure scenario, severity P1|P2|P3.
 Hand each verifier up to three findings, with the job of refuting each: read the
 cited code, trace the scenario, and answer CONFIRMED or REFUTED with the lines
 that decide it. Drop REFUTED. Drop a finding whose fix is already on
-origin/{{base_branch}}. A finding past the verifiers' capacity is left out of
-this run and unrecorded; a later run reports it again. Count `total` (findings
-verified) and `refuted` for the digest.
+origin/{{base_branch}}. When findings exceed that capacity, hand them out in
+priority order, all P1, then all P2, then all P3 (step 3's findings first within
+a severity). A finding left past capacity is never dropped: it is unverified,
+and step 7 records it. Count `total` (findings verified), `refuted` and
+`unverified` for the digest.
 
 **6. File the CONFIRMED findings.** Each P1 and P2 finding, P1 first, becomes one
 shaped bead labelled `review-deep` with the finding's priority, whatever path it
@@ -120,11 +123,11 @@ the digest lists it under `would file`.
 
 **7. Record the findings, before any cursor.** A `finding:` line per finding a
 bead covers (a batch bead covers each of its findings), a `queued:` line per P1
-or P2 finding past the cap, and a `reviewed:` note per line of
+or P2 finding past the cap, a `queued:` line per unverified finding (below), and a `reviewed:` note per line of
 `$D/reviewed-lines.txt` (each line is already `reviewed: <date> <path>`):
 ```bash
 gt bead note {{issue}} "finding: <fingerprint> <bead id | digest-only>"
-gt bead note {{issue}} "queued: <fingerprint> <P1|P2> <file:line> <claim>"
+gt bead note {{issue}} "queued: <fingerprint> <P1|P2|P3> <file:line> <claim>"
 gt bead note {{issue}} "<one line of reviewed-lines.txt>"
 gt bead comment {{issue}} "$(cat $D/digest.md)"
 ```
@@ -133,10 +136,18 @@ cap, and every one of a dry run, takes a `queued:` line, which later runs pick u
 in step 3 until a `finding:` line names it. A P3 finding has its `p3:` line from
 step 6 and takes a `finding:` line once a batch bead covers it. `digest-only` is what a run before this
 one wrote for a finding it filed no bead for: such a line stays as written, and
-the fingerprint is `seen`, so the finding is not re-filed. The digest has:
+the fingerprint is `seen`, so the finding is not re-filed.
+
+A finding the verifiers had no capacity for takes a `queued:` line with its own
+severity, whatever that is. A P3 gets one too: a `p3:` line is a confirmed
+finding that `batches` files as it stands. Step 3 of the next run verifies the
+queued finding. Never leave a finding
+unrecorded because it is a P3 or looks cheap to find again: the 21-day file
+skip means a later run does not re-read its file. The digest has:
 landings reviewed (bead, commit), `unparsed=` from the plan, slice files read,
 reviewers and verifiers used, then numbered `filed`, `would file` and
-`queued` lists and `refuted=<n> of <total>`. When total >= 5 and refuted = 0,
+`queued` lists, `refuted=<n> of <total>` and `unverified=<n>`, the findings left
+past the verifiers' capacity (0 when none). When total >= 5 and refuted = 0,
 add the line `UNCHALLENGED: no finding was refuted`.
 
 **8. Clear the risk-path items you covered** (live runs only; skip when

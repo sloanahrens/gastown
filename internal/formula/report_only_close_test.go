@@ -86,10 +86,38 @@ func TestDeepReviewFilesEveryConfirmedFinding(t *testing.T) {
 		"-p <1|2|3>",
 		"-l review-deep",
 		"names that risk path in `## Constraints`",
-		"queued: <fingerprint> <P1|P2> <file:line> <claim>",
+		"queued: <fingerprint> <P1|P2|P3> <file:line> <claim>",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("deep-review-run lacks %q", want)
+		}
+	}
+}
+
+// TestDeepReviewVerifierOverflowIsRecorded guards gt-97dew: a finding past the
+// verifiers' capacity is verified in P1, P2, P3 order and the rest is queued,
+// not dropped, because the 21-day file skip keeps a later run from re-reading
+// the file and finding it again.
+func TestDeepReviewVerifierOverflowIsRecorded(t *testing.T) {
+	t.Parallel()
+	raw, err := GetEmbeddedFormulaContent("deep-review-run")
+	if err != nil {
+		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
+	}
+	text := string(raw)
+	if strings.Contains(text, "left out of\nthis run and unrecorded") {
+		t.Error("deep-review-run still drops a finding past the verifiers' capacity unrecorded")
+	}
+	for _, want := range []string{
+		"all P1, then all P2, then all P3",
+		"A finding left past capacity is never dropped",
+		"a `queued:` line per unverified finding",
+		"takes a `queued:` line with its own\nseverity, whatever that is",
+		"Never leave a finding\nunrecorded because it is a P3",
+		"`unverified=<n>`",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("deep-review-run lacks the overflow rule %q", want)
 		}
 	}
 }
