@@ -43,10 +43,10 @@ const doltServerStopBudget = 30 * time.Second
 // supervisor (internal/cmd/daemon_supervisor.go) sets the job's ExitTimeOut
 // to this same budget, so a SIGTERM'd daemon that hasn't exited by then is
 // SIGKILLed regardless of which step it is on; the hand path's StopDaemon
-// (daemon.go) uses a much shorter ShutdownNotifyDelay (500ms) before it does
-// the same. Either way, ShutdownBudget is the longest the old process can
-// legitimately take, and it is what waitForRestart's poll budget is derived
-// from.
+// (daemon.go) waits StopWaitBudget, ShutdownBudget plus a small margin, before
+// it does the same. Either way, ShutdownBudget is the longest the old process
+// can legitimately take, and it is what waitForRestart's poll budget is
+// derived from.
 const ShutdownBudget = doltServerStopBudget
 
 // DefaultDoltHealthCheckInterval is how often the dedicated Dolt health check
