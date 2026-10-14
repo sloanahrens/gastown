@@ -180,11 +180,13 @@ is the only thing that fills a free seat from ready work, and a town that
 dispatches nothing until an operator switches it on is the failure it exists to
 prevent.
 
-To park it, set `patrols.spec_dispatch.enabled` false in `mayor/daemon.json` and
-restart the daemon. The operator hold file (`<town>/seat-refill.hold`) and ESTOP
-already stop the tick without a restart. The seat budget comes from
-`polecat_pool`, not from this block; `max_hooked` is the only seat key here, and
-it is opt-in.
+To park it, set `daemon.patrols.spec_dispatch.enabled` false in
+`settings/config.json` and restart the daemon. A town that has not run
+`gt config migrate` still keeps that patrol block in `mayor/daemon.json`. The
+operator hold file (`<town>/seat-refill.hold`) and ESTOP already stop the tick
+without a restart.
+The seat budget comes from `polecat_pool`, not from this block; `max_hooked` is
+the only seat key here, and it is opt-in.
 
 `gt status --line` and the health tick report `dispatch=off[R]` while the
 ticker is off, `dispatch=stalled[R]` when every tick in its ten-minute window
