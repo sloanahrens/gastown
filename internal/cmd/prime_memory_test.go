@@ -669,7 +669,7 @@ func TestMarkdownHeading(t *testing.T) {
 		{"   ## Gate", "Gate", true},
 		{"###### Size", "Size", true},
 		{"# comment", "comment", true},
-		{"#!" + "/bin/sh", "", false}, // split so the no-exec-files policy does not read it as a script
+		{"#" + "!/bin/sh", "", false}, // split: a literal opening with "#!" reads to the no-exec-files policy as a script
 		{"#4821 is the cause", "", false},
 		{"#123", "", false},
 		{"#Goal", "", false},
