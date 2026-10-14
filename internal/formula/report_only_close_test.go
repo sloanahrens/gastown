@@ -1,6 +1,7 @@
 package formula
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -300,5 +301,32 @@ func TestDeepReviewReviewsLivingDocsForDrift(t *testing.T) {
 	// The doc reviewed: notes are written before the cursor, as the code ones are.
 	if strings.Index(text, "`reviewed: <date> <doc>`") > strings.Index(text, "**9. Commit the cursor, last**") {
 		t.Error("deep-review-run notes the reviewed docs after the cursor")
+	}
+}
+
+// TestDeepReviewFingerprintGrammarHasNoSpaces guards gt-e39z4: the first
+// doc-drift run wrote queued: lines whose fingerprint carried spaces in its
+// claim anchor (docs/testing.md:gate row runs budget runner:doc-drift), and
+// every later run stopped reading the ledger. The formula states the one-token
+// grammar and gives a doc-drift form an agent can copy.
+func TestDeepReviewFingerprintGrammarHasNoSpaces(t *testing.T) {
+	t.Parallel()
+	raw, err := GetEmbeddedFormulaContent("deep-review-run")
+	if err != nil {
+		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
+	}
+	text := string(raw)
+	grammar := regexp.MustCompile("A fingerprint is `<file>:<symbol>:<kind>`, one token, no\\s+spaces")
+	if !grammar.MatchString(text) {
+		t.Error("deep-review-run does not state that a fingerprint is one token with no spaces")
+	}
+	examples := regexp.MustCompile("`(docs/[^`]*:doc-drift)`").FindAllStringSubmatch(text, -1)
+	if len(examples) == 0 {
+		t.Fatal("deep-review-run gives no doc-drift fingerprint example")
+	}
+	for _, e := range examples {
+		if strings.ContainsAny(e[1], " \t\n") {
+			t.Errorf("the doc-drift fingerprint example %q has whitespace; the line an agent writes from it fails the ledger read", e[1])
+		}
 	}
 }

@@ -3,8 +3,9 @@
 # closed on unreadable input, timestamp ordering, the cursor ledger, the
 # risk-ranked rotation slice (score, 21-day exclusion, count and byte caps,
 # reviewed lines, cursor) on a production-sized tree, fingerprint lookup, and
-# the queued ledger line's severity, and the P3 batches (threshold, age, filed,
-# cap, seen, malformed), plan --mode slice|landings|both, the gate subcommand
+# the queued ledger line's severity and its skipped malformed lines, the P3
+# batches (threshold, age, filed, cap, seen, skipped malformed lines),
+# plan --mode slice|landings|both, the gate subcommand
 # (count and age thresholds, both bd --json shapes, untrusted input), the
 # docs-audit subcommand (dead paths and commands, code_changed, score order,
 # which docs are audited) and plan's docs.txt (slice pairing, stale docs, caps).
@@ -315,17 +316,26 @@ N
 assert_eq "filed ones and repeats drop out" "queued: a.go:A:x P1 a.go:1 first claim|queued: c.go:C:z P2 c.go:3 third" "$("$DR" queued --prev-notes "$TMP/n9.txt" | paste -sd'|' -)"
 assert_eq "none queued" "" "$("$DR" queued --prev-notes "$TMP/none.txt")"
 
-echo "queued: P3 is a severity, a line without one fails closed"
+echo "queued: P3 is a severity, a malformed line is skipped with a warning"
 printf 'queued: a.go:A:x P3 a.go:1 low claim\n' > "$TMP/q3.txt"
 assert_eq "P3 carried through" "queued: a.go:A:x P3 a.go:1 low claim" "$("$DR" queued --prev-notes "$TMP/q3.txt")"
 queued_rc() { local rc=0; "$DR" queued --prev-notes "$1" > "$TMP/queued.out" 2> "$TMP/queued.err" || rc=$?; echo "$rc"; }
-printf 'queued: a.go:A:x a.go:1 no severity\n' > "$TMP/qbad1.txt"
-assert_eq "severity missing" "3" "$(queued_rc "$TMP/qbad1.txt")"
-assert_eq "the failure names the line" "1" "$(grep -c 'malformed queued line: queued: a.go:A:x a.go:1 no severity' "$TMP/queued.err" || true)"
-printf 'queued: a.go:A:x P4 a.go:1 unknown severity\n' > "$TMP/qbad2.txt"
-assert_eq "severity not P1-P3" "3" "$(queued_rc "$TMP/qbad2.txt")"
-printf 'queued: a.go:A:x P2 a.go:1\n' > "$TMP/qbad3.txt"
-assert_eq "claim missing" "3" "$(queued_rc "$TMP/qbad3.txt")"
+cat > "$TMP/qbad1.txt" <<'N'
+queued: a.go:A:x P1 a.go:1 good claim
+queued: b.go:B:y a.go:2 no severity
+queued: c.go:C:z P4 a.go:3 unknown severity
+N
+assert_eq "one bad line among good ones exits 0" "0" "$(queued_rc "$TMP/qbad1.txt")"
+assert_eq "the good line is still listed" "queued: a.go:A:x P1 a.go:1 good claim" "$(paste -sd'|' - < "$TMP/queued.out")"
+assert_eq "the warning names the bad line" "1" "$(grep -c 'malformed queued line: queued: b.go:B:y a.go:2 no severity' "$TMP/queued.err" || true)"
+assert_eq "and the count names how many were skipped" "1" "$(grep -c 'skipped 2 malformed queued lines' "$TMP/queued.err" || true)"
+printf 'queued: a.go:A:x P2 a.go:1\n' > "$TMP/qbad2.txt"
+assert_eq "claim missing" "0" "$(queued_rc "$TMP/qbad2.txt")"
+assert_eq "a lone bad line takes the singular count" "1" "$(grep -c 'skipped 1 malformed queued line; the ledger cannot be trusted' "$TMP/queued.err" || true)"
+printf 'queued: a.go:A:x a.go:1 no severity\nqueued: b.go:B:y P4 a.go:2 unknown\n' > "$TMP/qbad3.txt"
+assert_eq "an all-bad ledger exits 0" "0" "$(queued_rc "$TMP/qbad3.txt")"
+assert_eq "with nothing on stdout" "0" "$(wc -c < "$TMP/queued.out" | tr -d ' ')"
+assert_eq "and a count the run can report" "1" "$(grep -c 'skipped 2 malformed queued lines; the ledger cannot be trusted' "$TMP/queued.err" || true)"
 
 echo "batches: a package is listed at MIN unfiled P3 lines or when its oldest is MAX_AGE days old"
 batches() { "$DR" batches --prev-notes "$1" --now "$NOW" "${@:2}" | paste -sd'|' -; }
@@ -404,13 +414,18 @@ assert_eq "the file:line field" "no" "$(seen_p3 p3.go:1)"
 assert_eq "the date" "no" "$(seen_p3 2026-10-10)"
 assert_eq "text inside the claim" "no" "$(seen_p3 inner.go:I:x)"
 
-echo "batches: a malformed p3 line fails closed and prints nothing"
+echo "batches: a malformed p3 line is skipped with a warning; the rest is listed"
 for bad in 'p3: 2026-10-10 a/b.go:B:x a/b.go:1' 'p3: yesterday a/b.go:B:x a/b.go:1 claim' 'p3: 2026-10-10 a/b.go a/b.go:1 claim' 'p3: 2026-10-10 a/b.go:B a/b.go:1 claim' 'p3: 2026-10-10' 'p3: 2026-10-10 :B:x a/b.go:1 claim'; do
   { cat "$TMP/b1.txt"; printf '%s\n' "$bad"; } > "$TMP/bbad.txt"
-  assert_eq "exit 3: $bad" "3" "$(batches_rc "$TMP/bbad.txt")"
-  assert_eq "nothing on stdout" "0" "$(wc -c < "$TMP/batches.out" | tr -d ' ')"
+  assert_eq "exit 0: $bad" "0" "$(batches_rc "$TMP/bbad.txt")"
+  assert_eq "the rest of the ledger is unchanged: $bad" "$(batches "$TMP/b1.txt")" "$(paste -sd'|' - < "$TMP/batches.out")"
 done
-assert_eq "the failure names the line" "1" "$(grep -c 'malformed p3 line: p3: 2026-10-10 :B:x a/b.go:1 claim' "$TMP/batches.err" || true)"
+assert_eq "the warning names the line" "1" "$(grep -c 'malformed p3 line: p3: 2026-10-10 :B:x a/b.go:1 claim' "$TMP/batches.err" || true)"
+assert_eq "with the count of skipped lines" "1" "$(grep -c 'skipped 1 malformed p3 line; the ledger cannot be trusted' "$TMP/batches.err" || true)"
+printf 'p3: 2026-10-10\np3: 2026-10-10 a/b.go:B a/b.go:1 claim\n' > "$TMP/ballbad.txt"
+assert_eq "an all-bad ledger exits 0" "0" "$(batches_rc "$TMP/ballbad.txt")"
+assert_eq "prints no rows" "0" "$(wc -c < "$TMP/batches.out" | tr -d ' ')"
+assert_eq "and a count the run can report" "1" "$(grep -c 'skipped 2 malformed p3 lines; the ledger cannot be trusted' "$TMP/batches.err" || true)"
 assert_eq "bad --now" "3" "$(batches_rc "$TMP/b1.txt" --now tomorrow)"
 assert_eq "missing notes file is usage" "2" "$("$DR" batches --prev-notes "$TMP/absent" > /dev/null 2>&1 || echo $?)"
 assert_eq "no --prev-notes is usage" "2" "$("$DR" batches > /dev/null 2>&1 || echo $?)"
