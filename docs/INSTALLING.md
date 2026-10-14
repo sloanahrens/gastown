@@ -209,7 +209,7 @@ gt install ~/gt --shell --git
 #   ~/gt/
 #   ├── CLAUDE.md          # Identity anchor (run gt prime)
 #   ├── mayor/             # Town config and state
-#   ├── rigs/              # Project containers (initially empty)
+#   ├── plugins/           # Town-level patrol plugins
 #   └── .beads/            # Town-level issue tracking
 ```
 
