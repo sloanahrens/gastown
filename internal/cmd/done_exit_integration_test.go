@@ -96,10 +96,18 @@ func TestIntegrationRunDoneReworkBranchRecordsActualWorkerNotBranchName(t *testi
 // branchSetup shaping the repo, and returns runDone's error.
 func runDoneForExitCode(t *testing.T, branchSetup func(t *testing.T, workDir string)) error {
 	t.Helper()
+	_, err := runDoneForExitCodeWithStatus(t, "unpushed", branchSetup)
+	return err
+}
+
+// runDoneForExitCodeWithStatus is runDoneForExitCode with the --cleanup-status
+// the polecat passes. It also returns the path of the bd recorder log.
+func runDoneForExitCodeWithStatus(t *testing.T, cleanupStatus string, branchSetup func(t *testing.T, workDir string)) (string, error) {
+	t.Helper()
 	workDir, currentBeadsDir, ownerBeadsDir := setupRoutedSourceTestTown(t)
 	setupRoutedSubmitCommandTown(t, workDir)
 	branchSetup(t, workDir)
-	installSubmitSourceBDRecorder(t, currentBeadsDir, ownerBeadsDir)
+	logPath := installSubmitSourceBDRecorder(t, currentBeadsDir, ownerBeadsDir)
 	resetDoneFlagsForTest(t)
 	oldDelays := pushLandingRetryDelays
 	pushLandingRetryDelays = []time.Duration{0}
@@ -116,11 +124,11 @@ func runDoneForExitCode(t *testing.T, branchSetup func(t *testing.T, workDir str
 	t.Chdir(workDir)
 
 	doneIssue = "bd-source"
-	doneCleanupStatus = "unpushed"
+	doneCleanupStatus = cleanupStatus
 	updateAgentStateOnDoneFn = func(cwd, townRoot, exitType, issueID string, pending beads.AgentFieldUpdates) (bool, error) {
 		return false, nil
 	}
-	return runDone(nil, nil)
+	return logPath, runDone(nil, nil)
 }
 
 // installRemoteHook writes a git hook into the test repo's bare origin.
@@ -156,17 +164,40 @@ func TestIntegrationRunDoneExitsPushUnverifiedWhenOriginDropsTheBranch(t *testin
 	assertDoneExitCode(t, err, done.DoneExitPushUnverified, "feature/routed-submit")
 }
 
+// emptyBranchSetup leaves the polecat branch at main's tip with nothing ahead
+// of origin/main, the shape of a run that did no code work.
+func emptyBranchSetup(t *testing.T, workDir string) {
+	t.Helper()
+	setupRoutedSubmitGitRepo(t, workDir, false)
+	runGitForMQSubmitTest(t, workDir, "reset", "--hard", "main")
+}
+
 // TestRunDoneExitsCloseFailedOnNoMRClose: a branch with nothing ahead of main
-// closes its source bead without an MR; bd cannot close it: exit 13. Push
-// verification of the no-MR close runs (it is no longer skippable) and
-// passes, because HEAD is on origin/main.
+// closes its source bead without an MR; bd cannot close it: exit 13. Since
+// gt-mr78z the observed clean state of an empty branch no longer qualifies, so
+// the run passes an explicit cleanup status of clean, the supported route to a
+// no-code close. Push verification of the no-MR close runs (it is no longer
+// skippable) and passes, because HEAD is on origin/main.
 func TestIntegrationRunDoneExitsCloseFailedOnNoMRClose(t *testing.T) {
 	t.Setenv("GT_TEST_BD_CLOSE_FAILS", "1")
-	err := runDoneForExitCode(t, func(t *testing.T, workDir string) {
-		setupRoutedSubmitGitRepo(t, workDir, false)
-		runGitForMQSubmitTest(t, workDir, "reset", "--hard", "main")
-	})
+	_, err := runDoneForExitCodeWithStatus(t, "clean", emptyBranchSetup)
 	assertDoneExitCode(t, err, done.DoneExitCloseFailed, "could not close issue bd-source")
+}
+
+// TestIntegrationRunDoneRefusesNoCommitsWithoutExplicitCleanStatus guards the
+// gt-mr78z contract: the same empty branch without an explicit clean status is
+// refused, and the source bead is never closed.
+func TestIntegrationRunDoneRefusesNoCommitsWithoutExplicitCleanStatus(t *testing.T) {
+	logPath, err := runDoneForExitCodeWithStatus(t, "unpushed", emptyBranchSetup)
+	if err == nil || !strings.Contains(err.Error(), "no commits on branch ahead of") {
+		t.Fatalf("runDone error = %v, want the no-commits refusal", err)
+	}
+	if got := exitCodeForError(err); got == 0 {
+		t.Errorf("exit code = %d, want non-zero", got)
+	}
+	if log := readSubmitSourceBDLog(t, logPath); strings.Contains(log, "\tclose ") {
+		t.Errorf("source bead was closed despite the refusal:\n%s", log)
+	}
 }
 
 // TestRunDoneClassifiesOnTheLastPushAttempt: the first push fails, the retry
