@@ -6,17 +6,19 @@
 #
 #   make gate              the landing gate: the exec-tax preflight (a warning
 #                          at worst, gt-2ycne.1), then lint, then `go build
-#                          ./...`, then the unit tier: the budget runner over
-#                          every package (there is no slow tier: internal/cmd
-#                          and internal/beads run here since gt-ik4a1.9). A
-#                          package over testpolicy.FastTierMaxWall of wall
-#                          time is only warned about (a TIER: line): wall time
-#                          depends on host load, and a landing is never
-#                          refused for contention (gt-z7qtk). Prints its wall
-#                          time at the end.
-#   make tier-check        the unit tier again, with a wall overrun failing
-#                          (-strict-wall), so the drift the gate only warns
-#                          about is still caught (gt-z862q). Run it on a quiet
+#                          ./...`, then the unit tier: plain `go test -timeout
+#                          20m ./...` over every package, through go test's
+#                          result cache (there is no slow tier: internal/cmd
+#                          and internal/beads run here since gt-ik4a1.9;
+#                          gt-s1vff). The gate runs no budget runner and
+#                          measures no wall, CPU or idle time, so a landing is
+#                          never refused for contention (gt-z7qtk). Prints its
+#                          wall time at the end.
+#   make tier-check        the unit tier through the budget runner, whose only
+#                          caller it is: the runner judges each package's CPU
+#                          budget and wall time, and a wall overrun fails
+#                          (-strict-wall), so the drift the gate cannot see is
+#                          still caught (gt-z862q). Run it on a quiet
 #                          host from the post-landing job or a daily one, never
 #                          as a landing gate. No lint or build stage.
 #                          Never starts a container and never takes the
