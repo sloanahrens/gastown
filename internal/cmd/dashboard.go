@@ -101,12 +101,13 @@ how long it has waited and whether Sloan has answered it — so he can see what 
 waiting on him and answer it by commenting on the bead. The page draws it and
 never writes: there is no form, and a question is closed from a terminal.
 
-The Deep review panel reads the gastown rig's scheduled:deep-review beads with
-bd — when the next run is due by the schedule's interval, or "paused: <reason>"
-while a hold file or ESTOP parks dispatch, and the last ten runs with their
-status, duration, findings, beads filed and a reference to the digest. A read
-that fails says so rather than reading as no runs. The panel never writes and
-never draws a digest's text.
+The Deep review panel reads the gastown rig's scheduled:deep-review,
+scheduled:deep-review-slice and scheduled:deep-review-risk beads with bd — when
+each schedule is next due by its interval, or "paused: <reason>" while a hold
+file or ESTOP parks dispatch, and the last ten runs across the schedules with
+their kind, status, duration, findings, beads filed and a reference to the
+digest. A read that fails says so rather than reading as no runs. The panel
+never writes and never draws a digest's text.
 
 Lifecycle: the dashboard watches its own binary and the town registry. When make
 install replaces the binary, or a rig is added to or removed from the town, the

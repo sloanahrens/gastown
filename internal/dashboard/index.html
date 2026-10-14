@@ -1870,16 +1870,19 @@ function questionCard(r) {
   return c;
 }
 
-// The Deep review pane: when the scheduled deep review is next due, or why the
-// town holds it, and the last ten runs, newest first. Read-only: a run is
+// The Deep review pane: when each of the review's schedules is next due, or why
+// the town holds them, and the last ten runs, newest first. Read-only: a run is
 // triggered, paused and edited from a terminal.
 //
-// The standing line is the reader's own word. A held town starts no run
-// whatever the interval says, so "paused" replaces the due time rather than
-// sitting beside it. Every cell goes through el(), which writes textContent:
-// the run's bead id and the hold's reason are text and never markup. The
-// digest column is a reference — the bead and its comment count — and never the
-// digest's text.
+// The standing is one cell per configured schedule — two since the review was
+// split into a slice path and a risk path — carrying the schedule's next-run
+// text with its name under it. The reader's own words are what a cell shows; a
+// town with no schedule configured says so in one nameless cell. A held town
+// starts no run whatever an interval says, so "paused" replaces the cells
+// rather than sitting beside them. Every cell goes through el(), which writes
+// textContent: the run's bead id and the hold's reason are text and never
+// markup. The digest column is a reference — the bead and its comment count —
+// and never the digest's text.
 function renderDeepReview(s) {
   const box = $("deepreview"), note = $("deepreviewnote");
   box.replaceChildren();
@@ -1889,20 +1892,32 @@ function renderDeepReview(s) {
   // A read that failed is a named state, never an empty pane: "no deep review
   // has run" and "the runs could not be read" must not look alike.
   if (d.unavailable) { box.append(el("div", "badc", "unavailable: deep reviews could not be read")); return; }
-  const standing = d.paused ? "paused: " + d.paused : (d.next ? "next: " + d.next : "");
+  const nexts = d.next || [];
   const kv = el("div", "kv");
-  const line = el("div");
-  line.append(el("b", d.paused ? "warnc" : "", d.paused ? "paused" : "next"), el("span", "", d.paused ? d.paused : (d.next || "–")));
-  kv.append(line);
+  if (d.paused) {
+    const cell = el("div");
+    cell.append(el("b", "warnc", "paused"), el("span", "", d.paused));
+    kv.append(cell);
+  } else {
+    // The reader sends one line per configured schedule, and one nameless line
+    // for a town that has none: that line's label is the pane's own subject,
+    // and its text is the reader's word for the state.
+    for (const n of nexts) {
+      const cell = el("div");
+      cell.append(el("b", "", n.text), el("span", "", n.name || "deep review"));
+      kv.append(cell);
+    }
+  }
   box.append(kv);
+  const standing = d.paused ? d.paused : nexts.map(n => (n.name ? n.name + " " : "") + n.text).join(" · ");
   note.className = d.paused ? "r warnc" : "r";
-  note.textContent = d.paused ? "paused" : (d.next || "");
-  note.title = standing;
+  note.textContent = d.paused ? "paused" : standing;
+  note.title = (d.paused ? "paused: " : "next: ") + standing;
   const rows = d.rows || [];
   if (!rows.length) { box.append(el("div", "empty", "no runs yet")); return; }
   const t = el("table");
   const hr = el("tr");
-  [["Run"], ["Status"], ["Took", "closed minus created", 1], ["Found", "finding: lines in the run's notes", 1], ["Filed", "findings that named a bead", 1], ["Queued", "queued: lines in the run's notes", 1], ["Digest"]]
+  [["Run"], ["Kind", "the schedule that filed the run"], ["Status"], ["Took", "closed minus created", 1], ["Found", "finding: lines in the run's notes", 1], ["Filed", "findings that named a bead", 1], ["Queued", "queued: lines in the run's notes", 1], ["Digest"]]
     .forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); });
   t.append(hr);
   for (const r of rows) {
@@ -1910,6 +1925,7 @@ function renderDeepReview(s) {
     const id = el("td", "title", r.id);
     if (r.unparsed) { const b = el("span", "badge warnc", "unparsed"); b.title = "a finding:, queued: or cursor: line in the notes is missing its fields"; id.append(document.createTextNode(" "), b); }
     tr.append(id);
+    tr.append(el("td", "title", r.kind || "–"));
     tr.append(el("td", r.status === "open" ? "warnc" : "", r.status));
     tr.append(el("td", "n", r.duration_sec == null ? "–" : fmtDur(r.duration_sec)));
     tr.append(el("td", "n", String(r.findings)));
