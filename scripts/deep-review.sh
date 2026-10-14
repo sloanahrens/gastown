@@ -84,6 +84,7 @@ usage:
                             [--prev-notes FILE] [--out DIR]
   deep-review.sh gate --landings FILE --label LABEL [--repo DIR] [--ref REF]
                       [--now RFC3339] [--min-count N] [--min-age-min M]
+                      [--green-state PATH]
   deep-review.sh seen --prev-notes FILE FINGERPRINT
   deep-review.sh queued --prev-notes FILE
   deep-review.sh batches --prev-notes FILE [--now RFC3339] [--min N]
@@ -683,14 +684,54 @@ cmd_docs_audit() {
   echo "out=$out"
 }
 
+# read_green_state PATH REPO: reads the tier sweep record at PATH and, when it
+# holds a full green sweep of REPO, sets GREEN_SHA to its last_green_sha. Every
+# other outcome sets GREEN_REASON and returns 1: a sweep that cannot be read
+# closes the gate instead of opening it, and a tip REPO does not hold cannot
+# order any landing against it.
+read_green_state() {
+  local path="$1" repo="$2" line verdict reason
+  [ -f "$path" ] || { GREEN_REASON="no state file"; return 1; }
+  [ -r "$path" ] || { GREEN_REASON="$path cannot be read"; return 1; }
+  line="$(jq -r '
+    if type != "object" then error("not an object") else . end
+    | (if (.last_green_sha | type) == "string" then .last_green_sha else "" end
+       | gsub("^[[:space:]]+|[[:space:]]+$"; "")) as $sha
+    | ((.tiers | objects) // {}) as $t
+    | (($t.shell | objects | .verdict) // "missing") as $shell
+    | (($t.integration | objects | .verdict) // "missing") as $integ
+    | (($t.race | objects | .verdict) // "missing") as $race
+    | if $sha == "" then "skip\tno last_green_sha"
+      elif $shell != "GREEN" then "skip\tshell tier is \($shell)"
+      elif $integ != "GREEN" then "skip\tintegration tier is \($integ)"
+      elif $race != "GREEN" then "skip\trace tier is \($race)"
+      else "run\t\($sha)"
+      end
+  ' "$path" 2>/dev/null)" || { GREEN_REASON="$path is not readable JSON"; return 1; }
+  IFS=$'\t' read -r verdict reason <<< "$line"
+  if [ "$verdict" != run ]; then
+    GREEN_REASON="${reason:-no green sweep recorded}"
+    return 1
+  fi
+  git -C "$repo" rev-parse --verify --quiet "$reason^{commit}" >/dev/null 2>&1 \
+    || { GREEN_REASON="last_green_sha ${reason:0:8} is not a commit in $repo"; return 1; }
+  GREEN_SHA="$reason"
+}
+
 # gate: does the landings job have anything to do? Reads the run history itself
 # (bd list, both shapes of bd --json as the formula's step 1 does), finds the
 # risky landings after the newest cursor with the code plan uses, and decides
 # from their count and the age of the oldest. Exit 0 run, 1 skip, 3 an input it
 # cannot trust. --ref is accepted so a caller can pass plan's flags; the gate
 # reads no tree. --repo is the directory bd runs in.
+#
+# --green-state hands the gate a tier sweep record instead and makes that sweep
+# the threshold: only a landing whose landed_commit the last full green sweep
+# covered is counted, and one of them is enough whatever its age, so the review
+# reads landings a red or partial sweep has not cleared. A record holding no
+# green sweep is a skip, never a run.
 cmd_gate() {
-  local landings="" label="" repo="." now="" min_count="$DEFAULT_GATE_MIN_COUNT" min_age="$DEFAULT_GATE_MIN_AGE_MIN"
+  local landings="" label="" repo="." now="" green_state="" min_count="" min_age=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --landings) landings="${2:-}"; shift 2 || usage ;;
@@ -698,16 +739,35 @@ cmd_gate() {
       --repo) repo="${2:-}"; shift 2 || usage ;;
       --ref) [ $# -ge 2 ] || usage; shift 2 ;;
       --now) now="${2:-}"; shift 2 || usage ;;
-      --min-count) min_count="${2:-}"; shift 2 || usage ;;
-      --min-age-min) min_age="${2:-}"; shift 2 || usage ;;
+      --min-count) [ -n "${2:-}" ] || usage; min_count="$2"; shift 2 || usage ;;
+      --min-age-min) [ -n "${2:-}" ] || usage; min_age="$2"; shift 2 || usage ;;
+      --green-state) [ -n "${2:-}" ] || usage; green_state="$2"; shift 2 || usage ;;
       *) usage ;;
     esac
   done
   [ -f "$landings" ] && [ -n "$label" ] && [ -d "$repo" ] || usage
+  local def_count="$DEFAULT_GATE_MIN_COUNT" def_age="$DEFAULT_GATE_MIN_AGE_MIN"
+  if [ -n "$green_state" ]; then
+    def_count=1
+    def_age=0
+  fi
+  [ -n "$min_count" ] || min_count="$def_count"
+  [ -n "$min_age" ] || min_age="$def_age"
   case "$min_count" in ''|*[!0-9]*) usage ;; esac
   case "$min_age" in ''|*[!0-9]*) usage ;; esac
   [ -n "$now" ] || now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   valid_ts "$now" || die "--now is not RFC3339: $now"
+
+  # the sweep answers first: a caller that asks for a green gate and cannot see
+  # one skips without asking bd anything
+  local green=""
+  if [ -n "$green_state" ]; then
+    if ! read_green_state "$green_state" "$repo"; then
+      echo "gate: skip (no green sweep: $GREEN_REASON)"
+      exit 1
+    fi
+    green=" green=${GREEN_SHA:0:8}"
+  fi
 
   # global, not local: the EXIT trap runs after this function has returned
   tmp="$(mktemp -d)"
@@ -725,6 +785,22 @@ cmd_gate() {
   classify_landings "$landings" "$tmp"
   risky_landings "$tmp" "$SINCE"
 
+  # Only the landings the green sweep covered are this run's to review. The
+  # records pass through the filter unchanged; a landing that is not an
+  # ancestor of the sweep's tip, or one the repo does not hold at all, drops.
+  if [ -n "$green_state" ]; then
+    local line commit covered="$tmp/covered.jsonl"
+    : > "$covered"
+    while IFS= read -r line; do
+      commit="$(jq -r '.landed_commit // ""' <<< "$line")"
+      [ -n "$commit" ] || continue
+      if git -C "$repo" merge-base --is-ancestor "$commit" "$GREEN_SHA" 2>/dev/null; then
+        printf '%s\n' "$line" >> "$covered"
+      fi
+    done < "$tmp/landings.jsonl"
+    mv "$covered" "$tmp/landings.jsonl"
+  fi
+
   local n oldest=0
   n="$(awk 'END { print NR }' "$tmp/landings.jsonl")"
   if [ "$n" -gt 0 ]; then
@@ -734,9 +810,9 @@ cmd_gate() {
       | (if $s < 0 then 0 else $s end) / 60 | floor' "$tmp/landings.jsonl")"
   fi
   if [ "$n" -gt 0 ] && { [ "$oldest" -ge "$min_age" ] || [ "$n" -ge "$min_count" ]; }; then
-    echo "gate: run n=$n oldest=${oldest}m"
+    echo "gate: run n=$n oldest=${oldest}m$green"
   else
-    echo "gate: skip n=$n oldest=${oldest}m"
+    echo "gate: skip n=$n oldest=${oldest}m$green"
     exit 1
   fi
 }
