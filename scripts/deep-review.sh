@@ -8,10 +8,25 @@
 #   queued  confirmed findings an earlier run recorded but never filed
 #   batches unfiled P3 findings grouped per package, ready to file as one bead
 #   gate    whether the risky-landings job has anything to do (no LLM)
+#   docs-audit  which living docs look out of date, scored without an LLM
 #
 # plan --mode splits the run into two jobs: slice (the hourly rotation slice,
 # no landings, no cursor moved) and landings (the risky landings, no slice).
 # The default, both, is the original single run.
+#
+# docs-audit scores every living doc at a ref (README.md, CLAUDE.md, AGENTS.md,
+# .beads/PRIME.md, docs/*.md, docs/concepts, docs/guides, internal/**/README.md;
+# the plans, design, adr and research records are point-in-time and never
+# audited) from three counts. dead_paths: backticked paths under internal, cmd,
+# scripts, docs, test or tests that the tree no longer holds. dead_cmds:
+# backticked `gt <word>` or `bd <word>` whose subcommand the binary's --help does
+# not list (not counted when the binary is not on PATH). code_changed: commits of
+# the last 60 days that touched a file the doc cites, made after the doc's own
+# last commit, so a doc committed with its code does not count. plan, whenever
+# it builds the slice, then writes docs.txt: living docs that cite a slice file
+# or its package directory (6 at most), then the 3 highest-scoring docs without a
+# reviewed: line from the last 21 days, 8 docs at most. docs.txt is empty in
+# landings mode and on a quiet day, like the slice.
 #
 # Ledger lines, written into the run bead's notes by the formula:
 #   cursor: <RFC3339 landed_at of the newest landing covered> <last slice path>
@@ -48,6 +63,10 @@ DEFAULT_GATE_MIN_COUNT=3
 DEFAULT_GATE_MIN_AGE_MIN=20
 REVIEW_COOLDOWN_DAYS=21
 RISK_HISTORY="60.days.ago"
+DOC_HISTORY_DAYS=60
+DOC_PAIR_MAX=6
+DOC_STALE_TOP=3
+DOC_MAX=8
 
 usage() {
   cat >&2 <<'EOF'
@@ -55,6 +74,8 @@ usage:
   deep-review.sh plan --landings FILE --prev-notes FILE --repo DIR
                       [--ref REF] [--slice N] [--slice-bytes N] [--now RFC3339]
                       [--out DIR] [--mode slice|landings|both]
+  deep-review.sh docs-audit --repo DIR [--ref REF] [--now RFC3339]
+                            [--prev-notes FILE] [--out DIR]
   deep-review.sh gate --landings FILE --label LABEL [--repo DIR] [--ref REF]
                       [--now RFC3339] [--min-count N] [--min-age-min M]
   deep-review.sh seen --prev-notes FILE FINGERPRINT
@@ -273,6 +294,158 @@ build_slice() {
   awk -v today="$today" '{ print "reviewed: " today " " $0 }' "$out/slice.txt" > "$out/reviewed-lines.txt"
 }
 
+# build_docs_audit REPO REF NOW OUT: writes $OUT/docs-audit.txt, one line per
+# living doc, "<score> <doc> dead_paths=<n> dead_cmds=<n> code_changed=<n>",
+# highest score first, ties by path. $OUT/doc-refs.tsv (doc, p|c, value) is the
+# citation list build_docs reads. Cost: one ls-tree, one git show per doc, one
+# log pass and at most two --help calls, whatever the number of docs.
+build_docs_audit() {
+  local repo="$1" ref="$2" now="$3" out="$4" since tool d
+  local have_gt=0 have_bd=0
+
+  git -C "$repo" ls-tree -r --name-only "$ref" > "$out/doc-tree.txt" || die "cannot list the tree at $ref"
+  awk '
+    $0 == "README.md" || $0 == "CLAUDE.md" || $0 == "AGENTS.md" || $0 == ".beads/PRIME.md" { print; next }
+    /^docs\/[^\/]+\.md$/ { print; next }
+    /^docs\/(concepts|guides)\/.*\.md$/ { print; next }
+    /^internal\/.*\/README\.md$/ { print }
+  ' "$out/doc-tree.txt" | LC_ALL=C sort > "$out/living-docs.txt"
+
+  # the docs in one stream, each behind a \001 marker line
+  while IFS= read -r d; do
+    printf '\001%s\n' "$d"
+    git -C "$repo" show "$ref:$d" || die "cannot read $d at $ref"
+    printf '\n'
+  done < "$out/living-docs.txt" > "$out/doc-text.txt"
+
+  # Citations are inline code spans outside fenced blocks. A path is the first
+  # word of a span that starts with a tracked root; globs and placeholders are
+  # skipped and #anchors and :line suffixes stripped. A command is a span that
+  # starts with gt or bd and a lowercase word, so flags and <placeholders> skip.
+  awk '
+    function emit(kind, val,   k) {
+      k = doc SUBSEP kind SUBSEP val
+      if (!(k in seen)) { seen[k] = 1; printf "%s\t%s\t%s\n", doc, kind, val }
+    }
+    substr($0, 1, 1) == "\001" { doc = substr($0, 2); fence = 0; next }
+    /^[ \t]*```/ { fence = !fence; next }
+    fence { next }
+    {
+      line = $0
+      while (match(line, /`[^`]+`/)) {
+        tok = substr(line, RSTART + 1, RLENGTH - 2)
+        line = substr(line, RSTART + RLENGTH)
+        sub(/^[ \t]+/, "", tok)
+        n = split(tok, w, /[ \t]+/)
+        if (tok ~ /^(internal|cmd|scripts|docs|test|tests)\//) {
+          p = w[1]
+          if (p ~ /[*?<>{}$]/ || index(p, "[") || index(p, "]") || index(p, "...")) continue
+          sub(/#.*$/, "", p)
+          sub(/:[0-9]+(-[0-9]+)?(:[0-9]+)?$/, "", p)
+          sub(/\/+$/, "", p)
+          emit("p", p)
+        } else if ((w[1] == "gt" || w[1] == "bd") && n >= 2 && w[2] ~ /^[a-z][a-z0-9_-]*$/) {
+          emit("c", w[1] " " w[2])
+        }
+      }
+    }
+  ' "$out/doc-text.txt" > "$out/doc-refs.tsv"
+
+  # A binary that is not on PATH, or prints no command list, is not judged.
+  for tool in gt bd; do
+    : > "$out/$tool-cmds.txt"
+    awk -F'\t' -v t="$tool" '$2 == "c" { split($3, a, " "); if (a[1] == t) f = 1 } END { exit !f }' "$out/doc-refs.tsv" || continue
+    command -v "$tool" >/dev/null 2>&1 || continue
+    { "$tool" --help 2>&1 || true; } | awk '/^  [a-z][a-z0-9_-]* +[^ ]/ { print $1 }' | LC_ALL=C sort -u > "$out/$tool-cmds.txt"
+    [ -s "$out/$tool-cmds.txt" ] || continue
+    if [ "$tool" = gt ]; then have_gt=1; else have_bd=1; fi
+  done
+
+  since="$(jq -n -r --arg now "$now" "$JQ_TS"'(($now | ts)[0] - '"$DOC_HISTORY_DAYS"' * 86400) | todate')"
+  git -C "$repo" log --since="$since" --name-only --format=@%H "$ref" > "$out/doc-history.txt" \
+    || die "cannot read the history at $ref"
+
+  awk -F'\t' -v have_gt="$have_gt" -v have_bd="$have_bd" \
+    -v tree="$out/doc-tree.txt" -v gtc="$out/gt-cmds.txt" -v bdc="$out/bd-cmds.txt" \
+    -v living="$out/living-docs.txt" -v refs="$out/doc-refs.tsv" -v hist="$out/doc-history.txt" '
+    FILENAME == tree {
+      isfile[$0] = 1
+      d = $0
+      while (sub(/\/[^\/]*$/, "", d)) isdir[d] = 1
+      next
+    }
+    FILENAME == gtc { cmd["gt " $1] = 1; next }
+    FILENAME == bdc { cmd["bd " $1] = 1; next }
+    FILENAME == living { order[++ndocs] = $0; next }
+    FILENAME == refs {
+      if ($2 == "p") {
+        if (isfile[$3]) { cited[$1, ++ncited[$1]] = $3 }
+        else if (!isdir[$3]) deadp[$1]++
+      } else {
+        split($3, a, " ")
+        if ((a[1] == "gt" ? have_gt : have_bd) && !($3 in cmd)) deadc[$1]++
+      }
+      next
+    }
+    FILENAME == hist {
+      if (substr($0, 1, 1) == "@") { idx++; next }
+      if ($0 == "") next
+      touched[$0] = touched[$0] " " idx
+      if (!($0 in newest)) newest[$0] = idx
+      next
+    }
+    END {
+      # idx counts commits newest first, so a smaller idx is a later commit
+      for (i = 1; i <= ndocs; i++) {
+        d = order[i]
+        limit = (d in newest) ? newest[d] : 1000000000
+        cc = 0
+        for (j = 1; j <= ncited[d]; j++) {
+          m = split(touched[cited[d, j]], a, " ")
+          for (k = 1; k <= m; k++) {
+            ix = a[k] + 0
+            if (ix < limit && !((d, ix) in marked)) { marked[d, ix] = 1; cc++ }
+          }
+        }
+        printf "%d %s dead_paths=%d dead_cmds=%d code_changed=%d\n", 5 * deadp[d] + 5 * deadc[d] + (cc > 10 ? 10 : cc), d, deadp[d] + 0, deadc[d] + 0, cc
+      }
+    }
+  ' "$out/doc-tree.txt" "$out/gt-cmds.txt" "$out/bd-cmds.txt" "$out/living-docs.txt" "$out/doc-refs.tsv" "$out/doc-history.txt" \
+    | LC_ALL=C sort -k1,1nr -k2,2 > "$out/docs-audit.txt"
+}
+
+# build_docs NOTES NOW OUT: writes $OUT/docs.txt from docs-audit.txt, doc-refs.tsv
+# and slice.txt. First the living docs that cite a slice file or its package
+# directory, best score first, DOC_PAIR_MAX at most; then the DOC_STALE_TOP
+# best-scoring docs with no reviewed: line since the cooldown cutoff, whether or
+# not already paired; no doc twice, DOC_MAX in all.
+build_docs() {
+  local notes="$1" now="$2" out="$3" cutoff
+  cutoff="$(jq -n -r --arg now "$now" "$JQ_TS"'(($now | ts)[0] - '"$REVIEW_COOLDOWN_DAYS"' * 86400) | strftime("%Y-%m-%d")')"
+  awk -F'\t' -v slice="$out/slice.txt" -v audit="$out/docs-audit.txt" -v refs="$out/doc-refs.tsv" \
+    -v cutoff="$cutoff" -v pair_max="$DOC_PAIR_MAX" -v stale_top="$DOC_STALE_TOP" -v max="$DOC_MAX" '
+    FILENAME == slice { inslice[$0] = 1; d = $0; sub(/\/[^\/]*$/, "", d); inslice[d] = 1; next }
+    FILENAME == audit { split($0, a, " "); order[++ndocs] = a[2]; next }
+    FILENAME == refs { if ($2 == "p" && ($3 in inslice)) paired[$1] = 1; next }
+    /^reviewed: [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] ./ {
+      dt = substr($0, 11, 10); p = substr($0, 22)
+      if (!(p in rev) || dt > rev[p]) rev[p] = dt
+    }
+    END {
+      for (i = 1; i <= ndocs && np < pair_max; i++) {
+        d = order[i]
+        if (paired[d] && printed < max) { print d; chosen[d] = 1; printed++; np++ }
+      }
+      for (i = 1; i <= ndocs && ns < stale_top; i++) {
+        d = order[i]
+        if ((d in rev) && (rev[d] "") >= (cutoff "")) continue
+        ns++
+        if (!(d in chosen) && printed < max) { print d; chosen[d] = 1; printed++ }
+      }
+    }
+  ' "$out/slice.txt" "$out/docs-audit.txt" "$out/doc-refs.tsv" "$notes" > "$out/docs.txt"
+}
+
 # ledger_since NOTES NOW: sets SINCE (the newest cursor's timestamp, or NOW minus
 # the default window) and CURSOR (that cursor's path, empty without one).
 ledger_since() {
@@ -391,13 +564,42 @@ cmd_plan() {
   : > "$out/slice.txt"
   : > "$out/slice-rows.txt"
   : > "$out/reviewed-lines.txt"
+  : > "$out/docs.txt"
   if [ "$mode" = slice ] || { [ "$mode" = both ] && [ "$n" -gt 0 ]; }; then
     build_slice "$repo" "$ref" "$notes" "$now" "$out" "$slice" "$slice_bytes"
     echo "rotation_cursor_old=$cursor"
     echo "rotation_cursor_new=$(tail -n 1 "$out/slice.txt")"
+    build_docs_audit "$repo" "$ref" "$now" "$out"
+    build_docs "$notes" "$now" "$out"
   fi
+  echo "docs=$(awk 'END { print NR }' "$out/docs.txt")"
   echo "slice_files=$(awk 'END { print NR }' "$out/slice.txt")"
   echo "slice_bytes=$(awk -F'\t' '{ s += $4 } END { print s + 0 }' "$out/slice-rows.txt")"
+  echo "out=$out"
+}
+
+# docs-audit: the audit alone. --prev-notes is accepted so a caller can pass
+# plan's flags; the audit reads no ledger.
+cmd_docs_audit() {
+  local repo="" ref="HEAD" now="" out="" notes=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repo) repo="${2:-}"; shift 2 || usage ;;
+      --ref) ref="${2:-}"; shift 2 || usage ;;
+      --now) now="${2:-}"; shift 2 || usage ;;
+      --out) out="${2:-}"; shift 2 || usage ;;
+      --prev-notes) notes="${2:-}"; shift 2 || usage ;;
+      *) usage ;;
+    esac
+  done
+  [ -d "$repo" ] || usage
+  [ -z "$notes" ] || [ -f "$notes" ] || usage
+  [ -n "$now" ] || now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  valid_ts "$now" || die "--now is not RFC3339: $now"
+  [ -n "$out" ] || out="$(mktemp -d)"
+  mkdir -p "$out"
+  build_docs_audit "$repo" "$ref" "$now" "$out"
+  echo "docs=$(awk 'END { print NR }' "$out/docs-audit.txt")"
   echo "out=$out"
 }
 
@@ -467,5 +669,6 @@ case "$sub" in
   queued) cmd_queued "$@" ;;
   batches) cmd_batches "$@" ;;
   gate) cmd_gate "$@" ;;
+  docs-audit) cmd_docs_audit "$@" ;;
   *) usage ;;
 esac

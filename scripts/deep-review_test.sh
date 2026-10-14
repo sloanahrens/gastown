@@ -4,8 +4,10 @@
 # risk-ranked rotation slice (score, 21-day exclusion, count and byte caps,
 # reviewed lines, cursor) on a production-sized tree, fingerprint lookup, and
 # the queued ledger line's severity, and the P3 batches (threshold, age, filed,
-# cap, seen, malformed), plan --mode slice|landings|both, and the gate
-# subcommand (count and age thresholds, both bd --json shapes, untrusted input).
+# cap, seen, malformed), plan --mode slice|landings|both, the gate subcommand
+# (count and age thresholds, both bd --json shapes, untrusted input), the
+# docs-audit subcommand (dead paths and commands, code_changed, score order,
+# which docs are audited) and plan's docs.txt (slice pairing, stale docs, caps).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -560,6 +562,211 @@ assert_eq "non-numeric --min-count" "2" "$(gate_rc --landings "$LANDINGS" --labe
 assert_eq "non-numeric --min-age-min" "2" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --min-age-min soon)"
 assert_eq "unknown flag" "2" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --bogus 1)"
 assert_eq "flag without a value" "2" "$(gate_rc --landings "$LANDINGS" --label)"
+
+# ---- docs-audit -----------------------------------------------------------
+
+audit_rc() { # prints the exit code; stdout to $TMP/audit.out, stderr to $TMP/audit.err
+  local rc=0
+  "$DR" docs-audit "$@" > "$TMP/audit.out" 2> "$TMP/audit.err" || rc=$?
+  echo "$rc"
+}
+
+# Stub gt and bd that print a cobra-style command list for --help.
+mkdir -p "$TMP/dbin"
+cat > "$TMP/dbin/gt" <<'STUB'
+#!/usr/bin/env bash
+[ "${1:-}" = "--help" ] || exit 1
+printf 'Gas Town stub\n\nUsage:\n  gt [command]\n\nWork Management:\n  done         Submit work\n  hook         Show the hook\n\nAdditional Commands:\n  help         Help about any command\n\nFlags:\n  -h, --help   help for gt\n'
+STUB
+cat > "$TMP/dbin/bd" <<'STUB'
+#!/usr/bin/env bash
+[ "${1:-}" = "--help" ] || exit 1
+printf 'Issues stub\n\nUsage:\n  bd [flags]\n  bd [command]\n\nWorking With Issues:\n  list              List issues\n  show              Show an issue\n\nFlags:\n  -h, --help   help for bd\n'
+STUB
+chmod +x "$TMP/dbin/gt" "$TMP/dbin/bd"
+
+# A PATH without gt and bd: only the tools the audit runs.
+mkdir -p "$TMP/nobin"
+for t in git jq awk sort mkdir mktemp date; do ln -sf "$(command -v "$t")" "$TMP/nobin/$t"; done
+
+DREPO="$TMP/drepo"
+mkdir -p "$DREPO"
+git -C "$DREPO" init -q
+git -C "$DREPO" config user.email t@t; git -C "$DREPO" config user.name t
+git -C "$DREPO" config commit.gpgsign false
+dcommit() { # date message: commit everything staged-or-not at that date
+  git -C "$DREPO" add -A
+  GIT_AUTHOR_DATE="$1" GIT_COMMITTER_DATE="$1" git -C "$DREPO" commit -q -m "$2"
+}
+dwrite() { mkdir -p "$DREPO/$(dirname "$1")"; cat > "$DREPO/$1"; }
+dtouch() { mkdir -p "$DREPO/$(dirname "$1")"; echo "change $RANDOM" >> "$DREPO/$1"; }
+
+for f in internal/a/one.go internal/a/two.go internal/b/three.go internal/a/busy.go cmd/main.go scripts/tool.sh tests/t.sh; do dwrite "$f" <<< "package x"; done
+dwrite README.md <<'MD'
+# Demo
+Code lives in `internal/a/one.go` and `internal/a/one.go:12`, see `internal/a/` too.
+Gone: `internal/gone.go` and `docs/old.md#frag`; kept: `internal/b/three.go:3-9`.
+Skipped: `cmd/*.go`, `internal/<pkg>/x.go`, `internal/...`, `scripts/{a,b}.sh`.
+Run `gt done` then `gt zap now`; use `bd list -l x` and `bd nope`. Also `gt --version`,
+`gt <cmd>`, the bead id `gt-4ysxr` and `go test ./internal/...` name nothing.
+
+```
+`internal/fenced.go` and `gt fenced` sit in a fence
+```
+MD
+dwrite docs/stale.md <<'MD'
+Covers `internal/a/one.go`, `internal/a/two.go` and `internal/b/three.go`.
+MD
+dwrite docs/fresh.md <<'MD'
+Covers `internal/a/two.go`.
+MD
+dwrite docs/mid.md <<'MD'
+Covers `internal/a/one.go`.
+MD
+dwrite docs/busy.md <<'MD'
+Covers `internal/a/busy.go`.
+MD
+dwrite docs/concepts/c.md <<'MD'
+Uses `scripts/tool.sh` and `scripts/nope.sh`.
+MD
+dwrite docs/guides/g.md <<'MD'
+Uses `tests/t.sh` and `cmd/main.go`.
+MD
+dwrite internal/a/README.md <<'MD'
+Lines `internal/a/one.go:5-9`.
+MD
+dwrite .beads/PRIME.md <<'MD'
+Run `gt done`.
+MD
+dwrite AGENTS.md <<'MD'
+Nothing cited.
+MD
+dwrite CLAUDE.md <<'MD'
+Gone: `internal/claude-gone.go`.
+MD
+for f in docs/plans/p.md docs/design/d.md docs/adr/a.md docs/research/r.md docs/sub/deep.md; do
+  dwrite "$f" <<'MD'
+Gone: `internal/dead.go` and `gt maintain`.
+MD
+done
+dcommit 2026-06-01T12:00:00Z c0
+dtouch internal/a/one.go; dtouch internal/a/two.go
+dcommit 2026-09-01T12:00:00Z c1
+dtouch internal/a/two.go; dtouch docs/fresh.md
+dcommit 2026-09-05T12:00:00Z c2
+dtouch docs/mid.md
+dcommit 2026-09-06T12:00:00Z c2b
+dtouch internal/a/one.go; dtouch internal/b/three.go
+dcommit 2026-09-08T12:00:00Z c3
+for i in $(seq 1 12); do dtouch internal/a/busy.go; dcommit "2026-09-$((10 + i))T12:00:00Z" "busy $i"; done
+git -C "$DREPO" tag c3
+dwrite internal/gone.go <<< "package x"
+dcommit 2026-09-30T12:00:00Z c4
+
+echo "docs-audit: dead paths, dead commands, code_changed, score order, living docs only"
+cat > "$TMP/audit.want" <<'W'
+22 README.md dead_paths=2 dead_cmds=2 code_changed=2
+10 docs/busy.md dead_paths=0 dead_cmds=0 code_changed=12
+5 CLAUDE.md dead_paths=1 dead_cmds=0 code_changed=0
+5 docs/concepts/c.md dead_paths=1 dead_cmds=0 code_changed=0
+3 docs/stale.md dead_paths=0 dead_cmds=0 code_changed=3
+2 internal/a/README.md dead_paths=0 dead_cmds=0 code_changed=2
+1 docs/mid.md dead_paths=0 dead_cmds=0 code_changed=1
+0 .beads/PRIME.md dead_paths=0 dead_cmds=0 code_changed=0
+0 AGENTS.md dead_paths=0 dead_cmds=0 code_changed=0
+0 docs/fresh.md dead_paths=0 dead_cmds=0 code_changed=0
+0 docs/guides/g.md dead_paths=0 dead_cmds=0 code_changed=0
+W
+rc="$(PATH="$TMP/dbin:$PATH" audit_rc --repo "$DREPO" --ref c3 --now "$NOW" --out "$TMP/da1")"
+assert_eq "exit 0" "0" "$rc"
+assert_eq "docs counted on stdout" "11" "$(grep '^docs=' "$TMP/audit.out" | cut -d= -f2)"
+assert_eq "scores, counts and order; plans, design, adr, research and docs/sub are not audited" "$(cat "$TMP/audit.want")" "$(cat "$TMP/da1/docs-audit.txt")"
+assert_eq "a span inside a fence is not a citation" "0" "$(grep -c 'fenced' "$TMP/da1/doc-refs.tsv" || true)"
+
+echo "docs-audit: code_changed counts a commit once, after the doc's own commit, inside 60 days, at most 10"
+assert_eq "stale.md: c1, c2 and c3 touch cited files, c3 touches two of them" "3" "$(grep ' docs/stale.md ' "$TMP/da1/docs-audit.txt" | sed 's/.*code_changed=//')"
+assert_eq "fresh.md changed in the commit that changed its code: nothing after it" "0" "$(grep ' docs/fresh.md ' "$TMP/da1/docs-audit.txt" | sed 's/.*code_changed=//')"
+assert_eq "mid.md: the code commit before its own commit does not count, the one after does" "1" "$(grep ' docs/mid.md ' "$TMP/da1/docs-audit.txt" | sed 's/.*code_changed=//')"
+assert_eq "busy.md: 12 commits are reported as 12 and cap at 10 in the score" "10" "$(grep ' docs/busy.md ' "$TMP/da1/docs-audit.txt" | cut -d' ' -f1)"
+rc="$(PATH="$TMP/dbin:$PATH" audit_rc --repo "$DREPO" --ref c3 --now 2026-12-01T00:00:00Z --out "$TMP/da2")"
+assert_eq "everything older than 60 days before --now is outside the window" "0" "$(awk '{ s += substr($5, 14) } END { print s + 0 }' "$TMP/da2/docs-audit.txt")"
+
+echo "docs-audit: --ref picks the tree"
+rc="$(PATH="$TMP/dbin:$PATH" audit_rc --repo "$DREPO" --now "$NOW" --out "$TMP/da3")"
+assert_eq "at HEAD internal/gone.go exists and its commit counts" "18 README.md dead_paths=1 dead_cmds=2 code_changed=3" "$(head -n 1 "$TMP/da3/docs-audit.txt")"
+
+echo "docs-audit: a binary that is not on PATH is not judged"
+rc=0
+PATH="$TMP/nobin" "$BASH" "$DR" docs-audit --repo "$DREPO" --ref c3 --now "$NOW" --out "$TMP/da4" > "$TMP/audit.out" 2> "$TMP/audit.err" || rc=$?
+assert_eq "exit 0" "0" "$rc"
+assert_eq "no dead_cmds without gt and bd" "12 README.md dead_paths=2 dead_cmds=0 code_changed=2" "$(head -n 1 "$TMP/da4/docs-audit.txt")"
+
+echo "docs-audit: usage and untrusted input"
+assert_eq "no --repo" "2" "$(audit_rc --out "$TMP/du1")"
+assert_eq "missing --repo directory" "2" "$(audit_rc --repo "$TMP/absent")"
+assert_eq "unknown flag" "2" "$(audit_rc --repo "$DREPO" --bogus 1)"
+assert_eq "flag without a value" "2" "$(audit_rc --repo "$DREPO" --ref)"
+assert_eq "missing --prev-notes file" "2" "$(audit_rc --repo "$DREPO" --prev-notes "$TMP/absent")"
+assert_eq "--prev-notes is accepted" "0" "$(audit_rc --repo "$DREPO" --ref c3 --now "$NOW" --prev-notes "$TMP/none.txt" --out "$TMP/du2")"
+assert_eq "bad --now" "3" "$(audit_rc --repo "$DREPO" --now tomorrow --out "$TMP/du3")"
+assert_eq "unknown ref" "3" "$(audit_rc --repo "$DREPO" --ref no-such-ref --now "$NOW" --out "$TMP/du4")"
+
+# ---- plan: docs.txt -------------------------------------------------------
+
+echo "plan docs.txt: docs that cite a slice file or its package directory, then the stalest docs"
+PREPO="$TMP/prepo"
+mkrepo "$PREPO" internal/a/one.go internal/a/two.go internal/b/three.go internal/c/four.go
+dead() { # n prefix: n backticked paths the tree does not hold
+  local i
+  for i in $(seq 1 "$1"); do printf '`internal/dead/%s-%s.go` ' "$2" "$i"; done
+  echo
+}
+{ echo '`internal/a/one.go` `internal/x/gone.go`'; } > "$PREPO/README.md"
+mkdir -p "$PREPO/docs"
+echo 'Package `internal/b/`.' > "$PREPO/docs/p1.md"
+echo '`internal/c/four.go` `internal/d/1.go` `internal/d/2.go`' > "$PREPO/docs/p2.md"
+dead 3 p3 > "$PREPO/docs/p3.md"
+echo 'Nothing cited.' > "$PREPO/docs/p4.md"
+echo '`internal/a/two.go`' > "$PREPO/docs/q.md"
+git -C "$PREPO" add -A; git -C "$PREPO" commit -q -m docs
+
+rc="$(plan_rc --mode slice --prev-notes "$TMP/none.txt" --repo "$PREPO" --slice 3 --now "$NOW" --out "$TMP/pd1")"
+assert_eq "exit 0" "0" "$rc"
+assert_eq "slice is the first three files by path" "internal/a/one.go internal/a/two.go internal/b/three.go" "$(joined "$TMP/pd1/slice.txt")"
+assert_eq "paired by score then path, then the two highest scorers not paired already" "README.md docs/p1.md docs/q.md docs/p3.md docs/p2.md" "$(joined "$TMP/pd1/docs.txt")"
+assert_eq "docs= is the line count" "5" "$(field docs)"
+assert_eq "the audit lands beside it, best score first" "15 docs/p3.md dead_paths=3 dead_cmds=0 code_changed=0" "$(head -n 1 "$TMP/pd1/docs-audit.txt")"
+assert_eq "four.go is outside the slice, so p2 is there for its score only" "docs/p2.md" "$(grep -x 'docs/p2.md' "$TMP/pd1/docs.txt")"
+
+printf 'reviewed: 2026-10-05 docs/p3.md\nreviewed: 2026-01-01 docs/p3.md\nreviewed: 2026-09-01 docs/p2.md\nreviewed: yesterday docs/p1.md\n' > "$TMP/dn1.txt"
+rc="$(plan_rc --mode slice --prev-notes "$TMP/dn1.txt" --repo "$PREPO" --slice 3 --now "$NOW" --out "$TMP/pd2")"
+assert_eq "a doc reviewed 5 days ago (newest date wins) drops out; one reviewed 39 days ago stays eligible" "README.md docs/p1.md docs/q.md docs/p2.md" "$(joined "$TMP/pd2/docs.txt")"
+assert_eq "docs= follows" "4" "$(field docs)"
+
+rc="$(plan_rc --mode slice --prev-notes "$TMP/none.txt" --repo "$PREPO" --slice 1 --now "$NOW" --out "$TMP/pd3")"
+assert_eq "a slice of one file pairs only the docs that cite it" "README.md docs/p3.md docs/p2.md" "$(joined "$TMP/pd3/docs.txt")"
+
+echo "plan docs.txt: 6 paired docs and 8 in all"
+CREPO="$TMP/crepo"
+mkrepo "$CREPO" internal/a/one.go
+mkdir -p "$CREPO/docs"
+for n in 1 2 3 4 5 6 7 8 9; do { printf '`internal/a/one.go` '; dead "$n" "d$n"; } > "$CREPO/docs/d$n.md"; done
+dead 30 ha > "$CREPO/docs/hot-a.md"; dead 20 hb > "$CREPO/docs/hot-b.md"; dead 10 hc > "$CREPO/docs/hot-c.md"
+git -C "$CREPO" add -A; git -C "$CREPO" commit -q -m docs
+rc="$(plan_rc --mode slice --prev-notes "$TMP/none.txt" --repo "$CREPO" --now "$NOW" --out "$TMP/pc1")"
+assert_eq "six paired by score, then hot-a and hot-b; hot-c is cut by the cap of 8" "docs/d9.md docs/d8.md docs/d7.md docs/d6.md docs/d5.md docs/d4.md docs/hot-a.md docs/hot-b.md" "$(joined "$TMP/pc1/docs.txt")"
+assert_eq "docs=8" "8" "$(field docs)"
+
+echo "plan docs.txt: the docs go where the slice goes"
+rc="$(plan_rc --mode landings --landings "$LANDINGS" --prev-notes "$TMP/none.txt" --now "$NOW" --out "$TMP/pl1")"
+assert_eq "landings mode: no docs" "0" "$(field docs)"
+assert_eq "landings mode: docs.txt empty" "0" "$(wc -c < "$TMP/pl1/docs.txt" | tr -d ' ')"
+rc="$(plan_rc --mode both --landings "$LANDINGS" --prev-notes "$TMP/n2.txt" --repo "$PREPO" --slice 3 --now "$NOW" --out "$TMP/pl2")"
+assert_eq "both mode on a quiet day: no slice, no docs" "true/0/0" "$(field quiet)/$(field slice_files)/$(field docs)"
+rc="$(plan_rc --mode both --landings "$LANDINGS" --prev-notes "$TMP/none.txt" --repo "$PREPO" --slice 3 --now "$NOW" --out "$TMP/pl3")"
+assert_eq "both mode with landings: the same docs as slice mode" "README.md docs/p1.md docs/q.md docs/p3.md docs/p2.md" "$(joined "$TMP/pl3/docs.txt")"
+rc="$(plan_rc --landings "$LANDINGS" --prev-notes "$TMP/none.txt" --repo "$REPO" --now "$NOW" --out "$TMP/pl4")"
+assert_eq "a tree with no living docs plans none" "0" "$(field docs)"
 
 echo ""
 echo "passed: $PASS failed: $FAIL"
