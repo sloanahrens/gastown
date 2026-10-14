@@ -294,6 +294,17 @@ build_slice() {
   awk -v today="$today" '{ print "reviewed: " today " " $0 }' "$out/slice.txt" > "$out/reviewed-lines.txt"
 }
 
+# help_commands TOOL OUT: writes $OUT/TOOL-cmds.txt, the top-level subcommands
+# TOOL --help lists. Empty when no doc cites TOOL, when it is not on PATH or
+# when its help lists nothing, and then the audit does not judge its commands.
+help_commands() {
+  local tool="$1" out="$2"
+  : > "$out/$tool-cmds.txt"
+  awk -F'\t' -v t="$tool" '$2 == "c" { split($3, a, " "); if (a[1] == t) f = 1 } END { exit !f }' "$out/doc-refs.tsv" || return 0
+  command -v "$tool" >/dev/null 2>&1 || return 0
+  { "$tool" --help 2>&1 || true; } | awk '/^  [a-z][a-z0-9_-]* +[^ ]/ { print $1 }' | LC_ALL=C sort -u > "$out/$tool-cmds.txt"
+}
+
 # build_docs_audit REPO REF NOW OUT: writes $OUT/docs-audit.txt, one line per
 # living doc, "<score> <doc> dead_paths=<n> dead_cmds=<n> code_changed=<n>",
 # highest score first, ties by path. $OUT/doc-refs.tsv (doc, p|c, value) is the
@@ -351,15 +362,8 @@ build_docs_audit() {
     }
   ' "$out/doc-text.txt" > "$out/doc-refs.tsv"
 
-  # A binary that is not on PATH, or prints no command list, is not judged.
-  for tool in gt bd; do
-    : > "$out/$tool-cmds.txt"
-    awk -F'\t' -v t="$tool" '$2 == "c" { split($3, a, " "); if (a[1] == t) f = 1 } END { exit !f }' "$out/doc-refs.tsv" || continue
-    command -v "$tool" >/dev/null 2>&1 || continue
-    { "$tool" --help 2>&1 || true; } | awk '/^  [a-z][a-z0-9_-]* +[^ ]/ { print $1 }' | LC_ALL=C sort -u > "$out/$tool-cmds.txt"
-    [ -s "$out/$tool-cmds.txt" ] || continue
-    if [ "$tool" = gt ]; then have_gt=1; else have_bd=1; fi
-  done
+  help_commands gt "$out"; [ ! -s "$out/gt-cmds.txt" ] || have_gt=1
+  help_commands bd "$out"; [ ! -s "$out/bd-cmds.txt" ] || have_bd=1
 
   since="$(jq -n -r --arg now "$now" "$JQ_TS"'(($now | ts)[0] - '"$DOC_HISTORY_DAYS"' * 86400) | todate')"
   git -C "$repo" log --since="$since" --name-only --format=@%H "$ref" > "$out/doc-history.txt" \
