@@ -78,6 +78,18 @@ func TestHandBack_OpensClearsLabelsAndComments(t *testing.T) {
 	}
 }
 
+func TestHandBackNoted_AppendsTheNoteToTheComment(t *testing.T) {
+	t.Parallel()
+	w := &fakeBeadWriter{}
+	if err := HandBackNoted(context.Background(), w, "gt-abc", stoppedSeat, "b1", time.Minute, "Worktree not checkpointed."); err != nil {
+		t.Fatalf("HandBackNoted: %v", err)
+	}
+	comment := w.calls[len(w.calls)-1]
+	if !strings.HasSuffix(comment, " Worktree not checkpointed.") || !strings.Contains(comment, "work kept on branch b1") {
+		t.Errorf("comment = %q, want the standard text then the note", comment)
+	}
+}
+
 // A repeated hand-back reads the bead first: one that was closed, or slung to
 // another polecat after a partial first hand-back, is left alone, while the
 // half-released bead (open, unassigned) is finished.

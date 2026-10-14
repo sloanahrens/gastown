@@ -190,7 +190,7 @@ func TestStop_FailedCheckpointRetriesWithoutRepeatingEarlierSteps(t *testing.T) 
 	if !reflect.DeepEqual(f.calls, want) {
 		t.Fatalf("calls = %q, want %q (no hand-back past a failed checkpoint)", f.calls, want)
 	}
-	if !strings.Contains(buf.String(), "checkpoint failed: git busy") {
+	if !strings.Contains(buf.String(), "checkpoint failed (1 of 5): git busy") {
 		t.Errorf("log lacks the checkpoint failure:\n%s", buf.String())
 	}
 
@@ -541,7 +541,7 @@ func TestStop_RefusedCheckpointKeepsTheStopPendingAndIsRetried(t *testing.T) {
 	if len(f.handedBack) != 0 {
 		t.Fatalf("handed back past a refused checkpoint: %q", f.handedBack)
 	}
-	if !strings.Contains(buf.String(), "checkpoint failed: checkpoint refused") {
+	if !strings.Contains(buf.String(), "checkpoint failed (1 of 5): checkpoint refused") {
 		t.Errorf("log lacks the refusal:\n%s", buf.String())
 	}
 	if st, _ := readOverrunState(d.config.TownRoot, "gt-aaa11"); !st.CheckpointedAt.IsZero() || !st.StoppedAt.IsZero() {
@@ -553,6 +553,93 @@ func TestStop_RefusedCheckpointKeepsTheStopPendingAndIsRetried(t *testing.T) {
 	d.runOverrunGuard(f.seams())
 	if len(f.handedBack) != 1 {
 		t.Errorf("hand-backs after the retried checkpoint = %q, want one", f.handedBack)
+	}
+}
+
+// A checkpoint refused on every tick is bounded (gt-98rlt): after
+// overrunCheckpointMaxAttempts the bead is handed back with a note, the pause
+// stays down so the worktree is not reused, and the stop does not run again.
+func TestStop_PersistentlyRefusedCheckpointIsGivenUpOnAndHandedBack(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	f := newOverrunFake(22*time.Minute, stopSeat)
+	f.failOn = map[string]error{"checkpoint": errors.New("checkpoint refused; uncommitted work may remain in the worktree")}
+
+	for i := 1; i < overrunCheckpointMaxAttempts; i++ {
+		d.runOverrunGuard(f.seams())
+		if len(f.handedBack) != 0 {
+			t.Fatalf("tick %d: handed back before the cap: %q", i, f.handedBack)
+		}
+		f.seats = nil
+		f.now = f.now.Add(time.Minute)
+	}
+	f.calls = nil
+	d.runOverrunGuard(f.seams())
+
+	want := []string{"recheck gastown/capable", "checkpoint gastown/capable", "hand-back gastown/capable"}
+	if !reflect.DeepEqual(f.calls, want) {
+		t.Fatalf("calls at the cap = %q, want %q (no clear-pause: the seat stays parked)", f.calls, want)
+	}
+	if len(f.handedBack) != 1 || len(f.handBackNotes) != 1 {
+		t.Fatalf("hand-backs = %q notes = %q, want one each", f.handedBack, f.handBackNotes)
+	}
+	for _, w := range []string{"could not be checkpointed", "5 attempts", "gastown/capable stays paused", "gt agent resume"} {
+		if !strings.Contains(f.handBackNotes[0], w) {
+			t.Errorf("hand-back note %q lacks %q", f.handBackNotes[0], w)
+		}
+	}
+	if !strings.Contains(buf.String(), "giving up on the checkpoint") {
+		t.Errorf("log lacks the give-up line:\n%s", buf.String())
+	}
+	st, _ := readOverrunState(d.config.TownRoot, "gt-aaa11")
+	if st.StoppedAt.IsZero() || !st.CheckpointedAt.IsZero() || !st.CheckpointGaveUp {
+		t.Errorf("state %+v, want stopped, not checkpointed, gave up", st)
+	}
+
+	f.calls = nil
+	f.now = f.now.Add(time.Minute)
+	d.runOverrunGuard(f.seams())
+	if len(f.calls) != 0 || len(f.handedBack) != 1 {
+		t.Errorf("a finished stop ran again: calls %q hand-backs %q", f.calls, f.handedBack)
+	}
+}
+
+// A seat taken back before the cap is never handed back, however many
+// checkpoints had failed: the give-up path sits behind the same re-check.
+func TestStop_TakenBackSeatIsNotHandedBackAtTheCap(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	f := newOverrunFake(22*time.Minute, stopSeat)
+	f.failOn = map[string]error{"checkpoint": errors.New("git busy")}
+	for i := 1; i < overrunCheckpointMaxAttempts; i++ {
+		d.runOverrunGuard(f.seams())
+		f.seats = nil
+		f.now = f.now.Add(time.Minute)
+	}
+	f.lapsed = "a session is running on the seat"
+	f.calls = nil
+	d.runOverrunGuard(f.seams())
+	if len(f.handedBack) != 0 || !reflect.DeepEqual(f.calls, []string{"recheck gastown/capable"}) {
+		t.Errorf("calls %q hand-backs %q, want only the re-check", f.calls, f.handedBack)
+	}
+}
+
+// Failures short of the cap that end in a good checkpoint hand the bead back
+// with no note and release the seat as before.
+func TestStop_CheckpointThatRecoversHandsBackWithoutANote(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	f := newOverrunFake(22*time.Minute, stopSeat)
+	f.failOn = map[string]error{"checkpoint": errors.New("git busy")}
+	d.runOverrunGuard(f.seams())
+	f.seats, f.calls, f.failOn = nil, nil, nil
+	f.now = f.now.Add(time.Minute)
+	d.runOverrunGuard(f.seams())
+	if len(f.handBackNotes) != 1 || f.handBackNotes[0] != "" {
+		t.Errorf("notes = %q, want one empty note", f.handBackNotes)
+	}
+	if got := f.calls[len(f.calls)-1]; got != "clear-pause gastown/capable" {
+		t.Errorf("last call %q, want the pause cleared", got)
 	}
 }
 

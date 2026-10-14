@@ -74,13 +74,14 @@ type overrunSeams struct {
 	// The stop's side effects, called in this order by overrunStop:
 	// pause writes the seat's pause marker, stopSession ends its session,
 	// checkpoint commits its worktree, handBack returns its bead to the pool
-	// after elapsed. clearPause removes the marker again when the session
+	// after elapsed, with note added to its comment (empty unless the stop gave
+	// up on the checkpoint). clearPause removes the marker again when the session
 	// would not stop.
 	pause       func(seat overrunSeat) error
 	clearPause  func(seat overrunSeat) error
 	stopSession func(seat overrunSeat) error
 	checkpoint  func(seat overrunSeat) error
-	handBack    func(seat overrunSeat, elapsed time.Duration) error
+	handBack    func(seat overrunSeat, elapsed time.Duration, note string) error
 
 	// stopLapsed re-reads, before a resumed stop runs its checkpoint or
 	// hand-back, whether the stop still owns the seat. It returns why not

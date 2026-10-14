@@ -45,7 +45,12 @@ const (
 // submitted (gt done running, or gt:ready-to-land) is not stopped, and a bead
 // that gained gt:ready-to-land mid-stop is not handed back.
 //
-// A refused checkpoint fails step 3. A stop resumed past step 2 first checks
+// A refused checkpoint fails step 3 and is retried once per tick. After
+// overrunCheckpointMaxAttempts failures the stop gives up on it: step 4 runs
+// with a note in the comment that the worktree may hold uncommitted work, and
+// step 5 is skipped, so the seat stays paused (and the worktree unreused)
+// until an operator looks. The hand-back's needs-split label raises the
+// attention item. A stop resumed past step 2 first checks
 // the pause is still down and no session runs on the seat; if not, the seat
 // was taken back and the stop ends without a hand-back.
 //
@@ -139,14 +144,28 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	}
 
 	// 3. Checkpoint the worktree.
-	if st.CheckpointedAt.IsZero() {
+	if st.CheckpointedAt.IsZero() && !st.CheckpointGaveUp {
 		if err := s.checkpoint(seat); err != nil {
-			d.logger.Printf("overrun_guard: stop %s on %s: checkpoint failed: %v", who, st.Bead, err)
-			return
-		}
-		st.CheckpointedAt = now
-		if !save() {
-			return
+			st.CheckpointFailures++
+			d.logger.Printf("overrun_guard: stop %s on %s: checkpoint failed (%d of %d): %v",
+				who, st.Bead, st.CheckpointFailures, overrunCheckpointMaxAttempts, err)
+			if st.CheckpointFailures < overrunCheckpointMaxAttempts {
+				save()
+				return
+			}
+			// The refusal has outlasted every retry and nothing changes the
+			// worktree while the seat is stopped: hand the bead back without it.
+			st.CheckpointGaveUp = true
+			if !save() {
+				return
+			}
+			d.logger.Printf("overrun_guard: stop %s on %s: giving up on the checkpoint; handing the bead back without it",
+				who, st.Bead)
+		} else {
+			st.CheckpointedAt = now
+			if !save() {
+				return
+			}
 		}
 	}
 
@@ -165,8 +184,26 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	}
 	handed := seat
 	handed.Bead, handed.Branch = st.Bead, branch
-	if err := s.handBack(handed, elapsed); err != nil {
+	note := ""
+	if st.CheckpointGaveUp {
+		note = fmt.Sprintf("The worktree could not be checkpointed after %d attempts and may hold uncommitted work; "+
+			"it is left as it was, and %s stays paused until an operator checks it and runs gt agent resume.",
+			st.CheckpointFailures, who)
+	}
+	if err := s.handBack(handed, elapsed, note); err != nil {
 		d.logger.Printf("overrun_guard: stop %s on %s: hand-back failed: %v", who, st.Bead, err)
+		return
+	}
+	if st.CheckpointGaveUp {
+		// 5 is skipped: the park is what keeps the name, and the worktree
+		// under it, from taking new work while it holds uncommitted state.
+		st.StoppedAt = now
+		if !save() {
+			d.logger.Printf("overrun_guard: WARNING: %s: %s handed back but state not saved — the hand-back will be repeated", who, st.Bead)
+			return
+		}
+		d.logger.Printf("overrun_guard: stopped %s on %s after %s; bead handed back without a checkpoint (branch %s and worktree kept, seat left paused)",
+			who, st.Bead, elapsed.Round(time.Second), branch)
 		return
 	}
 	// 5. Release the seat. The bead no longer names it, so nothing restarts it
@@ -230,13 +267,13 @@ func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 		return nil
 	}
 	s.stopLapsed = d.overrunStopLapsed
-	s.handBack = func(seat overrunSeat, elapsed time.Duration) error {
+	s.handBack = func(seat overrunSeat, elapsed time.Duration, note string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), overrunHandBackTimeout)
 		defer cancel()
 		store := beads.NewPlain(d.config.TownRoot, bdMutationRoutingEnv(d.config.TownRoot),
 			beads.WithBin(d.bdPathOrDefault())).WithTimeout(overrunHandBackTimeout)
-		err := polecat.HandBack(ctx, polecat.NewBeadWriter(store, overrunActor), seat.Bead,
-			seat.Rig+"/polecats/"+seat.Polecat, seat.Branch, elapsed)
+		err := polecat.HandBackNoted(ctx, polecat.NewBeadWriter(store, overrunActor), seat.Bead,
+			seat.Rig+"/polecats/"+seat.Polecat, seat.Branch, elapsed, note)
 		if errors.Is(err, polecat.ErrHandBackSkipped) {
 			// The bead is no longer this seat's: nothing to release, nothing to repeat.
 			d.logger.Printf("overrun_guard: %s/%s: %v", seat.Rig, seat.Polecat, err)

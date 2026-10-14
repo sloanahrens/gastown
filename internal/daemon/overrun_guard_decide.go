@@ -52,6 +52,11 @@ const (
 	// overrunNudgeMaxAttempts is how many nudges the guard tries per sling
 	// before it gives up on the nudge. The stop never depends on it.
 	overrunNudgeMaxAttempts = 3
+	// overrunCheckpointMaxAttempts is how many failed checkpoints a stop
+	// tolerates, one per tick, before it hands the bead back without one. A
+	// refusal such as a mid-rebase worktree does not clear while the seat is
+	// stopped, so retrying past a few ticks only keeps the bead on a dead seat.
+	overrunCheckpointMaxAttempts = 5
 )
 
 // nudgeFailures is how many nudges have failed for the sling at slung.
@@ -101,7 +106,14 @@ type overrunState struct {
 	StopBeganAt      time.Time `json:"stop_began_at,omitzero"`
 	SessionStoppedAt time.Time `json:"session_stopped_at,omitzero"`
 	CheckpointedAt   time.Time `json:"checkpointed_at,omitzero"`
-	StoppedAt        time.Time `json:"stopped_at,omitzero"`
+
+	// CheckpointFailures counts the checkpoint attempts that failed in this
+	// stop. At overrunCheckpointMaxAttempts the stop hands the bead back
+	// without a checkpoint and sets CheckpointGaveUp, so a worktree that
+	// refuses every attempt does not hold the bead for good.
+	CheckpointFailures int       `json:"checkpoint_failures,omitempty"`
+	CheckpointGaveUp   bool      `json:"checkpoint_gave_up,omitempty"`
+	StoppedAt          time.Time `json:"stopped_at,omitzero"`
 }
 
 // overrunStatePath is <town>/.runtime/overrun-guard/<bead>.json. A bead id

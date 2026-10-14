@@ -87,6 +87,8 @@ type overrunFake struct {
 	failOn map[string]error
 	// handedBack lists the beads handBack received, with the branch it was given.
 	handedBack []string
+	// handBackNotes lists the note each handBack call carried, in the same order.
+	handBackNotes []string
 
 	// submitted is what the submittedNow re-check answers from the start;
 	// readyAfterStop makes it answer true once the session has been stopped,
@@ -136,11 +138,12 @@ func (f *overrunFake) seams() overrunSeams {
 			f.calls = append(f.calls, "recheck "+seat.Rig+"/"+seat.Polecat)
 			return f.lapsed, f.lapsedErr
 		},
-		handBack: func(seat overrunSeat, elapsed time.Duration) error {
+		handBack: func(seat overrunSeat, elapsed time.Duration, note string) error {
 			if err := f.step("hand-back", seat); err != nil {
 				return err
 			}
 			f.handedBack = append(f.handedBack, seat.Bead+" "+seat.Branch+" "+elapsed.String())
+			f.handBackNotes = append(f.handBackNotes, note)
 			return nil
 		},
 	}
