@@ -77,6 +77,12 @@ const scheduledSlingFailureMarker = "scheduled_slings-sling-failed"
 // scheduledSlingFailureReason is what the patrol records on such a bead.
 const scheduledSlingFailureReason = scheduledSlingFailureMarker + ": gt sling failed; the patrol retries on the next tick"
 
+// scheduledSlingStalledReason is what the patrol records on a run bead it
+// created but no sling ever hooked, once the bead outlived the sling budget
+// (gt-g16z2). The failure marker keeps it read as "no run happened": any other
+// reason would gate the interval as a completed run and suppress the entry.
+const scheduledSlingStalledReason = scheduledSlingFailureMarker + ": the run bead stayed open and unhooked past the sling budget; the patrol retries on the next tick"
+
 // isFailedScheduledRun reports whether a closed run bead records a sling that
 // never started. The reason is matched by prefix because bd may normalize or
 // truncate close reasons.
@@ -87,8 +93,9 @@ func isFailedScheduledRun(b scheduledBead) bool {
 type scheduledAction int
 
 const (
-	scheduledSkipOpen   scheduledAction = iota // a run is in flight or its MR is queued
-	scheduledSkipRecent                        // the newest run started less than an interval ago
+	scheduledSkipOpen     scheduledAction = iota // a run is in flight or its MR is queued
+	scheduledSkipRecent                          // the newest run started less than an interval ago
+	scheduledRecoverStale                        // an unhooked run bead outlived the sling budget
 	scheduledDispatch
 )
 
@@ -98,32 +105,69 @@ func (a scheduledAction) String() string {
 		return "skip-open"
 	case scheduledSkipRecent:
 		return "skip-recent"
+	case scheduledRecoverStale:
+		return "recover-stale"
 	default:
 		return "dispatch"
 	}
 }
 
+// scheduledDecision is one tick's verdict for an entry: the action, and the
+// run beads a stale-action has to retire.
+type scheduledDecision struct {
+	action scheduledAction
+	// stale holds every open, unhooked run bead past staleAfter. Only
+	// scheduledRecoverStale sets it.
+	stale []scheduledBead
+}
+
+// isOpenUnhooked reports whether the bead records a run that was created but
+// never started. gt sling moves the bead to hooked before it spawns the
+// polecat, so "open" is the only status such a bead has.
+func isOpenUnhooked(b scheduledBead) bool { return b.Status == string(beads.StatusOpen) }
+
 // decideScheduledSling is pure: the beads carrying the entry's label, the
-// entry's interval, and now. Any open bead wins over recency so a run whose
-// MR is still in the queue is never doubled. A run that failed to sling is
-// neither: it never started, so it must not block the retry.
-func decideScheduledSling(beads []scheduledBead, interval time.Duration, now time.Time) scheduledAction {
-	var newest time.Time
+// entry's interval, the age past which an open run bead is a leftover rather
+// than a sling in progress (staleAfter), and now. Any bead that could still be
+// a live run wins over recency, so a run whose MR is still in the queue is
+// never doubled. A run that failed to sling is neither: it never started, so
+// it must not block the retry. Neither is an unhooked bead past staleAfter,
+// which nothing is left to hook (see retireStalledScheduledRuns); reading that
+// one as skip-open would reset the failure counter that exists to escalate it.
+func decideScheduledSling(beads []scheduledBead, interval, staleAfter time.Duration, now time.Time) scheduledDecision {
+	var (
+		newest time.Time
+		stale  []scheduledBead
+	)
 	for _, b := range beads {
 		if isFailedScheduledRun(b) {
 			continue
 		}
 		if b.Status != "closed" {
-			return scheduledSkipOpen
+			// A bead with no readable created_at has no age to judge, and a
+			// duplicate run costs more than a stalled one, so it counts as a
+			// run in flight. A zero staleAfter is the same answer, so a caller
+			// that passes none recovers nothing rather than closing live runs.
+			if isOpenUnhooked(b) && !b.CreatedAt.IsZero() && staleAfter > 0 && now.Sub(b.CreatedAt) > staleAfter {
+				stale = append(stale, b)
+				continue
+			}
+			return scheduledDecision{action: scheduledSkipOpen}
 		}
 		if b.CreatedAt.After(newest) {
 			newest = b.CreatedAt
 		}
 	}
-	if !newest.IsZero() && now.Sub(newest) < interval {
-		return scheduledSkipRecent
+	if len(stale) > 0 {
+		// The beads must be retired before the entry can run again, and they
+		// cannot be dispatched around: dispatching now would put a second run
+		// beside a bead that is still open.
+		return scheduledDecision{action: scheduledRecoverStale, stale: stale}
 	}
-	return scheduledDispatch
+	if !newest.IsZero() && now.Sub(newest) < interval {
+		return scheduledDecision{action: scheduledSkipRecent}
+	}
+	return scheduledDecision{action: scheduledDispatch}
 }
 
 // parseScheduledBeads reads `bd list --json` output. created_at stays a string
@@ -343,7 +387,9 @@ func (d *Daemon) runScheduledSlings() {
 // scheduledRunMayHaveStarted reports whether a run bead whose sling timed out
 // is past "open": gt sling hooks the bead before it spawns the polecat. A bead
 // that cannot be read counts as started, since a duplicate run costs more than
-// a stalled one that the failure count surfaces.
+// a stalled one — and a stalled one is not silent either: left open and
+// unhooked past scheduledStaleRunAfter it is retired as a failed run on a later
+// tick (gt-g16z2), so erring toward "started" costs the entry a tick.
 func (d *Daemon) scheduledRunMayHaveStarted(ctx context.Context, r scheduledSlingRunner, e ScheduledSlingEntry, id string) bool {
 	// The sling's own context is spent; look again on a fresh one.
 	lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledSlingLookupTimeout)
@@ -368,9 +414,12 @@ func (d *Daemon) runScheduledSlingEntry(ctx context.Context, e ScheduledSlingEnt
 	if err != nil {
 		return err
 	}
-	action := decideScheduledSling(beadsForLabel, scheduledSlingInterval(e), now)
-	if action != scheduledDispatch {
-		d.logger.Printf("scheduled_slings: %s: %s", e.Name, action)
+	plan := decideScheduledSling(beadsForLabel, scheduledSlingInterval(e), d.scheduledStaleRunAfter(), now)
+	if plan.action == scheduledRecoverStale {
+		return d.retireStalledScheduledRuns(ctx, r, e, plan.stale, now)
+	}
+	if plan.action != scheduledDispatch {
+		d.logger.Printf("scheduled_slings: %s: %s", e.Name, plan.action)
 		return nil
 	}
 	// A gated or failed gate is not a failed run: no bead exists, the sling
@@ -415,4 +464,41 @@ func (d *Daemon) scheduledSlingBudget() time.Duration {
 		return d.scheduledSlingTimeout
 	}
 	return scheduledSlingCommandTimeout
+}
+
+// scheduledStaleRunAfter is how long a run bead may stay open and unhooked
+// before the patrol reads it as a run that never started: one sling budget,
+// the longest a `gt sling` that created it can still be running, plus one tick,
+// the patrol's next chance to see how that sling ended.
+func (d *Daemon) scheduledStaleRunAfter() time.Duration {
+	return d.scheduledSlingBudget() + scheduledSlingsTickInterval
+}
+
+// retireStalledScheduledRuns failure-closes run beads that were created but
+// never hooked and outlived the sling budget, and reports the recovery as an
+// error so this tick counts toward the escalation. Nothing else closes them,
+// so without this a leftover from a daemon that died between creating a bead
+// and slinging it reads as skip-open on every later tick: the entry reports
+// success, its failure counter resets, and it stays dead until an operator
+// closes the bead by hand (gt-g16z2).
+func (d *Daemon) retireStalledScheduledRuns(ctx context.Context, r scheduledSlingRunner, e ScheduledSlingEntry, stale []scheduledBead, now time.Time) error {
+	for _, b := range stale {
+		age := now.Sub(b.CreatedAt).Round(time.Second)
+		d.logger.Printf("scheduled_slings: %s: run %s was created but no sling hooked it within %s (budget %s); retiring it as a failed run so the next tick retries",
+			e.Name, b.ID, age, d.scheduledStaleRunAfter())
+		if err := r.closeBead(ctx, e.Rig, b.ID, scheduledSlingStalledReason); err != nil {
+			return fmt.Errorf("run bead %s stayed open and unhooked for %s and could not be retired: %w", b.ID, age, err)
+		}
+	}
+	return fmt.Errorf("run bead(s) %s left open and unhooked past the %s sling budget; retired as failed runs so the next tick retries",
+		staleRunIDs(stale), d.scheduledStaleRunAfter())
+}
+
+// staleRunIDs is the retired beads' ids, for the failure message.
+func staleRunIDs(stale []scheduledBead) string {
+	ids := make([]string, 0, len(stale))
+	for _, b := range stale {
+		ids = append(ids, b.ID)
+	}
+	return strings.Join(ids, ", ")
 }

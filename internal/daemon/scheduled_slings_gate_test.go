@@ -157,7 +157,7 @@ func TestScheduledGate_NoGateCommandNeverAsks(t *testing.T) {
 
 func TestScheduledGate_SkippedRunsNeverAskTheGate(t *testing.T) {
 	t.Parallel()
-	open := []scheduledBead{{ID: "gt-old", Status: "open", CreatedAt: scheduledGateNow.Add(-time.Hour)}}
+	open := []scheduledBead{{ID: "gt-old", Status: "open", CreatedAt: scheduledGateNow.Add(-time.Minute)}}
 	f := &fakeScheduledRunner{beads: open, now: scheduledGateNow}
 	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{gatedEntry}, f)
 	if err := d.runScheduledSlingEntry(context.Background(), gatedEntry, scheduledGateNow); err != nil {
