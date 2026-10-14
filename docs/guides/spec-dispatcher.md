@@ -128,6 +128,14 @@ usage attribution and the overrun guard's scheduled-bead exemption still see a
 scheduled run. `gt spec dispatch --dry-run` and the dispatched line print
 `, formula <name>` after the seat.
 
+A scheduled sling entry with `"dispatch": "spec"` in `daemon.json` hands its due
+run to this dispatcher (gt-z5g3c): the `scheduled_slings` patrol creates one
+shaped, report-only bead labeled `scheduled:<name>` and `formula:<formula>`, with
+the entry's `vars` sorted in a `## Formula vars` section, and does not sling. The
+entry must leave `agent` empty, since the dispatcher picks the seat. The open
+bead is the queue: the entry's skip-open rule holds the next run, and the patrol
+never retires it as stalled however long a full pool keeps it waiting.
+
 ## Seats and budget
 
 A seat is one agent with its own cap. Every agent runs the claude CLI with the

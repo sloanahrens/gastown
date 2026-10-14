@@ -174,6 +174,7 @@ type fakeScheduledRunner struct {
 	beads     []scheduledBead
 	listErr   error
 	created   []string // bead titles, in order
+	runs      []scheduledRunBead
 	createID  string
 	createErr error
 	slungIDs  []string
@@ -237,8 +238,9 @@ func (f *fakeScheduledRunner) listBeads(_ context.Context, _, _ string) ([]sched
 	return f.beads, f.listErr
 }
 
-func (f *fakeScheduledRunner) createBead(_ context.Context, _, title, _, _ string, _ int) (string, error) {
-	f.created = append(f.created, title)
+func (f *fakeScheduledRunner) createBead(_ context.Context, _ string, run scheduledRunBead) (string, error) {
+	f.created = append(f.created, run.Title)
+	f.runs = append(f.runs, run)
 	if f.createErr != nil {
 		return "", f.createErr
 	}
@@ -533,7 +535,7 @@ func TestExecScheduledSlingRunner_CreatesAndClosesRunBeads(t *testing.T) {
 	r := &execScheduledSlingRunner{townRoot: t.TempDir(), gtPath: "gt", open: func(string) beads.Client { return rig }}
 	ctx := context.Background()
 
-	id, err := r.createBead(ctx, "gastown", "doc audit", "scheduled:doc-audit", "run body", 3)
+	id, err := r.createBead(ctx, "gastown", scheduledRunBead{Title: "doc audit", Labels: []string{"scheduled:doc-audit"}, Description: "run body", Priority: 3})
 	if err != nil {
 		t.Fatalf("createBead: %v", err)
 	}

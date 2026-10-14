@@ -32,6 +32,9 @@ func scheduledSlingValidate(e ScheduledSlingEntry) error {
 	if err != nil || d <= 0 {
 		return fmt.Errorf("scheduled_slings[%s]: interval %q must be a positive Go duration", e.Name, e.IntervalStr)
 	}
+	if err := scheduledSlingValidateDispatch(e); err != nil {
+		return err
+	}
 	if e.GateTimeoutStr != "" {
 		if gt, err := time.ParseDuration(e.GateTimeoutStr); err != nil || gt <= 0 {
 			return fmt.Errorf("scheduled_slings[%s]: gate_timeout %q must be a positive Go duration", e.Name, e.GateTimeoutStr)
@@ -192,7 +195,7 @@ func scheduledBeadsOf(issues []*beads.Issue) []scheduledBead {
 // sling, and the close that retires a run whose sling failed.
 type scheduledSlingRunner interface {
 	listBeads(ctx context.Context, rig, label string) ([]scheduledBead, error)
-	createBead(ctx context.Context, rig, title, label, description string, priority int) (string, error)
+	createBead(ctx context.Context, rig string, run scheduledRunBead) (string, error)
 	sling(ctx context.Context, beadID string, e ScheduledSlingEntry) error
 	closeBead(ctx context.Context, rig, beadID, reason string) error
 	// runGate runs the entry's gate_command under ctx's deadline and returns
@@ -242,8 +245,8 @@ func (r *execScheduledSlingRunner) closeBead(_ context.Context, rig, beadID, rea
 	return r.store(rig).CloseWithReason(reason, beadID)
 }
 
-func (r *execScheduledSlingRunner) createBead(_ context.Context, rig, title, label, description string, priority int) (string, error) {
-	issue, err := r.store(rig).Create(beads.CreateOptions{Title: title, Labels: []string{label}, Priority: priority, Description: description})
+func (r *execScheduledSlingRunner) createBead(_ context.Context, rig string, run scheduledRunBead) (string, error) {
+	issue, err := r.store(rig).Create(beads.CreateOptions{Title: run.Title, Labels: run.Labels, Priority: run.Priority, Description: run.Description, Acceptance: run.Acceptance})
 	if err != nil {
 		return "", err
 	}
@@ -414,7 +417,14 @@ func (d *Daemon) runScheduledSlingEntry(ctx context.Context, e ScheduledSlingEnt
 	if err != nil {
 		return err
 	}
-	plan := decideScheduledSling(beadsForLabel, scheduledSlingInterval(e), d.scheduledStaleRunAfter(), now)
+	// A spec-dispatched run bead is open and unhooked for as long as the
+	// dispatcher queues it, so the sling budget says nothing about its age: a
+	// zero staleAfter recovers nothing and a queued run stays skip-open.
+	staleAfter := d.scheduledStaleRunAfter()
+	if e.Dispatch == scheduledDispatchSpec {
+		staleAfter = 0
+	}
+	plan := decideScheduledSling(beadsForLabel, scheduledSlingInterval(e), staleAfter, now)
 	if plan.action == scheduledRecoverStale {
 		return d.retireStalledScheduledRuns(ctx, r, e, plan.stale, now)
 	}
@@ -432,8 +442,11 @@ func (d *Daemon) runScheduledSlingEntry(ctx context.Context, e ScheduledSlingEnt
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), d.scheduledSlingBudget())
 	defer cancel()
 	title := fmt.Sprintf("%s %s", e.Name, now.UTC().Format("2006-01-02"))
+	if e.Dispatch == scheduledDispatchSpec {
+		return d.createSpecDispatchedRun(ctx, r, e, title)
+	}
 	desc := fmt.Sprintf("Scheduled run of formula %s on rig %s, created by the daemon's scheduled_slings patrol. Label %s is the run's identity; while this bead is open no second run is dispatched.", e.Formula, e.Rig, scheduledSlingLabel(e))
-	id, err := r.createBead(ctx, e.Rig, title, scheduledSlingLabel(e), desc, scheduledSlingPriority(e))
+	id, err := r.createBead(ctx, e.Rig, scheduledRunBead{Title: title, Labels: []string{scheduledSlingLabel(e)}, Description: desc, Priority: scheduledSlingPriority(e)})
 	if err != nil {
 		return err
 	}

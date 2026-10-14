@@ -609,6 +609,14 @@ type ScheduledSlingEntry struct {
 	Priority    int               `json:"priority,omitempty"`
 	Vars        map[string]string `json:"vars,omitempty"`
 
+	// Dispatch says who runs a due run. Empty means the scheduler slings the
+	// run bead itself, to Agent. "spec" means the scheduler only creates the
+	// shaped bead, labeled scheduled:<name> and formula:<formula> with Vars in
+	// a "## Formula vars" section, and the spec dispatcher picks the seat, the
+	// queue position and the moment: a full pool is a wait, not a failed sling.
+	// The dispatcher chooses the seat, so Agent must be empty with "spec".
+	Dispatch string `json:"dispatch,omitempty"`
+
 	// GateCommand is a shell command that decides whether a due run happens.
 	// The patrol runs it through `sh -c` in <town>/<rig>/mayor/rig, with
 	// GT_TOWN_ROOT and GT_SCHEDULE_NAME set, after the interval and open-run
