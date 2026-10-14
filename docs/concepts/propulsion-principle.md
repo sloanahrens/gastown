@@ -36,9 +36,9 @@ gt prime             # Shows inline formula checklist
 bd show <issue-id>   # What's my assigned issue?
 ```
 
-### The New Workflow: Inline Formula Steps
+### The Workflow: Inline Formula Steps
 
-Formula steps are shown inline at prime time — no step beads to manage:
+Formula steps are rendered inline when you prime:
 
 ```bash
 gt prime             # See your checklist
@@ -46,22 +46,13 @@ gt prime             # See your checklist
 gt done              # Submit and self-clean
 ```
 
-No step closures, no `bd mol current`, no momentum-killing transitions.
-
-**The new workflow (propulsion):**
-```bash
-bd close gt-abc.3 --continue
-```
-
-One command. Auto-advance. Momentum preserved.
-
 ### The Propulsion Loop
 
 ```
-1. gt hook                   # What's hooked?
-2. bd mol current             # Where am I?
+1. gt hook                    # What's hooked?
+2. gt prime                   # Where am I?
 3. Execute step
-4. bd close <step> --continue # Close and advance
+4. gt mol step done <step-id> # Close the step, advance to the next
 5. GOTO 2
 ```
 
