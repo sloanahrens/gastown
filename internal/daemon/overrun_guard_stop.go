@@ -45,6 +45,10 @@ const (
 // submitted (gt done running, or gt:ready-to-land) is not stopped, and a bead
 // that gained gt:ready-to-land mid-stop is not handed back.
 //
+// A refused checkpoint fails step 3. A stop resumed past step 2 first checks
+// the pause is still down and no session runs on the seat; if not, the seat
+// was taken back and the stop ends without a hand-back.
+//
 // Progress is saved after each step, so a step that fails is logged and
 // retried from the failed step on the next tick, never from the top and never
 // skipping ahead. StoppedAt is written last; with it set the stop does not run
@@ -69,6 +73,7 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	if st.StopBeganAt.IsZero() {
 		st.Rig, st.Polecat, st.Branch, st.Elapsed = seat.Rig, seat.Polecat, seat.Branch, elapsed
 	}
+	resumed := !st.SessionStoppedAt.IsZero()
 	branch := st.Branch
 	if branch == "" {
 		branch = "(unknown)"
@@ -111,6 +116,24 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 		}
 		st.SessionStoppedAt = now
 		if !save() {
+			return
+		}
+	}
+
+	// A stop resumed after its session was stopped may find the seat taken
+	// back: an operator lifted the pause, or a new session started on it.
+	// Steps 3 and 4 then act on a bead that session holds, so the stop ends.
+	if resumed && s.stopLapsed != nil {
+		why, err := s.stopLapsed(seat)
+		if err != nil {
+			d.logger.Printf("overrun_guard: stop %s on %s: cannot re-check the seat: %v", who, st.Bead, err)
+			return
+		}
+		if why != "" {
+			// StoppedAt ends the stop for this sling; the bead stays with its holder.
+			st.StoppedAt = now
+			save()
+			d.logger.Printf("overrun_guard: %s on %s: %s; abandoning the stop, bead not handed back", who, st.Bead, why)
 			return
 		}
 	}
@@ -199,9 +222,14 @@ func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 			d.logger.Printf("overrun_guard: %s/%s: no worktree to checkpoint", seat.Rig, seat.Polecat)
 			return nil
 		}
-		d.checkpointWorktree(workDir, seat.Rig, seat.Polecat)
+		// A refused checkpoint fails the step: the hand-back comment names the
+		// branch as holding the work, which dirty files alone do not.
+		if d.checkpointWorktreeOutcome(workDir, seat.Rig, seat.Polecat) == checkpointRefused {
+			return errors.New("checkpoint refused; uncommitted work may remain in the worktree")
+		}
 		return nil
 	}
+	s.stopLapsed = d.overrunStopLapsed
 	s.handBack = func(seat overrunSeat, elapsed time.Duration) error {
 		ctx, cancel := context.WithTimeout(context.Background(), overrunHandBackTimeout)
 		defer cancel()
@@ -217,6 +245,29 @@ func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 		return err
 	}
 	return s
+}
+
+// overrunStopLapsed reports why a stop that began on an earlier tick no longer
+// owns its seat: the pause marker is gone (an operator resumed the seat) or a
+// session is running on it. Either way the bead may belong to that session,
+// and handing it back would release work in progress.
+func (d *Daemon) overrunStopLapsed(seat overrunSeat) (string, error) {
+	paused, _, err := agentpause.IsPaused(d.config.TownRoot, seat.Rig, constants.RolePolecat, seat.Polecat)
+	if err != nil {
+		return "", fmt.Errorf("read pause marker: %w", err)
+	}
+	if !paused {
+		return "the pause marker is gone", nil
+	}
+	sessionName := session.PolecatSessionName(d.prefixRegistry().PrefixForRig(seat.Rig), seat.Polecat)
+	alive, err := d.tmux.HasSession(sessionName)
+	if err != nil {
+		return "", fmt.Errorf("check session %s: %w", sessionName, err)
+	}
+	if alive {
+		return "a session is running on the seat", nil
+	}
+	return "", nil
 }
 
 // overrunSubmittedNow reads the seat's submitted state fresh: a live exiting

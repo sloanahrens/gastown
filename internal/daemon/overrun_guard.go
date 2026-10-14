@@ -81,6 +81,13 @@ type overrunSeams struct {
 	stopSession func(seat overrunSeat) error
 	checkpoint  func(seat overrunSeat) error
 	handBack    func(seat overrunSeat, elapsed time.Duration) error
+
+	// stopLapsed re-reads, before a resumed stop runs its checkpoint or
+	// hand-back, whether the stop still owns the seat. It returns why not
+	// (the pause marker is gone, a session is running) or "" when it does; an
+	// error means the seat could not be read and the step is retried. nil means
+	// no re-check.
+	stopLapsed func(seat overrunSeat) (string, error)
 }
 
 // overrunGuardConfig returns the patrol's config, or nil when absent.

@@ -161,7 +161,10 @@ func (d *Daemon) scheduledGateAllows(ctx context.Context, r scheduledSlingRunner
 		return true
 	}
 	timeout := scheduledSlingGateTimeout(e)
-	gctx, cancel := context.WithTimeout(ctx, timeout)
+	// The gate's deadline is its own: under the caller's 5-minute context a
+	// longer gate_timeout would be cut short and still reported as timing out
+	// after the configured value (gt-0frud).
+	gctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 	out, runErr := r.runGate(gctx, e)
 	ctxErr := gctx.Err()
 	cancel()
