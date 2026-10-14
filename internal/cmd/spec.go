@@ -192,9 +192,10 @@ Every dispatch's sling args tell the polecat to test install paths in a
 temporary INSTALL_DIR.
 
 Budget comes from polecat_pool in settings/config.json (agent, max_seats,
-min_spawn_gap, pro_agent, pro_max, pro_label) and
-patrols.spec_dispatch in mayor/daemon.json (hooked_agent, max_hooked,
-prefer_hooked, max_per_tick).
+min_spawn_gap, pro_agent, pro_max, pro_label) and daemon.patrols.spec_dispatch
+in settings/config.json (hooked_agent, max_hooked, prefer_hooked, max_per_tick).
+A town that has not run gt config migrate still keeps that patrol block in
+mayor/daemon.json.
 The operator hold file and ESTOP stop the tick.`,
 	Args:         cobra.NoArgs,
 	SilenceUsage: true,

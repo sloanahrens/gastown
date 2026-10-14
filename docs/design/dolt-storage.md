@@ -416,13 +416,15 @@ completed or failed run resets the streak.
 `dolt_gc()` only collect the new generation. Chunks promoted to the old
 generation stay until a `--full` pass.
 
-Settings (`patrols.scheduled_maintenance` in `mayor/daemon.json`):
+Settings (`daemon.patrols.scheduled_maintenance` in `settings/config.json`):
 
 ```json
 "scheduled_maintenance": { "enabled": true, "window": "03:00" }
 ```
 
-or `gt config set maintenance.window 03:00`. The schedule and trigger are
+or `gt config set maintenance.window 03:00`. A town that has not run
+`gt config migrate` still keeps that patrol block in `mayor/daemon.json`. The
+schedule and trigger are
 policy, not settings. The retired keys (`interval`, `threshold`, `mode`,
 `gc_min_bytes`, `gc_growth_ratio`) still parse, so a daemon.json carrying
 them decodes strictly, and the daemon logs them as ignored.
