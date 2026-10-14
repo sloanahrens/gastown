@@ -450,6 +450,56 @@ func TestScanLogIsIncrementalAndSurvivesRotation(t *testing.T) {
 	}
 }
 
+// A landing pass that stops on an infrastructure failure logs no [land] line,
+// only the worker's "landing failed" line, and that line must end the merge the
+// pass began: the pane showed the bead as running beside its backoff row
+// (gt-7lcem). The lines go through scanLog, whose prefilter decides which of
+// them the parser ever sees.
+func TestScanLogEndsAMergeAtTheLandingsOutcome(t *testing.T) {
+	t.Parallel()
+	const (
+		failed     = "2026/10/12 19:58:10 landing_worker: gastown: gt-7qz2h: landing failed (1 in a row, next try in 30s): landing failed at gate: ci unreachable"
+		landed     = "2026/10/12 19:58:10 landing_worker: [land] gt-7qz2h: landed 1a2b3c4d on main"
+		rejected   = "2026/10/12 19:58:10 landing_worker: [land] gt-7qz2h: rejected (gate): the candidate gate failed"
+		otherFails = "2026/10/12 19:58:10 landing_worker: gastown: gt-7qz2h: reading the branch tip failed (1 in a row, next try in 30s): no ref"
+		otherBead  = "2026/10/12 19:58:10 landing_worker: gastown: gt-other: landing failed (1 in a row, next try in 30s): landing failed at push: refused"
+		earlier    = "2026/10/12 19:50:00 landing_worker: gastown: gt-7qz2h: landing failed (2 in a row, next try in 1m0s): landing failed at review: timeout"
+	)
+	tests := []struct {
+		name  string
+		lines []string
+		done  bool
+	}{
+		{"merge with nothing after it is running", []string{omTestMergeLine}, false},
+		{"infra failure ends the merge", []string{omTestMergeLine, failed}, true},
+		{"landed ends the merge", []string{omTestMergeLine, landed}, true},
+		{"rejection ends the merge", []string{omTestMergeLine, rejected}, true},
+		{"another stage's failure leaves the merge running", []string{omTestMergeLine, otherFails}, false},
+		{"another bead's failure leaves the merge running", []string{omTestMergeLine, otherBead}, false},
+		{"an earlier attempt's failure leaves the newer merge running", []string{omTestMergeLine, earlier}, false},
+		{"a retry's merge runs again after the failure", []string{omTestMergeLine, failed, "2026/10/12 20:01:00 landing_worker: [land] gt-7qz2h: merged 49f6dbfd onto origin/main (8d0d9b28) as 5e6f7a8b; pushing the merge candidate"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := &omReader{logPath: omTestLogFile(t, tt.lines...)}
+			if err := r.scanLog(); err != nil {
+				t.Fatal(err)
+			}
+			m, ok := r.merges["gt-7qz2h"]
+			if !ok {
+				t.Fatalf("merges = %+v, want gt-7qz2h", r.merges)
+			}
+			if m.Done != tt.done {
+				t.Errorf("Done = %v, want %v", m.Done, tt.done)
+			}
+			if got := len(r.running(time.Date(2026, 10, 12, 0, 0, 0, 0, time.Local))); got != map[bool]int{true: 0, false: 1}[tt.done] {
+				t.Errorf("running rows = %d for Done=%v", got, tt.done)
+			}
+		})
+	}
+}
+
 func TestBuildOM(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 3, 18, 0, 0, 0, time.Local)

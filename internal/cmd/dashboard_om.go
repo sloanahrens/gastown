@@ -69,7 +69,17 @@ var (
 	// than every running row.
 	omMergeRe  = regexp.MustCompile(`^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) landing_worker: \[land\] (\S+): merged (?:([0-9a-f]+) onto \S+ \(([0-9a-f]+)\) as ([0-9a-f]+))?`)
 	omLandedRe = regexp.MustCompile(`^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) landing_worker: \[land\] (\S+): (?:landed|already landed as) `)
+	// omInfraFailedRe ends a merge too. A pass that stops on an infrastructure
+	// failure (gate, review, push, merge pull request) logs no [land] line:
+	// the worker's infraFailure logs "<rig>: <bead>: landing failed (N in a
+	// row, next try in D): ..." instead, and nothing else would close the
+	// merge the pass began (gt-7lcem).
+	omInfraFailedRe = regexp.MustCompile(`^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) landing_worker: \S+: (\S+): landing failed \(`)
 )
+
+// infraFailedMarker is what the worker's line for a failed landing pass carries
+// after the bead; scanLog keeps a line that has it.
+const infraFailedMarker = ": landing failed ("
 
 const omLogTimeLayout = "2006/01/02 15:04:05"
 
@@ -555,7 +565,7 @@ func (r *omReader) scanLog() error {
 			return err
 		}
 		r.offset += int64(len(line))
-		if !strings.Contains(line, "[land]") && !strings.Contains(line, dispatchTickMarker) && !strings.Contains(line, daemonStartMarker) {
+		if !strings.Contains(line, "[land]") && !strings.Contains(line, infraFailedMarker) && !strings.Contains(line, dispatchTickMarker) && !strings.Contains(line, daemonStartMarker) {
 			continue
 		}
 		r.parseLogLine(strings.TrimRight(line, "\r\n"))
@@ -580,6 +590,12 @@ func (r *omReader) parseLogLine(line string) {
 		return
 	}
 	if m := omLandedRe.FindStringSubmatch(line); m != nil {
+		if at, err := omLogAt(m[1]); err == nil {
+			r.endMerge(m[2], at)
+		}
+		return
+	}
+	if m := omInfraFailedRe.FindStringSubmatch(line); m != nil {
 		if at, err := omLogAt(m[1]); err == nil {
 			r.endMerge(m[2], at)
 		}
