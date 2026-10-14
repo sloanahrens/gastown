@@ -34,10 +34,10 @@ type CrewStatusItem struct {
 	MailError  string `json:"mail_error,omitempty"`
 }
 
-// crewMailCounter returns the total and unread message counts for a crew
-// member's beads mailbox. It is a package var so tests can stub the mailbox
-// without a live Dolt server.
-var crewMailCounter = countCrewBeadsMail
+// crewMailCounter returns the total and unread message counts for a mailbox
+// address. Tests pass a stub in place of countCrewBeadsMail so no live Dolt
+// server is needed.
+type crewMailCounter func(address string) (total, unread int, err error)
 
 // countCrewBeadsMail counts mail through the router's beads mailbox, the same
 // store gt mail send writes to, rather than the legacy <clone>/mail inbox file.
@@ -169,8 +169,8 @@ func printCrewStatus(w io.Writer, items []CrewStatusItem, asJSON bool) error {
 // crewMailCounts reads a crew member's beads mail counts. Non-fatal: a failed
 // read returns nil counts and the error text, so the status shows the count as
 // unknown instead of a false 0.
-func crewMailCounts(rigName, crewName string) (total, unread *int, errText string) {
-	t, u, err := crewMailCounter(fmt.Sprintf("%s/crew/%s", rigName, crewName))
+func crewMailCounts(count crewMailCounter, rigName, crewName string) (total, unread *int, errText string) {
+	t, u, err := count(fmt.Sprintf("%s/crew/%s", rigName, crewName))
 	if err != nil {
 		return nil, nil, err.Error()
 	}
@@ -219,7 +219,7 @@ func buildCrewStatusItems(reg *session.PrefixRegistry, r *rig.Rig, workers []*cr
 			untracked = gitStatus.Untracked
 		}
 
-		mailTotal, mailUnread, mailErr := crewMailCounts(r.Name, w.Name)
+		mailTotal, mailUnread, mailErr := crewMailCounts(countCrewBeadsMail, r.Name, w.Name)
 
 		item := CrewStatusItem{
 			Name:         w.Name,

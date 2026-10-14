@@ -7,27 +7,31 @@ import (
 	"testing"
 )
 
-func stubCrewMailCounter(t *testing.T, fn func(address string) (int, int, error)) {
-	t.Helper()
-	orig := crewMailCounter
-	crewMailCounter = fn
-	t.Cleanup(func() { crewMailCounter = orig })
-}
-
-func buildOneCrewStatusItem(t *testing.T) CrewStatusItem {
-	t.Helper()
-	total, unread, errText := crewMailCounts("gastown", "emma")
+func buildOneCrewStatusItem(count crewMailCounter) CrewStatusItem {
+	total, unread, errText := crewMailCounts(count, "gastown", "emma")
 	return CrewStatusItem{Name: "emma", Rig: "gastown", MailTotal: total, MailUnread: unread, MailError: errText}
 }
 
+func crewStatusItemJSON(t *testing.T, item CrewStatusItem) map[string]any {
+	t.Helper()
+	data, err := json.Marshal(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
 func TestCrewStatusCountsBeadsMail(t *testing.T) {
+	t.Parallel()
 	var gotAddress string
-	stubCrewMailCounter(t, func(address string) (int, int, error) {
+	item := buildOneCrewStatusItem(func(address string) (int, int, error) {
 		gotAddress = address
 		return 5, 3, nil
 	})
-
-	item := buildOneCrewStatusItem(t)
 
 	if gotAddress != "gastown/crew/emma" {
 		t.Errorf("mailbox address = %q, want gastown/crew/emma", gotAddress)
@@ -39,14 +43,7 @@ func TestCrewStatusCountsBeadsMail(t *testing.T) {
 		t.Errorf("text Mail line = %q", got)
 	}
 
-	data, err := json.Marshal(item)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out map[string]any
-	if err := json.Unmarshal(data, &out); err != nil {
-		t.Fatal(err)
-	}
+	out := crewStatusItemJSON(t, item)
 	if out["mail_total"] != float64(5) || out["mail_unread"] != float64(3) {
 		t.Errorf("json mail_total/mail_unread = %v/%v, want 5/3", out["mail_total"], out["mail_unread"])
 	}
@@ -56,11 +53,10 @@ func TestCrewStatusCountsBeadsMail(t *testing.T) {
 }
 
 func TestCrewStatusMailErrorIsUnknownNotZero(t *testing.T) {
-	stubCrewMailCounter(t, func(string) (int, int, error) {
+	t.Parallel()
+	item := buildOneCrewStatusItem(func(string) (int, int, error) {
 		return 0, 0, errors.New("dolt unreachable")
 	})
-
-	item := buildOneCrewStatusItem(t)
 
 	if item.MailTotal != nil || item.MailUnread != nil {
 		t.Fatalf("mail counts = %v/%v on error, want nil (unknown)", item.MailUnread, item.MailTotal)
@@ -69,14 +65,7 @@ func TestCrewStatusMailErrorIsUnknownNotZero(t *testing.T) {
 		t.Errorf("text Mail line = %q, want unknown with the error", line)
 	}
 
-	data, err := json.Marshal(item)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out map[string]any
-	if err := json.Unmarshal(data, &out); err != nil {
-		t.Fatal(err)
-	}
+	out := crewStatusItemJSON(t, item)
 	if v, ok := out["mail_total"]; !ok || v != nil {
 		t.Errorf("json mail_total = %v (present=%v), want null", v, ok)
 	}
