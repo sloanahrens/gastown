@@ -16,7 +16,7 @@ The overarching goal ensuring useful outcomes through orchestration of potential
 ## Environments
 
 ### Town
-The management headquarters (e.g., `~/gt/`). The Town coordinates all workers across multiple Rigs; the operator works from it, and town-level state (config, agent identity, cross-rig coordination) lives in its `mayor/` directory.
+The management headquarters (e.g., `~/gt/`). The Town coordinates all workers across multiple Rigs; the operator works from it, and town-level state (config, agent identity, cross-rig coordination) lives in its `mayor/` directory (a path name kept from the retired mayor role; no mayor process runs).
 
 ### Rig
 A project-specific Git repository under Gas Town management. Each Rig has its own Polecats and Crew members. Rigs are where actual development work happens.
@@ -69,7 +69,7 @@ Real-time messaging between agents with `gt nudge`. Nudges allow immediate commu
 Agent session refresh via `/handoff`. When context gets full or an agent needs a fresh start, handoff transfers work state to a new session.
 
 ### Patrol scan
-The daemon's per-rig Go tick: restarts a polecat whose session is dead while it holds work, closes orphaned molecules, and returns a gone polecat's work bead to the ready queue with its surviving branch recorded. It replaced the witness and deacon patrol agents.
+The daemon's per-rig Go tick: restarts a polecat whose session is dead while it holds work, closes orphaned molecules, and returns a gone polecat's work bead to the ready queue with its surviving branch recorded. It replaced the retired witness and deacon patrol agents.
 
 ## Supervision
 

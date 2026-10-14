@@ -2,7 +2,7 @@
 
 > **Rig Policy — overrides formula instructions where they conflict.**
 
-This document canonizes the witness's 7-step verification protocol as the
+This document canonizes the 7-step verification protocol as the
 authoritative reference for verification instruments and destruction-adjacent
 changes in gastown.
 
@@ -97,10 +97,6 @@ failures:
 - Marble: 54 samples with missing boundary case
 - The 5x gap between merged vs. installed binary
 - The startup-window alternative
-
-## Cross-references
-
-- Refinery gate policy: see `contrib/gastown/directives/refinery.md`
 
 ## Do NOT
 

@@ -18,7 +18,7 @@ bd -C ~/gt/wyvern/mayor/rig show wyv-123     # Wyvern rig beads
 
 **How it works**: Routes are defined in `~/gt/.beads/routes.jsonl`. Each rig's
 prefix maps to its beads location (the rig's canonical clone at
-`<rig>/mayor/rig`).
+`<rig>/mayor/rig` — a path kept from the retired mayor role, not a live agent).
 
 | Prefix | Routes To | Purpose |
 |--------|-----------|---------|
@@ -104,7 +104,8 @@ Theme resolution:
 - `custom`: use exact `{bg, fg}` colors
 - `role_themes`: override role-specific sessions within the rig
 
-Town-level role defaults live in `mayor/config.json` under:
+Town-level role defaults live in `mayor/config.json` (like `mayor/rig`, a kept
+path named for the retired mayor role) under:
 
 ```json
 {
@@ -966,10 +967,12 @@ bd dep add <child> <parent>  # child depends on parent
 ### Reading a bead's history
 
 `bd history <id>` prints one snapshot per retained Dolt commit. A flatten
-(the offline procedure in [dolt-history-offline.md](dolt-history-offline.md), or `gt maintain` and compactor-dog before they were removed) discards those commits, and
-the command does not say so — a bead whose snapshots begin at the flatten reads
-exactly like one whose snapshots begin at its creation, so a field showing a
-single value looks like a field that never changed.
+(the offline procedure in [dolt-history-offline.md](dolt-history-offline.md), or
+the routine flattening `gt maintain` and compactor-dog did before it was
+removed) discards those commits, and the command does not say so — a bead whose
+snapshots begin at the flatten reads exactly like one whose snapshots begin at
+its creation, so a field showing a single value looks like a field that never
+changed.
 
 ```bash
 gt history <id>              # Where the snapshots start, and whether that is truncated

@@ -179,19 +179,21 @@ bd list --remote=partner --tag=integration
 **The problem:** An agent says "done." Is it actually done? Is the code quality
 acceptable? Did it pass review?
 
-**The solution:** Structured validation with attribution:
+**The solution:** Structured validation with attribution. The daemon's landing
+worker merges the branch and writes a `LANDING RECORD` block onto the work bead
+(internal/land/note.go), carrying the gate result, the om verdict and score, and
+the route that landed it (`daemon`):
 
-```json
-{
-  "validated_by": "gastown/refinery",
-  "validation_type": "merge",
-  "timestamp": "2025-01-15T10:30:00Z",
-  "quality_signals": {
-    "tests_passed": true,
-    "review_approved": true,
-    "lint_clean": true
-  }
-}
+```
+LANDING RECORD
+landed_commit: a3c4ea9a5
+branch: polecat/nux/gt-xyz+mv8d7k47
+target: main
+gate_result: pass (lint exit 0 12s, test exit 0 96s)
+om_verdict: approve
+om_score: 0.9
+route: daemon
+landed_at: 2025-01-15T10:30:00Z
 ```
 
 **Why it matters:**
