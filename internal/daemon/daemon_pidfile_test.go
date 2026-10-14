@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/gofrs/flock"
 )
 
 // gt-fsgb1: daemon.pid is what names the daemon, and nothing rewrites it after
@@ -78,20 +80,55 @@ func TestFinishStopDaemonRemovesTheStoppedDaemonsPIDFile(t *testing.T) {
 	}
 }
 
-// A pid file naming another PID belongs to a daemon that started the moment
-// the stopped one let go of the lock: its file stays.
-func TestFinishStopDaemonKeepsANewDaemonsPIDFile(t *testing.T) {
+// A pid file written by a daemon that started the moment the stopped one let go
+// of the lock stays: that daemon holds daemon.lock, whatever PID the file names.
+func TestFinishStopDaemonKeepsAFileWrittenByADaemonHoldingTheLock(t *testing.T) {
 	t.Parallel()
-	townRoot, pidFile := pidTown(t, 7777)
+	for _, tc := range []struct {
+		name     string
+		filedPID int
+	}{
+		{"new daemon's own pid", 7777},
+		{"pid reused by the new daemon", 4242},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot, pidFile := pidTown(t, tc.filedPID)
+			lock := flock.New(daemonLockPath(townRoot))
+			locked, err := lock.TryLock()
+			if err != nil || !locked {
+				t.Fatalf("taking daemon.lock as the new daemon: locked=%v err=%v", locked, err)
+			}
+			defer func() { _ = lock.Unlock() }()
+
+			if err := finishStopDaemon(townRoot, 4242, true); err != nil {
+				t.Fatalf("finishStopDaemon: %v", err)
+			}
+			if statErr := statPIDFile(t, pidFile); statErr != nil {
+				t.Errorf("the pid file of a daemon holding daemon.lock was removed: %v", statErr)
+			}
+			if pid, _, err := readPIDFile(pidFile); err != nil || pid != tc.filedPID {
+				t.Errorf("daemon.pid = (%d, %v), want the PID %d it named", pid, err, tc.filedPID)
+			}
+		})
+	}
+}
+
+// With nothing holding daemon.lock, the stopped daemon's file goes even where
+// the lock file exists.
+func TestFinishStopDaemonRemovesTheFileOfAFreeLock(t *testing.T) {
+	t.Parallel()
+	townRoot := lockTown(t)
+	pidFile := filepath.Join(townRoot, "daemon", "daemon.pid")
+	if _, err := writePIDFile(pidFile, 4242); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := finishStopDaemon(townRoot, 4242, true); err != nil {
 		t.Fatalf("finishStopDaemon: %v", err)
 	}
-	if statErr := statPIDFile(t, pidFile); statErr != nil {
-		t.Errorf("the pid file of a daemon that did not stop was removed: %v", statErr)
-	}
-	if pid, _, err := readPIDFile(pidFile); err != nil || pid != 7777 {
-		t.Errorf("daemon.pid = (%d, %v), want the PID 7777 it named", pid, err)
+	if statErr := statPIDFile(t, pidFile); !os.IsNotExist(statErr) {
+		t.Errorf("daemon.pid survived a finished stop on a free lock: %v", statErr)
 	}
 }
 

@@ -1513,6 +1513,13 @@ func (d *Daemon) ensureDoltServerUp() error {
 		d.logger.Println("Dolt server not started: daemon is shutting down")
 		return errDoltBringUpSkipped
 	}
+	// A daemon started while `gt down` holds shutdown.lock has a live context,
+	// yet the town is being torn down: the startup catch-ups reach here before
+	// the first heartbeat, which is the step that checks the lock itself.
+	if d.isShutdownInProgress() {
+		d.logger.Println("Dolt server not started: town shutdown in progress")
+		return errDoltBringUpSkipped
+	}
 	return d.doltServer.EnsureRunning()
 }
 
@@ -2247,18 +2254,29 @@ func StopDaemon(townRoot string) error {
 // A pid file removed while its daemon still runs takes the PID with it:
 // IsRunning then answers (true, 0), and every later stop refuses with "pid is
 // not known yet" until that daemon restarts, because nothing rewrites the file
-// after startup. A pid file naming some other PID is a new daemon's — it
-// started as soon as the old one let go of the lock — so it stays too.
+// after startup. A pid file written by a new daemon — it started as soon as the
+// old one let go of the lock — stays too, and daemon.lock is what tells them
+// apart: the file is removed only while the probe holds the lock shared, so a
+// daemon cannot take the lock and write its pid file between the probe and the
+// removal (a check made unlocked would delete that fresh file). A lock that is
+// held, or cannot be probed, leaves the file alone.
 func finishStopDaemon(townRoot string, pid int, gone bool) error {
 	pidFile := filepath.Join(townRoot, "daemon", "daemon.pid")
 	if !gone {
 		return fmt.Errorf("stopping daemon (PID %d) did not finish within %s; left %s in place so a later stop can still find it",
 			pid, StopWaitBudget, pidFile)
 	}
-	if filed, _, err := readPIDFile(pidFile); err == nil && filed != pid {
+	held, probeLock, err := probeDaemonLock(filepath.Join(townRoot, "daemon", "daemon.lock"))
+	if err != nil || held {
 		return nil
 	}
-	_ = os.Remove(pidFile)
+	if probeLock == nil {
+		// No daemon.lock file: no daemon has run here, so there is no owner to
+		// protect and nothing to race.
+		_ = os.Remove(pidFile)
+		return nil
+	}
+	settleFreeDaemonLock(pidFile, probeLock.Unlock)
 	return nil
 }
 
