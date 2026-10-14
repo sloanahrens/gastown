@@ -6,10 +6,43 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
 )
+
+// The routing lives in the "escalation" section of settings/config.json on a
+// two-file town. The retired settings/escalation.json may appear in the help
+// only on the line that tells an un-migrated town to run gt config migrate.
+func TestEscalateHelpNamesConfigSection(t *testing.T) {
+	t.Parallel()
+
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		for _, line := range strings.Split(c.Long, "\n") {
+			if strings.Contains(line, "settings/escalation.json") && !strings.Contains(line, "gt config migrate") {
+				t.Errorf("%s help names the retired file outside the un-migrated note: %q", c.CommandPath(), line)
+			}
+		}
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(escalateCmd)
+
+	for _, want := range []string{
+		`"escalation" section of settings/config.json`,
+		`under "escalation" in ~/gt/settings/config.json`,
+	} {
+		if !strings.Contains(escalateCmd.Long, want) {
+			t.Errorf("escalate help missing %q", want)
+		}
+	}
+	if !strings.Contains(escalateStaleCmd.Long, `stale_threshold under "escalation" in settings/config.json`) {
+		t.Errorf("escalate stale help does not name where stale_threshold lives")
+	}
+}
 
 func TestGetNextSeverity(t *testing.T) {
 	t.Parallel()
