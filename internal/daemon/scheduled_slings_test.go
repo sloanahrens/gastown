@@ -132,6 +132,40 @@ type fakeScheduledRunner struct {
 	closedIDs []string
 	closedWhy []string
 	now       time.Time
+
+	// gate answers: the n-th runGate call returns gateAnswers[n], the last one
+	// repeating. gateDeadlines records the time left on each call's context.
+	gateAnswers   []gateAnswer
+	gateCalls     []string // entry names, in order
+	gateDeadlines []time.Duration
+}
+
+// gateAnswer is one scripted gate run. timedOut makes the fake behave as a
+// command the deadline killed: it returns the kill's error with the gate
+// context already expired, without waiting.
+type gateAnswer struct {
+	out      string
+	err      error
+	timedOut bool
+}
+
+func (f *fakeScheduledRunner) runGate(ctx context.Context, e ScheduledSlingEntry) ([]byte, error) {
+	if dl, ok := ctx.Deadline(); ok {
+		f.gateDeadlines = append(f.gateDeadlines, time.Until(dl))
+	}
+	f.gateCalls = append(f.gateCalls, e.Name)
+	if len(f.gateAnswers) == 0 {
+		return nil, nil
+	}
+	i := len(f.gateCalls) - 1
+	if i >= len(f.gateAnswers) {
+		i = len(f.gateAnswers) - 1
+	}
+	a := f.gateAnswers[i]
+	if a.timedOut {
+		return []byte(a.out), context.DeadlineExceeded
+	}
+	return []byte(a.out), a.err
 }
 
 func (f *fakeScheduledRunner) listBeads(_ context.Context, _, _ string) ([]scheduledBead, error) {

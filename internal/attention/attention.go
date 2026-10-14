@@ -51,6 +51,9 @@ const (
 	// KindOverrunStopped: the overrun guard stopped a polecat at the
 	// 20-minute rule and handed its bead back to be split.
 	KindOverrunStopped Kind = "overrun-stopped"
+	// KindScheduledGate: a scheduled sling's gate_command failed or timed out
+	// three ticks in a row, so the schedule is not running.
+	KindScheduledGate Kind = "scheduled-gate"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -60,7 +63,7 @@ func Kinds() []Kind {
 		KindRiskPath, KindRedMain, KindRejectedTwice, KindEscalation,
 		KindPolecatStall, KindLandingStuck, KindQueueStuck, KindDirectPush,
 		KindSlotHeld, KindSlotDeadHolder, KindBDSlow, KindTierSweepRed,
-		KindRevertRefused, KindBlockedMail, KindOverrunStopped,
+		KindRevertRefused, KindBlockedMail, KindOverrunStopped, KindScheduledGate,
 	}
 }
 
