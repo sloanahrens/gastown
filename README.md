@@ -356,44 +356,36 @@ gt agents                              # Check for live sessions
 
 Formulas are TOML-defined workflows embedded in the `gt` binary (source in `internal/formula/formulas/`).
 
-**Example Formula** (`internal/formula/formulas/release.formula.toml`):
+**Example Formula** (`internal/formula/formulas/gastown-release.formula.toml`,
+abridged; `internal/formula/formulas/beads-release.formula.toml` is the same
+shape for the beads repo):
 
 ```toml
-description = "Standard release process"
-formula = "release"
-version = 1
+description = "Gas Town release workflow - from version bump to verified release."
+
+formula = "gastown-release"
+type = "workflow"
+version = 2
 
 [vars.version]
-description = "The semantic version to release (e.g., 1.2.0)"
+description = "The semantic version to release (e.g., 0.3.0)"
 required = true
 
 [[steps]]
-id = "bump-version"
-title = "Bump version"
+id = "run-bump-script"
+title = "Run bump-version.sh"
+needs = ["update-changelog"]
 description = "Run ./scripts/bump-version.sh {{version}}"
-
-[[steps]]
-id = "run-tests"
-title = "Run tests"
-description = "Run make test"
-needs = ["bump-version"]
-
-[[steps]]
-id = "build"
-title = "Build"
-description = "Run make build"
-needs = ["run-tests"]
 
 [[steps]]
 id = "create-tag"
 title = "Create release tag"
+needs = ["commit-release"]
 description = "Run git tag -a v{{version}} -m 'Release v{{version}}'"
-needs = ["build"]
 
 [[steps]]
-id = "publish"
-title = "Publish"
-description = "Run ./scripts/publish.sh"
+id = "push-release"
+title = "Push commit and tag"
 needs = ["create-tag"]
 ```
 
@@ -404,10 +396,10 @@ needs = ["create-tag"]
 bd formula list
 
 # Run a formula with variables
-bd cook release --var version=1.2.0
+bd cook gastown-release --var version=0.3.0
 
 # Create formula instance for tracking
-bd mol pour release --var version=1.2.0
+bd mol pour gastown-release --var version=0.3.0
 ```
 
 ### Manual Dispatch Workflow
