@@ -129,6 +129,31 @@ func TestWorkersRunOnEveryTickWhileAPageIsOpen(t *testing.T) {
 	}
 }
 
+// A worker whose context has ended starts no further poll, even with a tick
+// waiting and a page open. select picks at random among ready cases, so without
+// the check a stopped hub started one more poll about half the time, and that
+// poll's children were in flight when the restart replaced the process
+// (gt-9rwye). The repetition makes the random pick reproducible.
+func TestWorkerStartsNoPollOnceItsContextEnded(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 14, 8, 0, 0, 0, time.UTC)
+	h := NewHub(Config{Now: func() time.Time { return now }})
+	page, _ := h.Subscribe() // the connect's wake is spent before the worker starts
+	defer h.Unsubscribe(page)
+
+	var runs atomic.Int64
+	for i := 0; i < 200; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		ticks := make(chan time.Time, 1)
+		ticks <- now
+		h.work(ctx, ticks, time.Minute, func() { runs.Add(1) })
+	}
+	if got := runs.Load(); got != 0 {
+		t.Fatalf("%d polls started after the context ended, want 0", got)
+	}
+}
+
 // A page connecting releases every worker at once. Handing one token per worker
 // down a shared channel released whichever workers happened to be parked and
 // left the rest to their ticker, so a pane could sit on a stale snapshot for a

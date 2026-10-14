@@ -111,7 +111,9 @@ never draws a digest's text.
 Lifecycle: the dashboard watches its own binary and the town registry. When make
 install replaces the binary, or a rig is added to or removed from the town, the
 dashboard restarts itself in place: same PID, same flags, same listening socket,
-so the port never closes. Open pages reconnect and reload. If the new binary
+so the port never closes. The pollers are stopped first and the bd and git
+reads in flight are waited for (killed after 10 seconds), so the restart leaves
+no defunct child. Open pages reconnect and reload. If the new binary
 fails to run or the restart fails, the running build keeps serving and says so.
 --open fires on the first launch only. Not available on Windows.
 
@@ -156,13 +158,13 @@ func runDashboard(cmd *cobra.Command, _ []string) error {
 	}
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go hub.Run(ctx)
+	run := procutil.StartStoppable(ctx, hub.Run)
 
 	// A new gt binary on disk (make install) or a rig added to the town
 	// restarts the dashboard in place; see the lifecycle note in the command
 	// help.
 	if exe, err := os.Executable(); err == nil && dashboardCanReexec {
-		go superviseRestart(ctx, exe, dashboardRegistryPath(townRoot), ln, cmd.OutOrStdout())
+		go superviseRestart(ctx, exe, dashboardRegistryPath(townRoot), ln, run, cmd.OutOrStdout())
 	}
 
 	srv := &http.Server{Handler: hub.Handler(), ReadHeaderTimeout: 10 * time.Second}

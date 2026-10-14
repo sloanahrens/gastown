@@ -308,10 +308,11 @@ func TestDashboardRegistryPathIsTheMachineConfigFile(t *testing.T) {
 func TestHandoffKeepsServingWhenTheNewBinaryDoesNotRun(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	execd := false
+	execd, quiesced := false, false
 	err := handoff(
 		"binary",
 		func() error { return errors.New("signal: killed") },
+		func() func() { quiesced = true; return func() {} },
 		func() error { execd = true; return nil },
 		&out,
 	)
@@ -321,6 +322,9 @@ func TestHandoffKeepsServingWhenTheNewBinaryDoesNotRun(t *testing.T) {
 	if execd {
 		t.Fatal("exec'd over a binary that failed verification")
 	}
+	if quiesced {
+		t.Fatal("stopped the hub for a restart that never happened")
+	}
 	if strings.Contains(out.String(), "restarting") {
 		t.Fatalf("announced a restart that did not happen: %q", out.String())
 	}
@@ -329,9 +333,24 @@ func TestHandoffKeepsServingWhenTheNewBinaryDoesNotRun(t *testing.T) {
 func TestHandoffReportsAFailedExec(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	err := handoff("binary", func() error { return nil }, func() error { return errors.New("exec format error") }, &out)
+	var steps []string
+	err := handoff(
+		"binary",
+		func() error { steps = append(steps, "verify"); return nil },
+		func() func() {
+			steps = append(steps, "quiesce")
+			return func() { steps = append(steps, "resume") }
+		},
+		func() error { steps = append(steps, "exec"); return errors.New("exec format error") },
+		&out,
+	)
 	if err == nil || !strings.Contains(err.Error(), "re-exec") {
 		t.Fatalf("err = %v, want a re-exec failure", err)
+	}
+	// The hub is stopped before exec, and started again when exec fails: a
+	// failed restart leaves this process serving with its polls running.
+	if got, want := strings.Join(steps, ","), "verify,quiesce,exec,resume"; got != want {
+		t.Fatalf("steps = %s, want %s", got, want)
 	}
 	if want := "gt dashboard: binary changed, restarting"; !strings.Contains(out.String(), want) {
 		t.Fatalf("out = %q, want %q", out.String(), want)
@@ -347,6 +366,7 @@ func TestHandoffNamesTheRegistryChange(t *testing.T) {
 	err := handoff(
 		"town registry",
 		func() error { verified = true; return nil },
+		func() func() { return func() {} },
 		func() error { return errors.New("exec format error") },
 		&out,
 	)
