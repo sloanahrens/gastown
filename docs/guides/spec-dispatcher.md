@@ -109,6 +109,25 @@ the bead is slung fresh and one comment records the branch that was gone. A
 remote that cannot be read is unknown, not gone — the candidate waits for the
 next tick rather than handing preserved work to a fresh start (ADR 0005).
 
+## A bead can declare its formula
+
+A bead labeled `formula:<name>` is slung with that formula instead of the
+rig's default, through the same seat choice, holds and caps as any other bead
+(gt-j5cr2). Its variables are the lines of a `## Formula vars` section in the
+description, one `key=value` per line up to the next `## ` heading. Blank
+lines and lines starting with `#` are ignored, and a repeated key keeps its
+last value.
+
+The tick skips, and does not label failed, a bead whose declaration it cannot
+run: `bad formula vars: <line>` for a line without `=` or with an empty key,
+`bad formula label: formula:` or `conflicting formula labels: a, b` for the
+label, and `unknown formula: <name>` when the rig has no such formula. The
+bead stays ready, so fixing the bead clears the skip. A bead that also wears
+`scheduled:<name>` is slung with the actor `daemon/scheduled:<name>`, so
+usage attribution and the overrun guard's scheduled-bead exemption still see a
+scheduled run. `gt spec dispatch --dry-run` and the dispatched line print
+`, formula <name>` after the seat.
+
 ## Seats and budget
 
 A seat is one agent with its own cap. Every agent runs the claude CLI with the

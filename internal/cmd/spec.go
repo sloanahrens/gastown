@@ -438,6 +438,10 @@ type specDispatchEntry struct {
 type specCandidate struct {
 	Spec specdispatch.Spec
 	Rig  string
+	// Run is the formula, variables and actor the bead declares for its own
+	// sling; the zero value is a bead that declares none (gt-j5cr2). The tick
+	// fills it from the fresh read, before the seat is chosen.
+	Run specdispatch.FormulaRun
 }
 
 // specRoster is the live polecat picture the budget is built from: the seats
@@ -480,13 +484,16 @@ type specDispatchEnv struct {
 	// exists on the rig's origin. An error means the answer is unknown, and
 	// the candidate is left for the next tick (gt-gzhin.3).
 	BranchOnOrigin func(rig, branch string) (bool, error)
-	Sling          func(c specCandidate, resumeBranch string, seat specdispatch.SeatChoice) (polecat string, err error)
-	Sleep          func(time.Duration)
-	Now            func() time.Time
-	Template       specdispatch.Template
-	Budget         specdispatch.Budget // agents, caps and preferences; live counts filled per tick
-	PerTick        int
-	DryRun         bool
+	// FormulaExists errors when a formula a bead declares is not one the rig
+	// can sling. It is asked only for a bead that declares one (gt-j5cr2).
+	FormulaExists func(rig, formula string) error
+	Sling         func(c specCandidate, resumeBranch string, seat specdispatch.SeatChoice) (polecat string, err error)
+	Sleep         func(time.Duration)
+	Now           func() time.Time
+	Template      specdispatch.Template
+	Budget        specdispatch.Budget // agents, caps and preferences; live counts filled per tick
+	PerTick       int
+	DryRun        bool
 	// MaxPriority is the ceiling on a candidate's priority number
 	// (polecat_pool.max_priority): a bead numbered higher is backlog.
 	MaxPriority int
@@ -561,6 +568,22 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: not eligible (%s)", id, why)})
 			continue
 		}
+		// A bead may declare the formula that runs it. A declaration the tick
+		// cannot read, or a formula the rig does not have, is a skip with its
+		// reason: the bead stays ready and is never slung with the wrong
+		// formula (gt-j5cr2).
+		run, err := specdispatch.FormulaRunOf(full)
+		if err != nil {
+			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s", id, err)})
+			continue
+		}
+		if run.Declared() {
+			if err := env.FormulaExists(c.Rig, run.Formula); err != nil {
+				report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: unknown formula: %s", id, run.Formula)})
+				continue
+			}
+		}
+		c.Run = run
 		// A red-main bead is the fix forward for a breakage the owner is
 		// already undoing; a seat spent on it races the revert over the same
 		// package (gt-zkdwt). The hold lifts as soon as the revert lands, is
@@ -713,7 +736,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		entry := specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent}
 		if env.DryRun {
 			entry.Line = fmt.Sprintf("%s: would sling to %s on %s (%s)", id, c.Rig, seat.Agent, seat.Reason)
-			entry.Line += specResumeNote(resume, gone)
+			entry.Line += specFormulaNote(c.Run) + specResumeNote(resume, gone)
 			if shapeNote != "" {
 				entry.Line += "; " + shapeNote
 			}
@@ -784,7 +807,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		}
 		entry.Polecat = polecat
 		entry.Line = fmt.Sprintf("%s: slung to %s/%s on %s (%s)", id, c.Rig, polecat, seat.Agent, seat.Reason)
-		entry.Line += specResumeNote(resume, gone)
+		entry.Line += specFormulaNote(c.Run) + specResumeNote(resume, gone)
 		if attempts > 1 {
 			entry.Line += fmt.Sprintf(" after %d attempts", attempts)
 		}
@@ -872,6 +895,15 @@ func specHeldBeads(townRoot, rig string) ([]specdispatch.HeldBead, error) {
 	}
 	beadsDir := beads.ResolveBeadsDir(filepath.Join(townRoot, rig))
 	return heldBeadsFrom(beads.NewPinned(beadsDir), warnDuplicateEnrichmentFailed, beadsDir)
+}
+
+// specFormulaNote names the formula a bead declared, for the tick's dispatched
+// and dry-run lines; a bead that declares none adds nothing (gt-j5cr2).
+func specFormulaNote(run specdispatch.FormulaRun) string {
+	if !run.Declared() {
+		return ""
+	}
+	return ", formula " + run.Formula
 }
 
 // specResumeNote names the branch a dispatch continues, or the recorded
@@ -1077,6 +1109,9 @@ func runSpecDispatch(cmd *cobra.Command, _ []string) error {
 		AddLabel: func(id, label string) error { return poolBeadLabelAdd(townRoot, id, label) },
 		BranchOnOrigin: func(rig, branch string) (bool, error) {
 			return polecat.BranchOnOrigin(filepath.Join(townRoot, rig), branch)
+		},
+		FormulaExists: func(rig, formula string) error {
+			return verifyFormulaExists(formula, filepath.Join(townRoot, rig), townRoot)
 		},
 		Sling: func(c specCandidate, resumeBranch string, seat specdispatch.SeatChoice) (string, error) {
 			return slingSpec(townRoot, c, resumeBranch, seat)
@@ -1385,11 +1420,20 @@ func hasCommentWithPrefix(comments []beads.Comment, key string) bool {
 // failed dispatch leaves the bead unassigned for the next tick; and every
 // dispatch carries the host-safety instruction. A non-empty resumeBranch is
 // the gt sling --branch a recovered bead's surviving work resumes on.
+//
+// A bead that declares its own formula (gt-j5cr2) is slung with that formula,
+// its variables, and — for a scheduled run — the scheduler's actor; the rig's
+// default formula, passed as formula, applies to every other bead.
 func specSlingParams(townRoot, beadsDir, formula string, c specCandidate, resumeBranch string, seat specdispatch.SeatChoice) SlingParams {
+	if c.Run.Declared() {
+		formula = c.Run.Formula
+	}
 	return SlingParams{
 		BeadID:           c.Spec.ID,
 		RigName:          c.Rig,
 		FormulaName:      formula,
+		Vars:             c.Run.Vars,
+		Actor:            c.Run.Actor,
 		Agent:            seat.Agent,
 		ResumeBranch:     resumeBranch,
 		Args:             specdispatch.HostSafetyPrompt,
