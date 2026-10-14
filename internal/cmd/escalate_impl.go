@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/done"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/notify"
@@ -35,12 +37,19 @@ type escalateRun struct {
 	clearKeys                                          []string
 	clearReason                                        string
 
+	// rig and polecat are GT_RIG and GT_POLECAT; polecat is "" outside a
+	// polecat session.
+	rig, polecat string
+
 	in       io.Reader
 	out      io.Writer
+	errOut   io.Writer
 	townRoot func() (string, error)
 	sender   func() string
-	raise    func(notify.EscalationRequest, *config.EscalationConfig) (*notify.RaiseResult, error)
-	clear    func(townRoot string, keys []string, closedBy, reason string) ([]string, error)
+	// hookedBead names the bead hooked to the polecat seat, "" when none is.
+	hookedBead func(townRoot, seat string) string
+	raise      func(notify.EscalationRequest, *config.EscalationConfig) (*notify.RaiseResult, error)
+	clear      func(townRoot string, keys []string, closedBy, reason string) ([]string, error)
 }
 
 func escalateRunFromFlags() escalateRun {
@@ -55,10 +64,14 @@ func escalateRunFromFlags() escalateRun {
 		json:        escalateJSON,
 		clearKeys:   escalateClearKeys,
 		clearReason: escalateClearReason,
+		rig:         os.Getenv("GT_RIG"),
+		polecat:     os.Getenv("GT_POLECAT"),
 		in:          os.Stdin,
 		out:         os.Stdout,
+		errOut:      os.Stderr,
 		townRoot:    workspace.FindFromCwdOrError,
 		sender:      detectSender,
+		hookedBead:  findPolecatHookedBead,
 		raise:       notify.Raise,
 		clear:       notify.Clear,
 	}
@@ -104,6 +117,8 @@ func (r escalateRun) escalate(args []string) error {
 		agentID = "unknown"
 	}
 
+	r.relatedBead = r.relatedOrHooked(townRoot)
+
 	// Dry run mode
 	if r.dryRun {
 		actions := escalationConfig.GetRouteForSeverity(severity)
@@ -117,6 +132,9 @@ func (r escalateRun) escalate(args []string) error {
 		}
 		if r.fingerprint != "" {
 			fmt.Fprintf(r.out, "  Fingerprint: %s\n", notify.FingerprintLabel(r.fingerprint))
+		}
+		if r.relatedBead != "" {
+			fmt.Fprintf(r.out, "  Related: %s\n", r.relatedBead)
 		}
 		fmt.Fprintf(r.out, "  Actions: %s\n", strings.Join(actions, ", "))
 		fmt.Fprintf(r.out, "  Mail targets: %s\n", strings.Join(targets, ", "))
@@ -144,6 +162,38 @@ func (r escalateRun) escalate(args []string) error {
 	}
 	r.printCreatedEscalation(res, severity)
 	return nil
+}
+
+// relatedOrHooked is the bead the escalation is filed against: --related when
+// given, else, inside a polecat session, the bead hooked to that polecat. The
+// supervisor holds an ESCALATED seat until an escalation that names the seat's
+// bead is closed, and polecats raise escalations with free-text titles, so
+// without this tie the seat is never released. A failed lookup never fails the
+// escalation: it goes out unnamed with a warning.
+func (r escalateRun) relatedOrHooked(townRoot string) string {
+	if r.relatedBead != "" || r.polecat == "" {
+		return r.relatedBead
+	}
+	var hooked string
+	if r.rig != "" && r.hookedBead != nil {
+		hooked = r.hookedBead(townRoot, r.rig+"/polecats/"+r.polecat)
+	}
+	if hooked == "" {
+		w := r.errOut
+		if w == nil {
+			w = os.Stderr
+		}
+		fmt.Fprintf(w, "Warning: could not find the bead hooked to polecat %q; escalation raised without a related bead\n", r.polecat)
+	}
+	return hooked
+}
+
+// findPolecatHookedBead is the bead assigned to seat ("rig/polecats/name") in
+// the rig's store, the lookup gt done uses, or "" when there is none or the
+// store cannot be read.
+func findPolecatHookedBead(townRoot, seat string) string {
+	rig, _, _ := strings.Cut(seat, "/")
+	return done.FindHookedBeadForAgent(beads.NewWithBeadsDir(filepath.Join(townRoot, rig), ""), seat)
 }
 
 // printRepeatEscalation reports a firing that was recorded on the open
