@@ -379,3 +379,112 @@ func (r needsSplitReader) Show(string) (*beads.Issue, error) { return r.issue, n
 func (r needsSplitReader) List(beads.ListOptions) ([]*beads.Issue, error) {
 	return []*beads.Issue{r.issue}, nil
 }
+
+// A seat past the limit whose gt done is running (the re-check says submitted)
+// is not paused, stopped or handed back, and nothing is recorded, so the guard
+// judges it again next tick.
+func TestStop_SeatInGtDoneIsNotStopped(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	f := newOverrunFake(25*time.Minute, stopSeat)
+	f.submitted = true
+
+	d.runOverrunGuard(f.seams())
+
+	if len(f.calls) != 0 {
+		t.Errorf("a seat in gt done had stop steps run: %q", f.calls)
+	}
+	if !strings.Contains(buf.String(), "submitted before the stop") {
+		t.Errorf("log lacks the leaving-it line:\n%s", buf.String())
+	}
+	if st, _ := readOverrunState(d.config.TownRoot, "gt-aaa11"); !st.StopBeganAt.IsZero() || !st.StoppedAt.IsZero() {
+		t.Errorf("state %+v recorded a stop that did not happen", st)
+	}
+}
+
+// A bead that gains gt:ready-to-land between the seat listing and the
+// hand-back is not handed back: it would carry needs-split and ready-to-land
+// at once. The pause is released and the stop is recorded finished.
+func TestStop_BeadReadyToLandMidStopIsNotHandedBack(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	f := newOverrunFake(21*time.Minute, stopSeat)
+	f.readyAfterStop = true
+
+	d.runOverrunGuard(f.seams())
+
+	want := []string{
+		"pause gastown/capable",
+		"stop gastown/capable",
+		"checkpoint gastown/capable",
+		"clear-pause gastown/capable",
+	}
+	if !reflect.DeepEqual(f.calls, want) {
+		t.Errorf("call order = %q, want %q (no hand-back)", f.calls, want)
+	}
+	if len(f.handedBack) != 0 {
+		t.Errorf("submitted bead handed back: %q", f.handedBack)
+	}
+	if st, _ := readOverrunState(d.config.TownRoot, "gt-aaa11"); st.StoppedAt.IsZero() {
+		t.Error("StoppedAt not saved; the next tick would repeat the stop")
+	}
+}
+
+// With no gt done signal the seat is stopped and handed back as before.
+func TestStop_SeatWithNoGtDoneSignalIsStillStopped(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	f := newOverrunFake(21*time.Minute, stopSeat)
+
+	d.runOverrunGuard(f.seams())
+
+	if len(f.stops) != 1 || len(f.handedBack) != 1 {
+		t.Errorf("stops %v, hand-backs %v; want one of each", f.stops, f.handedBack)
+	}
+}
+
+func TestHeartbeatShowsGtDone(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	hb := func(state polecat.HeartbeatState, age time.Duration) *polecat.SessionHeartbeat {
+		return &polecat.SessionHeartbeat{Timestamp: now.Add(-age), State: state}
+	}
+	tests := []struct {
+		name string
+		hb   *polecat.SessionHeartbeat
+		want bool
+	}{
+		{"no heartbeat", nil, false},
+		{"fresh exiting", hb(polecat.HeartbeatExiting, 30*time.Second), true},
+		{"exiting just inside the stale window", hb(polecat.HeartbeatExiting, polecat.SessionHeartbeatStaleThreshold-time.Second), true},
+		{"stale exiting is a dead gt done", hb(polecat.HeartbeatExiting, polecat.SessionHeartbeatStaleThreshold), false},
+		{"fresh working", hb(polecat.HeartbeatWorking, time.Second), false},
+		{"fresh idle", hb(polecat.HeartbeatIdle, time.Second), false},
+		{"v1 heartbeat without state", hb("", time.Second), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := heartbeatShowsGtDone(tt.hb, now); got != tt.want {
+				t.Errorf("heartbeatShowsGtDone = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// gtDoneInFlight reads the heartbeat gt done writes through the polecat package.
+func TestGtDoneInFlight_ReadsTheHeartbeatFile(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	const sess = "gt-capable"
+	if d.gtDoneInFlight(sess) {
+		t.Error("in flight with no heartbeat file")
+	}
+	polecat.TouchSessionHeartbeatWithState(d.config.TownRoot, sess, polecat.HeartbeatWorking, "work", "gt-aaa11")
+	if d.gtDoneInFlight(sess) {
+		t.Error("a working heartbeat read as gt done")
+	}
+	polecat.TouchSessionHeartbeatWithState(d.config.TownRoot, sess, polecat.HeartbeatExiting, "gt done", "gt-aaa11")
+	if !d.gtDoneInFlight(sess) {
+		t.Error("a fresh exiting heartbeat not read as gt done")
+	}
+}

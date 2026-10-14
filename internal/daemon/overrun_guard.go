@@ -59,6 +59,13 @@ type overrunSeams struct {
 	// nudge delivers msg to the seat's session.
 	nudge func(seat overrunSeat, msg string) error
 
+	// submittedNow re-reads, at the moment of acting, whether the seat has
+	// submitted its work: gt done is running (a fresh exiting heartbeat) or the
+	// bead is gt:ready-to-land. The seat list can be minutes old by then, and
+	// gt done sets the label only after its rebase and gate. nil means no
+	// re-check.
+	submittedNow func(seat overrunSeat) bool
+
 	// The stop's side effects, called in this order by overrunStop:
 	// pause writes the seat's pause marker, stopSession ends its session,
 	// checkpoint commits its worktree, handBack returns its bead to the pool
@@ -295,6 +302,10 @@ func (d *Daemon) overrunSeatFor(polecatsDir, rigName, name string) (overrunSeat,
 	if err != nil || !alive {
 		return seat, false
 	}
+	if d.gtDoneInFlight(sessionName) {
+		seat.Submitted = true
+		return seat, false // gt done is running; its intent record and label come minutes later
+	}
 
 	bead := rec.WorkBead
 	if bead == "" {
@@ -321,6 +332,22 @@ func (d *Daemon) overrunSeatFor(polecatsDir, rigName, name string) (overrunSeat,
 		}
 	}
 	return seat, true
+}
+
+// gtDoneInFlight reports whether the session's heartbeat says gt done is
+// running. gt done writes state exiting first (internal/done/done.go) and renews
+// it through its gate stages, before the intent record or gt:ready-to-land
+// exist, so a fresh exiting heartbeat is the early submitted signal.
+func (d *Daemon) gtDoneInFlight(sessionName string) bool {
+	return heartbeatShowsGtDone(polecat.ReadSessionHeartbeat(d.config.TownRoot, sessionName), time.Now())
+}
+
+// heartbeatShowsGtDone reports whether hb is an exiting heartbeat fresher than
+// the stale threshold. A stale one is a gt done that died or wedged: the seat
+// stays subject to the guard.
+func heartbeatShowsGtDone(hb *polecat.SessionHeartbeat, now time.Time) bool {
+	return hb != nil && hb.EffectiveState() == polecat.HeartbeatExiting &&
+		now.Sub(hb.Timestamp) < polecat.SessionHeartbeatStaleThreshold
 }
 
 // hasScheduledSlingLabel reports whether labels include one with the

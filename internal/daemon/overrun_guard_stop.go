@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -36,6 +37,10 @@ const (
 //     roster no longer counts the seat; a bead found closed or re-slung to
 //     another polecat is left alone. The attention item for the stop is
 //     derived from that hand-back (collectOverrunStopped).
+//
+// submittedNow is read before step 1 and before step 4: a seat that has
+// submitted (gt done running, or gt:ready-to-land) is not stopped, and a bead
+// that gained gt:ready-to-land mid-stop is not handed back.
 //
 // Progress is saved after each step, so a step that fails is logged and
 // retried from the failed step on the next tick, never from the top and never
@@ -67,8 +72,13 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	}
 	elapsed = st.Elapsed
 
-	// 1. Pause.
+	// 1. Pause. The seat list is older than this call, so look again first: a
+	// seat that has begun gt done since is not stopped.
 	if st.StopBeganAt.IsZero() {
+		if s.submittedNow != nil && s.submittedNow(seat) {
+			d.logger.Printf("overrun_guard: %s on %s submitted before the stop; leaving it", who, st.Bead)
+			return
+		}
 		if err := s.pause(seat); err != nil {
 			d.logger.Printf("overrun_guard: stop %s on %s: pause failed: %v", who, st.Bead, err)
 			return
@@ -114,7 +124,19 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 		}
 	}
 
-	// 4. Hand the bead back.
+	// 4. Hand the bead back, unless the work was submitted while the stop ran:
+	// a bead that is gt:ready-to-land must not also carry needs-split. The seat
+	// is stopped and its work checkpointed, so release the pause and finish.
+	if s.submittedNow != nil && s.submittedNow(seat) {
+		if err := s.clearPause(seat); err != nil {
+			d.logger.Printf("overrun_guard: WARNING: %s: pause marker not cleared: %v", who, err)
+			return
+		}
+		st.StoppedAt = now
+		save()
+		d.logger.Printf("overrun_guard: %s on %s submitted during the stop; not handed back", who, st.Bead)
+		return
+	}
 	handed := seat
 	handed.Bead, handed.Branch = st.Bead, branch
 	if err := s.handBack(handed, elapsed); err != nil {
@@ -156,6 +178,7 @@ func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 		return agentpause.Resume(d.config.TownRoot, seat.Rig, constants.RolePolecat, seat.Polecat)
 	}
 	s.stopSession = d.overrunStopSession
+	s.submittedNow = d.overrunSubmittedNow
 	s.checkpoint = func(seat overrunSeat) error {
 		polecatsDir := filepath.Join(d.config.TownRoot, seat.Rig, "polecats")
 		workDir := resolvePolecatWorktree(polecatsDir, seat.Polecat, seat.Rig)
@@ -182,6 +205,19 @@ func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 		return err
 	}
 	return s
+}
+
+// overrunSubmittedNow reads the seat's submitted state fresh: a live exiting
+// heartbeat, or a work bead that is gt:ready-to-land. A bead read that fails
+// answers no, as workBeadStillSubmitted does: the hand-back's own bd write
+// fails when bd is down.
+func (d *Daemon) overrunSubmittedNow(seat overrunSeat) bool {
+	sessionName := session.PolecatSessionName(d.prefixRegistry().PrefixForRig(seat.Rig), seat.Polecat)
+	if d.gtDoneInFlight(sessionName) {
+		return true
+	}
+	still, known := d.workBeadStillSubmitted(seat.Rig, seat.Bead)
+	return known && still
 }
 
 // overrunStopSession stops the seat's session through the polecat session
