@@ -457,20 +457,24 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 // call, and a stuck gc must not hold an install forever (gt-oucgn).
 func (d *Daemon) upgradeHold(now time.Time) *daemonWork {
 	waited := now.Sub(d.upgradeWaitSince)
-	gcWaited, gcRunning := d.maintenanceGCUpgradeHold(now)
 
 	// daemonWorkHold is hard-first, so a hard hold is returned here, unbounded,
-	// even when soft work is in flight alongside it.
+	// even when soft work is in flight alongside it. The gc's clock is told
+	// whether it is, so it does not run while a hard hold is what defers the
+	// restart.
 	hold := d.daemonWorkHold()
-	if hold != nil && hold.hard {
+	hardHeld := hold != nil && hold.hard
+	gcWaited, gcRunning := d.maintenanceGCUpgradeHold(now, hardHeld)
+	if hardHeld {
 		return hold
 	}
 
-	// A --full gc call is in flight on the server; the daemon does not cut it
+	// A gc cycle is in flight and the daemon does not cut its call
 	// (maintenance_gc_guard.go), so the restart waits for the cycle to close —
-	// up to the gc's own bound, past which the call is stuck (gt-oucgn). Its
-	// wait is read off the hold's own clock, not the marker's, so a gc that
-	// starts late in a wait still gets its full bound.
+	// up to the gc call's own bound, past which the call is stuck (gt-oucgn).
+	// The wait is read off the call's own clock, not the marker's or the
+	// cycle's, so a gc that starts late in a wait, or after a long backup,
+	// still gets its full bound.
 	if gcRunning && gcWaited < maintenanceGCRestartCap {
 		return &daemonWork{name: maintenanceGCHoldLabel, hard: true}
 	}
@@ -493,7 +497,7 @@ func (d *Daemon) upgradeHold(now time.Time) *daemonWork {
 	// anything, it is cutting or letting go — only now, when the restart is
 	// real (gt-rtbbr).
 	if gcRunning {
-		d.logger.Printf("upgrade-restart: the maintenance gc cycle has been in flight for %s, past its %s bound; restarting anyway and the shutdown cancels it",
+		d.logger.Printf("upgrade-restart: the maintenance gc call has run for %s, past its %s bound; restarting anyway and the shutdown cancels it",
 			gcWaited.Round(time.Second), maintenanceGCRestartCap)
 	}
 	if postLand {
@@ -529,7 +533,7 @@ func (d *Daemon) endUpgradeDrain() {
 	d.upgradeRestartPending.Store(false)
 	d.upgradeWaitLogged = ""
 	d.upgradeDrainLogged = false
-	d.upgradeGCHoldSince = time.Time{}
+	d.resetUpgradeGCHold()
 }
 
 // logUpgradeWait says what a pending restart is waiting on: the drain starting
