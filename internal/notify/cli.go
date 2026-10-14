@@ -87,16 +87,20 @@ func (c *CLI) MailSend(ctx context.Context, to, subject, body string, opts ...Ma
 	return c.exec(ctx, "", args...)
 }
 
-// Nudge runs `gt nudge` in its default (wait-idle) mode, or hands the nudge
-// to Nudger.
-func (c *CLI) Nudge(ctx context.Context, target, message string) error {
+// Nudge runs `gt nudge` in its default (wait-idle) mode, in queue mode with
+// the Queue option, or hands the nudge to Nudger.
+func (c *CLI) Nudge(ctx context.Context, target, message string, opts ...NudgeOption) error {
 	if err := ValidateNudge(target, message); err != nil {
 		return err
 	}
 	if c.Nudger != nil {
-		return c.Nudger.Nudge(ctx, target, message)
+		return c.Nudger.Nudge(ctx, target, message, opts...)
 	}
-	return c.exec(ctx, "", "nudge", "--", target, message)
+	args := []string{"nudge"}
+	if ApplyNudgeOptions(opts).Queue {
+		args = append(args, "--mode=queue")
+	}
+	return c.exec(ctx, "", append(args, "--", target, message)...)
 }
 
 // Escalate runs `gt escalate`, passing the reason on stdin.

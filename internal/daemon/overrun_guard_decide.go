@@ -45,6 +45,31 @@ func decideOverrun(in overrunInput) overrunAction {
 	return overrunNone
 }
 
+const (
+	// overrunNudgeRetryAfter is the least wait after a failed nudge before the
+	// next attempt for the same sling.
+	overrunNudgeRetryAfter = 5 * time.Minute
+	// overrunNudgeMaxAttempts is how many nudges the guard tries per sling
+	// before it gives up on the nudge. The stop never depends on it.
+	overrunNudgeMaxAttempts = 3
+)
+
+// nudgeFailures is how many nudges have failed for the sling at slung.
+func (s overrunState) nudgeFailures(slung time.Time) int {
+	if s.NudgeFailedAt.Before(slung) {
+		return 0
+	}
+	return s.NudgeFailures
+}
+
+// nudgeHeld reports whether a nudge due at now must wait: the attempts for
+// this sling are used up, or the last one failed less than
+// overrunNudgeRetryAfter ago.
+func (s overrunState) nudgeHeld(slung, now time.Time) bool {
+	n := s.nudgeFailures(slung)
+	return n >= overrunNudgeMaxAttempts || (n > 0 && now.Sub(s.NudgeFailedAt) < overrunNudgeRetryAfter)
+}
+
 // overrunState is what the guard remembers about one bead between ticks.
 //
 // The stop's progress is kept here too, one stamp per step, because every
@@ -54,6 +79,13 @@ func decideOverrun(in overrunInput) overrunAction {
 type overrunState struct {
 	Bead     string    `json:"bead"`
 	NudgedAt time.Time `json:"nudged_at,omitzero"`
+
+	// NudgeFailures counts the failed nudges for the sling that NudgeFailedAt
+	// belongs to; NudgeFailedAt is when the latest one failed. A failure
+	// stamped before the current sling belongs to an earlier run of the bead
+	// and counts for nothing (nudgeFailures).
+	NudgeFailures int       `json:"nudge_failures,omitempty"`
+	NudgeFailedAt time.Time `json:"nudge_failed_at,omitzero"`
 
 	// Rig, Polecat and Branch name the seat the stop acts on; Elapsed is how
 	// long it had held the bead when the stop began.

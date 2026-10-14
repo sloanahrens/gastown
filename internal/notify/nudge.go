@@ -13,7 +13,7 @@ import (
 
 // Nudger delivers one nudge. CLI.Nudge hands its nudges to one when set.
 type Nudger interface {
-	Nudge(ctx context.Context, target, message string) error
+	Nudge(ctx context.Context, target, message string, opts ...NudgeOption) error
 }
 
 // TownNudger delivers a nudge in-process, exactly as `gt nudge <target>
@@ -65,8 +65,9 @@ func (n *TownNudger) getenv() func(string) string {
 	}
 }
 
-// Nudge delivers message to target.
-func (n *TownNudger) Nudge(ctx context.Context, target, message string) error {
+// Nudge delivers message to target: through its queue alone with the Queue
+// option, else by waiting for it to go idle.
+func (n *TownNudger) Nudge(ctx context.Context, target, message string, opts ...NudgeOption) error {
 	if err := ValidateNudge(target, message); err != nil {
 		return err
 	}
@@ -83,6 +84,9 @@ func (n *TownNudger) Nudge(ctx context.Context, target, message string) error {
 	townRoot, _ := workspace.Find(dir)
 	sender := deliver.Sender(dir, townRoot, n.getenv())
 	town := n.newTown(townRoot)
+	if ApplyNudgeOptions(opts).Queue {
+		town.Delivery.Mode = deliver.ModeQueue
+	}
 
 	// Deliver on its own goroutine so a tmux call that hangs past the
 	// deadline cannot hold the caller: the delivery checks ctx before every

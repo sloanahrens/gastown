@@ -38,6 +38,7 @@ type Call struct {
 	// KindNudge
 	Target  string
 	Message string
+	Nudge   notify.NudgeOptions
 
 	// KindEscalate
 	Escalation notify.Escalation
@@ -145,11 +146,11 @@ func (r *Recorder) MailSend(ctx context.Context, to, subject, body string, opts 
 }
 
 // Nudge records a nudge.
-func (r *Recorder) Nudge(ctx context.Context, target, message string) error {
+func (r *Recorder) Nudge(ctx context.Context, target, message string, opts ...notify.NudgeOption) error {
 	if err := notify.ValidateNudge(target, message); err != nil {
 		return err
 	}
-	return r.record(ctx, Call{Kind: KindNudge, Target: target, Message: message})
+	return r.record(ctx, Call{Kind: KindNudge, Target: target, Message: message, Nudge: notify.ApplyNudgeOptions(opts)})
 }
 
 // Escalate records an escalation.

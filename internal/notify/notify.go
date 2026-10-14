@@ -33,8 +33,9 @@ type Notifier interface {
 	// "gastown/witness").
 	MailSend(ctx context.Context, to, subject, body string, opts ...MailOption) error
 	// Nudge delivers message to a live agent session (e.g. "gastown/witness",
-	// "gastown/refinery", "gastown/furiosa").
-	Nudge(ctx context.Context, target, message string) error
+	// "gastown/refinery", "gastown/furiosa"). Without options it waits for the
+	// session to go idle and queues the message if it does not.
+	Nudge(ctx context.Context, target, message string, opts ...NudgeOption) error
 	// Escalate raises an escalation, or records a repeat of the open one
 	// with the same alert key.
 	Escalate(ctx context.Context, e Escalation) error
@@ -102,6 +103,34 @@ func NoNotify() MailOption { return func(o *MailOptions) { o.NoNotify = true } }
 // ApplyMailOptions folds opts into one MailOptions.
 func ApplyMailOptions(opts []MailOption) MailOptions {
 	var o MailOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&o)
+		}
+	}
+	return o
+}
+
+// NudgeOptions are the optional parts of a nudge.
+type NudgeOptions struct {
+	// Queue writes the message to the target's nudge queue and returns. The
+	// default waits for the target to go idle and, for a busy one, keeps
+	// watching it before it returns. Queue never waits on the target, so a
+	// busy target cannot hold the caller to its deadline; use it for a message
+	// that can wait for the target's next turn boundary.
+	Queue bool
+}
+
+// NudgeOption sets one NudgeOptions field.
+type NudgeOption func(*NudgeOptions)
+
+// Queue delivers the nudge through the target's queue alone (gt nudge
+// --mode=queue). It never interrupts the target.
+func Queue() NudgeOption { return func(o *NudgeOptions) { o.Queue = true } }
+
+// ApplyNudgeOptions folds opts into one NudgeOptions.
+func ApplyNudgeOptions(opts []NudgeOption) NudgeOptions {
+	var o NudgeOptions
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&o)
