@@ -1068,3 +1068,48 @@ func TestRestartDaemon_LoadsAJobTheManagerLostAndReplacesTheDaemonBesideIt(t *te
 		t.Errorf("stopped=%v loaded=%v, want the old daemon stopped and the job loaded", calls.stopped, job.loaded)
 	}
 }
+
+// IsRunning reports running with pid 0 while the daemon holds the lock but
+// has not written its PID file yet; waitForDaemon must poll past that window
+// rather than hand callers a PID of 0 to print (gt-2flp3).
+func TestWaitForDaemon_PollsPastPidZero(t *testing.T) {
+	t.Parallel()
+	type read struct {
+		running bool
+		pid     int
+	}
+	tests := []struct {
+		name    string
+		reads   []read
+		wantPID int
+		wantErr bool
+	}{
+		{"pid file already written", []read{{true, 4242}}, 4242, false},
+		{"not yet running, then running", []read{{false, 0}, {true, 4242}}, 4242, false},
+		{"lock held before pid file", []read{{true, 0}, {true, 4242}}, 4242, false},
+		{"lock held for many polls before pid file", []read{{true, 0}, {true, 0}, {true, 0}, {true, 0}, {true, 4242}}, 4242, false},
+		{"pid file never written", []read{{true, 0}}, 0, true},
+		{"never running", []read{{false, 0}}, 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reads := 0
+			c := &daemonControl{
+				sleep: func(time.Duration) {},
+				isRunning: func(string) (bool, int, error) {
+					r := tt.reads[min(reads, len(tt.reads)-1)]
+					reads++
+					return r.running, r.pid, nil
+				},
+			}
+			pid, err := c.waitForDaemon(t.TempDir())
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("waitForDaemon err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if pid != tt.wantPID {
+				t.Errorf("waitForDaemon pid = %d, want %d", pid, tt.wantPID)
+			}
+		})
+	}
+}

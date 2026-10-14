@@ -396,6 +396,11 @@ func (c *daemonControl) startDaemon(townRoot string) (via string, pid int, err e
 const daemonPollInterval = 100 * time.Millisecond
 
 // waitForDaemon polls the lock for up to 3 s and returns the daemon's PID.
+//
+// pid <= 0 never satisfies the wait: IsRunning reports running with pid 0
+// while the daemon holds the lock but has not written its PID file yet
+// (daemon.Run locks first, then runs its startup preflight), and returning
+// then would make the callers announce "Daemon started (PID 0)".
 func (c *daemonControl) waitForDaemon(townRoot string) (int, error) {
 	for range 30 {
 		c.sleep(c.pollInterval)
@@ -403,7 +408,7 @@ func (c *daemonControl) waitForDaemon(townRoot string) (int, error) {
 		if err != nil {
 			return 0, fmt.Errorf("checking daemon status: %w", err)
 		}
-		if running {
+		if running && pid > 0 {
 			return pid, nil
 		}
 	}
