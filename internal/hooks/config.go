@@ -378,7 +378,23 @@ func DefaultOverrides() map[string]*HooksConfig {
 		// matchers are bare tool names, which mergeEntries unions into the base
 		// shellExecutingToolMatcher entry rather than replacing it, so the town-wide guards (pr-
 		// workflow, dangerous-command, container-suite) stay in force here.
+		//
+		// It also drains the session's nudge queue after every tool call
+		// (gt-drwph). The overrun guard queues its split-proposal nudge, and the
+		// UserPromptSubmit drain never fires while a polecat runs tool turns, so
+		// the nudge expired unseen.
 		"polecats": {
+			PostToolUse: []HookEntry{
+				{
+					Matcher: "",
+					Hooks: []Hook{
+						{
+							Type:    "command",
+							Command: gtCommand("gt tap nudge-drain"),
+						},
+					},
+				},
+			},
 			Stop: []HookEntry{
 				{
 					Matcher: "",

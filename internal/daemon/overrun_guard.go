@@ -279,9 +279,11 @@ func (d *Daemon) overrunProdSeams() overrunSeams {
 		nudge: func(seat overrunSeat, msg string) error {
 			ctx, cancel := context.WithTimeout(context.Background(), overrunNudgeTimeout)
 			defer cancel()
-			// Queue mode: the message can wait for the seat's next turn. The
+			// Queue mode: the message waits for the seat's next hook. The
 			// default waits up to 15 s for an idle prompt and then watches the
-			// busy seat for 60 s more, which outlasts this context.
+			// busy seat for 60 s more, which outlasts this context. A seat
+			// running tool turns drains the queue through the polecat
+			// PostToolUse hook, gt tap nudge-drain (gt-drwph).
 			return d.notify().Nudge(ctx, seat.Rig+"/"+seat.Polecat, msg, notify.Queue())
 		},
 	})

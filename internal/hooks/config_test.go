@@ -1356,3 +1356,49 @@ func TestConfigHomeCascade(t *testing.T) {
 		t.Fatalf("loadBase() = %+v, %v; want the $GT_HOME/.gt copy", got, err)
 	}
 }
+
+// TestComputeExpectedNudgeDrainIsPolecatOnly pins the gt-drwph wiring: the
+// polecats role drains its nudge queue after every tool call, because the
+// UserPromptSubmit drain never fires while a polecat runs tool turns and the
+// overrun guard's split-proposal nudge would expire unseen. Other roles keep
+// their existing delivery paths and must not gain the hook.
+func TestComputeExpectedNudgeDrainIsPolecatOnly(t *testing.T) {
+	t.Parallel()
+	home := configHome{home: t.TempDir()}
+
+	const drainCommand = "tap nudge-drain"
+	polecats, err := home.computeExpected("gastown/polecats")
+	if err != nil {
+		t.Fatalf("home.computeExpected(gastown/polecats): %v", err)
+	}
+	found := false
+	for _, entry := range polecats.PostToolUse {
+		for _, h := range entry.Hooks {
+			if strings.Contains(h.Command, drainCommand) {
+				found = true
+				if entry.Matcher != "" {
+					t.Errorf("nudge drain must run after every tool, got matcher %q", entry.Matcher)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Errorf("polecats missing the %q PostToolUse hook, got: %+v", drainCommand, polecats.PostToolUse)
+	}
+
+	for _, target := range []string{"crew", "mayor", "witness", "refinery", "deacon"} {
+		cfg, err := home.computeExpected(target)
+		if err != nil {
+			t.Fatalf("home.computeExpected(%s): %v", target, err)
+		}
+		for _, eventType := range EventTypes {
+			for _, entry := range cfg.GetEntries(eventType) {
+				for _, h := range entry.Hooks {
+					if strings.Contains(h.Command, drainCommand) {
+						t.Errorf("%s must not receive the nudge-drain hook (%s, matcher %q)", target, eventType, entry.Matcher)
+					}
+				}
+			}
+		}
+	}
+}
