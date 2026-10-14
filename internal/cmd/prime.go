@@ -35,6 +35,7 @@ var primeStateJSON bool
 var primeExplain bool
 var primeStep int
 var primeFormula string
+var primeExplainMemoryBead string
 var primeStructuredSessionStartOutput bool
 
 // Prime's external injections are best-effort; role context should still
@@ -124,6 +125,8 @@ func init() {
 		"Print the title and full body of step N (1-based) of the hooked molecule, or of --formula, and exit")
 	primeCmd.Flags().StringVar(&primeFormula, "formula", "",
 		"Formula name for --step (default: the hooked bead's poured molecule)")
+	primeCmd.Flags().StringVar(&primeExplainMemoryBead, "explain-memory", "",
+		"Print how the rig's memories score for this bead, read-only, and exit")
 	rootCmd.AddCommand(primeCmd)
 }
 
@@ -159,6 +162,15 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 	}
 	if primeStep > 0 {
 		return runPrimeStep(RoleContext{Role: roleInfo.Role, Rig: roleInfo.Rig, Polecat: roleInfo.Polecat, TownRoot: townRoot, WorkDir: cwd})
+	}
+
+	// --explain-memory is the other read-only fetch: it reports the memory
+	// scoring for one bead and prints no session context.
+	if cmd.Flags().Changed("explain-memory") {
+		if primeExplainMemoryBead == "" {
+			return fmt.Errorf("--explain-memory needs the bead to explain")
+		}
+		return runPrimeExplainMemory(cmd.OutOrStdout(), RoleContext{Role: roleInfo.Role, Rig: roleInfo.Rig, Polecat: roleInfo.Polecat, TownRoot: townRoot, WorkDir: cwd}, primeExplainMemoryBead)
 	}
 
 	if primeHookMode {
@@ -283,8 +295,10 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 		},
 		handoff:    func() string { return section(func(w io.Writer) { outputHandoffContent(w, ctx) }) },
 		checkpoint: func() string { return section(func(w io.Writer) { outputCheckpointContext(w, ctx) }) },
-		memories:   func() string { return section(func(w io.Writer) { primeTools{out: w}.memoryInject(ctx, cwd) }) },
-		mail:       func() string { return section(func(w io.Writer) { primeTools{out: w}.mailInject(cwd) }) },
+		memories: func() string {
+			return section(func(w io.Writer) { primeTools{out: w}.memoryInject(ctx, cwd, hookedBead) })
+		},
+		mail: func() string { return section(func(w io.Writer) { primeTools{out: w}.mailInject(cwd) }) },
 		startup: func() string {
 			if !primeStartupDirectiveAllowed(hookErr) {
 				return ""
@@ -702,23 +716,27 @@ func (p primeTools) command(workDir, name string, args ...string) (bytes.Buffer,
 // externalTools runs lightweight memory and mail injection in one go.
 // runPrime renders the two as separate payload sections; this keeps the
 // combined behavior for tests.
-func (p primeTools) externalTools(ctx RoleContext, cwd string) {
-	p.memoryInject(ctx, cwd)
+func (p primeTools) externalTools(ctx RoleContext, cwd string, hookedBead *beads.Issue) {
+	p.memoryInject(ctx, cwd, hookedBead)
 	p.mailInject(cwd)
 }
 
-// memoryInject renders the memory index section (skipped in dry-run and for
-// roles that do not render memories).
-func (p primeTools) memoryInject(ctx RoleContext, cwd string) {
+// memoryInject renders the memory section a role's prime carries (skipped in
+// dry-run): the index for crew, and for a polecat the per-bead section its
+// town has turned on (prime_memory.go).
+func (p primeTools) memoryInject(ctx RoleContext, cwd string, hookedBead *beads.Issue) {
 	if primeDryRun {
 		explainTo(p.w(), primeExplain, true, "memory injection: skipped in dry-run mode")
 		return
 	}
-	if !shouldRenderMemories(string(ctx.Role)) {
-		explainTo(p.w(), primeExplain, true, fmt.Sprintf("memory injection: skipped for role %s", ctx.Role))
+	if shouldRenderMemories(string(ctx.Role)) {
+		p.memoryIndex(cwd)
 		return
 	}
-	p.memoryIndex(cwd)
+	if p.polecatBeadMemories(ctx, cwd, hookedBead) {
+		return
+	}
+	explainTo(p.w(), primeExplain, true, fmt.Sprintf("memory injection: skipped for role %s", ctx.Role))
 }
 
 // mailInject renders pending mail (skipped in dry-run).
@@ -737,7 +755,9 @@ func (p primeTools) mailInject(cwd string) {
 // The index is the first section the hook budget evicts, and the roles that
 // do not get it carry their rules in a section that outranks memories — a
 // patrol role's attached formula, a polecat's hooked work — so spending a
-// third of the budget on a section evicted ahead of them buys nothing.
+// third of the budget on a section evicted ahead of them buys nothing. A
+// polecat's own, bead-scoped memory section is a separate one, off until the
+// town turns it on (prime_memory.go).
 func shouldRenderMemories(role string) bool {
 	return strings.EqualFold(role, string(RoleCrew))
 }
