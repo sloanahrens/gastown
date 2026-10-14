@@ -3,6 +3,8 @@ package formula
 import (
 	"strings"
 	"testing"
+
+	"github.com/BurntSushi/toml"
 )
 
 // TestReportOnlyFormulasCloseTheirBeadBeforeDeferred guards gt-hqbkr: gt done
@@ -80,11 +82,11 @@ func TestDeepReviewFilesEveryConfirmedFinding(t *testing.T) {
 		t.Error("deep-review-run still routes findings with the crew-only label")
 	}
 	for _, want := range []string{
-		"File every CONFIRMED finding",
+		"File the CONFIRMED findings",
 		"-p <1|2|3>",
 		"-l review-deep",
 		"names that risk path in `## Constraints`",
-		"queued: <fingerprint> <P1|P2|P3> <file:line> <claim>",
+		"queued: <fingerprint> <P1|P2> <file:line> <claim>",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("deep-review-run lacks %q", want)
@@ -124,5 +126,67 @@ func TestDeepReviewLedgerLoadRunsInAPolecatSession(t *testing.T) {
 		if !strings.Contains(step1, want) {
 			t.Errorf("step 1 lacks the literal-path form %q", want)
 		}
+	}
+}
+
+// TestDeepReviewSpendsFewerTokensPerFinding guards gt-3dozz: the slice is a byte
+// budget, P3 findings are batched through the script instead of filed one by
+// one, reviewers grep tests instead of reading them whole, and a run where no
+// finding was refuted is flagged.
+func TestDeepReviewSpendsFewerTokensPerFinding(t *testing.T) {
+	t.Parallel()
+	raw, err := GetEmbeddedFormulaContent("deep-review-run")
+	if err != nil {
+		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
+	}
+	text := string(raw)
+	if strings.Contains(text, "read each whole file with its tests") {
+		t.Error("deep-review-run still has reviewers read whole test files")
+	}
+	for _, want := range []string{
+		"--slice-bytes {{slice_bytes}}",
+		"grep -n <symbol>",
+		"one subagent per three findings, at most {{max_verifiers}}",
+		"refuted=<n> of <total>",
+		"UNCHALLENGED: no finding was refuted",
+		"p3: <YYYY-MM-DD> <fingerprint> <file:line> <claim>",
+		"bash scripts/deep-review.sh batches --prev-notes $D/prev-notes.txt",
+		"batch beads included",
+		"reviewed-lines.txt",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("deep-review-run lacks %q", want)
+		}
+	}
+	// The cursor stays the last ledger line, after the reviewed: notes.
+	if strings.Index(text, "reviewed-lines.txt") > strings.Index(text, "**9. Commit the cursor, last.**") {
+		t.Error("deep-review-run writes the reviewed: lines after the cursor")
+	}
+
+	mol, err := GetEmbeddedFormulaContent("mol-deep-review")
+	if err != nil {
+		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
+	}
+	var f struct {
+		Vars map[string]struct {
+			Default string `toml:"default"`
+		} `toml:"vars"`
+	}
+	if _, err := toml.Decode(string(mol), &f); err != nil {
+		t.Fatalf("decode mol-deep-review: %v", err)
+	}
+	for name, want := range map[string]string{
+		"slice_bytes":   "250000",
+		"slice_files":   "40",
+		"max_reviewers": "4",
+		"max_verifiers": "4",
+		"max_beads":     "5",
+	} {
+		if got := f.Vars[name].Default; got != want {
+			t.Errorf("mol-deep-review var %s default = %q, want %q", name, got, want)
+		}
+	}
+	if !strings.Contains(string(mol), "| slice_bytes |") {
+		t.Error("mol-deep-review's variable table lacks slice_bytes")
 	}
 }

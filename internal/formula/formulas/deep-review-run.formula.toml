@@ -22,7 +22,7 @@ bd list -l scheduled:deep-review --all --limit 60 --json > /tmp/deep-review-{{is
   git fetch origin {{base_branch}} &&
   bash scripts/deep-review.sh plan --landings /tmp/deep-review-{{issue}}/landings-all.jsonl \\
     --prev-notes /tmp/deep-review-{{issue}}/prev-notes.txt --repo . --ref origin/{{base_branch}} \\
-    --slice {{slice_files}} --out /tmp/deep-review-{{issue}} > /tmp/deep-review-{{issue}}/plan.txt
+    --slice {{slice_files}} --slice-bytes {{slice_bytes}} --out /tmp/deep-review-{{issue}} > /tmp/deep-review-{{issue}}/plan.txt
 echo "plan exit: $?"; cat /tmp/deep-review-{{issue}}/plan.txt
 ```
 This block writes the literal path: the polecat-paths guard refuses a `mkdir`
@@ -58,7 +58,10 @@ empty queue: escalate as step 1 does and exit `ESCALATED`.
   <landed_commit>` (land commits are merges; the first parent is main)
   against the code on origin/{{base_branch}}. Group landings that touch the
   same package under one reviewer.
-- the files in `$D/slice.txt`: read each whole file with its tests.
+- the files in `$D/slice.txt`: read each file whole. Open a test file only by
+  grepping it (`git show origin/{{base_branch}}:<test path> | grep -n <symbol>`)
+  for the symbols under review, and read the matching test functions, not the
+  whole test file.
 
 Every reviewer prompt carries: read-only; never fetch or pull in
 mayor/rig; cite file:line on origin/{{base_branch}}; report a finding only
@@ -70,22 +73,38 @@ included (`bash scripts/deep-review.sh seen --prev-notes $D/prev-notes.txt
 `internal/daemon/daemon.go:StopDaemon:held-lock-unlinked`. Each finding returns:
 fingerprint, file:line, claim (one line), failure scenario, severity P1|P2|P3.
 
-**5. Verify (at most {{max_verifiers}} subagents).** Hand every finding to a
-verifier whose job is to refute it: read the cited code, trace the scenario,
-and answer CONFIRMED or REFUTED with the lines that decide it. Drop REFUTED.
-Drop a finding whose fix is already on origin/{{base_branch}}.
+**5. Verify (one subagent per three findings, at most {{max_verifiers}}).**
+Hand each verifier up to three findings, with the job of refuting each: read the
+cited code, trace the scenario, and answer CONFIRMED or REFUTED with the lines
+that decide it. Drop REFUTED. Drop a finding whose fix is already on
+origin/{{base_branch}}. A finding past the verifiers' capacity is left out of
+this run and unrecorded; a later run reports it again. Count `total` (findings
+verified) and `refuted` for the digest.
 
-**6. File every CONFIRMED finding.** In priority order, P1 then P2 then P3, each
-finding becomes one shaped bead labelled `review-deep` with the finding's
-priority, whatever path it cites: polecats fix it, and om review and the
-landing gate still gate the landing.
+**6. File the CONFIRMED findings.** Each P1 and P2 finding, P1 first, becomes one
+shaped bead labelled `review-deep` with the finding's priority, whatever path it
+cites: polecats fix it, and om review and the landing gate still gate the
+landing. A P3 finding (a queued P3 from step 3 included) is not filed alone.
+Record it, add the same line to the ledger file (this run's notes are not in
+it yet), then list the batches that are ready:
+```bash
+D=/tmp/deep-review-{{issue}}
+gt bead note {{issue}} "p3: <YYYY-MM-DD> <fingerprint> <file:line> <claim>"
+echo "p3: <YYYY-MM-DD> <fingerprint> <file:line> <claim>" >> /tmp/deep-review-{{issue}}/prev-notes.txt
+bash scripts/deep-review.sh batches --prev-notes $D/prev-notes.txt
+```
+`batches` prints `batch <package dir>` and then that package's p3 lines. File
+one bead per `batch` block: label `review-deep`, priority 3, a title naming the
+package, `## Goal` listing each finding as file:line and claim, one
+`## Acceptance` checkbox per finding, and `## Size` one worker.
 - A finding that cites a guard (`internal/cmd/tap_guard*`, `scripts/guards/`),
   Dolt data deletion (`internal/doltserver/`, `internal/doltbackup/`), process
   lifecycle (`internal/daemon/`, `internal/supervisor/`, `internal/estop/`) or
   an install script: the bead body names that risk path in `## Constraints`, so
   the reviewer reads the diff with care.
-- Cap: at most {{max_beads}} beads per run. A finding past the cap is `queued`
-  in step 7, and the next run files it first.
+- Cap: at most {{max_beads}} beads per run, batch beads included. A P1 or P2
+  finding past the cap is `queued` in step 7, and the next run files it first;
+  a batch past the cap stays unfiled, and the next `batches` lists it again.
 
 Write the bead body to `/tmp/deep-review-{{issue}}/body.md` (the literal path)
 with a quoted heredoc (no backticks or code in double-quoted text). It needs `## Goal`, `## Constraints`, `## Out of scope`,
@@ -99,20 +118,26 @@ gt spec lint <new id>          # must exit 0; fix the body until it does
 With `{{dry_run}}` `true`, file nothing: every confirmed finding is `queued` and
 the digest lists it under `would file`.
 
-**7. Record the findings.** One line per CONFIRMED finding, before any cursor:
+**7. Record the findings, before any cursor.** A `finding:` line per finding a
+bead covers (a batch bead covers each of its findings), a `queued:` line per P1
+or P2 finding past the cap, and a `reviewed:` note per line of
+`$D/reviewed-lines.txt` (each line is already `reviewed: <date> <path>`):
 ```bash
 gt bead note {{issue}} "finding: <fingerprint> <bead id | digest-only>"
-gt bead note {{issue}} "queued: <fingerprint> <P1|P2|P3> <file:line> <claim>"
+gt bead note {{issue}} "queued: <fingerprint> <P1|P2> <file:line> <claim>"
+gt bead note {{issue}} "<one line of reviewed-lines.txt>"
 gt bead comment {{issue}} "$(cat $D/digest.md)"
 ```
-A filed bead takes a `finding:` line naming it; a finding past the cap, and
-every finding of a dry run, takes a `queued:` line, which later runs pick up in
-step 3 until a `finding:` line names it. `digest-only` is what a run before this
+A filed bead takes a `finding:` line naming it; a P1 or P2 finding past the
+cap, and every one of a dry run, takes a `queued:` line, which later runs pick up
+in step 3 until a `finding:` line names it. A P3 finding has its `p3:` line from
+step 6 and takes a `finding:` line once a batch bead covers it. `digest-only` is what a run before this
 one wrote for a finding it filed no bead for: such a line stays as written, and
 the fingerprint is `seen`, so the finding is not re-filed. The digest has:
 landings reviewed (bead, commit), `unparsed=` from the plan, slice files read,
 reviewers and verifiers used, then numbered `filed`, `would file` and
-`queued` lists and the count of `refuted`.
+`queued` lists and `refuted=<n> of <total>`. When total >= 5 and refuted = 0,
+add the line `UNCHALLENGED: no finding was refuted`.
 
 **8. Clear the risk-path items you covered** (live runs only; skip when
 `{{dry_run}}` is `true`). For each reviewed landing: `gt bead review <bead>
@@ -126,6 +151,7 @@ gt bead note {{issue}} "cursor: <reviewed_until_new from the plan> <rotation_cur
 ```
 
 **Done when:** the plan exited 0, the digest comment, every `finding:` and
-`queued:` line and then the `cursor:` line are on {{issue}} (`bd show
-{{issue}}`), and (live runs) every filed bead passed `gt spec lint`.
+`queued:`, `reviewed:` and `p3:` line and then the `cursor:` line are on
+{{issue}} (`bd show {{issue}}`), and (live runs) every filed bead passed
+`gt spec lint`.
 """
