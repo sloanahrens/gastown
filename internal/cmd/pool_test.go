@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
@@ -860,6 +863,113 @@ func TestPoolShowNamesTheDeadHookedSeatsInTheCount(t *testing.T) {
 		}
 	}
 }
+
+// TestPoolShowAndTheTickAgreeOnAMixedPoolsSessionlessSeat is gt-2q283 through
+// both readers of one seat picture: `gt pool show`'s page and the spec
+// dispatcher's tick line are built from the same count (poolSeatSessions →
+// specRosterFrom), so the counts an operator reads on the page are the counts
+// the dispatcher refuses on.
+//
+// The town is the mixed pool of 2026-10-14: the pool's own seat is
+// claude-sonnet with two seats, the hooked seat is deepseek-flash with two, and
+// a flash seat's session is gone with its bead still hooked. On 11:34 the tick
+// line read claude-sonnet 4/2 (1 dead-hooked), deepseek-flash 0/2 — the crashed
+// seat counted on the pool's own agent, so the pool read full with two Sonnet
+// sessions in the town and the other seat read empty.
+func TestPoolShowAndTheTickAgreeOnAMixedPoolsSessionlessSeat(t *testing.T) {
+	t.Parallel()
+	root := poolTestTown(t, mixedPoolTestSettings, mixedPoolTestDaemon)
+	writeTestRigsConfig(t, root, "gastown")
+	writeTownPolecatDir(t, root, "gastown", "ember")
+	// The seat was slung on the hooked seat's agent, and its session is gone:
+	// the record is the only place that still says so.
+	writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "ember"}, root,
+		intent.Record{Agent: "deepseek-flash"})
+	reads := poolSeatReadsAnswering(t, deferredExitFields(), assignedActiveWork("gt-held"))
+
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := poolSeatSessionsWith(&fakeLister{}, root, poolDispositionAnswering(root, reads), nil, ts.PolecatPool)
+	if err != nil {
+		t.Fatalf("poolSeatSessionsWith: %v", err)
+	}
+
+	// The tick line: the seats the dispatcher runs, occupied from the roster.
+	budget := poolTestTownBudget(t, root)
+	roster := specRosterFrom(sessions, ts)
+	budget.SetLive(roster.Live)
+	budget.SetDeadHooked(roster.DeadHooked)
+
+	// The page: the same seats, occupied from the same seats' picture.
+	view, err := loadPoolSeats(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := poolLiveForWith(root, func(pool *config.PolecatPool) ([]poolSession, error) {
+		return poolSeatSessionsWith(&fakeLister{}, root, poolDispositionAnswering(root, reads), nil, pool)
+	})
+	var out bytes.Buffer
+	if err := renderPoolShow(&out, root, view, live); err != nil {
+		t.Fatal(err)
+	}
+	page := out.String()
+
+	// The crash is on the seat it was slung on, in both readings, and the
+	// pool's own seat is empty because nothing live sits on it.
+	for _, want := range []string{"claude-sonnet 0/2", "deepseek-flash 1/2 (1 dead-hooked)"} {
+		if !strings.Contains(budget.Picture(), want) {
+			t.Errorf("the tick line reads %q, want it to name %q", budget.Picture(), want)
+		}
+	}
+	for _, seat := range budget.Seats {
+		line := seatLineFor(page, seat.Agent)
+		if line == "" {
+			t.Fatalf("the page prints no line for seat %s:\n%s", seat.Agent, page)
+		}
+		if got := fmt.Sprintf("live %d/%d", seat.Live, seat.Cap); !strings.Contains(line, got) {
+			t.Errorf("the page reads %q for seat %s, the tick line counts it %q:\n%s", line, seat.Agent, got, page)
+		}
+	}
+	// The town's total is the one number both readings already agreed on, and
+	// it is not what changed: one polecat is one polecat.
+	if !strings.Contains(page, "live 1/4") {
+		t.Errorf("the page's total should count the crashed seat once:\n%s", page)
+	}
+}
+
+// seatLineFor returns the pool-show line for agent, or "".
+func seatLineFor(page, agent string) string {
+	for _, line := range strings.Split(page, "\n") {
+		if strings.Contains(line, " "+agent+" ") || strings.HasSuffix(line, " "+agent) {
+			return line
+		}
+	}
+	return ""
+}
+
+// mixedPoolTestSettings is the 2026-10-14 town: the pool's seat is
+// claude-sonnet (also the polecat role default) with two seats, and the town
+// caps every seat together at four.
+const mixedPoolTestSettings = `{
+  "type": "town-settings",
+  "version": 1,
+  "polecat_pool": {"agent": "claude-sonnet", "max_seats": 2, "max_total": 4},
+  "role_agents": {"polecat": "claude-sonnet"}
+}
+`
+
+// mixedPoolTestDaemon puts the dispatcher's second seat on deepseek-flash with
+// two seats.
+const mixedPoolTestDaemon = `{
+  "type": "daemon-patrol-config",
+  "version": 1,
+  "patrols": {
+    "spec_dispatch": {"enabled": true, "interval": "60s", "hooked_agent": "deepseek-flash", "max_hooked": 2}
+  }
+}
+`
 
 // TestPoolShowReadsNoSeatPictureWithoutARigRegistry pins the guard that keeps
 // the page off the tmux server where there is nothing to count: a town whose rig

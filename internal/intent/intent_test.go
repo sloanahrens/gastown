@@ -324,6 +324,73 @@ func TestClearSubmittedWithoutRecordWritesNothing(t *testing.T) {
 	}
 }
 
+// TestMarkSlungRecordsTheAgentTheSeatRuns is gt-2q283: the session's GT_AGENT
+// dies with the session, so the record is what a sessionless seat — mid-landing
+// or waiting for its supervised restart — is counted by. MarkSlung writes it on
+// a seat that has no record yet and overwrites the agent a later sling runs the
+// seat on, so a reused seat is never counted on its predecessor's agent.
+func TestMarkSlungRecordsTheAgentTheSeatRuns(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 10, 14, 11, 34, 0, 0, time.UTC)
+
+	if err := MarkSlung(town, polecat, "deepseek-flash", "gt sling", now); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := Read(town, polecat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Agent != "deepseek-flash" {
+		t.Fatalf("record = %+v, want agent deepseek-flash", rec)
+	}
+	if rec.Held() || rec.Paused || rec.Submitted() || rec.EffectiveDesired() != DesiredRun {
+		t.Fatalf("recording an agent is not a hold or a submission: %+v", rec)
+	}
+
+	// The seat is reused on another agent: the record follows the sling.
+	if err := MarkSlung(town, polecat, "claude-sonnet", "gt sling", now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if rec, _ = Read(town, polecat); rec.Agent != "claude-sonnet" {
+		t.Fatalf("record = %+v, want agent claude-sonnet", rec)
+	}
+}
+
+// An empty agent is the polecat role default, and is recorded as no agent at
+// all, which is what the readers that count a sessionless seat fall back to.
+func TestMarkSlungRecordsAnEmptyAgentAsNone(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := MarkSlung(town, polecat, "  ", "gt sling", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if rec, _ := Read(town, polecat); rec.Agent != "" {
+		t.Fatalf("record = %+v, want no agent", rec)
+	}
+}
+
+// A park outranks a dispatch, and MarkSlung never lifts one: an operator
+// inspecting the seat still owns it.
+func TestMarkSlungLeavesAHoldAlone(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if _, err := Update(town, polecat, func(r *Record) error {
+		r.Desired, r.Reason = DesiredPark, "operator inspecting"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := MarkSlung(town, polecat, "deepseek-flash", "gt sling", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := Read(town, polecat)
+	if rec.Desired != DesiredPark || rec.Agent != "" {
+		t.Fatalf("MarkSlung wrote to a parked seat: %+v", rec)
+	}
+}
+
 func TestClearLandedStopsTheSubmittedSeat(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()

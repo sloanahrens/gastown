@@ -147,6 +147,12 @@ type Record struct {
 	LastAction *Action     `json:"last_action,omitempty"`
 	Progress   *Progress   `json:"progress,omitempty"`
 
+	// Agent is the agent this seat was slung on, recorded when a sling starts
+	// its session (MarkSlung). The session's GT_AGENT dies with the session, so
+	// this is the seat's only surviving statement of which agent it runs, and
+	// the thing a reader counts a sessionless seat by (gt-2q283).
+	Agent string `json:"agent,omitempty"`
+
 	// The pause marker fields, unchanged in name and meaning. Paused is
 	// always serialized and always equals Held().
 	Paused          bool      `json:"paused"`
@@ -222,6 +228,30 @@ func ClearSubmitted(townRoot string, s Seat, actor string, now time.Time) error 
 		}
 		r.Desired = DesiredRun
 		r.WorkBead = ""
+		r.Actor, r.UpdatedAt = actor, now.UTC()
+		return nil
+	})
+	return err
+}
+
+// MarkSlung records the agent a sling is starting this seat's session on. The
+// session carries the agent as GT_AGENT and takes it away when it ends, so the
+// record is what is left to say which agent a seat runs when the seat has no
+// session at all — mid-landing after `gt done`, or waiting for its supervised
+// restart. A reader that counts the pool's seats per agent (the spec
+// dispatcher's roster) has nothing else to read them from (gt-2q283).
+//
+// An empty agent is recorded as it is: the seat runs the polecat role default
+// then, and a reader falls back to that same default for it.
+//
+// A hold is left alone, the way MarkSubmitted leaves one: an operator park or a
+// freeze still wins.
+func MarkSlung(townRoot string, s Seat, agent, actor string, now time.Time) error {
+	_, err := Update(townRoot, s, func(r *Record) error {
+		if r.Held() {
+			return nil
+		}
+		r.Agent = strings.TrimSpace(agent)
 		r.Actor, r.UpdatedAt = actor, now.UTC()
 		return nil
 	})
