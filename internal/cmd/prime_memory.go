@@ -133,13 +133,11 @@ func (p primeTools) appendRecall(ctx RoleContext, beadID string, rows []beadMemo
 }
 
 // recalledKeys returns the keys the section carries, in the order it carries
-// them — the ranked order beadMemoryRows produced.
+// them.
 func recalledKeys(rows []beadMemory) []string {
 	keys := make([]string, 0, len(rows))
-	for _, row := range rows {
-		if row.selected {
-			keys = append(keys, row.mem.Key)
-		}
+	for _, row := range selectedInOrder(rows) {
+		keys = append(keys, row.mem.Key)
 	}
 	return keys
 }
@@ -197,24 +195,37 @@ func memoryCorpus(kvs map[string]string) []memrecall.Memory {
 // beadMemoryRows scores every candidate memory in corpus against bead's query
 // and returns them ranked by final score, then key.
 //
-// The section itself renders memrecall.Select's order; this ranking is the
-// diagnostic one, shared by the footer and --explain-memory.
+// The section itself renders memrecall.Select's order, which each selected
+// row carries as order; this ranking is the diagnostic one, shared by the
+// footer and --explain-memory.
+//
+// A candidate is a memory Select would carry were the budget unlimited. That
+// is the scored memories and the pinned ones Select takes up to its per-scope
+// cap, so a pinned memory the cap turns away is no candidate: Select never
+// weighed it, and calling it a match would have the footer and
+// --explain-memory report a memory that was never in the running.
 func beadMemoryRows(corpus []memrecall.Memory, bead *beads.Issue, now time.Time) []beadMemory {
 	q, paths := beadMemoryQuery(bead)
 	selected := memrecall.Select(q, paths, corpus, now, memrecall.Budget)
+	order := make(map[string]int, len(selected))
 	texts := make(map[string]string, len(selected))
-	for _, s := range selected {
+	for i, s := range selected {
+		order[s.Key] = i
 		texts[s.Key] = s.Text
 	}
+	candidates := make(map[string]struct{}, len(corpus))
+	for _, s := range memrecall.Select(q, paths, corpus, now, unlimitedBudget) {
+		candidates[s.Key] = struct{}{}
+	}
 
-	rows := make([]beadMemory, 0, len(corpus))
+	rows := make([]beadMemory, 0, len(candidates))
 	for _, m := range corpus {
-		raw, score := memrecall.Score(q, paths, m, now)
-		if !beadMemoryCandidate(m, raw) {
+		if _, ok := candidates[m.Key]; !ok {
 			continue
 		}
+		raw, score := memrecall.Score(q, paths, m, now)
 		text, kept := texts[m.Key]
-		rows = append(rows, beadMemory{mem: m, raw: raw, score: score, text: text, selected: kept})
+		rows = append(rows, beadMemory{mem: m, raw: raw, score: score, text: text, selected: kept, order: order[m.Key]})
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].score != rows[j].score {
@@ -235,15 +246,26 @@ type beadMemory struct {
 	text string
 	// selected reports whether the section carries the memory.
 	selected bool
+	// order is the memory's position in Select's output, the order the section
+	// renders in. It means nothing unless selected.
+	order int
 }
 
-// beadMemoryCandidate reports whether memrecall counts a memory as a candidate
-// at all: an always-and-durable memory is pinned whatever it scores, and any
-// other memory has to clear CandidateFloor on its raw score. It restates
-// Select's own switch (memrecall.go), which the footer and --explain-memory
-// need but the package does not export.
-func beadMemoryCandidate(m memrecall.Memory, raw float64) bool {
-	return m.Always && m.Durable || raw >= memrecall.CandidateFloor
+// unlimitedBudget stands in for "no budget" when asking Select which memories
+// are candidates; a non-positive budget would mean memrecall.Budget instead.
+const unlimitedBudget = 1 << 30
+
+// selectedInOrder returns the rows the section carries, in the order it
+// renders them: memrecall.Select's, pinned memories first.
+func selectedInOrder(rows []beadMemory) []beadMemory {
+	var out []beadMemory
+	for _, row := range rows {
+		if row.selected {
+			out = append(out, row)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].order < out[j].order })
+	return out
 }
 
 // beadMemoryQuery builds the bead side of memrecall's comparison: its title,
@@ -264,7 +286,16 @@ func beadMemoryQuery(bead *beads.Issue) (map[string]struct{}, []string) {
 func beadGoalAndConstraints(description string) string {
 	var kept []string
 	want := false
+	var fence codeFence
 	for _, line := range strings.Split(description, "\n") {
+		// A line inside a fenced code block is text, whatever it starts with:
+		// a shell comment or a shebang is not a section heading.
+		if fence.inside(line) {
+			if want {
+				kept = append(kept, line)
+			}
+			continue
+		}
 		if name, ok := markdownHeading(line); ok {
 			want = strings.EqualFold(name, "Goal") || strings.EqualFold(name, "Constraints")
 			continue
@@ -279,17 +310,51 @@ func beadGoalAndConstraints(description string) string {
 // markdownHeading returns a heading line's first word, so a section named by
 // title ("## Goal", "# Constraints", "## Goal:") is recognized however it is
 // spelled.
+//
+// It follows markdown's ATX rule: one to six #s, then a space, and an indent of
+// at most three spaces. "#4821", "#!/bin/sh" and "#######" are text.
 func markdownHeading(line string) (string, bool) {
-	trimmed := strings.TrimSpace(line)
-	if !strings.HasPrefix(trimmed, "#") {
+	if indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]; len(indent) > 3 || strings.Contains(indent, "\t") {
 		return "", false
 	}
-	text := strings.TrimSpace(strings.TrimLeft(trimmed, "#"))
+	trimmed := strings.TrimSpace(line)
+	hashes := len(trimmed) - len(strings.TrimLeft(trimmed, "#"))
+	if hashes == 0 || hashes > 6 || len(trimmed) == hashes || trimmed[hashes] != ' ' {
+		return "", false
+	}
+	text := strings.TrimSpace(trimmed[hashes:])
 	if text == "" {
 		return "", false
 	}
 	name, _, _ := strings.Cut(text, " ")
 	return strings.TrimSuffix(name, ":"), true
+}
+
+// codeFence tracks whether a line sits inside a fenced code block (``` or ~~~,
+// three or more, closed by the same character at least as long).
+type codeFence struct {
+	char byte
+	size int
+}
+
+// inside reports whether line belongs to the block, fence lines included, and
+// advances the state past it.
+func (f *codeFence) inside(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if f.size > 0 {
+		if trimmed != "" && strings.Trim(trimmed, string(f.char)) == "" && len(trimmed) >= f.size {
+			f.size = 0
+		}
+		return true
+	}
+	for _, c := range []byte{'`', '~'} {
+		n := len(trimmed) - len(strings.TrimLeft(trimmed, string(c)))
+		if n >= 3 && (c != '`' || !strings.Contains(trimmed[n:], "`")) {
+			f.char, f.size = c, n
+			return true
+		}
+	}
+	return false
 }
 
 // beadMemoryPaths returns the file paths a bead names: the file references
@@ -347,16 +412,17 @@ func renderBeadMemorySection(rows []beadMemory, beadID string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n%s\n\n", beadMemoryHeading)
 
-	var dropped []beadMemory
 	selectedBytes := 0
-	for _, row := range rows {
-		if !row.selected {
-			dropped = append(dropped, row)
-			continue
-		}
+	for _, row := range selectedInOrder(rows) {
 		b.WriteString(row.text)
 		b.WriteString("\n")
 		selectedBytes += len(row.text)
+	}
+	var dropped []beadMemory
+	for _, row := range rows {
+		if !row.selected {
+			dropped = append(dropped, row)
+		}
 	}
 	if footer := beadMemoryFooter(dropped, beadID, memrecall.Budget-selectedBytes); footer != "" {
 		b.WriteString("\n")
