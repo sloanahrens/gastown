@@ -14,9 +14,7 @@ Use the bootstrap script instead:
   --rig nightrider_local \
   --local-repo /gt/nightRider \
   --prefix nr \
-  --polecat-agent claude \
-  --witness-agent claude-haiku \
-  --refinery-agent claude-haiku
+  --polecat-agent claude
 ```
 
 If you omit `--remote`, the script registers the rig with `file://<local-repo>`.
@@ -29,9 +27,16 @@ What this does:
   standard rig container instead of inheriting a hand-built one.
 - Reuses objects from the local repo, so bootstrap stays fast and does not modify the
   source repo.
-- Leaves the resulting rig with the normal `.repo.git`, `mayor/rig`, `refinery/rig`,
-  `settings/`, and `.beads/` layout that Gas Town expects.
-- Optionally pins per-rig role agents in `settings/config.json`.
+- Leaves the resulting rig with the normal `.repo.git`, `settings/`, and `.beads/`
+  layout that Gas Town expects.
+- Optionally pins the polecat agent in `settings/config.json`.
+
+## Landing
+
+The daemon landing worker lands the rig's work through Forgejo and fails closed for a
+rig without a `merge_queue.forgejo` block in `<rig>/settings/config.json`. The bootstrap
+does not write that block; before polecats can land work, follow
+[the Forgejo runbook](../forgejo-runbook.md).
 
 When to still use `--adopt`:
 
