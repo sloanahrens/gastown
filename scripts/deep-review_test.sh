@@ -571,17 +571,44 @@ audit_rc() { # prints the exit code; stdout to $TMP/audit.out, stderr to $TMP/au
   echo "$rc"
 }
 
-# Stub gt and bd that print a cobra-style command list for --help.
+# Stub gt and bd, cobra-like. Bare --help prints the top-level command list.
+# "<word> --help" prints help for the words the stub knows but does not list
+# (gt unhook, bd stats), prints nothing and fails for "weird", and says
+# unknown command for any other word. Every call is appended to $STUB_LOG, and
+# any call that is not a lone --help or "<word> --help" is a failure.
 mkdir -p "$TMP/dbin"
 cat > "$TMP/dbin/gt" <<'STUB'
 #!/usr/bin/env bash
-[ "${1:-}" = "--help" ] || exit 1
-printf 'Gas Town stub\n\nUsage:\n  gt [command]\n\nWork Management:\n  done         Submit work\n  hook         Show the hook\n\nAdditional Commands:\n  help         Help about any command\n\nFlags:\n  -h, --help   help for gt\n'
+[ -z "${STUB_LOG:-}" ] || echo "gt $*" >> "$STUB_LOG"
+if [ "$*" = "--help" ]; then
+  printf 'Gas Town stub\n\nUsage:\n  gt [command]\n\nWork Management:\n  done         Submit work\n  hook         Show the hook\n\nAdditional Commands:\n  help         Help about any command\n\nFlags:\n  -h, --help   help for gt\n'
+  exit 0
+fi
+if [ $# -eq 2 ] && [ "$2" = "--help" ]; then
+  case "$1" in
+    unhook) printf 'Detach work from the hook\n\nUsage:\n  gt unhook [flags]\n'; exit 0 ;;
+    weird) exit 1 ;;
+  esac
+  printf 'Error: unknown command "%s" for "gt"\nRun '"'"'gt --help'"'"' for usage.\n' "$1" >&2
+  exit 1
+fi
+exit 1
 STUB
 cat > "$TMP/dbin/bd" <<'STUB'
 #!/usr/bin/env bash
-[ "${1:-}" = "--help" ] || exit 1
-printf 'Issues stub\n\nUsage:\n  bd [flags]\n  bd [command]\n\nWorking With Issues:\n  list              List issues\n  show              Show an issue\n\nFlags:\n  -h, --help   help for bd\n'
+[ -z "${STUB_LOG:-}" ] || echo "bd $*" >> "$STUB_LOG"
+if [ "$*" = "--help" ]; then
+  printf 'Issues stub\n\nUsage:\n  bd [flags]\n  bd [command]\n\nWorking With Issues:\n  list              List issues\n  show              Show an issue\n\nFlags:\n  -h, --help   help for bd\n'
+  exit 0
+fi
+if [ $# -eq 2 ] && [ "$2" = "--help" ]; then
+  case "$1" in
+    stats) printf 'Show statistics\n\nUsage:\n  bd stats [flags]\n'; exit 0 ;;
+  esac
+  printf 'Error: unknown command "%s" for "bd"\nRun '"'"'bd --help'"'"' for usage.\n' "$1" >&2
+  exit 1
+fi
+exit 1
 STUB
 chmod +x "$TMP/dbin/gt" "$TMP/dbin/bd"
 
@@ -700,6 +727,55 @@ rc=0
 PATH="$TMP/nobin" "$BASH" "$DR" docs-audit --repo "$DREPO" --ref c3 --now "$NOW" --out "$TMP/da4" > "$TMP/audit.out" 2> "$TMP/audit.err" || rc=$?
 assert_eq "exit 0" "0" "$rc"
 assert_eq "no dead_cmds without gt and bd" "12 README.md dead_paths=2 dead_cmds=0 code_changed=2" "$(head -n 1 "$TMP/da4/docs-audit.txt")"
+
+echo "docs-audit: a command the listing lacks is confirmed with --help"
+CREPO1="$TMP/crepo1"
+mkrepo "$CREPO1" internal/a/one.go
+mkdir -p "$CREPO1/docs"
+cat > "$CREPO1/docs/cmds.md" <<'MD'
+Listed: `gt done` and `bd list`. Not listed but they run: `gt unhook` and `bd stats`.
+Unknown: `gt zap` and `bd nope`. Fails without saying unknown: `gt weird`. Again: `gt zap`.
+MD
+cat > "$CREPO1/docs/more.md" <<'MD'
+Same words in a second doc: `gt unhook`, `gt zap`.
+MD
+git -C "$CREPO1" add -A; git -C "$CREPO1" commit -q -m docs
+: > "$TMP/stub1.log"
+rc="$(STUB_LOG="$TMP/stub1.log" PATH="$TMP/dbin:$PATH" audit_rc --repo "$CREPO1" --now "$NOW" --out "$TMP/dc1")"
+assert_eq "exit 0" "0" "$rc"
+assert_eq "gt unhook, bd stats and gt weird answer --help, so only gt zap and bd nope are dead" "10 docs/cmds.md dead_paths=0 dead_cmds=2 code_changed=0" "$(grep ' docs/cmds.md ' "$TMP/dc1/docs-audit.txt")"
+assert_eq "the same candidate in a second doc is judged the same way" "5 docs/more.md dead_paths=0 dead_cmds=1 code_changed=0" "$(grep ' docs/more.md ' "$TMP/dc1/docs-audit.txt")"
+assert_eq "each candidate is asked once and judged by its answer" "bd nope dead
+bd stats alive
+gt unhook alive
+gt weird alive
+gt zap dead" "$(LC_ALL=C sort "$TMP/dc1/cmd-checks.txt")"
+assert_eq "the only calls are the two listings and one <word> --help per candidate" "bd --help
+bd nope --help
+bd stats --help
+gt --help
+gt unhook --help
+gt weird --help
+gt zap --help" "$(LC_ALL=C sort "$TMP/stub1.log")"
+
+echo "docs-audit: at most 20 confirming --help calls, best-scoring docs first"
+CREPO2="$TMP/crepo2"
+mkrepo "$CREPO2" internal/a/one.go
+mkdir -p "$CREPO2/docs"
+for n in $(seq -w 1 15); do printf '`gt yy%s` ' "$n"; done > "$CREPO2/docs/high.md"
+for n in $(seq -w 1 10); do printf '`gt zz%s` ' "$n"; done > "$CREPO2/docs/low.md"
+git -C "$CREPO2" add -A; git -C "$CREPO2" commit -q -m docs
+: > "$TMP/stub2.log"
+rc="$(STUB_LOG="$TMP/stub2.log" PATH="$TMP/dbin:$PATH" audit_rc --repo "$CREPO2" --now "$NOW" --out "$TMP/dc2")"
+assert_eq "exit 0" "0" "$rc"
+assert_eq "20 calls beyond the two listings" "20" "$(grep -c -v -x -e 'gt --help' -e 'bd --help' "$TMP/stub2.log")"
+assert_eq "the higher-scoring doc is asked about first: all 15 of its commands count dead" "75 docs/high.md dead_paths=0 dead_cmds=15 code_changed=0" "$(grep ' docs/high.md ' "$TMP/dc2/docs-audit.txt")"
+assert_eq "the lower one gets the 5 calls left; the other 5 are not counted dead" "25 docs/low.md dead_paths=0 dead_cmds=5 code_changed=0" "$(grep ' docs/low.md ' "$TMP/dc2/docs-audit.txt")"
+assert_eq "the 5 past the cap are recorded as skipped" "5" "$(grep -c ' skipped$' "$TMP/dc2/cmd-checks.txt")"
+
+echo "docs-audit: the confirming calls pass --help and nothing else"
+assert_eq "no call without --help" "0" "$(cat "$TMP/stub1.log" "$TMP/stub2.log" | grep -c -v -e '--help$' || true)"
+assert_eq "no call with more than one word before --help" "0" "$(cat "$TMP/stub1.log" "$TMP/stub2.log" | awk 'NF > 3' | wc -l | tr -d ' ')"
 
 echo "docs-audit: usage and untrusted input"
 assert_eq "no --repo" "2" "$(audit_rc --out "$TMP/du1")"

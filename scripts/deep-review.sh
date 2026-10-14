@@ -19,8 +19,12 @@
 # the plans, design, adr and research records are point-in-time and never
 # audited) from three counts. dead_paths: backticked paths under internal, cmd,
 # scripts, docs, test or tests that the tree no longer holds. dead_cmds:
-# backticked `gt <word>` or `bd <word>` whose subcommand the binary's --help does
-# not list (not counted when the binary is not on PATH). code_changed: commits of
+# backticked `gt <word>` or `bd <word>` that the binary does not know (not
+# counted when the binary is not on PATH). A command the top-level --help lists
+# is known. One it does not list is asked `tool word --help` and is dead only
+# when the answer says unknown command. At most 20 such calls run per audit,
+# best-scoring docs first, and a candidate past the cap is not counted dead.
+# code_changed: commits of
 # the last 60 days that touched a file the doc cites, made after the doc's own
 # last commit, so a doc committed with its code does not count. plan, whenever
 # it builds the slice, then writes docs.txt: living docs that cite a slice file
@@ -66,6 +70,7 @@ RISK_HISTORY="60.days.ago"
 DOC_HISTORY_DAYS=60
 DOC_PAIR_MAX=6
 DOC_STALE_TOP=3
+DOC_CMD_CHECKS=20
 DOC_MAX=8
 
 usage() {
@@ -305,11 +310,113 @@ help_commands() {
   { "$tool" --help 2>&1 || true; } | awk '/^  [a-z][a-z0-9_-]* +[^ ]/ { print $1 }' | LC_ALL=C sort -u > "$out/$tool-cmds.txt"
 }
 
+# score_docs OUT HAVE_GT HAVE_BD: writes $OUT/docs-audit.txt, one line per
+# living doc, "<score> <doc> dead_paths=<n> dead_cmds=<n> code_changed=<n>",
+# highest score first, ties by path. A cited command is dead when the top-level
+# listing lacks it and $OUT/cmd-ok.txt does not name it.
+score_docs() {
+  local out="$1" have_gt="$2" have_bd="$3"
+  awk -F'\t' -v have_gt="$have_gt" -v have_bd="$have_bd" \
+    -v tree="$out/doc-tree.txt" -v gtc="$out/gt-cmds.txt" -v bdc="$out/bd-cmds.txt" -v ok="$out/cmd-ok.txt" \
+    -v living="$out/living-docs.txt" -v refs="$out/doc-refs.tsv" -v hist="$out/doc-history.txt" '
+    FILENAME == tree {
+      isfile[$0] = 1
+      d = $0
+      while (sub(/\/[^\/]*$/, "", d)) isdir[d] = 1
+      next
+    }
+    FILENAME == gtc { cmd["gt " $1] = 1; next }
+    FILENAME == bdc { cmd["bd " $1] = 1; next }
+    FILENAME == ok { cmd[$0] = 1; next }
+    FILENAME == living { order[++ndocs] = $0; next }
+    FILENAME == refs {
+      if ($2 == "p") {
+        if (isfile[$3]) { cited[$1, ++ncited[$1]] = $3 }
+        else if (!isdir[$3]) deadp[$1]++
+      } else {
+        split($3, a, " ")
+        if ((a[1] == "gt" ? have_gt : have_bd) && !($3 in cmd)) deadc[$1]++
+      }
+      next
+    }
+    FILENAME == hist {
+      if (substr($0, 1, 1) == "@") { idx++; next }
+      if ($0 == "") next
+      touched[$0] = touched[$0] " " idx
+      if (!($0 in newest)) newest[$0] = idx
+      next
+    }
+    END {
+      # idx counts commits newest first, so a smaller idx is a later commit
+      for (i = 1; i <= ndocs; i++) {
+        d = order[i]
+        limit = (d in newest) ? newest[d] : 1000000000
+        cc = 0
+        for (j = 1; j <= ncited[d]; j++) {
+          m = split(touched[cited[d, j]], a, " ")
+          for (k = 1; k <= m; k++) {
+            ix = a[k] + 0
+            if (ix < limit && !((d, ix) in marked)) { marked[d, ix] = 1; cc++ }
+          }
+        }
+        printf "%d %s dead_paths=%d dead_cmds=%d code_changed=%d\n", 5 * deadp[d] + 5 * deadc[d] + (cc > 10 ? 10 : cc), d, deadp[d] + 0, deadc[d] + 0, cc
+      }
+    }
+  ' "$out/doc-tree.txt" "$out/gt-cmds.txt" "$out/bd-cmds.txt" "$out/cmd-ok.txt" "$out/living-docs.txt" "$out/doc-refs.tsv" "$out/doc-history.txt" \
+    | LC_ALL=C sort -k1,1nr -k2,2 > "$out/docs-audit.txt"
+}
+
+# confirm_commands OUT HAVE_GT HAVE_BD: writes $OUT/cmd-ok.txt, the cited
+# commands the audit must not count dead, and $OUT/cmd-checks.txt, one
+# "<tool> <word> alive|dead|skipped" line per candidate. A candidate is a cited
+# command the top-level listing lacks, taken from the docs in the order of
+# docs-audit.txt, which scored every candidate dead. Each of the first
+# DOC_CMD_CHECKS is asked `tool word --help` and is dead only when the answer
+# says unknown command; any other answer, a failure included, is alive. The
+# rest are skipped and count alive. Only --help is ever passed, so a command
+# that exists is never run.
+confirm_commands() {
+  local out="$1" have_gt="$2" have_bd="$3" tool word help verdict n=0
+  : > "$out/cmd-ok.txt"
+  : > "$out/cmd-checks.txt"
+  while read -r tool word; do
+    if [ "$n" -ge "$DOC_CMD_CHECKS" ]; then
+      verdict=skipped
+    else
+      n=$((n + 1))
+      help="$({ "$tool" "$word" --help </dev/null 2>&1 || true; })"
+      case "$help" in
+        *'unknown command "'*) verdict=dead ;;
+        *) verdict=alive ;;
+      esac
+    fi
+    echo "$tool $word $verdict" >> "$out/cmd-checks.txt"
+    [ "$verdict" = dead ] || echo "$tool $word" >> "$out/cmd-ok.txt"
+  done < <(awk -F'\t' -v have_gt="$have_gt" -v have_bd="$have_bd" \
+    -v gtc="$out/gt-cmds.txt" -v bdc="$out/bd-cmds.txt" -v audit="$out/docs-audit.txt" -v refs="$out/doc-refs.tsv" '
+    FILENAME == gtc { cmd["gt " $1] = 1; next }
+    FILENAME == bdc { cmd["bd " $1] = 1; next }
+    FILENAME == audit { split($0, a, " "); order[++ndocs] = a[2]; next }
+    $2 == "c" { cited[$1, ++ncited[$1]] = $3 }
+    END {
+      for (i = 1; i <= ndocs; i++) {
+        d = order[i]
+        for (j = 1; j <= ncited[d]; j++) {
+          c = cited[d, j]
+          split(c, a, " ")
+          if ((a[1] == "gt" ? have_gt : have_bd) && !(c in cmd) && !(c in seen)) { seen[c] = 1; print c }
+        }
+      }
+    }
+  ' "$out/gt-cmds.txt" "$out/bd-cmds.txt" "$out/docs-audit.txt" "$out/doc-refs.tsv")
+}
+
 # build_docs_audit REPO REF NOW OUT: writes $OUT/docs-audit.txt, one line per
 # living doc, "<score> <doc> dead_paths=<n> dead_cmds=<n> code_changed=<n>",
 # highest score first, ties by path. $OUT/doc-refs.tsv (doc, p|c, value) is the
 # citation list build_docs reads. Cost: one ls-tree, one git show per doc, one
-# log pass and at most two --help calls, whatever the number of docs.
+# log pass, at most two listing --help calls and at most DOC_CMD_CHECKS
+# confirming ones, whatever the number of docs.
 build_docs_audit() {
   local repo="$1" ref="$2" now="$3" out="$4" since tool d
   local have_gt=0 have_bd=0
@@ -369,53 +476,12 @@ build_docs_audit() {
   git -C "$repo" log --since="$since" --name-only --format=@%H "$ref" > "$out/doc-history.txt" \
     || die "cannot read the history at $ref"
 
-  awk -F'\t' -v have_gt="$have_gt" -v have_bd="$have_bd" \
-    -v tree="$out/doc-tree.txt" -v gtc="$out/gt-cmds.txt" -v bdc="$out/bd-cmds.txt" \
-    -v living="$out/living-docs.txt" -v refs="$out/doc-refs.tsv" -v hist="$out/doc-history.txt" '
-    FILENAME == tree {
-      isfile[$0] = 1
-      d = $0
-      while (sub(/\/[^\/]*$/, "", d)) isdir[d] = 1
-      next
-    }
-    FILENAME == gtc { cmd["gt " $1] = 1; next }
-    FILENAME == bdc { cmd["bd " $1] = 1; next }
-    FILENAME == living { order[++ndocs] = $0; next }
-    FILENAME == refs {
-      if ($2 == "p") {
-        if (isfile[$3]) { cited[$1, ++ncited[$1]] = $3 }
-        else if (!isdir[$3]) deadp[$1]++
-      } else {
-        split($3, a, " ")
-        if ((a[1] == "gt" ? have_gt : have_bd) && !($3 in cmd)) deadc[$1]++
-      }
-      next
-    }
-    FILENAME == hist {
-      if (substr($0, 1, 1) == "@") { idx++; next }
-      if ($0 == "") next
-      touched[$0] = touched[$0] " " idx
-      if (!($0 in newest)) newest[$0] = idx
-      next
-    }
-    END {
-      # idx counts commits newest first, so a smaller idx is a later commit
-      for (i = 1; i <= ndocs; i++) {
-        d = order[i]
-        limit = (d in newest) ? newest[d] : 1000000000
-        cc = 0
-        for (j = 1; j <= ncited[d]; j++) {
-          m = split(touched[cited[d, j]], a, " ")
-          for (k = 1; k <= m; k++) {
-            ix = a[k] + 0
-            if (ix < limit && !((d, ix) in marked)) { marked[d, ix] = 1; cc++ }
-          }
-        }
-        printf "%d %s dead_paths=%d dead_cmds=%d code_changed=%d\n", 5 * deadp[d] + 5 * deadc[d] + (cc > 10 ? 10 : cc), d, deadp[d] + 0, deadc[d] + 0, cc
-      }
-    }
-  ' "$out/doc-tree.txt" "$out/gt-cmds.txt" "$out/bd-cmds.txt" "$out/living-docs.txt" "$out/doc-refs.tsv" "$out/doc-history.txt" \
-    | LC_ALL=C sort -k1,1nr -k2,2 > "$out/docs-audit.txt"
+  # First pass: every command the listing lacks is dead. Second pass, only when
+  # a candidate exists: the ones --help knows are not.
+  : > "$out/cmd-ok.txt"
+  score_docs "$out" "$have_gt" "$have_bd"
+  confirm_commands "$out" "$have_gt" "$have_bd"
+  if [ -s "$out/cmd-ok.txt" ]; then score_docs "$out" "$have_gt" "$have_bd"; fi
 }
 
 # build_docs NOTES NOW OUT: writes $OUT/docs.txt from docs-audit.txt, doc-refs.tsv
