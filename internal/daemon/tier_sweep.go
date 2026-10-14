@@ -88,6 +88,11 @@ const (
 	// close-on-green would close a sweep bead on an unrelated landing.
 	tierSweepRedLabel = "tier-sweep-red"
 
+	// tierSweepRetryMinGap is the least time between a red cycle and the early
+	// re-run its closed fix beads allow, so a sweep that stays red on every new
+	// landing cannot loop faster than this.
+	tierSweepRetryMinGap = 10 * time.Minute
+
 	// tierSweepNoName stands in for the failing unit when a RED summary named
 	// none.
 	tierSweepNoName = "(no failing unit named)"
@@ -441,8 +446,15 @@ func (d *Daemon) triggerTierSweep() {
 	}
 	now := d.clk().Now()
 	dec := evaluatePatrolDue(d.config.TownRoot, "tier_sweep", time.Time{}, now, tierSweepInterval(d.patrolConfig))
+	// Inside the interval, a rig whose last cycle was red may still be due early
+	// (gt-giai1). The state files pick the candidates; the bead store and
+	// origin/main are read on the cycle's goroutine.
+	var early []string
 	if !dec.due {
-		return
+		early = d.tierSweepEarlyCandidates(now)
+		if len(early) == 0 {
+			return
+		}
 	}
 	if !d.tierSweepRunning.CompareAndSwap(false, true) {
 		return
@@ -452,6 +464,13 @@ func (d *Daemon) triggerTierSweep() {
 	}
 	go func() {
 		defer d.tierSweepRunning.Store(false)
+		if !dec.due {
+			// An early re-run leaves the patrol's hourly clock alone: the rig's
+			// own record carries the gap, and a heartbeat that finds main
+			// unmoved must not consume the hour.
+			d.runTierSweepEarly(early, now)
+			return
+		}
 		if !d.runTierSweep() {
 			// Nothing accomplished: leave the gate open so the next heartbeat
 			// retries.
@@ -463,16 +482,126 @@ func (d *Daemon) triggerTierSweep() {
 	}()
 }
 
+// tierSweepEarlyDue reports whether st is a red record old enough to re-run
+// before the interval: the last cycle was not green, and at least
+// tierSweepRetryMinGap has passed since it ran. The fix beads and a moved
+// origin/main are the other two conditions, checked by runTierSweepEarly.
+func tierSweepEarlyDue(st tierSweepState, now time.Time) bool {
+	return st.LastSHA != "" && st.LastSHA != st.LastGreenSHA && now.Sub(st.LastRun) >= tierSweepRetryMinGap
+}
+
+// tierSweepEarlyCandidates lists the configured rigs whose record passes
+// tierSweepEarlyDue.
+func (d *Daemon) tierSweepEarlyCandidates(now time.Time) []string {
+	var out []string
+	for _, rig := range tierSweepRigs(d.patrolConfig, d.getKnownRigs()) {
+		st, err := readTierSweepState(d.config.TownRoot, rig)
+		if err != nil {
+			continue
+		}
+		if tierSweepEarlyDue(st, now) {
+			out = append(out, rig)
+		}
+	}
+	return out
+}
+
+// tierSweepRedBeadsOpen reports whether rig has a sweep bead that is open or
+// in progress: its fix has not landed.
+func tierSweepRedBeadsOpen(bd tierSweepBeadStore, rig string) (bool, error) {
+	prefix := tierSweepRigBeadPrefix(rig)
+	for _, status := range []string{"open", string(beads.StatusInProgress), beads.StatusHooked} {
+		issues, err := bd.List(beads.ListOptions{Status: status, Label: tierSweepRedLabel, Priority: -1, Limit: 0})
+		if err != nil {
+			return false, err
+		}
+		for _, is := range issues {
+			if is != nil && strings.HasPrefix(is.Title, prefix) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// runTierSweepEarly re-runs the candidate rigs whose red beads have all
+// closed and whose origin/main has moved since their last cycle. A rig that
+// fails either test is left to the normal interval, without a word in the log.
+func (d *Daemon) runTierSweepEarly(rigs []string, now time.Time) {
+	if d.tierSweepDeferForRestart() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), tierSweepRunBudget)
+	defer cancel()
+
+	var cycle *dogCycle
+	defer func() {
+		if cycle != nil {
+			cycle.close()
+		}
+	}()
+	for _, rig := range rigs {
+		if ctx.Err() != nil {
+			return
+		}
+		state, err := readTierSweepState(d.config.TownRoot, rig)
+		if err != nil || !tierSweepEarlyDue(state, now) {
+			continue
+		}
+		bd := d.tierSweepBeads(rig)
+		if bd == nil {
+			continue
+		}
+		open, err := tierSweepRedBeadsOpen(bd, rig)
+		if err != nil {
+			d.logger.Printf("tier_sweep: %s: listing %s beads: %v", rig, tierSweepRedLabel, err)
+			continue
+		}
+		if open {
+			continue
+		}
+		repo := filepath.Join(d.config.TownRoot, rig, ".repo.git")
+		if _, err := os.Stat(repo); err != nil {
+			continue
+		}
+		mainSHA := d.tierSweepSeams.mainSHA
+		if mainSHA == nil {
+			mainSHA = tierSweepMainSHA
+		}
+		sha, err := mainSHA(ctx, repo)
+		if err != nil {
+			d.logger.Printf("tier_sweep: %s: cannot read origin/main (%v); deferring the early re-run", rig, err)
+			continue
+		}
+		if sha == "" || sha == state.LastSHA || sha == state.LastGreenSHA {
+			continue
+		}
+		d.logger.Printf("tier_sweep: %s: red bead(s) closed and main moved; re-running now", rig)
+		if cycle == nil {
+			cycle = d.startDogCycle("tier_sweep")
+		}
+		d.tierSweepRigCycle(ctx, cycle, rig, repo, sha, state, now)
+	}
+}
+
+// tierSweepDeferForRestart reports whether a pending upgrade restart defers
+// the cycle, logging the skip once per pending restart, not once per heartbeat.
+func (d *Daemon) tierSweepDeferForRestart() bool {
+	if !d.upgradeRestartPending.Load() {
+		return false
+	}
+	if d.tierSweepSkipLogged.CompareAndSwap(false, true) {
+		d.logger.Printf("tier_sweep: an upgrade restart is pending; skipping this cycle")
+	}
+	return true
+}
+
 // runTierSweep is one cycle over every configured rig. It reports whether the
 // cycle reached a verdict, as opposed to deferring with nothing accomplished.
 // A pending upgrade restart defers the cycle: the job stays due and the next
 // heartbeat retries, so the restart does not cost the hour.
 func (d *Daemon) runTierSweep() bool {
-	if d.upgradeRestartPending.Load() {
-		// Once per pending restart, not once per heartbeat.
-		if d.tierSweepSkipLogged.CompareAndSwap(false, true) {
-			d.logger.Printf("tier_sweep: an upgrade restart is pending; skipping this cycle")
-		}
+	if d.tierSweepDeferForRestart() {
 		return false
 	}
 	rigs := tierSweepRigs(d.patrolConfig, d.getKnownRigs())
@@ -1037,22 +1166,28 @@ func parseTierSweepSummaries(output string) map[string]tierSweepTierResult {
 
 // tierSweepBeadPrefix keys an open sweep bead for one rig and tier.
 func tierSweepBeadPrefix(rig, tier string) string {
-	return fmt.Sprintf("tier sweep (%s): %s: ", rig, tier)
+	return tierSweepRigBeadPrefix(rig) + tier + ": "
+}
+
+// tierSweepRigBeadPrefix is the title prefix every sweep bead for rig shares.
+func tierSweepRigBeadPrefix(rig string) string {
+	return fmt.Sprintf("tier sweep (%s): ", rig)
+}
+
+// tierSweepBeads opens the rig's writable bead store, or nil when none opens.
+func (d *Daemon) tierSweepBeads(rig string) tierSweepBeadStore {
+	if open := d.tierSweepSeams.beads; open != nil {
+		return open(rig)
+	}
+	rigPath := filepath.Join(d.config.TownRoot, rig)
+	return beads.NewPinned(beads.ResolveBeadsDir(rigPath), beads.WithBin(d.bdPathOrDefault()))
 }
 
 // tierSweepBeads files one bead per failing unit of a RED tier, and closes a
 // GREEN tier's open beads. A bead-store error is logged and the sweep
 // continues: the verdict is already recorded.
 func (d *Daemon) tierSweepRecordBeads(rig, sha string, results map[string]tierSweepTierResult) {
-	open := d.tierSweepSeams.beads
-	if open == nil {
-		rigPath := filepath.Join(d.config.TownRoot, rig)
-		bdPath := d.bdPathOrDefault()
-		open = func(string) tierSweepBeadStore {
-			return beads.NewPinned(beads.ResolveBeadsDir(rigPath), beads.WithBin(bdPath))
-		}
-	}
-	bd := open(rig)
+	bd := d.tierSweepBeads(rig)
 	if bd == nil {
 		return
 	}
