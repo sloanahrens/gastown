@@ -342,6 +342,7 @@ func TestQuestionsStripsControlCharactersAndCapsFields(t *testing.T) {
 }
 
 func TestQuestionHeldIDs(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		body string
@@ -358,6 +359,7 @@ func TestQuestionHeldIDs(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if got := questionHeldIDs(tc.body); !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("questionHeldIDs(%q) = %v, want %v", tc.body, got, tc.want)
 			}
