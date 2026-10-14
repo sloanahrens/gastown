@@ -5,9 +5,13 @@ import (
 	"errors"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gofrs/flock"
 )
 
 // shutdownTestDaemon is a daemon with the context pair shutdown() cancels and
@@ -150,6 +154,64 @@ func TestCompactorDogSkipsItsCycleWhenDoltBringUpIsSkipped(t *testing.T) {
 			awaitCompactorDogIdle(t, d)
 			if got := cycles.Load(); got != tc.wantCycles {
 				t.Errorf("cycles = %d, want %d", got, tc.wantCycles)
+			}
+		})
+	}
+}
+
+// holdShutdownLock takes the flock `gt down` holds while it tears the town down.
+func holdShutdownLock(t *testing.T, townRoot string) {
+	t.Helper()
+	lockPath := filepath.Join(townRoot, "daemon", "shutdown.lock")
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lock := flock.New(lockPath)
+	if locked, err := lock.TryLock(); err != nil || !locked {
+		t.Fatalf("TryLock shutdown.lock = %v, %v", locked, err)
+	}
+	t.Cleanup(func() { _ = lock.Unlock() })
+}
+
+// A daemon started while `gt down` holds shutdown.lock has a live context, so
+// the context check alone lets its startup catch-ups bring Dolt up in a town
+// being torn down. The bring-up honors the lock, and the compactor catch-up that
+// calls it runs no cycle and starts no server (gt-t4j0m).
+func TestStartupCatchUpHonorsShutdownLock(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		holdLock   bool
+		wantStarts int32
+		wantCycles int32
+	}{
+		{"no shutdown", false, 1, 1},
+		{"shutdown.lock held", true, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var starts, cycles atomic.Int32
+			d := compactorDogTestDaemon(t.TempDir(), nil)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			d.ctx, d.cancel = ctx, cancel
+			d.doltServer = shuttingDownTestManager(t, d, &starts)
+			d.compactorDogCycleFn = func() bool { cycles.Add(1); return true }
+			if tc.holdLock {
+				holdShutdownLock(t, d.config.TownRoot)
+				if err := d.ensureDoltServerUp(); !errors.Is(err, errDoltBringUpSkipped) {
+					t.Fatalf("ensureDoltServerUp = %v, want errDoltBringUpSkipped", err)
+				}
+			}
+
+			d.triggerCompactorDog()
+			awaitCompactorDogIdle(t, d)
+
+			if got := cycles.Load(); got != tc.wantCycles {
+				t.Errorf("compactor cycles = %d, want %d", got, tc.wantCycles)
+			}
+			if got := starts.Load(); got != tc.wantStarts {
+				t.Errorf("Dolt starts = %d, want %d", got, tc.wantStarts)
 			}
 		})
 	}

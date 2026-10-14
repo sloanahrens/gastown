@@ -607,9 +607,18 @@ func (d *Daemon) resumeReopenedScheduledRun(ctx context.Context, r scheduledSlin
 		if isScheduledSlingRefusal(err) {
 			return &scheduledSlingDeferred{cause: err}
 		}
-		return fmt.Errorf("resuming reopened run %s on branch %s: %w", b.ID, b.ResumeBranch, err)
+		return fmt.Errorf("resuming reopened run %s %s: %w", b.ID, resumeTarget(branch), err)
 	}
 	return nil
+}
+
+// resumeTarget names where a resumed run was slung, for the failure message:
+// the branch it continued on, or main when the branch was gone from origin.
+func resumeTarget(branch string) string {
+	if branch == "" {
+		return "from main"
+	}
+	return "on branch " + branch
 }
 
 // scheduledSlingBudget is the time one entry's create and sling may take.

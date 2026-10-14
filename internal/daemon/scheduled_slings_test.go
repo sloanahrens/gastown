@@ -534,6 +534,36 @@ func TestRunScheduledSlings_AFailedResumeKeepsTheBeadAndEscalates(t *testing.T) 
 	}
 }
 
+// The failure error names where the sling went: the resume branch, or main when
+// the branch was gone from origin and the run was slung from main (gt-t4j0m).
+func TestResumeReopenedScheduledRun_FailureNamesTheTargetSlung(t *testing.T) {
+	t.Parallel()
+	const branch = "polecat/nux/gt-run+abc"
+	for _, tc := range []struct {
+		name    string
+		gone    []string
+		want    string
+		wantNot string
+	}{
+		{name: "branch on origin", want: "on branch " + branch, wantNot: "from main"},
+		{name: "branch gone from origin", gone: []string{branch}, want: "from main", wantNot: branch},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeScheduledRunner{createID: "gt-next", now: time.Now(), goneBranches: tc.gone, slingErr: errors.New("boom")}
+			d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
+			b := scheduledBead{ID: "gt-run", Status: "open", CreatedAt: time.Now().Add(-time.Hour), ResumeBranch: branch}
+			err := d.resumeReopenedScheduledRun(context.Background(), f, docAuditEntry, b)
+			if err == nil {
+				t.Fatal("resumeReopenedScheduledRun returned nil for a failed sling")
+			}
+			if !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), tc.wantNot) {
+				t.Errorf("error = %q, want it to contain %q and not %q", err, tc.want, tc.wantNot)
+			}
+		})
+	}
+}
+
 // A capacity refusal of the resume is a deferral, not a failure: the bead stays
 // open and the next tick asks again.
 func TestRunScheduledSlings_ARefusedResumeIsADeferral(t *testing.T) {
