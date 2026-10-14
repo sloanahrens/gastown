@@ -850,12 +850,7 @@ func (d *Daemon) Run() (err error) {
 	defer func() { _ = os.Remove(d.config.PidFile) }() // best-effort cleanup
 
 	// Update state
-	state := &State{
-		Running:   true,
-		PID:       os.Getpid(),
-		StartedAt: time.Now(),
-		Commit:    d.resolveOwnCommit(),
-	}
+	state := startState(os.Getpid(), time.Now(), d.resolveOwnCommit())
 	if err := SaveState(d.config.TownRoot, state); err != nil {
 		d.logger.Printf("Warning: failed to save state: %v", err)
 	}
@@ -1391,6 +1386,21 @@ var heartbeatSteps = []heartbeatStep{
 	// townhealth, so the bd-slow collector can read this tick's Dolt verdict;
 	// non-lifecycle, so an E-stopped town still gets its queue.
 	{name: "attention", run: (*Daemon).writeAttention},
+}
+
+// startState is the state record a daemon writes as it starts. The first
+// heartbeat completes about a minute later, so LastHeartbeat starts at the
+// start time with count 0: the health line then reads a young daemon as
+// fresh instead of "no heartbeat recorded", and a daemon that never beats
+// still ages past the heartbeat threshold from its start (gt-v9oug).
+func startState(pid int, now time.Time, commit string) *State {
+	return &State{
+		Running:       true,
+		PID:           pid,
+		StartedAt:     now,
+		LastHeartbeat: now,
+		Commit:        commit,
+	}
 }
 
 // heartbeatWork is the recovery work of one heartbeat, run after the

@@ -426,6 +426,13 @@ func TestDaemonHeartbeatFreshAndAdvancing(t *testing.T) {
 		"stuck count degrades":    {hb: HeartbeatRecord{At: ago(time.Minute), Count: 5}, prev: &Report{At: ago(12 * time.Minute), HeartbeatCount: 5}, tag: Live, want: Degraded},
 		"stuck briefly is fine":   {hb: HeartbeatRecord{At: ago(time.Minute), Count: 5}, prev: &Report{At: ago(time.Minute), HeartbeatCount: 5}, tag: Live, want: Green},
 		"never beat is unknown":   {tag: Unknown, want: VerdictUnknown},
+		// gt-v9oug: a restarted daemon records its start time as the heartbeat
+		// with count 0, which reads fresh until the threshold passes.
+		"fresh restart is green":                 {hb: HeartbeatRecord{At: ago(10 * time.Second)}, tag: Recorded, want: Green},
+		"count 0 after a restart is not stuck":   {hb: HeartbeatRecord{At: ago(10 * time.Second)}, prev: &Report{At: ago(3 * time.Minute), HeartbeatCount: 12}, tag: Live, want: Green},
+		"count 0 twice running is not stuck":     {hb: HeartbeatRecord{At: ago(time.Minute)}, prev: &Report{At: ago(12 * time.Minute)}, tag: Recorded, want: Green},
+		"old start without a beat is degraded":   {hb: HeartbeatRecord{At: ago(15 * time.Minute)}, tag: Recorded, want: Degraded},
+		"much older start without a beat is red": {hb: HeartbeatRecord{At: ago(40 * time.Minute)}, tag: Recorded, want: Red},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

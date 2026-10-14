@@ -602,6 +602,47 @@ func TestWriteTownHealth_HeartbeatAdvanceIsLiveAfterTheFirstTick(t *testing.T) {
 	}
 }
 
+// gt-v9oug: the state a daemon writes as it starts carries its start time as
+// the heartbeat, so the health tick that runs before the first heartbeat
+// reads the daemon as fresh; the same record ages into a degraded field when
+// the daemon never beats, and a missing state file is still unknown.
+func TestWriteTownHealth_DaemonFieldBeforeTheFirstHeartbeat(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	for name, tc := range map[string]struct {
+		startedAgo time.Duration
+		missing    bool
+		want       townhealth.Verdict
+	}{
+		"fresh start is green":          {startedAgo: 20 * time.Second, want: townhealth.Green},
+		"old start without a beat":      {startedAgo: 15 * time.Minute, want: townhealth.Degraded},
+		"missing state file is unknown": {missing: true, want: townhealth.VerdictUnknown},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := healthTown(t, now)
+			stateFile := StateFile(d.config.TownRoot)
+			if tc.missing {
+				if err := os.Remove(stateFile); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := SaveState(d.config.TownRoot, startState(4242, now.Add(-tc.startedAgo), "abc123")); err != nil {
+				t.Fatal(err)
+			}
+			d.writeTownHealth()
+
+			r, err := townhealth.Read(d.config.TownRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := healthField(t, r, "daemon")
+			if got.Verdict != tc.want {
+				t.Errorf("daemon = %+v, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestWriteTownHealth_EscalationReadsTheSetEscalateListShows pins the health
 // field to the set `gt escalate list` displays, over the two ways the two
 // readers disagreed: a delivery carrier is not an escalation, and an
