@@ -22,7 +22,7 @@ supervision decision.
   by every `gt agents state` write. A label rewrite is used because
   `bd agent heartbeat` was never shipped (steveyegge/beads#2828).
 - **Read by:** nothing that acts on it. The patrol agents that aged this label
-  out were deleted with the witness and deacon roles.
+  out went with the retired witness and deacon roles.
 
 ## Rules of thumb
 

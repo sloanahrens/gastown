@@ -50,8 +50,7 @@ Initialize your session and understand your assignment...
 Ensure you're on a clean feature branch...
 ```
 
-The agent works through the checklist and runs `gt done` (polecats) or
-`gt patrol report` (patrol agents) when complete.
+The agent works through the checklist and runs `gt done` when complete.
 
 ## Molecule Commands
 
@@ -79,9 +78,8 @@ gt prime                   # Shows inline formula checklist
 gt mol attach <bead> <mol>   # Pin molecule to bead
 gt mol detach <bead>         # Unpin molecule from bead
 
-# Patrol lifecycle
-gt patrol new              # Create patrol wisp and hook it
-gt patrol report --summary "..."  # Close current patrol, start next cycle
+# Patrol dispatch
+gt sling mol-pr-feedback-patrol <rig>   # Dispatch a patrol formula run
 ```
 
 ## Polecat Workflow
@@ -112,21 +110,16 @@ High frequency + cheap steps = inline (default). Low frequency + expensive steps
 
 ## Patrol Workflow
 
-Patrol agents (Deacon, Witness, Refinery) cycle through patrol formulas:
-
-```
-1. gt patrol new          # Create root-only patrol wisp
-2. gt prime               # Shows patrol checklist inline
-3. Work through each step
-4. gt patrol report --summary "..."  # Close + start next cycle
-```
-
-`gt patrol report` atomically closes the current patrol root and spawns
-a new one for the next cycle.
+A patrol formula (`wisp_type = "patrol"`, `scan_interval_seconds`) is dispatched
+by the daemon: its `scheduled_slings` patrol slings the formula on an interval
+(internal/daemon/scheduled_slings.go), and `patrol_scan` restarts a session that
+died still holding the run. The session works the checklist and starts the next
+cycle by reopening the cycle's own step beads
+(internal/formula/formulas/mol-pr-feedback-patrol.toml, `loop-or-exit`); a
+session near its context limit hands off instead (`gt handoff`).
 
 ## Best Practices
 
 1. **Persist findings early** — `bd update <issue> --append-notes "..."` before session death
 2. **Run `gt done` when complete** — mandatory for polecats (pushes, submits to MQ/PR path, exits)
-3. **Use `gt patrol report`** — for patrol agents to cycle (replaces squash+new pattern)
-4. **File discovered work** — `bd create` for bugs found, don't fix them yourself
+3. **File discovered work** — `bd create` for bugs found, don't fix them yourself

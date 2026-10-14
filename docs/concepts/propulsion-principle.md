@@ -43,8 +43,7 @@ Formula steps are shown inline at prime time — no step beads to manage:
 ```bash
 gt prime             # See your checklist
 # Work through each step in order
-gt done              # Submit and self-clean (polecats)
-gt patrol report     # Close + next cycle (patrol agents)
+gt done              # Submit and self-clean
 ```
 
 No step closures, no `bd mol current`, no momentum-killing transitions.
@@ -72,7 +71,7 @@ One command. Auto-advance. Momentum preserved.
 Polecat restarts with work on hook
   → Polecat announces itself
   → Polecat waits for confirmation
-  → Witness assumes work is progressing
+  → The daemon's patrol_scan tick sees a live session and leaves it alone
   → Nothing happens
   → Gas Town stops
 ```
@@ -82,7 +81,7 @@ Polecat restarts with work on hook
 1. Check hook (`gt hook`)
 2. Work hooked → EXECUTE immediately
 3. Hook empty → Check mail for attached work
-4. Nothing anywhere → ERROR: escalate to Witness
+4. Nothing anywhere → ERROR: `gt escalate`, which files a bead for the operator
 
 **Note:** "Hooked" means work assigned to you. This triggers autonomous mode
 even if no molecule is attached. Don't confuse with "pinned" which is for
