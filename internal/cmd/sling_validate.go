@@ -40,9 +40,7 @@ func ValidateTarget(target string) error {
 				"Valid formats:\n"+
 				"  <rig>                  auto-spawn polecat\n"+
 				"  <rig>/polecats/<name>  specific polecat\n"+
-				"  <rig>/crew/<name>      crew worker\n"+
-				"  <rig>/witness          rig witness\n"+
-				"  <rig>/refinery         rig refinery",
+				"  <rig>/crew/<name>      crew worker",
 				target, i)
 		}
 	}
@@ -88,10 +86,8 @@ func ValidateTarget(target string) error {
 				"Valid roles after a rig name:\n"+
 				"  %s/polecats/<name>  specific polecat\n"+
 				"  %s/crew/<name>      crew worker\n"+
-				"  %s/witness          rig witness\n"+
-				"  %s/refinery         rig refinery\n"+
 				"Or use just %q to target by name shorthand",
-				target, parts[1], parts[0], parts[0], parts[0], parts[0], parts[0])
+				target, parts[1], parts[0], parts[0], parts[0])
 		}
 		// else: 2-segment with unknown role → polecat/crew shorthand, let resolveTarget handle.
 	}

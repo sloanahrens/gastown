@@ -3024,7 +3024,7 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 		case preservedRef != "" && alreadyOnRemote:
 			fmt.Printf("  %s %s's work already on %s\n", style.Dim.Render("○"), branchToDelete, preservedRef)
 		case preservedRef != "":
-			fmt.Printf("  %s remote ref %s preserved for refinery merge\n", style.Dim.Render("○"), preservedRef)
+			fmt.Printf("  %s remote ref %s preserved for the landing worker\n", style.Dim.Render("○"), preservedRef)
 		case opts.AcknowledgeUnpreserved:
 			fmt.Printf("  %s %s deleted with no remote copy (%s)\n",
 				style.Warning.Render("⚠"), branchToDelete, NukeAcknowledgeUnpreservedFlag)
@@ -3210,7 +3210,7 @@ func checkNukeActiveMRSafety(checker activeMRRemovalChecker, polecatName, rigNam
 		return nil
 	}
 	if activeMR, blocker := checker.ActiveMRRemovalBlocker(polecatName); blocker != "" {
-		return fmt.Errorf("cannot nuke %s/%s: MR %s is still pending in merge queue (%s)\nRefinery will process the MR and clean up after merge\nUse --force to override (risks data loss)", rigName, polecatName, activeMR, blocker)
+		return fmt.Errorf("cannot nuke %s/%s: MR %s is still pending in merge queue (%s)\nThe landing worker lands the MR; clean up after it merges\nUse --force to override (risks data loss)", rigName, polecatName, activeMR, blocker)
 	}
 	return nil
 }

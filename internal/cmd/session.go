@@ -191,7 +191,7 @@ func init() {
 	// Restart flags
 	sessionRestartCmd.Flags().BoolVarP(&sessionForce, "force", "f", false, "Force immediate shutdown")
 	sessionRestartCmd.Flags().StringVar(&sessionRequestedBy, "requested-by", "",
-		"Caller performing an automated restart (e.g. \"witness\"); recorded in the town log wake line")
+		"Caller performing an automated restart (e.g. \"daemon/patrol-scan\"); recorded in the town log wake line")
 
 	// Status flags
 	sessionStatusCmd.Flags().BoolVar(&sessionStatusJSON, "json", false, "Output as JSON")
@@ -362,7 +362,7 @@ func runSessionStop(cmd *cobra.Command, args []string) error {
 	if polecatMgr.HasPolecat(polecatName) {
 		wrote, werr := writeDeliberateStopMarker(townRoot, rigName, polecatName)
 		if werr != nil {
-			style.PrintWarning("could not record the stop for %s/%s: %v (the witness may restart it)", rigName, polecatName, werr)
+			style.PrintWarning("could not record the stop for %s/%s: %v (the daemon's supervised restart may bring it back)", rigName, polecatName, werr)
 		}
 		markerWritten = wrote
 	}
@@ -378,7 +378,7 @@ func runSessionStop(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("%s Session stopped.\n", style.Bold.Render("✓"))
 	if markerWritten {
-		fmt.Printf("  Recorded as a deliberate stop — the witness will not restart it.\n")
+		fmt.Printf("  Recorded as a deliberate stop — the daemon's supervised restart will leave it down.\n")
 		fmt.Printf("  Resume with: %s\n", style.Dim.Render("gt session start "+rigName+"/"+polecatName))
 	}
 
@@ -402,7 +402,7 @@ const deliberateSessionStopReason = "deliberate stop (gt session stop)"
 
 // pauseClearedNotice is printed by the two starts that clear a parked
 // session's pause marker: gt session start and gt session restart.
-const pauseClearedNotice = "  Cleared the pause marker — the witness will restart this session if it dies again.\n"
+const pauseClearedNotice = "  Cleared the pause marker — the daemon's supervised restart will bring this session back if it dies again.\n"
 
 // polecatSessionParked reports whether an operator parked this polecat's
 // session — gt agent pause, or the deliberate stop gt session stop records —

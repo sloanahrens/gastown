@@ -2100,15 +2100,15 @@ func isForcePushArg(f string) bool {
 // but get no env signal here (gt-deff): a release (beads-release /
 // gastown-release) and a plugin script's own push when an agent runs its
 // instructions by hand. Neither gets a signal because a signal an agent sets
-// for itself is a user override, not a gate - only the Refinery's merge and
+// for itself is a user override, not a gate - only the landing worker's merge and
 // `gt done`'s own direct merge, which gt itself sets, are gates. So the
-// allow path for both is a crew or refinery session.
+// allow path for both is a crew session.
 const (
 	polecatMainPushReason      = "Polecats never push to main/master (use gt done)"
-	polecatMainPushAlternative = "Alternative: `gt done` pushes your polecat/<name>/<bead> branch and the Refinery " +
+	polecatMainPushAlternative = "Alternative: `gt done` pushes your polecat/<name>/<bead> branch and the landing worker " +
 		"merges it to the default branch after verification — a direct push to main skips " +
-		"the MR, the Refinery gate run, and the om review (gt-ibt8). A release, or a plugin " +
-		"script's own push, runs from a crew/refinery session instead (gt-deff)."
+		"the MR, the landing worker's gate run, and the om review (gt-ibt8). A release, or a plugin " +
+		"script's own push, runs from a crew session instead (gt-deff)."
 )
 
 // polecatMainPushBranches are the destination branch names a polecat session
