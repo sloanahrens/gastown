@@ -60,8 +60,7 @@ current work or idles, and the supervisor refuses to restart or kill it
 while the marker stands.
 
 Only polecat is supported: it is the only role any scanner consults the
-pause marker for. Other roles are refused (deacon has its own, separate
-"gt deacon pause").
+pause marker for. Other roles are refused.
 
 Use --reason to record why the agent was paused (shown in gt status
 and in scanner log output).

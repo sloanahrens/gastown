@@ -3006,10 +3006,10 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 
 	// Step 4: Delete local branch (if we know it)
 	// Local branch can always be deleted (worktree is already gone).
-	// Remote branch is never deleted during nuke — the refinery owns
-	// remote branch cleanup after successful merge (gt mq post-merge).
-	// This prevents the race where nuke deletes the branch before the
-	// refinery has a chance to merge it. (gt-v5ku)
+	// Remote branch is never deleted during nuke — the merge pipeline owns
+	// remote branch cleanup after a successful merge (formerly gt mq
+	// post-merge, now removed). This prevents the race where nuke deletes the
+	// branch before the merge has landed. (gt-v5ku)
 	if branchToDelete != "" {
 		repoGit := getRepoGitForRig(r.Path)
 		if err := repoGit.DeleteBranch(branchToDelete, true); err != nil {
@@ -3610,8 +3610,8 @@ func remotePolecatBranchEligibleForPrune(lookup polecatStateLookup, branch strin
 // fails closed: a lookup that errors is reported as "protected", because the
 // only error that could mean otherwise is a definitive "no such PR". One
 // consequence is that a rig whose origin is not a GitHub repo has no --remote
-// pruning at all — the same outcome gt mq post-merge's branch delete reached
-// when the guard was introduced there (gas-fk4).
+// pruning at all — the same outcome the retired gt mq post-merge branch delete
+// reached when the guard was introduced there (gas-fk4).
 //
 // It is a package-level var, like the prune flags above it, because
 // runPolecatPrune's tests drive real local file remotes: the lookup resolves the
@@ -3678,7 +3678,7 @@ func pruneRemotePolecatBranches(out io.Writer, lookup polecatStateLookup, hasOpe
 		// Deleting a branch that has an open pull request makes GitHub
 		// auto-close the PR as "closed" (not "merged"), destroying the PR
 		// audit trail (gas-fk4). The guard sits after every other gate, as it
-		// does in gt mq post-merge's cleanupMQPostMergeBranch, so only branches
+		// did in the retired gt mq post-merge cleanup, so only branches
 		// this pass would otherwise delete are reported as PR-protected.
 		if hasOpenPR(branch, ref.Hash) {
 			fmt.Fprintf(out, "  %s Skipping remote branch %s: open PR exists (gas-fk4)\n", style.Dim.Render("○"), branch)

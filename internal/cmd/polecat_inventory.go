@@ -432,7 +432,7 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 		// The decision is the shared active_mr policy, so what the list shows
 		// agrees with the reuse gate (Manager.ReuseDecisionForPolecat) and with
 		// `gt polecat check-recovery`; the index's status label stays in the
-		// blocker string because it is the vocabulary `gt mq list` uses.
+		// blocker string because it is the vocabulary the retired `gt mq list` used.
 		//
 		// gt-wprt: a pointer whose wisp is gone used to block unconditionally,
 		// which read as idle-pr-open forever and refused every spawn once the
@@ -674,7 +674,7 @@ func resolvePolecatSeats(seats []polecatSeat) []PolecatListItem {
 }
 
 // MR status values reported on PolecatListItem.MRStatus. They are the
-// vocabulary `gt mq list` already uses for a queue entry (open, ready,
+// vocabulary the retired `gt mq list` used for a queue entry (open, ready,
 // blocked) plus the two ways an MR leaves the queue and "missing" for an
 // active_mr pointer whose bead is gone (reaped after the reaper's retention
 // window, or never in this rig's database).
@@ -713,8 +713,8 @@ type polecatMRIndex struct {
 
 // loadPolecatMRIndex issues the rig's one bulk merge-request query. Status
 // "all" (not just open) so a polecat whose MR merged or was rejected reports
-// how it ended instead of looking like a missing bead; `gt mq list` reads the
-// same set with --status all.
+// how it ended instead of looking like a missing bead; the retired
+// `gt mq list` read the same set with --status all.
 func loadPolecatMRIndex(bd polecatMRLister, rigName string) (polecatMRIndex, error) {
 	mrs, err := bd.ListMergeRequests(beads.ListOptions{
 		Status:   "all",
@@ -796,8 +796,8 @@ func (ix polecatMRIndex) statusFor(activeMR, worker string) (id, status string) 
 	return activeMR, polecatMRStatusMissing
 }
 
-// polecatMRStatusFor classifies an MR bead the way `gt mq list` presents the
-// queue (internal/cmd/mq_list.go): an open MR with unresolved dependencies is
+// polecatMRStatusFor classifies an MR bead the way the retired `gt mq list`
+// presented the queue: an open MR with unresolved dependencies is
 // blocked, one the refinery has claimed (assignee set) is open — in flight —
 // and one free of both is ready. A terminal MR reports how it ended: merged for
 // a merge, rejected for every other close reason (rejected, conflict,

@@ -36,9 +36,10 @@ type SpawnedPolecatInfo struct {
 	Pane        string // Tmux pane ID (empty until StartSession is called)
 	BaseBranch  string // Effective MERGE-TARGET base branch (e.g., "main", "integration/epic-id").
 	// gt-a8i3: this must NEVER be the resume branch — it feeds the base_branch
-	// formula var, which `gt done`/`gt mq submit` read as the MR --target. A
-	// resume dispatch checks out ResumeBranch as the polecat's working branch
-	// (see Branch below) but still merges back to the rig's normal target.
+	// formula var, which `gt done` reads as the MR --target (as the removed
+	// `gt mq submit` did). A resume dispatch checks out ResumeBranch as the
+	// polecat's working branch (see Branch below) but still merges back to the
+	// rig's normal target.
 	Branch string // Git branch name actually checked out (for cleanup on rollback; equals ResumeBranch on a resume dispatch)
 
 	// Provenance for rollback (gt-7evi4). A rollback undoes only what this
@@ -103,9 +104,9 @@ type beadHold struct {
 // gt-a8i3: deliberately takes no resumeBranch parameter. A resume dispatch
 // (`gt sling --branch/--pr`) checks out an existing branch as the polecat's
 // working branch, but that has no bearing on what the work should merge
-// into — conflating the two here previously caused `gt done`/`gt mq submit`
-// to submit a self-targeted MR that merges as a no-op and deletes the only
-// copy of the work on cleanup.
+// into — conflating the two here previously caused `gt done` (then also
+// `gt mq submit`) to submit a self-targeted MR that merges as a no-op and
+// deletes the only copy of the work on cleanup.
 func resolveSpawnBaseBranch(baseBranch, defaultBranch string) string {
 	effectiveBranch := strings.TrimPrefix(baseBranch, "origin/")
 	if effectiveBranch == "" {
