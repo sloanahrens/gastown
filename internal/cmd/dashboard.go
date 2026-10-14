@@ -112,8 +112,9 @@ Lifecycle: the dashboard watches its own binary and the town registry. When make
 install replaces the binary, or a rig is added to or removed from the town, the
 dashboard restarts itself in place: same PID, same flags, same listening socket,
 so the port never closes. The pollers are stopped first and the bd and git
-reads in flight are waited for (killed after 10 seconds), so the restart leaves
-no defunct child. Open pages reconnect and reload. If the new binary
+reads in flight, queue row expansions included, are waited for (killed after 10
+seconds), so the restart leaves no defunct child; a row expanded during the
+restart gets a retryable error. Open pages reconnect and reload. If the new binary
 fails to run or the restart fails, the running build keeps serving and says so.
 --open fires on the first launch only. Not available on Windows.
 

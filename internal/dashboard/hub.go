@@ -45,6 +45,7 @@ type Hub struct {
 
 	detailMu    sync.Mutex
 	detailCache map[string]detailEntry
+	detailGate  detailGate // bead-detail reads join Run's lifecycle (gt-fekq1)
 }
 
 // Sub is one open page.
@@ -66,11 +67,20 @@ func NewHub(cfg Config) *Hub {
 	}
 }
 
-// Run starts the workers and blocks until ctx ends and every poll in flight has
-// returned. It may be called again on the same hub once it has returned: the
-// in-place restart stops the hub before exec and starts it again if exec fails.
+// Run starts the workers and blocks until ctx ends and every poll and bead-detail
+// read in flight has returned. Once ctx ends, new detail reads are refused with a
+// retryable error until Run is called again. It may be called again on the same
+// hub once it has returned: the in-place restart stops the hub before exec and
+// starts it again if exec fails.
 func (h *Hub) Run(ctx context.Context) {
 	var wg sync.WaitGroup
+	h.detailGate.open()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-ctx.Done()
+		h.detailGate.closeAndDrain()
+	}()
 	start := func(every time.Duration, fn func()) {
 		if fn == nil {
 			return

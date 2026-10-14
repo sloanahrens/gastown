@@ -200,12 +200,21 @@ func (h *Hub) beadDetail(rig, id string) (*BeadDetail, error) {
 	if h.cfg.Bead == nil || !ValidBeadRef(rig, id) {
 		return nil, errDetailUnavailable
 	}
+	if !h.detailGate.enter() {
+		return nil, errDetailQuiescing
+	}
+	defer h.detailGate.leave()
 	key := rig + "/" + id
 	h.detailMu.Lock()
 	defer h.detailMu.Unlock() // serializes reads: a flurry of clicks is one bd at a time
 	now := h.cfg.Now()
 	if e, ok := h.detailCache[key]; ok && now.Sub(e.at) < detailTTL {
 		return e.d, nil
+	}
+	// A read that queued behind another was admitted before the restart began;
+	// it must not start its own child now.
+	if h.detailGate.isClosed() {
+		return nil, errDetailQuiescing
 	}
 	d, err := h.cfg.Bead(rig, id)
 	if err != nil || d == nil {

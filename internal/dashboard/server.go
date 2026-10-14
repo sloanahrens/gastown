@@ -128,6 +128,11 @@ func (h *Hub) serveBead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d, err := h.beadDetail(rig, id)
+	if errors.Is(err, errDetailQuiescing) {
+		w.Header().Set("Retry-After", "2")
+		http.Error(w, "dashboard restarting, retry", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		http.Error(w, "bead unavailable", http.StatusBadGateway)
 		return
