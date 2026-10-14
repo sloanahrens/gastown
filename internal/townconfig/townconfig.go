@@ -2,15 +2,16 @@
 //
 // Load reads the town's config files once into an immutable, validated Town:
 // mayor/town.json, mayor/rigs.json, settings/config.json, every registered
-// rig's settings/config.json, mayor/daemon.json, settings/daemon.env and the
+// rig's settings/config.json, settings/daemon.env and the
 // managed Dolt server config .dolt-data/config.yaml, plus any pre-registry
 // park records under .beads-wisp/config (parked.go). Every file is decoded
 // strictly through internal/config's one parser, so an unknown key is an
 // error.
 //
 // On the two-file layout (gt config migrate, internal/config/layout.go)
-// mayor/rigs.json and mayor/daemon.json are sections of mayor/town.json and
-// settings/config.json. The kernel reads them through the same paths: the
+// the retired mayor/rigs.json and mayor/daemon.json are sections of
+// mayor/town.json and settings/config.json (the daemon patrol config is the
+// "daemon" section of settings/config.json, which Load reads as part of it). The kernel reads them through the same paths: the
 // config loaders follow a retired file to its section, so both layouts
 // load, and gt doctor's config-layout check warns until the town moves.
 //
@@ -390,7 +391,8 @@ func (t *Town) Operational() *config.OperationalConfig {
 	return clone(t.settings.Operational)
 }
 
-// Daemon is mayor/daemon.json, or nil when the file is absent.
+// Daemon is the daemon patrol config (settings/config.json's "daemon" section,
+// the legacy mayor/daemon.json on an unmigrated town), or nil when it is absent.
 func (t *Town) Daemon() *config.DaemonPatrolConfig { return clone(t.daemon) }
 
 // DaemonEnv is settings/daemon.env, empty when the file is absent.

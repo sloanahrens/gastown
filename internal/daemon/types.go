@@ -106,9 +106,10 @@ func SaveState(townRoot string, state *State) error {
 	return atomicfile.WriteJSON(stateFile, state)
 }
 
-// The mayor/daemon.json schema lives in internal/config so the config
-// kernel decodes the file strictly with the types the daemon runs on
-// (gt-y3pgh.1). These aliases keep the daemon's names.
+// The daemon patrol config schema (the "daemon" section of settings/config.json,
+// the legacy mayor/daemon.json on an unmigrated town) lives in internal/config
+// so the config kernel decodes the file strictly with the types the daemon runs
+// on (gt-y3pgh.1). These aliases keep the daemon's names.
 type (
 	DaemonPatrolConfig         = agentconfig.DaemonPatrolConfig
 	PatrolConfig               = agentconfig.PatrolConfig
@@ -132,20 +133,23 @@ type (
 	TierSweepConfig            = agentconfig.TierSweepConfig
 )
 
-// PatrolConfigFile returns the path to the patrol config file.
+// PatrolConfigFile returns the path to the patrol config file: the legacy
+// mayor/daemon.json, which the config loaders follow to the "daemon" section of
+// settings/config.json once the town has one.
 func PatrolConfigFile(townRoot string) string {
 	return filepath.Join(townRoot, constants.DirMayor, "daemon.json")
 }
 
 // PatrolConfigSource names the file the patrol config was read from: on the
-// two-file layout mayor/daemon.json is settings/config.json's "daemon"
-// section, so a startup line that names mayor/daemon.json reports to the
-// operator a file whose edit the daemon did not read (gt-y3pgh.12).
+// two-file layout the patrol config is settings/config.json's "daemon"
+// section, so a startup line that names the retired mayor/daemon.json reports
+// to the operator a file whose edit the daemon did not read (gt-y3pgh.12).
 func PatrolConfigSource(townRoot string) string {
 	return agentconfig.SourcePath(PatrolConfigFile(townRoot))
 }
 
-// LoadPatrolConfig loads patrol configuration from mayor/daemon.json.
+// LoadPatrolConfig loads patrol configuration from the "daemon" section of
+// settings/config.json (the legacy mayor/daemon.json on an unmigrated town).
 // Returns nil if the file doesn't exist or can't be parsed.
 //
 // It returns nil both when the file is absent and when it does not parse, so
@@ -160,7 +164,7 @@ func LoadPatrolConfig(townRoot string) *DaemonPatrolConfig {
 	return cfg
 }
 
-// ReadPatrolConfig loads mayor/daemon.json through the config package's one
+// ReadPatrolConfig loads the patrol config (see PatrolConfigFile) through the config package's one
 // parser, telling absent (nil, nil) from unparseable (nil, *config.ParseError
 // naming the file and offset).
 func ReadPatrolConfig(townRoot string) (*DaemonPatrolConfig, error) {
@@ -171,7 +175,7 @@ func ReadPatrolConfig(townRoot string) (*DaemonPatrolConfig, error) {
 	return cfg, err
 }
 
-// SavePatrolConfig writes mayor/daemon.json through the config package's
+// SavePatrolConfig writes the patrol config (see PatrolConfigFile) through the config package's
 // locked writer, which refuses to replace a file that does not parse.
 func SavePatrolConfig(townRoot string, config *DaemonPatrolConfig) error {
 	return agentconfig.WriteConfigJSON(PatrolConfigFile(townRoot), config, 0o644)
@@ -364,7 +368,7 @@ func loadDisabledPatrolsFromTownSettingsTo(townRoot string, warn io.Writer) map[
 }
 
 // isPatrolActive checks whether a patrol should run, combining the
-// daemon patrol config (mayor/daemon.json) with the town-level
+// daemon patrol config (settings/config.json's "daemon" section) with the town-level
 // disabled_patrols list (settings/config.json). A patrol is active
 // only if it is enabled in daemon config AND not in the disabled list.
 func (d *Daemon) isPatrolActive(patrol string) bool {

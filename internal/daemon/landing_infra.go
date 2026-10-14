@@ -61,7 +61,7 @@ func landingInfraInterval(config *DaemonPatrolConfig) time.Duration {
 	return defaultLandingInfraInterval
 }
 
-// landingInfraConfig is daemon.json's patrols.landing_infra block, or nil.
+// landingInfraConfig is the daemon patrol config's patrols.landing_infra block, or nil.
 func landingInfraConfig(config *DaemonPatrolConfig) *LandingInfraConfig {
 	if config == nil || config.Patrols == nil {
 		return nil

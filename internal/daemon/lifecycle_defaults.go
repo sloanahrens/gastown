@@ -25,7 +25,7 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 				MaxAgeStr:    "24h",
 				DeleteAgeStr: "168h", // 7 days
 				// Auto-close is stated explicitly so the threshold is visible in
-				// daemon.json rather than inferred from code. It matches the
+				// the daemon patrol config rather than inferred from code. It matches the
 				// mol-dog-reaper formula default; shortening it is what swept the
 				// town's agent beads in gt-2qzr.
 				StaleIssueAgeStr: "720h", // 30 days
@@ -118,8 +118,8 @@ func EnsureLifecycleDefaults(config *DaemonPatrolConfig) bool {
 //
 // This is the top-level function called by gt init and gt up.
 //
-// A daemon.json that does not parse is returned as an error and never
-// rewritten (gt-fcxe9.10): only an absent file is created from defaults.
+// A daemon patrol config that does not parse is returned as an error and never
+// rewritten (gt-fcxe9.10): only an absent one is created from defaults.
 func EnsureLifecycleConfigFile(townRoot string) error {
 	config, err := ReadPatrolConfig(townRoot)
 	if err != nil {

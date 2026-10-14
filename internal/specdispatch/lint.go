@@ -115,8 +115,8 @@ type Template struct {
 }
 
 // DefaultTemplatePath is the operator's template,
-// ~/.claude/docs/agents/spec-template.md. daemon.json
-// patrols.spec_dispatch.template overrides it.
+// ~/.claude/docs/agents/spec-template.md. The "daemon" section of
+// settings/config.json (patrols.spec_dispatch.template) overrides it.
 func DefaultTemplatePath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {

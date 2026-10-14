@@ -68,8 +68,9 @@ type Daemon struct {
 
 	// disabledPatrols is loaded from town settings (disabled_patrols field).
 	// Provides a simple way to disable individual patrol dogs without editing
-	// the daemon patrol config (settings/config.json's "daemon" section on a
-	// two-file town, mayor/daemon.json on a five-file one). Checked by
+	// the daemon patrol config (settings/config.json's "daemon" section; the
+	// legacy mayor/daemon.json on a town gt config migrate has not moved).
+	// Checked by
 	// isPatrolActive alongside patrolConfig.
 	disabledPatrols map[string]bool
 
@@ -650,8 +651,9 @@ func New(config *Config) (*Daemon, error) {
 		_ = t.UnsetGlobalEnvironment(k)
 	}
 
-	// Load the daemon patrol config (settings/config.json's "daemon" section
-	// on a two-file town, mayor/daemon.json on a five-file one), ensuring
+	// Load the daemon patrol config (settings/config.json's "daemon" section;
+	// the legacy mayor/daemon.json on a town gt config migrate has not moved),
+	// ensuring
 	// lifecycle defaults are populated for any missing data maintenance
 	// tickers. Without this, opt-in patrols (compactor, reaper, doctor, JSONL
 	// backup, dolt backup) remain disabled if the config was created before
@@ -666,8 +668,8 @@ func New(config *Config) (*Daemon, error) {
 	}
 	patrolConfig := LoadPatrolConfig(config.TownRoot)
 	if patrolConfig != nil {
-		// Name the file the config was read from: on the two-file layout it is
-		// settings/config.json, not mayor/daemon.json (gt-y3pgh.12).
+		// Name the file the config was read from: on a migrated town it is
+		// settings/config.json, not the retired mayor/daemon.json (gt-y3pgh.12).
 		source := PatrolConfigSource(config.TownRoot)
 		logger.Printf("Loaded patrol config from %s", source)
 		// Propagate the daemon config's env to this process and all spawned sessions.
@@ -689,7 +691,7 @@ func New(config *Config) (*Daemon, error) {
 	}
 
 	// Load disabled_patrols from town settings (settings/config.json).
-	// This provides a simpler way to disable patrols than editing daemon.json.
+	// This provides a simpler way to disable patrols than editing the "daemon" section of settings/config.json.
 	disabledPatrols := loadDisabledPatrolsFromTownSettings(config.TownRoot)
 	if len(disabledPatrols) > 0 {
 		names := make([]string, 0, len(disabledPatrols))
@@ -708,7 +710,7 @@ func New(config *Config) (*Daemon, error) {
 		}
 		if doltServer.config.Port == 0 {
 			// The endpoint comes from the town's config only (gt-y3pgh.9);
-			// daemon.json's dolt_server port/host are ignored. With no
+			// the daemon section's dolt_server port/host are ignored. With no
 			// endpoint there is nothing to manage, and guessing one would
 			// point the daemon at some other server.
 			logger.Printf("Dolt server management disabled: town has no Dolt endpoint (set it with gt config set dolt.port)")
@@ -763,7 +765,7 @@ func New(config *Config) (*Daemon, error) {
 
 // processEnv writes the daemon's own process environment. It is the one
 // place the daemon does: PublishIdentity publishes the daemon's identity and
-// New the town root, daemon.json's env, the augmented PATH and the Dolt
+// New the town root, the daemon patrol config's env, the augmented PATH and the Dolt
 // endpoint here so every session, bd and gt it starts inherits them, and the
 // libraries that build those children (config.AgentEnv, internal/beads) read
 // the process environment.
@@ -1048,9 +1050,8 @@ func (d *Daemon) Run() (err error) {
 	}
 
 	// Start the spec dispatcher ticker unless the daemon patrol config
-	// (settings/config.json's "daemon" section on a two-file town,
-	// mayor/daemon.json on a five-file one) sets enabled:false (default on,
-	// gt-1gnq9).
+	// (settings/config.json's "daemon" section; the legacy mayor/daemon.json
+	// on an unmigrated town) sets enabled:false (default on, gt-1gnq9).
 	var specDispatchTicker *time.Ticker
 	var specDispatchChan <-chan time.Time
 	if d.isPatrolActive("spec_dispatch") {

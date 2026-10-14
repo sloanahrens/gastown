@@ -82,7 +82,7 @@ func wispReaperStaleIssueAge(config *DaemonPatrolConfig) time.Duration {
 	return defaultStaleIssueAge
 }
 
-// WispReaperAutoCloseDisarmed reports whether daemon.json explicitly disarms
+// WispReaperAutoCloseDisarmed reports whether the daemon patrol config explicitly disarms
 // the wisp_reaper auto-close step (patrols.wisp_reaper.auto_close=false).
 //
 // This is read by `gt reaper auto-close` as well, so the setting disarms a
