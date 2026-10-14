@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -111,4 +112,86 @@ func TestUsagePanelSetsNoMarkup(t *testing.T) {
 	if !strings.Contains(draw, `tr.append(el("td", cls || "", text))`) {
 		t.Error("renderUsage does not draw its cells through el()")
 	}
+}
+
+// The Deep reviews table shows what a run's tokens bought: the findings the
+// Deep review pane counted for the same bead, and the uncached tokens per
+// finding. The two lists come from different readers, so the page joins them by
+// bead id and does no new read.
+func TestUsagePanelJoinsDeepReviewFindings(t *testing.T) {
+	t.Parallel()
+
+	draw := pageFunc(t, "renderUsage")
+	for _, want := range []string{
+		// The join: the Deep review pane's rows keyed by their id, read off the
+		// same state the Usage payload rides in.
+		`const found = new Map(((s.deepreview && s.deepreview.rows) || []).map(r => [r.id, r.findings]));`,
+		`const f = found.get(r.bead);`,
+		`["Findings", 1], ["Tokens per finding", 1]`,
+		// Findings: the count, and "-" for a run the Deep review pane does not list.
+		`[f == null ? "-" : String(f), "n"]`,
+		// Tokens per finding: uncached over findings, in the other token cells'
+		// format, and "-" for zero or unknown findings.
+		`[f ? fmtTokens(Math.round(r.uncached / f)) : "-", "n"]`,
+	} {
+		if !strings.Contains(draw, want) {
+			t.Errorf("renderUsage has no %q", want)
+		}
+	}
+}
+
+// A run the Deep review pane lists with no findings, a run it does not list and
+// a state with no deep review at all each draw "-" and never divide by zero,
+// and a joined run draws its count and its quotient. The join expressions are
+// run against those four shapes.
+func TestUsagePanelDeepReviewColumnsCases(t *testing.T) {
+	t.Parallel()
+
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not installed")
+	}
+	script := `
+const fmtTokens = n => {
+  n = Number(n) || 0;
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+  return String(n);
+};
+const cells = (s, r) => {
+  ` + deepReviewJoin(t) + `
+  const f = found.get(r.bead);
+  return [f == null ? "-" : String(f), f ? fmtTokens(Math.round(r.uncached / f)) : "-"];
+};
+const withRows = { deepreview: { rows: [{ id: "a", findings: 4 }, { id: "z", findings: 0 }] } };
+console.log(JSON.stringify([
+  cells(withRows, { bead: "a", uncached: 2500000 }),
+  cells(withRows, { bead: "a", uncached: 10 }),
+  cells(withRows, { bead: "z", uncached: 500 }),
+  cells(withRows, { bead: "missing", uncached: 500 }),
+  cells({ deepreview: null }, { bead: "a", uncached: 500 }),
+  cells({}, { bead: "a", uncached: 500 }),
+]));`
+	out, err := exec.Command(node, "-e", script).Output()
+	if err != nil {
+		t.Fatalf("node: %v", err)
+	}
+	want := `[["4","625.0k"],["4","3"],["0","-"],["-","-"],["-","-"],["-","-"]]`
+	if got := strings.TrimSpace(string(out)); got != want {
+		t.Errorf("columns = %s, want %s", got, want)
+	}
+}
+
+// deepReviewJoin returns the page's own join statement, so the case test runs
+// the code the page runs.
+func deepReviewJoin(t *testing.T) string {
+	t.Helper()
+
+	draw := pageFunc(t, "renderUsage")
+	i := strings.Index(draw, "const found = ")
+	if i < 0 {
+		t.Fatal("renderUsage has no deep review join")
+	}
+	line := draw[i:]
+	return line[:strings.Index(line, "\n")]
 }
