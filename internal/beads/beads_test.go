@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -1628,6 +1629,12 @@ func TestBDListSlowListDoesNotBlockUnrelatedList(t *testing.T) {
 	if err := os.MkdirAll(markerDir, 0755); err != nil {
 		t.Fatalf("create marker dir: %v", err)
 	}
+	// The slow stub announces itself by writing a line to this FIFO; the test
+	// reads it instead of polling for a marker file.
+	startedFifo := filepath.Join(markerDir, "slow-started")
+	if out, err := exec.Command("mkfifo", startedFifo).CombinedOutput(); err != nil {
+		t.Fatalf("mkfifo %s: %v\n%s", startedFifo, err, out)
+	}
 	binDir := filepath.Join(tmp, "bin")
 	if err := os.MkdirAll(binDir, 0755); err != nil {
 		t.Fatalf("create bin dir: %v", err)
@@ -1672,7 +1679,7 @@ func TestBDListSlowListDoesNotBlockUnrelatedList(t *testing.T) {
 		}
 	})
 
-	waitForFile(t, filepath.Join(markerDir, "slow-started"), listConcurrencyBackstop)
+	waitForStubStarted(t, startedFifo, listConcurrencyBackstop)
 
 	// The unrelated list must complete while the slow list still holds "the
 	// lock". That ordering is the assertion, and it is checked below with no
@@ -1767,16 +1774,30 @@ func sanitizedBDListConcurrencyEnv() []string {
 	return env
 }
 
-func waitForFile(t *testing.T, path string, timeout time.Duration) {
+// waitForStubStarted blocks until the slow stub writes its line to fifo. The
+// FIFO is opened read-write so the open never waits for the stub and the
+// stub's own open finds a reader; the timeout is only a hang guard, and the
+// deferred Close is what unblocks the pending read after it fires.
+func waitForStubStarted(t *testing.T, fifo string, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	f, err := os.OpenFile(fifo, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open %s: %v", fifo, err)
 	}
-	t.Fatalf("timed out waiting for %s", path)
+	defer f.Close()
+	read := make(chan error, 1)
+	go func() {
+		_, err := bufio.NewReader(f).ReadString('\n')
+		read <- err
+	}()
+	select {
+	case err := <-read:
+		if err != nil {
+			t.Fatalf("reading %s: %v", fifo, err)
+		}
+	case <-time.After(timeout):
+		t.Fatalf("timed out waiting for %s", fifo)
+	}
 }
 
 func writeConcurrentBDListStub(t *testing.T, dir string) {
@@ -1813,7 +1834,7 @@ for arg in "$@"; do
 done
 
 if [ "$status" = "open" ]; then
-  : > "${LISTCONC_MARKER_DIR}/slow-started"
+  echo started > "${LISTCONC_MARKER_DIR}/slow-started"
   # Hold "the lock" until the test releases it. There is deliberately no
   # self-release timer: a timer would tie the fast command's pass window to how
   # long this stub happens to stay alive (gt-gmd attempt 3 -- the fast command
