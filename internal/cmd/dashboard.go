@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/procutil"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/townhealth"
 	"github.com/steveyegge/gastown/internal/townstatus"
@@ -174,7 +175,7 @@ func runDashboard(cmd *cobra.Command, _ []string) error {
 	url := "http://" + addr
 	fmt.Fprintf(cmd.OutOrStdout(), "gt dashboard: %s (read-only, loopback only; polls only while a page is open)\n", url)
 	if dashboardOpen && !inherited { // a restart is not a second launch
-		_ = exec.Command("open", url).Start()
+		_, _ = procutil.Start("open", url) // procutil waits on the child, so it leaves no zombie
 	}
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		return err
