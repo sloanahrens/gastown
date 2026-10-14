@@ -19,13 +19,13 @@ import (
 
 const idleTestSHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
-// newRunnerIdleDaemon is an even-hour sweep of gastown whose runner-idle probe
+// newRunnerIdleDaemon is a sweep of gastown whose runner-idle probe
 // answers from probe (poll 1, 2, ...) and whose pauses advance the fake clock
 // by exactly the pause they were asked for.
 func newRunnerIdleDaemon(t *testing.T, wait string, probe func(poll int) error) (*Daemon, *tierSweepRunRecorder, *bytes.Buffer, *clockwork.FakeClock) {
 	t.Helper()
-	// 14:00 is even, so the cycle runs the shell stage and then the integration
-	// suite: the one stage that takes the container-gate slot.
+	// The cycle runs the shell stage and then the integration suite: the one
+	// stage that takes the container-gate slot.
 	now := atHour(time.Now(), 14)
 	d, rec, _, logs := newTierSweepDaemon(t, now, "gastown")
 	clk := clockwork.NewFakeClockAt(now)

@@ -32,7 +32,7 @@ import (
 //
 // A cycle checks origin/main out detached in one fixed private worktree outside
 // the town root (landingWorkRoot), runs the shell tier every time and the
-// integration and race tiers on even local hours. It runs no `make gate`:
+// integration and race tiers after it. It runs no `make gate`:
 // every landing already gates the merged tree (gt-vsct7.8).
 //
 // A cycle whose config sets runner_idle_command waits, bounded by
@@ -110,7 +110,8 @@ type tierSweepState struct {
 	// key: while origin/main equals it there is nothing new to sweep.
 	LastGreenSHA string `json:"last_green_sha"`
 	// Tiers is the last verdict per tier, carried forward for a tier a cycle
-	// did not run (the integration tiers on an odd hour).
+	// did not run (every cycle plans every tier, so only a cycle that stopped
+	// early leaves a tier's entry from an older cycle).
 	Tiers map[string]tierSweepTierResult `json:"tiers"`
 }
 
@@ -428,8 +429,8 @@ type tierSweepBeadStore interface {
 }
 
 // triggerTierSweep runs one tier_sweep cycle on its own goroutine when the job
-// is due: a cycle runs the shell tier and, on even hours, the integration
-// suite, so inline it would stall the heartbeat.
+// is due: a cycle runs the shell tier and then the integration suite, so
+// inline it would stall the heartbeat.
 func (d *Daemon) triggerTierSweep() {
 	if !d.isPatrolActive("tier_sweep") {
 		return
@@ -540,31 +541,25 @@ func (d *Daemon) runTierSweepRig(ctx context.Context, cycle *dogCycle, rig strin
 	return d.tierSweepRigCycle(ctx, cycle, rig, repo, sha, state, now)
 }
 
-// tierSweepStages is the stages one cycle runs for rig: the shell tier every
-// time, and the integration suite (integration and race) on even local hours.
-// full reports whether the cycle covers every tier the sweep is scheduled to
-// cover, which only an even-hour cycle does.
-func tierSweepStages(rig string, now time.Time) (stages []tierSweepStage, full bool) {
-	stages = []tierSweepStage{{
+// tierSweepStages is the stages one cycle runs for rig: the shell tier, then
+// the integration suite (integration and race). Every cycle runs both, whatever
+// the hour, so a green cycle always covers every tier.
+func tierSweepStages(rig string) []tierSweepStage {
+	return []tierSweepStage{{
 		tiers:  []string{"shell"},
 		budget: tierSweepShellBudget,
 		step:   "shell",
+	}, {
+		tiers:  []string{"integration", "race"},
+		budget: tierSweepIntegrationBudget,
+		slot:   true,
+		role:   rig + "/tier-sweep",
+		step:   "test",
 	}}
-	if now.Hour()%2 == 0 {
-		stages = append(stages, tierSweepStage{
-			tiers:  []string{"integration", "race"},
-			budget: tierSweepIntegrationBudget,
-			slot:   true,
-			role:   rig + "/tier-sweep",
-			step:   "test",
-		})
-	}
-	return stages, len(stages) > 1
 }
 
 // tierSweepTierList names the tiers a cycle's stages will run, in the order it
-// runs them, for the "sweep started" line: "shell", or
-// "shell, integration, race" on an even hour.
+// runs them, for the "sweep started" line: "shell, integration, race".
 func tierSweepTierList(stages []tierSweepStage) string {
 	var tiers []string
 	for _, st := range stages {
@@ -720,7 +715,7 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 	}
 	defer cleanup()
 
-	stages, full := tierSweepStages(rig, now)
+	stages := tierSweepStages(rig)
 	// The cycle's start, logged before the first stage runs so the dashboard's
 	// Tier sweeps pane reads a sweep as running from its true beginning, over
 	// the stages it will run, instead of inferring it from the shell stage
@@ -807,11 +802,10 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 		state.Tiers[tier] = ts
 	}
 	state.LastRun, state.LastSHA = now, sha
-	// LastGreenSHA advances only on a cycle that covered every tier the sweep
-	// is scheduled to cover: a shell-only green says nothing about the
-	// integration tiers, and advancing on it would skip them forever on a
-	// quiet repo.
-	green := !deferred && full && tierSweepAllGreen(results, stages)
+	// LastGreenSHA advances only on a cycle whose every stage ran green: a
+	// deferred cycle ran fewer stages than it planned and says nothing about
+	// the rest.
+	green := !deferred && tierSweepAllGreen(results, stages)
 	if green {
 		state.LastGreenSHA = sha
 	}
