@@ -1,0 +1,161 @@
+package daemon
+
+import (
+	"context"
+	"io"
+	"log"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// shutdownTestDaemon is a daemon with the context pair shutdown() cancels and
+// a town root under t.TempDir, so SaveState has somewhere to write.
+func shutdownTestDaemon(t *testing.T) *Daemon {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	return &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(io.Discard, "", 0),
+		ctx:    ctx,
+		cancel: cancel,
+	}
+}
+
+// shuttingDownTestManager is a manager whose server is down and whose start is
+// counted, so a test can tell "brought Dolt up" from "left it alone".
+func shuttingDownTestManager(t *testing.T, daemon *Daemon, starts *atomic.Int32) *DoltServerManager {
+	t.Helper()
+	return &DoltServerManager{
+		config:   &DoltServerConfig{Enabled: true},
+		townRoot: daemon.config.TownRoot,
+		logger:   func(string, ...interface{}) {},
+		runningFn: func() (int, bool) {
+			return 0, false
+		},
+		startFn:    func() error { starts.Add(1); return nil },
+		stopFn:     func() {},
+		sleepFn:    func(time.Duration) {},
+		nowFn:      time.Now,
+		escalateFn: func(int) {},
+	}
+}
+
+// A SIGTERM'd daemon must cancel its context before it stops Dolt: every
+// background worker stops on d.ctx.Done(), and the ones that bring Dolt up
+// themselves (compactor dog, scheduled slings) would otherwise keep starting
+// passes against a server that is going down (gt-govth).
+func TestShutdownCancelsContextBeforeStoppingDolt(t *testing.T) {
+	t.Parallel()
+	d := shutdownTestDaemon(t)
+
+	workerReturned := make(chan struct{})
+	go func() {
+		defer close(workerReturned)
+		<-d.ctx.Done()
+	}()
+
+	stopCalled := false
+	ctxCanceledAtStop := false
+	d.doltServer = &DoltServerManager{
+		config:   &DoltServerConfig{Enabled: true},
+		townRoot: d.config.TownRoot,
+		logger:   func(string, ...interface{}) {},
+		stopFn: func() {
+			stopCalled = true
+			ctxCanceledAtStop = d.ctx.Err() != nil
+		},
+	}
+
+	if err := d.shutdown(&State{Running: true}); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	if !stopCalled {
+		t.Fatal("shutdown never stopped the Dolt server it manages")
+	}
+	if !ctxCanceledAtStop {
+		t.Error("Dolt was stopped while the daemon context was still live: workers can still act during the stop")
+	}
+	waitForSignal(t, workerReturned, "a worker blocked on d.ctx.Done() did not return when shutdown started")
+}
+
+// The bring-up a patrol cycle calls must not start Dolt once shutdown has
+// begun; the same daemon before shutdown still starts it, so a passing test is
+// not a manager that never starts anything.
+func TestEnsureDoltServerUpStartsNoDoltAfterShutdown(t *testing.T) {
+	t.Parallel()
+
+	t.Run("not shutting down", func(t *testing.T) {
+		t.Parallel()
+		var starts atomic.Int32
+		d := shutdownTestDaemon(t)
+		d.doltServer = shuttingDownTestManager(t, d, &starts)
+
+		if err := d.ensureDoltServerUp(); err != nil {
+			t.Fatalf("ensureDoltServerUp: %v", err)
+		}
+		if got := starts.Load(); got != 1 {
+			t.Fatalf("Dolt starts = %d, want 1 (this is the control: nothing here is blocked)", got)
+		}
+	})
+
+	t.Run("shutdown begun", func(t *testing.T) {
+		t.Parallel()
+		var starts atomic.Int32
+		d := shutdownTestDaemon(t)
+		d.doltServer = shuttingDownTestManager(t, d, &starts)
+
+		d.cancel() // what shutdown() does first
+
+		if err := d.ensureDoltServerUp(); err != nil {
+			t.Fatalf("ensureDoltServerUp: %v", err)
+		}
+		if got := starts.Load(); got != 0 {
+			t.Fatalf("Dolt starts = %d, want 0: the daemon is going down and would leave a detached server behind", got)
+		}
+	})
+}
+
+// A manager that has been asked to stop stays stopped: this is the race the
+// daemon-level cancel alone cannot close, because a worker that reached
+// EnsureRunning before the cancel blocks on mu until Stop releases it.
+func TestEnsureRunning_StartRequestedAfterStopIsRefused(t *testing.T) {
+	t.Parallel()
+	var starts atomic.Int32
+	m := newTestManager(t)
+	m.startFn = func() error { starts.Add(1); return nil }
+
+	if err := m.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := m.EnsureRunning(); err != nil {
+		t.Fatalf("EnsureRunning: %v", err)
+	}
+	if got := starts.Load(); got != 0 {
+		t.Fatalf("Dolt starts after Stop = %d, want 0", got)
+	}
+}
+
+// The backoff sleep releases mu, so it is the window where a Stop can land
+// between EnsureRunning's entry and its start. Stop is called from inside the
+// sleep here: deterministic, and it lands exactly there.
+func TestEnsureRunning_StopDuringBackoffStartIsRefused(t *testing.T) {
+	t.Parallel()
+	var starts, stops atomic.Int32
+	m := newTestManager(t)
+	m.startFn = func() error { starts.Add(1); return nil }
+	m.stopFn = func() { stops.Add(1) }
+	m.sleepFn = func(time.Duration) { _ = m.Stop() }
+
+	if err := m.EnsureRunning(); err != nil {
+		t.Fatalf("EnsureRunning: %v", err)
+	}
+	if got := stops.Load(); got != 1 {
+		t.Fatalf("Stop calls = %d, want 1 (the test did not land a Stop in the backoff)", got)
+	}
+	if got := starts.Load(); got != 0 {
+		t.Fatalf("Dolt starts = %d, want 0: the restart outlived the Stop that asked for it", got)
+	}
+}
