@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -199,6 +200,58 @@ func TestRunOverrunGuard_SkipsSubmittedAndParked(t *testing.T) {
 
 	if len(f.nudges) != 0 || len(f.stops) != 0 {
 		t.Errorf("skipped seats were acted on: nudges %v, stops %v", f.nudges, f.stops)
+	}
+}
+
+// The scheduled deep-review runs past 20 minutes by design, so a seat on a
+// scheduled: bead gets no nudge and no stop, while an identical seat without
+// the label is still judged.
+func TestRunOverrunGuard_SkipsScheduledSlings(t *testing.T) {
+	t.Parallel()
+	for _, elapsed := range []time.Duration{13 * time.Minute, 21 * time.Minute} {
+		d, buf := newOverrunDaemon(t, false)
+		f := newOverrunFake(elapsed,
+			overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-r71dd", Scheduled: true},
+			overrunSeat{Rig: "gastown", Polecat: "nux", Bead: "gt-plain"},
+		)
+
+		d.runOverrunGuard(f.seams())
+
+		wantNudges, wantStops := []string{"gastown/nux"}, 0
+		if elapsed >= 20*time.Minute {
+			wantNudges, wantStops = nil, 1
+		}
+		if !slices.Equal(f.nudges, wantNudges) || len(f.stops) != wantStops {
+			t.Errorf("after %v: nudges %v, stops %v; want nudges %v and %d stop of the unlabelled seat only", elapsed, f.nudges, f.stops, wantNudges, wantStops)
+		}
+		if wantStops == 1 && f.stops[0] != "gastown/nux" {
+			t.Errorf("after %v: stopped %v, want gastown/nux", elapsed, f.stops)
+		}
+		if strings.Contains(buf.String(), "gt-r71dd") {
+			t.Errorf("skipped scheduled seat logged at normal level:\n%s", buf.String())
+		}
+		if st, _ := readOverrunState(d.config.TownRoot, "gt-r71dd"); !st.NudgedAt.IsZero() {
+			t.Errorf("scheduled seat has nudge state %+v", st)
+		}
+	}
+}
+
+func TestHasScheduledSlingLabel(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		labels []string
+		want   bool
+	}{
+		{nil, false},
+		{[]string{"gt:ready-to-land"}, false},
+		{[]string{"unscheduled:x", "scheduled"}, false},
+		{[]string{"gt:task", "scheduled:deep-review"}, true},
+		{[]string{scheduledSlingLabel(ScheduledSlingEntry{Name: "doc-audit"})}, true},
+	}
+	for _, tt := range tests {
+		if got := hasScheduledSlingLabel(tt.labels); got != tt.want {
+			t.Errorf("hasScheduledSlingLabel(%v) = %v, want %v", tt.labels, got, tt.want)
+		}
 	}
 }
 

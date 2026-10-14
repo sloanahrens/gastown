@@ -39,7 +39,10 @@ func scheduledSlingInterval(e ScheduledSlingEntry) time.Duration {
 	return d
 }
 
-func scheduledSlingLabel(e ScheduledSlingEntry) string { return "scheduled:" + e.Name }
+// scheduledSlingLabelPrefix starts every scheduled sling's identity label.
+const scheduledSlingLabelPrefix = "scheduled:"
+
+func scheduledSlingLabel(e ScheduledSlingEntry) string { return scheduledSlingLabelPrefix + e.Name }
 
 func scheduledSlingPriority(e ScheduledSlingEntry) int {
 	if e.Priority == 0 {

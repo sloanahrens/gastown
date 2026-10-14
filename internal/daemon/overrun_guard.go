@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -38,6 +40,11 @@ const overrunNudgeMessage = "This bead has run longer than expected. Write a spl
 type overrunSeat struct {
 	Rig, Polecat, Bead, Branch string
 	Submitted, Parked          bool
+	// Scheduled is set when the bead carries a scheduled: label, the mark of a
+	// run the daemon's scheduled_slings patrol created. Those run long by
+	// design (the deep-review is Opus and report-only), so the guard leaves
+	// them alone.
+	Scheduled bool
 }
 
 // overrunSeams are the guard's reads and side effects. A test sets all of
@@ -138,7 +145,7 @@ func (d *Daemon) triggerOverrunGuard() {
 }
 
 // runOverrunGuard judges every working seat once. A seat that is submitted,
-// parked or undated is left alone. At the nudge threshold the seat is nudged
+// parked, on a scheduled sling or undated is left alone. At the nudge threshold the seat is nudged
 // once per sling, remembered in the bead's state file; past the stop
 // threshold the stop seam runs. In dry-run mode nothing is sent, stopped or
 // written, and the log says what would have happened.
@@ -171,7 +178,7 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 	}
 
 	for _, seat := range seats {
-		if seat.Submitted || seat.Parked || seat.Bead == "" || resumed[seat.Bead] {
+		if seat.Submitted || seat.Parked || seat.Scheduled || seat.Bead == "" || resumed[seat.Bead] {
 			continue
 		}
 		who := seat.Rig + "/" + seat.Polecat
@@ -300,12 +307,13 @@ func (d *Daemon) overrunSeatFor(polecatsDir, rigName, name string) (overrunSeat,
 	if bead == "" {
 		return seat, false
 	}
-	closed, submitted, _ := d.beadFinished(bead)
+	closed, submitted, _, labels := d.beadFinishedLabels(bead)
 	if closed {
 		return seat, false
 	}
 	seat.Bead = bead
 	seat.Submitted = submitted
+	seat.Scheduled = hasScheduledSlingLabel(labels)
 
 	if workDir := resolvePolecatWorktree(polecatsDir, name, rigName); workDir != "" {
 		if branch, err := d.gitAt(workDir).CurrentBranch(); err == nil {
@@ -313,6 +321,12 @@ func (d *Daemon) overrunSeatFor(polecatsDir, rigName, name string) (overrunSeat,
 		}
 	}
 	return seat, true
+}
+
+// hasScheduledSlingLabel reports whether labels include one with the
+// scheduled: prefix that scheduledSlingLabel gives a scheduled sling's bead.
+func hasScheduledSlingLabel(labels []string) bool {
+	return slices.ContainsFunc(labels, func(l string) bool { return strings.HasPrefix(l, scheduledSlingLabelPrefix) })
 }
 
 // overrunSlungReader dates slings from the town event log, reading it once
