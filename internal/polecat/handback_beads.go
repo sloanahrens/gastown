@@ -10,6 +10,7 @@ import (
 // handBackStore is the slice of beads.Client the production BeadWriter uses.
 // *beads.Beads satisfies it; a test passes a fake.
 type handBackStore interface {
+	Show(id string) (*beads.Issue, error)
 	Update(id string, opts beads.UpdateOptions) error
 	AddCommentAs(id, author, comment string) error
 }
@@ -26,6 +27,17 @@ type beadsWriter struct {
 // is bd.
 func NewBeadWriter(store handBackStore, actor string) BeadWriter {
 	return &beadsWriter{store: store, actor: actor}
+}
+
+func (w *beadsWriter) State(ctx context.Context, id string) (string, string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", "", err
+	}
+	is, err := w.store.Show(id)
+	if err != nil {
+		return "", "", err
+	}
+	return is.Status, is.Assignee, nil
 }
 
 func (w *beadsWriter) SetStatus(ctx context.Context, id, status string) error {

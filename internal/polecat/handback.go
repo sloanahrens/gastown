@@ -2,6 +2,7 @@ package polecat
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -11,10 +12,17 @@ import (
 // pool until a person cuts it smaller and removes the label.
 const NeedsSplitLabel = "needs-split"
 
-// BeadWriter is the bead writes HandBack makes. It is deliberately narrow: no
-// method reaches a branch or a worktree, so a hand-back cannot lose a polecat's
-// work.
+// ErrHandBackSkipped is what HandBack wraps when it finds the bead no longer
+// the stopped polecat's to release: closed, or assigned to another polecat. It
+// wrote nothing. The caller treats it as a hand-back that needs no repeat.
+var ErrHandBackSkipped = errors.New("hand-back skipped")
+
+// BeadWriter is the bead read and writes HandBack makes. It is deliberately
+// narrow: no method reaches a branch or a worktree, so a hand-back cannot lose
+// a polecat's work.
 type BeadWriter interface {
+	// State returns the bead's current status and assignee.
+	State(ctx context.Context, id string) (status, assignee string, err error)
 	SetStatus(ctx context.Context, id, status string) error
 	ClearAssignee(ctx context.Context, id string) error
 	AddLabel(ctx context.Context, id, label string) error
@@ -27,8 +35,22 @@ type BeadWriter interface {
 // where the next reader finds the work.
 //
 // The writes happen in that order and stop at the first error, leaving the
-// earlier ones in place.
-func HandBack(ctx context.Context, w BeadWriter, beadID, branch string, elapsed time.Duration) error {
+// earlier ones in place. A caller repeats a failed hand-back, and in between
+// the dispatcher may have slung the half-released bead (open, unassigned) to
+// another polecat. So HandBack first reads the bead and writes nothing when it
+// is closed or assigned to anyone but assignee, the stopped polecat's bead
+// assignee. An empty assignee is the half-released bead and is finished.
+func HandBack(ctx context.Context, w BeadWriter, beadID, assignee, branch string, elapsed time.Duration) error {
+	status, current, err := w.State(ctx, beadID)
+	if err != nil {
+		return fmt.Errorf("hand back %s: read bead: %w", beadID, err)
+	}
+	if status == "closed" || status == "tombstone" {
+		return fmt.Errorf("hand back %s: %w: bead is %s", beadID, ErrHandBackSkipped, status)
+	}
+	if current != "" && current != assignee {
+		return fmt.Errorf("hand back %s: %w: bead is assigned to %s, not %s", beadID, ErrHandBackSkipped, current, assignee)
+	}
 	if err := w.SetStatus(ctx, beadID, "open"); err != nil {
 		return fmt.Errorf("hand back %s: set status: %w", beadID, err)
 	}
