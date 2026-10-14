@@ -40,7 +40,11 @@ Read with 'gt show' or 'bd show'; write with these:
   gt bead dep add <issue> <needs>      <issue> depends on <needs>
   gt bead dep remove <issue> <needs>   Drop that dependency
   gt bead close <id> --reason=...      Close beads
-  gt bead reopen <id>...               Return beads to open`,
+  gt bead reopen <id>...               Return beads to open
+
+Read across every rig with 'gt bead search':
+
+  gt bead search <words...>            Search all rigs' beads, grouped by rig`,
 	RunE: requireSubcommand,
 }
 
@@ -275,7 +279,7 @@ func init() {
 
 	beadDepCmd.AddCommand(beadDepAddCmd, beadDepRemoveCmd)
 	beadCmd.AddCommand(beadCreateCmd, beadNoteCmd, beadUpdateCmd, beadClaimCmd, beadResetCmd,
-		beadCommentCmd, beadReviewCmd, beadDepCmd, beadCloseCmd, beadReopenCmd)
+		beadCommentCmd, beadReviewCmd, beadDepCmd, beadCloseCmd, beadReopenCmd, beadSearchCmd)
 	rootCmd.AddCommand(beadCmd)
 }
 
