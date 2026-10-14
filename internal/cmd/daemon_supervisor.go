@@ -492,8 +492,9 @@ func (c *daemonControl) restartDaemon(townRoot string) (via string, pid int, err
 		if err := c.stopDirect(townRoot); err != nil {
 			return "", 0, fmt.Errorf("stopping the daemon: %w", err)
 		}
-		// c.stopDirect (daemon.StopDaemon) sends SIGKILL and returns
-		// without confirming it took: its own caller (`gt daemon stop`) has
+		// c.stopDirect (daemon.StopDaemon) returns once the daemon exited
+		// or after sending SIGKILL, without confirming the kill took: its
+		// own caller (`gt daemon stop`) has
 		// nothing further to do with the process either way. This caller
 		// does — it is about to spawn a new daemon into the same lock — so
 		// starting that race before the old holder is confirmed gone risks
@@ -570,10 +571,10 @@ const daemonStartupMargin = 30 * time.Second
 //     guaranteed gone within ShutdownBudget of the restart, whatever its own
 //     shutdown steps add up to.
 //   - The hand path (no supervisor) does not use this function at all:
-//     restartDaemon calls c.stopDirect (daemon.StopDaemon) instead, whose
-//     own SIGKILL grace is constants.ShutdownNotifyDelay (500 ms) — an order
-//     of magnitude tighter, because there is no supervisor to leave the job
-//     loaded for, so the caller can afford to force the issue immediately.
+//     restartDaemon calls c.stopDirect (daemon.StopDaemon) instead, which
+//     polls for the daemon to exit and SIGKILLs it only after
+//     daemon.StopWaitBudget (ShutdownBudget plus a margin), so a daemon that
+//     finishes shutdown() is never killed and it returns with the old one gone.
 //
 // So ShutdownBudget is the bound this function actually has to plan around;
 // daemonStartupMargin covers the incoming daemon on top of it.

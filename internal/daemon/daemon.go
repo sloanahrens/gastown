@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -2022,6 +2023,55 @@ func isRunningFromPID(townRoot string) (bool, int, error) {
 	return true, pid, nil
 }
 
+// StopWaitBudget is how long StopDaemon lets a SIGTERMed daemon finish
+// shutdown() before it sends SIGKILL: ShutdownBudget, the ceiling on that
+// shutdown, plus stopWaitMargin for the steps that run after Dolt's stop.
+// Killing sooner lands before SaveState(Running=false) and the dolt.pid
+// cleanup, leaving a stale state file behind (gt-dhlm4).
+const StopWaitBudget = ShutdownBudget + stopWaitMargin
+
+// stopWaitMargin covers the in-process steps shutdown() runs after the Dolt
+// stop returns: they are quick, but not part of ShutdownBudget.
+const stopWaitMargin = 5 * time.Second
+
+// stopPollInterval is how often StopDaemon re-checks that the daemon exited.
+const stopPollInterval = 100 * time.Millisecond
+
+// daemonStopWait waits for a SIGTERMed daemon to exit, then SIGKILLs it if it
+// outlives budget. Its effects are fields so a test can drive it with a fake
+// clock and a fake process.
+type daemonStopWait struct {
+	clock  clockwork.Clock
+	out    io.Writer
+	pid    int
+	budget time.Duration
+	poll   time.Duration
+	alive  func() bool
+	verify func() error // re-checks pid is still the daemon before SIGKILL
+	kill   func() error
+}
+
+// run returns once the daemon has exited or SIGKILL has been sent.
+func (w *daemonStopWait) run() {
+	if !w.alive() {
+		return
+	}
+	fmt.Fprintf(w.out, "  Waiting up to %s for the daemon (PID %d) to finish shutting down...\n",
+		w.budget, w.pid)
+	deadline := w.clock.Now().Add(w.budget)
+	for w.alive() {
+		if !w.clock.Now().Before(deadline) {
+			if w.verify() == nil {
+				fmt.Fprintf(w.out, "  Daemon (PID %d) still running after %s; sending SIGKILL\n",
+					w.pid, w.budget)
+				_ = w.kill()
+			}
+			return
+		}
+		w.clock.Sleep(w.poll)
+	}
+}
+
 // StopDaemon stops the running daemon for the given town.
 // Note: The file lock in Run() prevents multiple daemons per town, so we only
 // need to kill the process from the PID file.
@@ -2070,18 +2120,20 @@ func StopDaemon(townRoot string) error {
 		return fmt.Errorf("sending termination signal: %w", err)
 	}
 
-	// Wait a bit for graceful shutdown. StopDaemon runs outside any Daemon, so
-	// it waits on the real clock.
-	clockwork.NewRealClock().Sleep(constants.ShutdownNotifyDelay)
-
-	// Check if still running
-	if isProcessAlive(process) {
-		// Still running, force kill — re-verified: the PID may have exited
-		// and been reused during the wait (gt-p7zy0).
-		if verifyGTDaemonPID(townRoot, pid) == nil {
-			_ = sendKillSignal(process)
-		}
-	}
+	// Give shutdown() the time it is budgeted before forcing the issue.
+	// StopDaemon runs outside any Daemon, so it waits on the real clock.
+	(&daemonStopWait{
+		clock:  clockwork.NewRealClock(),
+		out:    os.Stdout,
+		pid:    pid,
+		budget: StopWaitBudget,
+		poll:   stopPollInterval,
+		alive:  func() bool { return isProcessAlive(process) },
+		// Re-verified: the PID may have exited and been reused during the
+		// wait (gt-p7zy0).
+		verify: func() error { return verifyGTDaemonPID(townRoot, pid) },
+		kill:   func() error { return sendKillSignal(process) },
+	}).run()
 
 	// Clean up PID file
 	pidFile := filepath.Join(townRoot, "daemon", "daemon.pid")
