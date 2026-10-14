@@ -12,6 +12,9 @@ import (
 	"github.com/jonboulle/clockwork"
 )
 
+// stopWaitEpoch is the fixed start of the fake clock these tests run on.
+var stopWaitEpoch = time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
+
 // fakeStopTarget is a daemon process that exits exitsAfter past its SIGTERM
 // on the fake clock, or never when exitsAfter is zero, and that dies
 // immediately when killed.
@@ -146,7 +149,7 @@ func TestStopDaemonWaitTable(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			clk := clockwork.NewFakeClock()
+			clk := clockwork.NewFakeClockAt(stopWaitEpoch)
 			target := &fakeStopTarget{clk: clk, termAt: clk.Now(), exitsAfter: tt.exitsAfter}
 			var out bytes.Buffer
 			w := newStopWait(clk, target, &out)
@@ -172,7 +175,7 @@ func TestStopDaemonWaitTable(t *testing.T) {
 // A daemon already gone when the wait starts is neither waited on nor killed.
 func TestStopDaemonWaitReturnsAtOnceWhenAlreadyGone(t *testing.T) {
 	t.Parallel()
-	clk := clockwork.NewFakeClock()
+	clk := clockwork.NewFakeClockAt(stopWaitEpoch)
 	target := &fakeStopTarget{clk: clk, termAt: clk.Now(), exited: true}
 	var out bytes.Buffer
 	w := newStopWait(clk, target, &out)
