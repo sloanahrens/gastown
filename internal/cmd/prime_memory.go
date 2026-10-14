@@ -13,18 +13,25 @@
 // leaving prime's payload exactly as it was before this section existed.
 // `gt prime --explain-memory <bead>` prints the same scoring read-only, so the
 // selection can be judged before the flag is turned on.
+//
+// Every rendered section also appends one line to the town's recall log, the
+// only record of which memories a polecat actually received (appendRecall).
 
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/memrecall"
 )
 
@@ -72,8 +79,95 @@ func (p primeTools) polecatBeadMemories(ctx RoleContext, cwd string, hookedBead 
 	}
 
 	rows := beadMemoryRows(memoryCorpus(kvs), hookedBead, p.clk().Now())
-	_, _ = fmt.Fprint(p.w(), renderBeadMemorySection(rows))
+	section := renderBeadMemorySection(rows)
+	if section == "" {
+		return true
+	}
+	_, _ = fmt.Fprint(p.w(), section)
+	p.appendRecall(ctx, hookedBead.ID, rows, len(section))
 	return true
+}
+
+// recallRecord is one line of the recall log: which memories prime injected for
+// which bead, and what the section cost.
+//
+// Keys is the memories the section carried, not the candidates it scored. The
+// log's reader is the memory hygiene audit, which needs the recalled set to
+// tell a memory polecats keep getting from one that has never been worth
+// selecting (gt-k7t18).
+type recallRecord struct {
+	TS    string   `json:"ts"`
+	Bead  string   `json:"bead"`
+	Rig   string   `json:"rig"`
+	Keys  []string `json:"keys"`
+	Bytes int      `json:"bytes"`
+}
+
+// recallLogPath is <townRoot>/.runtime/memory-recall.jsonl, the town's
+// append-only recall log.
+func recallLogPath(townRoot string) string {
+	return filepath.Join(constants.TownRuntimePath(townRoot), "memory-recall.jsonl")
+}
+
+// appendRecall records one injection. It is called only when the section
+// rendered: a prime that injected no memories logs no line, so the file holds
+// injections rather than primes.
+//
+// Best-effort by contract — the caller is prime, which must not fail, wait or
+// grow a dependency on an audit log, so a write error is one stderr line and
+// nothing else.
+func (p primeTools) appendRecall(ctx RoleContext, beadID string, rows []beadMemory, sectionBytes int) {
+	if ctx.TownRoot == "" {
+		return
+	}
+	rec := recallRecord{
+		TS:    p.clk().Now().UTC().Format(time.RFC3339),
+		Bead:  beadID,
+		Rig:   ctx.Rig,
+		Keys:  recalledKeys(rows),
+		Bytes: sectionBytes,
+	}
+	if err := appendRecallRecord(recallLogPath(ctx.TownRoot), rec); err != nil {
+		fmt.Fprintf(p.errW(), "gt prime: memory recall log: %v\n", err)
+	}
+}
+
+// recalledKeys returns the keys the section carries, in the order it carries
+// them — the ranked order beadMemoryRows produced.
+func recalledKeys(rows []beadMemory) []string {
+	keys := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if row.selected {
+			keys = append(keys, row.mem.Key)
+		}
+	}
+	return keys
+}
+
+// appendRecallRecord appends rec to path as one JSON line: a single O_APPEND
+// write, mode 0600, the directory created when absent.
+//
+// One write and no fsync or read-back is the point (gt-k7t18): the line is an
+// audit record, and prime pays for it one syscall at a time. A crash between
+// the write and the next line leaves the record, which is all the log claims.
+func appendRecallRecord(path string, rec recallRecord) error {
+	line, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	line = append(line, '\n')
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	fh, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = fh.Close() }()
+
+	_, err = fh.Write(line)
+	return err
 }
 
 // memoryCorpus returns the rig kv's memories in key order, so the same corpus
