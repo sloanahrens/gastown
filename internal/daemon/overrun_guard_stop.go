@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
@@ -35,7 +37,7 @@ const (
 //  3. checkpoint the worktree;
 //  4. push the kept branch to origin; a failed push is retried every tick,
 //     and the hand-back waits for it, so its comment never names a branch that
-//     exists only in the worktree;
+//     exists only in the worktree (see below for when the push is given up);
 //  5. hand the bead back (status open, assignee cleared, needs-split) so the
 //     roster no longer counts the seat; a bead found closed or re-slung to
 //     another polecat is left alone. The attention item for the stop is
@@ -54,7 +56,12 @@ const (
 // overrunCheckpointMaxAttempts failures the stop gives up on it: steps 4 and 5
 // run (the push keeps what was committed), the comment carrying a note that the
 // worktree may hold uncommitted work, and step 6 is skipped, so the seat stays
-// paused (and the worktree unreused) until an operator looks. The hand-back's needs-split label raises the
+// paused (and the worktree unreused) until an operator looks. The push has the
+// same shape: after overrunPushMaxAttempts failures, or at once when origin
+// rejects the unforced push as non-fast-forward (it holds a different history
+// for the branch), the stop gives up on it, and the comment's note says the
+// branch exists only in the worktree, names the path and says why the push
+// failed; step 6 is skipped. The hand-back's needs-split label raises the
 // attention item. A stop resumed past step 2 first checks
 // the pause is still down and no session runs on the seat; if not, the seat
 // was taken back and the stop ends without a hand-back.
@@ -190,42 +197,65 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 
 	// 4. Push the kept branch, so the comment below never names a branch that
 	// exists only in the worktree and the seat reads recoverable. A failed
-	// push is retried every tick: the hand-back waits for it.
-	if st.PushedAt.IsZero() && s.push != nil {
+	// push is retried every tick: the hand-back waits for it, up to
+	// overrunPushMaxAttempts; a non-fast-forward rejection, which no retry
+	// changes, gives up at once.
+	if st.PushedAt.IsZero() && !st.PushGaveUp && s.push != nil {
 		pushSeat := seat
 		pushSeat.Bead, pushSeat.Branch = st.Bead, st.Branch
 		if err := s.push(pushSeat); err != nil {
-			d.logger.Printf("overrun_guard: stop %s on %s: push of branch %s failed, retrying next tick: %v", who, st.Bead, branch, err)
-			return
-		}
-		st.PushedAt = now
-		if !save() {
-			return
+			st.PushFailures++
+			st.PushFailure = pushFailureReason(err)
+			var diverged *overrunPushDivergedError
+			if !errors.As(err, &diverged) && st.PushFailures < overrunPushMaxAttempts {
+				d.logger.Printf("overrun_guard: stop %s on %s: push of branch %s failed, retrying next tick: %v (%d of %d)",
+					who, st.Bead, branch, err, st.PushFailures, overrunPushMaxAttempts)
+				save()
+				return
+			}
+			// The push will not succeed while the seat is stopped: hand the
+			// bead back with the branch named as living in the worktree only.
+			st.PushGaveUp = true
+			if !save() {
+				return
+			}
+			d.logger.Printf("overrun_guard: stop %s on %s: giving up on the push of branch %s after %d attempt(s); handing the bead back with a note: %v",
+				who, st.Bead, branch, st.PushFailures, err)
+		} else {
+			st.PushedAt = now
+			if !save() {
+				return
+			}
 		}
 	}
 
 	// 5. Hand the bead back.
 	handed := seat
 	handed.Bead, handed.Branch = st.Bead, branch
-	note := ""
+	var notes []string
 	if st.CheckpointGaveUp {
-		note = fmt.Sprintf("The worktree could not be checkpointed after %d attempts and may hold uncommitted work; "+
+		notes = append(notes, fmt.Sprintf("The worktree could not be checkpointed after %d attempts and may hold uncommitted work; "+
 			"it is left as it was, and %s stays paused until an operator checks it and runs gt agent resume.",
-			st.CheckpointFailures, who)
+			st.CheckpointFailures, who))
 	}
-	if err := s.handBack(handed, elapsed, note); err != nil {
+	if st.PushGaveUp {
+		notes = append(notes, fmt.Sprintf("Branch %s exists only in the seat's worktree (%s): it could not be pushed to origin (%s); "+
+			"%s stays paused until an operator pushes it and runs gt agent resume.",
+			branch, d.overrunWorktreePath(seat), st.PushFailure, who))
+	}
+	if err := s.handBack(handed, elapsed, strings.Join(notes, " ")); err != nil {
 		d.logger.Printf("overrun_guard: stop %s on %s: hand-back failed: %v", who, st.Bead, err)
 		return
 	}
-	if st.CheckpointGaveUp {
+	if st.CheckpointGaveUp || st.PushGaveUp {
 		// 6 is skipped: the park is what keeps the name, and the worktree
-		// under it, from taking new work while it holds uncommitted state.
+		// under it, from taking new work while it holds state origin lacks.
 		st.StoppedAt = now
 		if !save() {
 			d.logger.Printf("overrun_guard: WARNING: %s: %s handed back but state not saved — the hand-back will be repeated", who, st.Bead)
 			return
 		}
-		d.logger.Printf("overrun_guard: stopped %s on %s after %s; bead handed back without a checkpoint (branch %s and worktree kept, seat left paused)",
+		d.logger.Printf("overrun_guard: stopped %s on %s after %s; bead handed back with a note (branch %s and worktree kept, seat left paused)",
 			who, st.Bead, elapsed.Round(time.Second), branch)
 		return
 	}
@@ -349,9 +379,87 @@ func (d *Daemon) overrunPushBranch(seat overrunSeat) error {
 		return fmt.Errorf("resolve branch %s: %w", branch, err)
 	}
 	if err := g.Push("origin", sha+":refs/heads/"+branch, false); err != nil {
+		if isNonFastForwardPush(err) {
+			return &overrunPushDivergedError{Branch: branch, OriginSHA: originBranchSHA(g, branch), Err: err}
+		}
 		return fmt.Errorf("push %s: %w", branch, err)
 	}
 	return nil
+}
+
+// overrunPushDivergedError is a push origin rejected because it holds history
+// for the branch that the local branch does not contain. No retry changes
+// that, and the push is never forced, so the stop gives up on it at once.
+type overrunPushDivergedError struct {
+	Branch    string
+	OriginSHA string // empty when origin could not be asked
+	Err       error
+}
+
+func (e *overrunPushDivergedError) Error() string {
+	return fmt.Sprintf("push %s: %s: %v", e.Branch, e.reason(), e.Err)
+}
+
+func (e *overrunPushDivergedError) Unwrap() error { return e.Err }
+
+// reason is the hand-back note's account of the rejection.
+func (e *overrunPushDivergedError) reason() string {
+	if e.OriginSHA == "" {
+		return "origin holds a different history for this branch (origin sha unknown)"
+	}
+	return "origin holds a different history for this branch (origin sha " + e.OriginSHA + ")"
+}
+
+// isNonFastForwardPush reports whether err is git's non-fast-forward
+// rejection, worded "non-fast-forward" when git knows the remote ref's history
+// and "fetch first" when it knows only that the ref moved.
+func isNonFastForwardPush(err error) bool {
+	var ge *git.GitError
+	if !errors.As(err, &ge) {
+		return false
+	}
+	return strings.Contains(ge.Stderr, "non-fast-forward") || strings.Contains(ge.Stderr, "fetch first")
+}
+
+// originBranchSHA is the commit origin holds for branch, or "" when origin
+// cannot be asked or does not have it.
+func originBranchSHA(g daemonGit, branch string) string {
+	ref := "refs/heads/" + branch
+	refs, err := g.ListRemoteRefsWithHashes("origin", ref)
+	if err != nil {
+		return ""
+	}
+	for _, r := range refs {
+		if r.Name == ref {
+			return r.Hash
+		}
+	}
+	return ""
+}
+
+// pushFailureReason is why a push failed, on one line and bounded, for the
+// hand-back note and the saved state.
+func pushFailureReason(err error) string {
+	var diverged *overrunPushDivergedError
+	if errors.As(err, &diverged) {
+		return diverged.reason()
+	}
+	const maxLen = 300
+	msg := strings.Join(strings.Fields(err.Error()), " ")
+	if len(msg) > maxLen {
+		msg = msg[:maxLen] + "..."
+	}
+	return msg
+}
+
+// overrunWorktreePath is where the seat's kept branch lives: its resolved
+// worktree, else the seat's polecat directory.
+func (d *Daemon) overrunWorktreePath(seat overrunSeat) string {
+	polecatsDir := filepath.Join(d.config.TownRoot, seat.Rig, "polecats")
+	if dir := resolvePolecatWorktree(polecatsDir, seat.Polecat, seat.Rig); dir != "" {
+		return dir
+	}
+	return filepath.Join(polecatsDir, seat.Polecat)
 }
 
 // overrunResetAgentBead resets the stopped seat's agent bead the way gt polecat
