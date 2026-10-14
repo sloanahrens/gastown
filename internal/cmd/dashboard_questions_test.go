@@ -340,3 +340,27 @@ func TestQuestionsStripsControlCharactersAndCapsFields(t *testing.T) {
 		t.Error("the question is drawn across lines")
 	}
 }
+
+func TestQuestionHeldIDs(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{"prose line keeps its ids", "gt-wisp-590yk, hq-cv-abc and nothing else", []string{"gt-wisp-590yk", "hq-cv-abc"}},
+		{"bullet takes the leading id only", "- gt-abc (the follow-up to gt-xyz; needs a re-run)", []string{"gt-abc"}},
+		{"one id per bullet, annotations dropped", "- gt-abc e-stop pending\n- hq-cv-def: a follow-up\n- gt-wisp-590yk", []string{"gt-abc", "hq-cv-def", "gt-wisp-590yk"}},
+		{"stub line names no bead", "- stub: re-run once the follow-up lands", nil},
+		{"none line names no bead", "- none", nil},
+		{"bare none and blank lines", "none\n\n  \n", nil},
+		{"dotted id", "- gt-3t8.1 (re-run)", []string{"gt-3t8.1"}},
+		{"empty bullet", "-\n- ", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := questionHeldIDs(tc.body); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("questionHeldIDs(%q) = %v, want %v", tc.body, got, tc.want)
+			}
+		})
+	}
+}

@@ -251,17 +251,32 @@ func questionField(s string) string {
 	return capRunes(strings.Join(strings.Fields(flat), " "), questionFieldMax)
 }
 
-// questionHeldIDs are the bead ids a ## Held work section names. The section is
-// prose the overseer wrote, so only tokens shaped like a bead id are kept: an
-// id the page draws is one the operator can paste into bd.
+// questionHeldIDs are the bead ids a ## Held work section names. gt-ask writes
+// one id per "- " line and may append an annotation after it, so a bullet line
+// yields its first token only: the annotation is prose, and its hyphenated
+// words ("follow-up", "re-run") match the id shape. A bullet whose first token
+// is "none" or "stub:" names no bead. A line that is not a bullet is free prose
+// from a hand-written description; its tokens are kept when shaped like an id.
+// Either way an id the page draws is one the operator can paste into bd.
 func questionHeldIDs(body string) []string {
 	var out []string
-	for _, token := range strings.FieldsFunc(body, func(r rune) bool {
-		return !(unicode.IsLower(r) || unicode.IsDigit(r) || r == '-' || r == '.' || r == '_')
-	}) {
-		token = strings.Trim(token, "._-")
-		if questionBeadID.MatchString(token) {
-			out = append(out, token)
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if rest, ok := strings.CutPrefix(line, "- "); ok {
+			if first := strings.Fields(rest); len(first) > 0 {
+				if id := strings.Trim(first[0], "._-,;:"); questionBeadID.MatchString(id) {
+					out = append(out, id)
+				}
+			}
+			continue
+		}
+		for _, token := range strings.FieldsFunc(line, func(r rune) bool {
+			return !(unicode.IsLower(r) || unicode.IsDigit(r) || r == '-' || r == '.' || r == '_')
+		}) {
+			token = strings.Trim(token, "._-")
+			if questionBeadID.MatchString(token) {
+				out = append(out, token)
+			}
 		}
 	}
 	return out
