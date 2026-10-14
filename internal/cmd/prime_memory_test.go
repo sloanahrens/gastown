@@ -225,9 +225,6 @@ func TestPrimeMemory_CapsTheSection(t *testing.T) {
 			continue
 		}
 		dropped++
-		if dropped <= beadMemoryFooterLookups && !strings.Contains(section, row.mem.Key) {
-			t.Errorf("footer does not name the dropped key %s:\n%s", row.mem.Key, section)
-		}
 	}
 	if selectedBytes == 0 || dropped == 0 {
 		t.Fatalf("12 matching memories selected %d bytes and dropped %d, want both non-zero", selectedBytes, dropped)
@@ -235,8 +232,12 @@ func TestPrimeMemory_CapsTheSection(t *testing.T) {
 	if selectedBytes > memrecall.Budget {
 		t.Errorf("selected text = %d bytes, over memrecall's %d-byte budget", selectedBytes, memrecall.Budget)
 	}
-	if want := fmt.Sprintf("%d more matched: ", dropped); !strings.Contains(section, want) {
+	want := fmt.Sprintf("%d more matched: gt prime --explain-memory %s", dropped, primeMemoryBead().ID)
+	if !strings.Contains(section, want) {
 		t.Errorf("footer missing %q:\n%s", want, section)
+	}
+	if strings.Contains(section, "bd kv") {
+		t.Errorf("section names a bd kv command, which agent prose may not:\n%s", section)
 	}
 }
 
@@ -258,7 +259,7 @@ func TestPrimeMemory_RendersFooterWhenNoCandidateFits(t *testing.T) {
 	if !strings.Contains(section, beadMemoryHeading) {
 		t.Fatalf("section missing its heading:\n%s", section)
 	}
-	if want := "1 more matched: " + key + "\n"; !strings.Contains(section, want) {
+	if want := "1 more matched: gt prime --explain-memory gt-test1 (" + key + ")\n"; !strings.Contains(section, want) {
 		t.Errorf("section missing %q:\n%s", want, section)
 	}
 	if strings.Contains(section, "### ") {
@@ -266,57 +267,78 @@ func TestPrimeMemory_RendersFooterWhenNoCandidateFits(t *testing.T) {
 	}
 }
 
-// TestPrimeMemory_FooterBoundsTheKeysItNames pins the footer's other half: the
-// count is every candidate that did not fit, the names stop at
-// beadMemoryFooterLookups, and the rest are counted. On the live rig nearly the
-// whole corpus scores, so naming them all would cost more than the section it
-// introduces.
-func TestPrimeMemory_FooterBoundsTheKeysItNames(t *testing.T) {
+// droppedMemories returns n candidates that scored but were not selected.
+func droppedMemories(n int) []beadMemory {
+	rows := make([]beadMemory, 0, n)
+	for i := 0; i < n; i++ {
+		rows = append(rows, beadMemory{mem: memrecall.Memory{Key: fmt.Sprintf("gt.feedback.dropped-%02d", i)}})
+	}
+	return rows
+}
+
+// TestPrimeMemory_FooterPointsAtExplainMemory pins the footer's shape: the
+// count of candidates that did not fit and the gt command that prints them for
+// the bead the section was built for. With room to spare it also names the
+// highest-scoring keys, bounded by beadMemoryFooterLookups, and counts the rest.
+func TestPrimeMemory_FooterPointsAtExplainMemory(t *testing.T) {
 	t.Parallel()
-	townRoot := t.TempDir()
-	writePrimeMemorySettings(t, townRoot, true)
+	const room = memrecall.Budget
 
-	corpus := map[string]string{}
-	for i := 0; i < 20; i++ {
-		key, value := primeMemoryKVEntry("feedback", fmt.Sprintf("prime-budget-%02d", i), "2026-08-20",
-			strings.Repeat("A polecat's gt prime spends its hook budget on the hooked work first. ", 5))
-		corpus[key] = value
+	got := beadMemoryFooter(droppedMemories(1), "gt-abc", room)
+	if want := "1 more matched: gt prime --explain-memory gt-abc (gt.feedback.dropped-00)\n"; got != want {
+		t.Errorf("one dropped: footer = %q, want %q", got, want)
 	}
-	f := &fakePrimeRunner{answers: map[string]string{primeKVListCall: primeMemoryKV(t, corpus)}}
-	ctx := RoleContext{Role: RolePolecat, TownRoot: townRoot}
 
-	section, _ := primeMemorySection(t, f, ctx, t.TempDir(), primeMemoryBead())
-
-	rows := beadMemoryRows(memoryCorpus(corpus), primeMemoryBead(), primeTestEpoch)
-	dropped := len(rows) - countSelected(rows)
-	if dropped <= beadMemoryFooterLookups {
-		t.Fatalf("corpus dropped %d candidates, need more than %d to exercise the bound", dropped, beadMemoryFooterLookups)
+	n := beadMemoryFooterLookups + 4
+	got = beadMemoryFooter(droppedMemories(n), "gt-abc", room)
+	if want := fmt.Sprintf("%d more matched: gt prime --explain-memory gt-abc (", n); !strings.HasPrefix(got, want) {
+		t.Errorf("footer = %q, want prefix %q", got, want)
 	}
-	footerLine := ""
-	for _, line := range strings.Split(section, "\n") {
-		if strings.HasPrefix(line, fmt.Sprintf("%d more matched: ", dropped)) {
-			footerLine = line
-		}
+	if want := ", and 4 more)\n"; !strings.HasSuffix(got, want) {
+		t.Errorf("footer = %q, want suffix %q", got, want)
 	}
-	if footerLine == "" {
-		t.Fatalf("footer missing its count of %d:\n%s", dropped, section)
+	if c := strings.Count(got, "gt.feedback.dropped-"); c != beadMemoryFooterLookups {
+		t.Errorf("footer names %d keys, want %d: %q", c, beadMemoryFooterLookups, got)
 	}
-	if want := fmt.Sprintf(", and %d more", dropped-beadMemoryFooterLookups); !strings.HasSuffix(footerLine, want) {
-		t.Errorf("footer %q missing %q", footerLine, want)
-	}
-	if got := strings.Count(footerLine, "gt.feedback.prime-budget-"); got != beadMemoryFooterLookups {
-		t.Errorf("footer names %d keys, want %d: %q", got, beadMemoryFooterLookups, footerLine)
+	if strings.Contains(got, "bd kv") {
+		t.Errorf("footer names a bd kv command, which agent prose may not: %q", got)
 	}
 }
 
-func countSelected(rows []beadMemory) int {
-	n := 0
-	for _, row := range rows {
-		if row.selected {
-			n++
+// TestPrimeMemory_FooterDropsKeysThatDoNotFit pins the other half: when the
+// key list would push the section past memrecall's budget, the footer keeps the
+// count and the command and drops the keys.
+func TestPrimeMemory_FooterDropsKeysThatDoNotFit(t *testing.T) {
+	t.Parallel()
+	bare := "3 more matched: gt prime --explain-memory gt-abc\n"
+	for _, room := range []int{0, len(bare) - 1, len(bare) + 10} {
+		if got := beadMemoryFooter(droppedMemories(3), "gt-abc", room); got != bare {
+			t.Errorf("room %d: footer = %q, want %q", room, got, bare)
 		}
 	}
-	return n
+}
+
+// TestPrimeMemory_FooterOmittedWhenNothingLeftOut covers the corpus that fits
+// whole: every candidate is selected, so the section carries no footer and
+// points at no command.
+func TestPrimeMemory_FooterOmittedWhenNothingLeftOut(t *testing.T) {
+	t.Parallel()
+	if got := beadMemoryFooter(nil, "gt-abc", memrecall.Budget); got != "" {
+		t.Errorf("footer for no dropped candidates = %q, want empty", got)
+	}
+
+	rows := []beadMemory{{
+		mem:      memrecall.Memory{Key: "gt.feedback.kept"},
+		text:     "### gt.feedback.kept (verified 2026-08-20)\nkept\n",
+		selected: true,
+	}}
+	section := renderBeadMemorySection(rows, "gt-abc")
+	if !strings.Contains(section, "### gt.feedback.kept") {
+		t.Fatalf("section missing the selected memory:\n%s", section)
+	}
+	if strings.Contains(section, "more matched") || strings.Contains(section, "--explain-memory") {
+		t.Errorf("section carries a footer though nothing was left out:\n%s", section)
+	}
 }
 
 // TestPrimeMemory_OmitsSectionWithoutCandidates pins the omission rule: a rig
