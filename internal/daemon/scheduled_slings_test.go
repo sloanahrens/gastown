@@ -313,15 +313,16 @@ func TestRunScheduledSlings_InvalidEntryIsSkippedNotFatal(t *testing.T) {
 
 func TestTriggerScheduledSlings_SingleFlight(t *testing.T) {
 	t.Parallel()
-	d := &Daemon{logger: discardLogger} // patrol inactive: run returns at once
+	d := &Daemon{logger: discardLogger} // patrol inactive: a started cycle returns at once
 	d.scheduledSlingsRunning.Store(true)
-	if d.triggerScheduledSlings() {
-		t.Error("a trigger must skip while a cycle is running")
+	d.triggerScheduledSlings()
+	time.Sleep(50 * time.Millisecond)
+	if !d.scheduledSlingsRunning.Load() {
+		t.Fatal("a trigger must skip while a cycle is running; a cycle it started would have cleared the flag")
 	}
 	d.scheduledSlingsRunning.Store(false)
-	if !d.triggerScheduledSlings() {
-		t.Fatal("a trigger with no cycle running should start one")
-	}
+	d.triggerScheduledSlings()
+	awaitScheduledSlingsIdle(t, d)
 }
 
 func TestExecScheduledRunner_SlingArgv(t *testing.T) {
@@ -425,5 +426,52 @@ func TestSlingErrorLineFallsBackToFirstLine(t *testing.T) {
 	}
 	if got := slingErrorLine(""); got != "" {
 		t.Fatalf("got %q, want empty", got)
+	}
+}
+
+// awaitScheduledSlingsIdle waits for the goroutine triggerScheduledSlings
+// starts; the atomic flag's release orders the fake runner's writes before the
+// test reads them.
+func awaitScheduledSlingsIdle(t *testing.T, d *Daemon) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for d.scheduledSlingsRunning.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("scheduled_slings cycle did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// The startup catch-up is one triggerScheduledSlings call with no tick before
+// it: a due schedule dispatches then, and the tick that follows reads the run
+// bead the startup call created and does not dispatch a second time (gt-jok8h).
+func TestTriggerScheduledSlings_StartupCatchUpDispatchesDueOnce(t *testing.T) {
+	t.Parallel()
+	f := &fakeScheduledRunner{createID: "gt-run1", now: time.Now()}
+	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
+
+	d.triggerScheduledSlings()
+	awaitScheduledSlingsIdle(t, d)
+	if len(f.slungIDs) != 1 || f.slungIDs[0] != "gt-run1" {
+		t.Fatalf("startup trigger sling calls = %v, want one dispatch of gt-run1", f.slungIDs)
+	}
+
+	d.triggerScheduledSlings() // the first tick, after the startup call
+	awaitScheduledSlingsIdle(t, d)
+	if len(f.slungIDs) != 1 || len(f.created) != 1 {
+		t.Errorf("tick after startup dispatched again: created=%v sling=%v", f.created, f.slungIDs)
+	}
+}
+
+func TestTriggerScheduledSlings_StartupCatchUpSkipsRecentRun(t *testing.T) {
+	t.Parallel()
+	f := &fakeScheduledRunner{beads: []scheduledBead{{ID: "gt-old", Status: "closed", CreatedAt: time.Now().Add(-time.Hour)}}}
+	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
+
+	d.triggerScheduledSlings()
+	awaitScheduledSlingsIdle(t, d)
+	if len(f.created) != 0 || len(f.slungIDs) != 0 {
+		t.Errorf("recent run bead must suppress the startup dispatch, got create=%v sling=%v", f.created, f.slungIDs)
 	}
 }
