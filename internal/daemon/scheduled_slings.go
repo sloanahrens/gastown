@@ -31,6 +31,11 @@ func scheduledSlingValidate(e ScheduledSlingEntry) error {
 	if err != nil || d <= 0 {
 		return fmt.Errorf("scheduled_slings[%s]: interval %q must be a positive Go duration", e.Name, e.IntervalStr)
 	}
+	if e.GateTimeoutStr != "" {
+		if gt, err := time.ParseDuration(e.GateTimeoutStr); err != nil || gt <= 0 {
+			return fmt.Errorf("scheduled_slings[%s]: gate_timeout %q must be a positive Go duration", e.Name, e.GateTimeoutStr)
+		}
+	}
 	return nil
 }
 
@@ -145,6 +150,9 @@ type scheduledSlingRunner interface {
 	createBead(ctx context.Context, rig, title, label, description string, priority int) (string, error)
 	sling(ctx context.Context, beadID string, e ScheduledSlingEntry) error
 	closeBead(ctx context.Context, rig, beadID, reason string) error
+	// runGate runs the entry's gate_command under ctx's deadline and returns
+	// its combined output and run error (see scheduledGateAllows).
+	runGate(ctx context.Context, e ScheduledSlingEntry) ([]byte, error)
 }
 
 const (
@@ -288,6 +296,11 @@ func (d *Daemon) runScheduledSlings() {
 		d.scheduledSlingEscalate = d.escalate
 	}
 	now := time.Now()
+	names := make(map[string]bool, len(cfg.Entries))
+	for _, e := range cfg.Entries {
+		names[e.Name] = true
+	}
+	d.scheduledGateFailures.retain(names)
 	for _, e := range cfg.Entries {
 		if err := scheduledSlingValidate(e); err != nil {
 			d.logger.Printf("scheduled_slings: %v (entry skipped)", err)
@@ -327,6 +340,11 @@ func (d *Daemon) runScheduledSlingEntry(ctx context.Context, e ScheduledSlingEnt
 	action := decideScheduledSling(beadsForLabel, scheduledSlingInterval(e), now)
 	if action != scheduledDispatch {
 		d.logger.Printf("scheduled_slings: %s: %s", e.Name, action)
+		return nil
+	}
+	// A gated or failed gate is not a failed run: no bead exists, the sling
+	// failure counter is untouched, and the next tick asks again.
+	if !d.scheduledGateAllows(ctx, r, e) {
 		return nil
 	}
 	title := fmt.Sprintf("%s %s", e.Name, now.UTC().Format("2006-01-02"))

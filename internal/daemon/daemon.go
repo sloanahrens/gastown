@@ -346,6 +346,10 @@ type Daemon struct {
 	// scheduledSlingEscalate defaults to d.escalate; tests capture it.
 	scheduledSlingEscalate func(source, message string)
 
+	// scheduledGateFailures counts consecutive gate_command failures per entry
+	// name. The patrol goroutine writes it and the attention tick reads it.
+	scheduledGateFailures scheduledGateCounts
+
 	// scheduledSlingsHold and queuedWorkHold remember the operator dispatch
 	// hold each dispatcher last saw, so a hold is logged once when it appears,
 	// changes, or lifts rather than on every tick (gt-ifijm).

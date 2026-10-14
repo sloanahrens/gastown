@@ -608,6 +608,19 @@ type ScheduledSlingEntry struct {
 	IntervalStr string            `json:"interval"`
 	Priority    int               `json:"priority,omitempty"`
 	Vars        map[string]string `json:"vars,omitempty"`
+
+	// GateCommand is a shell command that decides whether a due run happens.
+	// The patrol runs it through `sh -c` in <town>/<rig>/mayor/rig, with
+	// GT_TOWN_ROOT and GT_SCHEDULE_NAME set, after the interval and open-run
+	// checks say a run is due and before the run bead is created. Exit 0 runs;
+	// exit 1 means nothing to do (no bead; the next tick asks again); any other
+	// exit or a timeout skips the tick, and the third failure in a row raises a
+	// low attention item scheduled-gate:<name>. Empty means no gate: every due
+	// interval runs.
+	GateCommand string `json:"gate_command,omitempty"`
+
+	// GateTimeoutStr bounds GateCommand, as a Go duration (default 60s).
+	GateTimeoutStr string `json:"gate_timeout,omitempty"`
 }
 
 // TierSweepConfig holds configuration for the tier_sweep patrol
