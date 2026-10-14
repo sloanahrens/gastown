@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode"
 
@@ -449,7 +450,54 @@ func (r OMReviewer) omInvocation() (string, runFunc) {
 	if run == nil {
 		run = realRun
 	}
-	return path, run
+	return path, omRestartWhileBusy(run)
+}
+
+// omBusyAttempts bounds the starts of one om exec that is refused because the
+// executable is momentarily busy, and omBusyWait is the first pause between
+// them, doubling each time: seven pauses of 1+2+4+...+64 ms, an eighth of a
+// second in all, against an ETXTBSY that clears in a moment.
+const (
+	omBusyAttempts = 8
+	omBusyWait     = time.Millisecond
+)
+
+// omRestartWhileBusy starts argv again while the kernel refuses it with
+// ETXTBSY, and reports anything else at once.
+//
+// A file that was just written is "busy" until every descriptor open on it for
+// writing is closed, including the ones a forked child is still holding before
+// its own exec: fork inherits a descriptor, and O_CLOEXEC closes it only at
+// that child's execve, so a fork by any goroutine in the window between the
+// write and the close keeps the file unwritable for a moment
+// (go.dev/issue/22315; internal/testpolicy/cmd/budget retries the same error
+// when it starts a test binary that `go test` has just written). It is a
+// property of the moment, not of the binary, so a restart is the whole answer.
+//
+// The om execs are where it lands: a landing that probes a just-written or
+// just-installed om reads no version and no help without it, and the review's
+// own probes are what a landing is judged on (gt-0pt32). The bound is what
+// keeps a genuinely unstoppable om from holding a review: past it the error is
+// the answer, as it was before. The pause is a timered select rather than a
+// sleep, like every other wait in this package, so a canceled attempt stops
+// waiting the moment it is canceled and the failing probe still starts the
+// review's clock no later than it did before (internal/testpolicy, prod-no-sleep).
+func omRestartWhileBusy(run runFunc) runFunc {
+	return func(ctx context.Context, dir string, env, argv []string, out io.Writer) (int, error) {
+		wait := omBusyWait
+		for attempt := 0; ; attempt++ {
+			code, err := run(ctx, dir, env, argv, out)
+			if err == nil || !errors.Is(err, syscall.ETXTBSY) || attempt == omBusyAttempts-1 {
+				return code, err
+			}
+			select {
+			case <-ctx.Done():
+				return code, err
+			case <-time.After(wait):
+			}
+			wait *= 2
+		}
+	}
 }
 
 // parseOMVersion reads the version out of `om version`'s output, the line "om

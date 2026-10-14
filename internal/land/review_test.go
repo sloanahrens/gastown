@@ -3,10 +3,13 @@ package land
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -237,6 +240,72 @@ func TestOMReviewerProbesTheVersionOncePerBinary(t *testing.T) {
 	}
 	if stub.versions != 1 {
 		t.Errorf("version probes = %d, want 1: an installed om keeps its version", stub.versions)
+	}
+}
+
+// TestOMReviewerRestartsAnExecTheKernelCalledBusy: a start the kernel refuses
+// with ETXTBSY is a moment, not a verdict, so the om exec is started again and
+// an om that was just written -- the fake om of the contract tests, an om a
+// deploy renamed into place -- still names its version (gt-0pt32).
+func TestOMReviewerRestartsAnExecTheKernelCalledBusy(t *testing.T) {
+	t.Parallel()
+	var calls int
+	r := OMReviewer{Path: filepath.Join(t.TempDir(), "om"), OutDir: t.TempDir()}
+	r.run = func(_ context.Context, _ string, _ []string, argv []string, out io.Writer) (int, error) {
+		calls++
+		if calls == 1 {
+			return -1, fmt.Errorf("fork/exec %s: %w", argv[0], syscall.ETXTBSY)
+		}
+		_, _ = io.WriteString(out, stubVersionLine())
+		return 0, nil
+	}
+	if got := r.omVersion(context.Background(), ReviewInput{Dir: t.TempDir()}); got != stubOMVersion {
+		t.Fatalf("version = %q, want %q after one busy start", got, stubOMVersion)
+	}
+	if calls != 2 {
+		t.Fatalf("om was started %d times, want 2: one refused as busy, one that answered", calls)
+	}
+}
+
+// TestOMReviewerBoundsTheRestarts: an om that stays busy is still a failure,
+// with the reason in the warning, rather than a review held open (gt-0pt32).
+func TestOMReviewerBoundsTheRestarts(t *testing.T) {
+	t.Parallel()
+	var calls int
+	r := OMReviewer{Path: filepath.Join(t.TempDir(), "om"), OutDir: t.TempDir()}
+	r.run = func(context.Context, string, []string, []string, io.Writer) (int, error) {
+		calls++
+		return -1, fmt.Errorf("fork/exec: %w", syscall.ETXTBSY)
+	}
+	var log strings.Builder
+	got := r.omVersion(context.Background(), ReviewInput{Dir: t.TempDir(), Logf: logfTo(&log)})
+	if got != omVersionUnknown {
+		t.Fatalf("version = %q, want %q: a busy om has none to report", got, omVersionUnknown)
+	}
+	if calls != omBusyAttempts {
+		t.Fatalf("om was started %d times, want the bound %d", calls, omBusyAttempts)
+	}
+	if !strings.Contains(log.String(), "text file busy") {
+		t.Errorf("log = %q, want the reason the probe read no version", log.String())
+	}
+}
+
+// TestOMReviewerRestartsNothingElse: only a busy executable earns a second
+// start; any other run error is the answer the first attempt already gave
+// (gt-0pt32).
+func TestOMReviewerRestartsNothingElse(t *testing.T) {
+	t.Parallel()
+	var calls int
+	r := OMReviewer{Path: filepath.Join(t.TempDir(), "om"), OutDir: t.TempDir()}
+	r.run = func(context.Context, string, []string, []string, io.Writer) (int, error) {
+		calls++
+		return -1, fmt.Errorf("fork/exec: %w", syscall.ENOENT)
+	}
+	if got := r.omVersion(context.Background(), ReviewInput{Dir: t.TempDir()}); got != omVersionUnknown {
+		t.Fatalf("version = %q, want %q", got, omVersionUnknown)
+	}
+	if calls != 1 {
+		t.Fatalf("om was started %d times, want 1: only a busy executable is worth a second start", calls)
 	}
 }
 
