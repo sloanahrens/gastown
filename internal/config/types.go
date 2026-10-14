@@ -145,6 +145,11 @@ type TownSettings struct {
 	// (secrets.go, gt-y3pgh.5).
 	Secrets *SecretsConfig `json:"secrets,omitempty"`
 
+	// Prime configures gt prime's optional sections ("prime" in
+	// settings/config.json: gt config does not write this section, so it is
+	// set by hand).
+	Prime *PrimeConfig `json:"prime,omitempty"`
+
 	// DisabledPatrols lists patrol names to disable at the town level.
 	// This provides a simple way to turn off individual daemon patrol dogs
 	// without editing the daemon patrol config (settings/config.json's
@@ -388,6 +393,28 @@ type PolecatConfig struct {
 	// Values: "per_bead" (default), "every_n_beads:<N>", "never".
 	// Parsed by polecat.ParseTargetCleanPolicy.
 	TargetCleanPolicy string `json:"target_clean_policy,omitempty"`
+}
+
+// PrimeConfig configures gt prime's optional sections. See
+// TownSettings.Prime.
+type PrimeConfig struct {
+	// Memory configures the per-bead memory section.
+	Memory *PrimeMemoryConfig `json:"memory,omitempty"`
+}
+
+// PrimeMemoryConfig configures the "## Memories for this bead" section, which
+// renders the rig memories the memrecall package matches against a polecat's
+// hooked bead (gt-jhf24).
+type PrimeMemoryConfig struct {
+	// Polecat turns the section on for polecats. Default false: the section
+	// spends hook budget that a polecat's hooked work competes for.
+	Polecat bool `json:"polecat,omitempty"`
+}
+
+// PrimeMemoryPolecat reports whether town settings turn on the polecat
+// per-bead memory section; false unless configured.
+func (s *TownSettings) PrimeMemoryPolecat() bool {
+	return s != nil && s.Prime != nil && s.Prime.Memory != nil && s.Prime.Memory.Polecat
 }
 
 // ParseDurationOrDefault parses a Go duration string, returning fallback on error or empty input.

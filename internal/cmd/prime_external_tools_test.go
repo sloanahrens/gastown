@@ -117,7 +117,7 @@ func TestRunPrimeExternalTools_RunsMemoryAndMail(t *testing.T) {
 	p, _, out := newFakePrimeTools(f)
 	workDir := t.TempDir()
 
-	p.externalTools(RoleContext{Role: RoleCrew}, workDir)
+	p.externalTools(RoleContext{Role: RoleCrew}, workDir, nil)
 
 	for _, want := range []string{primeKVListCall, primeMailCheckCall} {
 		if !f.called(want) {
@@ -159,7 +159,7 @@ func TestRunPrimeExternalTools_MemoryIsCrewOnly(t *testing.T) {
 			}}
 			p, _, out := newFakePrimeTools(f)
 
-			p.externalTools(RoleContext{Role: tc.role}, t.TempDir())
+			p.externalTools(RoleContext{Role: tc.role}, t.TempDir(), nil)
 
 			if tc.wantMemory {
 				if !f.called(primeKVListCall) {
@@ -204,7 +204,7 @@ func TestRunPrimeMemoryInject_BoundsTheIndex(t *testing.T) {
 	f := &fakePrimeRunner{answers: map[string]string{primeKVListCall: string(kvJSON)}}
 	p, _, buf := newFakePrimeTools(f)
 
-	p.memoryInject(RoleContext{Role: RoleCrew}, t.TempDir())
+	p.memoryInject(RoleContext{Role: RoleCrew}, t.TempDir(), nil)
 	out := buf.String()
 
 	if !strings.Contains(out, "# Agent Memories (38)") {
@@ -278,7 +278,7 @@ func TestRunPrimeExternalTools_BoundsSlowMailCheck(t *testing.T) {
 	// check leaves the memory section standing, which needs a role that
 	// renders one (see shouldRenderMemories).
 	call := waitOutWedgedTool(t, f, clk, func() {
-		p.externalTools(RoleContext{Role: RoleCrew}, t.TempDir())
+		p.externalTools(RoleContext{Role: RoleCrew}, t.TempDir(), nil)
 	})
 
 	if call.line != primeMailCheckCall {
