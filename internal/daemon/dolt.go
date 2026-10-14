@@ -106,6 +106,11 @@ type DoltServerManager struct {
 	escalated       bool          // Whether we've already escalated (avoid spamming)
 	restarting      bool          // Whether a restart is in progress (guards against concurrent restarts)
 
+	// stopRequested is set by Stop — the daemon leaving — and never cleared:
+	// once it is set, a start is the detached server that outlives the daemon
+	// Stop exists to prevent (gt-govth). Protected by mu.
+	stopRequested bool
+
 	// Identity verification state
 	lastIdentityCheck time.Time // Last time we ran the database identity check
 
@@ -530,6 +535,12 @@ func (m *DoltServerManager) EnsureRunning() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Checked under mu: the start this refuses is one that waited for Stop to
+	// release the lock (gt-govth).
+	if m.stopRequested {
+		return nil
+	}
+
 	// Another goroutine is already restarting — skip to avoid double-starts
 	if m.restarting {
 		m.logger("Dolt server restart already in progress, skipping")
@@ -652,6 +663,12 @@ func (m *DoltServerManager) restartWithBackoff() error {
 		m.mu.Unlock()
 		m.doSleep(delay)
 		m.mu.Lock()
+
+		// The backoff sleep released mu, so a Stop can have landed in it: the
+		// entry check in EnsureRunning does not cover this restart (gt-govth).
+		if m.stopRequested {
+			return nil
+		}
 
 		// Re-check after re-acquiring the lock: another goroutine may have
 		// started the server while we were sleeping (TOCTOU guard).
@@ -1118,10 +1135,13 @@ func (m *DoltServerManager) verifyStartedLocked(proc *os.Process, exited <-chan 
 	return failure
 }
 
-// Stop stops the Dolt SQL server.
+// Stop stops the Dolt SQL server and keeps it stopped: later EnsureRunning
+// calls start nothing (see stopRequested), so a worker racing the shutdown
+// cannot leave a server behind that outlives the daemon (gt-govth).
 func (m *DoltServerManager) Stop() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.stopRequested = true
 	m.stopLocked()
 	return nil
 }

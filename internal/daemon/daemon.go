@@ -1459,7 +1459,21 @@ func (d *Daemon) ensureDoltServerUp() error {
 	if d.doltServer == nil || !d.doltServer.IsEnabled() {
 		return nil
 	}
+	// shutdown() cancels d.ctx before it stops Dolt, so a canceled context
+	// says the daemon is leaving: a server started here is one no daemon is
+	// left to manage or adopt (gt-govth).
+	if d.shuttingDown() {
+		d.logger.Println("Dolt server not started: daemon is shutting down")
+		return nil
+	}
 	return d.doltServer.EnsureRunning()
+}
+
+// shuttingDown reports whether the daemon has begun shutting down. It reads
+// the context shutdown() cancels first, the same signal the background workers
+// wait on (d.ctx.Done()).
+func (d *Daemon) shuttingDown() bool {
+	return d.ctx != nil && d.ctx.Err() != nil
 }
 
 // reportDoltWarnings records the Dolt health check's warnings as a failed
@@ -1844,6 +1858,15 @@ func autoRestartDisabled(val interface{}) bool {
 // shutdown performs graceful shutdown.
 func (d *Daemon) shutdown(state *State) error { //nolint:unparam // error return kept for future use
 	d.logger.Println("Daemon shutting down")
+
+	// Cancel before the Dolt stop, not after: the landing worker, spec
+	// dispatch, the patrol scans and plugin scripts stop on d.ctx.Done(), and
+	// the compactor dog and scheduled slings bring Dolt up themselves, so a
+	// cancel that waited for the stop would leave them starting passes against
+	// a server on its way down for the whole doltServerStopBudget (gt-govth).
+	if d.cancel != nil {
+		d.cancel()
+	}
 
 	// Stop Dolt server if we're managing it. An upgrade restart leaves Dolt
 	// running: the server is detached and the next daemon adopts it via
