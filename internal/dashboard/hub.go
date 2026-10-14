@@ -66,7 +66,9 @@ func NewHub(cfg Config) *Hub {
 	}
 }
 
-// Run starts the workers and blocks until ctx ends.
+// Run starts the workers and blocks until ctx ends and every poll in flight has
+// returned. It may be called again on the same hub once it has returned: the
+// in-place restart stops the hub before exec and starts it again if exec fails.
 func (h *Hub) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 	start := func(every time.Duration, fn func()) {
@@ -140,7 +142,9 @@ func (h *Hub) Run(ctx context.Context) {
 
 // work runs fn every interval, but only while a page is watching. A page that
 // connects wakes the worker, which runs fn at once if its last run is a whole
-// interval old.
+// interval old. Once ctx ends no further fn starts and the one running is
+// waited out, so Run returning means every poll, and every child process a poll
+// started, has finished (gt-9rwye).
 //
 // A tick is the interval itself, so it runs fn whenever a page is open. Asking
 // due there too compared the wall clock against the last run, which the tick
@@ -157,9 +161,15 @@ func (h *Hub) work(ctx context.Context, ticks <-chan time.Time, every time.Durat
 			if h.viewers() == 0 {
 				continue
 			}
+			if ctx.Err() != nil { // select picks at random when both are ready
+				return
+			}
 			last = h.cfg.Now()
 			fn()
 		case <-h.wakeChan():
+			if ctx.Err() != nil {
+				return
+			}
 			if h.due(&last, every) {
 				fn()
 			}

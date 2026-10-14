@@ -9,16 +9,34 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/procutil"
 )
 
 const (
 	dashboardPoll          = 3 * time.Second
 	dashboardVerifyTimeout = 10 * time.Second
 
+	// A restart waits dashboardDrainBound for the polls in flight to finish on
+	// their own (most are a bd or git read that ends in under a second; the bound
+	// is for the one that hangs), then kills their children and waits
+	// dashboardKillBound for the polls to return.
+	dashboardDrainBound = 10 * time.Second
+	dashboardKillBound  = 5 * time.Second
+
 	// dashboardListenFDEnv names the inherited listening socket a restarted
 	// dashboard serves on, so the port never closes and the rebind cannot fail.
 	dashboardListenFDEnv = "GT_DASHBOARD_LISTEN_FD"
 )
+
+var dashboardQuiesceBounds = procutil.QuiesceBounds{Drain: dashboardDrainBound, Kill: dashboardKillBound}
+
+// dashboardLogf writes lines to out under the dashboard's log prefix.
+func dashboardLogf(out io.Writer) func(format string, args ...any) {
+	return func(format string, args ...any) {
+		fmt.Fprintf(out, "gt dashboard: "+format+"\n", args...)
+	}
+}
 
 // execEnv is env with the inherited-listener variable set to fd. Any earlier
 // value is dropped: Go keeps the first of duplicate keys at startup, so a second
@@ -125,8 +143,9 @@ func restartWatches(exe, registry string) []watchedFile {
 
 // superviseRestart restarts the dashboard in place each time a watched file is
 // replaced. A change that does not pass handoff leaves the running build serving
-// and is not retried until a watched file changes again.
-func superviseRestart(ctx context.Context, exe, registry string, ln net.Listener, out io.Writer) {
+// and is not retried until a watched file changes again. hub is the run of the
+// poll workers, stopped before each exec so no poll child is left behind.
+func superviseRestart(ctx context.Context, exe, registry string, ln net.Listener, hub *procutil.Stoppable, out io.Writer) {
 	files := restartWatches(exe, registry)
 	for ctx.Err() == nil {
 		what := ""
@@ -137,6 +156,7 @@ func superviseRestart(ctx context.Context, exe, registry string, ln net.Listener
 		err := handoff(
 			what,
 			func() error { return verifyBinary(ctx, exe) },
+			func() func() { return hub.Quiesce(dashboardQuiesceBounds, procutil.KillChildren, dashboardLogf(out)) },
 			func() error { return reexecSelf(exe, ln) },
 			out,
 		)
@@ -146,15 +166,21 @@ func superviseRestart(ctx context.Context, exe, registry string, ln net.Listener
 	}
 }
 
-// handoff checks the binary still runs, announces the restart and replaces this
-// process with it. what names the change that triggered it in the log line. exec
-// returns only on failure, and nothing has been torn down by then.
-func handoff(what string, verify, exec func() error, out io.Writer) error {
+// handoff checks the binary still runs, announces the restart, quiesces the hub
+// and replaces this process with the new binary. what names the change that
+// triggered it in the log line. quiesce stops the hub's polls and waits out the
+// children they have in flight, so exec does not strand them as defunct; it
+// returns the func that starts the hub again. exec returns only on failure, and
+// the hub is resumed then, so a failed restart leaves this process serving with
+// its polls running.
+func handoff(what string, verify func() error, quiesce func() (resume func()), exec func() error, out io.Writer) error {
 	if err := verify(); err != nil {
 		return fmt.Errorf("the gt binary does not run: %w", err)
 	}
 	fmt.Fprintf(out, "gt dashboard: %s changed, restarting\n", what)
+	resume := quiesce()
 	if err := exec(); err != nil {
+		resume()
 		return fmt.Errorf("re-exec: %w", err)
 	}
 	return nil
