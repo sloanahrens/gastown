@@ -490,6 +490,10 @@ type Daemon struct {
 	// predicate, so checkUpgradeRestart holds a restart for it separately, up
 	// to tierSweepRestartCap (gt-ccyw0).
 	tierSweepRunning atomic.Bool
+	// tierSweepSkipLogged is true once the job has logged that a pending
+	// upgrade restart deferred its cycle; triggerTierSweep clears it when no
+	// restart is pending, so the line appears once per restart.
+	tierSweepSkipLogged atomic.Bool
 	// tierSweepSeams replace the tier_sweep job's outside effects in tests;
 	// the zero value is production (see tier_sweep.go).
 	tierSweepSeams tierSweepSeams
