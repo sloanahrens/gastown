@@ -44,7 +44,27 @@ const (
 // doltGCStaleAlertKey is one database's stale-gc alert key.
 func doltGCStaleAlertKey(db string) string { return doltGCStaleAlertKeyPrefix + db }
 
-// checkStaleMaintenanceGC raises one alert per database whose last completed gc
+// checkStaleMaintenanceGC hands the stale-gc check to a goroutine and returns.
+// It is called from the daemon's select loop, and each gt escalate it makes can
+// take about three minutes when Dolt hangs (60s x 3 attempts plus backoff), so
+// run inline it would hold the Dolt health check, the heartbeat and signal
+// handling for that long per stale database (gt-3v0sf).
+//
+// One check is in flight at a time: a tick that finds the previous one still
+// delivering returns, and the next tick starts again from the state file, so a
+// slow Dolt neither stacks goroutines nor raises one alert twice at once.
+func (d *Daemon) checkStaleMaintenanceGC(now time.Time) {
+	if !d.staleGCCheckRunning.CompareAndSwap(false, true) {
+		d.logger.Printf("scheduled_maintenance: stale-gc check still delivering from an earlier tick; skipping this one")
+		return
+	}
+	d.maintenance().dispatch(func() {
+		defer d.staleGCCheckRunning.Store(false)
+		d.settleStaleMaintenanceGC(now)
+	})
+}
+
+// settleStaleMaintenanceGC raises one alert per database whose last completed gc
 // is older than maintenanceGCStaleAfter and clears the ones that have had a gc
 // since. It runs on every scheduled_maintenance tick, in the window and out of
 // it: the failure it exists for is the window never opening at all, which an
@@ -55,7 +75,7 @@ func doltGCStaleAlertKey(db string) string { return doltGCStaleAlertKeyPrefix + 
 // escalation bead — a Dolt write per call — so only the transition into and out
 // of staleness costs one, and a daemon that restarted in between still clears
 // the key whose database recovered while it was down (gt-g49yk).
-func (d *Daemon) checkStaleMaintenanceGC(now time.Time) {
+func (d *Daemon) settleStaleMaintenanceGC(now time.Time) {
 	st, err := loadMaintenanceGCState(d.config.TownRoot)
 	if err != nil {
 		// Fail closed. An unreadable file does not say every database is fine,

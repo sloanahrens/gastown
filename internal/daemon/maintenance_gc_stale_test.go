@@ -1,13 +1,17 @@
 package daemon
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
@@ -17,11 +21,15 @@ import (
 // 'Maintenance|Attention|TownHealth'`.
 
 // staleGCTestDaemon is a daemon whose alerts go to a recorder, on a town root
-// the caller chooses (so a second daemon on the same root is a restart).
+// the caller chooses (so a second daemon on the same root is a restart). The
+// check's dispatch runs inline so a test sees its result as soon as the tick
+// returns; the tests that pin the hand-off replace it.
 func staleGCTestDaemon(t *testing.T, town string) (*Daemon, *notifyfake.Recorder) {
 	t.Helper()
 	rec := notifyfake.New()
-	return &Daemon{logger: discardLogger, config: &Config{TownRoot: town}, notifier: rec}, rec
+	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: town}, notifier: rec}
+	d.maint.dispatch = func(fn func()) { fn() }
+	return d, rec
 }
 
 // discoverStaleGCDatabases is the fake discovery: these databases exist.
@@ -300,5 +308,112 @@ func TestScheduledMaintenanceTickCarriesTheStaleGCAlert(t *testing.T) {
 	clears := rec.Clears()
 	if len(clears) != 1 || !slices.Equal(clears[0].Fingerprints, []string{doltGCStaleAlertKey("gt")}) {
 		t.Fatalf("clears = %+v, want one for gt after its gc", clears)
+	}
+}
+
+// stuckEscalateNotifier is a notifier whose escalations hang, as gt escalate
+// does against a slow Dolt, until release is closed. entered gets one value per
+// Escalate call that starts.
+type stuckEscalateNotifier struct {
+	notify.Notifier
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (n *stuckEscalateNotifier) Escalate(ctx context.Context, e notify.Escalation) error {
+	n.entered <- struct{}{}
+	select {
+	case <-n.release:
+		return n.Notifier.Escalate(ctx, e)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// The run loop must not wait on the alerts: with escalations that hang, a tick
+// over several stale databases returns at once, the delivery carries on off the
+// loop, and a tick that arrives while it is still stuck starts nothing beside
+// it (gt-3v0sf).
+func TestCheckStaleMaintenanceGCDoesNotWaitOnEscalations(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	d, rec := staleGCTestDaemon(t, town)
+	d.maint.dispatch = nil // the production default: a goroutine
+	stuck := &stuckEscalateNotifier{Notifier: rec, entered: make(chan struct{}, 16), release: make(chan struct{})}
+	d.notifier = stuck
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(stuck.release) }) }
+	t.Cleanup(release)
+	for _, db := range []string{"gt", "hq", "om"} {
+		recordRun(t, d, db, 12, 100*mib)
+	}
+	discoverStaleGCDatabases(d, "gt", "hq", "om")
+
+	tick := func() {
+		t.Helper()
+		returned := make(chan struct{})
+		go func() {
+			d.checkStaleMaintenanceGC(gcTestNow)
+			close(returned)
+		}()
+		select {
+		case <-returned:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the stale-gc check waited on a hung escalation instead of handing it off")
+		}
+	}
+
+	tick()
+	select {
+	case <-stuck.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the delivery never reached gt escalate off the loop")
+	}
+	tick() // Still stuck on the first alert: this one must start no second delivery.
+	if n := len(stuck.entered); n != 0 {
+		t.Errorf("a tick during a stuck delivery started %d more escalation(s), want 0", n)
+	}
+
+	release()
+	deadline := time.Now().Add(5 * time.Second)
+	for d.staleGCCheckRunning.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("the delivery never finished after escalations were released")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := len(rec.Escalations()); n != 3 {
+		t.Errorf("escalations = %d, want one per stale database (3)", n)
+	}
+}
+
+// A raise that fails is not recorded open, so the next tick retries it; one that
+// landed is not raised again while it is open.
+func TestCheckStaleMaintenanceGCRetriesAFailedRaiseOnALaterTick(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	d, rec := staleGCTestDaemon(t, town)
+	recordRun(t, d, "gt", 12, 100*mib)
+	discoverStaleGCDatabases(d, "gt")
+
+	rec.Fail(notifyfake.KindEscalate, errors.New("dolt is slow"))
+	d.checkStaleMaintenanceGC(gcTestNow)
+	st, err := loadMaintenanceGCState(town)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if st.StaleGCAlerts[doltGCStaleAlertKey("gt")] {
+		t.Fatalf("a raise that failed was recorded open: %v", st.StaleGCAlerts)
+	}
+
+	rec.Fail(notifyfake.KindEscalate, nil)
+	before := len(rec.Escalations())
+	d.checkStaleMaintenanceGC(gcTestNow)
+	if got := len(rec.Escalations()) - before; got != 1 {
+		t.Fatalf("the next tick raised %d alert(s), want the retry", got)
+	}
+	d.checkStaleMaintenanceGC(gcTestNow)
+	if got := len(rec.Escalations()) - before; got != 1 {
+		t.Errorf("an open alert was raised again: %d raises since the retry", got)
 	}
 }

@@ -249,6 +249,10 @@ type Daemon struct {
 	// dolt-gc-state-unreadable alert open; the state file that would record it
 	// is the one that cannot be read (maintenance_gc_stale.go).
 	gcStateUnreadableRaised atomic.Bool
+	// staleGCCheckRunning is set while a stale-gc check is off the select loop
+	// delivering its alerts; a tick that finds it set skips rather than stack a
+	// second check behind a slow gt escalate (gt-3v0sf).
+	staleGCCheckRunning atomic.Bool
 	// doltMaintMu serializes a gc call (write side, TryLock) against the
 	// daemon's own Dolt tasks (read side, TryRLock via tryDoltTask). Nobody
 	// blocks on it; see maintenance_gc_guard.go.
