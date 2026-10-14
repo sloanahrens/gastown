@@ -233,9 +233,27 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 	// a blocker, so the bead stays open with the blocker on it and the molecule
 	// stays attached for the resumed seat (gt-tdxsx). Unlike DEFERRED, a
 	// workflow step is not complete either — the blocker stands.
+	//
+	// The note says the bead stays open, so it is written only to a bead that
+	// does: an already-closed bead gets its molecule cleaned up like any other
+	// closed hook (gt-mddzp) and no note, and a rig identity bead gets neither.
+	// A bead whose status cannot be read gets no note either; the escalation
+	// itself was raised with gt escalate and does not depend on it.
 	if hookedBeadID != "" && exitType == done.ExitEscalated {
 		hookBd, _, _ := done.RoutedIssueBeadsIn(beadsPath, hookedBeadID, e.sourceOpener())
-		done.NotifyDoneEscalated(hookBd, hookedBeadID)
+		hookedBead, hookedErr := hookBd.Show(hookedBeadID)
+		switch {
+		case hookedErr != nil:
+			if !errors.Is(hookedErr, beads.ErrNotFound) {
+				style.PrintWarning("could not read hooked bead %s to record the escalation: %v", hookedBeadID, hookedErr)
+			}
+		case beads.IssueStatus(hookedBead.Status).IsTerminal():
+			closeMoleculeOfClosedBead(hookBd, hookedBeadID, hookedBead)
+		case beads.HasLabel(hookedBead, "gt:rig"):
+			fmt.Fprintf(os.Stderr, "Note: hooked bead %s is a rig identity bead (gt:rig) — not recording the escalation on it\n", hookedBeadID)
+		default:
+			done.NotifyDoneEscalated(hookBd, hookedBeadID)
+		}
 	}
 
 	if hookedBeadID != "" && exitType != done.ExitEscalated && (exitType != done.ExitDeferred || isWorkflowStep) {

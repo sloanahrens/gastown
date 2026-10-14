@@ -651,3 +651,142 @@ func containsString(list []string, want string) bool {
 	}
 	return false
 }
+
+// TestMarkdownHeading pins what counts as a section heading: markdown's ATX
+// rule, so a shell comment, a shebang or an issue number inside a Goal body is
+// text rather than the end of the section (gt-40p93).
+func TestMarkdownHeading(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		line     string
+		wantName string
+		wantOK   bool
+	}{
+		{"## Goal", "Goal", true},
+		{"# Constraints", "Constraints", true},
+		{"## Goal:", "Goal", true},
+		{"### Out of scope", "Out", true},
+		{"   ## Gate", "Gate", true},
+		{"###### Size", "Size", true},
+		{"# comment", "comment", true},
+		{"#!/bin/sh", "", false},
+		{"#4821 is the cause", "", false},
+		{"#123", "", false},
+		{"#Goal", "", false},
+		{"####### Goal", "", false},
+		{"#", "", false},
+		{"## ", "", false},
+		{"    ## indented code", "", false},
+		{"\t## tab-indented code", "", false},
+		{"not a heading", "", false},
+		{"", "", false},
+	} {
+		name, ok := markdownHeading(tc.line)
+		if name != tc.wantName || ok != tc.wantOK {
+			t.Errorf("markdownHeading(%q) = (%q, %v), want (%q, %v)", tc.line, name, ok, tc.wantName, tc.wantOK)
+		}
+	}
+}
+
+// TestBeadGoalAndConstraints_KeepsHashLinesInsideTheBody covers the capture
+// itself: the Goal and Constraints bodies come back whole when they carry #
+// lines that are not headings, and fenced code never ends a section.
+func TestBeadGoalAndConstraints_KeepsHashLinesInsideTheBody(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		desc string
+		want string
+	}{
+		{
+			name: "issue number and shebang line",
+			desc: "## Goal\nfix the crash\n#4821 is the cause\n#!/bin/sh is mangled\nthen retest\n\n## Gate\nmake gate",
+			want: "fix the crash\n#4821 is the cause\n#!/bin/sh is mangled\nthen retest\n",
+		},
+		{
+			name: "shell comment inside a backtick fence",
+			desc: "## Goal\nrun:\n```sh\n# comment\necho hi\n```\nthen stop\n## Out of scope\nignored",
+			want: "run:\n```sh\n# comment\necho hi\n```\nthen stop",
+		},
+		{
+			name: "heading-looking line inside a tilde fence",
+			desc: "## Constraints\n~~~\n## Gate\n~~~\nkeep going\n## Size\nignored",
+			want: "~~~\n## Gate\n~~~\nkeep going",
+		},
+		{
+			name: "short closing fence does not close a long one",
+			desc: "## Goal\n````\n```\n# still code\n````\nafter\n## Gate\nignored",
+			want: "````\n```\n# still code\n````\nafter",
+		},
+		{
+			name: "fence outside a wanted section is skipped whole",
+			desc: "## Gate\n```\n## Goal\nnot the goal\n```\n## Goal\nreal goal",
+			want: "real goal",
+		},
+		{
+			name: "real headings still split sections",
+			desc: "attached_molecule: gt-wisp-1\n\n## Goal\ng\n\n## Constraints\nc\n\n## Gate\nignored",
+			want: "g\n\nc\n",
+		},
+	} {
+		got := beadGoalAndConstraints(tc.desc)
+		if strings.TrimRight(got, "\n") != strings.TrimRight(tc.want, "\n") {
+			t.Errorf("%s: beadGoalAndConstraints =\n%q\nwant\n%q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestPrimeMemory_RendersInSelectOrder pins the section's order: a pinned
+// memory renders ahead of a higher-scoring ranked one, and the recall log
+// names the keys in that same order.
+func TestPrimeMemory_RendersInSelectOrder(t *testing.T) {
+	t.Parallel()
+	pinnedKey, pinnedValue := primeMemoryKVEntry("general", "operator-etiquette", "2020-01-01", "Be polite.")
+	pinnedValue = strings.Replace(pinnedValue, "verified:", "always: true\ndurable: true\nverified:", 1)
+	rankedKey, rankedValue := primeMemoryKVEntry("feedback", "prime-budget", "2026-08-20",
+		"A polecat's gt prime spends its hook budget on the hooked work first.")
+	corpus := memoryCorpus(map[string]string{pinnedKey: pinnedValue, rankedKey: rankedValue})
+
+	rows := beadMemoryRows(corpus, primeMemoryBead(), primeTestEpoch)
+	if len(rows) != 2 || rows[0].mem.Key != rankedKey {
+		t.Fatalf("rows = %v, want the ranked memory scoring first", rows)
+	}
+	section := renderBeadMemorySection(rows, "gt-test1")
+
+	if p, r := strings.Index(section, pinnedKey), strings.Index(section, rankedKey); p < 0 || r < 0 || p > r {
+		t.Errorf("pinned memory at %d, ranked memory at %d, want pinned first:\n%s", p, r, section)
+	}
+	if got, want := recalledKeys(rows), []string{pinnedKey, rankedKey}; !reflect.DeepEqual(got, want) {
+		t.Errorf("recalledKeys = %v, want %v", got, want)
+	}
+}
+
+// TestPrimeMemory_PinnedMemoriesPastTheCapAreNotMatches covers the pinned
+// memories Select turns away for its per-scope cap: it never weighed them, so
+// they are neither "matched" in the footer nor candidates in --explain-memory.
+func TestPrimeMemory_PinnedMemoriesPastTheCapAreNotMatches(t *testing.T) {
+	t.Parallel()
+	corpus := map[string]string{}
+	for i := 0; i < 5; i++ {
+		key, value := primeMemoryKVEntry("general", fmt.Sprintf("pinned-%d", i), "2026-08-20", "Be polite.")
+		corpus[key] = strings.Replace(value, "verified:", "always: true\ndurable: true\nverified:", 1)
+	}
+	mems := memoryCorpus(corpus)
+
+	rows := beadMemoryRows(mems, primeMemoryBead(), primeTestEpoch)
+
+	capped := len(memrecall.Select(nil, nil, mems, primeTestEpoch, memrecall.Budget))
+	if capped == 0 || capped >= len(mems) {
+		t.Fatalf("Select kept %d of %d pinned memories, want the cap to turn some away", capped, len(mems))
+	}
+	if len(rows) != capped {
+		t.Errorf("%d rows, want the %d pinned memories Select took", len(rows), capped)
+	}
+	if section := renderBeadMemorySection(rows, "gt-test1"); strings.Contains(section, "more matched") {
+		t.Errorf("footer reports capped pinned memories as matches:\n%s", section)
+	}
+	if report := explainMemoryReport(primeMemoryBead(), mems, primeTestEpoch); !strings.Contains(report,
+		fmt.Sprintf("%d candidates, %d selected", capped, capped)) {
+		t.Errorf("report counts the capped memories as candidates:\n%s", report)
+	}
+}
