@@ -6,7 +6,8 @@
 # the queued ledger line's severity and its skipped malformed lines, the P3
 # batches (threshold, age, filed, cap, seen, skipped malformed lines),
 # plan --mode slice|landings|both, the gate subcommand
-# (count and age thresholds, both bd --json shapes, untrusted input), the
+# (count and age thresholds, the green-sweep gate and the sweep records it
+# refuses, both bd --json shapes, untrusted input), the
 # docs-audit subcommand (dead paths and commands, code_changed, score order,
 # which docs are audited) and plan's docs.txt (slice pairing, stale docs, caps).
 set -euo pipefail
@@ -559,6 +560,63 @@ assert_eq "--min-count 4: skip" "1" "$(gate_rc --landings "$TMP/young.jsonl" --l
 assert_eq "skip output" "gate: skip n=3 oldest=10m" "$(gate_out)"
 rc="$(plan_rc --mode landings --landings "$TMP/young.jsonl" --prev-notes "$TMP/none.txt" --now "$NOW" --out "$TMP/g1")"
 assert_eq "plan --mode landings counts the same three" "3" "$(field landings)"
+
+echo "gate --green-state: only landings a full green sweep covered count"
+GREPO="$TMP/grepo"
+mkrepo "$GREPO" internal/a/one.go
+G1="$(git -C "$GREPO" rev-parse HEAD)"
+echo "package y" > "$GREPO/internal/a/two.go"
+git -C "$GREPO" add -A; git -C "$GREPO" commit -q -m second
+G2="$(git -C "$GREPO" rev-parse HEAD)"
+GL="$TMP/green-landings.jsonl"
+cat > "$GL" <<J
+{"bead":"gt-g1","landed_commit":"$G1","landed_at":"2026-10-10T01:00:00Z","risk_paths":["internal/a/one.go"]}
+{"bead":"gt-g2","landed_commit":"$G2","landed_at":"2026-10-10T02:00:00Z","risk_paths":["internal/a/two.go"]}
+J
+green_state() { # sha shell integration race -> the record at $TMP/gs.json
+  printf '{"last_green_sha":"%s","tiers":{"shell":{"verdict":"%s"},"integration":{"verdict":"%s"},"race":{"verdict":"%s"}}}\n' "$1" "$2" "$3" "$4" > "$TMP/gs.json"
+}
+green_state "$G1" GREEN GREEN GREEN
+assert_eq "a sweep covering the older landing is enough on its own" "0" "$(gate_rc --landings "$GL" --label "$LBL" --repo "$GREPO" --now "$NOW" --green-state "$TMP/gs.json")"
+assert_eq "the run line names the tip it gated on" "gate: run n=1 oldest=540m green=${G1:0:8}" "$(gate_out)"
+green_state "$G2" GREEN GREEN GREEN
+assert_eq "a sweep at the newer tip covers both" "0" "$(gate_rc --landings "$GL" --label "$LBL" --repo "$GREPO" --now "$NOW" --green-state "$TMP/gs.json")"
+assert_eq "output" "gate: run n=2 oldest=540m green=${G2:0:8}" "$(gate_out)"
+assert_eq "the gate still reads the run history" "list -l scheduled:deep-review --all --limit 60 --json" "$(cut -d' ' -f2- "$BD_STUB_ARGS")"
+printf '{"bead":"gt-g3","landed_commit":"%s","landed_at":"2026-10-10T02:57:00Z","risk_paths":["internal/a/two.go"]}\n' "$G2" > "$TMP/green-young.jsonl"
+assert_eq "one landing minutes old is enough (no count of three, no 20m wait)" "0" "$(gate_rc --landings "$TMP/green-young.jsonl" --label "$LBL" --repo "$GREPO" --now 2026-10-10T03:00:00Z --green-state "$TMP/gs.json")"
+assert_eq "output" "gate: run n=1 oldest=3m green=${G2:0:8}" "$(gate_out)"
+assert_eq "an explicit threshold still wins" "1" "$(gate_rc --landings "$GL" --label "$LBL" --repo "$GREPO" --now "$NOW" --green-state "$TMP/gs.json" --min-count 5 --min-age-min 600)"
+assert_eq "skip output" "gate: skip n=2 oldest=540m green=${G2:0:8}" "$(gate_out)"
+
+printf '{"bead":"gt-g2","landed_commit":"%s","landed_at":"2026-10-10T02:00:00Z","risk_paths":["internal/a/two.go"]}\n' "$G2" > "$TMP/green-newer.jsonl"
+green_state "$G1" GREEN GREEN GREEN
+assert_eq "a landing newer than the tip is not covered" "1" "$(gate_rc --landings "$TMP/green-newer.jsonl" --label "$LBL" --repo "$GREPO" --now "$NOW" --green-state "$TMP/gs.json")"
+assert_eq "skip output" "gate: skip n=0 oldest=0m green=${G1:0:8}" "$(gate_out)"
+printf '{"bead":"gt-gx","landed_commit":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef","landed_at":"2026-10-10T02:00:00Z","risk_paths":["internal/a/two.go"]}\n' > "$TMP/green-unknown.jsonl"
+assert_eq "a commit the repo does not know does not count" "1" "$(gate_rc --landings "$TMP/green-unknown.jsonl" --label "$LBL" --repo "$GREPO" --now "$NOW" --green-state "$TMP/gs.json")"
+
+echo "gate --green-state: a sweep that is not green is a skip, never a run"
+green_state "$G1" GREEN GREEN RED
+assert_eq "a red race tier" "1" "$(gate_rc --landings "$GL" --label "$LBL" --repo "$GREPO" --now "$NOW" --green-state "$TMP/gs.json")"
+assert_eq "names the tier" "gate: skip (no green sweep: race tier is RED)" "$(gate_out)"
+green_state "$G1" GREEN RED GREEN
+assert_eq "a red integration tier" "gate: skip (no green sweep: integration tier is RED)" "$(gate_rc --landings "$GL" --label "$LBL" --repo "$GREPO" --now "$NOW" --green-state "$TMP/gs.json" >/dev/null; gate_out)"
+printf '{"last_green_sha":"%s","tiers":{"integration":{"verdict":"GREEN"},"race":{"verdict":"GREEN"}}}\n' "$G1" > "$TMP/gs.json"
+assert_eq "a tier the record does not carry" "gate: skip (no green sweep: shell tier is missing)" "$(gate_rc --landings "$GL" --label "$LBL" --repo "$GREPO" --now "$NOW" --green-state "$TMP/gs.json" >/dev/null; gate_out)"
+printf '{"last_run":"2026-10-10T02:30:00Z","last_sha":"%s","last_green_sha":"%s","tiers":{"shell":{"verdict":"GREEN","passed":12,"failed":0,"failed_names":[],"log":"/tmp/s.log"},"integration":{"verdict":"GREEN","passed":4,"failed":0,"log":"/tmp/i.log"},"race":{"verdict":"GREEN","passed":1,"failed":0}}}\n' "$G1" "$G1" > "$TMP/gs.json"
+assert_eq "the record's other fields are no obstacle" "0" "$(gate_rc --landings "$GL" --label "$LBL" --repo "$GREPO" --now "$NOW" --green-state "$TMP/gs.json")"
+printf '{"last_green_sha":"","tiers":{"shell":{"verdict":"GREEN"},"integration":{"verdict":"GREEN"},"race":{"verdict":"GREEN"}}}' > "$TMP/gs.json"
+assert_eq "no last_green_sha yet" "gate: skip (no green sweep: no last_green_sha)" "$(gate_rc --landings "$GL" --label "$LBL" --repo "$GREPO" --now "$NOW" --green-state "$TMP/gs.json" >/dev/null; gate_out)"
+printf '{"last_green_sha":"0000000000000000000000000000000000000000","tiers":{"shell":{"verdict":"GREEN"},"integration":{"verdict":"GREEN"},"race":{"verdict":"GREEN"}}}' > "$TMP/gs.json"
+assert_eq "a tip this repo does not hold" "gate: skip (no green sweep: last_green_sha 00000000 is not a commit in $GREPO)" "$(gate_rc --landings "$GL" --label "$LBL" --repo "$GREPO" --now "$NOW" --green-state "$TMP/gs.json" >/dev/null; gate_out)"
+assert_eq "a record that is not there" "gate: skip (no green sweep: no state file)" "$(gate_rc --landings "$GL" --label "$LBL" --repo "$GREPO" --green-state "$TMP/absent.json" >/dev/null; gate_out)"
+printf '{"last_green_sha":' > "$TMP/gsbad.json"
+assert_eq "a record that is not JSON" "gate: skip (no green sweep: $TMP/gsbad.json is not readable JSON)" "$(gate_rc --landings "$GL" --label "$LBL" --repo "$GREPO" --green-state "$TMP/gsbad.json" >/dev/null; gate_out)"
+printf '[]' > "$TMP/gsarr.json"
+assert_eq "a record that is not an object" "gate: skip (no green sweep: $TMP/gsarr.json is not readable JSON)" "$(gate_rc --landings "$GL" --label "$LBL" --repo "$GREPO" --green-state "$TMP/gsarr.json" >/dev/null; gate_out)"
+assert_eq "and all of them are one line on stdout" "1" "$(wc -l < "$TMP/gate.out" | tr -d ' ')"
+assert_eq "--green-state with no value is usage" "2" "$(gate_rc --landings "$GL" --label "$LBL" --repo "$GREPO" --green-state)"
 
 echo "gate: an input it cannot trust is exit 3, never a skip"
 assert_eq "bd fails" "3" "$(BD_STUB_RC=1 gate_rc --landings "$LANDINGS" --label "$LBL" --now "$NOW")"
