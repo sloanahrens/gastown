@@ -127,8 +127,26 @@ printf '[1,2]\n' > "$TMP/arr.jsonl"
 assert_eq "a JSON line that is not an object" "3" "$(plan_rc --landings "$TMP/arr.jsonl" --prev-notes "$TMP/none.txt" --repo "$REPO" --now "$NOW" --out "$TMP/e6")"
 printf 'cursor: not-a-time internal/a/one.go\n' > "$TMP/badcur.txt"
 assert_eq "cursor with a bad timestamp" "3" "$(plan_rc --landings "$LANDINGS" --prev-notes "$TMP/badcur.txt" --repo "$REPO" --now "$NOW" --out "$TMP/e7")"
-printf 'cursor: 2026-10-10T03:00:00Z\n' > "$TMP/badcur2.txt"
-assert_eq "cursor with no path" "3" "$(plan_rc --landings "$LANDINGS" --prev-notes "$TMP/badcur2.txt" --repo "$REPO" --now "$NOW" --out "$TMP/e8")"
+printf 'cursor: \n' > "$TMP/badcur2.txt"
+assert_eq "cursor with no timestamp" "3" "$(plan_rc --landings "$LANDINGS" --prev-notes "$TMP/badcur2.txt" --repo "$REPO" --now "$NOW" --out "$TMP/e8")"
+echo "a cursor line without a path (an empty slice wrote it) is read, not refused"
+# slice mode always prints rotation_cursor_old=, so an empty path is a present, empty line
+oldcur() { grep '^rotation_cursor_old=' "$TMP/plan.out" || echo "(no rotation_cursor_old line)"; }
+for spelling in 'cursor: 2026-10-10T03:00:00.5Z \n' 'cursor: 2026-10-10T03:00:00.5Z\n'; do
+  # shellcheck disable=SC2059
+  printf "$spelling" > "$TMP/nopath.txt"
+  rc="$(plan_rc --mode slice --landings "$LANDINGS" --prev-notes "$TMP/nopath.txt" --repo "$REPO" --now "$NOW" --out "$TMP/np")"
+  assert_eq "pathless cursor [$spelling] exits 0" "0" "$rc"
+  assert_eq "pathless cursor [$spelling] timestamp" "2026-10-10T03:00:00.5Z" "$(field reviewed_until_old)"
+  assert_eq "pathless cursor [$spelling] path is empty" "rotation_cursor_old=" "$(oldcur)"
+done
+printf 'cursor: 2026-10-10T01:00:00Z internal/a/one.go\ncursor: 2026-10-10T03:00:00Z\ncursor: 2026-10-10T02:00:00Z internal/b/two.go\n' > "$TMP/nopath2.txt"
+rc="$(plan_rc --mode slice --landings "$LANDINGS" --prev-notes "$TMP/nopath2.txt" --repo "$REPO" --now "$NOW" --out "$TMP/np2")"
+assert_eq "the newest cursor wins when it has no path" "2026-10-10T03:00:00Z" "$(field reviewed_until_old)"
+assert_eq "and its path is empty, not an older line's" "rotation_cursor_old=" "$(oldcur)"
+printf 'cursor: 2026-10-10T01:00:00Z internal/a/one.go\ncursor: 2026-10-10T03:00:00Z\ncursor: 2026-10-10T04:00:00Z internal/b/two.go\n' > "$TMP/nopath3.txt"
+rc="$(plan_rc --mode slice --landings "$LANDINGS" --prev-notes "$TMP/nopath3.txt" --repo "$REPO" --now "$NOW" --out "$TMP/np3")"
+assert_eq "a newer cursor with a path still wins" "2026-10-10T04:00:00Z|rotation_cursor_old=internal/b/two.go" "$(field reviewed_until_old)|$(oldcur)"
 assert_eq "bad --now" "3" "$(plan_rc --landings "$LANDINGS" --prev-notes "$TMP/none.txt" --repo "$REPO" --now tomorrow --out "$TMP/e9")"
 mkrepo "$TMP/norepo" cmd/main.go
 assert_eq "no Go files under internal/" "3" "$(plan_rc --landings "$LANDINGS" --prev-notes "$TMP/none.txt" --repo "$TMP/norepo" --now "$NOW" --out "$TMP/e10")"

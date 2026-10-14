@@ -33,7 +33,8 @@
 # landings mode and on a quiet day, like the slice.
 #
 # Ledger lines, written into the run bead's notes by the formula:
-#   cursor: <RFC3339 landed_at of the newest landing covered> <last slice path>
+#   cursor: <RFC3339 landed_at of the newest landing covered> [<last slice path>]
+#     (the path is optional: an empty slice leaves it empty, and it is only echoed)
 #   reviewed: <YYYY-MM-DD> <path>
 #   finding: <fingerprint> <bead id | digest-only>
 #   queued: <fingerprint> <P1|P2|P3> <file:line> <claim>
@@ -223,11 +224,14 @@ cmd_batches() {
   '
 }
 
-# newest cursor line in the notes: prints "<timestamp>\t<path>", or nothing
+# newest cursor line in the notes: prints "<timestamp>\t<path>", or nothing.
+# The path is optional: an empty slice leaves it empty, so "cursor: <timestamp>"
+# (with or without a trailing space) parses to that timestamp and an empty path.
 newest_cursor() {
   jq -R -s -r "$JQ_TS"'
     split("\n") | map(select(startswith("cursor: ")))
-    | map((capture("^cursor: (?<t>\\S+) (?<p>.+)$") // error("malformed cursor line: " + .))
+    | map((capture("^cursor: (?<t>\\S+)(?: (?<p>.*))?$") // error("malformed cursor line: " + .))
+          | .p = (.p // "")
           | if (.t | tsok) == null then error("bad timestamp in cursor line: " + .t) else . end)
     | if length == 0 then empty else max_by(.t | ts) | "\(.t)\t\(.p)" end
   ' "$1"
