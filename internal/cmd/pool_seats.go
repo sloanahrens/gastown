@@ -135,6 +135,27 @@ func slungAgent(rec intent.Record, fallback string) string {
 	return fallback
 }
 
+// polecatStarter is the one SessionManager verb restartPolecatOnSlungAgent
+// needs, so the start paths can be tested without tmux.
+type polecatStarter interface {
+	Start(name string, opts polecat.SessionStartOptions) error
+}
+
+// restartPolecatOnSlungAgent starts a polecat session on the agent the seat's
+// intent record says it was slung on (intent.MarkSlung), so a seat slung on
+// deepseek-flash does not come back as the polecat role default. A seat with
+// no record, or a record naming no agent, starts with opts as given: the role
+// default, as before. opts.Agent, when set, wins over the record.
+func restartPolecatOnSlungAgent(mgr polecatStarter, townRoot, rigName, polecatName string, opts polecat.SessionStartOptions) error {
+	if opts.Agent == "" && townRoot != "" {
+		// An unreadable record reads as one that names no agent (Read's
+		// fail-closed record carries none), so the error is not acted on.
+		rec, _ := intent.Read(townRoot, polecatIntentSeat(rigName, polecatName))
+		opts.Agent = slungAgent(rec, "")
+	}
+	return mgr.Start(polecatName, opts)
+}
+
 // poolDeadHookedSessions lists the seats whose tmux session is gone but whose
 // agent bead still names hooked, non-terminal work: a polecat that crashed and
 // whose supervised restart is due (gt-tldj4). Such a seat keeps holding the

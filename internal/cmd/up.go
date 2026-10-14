@@ -700,7 +700,7 @@ func startPolecatsWithWork(townRoot, rigName string) ([]string, map[string]error
 	// (gt-4k3fj.4.1).
 	polecatMgr := supervisedPolecatSessions(tmux.NewTmux(), r, "gt up", operatorActor("gt up"))
 	start := func(polecatName string) error {
-		return polecatMgr.Start(polecatName, polecat.SessionStartOptions{})
+		return restartPolecatOnSlungAgent(polecatMgr, townRoot, rigName, polecatName, polecat.SessionStartOptions{})
 	}
 	return startPolecatsWithWorkUsing(townRoot, rigName, polecatHasPinnedWork, start)
 }
