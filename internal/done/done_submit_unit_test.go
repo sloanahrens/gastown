@@ -56,6 +56,10 @@ type fakeDoneRepo struct {
 	// patchIDs are FirstParentPatchIDs answers keyed by the range's tip.
 	patchIDs map[string][]string
 
+	// preservedByDefault makes a branch origin does not have read as pushed
+	// when HEAD is an ancestor of the default branch, as the real git does.
+	preservedByDefault bool
+
 	// verifyErr makes the worktree's own origin query fail to run.
 	verifyErr error
 
@@ -133,6 +137,11 @@ func (f *fakeDoneRepo) AbortRebase() error {
 
 func (f *fakeDoneRepo) BranchPushedToRemote(localBranch, remote string) (bool, int, error) {
 	tip := f.origin[localBranch]
+	if tip == "" && f.preservedByDefault {
+		// git.BranchPreservationStatus with no remote branch: HEAD is judged
+		// against origin's default branch.
+		return f.ancestors[f.head], 0, nil
+	}
 	return tip != "" && f.ancestors[tip], 0, nil
 }
 
@@ -683,6 +692,72 @@ func TestSubmitNoCommitsRefusesAnUnpushedPolecatBranch(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "cleanup-status") {
 		t.Errorf("refusal %q names the bypass", err)
+	}
+}
+
+// emptyBranchHarness is a polecat that did nothing: a fresh branch at the
+// target's tip, never pushed, whose cleanup status is the one gt done
+// observes rather than a hand-picked value (gt-mr78z).
+func emptyBranchHarness(t *testing.T) *submitHarness {
+	t.Helper()
+	h := newSubmitHarness(t)
+	h.repo.ahead = 0
+	h.repo.preservedByDefault = true
+	h.r.cleanupStatus = observeCleanupStatus(h.repo, doneTestBranch)
+	h.repo.reachable["main"] = map[string]bool{"feature1": true}
+	return h
+}
+
+// TestSubmitEmptyBranchObservedCleanIsRefused: the observed status of an
+// empty branch is "clean", the value the zero-commit guard used to trust, so
+// the bead was closed as completed with no code changes. Without the explicit
+// flag the run is refused and the bead stays hooked.
+func TestSubmitEmptyBranchObservedCleanIsRefused(t *testing.T) {
+	t.Parallel()
+	h := emptyBranchHarness(t)
+	if h.r.cleanupStatus != "clean" {
+		t.Fatalf("observed cleanup status = %q, want clean: the harness no longer builds the empty-branch state", h.r.cleanupStatus)
+	}
+	err := h.submit()
+	if err == nil || !strings.Contains(err.Error(), "no commits on branch ahead of origin/main") {
+		t.Fatalf("submit = %v, want the no-commits refusal", err)
+	}
+	for _, want := range []string{"gt bead close bd-source", "no-changes:"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q lacks %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "cleanup-status") {
+		t.Errorf("refusal %q names the bypass", err)
+	}
+	if got := h.source(t).Status; got != string(beads.StatusHooked) {
+		t.Errorf("bead status = %s, want it left hooked", got)
+	}
+}
+
+// TestSubmitExplicitCleanOnNoCodeBeadStillCompletes: the documented
+// report-only path, gt done --cleanup-status clean, closes the bead.
+func TestSubmitExplicitCleanOnNoCodeBeadStillCompletes(t *testing.T) {
+	t.Parallel()
+	h := emptyBranchHarness(t)
+	h.r.opts.cleanupStatus = "clean"
+	if err := h.submit(); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if got := h.source(t).Status; got != string(beads.StatusClosed) {
+		t.Errorf("bead status = %s, want closed", got)
+	}
+}
+
+// TestSubmitEmptyBranchOfAnAlreadyClosedBeadCompletes: the nothing-to-implement
+// route closes the bead with gt bead close and then runs gt done, which must
+// not refuse the closed bead's empty branch.
+func TestSubmitEmptyBranchOfAnAlreadyClosedBeadCompletes(t *testing.T) {
+	t.Parallel()
+	h := emptyBranchHarness(t)
+	h.bd.Seed(beads.Issue{ID: "bd-source", Title: "the work", Type: "task", Status: string(beads.StatusClosed), CloseReason: "no-changes: nothing to do"})
+	if err := h.submit(); err != nil {
+		t.Fatalf("submit: %v", err)
 	}
 }
 

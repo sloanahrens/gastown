@@ -69,7 +69,7 @@ func TestCompleteWithoutCodeCommentsSkippedClose(t *testing.T) {
 	t.Parallel()
 	h := newSubmitHarness(t)
 	h.repo.ahead = 0
-	h.r.cleanupStatus = "clean"
+	h.r.opts.cleanupStatus = "clean"
 	seedCriteria(h, "- [ ] unit tests pass")
 
 	if err := h.submit(); err != nil {
@@ -96,7 +96,7 @@ func TestCompleteWithoutCodeSurvivesAFailedComment(t *testing.T) {
 	t.Parallel()
 	h := newSubmitHarness(t)
 	h.repo.ahead = 0
-	h.r.cleanupStatus = "clean"
+	h.r.opts.cleanupStatus = "clean"
 	h.client = commentFailingClient{Client: h.bd, err: errors.New("dolt unavailable")}
 	seedCriteria(h, "- [ ] unit tests pass")
 
