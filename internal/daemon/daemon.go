@@ -799,6 +799,40 @@ func (d *Daemon) cleanupLegacySocketSessions() {
 // for a job still loaded (gt-2gctr, gt-swsqm).
 const unrequestedStopLogLine = "Stop was not requested through gt: exiting 75; this was a bootout or a signal from outside gt, and launchd relaunches only under KeepAlive"
 
+// daemonLockWaitBudget is how long Run keeps trying daemon.lock before it
+// concludes another daemon holds it, and daemonLockPollInterval is the gap
+// between those attempts.
+//
+// A probe of the same lock (probeDaemonLock) holds it only for the two
+// syscalls a look takes, so a start that loses the race to one waits it out
+// and starts; a real daemon holds the lock for its whole life and still loses
+// after the budget (gt-fsgb1).
+const (
+	daemonLockWaitBudget   = 2 * time.Second
+	daemonLockPollInterval = 25 * time.Millisecond
+)
+
+// acquireDaemonLock takes the exclusive daemon.lock flock that makes this
+// process the town's one daemon, retrying for budget so a probe holding the
+// lock shared cannot end a legitimate start (gt-fsgb1).
+func acquireDaemonLock(clk clockwork.Clock, lockPath string, budget, poll time.Duration) (*flock.Flock, error) {
+	fileLock := flock.New(lockPath)
+	deadline := clk.Now().Add(budget)
+	for {
+		locked, err := fileLock.TryLock()
+		if err != nil {
+			return nil, fmt.Errorf("acquiring lock: %w", err)
+		}
+		if locked {
+			return fileLock, nil
+		}
+		if !clk.Now().Before(deadline) {
+			return nil, fmt.Errorf("daemon already running (lock held by another process)")
+		}
+		clk.Sleep(poll)
+	}
+}
+
 // Run starts the daemon main loop.
 func (d *Daemon) Run() (err error) {
 	pid := os.Getpid()
@@ -820,15 +854,9 @@ func (d *Daemon) Run() (err error) {
 	// can all pass the IsRunning() check before any writes the PID file.
 	// Uses gofrs/flock for cross-platform compatibility (Unix + Windows).
 	lockFile := filepath.Join(d.config.TownRoot, "daemon", "daemon.lock")
-	fileLock := flock.New(lockFile)
-
-	// Try to acquire exclusive lock (non-blocking)
-	locked, err := fileLock.TryLock()
+	fileLock, err := acquireDaemonLock(d.clk(), lockFile, daemonLockWaitBudget, daemonLockPollInterval)
 	if err != nil {
-		return fmt.Errorf("acquiring lock: %w", err)
-	}
-	if !locked {
-		return fmt.Errorf("daemon already running (lock held by another process)")
+		return err
 	}
 	defer func() { _ = fileLock.Unlock() }()
 
@@ -1975,6 +2003,46 @@ func IsShutdownInProgress(townRoot string) bool {
 	return true
 }
 
+// probeDaemonLock asks whether a daemon holds the town's daemon.lock. held is
+// the answer; a non-nil probeLock is a *shared* lock on the file that the
+// caller owns until it has settled what it read under it.
+//
+// Shared, not exclusive (gt-fsgb1): an exclusive probe is indistinguishable
+// from a daemon to every other probe, so two checks racing each other each
+// report a daemon that is not there. A daemon's exclusive hold still fails a
+// shared probe, which is the answer a probe is after.
+func probeDaemonLock(lockPath string) (held bool, probeLock *flock.Flock, err error) {
+	if _, err := os.Stat(lockPath); os.IsNotExist(err) {
+		return false, nil, nil // No lock file — no daemon has ever run
+	}
+
+	lock := flock.New(lockPath)
+	locked, err := lock.TryRLock()
+	if err != nil {
+		return false, nil, err
+	}
+
+	if !locked {
+		// A daemon holds the lock exclusively
+		return true, nil, nil
+	}
+
+	// We hold the lock shared
+	return false, lock, nil
+}
+
+// settleFreeDaemonLock removes the pid file of a town no daemon holds the lock
+// of, and releases the probe lock only afterwards.
+//
+// The order is the point (gt-fsgb1): released first, the two steps leave a
+// window for a starting daemon to take the lock and write its pid file, which
+// the removal then deletes — after which nothing rewrites the file until that
+// daemon restarts, and StopDaemon refuses with "pid is not known yet".
+func settleFreeDaemonLock(pidFile string, release func() error) {
+	_ = os.Remove(pidFile)
+	_ = release()
+}
+
 // IsRunning checks if a daemon is running for the given town.
 // Uses the daemon.lock flock as the authoritative signal — if the lock is held,
 // the daemon is running. Falls back to PID file for the process ID.
@@ -1982,23 +2050,20 @@ func IsShutdownInProgress(townRoot string) bool {
 func IsRunning(townRoot string) (bool, int, error) {
 	// Primary check: is the daemon lock held?
 	lockPath := filepath.Join(townRoot, "daemon", "daemon.lock")
-	if _, err := os.Stat(lockPath); os.IsNotExist(err) {
-		return false, 0, nil
-	}
-
-	lock := flock.New(lockPath)
-	locked, err := lock.TryLock()
+	held, probeLock, err := probeDaemonLock(lockPath)
 	if err != nil {
 		// Can't check lock — fall back to PID file + signal check
 		return isRunningFromPID(townRoot)
 	}
 
-	if locked {
-		// We acquired the lock, so no daemon holds it
-		_ = lock.Unlock()
-		// Clean up stale PID file if present
-		pidFile := filepath.Join(townRoot, "daemon", "daemon.pid")
-		_ = os.Remove(pidFile)
+	pidFile := filepath.Join(townRoot, "daemon", "daemon.pid")
+
+	if !held {
+		// No daemon holds the lock: clean up any stale PID file, still
+		// holding the lock we read it under
+		if probeLock != nil {
+			settleFreeDaemonLock(pidFile, probeLock.Unlock)
+		}
 		return false, 0, nil
 	}
 
@@ -2006,7 +2071,6 @@ func IsRunning(townRoot string) (bool, int, error) {
 	// Use readPIDFile to handle the "PID\nNONCE" format introduced alongside
 	// nonce-based ownership verification. A plain Atoi on the raw file content
 	// fails when a nonce line is present, returning PID 0.
-	pidFile := filepath.Join(townRoot, "daemon", "daemon.pid")
 	pid, _, err := readPIDFile(pidFile)
 	if err != nil {
 		// Lock held but no readable PID file — daemon running, PID unknown
@@ -2069,25 +2133,46 @@ type daemonStopWait struct {
 	kill   func() error
 }
 
-// run returns once the daemon has exited or SIGKILL has been sent.
-func (w *daemonStopWait) run() {
+// run returns once the daemon has exited or SIGKILL has been sent, and reports
+// whether it is gone. The false cases are the ones the pid file has to survive:
+// a daemon that outlives its budget with a PID that no longer verifies
+// (gt-p7zy0), or one that has not gone in the grace after the SIGKILL.
+func (w *daemonStopWait) run() bool {
 	if !w.alive() {
-		return
+		return true
 	}
 	fmt.Fprintf(w.out, "  Waiting up to %s for the daemon (PID %d) to finish shutting down...\n",
 		w.budget, w.pid)
 	deadline := w.clock.Now().Add(w.budget)
 	for w.alive() {
 		if !w.clock.Now().Before(deadline) {
-			if w.verify() == nil {
-				fmt.Fprintf(w.out, "  Daemon (PID %d) still running after %s; sending SIGKILL\n",
-					w.pid, w.budget)
-				_ = w.kill()
+			if w.verify() != nil {
+				return false
 			}
-			return
+			fmt.Fprintf(w.out, "  Daemon (PID %d) still running after %s; sending SIGKILL\n",
+				w.pid, w.budget)
+			_ = w.kill()
+			return w.awaitExit(stopKillGrace)
 		}
 		w.clock.Sleep(w.poll)
 	}
+	return true
+}
+
+// stopKillGrace is how long run waits for a SIGKILLed daemon to disappear
+// before it reports the daemon still running.
+const stopKillGrace = 2 * time.Second
+
+// awaitExit waits up to grace for the process to go.
+func (w *daemonStopWait) awaitExit(grace time.Duration) bool {
+	deadline := w.clock.Now().Add(grace)
+	for w.alive() {
+		if !w.clock.Now().Before(deadline) {
+			return false
+		}
+		w.clock.Sleep(w.poll)
+	}
+	return true
 }
 
 // StopDaemon stops the running daemon for the given town.
@@ -2140,7 +2225,7 @@ func StopDaemon(townRoot string) error {
 
 	// Give shutdown() the time it is budgeted before forcing the issue.
 	// StopDaemon runs outside any Daemon, so it waits on the real clock.
-	(&daemonStopWait{
+	gone := (&daemonStopWait{
 		clock:  clockwork.NewRealClock(),
 		out:    os.Stdout,
 		pid:    pid,
@@ -2153,10 +2238,27 @@ func StopDaemon(townRoot string) error {
 		kill:   func() error { return sendKillSignal(process) },
 	}).run()
 
-	// Clean up PID file
-	pidFile := filepath.Join(townRoot, "daemon", "daemon.pid")
-	_ = os.Remove(pidFile)
+	return finishStopDaemon(townRoot, pid, gone)
+}
 
+// finishStopDaemon clears the pid file of a daemon whose stop has settled, and
+// reports a daemon that is still running instead of clearing it (gt-fsgb1).
+//
+// A pid file removed while its daemon still runs takes the PID with it:
+// IsRunning then answers (true, 0), and every later stop refuses with "pid is
+// not known yet" until that daemon restarts, because nothing rewrites the file
+// after startup. A pid file naming some other PID is a new daemon's — it
+// started as soon as the old one let go of the lock — so it stays too.
+func finishStopDaemon(townRoot string, pid int, gone bool) error {
+	pidFile := filepath.Join(townRoot, "daemon", "daemon.pid")
+	if !gone {
+		return fmt.Errorf("stopping daemon (PID %d) did not finish within %s; left %s in place so a later stop can still find it",
+			pid, StopWaitBudget, pidFile)
+	}
+	if filed, _, err := readPIDFile(pidFile); err == nil && filed != pid {
+		return nil
+	}
+	_ = os.Remove(pidFile)
 	return nil
 }
 
@@ -2169,19 +2271,16 @@ func StopDaemon(townRoot string) error {
 // (process dead) or missing. Returns the stale PID if available.
 func FindOrphanedDaemons(townRoot string) ([]int, error) {
 	lockPath := filepath.Join(townRoot, "daemon", "daemon.lock")
-	if _, err := os.Stat(lockPath); os.IsNotExist(err) {
-		return nil, nil // No lock file — no daemon has ever run
-	}
-
-	lock := flock.New(lockPath)
-	locked, err := lock.TryLock()
+	held, probeLock, err := probeDaemonLock(lockPath)
 	if err != nil {
 		return nil, nil // Can't check lock — assume no orphans
 	}
 
-	if locked {
-		// We acquired the lock — no daemon holds it, no orphans possible
-		_ = lock.Unlock()
+	if !held {
+		// No daemon holds the lock, no orphans possible
+		if probeLock != nil {
+			_ = probeLock.Unlock()
+		}
 		return nil, nil
 	}
 
