@@ -44,9 +44,8 @@ func reportThrowawayPaths(g *git.Git, baseRef string) error {
 }
 
 // throwawayRefusalError builds the refusal for a branch that would add throwaway
-// files. Like revertedMergeRefusal it does not name the flag that overrides it:
-// agents read refusal text and self-bypass, so the text says what to do about
-// the branch instead.
+// files. It does not name the flag that overrides it: agents read refusal text
+// and self-bypass, so the text says what to do about the branch instead.
 func throwawayRefusalError(baseRef string, found []string) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "refusing to submit: this branch would add %d throwaway file(s) to %s\n\n", len(found), baseRef)
