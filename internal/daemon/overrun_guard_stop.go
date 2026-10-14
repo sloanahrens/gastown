@@ -36,7 +36,10 @@ const (
 //  4. hand the bead back (status open, assignee cleared, needs-split) so the
 //     roster no longer counts the seat; a bead found closed or re-slung to
 //     another polecat is left alone. The attention item for the stop is
-//     derived from that hand-back (collectOverrunStopped).
+//     derived from that hand-back (collectOverrunStopped);
+//  5. release the seat: clear the pause, so the polecat name and its worktree
+//     can take new work. The kept branch is safe without the park: the
+//     bead's comment names it and the worktree is not touched.
 //
 // submittedNow is read before step 1 and before step 4: a seat that has
 // submitted (gt done running, or gt:ready-to-land) is not stopped, and a bead
@@ -141,6 +144,15 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	handed.Bead, handed.Branch = st.Bead, branch
 	if err := s.handBack(handed, elapsed); err != nil {
 		d.logger.Printf("overrun_guard: stop %s on %s: hand-back failed: %v", who, st.Bead, err)
+		return
+	}
+	// 5. Release the seat. The bead no longer names it, so nothing restarts it
+	// on this sling; leaving the pause would make parkedReuseBlocker refuse the
+	// name until an operator ran gt agent resume, with no notice that it was
+	// parked. A failed clear leaves the stop pending, so the next tick repeats
+	// the hand-back (HandBack finishes a bead it already released) and the clear.
+	if err := s.clearPause(seat); err != nil {
+		d.logger.Printf("overrun_guard: WARNING: %s: pause marker not cleared after the hand-back of %s: %v", who, st.Bead, err)
 		return
 	}
 	st.StoppedAt = now

@@ -28,9 +28,10 @@ func TestStop_OrderIsPauseStopCheckpointHandBack(t *testing.T) {
 		"stop gastown/capable",
 		"checkpoint gastown/capable",
 		"hand-back gastown/capable",
+		"clear-pause gastown/capable",
 	}
 	if !reflect.DeepEqual(f.calls, want) {
-		t.Errorf("call order = %q, want %q", f.calls, want)
+		t.Errorf("call order = %q, want %q (the seat is released after the hand-back)", f.calls, want)
 	}
 	if len(f.handedBack) != 1 || f.handedBack[0] != "gt-aaa11 polecat/capable/gt-aaa11+x1 20m0s" {
 		t.Errorf("hand-back got %q, want the bead, its branch and 20m0s", f.handedBack)
@@ -41,6 +42,39 @@ func TestStop_OrderIsPauseStopCheckpointHandBack(t *testing.T) {
 	}
 	if st.StoppedAt.IsZero() {
 		t.Error("StoppedAt not persisted after the hand-back")
+	}
+}
+
+// A pause that cannot be cleared after the hand-back leaves the seat parked,
+// so the stop stays pending: the next tick repeats the hand-back and the clear
+// instead of finishing with the park unannounced.
+func TestStop_FailedReleaseAfterHandBackKeepsTheStopPending(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.failOn = map[string]error{"clear-pause": errors.New("disk full")}
+
+	d.runOverrunGuard(f.seams())
+
+	st, _ := readOverrunState(d.config.TownRoot, "gt-aaa11")
+	if !st.StoppedAt.IsZero() {
+		t.Error("StoppedAt written although the seat is still parked")
+	}
+	if !strings.Contains(buf.String(), "pause marker not cleared after the hand-back") {
+		t.Errorf("log lacks the failed release:\n%s", buf.String())
+	}
+
+	f.seats, f.calls, f.failOn = nil, nil, nil
+	f.now = f.now.Add(time.Minute)
+	d.runOverrunGuard(f.seams())
+
+	want := []string{"hand-back gastown/capable", "clear-pause gastown/capable"}
+	if !reflect.DeepEqual(f.calls, want) {
+		t.Errorf("resumed call order = %q, want %q", f.calls, want)
+	}
+	st, _ = readOverrunState(d.config.TownRoot, "gt-aaa11")
+	if st.StoppedAt.IsZero() {
+		t.Error("StoppedAt not persisted once the seat was released")
 	}
 }
 
@@ -71,7 +105,7 @@ func TestStop_FailedSessionStopClearsMarkerAndSkipsHandBack(t *testing.T) {
 	f.calls, f.failOn = nil, nil
 	f.now = f.now.Add(time.Minute)
 	d.runOverrunGuard(f.seams())
-	if len(f.calls) != 4 || f.calls[0] != "pause gastown/capable" || f.calls[3] != "hand-back gastown/capable" {
+	if len(f.calls) != 5 || f.calls[0] != "pause gastown/capable" || f.calls[3] != "hand-back gastown/capable" || f.calls[4] != "clear-pause gastown/capable" {
 		t.Errorf("retry call order = %q, want the full sequence", f.calls)
 	}
 }
@@ -89,7 +123,7 @@ func TestStop_FailedMarkerClearKeepsTheStopPending(t *testing.T) {
 	f.now = f.now.Add(time.Minute)
 	d.runOverrunGuard(f.seams())
 
-	want := []string{"stop gastown/capable", "checkpoint gastown/capable", "hand-back gastown/capable"}
+	want := []string{"stop gastown/capable", "checkpoint gastown/capable", "hand-back gastown/capable", "clear-pause gastown/capable"}
 	if !reflect.DeepEqual(f.calls, want) {
 		t.Errorf("resumed call order = %q, want %q (no second pause)", f.calls, want)
 	}
@@ -102,8 +136,8 @@ func TestStop_RunsOnceAfterStoppedAt(t *testing.T) {
 
 	d.runOverrunGuard(f.seams())
 	first := len(f.calls)
-	if first != 4 {
-		t.Fatalf("first tick made %d calls (%q), want 4", first, f.calls)
+	if first != 5 {
+		t.Fatalf("first tick made %d calls (%q), want 5", first, f.calls)
 	}
 
 	// The seat is still listed (say the session came back): the stop is done
@@ -135,7 +169,7 @@ func TestStop_ReslingAfterStopRunsAFreshStop(t *testing.T) {
 	f.now = resling.Add(21 * time.Minute)
 	d.runOverrunGuard(f.seams())
 
-	if len(f.calls) != 4 {
+	if len(f.calls) != 5 {
 		t.Errorf("calls for the new sling = %q, want a full stop", f.calls)
 	}
 }
@@ -160,7 +194,7 @@ func TestStop_FailedCheckpointRetriesWithoutRepeatingEarlierSteps(t *testing.T) 
 	f.seats, f.calls, f.failOn = nil, nil, nil
 	f.now = f.now.Add(time.Minute)
 	d.runOverrunGuard(f.seams())
-	want = []string{"checkpoint gastown/capable", "hand-back gastown/capable"}
+	want = []string{"checkpoint gastown/capable", "hand-back gastown/capable", "clear-pause gastown/capable"}
 	if !reflect.DeepEqual(f.calls, want) {
 		t.Errorf("retry calls = %q, want %q", f.calls, want)
 	}
@@ -185,8 +219,8 @@ func TestStop_FailedHandBackRetriesAndStaysUnfinished(t *testing.T) {
 	f.seats, f.calls, f.failOn = nil, nil, nil
 	f.now = f.now.Add(time.Minute)
 	d.runOverrunGuard(f.seams())
-	if want := []string{"hand-back gastown/capable"}; !reflect.DeepEqual(f.calls, want) {
-		t.Errorf("retry calls = %q, want only the hand-back", f.calls)
+	if want := []string{"hand-back gastown/capable", "clear-pause gastown/capable"}; !reflect.DeepEqual(f.calls, want) {
+		t.Errorf("retry calls = %q, want the hand-back and the release", f.calls)
 	}
 	st, _ = readOverrunState(d.config.TownRoot, "gt-aaa11")
 	if st.StoppedAt.IsZero() {
