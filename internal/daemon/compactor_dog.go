@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -163,6 +164,9 @@ func (d *Daemon) triggerCompactorDog() {
 		// goroutine, where it cannot stall the tick loop behind a restart and
 		// its backoff (gt-ox6c).
 		if err := d.ensureDoltServerUp(); err != nil {
+			if errors.Is(err, errDoltBringUpSkipped) {
+				return
+			}
 			d.logger.Printf("compactor_dog: Dolt server unavailable: %v", err)
 		}
 		if d.compactorDogCycle() {

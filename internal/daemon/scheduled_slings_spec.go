@@ -118,10 +118,14 @@ func untakenSpecBound(e ScheduledSlingEntry) time.Duration {
 // (the dispatcher owns it), so without this a run the dispatcher will not take
 // reads as skip-open on every tick, resets the failure counter, and the entry
 // stays silently dead. The returned error counts toward the escalation.
+//
+// A reopened run (isReopenedRun) is not counted: dead-holder recovery leaves
+// created_at alone, so its age says nothing about how long the dispatcher has
+// had it, and the dispatcher resumes it on its own schedule (gt-84o0a).
 func reportUntakenSpecRuns(runs []scheduledBead, e ScheduledSlingEntry, now time.Time) error {
 	var untaken []scheduledBead
 	for _, b := range runs {
-		if isOpenUnhooked(b) && !b.CreatedAt.IsZero() && now.Sub(b.CreatedAt) > untakenSpecBound(e) {
+		if isOpenUnhooked(b) && !isReopenedRun(b) && !b.CreatedAt.IsZero() && now.Sub(b.CreatedAt) > untakenSpecBound(e) {
 			untaken = append(untaken, b)
 		}
 	}

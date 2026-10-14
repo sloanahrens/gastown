@@ -4,11 +4,16 @@ import (
 	"context"
 	"errors"
 	"log"
+	"os"
+	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
@@ -196,6 +201,18 @@ type fakeScheduledRunner struct {
 	// replaces slingErr when set, to act as a sling that ran into its deadline.
 	slingBudgets []time.Duration
 	slingHook    func(ctx context.Context, f *fakeScheduledRunner, beadID string) error
+
+	// goneBranches are the branches absent from origin; every other branch is
+	// there. probeErr makes the origin probe fail.
+	goneBranches []string
+	probeErr     error
+}
+
+func (f *fakeScheduledRunner) originHasBranch(_ context.Context, _, branch string) (bool, error) {
+	if f.probeErr != nil {
+		return false, f.probeErr
+	}
+	return !slices.Contains(f.goneBranches, branch), nil
 }
 
 // setStatus moves a run bead to status, as gt sling hooking it would.
@@ -439,6 +456,59 @@ func TestRunScheduledSlings_AReopenedRunResumesItsBranchInsteadOfBeingRetired(t 
 	}
 	if len(*esc) != 0 {
 		t.Errorf("nothing failed, escalated %v", *esc)
+	}
+}
+
+// A resume branch deleted from origin out-of-band has no work to continue and
+// would fail every tick: the run is slung from main instead. A probe that
+// cannot answer is not "gone", so the resume goes ahead on the branch as before
+// (gt-84o0a).
+func TestRunScheduledSlings_AResumeBranchGoneFromOriginIsSlungFromMain(t *testing.T) {
+	t.Parallel()
+	const branch = "polecat/nux/gt-run+abc"
+	for _, tc := range []struct {
+		name       string
+		gone       []string
+		probeErr   error
+		wantBranch string
+	}{
+		{name: "branch on origin", wantBranch: branch},
+		{name: "branch gone from origin", gone: []string{branch}, wantBranch: ""},
+		{name: "another branch gone", gone: []string{"polecat/other/x"}, wantBranch: branch},
+		{name: "probe fails", probeErr: errors.New("origin unreachable"), wantBranch: branch},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeScheduledRunner{createID: "gt-next", now: time.Now(), goneBranches: tc.gone, probeErr: tc.probeErr}
+			d, esc := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
+			f.beads = []scheduledBead{{ID: "gt-run", Status: "open", CreatedAt: time.Now().Add(-time.Hour), ResumeBranch: branch}}
+			d.runScheduledSlings()
+			if len(f.slungIDs) != 1 || f.slungIDs[0] != "gt-run" || f.slungBranches[0] != tc.wantBranch {
+				t.Fatalf("slung %v on %q, want gt-run on %q", f.slungIDs, f.slungBranches, tc.wantBranch)
+			}
+			if len(f.closedIDs) != 0 || len(f.created) != 0 {
+				t.Errorf("the reopened bead is slung in place: closed %v created %v", f.closedIDs, f.created)
+			}
+			if got := d.scheduledSlingFailures["doc-audit"]; got != 0 || len(*esc) != 0 {
+				t.Errorf("a sling that succeeded is no failure: count %d, escalations %v", got, *esc)
+			}
+		})
+	}
+}
+
+// A fresh sling that fails keeps the bead open and counts, like any failed sling.
+func TestRunScheduledSlings_AFailedFreshResumeStillCounts(t *testing.T) {
+	t.Parallel()
+	const branch = "polecat/nux/gt-run+abc"
+	f := &fakeScheduledRunner{createID: "gt-next", now: time.Now(), goneBranches: []string{branch}, slingErr: errors.New("boom")}
+	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
+	f.beads = []scheduledBead{{ID: "gt-run", Status: "open", CreatedAt: time.Now().Add(-time.Hour), ResumeBranch: branch}}
+	d.runScheduledSlings()
+	if got := d.scheduledSlingFailures["doc-audit"]; got != 1 {
+		t.Fatalf("failures = %d, want 1", got)
+	}
+	if len(f.closedIDs) != 0 {
+		t.Errorf("the bead must stay open for the next tick, closed %v", f.closedIDs)
 	}
 }
 
@@ -846,6 +916,81 @@ func TestTriggerScheduledSlings_StartupCatchUpDispatchesDueOnce(t *testing.T) {
 	awaitScheduledSlingsIdle(t, d)
 	if len(f.slungIDs) != 1 || len(f.created) != 1 {
 		t.Errorf("tick after startup dispatched again: created=%v sling=%v", f.created, f.slungIDs)
+	}
+}
+
+// The startup catch-up honors the shutdown.lock guard the tick path applies: a
+// daemon started while `gt down` holds the lock dispatches nothing (gt-84o0a).
+func TestCatchUpScheduledSlings_HonorsTheShutdownLock(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name         string
+		holdLock     bool
+		wantDispatch bool
+	}{
+		{"no shutdown", false, true},
+		{"shutdown.lock held", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeScheduledRunner{createID: "gt-run1", now: time.Now()}
+			d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
+			if tc.holdLock {
+				lockPath := filepath.Join(d.config.TownRoot, "daemon", "shutdown.lock")
+				if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				lock := flock.New(lockPath)
+				if locked, err := lock.TryLock(); err != nil || !locked {
+					t.Fatalf("TryLock = %v, %v", locked, err)
+				}
+				t.Cleanup(func() { _ = lock.Unlock() })
+			}
+			d.catchUpScheduledSlings()
+			awaitScheduledSlingsIdle(t, d)
+			if dispatched := len(f.slungIDs) == 1; dispatched != tc.wantDispatch {
+				t.Errorf("dispatched = %v, want %v (created %v, slung %v)", dispatched, tc.wantDispatch, f.created, f.slungIDs)
+			}
+		})
+	}
+}
+
+// A cycle whose Dolt bring-up was skipped for shutdown does not run its pass:
+// reading bead history or opening SQL connections needs the server the
+// shutdown is stopping (gt-84o0a).
+func TestTriggerScheduledSlings_SkipsThePassWhenDoltBringUpIsSkipped(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name         string
+		shuttingDown bool
+		wantDispatch bool
+	}{
+		{"daemon running", false, true},
+		{"daemon shutting down", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var starts atomic.Int32
+			var logs strings.Builder
+			f := &fakeScheduledRunner{createID: "gt-run1", now: time.Now()}
+			d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
+			d.logger = log.New(&logs, "", 0)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			d.ctx, d.cancel = ctx, cancel
+			d.doltServer = shuttingDownTestManager(t, d, &starts)
+			if tc.shuttingDown {
+				cancel()
+			}
+			d.triggerScheduledSlings()
+			awaitScheduledSlingsIdle(t, d)
+			if dispatched := len(f.slungIDs) == 1; dispatched != tc.wantDispatch {
+				t.Errorf("dispatched = %v, want %v", dispatched, tc.wantDispatch)
+			}
+			if strings.Contains(logs.String(), "Dolt server unavailable") {
+				t.Errorf("a shutdown skip is not an unavailable server; log:\n%s", logs.String())
+			}
+		})
 	}
 }
 

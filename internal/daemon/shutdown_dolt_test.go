@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log"
 	"sync/atomic"
@@ -109,13 +110,49 @@ func TestEnsureDoltServerUpStartsNoDoltAfterShutdown(t *testing.T) {
 
 		d.cancel() // what shutdown() does first
 
-		if err := d.ensureDoltServerUp(); err != nil {
-			t.Fatalf("ensureDoltServerUp: %v", err)
+		// The skip is reported, not returned as success: callers that need
+		// the server cannot tell "up" from "left alone" otherwise (gt-84o0a).
+		if err := d.ensureDoltServerUp(); !errors.Is(err, errDoltBringUpSkipped) {
+			t.Fatalf("ensureDoltServerUp = %v, want errDoltBringUpSkipped", err)
 		}
 		if got := starts.Load(); got != 0 {
 			t.Fatalf("Dolt starts = %d, want 0: the daemon is going down and would leave a detached server behind", got)
 		}
 	})
+}
+
+// The compactor dog does not run its SQL cycle, or record a run, when the Dolt
+// bring-up was skipped for shutdown; the same daemon before shutdown runs it
+// (gt-84o0a).
+func TestCompactorDogSkipsItsCycleWhenDoltBringUpIsSkipped(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name         string
+		shuttingDown bool
+		wantCycles   int32
+	}{
+		{"daemon running", false, 1},
+		{"daemon shutting down", true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var starts, cycles atomic.Int32
+			d := compactorDogTestDaemon(t.TempDir(), nil)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			d.ctx, d.cancel = ctx, cancel
+			d.doltServer = shuttingDownTestManager(t, d, &starts)
+			d.compactorDogCycleFn = func() bool { cycles.Add(1); return true }
+			if tc.shuttingDown {
+				cancel()
+			}
+			d.triggerCompactorDog()
+			awaitCompactorDogIdle(t, d)
+			if got := cycles.Load(); got != tc.wantCycles {
+				t.Errorf("cycles = %d, want %d", got, tc.wantCycles)
+			}
+		})
+	}
 }
 
 // A manager that has been asked to stop stays stopped: this is the race the
