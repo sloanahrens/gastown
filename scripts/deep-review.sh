@@ -9,11 +9,15 @@
 #
 # Ledger lines, written into the run bead's notes by the formula:
 #   cursor: <RFC3339 landed_at of the newest landing covered> <last slice path>
+#   reviewed: <YYYY-MM-DD> <path>
 #   finding: <fingerprint> <bead id | digest-only>
 #   queued: <fingerprint> <P1|P2|P3> <file:line> <claim>
 # --prev-notes is the notes of recent run beads in any order. The cursor line
 # with the newest timestamp wins, so the order and status of the run beads do
-# not matter. A queued finding stays pending until a finding line names it.
+# not matter. The rotation slice is ranked by risk, not by the cursor path: a
+# file with a reviewed: line from the last 21 days is skipped, and the newest
+# date wins when a path has several. A reviewed: line that is malformed is
+# ignored, because the worst outcome is a file read twice. A queued finding stays pending until a finding line names it.
 # A queued line that does not carry a severity and a claim stops queued with
 # exit 3: the run that would file it reads a truncated queue as a short one,
 # and a lost finding is worse than a run that stops and escalates.
@@ -24,12 +28,16 @@ set -euo pipefail
 
 DEFAULT_WINDOW_SECONDS=86400
 DEFAULT_SLICE=15
+DEFAULT_SLICE_BYTES=150000
+REVIEW_COOLDOWN_DAYS=21
+RISK_HISTORY="60.days.ago"
 
 usage() {
   cat >&2 <<'EOF'
 usage:
   deep-review.sh plan --landings FILE --prev-notes FILE --repo DIR
-                      [--ref REF] [--slice N] [--now RFC3339] [--out DIR]
+                      [--ref REF] [--slice N] [--slice-bytes N] [--now RFC3339]
+                      [--out DIR]
   deep-review.sh seen --prev-notes FILE FINGERPRINT
   deep-review.sh queued --prev-notes FILE
 EOF
@@ -102,8 +110,80 @@ newest_cursor() {
   ' "$1"
 }
 
+# build_slice REPO REF NOTES NOW OUT SLICE BYTES: writes $OUT/slice.txt (paths),
+# slice-rows.txt (tier, review date, score, bytes, path) and reviewed-lines.txt.
+#
+# Score per non-test Go file under internal/ at REF, from one git log pass and
+# two tree-wide calls, never one call per file (the tree has ~930 files):
+#   3*fix_commits + commits + min(5, lines/200) + 4 if no sibling _test.go
+# fix_commits are commits since RISK_HISTORY whose subject starts with fix.
+# Files reviewed within REVIEW_COOLDOWN_DAYS of NOW (UTC date) form tier 1 and
+# are skipped; only when every file is tier 1 does the slice fall back to it,
+# least recently reviewed first. The slice stops at the first file that would
+# push it past BYTES or SLICE, and always keeps its first file so one file
+# larger than the budget cannot empty a non-quiet day's slice. Temp files, not
+# pipes into head: head closing early would SIGPIPE the writer and pipefail
+# would abort on a file list the size of the real tree.
+build_slice() {
+  local repo="$1" ref="$2" notes="$3" now="$4" out="$5" slice="$6" budget="$7"
+  local cutoff today rc=0
+  cutoff="$(jq -n -r --arg now "$now" "$JQ_TS"'(($now | ts)[0] - '"$REVIEW_COOLDOWN_DAYS"' * 86400) | strftime("%Y-%m-%d")')"
+  today="$(jq -n -r --arg now "$now" "$JQ_TS"'($now | ts)[0] | strftime("%Y-%m-%d")')"
+
+  git -C "$repo" ls-tree -r -l "$ref" -- internal > "$out/tree.txt" || die "cannot list internal/ at $ref"
+  awk -F'\t' '$2 ~ /\.go$/ && $2 !~ /_test\.go$/ { print $2 }' "$out/tree.txt" | LC_ALL=C sort > "$out/all-files.txt"
+  [ -s "$out/all-files.txt" ] || die "no non-test Go files under internal/ at $ref"
+  # git grep exits 1 when no line matches, which is a tree of empty files
+  git -C "$repo" grep -c '' "$ref" -- internal > "$out/line-counts.txt" || rc=$?
+  [ "$rc" -le 1 ] || die "cannot count lines under internal/ at $ref"
+  git -C "$repo" log --since="$RISK_HISTORY" --name-only --format=@%s "$ref" -- internal > "$out/history.txt" \
+    || die "cannot read the history of internal/ at $ref"
+
+  awk -F'\t' -v tree="$out/tree.txt" -v lines="$out/line-counts.txt" -v hist="$out/history.txt" -v cutoff="$cutoff" '
+    FILENAME == tree {
+      if ($2 !~ /\.go$/) next
+      isgo[$2] = 1
+      if ($2 !~ /_test\.go$/) { k = split($1, m, " "); size[$2] = m[k] + 0 }
+      next
+    }
+    FILENAME == lines {
+      r = substr($0, index($0, ":") + 1)
+      if (match(r, /:[0-9]+$/)) nlines[substr(r, 1, RSTART - 1)] = substr(r, RSTART + 1) + 0
+      next
+    }
+    FILENAME == hist {
+      if (substr($0, 1, 1) == "@") { fix = (tolower(substr($0, 2, 3)) == "fix"); next }
+      if ($0 == "") next
+      commits[$0]++
+      if (fix) fixes[$0]++
+      next
+    }
+    /^reviewed: [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] ./ {
+      d = substr($0, 11, 10); p = substr($0, 22)
+      if (!(p in rev) || d > rev[p]) rev[p] = d
+    }
+    END {
+      for (p in size) {
+        t = substr(p, 1, length(p) - 3) "_test.go"
+        s = 3 * fixes[p] + commits[p] + (nlines[p] / 200 > 5 ? 5 : nlines[p] / 200) + ((t in isgo) ? 0 : 4)
+        recent = (p in rev) && ((rev[p] "") >= (cutoff ""))
+        printf "%d\t%s\t%.4f\t%d\t%s\n", recent ? 1 : 0, recent ? rev[p] : "0000-00-00", s, size[p], p
+      }
+    }
+  ' "$out/tree.txt" "$out/line-counts.txt" "$out/history.txt" "$notes" \
+    | LC_ALL=C sort -t "$(printf '\t')" -k1,1n -k2,2 -k3,3nr -k5 > "$out/ranked.txt"
+
+  awk -F'\t' -v n="$slice" -v budget="$budget" '
+    NR == 1 { tier = $1 }
+    $1 != tier || taken >= n || (taken > 0 && bytes + $4 > budget) { exit }
+    { print; bytes += $4; taken++ }
+  ' "$out/ranked.txt" > "$out/slice-rows.txt"
+  cut -f5 "$out/slice-rows.txt" > "$out/slice.txt"
+  awk -v today="$today" '{ print "reviewed: " today " " $0 }' "$out/slice.txt" > "$out/reviewed-lines.txt"
+}
+
 cmd_plan() {
-  local landings="" notes="" repo="" ref="HEAD" slice="$DEFAULT_SLICE" now="" out=""
+  local landings="" notes="" repo="" ref="HEAD" slice="$DEFAULT_SLICE" slice_bytes="$DEFAULT_SLICE_BYTES" now="" out=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --landings) landings="${2:-}"; shift 2 || usage ;;
@@ -111,6 +191,7 @@ cmd_plan() {
       --repo) repo="${2:-}"; shift 2 || usage ;;
       --ref) ref="${2:-}"; shift 2 || usage ;;
       --slice) slice="${2:-}"; shift 2 || usage ;;
+      --slice-bytes) slice_bytes="${2:-}"; shift 2 || usage ;;
       --now) now="${2:-}"; shift 2 || usage ;;
       --out) out="${2:-}"; shift 2 || usage ;;
       *) usage ;;
@@ -119,6 +200,8 @@ cmd_plan() {
   [ -f "$landings" ] && [ -f "$notes" ] && [ -d "$repo" ] || usage
   case "$slice" in ''|*[!0-9]*) usage ;; esac
   [ "$slice" -gt 0 ] || usage
+  case "$slice_bytes" in ''|*[!0-9]*) usage ;; esac
+  [ "$slice_bytes" -gt 0 ] || usage
   [ -n "$now" ] || now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   valid_ts "$now" || die "--now is not RFC3339: $now"
   [ -n "$out" ] || out="$(mktemp -d)"
@@ -183,26 +266,18 @@ cmd_plan() {
   echo "reviewed_until_old=$since"
   echo "reviewed_until_new=$newest"
 
-  # Rotation slice: the next N non-test Go files under internal/ after the
-  # cursor path, wrapping. Skipped on a quiet day. One awk pass, no head in a
-  # pipe: head closing early would SIGPIPE the writer and pipefail would abort
-  # on a file list the size of the real tree.
+  # Rotation slice, skipped on a quiet day. The cursor path no longer picks
+  # files; it is echoed so the ledger's cursor: line keeps its shape.
   : > "$out/slice.txt"
+  : > "$out/slice-rows.txt"
+  : > "$out/reviewed-lines.txt"
   if [ "$n" -gt 0 ]; then
-    git -C "$repo" ls-tree -r --name-only "$ref" -- internal \
-      | awk '/\.go$/ && !/_test\.go$/' | LC_ALL=C sort > "$out/all-files.txt"
-    [ -s "$out/all-files.txt" ] || die "no non-test Go files under internal/ at $ref"
-    LC_ALL=C awk -v c="$cursor" -v n="$slice" '
-      { a[NR] = $0 }
-      END {
-        for (i = 1; i <= NR && out < n; i++) if (c == "" || (a[i] "") > (c "")) { print a[i]; out++ }
-        for (i = 1; i <= NR && out < n; i++) if (!(c == "" || (a[i] "") > (c ""))) { print a[i]; out++ }
-      }
-    ' "$out/all-files.txt" > "$out/slice.txt"
+    build_slice "$repo" "$ref" "$notes" "$now" "$out" "$slice" "$slice_bytes"
     echo "rotation_cursor_old=$cursor"
     echo "rotation_cursor_new=$(tail -n 1 "$out/slice.txt")"
   fi
   echo "slice_files=$(awk 'END { print NR }' "$out/slice.txt")"
+  echo "slice_bytes=$(awk -F'\t' '{ s += $4 } END { print s + 0 }' "$out/slice-rows.txt")"
   echo "out=$out"
 }
 
