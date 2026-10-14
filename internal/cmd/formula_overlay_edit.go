@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -61,17 +60,8 @@ func runFormulaOverlayEdit(cmd *cobra.Command, args []string) error {
 	}
 
 	// Open in editor
-	editor := os.Getenv("EDITOR")
-	if editor == "" {
-		editor = "vi"
-	}
-
-	editorCmd := exec.Command(editor, path)
-	editorCmd.Stdin = os.Stdin
-	editorCmd.Stdout = os.Stdout
-	editorCmd.Stderr = os.Stderr
-	if err := editorCmd.Run(); err != nil {
-		return fmt.Errorf("running editor: %w", err)
+	if err := openInEditor(path); err != nil {
+		return err
 	}
 
 	// Validate after editing
