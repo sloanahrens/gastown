@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +51,36 @@ func primeMemoryKVEntry(memType, slug, verified, body string) (key, value string
 	key = "gt." + memType + "." + slug
 	value = fmt.Sprintf("type: %s\nverified: %s\n\n%s\n", memType, verified, body)
 	return key, value
+}
+
+// primeMemoryMatch builds the memory the section selects for primeMemoryBead:
+// its key holds three of the bead's words, which three key hits reach the floor
+// with at any pool size.
+func primeMemoryMatch(verified, body string) (key, value string) {
+	return primeMemoryKVEntry("feedback", "prime-memories-budget", verified, body)
+}
+
+// primeMemoryFiller returns n rig memories that share no term with
+// primeMemoryBead, so a test's own memory is scored as one of a pool: a keyword
+// is worth its rarity, and a pool of one weighs every word as common.
+func primeMemoryFiller(n int) map[string]string {
+	kvs := make(map[string]string, n)
+	for i := range n {
+		key, value := primeMemoryKVEntry("project", fmt.Sprintf("garden-beds-%02d", i), "2026-08-20",
+			"Spread mulch on the beds in spring.")
+		kvs[key] = value
+	}
+	return kvs
+}
+
+// primeMemoryCorpus builds the rig kv of a test: work's memories behind n
+// unrelated ones.
+func primeMemoryCorpus(n int, work map[string]string) map[string]string {
+	kvs := primeMemoryFiller(n)
+	for k, v := range work {
+		kvs[k] = v
+	}
+	return kvs
 }
 
 // primeMemoryKV marshals a corpus into the shape of `bd kv list --json`.
@@ -167,9 +198,10 @@ func TestPrimeMemory_FlagOnRendersSectionAfterHookedWork(t *testing.T) {
 	townRoot := t.TempDir()
 	writePrimeMemorySettings(t, townRoot, true)
 
-	key, value := primeMemoryKVEntry("feedback", "prime-budget", "2026-08-20",
+	key, value := primeMemoryMatch("2026-08-20",
 		"A polecat's gt prime spends its hook budget on the hooked work first; the memory section is what gets evicted.")
-	f := &fakePrimeRunner{answers: map[string]string{primeKVListCall: primeMemoryKV(t, map[string]string{key: value})}}
+	f := &fakePrimeRunner{answers: map[string]string{primeKVListCall: primeMemoryKV(t, primeMemoryCorpus(2,
+		map[string]string{key: value}))}}
 	ctx := RoleContext{Role: RolePolecat, TownRoot: townRoot}
 
 	section, _ := primeMemorySection(t, f, ctx, t.TempDir(), primeMemoryBead())
@@ -198,39 +230,51 @@ func TestPrimeMemory_FlagOnRendersSectionAfterHookedWork(t *testing.T) {
 	}
 }
 
-// TestPrimeMemory_CapsTheSection pins memrecall's 2048-byte budget as the
-// section's bound: a corpus of matching memories fills it and no more, and the
-// keys that did not fit are named in the footer.
+// TestPrimeMemory_CapsTheSection pins the section's two bounds: at most
+// memrecall.MaxScored memories, and no more of them than the 2048-byte budget
+// holds. What neither bound fits is named in the footer.
 func TestPrimeMemory_CapsTheSection(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	writePrimeMemorySettings(t, townRoot, true)
 
+	// Four memories that all match, each too long for two of them to share the
+	// budget: three clear the cap and two fit.
 	corpus := map[string]string{}
-	for i := 0; i < 12; i++ {
-		key, value := primeMemoryKVEntry("feedback", fmt.Sprintf("prime-budget-%02d", i), "2026-08-20",
-			strings.Repeat("A polecat's gt prime spends its hook budget on the hooked work first. ", 5))
+	for i := range 4 {
+		key, value := primeMemoryKVEntry("feedback", fmt.Sprintf("prime-memories-budget-%02d", i), "2026-08-20",
+			strings.Repeat("A polecat's gt prime spends its hook budget on the hooked work first. ", 12))
 		corpus[key] = value
 	}
+	corpus = primeMemoryCorpus(2, corpus)
 	f := &fakePrimeRunner{answers: map[string]string{primeKVListCall: primeMemoryKV(t, corpus)}}
 	ctx := RoleContext{Role: RolePolecat, TownRoot: townRoot}
 
 	section, _ := primeMemorySection(t, f, ctx, t.TempDir(), primeMemoryBead())
 
 	rows := beadMemoryRows(memoryCorpus(corpus), primeMemoryBead(), primeTestEpoch)
-	selectedBytes, dropped := 0, 0
-	for _, row := range rows {
-		if row.selected {
-			selectedBytes += len(row.text)
-			continue
-		}
-		dropped++
+	selectedBytes := 0
+	for _, row := range selectedRows(rows) {
+		selectedBytes += len(row.Text)
 	}
-	if selectedBytes == 0 || dropped == 0 {
-		t.Fatalf("12 matching memories selected %d bytes and dropped %d, want both non-zero", selectedBytes, dropped)
+	carried, matched := len(selectedRows(rows)), 0
+	for _, row := range rows {
+		if row.Matched() {
+			matched++
+		}
+	}
+	if carried == 0 || matched <= carried {
+		t.Fatalf("four matching memories carried %d and matched %d, want the bounds to leave some out", carried, matched)
+	}
+	if carried > memrecall.MaxScored {
+		t.Errorf("the section carries %d memories, over the cap of %d", carried, memrecall.MaxScored)
 	}
 	if selectedBytes > memrecall.Budget {
 		t.Errorf("selected text = %d bytes, over memrecall's %d-byte budget", selectedBytes, memrecall.Budget)
+	}
+	dropped := len(droppedRows(rows))
+	if dropped == 0 {
+		t.Fatalf("the bounds left nothing out of %d matches", matched)
 	}
 	want := fmt.Sprintf("%d more matched: gt prime --explain-memory %s", dropped, primeMemoryBead().ID)
 	if !strings.Contains(section, want) {
@@ -249,9 +293,10 @@ func TestPrimeMemory_RendersFooterWhenNoCandidateFits(t *testing.T) {
 	townRoot := t.TempDir()
 	writePrimeMemorySettings(t, townRoot, true)
 
-	key, value := primeMemoryKVEntry("project", "prime-budget", "2026-08-20",
+	key, value := primeMemoryMatch("2026-08-20",
 		strings.Repeat("The polecat's gt prime hook budget is what this memory is about. ", 100))
-	f := &fakePrimeRunner{answers: map[string]string{primeKVListCall: primeMemoryKV(t, map[string]string{key: value})}}
+	f := &fakePrimeRunner{answers: map[string]string{primeKVListCall: primeMemoryKV(t, primeMemoryCorpus(2,
+		map[string]string{key: value}))}}
 	ctx := RoleContext{Role: RolePolecat, TownRoot: townRoot}
 
 	section, _ := primeMemorySection(t, f, ctx, t.TempDir(), primeMemoryBead())
@@ -267,11 +312,11 @@ func TestPrimeMemory_RendersFooterWhenNoCandidateFits(t *testing.T) {
 	}
 }
 
-// droppedMemories returns n candidates that scored but were not selected.
-func droppedMemories(n int) []beadMemory {
-	rows := make([]beadMemory, 0, n)
+// droppedMemories returns n rows the section matched and did not carry.
+func droppedMemories(n int) []memrecall.Ranked {
+	rows := make([]memrecall.Ranked, 0, n)
 	for i := 0; i < n; i++ {
-		rows = append(rows, beadMemory{mem: memrecall.Memory{Key: fmt.Sprintf("gt.feedback.dropped-%02d", i)}})
+		rows = append(rows, memrecall.Ranked{Memory: memrecall.Memory{Key: fmt.Sprintf("gt.feedback.dropped-%02d", i)}})
 	}
 	return rows
 }
@@ -327,10 +372,10 @@ func TestPrimeMemory_FooterOmittedWhenNothingLeftOut(t *testing.T) {
 		t.Errorf("footer for no dropped candidates = %q, want empty", got)
 	}
 
-	rows := []beadMemory{{
-		mem:      memrecall.Memory{Key: "gt.feedback.kept"},
-		text:     "### gt.feedback.kept (verified 2026-08-20)\nkept\n",
-		selected: true,
+	rows := []memrecall.Ranked{{
+		Memory:  memrecall.Memory{Key: "gt.feedback.kept"},
+		Text:    "### gt.feedback.kept (verified 2026-08-20)\nkept\n",
+		Carried: true,
 	}}
 	section := renderBeadMemorySection(rows, "gt-abc")
 	if !strings.Contains(section, "### gt.feedback.kept") {
@@ -423,54 +468,93 @@ func TestPrimeMemoryPaths_KeepsSourceRootDirectories(t *testing.T) {
 	}
 }
 
-// TestPrimeExplainMemory_ReportsRawAndFinalScores pins the dry run's output:
-// every candidate with both of memrecall's scores and whether the section
-// would carry it.
-func TestPrimeExplainMemory_ReportsRawAndFinalScores(t *testing.T) {
+// TestPrimeMemoryPool_SkipsArchivedAndNonMemoryKeys covers the pool's filter:
+// the rig kv also holds the memories the operator archived and keys that are no
+// memory at all, and neither is a candidate for a bead.
+func TestPrimeMemoryPool_SkipsArchivedAndNonMemoryKeys(t *testing.T) {
+	t.Parallel()
+	corpus := memoryCorpus(map[string]string{
+		"gt.feedback.prime-memories-budget": "type: feedback\n\nBody.",
+		"memory.checkpoint-note":            "Points at the checkpoint.",
+		// The operator's archive: retired memories, still in the kv.
+		"archive.gt.feedback.retired-note": "type: feedback\n\nBody.",
+		"archive.memory.retired-note":      "Points at the checkpoint.",
+		// Keys that name no memory: the kv's own schema, and bare namespaces.
+		"schema_version":   "1",
+		"gt.":              "nothing",
+		"memory.":          "nothing",
+		"memory.feedback.": "nothing",
+	})
+
+	var keys []string
+	for _, mem := range corpus {
+		keys = append(keys, mem.Key)
+	}
+	if want := []string{"gt.feedback.prime-memories-budget", "memory.checkpoint-note"}; !slices.Equal(keys, want) {
+		t.Errorf("the pool holds %v, want only the live memories %v", keys, want)
+	}
+}
+
+// TestPrimeExplainMemory_ReportsScoresAndReasons pins the dry run's output:
+// every pool memory with the idf-weighted raw score, the final score, the
+// distinctive hits that qualified it and why the section does not carry it.
+func TestPrimeExplainMemory_ReportsScoresAndReasons(t *testing.T) {
 	t.Parallel()
 	bead := primeMemoryBead()
 	now := primeTestEpoch
-	matchKey, matchValue := primeMemoryKVEntry("feedback", "prime-budget", "2026-08-20",
+	matchKey, matchValue := primeMemoryMatch("2026-08-20",
 		"A polecat's gt prime spends its hook budget on the hooked work first.")
-	overBudgetKey, overBudgetValue := primeMemoryKVEntry("general", "prime-and-memories-elsewhere", "2020-01-01",
+	overBudgetKey, overBudgetValue := primeMemoryKVEntry("feedback", "prime-memories-budget-elsewhere", "2020-01-01",
 		strings.Repeat("Unrelated filler about prime and memories. ", 200))
+	corpus := memoryCorpus(primeMemoryCorpus(2, map[string]string{
+		matchKey: matchValue, overBudgetKey: overBudgetValue,
+	}))
 
-	corpus := []memrecall.Memory{
-		memrecall.Parse(matchKey, matchValue),
-		memrecall.Parse(overBudgetKey, overBudgetValue),
-	}
 	report := explainMemoryReport(bead, corpus, now)
 
-	q, paths := beadMemoryQuery(bead)
-	raw, score := memrecall.Score(q, paths, corpus[0], now)
-	if want := fmt.Sprintf("  selected      raw %.1f  final %.1f  %s\n", raw, score, matchKey); !strings.Contains(report, want) {
+	match := memoryRow(t, corpus, matchKey)
+	if want := fmt.Sprintf("  %-30s  raw %5.1f  final %5.1f  %s  [key:budget, key:memories, key:prime]\n",
+		"selected", match.Raw, match.Score, matchKey); !strings.Contains(report, want) {
 		t.Errorf("report missing %q:\n%s", want, report)
 	}
-	raw, score = memrecall.Score(q, paths, corpus[1], now)
-	if want := fmt.Sprintf("  not-selected  raw %.1f  final %.1f  %s\n", raw, score, overBudgetKey); !strings.Contains(report, want) {
+	over := memoryRow(t, corpus, overBudgetKey)
+	if want := fmt.Sprintf("  %-30s  raw %5.1f  final %5.1f  %s  [key:budget, key:memories, key:prime]\n",
+		"dropped: "+string(memrecall.DroppedNoBudget), over.Raw, over.Score, overBudgetKey); !strings.Contains(report, want) {
 		t.Errorf("report missing %q:\n%s", want, report)
 	}
-	if header := fmt.Sprintf("explain-memory %s: 2 rig memories, 2 candidates, 1 selected", bead.ID); !strings.Contains(report, header) {
+	if header := fmt.Sprintf("explain-memory %s: %d rig memories, 2 matched, 1 selected", bead.ID, len(corpus)); !strings.Contains(report, header) {
 		t.Errorf("report missing %q:\n%s", header, report)
 	}
 }
 
-// TestPrimeExplainMemory_ReportsNoCandidates covers the report's other shape:
-// a corpus nothing scores against, which is what leaves the section out.
-func TestPrimeExplainMemory_ReportsNoCandidates(t *testing.T) {
+// TestPrimeExplainMemory_ReportsNoMatches covers the report's other shape: a
+// pool nothing scores against, which is what leaves the section out.
+func TestPrimeExplainMemory_ReportsNoMatches(t *testing.T) {
 	t.Parallel()
-	corpus := []memrecall.Memory{
-		memrecall.Parse("gt.project.garden-mulch", "type: project\nverified: 2026-08-20\n\nSpread mulch on the beds in spring.\n"),
-	}
+	corpus := memoryCorpus(primeMemoryCorpus(2, map[string]string{
+		"gt.project.garden-mulch": "type: project\nverified: 2026-08-20\n\nSpread mulch on the beds in spring.\n",
+	}))
 
 	report := explainMemoryReport(primeMemoryBead(), corpus, primeTestEpoch)
 
-	if !strings.Contains(report, "0 candidates, 0 selected") {
+	if !strings.Contains(report, "0 matched, 0 selected") {
 		t.Errorf("report missing the empty selection:\n%s", report)
 	}
-	if !strings.Contains(report, "no candidate:") {
+	if !strings.Contains(report, "no match:") {
 		t.Errorf("report does not explain the empty selection:\n%s", report)
 	}
+}
+
+// memoryRow returns the report row for one memory key.
+func memoryRow(t *testing.T, corpus []memrecall.Memory, key string) memrecall.Ranked {
+	t.Helper()
+	for _, row := range beadMemoryRows(corpus, primeMemoryBead(), primeTestEpoch) {
+		if row.Memory.Key == key {
+			return row
+		}
+	}
+	t.Fatalf("%s is not in the ranking", key)
+	return memrecall.Ranked{}
 }
 
 // recallLogRecords reads the town's recall log back as records, one per line.
@@ -503,10 +587,9 @@ func TestPrimeMemoryRecallLog_RecordsTheInjection(t *testing.T) {
 	townRoot := t.TempDir()
 	writePrimeMemorySettings(t, townRoot, true)
 
-	corpus := map[string]string{}
-	key, value := primeMemoryKVEntry("feedback", "prime-budget", "2026-08-20",
+	key, value := primeMemoryMatch("2026-08-20",
 		"A polecat's gt prime spends its hook budget on the hooked work first.")
-	corpus[key] = value
+	corpus := primeMemoryCorpus(2, map[string]string{key: value})
 	f := &fakePrimeRunner{answers: map[string]string{primeKVListCall: primeMemoryKV(t, corpus)}}
 	ctx := RoleContext{Role: RolePolecat, Rig: "gastown", TownRoot: townRoot}
 
@@ -542,9 +625,10 @@ func TestPrimeMemoryRecallLog_AppendsOnlyWhenTheSectionRenders(t *testing.T) {
 	townRoot := t.TempDir()
 	writePrimeMemorySettings(t, townRoot, true)
 
-	key, value := primeMemoryKVEntry("feedback", "prime-budget", "2026-08-20",
+	key, value := primeMemoryMatch("2026-08-20",
 		"A polecat's gt prime spends its hook budget on the hooked work first.")
-	f := &fakePrimeRunner{answers: map[string]string{primeKVListCall: primeMemoryKV(t, map[string]string{key: value})}}
+	f := &fakePrimeRunner{answers: map[string]string{primeKVListCall: primeMemoryKV(t, primeMemoryCorpus(2,
+		map[string]string{key: value}))}}
 	ctx := RoleContext{Role: RolePolecat, Rig: "gastown", TownRoot: townRoot}
 
 	// A line another writer left behind survives every later append.
@@ -592,9 +676,10 @@ func TestPrimeMemoryRecallLog_FailureIsNonFatal(t *testing.T) {
 		t.Fatalf("block the runtime directory: %v", err)
 	}
 
-	key, value := primeMemoryKVEntry("feedback", "prime-budget", "2026-08-20",
+	key, value := primeMemoryMatch("2026-08-20",
 		"A polecat's gt prime spends its hook budget on the hooked work first.")
-	f := &fakePrimeRunner{answers: map[string]string{primeKVListCall: primeMemoryKV(t, map[string]string{key: value})}}
+	f := &fakePrimeRunner{answers: map[string]string{primeKVListCall: primeMemoryKV(t, primeMemoryCorpus(2,
+		map[string]string{key: value}))}}
 	p, _, out := newFakePrimeTools(f)
 	var warnings strings.Builder
 	p.errs = &warnings
@@ -622,9 +707,10 @@ func TestPrimeMemoryRecallLog_FileAndDirModes(t *testing.T) {
 	townRoot := t.TempDir()
 	writePrimeMemorySettings(t, townRoot, true)
 
-	key, value := primeMemoryKVEntry("feedback", "prime-budget", "2026-08-20",
+	key, value := primeMemoryMatch("2026-08-20",
 		"A polecat's gt prime spends its hook budget on the hooked work first.")
-	f := &fakePrimeRunner{answers: map[string]string{primeKVListCall: primeMemoryKV(t, map[string]string{key: value})}}
+	f := &fakePrimeRunner{answers: map[string]string{primeKVListCall: primeMemoryKV(t, primeMemoryCorpus(2,
+		map[string]string{key: value}))}}
 	primeMemorySection(t, f, RoleContext{Role: RolePolecat, Rig: "gastown", TownRoot: townRoot}, t.TempDir(), primeMemoryBead())
 
 	info, err := os.Stat(recallLogPath(townRoot))
@@ -743,12 +829,12 @@ func TestPrimeMemory_RendersInSelectOrder(t *testing.T) {
 	t.Parallel()
 	pinnedKey, pinnedValue := primeMemoryKVEntry("general", "operator-etiquette", "2020-01-01", "Be polite.")
 	pinnedValue = strings.Replace(pinnedValue, "verified:", "always: true\ndurable: true\nverified:", 1)
-	rankedKey, rankedValue := primeMemoryKVEntry("feedback", "prime-budget", "2026-08-20",
+	rankedKey, rankedValue := primeMemoryMatch("2026-08-20",
 		"A polecat's gt prime spends its hook budget on the hooked work first.")
 	corpus := memoryCorpus(map[string]string{pinnedKey: pinnedValue, rankedKey: rankedValue})
 
 	rows := beadMemoryRows(corpus, primeMemoryBead(), primeTestEpoch)
-	if len(rows) != 2 || rows[0].mem.Key != rankedKey {
+	if len(rows) != 2 || rows[0].Memory.Key != rankedKey {
 		t.Fatalf("rows = %v, want the ranked memory scoring first", rows)
 	}
 	section := renderBeadMemorySection(rows, "gt-test1")
@@ -779,14 +865,20 @@ func TestPrimeMemory_PinnedMemoriesPastTheCapAreNotMatches(t *testing.T) {
 	if capped == 0 || capped >= len(mems) {
 		t.Fatalf("Select kept %d of %d pinned memories, want the cap to turn some away", capped, len(mems))
 	}
-	if len(rows) != capped {
-		t.Errorf("%d rows, want the %d pinned memories Select took", len(rows), capped)
+	matched := 0
+	for _, row := range rows {
+		if row.Matched() {
+			matched++
+		}
+	}
+	if matched != capped {
+		t.Errorf("%d memories matched, want the %d pinned memories Select took", matched, capped)
 	}
 	if section := renderBeadMemorySection(rows, "gt-test1"); strings.Contains(section, "more matched") {
 		t.Errorf("footer reports capped pinned memories as matches:\n%s", section)
 	}
 	if report := explainMemoryReport(primeMemoryBead(), mems, primeTestEpoch); !strings.Contains(report,
-		fmt.Sprintf("%d candidates, %d selected", capped, capped)) {
-		t.Errorf("report counts the capped memories as candidates:\n%s", report)
+		fmt.Sprintf("%d matched, %d selected", capped, capped)) {
+		t.Errorf("report counts the capped memories as matches:\n%s", report)
 	}
 }

@@ -2,6 +2,7 @@ package memrecall
 
 import (
 	"encoding/json"
+	"fmt"
 	"maps"
 	"math"
 	"os"
@@ -209,83 +210,160 @@ func TestQuery(t *testing.T) {
 	}
 }
 
+// TestCorpusIDF pins the weight every match is worth: ln(1 + N/df).
+func TestCorpusIDF(t *testing.T) {
+	t.Parallel()
+	c := NewCorpus([]Memory{
+		note("dolt-notes", "dolt"),
+		note("dolt-more", "dolt"),
+		note("quiet-window", "dolt"),
+	})
+
+	if c.N != 3 {
+		t.Errorf("N = %d, want 3", c.N)
+	}
+	if got, want := c.IDF("dolt"), math.Log(2); math.Abs(got-want) > 1e-9 {
+		t.Errorf("IDF of a word every memory holds = %v, want ln 2 = %v", got, want)
+	}
+	if got, want := c.IDF("window"), math.Log(4); math.Abs(got-want) > 1e-9 {
+		t.Errorf("IDF of a word one memory of three holds = %v, want ln 4 = %v", got, want)
+	}
+	if got := c.IDF("absent"); got != 0 {
+		t.Errorf("IDF of a word no memory holds = %v, want 0", got)
+	}
+	if got := NewCorpus(nil).IDF("dolt"); got != 0 {
+		t.Errorf("IDF in an empty pool = %v, want 0", got)
+	}
+}
+
+// TestScore pins the idf-weighted raw score: what a matched keyword is worth,
+// and where in the memory it was found. The pool is part of every case, because
+// a keyword is worth its rarity in that pool.
 func TestScore(t *testing.T) {
 	t.Parallel()
-	mem := func(key, body string) Memory {
+
+	parse := func(key, body string) Memory {
 		return Parse(key, "recorded: 2026-10-14 by gastown/crew/sloan\n\n"+body)
 	}
 
 	tests := []struct {
-		name     string
+		name string
+		// query and paths are the bead side; memories is the whole pool and
+		// target names the memory under test.
 		query    []string
 		paths    []string
-		memory   Memory
+		memories []Memory
+		target   int
 		wantRaw  float64
 		wantScor float64
 	}{{
-		name:     "a key hit alone clears the floor",
+		name:     "a key hit weighs its idf twice",
 		query:    []string{"presubmit"},
-		memory:   mem("memory.gt-done-runs-presubmit-once", "It runs once."),
-		wantRaw:  2,
-		wantScor: 1.2,
+		memories: inPool(4, parse("memory.presubmit-note", "It runs once.")),
+		wantRaw:  2 * math.Log(6),
+		wantScor: 2 * math.Log(6) * 0.6,
 	}, {
-		name:    "a body hit alone does not",
-		query:   []string{"window"},
-		memory:  mem("memory.quiet-hours", "The window is quiet."),
-		wantRaw: 1,
-		// Below the floor; Score still reports the weighted value, and Select
-		// is what refuses it.
-		wantScor: 0.6,
+		name:     "a body hit weighs its idf once",
+		query:    []string{"window"},
+		memories: inPool(4, parse("memory.quiet-hours", "The window is quiet.")),
+		wantRaw:  math.Log(6),
+		wantScor: math.Log(6) * 0.6,
 	}, {
-		name:    "a body word already counted in the key is not counted twice",
-		query:   []string{"presubmit"},
-		memory:  mem("memory.gt-done-runs-presubmit-once", "Presubmit runs once."),
-		wantRaw: 2, wantScor: 1.2,
+		// The pool's common word: every memory holds it, so it weighs ln 2
+		// whatever the pool's size.
+		name:  "a word in every memory weighs ln 2",
+		query: []string{"dolt"},
+		memories: []Memory{
+			parse("memory.note-one", "dolt"),
+			parse("memory.note-two", "dolt"),
+			parse("memory.note-three", "dolt"),
+			parse("memory.note-four", "dolt"),
+		},
+		wantRaw:  math.Log(2),
+		wantScor: math.Log(2) * 0.6,
 	}, {
-		name:     "a file anchor the bead names adds two",
+		name:  "the key side of a word weighs twice its body side",
+		query: []string{"window"},
+		memories: []Memory{
+			parse("memory.window-note", "Nothing here."),
+			parse("memory.quiet-note", "The window is quiet."),
+			parse("memory.third-note", "Nothing here."),
+			parse("memory.fourth-note", "Nothing here."),
+		},
+		wantRaw:  2 * math.Log(3),
+		wantScor: 2 * math.Log(3) * 0.6,
+	}, {
+		name:  "the body side of the same word weighs it once",
+		query: []string{"window"},
+		memories: []Memory{
+			parse("memory.window-note", "Nothing here."),
+			parse("memory.quiet-note", "The window is quiet."),
+			parse("memory.third-note", "Nothing here."),
+			parse("memory.fourth-note", "Nothing here."),
+		},
+		target:   1,
+		wantRaw:  math.Log(3),
+		wantScor: math.Log(3) * 0.6,
+	}, {
+		name:     "a body word the key already holds is not counted twice",
+		query:    []string{"presubmit"},
+		memories: inPool(4, parse("memory.presubmit-note", "Presubmit runs once.")),
+		wantRaw:  2 * math.Log(6),
+		wantScor: 2 * math.Log(6) * 0.6,
+	}, {
+		name:     "a file anchor the bead names weighs 2*ln(1+N)",
 		query:    []string{"presubmit"},
 		paths:    []string{"internal/cmd/prime.go"},
-		memory:   Parse("memory.gt-done-runs-presubmit-once", "verified: 2026-01-01\nanchors: file:internal/cmd/prime.go\n\nIt runs once."),
-		wantRaw:  4,
-		wantScor: 2.4,
+		memories: inPool(4, Parse("memory.anchor-note", "anchors: file:internal/cmd/prime.go\n\nIt runs once.")),
+		wantRaw:  2 * math.Log(6),
+		wantScor: 2 * math.Log(6) * 0.6,
 	}, {
-		name:    "a symbol anchor naming the same path adds nothing",
-		query:   []string{"presubmit"},
-		paths:   []string{"internal/cmd/prime.go"},
-		memory:  Parse("memory.gt-done-runs-presubmit-once", "anchors: symbol:internal/cmd/prime.go\n\nIt runs once."),
-		wantRaw: 2, wantScor: 1.2,
+		name:     "a symbol anchor naming the same path weighs nothing",
+		query:    []string{"presubmit"},
+		paths:    []string{"internal/cmd/prime.go"},
+		memories: inPool(4, Parse("memory.anchor-note", "anchors: symbol:internal/cmd/prime.go\n\nIt runs once.")),
+		wantRaw:  0,
+		wantScor: 0,
 	}, {
-		name:    "feedback outweighs a reference of the same raw score",
-		query:   []string{"presubmit"},
-		memory:  Parse("memory.note-presubmit", "type: feedback\n\nBody."),
-		wantRaw: 2, wantScor: 2.6,
+		name:  "feedback outweighs a reference of the same raw score",
+		query: []string{"presubmit"},
+		memories: []Memory{
+			Parse("memory.feedback-presubmit", "type: feedback\n\nBody."),
+			Parse("memory.reference-presubmit", "type: reference\n\nBody."),
+		},
+		wantRaw:  2 * math.Log(2),
+		wantScor: 2 * math.Log(2) * 1.3,
 	}, {
-		name:    "an unknown type weighs as general",
-		query:   []string{"presubmit"},
-		memory:  Parse("memory.note-presubmit", "type: housekeeping\n\nBody."),
-		wantRaw: 2, wantScor: 1.2,
+		name:  "an unknown type weighs as general",
+		query: []string{"presubmit"},
+		memories: []Memory{
+			Parse("memory.feedback-presubmit", "type: housekeeping\n\nBody."),
+			Parse("memory.reference-presubmit", "type: reference\n\nBody."),
+		},
+		wantRaw:  2 * math.Log(2),
+		wantScor: 2 * math.Log(2) * 0.6,
 	}, {
 		name:     "verified exactly 30 days ago earns recency",
 		query:    []string{"presubmit"},
-		memory:   Parse("memory.note-presubmit", "type: feedback\nverified: 2026-09-14\n\nBody."),
-		wantRaw:  2,
-		wantScor: 3.1,
+		memories: inPool(4, Parse("memory.presubmit-note", "type: feedback\nverified: 2026-09-14\n\nBody.")),
+		wantRaw:  2 * math.Log(6),
+		wantScor: 2*math.Log(6)*1.3 + 0.5,
 	}, {
 		name:     "the day before the window does not",
 		query:    []string{"presubmit"},
-		memory:   Parse("memory.note-presubmit", "type: feedback\nverified: 2026-09-13\n\nBody."),
-		wantRaw:  2,
-		wantScor: 2.6,
+		memories: inPool(4, Parse("memory.presubmit-note", "type: feedback\nverified: 2026-09-13\n\nBody.")),
+		wantRaw:  2 * math.Log(6),
+		wantScor: 2 * math.Log(6) * 1.3,
 	}, {
 		name:     "an unknown date earns nothing",
 		query:    []string{"presubmit"},
-		memory:   Parse("memory.note-presubmit", "type: feedback\n\nBody."),
-		wantRaw:  2,
-		wantScor: 2.6,
+		memories: inPool(4, Parse("memory.presubmit-note", "type: feedback\n\nBody.")),
+		wantRaw:  2 * math.Log(6),
+		wantScor: 2 * math.Log(6) * 1.3,
 	}, {
 		name:     "no query terms, no score",
 		query:    nil,
-		memory:   mem("memory.gt-done-runs-presubmit-once", "It runs once."),
+		memories: inPool(4, parse("memory.presubmit-note", "It runs once.")),
 		wantRaw:  0,
 		wantScor: 0,
 	}}
@@ -293,8 +371,8 @@ func TestScore(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			raw, score := Score(setOf(tc.query), tc.paths, tc.memory, testNow)
-			if raw != tc.wantRaw {
+			raw, score := Score(setOf(tc.query), tc.paths, tc.memories[tc.target], NewCorpus(tc.memories), testNow)
+			if math.Abs(raw-tc.wantRaw) > 1e-9 {
 				t.Errorf("raw = %v, want %v", raw, tc.wantRaw)
 			}
 			if math.Abs(score-tc.wantScor) > 1e-9 {
@@ -323,33 +401,165 @@ func TestOverlap(t *testing.T) {
 	}
 }
 
-func TestSelectOrder(t *testing.T) {
+// TestSelectRareWordOnly is the acceptance case: a pool of long memories that
+// all hold the town's common words, where one also holds a word of its own.
+// Only that memory is about the bead.
+func TestSelectRareWordOnly(t *testing.T) {
 	t.Parallel()
-	q := setOf([]string{"dolt"})
-	mems := []Memory{
-		// Equal scores, so the newer verification decides.
-		{Key: "memory.older-dolt-note", Body: "dolt", Type: "general", Scope: "rig",
-			Verified: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)},
-		{Key: "memory.newer-dolt-note", Body: "dolt", Type: "general", Scope: "rig",
-			Verified: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)},
-		// Equal score and date, so the key decides.
-		{Key: "memory.aaa-dolt-note", Body: "dolt", Type: "general", Scope: "rig"},
-		{Key: "memory.bbb-dolt-note", Body: "dolt", Type: "general", Scope: "rig"},
-		// Highest score of all: feedback's weight lifts it over the others.
-		{Key: "memory.feedback-dolt-note", Body: "dolt", Type: "feedback", Scope: "rig"},
+	got := Select(
+		setOf([]string{"gastown", "polecat", "bead", "daemon", "kittens"}),
+		nil, longCorpus(), testNow, 0)
+	if want := []string{"memory.kittens-grooming"}; !slices.Equal(selectedKeys(got), want) {
+		t.Errorf("Select = %v, want only the memory holding the bead's rare word", selectedKeys(got))
+	}
+}
+
+// TestSelectCommonWordsOnly is the other half: a bead that shares only the
+// town's common words selects nothing, which is what omits the section.
+func TestSelectCommonWordsOnly(t *testing.T) {
+	t.Parallel()
+	corpus := longCorpus()
+	q := setOf([]string{"gastown", "polecat", "bead", "daemon"})
+
+	if got := Select(q, nil, corpus, testNow, 0); len(got) != 0 {
+		t.Errorf("Select = %v, want nothing: a pool-common word is no evidence a memory is about this bead", selectedKeys(got))
 	}
 
+	rows := Rank(q, nil, corpus, testNow, 0)
+	if len(rows) != len(corpus) {
+		t.Fatalf("Rank returned %d rows for a %d-memory pool", len(rows), len(corpus))
+	}
+	for _, row := range rows {
+		if row.Matched() {
+			t.Errorf("%s matched a bead sharing only pool-common words", row.Memory.Key)
+		}
+		if row.Raw >= CandidateFloor {
+			t.Errorf("%s scored raw %v, at or over the floor %v", row.Memory.Key, row.Raw, CandidateFloor)
+		}
+	}
+}
+
+// TestDistinctiveShareBoundary pins the share test at its edge: in a pool of
+// ten, a word two memories hold (df/N = 0.2) is distinctive and a word three
+// hold is not.
+func TestDistinctiveShareBoundary(t *testing.T) {
+	t.Parallel()
+	// A distinctive word of its own keeps the memory a candidate, so the
+	// boundary word's classification is what the assertion reads.
+	subject := note("widget-gizmo-note", "Nothing else.")
+
+	distinctive := func(t *testing.T, holders int) []string {
+		t.Helper()
+		mems := append([]Memory{subject}, note("widget-first-note", "Nothing else."))
+		for range holders - 2 {
+			mems = append(mems, note("widget-other-note", "Nothing else."))
+		}
+		mems = append(mems, filler(10-len(mems))...)
+		if len(mems) != 10 {
+			t.Fatalf("the pool is %d memories, want 10", len(mems))
+		}
+		rows := Rank(setOf([]string{"widget", "gizmo"}), nil, mems, testNow, 0)
+		for _, row := range rows {
+			if row.Memory.Key == subject.Key {
+				return row.Distinctive
+			}
+		}
+		t.Fatalf("%s is not in the ranking", subject.Key)
+		return nil
+	}
+
+	if hits := distinctive(t, 2); !slices.Contains(hits, "key:widget") {
+		t.Errorf("df/N exactly 0.2: distinctive hits = %v, want the boundary word among them", hits)
+	}
+	if hits := distinctive(t, 3); slices.Contains(hits, "key:widget") {
+		t.Errorf("df/N 0.3: distinctive hits = %v, want the boundary word left out", hits)
+	}
+}
+
+// TestSelectSmallPool covers the rule for a pool too small to read a share
+// from: a key hit is distinctive there, and a body hit is not.
+func TestSelectSmallPool(t *testing.T) {
+	t.Parallel()
+	// Eight memories that all hold the bead's three words, four of them in the
+	// key and four in the body. The share is 1.0 for all three words, so only
+	// the small-pool rule can qualify anything — and three key hits reach the
+	// floor.
+	mems := []Memory{
+		note("alpha-bravo-charlie-one", "Nothing else."),
+		note("alpha-bravo-charlie-two", "Nothing else."),
+		note("alpha-bravo-charlie-three", "Nothing else."),
+		note("alpha-bravo-charlie-four", "Nothing else."),
+		note("quiet-one", "Alpha, bravo and charlie, said every memory."),
+		note("quiet-two", "Alpha, bravo and charlie, said every memory."),
+		note("quiet-three", "Alpha, bravo and charlie, said every memory."),
+		note("quiet-four", "Alpha, bravo and charlie, said every memory."),
+	}
+	q := setOf([]string{"alpha", "bravo", "charlie"})
+
 	got := Select(q, nil, mems, testNow, 0)
-	want := []string{
-		"memory.feedback-dolt-note",
-		"memory.newer-dolt-note",
-		"memory.older-dolt-note",
-		"memory.aaa-dolt-note",
-		"memory.bbb-dolt-note",
+	if len(got) != MaxScored {
+		t.Errorf("Select = %v, want the %d best of a pool where a key hit is distinctive", selectedKeys(got), MaxScored)
 	}
-	if keys := selectedKeys(got); !slices.Equal(keys, want) {
-		t.Errorf("Select order = %v, want %v", keys, want)
+	for _, row := range Rank(q, nil, mems, testNow, 0) {
+		if row.Memory.Key == "memory.quiet-one" && row.Matched() {
+			t.Errorf("a body-only match in a small pool matched, so the body side of the rule is not in force")
+		}
 	}
+
+	// Enough matched body words clear the floor and still select nothing: at
+	// this pool size what makes a memory distinctive is a key hit or an anchor,
+	// and a body word is neither.
+	bodyOnly := note("quiet-note", "Alpha, bravo, charlie, delta, echo and foxtrot, all in the body.")
+	bodyQuery := setOf([]string{"alpha", "bravo", "charlie", "delta", "echo", "foxtrot"})
+	rows := Rank(bodyQuery, nil, inPool(8, bodyOnly), testNow, 0)
+	if rows[0].Memory.Key != bodyOnly.Key || rows[0].Raw < CandidateFloor {
+		t.Fatalf("the body-only memory scored raw %v at the head of the ranking, want it over the floor %v: this case tests nothing",
+			rows[0].Raw, CandidateFloor)
+	}
+	if rows[0].Dropped != DroppedNoDistinctive {
+		t.Errorf("a body-only match in a small pool was dropped for %q, want %q", rows[0].Dropped, DroppedNoDistinctive)
+	}
+}
+
+// TestSelectOrder pins the ranking: the score first, then newer verification,
+// then key, so a corpus renders the same section on every run.
+func TestSelectOrder(t *testing.T) {
+	t.Parallel()
+	t.Run("equal scores fall back to the key", func(t *testing.T) {
+		t.Parallel()
+		mems := pool(10,
+			note("bravo-note", "Matched in the key."),
+			note("alpha-note", "Matched in the key."),
+			note("charlie-note", "Matched in the key."),
+		)
+		got := Select(setOf([]string{"alpha", "bravo", "charlie"}), nil, mems, testNow, 0)
+		want := []string{"memory.alpha-note", "memory.bravo-note", "memory.charlie-note"}
+		if keys := selectedKeys(got); !slices.Equal(keys, want) {
+			t.Errorf("Select order = %v, want %v", keys, want)
+		}
+	})
+
+	t.Run("a newer verification wins a tie in words", func(t *testing.T) {
+		t.Parallel()
+		fresh := note("zzz-alpha-note", "Matched in the key.")
+		fresh.Type, fresh.Verified = "general", testNow.Add(-24*time.Hour)
+		stale := note("aaa-bravo-note", "Matched in the key.")
+		got := Select(setOf([]string{"alpha", "bravo"}), nil, pool(10, fresh, stale), testNow, 0)
+		if want := []string{"memory.zzz-alpha-note", "memory.aaa-bravo-note"}; !slices.Equal(selectedKeys(got), want) {
+			t.Errorf("Select = %v, want the verified memory first despite its later key", selectedKeys(got))
+		}
+	})
+
+	t.Run("a heavier type wins the same raw score", func(t *testing.T) {
+		t.Parallel()
+		guidance := note("zzz-alpha-note", "Matched in the key.")
+		guidance.Type = "feedback"
+		pointer := note("aaa-bravo-note", "Matched in the key.")
+		rows := Rank(setOf([]string{"alpha", "bravo"}), nil, pool(10, guidance, pointer), testNow, 0)
+		if want := []string{"memory.zzz-alpha-note", "memory.aaa-bravo-note"}; !slices.Equal(rankedKeys(rows[:2]), want) {
+			t.Errorf("Rank = %v, want feedback ahead of a general of the same raw score", rankedKeys(rows[:2]))
+		}
+	})
 }
 
 func TestSelectAlways(t *testing.T) {
@@ -357,36 +567,45 @@ func TestSelectAlways(t *testing.T) {
 	// Every pinned memory scores zero against the query, so nothing but the
 	// always-and-durable rule can select them — and they still come before the
 	// high-scoring candidate.
-	mems := []Memory{
+	mems := append([]Memory{
 		{Key: "rig-a", Body: "nothing", Always: true, Durable: true, Scope: "rig"},
 		{Key: "rig-b", Body: "nothing", Always: true, Durable: true, Scope: "rig"},
 		{Key: "rig-c", Body: "nothing", Always: true, Durable: true, Scope: "rig"},
 		{Key: "rig-d", Body: "nothing", Always: true, Durable: true, Scope: "rig"},
 		{Key: "town-a", Body: "nothing", Always: true, Durable: true, Scope: "town"},
-		{Key: "memory.dolt-candidate", Body: "dolt", Scope: "rig"},
 		// Always without durable is not pinned; it needs a score like any other.
 		{Key: "half-pinned", Body: "nothing", Always: true, Scope: "rig"},
-	}
+	}, note("dolt-spindle-window-note", "Matched in the key."))
 
-	got := Select(setOf([]string{"dolt"}), nil, mems, testNow, 0)
-	want := []string{"rig-a", "rig-b", "rig-c", "town-a", "memory.dolt-candidate"}
+	q := setOf([]string{"dolt", "spindle", "window"})
+	got := Select(q, nil, mems, testNow, 0)
+	want := []string{"rig-a", "rig-b", "rig-c", "town-a", "memory.dolt-spindle-window-note"}
 	if keys := selectedKeys(got); !slices.Equal(keys, want) {
 		t.Errorf("Select = %v, want %v (three pinned per scope, then the candidate)", keys, want)
+	}
+	for _, row := range Rank(q, nil, mems, testNow, 0) {
+		if row.Memory.Key != "rig-d" {
+			continue
+		}
+		if row.Dropped != DroppedOverPinnedCap || row.Matched() {
+			t.Errorf("the fourth pinned memory is %q and matched=%v, want it turned away as %q and no match",
+				row.Dropped, row.Matched(), DroppedOverPinnedCap)
+		}
 	}
 }
 
 func TestSelectBudget(t *testing.T) {
 	t.Parallel()
-	large := Memory{Key: "memory.aaa-dolt-large", Body: "dolt " + strings.Repeat("padding ", 200), Scope: "rig"}
-	small := Memory{Key: "memory.bbb-dolt-small", Body: "dolt", Scope: "rig"}
+	large := note("aaa-alpha-large", "alpha "+strings.Repeat("padding ", 200))
+	small := note("bbb-bravo-small", "bravo")
 	// Scores tie, so the key decides the order: large, then small, then last;
 	// the large one is the one that cannot fit.
-	last := Memory{Key: "memory.zzz-dolt-last", Body: "dolt", Scope: "rig"}
-	smallText := renderMemory(small)
-	lastText := renderMemory(last)
+	last := note("ccc-charlie-last", "charlie")
+	mems := pool(10, large, small, last)
+	smallText, lastText := renderMemory(small), renderMemory(last)
 
-	got := Select(setOf([]string{"dolt"}), nil, []Memory{large, small, last}, testNow, len(smallText)+len(lastText))
-	if keys := selectedKeys(got); !slices.Equal(keys, []string{"memory.bbb-dolt-small", "memory.zzz-dolt-last"}) {
+	got := Select(setOf([]string{"alpha", "bravo", "charlie"}), nil, mems, testNow, len(smallText)+len(lastText))
+	if keys := selectedKeys(got); !slices.Equal(keys, []string{"memory.bbb-bravo-small", "memory.ccc-charlie-last"}) {
 		t.Fatalf("Select = %v, want the two that fit", keys)
 	}
 	if got[1].Text != lastText {
@@ -395,19 +614,25 @@ func TestSelectBudget(t *testing.T) {
 	if total := len(got[0].Text) + len(got[1].Text); total > len(smallText)+len(lastText) {
 		t.Errorf("the section holds %d bytes, over the budget", total)
 	}
+
+	for _, row := range Rank(setOf([]string{"alpha", "bravo", "charlie"}), nil, mems, testNow, len(smallText)+len(lastText)) {
+		if row.Memory.Key == large.Key && (row.Dropped != DroppedNoBudget || !row.Matched()) {
+			t.Errorf("the memory that did not fit is %q and matched=%v, want it reported as %q and still a match",
+				row.Dropped, row.Matched(), DroppedNoBudget)
+		}
+	}
 }
 
-func TestSelectBudgetDefault(t *testing.T) {
+// TestSelectDefaultBudget pins the default: a non-positive budget means Budget,
+// which bounds the section below the cap of MaxScored.
+func TestSelectDefaultBudget(t *testing.T) {
 	t.Parallel()
-	var mems []Memory
-	for i := range 100 {
-		mems = append(mems, Memory{
-			Key:   "memory.dolt-note-" + string(rune('a'+i%26)) + string(rune('a'+i/26)),
-			Body:  strings.Repeat("dolt ", 40),
-			Scope: "rig",
-		})
-	}
-	got := Select(setOf([]string{"dolt"}), nil, mems, testNow, 0)
+	mems := pool(10,
+		note("alpha-note", "alpha "+strings.Repeat("padding ", 100)),
+		note("bravo-note", "bravo "+strings.Repeat("padding ", 100)),
+		note("charlie-note", "charlie "+strings.Repeat("padding ", 100)),
+	)
+	got := Select(setOf([]string{"alpha", "bravo", "charlie"}), nil, mems, testNow, 0)
 	if len(got) == 0 {
 		t.Fatal("Select returned nothing")
 	}
@@ -418,36 +643,152 @@ func TestSelectBudgetDefault(t *testing.T) {
 	if total > Budget {
 		t.Errorf("section is %d bytes, over the default budget %d", total, Budget)
 	}
-	if len(got) == len(mems) {
-		t.Error("the default budget bounded nothing")
+	if len(got) == MaxScored {
+		t.Error("three memories of this size fit the default budget, so the budget bounded nothing")
 	}
 }
 
-func TestSelectDropsBelowFloor(t *testing.T) {
+// TestSelectCap pins the cap: however many memories clear the bar, the section
+// carries MaxScored of them.
+func TestSelectCap(t *testing.T) {
 	t.Parallel()
-	mems := []Memory{{Key: "memory.quiet-hours", Body: "The window is quiet.", Scope: "rig"}}
-	if got := Select(setOf([]string{"window"}), nil, mems, testNow, 0); len(got) != 0 {
-		t.Errorf("Select = %v, want nothing: a body-only hit is below the floor", selectedKeys(got))
+	q := setOf([]string{"alpha", "bravo", "charlie", "delta"})
+	mems := pool(10,
+		note("alpha-note", "Matched in the key."),
+		note("bravo-note", "Matched in the key."),
+		note("charlie-note", "Matched in the key."),
+		note("delta-note", "Matched in the key."),
+	)
+
+	want := []string{"memory.alpha-note", "memory.bravo-note", "memory.charlie-note"}
+	if keys := selectedKeys(Select(q, nil, mems, testNow, 0)); !slices.Equal(keys, want) {
+		t.Errorf("Select = %v, want the %d best", keys, MaxScored)
+	}
+
+	for _, row := range Rank(q, nil, mems, testNow, 0) {
+		if row.Memory.Key != "memory.delta-note" {
+			continue
+		}
+		if row.Dropped != DroppedOverCap || !row.Matched() {
+			t.Errorf("the fourth match is %q and matched=%v, want it cut as %q and still a match",
+				row.Dropped, row.Matched(), DroppedOverCap)
+		}
 	}
 }
 
+// TestSelectKeepShareCut pins the other cut: from a top score, a memory more
+// than twice as far below it is no longer worth rendering.
+func TestSelectKeepShareCut(t *testing.T) {
+	t.Parallel()
+	// Three, two and one key hits of the query's own words: raw scores in the
+	// ratio 3:2:1, so 60% of the top keeps the first two.
+	top := note("alpha-bravo-charlie-note", "Matched in the key.")
+	mid := note("delta-echo-note", "Matched in the key.")
+	low := note("foxtrot-note", "Matched in the key.")
+	q := setOf([]string{"alpha", "bravo", "charlie", "delta", "echo", "foxtrot"})
+	mems := pool(10, top, mid, low)
+
+	if keys := selectedKeys(Select(q, nil, mems, testNow, 0)); !slices.Equal(keys, []string{top.Key, mid.Key}) {
+		t.Errorf("Select = %v, want the two within %v of the top score", keys, KeepShare)
+	}
+
+	for _, row := range Rank(q, nil, mems, testNow, 0) {
+		if row.Memory.Key != low.Key {
+			continue
+		}
+		if row.Dropped != DroppedBelowTop || !row.Matched() {
+			t.Errorf("the lowest scorer is %q and matched=%v, want it cut as %q and still a match",
+				row.Dropped, row.Matched(), DroppedBelowTop)
+		}
+	}
+}
+
+// TestRankReportsTheMatchReasons pins the two ways a memory fails to be a
+// match: no distinctive hit, and a distinctive hit under the floor.
+func TestRankReportsTheMatchReasons(t *testing.T) {
+	t.Parallel()
+	// Ten memories. Every one holds "dolt" in its body, so dolt weighs ln 2 and
+	// a body hit under the floor; "widget" is held by two of them, which is
+	// exactly the distinctive share, but one key hit does not reach the floor.
+	common := note("common-note", "Dolt again.")
+	boundary := note("widget-gizmo-note", "Nothing else.")
+	mems := []Memory{
+		common,
+		boundary,
+		note("widget-other-note", "Nothing else."),
+	}
+	// Eight of the ten memories hold dolt, so it is this pool's own common word.
+	for i := range 7 {
+		mems = append(mems, note(fmt.Sprintf("dolt-note-%02d", i), "Dolt again."))
+	}
+
+	reasons := map[string]DropReason{}
+	for _, row := range Rank(setOf([]string{"widget", "dolt"}), nil, mems, testNow, 0) {
+		reasons[row.Memory.Key] = row.Dropped
+	}
+	if got := reasons[common.Key]; got != DroppedNoDistinctive {
+		t.Errorf("a pool-common word alone reported %q, want %q", got, DroppedNoDistinctive)
+	}
+	if got := reasons[boundary.Key]; got != DroppedBelowFloor {
+		t.Errorf("a distinctive hit under the floor reported %q, want %q", got, DroppedBelowFloor)
+	}
+}
+
+// TestSelectRendersWholeMemory pins the text a memory contributes: its heading
+// with the date it was last verified, then its body whole.
 func TestSelectRendersWholeMemory(t *testing.T) {
 	t.Parallel()
-	mems := []Memory{
-		{Key: "memory.dolt-verified", Body: "dolt\nsecond line", Scope: "rig",
-			Verified: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)},
-		{Key: "memory.dolt-unverified", Body: "dolt", Scope: "rig"},
-	}
-	got := Select(setOf([]string{"dolt"}), nil, mems, testNow, 0)
+	verified := note("dolt-alpha-note", "dolt\nsecond line")
+	verified.Verified = time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	got := Select(setOf([]string{"alpha", "bravo"}), nil, pool(10, verified, note("bravo-note", "dolt")), testNow, 0)
 	if len(got) != 2 {
 		t.Fatalf("Select = %v, want both", selectedKeys(got))
 	}
-	if want := "### memory.dolt-verified (verified 2026-10-01)\ndolt\nsecond line\n"; got[0].Text != want {
+	if want := "### memory.dolt-alpha-note (verified 2026-10-01)\ndolt\nsecond line\n"; got[0].Text != want {
 		t.Errorf("Text = %q, want %q", got[0].Text, want)
 	}
-	if want := "### memory.dolt-unverified (unverified)\ndolt\n"; got[1].Text != want {
+	if want := "### memory.bravo-note (unverified)\ndolt\n"; got[1].Text != want {
 		t.Errorf("Text = %q, want %q", got[1].Text, want)
 	}
+}
+
+// note builds a memory from a key slug and a body, the shape a legacy value
+// parses to.
+func note(slug, body string) Memory {
+	return Memory{Key: "memory." + slug, Body: body, Type: "general", Scope: "rig"}
+}
+
+// filler returns n memories that share no term with a test's query, so the idf
+// weights are measured against a pool rather than against the two memories a
+// test cares about. A query word in a filler key or body would move df, which
+// is why the filler is about nothing else.
+func filler(n int) []Memory {
+	out := make([]Memory, 0, n)
+	for i := range n {
+		out = append(out, note(fmt.Sprintf("filler-note-%02d", i), "Unrelated chatter about gardening and bread."))
+	}
+	return out
+}
+
+// pool lists mems behind n filler memories.
+func pool(n int, mems ...Memory) []Memory {
+	return append(filler(n), mems...)
+}
+
+// inPool puts one memory in front of n filler memories.
+func inPool(n int, mem Memory) []Memory {
+	return append([]Memory{mem}, filler(n)...)
+}
+
+// longCorpus is the acceptance fixture: twelve long memories that all hold the
+// town's common words, and one of them a word of its own.
+func longCorpus() []Memory {
+	const common = "In gastown a polecat takes one bead at a time, and the daemon watches the rest of the town."
+	mems := []Memory{note("kittens-grooming", common+" The kittens are brushed here.")}
+	for i := range 11 {
+		mems = append(mems, note(fmt.Sprintf("long-note-%02d", i), common))
+	}
+	return mems
 }
 
 // keywordList lists a term set in a stable order for comparison and messages.
@@ -469,6 +810,15 @@ func setOf(words []string) map[string]struct{} {
 func sortedCopy(words []string) []string {
 	out := slices.Clone(words)
 	slices.Sort(out)
+	return out
+}
+
+// rankedKeys lists the keys of rows in the order they are ranked.
+func rankedKeys(rows []Ranked) []string {
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.Memory.Key)
+	}
 	return out
 }
 
