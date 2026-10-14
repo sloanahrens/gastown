@@ -37,7 +37,7 @@ label `needs-planning`, a Size that says planning, or more than six
 acceptance items. `--json` does not change the exit codes.
 
 The required `## ` sections are the template file's when that file exists:
-daemon.json `patrols.spec_dispatch.template`, else
+`daemon.patrols.spec_dispatch.template` in `settings/config.json`, else
 `~/.claude/docs/agents/spec-template.md`. With no template file, or one
 carrying no `## ` heading, the built-in Goal, Constraints, Out of scope, Gate
 and Size are checked instead.
@@ -128,7 +128,7 @@ usage attribution and the overrun guard's scheduled-bead exemption still see a
 scheduled run. `gt spec dispatch --dry-run` and the dispatched line print
 `, formula <name>` after the seat.
 
-A scheduled sling entry with `"dispatch": "spec"` in `daemon.json` hands its due
+A scheduled sling entry with `"dispatch": "spec"` in `daemon.patrols.scheduled_slings` (`settings/config.json`) hands its due
 run to this dispatcher (gt-z5g3c): the `scheduled_slings` patrol creates one
 shaped, report-only bead labeled `scheduled:<name>` and `formula:<formula>`, with
 the entry's `vars` sorted in a `## Formula vars` section, and does not sling. The
@@ -208,8 +208,8 @@ dispatches nothing until an operator switches it on is the failure it exists to
 prevent.
 
 To park it, set `daemon.patrols.spec_dispatch.enabled` false in
-`settings/config.json` and restart the daemon. A town that has not run
-`gt config migrate` still keeps that patrol block in `mayor/daemon.json`. The
+`settings/config.json` and restart the daemon. Before
+`gt config migrate` (historical layout) that patrol block lived in `mayor/daemon.json`. The
 operator hold file (`<town>/seat-refill.hold`) and ESTOP already stop the tick
 without a restart.
 The seat budget comes from `polecat_pool`, not from this block; `max_hooked` is
