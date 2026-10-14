@@ -238,8 +238,11 @@ divergence row in "When a landing fails".
 `gt promote --rig <rig> --sha <commit>` advances a rig's GitHub `main` to one
 commit through the same owner, lock and record as the two promotions above, for
 a caller whose green commit Gas Town never verdicts; `gt promote --help` holds
-its exit codes and what it refuses. The command does not check the commit is
-green: the caller must have the green verdict first.
+its exit codes and what it refuses. It refuses a commit that is not on the rig's
+Forgejo `main`, and for a rig the town's tier sweep covers it takes only the
+commit of the sweep's last fully green cycle — no commit at all while the sweep
+has no green cycle on record. A rig the sweep does not cover is promoted as the
+caller asks, green or not: there the caller must have the green verdict first.
 
 The `app-promote` script plugin calls it for the app rigs: it promotes the
 newest `main` commit whose Forgejo integration tier passed on the deployed
