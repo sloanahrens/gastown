@@ -233,7 +233,7 @@ func outputPolecatContext(w io.Writer, ctx RoleContext) {
 	fmt.Fprintln(w, "- `"+cli.Name()+" mail inbox` - Check your inbox for work assignments")
 	fmt.Fprintln(w, "- `bd show <issue>` - View your assigned issue")
 	if _, isForkRig, _ := roleRigContext(ctx); isForkRig {
-		fmt.Fprintln(w, "- Fork rig: push to origin and use PR/no-merge workflow; do not submit upstream changes to MQ")
+		fmt.Fprintln(w, "- Fork rig: push to origin and use PR/no-merge workflow; do not send upstream changes through the landing worker")
 	} else {
 		fmt.Fprintln(w, "- `"+cli.Name()+" done` - Signal work ready for merge")
 	}
@@ -253,7 +253,7 @@ func outputCrewContext(w io.Writer, ctx RoleContext) {
 		style.Bold.Render(ctx.Polecat), style.Bold.Render(ctx.Rig))
 	fmt.Fprintln(w, "## About Crew Workers")
 	fmt.Fprintln(w, "- Persistent workspace (not auto-garbage-collected)")
-	fmt.Fprintln(w, "- User-managed (not Witness-monitored)")
+	fmt.Fprintln(w, "- User-managed (you decide when a session starts and stops)")
 	fmt.Fprintln(w, "- Long-lived identity across sessions")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "**Identity**: You are the AI agent. The human sending you messages is the")
@@ -315,7 +315,7 @@ func outputCommandQuickReference(w io.Writer, ctx RoleContext) {
 	case RolePolecat:
 		fmt.Fprintln(w, "| Want to... | Correct command | Common mistake |")
 		fmt.Fprintln(w, "|------------|----------------|----------------|")
-		fmt.Fprintf(w, "| Signal work complete | `%s done` | ~~gt bead close <root-issue>~~ (Refinery closes it) |\n", c)
+		fmt.Fprintf(w, "| Signal work complete | `%s done` | ~~gt bead close <root-issue>~~ (the landing worker closes it once `%s done` lands your branch) |\n", c, c)
 		fmt.Fprintln(w, "| Close a sub-issue | `gt bead close <id>` | ~~bd complete~~ (not a command), ~~bd update --status done~~ (invalid status) |")
 		fmt.Fprintf(w, "| Message another agent | `%s nudge <target> \"msg\"` | ~~tmux send-keys~~ (unreliable) |\n", c)
 		fmt.Fprintf(w, "| Check workflow steps | `%s prime` (shows inline checklist) | ~~bd ready~~ (excludes molecule steps) |\n", c)

@@ -1046,3 +1046,57 @@ func TestShouldRenderMemories(t *testing.T) {
 		})
 	}
 }
+
+// Prime output is what agents follow as instructions. The Refinery, Witness,
+// Deacon and Mayor roles are retired, so no printed line may name them.
+func TestPrimeOutputNamesNoRetiredRoles(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	forkRig := filepath.Join(townRoot, "forkrig")
+	if err := os.MkdirAll(forkRig, 0o755); err != nil {
+		t.Fatalf("mkdir rig: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(forkRig, "config.json"), []byte(`{"type":"rig","version":1,"name":"forkrig","upstream_url":"https://github.com/upstream/repo"}`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	contexts := map[string]RoleContext{
+		"polecat": {Role: RolePolecat, Rig: "myrig", TownRoot: townRoot, Polecat: "scout", formulaOpen: (&fakeCook{msg: "formula not found"}).open},
+		"fork":    {Role: RolePolecat, Rig: "forkrig", TownRoot: townRoot, Polecat: "scout"},
+		"crew":    {Role: RoleCrew, Rig: "myrig", TownRoot: townRoot, Polecat: "ada"},
+	}
+	retired := []string{"refinery", "witness", "deacon", "mayor"}
+	bead := &beads.Issue{ID: "gt-test", Title: "test"}
+
+	for name, ctx := range contexts {
+		var buf bytes.Buffer
+		outputCommandQuickReference(&buf, ctx)
+		if ctx.Role == RoleCrew {
+			outputCrewContext(&buf, ctx)
+		}
+		if ctx.Role == RolePolecat {
+			_ = primeCompactResume(&buf, ctx, "compact", "")
+			outputAutonomousDirective(&buf, ctx, bead, false)
+			outputAutonomousDirective(&buf, ctx, bead, true)
+			if err := outputMoleculeWorkflow(&buf, ctx, &beads.AttachmentFields{AttachedFormula: "mol-polecat-work"}); err != nil {
+				t.Fatalf("%s: outputMoleculeWorkflow: %v", name, err)
+			}
+		}
+		out := strings.ToLower(buf.String())
+		for _, role := range retired {
+			if strings.Contains(out, role) {
+				t.Errorf("%s: prime output names retired role %q:\n%s", name, role, buf.String())
+			}
+		}
+	}
+}
+
+func TestPolecatQuickReferenceNamesLandingWorker(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	outputCommandQuickReference(&buf, RoleContext{Role: RolePolecat})
+	out := buf.String()
+	if !strings.Contains(out, "landing worker closes it") || !strings.Contains(out, " done` lands your branch") {
+		t.Fatalf("root-issue row should name the landing worker and done, got:\n%s", out)
+	}
+}

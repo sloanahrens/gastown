@@ -403,9 +403,9 @@ func primeCompactResume(w io.Writer, ctx RoleContext, hookSource, handoffReason 
 	// Without this, polecats finish implementation and sit at the prompt forever.
 	if ctx.Role == RolePolecat {
 		if _, isForkRig, _ := roleRigContext(ctx); isForkRig {
-			fmt.Fprintf(w, "\n**IMPORTANT**: This is a fork-backed rig. Do not submit to the Refinery merge queue; complete the PR/no-merge workflow your assignment specifies.\n")
+			fmt.Fprintf(w, "\n**IMPORTANT**: This is a fork-backed rig. Do not send this work through the landing worker; complete the PR/no-merge workflow your assignment specifies.\n")
 		} else {
-			fmt.Fprintf(w, "\n**IMPORTANT**: When all work is complete (code committed, tests pass), run `%s done` to submit to the merge queue.\n", cli.Name())
+			fmt.Fprintf(w, "\n**IMPORTANT**: When all work is complete (code committed, tests pass), run `%s done` to submit your branch for landing.\n", cli.Name())
 		}
 	}
 	return nil
@@ -1090,11 +1090,11 @@ func outputAutonomousDirective(w io.Writer, ctx RoleContext, hookedBead *beads.I
 	}
 
 	// Polecats MUST call gt done — this is the single most important instruction.
-	// Without it, work lands but sessions accumulate and the merge queue stalls.
+	// Without it, work lands but sessions accumulate and the landing worker never sees the branch.
 	if ctx.Role == RolePolecat {
 		fmt.Fprintln(w)
 		if isForkRig {
-			fmt.Fprintln(w, "**⚠️ FORK-BACKED RIG: do not submit to the Refinery merge queue.**")
+			fmt.Fprintln(w, "**⚠️ FORK-BACKED RIG: do not send this work through the landing worker.**")
 			fmt.Fprintln(w, "Push branches to the fork remote and use a GitHub PR/no-merge workflow against upstream unless the assignment explicitly says otherwise.")
 		} else {
 			fmt.Fprintf(w, "**⚠️ MANDATORY: When all work is committed, run `%s done` to submit and exit.**\n", cli.Name())
@@ -1113,11 +1113,11 @@ func outputAutonomousDirective(w io.Writer, ctx RoleContext, hookedBead *beads.I
 	}
 	if ctx.Role == RolePolecat {
 		if isForkRig {
-			fmt.Fprintln(w, "- Use the Refinery/MQ for upstream changes in this fork-backed rig")
+			fmt.Fprintln(w, "- Use the landing worker for upstream changes in this fork-backed rig")
 			fmt.Fprintln(w, "- Push directly to upstream main")
 		} else {
 			fmt.Fprintf(w, "- Sit idle after committing (run `%s done`)\n", cli.Name())
-			fmt.Fprintln(w, "- Push directly to main (use the merge queue)")
+			fmt.Fprintln(w, "- Push directly to main (the landing worker lands your branch)")
 		}
 	}
 	fmt.Fprintln(w)
@@ -1254,7 +1254,7 @@ func outputMoleculeWorkflow(w io.Writer, ctx RoleContext, attachment *beads.Atta
 	if attachment.AttachedFormula != "" {
 		if _, isForkRig, _ := roleRigContext(ctx); isForkRig && ctx.Role == RolePolecat {
 			fmt.Fprintf(w, "%s\n", style.Bold.Render("FORK-BACKED RIG OVERRIDE"))
-			fmt.Fprintf(w, "Formula %q is attached, but its embedded polecat checklist is not rendered because it contains local Refinery/MQ completion steps.\n", attachment.AttachedFormula)
+			fmt.Fprintf(w, "Formula %q is attached, but its embedded polecat checklist is not rendered because it contains landing-worker completion steps.\n", attachment.AttachedFormula)
 			fmt.Fprintln(w, "Use the hooked bead and assignment-specific GitHub PR/no-merge workflow as the source of truth for completion.")
 			return nil
 		}
@@ -1262,7 +1262,7 @@ func outputMoleculeWorkflow(w io.Writer, ctx RoleContext, attachment *beads.Atta
 		fmt.Fprintln(w)
 		fmt.Fprintf(w, "%s\n", style.Bold.Render("Work through ALL steps above, including submit and cleanup."))
 		fmt.Fprintln(w, "The base bead is your assignment. The formula steps define your workflow.")
-		fmt.Fprintf(w, "\n%s\n", style.Bold.Render("REQUIRED: When all steps complete, run `"+cli.Name()+" done` to submit to the merge queue. Do NOT stop after implementation — the formula has submit steps you must follow."))
+		fmt.Fprintf(w, "\n%s\n", style.Bold.Render("REQUIRED: When all steps complete, run `"+cli.Name()+" done` to submit your branch for landing. Do NOT stop after implementation — the formula has submit steps you must follow."))
 		return nil
 	}
 
