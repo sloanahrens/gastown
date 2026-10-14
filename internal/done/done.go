@@ -937,7 +937,7 @@ func Run(opts Options) error {
 		cleanupStatus = popBranchStashes(r.g, cleanupStatus)
 	}
 	if cleanupStatus == "uncommitted" {
-		if err := autoSaveUncommittedWork(r.g, r.cwd, r.branch); err != nil {
+		if err := autoSaveUncommittedWork(r.g, r.cwd, r.branch, exitType); err != nil {
 			return err
 		}
 		// Re-observe rather than assume the safety net caught everything: a
@@ -1090,18 +1090,24 @@ func popBranchStashes(g branchStashGit, current string) string {
 // (gt-pvx): polecats have run gt done without committing thousands of lines,
 // then died. The commit is marked as an auto-save, runtime and overlay files
 // and throwaway files are left out, and deletions of tracked files are never
-// committed. Only unmerged conflicts refuse.
+// committed. Unmerged conflicts refuse a COMPLETED exit; DEFERRED and
+// ESCALATED submit nothing, so they skip the save and leave the conflict
+// visible to the cleanup status the caller re-observes (gt-v7dmq).
 //
 // A best-effort failure warns rather than returning: the safety net may miss,
 // but the run still records what it observed. The caller re-observes the
 // worktree's cleanup status afterwards instead of reading a "did it save"
 // flag, so a missed save stays visible as uncommitted work.
-func autoSaveUncommittedWork(g *git.Git, cwd, branch string) error {
+func autoSaveUncommittedWork(g *git.Git, cwd, branch, exitType string) error {
 	workStatus, err := g.CheckUncommittedWork()
 	if err != nil || !workStatus.HasUncommittedChanges || workStatus.CleanExcludingRuntime() {
 		return nil
 	}
 	if len(workStatus.UnmergedFiles) > 0 {
+		if exitType != ExitCompleted {
+			style.PrintWarning("unmerged conflicts left uncommitted: %s", strings.Join(workStatus.UnmergedFiles, ", "))
+			return nil
+		}
 		return fmt.Errorf("cannot auto-save unmerged conflicts: %s\nResolve conflicts first, or use --status DEFERRED to exit without completing", strings.Join(workStatus.UnmergedFiles, ", "))
 	}
 
