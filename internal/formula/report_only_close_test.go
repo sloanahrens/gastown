@@ -74,10 +74,16 @@ func TestDeepReviewFilesEveryConfirmedFinding(t *testing.T) {
 			t.Errorf("deep-review-run still carries the retired approval path: %q", retired)
 		}
 	}
+	// gt-oedvw: no path keeps a finding off the dispatcher; a risk path is
+	// named in the bead body instead.
+	if strings.Contains(strings.ToLower(text), "crew-only") {
+		t.Error("deep-review-run still routes findings with the crew-only label")
+	}
 	for _, want := range []string{
 		"File every CONFIRMED finding",
 		"-p <1|2|3>",
-		"-l crew-only", // filed, never slung
+		"-l review-deep",
+		"names that risk path in `## Constraints`",
 		"queued: <fingerprint> <P1|P2|P3> <file:line> <claim>",
 	} {
 		if !strings.Contains(text, want) {

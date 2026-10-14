@@ -55,7 +55,7 @@ decides and reports without slinging, labeling or commenting.
    retired label `spec` and type `feature` are not required — the candidate
    filter does not read them (gt-mmsr2). A bead held off the dispatch path is
    skipped: labeled `gt:ready-to-land`, `spec-dispatch-failed`, or `crew-only`
-   (a person lands the deep-review findings on the guard and lifecycle paths),
+   (a person hand-labels a bead only they land),
    or carrying a dispatch hold. Before writing or reading a hold marker, read
    [Dispatch holds](../concepts/dispatch-holds.md): it lists them and where each
    is written. The beads the `spec-dispatch-failed` and `crew-only` labels hold

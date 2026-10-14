@@ -1519,7 +1519,7 @@ func TestSpecCandidatesFromAFakeStore(t *testing.T) {
 	}
 }
 
-// A ready, shaped bead the deep-review formula labeled crew-only is skipped,
+// A ready, shaped bead a person labeled crew-only is skipped,
 // and the read says so: the skip line names the label, so the tick log and the
 // dry run show an operator why the bead never took a seat instead of dropping
 // it unseen. Its unlabelled twin, same type and priority, still dispatches

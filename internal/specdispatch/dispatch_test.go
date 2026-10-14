@@ -45,9 +45,9 @@ func TestEligible(t *testing.T) {
 		// bead's own record: no label, no assignee, and still no candidate.
 		{func(s *Spec) { s.SubmittedForLanding = true }, nil, false, "submitted for landing"},
 		{func(s *Spec) { s.Labels = append(s.Labels, "needs-human") }, nil, false, "label needs-human"},
-		// The deep-review formula's crew-only label: a person lands those beads,
+		// The hand-applied crew-only label: a person lands those beads,
 		// so no seat takes one (gt-k1g3e). The label is read before the ceiling,
-		// so the refusal names the label even for the P3 a deep review files.
+		// so the refusal names the label even for a P3.
 		{func(s *Spec) { s.Labels = append(s.Labels, CrewOnlyLabel) }, nil, false, "label crew-only"},
 		{func(s *Spec) { s.Labels = append(s.Labels, "Crew-Only"); s.Priority = 3 }, nil, false, "label crew-only"},
 		// The reviewer label was retired with the role (gt-rwp7z.11): a bead

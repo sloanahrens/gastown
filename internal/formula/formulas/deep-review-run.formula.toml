@@ -76,17 +76,16 @@ and answer CONFIRMED or REFUTED with the lines that decide it. Drop REFUTED.
 Drop a finding whose fix is already on origin/{{base_branch}}.
 
 **6. File every CONFIRMED finding.** In priority order, P1 then P2 then P3, each
-finding becomes one shaped bead:
-- Crew-only paths, below: the bead carries label `crew-only`; it is never
-  slung, at any severity.
-- Any other path: label `review-deep` and the finding's priority.
+finding becomes one shaped bead labelled `review-deep` with the finding's
+priority, whatever path it cites: polecats fix it, and om review and the
+landing gate still gate the landing.
+- A finding that cites a guard (`internal/cmd/tap_guard*`, `scripts/guards/`),
+  Dolt data deletion (`internal/doltserver/`, `internal/doltbackup/`), process
+  lifecycle (`internal/daemon/`, `internal/supervisor/`, `internal/estop/`) or
+  an install script: the bead body names that risk path in `## Constraints`, so
+  the reviewer reads the diff with care.
 - Cap: at most {{max_beads}} beads per run. A finding past the cap is `queued`
   in step 7, and the next run files it first.
-
-Crew-only paths: `internal/cmd/tap_guard*`, `scripts/guards/`, data deletion in
-`internal/doltserver/` and `internal/doltbackup/`, process lifecycle in
-`internal/daemon/`, `internal/supervisor/`, `internal/estop/`, and the install
-scripts.
 
 Write the bead body to `/tmp/deep-review-{{issue}}/body.md` (the literal path)
 with a quoted heredoc (no backticks or code in double-quoted text). It needs `## Goal`, `## Constraints`, `## Out of scope`,
@@ -97,8 +96,6 @@ gt bead create "<one line>" --type bug -p <1|2|3> -l review-deep -q \\
   -d "$(cat $D/body.md)"
 gt spec lint <new id>          # must exit 0; fix the body until it does
 ```
-A crew-only finding runs those two commands with `-l crew-only` in place of
-`-l review-deep`.
 With `{{dry_run}}` `true`, file nothing: every confirmed finding is `queued` and
 the digest lists it under `would file`.
 
@@ -114,8 +111,8 @@ step 3 until a `finding:` line names it. `digest-only` is what a run before this
 one wrote for a finding it filed no bead for: such a line stays as written, and
 the fingerprint is `seen`, so the finding is not re-filed. The digest has:
 landings reviewed (bead, commit), `unparsed=` from the plan, slice files read,
-reviewers and verifiers used, then numbered `filed`, `would file`, `queued` and
-`crew-only` lists and the count of `refuted`.
+reviewers and verifiers used, then numbered `filed`, `would file` and
+`queued` lists and the count of `refuted`.
 
 **8. Clear the risk-path items you covered** (live runs only; skip when
 `{{dry_run}}` is `true`). For each reviewed landing: `gt bead review <bead>
