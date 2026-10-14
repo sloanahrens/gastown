@@ -17,10 +17,8 @@ const HostSafetyPrompt = "HOST SAFETY (spec dispatcher): any test of install or 
 	"INSTALL_DIR (mktemp -d) and never the real ~/.local/bin. Never run make install, gt dolt cleanup, " +
 	"or rm -rf outside your worktree on this host."
 
-// CrewOnlyLabel marks a bead only a person lands: the deep-review formula puts
-// it on every finding that cites a guard or a lifecycle path
-// (internal/formula/formulas/deep-review-run.formula.toml), so no seat is ever
-// spent on one (gt-k1g3e).
+// CrewOnlyLabel marks a bead only a person lands: a person hand-labels it, and
+// the dispatcher never slings it (gt-k1g3e).
 const CrewOnlyLabel = "crew-only"
 
 // excludedLabels are the labels that keep a candidate out of the dispatcher's
