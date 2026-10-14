@@ -18,7 +18,9 @@ const never = 24 * time.Hour
 // logs collects what Quiesce says.
 type logs struct{ lines []string }
 
-func (l *logs) logf(format string, args ...any) { l.lines = append(l.lines, fmt.Sprintf(format, args...)) }
+func (l *logs) logf(format string, args ...any) {
+	l.lines = append(l.lines, fmt.Sprintf(format, args...))
+}
 
 func (l *logs) text() string { return strings.Join(l.lines, "\n") }
 
