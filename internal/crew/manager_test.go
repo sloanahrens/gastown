@@ -941,3 +941,34 @@ func TestRespawnHookGatesReplacement(t *testing.T) {
 		t.Fatalf("refusing hook: err=%v ran=%d", err, ran)
 	}
 }
+
+// CheckRename answers what Rename would, without touching the workspace, so
+// the cmd layer can refuse a doomed rename before it stops a session.
+func TestCrewRenameCheck(t *testing.T) {
+	t.Parallel()
+	rigPath := t.TempDir()
+	for _, n := range []string{"emma", "bob"} {
+		if err := os.MkdirAll(filepath.Join(rigPath, "crew", n), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mgr := &Manager{rig: &rig.Rig{Name: "test-rig", Path: rigPath}}
+
+	tests := []struct {
+		name, from, to string
+		want           error
+	}{
+		{"free name", "emma", "carol", nil},
+		{"invalid name", "emma", "a/b", ErrInvalidCrewName},
+		{"old missing", "ghost", "carol", ErrCrewNotFound},
+		{"new exists", "emma", "bob", ErrCrewExists},
+	}
+	for _, tt := range tests {
+		if got := mgr.CheckRename(tt.from, tt.to); !errors.Is(got, tt.want) {
+			t.Errorf("%s: CheckRename(%q, %q) = %v, want %v", tt.name, tt.from, tt.to, got, tt.want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(rigPath, "crew", "emma")); err != nil {
+		t.Errorf("CheckRename moved the workspace: %v", err)
+	}
+}
