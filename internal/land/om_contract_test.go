@@ -51,6 +51,7 @@ type fakeOMRun struct {
 	copyOf   string // the --criteria-file's content as the review saw it
 	outDir   string // OutDir handed to the reviewer
 	reviewer OMReviewer
+	warn     bytes.Buffer // the reviewer's warning lines; why() quotes them
 }
 
 // shQuote single-quotes s for /bin/sh.
@@ -100,12 +101,39 @@ func newFakeOM(t *testing.T, spec fakeOMSpec) *fakeOMRun {
 	return f
 }
 
+// logf is the reviewer's warning sink for this fake, the Logf contractInput
+// hands ReviewInput: an assertion on the recorded calls quotes it (why).
+func (f *fakeOMRun) logf(format string, args ...any) {
+	fmt.Fprintf(&f.warn, format+"\n", args...)
+}
+
+// why explains a call the fake om never recorded, for a failure message. A
+// probe leaves no trace either because the reviewer warned about it -- a run
+// error, a timeout, a busy executable -- or because omHelpProbe answered from
+// its process-wide cache without running anything; the two read alike without
+// this, and naming one is the whole point of the diagnostic (gt-0pt32).
+func (f *fakeOMRun) why() string {
+	if s := strings.TrimSpace(f.warn.String()); s != "" {
+		return fmt.Sprintf("; the reviewer logged: %s", s)
+	}
+	if id, ok := omBinaryIdentity(f.path); ok {
+		omHelpProbe.mu.Lock()
+		defer omHelpProbe.mu.Unlock()
+		_, help := omHelpProbe.help[id]
+		_, version := omHelpProbe.version[id]
+		if help || version {
+			return fmt.Sprintf("; nothing was logged: omHelpProbe already held this binary (help cached %v, version cached %v)", help, version)
+		}
+	}
+	return "; the reviewer logged nothing and omHelpProbe holds no entry for it"
+}
+
 // calls returns every recorded invocation, in order.
 func (f *fakeOMRun) calls(t *testing.T) []fakeOMCall {
 	t.Helper()
 	data, err := os.ReadFile(f.log)
 	if err != nil {
-		t.Fatalf("the fake om recorded no call: %v", err)
+		t.Fatalf("the fake om recorded no call: %v%s", err, f.why())
 	}
 	var out []fakeOMCall
 	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
@@ -128,19 +156,20 @@ func (f *fakeOMRun) review(t *testing.T) fakeOMCall {
 		}
 	}
 	if len(found) != 1 {
-		t.Fatalf("om ran %d reviews, want exactly 1 (calls %q)", len(found), f.calls(t))
+		t.Fatalf("om ran %d reviews, want exactly 1 (calls %q%s)", len(found), f.calls(t), f.why())
 	}
 	return found[0]
 }
 
 // contractInput is a review of base..head in a real directory (the runner
-// starts om there) that names a bead and carries acceptance text.
-func contractInput(t *testing.T, log *bytes.Buffer) ReviewInput {
+// starts om there) that names a bead and carries acceptance text. Its warnings
+// land on f, which a failing recorded-call assertion quotes.
+func contractInput(t *testing.T, f *fakeOMRun) ReviewInput {
 	t.Helper()
 	return ReviewInput{
 		Dir: t.TempDir(), Base: "aaa111", Head: "bbb222",
 		BeadID: "gt-q52sv", CriteriaText: "## Acceptance\n- [ ] it works\n- [ ] it is pinned",
-		Logf: logfTo(log),
+		Logf: f.logf,
 	}
 }
 
@@ -169,11 +198,10 @@ func TestOMContractArgv(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := newFakeOM(t, fakeOMSpec{help: tc.help, verdict: `{"score":0.9,"verdict":"approve","findings":[]}`})
-			var log bytes.Buffer
-			in := contractInput(t, &log)
+			in := contractInput(t, f)
 			in.BeadID, in.CriteriaText = tc.bead, tc.crit
 			if _, err := f.reviewer.ReviewBead(context.Background(), in); err != nil {
-				t.Fatalf("ReviewBead: %v\nlog: %s", err, log.String())
+				t.Fatalf("ReviewBead: %v\nlog: %s", err, f.warn.String())
 			}
 			got := f.review(t)
 			fixed := []string{"review", "-C", in.Dir, "--base", in.Base, "--head", in.Head, "--out"}
@@ -229,8 +257,7 @@ func TestOMContractWithoutBeadOrCriteria(t *testing.T) {
 func TestOMContractProbes(t *testing.T) {
 	t.Parallel()
 	f := newFakeOM(t, fakeOMSpec{help: helpBoth, verdict: `{"score":0.9,"verdict":"approve","findings":[]}`})
-	var log bytes.Buffer
-	v, err := f.reviewer.ReviewBead(context.Background(), contractInput(t, &log))
+	v, err := f.reviewer.ReviewBead(context.Background(), contractInput(t, f))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +271,7 @@ func TestOMContractProbes(t *testing.T) {
 		}
 	}
 	if help != 1 || version != 1 {
-		t.Fatalf("probes: %d x `review --help`, %d x `version`; want one of each (calls %q)", help, version, f.calls(t))
+		t.Fatalf("probes: %d x `review --help`, %d x `version`; want one of each (calls %q%s)", help, version, f.calls(t), f.why())
 	}
 	if v.Version != contractOMSHA {
 		t.Fatalf("Version = %q, want %q from `om version`", v.Version, contractOMSHA)
@@ -274,8 +301,7 @@ func TestOMContractExitCodes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := newFakeOM(t, fakeOMSpec{help: helpBoth, verdict: tc.verdict, silent: tc.verdict == "", exit: tc.exit})
-			var log bytes.Buffer
-			v, err := f.reviewer.ReviewBead(context.Background(), contractInput(t, &log))
+			v, err := f.reviewer.ReviewBead(context.Background(), contractInput(t, f))
 			if tc.wantErr != nil {
 				if !errors.Is(err, tc.wantErr) {
 					t.Fatalf("error = %v, want it to wrap %v", err, tc.wantErr)
@@ -330,8 +356,7 @@ func TestOMContractFailsClosed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := newFakeOM(t, fakeOMSpec{help: helpBoth, verdict: tc.verdict, silent: tc.silent, exit: tc.exit})
-			var log bytes.Buffer
-			v, err := f.reviewer.ReviewBead(context.Background(), contractInput(t, &log))
+			v, err := f.reviewer.ReviewBead(context.Background(), contractInput(t, f))
 			if err == nil {
 				t.Fatalf("ReviewBead = %+v, nil; want an error", v)
 			}
@@ -361,8 +386,7 @@ func TestOMContractTimeout(t *testing.T) {
 	t.Parallel()
 	f := newFakeOM(t, fakeOMSpec{help: helpBoth, hang: true, verdict: `{"score":0.9,"verdict":"approve","findings":[]}`})
 	f.reviewer.Timeout = 150 * time.Millisecond
-	var log bytes.Buffer
-	v, err := f.reviewer.ReviewBead(context.Background(), contractInput(t, &log))
+	v, err := f.reviewer.ReviewBead(context.Background(), contractInput(t, f))
 	if !errors.Is(err, ErrOMTimeout) {
 		t.Fatalf("error = %v, want it to wrap ErrOMTimeout", err)
 	}
@@ -392,8 +416,7 @@ const contractVerdictJSON = `{
 func TestOMContractVerdictFields(t *testing.T) {
 	t.Parallel()
 	f := newFakeOM(t, fakeOMSpec{help: helpBoth, verdict: contractVerdictJSON, exit: 1})
-	var log bytes.Buffer
-	got, err := f.reviewer.ReviewBead(context.Background(), contractInput(t, &log))
+	got, err := f.reviewer.ReviewBead(context.Background(), contractInput(t, f))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,8 +431,8 @@ func TestOMContractVerdictFields(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("verdict = %+v\nwant      %+v", got, want)
 	}
-	if strings.Contains(log.String(), "bead") {
-		t.Fatalf("a verdict echoing the bead logged a warning: %s", log.String())
+	if strings.Contains(f.warn.String(), "bead") {
+		t.Fatalf("a verdict echoing the bead logged a warning: %s", f.warn.String())
 	}
 }
 
@@ -418,8 +441,7 @@ func TestOMContractVerdictFields(t *testing.T) {
 func TestOMContractApproveWithoutOptionalFields(t *testing.T) {
 	t.Parallel()
 	f := newFakeOM(t, fakeOMSpec{help: helpBoth, verdict: `{"score":0.95,"verdict":"approve"}`})
-	var log bytes.Buffer
-	got, err := f.reviewer.ReviewBead(context.Background(), contractInput(t, &log))
+	got, err := f.reviewer.ReviewBead(context.Background(), contractInput(t, f))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -454,19 +476,18 @@ func TestOMContractBeadEcho(t *testing.T) {
 				verdict = fmt.Sprintf(`{"score":0.9,"verdict":"approve","bead":%q,"findings":[]}`, tc.bead)
 			}
 			f := newFakeOM(t, fakeOMSpec{help: helpBoth, verdict: verdict})
-			var log bytes.Buffer
-			got, err := f.reviewer.ReviewBead(context.Background(), contractInput(t, &log))
+			got, err := f.reviewer.ReviewBead(context.Background(), contractInput(t, f))
 			if err != nil {
 				t.Fatal(err)
 			}
 			if got.Bead != tc.wantBead || !got.Approved() {
 				t.Fatalf("verdict = %+v, want an approve with bead %q", got, tc.wantBead)
 			}
-			if tc.warn == "" && log.Len() > 0 {
-				t.Fatalf("unexpected warning: %s", log.String())
+			if tc.warn == "" && f.warn.Len() > 0 {
+				t.Fatalf("unexpected warning: %s", f.warn.String())
 			}
-			if tc.warn != "" && !strings.Contains(log.String(), tc.warn) {
-				t.Fatalf("log = %q, want it to contain %q", log.String(), tc.warn)
+			if tc.warn != "" && !strings.Contains(f.warn.String(), tc.warn) {
+				t.Fatalf("log = %q, want it to contain %q", f.warn.String(), tc.warn)
 			}
 		})
 	}
@@ -488,8 +509,7 @@ func TestOMContractLeavesNoFiles(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := newFakeOM(t, tc.spec)
-			var log bytes.Buffer
-			_, _ = f.reviewer.ReviewBead(context.Background(), contractInput(t, &log))
+			_, _ = f.reviewer.ReviewBead(context.Background(), contractInput(t, f))
 			entries, err := os.ReadDir(f.outDir)
 			if err != nil {
 				t.Fatal(err)
