@@ -256,17 +256,24 @@ func (d *Daemon) scheduledRunner() scheduledSlingRunner {
 }
 
 // triggerScheduledSlings starts a cycle on its own goroutine; an overlapping
-// tick is skipped. Returns true if a cycle started.
-func (d *Daemon) triggerScheduledSlings() bool {
+// tick is skipped.
+func (d *Daemon) triggerScheduledSlings() {
 	if !d.scheduledSlingsRunning.CompareAndSwap(false, true) {
 		d.logger.Printf("scheduled_slings: previous cycle still running, skipping this tick")
-		return false
+		return
 	}
 	go func() {
 		defer d.scheduledSlingsRunning.Store(false)
+		// The startup catch-up dispatches before the first heartbeat has
+		// started Dolt, and every entry reads bead history through it, so the
+		// cycle brings the server up itself rather than counting a cold start
+		// as a failed tick (gt-ox6c).
+		if err := d.ensureDoltServerUp(); err != nil {
+			d.logger.Printf("scheduled_slings: Dolt server unavailable: %v", err)
+			return
+		}
 		d.runScheduledSlings()
 	}()
-	return true
 }
 
 func (d *Daemon) runScheduledSlings() {

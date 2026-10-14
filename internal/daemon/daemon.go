@@ -1039,6 +1039,12 @@ func (d *Daemon) Run() (err error) {
 		scheduledSlingsChan = scheduledSlingsTicker.C
 		defer scheduledSlingsTicker.Stop()
 		d.logger.Printf("Scheduled slings ticker started (tick %v, %d entries)", scheduledSlingsTickInterval, len(d.patrolConfig.Patrols.ScheduledSlings.Entries))
+		// Catch up at startup rather than waiting for the first tick: the
+		// ticker is fresh on every start, so restarts closer together than
+		// scheduledSlingsTickInterval would otherwise never evaluate a
+		// schedule. Due-ness comes from bead history, so an extra evaluation
+		// cannot double-dispatch (gt-ima2, gt-gxpwc).
+		d.triggerScheduledSlings()
 	}
 
 	// Start the spec dispatcher ticker unless the daemon patrol config
