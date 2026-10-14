@@ -1046,7 +1046,7 @@ func (d *Daemon) Run() (err error) {
 		// scheduledSlingsTickInterval would otherwise never evaluate a
 		// schedule. Due-ness comes from bead history, so an extra evaluation
 		// cannot double-dispatch (gt-ima2, gt-gxpwc).
-		d.triggerScheduledSlings()
+		d.catchUpScheduledSlings()
 	}
 
 	// Start the spec dispatcher ticker unless the daemon patrol config
@@ -1462,7 +1462,14 @@ func (d *Daemon) ensureDoltServerRunning() {
 
 }
 
+// errDoltBringUpSkipped is what ensureDoltServerUp returns when it left Dolt
+// alone because the daemon is shutting down. It is neither a failure to start
+// the server nor "Dolt is up": a caller that needs the server skips its pass
+// on it (gt-84o0a).
+var errDoltBringUpSkipped = errors.New("dolt bring-up skipped: daemon is shutting down")
+
 // ensureDoltServerUp brings the Dolt server up and reports a failure to do so.
+// It returns errDoltBringUpSkipped, not nil, when the daemon is shutting down.
 //
 // ensureDoltServerRunning is the heartbeat's step 0 and does more than this: it
 // reports Dolt warnings from state the heartbeat goroutine owns. A patrol cycle running on its own goroutine takes this bare
@@ -1476,7 +1483,7 @@ func (d *Daemon) ensureDoltServerUp() error {
 	// left to manage or adopt (gt-govth).
 	if d.shuttingDown() {
 		d.logger.Println("Dolt server not started: daemon is shutting down")
-		return nil
+		return errDoltBringUpSkipped
 	}
 	return d.doltServer.EnsureRunning()
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/util"
@@ -233,6 +234,9 @@ type scheduledSlingRunner interface {
 	// from main.
 	sling(ctx context.Context, beadID, branch string, e ScheduledSlingEntry) error
 	closeBead(ctx context.Context, rig, beadID, reason string) error
+	// originHasBranch reports whether branch is on the rig repo's origin, so a
+	// resume is not slung on a branch deleted out-of-band (gt-84o0a).
+	originHasBranch(ctx context.Context, rig, branch string) (bool, error)
 	// runGate runs the entry's gate_command under ctx's deadline and returns
 	// its combined output and run error (see scheduledGateAllows).
 	runGate(ctx context.Context, e ScheduledSlingEntry) ([]byte, error)
@@ -278,6 +282,11 @@ func (r *execScheduledSlingRunner) listBeads(_ context.Context, rig, label strin
 // closeBead closes a run bead with a reason.
 func (r *execScheduledSlingRunner) closeBead(_ context.Context, rig, beadID, reason string) error {
 	return r.store(rig).CloseWithReason(reason, beadID)
+}
+
+// originHasBranch asks the rig's bare repo whether origin carries branch.
+func (r *execScheduledSlingRunner) originHasBranch(_ context.Context, rig, branch string) (bool, error) {
+	return git.NewGit(filepath.Join(r.townRoot, rig, ".repo.git")).RemoteBranchExists("origin", branch)
 }
 
 func (r *execScheduledSlingRunner) createBead(_ context.Context, rig string, run scheduledRunBead) (string, error) {
@@ -368,6 +377,18 @@ func (d *Daemon) scheduledRunner() scheduledSlingRunner {
 	return d.scheduledSlingRunner
 }
 
+// catchUpScheduledSlings is the startup evaluation Run makes before the first
+// tick. It stands down while shutdown.lock is held, as the tick path does, so a
+// daemon started during `gt down` does not dispatch into a town being torn
+// down (gt-84o0a).
+func (d *Daemon) catchUpScheduledSlings() {
+	if d.isShutdownInProgress() {
+		d.logger.Printf("scheduled_slings: startup catch-up skipped: shutdown in progress")
+		return
+	}
+	d.triggerScheduledSlings()
+}
+
 // triggerScheduledSlings starts a cycle on its own goroutine; an overlapping
 // tick is skipped.
 func (d *Daemon) triggerScheduledSlings() {
@@ -382,7 +403,9 @@ func (d *Daemon) triggerScheduledSlings() {
 		// cycle brings the server up itself rather than counting a cold start
 		// as a failed tick (gt-ox6c).
 		if err := d.ensureDoltServerUp(); err != nil {
-			d.logger.Printf("scheduled_slings: Dolt server unavailable: %v", err)
+			if !errors.Is(err, errDoltBringUpSkipped) {
+				d.logger.Printf("scheduled_slings: Dolt server unavailable: %v", err)
+			}
 			return
 		}
 		d.runScheduledSlings()
@@ -559,12 +582,28 @@ func (d *Daemon) runScheduledSlingEntry(ctx context.Context, e ScheduledSlingEnt
 // leaves the bead open and is returned, so the next tick retries it and the
 // failures count toward the escalation: closing it with the failure marker
 // would send the next tick to a fresh run and strand the branch again.
+//
+// A branch that is gone from origin (deleted out-of-band) holds no work to
+// continue and would fail every tick, so the run is slung from main instead.
+// A probe that cannot answer is not "gone": the resume goes ahead as before
+// (gt-84o0a).
 func (d *Daemon) resumeReopenedScheduledRun(ctx context.Context, r scheduledSlingRunner, e ScheduledSlingEntry, b scheduledBead) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), d.scheduledSlingBudget())
 	defer cancel()
-	d.logger.Printf("scheduled_slings: %s: run %s was reopened after its polecat died; slinging %s to %s again on branch %s",
-		e.Name, b.ID, e.Formula, e.Rig, b.ResumeBranch)
-	if err := r.sling(ctx, b.ID, b.ResumeBranch, e); err != nil {
+	branch := b.ResumeBranch
+	if onOrigin, err := r.originHasBranch(ctx, e.Rig, branch); err != nil {
+		d.logger.Printf("scheduled_slings: %s: cannot check branch %s on origin: %v", e.Name, branch, err)
+	} else if !onOrigin {
+		d.logger.Printf("scheduled_slings: %s: run %s was reopened but branch %s is gone from origin; slinging it from main", e.Name, b.ID, branch)
+		branch = ""
+	}
+	if branch == "" {
+		d.logger.Printf("scheduled_slings: %s: slinging run %s: %s to %s from main", e.Name, b.ID, e.Formula, e.Rig)
+	} else {
+		d.logger.Printf("scheduled_slings: %s: run %s was reopened after its polecat died; slinging %s to %s again on branch %s",
+			e.Name, b.ID, e.Formula, e.Rig, branch)
+	}
+	if err := r.sling(ctx, b.ID, branch, e); err != nil {
 		if isScheduledSlingRefusal(err) {
 			return &scheduledSlingDeferred{cause: err}
 		}

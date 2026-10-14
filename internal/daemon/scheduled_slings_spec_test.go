@@ -172,6 +172,38 @@ func TestRunScheduledSlingEntry_SpecDispatchUntakenRunEscalates(t *testing.T) {
 	}
 }
 
+// A spec run reopened by dead-holder recovery keeps its original created_at, so
+// its age says nothing about how long the dispatcher has had it: it raises no
+// untaken-run escalation however old it is (gt-84o0a).
+func TestReportUntakenSpecRuns_SkipsAReopenedRun(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-untakenSpecBound(specAuditEntry) - time.Hour)
+	for _, tc := range []struct {
+		name    string
+		runs    []scheduledBead
+		wantIDs string // "" means no error
+	}{
+		{"never taken", []scheduledBead{{ID: "gt-a", Status: "open", CreatedAt: old}}, "gt-a"},
+		{"reopened", []scheduledBead{{ID: "gt-b", Status: "open", CreatedAt: old, ResumeBranch: "polecat/nux/gt-b+x"}}, ""},
+		{"reopened beside a never-taken run", []scheduledBead{
+			{ID: "gt-b", Status: "open", CreatedAt: old, ResumeBranch: "polecat/nux/gt-b+x"},
+			{ID: "gt-a", Status: "open", CreatedAt: old},
+		}, "gt-a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := reportUntakenSpecRuns(tc.runs, specAuditEntry, now)
+			switch {
+			case tc.wantIDs == "" && err != nil:
+				t.Fatalf("err = %v, want none", err)
+			case tc.wantIDs != "" && (err == nil || !strings.Contains(err.Error(), tc.wantIDs) || strings.Contains(err.Error(), "gt-b")):
+				t.Fatalf("err = %v, want one naming only %s", err, tc.wantIDs)
+			}
+		})
+	}
+}
+
 func TestRunScheduledSlingEntry_SpecDispatchUsesEntryPriority(t *testing.T) {
 	t.Parallel()
 	e := specAuditEntry
