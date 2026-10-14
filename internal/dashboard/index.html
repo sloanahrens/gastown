@@ -222,6 +222,7 @@ a.drow:hover{background:#19212b}
     <section><h2>Alerts <span class="r" id="alertsnote"></span></h2><div class="body" id="alerts"></div></section>
     <section><h2>Report <span class="r" id="reportnote"></span></h2><div class="body" id="report"></div></section>
     <section><h2>DeepSeek <span class="r" id="spendnote"></span></h2><div class="body" id="spend"></div></section>
+    <section><h2>Usage <span class="r" id="usagenote"></span></h2><div class="body" id="usage"></div></section>
     <section><h2>Rigs <span class="r" id="rigsnote"></span></h2><div class="body" id="rigs"></div></section>
     <section><h2><span class="sweepico" id="tiersweepico"></span>Tier sweeps <span class="r" id="tiersweepnote"></span></h2><div class="body" id="tiersweep"></div></section>
     <section><h2>Polecats <span class="r" id="seatsnote"></span></h2><div class="body" id="seats"></div></section>
@@ -1920,6 +1921,93 @@ function renderDeepReview(s) {
   box.append(t);
 }
 
+// The Usage pane: what the town spent over the last day, from the records the
+// usage scan writes. Collapsed by default, with the two numbers an operator
+// wants without opening it in the header: the day's DeepSeek estimate and how
+// many beads ran over twenty minutes. Read-only.
+//
+// Claude rows show uncached tokens, since the scan estimates no cost for them;
+// DeepSeek rows show estimated dollars, labelled "est." because they are a rate
+// over the tokens and not a bill. A read that failed and a scan that never ran
+// are named states, never an empty list. Every cell goes through el(), which
+// writes textContent: a bead id or model name is text and never markup.
+let openUsage = false;
+const USAGE_STALE_SEC = 3 * 3600;
+const isDeepSeek = model => /^deepseek/i.test(model || "");
+const fmtTokens = n => {
+  n = Number(n) || 0;
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+  return String(n);
+};
+function renderUsage(s) {
+  const box = $("usage"), note = $("usagenote");
+  box.replaceChildren();
+  const u = s.usage;
+  note.className = "r"; note.textContent = ""; note.title = "";
+  if (!u) { box.append(el("div", "empty", "reading…")); return; }
+  if (u.unavailable) {
+    box.append(el("div", "badc", "usage records unreadable"));
+    note.className = "r badc"; note.textContent = "unreadable";
+    return;
+  }
+  const byClass = u.by_class_model || [], deep = u.deep_review_runs || [], top = u.top_beads || [], over = u.over20 || [];
+  const est = byClass.filter(r => isDeepSeek(r.model)).reduce((sum, r) => sum + (r.est_cost_usd || 0), 0);
+  note.className = over.length ? "r warnc" : "r";
+  note.textContent = "est. " + money(est) + " · " + over.length + " over 20m";
+  note.title = "estimated DeepSeek spend over the last " + (u.window || "24h") + "; beads that ran over twenty minutes in the last week";
+
+  // How old the records are: the scan runs on a schedule, so an old AsOf means
+  // the numbers below are a past day's, and the pane says so beside them.
+  const scanned = u.as_of ? new Date(u.as_of).getTime() : NaN;
+  if (isNaN(scanned)) box.append(el("div", "empty warnc", "never scanned"));
+  else {
+    const old = (Date.now() - scanned) / 1000 > USAGE_STALE_SEC;
+    box.append(el("div", "empty" + (old ? " warnc" : ""), "records last scanned " + age(u.as_of) + " ago" + (old ? " (stale)" : "")));
+  }
+
+  const d = document.createElement("details");
+  d.open = openUsage;
+  d.ontoggle = () => { openUsage = d.open; };
+  d.append(el("summary", "title", "last " + (u.window || "24h") + " by class and model, deep reviews, top and slow beads"));
+  const table = (heads, rows) => {
+    const t = el("table");
+    const hr = el("tr");
+    heads.forEach(([h, num]) => hr.append(el("th", num ? "n" : "", h)));
+    t.append(hr);
+    for (const cells of rows) {
+      const tr = el("tr");
+      cells.forEach(([text, cls]) => tr.append(el("td", cls || "", text)));
+      t.append(tr);
+    }
+    return t;
+  };
+  const section = (title, node) => { d.append(el("h3", "sub", title), node); };
+  const none = text => el("div", "empty", text);
+
+  section("By class and model", byClass.length
+    ? table([["Class"], ["Model"], ["Calls", 1], ["Spend", 1]], byClass.map(r => [
+        [r.class], [r.model, "title"], [String(r.calls), "n"],
+        [isDeepSeek(r.model) ? "est. " + money(r.est_cost_usd) : fmtTokens(r.uncached) + " tokens", "n"]]))
+    : none("no usage in the last " + (u.window || "24h")));
+  section("Deep reviews", deep.length
+    ? table([["Run"], ["Ended"], ["Took", 1], ["Tokens", 1], ["In subagents", 1]], deep.map(r => [
+        [r.bead], [age(r.end) + " ago", "title"], [fmtDur(r.wall_s), "n"], [fmtTokens(r.uncached), "n"], [Math.round((r.subagent_share || 0) * 100) + "%", "n"]]))
+    : none("no deep review runs"));
+  section("Top beads", top.length
+    ? table([["Bead"], ["Class"], ["Took", 1], ["Spend", 1]], top.map(r => [
+        [r.bead], [r.class, "title"], [fmtDur(r.wall_s), "n"],
+        [r.est_cost_usd ? "est. " + money(r.est_cost_usd) : fmtTokens(r.uncached) + " tokens", "n"]]))
+    : none("no beads in the last " + (u.window || "24h")));
+  section("Over 20 minutes", over.length
+    ? table([["Bead"], ["Rig"], ["Took", 1], ["Tests", 1]], over.map(r => [
+        [r.bead, "warnc"], [r.rig, "title"], [fmtDur(r.wall_s), "n warnc"],
+        [r.test_runs + " runs, " + r.failed_test_runs + " failed", "n" + (r.failed_test_runs ? " badc" : "")]]))
+    : none("none in the last week"));
+  d.append(el("div", "empty", (u.unmatched || 0) + " unmatched · " + (u.incomplete || 0) + " incomplete · " + (u.skipped || 0) + " skipped"));
+  box.append(d);
+}
+
 // The Escalations pane: the town's open escalation beads, newest first. An
 // alert is what the dashboard noticed; an escalation is a bead somebody raised,
 // with a severity and a raiser, that stays open until it is closed. Read-only —
@@ -2225,7 +2313,7 @@ function renderQueue(s, force) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderModels(state); renderModelsPanel(state); renderTiles(state); renderQuestions(state); renderDeepReview(state); renderEscalations(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderReports(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
+function renderAll() { if (!state) return; renderHealth(state.health); renderModels(state); renderModelsPanel(state); renderTiles(state); renderQuestions(state); renderDeepReview(state); renderUsage(state); renderEscalations(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderReports(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));
