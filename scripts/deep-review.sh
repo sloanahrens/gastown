@@ -44,14 +44,14 @@
 # file with a reviewed: line from the last 21 days is skipped, and the newest
 # date wins when a path has several. A reviewed: line that is malformed is
 # ignored, because the worst outcome is a file read twice. A queued finding stays pending until a finding line names it.
-# A queued line that does not carry a severity and a claim stops queued with
-# exit 3: the run that would file it reads a truncated queue as a short one,
-# and a lost finding is worse than a run that stops and escalates. A p3: line
-# is a P3 finding held back so a run does not file one bead per P3. batches
-# groups the ones no finding: line names yet by package directory (the dirname
-# of the file in the fingerprint), and lists a package once it holds enough of
-# them or its oldest has waited long enough. A malformed p3: line stops
-# batches with exit 3 for the same reason.
+# A queued: or p3: line whose fields do not parse is skipped: queued and
+# batches warn naming it, print how many they skipped, and list the rest. An
+# earlier run wrote the line, so refusing the whole ledger would stop every
+# later run on it, and a parser that rejects the line cannot recover the finding
+# from it either way. A p3: line is a P3 finding held back so a run does not
+# file one bead per P3. batches groups the ones no finding: line names yet by
+# package directory (the dirname of the file in the fingerprint), and lists a
+# package once it holds enough of them or its oldest has waited long enough.
 #
 # Exit codes: 2 usage, 3 an input the script cannot trust. Never read a
 # non-zero exit as a quiet day.
@@ -141,9 +141,14 @@ cmd_queued() {
       n = split(substr($0, 9), f, " ")
       if (n < 4 || f[2] !~ /^(P1|P2|P3)$/) {
         printf "deep-review.sh: malformed queued line: %s\n", $0 > "/dev/stderr"
-        exit 3
+        skipped++
+        next
       }
       if (!(f[1] in filed) && !(f[1] in shown)) { shown[f[1]] = 1; print }
+    }
+    END {
+      if (skipped)
+        printf "deep-review.sh: skipped %d malformed queued line%s; the ledger cannot be trusted\n", skipped, (skipped == 1 ? "" : "s") > "/dev/stderr"
     }
   ' "$notes" "$notes"
 }
@@ -177,14 +182,14 @@ cmd_batches() {
 
   local cutoff rows
   cutoff="$(jq -n -r --arg now "$now" "$JQ_TS"'(($now | ts)[0] - '"$max_age"' * 86400) | strftime("%Y-%m-%d")')"
-  # Rows are held until the whole file has parsed, so a malformed line prints nothing.
   rows="$(awk '
     NR == FNR { if (index($0, "finding: ") == 1) { split(substr($0, 10), f, " "); filed[f[1]] = 1 } next }
     index($0, "p3: ") == 1 {
       n = split(substr($0, 5), f, " ")
       if (n < 4 || f[1] !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/ || f[2] !~ /^[^:]+:.+:[^:]+$/) {
         printf "deep-review.sh: malformed p3 line: %s\n", $0 > "/dev/stderr"
-        bad = 1; exit 3
+        skipped++
+        next
       }
       fp = f[2]
       if (fp in filed) next
@@ -192,7 +197,8 @@ cmd_batches() {
       if (!(fp in date) || f[1] < date[fp]) { date[fp] = f[1]; line[fp] = $0 }
     }
     END {
-      if (bad) exit 3
+      if (skipped)
+        printf "deep-review.sh: skipped %d malformed p3 line%s; the ledger cannot be trusted\n", skipped, (skipped == 1 ? "" : "s") > "/dev/stderr"
       for (i = 1; i <= count; i++) {
         fp = order[i]
         file = substr(fp, 1, index(fp, ":") - 1)
@@ -201,7 +207,7 @@ cmd_batches() {
         printf "%s\t%s\t%d\t%s\n", dir, date[fp], i, line[fp]
       }
     }
-  ' "$notes" "$notes")" || exit 3
+  ' "$notes" "$notes")"
   [ -n "$rows" ] || return 0
   printf '%s\n' "$rows" | LC_ALL=C sort -t "$(printf '\t')" -k1,1 -k2,2 -k3,3n | awk -F'\t' -v min="$min" -v cap="$max_per" -v cutoff="$cutoff" '
     function flush(   i) {

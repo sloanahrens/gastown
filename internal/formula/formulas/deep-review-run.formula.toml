@@ -61,7 +61,8 @@ the script cannot trust, not an empty queue: escalate as step 1 does.
   for the symbols under review, and read only the matching test functions.
 - the docs in `$D/docs.txt`: check every behavioral claim, command, flag and
   path against the code on origin/{{base_branch}}. A contradiction is a finding of
-  kind `doc-drift`, severity P3, fingerprint `<doc>:<short claim anchor>:doc-drift`,
+  kind `doc-drift`, severity P3, fingerprint `<doc>:<short claim anchor>:doc-drift`
+  (for example `docs/INSTALLING.md:install-tree-rigs-dir:doc-drift`),
   `file:line` the contradicting code, its claim one line naming the stale text
   and ending `-> <exact replacement text>`. Docs under docs/plans, docs/design,
   docs/adr and docs/research are historical: never review them for drift.
@@ -70,9 +71,10 @@ Every reviewer prompt carries: read-only; never fetch or pull in
 mayor/rig; cite file:line on origin/{{base_branch}}; report a finding only
 with a concrete failure scenario (input or state, wrong behavior); skip style
 and anything the ledger already holds, `digest-only` lines included (`bash scripts/deep-review.sh seen --prev-notes $D/prev-notes.txt
-<fingerprint>` exits 0). A fingerprint is `<file>:<symbol>:<kind>`, such as
-`internal/daemon/daemon.go:StopDaemon:held-lock-unlinked`. Each finding returns:
-fingerprint, file:line, claim (one line), failure scenario, severity P1|P2|P3.
+<fingerprint>` exits 0). A fingerprint is `<file>:<symbol>:<kind>`, one token, no
+spaces, such as `internal/daemon/daemon.go:StopDaemon:held-lock-unlinked`. Each
+finding returns: fingerprint, file:line, claim (one line), failure scenario,
+severity P1|P2|P3.
 
 **5. Verify (one subagent per three findings, at most {{max_verifiers}}).**
 Each verifier takes up to three findings and tries to refute each: read the
