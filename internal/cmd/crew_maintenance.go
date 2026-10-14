@@ -84,21 +84,35 @@ func crewRenameError(oldName, newName string, err error) error {
 	return fmt.Errorf("renaming crew workspace: %w", err)
 }
 
+// crewPristineScope resolves which rig and worker `gt crew pristine` acts on.
+// A rig/name argument names its rig, as in runCrewRename; --rig wins when set,
+// and a bare name or no argument leaves the rig to --rig or the cwd.
+func crewPristineScope(rigFlag string, args []string) (rigName, name string) {
+	rigName = rigFlag
+	if len(args) == 0 {
+		return rigName, ""
+	}
+	name = args[0]
+	if rig, crewName, ok := parseRigSlashName(name); ok {
+		if rigName == "" {
+			rigName = rig
+		}
+		name = crewName
+	}
+	return rigName, name
+}
+
 func runCrewPristine(cmd *cobra.Command, args []string) error {
-	crewMgr, r, err := getCrewManager(crewRig)
+	rigName, name := crewPristineScope(crewRig, args)
+	crewMgr, r, err := getCrewManager(rigName)
 	if err != nil {
 		return err
 	}
 
 	var workers []*crew.CrewWorker
 
-	if len(args) > 0 {
+	if name != "" {
 		// Specific worker
-		name := args[0]
-		// Parse rig/name format (e.g., "beads/emma" -> rig=beads, name=emma)
-		if _, crewName, ok := parseRigSlashName(name); ok {
-			name = crewName
-		}
 		worker, err := crewMgr.Get(name)
 		if err != nil {
 			if err == crew.ErrCrewNotFound {
