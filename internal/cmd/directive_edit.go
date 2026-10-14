@@ -2,12 +2,14 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 var directiveEditCmd = &cobra.Command{
@@ -46,14 +48,26 @@ func runDirectiveEdit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("unknown role %q — valid names: %s", role, knownRolesHelp())
 	}
 
-	townRoot, rigName, err := resolveDirectiveContext(directiveEditRig)
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+	cwd, _ := os.Getwd() // an unreadable cwd only turns off rig auto-detection
+
+	return runDirectiveEditIn(cmd.OutOrStdout(), townRoot, cwd, directiveEditRig, role, directiveEditTown, openInEditor)
+}
+
+// runDirectiveEditIn is runDirectiveEdit in a known town. The rig is resolved
+// (and an explicit one validated) before anything is created, so a bad --rig
+// leaves the disk untouched. openEditor is the seam tests stub.
+func runDirectiveEditIn(out io.Writer, townRoot, cwd, explicitRig, role string, townLevel bool, openEditor func(path string) error) error {
+	rigName, err := resolveDirectiveRigIn(townRoot, explicitRig, cwd)
 	if err != nil {
 		return err
 	}
 
-	// Determine which file to edit
 	var path string
-	if directiveEditTown || rigName == "" {
+	if townLevel || rigName == "" {
 		path = filepath.Join(townRoot, "directives", role+".md")
 	} else {
 		path = filepath.Join(townRoot, rigName, "directives", role+".md")
@@ -75,10 +89,20 @@ func runDirectiveEdit(cmd *cobra.Command, args []string) error {
 		if err := os.WriteFile(path, []byte(initial), 0644); err != nil {
 			return fmt.Errorf("creating directive file: %w", err)
 		}
-		fmt.Printf("Created new directive: %s\n", path)
+		fmt.Fprintf(out, "Created new directive: %s\n", path)
 	}
 
-	// Open in editor
+	if err := openEditor(path); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(out, "Directive updated: %s\n", path)
+	fmt.Fprintln(out, "Changes take effect at next 'gt prime'.")
+	return nil
+}
+
+// openInEditor runs $EDITOR (vi when unset) on path and waits for it to exit.
+func openInEditor(path string) error {
 	editor := os.Getenv("EDITOR")
 	if editor == "" {
 		editor = "vi"
@@ -91,8 +115,5 @@ func runDirectiveEdit(cmd *cobra.Command, args []string) error {
 	if err := editorCmd.Run(); err != nil {
 		return fmt.Errorf("running editor: %w", err)
 	}
-
-	fmt.Printf("Directive updated: %s\n", path)
-	fmt.Println("Changes take effect at next 'gt prime'.")
 	return nil
 }

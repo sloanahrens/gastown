@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -74,15 +75,47 @@ func resolveDirectiveContext(explicitRig string) (townRoot, rigName string, err 
 		return "", "", fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	rigName = explicitRig
-	if rigName == "" {
-		cwd, err := os.Getwd()
-		if err == nil {
-			rigName = detectRigFromPath(townRoot, cwd)
+	cwd, _ := os.Getwd() // an unreadable cwd only turns off rig auto-detection
+	rigName, err = resolveDirectiveRigIn(townRoot, explicitRig, cwd)
+	if err != nil {
+		return "", "", err
+	}
+	return townRoot, rigName, nil
+}
+
+// resolveDirectiveRigIn is the rig half of resolveDirectiveContext in a known
+// town: an explicit rig must pass validateDirectiveRig, otherwise the rig is
+// the one cwd sits in, if any.
+func resolveDirectiveRigIn(townRoot, explicitRig, cwd string) (string, error) {
+	if explicitRig != "" {
+		if err := validateDirectiveRig(townRoot, explicitRig); err != nil {
+			return "", err
 		}
+		return explicitRig, nil
+	}
+	if cwd == "" {
+		return "", nil
+	}
+	return detectRigFromPath(townRoot, cwd), nil
+}
+
+// validateDirectiveRig rejects an explicit --rig that cannot name a directory
+// the loaders read. The name is joined into a path, so a separator or ".."
+// would write outside the town, and a name missing from the registry (a typo)
+// would write a file no agent ever loads.
+func validateDirectiveRig(townRoot, rigName string) error {
+	if strings.ContainsAny(rigName, `/\`) || strings.Contains(rigName, "..") {
+		return fmt.Errorf("invalid rig name %q: must be a registered rig name, not a path", rigName)
 	}
 
-	return townRoot, rigName, nil
+	rigsConfig, err := config.LoadRigsConfigOrEmpty(constants.MayorRigsPath(townRoot))
+	if err != nil {
+		return fmt.Errorf("loading rigs config: %w", err)
+	}
+	if _, ok := rigsConfig.Rigs[rigName]; !ok {
+		return fmt.Errorf("rig %q is not a registered rig of this town; run 'gt rig list' to see the rigs", rigName)
+	}
+	return nil
 }
 
 // isValidRole reports whether role can name a directive file: a known agent
