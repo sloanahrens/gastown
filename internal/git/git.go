@@ -4614,8 +4614,10 @@ func (b sourceBeside) spares(root, path string, changedSources []string) bool {
 
 // looksGenerated reports whether path, a file under the coverage/ or .cache/
 // directory root, reads as generator output: anything in a .cache, a coverage
-// reporter's report directory or well-known report file, or a compiler's
-// profile data. A file under testdata/ is a fixture by Go convention whatever
+// reporter's report directory or well-known report file (go tool cover -html
+// writes coverage.html), or a compiler's or profiler's data (.profraw, .prof).
+// A bare .html is not listed: report.html or a template may be hand-written.
+// A file under testdata/ is a fixture by Go convention whatever
 // its name, since a coverage package tests against sample lcov.info files.
 func looksGenerated(root, path string) bool {
 	if filepath.Base(strings.TrimSuffix(root, "/")) == ".cache" {
@@ -4632,11 +4634,12 @@ func looksGenerated(root, path string) bool {
 	name := strings.ToLower(parts[len(parts)-1])
 	switch name {
 	case "coverage.out", "cover.out", "lcov.info", "coverage.xml", "cobertura.xml", "clover.xml",
-		"coverage-final.json", "coverage-summary.json", ".coverage":
+		"coverage-final.json", "coverage-summary.json", ".coverage",
+		"coverage.html", "cover.html", "coverage.txt", "coverage.json", "coverage.profile":
 		return true
 	}
 	switch filepath.Ext(name) {
-	case ".profraw", ".profdata", ".gcda", ".gcno":
+	case ".profraw", ".profdata", ".gcda", ".gcno", ".gcov", ".prof", ".pprof", ".lcov":
 		return true
 	}
 	return false
