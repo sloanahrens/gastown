@@ -187,7 +187,14 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		if checkErr != nil {
 			fmt.Fprintf(d.out(), "  %s %v\n", style.Dim.Render("Warning:"), checkErr)
 		}
-		if decision := DecideDuplicates(opts.BeadID, matches); decision.Message != "" {
+		// A nil candidate is the check declining to run — a bead naming no
+		// tests or files — and it comes back with no matches, so the ID-only
+		// stand-in is never ranked against anything: it only names the bead.
+		candidate := Duplicate{ID: opts.BeadID}
+		if dupCandidate != nil {
+			candidate = *dupCandidate
+		}
+		if decision := DecideDuplicates(candidate, matches); decision.Message != "" {
 			if decision.Blocked {
 				result.ErrMsg = ErrDuplicateContent.Error()
 				return result, decision.Err()

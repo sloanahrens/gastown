@@ -769,12 +769,14 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		})
 		if err != nil {
 			if isSpecOverlapRefusal(err) {
-				// The content-overlap guard refuses only live work, so the
-				// refusal lifts on its own when the overlapping bead closes.
-				// The bead stays ready and the next tick retries it, rather
-				// than leaving a label for an operator to clear by hand
-				// (gt-q6zoo).
-				report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent, Line: fmt.Sprintf("%s: sling deferred, content overlap clears when the overlapping bead closes: %s", id, firstErrLine(err))})
+				// The content-overlap guard refuses work in flight, and an
+				// unstarted peer only while that peer is ahead of this bead in
+				// dispatch order. Either way the refusal lifts on its own: the
+				// peer is slung (and this bead is then held against work in
+				// flight), or it closes. The bead stays ready and the next tick
+				// retries it, rather than leaving a label for an operator to
+				// clear by hand (gt-q6zoo, gt-nlkba).
+				report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent, Line: fmt.Sprintf("%s: sling deferred, content overlap holds it (work in flight, or unstarted work ahead of it): %s", id, firstErrLine(err))})
 				continue
 			}
 			if isSpecSlingRefusal(err) {
@@ -919,9 +921,10 @@ func specResumeNote(resume, gone string) string {
 }
 
 // isSpecOverlapRefusal reports whether a sling error is the content-overlap
-// guard's refusal. The guard refuses only live work, so the refusal clears on
-// its own when the overlapping bead closes: the dispatcher defers the bead
-// rather than labeling it out of the queue (gt-q6zoo).
+// guard's refusal. The guard refuses work in flight, and an unstarted peer only
+// while that peer comes first in dispatch order, so the refusal clears on its
+// own once the peer is slung or closes: the dispatcher defers the bead rather
+// than labeling it out of the queue (gt-q6zoo, gt-nlkba).
 func isSpecOverlapRefusal(err error) bool {
 	return errors.Is(err, errSlingDuplicateContent)
 }

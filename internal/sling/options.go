@@ -80,6 +80,10 @@ type Bead struct {
 	Labels       []string         `json:"labels,omitempty"`
 	Dependencies []beads.IssueDep `json:"dependencies,omitempty"`
 	IssueType    string           `json:"issue_type,omitempty"`
+	// Priority and CreatedAt are the bead's dispatch-order keys, read so the
+	// content-overlap guard can rank an unstarted peer against it (gt-nlkba).
+	Priority  int    `json:"priority"`
+	CreatedAt string `json:"created_at,omitempty"`
 }
 
 // Hold is a work bead's status and assignee before a dispatch touched it.

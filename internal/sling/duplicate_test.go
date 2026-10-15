@@ -17,6 +17,10 @@ func TestSlingDuplicateIgnoresDependencyChain(t *testing.T) {
 	}
 	related := RelatedBeads(candidateID, edges, 4)
 
+	// The candidate carries the lower priority number, so every open bead here
+	// is behind it in dispatch order and the only thing that can refuse the
+	// sling is the overlap itself.
+	candidate := Duplicate{ID: candidateID, Priority: 1}
 	tests := []struct {
 		name      string
 		bead      string
@@ -30,11 +34,11 @@ func TestSlingDuplicateIgnoresDependencyChain(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			match := DuplicateMatch{
-				Bead:        Duplicate{ID: tt.bead, Status: "open"},
+				Bead:        Duplicate{ID: tt.bead, Status: "in_progress"},
 				SharedTests: []string{"TestSharedStep"},
 			}
 			kept := DropRelatedMatches([]DuplicateMatch{match}, related)
-			got := DecideDuplicates(candidateID, kept)
+			got := DecideDuplicates(candidate, kept)
 			if got.Blocked != tt.wantBlock {
 				t.Fatalf("Blocked = %v, want %v (kept %+v)", got.Blocked, tt.wantBlock, kept)
 			}
@@ -61,7 +65,8 @@ func TestDropRelatedMatchesKeepsTheUnrelatedOne(t *testing.T) {
 	if len(kept) != 1 || kept[0].Bead.ID != "gt-unrelated" {
 		t.Fatalf("kept %+v, want only gt-unrelated", kept)
 	}
-	if got := DecideDuplicates(candidateID, kept); !got.Blocked {
+	candidate := Duplicate{ID: candidateID, Priority: 1}
+	if got := DecideDuplicates(candidate, kept); !got.Blocked {
 		t.Fatalf("the unrelated bead must still refuse the sling:\n%s", got.Message)
 	}
 }

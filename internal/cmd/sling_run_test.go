@@ -940,7 +940,7 @@ func TestSlingClearsOrphanEpisodeLabelsOnHook(t *testing.T) {
 // run reports the refusal without refusing.
 func TestSlingDuplicateContent(t *testing.T) {
 	t.Parallel()
-	dup := []duplicateMatch{{Bead: duplicateCandidate{ID: "gt-other", Status: "open"}, SharedTests: []string{"TestX"}}}
+	dup := []duplicateMatch{{Bead: duplicateCandidate{ID: "gt-other", Status: "hooked"}, SharedTests: []string{"TestX"}}}
 	for _, tc := range []struct {
 		name          string
 		force, dryRun bool
@@ -1008,7 +1008,7 @@ func TestSlingRefusalSilencesUsage(t *testing.T) {
 	h.run.checkDuplicates = func(_, _ string, info *beadInfo) (*duplicateCandidate, []duplicateMatch, error) {
 		candidate := duplicateCandidate{ID: slingBead, Title: info.Title, Status: info.Status,
 			Refs: extractContentRefs(info.Title, info.Description)}
-		other := duplicateCandidate{ID: "gt-ik4a1", Status: "open",
+		other := duplicateCandidate{ID: "gt-ik4a1", Status: "in_progress",
 			Refs: extractContentRefs("TestIntegration fails in internal/cmd.")}
 		return &candidate, findDuplicateMatches(candidate, []duplicateCandidate{other}), nil
 	}
@@ -1031,7 +1031,7 @@ func TestSlingRefusalSilencesUsage(t *testing.T) {
 	}
 	lines := strings.Split(strings.TrimRight(err.Error(), "\n"), "\n")
 	last := lines[len(lines)-1]
-	for _, want := range []string{"live bead(s)", "--force"} {
+	for _, want := range []string{"overlapping bead(s)", "--force"} {
 		if !strings.Contains(last, want) {
 			t.Errorf("last line %q must carry the reason and the remediation a dispatcher log shows (missing %q)", last, want)
 		}

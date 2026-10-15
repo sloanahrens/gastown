@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/sling"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
 // The fixtures below are transcribed from the beads named in gt-mcq — the two
@@ -206,7 +209,7 @@ func TestSlingDuplicateCheckCatchesTonightPairs(t *testing.T) {
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
 				matches := findDuplicateMatches(tc.candidate, []duplicateCandidate{tc.other})
-				decision := decideSlingDuplicates(tc.candidate.ID, matches)
+				decision := decideSlingDuplicates(tc.candidate, matches)
 				wantBlocked := tc.other.Status != "closed"
 				if decision.Blocked != wantBlocked {
 					t.Fatalf("blocked = %v, want %v (other is %s); report was:\n%s", decision.Blocked, wantBlocked, tc.other.Status, decision.Message)
@@ -228,11 +231,10 @@ func TestSlingDuplicateCheckCatchesTonightPairs(t *testing.T) {
 		other := newDuplicateCandidate("gt-3vr", bead3vrTitle, "closed", bead3vrDesc)
 		other.ClosedAt = closed
 
-		matches := findDuplicateMatches(
-			newDuplicateCandidate("gt-rl0", beadRl0Title, "open", beadRl0Desc),
-			[]duplicateCandidate{other})
+		candidate := newDuplicateCandidate("gt-rl0", beadRl0Title, "open", beadRl0Desc)
+		matches := findDuplicateMatches(candidate, []duplicateCandidate{other})
 
-		decision := decideSlingDuplicates("gt-rl0", matches)
+		decision := decideSlingDuplicates(candidate, matches)
 		if decision.Blocked {
 			t.Fatalf("a CLOSED overlap must never refuse the sling (gt-4k3fj.5); report was:\n%s", decision.Message)
 		}
@@ -242,9 +244,8 @@ func TestSlingDuplicateCheckCatchesTonightPairs(t *testing.T) {
 
 		live := other
 		live.Status = "in_progress"
-		liveDecision := decideSlingDuplicates("gt-rl0", findDuplicateMatches(
-			newDuplicateCandidate("gt-rl0", beadRl0Title, "open", beadRl0Desc),
-			[]duplicateCandidate{live}))
+		liveDecision := decideSlingDuplicates(candidate, findDuplicateMatches(
+			candidate, []duplicateCandidate{live}))
 		if !liveDecision.Blocked {
 			t.Fatalf("the same overlap with live work must refuse; report was:\n%s", liveDecision.Message)
 		}
@@ -277,11 +278,11 @@ func TestSlingDuplicateNegativeControl(t *testing.T) {
 	if len(matches) == 0 {
 		t.Fatal("expected a file-only overlap to be reported")
 	}
-	if matches[0].Blocking() {
+	if matches[0].Blocking(candidate) {
 		t.Fatal("a shared file with no shared test must not block")
 	}
 
-	decision := decideSlingDuplicates(candidate.ID, matches)
+	decision := decideSlingDuplicates(candidate, matches)
 	if decision.Blocked {
 		t.Fatalf("distinct bead sharing one file must pass; got refusal:\n%s", decision.Message)
 	}
@@ -317,7 +318,7 @@ func TestSlingDuplicateIgnoresPackageFixtures(t *testing.T) {
 		if len(matches) != 1 {
 			t.Fatalf("expected the shared file to be reported, got %+v", matches)
 		}
-		if matches[0].Blocking() {
+		if matches[0].Blocking(candidate) {
 			t.Fatalf("a shared TestMain must not refuse a sling: %+v", matches[0])
 		}
 		for _, m := range matches {
@@ -325,7 +326,7 @@ func TestSlingDuplicateIgnoresPackageFixtures(t *testing.T) {
 				t.Fatalf("shared tests = %v, want none: TestMain is a package fixture", m.SharedTests)
 			}
 		}
-		decision := decideSlingDuplicates(candidate.ID, matches)
+		decision := decideSlingDuplicates(candidate, matches)
 		if decision.Blocked {
 			t.Fatalf("distinct beads citing TestMain must pass; got refusal:\n%s", decision.Message)
 		}
@@ -337,7 +338,7 @@ func TestSlingDuplicateIgnoresPackageFixtures(t *testing.T) {
 	t.Run("a real shared test still refuses", func(t *testing.T) {
 		candidate, other := newPair("TestRunDoneSlotWait", "TestRunDoneSlotWait")
 		matches := findDuplicateMatches(candidate, []duplicateCandidate{other})
-		decision := decideSlingDuplicates(candidate.ID, matches)
+		decision := decideSlingDuplicates(candidate, matches)
 		if !decision.Blocked {
 			t.Fatalf("the same pair sharing a real test must refuse; report was:\n%s", decision.Message)
 		}
@@ -346,7 +347,8 @@ func TestSlingDuplicateIgnoresPackageFixtures(t *testing.T) {
 
 func TestDecideSlingDuplicates(t *testing.T) {
 	t.Parallel()
-	if got := decideSlingDuplicates("gt-x", nil); got.Message != "" || got.Blocked {
+	candidate := newDuplicateCandidate("gt-x", "sling the thing", "open")
+	if got := decideSlingDuplicates(candidate, nil); got.Message != "" || got.Blocked {
 		t.Errorf("no matches should produce no report, got %+v", got)
 	}
 
@@ -359,7 +361,7 @@ func TestDecideSlingDuplicates(t *testing.T) {
 		SharedFiles: []string{"internal/cmd/sling.go"},
 	}
 
-	both := decideSlingDuplicates("gt-x", []duplicateMatch{warning, blocking})
+	both := decideSlingDuplicates(candidate, []duplicateMatch{warning, blocking})
 	if !both.Blocked {
 		t.Error("a test-name overlap must block even alongside a file-only overlap")
 	}
@@ -376,7 +378,7 @@ func TestDecideSlingDuplicates(t *testing.T) {
 			SharedFiles: []string{"internal/cmd/sling.go"},
 		})
 	}
-	if got := decideSlingDuplicates("gt-x", many); !strings.Contains(got.Message, "and 3 more") {
+	if got := decideSlingDuplicates(candidate, many); !strings.Contains(got.Message, "and 3 more") {
 		t.Errorf("expected the report to summarize the remainder:\n%s", got.Message)
 	}
 }
@@ -396,7 +398,7 @@ func TestFindDuplicateMatchesSkipsSelfAndEmpty(t *testing.T) {
 	if matches[0].Bead.ID != "gt-match" {
 		t.Errorf("matched the wrong bead: %s", matches[0].Bead.ID)
 	}
-	if !matches[0].Blocking() {
+	if !matches[0].Blocking(candidate) {
 		t.Error("TestFoo overlap should block")
 	}
 }
@@ -466,8 +468,10 @@ func TestDuplicateIntraBatchDetection(t *testing.T) {
 	})
 
 	beadsDir := t.TempDir()
-	first := newDuplicateCandidate("gt-3vr", bead3vrTitle, "open", bead3vrDesc)
-	second := newDuplicateCandidate("gt-rl0", beadRl0Title, "open", beadRl0Desc)
+	// gt-3vr was filed first, so the ready board reaches it first; the guard
+	// ranks the two the same way.
+	first := ranked(newDuplicateCandidate("gt-3vr", bead3vrTitle, "open", bead3vrDesc), 1, "2026-10-15T09:00:00Z")
+	second := ranked(newDuplicateCandidate("gt-rl0", beadRl0Title, "open", beadRl0Desc), 1, "2026-10-15T10:00:00Z")
 
 	// First dispatch sees an empty pool and finds nothing.
 	matches := findDuplicateMatches(first, mustPool(t, pools, beadsDir))
@@ -480,7 +484,7 @@ func TestDuplicateIntraBatchDetection(t *testing.T) {
 
 	// The second dispatch in the same batch now sees it.
 	matches = findDuplicateMatches(second, mustPool(t, pools, beadsDir))
-	if len(matches) != 1 || !matches[0].Blocking() {
+	if len(matches) != 1 || !matches[0].Blocking(second) {
 		t.Fatalf("expected the intra-batch duplicate to be caught, got %+v", matches)
 	}
 	if matches[0].Bead.ID != "gt-3vr" {
@@ -530,7 +534,10 @@ func TestCheckSlingDuplicatesSeesOverlapInPoolDesignNotes(t *testing.T) {
 		}, beadsDir)
 	})
 
-	info := &beadInfo{Title: "Fix TestFoo flake", Status: "open", Description: "TestFoo fails after the refactor."}
+	// gt-pool1 is the older bead, so it comes first in dispatch order and its
+	// overlap refuses the candidate rather than the other way round.
+	info := &beadInfo{Title: "Fix TestFoo flake", Status: "open", Description: "TestFoo fails after the refactor.",
+		CreatedAt: "2026-10-15T10:00:00Z"}
 	candidate, matches, err := pools.check(townRoot, "gt-newbead", info)
 	if err != nil {
 		t.Fatalf("checkSlingDuplicates: %v", err)
@@ -538,7 +545,7 @@ func TestCheckSlingDuplicatesSeesOverlapInPoolDesignNotes(t *testing.T) {
 	if candidate == nil {
 		t.Fatal("a bead naming TestFoo should be checked")
 	}
-	decision := decideSlingDuplicates("gt-newbead", matches)
+	decision := decideSlingDuplicates(*candidate, matches)
 	if !decision.Blocked {
 		t.Fatalf("expected a refusal: the shared test lives in the pool bead's design/notes, got %+v", matches)
 	}
@@ -583,13 +590,17 @@ func TestCheckSlingDuplicatesIgnoresDependencyChain(t *testing.T) {
 		}, beadsDir)
 	})
 
+	// The pool beads carry the lower priority number, so both come first in
+	// dispatch order and neither is let past on rank; the dependency chain is
+	// the only thing this test varies.
 	info := &beadInfo{
 		Title:        "plan: base step",
 		Status:       "open",
+		Priority:     2,
 		Description:  "TestSharedStep fails at the base of the plan.",
 		Dependencies: []beads.IssueDep{{ID: "gt-plan.3", DependencyType: "blocks"}},
 	}
-	_, matches, err := pools.check(townRoot, "gt-plan.1", info)
+	candidate, matches, err := pools.check(townRoot, "gt-plan.1", info)
 	if err != nil {
 		t.Fatalf("checkSlingDuplicates: %v", err)
 	}
@@ -604,7 +615,7 @@ func TestCheckSlingDuplicatesIgnoresDependencyChain(t *testing.T) {
 	if strings.Join(got, ",") != "gt-plan.7,gt-rival" {
 		t.Fatalf("matches = %v, want [gt-plan.7 gt-rival]", got)
 	}
-	decision := decideSlingDuplicates("gt-plan.1", matches)
+	decision := decideSlingDuplicates(*candidate, matches)
 	if !decision.Blocked {
 		t.Fatalf("the unrelated bead must still refuse the sling:\n%s", decision.Message)
 	}
@@ -649,13 +660,15 @@ func (s listLikeBD) ShowMultiple(ids []string) (map[string]*beads.Issue, error) 
 }
 
 // designNotesDuplicateStore holds gt-pool1, open, whose list row is silent
-// on TestFoo; only its design and notes name it.
+// on TestFoo; only its design and notes name it. It is older than the
+// candidate that shares the test, so it comes first in dispatch order.
 func designNotesDuplicateStore() listLikeBD {
 	db := beadsfake.New()
 	db.Seed(beads.Issue{ID: "gt-pool1", Title: "Some pool bead", Status: "open",
 		Description: "Unrelated prose, no test names here.",
 		Design:      "Root cause: TestFoo fails intermittently under load.",
-		Notes:       "Added regression coverage: TestFoo."})
+		Notes:       "Added regression coverage: TestFoo.",
+		CreatedAt:   "2026-10-15T09:00:00Z"})
 	return listLikeBD{Client: db}
 }
 
@@ -687,8 +700,9 @@ func TestSchedulerSlingParamsRunDuplicateCheck(t *testing.T) {
 
 // TestCapacityDispatchDuplicateRefusalIsAFailure pins the gt-eisp2 ruling: a
 // duplicate refusal at the capacity dispatcher counts toward the context's
-// circuit breaker instead of leaving it queued. It stays true until the
-// overlapping bead closes, so a silent deferral would stall the bead.
+// circuit breaker instead of leaving it queued. The refusal clears itself only
+// once the overlapping bead is slung or closes, with no bound on how long that
+// takes, so a silent deferral would stall the bead.
 func TestCapacityDispatchDuplicateRefusalIsAFailure(t *testing.T) {
 	t.Parallel()
 	refusal := fmt.Errorf("sling failed: %w", errors.New("refusing to sling gt-3vr: duplicate content of gt-rl0 (use --force)"))
@@ -704,6 +718,15 @@ func newDuplicateCandidate(id, title, status string, parts ...string) duplicateC
 		Status: status,
 		Refs:   extractContentRefs(append([]string{title}, parts...)...),
 	}
+}
+
+// ranked sets the dispatch-order keys the overlap guard ranks unstarted beads
+// by, so a fixture states which of two open beads the ready board reaches
+// first (gt-nlkba) instead of leaving it to the ID tie-break.
+func ranked(c duplicateCandidate, priority int, createdAt string) duplicateCandidate {
+	c.Priority = priority
+	c.CreatedAt = createdAt
+	return c
 }
 
 func mustPool(t *testing.T, pools *duplicatePools, beadsDir string) []duplicateCandidate {
@@ -808,19 +831,25 @@ func TestListDuplicateCandidates_EnrichmentSuccessIsQuiet(t *testing.T) {
 	}
 }
 
-// TestDuplicateOverlapBlocksOnlyLiveWork: only open, in_progress and hooked
-// beads refuse a sling; closed (the gt-bivxl case) and parked statuses warn.
-func TestDuplicateOverlapBlocksOnlyLiveWork(t *testing.T) {
+// TestDuplicateOverlapRefusalByStatus: in_progress and hooked beads refuse a
+// sling outright; closed (the gt-bivxl case) and parked statuses warn. An open
+// bead is neither — it refuses only on rank, which
+// TestOpenClusterDispatchesOneAtATime covers (gt-nlkba) — so here, where the
+// candidate comes first on the board, it does not refuse.
+func TestDuplicateOverlapRefusalByStatus(t *testing.T) {
 	t.Parallel()
+	// The overlapping bead below is numbered behind the candidate, so nothing
+	// here is let past on rank and the status is the only variable.
+	candidate := ranked(duplicateCandidate{ID: "gt-candidate", Status: "open"}, 1, "2026-10-15T12:00:00Z")
 	for status, want := range map[string]bool{
-		"open": true, "in_progress": true, "hooked": true,
+		"open": false, "in_progress": true, "hooked": true,
 		"closed": false, "pinned": false, "blocked": false, "deferred": false, "tombstone": false,
 	} {
-		m := duplicateMatch{Bead: duplicateCandidate{ID: "gt-1", Status: status}, SharedTests: []string{"TestFoo"}}
-		if got := m.Blocking(); got != want {
+		m := duplicateMatch{Bead: ranked(duplicateCandidate{ID: "gt-z1", Status: status}, 2, "2026-10-15T12:00:00Z"), SharedTests: []string{"TestFoo"}}
+		if got := m.Blocking(candidate); got != want {
 			t.Errorf("status %s: Blocking() = %v, want %v", status, got, want)
 		}
-		if got := decideSlingDuplicates("gt-x", []duplicateMatch{m}).Blocked; got != want {
+		if got := decideSlingDuplicates(candidate, []duplicateMatch{m}).Blocked; got != want {
 			t.Errorf("status %s: decision blocked = %v, want %v", status, got, want)
 		}
 	}
@@ -829,12 +858,115 @@ func TestDuplicateOverlapBlocksOnlyLiveWork(t *testing.T) {
 		{Bead: duplicateCandidate{ID: "gt-fqdj9", Status: "closed", ClosedAt: closedAt}, SharedTests: []string{"TestA"}},
 		{Bead: duplicateCandidate{ID: "gt-ty2fy", Status: "closed"}, SharedTests: []string{"TestB"}},
 	}
-	if d := decideSlingDuplicates("gt-bivxl", twoClosed); d.Blocked {
+	if d := decideSlingDuplicates(ranked(duplicateCandidate{ID: "gt-bivxl", Status: "open"}, 1, "2026-10-15T12:00:00Z"), twoClosed); d.Blocked {
 		t.Fatalf("gt-bivxl must not be refused over two closed beads:\n%s", d.Message)
 	}
 }
 
-// TestDuplicateOverlapSkipsEpics (gt-fudap): an epic's prose enumerates its
+// TestOpenClusterDispatchesOneAtATime is the gt-nlkba acceptance bar, over the
+// cluster that actually wedged: gt-hqenc, gt-79opc and gt-t7p80 are ready, all
+// three name TestDangerousGuard_Integration in
+// internal/cmd/tap_guard_dangerous.go, and every one of them refused each of the
+// others for hours while a seat sat idle — each refusal saying it would clear
+// when "the overlapping bead closes", which none of them ever would. With the
+// refusal ordered, one pass of the decision per bead lets exactly one through:
+// the highest priority, then the oldest. The rest are then held against work in
+// flight, which is what happens today after a manual --force sling.
+func TestOpenClusterDispatchesOneAtATime(t *testing.T) {
+	t.Parallel()
+	const shared = "TestDangerousGuard_Integration fails in internal/cmd/tap_guard_dangerous.go."
+
+	cluster := []duplicateCandidate{
+		// P1 and newer: behind gt-79opc on age alone.
+		ranked(newDuplicateCandidate("gt-hqenc", "guard judges the argv after gt slot run --", "open", shared), 1, "2026-10-15T10:00:00Z"),
+		// P1 and oldest: the head of the cluster.
+		ranked(newDuplicateCandidate("gt-79opc", "guard blocks a nested command", "open", shared), 1, "2026-10-15T09:00:00Z"),
+		// The oldest of all, but P2: priority number wins over age.
+		ranked(newDuplicateCandidate("gt-t7p80", "guard tests are flaky under load", "open", shared), 2, "2026-10-15T08:00:00Z"),
+	}
+
+	// unblocked runs one pass of the decision the way the tick does: the ready
+	// board decides each bead it is holding, and everything else — the work
+	// already in flight — is only what those beads are compared against.
+	unblocked := func(pool []duplicateCandidate) []string {
+		var got []string
+		for _, c := range pool {
+			if c.Status != "open" {
+				continue
+			}
+			if !decideSlingDuplicates(c, findDuplicateMatches(c, pool)).Blocked {
+				got = append(got, c.ID)
+			}
+		}
+		return got
+	}
+
+	// Every bead is open, so nothing is live: exactly one is not refused, and
+	// it is the head.
+	if got := unblocked(cluster); len(got) != 1 || got[0] != "gt-79opc" {
+		t.Fatalf("unblocked = %v, want exactly [gt-79opc]", got)
+	}
+
+	// The head is slung: now it is work in flight, and the overlap with it
+	// refuses the other two whoever they are.
+	slung := append([]duplicateCandidate(nil), cluster...)
+	slung[1].Status = "hooked"
+	if got := unblocked(slung); len(got) != 0 {
+		t.Fatalf("unblocked = %v, want none: a hooked head must hold the rest", got)
+	}
+
+	// A live member refuses every open peer in the cluster regardless of order,
+	// including the one the board would have reached first.
+	live := append([]duplicateCandidate(nil), cluster...)
+	live[2].Status = "in_progress"
+	if got := unblocked(live); len(got) != 0 {
+		t.Fatalf("unblocked = %v, want none: an in_progress peer holds the opens", got)
+	}
+}
+
+// TestPrecedesIsTheReadyBoardOrder pins the guard's ranking to the dispatcher's
+// (specdispatch.Order): lower priority number, then earlier creation, then bead
+// ID. If the two drift, the bead the guard lets through is not the one the
+// board would sling first, and the cluster deadlocks again (gt-nlkba).
+func TestPrecedesIsTheReadyBoardOrder(t *testing.T) {
+	t.Parallel()
+	rows := []struct {
+		id       string
+		priority int
+		created  string
+	}{
+		{"gt-b", 2, "2026-10-15T10:00:00Z"},
+		{"gt-a", 1, "2026-10-15T11:00:00Z"},
+		{"gt-c", 1, "2026-10-15T09:00:00.5Z"},
+		{"gt-e", 1, "2026-10-15T09:00:00Z"},
+		{"gt-d", 1, "2026-10-15T09:00:00Z"}, // level with gt-e: the ID breaks it
+		{"gt-f", 1, ""},                     // no creation time at all
+	}
+
+	guarded := make([]duplicateCandidate, 0, len(rows))
+	board := make([]specdispatch.Spec, 0, len(rows))
+	for _, r := range rows {
+		guarded = append(guarded, ranked(duplicateCandidate{ID: r.id}, r.priority, r.created))
+		board = append(board, specdispatch.Spec{ID: r.id, Priority: r.priority, CreatedAt: r.created})
+	}
+	sort.Slice(guarded, func(i, j int) bool { return sling.Precedes(guarded[i], guarded[j]) })
+	specdispatch.Order(board)
+
+	guardOrder := make([]string, 0, len(guarded))
+	for _, c := range guarded {
+		guardOrder = append(guardOrder, c.ID)
+	}
+	specOrder := make([]string, 0, len(board))
+	for _, s := range board {
+		specOrder = append(specOrder, s.ID)
+	}
+
+	for i := range board {
+		if guarded[i].ID != board[i].ID {
+			t.Fatalf("guard order %v, board order %v", guardOrder, specOrder)
+		}
+	}
+} // TestDuplicateOverlapSkipsEpics (gt-fudap): an epic's prose enumerates its
 // children's tests and files rather than naming one defect, so a shared test
 // name against an epic says nothing about duplication. The seat-refill failure
 // behind this bead slung task gt-idv8s, which shares TestIntegration with open
@@ -855,16 +987,18 @@ func TestDuplicateOverlapSkipsEpics(t *testing.T) {
 	if len(matches) != 0 {
 		t.Fatalf("an epic must not be an overlap candidate, got %+v", matches)
 	}
-	if d := decideSlingDuplicates(candidate.ID, matches); d.Blocked {
+	if d := decideSlingDuplicates(candidate, matches); d.Blocked {
 		t.Fatalf("an epic overlap must not refuse the sling:\n%s", d.Message)
 	}
 
 	// Control: the same text on a plain task still refuses, so the exclusion is
-	// the epic type and not the shared test itself.
+	// the epic type and not the shared test itself. The task is live work, so
+	// the refusal does not depend on which of the two ranks first.
 	task := epic
 	task.IssueType = "task"
+	task.Status = "in_progress"
 	taskMatches := findDuplicateMatches(candidate, []duplicateCandidate{task})
-	if len(taskMatches) != 1 || !decideSlingDuplicates(candidate.ID, taskMatches).Blocked {
+	if len(taskMatches) != 1 || !decideSlingDuplicates(candidate, taskMatches).Blocked {
 		t.Fatalf("the same overlap with a non-epic task must still refuse; matches=%+v", taskMatches)
 	}
 }
