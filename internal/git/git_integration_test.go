@@ -2146,6 +2146,48 @@ func TestIntegrationBranchPreservationStatusCountsWorkAheadOfExactRemoteBranch(t
 	}
 }
 
+// Another clone advances the exact remote branch, so its tip is not in this
+// clone's object store, and the branch has no upstream and no targets. Every
+// comparison against that tip fails, so nothing was judged: the check must
+// report the failure rather than the zero-unpreserved verdict it used to
+// return off the stale ComparisonBase, which read as safe to discard.
+func TestIntegrationBranchPreservationStatusUnjudgeableExactBranchFailsClosed(t *testing.T) {
+	t.Parallel()
+	localDir, remoteDir, _ := initTestRepoWithRemote(t)
+	branch := "polecat/x"
+
+	otherDir := filepath.Join(t.TempDir(), "other")
+	runGit(t, filepath.Dir(otherDir), "clone", remoteDir, otherDir)
+	runGit(t, otherDir, "checkout", "-b", branch)
+	if err := os.WriteFile(filepath.Join(otherDir, "elsewhere.txt"), []byte("elsewhere\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	runGit(t, otherDir, "add", "elsewhere.txt")
+	runGit(t, otherDir, "commit", "-m", "elsewhere")
+	runGit(t, otherDir, "push", "origin", branch)
+
+	runGit(t, localDir, "checkout", "-b", branch)
+	if err := os.WriteFile(filepath.Join(localDir, "local-only.txt"), []byte("local\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	runGit(t, localDir, "add", "local-only.txt")
+	runGit(t, localDir, "commit", "-m", "local only")
+
+	g := NewGit(localDir)
+	status, err := g.BranchPreservationStatus(branch, "origin", nil)
+	if err == nil && status.UnpreservedPatchCount == 0 {
+		t.Fatalf("BranchPreservationStatus = %+v, nil; want an error or unpreserved commits", status)
+	}
+	if err != nil && status.Preserved {
+		t.Errorf("BranchPreservationStatus = %+v, %v; an error must not carry a preserved verdict", status, err)
+	}
+
+	unpushed, err := g.UnpushedCommits()
+	if err == nil && unpushed == 0 {
+		t.Fatalf("UnpushedCommits = 0, nil; want an error or a count above 0")
+	}
+}
+
 // foreignPolecatUpstreamRepo builds the gt-y6w8y state: origin/main has moved
 // past origin/polecat/shale/x, and a local polecat/quartz/x branch (never
 // pushed) is configured to track that other polecat's branch. HEAD sits on

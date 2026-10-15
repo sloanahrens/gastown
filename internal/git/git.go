@@ -4045,7 +4045,10 @@ func (g *Git) branchPreservationStatusWith(localBranch, remote string, targets [
 			result = candidate
 		}
 	}
-	if judged || result.ComparisonBase != "" {
+	// Test judged alone: a ComparisonBase named by the exact-branch arm proves
+	// nothing was compared, and returning it as a verdict read an unreachable
+	// remote tip as zero unpreserved commits.
+	if judged {
 		return result, nil
 	}
 	if lastErr != nil {
