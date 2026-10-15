@@ -419,6 +419,37 @@ func discardDescendants(b beads.Client, parentID string) (closed, forced int, er
 	return closed, forced, err
 }
 
+// closeMoleculeOfClosedBead ends the workflow an already-closed work bead
+// carries, steps then root and unforced, so a bead closed before gt done ran
+// (the nothing-to-implement route) does not leave its molecule and step wisps
+// open for good (gt-mddzp). endedBy is recorded as the root's close reason.
+// A root bd still refuses is reported, not forced: the bead is already closed
+// and no landing record is at stake.
+func closeMoleculeOfClosedBead(b beads.Client, beadID string, bead *beads.Issue, endedBy string) {
+	attachment := beads.ParseAttachmentFields(bead)
+	if attachment == nil || attachment.AttachedMolecule == "" {
+		return
+	}
+	molID := attachment.AttachedMolecule
+	// A molecule another path already ended (the landing, a burn) closes
+	// nothing here, which also keeps a second close of the same bead quiet.
+	if root, err := b.Show(molID); err != nil || root == nil || beads.IssueStatus(root.Status).IsTerminal() {
+		return
+	}
+	n, err := closeStepsThenRoot(b, molID, func() error {
+		if err := b.CloseWithReason(endedBy, molID); err != nil && !errors.Is(err, beads.ErrNotFound) {
+			return err
+		}
+		return nil
+	})
+	if n > 0 {
+		fmt.Fprintf(os.Stderr, "Closed %d molecule step(s) for %s\n", n, molID)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: couldn't close attached molecule %s of closed bead %s: %v\n", molID, beadID, err)
+	}
+}
+
 // closeStepsThenRoot closes a molecule whose work is claimed complete (gt
 // done, the patrol helpers): its descendants, unforced, and then the root
 // through closeRoot, but only when no descendant is left open. A step bd

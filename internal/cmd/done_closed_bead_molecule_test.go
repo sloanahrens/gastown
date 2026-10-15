@@ -81,6 +81,59 @@ func TestDoneClosedBeadWithFinishedMoleculeIsQuiet(t *testing.T) {
 	}
 }
 
+// TestDoneDeferredExitClosesMoleculeOfBeadClosedBeforeDone covers the report-only
+// route gt-x1d8s measured: the job closes its own bead (`gt bead close --reason=
+// "no-changes: ..."`, mol-deep-review's submit step) and then exits `gt done
+// --status DEFERRED`. The DEFERRED branch skipped the close block whole — the one
+// place that ended an attached molecule — and no landing follows a report-only
+// run, so the molecule root and its step wisps stayed open for good. One root per
+// scheduled run leaked that way; 25 of the 28 orphans measured on 2026-10-15 had
+// this shape.
+func TestDoneDeferredExitClosesMoleculeOfBeadClosedBeforeDone(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	db.Seed(doneAgentBead(),
+		beads.Issue{ID: "gt-base-123", Title: "Base bead", Status: string(beads.StatusClosed),
+			CloseReason: "no-changes: report-only deep review, digest and cursor posted",
+			Description: "attached_molecule: gt-wisp-xyz"})
+	db.Seed(beads.Issue{ID: "gt-wisp-xyz", Title: "mol-deep-review", Status: "open", Ephemeral: true})
+	seedChildren(t, db, "gt-wisp-xyz",
+		beads.Issue{ID: "gt-step-1", Title: "Step 1", Status: "open", Ephemeral: true},
+		beads.Issue{ID: "gt-step-2", Title: "Step 2", Status: "open", Ephemeral: true})
+
+	rec := runDoneStateUpdateForExit(t, db, nil, ExitDeferred)
+
+	got := rec.closed()
+	sort.Strings(got)
+	want := []string{"gt-step-1", "gt-step-2", "gt-wisp-xyz"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("closed = %v, want the molecule's steps and root %v", got, want)
+	}
+	for _, id := range want {
+		if is, err := db.Show(id); err != nil || is.Status != "closed" {
+			t.Errorf("%s = %+v, %v; want closed", id, is, err)
+		}
+	}
+}
+
+// TestDoneDeferredExitLeavesOpenBeadsMoleculeAlone: DEFERRED means work paused,
+// not done. A bead that is still open keeps its molecule for the session that
+// resumes it.
+func TestDoneDeferredExitLeavesOpenBeadsMoleculeAlone(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	db.Seed(doneAgentBead(),
+		beads.Issue{ID: "gt-base-123", Title: "Base bead", Status: string(beads.StatusHooked),
+			Description: "attached_molecule: gt-wisp-xyz"})
+	db.Seed(beads.Issue{ID: "gt-wisp-xyz", Title: "mol-polecat-work", Status: "open", Ephemeral: true})
+
+	rec := runDoneStateUpdateForExit(t, db, nil, ExitDeferred)
+
+	if got := rec.closed(); len(got) != 0 {
+		t.Fatalf("closed = %v; a DEFERRED exit leaves an open bead and its molecule open", got)
+	}
+}
+
 // TestDoneClosedBeadWithoutMoleculeClosesNothing: a closed bead that carries no
 // attachment is left alone — the close block's old behavior, kept.
 func TestDoneClosedBeadWithoutMoleculeClosesNothing(t *testing.T) {

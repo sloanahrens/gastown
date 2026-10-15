@@ -251,3 +251,53 @@ func TestBeadCloseAndReopen(t *testing.T) {
 		t.Errorf("a refused batch still closed %s", a.ID)
 	}
 }
+
+// TestBeadCloseEndsTheAttachedMolecule: a work bead closed through this verb
+// takes its molecule with it, steps first. The polecat that closes its own bead
+// to report no-changes (mol-deep-review's submit step) then exits without a
+// landing, so nothing else would end the molecule: gt done's close block needs a
+// COMPLETED or ESCALATED exit and a landed bead's molecule belongs to the
+// landing (gt-x1d8s).
+func TestBeadCloseEndsTheAttachedMolecule(t *testing.T) {
+	t.Parallel()
+	v, fake, _ := testBeadVerbs("gastown/polecats/opal")
+	fake.Seed(beads.Issue{ID: "gt-work-1", Title: "Work", Status: string(beads.StatusHooked),
+		Description: "attached_molecule: gt-wisp-mol1\nattached_formula: mol-deep-review"})
+	fake.Seed(beads.Issue{ID: "gt-wisp-mol1", Title: "mol-deep-review", Status: "open", Ephemeral: true})
+	seedChildren(t, fake, "gt-wisp-mol1",
+		beads.Issue{ID: "gt-step-1", Title: "Step 1", Status: "open", Ephemeral: true},
+		beads.Issue{ID: "gt-step-2", Title: "Step 2", Status: "open", Ephemeral: true})
+
+	if err := v.close("no-changes: report-only deep review", "gt-work-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range []string{"gt-step-1", "gt-step-2", "gt-wisp-mol1"} {
+		if got := mustShowBead(t, fake, id); got.Status != "closed" {
+			t.Errorf("%s = %s, want closed", id, got.Status)
+		}
+	}
+	if got := mustShowBead(t, fake, "gt-work-1"); got.CloseReason != "no-changes: report-only deep review" {
+		t.Errorf("work bead close reason = %q, want the caller's", got.CloseReason)
+	}
+}
+
+// TestBeadCloseWithoutAttachmentLeavesMoleculesAlone: a bead carrying no
+// attachment closes exactly as before — no molecule is guessed at.
+func TestBeadCloseWithoutAttachmentLeavesMoleculesAlone(t *testing.T) {
+	t.Parallel()
+	v, fake, _ := testBeadVerbs("gastown/polecats/opal")
+	plain := mustCreateBead(t, fake, beads.CreateOptions{Title: "plain"})
+	mol := mustCreateBead(t, fake, beads.CreateOptions{Title: "mol-polecat-work"})
+
+	if err := v.close("sub-issue done", plain.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := mustShowBead(t, fake, plain.ID); got.Status != "closed" {
+		t.Errorf("%s = %s, want closed", plain.ID, got.Status)
+	}
+	if got := mustShowBead(t, fake, mol.ID); got.Status == "closed" {
+		t.Errorf("molecule %s was closed by a close of %s", mol.ID, plain.ID)
+	}
+}

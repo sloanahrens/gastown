@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/style"
 )
 
 // bead.go is `gt bead`, the agent's write surface on beads (deep review D1
@@ -493,11 +494,33 @@ func (v *beadVerbs) close(reason string, ids ...string) error {
 	} else {
 		err = v.client.CloseWithReason(reason, ids...)
 	}
+	// A closed work bead ends its molecule with it. This is the only path that
+	// ends the bead for a session that closes its own to report no-changes and
+	// then exits without a landing (`gt bead close --reason="no-changes: ..."`),
+	// and nothing after it ends the molecule: gt done's close block needs a
+	// COMPLETED or ESCALATED exit, and a landed bead's molecule is the landing's
+	// (gt-x1d8s).
+	v.endMoleculesOf(beads.ClosedIDs(ids, err))
 	if err != nil {
 		return err
 	}
 	_, err = fmt.Fprintf(v.out, "✓ Closed %s\n", strings.Join(ids, " "))
 	return err
+}
+
+// endMoleculesOf ends the workflow each of ids carries in its attached_molecule
+// field. Only the beads a close actually closed arrive here, and only a bead
+// carrying an attachment acts, so a plain close is unchanged. Failures are
+// warnings: the close the caller asked for already happened.
+func (v *beadVerbs) endMoleculesOf(ids []string) {
+	for _, id := range ids {
+		is, err := v.client.Show(id)
+		if err != nil {
+			style.PrintWarning("reading %s to end its molecule: %v", id, err)
+			continue
+		}
+		closeMoleculeOfClosedBead(v.client, id, is, "work bead closed")
+	}
 }
 
 func (v *beadVerbs) reopen(ids ...string) error {
