@@ -1107,12 +1107,16 @@ func (d *Daemon) Run() (err error) {
 
 	// Start the overseer_report ticker if enabled (default off, gt-a6fg7). The
 	// report is one file per interval slot, so the run at startup writes the
-	// current slot's file unless an earlier run already did.
+	// current slot's file unless an earlier run already did. The ticker fires
+	// several times a slot because it is not aligned to the slots: one tick per
+	// interval, a late one could land in the slot after the one it was meant for
+	// and leave that slot without a file. A run in a slot that has its file
+	// writes nothing, so the extra ticks cost one directory read.
 	var overseerReportTicker *time.Ticker
 	var overseerReportChan <-chan time.Time
 	if d.isPatrolActive("overseer_report") {
 		interval := overseerReportInterval(d.patrolConfig)
-		overseerReportTicker = time.NewTicker(interval)
+		overseerReportTicker = time.NewTicker(overseerReportTickEvery(interval))
 		overseerReportChan = overseerReportTicker.C
 		defer overseerReportTicker.Stop()
 		d.logger.Printf("Overseer report ticker started (interval %v)", interval)

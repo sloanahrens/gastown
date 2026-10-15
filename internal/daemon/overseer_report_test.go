@@ -282,8 +282,46 @@ func TestOverseerReportNeverReplacesAnExistingFile(t *testing.T) {
 
 	w2 := newOverseerWorld(t, "2026-10-14T20:17:00Z")
 	w2.seedReport(t, "20261014T203000Z")
-	if path := w2.run(t); path != "" {
+	if path, _ := writeOverseerReport(w2.town, 15*time.Minute, w2.seams()); path != "" {
 		t.Errorf("wrote %s although a later report exists", path)
+	}
+}
+
+// A report file named for an instant the clock has not reached holds the
+// patrol off, and the run says so instead of returning empty and silent.
+func TestWriteOverseerReportFutureFileStillWrites(t *testing.T) {
+	t.Parallel()
+	w := newOverseerWorld(t, "2026-10-14T20:17:00Z")
+	future := w.seedReport(t, "20261014T230000Z")
+
+	path, err := writeOverseerReport(w.town, 15*time.Minute, w.seams())
+	if path != "" {
+		t.Errorf("wrote %s under a future-dated report", path)
+	}
+	if err == nil || !strings.Contains(err.Error(), "20261014T230000Z") || !strings.Contains(err.Error(), "dated after now") {
+		t.Errorf("err = %v, want it to name the future-dated report", err)
+	}
+	if got := readOverseerFile(t, future); got != "earlier report\n" {
+		t.Errorf("the future-dated report was changed to %q", got)
+	}
+
+	// A report for the slot the clock is in is covered, not a future one.
+	w.now = overseerAt("2026-10-14T23:05:00Z")
+	if path, err := writeOverseerReport(w.town, 15*time.Minute, w.seams()); path != "" || err != nil {
+		t.Errorf("run in the covered slot = %q, %v, want nothing and no error", path, err)
+	}
+}
+
+func TestOverseerReportTickEveryFiresSeveralTimesASlot(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ interval, want time.Duration }{
+		{15 * time.Minute, 225 * time.Second},
+		{time.Hour, 15 * time.Minute},
+		{3 * time.Second, 3 * time.Second},
+	} {
+		if got := overseerReportTickEvery(tc.interval); got != tc.want {
+			t.Errorf("overseerReportTickEvery(%v) = %v, want %v", tc.interval, got, tc.want)
+		}
 	}
 }
 
@@ -449,6 +487,58 @@ func TestOverseerReportLeftDryRunErrors(t *testing.T) {
 	}
 	if strings.Contains(text, "LEFT\n  (none)") {
 		t.Errorf("LEFT reads as an empty queue:\n%s", text)
+	}
+}
+
+// A dry run that decided some beads and failed to read another keeps the
+// decided rows and says how many errors it carried; only a run that decided
+// nothing is unavailable.
+func TestOverseerReportLeftPartialErrorsKeepRows(t *testing.T) {
+	t.Parallel()
+	left, err := overseerReportLeftFrom(specDispatchTickReport{
+		Dispatched: []specDispatchTickEntry{{Bead: "gt-a", Rig: "r", Line: "gt-a: would sling to r on x (y)"}},
+		Skipped:    []specDispatchTickEntry{{Bead: "gt-c", Rig: "r", Line: "gt-c: unshaped: missing ## Gate"}},
+		Errors:     []string{"gt-z: bd show timed out"},
+	})
+	if err != nil {
+		t.Fatalf("a partial failure made LEFT unavailable: %v", err)
+	}
+	if len(left.Next) != 1 || len(left.Held) != 1 || left.Errors != 1 {
+		t.Fatalf("left = %+v, want one next, one held and one error", left)
+	}
+
+	w := newOverseerWorld(t, "2026-10-14T20:17:33Z")
+	w.left = func() (townreport.DispatchLeft, error) { return left, nil }
+	slot := overseerAt("2026-10-14T20:15:00Z")
+	text := w.seams().digest(slot, slot.Add(-15*time.Minute)).Render()
+	for _, want := range []string{"next  gt-a", "held  gt-c", "reported 1 error(s)"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("LEFT lacks %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "unavailable (dispatch dry run") {
+		t.Errorf("LEFT reads as unavailable:\n%s", text)
+	}
+}
+
+// A bead pinned to an agent the pool has no seat for never gets one, so it is
+// held, where a bead waiting on a full seat is next.
+func TestOverseerReportLeftUnservablePinHeld(t *testing.T) {
+	t.Parallel()
+	left, err := overseerReportLeftFrom(specDispatchTickReport{
+		Skipped: []specDispatchTickEntry{
+			{Bead: "gt-p", Rig: "r", Line: "gt-p: no seat: pinned to claude-opus, which has no seat in the pool: claude 2/2"},
+			{Bead: "gt-w", Rig: "r", Line: "gt-w: no seat: waiting for a claude seat: claude 2/2"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left.Held) != 1 || left.Held[0].Bead != "gt-p" {
+		t.Errorf("held = %+v, want the unservable pin", left.Held)
+	}
+	if len(left.Next) != 1 || left.Next[0].Bead != "gt-w" {
+		t.Errorf("next = %+v, want the bead waiting on a full seat", left.Next)
 	}
 }
 

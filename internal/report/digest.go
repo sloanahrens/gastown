@@ -50,12 +50,15 @@ type SeatWork struct {
 // reason. LabeledFailed counts the ready beads the dispatcher keeps out of its
 // queue because they carry the spec-dispatch-failed label; it reports only the
 // count, so they have no row. Hold is the reason the whole dispatcher is
-// parked, or empty.
+// parked, or empty. Errors counts the failures a dry run reported beside the
+// rows it did decide (one bead it could not read), so a short queue is not
+// read as a complete one.
 type DispatchLeft struct {
 	Hold          string
 	Next          []DispatchRow
 	Held          []DispatchRow
 	LabeledFailed int
+	Errors        int
 }
 
 // DispatchRow is one bead the dry run named.
@@ -259,6 +262,9 @@ func (d Digest) left() []string {
 	lines = append(lines, capRows(held, digestHeldRows)...)
 	if l.LabeledFailed > 0 {
 		lines = append(lines, fmt.Sprintf("held  %d by label %s (stuck until the label is cleared)", l.LabeledFailed, constants.LabelSpecDispatchFailed))
+	}
+	if l.Errors > 0 {
+		lines = append(lines, fmt.Sprintf("note  the dry run reported %d error(s); this queue may be incomplete", l.Errors))
 	}
 	return lines
 }

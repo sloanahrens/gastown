@@ -604,3 +604,46 @@ func TestHostDockerProbeFailureReplacesKeptStackDown(t *testing.T) {
 		t.Errorf("stack-down items = %d, want 1", n)
 	}
 }
+
+// A docker ps that fails because the tick's own context is spent says nothing
+// about docker, so three such ticks are not three beats toward the stack being
+// down.
+func TestHostDockerProbeExpiredContextNotCounted(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	h := healthyHost()
+	h.containersErr = context.DeadlineExceeded
+	f.src.host = h
+
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+	for beat := 0; beat < attentionDockerProbeDownBeats+1; beat++ {
+		items, err := f.src.collectHostDocker(expired)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, it := range items {
+			if it.Key == hostRuleDockerDown {
+				t.Fatalf("beat %d raised %s on a context that was already expired", beat+1, hostRuleDockerDown)
+			}
+		}
+	}
+	if f.src.dockerProbeFails != 0 {
+		t.Errorf("dockerProbeFails = %d, want the expired ticks uncounted", f.src.dockerProbeFails)
+	}
+
+	// A docker ps that fails on a live context still counts.
+	h.containersErr = errors.New("Cannot connect to the Docker daemon")
+	var items []attention.Item
+	for beat := 0; beat < attentionDockerProbeDownBeats; beat++ {
+		items, _ = f.src.collectHostDocker(context.Background())
+	}
+	found := false
+	for _, it := range items {
+		found = found || it.Key == hostRuleDockerDown
+	}
+	if !found {
+		t.Errorf("items = %+v, want %s after %d real failures", items, hostRuleDockerDown, attentionDockerProbeDownBeats)
+	}
+}

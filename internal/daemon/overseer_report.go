@@ -59,6 +59,16 @@ func overseerReportInterval(config *DaemonPatrolConfig) time.Duration {
 	return defaultOverseerReportInterval
 }
 
+// overseerReportTickEvery is how often the patrol ticker fires for a report
+// interval: four times a slot, so every slot sees a tick whatever the
+// ticker's phase.
+func overseerReportTickEvery(interval time.Duration) time.Duration {
+	if tick := interval / 4; tick >= time.Second {
+		return tick
+	}
+	return interval
+}
+
 // overseerReportSeams are the report's reads and its clock. A test sets all of
 // them; production fills them in (overseerReportProdSeams).
 type overseerReportSeams struct {
@@ -118,6 +128,13 @@ func writeOverseerReport(townRoot string, interval time.Duration, s *overseerRep
 		return "", err
 	}
 	if !newest.IsZero() && !newest.Before(slot) {
+		if newest.After(now) {
+			// Not a covered slot: a report named for an instant the clock has
+			// not reached, which the run waits behind. Say so, or the patrol
+			// looks alive while writing nothing.
+			return "", fmt.Errorf("newest report %s is dated after now (%s), so no report is written until the clock reaches it",
+				newest.UTC().Format(overseerReportLayout), now.UTC().Format(overseerReportLayout))
+		}
 		return "", nil
 	}
 	since := prev
@@ -298,17 +315,20 @@ func (d *Daemon) overseerReportLeft() (townreport.DispatchLeft, error) {
 //
 // A dry run that exits 0 can still carry Errors (an unreadable roster, a
 // failed board read), and then its empty queue means "could not read", not "no
-// ready work". Such a report is an error, so LEFT renders as unavailable the
-// way a failed command does.
+// ready work". Such a report with no decided bead is an error, so LEFT renders
+// as unavailable the way a failed command does: an unreadable roster stops the
+// run before it decides anything. Once any bead was decided, an error is one
+// bead's failed read, and LEFT keeps the decided rows and carries the count.
 func overseerReportLeftFrom(r specDispatchTickReport) (townreport.DispatchLeft, error) {
-	if len(r.Errors) > 0 {
+	decided := len(r.Dispatched)+len(r.Skipped)+len(r.Refused)+len(r.Planning)+len(r.Failed) > 0 || r.LabeledFailed > 0
+	if len(r.Errors) > 0 && !decided {
 		err := fmt.Errorf("dispatch dry run reported errors: %s", r.Errors[0])
 		if more := len(r.Errors) - 1; more > 0 {
 			err = fmt.Errorf("%w (+%d more)", err, more)
 		}
 		return townreport.DispatchLeft{}, err
 	}
-	left := townreport.DispatchLeft{Hold: r.Hold, LabeledFailed: r.LabeledFailed}
+	left := townreport.DispatchLeft{Hold: r.Hold, LabeledFailed: r.LabeledFailed, Errors: len(r.Errors)}
 	row := func(e specDispatchTickEntry, prefix string) townreport.DispatchRow {
 		return townreport.DispatchRow{Bead: e.Bead, Rig: e.Rig, Text: prefix + specSkipReason(e)}
 	}
@@ -317,7 +337,10 @@ func overseerReportLeftFrom(r specDispatchTickReport) (townreport.DispatchLeft, 
 	}
 	for _, e := range r.Skipped {
 		reason := specSkipReason(e)
-		if strings.HasPrefix(reason, "clean, per-tick limit") || strings.HasPrefix(reason, "no seat:") {
+		// A pin to an agent the pool lacks waits on no seat that will free up,
+		// so it is held, not next.
+		waitsForSeat := strings.HasPrefix(reason, "no seat:") && !strings.HasPrefix(reason, "no seat: pinned to ")
+		if strings.HasPrefix(reason, "clean, per-tick limit") || waitsForSeat {
 			left.Next = append(left.Next, row(e, ""))
 			continue
 		}
