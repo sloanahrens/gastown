@@ -44,7 +44,8 @@ func (m *memQuestionStore) Create(o beads.CreateOptions) (*beads.Issue, error) {
 	m.nextID++
 	is := &beads.Issue{
 		ID: fmt.Sprintf("hq-t%d", m.nextID), Title: o.Title, Labels: o.Labels,
-		Description: o.Description, Status: "open", CreatedAt: m.now.Format(time.RFC3339),
+		Description: o.Description, Status: "open", Priority: o.Priority,
+		CreatedAt: m.now.Format(time.RFC3339),
 	}
 	m.issues = append(m.issues, is)
 	m.prio[is.ID] = o.Priority
@@ -98,6 +99,10 @@ func openMem(m *memQuestionStore) func() (questionStore, error) {
 	return func() (questionStore, error) { return m, nil }
 }
 
+// askDefault is gt ask's flags when a test does not care about them: the
+// default priority and no effort tag.
+func askDefault() question.AskOptions { return question.AskOptions{Priority: question.Priority} }
+
 const askTestBody = "## Question\nRetry a rejected landing once?\n\n## Recommended answer\nYes, once.\n\n## Held work\n- gt-abc1 (the rework)\n- stub: split the landing gate\n\n## Facts\nTwo of ten passed on retry.\n"
 
 var askNow = time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
@@ -109,7 +114,7 @@ func TestAskFilesABeadTheDashboardReaderParsesBack(t *testing.T) {
 	t.Parallel()
 	store := newMemQuestionStore(askNow)
 	var out bytes.Buffer
-	if err := askQuestion(strings.NewReader(askTestBody), &out, "Retry policy", openMem(store)); err != nil {
+	if err := askQuestion(strings.NewReader(askTestBody), &out, "Retry policy", askDefault(), openMem(store)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -155,12 +160,75 @@ func TestAskRefusesABodyWithoutQuestionOrRecommendedAnswer(t *testing.T) {
 	} {
 		store := newMemQuestionStore(askNow)
 		opened := false
-		err := askQuestion(strings.NewReader(body), &bytes.Buffer{}, "t", func() (questionStore, error) {
+		err := askQuestion(strings.NewReader(body), &bytes.Buffer{}, "t", askDefault(), func() (questionStore, error) {
 			opened = true
 			return store, nil
 		})
 		if err == nil {
 			t.Errorf("%s: gt ask filed a question", name)
+		}
+		if opened || len(store.issues) != 0 {
+			t.Errorf("%s: a refused question touched the database (opened=%v, beads=%d)", name, opened, len(store.issues))
+		}
+	}
+}
+
+// A question is a bead, so the priority and the effort tag gt ask was given are
+// filed on the bead, and the row the readers build carries both off it.
+func TestAskFilesThePriorityAndEffortItWasGiven(t *testing.T) {
+	t.Parallel()
+	store := newMemQuestionStore(askNow)
+	var out bytes.Buffer
+	opts := question.AskOptions{Priority: 1, Effort: question.EffortQuick}
+	if err := askQuestion(strings.NewReader(askTestBody), &out, "Retry policy", opts, openMem(store)); err != nil {
+		t.Fatal(err)
+	}
+
+	q := store.find("hq-t1")
+	if q == nil || store.prio["hq-t1"] != 1 {
+		t.Fatalf("question = %+v at priority %d, want P1", q, store.prio["hq-t1"])
+	}
+	if want := []string{question.Label, "effort:quick"}; !reflect.DeepEqual(q.Labels, want) {
+		t.Errorf("labels = %v, want %v", q.Labels, want)
+	}
+	if store.prio["hq-t2"] != 1 {
+		t.Errorf("the stub bead is at priority %d, want the question's P1", store.prio["hq-t2"])
+	}
+
+	// bd counts the holds on the question bead itself, so the row reads the
+	// held count off it.
+	q.DependentCount = 2
+	reader := newQuestionsReader(store)
+	reader.all = true
+	qs := reader.read(askNow)
+	if len(qs.Rows) != 1 {
+		t.Fatalf("rows = %+v, want the one question", qs.Rows)
+	}
+	row := qs.Rows[0]
+	if row.Priority != 1 || row.Effort != question.EffortQuick || row.HeldCount != 2 {
+		t.Errorf("row = priority %d effort %q held %d, want P1, quick, 2",
+			row.Priority, row.Effort, row.HeldCount)
+	}
+}
+
+// A priority or an effort tag gt ask does not know is refused before the town
+// database is opened, so a mistyped flag files nothing.
+func TestAskRefusesAPriorityOrEffortOutsideTheScale(t *testing.T) {
+	t.Parallel()
+	for name, opts := range map[string]question.AskOptions{
+		"priority above bd's range":    {Priority: 9},
+		"priority below bd's range":    {Priority: -1},
+		"effort gt ask does not write": {Priority: question.Priority, Effort: "x"},
+	} {
+		store := newMemQuestionStore(askNow)
+		opened := false
+		err := askQuestion(strings.NewReader(askTestBody), &bytes.Buffer{}, "t", opts,
+			func() (questionStore, error) {
+				opened = true
+				return store, nil
+			})
+		if err == nil || !strings.HasPrefix(err.Error(), "gt ask: --") {
+			t.Errorf("%s: err = %v, want one naming the flag", name, err)
 		}
 		if opened || len(store.issues) != 0 {
 			t.Errorf("%s: a refused question touched the database (opened=%v, beads=%d)", name, opened, len(store.issues))
@@ -175,7 +243,7 @@ func TestAskKeepsTheQuestionWhenAHoldFails(t *testing.T) {
 	store := newMemQuestionStore(askNow)
 	store.depErr = errors.New("dep add failed")
 	var out bytes.Buffer
-	err := askQuestion(strings.NewReader(askTestBody), &out, "Retry policy", openMem(store))
+	err := askQuestion(strings.NewReader(askTestBody), &out, "Retry policy", askDefault(), openMem(store))
 	if err == nil || !strings.Contains(err.Error(), "hq-t1 was filed") || !strings.Contains(err.Error(), "gt-abc1") {
 		t.Errorf("err = %v, want one naming the filed question and the failed hold", err)
 	}
@@ -189,7 +257,7 @@ func TestAskKeepsTheQuestionWhenAHoldFails(t *testing.T) {
 func TestAnswerAddsTheCommentTheConventionReads(t *testing.T) {
 	t.Parallel()
 	store := newMemQuestionStore(askNow)
-	if err := askQuestion(strings.NewReader(askTestBody), &bytes.Buffer{}, "Retry policy", openMem(store)); err != nil {
+	if err := askQuestion(strings.NewReader(askTestBody), &bytes.Buffer{}, "Retry policy", askDefault(), openMem(store)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -223,7 +291,7 @@ func TestAnswerAddsTheCommentTheConventionReads(t *testing.T) {
 func TestAnswerRefusesWhatItCannotMarkCorrectly(t *testing.T) {
 	t.Parallel()
 	store := newMemQuestionStore(askNow)
-	if err := askQuestion(strings.NewReader(askTestBody), &bytes.Buffer{}, "Retry policy", openMem(store)); err != nil {
+	if err := askQuestion(strings.NewReader(askTestBody), &bytes.Buffer{}, "Retry policy", askDefault(), openMem(store)); err != nil {
 		t.Fatal(err)
 	}
 	other, _ := store.Create(beads.CreateOptions{Title: "not a question", Labels: []string{"gt:task"}})
@@ -248,16 +316,17 @@ func TestAnswerRefusesWhatItCannotMarkCorrectly(t *testing.T) {
 	}
 }
 
-// gt questions lists the open ones with their ages and held work, oldest
-// first, and --json prints the dashboard's payload.
+// gt questions lists the open ones as a priority queue, with the priority, the
+// held count and the effort tag on each row, and --json prints the dashboard's
+// payload.
 func TestQuestionsListsOpenQuestionsWithAgeAndHeldWork(t *testing.T) {
 	t.Parallel()
 	store := newMemQuestionStore(askNow.Add(-26 * time.Hour))
-	if err := askQuestion(strings.NewReader(askTestBody), &bytes.Buffer{}, "older question", openMem(store)); err != nil {
+	if err := askQuestion(strings.NewReader(askTestBody), &bytes.Buffer{}, "older question", askDefault(), openMem(store)); err != nil {
 		t.Fatal(err)
 	}
 	store.now = askNow.Add(-20 * time.Minute)
-	if err := askQuestion(strings.NewReader("## Question\nq\n## Recommended answer\nr\n## Held work\nnone"), &bytes.Buffer{}, "newer question", openMem(store)); err != nil {
+	if err := askQuestion(strings.NewReader("## Question\nq\n## Recommended answer\nr\n## Held work\nnone"), &bytes.Buffer{}, "newer question", askDefault(), openMem(store)); err != nil {
 		t.Fatal(err)
 	}
 	store.now = askNow
@@ -267,6 +336,9 @@ func TestQuestionsListsOpenQuestionsWithAgeAndHeldWork(t *testing.T) {
 
 	reader := newQuestionsReader(store)
 	reader.all = true
+	// bd counts the two holds gt ask made on the question bead, one per ##
+	// Held work line.
+	store.find("hq-t1").DependentCount = 2
 	qs := reader.read(askNow)
 
 	var table bytes.Buffer
@@ -277,15 +349,25 @@ func TestQuestionsListsOpenQuestionsWithAgeAndHeldWork(t *testing.T) {
 	if len(lines) != 3 || !strings.HasPrefix(lines[0], "ID") {
 		t.Fatalf("table = %q, want a header and two rows", table.String())
 	}
-	for _, want := range []string{"hq-t1", "26h00m", "answered", "gt-abc1,hq-t2", "older question"} {
-		if !strings.Contains(lines[1], want) {
-			t.Errorf("first row %q has no %q", lines[1], want)
-		}
+	if want := "ID AGE STATE PRI HELD EFFORT TITLE"; strings.Join(strings.Fields(lines[0]), " ") != want {
+		t.Errorf("header = %q, want %q", lines[0], want)
 	}
-	for _, want := range []string{"hq-t3", "20m", "awaiting", "newer question"} {
-		if !strings.Contains(lines[2], want) {
-			t.Errorf("second row %q has no %q", lines[2], want)
-		}
+	// The first six cells are single words, so they can be read by position:
+	// the older question is answered, at the default P2, holding two beads, and
+	// carries no effort tag.
+	if got := strings.Fields(lines[1]); len(got) < 6 || got[0] != "hq-t1" || got[1] != "26h00m" ||
+		got[2] != "answered" || got[3] != "P2" || got[4] != "2" || got[5] != "-" {
+		t.Errorf("first row = %q, want hq-t1 answered at P2 holding 2 beads with no effort tag", lines[1])
+	}
+	if !strings.Contains(lines[1], "older question") {
+		t.Errorf("first row %q has no title", lines[1])
+	}
+	if got := strings.Fields(lines[2]); len(got) < 6 || got[0] != "hq-t3" || got[1] != "20m" ||
+		got[2] != "awaiting" || got[3] != "P2" || got[4] != "0" || got[5] != "-" {
+		t.Errorf("second row = %q, want hq-t3 awaiting at P2 holding nothing", lines[2])
+	}
+	if !strings.Contains(lines[2], "newer question") {
+		t.Errorf("second row %q has no title", lines[2])
 	}
 
 	var js bytes.Buffer

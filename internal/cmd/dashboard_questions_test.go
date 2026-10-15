@@ -41,15 +41,26 @@ func (f *fakeQuestions) reader() *dashQuestionsReader {
 }
 
 // questionIssue is a question bead with a description shaped the way the
-// overseer's tool writes one.
-func questionIssue(id, title, question, recommended, held string, at time.Time) *beads.Issue {
+// overseer's tool writes one, filed the way gt ask files one: at the default
+// priority and with no effort tag.
+func questionIssue(id, title, qtext, recommended, held string, at time.Time) *beads.Issue {
 	return &beads.Issue{
 		ID:        id,
 		Title:     title,
+		Priority:  question.Priority,
 		CreatedAt: at.Format(time.RFC3339),
-		Description: "## Question\n" + question +
+		Description: "## Question\n" + qtext +
 			"\n\n## Recommended answer\n" + recommended +
 			"\n\n## Held work\n" + held,
+	}
+}
+
+// questionAt is a question asked at a priority and an instant, for the queue's
+// ordering: what it was asked is not what the ordering test is about.
+func questionAt(id string, priority int, at time.Time) *beads.Issue {
+	return &beads.Issue{
+		ID: id, Title: "a question", Priority: priority, CreatedAt: at.Format(time.RFC3339),
+		Description: "## Question\nq\n\n## Recommended answer\na\n\n## Held work\nnone",
 	}
 }
 
@@ -93,12 +104,17 @@ func TestQuestionsReadsAWellFormedQuestion(t *testing.T) {
 	t.Parallel()
 
 	asked := questionsNow.Add(-2 * time.Hour)
+	issue := questionIssue("gt-cr62m", "retry policy",
+		"Should the landing worker retry a rejected merge?",
+		"Yes: retry twice, then raise an escalation.",
+		"gt-wisp-590yk, hq-cv-abc and nothing else",
+		asked)
+	// The two holds bd counts on the bead, and the effort tag gt ask filed it
+	// with — both read off the bead, not the description.
+	issue.DependentCount = 2
+	issue.Labels = []string{question.Label, "effort:session"}
 	f := &fakeQuestions{
-		issues: []*beads.Issue{questionIssue("gt-cr62m", "retry policy",
-			"Should the landing worker retry a rejected merge?",
-			"Yes: retry twice, then raise an escalation.",
-			"gt-wisp-590yk, hq-cv-abc and nothing else",
-			asked)},
+		issues: []*beads.Issue{issue},
 		comments: map[string][]beads.Comment{
 			"gt-cr62m": {comment("[overseer] this one is yours", asked)},
 		},
@@ -123,6 +139,10 @@ func TestQuestionsReadsAWellFormedQuestion(t *testing.T) {
 	}
 	if want := []string{"gt-wisp-590yk", "hq-cv-abc"}; !reflect.DeepEqual(r.Held, want) {
 		t.Errorf("held %v, want %v (the section's prose is not an id)", r.Held, want)
+	}
+	if r.Priority != question.Priority || r.HeldCount != 2 || r.Effort != question.EffortSession {
+		t.Errorf("priority %d held count %d effort %q, want P2 holding 2 with the session tag",
+			r.Priority, r.HeldCount, r.Effort)
 	}
 	if r.AgeSec == nil || *r.AgeSec != 7200 {
 		t.Errorf("age %v, want 7200 seconds", r.AgeSec)
@@ -208,14 +228,15 @@ func TestQuestionsReadsAnsweredAndAwaitingFromTheNewestComment(t *testing.T) {
 }
 
 // The queue is the operator's, so it is ordered by how long each question has
-// waited, and a bead whose creation time does not parse comes last: an
-// unreadable time must not read as the longest wait.
+// waited within its priority, and a bead whose creation time does not parse
+// comes last: an unreadable time must not read as the longest wait.
 func TestQuestionsOrdersTheLongestWaitFirst(t *testing.T) {
 	t.Parallel()
 
 	f := &fakeQuestions{issues: []*beads.Issue{
 		questionIssue("gt-third", "asked an hour ago", "q", "a", "", questionsNow.Add(-time.Hour)),
-		{ID: "gt-untimed", Title: "no time at all", Description: "## Question\nq\n## Recommended answer\na", CreatedAt: "not a time"},
+		{ID: "gt-untimed", Title: "no time at all", Priority: question.Priority,
+			Description: "## Question\nq\n## Recommended answer\na", CreatedAt: "not a time"},
 		questionIssue("gt-first", "asked a day ago", "q", "a", "", questionsNow.Add(-24*time.Hour)),
 	}}
 	q := f.reader().read(questionsNow)
@@ -227,6 +248,32 @@ func TestQuestionsOrdersTheLongestWaitFirst(t *testing.T) {
 	}
 	if r := q.Rows[0]; r.AgeSec == nil || *r.AgeSec != int64(24*time.Hour/time.Second) {
 		t.Errorf("the oldest question's age is %v, want a day", r.AgeSec)
+	}
+}
+
+// The queue is a priority queue like the work queue: the most urgent priority
+// first, and only then how long the question has waited, so a P0 asked a minute
+// ago is read before a P3 that has waited a week. A bead with no parseable time
+// still sorts after the timed ones at its own priority, and never above a
+// priority it does not hold.
+func TestQuestionsOrdersByPriorityThenTheLongestWait(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeQuestions{issues: []*beads.Issue{
+		questionAt("gt-p3-old", 3, questionsNow.Add(-7*24*time.Hour)),
+		questionAt("gt-p1-new", 1, questionsNow.Add(-time.Minute)),
+		questionAt("gt-p0-old", 0, questionsNow.Add(-2*time.Hour)),
+		{
+			ID: "gt-p1-untimed", Title: "no time at all", Priority: 1,
+			Description: "## Question\nq\n## Recommended answer\na", CreatedAt: "not a time",
+		},
+		questionAt("gt-p0-new", 0, questionsNow.Add(-time.Hour)),
+		questionAt("gt-p3-new", 3, questionsNow.Add(-2*time.Hour)),
+	}}
+	q := f.reader().read(questionsNow)
+	want := []string{"gt-p0-old", "gt-p0-new", "gt-p1-new", "gt-p1-untimed", "gt-p3-old", "gt-p3-new"}
+	if got := questionIDs(q.Rows); !reflect.DeepEqual(got, want) {
+		t.Errorf("the queue is %v, want %v", got, want)
 	}
 }
 

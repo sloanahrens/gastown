@@ -65,7 +65,7 @@ const askBody = "## Question\nRetry once?\n\n## Recommended answer\nYes.\n\n## H
 
 func TestAskParsesTheBodyGtAskFiles(t *testing.T) {
 	t.Parallel()
-	ask, err := ParseAsk("  Retry policy  ", askBody)
+	ask, err := ParseAsk("  Retry policy  ", askBody, AskOptions{Priority: Priority})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,28 @@ func TestAskRefusesWhatSloanCannotAnswer(t *testing.T) {
 		{"empty stub title", "t", "## Question\nq\n## Recommended answer\nr\n## Held work\n- stub:\n", "empty stub"},
 	}
 	for _, tc := range cases {
-		_, err := ParseAsk(tc.title, tc.body)
+		_, err := ParseAsk(tc.title, tc.body, AskOptions{Priority: Priority})
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want one naming %q", tc.name, err, tc.want)
+		}
+	}
+}
+
+// A flag beyond what a question can be filed at is refused by name, so the
+// operator reads which argument to fix rather than which section of the body.
+func TestAskRefusesAPriorityOrEffortItCannotFile(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, want string
+		opts       AskOptions
+	}{
+		{"priority above bd's range", "--priority 9", AskOptions{Priority: 9}},
+		{"priority below bd's range", "--priority -1", AskOptions{Priority: -1}},
+		{"effort gt ask does not write", `--effort "x"`, AskOptions{Priority: Priority, Effort: "x"}},
+		{"effort in the wrong case", `--effort "Quick"`, AskOptions{Priority: Priority, Effort: "Quick"}},
+	}
+	for _, tc := range cases {
+		_, err := ParseAsk("t", askBody, tc.opts)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: err = %v, want one naming %q", tc.name, err, tc.want)
 		}
@@ -110,9 +131,55 @@ func TestAskRefusesWhatSloanCannotAnswer(t *testing.T) {
 
 func TestAskHeldWorkAndFactsAreOptional(t *testing.T) {
 	t.Parallel()
-	ask, err := ParseAsk("t", "## Question\nq\n## Recommended answer\nr")
+	ask, err := ParseAsk("t", "## Question\nq\n## Recommended answer\nr", AskOptions{Priority: Priority})
 	if err != nil || len(ask.Holds) != 0 {
 		t.Errorf("ParseAsk = %+v, %v; want a question that holds nothing", ask, err)
+	}
+}
+
+// The question is a bead, so its priority is the bead's own and does not have
+// to be read back out of the body. The effort tag is a label, written only when
+// gt ask was given one: a question filed without it carries no tag at all.
+func TestAskCarriesThePriorityAndEffortItWasGiven(t *testing.T) {
+	t.Parallel()
+	ask, err := ParseAsk("t", "## Question\nq\n## Recommended answer\nr", AskOptions{Priority: 1, Effort: EffortQuick})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ask.Priority != 1 || ask.Effort != EffortQuick {
+		t.Errorf("ParseAsk = priority %d effort %q, want P1 with the quick tag", ask.Priority, ask.Effort)
+	}
+	if want := []string{Label, "effort:quick"}; !reflect.DeepEqual(ask.Labels(), want) {
+		t.Errorf("labels = %v, want %v", ask.Labels(), want)
+	}
+	none, err := ParseAsk("t", "## Question\nq\n## Recommended answer\nr", AskOptions{Priority: Priority})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{Label}; !reflect.DeepEqual(none.Labels(), want) {
+		t.Errorf("labels = %v, want %v: a question with no effort tag carries no label for one", none.Labels(), want)
+	}
+}
+
+// The effort tag is read off the bead's labels, so the three readers of a
+// question see the tag gt ask wrote without a parse of their own.
+func TestEffortOfReadsTheTagOffTheLabels(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		labels []string
+		want   string
+	}{
+		{"no labels", nil, ""},
+		{"only the question label", []string{Label}, ""},
+		{"the tag alone", []string{"effort:session"}, "session"},
+		{"the tag beside the question label", []string{Label, "effort:quick"}, "quick"},
+		{"another label's punctuation is not a tag", []string{"efforts:quick", "gt:task"}, ""},
+		{"a hand-written tag is shown as it is", []string{"effort:an hour"}, "an hour"},
+	} {
+		if got := EffortOf(tc.labels); got != tc.want {
+			t.Errorf("%s: EffortOf(%v) = %q, want %q", tc.name, tc.labels, got, tc.want)
+		}
 	}
 }
 

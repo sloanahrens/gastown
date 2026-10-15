@@ -19,26 +19,54 @@ type Ask struct {
 	// Body is the description filed on the bead: the text gt ask was given.
 	Body  string
 	Holds []Hold
+	// Priority is the priority the question bead is filed at, bd's 0-4.
+	Priority int
+	// Effort is the tag for what answering takes, "" for none.
+	Effort string
+}
+
+// AskOptions are gt ask's arguments that are not the body: the flags it was
+// given. Priority's zero value is P0, a real priority, so a caller with a
+// default passes it rather than leaving the field out.
+type AskOptions struct {
+	Priority int
+	Effort   string
+}
+
+// Labels are the labels the question bead is filed with: the overseer-question
+// label every question carries, and the effort tag when there is one.
+func (a Ask) Labels() []string {
+	labels := []string{Label}
+	if l := EffortLabel(a.Effort); l != "" {
+		labels = append(labels, l)
+	}
+	return labels
 }
 
 // stubPrefix leads a ## Held work line that names work with no bead yet.
 const stubPrefix = "stub:"
 
-// ParseAsk checks the title and body gt ask was given and reads the work the
-// question holds. A body without a ## Question or a ## Recommended answer
-// section is refused: a question Sloan cannot answer from one glance is not
-// worth waking for. ## Held work and ## Facts are optional, and a missing
+// ParseAsk checks the title, the flags and the body gt ask was given and reads
+// the work the question holds. A body without a ## Question or a ## Recommended
+// answer section is refused: a question Sloan cannot answer from one glance is
+// not worth waking for. ## Held work and ## Facts are optional, and a missing
 // ## Held work holds nothing.
 //
 // A held line that is neither a bead id, "stub: <title>" nor "none" is an
 // error, so a malformed line files nothing rather than half a question.
-func ParseAsk(title, body string) (Ask, error) {
+func ParseAsk(title, body string, opts AskOptions) (Ask, error) {
 	title = strings.TrimSpace(title)
 	if title == "" {
 		return Ask{}, fmt.Errorf("a question needs a title")
 	}
 	if n := utf8.RuneCountInString(title); n > TitleMax {
 		return Ask{}, fmt.Errorf("title is %d characters, over the %d limit", n, TitleMax)
+	}
+	if err := CheckPriority(opts.Priority); err != nil {
+		return Ask{}, err
+	}
+	if err := CheckEffort(opts.Effort); err != nil {
+		return Ask{}, err
 	}
 	sections := Sections(body)
 	for _, s := range []struct{ key, name string }{
@@ -53,7 +81,32 @@ func ParseAsk(title, body string) (Ask, error) {
 	if err != nil {
 		return Ask{}, err
 	}
-	return Ask{Title: title, Body: strings.TrimSpace(body), Holds: holds}, nil
+	return Ask{Title: title, Body: strings.TrimSpace(body), Holds: holds,
+		Priority: opts.Priority, Effort: opts.Effort}, nil
+}
+
+// PriorityMin and PriorityMax bound the priority a question is filed at, bd's
+// own range: 0 is the most urgent.
+const (
+	PriorityMin = 0
+	PriorityMax = 4
+)
+
+// CheckPriority refuses a priority outside bd's range.
+func CheckPriority(priority int) error {
+	if priority < PriorityMin || priority > PriorityMax {
+		return fmt.Errorf("--priority %d is outside bd's %d-%d range", priority, PriorityMin, PriorityMax)
+	}
+	return nil
+}
+
+// CheckEffort refuses an effort tag gt ask does not write.
+func CheckEffort(effort string) error {
+	switch effort {
+	case "", EffortQuick, EffortSession:
+		return nil
+	}
+	return fmt.Errorf("--effort %q is not %s or %s", effort, EffortQuick, EffortSession)
 }
 
 // parseHolds reads a ## Held work section: one bead id, "stub: <title>" or

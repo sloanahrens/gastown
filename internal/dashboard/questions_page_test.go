@@ -1,8 +1,10 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -68,16 +70,18 @@ func TestQuestionsPanelMarksTheOldestPastFourHours(t *testing.T) {
 	}
 }
 
-// One question is one card: what the overseer asks, the answer it recommends,
-// the work it holds up, whether Sloan has answered it, and the line that
-// answers it. The page writes nothing — that line is the whole answer path, and
-// the operator copies it into a terminal.
+// One question is one card: what the overseer asks, its priority and effort
+// tag, the answer it recommends, the work it holds up, whether Sloan has
+// answered it, and the line that answers it. The page writes nothing — that
+// line is the whole answer path, and the operator copies it into a terminal.
 func TestQuestionCardCarriesTheAnswerPath(t *testing.T) {
 	t.Parallel()
 
 	draw := pageFunc(t, "questionCard")
 	for _, want := range []string{
 		`head.append(el("span", "bead", r.id));`,
+		`head.append(el("span", r.priority <= 1 ? "qpri warnc" : "qpri", "P" + r.priority));`,
+		`if (r.effort) head.append(el("span", "qeffort", r.effort));`,
 		`if (r.question) c.append(el("div", "qtext", r.question));`,
 		`if (r.recommended) c.append(el("div", "qrec", "Recommended: " + r.recommended));`,
 		`if ((r.held || []).length) c.append(el("div", "qheld", "Held: " + r.held.join(", ")));`,
@@ -113,7 +117,8 @@ func TestQuestionsReachTheAPIAndChangeNothingElse(t *testing.T) {
 		},
 		Questions: func() *Questions {
 			return &Questions{Rows: []QuestionRow{
-				{ID: "gt-cr62m", Title: "retry policy", Question: "retry?", State: QuestionAwaiting, Comments: 1},
+				{ID: "gt-cr62m", Title: "retry policy", Priority: 1, Question: "retry?",
+					HeldCount: 2, Effort: "quick", State: QuestionAwaiting, Comments: 1},
 			}}
 		},
 	})
@@ -132,6 +137,21 @@ func TestQuestionsReachTheAPIAndChangeNothingElse(t *testing.T) {
 	if !strings.Contains(body, `"questions"`) || !strings.Contains(body, `"retry policy"`) {
 		t.Errorf("/api/state does not carry the questions the hub holds: %s", body)
 	}
+	// The row carries what the queue is ordered by, so the panel that renders
+	// it — the Questions pane or the Attention panel — needs no query of its own.
+	var state struct {
+		Questions Questions `json:"questions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &state); err != nil {
+		t.Fatalf("/api/state is not the page's JSON: %v", err)
+	}
+	if len(state.Questions.Rows) != 1 {
+		t.Fatalf("the state carries %d question rows, want the one the hub holds", len(state.Questions.Rows))
+	}
+	if r := state.Questions.Rows[0]; r.Priority != 1 || r.HeldCount != 2 || r.Effort != "quick" {
+		t.Errorf("the row carries priority %d, held count %d, effort %q, want P1 holding 2 with the quick tag",
+			r.Priority, r.HeldCount, r.Effort)
+	}
 
 	st := h.State()
 	if st.Health.Verdict != "green" {
@@ -139,5 +159,26 @@ func TestQuestionsReachTheAPIAndChangeNothingElse(t *testing.T) {
 	}
 	if st.Escalations == nil || len(st.Escalations.Rows) != 1 {
 		t.Errorf("open questions changed the escalations the pane holds: %+v", st.Escalations)
+	}
+}
+
+// The row carries the three fields the queue is ordered and read by in the
+// order the operator reads them — the priority, the held count, the effort tag
+// — so the payload a panel renders needs no join of its own. The order is the
+// struct's, which is what encoding/json writes.
+func TestQuestionRowCarriesPriorityHeldCountAndEffortInOrder(t *testing.T) {
+	t.Parallel()
+
+	row := reflect.TypeOf(QuestionRow{})
+	var got []string
+	for i := 0; i < row.NumField(); i++ {
+		name, _, _ := strings.Cut(row.Field(i).Tag.Get("json"), ",")
+		switch name {
+		case "priority", "held_count", "effort":
+			got = append(got, name)
+		}
+	}
+	if want := []string{"priority", "held_count", "effort"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("the row carries %v, want %v", got, want)
 	}
 }

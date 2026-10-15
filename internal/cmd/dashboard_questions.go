@@ -100,29 +100,37 @@ func questionRow(issue *beads.Issue) questionCandidate {
 		row: dashboard.QuestionRow{
 			ID:          issue.ID,
 			Title:       f.Title,
+			Priority:    issue.Priority,
 			Question:    f.Question,
 			Recommended: f.Recommended,
 			Held:        f.Held,
+			HeldCount:   issue.DependentCount,
+			Effort:      question.EffortOf(issue.Labels),
 			Malformed:   f.Malformed,
 		},
 		askedAt: question.AskedAt(issue),
 	}
 }
 
-// sortQuestionRows orders the queue oldest first, so the question that has
-// waited longest is the first the operator reads, and puts a bead with no time
-// it can be measured from after every one that has a time: an unreadable
-// creation time must not sort as the longest wait.
+// sortQuestionRows orders the queue as a priority queue, the way the work queue
+// is ordered: the most urgent priority first, and within a priority the
+// question that has waited longest, so a teardown go read outranks a question
+// asked yesterday. A bead with no time it can be measured from comes after
+// every one that has a time, at its own priority: an unreadable creation time
+// must not sort as the longest wait.
 func sortQuestionRows(candidates []questionCandidate) {
 	sort.SliceStable(candidates, func(i, j int) bool {
-		a, b := candidates[i].askedAt, candidates[j].askedAt
+		a, b := candidates[i], candidates[j]
+		if a.row.Priority != b.row.Priority {
+			return a.row.Priority < b.row.Priority
+		}
 		switch {
-		case a.IsZero() != b.IsZero():
-			return b.IsZero()
-		case a.IsZero():
+		case a.askedAt.IsZero() != b.askedAt.IsZero():
+			return b.askedAt.IsZero()
+		case a.askedAt.IsZero():
 			return false
 		}
-		return a.Before(b)
+		return a.askedAt.Before(b.askedAt)
 	})
 }
 
