@@ -49,7 +49,7 @@ func TestDeploysBlockDrawsWhatTheReaderDecided(t *testing.T) {
 		`note.textContent = err ? "could not read the runs: " + err : (unreadable ? unreadable + (unreadable === 1 ? " repo unreadable" : " repos unreadable") : "");`,
 		`box.append(el("div", err ? "badc" : "empty", err ? "no deploy runs: " + err : "no deploy runs yet"));`,
 		`for (const r of runs) box.append(deployRow(r));`,
-		`if (!runs.length)`,
+		`if (!runs.length && !health.length)`,
 	} {
 		if !strings.Contains(draw, want) {
 			t.Errorf("renderDeploys has no %q", want)
@@ -232,7 +232,7 @@ func TestDeploysBlockTagsAStagingRunAndNotARelease(t *testing.T) {
 func TestDeploysBlockWritesTheReposTextAndNeverMarkup(t *testing.T) {
 	t.Parallel()
 
-	for _, fn := range []string{"renderDeploys", "deployRow", "deployStages"} {
+	for _, fn := range []string{"renderDeploys", "deployRow", "deployStages", "healthHead", "healthRow"} {
 		if strings.Contains(pageFunc(t, fn), "innerHTML") {
 			t.Errorf("%s sets markup from a repository's text", fn)
 		}
@@ -242,5 +242,134 @@ func TestDeploysBlockWritesTheReposTextAndNeverMarkup(t *testing.T) {
 		if strings.Contains(page, sink) {
 			t.Errorf("index.html has a %s path, so a repository's text could be parsed as markup", sink)
 		}
+	}
+}
+
+// The scheduled checks are the block's other kind of row: one row per app and
+// environment, under the runs, with a header of its own because their columns
+// are not a run's — no stages, commit or ref to line up with (gt-t9w60).
+func TestDeploysBlockDrawsTheScheduledHealthRows(t *testing.T) {
+	t.Parallel()
+
+	draw := pageFunc(t, "renderDeploys")
+	for _, want := range []string{
+		`const runs = d.runs || [], health = d.health || [];`,
+		`for (const h of health) happ = Math.max(happ, (h.app || "–").length);`,
+		`if (happ) box.style.setProperty("--happ", (happ + 1) + "ch");`,
+		`if (health.length) box.append(healthHead());`,
+		`for (const h of health) box.append(healthRow(h));`,
+	} {
+		if !strings.Contains(draw, want) {
+			t.Errorf("renderDeploys has no %q", want)
+		}
+	}
+
+	// The header names the columns and takes the rows' font, for the reason the
+	// runs' header does: the widths are in ch, and a ch is the drawing font's
+	// own (gt-egffr).
+	head := pageFunc(t, "healthHead")
+	if !strings.Contains(head, `[["App", "happ"], ["Environment", "henv"], ["Result", "hstate"], ["Age", "hage"], ["Last green", "hgreen"], ["Passed", "hpass"]]`) {
+		t.Error("the scheduled rows' header does not name their columns")
+	}
+	rule := cssRule(t, ".hhead")
+	if strings.Contains(rule, "font-size") {
+		t.Errorf(".hhead rule is %q: a font size of its own makes a ch-based column another width under the header than under the rows", rule)
+	}
+	if !strings.Contains(rule, "color:var(--dim)") {
+		t.Errorf(".hhead rule is %q: the header is no longer dim, so it reads as a row", rule)
+	}
+
+	// The row is the app and the environment it is about, the newest result and
+	// how long ago it ran, the last green and the pass count. It links the
+	// newest run the way a deploy row links its run, and shows the app's whole
+	// repo name on the shortened cell it draws (gt-t9w60).
+	row := pageFunc(t, "healthRow")
+	for _, want := range []string{
+		`const row = h.url ? el("a", "hrow") : el("div", "hrow");`,
+		`if (h.url) { row.href = h.url; row.target = "_blank"; row.rel = "noopener"; row.title = h.url; }`,
+		`if (app.textContent !== h.repo) app.title = h.repo;`,
+		`el("span", "hstate " + (HEALTH_RESULT_CLASS[h.status] || "title"), h.unread ? "not read" : healthResult(h))`,
+		`el("span", "hage", h.at ? age(h.at) : "–")`,
+		`el("span", "hgreen", h.last_green ? age(h.last_green) + " ago" : "–")`,
+		`el("span", "hpass", h.runs ? h.passed + "/" + h.runs : "–")`,
+	} {
+		if !strings.Contains(row, want) {
+			t.Errorf("healthRow has no %q", want)
+		}
+	}
+
+	// The app column keeps the width it is measured to, the environment names
+	// the width of the longest one health.yml carries, and the counts sit on
+	// the row's line beside them.
+	for _, want := range []string{
+		`.happ{flex:0 0 var(--happ,16ch)}`,
+		`.henv{flex:0 0 20ch;color:var(--dim)}`,
+		`.hstate{flex:0 0 16ch}`,
+		`.hage,.hgreen{flex:0 0 8ch;color:var(--dim)}`,
+		`.hpass{flex:0 0 8ch;color:var(--dim)}`,
+	} {
+		if !strings.Contains(string(indexHTML), want) {
+			t.Errorf("index.html has no %q", want)
+		}
+	}
+}
+
+// A check the app was off for is not a pass, and the page is where that is
+// said: a skipped run reads "off on purpose" and carries no colour, and only a
+// pass and a failure have one, so no cell drawn from a skipped run can read as
+// green (gt-t9w60).
+func TestDeploysBlockNeverDrawsASkippedCheckAsGreen(t *testing.T) {
+	t.Parallel()
+
+	page := string(indexHTML)
+	if !strings.Contains(page, `const HEALTH_RESULT = {success: "green", failure: "failed", skipped: "off on purpose"};`) {
+		t.Error("the page does not word a skipped check as off on purpose")
+	}
+	if !strings.Contains(page, `const HEALTH_RESULT_CLASS = {success: "good", failure: "badc"};`) {
+		t.Error("the coloured results are not the pass and the failure alone, so another check could be drawn as one")
+	}
+	if strings.Contains(pageFunc(t, "healthRow"), `"good"`) {
+		t.Error("healthRow colours a result of its own, so a check nobody ran could read as green")
+	}
+	// The page's own word for a skipped run is on the cell, and the API's word
+	// stays on its title: an operator reading "off on purpose" can see the run
+	// itself was skipped.
+	if !strings.Contains(pageFunc(t, "healthRow"), `if (result.textContent !== (h.status || "–"))`) {
+		t.Error("healthRow does not keep the API's own word for the result it rewords")
+	}
+}
+
+// A failed scheduled check is marked in the header, where a glance at the page
+// finds it beside the town's own verdict: one red pill naming the app, hidden
+// until a reader names one, so an empty marker is never a strip that claims
+// nothing is wrong (gt-t9w60).
+func TestDeploysBlockMarksAFailedCheckInTheHeaderStrip(t *testing.T) {
+	t.Parallel()
+
+	page := string(indexHTML)
+	header := page[strings.Index(page, "<header>"):strings.Index(page, "</header>")]
+	if !strings.Contains(header, `<span id="healthmark" class="pill red" hidden></span>`) {
+		t.Fatal("the header has no red health marker (#healthmark)")
+	}
+	if strings.Index(header, `id="healthline"`) > strings.Index(header, `id="healthmark"`) {
+		t.Error("the marker is drawn above the health line it belongs beside")
+	}
+
+	mark := pageFunc(t, "renderHealthMark")
+	for _, want := range []string{
+		`const box = $("healthmark"), d = (s && s.deploys) || null;`,
+		`const apps = (d && d.health_failed) || [];`,
+		`box.hidden = !apps.length;`,
+		`box.textContent = apps.length ? "health: " + apps.join(", ") : "";`,
+	} {
+		if !strings.Contains(mark, want) {
+			t.Errorf("renderHealthMark has no %q", want)
+		}
+	}
+
+	// The marker carries the reader's own finding: the apps the deploys reader
+	// marked as failed, not a second reading of the rows the block draws.
+	if !strings.Contains(pageFunc(t, "renderAll"), "renderDeploys(state); renderHealthMark(state);") {
+		t.Error("the page's redraw does not include the health marker with the block it comes from")
 	}
 }

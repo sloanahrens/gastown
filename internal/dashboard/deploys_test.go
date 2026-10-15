@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strconv"
@@ -31,8 +32,13 @@ type deployStub struct {
 	jobs     map[int64][]forgejo.ActionRunJob
 	jobsErr  map[int64]error
 
-	runsAsked []string
-	jobsAsked []int64
+	// runsAsked is the repos asked for their runs under the deploy read;
+	// healthAsked is the repos asked for the health workflow's runs. The stub
+	// answers both from Runs, so the block's own workflow match is what the
+	// tests hold.
+	runsAsked   []string
+	healthAsked []string
+	jobsAsked   []int64
 }
 
 func (s *deployStub) ListUserRepos(context.Context) ([]forgejo.Repository, error) {
@@ -46,9 +52,13 @@ func (s *deployStub) ListUserRepos(context.Context) ([]forgejo.Repository, error
 	return out, nil
 }
 
-func (s *deployStub) ListRuns(_ context.Context, owner, repo string, _ forgejo.RunFilter) (*forgejo.RunList, error) {
+func (s *deployStub) ListRuns(_ context.Context, owner, repo string, f forgejo.RunFilter) (*forgejo.RunList, error) {
 	name := owner + "/" + repo
-	s.runsAsked = append(s.runsAsked, name)
+	if f.WorkflowID == healthWorkflow {
+		s.healthAsked = append(s.healthAsked, name)
+	} else {
+		s.runsAsked = append(s.runsAsked, name)
+	}
 	if err := s.runsErr[name]; err != nil {
 		return nil, err
 	}
@@ -250,6 +260,7 @@ func TestDeployThresholds(t *testing.T) {
 	assert.Equal(t, 5, deployRunsKept, "runs listed per repo")
 	assert.Equal(t, 3, deployJobsKept, "runs whose jobs one refresh fetches, across every repo")
 	assert.Equal(t, 40, deployTextMax, "runes of a stage name or a ref the page shows")
+	assert.Equal(t, 24, healthRunWindow, "health runs a row is counted over, and the jobs calls one repo costs: a day of the hourly check")
 }
 
 // A landing's staging deploy is a deploy the operator has to see: the block
@@ -602,4 +613,320 @@ func TestOrderJobsEndsOnACycle(t *testing.T) {
 		names = append(names, j.Name)
 	}
 	assert.Equal(t, []string{"a", "b"}, names)
+}
+
+// testHealthRun builds a run of the scheduled health workflow: the check of a
+// deployed app, which runs on its own hourly clock rather than behind a
+// landing or a release.
+func testHealthRun(id int64, status string, created int) forgejo.ActionRun {
+	run := testDeployRun(id, "main", status, created)
+	run.WorkflowID = ".forgejo/workflows/health.yml"
+	run.Event = "schedule"
+	return run
+}
+
+// healthJobs is one health run's jobs: the off job every run carries, then the
+// two environments the workflow checks, in the statuses the test gives them.
+func healthJobs(off, staging, prod string) []forgejo.ActionRunJob {
+	return []forgejo.ActionRunJob{
+		testJob("off", off),
+		testJob("staging-integration", staging, "off"),
+		testJob("prod-smoke", prod, "staging-integration"),
+	}
+}
+
+// healthRowsOf names the health rows by app and environment, which is what the
+// tests that read more than one of them address them by.
+func healthRowsOf(rows []DeployHealthRow) []string {
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.App+"/"+r.Env)
+	}
+	return out
+}
+
+// The scheduled checks reach the page as one row per app and environment, not
+// as a run each: health.yml runs hourly, so a row behind every run would bury
+// the deploys the block is about. Every run folded into a row is a run the
+// repo ran, and the run's own jobs are what say whether the check passed.
+func TestDeployReaderFoldsTheHealthRunsIntoRowsPerAppAndEnvironment(t *testing.T) {
+	t.Parallel()
+
+	stub := &deployStub{
+		repos: []string{"sloan/fractals-nextjs"},
+		runs: map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {
+			testHealthRun(3, "success", 41),
+			testHealthRun(2, "success", 21),
+			testHealthRun(1, "success", 1),
+		}},
+		jobs: map[int64][]forgejo.ActionRunJob{
+			3: healthJobs("success", "success", "success"),
+			2: healthJobs("success", "success", "success"),
+			1: healthJobs("success", "success", "success"),
+		},
+	}
+	d := newDeployTestReader(stub, nil).Read()
+
+	require.Empty(t, d.Error)
+	require.Empty(t, d.Missing)
+	assert.Empty(t, d.Runs, "a health run is not a deploy row")
+	assert.Empty(t, d.HealthFailed)
+	require.Len(t, d.Health, 2)
+	assert.Equal(t, []string{"fractals-nextjs/staging-integration", "fractals-nextjs/prod-smoke"}, healthRowsOf(d.Health))
+
+	row := d.Health[0]
+	assert.Equal(t, "sloan/fractals-nextjs", row.Repo)
+	assert.Equal(t, "success", row.Status)
+	assert.Equal(t, "https://forgejo.test/runs/3", row.URL, "the row links the newest run it folded")
+	assert.True(t, row.At.Equal(time.Date(2026, 10, 5, 10, 41, 0, 0, time.UTC)), "the result carries the newest run's own time")
+	assert.True(t, row.LastGreen.Equal(row.At), "the newest run passed, so it is the last green")
+	assert.Equal(t, 3, row.Passed, "all three runs of the window passed")
+	assert.Equal(t, 3, row.Runs)
+	assert.False(t, row.Unread)
+	assert.Equal(t, 3, d.Health[1].Passed, "each environment is read from its own job")
+
+	// Both reads are per repo: the repo's deploy runs, then its health runs.
+	assert.Equal(t, []string{"sloan/fractals-nextjs"}, stub.runsAsked)
+	assert.Equal(t, []string{"sloan/fractals-nextjs"}, stub.healthAsked)
+	assert.Equal(t, []int64{3, 2, 1}, stub.jobsAsked, "the jobs of every run of the window, which is what tells a pass from an app that is off")
+}
+
+// A failed check is the row's own result and the strip's marker, and the last
+// green stays the run that did pass: the two are read from the same window, so
+// an operator can see how long a check has been failing.
+func TestDeployReaderCountsThePassesAndFindsTheLastGreen(t *testing.T) {
+	t.Parallel()
+
+	stub := &deployStub{
+		repos: []string{"sloan/fractals-nextjs"},
+		runs: map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {
+			testHealthRun(3, "failure", 41),
+			testHealthRun(2, "success", 21),
+			testHealthRun(1, "success", 1),
+		}},
+		jobs: map[int64][]forgejo.ActionRunJob{
+			3: healthJobs("success", "success", "failure"),
+			2: healthJobs("success", "success", "success"),
+			1: healthJobs("success", "success", "success"),
+		},
+	}
+	d := newDeployTestReader(stub, nil).Read()
+
+	assert.Equal(t, []string{"fractals-nextjs"}, d.HealthFailed, "the newest run of a turned-on app failed, so the strip marks it")
+	require.Len(t, d.Health, 2)
+
+	staging, prod := d.Health[0], d.Health[1]
+	assert.Equal(t, "success", staging.Status)
+	assert.Equal(t, 3, staging.Passed, "staging's own job passed every run, whatever prod did")
+	assert.Equal(t, "failure", prod.Status)
+	assert.Equal(t, 2, prod.Passed, "of the window's three runs, prod passed two")
+	assert.Equal(t, 3, prod.Runs)
+	assert.True(t, prod.At.Equal(time.Date(2026, 10, 5, 10, 41, 0, 0, time.UTC)), "the failure is the newest run's")
+	assert.True(t, prod.LastGreen.Equal(time.Date(2026, 10, 5, 10, 21, 0, 0, time.UTC)), "the last green is the newest run that passed, not the newest run")
+}
+
+// A run whose checks were skipped is the app being off on purpose: the row
+// says so, nothing counts it as a pass, and the strip is not marked — a
+// deployment nobody tested must not read as one that was.
+func TestDeployReaderReadsASkippedHealthRunAsOffNotAsAPass(t *testing.T) {
+	t.Parallel()
+
+	stub := &deployStub{
+		repos: []string{"sloan/fractals-nextjs"},
+		runs: map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {
+			testHealthRun(2, "success", 41),
+			testHealthRun(1, "success", 21),
+		}},
+		jobs: map[int64][]forgejo.ActionRunJob{
+			2: healthJobs("skipped", "skipped", "skipped"),
+			1: healthJobs("success", "success", "success"),
+		},
+	}
+	d := newDeployTestReader(stub, nil).Read()
+
+	assert.Empty(t, d.HealthFailed, "an app that is off on purpose is not a failed app")
+	require.Len(t, d.Health, 2)
+	for _, row := range d.Health {
+		assert.Equal(t, "skipped", row.Status, "the row carries the API's own word, which the page says as off on purpose")
+		assert.Equal(t, 1, row.Passed, "of two runs, only the one that ran passed")
+		assert.Equal(t, 2, row.Runs)
+		assert.True(t, row.LastGreen.Equal(time.Date(2026, 10, 5, 10, 21, 0, 0, time.UTC)), "the last green is the run before the app was turned off")
+	}
+}
+
+// The pass count and the last green are read over a window of the app's newest
+// runs, not over everything the repo has ever run: the window is the day the
+// workflow checks, and it is also what bounds the calls the block makes.
+func TestDeployReaderCountsTheHealthWindowAndNoMore(t *testing.T) {
+	t.Parallel()
+
+	var runs []forgejo.ActionRun
+	jobs := map[int64][]forgejo.ActionRunJob{}
+	for i := 0; i < healthRunWindow+1; i++ {
+		id := int64(i + 1)
+		runs = append(runs, testHealthRun(id, "success", i))
+		if i == 0 {
+			// The oldest run, past the window, failed: it is history the rows
+			// do not count, so it neither lowers the count nor marks the strip.
+			jobs[id] = healthJobs("success", "success", "failure")
+			continue
+		}
+		jobs[id] = healthJobs("success", "success", "success")
+	}
+	stub := &deployStub{
+		repos: []string{"sloan/fractals-nextjs"},
+		runs:  map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": runs},
+		jobs:  jobs,
+	}
+	d := newDeployTestReader(stub, nil).Read()
+
+	require.Len(t, d.Health, 2)
+	assert.Equal(t, healthRunWindow, d.Health[1].Runs, "the window, and the run past it is not counted")
+	assert.Equal(t, healthRunWindow, d.Health[1].Passed)
+	assert.Empty(t, d.HealthFailed, "a failure older than the window is not the newest check")
+	assert.Len(t, stub.jobsAsked, healthRunWindow, "one jobs call per run of the window, and none for the runs past it")
+}
+
+// A repo with no health run shows nothing extra: the block gains its scheduled
+// rows only where the workflow has run, and the read costs that repo one list.
+func TestDeployReaderWithNoHealthRunsShowsNothingExtra(t *testing.T) {
+	t.Parallel()
+
+	stub := &deployStub{
+		repos: []string{"sloan/beads"},
+		runs:  map[string][]forgejo.ActionRun{"sloan/beads": {testDeployRun(4, "v0.2.0", "success", 20)}},
+	}
+	d := newDeployTestReader(stub, nil).Read()
+
+	require.Len(t, d.Runs, 1)
+	assert.Empty(t, d.Health)
+	assert.Empty(t, d.HealthFailed)
+	assert.Equal(t, []string{"sloan/beads"}, stub.healthAsked, "the repo was asked, and answered with no health run")
+	assert.Equal(t, []int64{4}, stub.jobsAsked, "the deploy run's jobs, and no health run's")
+}
+
+// The strip's marker names the app whose newest check failed, and only it: a
+// town with one app failing and one app off names one.
+func TestDeployReaderGivenTwoAppsNamesOnlyTheFailedOne(t *testing.T) {
+	t.Parallel()
+
+	stub := &deployStub{
+		repos: []string{"sloan/fractals-nextjs", "sloan/arkansas-beaver-committee"},
+		runs: map[string][]forgejo.ActionRun{
+			"sloan/fractals-nextjs":           {testHealthRun(2, "failure", 5)},
+			"sloan/arkansas-beaver-committee": {testHealthRun(1, "success", 7)},
+		},
+		jobs: map[int64][]forgejo.ActionRunJob{
+			2: healthJobs("success", "success", "failure"),
+			1: healthJobs("skipped", "skipped", "skipped"),
+		},
+	}
+	d := newDeployTestReader(stub, nil).Read()
+
+	assert.Equal(t, []string{"fractals-nextjs"}, d.HealthFailed)
+	require.Len(t, d.Health, 4)
+	assert.Equal(t, []string{
+		"arkansas-beaver-committee/staging-integration", "arkansas-beaver-committee/prod-smoke",
+		"fractals-nextjs/staging-integration", "fractals-nextjs/prod-smoke",
+	}, healthRowsOf(d.Health), "one row per app and environment, the apps in order")
+	assert.Equal(t, "skipped", d.Health[0].Status, "the off app's rows are its skipped runs")
+}
+
+// A jobs call that fails is not a pass and not a failure: the row says its
+// newest run could not be read, and the strip is not marked from a check the
+// block never saw.
+func TestDeployReaderSaysAHealthRowItCouldNotRead(t *testing.T) {
+	t.Parallel()
+
+	stub := &deployStub{
+		repos:   []string{"sloan/fractals-nextjs"},
+		runs:    map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {testHealthRun(2, "failure", 5)}},
+		jobsErr: map[int64]error{2: io.EOF},
+	}
+	d := newDeployTestReader(stub, nil).Read()
+
+	require.Empty(t, d.Error)
+	assert.Empty(t, d.HealthFailed, "a run the block could not read is no word on the app")
+	require.Len(t, d.Health, 2, "the app's checks are still drawn, as rows it could not read")
+	for _, row := range d.Health {
+		assert.True(t, row.Unread)
+		assert.Empty(t, row.Status, "a result the block did not read is not a result")
+		assert.Zero(t, row.Passed)
+		assert.Zero(t, row.Runs)
+	}
+
+	// Every call failing is the same row: the check is not silently gone, and
+	// the environments the block knows are still named.
+	assert.Equal(t, []string{"fractals-nextjs/staging-integration", "fractals-nextjs/prod-smoke"}, healthRowsOf(d.Health))
+
+	// A run whose jobs named no environment the block knows is not a check of
+	// one, and draws no row at all.
+	stub.jobsErr = nil
+	stub.jobs = map[int64][]forgejo.ActionRunJob{2: {testJob("off", "skipped"), testJob("something-else", "success")}}
+	d = newDeployTestReader(stub, nil).Read()
+	assert.Empty(t, d.Health)
+	assert.Empty(t, d.HealthFailed)
+}
+
+// A run the block could not read under a newer one the block could does not
+// become the row's result: the newest run is the newest word on the app, and
+// the passes the block did read are still counted.
+func TestDeployReaderKeepsTheNewestRunAsTheRowsResult(t *testing.T) {
+	t.Parallel()
+
+	stub := &deployStub{
+		repos: []string{"sloan/fractals-nextjs"},
+		runs: map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {
+			testHealthRun(2, "failure", 41),
+			testHealthRun(1, "success", 21),
+		}},
+		jobs: map[int64][]forgejo.ActionRunJob{
+			2: healthJobs("success", "success", "failure"),
+		},
+		jobsErr: map[int64]error{1: io.EOF},
+	}
+	d := newDeployTestReader(stub, nil).Read()
+
+	require.Len(t, d.Health, 2)
+	assert.Equal(t, "failure", d.Health[1].Status)
+	assert.Equal(t, 0, d.Health[1].Passed, "the run under it was not read, so it is not counted either way")
+	assert.Equal(t, 1, d.Health[1].Runs)
+	assert.Equal(t, []string{"fractals-nextjs"}, d.HealthFailed)
+}
+
+// The page reads the block by the reader's own field names, so the names the
+// scheduled rows and the strip's marker travel under are pinned here: a rename
+// on either side of the wire is a row that silently stops being drawn, and a
+// marker no app can raise.
+func TestDeploysJSONCarriesTheNamesThePageReads(t *testing.T) {
+	t.Parallel()
+
+	d := &Deploys{
+		Runs: []DeployRun{},
+		Health: []DeployHealthRow{{
+			Repo:      "sloan/fractals-nextjs",
+			App:       "fractals-nextjs",
+			Env:       healthEnvProd,
+			Status:    healthFailure,
+			At:        deployNow.Add(-time.Minute),
+			LastGreen: deployNow.Add(-time.Hour),
+			Passed:    23,
+			Runs:      24,
+			URL:       "https://forgejo.test/runs/7",
+			Unread:    true,
+		}},
+		HealthFailed: []string{"fractals-nextjs"},
+	}
+	b, err := json.Marshal(d)
+	require.NoError(t, err)
+	for _, want := range []string{
+		`"health":[`, `"health_failed":["fractals-nextjs"]`,
+		`"repo":"sloan/fractals-nextjs"`, `"app":"fractals-nextjs"`, `"env":"prod-smoke"`,
+		`"status":"failure"`, `"at":`, `"last_green":`, `"passed":23`, `"runs":24`,
+		`"url":"https://forgejo.test/runs/7"`, `"unread":true`,
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("the block's JSON has no %s: the page reads nothing there", want)
+		}
+	}
 }

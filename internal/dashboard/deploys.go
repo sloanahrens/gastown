@@ -15,10 +15,11 @@ import (
 )
 
 // The Deploys block: the deploy workflows' runs, one row each, with the stages
-// the workflow's needs give. It reads what the Forgejo panel reads — the same
-// read-only viewer client and the same repos — and adds nothing of its own:
-// the run list, the run's stamps and its jobs are all the evidence it has. The
-// runner's own health is not among them. GET
+// the workflow's needs give, and beneath them the apps' scheduled health
+// checks, one row per app and environment. It reads what the Forgejo panel
+// reads — the same read-only viewer client and the same repos — and adds
+// nothing of its own: the run list, the run's stamps and its jobs are all the
+// evidence it has. The runner's own health is not among them. GET
 // /repos/{owner}/{repo}/actions/runners is owner-only and answers the viewer
 // 403, so a run nothing has picked up is inferred from the run and said as an
 // inference.
@@ -51,6 +52,31 @@ const (
 	// on.
 	deployTextMax = 40
 
+	// healthWorkflow is the scheduled check of a deployed app: an app repo's
+	// hourly run of its integration suite against staging and a read-only
+	// smoke check against prod (dv-4qtt). It is not a deploy — a run behind
+	// every hour would be an hourly row per app drowning the releases — so the
+	// block folds its runs into one row per app and environment instead of
+	// listing them (gt-t9w60).
+	healthWorkflow = "health.yml"
+
+	// healthEnvStaging and healthEnvProd are the environments health.yml
+	// checks, by the names its jobs carry them, and healthEnvs is those two in
+	// the order the block draws them: the deployment moves staging first. A
+	// job the block does not know is not an environment — health.yml's own off
+	// job is the app being stopped, not a place it was checked.
+	healthEnvStaging = "staging-integration"
+	healthEnvProd    = "prod-smoke"
+
+	// healthRunWindow is how many of an app's newest health runs a row is
+	// counted over: the pass count's denominator, and how far back the block
+	// looks for the environment's last green. The jobs of every run in the
+	// window are fetched, one call each, since an environment's result is not
+	// on the run — the run's own status is the whole workflow's — so each run
+	// costs one call. Only a repo that has health runs pays it, and the whole
+	// read shares the refresh's own deadline.
+	healthRunWindow = 24
+
 	// deployNoRunnerAfter is how long a deploy run may sit waiting before the
 	// block says nothing has picked it up, and deployStuckAfter how long a
 	// running run may hold the same stages before the block marks it stuck.
@@ -69,6 +95,17 @@ const deployStuck = "stuck?"
 const (
 	deployWaiting = "waiting"
 	deployRunning = "running"
+)
+
+// healthEnvs is the environments the block reads, in the order it draws them.
+var healthEnvs = []string{healthEnvStaging, healthEnvProd}
+
+// The job statuses the health fold reads: the API's own words for a job. Only
+// success is a pass — a run whose environment jobs are skipped is an app that
+// is off on purpose, and the page is where that is said.
+const (
+	healthSuccess = "success"
+	healthFailure = "failure"
 )
 
 // DeployStage is one stage of a deploy run: one job, its name and the state
@@ -122,15 +159,64 @@ type DeployRun struct {
 	Warn string `json:"warn,omitempty"`
 }
 
+// DeployHealthRow is one app's scheduled health check in one environment as
+// the block draws it. It is not a run: it is the app's newest healthRunWindow
+// runs folded together, so the row is the newest result and when it ran, the
+// last time this environment was green, and how much of the window it passed.
+// The fold is what keeps an hourly check from being an hourly row.
+type DeployHealthRow struct {
+	// Repo is the owner/name the page names the app's repo by everywhere else,
+	// and App the repo's own name, which the row's first cell and the strip's
+	// marker carry it by.
+	Repo string `json:"repo"`
+	App  string `json:"app"`
+	// Env is the environment the row is about: staging-integration or
+	// prod-smoke, the names health.yml's jobs carry.
+	Env string `json:"env"`
+	// Status is the newest health run's own word for this environment's job —
+	// success, failure, or skipped, the last of which is the app being off on
+	// purpose. It is empty for a row whose newest run could not be read, which
+	// Unread says.
+	Status string `json:"status,omitempty"`
+	// At is when that run was created: the age the page shows beside the
+	// result. It is absent with the status.
+	At time.Time `json:"at,omitzero"`
+	// LastGreen is when this environment last passed, absent when it has not
+	// passed in the window. A skipped run is not a pass, so an app that is off
+	// keeps the green it earned before it was turned off, and an app that has
+	// never passed says so rather than reading as green.
+	LastGreen time.Time `json:"last_green,omitzero"`
+	// Passed is how many of the window's runs this environment passed, out of
+	// Runs: the runs the block read that carry the environment's job. A run
+	// whose jobs call failed is in neither count, since it says nothing about
+	// the environment either way.
+	Passed int `json:"passed"`
+	Runs   int `json:"runs"`
+	// URL is the newest run's html_url, absent when the API sent none or sent
+	// something that is not http(s).
+	URL string `json:"url,omitempty"`
+	// Unread marks a row whose newest run's jobs the block could not read. The
+	// page says so rather than drawing the run under it as the newest.
+	Unread bool `json:"unread,omitempty"`
+}
+
 // Deploys is the Cloud section's Deploys block: the newest deploy runs the
 // viewer can see, of either workflow. Missing names the repos whose runs could
 // not be read, so a repo that failed is named rather than reading as a repo
 // with no deploys; Error is the class of a refresh that read no repo at all,
 // which the block's note carries.
 type Deploys struct {
-	Runs    []DeployRun `json:"runs"`
-	Missing []string    `json:"missing,omitempty"`
-	Error   string      `json:"error,omitempty"`
+	Runs []DeployRun `json:"runs"`
+	// Health is the scheduled checks of every repo that has them: one row per
+	// app and environment. It is empty until a repo has health.yml runs, so a
+	// repo without the workflow shows nothing extra.
+	Health []DeployHealthRow `json:"health,omitempty"`
+	// HealthFailed names the apps whose newest scheduled check failed — the
+	// strip's red marker. An app that is off is not among them: its run is
+	// skipped, which is on purpose, not a failure.
+	HealthFailed []string `json:"health_failed,omitempty"`
+	Missing      []string `json:"missing,omitempty"`
+	Error        string   `json:"error,omitempty"`
 }
 
 // deployAPI is the part of the Forgejo client the deploy reader calls.
@@ -193,9 +279,11 @@ func (r *DeployReader) Read() *Deploys {
 	}
 
 	var (
-		runs     []deployRun
-		missing  []string
-		firstErr error
+		runs         []deployRun
+		health       []DeployHealthRow
+		healthFailed []string
+		missing      []string
+		firstErr     error
 	)
 	for _, name := range names {
 		owner, repo, ok := strings.Cut(name, "/")
@@ -211,6 +299,15 @@ func (r *DeployReader) Read() *Deploys {
 			continue
 		}
 		runs = append(runs, found...)
+		// The same repo's scheduled checks, folded. A repo that cannot list
+		// them costs the block its scheduled rows and nothing else: the deploy
+		// runs above are already in hand, and a repo with no health run at all
+		// shows nothing extra.
+		rows, failed := r.healthRows(ctx, name, owner, repo)
+		health = append(health, rows...)
+		if failed {
+			healthFailed = append(healthFailed, healthApp(name))
+		}
 	}
 	if len(missing) == len(names) && len(missing) > 0 {
 		// Every repo failed, so there is no fresh value at all. That is the
@@ -256,7 +353,13 @@ func (r *DeployReader) Read() *Deploys {
 	r.watch = next
 	r.mu.Unlock()
 
-	return &Deploys{Runs: rows, Missing: missing}
+	// The rows are read a repo at a time, in the viewer's order, and the page
+	// is read app by app: sorting by app keeps an app's environments together,
+	// in the order the fold drew them.
+	sort.SliceStable(health, func(i, j int) bool { return health[i].App < health[j].App })
+	sort.Strings(healthFailed)
+
+	return &Deploys{Runs: rows, Health: health, HealthFailed: healthFailed, Missing: missing}
 }
 
 // inferWarn reads the runner trouble off one run and records what this read
@@ -323,6 +426,172 @@ func (r *DeployReader) runList(ctx context.Context, name, owner, repo string) ([
 	}
 	return out, nil
 }
+
+// healthRun is one scheduled run of health.yml as the fold reads it: the run
+// and its created stamp parsed once, and the status of each environment job it
+// carries. Envs is nil for a run whose jobs call failed, which is not the same
+// as a run whose jobs named no environment at all: the first is a row the
+// block must say it could not read, the second is a check this environment is
+// not part of.
+type healthRun struct {
+	run     forgejo.ActionRun
+	created time.Time
+	envs    map[string]string
+	unread  bool
+}
+
+// healthRows reads one repo's scheduled health checks and folds them into the
+// block's rows: the app's newest healthRunWindow runs of health.yml as one row
+// per app and environment, plus whether the app's newest check failed.
+//
+// The jobs of every run in the window are fetched, one call each, because an
+// environment's result is not on the run: the run's own status is the whole
+// workflow's, and a run whose jobs were all skipped is green there while
+// nothing was tested. Reading the jobs is what tells a pass from an app that
+// was off, and the window is what makes the pass count and the last green a
+// reading rather than a guess.
+//
+// A repo whose health runs cannot be listed at all is a repo with no scheduled
+// rows here: the block adds nothing to Missing for it, since the deploy runs
+// the same listing answered are in hand.
+func (r *DeployReader) healthRows(ctx context.Context, name, owner, repo string) ([]DeployHealthRow, bool) {
+	// The workflow filter is the API's own, so the page holds the health runs
+	// and not the repo's whole history; the base name is still matched below,
+	// the way the deploy list matches it.
+	list, err := r.api.ListRuns(ctx, owner, repo, forgejo.RunFilter{WorkflowID: healthWorkflow, Page: 1, Limit: healthRunWindow})
+	if err != nil {
+		return nil, false
+	}
+	var window []healthRun
+	for _, run := range list.Runs {
+		if path.Base(run.WorkflowID) != healthWorkflow {
+			continue
+		}
+		window = append(window, healthRun{run: run, created: parseRunStamp(run.Created)})
+	}
+	sort.SliceStable(window, func(i, j int) bool { return window[i].created.After(window[j].created) })
+	if len(window) > healthRunWindow {
+		window = window[:healthRunWindow]
+	}
+	for i := range window {
+		jobs, err := r.api.ListRunJobs(ctx, owner, repo, window[i].run.ID)
+		if err != nil {
+			window[i].unread = true
+			continue
+		}
+		window[i].envs = healthEnvsOf(jobs)
+	}
+	return foldHealth(name, window)
+}
+
+// healthEnvsOf reads one run's jobs as the environments it checked: the
+// status the API gave each known environment job. A job the block does not
+// know is not an environment, and neither is a job that only held the ones it
+// needs.
+func healthEnvsOf(jobs []forgejo.ActionRunJob) map[string]string {
+	out := make(map[string]string, len(healthEnvs))
+	for _, j := range jobs {
+		name := cloudText(j.Name, deployTextMax)
+		for _, env := range healthEnvs {
+			if name == env {
+				out[env] = cloudText(j.Status, deployTextMax)
+			}
+		}
+	}
+	return out
+}
+
+// foldHealth folds one app's window into the block's rows, one per
+// environment, and says whether the app is one the strip must mark. The row's
+// result is the newest run's, never an older run's drawn as the newest: a run
+// the block could not read leaves the row saying so, with the passes it did
+// read still counted beside it.
+func foldHealth(name string, window []healthRun) ([]DeployHealthRow, bool) {
+	app := healthApp(name)
+	// The newest run is what the row's result comes from, so a window whose
+	// newest run could not be read has no result to report whatever the runs
+	// under it hold.
+	read := len(window) > 0 && !window[0].unread
+	rows := make([]DeployHealthRow, 0, len(healthEnvs))
+	for _, env := range healthWindowEnvs(window) {
+		row := DeployHealthRow{Repo: name, App: app, Env: env, Unread: !read}
+		have := false
+		for _, hr := range window {
+			status, ok := hr.envs[env]
+			if !ok {
+				continue
+			}
+			row.Runs++
+			if status == healthSuccess {
+				row.Passed++
+				if row.LastGreen.IsZero() {
+					row.LastGreen = hr.created
+				}
+			}
+			if !have {
+				// The first run that carries this environment is the newest
+				// one: the window is newest first, and a run whose jobs were
+				// not read carries no environment at all.
+				have = true
+				row.Status, row.At, row.URL = status, hr.created, deployURL(hr.run.HTMLURL)
+			}
+		}
+		rows = append(rows, row)
+	}
+	return rows, healthFailed(window)
+}
+
+// healthWindowEnvs names the environments a window carries, in the order the
+// block draws them. A window whose jobs were read and named none is a repo
+// whose health workflow checks no environment the block knows, and draws no
+// rows; one whose newest run could not be read could name either, so the block
+// draws the two it knows as rows it could not read rather than nothing at all
+// — a silent blank would read as an app with no scheduled check.
+func healthWindowEnvs(window []healthRun) []string {
+	var named []string
+	read := false
+	for _, env := range healthEnvs {
+		for _, hr := range window {
+			if hr.unread {
+				continue
+			}
+			read = true
+			if _, ok := hr.envs[env]; ok {
+				named = append(named, env)
+				break
+			}
+		}
+	}
+	if len(named) == 0 && len(window) > 0 && !read {
+		return append([]string(nil), healthEnvs...)
+	}
+	return named
+}
+
+// healthFailed reports whether an app's newest scheduled check failed, which
+// is what the strip's marker is drawn from. A run whose environment jobs are
+// skipped is an app that is off on purpose: that is not a failure, and it is
+// why the run's own status is not what this reads.
+func healthFailed(window []healthRun) bool {
+	for _, hr := range window {
+		if hr.unread {
+			// A run the block could not read is no word on the app; the newest
+			// one it did read is.
+			continue
+		}
+		for _, status := range hr.envs {
+			if status == healthFailure {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// healthApp is the name an app is known by: the repo's own name, without the
+// owner, which is what the strip's marker and the row's first cell carry.
+func healthApp(repo string) string { return path.Base(repo) }
 
 // deployRunWorkflow names the workflow a run belongs to, or "" for a run of
 // one the block does not follow. It reads the workflow by its base name, the
