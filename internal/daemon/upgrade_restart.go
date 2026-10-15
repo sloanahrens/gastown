@@ -41,7 +41,25 @@ const postLandRestartCap = 2 * time.Minute
 // says it cut the sweep short. The cap is not in isIdleForUpgrade: it needs
 // the marker's wait time, and a sweep in the idle predicate would hold the
 // restart forever.
+//
+// The clock is tierSweepRestartWait's, not the marker's alone: a sweep that
+// starts while the restart has already waited — one the stale bound let through
+// (gt-zvqn8) — would otherwise be cut on the heartbeat after it started.
 const tierSweepRestartCap = 15 * time.Minute
+
+// tierSweepRestartWait is how long the running sweep cycle has been given: the
+// smaller of the marker's wait clock and the cycle's own run, so a cycle that
+// started before the marker keeps the marker's bound and a cycle that started
+// after it gets that bound from its own start. A daemon with no recorded start
+// — a sweep whose cycle began before this change, or a test that sets
+// tierSweepRunning directly — falls back to the marker's clock.
+func (d *Daemon) tierSweepRestartWait(now time.Time, waited time.Duration) time.Duration {
+	started := d.tierSweepStartedAt.Load()
+	if started == 0 {
+		return waited
+	}
+	return min(max(now.Sub(time.Unix(0, started)), 0), max(waited, 0))
+}
 
 // housekeepingRestartCap is how long a pending upgrade restart waits for the
 // daemon's own housekeeping — a script plugin run, a dog cycle, the
@@ -483,11 +501,12 @@ func (d *Daemon) upgradeHold(now time.Time) *daemonWork {
 	// A running sweep cycle holds the restart, bounded, instead of dying with
 	// the old daemon.
 	sweep := d.tierSweepRunning.Load()
+	sweepWaited := d.tierSweepRestartWait(now, waited)
 
 	switch {
 	case postLand && waited < postLandRestartCap:
 		return &daemonWork{name: "the post-land run"}
-	case sweep && waited < tierSweepRestartCap:
+	case sweep && sweepWaited < tierSweepRestartCap:
 		return &daemonWork{name: tierSweepHoldLabel}
 	case hold != nil && waited < housekeepingRestartCap:
 		return hold
@@ -504,7 +523,8 @@ func (d *Daemon) upgradeHold(now time.Time) *daemonWork {
 		d.logger.Printf("upgrade-restart: a post-land run is still in flight after %s; restarting anyway (the landing worker reruns the untested tip on start)", postLandRestartCap)
 	}
 	if sweep {
-		d.logger.Printf("upgrade-restart: a tier sweep is still running after %s; restarting anyway and cutting the sweep short", tierSweepRestartCap)
+		d.logger.Printf("upgrade-restart: a tier sweep has run for %s without closing; restarting anyway and cutting the sweep short",
+			sweepWaited.Round(time.Second))
 	} else if d.upgradeWaitLogged == tierSweepHoldLabel {
 		d.logger.Printf("upgrade-restart: the tier sweep closed; restarting")
 	}
@@ -552,7 +572,9 @@ func (d *Daemon) logUpgradeWait(name string, now time.Time) {
 // A tier sweep cycle that started before the marker runs in this process;
 // restarting kills it and its verdict is never recorded (gt-ccyw0). upgradeHold
 // holds for it while it runs, up to tierSweepRestartCap. New cycles do not
-// start in between: runTierSweep skips while the drain is on.
+// start in between unless the last sweep is already past the stale bound
+// (tierSweepDeferForRestart, gt-zvqn8), which is the one case where the
+// restart waits on a sweep that began after the marker did.
 
 // landingPassBead is the bead of a landing pass in flight (the first rig by
 // name when several), or "" when none is working on one.
