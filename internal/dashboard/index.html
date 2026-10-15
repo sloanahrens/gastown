@@ -1669,29 +1669,29 @@ function renderSpend(s) {
   const kv = el("div", "kv");
   const add = (v, k, cls) => { const x = el("div"); x.append(el("b", cls || "", v), el("span", "", k)); kv.append(x); };
   add(money(d.balance), "balance", live.available === false ? "badc" : "");
-  // spent_ledger (sampled drops over the whole ledger) replaces spent_total, a
-  // hand-set constant; a report without it still gets the old tile (gt-jrrrv).
-  if (d.spent_ledger != null) add(money(d.spent_ledger), "spent (sampled" + (d.ledger_since ? " since " + String(d.ledger_since).slice(0, 10) : "") + ")");
-  else add(money(d.spent_total), "spent since top-up");
+  // Spent is the sum of the sampled drops from ledger_since; only a report with
+  // no ledger total falls back to spent_total.
+  if (d.spent_ledger != null) {
+    const since = /^\d{4}-\d{2}-\d{2}/.exec(String(d.ledger_since || ""));
+    add(money(d.spent_ledger), "spent (sampled" + (since ? " since " + since[0] : "") + ")");
+  } else add(money(d.spent_total), "spent since top-up");
   add(d.pace_1h ? money(d.pace_1h.per_hour) + "/h" : "–", "last 1h");
   add(d.pace_24h ? money(d.pace_24h.per_hour) + "/h" : "–", "last 24h");
   const rw = d.runway_days_at_24h_pace;
   add(rw == null ? "–" : rw.toFixed(1) + "d", "runway", rw != null && rw < 3 ? "badc" : rw != null && rw < 7 ? "warnc" : "");
   box.append(kv);
-  // Cash vs credit under the balance, so a balance that rose by granted credit
-  // is not read as money the operator paid in (gt-jrrrv). Both fields are
-  // optional: an older report has neither and gets no line.
+  // Cash vs credit under the balance, so granted credit is not read as money
+  // paid in. Both fields are needed; a report without them gets no line.
   if (d.cash != null && d.credit != null) {
     box.append(el("div", "title", money(d.cash) + " cash + " + money(d.credit) + " credit"));
     const cr = d.credit_runway_days_at_24h_pace;
     if (d.credit > 0 && cr != null) box.append(el("div", "title", "credit lasts ~" + cr.toFixed(1) + "d, then cash"));
   }
   // One dim line of the last few days instead of a table, to keep the panel short.
-  // A report that lists balance rises (credits) never has a negative day; one
-  // that predates it keeps calling a negative day a top-up.
+  // A negative day is a balance rise; the credits line below says of what kind.
   const days = Object.entries(d.per_day || {}).slice(-4).reverse();
   if (days.length) {
-    box.append(el("div", "title", days.map(([day, v]) => day.slice(5) + " " + (v.spent < 0 && !Array.isArray(d.credits) ? "top-up" : money(v.spent))).join(" · ")));
+    box.append(el("div", "title", days.map(([day, v]) => day.slice(5) + " " + (v.spent < 0 ? "+" + money(-v.spent) + " added" : money(v.spent))).join(" · ")));
   }
   // The last balance rises, each with what the report made of it.
   const creditText = c => {

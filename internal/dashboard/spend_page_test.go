@@ -5,6 +5,9 @@ import (
 	"testing"
 )
 
+// There is no JS engine in the unit tier, so like the other page tests these
+// pin the lines renderSpend draws from, not a rendered DOM.
+
 // The balance is split into cash and credit under the tile, the credit runway
 // rides beside it, balance rises are listed by the kind the report gave them,
 // and the spent tile reads the sampled ledger from its start date (gt-jrrrv).
@@ -19,26 +22,27 @@ func TestSpendPanelShowsCashVersusCreditAndTheCreditEvents(t *testing.T) {
 		`d.credit_runway_days_at_24h_pace`,
 		`"credit lasts ~" + cr.toFixed(1) + "d, then cash"`,
 		// credits non-empty: one dim line, each rise with its kind.
-		`d.credits`,
 		`"credit": " credit"`,
 		`"top-up": " top-up"`,
 		`"credit+top-up": " credit + top-up"`,
 		`(kind || " added")`,
 		`" +" + money(c.amount)`,
-		// the spent tile starts where the ledger does.
+		// the spent tile reads the ledger and names where it starts.
 		`d.spent_ledger != null`,
-		`"spent (sampled"`,
-		`d.ledger_since`,
+		`"spent (sampled" + (since ? " since " + since[0] : "") + ")"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("renderSpend does not draw the credit view: no %q", want)
 		}
 	}
 
-	// A rise is never called a top-up by the per-day line once the report
-	// classifies its rises: the only "top-up" left there is for an older report.
-	if !strings.Contains(body, `v.spent < 0 && !Array.isArray(d.credits) ? "top-up"`) {
-		t.Error("the per-day line still calls every negative day a top-up")
+	// A negative day is a balance rise, never called a top-up by the per-day
+	// line: the credits line carries the kind.
+	if strings.Contains(body, `v.spent < 0 ? "top-up"`) || strings.Contains(body, `v.spent < 0 && !Array.isArray`) {
+		t.Error("the per-day line still calls a negative day a top-up")
+	}
+	if !strings.Contains(body, `v.spent < 0 ? "+" + money(-v.spent) + " added" : money(v.spent)`) {
+		t.Error("the per-day line does not show a negative day as a rise")
 	}
 
 	// The newest rise leads, like the per-day line.
@@ -58,11 +62,12 @@ func TestSpendPanelToleratesAReportWithoutTheCreditFields(t *testing.T) {
 		`d.cash != null && d.credit != null`,
 		// credits must be an array before it is read.
 		`Array.isArray(d.credits) ?`,
-		// the old tile stays when there is no ledger total.
-		`else add(money(d.spent_total), "spent since top-up")`,
+		// the old tile stays only when there is no ledger total.
+		`} else add(money(d.spent_total), "spent since top-up")`,
+		// a ledger_since that is not a date is left out of the label.
+		`/^\d{4}-\d{2}-\d{2}/.exec(String(d.ledger_since || ""))`,
 		// no runway number, no runway line.
 		`cr != null`,
-		`d.ledger_since ?`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("renderSpend does not tolerate an older report: no %q", want)
