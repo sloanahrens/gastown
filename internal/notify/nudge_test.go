@@ -206,13 +206,22 @@ func TestTownNudgerReturnsAtTheDeadlineWhenTmuxHangs(t *testing.T) {
 func TestTownNudgerQueueOptionDeliversToABusySeat(t *testing.T) {
 	t.Parallel()
 	const session = "gt-crew-max"
+	// deadline is the caller's, and it must be a bound on what the nudge waits
+	// for, never on how fast a loaded host writes the queue: the gate runs this
+	// beside the whole parallel suite, where a 300 ms deadline fired before the
+	// queue write (load average 30). The default mode blocks on the watch until
+	// the deadline, so its deadline is the test's duration and stays short;
+	// queue mode must return long before the one-minute watch, so its deadline
+	// is generous and still far under it: a queue mode that waited on the seat
+	// would fail the call with DeadlineExceeded after 20 s.
 	cases := []struct {
-		name    string
-		opts    []NudgeOption
-		wantErr error
+		name     string
+		opts     []NudgeOption
+		deadline time.Duration
+		wantErr  error
 	}{
-		{"default waits out the watch", nil, context.DeadlineExceeded},
-		{"queue option returns at once", []NudgeOption{Queue()}, nil},
+		{"default waits out the watch", nil, 2 * time.Second, context.DeadlineExceeded},
+		{"queue option returns at once", []NudgeOption{Queue()}, 20 * time.Second, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -227,7 +236,7 @@ func TestTownNudgerQueueOptionDeliversToABusySeat(t *testing.T) {
 				town.Delivery.WatchTimeout = time.Minute // the real watch outlasts the caller's deadline
 				return town
 			}
-			ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+			ctx, cancel := context.WithTimeout(t.Context(), tc.deadline)
 			defer cancel()
 
 			err := n.Nudge(ctx, session, "split proposal", tc.opts...)
