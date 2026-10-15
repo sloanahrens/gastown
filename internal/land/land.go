@@ -128,6 +128,11 @@ type Lander struct {
 	// the bead an earlier landing filed for one (gt-s01pn). Nil means off, and
 	// off means nothing in the feed runs.
 	Followups FollowupBeads
+	// OMQueue queues the major and critical findings of an approved landing
+	// onto its work bead, for the next deep-review run to verify and file
+	// (gt-qtj72). False means off, and off means nothing in the queue runs. It
+	// writes through Beads, so it needs no surface of its own.
+	OMQueue bool
 	// RangeChecks run on base..head before the merge (the landing worker
 	// passes AttributionCheck). A returned Rejection is written to the bead
 	// like any other.
@@ -1010,6 +1015,9 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	// The landing is recorded, so the feed runs after it and cannot change it
 	// (gt-s01pn).
 	l.fileFollowups(dir, w, res)
+	// The queue runs after the record for the same reason, and writes only the
+	// work bead's notes, label and comment (gt-qtj72).
+	l.queueOMFindings(w, res)
 	return res, nil
 }
 

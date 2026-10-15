@@ -519,6 +519,14 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		lander.Followups = followupBeads{client: bd}
 		d.logger.Printf("landing_worker: %s: om follow-up feed on (landing.followups)", rigName)
 	}
+	// The finding queue records an approved landing's om findings on its own
+	// work bead, for the next deep-review run to verify. It is the rig's own
+	// operator setting for the same reason the feed is: it writes to beads, so
+	// which rig queues is never merged repo content's call (gt-qtj72).
+	if rigOMQueueEnabled(rigPath) {
+		lander.OMQueue = true
+		d.logger.Printf("landing_worker: %s: om finding queue on (landing.om_queue)", rigName)
+	}
 	// A test that keeps failing for beads that did not touch it is the daemon's
 	// to escalate and file a repair for (gt-xvw20); the watch does that off the
 	// landing's goroutine, where a retrying alert cannot hold up a rejection.
@@ -996,6 +1004,18 @@ func rigFollowupsEnabled(rigPath string) bool {
 		return false
 	}
 	return settings.Landing.Followups
+}
+
+// rigOMQueueEnabled is landing.om_queue from the rig's own settings/config.json
+// only, for the reason rigFollowupsEnabled reads its file: the queue writes to
+// beads, so which rig queues om's findings is the operator's call and never
+// merged repo content's (gt-qtj72).
+func rigOMQueueEnabled(rigPath string) bool {
+	settings, err := config.LoadRigSettings(config.RigSettingsPath(rigPath))
+	if err != nil || settings == nil || settings.Landing == nil {
+		return false
+	}
+	return settings.Landing.OMQueue
 }
 
 // followupBeads is the daemon's land.FollowupBeads over the beads client the
