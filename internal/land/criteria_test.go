@@ -100,17 +100,18 @@ Flags:
 // reading the --criteria-file while the review runs — the only moment its
 // contents are supposed to exist.
 type criteriaStub struct {
-	t        *testing.T
-	help     string
-	probes   int
-	versions int
-	argv     []string
-	critPath string
-	text     string
-	mode     os.FileMode // the criteria file's permissions as the run saw them
-	sawFlag  bool
-	hold     bool  // block until the attempt's deadline passes
-	fail     error // the review's own failure
+	t         *testing.T
+	help      string
+	probeFail int // help probes to fail with a run error before answering
+	probes    int
+	versions  int
+	argv      []string
+	critPath  string
+	text      string
+	mode      os.FileMode // the criteria file's permissions as the run saw them
+	sawFlag   bool
+	hold      bool  // block until the attempt's deadline passes
+	fail      error // the review's own failure
 }
 
 func (s *criteriaStub) run(ctx context.Context, _ string, _ []string, argv []string, out io.Writer) (int, error) {
@@ -121,6 +122,9 @@ func (s *criteriaStub) run(ctx context.Context, _ string, _ []string, argv []str
 	}
 	if slices.Contains(argv, "--help") {
 		s.probes++
+		if s.probes <= s.probeFail {
+			return -1, errors.New("exec: om: not found")
+		}
 		_, _ = io.WriteString(out, s.help)
 		return 2, nil
 	}
@@ -219,9 +223,10 @@ func TestOMReviewerPassesTheCriteriaFile(t *testing.T) {
 	}
 }
 
-// TestOMReviewerProbesHelpOnceForBothFlags: the flags are properties of the one
-// installed binary, so one help read answers both questions.
-func TestOMReviewerProbesHelpOnceForBothFlags(t *testing.T) {
+// TestOMReviewerProbesTheHelpOncePerBinary: whether om takes the criteria flag
+// is a property of the installed binary, so one help read answers it however
+// many landings ask.
+func TestOMReviewerProbesTheHelpOncePerBinary(t *testing.T) {
 	t.Parallel()
 	bin := omBinary(t)
 	stub := &criteriaStub{t: t, help: omHelpWithCriteria}
@@ -233,7 +238,98 @@ func TestOMReviewerProbesHelpOnceForBothFlags(t *testing.T) {
 		}
 	}
 	if stub.probes != 1 {
-		t.Errorf("probed %d times, want 1: one help read answers both flags", stub.probes)
+		t.Errorf("probed %d times, want 1: the flags are a property of the binary", stub.probes)
+	}
+}
+
+// TestOMReviewerReprobesAReinstalledOM: an om replaced under a running daemon is
+// a different binary, whatever the path says, so its flags are read again.
+func TestOMReviewerReprobesAReinstalledOM(t *testing.T) {
+	t.Parallel()
+	bin := omBinary(t)
+	stub := &criteriaStub{t: t, help: omHelpWithCriteria}
+	r := criteriaStubbed(t, bin, stub)
+	in := func() ReviewInput {
+		return ReviewInput{Dir: t.TempDir(), Base: "a", Head: "b", BeadID: "gt-abc", CriteriaText: "- [ ] one"}
+	}
+	if _, err := r.ReviewBead(context.Background(), in()); err != nil {
+		t.Fatal(err)
+	}
+	// The upgrade: same path, a binary of another size, so a new identity.
+	if err := os.WriteFile(bin, []byte("nominal om, reinstalled\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ReviewBead(context.Background(), in()); err != nil {
+		t.Fatal(err)
+	}
+	if stub.probes != 2 {
+		t.Errorf("probed %d times, want 2: a reinstalled om is probed again", stub.probes)
+	}
+}
+
+// TestOMReviewerRetriesAFailedProbe: a probe that cannot run is not an answer,
+// so the criteria flag is left off, the failure is logged, and the next review
+// probes again. The bead's id is on the argv either way (gt-r3fg9): the flags
+// the probe decides are never the one the review must carry.
+func TestOMReviewerRetriesAFailedProbe(t *testing.T) {
+	t.Parallel()
+	bin := omBinary(t)
+	stub := &criteriaStub{t: t, help: omHelpWithCriteria, probeFail: 1}
+	r := criteriaStubbed(t, bin, stub)
+	var log strings.Builder
+	in := func() ReviewInput {
+		return ReviewInput{Dir: t.TempDir(), Base: "a", Head: "b", BeadID: "gt-abc",
+			CriteriaText: "- [ ] one", Logf: logfTo(&log)}
+	}
+	if _, err := r.ReviewBead(context.Background(), in()); err != nil {
+		t.Fatal(err)
+	}
+	if stub.sawFlag {
+		t.Errorf("argv = %q carries --criteria-file after a failed probe", stub.argv)
+	}
+	if !slices.Contains(stub.argv, "--bead") {
+		t.Errorf("argv = %q, want the bead's id whatever the probe answered", stub.argv)
+	}
+	if !strings.Contains(log.String(), "could not probe") {
+		t.Errorf("log = %q, want the failed probe named", log.String())
+	}
+	if _, err := r.ReviewBead(context.Background(), in()); err != nil {
+		t.Fatal(err)
+	}
+	if stub.probes != 2 {
+		t.Errorf("probed %d times, want 2: a failed probe is not cached", stub.probes)
+	}
+	if !stub.sawFlag {
+		t.Errorf("argv = %q, want --criteria-file once the probe answers", stub.argv)
+	}
+}
+
+// TestOMReviewerRetriesAProbeWithNoHelpText: an om that exits without printing
+// help is as unprobed as one that failed, so the criteria flag stays off and the
+// probe is retried.
+func TestOMReviewerRetriesAProbeWithNoHelpText(t *testing.T) {
+	t.Parallel()
+	bin := omBinary(t)
+	stub := &criteriaStub{t: t, help: ""}
+	r := criteriaStubbed(t, bin, stub)
+	var log strings.Builder
+	in := func() ReviewInput {
+		return ReviewInput{Dir: t.TempDir(), Base: "a", Head: "b", BeadID: "gt-abc",
+			CriteriaText: "- [ ] one", Logf: logfTo(&log)}
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := r.ReviewBead(context.Background(), in()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if stub.sawFlag {
+		t.Errorf("argv = %q carries --criteria-file with no help text to justify it", stub.argv)
+	}
+	if stub.probes != 2 {
+		t.Errorf("probed %d times, want 2: a help-less probe is not cached", stub.probes)
+	}
+	if !strings.Contains(log.String(), "no output") {
+		t.Errorf("log = %q, want the missing help named", log.String())
 	}
 }
 
