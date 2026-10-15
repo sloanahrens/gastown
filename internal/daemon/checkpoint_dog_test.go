@@ -352,6 +352,40 @@ func TestCheckpointWorktreeKeepsFixtureBesideTrackedSource(t *testing.T) {
 	}
 }
 
+// An edited source file under a coverage/ directory does not make the output
+// written beside it work: the checkpoint commits the edit and a modified
+// fixture HEAD tracks, and leaves the generated files out (gt-qdvp2).
+func TestCheckpointWorktreeResetsOutputBesideEditedSourceButKeepsTrackedFixture(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	workDir, _, g := checkpointClone(t, d, map[string]string{
+		"pkg/coverage/collector.go":           "package coverage\n",
+		"pkg/coverage/testdata/report.golden": "old\n",
+	})
+	before := headOf(t, g)
+	writeWorkFiles(t, workDir, map[string]string{
+		"pkg/coverage/collector.go":           "package coverage\n// edited\n",
+		"pkg/coverage/testdata/report.golden": "new\n",
+		"pkg/coverage/lcov-report/index.html": "<html>\n",
+		"pkg/coverage/coverage.out":           "mode: set\n",
+	})
+
+	if !d.checkpointWorktree(workDir, "rig", "polecat") {
+		t.Fatal("checkpointWorktree did not create a checkpoint commit")
+	}
+	want := []string{"pkg/coverage/collector.go", "pkg/coverage/testdata/report.golden"}
+	if got := changedSince(t, g, before); !slices.Equal(got, want) {
+		t.Fatalf("checkpoint commit changed %q, want %q", got, want)
+	}
+	wantNothingStaged(t, g)
+	st := worktreeStatus(t, g)
+	for _, generated := range []string{"pkg/coverage/lcov-report/index.html", "pkg/coverage/coverage.out"} {
+		if !slices.Contains(st.Untracked, generated) {
+			t.Errorf("status %+v: %s was committed or lost; want it left untracked", st, generated)
+		}
+	}
+}
+
 func TestCheckpointWorktreeSkipsRuntimeOnlyNestedArtifacts(t *testing.T) {
 	t.Parallel()
 	d := &Daemon{logger: log.New(io.Discard, "", 0)}

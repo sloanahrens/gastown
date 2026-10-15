@@ -190,6 +190,31 @@ func RunWorkTreeContract(t *testing.T, newEnv func(t *testing.T) Env) {
 		}
 	})
 
+	t.Run("RuntimeArtifactPathspecs resets output beside edited source but not a tracked fixture", func(t *testing.T) {
+		t.Parallel()
+		fx := newFixture(t, newEnv(t))
+		g := fx.env.Open(fx.clone).(WorkTree)
+		writeFiles(t, fx.clone, map[string]string{
+			"pkg/coverage/collector.go":           "package coverage\n",
+			"pkg/coverage/testdata/report.golden": "old\n",
+		})
+		if err := g.Add("-A"); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.Commit("source and fixture"); err != nil {
+			t.Fatal(err)
+		}
+		got := g.RuntimeArtifactPathspecs([]string{
+			"pkg/coverage/collector.go",
+			"pkg/coverage/testdata/report.golden",
+			"pkg/coverage/lcov-report/index.html",
+			"pkg/coverage/coverage.out",
+		})
+		if want := []string{"pkg/coverage/lcov-report/", "pkg/coverage/coverage.out"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("RuntimeArtifactPathspecs = %q, want %q", got, want)
+		}
+	})
+
 	t.Run("Commit commits the index on HEAD, and refuses an empty one", func(t *testing.T) {
 		t.Parallel()
 		fx := newFixture(t, newEnv(t))
