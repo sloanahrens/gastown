@@ -192,6 +192,9 @@ type Manager struct {
 	getwd func() (string, error)
 	// clock paces the Dolt retry backoff; nil is the real clock.
 	clock clockwork.Clock
+	// recoverReadOnly restarts a read-only Dolt server; nil means
+	// doltserver.RecoverReadOnly. A test sets it so no real server is touched.
+	recoverReadOnly func(townRoot string) error
 	// diskSpace reports the free space at a path; nil means
 	// util.CheckDiskSpace, which runs diskutil on macOS.
 	diskSpace func(path string) (util.DiskSpaceLevel, string, error)
@@ -417,8 +420,11 @@ func (m *Manager) CheckDoltHealth() error {
 		if err == nil || errors.Is(err, beads.ErrNotFound) {
 			return nil
 		}
-		// Optimistic lock errors mean Dolt is alive but busy with concurrent writes
-		if isDoltOptimisticLockError(err) {
+		// Optimistic lock errors mean Dolt is alive but busy with concurrent writes.
+		// A read-only server matches that predicate too ("cannot update manifest:
+		// database is read only") but is not healthy: it falls through to the
+		// retries and the recovery below instead of passing the check.
+		if !doltserver.IsReadOnlyError(err.Error()) && isDoltOptimisticLockError(err) {
 			return nil
 		}
 		// If beads isn't configured at all, skip the health check
@@ -441,7 +447,11 @@ func (m *Manager) CheckDoltHealth() error {
 	// If the persistent failure looks like read-only, attempt server recovery
 	// before giving up. This is the gt-level recovery path (gt-chx92).
 	if lastErr != nil && doltserver.IsReadOnlyError(lastErr.Error()) {
-		if recoverErr := doltserver.RecoverReadOnly(m.townRoot); recoverErr == nil {
+		recoverFn := m.recoverReadOnly
+		if recoverFn == nil {
+			recoverFn = doltserver.RecoverReadOnly
+		}
+		if recoverErr := recoverFn(m.townRoot); recoverErr == nil {
 			// Recovery succeeded — verify health once more
 			_, err := m.beads.Show("__health_check_nonexistent__")
 			if err == nil || errors.Is(err, beads.ErrNotFound) {
@@ -1047,6 +1057,10 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 			return nil, fmt.Errorf("creating worktree on existing branch %s: %w", opts.ResumeBranch, err)
 		}
 		worktreeCreated = true
+		if err := m.advanceResumeBranch(clonePath, opts.ResumeBranch); err != nil {
+			cleanupOnError()
+			return nil, err
+		}
 	} else {
 		var startPoint string
 		if opts.BaseBranch != "" {
@@ -1249,6 +1263,10 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retE
 			return nil, fmt.Errorf("creating worktree on existing branch %s: %w", opts.ResumeBranch, err)
 		}
 		worktreeCreated = true
+		if err := m.advanceResumeBranch(clonePath, opts.ResumeBranch); err != nil {
+			cleanupOnError()
+			return nil, err
+		}
 	} else {
 		// Determine the start point for the new worktree
 		var startPoint string
@@ -1439,11 +1457,49 @@ func (m *Manager) CheckShellOutsideWorktree(name string) error {
 	if absErr1 != nil || absErr2 != nil || absErr3 != nil {
 		return fmt.Errorf("cannot verify shell safety: failed to resolve paths")
 	}
-	if strings.HasPrefix(cwdAbs, cloneAbs) || strings.HasPrefix(cwdAbs, polecatAbs) {
+	if pathWithin(cwdAbs, cloneAbs) || pathWithin(cwdAbs, polecatAbs) {
 		return fmt.Errorf("%w: your shell is in %s\n\nPlease cd elsewhere first, then retry:\n  cd ~/gt\n  gt polecat nuke %s/%s --force",
 			ErrShellInWorktree, cwd, m.rig.Name, name)
 	}
 	return nil
+}
+
+// advanceResumeBranch moves a resumed branch to the origin tip the resume just
+// fetched. WorktreeAddExistingForce attaches to whatever local branch already
+// exists, which can sit behind origin/<branch>: the polecat would start on that
+// stale tip and its push would be rejected non-fast-forward. clonePath is the
+// worktree already on the branch.
+//
+// Only a local tip that origin already contains moves. A local branch holding
+// commits origin lacks is left alone with a warning, since resetting would
+// discard them.
+func (m *Manager) advanceResumeBranch(clonePath, branch string) error {
+	g := m.gits.Open(clonePath)
+	remoteRef := "origin/" + branch
+	if exists, err := g.RefExists(remoteRef); err != nil || !exists {
+		return nil // the fetch found nothing newer to move to
+	}
+	contained, err := g.IsAncestor("HEAD", remoteRef)
+	if err != nil {
+		return fmt.Errorf("comparing resume branch %s with %s: %w", branch, remoteRef, err)
+	}
+	if !contained {
+		style.PrintWarning("resume branch %s has local commits not on %s; leaving it at its local tip", branch, remoteRef)
+		return nil
+	}
+	// reset --hard, not checkout -B: the repair path's old worktree still holds
+	// the branch, and checkout -B refuses a branch another worktree has.
+	if err := g.ResetHard(remoteRef); err != nil {
+		return fmt.Errorf("moving resume branch %s to %s: %w", branch, remoteRef, err)
+	}
+	return nil
+}
+
+// pathWithin reports whether path is dir or lies under it. Both are absolute
+// and clean. The match stops at a path separator, so polecats/51 is not
+// inside polecats/5.
+func pathWithin(path, dir string) bool {
+	return path == dir || strings.HasPrefix(path, dir+string(filepath.Separator))
 }
 
 func (m *Manager) removeWithOptionsLocked(name string, opts RemoveOptions) error {
@@ -1918,6 +1974,12 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 	}
 
 	tmpClonePath := newClonePath + ".repair-tmp"
+	if oldClonePath == polecatDir {
+		// Legacy layout: the old clone is polecatDir itself, and removing it
+		// below would take a temp worktree inside it along. Stage the repair
+		// beside polecatDir, under a dot name List skips.
+		tmpClonePath = filepath.Join(filepath.Dir(polecatDir), "."+name+".repair-tmp")
+	}
 	_ = os.RemoveAll(tmpClonePath) // clean up any leftover temp dir
 
 	if opts.ResumeBranch != "" {
@@ -1933,6 +1995,11 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 		}
 		if err := repoGit.WorktreeAddExistingForce(tmpClonePath, opts.ResumeBranch); err != nil {
 			return nil, fmt.Errorf("creating fresh worktree on existing branch %s: %w", opts.ResumeBranch, err)
+		}
+		if err := m.advanceResumeBranch(tmpClonePath, opts.ResumeBranch); err != nil {
+			_ = repoGit.WorktreeRemove(tmpClonePath, true)
+			_ = os.RemoveAll(tmpClonePath)
+			return nil, err
 		}
 	} else {
 		// Determine the start point for the new worktree
@@ -1994,7 +2061,12 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 	// Move temp worktree to final location using git worktree move.
 	// os.Rename breaks worktrees: the .git file and registry gitdir still
 	// reference the old temp path, leaving a broken worktree. (GH#2056)
-	if err := repoGit.WorktreeMove(tmpClonePath, newClonePath); err != nil {
+	// Removing a legacy clone removed polecatDir with it; the move needs it back.
+	moveErr := os.MkdirAll(polecatDir, 0755)
+	if moveErr == nil {
+		moveErr = repoGit.WorktreeMove(tmpClonePath, newClonePath)
+	}
+	if err := moveErr; err != nil {
 		// The old clone is already gone, so remove polecatDir with the temp
 		// worktree rather than leave a clone-less polecat behind.
 		removeFailedRepairWorktree(repoGit, polecatDir, newClonePath)
