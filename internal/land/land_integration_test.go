@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/checkpoint"
 )
 
 // The unit tier lands through gitfake. These run the same landings through
@@ -106,6 +108,21 @@ func appendT(t *testing.T, dir, name, line string) {
 	}
 }
 
+// realAutoSaveOnBranch commits an auto-save checkpoint on the fixture's work
+// branch and pushes it, so the range a landing brings to the target holds one
+// and mergeWork squashes it away.
+func realAutoSaveOnBranch(t *testing.T, f *landFixture) {
+	t.Helper()
+	seed := filepath.Join(filepath.Dir(f.origin), "seed")
+	gitT(t, seed, "checkout", "-q", fixtureBranch)
+	gitT(t, seed, "pull", "-q", "--ff-only", "origin", fixtureBranch)
+	writeT(t, seed, "c.txt", "wip\n")
+	gitT(t, seed, "add", "c.txt")
+	gitT(t, seed, "commit", "-q", "-m", checkpoint.WIPCommitPrefix+" 2026-09-30")
+	gitT(t, seed, "push", "-q", "origin", fixtureBranch)
+	f.work.Head = gitT(t, seed, "rev-parse", "HEAD")
+}
+
 // realAppendOnBranch commits line appended to name on the fixture's work
 // branch and pushes it, moving the landing's head: the branch's half of the
 // two appends a union merge has to reconcile.
@@ -158,6 +175,17 @@ func TestIntegrationLandUnionMergesTwoAppends(t *testing.T) {
 
 func TestIntegrationLandMergesGatesPushesAndRecords(t *testing.T) {
 	landsAndRecords(t, newRealLandFixture(t))
+}
+
+// TestIntegrationLandRecoversUnrecordedSquashLanding: the squash recovery over
+// real git, where the patch a landing wrote and the patch of the head it
+// merged are two diffs git patch-id has to agree on for the landing to be
+// finished rather than landed a second time (gt-064oh).
+func TestIntegrationLandRecoversUnrecordedSquashLanding(t *testing.T) {
+	t.Parallel()
+	f := newRealLandFixture(t)
+	realAutoSaveOnBranch(t, f)
+	recoversUnrecordedSquashLanding(t, f)
 }
 
 func TestIntegrationLandConflictIsARejectionWithFiles(t *testing.T) {

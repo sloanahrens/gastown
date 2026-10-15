@@ -954,22 +954,28 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		}
 		return Result{}, err
 	}
-	if already, err := g.IsAncestor(w.Head, base); err != nil {
+	already, err := g.IsAncestor(w.Head, base)
+	if err != nil {
 		return Result{}, &InfraError{Stage: "ancestry", Err: err}
-	} else if already {
-		// This lander's own merge is also already reachable when its record
-		// was never written (the daemon died between the merge and the
-		// record, or the MergePull response was lost): that landing is
-		// finished, not rejected. Anything else reached the target by a route
-		// that left no landing record (an operator push), which is not the
-		// author's to rework (gt-mdet3).
-		completed, err := l.completeUnrecordedLanding(g, w)
-		if completed != nil {
-			return *completed, err
-		}
-		if err != nil {
-			return Result{}, err
-		}
+	}
+	// A landing this lander merged but never recorded — the daemon died
+	// between the merge and the record, or the MergePull response was lost —
+	// is finished, not landed again. It is on the target either way the merge
+	// can be written there: a --no-ff merge contains the head, so the ancestry
+	// check above sees it, and a squash, which mergeWork makes of a range that
+	// still holds auto-save commits, is a single-parent commit that never will
+	// (gt-064oh). The land merge's subject names this branch, head and target,
+	// so it finds both, and neither is the author's work to redo.
+	if completed, err := l.completeUnrecordedLanding(g, w); completed != nil {
+		return *completed, err
+	} else if err != nil {
+		return Result{}, err
+	}
+	if already {
+		// The head is on the target with no land merge of this lander's to
+		// account for it: it reached the target by a route that left no
+		// landing record (an operator push), which is not the author's to
+		// rework (gt-mdet3).
 		return Result{}, l.reject(issue, w, &Rejection{Kind: RejectEmpty, Rework: false,
 			Reason: fmt.Sprintf("empty merge: head %s is already reachable from %s/%s (%s) with no landing record; nothing to land", shortSHA(w.Head), remote, w.Target, shortSHA(base))}, nil)
 	}
@@ -1237,8 +1243,9 @@ func landMergeMarker(w Work) string {
 // completeUnrecordedLanding finishes a landing this lander merged but never
 // recorded: it finds the land merge it made for w's head on the target, writes
 // the record and returns the result. It returns nil, nil when the target
-// carries no such merge, which means the head arrived by a route that left no
-// record of this lander's and is not a landing to complete.
+// carries no such merge — or carries one whose patch is not this head's change
+// — which means the head arrived by a route that left no record of this
+// lander's and is not a landing to complete.
 //
 // The target's history is the whole evidence: om's verdict and the gate's
 // result were not kept, so the record says so rather than inventing them.
@@ -1263,6 +1270,25 @@ func (l *Lander) completeUnrecordedLanding(g Repo, w Work) (*Result, error) {
 	patchID, err := g.PatchID(base, merged)
 	if err != nil {
 		return nil, &InfraError{Stage: "patch-id of the landing", Err: err}
+	}
+	// A --no-ff merge holds the head among its ancestors, so the marker and
+	// the head agree on which work landed. A squash holds it nowhere, and the
+	// marker is then the only thing naming the head: the patch the commit
+	// wrote has to be the head's own change against the base it merged onto,
+	// or the subject matched a different head's landing and this head's work
+	// is not on the target to record.
+	if containsHead, err := g.IsAncestor(w.Head, merged); err != nil {
+		return nil, &InfraError{Stage: "ancestry of the landing", Err: err}
+	} else if !containsHead {
+		headPatchID, err := g.PatchID(base, w.Head)
+		if err != nil {
+			return nil, &InfraError{Stage: "patch-id of the head", Err: err}
+		}
+		if headPatchID != patchID {
+			l.logf("%s: %s begins a land merge's subject but its patch is not %s's change; not finishing it",
+				w.BeadID, shortSHA(merged), shortSHA(w.Head))
+			return nil, nil
+		}
 	}
 	// The risk paths are recomputed rather than carried: the label a landed
 	// path puts on the bead is the same read Land does on a live landing.
