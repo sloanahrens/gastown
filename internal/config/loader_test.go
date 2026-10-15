@@ -2411,6 +2411,37 @@ func TestLoadDaemonPatrolConfigBadScheduledStopAfterKeepsConfig(t *testing.T) {
 	}
 }
 
+func TestDropBadScheduledStopAfterWarns(t *testing.T) {
+	t.Parallel()
+	cfg := overrunScheduledLimit("90min")
+	var buf strings.Builder
+	dropBadScheduledStopAfter(&buf, cfg)
+	if got := buf.String(); !strings.Contains(got, `"90min"`) || !strings.Contains(got, "scheduled_stop_after") {
+		t.Errorf("warning = %q, want it to name scheduled_stop_after and the bad value", got)
+	}
+	if got := cfg.Patrols.OverrunGuard.ScheduledStopAfter; got != "" {
+		t.Errorf("ScheduledStopAfter = %q, want cleared", got)
+	}
+
+	good := overrunScheduledLimit("90m")
+	buf.Reset()
+	dropBadScheduledStopAfter(&buf, good)
+	if buf.Len() != 0 || good.Patrols.OverrunGuard.ScheduledStopAfter != "90m" {
+		t.Errorf("a valid value was touched: warning %q, value %q", buf.String(), good.Patrols.OverrunGuard.ScheduledStopAfter)
+	}
+}
+
+func TestSaveDaemonPatrolConfigRefusesBadScheduledStopAfter(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "daemon.json")
+	if err := SaveDaemonPatrolConfig(path, overrunScheduledLimit("90min")); err == nil {
+		t.Fatal(`SaveDaemonPatrolConfig accepted scheduled_stop_after "90min"`)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("a refused save left a file behind: %v", err)
+	}
+}
+
 func TestLoadDaemonPatrolConfigNotFound(t *testing.T) {
 	t.Parallel()
 	_, err := LoadDaemonPatrolConfig("/nonexistent/path.json")
