@@ -543,7 +543,7 @@ These are set in tmux session environment when agents are spawned.
 | `GT_TOWN_ROOT` | Town root directory | `/home/user/gt` |
 | `BD_ACTOR` | Agent identity for attribution | `gastown/polecats/toast` |
 | `GIT_AUTHOR_NAME` | Commit attribution (the agent name alone, without rig or role) | `toast` |
-| `BEADS_DIR` | Beads database location | `/home/user/gt/gastown/.beads` |
+| `BEADS_DOLT_AUTO_START` | `0`: agents never auto-start a Dolt server; `BEADS_DIR` is cleared | `0` |
 
 ### Rig-Level Variables
 
@@ -558,7 +558,6 @@ These are set in tmux session environment when agents are spawned.
 
 | Variable | Purpose |
 |----------|---------|
-| `GIT_AUTHOR_EMAIL` | Workspace owner email (from git config) |
 | `GT_TMUX_SOCKET` | tmux socket the town's agents live on |
 | `CLAUDE_RUNTIME_CONFIG_DIR` | Custom Claude settings directory |
 
