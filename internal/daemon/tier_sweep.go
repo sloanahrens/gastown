@@ -427,6 +427,9 @@ type tierSweepStageResult struct {
 type tierSweepSeams struct {
 	// mainSHA fetches and reads origin/main in the rig repository.
 	mainSHA func(ctx context.Context, repo string) (string, error)
+	// localMainSHA reads origin/main from the rig repository as of its last
+	// fetch, without fetching: the restart deferral asks it on every heartbeat.
+	localMainSHA func(repo string) (string, error)
 	// worktree checks sha out detached at dir, returning a cleanup.
 	worktree func(ctx context.Context, repo, dir, sha string) (func(), error)
 	// run executes one stage in dir.
@@ -613,7 +616,8 @@ func (d *Daemon) runTierSweepEarly(rigs []string, now time.Time) {
 // the cycle at now, logging the skip once per pending restart, not once per
 // heartbeat.
 //
-// The deferral is bounded by the sweep's own age (gt-zvqn8). Every landing that
+// The deferral is bounded by the age of the oldest sweep still owed (gt-zvqn8,
+// gt-v8j5x). Every landing that
 // changes the binary installs it and leaves a restart pending, so during a run
 // of landings the flag is set almost continuously; an unbounded deferral left
 // the integration and race tiers — which only a sweep gates — unswept for
@@ -647,10 +651,15 @@ func (d *Daemon) tierSweepDeferForRestart(now time.Time) bool {
 	}
 }
 
-// tierSweepAge is how long ago the sweep last looked at a rig: the oldest
-// LastRun among the configured rigs' records, which every cycle that runs a
-// stage writes, green or red. The second result is false when none of them has
-// a readable record yet — nothing is known to have been swept, so nothing is
+// tierSweepAge is how long ago the sweep last looked at a rig that still has
+// something to sweep: the oldest LastRun among the configured rigs' records.
+// Every cycle that runs a stage writes LastRun, green or red; a cycle that
+// skips a rig as unchanged since its last green sweep does not, so a quiet rig
+// keeps a LastRun hours old while the patrol runs hourly. Such a rig is left
+// out (tierSweepCaughtUp): its age says nothing about whether the sweep is
+// keeping up, and counting it would retire the restart's deferral for the busy
+// rigs (gt-v8j5x). The second result is false when no remaining rig has a
+// readable record yet — nothing is known to have been swept, so nothing is
 // starved.
 //
 // A rig with no record is skipped rather than counted as infinitely stale: a
@@ -662,7 +671,7 @@ func (d *Daemon) tierSweepAge(now time.Time) (time.Duration, bool) {
 	found := false
 	for _, rig := range tierSweepRigs(d.patrolConfig, d.getKnownRigs()) {
 		st, err := readTierSweepState(d.config.TownRoot, rig)
-		if err != nil || st.LastRun.IsZero() {
+		if err != nil || st.LastRun.IsZero() || d.tierSweepCaughtUp(rig, st) {
 			continue
 		}
 		rigAge := now.Sub(st.LastRun)
@@ -672,6 +681,22 @@ func (d *Daemon) tierSweepAge(now time.Time) (time.Duration, bool) {
 		found = true
 	}
 	return age, found
+}
+
+// tierSweepCaughtUp reports whether rig's origin/main, as of the repository's
+// last fetch, is the tip its last green sweep covered, which is the condition
+// runTierSweepRig skips on. A rig whose tip cannot be read counts as not
+// caught up: a sweep that may be starved must not be hidden.
+func (d *Daemon) tierSweepCaughtUp(rig string, st tierSweepState) bool {
+	if st.LastGreenSHA == "" {
+		return false
+	}
+	read := d.tierSweepSeams.localMainSHA
+	if read == nil {
+		read = tierSweepLocalMainSHA
+	}
+	sha, err := read(filepath.Join(d.config.TownRoot, rig, ".repo.git"))
+	return err == nil && sha == st.LastGreenSHA
 }
 
 // runTierSweep is one cycle over every configured rig. It reports whether the
@@ -1160,6 +1185,16 @@ func tierSweepCheckoutWith(g tierSweepGitOps, repo, dir, sha string) (func(), er
 		return nil, err
 	}
 	return func() {}, nil
+}
+
+// tierSweepLocalMainSHA returns the tip of origin/main as the repository last
+// fetched it.
+func tierSweepLocalMainSHA(repo string) (string, error) {
+	sha, err := git.NewGit(repo).Rev("origin/main")
+	if err != nil {
+		return "", fmt.Errorf("resolving origin/main: %w", err)
+	}
+	return strings.TrimSpace(sha), nil
 }
 
 // tierSweepMainSHA fetches origin/main and returns its tip.
