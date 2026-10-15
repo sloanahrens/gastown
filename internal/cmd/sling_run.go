@@ -176,6 +176,7 @@ type slingDeps struct {
 	rollbackArtifacts func(spawn *SpawnedPolecatInfo, townRoot, beadID, hookWorkDir string)
 	restoreRawFields  func(beadID, townRoot, hookWorkDir string, originalInfo *beadInfo)
 	restorePinned     func(townRoot, beadID, assignee string)
+	restoreHold       func(townRoot, beadID string, hold beadHold)
 
 	// Nudging the target once the work is hooked.
 	sessionFromPane   func(pane string) string
@@ -272,6 +273,7 @@ func realSlingDeps() *slingDeps {
 		rollbackArtifacts: rollbackSlingArtifactsFn,
 		restoreRawFields:  restoreRollbackRawWorkflowFieldsFromCurrent,
 		restorePinned:     restorePinnedBead,
+		restoreHold:       restoreBeadHold,
 
 		sessionFromPane:   getSessionFromPane,
 		ensureAgentReady:  ensureAgentReady,

@@ -2165,20 +2165,29 @@ func reconcileCleanupStatusIfSafe(status *RecoveryStatus, updater beads.Client, 
 		return
 	}
 	if updater == nil {
-		status.NeedsRecovery = true
-		status.Verdict = "NEEDS_RECOVERY"
-		status.Blockers = append(status.Blockers, "cleanup_reconcile_failed: updater unavailable")
+		failCleanupReconcile(status, "cleanup_reconcile_failed: updater unavailable")
 		return
 	}
 	if err := beads.UpdateAgentCleanupStatus(updater, agentBeadID, string(polecat.CleanupClean)); err != nil {
-		status.NeedsRecovery = true
-		status.Verdict = "NEEDS_RECOVERY"
-		status.Blockers = append(status.Blockers, fmt.Sprintf("cleanup_reconcile_failed: %v", err))
+		failCleanupReconcile(status, fmt.Sprintf("cleanup_reconcile_failed: %v", err))
 		return
 	}
 	status.CleanupStatus = polecat.CleanupClean
 	status.Reconciled = true
 	status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("reconciled_cleanup_status=clean previous=%s", previous))
+}
+
+// failCleanupReconcile turns a SAFE_TO_NUKE status into NEEDS_RECOVERY after a
+// failed reconcile. The verdict flips together with the flags DecideWorkstate
+// derived from the old verdict, or --json would report safe_to_nuke true beside
+// needs_recovery true.
+func failCleanupReconcile(status *RecoveryStatus, blocker string) {
+	status.NeedsRecovery = true
+	status.Verdict = "NEEDS_RECOVERY"
+	status.SafeToNuke = false
+	status.Reusable = false
+	status.CountsTowardCapacity = false
+	status.Blockers = append(status.Blockers, blocker)
 }
 
 func cleanupStatusReconcileCandidate(status *RecoveryStatus, p *polecat.Polecat, fields *beads.AgentFields) (polecat.CleanupStatus, bool) {
@@ -2332,7 +2341,7 @@ func recoveryTargetRefs(bd recoveryBeads, issueID, activeMR, branch string, extr
 			}
 			if issue, err := bd.Show(candidateIssueID); err == nil {
 				appendAttachmentTargets(&refs, issue)
-			} else {
+			} else if !errors.Is(err, beads.ErrNotFound) {
 				lookupFailed = true
 			}
 		}
@@ -2581,22 +2590,9 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 
 	for _, p := range targets {
 		if polecatNukeDryRun {
-			blocked := !polecatNukeForce && checkPolecatSafety(p).Blocked
-			if blocked {
-				fmt.Printf("Would refuse to nuke %s/%s without --force:\n", p.rigName, p.polecatName)
-				dryRunBlocked++
-			} else {
-				fmt.Printf("Would nuke %s/%s:\n", p.rigName, p.polecatName)
-			}
-			fmt.Printf("  - Kill session: gt-%s-%s\n", p.rigName, p.polecatName)
-			fmt.Printf("  - Delete worktree: %s/polecats/%s\n", p.r.Path, p.polecatName)
-			fmt.Printf("  - Delete branch (if exists)\n")
-			fmt.Printf("  - Reset agent bead: %s\n", polecatBeadIDForRig(p.r, p.rigName, p.polecatName))
-
-			if displayDryRunSafetyCheck(p) && !blocked {
+			if previewNukeDryRun(os.Stdout, p, polecatNukeForce, townRegistry(), checkPolecatSafety, displayDryRunSafetyCheck) {
 				dryRunBlocked++
 			}
-			fmt.Println()
 			continue
 		}
 
@@ -2658,6 +2654,34 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// previewNukeDryRun prints one polecat's --dry-run preview to w and reports
+// whether the real nuke would refuse it. --force bypasses the safety refusal
+// (nukeSafetyRefusal), so a forced preview never counts one, though the safety
+// listing still prints. The session and worktree are the ones the nuke will
+// stop and delete: the rig's registered session prefix, not the rig name, and
+// the Manager's clone path, not polecats/<name>.
+func previewNukeDryRun(w io.Writer, p polecatTarget, force bool, reg *session.PrefixRegistry,
+	check func(polecatTarget) *SafetyCheckResult, listSafety func(polecatTarget) bool) bool {
+	refused := !force && check(p).Blocked
+	if refused {
+		fmt.Fprintf(w, "Would refuse to nuke %s/%s without --force:\n", p.rigName, p.polecatName)
+	} else {
+		fmt.Fprintf(w, "Would nuke %s/%s:\n", p.rigName, p.polecatName)
+	}
+	fmt.Fprintf(w, "  - Kill session: %s\n", session.PolecatSessionName(reg.PrefixForRig(p.rigName), p.polecatName))
+	fmt.Fprintf(w, "  - Delete worktree: %s\n", p.mgr.ClonePath(p.polecatName))
+	fmt.Fprintf(w, "  - Delete branch (if exists)\n")
+	fmt.Fprintf(w, "  - Reset agent bead: %s\n", polecatBeadIDForRig(p.r, p.rigName, p.polecatName))
+
+	// The listing prints its own report; only an unforced preview that did not
+	// already count the refusal above takes its verdict.
+	if listSafety(p) && !refused && !force {
+		refused = true
+	}
+	fmt.Fprintln(w)
+	return refused
 }
 
 func dryRunNukeSummary(total, blocked int) string {

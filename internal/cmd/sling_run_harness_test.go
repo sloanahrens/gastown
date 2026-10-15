@@ -284,6 +284,14 @@ func newSlingHarness(t *testing.T) *slingHarness {
 		},
 		restoreRawFields: func(id, _, _ string, _ *beadInfo) { h.record("restore raw fields %s", id) },
 		restorePinned:    func(_, id, assignee string) { h.record("restore pinned %s %s", id, assignee) },
+		restoreHold: func(_, id string, hold beadHold) {
+			h.mu.Lock()
+			if b := h.beads[id]; b != nil {
+				b.Status, b.Assignee = hold.Status, hold.Assignee
+			}
+			h.mu.Unlock()
+			h.record("restore hold %s %s %s", id, hold.Status, hold.Assignee)
+		},
 
 		sessionFromPane:  func(string) string { return "" },
 		ensureAgentReady: func(string) error { return nil },

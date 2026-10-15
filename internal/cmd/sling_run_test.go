@@ -223,6 +223,33 @@ func TestSlingAlreadyAssigned(t *testing.T) {
 		h.wantCalls("clear reassigned", "clear reassigned "+holder)
 		h.wantCalls("restore reassigned", "restore reassigned "+holder)
 	})
+	t.Run("force reassign to a crew target restores the bead when the sling fails", func(t *testing.T) {
+		t.Parallel()
+		h := newSlingHarness(t)
+		h.addBead(slingBead, beadInfo{Status: "hooked", Assignee: holder})
+		h.run.opts.force = true
+		// The real unhook leaves the bead open and unassigned; no spawn exists,
+		// so the spawn rollback has nothing to give it back.
+		h.run.unhook = func(_, id string) error {
+			h.mu.Lock()
+			h.beads[id].Status, h.beads[id].Assignee = "open", ""
+			h.mu.Unlock()
+			h.record("unhook %s", id)
+			return nil
+		}
+		h.run.hook = func(_, _, _, _ string, _ *beadFieldUpdates) error { return errors.New("bd is down") }
+		if err := h.sling(slingBead, "gastown/crew/sloan"); err == nil {
+			t.Fatal("sling succeeded, want the hook failure to roll it back")
+		}
+		h.wantCalls("unhook", "unhook "+slingBead)
+		got, err := h.info(slingBead)
+		if err != nil {
+			t.Fatalf("info: %v", err)
+		}
+		if got.Status != "hooked" || got.Assignee != holder {
+			t.Errorf("bead ended %s to %q, want hooked to the original holder %q", got.Status, got.Assignee, holder)
+		}
+	})
 	t.Run("dead holder is auto-forced after the survival guard", func(t *testing.T) {
 		t.Parallel()
 		h := newSlingHarness(t)
