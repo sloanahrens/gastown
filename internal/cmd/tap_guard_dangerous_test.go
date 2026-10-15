@@ -1312,11 +1312,12 @@ func TestEvaluateDangerousCommandUnquotedHeredocSubstitution(t *testing.T) {
 // TestHeredocDoesNotHideRealCommand ensures stripHeredocBodies only
 // removes the body span and leaves surrounding shell text — including a
 // second, genuinely dangerous command after the terminator — intact. The
-// middle cases are the two other spellings of "<<" the shell does not read
-// as a heredoc operator (gt-yza8u): a shift inside a $(("..")) arithmetic
-// expansion, and a "<" behind a backslash. Reading either one as a heredoc
-// stripped the lines below it, so the live command standing where the body
-// would have been was never judged at all.
+// middle cases are the spellings of "<<" the shell does not read as a
+// heredoc operator: a shift inside a $(("..")) arithmetic expansion and a
+// "<" behind a backslash (gt-yza8u), and a shift after a nested $((".."))
+// whose "))" the outer expansion outlives (gt-schaa). Reading any of them
+// as a heredoc stripped the lines below it, so the live command standing
+// where the body would have been was never judged at all.
 func TestHeredocDoesNotHideRealCommand(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1342,6 +1343,16 @@ func TestHeredocDoesNotHideRealCommand(t *testing.T) {
 		{
 			name:      "arithmetic shift over a force push",
 			command:   "echo $((1<<EOF))\ngit push --force origin x\nEOF",
+			wantBlock: true,
+		},
+		{
+			name:      "shift after a nested arithmetic expansion",
+			command:   "echo $(( $((1)) << x ))\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
+			name:      "shift after a parenthesized arithmetic term",
+			command:   "echo $(( (1) << x ))\nsudo rm -rf /\nx",
 			wantBlock: true,
 		},
 		{
