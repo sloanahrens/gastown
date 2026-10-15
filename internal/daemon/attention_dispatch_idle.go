@@ -26,6 +26,12 @@ const (
 	// streak to still describe now. Past it the ticker is off or failing, and
 	// a stale streak would hold the item for good.
 	attentionDispatchIdleFresh = 10 * time.Minute
+	// attentionDispatchIdleGap is how long the ticker may be quiet between two
+	// ticks and still have them count as consecutive: five ticks at the
+	// default minute interval, half of attentionDispatchIdleFresh. A parked or
+	// stopped ticker reports nothing, so without it the idle ticks either side
+	// of the gap could not be told from a consecutive run (gt-icmd4).
+	attentionDispatchIdleGap = 5 * time.Minute
 	// attentionDispatchIdleReasons is how many skip reasons the summary names.
 	attentionDispatchIdleReasons = 3
 )
@@ -65,10 +71,16 @@ type dispatchIdleTracker struct {
 // Observe folds one tick report into the streak. A tick is idle when the
 // roster shows a free seat, a dispatchable bead waited and nothing was
 // dispatched. Any other tick ends the streak: a held tick decided nothing on
-// purpose, and a roster that cannot be read could be hiding a full town.
+// purpose, and a roster that cannot be read could be hiding a full town. A
+// tick that arrives long after the last one ends it too: the ticker was
+// parked, failing or behind in between, and the idle ticks on either side of
+// the gap are not a run of consecutive ones (gt-icmd4).
 func (t *dispatchIdleTracker) Observe(r specDispatchTickReport, at time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if !t.st.At.IsZero() && at.Sub(t.st.At) > attentionDispatchIdleGap {
+		t.st.Streak = 0
+	}
 	t.st.At = at
 	if r.Hold != "" || len(r.Dispatched) > 0 || !rosterHasFreeSeat(r.Roster) {
 		t.st.Streak = 0
@@ -81,6 +93,15 @@ func (t *dispatchIdleTracker) Observe(r specDispatchTickReport, at time.Time) {
 	}
 	t.st.Streak++
 	t.st.Roster, t.st.Waiting, t.st.Reasons = r.Roster, waiting, reasons
+}
+
+// Reset ends the streak: the ticker did not tick, so the run of idle ticks
+// ending at the last observation is over (gt-icmd4). The recorded tick keeps
+// its time, which is what the freshness check reads.
+func (t *dispatchIdleTracker) Reset() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.st.Streak = 0
 }
 
 // Status returns the tracker's current reading.

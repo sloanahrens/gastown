@@ -246,27 +246,36 @@ func TestRunTierSweep_YoungSweepStillDefersToTheRestart(t *testing.T) {
 	if len(rec.stages) != 0 {
 		t.Fatalf("stages run = %+v, want none inside the stale bound", rec.stages)
 	}
-	if !strings.Contains(logs.String(), "skipping this cycle (last sweep 20m0s ago, bound 1h30m0s)") {
-		t.Fatalf("the skip line does not say how old the sweep was:\n%s", logs.String())
+	if !strings.Contains(logs.String(), "skipping this cycle (owed sweep 20m0s old, bound 1h30m0s)") {
+		t.Fatalf("the skip line does not say how old the owed sweep was:\n%s", logs.String())
 	}
 }
 
 // gt-v8j5x: a rig whose origin/main is the tip its last green sweep covered is
 // skipped by every cycle, so its LastRun goes stale while the patrol runs. Its
 // age must not stand for the sweep's age, or it retires the restart's deferral
-// and the busy rig's sweep runs into the restart.
+// and the busy rig's sweep runs into the restart. The age of a rig that does
+// owe a sweep is the owed interval (gt-icmd4), so a landing's tip counts from
+// the landing, while a record that has been owed past the bound still retires
+// the deferral.
 func TestRunTierSweep_QuietRigDoesNotRetireTheRestartDeferral(t *testing.T) {
 	t.Parallel()
 	now := atHour(time.Now(), 15)
 	const tip = "abc123"
 	for _, tc := range []struct {
-		name      string
-		quietTip  func(string) (string, error)
+		name string
+		// quietTip answers the quiet rig's origin/main: the green tip, a moved
+		// tip, or an error.
+		quietTip func(string) (string, error)
+		// owedFor is how long ago the record says the quiet rig's owed
+		// interval began; zero leaves the record undated.
+		owedFor   time.Duration
 		wantDefer bool
 	}{
-		{"quiet rig at the tip", func(string) (string, error) { return tip, nil }, true},
-		{"rig whose main moved is still starved", func(string) (string, error) { return "def456", nil }, false},
-		{"rig whose tip cannot be read is still starved", func(string) (string, error) { return "", errors.New("no ref") }, false},
+		{"quiet rig at the tip", func(string) (string, error) { return tip, nil }, 0, true},
+		{"rig that just became owed defers", func(string) (string, error) { return "def456", nil }, 0, true},
+		{"rig owed past the bound is still starved", func(string) (string, error) { return "def456", nil }, 3 * time.Hour, false},
+		{"rig whose tip cannot be read is still starved", func(string) (string, error) { return "", errors.New("no ref") }, 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -278,9 +287,11 @@ func TestRunTierSweep_QuietRigDoesNotRetireTheRestartDeferral(t *testing.T) {
 				return "", errors.New("unexpected fetch")
 			}
 			withTierSweepLastRun(t, d, "busy", now.Add(-10*time.Minute))
-			if err := writeTierSweepState(d.config.TownRoot, "quiet", tierSweepState{
-				LastRun: now.Add(-3 * time.Hour), LastSHA: tip, LastGreenSHA: tip,
-			}); err != nil {
+			quiet := tierSweepState{LastRun: now.Add(-3 * time.Hour), LastSHA: tip, LastGreenSHA: tip}
+			if tc.owedFor > 0 {
+				quiet.OwedSince = now.Add(-tc.owedFor)
+			}
+			if err := writeTierSweepState(d.config.TownRoot, "quiet", quiet); err != nil {
 				t.Fatal(err)
 			}
 			d.upgradeRestartPending.Store(true)
@@ -288,13 +299,14 @@ func TestRunTierSweep_QuietRigDoesNotRetireTheRestartDeferral(t *testing.T) {
 			if got := d.tierSweepDeferForRestart(now); got != tc.wantDefer {
 				t.Fatalf("defer = %v, want %v", got, tc.wantDefer)
 			}
-			if tc.wantDefer {
-				if d.runTierSweep() {
-					t.Fatal("a deferred cycle reached no verdict")
-				}
-				if len(rec.stages) != 0 {
-					t.Fatalf("stages run = %+v, want none while the restart defers the sweep", rec.stages)
-				}
+			if !tc.wantDefer {
+				return
+			}
+			if d.runTierSweep() {
+				t.Fatal("a deferred cycle reached no verdict")
+			}
+			if len(rec.stages) != 0 {
+				t.Fatalf("stages run = %+v, want none while the restart defers the sweep", rec.stages)
 			}
 		})
 	}
@@ -388,6 +400,71 @@ func TestTriggerTierSweep_SkipLoggedOncePerPendingRestart(t *testing.T) {
 	waitTierSweepIdle(t, d)
 	if got := count(); got != 2 {
 		t.Fatalf("skip line logged %d times across two restarts, want 2:\n%s", got, logs.String())
+	}
+}
+
+// The line saying why a stale sweep ran under a pending restart is not the
+// skip line's to suppress: a restart that first deferred a younger sweep must
+// still hear, later on, that the bound retired the deferral (gt-icmd4).
+func TestTierSweepStaleRunLogIsNotSuppressedByTheDeferralSkipLatch(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, _, _, logs := newTierSweepDaemon(t, now, "gastown")
+	withTierSweepLastRun(t, d, "gastown", now.Add(-20*time.Minute))
+	d.upgradeRestartPending.Store(true)
+
+	if !d.tierSweepDeferForRestart(now) {
+		t.Fatal("a sweep inside the bound must defer to the pending restart")
+	}
+	if !strings.Contains(logs.String(), "skipping this cycle") {
+		t.Fatalf("the deferring cycle said nothing:\n%s", logs.String())
+	}
+
+	// The same pending restart, hours on: the sweep is owed past the bound and
+	// runs, and the line that says so must reach the log.
+	if d.tierSweepDeferForRestart(now.Add(2 * time.Hour)) {
+		t.Fatal("a sweep past the stale bound must not defer to the pending restart")
+	}
+	if !strings.Contains(logs.String(), "past the 1h30m0s bound; sweeping now rather than waiting out the pending restart") {
+		t.Fatalf("the deferral's latch swallowed the run line:\n%s", logs.String())
+	}
+}
+
+// gt-icmd4: a rig caught up at the tip it last swept green keeps a LastRun
+// hours old while it stays quiet. The landing that moves its main owes it a
+// sweep now, and the pending restart has not starved it: the age is the owed
+// interval, so the cycle still defers instead of sweeping at once.
+func TestTierSweepAgeCountsFromWhenTheSweepBecameOwed(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec, _, logs := newTierSweepDaemon(t, now, "gastown")
+	d.tierSweepSeams.localMainSHA = func(string) (string, error) { return "new1", nil }
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) {
+		t.Error("a deferred cycle read origin/main")
+		return "", errors.New("unexpected fetch")
+	}
+	if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{
+		LastRun: now.Add(-6 * time.Hour), LastSHA: "green0", LastGreenSHA: "green0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d.upgradeRestartPending.Store(true)
+
+	d.triggerTierSweep()
+	waitTierSweepIdle(t, d)
+
+	age, swept := d.tierSweepAge(now)
+	if !swept || age >= defaultTierSweepStaleAfter {
+		t.Fatalf("owed age = %s (swept = %v), want an interval below the %s bound", age, swept, defaultTierSweepStaleAfter)
+	}
+	if st := tierSweepTestState(t, d, "gastown"); !st.OwedSince.Equal(now) {
+		t.Fatalf("OwedSince = %v, want %v: the read that first sees main move dates the interval", st.OwedSince, now)
+	}
+	if len(rec.stages) != 0 {
+		t.Fatalf("stages = %+v, want none: the restart defers a sweep that only just became owed", rec.stages)
+	}
+	if !strings.Contains(logs.String(), "an upgrade restart is pending; skipping this cycle") {
+		t.Fatalf("the cycle deferred without saying why:\n%s", logs.String())
 	}
 }
 
@@ -977,6 +1054,51 @@ func TestTierSweepCoversRigAgreesWithTierSweepCoverageFor(t *testing.T) {
 		if got.Covered != d.tierSweepCoversRig(rig) {
 			t.Errorf("rig %s: TierSweepCoverageFor covered=%v, daemon predicate=%v", rig, got.Covered, d.tierSweepCoversRig(rig))
 		}
+	}
+}
+
+// gt-icmd4: a deferred cycle records nothing. The record's verdicts and the
+// failing names on them belong to the tip LastSHA names — the pair the hour
+// report prints and the dashboard matches a row's names to — so a cycle that
+// could not finish the tip it was sweeping must leave them alone rather than
+// merge a RED from that tip under the older sha.
+func TestTierSweepRigCycleDeferredKeepsFailedNamesWithTheSHA(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec, _, _ := newTierSweepDaemon(t, now, "gastown")
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "new2", nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+	if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{
+		LastRun: now.Add(-time.Hour), LastSHA: "red1", LastGreenSHA: "green0",
+		Tiers: map[string]tierSweepTierResult{
+			"shell": {Verdict: tierSweepRed, Failed: 1, FailedNames: []string{"TestSomethingInCmd"}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The shell stage runs RED at the new tip and the slot stage never starts,
+	// so the cycle defers with a partial record.
+	rec.result = func(st tierSweepStage) tierSweepStageResult {
+		if st.slot {
+			return tierSweepStageResult{err: errors.New("slot busy")}
+		}
+		return tierSweepStageResult{
+			output:   "tier-sweep: shell RED passed=1 failed=1 skipped=0 (logs /tmp/tier-sweep.x)\n",
+			exitCode: 1, ran: true,
+		}
+	}
+	if d.runTierSweep() {
+		t.Fatal("a partial cycle reached a verdict")
+	}
+
+	st := tierSweepTestState(t, d, "gastown")
+	if st.LastSHA != "red1" {
+		t.Fatalf("LastSHA = %q after a deferred cycle, want the old tip red1", st.LastSHA)
+	}
+	got := st.Tiers["shell"]
+	if got.Verdict != tierSweepRed || len(got.FailedNames) != 1 || got.FailedNames[0] != "TestSomethingInCmd" {
+		t.Fatalf("shell verdict = %+v, want red1's RED and the failing name it carries", got)
 	}
 }
 

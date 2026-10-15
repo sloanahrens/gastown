@@ -95,6 +95,27 @@ func TestDispatchIdleRaisesAfterFiveIdleTicks(t *testing.T) {
 	}
 }
 
+// gt-icmd4: the ticker was parked or failing between two observations, so the
+// idle ticks before the gap and the one after it are not a consecutive run.
+// Without this, four idle ticks, an hour's hold and one more idle tick raise
+// the HIGH item after one tick of a resumed streak.
+func TestDispatchIdleStreakResetsAcrossAGap(t *testing.T) {
+	t.Parallel()
+	r := newIdleRig(t)
+	tick := idleTick(overlapLine)
+
+	r.observe(tick, attentionDispatchIdleTicks-1)
+	r.now = r.now.Add(time.Hour)
+	r.tr.Observe(tick, r.now)
+
+	if got := r.tr.Status().Streak; got != 1 {
+		t.Fatalf("Streak = %d after an idle tick an hour on, want 1", got)
+	}
+	if items := r.items(t); len(items) != 0 {
+		t.Fatalf("raised after one idle tick of a resumed streak: %+v", items)
+	}
+}
+
 func TestDispatchIdleNamesOnlyTheTopThreeReasons(t *testing.T) {
 	t.Parallel()
 	r := newIdleRig(t)

@@ -522,6 +522,11 @@ type Daemon struct {
 	// upgrade restart deferred its cycle; triggerTierSweep clears it when no
 	// restart is pending, so the line appears once per restart.
 	tierSweepSkipLogged atomic.Bool
+	// tierSweepStaleLogged is the same, for the line saying the owed sweep is
+	// past the stale bound and so runs despite the restart. It is a latch of
+	// its own: one shared with the skip line would swallow the run line
+	// whenever a restart had already deferred a younger sweep (gt-icmd4).
+	tierSweepStaleLogged atomic.Bool
 	// tierSweepSeams replace the tier_sweep job's outside effects in tests;
 	// the zero value is production (see tier_sweep.go).
 	tierSweepSeams tierSweepSeams

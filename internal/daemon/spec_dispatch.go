@@ -101,6 +101,9 @@ func (d *Daemon) triggerSpecDispatch() bool {
 		if d.specDispatchHold.Changed(reason) {
 			d.logger.Printf("spec_dispatch: not ticking: %s", reason)
 		}
+		// No tick runs under the hold, so the run of idle ticks ends here
+		// rather than resuming across it (gt-icmd4).
+		d.dispatchIdle.Reset()
 		return false
 	}
 	if d.specDispatchHold.Changed("") {
@@ -165,6 +168,9 @@ func (d *Daemon) runSpecDispatch() {
 	out, err := d.runSpecDispatchCommand()
 	if err != nil {
 		d.logger.Printf("spec_dispatch: tick failed: %v", err)
+		// A tick that failed observed nothing, so the run of idle ticks ends
+		// here: the next one counts from one (gt-icmd4).
+		d.dispatchIdle.Reset()
 		return
 	}
 	if r, perr := parseSpecDispatchReport(out); perr == nil {
@@ -174,6 +180,10 @@ func (d *Daemon) runSpecDispatch() {
 		if r.Hold == "" {
 			d.recordDispatchTick(r, now)
 		}
+	} else {
+		// A report nothing can read says nothing about the town: the run of
+		// idle ticks ends rather than carrying over the tick (gt-icmd4).
+		d.dispatchIdle.Reset()
 	}
 	for _, line := range d.formatSpecDispatchReport(out) {
 		d.logger.Printf("spec_dispatch: %s", line)
