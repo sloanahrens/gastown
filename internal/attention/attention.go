@@ -164,6 +164,15 @@ type Event struct {
 	Key string `json:"key"`
 	// State is new or cleared.
 	State EventState `json:"state"`
+	// Rule is the stable id of the rule that raised the item, such as
+	// landing.stuck_inflight. A line written before the rule existed has none.
+	Rule string `json:"rule,omitempty"`
+	// Handled says who handles the transition (self_healed, operator_action or
+	// info). Empty reads as info.
+	Handled Handled `json:"handled,omitempty"`
+	// Wake is whether the transition should wake the overseer or the human.
+	// Absent reads as false.
+	Wake bool `json:"wake,omitempty"`
 }
 
 // StaleAfter is how old state.json may be before a reader stops trusting it:

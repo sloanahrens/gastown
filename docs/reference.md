@@ -882,8 +882,13 @@ gt attention                 # the queue, oldest first
 gt attention --all           # include acked items
 gt attention --json          # state.json
 gt attention -f              # stream new transitions as they append
+gt attention --follow --wake-only   # only the events that need a decision
 gt attention ack <key>       # hide an item until its condition clears
 ```
+
+`--follow` prints `HH:MM:SS rule detail`, one line per event; `--json` prints
+the `events.jsonl` line, and `--since DURATION` replays that window first. One
+`--follow --wake-only` monitor replaces a monitor per condition.
 
 The queue is three files under `<town>/.runtime/attention/`. The daemon keeps a
 fourth there, `tips.json`: the origin tips the direct-push check has seen, so a
@@ -895,10 +900,16 @@ writes `acks.json`:
   last_seen, acked_at}`; `key` is the condition's stable identity, so the same
   condition re-observed keeps its key and its `first_seen`.
 - `events.jsonl` — the transitions, append-only, rotated to `events.jsonl.1` at
-  1 MB. Each line is `{ts, class, severity, text, key, state}`, `state` being
-  `new` or `cleared`. The first four fields are the `alerts.jsonl` schema
-  (`gt-z2pdg`) that `gt tail`'s watch source reads (see **Watch Feed**), so
-  transitions show in the feed.
+  1 MB. Each line is `{ts, class, severity, text, key, state, rule, handled,
+  wake}`, `state` being `new` or `cleared`. The first four fields are the
+  `alerts.jsonl` schema (`gt-z2pdg`) that `gt tail`'s watch source reads (see
+  **Watch Feed**), so transitions show in the feed. `rule` is the stable id of
+  the rule that raised the item (`landing.stuck_inflight`); `handled` is
+  `self_healed`, `operator_action` or `info`; `wake` says the overseer or the
+  human should be woken. A line without them reads as `info`, no wake. The one
+  table of each rule's flags is `ruleFlags` in `internal/attention/rules.go`;
+  `host.disk_warn` is `info` until it holds for three consecutive heartbeats,
+  then the daemon appends one `operator_action` wake line for it.
 - `acks.json` — the acknowledged keys, `{acks: [{key, at}]}`, written by `gt
   attention ack` under a flock. The daemon reads it and never writes it, so
   neither process races the other's file.

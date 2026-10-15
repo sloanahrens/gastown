@@ -84,13 +84,24 @@ func Reconcile(prev State, observed []Item, acks Acks, now time.Time) Result {
 }
 
 // transition renders one item's transition to an events.jsonl line.
+//
+// A new transition carries its rule's flags. A cleared one names the rule but
+// is info and never wakes: the condition has resolved, so nothing is left to
+// decide.
 func transition(it Item, state EventState, now time.Time) Event {
-	return Event{
+	e := Event{
 		TS:       now,
 		Class:    it.Kind,
 		Severity: it.Severity,
 		Text:     it.Summary,
 		Key:      it.Key,
 		State:    state,
+		Rule:     RuleFor(it),
+		Handled:  HandledInfo,
 	}
+	if state == EventNew {
+		f, _ := Flags(e.Rule)
+		e.Handled, e.Wake = f.Handled, f.Wake
+	}
+	return e
 }

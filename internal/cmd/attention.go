@@ -7,7 +7,9 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/townhealth"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -23,6 +26,8 @@ var (
 	attentionAll      bool
 	attentionJSON     bool
 	attentionFollow   bool
+	attentionWakeOnly bool
+	attentionSince    time.Duration
 	attentionInterval time.Duration
 )
 
@@ -56,15 +61,25 @@ A state older than 15 minutes is stale: the daemon has stopped writing it.
 That prints a STALE header and exits 3, as gt status --line reports an
 unknown health. --json prints state.json as it stands.
 
+Every event also names the rule that raised it, who handles it and whether it
+should wake the overseer or the human: {rule, handled, wake}. rule is a stable
+id such as landing.stuck_inflight; handled is self_healed, operator_action or
+info; a line written before these fields existed reads as info, wake=false.
+
 With -f, print one line per events.jsonl line appended after the command
-started, "+" for a new item and "-" for a cleared one.
+started, as "HH:MM:SS rule detail" (a cleared item's detail starts "cleared:").
+--wake-only prints only the events that need a decision, so one monitor can
+stand in for many. --json prints the events.jsonl lines themselves. --since
+DURATION first replays the events from that long ago. It follows the file
+across its rotation and exits 0 on SIGINT or SIGTERM.
 
 Examples:
   gt attention                 # the queue, oldest first
   gt attention --all           # include acked items
   gt attention --json          # state.json
   gt attention ack esc:hq-123  # acknowledge one item
-  gt attention -f              # stream transitions as they append`,
+  gt attention -f              # stream transitions as they append
+  gt attention --follow --wake-only   # only the events that need a decision`,
 	Args: cobra.NoArgs,
 	RunE: runAttention,
 }
@@ -85,6 +100,8 @@ func init() {
 	attentionCmd.Flags().BoolVar(&attentionJSON, "json", false, "Print state.json instead of the table")
 	attentionCmd.Flags().BoolVarP(&attentionFollow, "follow", "f", false, "Stream events.jsonl lines appended after start")
 	attentionCmd.Flags().DurationVar(&attentionInterval, "interval", time.Second, "Poll interval with --follow")
+	attentionCmd.Flags().BoolVar(&attentionWakeOnly, "wake-only", false, "With --follow, print only events that need a decision (wake=true)")
+	attentionCmd.Flags().DurationVar(&attentionSince, "since", 0, "With --follow, first replay the events from the last DURATION")
 	attentionCmd.AddCommand(attentionAckCmd)
 	rootCmd.AddCommand(attentionCmd)
 }
@@ -116,6 +133,9 @@ func buildAttention(townRoot string, now time.Time) (attentionView, error) {
 
 func runAttention(cmd *cobra.Command, _ []string) error {
 	now := time.Now()
+	if err := checkFollowFlags(attentionFollow, attentionWakeOnly, attentionSince); err != nil {
+		return err
+	}
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return fmt.Errorf("finding the town root: %w", err)
@@ -126,7 +146,8 @@ func runAttention(cmd *cobra.Command, _ []string) error {
 		defer stop()
 		ticker := time.NewTicker(attentionInterval)
 		defer ticker.Stop()
-		return attentionFollowEvents(ctx, out, townRoot, ticker.C)
+		opts := followOptions{wakeOnly: attentionWakeOnly, asJSON: attentionJSON, since: attentionSince, now: now}
+		return attentionFollowEvents(ctx, out, townRoot, ticker.C, opts)
 	}
 	view, err := buildAttention(townRoot, now)
 	if err != nil {
@@ -236,47 +257,116 @@ func beadOrSHA(it attention.Item) string {
 	return it.SHA
 }
 
+// checkFollowFlags refuses the follow-only flags without --follow, which
+// would otherwise be silently ignored.
+func checkFollowFlags(follow, wakeOnly bool, since time.Duration) error {
+	if !follow && (wakeOnly || since > 0) {
+		return fmt.Errorf("--wake-only and --since need --follow")
+	}
+	return nil
+}
+
+// followOptions are the filters and format of gt attention --follow.
+type followOptions struct {
+	// wakeOnly prints only raised events with wake=true: the ones that need a
+	// decision.
+	wakeOnly bool
+	// asJSON prints the events.jsonl line itself instead of the human line.
+	asJSON bool
+	// since replays the events already in the file whose ts is within this
+	// duration of now, before following. Zero starts at the end of the file.
+	since time.Duration
+	// now is the clock since is measured from.
+	now time.Time
+}
+
 // attentionFollowEvents prints each events.jsonl line appended after start
-// until ctx is done, driven by ticks so a test can step it.
-func attentionFollowEvents(ctx context.Context, w io.Writer, townRoot string, ticks <-chan time.Time) error {
-	seen, err := attentionEventCount(townRoot)
+// until ctx is done, driven by ticks so a test can step it. It follows the
+// file by path (events.Tail), so the 1 MB rotation to events.jsonl.1 does not
+// leave it reading the old inode.
+func attentionFollowEvents(ctx context.Context, w io.Writer, townRoot string, ticks <-chan time.Time, opts followOptions) error {
+	path := attention.EventsPath(townRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tail, err := events.OpenTail(path)
 	if err != nil {
 		return err
+	}
+	defer func() { _ = tail.Close() }()
+	if opts.since > 0 {
+		history, err := attentionHistory(path, tail.Offset())
+		if err != nil {
+			return err
+		}
+		cutoff := opts.now.Add(-opts.since)
+		printAttentionLines(w, history, opts, func(e attention.Event) bool { return !e.TS.Before(cutoff) })
 	}
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticks:
-			events, err := attention.ReadEvents(townRoot)
+			lines, err := tail.Poll()
+			printAttentionLines(w, lines, opts, nil)
 			if err != nil {
 				return err
 			}
-			if len(events) < seen {
-				seen = 0 // the log rotated; start over on the fresh one
-			}
-			for _, e := range events[seen:] {
-				writeAttentionEvent(w, e)
-			}
-			seen = len(events)
 		}
 	}
 }
 
-// attentionEventCount is how many transitions events.jsonl holds now.
-func attentionEventCount(townRoot string) (int, error) {
-	events, err := attention.ReadEvents(townRoot)
+// attentionHistory returns the complete lines in the first end bytes of path:
+// what the file held when the tail opened, so replay and follow do not overlap.
+func attentionHistory(path string, end int64) ([]string, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // G304: a path built from the town root
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return len(events), nil
+	if int64(len(data)) > end {
+		data = data[:end]
+	}
+	return strings.Split(string(data), "\n"), nil
 }
 
-// writeAttentionEvent prints one transition as a signed line.
-func writeAttentionEvent(w io.Writer, e attention.Event) {
-	sign := "+"
-	if e.State == attention.EventCleared {
-		sign = "-"
+// printAttentionLines prints each line that parses as an event, passes the
+// wake filter and, when keep is set, keep. A line that does not parse is
+// skipped, as ReadEvents skips it.
+func printAttentionLines(w io.Writer, lines []string, opts followOptions, keep func(attention.Event) bool) {
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var e attention.Event
+		if json.Unmarshal([]byte(line), &e) != nil {
+			continue
+		}
+		if opts.wakeOnly && !e.Wake {
+			continue
+		}
+		if keep != nil && !keep(e) {
+			continue
+		}
+		if opts.asJSON {
+			fmt.Fprintln(w, line)
+			continue
+		}
+		fmt.Fprintln(w, attentionEventLine(e))
 	}
-	fmt.Fprintf(w, "%s %s %s %s\n", sign, e.TS.Format("15:04:05"), e.Key, e.Text)
+}
+
+// attentionEventLine is the human line for one event: the time, the rule that
+// raised it and the collector's own detail text. A cleared event says so; a
+// line written before rules existed shows its class in the rule's place.
+func attentionEventLine(e attention.Event) string {
+	rule := e.Rule
+	if rule == "" {
+		rule = string(e.Class)
+	}
+	detail := e.Text
+	if e.State == attention.EventCleared {
+		detail = "cleared: " + detail
+	}
+	return fmt.Sprintf("%s %s %s", e.TS.Local().Format("15:04:05"), rule, detail)
 }

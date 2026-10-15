@@ -160,8 +160,9 @@ func (l *landingStates) each(fn func(rig, bead string)) {
 //
 // It is read and written only on the heartbeat goroutine.
 type attentionCache struct {
-	state       attention.State
-	reworkNotes map[string]reworkNote
+	state         attention.State
+	reworkNotes   map[string]reworkNote
+	diskWarnBeats int
 }
 
 // reworkNote is one rework bead's cached rejection count, keyed by the
@@ -252,6 +253,9 @@ type attentionSources struct {
 	// host collector whose probe failed keeps its rules' previous items from
 	// it, so an unanswered probe does not clear a real alarm.
 	prev attention.State
+	// diskWarnBeats is how many consecutive ticks host.disk_warn has held,
+	// carried across ticks by the daemon. attentionTick updates it.
+	diskWarnBeats int
 }
 
 // writeAttention is the heartbeat step after townhealth (gt-vsct7.2): it runs
@@ -287,13 +291,14 @@ func (d *Daemon) writeAttention() {
 	if cache.reworkNotes != nil {
 		src.reworkNotes = cache.reworkNotes
 	}
+	src.diskWarnBeats = cache.diskWarnBeats
 	tips, err := readDirectPushTips(d.config.TownRoot)
 	if err != nil {
 		d.logger.Printf("attention: reading %s: %v", tipsFileName, err)
 	}
 	src.tips = &tips
 	state := d.attentionTick(ctx, src, prev, acks, now)
-	d.lastAttention = &attentionCache{state: state, reworkNotes: src.reworkNotes}
+	d.lastAttention = &attentionCache{state: state, reworkNotes: src.reworkNotes, diskWarnBeats: src.diskWarnBeats}
 	if len(src.tips.Rigs) == 0 {
 		return
 	}
@@ -319,10 +324,15 @@ func (d *Daemon) attentionTick(ctx context.Context, src *attentionSources, prev 
 	src.prev = prev
 	observed := collectAttention(ctx, prev, src.collectors(), d.logger.Printf)
 	res := attention.Reconcile(prev, observed, acks, now)
+	beats, promoted := diskWarnPromotion(res.State, src.diskWarnBeats, now)
+	res.Events = append(res.Events, promoted...)
 	if err := attention.AppendEvents(d.config.TownRoot, res.Events); err != nil {
 		d.logger.Printf("attention: appending %s: %v", attention.EventsFileName, err)
 		return prev
 	}
+	// The count advances only once its events are durable, so a failed append
+	// re-derives the promotion on the next tick instead of skipping it.
+	src.diskWarnBeats = beats
 	// One line per transition, and nothing on a tick with no change: the line
 	// is the signal, not a per-beat heartbeat. It says what the append just
 	// made durable, so the tick that delivered nothing says nothing here.
@@ -345,6 +355,34 @@ func (d *Daemon) attentionTick(ctx context.Context, src *attentionSources, prev 
 		d.logger.Printf("attention: pruning acks: %v", err)
 	}
 	return res.State
+}
+
+// diskWarnPromotion counts the consecutive ticks host.disk_warn has held in
+// state and, on the tick that reaches attention.DiskWarnPromoteBeats, returns
+// one more raised line for the item with the operator_action, wake flags a
+// warning that does not clear has earned. It fires once per run of ticks: the
+// count keeps rising past the threshold and resets when the item clears, so a
+// disk that fills again after clearing earns a new promotion.
+func diskWarnPromotion(state attention.State, beats int, now time.Time) (int, []attention.Event) {
+	it, ok := attention.Find(state, attention.RuleHostDiskWarn)
+	if !ok {
+		return 0, nil
+	}
+	beats++
+	if beats != attention.DiskWarnPromoteBeats {
+		return beats, nil
+	}
+	return beats, []attention.Event{{
+		TS:       now,
+		Class:    it.Kind,
+		Severity: attention.SeverityHigh,
+		Text:     fmt.Sprintf("%s (unresolved for %d heartbeats)", it.Summary, beats),
+		Key:      it.Key,
+		State:    attention.EventNew,
+		Rule:     attention.RuleHostDiskWarn,
+		Handled:  attention.HandledOperatorAction,
+		Wake:     true,
+	}}
 }
 
 // attentionWord is the transition's word in the daemon log. A cleared line
