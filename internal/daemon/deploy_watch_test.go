@@ -1,0 +1,763 @@
+package daemon
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/forgejo"
+)
+
+// The tests drive the watch with a fake Forgejo: the API's own answers matter
+// to the watch, so the fake is the seam and no test opens a socket (except
+// TestDeployWatch_TokenNeverReachesTheAlert, whose transport answers in
+// process).
+
+var deployTestNow = time.Date(2026, 10, 15, 18, 0, 0, 0, time.UTC)
+
+const (
+	deployTestOwner   = "acme"
+	deployTestName    = "fractals-nextjs"
+	deployTestRepo    = deployTestOwner + "/" + deployTestName
+	deployTestAPIBase = "http://forgejo.test/api/v1"
+)
+
+// fakeDeployForgejo is one repository's runs and jobs, as the API answers.
+type fakeDeployForgejo struct {
+	runs    []forgejo.ActionRun
+	jobs    map[int64][]forgejo.ActionRunJob
+	listErr error
+	jobErr  error
+	lists   int
+	limits  []int
+}
+
+func (f *fakeDeployForgejo) ListRuns(_ context.Context, _, _ string, filter forgejo.RunFilter) (*forgejo.RunList, error) {
+	f.lists++
+	f.limits = append(f.limits, filter.Limit)
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return &forgejo.RunList{TotalCount: len(f.runs), Runs: f.runs}, nil
+}
+
+func (f *fakeDeployForgejo) ListRunJobs(_ context.Context, _, _ string, runID int64) ([]forgejo.ActionRunJob, error) {
+	if f.jobErr != nil {
+		return nil, f.jobErr
+	}
+	return f.jobs[runID], nil
+}
+
+// deployRecorder records what one watch did, and can fail a delivery so a
+// test can pin what the watch retries.
+type deployRecorder struct {
+	mu       sync.Mutex
+	raised   []deployRaise
+	cleared  []deployClear
+	pushed   []deployPush
+	raiseErr error
+	clearErr error
+	pushErr  error
+}
+
+type deployRaise struct{ Severity, Key, Message string }
+type deployClear struct{ Key, Reason string }
+type deployPush struct{ Title, Body string }
+
+func (r *deployRecorder) raise(severity, key, message string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.raiseErr != nil {
+		return r.raiseErr
+	}
+	r.raised = append(r.raised, deployRaise{severity, key, message})
+	return nil
+}
+
+func (r *deployRecorder) clear(key, reason string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.clearErr != nil {
+		return r.clearErr
+	}
+	r.cleared = append(r.cleared, deployClear{key, reason})
+	return nil
+}
+
+func (r *deployRecorder) push(title, body string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.pushErr != nil {
+		return r.pushErr
+	}
+	r.pushed = append(r.pushed, deployPush{title, body})
+	return nil
+}
+
+func (r *deployRecorder) raisedAlerts() []deployRaise {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]deployRaise(nil), r.raised...)
+}
+
+func (r *deployRecorder) clearedAlerts() []deployClear {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]deployClear(nil), r.cleared...)
+}
+
+func (r *deployRecorder) pushes() []deployPush {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]deployPush(nil), r.pushed...)
+}
+
+// newTestDeployWatch builds a watch over api for one repository, with the
+// recorder wired to every seam and the state file under a temp dir.
+func newTestDeployWatch(t *testing.T, api deployRunAPI) (*deployWatch, *deployRecorder) {
+	t.Helper()
+	rec := &deployRecorder{}
+	w := newDeployWatch()
+	w.API = func(string) (deployRunAPI, error) { return api, nil }
+	w.Repos = func() []deployRepo {
+		return []deployRepo{{Rig: "fractals", Owner: deployTestOwner, Name: deployTestName, APIBase: deployTestAPIBase}}
+	}
+	w.Raise = rec.raise
+	w.Clear = rec.clear
+	w.Push = rec.push
+	w.State = filepath.Join(t.TempDir(), deployWatchStateFile)
+	w.Now = func() time.Time { return deployTestNow }
+	return w, rec
+}
+
+// deployTestRun is one run of the fake repository's history.
+func deployTestRun(id int64, workflow, ref, status string, created time.Time, title string) forgejo.ActionRun {
+	return forgejo.ActionRun{
+		ID:         id,
+		WorkflowID: ".forgejo/workflows/" + workflow,
+		Status:     status,
+		PrettyRef:  ref,
+		Title:      title,
+		Created:    created.Format(time.RFC3339),
+		HTMLURL:    fmt.Sprintf("http://forgejo.test/%s/actions/runs/%d", deployTestRepo, id),
+	}
+}
+
+// failingJob is one job of a run, in the state the API reports.
+func deployTestJob(runID int64, name, status string) forgejo.ActionRunJob {
+	return forgejo.ActionRunJob{ID: runID * 10, RunID: runID, Name: name, Status: status}
+}
+
+func TestDeployWatch_StagingFailureOnMainRaisesOneMediumAlert(t *testing.T) {
+	t.Parallel()
+	run := deployTestRun(1153, deployWorkflowStaging, "main", deployRunFailed, deployTestNow.Add(-time.Hour), "fix: guard the retry (gt-abc)")
+	api := &fakeDeployForgejo{
+		runs: []forgejo.ActionRun{run},
+		jobs: map[int64][]forgejo.ActionRunJob{1153: {deployTestJob(1153, "staging-integration", deployRunFailed)}},
+	}
+	w, rec := newTestDeployWatch(t, api)
+
+	w.poll(context.Background())
+
+	raised := rec.raisedAlerts()
+	if len(raised) != 1 {
+		t.Fatalf("raised = %+v, want one escalation", raised)
+	}
+	got := raised[0]
+	if got.Key != "deploy-failed:"+deployTestRepo+":"+deployWorkflowStaging {
+		t.Errorf("key = %q, want deploy-failed:%s:%s", got.Key, deployTestRepo, deployWorkflowStaging)
+	}
+	if got.Severity != config.SeverityMedium {
+		t.Errorf("severity = %q, want %q", got.Severity, config.SeverityMedium)
+	}
+	for _, want := range []string{
+		deployTestRepo, deployWorkflowStaging, "run 1153", "main",
+		"fix: guard the retry (gt-abc)", "staging-integration",
+		"http://forgejo.test/" + deployTestRepo + "/actions/runs/1153",
+	} {
+		if !strings.Contains(got.Message, want) {
+			t.Errorf("message %q does not name %q", got.Message, want)
+		}
+	}
+	if pushes := rec.pushes(); len(pushes) != 0 {
+		t.Errorf("pushes = %+v, want none for a medium severity", pushes)
+	}
+	if len(api.limits) != 1 || api.limits[0] != deployWatchRunLimit {
+		t.Errorf("list limits = %v, want one list at %d", api.limits, deployWatchRunLimit)
+	}
+}
+
+func TestDeployWatch_TheSameFailureRaisesNothingNew(t *testing.T) {
+	t.Parallel()
+	run := deployTestRun(1153, deployWorkflowStaging, "main", deployRunFailed, deployTestNow.Add(-time.Hour), "fix: guard the retry")
+	api := &fakeDeployForgejo{runs: []forgejo.ActionRun{run}}
+	w, rec := newTestDeployWatch(t, api)
+
+	w.poll(context.Background())
+	w.poll(context.Background())
+	w.poll(context.Background())
+
+	if raised := rec.raisedAlerts(); len(raised) != 1 {
+		t.Errorf("raised = %+v, want the one escalation the first poll filed", raised)
+	}
+}
+
+func TestDeployWatch_TagReleaseFailureIsHighAndPushes(t *testing.T) {
+	t.Parallel()
+	run := deployTestRun(77, deployWorkflowDeploy, "v0.1.3", deployRunFailed, deployTestNow.Add(-30*time.Minute), "chore: release v0.1.3")
+	api := &fakeDeployForgejo{runs: []forgejo.ActionRun{run}}
+	w, rec := newTestDeployWatch(t, api)
+
+	w.poll(context.Background())
+	w.poll(context.Background())
+
+	raised := rec.raisedAlerts()
+	if len(raised) != 1 {
+		t.Fatalf("raised = %+v, want one escalation", raised)
+	}
+	if raised[0].Severity != config.SeverityHigh {
+		t.Errorf("severity = %q, want %q", raised[0].Severity, config.SeverityHigh)
+	}
+	pushes := rec.pushes()
+	if len(pushes) != 1 {
+		t.Fatalf("pushes = %+v, want exactly one for a high severity", pushes)
+	}
+	if !strings.Contains(pushes[0].Title, deployTestRepo) || !strings.Contains(pushes[0].Body, "v0.1.3") {
+		t.Errorf("push = %+v, want the repository and the ref", pushes[0])
+	}
+}
+
+func TestDeployWatch_ALaterGreenRunClearsTheEscalation(t *testing.T) {
+	t.Parallel()
+	failed := deployTestRun(1153, deployWorkflowStaging, "main", deployRunFailed, deployTestNow.Add(-time.Hour), "fix: guard the retry")
+	green := deployTestRun(1154, deployWorkflowStaging, "main", deployRunSucceeded, deployTestNow.Add(-time.Minute), "fix: guard the retry")
+	api := &fakeDeployForgejo{runs: []forgejo.ActionRun{failed}}
+	w, rec := newTestDeployWatch(t, api)
+
+	w.poll(context.Background())
+
+	api.runs = []forgejo.ActionRun{failed, green}
+	w.poll(context.Background())
+
+	cleared := rec.clearedAlerts()
+	if len(cleared) != 1 {
+		t.Fatalf("cleared = %+v, want the one alert the failure raised", cleared)
+	}
+	if want := "deploy-failed:" + deployTestRepo + ":" + deployWorkflowStaging; cleared[0].Key != want {
+		t.Errorf("cleared key = %q, want %q", cleared[0].Key, want)
+	}
+	if !strings.Contains(cleared[0].Reason, "1154") {
+		t.Errorf("clear reason = %q, want the run that cleared it", cleared[0].Reason)
+	}
+	if failures := w.failures(); len(failures) != 0 {
+		t.Errorf("failures = %+v, want none once the deploy is green", failures)
+	}
+
+	// A failure after the green run is a new alert: the escalation was closed.
+	again := deployTestRun(1155, deployWorkflowStaging, "main", deployRunFailed, deployTestNow.Add(-time.Second), "fix: another try")
+	api.runs = []forgejo.ActionRun{failed, green, again}
+	w.poll(context.Background())
+
+	if raised := rec.raisedAlerts(); len(raised) != 2 {
+		t.Errorf("raised = %+v, want a second escalation for the run that failed after the green one", raised)
+	}
+}
+
+func TestDeployWatch_LandRefsAndOldRunsAreNotDeploys(t *testing.T) {
+	t.Parallel()
+	api := &fakeDeployForgejo{runs: []forgejo.ActionRun{
+		// A candidate branch: the land/* gate covers it, not this watch.
+		deployTestRun(1, deployWorkflowStaging, "land/gt-abc", deployRunFailed, deployTestNow.Add(-time.Hour), "candidate"),
+		// A release workflow on main: not a deploy this watch follows.
+		deployTestRun(2, deployWorkflowDeploy, "main", deployRunFailed, deployTestNow.Add(-time.Hour), "deploy main"),
+		// A feature branch named like a tag.
+		deployTestRun(3, deployWorkflowDeploy, "verify", deployRunFailed, deployTestNow.Add(-time.Hour), "verify"),
+		// A staging failure older than the window.
+		deployTestRun(4, deployWorkflowStaging, "main", deployRunFailed, deployTestNow.Add(-48*time.Hour), "old"),
+		// A workflow the watch does not follow at all.
+		deployTestRun(5, "gate.yml", "main", deployRunFailed, deployTestNow.Add(-time.Hour), "gate"),
+	}}
+	w, rec := newTestDeployWatch(t, api)
+
+	w.poll(context.Background())
+
+	if raised := rec.raisedAlerts(); len(raised) != 0 {
+		t.Errorf("raised = %+v, want none: land/*, a deploy on main, a 48h-old run and gate.yml are not deploys", raised)
+	}
+	if failures := w.failures(); len(failures) != 0 {
+		t.Errorf("failures = %+v, want an empty picture", failures)
+	}
+}
+
+func TestDeployWatch_HealthSeverityFollowsTheFailingJob(t *testing.T) {
+	t.Parallel()
+	prod := deployTestRun(9, deployWorkflowHealth, "v0.1.3", deployRunFailed, deployTestNow.Add(-time.Minute), "release smoke")
+	staging := deployTestRun(8, deployWorkflowHealth, "main", deployRunFailed, deployTestNow.Add(-2*time.Minute), "staging check")
+	api := &fakeDeployForgejo{
+		runs: []forgejo.ActionRun{prod, staging},
+		jobs: map[int64][]forgejo.ActionRunJob{
+			9: {deployTestJob(9, "smoke-runners", deployRunSucceeded), deployTestJob(9, deployHealthProdJob, deployRunFailed)},
+			8: {deployTestJob(8, "staging-integration", deployRunFailed)},
+		},
+	}
+	w, rec := newTestDeployWatch(t, api)
+
+	w.poll(context.Background())
+
+	raised := rec.raisedAlerts()
+	if len(raised) != 1 {
+		t.Fatalf("raised = %+v, want the newest health run only", raised)
+	}
+	if raised[0].Severity != config.SeverityHigh {
+		t.Errorf("severity = %q, want %q for a failed %s", raised[0].Severity, config.SeverityHigh, deployHealthProdJob)
+	}
+	if pushes := rec.pushes(); len(pushes) != 1 {
+		t.Errorf("pushes = %+v, want one for the failed prod smoke", pushes)
+	}
+	if !strings.Contains(raised[0].Message, deployHealthProdJob) {
+		t.Errorf("message %q does not name the failing job", raised[0].Message)
+	}
+}
+
+// TestDeployWatch_SkipsARepositoryItCannotReadQuietly pins the two answers a
+// read can give on a rig that does not deploy here: a 404 is not news, and no
+// alert is raised or cleared from a repository nothing can be read about — a
+// repository that has gone missing is not a green deploy.
+func TestDeployWatch_SkipsARepositoryItCannotReadQuietly(t *testing.T) {
+	t.Parallel()
+	run := deployTestRun(1153, deployWorkflowStaging, "main", deployRunFailed, deployTestNow.Add(-time.Hour), "fix: guard the retry")
+	api := &fakeDeployForgejo{runs: []forgejo.ActionRun{run}}
+	w, rec := newTestDeployWatch(t, api)
+	var logged []string
+	w.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	w.poll(context.Background())
+	if raised := rec.raisedAlerts(); len(raised) != 1 {
+		t.Fatalf("raised = %+v, want the one escalation for the failed run", raised)
+	}
+
+	api.listErr = &forgejo.APIError{Method: "GET", Path: "/repos", StatusCode: 404, Body: "not found"}
+	logged = nil
+	w.poll(context.Background())
+
+	if raised := rec.raisedAlerts(); len(raised) != 1 {
+		t.Errorf("raised = %+v, want no second escalation from a repository that answered nothing", raised)
+	}
+	if cleared := rec.clearedAlerts(); len(cleared) != 0 {
+		t.Errorf("cleared = %+v, want no clear from a repository that answered nothing", cleared)
+	}
+	if failures := w.failures(); len(failures) != 1 {
+		t.Errorf("failures = %+v, want the last picture kept", failures)
+	}
+	if len(logged) != 0 {
+		t.Errorf("log = %v, want a 404 repository skipped quietly", logged)
+	}
+}
+
+// TestDeployWatch_AReadFailureKeepsTheOpenAlert is the other half: a Forgejo
+// that is down answers nothing, which is not a green deploy.
+func TestDeployWatch_AReadFailureKeepsTheOpenAlert(t *testing.T) {
+	t.Parallel()
+	run := deployTestRun(1153, deployWorkflowStaging, "main", deployRunFailed, deployTestNow.Add(-time.Hour), "fix: guard the retry")
+	api := &fakeDeployForgejo{runs: []forgejo.ActionRun{run}}
+	w, rec := newTestDeployWatch(t, api)
+
+	w.poll(context.Background())
+
+	api.listErr = fmt.Errorf("dial tcp: connection refused")
+	w.poll(context.Background())
+
+	if cleared := rec.clearedAlerts(); len(cleared) != 0 {
+		t.Errorf("cleared = %+v, want no clear from a repository that answered nothing", cleared)
+	}
+	if failures := w.failures(); len(failures) != 1 {
+		t.Errorf("failures = %+v, want the last picture kept", failures)
+	}
+}
+
+// TestDeployWatch_StateSurvivesARestart pins what the state file is for: a
+// daemon that restarts while a deploy is red neither re-raises the alert nor
+// pushes it to a person again.
+func TestDeployWatch_StateSurvivesARestart(t *testing.T) {
+	t.Parallel()
+	run := deployTestRun(77, deployWorkflowDeploy, "v0.1.3", deployRunFailed, deployTestNow.Add(-time.Minute), "chore: release v0.1.3")
+	api := &fakeDeployForgejo{runs: []forgejo.ActionRun{run}}
+	w, _ := newTestDeployWatch(t, api)
+	w.poll(context.Background())
+
+	// The next daemon reads the same state file.
+	next, nextRec := newTestDeployWatch(t, api)
+	next.State = w.State
+	next.poll(context.Background())
+
+	if raised := nextRec.raisedAlerts(); len(raised) != 0 {
+		t.Errorf("raised = %+v, want nothing: the alert state file says this run is already escalated", raised)
+	}
+	if pushes := nextRec.pushes(); len(pushes) != 0 {
+		t.Errorf("pushes = %+v, want nothing: the push for this run already went out", pushes)
+	}
+	// And a green run still clears what the earlier daemon raised.
+	api.runs = append(api.runs, deployTestRun(78, deployWorkflowDeploy, "v0.1.3", deployRunSucceeded, deployTestNow.Add(-time.Second), "release"))
+	next.poll(context.Background())
+	if cleared := nextRec.clearedAlerts(); len(cleared) != 1 {
+		t.Errorf("cleared = %+v, want the alert a previous daemon raised", cleared)
+	}
+}
+
+// TestDeployWatch_ARaiseThatDidNotLandIsRetried: the state records a
+// delivery, so a dropped escalation is raised again by the next poll instead
+// of being remembered as sent.
+func TestDeployWatch_ARaiseThatDidNotLandIsRetried(t *testing.T) {
+	t.Parallel()
+	run := deployTestRun(1153, deployWorkflowStaging, "main", deployRunFailed, deployTestNow.Add(-time.Hour), "fix: guard the retry")
+	api := &fakeDeployForgejo{runs: []forgejo.ActionRun{run}}
+	w, rec := newTestDeployWatch(t, api)
+	rec.raiseErr = fmt.Errorf("gt escalate: exit 1")
+
+	w.poll(context.Background())
+
+	rec.mu.Lock()
+	rec.raiseErr = nil
+	rec.mu.Unlock()
+	w.poll(context.Background())
+
+	if raised := rec.raisedAlerts(); len(raised) != 1 {
+		t.Errorf("raised = %+v, want the retry that landed", raised)
+	}
+}
+
+// endpointTransport answers each request in process, so the test exercises the
+// real client's request building without a socket.
+type endpointTransport struct{ h http.Handler }
+
+func (tr endpointTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	tr.h.ServeHTTP(rec, r)
+	resp := rec.Result()
+	resp.Request = r
+	return resp, nil
+}
+
+// TestDeployWatch_TokenNeverReachesTheAlert drives the watch through the real
+// viewer client: the token authenticates the read and appears nowhere else —
+// not in a run's text, and so not in an escalation or a push.
+func TestDeployWatch_TokenNeverReachesTheAlert(t *testing.T) {
+	t.Parallel()
+	const secret = "viewer-token-that-must-not-be-printed"
+	var auth string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/actions/runs"):
+			// A release run, so both the escalation and the push are written
+			// and both are checked for the token.
+			_, _ = io.WriteString(w, `{"total_count":1,"workflow_runs":[{"id":77,"status":"failure","title":"chore: release v0.1.3","prettyref":"v0.1.3","workflow_id":".forgejo/workflows/deploy.yml","created":"2026-10-15T17:00:00Z","html_url":"http://forgejo.test/acme/fractals-nextjs/actions/runs/77"}]}`)
+		case strings.HasSuffix(r.URL.Path, "/jobs"):
+			_, _ = io.WriteString(w, `[{"id":1,"run_id":77,"name":"deploy-production","status":"failure"}]`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	client, err := forgejo.NewClient(config.ForgejoRoleViewer,
+		forgejo.WithToken(secret),
+		forgejo.WithBaseURL("http://forgejo.test/api/v1"),
+		forgejo.WithHTTPClient(&http.Client{Transport: endpointTransport{h: handler}}))
+	if err != nil {
+		t.Fatalf("forgejo client: %v", err)
+	}
+	w, rec := newTestDeployWatch(t, client)
+
+	w.poll(context.Background())
+
+	if auth != "token "+secret {
+		t.Errorf("Authorization = %q, want the viewer token", auth)
+	}
+	raised := rec.raisedAlerts()
+	if len(raised) != 1 {
+		t.Fatalf("raised = %+v, want one escalation", raised)
+	}
+	if strings.Contains(raised[0].Message, secret) {
+		t.Errorf("the escalation carries the token: %q", raised[0].Message)
+	}
+	pushes := rec.pushes()
+	if len(pushes) != 1 {
+		t.Fatalf("pushes = %+v, want the high severity push this run earns", pushes)
+	}
+	for _, p := range pushes {
+		if strings.Contains(p.Title+p.Body, secret) {
+			t.Errorf("the push carries the token: %+v", p)
+		}
+	}
+}
+
+// TestDeployWatch_StateFileIsReadable pins the state file's shape, the one
+// thing that outlives the process.
+func TestDeployWatch_StateFileIsReadable(t *testing.T) {
+	t.Parallel()
+	run := deployTestRun(1153, deployWorkflowStaging, "main", deployRunFailed, deployTestNow.Add(-time.Hour), "fix: guard the retry")
+	api := &fakeDeployForgejo{runs: []forgejo.ActionRun{run}}
+	w, _ := newTestDeployWatch(t, api)
+	w.State = filepath.Join(t.TempDir(), "deploy-watch.json")
+
+	w.poll(context.Background())
+
+	data, err := os.ReadFile(w.State)
+	if err != nil {
+		t.Fatalf("state file: %v", err)
+	}
+	var st deployWatchState
+	if err := json.Unmarshal([]byte(data), &st); err != nil {
+		t.Fatalf("state file %s: %v", data, err)
+	}
+	key := "deploy-failed:" + deployTestRepo + ":" + deployWorkflowStaging
+	if open, ok := st.Open[key]; !ok || open.Run != 1153 {
+		t.Errorf("state = %+v, want %s open on run 1153", st.Open, key)
+	}
+}
+
+// deployTestWorkflow is the watch's own table entry for a workflow file, so
+// a test asserts against the ref classes the poll filters on rather than a
+// copy of them.
+func deployTestWorkflow(t *testing.T, file string) deployWorkflow {
+	t.Helper()
+	for _, wf := range deployWorkflows {
+		if wf.File == file {
+			return wf
+		}
+	}
+	t.Fatalf("deployWorkflows has no entry for %s", file)
+	return deployWorkflow{}
+}
+
+// TestDeployWatch_ACancelledRunCountsAsAFailureAndAnInFlightOneDoesNot pins
+// the two statuses a run may end or hold that are not a plain failure: the
+// bead counts a cancelled run as failed, and a newer run still in flight
+// says nothing either way, so it clears nothing.
+func TestDeployWatch_ACancelledRunCountsAsAFailureAndAnInFlightOneDoesNot(t *testing.T) {
+	t.Parallel()
+	cancelled := deployTestRun(70, deployWorkflowTeardown, "v0.1.3", deployRunCancelled, deployTestNow.Add(-time.Hour), "teardown v0.1.3")
+	api := &fakeDeployForgejo{runs: []forgejo.ActionRun{cancelled}}
+	w, rec := newTestDeployWatch(t, api)
+
+	w.poll(context.Background())
+
+	raised := rec.raisedAlerts()
+	if len(raised) != 1 || raised[0].Severity != config.SeverityHigh {
+		t.Fatalf("raised = %+v, want one high escalation for a cancelled release run", raised)
+	}
+
+	running := deployTestRun(71, deployWorkflowTeardown, "v0.1.3", "running", deployTestNow.Add(-time.Minute), "teardown v0.1.3")
+	api.runs = []forgejo.ActionRun{cancelled, running}
+	w.poll(context.Background())
+
+	if cleared := rec.clearedAlerts(); len(cleared) != 0 {
+		t.Errorf("cleared = %+v, want nothing: a run still in flight is not a green one", cleared)
+	}
+	if raised := rec.raisedAlerts(); len(raised) != 1 {
+		t.Errorf("raised = %+v, want no second escalation for the run in flight", raised)
+	}
+}
+
+// TestDeployWatch_WorkflowRefAndSeverity is the classification table: which
+// workflows are deploys, on which refs, at which severity. A run that matches
+// no row is not a deploy and raises nothing.
+func TestDeployWatch_WorkflowRefAndSeverity(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		workflow string
+		ref      string
+		jobs     []string
+		wantRef  string
+		wantSev  string
+	}{
+		{"staging on main", deployWorkflowStaging, "main", nil, deployRefMain, config.SeverityMedium},
+		{"staging on a tag", deployWorkflowStaging, "v0.1.3", nil, deployRefTag, ""},
+		{"deploy on a tag", deployWorkflowDeploy, "v0.1.3", nil, deployRefTag, config.SeverityHigh},
+		{"deploy on main", deployWorkflowDeploy, "main", nil, deployRefMain, ""},
+		{"teardown on a tag", deployWorkflowTeardown, "v1.0.0", nil, deployRefTag, config.SeverityHigh},
+		{"teardown on main", deployWorkflowTeardown, "main", nil, deployRefMain, ""},
+		{"health prod smoke", deployWorkflowHealth, "v0.1.3", []string{deployHealthProdJob}, deployRefTag, config.SeverityHigh},
+		{"health staging check", deployWorkflowHealth, "main", []string{"staging-integration"}, deployRefMain, config.SeverityMedium},
+		{"a candidate branch", deployWorkflowStaging, "land/gt-abc", nil, "", ""},
+		{"a branch named like a tag", deployWorkflowDeploy, "verify", nil, "", ""},
+		{"a branch named v2-migration", deployWorkflowDeploy, "v2-migration", nil, "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if class := deployRefClass(tc.ref); class != tc.wantRef {
+				t.Errorf("deployRefClass(%q) = %q, want %q", tc.ref, class, tc.wantRef)
+			}
+			if got := deploySeverity(deployTestWorkflow(t, tc.workflow), tc.ref, tc.jobs); got != tc.wantSev {
+				t.Errorf("%s on %s = %q, want %q", tc.workflow, tc.ref, got, tc.wantSev)
+			}
+		})
+	}
+	for workflowID, want := range map[string]string{
+		".forgejo/workflows/" + deployWorkflowStaging: deployWorkflowStaging,
+		deployWorkflowDeploy:                          deployWorkflowDeploy,
+		".forgejo/workflows/gate.yml":                 "",
+		"":                                            "",
+	} {
+		if got := deployRunWorkflow(workflowID); got != want {
+			t.Errorf("deployRunWorkflow(%q) = %q, want %q", workflowID, got, want)
+		}
+	}
+}
+
+// TestDeployWatch_EachRepositoryIsReadThroughItsOwnInstance pins the seam the
+// API is: a rig is read through the host its own config names, so a
+// same-named repository on another Forgejo instance is never read as this
+// rig's.
+func TestDeployWatch_EachRepositoryIsReadThroughItsOwnInstance(t *testing.T) {
+	t.Parallel()
+	one := &fakeDeployForgejo{runs: []forgejo.ActionRun{deployTestRun(1, deployWorkflowStaging, "main", deployRunFailed, deployTestNow.Add(-time.Minute), "one")}}
+	two := &fakeDeployForgejo{runs: []forgejo.ActionRun{deployTestRun(2, deployWorkflowStaging, "main", deployRunFailed, deployTestNow.Add(-time.Minute), "two")}}
+	byBase := map[string]deployRunAPI{
+		"http://one.test/api/v1": one,
+		"http://two.test/api/v1": two,
+	}
+	w, rec := newTestDeployWatch(t, one)
+	var asked []string
+	w.API = func(base string) (deployRunAPI, error) {
+		asked = append(asked, base)
+		api, ok := byBase[base]
+		if !ok {
+			return nil, fmt.Errorf("no client for %s", base)
+		}
+		return api, nil
+	}
+	w.Repos = func() []deployRepo {
+		return []deployRepo{
+			{Rig: "one", Owner: "acme", Name: deployTestName, APIBase: "http://one.test/api/v1"},
+			{Rig: "two", Owner: "acme", Name: deployTestName, APIBase: "http://two.test/api/v1"},
+		}
+	}
+
+	w.poll(context.Background())
+
+	if one.lists != 1 || two.lists != 1 {
+		t.Errorf("lists = %d and %d, want each repository read once through its own instance", one.lists, two.lists)
+	}
+	// Two asks per repository: its runs, then the failed run's jobs.
+	instances := map[string]bool{}
+	for _, base := range asked {
+		instances[base] = true
+	}
+	if len(instances) != 2 || !instances["http://one.test/api/v1"] || !instances["http://two.test/api/v1"] {
+		t.Errorf("clients asked for = %v, want each repository's own API base and no other", asked)
+	}
+	if raised := rec.raisedAlerts(); len(raised) != 2 {
+		t.Errorf("raised = %+v, want one per repository", raised)
+	}
+}
+
+// TestDeployWatch_AGreenRunClearsAnAlertWhoseStateFileIsGone: the state file
+// says which alerts this process raised, and a town whose file was deleted
+// still has the escalation beads. A green run closes them once, then trusts
+// the state it wrote.
+func TestDeployWatch_AGreenRunClearsAnAlertWhoseStateFileIsGone(t *testing.T) {
+	t.Parallel()
+	green := deployTestRun(1154, deployWorkflowStaging, "main", deployRunSucceeded, deployTestNow.Add(-time.Minute), "fix: guard the retry")
+	api := &fakeDeployForgejo{runs: []forgejo.ActionRun{green}}
+	w, rec := newTestDeployWatch(t, api)
+
+	w.poll(context.Background())
+
+	cleared := rec.clearedAlerts()
+	if len(cleared) != 1 {
+		t.Fatalf("cleared = %+v, want one clear for a state file that was never written", cleared)
+	}
+	if !strings.Contains(cleared[0].Reason, "1154") {
+		t.Errorf("clear reason = %q, want the run that cleared it", cleared[0].Reason)
+	}
+	w.poll(context.Background())
+	if again := rec.clearedAlerts(); len(again) != 1 {
+		t.Errorf("cleared = %+v, want the clear once, not one per poll", again)
+	}
+
+	// The next daemon reads the state this one wrote, so it clears nothing.
+	next, nextRec := newTestDeployWatch(t, api)
+	next.State = w.State
+	next.poll(context.Background())
+	if cleared := nextRec.clearedAlerts(); len(cleared) != 0 {
+		t.Errorf("cleared = %+v, want nothing once the state file names the alerts", cleared)
+	}
+}
+
+// TestDeployWatch_ARecordedPushNeedsACommand pins that a town with no
+// operational.overseer.silent_push owes no push: nothing is recorded as
+// delivered, so configuring the command later still reaches a person.
+func TestDeployWatch_ARecordedPushNeedsACommand(t *testing.T) {
+	t.Parallel()
+	run := deployTestRun(77, deployWorkflowDeploy, "v0.1.3", deployRunFailed, deployTestNow.Add(-time.Minute), "chore: release v0.1.3")
+	api := &fakeDeployForgejo{runs: []forgejo.ActionRun{run}}
+	w, rec := newTestDeployWatch(t, api)
+	w.Push = nil
+
+	w.poll(context.Background())
+
+	if pushes := rec.pushes(); len(pushes) != 0 {
+		t.Errorf("pushes = %+v, want none with no command configured", pushes)
+	}
+
+	w.Push = rec.push
+	w.poll(context.Background())
+
+	if pushes := rec.pushes(); len(pushes) != 1 {
+		t.Errorf("pushes = %+v, want the push for the failure that still stands", pushes)
+	}
+}
+
+// TestCollectDeployFailures_ItemsCarryTheRuleAndOwner pins the queue's half:
+// the failures the watch found appear as deploy.failed items the dashboard's
+// Attention panel and the wake monitor read.
+func TestCollectDeployFailures_ItemsCarryTheRuleAndOwner(t *testing.T) {
+	t.Parallel()
+	d, _ := daemonWithRecorder(t)
+	w := newDeployWatch()
+	w.failing = map[string][]deployFailure{
+		"fractals": {{
+			Rig: "fractals", Repo: deployTestRepo, Workflow: deployWorkflowStaging,
+			Key:      "deploy-failed:" + deployTestRepo + ":" + deployWorkflowStaging,
+			Severity: config.SeverityMedium, RunID: 1153,
+			Summary: deployTestRepo + " " + deployWorkflowStaging + " run 1153 failed on main",
+		}},
+	}
+	d.deployW.Store(w)
+
+	s := &attentionSources{d: d, now: deployTestNow}
+	items, err := s.collectDeployFailures(context.Background())
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items = %+v, want one", items)
+	}
+	got := items[0]
+	if got.Kind != attention.KindDeployFailed {
+		t.Errorf("kind = %q, want %q", got.Kind, attention.KindDeployFailed)
+	}
+	if got.Rig != "fractals" || !strings.Contains(got.Summary, "run 1153") {
+		t.Errorf("item = %+v, want the rig and the run", got)
+	}
+	rule := attention.RuleFor(got)
+	if rule != attention.RuleDeployFailed {
+		t.Errorf("rule = %q, want %q", rule, attention.RuleDeployFailed)
+	}
+	if flags, ok := attention.Flags(rule); !ok || !flags.Wake {
+		t.Errorf("flags = %+v, want a rule that wakes", flags)
+	}
+}

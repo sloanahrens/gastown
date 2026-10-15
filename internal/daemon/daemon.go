@@ -117,6 +117,12 @@ type Daemon struct {
 	// collectors (attention_host.go); nil is production.
 	hostProbes hostProbes
 
+	// deployW is the deploy watch (deploy_watch.go), stored once it starts.
+	// Its collector runs on the heartbeat goroutine and the watch itself on
+	// its own, so the pointer is what they share.
+	deployW         atomic.Pointer[deployWatch]
+	deployWatchOnce sync.Once
+
 	// townHealthSources replaces the health report's outside probes (Dolt
 	// ping, backup root, slot status) in tests; nil probes for real.
 	townHealthSources func(s *healthSources)
