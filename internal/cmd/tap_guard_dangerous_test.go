@@ -1314,10 +1314,14 @@ func TestEvaluateDangerousCommandUnquotedHeredocSubstitution(t *testing.T) {
 // second, genuinely dangerous command after the terminator — intact. The
 // middle cases are the spellings of "<<" the shell does not read as a
 // heredoc operator: a shift inside a $(("..")) arithmetic expansion and a
-// "<" behind a backslash (gt-yza8u), and a shift after a nested $((".."))
-// whose "))" the outer expansion outlives (gt-schaa). Reading any of them
-// as a heredoc stripped the lines below it, so the live command standing
-// where the body would have been was never judged at all.
+// "<" behind a backslash (gt-yza8u), a shift after a nested $((".."))
+// whose "))" the outer expansion outlives (gt-schaa), and a shift in any
+// of the other arithmetic contexts — a command-position "((" or "for ((",
+// a "$[", an array subscript, and the offset of a "${name:..}" (gt-dherr).
+// Reading any of them as a heredoc stripped the lines below it, so the live
+// command standing where the body would have been was never judged at all.
+// A "let" argument is the exception that stays a heredoc: bash reads its
+// "<<" as a redirection, so stripping that body is the right answer.
 func TestHeredocDoesNotHideRealCommand(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1356,8 +1360,53 @@ func TestHeredocDoesNotHideRealCommand(t *testing.T) {
 			wantBlock: true,
 		},
 		{
+			name:      "shift in a command-position arithmetic command",
+			command:   "((1<<x))\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
+			name:      "shift in a command-position arithmetic assignment",
+			command:   "(( y = 1 << x ))\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
+			name:      "shift in an arithmetic expansion of the old form",
+			command:   "echo $[1<<x]\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
+			name:      "shift in a substring offset",
+			command:   "v=abcdef; echo ${v:1<<x:2}\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
+			name:      "shift in a C-style for header",
+			command:   "for ((i=1<<x;i<3;i++)); do :; done\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
+			name:      "shift in an array subscript",
+			command:   "a[1<<x]=3\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
 			name:      "a real heredoc body stays data",
 			command:   "cat <<EOF\nsudo rm -rf /\nEOF",
+			wantBlock: false,
+		},
+		{
+			name:      "the [ test command is not an arithmetic context",
+			command:   "if [ -f x ]; then\ncat <<EOF\nsudo rm -rf /\nEOF\nfi",
+			wantBlock: false,
+		},
+		{
+			name:      "a default-value expansion does not hide the heredoc after it",
+			command:   "echo ${v:-fallback}\ncat <<EOF\nsudo rm -rf /\nEOF",
+			wantBlock: false,
+		},
+		{
+			name:      "a shift in a let argument is a real heredoc",
+			command:   "let y=1<<x\nsudo rm -rf /\nx",
 			wantBlock: false,
 		},
 	}
