@@ -190,8 +190,16 @@ func TestUnwiredSourcesAreUnknownNeverGreen(t *testing.T) {
 			t.Errorf("field %s = %+v, want UNKNOWN with value ?", f.Key(), f)
 		}
 	}
-	if len(r.Fields) != 15 {
-		t.Errorf("got %d fields, want one per source (15)", len(r.Fields))
+	// One field per source, less the host: a town with no load source has no
+	// host reading to show, and an UNKNOWN would outrank every other field's
+	// verdict for a reading that was only ever corroboration (gt-auiji).
+	if len(r.Fields) != 14 {
+		t.Errorf("got %d fields, want one per source but the host (14)", len(r.Fields))
+	}
+	for _, f := range r.Fields {
+		if f.Key() == FieldHost {
+			t.Errorf("an unwired host source still claimed a %s field: %+v", FieldHost, f)
+		}
 	}
 }
 
@@ -329,9 +337,9 @@ func TestExecTaxUnderLoad(t *testing.T) {
 		load    HostLoad
 		loadErr error
 		want    Verdict
-		// town is the verdict every field together yields; "" means want.
-		// Only a case whose host cannot be read differs, because the host
-		// field is then UNKNOWN whatever the probe said (gt-auiji).
+		// town is the verdict every field together yields; "" means want. No
+		// case differs today: a host that cannot be read has no field of its
+		// own, so it leaves the probe's verdict standing (gt-auiji).
 		town   Verdict
 		value  string
 		detail string
@@ -391,7 +399,6 @@ func TestExecTaxUnderLoad(t *testing.T) {
 			median:  79 * time.Millisecond,
 			loadErr: errors.New("sysctl: not found"),
 			want:    Red,
-			town:    VerdictUnknown,
 			value:   "79ms/exec",
 		},
 		"a host that reports no cores cannot corroborate": {
@@ -1016,13 +1023,44 @@ func TestHostFieldShowsTheReadingsBesideTheLoad(t *testing.T) {
 			}
 		})
 	}
+}
 
-	// A host that answered nothing is a question nobody could answer, not an
-	// idle machine.
-	f := healthy()
-	f.load = HostLoad{}
-	if got := field(t, Compute(context.Background(), inputs(f)), "host"); got.Tag != Unknown || got.Verdict != VerdictUnknown {
-		t.Errorf("host = %+v, want UNKNOWN", got)
+// A host that reported nothing has no field at all, and the town keeps the
+// verdict its other fields reached. An UNKNOWN outranks red, so a field for a
+// reading this town could not take would report the whole town unknown
+// whenever the probe's answer was the thing worth knowing (gt-auiji).
+func TestHostThatReportedNothingLeavesTheTownVerdict(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		load    HostLoad
+		loadErr error
+	}{
+		"the host answered none of its probes": {load: HostLoad{}},
+		"the host could not be read":           {loadErr: errors.New("sysctl: not found")},
+		"no load source is wired":              {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := healthy()
+			f.load, f.loadErr = tc.load, tc.loadErr
+			in := inputs(f)
+			if name == "no load source is wired" {
+				in.Load = nil
+			}
+			// The exec probe reddens so the town has a verdict the host
+			// field could overwrite.
+			f.execTax = 79 * time.Millisecond
+
+			r := Compute(context.Background(), in)
+			for _, got := range r.Fields {
+				if got.Key() == FieldHost {
+					t.Fatalf("a host with no reading still claimed a %s field: %+v", FieldHost, got)
+				}
+			}
+			if r.Verdict != Red {
+				t.Errorf("town verdict = %s, want the exec-tax field's red", r.Verdict)
+			}
+		})
 	}
 }
 

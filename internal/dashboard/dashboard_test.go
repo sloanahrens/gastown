@@ -400,9 +400,6 @@ func TestSlowPageIsDropped(t *testing.T) {
 	}
 }
 
-// The host sample's parsers live in internal/hoststat, which the tile, the
-// hub and the town health line all read (gt-auiji).
-
 func TestSlungRegexReadsBothDispatchLineShapes(t *testing.T) {
 	t.Parallel()
 	for text, want := range map[string]string{

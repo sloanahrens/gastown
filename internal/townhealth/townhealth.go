@@ -618,7 +618,10 @@ func Compute(ctx context.Context, in Inputs) Report {
 	h, hErr := hostReading(in)
 	r.Fields = append(r.Fields, dolt(ctx, in))
 	et, ms := execTax(ctx, in, h)
-	r.Fields = append(r.Fields, et, host(h, hErr))
+	r.Fields = append(r.Fields, et)
+	if hf, ok := host(h, hErr); ok {
+		r.Fields = append(r.Fields, hf)
+	}
 	r.ExecTaxMS = ms
 	hb, count := heartbeat(in)
 	r.Fields = append(r.Fields, hb)
@@ -758,19 +761,22 @@ func hostReading(in Inputs) (HostLoad, error) {
 	return in.Load.Load1()
 }
 
-// host renders the host's own busyness. It is green whenever it could read
-// the host, and its value leaves out a number the host did not report: a
-// probe too slow to answer under load must not read as a failure, or the
-// field would be worst exactly when the host is busiest (gt-auiji).
-func host(h HostLoad, err error) Field {
+// host renders the host's own busyness, and reports whether it had one to
+// show. The field is green whenever the host could be read: a busy host is
+// the exec-tax field's to report, and a probe too slow to answer under load
+// must not read as a failure, or this field would be worst exactly when the
+// host is busiest. A host that reported nothing has no field at all, because
+// an UNKNOWN outranks red in the town verdict and this reading is only ever
+// corroboration for the exec-tax probe (gt-auiji, gt-v50sn).
+func host(h HostLoad, err error) (Field, bool) {
 	if err != nil {
-		return unknown(FieldHost, "", "", err)
+		return Field{}, false
 	}
 	v := hostText(h)
 	if v == "" {
-		return unknown(FieldHost, "", "", errors.New("the host reported no reading"))
+		return Field{}, false
 	}
-	return Field{Name: FieldHost, Tag: Live, Verdict: Green, Value: v}
+	return Field{Name: FieldHost, Tag: Live, Verdict: Green, Value: v}, true
 }
 
 // hostText renders one host reading the way the field shows it: what a

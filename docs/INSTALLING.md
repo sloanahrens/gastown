@@ -191,7 +191,7 @@ threads in the load average, so a machine with a Dolt server behind it reads
 load 30 on 24 cores with half its CPU idle. The `host` field `gt status`
 prints, and the dashboard's **Host CPU** tile, both carry the CPU idle share
 and the Dolt server's own CPU in cores beside the load average; the tile is
-amber at or below 20% idle and red below 5%.
+amber below 20% idle and red below 5%.
 
 Signing runs unattended, so an install never waits at a prompt: the installer
 unlocks its own keychain and gives `codesign` thirty seconds with stdin at

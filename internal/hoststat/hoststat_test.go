@@ -1,6 +1,8 @@
 package hoststat
 
 import (
+	"context"
+	"errors"
 	"math"
 	"testing"
 )
@@ -64,20 +66,31 @@ func TestParseCPUIdle(t *testing.T) {
 	}
 }
 
+// The load averages come from the kernel's own counters rather than from top,
+// so that a top the timeout kills costs the idle reading and not the load
+// average beside it (gt-auiji). Both hosts' shapes are pinned.
 func TestParseLoadAvg(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
 		in   string
+		read func(string) (*float64, *float64, *float64)
 		want [3]*float64
 	}{
-		"macOS":                           {in: macTop, want: [3]*float64{ptr(35.83), ptr(22.93), ptr(20.23)}},
-		"Linux":                           {in: linuxTop, want: [3]*float64{ptr(35.83), ptr(22.93), ptr(20.23)}},
-		"no load line":                    {in: "CPU usage: 1.0% user\n"},
-		"a short load line is no reading": {in: "Load Avg: 1.5\n"},
+		"Linux": {in: "35.83 22.93 20.23 2/1234 56789\n", read: parseProcLoadavg,
+			want: [3]*float64{ptr(35.83), ptr(22.93), ptr(20.23)}},
+		"Linux with one field": {in: "35.83\n", read: parseProcLoadavg},
+		"Linux with a word":    {in: "busy busy busy\n", read: parseProcLoadavg},
+		"macOS": {in: "{ 35.83 22.93 20.23 }\n", read: parseSysctlLoadavg,
+			want: [3]*float64{ptr(35.83), ptr(22.93), ptr(20.23)}},
+		"macOS empty":      {in: "{ }\n", read: parseSysctlLoadavg},
+		"macOS short":      {in: "{ 35.83 }\n", read: parseSysctlLoadavg},
+		"macOS unparsable": {in: "{ 35.83 22.93 high }\n", read: parseSysctlLoadavg},
+		"macOS without braces": {in: "35.83 22.93 20.23\n", read: parseSysctlLoadavg,
+			want: [3]*float64{ptr(35.83), ptr(22.93), ptr(20.23)}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			l1, l5, l15 := parseLoadAvg(tc.in)
+			l1, l5, l15 := tc.read(tc.in)
 			got := [3]*float64{l1, l5, l15}
 			for i := range got {
 				switch {
@@ -103,15 +116,20 @@ func TestParseDoltCores(t *testing.T) {
 		want *float64
 	}{
 		"one server": {
-			in:   " 384.8 /opt/homebrew/bin/go\n  38.2 dolt\n  12.0 git\n",
+			in:   " 384.8 /opt/homebrew/bin/go\n  38.2 /opt/homebrew/bin/dolt sql-server --config /x/config.yaml\n  12.0 git\n",
 			want: ptr(0.382),
 		},
 		"a second server process is added": {
-			in:   "  38.2 dolt\n  21.8 /usr/local/bin/dolt\n",
+			in:   "  38.2 dolt sql-server\n  21.8 /usr/local/bin/dolt sql-server --config /x/config.yaml\n",
 			want: ptr(0.6),
 		},
-		"no dolt process": {in: "  38.2 go\n"},
-		"a name that only starts with dolt is another program": {in: "  38.2 doltserver\n"},
+		"no dolt process": {in: "  38.2 go build ./...\n"},
+		"a name that only starts with dolt is another program": {in: "  38.2 doltserver sql-server\n"},
+		"the client is not the server": {
+			in: "  38.2 dolt sql -q 'select 1'\n  21.0 dolt backup sync\n",
+		},
+		"a dolt with no subcommand is not the server":    {in: "  38.2 dolt\n"},
+		"another program's sql-server is not the server": {in: "  38.2 postgres sql-server\n"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -130,10 +148,67 @@ func TestParseDoltCores(t *testing.T) {
 
 func TestParseTop(t *testing.T) {
 	t.Parallel()
-	ps := " 95.0 /usr/local/go/bin/go\n 40.2 /usr/bin/go\n 30.0 /usr/bin/dolt\n  0.1 launchd\n"
+	ps := " 95.0 /usr/local/go/bin/go build ./...\n 40.2 /usr/bin/go test ./x\n 30.0 /usr/bin/dolt sql-server\n  0.1 launchd\n"
 	top := parseTop(ps, 5)
 	if len(top) != 2 || top[0].Name != "go" || top[0].CPU < 135 || top[1].Name != "dolt" {
 		t.Fatalf("parseTop = %+v", top)
+	}
+}
+
+// A sample is one reading per probe, and a probe that fails is only its own
+// reading: the load average comes from the kernel's counters rather than from
+// top, so a top the timeout kills costs the idle share and nothing else. The
+// whole sample is discarded where the probe that failed is the load, which is
+// the one reading with no substitute (gt-auiji).
+func TestSampleHoldsEachReadingAgainstItsOwnProbeFailing(t *testing.T) {
+	t.Parallel()
+
+	const ps = "  38.2 dolt sql-server --config /x/config.yaml\n"
+	errf := func() error { return errors.New("refused") }
+	load := func(context.Context) (*float64, *float64, *float64) {
+		l1, l5, l15 := 30.0, 21.0, 19.0
+		return &l1, &l5, &l15
+	}
+	cases := map[string]struct {
+		p        probes
+		wantIdle bool
+		wantDolt bool
+		wantLoad bool
+	}{
+		"every probe answers": {
+			p:        probes{load: load, top: func(context.Context) ([]byte, error) { return []byte(macTop), nil }, ps: func(context.Context) ([]byte, error) { return []byte(ps), nil }},
+			wantIdle: true, wantDolt: true, wantLoad: true,
+		},
+		"top fails": {
+			p:        probes{load: load, top: func(context.Context) ([]byte, error) { return nil, errf() }, ps: func(context.Context) ([]byte, error) { return []byte(ps), nil }},
+			wantDolt: true, wantLoad: true,
+		},
+		"ps fails": {
+			p:        probes{load: load, top: func(context.Context) ([]byte, error) { return []byte(macTop), nil }, ps: func(context.Context) ([]byte, error) { return nil, errf() }},
+			wantIdle: true, wantLoad: true,
+		},
+		"the load counters fail": {
+			p:        probes{load: func(context.Context) (*float64, *float64, *float64) { return nil, nil, nil }, top: func(context.Context) ([]byte, error) { return []byte(macTop), nil }, ps: func(context.Context) ([]byte, error) { return []byte(ps), nil }},
+			wantIdle: true, wantDolt: true,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := sample(context.Background(), tc.p)
+			if (r.CPUIdle != nil) != tc.wantIdle {
+				t.Errorf("CPUIdle = %v, want a reading: %v", r.CPUIdle, tc.wantIdle)
+			}
+			if (r.DoltCores != nil) != tc.wantDolt {
+				t.Errorf("DoltCores = %v, want a reading: %v", r.DoltCores, tc.wantDolt)
+			}
+			if (r.Load1 != nil) != tc.wantLoad {
+				t.Errorf("Load1 = %v, want a reading: %v", r.Load1, tc.wantLoad)
+			}
+			if r.Cores < 1 {
+				t.Errorf("Cores = %d, want the host's count", r.Cores)
+			}
+		})
 	}
 }
 
