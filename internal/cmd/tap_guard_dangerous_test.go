@@ -1385,6 +1385,7 @@ func TestDangerousGuard_Integration(t *testing.T) {
 		{"git clean -f", "git clean -f", true},
 		{"git clean -fd", "git clean -fd", true},
 		{"git clean --force", "git clean --force", true},
+		{"go clean -modcache behind go's -C dir flag", "go -C /tmp clean -modcache", true},
 		{"drop table", "DROP TABLE users", true},
 
 		// Blocked — the argv after gt slot run -- is exec'd, not text (gt-hqenc)
@@ -1687,6 +1688,11 @@ func TestMatchesGoCleanSharedCache(t *testing.T) {
 		{"flag with =true value", "go clean -modcache=true", true},
 		{"path-qualified go", "/usr/local/go/bin/go clean -modcache", true},
 		{"path-qualified go, double-dash with value", "/usr/local/go/bin/go clean --testcache=true", true},
+		{"go's global -C dir flag before the subcommand", "go -C /tmp clean -modcache", true},
+		{"glued -C=dir spelling", "go -C=/tmp clean -cache", true},
+		{"repeated -C dir flags", "go -C /tmp -C /var/tmp clean -testcache", true},
+		{"-C dir flag and a shared flag with a value", "go -C /tmp clean --fuzzcache=true", true},
+		{"-C dir flag after another command on the line", "cd x && go -C /tmp clean -modcache", true},
 
 		// Should allow.
 		{"safe flag on go clean, shared flag on a later unrelated command", "go clean -i; ls -la -cache", false},
@@ -1698,6 +1704,8 @@ func TestMatchesGoCleanSharedCache(t *testing.T) {
 		{"go clean -x", "go clean -x", false},
 		{"go clean -r", "go clean -r", false},
 		{"go clean of a package", "go clean ./...", false},
+		{"go clean of a package behind -C dir", "go -C /tmp clean ./...", false},
+		{"-C dir flag on a command that is not go clean", "ls -C /tmp clean -cache", false},
 		{"no go clean at all", "echo hello", false},
 		{"flag mentioned in quoted prose", `gt mail send x -s "note" -m "never go clean -modcache"`, false},
 	}
