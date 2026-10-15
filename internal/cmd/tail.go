@@ -460,8 +460,9 @@ func allTailKinds() map[string]bool {
 	return m
 }
 
-// openTailJournal opens a store's journal through bd, pinned to that store's
-// beads directory.
+// openTailJournal opens a store's journal: the journal read over a connection
+// of gastown's own, with bd answering the polls that connection cannot
+// (gt-jw9sr), both pinned to that store's beads directory.
 func openTailJournal(townRoot, rig string) (tailJournal, error) {
 	dir := doltserver.FindRigBeadsDir(townRoot, rig)
 	if dir == "" {
@@ -470,7 +471,8 @@ func openTailJournal(townRoot, rig string) (tailJournal, error) {
 	if _, err := os.Stat(dir); err != nil {
 		return nil, fmt.Errorf("beads directory %s: %w", dir, err)
 	}
-	return &tailBDJournal{Beads: beads.NewWithBeadsDir(townRoot, dir), dir: dir, run: deps.NewBDProcessRunner(filepath.Dir(dir))}, nil
+	bd := &tailBDJournal{Beads: beads.NewWithBeadsDir(townRoot, dir), dir: dir, run: deps.NewBDProcessRunner(filepath.Dir(dir))}
+	return newTailJournalStore(bd, func() (tailJournalRead, error) { return openTailJournalSQL(townRoot, dir) }), nil
 }
 
 // buildTailSources returns the selected sources in tie order: hq, then each

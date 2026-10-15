@@ -17,7 +17,7 @@ import (
 
 // bdTableRead matches SQL text that reads a table bd owns.
 var bdTableRead = regexp.MustCompile("(?i)\\b(FROM|JOIN)\\s+(`?[%\\w]+`?\\.)?`?" +
-	`(issues|wisps|labels|wisp_labels|comments|wisp_comments|events|wisp_events|dependencies|wisp_dependencies|config|schema_migrations)` +
+	`(issues|wisps|labels|wisp_labels|comments|wisp_comments|events|wisp_events|dependencies|wisp_dependencies|config|schema_migrations|bd_events_journal|bd_events_seq)` +
 	"`?(\\s|$|\\)|,)")
 
 // guardExempt are the trees that open their own connections on purpose:
@@ -214,6 +214,8 @@ func TestBdTableReadPattern(t *testing.T) {
 	for _, q := range []string{
 		"SELECT COUNT(*) FROM issues",
 		"SELECT id FROM wisps w LEFT JOIN wisp_labels l ON w.id = l.issue_id",
+		"SELECT seq FROM bd_events_journal WHERE seq > 5",
+		"SELECT next_seq FROM bd_events_seq WHERE id = 0",
 		"SELECT created_at FROM `%s`.issues WHERE id = ?",
 		"SELECT issue_id FROM dependencies WHERE issue_id = ?",
 		"(SELECT issue_id FROM labels)",

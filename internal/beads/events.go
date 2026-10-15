@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 )
 
 // EventRecord is one row of bd's events journal (bd events tail): a
@@ -117,6 +118,98 @@ func (r journalRecord) record() EventRecord {
 		rec.Status = issue.Status
 	}
 	return rec
+}
+
+// EventJournalRow is one row of bd's journal table (bd_events_journal) as a
+// read of the table returns it: the columns EventsTail gets from bd, which a
+// persistent connection reads directly (gt-jw9sr). Issue is the issue's state
+// after the mutation as bd stored it, raw and unparsed; "" when the row
+// carries none (a delete).
+type EventJournalRow struct {
+	Seq     int64
+	TS      string
+	Op      string
+	IssueID string
+	Actor   string
+	Issue   string
+}
+
+// EventsPageFromJournalRows projects a read of the journal table onto
+// EventsPage: the same records, the same seq cursor and the same pruned-past
+// verdict as EventsTail's bd path, so a viewer may read either and show one
+// stream (gt-jw9sr). rows are the page the caller fetched — in seq order, and
+// one row longer than limit when the caller asked for a limit, which is what
+// lets a full page say that more follow. head is bd_events_seq's counter, the
+// highest sequence ever assigned.
+func EventsPageFromJournalRows(rows []EventJournalRow, since int64, limit int, head int64) (*EventsPage, error) {
+	if head <= since {
+		// The journal has not moved, so the cursor stands and no row is read:
+		// this is what a poll of a store with no new mutations costs.
+		return &EventsPage{NextSince: since}, nil
+	}
+	if err := journalRowsTruncation(rows, since, head); err != nil {
+		return nil, err
+	}
+	page := &EventsPage{NextSince: since}
+	for _, r := range rows {
+		page.Records = append(page.Records, r.record())
+	}
+	if limit > 0 && len(page.Records) > limit {
+		page.Records, page.More = page.Records[:limit], true
+	}
+	if n := len(page.Records); n > 0 {
+		page.NextSince = page.Records[n-1].Seq
+	}
+	return page, nil
+}
+
+// journalRowsTruncation is EventsTail's pruned-past verdict reached from the
+// rows instead of from bd, with the three shapes and the fields bd's own
+// ComputeEventsTruncation answers with (internal/storage/issueops). Seqs are
+// gapless by construction and a prune only ever deletes a prefix, so a gap is
+// a prune the reader must be told about rather than a page to skip.
+func journalRowsTruncation(rows []EventJournalRow, since, head int64) error {
+	if len(rows) == 0 {
+		// Nothing is retained, and the caller is provably behind it.
+		return &EventsTruncatedError{Since: since, Floor: head + 1, Head: head}
+	}
+	if rows[0].Seq != since+1 {
+		return &EventsTruncatedError{Since: since, Floor: rows[0].Seq, Head: head}
+	}
+	for i := 1; i < len(rows); i++ {
+		if rows[i].Seq != rows[i-1].Seq+1 {
+			return &EventsTruncatedError{Since: rows[i-1].Seq, Floor: rows[i].Seq, Head: head}
+		}
+	}
+	return nil
+}
+
+// record projects one journal-table row onto the record both read paths
+// publish, so a row bd hands back and a row a connection reads say the same
+// thing.
+func (r EventJournalRow) record() EventRecord {
+	rec := journalRecord{Seq: r.Seq, TS: normalizeJournalTS(r.TS), Op: r.Op, IssueID: r.IssueID, Actor: r.Actor}
+	if r.Issue != "" {
+		rec.Issue = json.RawMessage(r.Issue)
+	}
+	return rec.record()
+}
+
+// normalizeJournalTS emits the RFC3339Nano UTC timestamp bd publishes whatever
+// shape the driver stringified the DATETIME as, so the two read paths agree on
+// the record and not merely on the instant.
+func normalizeJournalTS(raw string) string {
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05.999999999Z07:00",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02 15:04:05",
+	} {
+		if ts, err := time.Parse(layout, raw); err == nil {
+			return ts.UTC().Format(time.RFC3339Nano)
+		}
+	}
+	return raw
 }
 
 // parseLegacyEventLines reads bd events tail's pre-machine-mode output: one

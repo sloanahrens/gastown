@@ -86,6 +86,8 @@ func inline(text string, args []any) (string, error) {
 			b.WriteString(quote(v))
 		case int:
 			b.WriteString(strconv.Itoa(v))
+		case int64:
+			b.WriteString(strconv.FormatInt(v, 10))
 		default:
 			return "", fmt.Errorf("beadsql: cannot inline %T", v)
 		}
@@ -439,6 +441,30 @@ func mailLists(identities []string) (ids, ccs string) {
 		cc[i] = "cc:" + id
 	}
 	return quoteList(identities, ","), quoteList(cc, ",")
+}
+
+// JournalHead reads the events journal's sequence counter: the highest seq
+// ever assigned, which stays the journal's head even after a prune deleted
+// every row. It is what tells a stuck cursor from a caught-up one, and a
+// viewer polls it first so a store whose journal has not moved pays for one
+// indexed row and no scan (gt-jw9sr).
+func JournalHead() Query { return declared("SELECT next_seq FROM bd_events_seq WHERE id = 0") }
+
+// JournalTail reads journal rows with seq above since, in seq order, at most
+// limit of them (0 = all). The columns are the ones a viewer publishes, in
+// bd's own read of the table: CAST(ts AS CHAR) normalizes the DATETIME to a
+// string, and issue_json is the issue's state after the mutation — null on a
+// delete.
+//
+// Read limit+1 rows to learn whether more follow: a page that comes back full
+// is not a page that ended.
+func JournalTail(since int64, limit int) Query {
+	text := "SELECT seq, CAST(ts AS CHAR), op, issue_id, actor, issue_json" +
+		" FROM bd_events_journal WHERE seq > ? ORDER BY seq ASC"
+	if limit > 0 {
+		text += " LIMIT " + strconv.Itoa(limit)
+	}
+	return Query{text: text, args: []any{since}}
 }
 
 // MoleculesAttachedTo reads the open molecule wisps that block, or are
