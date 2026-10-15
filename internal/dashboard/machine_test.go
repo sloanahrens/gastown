@@ -53,6 +53,70 @@ func TestSampleMachineCarriesEveryReadingTheHostReported(t *testing.T) {
 	if len(m.Top) != 1 || m.Top[0].Name != "go" {
 		t.Errorf("Top = %+v, want the one process the host reported", m.Top)
 	}
+	if m.HostState != "" {
+		t.Errorf("HostState = %q, want no colour on a host with %v%% idle", m.HostState, idle)
+	}
+}
+
+// The tile's colour is decided here, from the host's own idle share, so that
+// the page draws a verdict instead of comparing thresholds itself: the tile
+// is amber below hoststat.CPUIdleScarce idle and red below
+// hoststat.CPUIdleCritical, and every reading here is run against the rule,
+// the two failing ones included (gt-auiji).
+func TestHostStateColoursTheHostByItsIdleShare(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		idle *float64
+		want string
+	}{
+		{"a host that reported no idle reading", nil, ""},
+		{"an idle host", f64(94), ""},
+		{"a host with CPU to spare", f64(hoststat.CPUIdleScarce), ""},
+		{"a host just below the share it needs", f64(hoststat.CPUIdleScarce - 0.1), "warn"},
+		{"a host at the share it is nearly out of", f64(hoststat.CPUIdleCritical), "warn"},
+		{"a host just below it", f64(hoststat.CPUIdleCritical - 0.1), "bad"},
+		{"a host with no CPU idle at all", f64(0), "bad"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := hostState(tc.idle); got != tc.want {
+				t.Errorf("hostState(%v) = %q, want %q", tc.idle, got, tc.want)
+			}
+		})
+	}
+}
+
+// The sample carries the verdict the page paints: a host read at half idle is
+// an uncoloured tile, and one read at 3% idle is a red tile — the reading a
+// load-led tile would have called calm while the machine was out of CPU
+// (gt-auiji).
+func TestSampleMachineCarriesTheHostTilesVerdict(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		idle float64
+		want string
+	}{
+		{"half the host idle", 47.2, ""},
+		{"3% of the host idle", 3, "bad"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			l1, idle := 30.5, tc.idle
+			m, err := sampleMachine(func(context.Context) hoststat.Reading {
+				return hoststat.Reading{Load1: &l1, CPUIdle: &idle, Cores: 24}
+			})
+			if err != nil {
+				t.Fatalf("sampleMachine: %v", err)
+			}
+			if m.HostState != tc.want {
+				t.Errorf("HostState = %q, want %q", m.HostState, tc.want)
+			}
+		})
+	}
 }
 
 // The load average is the one reading that cannot be absent beside a live
@@ -73,3 +137,5 @@ func TestSampleMachineHoldsAHostThatReportedOnlyTheLoad(t *testing.T) {
 		t.Errorf("machine = %+v, want the load with no idle or Dolt reading", m)
 	}
 }
+
+func f64(v float64) *float64 { return &v }

@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/hoststat"
 )
 
 // Tag says how a field was observed.
@@ -684,15 +685,6 @@ func dolt(ctx context.Context, in Inputs) Field {
 	return f
 }
 
-// ExecTaxCPUIdleLimit is the share of the host's cores that must still be
-// idle for a slow exec probe to read as a taxed program tree rather than a
-// saturated host (gt-auiji). Below it the probe is timing a run queue, not
-// the macOS scan, so the reading is degraded rather than red. The load
-// average is not the test it was: macOS counts running threads into it, so a
-// lost Developer Tools grant on a 24-core host with a Dolt server reads as
-// load 30 while half the machine sits idle.
-const ExecTaxCPUIdleLimit = 20.0
-
 // ExecTaxLoadPerCoreLimit is the one-minute load average per logical core
 // above which a slow exec probe reads as a saturated host, standing in when
 // the host reported no CPU idle reading (gt-v50sn). The limit sits above one,
@@ -730,12 +722,14 @@ func execTax(ctx context.Context, in Inputs, h HostLoad) (Field, *float64) {
 }
 
 // overloadedHost reports whether the host has too little CPU free to explain
-// a red exec-tax reading. CPUIdle decides it where the host reported one, and
-// the load average per core stands in where it did not; a town with no load
-// source, or a host that reported neither, keeps the probe's verdict.
+// a red exec-tax reading. CPUIdle decides it where the host reported one —
+// below hoststat.CPUIdleScarce, the share the dashboard's host tile turns
+// amber at (gt-auiji) — and the load average per core stands in where it did
+// not; a town with no load source, or a host that reported neither, keeps the
+// probe's verdict.
 func overloadedHost(h HostLoad) bool {
 	if h.CPUIdle != nil {
-		return *h.CPUIdle < ExecTaxCPUIdleLimit
+		return *h.CPUIdle < hoststat.CPUIdleScarce
 	}
 	if h.Cores < 1 || h.Average <= 0 {
 		return false

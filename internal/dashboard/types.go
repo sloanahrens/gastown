@@ -203,9 +203,14 @@ type Machine struct {
 	DoltCores *float64 `json:"dolt_cores,omitempty"`
 	// Cores is the host's logical CPU count, the number the load average is
 	// read against. The browser's own count is another machine's.
-	Cores int       `json:"cores,omitempty"`
-	Top   []Proc    `json:"top"`
-	At    time.Time `json:"at"`
+	Cores int `json:"cores,omitempty"`
+	// HostState is the host tile's color, decided here from CPUIdle so the
+	// page draws a verdict rather than comparing thresholds of its own.
+	// Absent for a host with CPU to spare and for one that reported no idle
+	// reading, which the tile shows as a dash.
+	HostState string    `json:"host_state,omitempty"`
+	Top       []Proc    `json:"top"`
+	At        time.Time `json:"at"`
 }
 
 // LoadPoint is one load sample for the sparkline.

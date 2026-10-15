@@ -29,6 +29,19 @@ const loadTimeout = 2 * time.Second
 // topProcs is how many of the busiest processes a sample keeps.
 const topProcs = 6
 
+// CPUIdleScarce and CPUIdleCritical are the CPU idle shares below which a
+// host is short of CPU and nearly out of it. The idle share states that, not
+// the load average: macOS counts running threads into the load average, so a
+// 24-core host with half its CPU idle reads load 30 (gt-auiji). They live
+// here because the two readers of the idle share have to turn at the same
+// number — a slow exec probe on a host below CPUIdleScarce is timing a run
+// queue rather than the macOS scan (gt-v50sn), which is the point the
+// dashboard's host tile turns amber at.
+const (
+	CPUIdleScarce   = 20.0
+	CPUIdleCritical = 5.0
+)
+
 // Proc is one process's CPU in percent of one core.
 type Proc struct {
 	Name string

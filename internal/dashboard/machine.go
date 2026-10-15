@@ -24,7 +24,7 @@ func SampleMachine() (Machine, error) {
 // the hub ages the tile rather than reading it as a calm machine (gt-q6h8e).
 func sampleMachine(sample func(context.Context) hoststat.Reading) (Machine, error) {
 	r := sample(context.Background())
-	m := Machine{At: time.Now(), Cores: r.Cores, CPUIdle: r.CPUIdle, DoltCores: r.DoltCores}
+	m := Machine{At: time.Now(), Cores: r.Cores, CPUIdle: r.CPUIdle, DoltCores: r.DoltCores, HostState: hostState(r.CPUIdle)}
 	for _, p := range r.Top {
 		m.Top = append(m.Top, Proc{Name: p.Name, CPU: p.CPU})
 	}
@@ -39,4 +39,23 @@ func sampleMachine(sample func(context.Context) hoststat.Reading) (Machine, erro
 		m.Load15 = *r.Load15
 	}
 	return m, nil
+}
+
+// hostState is the host tile's verdict on the reading of record, the CPU
+// idle share: "bad" below hoststat.CPUIdleCritical idle, "warn" below
+// hoststat.CPUIdleScarce, "" above them. The page draws that verdict rather
+// than comparing thresholds of its own, so what the tile calls a strained
+// host is the same reading a slow exec probe calls a saturated one
+// (gt-auiji, gt-v50sn). A host that reported no idle reading gets no verdict:
+// the tile shows a dash, never a calm machine.
+func hostState(idle *float64) string {
+	switch {
+	case idle == nil:
+		return ""
+	case *idle < hoststat.CPUIdleCritical:
+		return "bad"
+	case *idle < hoststat.CPUIdleScarce:
+		return "warn"
+	}
+	return ""
 }
