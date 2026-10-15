@@ -347,9 +347,17 @@ func TestAttentionFollowSinceReplaysRecentHistoryOnly(t *testing.T) {
 }
 
 func TestAttentionFollowFlagsNeedFollow(t *testing.T) {
-	attentionWakeOnly = true
-	defer func() { attentionWakeOnly = false }()
-	if err := runAttention(attentionCmd, nil); err == nil || !strings.Contains(err.Error(), "--follow") {
+	t.Parallel()
+	if err := checkFollowFlags(false, true, 0); err == nil || !strings.Contains(err.Error(), "--follow") {
 		t.Errorf("--wake-only without --follow = %v, want an error naming --follow", err)
+	}
+	if err := checkFollowFlags(false, false, time.Hour); err == nil {
+		t.Error("--since without --follow = nil, want an error")
+	}
+	if err := checkFollowFlags(true, true, time.Hour); err != nil {
+		t.Errorf("--follow with both = %v, want nil", err)
+	}
+	if err := checkFollowFlags(false, false, 0); err != nil {
+		t.Errorf("no follow flags = %v, want nil", err)
 	}
 }

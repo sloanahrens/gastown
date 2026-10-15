@@ -133,8 +133,8 @@ func buildAttention(townRoot string, now time.Time) (attentionView, error) {
 
 func runAttention(cmd *cobra.Command, _ []string) error {
 	now := time.Now()
-	if !attentionFollow && (attentionWakeOnly || attentionSince > 0) {
-		return fmt.Errorf("--wake-only and --since need --follow")
+	if err := checkFollowFlags(attentionFollow, attentionWakeOnly, attentionSince); err != nil {
+		return err
 	}
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
@@ -255,6 +255,15 @@ func beadOrSHA(it attention.Item) string {
 		return it.Bead
 	}
 	return it.SHA
+}
+
+// checkFollowFlags refuses the follow-only flags without --follow, which
+// would otherwise be silently ignored.
+func checkFollowFlags(follow, wakeOnly bool, since time.Duration) error {
+	if !follow && (wakeOnly || since > 0) {
+		return fmt.Errorf("--wake-only and --since need --follow")
+	}
+	return nil
 }
 
 // followOptions are the filters and format of gt attention --follow.
