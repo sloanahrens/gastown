@@ -1209,6 +1209,40 @@ func TestHeredocBodyStaysOpaque(t *testing.T) {
 	}
 }
 
+// TestEvaluateDangerousCommandUnquotedHeredocSubstitution pins gt-x50o8: the
+// shell expands $(...) and backticks in an unquoted heredoc body, so a
+// dangerous command written there runs even though the body is otherwise data.
+// A quoted tag keeps the body literal, so the same text stays allowed.
+func TestEvaluateDangerousCommandUnquotedHeredocSubstitution(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		command     string
+		wantBlocked bool
+	}{
+		{"unquoted dollar-paren", "cat > /tmp/x <<EOF\n$(git reset --hard origin/main)\nEOF", true},
+		{"unquoted backtick", "cat > /tmp/x <<EOF\n`git reset --hard origin/main`\nEOF", true},
+		{"unquoted strip-tabs form", "cat > /tmp/x <<-EOF\n\t$(git reset --hard origin/main)\n\tEOF", true},
+		{"unquoted substitution amid prose", "cat > /tmp/x <<EOF\nreset now: $(git reset --hard) done\nEOF", true},
+		{"unquoted harmless substitution", "cat > /tmp/x <<EOF\nbranch: $(git rev-parse --abbrev-ref HEAD)\nEOF", false},
+		{"single-quoted tag is literal", "cat > /tmp/x <<'EOF'\n$(git reset --hard origin/main)\nEOF", false},
+		{"double-quoted tag is literal", "cat > /tmp/x <<\"EOF\"\n$(git reset --hard origin/main)\nEOF", false},
+		{"single-quoted tag backtick is literal", "cat > /tmp/x <<'EOF'\n`git reset --hard origin/main`\nEOF", false},
+		{"double-quoted tag backtick is literal", "cat > /tmp/x <<\"EOF\"\n`git reset --hard origin/main`\nEOF", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
+			if tt.wantBlocked && reason == "" {
+				t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked — the shell runs the substitution", tt.command)
+			}
+			if !tt.wantBlocked && reason != "" {
+				t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed", tt.command, reason)
+			}
+		})
+	}
+}
+
 // TestHeredocDoesNotHideRealCommand ensures stripHeredocBodies only
 // removes the body span and leaves surrounding shell text — including a
 // second, genuinely dangerous command after the terminator — intact.

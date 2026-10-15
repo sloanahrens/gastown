@@ -182,6 +182,10 @@ func evaluateDangerousCommand(command string, depth int, sess guardSession) (rea
 	// removes them from the text scanned below, and they come back in as
 	// nested commands of their own (gt-9g0y).
 	shellFedBodies := shellFedHeredocBodies(command)
+	// An unquoted heredoc body is data to its reader but not to the shell,
+	// which expands $(...) and backticks in it while reading it. Those
+	// substitutions run, so they are judged as nested commands (gt-x50o8).
+	bodySubstitutions := heredocBodySubstitutions(command)
 	// Kept for the checks that need the pre-strip text: the done/slot loop
 	// rule reads heredoc bodies the command writes to a FILE, which the
 	// stripping below is exactly what removes from view (gt-7dxw).
@@ -254,6 +258,7 @@ func evaluateDangerousCommand(command string, depth int, sess guardSession) (rea
 	nested := nestedCommands(tokens, lowerTokens)
 	nested = append(nested, commandSubstitutions(command)...)
 	nested = append(nested, shellFedBodies...)
+	nested = append(nested, bodySubstitutions...)
 	for _, n := range nested {
 		if r, alt := evaluateDangerousCommand(n, depth+1, sess); r != "" {
 			return r, alt
@@ -340,13 +345,16 @@ var heredocStartPattern = regexp.MustCompile(`<<(-?)[ \t]*(['"]?)([A-Za-z_][A-Za
 // that line starts at, the body text, and the body's byte offsets. bodyStart
 // is -1 when the operator line is the command's last line, so no body follows.
 // readerStart lets a caller reach the text the shell had already run by the
-// time it reads the body, without re-finding the operator (gt-v02wh).
+// time it reads the body, without re-finding the operator (gt-v02wh). quoted
+// is true when the tag is quoted: the shell leaves such a body literal, while
+// an unquoted body gets its $(...) and backticks expanded (gt-x50o8).
 type heredocSpan struct {
 	reader      string
 	readerStart int
 	body        string
 	bodyStart   int
 	bodyEnd     int
+	quoted      bool
 }
 
 // scanHeredocs returns every heredoc in command, in source order. A "<<" that
@@ -365,6 +373,7 @@ func scanHeredocs(command string) []heredocSpan {
 			continue // inside a previously accepted heredoc body
 		}
 		allowIndent := command[m[2]:m[3]] == "-"
+		quoted := m[5] > m[4]
 		tag := command[m[6]:m[7]]
 		reader, readerStart := heredocReaderLine(command, start, end)
 
@@ -372,7 +381,7 @@ func scanHeredocs(command string) []heredocSpan {
 		if nl < 0 {
 			// No body follows on a later line (e.g. the heredoc marker is
 			// the last thing on the line with nothing after it).
-			spans = append(spans, heredocSpan{reader: reader, readerStart: readerStart, bodyStart: -1, bodyEnd: end})
+			spans = append(spans, heredocSpan{reader: reader, readerStart: readerStart, bodyStart: -1, bodyEnd: end, quoted: quoted})
 			stripped = end
 			continue
 		}
@@ -384,6 +393,7 @@ func scanHeredocs(command string) []heredocSpan {
 			body:        command[bodyStart:bodyEnd],
 			bodyStart:   bodyStart,
 			bodyEnd:     bodyEnd,
+			quoted:      quoted,
 		})
 		stripped = bodyEnd
 	}
@@ -479,6 +489,22 @@ func shellFedHeredocSpans(command string) []heredocSpan {
 		}
 	}
 	return spans
+}
+
+// heredocBodySubstitutions returns the command substitutions written in the
+// bodies of unquoted heredocs. stripHeredocBodies drops those bodies before
+// commandSubstitutions runs, yet the shell expands "$(git reset --hard)" in
+// "cat > f <<EOF" while reading the body. A quoted tag keeps its body
+// literal, so its substitutions stay inert (gt-x50o8).
+func heredocBodySubstitutions(command string) []string {
+	var subs []string
+	for _, span := range scanHeredocs(command) {
+		if span.bodyStart < 0 || span.quoted {
+			continue
+		}
+		subs = append(subs, commandSubstitutions(span.body)...)
+	}
+	return subs
 }
 
 // heredocBodyDir returns the directory a shell-fed heredoc's body runs in:
