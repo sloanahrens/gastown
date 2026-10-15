@@ -225,6 +225,13 @@ func runDoneStateUpdate(t *testing.T, db beads.Client) *doneRecorder {
 // childrenErr when set.
 func runDoneStateUpdateWith(t *testing.T, db beads.Client, childrenErr error) *doneRecorder {
 	t.Helper()
+	return runDoneStateUpdateForExit(t, db, childrenErr, ExitCompleted)
+}
+
+// runDoneStateUpdateForExit is runDoneStateUpdateWith for an explicit gt done
+// exit type.
+func runDoneStateUpdateForExit(t *testing.T, db beads.Client, childrenErr error, exitType string) *doneRecorder {
+	t.Helper()
 	townRoot := t.TempDir()
 	for _, dir := range []string{"mayor", filepath.Join(".beads", "locks"), "gastown"} {
 		if err := os.MkdirAll(filepath.Join(townRoot, dir), 0755); err != nil {
@@ -245,7 +252,7 @@ func runDoneStateUpdateWith(t *testing.T, db beads.Client, childrenErr error) *d
 			return "", errors.New("resolving HEAD: not a git repository")
 		},
 	}
-	_, _ = updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, ExitCompleted, "gt-base-123", beads.AgentFieldUpdates{})
+	_, _ = updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, exitType, "gt-base-123", beads.AgentFieldUpdates{})
 	return rec
 }
 

@@ -248,11 +248,34 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 				style.PrintWarning("could not read hooked bead %s to record the escalation: %v", hookedBeadID, hookedErr)
 			}
 		case beads.IssueStatus(hookedBead.Status).IsTerminal():
-			closeMoleculeOfClosedBead(hookBd, hookedBeadID, hookedBead)
+			closeMoleculeOfClosedBead(hookBd, hookedBeadID, hookedBead, "done")
 		case beads.HasLabel(hookedBead, "gt:rig"):
 			fmt.Fprintf(os.Stderr, "Note: hooked bead %s is a rig identity bead (gt:rig) — not recording the escalation on it\n", hookedBeadID)
 		default:
 			done.NotifyDoneEscalated(hookBd, hookedBeadID)
+		}
+	}
+
+	// A DEFERRED exit keeps the bead for the next session — but only a bead
+	// that is still open has work to resume. A report-only job closes its own
+	// bead and then exits DEFERRED (mol-deep-review's submit step, and
+	// mol-polecat-work's zero-commit route: `gt bead close --reason="no-changes:
+	// ..."` followed by `gt done --status DEFERRED`), and the block below is
+	// skipped for DEFERRED, so the molecule and its step wisps stayed open for
+	// good — one leaked root per scheduled run, hourly, until the store held 35
+	// (gt-x1d8s). The terminal-bead check is gt-mddzp's, for the same reason.
+	// A workflow step's DEFERRED exit is a completion, not a pause, so the block
+	// below still owns that case.
+	if hookedBeadID != "" && exitType == done.ExitDeferred && !isWorkflowStep {
+		hookBd, _, _ := done.RoutedIssueBeadsIn(beadsPath, hookedBeadID, e.sourceOpener())
+		hookedBead, hookedErr := hookBd.Show(hookedBeadID)
+		switch {
+		case hookedErr != nil:
+			if !errors.Is(hookedErr, beads.ErrNotFound) {
+				style.PrintWarning("could not read hooked bead %s to close its molecule: %v", hookedBeadID, hookedErr)
+			}
+		case beads.IssueStatus(hookedBead.Status).IsTerminal():
+			closeMoleculeOfClosedBead(hookBd, hookedBeadID, hookedBead, "done")
 		}
 	}
 
@@ -285,7 +308,7 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 			// attached molecule, is skipped for a terminal bead and no landing
 			// follows, so the molecule and its step wisps would stay open for
 			// good (gt-mddzp).
-			closeMoleculeOfClosedBead(hookBd, hookedBeadID, hookedBead)
+			closeMoleculeOfClosedBead(hookBd, hookedBeadID, hookedBead, "done")
 			goto doneStateUpdate
 		}
 		if hookedErr == nil && !beads.IssueStatus(hookedBead.Status).IsTerminal() {
@@ -432,36 +455,6 @@ doneStateUpdate:
 	// Clear legacy checkpoints on clean exit — gt done completed successfully.
 	clearDoneCheckpoints(agentBd, agentBeadID)
 	return consumed, nil
-}
-
-// closeMoleculeOfClosedBead ends the workflow an already-closed work bead
-// carries, steps then root and unforced, so a bead closed before gt done ran
-// (the nothing-to-implement route) does not leave its molecule and step wisps
-// open for good (gt-mddzp). A root bd still refuses is reported, not forced:
-// the bead is already closed and no landing record is at stake.
-func closeMoleculeOfClosedBead(b beads.Client, beadID string, bead *beads.Issue) {
-	attachment := beads.ParseAttachmentFields(bead)
-	if attachment == nil || attachment.AttachedMolecule == "" {
-		return
-	}
-	molID := attachment.AttachedMolecule
-	// A molecule another path already ended (the landing, a burn) closes
-	// nothing here, which also keeps a second gt done on the same bead quiet.
-	if root, err := b.Show(molID); err != nil || root == nil || beads.IssueStatus(root.Status).IsTerminal() {
-		return
-	}
-	n, err := closeStepsThenRoot(b, molID, func() error {
-		if err := b.CloseWithReason("done", molID); err != nil && !errors.Is(err, beads.ErrNotFound) {
-			return err
-		}
-		return nil
-	})
-	if n > 0 {
-		fmt.Fprintf(os.Stderr, "Closed %d molecule step(s) for %s\n", n, molID)
-	}
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: couldn't close attached molecule %s of already-closed bead %s: %v\n", molID, beadID, err)
-	}
 }
 
 // defaultClosedWispDeleteAge is the grace period before a closed ephemeral
