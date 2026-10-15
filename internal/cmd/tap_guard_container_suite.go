@@ -33,7 +33,9 @@ one starving the refinery for 29 minutes).
 This guard blocks, when running as a polecat or refinery:
   - go test <pkg...>   where <pkg...> intersects the testcontainers-backed
                         package list (containerSuitePackages) or is a
-                        whole-repo wildcard (./..., ...)
+                        whole-repo wildcard (./..., ...). Go's global -C dir
+                        flag between the binary and "test" ("go -C <dir>
+                        test ...") does not hide the invocation (gt-saorq)
   - go test .          (or a bare "go test") when the directory it runs in
                         is one of those packages — the cwd is judged like
                         any other target, not exempted
@@ -291,7 +293,10 @@ func commandSetsDockerTests(tokens []string, value string) bool {
 // directory the segment runs in, and cwdKnown whether the walk could place it;
 // an unplaced one is refused where the segment's target would be read from it
 // (cwdTargetsUnplacedDir), the reading an unplaceable make -C already gets
-// (gt-ofj05).
+// (gt-ofj05). The go case is located by findGoSubcommand rather than by go's
+// adjacency to "test", so Go's global -C dir flag between the two ("go -C
+// /tmp test ./internal/cmd") does not hide the invocation (gt-saorq); any
+// other flag between them still ends the walk, so it reads as no invocation.
 func evaluateContainerSuiteSegment(tokens []string, dockerOn bool, cwd string, cwdKnown bool) (reason string, matched []string) {
 	if len(tokens) == 0 {
 		return "", nil
@@ -305,8 +310,8 @@ func evaluateContainerSuiteSegment(tokens []string, dockerOn bool, cwd string, c
 		return "", nil // already wrapped by gt slot run
 	}
 
-	if i := findTestInvocation(lower, "go"); i >= 0 && dockerOn {
-		pkgArgs := goTestPackageArgs(tokens[i+2:])
+	if i := findGoSubcommand(lower, "test"); i >= 0 && dockerOn {
+		pkgArgs := goTestPackageArgs(tokens[i+1:])
 		if cwdTargetsUnplacedDir(pkgArgs, cwdKnown) {
 			return "bare 'go test' names a directory the guard cannot place", nil
 		}

@@ -34,6 +34,20 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 		{"switch via env(1)", "env GT_TEST_DOCKER=1 go test ./internal/beads/...", true},
 		{"switch quoted", `GT_TEST_DOCKER="1" go test ./internal/beads/...`, true},
 
+		// Blocked: go's global -C dir flag may sit between the binary and the
+		// subcommand, in either spelling, and the invocation must be read
+		// through it — the same walk gt-t7p80/gt-soohm added for go clean
+		// (gt-saorq).
+		{"go -C dir flag before the subcommand", "GT_TEST_DOCKER=1 go -C /tmp test ./internal/beads/...", true},
+		{"go -C=dir flag before the subcommand", "GT_TEST_DOCKER=1 go -C=/tmp test ./internal/beads/...", true},
+		{"go -C dir flag, repeated", "GT_TEST_DOCKER=1 go -C /a -C /b test ./internal/beads/...", true},
+		{"go -C dir flag with a whole-repo target", "GT_TEST_DOCKER=1 go -C /tmp test ./...", true},
+		{"go -C dir flag with a module-prefixed container package", "GT_TEST_DOCKER=1 go -C /tmp test github.com/steveyegge/gastown/internal/beads/...", true},
+		{"go -C into a directory itself named test", "GT_TEST_DOCKER=1 go -C test test ./internal/beads/...", true},
+		// The walk names the binary by isGoBinaryName, so a versioned
+		// toolchain owns the invocation too: it starts the same containers.
+		{"versioned go binary on a container package", "GT_TEST_DOCKER=1 go1.22.0 test ./internal/beads/...", true},
+
 		// Allowed: the same bare runs with the switch off cannot reach Docker.
 		{"bare go test container package, switch off", "go test ./internal/beads/...", false},
 		{"bare go test container package, switch explicitly 0", "GT_TEST_DOCKER=0 go test ./internal/beads/...", false},
@@ -61,6 +75,15 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 		{"go test multiple non-container packages", "go test ./internal/style/... ./internal/version/...", false},
 		{"go test bare no package args", "go test", false},
 		{"go test with -v only", "go test -v", false},
+
+		// Allowed: the -C walk costs exactly the flag and its directory, so a
+		// command whose container test is still hidden behind another flag is
+		// not read as an invocation, and a non-test subcommand is not either.
+		{"go -C dir flag, switch off", "go -C /tmp test ./internal/beads/...", false},
+		{"go -C dir flag on a non-container package", "GT_TEST_DOCKER=1 go -C /tmp test ./internal/style/...", false},
+		{"a flag other than -C between go and test", "GT_TEST_DOCKER=1 go -v test ./internal/beads/...", false},
+		{"go -C dir flag with a non-test subcommand", "GT_TEST_DOCKER=1 go -C /tmp build ./internal/beads/...", false},
+		{"go -C dir flag with no subcommand", "GT_TEST_DOCKER=1 go -C /tmp", false},
 
 		// Allowed: unrelated commands.
 		{"unrelated command", "ls -la", false},
