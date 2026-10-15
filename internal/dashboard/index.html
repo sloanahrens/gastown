@@ -165,6 +165,11 @@ section.collapsed>h2{border-bottom:0}
 .cfull{padding:4px 0 8px 10px;margin-bottom:4px;border-left:2px solid var(--line);overflow-wrap:anywhere}
 .ccheck{margin-bottom:4px}
 .ccrow{display:flex;gap:6px;align-items:baseline;padding-left:10px}
+.apow{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;margin-bottom:2px}
+.apname{flex:0 0 auto;white-space:nowrap}
+.apstate{flex:0 0 auto;white-space:nowrap}
+.aptext{min-width:0;overflow-wrap:anywhere}
+.aprel{margin-left:auto;color:var(--dim);overflow-wrap:anywhere}
 .ccsection{flex:0 0 auto;white-space:nowrap;color:var(--dim)}
 .cctext{min-width:0;overflow-wrap:anywhere}
 .reptext{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;background:#10161d;border:1px solid var(--line);border-radius:6px;padding:6px 8px;max-height:68vh;overflow:auto}
@@ -955,6 +960,37 @@ function drawCloudChecks(box, checks) {
   }
 }
 
+// The app power line: one row per app, drawn above the patrol's findings so the
+// operator reads which apps are off before what the patrol found. An app that is
+// off takes the amber and one the reader could not place the red, so neither
+// reads as on; the markers and ledgers are other accounts' files, so every cell
+// goes through el(), which writes textContent and never markup.
+function appPowerState(a) {
+  if (a.state === "on") return "on";
+  if (a.state === "off") return "off (" + (a.env || a.note || "unreadable marker") + ")";
+  return "unknown (" + (a.note || "unreadable") + ")";
+}
+
+function drawAppPower(box, p) {
+  if (!p) return;
+  if (!p.apps || !p.apps.length) { box.append(el("div", p.note ? "badc" : "empty", p.note ? "app power: unknown (" + p.note + ")" : "app power: no apps")); return; }
+  for (const a of p.apps) {
+    const row = el("div", "apow");
+    row.append(el("span", "apname title", a.app), el("span", "apstate " + (a.state === "on" ? "" : a.state === "off" ? "warnc" : "badc"), appPowerState(a)));
+    if (a.state === "off" && a.since) {
+      const who = [a.since ? "since " + age(a.since) + " ago" : "", a.by ? "by " + a.by : "", a.reason || ""].filter(Boolean);
+      const why = el("span", "aptext", who.join(" · "));
+      why.title = a.since ? new Date(a.since).toLocaleString() : "";
+      row.append(why);
+    }
+    const rel = a.release;
+    if (rel) row.append(el("span", "aprel", "last: " + [rel.at ? age(rel.at) + " ago" : "", rel.action || "", rel.reason || ""].filter(Boolean).join(" ")));
+    else if (a.release_note) row.append(el("span", "aprel badc", "ledger: " + a.release_note));
+    box.append(row);
+  }
+  if (p.more) box.append(el("div", "empty", "and " + p.more + " more apps"));
+}
+
 function renderCloud(s) {
   const box = $("cloud"), note = $("cloudnote");
   box.replaceChildren();
@@ -965,6 +1001,7 @@ function renderCloud(s) {
   // not hide them.
   const checks = c.checks;
   drawCloudChecks(box, checks);
+  drawAppPower(box, c.apps);
   // The reader names the state — fresh, overdue, the error that stopped it, or
   // why there is no report — and overdue and error take the amber the page
   // already marks a stale reading with. A fresh run with failures adds its own

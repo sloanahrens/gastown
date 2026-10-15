@@ -282,7 +282,8 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	backoff := newDashBackoff(townRoot)
 	queue := newDashQueueReader(townRoot)
 	cloud := dashboard.NewCloudReader(config.CloudReportsDir()).
-		WithChecks(dashboard.NewCloudChecksReader(dashboardCloudChecksPath(townRoot)))
+		WithChecks(dashboard.NewCloudChecksReader(dashboardCloudChecksPath(townRoot))).
+		WithApps(dashboard.NewAppPowerReader(config.CloudOffDir(), config.CloudReleasesDir()))
 	reports := dashboard.NewReportsReader(dashboardReportsDir(townRoot))
 	questions := newDashQuestionsReader(townRoot)
 	overseerPane := newDashOverseerReader(townRoot, func() (int, error) {
