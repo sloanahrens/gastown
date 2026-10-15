@@ -1,9 +1,11 @@
 package dashboard
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -240,6 +242,76 @@ func TestAppPowerUnreadableMarkerFileIsUnknown(t *testing.T) {
 	row := appRow(t, r.Read(appNow), "locked")
 	if row.State != AppUnknown || row.Note != appMarkerReadFailed {
 		t.Errorf("state %q note %q, want unknown (marker unreadable)", row.State, row.Note)
+	}
+}
+
+// A FIFO named x.off must not be opened: an open would block until a writer
+// appears and stall the Cloud poll for good. The read runs in a goroutine so a
+// missing fix fails the test by timeout instead of hanging the suite.
+func TestReadSkipsNonRegularMarkerWithoutBlocking(t *testing.T) {
+	t.Parallel()
+
+	r := appFixture(t, map[string]string{}, map[string]string{"y": "\n"})
+	if err := syscall.Mkfifo(filepath.Join(r.offDir, "x.off"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A FIFO in the ledgers directory is skipped the same way.
+	if err := syscall.Mkfifo(filepath.Join(r.releasesDir, "z.jsonl"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Without the fix the goroutine sits in open(2) on the FIFO; opening it
+	// read-write at cleanup releases it so the test leaves nothing behind.
+	t.Cleanup(func() {
+		if f, err := os.OpenFile(filepath.Join(r.offDir, "x.off"), os.O_RDWR, 0); err == nil {
+			f.Close()
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan *AppPower, 1)
+	go func() { done <- r.Read(appNow) }()
+	select {
+	case p := <-done:
+		x := appRow(t, p, "x")
+		if x.State != AppUnknown || x.Note != appMarkerNotAFile {
+			t.Errorf("x row state %q note %q, want unknown (%s)", x.State, x.Note, appMarkerNotAFile)
+		}
+		if z := appRow(t, p, "z"); z.ReleaseNote != appLedgerReadFailed {
+			t.Errorf("z row release note %q, want %q", z.ReleaseNote, appLedgerReadFailed)
+		}
+	case <-ctx.Done():
+		t.Fatal("Read blocked on a FIFO marker")
+	}
+}
+
+// A directory named x.off is an entry the reader cannot make sense of, so the
+// app is not on.
+func TestReadDirectoryMarkerIsNotOn(t *testing.T) {
+	t.Parallel()
+
+	r := appFixture(t, map[string]string{}, map[string]string{})
+	if err := os.Mkdir(filepath.Join(r.offDir, "x.off"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	row := appRow(t, r.Read(appNow), "x")
+	if row.State == AppOn {
+		t.Errorf("x row state %q, want not on", row.State)
+	}
+	if row.State != AppUnknown || row.Note != appMarkerNotAFile {
+		t.Errorf("x row state %q note %q, want unknown (%s)", row.State, row.Note, appMarkerNotAFile)
+	}
+}
+
+// A symlink to a regular marker still reads as that marker.
+func TestAppPowerSymlinkedMarkerIsRead(t *testing.T) {
+	t.Parallel()
+
+	r := appFixture(t, map[string]string{"real": "since=" + markerSince + " by=s env=prod reason=r\n"}, map[string]string{})
+	if err := os.Symlink(filepath.Join(r.offDir, "real.off"), filepath.Join(r.offDir, "link.off")); err != nil {
+		t.Fatal(err)
+	}
+	if row := appRow(t, r.Read(appNow), "link"); row.State != AppOff || row.Env != AppEnvProd {
+		t.Errorf("link row %+v, want off in prod", row)
 	}
 }
 

@@ -65,6 +65,7 @@ const (
 	appOffDirUnreadable = "off directory unreadable"
 	appMarkerUnreadable = "unreadable marker"
 	appMarkerReadFailed = "marker unreadable"
+	appMarkerNotAFile   = "marker is not a regular file"
 	appLedgerBadLine    = "ledger line unreadable"
 	appLedgerReadFailed = "ledger unreadable"
 )
@@ -173,8 +174,10 @@ func (r *AppPowerReader) Read(now time.Time) *AppPower {
 	return p
 }
 
-// listApps maps the app name of each regular file in dir ending in suffix to
-// the file's name. The error is the directory's own when it cannot be listed.
+// listApps maps the app name of each entry in dir ending in suffix to the
+// entry's name. An entry that is not a regular file is kept: its name still
+// stands for an app, and the readers report it as one they cannot read rather
+// than the app being on. The error is the directory's own when it cannot be listed.
 func listApps(dir, suffix string) (map[string]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -184,7 +187,7 @@ func listApps(dir, suffix string) (map[string]string, error) {
 	for _, e := range entries {
 		file := e.Name()
 		name := strings.TrimSuffix(file, suffix)
-		if e.IsDir() || name == "" || name == file || strings.HasPrefix(file, ".") {
+		if name == "" || name == file || strings.HasPrefix(file, ".") {
 			continue
 		}
 		out[name] = file
@@ -202,6 +205,9 @@ func readMarker(row *AppPowerRow, path string) {
 	line, err := readFirstLine(path, appMarkerMaxBytes)
 	if err != nil {
 		row.State, row.Note = AppUnknown, appMarkerReadFailed
+		if errors.Is(err, errNotRegular) {
+			row.Note = appMarkerNotAFile
+		}
 		return
 	}
 	row.State = AppOff
@@ -289,10 +295,26 @@ func readLedger(row *AppPowerRow, path string) {
 	row.Release = rel
 }
 
+var errNotRegular = errors.New("not a regular file")
+
+// openRegular opens path for reading when it is a regular file, following a
+// symlink to one. A FIFO, socket or device is refused before it is opened, since
+// opening a FIFO blocks until a writer appears and the poll has no timeout.
+func openRegular(path string) (*os.File, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, errNotRegular
+	}
+	return os.Open(path)
+}
+
 // readFirstLine reads at most max bytes from the start of path and returns the
-// first line of them.
+// first line of them. It does not open a file that is not a regular one.
 func readFirstLine(path string, max int64) (string, error) {
-	f, err := os.Open(path)
+	f, err := openRegular(path)
 	if err != nil {
 		return "", err
 	}
@@ -310,9 +332,9 @@ func readFirstLine(path string, max int64) (string, error) {
 // readLastLine reads at most max bytes from the end of path and returns the last
 // non-blank line of them, "" for a file with none. A last line longer than the
 // tail cannot be told apart from the middle of one, so it is an error rather than
-// a guess.
+// a guess. It does not open a file that is not a regular one.
 func readLastLine(path string, max int64) (string, error) {
-	f, err := os.Open(path)
+	f, err := openRegular(path)
 	if err != nil {
 		return "", err
 	}
