@@ -461,6 +461,12 @@ type heredocSpan struct {
 // the shell never reads as a redirection, and one preceded by "<" is the tail
 // of a "<<<" here-string: both are skipped, because a body inferred from
 // either runs to the end of the text and hides the lines after it (gt-79opc).
+// So are the two other spellings that look like a heredoc operator but are
+// not (gt-yza8u): a "<" behind a backslash ("\<<EOF" reads as a literal "<"
+// followed by a single-"<" redirect) and a "<<" inside a "$((" arithmetic
+// expansion, where it is a shift. Accepting either one stripped a body the
+// shell never read, and the live commands standing in for that body went
+// unchecked.
 func scanHeredocs(command string) []heredocSpan {
 	matches := heredocStartPattern.FindAllStringSubmatchIndex(command, -1)
 	if matches == nil {
@@ -474,7 +480,10 @@ func scanHeredocs(command string) []heredocSpan {
 		if start < stripped {
 			continue // inside a previously accepted heredoc body
 		}
-		if walk.advanceTo(start) != 0 || (start > 0 && command[start-1] == '<') {
+		if walk.advanceTo(start) != 0 || walk.escaped || walk.arith {
+			continue
+		}
+		if start > 0 && command[start-1] == '<' {
 			continue
 		}
 		allowIndent := command[m[2]:m[3]] == "-"
@@ -533,7 +542,8 @@ func scanHeredocs(command string) []heredocSpan {
 // a literal "<<" from a redirection. Comments decide it because a word-leading
 // "#" makes the rest of its line text the shell does not parse at all: read as
 // a quote, the apostrophe in "# don't" left the real heredoc below invisible
-// (gt-79opc).
+// (gt-79opc). Arithmetic expansions decide it too: the shell reads the text of
+// a "$((" as an expression, where "<<" shifts (gt-yza8u).
 type heredocQuoteWalk struct {
 	runes   []rune
 	runeIdx int
@@ -541,6 +551,8 @@ type heredocQuoteWalk struct {
 	quote   rune // the quoted stretch being read: 0, '\'' or '"'
 	comment bool // inside a "#" comment, which runs to the end of its line
 	escaped bool // the rune at runeIdx is literal text behind a backslash
+	arith   bool // inside a "$((" arithmetic expansion, where "<<" is a shift
+	paren   int  // parens open since that expansion began
 	prevIdx int  // the rune the shell read last, for startsShellWord
 	prevEsc bool // that rune was backslash-escaped
 }
@@ -566,12 +578,31 @@ func (w *heredocQuoteWalk) advanceTo(to int) rune {
 			w.quote = 0
 		case r == '#' && startsShellWord(w.runes, w.prevIdx, w.prevEsc):
 			w.comment = true
+		case w.quote == 0 && r == '$' && w.runeAt(w.runeIdx+1) == '(' && w.runeAt(w.runeIdx+2) == '(':
+			// "$((" opens an arithmetic expansion. The two "(" that follow
+			// are counted, so the matching "))" is what closes it.
+			w.arith, w.paren = true, 0
+		case w.arith && w.quote == 0 && r == '(':
+			w.paren++
+		case w.arith && w.quote == 0 && r == ')':
+			if w.paren--; w.paren <= 0 {
+				w.arith, w.paren = false, 0
+			}
 		}
 		w.prevIdx, w.prevEsc = w.runeIdx, escaped
 		w.byteIdx += utf8.RuneLen(r)
 		w.runeIdx++
 	}
 	return w.quote
+}
+
+// runeAt returns the rune at index i, or 0 when i is past either end — the
+// lookahead the "$((" case needs to read an operator it has not consumed yet.
+func (w *heredocQuoteWalk) runeAt(i int) rune {
+	if i < 0 || i >= len(w.runes) {
+		return 0
+	}
+	return w.runes[i]
 }
 
 // skipTo reads past byte offset to with no quote tracking: the text crossed is
@@ -583,6 +614,7 @@ func (w *heredocQuoteWalk) skipTo(to int) {
 		w.runeIdx++
 	}
 	w.quote, w.comment, w.escaped, w.prevIdx, w.prevEsc = 0, false, false, -1, false
+	w.arith, w.paren = false, 0
 }
 
 // heredocReaderLine returns the text of the line the heredoc operator at

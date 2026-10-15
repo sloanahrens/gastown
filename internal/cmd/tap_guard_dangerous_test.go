@@ -1311,12 +1311,55 @@ func TestEvaluateDangerousCommandUnquotedHeredocSubstitution(t *testing.T) {
 
 // TestHeredocDoesNotHideRealCommand ensures stripHeredocBodies only
 // removes the body span and leaves surrounding shell text — including a
-// second, genuinely dangerous command after the terminator — intact.
+// second, genuinely dangerous command after the terminator — intact. The
+// middle cases are the two other spellings of "<<" the shell does not read
+// as a heredoc operator (gt-yza8u): a shift inside a $(("..")) arithmetic
+// expansion, and a "<" behind a backslash. Reading either one as a heredoc
+// stripped the lines below it, so the live command standing where the body
+// would have been was never judged at all.
 func TestHeredocDoesNotHideRealCommand(t *testing.T) {
 	t.Parallel()
-	command := "cat > note.md <<'EOF'\nordinary content\nEOF\nsudo rm -rf /"
-	if reason, _ := evaluateDangerousCommand(command, 0, noTownSession); reason == "" {
-		t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked — real command after heredoc must still be checked", command)
+	tests := []struct {
+		name      string
+		command   string
+		wantBlock bool
+	}{
+		{
+			name:      "a real command after a real heredoc",
+			command:   "cat > note.md <<'EOF'\nordinary content\nEOF\nsudo rm -rf /",
+			wantBlock: true,
+		},
+		{
+			name:      "arithmetic shift, not a heredoc operator",
+			command:   "echo $((1<<x))\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
+			name:      "escaped < is a literal, then a single-< redirect",
+			command:   "echo \\<<EOF\nsudo rm -rf /\nEOF",
+			wantBlock: true,
+		},
+		{
+			name:      "arithmetic shift over a force push",
+			command:   "echo $((1<<EOF))\ngit push --force origin x\nEOF",
+			wantBlock: true,
+		},
+		{
+			name:      "a real heredoc body stays data",
+			command:   "cat <<EOF\nsudo rm -rf /\nEOF",
+			wantBlock: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
+			if tt.wantBlock && reason == "" {
+				t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked — the shell reads a command here, so it must still be checked", tt.command)
+			}
+			if !tt.wantBlock && reason != "" {
+				t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — the body is data for its reader", tt.command, reason)
+			}
+		})
 	}
 }
 
