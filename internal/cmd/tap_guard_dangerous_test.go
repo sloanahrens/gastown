@@ -1641,12 +1641,18 @@ func TestMatchesGoCleanSharedCache(t *testing.T) {
 		{"flag order reversed", "go clean -cache -x", true},
 		{"multiple shared flags", "go clean -cache -testcache -modcache", true},
 		{"glued to a shell operator", "cd /tmp; go clean -modcache", true},
+		{"double-dash flag", "go clean --modcache", true},
+		{"flag with =true value", "go clean -modcache=true", true},
+		{"path-qualified go", "/usr/local/go/bin/go clean -modcache", true},
+		{"path-qualified go, double-dash with value", "/usr/local/go/bin/go clean --testcache=true", true},
 
 		// Should allow.
 		{"safe flag on go clean, shared flag on a later unrelated command", "go clean -i; ls -la -cache", false},
 		{"bare go clean", "go clean", false},
 		{"go clean -i", "go clean -i", false},
 		{"go clean -n", "go clean -n", false},
+		{"path-qualified go clean -i", "/usr/local/go/bin/go clean -i", false},
+		{"cache as a non-flag argument", "go clean cache", false},
 		{"go clean -x", "go clean -x", false},
 		{"go clean -r", "go clean -r", false},
 		{"go clean of a package", "go clean ./...", false},

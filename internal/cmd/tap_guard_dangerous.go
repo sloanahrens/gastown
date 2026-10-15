@@ -2464,10 +2464,10 @@ func matchesDDLDestruction(tokens []string) string {
 // by every agent on the host. Ported from the interim host-hygiene hook
 // (~/gt/.claude/hooks/no-root-scan.sh) — see gt-nqcy follow-up.
 var goCleanSharedCacheFlags = map[string]bool{
-	"-cache":     true,
-	"-testcache": true,
-	"-modcache":  true,
-	"-fuzzcache": true,
+	"cache":     true,
+	"testcache": true,
+	"modcache":  true,
+	"fuzzcache": true,
 }
 
 const goCleanSharedCacheReason = "'go clean' with -cache/-testcache/-modcache/-fuzzcache wipes the Go build cache shared by every agent on this host"
@@ -2476,7 +2476,10 @@ const goCleanSharedCacheAlternative = "Alternative: use 'go test -count=1' for a
 
 // matchesGoCleanSharedCache blocks 'go clean' invocations carrying any of
 // the shared-cache flags (goCleanSharedCacheFlags), in any order and
-// combined with other clean flags (e.g. 'go clean -x -cache'). tokens must
+// combined with other clean flags (e.g. 'go clean -x -cache'). The go binary
+// may be path-qualified (/usr/local/go/bin/go), and Go's flag package accepts
+// one or two leading dashes and a =value suffix, so --modcache and
+// -modcache=true wipe the cache too (gt-5jir5). tokens must
 // be lowercased, shell-aware tokens (see shellTokenize). inClean resets at
 // every shell operator so a flag on an unrelated LATER command on the same
 // line (e.g. "go clean -i; ls -la -cache") is never mistaken for one of
@@ -2488,18 +2491,32 @@ func matchesGoCleanSharedCache(tokens []string) (reason, alternative string) {
 			inClean = false
 			continue
 		}
-		if f == "clean" && i > 0 && tokens[i-1] == "go" {
+		if f == "clean" && i > 0 && filepath.Base(tokens[i-1]) == "go" {
 			inClean = true
 			continue
 		}
 		if !inClean {
 			continue
 		}
-		if goCleanSharedCacheFlags[f] {
+		if isGoCleanSharedCacheFlag(f) {
 			return goCleanSharedCacheReason, goCleanSharedCacheAlternative
 		}
 	}
 	return "", ""
+}
+
+// isGoCleanSharedCacheFlag reports whether tok is one of the shared-cache
+// flags in any spelling Go's flag package accepts: -cache, --cache or
+// -cache=true. A token without a leading dash is an argument, not a flag.
+func isGoCleanSharedCacheFlag(tok string) bool {
+	if !strings.HasPrefix(tok, "-") {
+		return false
+	}
+	name := strings.TrimLeft(tok, "-")
+	if eq := strings.IndexByte(name, '='); eq >= 0 {
+		name = name[:eq]
+	}
+	return goCleanSharedCacheFlags[name]
 }
 
 // polecatFullSuiteUncachedReason is the block text for an uncached
