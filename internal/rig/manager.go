@@ -631,7 +631,11 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 			}
 			// Drop orphan databases created by bd init (gh#3562, gt-sv1h).
 			// See dropRigOrphanDBs for naming details across bd versions.
-			if err := dropRigOrphanDBs(m.doltDBs(), opts.BeadsPrefix, opts.Name); err != nil {
+			protected, err := m.protectedRigDatabases()
+			if err != nil {
+				return nil, fmt.Errorf("orphan database cleanup: %w", err)
+			}
+			if err := dropRigOrphanDBs(m.doltDBs(), opts.BeadsPrefix, opts.Name, protected); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: orphan database cleanup: %v\n", err)
 			}
 		}
@@ -679,7 +683,11 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	// Safety-net: drop orphan databases that may have been created by bd init.
 	// InitBeads already does this, but repeat here in case EnsureMetadata path
 	// diverges, and verify post-condition: no orphan should remain (gh#3562).
-	if err := dropRigOrphanDBs(m.doltDBs(), opts.BeadsPrefix, opts.Name); err != nil {
+	protected, err := m.protectedRigDatabases()
+	if err != nil {
+		return nil, fmt.Errorf("orphan database cleanup: %w", err)
+	}
+	if err := dropRigOrphanDBs(m.doltDBs(), opts.BeadsPrefix, opts.Name, protected); err != nil {
 		return nil, fmt.Errorf("rig init left a duplicate Dolt database: %w", err)
 	}
 
@@ -1308,20 +1316,22 @@ func warnDeprecatedRigConfigKeys(data []byte, path string) {
 // reads from <rigName> — causing the silent data split documented in gh#3562.
 //
 // On entry the orphan is freshly created by bd init and contains only schema
-// tables, so it is safe to force-drop. If the candidate looks like a real rig
-// database (matches rigName, "hq", or doesn't exist at all) it is skipped.
+// tables, so it is safe to force-drop — except for a candidate in protected,
+// where the new prefix names a live database by coincidence (gt-1h1ea).
 //
 // Returns an error only if at least one orphan candidate exists on disk and
 // cannot be removed — callers in AddRig treat that as fatal so the user is not
 // left with a silently-split rig.
-func dropRigOrphanDBs(dolt doltDatabases, prefix, rigName string) error {
+func dropRigOrphanDBs(dolt doltDatabases, prefix, rigName string, protected map[string]bool) error {
 	if prefix == "" || rigName == "" {
 		return nil
 	}
 	candidates := []string{prefix, "beads_" + prefix}
 	var failures []string
 	for _, name := range candidates {
-		if name == rigName || name == "hq" {
+		// protected holds a database another rig owns, which this prefix
+		// names by coincidence; dropping it would delete that rig's beads.
+		if name == rigName || name == "hq" || protected[name] {
 			continue
 		}
 		if !dolt.Exists(name) {
@@ -1451,7 +1461,11 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 		// EnsureMetadata). Orphans must be dropped or beads created from the
 		// rig will silently land in the wrong DB and become invisible to the mayor.
 		if rigName != "" {
-			if err := dropRigOrphanDBs(m.doltDBs(), prefix, rigName); err != nil {
+			protected, err := m.protectedRigDatabases()
+			if err != nil {
+				return fmt.Errorf("orphan database cleanup: %w", err)
+			}
+			if err := dropRigOrphanDBs(m.doltDBs(), prefix, rigName, protected); err != nil {
 				// Non-fatal: AddRig has a post-init verification step that errors
 				// loudly if an orphan persists. Log here so the trail is visible
 				// when rig init is invoked outside AddRig.

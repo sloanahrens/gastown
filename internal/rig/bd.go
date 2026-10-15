@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/doltserver"
 )
@@ -88,4 +89,16 @@ func (m *Manager) doltDBs() doltDatabases {
 		return m.dolt
 	}
 	return townDolt{m.townRoot}
+}
+
+// protectedRigDatabases is the set of Dolt databases dropRigOrphanDBs must
+// leave alone: every database the town's rigs own, with the registry snapshot
+// this Manager loaded folded in, since that snapshot may name a rig whose
+// entry has not reached disk yet (gt-1h1ea).
+func (m *Manager) protectedRigDatabases() (map[string]bool, error) {
+	var registry map[string]config.RigEntry
+	if m.config != nil {
+		registry = m.config.Rigs
+	}
+	return beads.RegisteredRigDatabases(m.townRoot, registry)
 }

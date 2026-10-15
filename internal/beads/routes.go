@@ -200,6 +200,69 @@ func GetPrefixForRig(townRoot, rigName string) string {
 	return config.GetRigPrefix(townRoot, rigName)
 }
 
+// RegisteredRigDatabases returns the Dolt databases the town's rigs own, which
+// `gt rig add` must not drop as orphans (gt-1h1ea). registry is the caller's
+// snapshot of the town registry and may be nil.
+func RegisteredRigDatabases(townRoot string, registry map[string]config.RigEntry) (map[string]bool, error) {
+	routes, err := LoadRoutes(filepath.Join(townRoot, ".beads"))
+	if err != nil {
+		return nil, fmt.Errorf("loading routes: %w", err)
+	}
+
+	// Both registries, so a rig either one names is counted: the caller's
+	// snapshot may predate disk (a rig registered while a long clone ran) and
+	// disk may postdate it.
+	rigs := make(map[string]config.RigEntry, len(registry))
+	for name, entry := range registry {
+		rigs[name] = entry
+	}
+	onDisk, err := config.LoadRigsConfigOrEmpty(filepath.Join(townRoot, "mayor", "rigs.json"))
+	if err != nil {
+		return nil, fmt.Errorf("loading the rig registry: %w", err)
+	}
+	for name, entry := range onDisk.Rigs {
+		// The database is what this function is after, so an entry that names
+		// one beats an entry that does not.
+		if current, ok := rigs[name]; !ok || (current.DoltDatabase == "" && entry.DoltDatabase != "") {
+			rigs[name] = entry
+		}
+	}
+
+	databases := make(map[string]bool, len(rigs))
+	for name, entry := range rigs {
+		db := entry.DoltDatabase
+		if db == "" {
+			db, _ = config.RigMetadataDatabase(townRoot, name)
+		}
+		if db == "" {
+			// bd's default names a rig's database after the rig. Reading the
+			// rig's name out of the recursion instead would match a rig whose
+			// database differs from it, and the gastown rig keeps the "gt"
+			// database.
+			db = name
+		}
+		databases[db] = true
+	}
+
+	// A route is a rig's earliest record, written before it is registered, and
+	// it carries a path and a prefix, never a database: a rig only a route
+	// names is counted through its own workspace alone.
+	for _, r := range routes {
+		rig := strings.SplitN(r.Path, "/", 2)[0]
+		if rig == "" || rig == "." {
+			continue
+		}
+		if _, registered := rigs[rig]; registered {
+			continue
+		}
+		if db, _ := config.RigMetadataDatabase(townRoot, rig); db != "" {
+			databases[db] = true
+		}
+	}
+
+	return databases, nil
+}
+
 // CheckPrefixAvailable verifies that a prefix is not already used by a different rig.
 // The prefix should include the trailing hyphen (e.g., "gt-").
 // newPath is the path of the rig being added (e.g., "gastown" or "gastown/mayor/rig").
@@ -221,6 +284,24 @@ func CheckPrefixAvailable(townRoot string, prefix string, newPath string) error 
 			if existingRig != newRig {
 				return fmt.Errorf("prefix %q is already used by %s (path: %s); use --prefix to specify a different prefix", prefix, existingRig, r.Path)
 			}
+		}
+	}
+
+	// `gt rig add` drops the databases bd init leaves behind, named <prefix> and
+	// beads_<prefix>, so a prefix that names another rig's database resolves to
+	// that live database and takes its beads with it (gt-1h1ea). Routes carry no
+	// database names, so compare against the databases the rigs record.
+	databases, err := RegisteredRigDatabases(townRoot, nil)
+	if err != nil {
+		return err
+	}
+	stem := strings.TrimSuffix(prefix, "-")
+	for _, candidate := range []string{stem, "beads_" + stem} {
+		if candidate == newRig {
+			continue // the rig being added owns any database named after it
+		}
+		if databases[candidate] {
+			return fmt.Errorf("prefix %q names %q, the Dolt database of a registered rig, which `gt rig add` would drop as an orphan; use --prefix to specify a different prefix", prefix, candidate)
 		}
 	}
 
