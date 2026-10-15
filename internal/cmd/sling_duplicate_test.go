@@ -1130,6 +1130,111 @@ func TestOpenClusterDispatchesPastAHeldHead(t *testing.T) {
 	}
 }
 
+// TestOpenClusterBurstKeepsRefusingANotedDispatchedPeer is the gt-bvvab
+// acceptance bar, over the one bead the gt-00gee dispatchability question can
+// answer wrong: the peer this same tick has already slung.
+//
+// A burst reads one pool for the whole tick, so a bead it slung mid-tick reaches
+// the beads behind it only as the row the guard weighed it by — still open
+// (sling.go noteDispatched). The dispatcher's hold question has to be answered
+// from that row: answered from anything live it sees the peer hooked, hooked is
+// a hold, and a held peer stops refusing, so the next bead of the tick is slung
+// onto a seat the first one already holds (gt-mcq, gt-bvvab).
+//
+// The cluster is the gt-nlkba shape — two ready beads naming one test, sharing
+// no path — slung in board order, the way the gt-3vr/gt-rl0 double dispatch was
+// actually filed.
+func TestOpenClusterBurstKeepsRefusingANotedDispatchedPeer(t *testing.T) {
+	t.Parallel()
+	townRoot := duplicateTown(t)
+	// The overlap is the test name alone: a shared path would also let the
+	// dispatcher's own path hold settle the bead before the guard saw it.
+	const shared = "TestDangerousGuard_Integration is the test that fails."
+	shaped := specTestDescription + "\n\n" + shared
+
+	db := beadsfake.New()
+	// The head of the cluster, and the bead behind it in the same tick.
+	db.Seed(beads.Issue{ID: "gt-lead", Title: "guard blocks a nested command", Type: "task", Status: "open",
+		Priority: 1, CreatedAt: "2026-10-15T09:00:00Z", Description: shaped,
+		AcceptanceCriteria: specTestAcceptance})
+	db.Seed(beads.Issue{ID: "gt-next", Title: "guard judges the argv after `gt slot run --`", Type: "task", Status: "open",
+		Priority: 2, CreatedAt: "2026-10-15T10:00:00Z", Description: shaped,
+		AcceptanceCriteria: specTestAcceptance})
+
+	knobs := specHoldKnobs{
+		MaxPriority: 2,
+		ShapeGate:   specdispatch.ShapeGateWarn,
+		Template:    specdispatch.Template{Sections: specdispatch.DefaultSections, Source: "built-in"},
+	}
+	pools := newDuplicatePools(
+		func(beadsDir string) ([]duplicateCandidate, error) {
+			return fetchDuplicatePoolFrom(db, func(dir string, err error) {
+				t.Errorf("enrichment of %s failed: %v", dir, err)
+			}, beadsDir)
+		},
+		func(_, _ string, peer duplicateCandidate) string { return specPeerHeldFrom(db, knobs, peer) },
+	)
+	beadsDir := duplicateBeadsDir(townRoot, "gt-lead")
+	if beadsDir == "" {
+		t.Fatal("the town routes no gt- bead to a rig, so the burst has no pool to read")
+	}
+
+	// check is one bead of the burst as sling.go runs it: the guard's verdict on
+	// that bead against the tick's pool, through the same resolver the tick
+	// wires.
+	check := func(id string) (*duplicateCandidate, []duplicateMatch) {
+		t.Helper()
+		issue, err := db.Show(id)
+		if err != nil {
+			t.Fatalf("read %s: %v", id, err)
+		}
+		candidate, matches, err := pools.check(townRoot, id, beadInfoOf(issue))
+		if err != nil {
+			t.Fatalf("check %s: %v", id, err)
+		}
+		if candidate == nil {
+			t.Fatalf("%s names %s, so the guard has to inspect it", id, shared)
+		}
+		return candidate, matches
+	}
+
+	lead, leadMatches := check("gt-lead")
+	if d := decideSlingDuplicates(*lead, leadMatches); d.Blocked {
+		t.Fatalf("gt-lead heads the cluster and nothing precedes it: %s", d.Message)
+	}
+
+	// The lead's sling lands: the hook write makes it work in flight, and the
+	// burst files the row the guard weighed it by back into the pool.
+	status, assignee := "hooked", "gastown/polecats/x"
+	if err := db.Update("gt-lead", beads.UpdateOptions{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("hook gt-lead: %v", err)
+	}
+	pools.noteSlingCandidateDispatched(townRoot, lead)
+
+	// The bead behind it in the same tick shares only the test name, so nothing
+	// but the lead's own state can refuse it.
+	next, matches := check("gt-next")
+	var peer *duplicateMatch
+	for i := range matches {
+		if matches[i].Bead.ID == "gt-lead" {
+			peer = &matches[i]
+		}
+	}
+	if peer == nil {
+		var got []string
+		for _, m := range matches {
+			got = append(got, m.Bead.ID)
+		}
+		t.Fatalf("the pool the tick is still reading must hold gt-lead as gt-next's peer, got %v", got)
+	}
+	if len(peer.SharedFiles) != 0 {
+		t.Fatalf("gt-next shares %v with gt-lead, so the case is no longer the test-name-only overlap", peer.SharedFiles)
+	}
+	if !peer.Blocking(*next) {
+		t.Errorf("Blocking(gt-next) = false over the gt-lead slung earlier in this tick: a peer whose seat is already spent must keep refusing, or the burst puts two seats on one defect")
+	}
+}
+
 // poolRow is the pool's own row for id: the record the overlap guard weighs a
 // peer by, and the one the dispatcher's hold questions read.
 func poolRow(t *testing.T, pool []duplicateCandidate, id string) duplicateCandidate {
