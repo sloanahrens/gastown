@@ -286,14 +286,26 @@ func (d *Daemon) overseerReportLeft() (townreport.DispatchLeft, error) {
 	if err != nil {
 		return townreport.DispatchLeft{}, fmt.Errorf("unparseable dispatch output: %w", err)
 	}
-	return overseerReportLeftFrom(r), nil
+	return overseerReportLeftFrom(r)
 }
 
 // overseerReportLeftFrom sorts a dry run's decisions. A bead the dry run would
 // sling, or finds clean but without a seat or past the per-tick limit, is
 // next in the queue, in the order the dispatcher named them; every other bead
 // it declined is held, with its reason.
-func overseerReportLeftFrom(r specDispatchTickReport) townreport.DispatchLeft {
+//
+// A dry run that exits 0 can still carry Errors (an unreadable roster, a
+// failed board read), and then its empty queue means "could not read", not "no
+// ready work". Such a report is an error, so LEFT renders as unavailable the
+// way a failed command does.
+func overseerReportLeftFrom(r specDispatchTickReport) (townreport.DispatchLeft, error) {
+	if len(r.Errors) > 0 {
+		err := fmt.Errorf("dispatch dry run reported errors: %s", r.Errors[0])
+		if more := len(r.Errors) - 1; more > 0 {
+			err = fmt.Errorf("%w (+%d more)", err, more)
+		}
+		return townreport.DispatchLeft{}, err
+	}
 	left := townreport.DispatchLeft{Hold: r.Hold}
 	row := func(e specDispatchTickEntry, prefix string) townreport.DispatchRow {
 		return townreport.DispatchRow{Bead: e.Bead, Rig: e.Rig, Text: prefix + specSkipReason(e)}
@@ -317,7 +329,7 @@ func overseerReportLeftFrom(r specDispatchTickReport) townreport.DispatchLeft {
 			left.Held = append(left.Held, row(e, g.name+": "))
 		}
 	}
-	return left
+	return left, nil
 }
 
 // overseerReportHealth is the town health line from the file the heartbeat

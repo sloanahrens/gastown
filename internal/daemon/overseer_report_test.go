@@ -97,7 +97,7 @@ func newOverseerWorld(t *testing.T, now string) *overseerWorld {
 					{Bead: "gt-u1", Rig: "gastown", Line: "gt-u1: unshaped: missing ## Gate"},
 				},
 				Planning: []specDispatchTickEntry{{Bead: "gt-p1", Rig: "gastown", Line: "gt-p1: needs plan"}},
-			}), nil
+			})
 		},
 		health: func() (string, error) { return "GREEN tick 12s ago, 3 landed/24h", nil },
 		rigs:   func() ([]string, error) { return []string{"gastown"}, nil },
@@ -400,7 +400,7 @@ func TestOverseerReportStaysUnderSixtyLines(t *testing.T) {
 
 func TestOverseerReportLeftSortsTheDryRun(t *testing.T) {
 	t.Parallel()
-	left := overseerReportLeftFrom(specDispatchTickReport{
+	left, err := overseerReportLeftFrom(specDispatchTickReport{
 		Dispatched: []specDispatchTickEntry{{Bead: "gt-a", Rig: "r", Line: "gt-a: would sling to r on x (y)"}},
 		Skipped: []specDispatchTickEntry{
 			{Bead: "gt-b", Rig: "r", Line: "gt-b: no seat: claude 2/2"},
@@ -409,6 +409,9 @@ func TestOverseerReportLeftSortsTheDryRun(t *testing.T) {
 		},
 		Refused: []specDispatchTickEntry{{Bead: "gt-e", Rig: "r", Line: "gt-e: refused by lint"}},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	var next, held []string
 	for _, r := range left.Next {
 		next = append(next, r.Bead)
@@ -422,8 +425,29 @@ func TestOverseerReportLeftSortsTheDryRun(t *testing.T) {
 	if got := strings.Join(held, "|"); got != "gt-c unshaped: missing ## Gate|gt-e refused: refused by lint" {
 		t.Errorf("held = %s", got)
 	}
-	if held := overseerReportLeftFrom(specDispatchTickReport{Hold: "operator hold"}); held.Hold != "operator hold" {
-		t.Errorf("hold = %q", held.Hold)
+	if held, err := overseerReportLeftFrom(specDispatchTickReport{Hold: "operator hold"}); err != nil || held.Hold != "operator hold" {
+		t.Errorf("hold = %q, err = %v", held.Hold, err)
+	}
+}
+
+// A dry run that exits 0 with Errors set (an unreadable roster, a failed board
+// read) decided nothing about the beads it could not read, so LEFT reads as
+// unavailable rather than as an empty queue.
+func TestOverseerReportLeftDryRunErrors(t *testing.T) {
+	t.Parallel()
+	w := newOverseerWorld(t, "2026-10-14T20:17:33Z")
+	w.left = func() (townreport.DispatchLeft, error) {
+		return overseerReportLeftFrom(specDispatchTickReport{Errors: []string{"roster unreadable", "gastown: board read failed"}})
+	}
+	slot := overseerAt("2026-10-14T20:15:00Z")
+	text := w.seams().digest(slot, slot.Add(-15*time.Minute)).Render()
+
+	want := "LEFT\n  unavailable (dispatch dry run reported errors: roster unreadable (+1 more))\n"
+	if !strings.Contains(text, want) {
+		t.Errorf("LEFT does not say the dry run failed (want %q):\n%s", want, text)
+	}
+	if strings.Contains(text, "LEFT\n  (none)") {
+		t.Errorf("LEFT reads as an empty queue:\n%s", text)
 	}
 }
 
