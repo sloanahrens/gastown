@@ -95,6 +95,21 @@ type Verdict struct {
 	// beside the verdict, so a bead names the reviewer that judged it
 	// (gt-uebmq).
 	Version string `json:"-"`
+	// Rescore is set when a borderline rejection was re-scored, and nil on
+	// every verdict om reached in one run (gt-cz07b). It is the landing's own
+	// record, not a field om wrote.
+	Rescore *Rescore `json:"-"`
+}
+
+// Rescore is the second om run a borderline rejection earned (gt-cz07b): the
+// score of the run the landing first stood on and the score the rerun reached.
+// It rides the verdict the landing decides on, which is the higher-scoring of
+// the two, so the verdict comment names both and a reader can see the review
+// ran twice. The rejected run's score has no other record once the rerun
+// approves: an approval leaves no rejection note.
+type Rescore struct {
+	First float64
+	Rerun float64
 }
 
 // Approved reports whether the verdict lets the work land.
@@ -127,6 +142,13 @@ type ReviewInput struct {
 	// is given through --criteria-file when it accepts the flag. Empty means
 	// the bead carries none and the flag is omitted (gt-yl7n4).
 	CriteriaText string
+	// PriorFindings are the findings of the previous round's refusal, which om
+	// is given through --prior-findings so it classifies each as resolved,
+	// unresolved or regressed instead of raising a fresh set of minors on a
+	// diff that has not changed since the refusal (gt-cz07b). Empty means this
+	// is the landing's first review, or the round before it refused on
+	// something other than findings.
+	PriorFindings []Finding
 	// Logf receives the reviewer's warning lines; nil drops them.
 	Logf func(format string, args ...any)
 }
@@ -241,6 +263,11 @@ func (r OMReviewer) Review(ctx context.Context, dir, base, head string) (Verdict
 // named on the argv as --criteria-file when the installed om takes the flag, so
 // om reads the criteria the bead was dispatched with rather than inferring them
 // (gt-yl7n4).
+//
+// A rework round — one a refusal sent back to the author — carries that
+// refusal's findings, written to a temp file in OutDir and named on the argv as
+// --prior-findings, so om scores the round on what is still unresolved rather
+// than on a fresh set of minors (gt-cz07b).
 func (r OMReviewer) ReviewBead(ctx context.Context, in ReviewInput) (Verdict, error) {
 	// The verdict names the om behind it, and a review that produced none is
 	// exactly when the binary is worth naming, so this is read whatever the
@@ -312,6 +339,20 @@ func (r OMReviewer) reviewOnce(ctx context.Context, in ReviewInput) (Verdict, er
 	if timeout <= 0 {
 		timeout = DefaultOMTimeout
 	}
+	// The previous round's findings, written before the attempt clock starts
+	// like the criteria file beside them: om reads them from a path, and a file
+	// that cannot be written costs the round its classification rather than the
+	// review.
+	priorPath := ""
+	if len(in.PriorFindings) > 0 {
+		p, err := r.writePriorFindings(in)
+		if err != nil {
+			r.warnf(in, "could not write the previous round's findings (%v); om reviews this round cold", err)
+		} else {
+			priorPath = p
+			defer func() { _ = os.Remove(p) }()
+		}
+	}
 	rctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	argv := []string{path, "review", "-C", dir, "--base", base, "--head", head, "--out", outPath}
@@ -326,6 +367,12 @@ func (r OMReviewer) reviewOnce(ctx context.Context, in ReviewInput) (Verdict, er
 	}
 	if criteriaPath != "" {
 		argv = append(argv, "--criteria-file", criteriaPath)
+	}
+	// --prior-findings rides the argv alone: --prior-head names the last
+	// APPROVED review, and the round these findings come from was refused, so
+	// naming it as approved would tell om the diff already passed (gt-cz07b).
+	if priorPath != "" {
+		argv = append(argv, "--prior-findings", priorPath)
 	}
 	code, runErr := run(rctx, dir, omUnsetEnv, argv, w)
 	if runErr != nil && errors.Is(rctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
@@ -532,6 +579,32 @@ func (r OMReviewer) writeCriteria(in ReviewInput) (string, error) {
 	}
 	name := f.Name()
 	if _, err := f.WriteString(in.CriteriaText); err != nil {
+		_ = f.Close()
+		_ = os.Remove(name)
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(name)
+		return "", err
+	}
+	return name, nil
+}
+
+// writePriorFindings writes the previous round's findings to a 0600 temp file
+// in OutDir, as the JSON array om's --prior-findings reads, and returns its
+// path. The caller removes it after the run; findings that cannot be written
+// are not a reason to skip the review.
+func (r OMReviewer) writePriorFindings(in ReviewInput) (string, error) {
+	data, err := json.Marshal(in.PriorFindings)
+	if err != nil {
+		return "", err
+	}
+	f, err := os.CreateTemp(r.OutDir, "om-prior-findings-*.json")
+	if err != nil {
+		return "", err
+	}
+	name := f.Name()
+	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
 		_ = os.Remove(name)
 		return "", err

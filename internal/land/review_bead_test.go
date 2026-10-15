@@ -65,6 +65,7 @@ type omStub struct {
 	noVersion bool   // an om whose `version` call prints nothing
 	probes    int
 	versions  int
+	prior     string     // the previous round's findings file as the review read it
 	argv      []string   // the last review's argv
 	argvs     [][]string // every review's argv, in the order om ran
 }
@@ -101,6 +102,15 @@ func (s *omStub) run(_ context.Context, _ string, _ []string, argv []string, out
 			if err := os.WriteFile(argv[i+1], []byte(body), 0o600); err != nil {
 				s.t.Fatal(err)
 			}
+		}
+		// om reads the file the flag names during the review, before the
+		// reviewer removes it: the content a test asserts on is what om saw.
+		if a == "--prior-findings" && i+1 < len(argv) {
+			data, err := os.ReadFile(argv[i+1])
+			if err != nil {
+				s.t.Fatal(err)
+			}
+			s.prior = string(data)
 		}
 	}
 	_, _ = io.WriteString(out, "om: reviewing\n")

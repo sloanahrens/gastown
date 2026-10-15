@@ -13,8 +13,10 @@ import (
 )
 
 // verdictCommentRE takes a work bead's verdict comment apart: every field of
-// the line Land writes, in the order it writes them.
-var verdictCommentRE = regexp.MustCompile(`^om (.+) (\d+\.\d\d) \(om (\S+), (\S+)–(\S+)\) \[head ([0-9a-f]{8})\]$`)
+// the line Land writes, in the order it writes them. The re-score clause is the
+// one optional field: only a verdict a borderline rejection was re-scored into
+// carries it (gt-cz07b).
+var verdictCommentRE = regexp.MustCompile(`^om (.+) (\d+\.\d\d) \(om (\S+), (\S+)–(\S+)\) \[head ([0-9a-f]{8})\]( \(re-scored: .+\))?$`)
 
 // parsedVerdictComment is a verdict comment's fields.
 type parsedVerdictComment struct {
@@ -24,6 +26,7 @@ type parsedVerdictComment struct {
 	start   time.Time
 	end     time.Time
 	head    string
+	rescore string // "" on a verdict om reached in one run
 }
 
 // parseVerdictComment fails the test when text is not a verdict comment in the
@@ -42,7 +45,7 @@ func parseVerdictComment(t *testing.T, text string) parsedVerdictComment {
 		return at
 	}
 	parsed := parsedVerdictComment{word: m[1], score: m[2], version: m[3],
-		start: parse("start", m[4]), end: parse("end", m[5]), head: m[6]}
+		start: parse("start", m[4]), end: parse("end", m[5]), head: m[6], rescore: strings.TrimSpace(m[7])}
 	if parsed.end.Before(parsed.start) {
 		t.Errorf("comment window ends before it starts: %s–%s", m[4], m[5])
 	}

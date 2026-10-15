@@ -68,11 +68,25 @@ func (l *Lander) writeComment(id, text, head, prefix string) commentOutcome {
 
 // verdictCommentText is the line a review leaves on the work bead: the verdict
 // and its score, the om behind it, the window the review ran in and the
-// candidate head it covered (gt-uebmq).
+// candidate head it covered (gt-uebmq), plus both scores when a borderline
+// rejection was re-scored (gt-cz07b).
 func verdictCommentText(v Verdict, head string, start, end time.Time) string {
-	return fmt.Sprintf("om %s %.2f (om %s, %s–%s) %s",
+	return fmt.Sprintf("om %s %.2f (om %s, %s–%s) %s%s",
 		verdictCommentWord(v), v.Score, verdictCommentVersion(v),
-		start.UTC().Format(time.RFC3339), end.UTC().Format(time.RFC3339), verdictCommentHead(head))
+		start.UTC().Format(time.RFC3339), end.UTC().Format(time.RFC3339), verdictCommentHead(head),
+		verdictCommentRescore(v))
+}
+
+// verdictCommentRescore renders the re-score clause of a verdict comment: both
+// om scores and which run is which, so a bead's reader can tell an approve om
+// reached twice — the second time carrying it over the bar — from one it
+// reached the first time (gt-cz07b). The rejected run's score is recorded
+// nowhere else when the rerun approves.
+func verdictCommentRescore(v Verdict) string {
+	if v.Rescore == nil {
+		return ""
+	}
+	return fmt.Sprintf(" (re-scored: %.2f rejected first, %.2f on the rerun)", v.Rescore.First, v.Rescore.Rerun)
 }
 
 // verdictCommentWord is the verdict as the comment names it: a landing the
