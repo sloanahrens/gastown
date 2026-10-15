@@ -12,6 +12,8 @@ package dashboard
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/attention"
 )
 
 // Entry is one line of the feed: what gt tail's default view would print.
@@ -636,6 +638,9 @@ type Config struct {
 	Escalation func() *Escalations
 	// Dispatch reads the spec dispatcher's last tick from the daemon log.
 	Dispatch func() *Dispatch
+	// Attention returns the attention queue's transitions that appeared since
+	// its last call, and the acks as they stand (NewAttentionFollower).
+	Attention func() ([]attention.Event, attention.Acks)
 	// Models reads the header strip's models from the configs the town keeps.
 	Models func() *Models
 	// Queue reads the work queue lists; Bead reads one bead's text on request.
@@ -671,6 +676,7 @@ type Config struct {
 	UsageEvery      time.Duration
 	EscalationEvery time.Duration
 	DispatchEvery   time.Duration
+	AttentionEvery  time.Duration
 	ModelsEvery     time.Duration
 	QueueEvery      time.Duration
 	TrendEvery      time.Duration
@@ -720,6 +726,9 @@ func (c *Config) defaults() {
 	def(&c.UsageEvery, 60*time.Second)
 	def(&c.EscalationEvery, 60*time.Second)
 	def(&c.DispatchEvery, 10*time.Second)
+	// The daemon appends to events.jsonl once a heartbeat; a read is a stat and
+	// the new lines.
+	def(&c.AttentionEvery, 5*time.Second)
 	// The strip's two configs are files an operator edits by hand, so it reads
 	// them on the same minute the other slow readers use: a mode switched in
 	// settings shows within one poll, and a poll is a page's worth of slack.

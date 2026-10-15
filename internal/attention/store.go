@@ -183,7 +183,38 @@ func rotateIfFull(path, rotated string, max int64) error {
 // that does not parse is skipped: a process killed mid-write leaves one, and
 // losing that line beats failing the read that lists the rest.
 func ReadEvents(townRoot string) ([]Event, error) {
-	f, err := os.Open(EventsPath(townRoot))
+	return readEventsFile(EventsPath(townRoot))
+}
+
+// ReadRetainedEvents returns every transition the two retained logs hold,
+// oldest first: events.jsonl.1 and then events.jsonl. A reader that wants the
+// conditions standing now needs both, because a rotation can leave the line
+// that raised one in the rotated file.
+func ReadRetainedEvents(townRoot string) ([]Event, error) {
+	old, err := readEventsFile(RotatedEventsPath(townRoot))
+	if err != nil {
+		return nil, err
+	}
+	cur, err := readEventsFile(EventsPath(townRoot))
+	return append(old, cur...), err
+}
+
+// ParseEventLine decodes one events.jsonl line. It reports false for a blank
+// line or one that does not parse.
+func ParseEventLine(line string) (Event, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return Event{}, false
+	}
+	var e Event
+	if json.Unmarshal([]byte(line), &e) != nil {
+		return Event{}, false
+	}
+	return e, true
+}
+
+func readEventsFile(path string) ([]Event, error) {
+	f, err := os.Open(path) //nolint:gosec // G304: a path built from the town root
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -195,15 +226,9 @@ func ReadEvents(townRoot string) ([]Event, error) {
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
+		if e, ok := ParseEventLine(scanner.Text()); ok {
+			out = append(out, e)
 		}
-		var e Event
-		if json.Unmarshal([]byte(line), &e) != nil {
-			continue
-		}
-		out = append(out, e)
 	}
 	return out, scanner.Err()
 }

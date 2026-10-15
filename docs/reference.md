@@ -890,6 +890,12 @@ gt attention ack <key>       # hide an item until its condition clears
 the `events.jsonl` line, and `--since DURATION` replays that window first. One
 `--follow --wake-only` monitor replaces a monitor per condition.
 
+The dashboard's Alerts panel shows the same wake events: a `wake=true` raised
+line is an alert keyed by its `key` and titled with its rule id until a cleared
+line or an ack removes it. Where the dashboard's own alert covers the same
+condition (red main, an open escalation, a polecat stall, a stuck queue), only
+the attention alert shows.
+
 The queue is three files under `<town>/.runtime/attention/`. The daemon keeps a
 fourth there, `tips.json`: the origin tips the direct-push check has seen, so a
 daemon restart does not drop a push nobody has acked. `gt attention` only ever

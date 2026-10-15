@@ -144,6 +144,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.Dispatch != nil {
 		start(h.cfg.DispatchEvery, h.pollDispatch)
 	}
+	if h.cfg.Attention != nil {
+		start(h.cfg.AttentionEvery, h.pollAttention)
+	}
 	if h.cfg.Models != nil {
 		start(h.cfg.ModelsEvery, h.pollModels)
 	}
@@ -359,14 +362,49 @@ func (h *Hub) observeLocked(entries []Entry) int {
 	raised := 0
 	for _, al := range h.alerts.Observe(h.prev, next, entries) {
 		raised++
-		h.state.Alerts = append(h.state.Alerts, al)
-		if n := len(h.state.Alerts); n > alertsKept {
-			h.state.Alerts = append([]Alert(nil), h.state.Alerts[n-alertsKept:]...)
-		}
-		h.broadcastLocked(frame("alert", al))
+		h.addAlertLocked(al)
 	}
 	h.prev = next
 	return raised
+}
+
+// addAlertLocked keeps al among the recent alerts and tells the open pages.
+func (h *Hub) addAlertLocked(al Alert) {
+	h.state.Alerts = append(h.state.Alerts, al)
+	if n := len(h.state.Alerts); n > alertsKept {
+		h.state.Alerts = append([]Alert(nil), h.state.Alerts[n-alertsKept:]...)
+	}
+	h.broadcastLocked(frame("alert", al))
+}
+
+// pollAttention feeds the attention queue's wake events to the alerts, so the
+// Alerts panel shows what the overseer's wake stream shows. An alert that the
+// events clear, or that the Alerter's own alert for the same condition gives
+// way to, leaves the list.
+func (h *Hub) pollAttention() {
+	evs, acks := h.cfg.Attention()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	raised, removed := h.alerts.ObserveAttention(evs, acks)
+	if len(removed) > 0 {
+		gone := make(map[string]bool, len(removed))
+		for _, k := range removed {
+			gone[k] = true
+		}
+		kept := h.state.Alerts[:0:0]
+		for _, al := range h.state.Alerts {
+			if !gone[al.Key] {
+				kept = append(kept, al)
+			}
+		}
+		h.state.Alerts = kept
+	}
+	for _, al := range raised {
+		h.addAlertLocked(al)
+	}
+	if len(removed) > 0 || len(raised) > 0 {
+		h.publishLocked()
+	}
 }
 
 func frame(event string, v any) []byte {

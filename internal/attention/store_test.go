@@ -293,3 +293,42 @@ func TestStoreAppendEventsRetryWritesEachEventOnce(t *testing.T) {
 		}
 	}
 }
+
+// ParseEventLine is the one decoder of an events.jsonl line: a blank or broken
+// line is not an event.
+func TestParseEventLine(t *testing.T) {
+	t.Parallel()
+	e, ok := ParseEventLine(`  {"ts":"2026-10-14T10:00:00Z","class":"red-main","severity":"high","text":"t","key":"k","state":"new","rule":"main.red","handled":"operator_action","wake":true}` + "\n")
+	if !ok || e.Key != "k" || e.Rule != RuleRedMain || !e.Wake || e.State != EventNew {
+		t.Fatalf("ParseEventLine = %+v, %v", e, ok)
+	}
+	for _, bad := range []string{"", "   ", `{"key":`, "not json"} {
+		if _, ok := ParseEventLine(bad); ok {
+			t.Errorf("ParseEventLine(%q) parsed", bad)
+		}
+	}
+}
+
+// ReadRetainedEvents reads the rotated log and then the current one, so the
+// line that raised a condition survives a rotation; a town with neither file
+// reads as no events.
+func TestReadRetainedEventsSpansTheRotation(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if evs, err := ReadRetainedEvents(town); err != nil || len(evs) != 0 {
+		t.Fatalf("no files -> %v, %v", evs, err)
+	}
+	if err := AppendEvents(town, []Event{{Key: "old", State: EventNew}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(EventsPath(town), RotatedEventsPath(town)); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendEvents(town, []Event{{Key: "new", State: EventNew}}); err != nil {
+		t.Fatal(err)
+	}
+	evs, err := ReadRetainedEvents(town)
+	if err != nil || len(evs) != 2 || evs[0].Key != "old" || evs[1].Key != "new" {
+		t.Fatalf("ReadRetainedEvents = %+v, %v, want old then new", evs, err)
+	}
+}
