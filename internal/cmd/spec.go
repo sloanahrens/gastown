@@ -329,11 +329,104 @@ func specChildren(townRoot, beadID string) ([]specdispatch.Child, error) {
 	if err != nil {
 		return nil, err
 	}
+	return childSpecs(issues), nil
+}
+
+// childSpecs reduces a child set to what the container rule reads.
+func childSpecs(issues []*beads.Issue) []specdispatch.Child {
 	out := make([]specdispatch.Child, 0, len(issues))
 	for _, issue := range issues {
 		out = append(out, specdispatch.Child{ID: issue.ID, Status: issue.Status})
 	}
-	return out, nil
+	return out
+}
+
+// specHoldKnobs is the dispatcher's own settings the peer-hold question reads:
+// the candidate filter's priority ceiling and reserved labels, and the shape
+// gate with the template it lints against. Reading them from the town is the
+// caller's (specHoldKnobsFrom), so the hold rule itself is a function of the
+// bead and these values.
+type specHoldKnobs struct {
+	MaxPriority int
+	Reserved    []string
+	ShapeGate   string
+	Template    specdispatch.Template
+}
+
+// specHoldKnobsFrom reads the knobs from the town's settings — the same keys
+// runSpecDispatch reads them from. The second result is false when those
+// settings will not load, which leaves the hold question unanswered rather
+// than answered wrongly.
+func specHoldKnobsFrom(townRoot string) (specHoldKnobs, bool) {
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
+	if err != nil {
+		return specHoldKnobs{}, false
+	}
+	sd := loadSpecDispatchConfig(townRoot)
+	knobs := specHoldKnobs{
+		MaxPriority: ts.PolecatPool.GetMaxPriority(),
+		Reserved:    specBudgetFromConfig(ts, sd).ReservedLabels(),
+		ShapeGate:   ts.PolecatPool.GetShapeGate(),
+	}
+	if knobs.ShapeGate != specdispatch.ShapeGateOff {
+		knobs.Template = specdispatch.LoadTemplate(specTemplatePath(sd))
+	}
+	return knobs, true
+}
+
+// specPeerHeldFrom reports why the spec dispatcher would not sling beadID, and
+// "" when the bead is one it would take. It asks of the bead the three
+// questions the tick asks of a candidate before spending a seat: the candidate
+// filter (specdispatch.Eligible), the shape gate's verdict, and the container
+// rule. The overlap guard reads the answer on an unstarted peer, so a cluster
+// whose head is held dispatches its next eligible bead instead of none
+// (gt-00gee).
+//
+// A hold the tick decides from its own state rather than the bead — seat
+// availability, the per-tick limit, the pre-dispatch overlap hold, a red-main
+// revert in flight — is not answered here: those lift within a tick or two, so
+// the peer they hold is one the cluster should still wait for. Nor is a hold
+// that holds every bead of a rig together, such as a parked or docked rig: the
+// comparison pool is the candidate's own rig, so such a hold can never tell a
+// peer apart from the bead being slung.
+//
+// Unknown is not held: a bead that will not read, or a child set that will
+// not, answers "" and the guard keeps refusing. That reads wrong as a delayed
+// dispatch, where the other answer reads wrong as two seats on one defect.
+func specPeerHeldFrom(store beads.Client, knobs specHoldKnobs, beadID string) string {
+	issue, err := store.Show(beadID)
+	if err != nil || issue == nil {
+		return ""
+	}
+	spec := specFromIssue(issue)
+	if ok, why := specdispatch.Eligible(spec, knobs.MaxPriority, knobs.Reserved); !ok {
+		return why
+	}
+	if knobs.ShapeGate != specdispatch.ShapeGateOff && !spec.HasLabel(specdispatch.ShapeWaivedLabel) {
+		if verdict := specdispatch.Lint(spec, knobs.Template); !verdict.Clean() {
+			// The first refusal, as the lint's own one-line verdict names it:
+			// the whole ShapeNote can run to every missing section, and this
+			// reason is printed per overlapping bead in the guard's report.
+			return verdict.Field + ": " + verdict.Reason
+		}
+	}
+	children, err := store.Children(beadID)
+	if err != nil {
+		return ""
+	}
+	spec.Children = childSpecs(children)
+	return specdispatch.OpenChildHold(spec)
+}
+
+// specPeerHeldPinned is specPeerHeldFrom against the rig's own beads, the
+// shape the overlap guard asks it in: the knobs come from the town, the bead
+// from the database its comparison pool came from.
+func specPeerHeldPinned(townRoot, beadsDir, beadID string) string {
+	knobs, ok := specHoldKnobsFrom(townRoot)
+	if !ok {
+		return ""
+	}
+	return specPeerHeldFrom(slingStores{}.pinnedAt(beadsDir), knobs, beadID)
 }
 
 func runSpecLint(cmd *cobra.Command, args []string) error {
@@ -771,12 +864,13 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			if isSpecOverlapRefusal(err) {
 				// The content-overlap guard refuses work in flight, and an
 				// unstarted peer only while that peer is ahead of this bead in
-				// dispatch order. Either way the refusal lifts on its own: the
-				// peer is slung (and this bead is then held against work in
-				// flight), or it closes. The bead stays ready and the next tick
-				// retries it, rather than leaving a label for an operator to
-				// clear by hand (gt-q6zoo, gt-nlkba).
-				report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent, Line: fmt.Sprintf("%s: sling deferred, content overlap holds it (work in flight, or unstarted work ahead of it): %s", id, firstErrLine(err))})
+				// dispatch order and is one the dispatcher would sling. Either
+				// way the refusal lifts on its own: the peer is slung (and this
+				// bead is then held against work in flight), or it closes. The
+				// bead stays ready and the next tick retries it, rather than
+				// leaving a label for an operator to clear by hand (gt-q6zoo,
+				// gt-nlkba).
+				report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent, Line: fmt.Sprintf("%s: sling deferred, content overlap holds it (work in flight, or unstarted work the dispatcher would sling first): %s", id, firstErrLine(err))})
 				continue
 			}
 			if isSpecSlingRefusal(err) {
@@ -922,9 +1016,10 @@ func specResumeNote(resume, gone string) string {
 
 // isSpecOverlapRefusal reports whether a sling error is the content-overlap
 // guard's refusal. The guard refuses work in flight, and an unstarted peer only
-// while that peer comes first in dispatch order, so the refusal clears on its
-// own once the peer is slung or closes: the dispatcher defers the bead rather
-// than labeling it out of the queue (gt-q6zoo, gt-nlkba).
+// while that peer comes first in dispatch order and the dispatcher would sling
+// it, so the refusal clears on its own once the peer is slung or closes: the
+// dispatcher defers the bead rather than labeling it out of the queue
+// (gt-q6zoo, gt-nlkba, gt-00gee).
 func isSpecOverlapRefusal(err error) bool {
 	return errors.Is(err, errSlingDuplicateContent)
 }

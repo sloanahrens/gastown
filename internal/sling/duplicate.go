@@ -40,7 +40,11 @@ type Duplicate struct {
 	// taken first (gt-nlkba).
 	Priority  int
 	CreatedAt string
-	Refs      ContentRefs
+	// Held names why the dispatcher would not sling this bead, empty when it
+	// would. The verdict is the caller's, because deciding that a bead is the
+	// dispatcher's to run is the dispatcher's own rule (gt-00gee).
+	Held string
+	Refs ContentRefs
 	// Blockers lists the IDs this bead has a blocking dependency on, as far as
 	// the caller could read them from bd. The overlap guard walks these edges
 	// to tell a bead of the candidate's own chain from a duplicate: a chain's
@@ -63,16 +67,20 @@ type DuplicateMatch struct {
 }
 
 // Blocking reports whether the overlap is strong enough to refuse the sling:
-// a shared test name against live work, since shared files alone are common
-// between beads that are genuinely distinct (gt-4k3fj.5). candidate is the
-// bead being slung, which the unstarted case ranks the overlap against.
+// a shared test name against work that is either in flight or the dispatcher's
+// next move, since shared files alone are common between beads that are
+// genuinely distinct (gt-4k3fj.5). candidate is the bead being slung, which
+// the unstarted case ranks the overlap against.
 //
 // Work in flight on the test refuses the sling whoever the two beads are. An
-// unstarted overlap — an open bead, holding no seat — refuses only when it
-// precedes the candidate in dispatch order, which lets exactly one bead of an
-// all-open cluster through: the one the ready board would reach first. Every
-// open bead refusing every other refused the whole cluster forever and left
-// the dispatcher nothing to sling (gt-nlkba).
+// unstarted overlap — an open bead, holding no seat — refuses only when both
+// of these hold: it precedes the candidate in dispatch order, and it is a bead
+// the dispatcher would actually sling (Held empty). One is not enough. Every
+// open bead refusing every other refused an all-open cluster forever and left
+// the dispatcher nothing to sling (gt-nlkba); and a peer the dispatcher holds
+// for a reason of its own — a shape the lint refuses, a hold label, a
+// container whose child is open — is never slung at all, so ranking it first
+// refused the rest of the cluster for as long as the hold lasted (gt-00gee).
 func (m DuplicateMatch) Blocking(candidate Duplicate) bool {
 	if len(m.SharedTests) == 0 {
 		return false
@@ -80,7 +88,7 @@ func (m DuplicateMatch) Blocking(candidate Duplicate) bool {
 	if liveOverlapStatuses[m.Bead.Status] {
 		return true
 	}
-	return m.Bead.Status == "open" && Precedes(m.Bead, candidate)
+	return m.Bead.Status == "open" && m.Bead.Held == "" && Precedes(m.Bead, candidate)
 }
 
 // liveOverlapStatuses are the statuses of work already in flight: a bead in
@@ -264,8 +272,9 @@ func DecideDuplicates(candidate Duplicate, matches []DuplicateMatch) DuplicateDe
 		b.WriteString("  Two beads describing one defect from different vantage points share no\n")
 		b.WriteString("  keywords, but they do name the same failing tests (gt-mcq).\n")
 		b.WriteString("  Work in flight on that test refuses the sling; unstarted work refuses only\n")
-		b.WriteString("  when it comes first in dispatch order, so a cluster of ready beads still\n")
-		b.WriteString("  dispatches one at a time rather than not at all.\n\n")
+		b.WriteString("  when it comes first in dispatch order AND is one the dispatcher would\n")
+		b.WriteString("  sling, so a cluster of ready beads dispatches one at a time rather than\n")
+		b.WriteString("  none of them, even when the bead ahead of this one is held.\n\n")
 		writeMatchList(&b, blocking)
 		// One line, and the report's last: an automatic dispatcher logs only
 		// the last line of a failed sling, so it has to carry both the reason
@@ -273,10 +282,11 @@ func DecideDuplicates(candidate Duplicate, matches []DuplicateMatch) DuplicateDe
 		fmt.Fprintf(&b, "\nRefusing to sling %s: %d overlapping bead(s) share the test(s) above; re-sling with --force if this is genuinely distinct: gt sling %s <target> --force\n",
 			beadID, len(blocking), beadID)
 	} else {
-		fmt.Fprintf(&b, "%s %s overlaps %d existing bead(s), none of them in flight or ahead of it.\n",
+		fmt.Fprintf(&b, "%s %s overlaps %d existing bead(s), none of them in flight or next for the dispatcher.\n",
 			style.Warning.Render("⚠"), beadID, len(warning))
-		b.WriteString("  Shared files alone, closed or parked work, and unstarted work this bead would\n")
-		b.WriteString("  reach first do not block; this sling proceeds.\n\n")
+		b.WriteString("  Shared files alone, closed or parked work, unstarted work this bead would\n")
+		b.WriteString("  reach first, and unstarted work the dispatcher holds for a reason of its\n")
+		b.WriteString("  own do not block; this sling proceeds.\n\n")
 		writeMatchList(&b, warning)
 	}
 
@@ -302,10 +312,14 @@ func writeMatchList(b *strings.Builder, matches []DuplicateMatch) {
 	}
 }
 
-// statusPhrase renders a match's state for the report, including how recently a
-// closed bead was closed — the age is what tells the operator whether this is
-// work that landed an hour ago or a week ago.
+// statusPhrase renders a match's state for the report: the hold that keeps an
+// unstarted bead from refusing the sling, and how recently a closed bead was
+// closed — the age is what tells the operator whether this is work that landed
+// an hour ago or a week ago.
 func statusPhrase(c Duplicate) string {
+	if c.Status == "open" && c.Held != "" {
+		return "open, held from dispatch: " + c.Held
+	}
 	if c.Status != "closed" {
 		return c.Status
 	}

@@ -58,9 +58,9 @@ Content Duplicate Guard:
   defect from different vantage points share no keywords, but they do name the
   same tests. A shared test name refuses the sling: work already in flight
   always, and unstarted work only when it comes first in dispatch order
-  (priority, then age, then id), so a cluster of overlapping ready beads still
-  dispatches one at a time. A shared file alone warns and proceeds.
-  --force overrides.
+  (priority, then age, then id) and the dispatcher would sling it, so a cluster
+  of overlapping ready beads dispatches one at a time even when the bead ahead
+  of it is held. A shared file alone warns and proceeds. --force overrides.
   gt sling gt-abc greenplace --force                # Sling despite the overlap
 
 Natural Language Args:

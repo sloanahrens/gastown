@@ -39,10 +39,14 @@ import (
 // keywords, or embeddings, because those are exactly what the two vantage
 // points defeat. Which overlaps of a shared test refuse is narrower than it
 // looks: work in flight always does, but an unstarted peer only when it comes
-// first in dispatch order, or a cluster of ready beads naming one test would
-// refuse each other forever and dispatch none of them (gt-nlkba). The rule
-// lives in sling.Blocking / sling.DecideDuplicates, so the CLI and the
-// dispatcher cannot disagree about it.
+// first in dispatch order and the dispatcher would sling it — a cluster of
+// ready beads naming one test would otherwise refuse each other forever and
+// dispatch none of them (gt-nlkba), and a head the dispatcher holds for a
+// reason of its own would refuse the rest for as long as the hold lasted
+// (gt-00gee). The rule lives in sling.Blocking / sling.DecideDuplicates, so
+// the CLI and the dispatcher cannot disagree about it, and the peer's
+// dispatchability is answered here (specPeerHeldFrom) because deciding it is
+// the dispatcher's rule.
 
 const (
 	// duplicateLookback bounds the recently-closed half of the comparison pool.
@@ -234,6 +238,15 @@ func findDuplicateMatches(candidate duplicateCandidate, pool []duplicateCandidat
 			SharedFiles: sharedFiles,
 		})
 	}
+	sortDuplicateMatches(candidate, matches)
+	return matches
+}
+
+// sortDuplicateMatches orders a match list for the report: the ones that
+// refuse the sling first, then by bead ID. A caller that stamps the peers with
+// the dispatcher's verdict (resolvePeerHolds) sorts again afterwards, since
+// that verdict is what decides which ones refuse.
+func sortDuplicateMatches(candidate duplicateCandidate, matches []duplicateMatch) {
 	sort.Slice(matches, func(i, j int) bool {
 		bi, bj := matches[i].Blocking(candidate), matches[j].Blocking(candidate)
 		if bi != bj {
@@ -241,7 +254,6 @@ func findDuplicateMatches(candidate duplicateCandidate, pool []duplicateCandidat
 		}
 		return matches[i].Bead.ID < matches[j].Bead.ID
 	})
-	return matches
 }
 
 // checkSlingDuplicates compares a bead's own content against its rig's open and
@@ -287,7 +299,37 @@ func (p *duplicatePools) check(townRoot, beadID string, info *beadInfo) (*duplic
 		return candidate, nil, fmt.Errorf("duplicate check skipped: %w", err)
 	}
 	matches := findDuplicateMatches(*candidate, pool)
-	return candidate, dropRelatedMatches(*candidate, pool, matches), nil
+	matches = dropRelatedMatches(*candidate, pool, matches)
+	return candidate, p.resolvePeerHolds(townRoot, beadsDir, *candidate, matches), nil
+}
+
+// resolvePeerHolds stamps each unstarted peer the guard's rank is about to
+// weigh with the dispatcher's verdict on it (sling.Duplicate.Held): the reason
+// the dispatcher would not sling that bead, or "" when it would. Only a peer
+// that is open and ahead of the candidate is asked — those are the only ones
+// an answer changes (sling.Blocking) — so the question costs one read per peer
+// that could refuse rather than one per pool bead.
+//
+// A pool built without a resolver leaves every peer un-asked, which is the
+// conservative reading of the same silence: each still holds the sling on its
+// rank alone.
+func (p *duplicatePools) resolvePeerHolds(townRoot, beadsDir string, candidate duplicateCandidate, matches []duplicateMatch) []duplicateMatch {
+	if p.held == nil || len(matches) == 0 {
+		return matches
+	}
+	asked := false
+	for i := range matches {
+		peer := matches[i].Bead
+		if peer.Status != "open" || !sling.Precedes(peer, candidate) {
+			continue
+		}
+		matches[i].Bead.Held = p.held(townRoot, beadsDir, peer.ID)
+		asked = true
+	}
+	if asked {
+		sortDuplicateMatches(candidate, matches)
+	}
+	return matches
 }
 
 // dropRelatedMatches removes the overlaps the candidate's dependency chain
@@ -403,16 +445,24 @@ type duplicatePoolEntry struct {
 // fetch. The process shares slingDuplicatePools; a test builds its own.
 type duplicatePools struct {
 	fetch func(beadsDir string) ([]duplicateCandidate, error)
+	// held reports why the dispatcher would not sling a bead, "" when it would
+	// (sling.Duplicate.Held). It is a parameter of the check rather than part
+	// of the pool fetch because it is a question about the dispatcher's own
+	// knobs — the priority ceiling, the shape gate, the child set — asked of
+	// the few peers the rank is weighing. A nil resolver is the conservative
+	// reading: no peer is known to be held, so each still holds the sling on
+	// its rank.
+	held  func(townRoot, beadsDir, beadID string) string
 	mu    sync.Mutex
 	cache map[string]*duplicatePoolEntry
 }
 
-func newDuplicatePools(fetch func(beadsDir string) ([]duplicateCandidate, error)) *duplicatePools {
-	return &duplicatePools{fetch: fetch, cache: map[string]*duplicatePoolEntry{}}
+func newDuplicatePools(fetch func(beadsDir string) ([]duplicateCandidate, error), held func(townRoot, beadsDir, beadID string) string) *duplicatePools {
+	return &duplicatePools{fetch: fetch, held: held, cache: map[string]*duplicatePoolEntry{}}
 }
 
 // slingDuplicatePools is the process-wide cache, read from the bd on PATH.
-var slingDuplicatePools = newDuplicatePools(fetchDuplicatePool)
+var slingDuplicatePools = newDuplicatePools(fetchDuplicatePool, specPeerHeldPinned)
 
 // poolFor returns the comparison pool for a rig, reusing a snapshot taken
 // within duplicatePoolTTL. Returns a slice shared with the cache; callers must
