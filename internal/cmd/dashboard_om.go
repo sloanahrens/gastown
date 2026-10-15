@@ -438,8 +438,23 @@ func newOMReader(townRoot string, landings *dashLandings, polecatFor func(rig, b
 // the base the worker merges onto. found is false for a target with no
 // .om.json; any other failure is an error, never "none".
 func readRigOMJSON(townRoot, rigName string) (data []byte, found bool, err error) {
+	return readRigOMJSONIn(townRoot, rigName, func(repoPath string) omRigRepo { return git.NewGit(repoPath) })
+}
+
+// omRigRepo is the rig's bare repository as readRigOMJSONIn uses it: the
+// remotes the landing target resolves against, and the file read at its tip.
+type omRigRepo interface {
+	omFileReader
+	rig.LandingRemotes
+}
+
+// readRigOMJSONIn is readRigOMJSON over open, which returns the repository at
+// a path: the rule that picks the landing remote and branch, apart from the
+// git it reads them through.
+func readRigOMJSONIn(townRoot, rigName string, open func(repoPath string) omRigRepo) (data []byte, found bool, err error) {
 	rigPath := filepath.Join(townRoot, rigName)
-	remote, err := rig.ResolveLandingRemote(townRoot, rigName)
+	repo := open(filepath.Join(rigPath, ".repo.git"))
+	remote, err := rig.ResolveLandingRemoteIn(repo, townRoot, rigName)
 	if err != nil {
 		return nil, false, err
 	}
@@ -451,7 +466,7 @@ func readRigOMJSON(townRoot, rigName string) (data []byte, found bool, err error
 	if cfg != nil && cfg.DefaultBranch != "" {
 		branch = cfg.DefaultBranch
 	}
-	return omFileAt(git.NewGit(filepath.Join(rigPath, ".repo.git")), remote+"/"+branch)
+	return omFileAt(repo, remote+"/"+branch)
 }
 
 // omFileReader is the part of *git.Git omFileAt reads a file through.

@@ -121,3 +121,138 @@ func TestOMPanelFileAtSeparatesAbsentFromBroken(t *testing.T) {
 		t.Errorf("broken repository: found=%v err=%v; want the error and not none", found, err)
 	}
 }
+
+// fakeOMRig is a rig's bare repository for readRigOMJSONIn: refs maps a ref to
+// the .om.json at its tip, and a ref it does not hold fails to resolve, as in
+// git, so a read at the wrong ref is an error and never a file. remotes
+// and order are the remotes the landing target resolves against.
+type fakeOMRig struct {
+	refs    map[string]string
+	remotes map[string]string // remote name -> URL
+	order   []string
+}
+
+func (f *fakeOMRig) ShowFileAtRev(ref, path string) (string, error) {
+	out, ok := f.refs[ref]
+	if !ok {
+		return "", errors.New("resolving " + ref + ": unknown revision")
+	}
+	if out == "" {
+		return "", git.ErrNotAtRef
+	}
+	return out, nil
+}
+
+func (f *fakeOMRig) Remotes() ([]string, error)         { return f.order, nil }
+func (f *fakeOMRig) RemoteURL(n string) (string, error) { return f.remotes[n], nil }
+
+// omRigTown writes a town with one rig whose config.json is cfg ("" writes
+// none) and returns the town root.
+func omRigTown(t *testing.T, cfg string) string {
+	t.Helper()
+	town := t.TempDir()
+	rigDir := filepath.Join(town, omPanelRig)
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if cfg != "" {
+		if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(cfg), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return town
+}
+
+func omRigCfg(branch, forgejoURL string) string {
+	cfg := `{"type":"rig","version":1,"name":"` + omPanelRig + `"`
+	if branch != "" {
+		cfg += `,"default_branch":"` + branch + `"`
+	}
+	if forgejoURL != "" {
+		cfg += `,"merge_queue":{"forgejo":{"remote_url":"` + forgejoURL + `"}}`
+	}
+	return cfg + "}"
+}
+
+// The panel reads the file at the rig's landing target, the branch the worker
+// merges onto. A rig that lands on master has its .om.json there, and a read at
+// origin/main would show the wrong bar or none while every stubbed-reader test
+// stays green (gt-8yk8n).
+func TestReadRigOMJSON_UsesConfiguredDefaultBranch(t *testing.T) {
+	t.Parallel()
+	town := omRigTown(t, omRigCfg("master", ""))
+	repo := &fakeOMRig{refs: map[string]string{"origin/master": `{"threshold":0.8}`}}
+	var opened string
+	data, found, err := readRigOMJSONIn(town, omPanelRig, func(path string) omRigRepo { opened = path; return repo })
+	if err != nil || !found || string(data) != `{"threshold":0.8}` {
+		t.Errorf("read = %q found=%v err=%v; want master's file", data, found, err)
+	}
+	if want := filepath.Join(town, omPanelRig, ".repo.git"); opened != want {
+		t.Errorf("opened %s, want the rig's bare repository %s", opened, want)
+	}
+}
+
+// Without a configured branch the target is main, whether the rig has no
+// config.json or one that names none.
+func TestReadRigOMJSON_DefaultsToMain(t *testing.T) {
+	t.Parallel()
+	for name, cfg := range map[string]string{"no config.json": "", "config without default_branch": omRigCfg("", "")} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			repo := &fakeOMRig{refs: map[string]string{"origin/main": `{"threshold":0.7}`, "origin/master": `{"threshold":0.1}`}}
+			data, found, err := readRigOMJSONIn(omRigTown(t, cfg), omPanelRig, func(string) omRigRepo { return repo })
+			if err != nil || !found || string(data) != `{"threshold":0.7}` {
+				t.Errorf("read = %q found=%v err=%v; want main's file", data, found, err)
+			}
+		})
+	}
+}
+
+// A landing target with no .om.json is none; the rig's remote and branch still
+// pick the ref it was looked for at.
+func TestReadRigOMJSON_TargetWithoutTheFileIsNone(t *testing.T) {
+	t.Parallel()
+	repo := &fakeOMRig{refs: map[string]string{"origin/master": ""}}
+	data, found, err := readRigOMJSONIn(omRigTown(t, omRigCfg("master", "")), omPanelRig, func(string) omRigRepo { return repo })
+	if err != nil || found || data != nil {
+		t.Errorf("read = %q found=%v err=%v; want none and no error", data, found, err)
+	}
+}
+
+// The ref is the landing remote's, not always origin: a rig cut over to
+// Forgejo lands on the remote carrying the configured URL.
+func TestReadRigOMJSON_ReadsTheLandingRemotesBranch(t *testing.T) {
+	t.Parallel()
+	const url = "https://forgejo.example/gastown/gastown"
+	repo := &fakeOMRig{
+		order:   []string{"origin", "forgejo"},
+		remotes: map[string]string{"origin": "https://github.com/acme/gastown.git", "forgejo": url},
+		refs:    map[string]string{"forgejo/master": `{"threshold":0.9}`, "origin/master": `{"threshold":0.1}`},
+	}
+	data, found, err := readRigOMJSONIn(omRigTown(t, omRigCfg("master", url)), omPanelRig, func(string) omRigRepo { return repo })
+	if err != nil || !found || string(data) != `{"threshold":0.9}` {
+		t.Errorf("read = %q found=%v err=%v; want forgejo/master's file", data, found, err)
+	}
+}
+
+// A failure in either lookup is an error, never "the rig has no .om.json": the
+// panel would otherwise show the user's bar as the one the worker enforces.
+func TestReadRigOMJSON_ConfigAndRemoteFailuresAreErrors(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		// The landing remote is resolved first: a Forgejo URL no remote carries.
+		"landing remote matches no remote": omRigCfg("main", "https://forgejo.example/other/repo"),
+		// A config.json that does not decode must not read as an unconfigured rig.
+		"rig config that does not decode": `{"type":"rig","version":1,"name":"` + omPanelRig + `","defualt_branch":"master"}`,
+	}
+	for name, cfg := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			repo := &fakeOMRig{refs: map[string]string{"origin/main": `{"threshold":0.7}`}}
+			data, found, err := readRigOMJSONIn(omRigTown(t, cfg), omPanelRig, func(string) omRigRepo { return repo })
+			if err == nil || found || data != nil {
+				t.Errorf("read = %q found=%v err=%v; want an error", data, found, err)
+			}
+		})
+	}
+}
