@@ -1155,24 +1155,38 @@ func tierSweepVerdictsAt(tiers map[string]tierSweepTierResult) string {
 func TestTierSweepRecordedTiers(t *testing.T) {
 	t.Parallel()
 	stages := []tierSweepStage{{tiers: []string{"shell"}}, {tiers: []string{"integration", "race"}}}
-	prior := map[string]tierSweepTierResult{
+	prior := tierSweepState{LastSHA: "tipA", Tiers: map[string]tierSweepTierResult{
 		"shell":       {Verdict: tierSweepGreen, SHA: "tipA"},
 		"integration": {Verdict: tierSweepRed, SHA: "tipA"},
 		"retired":     {Verdict: tierSweepRed, SHA: "tipA"},
-	}
+	}}
 	tests := []struct {
 		name     string
+		prior    tierSweepState
 		results  map[string]tierSweepTierResult
 		deferred bool
 		want     string
 	}{{
-		name: "a full cycle keeps only its own verdicts",
+		name:  "a full cycle keeps only its own verdicts",
+		prior: prior,
 		results: map[string]tierSweepTierResult{
 			"shell": {Verdict: tierSweepGreen}, "integration": {Verdict: tierSweepGreen}, "race": {Verdict: tierSweepRed},
 		},
 		want: "integration=GREEN@tipB race=RED@tipB shell=GREEN@tipB",
 	}, {
 		name:     "a partial cycle keeps the earlier verdict for the tiers it never reached",
+		prior:    prior,
+		results:  map[string]tierSweepTierResult{"shell": {Verdict: tierSweepGreen}},
+		deferred: true,
+		want:     "integration=RED@tipA shell=GREEN@tipB",
+	}, {
+		// The upgrade boundary: a record written before a verdict carried its
+		// own tip has none, and the record's LastSHA is the tip every tier in
+		// it was judged at.
+		name: "a carried verdict from a record with no per-tier tips takes that record's own",
+		prior: tierSweepState{LastSHA: "tipA", Tiers: map[string]tierSweepTierResult{
+			"integration": {Verdict: tierSweepRed},
+		}},
 		results:  map[string]tierSweepTierResult{"shell": {Verdict: tierSweepGreen}},
 		deferred: true,
 		want:     "integration=RED@tipA shell=GREEN@tipB",
@@ -1180,7 +1194,7 @@ func TestTierSweepRecordedTiers(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := tierSweepRecordedTiers(tc.results, prior, stages, "tipB", tc.deferred)
+			got := tierSweepRecordedTiers(tc.results, tc.prior, stages, "tipB", tc.deferred)
 			if rendered := tierSweepVerdictsAt(got); rendered != tc.want {
 				t.Errorf("recorded = %s, want %s", rendered, tc.want)
 			}
@@ -1245,6 +1259,49 @@ func TestTierSweepRigCycle_PartialCycleKeepsPriorRedTier(t *testing.T) {
 	}
 	if items[0].SHA != "tipA" {
 		t.Errorf("item = %+v, want it dated at the tip its verdict was taken at", items[0])
+	}
+}
+
+// The upgrade boundary a carried verdict crosses: a record written before a
+// verdict carried its own tip holds none, and the carry-over must date those
+// tiers at the record's tip rather than at the cycle that did not run them. An
+// empty tip is what the readers fall back to the newest tip for, which is the
+// misdating gt-euxf1 is about.
+func TestTierSweepRigCycle_CarriedLegacyVerdictKeepsTheRecordsTip(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec, _, _ := newTierSweepDaemon(t, now, "gastown")
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "tipB", nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+	// A record as an older daemon wrote it: the tiers carry no tip of their own.
+	if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{
+		LastRun: now.Add(-time.Hour), LastSHA: "tipA", LastGreenSHA: "green0",
+		Tiers: map[string]tierSweepTierResult{
+			"integration": {Verdict: tierSweepRed, Passed: 12, Failed: 1, FailedNames: []string{"TestThing"}},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec.result = func(st tierSweepStage) tierSweepStageResult {
+		if st.slot {
+			return tierSweepStageResult{err: errors.New("slot busy")}
+		}
+		return tierSweepStageResult{
+			output:   "tier-sweep: shell GREEN passed=3 failed=0 skipped=0 (logs /tmp/tier-sweep.x)\n",
+			exitCode: 0, ran: true,
+		}
+	}
+	if d.runTierSweep() {
+		t.Fatal("a partial cycle reached a verdict")
+	}
+
+	st := tierSweepTestState(t, d, "gastown")
+	got := st.Tiers["integration"]
+	if got.Verdict != tierSweepRed || got.SHA != "tipA" {
+		t.Fatalf("integration = %+v, want the carried RED dated at tipA, the tip its record judged it at", got)
+	}
+	if items := tierSweepItems(t, d, now, "gastown"); len(items) != 1 || items[0].SHA != "tipA" {
+		t.Errorf("items = %+v, want the carried RED's item dated at tipA", items)
 	}
 }
 

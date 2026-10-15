@@ -345,11 +345,9 @@ func (r *tierSweepReader) recordFailed(rig, sha string, known map[string]bool) m
 		if len(t.FailedNames) == 0 {
 			continue
 		}
-		// A tier a partial cycle carried forward names the tip its verdict was
-		// taken at, and its failing units are that tip's: attaching them to
-		// this row would date a red nobody re-ran to the tip this cycle saw
-		// (gt-euxf1). A record written before the field carries no tier sha,
-		// and the record's own has already been matched above.
+		// A carried tier's failing units belong to the tip it names, not to
+		// this row's: attaching them here would date a red nobody re-ran to
+		// the tip this cycle saw (gt-euxf1).
 		if t.SHA != "" && !tierSweepSameSHA(t.SHA, sha) {
 			continue
 		}

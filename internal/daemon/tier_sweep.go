@@ -117,9 +117,8 @@ const (
 // gt report --hour reads the same file (internal/cmd/report.go).
 type tierSweepState struct {
 	LastRun time.Time `json:"last_run"`
-	// LastSHA is the tip the last cycle saw. Every tier that cycle ran was
-	// judged there; a tier a Partial cycle did not reach carries the tip its
-	// verdict was taken at on the verdict itself.
+	// LastSHA is the tip the last cycle saw: every tier that cycle ran was
+	// judged there.
 	LastSHA string `json:"last_sha"`
 	// Partial is true while the last cycle stopped before running every stage
 	// it planned. Tiers then holds the tiers that cycle judged at LastSHA plus
@@ -1100,7 +1099,9 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 	}
 
 	state.LastRun = now
-	prior := state.Tiers
+	// The record this cycle replaces, read before the fields below rebind it:
+	// its LastSHA dates the verdicts the cycle carries forward.
+	prior := state
 	state.Tiers = tierSweepRecordedTiers(results, prior, stages, sha, deferred)
 	state.LastSHA = sha
 	state.Partial = deferred
@@ -1142,17 +1143,12 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 // tierSweepRecordedTiers is the verdict map one cycle leaves in the record:
 // every tier the cycle ran, under this cycle's tip, plus — for a cycle that
 // stopped before running every stage it planned — the verdict the previous
-// cycle took for each tier the schedule names and this one never reached.
-//
-// The carry-over is what keeps the record a reading of the tree rather than of
-// a single cycle. A tier nothing re-ran has no new verdict, and dropping the
-// old one reads as a clear the sweep never took: the attention item for a red
-// tier would retire while its beads stayed open (gt-euxf1). The carried verdict
-// keeps its own tip in SHA, so an earlier tip's verdict is never read as this
-// cycle's (gt-icmdq). A tier the schedule no longer names is dropped rather
-// than carried: no cycle would ever re-run it, so its verdict would sit in the
-// record forever.
-func tierSweepRecordedTiers(results, prior map[string]tierSweepTierResult, stages []tierSweepStage, sha string, deferred bool) map[string]tierSweepTierResult {
+// cycle took for each tier the schedule names and this one never reached. A
+// tier nothing re-ran has no new verdict, and dropping the old one reads as a
+// clear the sweep never took: the red tier's beads stay open while its
+// attention item retires (gt-euxf1). A tier the schedule no longer names is
+// dropped rather than carried, because no cycle would ever re-run it.
+func tierSweepRecordedTiers(results map[string]tierSweepTierResult, prior tierSweepState, stages []tierSweepStage, sha string, deferred bool) map[string]tierSweepTierResult {
 	recorded := make(map[string]tierSweepTierResult, len(results))
 	for tier, res := range results {
 		res.SHA = sha
@@ -1168,9 +1164,18 @@ func tierSweepRecordedTiers(results, prior map[string]tierSweepTierResult, stage
 			if _, ran := results[tier]; ran {
 				continue
 			}
-			if prev, ok := prior[tier]; ok {
-				recorded[tier] = prev
+			carried, ok := prior.Tiers[tier]
+			if !ok {
+				continue
 			}
+			if carried.SHA == "" {
+				// A record written before a verdict carried its own tip dates
+				// every tier in it at its LastSHA. Passing that tip on keeps
+				// the readers from falling back to this cycle's and dating
+				// the verdict to a commit nothing judged it at (gt-euxf1).
+				carried.SHA = prior.LastSHA
+			}
+			recorded[tier] = carried
 		}
 	}
 	return recorded

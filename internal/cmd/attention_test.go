@@ -94,6 +94,21 @@ func TestAttentionTableOldestFirstHidesAcked(t *testing.T) {
 	}
 }
 
+// A sweep item names no bead, so its sha is what the BEAD/SHA column shows. For
+// a verdict a Partial cycle carried forward that is an earlier tip than the
+// record's, and the column is where an operator reads it (gt-euxf1).
+func TestAttentionBeadOrSHAShowsASweepItemsTip(t *testing.T) {
+	t.Parallel()
+	it := attention.Item{
+		Key: "sweep:gastown:integration", Kind: attention.KindTierSweepRed,
+		Severity: attention.SeverityHigh, Rig: "gastown", SHA: "tipa0002",
+		Summary: "tier sweep gastown integration RED",
+	}
+	if got := beadOrSHA(it); got != "tipa0002" {
+		t.Errorf("beadOrSHA = %q, want the item's sha", got)
+	}
+}
+
 func TestAttentionJSONPrintsState(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
