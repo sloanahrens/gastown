@@ -29,6 +29,10 @@ const (
 	// attentionHostProbeTimeout bounds one external host probe, so a wedged
 	// docker daemon costs one tick's probe and not the whole tick.
 	attentionHostProbeTimeout = 20 * time.Second
+	// attentionDockerProbeDownBeats is how many consecutive ticks docker ps
+	// must fail before the stack is reported down. One failed tick stays an
+	// info line: a probe that times out once is not an outage.
+	attentionDockerProbeDownBeats = 3
 )
 
 // The host rules' stable ids. They are the item keys, so an ack and a reader
@@ -213,11 +217,37 @@ func (s *attentionSources) collectHostMem(ctx context.Context) ([]attention.Item
 
 // collectHostDocker raises host.docker_stack_down when any required container
 // (requiredStackContainers) is not among the running ones, naming the missing.
+//
+// A docker ps that fails cannot name the missing containers, and a failure that
+// held for attentionDockerProbeDownBeats ticks in a row is the stack down in
+// all but name: Docker Desktop has quit or the daemon is wedged. Such a failure
+// raises host.docker_stack_down itself, because the info-only probe item never
+// wakes anyone. A failure that comes and goes stays a probe item.
 func (s *attentionSources) collectHostDocker(ctx context.Context) ([]attention.Item, error) {
 	running, err := s.host.Containers(ctx)
 	if err != nil {
-		return s.hostProbeFailed(hostProbeDocker, err, attention.KindHostDocker), nil
+		s.dockerProbeFails++
+		items := s.hostProbeFailed(hostProbeDocker, err, attention.KindHostDocker)
+		if s.dockerProbeFails < attentionDockerProbeDownBeats {
+			return items, nil
+		}
+		// The stack-down item the probe kept from an earlier tick is replaced,
+		// not joined: one key, one item.
+		kept := items[:0]
+		for _, it := range items {
+			if it.Key != hostRuleDockerDown {
+				kept = append(kept, it)
+			}
+		}
+		return append(kept, attention.Item{
+			Key:      hostRuleDockerDown,
+			Kind:     attention.KindHostDocker,
+			Severity: attention.SeverityHigh,
+			Summary: fmt.Sprintf("docker ps has failed for %d heartbeats, so the stack is unreachable: %s",
+				s.dockerProbeFails, oneLine(err.Error())),
+		}), nil
 	}
+	s.dockerProbeFails = 0
 	up := make(map[string]bool, len(running))
 	for _, n := range running {
 		up[n] = true

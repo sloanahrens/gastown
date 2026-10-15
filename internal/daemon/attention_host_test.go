@@ -504,3 +504,103 @@ func TestAttentionHostParseContainerNames(t *testing.T) {
 		t.Errorf("names = %v, want none", got)
 	}
 }
+
+// A docker ps that errors on one tick is an info line; one that errors on three
+// ticks in a row is the stack down, and wakes once. A good probe in between
+// starts the count again.
+func TestHostDockerProbeFailurePersistsWakes(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	h := healthyHost()
+	f.src.host = h
+	wakes := func() []attention.Event {
+		var out []attention.Event
+		for _, e := range f.events(t) {
+			if e.Wake {
+				out = append(out, e)
+			}
+		}
+		return out
+	}
+	beat := 0
+	tick := func() attention.State {
+		beat++
+		return f.tick(t, now.Add(time.Duration(beat)*time.Minute))
+	}
+
+	h.containersErr = errors.New("Cannot connect to the Docker daemon")
+	tick()
+	if got := wakes(); len(got) != 0 {
+		t.Fatalf("one failed tick wake events = %+v, want none", got)
+	}
+
+	// The probe recovers, so the next failures count from one again.
+	h.containersErr = nil
+	tick()
+	h.containersErr = errors.New("Cannot connect to the Docker daemon")
+	tick()
+	st := tick()
+	if got := wakes(); len(got) != 0 {
+		t.Fatalf("two failed ticks after a good one wake events = %+v, want none", got)
+	}
+	if _, ok := attention.Find(st, hostRuleDockerDown); ok {
+		t.Fatalf("host items = %v, want no stack-down item before the third failure", hostKeys(st))
+	}
+
+	st = tick()
+	got := wakes()
+	if len(got) != 1 {
+		t.Fatalf("third consecutive failed tick wake events = %+v, want one", got)
+	}
+	if got[0].Key != hostRuleDockerDown || got[0].Handled != attention.HandledOperatorAction || got[0].State != attention.EventNew {
+		t.Errorf("wake event = %+v, want a raised host.docker_stack_down", got[0])
+	}
+	down := itemByKey(t, st, hostRuleDockerDown)
+	if !strings.Contains(down.Summary, "Cannot connect to the Docker daemon") || strings.Contains(down.Summary, "\n") {
+		t.Errorf("summary = %q, want the one-line probe error", down.Summary)
+	}
+	itemByKey(t, st, hostProbeFailedPrefix+hostProbeDocker)
+
+	tick()
+	tick()
+	if n := len(wakes()); n != 1 {
+		t.Errorf("wake events after five failed ticks = %d, want the one", n)
+	}
+
+	h.containersErr = nil
+	st = tick()
+	if keys := hostKeys(st); len(keys) != 0 {
+		t.Errorf("host items = %v, want both cleared once docker answers healthy", keys)
+	}
+}
+
+// A stack-down item the probe kept from a real missing-container tick is
+// replaced by the unreachable one when the failure persists, never doubled.
+func TestHostDockerProbeFailureReplacesKeptStackDown(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	h := healthyHost()
+	h.containers = nil
+	f.src.host = h
+	f.tick(t, now)
+
+	h.containersErr = errors.New("docker.sock: connection refused")
+	var st attention.State
+	for beat := 1; beat <= attentionDockerProbeDownBeats; beat++ {
+		st = f.tick(t, now.Add(time.Duration(beat)*time.Minute))
+	}
+	n := 0
+	for _, it := range st.Items {
+		if it.Key == hostRuleDockerDown {
+			n++
+			if !strings.Contains(it.Summary, "connection refused") {
+				t.Errorf("summary = %q, want the unreachable wording", it.Summary)
+			}
+		}
+	}
+	if n != 1 {
+		t.Errorf("stack-down items = %d, want 1", n)
+	}
+}
