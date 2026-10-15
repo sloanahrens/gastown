@@ -251,6 +251,55 @@ func TestRunTierSweep_YoungSweepStillDefersToTheRestart(t *testing.T) {
 	}
 }
 
+// gt-v8j5x: a rig whose origin/main is the tip its last green sweep covered is
+// skipped by every cycle, so its LastRun goes stale while the patrol runs. Its
+// age must not stand for the sweep's age, or it retires the restart's deferral
+// and the busy rig's sweep runs into the restart.
+func TestRunTierSweep_QuietRigDoesNotRetireTheRestartDeferral(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	const tip = "abc123"
+	for _, tc := range []struct {
+		name      string
+		quietTip  func(string) (string, error)
+		wantDefer bool
+	}{
+		{"quiet rig at the tip", func(string) (string, error) { return tip, nil }, true},
+		{"rig whose main moved is still starved", func(string) (string, error) { return "def456", nil }, false},
+		{"rig whose tip cannot be read is still starved", func(string) (string, error) { return "", errors.New("no ref") }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, rec, _, _ := newTierSweepDaemon(t, now, "busy", "quiet")
+			d.patrolConfig.Patrols.TierSweep.Rigs = []string{"busy", "quiet"}
+			d.tierSweepSeams.localMainSHA = tc.quietTip
+			d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) {
+				t.Error("the restart deferral must not fetch origin/main")
+				return "", errors.New("unexpected fetch")
+			}
+			withTierSweepLastRun(t, d, "busy", now.Add(-10*time.Minute))
+			if err := writeTierSweepState(d.config.TownRoot, "quiet", tierSweepState{
+				LastRun: now.Add(-3 * time.Hour), LastSHA: tip, LastGreenSHA: tip,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			d.upgradeRestartPending.Store(true)
+
+			if got := d.tierSweepDeferForRestart(now); got != tc.wantDefer {
+				t.Fatalf("defer = %v, want %v", got, tc.wantDefer)
+			}
+			if tc.wantDefer {
+				if d.runTierSweep() {
+					t.Fatal("a deferred cycle reached no verdict")
+				}
+				if len(rec.stages) != 0 {
+					t.Fatalf("stages run = %+v, want none while the restart defers the sweep", rec.stages)
+				}
+			}
+		})
+	}
+}
+
 // The bound is the named 90m constant and includes it: a sweep exactly at the
 // bound runs, a fresher one defers. A rig with no record has no age to measure
 // and defers as it did before the bound existed (gt-zvqn8).
