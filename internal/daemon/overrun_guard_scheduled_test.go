@@ -2,12 +2,16 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/polecat"
 )
 
 // newScheduledOverrunDaemon is newOverrunDaemon with scheduled_stop_after set
@@ -432,5 +436,74 @@ func TestRunOverrunGuard_ScheduledFailedRetireRepeatsOnlyTheRelease(t *testing.T
 	}
 	if len(f.comments) != 1 || len(f.closed) != 1 {
 		t.Errorf("comments %q, closed %q; want one of each, not repeated", f.comments, f.closed)
+	}
+}
+
+// scheduledCloseFake is a run bead behind the production BeadWriter, with a
+// force close that can be made to fail.
+type scheduledCloseFake struct {
+	*bdFake
+	failClose bool
+	closed    []string
+}
+
+func (f *scheduledCloseFake) force(reason string, ids ...string) error {
+	if f.failClose {
+		return errors.New("bd down")
+	}
+	f.closed = append(f.closed, ids...)
+	f.issue.Status = "closed"
+	return nil
+}
+
+// The first close cleared the assignee and failed; the retry is a tick later,
+// and the dispatcher or a landing may have taken the bead since. The retry
+// closes the half-closed bead, and leaves a re-slung or already-closed one
+// alone.
+func TestScheduledCloseSkipsReassignedBead(t *testing.T) {
+	t.Parallel()
+	const seat = "gastown/polecats/capable"
+	for _, tc := range []struct {
+		name, status, assignee string
+		wantClosed             bool
+	}{
+		{"untouched since the failed close", "hooked", "", true},
+		{"re-slung to another polecat", "hooked", "gastown/polecats/nux", false},
+		{"re-slung and started", "in_progress", "gastown/polecats/nux", false},
+		{"closed meanwhile", "closed", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := &scheduledCloseFake{
+				bdFake:    &bdFake{issue: beads.Issue{ID: "gt-r71dd", Status: "hooked", Assignee: seat}},
+				failClose: true,
+			}
+			w := polecat.NewBeadWriter(f.bdFake, overrunActor)
+			ctx := context.Background()
+
+			if _, err := closeRunBead(ctx, w, f.force, "gt-r71dd", seat, "r"); err == nil {
+				t.Fatal("first close succeeded, want the failure")
+			}
+			if f.issue.Assignee != "" {
+				t.Fatalf("the failed close left the assignee %q, want it cleared", f.issue.Assignee)
+			}
+
+			// Between the ticks.
+			f.issue.Status, f.issue.Assignee, f.failClose = tc.status, tc.assignee, false
+			skipped, err := closeRunBead(ctx, w, f.force, "gt-r71dd", seat, "r")
+			if err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+			if got := len(f.closed) == 1; got != tc.wantClosed {
+				t.Errorf("closed = %v, want closed %v", f.closed, tc.wantClosed)
+			}
+			if (skipped != "") == tc.wantClosed {
+				t.Errorf("skipped = %q, want a reason exactly when the bead is left alone", skipped)
+			}
+			if !tc.wantClosed && (f.issue.Assignee != tc.assignee || f.issue.Status != tc.status) {
+				t.Errorf("retry changed the bead to %q assigned to %q, want %q assigned to %q untouched",
+					f.issue.Status, f.issue.Assignee, tc.status, tc.assignee)
+			}
+		})
 	}
 }

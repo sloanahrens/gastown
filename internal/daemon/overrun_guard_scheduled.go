@@ -219,14 +219,41 @@ func (d *Daemon) overrunCommentBead(seat overrunSeat, text string) error {
 
 // overrunCloseRunBead is the production closeBead seam: clear the assignee, then
 // close the run bead with reason. The close is forced past dependency checks, as
-// gt done's is: the run's molecule wisps must not hold a stopped run open.
+// gt done's is: the run's molecule wisps must not hold a stopped run open. A bead
+// that is no longer this seat's is left alone and counts as closed for the stop.
 func (d *Daemon) overrunCloseRunBead(seat overrunSeat, reason string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), overrunHandBackTimeout)
 	defer cancel()
 	store := beads.NewPlain(d.config.TownRoot, bdMutationRoutingEnv(d.config.TownRoot),
 		beads.WithBin(d.bdPathOrDefault())).WithTimeout(overrunHandBackTimeout)
-	if err := polecat.NewBeadWriter(store, overrunActor).ClearAssignee(ctx, seat.Bead); err != nil {
-		return err
+	skipped, err := closeRunBead(ctx, polecat.NewBeadWriter(store, overrunActor), store.ForceCloseWithReason,
+		seat.Bead, seat.Rig+"/polecats/"+seat.Polecat, reason)
+	if skipped != "" {
+		d.logger.Printf("overrun_guard: %s/%s: %s; not closing it", seat.Rig, seat.Polecat, skipped)
 	}
-	return store.ForceCloseWithReason(reason, seat.Bead)
+	return err
+}
+
+// closeRunBead clears the assignee and force-closes the run bead, after
+// reading who holds it. A close that failed after the assignee was cleared is
+// retried from the next tick, and in between the dispatcher may have slung the
+// unassigned bead to another polecat or it may have closed: either way the
+// bead is no longer assignee's, so nothing is written and skipped says why. An
+// empty assignee is the half-closed bead and is finished.
+func closeRunBead(ctx context.Context, w polecat.BeadWriter, force func(reason string, ids ...string) error,
+	beadID, assignee, reason string) (skipped string, err error) {
+	status, current, err := w.State(ctx, beadID)
+	if err != nil {
+		return "", fmt.Errorf("close %s: read bead: %w", beadID, err)
+	}
+	if status == "closed" || status == "tombstone" {
+		return fmt.Sprintf("%s is already %s", beadID, status), nil
+	}
+	if current != "" && current != assignee {
+		return fmt.Sprintf("%s is assigned to %s, not %s", beadID, current, assignee), nil
+	}
+	if err := w.ClearAssignee(ctx, beadID); err != nil {
+		return "", err
+	}
+	return "", force(reason, beadID)
 }

@@ -226,7 +226,12 @@ func (s *attentionSources) collectHostMem(ctx context.Context) ([]attention.Item
 func (s *attentionSources) collectHostDocker(ctx context.Context) ([]attention.Item, error) {
 	running, err := s.host.Containers(ctx)
 	if err != nil {
-		s.dockerProbeFails++
+		// A docker ps that died with the tick's own context (the heartbeat ran
+		// out of time) says nothing about docker, so it is a probe failure but
+		// not a beat toward the stack being down.
+		if ctx.Err() == nil {
+			s.dockerProbeFails++
+		}
 		items := s.hostProbeFailed(hostProbeDocker, err, attention.KindHostDocker)
 		if s.dockerProbeFails < attentionDockerProbeDownBeats {
 			return items, nil
