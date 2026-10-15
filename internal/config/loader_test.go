@@ -2318,6 +2318,16 @@ func TestDaemonPatrolConfigRoundTrip(t *testing.T) {
 	}
 }
 
+// overrunScheduledLimit is a daemon patrol config whose overrun guard sets
+// scheduled_stop_after to limit.
+func overrunScheduledLimit(limit string) *DaemonPatrolConfig {
+	return &DaemonPatrolConfig{
+		Type:    "daemon-patrol-config",
+		Version: 1,
+		Patrols: &PatrolsConfig{OverrunGuard: &OverrunGuardConfig{Enabled: true, ScheduledStopAfter: limit}},
+	}
+}
+
 func TestDaemonPatrolConfigValidation(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -2354,6 +2364,11 @@ func TestDaemonPatrolConfigValidation(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{name: "scheduled stop limit", config: overrunScheduledLimit("90m"), wantErr: false},
+		{name: "scheduled stop limit unset", config: overrunScheduledLimit(""), wantErr: false},
+		{name: "scheduled stop limit zero means never", config: overrunScheduledLimit("0"), wantErr: false},
+		{name: "scheduled stop limit negative rejected", config: overrunScheduledLimit("-5m"), wantErr: true},
+		{name: "scheduled stop limit unparseable rejected", config: overrunScheduledLimit("an hour"), wantErr: true},
 	}
 
 	for _, tt := range tests {

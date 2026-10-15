@@ -93,6 +93,8 @@ type overrunFake struct {
 	agentBeadsReset []string
 	// handBackNotes lists the note each handBack call carried, in the same order.
 	handBackNotes []string
+	// comments lists "<bead>: <text>" for each comment a scheduled stop added.
+	comments []string
 
 	// submitted is what the submittedNow re-check answers from the start;
 	// readyAfterStop makes it answer true once the session has been stopped,
@@ -138,6 +140,13 @@ func (f *overrunFake) seams() overrunSeams {
 			return nil
 		},
 		checkpoint: func(seat overrunSeat) error { return f.step("checkpoint", seat) },
+		comment: func(seat overrunSeat, text string) error {
+			if err := f.step("comment", seat); err != nil {
+				return err
+			}
+			f.comments = append(f.comments, seat.Bead+": "+text)
+			return nil
+		},
 		push: func(seat overrunSeat) error {
 			if err := f.step("push", seat); err != nil {
 				return err
@@ -244,8 +253,9 @@ func TestRunOverrunGuard_SkipsSubmittedAndParked(t *testing.T) {
 }
 
 // The scheduled deep-review runs past 20 minutes by design, so a seat on a
-// scheduled: bead gets no nudge and no stop, while an identical seat without
-// the label is still judged.
+// scheduled: bead gets no nudge and no 20 minute stop (its own limit is
+// scheduled_stop_after, see overrun_guard_scheduled_test.go), while an
+// identical seat without the label is still judged.
 func TestRunOverrunGuard_SkipsScheduledSlings(t *testing.T) {
 	t.Parallel()
 	for _, elapsed := range []time.Duration{13 * time.Minute, 21 * time.Minute} {

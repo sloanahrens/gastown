@@ -124,7 +124,7 @@ run: `bad formula vars: <line>` for a line without `=` or with an empty key,
 label, and `unknown formula: <name>` when the rig has no such formula. The
 bead stays ready, so fixing the bead clears the skip. A bead that also wears
 `scheduled:<name>` is slung with the actor `daemon/scheduled:<name>`, so
-usage attribution and the overrun guard's scheduled-bead exemption still see a
+usage attribution and the overrun guard's scheduled-run limit still see a
 scheduled run. `gt spec dispatch --dry-run` and the dispatched line print
 `, formula <name>` after the seat.
 
@@ -146,6 +146,21 @@ priority is the entry's `priority` (3 when unset), held at
 dispatcher accepts it. A run still open and unhooked after the entry's `interval`
 (at least 6 hours) counts as a failed tick, so the third in a row escalates
 instead of the entry skipping the open run forever.
+
+The overrun guard (`daemon.patrols.overrun_guard`) does not apply its 12 and 20
+minute rule to a seat on a `scheduled:` bead, because a deep review runs long by
+design, but it does not leave one unbounded. `scheduled_stop_after` (a duration
+such as `"90m"`, default `60m`) is the only limit on such a seat, counted from the
+sling. Past it the guard stops the session with the same deliberate-stop record
+`gt session stop` writes, so `patrol_scan` and the zombie detector leave the seat
+down, logs `overrun_guard: stopped scheduled <rig>/<polecat> on <bead> after
+<elapsed>` and adds one comment to the bead naming the limit. It does not hand
+the bead back, label it `needs-split`, checkpoint or push: a scheduled run is
+report-only, and the `scheduled_slings` patrol creates the next one. `"0"` never
+stops a scheduled seat, which is how the guard behaved before the limit; a
+negative or unparseable value is refused when the config loads. Add the key to
+`settings/config.json` only after the running `gt` binary knows it, because the
+strict parser parks every rig on an unknown key.
 
 ## Seats and budget
 
