@@ -322,6 +322,14 @@ type commentBeads struct {
 	*beadsfake.Fake
 	failComments bool
 	failComment  bool
+	failShow     bool
+}
+
+func (b *commentBeads) Show(id string) (*beads.Issue, error) {
+	if b.failShow {
+		return nil, errors.New("dolt: connection refused")
+	}
+	return b.Fake.Show(id)
 }
 
 func (b *commentBeads) Comments(id string) ([]beads.Comment, error) {

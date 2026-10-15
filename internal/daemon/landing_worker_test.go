@@ -292,6 +292,49 @@ func TestRigFollowupsEnabledReadsRigSettingsOnly(t *testing.T) {
 	})
 }
 
+// TestRigFollowupBackpressureReadsRigSettingsOnly: the bound decides when the
+// feed stops filing beads, so it comes from the rig's own settings/config.json
+// and an unset one is the feed's default rather than a value from merged repo
+// content (gt-4ty22).
+func TestRigFollowupBackpressureReadsRigSettingsOnly(t *testing.T) {
+	t.Parallel()
+	write := func(t *testing.T, rigPath, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(rigPath, "settings"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(rigPath, "settings", "config.json"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		body string
+		want int
+	}{
+		{name: "no settings file", want: 0},
+		{name: "settings without a merge queue block", body: `{"type":"rig-settings","version":1,"landing":{"followups":true}}`, want: 0},
+		{name: "an empty merge queue block", body: `{"type":"rig-settings","version":1,"merge_queue":{}}`, want: 0},
+		{name: "a bound", body: `{"type":"rig-settings","version":1,"merge_queue":{"followup_backpressure":12}}`, want: 12},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rigPath := t.TempDir()
+			if tc.body != "" {
+				write(t, rigPath, tc.body)
+			}
+			got := rigFollowupBackpressure(rigPath)
+			if got != tc.want {
+				t.Errorf("rigFollowupBackpressure() = %d, want %d", got, tc.want)
+			}
+			// Whatever the file says, the feed reads a bound that stops it.
+			if land.FollowupBackpressureOrDefault(got) <= 0 {
+				t.Errorf("the feed resolves %d to no bound at all", got)
+			}
+		})
+	}
+}
+
 // TestRigOMQueueEnabledReadsRigSettingsOnly: the finding queue writes to beads,
 // so it is off unless the rig's own settings/config.json turns it on (gt-qtj72).
 func TestRigOMQueueEnabledReadsRigSettingsOnly(t *testing.T) {

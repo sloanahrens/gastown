@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -123,11 +124,24 @@ type Lander struct {
 	Out      io.Writer
 	Now      func() time.Time
 	// Followups, when set, is the beads surface the post-landing follow-up
-	// feed files through: a landing om approved in the band gets one shaped
-	// bead for the findings that were not worth blocking on, or a comment on
-	// the bead an earlier landing filed for one (gt-s01pn). Nil means off, and
-	// off means nothing in the feed runs.
+	// feed files through: a landing om approved at or above the rig's bar gets
+	// shaped beads for the minor findings that were not worth blocking on, or a
+	// comment on the bead an earlier landing filed for one (gt-s01pn). Nil
+	// means off, and off means nothing in the feed runs.
 	Followups FollowupBeads
+	// FollowupBackpressure is the open om-followup count at which the feed
+	// stops filing. Zero means DefaultFollowupBackpressure (gt-4ty22).
+	FollowupBackpressure int
+	// FollowupAlert, when set, is told once a day while the backpressure keeps
+	// the feed from filing, so the findings lost to it are visible. It runs on
+	// the feed's own goroutine, which the feed's timeout can abandon; nil
+	// reports nothing (gt-4ty22).
+	FollowupAlert func(message string)
+	// followupAlertAt is when FollowupAlert was last called, and the mutex
+	// guards it: the feed's timeout can abandon one landing's goroutine while
+	// the next landing's feed is already running.
+	followupAlertAt time.Time
+	followupAlertMu sync.Mutex
 	// OMQueue queues the major and critical findings of an approved landing
 	// onto its work bead, for the next deep-review run to verify and file
 	// (gt-qtj72). False means off, and off means nothing in the queue runs. It

@@ -520,7 +520,14 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	// a rig whose own settings turn it on (gt-s01pn).
 	if rigFollowupsEnabled(rigPath) {
 		lander.Followups = followupBeads{client: bd}
-		d.logger.Printf("landing_worker: %s: om follow-up feed on (landing.followups)", rigName)
+		lander.FollowupBackpressure = rigFollowupBackpressure(rigPath)
+		// The backpressure holds findings back silently otherwise, so the day
+		// it does, the loss reaches a human as a low attention item (gt-4ty22).
+		lander.FollowupAlert = func(message string) {
+			_ = d.escalateAlertSeverity("low", "followup-backpressure:"+rigName, "landing_worker", message)
+		}
+		d.logger.Printf("landing_worker: %s: om follow-up feed on (landing.followups; %d open %s beads stop it)",
+			rigName, land.FollowupBackpressureOrDefault(lander.FollowupBackpressure), land.FollowUpLabel)
 	}
 	// The finding queue records an approved landing's om findings on its own
 	// work bead, for the next deep-review run to verify. It is the rig's own
@@ -1007,6 +1014,19 @@ func rigFollowupsEnabled(rigPath string) bool {
 		return false
 	}
 	return settings.Landing.Followups
+}
+
+// rigFollowupBackpressure is merge_queue.followup_backpressure from the rig's
+// own settings/config.json, and 0 when it names none — the count the feed
+// reads as its own default. It is read from there for the reason
+// rigFollowupsEnabled reads its file: it decides when the feed stops filing
+// beads nobody is waiting on (gt-4ty22).
+func rigFollowupBackpressure(rigPath string) int {
+	settings, err := config.LoadRigSettings(config.RigSettingsPath(rigPath))
+	if err != nil || settings == nil || settings.MergeQueue == nil {
+		return 0
+	}
+	return settings.MergeQueue.FollowupBackpressure
 }
 
 // rigOMQueueEnabled is landing.om_queue from the rig's own settings/config.json
