@@ -38,9 +38,9 @@ func TestTheStripIsInTheHeader(t *testing.T) {
 	}
 }
 
-// The models line folds the seat and role tables that used to sit under the
-// header into one line of the strip. It is closed until the viewer opens it,
-// and the choice persists the way every pane's fold does (gt-ywlei).
+// The models line folds the seat and role tables it carries into one line of
+// the strip. It is closed until the viewer opens it, and the choice persists
+// (gt-ywlei).
 func TestTheModelsLineFoldsTheTablesUnderIt(t *testing.T) {
 	t.Parallel()
 
@@ -64,16 +64,21 @@ func TestTheModelsLineFoldsTheTablesUnderIt(t *testing.T) {
 			t.Errorf("paintModelsLine has no %q", want)
 		}
 	}
-	// The choice is the viewer's and lives in the store the panes' folds use,
-	// with their polarity: true is collapsed, and nothing stored is closed.
+	// The choice is the viewer's and survives the load, in a key of its own:
+	// the panes' folds sit in gt-collapsed keyed by their titles, where a
+	// stored true means collapsed, and a key of its own needs no reader to
+	// invert it (gt-ywlei).
 	for _, want := range []string{
-		`localStorage.getItem("gt-collapsed")`,
-		`modelsOpen = (JSON.parse(localStorage.getItem("gt-collapsed") || "{}") || {})["models"] === false;`,
-		`localStorage.setItem("gt-collapsed", JSON.stringify(saved));`,
+		`const MODELS_OPEN_KEY = "gt-models-open";`,
+		`modelsOpen = localStorage.getItem(MODELS_OPEN_KEY) === "1";`,
+		`localStorage.setItem(MODELS_OPEN_KEY, modelsOpen ? "1" : "0");`,
 	} {
 		if !strings.Contains(page, want) {
-			t.Errorf("the models fold is not remembered the way a pane's fold is: no %q", want)
+			t.Errorf("the models fold does not remember the viewer's choice: no %q", want)
 		}
+	}
+	if strings.Contains(pageFunc(t, "toggleModels"), "gt-collapsed") {
+		t.Error("the models fold writes the panes' own store, where a stored true means collapsed")
 	}
 	if !strings.Contains(page, `$("models").addEventListener("click", toggleModels);`) {
 		t.Error("the models line has nothing to open it")

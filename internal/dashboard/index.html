@@ -20,7 +20,9 @@ h1{font-size:15px;margin:0;letter-spacing:.08em;text-transform:uppercase;color:v
 #healthmark{white-space:nowrap}
 #strip{color:var(--dim);min-width:0}
 #strip b{font-weight:700}
-.v{color:var(--text)}
+#strip .v{color:var(--text)}
+#strip .warnc{color:var(--amber)}
+#strip .badc{color:var(--red)}
 #models{background:none;border:0;padding:0;color:var(--dim);font:inherit;cursor:pointer;white-space:nowrap}
 #models:hover{color:var(--text)}
 #modelspanel{display:flex;gap:32px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--line)}
@@ -309,25 +311,40 @@ function readCaption(r, parts) {
 
 let state = null;
 
-// One fact of the status strip. Each is separated from the one before it by
-// the middot the rest of the page joins with, and its value is the only bold
-// thing in it, so a glance lands on the numbers.
+// Every state a polecat's session is read into (the State* constants of
+// internal/dashboard/types.go), and what the strip does with it: the alarm the
+// state earns, whether it is work in progress — a session is on somebody's bead
+// — and the word the strip names its count by beside the working number. The
+// reader sends states this page has never seen the moment the town learns one,
+// so the strip names a state no row here covers rather than dropping it.
+const POLE_ALARM = {working: "", quiet: "warnc", gating: "", queued: "", spawning: "", stalled: "badc", "review-needed": "", recovery: "", "needs-human": "badc", parked: "", idle: "", unknown: ""};
+const POLE_WORKING = {working: 1, quiet: 1, gating: 1, queued: 0, spawning: 0, stalled: 0, "review-needed": 0, recovery: 0, "needs-human": 0, parked: 0, idle: 0, unknown: 0};
+const POLE_WORD = {queued: "queued", spawning: "spawning", stalled: "stalled", "review-needed": "need review", recovery: "recovering", "needs-human": "need a human", parked: "parked", unknown: "unknown (tmux unreadable)", quiet: "quiet"};
+
+// The thresholds the strip's alarming branches read: the seconds the oldest
+// waiting landing may sit before it reads warn and then bad, the load per core
+// the machine may run at, and the commits the installed gt may fall behind main
+// before it reads warn.
+const STRIP_ALARM = {wait_warn_secs: 900, wait_bad_secs: 3600, load_warn_cores: 1, load_bad_cores: 3, behind_warn: 20};
+
+// factBox opens one reading of the strip, joined to the one before it by the
+// page's middot.
 function factBox(box) {
   if (box.childElementCount) box.append(document.createTextNode(" · "));
-  const x = el("span", "fact");
+  const x = el("span", "");
   box.append(x);
   return x;
 }
 
-// fact is one value and the name of what it counts, with the reading's own
-// detail in the title. The value is the bright part of the fact unless the
-// reading gives it another colour — the page's own amber and red — and a fact
-// whose name leads it, so the value reads as a word, is drawn the other way
-// round.
+// fact writes one reading: its value, the name of what it counts and the
+// reading's own detail in the title. cls is the alarm class the value wears and
+// defaults to the bright one, so a fact nobody has to act on is loud and a
+// reading nobody has made is the strip's own dim; lead puts the name first,
+// for a value that only reads as a word.
 function fact(box, value, name, opts) {
   opts = opts || {};
   const x = factBox(box);
-  const b = el("b", opts.cls || "v", value);
+  const b = el("b", opts.cls == null ? "v" : opts.cls, value);
   if (opts.lead) x.append(document.createTextNode(name + " "), b);
   else x.append(b, document.createTextNode(" " + name));
   if (opts.extra) x.append(document.createTextNode(" · " + opts.extra));
@@ -399,14 +416,12 @@ function seatFacts(m) {
 }
 
 // renderStrip is the page's one status strip, and the whole of its top: the
-// verdict, the day's shape and what needs the operator as one line of facts.
-// Each fact is drawn once, from the reader that owns it — the landings off the
-// Landings pane's own window, the seats off the polecats the Polecats pane
-// counts, the queue off the ready read, what needs you off the two panes below
-// — and a reading nobody has made says so: a strip that drew a zero it had not
-// read would answer the operator with a fact it invented. The three facts the
-// tiles also carried are drawn only in the state the tile would have coloured
-// them, so an alert is never lost to the strip being one line.
+// day's shape and what needs the operator as one line of facts, each drawn once
+// from the reader that owns it — the landings off the Landings pane's own
+// window, the seats off the polecats the Polecats pane counts, the queue off
+// the ready read, the machine and the install off the Machine pane's. A
+// reading nobody has made says so, in the strip's own dim: a strip that drew a
+// zero it had not read would answer the operator with a fact it invented.
 function renderStrip(s) {
   const box = $("strip");
   box.replaceChildren();
@@ -417,41 +432,47 @@ function renderStrip(s) {
   const t = s.trend || null;
   const landed = ((t && t.hours) || []).reduce((n, h) => n + h.landed, 0);
   fact(box, t ? String(landed) : "–", "landed/24h",
-    {cls: t ? "" : "title", tip: t ? "what landed in the last 24 hours, off the Landings pane's own window" : "the landings window has not been read yet"});
+    {cls: t ? "v" : "", tip: t ? "what landed in the last 24 hours, off the Landings pane's own window" : "the landings window has not been read yet"});
 
   // Seats: one entry per open seat.
   const seats = seatFacts(s.models);
   const sp = factBox(box);
-  if (!seats) { sp.append(el("b", "title", "–"), document.createTextNode(" seats")); sp.title = "the town's settings have not been read yet"; }
+  if (!seats) { sp.append(el("b", "", "–"), document.createTextNode(" seats")); sp.title = "the town's settings have not been read yet"; }
   else if (!seats.length) { sp.append(el("b", "", "no open seats")); sp.title = "every seat is closed: the pool, the pro seat and the second seat name no agent the dispatcher could run"; }
   else seats.forEach((f, i) => { const x = el("span", "", (i ? " · " : "") + f.text); if (f.title) x.title = f.title; sp.append(x); });
 
-  // Working: the polecats on the job — holding a bead with a session that is
-  // producing output, one that has gone quiet for under the polecat pane's ten
-  // minutes, or one gating its bead. A parked rig is stood down on purpose and
-  // holds nothing, so it is counted nowhere here; the rest of the seats' states
-  // are named in the title rather than folded into this number.
+  // Working: the polecats on the job, off POLE_WORKING, so which states are
+  // work in progress is one table. A parked rig is stood down on purpose and
+  // holds nothing, so it is counted nowhere; every other state the town has is
+  // named beside the count, and the alarm is the worst any live state earns.
   const pcs = s.polecats || [];
   const live = pcs.filter(p => !p.rig_parked);
   const n = k => live.filter(p => p.state === k).length;
-  const active = n("working") + n("quiet") + n("gating");
-  const rest = [n("queued") ? n("queued") + " queued" : null, n("stalled") ? n("stalled") + " stalled" : null,
-    n("needs-human") ? n("needs-human") + " need a human" : null, n("unknown") ? n("unknown") + " unknown (tmux unreadable)" : null,
-    n("quiet") ? n("quiet") + " quiet" : null].filter(Boolean).join(" · ");
-  fact(box, s.summary ? String(active) : "–", "working",
-    {cls: n("stalled") + n("needs-human") ? "badc" : n("quiet") ? "warnc" : "",
-     tip: "polecats holding work with a live session" + (rest ? " · " + rest : "") + (n("stalled") + n("needs-human") ? " · the Polecats pane has the rows" : "")});
+  const active = Object.keys(POLE_WORKING).reduce((sum, k) => sum + (POLE_WORKING[k] ? n(k) : 0), 0);
+  const alarms = live.map(p => POLE_ALARM[p.state] || "");
+  const worst = alarms.indexOf("badc") >= 0 ? "badc" : alarms.indexOf("warnc") >= 0 ? "warnc" : "";
+  const rest = Object.keys(POLE_WORD).filter(k => n(k)).map(k => n(k) + " " + POLE_WORD[k]);
+  const strangers = live.filter(p => !(p.state in POLE_ALARM)).length;
+  if (strangers) rest.push(strangers + " in a state this page does not know");
+  const parked = pcs.length - live.length;
+  const also = [sm.seats_cap ? "cap " + sm.seats_cap : null, parked ? parked + " in parked rigs" : null].concat(rest).filter(Boolean).join(" · ");
+  fact(box, s.polecats ? String(active) : "–", "working",
+    {cls: s.polecats ? worst : "", tip: "polecats holding work with a live session" + (also ? " · " + also : "") + (worst === "badc" ? " · the Polecats pane has the rows" : "")});
 
   // Waiting to land: the ready reader's count, and how long the oldest has
-  // waited. A read that failed or aged is named — it is never a drained queue.
+  // waited. The count is drawn even when the read behind it failed or aged —
+  // it is never a drained queue — and the alarm is the read's own state, or the
+  // age of the oldest.
   const rr = readOf(s, "ready");
   const q = sm.ready_to_land;
   const oldest = sm.oldest_ready ? (Date.now() - new Date(sm.oldest_ready).getTime()) / 1000 : null;
-  if (rr && rr.stale) fact(box, "unavailable", "waiting to land", {cls: rr.error ? "badc" : "warnc",
-    tip: rr.error ? "the read that lists what is waiting to land failed" : "the last count of what is waiting to land is old"});
+  const why = rr && rr.stale ? (rr.error ? "the read that lists what is waiting to land failed" : "the last count of what is waiting to land is old") : null;
+  const waitCls = why ? (rr.error ? "badc" : "warnc")
+    : oldest > STRIP_ALARM.wait_bad_secs ? "badc" : oldest > STRIP_ALARM.wait_warn_secs ? "warnc" : "";
+  if (q == null && why) fact(box, "unavailable", "waiting to land", {cls: waitCls, tip: why});
   else fact(box, q == null ? "–" : String(q), "waiting to land",
-    {cls: oldest > 3600 ? "badc" : oldest > 900 ? "warnc" : "", extra: oldest == null ? null : "oldest " + fmtDur(oldest),
-     tip: "beads submitted and waiting for the landing worker; the age is the oldest one's"});
+    {cls: q == null ? "" : waitCls, extra: oldest == null ? null : "oldest " + fmtDur(oldest),
+     tip: ["beads submitted and waiting for the landing worker", why, q == null && !why ? "the read that lists them has not come back" : null, oldest == null ? null : "the age is the oldest one's"].filter(Boolean).join(" · ")});
 
   // Needs you: everything waiting on a decision — the open escalations and the
   // overseer's open questions — off the same two reads the panes below draw, so
@@ -462,33 +483,36 @@ function renderStrip(s) {
   const pending = [esc === null ? "the escalations" : null, ask === null ? "the questions" : null].filter(Boolean);
   if (failed.length) fact(box, "unavailable", "needs you", {cls: "badc",
     tip: failed.join(" and ") + " could not be read" + (pending.length ? ", and " + pending.join(" and ") + " has not been read yet" : "")});
-  else if (pending.length) fact(box, "–", "needs you", {cls: "title", tip: pending.join(" and ") + " has not been read yet"});
+  else if (pending.length) fact(box, "–", "needs you", {cls: "", tip: pending.join(" and ") + " have not been read yet"});
   else fact(box, String(esc + ask), "needs you", {cls: esc + ask ? "badc" : "",
     tip: esc + " open escalation" + (esc === 1 ? "" : "s") + " · " + ask + " open question" + (ask === 1 ? "" : "s") + " · everything waiting on a decision"});
 
-  // The tiles' three other facts, drawn only when they have something to say:
-  // each is here in the state that would have coloured its tile, so the strip
-  // stays one line and no alert is dropped with the tiles.
+  // The machine, the install and the ship time: numbers the operator reads
+  // rather than alarms, so each is drawn whatever it says and coloured only
+  // when it is one. The strip is the page's only readout of them.
   const m = s.machine || {};
   const cores = navigator.hardwareConcurrency || 8;
-  if (m.load1 != null && m.load1 > cores) fact(box, m.load1.toFixed(1), "load",
-    {lead: true, cls: m.load1 > cores * 3 ? "badc" : "warnc",
-     tip: "1m load over " + cores + " cores" + (m.load5 != null ? " · 5m " + m.load5.toFixed(1) + " · 15m " + m.load15.toFixed(1) : "") + " · the Machine pane has the curve"});
-  if (sm.behind > 0) fact(box, sm.behind + " behind", "vs main",
-    {lead: true, cls: sm.behind > 20 ? "warnc" : "",
-     tip: sm.main_tip ? "the installed gt is " + sm.behind + " commits behind main " + sm.main_tip + " (" + (sm.installed_gt || "?") + "), as of the install repo's last fetch" : "the installed gt is behind main, as of the install repo's last fetch"});
+  fact(box, m.load1 == null ? "–" : m.load1.toFixed(1), "load",
+    {cls: m.load1 == null ? "" : m.load1 > cores * STRIP_ALARM.load_bad_cores ? "badc" : m.load1 > cores * STRIP_ALARM.load_warn_cores ? "warnc" : "",
+     tip: "1m load over " + cores + " cores" + (m.load5 == null ? "" : " · 5m " + m.load5.toFixed(1) + " · 15m " + m.load15.toFixed(1)) + " · the Machine pane has the curve"});
+  fact(box, sm.behind == null ? "–" : sm.behind === 0 ? "current" : sm.behind + " behind", "vs main",
+    {cls: sm.behind == null || sm.behind <= STRIP_ALARM.behind_warn ? "" : "warnc",
+     tip: sm.main_tip ? "the installed gt against main " + sm.main_tip + " (" + (sm.installed_gt || "?") + "), as of the install repo's last fetch" : "the installed gt against main, as of the install repo's last fetch"});
+  fact(box, sm.median_deploy_min == null ? "–" : Math.round(sm.median_deploy_min) + "m", "to ship",
+    {cls: sm.median_deploy_min == null ? "" : "v", tip: "the median dispatch→deploy" + (sm.deploy_waiting ? " · " + sm.deploy_waiting + " landed and awaiting a deploy" : "") + " · the Deploys block has the runs"});
   if (sm.deploy_waiting > 0) fact(box, String(sm.deploy_waiting), "awaiting deploy",
-    {tip: "beads that landed and are waiting for their deploy; the Deploys block has the runs, and the median dispatch→deploy is " + (sm.median_deploy_min == null ? "not read" : Math.round(sm.median_deploy_min) + "m")});
+    {tip: "beads that landed and are waiting for their deploy; the Deploys block has the runs"});
 }
 
-// The models line folds away the seat table and the model-per-role table that
-// used to sit under the header, which the strip's seats fact and each pane's
-// own rows already carry the numbers of. It starts folded, so the top of the
-// page is one line until somebody asks for the detail, and the choice is the
-// viewer's, remembered the way every pane's fold is — in the same gt-collapsed
-// store setupCollapse reads and writes.
+// The models line opens the seat table and the model-per-role table the strip's
+// seats fact carries the counts of, and starts closed so the top of the page is
+// one line until somebody asks for the detail. It keeps its own store: the
+// panes' folds are keyed by their titles in gt-collapsed (setupCollapse), where
+// a stored true means collapsed, and a key of its own needs no reader to invert
+// it.
+const MODELS_OPEN_KEY = "gt-models-open";
 let modelsOpen = false;
-try { modelsOpen = (JSON.parse(localStorage.getItem("gt-collapsed") || "{}") || {})["models"] === false; } catch (e) {}
+try { modelsOpen = localStorage.getItem(MODELS_OPEN_KEY) === "1"; } catch (e) {}
 function paintModelsLine() {
   const b = $("models");
   b.textContent = "models " + (modelsOpen ? "▾" : "▸");
@@ -498,11 +522,7 @@ function paintModelsLine() {
 function toggleModels() {
   modelsOpen = !modelsOpen;
   paintModelsLine();
-  try {
-    const saved = JSON.parse(localStorage.getItem("gt-collapsed") || "{}") || {};
-    saved["models"] = !modelsOpen;
-    localStorage.setItem("gt-collapsed", JSON.stringify(saved));
-  } catch (e) {}
+  try { localStorage.setItem(MODELS_OPEN_KEY, modelsOpen ? "1" : "0"); } catch (e) {}
   renderModelsPanel(state || {});
 }
 
