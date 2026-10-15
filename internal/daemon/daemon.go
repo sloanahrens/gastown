@@ -119,9 +119,16 @@ type Daemon struct {
 
 	// deployW is the deploy watch (deploy_watch.go), stored once it starts.
 	// Its collector runs on the heartbeat goroutine and the watch itself on
-	// its own, so the pointer is what they share.
+	// its own, so the pointer is what they share. deployWatchMu guards the
+	// start, which a town that cannot build a watch at first is allowed to
+	// retry; deployWatchHold is the reason it last could not, logged once.
 	deployW         atomic.Pointer[deployWatch]
-	deployWatchOnce sync.Once
+	deployWatchMu   sync.Mutex
+	deployWatchHold string
+
+	// deployWatchBuild replaces the production builder (deploy_watch.go) in
+	// tests; nil builds the real one.
+	deployWatchBuild func() (*deployWatch, string)
 
 	// townHealthSources replaces the health report's outside probes (Dolt
 	// ping, backup root, slot status) in tests; nil probes for real.

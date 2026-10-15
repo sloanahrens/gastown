@@ -22,17 +22,16 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
-// The deploy watch (gt-hcbft): the landing worker waits only on the land/*
-// gate, so the run that actually ships an app after the merge — staging.yml on
-// main, deploy.yml or teardown.yml on a release tag, health.yml's staging
-// check and prod smoke — fails with nobody watching it. A failed staging run
-// on fractals-nextjs (run 1153) waited two days for a human to notice.
+// The deploy watch (gt-hcbft): the landing worker's land/* gate sees only the
+// candidate it merges, so the workflow that ships an app afterwards —
+// staging.yml on main, deploy.yml or teardown.yml on a release tag,
+// health.yml's staging check and its prod smoke — can fail with nobody
+// watching.
 //
-// The watch reads each rig's repository through the read-only viewer client,
-// one run list per repository per poll, and keeps one escalation per
-// repository and workflow: raised by the newest failed run, closed by the
-// newest green one. It reads and never runs anything, and it writes no bead
-// of its own.
+// One run list per repository per poll through the read-only viewer client,
+// and one escalation per repository, workflow and ref class: raised by the
+// newest failed run of that class, closed by the newest green one of the same
+// class. It reads and never runs anything, and writes no bead of its own.
 
 const (
 	// deployWatchInterval is the gap between polls. A deploy run takes
@@ -58,8 +57,9 @@ const (
 	// carries.
 	deployWatchSource = "deploy-watch"
 
-	// deployFailedKeyPrefix keys one alert per repository and workflow:
-	// deploy-failed:<owner/repo>:<workflow>.
+	// deployFailedKeyPrefix keys one alert per repository, workflow and ref
+	// class: deploy-failed:<owner/repo>:<workflow>:<class>, the class suffix
+	// only for the one workflow that deploys two of them (deployAlertKey).
 	deployFailedKeyPrefix = "deploy-failed:"
 
 	// deployMessageMax caps a commit title in an escalation message and
@@ -74,10 +74,9 @@ const (
 
 // The workflows the watch follows, and the ref classes each deploys from: a
 // landing deploys main to staging, a release deploys a version tag, and
-// health.yml checks both the staging deploy and the released artifact. That
-// last one is the only workflow with two classes, and its alert is keyed by
-// the workflow rather than the class, so the newest run of it decides either
-// way: the next green health run closes it, which is what dv-4qtt asks for.
+// health.yml checks both the staging deploy and the released artifact. Each
+// class carries its own alert, because a green staging check says nothing
+// about the released artifact (gt-hcbft).
 var deployWorkflows = []deployWorkflow{
 	{File: deployWorkflowStaging, Classes: []string{deployRefMain}},
 	{File: deployWorkflowDeploy, Classes: []string{deployRefTag}},
@@ -94,9 +93,9 @@ const (
 )
 
 // health.yml runs two jobs with different meanings (dv-4qtt): the post-landing
-// staging check, and the released artifact's smoke test. The failing job's
-// name decides the alert's severity, because a broken release is worth more
-// than a broken staging.
+// staging check, and the released artifact's smoke test. A named prod smoke
+// raises the alert's severity wherever the run happened; no job name lowers it
+// (deploySeverity).
 const (
 	deployHealthProdJob = "prod-smoke"
 )
@@ -153,13 +152,14 @@ type deployWorkflow struct {
 	Classes []string
 }
 
-// deployFailure is one workflow whose newest run in the window failed: what
-// the escalation says and what the attention item shows.
+// deployFailure is one workflow whose newest run of one ref class in the
+// window failed: what the escalation says and what the attention item shows.
 type deployFailure struct {
 	Rig      string
 	Repo     string // owner/name
 	Workflow string
-	Key      string // deploy-failed:<repo>:<workflow>
+	Class    string // a deployRef* class
+	Key      string // deploy-failed:<repo>:<workflow>[:<class>]
 	Severity string // a config.Severity*
 	RunID    int64
 	Summary  string // the item's one line
@@ -167,12 +167,22 @@ type deployFailure struct {
 }
 
 // deployOpenRun is what the watch remembers about one raised alert: the run
-// the escalation names, and whether the high-severity push went out for it.
-// Both are persisted, so a daemon restart neither re-raises a standing
-// failure nor pushes it again.
+// the escalation names, the severity it was raised at, and whether the
+// high-severity push went out for it. All of it is persisted, so a daemon
+// restart neither re-raises a standing failure nor pushes it again.
+//
+// The rest is what the attention item shows while the alert is open. A failed
+// run ages out of the window well before anyone fixes the deploy, and the
+// escalation outlives it: the item has to outlive the run with it.
 type deployOpenRun struct {
-	Run    int64 `json:"run"`
-	Pushed bool  `json:"pushed,omitempty"`
+	Run      int64  `json:"run"`
+	Pushed   bool   `json:"pushed,omitempty"`
+	Severity string `json:"severity,omitempty"`
+	Rig      string `json:"rig,omitempty"`
+	Repo     string `json:"repo,omitempty"`
+	Workflow string `json:"workflow,omitempty"`
+	Class    string `json:"class,omitempty"`
+	Summary  string `json:"summary,omitempty"`
 }
 
 // deployWatchState is that memory as the state file holds it.
@@ -353,40 +363,76 @@ func (w *deployWatch) runs(ctx context.Context, repo deployRepo) ([]forgejo.Acti
 }
 
 // verdicts turns one repository's runs into the failures that hold now, and
-// raises or clears the alert each workflow's newest run decides. A workflow
-// with no run in the window says nothing either way: an alert it raised stays
-// open until a run answers it.
+// raises or clears the alert each workflow and ref class's newest run decides.
+// A pair with no run in the window says nothing either way: an alert it raised
+// stays open until a run answers it.
 func (w *deployWatch) verdicts(ctx context.Context, repo deployRepo, runs []forgejo.ActionRun, now time.Time) []deployFailure {
 	var out []deployFailure
+	// present is the keys this poll found a failed run for. Everything else
+	// the watch holds open keeps the item it was raised with (heldOpen).
+	present := map[string]bool{}
 	for _, wf := range deployWorkflows {
-		run, ok := newestDeployRun(runs, wf, now)
-		if !ok {
-			continue
-		}
-		key := deployAlertKey(repo, wf.File)
-		switch run.Status {
-		case deployRunFailed, deployRunCancelled:
-			jobs := w.failingJobs(ctx, repo, run)
-			severity := deploySeverity(wf, run.PrettyRef, jobs)
-			if severity == "" {
+		for _, class := range wf.Classes {
+			run, ok := newestDeployRun(runs, wf, class, now)
+			if !ok {
 				continue
 			}
-			f := deployFailure{
-				Rig:      repo.Rig,
-				Repo:     repo.repo(),
-				Workflow: wf.File,
-				Key:      key,
-				Severity: severity,
-				RunID:    run.ID,
-				Summary:  deploySummary(repo.repo(), wf.File, run),
-				Message:  deployMessage(repo.repo(), wf.File, run, jobs),
+			key := deployAlertKey(repo, wf, class)
+			switch run.Status {
+			case deployRunFailed, deployRunCancelled:
+				jobs := w.failingJobs(ctx, repo, run)
+				severity := deploySeverity(wf, class, jobs)
+				if severity == "" {
+					continue
+				}
+				f := deployFailure{
+					Rig:      repo.Rig,
+					Repo:     repo.repo(),
+					Workflow: wf.File,
+					Class:    class,
+					Key:      key,
+					Severity: severity,
+					RunID:    run.ID,
+					Summary:  deploySummary(repo.repo(), wf.File, run),
+					Message:  deployMessage(repo.repo(), wf.File, run, class, jobs),
+				}
+				w.note(f)
+				present[key] = true
+				out = append(out, f)
+			case deployRunSucceeded:
+				w.clearIfOpen(key, fmt.Sprintf("%s: run %d of %s succeeded on %s, so the deploy is green again",
+					repo.repo(), run.ID, wf.File, run.PrettyRef))
 			}
-			w.note(f)
-			out = append(out, f)
-		case deployRunSucceeded:
-			w.clearIfOpen(key, fmt.Sprintf("%s: run %d of %s succeeded on %s, so the deploy is green again",
-				repo.repo(), run.ID, wf.File, run.PrettyRef))
 		}
+	}
+	return append(out, w.heldOpen(repo, present)...)
+}
+
+// heldOpen is the alerts of this repository that this poll found no failed run
+// for: the run aged out of the window, a newer one is still in flight, or the
+// clear that would close it did not land. The escalation outlives all three,
+// so the item stays in the picture while the alert is open: an alert still
+// waiting on a human must not go quiet in the dashboard when its run scrolls
+// off the list.
+func (w *deployWatch) heldOpen(repo deployRepo, present map[string]bool) []deployFailure {
+	var out []deployFailure
+	for _, key := range sortedKeys(w.open) {
+		open := w.open[key]
+		// A record from a state file written before this field existed has no
+		// summary to show, and one this poll found is already in the picture.
+		if present[key] || open.Repo != repo.repo() || open.Summary == "" {
+			continue
+		}
+		out = append(out, deployFailure{
+			Rig:      open.Rig,
+			Repo:     open.Repo,
+			Workflow: open.Workflow,
+			Class:    open.Class,
+			Key:      key,
+			Severity: open.Severity,
+			RunID:    open.Run,
+			Summary:  open.Summary,
+		})
 	}
 	return out
 }
@@ -429,23 +475,29 @@ func (w *deployWatch) failingJobs(ctx context.Context, repo deployRepo, run forg
 }
 
 // note raises or re-raises the alert for f, and pushes it if it is high. A
-// repeated failure of the same run is not a new alert: gt escalate records
-// the repeat on the bead the key already names (gt-vwry), and the push goes
-// out once per run.
+// repeated failure of the same run at the same severity is not a new alert:
+// gt escalate records the repeat on the bead the key already names (gt-vwry),
+// and the push goes out once per run.
 //
-// The state records a delivery, not an attempt: a raise or a push that failed
-// is left unwritten, so the next poll retries it instead of suppressing it.
+// A run whose severity is read differently than last poll re-raises, so the
+// bead the key names is corrected rather than left at what a first partial
+// reading said. The state records a delivery, not an attempt: a raise or a
+// push that failed is left unwritten, so the next poll retries it instead of
+// suppressing it.
 func (w *deployWatch) note(f deployFailure) {
 	open, known := w.open[f.Key]
-	if !known || open.Run != f.RunID {
+	if !known || open.Run != f.RunID || open.Severity != f.Severity {
 		if err := w.Raise(f.Severity, f.Key, f.Message); err != nil {
 			w.logOnce("%s: raising %s: %v", f.Key, f.Severity, err)
 			return
 		}
-		open = deployOpenRun{Run: f.RunID}
+		open.Run = f.RunID
+		open.Severity = f.Severity
 		w.dirty = true
-		w.logOnce("%s: %s run %d failed on %s", f.Rig, f.Workflow, f.RunID, f.Repo)
+		w.logOnce("%s: %s run %d failed on %s at %s", f.Rig, f.Workflow, f.RunID, f.Repo, f.Severity)
 	}
+	open.Rig, open.Repo, open.Workflow, open.Class, open.Summary =
+		f.Rig, f.Repo, f.Workflow, f.Class, f.Summary
 	// A town with no push command owes no push, so nothing is recorded as
 	// delivered: if the operator configures one while this failure stands, the
 	// next poll pushes it.
@@ -562,23 +614,30 @@ func deployWatchStatePath(townRoot string) string {
 	return filepath.Join(townRoot, ".runtime", deployWatchStateFile)
 }
 
-// deployAlertKey is the alert's stable identity: one per repository and
-// workflow, so a workflow that fails twice names one escalation.
-func deployAlertKey(repo deployRepo, workflow string) string {
-	return deployFailedKeyPrefix + repo.repo() + ":" + workflow
+// deployAlertKey is the alert's stable identity: one per repository, workflow
+// and ref class, so a workflow that fails twice names one escalation. The
+// class suffix appears only when the workflow deploys from more than one
+// class, and only health.yml does: its staging check and its prod smoke are
+// two deploys, and a green one of either is no answer about the other.
+func deployAlertKey(repo deployRepo, wf deployWorkflow, class string) string {
+	key := deployFailedKeyPrefix + repo.repo() + ":" + wf.File
+	if len(wf.Classes) > 1 {
+		key += ":" + class
+	}
+	return key
 }
 
-// newestDeployRun is the newest run of wf on one of the ref classes it
-// deploys from, inside the window. A run of the workflow on another ref — a
-// land/<bead> candidate, a feature branch — is not that workflow's deploy.
-func newestDeployRun(runs []forgejo.ActionRun, wf deployWorkflow, now time.Time) (forgejo.ActionRun, bool) {
+// newestDeployRun is the newest run of wf on the ref class class, inside the
+// window. A run of the workflow on another ref — a land/<bead> candidate, a
+// feature branch, health.yml's other environment — is not this deploy.
+func newestDeployRun(runs []forgejo.ActionRun, wf deployWorkflow, class string, now time.Time) (forgejo.ActionRun, bool) {
 	var best forgejo.ActionRun
 	found := false
 	for _, run := range runs {
 		if deployRunWorkflow(run.WorkflowID) != wf.File {
 			continue
 		}
-		if !slices.Contains(wf.Classes, deployRefClass(run.PrettyRef)) {
+		if deployRefClass(run.PrettyRef) != class {
 			continue
 		}
 		created := parseDeployStamp(run.Created)
@@ -627,14 +686,18 @@ func deployRefClass(ref string) string {
 	return ""
 }
 
-// deploySeverity is what a failed run of wf on ref is worth, or "" for a
-// failure this watch does not alert on: a workflow on a ref class it does not
-// deploy from (staging does not run on a tag, a release does not run on main),
-// or a workflow the watch does not follow. A health failure is judged by the
-// job that failed, because a broken prod smoke is a broken release where the
-// staging check is the staging deploy.
-func deploySeverity(wf deployWorkflow, ref string, failingJobs []string) string {
-	if !slices.Contains(wf.Classes, deployRefClass(ref)) {
+// deploySeverity is what a failed run of wf on ref class class is worth, or ""
+// for a failure this watch does not alert on: a workflow on a ref class it
+// does not deploy from (staging does not run on a tag, a release does not run
+// on main), or a workflow the watch does not follow.
+//
+// The severity comes from the workflow and the class alone, never from the
+// jobs read, which is best-effort: an alarm whose level depends on a read that
+// may fail is an alarm that can go out too quietly. A job name can only raise
+// it — a prod smoke is a broken release wherever it ran — so the read can
+// never talk the watch down.
+func deploySeverity(wf deployWorkflow, class string, failingJobs []string) string {
+	if !slices.Contains(wf.Classes, class) {
 		return ""
 	}
 	switch wf.File {
@@ -643,7 +706,7 @@ func deploySeverity(wf deployWorkflow, ref string, failingJobs []string) string 
 	case deployWorkflowDeploy, deployWorkflowTeardown:
 		return config.SeverityHigh
 	case deployWorkflowHealth:
-		if slices.Contains(failingJobs, deployHealthProdJob) {
+		if class == deployRefTag || slices.Contains(failingJobs, deployHealthProdJob) {
 			return config.SeverityHigh
 		}
 		return config.SeverityMedium
@@ -670,8 +733,9 @@ func deployStatusWord(status string) string {
 // deployMessage is the escalation's text. Its first line becomes the bead's
 // title, so it carries the repository, the workflow and the run; the body
 // names the commit, the first failing job and the run's URL, which is what a
-// reader needs to open the failure and what the next green run clears.
-func deployMessage(repo, workflow string, run forgejo.ActionRun, failingJobs []string) string {
+// reader needs to open the failure. Its last line names the run that closes
+// it, which is a green run of the same workflow on the same ref class.
+func deployMessage(repo, workflow string, run forgejo.ActionRun, class string, failingJobs []string) string {
 	lines := []string{
 		deploySummary(repo, workflow, run),
 		fmt.Sprintf("commit: %s", deployLine(run.Title, deployMessageMax)),
@@ -682,8 +746,17 @@ func deployMessage(repo, workflow string, run forgejo.ActionRun, failingJobs []s
 	if run.HTMLURL != "" {
 		lines = append(lines, "run: "+deployLine(run.HTMLURL, deployMessageMax))
 	}
-	lines = append(lines, fmt.Sprintf("The next green run of %s on %s closes this.", workflow, repo))
+	lines = append(lines, fmt.Sprintf("The next green run of %s on %s in %s closes this.", workflow, deployClassWords(class), repo))
 	return strings.Join(lines, "\n")
+}
+
+// deployClassWords is a ref class as a sentence says it: a run happens on main
+// or on a release tag.
+func deployClassWords(class string) string {
+	if class == deployRefTag {
+		return "a release tag"
+	}
+	return class
 }
 
 // deployLine is what a repository's own text may contribute to an alert: one
@@ -731,7 +804,7 @@ func deployItemSeverity(severity string) attention.Severity {
 
 // sortedKeys is a string-keyed map's keys in order, so a picture built from
 // one is the same list every poll.
-func sortedKeys(m map[string][]deployFailure) []string {
+func sortedKeys[V any](m map[string]V) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
@@ -765,18 +838,37 @@ func (s *attentionSources) collectDeployFailures(context.Context) ([]attention.I
 // startDeployWatch starts the watch once per daemon, from the landing worker
 // manager: the rigs it polls are the ones that land through Forgejo, so a town
 // whose landing worker is off deploys nothing for it to watch.
+//
+// The manager calls this on every pass, and a pass that cannot build a watch
+// leaves the next one free to try again: the first minutes of a daemon's life
+// are exactly when its rigs or its viewer token may not be there yet, and a
+// watch that gave up for good at that moment would be an alarm that is off
+// with nothing but one log line to say so. The reason it could not start is
+// logged once per distinct reason, not once per pass.
 func (d *Daemon) startDeployWatch() {
 	if d.ctx == nil {
 		return
 	}
-	d.deployWatchOnce.Do(func() {
-		w := d.productionDeployWatch()
-		if w == nil {
-			return
+	d.deployWatchMu.Lock()
+	defer d.deployWatchMu.Unlock()
+	if d.deployW.Load() != nil {
+		return
+	}
+	build := d.productionDeployWatch
+	if d.deployWatchBuild != nil {
+		build = d.deployWatchBuild
+	}
+	w, hold := build()
+	if w == nil {
+		if hold != d.deployWatchHold {
+			d.deployWatchHold = hold
+			d.logger.Printf("deploy_watch: not started: %s", hold)
 		}
-		d.deployW.Store(w)
-		go w.run(d.ctx)
-	})
+		return
+	}
+	d.deployWatchHold = ""
+	d.deployW.Store(w)
+	go w.run(d.ctx)
 }
 
 // watchDeploy is the watch the attention collector reads, nil until it starts.
@@ -820,31 +912,31 @@ func (c *deployClients) client(apiBase string) (deployRunAPI, error) {
 
 // productionDeployWatch wires the watch's collaborators: the read-only viewer
 // client each rig's repository is read through, the daemon's own escalations
-// and clears, and the push command the silent-overseer rule already uses.
-func (d *Daemon) productionDeployWatch() *deployWatch {
+// and clears, and the push command the silent-overseer rule already uses. A
+// watch it cannot build comes back nil with the reason, which the caller logs
+// once and retries on (startDeployWatch).
+//
+// A town with no rig repository has nothing to watch, and one whose viewer
+// token cannot be read could read no run: both are answered here, before a
+// poll, rather than failing a read per repository per interval.
+func (d *Daemon) productionDeployWatch() (*deployWatch, string) {
 	townRoot := d.config.TownRoot
 	clients := &deployClients{}
 	if cfg := landingWorkerConfig(d.patrolConfig); cfg != nil {
 		dir, err := cfg.ForgejoTokenDir()
 		if err != nil {
-			d.logger.Printf("deploy_watch: the configured Forgejo token dir: %v", err)
-			return nil
+			return nil, fmt.Sprintf("the configured Forgejo token dir: %v", err)
 		}
 		clients.tokenDir = dir
 	} else if dir, err := config.DefaultForgejoTokenDir(); err == nil {
 		clients.tokenDir = dir
 	}
-	// A town with no rig repository has nothing to watch, and one whose
-	// viewer token cannot be read could read no run: both are said once here
-	// rather than failing a read per repository per poll.
 	repos := d.deployRepos()
 	if len(repos) == 0 {
-		d.logger.Printf("deploy_watch: no rig names a Forgejo repository, so no deploy is watched")
-		return nil
+		return nil, "no rig names a Forgejo repository"
 	}
 	if _, err := clients.client(repos[0].APIBase); err != nil {
-		d.logger.Printf("deploy_watch: no %s Forgejo token, so no deploy is watched: %v", config.ForgejoRoleViewer, err)
-		return nil
+		return nil, fmt.Sprintf("no %s Forgejo token: %v", config.ForgejoRoleViewer, err)
 	}
 	w := newDeployWatch()
 	w.API = clients.client
@@ -859,7 +951,7 @@ func (d *Daemon) productionDeployWatch() *deployWatch {
 	if push := d.loadOperationalConfig().GetOverseerConfig().SilentPushName(); push != "" {
 		w.Push = func(title, body string) error { return notify.PushIn(townRoot, push, title, body) }
 	}
-	return w
+	return w, ""
 }
 
 // deployRepos is every rig the landing worker serves, with the Forgejo
