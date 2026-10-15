@@ -2831,6 +2831,12 @@ func preserveFailureBlocker(rigName, polecatName string, force, acknowledged boo
 }
 
 func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manager, r *rig.Rig, opts nukePolecatOptions) error {
+	// Refuse before any step mutates state: the session kill, molecule burn and
+	// hooked-work release below cannot be undone when removal later refuses
+	// because the operator's shell is inside this worktree.
+	if err := mgr.CheckShellOutsideWorktree(polecatName); err != nil {
+		return err
+	}
 	if err := checkNukeActiveMRSafety(mgr, polecatName, rigName, opts.Force); err != nil {
 		return err
 	}
