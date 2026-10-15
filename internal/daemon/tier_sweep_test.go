@@ -453,7 +453,7 @@ func TestTierSweepAgeCountsFromWhenTheSweepBecameOwed(t *testing.T) {
 	d.triggerTierSweep()
 	waitTierSweepIdle(t, d)
 
-	age, swept := d.tierSweepAge(now)
+	age, swept, _ := d.tierSweepAge(now)
 	if !swept || age >= defaultTierSweepStaleAfter {
 		t.Fatalf("owed age = %s (swept = %v), want an interval below the %s bound", age, swept, defaultTierSweepStaleAfter)
 	}
@@ -1059,9 +1059,10 @@ func TestTierSweepCoversRigAgreesWithTierSweepCoverageFor(t *testing.T) {
 
 // gt-icmdq: the record's verdicts and the failing names on them belong to the
 // tip LastSHA names — the pair the hour report prints and the dashboard matches
-// a row's names to by sha. A cycle that could not finish the tip it was
-// sweeping records none of its results, so no RED is ever merged under the
-// older sha, and what the cycle did take is filed against the tip it saw it at.
+// a row's names to by sha. A cycle that could not finish records the verdicts
+// it took under the tip it took them at and marks the record partial, so the
+// RED it saw is kept, nothing is merged under the older sha, and the tip it
+// never covered keeps owing a cycle.
 func TestTierSweepRigCycleDeferredKeepsFailedNamesWithTheSHA(t *testing.T) {
 	t.Parallel()
 	now := atHour(time.Now(), 15)
@@ -1093,12 +1094,15 @@ func TestTierSweepRigCycleDeferredKeepsFailedNamesWithTheSHA(t *testing.T) {
 	}
 
 	st := tierSweepTestState(t, d, "gastown")
-	if st.LastSHA != "red1" {
-		t.Fatalf("LastSHA = %q after a deferred cycle, want the old tip red1", st.LastSHA)
+	if st.LastSHA != "new2" || !st.Partial {
+		t.Fatalf("record = %+v, want the deferred cycle's own tip new2, marked partial", st)
 	}
 	got := st.Tiers["shell"]
-	if got.Verdict != tierSweepRed || len(got.FailedNames) != 1 || got.FailedNames[0] != "TestSomethingInCmd" {
-		t.Fatalf("shell verdict = %+v, want red1's RED and the failing name it carries: the sha beside it must name the results", got)
+	if got.Verdict != tierSweepRed || len(got.FailedNames) != 1 || got.FailedNames[0] != "TestDeferredThing" {
+		t.Fatalf("shell verdict = %+v, want the RED the deferred cycle took, with the name it carries: the sha beside it must name the results", got)
+	}
+	if _, ok := st.Tiers["integration"]; ok {
+		t.Fatalf("tiers = %+v, want no integration verdict: that stage never ran", st.Tiers)
 	}
 
 	// The deferred cycle's own RED carries its names and the sha it was taken
@@ -1152,7 +1156,7 @@ func TestTierSweepDeferredCycleDoesNotRestartTheOwedClock(t *testing.T) {
 		t.Fatalf("OwedSince = %v after a deferred cycle, want the unchanged %v", st.OwedSince, owedSince)
 	}
 	d.upgradeRestartPending.Store(true)
-	if age, swept := d.tierSweepAge(now); !swept || age < defaultTierSweepStaleAfter {
+	if age, swept, _ := d.tierSweepAge(now); !swept || age < defaultTierSweepStaleAfter {
 		t.Fatalf("owed age = %s (swept = %v), want past the %s bound", age, swept, defaultTierSweepStaleAfter)
 	}
 	if d.tierSweepDeferForRestart(now) {
@@ -1160,11 +1164,80 @@ func TestTierSweepDeferredCycleDoesNotRestartTheOwedClock(t *testing.T) {
 	}
 }
 
-// A deferred early re-run (the stage never started) learned nothing about the
-// new tip, so it must leave LastSHA at the old one: runTierSweepEarly skips a
-// tip equal to LastSHA, and advancing it would lose the retry to the hourly
-// cycle.
-func TestRunTierSweepEarlyKeepsLastSHAOnDeferredVerdict(t *testing.T) {
+// gt-icmdq: a rig that fails every cycle owes a sweep the whole time, so a full
+// cycle that ends RED must not restamp OwedSince. Restamping would hold the age
+// under the stale bound for good, and the pending restart would defer the sweep
+// forever.
+func TestTierSweepRedCycleDoesNotRestartTheOwedClock(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, _, _, _ := newTierSweepDaemon(t, now, "gastown")
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "red2", nil }
+	d.tierSweepSeams.localMainSHA = func(string) (string, error) { return "red2", nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+	owedSince := now.Add(-2 * time.Hour)
+	if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{
+		LastRun: owedSince, LastSHA: "red1", LastGreenSHA: "green0", OwedSince: owedSince,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Every stage runs (the recorder defaults to no verdict line, which reads
+	// as RED), so the cycle reached a verdict and the rig still owes a sweep.
+	if !d.runTierSweep() {
+		t.Fatal("a cycle that ran every stage reached no verdict")
+	}
+
+	st := tierSweepTestState(t, d, "gastown")
+	if !st.OwedSince.Equal(owedSince) {
+		t.Fatalf("OwedSince = %v after a RED cycle, want the unchanged %v: only a green cycle ends the interval", st.OwedSince, owedSince)
+	}
+	d.upgradeRestartPending.Store(true)
+	if age, swept, _ := d.tierSweepAge(now); !swept || age < defaultTierSweepStaleAfter {
+		t.Fatalf("owed age = %s (swept = %v), want past the %s bound", age, swept, defaultTierSweepStaleAfter)
+	}
+	if d.tierSweepDeferForRestart(now) {
+		t.Fatal("a sweep owed past the stale bound must not defer to the pending restart")
+	}
+}
+
+// gt-icmdq: measuring the owed age dates nothing. The caller writes the stamp
+// for the rigs the read saw start owing a sweep, so a read stays a read and the
+// record has one writer on each path that touches it.
+func TestTierSweepAgeReadsWithoutDatingTheOwedClock(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, _, _, _ := newTierSweepDaemon(t, now, "gastown")
+	d.tierSweepSeams.localMainSHA = func(string) (string, error) { return "new1", nil }
+	if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{
+		LastRun: now.Add(-6 * time.Hour), LastSHA: "green0", LastGreenSHA: "green0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	age, swept, undated := d.tierSweepAge(now)
+	if !swept || age != 0 {
+		t.Fatalf("owed age = %s (swept = %v), want the interval dated from now", age, swept)
+	}
+	if len(undated) != 1 || undated[0] != "gastown" {
+		t.Fatalf("undated = %v, want the rig whose interval began at this read", undated)
+	}
+	if st := tierSweepTestState(t, d, "gastown"); !st.OwedSince.IsZero() {
+		t.Fatalf("OwedSince = %v after the read alone, want the record untouched", st.OwedSince)
+	}
+
+	d.upgradeRestartPending.Store(true)
+	d.tierSweepDeferForRestart(now)
+	if st := tierSweepTestState(t, d, "gastown"); !st.OwedSince.Equal(now) {
+		t.Fatalf("OwedSince = %v, want %v: the deferral check dates what the read saw", st.OwedSince, now)
+	}
+}
+
+// A deferred early re-run records only the stages that ran, under the tip it
+// reached them at, and marks the record partial. The tip is still owed a whole
+// cycle, so the next early tick comes back for it rather than leaving it to the
+// hourly one (gt-icmdq).
+func TestRunTierSweepEarlyRetriesATipItsCycleCouldNotCover(t *testing.T) {
 	t.Parallel()
 	now := atHour(time.Now(), 15)
 	d, rec, _, _ := newTierSweepDaemon(t, now, "gastown")
@@ -1189,22 +1262,23 @@ func TestRunTierSweepEarlyKeepsLastSHAOnDeferredVerdict(t *testing.T) {
 	}
 	d.runTierSweepEarly([]string{"gastown"}, now)
 	st := tierSweepTestState(t, d, "gastown")
-	if st.LastSHA != "red1" {
-		t.Fatalf("LastSHA = %q after a deferred early re-run, want the old tip red1", st.LastSHA)
+	if st.LastSHA != "new2" || !st.Partial {
+		t.Fatalf("record = %+v, want the partial cycle's own tip new2, marked partial", st)
 	}
 	if !st.LastRun.Equal(now) {
 		t.Fatalf("LastRun = %v, want %v so the retry gap spaces the next attempt", st.LastRun, now)
 	}
 
-	// Next early tick, past the gap: the retry runs and records the tip.
+	// Next early tick, past the gap: new2 is only partly swept, so the re-run
+	// comes back for it.
 	later := now.Add(tierSweepRetryMinGap)
 	rec.stages = nil
 	rec.green()
 	d.runTierSweepEarly([]string{"gastown"}, later)
 	if len(rec.stages) == 0 {
-		t.Fatal("the next early tick did not retry the deferred re-run")
+		t.Fatal("the next early tick did not retry the tip the deferred re-run left partly swept")
 	}
-	if st := tierSweepTestState(t, d, "gastown"); st.LastSHA != "new2" || st.LastGreenSHA != "new2" {
+	if st := tierSweepTestState(t, d, "gastown"); st.LastSHA != "new2" || st.LastGreenSHA != "new2" || st.Partial {
 		t.Fatalf("record = %+v, want the retry to land on new2", st)
 	}
 }

@@ -112,6 +112,9 @@ func (d *Daemon) triggerSpecDispatch() bool {
 	// The seats are read here rather than at startup: an edit to the mix lands
 	// at the next tick (spec_seats.go, gt-jdnab).
 	if !d.specSeatsReady() {
+		// A half-read seat picture starts no tick, so the run of idle ticks
+		// ends here rather than resuming across it (gt-icmdq).
+		d.dispatchIdle.Reset()
 		return false
 	}
 	if !d.specDispatchRunning.CompareAndSwap(false, true) {
@@ -175,9 +178,13 @@ func (d *Daemon) runSpecDispatch() {
 	}
 	if r, perr := parseSpecDispatchReport(out); perr == nil {
 		now := d.clk().Now()
-		d.dispatchIdle.Observe(r, now)
-		// A held tick decided nothing, so it carries no roster to record.
-		if r.Hold == "" {
+		// A held tick decided nothing and carries no roster, so it observes no
+		// idle run either: the streak ends here, as it does when no tick runs
+		// at all (gt-icmdq).
+		if r.Hold != "" {
+			d.dispatchIdle.Reset()
+		} else {
+			d.dispatchIdle.Observe(r, now)
 			d.recordDispatchTick(r, now)
 		}
 	} else {
