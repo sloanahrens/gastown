@@ -535,6 +535,7 @@ func LoadDaemonPatrolConfig(path string) (*DaemonPatrolConfig, error) {
 		return nil, err
 	}
 
+	dropBadScheduledStopAfter(os.Stderr, &config)
 	if err := validateDaemonPatrolConfig(&config); err != nil {
 		return nil, err
 	}
@@ -558,16 +559,38 @@ func validateDaemonPatrolConfig(c *DaemonPatrolConfig) error {
 	if c.Version > CurrentDaemonPatrolConfigVersion {
 		return fmt.Errorf("%w: got %d, max supported %d", ErrInvalidVersion, c.Version, CurrentDaemonPatrolConfigVersion)
 	}
-	if c.Patrols != nil && c.Patrols.OverrunGuard != nil {
-		if s := c.Patrols.OverrunGuard.ScheduledStopAfter; s != "" {
-			// "0" is a valid duration and means never; a negative one would
-			// read as an instant stop or as never, so it is refused.
-			if d, err := time.ParseDuration(s); err != nil || d < 0 {
-				return fmt.Errorf("daemon.patrols.overrun_guard.scheduled_stop_after %q: want a duration of zero or more, such as \"60m\"", s)
-			}
-		}
+	if s := badScheduledStopAfter(c); s != "" {
+		return fmt.Errorf("daemon.patrols.overrun_guard.scheduled_stop_after %q: want a duration of zero or more, such as \"60m\"", s)
 	}
 	return nil
+}
+
+// badScheduledStopAfter returns the overrun guard's scheduled_stop_after when
+// it is set to something that is not a duration of zero or more, else "". "0"
+// is a valid duration and means never; a negative one would read as an instant
+// stop or as never, so it counts as bad.
+func badScheduledStopAfter(c *DaemonPatrolConfig) string {
+	if c.Patrols == nil || c.Patrols.OverrunGuard == nil {
+		return ""
+	}
+	s := c.Patrols.OverrunGuard.ScheduledStopAfter
+	if s == "" {
+		return ""
+	}
+	if d, err := time.ParseDuration(s); err != nil || d < 0 {
+		return s
+	}
+	return ""
+}
+
+// dropBadScheduledStopAfter clears a bad scheduled_stop_after and says so on
+// warn, so the overrun guard uses its default limit and the rest of the config
+// still loads. Save still refuses the value (validateDaemonPatrolConfig).
+func dropBadScheduledStopAfter(warn io.Writer, c *DaemonPatrolConfig) {
+	if s := badScheduledStopAfter(c); s != "" {
+		fmt.Fprintf(warn, "warning: daemon.patrols.overrun_guard.scheduled_stop_after %q is not a duration of zero or more, using the default\n", s)
+		c.Patrols.OverrunGuard.ScheduledStopAfter = ""
+	}
 }
 
 // EnsureDaemonPatrolConfig creates the daemon patrol config if it doesn't
