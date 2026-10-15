@@ -274,6 +274,10 @@ type OM struct {
 	Running []OMRunning `json:"running,omitempty"`
 	Last    []OMReview  `json:"last,omitempty"`
 	Recent  []OMReview  `json:"recent"`
+	// ThresholdSource names where Threshold, Depth and TimeoutS came from: the
+	// rig's .om.json the landing worker enforces, or the user's om config when
+	// the rig has none. With no Threshold it says why there is none.
+	ThresholdSource string `json:"threshold_source,omitempty"`
 }
 
 // Models is the header strip: what the town runs its work on, read from the
