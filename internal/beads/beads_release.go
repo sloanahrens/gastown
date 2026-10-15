@@ -40,6 +40,48 @@ func (b *Beads) TransferIfAssignee(id, expected, status, assignee string) (trans
 	return false, err
 }
 
+// TransferIfUnassigned sets a bead's status and assignee, but only while the
+// bead is still open and unassigned: the undo of a force re-sling's unhook,
+// which never takes a bead another actor has since hooked (gt-ct2ob).
+// transferred=false with a nil error means the guard no longer held; a missing
+// bead is an error.
+func TransferIfUnassigned(c Client, id, status, assignee string) (transferred bool, err error) {
+	if b, ok := c.(*Beads); ok {
+		return transferIfUnassigned(b, id, status, assignee)
+	}
+	// A Client that cannot name bd's guard does the same compare in two
+	// steps: the read holds off a closed or already-taken bead, and
+	// TransferIfAssignee's empty guard is the atomic "still unassigned".
+	issue, err := c.Show(id)
+	if err != nil {
+		return false, err
+	}
+	if issue.Status != string(StatusOpen) || issue.Assignee != "" {
+		return false, nil
+	}
+	return c.TransferIfAssignee(id, "", status, assignee)
+}
+
+// transferIfUnassigned is the *Beads path: one bd update carrying both
+// preconditions (--if-status=open, --if-assignee=), so no read can go stale
+// between the compare and the write, and routing follows the issue's prefix
+// the way the other guarded writes do.
+func transferIfUnassigned(b *Beads, id, status, assignee string) (transferred bool, err error) {
+	if !b.noRoute {
+		if target := b.forIssueID(id); target != b {
+			return transferIfUnassigned(target, id, status, assignee)
+		}
+	}
+	_, err = b.run("update", id, "--status="+status, "--assignee="+assignee, "--if-status=open", "--if-assignee=")
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, ErrGuardNotHeld):
+		return false, nil
+	}
+	return false, err
+}
+
 // AppendNotes appends note to an issue's notes (bd update --append-notes),
 // which bd joins to existing notes with a newline. It routes by the issue's
 // prefix the way Update does. An empty note is a no-op.

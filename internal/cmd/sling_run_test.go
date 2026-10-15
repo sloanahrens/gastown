@@ -412,6 +412,83 @@ func TestSlingRollsBackAnInlineTargetsSpawn(t *testing.T) {
 	h.wantCalls("restore raw fields", "restore raw fields "+slingBead)
 }
 
+// TestSlingForcedSpawnRollbackRestoresTheHolder (gt-ct2ob): a forced re-sling
+// onto a named polecat that spawns, failing before the hook, gives the bead
+// back to the holder it was taken from. The force block leaves the bead open
+// and unassigned, and the spawn rollback only hands work back to a polecat
+// that holds it, so nothing else here would.
+func TestSlingForcedSpawnRollbackRestoresTheHolder(t *testing.T) {
+	t.Parallel()
+	const holder = "gastown/polecats/Nux"
+	h := newSlingHarness(t)
+	h.addBead(slingBead, beadInfo{Status: "hooked", Assignee: holder})
+	h.run.opts.force = true
+	h.run.resolveTarget = func(string, ResolveTargetOptions) (*ResolvedTarget, error) {
+		spawn := h.newSpawn("gastown")
+		return &ResolvedTarget{Agent: spawn.AgentID(), WorkDir: spawn.ClonePath, NewPolecatInfo: spawn}, nil
+	}
+	// The real unhook leaves the bead open and unassigned.
+	h.run.unhook = func(_, id string) error {
+		h.mu.Lock()
+		h.beads[id].Status, h.beads[id].Assignee = "open", ""
+		h.mu.Unlock()
+		h.record("unhook %s", id)
+		return nil
+	}
+	h.run.instantiateFormula = func(context.Context, string, string, string, string, string, []string) (*FormulaOnBeadResult, error) {
+		return nil, errors.New("formula has no steps")
+	}
+	wantSlingErr(t, h.sling(slingBead, "gastown/polecats/Toast"), "formula has no steps")
+	h.wantCalls("rollback", "rollback Toast bead="+slingBead)
+	h.wantCalls("restore hold", "restore hold "+slingBead+" hooked "+holder)
+	got, err := h.info(slingBead)
+	if err != nil {
+		t.Fatalf("info: %v", err)
+	}
+	if got.Status != "hooked" || got.Assignee != holder {
+		t.Errorf("bead ended %s to %q, want hooked to the original holder %q", got.Status, got.Assignee, holder)
+	}
+}
+
+// TestSlingForcedSpawnRollbackKeepsAnotherHoldersWork (gt-ct2ob): the restore
+// above is a compare-and-swap, so a bead another actor hooked while the sling
+// was failing stays with that actor.
+func TestSlingForcedSpawnRollbackKeepsAnotherHoldersWork(t *testing.T) {
+	t.Parallel()
+	const holder = "gastown/polecats/Nux"
+	h := newSlingHarness(t)
+	h.addBead(slingBead, beadInfo{Status: "hooked", Assignee: holder})
+	h.run.opts.force = true
+	h.run.resolveTarget = func(string, ResolveTargetOptions) (*ResolvedTarget, error) {
+		spawn := h.newSpawn("gastown")
+		return &ResolvedTarget{Agent: spawn.AgentID(), WorkDir: spawn.ClonePath, NewPolecatInfo: spawn}, nil
+	}
+	h.run.unhook = func(_, id string) error {
+		h.mu.Lock()
+		h.beads[id].Status, h.beads[id].Assignee = "open", ""
+		h.mu.Unlock()
+		return nil
+	}
+	// The dispatcher wins the race: the bead is hooked to a third polecat by
+	// the time the failed sling rolls back.
+	const third = "gastown/polecats/Rusty"
+	h.run.instantiateFormula = func(context.Context, string, string, string, string, string, []string) (*FormulaOnBeadResult, error) {
+		h.mu.Lock()
+		h.beads[slingBead].Status, h.beads[slingBead].Assignee = "hooked", third
+		h.mu.Unlock()
+		return nil, errors.New("formula has no steps")
+	}
+	wantSlingErr(t, h.sling(slingBead, "gastown/polecats/Toast"), "formula has no steps")
+	h.wantCalls("restore hold", "restore hold skipped "+slingBead)
+	got, err := h.info(slingBead)
+	if err != nil {
+		t.Fatalf("info: %v", err)
+	}
+	if got.Status != "hooked" || got.Assignee != third {
+		t.Errorf("bead ended %s to %q, want %s's hold kept", got.Status, got.Assignee, third)
+	}
+}
+
 // TestSlingForcedPinnedRollbackRestoresThePin: a forced sling of a pinned
 // bead that fails after writing puts the pin back.
 func TestSlingForcedPinnedRollbackRestoresThePin(t *testing.T) {
