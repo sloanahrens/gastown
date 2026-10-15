@@ -93,6 +93,15 @@ const (
 	// landing cannot loop faster than this.
 	tierSweepRetryMinGap = 10 * time.Minute
 
+	// defaultTierSweepStaleAfter is how old the last sweep may be before a
+	// pending upgrade restart stops deferring the next one (gt-zvqn8). Every
+	// landing that changes the binary leaves a restart pending, so during a run
+	// of landings the flag is set almost continuously and an unbounded deferral
+	// starves the only gate over the integration and race tiers. Ninety minutes
+	// is an hour and a half: a sweep that missed its own hour has missed half of
+	// the next one too.
+	defaultTierSweepStaleAfter = 90 * time.Minute
+
 	// tierSweepNoName stands in for the failing unit when a RED summary named
 	// none.
 	tierSweepNoName = "(no failing unit named)"
@@ -208,6 +217,18 @@ func tierSweepRunnerIdleWait(config *DaemonPatrolConfig) time.Duration {
 		}
 	}
 	return defaultTierSweepRunnerIdleWait
+}
+
+// tierSweepStaleAfter is how old the last sweep may be before a pending upgrade
+// restart stops deferring the next one, defaulting to 90m and reading a value
+// that does not parse, or is not positive, as unset.
+func tierSweepStaleAfter(config *DaemonPatrolConfig) time.Duration {
+	if c := tierSweepConfig(config); c != nil && c.RestartStaleAfterStr != "" {
+		if d, err := time.ParseDuration(c.RestartStaleAfterStr); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultTierSweepStaleAfter
 }
 
 // tierSweepCoversRig reports whether the tier sweep this daemon runs sweeps
@@ -459,6 +480,10 @@ func (d *Daemon) triggerTierSweep() {
 	if !d.tierSweepRunning.CompareAndSwap(false, true) {
 		return
 	}
+	// The hold the restart reads starts here, with the cycle, not with the
+	// marker: a sweep that begins while the restart has already waited out
+	// tierSweepRestartCap gets that much of its own (gt-zvqn8).
+	d.tierSweepStartedAt.Store(now.UnixNano())
 	if dec.warn != "" {
 		d.logger.Printf("tier_sweep: WARNING: %s — %s", dec.warn, dec.note)
 	}
@@ -528,7 +553,7 @@ func tierSweepRedBeadsOpen(bd tierSweepBeadStore, rig string) (bool, error) {
 // closed and whose origin/main has moved since their last cycle. A rig that
 // fails either test is left to the normal interval, without a word in the log.
 func (d *Daemon) runTierSweepEarly(rigs []string, now time.Time) {
-	if d.tierSweepDeferForRestart() {
+	if d.tierSweepDeferForRestart(now) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), tierSweepRunBudget)
@@ -585,23 +610,78 @@ func (d *Daemon) runTierSweepEarly(rigs []string, now time.Time) {
 }
 
 // tierSweepDeferForRestart reports whether a pending upgrade restart defers
-// the cycle, logging the skip once per pending restart, not once per heartbeat.
-func (d *Daemon) tierSweepDeferForRestart() bool {
+// the cycle at now, logging the skip once per pending restart, not once per
+// heartbeat.
+//
+// The deferral is bounded by the sweep's own age (gt-zvqn8). Every landing that
+// changes the binary installs it and leaves a restart pending, so during a run
+// of landings the flag is set almost continuously; an unbounded deferral left
+// the integration and race tiers — which only a sweep gates — unswept for
+// hours. A sweep at or past tierSweepStaleAfter therefore runs anyway, and the
+// restart waits for it (upgradeHold, tierSweepRestartCap). A rig with no sweep
+// record yet has no age to measure, so that case defers as before.
+func (d *Daemon) tierSweepDeferForRestart(now time.Time) bool {
 	if !d.upgradeRestartPending.Load() {
 		return false
 	}
-	if d.tierSweepSkipLogged.CompareAndSwap(false, true) {
-		d.logger.Printf("tier_sweep: an upgrade restart is pending; skipping this cycle")
+	age, swept := d.tierSweepAge(now)
+	bound := tierSweepStaleAfter(d.patrolConfig)
+	switch {
+	case swept && age >= bound:
+		if d.tierSweepSkipLogged.CompareAndSwap(false, true) {
+			d.logger.Printf("tier_sweep: the last sweep was %s ago, past the %s bound; sweeping now rather than waiting out the pending restart",
+				age.Round(time.Minute), bound)
+		}
+		return false
+	case swept:
+		if d.tierSweepSkipLogged.CompareAndSwap(false, true) {
+			d.logger.Printf("tier_sweep: an upgrade restart is pending; skipping this cycle (last sweep %s ago, bound %s)",
+				age.Round(time.Minute), bound)
+		}
+		return true
+	default:
+		if d.tierSweepSkipLogged.CompareAndSwap(false, true) {
+			d.logger.Printf("tier_sweep: an upgrade restart is pending; skipping this cycle (no sweep recorded yet)")
+		}
+		return true
 	}
-	return true
+}
+
+// tierSweepAge is how long ago the sweep last looked at a rig: the oldest
+// LastRun among the configured rigs' records, which every cycle that runs a
+// stage writes, green or red. The second result is false when none of them has
+// a readable record yet — nothing is known to have been swept, so nothing is
+// starved.
+//
+// A rig with no record is skipped rather than counted as infinitely stale: a
+// rig that is configured but has no repository is skipped by every cycle and
+// would otherwise make every sweep measure as stale, which would retire the
+// restart's deferral for the whole town.
+func (d *Daemon) tierSweepAge(now time.Time) (time.Duration, bool) {
+	var age time.Duration
+	found := false
+	for _, rig := range tierSweepRigs(d.patrolConfig, d.getKnownRigs()) {
+		st, err := readTierSweepState(d.config.TownRoot, rig)
+		if err != nil || st.LastRun.IsZero() {
+			continue
+		}
+		rigAge := now.Sub(st.LastRun)
+		if !found || rigAge > age {
+			age = rigAge
+		}
+		found = true
+	}
+	return age, found
 }
 
 // runTierSweep is one cycle over every configured rig. It reports whether the
 // cycle reached a verdict, as opposed to deferring with nothing accomplished.
-// A pending upgrade restart defers the cycle: the job stays due and the next
-// heartbeat retries, so the restart does not cost the hour.
+// A pending upgrade restart defers the cycle, unless the last sweep is already
+// past tierSweepStaleAfter: the job stays due and the next heartbeat retries,
+// so the restart does not cost the hour, and a run of landings cannot cost the
+// tiers their gate.
 func (d *Daemon) runTierSweep() bool {
-	if d.tierSweepDeferForRestart() {
+	if d.tierSweepDeferForRestart(d.clk().Now()) {
 		return false
 	}
 	rigs := tierSweepRigs(d.patrolConfig, d.getKnownRigs())

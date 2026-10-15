@@ -192,6 +192,46 @@ func TestUpgradeWaitsForARunningTierSweepUpToTheCap(t *testing.T) {
 			t.Fatalf("escalated: %v", *keys)
 		}
 	})
+
+	// gt-zvqn8: the stale bound can let a sweep start while the restart has
+	// already waited out the cap (that is the point: the sweep must not starve).
+	// Its hold runs from its own start, so the restart waits for it rather than
+	// killing it on the heartbeat that follows.
+	t.Run("a sweep that starts late in the wait gets its own bound", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		var logs strings.Builder
+		d.logger = log.New(&logs, "", 0)
+		captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: "/repo"})
+
+		// A cycle from before the marker is what starts the wait.
+		d.tierSweepRunning.Store(true)
+		now := time.Now()
+		if d.checkUpgradeRestart(now) {
+			t.Fatal("restarted under a running tier sweep")
+		}
+		// The marker has waited well past the cap when a stale sweep starts.
+		started := now.Add(3 * tierSweepRestartCap)
+		d.tierSweepStartedAt.Store(started.UnixNano())
+		d.tierSweepRunning.Store(true)
+		if d.checkUpgradeRestart(started) {
+			t.Fatal("a sweep that just started was cut on its first heartbeat")
+		}
+		if d.checkUpgradeRestart(started.Add(tierSweepRestartCap - time.Minute)) {
+			t.Fatal("the sweep was cut before its own bound, on the marker's clock")
+		}
+		if !strings.Contains(logs.String(), "waiting for the tier sweep that is running") {
+			t.Fatalf("no wait line for the late sweep:\n%s", logs.String())
+		}
+
+		// The cycle closes before its bound, and the restart goes.
+		d.tierSweepRunning.Store(false)
+		if !d.checkUpgradeRestart(started.Add(tierSweepRestartCap)) {
+			t.Fatal("a closed tier sweep must not hold the restart")
+		}
+	})
 }
 
 // gt-oucgn: a maintenance gc cycle in flight holds a pending upgrade restart —

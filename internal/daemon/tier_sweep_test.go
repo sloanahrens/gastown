@@ -197,6 +197,117 @@ func TestTriggerTierSweep_PendingRestartDefersWithoutConsumingTheHour(t *testing
 	}
 }
 
+// withTierSweepLastRun writes rig's sweep record with the given last run, so a
+// test can age a sweep without running one.
+func withTierSweepLastRun(t *testing.T, d *Daemon, rig string, lastRun time.Time) {
+	t.Helper()
+	if err := writeTierSweepState(d.config.TownRoot, rig, tierSweepState{LastRun: lastRun}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// gt-zvqn8: every landing that changes the binary leaves a restart pending, so
+// during a run of landings the flag is set almost continuously. The sweep — the
+// only gate over the integration and race tiers — must not wait indefinitely
+// for it: past the stale bound it runs anyway, and says why.
+func TestRunTierSweep_StaleSweepRunsWhileARestartIsPending(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec, _, logs := newTierSweepDaemon(t, now, "gastown")
+	rec.green()
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "abc123", nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+	withTierSweepLastRun(t, d, "gastown", now.Add(-defaultTierSweepStaleAfter-time.Minute))
+	d.upgradeRestartPending.Store(true)
+
+	if !d.runTierSweep() {
+		t.Fatal("a sweep past the stale bound must not defer to the pending restart")
+	}
+	if len(rec.stages) == 0 {
+		t.Fatalf("stages = %+v, want the stale sweep to run despite the pending restart", rec.stages)
+	}
+	if !strings.Contains(logs.String(), "past the 1h30m0s bound; sweeping now rather than waiting out the pending restart") {
+		t.Fatalf("no line saying why the sweep ran under a pending restart:\n%s", logs.String())
+	}
+}
+
+// A sweep inside the bound still defers, and the line carries its age
+// (gt-zvqn8).
+func TestRunTierSweep_YoungSweepStillDefersToTheRestart(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec, _, logs := newTierSweepDaemon(t, now, "gastown")
+	withTierSweepLastRun(t, d, "gastown", now.Add(-20*time.Minute))
+	d.upgradeRestartPending.Store(true)
+
+	if d.runTierSweep() {
+		t.Fatal("a deferred cycle accomplished nothing and must report no verdict, so the job stays due")
+	}
+	if len(rec.stages) != 0 {
+		t.Fatalf("stages run = %+v, want none inside the stale bound", rec.stages)
+	}
+	if !strings.Contains(logs.String(), "skipping this cycle (last sweep 20m0s ago, bound 1h30m0s)") {
+		t.Fatalf("the skip line does not say how old the sweep was:\n%s", logs.String())
+	}
+}
+
+// The bound is the named 90m constant and includes it: a sweep exactly at the
+// bound runs, a fresher one defers. A rig with no record has no age to measure
+// and defers as it did before the bound existed (gt-zvqn8).
+func TestTierSweepDeferForRestart_StaleBound(t *testing.T) {
+	t.Parallel()
+	if defaultTierSweepStaleAfter != 90*time.Minute {
+		t.Fatalf("defaultTierSweepStaleAfter = %s, want 90m", defaultTierSweepStaleAfter)
+	}
+	now := atHour(time.Now(), 15)
+	for _, tc := range []struct {
+		name    string
+		age     time.Duration
+		record  bool
+		wantDef bool
+	}{
+		{"an hour old defers", time.Hour, true, true},
+		{"just under the bound defers", defaultTierSweepStaleAfter - time.Second, true, true},
+		{"at the bound runs", defaultTierSweepStaleAfter, true, false},
+		{"a stale sweep runs", 3 * time.Hour, true, false},
+		{"no record defers", 0, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, _, logs := newTierSweepDaemon(t, now, "gastown")
+			if tc.record {
+				withTierSweepLastRun(t, d, "gastown", now.Add(-tc.age))
+			}
+			d.upgradeRestartPending.Store(true)
+
+			if got := d.tierSweepDeferForRestart(now); got != tc.wantDef {
+				t.Fatalf("defer = %v, want %v:\n%s", got, tc.wantDef, logs.String())
+			}
+			if tc.wantDef && !strings.Contains(logs.String(), "an upgrade restart is pending; skipping this cycle") {
+				t.Fatalf("a deferred sweep must say why:\n%s", logs.String())
+			}
+			if !tc.wantDef && !strings.Contains(logs.String(), "sweeping now rather than waiting out the pending restart") {
+				t.Fatalf("a sweep that ignored the restart must say why:\n%s", logs.String())
+			}
+		})
+	}
+}
+
+// The override moves the bound: with restart_stale_after at 5m, a 10m-old
+// sweep runs under a pending restart (gt-zvqn8).
+func TestTierSweepDeferForRestart_ConfiguredBound(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, _, _, _ := newTierSweepDaemon(t, now, "gastown")
+	d.patrolConfig.Patrols.TierSweep.RestartStaleAfterStr = "5m"
+	withTierSweepLastRun(t, d, "gastown", now.Add(-10*time.Minute))
+	d.upgradeRestartPending.Store(true)
+
+	if d.tierSweepDeferForRestart(now) {
+		t.Fatal("a sweep past the configured 5m bound must not defer to the pending restart")
+	}
+}
+
 // The skip line is written once per pending restart, not on every heartbeat,
 // and a later restart logs it again.
 func TestTriggerTierSweep_SkipLoggedOncePerPendingRestart(t *testing.T) {
@@ -220,8 +331,10 @@ func TestTriggerTierSweep_SkipLoggedOncePerPendingRestart(t *testing.T) {
 	d.triggerTierSweep()
 	waitTierSweepIdle(t, d)
 	d.upgradeRestartPending.Store(true)
-	// The sweep above recorded the hour; step past the interval so it is due.
-	d.clock = clockwork.NewFakeClockAt(d.clk().Now().Add(3 * time.Hour))
+	// The sweep above recorded the hour; step past the interval so it is due,
+	// and no further: a sweep past tierSweepStaleAfter runs despite the
+	// restart instead of logging the skip (gt-zvqn8).
+	d.clock = clockwork.NewFakeClockAt(d.clk().Now().Add(tierSweepInterval(d.patrolConfig) + time.Minute))
 	d.triggerTierSweep()
 	waitTierSweepIdle(t, d)
 	if got := count(); got != 2 {

@@ -285,3 +285,24 @@ func TestTierSweepRunnerIdleConfig(t *testing.T) {
 		t.Errorf("wait with an unparsable value = %v, want the 10m default", got)
 	}
 }
+
+// restart_stale_after and its default: an unset, unparsable or non-positive
+// value means 90m (gt-zvqn8).
+func TestTierSweepStaleAfterConfig(t *testing.T) {
+	t.Parallel()
+	if got := tierSweepStaleAfter(nil); got != 90*time.Minute {
+		t.Errorf("stale bound with no config = %v, want 90m", got)
+	}
+	cfg := &DaemonPatrolConfig{Patrols: &PatrolsConfig{TierSweep: &TierSweepConfig{
+		RestartStaleAfterStr: "45m",
+	}}}
+	if got := tierSweepStaleAfter(cfg); got != 45*time.Minute {
+		t.Errorf("stale bound = %v, want 45m", got)
+	}
+	for _, bad := range []string{"not a duration", "-5m", "0s"} {
+		cfg.Patrols.TierSweep.RestartStaleAfterStr = bad
+		if got := tierSweepStaleAfter(cfg); got != 90*time.Minute {
+			t.Errorf("stale bound with %q = %v, want the 90m default", bad, got)
+		}
+	}
+}

@@ -684,6 +684,12 @@ type TierSweepConfig struct {
 	// (e.g. "10m"). Default 10m. The stage starts anyway when the cap runs
 	// out, and the cycle's log says it ran under load.
 	RunnerIdleWaitStr string `json:"runner_idle_wait,omitempty"`
+
+	// RestartStaleAfterStr is how old the last sweep may be before a pending
+	// upgrade restart stops deferring the next one, as a string (e.g. "90m").
+	// Default 90m. Past the bound the sweep runs and the restart waits for it
+	// (gt-zvqn8).
+	RestartStaleAfterStr string `json:"restart_stale_after,omitempty"`
 }
 
 // LandingWorkerConfig holds configuration for the landing_worker patrol.

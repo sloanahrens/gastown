@@ -501,6 +501,12 @@ type Daemon struct {
 	// predicate, so checkUpgradeRestart holds a restart for it separately, up
 	// to tierSweepRestartCap (gt-ccyw0).
 	tierSweepRunning atomic.Bool
+	// tierSweepStartedAt is the UnixNano start of the cycle running now, 0 when
+	// none is. The restart's sweep hold is measured from it as well as from the
+	// marker's wait clock, so a sweep the stale bound let through while the
+	// restart had already waited gets its own bound instead of being cut on the
+	// heartbeat that follows (gt-zvqn8).
+	tierSweepStartedAt atomic.Int64
 	// tierSweepSkipLogged is true once the job has logged that a pending
 	// upgrade restart deferred its cycle; triggerTierSweep clears it when no
 	// restart is pending, so the line appears once per restart.
