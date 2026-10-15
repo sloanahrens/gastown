@@ -95,7 +95,7 @@ func TestDispatchIdleRaisesAfterFiveIdleTicks(t *testing.T) {
 	}
 }
 
-// gt-icmd4: the ticker was parked or failing between two observations, so the
+// gt-icmdq: the ticker was parked or failing between two observations, so the
 // idle ticks before the gap and the one after it are not a consecutive run.
 // Without this, four idle ticks, an hour's hold and one more idle tick raise
 // the HIGH item after one tick of a resumed streak.
@@ -113,6 +113,37 @@ func TestDispatchIdleStreakResetsAcrossAGap(t *testing.T) {
 	}
 	if items := r.items(t); len(items) != 0 {
 		t.Fatalf("raised after one idle tick of a resumed streak: %+v", items)
+	}
+}
+
+// gt-icmdq: the gap between consecutive ticks is a multiple of the ticker's own
+// cadence. A fixed five minutes ended the streak on every tick of a town that
+// configured a slower ticker, so the HIGH item could never raise at all.
+func TestDispatchIdleStreakSurvivesASlowTicker(t *testing.T) {
+	t.Parallel()
+	r := newIdleRig(t)
+	const interval = 10 * time.Minute
+	r.tr.setInterval(interval)
+	tick := idleTick(overlapLine)
+
+	for i := 0; i < attentionDispatchIdleTicks; i++ {
+		r.now = r.now.Add(interval)
+		r.tr.Observe(tick, r.now)
+	}
+	if got := r.tr.Status().Streak; got != attentionDispatchIdleTicks {
+		t.Fatalf("Streak = %d after %d idle ticks %s apart, want %d",
+			got, attentionDispatchIdleTicks, interval, attentionDispatchIdleTicks)
+	}
+	if items := r.items(t); len(items) != 1 {
+		t.Fatalf("items = %+v, want the idle item raised on a slow ticker", items)
+	}
+
+	// The gap scales with the cadence rather than vanishing: a ticker parked
+	// past its own gap still ends the run.
+	r.now = r.now.Add(attentionDispatchIdleGapIntervals*interval + time.Minute)
+	r.tr.Observe(tick, r.now)
+	if got := r.tr.Status().Streak; got != 1 {
+		t.Fatalf("Streak = %d after a tick past the scaled gap, want 1", got)
 	}
 }
 

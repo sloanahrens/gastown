@@ -255,7 +255,7 @@ func TestRunTierSweep_YoungSweepStillDefersToTheRestart(t *testing.T) {
 // skipped by every cycle, so its LastRun goes stale while the patrol runs. Its
 // age must not stand for the sweep's age, or it retires the restart's deferral
 // and the busy rig's sweep runs into the restart. The age of a rig that does
-// owe a sweep is the owed interval (gt-icmd4), so a landing's tip counts from
+// owe a sweep is the owed interval (gt-icmdq), so a landing's tip counts from
 // the landing, while a record that has been owed past the bound still retires
 // the deferral.
 func TestRunTierSweep_QuietRigDoesNotRetireTheRestartDeferral(t *testing.T) {
@@ -405,7 +405,7 @@ func TestTriggerTierSweep_SkipLoggedOncePerPendingRestart(t *testing.T) {
 
 // The line saying why a stale sweep ran under a pending restart is not the
 // skip line's to suppress: a restart that first deferred a younger sweep must
-// still hear, later on, that the bound retired the deferral (gt-icmd4).
+// still hear, later on, that the bound retired the deferral (gt-icmdq).
 func TestTierSweepStaleRunLogIsNotSuppressedByTheDeferralSkipLatch(t *testing.T) {
 	t.Parallel()
 	now := atHour(time.Now(), 15)
@@ -430,7 +430,7 @@ func TestTierSweepStaleRunLogIsNotSuppressedByTheDeferralSkipLatch(t *testing.T)
 	}
 }
 
-// gt-icmd4: a rig caught up at the tip it last swept green keeps a LastRun
+// gt-icmdq: a rig caught up at the tip it last swept green keeps a LastRun
 // hours old while it stays quiet. The landing that moves its main owes it a
 // sweep now, and the pending restart has not starved it: the age is the owed
 // interval, so the cycle still defers instead of sweeping at once.
@@ -1057,15 +1057,15 @@ func TestTierSweepCoversRigAgreesWithTierSweepCoverageFor(t *testing.T) {
 	}
 }
 
-// gt-icmd4: a deferred cycle records nothing. The record's verdicts and the
-// failing names on them belong to the tip LastSHA names — the pair the hour
-// report prints and the dashboard matches a row's names to — so a cycle that
-// could not finish the tip it was sweeping must leave them alone rather than
-// merge a RED from that tip under the older sha.
+// gt-icmdq: the record's verdicts and the failing names on them belong to the
+// tip LastSHA names — the pair the hour report prints and the dashboard matches
+// a row's names to by sha. A cycle that could not finish the tip it was
+// sweeping records none of its results, so no RED is ever merged under the
+// older sha, and what the cycle did take is filed against the tip it saw it at.
 func TestTierSweepRigCycleDeferredKeepsFailedNamesWithTheSHA(t *testing.T) {
 	t.Parallel()
 	now := atHour(time.Now(), 15)
-	d, rec, _, _ := newTierSweepDaemon(t, now, "gastown")
+	d, rec, bd, _ := newTierSweepDaemon(t, now, "gastown")
 	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "new2", nil }
 	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
 	if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{
@@ -1077,14 +1077,14 @@ func TestTierSweepRigCycleDeferredKeepsFailedNamesWithTheSHA(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The shell stage runs RED at the new tip and the slot stage never starts,
-	// so the cycle defers with a partial record.
+	// The shell stage runs RED at the new tip, naming the unit that failed, and
+	// the slot stage never starts, so the cycle defers.
 	rec.result = func(st tierSweepStage) tierSweepStageResult {
 		if st.slot {
 			return tierSweepStageResult{err: errors.New("slot busy")}
 		}
 		return tierSweepStageResult{
-			output:   "tier-sweep: shell RED passed=1 failed=1 skipped=0 (logs /tmp/tier-sweep.x)\n",
+			output:   "tier-sweep: shell RED passed=1 failed=1 skipped=0 failed: TestDeferredThing (logs /tmp/tier-sweep.x)\n",
 			exitCode: 1, ran: true,
 		}
 	}
@@ -1098,7 +1098,65 @@ func TestTierSweepRigCycleDeferredKeepsFailedNamesWithTheSHA(t *testing.T) {
 	}
 	got := st.Tiers["shell"]
 	if got.Verdict != tierSweepRed || len(got.FailedNames) != 1 || got.FailedNames[0] != "TestSomethingInCmd" {
-		t.Fatalf("shell verdict = %+v, want red1's RED and the failing name it carries", got)
+		t.Fatalf("shell verdict = %+v, want red1's RED and the failing name it carries: the sha beside it must name the results", got)
+	}
+
+	// The deferred cycle's own RED carries its names and the sha it was taken
+	// at, in the bead it files.
+	if len(bd.created) != 1 {
+		t.Fatalf("beads = %+v, want one for the RED the deferred cycle saw", bd.created)
+	}
+	if want := "tier sweep (gastown): shell: TestDeferredThing"; bd.created[0].Title != want {
+		t.Errorf("bead title = %q, want %q", bd.created[0].Title, want)
+	}
+	if !strings.Contains(bd.created[0].Description, "new2") {
+		t.Errorf("bead = %q, want it filed against the tip the RED was taken at", bd.created[0].Description)
+	}
+}
+
+// gt-icmdq: a deferred cycle learned nothing about the stages it could not run,
+// so it must not restart the owed clock. A rig the sweep keeps partly running
+// still ages past the stale bound, and the pending restart stops deferring it.
+func TestTierSweepDeferredCycleDoesNotRestartTheOwedClock(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec, _, _ := newTierSweepDaemon(t, now, "gastown")
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "new2", nil }
+	d.tierSweepSeams.localMainSHA = func(string) (string, error) { return "new2", nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+	owedSince := now.Add(-2 * time.Hour)
+	if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{
+		LastRun: owedSince, LastSHA: "red1", LastGreenSHA: "green0", OwedSince: owedSince,
+		Tiers: map[string]tierSweepTierResult{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The shell stage runs green and the slot stage never starts, so the cycle
+	// defers with a partial record.
+	rec.result = func(st tierSweepStage) tierSweepStageResult {
+		if st.slot {
+			return tierSweepStageResult{err: errors.New("slot busy")}
+		}
+		return tierSweepStageResult{
+			output:   "tier-sweep: shell GREEN passed=3 failed=0 skipped=0 (logs /tmp/tier-sweep.x)\n",
+			exitCode: 0, ran: true,
+		}
+	}
+	if d.runTierSweep() {
+		t.Fatal("a partial cycle reached a verdict")
+	}
+
+	st := tierSweepTestState(t, d, "gastown")
+	if !st.OwedSince.Equal(owedSince) {
+		t.Fatalf("OwedSince = %v after a deferred cycle, want the unchanged %v", st.OwedSince, owedSince)
+	}
+	d.upgradeRestartPending.Store(true)
+	if age, swept := d.tierSweepAge(now); !swept || age < defaultTierSweepStaleAfter {
+		t.Fatalf("owed age = %s (swept = %v), want past the %s bound", age, swept, defaultTierSweepStaleAfter)
+	}
+	if d.tierSweepDeferForRestart(now) {
+		t.Fatal("a sweep owed past the stale bound must not defer to the pending restart")
 	}
 }
 
