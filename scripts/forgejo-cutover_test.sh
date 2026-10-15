@@ -31,6 +31,8 @@ PASS=0
 FAIL=0
 
 STUB_ADMIN_TOKEN="stub-admin-token"
+BROKER_TOKEN="brokertoken-zqxvjkcd"
+DECOY_TOKEN="decoytoken-zqxvjkcd"
 API="http://forgejo.test/api/v1"
 WEB="http://forgejo.test"
 # The admin base the script's own git work rides: the web root plus the repo.
@@ -277,10 +279,20 @@ done
 path=${url#"$STUB_API"}
 path=${path%%\?*}
 printf '%s %s\n' "$method" "$path" >> "$STUB_STATE/calls.log"
+# The token this call presented, read from the curl config the cutover wrote, so
+# a case can tell which source was resolved. $STUB_SECRETS names every other
+# token the run may hold — a broker's — so that one is watched for in argv the
+# way the stand-in override is.
+if [ -f "$config" ]; then
+  sed -n 's/^header = "Authorization: token \(.*\)"$/\1/p' "$config" >> "$STUB_STATE/presented-tokens"
+fi
 for arg in "${orig_args[@]}"; do
-  case "$arg" in
-    *"$STUB_ADMIN_TOKEN"*) echo "admin token in argv: $arg" >> "$STUB_STATE/argv-violations" ;;
-  esac
+  for secret in "$STUB_ADMIN_TOKEN" ${STUB_SECRETS:-}; do
+    [ -n "$secret" ] || continue
+    case "$arg" in
+      *"$secret"*) echo "admin token in argv: $arg" >> "$STUB_STATE/argv-violations" ;;
+    esac
+  done
 done
 [ -n "$config" ] || echo "no curl config file on $method $path" >> "$STUB_STATE/argv-violations"
 
@@ -410,20 +422,29 @@ JSON
 JSON
 }
 
+# CUTOVER_TOKEN_ENV and CUTOVER_TOKEN_ARGS hold the token source a case runs
+# under: the stand-in's file by default, and under the broker a
+# GT_AUTH_FORGEJO_TOKEN in the environment with no file named at all.
+CUTOVER_TOKEN_ENV=()
+CUTOVER_TOKEN_ARGS=(--admin-token-file "$TMP/admin.env")
+
 # run_cutover [ARGS...] runs the script against the stubs, prints its combined
 # output, and returns its exit code.
 run_cutover() {
   local out rc
-  out=$(env -u FORGEJO_ADMIN_TOKEN -u FORGEJO_API_URL -u FORGEJO_URL \
+  out=$(env -u GT_AUTH_FORGEJO_TOKEN -u FORGEJO_ADMIN_TOKEN -u FORGEJO_ADMIN_ENV \
+    -u FORGEJO_API_URL -u FORGEJO_URL \
+    ${CUTOVER_TOKEN_ENV[@]+"${CUTOVER_TOKEN_ENV[@]}"} \
     HOME="$TMP/home" XDG_CONFIG_HOME="$CFG" PATH="$TMP/bin:$PATH" \
     STUB_STATE="$STATE" STUB_API="$API" STUB_MIRROR_TARGET="$GITHUB_URL" \
-    STUB_ADMIN_TOKEN="$STUB_ADMIN_TOKEN" STUB_MIRROR_ABSENT="${STUB_MIRROR_ABSENT:-}" \
+    STUB_ADMIN_TOKEN="$STUB_ADMIN_TOKEN" STUB_SECRETS="${STUB_SECRETS:-}" \
+    STUB_MIRROR_ABSENT="${STUB_MIRROR_ABSENT:-}" \
     STUB_BD_FAIL="${STUB_BD_FAIL:-}" \
     STUB_ADMIN_GIT_URL="$ADMIN_GIT_URL" \
     STUB_FORGEJO_GIT_URLS="$ADMIN_GIT_URL${STUB_FORGEJO_EXTRA_URL:+ $STUB_FORGEJO_EXTRA_URL}" \
     bash "$CUTOVER" acme --town-root "$TOWN" --repo acme/rig \
     --api-url "$API" --web-url "$WEB" \
-    --admin-token-file "$TMP/admin.env" --probe "$TMP/probe.sh" \
+    ${CUTOVER_TOKEN_ARGS[@]+"${CUTOVER_TOKEN_ARGS[@]}"} --probe "$TMP/probe.sh" \
     --provision "$TMP/provision.sh" --gt "$TMP/bin/gt" "$@" 2>&1)
   rc=$?
   printf '%s' "$out"
@@ -694,6 +715,74 @@ out=$(run_cutover --dry-run); rc=$?
 if [ "$rc" != 0 ]; then pass "the dry run stops on the divergence"; else fail "the dry run stops on the divergence" "$out"; fi
 check "it prints the diverged line" contains "diverged: refs/heads/main" "$out"
 check "nothing was pushed" [ ! -f "$STATE/pushes" ]
+
+echo "=== no admin token anywhere is a loud failure ==="
+# No broker, no override and no token file: the run must say how to get a token
+# rather than read one out of $HOME/forgejo/.env, which holds no login any more,
+# and it must send no request and run no probe (gt-7ueb3).
+decoy_home="$TMP/home-decoy"
+mkdir -p "$decoy_home/forgejo"
+printf 'FORGEJO_ADMIN_TOKEN=%s\n' "$DECOY_TOKEN" > "$decoy_home/forgejo/.env"
+fresh
+printf 'refs/heads/main abc123\n' > "$STATE/refs_$(refs_key "$FORGEJO_URL")"
+out=$(env -u GT_AUTH_FORGEJO_TOKEN -u FORGEJO_ADMIN_TOKEN -u FORGEJO_ADMIN_ENV \
+  HOME="$decoy_home" XDG_CONFIG_HOME="$CFG" PATH="$TMP/bin:$PATH" \
+  STUB_STATE="$STATE" STUB_API="$API" STUB_MIRROR_TARGET="$GITHUB_URL" \
+  STUB_ADMIN_TOKEN="$DECOY_TOKEN" STUB_ADMIN_GIT_URL="$ADMIN_GIT_URL" \
+  STUB_FORGEJO_GIT_URLS="$ADMIN_GIT_URL" \
+  bash "$CUTOVER" acme --town-root "$TOWN" --repo acme/rig \
+  --api-url "$API" --web-url "$WEB" --probe "$TMP/probe.sh" \
+  --provision "$TMP/provision.sh" --gt "$TMP/bin/gt" 2>&1); rc=$?
+if [ "$rc" != 0 ]; then pass "a run with no admin token exits non-zero"; else fail "a run with no admin token exits non-zero (rc=$rc)" "$out"; fi
+check "the failure names the broker command" contains "sudo -u gt-forge gt-approve run forgejo-cutover" "$out"
+check "the file's token never reaches the output" lacks "$DECOY_TOKEN" "$out"
+check "no request is sent without a token" test ! -s "$STATE/calls.log"
+check "no probe is run without a token" test ! -s "$STATE/probe.log"
+
+echo "=== the auth broker's run act supplies the token ==="
+# The operator runs `sudo -u gt-forge gt-approve run forgejo-cutover -- ...`, so
+# the run names no token file: the broker's GT_AUTH_FORGEJO_TOKEN is the source,
+# and the probe and the provisioner it runs inherit that environment rather than
+# a file path they would otherwise be handed (gt-7ueb3).
+fresh
+printf 'refs/heads/main abc123\n' > "$STATE/refs_$(refs_key "$FORGEJO_URL")"
+STUB_MIRROR_ABSENT=1
+STUB_SECRETS="$BROKER_TOKEN"
+CUTOVER_TOKEN_ENV=(GT_AUTH_FORGEJO_TOKEN="$BROKER_TOKEN")
+CUTOVER_TOKEN_ARGS=()
+out=$(run_cutover --mirror); rc=$?
+CUTOVER_TOKEN_ENV=()
+CUTOVER_TOKEN_ARGS=(--admin-token-file "$TMP/admin.env")
+unset STUB_SECRETS
+if [ "$rc" = 0 ]; then pass "a run under the broker's token exits 0"; else fail "a run under the broker's token exits 0 (rc=$rc)" "$out"; fi
+check "every call presents the broker's token" test "$(sort -u "$STATE/presented-tokens")" = "$BROKER_TOKEN"
+check "the broker's token never reaches the stub's argv" test ! -e "$STATE/argv-violations"
+check "the broker's token never reaches the output" lacks "$BROKER_TOKEN" "$out"
+check "the broker's token reaches no file the run writes" \
+  test "$(grep -rlF -- "$BROKER_TOKEN" "$CFG" "$TMP/home" "$RIG_ROOT" "$TOWN/mayor" 2>/dev/null | wc -l | tr -d ' ')" = 0
+check "the probe is run with no token file to read" lacks "--admin-token-file" "$(cat "$STATE/probe.log")"
+check "the probe is run with no token in its own argv" lacks "$BROKER_TOKEN" "$(cat "$STATE/probe.log")"
+check "the provisioner is run with no token file to read" lacks "--admin-token-file" "$(cat "$STATE/provision.log")"
+check "the provisioner is run with no token in its own argv" lacks "$BROKER_TOKEN" "$(cat "$STATE/provision.log")"
+check "the run still converges the rig" contains "imported every GitHub ref" "$out"
+check "the run still creates the push mirror" contains '"use_ssh":true' "$(cat "$STATE/mirror-create-body" 2>/dev/null)"
+
+echo "=== the environment override stands in for the broker ==="
+# A stand-in run may carry FORGEJO_ADMIN_TOKEN itself rather than name a file,
+# and a run with no token file names none (gt-7ueb3).
+fresh
+printf 'refs/heads/main abc123\n' > "$STATE/refs_$(refs_key "$FORGEJO_URL")"
+out=$(env -u GT_AUTH_FORGEJO_TOKEN -u FORGEJO_ADMIN_ENV \
+  FORGEJO_ADMIN_TOKEN="$STUB_ADMIN_TOKEN" STUB_MIRROR_ABSENT=1 \
+  HOME="$TMP/home" XDG_CONFIG_HOME="$CFG" PATH="$TMP/bin:$PATH" \
+  STUB_STATE="$STATE" STUB_API="$API" STUB_MIRROR_TARGET="$GITHUB_URL" \
+  STUB_ADMIN_TOKEN="$STUB_ADMIN_TOKEN" \
+  STUB_ADMIN_GIT_URL="$ADMIN_GIT_URL" STUB_FORGEJO_GIT_URLS="$ADMIN_GIT_URL" \
+  bash "$CUTOVER" acme --town-root "$TOWN" --repo acme/rig \
+  --api-url "$API" --web-url "$WEB" --mirror --probe "$TMP/probe.sh" \
+  --provision "$TMP/provision.sh" --gt "$TMP/bin/gt" 2>&1); rc=$?
+if [ "$rc" = 0 ]; then pass "a run with the override in the environment exits 0"; else fail "a run with the override in the environment exits 0 (rc=$rc)" "$out"; fi
+check "the environment override is the one presented" test "$(sort -u "$STATE/presented-tokens")" = "$STUB_ADMIN_TOKEN"
 
 echo
 echo "forgejo-cutover_test: passed=$PASS failed=$FAIL"

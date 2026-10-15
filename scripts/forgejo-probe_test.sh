@@ -21,6 +21,8 @@ trap 'rm -rf "$TMP"' EXIT
 PASS=0
 FAIL=0
 STUB_ADMIN_TOKEN="stub-admin-token"
+BROKER_TOKEN="brokertoken-zqxvjkcd"
+DECOY_TOKEN="decoytoken-zqxvjkcd"
 API="http://forgejo.test/api/v1"
 WEB="http://forgejo.test"
 SHA="cafebabecafebabecafebabecafebabecafebabe"
@@ -195,10 +197,20 @@ path=${url#"$STUB_API"}
 path=${path%%\?*}
 
 printf '%s %s\n' "$method" "$path" >> "$STUB_STATE/calls.log"
+# The token this call presented, read from the curl config the probe wrote, so a
+# case can tell which source the probe resolved. $STUB_SECRETS names every other
+# token the run may hold — a broker's token — so that one is watched for in argv
+# and in the output the way the stand-in override is.
+if [ -f "$config" ]; then
+  sed -n 's/^header = "Authorization: token \(.*\)"$/\1/p' "$config" >> "$STUB_STATE/presented-tokens"
+fi
 for arg in "${orig_args[@]}"; do
-  case "$arg" in
-    *"$STUB_ADMIN_TOKEN"*) echo "admin token in argv: $arg" >> "$STUB_STATE/argv-violations" ;;
-  esac
+  for secret in "$STUB_ADMIN_TOKEN" ${STUB_SECRETS:-}; do
+    [ -n "$secret" ] || continue
+    case "$arg" in
+      *"$secret"*) echo "admin token in argv: $arg" >> "$STUB_STATE/argv-violations" ;;
+    esac
+  done
 done
 if [ -z "$config" ]; then
   echo "no curl config file on $method $path" >> "$STUB_STATE/argv-violations"
@@ -298,7 +310,8 @@ chmod +x "$TMP/hook-allow"
 # output, and returns its exit code (the callers read it from $?).
 run_probe() {
   local out rc
-  out=$(cd "$SCRIPT_DIR/.." && env -u FORGEJO_ADMIN_TOKEN -u FORGEJO_API_URL -u FORGEJO_URL \
+  out=$(cd "$SCRIPT_DIR/.." && env -u GT_AUTH_FORGEJO_TOKEN -u FORGEJO_ADMIN_TOKEN \
+    -u FORGEJO_API_URL -u FORGEJO_URL \
     HOME="$TMP/home" XDG_CONFIG_HOME="$CFG" PATH="$TMP/bin:$PATH" \
     STUB_STATE="$STATE" STUB_API="$API" STUB_WEB="$WEB" STUB_SHA="$SHA" \
     STUB_ADMIN_TOKEN="$STUB_ADMIN_TOKEN" STUB_CONTEXT="${STUB_CONTEXT:-ci / gate (push)}" \
@@ -581,11 +594,71 @@ if [ "$rc" = 2 ]; then pass "an unknown option exits 2"; else fail "an unknown o
 
 echo "=== a missing admin token fails loudly ==="
 fresh
-out=$(env -u FORGEJO_ADMIN_TOKEN HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
+out=$(env -u GT_AUTH_FORGEJO_TOKEN -u FORGEJO_ADMIN_TOKEN HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
   STUB_STATE="$STATE" STUB_API="$API" STUB_WEB="$WEB" STUB_SHA="$SHA" \
   bash "$PROBE" rig --api-url "$API" --repo acme/rig --admin-token-file "$TMP/absent.env" 2>&1); rc=$?
 if [ "$rc" = 1 ]; then pass "a missing admin token exits 1"; else fail "a missing admin token exits 1 (rc=$rc)" "$out"; fi
 check "the missing token is named in the error" contains "no admin token" "$out"
+check "the error names the broker command" contains "sudo -u gt-forge gt-approve run forgejo-probe" "$out"
+
+echo "=== the auth broker's run act supplies the token ==="
+# The operator runs `sudo -u gt-forge gt-approve run forgejo-probe -- ...`, and
+# the broker mints a token limited to the rule's account, repositories and
+# scopes and revokes it when the run ends, so the probe takes it from the
+# environment and names no token file (gt-7ueb3).
+fresh
+out=$(cd "$SCRIPT_DIR/.." && env -u FORGEJO_ADMIN_TOKEN -u FORGEJO_ADMIN_ENV \
+  -u FORGEJO_API_URL -u FORGEJO_URL GT_AUTH_FORGEJO_TOKEN="$BROKER_TOKEN" \
+  HOME="$TMP/home" XDG_CONFIG_HOME="$CFG" PATH="$TMP/bin:$PATH" \
+  STUB_STATE="$STATE" STUB_API="$API" STUB_WEB="$WEB" STUB_SHA="$SHA" \
+  STUB_ADMIN_TOKEN="$BROKER_TOKEN" STUB_SECRETS="$BROKER_TOKEN" \
+  STUB_GATE_YML="$TMP/gate.yml" STUB_CONTEXT="ci / gate (push)" \
+  bash "$PROBE" rig --api-url "$API" --web-url "$WEB" --repo acme/rig \
+  --town-root "$TOWN" --timeout 20 --poll-interval 1 2>&1); rc=$?
+if [ "$rc" = 0 ]; then pass "a run under the broker's token exits 0"; else fail "a run under the broker's token exits 0 (rc=$rc)" "$out"; fi
+check "every call presents the broker's token" test "$(sort -u "$STATE/presented-tokens")" = "$BROKER_TOKEN"
+check "the broker's token never reaches the stub's argv" test ! -e "$STATE/argv-violations"
+check "the broker's token never reaches the output" lacks "$BROKER_TOKEN" "$out"
+check "the broker's token reaches no file the probe writes" \
+  test "$(grep -rlF -- "$BROKER_TOKEN" "$CFG" "$TMP/home" 2>/dev/null | wc -l | tr -d ' ')" = 0
+check "the run still deletes the probe branch" test "$(deleted)" = "land/probe-rig"
+check "the run still reads the gate status" test "$(count_calls GET /commits/)" = 1
+check "the run still writes its green record" test -f "$CFG/gt/probe-rig.record"
+
+echo "=== the environment override stands in for the broker ==="
+# A stand-in run may carry FORGEJO_ADMIN_TOKEN itself rather than name a file,
+# and a run with no token file names none (gt-7ueb3).
+fresh
+out=$(cd "$SCRIPT_DIR/.." && env -u GT_AUTH_FORGEJO_TOKEN -u FORGEJO_ADMIN_ENV \
+  -u FORGEJO_API_URL -u FORGEJO_URL FORGEJO_ADMIN_TOKEN="$STUB_ADMIN_TOKEN" \
+  HOME="$TMP/home" XDG_CONFIG_HOME="$CFG" PATH="$TMP/bin:$PATH" \
+  STUB_STATE="$STATE" STUB_API="$API" STUB_WEB="$WEB" STUB_SHA="$SHA" \
+  STUB_ADMIN_TOKEN="$STUB_ADMIN_TOKEN" \
+  STUB_GATE_YML="$TMP/gate.yml" STUB_CONTEXT="ci / gate (push)" \
+  bash "$PROBE" rig --api-url "$API" --web-url "$WEB" --repo acme/rig \
+  --town-root "$TOWN" --timeout 20 --poll-interval 1 2>&1); rc=$?
+if [ "$rc" = 0 ]; then pass "a run with the override in the environment exits 0"; else fail "a run with the override in the environment exits 0 (rc=$rc)" "$out"; fi
+check "the environment override is the one presented" test "$(head -1 "$STATE/presented-tokens")" = "$STUB_ADMIN_TOKEN"
+
+echo "=== a token in \$HOME/forgejo/.env is not used ==="
+# The login arrives from the broker's run act now, so a token sitting in
+# $HOME/forgejo/.env goes unused, however it got there (gt-7ueb3).
+decoy_home="$TMP/home-decoy"
+mkdir -p "$decoy_home/forgejo"
+printf 'FORGEJO_ADMIN_TOKEN=%s\n' "$DECOY_TOKEN" > "$decoy_home/forgejo/.env"
+fresh
+out=$(cd "$SCRIPT_DIR/.." && env -u GT_AUTH_FORGEJO_TOKEN -u FORGEJO_ADMIN_TOKEN \
+  -u FORGEJO_ADMIN_ENV -u FORGEJO_API_URL -u FORGEJO_URL \
+  HOME="$decoy_home" XDG_CONFIG_HOME="$CFG" PATH="$TMP/bin:$PATH" \
+  STUB_STATE="$STATE" STUB_API="$API" STUB_WEB="$WEB" STUB_SHA="$SHA" \
+  STUB_ADMIN_TOKEN="$DECOY_TOKEN" \
+  bash "$PROBE" rig --api-url "$API" --web-url "$WEB" --repo acme/rig \
+  --town-root "$TOWN" 2>&1); rc=$?
+if [ "$rc" != 0 ]; then pass "a token in \$HOME/forgejo/.env is not used"; else fail "a token in \$HOME/forgejo/.env is not used (rc=$rc)" "$out"; fi
+check "the file's token never reaches the API" test ! -e "$STATE/presented-tokens"
+check "the failure names the broker command" contains "sudo -u gt-forge gt-approve run forgejo-probe" "$out"
+check "the file's token never reaches the output" lacks "$DECOY_TOKEN" "$out"
+check "no request is sent without a token" test ! -s "$STATE/calls.log"
 
 echo
 if [ "$FAIL" = 0 ]; then

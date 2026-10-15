@@ -95,7 +95,7 @@
 #   --web-url URL         web root, the base of the git URL (default
 #                         $FORGEJO_URL, else --api-url less /api/v1)
 #   --admin-token-file F  file holding FORGEJO_ADMIN_TOKEN=... (default
-#                         $FORGEJO_ADMIN_ENV, else $HOME/forgejo/.env)
+#                         $FORGEJO_ADMIN_ENV, else no file is read)
 #   --probe PATH          probe run before the cutover (default: the
 #                         forgejo-probe.sh beside this script)
 #   --provision PATH      provisioner run for the repo (default: the
@@ -105,9 +105,14 @@
 #   --dry-run             read and print, never write
 #   -h, --help            this text
 #
-# The admin token resolves from $FORGEJO_ADMIN_TOKEN, else from
-# FORGEJO_ADMIN_TOKEN= in --admin-token-file. It must belong to a site
-# administrator: the mirror and provisioning calls are admin-scoped.
+# Before running this by hand, read docs/auth-broker.md in the devops rig: the
+# admin token resolves from $GT_AUTH_FORGEJO_TOKEN, which the broker's run act
+# sets, else from $FORGEJO_ADMIN_TOKEN or FORGEJO_ADMIN_TOKEN= in
+# --admin-token-file, which a stand-in run sets in place of the broker
+# (gt-7ueb3). It must belong to a site administrator: the mirror call is
+# admin-scoped and the provisioning run this script makes creates users and
+# mints tokens through the admin routes. The ref import and the promote key ride
+# the operator's own credentials, not this token.
 
 set -euo pipefail
 
@@ -142,7 +147,7 @@ TOWN_ROOT="${GT_TOWN_ROOT:-${GT_ROOT:-$HOME/gt}}"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gt"
 API_URL="${FORGEJO_API_URL:-http://127.0.0.1:3000/api/v1}"
 WEB_URL="${FORGEJO_URL:-}"
-ADMIN_TOKEN_FILE="${FORGEJO_ADMIN_ENV:-$HOME/forgejo/.env}"
+ADMIN_TOKEN_FILE="${FORGEJO_ADMIN_ENV:-}"
 MAIN_BRANCH="main"
 GATE_WORKFLOW="gate"
 BOT_PREFIX="bot-"
@@ -339,16 +344,27 @@ CURL_CONFIG="$WORK/curl.conf"
 cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
 
+# The token file handed to the probe and the provisioner, which a stand-in run
+# names and a broker run does not: those children read GT_AUTH_FORGEJO_TOKEN
+# from the environment they inherit. Forwarded only when one is set, since an
+# empty --admin-token-file is a usage error in them (gt-7ueb3).
+ADMIN_FILE_ARGS=()
+[ -n "$ADMIN_TOKEN_FILE" ] && ADMIN_FILE_ARGS=(--admin-token-file "$ADMIN_TOKEN_FILE")
+
 # The admin token goes in a mode-600 curl config rather than an argv -H, so it
-# never shows in `ps` and never reaches a shell trace or a log line.
+# never shows in `ps` and never reaches a shell trace or a log line. The broker
+# hands out GT_AUTH_FORGEJO_TOKEN for one run and revokes it at the end, so no
+# source here leaves the token on disk beyond that config, which cleanup removes.
 resolve_admin_token() {
   local token=""
-  if [ -n "${FORGEJO_ADMIN_TOKEN:-}" ]; then
+  if [ -n "${GT_AUTH_FORGEJO_TOKEN:-}" ]; then
+    token=$GT_AUTH_FORGEJO_TOKEN
+  elif [ -n "${FORGEJO_ADMIN_TOKEN:-}" ]; then
     token=$FORGEJO_ADMIN_TOKEN
   elif [ -f "$ADMIN_TOKEN_FILE" ]; then
     token=$(sed -n 's/^[[:space:]]*\(export[[:space:]]*\)\{0,1\}FORGEJO_ADMIN_TOKEN=//p' "$ADMIN_TOKEN_FILE" | tail -1 | sed "s/^['\"]//; s/['\"]$//")
   fi
-  [ -n "$token" ] || die "no admin token: set FORGEJO_ADMIN_TOKEN, or FORGEJO_ADMIN_TOKEN= in $ADMIN_TOKEN_FILE"
+  [ -n "$token" ] || die "no admin token: run this script through the auth broker (sudo -u gt-forge gt-approve run forgejo-cutover -- <its arguments>), or set FORGEJO_ADMIN_TOKEN${ADMIN_TOKEN_FILE:+ (or FORGEJO_ADMIN_TOKEN= in $ADMIN_TOKEN_FILE)} for a stand-in"
   case "$token" in
     *$'\n'*|*'"'*|*\\*|*' '*) die "the admin token holds whitespace, a quote or a backslash; refusing to use it" ;;
   esac
@@ -468,7 +484,7 @@ probe_green() {
   local -a args=("$RIG" --repo "$REPO" --main-branch "$MAIN_BRANCH"
     --town-root "$TOWN_ROOT"
     --api-url "$API_URL" --web-url "$WEB_URL"
-    --admin-token-file "$ADMIN_TOKEN_FILE"
+    ${ADMIN_FILE_ARGS[@]+"${ADMIN_FILE_ARGS[@]}"}
     --github-url "$GITHUB_URL" --git-url "$ADMIN_GIT_URL")
   if [ "$DRY_RUN" = 1 ]; then
     run bash "$PROBE" "${args[@]}"
@@ -846,7 +862,7 @@ import_refs
 # 3. Bots, access and protection for the repo, the dashboard panel's viewer read
 # grant included (gt-fn9e6.49).
 run bash "$PROVISION" --repo "$REPO" --main-branch "$MAIN_BRANCH" \
-  --api-url "$API_URL" --admin-token-file "$ADMIN_TOKEN_FILE"
+  --api-url "$API_URL" ${ADMIN_FILE_ARGS[@]+"${ADMIN_FILE_ARGS[@]}"}
 
 # 4. The connection to GitHub: promotion by default, the push mirror with
 # --mirror. Either way the deploy key GitHub needs is printed, not added.

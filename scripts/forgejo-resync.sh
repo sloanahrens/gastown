@@ -19,6 +19,15 @@
 # file and in the environment of the provisioning re-run, never in argv or on
 # stdout.
 #
+# Before running this by hand, read docs/auth-broker.md in the devops rig: the
+# admin token resolves from $GT_AUTH_FORGEJO_TOKEN, which the broker's run act
+# sets, else from $FORGEJO_ADMIN_TOKEN or FORGEJO_ADMIN_TOKEN= in
+# --admin-token-file, which a stand-in run sets in place of the broker
+# (gt-7ueb3). It must belong to a site administrator: lifting main's protection
+# is a write on the repository, and the restore re-runs the provisioner, which
+# creates users and mints tokens through the admin routes. The ref push rides
+# the operator's own credential helper, not this token.
+#
 # Usage: forgejo-resync.sh [options] OWNER/NAME
 #   --api-url URL          API root (default $FORGEJO_API_URL,
 #                          else http://127.0.0.1:3000/api/v1)
@@ -29,7 +38,7 @@
 #   --forgejo-url URL      git remote to push to (default
 #                          WEB_URL/OWNER/NAME.git)
 #   --admin-token-file F   file holding FORGEJO_ADMIN_TOKEN=... (default
-#                          $FORGEJO_ADMIN_ENV, else $HOME/forgejo/.env)
+#                          $FORGEJO_ADMIN_ENV, else no file is read)
 #   --main-branch NAME     protected landing target to lift and restore
 #                          (default: main)
 #   --backup-dir DIR       where the lifted rule's dated .bak- copy goes
@@ -55,7 +64,7 @@ usage() { sed -n '/^# Usage:/,/^$/p' "$0" | sed 's/^# \{0,1\}//'; }
 
 API_URL="${FORGEJO_API_URL:-http://127.0.0.1:3000/api/v1}"
 WEB_URL="${FORGEJO_URL:-}"
-ADMIN_TOKEN_FILE="${FORGEJO_ADMIN_ENV:-$HOME/forgejo/.env}"
+ADMIN_TOKEN_FILE="${FORGEJO_ADMIN_ENV:-}"
 MAIN_BRANCH="main"
 BACKUP_DIR="${FORGEJO_BACKUP_DIR:-$HOME/forgejo/backups}"
 PROVISION="$SELF_DIR/forgejo-provision.sh"
@@ -130,15 +139,19 @@ finish() {
 trap finish EXIT
 
 # The admin token goes in a mode-600 curl config rather than an argv -H, so it
-# never shows in `ps` and never reaches a shell trace or a log line.
+# never shows in `ps` and never reaches a shell trace or a log line. The broker
+# hands out GT_AUTH_FORGEJO_TOKEN for one run and revokes it at the end, so no
+# source here leaves the token on disk beyond that config, which finish removes.
 resolve_admin_token() {
   local token=""
-  if [ -n "${FORGEJO_ADMIN_TOKEN:-}" ]; then
+  if [ -n "${GT_AUTH_FORGEJO_TOKEN:-}" ]; then
+    token=$GT_AUTH_FORGEJO_TOKEN
+  elif [ -n "${FORGEJO_ADMIN_TOKEN:-}" ]; then
     token=$FORGEJO_ADMIN_TOKEN
   elif [ -f "$ADMIN_TOKEN_FILE" ]; then
     token=$(sed -n 's/^[[:space:]]*\(export[[:space:]]*\)\{0,1\}FORGEJO_ADMIN_TOKEN=//p' "$ADMIN_TOKEN_FILE" | tail -1 | sed "s/^['\"]//; s/['\"]$//")
   fi
-  [ -n "$token" ] || die "no admin token: set FORGEJO_ADMIN_TOKEN, or FORGEJO_ADMIN_TOKEN= in $ADMIN_TOKEN_FILE"
+  [ -n "$token" ] || die "no admin token: run this script through the auth broker (sudo -u gt-forge gt-approve run forgejo-resync -- <its arguments>), or set FORGEJO_ADMIN_TOKEN${ADMIN_TOKEN_FILE:+ (or FORGEJO_ADMIN_TOKEN= in $ADMIN_TOKEN_FILE)} for a stand-in"
   case "$token" in
     *$'\n'*|*'"'*|*\\*|*' '*) die "the admin token holds whitespace, a quote or a backslash; refusing to use it" ;;
   esac
@@ -241,9 +254,14 @@ lift_protection() {
 # restore_protection re-runs the provisioner, which recreates main's rule from
 # the same flags a cutover used. It also re-grants the role access the rule
 # names, so a rule Forgejo dropped as unmergeable is repaired in the same run.
+# The token file is forwarded only when a stand-in named one: under the broker
+# the provisioner reads GT_AUTH_FORGEJO_TOKEN from the environment it inherits,
+# and an empty --admin-token-file is a usage error (gt-7ueb3).
 restore_protection() {
+  local -a token_file=()
+  [ -n "$ADMIN_TOKEN_FILE" ] && token_file=(--admin-token-file "$ADMIN_TOKEN_FILE")
   run bash "$PROVISION" --repo "$REPO" --main-branch "$MAIN_BRANCH" \
-    --api-url "$API_URL" --admin-token-file "$ADMIN_TOKEN_FILE"
+    --api-url "$API_URL" ${token_file[@]+"${token_file[@]}"}
 }
 
 # --- refs --------------------------------------------------------------------
