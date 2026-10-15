@@ -486,7 +486,9 @@ func (r *omReader) rigRead(now time.Time) omRigRead {
 
 // resolveOMConfig is the config the landing worker's reviews run under: the
 // rig's .om.json over the user's config, which supplies what the rig file
-// leaves out (om's backend lives there). The second result says where the
+// leaves out. The backend is always the user's: om ignores a backend key in
+// the reviewed tree's .om.json (docs/design/forgejo-primary-landing.md). The
+// second result says where the
 // threshold comes from, for the panel's caption. A rig file that is there but
 // cannot be read or parsed fails every review, so none of its numbers is
 // guessed from the user config: threshold, depth and timeout are left empty and
@@ -510,9 +512,6 @@ func resolveOMConfig(user omConfig, rigName string, rr omRigRead) (omConfig, str
 		out.Threshold = rc.Threshold
 	} else {
 		source = omUserConfigSource + ", " + rigFile + " sets no threshold"
-	}
-	if len(rc.Backend) > 0 {
-		out.Backend = rc.Backend
 	}
 	if rc.Depth != "" {
 		out.Depth = rc.Depth

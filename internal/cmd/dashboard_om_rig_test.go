@@ -42,8 +42,10 @@ func TestOMPanelThresholdComesFromTheRigsOMJSON(t *testing.T) {
 			omTestPtr(0.6), "deep", 300, "~/.config/om/config.json, gastown has no .om.json", "flash"},
 		{"rig file without a threshold falls back for it", omTestRead(`{"depth":"standard"}`),
 			omTestPtr(0.6), "standard", 300, "~/.config/om/config.json, gastown .om.json sets no threshold", "flash"},
-		{"rig backend wins over the user's", omTestRead(`{"threshold":0.7,"backend":["/x/claude-deepseek-pro","-p"]}`),
-			omTestPtr(0.7), "deep", 300, "gastown .om.json", "pro"},
+		// om ignores a backend key in the reviewed tree's .om.json, so the
+		// model stays the user config's.
+		{"rig backend key is ignored", omTestRead(`{"threshold":0.7,"backend":["/x/claude-deepseek-pro","-p"]}`),
+			omTestPtr(0.7), "deep", 300, "gastown .om.json", "flash"},
 		// A rig file the worker cannot parse fails every review: the panel
 		// shows no bar, and says why, rather than the user's 0.6.
 		{"unparseable rig file", omTestRead(`{"threshold":`),
