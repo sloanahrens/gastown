@@ -2,11 +2,14 @@
 // from claiming the same worker identity.
 //
 // Lock files are stored at <worker>/.runtime/agent.lock and contain:
-// - PID of the owning process
+// - PID of the owning process, plus the kernel's start token for it
 // - Timestamp when lock was acquired
 // - Session ID (tmux session name)
 //
-// Stale locks (where the PID is dead) are automatically cleaned up.
+// A lock is stale when the process that wrote it is gone, which the pid and
+// the start token together decide: a pid alone is reused as soon as its
+// process dies, so a live pid is a holder only while it still carries the
+// recorded start token (gt-xa65s). Stale locks are automatically cleaned up.
 package lock
 
 import (
@@ -18,6 +21,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/procid"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -34,25 +38,52 @@ type LockInfo struct {
 	AcquiredAt time.Time `json:"acquired_at"`
 	SessionID  string    `json:"session_id,omitempty"`
 	Hostname   string    `json:"hostname,omitempty"`
+	// Start is the kernel's start token for PID (procid.StartToken): a pid is
+	// reused once its process dies, so the pair names one process for good.
+	// Empty in locks written before it was recorded, and on platforms whose
+	// kernel will not say.
+	Start string `json:"start,omitempty"`
 }
 
-// IsStale checks if the lock is stale (owning process is dead).
+// IsStale checks if the lock is stale (the process that wrote it is gone).
 func (l *LockInfo) IsStale() bool {
-	return !processExists(l.PID)
+	return l.holderGone(procid.StartToken)
+}
+
+// holderGone reports whether the process the lock names is gone, with the
+// process table read through start (procid.StartToken outside tests). The pid
+// has to still be that process: a pid whose process has since been handed to
+// somebody else is not the holder, and neither is a bare pid, because a lock
+// that records no start token names no process a reader can confirm (see
+// procid.ID.Running).
+func (l *LockInfo) holderGone(start func(int) (string, bool)) bool {
+	return !procid.ID{PID: l.PID, Start: l.Start}.Running(start)
 }
 
 // Lock represents an agent identity lock for a worker directory.
 type Lock struct {
 	workerDir string
 	lockPath  string
+	// startToken reads a pid's start token (procid.StartToken); the field is
+	// what lets a test script the process table, so whether a lock is held
+	// depends on what the lock recorded and not on which processes this host
+	// happens to be running.
+	startToken func(int) (string, bool)
 }
 
 // New creates a Lock for the given worker directory.
 func New(workerDir string) *Lock {
 	return &Lock{
-		workerDir: workerDir,
-		lockPath:  filepath.Join(workerDir, ".runtime", "agent.lock"),
+		workerDir:  workerDir,
+		lockPath:   filepath.Join(workerDir, ".runtime", "agent.lock"),
+		startToken: procid.StartToken,
 	}
+}
+
+// stale reports whether info's writer is gone, read through this lock's
+// start-token reader.
+func (l *Lock) stale(info *LockInfo) bool {
+	return info.holderGone(l.startToken)
 }
 
 // Acquire attempts to acquire the lock for this worker.
@@ -80,7 +111,7 @@ func (l *Lock) Acquire(sessionID string) error {
 	info, err := l.Read()
 	if err == nil {
 		// Lock exists - check if stale
-		if info.IsStale() {
+		if l.stale(info) {
 			// Stale lock - remove it
 			if err := l.Release(); err != nil {
 				return fmt.Errorf("removing stale lock: %w", err)
@@ -141,7 +172,7 @@ func (l *Lock) Check() error {
 	}
 
 	// Check if stale
-	if info.IsStale() {
+	if l.stale(info) {
 		// Clean up stale lock (best-effort cleanup)
 		_ = l.Release()
 		return nil
@@ -166,8 +197,18 @@ func (l *Lock) Status() string {
 		return fmt.Sprintf("error: %v", err)
 	}
 
-	if info.IsStale() {
-		return fmt.Sprintf("stale (dead PID %d)", info.PID)
+	if l.stale(info) {
+		// Say which evidence makes it stale: a pid with no process behind it,
+		// a pid the lock cannot tie to any process, and a pid that came back
+		// as a different one are three different repairs for a reader.
+		switch {
+		case !processExists(info.PID):
+			return fmt.Sprintf("stale (dead PID %d)", info.PID)
+		case info.Start == "":
+			return fmt.Sprintf("stale (PID %d, no recorded start time)", info.PID)
+		default:
+			return fmt.Sprintf("stale (PID %d now names another process)", info.PID)
+		}
 	}
 
 	if info.PID == os.Getpid() {
@@ -197,6 +238,12 @@ func (l *Lock) write(sessionID string) error {
 		AcquiredAt: time.Now(),
 		SessionID:  sessionID,
 		Hostname:   hostname,
+	}
+	// The start token is what lets a later reader tell this process from a
+	// different one that inherited its pid; without it the lock names no
+	// process and reads as stale.
+	if token, ok := l.startToken(os.Getpid()); ok {
+		info.Start = token
 	}
 
 	data, err := json.MarshalIndent(info, "", "  ")
@@ -258,18 +305,21 @@ func FindAllLocks(root string) (map[string]*LockInfo, error) {
 
 // CleanStaleLocks removes all stale locks in a directory tree.
 // Returns the number of stale locks cleaned.
-// A lock is only truly stale if BOTH the PID is dead AND the tmux session
+// A lock is only truly stale if BOTH its writer is gone AND the tmux session
 // doesn't exist. This prevents killing active workers whose spawning process
 // has exited (which is normal - Claude runs as a child in tmux).
 func CleanStaleLocks(root string) (int, error) {
-	return cleanStaleLocks(root, func() []string {
-		return activeTmuxSessions(realOutput, tmux.GetDefaultSocket())
-	})
+	return cleanStaleLocks(root,
+		func() []string {
+			return activeTmuxSessions(realOutput, tmux.GetDefaultSocket())
+		},
+		procid.StartToken)
 }
 
 // cleanStaleLocks is CleanStaleLocks asking sessions for the active tmux
-// sessions, once the lock scan has succeeded.
-func cleanStaleLocks(root string, sessions func() []string) (int, error) {
+// sessions and start for a pid's start token, once the lock scan has
+// succeeded.
+func cleanStaleLocks(root string, sessions func() []string, start func(int) (string, bool)) (int, error) {
 	locks, err := FindAllLocks(root)
 	if err != nil {
 		return 0, err
@@ -284,7 +334,7 @@ func cleanStaleLocks(root string, sessions func() []string) (int, error) {
 
 	cleaned := 0
 	for workerDir, info := range locks {
-		if info.IsStale() {
+		if info.holderGone(start) {
 			// PID is dead, but check if session still exists
 			if info.SessionID != "" && sessionSet[info.SessionID] {
 				// Session exists - worker is alive, don't clean
@@ -394,6 +444,12 @@ func splitLines(s string) []string {
 // by comparing tmux sessions with lock files.
 // Returns a list of collision descriptions.
 func DetectCollisions(root string, activeSessions []string) []string {
+	return detectCollisions(root, activeSessions, procid.StartToken)
+}
+
+// detectCollisions is DetectCollisions reading the process table through start
+// (procid.StartToken outside tests).
+func detectCollisions(root string, activeSessions []string, start func(int) (string, bool)) []string {
 	var collisions []string
 
 	locks, err := FindAllLocks(root)
@@ -408,9 +464,9 @@ func DetectCollisions(root string, activeSessions []string) []string {
 	}
 
 	for workerDir, info := range locks {
-		if info.IsStale() {
+		if info.holderGone(start) {
 			collisions = append(collisions,
-				fmt.Sprintf("stale lock in %s (dead PID %d, session: %s)",
+				fmt.Sprintf("stale lock in %s (PID %d, session: %s)",
 					workerDir, info.PID, info.SessionID))
 			continue
 		}

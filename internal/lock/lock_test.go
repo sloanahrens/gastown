@@ -8,9 +8,12 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/procid"
 )
 
-// testEpoch dates every lock fixture; staleness is decided by PID, not age.
+// testEpoch dates every lock fixture; staleness is decided by the process the
+// lock names, not by age.
 var testEpoch = time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
 
 func TestNew(t *testing.T) {
@@ -28,6 +31,10 @@ func TestNew(t *testing.T) {
 	}
 }
 
+// TestLockInfo_IsStale tables the locks this host decides without reading a
+// start token: a pid with no process behind it. The rest of the rule — a live
+// pid that carries a different start token — is table-tested against a
+// scripted process table in TestLockInfoHolderGone.
 func TestLockInfo_IsStale(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -35,10 +42,13 @@ func TestLockInfo_IsStale(t *testing.T) {
 		pid       int
 		wantStale bool
 	}{
-		{"current process", os.Getpid(), false},
 		{"invalid pid zero", 0, true},
 		{"invalid pid negative", -1, true},
 		{"non-existent pid", 999999999, true},
+		// A bare pid is not an identity: a lock written before the start token
+		// was recorded names no process a reader can confirm, so it is
+		// replaceable rather than a holder.
+		{"bare pid, no recorded token", os.Getpid(), true},
 	}
 
 	for _, tt := range tests {
@@ -46,6 +56,49 @@ func TestLockInfo_IsStale(t *testing.T) {
 			info := &LockInfo{PID: tt.pid}
 			if got := info.IsStale(); got != tt.wantStale {
 				t.Errorf("IsStale() = %v, want %v", got, tt.wantStale)
+			}
+		})
+	}
+}
+
+// tokens is a scripted process table: pid -> the start token that pid carries.
+// A pid absent from it has no process.
+type tokens map[int]string
+
+func (tt tokens) start(pid int) (string, bool) {
+	tok, ok := tt[pid]
+	return tok, ok
+}
+
+// TestLockInfoHolderGone tables what "the process that wrote the lock is
+// gone" means, with the process table scripted so every case is decided by
+// what the lock recorded.
+func TestLockInfoHolderGone(t *testing.T) {
+	t.Parallel()
+	const pid = 4242
+	held := LockInfo{PID: pid, Start: "1700000000.12"}
+
+	tests := []struct {
+		name  string
+		info  LockInfo
+		table tokens
+		want  bool
+	}{
+		{"the process that recorded it", held, tokens{pid: "1700000000.12"}, false},
+		// The case a bare pid gets wrong: the number is in use again, by a
+		// process that started at another time.
+		{"a recycled pid", held, tokens{pid: "1700000999.5"}, true},
+		{"a dead pid", held, tokens{}, true},
+		{"a token the kernel will not give", held, tokens{}, true},
+		{"no recorded start token", LockInfo{PID: pid}, tokens{pid: "1700000000.12"}, true},
+		{"zero pid", LockInfo{Start: "1700000000.12"}, tokens{0: "1700000000.12"}, true},
+		{"negative pid", LockInfo{PID: -1, Start: "1700000000.12"}, tokens{-1: "1700000000.12"}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.info.holderGone(tt.table.start); got != tt.want {
+				t.Errorf("holderGone() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -165,6 +218,91 @@ func TestLock_AcquireStaleLock(t *testing.T) {
 	}
 
 	l.Release()
+}
+
+// TestAcquireIgnoresLockHeldByRecycledPid: the pid a lock file names is the
+// holder only while it still carries the start token the lock recorded. Once
+// the process that wrote the lock dies the kernel hands its number to the
+// next process, and a lock gt prime left behind then reads as held by a
+// stranger, which returns ErrLocked and delivers no role context in that
+// worktree (gt-xa65s). Acquire has to take such a lock.
+func TestAcquireIgnoresLockHeldByRecycledPid(t *testing.T) {
+	t.Parallel()
+	// A pid that is live and is not this process — the test binary's parent —
+	// under a start token that is not its own: this process's, which started
+	// later. That is a recycled pid as a reader sees it.
+	pid := os.Getppid()
+	if pid <= 0 || pid == os.Getpid() {
+		t.Fatalf("$PPID %d is no other process to name", pid)
+	}
+	recorded, _ := procid.StartToken(os.Getpid())
+	if live, ok := procid.StartToken(pid); ok && live == recorded {
+		t.Fatalf("pids %d and %d carry the same start token %q", pid, os.Getpid(), recorded)
+	}
+
+	l := New(writeLockFixture(t, LockInfo{
+		PID:        pid,
+		Start:      recorded,
+		AcquiredAt: testEpoch,
+		SessionID:  "gone-session",
+	}))
+
+	if err := l.Acquire("new-session"); err != nil {
+		t.Fatalf("Acquire() over a lock held by a recycled pid: %v", err)
+	}
+
+	info, err := l.Read()
+	if err != nil {
+		t.Fatalf("Read() = %v", err)
+	}
+	if info.PID != os.Getpid() || info.SessionID != "new-session" {
+		t.Errorf("lock = %+v, want this process (pid %d, session new-session)", info, os.Getpid())
+	}
+}
+
+// TestAcquireRefusesLockHeldByALiveProcess is the other side of the rule: the
+// pid still carries the recorded start token, so its process is still the
+// holder and Acquire must refuse rather than take the lock. The process table
+// is scripted, so the case does not depend on the host's own pids.
+func TestAcquireRefusesLockHeldByALiveProcess(t *testing.T) {
+	t.Parallel()
+	const pid = 4242
+	holder := LockInfo{PID: pid, Start: "1700000000.12", AcquiredAt: testEpoch, SessionID: "live-session"}
+
+	l := New(writeLockFixture(t, holder))
+	l.startToken = tokens{pid: holder.Start}.start
+
+	if err := l.Acquire("new-session"); !errors.Is(err, ErrLocked) {
+		t.Fatalf("Acquire() over a live holder = %v, want ErrLocked", err)
+	}
+
+	// The holder's lock is untouched.
+	info, err := l.Read()
+	if err != nil {
+		t.Fatalf("Read() = %v", err)
+	}
+	if info.PID != holder.PID || info.Start != holder.Start || info.SessionID != holder.SessionID {
+		t.Errorf("lock = %+v, want the holder's record %+v", info, holder)
+	}
+}
+
+// writeLockFixture writes info as the agent lock of a fresh worker directory
+// and returns that directory.
+func writeLockFixture(t *testing.T, info LockInfo) string {
+	t.Helper()
+	workerDir := filepath.Join(t.TempDir(), "worker")
+	runtimeDir := filepath.Join(workerDir, ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeDir, "agent.lock"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	return workerDir
 }
 
 func TestLock_Read(t *testing.T) {
@@ -430,6 +568,7 @@ func TestCleanStaleLocks(t *testing.T) {
 	}
 	liveLock := LockInfo{
 		PID:        os.Getpid(),
+		Start:      "1700000000.12", // the process the table below reports
 		AcquiredAt: testEpoch,
 		SessionID:  "live-session",
 	}
@@ -438,8 +577,9 @@ func TestCleanStaleLocks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// No active tmux sessions.
-	cleaned, err := cleanStaleLocks(tmpDir, func() []string { return nil })
+	// No active tmux sessions; the live worker is the one the table holds.
+	table := tokens{os.Getpid(): liveLock.Start}
+	cleaned, err := cleanStaleLocks(tmpDir, func() []string { return nil }, table.start)
 	if err != nil {
 		t.Fatalf("CleanStaleLocks() error = %v", err)
 	}
@@ -476,7 +616,7 @@ func TestCleanStaleLocksKeepsLockWithLiveSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cleaned, err := cleanStaleLocks(tmpDir, func() []string { return []string{"gt-x", "$7"} })
+	cleaned, err := cleanStaleLocks(tmpDir, func() []string { return []string{"gt-x", "$7"} }, tokens{}.start)
 	if err != nil || cleaned != 0 {
 		t.Fatalf("cleanStaleLocks = %d, %v; want 0, nil", cleaned, err)
 	}
@@ -625,7 +765,8 @@ func TestDetectCollisions(t *testing.T) {
 		t.Fatal(err)
 	}
 	orphanLock := LockInfo{
-		PID:        os.Getpid(), // Live PID
+		PID:        os.Getpid(),     // Live PID: the table below holds it
+		Start:      "1700000000.12", // ...with the token it recorded
 		AcquiredAt: testEpoch,
 		SessionID:  "orphan-session", // Not in active list
 	}
@@ -635,7 +776,8 @@ func TestDetectCollisions(t *testing.T) {
 	}
 
 	activeSessions := []string{"active-session-1", "active-session-2"}
-	collisions := DetectCollisions(tmpDir, activeSessions)
+	table := tokens{os.Getpid(): orphanLock.Start}
+	collisions := detectCollisions(tmpDir, activeSessions, table.start)
 
 	if len(collisions) != 2 {
 		t.Errorf("DetectCollisions() found %d collisions, want 2: %v", len(collisions), collisions)
