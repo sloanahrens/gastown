@@ -327,17 +327,22 @@ function causeText(c) {
   return c.detail ? k + ": " + c.detail : k;
 }
 
-// renderHealthMark is the strip's red marker for the scheduled deployment
-// checks: one pill naming every app whose newest check failed. It carries the
-// deploys reader's own reading, so an app that is off — whose run was skipped
-// on purpose rather than failed — is not named, and a reader that has not read
-// yet, or a town whose checks are all green, leaves no marker at all.
+// renderHealthMark is the strip's marker for the scheduled deployment checks:
+// one pill naming every app whose newest check failed, and the apps whose newest
+// check the reader could not read, which is an alarm too — an app nobody can see
+// a result for is not one to leave unmarked. It carries the deploys reader's own
+// reading, so an app that is off — its run skipped on purpose rather than failed
+// — is in neither list, and a reader that has not read yet, or a town whose
+// checks are all green, leaves no marker at all.
 function renderHealthMark(s) {
   const box = $("healthmark"), d = (s && s.deploys) || null;
-  const apps = (d && d.health_failed) || [];
-  box.hidden = !apps.length;
-  box.textContent = apps.length ? "health: " + apps.join(", ") : "";
-  box.title = apps.length ? "the newest scheduled health check failed for " + apps.join(", ") : "";
+  const failed = (d && d.health_failed) || [], unread = (d && d.health_unread) || [];
+  const parts = [];
+  if (failed.length) parts.push("health: " + failed.join(", "));
+  if (unread.length) parts.push("not read: " + unread.join(", "));
+  box.hidden = !parts.length;
+  box.className = "pill " + (failed.length ? "red" : "degraded");
+  box.textContent = parts.join(" · ");
 }
 
 // renderHealth shows the verdict and, when it is not green, the worst cause
@@ -1313,11 +1318,15 @@ function renderDeploys(s) {
   // says: both are wired from the one viewer client.
   if (!d) { note.className = "r"; note.textContent = ""; box.append(el("div", "empty", "no viewer token")); return; }
   // The reader names what it could not read — the class of a refresh that read
-  // nothing, or the repos that failed — and the patrol findings above are
-  // untouched by either.
-  const err = d.error || "", unreadable = (d.missing || []).length;
-  note.className = err || unreadable ? "r warnc" : "r";
-  note.textContent = err ? "could not read the runs: " + err : (unreadable ? unreadable + (unreadable === 1 ? " repo unreadable" : " repos unreadable") : "");
+  // nothing, the repos whose runs failed, and the repos whose scheduled checks
+  // it could not list, which have no app to name in the strip — and the patrol
+  // findings above are untouched by any of them.
+  const err = d.error || "", unreadable = (d.missing || []).length, unchecked = (d.health_missing || []).length;
+  note.className = err || unreadable || unchecked ? "r warnc" : "r";
+  note.textContent = err ? "could not read the runs: " + err : [
+    unreadable ? unreadable + (unreadable === 1 ? " repo unreadable" : " repos unreadable") : "",
+    unchecked ? unchecked + (unchecked === 1 ? " repo's checks unreadable" : " repos' checks unreadable") : "",
+  ].filter(Boolean).join(" · ");
   const runs = d.runs || [], health = d.health || [];
   // A block with neither kind of row is still a town with no deploys: the
   // scheduled rows are drawn only where a repo has health runs, so their
@@ -1396,7 +1405,7 @@ function healthRow(h) {
   const result = el("span", "hstate " + (HEALTH_RESULT_CLASS[h.status] || "title"), h.unread ? "not read" : healthResult(h));
   // The API's own word stays on the title where the page words it another way,
   // so an operator reading "off on purpose" can see the run itself was skipped.
-  if (result.textContent !== (h.status || "–")) result.title = h.unread ? "the newest run's jobs could not be read" : (h.status || "not read");
+  if (h.status && result.textContent !== h.status) result.title = h.status;
   const green = el("span", "hgreen", h.last_green ? age(h.last_green) + " ago" : "–");
   if (!h.last_green) green.title = "not green in the runs the reader read";
   row.append(app, el("span", "henv", h.env || "–"), result,

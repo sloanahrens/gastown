@@ -1,8 +1,13 @@
 package dashboard
 
 import (
+	"io"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+
+	"github.com/steveyegge/gastown/internal/forgejo"
 )
 
 // The Deploys block is read where the operator reads a release: inside the
@@ -46,7 +51,13 @@ func TestDeploysBlockDrawsWhatTheReaderDecided(t *testing.T) {
 	draw := pageFunc(t, "renderDeploys")
 	for _, want := range []string{
 		`if (!d) { note.className = "r"; note.textContent = ""; box.append(el("div", "empty", "no viewer token")); return; }`,
-		`note.textContent = err ? "could not read the runs: " + err : (unreadable ? unreadable + (unreadable === 1 ? " repo unreadable" : " repos unreadable") : "");`,
+		// The note names every read that came back empty-handed, the scheduled
+		// checks included: a repo whose checks could not be listed is one the
+		// block could not ask, not one that answered with no checks (gt-t9w60).
+		`note.textContent = err ? "could not read the runs: " + err : [`,
+		`unreadable ? unreadable + (unreadable === 1 ? " repo unreadable" : " repos unreadable") : "",`,
+		`unchecked ? unchecked + (unchecked === 1 ? " repo's checks unreadable" : " repos' checks unreadable") : "",`,
+		`].filter(Boolean).join(" · ");`,
 		`box.append(el("div", err ? "badc" : "empty", err ? "no deploy runs: " + err : "no deploy runs yet"));`,
 		`for (const r of runs) box.append(deployRow(r));`,
 		`if (!runs.length && !health.length)`,
@@ -337,7 +348,7 @@ func TestDeploysBlockNeverDrawsASkippedCheckAsGreen(t *testing.T) {
 	// The page's own word for a skipped run is on the cell, and the API's word
 	// stays on its title: an operator reading "off on purpose" can see the run
 	// itself was skipped.
-	if !strings.Contains(pageFunc(t, "healthRow"), `if (result.textContent !== (h.status || "–"))`) {
+	if !strings.Contains(pageFunc(t, "healthRow"), `if (h.status && result.textContent !== h.status) result.title = h.status;`) {
 		t.Error("healthRow does not keep the API's own word for the result it rewords")
 	}
 }
@@ -361,9 +372,11 @@ func TestDeploysBlockMarksAFailedCheckInTheHeaderStrip(t *testing.T) {
 	mark := pageFunc(t, "renderHealthMark")
 	for _, want := range []string{
 		`const box = $("healthmark"), d = (s && s.deploys) || null;`,
-		`const apps = (d && d.health_failed) || [];`,
-		`box.hidden = !apps.length;`,
-		`box.textContent = apps.length ? "health: " + apps.join(", ") : "";`,
+		`const failed = (d && d.health_failed) || [], unread = (d && d.health_unread) || [];`,
+		`const parts = [];`,
+		`box.hidden = !parts.length;`,
+		`box.className = "pill " + (failed.length ? "red" : "degraded");`,
+		`box.textContent = parts.join(" · ");`,
 	} {
 		if !strings.Contains(mark, want) {
 			t.Errorf("renderHealthMark has no %q", want)
@@ -371,8 +384,88 @@ func TestDeploysBlockMarksAFailedCheckInTheHeaderStrip(t *testing.T) {
 	}
 
 	// The marker carries the reader's own finding: the apps the deploys reader
-	// marked as failed, not a second reading of the rows the block draws.
+	// marked, not a second reading of the rows the block draws.
 	if !strings.Contains(pageFunc(t, "renderAll"), "renderDeploys(state); renderHealthMark(state);") {
 		t.Error("the page's redraw does not include the health marker with the block it comes from")
 	}
+}
+
+// The marker is only as good as what the reader hands it, so this executes the
+// reader over a town whose apps are the four the strip has to tell apart: one
+// that passes, one that is off, one whose newest check failed and one whose
+// newest check could not be read. A failed app is named red, an app nobody
+// could read is named too — a silent one is the strip lying by omission — and
+// the app that is off is in neither, so an untested deployment never reads as a
+// green one (gt-t9w60).
+func TestDeploysReaderFeedsTheStripWhatItMarks(t *testing.T) {
+	t.Parallel()
+
+	stub := &deployStub{
+		repos: []string{"sloan/arkansas-beaver-committee", "sloan/beads", "sloan/fractals-nextjs", "sloan/gt-cloud"},
+		runs: map[string][]forgejo.ActionRun{
+			"sloan/arkansas-beaver-committee": {testHealthRun(1, "success", 5)},
+			"sloan/beads":                     {testHealthRun(2, "success", 5)},
+			"sloan/fractals-nextjs":           {testHealthRun(3, "success", 5)},
+			"sloan/gt-cloud":                  {testHealthRun(4, "failure", 5)},
+		},
+		jobs: map[int64][]forgejo.ActionRunJob{
+			1: healthJobs("success", "success", "success"),
+			2: healthJobs("skipped", "skipped", "skipped"),
+			3: healthJobs("success", "success", "failure"),
+			4: healthJobs("success", "success", "success"),
+		},
+		jobsErr: map[int64]error{4: io.EOF},
+	}
+	d := newDeployTestReader(stub, nil).Read()
+
+	assert.Equal(t, []string{"fractals-nextjs"}, d.HealthFailed)
+	assert.Equal(t, []string{"gt-cloud"}, d.HealthUnread)
+	assert.Empty(t, d.HealthMissing)
+
+	// The two words and the two colours are the page's, not the reader's, so
+	// they are held here to the statuses the reader sends: a row the page has no
+	// word for draws the API's own word dim, and no status but a pass may reach
+	// the pass colour.
+	words := pageTable(t, "HEALTH_RESULT")
+	classes := pageTable(t, "HEALTH_RESULT_CLASS")
+	for _, status := range []string{healthSuccess, healthFailure, "skipped"} {
+		if _, ok := words[status]; !ok {
+			t.Errorf("the page has no word for %q, a result the reader puts on a row", status)
+		}
+	}
+	assert.Equal(t, "green", words[healthSuccess], "a pass is not the page's word for a pass")
+	assert.Equal(t, "off on purpose", words["skipped"], "a skipped run is a deployment nobody tested, and the page must say so")
+	assert.Equal(t, map[string]string{healthSuccess: "good", healthFailure: "badc"}, classes,
+		"only a pass and a failure may be coloured, so no other result can read as one")
+	if _, coloured := classes[""]; coloured {
+		t.Error("a result the reader did not read has a colour, so an unread row could read as one")
+	}
+}
+
+// pageTable reads one of the page's const value tables, so a test can hold the
+// words and colours the page draws with to the values the reader sends
+// (gt-t9w60). The page itself is not executed anywhere in this repo — every page
+// test reads index.html — and the table is the part of it a reader can check.
+func pageTable(t *testing.T, name string) map[string]string {
+	t.Helper()
+
+	page := string(indexHTML)
+	at := strings.Index(page, "const "+name+" = {")
+	if at < 0 {
+		t.Fatalf("index.html has no %s table", name)
+	}
+	body := page[at:]
+	end := strings.Index(body, "};")
+	if end < 0 {
+		t.Fatalf("index.html's %s table is not closed", name)
+	}
+	out := map[string]string{}
+	for _, pair := range strings.Split(body[strings.Index(body, "{")+1:end], ",") {
+		key, value, ok := strings.Cut(pair, ":")
+		if !ok {
+			continue
+		}
+		out[strings.TrimSpace(key)] = strings.Trim(strings.TrimSpace(value), `"`)
+	}
+	return out
 }

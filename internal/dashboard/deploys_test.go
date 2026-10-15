@@ -25,12 +25,13 @@ var deployNow = time.Date(2026, 10, 5, 11, 0, 0, 0, time.UTC)
 // deployStub is a stand-in Forgejo that answers the three calls the deploy
 // reader makes, recording what it was asked for.
 type deployStub struct {
-	repos    []string
-	reposErr error
-	runs     map[string][]forgejo.ActionRun
-	runsErr  map[string]error
-	jobs     map[int64][]forgejo.ActionRunJob
-	jobsErr  map[int64]error
+	repos     []string
+	reposErr  error
+	runs      map[string][]forgejo.ActionRun
+	runsErr   map[string]error
+	healthErr map[string]error // only the health read fails: the repo's deploy runs answered
+	jobs      map[int64][]forgejo.ActionRunJob
+	jobsErr   map[int64]error
 
 	// runsAsked is the repos asked for their runs under the deploy read;
 	// healthAsked is the repos asked for the health workflow's runs. The stub
@@ -39,6 +40,12 @@ type deployStub struct {
 	runsAsked   []string
 	healthAsked []string
 	jobsAsked   []int64
+
+	// healthDeadline and jobsDeadline are the deadlines the checks' read and the
+	// deploy runs' jobs were called under: the checks run last on a budget of
+	// their own (gt-t9w60).
+	healthDeadline time.Time
+	jobsDeadline   time.Time
 }
 
 func (s *deployStub) ListUserRepos(context.Context) ([]forgejo.Repository, error) {
@@ -52,21 +59,31 @@ func (s *deployStub) ListUserRepos(context.Context) ([]forgejo.Repository, error
 	return out, nil
 }
 
-func (s *deployStub) ListRuns(_ context.Context, owner, repo string, f forgejo.RunFilter) (*forgejo.RunList, error) {
+func (s *deployStub) ListRuns(ctx context.Context, owner, repo string, f forgejo.RunFilter) (*forgejo.RunList, error) {
 	name := owner + "/" + repo
 	if f.WorkflowID == healthWorkflow {
 		s.healthAsked = append(s.healthAsked, name)
+		s.healthDeadline, _ = ctx.Deadline()
 	} else {
 		s.runsAsked = append(s.runsAsked, name)
 	}
 	if err := s.runsErr[name]; err != nil {
 		return nil, err
 	}
+	if f.WorkflowID == healthWorkflow {
+		if err := s.healthErr[name]; err != nil {
+			return nil, err
+		}
+	}
 	return &forgejo.RunList{Runs: s.runs[name]}, nil
 }
 
-func (s *deployStub) ListRunJobs(_ context.Context, _, _ string, runID int64) ([]forgejo.ActionRunJob, error) {
+func (s *deployStub) ListRunJobs(ctx context.Context, _, _ string, runID int64) ([]forgejo.ActionRunJob, error) {
 	s.jobsAsked = append(s.jobsAsked, runID)
+	if s.jobsDeadline.IsZero() {
+		// The deploys' own jobs are the first the refresh asks for.
+		s.jobsDeadline, _ = ctx.Deadline()
+	}
 	if err := s.jobsErr[runID]; err != nil {
 		return nil, err
 	}
@@ -847,6 +864,8 @@ func TestDeployReaderSaysAHealthRowItCouldNotRead(t *testing.T) {
 
 	require.Empty(t, d.Error)
 	assert.Empty(t, d.HealthFailed, "a run the block could not read is no word on the app")
+	assert.Equal(t, []string{"fractals-nextjs"}, d.HealthUnread,
+		"an app nobody has a reading of is named, not left to read as a town that is green")
 	require.Len(t, d.Health, 2, "the app's checks are still drawn, as rows it could not read")
 	for _, row := range d.Health {
 		assert.True(t, row.Unread)
@@ -866,13 +885,15 @@ func TestDeployReaderSaysAHealthRowItCouldNotRead(t *testing.T) {
 	d = newDeployTestReader(stub, nil).Read()
 	assert.Empty(t, d.Health)
 	assert.Empty(t, d.HealthFailed)
+	assert.Empty(t, d.HealthUnread)
 }
 
 // The strip's marker is raised from the newest run or not at all: a newer run
-// the block could not read is a check nobody has a reading of, and an older
-// run's failure under it is not what a marker says. The rows already refuse
-// that claim, and a marker making it would be the strip disagreeing with the
-// block it is drawn beside.
+// the block could not read is a check nobody has a reading of — the strip says
+// that rather than the failure, which is an older run's — and an older run's
+// failure under it is not what a marker says. The rows already refuse that
+// claim, and a marker making it would be the strip disagreeing with the block
+// it is drawn beside (gt-t9w60).
 func TestDeployReaderRaisesNoMarkerFromARunUnderAnUnreadNewest(t *testing.T) {
 	t.Parallel()
 
@@ -893,6 +914,7 @@ func TestDeployReaderRaisesNoMarkerFromARunUnderAnUnreadNewest(t *testing.T) {
 	assert.True(t, d.Health[1].Unread)
 	assert.Empty(t, d.Health[1].Status)
 	assert.Empty(t, d.HealthFailed, "the newest check was not read, so nothing is known to have failed")
+	assert.Equal(t, []string{"fractals-nextjs"}, d.HealthUnread, "and the strip says the check went unread")
 
 	// And with the newest run read, the failure under it is not the marker's
 	// either: only the newest run's own result is.
@@ -952,12 +974,15 @@ func TestDeploysJSONCarriesTheNamesThePageReads(t *testing.T) {
 			URL:       "https://forgejo.test/runs/7",
 			Unread:    true,
 		}},
-		HealthFailed: []string{"fractals-nextjs"},
+		HealthFailed:  []string{"fractals-nextjs"},
+		HealthUnread:  []string{"gt-cloud"},
+		HealthMissing: []string{"sloan/beads"},
 	}
 	b, err := json.Marshal(d)
 	require.NoError(t, err)
 	for _, want := range []string{
-		`"health":[`, `"health_failed":["fractals-nextjs"]`,
+		`"health":[`, `"health_failed":["fractals-nextjs"]`, `"health_unread":["gt-cloud"]`,
+		`"health_missing":["sloan/beads"]`,
 		`"repo":"sloan/fractals-nextjs"`, `"app":"fractals-nextjs"`, `"env":"prod-smoke"`,
 		`"status":"failure"`, `"at":`, `"last_green":`, `"passed":23`, `"runs":24`,
 		`"url":"https://forgejo.test/runs/7"`, `"unread":true`,
@@ -966,4 +991,111 @@ func TestDeploysJSONCarriesTheNamesThePageReads(t *testing.T) {
 			t.Errorf("the block's JSON has no %s: the page reads nothing there", want)
 		}
 	}
+}
+
+// A repo whose checks could not be listed is not a repo with no checks: it is
+// named, and its deploy runs are still drawn. An expired budget is that same
+// answer rather than a silent one — the town's checks nobody could read must
+// not read as a town with nothing to check (gt-t9w60).
+func TestDeployReaderNamesTheReposWhoseChecksItCouldNotList(t *testing.T) {
+	t.Parallel()
+
+	for _, cause := range []error{io.EOF, context.DeadlineExceeded} {
+		stub := &deployStub{
+			repos: []string{"sloan/beads", "sloan/fractals-nextjs"},
+			runs: map[string][]forgejo.ActionRun{
+				"sloan/beads":           {testDeployRun(4, "v0.2.0", "success", 20)},
+				"sloan/fractals-nextjs": {testHealthRun(1, "success", 5)},
+			},
+			healthErr: map[string]error{"sloan/fractals-nextjs": cause},
+		}
+		d := newDeployTestReader(stub, nil).Read()
+
+		require.Empty(t, d.Error)
+		require.Len(t, d.Runs, 1, "the repo's own runs answered, and are drawn whatever its checks did")
+		assert.Empty(t, d.Missing, "the repo's deploy runs answered, so it is not a repo that failed")
+		assert.Equal(t, []string{"sloan/fractals-nextjs"}, d.HealthMissing)
+		assert.Empty(t, d.Health, "nothing of its checks is known, so it has no rows to draw")
+		assert.Empty(t, d.HealthFailed)
+		assert.Empty(t, d.HealthUnread)
+	}
+}
+
+// A check that finished without passing is the app's newest check failing
+// whatever the API calls it, and one that has not finished is not: a cancelled
+// check raises the marker, a run still moving does not (gt-t9w60).
+func TestDeployReaderTellsACancelledCheckFromARunStillMoving(t *testing.T) {
+	t.Parallel()
+
+	stub := &deployStub{
+		repos: []string{"sloan/fractals-nextjs", "sloan/gt-cloud"},
+		runs: map[string][]forgejo.ActionRun{
+			"sloan/fractals-nextjs": {testHealthRun(1, forgejoRunCancelled, 5)},
+			"sloan/gt-cloud":        {testHealthRun(2, "running", 5)},
+		},
+		jobs: map[int64][]forgejo.ActionRunJob{
+			1: healthJobs("success", forgejoRunCancelled, "skipped"),
+			2: healthJobs("success", "running", "waiting"),
+		},
+	}
+	d := newDeployTestReader(stub, nil).Read()
+
+	assert.Equal(t, []string{"fractals-nextjs"}, d.HealthFailed, "a check nobody let finish did not pass")
+	assert.Empty(t, d.HealthUnread)
+
+	require.Len(t, d.Health, 4)
+	assert.Equal(t, forgejoRunCancelled, d.Health[0].Status, "the row carries the API's own word for it")
+	assert.Equal(t, "waiting", d.Health[3].Status, "a check that has not finished is not a failure")
+}
+
+// The marker reads the newest run, not only the two environments the rows name:
+// a job the block does not know failing is still the app's newest check
+// failing, and the rows beside it are not the whole word on the app (gt-t9w60).
+func TestDeployReaderMarksAFailureInAJobTheRowsDoNotName(t *testing.T) {
+	t.Parallel()
+
+	stub := &deployStub{
+		repos: []string{"sloan/fractals-nextjs"},
+		runs:  map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {testHealthRun(1, "failure", 5)}},
+		jobs: map[int64][]forgejo.ActionRunJob{1: {
+			testJob("off", "success"),
+			testJob("staging-integration", "success", "off"),
+			testJob("prod-smoke", "success", "staging-integration"),
+			testJob("notify", "failure", "prod-smoke"),
+		}},
+	}
+	d := newDeployTestReader(stub, nil).Read()
+
+	assert.Equal(t, []string{"fractals-nextjs"}, d.HealthFailed)
+	require.Len(t, d.Health, 2)
+	for _, row := range d.Health {
+		assert.Equal(t, "success", row.Status, "both environments passed; the run itself is what failed")
+	}
+}
+
+// The scheduled checks are the refresh's last read and run on a budget of their
+// own: the jobs call per run of every window is the refresh's costliest read,
+// and the deploy rows — the block's own subject — must not be what a slow
+// Forgejo takes it out of (gt-t9w60).
+func TestDeployReaderGivesTheChecksABudgetOfTheirOwn(t *testing.T) {
+	t.Parallel()
+
+	stub := &deployStub{
+		repos: []string{"sloan/fractals-nextjs"},
+		runs: map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {
+			testDeployRun(7, "v0.1.0", "success", 30),
+			testHealthRun(1, "success", 5),
+		}},
+		jobs: map[int64][]forgejo.ActionRunJob{7: {testJob("build", "success")}, 1: healthJobs("success", "success", "success")},
+	}
+	d := newDeployTestReader(stub, nil).Read()
+
+	require.Len(t, d.Runs, 1)
+	require.Len(t, d.Health, 2)
+	require.False(t, stub.jobsDeadline.IsZero(), "the deploy run's jobs were never asked for")
+	require.False(t, stub.healthDeadline.IsZero(), "the checks were never read")
+	assert.True(t, stub.healthDeadline.Before(stub.jobsDeadline),
+		"the checks' read is not on a budget of its own: it can spend the deadline the deploy rows need")
+	assert.LessOrEqual(t, time.Until(stub.healthDeadline), healthReadBudget+time.Second,
+		"the checks' budget is not what the reader says it is")
 }
