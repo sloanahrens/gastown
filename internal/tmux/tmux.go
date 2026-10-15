@@ -697,10 +697,36 @@ func (t *Tmux) EnsureSessionFreshWithCommandAndEnv(name, workDir, command string
 	return t.NewSessionWithCommandAndEnv(name, workDir, command, env)
 }
 
+// exactSessionTarget returns name as a tmux session target that matches that
+// session only.
+//
+// Given a name no session carries exactly, tmux resolves a session target by
+// prefix: "kx" also matches "kx-b". So a kill aimed at a session that has
+// already died lands on the neighbor sharing its prefix — kill-session -t kx
+// returns 0 having killed kx-b (gt-u4lr9). The "=" prefix restricts the lookup
+// to an exact match. psmux (the Windows tmux) does not support it, so Windows
+// keeps the bare session name.
+func exactSessionTarget(name string) string {
+	if runtime.GOOS == "windows" {
+		return name
+	}
+	return "=" + name
+}
+
+// exactPaneTarget is exactSessionTarget for the commands whose -t names a pane
+// or window (set-option, set-hook, display-message), where tmux reads a bare
+// name as a window name and rejects "=name" outright with "no such window:
+// =name". The trailing ":" is what makes the session part an exact session
+// lookup; callers append the window or pane they want after it. It survives
+// the Windows carve-out above — psmux lacks the "=", not the ":".
+func exactPaneTarget(name string) string {
+	return exactSessionTarget(name) + ":"
+}
+
 // KillSession terminates a tmux session. Idempotent: returns nil if the
 // session is already gone or there is no tmux server.
 func (t *Tmux) KillSession(name string) (retErr error) {
-	_, retErr = t.run("kill-session", "-t", name)
+	_, retErr = t.run("kill-session", "-t", exactSessionTarget(name))
 	if retErr == ErrSessionNotFound || retErr == ErrNoServer {
 		retErr = nil
 	}
@@ -734,8 +760,8 @@ func (t *Tmux) KillSessionWithProcesses(name string) error {
 	// the auto-respawn hook (gt-4k3fj.3), but a session made by an older
 	// binary may still carry it, and it would respawn the process 3 seconds
 	// after we kill it, creating a zombie that fights every kill attempt.
-	_ = t.SetRemainOnExit(name, false)
-	_, _ = t.run("set-hook", "-t", name, "-u", "pane-died")
+	_ = t.SetRemainOnExit(exactPaneTarget(name), false)
+	_, _ = t.run("set-hook", "-t", exactPaneTarget(name), "-u", "pane-died")
 
 	// Get the pane PID
 	pid, err := t.GetPanePID(name)
@@ -806,8 +832,8 @@ func (t *Tmux) KillSessionWithProcesses(name string) error {
 // Without exclusion, the caller would be killed before completing the cleanup.
 func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []string) error {
 	// Disarm any pane-died hook BEFORE killing anything (same as KillSessionWithProcesses).
-	_ = t.SetRemainOnExit(name, false)
-	_, _ = t.run("set-hook", "-t", name, "-u", "pane-died")
+	_ = t.SetRemainOnExit(exactPaneTarget(name), false)
+	_, _ = t.run("set-hook", "-t", exactPaneTarget(name), "-u", "pane-died")
 
 	// Build exclusion set for O(1) lookup
 	exclude := make(map[string]bool)
@@ -1227,13 +1253,7 @@ func (t *Tmux) IsAvailable() bool {
 // Uses "=" prefix for exact matching, preventing prefix matches
 // (e.g., "gt-deacon-boot" won't match when checking for "gt-deacon").
 func (t *Tmux) HasSession(name string) (bool, error) {
-	// psmux (Windows tmux alternative) doesn't support the "=" exact-match
-	// prefix for session targets. Use the bare name on Windows.
-	target := "=" + name
-	if runtime.GOOS == "windows" {
-		target = name
-	}
-	_, err := t.run("has-session", "-t", target)
+	_, err := t.run("has-session", "-t", exactSessionTarget(name))
 	if err != nil {
 		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
 			return false, nil
@@ -2793,12 +2813,14 @@ func (t *Tmux) GetPaneWorkDir(session string) (string, error) {
 
 // GetPanePID returns the PID of the pane's main process.
 // When target is a session name, explicitly targets the first window (:^) to avoid
-// returning the active pane's PID when a non-agent window is focused. When target is
-// a pane ID (e.g., "%5"), uses it directly.
+// returning the active pane's PID when a non-agent window is focused, and matches the
+// session exactly: a bare name also matches a longer session's name, so asking for the
+// PID of a dead "kx" would answer with live "kx-b"'s pane and hand its process tree to
+// the caller to kill (gt-u4lr9). When target is a pane ID (e.g., "%5"), uses it directly.
 func (t *Tmux) GetPanePID(target string) (string, error) {
 	tmuxTarget := target
 	if !strings.HasPrefix(target, "%") {
-		tmuxTarget = target + ":^"
+		tmuxTarget = exactPaneTarget(target) + "^"
 	}
 	out, err := t.run("display-message", "-t", tmuxTarget, "-p", "#{pane_pid}")
 	if err != nil {
