@@ -349,3 +349,158 @@ func TestNukeFromInsideTheWorktreeRefusesBeforeTouchingAnything(t *testing.T) {
 		t.Errorf("polecat sandbox gone after a refused nuke: %v", statErr)
 	}
 }
+
+const nukeE2EMolecule = "gt-wisp-mol"
+
+// moleculeRecorder is the molecule burn's bead database with a log of every
+// write it is asked for. The burn closes steps and the root, rewrites the work
+// bead's description and removes bonds; each of those is a write here.
+type moleculeRecorder struct {
+	*stubStore
+	writes []string
+	// stepID is the molecule's step, which the store minted.
+	stepID string
+}
+
+func (m *moleculeRecorder) Update(id string, opts beads.UpdateOptions) error {
+	m.writes = append(m.writes, "update "+id)
+	return m.stubStore.Update(id, opts)
+}
+
+func (m *moleculeRecorder) ForceCloseWithReason(reason string, ids ...string) error {
+	m.writes = append(m.writes, "force-close "+strings.Join(ids, ","))
+	return m.stubStore.ForceCloseWithReason(reason, ids...)
+}
+
+func (m *moleculeRecorder) RemoveDependency(issue, dependsOn string) error {
+	m.writes = append(m.writes, "remove-dep "+issue+" "+dependsOn)
+	return m.stubStore.RemoveDependency(issue, dependsOn)
+}
+
+// attachMolecule gives the fixture's work bead a molecule with one open step
+// and returns the recorder over the same store, with nothing logged yet.
+func (f *nukeE2E) attachMolecule() *moleculeRecorder {
+	f.t.Helper()
+	if _, err := f.store.Create(beads.CreateOptions{ID: nukeE2EMolecule, Title: "mol-polecat-work"}); err != nil {
+		f.t.Fatalf("creating the molecule: %v", err)
+	}
+	step, err := f.store.Create(beads.CreateOptions{Title: "step", Parent: nukeE2EMolecule})
+	if err != nil {
+		f.t.Fatalf("creating the molecule step: %v", err)
+	}
+	desc := "attached_molecule: " + nukeE2EMolecule
+	if err := f.store.Update(nukeE2EBead, beads.UpdateOptions{Description: &desc}); err != nil {
+		f.t.Fatalf("attaching the molecule: %v", err)
+	}
+	return &moleculeRecorder{stubStore: f.store, stepID: step.ID}
+}
+
+// status is the bead's status, or "gone" when the store no longer has it.
+func (f *nukeE2E) status(id string) string {
+	f.t.Helper()
+	issue, err := f.store.Show(id)
+	if err != nil {
+		return "gone"
+	}
+	return issue.Status
+}
+
+// A nuke the preserve gate refuses changes nothing about the polecat's
+// workflow: the molecule, its steps and its attachment on the work bead are
+// still there for a resume. The burn used to run before the gate, so an
+// unreachable origin refused the nuke with the molecule already gone.
+func TestNukeRefusedByPreserveGateKeepsTheMolecule(t *testing.T) {
+	t.Parallel()
+	f := newNukeE2E(t)
+	mol := f.attachMolecule()
+
+	releaser := &recordingReleaser{
+		fakeWorkReleaser: &fakeWorkReleaser{
+			beads: map[string][2]string{nukeE2EBead: {"hooked", nukeE2EAgent}},
+		},
+		sandboxGone: func() bool { return false },
+	}
+	sessions := &noSession{}
+	r := &rig.Rig{Name: nukeE2ERig, Path: f.rigPath}
+	mgr := polecat.NewManagerWithStore(r, nil, nil, townRegistry(), f.store)
+	err := nukePolecatFullWithOptions(nukeE2EPolecat, nukeE2ERig, mgr, r, nukePolecatOptions{
+		Deps: &nukeDeps{
+			Sessions:      sessions,
+			Releaser:      releaser,
+			SurvivingWork: func(string) (string, error) { return "", nil },
+			MoleculeBeads: mol,
+			Preserve: func(string) (preserveOutcome, error) {
+				return preserveOutcome{}, errors.New("fetch origin before nuke: origin unreachable")
+			},
+		},
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "refusing to nuke") {
+		t.Fatalf("nuke with an unreachable origin = %v, want the preserve refusal", err)
+	}
+	if len(mol.writes) != 0 {
+		t.Errorf("molecule writes = %v, want none: a refused nuke must not burn the molecule", mol.writes)
+	}
+	for _, id := range []string{nukeE2EMolecule, mol.stepID} {
+		if got := f.status(id); got != string(beads.StatusOpen) {
+			t.Errorf("%s status = %q, want it still open", id, got)
+		}
+	}
+	work, showErr := f.store.Show(nukeE2EBead)
+	if showErr != nil {
+		t.Fatalf("reading the work bead: %v", showErr)
+	}
+	if attached := beads.ParseAttachmentFields(work); attached == nil || attached.AttachedMolecule != nukeE2EMolecule {
+		t.Errorf("work bead attachment = %+v, want it still attached to %s", attached, nukeE2EMolecule)
+	}
+	if len(releaser.calls) != 0 {
+		t.Errorf("bd calls = %v, want none: a refused nuke keeps its hooked work", releaser.calls)
+	}
+	if _, statErr := os.Stat(f.polecatAt); statErr != nil {
+		t.Errorf("polecat sandbox gone after a refused nuke: %v", statErr)
+	}
+}
+
+// The other side of the same ordering: a nuke the gate lets through still
+// burns the molecule, so a re-sling is not blocked by a stale attachment.
+func TestNukeThatProceedsBurnsTheMolecule(t *testing.T) {
+	t.Parallel()
+	f := newNukeE2E(t)
+	mol := f.attachMolecule()
+
+	releaser := &recordingReleaser{
+		fakeWorkReleaser: &fakeWorkReleaser{
+			beads: map[string][2]string{nukeE2EBead: {"hooked", nukeE2EAgent}},
+		},
+		sandboxGone: func() bool { return false },
+	}
+	r := &rig.Rig{Name: nukeE2ERig, Path: f.rigPath}
+	mgr := polecat.NewManagerWithStore(r, nil, nil, townRegistry(), f.store)
+	err := nukePolecatFullWithOptions(nukeE2EPolecat, nukeE2ERig, mgr, r, nukePolecatOptions{
+		Deps: &nukeDeps{
+			Sessions:      &noSession{},
+			Releaser:      releaser,
+			SurvivingWork: func(string) (string, error) { return "", nil },
+			MoleculeBeads: mol,
+			Preserve: func(string) (preserveOutcome, error) {
+				return preserveOutcome{RemoteRef: "origin/" + nukeE2EBranch, AlreadyThere: true}, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("nuke returned %v, want nil", err)
+	}
+
+	for _, id := range []string{nukeE2EMolecule, mol.stepID} {
+		if got := f.status(id); got != string(beads.StatusClosed) && got != "gone" {
+			t.Errorf("%s status = %q, want it closed by the burn", id, got)
+		}
+	}
+	work, showErr := f.store.Show(nukeE2EBead)
+	if showErr != nil {
+		t.Fatalf("reading the work bead: %v", showErr)
+	}
+	if attached := beads.ParseAttachmentFields(work); attached != nil && attached.AttachedMolecule != "" {
+		t.Errorf("work bead still attached to %s after the burn", attached.AttachedMolecule)
+	}
+}
