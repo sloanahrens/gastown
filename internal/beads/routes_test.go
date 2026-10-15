@@ -644,6 +644,59 @@ func TestCheckPrefixAvailable_NoRoutes(t *testing.T) {
 	}
 }
 
+// TestCheckPrefixAvailableRejectsExistingRigName is the regression test for
+// gt-1h1ea: rig add drops the databases named like the new prefix, so a
+// prefix naming a registered rig's database has to be refused even when no
+// route carries it.
+func TestCheckPrefixAvailableRejectsExistingRigName(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	routesContent := `{"prefix": "gt-", "path": "gastown/mayor/rig"}
+{"prefix": "bd-", "path": "beads/mayor/rig"}
+`
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routesContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// beads_ab is registered but routed nowhere, which is the state the drop
+	// sees when a rig is added from a config the route file predates.
+	registry := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{
+		"beads":    {BeadsConfig: &config.BeadsConfig{Prefix: "bd"}, DoltDatabase: "beads"},
+		"beads_ab": {BeadsConfig: &config.BeadsConfig{Prefix: "ba"}},
+	}}
+	if err := os.MkdirAll(filepath.Join(tmpDir, "mayor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveRigsConfig(filepath.Join(tmpDir, "mayor", "rigs.json"), registry); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name    string
+		prefix  string
+		newPath string
+		wantErr bool
+	}{
+		{"prefix names a registered rig's own name", "gastown", "foo", true},
+		{"prefix names a registered rig's database", "beads", "foo", true},
+		{"prefix names beads_<registered rig>", "ab", "alpha_bravo", true},
+		{"prefix names the new rig itself", "foo", "foo", false},
+		{"prefix names nothing registered", "co", "coolthing", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := CheckPrefixAvailable(tmpDir, tc.prefix, tc.newPath)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("CheckPrefixAvailable(%q, %q) error = %v, wantErr %v",
+					tc.prefix, tc.newPath, err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestAgentBeadIDsWithPrefix(t *testing.T) {
 	tests := []struct {
 		name     string

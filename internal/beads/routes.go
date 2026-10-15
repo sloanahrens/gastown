@@ -200,6 +200,36 @@ func GetPrefixForRig(townRoot, rigName string) string {
 	return config.GetRigPrefix(townRoot, rigName)
 }
 
+// RegisteredRigDatabases returns the Dolt databases the town's registered rigs
+// own: each registered rig's name, the database its registry entry names when
+// they differ, and the rig names the routes imply for a rig routed before it
+// reached the registry.
+func RegisteredRigDatabases(townRoot string) map[string]bool {
+	names := make(map[string]bool)
+
+	if routes, err := LoadRoutes(filepath.Join(townRoot, ".beads")); err == nil {
+		for _, r := range routes {
+			if rig := strings.SplitN(r.Path, "/", 2)[0]; rig != "" && rig != "." {
+				names[rig] = true
+			}
+		}
+	}
+
+	// A rig registered while a long clone ran is on disk but not in the caller's
+	// snapshot, so read the registry rather than trusting one caller's copy.
+	rigs, err := config.LoadRigsConfigOrEmpty(filepath.Join(townRoot, "mayor", "rigs.json"))
+	if err == nil && rigs != nil {
+		for name, entry := range rigs.Rigs {
+			names[name] = true
+			if entry.DoltDatabase != "" {
+				names[entry.DoltDatabase] = true
+			}
+		}
+	}
+
+	return names
+}
+
 // CheckPrefixAvailable verifies that a prefix is not already used by a different rig.
 // The prefix should include the trailing hyphen (e.g., "gt-").
 // newPath is the path of the rig being added (e.g., "gastown" or "gastown/mayor/rig").
@@ -221,6 +251,20 @@ func CheckPrefixAvailable(townRoot string, prefix string, newPath string) error 
 			if existingRig != newRig {
 				return fmt.Errorf("prefix %q is already used by %s (path: %s); use --prefix to specify a different prefix", prefix, existingRig, r.Path)
 			}
+		}
+	}
+
+	// `gt rig add` drops the databases bd init leaves behind, named <prefix> and
+	// beads_<prefix>, so a prefix that names another rig's database resolves to
+	// that live database and takes its beads with it (gt-1h1ea). Routes carry no
+	// database names, so compare against the rigs themselves.
+	stem := strings.TrimSuffix(prefix, "-")
+	for name := range RegisteredRigDatabases(townRoot) {
+		if name == newRig {
+			continue // the rig being added owns any database named after it
+		}
+		if name == stem || name == "beads_"+stem {
+			return fmt.Errorf("prefix %q names the Dolt database of rig %q, which `gt rig add` would drop as an orphan; use --prefix to specify a different prefix", prefix, name)
 		}
 	}
 

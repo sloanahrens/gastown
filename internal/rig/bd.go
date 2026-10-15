@@ -89,3 +89,20 @@ func (m *Manager) doltDBs() doltDatabases {
 	}
 	return townDolt{m.townRoot}
 }
+
+// registeredRigDatabases is every Dolt database a rig of this town owns, which
+// dropRigOrphanDBs must leave in place. It unions the registry snapshot this
+// Manager loaded with the town's on-disk registry, which may name a rig
+// registered while a long clone ran (gt-1h1ea).
+func (m *Manager) registeredRigDatabases() map[string]bool {
+	names := beads.RegisteredRigDatabases(m.townRoot)
+	if m.config != nil {
+		for name, entry := range m.config.Rigs {
+			names[name] = true
+			if entry.DoltDatabase != "" {
+				names[entry.DoltDatabase] = true
+			}
+		}
+	}
+	return names
+}
