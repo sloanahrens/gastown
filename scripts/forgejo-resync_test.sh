@@ -16,6 +16,8 @@ trap 'rm -rf "$TMP"' EXIT
 PASS=0
 FAIL=0
 STUB_ADMIN_TOKEN="stub-admin-token"
+BROKER_TOKEN="brokertoken-zqxvjkcd"
+DECOY_TOKEN="decoytoken-zqxvjkcd"
 STUB_TOKEN_VALUE="stubtoken-abcdefghijklmnop"
 API="http://forgejo.test/api/v1"
 GH_URL="https://github.com/acme/rig.git"
@@ -69,10 +71,20 @@ done
 path=${url#"$STUB_API"}
 
 printf 'curl %s %s\n' "$method" "$path" >> "$STUB_STATE/events.log"
+# The token this call presented, read from the curl config the resync (and the
+# provisioning re-run it makes) wrote, so a case can tell which source was
+# resolved. $STUB_SECRETS names every other token the run may hold — a broker's —
+# so that one is watched for in argv the way the stand-in override is.
+if [ -f "$config" ]; then
+  sed -n 's/^header = "Authorization: token \(.*\)"$/\1/p' "$config" >> "$STUB_STATE/presented-tokens"
+fi
 for arg in "${orig_args[@]}"; do
-  case "$arg" in
-    *"$STUB_ADMIN_TOKEN"*) echo "admin token in argv: $arg" >> "$STUB_STATE/argv-violations" ;;
-  esac
+  for secret in "$STUB_ADMIN_TOKEN" ${STUB_SECRETS:-}; do
+    [ -n "$secret" ] || continue
+    case "$arg" in
+      *"$secret"*) echo "admin token in argv: $arg" >> "$STUB_STATE/argv-violations" ;;
+    esac
+  done
 done
 if [ -z "$config" ]; then
   echo "no curl config file on $method $path" >> "$STUB_STATE/argv-violations"
@@ -304,19 +316,24 @@ esac
 STUB
 chmod +x "$TMP/bin/git"
 
+# RESYNC_TOKEN_ARGS holds the token-file flags the call carries: the stand-in
+# default, or nothing at all for a run under the broker, which names no file.
+RESYNC_TOKEN_ARGS=(--admin-token-file "$TMP/admin.env")
+
 # run_resync [ARGS...] runs the resync against the stubs and prints its combined
 # output; $? is its exit code. STUB_PUSH_FAIL and STUB_LSREMOTE_FAIL pass
 # through from the caller's environment.
 run_resync() {
   local out rc
-  out=$(cd "$SCRIPT_DIR/.." && env -u FORGEJO_ADMIN_TOKEN -u FORGEJO_API_URL -u FORGEJO_URL \
-    -u FORGEJO_BACKUP_DIR \
+  out=$(cd "$SCRIPT_DIR/.." && env -u GT_AUTH_FORGEJO_TOKEN -u FORGEJO_ADMIN_TOKEN \
+    -u FORGEJO_API_URL -u FORGEJO_URL -u FORGEJO_BACKUP_DIR \
     HOME="$TMP/home" XDG_CONFIG_HOME="$CFG" PATH="$TMP/bin:$PATH" \
     STUB_STATE="$STATE" STUB_API="$API" STUB_ADMIN_TOKEN="$STUB_ADMIN_TOKEN" \
+    STUB_SECRETS="${STUB_SECRETS:-}" \
     STUB_TOKEN_VALUE="$STUB_TOKEN_VALUE" \
     STUB_GITHUB_URL="$GH_URL" STUB_FORGEJO_URL="$FJ_URL" \
     bash "$RESYNC" --api-url "$API" --github-url "$GH_URL" --forgejo-url "$FJ_URL" \
-    --admin-token-file "$TMP/admin.env" --backup-dir "$TMP/backups" "$@" 2>&1)
+    ${RESYNC_TOKEN_ARGS[@]+"${RESYNC_TOKEN_ARGS[@]}"} --backup-dir "$TMP/backups" "$@" 2>&1)
   rc=$?
   printf '%s' "$out"
   return "$rc"
@@ -444,12 +461,77 @@ out=$(run_resync --nope acme/rig); rc=$?
 if [ "$rc" = 2 ]; then pass "an unknown option exits 2"; else fail "an unknown option exits 2 (rc=$rc)" "$out"; fi
 out=$(run_resync a/b/c); rc=$?
 if [ "$rc" = 2 ]; then pass "a three-part repository exits 2"; else fail "a three-part repository exits 2 (rc=$rc)" "$out"; fi
-out=$(env -u FORGEJO_ADMIN_TOKEN HOME="$TMP/home" XDG_CONFIG_HOME="$CFG" PATH="$TMP/bin:$PATH" \
+out=$(env -u GT_AUTH_FORGEJO_TOKEN -u FORGEJO_ADMIN_TOKEN HOME="$TMP/home" XDG_CONFIG_HOME="$CFG" PATH="$TMP/bin:$PATH" \
   STUB_STATE="$STATE" STUB_API="$API" STUB_ADMIN_TOKEN="$STUB_ADMIN_TOKEN" \
   STUB_GITHUB_URL="$GH_URL" STUB_FORGEJO_URL="$FJ_URL" \
   bash "$RESYNC" --api-url "$API" --admin-token-file "$TMP/absent.env" acme/rig 2>&1); rc=$?
 if [ "$rc" = 1 ]; then pass "a missing admin token exits 1"; else fail "a missing admin token exits 1 (rc=$rc)" "$out"; fi
 check "the missing token is named" contains "no admin token" "$out"
+check "the error names the broker command" contains "sudo -u gt-forge gt-approve run forgejo-resync" "$out"
+
+echo "=== the auth broker's run act supplies the token ==="
+# The operator runs `sudo -u gt-forge gt-approve run forgejo-resync -- ...`, and
+# the broker mints a token limited to the rule's account, repositories and
+# scopes and revokes it when the run ends. The restore re-run of the provisioner
+# inherits that same environment and names no token file of its own (gt-7ueb3).
+fresh_state
+out=$(cd "$SCRIPT_DIR/.." && env -u FORGEJO_ADMIN_TOKEN -u FORGEJO_ADMIN_ENV \
+  -u FORGEJO_API_URL -u FORGEJO_URL -u FORGEJO_BACKUP_DIR \
+  GT_AUTH_FORGEJO_TOKEN="$BROKER_TOKEN" \
+  HOME="$TMP/home" XDG_CONFIG_HOME="$CFG" PATH="$TMP/bin:$PATH" \
+  STUB_STATE="$STATE" STUB_API="$API" STUB_ADMIN_TOKEN="$BROKER_TOKEN" \
+  STUB_SECRETS="$BROKER_TOKEN" STUB_TOKEN_VALUE="$STUB_TOKEN_VALUE" \
+  STUB_GITHUB_URL="$GH_URL" STUB_FORGEJO_URL="$FJ_URL" \
+  bash "$RESYNC" --api-url "$API" --github-url "$GH_URL" --forgejo-url "$FJ_URL" \
+  --backup-dir "$TMP/backups" acme/rig 2>&1); rc=$?
+if [ "$rc" = 0 ]; then pass "a run under the broker's token exits 0"; else fail "a run under the broker's token exits 0 (rc=$rc)" "$out"; fi
+check "every call presents the broker's token" test "$(sort -u "$STATE/presented-tokens")" = "$BROKER_TOKEN"
+check "the provisioning re-run runs under the broker" test "$(count_events "curl POST /admin/users")" -gt 0
+check "the broker's token never reaches a stub's argv" test ! -e "$STATE/argv-violations"
+check "the broker's token never reaches the output" lacks "$BROKER_TOKEN" "$out"
+check "the broker's token reaches no file the run writes" \
+  test "$(grep -rlF -- "$BROKER_TOKEN" "$CFG" "$TMP/home" "$TMP/backups" 2>/dev/null | wc -l | tr -d ' ')" = 0
+check "the run still imports the refs" contains "refs match" "$out"
+check "the run still restores main's protection" test -f "$(main_rule)"
+check "the token files land only in the test's config dir" test "$(find "$CFG" -type f -name 'forgejo-*.env' | wc -l | tr -d ' ')" = 3
+
+echo "=== the environment override stands in for the broker ==="
+# A stand-in run may carry FORGEJO_ADMIN_TOKEN itself rather than name a file,
+# and a run with no token file names none (gt-7ueb3).
+fresh_state
+RESYNC_TOKEN_ARGS=()
+out=$(cd "$SCRIPT_DIR/.." && env -u GT_AUTH_FORGEJO_TOKEN -u FORGEJO_ADMIN_ENV \
+  -u FORGEJO_API_URL -u FORGEJO_URL -u FORGEJO_BACKUP_DIR \
+  FORGEJO_ADMIN_TOKEN="$STUB_ADMIN_TOKEN" \
+  HOME="$TMP/home" XDG_CONFIG_HOME="$CFG" PATH="$TMP/bin:$PATH" \
+  STUB_STATE="$STATE" STUB_API="$API" STUB_ADMIN_TOKEN="$STUB_ADMIN_TOKEN" \
+  STUB_TOKEN_VALUE="$STUB_TOKEN_VALUE" \
+  STUB_GITHUB_URL="$GH_URL" STUB_FORGEJO_URL="$FJ_URL" \
+  bash "$RESYNC" --api-url "$API" --github-url "$GH_URL" --forgejo-url "$FJ_URL" \
+  --backup-dir "$TMP/backups" acme/rig 2>&1); rc=$?
+RESYNC_TOKEN_ARGS=(--admin-token-file "$TMP/admin.env")
+if [ "$rc" = 0 ]; then pass "a run with the override in the environment exits 0"; else fail "a run with the override in the environment exits 0 (rc=$rc)" "$out"; fi
+check "the environment override is the one presented" test "$(sort -u "$STATE/presented-tokens")" = "$STUB_ADMIN_TOKEN"
+
+echo "=== a token in \$HOME/forgejo/.env is not used ==="
+# The login arrives from the broker's run act now, so a token sitting in
+# $HOME/forgejo/.env goes unused, however it got there (gt-7ueb3).
+decoy_home="$TMP/home-decoy"
+mkdir -p "$decoy_home/forgejo"
+printf 'FORGEJO_ADMIN_TOKEN=%s\n' "$DECOY_TOKEN" > "$decoy_home/forgejo/.env"
+fresh_state
+out=$(cd "$SCRIPT_DIR/.." && env -u GT_AUTH_FORGEJO_TOKEN -u FORGEJO_ADMIN_TOKEN \
+  -u FORGEJO_ADMIN_ENV -u FORGEJO_API_URL -u FORGEJO_URL -u FORGEJO_BACKUP_DIR \
+  HOME="$decoy_home" XDG_CONFIG_HOME="$CFG" PATH="$TMP/bin:$PATH" \
+  STUB_STATE="$STATE" STUB_API="$API" STUB_ADMIN_TOKEN="$DECOY_TOKEN" \
+  STUB_GITHUB_URL="$GH_URL" STUB_FORGEJO_URL="$FJ_URL" \
+  bash "$RESYNC" --api-url "$API" --github-url "$GH_URL" --forgejo-url "$FJ_URL" \
+  --backup-dir "$TMP/backups" acme/rig 2>&1); rc=$?
+if [ "$rc" != 0 ]; then pass "a token in \$HOME/forgejo/.env is not used"; else fail "a token in \$HOME/forgejo/.env is not used (rc=$rc)" "$out"; fi
+check "the file's token never reaches the API" test ! -e "$STATE/presented-tokens"
+check "the failure names the broker command" contains "sudo -u gt-forge gt-approve run forgejo-resync" "$out"
+check "the file's token never reaches the output" lacks "$DECOY_TOKEN" "$out"
+check "no request is sent without a token" test ! -s "$STATE/events.log"
 
 echo
 if [ "$FAIL" = 0 ]; then
