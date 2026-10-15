@@ -156,11 +156,13 @@ func schedulerSlingParams(b capacity.PendingBead, townRoot string) (SlingParams,
 // verified, gt-vm5g4) are deferrals; everything else is a failure.
 //
 // A content-duplicate refusal (gt-mcq) is deliberately a failure. It clears
-// itself once the overlapping bead is slung or closes, but nothing bounds how
-// long that takes, so deferring it would leave the context queued and silent
-// for the 72h lookback. As a failure it is recorded with the refusal text, and
-// after maxDispatchFailures the context closes as circuit-broken: the
-// operator's signal to clear the overlap or re-sling with --force (gt-eisp2).
+// itself once the overlapping bead is slung or closes — an overlapping bead
+// the dispatcher itself holds never refuses at all (gt-00gee) — but nothing
+// bounds how long that takes, so deferring it would leave the context queued
+// and silent for the 72h lookback. As a failure it is recorded with the
+// refusal text, and after maxDispatchFailures the context closes as
+// circuit-broken: the operator's signal to clear the overlap or re-sling with
+// --force (gt-eisp2).
 // The breaker is per context, so one refused bead does not stop the dispatcher.
 func capacityDispatchDeferral(err error) (why string, deferred bool) {
 	var admissionErr *polecatCapacityAdmissionError

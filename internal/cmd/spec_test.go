@@ -25,12 +25,16 @@ import (
 
 const specTestDescription = "## Goal\nA thing.\n\n## Constraints\nGo.\n\n## Out of scope\nNone.\n\n## Gate\nmake gate\n\n## Size\none worker, one MR"
 
+// specTestAcceptance is the acceptance list a shapely test bead carries: the
+// lint's minimum is three items.
+const specTestAcceptance = "- [ ] a\n- [ ] b\n- [ ] c"
+
 // cleanSpec is a plain work bead: type task, no labels. Shape is the whole
 // gate, so it must be dispatchable as it stands (gt-mmsr2).
 func cleanSpec(id string, priority int, created string) specdispatch.Spec {
 	return specdispatch.Spec{
 		ID: id, Title: "Add " + id, Type: "task", Status: "open", Priority: priority, CreatedAt: created,
-		Description: specTestDescription, Acceptance: "- [ ] a\n- [ ] b\n- [ ] c",
+		Description: specTestDescription, Acceptance: specTestAcceptance,
 	}
 }
 
@@ -1222,9 +1226,10 @@ func TestSpecDispatchPoolRefusalIsASkip(t *testing.T) {
 
 // A content-overlap refusal is a deferral, not a failure: the guard refuses
 // work in flight, and an unstarted peer only while it is ahead of this bead in
-// dispatch order — here, an older bead on the same test — so the refusal clears
-// by itself once that peer is slung or closes. The bead is retried with no
-// label for an operator to remove (gt-q6zoo, gt-nlkba).
+// dispatch order and one the dispatcher would sling — here, an older bead on
+// the same test, with no hold of its own — so the refusal clears by itself once
+// that peer is slung or closes. The bead is retried with no label for an
+// operator to remove (gt-q6zoo, gt-nlkba, gt-00gee).
 func TestSpecDispatchOverlapRefusalDefersAndRetries(t *testing.T) {
 	t.Parallel()
 	overlap := sling.DecideDuplicates(

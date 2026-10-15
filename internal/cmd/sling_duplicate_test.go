@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
@@ -411,7 +412,7 @@ func TestCheckSlingDuplicatesSkipsBareBead(t *testing.T) {
 	pools := newDuplicatePools(func(string) ([]duplicateCandidate, error) {
 		fetched++
 		return nil, nil
-	})
+	}, noPeerHolds)
 
 	info := &beadInfo{
 		Title:       "Sling: a bead with bare prose",
@@ -436,7 +437,7 @@ func TestCheckSlingDuplicatesCheckErrorIsNotFatal(t *testing.T) {
 	t.Parallel()
 	pools := newDuplicatePools(func(string) ([]duplicateCandidate, error) {
 		return nil, os.ErrDeadlineExceeded
-	})
+	}, noPeerHolds)
 
 	info := &beadInfo{
 		Title:       "fix TestFoo in internal/cmd/sling.go",
@@ -465,7 +466,7 @@ func TestDuplicateIntraBatchDetection(t *testing.T) {
 	pools := newDuplicatePools(func(string) ([]duplicateCandidate, error) {
 		fetched++
 		return nil, nil
-	})
+	}, noPeerHolds)
 
 	beadsDir := t.TempDir()
 	// gt-3vr was filed first, so the ready board reaches it first; the guard
@@ -532,7 +533,7 @@ func TestCheckSlingDuplicatesSeesOverlapInPoolDesignNotes(t *testing.T) {
 		return fetchDuplicatePoolFrom(store, func(dir string, err error) {
 			t.Errorf("enrichment of %s failed: %v", dir, err)
 		}, beadsDir)
-	})
+	}, noPeerHolds)
 
 	// gt-pool1 is the older bead, so it comes first in dispatch order and its
 	// overlap refuses the candidate rather than the other way round.
@@ -588,7 +589,7 @@ func TestCheckSlingDuplicatesIgnoresDependencyChain(t *testing.T) {
 		return fetchDuplicatePoolFrom(db, func(dir string, err error) {
 			t.Errorf("enrichment of %s failed: %v", dir, err)
 		}, beadsDir)
-	})
+	}, noPeerHolds)
 
 	// The pool beads carry the lower priority number, so both come first in
 	// dispatch order and neither is let past on rank; the dependency chain is
@@ -737,6 +738,11 @@ func mustPool(t *testing.T, pools *duplicatePools, beadsDir string) []duplicateC
 	}
 	return pool
 }
+
+// noPeerHolds is the resolver for a pool whose test varies something other
+// than the peer-hold question: no peer is known to be held, so the guard's
+// rank decides alone, exactly as it did before the holds existed.
+func noPeerHolds(string, string, string) string { return "" }
 
 func assertStrings(t *testing.T, label string, got, want []string) {
 	t.Helper()
@@ -922,6 +928,217 @@ func TestOpenClusterDispatchesOneAtATime(t *testing.T) {
 	if got := unblocked(live); len(got) != 0 {
 		t.Fatalf("unblocked = %v, want none: an in_progress peer holds the opens", got)
 	}
+}
+
+// TestOpenClusterDispatchesPastAHeldHead is the gt-00gee acceptance bar, over
+// the case gt-nlkba's rule cannot reach: a cluster of three open beads naming
+// one test, whose head the dispatcher holds, dispatches its next eligible bead
+// instead of none.
+//
+// Ordering the refusals let exactly one bead of an all-open cluster through —
+// the head — so the cluster only progressed while the dispatcher could sling
+// that head. A head the dispatcher holds for a reason of its own is never slung
+// at all, and ranking it first refused the other two for as long as the hold
+// lasted. Here the head is a shape the lint refuses, which the dispatcher's
+// warn gate holds.
+func TestOpenClusterDispatchesPastAHeldHead(t *testing.T) {
+	t.Parallel()
+	townRoot := duplicateTown(t)
+	const shared = "TestDangerousGuard_Integration fails in internal/cmd/tap_guard_dangerous.go."
+	shaped := specTestDescription + "\n\n" + shared
+	// The head's shape is the gate's whole input: the lint refuses a bead with
+	// no Gate section.
+	unshaped := strings.Replace(specTestDescription, "## Gate\nmake gate", "", 1) + "\n\n" + shared
+
+	knobs := specHoldKnobs{
+		MaxPriority: 2,
+		ShapeGate:   specdispatch.ShapeGateWarn,
+		Template:    specdispatch.Template{Sections: specdispatch.DefaultSections, Source: "built-in"},
+	}
+
+	// cluster is the three beads in board order — one test, one file, oldest
+	// first. Only the head's shape varies between the two phases.
+	cluster := func(headDescription string) *beadsfake.Fake {
+		db := beadsfake.New()
+		db.Seed(
+			beads.Issue{ID: "gt-head", Title: "guard blocks a nested command", Type: "task", Status: "open",
+				Priority: 1, CreatedAt: "2026-10-15T09:00:00Z", Description: headDescription,
+				AcceptanceCriteria: specTestAcceptance},
+			beads.Issue{ID: "gt-mid", Title: "guard judges the argv after `gt slot run --`", Type: "task", Status: "open",
+				Priority: 1, CreatedAt: "2026-10-15T10:00:00Z", Description: shaped,
+				AcceptanceCriteria: specTestAcceptance},
+			beads.Issue{ID: "gt-tail", Title: "the guard's tests are flaky under load", Type: "task", Status: "open",
+				Priority: 1, CreatedAt: "2026-10-15T11:00:00Z", Description: shaped,
+				AcceptanceCriteria: specTestAcceptance},
+		)
+		return db
+	}
+
+	// dispatched runs one dispatcher pass over the cluster in board order: a
+	// bead the dispatcher holds is skipped before it can spend a seat, and a
+	// bead the overlap guard lets past is slung. The pool is the pass's own
+	// snapshot, so a bead slung mid-pass still reads as open in it — which is
+	// what the bead behind it compares against, exactly as the burst path does.
+	dispatched := func(db *beadsfake.Fake) []string {
+		pools := newDuplicatePools(
+			func(beadsDir string) ([]duplicateCandidate, error) {
+				return fetchDuplicatePoolFrom(db, func(dir string, err error) {
+					t.Errorf("enrichment of %s failed: %v", dir, err)
+				}, beadsDir)
+			},
+			func(_, _, beadID string) string { return specPeerHeldFrom(db, knobs, beadID) },
+		)
+		var slung []string
+		for _, id := range []string{"gt-head", "gt-mid", "gt-tail"} {
+			if specPeerHeldFrom(db, knobs, id) != "" {
+				continue
+			}
+			issue, err := db.Show(id)
+			if err != nil {
+				t.Fatalf("read %s: %v", id, err)
+			}
+			candidate, matches, err := pools.check(townRoot, id, beadInfoOf(issue))
+			if err != nil {
+				t.Fatalf("check %s: %v", id, err)
+			}
+			if candidate == nil {
+				t.Fatalf("%s names %s, so the guard has to inspect it", id, shared)
+			}
+			if decideSlingDuplicates(*candidate, matches).Blocked {
+				continue
+			}
+			slung = append(slung, id)
+		}
+		return slung
+	}
+
+	// The head is unshaped, so the dispatcher holds it and never slings it: the
+	// next bead goes, and the third is refused against work now ahead of it.
+	if got := dispatched(cluster(unshaped)); strings.Join(got, " ") != "gt-mid" {
+		t.Fatalf("dispatched %v, want [gt-mid]: a head the dispatcher holds must not wedge its cluster", got)
+	}
+
+	// The control is gt-nlkba's own rule: a head the dispatcher can sling is
+	// still the one bead of the cluster that goes.
+	if got := dispatched(cluster(shaped)); strings.Join(got, " ") != "gt-head" {
+		t.Fatalf("dispatched %v, want [gt-head]: a slingable head still holds the cluster", got)
+	}
+}
+
+// TestSpecPeerHeldFrom covers the rule the guard reads a peer's dispatchability
+// from: the questions the dispatcher asks a candidate before it spends a seat
+// (gt-00gee). "" means the dispatcher would sling the bead, so the guard must
+// count it; anything else is a hold, so the guard must not.
+func TestSpecPeerHeldFrom(t *testing.T) {
+	t.Parallel()
+	knobs := specHoldKnobs{
+		MaxPriority: 2,
+		ShapeGate:   specdispatch.ShapeGateWarn,
+		Template:    specdispatch.Template{Sections: specdispatch.DefaultSections, Source: "built-in"},
+	}
+	off := knobs
+	off.ShapeGate = specdispatch.ShapeGateOff
+	unshape := func(i *beads.Issue) {
+		i.Description = strings.Replace(i.Description, "## Gate\nmake gate", "", 1)
+	}
+
+	// peerDB seeds the peer gt-peer, mutated as the case asks, with a child for
+	// each entry of children.
+	peerDB := func(mutate func(*beads.Issue), children ...beads.Issue) *beadsfake.Fake {
+		db := beadsfake.New()
+		peer := beads.Issue{ID: "gt-peer", Title: "Fix TestFoo", Type: "task", Status: "open", Priority: 1,
+			Description: specTestDescription, AcceptanceCriteria: specTestAcceptance}
+		if mutate != nil {
+			mutate(&peer)
+		}
+		db.Seed(peer)
+		for _, child := range children {
+			db.Seed(child)
+			if err := db.AddTypedDependency(child.ID, peer.ID, "parent-child"); err != nil {
+				t.Fatalf("parent edge %s -> %s: %v", child.ID, peer.ID, err)
+			}
+		}
+		return db
+	}
+
+	cases := []struct {
+		name  string
+		db    *beadsfake.Fake
+		knobs specHoldKnobs
+		want  string
+	}{
+		{"a clean work bead is the dispatcher's", peerDB(nil), knobs, ""},
+		{"the failed label puts a bead out of the queue",
+			peerDB(func(i *beads.Issue) { i.Labels = []string{specdispatch.DispatchFailedLabel} }), knobs,
+			"label " + specdispatch.DispatchFailedLabel},
+		{"the shape gate holds a bead the lint refuses", peerDB(unshape), knobs,
+			"## Gate: section missing"},
+		{"a waived refusal dispatches anyway",
+			peerDB(func(i *beads.Issue) { unshape(i); i.Labels = []string{specdispatch.ShapeWaivedLabel} }), knobs, ""},
+		{"an off gate runs no lint", peerDB(unshape), off, ""},
+		{"an assigned bead is not the dispatcher's to take",
+			peerDB(func(i *beads.Issue) { i.Assignee = "gastown/polecats/x" }), knobs, "assigned to gastown/polecats/x"},
+		{"a bead past the ceiling is backlog", peerDB(func(i *beads.Issue) { i.Priority = 3 }), knobs,
+			"priority P3 outside the ceiling P2"},
+		{"a type the dispatcher never takes", peerDB(func(i *beads.Issue) { i.Type = "chore" }), knobs, "type chore"},
+		{"a container waits for its open child", peerDB(nil, beads.Issue{ID: "gt-child", Status: "open"}), knobs,
+			"container: open child gt-child"},
+		{"a container whose children closed is a candidate again",
+			peerDB(nil, beads.Issue{ID: "gt-child", Status: "closed"}), knobs, ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := specPeerHeldFrom(tc.db, tc.knobs, "gt-peer"); got != tc.want {
+				t.Errorf("specPeerHeldFrom = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	// A bead the rule cannot read answers "", the conservative half: the guard
+	// keeps refusing, which costs a delayed dispatch and never a second seat.
+	if got := specPeerHeldFrom(beadsfake.New(), knobs, "gt-missing"); got != "" {
+		t.Errorf("an unreadable bead = %q, want %q", got, "")
+	}
+}
+
+// TestSpecHoldKnobsFromReadsTheTown pins the wiring behind the peer-hold rule:
+// the knobs are the dispatcher's own keys, read from the town's settings
+// (polecat_pool.max_priority, polecat_pool.shape_gate), and an off gate loads
+// no template at all.
+func TestSpecHoldKnobsFromReadsTheTown(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a town that set nothing gets the dispatcher's defaults", func(t *testing.T) {
+		t.Parallel()
+		knobs, ok := specHoldKnobsFrom(duplicateTown(t))
+		if !ok {
+			t.Fatal("a town with no settings file still answers the knobs")
+		}
+		if knobs.MaxPriority != config.DefaultSeatRefillMaxPriority || knobs.ShapeGate != config.DefaultSeatRefillShapeGate {
+			t.Errorf("knobs = %+v, want the ceiling and gate the ticker defaults to", knobs)
+		}
+		if len(knobs.Template.Sections) == 0 {
+			t.Errorf("knobs = %+v, want the template the shape gate lints against", knobs)
+		}
+	})
+
+	t.Run("the town's own ceiling and gate win", func(t *testing.T) {
+		t.Parallel()
+		townRoot := duplicateTown(t)
+		writeModelsSettings(t, townRoot, `{"polecat_pool":{"max_priority":1,"shape_gate":"off"}}`)
+		knobs, ok := specHoldKnobsFrom(townRoot)
+		if !ok {
+			t.Fatal("a readable settings file answers the knobs")
+		}
+		if knobs.MaxPriority != 1 || knobs.ShapeGate != specdispatch.ShapeGateOff {
+			t.Errorf("knobs = %+v, want the town's ceiling and gate", knobs)
+		}
+		if len(knobs.Template.Sections) != 0 {
+			t.Errorf("an off gate has no verdict to reach, so it needs no template: %+v", knobs.Template)
+		}
+	})
 }
 
 // TestPrecedesIsTheReadyBoardOrder pins the guard's ranking to the dispatcher's
