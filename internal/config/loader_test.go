@@ -2381,6 +2381,36 @@ func TestDaemonPatrolConfigValidation(t *testing.T) {
 	}
 }
 
+func TestLoadDaemonPatrolConfigBadScheduledStopAfterKeepsConfig(t *testing.T) {
+	t.Parallel()
+	for _, bad := range []string{"90min", "1h30", "-5m"} {
+		t.Run(bad, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "daemon.json")
+			raw := `{"type":"daemon-patrol-config","version":1,"patrols":{` +
+				`"overrun_guard":{"enabled":true,"scheduled_stop_after":"` + bad + `"},` +
+				`"checkpoint_dog":{"enabled":true,"interval":"7m"}}}`
+			if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			cfg, err := LoadDaemonPatrolConfig(path)
+			if err != nil {
+				t.Fatalf("LoadDaemonPatrolConfig: %v", err)
+			}
+			og := cfg.Patrols.OverrunGuard
+			if og == nil || !og.Enabled {
+				t.Fatalf("overrun_guard = %+v, want enabled", og)
+			}
+			if og.ScheduledStopAfter != "" {
+				t.Errorf("ScheduledStopAfter = %q, want cleared so the default applies", og.ScheduledStopAfter)
+			}
+			if cd := cfg.Patrols.CheckpointDog; cd == nil || !cd.Enabled || cd.IntervalStr != "7m" {
+				t.Errorf("checkpoint_dog = %+v, want enabled with interval 7m", cd)
+			}
+		})
+	}
+}
+
 func TestLoadDaemonPatrolConfigNotFound(t *testing.T) {
 	t.Parallel()
 	_, err := LoadDaemonPatrolConfig("/nonexistent/path.json")
