@@ -1199,6 +1199,10 @@ func TestHeredocBodyStaysOpaque(t *testing.T) {
 		{"force-push phrase in heredoc body", "cat > note.md <<'EOF'\ngit push --force origin main\nEOF"},
 		{"unquoted delimiter", "cat > note.md <<EOF\ndrop table users\nEOF"},
 		{"strip-tabs delimiter form", "cat > note.md <<-'EOF'\n\tsudo rm -rf /\n\tEOF"},
+		// The apostrophe is comment text, not a quote the shell opened, so
+		// the operator below is still a real one and its body still data
+		// (gt-79opc).
+		{"apostrophe in a comment above the operator", "# don't touch the host\ncat > note.md <<'EOF'\nsudo rm -rf /tmp\nEOF"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1366,6 +1370,19 @@ func TestDangerousGuard_Integration(t *testing.T) {
 		{"env-prefixed rm -rf / under gt slot run", "gt slot run -- FOO=1 rm -rf /", true},
 		{"bash -c under gt slot run", "gt slot run -- bash -c 'git reset --hard'", true},
 		{"gt slot run after another command", "cd x && gt slot run -- git push --force origin x", true},
+
+		// Blocked — a "<<" the shell never takes as a redirection leaves the
+		// lines after it live, so nothing there may be stripped (gt-79opc).
+		// Each of these evaluates to allowed before the fix: the operator
+		// has no terminator line, so the body it was read as swallowed the
+		// rest of the command.
+		{"git push --force after a quoted <<EOF", "git commit -m \"explain <<EOF handling\"\ngit push --force origin x", true},
+		{"git reset --hard after a <<< here-string", "cat <<< hello\ngit reset --hard origin/main", true},
+		{"sudo after a quoted <<EOF", "git commit -m \"say <<EOF here\"\nsudo rm -rf /etc", true},
+
+		// Allowed — the same shape with a terminator still reads as data
+		{"terminated heredoc body stays data", "cat <<EOF\ndrop table users\nEOF", false},
+		{"terminated quoted-tag heredoc body stays data", "git commit -m \"explain <<EOF\"\ncat <<EOF\ndrop table users\nEOF", false},
 
 		// Allowed
 		{"rm -rf ./build/", "rm -rf ./build/", false},
