@@ -253,8 +253,10 @@ The bead comes from `--bead`, else from a branch name carrying a routed bead id;
 
 **Re-queueing a rejected landing (gt-3e1z4).** A landing the worker refuses labels the
 bead `rework` (removing `gt:ready-to-land`) and appends a `MERGE REJECTION` note naming
-the head it refused. When the polecat's branch still sits on that head the rejection
-came from something other than the diff, and nothing needs to change.
+the head it refused. A bead the human-only label holds keeps its assignee: its branch
+comes from a person, so the refusal goes back to the crew that submitted it rather than
+onto the board (gt-me800). When the polecat's branch still sits on that head the
+rejection came from something other than the diff, and nothing needs to change.
 `gt land requeue <bead> --reason "<why>"` removes `rework`, restores `gt:ready-to-land`
 and records the operator, the reason and the head as a bead comment, so the worker gates
 and merges the same head again. It refuses when the head changed (a normal `gt done`

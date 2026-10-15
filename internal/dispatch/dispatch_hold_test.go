@@ -33,6 +33,13 @@ func TestDispatchHoldFields_Verdicts(t *testing.T) {
 			want:  "label needs-split",
 		},
 		{
+			// A bead only a person can land: the crew holds it, and a polecat
+			// slung onto it can only waste a seat (gt-me800).
+			name:  "human-only label",
+			issue: beads.Issue{Status: "open", Labels: []string{HumanOnlyLabel}},
+			want:  "label human-only",
+		},
+		{
 			name:  "label, however typed",
 			issue: beads.Issue{Status: "open", Labels: []string{"NEEDS-PRO"}},
 			want:  "label NEEDS-PRO",
@@ -148,6 +155,13 @@ func TestSlingHoldFields_Verdicts(t *testing.T) {
 			name:  "routing label alongside a human hold",
 			issue: beads.Issue{Status: "open", Labels: []string{"needs-pro", "Needs-Human"}},
 			want:  "label Needs-Human",
+		},
+		{
+			// A manual sling onto a human-only bead is refused here, which is
+			// the read a `gt sling` without --force answers to (gt-me800).
+			name:  "human-only label",
+			issue: beads.Issue{Status: "open", Labels: []string{"Human-Only"}},
+			want:  "label Human-Only",
 		},
 		{
 			// A pinned or hooked bead is re-slingable, with --force and without

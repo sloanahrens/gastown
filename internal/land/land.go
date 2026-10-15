@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/checkpoint"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/git"
 )
@@ -1720,17 +1721,26 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 		other = LabelRework
 	}
 	remove := []string{LabelReadyToLand, other}
-	open, unassigned := string(beads.StatusOpen), ""
-	if err := l.Beads.Update(w.BeadID, beads.UpdateOptions{
+	open := string(beads.StatusOpen)
+	update := beads.UpdateOptions{
 		Status:       &open,
-		Assignee:     &unassigned,
 		AddLabels:    []string{label},
 		RemoveLabels: remove,
 		// The author's claim is over: gt done handed the work to the landing
-		// worker, and a rejection hands it back to dispatch. The re-read
-		// above established nobody else took it since.
+		// worker. The re-read above established nobody else took it since, so
+		// the write may reopen the bead whatever its assignee says.
 		Force: true,
-	}); err != nil {
+	}
+	// A human-only bead goes back to the holder that submitted it, not to
+	// dispatch: only a person can produce its branch, and an unassigned one is
+	// a bead the next tick slings onto a seat that cannot land it (gt-me800).
+	// The crew that holds it reads the rejection and asks the human for a new
+	// branch.
+	if !beads.HasLabel(now, dispatch.HumanOnlyLabel) {
+		unassigned := ""
+		update.Assignee = &unassigned
+	}
+	if err := l.Beads.Update(w.BeadID, update); err != nil {
 		rej.RecordErr = fmt.Errorf("reopening the bead: %w", err)
 	}
 	return rej

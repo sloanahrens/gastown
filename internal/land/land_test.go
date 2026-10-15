@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/checkpoint"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
 )
@@ -270,6 +271,35 @@ func (f *landFixture) assertRejected(t *testing.T, err error, kind RejectionKind
 		t.Errorf("rejection note:\n%s", b.Notes)
 	}
 	return rej
+}
+
+// TestRejectKeepsTheHolderOfAHumanOnlyBead: the branch of a human-only bead
+// comes from a person, so the crew that asked for it is the only holder that
+// can act on the refusal. Clearing the assignee instead is what put one back on
+// the dispatcher's board, and from there onto a polecat seat that cannot land
+// it (gt-me800). Everything else about the rejection is unchanged.
+func TestRejectKeepsTheHolderOfAHumanOnlyBead(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	const crew = "fractals/crew/ops"
+	f.bd.Seed(beads.Issue{ID: "gt-abc", Title: "land the release workflows", Status: "hooked", Type: "task",
+		Assignee: crew, Labels: []string{LabelReadyToLand, dispatch.HumanOnlyLabel}, Notes: FormatReadyNote(f.work)})
+	f.gate.fn = func(string) GateResult {
+		return GateResult{Passed: false, Steps: []StepResult{{Name: "test", ExitCode: 1}}}
+	}
+
+	_, err := f.lander().Land(context.Background(), f.work)
+	var rej *Rejection
+	if !errors.As(err, &rej) || rej.Kind != RejectGate || rej.RecordErr != nil {
+		t.Fatalf("Land = %T %v, want a recorded gate rejection", err, err)
+	}
+	b := f.bead()
+	if b.Status != "open" || b.Assignee != crew || beads.HasLabel(b, LabelReadyToLand) || !beads.HasLabel(b, LabelRework) {
+		t.Errorf("bead after rejection: status=%s assignee=%q labels=%v", b.Status, b.Assignee, b.Labels)
+	}
+	if CountRejections(b.Notes) != 1 {
+		t.Errorf("rejection not recorded once:\n%s", b.Notes)
+	}
 }
 
 // TestLandReusesOneWorktreePath is gt-2ycne.2: Go's build cache keys include

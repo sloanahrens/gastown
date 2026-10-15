@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/specdispatch"
@@ -1803,6 +1804,43 @@ func TestSpecCandidatesSkipsCrewOnlyLabel(t *testing.T) {
 	}
 	if !strings.Contains(e.Line, specdispatch.CrewOnlyLabel) {
 		t.Errorf("skip line %q does not name %s", e.Line, specdispatch.CrewOnlyLabel)
+	}
+}
+
+// A ready, shaped human-only bead is skipped the same way, and so is one that
+// also wears rework: only a person can produce the branch of such a bead, so a
+// seat on it is a session that cannot land its work whoever holds it (gt-me800).
+// Both refusals name the label, and the unlabelled twin still dispatches.
+func TestSpecCandidatesSkipsHumanOnlyLabel(t *testing.T) {
+	t.Parallel()
+	townRoot := specTown(t)
+	fakeBoard := func(string) ([]*beads.Issue, error) {
+		return []*beads.Issue{
+			{ID: "gt-human", Type: "bug", Status: "open", Priority: 2, Labels: []string{dispatch.HumanOnlyLabel}},
+			{ID: "gt-human-rework", Type: "bug", Status: "open", Priority: 2,
+				Labels: []string{dispatch.HumanOnlyLabel, land.LabelRework}},
+			{ID: "gt-open", Type: "bug", Status: "open", Priority: 2},
+		}, nil
+	}
+
+	got := specCandidates(townRoot, 2, fakeBoard, nil)
+	if len(got.Errors) != 0 {
+		t.Fatalf("errors = %v", got.Errors)
+	}
+	var ids []string
+	for _, c := range got.Candidates {
+		ids = append(ids, c.Spec.ID)
+	}
+	if joined := strings.Join(ids, " "); joined != "gt-open" {
+		t.Errorf("candidates = %q, want the unlabelled twin alone", joined)
+	}
+	if len(got.Skipped) != 2 {
+		t.Fatalf("skipped = %+v, want both human-only refusals", got.Skipped)
+	}
+	for _, e := range got.Skipped {
+		if e.Rig != "gastown" || !strings.Contains(e.Line, dispatch.HumanOnlyLabel) {
+			t.Errorf("skip entry = %+v, want a gastown line naming %s", e, dispatch.HumanOnlyLabel)
+		}
 	}
 }
 

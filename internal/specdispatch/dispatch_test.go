@@ -50,6 +50,17 @@ func TestEligible(t *testing.T) {
 		// so the refusal names the label even for a P3.
 		{func(s *Spec) { s.Labels = append(s.Labels, CrewOnlyLabel) }, nil, false, "label crew-only"},
 		{func(s *Spec) { s.Labels = append(s.Labels, "Crew-Only"); s.Priority = 3 }, nil, false, "label crew-only"},
+		// crew-only's sibling, and the label a landing rejection leaves in
+		// place: the bead's branch comes from a person, so the bead is not a
+		// seat's to take (gt-me800). rework beside it does not readmit the
+		// bead — that label alone is ordinary work back to a polecat, while
+		// this one is a hold the dispatcher names even for a P3 (the crew-only
+		// cases above).
+		{func(s *Spec) { s.Labels = append(s.Labels, dispatch.HumanOnlyLabel) }, nil, false, "label human-only"},
+		{func(s *Spec) {
+			s.Labels = append(s.Labels, "Human-Only", "rework")
+			s.Priority = 3
+		}, nil, false, "label human-only"},
 		// The reviewer label was retired with the role (gt-rwp7z.11): a bead
 		// still carrying it is held by nothing, so it dispatches as ordinary
 		// ready work.
@@ -109,6 +120,7 @@ func TestEligibleFollowsTheSharedHoldRule(t *testing.T) {
 	}{
 		{"gt:needs-human label", func(s *Spec) { s.Labels = []string{"gt:needs-human"} }},
 		{"bare needs-human label", func(s *Spec) { s.Labels = []string{"needs-human"} }},
+		{"human-only label", func(s *Spec) { s.Labels = []string{dispatch.HumanOnlyLabel} }},
 		{"operator label", func(s *Spec) { s.Labels = []string{"operator"} }},
 		{"pinned status", func(s *Spec) { s.Status = "pinned" }},
 		{"design ruling", func(s *Spec) { s.Design = "do not redispatch: park it." }},
@@ -142,8 +154,10 @@ func TestExcludedLabelsSplitIntoFilteredAndCarried(t *testing.T) {
 			t.Errorf("%s: board-carried %v, ready-query filtered %v; want exactly one", l, inCarried, inReady)
 		}
 	}
-	if !hasLabel(carried, CrewOnlyLabel) {
-		t.Errorf("carried = %v, want %s: the tick has to name the refusal", carried, CrewOnlyLabel)
+	for _, want := range []string{CrewOnlyLabel, dispatch.HumanOnlyLabel} {
+		if !hasLabel(carried, want) {
+			t.Errorf("carried = %v, want %s: the tick has to name the refusal", carried, want)
+		}
 	}
 	if len(carried)+len(ready) != len(ExcludedLabels()) {
 		t.Errorf("carried %v + ready %v do not make up ExcludedLabels %v", carried, ready, ExcludedLabels())
@@ -163,6 +177,8 @@ func TestBoardCarriedFollowsTheLabels(t *testing.T) {
 		{[]string{"review-deep"}, false},
 		{[]string{CrewOnlyLabel}, true},
 		{[]string{"Crew-Only"}, true},
+		{[]string{dispatch.HumanOnlyLabel}, true},
+		{[]string{"Human-Only"}, true},
 		{[]string{"needs-human", CrewOnlyLabel}, true},
 		{[]string{DispatchFailedLabel}, true},
 	} {
