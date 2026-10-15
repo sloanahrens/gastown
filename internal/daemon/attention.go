@@ -245,6 +245,13 @@ type attentionSources struct {
 	// reworkNotes is the rejection-count cache, carried across ticks by the
 	// daemon.
 	reworkNotes map[string]reworkNote
+
+	// host is the probes the host collectors read (attention_host.go).
+	host hostProbes
+	// prev is the state the tick reconciles against, set by attentionTick. A
+	// host collector whose probe failed keeps its rules' previous items from
+	// it, so an unanswered probe does not clear a real alarm.
+	prev attention.State
 }
 
 // writeAttention is the heartbeat step after townhealth (gt-vsct7.2): it runs
@@ -309,6 +316,7 @@ func (d *Daemon) writeAttention() {
 // (gt-2y4b7). An append that fails therefore hands back prev, and the next
 // tick re-derives the same transitions rather than losing them.
 func (d *Daemon) attentionTick(ctx context.Context, src *attentionSources, prev attention.State, acks attention.Acks, now time.Time) attention.State {
+	src.prev = prev
 	observed := collectAttention(ctx, prev, src.collectors(), d.logger.Printf)
 	res := attention.Reconcile(prev, observed, acks, now)
 	if err := attention.AppendEvents(d.config.TownRoot, res.Events); err != nil {
@@ -398,6 +406,9 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindTierSweepRed, collect: s.collectTierSweepRed},
 		{kind: attention.KindOverrunStopped, collect: s.collectOverrunStopped},
 		{kind: attention.KindScheduledGate, collect: s.collectScheduledGate},
+		{kind: attention.KindHostDisk, collect: s.collectHostDisk},
+		{kind: attention.KindHostMem, collect: s.collectHostMem},
+		{kind: attention.KindHostDocker, collect: s.collectHostDocker},
 	}
 }
 
@@ -410,6 +421,10 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 		now:         now,
 		report:      d.lastTownHealth,
 		reworkNotes: map[string]reworkNote{},
+		host:        d.hostProbes,
+	}
+	if s.host == nil {
+		s.host = systemHostProbes{townRoot: d.config.TownRoot}
 	}
 	s.landingRigs = d.attentionLandingRigs
 	s.redMain = func(ctx context.Context, rig string) ([]*beads.Issue, error) {

@@ -1,0 +1,241 @@
+package daemon
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os/exec"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/util"
+)
+
+// The host collectors' thresholds (gt-oxr3p), the ones the operator's
+// docker-watch.sh and health-watch.sh used before the daemon took the watching.
+// Compiled in like the queue's others.
+const (
+	attentionDiskWarnUsedPct = 80.0
+	attentionDiskWarnFreeGB  = 12.0
+	attentionDiskCritUsedPct = 90.0
+	attentionDiskCritFreeGB  = 5.0
+	// attentionMemLowFreePct is the free-memory percentage below which the host
+	// is short of memory.
+	attentionMemLowFreePct = 15.0
+	// attentionHostProbeTimeout bounds one external host probe, so a wedged
+	// docker daemon costs one tick's probe and not the whole tick.
+	attentionHostProbeTimeout = 20 * time.Second
+)
+
+// The host rules' stable ids. They are the item keys, so an ack and a reader
+// find a rule by the same name.
+const (
+	hostRuleDiskWarn   = "host.disk_warn"
+	hostRuleDiskCrit   = "host.disk_crit"
+	hostRuleMemLow     = "host.mem_low"
+	hostRuleDockerDown = "host.docker_stack_down"
+	// hostProbeFailedPrefix keys the item a failed probe raises; the probe's
+	// name follows.
+	hostProbeFailedPrefix = "host.probe_failed:"
+)
+
+// hostStackContainers are the containers that must be running: the Forgejo
+// stack the landing pipeline depends on and the history-man database.
+var hostStackContainers = []string{
+	"forgejo-forgejo-1",
+	"forgejo-db-1",
+	"forgejo-runner-daemon-1",
+	"forgejo-docker-in-docker-1",
+	"hm-postgres",
+}
+
+// The names a failed probe is reported under, as the operator would type the
+// command.
+const (
+	hostProbeDisk   = "disk usage"
+	hostProbeMem    = "memory_pressure"
+	hostProbeDocker = "docker ps"
+)
+
+// hostDisk is one volume's usage as the rules read it.
+type hostDisk struct {
+	UsedPct float64
+	FreeGB  float64
+}
+
+// hostProbes are the host reads the collectors make. Production is
+// systemHostProbes; tests inject fakes.
+type hostProbes interface {
+	// Disk is the usage of the volume holding the town root.
+	Disk() (hostDisk, error)
+	// MemFreePct is the host's free memory as a percentage of total.
+	MemFreePct(ctx context.Context) (float64, error)
+	// Containers are the names of the running Docker containers.
+	Containers(ctx context.Context) ([]string, error)
+}
+
+// systemHostProbes reads the machine the daemon runs on.
+type systemHostProbes struct {
+	townRoot string
+}
+
+func (p systemHostProbes) Disk() (hostDisk, error) {
+	info, err := util.GetDiskSpace(p.townRoot)
+	if err != nil {
+		return hostDisk{}, err
+	}
+	return hostDisk{UsedPct: info.UsedPercent, FreeGB: info.AvailableGB()}, nil
+}
+
+func (systemHostProbes) MemFreePct(ctx context.Context) (float64, error) {
+	ctx, cancel := context.WithTimeout(ctx, attentionHostProbeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "memory_pressure").Output()
+	if err != nil {
+		return 0, err
+	}
+	return parseMemoryPressure(string(out))
+}
+
+func (systemHostProbes) Containers(ctx context.Context) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, attentionHostProbeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "docker", "ps", "--format", "{{.Names}}").Output()
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+			return nil, fmt.Errorf("%w: %s", err, ee.Stderr)
+		}
+		return nil, err
+	}
+	return parseContainerNames(string(out)), nil
+}
+
+// memFreeLine is the line of memory_pressure's output that carries the figure.
+var memFreeLine = regexp.MustCompile(`System-wide memory free percentage:\s*([0-9.]+)%`)
+
+// parseMemoryPressure reads the free-memory percentage from memory_pressure's
+// output. An output without the line is an error, never zero: a zero would read
+// as a host out of memory.
+func parseMemoryPressure(out string) (float64, error) {
+	m := memFreeLine.FindStringSubmatch(out)
+	if m == nil {
+		return 0, fmt.Errorf("no %q line in output", "System-wide memory free percentage")
+	}
+	return strconv.ParseFloat(m[1], 64)
+}
+
+// parseContainerNames splits docker ps --format {{.Names}} output into names.
+func parseContainerNames(out string) []string {
+	var names []string
+	for _, line := range strings.Split(out, "\n") {
+		if n := strings.TrimSpace(line); n != "" {
+			names = append(names, n)
+		}
+	}
+	return names
+}
+
+// collectHostDisk raises host.disk_crit or host.disk_warn, whichever the town
+// root's volume is at (never both): >=90% used or <5 GB free is critical,
+// >=80% or <12 GB is a warning. The directory sizes that say what filled the
+// disk are not computed here, because walking the town is too slow for a
+// heartbeat; the summary points at the runbook for that.
+func (s *attentionSources) collectHostDisk(ctx context.Context) ([]attention.Item, error) {
+	d, err := s.host.Disk()
+	if err != nil {
+		return s.hostProbeFailed(hostProbeDisk, err, attention.KindHostDisk), nil
+	}
+	rule, sev := "", attention.SeverityLow
+	switch {
+	case d.UsedPct >= attentionDiskCritUsedPct || d.FreeGB < attentionDiskCritFreeGB:
+		rule, sev = hostRuleDiskCrit, attention.SeverityHigh
+	case d.UsedPct >= attentionDiskWarnUsedPct || d.FreeGB < attentionDiskWarnFreeGB:
+		rule = hostRuleDiskWarn
+	default:
+		return nil, nil
+	}
+	return []attention.Item{{
+		Key:      rule,
+		Kind:     attention.KindHostDisk,
+		Severity: sev,
+		Summary:  fmt.Sprintf("disk %.0f%% used, %.1f GB free; see docker-watch runbook", d.UsedPct, d.FreeGB),
+	}}, nil
+}
+
+// collectHostMem raises host.mem_low when less than 15% of the host's memory
+// is free.
+func (s *attentionSources) collectHostMem(ctx context.Context) ([]attention.Item, error) {
+	free, err := s.host.MemFreePct(ctx)
+	if err != nil {
+		return s.hostProbeFailed(hostProbeMem, err, attention.KindHostMem), nil
+	}
+	if free >= attentionMemLowFreePct {
+		return nil, nil
+	}
+	return []attention.Item{{
+		Key:      hostRuleMemLow,
+		Kind:     attention.KindHostMem,
+		Severity: attention.SeverityLow,
+		Summary:  fmt.Sprintf("memory %.0f%% free", free),
+	}}, nil
+}
+
+// collectHostDocker raises host.docker_stack_down when any container of
+// hostStackContainers is not among the running ones, naming the missing.
+func (s *attentionSources) collectHostDocker(ctx context.Context) ([]attention.Item, error) {
+	running, err := s.host.Containers(ctx)
+	if err != nil {
+		return s.hostProbeFailed(hostProbeDocker, err, attention.KindHostDocker), nil
+	}
+	up := make(map[string]bool, len(running))
+	for _, n := range running {
+		up[n] = true
+	}
+	var missing []string
+	for _, n := range hostStackContainers {
+		if !up[n] {
+			missing = append(missing, n)
+		}
+	}
+	if len(missing) == 0 {
+		return nil, nil
+	}
+	return []attention.Item{{
+		Key:      hostRuleDockerDown,
+		Kind:     attention.KindHostDocker,
+		Severity: attention.SeverityHigh,
+		Summary:  fmt.Sprintf("%d of %d stack containers not running: %s", len(missing), len(hostStackContainers), strings.Join(missing, ", ")),
+	}}, nil
+}
+
+// hostProbeFailed is what a collector returns when its probe failed: one
+// info-level item naming the probe, and the previous tick's items of the
+// collector's own kind. The probe's rule could not be judged, so it keeps
+// whatever it last held rather than clearing a real alarm (townhealth's
+// UNKNOWN rule). The other probes are other collectors and are unaffected.
+func (s *attentionSources) hostProbeFailed(probe string, err error, kind attention.Kind) []attention.Item {
+	out := prevOfKind(s.prev, kind)
+	return append(out, attention.Item{
+		Key:      hostProbeFailedPrefix + probe,
+		Kind:     attention.KindHostProbe,
+		Severity: attention.SeverityLow,
+		Summary:  fmt.Sprintf("host probe %s failed: %s", probe, oneLine(err.Error())),
+	})
+}
+
+// oneLine collapses s to its first line, capped, for a queue row.
+func oneLine(s string) string {
+	const max = 160
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > max {
+		s = s[:max] + "..."
+	}
+	return s
+}
