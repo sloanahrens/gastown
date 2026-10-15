@@ -184,6 +184,30 @@ func (w *WorkSurvival) ForIssue(issueID string) (string, error) {
 	return "", unknown
 }
 
+// LocalBranchHoldsUnpushedWork reports whether the local polecat branch has a
+// commit whose patch is on no base branch and not on the branch's pushed origin
+// copy, so deleting the local ref would destroy the only copy of that work. A
+// branch that is merged, empty, or fully pushed holds none. A non-nil error
+// means the answer is unknown (origin unreachable, a base missing, a compare
+// failed); callers that delete must treat that as "holds work".
+func (w *WorkSurvival) LocalBranchHoldsUnpushedWork(branch string) (bool, error) {
+	bases, err := w.baseRefs()
+	if err != nil {
+		return false, err
+	}
+	w.listOrigin()
+	if w.originErr != nil {
+		return false, fmt.Errorf("listing origin polecat branches: %w", w.originErr)
+	}
+	if _, pushed := w.originHash[branch]; pushed {
+		if err := w.ensureOriginRef(branch); err != nil {
+			return false, err
+		}
+		bases = append(append([]string(nil), bases...), "refs/remotes/origin/"+branch)
+	}
+	return w.unmergedOnAllBases(bases, "refs/heads/"+branch)
+}
+
 // unmergedOnAllBases reports whether ref has a commit whose patch is on none of
 // bases: the intersection of the '+' sets of `git cherry <base> <ref>`.
 func (w *WorkSurvival) unmergedOnAllBases(bases []string, ref string) (bool, error) {

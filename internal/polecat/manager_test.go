@@ -2770,3 +2770,83 @@ func TestRemoveKeepsTheIntentRecordWhenTheRemovalIsRefused(t *testing.T) {
 		t.Fatalf("refused removal deleted the intent record: %v", err)
 	}
 }
+
+// gc must not delete the only copy of work: unassignWorkBeads keeps a bead
+// hooked for a local polecat/* ref with unmerged commits, so a gc that then
+// deleted that ref would leave the bead pointing at a missing branch (gt-429ue).
+func TestCleanupStaleBranches_KeepsBranchWithUnpushedCommits(t *testing.T) {
+	t.Parallel()
+	const (
+		unpushed = "polecat/x/gt-1+abc"
+		merged   = "polecat/y/gt-2+def"
+		pushed   = "polecat/z/gt-3+ghi"
+	)
+
+	f := newSurvivalFixture(t)
+	f.branchWithWork(t, unpushed, "unpushed.txt")
+	f.do(t, f.g().Push(f.bare, unpushed+":refs/heads/"+unpushed, false))
+	f.branchAt(t, merged)
+	f.do(t, f.g().Push(f.bare, merged+":refs/heads/"+merged, false))
+	// Work that is on origin too: the local ref is only a second copy.
+	f.branchWithWork(t, pushed, "pushed.txt")
+	f.push(t, pushed)
+	f.do(t, f.g().Push(f.bare, pushed+":refs/heads/"+pushed, false))
+
+	mgr := newTestManager(&rig.Rig{Name: "gastown", Path: f.rigRoot}, f.w, nil, nil)
+
+	plan, err := mgr.PlanStaleBranches()
+	if err != nil {
+		t.Fatalf("PlanStaleBranches: %v", err)
+	}
+	if len(plan.Preserved) != 1 || plan.Preserved[0].Name != unpushed {
+		t.Fatalf("plan.Preserved = %+v, want only %s", plan.Preserved, unpushed)
+	}
+	if got := append([]string(nil), plan.Delete...); len(got) != 2 {
+		t.Fatalf("plan.Delete = %v, want %s and %s", got, merged, pushed)
+	}
+
+	deleted, err := mgr.CleanupStaleBranches()
+	if err != nil {
+		t.Fatalf("CleanupStaleBranches: %v", err)
+	}
+	if deleted != 2 {
+		t.Errorf("deleted = %d, want 2 (the merged and the pushed branch)", deleted)
+	}
+
+	left, err := f.w.repo(f.bare).ListBranches("polecat/*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 1 || left[0] != unpushed {
+		t.Errorf("branches after gc = %v, want only %s", left, unpushed)
+	}
+}
+
+// When the comparison cannot be made (origin unreachable), gc keeps the branch:
+// an unknown answer must not read as "nothing to lose".
+func TestCleanupStaleBranches_KeepsBranchWhenOriginIsUnreachable(t *testing.T) {
+	t.Parallel()
+	const branch = "polecat/x/gt-1+abc"
+
+	f := newSurvivalFixture(t)
+	f.branchAt(t, branch)
+	f.do(t, f.g().Push(f.bare, branch+":refs/heads/"+branch, false))
+	// Point the rig repo's origin at a repo that does not exist.
+	f.w.AddRemote(t, f.bare, "origin", filepath.Join(f.tmp, "missing.git"))
+
+	mgr := newTestManager(&rig.Rig{Name: "gastown", Path: f.rigRoot}, f.w, nil, nil)
+	deleted, err := mgr.CleanupStaleBranches()
+	if err != nil {
+		t.Fatalf("CleanupStaleBranches: %v", err)
+	}
+	if deleted != 0 {
+		t.Errorf("deleted = %d, want 0", deleted)
+	}
+	left, err := f.w.repo(f.bare).ListBranches("polecat/*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 1 {
+		t.Errorf("branches after gc = %v, want %s kept", left, branch)
+	}
+}
