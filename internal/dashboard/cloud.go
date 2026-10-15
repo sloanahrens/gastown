@@ -160,6 +160,10 @@ type Cloud struct {
 	// on the same poll as the report. It is nil when the reader has no checks
 	// reader wired, or when the plugin has written no status at all.
 	Checks *CloudChecks `json:"checks,omitempty"`
+	// Apps is the app power line: each app's on or off state and the release
+	// bot's latest ledger line. It is nil when the reader has no apps reader
+	// wired, or when neither of the apps reader's directories is there.
+	Apps *AppPower `json:"apps,omitempty"`
 }
 
 // CloudReader reads one reports directory.
@@ -168,6 +172,9 @@ type CloudReader struct {
 	// checks reads the cloud-check plugin's status, when one is wired (see
 	// WithChecks). Nil leaves Cloud.Checks nil.
 	checks *CloudChecksReader
+	// apps reads the app power line, when one is wired (see WithApps). Nil
+	// leaves Cloud.Apps nil.
+	apps *AppPowerReader
 }
 
 // NewCloudReader returns a reader of the patrol's reports in dir. The command
@@ -183,18 +190,29 @@ func (r *CloudReader) WithChecks(c *CloudChecksReader) *CloudReader {
 	return r
 }
 
+// WithApps attaches the app power reader, so Read fills the pane's app power
+// line from the same poll as the patrol's report. A reader with none leaves the
+// line absent.
+func (r *CloudReader) WithApps(a *AppPowerReader) *CloudReader {
+	r.apps = a
+	return r
+}
+
 // Read returns the patrol's latest report as it stands at now, with the
-// cloud-check status the reader was given.
+// cloud-check status and the app power line the reader was given.
 func (r *CloudReader) Read(now time.Time) *Cloud {
 	c := r.read(now)
 	if r.checks != nil {
 		c.Checks = r.checks.Read(now)
 	}
+	if r.apps != nil {
+		c.Apps = r.apps.Read(now)
+	}
 	return c
 }
 
-// read returns the patrol's latest report alone, leaving the checks line to
-// Read so no path out of it forgets to fill it.
+// read returns the patrol's latest report alone, leaving the checks and app
+// power lines to Read so no path out of it forgets to fill them.
 func (r *CloudReader) read(now time.Time) *Cloud {
 	c := &Cloud{At: now, Projects: []string{}, Findings: []CloudFinding{}}
 	if fi, err := os.Stat(r.dir); err != nil || !fi.IsDir() {
