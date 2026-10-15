@@ -779,11 +779,20 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	// rollback below runs it, so a sling that fails after the clear leaves the
 	// holder it took the bead from as it was (gt-u0zq0). Nil until a clear runs.
 	var restoreOutgoing func()
+	// unhooked is set once a force re-sling has set the bead open and
+	// unassigned. With a spawn, the spawn's rollback gives the work back; with
+	// none, the rollback below must put the holder's status and assignee back,
+	// or the bead stays open while the old holder still runs it.
+	unhooked := false
 	restoreReassigned := func() {
 		if restoreOutgoing != nil {
 			restoreOutgoing()
 			restoreOutgoing = nil
 		}
+		if unhooked && newPolecatInfo == nil {
+			r.restoreHold(townRoot, beadID, beadHold{Status: originalStatus, Assignee: originalAssignee})
+		}
+		unhooked = false
 	}
 	rollbackSpawnedPolecat := func(reason string) {
 		if newPolecatInfo != nil {
@@ -878,6 +887,8 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 			// Unhook the bead from old owner (set status back to open)
 			if err := r.unhook(townRoot, beadID); err != nil {
 				fmt.Fprintf(r.out, "%s Could not unhook bead from old owner: %v\n", style.Dim.Render("Warning:"), err)
+			} else {
+				unhooked = true
 			}
 		}
 	}
@@ -1366,6 +1377,22 @@ func restoreRollbackRawWorkflowFieldsFromCurrent(beadID, townRoot, hookWorkDir s
 		fmt.Printf("  %s Could not restore raw workflow metadata on %s: %v\n", style.Dim.Render("Warning:"), beadID, restoreErr)
 	} else if restored {
 		fmt.Printf("  %s Restored raw workflow metadata on %s\n", style.Dim.Render("○"), beadID)
+	}
+}
+
+// restoreBeadHold puts a bead back to the status and assignee a force
+// re-sling took it from: the undo of unhookFromPreviousOwner for a sling that
+// failed with no polecat spawned, where no spawn rollback gives the work back.
+func restoreBeadHold(townRoot, beadID string, hold beadHold) {
+	if townRoot == "" || beadID == "" || hold.Status == "" {
+		return
+	}
+	dir := beads.ResolveHookDir(townRoot, beadID, "")
+	status := hold.Status
+	if err := pinnedBd(dir).Update(beadID, beads.UpdateOptions{Status: &status, Assignee: &hold.Assignee}); err != nil {
+		fmt.Printf("  %s Could not restore bead %s to %s (%s): %v\n", style.Dim.Render("Warning:"), beadID, hold.Assignee, hold.Status, err)
+	} else {
+		fmt.Printf("  %s Restored bead %s to %s (%s)\n", style.Dim.Render("○"), beadID, hold.Assignee, hold.Status)
 	}
 }
 
