@@ -2,88 +2,60 @@ package dashboard
 
 import (
 	"context"
-	"fmt"
-	"os/exec"
-	"strconv"
-	"strings"
+	"errors"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/hoststat"
 )
 
-const machineTimeout = 3 * time.Second
-
-// SampleMachine reads the load average and the busiest processes: two short
-// children, run at most once per sample interval and only while a page is open.
+// SampleMachine reads the host's busyness — the CPU idle reading and the Dolt
+// server's CPU, with the load averages kept as the number macOS inflates
+// (gt-auiji) — and the busiest processes.
 func SampleMachine() (Machine, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), machineTimeout)
-	defer cancel()
-	m := Machine{At: time.Now()}
-	out, err := exec.CommandContext(ctx, "/usr/sbin/sysctl", "-n", "vm.loadavg").Output()
-	if err != nil {
-		return m, fmt.Errorf("vm.loadavg: %w", err)
+	return sampleMachine(hoststat.Sample)
+}
+
+// sampleMachine is SampleMachine with its probe passed in, so a test can drive
+// the branch a host that reads nothing takes.
+//
+// The load average is one instant counter read, so what is left that fails is
+// the host answering none of its probes — a sandbox, or a platform with no
+// probe to run. That sample carries nothing to paint, so it is an error and
+// the hub ages the tile rather than reading it as a calm machine (gt-q6h8e).
+func sampleMachine(sample func(context.Context) hoststat.Reading) (Machine, error) {
+	r := sample(context.Background())
+	m := Machine{At: time.Now(), Cores: r.Cores, CPUIdle: r.CPUIdle, DoltCores: r.DoltCores, HostState: hostState(r.CPUIdle)}
+	for _, p := range r.Top {
+		m.Top = append(m.Top, Proc{Name: p.Name, CPU: p.CPU})
 	}
-	if err := parseLoadavg(string(out), &m); err != nil {
-		return m, err
+	if r.Load1 == nil {
+		return m, errors.New("hoststat: no load average")
 	}
-	// -r sorts by CPU on macOS; the first lines are the busiest.
-	ps, err := exec.CommandContext(ctx, "/bin/ps", "-Ao", "pcpu=,comm=", "-r").Output()
-	if err == nil {
-		m.Top = parseTop(string(ps), 6)
+	m.Load1 = *r.Load1
+	if r.Load5 != nil {
+		m.Load5 = *r.Load5
+	}
+	if r.Load15 != nil {
+		m.Load15 = *r.Load15
 	}
 	return m, nil
 }
 
-// parseLoadavg reads sysctl's "{ 6.71 16.49 28.11 }".
-func parseLoadavg(s string, m *Machine) error {
-	f := strings.Fields(strings.Trim(strings.TrimSpace(s), "{}"))
-	if len(f) < 3 {
-		return fmt.Errorf("vm.loadavg: unexpected %q", s)
+// hostState is the host tile's verdict on the reading of record, the CPU
+// idle share: "bad" below hoststat.CPUIdleCritical idle, "warn" below
+// hoststat.CPUIdleScarce, "" above them. The page draws that verdict rather
+// than comparing thresholds of its own, so what the tile calls a strained
+// host is the same reading a slow exec probe calls a saturated one
+// (gt-auiji, gt-v50sn). A host that reported no idle reading gets no verdict:
+// the tile shows a dash, never a calm machine.
+func hostState(idle *float64) string {
+	switch {
+	case idle == nil:
+		return ""
+	case *idle < hoststat.CPUIdleCritical:
+		return "bad"
+	case *idle < hoststat.CPUIdleScarce:
+		return "warn"
 	}
-	for i, dst := range []*float64{&m.Load1, &m.Load5, &m.Load15} {
-		v, err := strconv.ParseFloat(f[i], 64)
-		if err != nil {
-			return fmt.Errorf("vm.loadavg: %w", err)
-		}
-		*dst = v
-	}
-	return nil
-}
-
-// parseTop reads "pcpu comm" lines and keeps the first n that use any CPU,
-// naming each process by the last element of its path and merging repeats
-// (twenty go test children are one line: "go").
-func parseTop(s string, n int) []Proc {
-	var order []string
-	sum := map[string]float64{}
-	for _, line := range strings.Split(s, "\n") {
-		f := strings.Fields(line)
-		if len(f) < 2 {
-			continue
-		}
-		cpu, err := strconv.ParseFloat(f[0], 64)
-		if err != nil || cpu <= 0.5 {
-			continue
-		}
-		name := f[1]
-		if i := strings.LastIndex(name, "/"); i >= 0 {
-			name = name[i+1:]
-		}
-		if _, ok := sum[name]; !ok {
-			order = append(order, name)
-		}
-		sum[name] += cpu
-	}
-	var out []Proc
-	for _, name := range order {
-		out = append(out, Proc{Name: name, CPU: sum[name]})
-	}
-	// Merging can reorder; keep the largest first.
-	for i := 1; i < len(out); i++ {
-		for j := i; j > 0 && out[j].CPU > out[j-1].CPU; j-- {
-			out[j], out[j-1] = out[j-1], out[j]
-		}
-	}
-	if len(out) > n {
-		out = out[:n]
-	}
-	return out
+	return ""
 }

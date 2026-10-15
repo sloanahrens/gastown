@@ -435,12 +435,22 @@ function renderTiles(s) {
     (sm.deploy_waiting ? " · " + sm.deploy_waiting + " awaiting deploy" : "")));
   tiles.append(tile("main vs gt", sm.behind == null ? "–" : (sm.behind === 0 ? "current" : sm.behind + " behind"),
     sm.main_tip ? sm.main_tip + " / " + (sm.installed_gt || "?") + " · as of the install repo’s last fetch" : "", sm.behind > 20 ? "warn" : ""));
-  const m = s.machine || {};
-  const cores = navigator.hardwareConcurrency || 8;
-  tiles.append(tile("Load", m.load1 == null ? "–" : m.load1.toFixed(1),
-    m.load5 != null ? "5m " + m.load5.toFixed(1) + " · 15m " + m.load15.toFixed(1) : "",
-    m.load1 > cores * 3 ? "bad" : m.load1 > cores ? "warn" : ""));
+  tiles.append(hostTile(s.machine || {}));
   $("tiles").dataset.at = s.summary_at || "";
+}
+
+// The host's busyness as its own tile: CPU idle leads it and the load average
+// trails. macOS counts running threads in its load average, so a load-led tile
+// reads a 24-core host at load 30 — half its CPU idle — as a drowning machine
+// (gt-auiji). The colour is the reader's host_state, so the tile and the
+// exec-tax field turn at the same reading; an idle reading the host did not
+// report is a dash on an uncoloured tile, never a green one.
+function hostTile(m) {
+  const idle = m.cpu_idle;
+  const sub = [m.dolt_cores != null ? "dolt " + m.dolt_cores.toFixed(1) + " cores" : null,
+    m.load1 != null ? "load " + m.load1.toFixed(1) + (m.cores ? " on " + m.cores + " cores" : "") : null,
+    m.load5 != null ? "5m " + m.load5.toFixed(1) + " · 15m " + m.load15.toFixed(1) : null].filter(Boolean).join(" · ");
+  return tile("Host CPU", idle == null ? "–" : Math.round(idle) + "% idle", sub, m.host_state || "");
 }
 
 function copyText(text, btn) {

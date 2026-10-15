@@ -68,6 +68,9 @@ type fake struct {
 
 	// started is the daemon's start time the dispatch field reads.
 	started time.Time
+
+	// loadCtx is the context the last host read ran under.
+	loadCtx context.Context
 }
 
 func (f *fake) Ping(context.Context) (time.Duration, error) {
@@ -86,7 +89,10 @@ func (f *fake) Heartbeat() (HeartbeatRecord, error) { return f.hb, f.hbErr }
 func (f *fake) ExecTax(context.Context) (time.Duration, error) {
 	return f.execTax, f.execTaxErr
 }
-func (f *fake) Load1() (HostLoad, error) { return f.load, f.loadErr }
+func (f *fake) Load1(ctx context.Context) (HostLoad, error) {
+	f.loadCtx = ctx
+	return f.load, f.loadErr
+}
 
 func (f *fake) Ticks() ([]Tick, error) { return f.ticks, f.ticksErr }
 func (f *fake) Landings(_ context.Context, since time.Time) ([]RigLandings, error) {
@@ -190,8 +196,16 @@ func TestUnwiredSourcesAreUnknownNeverGreen(t *testing.T) {
 			t.Errorf("field %s = %+v, want UNKNOWN with value ?", f.Key(), f)
 		}
 	}
+	// One field per source, less the host: a town with no load source has no
+	// host reading to show, and an UNKNOWN would outrank every other field's
+	// verdict for a reading that was only ever corroboration (gt-auiji).
 	if len(r.Fields) != 14 {
-		t.Errorf("got %d fields, want one per source (14)", len(r.Fields))
+		t.Errorf("got %d fields, want one per source but the host (14)", len(r.Fields))
+	}
+	for _, f := range r.Fields {
+		if f.Key() == FieldHost {
+			t.Errorf("an unwired host source still claimed a %s field: %+v", FieldHost, f)
+		}
 	}
 }
 
@@ -329,8 +343,12 @@ func TestExecTaxUnderLoad(t *testing.T) {
 		load    HostLoad
 		loadErr error
 		want    Verdict
-		value   string
-		detail  string
+		// town is the verdict every field together yields; "" means want. No
+		// case differs today: a host that cannot be read has no field of its
+		// own, so it leaves the probe's verdict standing (gt-auiji).
+		town   Verdict
+		value  string
+		detail string
 	}{
 		"a saturated host is degraded, not red": {
 			median: 79 * time.Millisecond,
@@ -352,6 +370,24 @@ func TestExecTaxUnderLoad(t *testing.T) {
 			want:   Red,
 			value:  "79ms/exec",
 			detail: "every fresh executable in this tree pays 79ms",
+		},
+		// The reading the bead is about: 38 on 24 cores is past the old
+		// per-core limit, so the thread-inflated load average alone excused
+		// the red reading. Half the machine is idle, so nothing was
+		// competing with the probe and the tax is the tree's (gt-auiji).
+		"a threaded host with idle CPU keeps the red reading": {
+			median: 79 * time.Millisecond,
+			load:   HostLoad{Average: 38, Cores: 24, CPUIdle: float64Ptr(47)},
+			want:   Red,
+			value:  "79ms/exec",
+			detail: "every fresh executable in this tree pays 79ms",
+		},
+		"a host with no CPU to spare is degraded on the idle reading": {
+			median: 79 * time.Millisecond,
+			load:   HostLoad{Average: 38, Cores: 24, CPUIdle: float64Ptr(6)},
+			want:   Degraded,
+			value:  "79ms/exec 6% cpu idle",
+			detail: "overloaded (6% cpu idle)",
 		},
 		"at the limit stays red": {
 			median: 79 * time.Millisecond,
@@ -395,8 +431,12 @@ func TestExecTaxUnderLoad(t *testing.T) {
 			if r.ExecTaxMS == nil || *r.ExecTaxMS != float64(tc.median)/float64(time.Millisecond) {
 				t.Errorf("ExecTaxMS = %v, want the probe's %v", r.ExecTaxMS, tc.median)
 			}
-			if r.Verdict != tc.want {
-				t.Errorf("town verdict = %s, want the exec-tax field's %s (every other field is green)", r.Verdict, tc.want)
+			town := tc.want
+			if tc.town != "" {
+				town = tc.town
+			}
+			if r.Verdict != town {
+				t.Errorf("town verdict = %s, want the exec-tax field's %s (every other field is green)", r.Verdict, town)
 			}
 		})
 	}
@@ -956,6 +996,97 @@ func TestDispatchLabeledFailedCountIsTheNewestTicks(t *testing.T) {
 		t.Errorf("dispatch = %+v, want silent: a count from outside the window is not carried forward", got)
 	}
 }
+
+// The host field is the line gt status shows beside the load average, so it
+// carries the CPU idle and Dolt core readings the load average cannot
+// (gt-auiji).
+func TestHostFieldShowsTheReadingsBesideTheLoad(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		load  HostLoad
+		value string
+	}{
+		"the load average comes last": {
+			load:  HostLoad{Average: 30, Cores: 24, CPUIdle: float64Ptr(47), DoltCores: float64Ptr(0.384)},
+			value: "47% cpu idle · 0.4 dolt cores · load 30 on 24 cores",
+		},
+		"a host that reported no idle reading keeps the load alone": {
+			load:  HostLoad{Average: 30, Cores: 24},
+			value: "load 30 on 24 cores",
+		},
+		"a Dolt reading is named without a load": {
+			load:  HostLoad{DoltCores: float64Ptr(2.5)},
+			value: "2.5 dolt cores",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := healthy()
+			f.load = tc.load
+			got := field(t, Compute(context.Background(), inputs(f)), "host")
+			if got.Tag != Live || got.Verdict != Green || got.Value != tc.value {
+				t.Errorf("host = %+v, want LIVE green %q", got, tc.value)
+			}
+		})
+	}
+}
+
+// A host that reported nothing has no field at all, and the town keeps the
+// verdict its other fields reached. An UNKNOWN outranks red, so a field for a
+// reading this town could not take would report the whole town unknown
+// whenever the probe's answer was the thing worth knowing (gt-auiji).
+func TestHostThatReportedNothingLeavesTheTownVerdict(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		load    HostLoad
+		loadErr error
+	}{
+		"the host answered none of its probes": {load: HostLoad{}},
+		"the host could not be read":           {loadErr: errors.New("sysctl: not found")},
+		"no load source is wired":              {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := healthy()
+			f.load, f.loadErr = tc.load, tc.loadErr
+			in := inputs(f)
+			if name == "no load source is wired" {
+				in.Load = nil
+			}
+			// The exec probe reddens so the town has a verdict the host
+			// field could overwrite.
+			f.execTax = 79 * time.Millisecond
+
+			r := Compute(context.Background(), in)
+			for _, got := range r.Fields {
+				if got.Key() == FieldHost {
+					t.Fatalf("a host with no reading still claimed a %s field: %+v", FieldHost, got)
+				}
+			}
+			if r.Verdict != Red {
+				t.Errorf("town verdict = %s, want the exec-tax field's red", r.Verdict)
+			}
+		})
+	}
+}
+
+// The host read runs under the caller's context, not a fresh one: a read that
+// samples top for a second must be cancelled by the computation's deadline
+// rather than hold the health computation past it (gt-auiji).
+func TestHostReadRunsUnderTheComputationsContext(t *testing.T) {
+	t.Parallel()
+	type key struct{}
+	ctx := context.WithValue(context.Background(), key{}, "compute")
+	f := healthy()
+
+	Compute(ctx, inputs(f))
+
+	if f.loadCtx == nil || f.loadCtx.Value(key{}) != "compute" {
+		t.Errorf("host read ran under %v, want the context Compute was given", f.loadCtx)
+	}
+}
+
+func float64Ptr(v float64) *float64 { return &v }
 
 func TestShort(t *testing.T) {
 	t.Parallel()

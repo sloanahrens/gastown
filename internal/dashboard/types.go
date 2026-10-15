@@ -186,13 +186,31 @@ type Proc struct {
 	CPU  float64 `json:"cpu"`
 }
 
-// Machine is the host's load and what is burning it.
+// Machine is the host's busyness and what is burning it.
 type Machine struct {
-	Load1  float64   `json:"load1"`
-	Load5  float64   `json:"load5"`
-	Load15 float64   `json:"load15"`
-	Top    []Proc    `json:"top"`
-	At     time.Time `json:"at"`
+	// Load1, Load5 and Load15 are the load averages. macOS counts running
+	// threads in them, so they run far past the core count on a half-idle
+	// host: they are the secondary number, and CPUIdle is the reading of
+	// record (gt-auiji).
+	Load1  float64 `json:"load1"`
+	Load5  float64 `json:"load5"`
+	Load15 float64 `json:"load15"`
+	// CPUIdle is the percent of the host's cores idle over the sample
+	// window, nil when it could not be read.
+	CPUIdle *float64 `json:"cpu_idle,omitempty"`
+	// DoltCores is the Dolt server's CPU in cores, nil when it could not be
+	// read.
+	DoltCores *float64 `json:"dolt_cores,omitempty"`
+	// Cores is the host's logical CPU count, the number the load average is
+	// read against. The browser's own count is another machine's.
+	Cores int `json:"cores,omitempty"`
+	// HostState is the host tile's color, decided here from CPUIdle so the
+	// page draws a verdict rather than comparing thresholds of its own.
+	// Absent for a host with CPU to spare and for one that reported no idle
+	// reading, which the tile shows as a dash.
+	HostState string    `json:"host_state,omitempty"`
+	Top       []Proc    `json:"top"`
+	At        time.Time `json:"at"`
 }
 
 // LoadPoint is one load sample for the sparkline.
