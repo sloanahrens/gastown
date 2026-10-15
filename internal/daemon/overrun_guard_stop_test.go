@@ -35,6 +35,7 @@ func TestStop_OrderIsPauseStopCheckpointHandBack(t *testing.T) {
 		"checkpoint gastown/capable",
 		"push gastown/capable",
 		"hand-back gastown/capable",
+		"recheck gastown/capable", // the seat is still ours before the release
 		"reset-agent-bead gastown/capable",
 		"record-cleanup gastown/capable",
 		"retire gastown/capable",
@@ -83,7 +84,7 @@ func TestStop_FailedReleaseAfterHandBackKeepsTheStopPending(t *testing.T) {
 	f.now = f.now.Add(time.Minute)
 	d.runOverrunGuard(f.seams())
 
-	want := []string{"recheck gastown/capable", "hand-back gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
+	want := []string{"recheck gastown/capable", "hand-back gastown/capable", "recheck gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
 	if !reflect.DeepEqual(f.calls, want) {
 		t.Errorf("resumed call order = %q, want %q", f.calls, want)
 	}
@@ -120,7 +121,7 @@ func TestStop_FailedSessionStopClearsMarkerAndSkipsHandBack(t *testing.T) {
 	f.calls, f.failOn = nil, nil
 	f.now = f.now.Add(time.Minute)
 	d.runOverrunGuard(f.seams())
-	if len(f.calls) != 8 || f.calls[0] != "pause gastown/capable" || f.calls[4] != "hand-back gastown/capable" || f.calls[7] != "retire gastown/capable" {
+	if len(f.calls) != 9 || f.calls[0] != "pause gastown/capable" || f.calls[4] != "hand-back gastown/capable" || f.calls[8] != "retire gastown/capable" {
 		t.Errorf("retry call order = %q, want the full sequence", f.calls)
 	}
 }
@@ -138,7 +139,7 @@ func TestStop_FailedMarkerClearKeepsTheStopPending(t *testing.T) {
 	f.now = f.now.Add(time.Minute)
 	d.runOverrunGuard(f.seams())
 
-	want := []string{"stop gastown/capable", "checkpoint gastown/capable", "push gastown/capable", "hand-back gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
+	want := []string{"stop gastown/capable", "checkpoint gastown/capable", "push gastown/capable", "hand-back gastown/capable", "recheck gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
 	if !reflect.DeepEqual(f.calls, want) {
 		t.Errorf("resumed call order = %q, want %q (no second pause)", f.calls, want)
 	}
@@ -151,8 +152,8 @@ func TestStop_RunsOnceAfterStoppedAt(t *testing.T) {
 
 	d.runOverrunGuard(f.seams())
 	first := len(f.calls)
-	if first != 8 {
-		t.Fatalf("first tick made %d calls (%q), want 8", first, f.calls)
+	if first != 9 {
+		t.Fatalf("first tick made %d calls (%q), want 9", first, f.calls)
 	}
 
 	// The seat is still listed (say the session came back): the stop is done
@@ -184,7 +185,7 @@ func TestStop_ReslingAfterStopRunsAFreshStop(t *testing.T) {
 	f.now = resling.Add(21 * time.Minute)
 	d.runOverrunGuard(f.seams())
 
-	if len(f.calls) != 8 {
+	if len(f.calls) != 9 {
 		t.Errorf("calls for the new sling = %q, want a full stop", f.calls)
 	}
 }
@@ -209,7 +210,7 @@ func TestStop_FailedCheckpointRetriesWithoutRepeatingEarlierSteps(t *testing.T) 
 	f.seats, f.calls, f.failOn = nil, nil, nil
 	f.now = f.now.Add(time.Minute)
 	d.runOverrunGuard(f.seams())
-	want = []string{"recheck gastown/capable", "checkpoint gastown/capable", "push gastown/capable", "hand-back gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
+	want = []string{"recheck gastown/capable", "checkpoint gastown/capable", "push gastown/capable", "hand-back gastown/capable", "recheck gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
 	if !reflect.DeepEqual(f.calls, want) {
 		t.Errorf("retry calls = %q, want %q", f.calls, want)
 	}
@@ -234,7 +235,7 @@ func TestStop_FailedHandBackRetriesAndStaysUnfinished(t *testing.T) {
 	f.seats, f.calls, f.failOn = nil, nil, nil
 	f.now = f.now.Add(time.Minute)
 	d.runOverrunGuard(f.seams())
-	if want := []string{"recheck gastown/capable", "hand-back gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}; !reflect.DeepEqual(f.calls, want) {
+	if want := []string{"recheck gastown/capable", "hand-back gastown/capable", "recheck gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}; !reflect.DeepEqual(f.calls, want) {
 		t.Errorf("retry calls = %q, want the hand-back and the release", f.calls)
 	}
 	st, _ = readOverrunState(d.config.TownRoot, "gt-aaa11")
@@ -815,5 +816,44 @@ func TestOverrunCleanupStatusDetachedHeadUnpushed(t *testing.T) {
 	}
 	if got := overrunCleanupStatus(g); got != string(polecat.CleanupUnpushed) {
 		t.Errorf("detached HEAD with a checkpoint commit = %q, want has_unpushed", got)
+	}
+}
+
+// An operator can resume the seat and sling new work onto the name while the
+// stop is still pushing or handing the bead back. Step 6 would then overwrite
+// the new sling's agent bead, cleanup status and intent record, so the stop
+// looks at the seat again first and, finding it taken back, leaves the release
+// to its new holder.
+func TestOverrunStopResumeDuringHandBackKeepsNewSling(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	seams := f.seams()
+	handBack := seams.handBack
+	seams.handBack = func(seat overrunSeat, elapsed time.Duration, note string) error {
+		err := handBack(seat, elapsed, note)
+		// The resume and the new sling land after the stop's last look at the
+		// seat and before its release.
+		f.lapsed = "the pause marker is gone"
+		return err
+	}
+
+	d.runOverrunGuard(seams)
+
+	for _, call := range f.calls {
+		for _, release := range []string{"reset-agent-bead", "record-cleanup", "retire"} {
+			if strings.HasPrefix(call, release) {
+				t.Errorf("%s ran after the seat was taken back; calls = %q", release, f.calls)
+			}
+		}
+	}
+	if len(f.handedBack) != 1 {
+		t.Errorf("hand-back ran %d times, want the one that preceded the resume", len(f.handedBack))
+	}
+	if st, _ := readOverrunState(d.config.TownRoot, "gt-aaa11"); st.StoppedAt.IsZero() {
+		t.Error("StoppedAt not written: the next tick would repeat the stop over the new sling")
+	}
+	if !strings.Contains(buf.String(), "seat not released") {
+		t.Errorf("log lacks the abandoned release:\n%s", buf.String())
 	}
 }
