@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -181,15 +180,13 @@ func cloudCheckRank(level string) int {
 	return 1
 }
 
-// readCloudChecksFile reads path, refusing a file larger than max before it is
-// read.
+// errCloudChecksOversize is a status file larger than the cap, refused before
+// it is read: the plugin's own status runs a few kilobytes.
+var errCloudChecksOversize = errors.New("cloud checks: status over the size cap")
+
+// readCloudChecksFile reads path, refusing a file larger than max and one that
+// is not a regular file, both before the read: a FIFO at the status path stalls
+// the poll the way one at the report path does.
 func readCloudChecksFile(path string, max int64) ([]byte, error) {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-	if fi.Size() > max {
-		return nil, errors.New("cloud checks: status over the size cap")
-	}
-	return os.ReadFile(path)
+	return readRegularCloudFile(path, max, errCloudChecksOversize)
 }

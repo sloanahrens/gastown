@@ -1,12 +1,16 @@
 package dashboard
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 	"unicode"
@@ -190,6 +194,130 @@ func TestCloudNamesEveryStateItCannotRead(t *testing.T) {
 		// the fields it always draws are there.
 		if c.Projects == nil || c.Findings == nil {
 			t.Errorf("%s: projects or findings are null in the page's payload", tc.name)
+		}
+	}
+}
+
+// A FIFO at one of the pane's fixed paths must not be opened: a read-only open
+// of a FIFO with no writer blocks until one appears, and the poll has no
+// timeout, so the read would stall the pane for good. Each read runs in a
+// goroutine, so a read that blocks fails this test by timeout instead of
+// hanging the suite.
+func TestCloudFileNonRegularFailsWithoutBlocking(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	fifo := func(name string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := syscall.Mkfifo(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	report := fifo(cloudReportFile)
+	heartbeat := fifo(cloudHeartbeatFile)
+	status := fifo("status.json")
+	// Without the guard a goroutine sits in open(2) on its FIFO; opening each
+	// read-write at cleanup releases it so the test leaves nothing behind.
+	t.Cleanup(func() {
+		for _, path := range []string{report, heartbeat, status} {
+			if f, err := os.OpenFile(path, os.O_RDWR, 0); err == nil {
+				f.Close()
+			}
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		call func() error
+	}{
+		{"report file", func() error {
+			_, err := readCloudFile(report, cloudReportMaxBytes)
+			return notRegular(err)
+		}},
+		{"heartbeat file", func() error {
+			_, err := NewCloudReader(dir).readHeartbeat()
+			return notRegular(err)
+		}},
+		{"checks file", func() error {
+			_, err := readCloudChecksFile(status, cloudChecksMaxBytes)
+			return notRegular(err)
+		}},
+		{"cloud reader", func() error {
+			if c := NewCloudReader(dir).Read(cloudNow); c.State != CloudError {
+				return fmt.Errorf("state %q, want %q", c.State, CloudError)
+			}
+			return nil
+		}},
+		{"checks reader", func() error {
+			if c := NewCloudChecksReader(status).Read(checksNow); c == nil || c.State != CloudChecksError {
+				return fmt.Errorf("state %+v, want %q", c, CloudChecksError)
+			}
+			return nil
+		}},
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		done := make(chan error, 1)
+		go func() { done <- tc.call() }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("%s: %v", tc.name, err)
+			}
+		case <-ctx.Done():
+			t.Errorf("%s: the read blocked on a FIFO", tc.name)
+		}
+		cancel()
+	}
+}
+
+// notRegular is the error a guarded read reports for a path that is not a
+// regular file, or the mismatch that says what it reported instead.
+func notRegular(err error) error {
+	if !errors.Is(err, errNotRegular) {
+		return fmt.Errorf("read reported %v, want %v", err, errNotRegular)
+	}
+	return nil
+}
+
+// A symlink named like the report, the heartbeat or the status file is refused
+// rather than followed, the way reports.go refuses a symlink named like one of
+// its reports: the writer's own output is the only thing at these paths, so a
+// link reads as the file it is not.
+func TestCloudRefusesSymlinksNamedLikeItsFiles(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		file string
+		read func(dir, path string) error
+	}{
+		{"report", cloudReportFile, func(_, path string) error {
+			_, err := readCloudFile(path, cloudReportMaxBytes)
+			return notRegular(err)
+		}},
+		{"heartbeat", cloudHeartbeatFile, func(dir, _ string) error {
+			_, err := NewCloudReader(dir).readHeartbeat()
+			return notRegular(err)
+		}},
+		{"checks", "status.json", func(_, path string) error {
+			_, err := readCloudChecksFile(path, cloudChecksMaxBytes)
+			return notRegular(err)
+		}},
+	} {
+		dir := t.TempDir()
+		// The link points at a readable file, so following it would read as a
+		// healthy report rather than as a missing one.
+		if err := os.WriteFile(filepath.Join(dir, "elsewhere.json"), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(dir, tc.file)
+		if err := os.Symlink(filepath.Join(dir, "elsewhere.json"), link); err != nil {
+			t.Fatal(err)
+		}
+		if err := tc.read(dir, link); err != nil {
+			t.Errorf("%s: %v", tc.name, err)
 		}
 	}
 }

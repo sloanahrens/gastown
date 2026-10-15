@@ -34,6 +34,10 @@ const (
 	// rejected. The patrol's own reports run a few kilobytes.
 	cloudReportMaxBytes = 256 << 10
 
+	// cloudHeartbeatMaxBytes refuses a larger heartbeat before reading it: the
+	// file is one RFC3339 timestamp, so anything longer is not one.
+	cloudHeartbeatMaxBytes = 64
+
 	// cloudMaxFindings is how many finding rows the page draws; the rest are
 	// counted in More, and in Counts and Total over the whole report.
 	cloudMaxFindings = 100
@@ -348,22 +352,38 @@ func cloudText(s string, max int) string {
 	return s
 }
 
-// readCloudFile reads path, refusing a file larger than max before it is read.
+// readCloudFile reads the patrol's report at path, refusing one larger than max
+// and one that is not a regular file, both before the read.
 func readCloudFile(path string, max int64) ([]byte, error) {
-	fi, err := os.Stat(path)
+	return readRegularCloudFile(path, max, errCloudOversize)
+}
+
+// readRegularCloudFile reads path when it is a regular file no larger than max,
+// reporting a larger one as oversize. The stat is a Lstat, so a symlink named
+// like one of the pane's files is refused rather than followed: the writer's own
+// output is the only thing at these paths. A FIFO, socket or device is refused
+// before it is read, since a read-only open of a FIFO with no writer blocks
+// until one appears and nothing here waits on a writer (gt-u3eb1).
+func readRegularCloudFile(path string, max int64, oversize error) ([]byte, error) {
+	fi, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
 	}
+	if !fi.Mode().IsRegular() {
+		return nil, errNotRegular
+	}
 	if fi.Size() > max {
-		return nil, errCloudOversize
+		return nil, oversize
 	}
 	return os.ReadFile(path)
 }
 
 // readHeartbeat reads the patrol's heartbeat: the RFC3339 timestamp it writes
-// beside the report each time it finishes a run.
+// beside the report each time it finishes a run. It goes through the report's
+// guard, so a FIFO or an oversize file beside the report cannot stall the poll
+// either — a file that is not one timestamp is errCloudHeartbeat.
 func (r *CloudReader) readHeartbeat() (time.Time, error) {
-	b, err := os.ReadFile(filepath.Join(r.dir, cloudHeartbeatFile))
+	b, err := readRegularCloudFile(filepath.Join(r.dir, cloudHeartbeatFile), cloudHeartbeatMaxBytes, errCloudHeartbeat)
 	if err != nil {
 		return time.Time{}, err
 	}
