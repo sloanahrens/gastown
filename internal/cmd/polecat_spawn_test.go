@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -85,11 +86,21 @@ func TestPolecatIntegrationEnabledDefaultsTrue(t *testing.T) {
 }
 
 // idlePolecatReuseFake stands in for the polecat manager's idle-reuse surface.
+// released records what the reuse path handed back, in order.
 type idlePolecatReuseFake struct {
 	idle     *polecat.Polecat
 	findErr  error
 	reuseErr error
+	getErr   error
 	getCalls int
+	released []idleReuseRelease
+}
+
+// idleReuseRelease is one release the reuse path asked for.
+type idleReuseRelease struct {
+	rigName     string
+	polecatName string
+	hookBead    string
 }
 
 func (f *idlePolecatReuseFake) FindIdlePolecat() (*polecat.Polecat, error) {
@@ -105,7 +116,22 @@ func (f *idlePolecatReuseFake) ReuseIdlePolecat(name string, opts polecat.AddOpt
 
 func (f *idlePolecatReuseFake) Get(name string) (*polecat.Polecat, error) {
 	f.getCalls++
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
 	return f.idle, nil
+}
+
+// releaseRecordingEnv is fakeIdleReuseEnv with the release seam pointed at
+// fake, so a test can see what the reuse path handed back, and a worktree check
+// that fails with verifyErr.
+func releaseRecordingEnv(fake *idlePolecatReuseFake, verifyErr error) idleReuseEnv {
+	env := fakeIdleReuseEnv()
+	env.verifyWorktree = func(string) error { return verifyErr }
+	env.releaseReused = func(rigName, polecatName, hookBead string) {
+		fake.released = append(fake.released, idleReuseRelease{rigName, polecatName, hookBead})
+	}
+	return env
 }
 
 // TestReuseIdlePolecatForSling_StopsOnHeldBranch guards gt-0kk2: a refusal to
@@ -177,6 +203,55 @@ func TestReuseIdlePolecatForSling_NoIdlePolecat(t *testing.T) {
 
 			if err != nil || info != nil {
 				t.Errorf("reuseIdlePolecatForSling gave (%+v, %v), want (nil, nil) so the caller allocates", info, err)
+			}
+		})
+	}
+}
+
+// TestReuseIdlePolecatForSling_VerifyFailureReleasesSlot guards gt-pa676: the
+// reuse writes the agent bead (hook_bead set, agent_state=spawning) before the
+// path can read the polecat back or check its sandbox, so both failures have to
+// hand the polecat back. Left hooked, the sling's own open bead reads as active
+// work, the reuse gate refuses the seat and the pool skips it, so it holds a
+// slot no sling can take until an operator nukes it.
+func TestReuseIdlePolecatForSling_VerifyFailureReleasesSlot(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name      string
+		fake      *idlePolecatReuseFake
+		verifyErr error
+	}{
+		{
+			name: "worktree verification fails",
+			fake: &idlePolecatReuseFake{
+				idle: &polecat.Polecat{Name: "alpha", ClonePath: "/town/rig/polecats/alpha/rig"},
+			},
+			verifyErr: errors.New("worktree is gone"),
+		},
+		{
+			// Get reports only a polecat whose sandbox is gone — a
+			// loadFromBeads read never fails — so this is the nuke-or-reaper
+			// race window between the reuse and the read-back.
+			name: "read-back fails",
+			fake: &idlePolecatReuseFake{
+				idle:   &polecat.Polecat{Name: "alpha"},
+				getErr: polecat.ErrPolecatNotFound,
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			info, err := reuseIdlePolecatForSlingWith(tt.fake, releaseRecordingEnv(tt.fake, tt.verifyErr), "rig",
+				SlingSpawnOptions{HookBead: "gt-next"}, func() {})
+
+			if err == nil {
+				t.Fatal("sling went on with a reused polecat it could not verify; want the error")
+			}
+			if info != nil {
+				t.Errorf("sling returned %+v alongside the error", info)
+			}
+			want := []idleReuseRelease{{rigName: "rig", polecatName: "alpha", hookBead: "gt-next"}}
+			if !slices.Equal(tt.fake.released, want) {
+				t.Errorf("released %+v, want exactly %+v", tt.fake.released, want)
 			}
 		})
 	}

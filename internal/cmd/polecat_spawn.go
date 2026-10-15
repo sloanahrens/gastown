@@ -271,6 +271,12 @@ type idleReuseEnv struct {
 	// reworkSeat names the polecat a rework bead goes back to and the branch
 	// its rejected attempt is on, or ok=false for any other bead (gt-lid6d).
 	reworkSeat func(beadID string) (*reworkSeat, bool)
+	// releaseReused hands a polecat this path just reused back to the pool: its
+	// slot goes idle, and the work bead goes back to open when this sling had
+	// already hooked it. A reuse writes the agent bead before the path can
+	// verify the sandbox, so the failures after it have to undo that write
+	// (gt-pa676).
+	releaseReused func(rigName, polecatName, hookBead string)
 }
 
 func realIdleReuseEnv(t *tmux.Tmux, r *rig.Rig, townRoot, rigName string, step func(name string)) idleReuseEnv {
@@ -286,7 +292,22 @@ func realIdleReuseEnv(t *tmux.Tmux, r *rig.Rig, townRoot, rigName string, step f
 		},
 		step:       step,
 		reworkSeat: func(beadID string) (*reworkSeat, bool) { return reworkSeatFor(townRoot, beadID) },
+		releaseReused: func(rigName, polecatName, hookBead string) {
+			releaseReusedPolecatWork(townRoot, rigName, polecatName, hookBead)
+		},
 	}
+}
+
+// releaseReusedPolecatWork gives back a polecat this sling reused but could not
+// go on with: its slot goes idle, and the work bead goes back to open when this
+// sling had already hooked it. It is the release a sling rollback applies to a
+// reused seat (gt-7evi4), minus the rollback's restore-to-original-holder step:
+// this path holds no spawn record, so it has no pre-sling hold to restore to.
+// The sandbox predates this sling, so it stays, as a rollback keeps it.
+func releaseReusedPolecatWork(townRoot, rigName, polecatName, hookBead string) {
+	rel := newPolecatWorkReleaserFn(townRoot, "")
+	agentID := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
+	releasePolecatWork(rel, agentID, hookBead, true)
 }
 
 // detectSpawnIntegrationBranch auto-detects the integration branch of the
@@ -409,11 +430,20 @@ func reuseIdlePolecatForSlingWith(
 		return nil, nil
 	}
 
+	// The reuse above has already written the agent bead (hook_bead set,
+	// agent_state=spawning), so both failures below hand the polecat back: the
+	// hook reads an open bead as active work, the reuse gate refuses a
+	// hook-still-set seat and FindIdlePolecat skips it, so a polecat left
+	// hooked here holds a pool seat no sling can take until an operator nukes
+	// it (gt-pa676). The fresh path needs no equivalent — it removes the
+	// sandbox it created, which resets the agent bead itself.
 	polecatObj, err := polecatMgr.Get(polecatName)
 	if err != nil {
+		env.releaseReused(rigName, polecatName, opts.HookBead)
 		return nil, fmt.Errorf("getting idle polecat after reuse: %w", err)
 	}
 	if err := env.verifyWorktree(polecatObj.ClonePath); err != nil {
+		env.releaseReused(rigName, polecatName, opts.HookBead)
 		return nil, fmt.Errorf("worktree verification failed for reused %s: %w", polecatName, err)
 	}
 
