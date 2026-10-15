@@ -139,9 +139,13 @@ func (d *Daemon) runSpecDispatch() {
 		d.logger.Printf("spec_dispatch: tick failed: %v", err)
 		return
 	}
-	// A held tick decided nothing, so it carries no roster to record.
-	if r, perr := parseSpecDispatchReport(out); perr == nil && r.Hold == "" {
-		d.recordDispatchTick(r, d.clk().Now())
+	if r, perr := parseSpecDispatchReport(out); perr == nil {
+		now := d.clk().Now()
+		d.dispatchIdle.Observe(r, now)
+		// A held tick decided nothing, so it carries no roster to record.
+		if r.Hold == "" {
+			d.recordDispatchTick(r, now)
+		}
 	}
 	for _, line := range d.formatSpecDispatchReport(out) {
 		d.logger.Printf("spec_dispatch: %s", line)

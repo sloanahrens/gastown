@@ -270,6 +270,11 @@ type attentionSources struct {
 	questions questionReads
 	// overseer is the silent-overseer collector's reads (attention_overseer.go).
 	overseer overseerReads
+	// dispatchIdle reads the idle-dispatch tracker and dispatchHold the
+	// operator hold; both are the idle-dispatcher collector's reads
+	// (attention_dispatch_idle.go).
+	dispatchIdle func() dispatchIdleStatus
+	dispatchHold func() string
 	// repeatedAt is when each repeating item was last said, carried across
 	// ticks by the daemon. attentionTick updates it.
 	repeatedAt map[string]time.Time
@@ -490,6 +495,7 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindHostDisk, collect: s.collectHostDisk},
 		{kind: attention.KindHostMem, collect: s.collectHostMem},
 		{kind: attention.KindHostDocker, collect: s.collectHostDocker},
+		{kind: attention.KindDispatchIdle, collect: s.collectDispatchIdle},
 	}, s.questionCollectors()...)
 }
 
@@ -510,6 +516,8 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 	s.landingRigs = d.attentionLandingRigs
 	s.questions = d.productionQuestionReads()
 	s.overseer = d.productionOverseerReads()
+	s.dispatchIdle = d.dispatchIdle.Status
+	s.dispatchHold = d.specDispatchTownHold
 	s.redMain = func(ctx context.Context, rig string) ([]*beads.Issue, error) {
 		return d.rigWorkBeads(rig).List(beads.ListOptions{
 			Status: "open", Label: landworker.LabelRedMain, Priority: -1, Limit: 0,
