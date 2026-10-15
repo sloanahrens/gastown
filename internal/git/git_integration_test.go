@@ -2188,6 +2188,60 @@ func TestIntegrationBranchPreservationStatusUnjudgeableExactBranchFailsClosed(t 
 	}
 }
 
+// An unjudgeable unpushed comparison must not cost the caller the worktree facts
+// it did gather: CheckUncommittedWork returns the error (so a discard caller that
+// checks only err fails closed) AND the status read so far, so gt done, which
+// needs only the worktree state before its own push-divergence check, can go on
+// (the tier sweep went RED when gt-dm13l made this error fatal to gt done).
+func TestIntegrationCheckUncommittedWorkUnjudgeableTipKeepsTheStatusItGathered(t *testing.T) {
+	t.Parallel()
+	localDir, remoteDir, _ := initTestRepoWithRemote(t)
+	branch := "polecat/x"
+
+	otherDir := filepath.Join(t.TempDir(), "other")
+	runGit(t, filepath.Dir(otherDir), "clone", remoteDir, otherDir)
+	runGit(t, otherDir, "checkout", "-b", branch)
+	if err := os.WriteFile(filepath.Join(otherDir, "elsewhere.txt"), []byte("elsewhere\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	runGit(t, otherDir, "add", "elsewhere.txt")
+	runGit(t, otherDir, "commit", "-m", "elsewhere")
+	runGit(t, otherDir, "push", "origin", branch)
+
+	runGit(t, localDir, "checkout", "-b", branch)
+	if err := os.WriteFile(filepath.Join(localDir, "local-only.txt"), []byte("local\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	runGit(t, localDir, "add", "local-only.txt")
+	runGit(t, localDir, "commit", "-m", "local only")
+
+	g := NewGit(localDir)
+	status, err := g.CheckUncommittedWork()
+	if !errors.Is(err, ErrComparisonUnjudgeable) {
+		t.Fatalf("CheckUncommittedWork err = %v, want one wrapping ErrComparisonUnjudgeable", err)
+	}
+	if status == nil {
+		t.Fatal("CheckUncommittedWork returned no status beside the unjudgeable error; gt done cannot read the worktree facts")
+	}
+	if status.HasUncommittedChanges || status.UnpushedCommits != 0 {
+		t.Errorf("clean worktree read as %+v, want no uncommitted changes and an unknown (0) unpushed count", status)
+	}
+
+	// The facts it did gather are real: a dirty worktree reads dirty.
+	if err := os.WriteFile(filepath.Join(localDir, "dirty.txt"), []byte("dirty\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	status, err = g.CheckUncommittedWork()
+	if !errors.Is(err, ErrComparisonUnjudgeable) || status == nil || !status.HasUncommittedChanges {
+		t.Errorf("dirty worktree: status %+v, err %v; want HasUncommittedChanges beside the unjudgeable error", status, err)
+	}
+
+	// A discard caller that checks only the error still fails closed.
+	if _, err := g.UnpushedCommits(); err == nil {
+		t.Error("UnpushedCommits = nil error on an unjudgeable tip; a discard caller must see the failure")
+	}
+}
+
 // foreignPolecatUpstreamRepo builds the gt-y6w8y state: origin/main has moved
 // past origin/polecat/shale/x, and a local polecat/quartz/x branch (never
 // pushed) is configured to track that other polecat's branch. HEAD sits on
