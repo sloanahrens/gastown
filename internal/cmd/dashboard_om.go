@@ -20,14 +20,18 @@ import (
 	"unicode"
 
 	"github.com/steveyegge/gastown/internal/dashboard"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/landings"
+	"github.com/steveyegge/gastown/internal/rig"
 )
 
 // The om panel reads two things the town already writes: each rig's landings
 // file (one record per landed bead, with om's verdict and score) and the
 // daemon log (om's wall time per review, and every rejection with its kind).
 // It runs no om and no bd. What om is running right now it reads from the
-// processes on the host, through the same panel's one ps read.
+// processes on the host, through the same panel's one ps read. The bar and
+// depth it reports are the rig's .om.json the landing worker reviews under,
+// read out of the rig's repository, not the user's om config (gt-ndbwf).
 
 const (
 	omRecentRows = 15
@@ -48,6 +52,15 @@ const (
 	// one worker's pass, never resumed, so a start after a merge means that
 	// landing died with the process: the reader drops its ghost row with it.
 	daemonStartMarker = "Daemon starting (PID "
+	// omPanelRig is the rig whose .om.json the panel reports: the panel is the
+	// gastown dashboard, and the panel has no per-rig place to list the bars of
+	// the town's other rigs (gt-ndbwf).
+	omPanelRig = "gastown"
+	// omRigConfigTTL is how long a read of the rig's .om.json is reused. The
+	// file changes only when a landing changes it, and each read starts git.
+	omRigConfigTTL = 30 * time.Second
+	// omUserConfigSource names the user's om config as the origin of a value.
+	omUserConfigSource = "~/.config/om/config.json"
 )
 
 var (
@@ -392,12 +405,18 @@ type omReader struct {
 	landings *dashLandings
 	logPath  string
 	cfgPath  string
+	// rigOM reads the rig's .om.json as the landing worker sees it: its bytes,
+	// and whether the rig has one. Nil reads as a rig with none.
+	rigOM func() (data []byte, found bool, err error)
 	// procs lists the host's processes, and polecatFor names who holds a bead,
 	// read from the bead store by the caller: the om panel's running rows and
 	// the Landings pane's live rows ask that one question of the same reader.
 	procs      omProcLister
 	polecatFor func(rig, bead string) string
 
+	rigMu    sync.Mutex // guards the cached read of the rig's .om.json
+	rigCfg   omRigRead
+	rigAt    time.Time
 	mu       sync.Mutex
 	offset   int64
 	stages   []omStage
@@ -409,8 +428,99 @@ type omReader struct {
 func newOMReader(townRoot string, landings *dashLandings, polecatFor func(rig, bead string) string) *omReader {
 	return &omReader{
 		landings: landings, logPath: filepath.Join(townRoot, "daemon", "daemon.log"), cfgPath: omConfigPath(),
+		rigOM: func() ([]byte, bool, error) { return readRigOMJSON(townRoot, omPanelRig) },
 		procs: listOMProcs, polecatFor: polecatFor,
 	}
+}
+
+// readRigOMJSON reads .om.json from the tip of the rig's landing target in its
+// bare repository: the file land.OMThreshold and the worker's om run read, off
+// the base the worker merges onto. found is false for a target with no
+// .om.json; any other failure is an error, never "none".
+func readRigOMJSON(townRoot, rigName string) (data []byte, found bool, err error) {
+	rigPath := filepath.Join(townRoot, rigName)
+	remote, err := rig.ResolveLandingRemote(townRoot, rigName)
+	if err != nil {
+		return nil, false, err
+	}
+	branch := "main"
+	cfg, err := rig.LoadRigConfigIfPresent(rigPath)
+	if err != nil {
+		return nil, false, err
+	}
+	if cfg != nil && cfg.DefaultBranch != "" {
+		branch = cfg.DefaultBranch
+	}
+	out, err := git.NewGit(filepath.Join(rigPath, ".repo.git")).ShowFileAtRev(remote+"/"+branch, ".om.json")
+	if errors.Is(err, git.ErrNotAtRef) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return []byte(out), true, nil
+}
+
+// omRigRead is one read of the rig's .om.json.
+type omRigRead struct {
+	data  []byte
+	found bool
+	err   error
+}
+
+// rigRead returns the rig's .om.json, reusing a read younger than
+// omRigConfigTTL. It starts git, so it runs outside r.mu.
+func (r *omReader) rigRead(now time.Time) omRigRead {
+	if r.rigOM == nil {
+		return omRigRead{}
+	}
+	r.rigMu.Lock()
+	defer r.rigMu.Unlock()
+	if age := now.Sub(r.rigAt); !r.rigAt.IsZero() && age >= 0 && age < omRigConfigTTL {
+		return r.rigCfg
+	}
+	data, found, err := r.rigOM()
+	r.rigCfg, r.rigAt = omRigRead{data: data, found: found, err: err}, now
+	return r.rigCfg
+}
+
+// resolveOMConfig is the config the landing worker's reviews run under: the
+// rig's .om.json over the user's config, which supplies what the rig file
+// leaves out (om's backend lives there). The second result says where the
+// threshold comes from, for the panel's caption. A rig file that is there but
+// cannot be read or parsed fails every review, so none of its numbers is
+// guessed from the user config: threshold, depth and timeout are left empty and
+// the source says why.
+func resolveOMConfig(user omConfig, rigName string, rr omRigRead) (omConfig, string) {
+	rigFile := rigName + " .om.json"
+	if !rr.found && rr.err == nil {
+		return user, omUserConfigSource + ", " + rigName + " has no .om.json"
+	}
+	var rc omConfig
+	err := rr.err
+	if err == nil {
+		err = json.Unmarshal(rr.data, &rc)
+	}
+	if err != nil {
+		return omConfig{Backend: user.Backend}, rigFile + " unreadable: " + err.Error()
+	}
+	out := user
+	source := rigFile
+	if rc.Threshold != nil {
+		out.Threshold = rc.Threshold
+	} else {
+		source = omUserConfigSource + ", " + rigFile + " sets no threshold"
+	}
+	if len(rc.Backend) > 0 {
+		out.Backend = rc.Backend
+	}
+	if rc.Depth != "" {
+		out.Depth = rc.Depth
+	}
+	if rc.Timeout > 0 {
+		out.Timeout = rc.Timeout
+	}
+	return out, source
 }
 
 // omConfigPath is the reviewer's own config, in the home of whoever runs the
@@ -433,10 +543,12 @@ func omConfigPath() string {
 // panel's poll for.
 func (r *omReader) read(now time.Time) *dashboard.OM {
 	procs := r.listProcs()
-	om, cands := r.readPanelLocked(now)
+	cfg, thresholdSource := resolveOMConfig(loadOMConfig(r.cfgPath), omPanelRig, r.rigRead(now))
+	om, cands := r.readPanelLocked(now, cfg)
 	if om == nil {
 		return nil
 	}
+	om.ThresholdSource = thresholdSource
 	om.Running = r.runningRows(cands, procs, now)
 	return om
 }
@@ -444,13 +556,13 @@ func (r *omReader) read(now time.Time) *dashboard.OM {
 // readPanelLocked is the panel's numbers off the log and the landings files,
 // and the merges in flight as the candidate-commit join a running review is
 // found under. r.mu is held; nil, nil is a read the log gave nothing to.
-func (r *omReader) readPanelLocked(now time.Time) (*dashboard.OM, map[string]string) {
+func (r *omReader) readPanelLocked(now time.Time, cfg omConfig) (*dashboard.OM, map[string]string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err := r.scanLog(); err != nil && len(r.stages) == 0 && len(r.rejects) == 0 {
 		return nil, nil
 	}
-	om := buildOM(now, r.landings.get(), r.stages, r.rejects, loadOMConfig(r.cfgPath))
+	om := buildOM(now, r.landings.get(), r.stages, r.rejects, cfg)
 	cands := make(map[string]string, len(r.merges))
 	for _, m := range r.merges {
 		if m.Cand != "" {

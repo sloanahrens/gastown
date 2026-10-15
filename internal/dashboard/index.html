@@ -1700,7 +1700,7 @@ function renderOM(s) {
     $("omnote").textContent = "";
     return;
   }
-  $("omnote").textContent = readCaption(r, [om.model, om.depth, om.threshold != null ? "threshold " + om.threshold : null, om.timeout_s ? om.timeout_s + "s timeout" : null, r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null]);
+  $("omnote").textContent = readCaption(r, [om.model, om.depth, om.threshold != null ? "threshold " + om.threshold + (om.threshold_source ? " (" + om.threshold_source + ")" : "") : (om.threshold_source ? "threshold unknown (" + om.threshold_source + ")" : null), om.timeout_s ? om.timeout_s + "s timeout" : null, r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null]);
 
   // Running now, then the last five om ran, above both folds. A server that
   // sends neither list draws neither block.
