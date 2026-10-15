@@ -92,6 +92,24 @@ const (
 	PriorityMax = 4
 )
 
+// PushMaxPriority is the lowest priority a question is pushed to the human at.
+// A question at P0, P1 or P2 is one the human must answer before the work it
+// holds can move; a P3 or P4 waits on the dashboard instead of in a text
+// (gt-71714).
+const PushMaxPriority = 2
+
+// PushPriority reports whether a question at priority is worth a push.
+func PushPriority(priority int) bool {
+	return priority >= PriorityMin && priority <= PushMaxPriority
+}
+
+// PushTitle is the one line a push carries: the question's id, so the text
+// names the dashboard row it is about, its priority and its title. The body is
+// never pushed (gt-71714).
+func PushTitle(id string, priority int, title string) string {
+	return fmt.Sprintf("Question %s P%d: %s", id, priority, title)
+}
+
 // CheckPriority refuses a priority outside bd's range.
 func CheckPriority(priority int) error {
 	if priority < PriorityMin || priority > PriorityMax {

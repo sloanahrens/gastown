@@ -3974,6 +3974,48 @@ func TestEscalationConfigGetStaleThreshold(t *testing.T) {
 	}
 }
 
+func TestEscalationConfigGetUnhandledAfter(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		config   *EscalationConfig
+		expected time.Duration
+	}{
+		{
+			name:     "default when empty",
+			config:   &EscalationConfig{},
+			expected: 30 * time.Minute,
+		},
+		{
+			name:     "2 hours",
+			config:   &EscalationConfig{UnhandledAfter: "2h"},
+			expected: 2 * time.Hour,
+		},
+		{
+			name:     "invalid duration falls back to the default",
+			config:   &EscalationConfig{UnhandledAfter: "invalid"},
+			expected: 30 * time.Minute,
+		},
+		{
+			// A window of zero would push every escalation the moment it was
+			// filed, which is the rule this key exists to relax.
+			name:     "a zero window falls back to the default",
+			config:   &EscalationConfig{UnhandledAfter: "0"},
+			expected: 30 * time.Minute,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tt.config.GetUnhandledAfter(); got != tt.expected {
+				t.Errorf("GetUnhandledAfter() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestEscalationConfigGetRouteForSeverity(t *testing.T) {
 	t.Parallel()
 

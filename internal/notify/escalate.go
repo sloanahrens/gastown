@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/events"
@@ -149,10 +150,17 @@ func sendNotifications(req EscalationRequest, issueID string, cfg *config.Escala
 	severity, description, townRoot, agentID := req.Severity, req.Description, req.TownRoot, req.EscalatedBy
 	actions := cfg.GetRouteForSeverity(severity)
 	targets := MailTargets(actions)
+	owner := attention.EscalationOwner(agentID)
 
 	router := mail.NewRouter(townRoot, req.Prefixes)
 	defer router.WaitPendingNotifications()
 	statuses := []DeliveryStatus{{Channel: "bead", Created: true, Severity: severity}}
+	if owner != attention.OwnerSloan {
+		// The withheld push is in the result rather than silent: the operator
+		// reading `gt escalate --json` sees that nothing texted anyone, and why.
+		statuses = append(statuses, DeliveryStatus{Channel: "push", Target: string(owner), Severity: severity,
+			Warning: "no push at filing: the escalation is not the human's to act on"})
+	}
 	for _, target := range targets {
 		status := DeliveryStatus{Target: target, Channel: "mail", Severity: severity, NotificationRoute: "mail+nudge"}
 		msg := &mail.Message{
@@ -207,8 +215,11 @@ func sendNotifications(req EscalationRequest, issueID string, cfg *config.Escala
 		statuses = append(statuses, status)
 	}
 
-	// Process external notification actions (email:, sms:, slack, log)
-	statuses = append(statuses, executeExternalActions(actions, cfg, issueID, severity, description, townRoot, senders)...)
+	// Process external notification actions (email:, sms:, slack, log) that
+	// reach the human. A push is gated on the owner: the escalation reaches the
+	// humans' channels only when the human is the one who has to act on it
+	// (gt-71714).
+	statuses = append(statuses, executeExternalActions(PushActions(actions, owner), cfg, issueID, severity, description, townRoot, senders)...)
 
 	// Log to activity feed
 	payload := events.EscalationPayload(issueID, agentID, strings.Join(targets, ","), description)

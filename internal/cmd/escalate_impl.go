@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/done"
@@ -138,6 +139,9 @@ func (r escalateRun) escalate(args []string) error {
 		}
 		fmt.Fprintf(r.out, "  Actions: %s\n", strings.Join(actions, ", "))
 		fmt.Fprintf(r.out, "  Mail targets: %s\n", strings.Join(targets, ", "))
+		owner := attention.EscalationOwner(agentID)
+		fmt.Fprintf(r.out, "  Owner: %s\n", owner)
+		fmt.Fprintf(r.out, "  Pushing to the human: %s\n", strings.Join(notify.PushActions(actions, owner), ", "))
 		return nil
 	}
 

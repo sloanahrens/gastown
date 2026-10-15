@@ -2591,6 +2591,13 @@ func validateEscalationConfig(c *EscalationConfig) error {
 		}
 	}
 
+	// Validate unhandled_after if specified
+	if c.UnhandledAfter != "" {
+		if _, err := time.ParseDuration(c.UnhandledAfter); err != nil {
+			return fmt.Errorf("invalid unhandled_after: %w", err)
+		}
+	}
+
 	// Initialize nil maps
 	if c.Routes == nil {
 		c.Routes = make(map[string][]string)
@@ -2677,6 +2684,20 @@ func (c *EscalationConfig) GetRenotifyWindow() time.Duration {
 		return time.Hour
 	}
 	return d
+}
+
+// DefaultEscalationUnhandledAfter is how long an escalation the overseer owns
+// may stay open before the human is pushed about it (gt-71714).
+const DefaultEscalationUnhandledAfter = 30 * time.Minute
+
+// GetUnhandledAfter returns how long an escalation the overseer owns may stay
+// open before the human is pushed about it. Returns the default if not
+// configured, invalid or not positive.
+func (c *EscalationConfig) GetUnhandledAfter() time.Duration {
+	if d, err := time.ParseDuration(c.UnhandledAfter); err == nil && d > 0 {
+		return d
+	}
+	return DefaultEscalationUnhandledAfter
 }
 
 // GetRouteForSeverity returns the escalation route actions for a given severity.

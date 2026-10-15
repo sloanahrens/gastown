@@ -66,7 +66,8 @@ cycle, and a condition that persists for days would never say so twice.
   },
   "stale_threshold": "4h",
   "max_reescalations": 2,
-  "renotify_window": "1h"
+  "renotify_window": "1h",
+  "unhandled_after": "30m"
 }
 ```
 
@@ -125,6 +126,23 @@ Try a command with `gt notify test <name>`. It sends `gastown notify test`
 and prints `NOTIFY OK` or `NOTIFY FAILED: <reason>`, exiting 1 on a failure.
 Go code calls `notify.Push(name, title, body)` to push through the same
 commands.
+
+### Who a Push Goes To
+
+A push is for what the human must act on, so the escalation's owner decides
+whether it is sent at all (gt-71714). The owner is the human's when the human's
+own session raised the escalation, and the overseer's when a polecat, a crew
+session or the daemon raised it, because the overseer triages those first:
+`exec:`, `email:`, `sms:` and `slack` run for the human's, while the bead, the
+mail to agents and the log run either way.
+
+An escalation the overseer owns reaches the human only if nobody acted on it for
+`unhandled_after` (default `"30m"`). The daemon pushes one line then — `Unhandled
+for 30 min: <id> <title>` — through the command `operational.overseer.silent_push`
+names, and records the push as the `unhandled-pushed` label so a restart does not
+say it twice. `gt ask` pushes a question the same way when it is filed at P0, P1
+or P2, as `Question <id> P<n>: <title>`; a P3 or P4 waits on the dashboard. Both
+push the title alone: no escalation body and no question body leave the town.
 
 ## Escalation Beads
 

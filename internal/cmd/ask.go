@@ -12,7 +12,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dashboard"
+	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/question"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -37,7 +39,9 @@ var askCmd = &cobra.Command{
 overseer-question label, and hold the work it blocks until it is closed.
 
 The question is a bead like any other, so --priority files it at bd's 0-4
-(default 2) and a P0 question outranks one that can wait. --effort quick or
+(default 2) and a P0 question outranks one that can wait. A question at P0, P1
+or P2 is also pushed to the human through the town's notify command, so it
+reaches a phone; a P3 or P4 waits on the dashboard instead. --effort quick or
 session records what answering takes, as an effort: label; a question filed
 without one carries no tag.
 
@@ -139,12 +143,38 @@ func openQuestionStore() (questionStore, error) {
 
 func runAsk(cmd *cobra.Command, args []string) error {
 	opts := question.AskOptions{Priority: askPriority, Effort: askEffort}
-	return askQuestion(cmd.InOrStdin(), cmd.OutOrStdout(), args[0], opts, openQuestionStore)
+	push, err := townQuestionPush()
+	if err != nil {
+		return err
+	}
+	return askQuestion(cmd.InOrStdin(), cmd.OutOrStdout(), args[0], opts, openQuestionStore, push)
+}
+
+// questionPush is where a question reaches the human: the notify command's name
+// and the runner for it. A zero value pushes nothing, which is what a town that
+// configures no command wants.
+type questionPush struct {
+	name string
+	run  func(name, title, body string) error
+}
+
+// townQuestionPush is the push gt ask makes: the notify command named by
+// operational.overseer.silent_push, the same one the silent-overseer alert uses.
+// A town that names none pushes nothing.
+func townQuestionPush() (questionPush, error) {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return questionPush{}, fmt.Errorf("finding the town root: %w", err)
+	}
+	name := config.LoadOperationalConfig(townRoot).GetOverseerConfig().SilentPushName()
+	return questionPush{name: name, run: func(n, title, body string) error {
+		return notify.PushIn(townRoot, n, title, body)
+	}}, nil
 }
 
 // askQuestion is gt ask: it reads and checks the body and the flags before it
 // opens the town database, so a refused question touches nothing.
-func askQuestion(in io.Reader, out io.Writer, title string, opts question.AskOptions, open func() (questionStore, error)) error {
+func askQuestion(in io.Reader, out io.Writer, title string, opts question.AskOptions, open func() (questionStore, error), push questionPush) error {
 	body, err := readQuestionInput(in, "the question body")
 	if err != nil {
 		return err
@@ -163,7 +193,23 @@ func askQuestion(in io.Reader, out io.Writer, title string, opts question.AskOpt
 	}
 	fmt.Fprintln(out, id)
 	fmt.Fprintf(out, "answer with: %s\n", answerCommand(id))
+	pushQuestion(out, push, id, ask)
 	return holdErr
+}
+
+// pushQuestion pushes a filed question to the human when its priority says the
+// human must answer it (question.PushPriority). A push that fails is reported,
+// never returned: the question exists, and the answer command printed beside it
+// is what the operator needs either way.
+func pushQuestion(out io.Writer, push questionPush, id string, ask question.Ask) {
+	if push.name == "" || push.run == nil || !question.PushPriority(ask.Priority) {
+		return
+	}
+	if err := push.run(push.name, question.PushTitle(id, ask.Priority, ask.Title), ""); err != nil {
+		fmt.Fprintf(out, "warning: the question was filed but not pushed through %s: %v\n", push.name, err)
+		return
+	}
+	fmt.Fprintf(out, "pushed through %s\n", push.name)
 }
 
 // fileQuestion files the question bead and holds the work it names. It returns

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/notify/pushcmd"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -64,9 +65,38 @@ func pushMessage(title, body string) string {
 }
 
 // sendEscalationExec pushes one escalation through the notify command a route's
-// exec:<name> action names.
+// exec:<name> action names. The title carries the bead id, so a text on a lock
+// screen names the dashboard row it is about (gt-71714).
 func sendEscalationExec(run commandRunner, cfg *config.EscalationConfig, name, beadID, severity, description string) error {
-	title := fmt.Sprintf("[Gas Town %s] %s", strings.ToUpper(severity), description)
+	title := fmt.Sprintf("[Gas Town %s] %s: %s", strings.ToUpper(severity), beadID, description)
 	body := fmt.Sprintf("Bead: %s\nSeverity: %s\nAcknowledge: gt escalate ack %s", beadID, strings.ToUpper(severity), beadID)
 	return pushThrough(run, cfg, name, title, body)
+}
+
+// PushActions returns the route actions that reach the human — the notify
+// commands (exec:), email, sms and slack — which run only when the human owns
+// the escalation. The bead, the mail to agents and the log are how an
+// escalation reaches the machines that triage it, and they run whatever its
+// owner is.
+//
+// An escalation the overseer owns pushes nothing when it is filed: a text is
+// for what the human must act on, and the overseer is the one who acts on this
+// one. It reaches the human only if it is still open after the unhandled window
+// (PushUnhandled, gt-71714).
+func PushActions(actions []string, owner attention.Owner) []string {
+	if owner == attention.OwnerSloan {
+		return actions
+	}
+	out := make([]string, 0, len(actions))
+	for _, action := range actions {
+		if _, ok := config.ExecActionName(action); ok {
+			continue
+		}
+		switch {
+		case action == "slack", strings.HasPrefix(action, "email:"), strings.HasPrefix(action, "sms:"):
+			continue
+		}
+		out = append(out, action)
+	}
+	return out
 }
