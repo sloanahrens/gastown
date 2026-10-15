@@ -22,10 +22,15 @@ const (
 	// attentionDispatchIdleTicks is how many consecutive idle ticks raise the
 	// rule: about five minutes at the default 60s interval.
 	attentionDispatchIdleTicks = 5
-	// attentionDispatchIdleFresh is how old the newest tick may be for the
-	// streak to still describe now. Past it the ticker is off or failing, and
-	// a stale streak would hold the item for good.
+	// attentionDispatchIdleFresh is how old the newest tick may be at the
+	// default cadence and still have the streak describe now. Past the bound
+	// the ticker is off or failing, and a stale streak would hold the item for
+	// good. A ticker that runs slower than the default gets its own cadence's
+	// bound instead, which is never shorter than this one (gt-icmdq).
 	attentionDispatchIdleFresh = 10 * time.Minute
+	// attentionDispatchIdleGapIntervals is how many of the ticker's own intervals
+	// two ticks may be apart and still count as consecutive (gt-icmdq).
+	attentionDispatchIdleGapIntervals = 5
 	// attentionDispatchIdleReasons is how many skip reasons the summary names.
 	attentionDispatchIdleReasons = 3
 )
@@ -41,6 +46,10 @@ type dispatchIdleStatus struct {
 	Streak int
 	// At is when the newest tick was observed.
 	At time.Time
+	// Fresh is how old At may be and still have the streak describe now: the
+	// ticker's own cadence, scaled, so a slow ticker's streak is not read as
+	// stale between two of its ticks (gt-icmdq).
+	Fresh time.Duration
 	// Roster is the newest idle tick's roster, as the tick printed it.
 	Roster string
 	// Waiting is how many dispatchable beads that tick left undispatched.
@@ -59,16 +68,56 @@ type dispatchIdleReason struct {
 // the heartbeat reads it.
 type dispatchIdleTracker struct {
 	mu sync.Mutex
-	st dispatchIdleStatus
+	// interval is the ticker's cadence, set where the ticker starts. The
+	// consecutive-tick gap scales with it, so a ticker slower than the default
+	// still has consecutive ticks (gt-icmdq).
+	interval time.Duration
+	st       dispatchIdleStatus
+}
+
+// setInterval records the cadence the ticker runs at, before its first tick.
+func (t *dispatchIdleTracker) setInterval(d time.Duration) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.interval = d
+}
+
+// gap is how long the ticker may be quiet between two ticks and still have them
+// count as consecutive: attentionDispatchIdleGapIntervals of its own intervals.
+// A fixed five minutes would end the streak on every tick of a slower ticker,
+// and the idle alarm could never raise at all (gt-icmdq).
+func (t *dispatchIdleTracker) gap() time.Duration {
+	interval := t.interval
+	if interval <= 0 {
+		interval = defaultSpecDispatchInterval
+	}
+	return attentionDispatchIdleGapIntervals * interval
+}
+
+// fresh is how old the newest tick may be and still describe now. The floor
+// holds a ticker at the default cadence to the same bound as before; a slower
+// one is held to its own gap, which is longer, or its last tick would read as
+// stale for most of every interval (gt-icmdq).
+func (t *dispatchIdleTracker) fresh() time.Duration {
+	if g := t.gap(); g > attentionDispatchIdleFresh {
+		return g
+	}
+	return attentionDispatchIdleFresh
 }
 
 // Observe folds one tick report into the streak. A tick is idle when the
 // roster shows a free seat, a dispatchable bead waited and nothing was
 // dispatched. Any other tick ends the streak: a held tick decided nothing on
-// purpose, and a roster that cannot be read could be hiding a full town.
+// purpose, and a roster that cannot be read could be hiding a full town. A tick
+// arriving more than gap after the last one ends it too: the ticker was parked,
+// failing or behind in between, and the idle ticks either side of that gap are
+// not consecutive (gt-icmdq).
 func (t *dispatchIdleTracker) Observe(r specDispatchTickReport, at time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if !t.st.At.IsZero() && at.Sub(t.st.At) > t.gap() {
+		t.st.Streak = 0
+	}
 	t.st.At = at
 	if r.Hold != "" || len(r.Dispatched) > 0 || !rosterHasFreeSeat(r.Roster) {
 		t.st.Streak = 0
@@ -83,11 +132,23 @@ func (t *dispatchIdleTracker) Observe(r specDispatchTickReport, at time.Time) {
 	t.st.Roster, t.st.Waiting, t.st.Reasons = r.Roster, waiting, reasons
 }
 
-// Status returns the tracker's current reading.
+// Reset ends the streak: the ticker did not tick, so the run of idle ticks
+// ending at the last observation is over (gt-icmdq). The recorded tick keeps
+// its time, which is what the freshness check reads.
+func (t *dispatchIdleTracker) Reset() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.st.Streak = 0
+}
+
+// Status returns the tracker's current reading, with the freshness bound its
+// cadence gives it: the reader cannot judge the streak without both.
 func (t *dispatchIdleTracker) Status() dispatchIdleStatus {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.st
+	st := t.st
+	st.Fresh = t.fresh()
+	return st
 }
 
 // rosterHasFreeSeat reports whether any seat in the roster has room. An
@@ -182,7 +243,7 @@ func dispatchIdleReasonKey(reason string) string {
 // collectDispatchIdle raises dispatch.idle while the tracker's streak has
 // reached attentionDispatchIdleTicks. It raises nothing under an operator
 // hold, since an idle dispatcher is what the hold asked for, and nothing from
-// a streak whose newest tick is old.
+// a streak whose newest tick is older than the ticker's own cadence allows.
 func (s *attentionSources) collectDispatchIdle(ctx context.Context) ([]attention.Item, error) {
 	if s.dispatchIdle == nil {
 		return nil, nil
@@ -191,7 +252,7 @@ func (s *attentionSources) collectDispatchIdle(ctx context.Context) ([]attention
 		return nil, nil
 	}
 	st := s.dispatchIdle()
-	if st.Streak < attentionDispatchIdleTicks || s.now.Sub(st.At) > attentionDispatchIdleFresh {
+	if st.Streak < attentionDispatchIdleTicks || s.now.Sub(st.At) > st.Fresh {
 		return nil, nil
 	}
 	return []attention.Item{{

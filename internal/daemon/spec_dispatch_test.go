@@ -367,3 +367,81 @@ func TestTriggerSpecDispatchParkedTicksNothing(t *testing.T) {
 		t.Errorf("lift line count = %d, want one", n)
 	}
 }
+
+// gt-icmdq: the idle streak counts consecutive ticks that each observed the
+// town. A tick that never ran under the operator hold, one that failed, and one
+// whose report cannot be read each observed nothing, so the run ends there and
+// the next idle tick counts from one instead of completing a streak the ticker
+// never kept.
+func TestSpecDispatchEndsTheIdleStreakWhenNoTickIsObserved(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		hold      bool
+		reply     cliReply
+		wantStart bool
+	}{
+		{"the town hold", true, cliReply{}, false},
+		{"a held report", false, cliReply{stdout: `{"hold": "operator dispatch hold present"}`}, true},
+		{"a failed tick", false, cliReply{code: 1, stderr: "boom"}, true},
+		{"an unreadable report", false, cliReply{stdout: "garbage"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			if tc.hold {
+				writeOperatorHold(t, townRoot)
+			}
+			fake := newFakeCLI(func([]string) cliReply { return tc.reply })
+			d := &Daemon{
+				config:       &Config{TownRoot: townRoot},
+				ctx:          context.Background(),
+				logger:       log.New(io.Discard, "", 0),
+				execCmd:      fake.run,
+				patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{SpecDispatch: &SpecDispatchConfig{Enabled: true}}},
+			}
+			idle := idleTick(overlapLine)
+			at := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+			for i := 0; i < attentionDispatchIdleTicks-1; i++ {
+				d.dispatchIdle.Observe(idle, at.Add(time.Duration(i)*time.Minute))
+			}
+			if started := d.triggerSpecDispatch(); started != tc.wantStart {
+				t.Fatalf("tick started = %v, want %v", started, tc.wantStart)
+			}
+			d.specDispatchCycles.Wait()
+
+			if got := d.dispatchIdle.Status().Streak; got != 0 {
+				t.Fatalf("Streak = %d after a tick that observed nothing, want 0", got)
+			}
+			// The next idle tick counts from one, a minute on and so inside the
+			// ticker's own cadence: four idle ticks, the tick that observed
+			// nothing and one more must not raise the five-tick item.
+			d.dispatchIdle.Observe(idle, at.Add(4*time.Minute))
+			if got := d.dispatchIdle.Status().Streak; got != 1 {
+				t.Fatalf("Streak = %d after one idle tick on, want 1", got)
+			}
+		})
+	}
+}
+
+// gt-icmdq: a seat picture that will not parse starts no tick, so the run of
+// idle ticks ends there rather than resuming across the ticks that never ran.
+func TestSpecDispatchSeatsUnreadableEndsTheIdleStreak(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeSpecSeatTown(t, root, specSeatPool("claude-sonnet", 2))
+	d, _, _ := specSeatDaemon(t, root)
+	writeSpecSeatBody(t, root, `{"type": "town-settings", "version": 1, "polecat_pool": {"agent": "claude-sonnet", "max_seats":`)
+
+	idle := idleTick(overlapLine)
+	at := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < attentionDispatchIdleTicks-1; i++ {
+		d.dispatchIdle.Observe(idle, at.Add(time.Duration(i)*time.Minute))
+	}
+	if specSeatTick(d) {
+		t.Fatal("the ticker ticked on a seat file that does not parse")
+	}
+	if got := d.dispatchIdle.Status().Streak; got != 0 {
+		t.Fatalf("Streak = %d after a tick the seat file stopped, want 0", got)
+	}
+}

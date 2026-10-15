@@ -535,6 +535,11 @@ type Daemon struct {
 	// upgrade restart deferred its cycle; triggerTierSweep clears it when no
 	// restart is pending, so the line appears once per restart.
 	tierSweepSkipLogged atomic.Bool
+	// tierSweepStaleLogged is the same, for the line saying the owed sweep is
+	// past the stale bound and so runs despite the restart. Shared with the
+	// skip line's latch, a restart that already deferred a younger sweep would
+	// swallow it (gt-icmdq).
+	tierSweepStaleLogged atomic.Bool
 	// tierSweepSeams replace the tier_sweep job's outside effects in tests;
 	// the zero value is production (see tier_sweep.go).
 	tierSweepSeams tierSweepSeams
@@ -1129,6 +1134,9 @@ func (d *Daemon) Run() (err error) {
 	var specDispatchChan <-chan time.Time
 	if d.isPatrolActive("spec_dispatch") {
 		interval := specDispatchInterval(d.patrolConfig)
+		// The idle rule's consecutive-tick gap is a multiple of the cadence the
+		// ticker actually runs at (gt-icmdq).
+		d.dispatchIdle.setInterval(interval)
 		specDispatchTicker = time.NewTicker(interval)
 		specDispatchChan = specDispatchTicker.C
 		defer specDispatchTicker.Stop()

@@ -101,6 +101,9 @@ func (d *Daemon) triggerSpecDispatch() bool {
 		if d.specDispatchHold.Changed(reason) {
 			d.logger.Printf("spec_dispatch: not ticking: %s", reason)
 		}
+		// No tick runs under the hold, so the run of idle ticks ends here
+		// rather than resuming across it (gt-icmdq).
+		d.dispatchIdle.Reset()
 		return false
 	}
 	if d.specDispatchHold.Changed("") {
@@ -109,6 +112,9 @@ func (d *Daemon) triggerSpecDispatch() bool {
 	// The seats are read here rather than at startup: an edit to the mix lands
 	// at the next tick (spec_seats.go, gt-jdnab).
 	if !d.specSeatsReady() {
+		// A half-read seat picture starts no tick, so the run of idle ticks
+		// ends here rather than resuming across it (gt-icmdq).
+		d.dispatchIdle.Reset()
 		return false
 	}
 	if !d.specDispatchRunning.CompareAndSwap(false, true) {
@@ -165,15 +171,26 @@ func (d *Daemon) runSpecDispatch() {
 	out, err := d.runSpecDispatchCommand()
 	if err != nil {
 		d.logger.Printf("spec_dispatch: tick failed: %v", err)
+		// A tick that failed observed nothing, so the run of idle ticks ends
+		// here: the next one counts from one (gt-icmdq).
+		d.dispatchIdle.Reset()
 		return
 	}
 	if r, perr := parseSpecDispatchReport(out); perr == nil {
 		now := d.clk().Now()
-		d.dispatchIdle.Observe(r, now)
-		// A held tick decided nothing, so it carries no roster to record.
-		if r.Hold == "" {
+		// A held tick decided nothing and carries no roster, so it observes no
+		// idle run either: the streak ends here, as it does when no tick runs
+		// at all (gt-icmdq).
+		if r.Hold != "" {
+			d.dispatchIdle.Reset()
+		} else {
+			d.dispatchIdle.Observe(r, now)
 			d.recordDispatchTick(r, now)
 		}
+	} else {
+		// A report nothing can read says nothing about the town: the run of
+		// idle ticks ends rather than carrying over the tick (gt-icmdq).
+		d.dispatchIdle.Reset()
 	}
 	for _, line := range d.formatSpecDispatchReport(out) {
 		d.logger.Printf("spec_dispatch: %s", line)
