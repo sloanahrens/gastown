@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -991,6 +992,53 @@ func TestLoadAccountsConfigNotFound(t *testing.T) {
 	_, err := LoadAccountsConfig("/nonexistent/path.json")
 	if err == nil {
 		t.Fatal("expected error for nonexistent file")
+	}
+}
+
+// TestResolveAccountConfigDirReportsUnparseableAccountsFile: a file that is
+// present but does not decode must reach the caller. Swallowing it dropped
+// --account, and the worker then ran on the default Claude config dir under the
+// wrong account (gt-yx4ay).
+func TestResolveAccountConfigDirReportsUnparseableAccountsFile(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "mayor", "accounts.json")
+	writeFile(t, path, `{"version":1,"accounts":{"work":{"config_dir":"/x"}},"zz_unknown":1}`)
+
+	configDir, handle, err := ResolveAccountConfigDir(path, "work")
+	if !errors.Is(err, ErrUnparseable) {
+		t.Fatalf("ResolveAccountConfigDir(unknown key) = %v, want ErrUnparseable", err)
+	}
+	if configDir != "" || handle != "" {
+		t.Errorf("configDir, handle = %q, %q, want both empty", configDir, handle)
+	}
+}
+
+// TestResolveAccountConfigDirReportsMissingAccountsFile: with no file there is
+// no account to select, so --account names something that does not exist and
+// must fail rather than fall through to the default config dir. A town that
+// simply has no accounts.json and asks for no account keeps the silent empty
+// result.
+func TestResolveAccountConfigDirReportsMissingAccountsFile(t *testing.T) {
+	t.Parallel()
+	missing := filepath.Join(t.TempDir(), "mayor", "accounts.json")
+
+	configDir, handle, err := ResolveAccountConfigDir(missing, "work")
+	if err == nil {
+		t.Fatal("ResolveAccountConfigDir(missing file, account 'work') = nil, want an error")
+	}
+	if !errors.Is(err, ErrNotFound) || !strings.Contains(err.Error(), "work") {
+		t.Errorf("err = %v, want the not-found error naming the account", err)
+	}
+	if configDir != "" || handle != "" {
+		t.Errorf("configDir, handle = %q, %q, want both empty", configDir, handle)
+	}
+
+	configDir, handle, err = ResolveAccountConfigDir(missing, "")
+	if err != nil {
+		t.Fatalf("ResolveAccountConfigDir(missing file, no account) = %v, want nil", err)
+	}
+	if configDir != "" || handle != "" {
+		t.Errorf("configDir, handle = %q, %q, want both empty", configDir, handle)
 	}
 }
 

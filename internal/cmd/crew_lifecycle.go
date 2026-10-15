@@ -300,7 +300,10 @@ func runCrewStart(cmd *cobra.Command, args []string) error {
 		townRoot = filepath.Dir(r.Path)
 	}
 	accountsPath := constants.MayorAccountsPath(townRoot)
-	claudeConfigDir, _, _ := config.ResolveAccountConfigDir(accountsPath, crewAccount)
+	claudeConfigDir, _, err := config.ResolveAccountConfigDir(accountsPath, crewAccount)
+	if err != nil {
+		return fmt.Errorf("resolving account: %w", err)
+	}
 
 	// Validate: --resume with a specific session ID only makes sense for a single
 	// crew member. Resuming N members with the same session ID is always a mistake.

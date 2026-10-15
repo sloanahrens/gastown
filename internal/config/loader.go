@@ -690,11 +690,24 @@ func (c *AccountsConfig) GetDefaultAccount() *Account {
 //
 // Returns empty string if no account configured or resolved.
 // Returns the handle that was resolved as second value.
+//
+// An absent accounts file is not an error on its own, but every other load
+// failure is returned: the callers pass --account straight through to
+// CLAUDE_CONFIG_DIR, so swallowing a parse error would silently run the worker
+// on the default config dir under the wrong account.
 func ResolveAccountConfigDir(accountsPath, accountFlag string) (configDir, handle string, err error) {
 	// Load accounts config
 	cfg, loadErr := LoadAccountsConfig(accountsPath)
 	if loadErr != nil {
-		// No accounts configured - that's OK, return empty
+		// A file that is present but does not load is the caller's problem.
+		if !errors.Is(loadErr, ErrNotFound) {
+			return "", "", loadErr
+		}
+		// No accounts file: fine with no account requested, but --account
+		// names an account that only the missing file could have defined.
+		if accountFlag != "" {
+			return "", "", fmt.Errorf("account '%s' not found: %w", accountFlag, loadErr)
+		}
 		return "", "", nil
 	}
 
