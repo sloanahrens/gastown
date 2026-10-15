@@ -386,6 +386,13 @@ type Daemon struct {
 	specUnshapedWarnedMu sync.Mutex
 	specUnshapedWarned   map[string]bool
 
+	// overseerReportRunning / overseerReportCycles are the overseer_report
+	// patrol's single-flight guard and cycle count (gt-a6fg7,
+	// overseer_report.go); overseerReportSeams replaces its sources in tests.
+	overseerReportRunning atomic.Bool
+	overseerReportCycles  sync.WaitGroup
+	overseerReportSeams   *overseerReportSeams
+
 	// patrolScanRunning / patrolScanCycles are the patrol_scan tick's
 	// single-flight guard and cycle count (gt-4k3fj.6, patrol_scan.go).
 	patrolScanRunning atomic.Bool
@@ -1098,6 +1105,20 @@ func (d *Daemon) Run() (err error) {
 		d.logger.Printf("Spec dispatch ticker started (interval %v)", interval)
 	}
 
+	// Start the overseer_report ticker if enabled (default off, gt-a6fg7). The
+	// report is one file per interval slot, so the run at startup writes the
+	// current slot's file unless an earlier run already did.
+	var overseerReportTicker *time.Ticker
+	var overseerReportChan <-chan time.Time
+	if d.isPatrolActive("overseer_report") {
+		interval := overseerReportInterval(d.patrolConfig)
+		overseerReportTicker = time.NewTicker(interval)
+		overseerReportChan = overseerReportTicker.C
+		defer overseerReportTicker.Stop()
+		d.logger.Printf("Overseer report ticker started (interval %v)", interval)
+		d.triggerOverseerReport()
+	}
+
 	// Start the patrol_scan tick if enabled (default off, gt-4k3fj.6): the
 	// deterministic replacement for the witness LLM's patrol.
 	var patrolScanTicker *time.Ticker
@@ -1230,6 +1251,13 @@ func (d *Daemon) Run() (err error) {
 			// ones within the seat budget, on its own goroutine (gt-4k3fj.5).
 			if !d.isShutdownInProgress() {
 				d.triggerSpecDispatch()
+			}
+
+		case <-overseerReportChan:
+			// Overseer report tick — writes the digest for the current slot on
+			// its own goroutine (gt-a6fg7).
+			if !d.isShutdownInProgress() {
+				d.triggerOverseerReport()
 			}
 
 		case <-patrolScanChan:

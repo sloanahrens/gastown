@@ -77,6 +77,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`overseer_report` patrol** (gt-a6fg7) — every 15 minutes the daemon writes
+  the status the overseer used to write by hand to
+  `.runtime/overseer/reports/<UTC timestamp>.md`, where the dashboard's Report
+  pane reads it: beads done since the previous report, working seats, the next
+  beads `gt spec dispatch --dry-run` would sling and the ones it holds, open
+  overseer questions and the town health line; the first report of each hour
+  adds `gt report --hour`'s sections. Off unless
+  `daemon.patrols.overseer_report.enabled` is true. `gt report` and the
+  patrol share `internal/report`, and `gt tail` and the report share
+  `internal/daemonlog`.
+
 - **A launchd respawn loop is a doctor finding and a red health line**
   (gt-92qx3) — when launchd cannot initialize the daemon job it respawns it
   every `ThrottleInterval` without the program ever running: `launchctl print`

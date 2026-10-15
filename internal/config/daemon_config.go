@@ -57,6 +57,7 @@ type PatrolsConfig struct {
 	OverrunGuard         *OverrunGuardConfig         `json:"overrun_guard,omitempty"`
 	ScheduledMaintenance *ScheduledMaintenanceConfig `json:"scheduled_maintenance,omitempty"`
 	SpecDispatch         *SpecDispatchConfig         `json:"spec_dispatch,omitempty"`
+	OverseerReport       *OverseerReportConfig       `json:"overseer_report,omitempty"`
 	PatrolScan           *PatrolScanConfig           `json:"patrol_scan,omitempty"`
 	RestartTracker       *RestartTrackerConfig       `json:"restart_tracker,omitempty"`
 	EventsPrune          *EventsPruneConfig          `json:"events_prune,omitempty"`
@@ -368,6 +369,18 @@ type EventsPruneConfig struct {
 
 	// MaxBytes caps the file size; over it, the newest half of the cap is kept.
 	MaxBytes int64 `json:"max_bytes,omitempty"`
+}
+
+// OverseerReportConfig configures the overseer_report patrol (gt-a6fg7): every
+// interval the daemon writes the digest the overseer used to write by hand to
+// <town>/.runtime/overseer/reports/, where the dashboard's Report pane reads
+// it. Off unless enabled.
+type OverseerReportConfig struct {
+	// Enabled turns the patrol on. Default off.
+	Enabled bool `json:"enabled"`
+
+	// IntervalStr is the slot length and cadence (default "15m").
+	IntervalStr string `json:"interval,omitempty"`
 }
 
 // PatrolScanConfig configures the patrol_scan tick (ADR 0005, gt-4k3fj.6):
