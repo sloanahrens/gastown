@@ -217,6 +217,23 @@ func ParseRejectionNote(notes string) (RejectionNote, bool) {
 	return n, true
 }
 
+// priorReviewFindings is the previous round's findings for the next review over
+// a bead's diff: the findings in the last MERGE REJECTION block, which is the
+// round that sent the work back (gt-cz07b). om classifies each as resolved,
+// unresolved or regressed, so a rework round is scored on what is still wrong
+// rather than on a fresh set of minors invented about an unchanged diff.
+//
+// Empty on a bead no refusal has rejected — which is exactly attempt 1 — and on
+// a refusal that raised none, such as a gate failure: that round has nothing
+// for om to classify, and the review runs cold.
+func priorReviewFindings(notes string) []Finding {
+	last, ok := ParseRejectionNote(notes)
+	if !ok {
+		return nil
+	}
+	return last.Findings
+}
+
 // parseRejectionHeader reads the "MERGE REJECTION (attempt N): kind - reason"
 // line. The class is dropped unless it is one word: the reason is free text
 // and its first word is not a class (the rule gt-1jig's readers use).

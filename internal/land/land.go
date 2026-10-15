@@ -715,13 +715,16 @@ func (l *Lander) logf(format string, args ...any) {
 // review runs the landing's reviewer over the merged tree, naming the work bead
 // when the reviewer can carry it, so om can echo the id back and a mismatch
 // reaches the landing log (gt-pwvv4), and carrying the bead's acceptance text
-// so om judges the diff against what the bead asked for (gt-yl7n4). A reviewer
-// that implements only Review is called exactly as before.
-func (l *Lander) review(ctx context.Context, beadID, criteria, dir, base, head string) (Verdict, error) {
+// so om judges the diff against what the bead asked for (gt-yl7n4) and the
+// previous round's findings so a rework round is scored against them
+// (gt-cz07b). A reviewer that implements only Review is called exactly as
+// before.
+func (l *Lander) review(ctx context.Context, in ReviewInput) (Verdict, error) {
+	in.Logf = l.logf
 	if br, ok := l.Reviewer.(BeadReviewer); ok {
-		return br.ReviewBead(ctx, ReviewInput{Dir: dir, Base: base, Head: head, BeadID: beadID, CriteriaText: criteria, Logf: l.logf})
+		return br.ReviewBead(ctx, in)
 	}
-	return l.Reviewer.Review(ctx, dir, base, head)
+	return l.Reviewer.Review(ctx, in.Dir, in.Base, in.Head)
 }
 
 func (l *Lander) open(dir string) Repo {
@@ -729,6 +732,89 @@ func (l *Lander) open(dir string) Repo {
 		return l.openRepo(dir)
 	}
 	return git.NewGit(dir)
+}
+
+// rescoreMargin is how far below the rig's bar a rejection may score, with no
+// major or critical finding, and still earn a second om run on the same head
+// (gt-cz07b). Reviewer noise is real at this distance: the same head scored
+// 0.78 in the daemon's run and 0.80 in the overseer's, so a diff whose true
+// score sits this close to the bar is decided by which run happened.
+const rescoreMargin = 0.03
+
+// rescoreEpsilon absorbs the float subtraction in the margin test. om's scores
+// and a bar are two-decimal values, and 0.8-0.77 is 0.030000000000000027:
+// without it a score exactly on the margin reads as outside it.
+const rescoreEpsilon = 1e-9
+
+// borderlineRejection reports whether v is a rejection a second om run may
+// flip: a request for changes with no major or critical finding that scored
+// within rescoreMargin of the rig's bar (gt-cz07b). A major finding is a
+// judgment, not noise, so it never earns a rerun, and bar <= 0 means the tree
+// named no bar for a score to be near.
+func borderlineRejection(v Verdict, bar float64) bool {
+	if v.Verdict != VerdictRequestChanges || bar <= 0 || v.Score >= bar {
+		return false
+	}
+	if bar-v.Score > rescoreMargin+rescoreEpsilon {
+		return false
+	}
+	return !hasMajorFinding(v.Findings)
+}
+
+// hasMajorFinding reports whether findings carry one om refuses work on: a
+// major or critical, the severities omPriority names.
+func hasMajorFinding(findings []Finding) bool {
+	for _, f := range findings {
+		if _, ok := omPriority(f.Severity); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// rescoreBorderline runs om once more over the same head when v is a
+// borderline rejection, and returns the verdict the landing stands on: the
+// higher-scoring of the two runs, since either is as true as the other. A
+// rerun that reaches no verdict leaves the first standing, because a review
+// that produced one decided the landing and the rerun is a second opinion
+// (gt-cz07b).
+//
+// It is not a rework attempt. Nothing reaches the bead until the landing is
+// decided, so a rerun that stays a rejection records the one refusal the
+// landing would have recorded anyway, and the three-attempt cap counts it
+// once.
+func (l *Lander) rescoreBorderline(ctx context.Context, v Verdict, in ReviewInput) Verdict {
+	bar, err := OMThreshold(in.Dir)
+	if err != nil {
+		l.logf("%s: could not read the review bar to decide whether to re-score the rejection (%v); the rejection stands", in.BeadID, err)
+		return v
+	}
+	if !borderlineRejection(v, bar) {
+		return v
+	}
+	l.logf("%s: om requested changes at %.2f with no major finding, within %.2f of the %.2f bar; om runs once more on the same head",
+		in.BeadID, v.Score, rescoreMargin, bar)
+	rerun, err := l.review(ctx, in)
+	if err != nil {
+		l.logf("%s: the second om run reached no verdict (%s); the first stands at %.2f", in.BeadID, reviewErrorReason(err), v.Score)
+		return v
+	}
+	// A run whose verdict is not one of om's two decisions judged nothing, the
+	// way a failure does: it is not a second opinion to weigh, and the first
+	// run's stands.
+	if rerun.Verdict != VerdictApprove && rerun.Verdict != VerdictRequestChanges {
+		l.logf("%s: the second om run returned no verdict (%q); the first stands at %.2f", in.BeadID, rerun.Verdict, v.Score)
+		return v
+	}
+	stands := v
+	word := "the first"
+	if rerun.Score > v.Score {
+		stands, word = rerun, "the second"
+	}
+	l.logf("%s: the second om run scored %.2f (%s) against %.2f (%s); the landing stands on %s",
+		in.BeadID, rerun.Score, rerun.Verdict, v.Score, v.Verdict, word)
+	stands.Rescore = &Rescore{First: v.Score, Rerun: rerun.Score}
+	return stands
 }
 
 func (l *Lander) now() time.Time {
@@ -927,8 +1013,9 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	} else {
 		l.stage(w, StageOM)
 		omCtx, omDone := l.Slow.watch(ctx, l, w, dir, StageOM)
-		criteria := CriteriaText(issue)
-		verdict, reviewErr = l.review(omCtx, w.BeadID, criteria, dir, base, merged)
+		in := ReviewInput{Dir: dir, Base: base, Head: merged, BeadID: w.BeadID,
+			CriteriaText: CriteriaText(issue), PriorFindings: priorReviewFindings(issue.Notes)}
+		verdict, reviewErr = l.review(omCtx, in)
 		// One flaky om run must not cost an escalation and a hand review
 		// (gt-q241r): an execution error on an ordinary tree is retried once,
 		// inside this same om stage. A timeout, an infra error and a verdict
@@ -938,7 +1025,10 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		omRetried := errors.Is(reviewErr, ErrOMExecution) && omCtx.Err() == nil && !l.omDiffPastBound(g, base, merged)
 		if omRetried {
 			l.logf("%s: om review returned no verdict (%s); retrying once", w.BeadID, reviewErrorReason(reviewErr))
-			verdict, reviewErr = l.review(omCtx, w.BeadID, criteria, dir, base, merged)
+			verdict, reviewErr = l.review(omCtx, in)
+		}
+		if reviewErr == nil {
+			verdict = l.rescoreBorderline(omCtx, verdict, in)
 		}
 		omDone()
 		l.logf("%s: %s", w.BeadID, stageTimes(gateRes, time.Since(reviewStart), omRetried))
