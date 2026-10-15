@@ -552,8 +552,11 @@ type SpecDispatchConfig struct {
 	// own agent (polecat_pool.agent). Default "claude-sonnet".
 	HookedAgent string `json:"hooked_agent,omitempty"`
 
-	// MaxHooked caps live polecats on HookedAgent (default 2). Zero means
-	// default; a negative value closes the seat.
+	// MaxHooked caps live polecats on HookedAgent. A cap above zero opens the
+	// second seat; zero or less leaves it closed, and an omitted key decodes
+	// to zero (omitempty), so unset is closed, not a default. Read by
+	// specBudgetFromConfig (internal/cmd/spec.go) and gt pool, which writes
+	// and reports the same rule: "0 closes the seat".
 	MaxHooked int `json:"max_hooked,omitempty"`
 
 	// HooklessAgent and MaxHookless are retired with the hookless seat class
