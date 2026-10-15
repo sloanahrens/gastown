@@ -19,6 +19,7 @@ import (
 type Repo interface {
 	Rev(ref string) (string, error)
 	IsAncestor(ancestor, descendant string) (bool, error)
+	MergeBase(a, b string) (string, error)
 	CommitTime(rev string) (time.Time, error)
 	CommitLandedOnTarget(remote, target, commit string) bool
 	TreesIdentical(a, b string) (bool, error)

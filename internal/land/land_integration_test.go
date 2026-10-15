@@ -188,6 +188,22 @@ func TestIntegrationLandRecoversUnrecordedSquashLanding(t *testing.T) {
 	recoversUnrecordedSquashLanding(t, f)
 }
 
+// TestIntegrationLandRecoversUnrecordedSquashLandingForkedBeforeItsBase: the
+// same recovery over real git, where the merge base git reads and the two
+// patch ids git patch-id has to agree on are its own — and the landing's base
+// is ahead of the head's fork point, so the head's own change is not the diff
+// between the two tips (gt-064oh).
+func TestIntegrationLandRecoversUnrecordedSquashLandingForkedBeforeItsBase(t *testing.T) {
+	t.Parallel()
+	f := newRealLandFixture(t)
+	realAutoSaveOnBranch(t, f)
+	f.base = f.pushMain("d.txt", "someone else landed\n")
+	merged := recoversUnrecordedSquashLanding(t, f)
+	if got := f.parents(merged); len(got) != 1 || got[0] != f.base {
+		t.Fatalf("the squash's parents = %v, want the later landing %s it merged onto", got, f.base)
+	}
+}
+
 func TestIntegrationLandConflictIsARejectionWithFiles(t *testing.T) {
 	conflictIsARejection(t, newRealLandFixture(t))
 }
