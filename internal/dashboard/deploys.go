@@ -16,10 +16,13 @@ import (
 
 // The Deploys block: the deploy workflows' runs, one row each, with the stages
 // the workflow's needs give, and beneath them the apps' scheduled health
-// checks, one row per app and environment. It reads the Forgejo panel's own
-// viewer client and repo list, and its only evidence is the runs, their stamps
-// and their jobs: the runner API is owner-only and answers the viewer 403, so a
-// run nothing has picked up is inferred and said as an inference.
+// checks, one row per app and environment. It reads what the Forgejo panel
+// reads — the same read-only viewer client and the same repos — and adds
+// nothing of its own: the run list, the run's stamps and its jobs are all the
+// evidence it has. The runner's own health is not among them. GET
+// /repos/{owner}/{repo}/actions/runners is owner-only and answers the viewer
+// 403, so a run nothing has picked up is inferred from the run and said as an
+// inference.
 
 const (
 	// deployWorkflow and stagingWorkflow are the workflows whose runs the block
@@ -29,18 +32,15 @@ const (
 	deployWorkflow  = "deploy.yml"
 	stagingWorkflow = "staging.yml"
 
-	// deployRunPage is how many runs one repo's query asks for, so a server
-	// that honors the page bounds the window. Forgejo 16.0.5 ignores `limit`
-	// unless `page` is given, and answers with the repo's runs whole (verified
-	// live) — the better answer here, since a deploy run sits behind every
-	// push, landing and probe run a busy repo makes. Either way the block
-	// keeps only the newest deployRunsKept of what comes back.
-	deployRunPage = 50
-
 	// deployRunsKept is how many of a repo's newest deploy runs the block
 	// lists, both workflows together, and deployJobsKept how many runs' jobs it
-	// fetches per refresh, across every repo. Runs cost one call per repo; jobs
-	// cost one call each, which is what the smaller, global cap is for.
+	// fetches per refresh, across every repo. Runs cost one call per workflow
+	// per repo — the query names the workflow, so the repo's hourly checks
+	// cannot crowd the deploys off the page — and jobs cost one call each,
+	// which is what the smaller, global cap is for. deployRunsKept of each
+	// workflow is enough for the newest deployRunsKept of both: a run of one
+	// workflow cannot be in the newest few overall while a newer run of the
+	// same workflow is not.
 	deployRunsKept = 5
 	deployJobsKept = 3
 
@@ -52,28 +52,27 @@ const (
 	// healthWorkflow is the scheduled check of a deployed app: an app repo's
 	// hourly run of its integration suite against staging and a read-only smoke
 	// check against prod (dv-4qtt). It is not a deploy, so the block folds its
-	// runs into one row per app and environment rather than listing them
-	// (gt-t9w60).
+	// runs into one row per app and environment rather than listing them.
 	healthWorkflow = "health.yml"
 
 	// healthEnvStaging and healthEnvProd are the environments health.yml checks,
 	// by the names its jobs carry them, in the order the block draws them: the
 	// deployment moves staging first. A job the block does not know is not an
-	// environment (gt-t9w60).
+	// environment.
 	healthEnvStaging = "staging-integration"
 	healthEnvProd    = "prod-smoke"
 
 	// healthRunWindow is how many of an app's newest health runs a row is
 	// counted over: the pass count's denominator and how far back the last green
 	// is looked for. An environment's result is not on the run — the run's
-	// status is the whole workflow's — so this is also the jobs calls one repo
-	// with checks costs (gt-t9w60).
+	// status is the whole workflow's — so this is the runs one repo with checks
+	// wants the jobs of, once.
 	healthRunWindow = 24
 
 	// healthReadBudget bounds the scheduled checks' own read, which runs last on
-	// a deadline of its own: a jobs call per run of every window is the refresh's
-	// costliest read, and it must not spend the time the deploy rows need
-	// (gt-t9w60).
+	// a deadline of its own: the runs no earlier refresh read the jobs of are
+	// the refresh's costliest read, and it must not spend the time the deploy
+	// rows need.
 	healthReadBudget = forgejoTimeout / 2
 
 	// deployNoRunnerAfter is how long a deploy run may sit waiting before the
@@ -96,8 +95,13 @@ const (
 	deployRunning = "running"
 )
 
-// healthEnvs is the environments the block reads, in the order it draws them.
-var healthEnvs = []string{healthEnvStaging, healthEnvProd}
+// healthEnvs is the environments the block reads, in the order it draws them,
+// and deployWorkflows the workflows whose runs it lists, in the order it asks
+// for them.
+var (
+	healthEnvs      = []string{healthEnvStaging, healthEnvProd}
+	deployWorkflows = []string{deployWorkflow, stagingWorkflow}
+)
 
 // The job statuses the health fold reads, in the API's own words. Only success
 // is a pass, and only failure and the canceled word are a check that finished
@@ -106,6 +110,10 @@ var healthEnvs = []string{healthEnvStaging, healthEnvProd}
 const (
 	healthSuccess = "success"
 	healthFailure = "failure"
+
+	// forgejoRunBlocked is Forgejo's word for a run between one job finishing
+	// and the next being picked up.
+	forgejoRunBlocked = "blocked"
 )
 
 // DeployStage is one stage of a deploy run: one job, its name and the state
@@ -185,10 +193,14 @@ type DeployHealthRow struct {
 	// than reading as green.
 	LastGreen time.Time `json:"last_green,omitzero"`
 	// Passed is how many of the window's runs this environment passed, out of
-	// Runs: the runs the block read that carry the environment's job. A run
-	// whose jobs call failed is in neither count.
+	// Runs: the runs the block read that carry the environment's job.
 	Passed int `json:"passed"`
 	Runs   int `json:"runs"`
+	// NotRead is how many runs of the window the block could not read: the
+	// block does not know whether they carry this environment's job, so they
+	// are in neither Passed nor Runs and are counted here instead of leaving
+	// the two to read as the whole window.
+	NotRead int `json:"not_read,omitempty"`
 	// URL is the newest run's html_url, absent when the API sent none or sent
 	// something that is not http(s).
 	URL string `json:"url,omitempty"`
@@ -199,9 +211,9 @@ type DeployHealthRow struct {
 
 // Deploys is the Cloud section's Deploys block: the newest deploy runs the
 // viewer can see, of either workflow. Missing names the repos whose runs could
-// not be read, so a repo that failed is named rather than reading as one with
-// no deploys; Error is the class of a refresh that read no repo at all, which
-// the block's note carries.
+// not be read, so a repo that failed is named rather than reading as a repo
+// with no deploys; Error is the class of a refresh that read no repo at all,
+// which the block's note carries.
 type Deploys struct {
 	Runs []DeployRun `json:"runs"`
 	// Health is the scheduled checks of every repo that has them: one row per
@@ -234,13 +246,16 @@ type deployAPI interface {
 // It is the one reader here that compares a read against the one before it:
 // "a run that has not moved" is not in any stamp the API sends, so the reader
 // holds the stages each running run last showed and when they changed to them.
+// The scheduled checks are read the same way for a different reason: a run that
+// has ended does not run again, so its jobs are read once and held.
 type DeployReader struct {
 	api   deployAPI
 	repos []string // owner/name overrides; empty reads the viewer's whole list
 	now   func() time.Time
 
-	mu    sync.Mutex
-	watch map[string]deployWatch // run key -> the stages last seen and since when
+	mu     sync.Mutex
+	watch  map[string]deployWatch // run key -> the stages last seen and since when
+	checks map[string]cachedCheck // run key -> the jobs of a check that has ended
 }
 
 // deployWatch is one running run's stages as a read left them and the moment
@@ -251,10 +266,21 @@ type deployWatch struct {
 	since time.Time
 }
 
+// cachedCheck is one scheduled run's jobs as the fold reads them. A run that has
+// ended is cached here, so the next refresh pays no jobs call for it; a run
+// still moving is not, since its jobs are not final.
+type cachedCheck struct {
+	envs   map[string]string
+	failed bool
+}
+
 // NewDeployReader builds a reader over api. A non-empty repos is the exact
 // owner/name list to read instead of every repo the viewer can see.
 func NewDeployReader(api deployAPI, repos []string) *DeployReader {
-	return &DeployReader{api: api, repos: append([]string(nil), repos...), now: time.Now, watch: map[string]deployWatch{}}
+	return &DeployReader{
+		api: api, repos: append([]string(nil), repos...), now: time.Now,
+		watch: map[string]deployWatch{}, checks: map[string]cachedCheck{},
+	}
 }
 
 // Read returns the deploy runs of the reader's repos: the newest
@@ -347,18 +373,24 @@ func (r *DeployReader) Read() *Deploys {
 	r.watch = next
 	r.mu.Unlock()
 
-	// The scheduled checks are the refresh's last read, on a budget of their own:
-	// a jobs call per run of every window is what they cost, and neither cost may
-	// take the deploy rows' time. A check the budget or the wire takes out is
-	// named — the repo in HealthMissing, the app in HealthUnread — rather than
-	// left to read as a town with no checks (gt-t9w60).
+	// The scheduled checks are the refresh's last read, on a budget of their
+	// own: the runs no earlier refresh has the jobs of are what they cost, and
+	// neither that nor the deploy rows may take the other's time. A check the
+	// budget or the wire takes out is named — the repo in HealthMissing, the app
+	// in HealthUnread — rather than left to read as a town with no checks.
 	health := []DeployHealthRow{}
 	var healthFailed, healthUnread, healthMissing []string
+	r.mu.Lock()
+	prevChecks := r.checks
+	r.mu.Unlock()
+	// Built fresh every refresh, so an entry goes the moment its run leaves the
+	// window and the map cannot grow with a town's history.
+	checks := make(map[string]cachedCheck, len(prevChecks))
 	hctx, cancelHealth := context.WithTimeout(ctx, healthReadBudget)
 	defer cancelHealth()
 	for _, name := range readable {
 		owner, repo, _ := strings.Cut(name, "/")
-		res := r.healthRows(hctx, name, owner, repo)
+		res := r.healthRows(hctx, name, owner, repo, prevChecks, checks)
 		health = append(health, res.rows...)
 		switch {
 		case !res.listed:
@@ -369,6 +401,9 @@ func (r *DeployReader) Read() *Deploys {
 			healthFailed = append(healthFailed, healthApp(name))
 		}
 	}
+	r.mu.Lock()
+	r.checks = checks
+	r.mu.Unlock()
 
 	// The rows are read a repo at a time, in the viewer's order, and the page
 	// is read app by app: sorting by app keeps an app's environments together,
@@ -425,7 +460,11 @@ type deployRun struct {
 
 // key names the run for the watch. The repo is part of it because an id is
 // only unique within the instance the reader happens to be pointed at.
-func (dr deployRun) key() string { return dr.repo + "#" + strconv.FormatInt(dr.run.ID, 10) }
+func (dr deployRun) key() string { return runKey(dr.repo, dr.run.ID) }
+
+// runKey names one run for the state the reader holds between refreshes: the
+// watch's stages and a check's jobs are both kept under it.
+func runKey(repo string, id int64) string { return repo + "#" + strconv.FormatInt(id, 10) }
 
 // runList reads one repo's deploy runs, newest first and at most
 // deployRunsKept of them: every run of either deploy workflow whatever its
@@ -433,18 +472,27 @@ func (dr deployRun) key() string { return dr.repo + "#" + strconv.FormatInt(dr.r
 // and a landing's staging deploy is one the operator has to see. The two
 // workflows share the cap, so a busy week of releases cannot crowd out the
 // staging runs, or the other way round.
+//
+// Each workflow is asked for by name rather than the repo's runs being read
+// whole: an app repo runs health.yml hourly, so an unfiltered page of its runs
+// is the checks and the deploy runs behind them fall off it. Forgejo 16.0.5
+// honors `limit` once `page` is given, so the page is always sent.
 func (r *DeployReader) runList(ctx context.Context, name, owner, repo string) ([]deployRun, error) {
-	list, err := r.api.ListRuns(ctx, owner, repo, forgejo.RunFilter{Limit: deployRunPage})
-	if err != nil {
-		return nil, err
-	}
-	out := make([]deployRun, 0, len(list.Runs))
-	for _, run := range list.Runs {
-		workflow := deployRunWorkflow(run.WorkflowID)
-		if workflow == "" {
-			continue
+	var out []deployRun
+	for _, workflow := range deployWorkflows {
+		list, err := r.api.ListRuns(ctx, owner, repo, forgejo.RunFilter{WorkflowID: workflow, Page: 1, Limit: deployRunsKept})
+		if err != nil {
+			return nil, err
 		}
-		out = append(out, deployRun{owner: owner, name: repo, repo: name, workflow: workflow, run: run, created: parseRunStamp(run.Created)})
+		for _, run := range list.Runs {
+			// The API matches the workflow on its path, so the base name is the
+			// same query; a server that answers loosely still cannot put another
+			// workflow's run in a deploy row.
+			if deployRunWorkflow(run.WorkflowID) != workflow {
+				continue
+			}
+			out = append(out, deployRun{owner: owner, name: repo, repo: name, workflow: workflow, run: run, created: parseRunStamp(run.Created)})
+		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].created.After(out[j].created) })
 	if len(out) > deployRunsKept {
@@ -479,14 +527,22 @@ type healthRead struct {
 // healthRows reads one repo's scheduled health checks and folds them into the
 // block's rows: the app's newest healthRunWindow runs of health.yml as one row
 // per app and environment, plus the newest run's word on the app. The jobs of
-// every run in the window are fetched because an environment's result is not on
+// every run in the window are read because an environment's result is not on
 // the run, and a run whose jobs were all skipped is green there while nothing
-// was tested (gt-t9w60).
+// was tested.
+//
+// prev holds the jobs of the runs that had ended as of the last refresh and
+// seen collects this one's, so a run that will not change again is read once:
+// the refresh pays a jobs call per run it has not settled rather than per run of
+// every window, and a check the block has read once is never read again as
+// unreadable. The window is newest first and read in that order, so a budget
+// that runs out spends what the row's pass count needed before it touches the
+// newest run the marker stands on.
 //
 // A listing that failed says so rather than reading as a repo with no checks:
 // its runs are the deploy runs' own listing, so it is a repo the block could not
 // ask, not one that answered nothing.
-func (r *DeployReader) healthRows(ctx context.Context, name, owner, repo string) healthRead {
+func (r *DeployReader) healthRows(ctx context.Context, name, owner, repo string, prev, seen map[string]cachedCheck) healthRead {
 	// The workflow filter is the API's own, so the page holds the health runs
 	// and not the repo's whole history; the base name is still matched below,
 	// the way the deploy list matches it.
@@ -506,16 +562,38 @@ func (r *DeployReader) healthRows(ctx context.Context, name, owner, repo string)
 		window = window[:healthRunWindow]
 	}
 	for i := range window {
+		key := runKey(name, window[i].run.ID)
+		if held, ok := prev[key]; ok {
+			window[i].envs, window[i].failed = held.envs, held.failed
+			seen[key] = held
+			continue
+		}
 		jobs, err := r.api.ListRunJobs(ctx, owner, repo, window[i].run.ID)
 		if err != nil {
+			// A run read under a budget that has run out was not read: it is
+			// not held, and the next refresh asks again.
 			window[i].unread = true
 			continue
 		}
 		window[i].envs = healthEnvsOf(jobs)
-		window[i].failed = healthJobFailed(jobs)
+		window[i].failed = healthRunFailed(jobs, window[i].run.Status)
+		if healthRunEnded(window[i].run.Status) {
+			seen[key] = cachedCheck{envs: window[i].envs, failed: window[i].failed}
+		}
 	}
 	rows, failed, unread := foldHealth(name, window)
 	return healthRead{rows: rows, listed: true, failed: failed, unread: unread}
+}
+
+// healthRunEnded reports whether a scheduled run has finished, which is what
+// makes its jobs final. A run still waiting for a runner, running, or between
+// two of its jobs has not: the next refresh reads it again.
+func healthRunEnded(status string) bool {
+	switch status {
+	case deployWaiting, deployRunning, forgejoRunBlocked:
+		return false
+	}
+	return true
 }
 
 // healthEnvsOf reads one run's jobs as the environments it checked: the status
@@ -545,9 +623,15 @@ func foldHealth(name string, window []healthRun) (rows []DeployHealthRow, failed
 	// under it hold.
 	unread = len(window) > 0 && window[0].unread
 	read := len(window) > 0 && !unread
+	gone := 0
+	for _, hr := range window {
+		if hr.unread {
+			gone++
+		}
+	}
 	rows = make([]DeployHealthRow, 0, len(healthEnvs))
 	for _, env := range healthWindowEnvs(window) {
-		row := DeployHealthRow{Repo: name, App: app, Env: env, Unread: !read}
+		row := DeployHealthRow{Repo: name, App: app, Env: env, Unread: !read, NotRead: gone}
 		have := false
 		for _, hr := range window {
 			status, ok := hr.envs[env]
@@ -578,7 +662,7 @@ func foldHealth(name string, window []healthRun) (rows []DeployHealthRow, failed
 // block draws them. A window whose jobs were read and named none draws no rows
 // — the workflow checks no environment the block knows — but one whose newest
 // run could not be read could name either, so the two it knows are drawn as
-// rows it could not read rather than left blank (gt-t9w60).
+// rows it could not read rather than left blank.
 func healthWindowEnvs(window []healthRun) []string {
 	var named []string
 	read := false
@@ -604,19 +688,25 @@ func healthWindowEnvs(window []healthRun) []string {
 // the newest run that finished without passing, whatever its name. The row is
 // per environment, so a failure in a job the two environments do not name would
 // otherwise reach nobody — and the newest run's word is the block's only stand
-// on the app (gt-t9w60). A run in flight has not failed, and an app that is off
+// on the app. A run in flight has not failed, and an app that is off
 // was skipped: neither raises a marker off an older run's failure, which would
 // claim what the block never saw.
 func healthFailed(window []healthRun) bool {
 	return len(window) > 0 && !window[0].unread && window[0].failed
 }
 
-// healthJobFailed reports whether any job of a run finished without passing.
-// Only failure and the canceled status count: a job waiting, running or blocked
-// has not finished, and a skipped one is the app being off on purpose.
-func healthJobFailed(jobs []forgejo.ActionRunJob) bool {
+// healthRunFailed reports whether a run finished without passing. A job that
+// failed or was canceled counts however it is named, and where the API sent the
+// run no jobs at all the run's own status is the only word left: it is the whole
+// workflow's, and a run the API calls a failure is not read as a run nothing
+// went wrong in.
+func healthRunFailed(jobs []forgejo.ActionRunJob, status string) bool {
+	if len(jobs) == 0 {
+		word := cloudText(status, deployTextMax)
+		return word == healthFailure || word == forgejoRunCancelled
+	}
 	for _, j := range jobs {
-		if status := cloudText(j.Status, deployTextMax); status == healthFailure || status == forgejoRunCancelled {
+		if word := cloudText(j.Status, deployTextMax); word == healthFailure || word == forgejoRunCancelled {
 			return true
 		}
 	}
