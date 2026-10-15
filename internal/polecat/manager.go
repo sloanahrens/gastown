@@ -3835,31 +3835,47 @@ func setupShellCommand(command string) (string, []string) {
 	return shell, []string{"-c", command}
 }
 
-// CleanupStaleBranches removes orphaned polecat branches that are no longer in use.
-// This includes:
-// - Branches for polecats that no longer exist
-// - Old timestamped branches (keeps only the most recent per polecat name)
-// Returns the number of branches deleted.
-func (m *Manager) CleanupStaleBranches() (int, error) {
+// StaleBranchPlan sorts a rig's local polecat/* branches into what gc keeps
+// because a live polecat uses it, what it keeps because deleting it would lose
+// work, and what it deletes.
+type StaleBranchPlan struct {
+	InUse     []string
+	Preserved []PreservedBranch
+	Delete    []string
+}
+
+// PreservedBranch is an orphan branch gc leaves alone, and why.
+type PreservedBranch struct {
+	Name   string
+	Reason string
+}
+
+// PlanStaleBranches classifies every local polecat branch without deleting
+// anything, so `gt polecat gc --dry-run` and the real run agree.
+//
+// An orphan branch is deleted only when it holds no commit absent from the
+// base branches and from its own pushed origin copy (WorkSurvival): that ref
+// can be the only copy of work a hooked bead still points at (gt-429ue). When
+// that cannot be determined the branch is kept.
+func (m *Manager) PlanStaleBranches() (*StaleBranchPlan, error) {
 	repoGit, err := m.repoBase()
 	if err != nil {
-		return 0, fmt.Errorf("finding repo base: %w", err)
+		return nil, fmt.Errorf("finding repo base: %w", err)
 	}
 
-	// List all polecat branches
 	branches, err := repoGit.ListBranches("polecat/*")
 	if err != nil {
-		return 0, fmt.Errorf("listing branches: %w", err)
+		return nil, fmt.Errorf("listing branches: %w", err)
 	}
 
+	plan := &StaleBranchPlan{}
 	if len(branches) == 0 {
-		return 0, nil
+		return plan, nil
 	}
 
-	// Get list of existing polecats
 	polecats, err := m.List()
 	if err != nil {
-		return 0, fmt.Errorf("listing polecats: %w", err)
+		return nil, fmt.Errorf("listing polecats: %w", err)
 	}
 
 	// Build set of current polecat branches (from actual polecat objects)
@@ -3868,13 +3884,57 @@ func (m *Manager) CleanupStaleBranches() (int, error) {
 		currentBranches[p.Branch] = true
 	}
 
-	// Delete branches not in current set
-	deleted := 0
+	var survival *WorkSurvival
+	var survivalErr error
 	for _, branch := range branches {
 		if currentBranches[branch] {
-			continue // This branch is in use
+			plan.InUse = append(plan.InUse, branch)
+			continue
 		}
-		// Delete orphaned branch
+		if survival == nil && survivalErr == nil {
+			survival, survivalErr = newWorkSurvival(m.gits, m.rig.Path, git.RemoteQueryTimeout)
+		}
+		if survivalErr != nil {
+			plan.Preserved = append(plan.Preserved, PreservedBranch{branch, fmt.Sprintf("could not check for unpushed commits: %v", survivalErr)})
+			continue
+		}
+		holds, err := survival.LocalBranchHoldsUnpushedWork(branch)
+		switch {
+		case err != nil:
+			plan.Preserved = append(plan.Preserved, PreservedBranch{branch, fmt.Sprintf("could not check for unpushed commits: %v", err)})
+		case holds:
+			plan.Preserved = append(plan.Preserved, PreservedBranch{branch, "has commits that are not on a base branch or on its pushed copy"})
+		default:
+			plan.Delete = append(plan.Delete, branch)
+		}
+	}
+	return plan, nil
+}
+
+// CleanupStaleBranches removes orphaned polecat branches that are no longer in
+// use and hold no unpushed work (see PlanStaleBranches); branches it keeps for
+// that reason are reported on stdout. Returns the number of branches deleted.
+func (m *Manager) CleanupStaleBranches() (int, error) {
+	plan, err := m.PlanStaleBranches()
+	if err != nil {
+		return 0, err
+	}
+	if len(plan.Delete) == 0 && len(plan.Preserved) == 0 {
+		return 0, nil
+	}
+
+	repoGit, err := m.repoBase()
+	if err != nil {
+		return 0, fmt.Errorf("finding repo base: %w", err)
+	}
+	for _, p := range plan.Preserved {
+		fmt.Printf("  Keeping %s: %s\n", p.Name, p.Reason)
+	}
+
+	deleted := 0
+	for _, branch := range plan.Delete {
+		// The plan found no unpushed work, so -D only skips git's own
+		// merged-into-HEAD test, which squash and rebase merges fail.
 		if err := repoGit.DeleteBranch(branch, true); err != nil {
 			// Log but continue - non-fatal
 			style.PrintWarning("could not delete branch %s: %v", branch, err)

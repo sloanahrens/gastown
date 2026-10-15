@@ -2469,43 +2469,29 @@ func runPolecatGC(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Garbage collecting stale polecat branches in %s...\n\n", r.Name)
 
 	if polecatGCDryRun {
-		// Dry run - list branches that would be deleted
-		repoGit := git.NewGit(r.Path)
-
-		// List all polecat branches
-		branches, err := repoGit.ListBranches("polecat/*")
+		// Dry run - the same plan the real run executes
+		plan, err := mgr.PlanStaleBranches()
 		if err != nil {
-			return fmt.Errorf("listing branches: %w", err)
+			return fmt.Errorf("planning cleanup: %w", err)
 		}
 
-		if len(branches) == 0 {
+		total := len(plan.InUse) + len(plan.Preserved) + len(plan.Delete)
+		if total == 0 {
 			fmt.Println("No polecat branches found.")
 			return nil
 		}
 
-		// Get current branches
-		polecats, err := mgr.List()
-		if err != nil {
-			return fmt.Errorf("listing polecats: %w", err)
+		for _, branch := range plan.Delete {
+			fmt.Printf("  Would delete: %s\n", style.Dim.Render(branch))
+		}
+		for _, branch := range plan.InUse {
+			fmt.Printf("  Keep (in use): %s\n", style.Success.Render(branch))
+		}
+		for _, p := range plan.Preserved {
+			fmt.Printf("  Keep (unpushed work): %s: %s\n", style.Warning.Render(p.Name), p.Reason)
 		}
 
-		currentBranches := make(map[string]bool)
-		for _, p := range polecats {
-			currentBranches[p.Branch] = true
-		}
-
-		// Show what would be deleted
-		toDelete := 0
-		for _, branch := range branches {
-			if !currentBranches[branch] {
-				fmt.Printf("  Would delete: %s\n", style.Dim.Render(branch))
-				toDelete++
-			} else {
-				fmt.Printf("  Keep (in use): %s\n", style.Success.Render(branch))
-			}
-		}
-
-		fmt.Printf("\nWould delete %d branch(es), keep %d\n", toDelete, len(branches)-toDelete)
+		fmt.Printf("\nWould delete %d branch(es), keep %d\n", len(plan.Delete), total-len(plan.Delete))
 		return nil
 	}
 
