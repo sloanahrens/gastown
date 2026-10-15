@@ -173,7 +173,10 @@ var slingRespawnResetCmd = &cobra.Command{
 
 When a bead hits the respawn limit (3 attempts), gt sling blocks further
 dispatches to prevent spawn storms. After investigating the root cause,
-use this command to allow re-dispatch.`,
+use this command to allow re-dispatch.
+
+Only a bead whose polecat died before submitting counts toward the limit: a
+sling that follows a landing rejection clears the counter by itself (gt-tatcn).`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSlingRespawnReset,
 }

@@ -296,3 +296,55 @@ func ResetBeadRespawnCount(workDir, beadID string) error {
 	delete(state.Beads, beadID)
 	return saveBeadRespawnState(townRoot, state)
 }
+
+// ResetBeadRespawnForRound clears beadID's respawn count when the last spawn it
+// records came before submitted, and reports whether it cleared it.
+//
+// Only a spawn the bead never submitted after is a death, and only deaths count
+// toward the limit. A spawn recorded before the newest submission is a round of
+// work instead: the polecat started, submitted, and the landing worker sent the
+// attempt back. Counting those spent a live bead's budget on work, and three
+// legitimate rework rounds put the fourth sling at the limit for good
+// (gt-tatcn).
+//
+// submitted is the bead's newest submission for landing, zero when none is
+// readable. Zero clears nothing, and neither does a submission older than the
+// last recorded spawn: a spawn since the submission is the death this counter
+// exists to stop. That is also why the bead's rework label is not consulted —
+// it records the refusal but not when it happened, so it cannot say which
+// spawns came before the refusal, and a rework bead whose polecat dies at start
+// must still reach the limit.
+//
+// workDir is the rig path; townRoot is resolved internally via workspace.Find.
+func ResetBeadRespawnForRound(workDir, beadID string, submitted time.Time) (bool, error) {
+	if submitted.IsZero() {
+		return false, nil
+	}
+	respawnMu.Lock()
+	defer respawnMu.Unlock()
+
+	townRoot := respawnTownRoot(workDir)
+
+	unlock, err := lockRespawnState(townRoot)
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+
+	state, err := loadBeadRespawnState(townRoot)
+	if err != nil {
+		return false, err
+	}
+	rec, ok := state.Beads[beadID]
+	if !ok {
+		return false, nil
+	}
+	if !submitted.After(rec.LastRespawn) {
+		return false, nil
+	}
+	delete(state.Beads, beadID)
+	if err := saveBeadRespawnState(townRoot, state); err != nil {
+		return false, err
+	}
+	return true, nil
+}

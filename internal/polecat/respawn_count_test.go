@@ -471,3 +471,132 @@ func TestRespawnStateCreatesTheStateDir(t *testing.T) {
 		t.Error("ShouldBlockRespawn = true after a single respawn")
 	}
 }
+
+// TestRespawnLimitSparesReworkRounds: a bead slung four times, each sling after
+// the landing worker refused its last submission, is still dispatchable
+// (gt-tatcn).
+func TestRespawnLimitSparesReworkRounds(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	const bead = "bead-rework"
+	base := time.Now().UTC()
+
+	for round := 1; round <= 4; round++ {
+		// Each round's submission lands after the sling that started it,
+		// the state the bead is slung from after a refusal.
+		cleared, err := ResetBeadRespawnForRound(townRoot, bead, base.Add(time.Duration(round)*time.Minute))
+		if err != nil {
+			t.Fatalf("round %d: ResetBeadRespawnForRound: %v", round, err)
+		}
+		if round == 1 && cleared {
+			t.Fatalf("round %d cleared a count the bead had not spent yet", round)
+		}
+		if round > 1 && !cleared {
+			t.Errorf("round %d cleared nothing; the round before it submitted", round)
+		}
+		if ShouldBlockRespawn(townRoot, bead) {
+			t.Fatalf("round %d was refused: four rounds of work spent the bead's respawn budget", round)
+		}
+		mustRecord(t, townRoot, bead)
+	}
+}
+
+// TestRespawnLimitHoldsForAReworkBeadThatKeepsDying: the bead came back from a
+// refusal and its polecat has died at start ever since. The refusal is not a
+// licence to keep slinging it — the spawns since the submission are deaths, and
+// the fourth sling is refused (gt-tatcn).
+func TestRespawnLimitHoldsForAReworkBeadThatKeepsDying(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	const bead = "bead-rework-dying"
+
+	// The submission of the round the landing worker refused, before every
+	// spawn below it.
+	refused := time.Now().UTC().Add(-time.Minute)
+	for attempt := 1; attempt <= config.DefaultRecoveryMaxBeadRespawns; attempt++ {
+		cleared, err := ResetBeadRespawnForRound(townRoot, bead, refused)
+		if err != nil {
+			t.Fatalf("attempt %d: ResetBeadRespawnForRound: %v", attempt, err)
+		}
+		if cleared && attempt > 1 {
+			t.Fatalf("attempt %d cleared the death the attempt before it recorded", attempt)
+		}
+		if ShouldBlockRespawn(townRoot, bead) {
+			t.Fatalf("attempt %d was refused; the bead dies before it can spend its own limit", attempt)
+		}
+		mustRecord(t, townRoot, bead)
+	}
+	if !ShouldBlockRespawn(townRoot, bead) {
+		t.Error("ShouldBlockRespawn after three deaths = false; want the rework bead refused")
+	}
+}
+
+// TestRespawnLimitHoldsForStartupDeaths: a bead whose polecat dies before it
+// can submit three times is still refused a fourth sling (gt-tatcn, gt-u3hc1).
+func TestRespawnLimitHoldsForStartupDeaths(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	const bead = "bead-dying"
+
+	for attempt := 1; attempt <= config.DefaultRecoveryMaxBeadRespawns; attempt++ {
+		// Nothing to clear: the bead carries no submission.
+		cleared, err := ResetBeadRespawnForRound(townRoot, bead, time.Time{})
+		if err != nil {
+			t.Fatalf("attempt %d: ResetBeadRespawnForRound: %v", attempt, err)
+		}
+		if cleared {
+			t.Fatalf("attempt %d cleared a count with no submission behind it", attempt)
+		}
+		if ShouldBlockRespawn(townRoot, bead) {
+			t.Fatalf("attempt %d was refused; the bead dies before it can spend its own limit", attempt)
+		}
+		mustRecord(t, townRoot, bead)
+	}
+	if !ShouldBlockRespawn(townRoot, bead) {
+		t.Error("ShouldBlockRespawn after three deaths = false; want the bead refused")
+	}
+}
+
+// TestResetBeadRespawnForRound_StaleSubmissionIsNotARound: a submission older
+// than the last respawn belongs to the round before it, and that round's sling
+// never submitted — the death the limit counts (gt-tatcn).
+func TestResetBeadRespawnForRound_StaleSubmissionIsNotARound(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	const bead = "bead-stale"
+
+	mustRecord(t, townRoot, bead)
+	cleared, err := ResetBeadRespawnForRound(townRoot, bead, time.Now().UTC().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("ResetBeadRespawnForRound: %v", err)
+	}
+	if cleared {
+		t.Error("a submission older than the last respawn cleared the count")
+	}
+	if count := mustRecord(t, townRoot, bead); count != 2 {
+		t.Errorf("count after the sling = %d, want 2", count)
+	}
+}
+
+// TestResetBeadRespawnForRound_UnreadableStateIsReported: a state file that
+// cannot be read is an error, never a silent clear — the count is the only
+// record that the bead is near its limit (gt-u3hc1).
+func TestResetBeadRespawnForRound_UnreadableStateIsReported(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	const bead = "bead-corrupt"
+
+	mustRecord(t, townRoot, bead)
+	// The half-written file a crash between truncate and write leaves behind.
+	if err := os.WriteFile(respawnStatePath(townRoot), []byte(`{"beads":{"bead-corrupt":{"count":1`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cleared, err := ResetBeadRespawnForRound(townRoot, bead, time.Now().UTC())
+	if err == nil {
+		t.Error("ResetBeadRespawnForRound on a truncated file = nil error, want a refusal")
+	}
+	if cleared {
+		t.Error("ResetBeadRespawnForRound on a truncated file reported a cleared count")
+	}
+}

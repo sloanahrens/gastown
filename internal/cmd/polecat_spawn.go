@@ -804,6 +804,14 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 		}
 	}
 	if opts.HookBead != "" && !opts.Force {
+		// A sling that follows a round which submitted is a round of work, not a
+		// failed start, so the rounds behind that submission are cleared before
+		// the limit reads them (gt-tatcn). The discount runs before the read
+		// because the limit is about deaths in the round this sling starts, and
+		// the counts it drops are the rounds behind the submission, which are
+		// not deaths by that rule. A sling that then fails to launch records no
+		// spawn of its own, so it costs the bead nothing it would be blocked on.
+		clearRespawnForSubmittedRound(slingStores{}, townRoot, opts.HookBead)
 		if polecat.ShouldBlockRespawn(townRoot, opts.HookBead) {
 			maxRespawns := config.LoadOperationalConfig(townRoot).GetRecoveryConfig().MaxBeadRespawnsV()
 			return nil, fmt.Errorf("respawn limit reached for %s (%d attempts). "+
