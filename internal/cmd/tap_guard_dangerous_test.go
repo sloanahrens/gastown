@@ -1283,6 +1283,14 @@ func TestEvaluateDangerousCommandUnquotedHeredocSubstitution(t *testing.T) {
 		{"unquoted strip-tabs form", "cat > /tmp/x <<-EOF\n\t$(git reset --hard origin/main)\n\tEOF", true},
 		{"unquoted substitution amid prose", "cat > /tmp/x <<EOF\nreset now: $(git reset --hard) done\nEOF", true},
 		{"unquoted harmless substitution", "cat > /tmp/x <<EOF\nbranch: $(git rev-parse --abbrev-ref HEAD)\nEOF", false},
+		// A backslash in an unquoted body escapes the "$(", so the reader
+		// gets the text literally and the shell runs nothing: data, not a
+		// command (gt-y6mhx). An even run of backslashes escapes itself, so
+		// the substitution is live again.
+		{"escaped dollar-paren is literal", "cat > /tmp/x <<EOF\n\\$(git reset --hard origin/main)\nEOF", false},
+		{"escaped dollar-paren amid prose", "cat > /tmp/x <<EOF\nwrite \\$(git reset --hard) verbatim\nEOF", false},
+		{"escaped backtick is literal", "cat > /tmp/x <<EOF\n\\`git reset --hard origin/main\\`\nEOF", false},
+		{"doubled backslash leaves the substitution live", "cat > /tmp/x <<EOF\n\\\\$(git reset --hard origin/main)\nEOF", true},
 		{"single-quoted tag is literal", "cat > /tmp/x <<'EOF'\n$(git reset --hard origin/main)\nEOF", false},
 		{"double-quoted tag is literal", "cat > /tmp/x <<\"EOF\"\n$(git reset --hard origin/main)\nEOF", false},
 		{"single-quoted tag backtick is literal", "cat > /tmp/x <<'EOF'\n`git reset --hard origin/main`\nEOF", false},
@@ -1729,9 +1737,15 @@ func TestMatchesGoCleanSharedCache(t *testing.T) {
 		{"repeated -C dir flags", "go -C /tmp -C /var/tmp clean -testcache", true},
 		{"-C dir flag and a shared flag with a value", "go -C /tmp clean --fuzzcache=true", true},
 		{"-C dir flag after another command on the line", "cd x && go -C /tmp clean -modcache", true},
+		{"versioned toolchain binary", "go1.22.0 clean -modcache", true},
+		{"versioned toolchain binary, cache flag", "go1.21 clean -cache", true},
+		{"path-qualified versioned toolchain binary", "/usr/local/go/bin/go1.22.0 clean -testcache", true},
+		{"gotip toolchain binary", "gotip clean -cache", true},
+		{"versioned toolchain binary behind -C dir", "go1.22.0 -C /tmp clean -modcache", true},
 
 		// Should allow.
 		{"safe flag on go clean, shared flag on a later unrelated command", "go clean -i; ls -la -cache", false},
+		{"versioned toolchain binary with a safe flag", "go1.22.0 clean -i", false},
 		{"bare go clean", "go clean", false},
 		{"go clean -i", "go clean -i", false},
 		{"go clean -n", "go clean -n", false},

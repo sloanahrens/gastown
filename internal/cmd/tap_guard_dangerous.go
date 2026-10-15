@@ -859,16 +859,40 @@ var commandSubstitutionPattern = regexp.MustCompile(`\$\(([^()]*)\)|` + "`" + `(
 // `...` command substitution in command, so evaluateDangerousCommand can
 // recurse into it the same as a bash -c/eval payload (gt-5ihs attempt 2:
 // "recurse into ... command substitution").
+//
+// A backslash before the opening "$(" or backtick escapes it: the shell passes
+// the text through literally and runs nothing, so "\$(git reset --hard)" is
+// data wherever it appears — most visibly in an unquoted heredoc body, which
+// heredocBodySubstitutions otherwise scans for the substitutions the shell DOES
+// expand (gt-y6mhx). An even run of backslashes escapes itself, leaving
+// \\$(cmd) live, so escaping is decided by counting the run.
 func commandSubstitutions(command string) []string {
 	var out []string
-	for _, m := range commandSubstitutionPattern.FindAllStringSubmatch(command, -1) {
-		if m[1] != "" {
-			out = append(out, m[1])
-		} else if m[2] != "" {
-			out = append(out, m[2])
+	for _, m := range commandSubstitutionPattern.FindAllStringSubmatchIndex(command, -1) {
+		if backslashesBefore(command, m[0])%2 == 1 {
+			continue
 		}
+		start, end := m[2], m[3]
+		if start < 0 {
+			start, end = m[4], m[5]
+		}
+		if start < 0 || command[start:end] == "" {
+			continue
+		}
+		out = append(out, command[start:end])
 	}
 	return out
+}
+
+// backslashesBefore counts the backslashes immediately preceding pos, which is
+// what decides whether the character at pos is escaped: an odd run escapes it,
+// an even run leaves it standing as syntax (gt-y6mhx).
+func backslashesBefore(s string, pos int) int {
+	n := 0
+	for i := pos - 1; i >= 0 && s[i] == '\\'; i-- {
+		n++
+	}
+	return n
 }
 
 // shellTokenize splits a shell command into argv-like tokens the way a real
@@ -2752,11 +2776,13 @@ func matchesGoCleanSharedCache(tokens []string) (reason, alternative string) {
 // The walk back from tokens[i] consumes exactly what -C costs: the flag in
 // either spelling, "-C dir" and "-C=dir", repeated for each -C on the line.
 // Any other word ends the walk, so a `clean` that no `go` invocation owns is
-// still not read as one of its subcommands. tokens must be lowercased,
-// shell-aware tokens (see shellTokenize), which is why -C arrives as -c.
+// still not read as one of its subcommands. The binary is matched by
+// isGoBinaryName, so a versioned toolchain (go1.22.0, gotip) owns its
+// subcommands too. tokens must be lowercased, shell-aware tokens (see
+// shellTokenize), which is why -C arrives as -c.
 func goSubcommandBefore(tokens []string, i int) bool {
 	for j := i - 1; j >= 0; j-- {
-		if filepath.Base(tokens[j]) == "go" {
+		if isGoBinaryName(filepath.Base(tokens[j])) {
 			return true
 		}
 		if isGoDirFlagValue(tokens[j]) {
@@ -2769,6 +2795,19 @@ func goSubcommandBefore(tokens []string, i int) bool {
 		return false
 	}
 	return false
+}
+
+// goBinaryNamePattern matches every name the Go toolchain ships under: the
+// plain `go` binary, a versioned release (go1.22.0, go1.21 — the names the
+// download page and Homebrew install), and the development toolchain `gotip`.
+// tokens are lowercased, so the name arrives in lower case.
+var goBinaryNamePattern = regexp.MustCompile(`^go(tip|\d+(\.\d+)*)?$`)
+
+// isGoBinaryName reports whether name is a Go toolchain binary. A `clean` run
+// through any of them wipes the same shared cache, so a versioned binary is
+// not a reason to miss the subcommand (gt-y6mhx).
+func isGoBinaryName(name string) bool {
+	return goBinaryNamePattern.MatchString(name)
 }
 
 // isGoDirFlag reports whether tok is go's -C dir flag spelled without a value
