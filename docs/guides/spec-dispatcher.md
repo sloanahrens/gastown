@@ -204,6 +204,12 @@ daemon start, so a change to it needs a daemon kickstart. The dispatcher keeps o
 seat per agent: a second seat on the pool's agent never runs, and `gt pool show`
 prints it as `not run`.
 
+Changing the mix is one verb, not five: `gt pool mix <agent>=<n> [<agent>=<n>]`
+writes the seats above together with `polecat_pool.max_total` and
+`role_agents.polecat`, and refuses a mix that leaves an agent the town has pinned
+work for — a `scheduled_slings` entry's agent, a bead's `agent:<name>` label —
+without a seat.
+
 Occupancy is every live polecat session, the seats whose session is gone while
 their work is still assigned (a crashed polecat waiting for its supervised
 restart) or still landing, and the seat claims in-flight slings hold, counted
