@@ -32,7 +32,8 @@ const (
 // one that is queued (waiting or blocked) or running.
 var forgejoCurrentStatuses = []string{"waiting", "blocked", "running"}
 
-// forgejoRunCancelled is the run status Forgejo reports for a canceled run.
+// forgejoRunCancelled is the status Forgejo reports for a canceled run, and the
+// same word a canceled job of one carries.
 const forgejoRunCancelled = "cancelled" //nolint:misspell // the status the API reports
 
 // forgejoCompletedStatuses are the statuses of a finished run: the set the

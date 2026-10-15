@@ -1,8 +1,14 @@
 package dashboard
 
 import (
+	"io"
+	"sort"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+
+	"github.com/steveyegge/gastown/internal/forgejo"
 )
 
 // The Deploys block is read where the operator reads a release: inside the
@@ -46,10 +52,19 @@ func TestDeploysBlockDrawsWhatTheReaderDecided(t *testing.T) {
 	draw := pageFunc(t, "renderDeploys")
 	for _, want := range []string{
 		`if (!d) { note.className = "r"; note.textContent = ""; box.append(el("div", "empty", "no viewer token")); return; }`,
-		`note.textContent = err ? "could not read the runs: " + err : (unreadable ? unreadable + (unreadable === 1 ? " repo unreadable" : " repos unreadable") : "");`,
+		// The note names every read that came back empty-handed, the scheduled
+		// checks included: a repo whose checks could not be listed is one the
+		// block could not ask, not one that answered with no checks (gt-t9w60).
+		`note.textContent = err ? "could not read the runs: " + err : [`,
+		`unreadable ? unreadable + (unreadable === 1 ? " repo unreadable" : " repos unreadable") : "",`,
+		`unchecked ? unchecked + (unchecked === 1 ? " repo's checks unreadable" : " repos' checks unreadable") : "",`,
+		`].filter(Boolean).join(" · ");`,
 		`box.append(el("div", err ? "badc" : "empty", err ? "no deploy runs: " + err : "no deploy runs yet"));`,
 		`for (const r of runs) box.append(deployRow(r));`,
-		`if (!runs.length)`,
+		`if (!runs.length && !health.length)`,
+		// The runs' header is drawn only where there are runs: a block holding
+		// scheduled rows alone has no run column to name.
+		`if (runs.length) {`,
 	} {
 		if !strings.Contains(draw, want) {
 			t.Errorf("renderDeploys has no %q", want)
@@ -232,7 +247,7 @@ func TestDeploysBlockTagsAStagingRunAndNotARelease(t *testing.T) {
 func TestDeploysBlockWritesTheReposTextAndNeverMarkup(t *testing.T) {
 	t.Parallel()
 
-	for _, fn := range []string{"renderDeploys", "deployRow", "deployStages"} {
+	for _, fn := range []string{"renderDeploys", "deployRow", "deployStages", "healthHead", "healthRow"} {
 		if strings.Contains(pageFunc(t, fn), "innerHTML") {
 			t.Errorf("%s sets markup from a repository's text", fn)
 		}
@@ -243,4 +258,394 @@ func TestDeploysBlockWritesTheReposTextAndNeverMarkup(t *testing.T) {
 			t.Errorf("index.html has a %s path, so a repository's text could be parsed as markup", sink)
 		}
 	}
+}
+
+// The scheduled checks are the block's other kind of row: one row per app and
+// environment, under the runs, with a header of its own because their columns
+// are not a run's — no stages, commit or ref to line up with.
+func TestDeploysBlockDrawsTheScheduledHealthRows(t *testing.T) {
+	t.Parallel()
+
+	draw := pageFunc(t, "renderDeploys")
+	for _, want := range []string{
+		`const runs = d.runs || [], health = d.health || [];`,
+		`for (const h of health) happ = Math.max(happ, (h.app || "–").length);`,
+		`if (happ) box.style.setProperty("--happ", (happ + 1) + "ch");`,
+		`if (health.length) box.append(healthHead());`,
+		`for (const h of health) box.append(healthRow(h));`,
+	} {
+		if !strings.Contains(draw, want) {
+			t.Errorf("renderDeploys has no %q", want)
+		}
+	}
+
+	// The header names the columns and takes the rows' font, for the reason the
+	// runs' header does: the widths are in ch, and a ch is the drawing font's
+	// own (gt-egffr).
+	head := pageFunc(t, "healthHead")
+	if !strings.Contains(head, `[["App", "happ"], ["Environment", "henv"], ["Result", "hstate"], ["Age", "hage"], ["Last green", "hgreen"], ["Passed", "hpass"]]`) {
+		t.Error("the scheduled rows' header does not name their columns")
+	}
+	rule := cssRule(t, ".hhead")
+	if strings.Contains(rule, "font-size") {
+		t.Errorf(".hhead rule is %q: a font size of its own makes a ch-based column another width under the header than under the rows", rule)
+	}
+	if !strings.Contains(rule, "color:var(--dim)") {
+		t.Errorf(".hhead rule is %q: the header is no longer dim, so it reads as a row", rule)
+	}
+
+	// The row is the app and the environment it is about, the newest result and
+	// how long ago it ran, the last green and the pass count. It links the
+	// newest run the way a deploy row links its run, and shows the app's whole
+	// repo name on the shortened cell it draws.
+	row := pageFunc(t, "healthRow")
+	for _, want := range []string{
+		`const row = h.url ? el("a", "hrow") : el("div", "hrow");`,
+		`if (h.url) { row.href = h.url; row.target = "_blank"; row.rel = "noopener"; row.title = h.url; }`,
+		`if (app.textContent !== h.repo) app.title = h.repo;`,
+		`el("span", "hstate " + (HEALTH_RESULT_CLASS[h.status] || "title"), h.unread ? "not read" : healthResult(h))`,
+		`el("span", "hage", h.at ? age(h.at) : "–")`,
+		`el("span", "hgreen", h.last_green ? age(h.last_green) + " ago" : "–")`,
+		// The count is over the runs the reader read the window for, and the runs
+		// it could not read are said beside it rather than dropped from it.
+		`const passes = el("span", "hpass", (h.runs ? h.passed + "/" + h.runs : "–") + (h.not_read ? " +" + h.not_read : ""));`,
+		`if (h.not_read) passes.title = h.not_read + (h.not_read === 1 ? " run of the window was not read" : " runs of the window were not read");`,
+	} {
+		if !strings.Contains(row, want) {
+			t.Errorf("healthRow has no %q", want)
+		}
+	}
+
+	// The app column keeps the width it is measured to, the environment names
+	// the width of the longest one health.yml carries, and the counts sit on
+	// the row's line beside them.
+	for _, want := range []string{
+		`.happ{flex:0 0 var(--happ,16ch)}`,
+		`.henv{flex:0 0 20ch;color:var(--dim)}`,
+		`.hstate{flex:0 0 16ch}`,
+		`.hage,.hgreen{flex:0 0 8ch;color:var(--dim)}`,
+		`.hpass{flex:0 0 14ch;color:var(--dim)}`,
+	} {
+		if !strings.Contains(string(indexHTML), want) {
+			t.Errorf("index.html has no %q", want)
+		}
+	}
+}
+
+// A failed scheduled check is marked in the header, where a glance at the page
+// finds it beside the town's own verdict: one red pill naming the app, hidden
+// until a reader names one, so an empty marker is never a strip that claims
+// nothing is wrong.
+func TestDeploysBlockMarksAFailedCheckInTheHeaderStrip(t *testing.T) {
+	t.Parallel()
+
+	page := string(indexHTML)
+	header := page[strings.Index(page, "<header>"):strings.Index(page, "</header>")]
+	if !strings.Contains(header, `<span id="healthmark" class="pill red" hidden></span>`) {
+		t.Fatal("the header has no red health marker (#healthmark)")
+	}
+	if strings.Index(header, `id="healthline"`) > strings.Index(header, `id="healthmark"`) {
+		t.Error("the marker is drawn above the health line it belongs beside")
+	}
+
+	// The page decides nothing: it draws the reader's health_mark, hides the
+	// pill when there is none, and is red only for the red state.
+	mark := pageFunc(t, "renderHealthMark")
+	for _, want := range []string{
+		`m = (s && s.deploys && s.deploys.health_mark) || null`,
+		`box.hidden = !m;`,
+		`"pill " + (m && m.state === "red" ? "red" : "degraded")`,
+		`box.textContent = m ? m.text : "";`,
+	} {
+		if !strings.Contains(mark, want) {
+			t.Errorf("renderHealthMark has no %q", want)
+		}
+	}
+
+	// The marker carries the reader's own finding: the apps the deploys reader
+	// marked, not a second reading of the rows the block draws.
+	if !strings.Contains(pageFunc(t, "renderAll"), "renderDeploys(state); renderHealthMark(state);") {
+		t.Error("the page's redraw does not include the health marker with the block it comes from")
+	}
+}
+
+// The marker is only as good as what the reader hands it, so this executes the
+// reader over a town whose apps are the four the strip has to tell apart: one
+// that passes, one that is off, one whose newest check failed and one whose
+// newest check could not be read. A failed app is named red, an app nobody
+// could read is named too — a silent one is the strip lying by omission — and
+// the app that is off is in neither, so an untested deployment never reads as a
+// green one. The two lists carry owner/name, so what the strip names is a repo
+// and two repos of the same base name are two of them.
+func TestDeploysReaderFeedsTheStripWhatItMarks(t *testing.T) {
+	t.Parallel()
+
+	stub := &deployStub{
+		repos: []string{"sloan/arkansas-beaver-committee", "sloan/beads", "sloan/fractals-nextjs", "sloan/gt-cloud"},
+		runs: map[string][]forgejo.ActionRun{
+			"sloan/arkansas-beaver-committee": {testHealthRun(1, "success", 5)},
+			"sloan/beads":                     {testHealthRun(2, "success", 5)},
+			"sloan/fractals-nextjs":           {testHealthRun(3, "success", 5)},
+			"sloan/gt-cloud":                  {testHealthRun(4, "failure", 5)},
+		},
+		jobs: map[int64][]forgejo.ActionRunJob{
+			1: healthJobs("success", "success", "success"),
+			2: healthJobs("skipped", "skipped", "skipped"),
+			3: healthJobs("success", "success", "failure"),
+			4: healthJobs("success", "success", "success"),
+		},
+		jobsErr: map[int64]error{4: io.EOF},
+	}
+	d := newDeployTestReader(stub, nil).Read()
+
+	assert.Equal(t, []string{"sloan/fractals-nextjs"}, d.HealthFailed)
+	assert.Equal(t, []string{"sloan/gt-cloud"}, d.HealthUnread)
+	assert.Empty(t, d.HealthMissing)
+
+	// The two words and the two colours are the page's, not the reader's, so
+	// they are held here to the statuses the reader sends: a row the page has no
+	// word for draws the API's own word dim, and no status but a pass may reach
+	// the pass colour.
+	words := pageTable(t, "HEALTH_RESULT")
+	classes := pageTable(t, "HEALTH_RESULT_CLASS")
+	for _, status := range []string{healthSuccess, healthFailure, "skipped"} {
+		if _, ok := words[status]; !ok {
+			t.Errorf("the page has no word for %q, a result the reader puts on a row", status)
+		}
+	}
+	assert.Equal(t, "green", words[healthSuccess], "a pass is not the page's word for a pass")
+	assert.Equal(t, "off on purpose", words["skipped"], "a skipped run is a deployment nobody tested, and the page must say so")
+	assert.Equal(t, map[string]string{healthSuccess: "good", healthFailure: "badc"}, classes,
+		"only a pass and a failure may be coloured, so no other result can read as one")
+	if _, coloured := classes[""]; coloured {
+		t.Error("a result the reader did not read has a colour, so an unread row could read as one")
+	}
+}
+
+// The marker has three states — the red pill, the degraded pill and no pill —
+// and each is a branch of renderHealthMark over the reader's two lists. This
+// executes the reader over one town per state, so what the page branches on is a
+// real read rather than a hand-written list: a failing app alone raises the red
+// pill, an app nobody has a reading of raises the degraded one on its own, and a
+// town whose checks are all green or off raises neither.
+func TestDeploysReaderGivesTheStripEachOfItsThreeStates(t *testing.T) {
+	t.Parallel()
+
+	passing := healthJobs("success", "success", "success")
+	off := healthJobs("skipped", "skipped", "skipped")
+	failing := healthJobs("success", "success", "failure")
+
+	for _, tc := range []struct {
+		name           string
+		runs           map[string][]forgejo.ActionRun
+		jobs           map[int64][]forgejo.ActionRunJob
+		jobsErr        map[int64]error
+		failed, unread []string
+		mark           *HealthMark
+	}{
+		{
+			name: "a town with nothing wrong raises no pill",
+			runs: map[string][]forgejo.ActionRun{
+				"sloan/arkansas-beaver-committee": {testHealthRun(1, "success", 5)},
+				"sloan/beads":                     {testHealthRun(2, "success", 5)},
+			},
+			jobs: map[int64][]forgejo.ActionRunJob{1: passing, 2: off},
+		},
+		{
+			name: "a failed check alone raises the red pill",
+			runs: map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {testHealthRun(3, "failure", 5)}},
+			jobs: map[int64][]forgejo.ActionRunJob{3: failing},
+			// owner/name, so two repos of the same base name are two entries.
+			failed: []string{"sloan/fractals-nextjs"},
+			mark:   &HealthMark{State: "red", Text: "health: sloan/fractals-nextjs"},
+		},
+		{
+			name:    "an unread check alone raises the degraded pill",
+			runs:    map[string][]forgejo.ActionRun{"sloan/gt-cloud": {testHealthRun(4, "success", 5)}},
+			jobsErr: map[int64]error{4: io.EOF},
+			unread:  []string{"sloan/gt-cloud"},
+			mark:    &HealthMark{State: "degraded", Text: "not read: sloan/gt-cloud"},
+		},
+		{
+			name: "an unread check beside a failed one is said with it",
+			runs: map[string][]forgejo.ActionRun{
+				"sloan/fractals-nextjs": {testHealthRun(3, "failure", 5)},
+				"sloan/gt-cloud":        {testHealthRun(4, "success", 5)},
+			},
+			jobs:    map[int64][]forgejo.ActionRunJob{3: failing},
+			jobsErr: map[int64]error{4: io.EOF},
+			failed:  []string{"sloan/fractals-nextjs"},
+			unread:  []string{"sloan/gt-cloud"},
+			mark:    &HealthMark{State: "red", Text: "health: sloan/fractals-nextjs · not read: sloan/gt-cloud"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			stub := &deployStub{repos: repoNames(tc.runs), runs: tc.runs, jobs: tc.jobs, jobsErr: tc.jobsErr}
+			d := newDeployTestReader(stub, nil).Read()
+
+			assert.Equal(t, tc.failed, d.HealthFailed)
+			assert.Equal(t, tc.unread, d.HealthUnread)
+			assert.Equal(t, tc.mark, d.HealthMark, "the pill the strip draws is the reader's decision")
+			// Every app the town has is on a row of its own, so the pill and the
+			// block can never disagree about which apps are there.
+			assert.Len(t, d.Health, 2*len(tc.runs))
+		})
+	}
+}
+
+// Every status a scheduled row can carry reaches the page from the reader, so
+// this runs the reader over a town built to produce each one — a pass, a
+// failure, a skip, a cancellation, the two words a run that has not finished
+// carries, and the empty status of a row nobody could read — and holds the set it
+// produced to the page's vocabulary. The point is the colour: only the two
+// statuses the page colours may be produced as a coloured one, and every other
+// status is drawn by the API's own word in the column's dim rather than by a
+// blank or by a green.
+func TestDeploysReaderSendsThePageOnlyStatusesItDraws(t *testing.T) {
+	t.Parallel()
+
+	stub := &deployStub{
+		repos: []string{
+			"sloan/beads", "sloan/cancelled", "sloan/failing", "sloan/moving",
+			"sloan/off", "sloan/passing", "sloan/unread",
+		},
+		runs: map[string][]forgejo.ActionRun{
+			"sloan/beads":     {testDeployRun(90, "v0.1.0", "success", 60)},
+			"sloan/cancelled": {testHealthRun(1, forgejoRunCancelled, 5)},
+			"sloan/failing":   {testHealthRun(2, "failure", 5)},
+			"sloan/moving":    {testHealthRun(3, "running", 5)},
+			"sloan/off":       {testHealthRun(4, "success", 5)},
+			"sloan/passing":   {testHealthRun(5, "success", 5)},
+			"sloan/unread":    {testHealthRun(6, "success", 5)},
+		},
+		jobs: map[int64][]forgejo.ActionRunJob{
+			1: healthJobs("success", forgejoRunCancelled, "skipped"),
+			2: healthJobs("success", "success", "failure"),
+			3: healthJobs("success", "running", "waiting"),
+			4: healthJobs("success", "skipped", "skipped"),
+			5: healthJobs("success", "success", "success"),
+		},
+		jobsErr: map[int64]error{6: io.EOF},
+	}
+	d := newDeployTestReader(stub, nil).Read()
+
+	sent := map[string]bool{}
+	for _, row := range d.Health {
+		sent[row.Status] = true
+	}
+	assert.Equal(t, map[string]bool{
+		"": true, healthSuccess: true, healthFailure: true, "skipped": true,
+		forgejoRunCancelled: true, "running": true, "waiting": true,
+	}, sent, "the statuses the reader puts on a row are not the ones the page was read for")
+
+	// The page's own rule, read from the page: a status is drawn in a colour only
+	// where the colour table names it, and every other status — the API's own
+	// words for a run that has not finished, was called off, or was never read —
+	// falls through to the column's dim.
+	colours := pageTable(t, "HEALTH_RESULT_CLASS")
+	for status := range sent {
+		if status == healthSuccess || status == healthFailure {
+			assert.Contains(t, colours, status, "the page has no colour for a %q check", status)
+			continue
+		}
+		assert.NotContains(t, colours, status, "the page colours %q, so a check that did not pass could read as one", status)
+	}
+}
+
+// repoNames lists a town's repos in a fixed order, so a stub built from a run
+// map answers the same list the reader was given.
+func repoNames(runs map[string][]forgejo.ActionRun) []string {
+	out := make([]string, 0, len(runs))
+	for name := range runs {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// pageTable reads one of the page's const value tables, so a test can hold the
+// words and colours the page draws with to the values the reader sends. The
+// page's functions cannot be run here — a JS engine is a subprocess, which
+// internal/testpolicy bans in the unit tier (gt-tq4ee) — so the table is the one
+// part of the rendering a test can read and hold.
+func pageTable(t *testing.T, name string) map[string]string {
+	t.Helper()
+
+	page := string(indexHTML)
+	at := strings.Index(page, "const "+name+" = {")
+	if at < 0 {
+		t.Fatalf("index.html has no %s table", name)
+	}
+	body := page[at:]
+	end := strings.Index(body, "};")
+	if end < 0 {
+		t.Fatalf("index.html's %s table is not closed", name)
+	}
+	out := map[string]string{}
+	for _, pair := range strings.Split(body[strings.Index(body, "{")+1:end], ",") {
+		key, value, ok := strings.Cut(pair, ":")
+		if !ok {
+			continue
+		}
+		out[strings.TrimSpace(key)] = strings.Trim(strings.TrimSpace(value), `"`)
+	}
+	return out
+}
+
+// The colour a check is drawn in is the page's own table and nothing else, so
+// that table is the whole rule and it can be held to the vocabulary the reader
+// sends without a JS engine: every status a row can carry is looked up here, and
+// no status but the pass and the failure may reach a colour. The unit tier runs
+// no subprocess and the repo has no page harness (gt-tq4ee), so the table, and
+// the one expression healthRow draws from it, are what a test can hold — what
+// the reader hands the page is executed in
+// TestDeploysReaderFeedsTheStripWhatItMarks.
+func TestDeploysBlockColoursOnlyThePassAndTheFailure(t *testing.T) {
+	t.Parallel()
+
+	colours := pageTable(t, "HEALTH_RESULT_CLASS")
+	words := pageTable(t, "HEALTH_RESULT")
+	assert.Equal(t, map[string]string{healthSuccess: "good", healthFailure: "badc"}, colours,
+		"the coloured results are not the pass and the failure alone, so another check could be drawn as one")
+	assert.Equal(t, "green", words[healthSuccess], "a pass is not the page's word for a pass")
+	assert.Equal(t, "off on purpose", words["skipped"],
+		"a skipped run is a deployment nobody tested, and the page must say so rather than leave it reading green")
+
+	// Every other status the reader can put on a row: the API's own words for a
+	// check that has not finished or was called off, and the empty status of a
+	// row whose newest run the block could not read. None of them is coloured,
+	// and none is in the words table, so each falls through to the API's own
+	// word in the column's dim.
+	for _, status := range []string{forgejoRunCancelled, "waiting", "running", forgejoRunBlocked, ""} {
+		if _, ok := colours[status]; ok {
+			t.Errorf("the page colours %q: a check nobody saw pass would read as one that did", status)
+		}
+		if _, ok := words[status]; ok {
+			t.Errorf("the page words %q itself; the table is for what it must say another way", status)
+		}
+	}
+
+	// The row's result cell is that table and nothing else: the class comes from
+	// the lookup with the column's dim as its fallback, the word from the table
+	// with the API's own word behind it, and an unread row says so instead. No
+	// colour literal appears in the row, so there is no second rule to drift.
+	row := pageFunc(t, "healthRow")
+	if !strings.Contains(row, `el("span", "hstate " + (HEALTH_RESULT_CLASS[h.status] || "title"), h.unread ? "not read" : healthResult(h))`) {
+		t.Error("the result cell does not take its class from the page's colour table with the column's dim as its fallback")
+	}
+	for _, literal := range []string{`"good"`, `"badc"`, `"green"`, `"failed"`} {
+		if strings.Contains(row, literal) {
+			t.Errorf("healthRow carries %s of its own, so a colour has a second source to drift from the table", literal)
+		}
+	}
+	assert.Contains(t, pageFunc(t, "healthResult"), `return HEALTH_RESULT[raw] || raw || "–";`,
+		"a result the page has no word for does not fall back to the API's own word")
+	// Where the page words a result another way, the API's own word stays on the
+	// cell's title: an operator reading "off on purpose" can see the run itself
+	// was skipped rather than failed.
+	assert.Contains(t, row, `if (h.status && result.textContent !== h.status) result.title = h.status;`,
+		"the result cell does not keep the API's own word for the check it rewords")
+
 }

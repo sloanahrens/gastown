@@ -17,6 +17,7 @@ h1{font-size:15px;margin:0;letter-spacing:.08em;text-transform:uppercase;color:v
 .pill{padding:3px 10px;border-radius:999px;font-weight:700;font-size:12px;border:1px solid currentColor}
 .pill.green{color:var(--green)}.pill.degraded{color:var(--amber)}.pill.red{color:var(--red)}.pill.unknown{color:var(--dim)}
 #healthline{color:var(--dim);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#healthmark{white-space:nowrap}
 #models{color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #modelspanel{display:flex;gap:32px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--line)}
 #modelspanel:empty{display:none}
@@ -205,6 +206,17 @@ a.drow:hover{background:#19212b}
 .dstage .tag{margin-right:0}
 .dstage .live{font-weight:700}
 .dwarn{flex:1 0 100%;overflow-wrap:anywhere}
+.hhead,.hrow{display:flex;flex-wrap:wrap;gap:2px 8px;align-items:baseline}
+.hhead{color:var(--dim);padding:6px 0 2px}
+.hrow{padding:4px 0;border-top:1px solid var(--line)}
+.happ,.henv,.hstate,.hage,.hgreen,.hpass{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.happ{flex:0 0 var(--happ,16ch)}
+.henv{flex:0 0 20ch;color:var(--dim)}
+.hstate{flex:0 0 16ch}
+.hage,.hgreen{flex:0 0 8ch;color:var(--dim)}
+.hpass{flex:0 0 14ch;color:var(--dim)}
+a.hrow{color:inherit;text-decoration:none;cursor:pointer}
+a.hrow:hover{background:#19212b}
 </style>
 </head>
 <body>
@@ -212,6 +224,7 @@ a.drow:hover{background:#19212b}
   <h1>Gas Town</h1>
   <span id="verdict" class="pill unknown">UNKNOWN</span>
   <span id="healthline">waiting for the town…</span>
+  <span id="healthmark" class="pill red" hidden></span>
   <span id="models"></span>
   <span id="conn" class="off">connecting</span>
   <button id="alertsctl" type="button">alerts: off</button>
@@ -312,6 +325,15 @@ function causeText(c) {
   if (c.rig) k += "/" + c.rig;
   if (c.subject) k += ":" + c.subject;
   return c.detail ? k + ": " + c.detail : k;
+}
+
+// renderHealthMark draws the strip's pill as the deploys reader decided it
+// (health_mark: red, degraded or absent); an absent mark hides the pill.
+function renderHealthMark(s) {
+  const box = $("healthmark"), m = (s && s.deploys && s.deploys.health_mark) || null;
+  box.hidden = !m;
+  box.className = "pill " + (m && m.state === "red" ? "red" : "degraded");
+  box.textContent = m ? m.text : "";
 }
 
 // renderHealth shows the verdict and, when it is not green, the worst cause
@@ -1287,13 +1309,20 @@ function renderDeploys(s) {
   // says: both are wired from the one viewer client.
   if (!d) { note.className = "r"; note.textContent = ""; box.append(el("div", "empty", "no viewer token")); return; }
   // The reader names what it could not read — the class of a refresh that read
-  // nothing, or the repos that failed — and the patrol findings above are
-  // untouched by either.
-  const err = d.error || "", unreadable = (d.missing || []).length;
-  note.className = err || unreadable ? "r warnc" : "r";
-  note.textContent = err ? "could not read the runs: " + err : (unreadable ? unreadable + (unreadable === 1 ? " repo unreadable" : " repos unreadable") : "");
-  const runs = d.runs || [];
-  if (!runs.length) { box.append(el("div", err ? "badc" : "empty", err ? "no deploy runs: " + err : "no deploy runs yet")); return; }
+  // nothing, the repos whose runs failed, and the repos whose scheduled checks
+  // it could not fold, which have no row to draw in the block — and the patrol
+  // findings above are untouched by any of them.
+  const err = d.error || "", unreadable = (d.missing || []).length, unchecked = (d.health_missing || []).length;
+  note.className = err || unreadable || unchecked ? "r warnc" : "r";
+  note.textContent = err ? "could not read the runs: " + err : [
+    unreadable ? unreadable + (unreadable === 1 ? " repo unreadable" : " repos unreadable") : "",
+    unchecked ? unchecked + (unchecked === 1 ? " repo's checks unreadable" : " repos' checks unreadable") : "",
+  ].filter(Boolean).join(" · ");
+  const runs = d.runs || [], health = d.health || [];
+  // A block with neither kind of row is still a town with no deploys: the
+  // scheduled rows are drawn only where a repo has health runs, so their
+  // absence is not something this note has to name.
+  if (!runs.length && !health.length) { box.append(el("div", err ? "badc" : "empty", err ? "no deploy runs: " + err : "no deploy runs yet")); return; }
   // The repo column is as wide as the longest name the block lists, plus one
   // character so the rounding of a name that fits does not ellipsize it, and
   // no name is cut to make room for another (gt-1hob8, gt-egffr). The ref
@@ -1301,18 +1330,84 @@ function renderDeploys(s) {
   // it, so a list holding one takes the tag's own width as well and shows no
   // ref narrower than it would among releases (gt-2h2lx). Every header cell
   // carries its column's class and the header takes the rows' font, since the
-  // widths are in ch and a ch is the drawing font's own (gt-egffr).
-  let widest = 0, tags = false;
+  // widths are in ch and a ch is the drawing font's own (gt-egffr). The
+  // scheduled rows' app column is measured the same way, from the apps they
+  // name, which are not always the repos the runs below name.
+  let widest = 0, tags = false, happ = 0;
   for (const r of runs) {
     widest = Math.max(widest, repoShort(r.repo).length);
     tags = tags || r.workflow === DEPLOY_STAGING;
   }
+  for (const h of health) happ = Math.max(happ, (h.app || "–").length);
   box.style.setProperty("--drepo", (widest + 1) + "ch");
   box.style.setProperty("--dref", (DEPLOY_REF_CH + (tags ? DEPLOY_STAGING_TAG_CH : 0)) + "ch");
-  const head = el("div", "dhead");
-  [["Repo", "drepo"], ["Ref", "dref"], ["Commit", "dhash"], ["State", "dstate"], ["Age", "dage"]].forEach(([h, cls]) => head.append(el("span", cls, h)));
-  box.append(head);
+  if (happ) box.style.setProperty("--happ", (happ + 1) + "ch");
+  if (runs.length) {
+    const head = el("div", "dhead");
+    [["Repo", "drepo"], ["Ref", "dref"], ["Commit", "dhash"], ["State", "dstate"], ["Age", "dage"]].forEach(([h, cls]) => head.append(el("span", cls, h)));
+    box.append(head);
+  }
   for (const r of runs) box.append(deployRow(r));
+  // The scheduled checks are the block's other kind of row, under the runs and
+  // with a header of their own: one row is an app and an environment folded
+  // over the day's checks, not a run, so it has no stages, commit or ref to
+  // line up with (gt-t9w60).
+  if (health.length) box.append(healthHead());
+  for (const h of health) box.append(healthRow(h));
+}
+
+// healthHead is the scheduled rows' column names. Every header cell carries its
+// column's class, and the header takes the rows' font for the reason the runs'
+// header does: the widths are in ch (gt-egffr).
+function healthHead() {
+  const head = el("div", "hhead");
+  [["App", "happ"], ["Environment", "henv"], ["Result", "hstate"], ["Age", "hage"], ["Last green", "hgreen"], ["Passed", "hpass"]].forEach(([h, cls]) => head.append(el("span", cls, h)));
+  return head;
+}
+
+// One scheduled check's result as the page says it. The API's word is not
+// enough: a run whose check was skipped because the app is off is "off on
+// purpose" — the deployment was not tested, so it is not green and never reads
+// as one — and a run the reader could not read says that rather than leaving a
+// blank that reads as a clean pass.
+const HEALTH_RESULT = {success: "green", failure: "failed", skipped: "off on purpose"};
+
+// Only a pass and a failure carry a colour. Every other word — running,
+// blocked, cancelled, off on purpose, not read — is the column's own dim,
+// which is the rule that keeps a check nobody ran from reading as a check that
+// passed.
+const HEALTH_RESULT_CLASS = {success: "good", failure: "badc"};
+
+function healthResult(h) {
+  const raw = h.status || "";
+  return HEALTH_RESULT[raw] || raw || "–";
+}
+
+// healthRow is one app's scheduled check in one environment: the app and the
+// environment, the newest result and how long ago it ran, when this
+// environment was last green, and how many of the window's runs it passed. The
+// row links the newest run the way a deploy row links its run; a row the reader
+// could not read has no run to send the operator to and says so.
+function healthRow(h) {
+  const row = h.url ? el("a", "hrow") : el("div", "hrow");
+  if (h.url) { row.href = h.url; row.target = "_blank"; row.rel = "noopener"; row.title = h.url; }
+  const app = el("span", "happ", h.app || "–");
+  if (app.textContent !== h.repo) app.title = h.repo;
+  const result = el("span", "hstate " + (HEALTH_RESULT_CLASS[h.status] || "title"), h.unread ? "not read" : healthResult(h));
+  // The API's own word stays on the title where the page words it another way,
+  // so an operator reading "off on purpose" can see the run itself was skipped.
+  if (h.status && result.textContent !== h.status) result.title = h.status;
+  const green = el("span", "hgreen", h.last_green ? age(h.last_green) + " ago" : "–");
+  if (!h.last_green) green.title = "not green in the runs the reader read";
+  // The count is over the runs the reader read the window for. The runs it could
+  // not read carry this environment's job or not — the block cannot tell — so
+  // they are neither passed nor failed, and they are said beside the count
+  // rather than dropped from it.
+  const passes = el("span", "hpass", (h.runs ? h.passed + "/" + h.runs : "–") + (h.not_read ? " +" + h.not_read : ""));
+  if (h.not_read) passes.title = h.not_read + (h.not_read === 1 ? " run of the window was not read" : " runs of the window were not read");
+  row.append(app, el("span", "henv", h.env || "–"), result,
+    el("span", "hage", h.at ? age(h.at) : "–"), green, passes);
+  return row;
 }
 
 // deployRow is one run: the repo, ref, commit, state and age on one line, the
@@ -2447,7 +2542,7 @@ function renderQueue(s, force) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderModels(state); renderModelsPanel(state); renderTiles(state); renderOverseer(state); renderQuestions(state); renderDeepReview(state); renderUsage(state); renderEscalations(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderReports(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
+function renderAll() { if (!state) return; renderHealth(state.health); renderModels(state); renderModelsPanel(state); renderTiles(state); renderOverseer(state); renderQuestions(state); renderDeepReview(state); renderUsage(state); renderEscalations(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderReports(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));

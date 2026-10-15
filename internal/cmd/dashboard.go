@@ -82,6 +82,15 @@ order their needs give, refreshed every minute. It infers runner trouble from
 the run itself: the runners API is owner-only and answers the viewer 403, so a
 run nothing has picked up, and one that has not moved, are said as inferences.
 
+The block's scheduled rows are the apps' hourly health.yml checks (dv-4qtt),
+folded rather than listed: one row per app and environment — staging and prod —
+with the newest result, the last green and the pass count over the newest 24
+runs, the runs the reader could not read counted beside it. A check skipped
+because the app is off reads "off on purpose" and is never green, and the header
+carries a red marker naming every repo whose newest check failed, or a degraded
+one naming a repo whose newest check nobody has a reading of. A repo with no
+health.yml run shows nothing extra.
+
 The Cloud panel reads the report the cloud patrol writes — report.json with a
 heartbeat beside it — from /Users/Shared/gt-cloud/reports, or from the
 directory GT_CLOUD_REPORTS_DIR names. It shows when the patrol last ran,
