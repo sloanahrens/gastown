@@ -318,7 +318,11 @@ func (d *Daemon) resumeOverrunStops(s overrunSeams) map[string]bool {
 			continue
 		}
 		touched[st.Bead] = true
-		seat := overrunSeat{Rig: st.Rig, Polecat: st.Polecat, Bead: st.Bead, Branch: st.Branch}
+		seat := overrunSeat{Rig: st.Rig, Polecat: st.Polecat, Bead: st.Bead, Branch: st.Branch, Scheduled: st.Scheduled}
+		if st.Scheduled {
+			d.overrunScheduledStop(s, seat, st, st.Elapsed)
+			continue
+		}
 		d.overrunStop(s, seat, st, st.Elapsed)
 	}
 	return touched
@@ -327,9 +331,14 @@ func (d *Daemon) resumeOverrunStops(s overrunSeams) map[string]bool {
 // overrunStopSeams fills the stop's side effects with the production ones.
 func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 	s.pause = func(seat overrunSeat) error {
+		reason := overrunPauseReason
+		if seat.Scheduled {
+			reason = overrunScheduledPauseReason
+		}
 		return agentpause.Pause(d.config.TownRoot, seat.Rig, constants.RolePolecat, seat.Polecat,
-			overrunPauseReason, overrunActor, "")
+			reason, overrunActor, "")
 	}
+	s.comment = d.overrunCommentBead
 	s.clearPause = func(seat overrunSeat) error {
 		return agentpause.Resume(d.config.TownRoot, seat.Rig, constants.RolePolecat, seat.Polecat)
 	}

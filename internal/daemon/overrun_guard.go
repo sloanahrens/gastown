@@ -30,6 +30,9 @@ const (
 	defaultOverrunGuardInterval   = time.Minute
 	defaultOverrunGuardNudgeAfter = 12 * time.Minute
 	defaultOverrunGuardStopAfter  = 20 * time.Minute
+	// defaultOverrunGuardScheduledStopAfter is the one limit on a scheduled
+	// sling. A deliberate deep-review runs long, but not without end.
+	defaultOverrunGuardScheduledStopAfter = 60 * time.Minute
 )
 
 // overrunNudgeTimeout bounds one nudge. Queue mode only writes a file, so it
@@ -47,8 +50,10 @@ type overrunSeat struct {
 	Submitted, Parked          bool
 	// Scheduled is set when the bead carries a scheduled: label, the mark of a
 	// run the daemon's scheduled_slings patrol created. Those run long by
-	// design (the deep-review is Opus and report-only), so the guard leaves
-	// them alone.
+	// design (the deep-review is report-only), so the guard never nudges them
+	// and gives them the longer scheduled_stop_after limit in place of the 12
+	// and 20 minute rule. Past it the session is stopped and the bead is not
+	// handed back (overrunScheduledStop).
 	Scheduled bool
 }
 
@@ -100,6 +105,11 @@ type overrunSeams struct {
 	recordCleanup func(seat overrunSeat) error
 	retire        func(seat overrunSeat) error
 
+	// comment adds one comment to the seat's bead and nothing else: the
+	// scheduled stop's record, which leaves the bead's status, assignee and
+	// labels as they are. nil means no comment.
+	comment func(seat overrunSeat, text string) error
+
 	// stopLapsed re-reads, before a resumed stop runs its checkpoint or
 	// hand-back, whether the stop still owns the seat. It returns why not
 	// (the pause marker is gone, a session is running) or "" when it does; an
@@ -147,6 +157,22 @@ func overrunGuardThresholds(c *DaemonPatrolConfig) (nudgeAfter, stopAfter time.D
 		overrunDuration(cfg.StopAfter, defaultOverrunGuardStopAfter)
 }
 
+// overrunScheduledStopAfter returns the limit on a scheduled sling: the
+// configured scheduled_stop_after, 60m when unset or unusable, and zero when it
+// is set to zero, which never stops one. A negative value cannot get here: the
+// config loader refuses it.
+func overrunScheduledStopAfter(c *DaemonPatrolConfig) time.Duration {
+	cfg := overrunGuardConfig(c)
+	if cfg == nil || cfg.ScheduledStopAfter == "" {
+		return defaultOverrunGuardScheduledStopAfter
+	}
+	d, err := time.ParseDuration(cfg.ScheduledStopAfter)
+	if err != nil || d < 0 {
+		return defaultOverrunGuardScheduledStopAfter
+	}
+	return d
+}
+
 // triggerOverrunGuard runs an overrun_guard cycle when the patrol is due, on
 // its own goroutine. Due-ness comes from the persisted last-run time, as for
 // checkpoint_dog (triggerCheckpointDog), so a daemon restart does not reset
@@ -182,9 +208,10 @@ func (d *Daemon) triggerOverrunGuard() {
 }
 
 // runOverrunGuard judges every working seat once. A seat that is submitted,
-// parked, on a scheduled sling or undated is left alone. At the nudge threshold the seat is nudged
+// parked or undated is left alone. At the nudge threshold the seat is nudged
 // once per sling, remembered in the bead's state file; past the stop
-// threshold the stop seam runs. In dry-run mode nothing is sent, stopped or
+// threshold the stop seam runs. A seat on a scheduled sling is never nudged and
+// is judged by scheduled_stop_after alone (zero leaves it alone). In dry-run mode nothing is sent, stopped or
 // written, and the log says what would have happened.
 func (d *Daemon) runOverrunGuard(s overrunSeams) {
 	if !d.isPatrolActive("overrun_guard") {
@@ -194,6 +221,7 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 		s.now = time.Now
 	}
 	nudgeAfter, stopAfter := overrunGuardThresholds(d.patrolConfig)
+	scheduledStopAfter := overrunScheduledStopAfter(d.patrolConfig)
 	dry := false
 	if cfg := overrunGuardConfig(d.patrolConfig); cfg != nil {
 		dry = cfg.DryRun
@@ -215,7 +243,7 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 	}
 
 	for _, seat := range seats {
-		if seat.Submitted || seat.Parked || seat.Scheduled || seat.Bead == "" || resumed[seat.Bead] {
+		if seat.Submitted || seat.Parked || (seat.Scheduled && scheduledStopAfter <= 0) || seat.Bead == "" || resumed[seat.Bead] {
 			continue
 		}
 		who := seat.Rig + "/" + seat.Polecat
@@ -235,10 +263,16 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 		// A nudge sent before this sling belongs to an earlier run of the
 		// bead (a rework re-sling starts a new clock).
 		nudged := !state.NudgedAt.IsZero() && !state.NudgedAt.Before(slung)
-		action := decideOverrun(overrunInput{
+		in := overrunInput{
 			Now: now, SlungAt: slung, Nudged: nudged,
 			NudgeAt: nudgeAfter, StopAt: stopAfter,
-		})
+		}
+		if seat.Scheduled {
+			// Both thresholds at the one limit: the stop wins from there on
+			// and no nudge can fall due before it.
+			in.NudgeAt, in.StopAt = scheduledStopAfter, scheduledStopAfter
+		}
+		action := decideOverrun(in)
 		elapsed := now.Sub(slung)
 
 		switch action {
@@ -278,7 +312,15 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 				continue
 			}
 			if dry {
-				d.logger.Printf("overrun_guard: dry run: would stop %s on %s after %s", who, seat.Bead, elapsed.Round(time.Second))
+				kind := ""
+				if seat.Scheduled {
+					kind = "scheduled "
+				}
+				d.logger.Printf("overrun_guard: dry run: would stop %s%s on %s after %s", kind, who, seat.Bead, elapsed.Round(time.Second))
+				continue
+			}
+			if seat.Scheduled {
+				d.overrunScheduledStop(s, seat, state, elapsed)
 				continue
 			}
 			d.overrunStop(s, seat, state, elapsed)

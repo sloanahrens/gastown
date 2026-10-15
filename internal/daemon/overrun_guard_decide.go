@@ -62,6 +62,9 @@ const (
 	// branch exists only in the worktree. A remote that refuses the branch for
 	// good would otherwise hold the bead on a paused seat with a log line per tick.
 	overrunPushMaxAttempts = 5
+	// overrunCommentMaxAttempts is how many failed bead comments a scheduled
+	// stop tolerates, one per tick, before it ends without one.
+	overrunCommentMaxAttempts = 5
 )
 
 // nudgeFailures is how many nudges have failed for the sling at slung.
@@ -130,6 +133,14 @@ type overrunState struct {
 	PushFailure  string `json:"push_failure,omitempty"`
 
 	StoppedAt time.Time `json:"stopped_at,omitzero"`
+
+	// Scheduled marks a stop of a scheduled sling (overrunScheduledStop): it
+	// ends at the session stop and one bead comment, so a pending one is
+	// resumed there and never by overrunStop, which would hand the bead back.
+	// CommentFailures counts the failed comments; at
+	// overrunCommentMaxAttempts the stop ends without one.
+	Scheduled       bool `json:"scheduled,omitempty"`
+	CommentFailures int  `json:"comment_failures,omitempty"`
 }
 
 // overrunStatePath is <town>/.runtime/overrun-guard/<bead>.json. A bead id

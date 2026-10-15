@@ -558,6 +558,15 @@ func validateDaemonPatrolConfig(c *DaemonPatrolConfig) error {
 	if c.Version > CurrentDaemonPatrolConfigVersion {
 		return fmt.Errorf("%w: got %d, max supported %d", ErrInvalidVersion, c.Version, CurrentDaemonPatrolConfigVersion)
 	}
+	if c.Patrols != nil && c.Patrols.OverrunGuard != nil {
+		if s := c.Patrols.OverrunGuard.ScheduledStopAfter; s != "" {
+			// "0" is a valid duration and means never; a negative one would
+			// read as an instant stop or as never, so it is refused.
+			if d, err := time.ParseDuration(s); err != nil || d < 0 {
+				return fmt.Errorf("daemon.patrols.overrun_guard.scheduled_stop_after %q: want a duration of zero or more, such as \"60m\"", s)
+			}
+		}
+	}
 	return nil
 }
 
