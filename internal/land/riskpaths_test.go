@@ -232,3 +232,22 @@ func TestOrdinaryLandingIsNotLabelled(t *testing.T) {
 		t.Errorf("labels = %v, want no %s on an ordinary landing", f.bead().Labels, LabelOverseerReviewWanted)
 	}
 }
+
+// A non-ASCII path under a subtree glob is a risk path. git C-quotes such a
+// name in diff --name-only output; the quoted form begins with a quote and so
+// never matched internal/daemon/** (the real-git half is in
+// riskpaths_integration_test.go).
+func TestRiskPathsMatchesNonASCIIPath(t *testing.T) {
+	t.Parallel()
+	f := newRiskFixture(t, "internal/daemon/**\n", map[string]string{
+		"internal/daemon/café.go": "x\n",
+		"README.md":               "y\n",
+	})
+	got, err := RiskPaths(f.repo(), f.base, f.head)
+	if err != nil {
+		t.Fatalf("RiskPaths: %v", err)
+	}
+	if !slices.Equal(got, []string{"internal/daemon/café.go"}) {
+		t.Errorf("RiskPaths = %q, want the non-ASCII path", got)
+	}
+}
