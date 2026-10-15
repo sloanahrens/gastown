@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/shlex"
 	"github.com/spf13/cobra"
@@ -394,18 +395,24 @@ var heredocStartPattern = regexp.MustCompile(`<<(-?)[ \t]*(['"]?)([A-Za-z_][A-Za
 // time it reads the body, without re-finding the operator (gt-v02wh). quoted
 // is true when the tag is quoted: the shell leaves such a body literal, while
 // an unquoted body gets its $(...) and backticks expanded (gt-x50o8).
+// unterminated is true when no line equals the tag, so the body runs to the
+// end of the text — a span the strippers refuse to act on (gt-79opc).
 type heredocSpan struct {
-	reader      string
-	readerStart int
-	body        string
-	bodyStart   int
-	bodyEnd     int
-	quoted      bool
+	reader       string
+	readerStart  int
+	body         string
+	bodyStart    int
+	bodyEnd      int
+	quoted       bool
+	unterminated bool
 }
 
 // scanHeredocs returns every heredoc in command, in source order. A "<<" that
 // appears inside another heredoc's body is that body's data, not a second
-// heredoc, so it is dropped (gt-mkrj).
+// heredoc, so it is dropped (gt-mkrj). One written inside quotes is a literal
+// the shell never reads as a redirection, and one preceded by "<" is the tail
+// of a "<<<" here-string: both are skipped, because a body inferred from
+// either runs to the end of the text and hides the lines after it (gt-79opc).
 func scanHeredocs(command string) []heredocSpan {
 	matches := heredocStartPattern.FindAllStringSubmatchIndex(command, -1)
 	if matches == nil {
@@ -413,10 +420,14 @@ func scanHeredocs(command string) []heredocSpan {
 	}
 	var spans []heredocSpan
 	stripped := 0 // end of the last accepted body; nothing before it starts a heredoc
+	walk := heredocQuoteWalk{runes: []rune(command), prevIdx: -1}
 	for _, m := range matches {
 		start, end := m[0], m[1]
 		if start < stripped {
 			continue // inside a previously accepted heredoc body
+		}
+		if walk.advanceTo(start) != 0 || (start > 0 && command[start-1] == '<') {
+			continue
 		}
 		allowIndent := command[m[2]:m[3]] == "-"
 		quoted := m[5] > m[4]
@@ -429,10 +440,31 @@ func scanHeredocs(command string) []heredocSpan {
 			// the last thing on the line with nothing after it).
 			spans = append(spans, heredocSpan{reader: reader, readerStart: readerStart, bodyStart: -1, bodyEnd: end, quoted: quoted})
 			stripped = end
+			walk.skipTo(end)
 			continue
 		}
 		bodyStart := end + nl + 1
 		bodyEnd := heredocTerminatorEnd(command, bodyStart, tag, allowIndent)
+		if bodyEnd < 0 {
+			// No line equals the tag, so the shell would read the rest of
+			// the text as the body. The span is still recorded — a reader
+			// that writes the body to a file, or feeds it to a shell, has
+			// to judge it — but nothing is stripped: the tail may just as
+			// well be live commands after a "<<" the shell never took as a
+			// redirection, and dropping it hid them (gt-79opc).
+			spans = append(spans, heredocSpan{
+				reader:       reader,
+				readerStart:  readerStart,
+				body:         command[bodyStart:],
+				bodyStart:    bodyStart,
+				bodyEnd:      len(command),
+				quoted:       quoted,
+				unterminated: true,
+			})
+			stripped = len(command)
+			walk.skipTo(len(command))
+			continue
+		}
 		spans = append(spans, heredocSpan{
 			reader:      reader,
 			readerStart: readerStart,
@@ -442,8 +474,67 @@ func scanHeredocs(command string) []heredocSpan {
 			quoted:      quoted,
 		})
 		stripped = bodyEnd
+		walk.skipTo(bodyEnd)
 	}
 	return spans
+}
+
+// heredocQuoteWalk is the reading half of spaceOutShellOperators' quoting
+// rules — backslash escapes, single and double quotes, and word-leading "#"
+// comments — walked forward over the text before each "<<" candidate, telling
+// a literal "<<" from a redirection. Comments decide it because a word-leading
+// "#" makes the rest of its line text the shell does not parse at all: read as
+// a quote, the apostrophe in "# don't" left the real heredoc below invisible
+// (gt-79opc).
+type heredocQuoteWalk struct {
+	runes   []rune
+	runeIdx int
+	byteIdx int
+	quote   rune // the quoted stretch being read: 0, '\'' or '"'
+	comment bool // inside a "#" comment, which runs to the end of its line
+	escaped bool // the rune at runeIdx is literal text behind a backslash
+	prevIdx int  // the rune the shell read last, for startsShellWord
+	prevEsc bool // that rune was backslash-escaped
+}
+
+// advanceTo reads up to byte offset to and returns the quote open there.
+func (w *heredocQuoteWalk) advanceTo(to int) rune {
+	for w.byteIdx < to && w.runeIdx < len(w.runes) {
+		r := w.runes[w.runeIdx]
+		escaped := w.escaped
+		w.escaped = false
+		switch {
+		case r == '\n':
+			w.comment = false
+		case w.comment:
+			// The shell parses none of a comment's text.
+		case escaped:
+			// Literal text behind a backslash opens nothing.
+		case r == '\\' && w.quote != '\'':
+			w.escaped = true
+		case w.quote == 0 && (r == '\'' || r == '"'):
+			w.quote = r
+		case w.quote != 0 && r == w.quote:
+			w.quote = 0
+		case r == '#' && startsShellWord(w.runes, w.prevIdx, w.prevEsc):
+			w.comment = true
+		}
+		w.prevIdx, w.prevEsc = w.runeIdx, escaped
+		w.byteIdx += utf8.RuneLen(r)
+		w.runeIdx++
+	}
+	return w.quote
+}
+
+// skipTo reads past byte offset to with no quote tracking: the text crossed is
+// a heredoc body, which the shell reads verbatim, so a quote left open in it
+// must not reach the command text after the terminator.
+func (w *heredocQuoteWalk) skipTo(to int) {
+	for w.byteIdx < to && w.runeIdx < len(w.runes) {
+		w.byteIdx += utf8.RuneLen(w.runes[w.runeIdx])
+		w.runeIdx++
+	}
+	w.quote, w.comment, w.escaped, w.prevIdx, w.prevEsc = 0, false, false, -1, false
 }
 
 // heredocReaderLine returns the text of the line the heredoc operator at
@@ -485,7 +576,10 @@ func heredocReaderLine(command string, start, end int) (string, int) {
 // dangerous phrase (gt-mkrj). Strips from just after the "<<TAG" line
 // through the line that is exactly TAG (optionally tab-indented, for the
 // "<<-TAG" form); text outside any heredoc span is left untouched. A body
-// fed to a shell invoker is not data — see shellFedHeredocBodies.
+// fed to a shell invoker is not data — see shellFedHeredocBodies. An
+// unterminated heredoc is left in place: its body is the whole tail of the
+// text, so stripping on a match that may not even be a redirection erased
+// every command after it (gt-79opc).
 func stripHeredocBodies(command string) string {
 	spans := scanHeredocs(command)
 	if len(spans) == 0 {
@@ -494,7 +588,7 @@ func stripHeredocBodies(command string) string {
 	var b strings.Builder
 	pos := 0
 	for _, s := range spans {
-		if s.bodyStart < 0 {
+		if s.bodyStart < 0 || s.unterminated {
 			continue
 		}
 		b.WriteString(command[pos:s.bodyStart])
@@ -634,8 +728,7 @@ func heredocReaderIsShellInvoker(reader string) bool {
 // heredocTerminatorEnd scans command starting at bodyStart for a line
 // whose content is exactly tag (leading tabs stripped first when
 // allowIndent, matching the "<<-TAG" form) and returns the offset just
-// past that terminator line (or len(command) if none is found, meaning
-// the heredoc is unterminated and the rest of the command is body).
+// past that terminator line, or -1 when no such line exists.
 func heredocTerminatorEnd(command string, bodyStart int, tag string, allowIndent bool) int {
 	offset := bodyStart
 	for offset <= len(command) {
@@ -661,7 +754,7 @@ func heredocTerminatorEnd(command string, bodyStart int, tag string, allowIndent
 		}
 		offset = next
 	}
-	return len(command)
+	return -1
 }
 
 // shellVarAssignPattern matches a simple "NAME=VALUE" shell variable
