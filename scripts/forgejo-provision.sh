@@ -22,7 +22,7 @@
 #   --web-url URL          web root written to the token files (default
 #                          $FORGEJO_URL, else --api-url less /api/v1)
 #   --admin-token-file F   file holding FORGEJO_ADMIN_TOKEN=... (default
-#                          $FORGEJO_ADMIN_ENV, else $HOME/forgejo/.env)
+#                          $FORGEJO_ADMIN_ENV, else no file is read)
 #   --role NAME            bot role to provision; repeatable (default: polecat
 #                          landing registry; known: polecat landing registry
 #                          viewer)
@@ -43,9 +43,12 @@
 #   --dry-run              read but never write
 #   -h, --help             this text
 #
-# The admin token resolves from $FORGEJO_ADMIN_TOKEN, else from
-# FORGEJO_ADMIN_TOKEN= in --admin-token-file. It must belong to a site
-# administrator: user creation and the admin token routes are admin-scoped.
+# Before running this by hand, read docs/auth-broker.md in the devops rig: the
+# admin token resolves from $GT_AUTH_FORGEJO_TOKEN, which the broker's run act
+# sets, else from $FORGEJO_ADMIN_TOKEN or FORGEJO_ADMIN_TOKEN= in
+# --admin-token-file, which a stand-in run sets in place of the broker
+# (gt-4tno0). It must belong to a site administrator: user creation and the
+# admin token routes are admin-scoped.
 
 set -euo pipefail
 
@@ -61,7 +64,7 @@ usage() { sed -n '/^# Usage:/,/^$/p' "$0" | sed 's/^# \{0,1\}//'; }
 
 API_URL="${FORGEJO_API_URL:-http://127.0.0.1:3000/api/v1}"
 WEB_URL="${FORGEJO_URL:-}"
-ADMIN_TOKEN_FILE="${FORGEJO_ADMIN_ENV:-$HOME/forgejo/.env}"
+ADMIN_TOKEN_FILE="${FORGEJO_ADMIN_ENV:-}"
 BOT_PREFIX="bot-"
 BOT_EMAIL_DOMAIN="bots.invalid"
 TOKEN_NAME="gt-provision"
@@ -184,15 +187,19 @@ cleanup() {
 trap cleanup EXIT
 
 # The admin token goes in a mode-600 curl config rather than an argv -H, so it
-# never shows in `ps` and never reaches a shell trace or a log line.
+# never shows in `ps` and never reaches a shell trace or a log line. The broker
+# hands out GT_AUTH_FORGEJO_TOKEN for one run and revokes it at the end, so no
+# source here leaves the token on disk beyond that config, which cleanup removes.
 resolve_admin_token() {
   local token=""
-  if [ -n "${FORGEJO_ADMIN_TOKEN:-}" ]; then
+  if [ -n "${GT_AUTH_FORGEJO_TOKEN:-}" ]; then
+    token=$GT_AUTH_FORGEJO_TOKEN
+  elif [ -n "${FORGEJO_ADMIN_TOKEN:-}" ]; then
     token=$FORGEJO_ADMIN_TOKEN
   elif [ -f "$ADMIN_TOKEN_FILE" ]; then
     token=$(sed -n 's/^[[:space:]]*\(export[[:space:]]*\)\{0,1\}FORGEJO_ADMIN_TOKEN=//p' "$ADMIN_TOKEN_FILE" | tail -1 | sed "s/^['\"]//; s/['\"]$//")
   fi
-  [ -n "$token" ] || die "no admin token: set FORGEJO_ADMIN_TOKEN, or FORGEJO_ADMIN_TOKEN= in $ADMIN_TOKEN_FILE"
+  [ -n "$token" ] || die "no admin token: run this script through the auth broker (sudo -u gt-forge gt-approve run forgejo-provision -- <its arguments>), or set FORGEJO_ADMIN_TOKEN${ADMIN_TOKEN_FILE:+ (or FORGEJO_ADMIN_TOKEN= in $ADMIN_TOKEN_FILE)} for a stand-in"
   case "$token" in
     *$'\n'*|*'"'*|*\\*|*' '*) die "the admin token holds whitespace, a quote or a backslash; refusing to use it" ;;
   esac
