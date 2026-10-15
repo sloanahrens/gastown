@@ -937,13 +937,20 @@ dashboard's Questions pane and the daemon read it.
 gt ask "<title>" <<'EOF'   # file one; body sections below, on stdin
 gt answer <id> "<text>"    # Sloan's answer: a comment with no prefix
 gt answer --overseer <id> "<text>"   # the overseer's note: "[overseer] <text>"
-gt questions [--json]      # the open ones, oldest first, with age and held work
+gt questions [--json]      # the open ones as a priority queue, with held work
 ```
 
 The body needs `## Question` and `## Recommended answer`; `## Held work` (bead
 ids, `stub: <title>`, or `none`) and `## Facts` are optional. A held bead is made
 to depend on the question, so it leaves `bd ready` until the question is closed.
 Nothing closes a question automatically.
+
+A question is a bead like any other, so `gt ask --priority 0-4` (default 2) files
+one that can stop the town above one that can wait, and `--effort quick|session`
+tags what answering takes as an `effort:` label. `gt questions` and the
+dashboard's Questions payload order by priority and then by how long the question
+has waited, and each row carries the priority, the count of beads depending on
+the question and its effort tag.
 
 A question is waiting on Sloan while its newest comment is the overseer's or
 there is none, and answered once its newest comment lacks the `[overseer]`

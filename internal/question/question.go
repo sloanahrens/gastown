@@ -36,8 +36,19 @@ const (
 	// TitleMax is the longest title gt ask files.
 	TitleMax = 120
 
-	// Priority is the priority a question is filed at.
+	// Priority is the priority gt ask files a question at when it is given
+	// none: bd's middle, so a question that says nothing else queues with
+	// ordinary work.
 	Priority = 2
+
+	// EffortQuick and EffortSession are the effort tags gt ask writes: a
+	// question answerable from one glance, and one that wants a sitting.
+	EffortQuick   = "quick"
+	EffortSession = "session"
+
+	// EffortPrefix leads the label an effort tag is written as, so the tag
+	// rides the bead's own labels and needs no new store.
+	EffortPrefix = "effort:"
 )
 
 // The description's section headings, as the parse keys them (lowercased).
@@ -65,6 +76,26 @@ var beadID = regexp.MustCompile(`^[a-z][a-z0-9]*-[a-z0-9][a-z0-9.-]*$`)
 
 // IsBeadID reports whether s has the shape of a bead id.
 func IsBeadID(s string) bool { return beadID.MatchString(s) }
+
+// EffortLabel is the label an effort tag is written as, and "" for no tag.
+func EffortLabel(effort string) string {
+	if effort == "" {
+		return ""
+	}
+	return EffortPrefix + effort
+}
+
+// EffortOf reads a question's effort tag off its labels, and "" when it carries
+// none. The tag is returned as written: a reader that second-guessed a
+// hand-added label would hide the operator's own note instead of showing it.
+func EffortOf(labels []string) string {
+	for _, l := range labels {
+		if tag, ok := strings.CutPrefix(l, EffortPrefix); ok && tag != "" {
+			return tag
+		}
+	}
+	return ""
+}
 
 // Fields are the parts of a question bead a reader draws.
 type Fields struct {

@@ -24,6 +24,9 @@ const (
 type QuestionRow struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
+	// Priority is the bead's own priority, bd's 0-4, which the queue sorts by:
+	// the question that can stop the town is the one the operator reads first.
+	Priority int `json:"priority"`
 	// Question and Recommended are the description's ## Question and
 	// ## Recommended answer sections, each as one line, or empty when the
 	// description does not carry them.
@@ -31,6 +34,14 @@ type QuestionRow struct {
 	Recommended string `json:"recommended,omitempty"`
 	// Held are the bead ids the ## Held work section names.
 	Held []string `json:"held,omitempty"`
+	// HeldCount is bd's own count of the beads that depend on the question: the
+	// work that leaves bd ready until the question is closed. It is read off
+	// the bead, so a hold added after the question was filed is counted too,
+	// and a description whose ids a hold never took is not.
+	HeldCount int `json:"held_count"`
+	// Effort is the tag gt ask was given for what answering takes, "" when the
+	// question carries none.
+	Effort string `json:"effort,omitempty"`
 	// AgeSec is how long ago the overseer asked, off the bead's own creation
 	// time, and is nil for a bead whose time the reader cannot parse: an age of
 	// zero would read as "asked just now".
@@ -46,10 +57,11 @@ type QuestionRow struct {
 	Malformed bool `json:"malformed,omitempty"`
 }
 
-// Questions is the town's open overseer questions, oldest first. Unavailable
-// says the read failed, which the pane draws as itself and never as an empty
-// list: "the overseer has asked nothing" and "the questions could not be read"
-// are different things to tell the operator.
+// Questions is the town's open overseer questions, most urgent first and, at
+// one priority, the longest wait first. Unavailable says the read failed, which
+// the pane draws as itself and never as an empty list: "the overseer has asked
+// nothing" and "the questions could not be read" are different things to tell
+// the operator.
 type Questions struct {
 	Rows        []QuestionRow `json:"rows"`
 	More        int           `json:"more,omitempty"`

@@ -184,6 +184,8 @@ section.collapsed>h2{border-bottom:0}
 .qtext{margin:2px 0}
 .qrec,.qheld{color:var(--dim);margin:2px 0}
 .qage{color:var(--dim)}
+.qpri,.qeffort{color:var(--dim);font-size:11px;white-space:nowrap}
+.qpri.warnc{color:var(--amber)}
 .qstate{color:var(--dim);font-size:11px;white-space:nowrap}
 .qcmd{margin-top:3px;display:inline-block;background:#10161d;border:1px solid var(--line);border-radius:4px;padding:1px 6px;font-size:11px;user-select:all}
 h3.sub{display:flex;gap:10px;align-items:center;margin:0;padding:10px 12px 0;font-size:11px;font-weight:400;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
@@ -1878,10 +1880,11 @@ function renderDispatch(s) {
 // amber the page carries for every other stale reading.
 const QUESTION_OLDEST_SEC = 4 * 3600;
 
-// The Questions pane: what the overseer has filed for Sloan, oldest first, so
-// the question that has waited longest is the first thing he reads. Each card
-// carries the question, the answer the overseer recommends, the work it holds
-// up, whether Sloan has answered it, and the line that answers it.
+// The Questions pane: what the overseer has filed for Sloan, most urgent first
+// and, at one priority, the longest wait first, so what can stop the town is
+// the first thing he reads. Each card carries the question, its priority and
+// effort tag, the answer the overseer recommends, the work it holds up,
+// whether Sloan has answered it, and the line that answers it.
 //
 // Every cell goes through el(), which writes textContent: the question and the
 // recommended answer are the overseer's own words, and a tag in them shows as
@@ -1919,6 +1922,10 @@ function questionCard(r) {
   const head = el("div", "chead");
   head.append(el("span", "bead", r.id));
   head.append(el("span", "title", r.title || ""));
+  // The priority is why a card is where it is in the pane, so it is drawn, and
+  // P0 and P1 in the amber the page marks what wants attention with.
+  head.append(el("span", r.priority <= 1 ? "qpri warnc" : "qpri", "P" + r.priority));
+  if (r.effort) head.append(el("span", "qeffort", r.effort));
   if (r.age_sec != null) head.append(el("span", "qage", fmtDur(r.age_sec)));
   head.append(el("span", "qstate", r.state === "answered" ? "answered, overseer acting" : "awaiting you"));
   c.append(head);

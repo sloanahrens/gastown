@@ -25,6 +25,8 @@ import (
 var (
 	answerOverseer bool
 	questionsJSON  bool
+	askPriority    int
+	askEffort      string
 )
 
 var askCmd = &cobra.Command{
@@ -33,6 +35,11 @@ var askCmd = &cobra.Command{
 	Short:   "File a question for Sloan and hold the work it blocks",
 	Long: `File a question for Sloan as a bead in the town database, under the
 overseer-question label, and hold the work it blocks until it is closed.
+
+The question is a bead like any other, so --priority files it at bd's 0-4
+(default 2) and a P0 question outranks one that can wait. --effort quick or
+session records what answering takes, as an effort: label; a question filed
+without one carries no tag.
 
 The body comes from stdin, in these sections:
 
@@ -55,7 +62,7 @@ It prints the question's id and the command that answers it. Read the body from
 a quoted heredoc, so backticks in it do not run.
 
 Examples:
-  gt ask "Retry policy for landing" <<'EOF'
+  gt ask --priority 1 --effort quick "Retry policy for landing" <<'EOF'
   ## Question
   Retry a rejected landing once, or hand it straight to a human?
   ## Recommended answer
@@ -91,16 +98,20 @@ Examples:
 var questionsCmd = &cobra.Command{
 	Use:     "questions",
 	GroupID: GroupComm,
-	Short:   "List the open overseer questions with their age and held work",
-	Long: `List every open overseer question, oldest first: its id, how long it has
-waited, whether it awaits Sloan or Sloan has answered and the overseer is
-acting, the work it holds, and its title. --json prints the dashboard's
-Questions payload instead.`,
+	Short:   "List the open overseer questions as a priority queue",
+	Long: `List every open overseer question as a priority queue: most urgent first and,
+within a priority, the longest wait first. A row is the question's id, how
+long it has waited, whether it awaits Sloan or Sloan has answered and the
+overseer is acting, its priority, how many beads it holds, the effort tag it
+was filed with, and its title. --json prints the dashboard's Questions payload
+instead.`,
 	Args: cobra.NoArgs,
 	RunE: runQuestions,
 }
 
 func init() {
+	askCmd.Flags().IntVar(&askPriority, "priority", question.Priority, "Priority to file the question at, bd's 0 (most urgent) to 4")
+	askCmd.Flags().StringVar(&askEffort, "effort", "", "What answering takes: quick or session (a tag on the bead)")
 	answerCmd.Flags().BoolVar(&answerOverseer, "overseer", false, `Comment as the overseer: prefix the text with "[overseer]"`)
 	questionsCmd.Flags().BoolVar(&questionsJSON, "json", false, "Print the questions as JSON")
 	rootCmd.AddCommand(askCmd, answerCmd, questionsCmd)
@@ -127,17 +138,18 @@ func openQuestionStore() (questionStore, error) {
 }
 
 func runAsk(cmd *cobra.Command, args []string) error {
-	return askQuestion(cmd.InOrStdin(), cmd.OutOrStdout(), args[0], openQuestionStore)
+	opts := question.AskOptions{Priority: askPriority, Effort: askEffort}
+	return askQuestion(cmd.InOrStdin(), cmd.OutOrStdout(), args[0], opts, openQuestionStore)
 }
 
-// askQuestion is gt ask: it reads and checks the body before it opens the town
-// database, so a refused question touches nothing.
-func askQuestion(in io.Reader, out io.Writer, title string, open func() (questionStore, error)) error {
+// askQuestion is gt ask: it reads and checks the body and the flags before it
+// opens the town database, so a refused question touches nothing.
+func askQuestion(in io.Reader, out io.Writer, title string, opts question.AskOptions, open func() (questionStore, error)) error {
 	body, err := readQuestionInput(in, "the question body")
 	if err != nil {
 		return err
 	}
-	ask, err := question.ParseAsk(title, body)
+	ask, err := question.ParseAsk(title, body, opts)
 	if err != nil {
 		return fmt.Errorf("gt ask: %w", err)
 	}
@@ -161,8 +173,8 @@ func askQuestion(in io.Reader, out io.Writer, title string, open func() (questio
 func fileQuestion(s questionStore, ask question.Ask) (string, error) {
 	issue, err := s.Create(beads.CreateOptions{
 		Title:       ask.Title,
-		Labels:      []string{question.Label},
-		Priority:    question.Priority,
+		Labels:      ask.Labels(),
+		Priority:    ask.Priority,
 		Description: ask.Body,
 	})
 	if err != nil {
@@ -173,9 +185,11 @@ func fileQuestion(s questionStore, ask question.Ask) (string, error) {
 	for _, h := range ask.Holds {
 		held := h.ID
 		if h.Stub != "" {
+			// The stub is the question's held work, so it is filed where the
+			// question was: it is the thing the priority is about.
 			stub, err := s.Create(beads.CreateOptions{
 				Title:       h.Stub,
-				Priority:    question.Priority,
+				Priority:    ask.Priority,
 				Description: fmt.Sprintf("Work held by overseer question %s; replace this stub with the real description.", id),
 			})
 			if err != nil {
@@ -294,9 +308,10 @@ func writeQuestions(out io.Writer, qs *dashboard.Questions, asJSON bool) error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tAGE\tSTATE\tHELD\tTITLE")
+	fmt.Fprintln(tw, "ID\tAGE\tSTATE\tPRI\tHELD\tEFFORT\tTITLE")
 	for _, r := range qs.Rows {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", r.ID, questionAge(r.AgeSec), r.State, questionHeld(r.Held), r.Title)
+		fmt.Fprintf(tw, "%s\t%s\t%s\tP%d\t%d\t%s\t%s\n",
+			r.ID, questionAge(r.AgeSec), r.State, r.Priority, r.HeldCount, questionEffort(r.Effort), r.Title)
 	}
 	return tw.Flush()
 }
@@ -317,12 +332,13 @@ func questionAge(sec *int64) string {
 	return fmt.Sprintf("%dm", int(d.Minutes()))
 }
 
-// questionHeld is the work a question holds, as the table prints it.
-func questionHeld(held []string) string {
-	if len(held) == 0 {
+// questionEffort is a question's effort tag as the table prints it: "-" when
+// the question carries none.
+func questionEffort(effort string) string {
+	if effort == "" {
 		return "-"
 	}
-	return strings.Join(held, ",")
+	return effort
 }
 
 // readQuestionInput reads what the command takes on stdin. A terminal is
