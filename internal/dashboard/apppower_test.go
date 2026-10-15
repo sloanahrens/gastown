@@ -229,13 +229,13 @@ func TestAppPowerUnreadableMarkerFileIsUnknown(t *testing.T) {
 	t.Parallel()
 
 	r := appFixture(t, map[string]string{"locked": "since=" + markerSince + " by=s env=all reason=x\n"}, map[string]string{})
+	// A dangling symlink is listed as a file but cannot be opened, for root too.
 	path := filepath.Join(r.offDir, "locked.off")
-	if err := os.Chmod(path, 0); err != nil {
+	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	if f, err := os.Open(path); err == nil {
-		f.Close()
-		t.Skip("the file opens despite mode 0 (running as root)")
+	if err := os.Symlink(filepath.Join(r.offDir, "missing-target"), path); err != nil {
+		t.Fatal(err)
 	}
 	row := appRow(t, r.Read(appNow), "locked")
 	if row.State != AppUnknown || row.Note != appMarkerReadFailed {
