@@ -48,8 +48,9 @@ runs `CALL dolt_gc('--full')` when either holds:
 - **old-gen growth**: `.dolt/noms/oldgen` grew more than 20% since right
   after its last GC.
 
-It runs only while the town is quiet (no gate slot held, no working polecat,
-no daemon Dolt task), defers to a pause someone else holds, and writes the
+It runs only while no gate slot is held and the daemon has no landing pass,
+scheduled slings cycle or install in flight; a working polecat does not defer
+it. It defers to a pause someone else holds, and writes the
 pause marker `~/gt/daemon/dolt.pause` before each GC call and removes it
 after. A daemon that dies mid-GC leaves a marker that lapses on its own 15
 minutes after it was written. Dolt's automatic GC stays on.
