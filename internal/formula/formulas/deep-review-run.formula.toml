@@ -7,7 +7,7 @@ version = 2
 id = "review"
 title = "Review risk-path landings, a rotating slice and its docs"
 description = """
-You orchestrate; subagents read. Nothing here edits the repo.
+You orchestrate; subagents read.
 A block that only reads the run directory starts with
 `D=/tmp/deep-review-{{issue}}` (each Bash call is a fresh shell); one that creates
 or redirects into it writes the literal path, since the polecat-paths guard
@@ -16,12 +16,13 @@ refuses a target built from `$D`.
 **1. Load the ledger and plan. The script decides; you do not.**
 ```bash
 mkdir -p /tmp/deep-review-{{issue}}
+cat {{review_script}} > /tmp/deep-review-{{issue}}/deep-review.sh &&
 bd list -l {{run_label}} --all --limit 60 --json > /tmp/deep-review-{{issue}}/runs.json &&
   jq -r '(if type == "object" then .data else . end)[] | select(.id != "{{issue}}") | .notes // empty' /tmp/deep-review-{{issue}}/runs.json > /tmp/deep-review-{{issue}}/prev-notes.txt &&
-  bash scripts/deep-review.sh om-queued --repo . >> /tmp/deep-review-{{issue}}/prev-notes.txt &&
-  cat "${GT_TOWN_ROOT:-$HOME/gt}/.runtime/landings/gastown.jsonl" > /tmp/deep-review-{{issue}}/landings-all.jsonl &&
+  bash /tmp/deep-review-{{issue}}/deep-review.sh om-queued --repo . >> /tmp/deep-review-{{issue}}/prev-notes.txt &&
+  cat "${GT_TOWN_ROOT:-$HOME/gt}/.runtime/landings/{{landings_rig}}.jsonl" > /tmp/deep-review-{{issue}}/landings-all.jsonl &&
   git fetch origin {{base_branch}} &&
-  bash scripts/deep-review.sh plan --landings /tmp/deep-review-{{issue}}/landings-all.jsonl \\
+  bash /tmp/deep-review-{{issue}}/deep-review.sh plan --landings /tmp/deep-review-{{issue}}/landings-all.jsonl \\
     --prev-notes /tmp/deep-review-{{issue}}/prev-notes.txt --repo . --ref origin/{{base_branch}} --mode {{mode}} \\
     --slice {{slice_files}} --slice-bytes {{slice_bytes}} --out /tmp/deep-review-{{issue}} > /tmp/deep-review-{{issue}}/plan.txt
 echo "plan exit: $?"; cat /tmp/deep-review-{{issue}}/plan.txt
@@ -43,7 +44,7 @@ gt bead note {{issue}} "quiet: no risk-path landings since the last review"
 Then skip to the submit step, which closes {{issue}} and runs
 `gt done --status DEFERRED`.
 
-**3. Pick up what earlier runs left.** `bash scripts/deep-review.sh queued
+**3. Pick up what earlier runs left.** `bash /tmp/deep-review-{{issue}}/deep-review.sh queued
 --prev-notes $D/prev-notes.txt` prints confirmed findings an earlier run
 recorded but did not file, plus the `om-queued` lines from om's reviews of
 approved landings. Step 5 refutes each one like any other finding; file it as
@@ -71,7 +72,7 @@ the tree on `origin/{{base_branch}}`, not the worktree, with
 Every reviewer prompt carries: read-only; never fetch or pull in
 mayor/rig; cite file:line on origin/{{base_branch}}; report a finding only
 with a concrete failure scenario (input or state, wrong behavior); skip style
-and anything the ledger holds, `digest-only` included (`bash scripts/deep-review.sh seen --prev-notes $D/prev-notes.txt
+and anything the ledger holds, `digest-only` included (`bash /tmp/deep-review-{{issue}}/deep-review.sh seen --prev-notes $D/prev-notes.txt
 <fingerprint>` exits 0). A fingerprint is `<file>:<symbol>:<kind>`, one token, no
 spaces. Each
 finding returns: fingerprint, file:line, claim (one line), failure scenario,
@@ -96,7 +97,7 @@ it), then list the batches:
 D=/tmp/deep-review-{{issue}}
 gt bead note {{issue}} "p3: <YYYY-MM-DD> <fingerprint> <file:line> <claim>"
 echo "p3: <YYYY-MM-DD> <fingerprint> <file:line> <claim>" >> /tmp/deep-review-{{issue}}/prev-notes.txt
-bash scripts/deep-review.sh batches --prev-notes $D/prev-notes.txt
+bash /tmp/deep-review-{{issue}}/deep-review.sh batches --prev-notes $D/prev-notes.txt
 ```
 `batches` prints `batch <package dir>` and its p3 lines. File one
 bead per block: label `review-deep`, priority 3, a title naming the
@@ -105,10 +106,9 @@ package, `## Goal` listing each finding as file:line and claim, one
 both kinds files two beads, `doc-drift` apart. A `doc-drift` bead's
 `## Goal` lists each doc, the claim, the file:line that contradicts it and the
 replacement text; `## Gate` says docs-only change; `## Constraints` forbid touching code.
-- A finding that cites a guard (`internal/cmd/tap_guard*`, `scripts/guards/`),
-  Dolt data deletion (`internal/doltserver/`, `internal/doltbackup/`), process
-  lifecycle (`internal/daemon/`, `internal/supervisor/`, `internal/estop/`) or
-  an install script: the bead body names that risk path in `## Constraints`.
+- A finding that cites a path in the repo's `internal/land/riskpaths.txt`
+  (gastown: a guard, Dolt data deletion, process lifecycle or an install
+  script): the bead body names that risk path in `## Constraints`.
 - Cap: at most {{max_beads}} beads per run, batch beads included. A P1 or P2
   finding past the cap is `queued` in step 7 and the next run files it first;
   a batch past the cap stays unfiled for the next `batches`.

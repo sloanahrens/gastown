@@ -620,6 +620,32 @@ assert_eq "a record that is not an object" "gate: skip (no green sweep: $TMP/gsa
 assert_eq "and all of them are one line on stdout" "1" "$(wc -l < "$TMP/gate.out" | tr -d ' ')"
 assert_eq "--green-state with no value is usage" "2" "$(gate_rc --landings "$GL" --label "$LBL" --repo "$GREPO" --green-state)"
 
+echo "gate --green-from-landings: a rig with no tier sweep gates on its last passing landing"
+FL="$TMP/fl.jsonl"
+cat > "$FL" <<J
+{"bead":"al-1","target":"main","gate_result":"pass (ci exit 0 16s)","landed_commit":"$G1","landed_at":"2026-10-10T01:00:00Z"}
+{"bead":"al-2","target":"main","gate_result":"pass (ci exit 0 16s)","landed_commit":"$G2","landed_at":"2026-10-10T02:00:00Z","risk_paths":["internal/a/two.go"]}
+J
+assert_eq "one risk-path landing the last green gate contains is enough" "0" "$(gate_rc --landings "$FL" --label "$LBL" --repo "$GREPO" --now "$NOW" --green-from-landings)"
+assert_eq "output names the green tip; the landing without risk paths is not counted" "gate: run n=1 oldest=480m green=${G2:0:8}" "$(gate_out)"
+assert_eq "no sweep file is read or needed" "0" "$(gate_rc --landings "$FL" --label "$LBL" --repo "$GREPO" --now 2026-10-10T02:03:00Z --green-from-landings)"
+assert_eq "a landing minutes old runs (no count of three, no 20m wait)" "gate: run n=1 oldest=3m green=${G2:0:8}" "$(gate_out)"
+assert_eq "an explicit threshold still wins" "1" "$(gate_rc --landings "$FL" --label "$LBL" --repo "$GREPO" --now "$NOW" --green-from-landings --min-count 5 --min-age-min 600)"
+cat > "$FL" <<J
+{"bead":"al-1","target":"main","gate_result":"pass (ci exit 0 16s)","landed_commit":"$G1","landed_at":"2026-10-10T01:00:00Z","risk_paths":["internal/a/one.go"]}
+{"bead":"al-2","target":"main","gate_result":"fail (ci exit 1 16s)","landed_commit":"$G2","landed_at":"2026-10-10T02:00:00Z","risk_paths":["internal/a/two.go"]}
+{"bead":"al-3","target":"release","gate_result":"pass (ci exit 0 16s)","landed_commit":"$G2","landed_at":"2026-10-10T02:30:00Z","risk_paths":["internal/a/two.go"]}
+J
+assert_eq "the last green gate on main is the newest passing record on main" "0" "$(gate_rc --landings "$FL" --label "$LBL" --repo "$GREPO" --now "$NOW" --green-from-landings)"
+assert_eq "landings past that tip are not covered" "gate: run n=1 oldest=540m green=${G1:0:8}" "$(gate_out)"
+printf '{"bead":"al-1","target":"main","gate_result":"fail (ci exit 1 16s)","landed_commit":"%s","landed_at":"2026-10-10T01:00:00Z","risk_paths":["x"]}\n' "$G1" > "$FL"
+assert_eq "no passing record is a skip, never a run" "1" "$(gate_rc --landings "$FL" --label "$LBL" --repo "$GREPO" --now "$NOW" --green-from-landings)"
+assert_eq "and says so" "gate: skip (no green gate: no landing record with a passing gate on main)" "$(gate_out)"
+printf '{"bead":"al-1","gate_result":"pass (ci exit 0 1s)","landed_commit":"0000000000000000000000000000000000000000","landed_at":"2026-10-10T01:00:00Z","risk_paths":["x"]}\n' > "$FL"
+assert_eq "a green tip the repo does not hold is a skip" "gate: skip (no green gate: last green landing 00000000 is not a commit in $GREPO)" "$(gate_rc --landings "$FL" --label "$LBL" --repo "$GREPO" --now "$NOW" --green-from-landings >/dev/null; gate_out)"
+assert_eq "a landing the tip does not contain does not count" "1" "$(gate_rc --landings "$FL" --label "$LBL" --repo "$GREPO" --now "$NOW" --green-from-landings)"
+assert_eq "--green-state and --green-from-landings together are usage" "2" "$(gate_rc --landings "$GL" --label "$LBL" --repo "$GREPO" --green-state "$TMP/gs.json" --green-from-landings)"
+
 echo "gate: an input it cannot trust is exit 3, never a skip"
 assert_eq "bd fails" "3" "$(BD_STUB_RC=1 gate_rc --landings "$LANDINGS" --label "$LBL" --now "$NOW")"
 echo 'not json' > "$BD_STUB_OUT"

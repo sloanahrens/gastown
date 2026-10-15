@@ -179,7 +179,7 @@ func TestDeepReviewSpendsFewerTokensPerFinding(t *testing.T) {
 		"refuted=<n> of <total>",
 		"UNCHALLENGED: no finding was refuted",
 		"p3: <YYYY-MM-DD> <fingerprint> <file:line> <claim>",
-		"bash scripts/deep-review.sh batches --prev-notes $D/prev-notes.txt",
+		"bash /tmp/deep-review-{{issue}}/deep-review.sh batches --prev-notes $D/prev-notes.txt",
 		"batch beads included",
 		"reviewed-lines.txt",
 	} {
