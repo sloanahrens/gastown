@@ -580,8 +580,14 @@ func (w *heredocQuoteWalk) advanceTo(to int) rune {
 			w.comment = true
 		case w.quote == 0 && r == '$' && w.runeAt(w.runeIdx+1) == '(' && w.runeAt(w.runeIdx+2) == '(':
 			// "$((" opens an arithmetic expansion. The two "(" that follow
-			// are counted, so the matching "))" is what closes it.
-			w.arith, w.paren = true, 0
+			// are counted, so the matching "))" is what closes it. One met
+			// inside an expansion already open adds its two "(" to that
+			// count instead of starting a fresh one, whose "))" would end
+			// the outer expansion early and leave a later "<<" reading as a
+			// heredoc (gt-schaa).
+			if !w.arith {
+				w.arith, w.paren = true, 0
+			}
 		case w.arith && w.quote == 0 && r == '(':
 			w.paren++
 		case w.arith && w.quote == 0 && r == ')':
