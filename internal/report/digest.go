@@ -10,6 +10,7 @@ import (
 	"unicode"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/question"
 )
 
@@ -46,11 +47,15 @@ type SeatWork struct {
 // DispatchLeft is the spec dispatcher's dry run, sorted for the digest: Next
 // are the beads it would dispatch in order, as a rig and a sentence, and Held
 // are the beads it skips for a reason other than a full seat, with that
-// reason. Hold is the reason the whole dispatcher is parked, or empty.
+// reason. LabeledFailed counts the ready beads the dispatcher keeps out of its
+// queue because they carry the spec-dispatch-failed label; it reports only the
+// count, so they have no row. Hold is the reason the whole dispatcher is
+// parked, or empty.
 type DispatchLeft struct {
-	Hold string
-	Next []DispatchRow
-	Held []DispatchRow
+	Hold          string
+	Next          []DispatchRow
+	Held          []DispatchRow
+	LabeledFailed int
 }
 
 // DispatchRow is one bead the dry run named.
@@ -251,7 +256,11 @@ func (d Digest) left() []string {
 	for _, r := range l.Held {
 		held = append(held, "held  "+dispatchRow(r))
 	}
-	return append(lines, capRows(held, digestHeldRows)...)
+	lines = append(lines, capRows(held, digestHeldRows)...)
+	if l.LabeledFailed > 0 {
+		lines = append(lines, fmt.Sprintf("held  %d by label %s (stuck until the label is cleared)", l.LabeledFailed, constants.LabelSpecDispatchFailed))
+	}
+	return lines
 }
 
 func dispatchRow(r DispatchRow) string {

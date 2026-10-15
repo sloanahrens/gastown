@@ -292,7 +292,9 @@ func (d *Daemon) overseerReportLeft() (townreport.DispatchLeft, error) {
 // overseerReportLeftFrom sorts a dry run's decisions. A bead the dry run would
 // sling, or finds clean but without a seat or past the per-tick limit, is
 // next in the queue, in the order the dispatcher named them; every other bead
-// it declined is held, with its reason.
+// it declined is held, with its reason. The beads the dispatcher holds out
+// with the spec-dispatch-failed label have no entry, only a count, which LEFT
+// carries so a bead stuck behind the label is not read as an empty queue.
 //
 // A dry run that exits 0 can still carry Errors (an unreadable roster, a
 // failed board read), and then its empty queue means "could not read", not "no
@@ -306,7 +308,7 @@ func overseerReportLeftFrom(r specDispatchTickReport) (townreport.DispatchLeft, 
 		}
 		return townreport.DispatchLeft{}, err
 	}
-	left := townreport.DispatchLeft{Hold: r.Hold}
+	left := townreport.DispatchLeft{Hold: r.Hold, LabeledFailed: r.LabeledFailed}
 	row := func(e specDispatchTickEntry, prefix string) townreport.DispatchRow {
 		return townreport.DispatchRow{Bead: e.Bead, Rig: e.Rig, Text: prefix + specSkipReason(e)}
 	}
