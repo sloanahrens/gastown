@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // omHelpWithBead is the help text of an om that knows the work bead: usage om
@@ -52,16 +54,19 @@ func logfTo(w io.Writer) func(format string, args ...any) {
 
 // omStub answers every call om sees: the `review --help` probe with help, the
 // review itself with an approve verdict echoing Bead, and `om version` with a
-// version. It counts the probes and keeps the review's argv.
+// version. It counts the probes and keeps the argv of every review.
 type omStub struct {
 	t         *testing.T
 	help      string // what `review --help` prints
 	fail      int    // help probes to fail with a run error before answering
 	bead      string // the bead the verdict echoes; "" echoes none
+	body      string // what a review writes; "" writes an approve echoing bead
+	code      int    // what a review exits with; 0 is approve
 	noVersion bool   // an om whose `version` call prints nothing
 	probes    int
 	versions  int
-	argv      []string
+	argv      []string   // the last review's argv
+	argvs     [][]string // every review's argv, in the order om ran
 }
 
 func (s *omStub) run(_ context.Context, _ string, _ []string, argv []string, out io.Writer) (int, error) {
@@ -83,9 +88,13 @@ func (s *omStub) run(_ context.Context, _ string, _ []string, argv []string, out
 		return 2, nil
 	}
 	s.argv = argv
-	body := `{"score":0.9,"verdict":"approve","findings":[]}`
-	if s.bead != "" {
-		body = fmt.Sprintf(`{"score":0.9,"verdict":"approve","bead":%q,"findings":[]}`, s.bead)
+	s.argvs = append(s.argvs, slices.Clone(argv))
+	body := s.body
+	if body == "" {
+		body = `{"score":0.9,"verdict":"approve","findings":[]}`
+		if s.bead != "" {
+			body = fmt.Sprintf(`{"score":0.9,"verdict":"approve","bead":%q,"findings":[]}`, s.bead)
+		}
 	}
 	for i, a := range argv {
 		if a == "--out" {
@@ -95,7 +104,7 @@ func (s *omStub) run(_ context.Context, _ string, _ []string, argv []string, out
 		}
 	}
 	_, _ = io.WriteString(out, "om: reviewing\n")
-	return 0, nil
+	return s.code, nil
 }
 
 func omStubbed(t *testing.T, bin string, stub *omStub) OMReviewer {
@@ -111,154 +120,129 @@ func reviewPrefix(bin, dir string) []string {
 	return []string{bin, "review", "-C", dir, "--base", "aaa", "--head", "bbb", "--out"}
 }
 
-// TestOMReviewerPassesTheBeadWhenTheHelpListsIt: the flag rides the argv, after
-// the range and the out file, and the echoed id comes back on the verdict.
-func TestOMReviewerPassesTheBeadWhenTheHelpListsIt(t *testing.T) {
+// TestOMReviewerAlwaysPassesTheBead: the id is on the argv of every review that
+// names a bead, whatever the installed om's help says. The id in om's prompt is
+// the only thing usage attribution can join a review to its work on, so a
+// review that quietly omits it is one the feed cannot place (gt-r3fg9).
+func TestOMReviewerAlwaysPassesTheBead(t *testing.T) {
 	t.Parallel()
-	bin := omBinary(t)
-	stub := &omStub{t: t, help: omHelpWithBead, bead: "gt-abc"}
-	dir := t.TempDir()
-	var log strings.Builder
-	v, err := omStubbed(t, bin, stub).ReviewBead(context.Background(),
-		ReviewInput{Dir: dir, Base: "aaa", Head: "bbb", BeadID: "gt-abc", Logf: logfTo(&log)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if v.Verdict != VerdictApprove || v.Bead != "gt-abc" {
-		t.Errorf("verdict = %+v, want an approve echoing gt-abc", v)
-	}
-	prefix := reviewPrefix(bin, dir)
-	if !slices.Equal(stub.argv[:len(prefix)], prefix) {
-		t.Errorf("argv = %q, want it to start with %q", stub.argv, prefix)
-	}
-	if rest := stub.argv[len(prefix):]; len(rest) != 3 || rest[1] != "--bead" || rest[2] != "gt-abc" {
-		t.Errorf("argv = %q, want --bead gt-abc after the out file", stub.argv)
-	}
-	if stub.probes != 1 {
-		t.Errorf("probed %d times, want 1", stub.probes)
-	}
-	if log.String() != "" {
-		t.Errorf("an echoed bead logged %q", log.String())
+	for _, tc := range []struct {
+		name string
+		help string
+	}{
+		{name: "the help lists the flag", help: omHelpWithBead},
+		{name: "the help does not list it", help: omHelpWithoutBead},
+		{name: "om prints no help", help: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bin := omBinary(t)
+			stub := &omStub{t: t, help: tc.help, bead: "gt-abc"}
+			dir := t.TempDir()
+			var log strings.Builder
+			v, err := omStubbed(t, bin, stub).ReviewBead(context.Background(),
+				ReviewInput{Dir: dir, Base: "aaa", Head: "bbb", BeadID: "gt-abc", Logf: logfTo(&log)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if v.Verdict != VerdictApprove || v.Bead != "gt-abc" {
+				t.Errorf("verdict = %+v, want an approve echoing gt-abc", v)
+			}
+			prefix := reviewPrefix(bin, dir)
+			if !slices.Equal(stub.argv[:len(prefix)], prefix) {
+				t.Errorf("argv = %q, want it to start with %q", stub.argv, prefix)
+			}
+			if rest := stub.argv[len(prefix):]; len(rest) != 3 || rest[1] != "--bead" || rest[2] != "gt-abc" {
+				t.Errorf("argv = %q, want --bead gt-abc after the out file", stub.argv)
+			}
+			// The bead's flag is never a question for the help read: with no
+			// acceptance text, this review has nothing left to probe for.
+			if stub.probes != 0 {
+				t.Errorf("probed %d times, want 0: --bead is not gated on the help", stub.probes)
+			}
+			if log.String() != "" {
+				t.Errorf("an echoed bead logged %q", log.String())
+			}
+		})
 	}
 }
 
-// TestOMReviewerOmitsTheBeadWhenTheHelpDoesNotListIt: an om without the flag is
-// called with the argv it has always been called with.
-func TestOMReviewerOmitsTheBeadWhenTheHelpDoesNotListIt(t *testing.T) {
+// TestOMReviewerKeepsTheBeadWhenTheOnlyFlagIsMissing: an om that takes no
+// criteria still gets the bead's id — the one flag the review cannot drop.
+func TestOMReviewerKeepsTheBeadWhenTheOnlyFlagIsMissing(t *testing.T) {
 	t.Parallel()
-	bin := omBinary(t)
+	bin, dir := omBinary(t), t.TempDir()
 	stub := &omStub{t: t, help: omHelpWithoutBead, bead: "gt-abc"}
-	dir := t.TempDir()
-	if _, err := omStubbed(t, bin, stub).ReviewBead(context.Background(),
-		ReviewInput{Dir: dir, Base: "aaa", Head: "bbb", BeadID: "gt-abc"}); err != nil {
+	if _, err := omStubbed(t, bin, stub).ReviewBead(context.Background(), ReviewInput{
+		Dir: dir, Base: "aaa", Head: "bbb", BeadID: "gt-abc", CriteriaText: "- [ ] one"}); err != nil {
 		t.Fatal(err)
+	}
+	if slices.Contains(stub.argv, "--criteria-file") {
+		t.Errorf("argv = %q carries --criteria-file the help does not list", stub.argv)
 	}
 	prefix := reviewPrefix(bin, dir)
-	if len(stub.argv) != len(prefix)+1 || !slices.Equal(stub.argv[:len(prefix)], prefix) {
-		t.Errorf("argv = %q, want the %d-argument argv of a review with no bead", stub.argv, len(prefix)+1)
+	if tail := stub.argv[len(prefix):]; len(tail) != 3 || tail[1] != "--bead" || tail[2] != "gt-abc" {
+		t.Errorf("argv = %q, want it to end at --bead gt-abc", stub.argv)
 	}
 }
 
-// TestOMReviewerProbesOncePerBinary: the answer is a property of the installed
-// binary, so it is read once however many landings ask for it.
-func TestOMReviewerProbesOncePerBinary(t *testing.T) {
+// TestLandNamesEveryOMReviewForItsWorkBead: the landing's own om run carries the
+// id of the bead it is landing, on the argv of a first landing (gt-r3fg9).
+func TestLandNamesEveryOMReviewForItsWorkBead(t *testing.T) {
 	t.Parallel()
-	bin := omBinary(t)
-	stub := &omStub{t: t, help: omHelpWithBead, bead: "gt-abc"}
-	r := omStubbed(t, bin, stub)
-	for i := 0; i < 3; i++ {
-		if _, err := r.ReviewBead(context.Background(),
-			ReviewInput{Dir: t.TempDir(), Base: "a", Head: "b", BeadID: "gt-abc"}); err != nil {
-			t.Fatal(err)
+	f := newLandFixture(t)
+	stub := &omStub{t: t, help: omHelpWithBead, bead: f.work.BeadID}
+	l := f.lander()
+	l.Reviewer = omStubbed(t, omBinary(t), stub)
+	if _, err := l.Land(context.Background(), f.work); err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	beadOnEveryOMArgv(t, stub, f.work.BeadID, 1)
+}
+
+// TestLandNamesEveryOMReviewForAReworkedBead: a landing om asked changes on is
+// reworked by its author and lands on a later head. Every om run over that bead
+// names it, so the review the feed places is the one that judged the head that
+// actually landed (gt-r3fg9).
+func TestLandNamesEveryOMReviewForAReworkedBead(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	stub := &omStub{t: t, bead: f.work.BeadID}
+	// The first landing asks for changes; the rework is approved.
+	stub.body = fmt.Sprintf(`{"score":0.3,"verdict":"request_changes","bead":%q,"findings":[]}`, f.work.BeadID)
+	stub.code = 1
+	l := f.lander()
+	l.Reviewer = omStubbed(t, omBinary(t), stub)
+	var rej *Rejection
+	if _, err := l.Land(context.Background(), f.work); !errors.As(err, &rej) || rej.Kind != RejectReview {
+		t.Fatalf("first Land = %T %v, want a review rejection", err, err)
+	}
+	// The author reworks the branch and re-submits the same bead: the label
+	// gt done puts back is the whole of the next round's readiness.
+	f.setBranch("fix: address the review")
+	if err := f.bd.Update(f.work.BeadID, beads.UpdateOptions{
+		AddLabels: []string{LabelReadyToLand}, RemoveLabels: []string{LabelRework}}); err != nil {
+		t.Fatalf("re-submitting the reworked bead: %v", err)
+	}
+	stub.body, stub.code = "", 0
+	if _, err := l.Land(context.Background(), f.work); err != nil {
+		t.Fatalf("the reworked landing: %v", err)
+	}
+	beadOnEveryOMArgv(t, stub, f.work.BeadID, 2)
+}
+
+// beadOnEveryOMArgv asserts om ran exactly want times and that every run named
+// bead, so a landing that drops the id fails here whatever else it does.
+func beadOnEveryOMArgv(t *testing.T, stub *omStub, bead string, want int) {
+	t.Helper()
+	if len(stub.argvs) != want {
+		t.Fatalf("om ran %d review(s), want %d: %q", len(stub.argvs), want, stub.argvs)
+	}
+	for i, argv := range stub.argvs {
+		j := slices.Index(argv, "--bead")
+		if j < 0 || j+1 >= len(argv) || argv[j+1] != bead {
+			t.Errorf("review %d argv = %q, want it to carry --bead %s", i+1, argv, bead)
 		}
-	}
-	if stub.probes != 1 {
-		t.Errorf("probed %d times, want 1 per binary identity", stub.probes)
-	}
-}
-
-// TestOMReviewerReprobesAReinstalledOM: an om replaced under a running daemon is
-// a different binary, whatever the path says.
-func TestOMReviewerReprobesAReinstalledOM(t *testing.T) {
-	t.Parallel()
-	bin := omBinary(t)
-	stub := &omStub{t: t, help: omHelpWithBead, bead: "gt-abc"}
-	r := omStubbed(t, bin, stub)
-	in := func() ReviewInput {
-		return ReviewInput{Dir: t.TempDir(), Base: "a", Head: "b", BeadID: "gt-abc"}
-	}
-	if _, err := r.ReviewBead(context.Background(), in()); err != nil {
-		t.Fatal(err)
-	}
-	// The upgrade: same path, a binary of another size, so a new identity.
-	if err := os.WriteFile(bin, []byte("nominal om, reinstalled\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := r.ReviewBead(context.Background(), in()); err != nil {
-		t.Fatal(err)
-	}
-	if stub.probes != 2 {
-		t.Errorf("probed %d times, want 2: a reinstalled om is probed again", stub.probes)
-	}
-}
-
-// TestOMReviewerRetriesAFailedProbe: a probe that cannot run is not an answer,
-// so the flag is left off, the failure is logged, and the next review probes
-// again.
-func TestOMReviewerRetriesAFailedProbe(t *testing.T) {
-	t.Parallel()
-	bin := omBinary(t)
-	stub := &omStub{t: t, help: omHelpWithBead, bead: "gt-abc", fail: 1}
-	r := omStubbed(t, bin, stub)
-	var log strings.Builder
-	in := func() ReviewInput {
-		return ReviewInput{Dir: t.TempDir(), Base: "a", Head: "b", BeadID: "gt-abc", Logf: logfTo(&log)}
-	}
-	if _, err := r.ReviewBead(context.Background(), in()); err != nil {
-		t.Fatal(err)
-	}
-	if slices.Contains(stub.argv, "--bead") {
-		t.Errorf("argv = %q carries --bead after a failed probe", stub.argv)
-	}
-	if !strings.Contains(log.String(), "could not probe") {
-		t.Errorf("log = %q, want the failed probe named", log.String())
-	}
-	if _, err := r.ReviewBead(context.Background(), in()); err != nil {
-		t.Fatal(err)
-	}
-	if stub.probes != 2 {
-		t.Errorf("probed %d times, want 2: a failed probe is not cached", stub.probes)
-	}
-	if !slices.Contains(stub.argv, "--bead") {
-		t.Errorf("argv = %q, want --bead once the probe answers", stub.argv)
-	}
-}
-
-// TestOMReviewerRetriesAProbeWithNoHelpText: an om that exits without printing
-// help is as unprobed as one that failed, so the flag stays off and the probe is
-// retried.
-func TestOMReviewerRetriesAProbeWithNoHelpText(t *testing.T) {
-	t.Parallel()
-	bin := omBinary(t)
-	stub := &omStub{t: t, help: "", bead: "gt-abc"}
-	r := omStubbed(t, bin, stub)
-	var log strings.Builder
-	in := func() ReviewInput {
-		return ReviewInput{Dir: t.TempDir(), Base: "a", Head: "b", BeadID: "gt-abc", Logf: logfTo(&log)}
-	}
-	for i := 0; i < 2; i++ {
-		if _, err := r.ReviewBead(context.Background(), in()); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if slices.Contains(stub.argv, "--bead") {
-		t.Errorf("argv = %q carries --bead with no help text to justify it", stub.argv)
-	}
-	if stub.probes != 2 {
-		t.Errorf("probed %d times, want 2: a help-less probe is not cached", stub.probes)
-	}
-	if !strings.Contains(log.String(), "no output") {
-		t.Errorf("log = %q, want the missing help named", log.String())
 	}
 }
 

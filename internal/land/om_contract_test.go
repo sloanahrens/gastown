@@ -173,9 +173,9 @@ func contractInput(t *testing.T, f *fakeOMRun) ReviewInput {
 	}
 }
 
-// TestOMContractArgv pins the command line gastown runs: the fixed flags
-// always, --bead and --criteria-file only when the installed om's help lists
-// them as flags of their own.
+// TestOMContractArgv pins the command line gastown runs: the fixed flags and
+// --bead always, --criteria-file only when the installed om's help lists it as
+// a flag of its own.
 func TestOMContractArgv(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -188,10 +188,10 @@ func TestOMContractArgv(t *testing.T) {
 	}{
 		{name: "om lists both flags", help: helpBoth, bead: "gt-q52sv", crit: "acceptance text", extra: []string{"--bead", "gt-q52sv"}, hasC: true},
 		{name: "om lists only --bead", help: "usage: om review --bead id\n", bead: "gt-q52sv", crit: "acceptance text", extra: []string{"--bead", "gt-q52sv"}},
-		{name: "om lists only --criteria-file", help: "usage: om review --criteria-file path\n", bead: "gt-q52sv", crit: "acceptance text", hasC: true},
-		{name: "om lists neither flag", help: "usage: om review -C dir --base b --head h --out f\n", bead: "gt-q52sv", crit: "acceptance text"},
-		{name: "look-alike flags do not count", help: "usage: om review --bead-id id --beads list --criteria-files dir\n", bead: "gt-q52sv", crit: "acceptance text"},
-		{name: "om prints no help", help: "", bead: "gt-q52sv", crit: "acceptance text"},
+		{name: "om lists only --criteria-file", help: "usage: om review --criteria-file path\n", bead: "gt-q52sv", crit: "acceptance text", extra: []string{"--bead", "gt-q52sv"}, hasC: true},
+		{name: "om lists neither flag", help: "usage: om review -C dir --base b --head h --out f\n", bead: "gt-q52sv", crit: "acceptance text", extra: []string{"--bead", "gt-q52sv"}},
+		{name: "look-alike flags do not count", help: "usage: om review --bead-id id --beads list --criteria-files dir\n", bead: "gt-q52sv", crit: "acceptance text", extra: []string{"--bead", "gt-q52sv"}},
+		{name: "om prints no help", help: "", bead: "gt-q52sv", crit: "acceptance text", extra: []string{"--bead", "gt-q52sv"}},
 		{name: "a bead with no acceptance text", help: helpBoth, bead: "gt-q52sv", extra: []string{"--bead", "gt-q52sv"}},
 		{name: "acceptance text with no bead", help: helpBoth, crit: "acceptance text", hasC: true},
 	} {
