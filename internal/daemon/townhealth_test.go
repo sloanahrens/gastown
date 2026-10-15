@@ -791,6 +791,59 @@ func TestHealthSourcesSeatsSkipStoppedSeats(t *testing.T) {
 	}
 }
 
+// Dispatch is where the ticker's park reaches the health record: the tracker
+// holds the seat read's error (spec_seats.go, parked) and this is the only
+// place the daemon hands it to townhealth. A parked ticker records no tick, so
+// without the assignment the field reads it as a dispatcher gone silent — and
+// the park and the field were each tested alone, which left that deletion
+// invisible (gt-9w94c).
+func TestHealthSourcesDispatchReportsParkedSeats(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeSpecSeatTown(t, root, specSeatPool("claude-sonnet", 2))
+	d, _, _ := specSeatDaemon(t, root)
+	if !specSeatTick(d) {
+		t.Fatal("the first tick did not start on a seat file that parses")
+	}
+	src := &healthSources{d: d}
+
+	rec, err := src.Dispatch()
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if rec.Parked != "" {
+		t.Errorf("Parked = %q with the seat file readable, want none", rec.Parked)
+	}
+
+	// The body stops one character short of the closing brace: the read
+	// fails, the ticker parks, and the park is all the record carries — no
+	// tick ran on it.
+	writeSpecSeatBody(t, root, `{"type": "town-settings", "version": 1, "polecat_pool": {"agent": "claude-sonnet", "max_seats":`)
+	if specSeatTick(d) {
+		t.Fatal("the ticker ticked on a seat file that does not parse")
+	}
+	rec, err = src.Dispatch()
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if !strings.Contains(rec.Parked, "seat settings could not be read") {
+		t.Errorf("Parked = %q, want the seat read error the ticker parked on", rec.Parked)
+	}
+
+	// A file that parses again lifts the park, so the field is not sticky.
+	writeSpecSeatTown(t, root, specSeatPool("claude-sonnet", 2))
+	if !specSeatTick(d) {
+		t.Fatal("the ticker did not resume after the seat file parsed again")
+	}
+	rec, err = src.Dispatch()
+	if err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if rec.Parked != "" {
+		t.Errorf("Parked = %q after a read worked again, want none", rec.Parked)
+	}
+}
+
 func TestSeatHomeMapsPolecatDirectoriesOnly(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
