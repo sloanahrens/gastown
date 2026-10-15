@@ -791,3 +791,29 @@ func TestOverrunStopLapsed_ReadsThePauseMarkerAndTheSession(t *testing.T) {
 		t.Errorf("paused with a live session: got %q, %v", why, err)
 	}
 }
+
+// A seat whose HEAD is detached has no branch the stop can push, so its
+// checkpoint commit exists only in the worktree. The recorded cleanup status
+// must say so: clean would let gt polecat nuke remove the worktree and strand
+// the commit.
+func TestOverrunCleanupStatusDetachedHeadUnpushed(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	workDir, f := checkpointSeat(t, d, map[string]string{"a.go": "package a\n"})
+	g := d.gitAt(workDir)
+
+	if err := f.OpenBranchRepo(workDir).CheckoutDetachForce("HEAD"); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkFiles(t, workDir, map[string]string{"a.go": "package a\n// checkpoint\n"})
+	f.CommitWorktree(t, workDir, "checkpoint")
+
+	// The push is skipped for a detached HEAD (overrunPushBranch has no branch
+	// to name), so nothing reaches origin before the status is read.
+	if err := d.overrunPushBranch(overrunSeat{Rig: stopSeat.Rig, Polecat: stopSeat.Polecat}); err != nil {
+		t.Fatal(err)
+	}
+	if got := overrunCleanupStatus(g); got != string(polecat.CleanupUnpushed) {
+		t.Errorf("detached HEAD with a checkpoint commit = %q, want has_unpushed", got)
+	}
+}

@@ -521,9 +521,10 @@ func resetOverrunAgentBead(c beads.Client, id, bead string) error {
 // overrunRecordCleanupStatus records what a live probe of the released seat's
 // worktree finds, so a later `gt polecat nuke` does not refuse the seat it was
 // told to release for a cleanup_status=<missing> the release itself created
-// (gt-6ixtp). The kept branch is on origin by then — the push runs before the
-// hand-back — so only the worktree's own state is asked about. A seat with no
-// worktree has nothing to record.
+// (gt-6ixtp). The push runs before the hand-back, so a seat with a branch has
+// it on origin by then; a seat on a detached HEAD has no branch to push, and
+// the probe's unpushed count is what records its commits as at risk. A seat
+// with no worktree has nothing to record.
 func (d *Daemon) overrunRecordCleanupStatus(seat overrunSeat) error {
 	polecatsDir := filepath.Join(d.config.TownRoot, seat.Rig, "polecats")
 	workDir := resolvePolecatWorktree(polecatsDir, seat.Polecat, seat.Rig)
@@ -549,6 +550,11 @@ func overrunCleanupStatus(g daemonGit) string {
 		return string(polecat.CleanupUncommitted)
 	case work.StashCount > 0:
 		return string(polecat.CleanupStash)
+	case work.UnpushedCommits > 0:
+		// The push step names a branch, so a detached HEAD (or any push that
+		// gave up) leaves its commits on this worktree alone: failing closed
+		// here is what keeps a nuke from removing them.
+		return string(polecat.CleanupUnpushed)
 	}
 	return string(polecat.CleanupClean)
 }
