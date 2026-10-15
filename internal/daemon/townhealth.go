@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/exectax"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/hoststat"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landings"
@@ -197,14 +198,23 @@ func (s *healthSources) ExecTax(ctx context.Context) (time.Duration, error) {
 	return res.Median, nil
 }
 
-// Load1 reads the host's one-minute load average and core count, so the
-// exec-tax field can tell a saturated host from a taxed program tree
-// (gt-v50sn).
+// Load1 reads the host's busyness, so the exec-tax field can tell a
+// saturated host from a taxed program tree and the host field can show the
+// readings beside the load average (gt-v50sn, gt-auiji). One hoststat sample
+// supplies the CPU idle and Dolt readings and the load average, which falls
+// back to sysctl when the sample parses none.
 func (s *healthSources) Load1() (townhealth.HostLoad, error) {
 	if s.load1 != nil {
 		return s.load1()
 	}
-	return townhealth.HostLoad{Average: EstimateLoad1(), Cores: runtime.NumCPU()}, nil
+	r := hoststat.Sample(context.Background())
+	h := townhealth.HostLoad{Cores: runtime.NumCPU(), CPUIdle: r.CPUIdle, DoltCores: r.DoltCores}
+	if r.Load1 != nil {
+		h.Average = *r.Load1
+	} else {
+		h.Average = EstimateLoad1()
+	}
+	return h, nil
 }
 
 func (s *healthSources) Heartbeat() (townhealth.HeartbeatRecord, error) {

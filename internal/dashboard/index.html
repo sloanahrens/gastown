@@ -436,10 +436,16 @@ function renderTiles(s) {
   tiles.append(tile("main vs gt", sm.behind == null ? "–" : (sm.behind === 0 ? "current" : sm.behind + " behind"),
     sm.main_tip ? sm.main_tip + " / " + (sm.installed_gt || "?") + " · as of the install repo’s last fetch" : "", sm.behind > 20 ? "warn" : ""));
   const m = s.machine || {};
-  const cores = navigator.hardwareConcurrency || 8;
-  tiles.append(tile("Load", m.load1 == null ? "–" : m.load1.toFixed(1),
-    m.load5 != null ? "5m " + m.load5.toFixed(1) + " · 15m " + m.load15.toFixed(1) : "",
-    m.load1 > cores * 3 ? "bad" : m.load1 > cores ? "warn" : ""));
+  // CPU idle leads and the load average trails: macOS counts running
+  // threads in its load average, so a load-led tile reads a half-idle host
+  // as drowning and colours it against the viewer's core count, not the
+  // host's (gt-auiji).
+  const idle = m.cpu_idle;
+  tiles.append(tile("Host CPU", idle == null ? "–" : Math.round(idle) + "% idle",
+    [m.dolt_cores != null ? "dolt " + m.dolt_cores.toFixed(1) + " cores" : null,
+     m.load1 != null ? "load " + m.load1.toFixed(1) + (m.cores ? " on " + m.cores + " cores" : "") : null,
+     m.load5 != null ? "5m " + m.load5.toFixed(1) + " · 15m " + m.load15.toFixed(1) : null].filter(Boolean).join(" · "),
+    idle == null ? "" : idle < 5 ? "bad" : idle < 20 ? "warn" : ""));
   $("tiles").dataset.at = s.summary_at || "";
 }
 

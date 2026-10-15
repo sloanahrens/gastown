@@ -190,8 +190,8 @@ func TestUnwiredSourcesAreUnknownNeverGreen(t *testing.T) {
 			t.Errorf("field %s = %+v, want UNKNOWN with value ?", f.Key(), f)
 		}
 	}
-	if len(r.Fields) != 14 {
-		t.Errorf("got %d fields, want one per source (14)", len(r.Fields))
+	if len(r.Fields) != 15 {
+		t.Errorf("got %d fields, want one per source (15)", len(r.Fields))
 	}
 }
 
@@ -329,8 +329,12 @@ func TestExecTaxUnderLoad(t *testing.T) {
 		load    HostLoad
 		loadErr error
 		want    Verdict
-		value   string
-		detail  string
+		// town is the verdict every field together yields; "" means want.
+		// Only a case whose host cannot be read differs, because the host
+		// field is then UNKNOWN whatever the probe said (gt-auiji).
+		town   Verdict
+		value  string
+		detail string
 	}{
 		"a saturated host is degraded, not red": {
 			median: 79 * time.Millisecond,
@@ -353,6 +357,24 @@ func TestExecTaxUnderLoad(t *testing.T) {
 			value:  "79ms/exec",
 			detail: "every fresh executable in this tree pays 79ms",
 		},
+		// The reading the bead is about: 38 on 24 cores is past the old
+		// per-core limit, so the thread-inflated load average alone excused
+		// the red reading. Half the machine is idle, so nothing was
+		// competing with the probe and the tax is the tree's (gt-auiji).
+		"a threaded host with idle CPU keeps the red reading": {
+			median: 79 * time.Millisecond,
+			load:   HostLoad{Average: 38, Cores: 24, CPUIdle: float64Ptr(47)},
+			want:   Red,
+			value:  "79ms/exec",
+			detail: "every fresh executable in this tree pays 79ms",
+		},
+		"a host with no CPU to spare is degraded on the idle reading": {
+			median: 79 * time.Millisecond,
+			load:   HostLoad{Average: 38, Cores: 24, CPUIdle: float64Ptr(6)},
+			want:   Degraded,
+			value:  "79ms/exec 6% cpu idle",
+			detail: "overloaded (6% cpu idle)",
+		},
 		"at the limit stays red": {
 			median: 79 * time.Millisecond,
 			load:   HostLoad{Average: 12, Cores: 8},
@@ -369,6 +391,7 @@ func TestExecTaxUnderLoad(t *testing.T) {
 			median:  79 * time.Millisecond,
 			loadErr: errors.New("sysctl: not found"),
 			want:    Red,
+			town:    VerdictUnknown,
 			value:   "79ms/exec",
 		},
 		"a host that reports no cores cannot corroborate": {
@@ -395,8 +418,12 @@ func TestExecTaxUnderLoad(t *testing.T) {
 			if r.ExecTaxMS == nil || *r.ExecTaxMS != float64(tc.median)/float64(time.Millisecond) {
 				t.Errorf("ExecTaxMS = %v, want the probe's %v", r.ExecTaxMS, tc.median)
 			}
-			if r.Verdict != tc.want {
-				t.Errorf("town verdict = %s, want the exec-tax field's %s (every other field is green)", r.Verdict, tc.want)
+			town := tc.want
+			if tc.town != "" {
+				town = tc.town
+			}
+			if r.Verdict != town {
+				t.Errorf("town verdict = %s, want the exec-tax field's %s (every other field is green)", r.Verdict, town)
 			}
 		})
 	}
@@ -956,6 +983,50 @@ func TestDispatchLabeledFailedCountIsTheNewestTicks(t *testing.T) {
 		t.Errorf("dispatch = %+v, want silent: a count from outside the window is not carried forward", got)
 	}
 }
+
+// The host field is the line gt status shows beside the load average, so it
+// carries the CPU idle and Dolt core readings the load average cannot
+// (gt-auiji).
+func TestHostFieldShowsTheReadingsBesideTheLoad(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		load  HostLoad
+		value string
+	}{
+		"the load average comes last": {
+			load:  HostLoad{Average: 30, Cores: 24, CPUIdle: float64Ptr(47), DoltCores: float64Ptr(0.384)},
+			value: "47% cpu idle · 0.4 dolt cores · load 30 on 24 cores",
+		},
+		"a host that reported no idle reading keeps the load alone": {
+			load:  HostLoad{Average: 30, Cores: 24},
+			value: "load 30 on 24 cores",
+		},
+		"a Dolt reading is named without a load": {
+			load:  HostLoad{DoltCores: float64Ptr(2.5)},
+			value: "2.5 dolt cores",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := healthy()
+			f.load = tc.load
+			got := field(t, Compute(context.Background(), inputs(f)), "host")
+			if got.Tag != Live || got.Verdict != Green || got.Value != tc.value {
+				t.Errorf("host = %+v, want LIVE green %q", got, tc.value)
+			}
+		})
+	}
+
+	// A host that answered nothing is a question nobody could answer, not an
+	// idle machine.
+	f := healthy()
+	f.load = HostLoad{}
+	if got := field(t, Compute(context.Background(), inputs(f)), "host"); got.Tag != Unknown || got.Verdict != VerdictUnknown {
+		t.Errorf("host = %+v, want UNKNOWN", got)
+	}
+}
+
+func float64Ptr(v float64) *float64 { return &v }
 
 func TestShort(t *testing.T) {
 	t.Parallel()

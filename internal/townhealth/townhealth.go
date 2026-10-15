@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -84,7 +85,11 @@ const (
 	FieldDolt = "dolt"
 	// FieldExecTax is the per-exec cost of a freshly written program in the
 	// daemon's process tree (gt-2ycne.1).
-	FieldExecTax    = "exec-tax"
+	FieldExecTax = "exec-tax"
+	// FieldHost is the host's own busyness: CPU idle, the Dolt server's CPU
+	// and the load average, which macOS counts running threads into
+	// (gt-auiji).
+	FieldHost       = "host"
 	FieldDaemon     = "daemon"
 	FieldTick       = "tick"
 	FieldLanding    = "landing"
@@ -298,16 +303,25 @@ type ExecTax interface {
 	ExecTax(ctx context.Context) (time.Duration, error)
 }
 
-// HostLoad is one reading of the host's one-minute load average, with the
-// logical CPU count it is read against.
+// HostLoad is one reading of the host's busyness: the one-minute load
+// average, the logical CPU count it is read against, and the two readings
+// that track harm where the load average cannot, CPUIdle and DoltCores.
+// Those two are nil when the host could not be read, never zero: an unread
+// CPU must not read as an idle one (gt-auiji).
 type HostLoad struct {
 	Average float64
 	Cores   int
+	// CPUIdle is the percent of all the host's cores idle over the sample
+	// window.
+	CPUIdle *float64
+	// DoltCores is the Dolt server's own CPU, in cores.
+	DoltCores *float64
 }
 
-// Load reads the host's one-minute load average. It is corroboration for the
-// exec-tax probe, not a field of its own: a nil Load, or a reading that
-// fails, leaves the probe's verdict standing (gt-v50sn).
+// Load reads the host's busyness. It is corroboration for the exec-tax probe
+// and the reading behind the host field; a nil Load, or a reading that
+// fails, leaves the probe's verdict standing and makes the host field
+// UNKNOWN (gt-v50sn).
 type Load interface {
 	Load1() (HostLoad, error)
 }
@@ -601,9 +615,10 @@ var errNotWired = errors.New("no source wired")
 // calling goroutine.
 func Compute(ctx context.Context, in Inputs) Report {
 	r := Report{At: in.Now}
+	h, hErr := hostReading(in)
 	r.Fields = append(r.Fields, dolt(ctx, in))
-	et, ms := execTax(ctx, in)
-	r.Fields = append(r.Fields, et)
+	et, ms := execTax(ctx, in, h)
+	r.Fields = append(r.Fields, et, host(h, hErr))
 	r.ExecTaxMS = ms
 	hb, count := heartbeat(in)
 	r.Fields = append(r.Fields, hb)
@@ -666,22 +681,30 @@ func dolt(ctx context.Context, in Inputs) Field {
 	return f
 }
 
+// ExecTaxCPUIdleLimit is the share of the host's cores that must still be
+// idle for a slow exec probe to read as a taxed program tree rather than a
+// saturated host (gt-auiji). Below it the probe is timing a run queue, not
+// the macOS scan, so the reading is degraded rather than red. The load
+// average is not the test it was: macOS counts running threads into it, so a
+// lost Developer Tools grant on a 24-core host with a Dolt server reads as
+// load 30 while half the machine sits idle.
+const ExecTaxCPUIdleLimit = 20.0
+
 // ExecTaxLoadPerCoreLimit is the one-minute load average per logical core
-// above which a slow exec probe reads as a saturated host rather than a taxed
-// program tree (gt-v50sn). The probe times the scheduler as much as the macOS
-// scan, so a red reading under 54 load on 8 cores is the run queue, not a
-// lost Developer Tools grant. The limit sits above one, the first point of
-// oversubscription, because macOS counts processes in uninterruptible wait in
-// its load average and a busy-but-progressing host should keep the red
-// reading; a grant actually lost reads over the threshold at any load.
+// above which a slow exec probe reads as a saturated host, standing in when
+// the host reported no CPU idle reading (gt-v50sn). The limit sits above one,
+// the first point of oversubscription, because macOS counts processes in
+// uninterruptible wait in its load average and a busy-but-progressing host
+// should keep the red reading; a grant actually lost reads over the
+// threshold at any load.
 const ExecTaxLoadPerCoreLimit = 1.5
 
 // execTax judges the cost of exec'ing a freshly written program in this
 // process tree, which is what the landing gate pays once per test binary.
 // The millisecond count is the report's to publish; the field is the verdict
-// on it. A red reading on a host far past its core count is degraded instead,
-// naming the load (gt-v50sn).
-func execTax(ctx context.Context, in Inputs) (Field, *float64) {
+// on it. A red reading on a host with no CPU to spare is degraded instead,
+// naming the reading that says so (gt-v50sn, gt-auiji).
+func execTax(ctx context.Context, in Inputs, h HostLoad) (Field, *float64) {
 	if in.ExecTax == nil {
 		return unknown(FieldExecTax, "", "", errNotWired), nil
 	}
@@ -694,34 +717,94 @@ func execTax(ctx context.Context, in Inputs) (Field, *float64) {
 	if f.Verdict != Green {
 		f.Detail = "every fresh executable in this tree pays " + Short(d)
 	}
-	if h, ok := overloadedLoad(in); ok && f.Verdict == Red {
+	if f.Verdict == Red && overloadedHost(h) {
 		f.Verdict = Degraded
-		f.Value += fmt.Sprintf(" load %s on %d cores", loadText(h.Average), h.Cores)
-		f.Detail = fmt.Sprintf("overloaded (load %s on %d cores)", loadText(h.Average), h.Cores)
+		note := overloadReason(h)
+		f.Value += " " + note
+		f.Detail = "overloaded (" + note + ")"
 	}
 	return f, &ms
 }
 
-// overloadedLoad returns the host load when it is far enough past the core
-// count to explain a red exec-tax reading. A town with no load source, or a
-// host that reports none, has no corroboration and keeps the probe's verdict.
-func overloadedLoad(in Inputs) (HostLoad, bool) {
+// overloadedHost reports whether the host has too little CPU free to explain
+// a red exec-tax reading. CPUIdle decides it where the host reported one, and
+// the load average per core stands in where it did not; a town with no load
+// source, or a host that reported neither, keeps the probe's verdict.
+func overloadedHost(h HostLoad) bool {
+	if h.CPUIdle != nil {
+		return *h.CPUIdle < ExecTaxCPUIdleLimit
+	}
+	if h.Cores < 1 || h.Average <= 0 {
+		return false
+	}
+	return h.Average/float64(h.Cores) > ExecTaxLoadPerCoreLimit
+}
+
+// overloadReason names the reading a red exec-tax probe was explained by.
+func overloadReason(h HostLoad) string {
+	if h.CPUIdle != nil {
+		return pctText(*h.CPUIdle) + "% cpu idle"
+	}
+	return fmt.Sprintf("load %s on %d cores", loadText(h.Average), h.Cores)
+}
+
+// hostReading reads the host once per computation: the exec-tax probe's
+// corroboration and the host field both need it, and reading the host twice
+// would run its probes twice (gt-auiji).
+func hostReading(in Inputs) (HostLoad, error) {
 	if in.Load == nil {
-		return HostLoad{}, false
+		return HostLoad{}, errNotWired
 	}
-	h, err := in.Load.Load1()
-	if err != nil || h.Cores < 1 || h.Average <= 0 {
-		return HostLoad{}, false
+	return in.Load.Load1()
+}
+
+// host renders the host's own busyness. It is green whenever it could read
+// the host, and its value leaves out a number the host did not report: a
+// probe too slow to answer under load must not read as a failure, or the
+// field would be worst exactly when the host is busiest (gt-auiji).
+func host(h HostLoad, err error) Field {
+	if err != nil {
+		return unknown(FieldHost, "", "", err)
 	}
-	if h.Average/float64(h.Cores) <= ExecTaxLoadPerCoreLimit {
-		return HostLoad{}, false
+	v := hostText(h)
+	if v == "" {
+		return unknown(FieldHost, "", "", errors.New("the host reported no reading"))
 	}
-	return h, true
+	return Field{Name: FieldHost, Tag: Live, Verdict: Green, Value: v}
+}
+
+// hostText renders one host reading the way the field shows it: what a
+// reader judges the host by first, the load average last because macOS
+// counts running threads into it.
+func hostText(h HostLoad) string {
+	var parts []string
+	if h.CPUIdle != nil {
+		parts = append(parts, pctText(*h.CPUIdle)+"% cpu idle")
+	}
+	if h.DoltCores != nil {
+		parts = append(parts, coresText(*h.DoltCores)+" dolt cores")
+	}
+	if h.Average > 0 {
+		part := "load " + loadText(h.Average)
+		if h.Cores > 0 {
+			part += fmt.Sprintf(" on %d cores", h.Cores)
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, " · ")
 }
 
 // loadText renders a load average the way the field shows it: 54, not
 // 54.000000.
 func loadText(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }
+
+// pctText renders a percentage whole: a 46.9% sample does not carry the
+// precision a tenth of a percent would claim.
+func pctText(v float64) string { return strconv.FormatFloat(math.Round(v), 'f', -1, 64) }
+
+// coresText renders a CPU share in cores to one decimal: what a server burns
+// moves in tenths of a core, which whole cores would round away.
+func coresText(v float64) string { return strconv.FormatFloat(v, 'f', 1, 64) }
 
 // median returns the middle sample (the lower middle for an even count).
 func median(ds []time.Duration) time.Duration {

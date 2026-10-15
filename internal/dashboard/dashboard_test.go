@@ -400,21 +400,8 @@ func TestSlowPageIsDropped(t *testing.T) {
 	}
 }
 
-func TestParseLoadavgAndTop(t *testing.T) {
-	t.Parallel()
-	var m Machine
-	if err := parseLoadavg("{ 6.71 16.49 28.11 }\n", &m); err != nil || m.Load1 != 6.71 || m.Load15 != 28.11 {
-		t.Fatalf("parseLoadavg: %v %+v", err, m)
-	}
-	if err := parseLoadavg("garbage", &m); err == nil {
-		t.Error("garbage load accepted")
-	}
-	ps := " 95.0 /usr/local/go/bin/go\n 40.2 /usr/bin/go\n 30.0 /usr/bin/dolt\n  0.1 launchd\n"
-	top := parseTop(ps, 5)
-	if len(top) != 2 || top[0].Name != "go" || top[0].CPU < 135 || top[1].Name != "dolt" {
-		t.Fatalf("parseTop = %+v", top)
-	}
-}
+// The host sample's parsers live in internal/hoststat, which the tile, the
+// hub and the town health line all read (gt-auiji).
 
 func TestSlungRegexReadsBothDispatchLineShapes(t *testing.T) {
 	t.Parallel()

@@ -181,10 +181,17 @@ codesign -dv ~/.local/bin/gt 2>&1 | grep Identifier # Identifier=com.gastown.gt
 line, so it carries `exec-tax` just when the reading is not green. A RED
 reading at 130 ms or more means the grant is missing or bound to an old
 cdhash — re-add `~/.local/bin/gt` under Developer Tools. A YELLOW reading is
-the host, not the grant: the probe ran while the one-minute load average was
-far past the core count, so the exec paid for a run queue rather than a scan,
-and the reading clears with the load. `gt status` names it `overloaded (load
-54 on 8 cores)`.
+the host, not the grant: fewer than 20% of the host's cores were idle, so the
+exec paid for a run queue rather than a scan, and the reading clears when the
+CPU is free again. `gt status` names the reading it judged by — `overloaded
+(6% cpu idle)`.
+
+Judge the host by CPU idle, not the load average. macOS counts running
+threads in the load average, so a machine with a Dolt server behind it reads
+load 30 on 24 cores with half its CPU idle. The `host` field `gt status`
+prints, and the dashboard's **Host CPU** tile, both carry the CPU idle share
+and the Dolt server's own CPU in cores beside the load average; the tile is
+amber at or below 20% idle and red below 5%.
 
 Signing runs unattended, so an install never waits at a prompt: the installer
 unlocks its own keychain and gives `codesign` thirty seconds with stdin at
