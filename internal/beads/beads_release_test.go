@@ -64,9 +64,9 @@ func TestReleaseIfAssigneeUsesGuard(t *testing.T) {
 	}
 }
 
-// TransferIfUnassigned is the failed force re-sling's guarded hand-back: it
-// carries both preconditions, and the empty --if-assignee is the one bd reads
-// as "still unassigned" (gt-ct2ob).
+// TransferIfUnassigned over *Beads is the failed force re-sling's guarded
+// hand-back: one bd update carrying both preconditions, where the empty
+// --if-assignee is the one bd reads as "still unassigned" (gt-ct2ob).
 func TestTransferIfUnassignedUsesGuard(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX bd stub")
@@ -74,7 +74,7 @@ func TestTransferIfUnassignedUsesGuard(t *testing.T) {
 	dir := t.TempDir()
 	argsLog := bdGuardStub(t, dir, "13")
 
-	transferred, err := New(dir).TransferIfUnassigned("gt-ct2ob", "open", "hooked", "gastown/polecats/Nux")
+	transferred, err := TransferIfUnassigned(New(dir), "gt-ct2ob", "hooked", "gastown/polecats/Nux")
 	if err != nil || transferred {
 		t.Fatalf("transferred=%v err=%v, want the guard read as a lost race", transferred, err)
 	}

@@ -1395,7 +1395,7 @@ func restoreBeadHold(townRoot, beadID string, hold beadHold) {
 		return
 	}
 	dir := beads.ResolveHookDir(townRoot, beadID, "")
-	restored, err := pinnedBd(dir).TransferIfUnassigned(beadID, string(beads.StatusOpen), hold.Status, hold.Assignee)
+	restored, err := beads.TransferIfUnassigned(pinnedBd(dir), beadID, hold.Status, hold.Assignee)
 	switch {
 	case err != nil:
 		fmt.Printf("  %s Could not restore bead %s to %s (%s): %v\n", style.Dim.Render("Warning:"), beadID, hold.Assignee, hold.Status, err)
