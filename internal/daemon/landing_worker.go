@@ -523,9 +523,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		lander.FollowupBackpressure = rigFollowupBackpressure(rigPath)
 		// The backpressure holds findings back silently otherwise, so the day
 		// it does, the loss reaches a human as a low attention item (gt-4ty22).
-		lander.FollowupAlert = func(message string) {
-			_ = d.escalateAlertSeverity("low", "followup-backpressure:"+rigName, "landing_worker", message)
-		}
+		lander.FollowupAlert = d.followupBackpressureAlert(rigName)
 		d.logger.Printf("landing_worker: %s: om follow-up feed on (landing.followups; %d open %s beads stop it)",
 			rigName, land.FollowupBackpressureOrDefault(lander.FollowupBackpressure), land.FollowUpLabel)
 	}
@@ -1027,6 +1025,40 @@ func rigFollowupBackpressure(rigPath string) int {
 		return 0
 	}
 	return settings.MergeQueue.FollowupBackpressure
+}
+
+// followupBackpressureAlertEvery is how often the feed's backpressure item may
+// reach a human for one rig: the bound holds findings back on every landing
+// until the open count falls, and a landing rate is not a news rate (gt-4ty22).
+const followupBackpressureAlertEvery = 24 * time.Hour
+
+// followupBackpressureAlert is the feed's low attention item for one rig: the
+// findings merge_queue.followup_backpressure held back, escalated at most once
+// a day. The record lives here rather than on the lander, which holds no state
+// between landings, and the mutex covers the feed's goroutine outliving the
+// timeout that abandoned it (gt-4ty22).
+func (d *Daemon) followupBackpressureAlert(rigName string) func(message string) {
+	var mu sync.Mutex
+	var last time.Time
+	key := "followup-backpressure:" + rigName
+	return func(message string) {
+		now := d.clk().Now()
+		mu.Lock()
+		raised := !last.IsZero() && now.Sub(last) < followupBackpressureAlertEvery
+		if !raised {
+			last = now
+		}
+		mu.Unlock()
+		if raised {
+			return
+		}
+		// The item is the only record of what the bound held back, so a
+		// delivery that failed keeps the day's slot and is logged rather than
+		// dropped (gt-4ty22).
+		if err := d.escalateAlertSeverity("low", key, "landing_worker", message); err != nil {
+			d.logger.Printf("landing_worker: %s: the follow-up backpressure item was not raised: %v", rigName, err)
+		}
+	}
 }
 
 // rigOMQueueEnabled is landing.om_queue from the rig's own settings/config.json

@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -332,6 +333,62 @@ func TestRigFollowupBackpressureReadsRigSettingsOnly(t *testing.T) {
 				t.Errorf("the feed resolves %d to no bound at all", got)
 			}
 		})
+	}
+}
+
+// TestFollowupBackpressureAlertOnceADay: the feed's backpressure item reaches
+// the operator once a day per rig — the bound holds findings back on every
+// landing until the open count falls, and a landing rate is not a news rate
+// (gt-4ty22).
+func TestFollowupBackpressureAlertOnceADay(t *testing.T) {
+	t.Parallel()
+	d, rec := daemonWithRecorder(t)
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	clk := clockwork.NewFakeClockAt(now)
+	d.clock = clk
+	alert := d.followupBackpressureAlert("gastown")
+
+	alert("40 om-followup beads are open")
+	got := rec.Escalations()
+	if len(got) != 1 {
+		t.Fatalf("escalations = %+v, want one", got)
+	}
+	if want := (notify.Escalation{Severity: "low", Description: "landing_worker: 40 om-followup beads are open",
+		Reason: "40 om-followup beads are open", Fingerprint: "followup-backpressure:gastown"}); got[0].Escalation != want {
+		t.Errorf("escalation = %+v\nwant            %+v", got[0].Escalation, want)
+	}
+	// The next landing the same day is held back the same way and says nothing
+	// more; one a day is what keeps the item from being noise.
+	alert("40 om-followup beads are open")
+	if got := rec.Escalations(); len(got) != 1 {
+		t.Fatalf("escalations for two landings in a day = %+v, want one", got)
+	}
+	clk.Advance(followupBackpressureAlertEvery)
+	alert("40 om-followup beads are open")
+	if got := rec.Escalations(); len(got) != 2 {
+		t.Fatalf("escalations the next day = %+v, want two", got)
+	}
+}
+
+// TestFollowupBackpressureAlertLogsADeliveryThatFailed: the item is the only
+// place the findings the bound held back are visible, so an escalation that
+// never arrived is logged rather than dropped (gt-4ty22).
+func TestFollowupBackpressureAlertLogsADeliveryThatFailed(t *testing.T) {
+	t.Parallel()
+	d, rec := daemonWithRecorder(t)
+	rec.Fail(notifyfake.KindEscalate, errors.New("gt escalate: exit status 1 (bd: database not found)"))
+	var out lockedBuffer
+	d.logger = log.New(&out, "", 0)
+	clk := newFixedClock()
+	d.clock = clk
+
+	// A refused escalation retries with the daemon's own backoff.
+	runOnClock(t, clk, time.Second, func() {
+		d.followupBackpressureAlert("gastown")("40 om-followup beads are open")
+	})
+
+	if !strings.Contains(out.String(), "the follow-up backpressure item was not raised") {
+		t.Errorf("log = %q, want the failed delivery named", out.String())
 	}
 }
 

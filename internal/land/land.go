@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -132,16 +131,12 @@ type Lander struct {
 	// FollowupBackpressure is the open om-followup count at which the feed
 	// stops filing. Zero means DefaultFollowupBackpressure (gt-4ty22).
 	FollowupBackpressure int
-	// FollowupAlert, when set, is told once a day while the backpressure keeps
+	// FollowupAlert, when set, is told every time the backpressure bound keeps
 	// the feed from filing, so the findings lost to it are visible. It runs on
-	// the feed's own goroutine, which the feed's timeout can abandon; nil
-	// reports nothing (gt-4ty22).
+	// the feed's own goroutine, which the feed's timeout can abandon; the
+	// lander holds no state between landings, so how often the loss reaches a
+	// human is the sink's own business (gt-4ty22). Nil reports nothing.
 	FollowupAlert func(message string)
-	// followupAlertAt is when FollowupAlert was last called, and the mutex
-	// guards it: the feed's timeout can abandon one landing's goroutine while
-	// the next landing's feed is already running.
-	followupAlertAt time.Time
-	followupAlertMu sync.Mutex
 	// OMQueue queues the major and critical findings of an approved landing
 	// onto its work bead, for the next deep-review run to verify and file
 	// (gt-qtj72). False means off, and off means nothing in the queue runs. It

@@ -9,7 +9,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
@@ -258,6 +257,29 @@ func TestFollowupFeedSplitsAFullLandingByPackage(t *testing.T) {
 	}
 }
 
+// TestFollowupFeedTreatsARootFileAsHavingNoPackage: a finding in a file at the
+// repository root has no package — path.Dir spells that "." — so its bead names
+// the finding alone rather than a package called "." (gt-4ty22).
+func TestFollowupFeedTreatsARootFileAsHavingNoPackage(t *testing.T) {
+	t.Parallel()
+	f := newFollowupFixture(t, 0.8, []Finding{
+		minorAt("README.md", 12, "name the error"),
+		minorAt("internal/land/note.go", 230, "swap the nil check"),
+	})
+	f.run()
+	if len(f.fake.created) != 2 {
+		t.Fatalf("filed %d beads, want one per package", len(f.fake.created))
+	}
+	// Packages file in sorted order, and no package sorts before a named one.
+	root := f.fake.created[0]
+	if want := "Found: name the error (om minor on gt-abc approved at 0.80)"; root.Title != want {
+		t.Errorf("title = %q, want %q", root.Title, want)
+	}
+	if strings.Contains(root.Title+root.Body, "in .") {
+		t.Errorf("the bead names a package called \".\":\n%s\n%s", root.Title, root.Body)
+	}
+}
+
 // TestFollowupFeedBodyLintsClean: the filed body is the shape the spec
 // dispatcher dispatches, checked with its own lint rather than a copy of the
 // shape kept here (gt-vpeaj, gt-s01pn).
@@ -496,16 +518,42 @@ func TestFollowupBackpressureOrDefault(t *testing.T) {
 	}
 }
 
-// TestFollowupFeedAlertsOnceADayWhileBackpressured: the findings the bound holds
-// back are raised as a low attention item, once a day rather than once a
-// landing, so the loss is visible without a hundred lines saying it
-// (gt-4ty22).
-func TestFollowupFeedAlertsOnceADayWhileBackpressured(t *testing.T) {
+// TestFollowupFeedBackpressuresEveryBead: the bound counts beads, so a landing
+// that splits into one bead per package stops at it rather than carrying the
+// open count past it. The findings it never filed for are named as the ones the
+// bound held back (gt-4ty22).
+func TestFollowupFeedBackpressuresEveryBead(t *testing.T) {
+	t.Parallel()
+	findings := []Finding{
+		minorAt("docs/reference.md", 1, "name the error"),
+		minorAt("internal/daemon/landing_worker.go", 2, "swap the nil check"),
+		minorAt("internal/land/note.go", 3, "drop the dead branch"),
+	}
+	f := newFollowupFixture(t, 0.8, findings)
+	f.lander.FollowupBackpressure = 2
+	f.fake.existing = openFollowupBeads(1)
+	log := f.run()
+	if len(f.fake.created) != 1 {
+		t.Fatalf("filed %d beads at a 2-bead bound with one open, want one:\n%s", len(f.fake.created), log)
+	}
+	// Packages file in sorted order, so the bead the bound let through is docs.
+	if !strings.Contains(f.fake.created[0].Body, "in docs") {
+		t.Errorf("bead = %q, want the first package filed", f.fake.created[0].Body)
+	}
+	if !strings.Contains(log, "2 om-followup beads are open, at the 2-bead backpressure bound; held back 2 findings for this landing") {
+		t.Errorf("log = %q, want the bound, the open count and the held-back findings", log)
+	}
+}
+
+// TestFollowupFeedHandsTheHeldBackFindingsToTheSink: the bound holds findings
+// back silently otherwise, so the feed hands the loss to the attention sink it
+// was given with the counts that make it actionable. How often that reaches a
+// human is the sink's business: the feed holds no state between landings to
+// rate-limit it with (gt-4ty22).
+func TestFollowupFeedHandsTheHeldBackFindingsToTheSink(t *testing.T) {
 	t.Parallel()
 	f := newFollowupFixture(t, 0.8, []Finding{minorFinding("name the error")})
 	f.fake.existing = openFollowupBeads(DefaultFollowupBackpressure)
-	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
-	f.lander.Now = func() time.Time { return now }
 	var alerts []string
 	f.lander.FollowupAlert = func(message string) { alerts = append(alerts, message) }
 
@@ -516,17 +564,6 @@ func TestFollowupFeedAlertsOnceADayWhileBackpressured(t *testing.T) {
 	if !strings.Contains(alerts[0], fmt.Sprintf("%d %s beads are open", DefaultFollowupBackpressure, FollowUpLabel)) ||
 		!strings.Contains(alerts[0], "1 finding of this landing got no bead") {
 		t.Errorf("alert = %q, want the open count and the findings lost named", alerts[0])
-	}
-	// The next landing the same day is held back the same way and says nothing
-	// more; one a day is what keeps the item from being noise.
-	f.run()
-	if len(alerts) != 1 {
-		t.Fatalf("raised %d attention items for two landings in a day, want one:\n%v", len(alerts), alerts)
-	}
-	now = now.Add(followUpAlertEvery)
-	f.run()
-	if len(alerts) != 2 {
-		t.Fatalf("raised %d attention items the next day, want two:\n%v", len(alerts), alerts)
 	}
 }
 
@@ -552,38 +589,76 @@ func TestFollowupFeedRaisesNoAlertWithoutBackpressure(t *testing.T) {
 }
 
 // TestFollowupFeedIsIdempotentPerLanding: a retry of the same landing attempt
-// finds the bead it already filed — keyed on the landed commit — and files no
-// second one (gt-s01pn).
+// finds the bead the earlier attempt filed — by the fingerprint of the finding
+// it carries — files no second one, and has nothing to say to it either: it is
+// this landing's own work, not a finding another landing raised (gt-s01pn,
+// gt-4ty22).
 func TestFollowupFeedIsIdempotentPerLanding(t *testing.T) {
 	t.Parallel()
-	filed := func(status string) []ExistingFollowup {
-		return []ExistingFollowup{{
-			ID: "gt-filed", Title: "Found: name the error", Status: status,
-			Description: "## Goal\nlanded commit 0123456789abcdef0123456789abcdef01234567\n",
-			Labels:      []string{FollowUpLabel},
-		}}
+	// filed is the shape the feed itself files: the finding's fingerprint label
+	// and a body naming the landed commit.
+	filed := []ExistingFollowup{{
+		ID: "gt-filed", Title: "Found: name the error", Status: "open",
+		Description: "## Goal\nFixed: the 1 finding om raised (landed commit 0123456789abcdef0123456789abcdef01234567).\n",
+		Labels:      []string{FollowUpLabel, Fingerprint("internal/land/note.go", "name the error")},
+	}}
+	f := newFollowupFixture(t, 0.8, []Finding{minorFinding("name the error")})
+	f.fake.existing = filed
+	// Seeded, so a comment the retry should not leave would land and be seen.
+	f.bd.Seed(beads.Issue{ID: "gt-filed", Title: "Found: name the error", Status: "open", Type: "task"})
+	f.run()
+	if len(f.fake.created) != 0 {
+		t.Fatalf("the retry filed %d beads for a landing already filed", len(f.fake.created))
 	}
-	t.Run("the filed bead stops the retry", func(t *testing.T) {
-		t.Parallel()
-		f := newFollowupFixture(t, 0.8, []Finding{minorFinding("name the error")})
-		f.fake.existing = filed("open")
-		log := f.run()
-		if len(f.fake.created) != 0 {
-			t.Fatalf("the retry filed %d beads for a landing already filed", len(f.fake.created))
+	comments, err := f.bd.Comments("gt-filed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 0 {
+		t.Errorf("comments = %v, want none on this landing's own bead", commentTexts(comments))
+	}
+}
+
+// TestFollowupFeedRetryAfterAPartialFile: the per-package split files several
+// beads, and an attempt that died after one of them leaves the rest to the
+// retry. One bead naming the landing's commit must never stand for the whole
+// landing, or the findings the attempt never reached are lost silently
+// (gt-4ty22).
+func TestFollowupFeedRetryAfterAPartialFile(t *testing.T) {
+	t.Parallel()
+	findings := []Finding{
+		minorAt("docs/reference.md", 1, "name the error"),
+		minorAt("internal/daemon/landing_worker.go", 2, "swap the nil check"),
+		minorAt("internal/land/note.go", 3, "drop the dead branch"),
+	}
+	f := newFollowupFixture(t, 0.8, findings)
+	// Docs is the package the interrupted attempt got to: its bead names the
+	// commit and carries only its own finding's fingerprint.
+	f.fake.existing = []ExistingFollowup{{
+		ID: "gt-partial", Title: "Found: name the error in docs", Status: "open",
+		Description: "## Goal\nFixed: the 1 finding om raised on gt-abc in docs (landed commit 0123456789abcdef0123456789abcdef01234567).\n",
+		Labels:      []string{FollowUpLabel, Fingerprint("docs/reference.md", "name the error")},
+	}}
+	// Seeded, so a comment the retry should not leave would land and be seen.
+	f.bd.Seed(beads.Issue{ID: "gt-partial", Title: "Found: name the error in docs", Status: "open", Type: "task"})
+	log := f.run()
+	if len(f.fake.created) != 2 {
+		t.Fatalf("filed %d beads on the retry, want the two packages it never reached:\n%s", len(f.fake.created), log)
+	}
+	// Packages file in sorted order, so the two left are internal/daemon and
+	// internal/land, and neither bead is a second one for docs.
+	for i, want := range []string{"in internal/daemon", "in internal/land"} {
+		if !strings.Contains(f.fake.created[i].Body, want) {
+			t.Errorf("bead %d does not name %q:\n%s", i, want, f.fake.created[i].Body)
 		}
-		if !strings.Contains(log, "gt-filed already carries this landing's follow-up") {
-			t.Errorf("log = %q, want the existing bead named", log)
-		}
-	})
-	t.Run("a closed bead for the commit does not stop a new landing", func(t *testing.T) {
-		t.Parallel()
-		f := newFollowupFixture(t, 0.8, []Finding{minorFinding("name the error")})
-		f.fake.existing = filed("closed")
-		f.run()
-		if len(f.fake.created) != 1 {
-			t.Fatalf("filed %d beads where the commit's bead is closed, want one", len(f.fake.created))
-		}
-	})
+	}
+	comments, err := f.bd.Comments("gt-partial")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 0 {
+		t.Errorf("comments = %v, want none on the bead the attempt filed", commentTexts(comments))
+	}
 }
 
 // TestFollowupFeedFailuresAreLoggedAndDropped: the landing is recorded before

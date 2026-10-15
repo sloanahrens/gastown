@@ -34,11 +34,6 @@ const (
 	// findings file one bead per package rather than one bead in all.
 	followUpGroupFindings = 6
 
-	// followUpAlertEvery is how often the feed raises its low attention item
-	// while the backpressure keeps holding findings back: the loss has to be
-	// visible, and a line per landing would say it a hundred times a day.
-	followUpAlertEvery = 24 * time.Hour
-
 	// followUpPriority is the priority a filed bead takes: every finding a
 	// passing review leaves is a minor, which is work nobody is waiting on, so
 	// it sorts below the queue's own beads.
@@ -147,16 +142,13 @@ func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate) 
 		// files nothing.
 		return []string{fmt.Sprintf("could not list the %s beads (%v); filing nothing for this landing", FollowUpLabel, err)}
 	}
-	if id := followupForCommit(existing, res.LandedCommit); id != "" {
-		return []string{fmt.Sprintf("%s already carries this landing's follow-up; filing nothing", id)}
-	}
-	if n, bound := openFollowups(existing), l.followupBackpressure(); n >= bound {
-		lines := []string{fmt.Sprintf("%d %s beads are open, at the %d-bead backpressure bound; held back %s for this landing",
-			n, FollowUpLabel, bound, findingsPhrase(len(findings)))}
-		if line := l.raiseFollowupAlert(n, bound, len(findings)); line != "" {
-			lines = append(lines, line)
-		}
-		return lines
+	// The beads an earlier attempt at this landing filed. They are this
+	// landing's own work, so a retry says nothing to them — the "seen again"
+	// comment is for a finding another landing raised (gt-4ty22).
+	own := followupIDsForCommit(existing, res.LandedCommit)
+	open := openFollowups(existing)
+	if bound := l.followupBackpressure(); open >= bound {
+		return []string{l.holdBack(open, bound, len(findings))}
 	}
 	var lines []string
 	var fresh []FollowupCandidate
@@ -165,6 +157,9 @@ func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate) 
 		case DedupeComment:
 			// The finding is already filed: the repeat goes on that bead's
 			// history, and nothing new is filed for it.
+			if own[d.Target] {
+				continue
+			}
 			if err := l.Beads.AddComment(d.Target, followupComment(w, res, c)); err != nil {
 				lines = append(lines, fmt.Sprintf("could not comment %s for the finding it repeats (%v)", d.Target, err))
 			}
@@ -175,16 +170,30 @@ func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate) 
 	if len(fresh) == 0 {
 		return lines
 	}
-	return append(lines, l.fileFollowupBeads(w, res, fresh)...)
+	return append(lines, l.fileFollowupBeads(w, res, fresh, open)...)
 }
 
 // fileFollowupBeads files the beads the fresh findings of one landing earn —
 // one for the landing, or one per package — and leaves one comment on the work
-// bead naming them. It returns the lines it wants logged.
-func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate) []string {
+// bead naming them. open is the om-followup count the de-duplication read
+// found, so the backpressure bound is applied to every bead the landing files
+// rather than once to the landing: a landing that splits into three beads
+// stops at the bound instead of carrying the queue past it (gt-4ty22). It
+// returns the lines it wants logged.
+func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate, open int) []string {
+	groups := followupGroups(fresh)
+	bound := l.followupBackpressure()
 	var lines []string
 	var ids []string
-	for _, g := range followupGroups(fresh) {
+	for i, g := range groups {
+		if open+len(ids) >= bound {
+			held := 0
+			for _, rest := range groups[i:] {
+				held += len(rest.Findings)
+			}
+			lines = append(lines, l.holdBack(open+len(ids), bound, held))
+			break
+		}
 		id, err := l.Followups.CreateFollowup(followupSpec(w, res, g))
 		if err != nil {
 			lines = append(lines, fmt.Sprintf("could not file the follow-up bead for %s (%v)", findingsPhrase(len(g.Findings)), err))
@@ -204,31 +213,16 @@ func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate
 	return lines
 }
 
-// raiseFollowupAlert raises one low attention item while the backpressure holds
-// findings back, at most once every followUpAlertEvery. It returns the line the
-// feed logs, and "" when the item is held back or there is nothing to raise it
-// through: how many findings were left without a bead is the point, and a line
-// per landing would say it a hundred times a day.
-//
-// The record is in memory and the clock is the lander's, so a daemon restart
-// re-arms it, which costs at most one extra item in a day.
-func (l *Lander) raiseFollowupAlert(n, bound, dropped int) string {
-	if l.FollowupAlert == nil {
-		return ""
+// holdBack is what the feed says and does when the backpressure bound keeps
+// findings from beads: the line it logs, and the item it hands the attention
+// sink, every time the bound holds something back (gt-4ty22).
+func (l *Lander) holdBack(open, bound, held int) string {
+	if l.FollowupAlert != nil {
+		l.FollowupAlert(fmt.Sprintf("%d %s beads are open, at the %d-bead backpressure bound: %s of this landing got no bead, and the feed files nothing more until the open count falls back",
+			open, FollowUpLabel, bound, findingsPhrase(held)))
 	}
-	now := l.now()
-	l.followupAlertMu.Lock()
-	raised := !l.followupAlertAt.IsZero() && now.Sub(l.followupAlertAt) < followUpAlertEvery
-	if !raised {
-		l.followupAlertAt = now
-	}
-	l.followupAlertMu.Unlock()
-	if raised {
-		return ""
-	}
-	l.FollowupAlert(fmt.Sprintf("%d %s beads are open, at the %d-bead backpressure bound: %s of this landing got no bead, and the feed files nothing more until the open count falls back",
-		n, FollowUpLabel, bound, findingsPhrase(dropped)))
-	return "raised a low attention item for the held-back findings"
+	return fmt.Sprintf("%d %s beads are open, at the %d-bead backpressure bound; held back %s for this landing",
+		open, FollowUpLabel, bound, findingsPhrase(held))
 }
 
 // FollowupBackpressureOrDefault is the open om-followup count at which a feed
@@ -282,14 +276,18 @@ func followupGroups(findings []FollowupCandidate) []followupGroup {
 }
 
 // followupPackage is the package a finding belongs to: the directory its file
-// sits in. A finding om named no path for has no package, and those group
-// together rather than with a directory.
+// sits in. A finding om named no path for has no package, and so does one in a
+// file at the repository root — path.Dir spells that ".", which is not a
+// package any worker takes (gt-4ty22).
 func followupPackage(fpath string) string {
 	fpath = strings.TrimSpace(fpath)
 	if fpath == "" {
 		return ""
 	}
-	return path.Dir(path.Clean(fpath))
+	if dir := path.Dir(path.Clean(fpath)); dir != "." {
+		return dir
+	}
+	return ""
 }
 
 // followupFindings keeps the findings a follow-up bead is for: the minors. Any
@@ -319,19 +317,26 @@ func followupCandidates(findings []Finding) []FollowupCandidate {
 	return out
 }
 
-// followupForCommit is the open follow-up that already names commit, or "".
-// A retry of a landing attempt that filed before failing finds its own bead
-// this way and files no second one.
-func followupForCommit(existing []ExistingFollowup, commit string) string {
+// followupIDsForCommit is the follow-ups that name commit in their body: the
+// beads an earlier attempt at this landing filed. A retry files no second bead
+// for them and has nothing to say to them either, but only for them — an
+// attempt that filed one package of three leaves the other two to the retry,
+// so one filed bead never stands for the whole landing (gt-4ty22).
+func followupIDsForCommit(existing []ExistingFollowup, commit string) map[string]bool {
 	if commit == "" {
-		return ""
+		return nil
 	}
+	var ids map[string]bool
 	for _, e := range existing {
-		if !followupClosed(e) && strings.Contains(e.Description, commit) {
-			return e.ID
+		if !strings.Contains(e.Description, commit) {
+			continue
 		}
+		if ids == nil {
+			ids = map[string]bool{}
+		}
+		ids[e.ID] = true
 	}
-	return ""
+	return ids
 }
 
 // openFollowups counts the follow-ups that are still open. Everything a bead
