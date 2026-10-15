@@ -75,9 +75,9 @@ agent, an agent holding none of those seats becomes the pool agent; the pro
 seat's agent is never that agent, so naming it sets the pro seat whether or
 not the pro seat is open. Any other agent is refused.
 
-The pool seat and the pro seat take effect at the dispatcher's next tick. The
-second seat is read when the daemon starts, so a change to it needs a daemon
-kickstart.
+All three seats take effect at the dispatcher's next tick, which reads them from
+the files on every run: no daemon restart, and no daemon kickstart to interrupt
+the tick or landing in flight.
 
 The file is written atomically and the previous copy is kept beside it as
 <file>.bak-<timestamp>. Keys gt pool does not own are left as they are.`,
@@ -144,11 +144,13 @@ The dispatcher runs one seat per agent, so an agent that already holds the pool
 seat or the pro seat leaves the second seat idle; gt pool show and this command
 say so.
 
-The second seat is read when the daemon starts, so a change to it needs a daemon
-kickstart. The patrol config is the "daemon" section of settings/config.json on
-a two-file town and mayor/daemon.json on a five-file one. It is written
-atomically and the previous copy is kept beside it as <file>.bak-<timestamp>.
-Keys gt pool does not own are left as they are.`,
+The change takes effect at the dispatcher's next tick, like the other two seats:
+the dispatcher reads this block on every run, so no daemon restart is needed. The
+daemon logs "spec_dispatch: seats now ..." on the tick that reads a changed mix.
+The patrol config is the "daemon" section of settings/config.json on a two-file
+town and mayor/daemon.json on a five-file one. It is written atomically and the
+previous copy is kept beside it as <file>.bak-<timestamp>. Keys gt pool does not
+own are left as they are.`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		n, err := strconv.Atoi(args[1])
@@ -524,8 +526,11 @@ func runPoolSet(w io.Writer, townRoot, agent string, n int) error {
 	return nil
 }
 
-// printSeatChange reports a seat write, with the kickstart note for the one seat
-// the daemon reads only at start.
+// printSeatChange reports a seat write and, for the second seat, when it lands.
+// The dispatcher reads every seat from the files on each tick — the second
+// seat's patrol block included — so the write is in force at the next tick and
+// nothing has to be restarted: a kickstart would only cut the tick or landing in
+// flight (gt-jdnab). The other two seats' Long text already says when they land.
 func printSeatChange(w io.Writer, seat poolSeatKey, agent string, n int) {
 	if n == 0 {
 		fmt.Fprintf(w, "closed the %s (%s)\n", seatName(seat), agent)
@@ -533,7 +538,7 @@ func printSeatChange(w io.Writer, seat poolSeatKey, agent string, n int) {
 		fmt.Fprintf(w, "%s: %s cap %d\n", seatName(seat), agent, n)
 	}
 	if seat == secondSeat {
-		fmt.Fprintln(w, "spec_dispatch is read at daemon start: kickstart the daemon for this to take effect")
+		fmt.Fprintln(w, "in force at the dispatcher's next tick; no restart is needed (the daemon logs \"seats now\" when it reads it)")
 	}
 }
 

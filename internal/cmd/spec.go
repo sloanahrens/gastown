@@ -201,7 +201,9 @@ Budget comes from polecat_pool in settings/config.json (agent, max_seats,
 min_spawn_gap, pro_agent, pro_max, pro_label) and daemon.patrols.spec_dispatch
 in settings/config.json (hooked_agent, max_hooked, prefer_hooked, max_per_tick).
 A town that has not run gt config migrate still keeps that patrol block in
-mayor/daemon.json.
+mayor/daemon.json. Both blocks are read on every tick, so a seat added, moved or
+closed applies at the next tick — no daemon restart. A block that does not parse
+stops the tick, whose seats stay the ones the last good tick ran with.
 The operator hold file and ESTOP stop the tick.`,
 	Args:         cobra.NoArgs,
 	SilenceUsage: true,
@@ -1139,6 +1141,9 @@ func specRosterFrom(sessions []poolSession, ts *config.TownSettings) specRoster 
 }
 
 // loadSpecDispatchConfig returns daemon.json's patrols.spec_dispatch, or nil.
+// It reads nil for a block that does not parse as well as for an absent one, so
+// it is for a caller that has a fallback: gt spec lint falls back to the
+// operator's default template. The tick reads through readSpecDispatchConfig.
 func loadSpecDispatchConfig(townRoot string) *config.SpecDispatchConfig {
 	if townRoot == "" {
 		return nil
@@ -1147,6 +1152,26 @@ func loadSpecDispatchConfig(townRoot string) *config.SpecDispatchConfig {
 		return pc.Patrols.SpecDispatch
 	}
 	return nil
+}
+
+// readSpecDispatchConfig is the tick's read of patrols.spec_dispatch, telling
+// an absent block (nil, nil) from one that does not parse (nil, err). The tick
+// reads the seat keys through it on every run, so a change to the second seat
+// lands at the next tick with no restart (gt-jdnab); the read error is what
+// stops a tick whose block does not parse, rather than dispatching on a picture
+// that silently lost the seat.
+func readSpecDispatchConfig(townRoot string) (*config.SpecDispatchConfig, error) {
+	if townRoot == "" {
+		return nil, nil
+	}
+	pc, err := daemon.ReadPatrolConfig(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	if pc == nil || pc.Patrols == nil {
+		return nil, nil
+	}
+	return pc.Patrols.SpecDispatch, nil
 }
 
 // specTemplatePath is the one resolver for the spec template path: the
@@ -1168,7 +1193,14 @@ func runSpecDispatch(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("loading town settings: %w", err)
 	}
-	sd := loadSpecDispatchConfig(townRoot)
+	// Both seat blocks are read here, on every tick: a seat the operator
+	// changed is the seat the next tick runs with, and a block that does not
+	// parse stops the tick instead of dropping a seat without a word
+	// (gt-jdnab).
+	sd, err := readSpecDispatchConfig(townRoot)
+	if err != nil {
+		return fmt.Errorf("reading the seat settings: %w", err)
+	}
 	tmplPath := specTemplatePath(sd)
 	perTick := defaultSpecMaxPerTick
 	if sd != nil && sd.MaxPerTick > 0 {

@@ -349,15 +349,19 @@ func TestPoolSetChangesThePoolSeatCap(t *testing.T) {
 	}
 }
 
-func TestPoolSetChangesTheSecondSeatCapAndSaysToKickstart(t *testing.T) {
+func TestPoolSetChangesTheSecondSeatCapAndSaysWhenItLands(t *testing.T) {
 	t.Parallel()
 	root := poolTestTown(t, poolTestSettings, poolTestDaemon)
 	out := poolTestSet(t, root, "claude-sonnet", 4)
 	if got := poolTestBudget(t, root)["claude-sonnet"]; got != 4 {
 		t.Errorf("second seat cap = %d, want 4", got)
 	}
-	if !strings.Contains(out, "read at daemon start") || !strings.Contains(out, "kickstart") {
-		t.Errorf("a second seat change did not say a kickstart is needed:\n%s", out)
+	// The second seat is the one that used to say it needed a daemon
+	// kickstart. It is read on every tick like the others, so the write lands
+	// at the next tick and the output must not send the operator to restart
+	// the daemon (gt-jdnab).
+	if !strings.Contains(out, "next tick") || strings.Contains(out, "kickstart") || strings.Contains(out, "daemon start") {
+		t.Errorf("a second seat change should say it lands at the next tick and need no restart:\n%s", out)
 	}
 }
 

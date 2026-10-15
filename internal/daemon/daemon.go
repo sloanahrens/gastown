@@ -374,6 +374,14 @@ type Daemon struct {
 	specDispatchCycles  sync.WaitGroup
 	specDispatchHold    dispatch.HoldLatch
 
+	// specSeats is the seat settings the ticker read on the last tick, cached
+	// by the mtime of the files they came from, and specSeatHold remembers the
+	// read error it last saw, so a seat change is announced once and a file
+	// that does not parse parks the ticker with one line per distinct error
+	// (spec_seats.go, gt-jdnab).
+	specSeats    specSeatTracker
+	specSeatHold dispatch.HoldLatch
+
 	// dispatchTicks is the spec_dispatch ticker's recent tick decisions,
 	// oldest first, which townhealth's dispatch field judges to tell a
 	// dispatcher that is off from one that is stalled (gt-xiw7o).

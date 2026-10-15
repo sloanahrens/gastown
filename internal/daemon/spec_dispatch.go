@@ -86,8 +86,8 @@ type specDispatchTickReport struct {
 }
 
 // triggerSpecDispatch starts one tick on its own goroutine unless one is
-// already running or the town's automatic dispatch is parked. It reports
-// whether a tick started.
+// already running, the town's automatic dispatch is parked, or the seat
+// settings cannot be read. It reports whether a tick started.
 //
 // A parked town starts no tick (gt-y6ovz): the tick would return the hold
 // report without deciding anything, and its single-flight flag is one of
@@ -106,6 +106,11 @@ func (d *Daemon) triggerSpecDispatch() bool {
 	if d.specDispatchHold.Changed("") {
 		d.logger.Printf("spec_dispatch: operator dispatch hold lifted; ticker resuming")
 	}
+	// The seats are read here rather than at startup for the same reason the
+	// tick reads them: an edit to the mix lands at the next tick (gt-jdnab).
+	if !d.specSeatsReady() {
+		return false
+	}
 	if !d.specDispatchRunning.CompareAndSwap(false, true) {
 		d.logger.Printf("spec_dispatch: previous tick still running, skipping")
 		return false
@@ -116,6 +121,32 @@ func (d *Daemon) triggerSpecDispatch() bool {
 		defer d.specDispatchRunning.Store(false)
 		d.runSpecDispatch()
 	}()
+	return true
+}
+
+// specSeatsReady reads the seat settings the next tick will run with and
+// reports whether the ticker may tick (gt-jdnab). The seat picture is announced
+// when it differs from the one the last tick read, so an operator who edits the
+// mix sees the ticker take it up instead of restarting the daemon to force it.
+// A file that does not parse parks the ticker with one line per distinct error:
+// the seats in force stay the ones the last good read named, and no tick runs
+// on a half-read picture.
+func (d *Daemon) specSeatsReady() bool {
+	if d.config == nil || d.config.TownRoot == "" {
+		return true
+	}
+	picture, err := d.specSeats.read(d.config.TownRoot)
+	if err != nil {
+		reason := "seat settings unreadable: " + err.Error()
+		if d.specSeatHold.Changed(reason) {
+			d.logger.Printf("spec_dispatch: not ticking: %s", reason)
+		}
+		return false
+	}
+	if d.specSeatHold.Changed("") {
+		d.logger.Printf("spec_dispatch: seat settings readable again; ticker resuming")
+	}
+	d.specSeats.announce(d.logger, picture)
 	return true
 }
 
