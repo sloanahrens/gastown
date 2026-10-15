@@ -36,7 +36,7 @@ func poolTestShow(t *testing.T, root string) string {
 	return out.String()
 }
 
-func TestPoolSetSecondWritesAgentAndCapAndSaysToKickstart(t *testing.T) {
+func TestPoolSetSecondWritesAgentAndCapAndSaysWhenItLands(t *testing.T) {
 	t.Parallel()
 	root := poolTestTown(t, poolSecondSettings, poolTestDaemon)
 	out, err := poolTestSetSecond(root, "deepseek-flash", 2)
@@ -56,9 +56,12 @@ func TestPoolSetSecondWritesAgentAndCapAndSaysToKickstart(t *testing.T) {
 	if got := poolTestBudget(t, root); got["deepseek-flash"] != 2 || got["claude-sonnet"] != 2 {
 		t.Errorf("dispatcher seats = %v, want claude-sonnet 2 and deepseek-flash 2", got)
 	}
-	if !strings.Contains(out, "second seat: deepseek-flash cap 2") ||
-		!strings.Contains(out, "read at daemon start") || !strings.Contains(out, "kickstart") {
-		t.Errorf("output lacks the change or the kickstart note:\n%s", out)
+	// The write lands at the next tick and asks for no restart (gt-jdnab).
+	if !strings.Contains(out, "second seat: deepseek-flash cap 2") || !strings.Contains(out, "next tick") {
+		t.Errorf("output lacks the change or when it lands:\n%s", out)
+	}
+	if strings.Contains(out, "kickstart") || strings.Contains(out, "daemon start") {
+		t.Errorf("the write still asks for a daemon kickstart:\n%s", out)
 	}
 }
 

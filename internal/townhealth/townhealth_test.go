@@ -858,6 +858,24 @@ func TestDispatch(t *testing.T) {
 			ago(time.Hour), Unknown, VerdictUnknown, "?", "could not read", "dispatch[?]",
 		},
 		{
+			// A parked ticker records no tick, so without the reason the field
+			// reads the same as a dispatcher that stopped ticking by inaction
+			// (gt-jdnab).
+			"a parked dispatcher names what stopped it instead of reading as silent",
+			DispatchRecord{Active: true, Parked: "the seat settings could not be read: daemon.json: unexpected end of JSON input"},
+			ago(30 * time.Minute), Recorded, Red, "parked", "daemon.json", "dispatch=parked[R]",
+		},
+		{
+			"a parked dispatcher is parked with ticks already in the window",
+			DispatchRecord{Active: true, Parked: "the seat settings could not be read: x", Ticks: []DispatchTick{idle}},
+			ago(time.Hour), Recorded, Red, "parked", "could not be read", "dispatch=parked[R]",
+		},
+		{
+			"parked does not outrank off: a dispatcher the operator turned off is off",
+			DispatchRecord{Parked: "the seat settings could not be read: x"},
+			ago(time.Hour), Recorded, Red, "off", "spec_dispatch is off", "dispatch=off[R]",
+		},
+		{
 			"a working dispatcher holding beads out of the queue is degraded, not green",
 			DispatchRecord{Active: true, Ticks: []DispatchTick{{At: ago(2 * time.Minute), Candidates: 3, Seats: []DispatchSeat{{Live: 1, Cap: 2}}, Dispatched: 1, LabeledFailed: 2}}},
 			ago(time.Hour), Recorded, Degraded, "ok (2 failed)", "labeled spec-dispatch-failed", "dispatch=ok_(2_failed)[R]",

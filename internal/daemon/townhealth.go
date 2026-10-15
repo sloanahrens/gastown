@@ -151,8 +151,9 @@ func (s *healthSources) daemonStarted() time.Time {
 }
 
 // Dispatch answers townhealth's dispatcher field: the spec_dispatch patrol
-// switch, the operator hold that parks every automatic dispatcher, and the
-// ticks the ticker recorded (gt-xiw7o).
+// switch, the operator hold that parks every automatic dispatcher, the seat
+// settings that park this one alone, and the ticks the ticker recorded
+// (gt-xiw7o, gt-jdnab).
 func (s *healthSources) Dispatch() (townhealth.DispatchRecord, error) {
 	if s.dispatch != nil {
 		return s.dispatch()
@@ -161,6 +162,9 @@ func (s *healthSources) Dispatch() (townhealth.DispatchRecord, error) {
 	if s.d.config != nil {
 		rec.Hold = dispatch.OperatorHold(s.d.config.TownRoot)
 	}
+	// A parked ticker records no tick, so the field would otherwise read it
+	// as a dispatcher gone silent (spec_seats.go, gt-jdnab).
+	rec.Parked = s.d.specSeats.parked()
 	rec.Ticks = s.d.dispatchTickRecords()
 	return rec, nil
 }

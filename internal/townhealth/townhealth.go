@@ -541,11 +541,16 @@ func (t DispatchTick) declined() bool {
 }
 
 // DispatchRecord is the automatic dispatcher as it stands: the patrol switch,
-// the operator's hold reason, and the ticks it has run recently, oldest
-// first.
+// the operator's hold reason, the seat settings that stop it ticking, and the
+// ticks it has run recently, oldest first.
 type DispatchRecord struct {
 	Active bool
 	Hold   string
+	// Parked names why the dispatcher is not ticking at all — the seat
+	// settings it reads every tick could not be read — and is empty while
+	// reads work. A parked ticker runs no tick to record, so without this
+	// the field reads it as a dispatcher that went silent (gt-jdnab).
+	Parked string
 	Ticks  []DispatchTick
 }
 
@@ -1226,6 +1231,9 @@ func dispatchField(in Inputs, rec DispatchRecord, ticks []DispatchTick, win time
 	}
 	if !rec.Active {
 		return Field{Name: FieldDispatch, Tag: Recorded, Verdict: Red, Value: "off", Detail: "spec_dispatch is off"}
+	}
+	if rec.Parked != "" {
+		return Field{Name: FieldDispatch, Tag: Recorded, Verdict: Red, Value: "parked", Detail: rec.Parked}
 	}
 	if len(ticks) == 0 {
 		if in.DaemonStarted.IsZero() {

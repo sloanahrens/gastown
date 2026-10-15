@@ -199,8 +199,7 @@ seat by removing its keys, where a hand-written `max_seats: 0` would mean
 uncapped to sling and the default cap here. `gt pool set-total <n>` sets the
 total the same way, 0 removing it. `gt pool set-second <agent> <n>` sets the
 `hooked_agent` seat's agent and cap in one write, which `gt pool set` cannot: it
-takes only an agent a seat already holds. The `hooked_agent` seat is read at
-daemon start, so a change to it needs a daemon kickstart. The dispatcher keeps one
+takes only an agent a seat already holds. The dispatcher keeps one
 seat per agent: a second seat on the pool's agent never runs, and `gt pool show`
 prints it as `not run`.
 
@@ -209,6 +208,16 @@ writes the seats above together with `polecat_pool.max_total` and
 `role_agents.polecat`, and refuses a mix that leaves an agent the town has pinned
 work for — a `scheduled_slings` entry's agent, a bead's `agent:<name>` label —
 without a seat.
+
+Every seat key is read on every tick, the `hooked_agent` seat's block included,
+so a seat added, moved or closed applies at the next tick: no daemon restart and
+no kickstart, which cut the tick then in flight the last time one was run
+(gt-jdnab). The daemon logs `spec_dispatch: seats now ...` on the tick that reads
+a mix different from the last one, and a seat file that does not parse parks the
+ticker with one line per distinct error, leaving the seats in force the ones the
+last good read named rather than ticking with a seat silently dropped. The
+patrol's `enabled` key is still read at daemon start, so turning the ticker off
+and on again is the one key here that needs a restart.
 
 Occupancy is every live polecat session, the seats whose session is gone while
 their work is still assigned (a crashed polecat waiting for its supervised
@@ -264,7 +273,10 @@ window with the ticker on and no tick landed in it, so a town with no working
 dispatcher says so from the one signal an operator reads. A tick that
 refused, replanned or skipped its candidates was working, not stalled. A tick
 whose roster the daemon cannot read is `dispatch[?]`: an unreadable roster is
-not a full town (gt-xiw7o).
+not a full town (gt-xiw7o). A seat file that does not parse parks the ticker
+outright, and it reads `dispatch=parked[R]` with the read error as its detail:
+the ticker runs no tick while parked, so without the reason it would look
+silent (gt-jdnab).
 
 The field counts the ready beads carrying `spec-dispatch-failed` as well, so a
 bead a failed dispatch left out of the queue is visible even while the

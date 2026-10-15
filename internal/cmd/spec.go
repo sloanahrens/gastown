@@ -201,8 +201,10 @@ Budget comes from polecat_pool in settings/config.json (agent, max_seats,
 min_spawn_gap, pro_agent, pro_max, pro_label) and daemon.patrols.spec_dispatch
 in settings/config.json (hooked_agent, max_hooked, prefer_hooked, max_per_tick).
 A town that has not run gt config migrate still keeps that patrol block in
-mayor/daemon.json.
-The operator hold file and ESTOP stop the tick.`,
+mayor/daemon.json. Both blocks are read on every tick, so a seat added, moved or
+closed applies at the next tick — no daemon restart. A block that does not parse
+stops the tick: it dispatches nothing until a read works, rather than run with
+the seat the bad block dropped. The operator hold file and ESTOP stop the tick.`,
 	Args:         cobra.NoArgs,
 	SilenceUsage: true,
 	RunE:         runSpecDispatch,
@@ -1139,6 +1141,9 @@ func specRosterFrom(sessions []poolSession, ts *config.TownSettings) specRoster 
 }
 
 // loadSpecDispatchConfig returns daemon.json's patrols.spec_dispatch, or nil.
+// It reads nil for a block that does not parse as well as for an absent one, so
+// it is for a caller that has a fallback: gt spec lint falls back to the
+// operator's default template. The tick reads through readSpecDispatchConfig.
 func loadSpecDispatchConfig(townRoot string) *config.SpecDispatchConfig {
 	if townRoot == "" {
 		return nil
@@ -1147,6 +1152,41 @@ func loadSpecDispatchConfig(townRoot string) *config.SpecDispatchConfig {
 		return pc.Patrols.SpecDispatch
 	}
 	return nil
+}
+
+// readSpecDispatchConfig is the tick's read of patrols.spec_dispatch, telling
+// an absent block (nil, nil) from one that does not parse (nil, err): the tick
+// stops on a block it cannot read rather than run on a picture that silently
+// lost the second seat (gt-jdnab).
+func readSpecDispatchConfig(townRoot string) (*config.SpecDispatchConfig, error) {
+	if townRoot == "" {
+		return nil, nil
+	}
+	pc, err := daemon.ReadPatrolConfig(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	if pc == nil || pc.Patrols == nil {
+		return nil, nil
+	}
+	return pc.Patrols.SpecDispatch, nil
+}
+
+// specTickTown reads the two files a tick runs on: the town settings that hold
+// the pool seat and the patrol block that holds the second one. Both are read
+// per tick, so a seat the operator changed is the seat the next tick runs with
+// (gt-jdnab); a patrol block that does not parse is an error rather than an
+// absent one, which is what stops the tick.
+func specTickTown(townRoot string) (*config.TownSettings, *config.SpecDispatchConfig, error) {
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading town settings: %w", err)
+	}
+	sd, err := readSpecDispatchConfig(townRoot)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading the seat settings: %w", err)
+	}
+	return ts, sd, nil
 }
 
 // specTemplatePath is the one resolver for the spec template path: the
@@ -1164,11 +1204,31 @@ func runSpecDispatch(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
+	report, err := runSpecDispatchAt(townRoot)
 	if err != nil {
-		return fmt.Errorf("loading town settings: %w", err)
+		return err
 	}
-	sd := loadSpecDispatchConfig(townRoot)
+	if specDispatchJSON {
+		out, err := json.MarshalIndent(report, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), string(out))
+		return nil
+	}
+	printSpecDispatchReport(cmd, report)
+	return nil
+}
+
+// runSpecDispatchAt runs one tick of the spec dispatcher over the town rooted
+// at townRoot, reporting what it decided (specDispatchEnv). It is the tick
+// itself, with the town resolution and the output left to runSpecDispatch, so
+// the tick a seat file stops is the tick a test can run.
+func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
+	ts, sd, err := specTickTown(townRoot)
+	if err != nil {
+		return specDispatchReport{}, err
+	}
 	tmplPath := specTemplatePath(sd)
 	perTick := defaultSpecMaxPerTick
 	if sd != nil && sd.MaxPerTick > 0 {
@@ -1224,18 +1284,7 @@ func runSpecDispatch(cmd *cobra.Command, _ []string) error {
 		MaxPriority: maxPriority,
 		ShapeGate:   ts.PolecatPool.GetShapeGate(),
 	}
-	report := runSpecDispatchCycle(env)
-
-	if specDispatchJSON {
-		out, err := json.MarshalIndent(report, "", "  ")
-		if err != nil {
-			return err
-		}
-		fmt.Fprintln(cmd.OutOrStdout(), string(out))
-		return nil
-	}
-	printSpecDispatchReport(cmd, report)
-	return nil
+	return runSpecDispatchCycle(env), nil
 }
 
 func printSpecDispatchReport(cmd *cobra.Command, r specDispatchReport) {
