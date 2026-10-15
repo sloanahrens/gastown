@@ -27,7 +27,11 @@ const CrewOnlyLabel = "crew-only"
 // (dispatch.DispatchHoldFields). A hold this list does not name — the operator
 // label, gt:needs-human, a ruling in prose — still stops the dispatcher there,
 // and every label it does name Eligible would have refused anyway (gt-lxxo4).
-var excludedLabels = []string{"gt:ready-to-land", "needs-human", DispatchFailedLabel, CrewOnlyLabel}
+//
+// dispatch.HumanOnlyLabel is named here for the skip line rather than for the
+// verdict: the shared rule holds it already, and a name in this list is what
+// makes the refusal a board-carried line the tick prints (gt-me800).
+var excludedLabels = []string{"gt:ready-to-land", "needs-human", DispatchFailedLabel, CrewOnlyLabel, dispatch.HumanOnlyLabel}
 
 // ExcludedLabels returns the labels that keep a bead from the dispatcher.
 func ExcludedLabels() []string { return append([]string(nil), excludedLabels...) }
@@ -37,7 +41,7 @@ func ExcludedLabels() []string { return append([]string(nil), excludedLabels...)
 // cannot report a bead the board never fetched: these are the labels whose
 // refusal the operator reads in the tick log, the rest is a silent pre-filter
 // (gt-q6zoo, gt-k1g3e). Every one of them is still refused by Eligible.
-var boardCarriedLabels = []string{DispatchFailedLabel, CrewOnlyLabel}
+var boardCarriedLabels = []string{DispatchFailedLabel, CrewOnlyLabel, dispatch.HumanOnlyLabel}
 
 // BoardCarriedLabels returns the excluded labels whose beads the ready board
 // must still carry. Before adding one, check that the tick reports it: a

@@ -13,7 +13,7 @@ which automatic path reads which marker.
 | `deferred`, `pinned` | status |
 | `operator` | label |
 | a person's handle (`sloan`, `Sloan Ahrens`, `overseer`) | assignee |
-| `needs-pro`, `gt:needs-human` (or `needs-human`), `needs-split` | label |
+| `needs-pro`, `gt:needs-human` (or `needs-human`), `needs-split`, `human-only` | label |
 | `do not redispatch` | design or notes |
 
 The markers are machine-read, so write one exactly as listed. A label matches

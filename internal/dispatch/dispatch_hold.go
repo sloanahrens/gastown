@@ -15,6 +15,12 @@ import (
 // paths that read it. dispatchHoldLabels, dispatchHoldStatuses and
 // dispatchHoldProse below are that vocabulary.
 
+// HumanOnlyLabel marks a bead only a person can land: a crew member claims it
+// and runs gt done, but the branch comes from the human (a rig's pre-receive
+// hook admits no other author), so a polecat slung onto one can only waste a
+// seat (gt-me800).
+const HumanOnlyLabel = "human-only"
+
 // routingHoldLabels and humanHoldLabels are the two kinds of decision
 // dispatchHoldLabels records, kept apart because a reader that has already
 // routed the bead reads only the second one.
@@ -26,18 +32,18 @@ import (
 // these rather than refuse the bead for wearing its own seat's selector
 // (SlingHoldFields).
 //
-// humanHoldLabels are the landings the worker left for a person (om gave no
-// verdict, a stage timed out, a policy refusal, or land.MaxReworkAttempts
-// rejections): unlike rework, no polecat can settle one (gt-hpca9, gt-28ibg).
-// needs-split is the same kind of hold: a polecat was stopped on the bead for
-// running past its time, and the bead is cut smaller before anyone takes it
-// again (polecat.HandBack). No seat claims them, so they hold wherever they
-// are read.
+// humanHoldLabels are the holds no polecat can settle, however the bead came
+// to wear one: the landings the worker left for a person (om gave no verdict,
+// a stage timed out, a policy refusal, or land.MaxReworkAttempts rejections;
+// gt-hpca9, gt-28ibg), the hand-applied needs-split — a polecat stopped on the
+// bead for running past its time, and the bead is cut smaller before anyone
+// takes it again (polecat.HandBack) — and HumanOnlyLabel. No seat claims them,
+// so they hold wherever they are read.
 //
 // Both are matched case-insensitively, since a label is typed by hand.
 var (
 	routingHoldLabels = []string{"needs-pro"}
-	humanHoldLabels   = []string{"gt:needs-human", "needs-human", "needs-split"}
+	humanHoldLabels   = []string{"gt:needs-human", "needs-human", "needs-split", HumanOnlyLabel}
 	// dispatchHoldLabels is the two lists in the order the rule reports them.
 	// The operator reservation (OperatorReservation) is the third decision a
 	// label records, and the one that also reaches through the assignee; it is
