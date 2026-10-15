@@ -339,6 +339,9 @@ func (d *Daemon) attentionTick(ctx context.Context, src *attentionSources, prev 
 	res := attention.Reconcile(prev, observed, acks, now)
 	beats, promoted := diskWarnPromotion(res.State, src.diskWarnBeats, now)
 	res.Events = append(res.Events, promoted...)
+	var riskPromoted []attention.Event
+	res.State, riskPromoted = attention.RiskPathPromotion(res.State, now)
+	res.Events = append(res.Events, riskPromoted...)
 	repeatedAt, repeats := attention.Repeats(res.State, res.Events, src.repeatedAt, now)
 	res.Events = append(res.Events, repeats...)
 	if err := attention.AppendEvents(d.config.TownRoot, res.Events); err != nil {
@@ -1237,6 +1240,7 @@ func (s *attentionSources) collectRiskPaths(ctx context.Context) ([]attention.It
 				Rig:      rig,
 				Bead:     rec.BeadID,
 				SHA:      rec.Head,
+				LandedAt: rec.LandedAt,
 				Summary:  fmt.Sprintf("%s landed %s touching %s; overseer review wanted", rec.BeadID, sha12(rec.Head), riskPathList(rec.RiskPaths)),
 			})
 		}

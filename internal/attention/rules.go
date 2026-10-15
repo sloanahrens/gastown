@@ -1,6 +1,9 @@
 package attention
 
-import "sort"
+import (
+	"sort"
+	"time"
+)
 
 // Handled says who deals with a transition, so a reader can tell a line that
 // wants a decision from one that is only a record.
@@ -102,7 +105,10 @@ var ruleFlags = map[string]RuleFlags{
 	// back. It needs an operator only if it repeats, which rejected_twice
 	// catches.
 	RuleRevertRefused: flagsAsk,
-	// A post-landing review is queued onto the work bead for the deep review.
+	// A post-landing review is queued onto the work bead for the deep review,
+	// which writes the review note itself after a green sweep. The rule is
+	// info; an item still unreviewed RiskPathPromoteAfter after its landing
+	// is promoted to operator_action by RiskPathPromotion.
 	RuleRiskPath: flagsInfo,
 	// host.disk_warn becomes operator_action after DiskWarnPromoteBeats
 	// consecutive heartbeats; the daemon writes that promotion as its own line.
@@ -115,6 +121,12 @@ var ruleFlags = map[string]RuleFlags{
 // DiskWarnPromoteBeats is how many consecutive heartbeats host.disk_warn must
 // hold before it becomes an operator_action that wakes.
 const DiskWarnPromoteBeats = 3
+
+// RiskPathPromoteAfter is how long after its landing a risk-path item may stay
+// unreviewed before it becomes an operator_action that wakes. A red sweep
+// gates the deep review off, so without this an unreviewed landing would stay
+// info for good.
+const RiskPathPromoteAfter = 3 * time.Hour
 
 // Flags returns the flags of rule, and whether the table has a row for it. An
 // unknown rule reads as info and no wake, as a line written before the fields

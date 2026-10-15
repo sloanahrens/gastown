@@ -1,11 +1,14 @@
 package daemon
 
 import (
+	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // Every collector the daemon registers raises a kind that has a rule row in the
@@ -60,6 +63,68 @@ func TestAttentionTickEventsCarryRuleFlags(t *testing.T) {
 	probe := byKey[hostProbeFailedPrefix+hostProbeDocker]
 	if probe.Rule != attention.RuleHostProbe || probe.Handled != attention.HandledInfo || probe.Wake {
 		t.Errorf("probe event = %+v, want info and no wake", probe)
+	}
+}
+
+// A risk-path item is info until its landing is three hours old, then raises
+// one operator_action wake line, once, aged from the landing record: a daemon
+// restart (tick reads state.json back) neither delays nor repeats it, and the
+// review note clears the item.
+func TestAttentionRiskPathPromotesThreeHoursAfterLanding(t *testing.T) {
+	t.Parallel()
+	landed := time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC)
+	// The item is first raised long after the landing was recorded, so the
+	// age cannot be counted from first_seen.
+	first := landed.Add(2 * time.Hour)
+	f := newAttentionFixture(t, first)
+	head := strings.Repeat("c", 40)
+	f.src.riskLandings = func(string, time.Time) ([]land.LandingRecord, error) {
+		return []land.LandingRecord{{BeadID: "gt-abc", Head: head, RiskPaths: []string{"internal/land/land.go"}, LandedAt: landed}}, nil
+	}
+	notes := ""
+	f.src.riskNotes = func(context.Context, string, string) (string, error) { return notes, nil }
+
+	wakes := func() []attention.Event {
+		var out []attention.Event
+		for _, e := range f.events(t) {
+			if e.Wake {
+				out = append(out, e)
+			}
+		}
+		return out
+	}
+
+	f.tick(t, first)
+	f.tick(t, landed.Add(attention.RiskPathPromoteAfter-time.Second))
+	evs := f.events(t)
+	if len(evs) != 1 || evs[0].Rule != attention.RuleRiskPath || evs[0].Handled != attention.HandledInfo || evs[0].Wake {
+		t.Fatalf("under three hours events = %+v, want the one info line", evs)
+	}
+
+	over := landed.Add(attention.RiskPathPromoteAfter + time.Second)
+	f.tick(t, over)
+	got := wakes()
+	if len(got) != 1 {
+		t.Fatalf("over three hours wake events = %+v, want one", got)
+	}
+	if got[0].Rule != attention.RuleRiskPath || got[0].Handled != attention.HandledOperatorAction || got[0].State != attention.EventNew || got[0].Key != "risk:gt-abc:"+head[:12] {
+		t.Errorf("promotion = %+v", got[0])
+	}
+
+	f.tick(t, over.Add(time.Minute))
+	f.tick(t, over.Add(2*time.Minute))
+	if n := len(wakes()); n != 1 {
+		t.Errorf("wake events after more ticks = %d, want the promotion once", n)
+	}
+
+	notes = land.OverseerReviewMarker + " " + head + " PASS"
+	st := f.tick(t, over.Add(3*time.Minute))
+	if _, ok := attention.Find(st, "risk:gt-abc:"+head[:12]); ok {
+		t.Errorf("state = %+v, want the reviewed item cleared", st.Items)
+	}
+	last := f.events(t)[len(f.events(t))-1]
+	if last.State != attention.EventCleared || last.Wake {
+		t.Errorf("last event = %+v, want a cleared line that does not wake", last)
 	}
 }
 

@@ -1,6 +1,7 @@
 package attention
 
 import (
+	"fmt"
 	"sort"
 	"time"
 )
@@ -48,6 +49,7 @@ func Reconcile(prev State, observed []Item, acks Acks, now time.Time) Result {
 		it := o
 		if p, ok := prevByKey[o.Key]; ok {
 			it.FirstSeen = p.FirstSeen
+			it.PromotedAt = p.PromotedAt
 		} else {
 			it.FirstSeen = now
 			events = append(events, transition(it, EventNew, now))
@@ -81,6 +83,48 @@ func Reconcile(prev State, observed []Item, acks Acks, now time.Time) Result {
 		Acks:   kept,
 		Events: events,
 	}
+}
+
+// RiskPathPromotion promotes each risk-path item whose landing is
+// RiskPathPromoteAfter old or older and that has not been promoted: it returns
+// the state with PromotedAt set on those items and one more raised line per
+// item, with the operator_action, wake flags. The age is the landing's, read
+// from the item, so it holds across a daemon restart; PromotedAt is in the
+// state, so a promoted item is not promoted again, and it goes with the item
+// when the review note clears it. An acked item is left alone, as an ack hides
+// an item until it clears. It is pure: the input state is not modified.
+func RiskPathPromotion(state State, now time.Time) (State, []Event) {
+	var events []Event
+	items := state.Items
+	copied := false
+	for i, it := range items {
+		if RuleFor(it) != RuleRiskPath || it.LandedAt.IsZero() || it.PromotedAt != nil || it.AckedAt != nil {
+			continue
+		}
+		age := now.Sub(it.LandedAt)
+		if age < RiskPathPromoteAfter {
+			continue
+		}
+		if !copied {
+			items = append([]Item(nil), items...)
+			copied = true
+		}
+		promotedAt := now
+		items[i].PromotedAt = &promotedAt
+		events = append(events, Event{
+			TS:       now,
+			Class:    it.Kind,
+			Severity: it.Severity,
+			Text:     fmt.Sprintf("%s (unreviewed %s after landing)", it.Summary, age.Truncate(time.Minute)),
+			Key:      it.Key,
+			State:    EventNew,
+			Rule:     RuleRiskPath,
+			Handled:  HandledOperatorAction,
+			Wake:     true,
+		})
+	}
+	state.Items = items
+	return state, events
 }
 
 // transition renders one item's transition to an events.jsonl line.

@@ -126,6 +126,13 @@ type Item struct {
 	// AckedAt is set when a human acknowledged the item. An ack hides the
 	// item until it clears; the item itself stays in the state.
 	AckedAt *time.Time `json:"acked_at,omitempty"`
+	// LandedAt is when the landing the item is about landed, for the items
+	// that have one. The risk-path promotion ages the item from it, so a
+	// daemon restart does not restart the clock.
+	LandedAt time.Time `json:"landed_at,omitzero"`
+	// PromotedAt is when the item was promoted to operator_action. It is in
+	// the state so a restart does not promote the same item twice.
+	PromotedAt *time.Time `json:"promoted_at,omitempty"`
 }
 
 // State is state.json: the current set, rewritten atomically each tick.

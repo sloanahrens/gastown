@@ -910,6 +910,9 @@ writes `acks.json`:
   table of each rule's flags is `ruleFlags` in `internal/attention/rules.go`;
   `host.disk_warn` is `info` until it holds for three consecutive heartbeats,
   then the daemon appends one `operator_action` wake line for it.
+  `landing.risk_path` is `info` until the landing is three hours old (the
+  record's `landed_at`, held in the item) with no review note; the daemon then
+  appends one `operator_action` wake line for it, once per item.
 - `acks.json` — the acknowledged keys, `{acks: [{key, at}]}`, written by `gt
   attention ack` under a flock. The daemon reads it and never writes it, so
   neither process races the other's file.
