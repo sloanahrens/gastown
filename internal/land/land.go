@@ -229,6 +229,11 @@ type Rejection struct {
 	// ReviewSummary and ReviewScore are om's, when om asked for changes.
 	ReviewSummary string
 	ReviewScore   float64
+	// ReviewVerdict is the verdict om reached, when the refusal came from one:
+	// request_changes for om's own refusal, approve for a landing the finding
+	// rules refused. A reader told request_changes beside the approve score of
+	// 0.90 would be told the opposite of what om said (gt-oi4je).
+	ReviewVerdict string
 	// Rework is false when only a human can lift the refusal (no_merge), and
 	// past MaxReworkAttempts whatever the kind was: the loop, not the refusal,
 	// is what the ceiling stops.
@@ -818,7 +823,7 @@ func findingsRejection(v Verdict) *Rejection {
 func minorFindings(findings []Finding) int {
 	n := 0
 	for _, f := range findings {
-		if strings.ToLower(strings.TrimSpace(f.Severity)) == "minor" {
+		if omSeverity(f.Severity) == omSeverityMinor {
 			n++
 		}
 	}
@@ -1661,6 +1666,7 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 		rej.Findings = verdict.Findings
 		rej.ReviewSummary = verdict.Summary
 		rej.ReviewScore = verdict.Score
+		rej.ReviewVerdict = verdict.Verdict
 		note.Findings = verdict.Findings
 		note.Receipt = &Receipt{Score: verdict.Score}
 	}

@@ -128,6 +128,21 @@ type Finding struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+// The severities a Finding's Severity carries, as the review reads them. A
+// severity outside this list blocks nothing and counts as nothing (gt-oi4je).
+const (
+	omSeverityCritical = "critical"
+	omSeverityMajor    = "major"
+	omSeverityMinor    = "minor"
+)
+
+// omSeverity is a finding's severity as every reader of it compares the field:
+// om pads it and shifts its case, and readers that disagreed about that would
+// disagree about which findings refuse a landing.
+func omSeverity(severity string) string {
+	return strings.ToLower(strings.TrimSpace(severity))
+}
+
 // Reviewer reviews the diff base..head in the tree at dir. An error means no
 // verdict exists; it is never read as approval.
 type Reviewer interface {

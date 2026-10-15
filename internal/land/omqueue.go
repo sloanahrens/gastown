@@ -147,10 +147,10 @@ const (
 // major is P2. A severity the review has no priority for is not one the queue
 // records.
 func omPriority(severity string) (string, bool) {
-	switch strings.ToLower(strings.TrimSpace(severity)) {
-	case "critical":
+	switch omSeverity(severity) {
+	case omSeverityCritical:
 		return omPriorityCritical, true
-	case "major":
+	case omSeverityMajor:
 		return omPriorityMajor, true
 	}
 	return "", false

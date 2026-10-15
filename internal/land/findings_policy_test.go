@@ -116,7 +116,7 @@ func TestFindingsRejection(t *testing.T) {
 	}
 }
 
-// reviewApprove installs a reviewer that answers every run with v.
+// approveLanding installs a reviewer that answers every run with v.
 func approveLanding(t *testing.T, f *landFixture, v Verdict) {
 	t.Helper()
 	f.review = &fakeReviewer{fn: func(string) (Verdict, error) { return v, nil }}

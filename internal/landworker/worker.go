@@ -850,7 +850,7 @@ func reworkMessage(rej *land.Rejection) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Landing rejected (%s): %s. Back to the polecat as rework: %s.", rej.Kind, land.NoteField(rej.Reason), ReworkComment)
 	if rej.Kind == land.RejectReview {
-		fmt.Fprintf(&b, "\n\nom verdict: request_changes, score %.2f", rej.ReviewScore)
+		fmt.Fprintf(&b, "\n\nom verdict: %s, score %.2f", reviewVerdictWord(rej.ReviewVerdict), rej.ReviewScore)
 		if s := strings.TrimSpace(rej.ReviewSummary); s != "" {
 			fmt.Fprintf(&b, "\n%s", s)
 		}
@@ -867,6 +867,16 @@ func reworkMessage(rej *land.Rejection) string {
 		fmt.Fprintf(&b, "\n- [%s] %s %s", land.NoteField(f.Severity), land.NoteField(loc), land.NoteField(f.Title))
 	}
 	return b.String()
+}
+
+// reviewVerdictWord is the verdict the rework comment names. A rejection
+// carrying none is om's own refusal, which is what every review rejection was
+// before the finding rules could refuse an approve om reached (gt-oi4je).
+func reviewVerdictWord(verdict string) string {
+	if verdict == "" {
+		return land.VerdictRequestChanges
+	}
+	return verdict
 }
 
 // infraFailure backs a bead off exponentially after a failure that says
