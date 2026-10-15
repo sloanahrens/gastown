@@ -1,4 +1,4 @@
-package cmd
+package report
 
 import (
 	"bytes"
@@ -20,6 +20,17 @@ import (
 	"github.com/steveyegge/gastown/internal/land"
 )
 
+// reportTestLoc is the zone the fixtures' daemon.log stamps are written in.
+var reportTestLoc = time.FixedZone("CDT", -5*3600)
+
+func at(s string) time.Time {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		panic(err)
+	}
+	return t
+}
+
 // reportWindowEnd is the fixed clock the report fixtures are built around:
 // 2026-10-02 13:52:05 CDT, so the window is 12:52:05–13:52:05 local.
 var reportWindowEnd = at("2026-10-02T13:52:05-05:00")
@@ -38,7 +49,7 @@ func (f *reportFakeStore) RejectedSince(time.Time) ([]*beads.Issue, error) {
 // reportNoWriteStore fails the test if gt report calls any write method. The
 // report is read-only: this is the assertion that keeps it so.
 type reportNoWriteStore struct {
-	reportStore
+	BeadStore
 	t *testing.T
 }
 
@@ -126,7 +137,7 @@ var reportReadOnlyClientMethods = map[string]bool{
 
 // TestReportNoWriteGuardCoversClient pins that the no-write guard still
 // observes every write on beads.Client. reportNoWriteStore embeds
-// reportStore, so a Client method it does not override is satisfied by the
+// BeadStore, so a Client method it does not override is satisfied by the
 // embedded store and a write through the guard goes unseen — which is how
 // DeleteIssues slipped past it when the method landed (gt-7iwy0.4.2). The
 // guard is read from this file's source rather than its Go method set, since
@@ -135,7 +146,7 @@ func TestReportNoWriteGuardCoversClient(t *testing.T) {
 	t.Parallel()
 	guarded := map[string]bool{}
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "report_test.go", nil, 0)
+	file, err := parser.ParseFile(fset, "hour_test.go", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,20 +200,20 @@ func reportTown(t *testing.T, files map[string]string) string {
 
 // reportRunFor builds a run over a fixture town with the fixed clock, a
 // fake store per store name, and a fixed mains reading.
-func reportRunFor(t *testing.T, townRoot string, store func(string) (reportStore, error)) (reportRun, *bytes.Buffer) {
+func reportRunFor(t *testing.T, townRoot string, store func(string) (BeadStore, error)) (HourRun, *bytes.Buffer) {
 	t.Helper()
 	out := &bytes.Buffer{}
-	return reportRun{
-		townRoot: townRoot,
-		loc:      tailTestLoc,
-		until:    reportWindowEnd,
-		out:      out,
-		version:  "1.2.1-dev",
-		commit:   "5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b",
-		rigs:     func() ([]string, error) { return []string{"gastown"}, nil },
-		store:    store,
-		mainTip: func(string) (reportMains, error) {
-			return reportMains{SHA: "138368fd7571c0ffee00", CommitsBehind: 3}, nil
+	return HourRun{
+		TownRoot: townRoot,
+		Loc:      reportTestLoc,
+		Until:    reportWindowEnd,
+		Out:      out,
+		Version:  "1.2.1-dev",
+		Commit:   "5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b5e6f7a8b",
+		Rigs:     func() ([]string, error) { return []string{"gastown"}, nil },
+		Store:    store,
+		MainTip: func(string) (Mains, error) {
+			return Mains{SHA: "138368fd7571c0ffee00", CommitsBehind: 3}, nil
 		},
 	}, out
 }
@@ -249,7 +260,7 @@ func reportGoldenTown(t *testing.T) string {
 }
 
 // reportGoldenStore seeds the beads the fixture town's sections read.
-func reportGoldenStore(t *testing.T) reportStore {
+func reportGoldenStore(t *testing.T) BeadStore {
 	t.Helper()
 	f := beadsfake.New()
 	f.Seed(
@@ -271,11 +282,11 @@ func reportGoldenStore(t *testing.T) reportStore {
 
 // reportGoldenStores serves the fixture beads for the rig store and nothing
 // for hq: the town store holds no escalations in this town.
-func reportGoldenStores(t *testing.T) func(string) (reportStore, error) {
+func reportGoldenStores(t *testing.T) func(string) (BeadStore, error) {
 	t.Helper()
 	rig := reportGoldenStore(t)
 	empty := &reportFakeStore{Fake: beadsfake.New()}
-	return func(store string) (reportStore, error) {
+	return func(store string) (BeadStore, error) {
 		if store == "hq" {
 			return empty, nil
 		}
@@ -287,7 +298,7 @@ func TestReportHourMatchesGolden(t *testing.T) {
 	t.Parallel()
 	townRoot := reportGoldenTown(t)
 	r, out := reportRunFor(t, townRoot, reportGoldenStores(t))
-	r.render(r.collect())
+	r.Render(r.Collect())
 
 	goldenPath := filepath.Join("testdata", "report_hour.txt")
 	want, err := os.ReadFile(goldenPath)
@@ -305,15 +316,15 @@ func TestReportHourIsReadOnly(t *testing.T) {
 	t.Parallel()
 	townRoot := reportGoldenTown(t)
 	stores := reportGoldenStores(t)
-	guard := func(store string) (reportStore, error) {
+	guard := func(store string) (BeadStore, error) {
 		s, err := stores(store)
 		if err != nil {
 			return nil, err
 		}
-		return reportNoWriteStore{reportStore: s, t: t}, nil
+		return reportNoWriteStore{BeadStore: s, t: t}, nil
 	}
 	r, _ := reportRunFor(t, townRoot, guard)
-	r.render(r.collect())
+	r.Render(r.Collect())
 }
 
 // TestReportHourWindowIsTimezoneAware pins the window's two ends in both
@@ -347,14 +358,14 @@ func TestReportHourWindowIsTimezoneAware(t *testing.T) {
 	)
 	// The town store holds none of it: everything lives in the rig store.
 	rig, empty := &reportFakeStore{Fake: f}, &reportFakeStore{Fake: beadsfake.New()}
-	stores := func(store string) (reportStore, error) {
+	stores := func(store string) (BeadStore, error) {
 		if store == "hq" {
 			return empty, nil
 		}
 		return rig, nil
 	}
 	r, _ := reportRunFor(t, townRoot, stores)
-	doc := r.collect()
+	doc := r.Collect()
 
 	var beads []string
 	for _, l := range doc.Landings {
@@ -373,7 +384,7 @@ func TestReportHourWindowIsTimezoneAware(t *testing.T) {
 // error.
 func TestReportHourSpendNeedsAFreshReading(t *testing.T) {
 	t.Parallel()
-	stores := func(string) (reportStore, error) { return &reportFakeStore{Fake: beadsfake.New()}, nil }
+	stores := func(string) (BeadStore, error) { return &reportFakeStore{Fake: beadsfake.New()}, nil }
 	cases := []struct {
 		name     string
 		spend    string
@@ -404,7 +415,7 @@ func TestReportHourSpendNeedsAFreshReading(t *testing.T) {
 				}
 			}
 			r, out := reportRunFor(t, townRoot, stores)
-			r.render(r.collect())
+			r.Render(r.Collect())
 			has := strings.Contains(out.String(), "DeepSeek")
 			if has != tc.shown {
 				t.Fatalf("spend shown = %v, want %v:\n%s", has, tc.shown, out)
@@ -424,9 +435,9 @@ func TestReportHourSpendNeedsAFreshReading(t *testing.T) {
 func TestReportHourUnavailableSections(t *testing.T) {
 	t.Parallel()
 	r, out := reportRunFor(t, reportTown(t, map[string]string{}),
-		func(string) (reportStore, error) { return nil, errors.New("bd is down") })
-	doc := r.collect()
-	r.render(doc)
+		func(string) (BeadStore, error) { return nil, errors.New("bd is down") })
+	doc := r.Collect()
+	r.Render(doc)
 
 	text := out.String()
 	for _, want := range []string{
@@ -450,12 +461,12 @@ func TestReportHourUnavailableSections(t *testing.T) {
 // that ref rather than passing itself off as the count against the tip.
 func TestReportHourMainsNamesTheRefItCountedAgainst(t *testing.T) {
 	t.Parallel()
-	stores := func(string) (reportStore, error) { return &reportFakeStore{Fake: beadsfake.New()}, nil }
+	stores := func(string) (BeadStore, error) { return &reportFakeStore{Fake: beadsfake.New()}, nil }
 	r, out := reportRunFor(t, reportTown(t, map[string]string{}), stores)
-	r.mainTip = func(string) (reportMains, error) {
-		return reportMains{SHA: "aa0a73eefad7", CommitsBehind: 12, BehindRef: "138368fd7571"}, nil
+	r.MainTip = func(string) (Mains, error) {
+		return Mains{SHA: "aa0a73eefad7", CommitsBehind: 12, BehindRef: "138368fd7571"}, nil
 	}
-	r.render(r.collect())
+	r.Render(r.Collect())
 	want := "origin/main aa0a73ee  installed gt 1.2.1-dev (5e6f7a8b)  12 commits behind (counted against origin/main at 138368fd: the remote tip is not fetched)"
 	if !strings.Contains(out.String(), want) {
 		t.Fatalf("mains row:\n%s\nwant %q", out, want)
@@ -508,7 +519,7 @@ func TestReportHourJSON(t *testing.T) {
 	t.Parallel()
 	townRoot := reportGoldenTown(t)
 	r, out := reportRunFor(t, townRoot, reportGoldenStores(t))
-	doc := r.collect()
+	doc := r.Collect()
 	if err := json.NewEncoder(out).Encode(doc); err != nil {
 		t.Fatal(err)
 	}

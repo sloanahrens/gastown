@@ -205,6 +205,33 @@ func TestDaemonPatrolConfigDecodesEventsPrune(t *testing.T) {
 	}
 }
 
+// overseer_report (gt-a6fg7) decodes strictly with its own fields, and a
+// config without it leaves the patrol unset, which the daemon reads as off.
+func TestDaemonPatrolConfigDecodesOverseerReport(t *testing.T) {
+	t.Parallel()
+	var cfg DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(`{"patrols":{"overseer_report":{"enabled":true,"interval":"15m"}}}`), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	want := OverseerReportConfig{Enabled: true, IntervalStr: "15m"}
+	if cfg.Patrols.OverseerReport == nil || *cfg.Patrols.OverseerReport != want {
+		t.Errorf("overseer_report = %+v, want %+v", cfg.Patrols.OverseerReport, want)
+	}
+
+	var absent DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(`{"patrols":{"handler":{"enabled":true}}}`), &absent); err != nil {
+		t.Fatalf("decode without overseer_report: %v", err)
+	}
+	if absent.Patrols.OverseerReport != nil {
+		t.Errorf("absent key decoded as %+v", absent.Patrols.OverseerReport)
+	}
+
+	var typo DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(`{"patrols":{"overseer_report":{"enabled":true,"intervall":"15m"}}}`), &typo); err == nil {
+		t.Error("an unknown overseer_report field decoded without error")
+	}
+}
+
 // TestForgejoTokenDir pins the landing worker's token-directory resolution
 // (gt-fn9e6.3): the configured directory wins, and an unconfigured worker
 // falls back to the host default. Tokens are never config values, so the only

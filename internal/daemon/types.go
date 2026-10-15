@@ -123,6 +123,7 @@ type (
 	OverrunGuardConfig         = agentconfig.OverrunGuardConfig
 	ScheduledMaintenanceConfig = agentconfig.ScheduledMaintenanceConfig
 	SpecDispatchConfig         = agentconfig.SpecDispatchConfig
+	OverseerReportConfig       = agentconfig.OverseerReportConfig
 	PatrolScanConfig           = agentconfig.PatrolScanConfig
 	RestartTrackerConfig       = agentconfig.RestartTrackerConfig
 	EventsPruneConfig          = agentconfig.EventsPruneConfig
@@ -292,6 +293,14 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.RebuildOM.Enabled
+	}
+	// overseer_report defaults OFF: the operator retires the overseer's cron
+	// prompt before the daemon takes the digest over (gt-a6fg7).
+	if patrol == "overseer_report" {
+		if config == nil || config.Patrols == nil || config.Patrols.OverseerReport == nil {
+			return false
+		}
+		return config.Patrols.OverseerReport.Enabled
 	}
 	// patrol_scan defaults OFF: it restarts polecats on its own, so the
 	// operator opts in (gt-4k3fj.6, ADR 0005).

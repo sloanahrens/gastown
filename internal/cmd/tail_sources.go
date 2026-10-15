@@ -3,7 +3,6 @@ package cmd
 import (
 	"bufio"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,11 +20,13 @@ import (
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/daemonlog"
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landings"
+	"github.com/steveyegge/gastown/internal/report"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/version"
 )
@@ -857,7 +858,7 @@ func tailDeploySummaryParts(f tailSummaryFields) []string {
 	}
 	waiting := fmt.Sprintf("waiting %d", f.Deploy.Waiting)
 	if f.Deploy.Waiting > 0 && f.Deploy.HasOldest {
-		waiting += " (oldest " + reportAge(f.Deploy.OldestWaiting) + ")"
+		waiting += " (oldest " + report.Age(f.Deploy.OldestWaiting) + ")"
 	}
 	return append(parts, waiting)
 }
@@ -1119,14 +1120,6 @@ func (r *tailRigs) bead(id string) string {
 	return "town"
 }
 
-// daemonLogStamp is log.LstdFlags as the daemon's logger writes it: local
-// time, no zone.
-const daemonLogStamp = "2006/01/02 15:04:05"
-
-// daemonBackupRe matches lumberjack's rotated daemon.log names; the stamp is
-// the rotation time in UTC, so a backup holds only lines older than it.
-var daemonBackupRe = regexp.MustCompile(`^daemon-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3})\.log(\.gz)?$`)
-
 // daemonSource tails ~/gt/daemon/daemon.log by byte offset. The first poll
 // also reads the rotated backups that can hold lines after the cutoff. A
 // line with no timestamp belongs to the previous timestamped line.
@@ -1151,7 +1144,7 @@ type daemonSource struct {
 	backupsRead bool
 	offset      int64
 	info        os.FileInfo
-	lastAt      time.Time
+	parser      *daemonlog.Parser
 	failed      tailOnce
 }
 
@@ -1197,8 +1190,8 @@ func (s *daemonSource) Poll() []tailLine {
 	}
 	if !s.backupsRead {
 		s.backupsRead = true
-		for _, b := range s.backups() {
-			if err := readDaemonBackup(b, emit); err != nil {
+		for _, b := range daemonlog.Backups(s.dir, s.cutoff) {
+			if err := daemonlog.ReadBackup(b, emit); err != nil {
 				out = append(out, s.line(now, "cannot read "+filepath.Base(b)+": "+err.Error()))
 			}
 		}
@@ -1221,74 +1214,10 @@ func (s *daemonSource) Poll() []tailLine {
 // parse splits a daemon.log line into its time and text. A line without the
 // stamp keeps its whole text and the previous line's time.
 func (s *daemonSource) parse(raw string) (time.Time, string) {
-	if len(raw) >= len(daemonLogStamp) {
-		if t, err := time.ParseInLocation(daemonLogStamp, raw[:len(daemonLogStamp)], s.loc); err == nil {
-			s.lastAt = t
-			return t, strings.TrimPrefix(raw[len(daemonLogStamp):], " ")
-		}
+	if s.parser == nil {
+		s.parser = &daemonlog.Parser{Loc: s.loc}
 	}
-	return s.lastAt, raw
-}
-
-// backups returns the rotated logs whose rotation time is at or after the
-// cutoff, oldest first.
-func (s *daemonSource) backups() []string {
-	entries, err := os.ReadDir(s.dir)
-	if err != nil {
-		return nil
-	}
-	type backup struct {
-		path string
-		at   time.Time
-	}
-	var bs []backup
-	for _, e := range entries {
-		m := daemonBackupRe.FindStringSubmatch(e.Name())
-		if m == nil {
-			continue
-		}
-		at, err := time.ParseInLocation("2006-01-02T15-04-05.000", m[1], time.UTC)
-		if err != nil || at.Before(s.cutoff) {
-			continue
-		}
-		bs = append(bs, backup{filepath.Join(s.dir, e.Name()), at})
-	}
-	sort.Slice(bs, func(i, j int) bool { return bs[i].at.Before(bs[j].at) })
-	paths := make([]string, len(bs))
-	for i, b := range bs {
-		paths[i] = b.path
-	}
-	return paths
-}
-
-func readDaemonBackup(path string, emit func(string)) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-	var r io.Reader = f
-	if strings.HasSuffix(path, ".gz") {
-		zr, err := gzip.NewReader(f)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = zr.Close() }()
-		r = zr
-	}
-	br := bufio.NewReader(r)
-	for {
-		line, err := br.ReadString('\n')
-		if line != "" {
-			emit(strings.TrimRight(line, "\r\n"))
-		}
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-	}
+	return s.parser.Parse(raw)
 }
 
 // readCurrent reads daemon.log's complete lines past the offset. A file that

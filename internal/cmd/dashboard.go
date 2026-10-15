@@ -24,6 +24,7 @@ import (
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/procutil"
+	"github.com/steveyegge/gastown/internal/report"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/townhealth"
 	"github.com/steveyegge/gastown/internal/townstatus"
@@ -207,7 +208,7 @@ func dashboardRegistryPath(townRoot string) string {
 // the latest.md copy it leaves for a human to read. The dashboard only reads
 // it; the tool is outside the repo.
 func dashboardReportsDir(townRoot string) string {
-	return filepath.Join(townRoot, ".runtime", "overseer", "reports")
+	return report.ReportsDir(townRoot)
 }
 
 // dashboardCloudChecksPath is where the devops rig's cloud-check plugin writes

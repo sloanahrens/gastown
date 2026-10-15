@@ -63,6 +63,7 @@ func specDispatchInterval(config *DaemonPatrolConfig) time.Duration {
 // Line is the sentence for the log, "<bead>: <reason>".
 type specDispatchTickEntry struct {
 	Bead string `json:"bead"`
+	Rig  string `json:"rig,omitempty"`
 	Line string `json:"line"`
 }
 
@@ -222,10 +223,13 @@ func dispatchRosterSeats(roster string) ([]townhealth.DispatchSeat, bool) {
 	return out, false
 }
 
-func (d *Daemon) runSpecDispatchCommand() ([]byte, error) {
+// runSpecDispatchCommand runs `gt spec dispatch --json` with extra flags; the
+// overseer report adds --dry-run to read the queue without slinging.
+func (d *Daemon) runSpecDispatchCommand(extra ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(d.ctx, specDispatchTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, d.gtPath, "spec", "dispatch", "--json") //nolint:gosec // G204: gtPath resolved at daemon init
+	args := append([]string{"spec", "dispatch", "--json"}, extra...)
+	cmd := exec.CommandContext(ctx, d.gtPath, args...) //nolint:gosec // G204: gtPath resolved at daemon init
 	cmd.Dir = d.config.TownRoot
 	cmd.Env = daemonGTEnv(os.Environ())
 	stdout, stderr, err := d.runCmd(cmd)
