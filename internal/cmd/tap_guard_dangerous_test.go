@@ -1358,6 +1358,15 @@ func TestDangerousGuard_Integration(t *testing.T) {
 		{"git clean --force", "git clean --force", true},
 		{"drop table", "DROP TABLE users", true},
 
+		// Blocked — the argv after gt slot run -- is exec'd, not text (gt-hqenc)
+		{"git reset --hard under gt slot run", "gt slot run --role gastown/nux -- git reset --hard origin/main", true},
+		{"git push --force under gt slot run", "gt slot run --role gastown/nux -- git push --force origin x", true},
+		{"git clean -fd under gt slot run", "gt slot run --role gastown/nux -- git clean -fd", true},
+		{"rm -rf / under gt slot run", "gt slot run --role gastown/nux -- rm -rf /", true},
+		{"env-prefixed rm -rf / under gt slot run", "gt slot run -- FOO=1 rm -rf /", true},
+		{"bash -c under gt slot run", "gt slot run -- bash -c 'git reset --hard'", true},
+		{"gt slot run after another command", "cd x && gt slot run -- git push --force origin x", true},
+
 		// Allowed
 		{"rm -rf ./build/", "rm -rf ./build/", false},
 		{"rm -rf /tmp/cache/", "rm -rf /tmp/cache/", false},
@@ -1370,29 +1379,20 @@ func TestDangerousGuard_Integration(t *testing.T) {
 		{"normal command", "ls -la", false},
 		{"drop and table in separate segments", "grep -n drop a.md; grep -n table b.md", false},
 		{"drop table behind a text-only command", "echo drop table users", false},
+		{"make test under gt slot run", "gt slot run -- make test", false},
+		{"gt slot run with a role flag", "gt slot run --role gastown/nux -- make test", false},
+		{"dangerous words in a quoted argument under gt slot run", "gt slot run -- git commit -m 'never git push --force'", false},
+		{"gt slot run named in text", "echo gt slot run -- git reset --hard", false},
+		{"gt slot run named in a gt mail argument", "gt mail send x -s note -m gt slot run -- git reset --hard", false},
 		{"git reset --hard behind a text-only command", "echo git reset --hard", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			lower := lowerTokens(tt.command)
-			blocked := false
-			if matchesSudo(lower) != "" {
-				blocked = true
-			} else if matchesPackageInstall(lower) != "" {
-				blocked = true
-			} else if matchesDangerousRmRf(lower) != "" {
-				blocked = true
-			} else if matchesDangerousGitPush(lower) != "" {
-				blocked = true
-			} else if r, _ := matchesDangerousGitReset(lower); r != "" {
-				blocked = true
-			} else if matchesGitClean(shellTokenize(tt.command)) != "" {
-				blocked = true
-			} else if matchesGitResetHard(shellTokenize(tt.command)) != "" {
-				blocked = true
-			} else if matchesDDLDestruction(shellTokenize(tt.command)) != "" {
-				blocked = true
-			}
+			// The real entry point, so a row also covers the nested-command
+			// walk (bash -c, eval, gt slot run --), not just the top-level
+			// matchers.
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
+			blocked := reason != ""
 			if blocked != tt.blocked {
 				t.Errorf("command %q: blocked=%v, want %v", tt.command, blocked, tt.blocked)
 			}

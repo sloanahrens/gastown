@@ -332,7 +332,53 @@ func nestedCommands(tokens, lowerTokens []string) []string {
 			nested = append(nested, strings.Join(tokens[i+1:], " "))
 		}
 	}
-	return nested
+	return append(nested, slotRunPayloads(tokens)...)
+}
+
+// slotRunPayloads returns, for every `gt slot run [flags] -- <argv>` the
+// command really runs, the argv as a command line of its own. slot.Run execs
+// that argv under the slot, so `gt slot run -- git reset --hard` is a git
+// reset; inCommandPosition treats a segment opening with gt as text-only,
+// which hid it from every matcher (gt-hqenc). Each argv word is re-quoted, so
+// a word with spaces (a commit message that names a dangerous command) stays
+// one word when the payload is judged. Every other gt subcommand keeps its
+// text-only treatment. tokens are shell-aware tokens (see shellTokenize).
+func slotRunPayloads(tokens []string) []string {
+	var payloads []string
+	for _, segment := range splitShellSegments(tokens) {
+		for i := 0; i+2 < len(segment); i++ {
+			if filepath.Base(strings.ToLower(segment[i])) != "gt" ||
+				!strings.EqualFold(segment[i+1], "slot") ||
+				!strings.EqualFold(segment[i+2], "run") ||
+				(i > 0 && !inCommandPosition(segment, i)) {
+				continue
+			}
+			for j := i + 3; j < len(segment); j++ {
+				if segment[j] != "--" {
+					continue
+				}
+				if j+1 < len(segment) {
+					quoted := make([]string, 0, len(segment)-j-1)
+					for _, word := range segment[j+1:] {
+						quoted = append(quoted, shellQuoteWord(word))
+					}
+					payloads = append(payloads, strings.Join(quoted, " "))
+				}
+				break
+			}
+		}
+	}
+	return payloads
+}
+
+// shellQuoteWord single-quotes word unless it is made only of characters the
+// shell never treats specially, so shellTokenize reads the result back as the
+// one word it came from.
+func shellQuoteWord(word string) string {
+	if word != "" && strings.Trim(word, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_@%+=:,./-") == "" {
+		return word
+	}
+	return "'" + strings.ReplaceAll(word, "'", `'\''`) + "'"
 }
 
 // heredocStartPattern matches a heredoc redirection operator: "<<TAG",
