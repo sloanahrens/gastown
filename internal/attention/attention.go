@@ -63,6 +63,14 @@ const (
 	// KindHostProbe: a host probe (disk, memory or docker) failed, so its rule
 	// could not be judged this tick.
 	KindHostProbe Kind = "host-probe"
+	// KindQuestionNew: an overseer question has been filed and nobody has
+	// commented on it yet.
+	KindQuestionNew Kind = "question-new"
+	// KindQuestionAnswered: Sloan answered an overseer question and the
+	// overseer has not yet commented on the answer.
+	KindQuestionAnswered Kind = "question-answered"
+	// KindQuestionStale: an overseer question has been open more than a day.
+	KindQuestionStale Kind = "question-stale"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -74,6 +82,7 @@ func Kinds() []Kind {
 		KindSlotHeld, KindSlotDeadHolder, KindBDSlow, KindTierSweepRed,
 		KindRevertRefused, KindBlockedMail, KindOverrunStopped, KindScheduledGate,
 		KindHostDisk, KindHostMem, KindHostDocker, KindHostProbe,
+		KindQuestionNew, KindQuestionAnswered, KindQuestionStale,
 	}
 }
 

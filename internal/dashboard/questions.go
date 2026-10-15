@@ -3,7 +3,7 @@ package dashboard
 // The Questions panel's payload: the questions the overseer has filed for
 // Sloan, so he can see what is waiting on him and answer it from a terminal.
 // The page stays read-only — there is no form and no write path, and Sloan
-// answers by commenting on the bead.
+// answers with gt answer, which comments on the bead.
 //
 // The reader that fills this payload lives with the town's other bd readers,
 // internal/cmd/dashboard_questions.go: every bd read this page makes runs

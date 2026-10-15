@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dashboard"
+	"github.com/steveyegge/gastown/internal/question"
 )
 
 // The panel's clock: every fixture below is written against this instant, so an
@@ -74,14 +75,14 @@ func questionIDs(rows []dashboard.QuestionRow) []string {
 func TestQuestionListAsksForEveryPriority(t *testing.T) {
 	t.Parallel()
 
-	if questionListOptions.Priority != -1 {
-		t.Errorf("the panel's query filters by priority %d, want the no-filter sentinel -1", questionListOptions.Priority)
+	if question.ListOptions.Priority != -1 {
+		t.Errorf("the panel's query filters by priority %d, want the no-filter sentinel -1", question.ListOptions.Priority)
 	}
-	if questionListOptions.Label != questionsLabel || questionListOptions.Status != questionsStatuses {
-		t.Errorf("the panel's query is %+v, want the label %q at %q", questionListOptions, questionsLabel, questionsStatuses)
+	if question.ListOptions.Label != question.Label || question.ListOptions.Status != question.Statuses {
+		t.Errorf("the panel's query is %+v, want the label %q at %q", question.ListOptions, question.Label, question.Statuses)
 	}
-	if questionListOptions.Limit != 0 {
-		t.Errorf("the panel's query caps at %d, want every open question", questionListOptions.Limit)
+	if question.ListOptions.Limit != 0 {
+		t.Errorf("the panel's query caps at %d, want every open question", question.ListOptions.Limit)
 	}
 }
 
@@ -312,7 +313,7 @@ func TestQuestionsStripsControlCharactersAndCapsFields(t *testing.T) {
 	t.Parallel()
 
 	hostile := "line one\nline two\rcarriage\x07 bell\x1b[31m nul:\x00 rlo:‮right-to-left <b>bold</b>"
-	long := strings.Repeat("é", questionFieldMax+200)
+	long := strings.Repeat("é", question.FieldMax+200)
 	f := &fakeQuestions{issues: []*beads.Issue{questionIssue(
 		"gt-abc12", "a title\x07", hostile, long, "gt-wisp-1", questionsNow)}}
 
@@ -326,8 +327,8 @@ func TestQuestionsStripsControlCharactersAndCapsFields(t *testing.T) {
 			t.Errorf("the question lost %q: %q", want, r.Question)
 		}
 	}
-	if n := len([]rune(r.Recommended)); n != questionFieldMax {
-		t.Errorf("an over-long answer is %d runes, want the cap of %d", n, questionFieldMax)
+	if n := len([]rune(r.Recommended)); n != question.FieldMax {
+		t.Errorf("an over-long answer is %d runes, want the cap of %d", n, question.FieldMax)
 	}
 	for _, field := range []string{r.Title, r.Question, r.Recommended} {
 		for _, run := range field {
@@ -338,31 +339,5 @@ func TestQuestionsStripsControlCharactersAndCapsFields(t *testing.T) {
 	}
 	if strings.ContainsRune(r.Question, '\n') {
 		t.Error("the question is drawn across lines")
-	}
-}
-
-func TestQuestionHeldIDs(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		body string
-		want []string
-	}{
-		{"prose line keeps its ids", "gt-wisp-590yk, hq-cv-abc and nothing else", []string{"gt-wisp-590yk", "hq-cv-abc"}},
-		{"bullet takes the leading id only", "- gt-abc (the follow-up to gt-xyz; needs a re-run)", []string{"gt-abc"}},
-		{"one id per bullet, annotations dropped", "- gt-abc e-stop pending\n- hq-cv-def: a follow-up\n- gt-wisp-590yk", []string{"gt-abc", "hq-cv-def", "gt-wisp-590yk"}},
-		{"stub line names no bead", "- stub: re-run once the follow-up lands", nil},
-		{"none line names no bead", "- none", nil},
-		{"bare none and blank lines", "none\n\n  \n", nil},
-		{"dotted id", "- gt-3t8.1 (re-run)", []string{"gt-3t8.1"}},
-		{"empty bullet", "-\n- ", nil},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := questionHeldIDs(tc.body); !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("questionHeldIDs(%q) = %v, want %v", tc.body, got, tc.want)
-			}
-		})
 	}
 }

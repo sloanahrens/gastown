@@ -919,6 +919,38 @@ dropped, so a recurrence raises a new item rather than hiding behind the old
 ack. A state older than 15 minutes is stale — the daemon has stopped writing
 it — and `gt attention` prints a `STALE` header and exits 3.
 
+### Overseer Questions
+
+A question the overseer has for Sloan is a bead in the town database under the
+label `overseer-question`, so it survives the overseer's session and the
+dashboard's Questions pane and the daemon read it.
+
+```bash
+gt ask "<title>" <<'EOF'   # file one; body sections below, on stdin
+gt answer <id> "<text>"    # Sloan's answer: a comment with no prefix
+gt answer --overseer <id> "<text>"   # the overseer's note: "[overseer] <text>"
+gt questions [--json]      # the open ones, oldest first, with age and held work
+```
+
+The body needs `## Question` and `## Recommended answer`; `## Held work` (bead
+ids, `stub: <title>`, or `none`) and `## Facts` are optional. A held bead is made
+to depend on the question, so it leaves `bd ready` until the question is closed.
+Nothing closes a question automatically.
+
+A question is waiting on Sloan while its newest comment is the overseer's or
+there is none, and answered once its newest comment lacks the `[overseer]`
+prefix. The attention queue raises three rules for it (flags in `ruleFlags`):
+
+- `question.new` wakes once for a question nobody has commented on.
+- `question.answered` wakes for an open question whose newest comment is not
+  the overseer's, and again every 20 minutes until the overseer comments.
+- `question.stale` is info for a question open over 24 hours, repeated every 6
+  hours.
+
+The repeat intervals are `repeatEvery` in `internal/attention/repeat.go`. Each
+question row on the dashboard shows the `gt answer <id> "..."` line Sloan runs;
+the page stays read-only.
+
 ### Watch Feed
 
 Two files carry the town's own alerts in one schema, and `gt tail`'s watch

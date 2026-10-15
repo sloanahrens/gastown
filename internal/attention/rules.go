@@ -50,6 +50,11 @@ const (
 	RuleHostMemLow     = "host.mem_low"
 	RuleHostDockerDown = "host.docker_stack_down"
 	RuleHostProbe      = "host.probe_failed"
+
+	// The overseer-question rules (gt-47rea).
+	RuleQuestionNew      = "question.new"
+	RuleQuestionAnswered = "question.answered"
+	RuleQuestionStale    = "question.stale"
 )
 
 var (
@@ -79,6 +84,13 @@ var ruleFlags = map[string]RuleFlags{
 	RuleHostDiskCrit:   flagsWake,
 	RuleHostMemLow:     flagsWake,
 	RuleHostDockerDown: flagsWake,
+	// A question is waiting on Sloan, or Sloan has answered and the overseer
+	// has yet to act; both are the overseer's to pick up.
+	RuleQuestionNew:      flagsWake,
+	RuleQuestionAnswered: flagsWake,
+	// A day-old question is a record for the overseer's next look, not a
+	// reason to wake it.
+	RuleQuestionStale: flagsInfo,
 	// A refusal is gt done working: the polecat is told and the bead goes
 	// back. It needs an operator only if it repeats, which rejected_twice
 	// catches.
@@ -121,25 +133,28 @@ func Rules() []string {
 // kindRules maps a kind to its rule id. The disk kind is keyed by the item
 // instead (RuleFor), because it raises two rules.
 var kindRules = map[Kind]string{
-	KindRiskPath:       RuleRiskPath,
-	KindRedMain:        RuleRedMain,
-	KindRejectedTwice:  RuleRejectedTwice,
-	KindEscalation:     RuleEscalation,
-	KindPolecatStall:   RulePolecatStall,
-	KindLandingStuck:   RuleLandingStuck,
-	KindQueueStuck:     RuleQueueStuck,
-	KindDirectPush:     RuleDirectPush,
-	KindSlotHeld:       RuleSlotHeld,
-	KindSlotDeadHolder: RuleSlotDeadHolder,
-	KindBDSlow:         RuleBDSlow,
-	KindTierSweepRed:   RuleTierSweepRed,
-	KindRevertRefused:  RuleRevertRefused,
-	KindBlockedMail:    RuleBlockedMail,
-	KindOverrunStopped: RuleOverrunStopped,
-	KindScheduledGate:  RuleScheduledGate,
-	KindHostMem:        RuleHostMemLow,
-	KindHostDocker:     RuleHostDockerDown,
-	KindHostProbe:      RuleHostProbe,
+	KindRiskPath:         RuleRiskPath,
+	KindRedMain:          RuleRedMain,
+	KindRejectedTwice:    RuleRejectedTwice,
+	KindEscalation:       RuleEscalation,
+	KindPolecatStall:     RulePolecatStall,
+	KindLandingStuck:     RuleLandingStuck,
+	KindQueueStuck:       RuleQueueStuck,
+	KindDirectPush:       RuleDirectPush,
+	KindSlotHeld:         RuleSlotHeld,
+	KindSlotDeadHolder:   RuleSlotDeadHolder,
+	KindBDSlow:           RuleBDSlow,
+	KindTierSweepRed:     RuleTierSweepRed,
+	KindRevertRefused:    RuleRevertRefused,
+	KindBlockedMail:      RuleBlockedMail,
+	KindOverrunStopped:   RuleOverrunStopped,
+	KindScheduledGate:    RuleScheduledGate,
+	KindHostMem:          RuleHostMemLow,
+	KindHostDocker:       RuleHostDockerDown,
+	KindHostProbe:        RuleHostProbe,
+	KindQuestionNew:      RuleQuestionNew,
+	KindQuestionAnswered: RuleQuestionAnswered,
+	KindQuestionStale:    RuleQuestionStale,
 }
 
 // RuleFor is the rule id of an item. The disk collector's key is its rule
