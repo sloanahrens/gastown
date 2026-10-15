@@ -3482,22 +3482,38 @@ func (t *Tmux) DisplayMessageDefault(session, message string) error {
 // This interrupts the terminal to ensure the notification is seen.
 // Uses echo to print a boxed banner with the notification details.
 func (t *Tmux) SendNotificationBanner(session, from, subject string) error {
-	// Sanitize inputs to prevent output manipulation
-	from = strings.ReplaceAll(from, "\n", " ")
-	from = strings.ReplaceAll(from, "\r", " ")
-	subject = strings.ReplaceAll(subject, "\n", " ")
-	subject = strings.ReplaceAll(subject, "\r", " ")
-
-	// Build the banner text
+	// from and subject are whatever another agent put in a mail, and this text
+	// is typed into a live shell, so both reach echo as quoted data only.
 	banner := fmt.Sprintf(`echo '
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📬 NEW MAIL from %s
 Subject: %s
 Run: gt mail inbox
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-'`, from, subject)
+'`, bannerField(from), bannerField(subject))
 
 	return t.SendKeys(session, banner)
+}
+
+// bannerField renders a value for interpolation inside the banner's
+// single-quoted echo argument. An embedded single quote is escaped so it
+// cannot close the argument and start a command, and every control character
+// is dropped so a subject cannot deliver ESC or Ctrl-C to the shell as a
+// keystroke (gt-5scr2).
+func bannerField(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r < 0x20 || r == 0x7f:
+			continue
+		case r == '\'':
+			b.WriteString(`'\''`)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // IsAgentRunning checks if an agent appears to be running in the session.
