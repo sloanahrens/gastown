@@ -4468,13 +4468,7 @@ func isGasTownRuntimePath(path string) bool {
 // artifact gets the shortest directory below it that holds no such source, or
 // its own path, so coverage/lcov-report/ style output still costs one pathspec.
 func RuntimeArtifactPathspecs(paths []string) []string {
-	var sources []string
-	for _, f := range paths {
-		f = normalizeArtifactPath(f)
-		if isSourceCodePath(f) && !isGasTownRuntimePath(f) {
-			sources = append(sources, f)
-		}
-	}
+	sources := sourcePathsIn(paths)
 
 	seen := make(map[string]bool)
 	var pathspecs []string
@@ -4493,6 +4487,19 @@ func RuntimeArtifactPathspecs(paths []string) []string {
 		pathspecs = append(pathspecs, root)
 	}
 	return pathspecs
+}
+
+// sourcePathsIn is the normalized source files among paths, the ones a
+// pathspec must not cover.
+func sourcePathsIn(paths []string) []string {
+	var sources []string
+	for _, f := range paths {
+		f = normalizeArtifactPath(f)
+		if isSourceCodePath(f) && !isGasTownRuntimePath(f) {
+			sources = append(sources, f)
+		}
+	}
+	return sources
 }
 
 func normalizeArtifactPath(path string) string {
@@ -4558,13 +4565,17 @@ func RuntimeArtifactPathspecsListing(paths []string, list func(root string) ([]s
 }
 
 // runtimeArtifactPathspecsBeside drops the paths under sourceRoots from the
-// artifacts RuntimeArtifactPathspecs resets.
+// artifacts RuntimeArtifactPathspecs resets, unless paths names a source file
+// under the root: that source already narrows each pathspec away from itself, so
+// the output beside it (coverage/lcov-report/) is still reset. Beside unchanged
+// tracked source a fixture cannot be told from output and stays.
 func runtimeArtifactPathspecsBeside(paths, sourceRoots []string) []string {
+	changedSources := sourcePathsIn(paths)
 	var kept []string
 	for _, f := range paths {
 		root, isArtifact := runtimeArtifactRoot(f)
 		// Source files stay in the list: they decide how far a pathspec may reach.
-		if !isArtifact || !slices.Contains(sourceRoots, root) {
+		if !isArtifact || !slices.Contains(sourceRoots, root) || holdsSource(root, changedSources) {
 			kept = append(kept, f)
 		}
 	}

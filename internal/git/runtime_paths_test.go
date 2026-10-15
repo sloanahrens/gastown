@@ -342,3 +342,45 @@ func TestRuntimeArtifactPathspecsListing(t *testing.T) {
 		})
 	}
 }
+
+// A coverage/ directory that holds tracked source still has its generated output
+// reset when the source is among the changed paths: the source narrows each
+// pathspec away from itself, so nothing staged is lost (gt-qdvp2).
+func TestRuntimeArtifactPathspecsBesideResetsArtifactsUnderSourceRoot(t *testing.T) {
+	t.Parallel()
+	sourceRoots := []string{"pkg/coverage/"}
+	for _, tc := range []struct {
+		name  string
+		paths []string
+		want  []string
+	}{
+		{
+			name:  "edited source leaves the output beside it reset",
+			paths: []string{"pkg/coverage/collector.go", "pkg/coverage/lcov-report/index.html", "pkg/coverage/coverage.out"},
+			want:  []string{"pkg/coverage/lcov-report/", "pkg/coverage/coverage.out"},
+		},
+		{
+			name:  "unchanged source keeps the fixture",
+			paths: []string{"pkg/coverage/lcov-report/index.html", "pkg/coverage/coverage.out"},
+			want:  nil,
+		},
+		{
+			name:  "source under another root does not spare this one",
+			paths: []string{"pkg/coverage/lcov-report/index.html", "web/coverage/main.go"},
+			want:  nil,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := runtimeArtifactPathspecsBeside(tc.paths, sourceRoots)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("runtimeArtifactPathspecsBeside = %q, want %q", got, tc.want)
+			}
+			for _, spec := range got {
+				if strings.HasPrefix("pkg/coverage/collector.go", spec) {
+					t.Errorf("pathspec %q covers collector.go", spec)
+				}
+			}
+		})
+	}
+}
