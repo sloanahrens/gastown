@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/townconfig"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -42,14 +43,32 @@ const (
 	hostProbeFailedPrefix = "host.probe_failed:"
 )
 
-// hostStackContainers are the containers that must be running: the Forgejo
-// stack the landing pipeline depends on and the history-man database.
+// hostStackContainers are the containers that must always be running: the
+// Forgejo stack the landing pipeline depends on.
 var hostStackContainers = []string{
 	"forgejo-forgejo-1",
 	"forgejo-db-1",
 	"forgejo-runner-daemon-1",
 	"forgejo-docker-in-docker-1",
-	"hm-postgres",
+}
+
+// The history-man database is required only while its rig is live: the operator
+// turns hm-postgres off on purpose when the hm rig is parked.
+const (
+	hostHMRig       = "hm"
+	hostHMContainer = "hm-postgres"
+)
+
+// requiredStackContainers is the containers in force this tick: the Forgejo
+// four, plus hm-postgres unless the hm rig is parked. A park state that cannot
+// be read counts as parked, because a false alarm for a container whose rig may
+// be parked costs more than a missed one.
+func (s *attentionSources) requiredStackContainers() []string {
+	req := append([]string(nil), hostStackContainers...)
+	if parked, err := s.host.RigParked(hostHMRig); err == nil && !parked {
+		req = append(req, hostHMContainer)
+	}
+	return req
 }
 
 // The names a failed probe is reported under, as the operator would type the
@@ -75,6 +94,9 @@ type hostProbes interface {
 	MemFreePct(ctx context.Context) (float64, error)
 	// Containers are the names of the running Docker containers.
 	Containers(ctx context.Context) ([]string, error)
+	// RigParked reports whether the rig is parked. An error means the state
+	// could not be read.
+	RigParked(rig string) (bool, error)
 }
 
 // systemHostProbes reads the machine the daemon runs on.
@@ -88,6 +110,11 @@ func (p systemHostProbes) Disk() (hostDisk, error) {
 		return hostDisk{}, err
 	}
 	return hostDisk{UsedPct: info.UsedPercent, FreeGB: info.AvailableGB()}, nil
+}
+
+func (p systemHostProbes) RigParked(rig string) (bool, error) {
+	rec, err := townconfig.ParkState(p.townRoot, rig)
+	return rec != nil, err
 }
 
 func (systemHostProbes) MemFreePct(ctx context.Context) (float64, error) {
@@ -184,8 +211,8 @@ func (s *attentionSources) collectHostMem(ctx context.Context) ([]attention.Item
 	}}, nil
 }
 
-// collectHostDocker raises host.docker_stack_down when any container of
-// hostStackContainers is not among the running ones, naming the missing.
+// collectHostDocker raises host.docker_stack_down when any required container
+// (requiredStackContainers) is not among the running ones, naming the missing.
 func (s *attentionSources) collectHostDocker(ctx context.Context) ([]attention.Item, error) {
 	running, err := s.host.Containers(ctx)
 	if err != nil {
@@ -195,8 +222,9 @@ func (s *attentionSources) collectHostDocker(ctx context.Context) ([]attention.I
 	for _, n := range running {
 		up[n] = true
 	}
+	required := s.requiredStackContainers()
 	var missing []string
-	for _, n := range hostStackContainers {
+	for _, n := range required {
 		if !up[n] {
 			missing = append(missing, n)
 		}
@@ -208,7 +236,7 @@ func (s *attentionSources) collectHostDocker(ctx context.Context) ([]attention.I
 		Key:      hostRuleDockerDown,
 		Kind:     attention.KindHostDocker,
 		Severity: attention.SeverityHigh,
-		Summary:  fmt.Sprintf("%d of %d stack containers not running: %s", len(missing), len(hostStackContainers), strings.Join(missing, ", ")),
+		Summary:  fmt.Sprintf("%d of %d stack containers not running: %s", len(missing), len(required), strings.Join(missing, ", ")),
 	}}, nil
 }
 

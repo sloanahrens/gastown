@@ -24,6 +24,22 @@ type fakeHost struct {
 	containersErr       error
 	diskCalls, memCalls int
 	containerCalls      int
+	// parked and parkedErr are the hm rig's park state; the zero value is a
+	// live rig.
+	parked    bool
+	parkedErr error
+}
+
+// allStackContainers is every container a live hm rig requires.
+func allStackContainers() []string {
+	return append(append([]string(nil), hostStackContainers...), hostHMContainer)
+}
+
+func (f *fakeHost) RigParked(rig string) (bool, error) {
+	if rig != hostHMRig {
+		return false, errors.New("unexpected rig " + rig)
+	}
+	return f.parked, f.parkedErr
 }
 
 // healthyHost is a host no rule fires on.
@@ -31,7 +47,7 @@ func healthyHost() *fakeHost {
 	return &fakeHost{
 		disk:       hostDisk{UsedPct: 40, FreeGB: 300},
 		memFree:    60,
-		containers: append([]string(nil), hostStackContainers...),
+		containers: allStackContainers(),
 	}
 }
 
@@ -175,7 +191,7 @@ func TestAttentionHostDocker(t *testing.T) {
 	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
 	without := func(drop ...string) []string {
 		var out []string
-		for _, n := range hostStackContainers {
+		for _, n := range allStackContainers() {
 			keep := true
 			for _, d := range drop {
 				if n == d {
@@ -226,6 +242,76 @@ func TestAttentionHostDocker(t *testing.T) {
 			}
 			if !strings.Contains(it.Summary, tt.missing) {
 				t.Errorf("summary = %q, want it to contain %q", it.Summary, tt.missing)
+			}
+		})
+	}
+}
+
+// hm-postgres is required only while the hm rig is live. A parked rig, or a
+// park state that cannot be read, drops it from the required set; the Forgejo
+// four stay required in every case.
+func TestAttentionHostDockerHMPostgresFollowsParkState(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	forgejoOnly := func(drop ...string) []string {
+		var out []string
+		for _, n := range hostStackContainers {
+			dropped := false
+			for _, d := range drop {
+				dropped = dropped || n == d
+			}
+			if !dropped {
+				out = append(out, n)
+			}
+		}
+		return out
+	}
+	unreadable := errors.New("rig hm is not registered")
+	tests := []struct {
+		name      string
+		parked    bool
+		parkedErr error
+		running   []string
+		summary   string // exact summary, "" for silence
+	}{
+		{"parked, hm-postgres off, forgejo up", true, nil, forgejoOnly(), ""},
+		{"parked, hm-postgres on, forgejo up", true, nil, allStackContainers(), ""},
+		{"parked, forgejo-db-1 missing", true, nil, forgejoOnly("forgejo-db-1"),
+			"1 of 4 stack containers not running: forgejo-db-1"},
+		{"parked, two forgejo missing, hm-postgres off", true, nil, forgejoOnly("forgejo-db-1", "forgejo-forgejo-1"),
+			"2 of 4 stack containers not running: forgejo-forgejo-1, forgejo-db-1"},
+		{"live, hm-postgres missing", false, nil, forgejoOnly(),
+			"1 of 5 stack containers not running: hm-postgres"},
+		{"live, all up", false, nil, allStackContainers(), ""},
+		{"live, forgejo-db-1 and hm-postgres missing", false, nil, forgejoOnly("forgejo-db-1"),
+			"2 of 5 stack containers not running: forgejo-db-1, hm-postgres"},
+		{"unreadable park state treats hm-postgres as not required", false, unreadable, forgejoOnly(), ""},
+		{"unreadable park state still requires forgejo", false, unreadable, forgejoOnly("forgejo-runner-daemon-1"),
+			"1 of 4 stack containers not running: forgejo-runner-daemon-1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newAttentionFixture(t, now)
+			h := healthyHost()
+			h.parked, h.parkedErr, h.containers = tt.parked, tt.parkedErr, tt.running
+			f.src.host = h
+			items := f.collect(t, f.src.collectHostDocker)
+			if tt.summary == "" {
+				if len(items) != 0 {
+					t.Fatalf("items = %+v, want none", items)
+				}
+				return
+			}
+			if len(items) != 1 {
+				t.Fatalf("items = %+v, want one", items)
+			}
+			it := items[0]
+			if it.Key != hostRuleDockerDown || it.Kind != attention.KindHostDocker || it.Severity != attention.SeverityHigh {
+				t.Errorf("item = %+v", it)
+			}
+			if it.Summary != tt.summary {
+				t.Errorf("summary = %q, want %q", it.Summary, tt.summary)
 			}
 		})
 	}
@@ -328,7 +414,7 @@ func TestAttentionHostFailedProbeKeepsTheRuleItHeld(t *testing.T) {
 	}
 	itemByKey(t, st, hostProbeFailedPrefix+hostProbeDocker)
 
-	h.containers, h.containersErr = append([]string(nil), hostStackContainers...), nil
+	h.containers, h.containersErr = allStackContainers(), nil
 	st = f.tick(t, now.Add(2*time.Minute))
 	if keys := hostKeys(st); len(keys) != 0 {
 		t.Errorf("host items = %v, want both cleared once docker answers healthy", keys)
