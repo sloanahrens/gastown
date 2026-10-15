@@ -41,15 +41,29 @@ type fakeDeployForgejo struct {
 	jobErr  error
 	lists   int
 	limits  []int
+	pages   []int
 }
 
+// ListRuns answers a page of the repository's runs, newest first, which is the
+// order the API pages them in.
 func (f *fakeDeployForgejo) ListRuns(_ context.Context, _, _ string, filter forgejo.RunFilter) (*forgejo.RunList, error) {
 	f.lists++
 	f.limits = append(f.limits, filter.Limit)
+	f.pages = append(f.pages, filter.Page)
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
-	return &forgejo.RunList{TotalCount: len(f.runs), Runs: f.runs}, nil
+	if filter.Limit <= 0 {
+		return &forgejo.RunList{TotalCount: len(f.runs), Runs: f.runs}, nil
+	}
+	start := max(filter.Page-1, 0) * filter.Limit
+	if start >= len(f.runs) {
+		return &forgejo.RunList{TotalCount: len(f.runs)}, nil
+	}
+	return &forgejo.RunList{
+		TotalCount: len(f.runs),
+		Runs:       f.runs[start:min(start+filter.Limit, len(f.runs))],
+	}, nil
 }
 
 func (f *fakeDeployForgejo) ListRunJobs(_ context.Context, _, _ string, runID int64) ([]forgejo.ActionRunJob, error) {
@@ -498,11 +512,12 @@ func TestDeployWatch_AnOpenAlertKeepsItsItemWhenTheRunAgesOut(t *testing.T) {
 	}
 }
 
-// TestDeployWatch_SkipsARepositoryItCannotReadQuietly pins the two answers a
-// read can give on a rig that does not deploy here: a 404 is not news, and no
-// alert is raised or cleared from a repository nothing can be read about — a
-// repository that has gone missing is not a green deploy.
-func TestDeployWatch_SkipsARepositoryItCannotReadQuietly(t *testing.T) {
+// TestDeployWatch_A404IsSaidOutLoudAndKeepsThePicture pins the two answers a
+// read can give on a repository the rig's own config names: a 404 raises and
+// clears nothing — a repository that cannot be read is not a green deploy —
+// and it is logged once, because a viewer that cannot read a configured
+// repository is a watch that sees nothing.
+func TestDeployWatch_A404IsSaidOutLoudAndKeepsThePicture(t *testing.T) {
 	t.Parallel()
 	run := deployTestRun(1153, deployWorkflowStaging, "main", deployRunFailed, deployTestNow.Add(-time.Hour), "fix: guard the retry")
 	api := &fakeDeployForgejo{runs: []forgejo.ActionRun{run}}
@@ -527,8 +542,14 @@ func TestDeployWatch_SkipsARepositoryItCannotReadQuietly(t *testing.T) {
 	if failures := w.failures(); len(failures) != 1 {
 		t.Errorf("failures = %+v, want the last picture kept", failures)
 	}
-	if len(logged) != 0 {
-		t.Errorf("log = %v, want a 404 repository skipped quietly", logged)
+	if len(logged) != 1 || !strings.Contains(logged[0], "404") {
+		t.Errorf("log = %v, want one line naming the 404", logged)
+	}
+
+	// The same answer is not news again.
+	w.poll(context.Background())
+	if len(logged) != 1 {
+		t.Errorf("log = %v, want the one line, not one per poll", logged)
 	}
 }
 
@@ -550,6 +571,86 @@ func TestDeployWatch_AReadFailureKeepsTheOpenAlert(t *testing.T) {
 	}
 	if failures := w.failures(); len(failures) != 1 {
 		t.Errorf("failures = %+v, want the last picture kept", failures)
+	}
+}
+
+// TestDeployWatch_ARigThatLeavesTheWatchLosesItsItem: a rig the town no longer
+// lists is polled by nobody, so its item would sit in the dashboard forever.
+// The escalation stays open — a repository that vanished is not a green deploy
+// — but the picture is this poll's.
+func TestDeployWatch_ARigThatLeavesTheWatchLosesItsItem(t *testing.T) {
+	t.Parallel()
+	run := deployTestRun(1153, deployWorkflowStaging, "main", deployRunFailed, deployTestNow.Add(-time.Hour), "fix: guard the retry")
+	api := &fakeDeployForgejo{runs: []forgejo.ActionRun{run}}
+	w, rec := newTestDeployWatch(t, api)
+
+	w.poll(context.Background())
+	if failures := w.failures(); len(failures) != 1 {
+		t.Fatalf("failures = %+v, want the failure that was just raised", failures)
+	}
+
+	w.Repos = func() []deployRepo { return nil }
+	w.poll(context.Background())
+
+	if failures := w.failures(); len(failures) != 0 {
+		t.Errorf("failures = %+v, want none for a rig the watch no longer polls", failures)
+	}
+	if cleared := rec.clearedAlerts(); len(cleared) != 0 {
+		t.Errorf("cleared = %+v, want nothing: leaving the watch is not a green run", cleared)
+	}
+}
+
+// TestDeployWatch_AFailureBeyondTheFirstRunPageIsStillSeen: the run list is
+// paged, and a page full of runs the watch does not follow must not hide the
+// deploy that failed behind them.
+func TestDeployWatch_AFailureBeyondTheFirstRunPageIsStillSeen(t *testing.T) {
+	t.Parallel()
+	var runs []forgejo.ActionRun
+	for i := range deployWatchRunLimit {
+		runs = append(runs, deployTestRun(int64(2000+i), "gate.yml", fmt.Sprintf("land/gt-%03d", i),
+			deployRunSucceeded, deployTestNow.Add(-time.Duration(i)*time.Minute), "candidate"))
+	}
+	runs = append(runs, deployTestRun(1153, deployWorkflowStaging, "main", deployRunFailed, deployTestNow.Add(-time.Hour), "fix: guard the retry"))
+	api := &fakeDeployForgejo{runs: runs}
+	w, rec := newTestDeployWatch(t, api)
+
+	w.poll(context.Background())
+
+	raised := rec.raisedAlerts()
+	if len(raised) != 1 {
+		t.Fatalf("raised = %+v, want the failure the second page holds", raised)
+	}
+	if want := deployFailedKeyPrefix + deployTestRepo + ":" + deployWorkflowStaging; raised[0].Key != want {
+		t.Errorf("key = %q, want %q", raised[0].Key, want)
+	}
+	if api.lists != 2 {
+		t.Errorf("list calls = %d (%v), want the second page read", api.lists, api.pages)
+	}
+}
+
+// TestDeployWatch_AWindowWiderThanThePageBudgetIsSaid: paging stops at a
+// budget, and a repository that fills it with runs inside the window is a
+// repository the watch cannot see all of. It says so rather than passing for a
+// quiet one.
+func TestDeployWatch_AWindowWiderThanThePageBudgetIsSaid(t *testing.T) {
+	t.Parallel()
+	var runs []forgejo.ActionRun
+	for i := range deployWatchRunLimit * deployWatchRunPages {
+		runs = append(runs, deployTestRun(int64(3000+i), "gate.yml", fmt.Sprintf("land/gt-%03d", i),
+			deployRunSucceeded, deployTestNow.Add(-time.Duration(i)*time.Minute), "candidate"))
+	}
+	api := &fakeDeployForgejo{runs: runs}
+	w, _ := newTestDeployWatch(t, api)
+	var logged []string
+	w.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+
+	w.poll(context.Background())
+
+	if api.lists != deployWatchRunPages {
+		t.Errorf("list calls = %d (%v), want the page budget spent once", api.lists, api.pages)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "24h0m0s") {
+		t.Errorf("log = %v, want one line naming the window the pages reach back", logged)
 	}
 }
 
@@ -780,6 +881,57 @@ func TestDeployWatch_StartsOnALaterPassWhenItCouldNotBuildOne(t *testing.T) {
 	}
 }
 
+// TestProductionDeployWatch_WiresTheTown pins the builder the daemon runs: the
+// repositories are the landing worker's rigs read from their own Forgejo
+// blocks, the state file lives under <town>/.runtime, and the viewer client
+// comes from the configured token dir. A town it cannot build one for comes
+// back with the reason the starter logs and retries on.
+func TestProductionDeployWatch_WiresTheTown(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	const rigName = "fractals"
+	writeKnownRigs(t, townRoot, rigName)
+	forgejoRigConfig(t, townRoot, rigName)
+	tokenDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tokenDir, "forgejo-viewer.env"), []byte("FORGEJO_TOKEN=secret\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	newDaemon := func(root, dir string) *Daemon {
+		return &Daemon{logger: discardLogger, config: &Config{TownRoot: root},
+			patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{LandingWorker: &LandingWorkerConfig{
+				Forgejo: &config.ForgejoWorkerConfig{TokenDir: dir}}}}}
+	}
+
+	d := newDaemon(townRoot, tokenDir)
+	w, hold := d.productionDeployWatch()
+	if w == nil {
+		t.Fatalf("productionDeployWatch = nil, %q; want the watch for a rig with a Forgejo repository", hold)
+	}
+	if hold != "" {
+		t.Errorf("hold = %q, want none beside a watch", hold)
+	}
+	if want := filepath.Join(townRoot, ".runtime", deployWatchStateFile); w.State != want {
+		t.Errorf("state = %q, want %q", w.State, want)
+	}
+	repos := w.Repos()
+	want := deployRepo{Rig: rigName, Owner: "gastown", Name: "gastown", APIBase: "https://forgejo.example/api/v1"}
+	if len(repos) != 1 || repos[0] != want {
+		t.Fatalf("repos = %+v, want %+v", repos, want)
+	}
+	if _, err := w.API(repos[0].APIBase); err != nil {
+		t.Errorf("client = %v, want the viewer client the token dir builds", err)
+	}
+
+	// The two holds the starter retries on: a town with no rig to poll, and
+	// one whose viewer token is not there yet.
+	if w, hold := newDaemon(t.TempDir(), tokenDir).productionDeployWatch(); w != nil || !strings.Contains(hold, "no rig names a Forgejo repository") {
+		t.Errorf("productionDeployWatch = %v, %q; want no watch and the rig reason", w, hold)
+	}
+	if w, hold := newDaemon(townRoot, t.TempDir()).productionDeployWatch(); w != nil || !strings.Contains(hold, "token") {
+		t.Errorf("productionDeployWatch = %v, %q; want no watch and the token reason", w, hold)
+	}
+}
+
 // endpointTransport answers each request in process, so the test exercises the
 // real client's request building without a socket.
 type endpointTransport struct{ h http.Handler }
@@ -867,6 +1019,46 @@ func TestDeployWatch_StateFileIsReadable(t *testing.T) {
 	key := "deploy-failed:" + deployTestRepo + ":" + deployWorkflowStaging
 	if open, ok := st.Open[key]; !ok || open.Run != 1153 {
 		t.Errorf("state = %+v, want %s open on run 1153", st.Open, key)
+	}
+}
+
+// TestDeployWatch_AStateFileWithoutASummaryGainsOne: the item the attention
+// queue shows is part of the record, so a poll that fills one in writes it.
+// A daemon that restarted onto a state file with no summary would otherwise
+// lose the item of an alert it raised and never re-raise it.
+func TestDeployWatch_AStateFileWithoutASummaryGainsOne(t *testing.T) {
+	t.Parallel()
+	run := deployTestRun(1153, deployWorkflowStaging, "main", deployRunFailed, deployTestNow.Add(-time.Hour), "fix: guard the retry")
+	api := &fakeDeployForgejo{runs: []forgejo.ActionRun{run}}
+	w, rec := newTestDeployWatch(t, api)
+	key := deployFailedKeyPrefix + deployTestRepo + ":" + deployWorkflowStaging
+	// What a state file written by an older daemon holds: the run and the
+	// severity, and nothing the item shows.
+	data, err := json.Marshal(deployWatchState{Open: map[string]deployOpenRun{
+		key: {Run: 1153, Severity: config.SeverityMedium},
+	}})
+	if err != nil {
+		t.Fatalf("state: %v", err)
+	}
+	if err := os.WriteFile(w.State, data, 0o600); err != nil {
+		t.Fatalf("writing the state file: %v", err)
+	}
+
+	w.poll(context.Background())
+
+	if raised := rec.raisedAlerts(); len(raised) != 0 {
+		t.Errorf("raised = %+v, want nothing: the state file names this run already", raised)
+	}
+	stored, err := os.ReadFile(w.State)
+	if err != nil {
+		t.Fatalf("state file: %v", err)
+	}
+	var st deployWatchState
+	if err := json.Unmarshal(stored, &st); err != nil {
+		t.Fatalf("state file %s: %v", stored, err)
+	}
+	if open := st.Open[key]; open.Summary == "" || open.Rig != "fractals" {
+		t.Errorf("state = %+v, want the item the alert was raised with written alongside it", st.Open[key])
 	}
 }
 

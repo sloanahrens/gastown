@@ -28,10 +28,9 @@ import (
 // health.yml's staging check and its prod smoke — can fail with nobody
 // watching.
 //
-// One run list per repository per poll through the read-only viewer client,
-// and one escalation per repository, workflow and ref class: raised by the
-// newest failed run of that class, closed by the newest green one of the same
-// class. It reads and never runs anything, and writes no bead of its own.
+// It reads through the read-only viewer client and never runs anything. One
+// escalation per repository, workflow and ref class is raised by the newest
+// failed run of that class and closed by the newest green one.
 
 const (
 	// deployWatchInterval is the gap between polls. A deploy run takes
@@ -47,11 +46,15 @@ const (
 	// deploy that has just failed, not the repository's history.
 	deployWatchWindow = 24 * time.Hour
 
-	// deployWatchRunLimit is how many runs one repository's list asks for.
-	// The API names a workflow by its path in the repository and deploys no
-	// branch filter (ref=main answers nothing — verified live), so one list
-	// per repository is filtered here rather than one call per workflow.
+	// deployWatchRunLimit is runs per page and deployWatchRunPages the most
+	// pages one poll reads per repository. The API deploys no ref filter
+	// (ref=main answers nothing — verified live), so runs are listed
+	// unfiltered and a busy repository can hold more of them inside the
+	// window than one page returns. A page is followed by the next while its
+	// oldest run is still inside the window, so a quiet repository costs one
+	// call and a busy one is read until the window is covered.
 	deployWatchRunLimit = 20
+	deployWatchRunPages = 5
 
 	// deployWatchSource is the source every escalation this watch raises
 	// carries.
@@ -171,9 +174,9 @@ type deployFailure struct {
 // high-severity push went out for it. All of it is persisted, so a daemon
 // restart neither re-raises a standing failure nor pushes it again.
 //
-// The rest is what the attention item shows while the alert is open. A failed
-// run ages out of the window well before anyone fixes the deploy, and the
-// escalation outlives it: the item has to outlive the run with it.
+// The rest is what the attention item shows. A failed run ages out of the
+// window well before anyone fixes the deploy, and the escalation outlives it,
+// so the item has to outlive the run.
 type deployOpenRun struct {
 	Run      int64  `json:"run"`
 	Pushed   bool   `json:"pushed,omitempty"`
@@ -223,7 +226,8 @@ type deployWatch struct {
 	// heartbeat goroutine, which must never wait on a retrying escalation.
 	picMu sync.RWMutex
 	// open is the raised alerts by key, and failing the last poll's picture
-	// per rig. A rig whose list failed keeps the picture it had (see poll).
+	// per rig. A rig whose list failed keeps the picture it had, and one the
+	// town no longer lists loses it (poll).
 	open    map[string]deployOpenRun
 	failing map[string][]deployFailure
 	// jobs is the failing job names of a run, cached by run id (failingJobs),
@@ -302,15 +306,25 @@ func (w *deployWatch) poll(ctx context.Context) {
 	w.load()
 
 	now := w.now()
+	repos := w.Repos()
 	fresh := map[string][]deployFailure{}
-	for _, repo := range w.Repos() {
-		runs, ok := w.runs(ctx, repo)
+	watched := make(map[string]bool, len(repos))
+	for _, repo := range repos {
+		watched[repo.Rig] = true
+		runs, ok := w.runs(ctx, repo, now)
 		if !ok {
 			continue
 		}
 		fresh[repo.Rig] = w.verdicts(ctx, repo, runs, now)
 	}
 	w.picMu.Lock()
+	// A rig the watch no longer polls leaves the picture with its alerts: no
+	// later poll would ever drop them.
+	for rig := range w.failing {
+		if !watched[rig] {
+			delete(w.failing, rig)
+		}
+	}
 	for rig, failures := range fresh {
 		w.failing[rig] = failures
 	}
@@ -339,27 +353,72 @@ func (w *deployWatch) pruneJobs() {
 	}
 }
 
-// runs lists one repository's runs. ok is false for a read this poll cannot
-// judge: the repository is not on its Forgejo instance (404, which is how a
-// rig that does not deploy here reads), or the read failed.
-func (w *deployWatch) runs(ctx context.Context, repo deployRepo) ([]forgejo.ActionRun, bool) {
+// runs lists one repository's runs, a page at a time until the window is
+// covered. ok is false for a read this poll cannot judge: the repository
+// answers nothing, or the read failed. Neither is a green deploy.
+func (w *deployWatch) runs(ctx context.Context, repo deployRepo, now time.Time) ([]forgejo.ActionRun, bool) {
 	api, err := w.API(repo.APIBase)
 	if err != nil {
 		w.logOnce("%s: no client for %s: %v", repo.Rig, repo.APIBase, err)
 		return nil, false
 	}
+	var out []forgejo.ActionRun
+	for page := 1; page <= deployWatchRunPages; page++ {
+		runs, ok := w.runPage(ctx, api, repo, page)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, runs...)
+		if len(runs) < deployWatchRunLimit || !deployPageInsideWindow(runs, now) {
+			return out, true
+		}
+	}
+	w.logOnce("%s %s: %d full pages reach only %s back, so a deploy that failed before them is not watched",
+		repo.Rig, repo.repo(), deployWatchRunPages, deployWatchWindow)
+	return out, true
+}
+
+// runPage lists one page of a repository's runs. ok is false for a page the
+// poll cannot judge, which ends the repository's read: half a list must not be
+// judged as a whole one.
+func (w *deployWatch) runPage(ctx context.Context, api deployRunAPI, repo deployRepo, page int) ([]forgejo.ActionRun, bool) {
 	ctx, cancel := context.WithTimeout(ctx, deployWatchCallTimeout)
 	defer cancel()
-	list, err := api.ListRuns(ctx, repo.Owner, repo.Name, forgejo.RunFilter{Limit: deployWatchRunLimit})
+	list, err := api.ListRuns(ctx, repo.Owner, repo.Name, forgejo.RunFilter{Limit: deployWatchRunLimit, Page: page})
 	if err != nil {
 		var apiErr *forgejo.APIError
 		if errors.As(err, &apiErr) && apiErr.StatusCode == 404 {
+			// The rig's own config names this repository, so a 404 is a
+			// repository the viewer cannot read — a blind watch, which says so
+			// rather than passing for a rig that watches nothing.
+			w.logOnce("%s: %s answers 404 on %s: the viewer cannot read the repository the rig names",
+				repo.Rig, repo.repo(), repo.APIBase)
 			return nil, false
 		}
 		w.logOnce("%s %s: reading runs: %v", repo.Rig, repo.repo(), err)
 		return nil, false
 	}
 	return list.Runs, true
+}
+
+// deployPageInsideWindow is whether a page's oldest run still falls inside the
+// window, so a page behind it could hold a run that counts. The route lists
+// runs newest first, which is what makes that oldest run the edge the rest of
+// the window lies behind. A page whose stamps none parse is not followed:
+// newestDeployRun reads no run without one, so such a page is the end of what
+// the watch can judge either way.
+func deployPageInsideWindow(runs []forgejo.ActionRun, now time.Time) bool {
+	var oldest time.Time
+	for _, run := range runs {
+		created := parseDeployStamp(run.Created)
+		if created.IsZero() {
+			continue
+		}
+		if oldest.IsZero() || created.Before(oldest) {
+			oldest = created
+		}
+	}
+	return !oldest.IsZero() && !oldest.Before(now.Add(-deployWatchWindow))
 }
 
 // verdicts turns one repository's runs into the failures that hold now, and
@@ -496,8 +555,15 @@ func (w *deployWatch) note(f deployFailure) {
 		w.dirty = true
 		w.logOnce("%s: %s run %d failed on %s at %s", f.Rig, f.Workflow, f.RunID, f.Repo, f.Severity)
 	}
-	open.Rig, open.Repo, open.Workflow, open.Class, open.Summary =
-		f.Rig, f.Repo, f.Workflow, f.Class, f.Summary
+	if open.Rig != f.Rig || open.Repo != f.Repo || open.Workflow != f.Workflow ||
+		open.Class != f.Class || open.Summary != f.Summary {
+		// What the item shows is part of the record, so a change to it is
+		// written: a state file from a daemon that recorded no summary would
+		// otherwise lose the item at the next restart.
+		open.Rig, open.Repo, open.Workflow, open.Class, open.Summary =
+			f.Rig, f.Repo, f.Workflow, f.Class, f.Summary
+		w.dirty = true
+	}
 	// A town with no push command owes no push, so nothing is recorded as
 	// delivered: if the operator configures one while this failure stands, the
 	// next poll pushes it.
@@ -839,12 +905,10 @@ func (s *attentionSources) collectDeployFailures(context.Context) ([]attention.I
 // manager: the rigs it polls are the ones that land through Forgejo, so a town
 // whose landing worker is off deploys nothing for it to watch.
 //
-// The manager calls this on every pass, and a pass that cannot build a watch
-// leaves the next one free to try again: the first minutes of a daemon's life
-// are exactly when its rigs or its viewer token may not be there yet, and a
-// watch that gave up for good at that moment would be an alarm that is off
-// with nothing but one log line to say so. The reason it could not start is
-// logged once per distinct reason, not once per pass.
+// The manager calls this on every pass, and a pass that cannot build one is
+// not the last: the first minutes of a daemon are exactly when a rig or the
+// viewer token may be missing, and a watch that gave up there would be an
+// alarm that is off. The hold is logged once per distinct reason.
 func (d *Daemon) startDeployWatch() {
 	if d.ctx == nil {
 		return
