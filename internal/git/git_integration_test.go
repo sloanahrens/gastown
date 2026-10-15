@@ -3120,7 +3120,7 @@ func TestIntegrationCheckUncommittedWorkKeepsFixtureBesideTrackedSource(t *testi
 
 // Git.RuntimeArtifactPathspecs and the status read the checkout's tracked files
 // from real git: the scenario of gt-qdvp2 end to end.
-func TestGitRuntimeArtifactPathspecsBesideEditedSource(t *testing.T) {
+func TestIntegrationRuntimeArtifactPathspecsBesideEditedSource(t *testing.T) {
 	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
