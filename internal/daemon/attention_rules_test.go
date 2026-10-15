@@ -186,3 +186,62 @@ func TestAttentionDiskWarnPromotesAfterThreeBeats(t *testing.T) {
 		t.Errorf("wake events three beats into a recurrence = %d, want 2", n)
 	}
 }
+
+// The disk-warn promotion honors an ack, and it survives a daemon restart: the
+// beat count is memory only, so the promotion is marked on the item in the
+// state, and a fresh count over the persisted item does not wake again.
+func TestDiskWarnPromotionSkipsAckedAndRestart(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	warning := func(f *attentionFixture) {
+		h := healthyHost()
+		h.disk = hostDisk{UsedPct: 85, FreeGB: 60}
+		f.src.host = h
+	}
+	wakes := func(f *attentionFixture) int {
+		n := 0
+		for _, e := range f.events(t) {
+			if e.Wake {
+				n++
+			}
+		}
+		return n
+	}
+
+	t.Run("an acked item raises no promotion wake", func(t *testing.T) {
+		t.Parallel()
+		f := newAttentionFixture(t, now)
+		warning(f)
+		f.tick(t, now.Add(time.Minute))
+		if err := attention.Acknowledge(f.d.config.TownRoot, hostRuleDiskWarn, now.Add(time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		for beat := 2; beat <= 6; beat++ {
+			f.tick(t, now.Add(time.Duration(beat)*time.Minute))
+		}
+		if n := wakes(f); n != 0 {
+			t.Errorf("wake events for an acked warning = %d, want 0", n)
+		}
+	})
+
+	t.Run("a fresh cache over a persisted promotion does not wake again", func(t *testing.T) {
+		t.Parallel()
+		f := newAttentionFixture(t, now)
+		warning(f)
+		for beat := 1; beat <= 3; beat++ {
+			f.tick(t, now.Add(time.Duration(beat)*time.Minute))
+		}
+		if n := wakes(f); n != 1 {
+			t.Fatalf("wake events after three beats = %d, want 1", n)
+		}
+
+		// A restart: the beat count starts over, the state on disk stays.
+		f.src.diskWarnBeats = 0
+		for beat := 4; beat <= 8; beat++ {
+			f.tick(t, now.Add(time.Duration(beat)*time.Minute))
+		}
+		if n := wakes(f); n != 1 {
+			t.Errorf("wake events after a restart with the warning held = %d, want the one already written", n)
+		}
+	})
+}
