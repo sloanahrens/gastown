@@ -17,6 +17,11 @@ import (
 // per finding, and it stays off. Here the landing only records what om raised;
 // the deep-review verifier decides which findings are worth a bead, by trying
 // to refute each one first.
+//
+// Its input is now a review that cannot pass: a landing carrying a major or
+// critical finding is refused back to the author whatever it scored
+// (gt-oi4je), so an approved landing reaches this queue with nothing to
+// record.
 
 const (
 	// OMFindingsLabel is the label a work bead whose findings were queued
@@ -132,15 +137,21 @@ func omQueueFindings(findings []Finding) []Finding {
 	return out
 }
 
+// The ledger priorities omPriority maps om's blocking severities onto.
+const (
+	omPriorityCritical = "P1"
+	omPriorityMajor    = "P2"
+)
+
 // omPriority maps an om severity onto the ledger's priority: critical is P1 and
 // major is P2. A severity the review has no priority for is not one the queue
 // records.
 func omPriority(severity string) (string, bool) {
-	switch strings.ToLower(strings.TrimSpace(severity)) {
-	case "critical":
-		return "P1", true
-	case "major":
-		return "P2", true
+	switch omSeverity(severity) {
+	case omSeverityCritical:
+		return omPriorityCritical, true
+	case omSeverityMajor:
+		return omPriorityMajor, true
 	}
 	return "", false
 }

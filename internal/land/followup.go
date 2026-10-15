@@ -159,13 +159,14 @@ func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate) 
 }
 
 // nonBlockingFindings keeps the findings a follow-up bead is for: major and
-// minor. Info is what om already decided is not worth fixing, and a finding om
-// blocked on comes with a request_changes whose landing never got here.
+// minor. Info is what om already decided is not worth fixing, and a landing
+// reaches the feed carrying no major or critical finding at all, because either
+// refuses it back to the author first (gt-oi4je).
 func nonBlockingFindings(findings []Finding) []Finding {
 	var out []Finding
 	for _, f := range findings {
-		switch strings.ToLower(strings.TrimSpace(f.Severity)) {
-		case "major", "minor":
+		switch omSeverity(f.Severity) {
+		case omSeverityMajor, omSeverityMinor:
 			out = append(out, f)
 		}
 	}

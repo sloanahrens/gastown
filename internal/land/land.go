@@ -229,6 +229,11 @@ type Rejection struct {
 	// ReviewSummary and ReviewScore are om's, when om asked for changes.
 	ReviewSummary string
 	ReviewScore   float64
+	// ReviewVerdict is the verdict om reached, when the refusal came from one:
+	// request_changes for om's own refusal, approve for a landing the finding
+	// rules refused. A reader told request_changes beside the approve score of
+	// 0.90 would be told the opposite of what om said (gt-oi4je).
+	ReviewVerdict string
 	// Rework is false when only a human can lift the refusal (no_merge), and
 	// past MaxReworkAttempts whatever the kind was: the loop, not the refusal,
 	// is what the ceiling stops.
@@ -764,12 +769,65 @@ func borderlineRejection(v Verdict, bar float64) bool {
 // hasMajorFinding reports whether findings carry one om refuses work on: a
 // major or critical, the severities omPriority names.
 func hasMajorFinding(findings []Finding) bool {
+	return blockingSeverity(findings) != ""
+}
+
+// blockingSeverity names the severity of the finding that refuses the work
+// whatever its score: critical when there is one, major otherwise, and "" when
+// there is neither (gt-oi4je). A severity omPriority has no priority for —
+// info, or a string this review does not know — does not block.
+func blockingSeverity(findings []Finding) string {
+	blocking := ""
 	for _, f := range findings {
-		if _, ok := omPriority(f.Severity); ok {
-			return true
+		priority, ok := omPriority(f.Severity)
+		if !ok {
+			continue
+		}
+		if priority == omPriorityCritical {
+			return "critical"
+		}
+		blocking = "major"
+	}
+	return blocking
+}
+
+// maxMinorFindings is how many minor findings an approving review may carry
+// into a landing (gt-oi4je). A sixth is the review saying the diff is not
+// ready, and one that landed would spend a follow-up bead on each.
+const maxMinorFindings = 5
+
+// findingsRejection is the refusal an approving review earns from its findings
+// alone, or nil when they let it land. om scores a lone major inside the
+// approving band, so the score and the findings are two decisions and this is
+// the findings': an approval carries no major or critical finding and no more
+// than maxMinorFindings minors (gt-oi4je). A verdict that is not an approval is
+// refused or waived elsewhere, and this leaves it alone.
+func findingsRejection(v Verdict) *Rejection {
+	if !v.Approved() {
+		return nil
+	}
+	if severity := blockingSeverity(v.Findings); severity != "" {
+		return &Rejection{Kind: RejectReview, Rework: true,
+			Reason: fmt.Sprintf("a %s finding blocks the landing at any score", severity)}
+	}
+	if minorFindings(v.Findings) > maxMinorFindings {
+		return &Rejection{Kind: RejectReview, Rework: true,
+			Reason: fmt.Sprintf("more than %d minor findings: fix the most important and resubmit", maxMinorFindings)}
+	}
+	return nil
+}
+
+// minorFindings counts the findings om graded minor, the one severity a
+// passing review may carry up to maxMinorFindings of. Info, and a severity
+// this review does not know, are not minors and fill no count.
+func minorFindings(findings []Finding) int {
+	n := 0
+	for _, f := range findings {
+		if omSeverity(f.Severity) == omSeverityMinor {
+			n++
 		}
 	}
-	return false
+	return n
 }
 
 // rescoreBorderline runs om once more over the same head when v is a
@@ -1056,6 +1114,12 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	l.commentVerdict(w, verdict, reviewStart, time.Now())
 	if verdict.Verdict == VerdictRequestChanges {
 		rej := &Rejection{Kind: RejectReview, Rework: true, Reason: fmt.Sprintf("om requested changes (score %.2f, %d finding(s))", verdict.Score, len(verdict.Findings))}
+		return Result{}, l.reject(issue, w, rej, &verdict)
+	}
+	// An approving verdict is a score and a set of findings, and the findings
+	// refuse the landing too: a major inside the approving band would otherwise
+	// land on its score alone (gt-oi4je).
+	if rej := findingsRejection(verdict); rej != nil {
 		return Result{}, l.reject(issue, w, rej, &verdict)
 	}
 	if err := ctx.Err(); err != nil {
@@ -1602,6 +1666,7 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 		rej.Findings = verdict.Findings
 		rej.ReviewSummary = verdict.Summary
 		rej.ReviewScore = verdict.Score
+		rej.ReviewVerdict = verdict.Verdict
 		note.Findings = verdict.Findings
 		note.Receipt = &Receipt{Score: verdict.Score}
 	}

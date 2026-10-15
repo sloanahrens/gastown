@@ -832,7 +832,7 @@ func TestPassOMRejectionCommentCarriesTheVerdict(t *testing.T) {
 	h.seedReady(t, "gt-abc")
 	h.lander.fn = func(int, land.Work) (land.Result, error) {
 		return land.Result{}, &land.Rejection{Kind: land.RejectReview, Rework: true, Reason: "om requested changes (score 0.41, 2 finding(s))",
-			ReviewScore: 0.41, ReviewSummary: "Retry loop drops the last error.",
+			ReviewScore: 0.41, ReviewVerdict: land.VerdictRequestChanges, ReviewSummary: "Retry loop drops the last error.",
 			Findings: []land.Finding{{Severity: "major", Path: "a.go", Line: 9, Title: "error dropped"}, {Severity: "minor", Path: "b.go", Title: "naming"}}}
 	}
 	h.w.Pass(context.Background())
@@ -840,10 +840,40 @@ func TestPassOMRejectionCommentCarriesTheVerdict(t *testing.T) {
 	if len(cs) != 1 {
 		t.Fatalf("comments %q; want exactly one on the work bead", cs)
 	}
-	for _, want := range []string{ReworkComment, "score 0.41", "Retry loop drops the last error.", "[major] a.go:9 error dropped", "[minor] b.go naming"} {
+	for _, want := range []string{ReworkComment, "om verdict: request_changes, score 0.41", "Retry loop drops the last error.", "[major] a.go:9 error dropped", "[minor] b.go naming"} {
 		if !strings.Contains(cs[0], want) {
 			t.Errorf("comment lacks %q:\n%s", want, cs[0])
 		}
+	}
+}
+
+// TestPassFindingRefusalCommentsTheApproveItRefused: a landing om approved and
+// the finding rules refused names the approve, so the author is not told om
+// asked for changes it never asked for (gt-oi4je).
+func TestPassFindingRefusalCommentsTheApproveItRefused(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	h.lander.fn = func(int, land.Work) (land.Result, error) {
+		return land.Result{}, &land.Rejection{Kind: land.RejectReview, Rework: true,
+			Reason:        "a major finding blocks the landing at any score",
+			ReviewScore:   0.90,
+			ReviewVerdict: land.VerdictApprove,
+			ReviewSummary: "Clear change with one real problem.",
+			Findings:      []land.Finding{{Severity: "major", Path: "a.go", Line: 9, Title: "error dropped"}}}
+	}
+	h.w.Pass(context.Background())
+	cs := h.comments(t, "gt-abc")
+	if len(cs) != 1 {
+		t.Fatalf("comments %q; want exactly one on the work bead", cs)
+	}
+	for _, want := range []string{"a major finding blocks the landing at any score", "om verdict: approve, score 0.90", "Clear change with one real problem.", "[major] a.go:9 error dropped"} {
+		if !strings.Contains(cs[0], want) {
+			t.Errorf("comment lacks %q:\n%s", want, cs[0])
+		}
+	}
+	if strings.Contains(cs[0], "request_changes") {
+		t.Errorf("the comment claims om asked for changes on an approve:\n%s", cs[0])
 	}
 }
 
