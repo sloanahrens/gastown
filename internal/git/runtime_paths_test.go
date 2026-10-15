@@ -489,6 +489,20 @@ func TestRuntimeArtifactPathspecsBesideKeepsNewFixtureBesideEditedSource(t *test
 	}
 }
 
+// go tool cover -html and -coverprofile write reports under whatever name the
+// caller picks; the common ones are generator output beside edited source even
+// though looksGenerated has no entry for the exact file (gt-dlwi0).
+func TestRuntimeArtifactPathspecs_UnlistedGeneratorOutputBesideEditedSource(t *testing.T) {
+	t.Parallel()
+	files := func(string) ([]string, error) { return []string{"coverage/collector.go"}, nil }
+	got := RuntimeArtifactPathspecsListing(
+		[]string{"coverage/collector.go", "coverage/coverage.html", "coverage/c.prof"}, files, files)
+	want := []string{"coverage/coverage.html", "coverage/c.prof"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("RuntimeArtifactPathspecsListing = %q, want %q", got, want)
+	}
+}
+
 // looksGenerated is the line between a new fixture and generator output under
 // a coverage/ or .cache/ root.
 func TestLooksGenerated(t *testing.T) {
@@ -502,6 +516,15 @@ func TestLooksGenerated(t *testing.T) {
 		{"pkg/coverage/", "pkg/coverage/lcov-report/index.html", true},
 		{"pkg/coverage/", "pkg/coverage/lcov-report/css/a.css", true},
 		{"pkg/coverage/", "pkg/coverage/default_1.profraw", true},
+		{"pkg/coverage/", "pkg/coverage/c.prof", true},
+		{"pkg/coverage/", "pkg/coverage/cpu.pprof", true},
+		{"pkg/coverage/", "pkg/coverage/coverage.html", true},
+		{"pkg/coverage/", "pkg/coverage/Cover.html", true},
+		{"pkg/coverage/", "pkg/coverage/coverage.lcov", true},
+		{"pkg/coverage/", "pkg/coverage/report.html", false},
+		{"pkg/coverage/", "pkg/coverage/template.html", false},
+		{"pkg/coverage/", "pkg/coverage/testdata/coverage.html", false},
+		{"pkg/coverage/", "pkg/coverage/testdata/c.prof", false},
 		{"pkg/coverage/", "pkg/coverage/testdata/report.golden", false},
 		{"pkg/coverage/", "pkg/coverage/testdata/lcov.info", false},
 		{"pkg/coverage/", "pkg/coverage/testdata/lcov-report/index.html", false},
