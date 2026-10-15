@@ -2711,6 +2711,10 @@ type nukeDeps struct {
 	// MoleculeBeads is the database the molecule burn reads and writes.
 	// nil: bd, in the rig's repo directory.
 	MoleculeBeads beads.Client
+	// Preserve is the self-preserve push of the polecat's branch, for a unit
+	// test that has no git to push from. nil: preserveBranchBeforeNuke on the
+	// worktree or bare repo that holds the branch.
+	Preserve func(branch string) (preserveOutcome, error)
 }
 
 // polecatSessionStopper is the session surface the nuke's first step uses.
@@ -2881,14 +2885,6 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 		branchToDelete = polecatInfo.Branch
 	}
 
-	// Step 2.5: Burn any molecule attached to the polecat's hooked work bead.
-	// Without this, nuked polecats leave orphan molecule refs that block re-sling.
-	// The stale attached_molecule in the work bead's description causes sling to
-	// fail with "bead already has N attached molecule(s)" on re-dispatch (gt-npzy).
-	if getErr == nil && polecatInfo != nil && polecatInfo.Issue != "" {
-		nukeCleanupMolecules(polecatInfo.Issue, r, deps.MoleculeBeads)
-	}
-
 	// Step 2.75: Self-preserve push before nuke (gt-4vr guardrail, gt-yxys
 	// fail-closed). The worktree and local branch are about to be destroyed, so
 	// this is the last chance to get unpushed commits onto the remote. A failed
@@ -2905,14 +2901,16 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 		// Use ClonePath from the polecat record — the worktree lives at
 		// <rig>/polecats/<name>/<rigName>/, not <rig>/polecats/<name>/.
 		var candidates []*git.Git
-		if polecatInfo != nil && polecatInfo.ClonePath != "" {
-			if _, statErr := os.Stat(polecatInfo.ClonePath); statErr == nil {
-				candidates = append(candidates, git.NewGit(polecatInfo.ClonePath))
+		if deps.Preserve == nil {
+			if polecatInfo != nil && polecatInfo.ClonePath != "" {
+				if _, statErr := os.Stat(polecatInfo.ClonePath); statErr == nil {
+					candidates = append(candidates, git.NewGit(polecatInfo.ClonePath))
+				}
 			}
-		}
-		bareRepoPath := filepath.Join(r.Path, ".repo.git")
-		if info, statErr := os.Stat(bareRepoPath); statErr == nil && info.IsDir() {
-			candidates = append(candidates, git.NewGitWithDir(bareRepoPath, ""))
+			bareRepoPath := filepath.Join(r.Path, ".repo.git")
+			if info, statErr := os.Stat(bareRepoPath); statErr == nil && info.IsDir() {
+				candidates = append(candidates, git.NewGitWithDir(bareRepoPath, ""))
+			}
 		}
 		var pushGit *git.Git
 		for _, candidate := range candidates {
@@ -2921,16 +2919,22 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 				break
 			}
 		}
+		preserve := deps.Preserve
+		if preserve == nil {
+			preserve = func(branch string) (preserveOutcome, error) {
+				return preserveBranchBeforeNuke(pushGit, branch, "origin")
+			}
+		}
 
 		switch {
-		case pushGit == nil:
+		case pushGit == nil && deps.Preserve == nil:
 			// Not in any local ref: there is no committed copy of this branch
 			// to lose, so the nuke can proceed. Uncommitted work in the
 			// worktree is what the safety gates above are for.
 			fmt.Printf("  %s branch %s has no local ref — nothing to preserve\n",
 				style.Dim.Render("○"), branchToDelete)
 		default:
-			outcome, preserveErr := preserveBranchBeforeNuke(pushGit, branchToDelete, "origin")
+			outcome, preserveErr := preserve(branchToDelete)
 			if preserveErr == nil {
 				preservedRef = outcome.RemoteRef
 				alreadyOnRemote = outcome.AlreadyThere
@@ -2955,6 +2959,16 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 					NukeAcknowledgeUnpreservedFlag, branchToDelete)
 			}
 		}
+	}
+
+	// Step 2.8: Burn any molecule attached to the polecat's hooked work bead.
+	// Without this, nuked polecats leave orphan molecule refs that block re-sling.
+	// The stale attached_molecule in the work bead's description causes sling to
+	// fail with "bead already has N attached molecule(s)" on re-dispatch (gt-npzy).
+	// It runs after the preserve gate: a refused nuke leaves the molecule, its
+	// steps and bonds alone, so a resume still has its workflow state.
+	if getErr == nil && polecatInfo != nil && polecatInfo.Issue != "" {
+		nukeCleanupMolecules(polecatInfo.Issue, r, deps.MoleculeBeads)
 	}
 
 	// Step 2.9: Give the hooked work bead back (gt-vm5g4). Without this the
