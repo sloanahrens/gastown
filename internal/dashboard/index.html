@@ -12,24 +12,22 @@
 *{box-sizing:border-box}
 html,body{margin:0;background:var(--bg);color:var(--text);font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 body{padding:0 16px 24px;max-width:1500px;margin:0 auto}
-header{display:flex;align-items:center;gap:14px;padding:14px 0;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:2}
+header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:14px 0;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:2}
 h1{font-size:15px;margin:0;letter-spacing:.08em;text-transform:uppercase;color:var(--teal)}
 .pill{padding:3px 10px;border-radius:999px;font-weight:700;font-size:12px;border:1px solid currentColor}
 .pill.green{color:var(--green)}.pill.degraded{color:var(--amber)}.pill.red{color:var(--red)}.pill.unknown{color:var(--dim)}
 #healthline{color:var(--dim);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #healthmark{white-space:nowrap}
-#models{color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#strip{color:var(--dim);min-width:0}
+#strip b{font-weight:700}
+.v{color:var(--text)}
+#models{background:none;border:0;padding:0;color:var(--dim);font:inherit;cursor:pointer;white-space:nowrap}
+#models:hover{color:var(--text)}
 #modelspanel{display:flex;gap:32px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--line)}
 #modelspanel:empty{display:none}
 #modelspanel table{width:auto;min-width:260px}
 #conn{font-size:12px;color:var(--dim)}
 #conn.on::before{content:"● ";color:var(--green)}#conn.off::before{content:"● ";color:var(--red)}
-.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:14px 0}
-.tile{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
-.tile .k{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
-.tile .v{font-size:22px;font-weight:700;margin-top:2px}
-.tile .s{color:var(--dim);font-size:11px;min-height:15px}
-.tile.warn .v{color:var(--amber)}.tile.bad .v{color:var(--red)}.tile.ok .v{color:var(--green)}
 .grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);gap:12px}
 @media (max-width:1000px){.grid{grid-template-columns:1fr}}
 .col{display:flex;flex-direction:column;gap:12px;min-width:0}
@@ -225,16 +223,15 @@ a.hrow:hover{background:#19212b}
   <span id="verdict" class="pill unknown">UNKNOWN</span>
   <span id="healthline">waiting for the town…</span>
   <span id="healthmark" class="pill red" hidden></span>
-  <span id="models"></span>
+  <span id="strip"></span>
+  <button id="models" type="button" aria-expanded="false" aria-controls="modelspanel" title="every seat, and the model each role runs">models ▸</button>
   <span id="conn" class="off">connecting</span>
   <button id="alertsctl" type="button">alerts: off</button>
 </header>
 
-<div id="modelspanel"></div>
+<div id="modelspanel" hidden></div>
 
 <div id="toasts"></div>
-
-<div class="tiles" id="tiles"></div>
 
 <div class="grid">
   <div class="col">
@@ -312,10 +309,39 @@ function readCaption(r, parts) {
 
 let state = null;
 
-function tile(k, v, sub, cls) {
-  const t = el("div", "tile" + (cls ? " " + cls : ""));
-  t.append(el("div", "k", k), el("div", "v", v), el("div", "s", sub || ""));
-  return t;
+// One fact of the status strip. Each is separated from the one before it by
+// the middot the rest of the page joins with, and its value is the only bold
+// thing in it, so a glance lands on the numbers.
+function factBox(box) {
+  if (box.childElementCount) box.append(document.createTextNode(" · "));
+  const x = el("span", "fact");
+  box.append(x);
+  return x;
+}
+
+// fact is one value and the name of what it counts, with the reading's own
+// detail in the title. The value is the bright part of the fact unless the
+// reading gives it another colour — the page's own amber and red — and a fact
+// whose name leads it, so the value reads as a word, is drawn the other way
+// round.
+function fact(box, value, name, opts) {
+  opts = opts || {};
+  const x = factBox(box);
+  const b = el("b", opts.cls || "v", value);
+  if (opts.lead) x.append(document.createTextNode(name + " "), b);
+  else x.append(b, document.createTextNode(" " + name));
+  if (opts.extra) x.append(document.createTextNode(" · " + opts.extra));
+  if (opts.tip) x.title = opts.tip;
+  return x;
+}
+
+// paneCount reads a pane's own reader as a count: nothing before the read has
+// come back, "unavailable" for one that failed or could not be made, else the
+// rows it listed plus the ones it counted and left out.
+function paneCount(pane) {
+  if (!pane) return null;
+  if (pane.unavailable) return "unavailable";
+  return (pane.rows || []).length + (pane.more || 0);
 }
 
 // causeText keys one non-green health field the way the health line does —
@@ -348,31 +374,152 @@ function renderHealth(h) {
   $("healthline").textContent = h && h.line ? h.line : "no health report";
 }
 
-// renderModels is the header strip: what the town runs its work on. Every
-// model comes from a config file the server re-reads on each poll, so a mode
-// switched in settings shows here within one; a field the server could not
-// read says unknown rather than leaving the strip looking like a town running
-// nothing. Seats are the polecats holding one — the pool's live polecats —
-// against the cap the pool declares; a pool that declares none shows the
-// count alone, because a cap of zero is not a cap.
-function renderModels(s) {
-  const m = s.models || {};
-  const seats = m.seats ? (m.seats.cap > 0 ? m.seats.live + "/" + m.seats.cap : String(m.seats.live)) : "–";
-  $("models").textContent = "polecats " + (m.polecat || "unknown") + " · seats " + seats + " · om " + (m.om || "unknown");
+// seatFacts is the strip's seats: what each open seat runs and how full it is,
+// off the seat rows the hub fills from the same polecats the Polecats pane
+// counts, so the two cannot disagree. A closed seat — nothing may fill it — is
+// left to the models line, and a seat whose config nobody could read says
+// unknown rather than passing as a seat nobody runs. The pro seat is named the
+// reserved one, which is what the town keeps it for: work pinned to its agent
+// (gt pool mix). No rows at all is a settings read that has not come back, not
+// a town with no seats: the reader always sends the three.
+function seatFacts(m) {
+  if (!m || !(m.seat_rows || []).length) return null;
+  const out = [];
+  for (const sr of m.seat_rows) {
+    const key = sr.key || "no config key recorded";
+    if (sr.unknown) { out.push({text: (sr.seat || "seat") + " seat unknown", title: "the config this seat is read from could not be read · " + key}); continue; }
+    if (sr.closed) continue;
+    const where = (sr.seat === "pro" ? "the pro seat, reserved for work pinned to its agent" : "the " + (sr.seat || "unknown") + " seat") + " · " + key;
+    out.push({
+      text: (sr.agent || "no agent") + " " + (sr.live == null ? "–" : sr.live) + "/" + sr.cap + (sr.cap_default ? "*" : "") + (sr.seat === "pro" ? " (reserved)" : ""),
+      title: where + (sr.live == null ? " · the polecats have not been read yet" : "") + (sr.cap_default ? " · the cap key is unset, so this is the default the dispatcher holds it to" : ""),
+    });
+  }
+  return out;
 }
 
-// renderModelsPanel is the table under the header strip: each polecat seat
-// with its agent, cap and live count, and the model each role runs on with the
-// config key it came from. A role whose live setting differs from the town
-// model table wears a drift badge naming what the table says. Like the strip,
-// every field is a fresh read of the configs, and one the server could not
-// read says unknown, never a blank that looks like a value.
+// renderStrip is the page's one status strip, and the whole of its top: the
+// verdict, the day's shape and what needs the operator as one line of facts.
+// Each fact is drawn once, from the reader that owns it — the landings off the
+// Landings pane's own window, the seats off the polecats the Polecats pane
+// counts, the queue off the ready read, what needs you off the two panes below
+// — and a reading nobody has made says so: a strip that drew a zero it had not
+// read would answer the operator with a fact it invented. The three facts the
+// tiles also carried are drawn only in the state the tile would have coloured
+// them, so an alert is never lost to the strip being one line.
+function renderStrip(s) {
+  const box = $("strip");
+  box.replaceChildren();
+  const sm = s.summary || {};
+
+  // Landings: the trend's own last 24 hours. No trend is a window nobody has
+  // read yet, not a day in which nothing landed.
+  const t = s.trend || null;
+  const landed = ((t && t.hours) || []).reduce((n, h) => n + h.landed, 0);
+  fact(box, t ? String(landed) : "–", "landed/24h",
+    {cls: t ? "" : "title", tip: t ? "what landed in the last 24 hours, off the Landings pane's own window" : "the landings window has not been read yet"});
+
+  // Seats: one entry per open seat.
+  const seats = seatFacts(s.models);
+  const sp = factBox(box);
+  if (!seats) { sp.append(el("b", "title", "–"), document.createTextNode(" seats")); sp.title = "the town's settings have not been read yet"; }
+  else if (!seats.length) { sp.append(el("b", "", "no open seats")); sp.title = "every seat is closed: the pool, the pro seat and the second seat name no agent the dispatcher could run"; }
+  else seats.forEach((f, i) => { const x = el("span", "", (i ? " · " : "") + f.text); if (f.title) x.title = f.title; sp.append(x); });
+
+  // Working: the polecats on the job — holding a bead with a session that is
+  // producing output, one that has gone quiet for under the polecat pane's ten
+  // minutes, or one gating its bead. A parked rig is stood down on purpose and
+  // holds nothing, so it is counted nowhere here; the rest of the seats' states
+  // are named in the title rather than folded into this number.
+  const pcs = s.polecats || [];
+  const live = pcs.filter(p => !p.rig_parked);
+  const n = k => live.filter(p => p.state === k).length;
+  const active = n("working") + n("quiet") + n("gating");
+  const rest = [n("queued") ? n("queued") + " queued" : null, n("stalled") ? n("stalled") + " stalled" : null,
+    n("needs-human") ? n("needs-human") + " need a human" : null, n("unknown") ? n("unknown") + " unknown (tmux unreadable)" : null,
+    n("quiet") ? n("quiet") + " quiet" : null].filter(Boolean).join(" · ");
+  fact(box, s.summary ? String(active) : "–", "working",
+    {cls: n("stalled") + n("needs-human") ? "badc" : n("quiet") ? "warnc" : "",
+     tip: "polecats holding work with a live session" + (rest ? " · " + rest : "") + (n("stalled") + n("needs-human") ? " · the Polecats pane has the rows" : "")});
+
+  // Waiting to land: the ready reader's count, and how long the oldest has
+  // waited. A read that failed or aged is named — it is never a drained queue.
+  const rr = readOf(s, "ready");
+  const q = sm.ready_to_land;
+  const oldest = sm.oldest_ready ? (Date.now() - new Date(sm.oldest_ready).getTime()) / 1000 : null;
+  if (rr && rr.stale) fact(box, "unavailable", "waiting to land", {cls: rr.error ? "badc" : "warnc",
+    tip: rr.error ? "the read that lists what is waiting to land failed" : "the last count of what is waiting to land is old"});
+  else fact(box, q == null ? "–" : String(q), "waiting to land",
+    {cls: oldest > 3600 ? "badc" : oldest > 900 ? "warnc" : "", extra: oldest == null ? null : "oldest " + fmtDur(oldest),
+     tip: "beads submitted and waiting for the landing worker; the age is the oldest one's"});
+
+  // Needs you: everything waiting on a decision — the open escalations and the
+  // overseer's open questions — off the same two reads the panes below draw, so
+  // the strip and the panes cannot disagree. Bead gt-bi6w0 wires this to the
+  // one merged attention list; until then it is their sum.
+  const esc = paneCount(s.escalations), ask = paneCount(s.questions);
+  const failed = [esc === "unavailable" ? "the escalations" : null, ask === "unavailable" ? "the questions" : null].filter(Boolean);
+  const pending = [esc === null ? "the escalations" : null, ask === null ? "the questions" : null].filter(Boolean);
+  if (failed.length) fact(box, "unavailable", "needs you", {cls: "badc",
+    tip: failed.join(" and ") + " could not be read" + (pending.length ? ", and " + pending.join(" and ") + " has not been read yet" : "")});
+  else if (pending.length) fact(box, "–", "needs you", {cls: "title", tip: pending.join(" and ") + " has not been read yet"});
+  else fact(box, String(esc + ask), "needs you", {cls: esc + ask ? "badc" : "",
+    tip: esc + " open escalation" + (esc === 1 ? "" : "s") + " · " + ask + " open question" + (ask === 1 ? "" : "s") + " · everything waiting on a decision"});
+
+  // The tiles' three other facts, drawn only when they have something to say:
+  // each is here in the state that would have coloured its tile, so the strip
+  // stays one line and no alert is dropped with the tiles.
+  const m = s.machine || {};
+  const cores = navigator.hardwareConcurrency || 8;
+  if (m.load1 != null && m.load1 > cores) fact(box, m.load1.toFixed(1), "load",
+    {lead: true, cls: m.load1 > cores * 3 ? "badc" : "warnc",
+     tip: "1m load over " + cores + " cores" + (m.load5 != null ? " · 5m " + m.load5.toFixed(1) + " · 15m " + m.load15.toFixed(1) : "") + " · the Machine pane has the curve"});
+  if (sm.behind > 0) fact(box, sm.behind + " behind", "vs main",
+    {lead: true, cls: sm.behind > 20 ? "warnc" : "",
+     tip: sm.main_tip ? "the installed gt is " + sm.behind + " commits behind main " + sm.main_tip + " (" + (sm.installed_gt || "?") + "), as of the install repo's last fetch" : "the installed gt is behind main, as of the install repo's last fetch"});
+  if (sm.deploy_waiting > 0) fact(box, String(sm.deploy_waiting), "awaiting deploy",
+    {tip: "beads that landed and are waiting for their deploy; the Deploys block has the runs, and the median dispatch→deploy is " + (sm.median_deploy_min == null ? "not read" : Math.round(sm.median_deploy_min) + "m")});
+}
+
+// The models line folds away the seat table and the model-per-role table that
+// used to sit under the header, which the strip's seats fact and each pane's
+// own rows already carry the numbers of. It starts folded, so the top of the
+// page is one line until somebody asks for the detail, and the choice is the
+// viewer's, remembered the way every pane's fold is — in the same gt-collapsed
+// store setupCollapse reads and writes.
+let modelsOpen = false;
+try { modelsOpen = (JSON.parse(localStorage.getItem("gt-collapsed") || "{}") || {})["models"] === false; } catch (e) {}
+function paintModelsLine() {
+  const b = $("models");
+  b.textContent = "models " + (modelsOpen ? "▾" : "▸");
+  b.setAttribute("aria-expanded", modelsOpen ? "true" : "false");
+  $("modelspanel").hidden = !modelsOpen;
+}
+function toggleModels() {
+  modelsOpen = !modelsOpen;
+  paintModelsLine();
+  try {
+    const saved = JSON.parse(localStorage.getItem("gt-collapsed") || "{}") || {};
+    saved["models"] = !modelsOpen;
+    localStorage.setItem("gt-collapsed", JSON.stringify(saved));
+  } catch (e) {}
+  renderModelsPanel(state || {});
+}
+
+// renderModelsPanel is what the models line opens: each polecat seat with its
+// agent, cap and live count, and the model each role runs on with the config
+// key it came from. A role whose live setting differs from the town model table
+// wears a drift badge naming what the table says. Every field is a fresh read
+// of the configs, and one the server could not read says unknown, never a blank
+// that looks like a value. A folded line keeps no table in the DOM, and one
+// with nothing to open says so in a line.
 function renderModelsPanel(s) {
   const box = $("modelspanel");
+  if (!modelsOpen) { box.replaceChildren(); return; }
   const m = s.models;
   box.replaceChildren();
   const seats = (m && m.seat_rows) || [], roles = (m && m.roles) || [];
-  if (!seats.length && !roles.length) return;
+  if (!seats.length && !roles.length) { box.append(el("div", "empty", "no seats and no roles have been read yet")); return; }
   const table = (cols, rows) => {
     const t = el("table"), head = el("tr");
     cols.forEach(([h, num]) => head.append(el("th", num ? "n" : "", h)));
@@ -409,48 +556,6 @@ function renderModelsPanel(s) {
     return tr;
   });
   box.append(table([["Seat"], ["Agent"], ["Live / cap", 1]], seatRows), table([["Role"], ["Model"]], roleRows));
-}
-
-function renderTiles(s) {
-  const sm = s.summary || {};
-  const tiles = $("tiles");
-  tiles.replaceChildren();
-  const q = sm.ready_to_land;
-  const rr = readOf(s, "ready");
-  let oldest = sm.oldest_ready ? (Date.now() - new Date(sm.oldest_ready).getTime()) / 1000 : null;
-  tiles.append(tile("Waiting to land", q == null ? "–" : String(q),
-    q == null ? (rr && rr.stale ? "unavailable" : "queue empty") : readCaption(rr, ["oldest " + fmtDur(oldest)]),
-    rr && rr.stale ? (rr.error ? "bad" : "warn") : q == null ? "" : (oldest > 3600 ? "bad" : oldest > 900 ? "warn" : q ? "" : "ok")));
-  const pcs = s.polecats || [];
-  const live = pcs.filter(p => !p.rig_parked);   // a parked rig is stood down on purpose
-  const n = k => live.filter(p => p.state === k).length;
-  const active = n("working") + n("quiet") + n("gating");
-  const bad = n("stalled") + n("needs-human");
-  tiles.append(tile("Polecats working", pcs.length ? String(active) : "–",
-    [sm.seats_cap ? "cap " + sm.seats_cap : null, pcs.length > live.length ? (pcs.length - live.length) + " in parked rigs" : null, n("queued") ? n("queued") + " queued" : null, n("stalled") ? n("stalled") + " stalled" : null, n("unknown") ? n("unknown") + " unknown (tmux unreadable)" : null, n("needs-human") ? n("needs-human") + " need a human" : null, n("quiet") ? n("quiet") + " quiet" : null].filter(Boolean).join(" · "),
-    bad ? "bad" : n("quiet") ? "warn" : ""));
-  tiles.append(tile("Escalations", sm.escalations == null ? "–" : String(sm.escalations), "", sm.escalations ? "bad" : (sm.escalations === 0 ? "ok" : "")));
-  const med = sm.median_deploy_min;
-  tiles.append(tile("Ship time", med == null ? "–" : Math.round(med) + "m", "median dispatch→deploy" +
-    (sm.deploy_waiting ? " · " + sm.deploy_waiting + " awaiting deploy" : "")));
-  tiles.append(tile("main vs gt", sm.behind == null ? "–" : (sm.behind === 0 ? "current" : sm.behind + " behind"),
-    sm.main_tip ? sm.main_tip + " / " + (sm.installed_gt || "?") + " · as of the install repo’s last fetch" : "", sm.behind > 20 ? "warn" : ""));
-  tiles.append(hostTile(s.machine || {}));
-  $("tiles").dataset.at = s.summary_at || "";
-}
-
-// The host's busyness as its own tile: CPU idle leads it and the load average
-// trails. macOS counts running threads in its load average, so a load-led tile
-// reads a 24-core host at load 30 — half its CPU idle — as a drowning machine
-// (gt-auiji). The colour is the reader's host_state, so the tile and the
-// exec-tax field turn at the same reading; an idle reading the host did not
-// report is a dash on an uncoloured tile, never a green one.
-function hostTile(m) {
-  const idle = m.cpu_idle;
-  const sub = [m.dolt_cores != null ? "dolt " + m.dolt_cores.toFixed(1) + " cores" : null,
-    m.load1 != null ? "load " + m.load1.toFixed(1) + (m.cores ? " on " + m.cores + " cores" : "") : null,
-    m.load5 != null ? "5m " + m.load5.toFixed(1) + " · 15m " + m.load15.toFixed(1) : null].filter(Boolean).join(" · ");
-  return tile("Host CPU", idle == null ? "–" : Math.round(idle) + "% idle", sub, m.host_state || "");
 }
 
 function copyText(text, btn) {
@@ -2552,7 +2657,7 @@ function renderQueue(s, force) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderModels(state); renderModelsPanel(state); renderTiles(state); renderOverseer(state); renderQuestions(state); renderDeepReview(state); renderUsage(state); renderEscalations(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderReports(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
+function renderAll() { if (!state) return; renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderOverseer(state); renderQuestions(state); renderDeepReview(state); renderUsage(state); renderEscalations(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderReports(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));
@@ -2663,10 +2768,12 @@ function toggleFeed() {
 }
 $("forgejofeedhead").addEventListener("click", toggleFeed);
 foldFeed(false); // no state has arrived yet, so there is no Actions section
+$("models").addEventListener("click", toggleModels);
+paintModelsLine();
 renderChips();
 connect();
 // Ages and elapsed times drift between pushes; redraw the cheap parts locally.
-setInterval(() => { if (state) { renderTiles(state); renderSeats(state); renderTierSweep(state); renderForgejo(state); renderQueue(state); } }, 15000);
+setInterval(() => { if (state) { renderStrip(state); renderSeats(state); renderTierSweep(state); renderForgejo(state); renderQueue(state); } }, 15000);
 </script>
 </body>
 </html>
