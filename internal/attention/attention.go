@@ -74,6 +74,9 @@ const (
 	// KindOverseerSilent: the overseer's heartbeat is older than its window
 	// while dispatchable work or an unanswered question waits.
 	KindOverseerSilent Kind = "overseer-silent"
+	// KindDispatchIdle: the dispatcher has a free seat and dispatchable work
+	// and has started nothing for several ticks.
+	KindDispatchIdle Kind = "dispatch-idle"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -86,7 +89,7 @@ func Kinds() []Kind {
 		KindRevertRefused, KindBlockedMail, KindOverrunStopped, KindScheduledGate,
 		KindHostDisk, KindHostMem, KindHostDocker, KindHostProbe,
 		KindQuestionNew, KindQuestionAnswered, KindQuestionStale,
-		KindOverseerSilent,
+		KindOverseerSilent, KindDispatchIdle,
 	}
 }
 

@@ -380,6 +380,10 @@ type Daemon struct {
 	dispatchTicksMu sync.Mutex
 	dispatchTicks   []townhealth.DispatchTick
 
+	// dispatchIdle counts the ticks that had a free seat and a dispatchable
+	// bead and started nothing, which the dispatch.idle rule judges (gt-wil0h).
+	dispatchIdle dispatchIdleTracker
+
 	// specUnshapedWarned remembers the beads the spec_dispatch ticker has
 	// warned about as unshaped, so a bead held unshaped every tick warns on the
 	// first tick that sees it, not on each (gt-gzav5).

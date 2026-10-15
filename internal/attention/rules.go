@@ -61,6 +61,9 @@ const (
 
 	// RuleOverseerSilent is the silent-overseer rule (gt-3a6h6).
 	RuleOverseerSilent = "overseer.silent"
+
+	// RuleDispatchIdle is the idle-dispatcher rule (gt-wil0h).
+	RuleDispatchIdle = "dispatch.idle"
 )
 
 var (
@@ -90,6 +93,9 @@ var ruleFlags = map[string]RuleFlags{
 	RuleHostDiskCrit:   flagsWake,
 	RuleHostMemLow:     flagsWake,
 	RuleHostDockerDown: flagsWake,
+	// Free seats and dispatchable beads with nothing started is work that is
+	// not happening, which no rule over existing work can see.
+	RuleDispatchIdle: flagsWake,
 	// A question is waiting on Sloan, or Sloan has answered and the overseer
 	// has yet to act; both are the overseer's to pick up.
 	RuleQuestionNew:      flagsWake,
@@ -175,6 +181,7 @@ var kindRules = map[Kind]string{
 	KindQuestionAnswered: RuleQuestionAnswered,
 	KindQuestionStale:    RuleQuestionStale,
 	KindOverseerSilent:   RuleOverseerSilent,
+	KindDispatchIdle:     RuleDispatchIdle,
 }
 
 // RuleFor is the rule id of an item. The disk collector's key is its rule
