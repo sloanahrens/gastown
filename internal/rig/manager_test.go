@@ -1566,7 +1566,7 @@ func TestAddRigDoesNotDropAnotherRigsDatabase(t *testing.T) {
 			BeadsPrefix:   "beads",
 			SkipDoltCheck: true,
 		})
-		if err == nil || !strings.Contains(err.Error(), `names the Dolt database of rig "beads"`) {
+		if err == nil || !strings.Contains(err.Error(), `names "beads", the Dolt database of a registered rig`) {
 			t.Fatalf("AddRig error = %v, want the prefix collision named", err)
 		}
 		if !dolt.Exists("beads") {
@@ -1600,6 +1600,71 @@ func TestAddRigDoesNotDropAnotherRigsDatabase(t *testing.T) {
 		}
 		if dolt.Exists("ab") {
 			t.Errorf("the orphan database %q should have been removed: %v", "ab", dolt.dbs)
+		}
+	})
+
+	// The new prefix's legacy orphan form, beads_<prefix>, names another rig's
+	// database, and that rig is on disk only: the Manager's snapshot predates
+	// it, so the prefix check has to read the registry to see it at all.
+	t.Run("beads_<prefix> names an on-disk-only rig's database", func(t *testing.T) {
+		t.Parallel()
+		root, rigsConfig := setupTestTown(t)
+		manager, _, _ := testManager(root, rigsConfig)
+		onDisk := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{
+			"mango_apps": {BeadsConfig: &config.BeadsConfig{Prefix: "ma"}, DoltDatabase: "beads_ma"},
+		}}
+		if err := config.SaveRigsConfig(filepath.Join(root, "mayor", "rigs.json"), onDisk); err != nil {
+			t.Fatalf("saving the registry: %v", err)
+		}
+		dolt := newFakeDolt("beads_ma")
+		manager.dolt = dolt
+
+		_, err := manager.AddRig(AddRigOptions{
+			Name:          "mallow",
+			GitURL:        "git@github.com:test/mallow.git",
+			BeadsPrefix:   "ma",
+			SkipDoltCheck: true,
+		})
+		if err == nil || !strings.Contains(err.Error(), `names "beads_ma", the Dolt database of a registered rig`) {
+			t.Fatalf("AddRig error = %v, want the prefix collision named", err)
+		}
+		if !dolt.Exists("beads_ma") {
+			t.Errorf("rig mango_apps' database was dropped: %v", dolt.dbs)
+		}
+	})
+
+	// A rig whose database is not named after it is no collision at all: the
+	// gastown rig keeps the "gt" database, so adding a rig with prefix
+	// "gastown" drops the orphan "gastown", which nothing owns.
+	t.Run("prefix names a rig, not that rig's database", func(t *testing.T) {
+		t.Parallel()
+		root, rigsConfig := setupTestTown(t)
+		manager, f, _ := testManager(root, rigsConfig)
+		rigsConfig.Rigs["gastown"] = config.RigEntry{
+			BeadsConfig:  &config.BeadsConfig{Prefix: "gt"},
+			DoltDatabase: "gt",
+		}
+		if err := config.SaveRigsConfig(filepath.Join(root, "mayor", "rigs.json"), rigsConfig); err != nil {
+			t.Fatalf("saving the registry: %v", err)
+		}
+		dolt := newFakeDolt("gt", "gastown") // "gastown": the orphan bd init leaves
+		manager.dolt = dolt
+		gitURL := remoteRepo(t, f, filepath.Join(t.TempDir(), "source"), nil)
+
+		if _, err := manager.AddRig(AddRigOptions{
+			Name:          "gastown_viewer",
+			GitURL:        gitURL,
+			BeadsPrefix:   "gastown",
+			SkipDoltCheck: true,
+		}); err != nil {
+			t.Fatalf("AddRig: %v", err)
+		}
+
+		if !dolt.Exists("gt") {
+			t.Errorf("rig gastown's database was dropped: %v", dolt.dbs)
+		}
+		if dolt.Exists("gastown") {
+			t.Errorf("the orphan database %q should have been removed: %v", "gastown", dolt.dbs)
 		}
 	})
 }

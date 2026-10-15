@@ -661,10 +661,13 @@ func TestCheckPrefixAvailableRejectsExistingRigName(t *testing.T) {
 		t.Fatal(err)
 	}
 	// beads_ab is registered but routed nowhere, which is the state the drop
-	// sees when a rig is added from a config the route file predates.
+	// sees when a rig is added from a config the route file predates. It
+	// records no database of its own, so its name stands in for one.
 	registry := &config.RigsConfig{Version: 1, Rigs: map[string]config.RigEntry{
+		"gastown":  {BeadsConfig: &config.BeadsConfig{Prefix: "gt"}, DoltDatabase: "gt"},
 		"beads":    {BeadsConfig: &config.BeadsConfig{Prefix: "bd"}, DoltDatabase: "beads"},
 		"beads_ab": {BeadsConfig: &config.BeadsConfig{Prefix: "ba"}},
+		"mango":    {BeadsConfig: &config.BeadsConfig{Prefix: "mg"}, DoltDatabase: "beads_ma"},
 	}}
 	if err := os.MkdirAll(filepath.Join(tmpDir, "mayor"), 0755); err != nil {
 		t.Fatal(err)
@@ -679,9 +682,10 @@ func TestCheckPrefixAvailableRejectsExistingRigName(t *testing.T) {
 		newPath string
 		wantErr bool
 	}{
-		{"prefix names a registered rig's own name", "gastown", "foo", true},
 		{"prefix names a registered rig's database", "beads", "foo", true},
+		{"prefix names a rig, not that rig's database", "gastown", "foo", false},
 		{"prefix names beads_<registered rig>", "ab", "alpha_bravo", true},
+		{"prefix names another rig's beads_<prefix> database", "ma", "mallow", true},
 		{"prefix names the new rig itself", "foo", "foo", false},
 		{"prefix names nothing registered", "co", "coolthing", false},
 	}
