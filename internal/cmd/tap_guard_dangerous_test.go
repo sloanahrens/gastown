@@ -95,9 +95,11 @@ func TestMatchesDangerousGitPush(t *testing.T) {
 // TestMatchesDangerousGitReset pins the gt-63sz guard: resetting onto a
 // remote-tracking ref is the squash-onto-a-fresh-base habit that silently
 // encodes a revert of everything merged since the checkout was cut. Every mode
-// is blocked (the implicit --mixed of a bare `git reset origin/main` included);
-// every reset to a local ref or a pathspec still works, since that is the
-// ordinary squash and unstage vocabulary.
+// is blocked (the implicit --mixed of a bare `git reset origin/main` included),
+// as is a target written as a shell expansion, whose text the guard cannot
+// resolve to the ref it really names (gt-tao2j); every reset to a local ref or
+// a pathspec still works, since that is the ordinary squash and unstage
+// vocabulary.
 func TestMatchesDangerousGitReset(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -150,6 +152,23 @@ func TestMatchesDangerousGitReset(t *testing.T) {
 		{"doubled peel", "git reset --soft @{u}^{}^{}", true},
 		{"mixed onto a peeled remote ref", "git reset --mixed origin/main^{commit}", true},
 
+		// Blocked — a target the guard cannot resolve: the shell expands it
+		// before git sees it, so the ref it really names is unreadable here
+		// (gt-tao2j). A quoted "$(…)" arrives as one token and a bare "$BASE"
+		// as one more; an unquoted substitution splits at its spaces, with
+		// its first word still carrying the "$(".
+		{"soft to a quoted substitution", `git reset --soft "$(git rev-parse origin/main)"`, true},
+		{"soft to an unquoted substitution", "git reset --soft $(cat /tmp/base)", true},
+		{"soft to an unquoted backtick substitution", "git reset --soft `cat /tmp/base`", true},
+		{"soft to a variable", "git reset --soft $BASE", true},
+		{"soft to a braced variable", "git reset --soft ${BASE}", true},
+		{"soft to a positional parameter", "git reset --soft $1", true},
+		{"soft to a backtick substitution", "git reset --soft `git rev-parse origin/main`", true},
+		{"soft to a variable with a suffix", "git reset --soft $BASE~1", true},
+		{"bare reset to a variable (implicit --mixed)", "git reset $BASE", true},
+		{"soft to a variable after a quiet flag", "git reset -q --soft $BASE", true},
+		{"soft to a substitution behind git -C", "git -C /tmp/repo reset --soft $(git rev-parse origin/main)", true},
+
 		// Allowed — local targets, pathspecs, and quoted prose.
 		{"soft to a local commit", "git reset --soft HEAD~1", false},
 		{"soft to a local commit by caret", "git reset --soft HEAD^", false},
@@ -161,6 +180,9 @@ func TestMatchesDangerousGitReset(t *testing.T) {
 		{"mixed to a local branch", "git reset --mixed feature/x", false},
 		{"reset a pathspec named like a ref", "git reset -- origin/main", false},
 		{"unstage a file", "git reset HEAD file.go", false},
+		// Only the target is judged: a pathspec after it cannot reset
+		// anything onto a ref, so an expanded one stays allowed.
+		{"unstage an expanded pathspec", "git reset HEAD $file", false},
 		{"no reset at all", "git status", false},
 		{"ref name inside quoted prose", `gt mail send x -s "note" -m "never git reset --soft origin/main"`, false},
 	}
@@ -1357,6 +1379,9 @@ func TestDangerousGuard_Integration(t *testing.T) {
 		{"git push --force", "git push --force origin main", true},
 		{"git reset --hard", "git reset --hard HEAD~1", true},
 		{"git reset --soft onto origin/main", "git reset --soft origin/main", true},
+		{"git reset --soft onto a quoted command substitution", `git reset --soft "$(git rev-parse origin/main)"`, true},
+		{"git reset --soft onto a bare variable", "git reset --soft $BASE", true},
+		{"git reset --soft onto a variable holding the remote ref", "BASE=$(git rev-parse origin/main); git reset --soft $BASE", true},
 		{"git clean -f", "git clean -f", true},
 		{"git clean -fd", "git clean -fd", true},
 		{"git clean --force", "git clean --force", true},
