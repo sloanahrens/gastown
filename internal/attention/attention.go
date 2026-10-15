@@ -54,6 +54,15 @@ const (
 	// KindScheduledGate: a scheduled sling's gate_command failed or timed out
 	// three ticks in a row, so the schedule is not running.
 	KindScheduledGate Kind = "scheduled-gate"
+	// KindHostDisk: the volume holding the town root is filling.
+	KindHostDisk Kind = "host-disk"
+	// KindHostMem: the host's free memory is low.
+	KindHostMem Kind = "host-mem"
+	// KindHostDocker: a container of the Forgejo or hm stack is not running.
+	KindHostDocker Kind = "host-docker"
+	// KindHostProbe: a host probe (disk, memory or docker) failed, so its rule
+	// could not be judged this tick.
+	KindHostProbe Kind = "host-probe"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -64,6 +73,7 @@ func Kinds() []Kind {
 		KindPolecatStall, KindLandingStuck, KindQueueStuck, KindDirectPush,
 		KindSlotHeld, KindSlotDeadHolder, KindBDSlow, KindTierSweepRed,
 		KindRevertRefused, KindBlockedMail, KindOverrunStopped, KindScheduledGate,
+		KindHostDisk, KindHostMem, KindHostDocker, KindHostProbe,
 	}
 }
 

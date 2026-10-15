@@ -73,6 +73,7 @@ func newAttentionFixture(t *testing.T, now time.Time) *attentionFixture {
 		riskLandings:  func(string, time.Time) ([]land.LandingRecord, error) { return nil, nil },
 		riskNotes:     func(context.Context, string, string) (string, error) { return "", nil },
 
+		host:        healthyHost(),
 		reworkNotes: map[string]reworkNote{},
 	}
 	return &attentionFixture{d: d, logs: logs, now: now, src: src}
@@ -752,6 +753,7 @@ func TestWriteAttention_WritesTheQueueFromTheDaemonsOwnReads(t *testing.T) {
 			LandingWorker: &LandingWorkerConfig{Enabled: true},
 		}},
 		openWorkBeads: bd.open,
+		hostProbes:    healthyHost(),
 	}
 
 	d.writeAttention()

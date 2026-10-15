@@ -113,6 +113,10 @@ type Daemon struct {
 	// only.
 	lastAttention *attentionCache
 
+	// hostProbes replaces the production reads of the attention host
+	// collectors (attention_host.go); nil is production.
+	hostProbes hostProbes
+
 	// townHealthSources replaces the health report's outside probes (Dolt
 	// ping, backup root, slot status) in tests; nil probes for real.
 	townHealthSources func(s *healthSources)
