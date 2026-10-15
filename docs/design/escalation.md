@@ -79,7 +79,52 @@ cycle, and a condition that persists for days would never say so twice.
 | `email:human` | `email:human` | Send email to `contacts.human_email` |
 | `sms:human` | `sms:human` | Send SMS to `contacts.human_sms` |
 | `slack` | `slack` | Post to `contacts.slack_webhook` |
+| `exec:<name>` | `exec:ntfy` | Run `notify.commands.<name>` with the message on stdin |
 | `log` | `log` | Write to escalation log file |
+
+### Push to a Phone: `exec:<name>`
+
+`exec:<name>` pushes an escalation to the human through any command the
+operator configures, so Gas Town carries no vendor code. Name the commands
+under `notify.commands` in the same file as the routes; each is an argv array,
+run without a shell:
+
+```json
+{
+  "routes": {
+    "high": ["bead", "exec:ntfy"],
+    "critical": ["bead", "email:human", "exec:ntfy"]
+  },
+  "notify": {
+    "commands": {
+      "ntfy": ["curl", "-fsS", "-m", "8", "--data-binary", "@-",
+               "https://ntfy.sh/REPLACE_WITH_PRIVATE_TOPIC"]
+    }
+  }
+}
+```
+
+Config load rejects a route that names an `exec:` command that is not under
+`notify.commands`, and the error names it. A town with no `notify` key behaves
+as before.
+
+How the command runs:
+
+- The message is on **stdin**. The first line is a short title; the rest is the
+  body. Nothing from the message goes in argv.
+- The environment is `PATH` and `HOME` only. A command that needs a secret
+  reads it from a file under `HOME`.
+- It has 10 seconds. A command still running then is killed with its whole
+  process group, `curl` and anything it spawned included.
+- Stdout and stderr are discarded.
+- A failure or timeout is logged and reported in the escalation's delivery
+  result by the command's **name**, never its argv (a topic URL is a secret).
+  It does not stop the route's other actions or the escalation bead.
+
+Try a command with `gt notify test <name>`. It sends `gastown notify test`
+and prints `NOTIFY OK` or `NOTIFY FAILED: <reason>`, exiting 1 on a failure.
+Go code calls `notify.Push(name, title, body)` to push through the same
+commands.
 
 ## Escalation Beads
 

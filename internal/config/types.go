@@ -1419,10 +1419,14 @@ type EscalationConfig struct {
 	//   - "sms:human"   → Send SMS to contacts.human_sms
 	//   - "slack"       → Post to contacts.slack_webhook
 	//   - "log"         → Write to escalation log file
+	//   - "exec:<name>" → Push the message through notify.commands.<name>
 	Routes map[string][]string `json:"routes"`
 
 	// Contacts contains contact information for external notification actions.
 	Contacts EscalationContacts `json:"contacts"`
+
+	// Notify holds the commands an exec:<name> route action runs.
+	Notify NotifyConfig `json:"notify,omitzero"`
 
 	// StaleThreshold is how long before an unacknowledged escalation
 	// is considered stale and gets re-escalated.
@@ -1443,6 +1447,30 @@ type EscalationConfig struct {
 	// every cycle. Format: Go duration string (e.g., "1h", "30m").
 	// Default: "1h". A value of "0" re-notifies on every firing.
 	RenotifyWindow string `json:"renotify_window,omitempty"`
+}
+
+// NotifyConfig names the commands that push a message to the human outside the
+// terminal. Gas Town carries no vendor code: the operator points a command at
+// ntfy, a webhook or anything else that reads a message on stdin.
+type NotifyConfig struct {
+	// Commands maps a name to an argv array, run without a shell. The message
+	// arrives on stdin, its first line a short title. A route reaches one as
+	// "exec:<name>".
+	Commands map[string][]string `json:"commands,omitempty"`
+}
+
+// ExecActionPrefix starts an escalation route action that runs a configured
+// notify command.
+const ExecActionPrefix = "exec:"
+
+// ExecActionName returns the notify command name an "exec:<name>" route action
+// names, and whether the action is one.
+func ExecActionName(action string) (string, bool) {
+	name, ok := strings.CutPrefix(action, ExecActionPrefix)
+	if !ok {
+		return "", false
+	}
+	return name, true
 }
 
 // EscalationContacts contains contact information for external notification channels.

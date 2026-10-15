@@ -27,7 +27,6 @@ var deletedCommands = [][]string{
 	{"changelog"},
 	{"checkpoint"},
 	{"dnd"},
-	{"notify"},
 	{"prune-branches"},
 	{"release"},
 	{"repair"},

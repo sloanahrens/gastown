@@ -23,13 +23,15 @@ type externalSenders struct {
 	email externalSender
 	slack externalSender
 	sms   externalSender
+	// command runs a notify command for an exec:<name> action.
+	command commandRunner
 }
 
 func defaultSenders() externalSenders {
-	return externalSenders{email: sendEscalationEmail, slack: sendEscalationSlack, sms: sendEscalationSMS}
+	return externalSenders{email: sendEscalationEmail, slack: sendEscalationSlack, sms: sendEscalationSMS, command: runNotifyCommand}
 }
 
-// executeExternalActions processes external notification actions (email:, sms:, slack, log).
+// executeExternalActions processes external notification actions (email:, sms:, slack, exec:, log).
 func executeExternalActions(actions []string, cfg *config.EscalationConfig, beadID, severity, description, townRoot string, senders externalSenders) []DeliveryStatus {
 	statuses := []DeliveryStatus{}
 	for _, action := range actions {
@@ -85,6 +87,20 @@ func executeExternalActions(actions []string, cfg *config.EscalationConfig, bead
 					status.RuntimeNotified = true
 					fmt.Printf("  💬 Posted to Slack\n")
 				}
+			}
+			statuses = append(statuses, status)
+
+		case strings.HasPrefix(action, config.ExecActionPrefix):
+			name, _ := config.ExecActionName(action)
+			status := DeliveryStatus{Channel: "exec", Target: name, Severity: severity}
+			// A failure is reported by the command's name alone and leaves
+			// the rest of the route to run.
+			if err := sendEscalationExec(senders.command, cfg, name, beadID, severity, description); err != nil {
+				status.Error = err.Error()
+				style.PrintWarning("exec:%s notify failed: %v", name, err)
+			} else {
+				status.RuntimeNotified = true
+				fmt.Printf("  📣 Pushed through notify command %s\n", name)
 			}
 			statuses = append(statuses, status)
 

@@ -2581,6 +2581,43 @@ func validateEscalationConfig(c *EscalationConfig) error {
 		return fmt.Errorf("%w: max_reescalations must be non-negative", ErrMissingField)
 	}
 
+	return c.validateNotify()
+}
+
+// validateNotify checks the notify commands and that every exec:<name> route
+// action names one of them. Commands and routes are walked in sorted order so
+// the same bad file always reports the same first error.
+func (c *EscalationConfig) validateNotify() error {
+	names := make([]string, 0, len(c.Notify.Commands))
+	for name := range c.Notify.Commands {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("%w: notify.commands has a command with an empty name", ErrMissingField)
+		}
+		if argv := c.Notify.Commands[name]; len(argv) == 0 || argv[0] == "" {
+			return fmt.Errorf("%w: notify.commands.%s must be an argv array with a program first", ErrMissingField, name)
+		}
+	}
+
+	severities := make([]string, 0, len(c.Routes))
+	for severity := range c.Routes {
+		severities = append(severities, severity)
+	}
+	sort.Strings(severities)
+	for _, severity := range severities {
+		for _, action := range c.Routes[severity] {
+			name, ok := ExecActionName(action)
+			if !ok {
+				continue
+			}
+			if _, configured := c.Notify.Commands[name]; !configured {
+				return fmt.Errorf("%w: route %q names %q but notify.commands.%s is not configured", ErrMissingField, severity, action, name)
+			}
+		}
+	}
 	return nil
 }
 
