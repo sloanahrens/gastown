@@ -451,7 +451,19 @@ func readRigOMJSON(townRoot, rigName string) (data []byte, found bool, err error
 	if cfg != nil && cfg.DefaultBranch != "" {
 		branch = cfg.DefaultBranch
 	}
-	out, err := git.NewGit(filepath.Join(rigPath, ".repo.git")).ShowFileAtRev(remote+"/"+branch, ".om.json")
+	return omFileAt(git.NewGit(filepath.Join(rigPath, ".repo.git")), remote+"/"+branch)
+}
+
+// omFileReader is the part of *git.Git omFileAt reads a file through.
+type omFileReader interface {
+	ShowFileAtRev(ref, path string) (string, error)
+}
+
+// omFileAt reads .om.json at ref. A tree without the file is none; a ref or
+// repository git cannot read is an error, so a broken rig never reads as one
+// with no .om.json.
+func omFileAt(g omFileReader, ref string) (data []byte, found bool, err error) {
+	out, err := g.ShowFileAtRev(ref, ".om.json")
 	if errors.Is(err, git.ErrNotAtRef) {
 		return nil, false, nil
 	}

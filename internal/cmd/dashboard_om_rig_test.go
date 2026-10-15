@@ -3,11 +3,11 @@ package cmd
 import (
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/git"
 )
 
 // omTestRead is the rig-file read a test hands the reader.
@@ -94,68 +94,30 @@ func TestOMPanelRigReadIsCachedForItsTTL(t *testing.T) {
 	}
 }
 
-// readRigOMJSON is driven in the shape production takes: a bare .repo.git
-// under the town's rig directory whose origin/main carries (or lacks) the
-// .om.json. A target with no file is "none"; a repository git cannot read is
-// an error and never reads as "none".
-func TestOMPanelReadRigOMJSONReadsTheLandingTargetsFile(t *testing.T) {
-	t.Parallel()
-	gitRun := func(dir string, args ...string) string {
-		t.Helper()
-		cmd := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"}, args...)...)
-		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-		return strings.TrimSpace(string(out))
-	}
-	mkTown := func(t *testing.T, omJSON string) string {
-		t.Helper()
-		town := t.TempDir()
-		rigDir := filepath.Join(town, "gastown")
-		work := filepath.Join(t.TempDir(), "work")
-		if err := os.MkdirAll(work, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		gitRun(work, "init", "-q", "-b", "main")
-		file, body := ".om.json", omJSON
-		if omJSON == "" {
-			file, body = "README", "x"
-		}
-		if err := os.WriteFile(filepath.Join(work, file), []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		gitRun(work, "add", "-A")
-		gitRun(work, "commit", "-q", "-m", "c")
-		if err := os.MkdirAll(rigDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		gitRun(rigDir, "clone", "-q", "--bare", work, ".repo.git")
-		sha := gitRun(rigDir, "--git-dir=.repo.git", "rev-parse", "main")
-		gitRun(rigDir, "--git-dir=.repo.git", "update-ref", "refs/remotes/origin/main", sha)
-		return town
-	}
+// fakeOMFile answers ShowFileAtRev with a canned result.
+type fakeOMFile struct {
+	out string
+	err error
+}
 
-	t.Run("target has the file", func(t *testing.T) {
-		t.Parallel()
-		data, found, err := readRigOMJSON(mkTown(t, `{"threshold":0.7}`), "gastown")
-		if err != nil || !found || string(data) != `{"threshold":0.7}` {
-			t.Fatalf("got %q found=%v err=%v", data, found, err)
-		}
-	})
-	t.Run("target has no file", func(t *testing.T) {
-		t.Parallel()
-		data, found, err := readRigOMJSON(mkTown(t, ""), "gastown")
-		if err != nil || found || data != nil {
-			t.Fatalf("got %q found=%v err=%v; a target with no .om.json is none, not an error", data, found, err)
-		}
-	})
-	t.Run("repository cannot be read", func(t *testing.T) {
-		t.Parallel()
-		if _, found, err := readRigOMJSON(t.TempDir(), "gastown"); err == nil || found {
-			t.Fatalf("found=%v err=%v; a rig with no repository must be an error, not a rig without .om.json", found, err)
-		}
-	})
+func (f fakeOMFile) ShowFileAtRev(ref, path string) (string, error) { return f.out, f.err }
+
+// omFileAt tells a target with no .om.json (git.ErrNotAtRef) from a read that
+// failed: only the first is "the rig has none". A broken repository must never
+// read as a rig without a file, or the panel would show the user's bar as the
+// landing worker's.
+func TestOMPanelFileAtSeparatesAbsentFromBroken(t *testing.T) {
+	t.Parallel()
+	data, found, err := omFileAt(fakeOMFile{out: `{"threshold":0.7}`}, "origin/main")
+	if err != nil || !found || string(data) != `{"threshold":0.7}` {
+		t.Errorf("present file: %q found=%v err=%v", data, found, err)
+	}
+	data, found, err = omFileAt(fakeOMFile{err: git.ErrNotAtRef}, "origin/main")
+	if err != nil || found || data != nil {
+		t.Errorf("absent file: %q found=%v err=%v; want none and no error", data, found, err)
+	}
+	broken := errors.New("resolving origin/main: not a git repository")
+	if _, found, err = omFileAt(fakeOMFile{err: broken}, "origin/main"); !errors.Is(err, broken) || found {
+		t.Errorf("broken repository: found=%v err=%v; want the error and not none", found, err)
+	}
 }
