@@ -1794,7 +1794,20 @@ func (g *Git) StagedDeletions() ([]string, error) {
 	if trimmed == "" {
 		return nil, nil
 	}
-	return strings.Split(trimmed, "\n"), nil
+	return splitGitPathLines(trimmed), nil
+}
+
+// splitGitPathLines splits newline-separated git path output into real file
+// names. Without -z, git C-quotes a path holding a quote, backslash or
+// non-ASCII byte, so each line goes through unquoteGitPath the way Status()
+// does with porcelain paths.
+func splitGitPathLines(out string) []string {
+	lines := strings.Split(out, "\n")
+	paths := make([]string, 0, len(lines))
+	for _, line := range lines {
+		paths = append(paths, unquoteGitPath(line))
+	}
+	return paths
 }
 
 // ShowFile returns the contents of a file at a given ref (e.g., "origin/main:CLAUDE.md").
@@ -1855,7 +1868,7 @@ func (g *Git) DiffNameOnly(base, head string) ([]string, error) {
 	if out == "" {
 		return nil, nil
 	}
-	return strings.Split(strings.TrimSpace(out), "\n"), nil
+	return splitGitPathLines(strings.TrimSpace(out)), nil
 }
 
 // GitStatus represents the status of the working directory.
@@ -2818,7 +2831,9 @@ func (g *Git) RemoteBranchExists(remote, branch string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return out != "", nil
+	// ls-remote matches its pattern against a trailing path component, so
+	// "integration/foo" also lists refs/heads/team/integration/foo.
+	return parseLSRemoteTip(out, branch) != "", nil
 }
 
 // RemoteBranchTip returns the SHA at refs/heads/<branch> on the remote.
@@ -2875,7 +2890,7 @@ func (g *Git) PushRemoteBranchExists(remote, branch string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return out != "", nil
+	return parseLSRemoteTip(out, branch) != "", nil
 }
 
 // PushRemoteBranchTip returns the SHA at refs/heads/<branch> on the push target.
@@ -4397,7 +4412,14 @@ func runtimeArtifactRoot(path string) (string, bool) {
 	parts := strings.Split(bare, "/")
 	for i, part := range parts {
 		switch part {
-		case ".beads", ".claude", ".opencode", ".runtime", ".logs", "__pycache__", "node_modules", ".vite", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", "coverage", "htmlcov":
+		case "coverage", ".cache":
+			// A source package can carry these names (pkg/coverage/collector.go),
+			// so a file in them is an artifact only when it is not source code.
+			if isSourceCodePath(bare) {
+				continue
+			}
+			return strings.Join(parts[:i+1], "/") + "/", true
+		case ".beads", ".claude", ".opencode", ".runtime", ".logs", "__pycache__", "node_modules", ".vite", ".pytest_cache", ".mypy_cache", ".ruff_cache", "htmlcov":
 			return strings.Join(parts[:i+1], "/") + "/", true
 		}
 	}
@@ -4409,6 +4431,17 @@ func runtimeArtifactRoot(path string) (string, bool) {
 	}
 
 	return "", false
+}
+
+// isSourceCodePath reports whether path has a compiled-language or Python
+// source extension. .js and .ts are left out on purpose: coverage reporters
+// write their own .js helpers (coverage/lcov-report/prettify.js).
+func isSourceCodePath(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".go", ".py", ".rs", ".java", ".kt", ".c", ".h", ".cc", ".cpp", ".rb", ".swift", ".cs":
+		return true
+	}
+	return false
 }
 
 // isGasTownRuntimePath returns true if the path is a runtime artifact that should
@@ -4994,12 +5027,13 @@ func (g *Git) SubmoduleChanges(base, head string) ([]SubmoduleChange, error) {
 		}
 		// Format: :oldmode newmode oldsha newsha status\tpath
 		// Submodule entries have mode 160000
-		if !strings.Contains(line, "160000") {
-			continue
-		}
-		// Parse the raw diff line
 		parts := strings.SplitN(line, "\t", 2)
 		if len(parts) != 2 {
+			continue
+		}
+		// Test the mode fields only: the path after the tab may hold "160000".
+		modes := strings.Fields(parts[0])
+		if len(modes) < 2 || (strings.TrimPrefix(modes[0], ":") != "160000" && modes[1] != "160000") {
 			continue
 		}
 		path := strings.TrimSpace(parts[1])
@@ -5133,12 +5167,10 @@ func submoduleDefaultBranch(run runFunc, submodulePath, remote string) (string, 
 	// Try local symbolic-ref first (no network, fastest)
 	if symOut, err := git("symbolic-ref", "refs/remotes/"+remote+"/HEAD"); err == nil {
 		ref := strings.TrimSpace(symOut)
-		// refs/remotes/origin/HEAD -> refs/remotes/origin/main -> main
-		if parts := strings.Split(ref, "/"); len(parts) > 0 {
-			branch := parts[len(parts)-1]
-			if branch != "" {
-				return branch, nil
-			}
+		// refs/remotes/origin/HEAD -> refs/remotes/origin/main -> main.
+		// Keep the whole name after the remote: release/1.0 is one branch.
+		if branch := strings.TrimPrefix(ref, "refs/remotes/"+remote+"/"); branch != "" && branch != ref {
+			return branch, nil
 		}
 	}
 
