@@ -2680,7 +2680,7 @@ func matchesGoCleanSharedCache(tokens []string) (reason, alternative string) {
 			inClean = false
 			continue
 		}
-		if f == "clean" && i > 0 && filepath.Base(tokens[i-1]) == "go" {
+		if f == "clean" && goSubcommandBefore(tokens, i) {
 			inClean = true
 			continue
 		}
@@ -2692,6 +2692,51 @@ func matchesGoCleanSharedCache(tokens []string) (reason, alternative string) {
 		}
 	}
 	return "", ""
+}
+
+// goSubcommandBefore reports whether tokens[i] is the subcommand word of a
+// `go` invocation that starts earlier in the token list — the relationship a
+// 'go SUBCOMMAND' matcher needs, since Go's global -C dir flag (Go >= 1.20)
+// may sit between the binary and the subcommand. Without the walk,
+// `go -C /tmp clean -modcache` reaches `clean` with the directory before it,
+// not `go`, and the invocation read as a plain `clean` (gt-t7p80).
+//
+// The walk back from tokens[i] consumes exactly what -C costs: the flag in
+// either spelling, "-C dir" and "-C=dir", repeated for each -C on the line.
+// Any other word ends the walk, so a `clean` that no `go` invocation owns is
+// still not read as one of its subcommands. tokens must be lowercased,
+// shell-aware tokens (see shellTokenize), which is why -C arrives as -c.
+func goSubcommandBefore(tokens []string, i int) bool {
+	for j := i - 1; j >= 0; j-- {
+		if filepath.Base(tokens[j]) == "go" {
+			return true
+		}
+		if isGoDirFlagValue(tokens[j]) {
+			continue
+		}
+		if j > 0 && isGoDirFlag(tokens[j-1]) {
+			j-- // tokens[j] is the directory a bare `-C` consumed
+			continue
+		}
+		return false
+	}
+	return false
+}
+
+// isGoDirFlag reports whether tok is go's -C dir flag spelled without a value
+// ("-C", "--C"), the form whose directory is the NEXT token. The name is
+// matched exactly, so `-c=` and a flag that merely starts with those letters
+// are not read as it.
+func isGoDirFlag(tok string) bool {
+	return tok == "-c" || tok == "--c"
+}
+
+// isGoDirFlagValue reports whether tok carries go's -C dir flag and its
+// directory in one word ("-C=/tmp", "--C=/tmp"), the spelling Go's flag
+// package accepts alongside the bare form.
+func isGoDirFlagValue(tok string) bool {
+	name, _, hasValue := strings.Cut(tok, "=")
+	return hasValue && isGoDirFlag(name)
 }
 
 // isGoCleanSharedCacheFlag reports whether tok is one of the shared-cache
