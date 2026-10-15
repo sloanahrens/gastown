@@ -72,7 +72,8 @@ func newNamedSlingFake() *namedSlingFake {
 }
 
 // fakeIdleReuseEnv is the idle-reuse path with no integration branch, a
-// worktree check that passes, and no feed or step timer to write to.
+// worktree check that passes, no feed or step timer to write to, and a release
+// that records nothing.
 func fakeIdleReuseEnv() idleReuseEnv {
 	return idleReuseEnv{
 		integrationBranch: func(string) string { return "" },
@@ -81,6 +82,7 @@ func fakeIdleReuseEnv() idleReuseEnv {
 		defaultBranch:     func() string { return "main" },
 		logSpawn:          func(string, string) {},
 		step:              func(string) {},
+		releaseReused:     func(string, string, string) {},
 	}
 }
 
