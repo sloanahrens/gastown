@@ -195,12 +195,15 @@ func TestLandTakesTheHigherScoreOfTwoRejections(t *testing.T) {
 
 // TestLandDoesNotRescoreARejectionWithAMajor: a major finding is om's judgment
 // about the diff, not noise about the score, so the refusal stands on one run
-// (gt-cz07b).
+// (gt-cz07b). The score is inside the margin, so only the finding's severity
+// keeps the rerun from happening: at the 0.70 a major usually scores, the
+// margin alone would stop it and this test would pass with the severity rule
+// gone.
 func TestLandDoesNotRescoreARejectionWithAMajor(t *testing.T) {
 	t.Parallel()
 	f := barFixture(t, "0.8")
 	rev := &sequenceReviewer{t: t, steps: []reviewStep{
-		{verdict: Verdict{Verdict: VerdictRequestChanges, Score: 0.70, Findings: []Finding{
+		{verdict: Verdict{Verdict: VerdictRequestChanges, Score: 0.78, Findings: []Finding{
 			{ID: "f-1", Severity: "major", Path: "a.go", Line: 4, Title: "the write is not atomic"}}}},
 	}}
 	l := f.lander()
