@@ -327,23 +327,13 @@ function causeText(c) {
   return c.detail ? k + ": " + c.detail : k;
 }
 
-// renderHealthMark is the strip's marker for the scheduled deployment checks:
-// one pill naming every repo whose newest check failed, and the repos whose
-// newest check the reader could not read, which is an alarm too — an app nobody
-// can see a result for is not one to leave unmarked. The names are owner/name,
-// so two repos with the same base name are two of them. It carries the deploys
-// reader's own reading, so an app that is off — its run skipped on purpose
-// rather than failed — is in neither list, and a reader that has not read yet,
-// or a town whose checks are all green, leaves no marker at all.
+// renderHealthMark draws the strip's pill as the deploys reader decided it
+// (health_mark: red, degraded or absent); an absent mark hides the pill.
 function renderHealthMark(s) {
-  const box = $("healthmark"), d = (s && s.deploys) || null;
-  const failed = (d && d.health_failed) || [], unread = (d && d.health_unread) || [];
-  const parts = [];
-  if (failed.length) parts.push("health: " + failed.join(", "));
-  if (unread.length) parts.push("not read: " + unread.join(", "));
-  box.hidden = !parts.length;
-  box.className = "pill " + (failed.length ? "red" : "degraded");
-  box.textContent = parts.join(" · ");
+  const box = $("healthmark"), m = (s && s.deploys && s.deploys.health_mark) || null;
+  box.hidden = !m;
+  box.className = "pill " + (m && m.state === "red" ? "red" : "degraded");
+  box.textContent = m ? m.text : "";
 }
 
 // renderHealth shows the verdict and, when it is not green, the worst cause

@@ -1031,13 +1031,14 @@ func TestDeploysJSONCarriesTheNamesThePageReads(t *testing.T) {
 		}},
 		HealthFailed:  []string{"sloan/fractals-nextjs"},
 		HealthUnread:  []string{"sloan/gt-cloud"},
+		HealthMark:    &HealthMark{State: "red", Text: "health: sloan/fractals-nextjs"},
 		HealthMissing: []string{"sloan/beads"},
 	}
 	b, err := json.Marshal(d)
 	require.NoError(t, err)
 	for _, want := range []string{
 		`"health":[`, `"health_failed":["sloan/fractals-nextjs"]`, `"health_unread":["sloan/gt-cloud"]`,
-		`"health_missing":["sloan/beads"]`,
+		`"health_missing":["sloan/beads"]`, `"health_mark":{"state":"red","text":"health: sloan/fractals-nextjs"}`,
 		`"repo":"sloan/fractals-nextjs"`, `"app":"fractals-nextjs"`, `"env":"prod-smoke"`,
 		`"status":"failure"`, `"at":`, `"last_green":`, `"passed":23`, `"runs":24`,
 		`"url":"https://forgejo.test/runs/7"`, `"unread":true`,
@@ -1069,10 +1070,53 @@ func TestDeployReaderNamesTheReposWhoseChecksItCouldNotList(t *testing.T) {
 		require.Empty(t, d.Error)
 		require.Len(t, d.Runs, 1, "the repo's own runs answered, and are drawn whatever its checks did")
 		assert.Empty(t, d.Missing, "the repo's deploy runs answered, so it is not a repo that failed")
-		assert.Equal(t, []string{"sloan/fractals-nextjs"}, d.HealthMissing)
+		assert.Equal(t, []string{"sloan/fractals-nextjs"}, d.HealthUnread, "a listing that failed is an unread check, which the strip says")
+		assert.Empty(t, d.HealthMissing, "the repo may well have health.yml; missing is for runs that name no known environment")
 		assert.Empty(t, d.Health, "nothing of its checks is known, so it has no rows to draw")
 		assert.Empty(t, d.HealthFailed)
-		assert.Empty(t, d.HealthUnread)
+		require.NotNil(t, d.HealthMark, "a repo whose checks could not be listed must not leave the strip quiet")
+		assert.Equal(t, HealthMark{State: "degraded", Text: "not read: sloan/fractals-nextjs"}, *d.HealthMark)
+	}
+}
+
+// A listing that answered with no health runs is a repo without the workflow:
+// it shows nothing extra and raises nothing, unlike one that failed.
+func TestDeployReaderRaisesNothingForARepoWithNoHealthRuns(t *testing.T) {
+	t.Parallel()
+
+	stub := &deployStub{
+		repos: []string{"sloan/beads"},
+		runs:  map[string][]forgejo.ActionRun{"sloan/beads": {testDeployRun(4, "v0.2.0", "success", 20)}},
+	}
+	d := newDeployTestReader(stub, nil).Read()
+
+	assert.Empty(t, d.Health)
+	assert.Empty(t, d.HealthFailed)
+	assert.Empty(t, d.HealthUnread)
+	assert.Empty(t, d.HealthMissing)
+	assert.Nil(t, d.HealthMark)
+}
+
+// The strip's pill is decided in Go: red while any check failed, degraded when
+// only unread checks remain, absent when neither list has a name.
+func TestHealthMark(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name           string
+		failed, unread []string
+		want           *HealthMark
+	}{
+		{name: "neither list leaves no pill"},
+		{name: "a failure is red", failed: []string{"a/x", "b/y"}, want: &HealthMark{State: "red", Text: "health: a/x, b/y"}},
+		{name: "unread alone is degraded", unread: []string{"a/x"}, want: &HealthMark{State: "degraded", Text: "not read: a/x"}},
+		{name: "a failure beside an unread check stays red and says both", failed: []string{"a/x"}, unread: []string{"b/y"},
+			want: &HealthMark{State: "red", Text: "health: a/x · not read: b/y"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, healthMark(tc.failed, tc.unread))
+		})
 	}
 }
 
@@ -1102,9 +1146,8 @@ func TestDeployReaderNamesTheReposWhoseChecksNameNoEnvironment(t *testing.T) {
 	assert.Empty(t, d.HealthUnread)
 }
 
-// A check that finished without passing is the app's newest check failing
-// whatever the API calls it, and one that has not finished is not: a cancelled
-// check raises the marker, a run still moving does not.
+// Neither a cancelled check nor a run still moving is a failure: only a check
+// that ended in failure raises the marker.
 func TestDeployReaderTellsACancelledCheckFromARunStillMoving(t *testing.T) {
 	t.Parallel()
 
@@ -1121,8 +1164,9 @@ func TestDeployReaderTellsACancelledCheckFromARunStillMoving(t *testing.T) {
 	}
 	d := newDeployTestReader(stub, nil).Read()
 
-	assert.Equal(t, []string{"sloan/fractals-nextjs"}, d.HealthFailed, "a check nobody let finish did not pass")
+	assert.Empty(t, d.HealthFailed, "a cancelled check is nobody's verdict, so it raises no marker")
 	assert.Empty(t, d.HealthUnread)
+	assert.Nil(t, d.HealthMark)
 
 	require.Len(t, d.Health, 4)
 	assert.Equal(t, forgejoRunCancelled, d.Health[0].Status, "the row carries the API's own word for it")
@@ -1230,6 +1274,52 @@ func TestDeployReaderReadsAFinishedChecksJobsOnce(t *testing.T) {
 
 	reader.Read()
 	assert.Equal(t, []int64{1, 2, 2}, stub.jobsAsked, "and only it is")
+}
+
+// Only a final read is held: an ended run with a job still waiting or blocked is
+// read again, and so is a run that was re-run, which keeps its id but shows a
+// new status or a new stop time.
+func TestDeployReaderHoldsOnlyAFinalRead(t *testing.T) {
+	t.Parallel()
+
+	const repo = "sloan/fractals-nextjs"
+	run := testHealthRun(1, "failure", 5)
+	run.Stopped = stamp(4)
+	stub := &deployStub{
+		repos: []string{repo},
+		runs:  map[string][]forgejo.ActionRun{repo: {run}},
+		jobs:  map[int64][]forgejo.ActionRunJob{1: healthJobs("success", "success", "blocked")},
+	}
+	reader := newDeployTestReader(stub, nil)
+
+	reader.Read()
+	reader.Read()
+	assert.Equal(t, []int64{1, 1}, stub.jobsAsked, "a job still blocked is not final, so the run is read again")
+
+	stub.jobs[1] = healthJobs("success", "success", "failure")
+	d := reader.Read()
+	assert.Equal(t, []string{repo}, d.HealthFailed)
+	reader.Read()
+	assert.Equal(t, []int64{1, 1, 1}, stub.jobsAsked, "every job final: held from here")
+
+	// The run is re-run: same id, now moving. Its fresh jobs are read, and the
+	// failure it held is gone from the strip while it runs.
+	rerun := run
+	rerun.Status, rerun.Stopped = "running", ""
+	stub.runs[repo] = []forgejo.ActionRun{rerun}
+	stub.jobs[1] = healthJobs("success", "running", "waiting")
+	d = reader.Read()
+	assert.Equal(t, []int64{1, 1, 1, 1}, stub.jobsAsked)
+	assert.Empty(t, d.HealthFailed, "a re-run in flight is not the failure it was")
+
+	// It ends in failure again with the same status word but a new stop time.
+	stub.jobs[1] = healthJobs("success", "success", "failure")
+	again := run
+	again.Stopped = stamp(2)
+	stub.runs[repo] = []forgejo.ActionRun{again}
+	reader.Read()
+	reader.Read()
+	assert.Equal(t, []int64{1, 1, 1, 1, 1}, stub.jobsAsked, "a new stop time is a new run of the job, read once more and then held")
 }
 
 // A check the block has read once is never read as unreadable after: the

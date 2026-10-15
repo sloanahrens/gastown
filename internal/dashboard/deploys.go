@@ -104,9 +104,9 @@ var (
 )
 
 // The job statuses the health fold reads, in the API's own words. Only success
-// is a pass, and only failure and the canceled word are a check that finished
-// without one: a skipped check is an app that is off on purpose, and waiting,
-// running and blocked have not finished at all.
+// is a pass and only failure raises the marker: a skipped check is an app that
+// is off on purpose, a canceled one is nobody's verdict, and waiting, running
+// and blocked have not finished.
 const (
 	healthSuccess = "success"
 	healthFailure = "failure"
@@ -208,6 +208,33 @@ type DeployHealthRow struct {
 	Unread bool `json:"unread,omitempty"`
 }
 
+// HealthMark is the strip's health pill: State is "red" while any app's newest
+// check failed and "degraded" when only unread ones remain; Text names them.
+type HealthMark struct {
+	State string `json:"state"`
+	Text  string `json:"text"`
+}
+
+// healthMark decides the pill: red for failures, degraded for unread checks
+// alone, nil when neither list has a name.
+func healthMark(failed, unread []string) *HealthMark {
+	var parts []string
+	if len(failed) > 0 {
+		parts = append(parts, "health: "+strings.Join(failed, ", "))
+	}
+	if len(unread) > 0 {
+		parts = append(parts, "not read: "+strings.Join(unread, ", "))
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	state := "degraded"
+	if len(failed) > 0 {
+		state = "red"
+	}
+	return &HealthMark{State: state, Text: strings.Join(parts, " · ")}
+}
+
 // Deploys is the Cloud section's Deploys block: the newest deploy runs the
 // viewer can see, of either workflow. Missing names the repos whose runs could
 // not be read, so a repo that failed is named rather than reading as a repo
@@ -227,9 +254,11 @@ type Deploys struct {
 	// is in neither: its run is skipped, which is on purpose, not a failure.
 	HealthFailed []string `json:"health_failed,omitempty"`
 	HealthUnread []string `json:"health_unread,omitempty"`
-	// HealthMissing names the repos whose scheduled checks the block could not
-	// fold: one whose runs could not be listed, and one whose runs name no
-	// environment the block knows. The block's note carries them.
+	// HealthMark is the strip's pill, decided here from the two lists above so
+	// the page only draws it; nil when neither list has a name.
+	HealthMark *HealthMark `json:"health_mark,omitempty"`
+	// HealthMissing names the repos whose runs name no environment the block
+	// knows, so there is no row to draw them in. The block's note carries them.
 	HealthMissing []string `json:"health_missing,omitempty"`
 	Missing       []string `json:"missing,omitempty"`
 	Error         string   `json:"error,omitempty"`
@@ -267,13 +296,14 @@ type deployWatch struct {
 	since time.Time
 }
 
-// cachedCheck is one scheduled run's jobs as the fold reads them. A run that has
-// ended and whose jobs were read is cached here, so the next refresh pays no
-// jobs call for it; a run still moving is not, since its jobs are not final, and
-// neither is one that ended with no jobs, since that is a read that failed.
+// cachedCheck is one scheduled run's jobs as the fold reads them, held only for
+// a run that ended with every job final. status and stopped are what the run
+// showed when it was read: a re-run changes them, and its jobs are read again.
 type cachedCheck struct {
-	envs   map[string]string
-	failed bool
+	envs    map[string]string
+	failed  bool
+	status  string
+	stopped string
 }
 
 // NewDeployReader builds a reader over api. A non-empty repos is the exact
@@ -394,15 +424,13 @@ func (r *DeployReader) Read() *Deploys {
 		owner, repo, _ := strings.Cut(name, "/")
 		res := r.healthRows(hctx, name, owner, repo, prevChecks, checks)
 		health = append(health, res.rows...)
-		// A repo whose checks could not be listed and one whose runs named no
-		// environment the block knows are one answer to an operator: the checks
-		// are there and the block could not read them, which must not draw as a
-		// repo with no checks.
+		// A listing that failed is an unread check, which the strip says; only
+		// runs that name no known environment are missing.
 		switch {
-		case !res.listed, res.unknown:
-			healthMissing = append(healthMissing, name)
-		case res.unread:
+		case res.listFailed, res.unread:
 			healthUnread = append(healthUnread, name)
+		case res.unknown:
+			healthMissing = append(healthMissing, name)
 		case res.failed:
 			healthFailed = append(healthFailed, name)
 		}
@@ -425,6 +453,7 @@ func (r *DeployReader) Read() *Deploys {
 		Health:        health,
 		HealthFailed:  healthFailed,
 		HealthUnread:  healthUnread,
+		HealthMark:    healthMark(healthFailed, healthUnread),
 		HealthMissing: healthMissing,
 		Missing:       missing,
 	}
@@ -522,16 +551,15 @@ type healthRun struct {
 }
 
 // healthRead is one repo's scheduled checks as the block reads them: the rows to
-// draw, whether the repo's health runs could be listed at all, whether they
-// could be folded into an environment, and the newest run's word on the app —
-// unread, or failed. unread and failed are read only where a row was drawn;
-// unknown and !listed both mean no row was.
+// draw and the newest run's word on the app — unread, or failed. unread and
+// failed are read only where a row was drawn; listFailed (the runs could not be
+// listed) and unknown (no environment the block knows) mean no row was.
 type healthRead struct {
-	rows    []DeployHealthRow
-	listed  bool
-	unknown bool
-	unread  bool
-	failed  bool
+	rows       []DeployHealthRow
+	listFailed bool
+	unknown    bool
+	unread     bool
+	failed     bool
 }
 
 // healthRows reads one repo's scheduled health checks and folds them into the
@@ -541,25 +569,16 @@ type healthRead struct {
 // the run, and a run whose jobs were all skipped is green there while nothing
 // was tested.
 //
-// prev holds the jobs of the runs that had ended as of the last refresh and
-// seen collects this one's, so a run that will not change again is read once:
-// the refresh pays a jobs call per run it has not settled rather than per run of
-// every window, and a check the block has read once is never read again as
-// unreadable. The window is newest first and read in that order, so a budget
-// that runs out has already read the newest run the marker stands on and takes
-// the window's oldest runs instead: the pass count loses their entries to
-// NotRead, which says them.
+// prev holds the jobs of runs that ended with every job final as of the last
+// refresh and seen collects this one's, so a settled run is read once. The
+// window is read newest first, so an exhausted budget costs the oldest runs
+// (NotRead says them), not the newest run the marker stands on.
 //
-// A listing that failed says so rather than reading as a repo with no checks:
-// its runs are the deploy runs' own listing, so it is a repo the block could not
-// ask, not one that answered nothing.
+// A listing that failed is listFailed, never a repo with no checks.
 func (r *DeployReader) healthRows(ctx context.Context, name, owner, repo string, prev, seen map[string]cachedCheck) healthRead {
-	// The workflow filter is the API's own, so the page holds the health runs
-	// and not the repo's whole history; the base name is still matched below,
-	// the way the deploy list matches it.
 	list, err := r.api.ListRuns(ctx, owner, repo, forgejo.RunFilter{WorkflowID: healthWorkflow, Page: 1, Limit: healthRunWindow})
 	if err != nil {
-		return healthRead{}
+		return healthRead{listFailed: true}
 	}
 	var window []healthRun
 	for _, run := range list.Runs {
@@ -574,39 +593,47 @@ func (r *DeployReader) healthRows(ctx context.Context, name, owner, repo string,
 	}
 	for i := range window {
 		key := runKey(name, window[i].run.ID)
-		if held, ok := prev[key]; ok {
+		run := window[i].run
+		if held, ok := prev[key]; ok && held.status == run.Status && held.stopped == run.Stopped {
 			window[i].envs, window[i].failed = held.envs, held.failed
 			seen[key] = held
 			continue
 		}
-		jobs, err := r.api.ListRunJobs(ctx, owner, repo, window[i].run.ID)
-		// A call that failed and one that answered with no jobs at all are the
-		// same thing to the block: the jobs are where a check says what it did,
-		// so a run with none is one the block could not read rather than one
-		// nothing went wrong in. Neither is held, so the next refresh asks again
-		// — a run read under a budget that ran out is not read either.
+		jobs, err := r.api.ListRunJobs(ctx, owner, repo, run.ID)
+		// A failed call and an empty answer are both a check the block could not
+		// read; neither is held, so the next refresh asks again.
 		if err != nil || len(jobs) == 0 {
 			window[i].unread = true
 			continue
 		}
 		window[i].envs = healthEnvsOf(jobs)
-		window[i].failed = healthRunFailed(jobs, window[i].run.Status)
-		if healthRunEnded(window[i].run.Status) {
-			seen[key] = cachedCheck{envs: window[i].envs, failed: window[i].failed}
+		window[i].failed = healthRunFailed(jobs, run.Status)
+		if healthRunEnded(run.Status) && healthJobsFinal(jobs) {
+			seen[key] = cachedCheck{envs: window[i].envs, failed: window[i].failed, status: run.Status, stopped: run.Stopped}
 		}
 	}
-	res := foldHealth(name, window)
-	res.listed = true
-	return res
+	return foldHealth(name, window)
 }
 
-// healthRunEnded reports whether a scheduled run has finished, which is what
-// makes its jobs final. A run still waiting for a runner, running, or between
-// two of its jobs has not: the next refresh reads it again.
+// healthRunEnded reports whether a scheduled run has finished: one waiting,
+// running, or between two of its jobs has not.
 func healthRunEnded(status string) bool {
 	switch status {
 	case deployWaiting, deployRunning, forgejoRunBlocked:
 		return false
+	}
+	return true
+}
+
+// healthJobsFinal reports whether every job has a final status, the only state
+// a run's jobs are held in; a job still waiting, blocked or running is read again.
+func healthJobsFinal(jobs []forgejo.ActionRunJob) bool {
+	for _, j := range jobs {
+		switch cloudText(j.Status, deployTextMax) {
+		case healthSuccess, healthFailure, forgejoRunCancelled, "skipped":
+		default:
+			return false
+		}
 	}
 	return true
 }
@@ -707,14 +734,9 @@ func healthWindowEnvs(window []healthRun) []string {
 	return named
 }
 
-// healthFailed reports whether an app's newest scheduled check failed: a job of
-// the newest run that finished without passing, whatever its name. The row is
-// per environment, so a failure in a job the two environments do not name would
-// otherwise reach nobody — and the newest run's word is the block's only stand
-// on the app. A run in flight has not failed: the check is marked when it ends,
-// not while it moves, so a job of it that has already failed raises nothing. An
-// app that is off was skipped, and neither raises a marker off an older run's
-// failure, which would claim what the block never saw.
+// healthFailed reports whether an app's newest scheduled check failed, in any
+// job. A run in flight has not failed, a skipped or canceled one is not a
+// failure, and an older run's failure is never claimed for the newest.
 func healthFailed(window []healthRun) bool {
 	if len(window) == 0 || window[0].unread {
 		return false
@@ -722,28 +744,17 @@ func healthFailed(window []healthRun) bool {
 	return healthRunEnded(window[0].run.Status) && window[0].failed
 }
 
-// healthRunFailed reports whether a run finished without passing: the run's own
-// status, which is the whole workflow's, or a job of it that failed or was
-// canceled, whatever either is named. A run the API calls a failure is not read
-// as one nothing went wrong in because its jobs happen to read green.
+// healthRunFailed reports whether the run's own status, which is the whole
+// workflow's, or any job of it, whatever its name, says failure. A canceled
+// run is not a failure.
 func healthRunFailed(jobs []forgejo.ActionRunJob, status string) bool {
-	if healthCheckFailed(status) {
+	if cloudText(status, deployTextMax) == healthFailure {
 		return true
 	}
 	for _, j := range jobs {
-		if healthCheckFailed(j.Status) {
+		if cloudText(j.Status, deployTextMax) == healthFailure {
 			return true
 		}
-	}
-	return false
-}
-
-// healthCheckFailed reads one status word as a check that finished without
-// passing: the API's failure and its cancellation.
-func healthCheckFailed(status string) bool {
-	switch cloudText(status, deployTextMax) {
-	case healthFailure, forgejoRunCancelled:
-		return true
 	}
 	return false
 }

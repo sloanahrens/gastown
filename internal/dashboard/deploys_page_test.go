@@ -348,6 +348,20 @@ func TestDeploysBlockMarksAFailedCheckInTheHeaderStrip(t *testing.T) {
 		t.Error("the marker is drawn above the health line it belongs beside")
 	}
 
+	// The page decides nothing: it draws the reader's health_mark, hides the
+	// pill when there is none, and is red only for the red state.
+	mark := pageFunc(t, "renderHealthMark")
+	for _, want := range []string{
+		`m = (s && s.deploys && s.deploys.health_mark) || null`,
+		`box.hidden = !m;`,
+		`"pill " + (m && m.state === "red" ? "red" : "degraded")`,
+		`box.textContent = m ? m.text : "";`,
+	} {
+		if !strings.Contains(mark, want) {
+			t.Errorf("renderHealthMark has no %q", want)
+		}
+	}
+
 	// The marker carries the reader's own finding: the apps the deploys reader
 	// marked, not a second reading of the rows the block draws.
 	if !strings.Contains(pageFunc(t, "renderAll"), "renderDeploys(state); renderHealthMark(state);") {
@@ -427,6 +441,7 @@ func TestDeploysReaderGivesTheStripEachOfItsThreeStates(t *testing.T) {
 		jobs           map[int64][]forgejo.ActionRunJob
 		jobsErr        map[int64]error
 		failed, unread []string
+		mark           *HealthMark
 	}{
 		{
 			name: "a town with nothing wrong raises no pill",
@@ -442,12 +457,14 @@ func TestDeploysReaderGivesTheStripEachOfItsThreeStates(t *testing.T) {
 			jobs: map[int64][]forgejo.ActionRunJob{3: failing},
 			// owner/name, so two repos of the same base name are two entries.
 			failed: []string{"sloan/fractals-nextjs"},
+			mark:   &HealthMark{State: "red", Text: "health: sloan/fractals-nextjs"},
 		},
 		{
 			name:    "an unread check alone raises the degraded pill",
 			runs:    map[string][]forgejo.ActionRun{"sloan/gt-cloud": {testHealthRun(4, "success", 5)}},
 			jobsErr: map[int64]error{4: io.EOF},
 			unread:  []string{"sloan/gt-cloud"},
+			mark:    &HealthMark{State: "degraded", Text: "not read: sloan/gt-cloud"},
 		},
 		{
 			name: "an unread check beside a failed one is said with it",
@@ -459,6 +476,7 @@ func TestDeploysReaderGivesTheStripEachOfItsThreeStates(t *testing.T) {
 			jobsErr: map[int64]error{4: io.EOF},
 			failed:  []string{"sloan/fractals-nextjs"},
 			unread:  []string{"sloan/gt-cloud"},
+			mark:    &HealthMark{State: "red", Text: "health: sloan/fractals-nextjs · not read: sloan/gt-cloud"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -469,6 +487,7 @@ func TestDeploysReaderGivesTheStripEachOfItsThreeStates(t *testing.T) {
 
 			assert.Equal(t, tc.failed, d.HealthFailed)
 			assert.Equal(t, tc.unread, d.HealthUnread)
+			assert.Equal(t, tc.mark, d.HealthMark, "the pill the strip draws is the reader's decision")
 			// Every app the town has is on a row of its own, so the pill and the
 			// block can never disagree about which apps are there.
 			assert.Len(t, d.Health, 2*len(tc.runs))
@@ -629,19 +648,4 @@ func TestDeploysBlockColoursOnlyThePassAndTheFailure(t *testing.T) {
 	assert.Contains(t, row, `if (h.status && result.textContent !== h.status) result.title = h.status;`,
 		"the result cell does not keep the API's own word for the check it rewords")
 
-	// The marker is the reader's own two lists and no reading of the rows: red
-	// for the apps whose newest check failed, the degraded pill for the apps
-	// nobody has a reading of, and hidden while both are empty.
-	mark := pageFunc(t, "renderHealthMark")
-	for _, want := range []string{
-		`const failed = (d && d.health_failed) || [], unread = (d && d.health_unread) || [];`,
-		`if (failed.length) parts.push("health: " + failed.join(", "));`,
-		`if (unread.length) parts.push("not read: " + unread.join(", "));`,
-		`box.hidden = !parts.length;`,
-		`box.className = "pill " + (failed.length ? "red" : "degraded");`,
-	} {
-		if !strings.Contains(mark, want) {
-			t.Errorf("renderHealthMark has no %q", want)
-		}
-	}
 }
