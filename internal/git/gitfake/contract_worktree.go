@@ -169,6 +169,27 @@ func RunWorkTreeContract(t *testing.T, newEnv func(t *testing.T) Env) {
 		}
 	})
 
+	t.Run("RuntimeArtifactPathspecs spares a fixture beside tracked source", func(t *testing.T) {
+		t.Parallel()
+		fx := newFixture(t, newEnv(t))
+		g := fx.env.Open(fx.clone).(WorkTree)
+		writeFiles(t, fx.clone, map[string]string{"internal/coverage/collector.go": "package coverage\n"})
+		if err := g.Add("-A"); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.Commit("source"); err != nil {
+			t.Fatal(err)
+		}
+		got := g.RuntimeArtifactPathspecs([]string{
+			"internal/coverage/testdata/report.golden",
+			"web/coverage/lcov.info",
+			"web/coverage/lcov-report/index.html",
+		})
+		if want := []string{"web/coverage/"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("RuntimeArtifactPathspecs = %q, want %q", got, want)
+		}
+	})
+
 	t.Run("Commit commits the index on HEAD, and refuses an empty one", func(t *testing.T) {
 		t.Parallel()
 		fx := newFixture(t, newEnv(t))

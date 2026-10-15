@@ -326,6 +326,32 @@ func TestCheckpointWorktreeExcludesNestedRuntimeArtifacts(t *testing.T) {
 	}
 }
 
+// A fixture under a coverage/ directory that holds tracked, unchanged source is
+// work: the staged list names only the fixture, so the runtime reset must learn
+// of the source from the checkout, while generated output elsewhere still
+// stays out (gt-za3u1).
+func TestCheckpointWorktreeKeepsFixtureBesideTrackedSource(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	workDir, _, g := checkpointClone(t, d, map[string]string{"internal/coverage/collector.go": "package coverage\n"})
+	before := headOf(t, g)
+	writeWorkFiles(t, workDir, map[string]string{
+		"internal/coverage/testdata/report.golden": "golden\n",
+		"web/coverage/lcov.info":                   "TN:\n",
+	})
+
+	if !d.checkpointWorktree(workDir, "rig", "polecat") {
+		t.Fatal("checkpointWorktree did not create a checkpoint commit")
+	}
+	if got := changedSince(t, g, before); !slices.Equal(got, []string{"internal/coverage/testdata/report.golden"}) {
+		t.Fatalf("checkpoint commit changed %q, want only the fixture", got)
+	}
+	wantNothingStaged(t, g)
+	if st := worktreeStatus(t, g); !slices.Contains(st.Untracked, "web/coverage/lcov.info") {
+		t.Fatalf("status %+v: generated coverage output was committed or lost; want it left untracked", st)
+	}
+}
+
 func TestCheckpointWorktreeSkipsRuntimeOnlyNestedArtifacts(t *testing.T) {
 	t.Parallel()
 	d := &Daemon{logger: log.New(io.Discard, "", 0)}

@@ -399,6 +399,27 @@ func (h *handle) ResetFiles(pathspecs ...string) error {
 	return nil
 }
 
+// RuntimeArtifactPathspecs is git.Git's: the tracked files under a root are
+// the index's (git ls-files).
+func (h *handle) RuntimeArtifactPathspecs(paths []string) []string {
+	return git.RuntimeArtifactPathspecsListing(paths, func(root string) ([]string, error) {
+		h.f.mu.Lock()
+		defer h.f.mu.Unlock()
+		r, wt, err := h.workTree("ls-files", "-z", "--", root)
+		if err != nil {
+			return nil, err
+		}
+		var tracked []string
+		for p := range h.f.stage(r, wt).tree {
+			if strings.HasPrefix(p, root) {
+				tracked = append(tracked, p)
+			}
+		}
+		sort.Strings(tracked)
+		return tracked, nil
+	})
+}
+
 // StagedChanges lists the index's differences from HEAD, by path.
 func (h *handle) StagedChanges() ([]git.StagedChange, error) {
 	h.f.mu.Lock()

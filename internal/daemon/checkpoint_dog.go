@@ -214,12 +214,17 @@ func (d *Daemon) checkpointWorktreeOutcome(workDir, rigName, polecatName string)
 	// Unstage runtime/ephemeral artifacts using the same centralized policy as
 	// gt done. Scanning staged paths catches tracked nested runtime dirs that
 	// git add -A can restage despite ignore rules.
+	//
+	// The staged list holds only paths that differ from HEAD, so g supplies
+	// the tracked source beside them: a fixture under a coverage/ or .cache/
+	// directory that holds unchanged tracked source is work, not output
+	// (gt-za3u1).
 	staged, err := g.StagedChanges()
 	if err != nil {
 		d.logger.Printf("checkpoint_dog: git diff --cached failed in %s/%s: %v", rigName, polecatName, err)
 		return checkpointRefused
 	}
-	for _, pathspec := range gtgit.RuntimeArtifactPathspecs(stagedPaths(staged, 0)) {
+	for _, pathspec := range g.RuntimeArtifactPathspecs(stagedPaths(staged, 0)) {
 		if err := g.ResetFiles(pathspec); err != nil {
 			d.logger.Printf("checkpoint_dog: git reset runtime artifact %q failed in %s/%s: %v", pathspec, rigName, polecatName, err)
 			return checkpointRefused

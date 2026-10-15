@@ -26,6 +26,7 @@ type daemonGit interface {
 	Add(pathspecs ...string) error
 	ResetFiles(pathspecs ...string) error
 	StagedChanges() ([]git.StagedChange, error)
+	RuntimeArtifactPathspecs(paths []string) []string
 	WriteTree() (string, error)
 	Commit(message string) error
 	CleanDefaultBranchBaseRef(remote, defaultBranch string) string

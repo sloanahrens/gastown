@@ -1,6 +1,8 @@
 package git
 
 import (
+	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -311,5 +313,32 @@ func TestComparisonRefCandidatesPreferRemoteTrackingRef(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("comparisonRefCandidates()[%d] = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+// The checkout's tracked source decides which coverage/ and .cache/ directories
+// are fixtures; a listing that fails counts as holding source (gt-za3u1).
+func TestRuntimeArtifactPathspecsListing(t *testing.T) {
+	t.Parallel()
+	paths := []string{"internal/coverage/testdata/report.golden", "web/coverage/lcov.info"}
+	tracked := map[string][]string{
+		"internal/coverage/": {"internal/coverage/collector.go"},
+		"web/coverage/":      {"web/coverage/README.md"},
+	}
+	for _, tc := range []struct {
+		name string
+		list func(root string) ([]string, error)
+		want []string
+	}{
+		{"tracked source spares only its own directory", func(root string) ([]string, error) { return tracked[root], nil }, []string{"web/coverage/"}},
+		{"a failed listing spares every directory", func(string) ([]string, error) { return nil, errors.New("ls-files failed") }, nil},
+		{"no tracked source resets both", func(string) ([]string, error) { return nil, nil }, []string{"internal/coverage/", "web/coverage/"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := RuntimeArtifactPathspecsListing(paths, tc.list); !slices.Equal(got, tc.want) {
+				t.Fatalf("RuntimeArtifactPathspecsListing = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
