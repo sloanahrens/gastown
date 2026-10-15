@@ -19,6 +19,10 @@ type daemonGit interface {
 
 	// Staging, for the checkpoint dog.
 	Status() (*git.GitStatus, error)
+	// CheckUncommittedWork reads the worktree's state for the overrun stop's
+	// release, which records how much of it is at risk (git.CleanExcludingRuntime
+	// and CleanupStatus).
+	CheckUncommittedWork() (*git.UncommittedWorkStatus, error)
 	Add(pathspecs ...string) error
 	ResetFiles(pathspecs ...string) error
 	StagedChanges() ([]git.StagedChange, error)

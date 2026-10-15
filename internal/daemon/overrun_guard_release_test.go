@@ -10,9 +10,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/townhealth"
 )
 
 // pushTick runs one guard tick a minute after the last, without the seat list
@@ -44,7 +49,7 @@ func TestStop_PushThatRecoversBeforeTheCapDoesNotGiveUp(t *testing.T) {
 	if len(f.handBackNotes) != 1 || f.handBackNotes[0] != "" {
 		t.Errorf("notes = %q, want one empty note", f.handBackNotes)
 	}
-	want := []string{"recheck gastown/capable", "push gastown/capable", "hand-back gastown/capable", "reset-agent-bead gastown/capable", "clear-pause gastown/capable"}
+	want := []string{"recheck gastown/capable", "push gastown/capable", "hand-back gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
 	if !reflect.DeepEqual(f.calls, want) {
 		t.Errorf("calls = %q, want %q (seat released)", f.calls, want)
 	}
@@ -73,7 +78,7 @@ func TestStop_PersistentlyFailedPushIsGivenUpOnAndHandedBack(t *testing.T) {
 
 	want := []string{"recheck gastown/capable", "push gastown/capable", "hand-back gastown/capable"}
 	if !reflect.DeepEqual(f.calls, want) {
-		t.Fatalf("calls at the cap = %q, want %q (no reset, no clear-pause: the seat stays parked)", f.calls, want)
+		t.Fatalf("calls at the cap = %q, want %q (no reset, no retire: the seat stays parked)", f.calls, want)
 	}
 	if len(f.handedBack) != 1 || len(f.handBackNotes) != 1 {
 		t.Fatalf("hand-backs = %q notes = %q, want one each", f.handedBack, f.handBackNotes)
@@ -192,7 +197,7 @@ func TestStop_FailedPushHoldsTheHandBackAndIsRetried(t *testing.T) {
 	f.calls, f.failOn = nil, nil
 	f.now = f.now.Add(time.Minute)
 	d.runOverrunGuard(f.seams())
-	want = []string{"recheck gastown/capable", "push gastown/capable", "hand-back gastown/capable", "reset-agent-bead gastown/capable", "clear-pause gastown/capable"}
+	want = []string{"recheck gastown/capable", "push gastown/capable", "hand-back gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
 	if !reflect.DeepEqual(f.calls, want) {
 		t.Errorf("calls after the push recovered = %q, want %q", f.calls, want)
 	}
@@ -248,7 +253,7 @@ func TestStop_FailedAgentBeadResetKeepsTheSeatParkedAndIsRetried(t *testing.T) {
 	f.seats, f.calls, f.failOn = nil, nil, nil
 	f.now = f.now.Add(time.Minute)
 	d.runOverrunGuard(f.seams())
-	want := []string{"recheck gastown/capable", "hand-back gastown/capable", "reset-agent-bead gastown/capable", "clear-pause gastown/capable"}
+	want := []string{"recheck gastown/capable", "hand-back gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
 	if !reflect.DeepEqual(f.calls, want) {
 		t.Errorf("retry calls = %q, want %q (the push is not repeated)", f.calls, want)
 	}
@@ -327,6 +332,110 @@ func TestResetOverrunAgentBead_LeavesAReSlungSeatAlone(t *testing.T) {
 
 	if err := resetOverrunAgentBead(beadsfake.New(), nuxAgentBead, "gt-0pt32"); err != nil {
 		t.Errorf("missing agent bead: %v, want nil", err)
+	}
+}
+
+// The cleanup status the reset cleared is recorded from the worktree the
+// release keeps: clean once the checkpoint committed and the push put the
+// branch on origin, and the worktree's own state when it holds more.
+func TestOverrunCleanupStatus_ReadsTheWorktree(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	workDir, f := checkpointSeat(t, d, map[string]string{"a.go": "package a\n"})
+	g := d.gitAt(workDir)
+
+	if got := overrunCleanupStatus(g); got != string(polecat.CleanupClean) {
+		t.Errorf("clean worktree = %q, want clean", got)
+	}
+	writeWorkFiles(t, workDir, map[string]string{"a.go": "package a\n// work\n"})
+	if got := overrunCleanupStatus(g); got != string(polecat.CleanupUncommitted) {
+		t.Errorf("worktree with uncommitted work = %q, want has_uncommitted", got)
+	}
+	f.Stash(t, workDir, "wip")
+	if got := overrunCleanupStatus(g); got != string(polecat.CleanupStash) {
+		t.Errorf("worktree with a stash = %q, want has_stash", got)
+	}
+	// A worktree the probe cannot read is unknown, never clean: the nuke
+	// preflight reads unknown and a missing status the same way.
+	if got := overrunCleanupStatus(d.gitAt(t.TempDir())); got != string(polecat.CleanupUnknown) {
+		t.Errorf("unreadable worktree = %q, want unknown", got)
+	}
+}
+
+// recordOverrunCleanupStatus writes the probed status onto the seat's agent
+// bead, which the release's reset left missing.
+func TestRecordOverrunCleanupStatus_WritesTheAgentBead(t *testing.T) {
+	t.Parallel()
+	c := agentBeadFake(t, "gt-0pt32")
+
+	if err := recordOverrunCleanupStatus(c, nuxAgentBead, string(polecat.CleanupClean)); err != nil {
+		t.Fatal(err)
+	}
+
+	got := nuxAgentFields(t, c)
+	if got.CleanupStatus != string(polecat.CleanupClean) || got.HookBead != "gt-0pt32" {
+		t.Errorf("agent bead after recording = %+v, want cleanup clean with the rest untouched", got)
+	}
+	if err := recordOverrunCleanupStatus(c, "", string(polecat.CleanupClean)); err == nil {
+		t.Error("recording on no bead id succeeded, want an error")
+	}
+}
+
+// A seat the guard stopped and released is not reported dead: the release
+// retires its record to stop in the write that lifts the pause, so a seat with
+// no session is never left reading as a running seat whose session died
+// (gt-6ixtp).
+func TestStop_ReleasedSeatReadsIdleNotDead(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 15, 1, 0, 0, 0, time.UTC)
+	d, _ := newOverrunDaemon(t, false)
+	town := d.config.TownRoot
+	// The fixture is a stopped, released seat: the polecat directory the kept
+	// branch lives in is still there, the session is gone, and the last
+	// liveness sample found the seat dead.
+	if err := os.MkdirAll(filepath.Join(town, stopSeat.Rig, "polecats", stopSeat.Polecat), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seat := intent.Seat{Rig: stopSeat.Rig, Role: constants.RolePolecat, Name: stopSeat.Polecat}
+	park := func() {
+		t.Helper()
+		if err := agentpause.Pause(town, stopSeat.Rig, constants.RolePolecat, stopSeat.Polecat, overrunPauseReason, overrunActor, ""); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := intent.Update(town, seat, func(r *intent.Record) error {
+			r.Progress = &intent.Progress{SampledAt: now, DeadSamples: 2}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	health := func() []townhealth.Seat {
+		t.Helper()
+		got, err := (&healthSources{d: d, evidence: time.Hour, now: now}).Seats()
+		if err != nil {
+			t.Fatalf("Seats: %v", err)
+		}
+		return got
+	}
+	park()
+
+	// Lifting the pause alone — what the release used to do — is the bug: the
+	// record stays at run with no session, so the field judges the seat dead.
+	if err := agentpause.Resume(town, stopSeat.Rig, constants.RolePolecat, stopSeat.Polecat); err != nil {
+		t.Fatal(err)
+	}
+	if got := health(); len(got) != 1 || got[0].DeadSamples != 2 {
+		t.Fatalf("after the pause alone: health = %+v, want the sessionless seat judged dead", got)
+	}
+
+	// The release retires it: nothing runs the seat, so the field does not
+	// judge it at all, with no operator action.
+	park()
+	if err := agentpause.Retire(town, stopSeat.Rig, constants.RolePolecat, stopSeat.Polecat, overrunActor); err != nil {
+		t.Fatal(err)
+	}
+	if got := health(); len(got) != 0 {
+		t.Errorf("after the release: health = %+v, want the released seat left out of the seat field", got)
 	}
 }
 

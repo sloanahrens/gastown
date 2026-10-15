@@ -86,10 +86,19 @@ type overrunSeams struct {
 	// push puts the seat's kept branch on origin, after the checkpoint and
 	// before handBack, so the comment never names a branch that exists only
 	// in the worktree. resetAgentBead clears the seat's agent bead of the
-	// handed-back bead, in the release step before clearPause. nil means no
+	// handed-back bead, in the release step before retire. nil means no
 	// push / no reset.
 	push           func(seat overrunSeat) error
 	resetAgentBead func(seat overrunSeat) error
+
+	// recordCleanup records the released seat's cleanup status on its agent
+	// bead, which resetAgentBead leaves missing, and retire ends the seat's
+	// hold and stops its record, both after resetAgentBead and before the stop
+	// is marked finished. A recordCleanup failure is logged and the release
+	// goes on; a retire failure leaves the stop pending. nil means no record /
+	// no retire (a hold left standing).
+	recordCleanup func(seat overrunSeat) error
+	retire        func(seat overrunSeat) error
 
 	// stopLapsed re-reads, before a resumed stop runs its checkpoint or
 	// hand-back, whether the stop still owns the seat. It returns why not

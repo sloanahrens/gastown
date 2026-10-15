@@ -152,6 +152,8 @@ func (f *overrunFake) seams() overrunSeams {
 			f.agentBeadsReset = append(f.agentBeadsReset, seat.Bead)
 			return nil
 		},
+		recordCleanup: func(seat overrunSeat) error { return f.step("record-cleanup", seat) },
+		retire:        func(seat overrunSeat) error { return f.step("retire", seat) },
 		stopLapsed: func(seat overrunSeat) (string, error) {
 			f.calls = append(f.calls, "recheck "+seat.Rig+"/"+seat.Polecat)
 			return f.lapsed, f.lapsedErr
