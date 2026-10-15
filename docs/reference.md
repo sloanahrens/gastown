@@ -539,10 +539,10 @@ These are set in tmux session environment when agents are spawned.
 
 | Variable | Purpose | Example |
 |----------|---------|---------|
-| `GT_ROLE` | Agent role type | `polecat`, `crew` |
+| `GT_ROLE` | Agent role, compound `<rig>/polecats/<name>` or `<rig>/crew/<name>` | `gastown/polecats/toast` |
 | `GT_TOWN_ROOT` | Town root directory | `/home/user/gt` |
 | `BD_ACTOR` | Agent identity for attribution | `gastown/polecats/toast` |
-| `GIT_AUTHOR_NAME` | Commit attribution (same as BD_ACTOR) | `gastown/polecats/toast` |
+| `GIT_AUTHOR_NAME` | Commit attribution (the agent name alone, without rig or role) | `toast` |
 | `BEADS_DIR` | Beads database location | `/home/user/gt/gastown/.beads` |
 
 ### Rig-Level Variables
@@ -566,8 +566,8 @@ These are set in tmux session environment when agents are spawned.
 
 | Role | Key Variables |
 |------|---------------|
-| **Polecat** | `GT_ROLE=polecat`, `GT_RIG=<rig>`, `GT_POLECAT=<name>`, `BD_ACTOR=<rig>/polecats/<name>` |
-| **Crew** | `GT_ROLE=crew`, `GT_RIG=<rig>`, `GT_CREW=<name>`, `BD_ACTOR=<rig>/crew/<name>` |
+| **Polecat** | `GT_ROLE=<rig>/polecats/<name>`, `GT_RIG=<rig>`, `GT_POLECAT=<name>`, `BD_ACTOR=<rig>/polecats/<name>` |
+| **Crew** | `GT_ROLE=<rig>/crew/<name>`, `GT_RIG=<rig>`, `GT_CREW=<name>`, `BD_ACTOR=<rig>/crew/<name>` |
 
 ### Doctor Check
 
