@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -878,6 +879,130 @@ func TestIsDoltOptimisticLockError(t *testing.T) {
 				t.Errorf("isDoltOptimisticLockError(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
+	}
+}
+
+// A read-only Dolt server answers with "cannot update manifest: database is
+// read only", which isDoltOptimisticLockError also matches. The health check
+// must not take that for a busy server: it retries, then asks the server to
+// recover (gt-chx92).
+func TestCheckDoltHealth_ReadOnlyAttemptsRecovery(t *testing.T) {
+	t.Parallel()
+	readOnly := errors.New("bd show __health_check_nonexistent__ --json: cannot update manifest: database is read only")
+
+	tests := []struct {
+		name        string
+		recoverErr  error
+		clearsFault bool
+		healthy     bool
+	}{
+		{"recovery fails", errors.New("restart failed"), false, false},
+		{"recovery succeeds", nil, true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			db := newPolecatDB()
+			db.err = readOnly
+			r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
+			m := newTestManager(r, nil, nil, db)
+			clk := clockwork.NewFakeClockAt(testEpoch)
+			m.clock = clk
+			recoveries := 0
+			m.recoverReadOnly = func(string) error {
+				recoveries++
+				if tt.clearsFault {
+					db.err = nil
+				}
+				return tt.recoverErr
+			}
+
+			done := make(chan error, 1)
+			go func() { done <- m.CheckDoltHealth() }()
+			err := driveClock(t, clk, doltBackoffMax, done)
+
+			if recoveries != 1 {
+				t.Errorf("RecoverReadOnly calls = %d, want 1", recoveries)
+			}
+			if tt.healthy {
+				if err != nil {
+					t.Fatalf("CheckDoltHealth after a successful recovery = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrDoltUnhealthy) {
+				t.Fatalf("CheckDoltHealth = %v, want ErrDoltUnhealthy", err)
+			}
+		})
+	}
+}
+
+// Only a path under the polecat's directory is inside it: polecat 51's
+// worktree is not polecat 5's (a prefix match said it was).
+func TestCheckShellOutsideWorktree_SiblingNamePrefix(t *testing.T) {
+	t.Parallel()
+	r := &rig.Rig{Name: "rig", Path: t.TempDir()}
+	m := newTestManager(r, nil, nil, nil)
+	polecats := filepath.Join(r.Path, "polecats")
+
+	tests := []struct {
+		name    string
+		cwd     string
+		wantErr bool
+	}{
+		{"sibling whose name starts with the name", filepath.Join(polecats, "51", "rig"), false},
+		{"sibling directory beside the polecat", filepath.Join(polecats, "5.pending"), false},
+		{"the polecat directory", filepath.Join(polecats, "5"), true},
+		{"the worktree", filepath.Join(polecats, "5", "rig"), true},
+		{"inside the worktree", filepath.Join(polecats, "5", "rig", "internal"), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m.getwd = func() (string, error) { return tt.cwd, nil }
+			err := m.CheckShellOutsideWorktree("5")
+			if tt.wantErr != errors.Is(err, ErrShellInWorktree) {
+				t.Fatalf("CheckShellOutsideWorktree with the shell in %s = %v, want ErrShellInWorktree: %v", tt.cwd, err, tt.wantErr)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("CheckShellOutsideWorktree with the shell in %s = %v, want nil", tt.cwd, err)
+			}
+		})
+	}
+}
+
+// A resumed branch whose local copy sits behind origin must start at the
+// origin tip, or the polecat's push is rejected non-fast-forward.
+func TestAddWithOptions_ResumeBranchStaleLocalTip(t *testing.T) {
+	t.Parallel()
+	mgr, mayorRig, _, w := canonicalRig(t)
+
+	// A real remote that advances: origin is a repository of its own, and the
+	// branch is pushed to it at C1, then again at C2.
+	remote := filepath.Join(t.TempDir(), "origin")
+	w.InitRepo(t, remote)
+	main := w.rev(t, mayorRig, "main")
+	w.SetRef(t, remote, "refs/heads/main", main)
+	branch := "polecat/example/gh-1234@abcdef"
+	c1 := w.branchAtNewCommit(t, remote, branch, main, "work, first push")
+	w.AddRemote(t, mayorRig, "origin", remote)
+	if err := w.repo(mayorRig).Fetch("origin"); err != nil {
+		t.Fatalf("fetch C1: %v", err)
+	}
+	// The local branch is a prior attempt's: at C1, while origin moves on.
+	w.SetRef(t, mayorRig, "refs/heads/"+branch, c1)
+	c2 := w.Commit(t, remote, branch, "work, second push", nil)
+
+	polecat, err := mgr.AddWithOptions("toast", AddOptions{ResumeBranch: branch})
+	if err != nil {
+		t.Fatalf("AddWithOptions with ResumeBranch: %v", err)
+	}
+
+	wt := w.repo(polecat.ClonePath)
+	if head := w.rev(t, polecat.ClonePath, "HEAD"); head != c2 {
+		t.Errorf("worktree HEAD = %s, want the fetched tip %s (stale local tip was %s)", head, c2, c1)
+	}
+	if current, err := wt.CurrentBranch(); err != nil || current != branch {
+		t.Errorf("worktree on branch %q (%v), want %q", current, err, branch)
 	}
 }
 
@@ -2344,9 +2469,8 @@ func TestReuseIdlePolecat_KillsLiveSession(t *testing.T) {
 // repair that fails once the old clone is gone leaves no clone-less polecatDir
 // behind, and the agent bead's hook is left as it was rather than cleared.
 //
-// The old structure (worktree directly at polecats/<name>) is what makes the
-// move fail: removing the old clone also removes polecatDir, so
-// WorktreeMove into polecats/<name>/<rig> has nowhere to land.
+// The move is made to fail, so the old-structure clone (worktree directly at
+// polecats/<name>) is gone and polecatDir with it when the repair gives up.
 func TestRepairWorktreeMoveFailureClearsPolecatDirAndKeepsHook(t *testing.T) {
 	t.Parallel()
 
@@ -2379,6 +2503,11 @@ func TestRepairWorktreeMoveFailureClearsPolecatDirAndKeepsHook(t *testing.T) {
 
 	db := newPolecatDB()
 	mgr := newTestManager(&rig.Rig{Name: rigName, Path: rigPath}, w, newFakeProbe(), db)
+	base := w.opener()
+	mgr.gits = gitOpener{
+		open:    func(dir string) gitRepo { return moveFailsRepo{base.open(dir)} },
+		openDir: func(gitDir, workDir string) gitRepo { return moveFailsRepo{base.openDir(gitDir, workDir)} },
+	}
 
 	agentID := mgr.agentBeadID(polecatName)
 	db.setAgent(t, agentID, func(f *beads.AgentFields) {
@@ -2399,6 +2528,68 @@ func TestRepairWorktreeMoveFailureClearsPolecatDirAndKeepsHook(t *testing.T) {
 	}
 	if hook := beads.ParseAgentFields(issue.Description).HookBead; hook != "gt-hooked" {
 		t.Fatalf("hook = %q, want it left as gt-hooked after a failed repair", hook)
+	}
+}
+
+// moveFailsRepo is a repository whose worktree moves fail.
+type moveFailsRepo struct{ gitRepo }
+
+func (moveFailsRepo) WorktreeMove(oldPath, newPath string) error {
+	return errors.New("worktree move refused")
+}
+
+// A polecat in the legacy layout has its clone at polecats/<name>. Repair
+// stages the new worktree outside that clone, since removing the old clone
+// would otherwise take the staged worktree with it, and ends with the worktree
+// at polecats/<name>/<rig>.
+func TestRepairWorktreeWithOptions_LegacyLayout(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	rigName := "testrepair"
+	rigPath := filepath.Join(townRoot, rigName)
+	mayorRig := filepath.Join(rigPath, "mayor", "rig")
+	for _, dir := range []string{mayorRig, filepath.Join(rigPath, ".beads"), filepath.Join(mayorRig, ".beads")} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "redirect"), []byte("mayor/rig/.beads\n"), 0644); err != nil {
+		t.Fatalf("write beads redirect: %v", err)
+	}
+
+	w := newWorld()
+	w.InitRepo(t, mayorRig)
+	head := w.Commit(t, mayorRig, "main", "Initial commit", map[string]string{"README.md": "# Test\n"})
+	w.checkout(t, mayorRig)
+	w.AddRemote(t, mayorRig, "origin", mayorRig)
+	w.SetRef(t, mayorRig, "refs/remotes/origin/main", head)
+
+	polecatName := "toast"
+	legacyPath := filepath.Join(rigPath, "polecats", polecatName)
+	if err := w.repo(mayorRig).WorktreeAddFromRef(legacyPath, "old-toast", "HEAD"); err != nil {
+		t.Fatalf("create legacy worktree: %v", err)
+	}
+
+	mgr := newTestManager(&rig.Rig{Name: rigName, Path: rigPath}, w, newFakeProbe(), newPolecatDB())
+	if _, err := mgr.RepairWorktreeWithOptions(polecatName, true, AddOptions{}); err != nil {
+		t.Fatalf("RepairWorktreeWithOptions on a legacy-layout polecat: %v", err)
+	}
+
+	newPath := filepath.Join(rigPath, "polecats", polecatName, rigName)
+	if _, err := os.Stat(filepath.Join(newPath, ".git")); err != nil {
+		t.Fatalf("no worktree at %s after repair: %v", newPath, err)
+	}
+	if got := mgr.clonePath(polecatName); got != newPath {
+		t.Errorf("clonePath = %s, want %s", got, newPath)
+	}
+	for _, leftover := range []string{
+		filepath.Join(rigPath, "polecats", "."+polecatName+".repair-tmp"),
+		newPath + ".repair-tmp",
+	} {
+		if _, err := os.Stat(leftover); err == nil {
+			t.Errorf("repair left its staging directory %s behind", leftover)
+		}
 	}
 }
 
