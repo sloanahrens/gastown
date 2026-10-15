@@ -273,7 +273,10 @@ window with the ticker on and no tick landed in it, so a town with no working
 dispatcher says so from the one signal an operator reads. A tick that
 refused, replanned or skipped its candidates was working, not stalled. A tick
 whose roster the daemon cannot read is `dispatch[?]`: an unreadable roster is
-not a full town (gt-xiw7o).
+not a full town (gt-xiw7o). A seat file that does not parse parks the ticker
+outright, and it reads `dispatch=parked[R]` with the read error as its detail:
+the ticker runs no tick while parked, so without the reason it would look
+silent (gt-jdnab).
 
 The field counts the ready beads carrying `spec-dispatch-failed` as well, so a
 bead a failed dispatch left out of the queue is visible even while the

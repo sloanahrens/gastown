@@ -15,23 +15,18 @@ import (
 // A seat is one agent with its own cap: the pool seat (polecat_pool.agent,
 // capped by max_seats), the pro seat (pro_agent, pro_max, pro_label) and the
 // second seat (patrols.spec_dispatch hooked_agent, max_hooked, prefer_hooked).
-// The tick reads them from the files on every run — `gt spec dispatch` builds
-// its seat list each time it runs, and that is what this daemon shells out to —
-// so an edit to the seat mix lands at the next tick with no restart.
+// A tick shells out to `gt spec dispatch`, which builds its seat list from
+// these files every run, so an edit to the mix lands at the next tick with no
+// restart — a kickstart costs the tick or the landing in flight (gt-jdnab).
 //
-// What the daemon keeps is the picture it read, for the two things a tick
-// cannot do from a process that dies at the end of it:
-//
-//   - saying when the mix changed ("seats now ..."). An operator who edits
-//     hooked_agent or max_hooked and cannot see the ticker pick it up restarts
-//     the daemon to force it, which costs the tick or the landing in flight.
-//   - parking the ticker while a file does not parse. The seats in force stay
-//     the ones the last good read named, and no tick runs on a half-read
-//     picture, which a nil-for-broken read would tick on: the second seat
-//     dropped, with nothing said about it.
+// What the daemon keeps is the picture it last read, for the two things a
+// process that dies at the end of every tick cannot do: saying when the mix
+// changed ("seats now ..."), and parking the ticker on a file that does not
+// parse rather than ticking with a seat silently dropped.
 //
 // Reads are keyed by the size and mtime of the files they came from, so a tick
-// with no operator edit costs one stat per file.
+// with no operator edit costs one stat per file; a read that failed is retried
+// on the next tick.
 
 // specSeatTracker is the seat settings the ticker read last, the stamps of the
 // files it read them from, and the picture it last announced.
@@ -49,17 +44,32 @@ type specSeatTracker struct {
 }
 
 // read returns the seat keys the town's files set, reading them again only when
-// a file moved since the last call.
+// a file moved since the last call — or when the last call failed: an unchanged
+// stamp is not a read that worked, and a failure the operator never edited away
+// (a lock, a permission) clears itself on the next tick rather than parking the
+// ticker until a file happens to move.
 func (t *specSeatTracker) read(townRoot string) (string, error) {
 	stamps := specSeatStamps(specSeatFiles(townRoot))
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if stamps == t.stamps {
+	if stamps == t.stamps && t.err == nil {
 		return t.picture, t.err
 	}
 	picture, err := readSpecSeatPicture(townRoot)
 	t.stamps, t.picture, t.err = stamps, picture, err
 	return picture, err
+}
+
+// parked says why the ticker is not running a tick — "" after a read that
+// worked. townhealth reports it, so a ticker stopped on a seat file is read as
+// parked with a reason rather than as a dispatcher gone silent (gt-jdnab).
+func (t *specSeatTracker) parked() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.err == nil {
+		return ""
+	}
+	return "the seat settings could not be read: " + t.err.Error()
 }
 
 // announce logs the seat picture when it differs from the one last announced:
@@ -109,7 +119,10 @@ func specSeatStamps(files []string) string {
 
 // readSpecSeatPicture reads the two blocks the seats come from and renders the
 // keys they set. An unreadable block is an error: the ticker parks on it rather
-// than tick with a picture that lost a seat to a typo (gt-jdnab).
+// than tick with a picture that lost a seat to a typo (gt-jdnab). Nothing here
+// writes: LoadOrCreateTownSettings parses a town settings file and hands back
+// defaults in memory for an absent one, so a tick that finds no settings leaves
+// the town as it was (gt-jdnab).
 func readSpecSeatPicture(townRoot string) (string, error) {
 	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
 	if err != nil {

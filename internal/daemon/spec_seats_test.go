@@ -158,6 +158,12 @@ func TestTriggerSpecDispatchParksOnASeatFileThatDoesNotParse(t *testing.T) {
 	if n := countContaining(lines(), "spec_dispatch: not ticking:", "seat settings unreadable"); n != 1 {
 		t.Errorf("park lines = %d, want one for one error:\n%s", n, strings.Join(lines(), "\n"))
 	}
+	// townhealth reads the park off the tracker: a parked ticker runs no tick
+	// to record, so this is what keeps it from reading as a silent dispatcher
+	// (gt-jdnab).
+	if why := d.specSeats.parked(); !strings.Contains(why, "seat settings could not be read") {
+		t.Errorf("parked reason = %q, want the read error townhealth reports", why)
+	}
 
 	// A different error is its own line, and still one per error.
 	writeSpecSeatBody(t, root, "{\n  \"type\": \"town-settings\",\n")
@@ -177,11 +183,75 @@ func TestTriggerSpecDispatchParksOnASeatFileThatDoesNotParse(t *testing.T) {
 	if n := countContaining(lines(), "seat settings readable again"); n != 1 {
 		t.Errorf("resume lines = %d, want one:\n%s", n, strings.Join(lines(), "\n"))
 	}
+	if why := d.specSeats.parked(); why != "" {
+		t.Errorf("parked reason = %q, want none once a read worked again", why)
+	}
 	if n := countContaining(lines(), "spec_dispatch: seats now"); n != 1 {
 		t.Errorf("seat lines = %d, want the first tick's alone: the seats did not change:\n%s", n, strings.Join(lines(), "\n"))
 	}
 	if calls := fake.argvs("spec", "dispatch"); len(calls) != 2 {
 		t.Errorf("tick calls = %d, want the resumed tick to have run (%v)", len(calls), calls)
+	}
+}
+
+// A read that failed is retried on the next tick even with both files where
+// they were: a failure that clears without an operator edit — a writer that was
+// mid-file when the tick read it — must not park the ticker until a stamp
+// happens to move (gt-jdnab).
+func TestSpecSeatTrackerRetriesAReadThatFailed(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeSpecSeatTown(t, root, specSeatPool("claude-sonnet", 2))
+	path := config.TownSettingsPath(root)
+	body, err := os.ReadFile(path) //nolint:gosec // G304: a temp town this test wrote
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := string(body)
+	// One byte moved turns the body into one that does not parse without
+	// changing its size, so the good body can be put back under a stamp the
+	// failed read already saw.
+	broken := strings.Replace(good, `"max_seats":`, `"max_seats",`, 1)
+	if broken == good || len(broken) != len(good) {
+		t.Fatalf("broken body = %q, want the good one with one byte moved", broken)
+	}
+	writeSpecSeatBody(t, root, broken)
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var tr specSeatTracker
+	if _, err := tr.read(root); err == nil {
+		t.Fatal("a read of a body that does not parse reported no error")
+	}
+
+	// The good body is back at the size and mtime the failed read was keyed
+	// by, so a tracker that answered that read from its cache stays parked.
+	writeSpecSeatBody(t, root, good)
+	if err := os.Chtimes(path, fi.ModTime(), fi.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	picture, err := tr.read(root)
+	if err != nil || picture != "pool_agent=claude-sonnet max_seats=2" {
+		t.Errorf("read after the file parsed again = %q, %v, want the seat picture", picture, err)
+	}
+}
+
+// The read opens nothing for writing: a town with no settings file reads as the
+// dispatcher's defaults and leaves that file as absent as it found it (gt-jdnab).
+func TestSpecSeatReadLeavesTheFilesItReadsAlone(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	var tr specSeatTracker
+	picture, err := tr.read(root)
+	if err != nil || picture != "" {
+		t.Fatalf("read of a town with no seat keys = %q, %v, want an empty picture", picture, err)
+	}
+	for _, path := range specSeatFiles(root) {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("the read left %s behind (stat %v): reading a seat file must not create one", path, err)
+		}
 	}
 }
 

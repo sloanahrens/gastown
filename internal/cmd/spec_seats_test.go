@@ -3,8 +3,6 @@ package cmd
 import (
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/config"
 )
 
 // specTickDaemon is a patrol config whose spec_dispatch block names no seat: the
@@ -17,15 +15,11 @@ const specTickDaemon = `{
 }`
 
 // specTickRoster is the roster the next tick of root runs with: the seat blocks
-// are read from the files the way runSpecDispatch reads them, and the seats are
-// counted by the same budget builder, so this is the picture a tick would take.
+// come from the tick's own read path, and the seats are counted by the same
+// budget builder, so this is the picture a tick would take.
 func specTickRoster(t *testing.T, root string) string {
 	t.Helper()
-	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(root))
-	if err != nil {
-		t.Fatal(err)
-	}
-	sd, err := readSpecDispatchConfig(root)
+	ts, sd, err := specTickTown(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,9 +31,8 @@ func specTickRoster(t *testing.T, root string) string {
 }
 
 // A seat the file gains or moves is the seat the next tick runs with: the tick
-// reads both blocks on every run, so `gt pool set-second` needs no daemon
-// restart — and no kickstart, which cut the tick or landing in flight the last
-// time one was run for this (gt-jdnab).
+// reads both blocks on every run, so a seat change needs no daemon restart
+// (gt-jdnab).
 func TestSpecDispatchSeatsFollowTheFileOnTheNextTick(t *testing.T) {
 	t.Parallel()
 	root := poolTestTown(t, poolSecondSettings, specTickDaemon)
@@ -93,8 +86,7 @@ func TestReadSpecDispatchConfigTellsAbsentFromBroken(t *testing.T) {
 		t.Errorf("an absent block = %+v, %v, want no block and no error", sd, err)
 	}
 
-	root = poolTestTown(t, poolSecondSettings,
-		`{"type": "daemon-patrol-config", "version": 1, "patrols": {"spec_dispatch": {"enabled": true, "max_hooked":`)
+	root = poolTestTown(t, poolSecondSettings, specTickBrokenDaemon)
 	sd, err = readSpecDispatchConfig(root)
 	if err == nil || sd != nil {
 		t.Fatalf("a block that does not parse = %+v, %v, want an error", sd, err)
@@ -107,5 +99,49 @@ func TestReadSpecDispatchConfigTellsAbsentFromBroken(t *testing.T) {
 	sd, err = readSpecDispatchConfig(root)
 	if err != nil || sd == nil || !sd.Enabled {
 		t.Errorf("a readable block = %+v, %v, want the block the file holds", sd, err)
+	}
+}
+
+// specTickBrokenDaemon is a patrol document cut off mid-key: the tick's read
+// errors on it rather than reading it as a town with no second seat.
+const specTickBrokenDaemon = `{"type": "daemon-patrol-config", "version": 1, "patrols": {"spec_dispatch": {"enabled": true, "max_hooked":`
+
+// A seat file the tick cannot read stops the tick: the tick returns the error
+// instead of slinging on a picture that lost the second seat, and the error
+// names the seat settings so the operator knows what to fix (gt-jdnab).
+func TestSpecDispatchStopsOnASeatFileItCannotRead(t *testing.T) {
+	t.Parallel()
+	root := poolTestTown(t, poolSecondSettings, specTickBrokenDaemon)
+	report, err := runSpecDispatchAt(root)
+	if err == nil {
+		t.Fatalf("the tick ran with a seat file that does not parse: %+v", report)
+	}
+	if !strings.Contains(err.Error(), "reading the seat settings") || !strings.Contains(err.Error(), "daemon.json") {
+		t.Errorf("tick error = %q, want it to name the unreadable seat settings", err)
+	}
+}
+
+// The tick reads the same file gt pool reads and writes: both go through
+// readSpecDispatchConfig, so a seat set-second wrote is a seat the tick sees
+// (gt-jdnab).
+func TestSpecTickAndPoolReadTheOnePatrolBlock(t *testing.T) {
+	t.Parallel()
+	root := poolTestTown(t, poolSecondSettings, specTickDaemon)
+	if _, err := poolTestSetSecond(root, "groq-compound", 3); err != nil {
+		t.Fatal(err)
+	}
+	sd, err := loadPoolSpecDispatch(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sd == nil || sd.HookedAgent != "groq-compound" || sd.MaxHooked != 3 {
+		t.Errorf("gt pool reads %+v, want the seat gt pool set-second wrote", sd)
+	}
+	_, ticked, err := specTickTown(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ticked == nil || ticked.HookedAgent != "groq-compound" || ticked.MaxHooked != 3 {
+		t.Errorf("the tick reads %+v, want the seat gt pool set-second wrote", ticked)
 	}
 }

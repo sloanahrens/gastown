@@ -56,8 +56,7 @@ func TestPoolSetSecondWritesAgentAndCapAndSaysWhenItLands(t *testing.T) {
 	if got := poolTestBudget(t, root); got["deepseek-flash"] != 2 || got["claude-sonnet"] != 2 {
 		t.Errorf("dispatcher seats = %v, want claude-sonnet 2 and deepseek-flash 2", got)
 	}
-	// The write lands at the dispatcher's next tick, which reads the block on
-	// every run, and no daemon restart is asked for (gt-jdnab).
+	// The write lands at the next tick and asks for no restart (gt-jdnab).
 	if !strings.Contains(out, "second seat: deepseek-flash cap 2") || !strings.Contains(out, "next tick") {
 		t.Errorf("output lacks the change or when it lands:\n%s", out)
 	}

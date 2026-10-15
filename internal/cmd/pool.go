@@ -76,8 +76,7 @@ seat's agent is never that agent, so naming it sets the pro seat whether or
 not the pro seat is open. Any other agent is refused.
 
 All three seats take effect at the dispatcher's next tick, which reads them from
-the files on every run: no daemon restart, and no daemon kickstart to interrupt
-the tick or landing in flight.
+the files on every run: no daemon restart or kickstart is needed.
 
 The file is written atomically and the previous copy is kept beside it as
 <file>.bak-<timestamp>. Keys gt pool does not own are left as they are.`,
@@ -145,8 +144,7 @@ seat or the pro seat leaves the second seat idle; gt pool show and this command
 say so.
 
 The change takes effect at the dispatcher's next tick, like the other two seats:
-the dispatcher reads this block on every run, so no daemon restart is needed. The
-daemon logs "spec_dispatch: seats now ..." on the tick that reads a changed mix.
+the dispatcher reads this block on every run, so no daemon restart is needed.
 The patrol config is the "daemon" section of settings/config.json on a two-file
 town and mayor/daemon.json on a five-file one. It is written atomically and the
 previous copy is kept beside it as <file>.bak-<timestamp>. Keys gt pool does not
@@ -311,18 +309,11 @@ func loadPoolSeats(townRoot string) (poolSeatView, error) {
 // loadPoolSpecDispatch reads spec_dispatch the way the daemon does. Unlike
 // loadSpecDispatchConfig it returns the read error: a file that does not parse
 // must stop a seat change, not read as "no seats".
+// loadPoolSpecDispatch is the one read of the patrol block gt pool reads and
+// writes: readSpecDispatchConfig, so pool and the ticker cannot drift onto two
+// readings of one file (gt-jdnab).
 func loadPoolSpecDispatch(townRoot string) (*config.SpecDispatchConfig, error) {
-	pc, err := config.LoadDaemonPatrolConfig(config.DaemonPatrolConfigPath(townRoot))
-	if err != nil {
-		if errors.Is(err, config.ErrNotFound) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	if pc.Patrols == nil {
-		return nil, nil
-	}
-	return pc.Patrols.SpecDispatch, nil
+	return readSpecDispatchConfig(townRoot)
 }
 
 func runPoolShow(w io.Writer, townRoot string) error {
@@ -527,10 +518,8 @@ func runPoolSet(w io.Writer, townRoot, agent string, n int) error {
 }
 
 // printSeatChange reports a seat write and, for the second seat, when it lands.
-// The dispatcher reads every seat from the files on each tick — the second
-// seat's patrol block included — so the write is in force at the next tick and
-// nothing has to be restarted: a kickstart would only cut the tick or landing in
-// flight (gt-jdnab). The other two seats' Long text already says when they land.
+// The ticker reads every seat from the files per tick, so the write holds from
+// the next tick it runs and nothing has to be restarted (gt-jdnab).
 func printSeatChange(w io.Writer, seat poolSeatKey, agent string, n int) {
 	if n == 0 {
 		fmt.Fprintf(w, "closed the %s (%s)\n", seatName(seat), agent)
@@ -538,7 +527,7 @@ func printSeatChange(w io.Writer, seat poolSeatKey, agent string, n int) {
 		fmt.Fprintf(w, "%s: %s cap %d\n", seatName(seat), agent, n)
 	}
 	if seat == secondSeat {
-		fmt.Fprintln(w, "in force at the dispatcher's next tick; no restart is needed (the daemon logs \"seats now\" when it reads it)")
+		fmt.Fprintln(w, "takes effect at the dispatcher's next tick; no restart is needed")
 	}
 }
 

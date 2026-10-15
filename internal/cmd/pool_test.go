@@ -356,10 +356,8 @@ func TestPoolSetChangesTheSecondSeatCapAndSaysWhenItLands(t *testing.T) {
 	if got := poolTestBudget(t, root)["claude-sonnet"]; got != 4 {
 		t.Errorf("second seat cap = %d, want 4", got)
 	}
-	// The second seat is the one that used to say it needed a daemon
-	// kickstart. It is read on every tick like the others, so the write lands
-	// at the next tick and the output must not send the operator to restart
-	// the daemon (gt-jdnab).
+	// The second seat lands like the other two: at the next tick, with no
+	// restart asked for (gt-jdnab).
 	if !strings.Contains(out, "next tick") || strings.Contains(out, "kickstart") || strings.Contains(out, "daemon start") {
 		t.Errorf("a second seat change should say it lands at the next tick and need no restart:\n%s", out)
 	}
