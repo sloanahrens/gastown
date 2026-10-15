@@ -173,8 +173,7 @@ type DeployRun struct {
 // (gt-t9w60).
 type DeployHealthRow struct {
 	// Repo is the owner/name the page names the app's repo by everywhere else,
-	// and App the repo's own name, which the row's first cell and the strip's
-	// marker carry it by.
+	// and App the repo's own name, which the row's first cell carries it by.
 	Repo string `json:"repo"`
 	App  string `json:"app"`
 	// Env is the environment the row is about: staging-integration or
@@ -220,15 +219,17 @@ type Deploys struct {
 	// app and environment. It is empty until a repo has health.yml runs, so a
 	// repo without the workflow shows nothing extra.
 	Health []DeployHealthRow `json:"health,omitempty"`
-	// HealthFailed names the apps whose newest scheduled check failed — the
-	// strip's red marker. HealthUnread names the apps whose newest check the
+	// HealthFailed names the repos whose newest scheduled check failed — the
+	// strip's red marker. HealthUnread names the repos whose newest check the
 	// block could not read, which the same marker says rather than leaving an
-	// alarm nobody can see. An app that is off is in neither: its run is
-	// skipped, which is on purpose, not a failure.
+	// alarm nobody can see. Both carry owner/name, so two repos with the same
+	// base name are two entries rather than one name twice. An app that is off
+	// is in neither: its run is skipped, which is on purpose, not a failure.
 	HealthFailed []string `json:"health_failed,omitempty"`
 	HealthUnread []string `json:"health_unread,omitempty"`
-	// HealthMissing names the repos whose scheduled checks could not be listed
-	// at all. They have no app to name, so the block's note carries them.
+	// HealthMissing names the repos whose scheduled checks the block could not
+	// fold: one whose runs could not be listed, and one whose runs name no
+	// environment the block knows. The block's note carries them.
 	HealthMissing []string `json:"health_missing,omitempty"`
 	Missing       []string `json:"missing,omitempty"`
 	Error         string   `json:"error,omitempty"`
@@ -267,8 +268,9 @@ type deployWatch struct {
 }
 
 // cachedCheck is one scheduled run's jobs as the fold reads them. A run that has
-// ended is cached here, so the next refresh pays no jobs call for it; a run
-// still moving is not, since its jobs are not final.
+// ended and whose jobs were read is cached here, so the next refresh pays no
+// jobs call for it; a run still moving is not, since its jobs are not final, and
+// neither is one that ended with no jobs, since that is a read that failed.
 type cachedCheck struct {
 	envs   map[string]string
 	failed bool
@@ -376,8 +378,8 @@ func (r *DeployReader) Read() *Deploys {
 	// The scheduled checks are the refresh's last read, on a budget of their
 	// own: the runs no earlier refresh has the jobs of are what they cost, and
 	// neither that nor the deploy rows may take the other's time. A check the
-	// budget or the wire takes out is named — the repo in HealthMissing, the app
-	// in HealthUnread — rather than left to read as a town with no checks.
+	// budget or the wire takes out is named in HealthMissing or HealthUnread
+	// rather than left to read as a town with no checks.
 	health := []DeployHealthRow{}
 	var healthFailed, healthUnread, healthMissing []string
 	r.mu.Lock()
@@ -392,23 +394,28 @@ func (r *DeployReader) Read() *Deploys {
 		owner, repo, _ := strings.Cut(name, "/")
 		res := r.healthRows(hctx, name, owner, repo, prevChecks, checks)
 		health = append(health, res.rows...)
+		// A repo whose checks could not be listed and one whose runs named no
+		// environment the block knows are one answer to an operator: the checks
+		// are there and the block could not read them, which must not draw as a
+		// repo with no checks.
 		switch {
-		case !res.listed:
+		case !res.listed, res.unknown:
 			healthMissing = append(healthMissing, name)
 		case res.unread:
-			healthUnread = append(healthUnread, healthApp(name))
+			healthUnread = append(healthUnread, name)
 		case res.failed:
-			healthFailed = append(healthFailed, healthApp(name))
+			healthFailed = append(healthFailed, name)
 		}
 	}
 	r.mu.Lock()
 	r.checks = checks
 	r.mu.Unlock()
 
-	// The rows are read a repo at a time, in the viewer's order, and the page
-	// is read app by app: sorting by app keeps an app's environments together,
-	// in the order the fold drew them.
-	sort.SliceStable(health, func(i, j int) bool { return health[i].App < health[j].App })
+	// The rows are read a repo at a time, in the viewer's order, and the page is
+	// read app by app: sorting by repo keeps an app's environments together, in
+	// the order the fold drew them, and two repos with the same base name are
+	// two groups of rows rather than one app's.
+	sort.SliceStable(health, func(i, j int) bool { return health[i].Repo < health[j].Repo })
 	sort.Strings(healthFailed)
 	sort.Strings(healthUnread)
 	sort.Strings(healthMissing)
@@ -515,13 +522,16 @@ type healthRun struct {
 }
 
 // healthRead is one repo's scheduled checks as the block reads them: the rows to
-// draw, whether the repo's health runs could be listed at all, and the newest
-// run's word on the app — unread, or failed.
+// draw, whether the repo's health runs could be listed at all, whether they
+// could be folded into an environment, and the newest run's word on the app —
+// unread, or failed. unread and failed are read only where a row was drawn;
+// unknown and !listed both mean no row was.
 type healthRead struct {
-	rows   []DeployHealthRow
-	listed bool
-	unread bool
-	failed bool
+	rows    []DeployHealthRow
+	listed  bool
+	unknown bool
+	unread  bool
+	failed  bool
 }
 
 // healthRows reads one repo's scheduled health checks and folds them into the
@@ -536,8 +546,9 @@ type healthRead struct {
 // the refresh pays a jobs call per run it has not settled rather than per run of
 // every window, and a check the block has read once is never read again as
 // unreadable. The window is newest first and read in that order, so a budget
-// that runs out spends what the row's pass count needed before it touches the
-// newest run the marker stands on.
+// that runs out has already read the newest run the marker stands on and takes
+// the window's oldest runs instead: the pass count loses their entries to
+// NotRead, which says them.
 //
 // A listing that failed says so rather than reading as a repo with no checks:
 // its runs are the deploy runs' own listing, so it is a repo the block could not
@@ -569,9 +580,12 @@ func (r *DeployReader) healthRows(ctx context.Context, name, owner, repo string,
 			continue
 		}
 		jobs, err := r.api.ListRunJobs(ctx, owner, repo, window[i].run.ID)
-		if err != nil {
-			// A run read under a budget that has run out was not read: it is
-			// not held, and the next refresh asks again.
+		// A call that failed and one that answered with no jobs at all are the
+		// same thing to the block: the jobs are where a check says what it did,
+		// so a run with none is one the block could not read rather than one
+		// nothing went wrong in. Neither is held, so the next refresh asks again
+		// — a run read under a budget that ran out is not read either.
+		if err != nil || len(jobs) == 0 {
 			window[i].unread = true
 			continue
 		}
@@ -581,8 +595,9 @@ func (r *DeployReader) healthRows(ctx context.Context, name, owner, repo string,
 			seen[key] = cachedCheck{envs: window[i].envs, failed: window[i].failed}
 		}
 	}
-	rows, failed, unread := foldHealth(name, window)
-	return healthRead{rows: rows, listed: true, failed: failed, unread: unread}
+	res := foldHealth(name, window)
+	res.listed = true
+	return res
 }
 
 // healthRunEnded reports whether a scheduled run has finished, which is what
@@ -616,12 +631,19 @@ func healthEnvsOf(jobs []forgejo.ActionRunJob) map[string]string {
 // with the newest run's result — never an older run's drawn as the newest — and
 // the newest run's word on the app: a run the block could not read leaves both
 // saying so, with the passes it did read still counted beside them.
-func foldHealth(name string, window []healthRun) (rows []DeployHealthRow, failed, unread bool) {
-	app := healthApp(name)
+func foldHealth(name string, window []healthRun) healthRead {
+	envs := healthWindowEnvs(window)
+	if len(window) > 0 && len(envs) == 0 {
+		// Every run was read and none named an environment the block knows — a
+		// job the workflow renamed, say — so there is no row to fold them into
+		// and no result to report. That is a repo whose checks the block cannot
+		// read, not a repo with no checks.
+		return healthRead{unknown: true}
+	}
 	// The newest run is what the row's result comes from, so a window whose
 	// newest run could not be read has no result to report whatever the runs
 	// under it hold.
-	unread = len(window) > 0 && window[0].unread
+	unread := len(window) > 0 && window[0].unread
 	read := len(window) > 0 && !unread
 	gone := 0
 	for _, hr := range window {
@@ -629,9 +651,9 @@ func foldHealth(name string, window []healthRun) (rows []DeployHealthRow, failed
 			gone++
 		}
 	}
-	rows = make([]DeployHealthRow, 0, len(healthEnvs))
-	for _, env := range healthWindowEnvs(window) {
-		row := DeployHealthRow{Repo: name, App: app, Env: env, Unread: !read, NotRead: gone}
+	rows := make([]DeployHealthRow, 0, len(envs))
+	for _, env := range envs {
+		row := DeployHealthRow{Repo: name, App: healthApp(name), Env: env, Unread: !read, NotRead: gone}
 		have := false
 		for _, hr := range window {
 			status, ok := hr.envs[env]
@@ -655,14 +677,15 @@ func foldHealth(name string, window []healthRun) (rows []DeployHealthRow, failed
 		}
 		rows = append(rows, row)
 	}
-	return rows, healthFailed(window), unread
+	return healthRead{rows: rows, unread: unread, failed: healthFailed(window)}
 }
 
 // healthWindowEnvs names the environments a window carries, in the order the
-// block draws them. A window whose jobs were read and named none draws no rows
-// — the workflow checks no environment the block knows — but one whose newest
-// run could not be read could name either, so the two it knows are drawn as
-// rows it could not read rather than left blank.
+// block draws them. A window whose runs were read and named none returns
+// nothing, which the fold says as a repo it could not read — the workflow
+// checks no environment the block knows — but one whose newest run could not be
+// read could name either, so the two it knows are drawn as rows it could not
+// read rather than left blank.
 func healthWindowEnvs(window []healthRun) []string {
 	var named []string
 	read := false
@@ -688,33 +711,45 @@ func healthWindowEnvs(window []healthRun) []string {
 // the newest run that finished without passing, whatever its name. The row is
 // per environment, so a failure in a job the two environments do not name would
 // otherwise reach nobody — and the newest run's word is the block's only stand
-// on the app. A run in flight has not failed, and an app that is off
-// was skipped: neither raises a marker off an older run's failure, which would
-// claim what the block never saw.
+// on the app. A run in flight has not failed: the check is marked when it ends,
+// not while it moves, so a job of it that has already failed raises nothing. An
+// app that is off was skipped, and neither raises a marker off an older run's
+// failure, which would claim what the block never saw.
 func healthFailed(window []healthRun) bool {
-	return len(window) > 0 && !window[0].unread && window[0].failed
+	if len(window) == 0 || window[0].unread {
+		return false
+	}
+	return healthRunEnded(window[0].run.Status) && window[0].failed
 }
 
-// healthRunFailed reports whether a run finished without passing. A job that
-// failed or was canceled counts however it is named, and where the API sent the
-// run no jobs at all the run's own status is the only word left: it is the whole
-// workflow's, and a run the API calls a failure is not read as a run nothing
-// went wrong in.
+// healthRunFailed reports whether a run finished without passing: the run's own
+// status, which is the whole workflow's, or a job of it that failed or was
+// canceled, whatever either is named. A run the API calls a failure is not read
+// as one nothing went wrong in because its jobs happen to read green.
 func healthRunFailed(jobs []forgejo.ActionRunJob, status string) bool {
-	if len(jobs) == 0 {
-		word := cloudText(status, deployTextMax)
-		return word == healthFailure || word == forgejoRunCancelled
+	if healthCheckFailed(status) {
+		return true
 	}
 	for _, j := range jobs {
-		if word := cloudText(j.Status, deployTextMax); word == healthFailure || word == forgejoRunCancelled {
+		if healthCheckFailed(j.Status) {
 			return true
 		}
 	}
 	return false
 }
 
+// healthCheckFailed reads one status word as a check that finished without
+// passing: the API's failure and its cancellation.
+func healthCheckFailed(status string) bool {
+	switch cloudText(status, deployTextMax) {
+	case healthFailure, forgejoRunCancelled:
+		return true
+	}
+	return false
+}
+
 // healthApp is the name an app is known by: the repo's own name, without the
-// owner, which is what the strip's marker and the row's first cell carry.
+// owner, which is what the row's first cell carries.
 func healthApp(repo string) string { return path.Base(repo) }
 
 // deployRunWorkflow names the workflow a run belongs to, or "" for a run of

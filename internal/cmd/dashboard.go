@@ -84,13 +84,11 @@ run nothing has picked up, and one that has not moved, are said as inferences.
 
 The block's scheduled rows are the apps' hourly health.yml checks (dv-4qtt),
 folded rather than listed: one row per app and environment — staging and prod —
-with the newest result and its age, the last time that environment passed and
-how many of the newest 24 runs it passed, which is what reading each run's jobs
-takes — a run of the window the reader could not read is counted beside the
-passes rather than dropped from them. A run whose checks were skipped because
-the app is off reads "off on purpose" and is never green, and the header carries
-a red health marker naming every app whose newest check failed, or a degraded
-one naming an app whose newest check nobody has a reading of. A repo with no
+with the newest result, the last green and the pass count over the newest 24
+runs, the runs the reader could not read counted beside it. A check skipped
+because the app is off reads "off on purpose" and is never green, and the header
+carries a red marker naming every repo whose newest check failed, or a degraded
+one naming a repo whose newest check nobody has a reading of. A repo with no
 health.yml run shows nothing extra.
 
 The Cloud panel reads the report the cloud patrol writes — report.json with a
