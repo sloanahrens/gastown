@@ -34,15 +34,19 @@ func TestEveryRuleHasAnOwner(t *testing.T) {
 			t.Errorf("the owner table names rule %q, which no longer exists", rule)
 		}
 	}
+}
 
-	// An escalation is the human's only when the overseer cannot resolve it,
-	// which the per-escalation rule decides, so the family default is the
-	// overseer's.
-	if got := RuleOwner(RuleEscalation); got != OwnerOverseer {
-		t.Errorf("RuleOwner(%q) = %q: an escalation.open row has no owner to judge", RuleEscalation, got)
-	}
-	if got := RuleOwner("something.new"); got != OwnerOverseer {
-		t.Errorf("RuleOwner of an unknown rule = %q, want the overseer default", got)
+// The rows the table cannot decide are the overseer's: an escalation.open row
+// carries nothing about who raised the escalation, and EscalationOwner is what
+// reads that off the escalation itself, so the family row must not claim the
+// human. An unknown rule reads the same way, as a line written before the table
+// existed (gt-71714).
+func TestRuleOwnerFallsBackToTheOverseer(t *testing.T) {
+	t.Parallel()
+	for _, rule := range []string{RuleEscalation, "something.new", ""} {
+		if got := RuleOwner(rule); got != OwnerOverseer {
+			t.Errorf("RuleOwner(%q) = %q, want the overseer default", rule, got)
+		}
 	}
 }
 

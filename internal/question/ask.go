@@ -105,9 +105,12 @@ func PushPriority(priority int) bool {
 
 // PushTitle is the one line a push carries: the question's id, so the text
 // names the dashboard row it is about, its priority and its title. The body is
-// never pushed (gt-71714).
+// never pushed, and the title is drawn the way the dashboard draws it — Field
+// flattens it to one line, drops the control and invisible format characters,
+// and caps its length — so what a lock screen shows is what the row says
+// (gt-71714).
 func PushTitle(id string, priority int, title string) string {
-	return fmt.Sprintf("Question %s P%d: %s", id, priority, title)
+	return fmt.Sprintf("Question %s P%d: %s", id, priority, Field(title))
 }
 
 // CheckPriority refuses a priority outside bd's range.

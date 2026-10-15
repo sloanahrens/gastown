@@ -146,6 +146,25 @@ func TestSendNotificationsPushesOnlyTheHumansEscalations(t *testing.T) {
 	}
 }
 
+// A route that reaches nobody reports no withheld push: the gate withholds what
+// a push action would have sent, and a route with none never had one to
+// withhold (gt-71714). The route carries no mail action, so the router is not
+// asked to resolve a recipient here.
+func TestSendNotificationsReportsNoWithheldPushWithoutAPushAction(t *testing.T) {
+	t.Parallel()
+	cfg := &config.EscalationConfig{
+		Routes: map[string][]string{"low": {"bead", "log"}},
+	}
+	req := EscalationRequest{
+		TownRoot: t.TempDir(), Severity: "low", Description: "x", EscalatedBy: "daemon",
+	}
+	for _, status := range sendNotifications(req, "hq-esc1", cfg, externalSenders{}) {
+		if status.Channel == "push" {
+			t.Errorf("status %+v reports a withheld push for a route with no push action", status)
+		}
+	}
+}
+
 func TestExecuteExternalActionsReportsSendFailure(t *testing.T) {
 	t.Parallel()
 	cfg := &config.EscalationConfig{Contacts: config.EscalationContacts{SlackWebhook: "https://hooks.example.com/slack"}}

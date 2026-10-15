@@ -140,9 +140,13 @@ An escalation the overseer owns reaches the human only if nobody acted on it for
 `unhandled_after` (default `"30m"`). The daemon pushes one line then — `Unhandled
 for 30 min: <id> <title>` — through the command `operational.overseer.silent_push`
 names, and records the push as the `unhandled-pushed` label so a restart does not
-say it twice. `gt ask` pushes a question the same way when it is filed at P0, P1
+say it twice; a record that could not be written is remembered for the life of
+the process instead, because a text the human has already read is not worth
+sending again. A town that names no push command reads no escalation config and
+sends nothing. `gt ask` pushes a question the same way when it is filed at P0, P1
 or P2, as `Question <id> P<n>: <title>`; a P3 or P4 waits on the dashboard. Both
-push the title alone: no escalation body and no question body leave the town.
+push the title alone, drawn as the dashboard draws it: no escalation body and no
+question body leave the town, and neither does a control character.
 
 ## Escalation Beads
 

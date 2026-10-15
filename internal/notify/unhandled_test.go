@@ -111,6 +111,90 @@ func TestUnhandledRunDoesNotPushTheSameEscalationTwice(t *testing.T) {
 	}
 }
 
+// One escalation's failure does not stop the ones behind it: every escalation
+// that has waited out the window is still owed its one push, and the pass
+// reports the failure it had rather than abandoning the rest (gt-71714).
+func TestUnhandledRunPushesTheRestWhenOneFails(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	first := escalationBead("hq-first", "daemon", now.Add(-time.Hour))
+	second := escalationBead("hq-second", "daemon", now.Add(-time.Hour))
+	var tried []string
+	run := UnhandledRun{
+		List: func() ([]*beads.Issue, error) { return []*beads.Issue{first, second}, nil },
+		Push: func(_, title, _ string) error {
+			tried = append(tried, title)
+			if strings.Contains(title, first.ID) {
+				return errors.New("timed out")
+			}
+			return nil
+		},
+		Mark: func(id string) error {
+			if id == first.ID {
+				t.Error("a failed push was recorded")
+			}
+			return nil
+		},
+		Name:   "imessage",
+		Window: config.DefaultEscalationUnhandledAfter,
+	}
+	ids, err := run.Run(now)
+	if err == nil || !strings.Contains(err.Error(), first.ID) {
+		t.Fatalf("Run = %v, want an error naming %s", err, first.ID)
+	}
+	if strings.Join(ids, ",") != second.ID {
+		t.Errorf("pushed %v, want %s alone", ids, second.ID)
+	}
+	if len(tried) != 2 {
+		t.Errorf("tried %v, want a push for both escalations", tried)
+	}
+}
+
+// A push that reached the human and then could not be recorded is not sent
+// again: the label is the record the next pass reads, so without a memory of
+// the send a database that refused the mark would re-text the human every
+// heartbeat (gt-71714).
+func TestUnhandledRunRemembersAPushItCouldNotRecord(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	unrecorded := escalationBead("hq-unrecorded", "daemon", now.Add(-time.Hour))
+	recorded := escalationBead("hq-recorded", "daemon", now.Add(-time.Hour))
+	var pushes []string
+	run := UnhandledRun{
+		List: func() ([]*beads.Issue, error) { return []*beads.Issue{unrecorded, recorded}, nil },
+		Push: func(_, title, _ string) error { pushes = append(pushes, title); return nil },
+		Mark: func(id string) error {
+			if id == unrecorded.ID {
+				return errors.New("connection refused")
+			}
+			recorded.Labels = append(recorded.Labels, beads.EscalationPushedLabel)
+			return nil
+		},
+		Name:   "imessage",
+		Window: config.DefaultEscalationUnhandledAfter,
+		memory: newPushMemory(),
+	}
+	ids, err := run.Run(now)
+	if err == nil || !strings.Contains(err.Error(), unrecorded.ID) {
+		t.Fatalf("Run = %v, want an error naming the record that failed", err)
+	}
+	// The text went out, so both count as pushed, and the failed record did not
+	// stop the escalation behind it.
+	if strings.Join(ids, ",") != "hq-unrecorded,hq-recorded" {
+		t.Errorf("pushed %v, want both escalations", ids)
+	}
+	if len(pushes) != 2 {
+		t.Fatalf("pushed %v, want a text for both escalations", pushes)
+	}
+
+	// The next pass reads the beads again: the recorded one is skipped by its
+	// label, the unrecorded one by the memory, so nobody is texted twice.
+	ids, err = run.Run(now)
+	if err != nil || len(ids) != 0 || len(pushes) != 2 {
+		t.Fatalf("second pass = %v, %v, %v, want nothing pushed again", ids, err, pushes)
+	}
+}
+
 // A town with no notify command pushes nothing, and a failed push is reported
 // without being recorded, so the next pass tries it again.
 func TestUnhandledRunWithoutACommandAndOnPushFailure(t *testing.T) {
@@ -136,6 +220,17 @@ func TestUnhandledRunWithoutACommandAndOnPushFailure(t *testing.T) {
 	run.Push = func(string, string, string) error { t.Error("pushed with no command configured"); return nil }
 	if ids, err := run.Run(now); err != nil || len(ids) != 0 {
 		t.Fatalf("Run with no command = %v, %v, want nothing", ids, err)
+	}
+}
+
+// A town that configures no push command has nowhere to send, so the pass
+// stops before it reads the escalation config or opens the beads store: a
+// heartbeat pays nothing until the town has somewhere to push to (gt-71714).
+func TestPushUnhandledDoesNothingWithoutAPushCommand(t *testing.T) {
+	t.Parallel()
+	ids, err := PushUnhandled(t.TempDir(), time.Now())
+	if err != nil || len(ids) != 0 {
+		t.Fatalf("PushUnhandled = %v, %v, want no ids and no error", ids, err)
 	}
 }
 

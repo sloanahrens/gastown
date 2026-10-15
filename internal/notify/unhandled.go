@@ -1,8 +1,10 @@
 package notify
 
 import (
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
@@ -75,6 +77,40 @@ func escalationTime(issue *beads.Issue, fields *beads.EscalationFields) (time.Ti
 	return time.Time{}, false
 }
 
+// pushMemory is the sends one process has made that could not be recorded on
+// their beads: the label Mark writes is the durable record of a push, and this
+// keeps a database that refused one from turning that escalation into a text
+// every heartbeat until the daemon restarts (gt-71714). It holds the ids of the
+// sends whose record failed, and nothing else.
+type pushMemory struct {
+	mu  sync.Mutex
+	ids map[string]bool
+}
+
+// newPushMemory is an empty memory.
+func newPushMemory() *pushMemory { return &pushMemory{ids: map[string]bool{}} }
+
+// has reports whether this process already pushed id. A nil memory remembers
+// nothing, which is what a caller with no process to keep it for gets.
+func (m *pushMemory) has(id string) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ids[id]
+}
+
+// note records that this process pushed id.
+func (m *pushMemory) note(id string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ids[id] = true
+}
+
 // UnhandledRun is one pass of the unhandled push: where it reads the open
 // escalations, where it sends and where it records the send. Tests replace them
 // so no unit test touches a database or starts a process.
@@ -86,11 +122,18 @@ type UnhandledRun struct {
 	Name string
 	// Window is how long an escalation may wait on the overseer first.
 	Window time.Duration
+	// memory remembers the sends whose record failed; nil remembers nothing.
+	memory *pushMemory
 }
 
 // Run pushes once for each escalation that has waited out the window, and
-// returns the ids it pushed. A push that fails is not recorded, so the next
-// pass tries it again; a failure to record one does not stop the others.
+// returns the ids it pushed.
+//
+// One escalation's failure does not stop the others: the errors are joined into
+// the one this returns. A push that fails is not recorded, so the next pass
+// tries it again; a push that reached the human but could not be recorded on
+// the bead is remembered in memory instead, because a record is not worth a
+// second text (gt-71714).
 func (r UnhandledRun) Run(now time.Time) ([]string, error) {
 	if r.Name == "" || r.Push == nil {
 		return nil, nil
@@ -100,35 +143,56 @@ func (r UnhandledRun) Run(now time.Time) ([]string, error) {
 		return nil, err
 	}
 	var pushed []string
+	var errs []error
 	for _, u := range unhandledPushes(issues, now, r.Window) {
-		if err := r.Push(r.Name, u.Line(r.Window), ""); err != nil {
-			return pushed, fmt.Errorf("pushing %s: %w", u.ID, err)
+		if r.memory.has(u.ID) {
+			// This process already texted the human about it; only the record
+			// of that send was missing.
+			continue
 		}
-		if r.Mark != nil {
-			if err := r.Mark(u.ID); err != nil {
-				return pushed, fmt.Errorf("recording the push of %s: %w", u.ID, err)
-			}
+		if err := r.Push(r.Name, u.Line(r.Window), ""); err != nil {
+			errs = append(errs, fmt.Errorf("pushing %s: %w", u.ID, err))
+			continue
 		}
 		pushed = append(pushed, u.ID)
+		if r.Mark == nil {
+			continue
+		}
+		if err := r.Mark(u.ID); err != nil {
+			r.memory.note(u.ID)
+			errs = append(errs, fmt.Errorf("recording the push of %s: %w", u.ID, err))
+		}
 	}
-	return pushed, nil
+	return pushed, errors.Join(errs...)
 }
+
+// processPushMemory is the memory every pass in this process shares, so a
+// failed record survives to the heartbeat that follows it.
+var processPushMemory = newPushMemory()
 
 // PushUnhandled is one pass against the town at townRoot: the open escalations
 // and the push command come from the town's own config, as the silent-overseer
 // push does. It returns the ids it pushed.
+//
+// A town that configures no push command has nowhere to send, so the pass stops
+// before it reads the escalation config or opens the beads store. A town that
+// does pays one config read for the pass and reuses it for every push in it.
 func PushUnhandled(townRoot string, now time.Time) ([]string, error) {
+	pushName := config.LoadOperationalConfig(townRoot).GetOverseerConfig().SilentPushName()
+	if pushName == "" {
+		return nil, nil
+	}
 	cfg, err := config.LoadOrCreateEscalationConfig(config.EscalationConfigPath(townRoot))
 	if err != nil {
 		return nil, fmt.Errorf("loading escalation config: %w", err)
 	}
-	pushName := config.LoadOperationalConfig(townRoot).GetOverseerConfig().SilentPushName()
 	bd := beads.New(beads.ResolveBeadsDir(townRoot))
 	return UnhandledRun{
 		List:   func() ([]*beads.Issue, error) { return beads.ListEscalations(bd) },
-		Push:   func(name, title, body string) error { return PushIn(townRoot, name, title, body) },
+		Push:   func(name, title, body string) error { return pushThrough(runNotifyCommand, cfg, name, title, body) },
 		Mark:   func(id string) error { return beads.MarkEscalationPushed(bd, id) },
 		Name:   pushName,
 		Window: cfg.GetUnhandledAfter(),
+		memory: processPushMemory,
 	}.Run(now)
 }

@@ -47,9 +47,10 @@ var ownerFamilies = []ownerFamily{
 	// A bead refused twice is a call the landing loop cannot make.
 	{RuleRejectedTwice, OwnerSloan},
 	// An escalation is the human's only when the overseer cannot resolve it,
-	// which EscalationOwner decides per escalation; an escalation.open item
-	// carries no such detail, so the family default is the one that has to be
-	// pushed for rather than sent.
+	// and only the escalation says whether that is so. EscalationOwner reads
+	// that off it; an escalation.open row carries none of it, so the family
+	// default is the overseer's and the row is the one owner that has to be
+	// corrected per item rather than read off the table.
 	{"escalation.", OwnerOverseer},
 }
 

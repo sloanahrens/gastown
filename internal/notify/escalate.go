@@ -155,7 +155,11 @@ func sendNotifications(req EscalationRequest, issueID string, cfg *config.Escala
 	router := mail.NewRouter(townRoot, req.Prefixes)
 	defer router.WaitPendingNotifications()
 	statuses := []DeliveryStatus{{Channel: "bead", Created: true, Severity: severity}}
-	if owner != attention.OwnerSloan {
+	// The push gate (gt-71714): PushActions keeps the actions that reach a
+	// person only when the human owns the escalation, so a route this gate
+	// shortens is one the owner rule withheld a push from.
+	pushActions := PushActions(actions, owner)
+	if len(pushActions) != len(actions) {
 		// The withheld push is in the result rather than silent: the operator
 		// reading `gt escalate --json` sees that nothing texted anyone, and why.
 		statuses = append(statuses, DeliveryStatus{Channel: "push", Target: string(owner), Severity: severity,
@@ -216,10 +220,8 @@ func sendNotifications(req EscalationRequest, issueID string, cfg *config.Escala
 	}
 
 	// Process external notification actions (email:, sms:, slack, log) that
-	// reach the human. A push is gated on the owner: the escalation reaches the
-	// humans' channels only when the human is the one who has to act on it
-	// (gt-71714).
-	statuses = append(statuses, executeExternalActions(PushActions(actions, owner), cfg, issueID, severity, description, townRoot, senders)...)
+	// reach the human, through the actions the owner gate above kept.
+	statuses = append(statuses, executeExternalActions(pushActions, cfg, issueID, severity, description, townRoot, senders)...)
 
 	// Log to activity feed
 	payload := events.EscalationPayload(issueID, agentID, strings.Join(targets, ","), description)
