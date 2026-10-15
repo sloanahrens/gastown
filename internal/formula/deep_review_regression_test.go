@@ -3,6 +3,8 @@ package formula
 import (
 	"strings"
 	"testing"
+
+	"github.com/BurntSushi/toml"
 )
 
 // TestDeepReviewBeadsCarryARegressionTest guards gt-4du83: a green test sweep is
@@ -60,14 +62,14 @@ func TestDeepReviewCollectsOMQueuedFindings(t *testing.T) {
 		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
 	}
 	text := string(raw)
-	const collect = "bash scripts/deep-review.sh om-queued --repo . >> /tmp/deep-review-{{issue}}/prev-notes.txt"
+	const collect = "bash /tmp/deep-review-{{issue}}/deep-review.sh om-queued --repo . >> /tmp/deep-review-{{issue}}/prev-notes.txt"
 	at := strings.Index(text, collect)
 	if at < 0 {
 		t.Fatalf("deep-review-run does not append om-queued to prev-notes.txt (%q)", collect)
 	}
 	for _, later := range []struct{ what, marker string }{
-		{"the plan that reads the ledger", "bash scripts/deep-review.sh plan"},
-		{"step 3, which reads the queued findings", "bash scripts/deep-review.sh queued"},
+		{"the plan that reads the ledger", "bash /tmp/deep-review-{{issue}}/deep-review.sh plan"},
+		{"step 3, which reads the queued findings", "bash /tmp/deep-review-{{issue}}/deep-review.sh queued"},
 	} {
 		i := strings.Index(text, later.marker)
 		if i < 0 {
@@ -89,5 +91,54 @@ func TestDeepReviewCollectsOMQueuedFindings(t *testing.T) {
 	flat := strings.Join(strings.Fields(text), " ")
 	if !strings.Contains(flat, "plus the `om-queued` lines from om's reviews of approved landings. Step 5 refutes each one like any other finding") {
 		t.Error("deep-review-run does not say the om-queued findings go through the refute step")
+	}
+}
+
+// TestDeepReviewRunsOnAnyRig guards gt-23w8z: a rig other than gastown is
+// reviewed by naming its landings file and the gastown checkout's script, so
+// the run formula hardcodes neither, and a sling that sets neither var renders
+// the gastown run it always did.
+func TestDeepReviewRunsOnAnyRig(t *testing.T) {
+	t.Parallel()
+	raw, err := GetEmbeddedFormulaContent("deep-review-run")
+	if err != nil {
+		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
+	}
+	text := string(raw)
+	for _, bad := range []string{"bash scripts/deep-review.sh", "landings/gastown.jsonl", "bash {{review_script}}"} {
+		if strings.Contains(text, bad) {
+			t.Errorf("deep-review-run hardcodes the gastown run (%q)", bad)
+		}
+	}
+	for _, want := range []string{
+		"landings/{{landings_rig}}.jsonl",
+		"cat {{review_script}} > /tmp/deep-review-{{issue}}/deep-review.sh",
+		"bash /tmp/deep-review-{{issue}}/deep-review.sh plan",
+		"`internal/land/riskpaths.txt`",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("deep-review-run lacks %q", want)
+		}
+	}
+
+	mol, err := GetEmbeddedFormulaContent("mol-deep-review")
+	if err != nil {
+		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
+	}
+	var f struct {
+		Vars map[string]struct {
+			Default string `toml:"default"`
+		} `toml:"vars"`
+	}
+	if _, err := toml.Decode(string(mol), &f); err != nil {
+		t.Fatalf("decode mol-deep-review: %v", err)
+	}
+	for name, want := range map[string]string{
+		"landings_rig":  "gastown",
+		"review_script": "scripts/deep-review.sh",
+	} {
+		if got := f.Vars[name].Default; got != want {
+			t.Errorf("mol-deep-review var %s default = %q, want %q", name, got, want)
+		}
 	}
 }

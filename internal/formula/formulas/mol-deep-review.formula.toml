@@ -1,5 +1,5 @@
 description = """
-Scheduled deep review of gastown, read-only, filing a shaped bead for every
+Scheduled deep review of the rig it is slung on (gastown by default), read-only, filing a shaped bead for every
 confirmed finding with no approval step. Mode `slice` reviews a ranked chunk of
 code files and the living docs that describe them; mode `landings` reviews
 recent risk-path landings and skips a quiet day; `both` does the two in one run.
@@ -19,6 +19,8 @@ review; the ledger in the previous runs' bead notes says where to resume.
 | base_branch | sling vars | Branch to review (default: main) |
 | mode | sling vars | `slice`, `landings` or `both` (default both) |
 | run_label | sling vars | Label whose run beads hold this schedule's ledger (default scheduled:deep-review); the sling puts it on the run bead |
+| landings_rig | sling vars | Rig whose `.runtime/landings/<rig>.jsonl` the run reviews (default gastown) |
+| review_script | sling vars | File the run copies deep-review.sh from (default scripts/deep-review.sh in the run's worktree); a rig whose repo lacks the script names the gastown checkout's copy |
 | dry_run | sling vars | `true` files nothing and queues what it would file (default: true) |
 | slice_bytes | sling vars | Byte budget of the rotation slice (default 250000) |
 | slice_files | sling vars | Safety cap on slice files (default 40); the byte budget is the main limit |
@@ -109,6 +111,14 @@ default = "both"
 [vars.run_label]
 description = "Label of this schedule's run beads, read for the ledger; the sling sets it on the run bead"
 default = "scheduled:deep-review"
+
+[vars.landings_rig]
+description = "Rig whose landings file (.runtime/landings/<rig>.jsonl) the run reads"
+default = "gastown"
+
+[vars.review_script]
+description = "File the run copies deep-review.sh from; a rig without the script in its repo names the gastown checkout's copy"
+default = "scripts/deep-review.sh"
 
 [vars.dry_run]
 description = "true files nothing and queues what it would file"

@@ -65,6 +65,11 @@
 # refutes them like any other finding. om-queued fails closed (exit 3) on
 # anything bd hands back that it cannot read; --repo is where bd runs.
 #
+# A rig other than gastown runs this same script from the gastown checkout: the
+# caller names that rig's landings file, run label and repo, and the script reads
+# nothing else of the rig. A rig with no tier sweep gates on --green-from-landings
+# (see cmd_gate) instead of --green-state.
+#
 # Exit codes: 2 usage, 3 an input the script cannot trust. Never read a
 # non-zero exit as a quiet day.
 set -euo pipefail
@@ -97,7 +102,7 @@ usage:
                             [--prev-notes FILE] [--out DIR]
   deep-review.sh gate --landings FILE --label LABEL [--repo DIR] [--ref REF]
                       [--now RFC3339] [--min-count N] [--min-age-min M]
-                      [--green-state PATH]
+                      [--green-state PATH | --green-from-landings]
   deep-review.sh seen --prev-notes FILE FINGERPRINT
   deep-review.sh queued --prev-notes FILE
   deep-review.sh batches --prev-notes FILE [--now RFC3339] [--min N]
@@ -782,6 +787,29 @@ read_green_state() {
   GREEN_SHA="$reason"
 }
 
+# read_green_landings LANDINGS REPO: for a rig with no tier sweep, takes the last
+# landing record in LANDINGS whose gate_result starts with "pass" and whose target
+# is main as the rig's last green gate on main, and sets GREEN_SHA to its
+# landed_commit. A file holding no such record, or a commit REPO does not hold,
+# sets GREEN_REASON and returns 1: a gate that cannot name a green commit skips
+# and never runs. A line that is not JSON is ignored here; classify_landings
+# judges the file.
+read_green_landings() {
+  local landings="$1" repo="$2" sha
+  sha="$(jq -R -r '
+    (try fromjson catch null)
+    | select(type == "object"
+             and ((.gate_result | type) == "string") and (.gate_result | startswith("pass"))
+             and ((.target // "main") == "main")
+             and ((.landed_commit | type) == "string") and (.landed_commit | length) > 0)
+    | .landed_commit
+  ' "$landings" | tail -n 1)" || { GREEN_REASON="$landings cannot be read"; return 1; }
+  [ -n "$sha" ] || { GREEN_REASON="no landing record with a passing gate on main"; return 1; }
+  git -C "$repo" rev-parse --verify --quiet "$sha^{commit}" >/dev/null 2>&1 \
+    || { GREEN_REASON="last green landing ${sha:0:8} is not a commit in $repo"; return 1; }
+  GREEN_SHA="$sha"
+}
+
 # gate: does the landings job have anything to do? Reads the run history itself
 # (bd list, both shapes of bd --json as the formula's step 1 does), finds the
 # risky landings after the newest cursor with the code plan uses, and decides
@@ -794,8 +822,14 @@ read_green_state() {
 # covered is counted, and one of them is enough whatever its age, so the review
 # reads landings a red or partial sweep has not cleared. A record holding no
 # green sweep is a skip, never a run.
+#
+# --green-from-landings is the same gate for a rig with no tier sweep: the rig's
+# last green gate on main is its newest landing record whose gate_result passed,
+# only landings that commit contains count, and the threshold is the same single
+# landing. It is explicit: a landings file with no passing record is a skip. It
+# excludes --green-state.
 cmd_gate() {
-  local landings="" label="" repo="." now="" green_state="" min_count="" min_age=""
+  local landings="" label="" repo="." now="" green_state="" green_landings=0 min_count="" min_age=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --landings) landings="${2:-}"; shift 2 || usage ;;
@@ -806,12 +840,16 @@ cmd_gate() {
       --min-count) [ -n "${2:-}" ] || usage; min_count="$2"; shift 2 || usage ;;
       --min-age-min) [ -n "${2:-}" ] || usage; min_age="$2"; shift 2 || usage ;;
       --green-state) [ -n "${2:-}" ] || usage; green_state="$2"; shift 2 || usage ;;
+      --green-from-landings) green_landings=1; shift ;;
       *) usage ;;
     esac
   done
   [ -f "$landings" ] && [ -n "$label" ] && [ -d "$repo" ] || usage
+  { [ "$green_landings" -eq 0 ] || [ -z "$green_state" ]; } || usage
+  local gated=""
+  if [ -n "$green_state" ] || [ "$green_landings" -eq 1 ]; then gated=1; fi
   local def_count="$DEFAULT_GATE_MIN_COUNT" def_age="$DEFAULT_GATE_MIN_AGE_MIN"
-  if [ -n "$green_state" ]; then
+  if [ -n "$gated" ]; then
     def_count=1
     def_age=0
   fi
@@ -828,6 +866,12 @@ cmd_gate() {
   if [ -n "$green_state" ]; then
     if ! read_green_state "$green_state" "$repo"; then
       echo "gate: skip (no green sweep: $GREEN_REASON)"
+      exit 1
+    fi
+    green=" green=${GREEN_SHA:0:8}"
+  elif [ "$green_landings" -eq 1 ]; then
+    if ! read_green_landings "$landings" "$repo"; then
+      echo "gate: skip (no green gate: $GREEN_REASON)"
       exit 1
     fi
     green=" green=${GREEN_SHA:0:8}"
@@ -849,10 +893,11 @@ cmd_gate() {
   classify_landings "$landings" "$tmp"
   risky_landings "$tmp" "$SINCE"
 
-  # Only the landings the green sweep covered are this run's to review. The
-  # records pass through the filter unchanged; a landing that is not an
-  # ancestor of the sweep's tip, or one the repo does not hold at all, drops.
-  if [ -n "$green_state" ]; then
+  # Only the landings the green tip (the sweep's, or the last green landing's)
+  # covered are this run's to review. The records pass through the filter
+  # unchanged; a landing that is not an ancestor of the tip, or one the repo
+  # does not hold at all, drops.
+  if [ -n "$gated" ]; then
     local line commit covered="$tmp/covered.jsonl"
     : > "$covered"
     while IFS= read -r line; do
