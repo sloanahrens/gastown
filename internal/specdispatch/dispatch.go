@@ -253,6 +253,17 @@ type Seat struct {
 	Label string
 }
 
+// AgentLabelPrefix starts the label that pins a bead to one agent's seats:
+// agent:claude-sonnet. A scheduled spec entry that names an agent writes it onto
+// the beads it creates, so a review the operator approved for a Claude model can
+// never be slung onto another agent's seat just because that seat is free.
+const AgentLabelPrefix = "agent:"
+
+// PinnedAgents returns the distinct agent names carried by the bead's agent:
+// labels, in label order. One name pins the bead; two or more conflict, and the
+// seat choice refuses to guess between them.
+func (s Spec) PinnedAgents() []string { return s.labelValues(AgentLabelPrefix) }
+
 // Free reports whether the seat has room.
 func (s Seat) Free() bool { return s.Agent != "" && s.Live < s.Cap }
 
@@ -260,6 +271,11 @@ func (s Seat) Free() bool { return s.Agent != "" && s.Live < s.Cap }
 // its own beads, and a plain seat leaves every reserved bead to the seat that
 // reserved it.
 func (s Seat) takes(spec Spec, b Budget) bool {
+	// A bead pinned to an agent (an agent:<name> label) is that agent's alone: a
+	// seat of any other agent leaves it, whatever else the seat would take.
+	if pinned := spec.PinnedAgents(); len(pinned) > 0 && (len(pinned) > 1 || pinned[0] != s.Agent) {
+		return false
+	}
 	if s.Label != "" {
 		return spec.HasLabel(s.Label)
 	}
@@ -406,6 +422,10 @@ func ChooseSeat(b Budget, spec Spec) SeatChoice {
 			return SeatChoice{Skip: true, Reason: fmt.Sprintf("min_spawn_gap: newest polecat %s old (< %s)", age.Round(time.Second), b.MinSpawnGap)}
 		}
 	}
+	pinned := spec.PinnedAgents()
+	if len(pinned) > 1 {
+		return SeatChoice{Skip: true, Reason: fmt.Sprintf("conflicting %s labels (%s): a bead names one agent", AgentLabelPrefix, strings.Join(pinned, ", "))}
+	}
 	free := false
 	for _, seat := range b.Seats {
 		if !seat.Free() {
@@ -415,6 +435,16 @@ func ChooseSeat(b Budget, spec Spec) SeatChoice {
 		if seat.takes(spec, b) {
 			return SeatChoice{Agent: seat.Agent, Reason: seat.reason()}
 		}
+	}
+	if len(pinned) == 1 {
+		// Never another agent's seat: the label says which model may run the
+		// bead, so a full or missing seat is a wait, not a fallback.
+		for _, seat := range b.Seats {
+			if seat.Agent == pinned[0] {
+				return SeatChoice{Skip: true, Reason: fmt.Sprintf("waiting for a %s seat: %s", pinned[0], b.Picture())}
+			}
+		}
+		return SeatChoice{Skip: true, Reason: fmt.Sprintf("pinned to %s, which has no seat in the pool: %s", pinned[0], b.Picture())}
 	}
 	if free {
 		return SeatChoice{Skip: true, Reason: "no free seat takes this bead: " + b.Picture()}

@@ -132,7 +132,13 @@ A scheduled sling entry with `"dispatch": "spec"` in `daemon.patrols.scheduled_s
 run to this dispatcher (gt-z5g3c): the `scheduled_slings` patrol creates one
 shaped, report-only bead labeled `scheduled:<name>` and `formula:<formula>`, with
 the entry's `vars` sorted in a `## Formula vars` section, and does not sling. The
-entry must leave `agent` empty, since the dispatcher picks the seat. The open
+entry may name an `agent` (an agent from `agents`, e.g. `claude-sonnet`): the
+patrol then also writes an `agent:<name>` label on the bead, and the dispatcher
+slings it only onto a seat of that agent. A full seat is a wait (`waiting for a
+<agent> seat`), an agent with no seat in the pool is a louder skip, and neither
+ever falls back to another agent's seat, so a review approved for a Claude model
+cannot land on a cheaper seat because that seat is free. With no `agent` the
+dispatcher picks any seat, as before. The open
 bead is the queue: the entry's skip-open rule holds the next run, and the patrol
 never retires it as stalled however long a full pool keeps it waiting. The bead's
 priority is the entry's `priority` (3 when unset), held at
