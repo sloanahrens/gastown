@@ -627,7 +627,12 @@ type ScheduledSlingEntry struct {
 	// shaped bead, labeled scheduled:<name> and formula:<formula> with Vars in
 	// a "## Formula vars" section, and the spec dispatcher picks the seat, the
 	// queue position and the moment: a full pool is a wait, not a failed sling.
-	// The dispatcher chooses the seat, so Agent must be empty with "spec".
+	// The dispatcher chooses the seat and the moment. With "spec", Agent is
+	// optional: when set, the scheduler writes it onto each run bead as an
+	// agent:<name> label and the dispatcher slings the bead only onto a seat of
+	// that agent, waiting when none is free and never falling back to another
+	// agent (a review approved for a Claude model must not land on a cheaper
+	// seat because that seat happens to be free). Empty means any seat.
 	Dispatch string `json:"dispatch,omitempty"`
 
 	// GateCommand is a shell command that decides whether a due run happens.

@@ -36,11 +36,12 @@ func TestScheduledSlingEntry_ValidateDispatch(t *testing.T) {
 		mutate func(*ScheduledSlingEntry)
 		want   string
 	}{
-		"unknown dispatch": {func(e *ScheduledSlingEntry) { e.Dispatch = "sling" }, `dispatch "sling"`},
-		"spec with agent":  {func(e *ScheduledSlingEntry) { e.Dispatch, e.Agent = "spec", "deepseek-pro" }, "must be empty"},
-		"var with newline": {func(e *ScheduledSlingEntry) { e.Dispatch, e.Vars = "spec", map[string]string{"k": "a\nb=c"} }, "key=value line"},
-		"var key with =":   {func(e *ScheduledSlingEntry) { e.Dispatch, e.Vars = "spec", map[string]string{"a=b": "c"} }, "key=value line"},
-		"comment var key":  {func(e *ScheduledSlingEntry) { e.Dispatch, e.Vars = "spec", map[string]string{"#a": "c"} }, "key=value line"},
+		"unknown dispatch":                     {func(e *ScheduledSlingEntry) { e.Dispatch = "sling" }, `dispatch "sling"`},
+		"spec agent that is not a label value": {func(e *ScheduledSlingEntry) { e.Dispatch, e.Agent = "spec", "Claude Sonnet" }, "must match"},
+		"spec agent with a colon":              {func(e *ScheduledSlingEntry) { e.Dispatch, e.Agent = "spec", "agent:claude-sonnet" }, "must match"},
+		"var with newline":                     {func(e *ScheduledSlingEntry) { e.Dispatch, e.Vars = "spec", map[string]string{"k": "a\nb=c"} }, "key=value line"},
+		"var key with =":                       {func(e *ScheduledSlingEntry) { e.Dispatch, e.Vars = "spec", map[string]string{"a=b": "c"} }, "key=value line"},
+		"comment var key":                      {func(e *ScheduledSlingEntry) { e.Dispatch, e.Vars = "spec", map[string]string{"#a": "c"} }, "key=value line"},
 	}
 	for name, c := range cases {
 		e := base
@@ -49,6 +50,12 @@ func TestScheduledSlingEntry_ValidateDispatch(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: err = %v, want one containing %q", name, err, c.want)
 		}
+	}
+	// A spec entry may name an agent: it becomes the bead's agent: pin.
+	pinned := base
+	pinned.Dispatch, pinned.Agent = "spec", "claude-sonnet"
+	if err := scheduledSlingValidate(pinned); err != nil {
+		t.Errorf("a spec entry that names an agent must validate: %v", err)
 	}
 	// An agent with no dispatch, and any vars with no dispatch, stay valid.
 	slung := base
@@ -347,5 +354,40 @@ func TestExecScheduledSlingRunner_CreatesSpecRunBead(t *testing.T) {
 	}
 	if is.AcceptanceCriteria != acc || is.Priority != 2 || !slices.Equal(slices.Sorted(slices.Values(is.Labels)), []string{"formula:mol-deep-review", "scheduled:deep-review"}) {
 		t.Errorf("created run bead = %+v", is)
+	}
+}
+
+// An entry that names an agent writes it onto the run bead as an agent: label, and
+// the dispatcher reads that label back as the pin; an entry that names none writes
+// no such label, so its run goes to any seat as before.
+func TestRunScheduledSlingEntry_SpecDispatchWritesTheAgentPin(t *testing.T) {
+	t.Parallel()
+	pinned := specAuditEntry
+	pinned.Agent = "claude-sonnet"
+	f := &fakeScheduledRunner{createID: "gt-run1", now: time.Now()}
+	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{pinned}, f)
+	spec := specRunOf(t, d, f, pinned)
+	if want := []string{"scheduled:deep-review", "formula:mol-deep-review", "agent:claude-sonnet"}; !slices.Equal(f.runs[0].Labels, want) {
+		t.Errorf("labels = %v, want %v", f.runs[0].Labels, want)
+	}
+	if got := spec.PinnedAgents(); !slices.Equal(got, []string{"claude-sonnet"}) {
+		t.Errorf("the dispatcher reads the pin as %v, want [claude-sonnet]", got)
+	}
+	b := specdispatch.Budget{
+		Seats: []specdispatch.Seat{{Agent: "deepseek-flash", Cap: 2}, {Agent: "claude-sonnet", Cap: 2}},
+		Now:   time.Now(),
+	}
+	if got := specdispatch.ChooseSeat(b, spec); got.Skip || got.Agent != "claude-sonnet" {
+		t.Errorf("the scheduled run took %+v, want the claude-sonnet seat", got)
+	}
+	b.Seats[1].Live = 2
+	if got := specdispatch.ChooseSeat(b, spec); !got.Skip {
+		t.Errorf("with the claude-sonnet seat full the run must wait, got %+v", got)
+	}
+
+	plain := &fakeScheduledRunner{createID: "gt-run2", now: time.Now()}
+	d2, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{specAuditEntry}, plain)
+	if s2 := specRunOf(t, d2, plain, specAuditEntry); len(s2.PinnedAgents()) != 0 {
+		t.Errorf("an entry with no agent must not pin: %v", s2.PinnedAgents())
 	}
 }

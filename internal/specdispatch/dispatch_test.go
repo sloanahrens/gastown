@@ -494,3 +494,77 @@ func TestRetryOnContention(t *testing.T) {
 		}
 	})
 }
+
+// A bead pinned with an agent: label is slung only onto a seat of that agent. A
+// free seat of another agent is not a fallback: the bead waits, and the skip
+// says which seat it waits for.
+func TestChooseSeatPinnedAgent(t *testing.T) {
+	t.Parallel()
+	b := Budget{
+		Seats: []Seat{
+			{Agent: "deepseek-flash", Cap: 2},
+			{Agent: "claude-sonnet", Cap: 2},
+		},
+		Now: time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC),
+	}
+	pinned := goodSpec()
+	pinned.Labels = []string{"scheduled:deep-review-risk", "agent:claude-sonnet"}
+
+	// Both seats are free: the pool-order first seat is the flash one, and the
+	// pin still takes the Claude seat.
+	if got := ChooseSeat(b, pinned); got.Skip || got.Agent != "claude-sonnet" {
+		t.Errorf("pinned bead took %+v, want the claude-sonnet seat", got)
+	}
+	// A bead without the label still takes the first free seat, as before.
+	if got := ChooseSeat(b, goodSpec()); got.Agent != "deepseek-flash" {
+		t.Errorf("unpinned bead took %+v, want the first free seat", got)
+	}
+
+	// The pinned agent's seat is full and the flash seat is free: wait, never fall back.
+	b.Seats[1].Live = 2
+	got := ChooseSeat(b, pinned)
+	if !got.Skip || got.Agent != "" || !strings.Contains(got.Reason, "waiting for a claude-sonnet seat") {
+		t.Errorf("pinned bead with its seat full = %+v, want a skip that names the seat", got)
+	}
+
+	// An agent that has no seat in the pool at all is a different, louder skip.
+	orphan := goodSpec()
+	orphan.Labels = []string{"agent:deepseek-pro"}
+	got = ChooseSeat(b, orphan)
+	if !got.Skip || !strings.Contains(got.Reason, "deepseek-pro, which has no seat in the pool") {
+		t.Errorf("bead pinned to an agent with no seat = %+v", got)
+	}
+
+	// Two different pins conflict and nothing is guessed; the same pin twice, or in
+	// another case or padded, is one pin.
+	two := goodSpec()
+	two.Labels = []string{"agent:claude-sonnet", "agent:deepseek-flash"}
+	b.Seats[1].Live = 0
+	if got := ChooseSeat(b, two); !got.Skip || !strings.Contains(got.Reason, "conflicting agent: labels") {
+		t.Errorf("conflicting pins = %+v, want a skip", got)
+	}
+	same := goodSpec()
+	same.Labels = []string{"agent:claude-sonnet", " Agent:claude-sonnet "}
+	if got := ChooseSeat(b, same); got.Skip || got.Agent != "claude-sonnet" {
+		t.Errorf("a repeated pin = %+v, want the claude-sonnet seat", got)
+	}
+
+	// The pin does not lift a reserved seat's own rule: a bead pinned to the pro
+	// seat's agent still needs the pro label to reach it.
+	b.Seats = []Seat{{Agent: "deepseek-flash", Cap: 2}, {Agent: "deepseek-pro", Cap: 1, Label: "needs-pro"}}
+	pro := goodSpec()
+	pro.Labels = []string{"agent:deepseek-pro"}
+	if got := ChooseSeat(b, pro); !got.Skip {
+		t.Errorf("a pin must not open a reserved seat: %+v", got)
+	}
+	pro.Labels = append(pro.Labels, "needs-pro")
+	if got := ChooseSeat(b, pro); got.Agent != "deepseek-pro" {
+		t.Errorf("pinned and labelled bead took %+v, want the pro seat", got)
+	}
+
+	// The town total still caps a pinned bead like any other.
+	b.MaxTotal, b.LiveTotal = 2, 2
+	if got := ChooseSeat(b, pinned); !got.Skip || !strings.Contains(got.Reason, "over the town total") {
+		t.Errorf("pinned bead over the town total = %+v", got)
+	}
+}
