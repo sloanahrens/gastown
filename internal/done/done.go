@@ -1172,9 +1172,13 @@ func submitForLanding(r *doneRun) error {
 	// artifacts (.claude/, .beads/, .runtime/ ...) are toolchain-managed and
 	// excluded.
 	workStatus, err := r.deps.repo.CheckUncommittedWork()
-	if err != nil {
+	if err != nil && !(errors.Is(err, git.ErrComparisonUnjudgeable) && workStatus != nil) {
 		return fmt.Errorf("checking git status: %w", err)
 	}
+	// An unjudgeable unpushed comparison (another clone advanced the remote
+	// branch, so its tip is not in this object store) leaves the worktree facts
+	// intact and this check does not use the count: the push below applies its
+	// own divergence check and refuses with its own message.
 	if workStatus.HasUncommittedChanges && !workStatus.CleanExcludingRuntime() {
 		return fmt.Errorf("cannot complete: uncommitted changes would be lost\nCommit your changes first, or use --status DEFERRED to exit without completing\nUncommitted: %s", workStatus.String())
 	}

@@ -1,6 +1,7 @@
 package done
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -274,9 +275,11 @@ func submitCrewForLanding(r *doneRun) error {
 	}
 	repo := r.deps.repo
 	workStatus, err := repo.CheckUncommittedWork()
-	if err != nil {
+	if err != nil && !(errors.Is(err, git.ErrComparisonUnjudgeable) && workStatus != nil) {
 		return fmt.Errorf("checking git status: %w", err)
 	}
+	// Only the unpushed comparison could not be made (see done.go): the
+	// worktree facts are intact and the push applies its own divergence check.
 	if workStatus.HasUncommittedChanges && !workStatus.CleanExcludingRuntime() {
 		return fmt.Errorf("cannot submit: uncommitted changes are not on the pushed branch\nCommit and push them first\nUncommitted: %s", workStatus.String())
 	}

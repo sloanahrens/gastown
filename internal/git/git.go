@@ -22,6 +22,15 @@ var errNoUpstream = errors.New("no upstream configured")
 
 var errNoComparisonRefs = errors.New("no comparison refs resolved")
 
+// ErrComparisonUnjudgeable marks a branch-preservation comparison that could not
+// be made: every comparison ref failed, so nothing was judged and no verdict
+// exists (the exact remote branch tip is not in this clone's object store, for
+// one). A caller about to discard work reads it as unpreserved work. A caller
+// that does not need the comparison (gt done, which checks the worktree and
+// then pushes with its own divergence check) can go on without it:
+// CheckUncommittedWork returns the status it did gather beside this error.
+var ErrComparisonUnjudgeable = errors.New("no branch comparison could be judged")
+
 // GitError contains raw output from a git command for agent observation.
 // ZFC: Callers observe the raw output and decide what to do.
 // The error interface methods provide human-readable messages, but agents
@@ -4052,7 +4061,7 @@ func (g *Git) branchPreservationStatusWith(localBranch, remote string, targets [
 		return result, nil
 	}
 	if lastErr != nil {
-		return result, lastErr
+		return result, fmt.Errorf("%w: %w", ErrComparisonUnjudgeable, lastErr)
 	}
 	return result, fmt.Errorf("no usable comparison refs")
 }
@@ -4717,6 +4726,11 @@ func (g *Git) lsTreeBlobs(ref string, paths []string) map[string]string {
 }
 
 // CheckUncommittedWork performs a comprehensive check for uncommitted work.
+//
+// When only the unpushed-commit comparison could not be made, the error wraps
+// ErrComparisonUnjudgeable and the returned status is the one gathered so far
+// (UnpushedCommits is 0, meaning unknown). Any other error returns a nil status,
+// so a caller that checks only err keeps failing closed.
 func (g *Git) CheckUncommittedWork() (*UncommittedWorkStatus, error) {
 	return g.checkUncommittedWork(g.UnpushedCommits)
 }
@@ -4769,6 +4783,14 @@ func (g *Git) checkUncommittedWork(unpushedCommits func() (int, error)) (*Uncomm
 	// Check unpushed commits
 	unpushed, err := unpushedCommits()
 	if err != nil {
+		if errors.Is(err, ErrComparisonUnjudgeable) {
+			// Everything else was read; only the comparison could not be made.
+			// UnpushedCommits stays 0 and means unknown here: a caller that
+			// discards work must treat the error as unpreserved work, and one
+			// that does not use the count may go on with the rest (see
+			// ErrComparisonUnjudgeable).
+			return status, fmt.Errorf("checking unpushed commits: %w", err)
+		}
 		return nil, fmt.Errorf("checking unpushed commits: %w", err)
 	}
 	status.UnpushedCommits = unpushed
