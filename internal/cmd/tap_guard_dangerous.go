@@ -336,14 +336,16 @@ func nestedCommands(tokens, lowerTokens []string) []string {
 	return append(nested, slotRunPayloads(tokens)...)
 }
 
-// slotRunPayloads returns, for every `gt slot run [flags] -- <argv>` the
-// command really runs, the argv as a command line of its own. slot.Run execs
-// that argv under the slot, so `gt slot run -- git reset --hard` is a git
-// reset; inCommandPosition treats a segment opening with gt as text-only,
-// which hid it from every matcher (gt-hqenc). Each argv word is re-quoted, so
-// a word with spaces (a commit message that names a dangerous command) stays
-// one word when the payload is judged. Every other gt subcommand keeps its
-// text-only treatment. tokens are shell-aware tokens (see shellTokenize).
+// slotRunPayloads returns, for every `gt slot run [flags] <argv>` the command
+// really runs, the argv as a command line of its own. slot.Run execs that
+// argv under the slot, so `gt slot run -- git reset --hard` is a git reset;
+// inCommandPosition treats a segment opening with gt as text-only, which hid
+// it from every matcher (gt-hqenc). slot's argv needs no `--` to be exec'd, so
+// the payload is the argv slot.Run will be handed either way (gt-sni9y). Each
+// argv word is re-quoted, so a word with spaces (a commit message that names a
+// dangerous command) stays one word when the payload is judged. Every other gt
+// subcommand keeps its text-only treatment. tokens are shell-aware tokens (see
+// shellTokenize).
 func slotRunPayloads(tokens []string) []string {
 	var payloads []string
 	for _, segment := range splitShellSegments(tokens) {
@@ -354,22 +356,68 @@ func slotRunPayloads(tokens []string) []string {
 				(i > 0 && !inCommandPosition(segment, i)) {
 				continue
 			}
-			for j := i + 3; j < len(segment); j++ {
-				if segment[j] != "--" {
-					continue
-				}
-				if j+1 < len(segment) {
-					quoted := make([]string, 0, len(segment)-j-1)
-					for _, word := range segment[j+1:] {
-						quoted = append(quoted, shellQuoteWord(word))
-					}
-					payloads = append(payloads, strings.Join(quoted, " "))
-				}
-				break
+			argv := slotRunArgv(segment[i+3:])
+			if len(argv) == 0 {
+				continue
 			}
+			quoted := make([]string, 0, len(argv))
+			for _, word := range argv {
+				quoted = append(quoted, shellQuoteWord(word))
+			}
+			payloads = append(payloads, strings.Join(quoted, " "))
 		}
 	}
 	return payloads
+}
+
+// slotRunFlagNames are `gt slot run`'s own flags that take a value
+// (internal/cmd/slot.go). A word naming one is never the argv — pflag pulls it,
+// and the value beside it, out of the operator's words — while every other
+// flag-shaped word is: cobra fails the command on a flag it does not know, so
+// "-rf" in `gt slot run rm -rf /` is argv, and dropping it would drop the
+// command the payload is there to judge.
+var slotRunFlagNames = map[string]bool{"role": true, "timeout": true, "nice": true}
+
+// slotRunArgv returns the argv `gt slot run` hands to exec, read from the
+// operator's words after "run". pflag takes slot's own value flags out of
+// those words wherever they sit, in either the separate (--role X) or glued
+// (--role=X) form, so the command starts at the first word left; a `--`
+// terminates that parsing and is dropped, and the words after it are
+// positional whatever they look like (gt-sni9y). words kept rather than
+// dropped matter as much as words dropped: the returned argv is what the slot
+// will really run, so judging it matches judging the command.
+func slotRunArgv(words []string) []string {
+	var argv []string
+	for i := 0; i < len(words); i++ {
+		word := words[i]
+		if word == "--" {
+			return append(argv, words[i+1:]...)
+		}
+		flag, glued := slotRunFlag(word)
+		if flag == "" {
+			argv = append(argv, word)
+			continue
+		}
+		if !glued {
+			i++ // the flag's own value word
+		}
+	}
+	return argv
+}
+
+// slotRunFlag returns the name of the `gt slot run` flag word names ("" when
+// it names none) and whether word glued that flag's value to it with "=", so
+// only an unglued flag still owes the walk its value word.
+func slotRunFlag(word string) (string, bool) {
+	if len(word) < 2 || word[0] != '-' {
+		return "", false
+	}
+	name, _, glued := strings.Cut(word, "=")
+	name = strings.TrimLeft(name, "-")
+	if !slotRunFlagNames[name] {
+		return "", false
+	}
+	return name, glued
 }
 
 // shellQuoteWord single-quotes word unless it is made only of characters the

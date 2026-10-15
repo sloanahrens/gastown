@@ -539,6 +539,38 @@ func TestMatchesPacmanInstall(t *testing.T) {
 	}
 }
 
+// TestSlotRunPayloadsWithoutDashDash pins the fix for an argv run through
+// gt slot run with no `--` before it: slot.Run execs the positionals either
+// way, so the payload is read from the words after slot run's own flags
+// rather than from after a `--` (gt-sni9y). The `--` forms keep the payload
+// they had, and a word that only looks like a flag (-rf) stays in the argv —
+// it is what slot will exec, and dropping it would hide `rm -rf /`.
+func TestSlotRunPayloadsWithoutDashDash(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		want    []string
+	}{
+		{"no -- and no flags", "gt slot run git push origin main", []string{"git push origin main"}},
+		{"no -- after a role flag", "gt slot run --role gastown/nux git push origin main", []string{"git push origin main"}},
+		{"-- trailing the argv", "gt slot run git push origin main --", []string{"git push origin main"}},
+		{"no -- after a glued role flag", "gt slot run --role=gastown/nux git push origin main", []string{"git push origin main"}},
+		{"-- before the argv", "gt slot run -- make test", []string{"make test"}},
+		{"-- before the argv, after a role flag", "gt slot run --role gastown/nux -- make test", []string{"make test"}},
+		{"-- timeout value is not the command", "gt slot run --timeout 5m make test", []string{"make test"}},
+		{"flag-shaped argv word stays", "gt slot run rm -rf /", []string{"rm -rf /"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := slotRunPayloads(shellTokenize(tt.command))
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("slotRunPayloads(shellTokenize(%q)) = %q, want %q", tt.command, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestNestedShellCommands pins the fix for wrappers that shlex tokenization
 // otherwise hides from every fragment-based check: a quoted payload to
 // bash -c/sh -c/eval collapses to a single token, so exact-token fragment
@@ -1396,6 +1428,8 @@ func TestDangerousGuard_Integration(t *testing.T) {
 		{"env-prefixed rm -rf / under gt slot run", "gt slot run -- FOO=1 rm -rf /", true},
 		{"bash -c under gt slot run", "gt slot run -- bash -c 'git reset --hard'", true},
 		{"gt slot run after another command", "cd x && gt slot run -- git push --force origin x", true},
+		{"git clean -fd under gt slot run with no --", "gt slot run git clean -fd", true},
+		{"rm -rf / under gt slot run with no -- after a role flag", "gt slot run --role gastown/nux rm -rf /", true},
 
 		// Blocked — a "<<" the shell never takes as a redirection leaves the
 		// lines after it live, so nothing there may be stripped (gt-79opc).
@@ -1424,6 +1458,8 @@ func TestDangerousGuard_Integration(t *testing.T) {
 		{"drop table behind a text-only command", "echo drop table users", false},
 		{"make test under gt slot run", "gt slot run -- make test", false},
 		{"gt slot run with a role flag", "gt slot run --role gastown/nux -- make test", false},
+		{"make test under gt slot run with no --", "gt slot run make test", false},
+		{"make test under gt slot run with a role flag and no --", "gt slot run --role gastown/nux make test", false},
 		{"dangerous words in a quoted argument under gt slot run", "gt slot run -- git commit -m 'never git push --force'", false},
 		{"gt slot run named in text", "echo gt slot run -- git reset --hard", false},
 		{"gt slot run named in a gt mail argument", "gt mail send x -s note -m gt slot run -- git reset --hard", false},
