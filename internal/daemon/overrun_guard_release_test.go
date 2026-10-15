@@ -49,7 +49,7 @@ func TestStop_PushThatRecoversBeforeTheCapDoesNotGiveUp(t *testing.T) {
 	if len(f.handBackNotes) != 1 || f.handBackNotes[0] != "" {
 		t.Errorf("notes = %q, want one empty note", f.handBackNotes)
 	}
-	want := []string{"recheck gastown/capable", "push gastown/capable", "hand-back gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
+	want := []string{"recheck gastown/capable", "push gastown/capable", "hand-back gastown/capable", "recheck gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
 	if !reflect.DeepEqual(f.calls, want) {
 		t.Errorf("calls = %q, want %q (seat released)", f.calls, want)
 	}
@@ -197,7 +197,7 @@ func TestStop_FailedPushHoldsTheHandBackAndIsRetried(t *testing.T) {
 	f.calls, f.failOn = nil, nil
 	f.now = f.now.Add(time.Minute)
 	d.runOverrunGuard(f.seams())
-	want = []string{"recheck gastown/capable", "push gastown/capable", "hand-back gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
+	want = []string{"recheck gastown/capable", "push gastown/capable", "hand-back gastown/capable", "recheck gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
 	if !reflect.DeepEqual(f.calls, want) {
 		t.Errorf("calls after the push recovered = %q, want %q", f.calls, want)
 	}
@@ -253,7 +253,7 @@ func TestStop_FailedAgentBeadResetKeepsTheSeatParkedAndIsRetried(t *testing.T) {
 	f.seats, f.calls, f.failOn = nil, nil, nil
 	f.now = f.now.Add(time.Minute)
 	d.runOverrunGuard(f.seams())
-	want := []string{"recheck gastown/capable", "hand-back gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
+	want := []string{"recheck gastown/capable", "hand-back gastown/capable", "recheck gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
 	if !reflect.DeepEqual(f.calls, want) {
 		t.Errorf("retry calls = %q, want %q (the push is not repeated)", f.calls, want)
 	}

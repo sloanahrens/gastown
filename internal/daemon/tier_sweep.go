@@ -930,7 +930,15 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 	for tier, ts := range results {
 		state.Tiers[tier] = ts
 	}
-	state.LastRun, state.LastSHA = now, sha
+	state.LastRun = now
+	// LastSHA advances only on a cycle that ran every stage it planned. A
+	// deferred cycle leaves it at the old tip: runTierSweepEarly skips a tip
+	// equal to LastSHA, so advancing it would drop the early retry and leave
+	// the rig waiting for the hourly cycle. LastRun still moves, so the retry
+	// gap spaces the next attempt.
+	if !deferred {
+		state.LastSHA = sha
+	}
 	// LastGreenSHA advances only on a cycle whose every stage ran green: a
 	// deferred cycle ran fewer stages than it planned and says nothing about
 	// the rest.

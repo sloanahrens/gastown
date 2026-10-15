@@ -66,7 +66,10 @@ const (
 // failed; step 6 is skipped. The hand-back's needs-split label raises the
 // attention item. A stop resumed past step 2 first checks
 // the pause is still down and no session runs on the seat; if not, the seat
-// was taken back and the stop ends without a hand-back.
+// was taken back and the stop ends without a hand-back. Every stop looks
+// again just before step 6, because the push and hand-back can outlast an
+// operator resume and a new sling: a seat taken back by then keeps the bead
+// handed back, and the release is left to its new holder.
 //
 // Progress is saved after each step, so a step that fails is logged and
 // retried from the failed step on the next tick, never from the top and never
@@ -261,6 +264,25 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 			who, st.Bead, elapsed.Round(time.Second), branch)
 		return
 	}
+	// The push and the hand-back are the slow steps, and the seat can be taken
+	// back during them: an operator resumes it and a new sling lands on the
+	// name. Step 6 writes the seat's agent bead, cleanup status and intent
+	// record, which would then be that sling's, so look again first. The bead
+	// is already handed back; only the release is left to its new holder.
+	if s.stopLapsed != nil {
+		why, err := s.stopLapsed(seat)
+		if err != nil {
+			d.logger.Printf("overrun_guard: stop %s on %s: cannot re-check the seat before releasing it: %v", who, st.Bead, err)
+			return
+		}
+		if why != "" {
+			st.StoppedAt = now
+			save()
+			d.logger.Printf("overrun_guard: %s on %s: %s; bead handed back, seat not released", who, st.Bead, why)
+			return
+		}
+	}
+
 	// 6. Release the seat. The bead no longer names it, so nothing restarts it
 	// on this sling; leaving the pause would make parkedReuseBlocker refuse the
 	// name until an operator ran gt agent resume, with no notice that it was
@@ -521,9 +543,10 @@ func resetOverrunAgentBead(c beads.Client, id, bead string) error {
 // overrunRecordCleanupStatus records what a live probe of the released seat's
 // worktree finds, so a later `gt polecat nuke` does not refuse the seat it was
 // told to release for a cleanup_status=<missing> the release itself created
-// (gt-6ixtp). The kept branch is on origin by then — the push runs before the
-// hand-back — so only the worktree's own state is asked about. A seat with no
-// worktree has nothing to record.
+// (gt-6ixtp). The push runs before the hand-back, so a seat with a branch has
+// it on origin by then; a seat on a detached HEAD has no branch to push, and
+// the probe's unpushed count is what records its commits as at risk. A seat
+// with no worktree has nothing to record.
 func (d *Daemon) overrunRecordCleanupStatus(seat overrunSeat) error {
 	polecatsDir := filepath.Join(d.config.TownRoot, seat.Rig, "polecats")
 	workDir := resolvePolecatWorktree(polecatsDir, seat.Polecat, seat.Rig)
@@ -549,6 +572,11 @@ func overrunCleanupStatus(g daemonGit) string {
 		return string(polecat.CleanupUncommitted)
 	case work.StashCount > 0:
 		return string(polecat.CleanupStash)
+	case work.UnpushedCommits > 0:
+		// The push step names a branch, so a detached HEAD (or any push that
+		// gave up) leaves its commits on this worktree alone: failing closed
+		// here is what keeps a nuke from removing them.
+		return string(polecat.CleanupUnpushed)
 	}
 	return string(polecat.CleanupClean)
 }

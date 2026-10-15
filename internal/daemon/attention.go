@@ -343,7 +343,9 @@ func (d *Daemon) attentionTick(ctx context.Context, src *attentionSources, prev 
 	src.prev = prev
 	observed := collectAttention(ctx, prev, src.collectors(), d.logger.Printf)
 	res := attention.Reconcile(prev, observed, acks, now)
-	beats, promoted := diskWarnPromotion(res.State, src.diskWarnBeats, now)
+	var beats int
+	var promoted []attention.Event
+	res.State, beats, promoted = diskWarnPromotion(res.State, src.diskWarnBeats, now)
 	res.Events = append(res.Events, promoted...)
 	var riskPromoted []attention.Event
 	res.State, riskPromoted = attention.RiskPathPromotion(res.State, now)
@@ -389,16 +391,31 @@ func (d *Daemon) attentionTick(ctx context.Context, src *attentionSources, prev 
 // warning that does not clear has earned. It fires once per run of ticks: the
 // count keeps rising past the threshold and resets when the item clears, so a
 // disk that fills again after clearing earns a new promotion.
-func diskWarnPromotion(state attention.State, beats int, now time.Time) (int, []attention.Event) {
+//
+// The count is memory only, so the promotion is also marked on the item
+// (PromotedAt, which the state carries and a restart reads back): a daemon
+// restarted while the warning persists counts again from zero but does not
+// wake a second time. An acked item is left alone, as an ack hides an item
+// until it clears. The returned state carries the mark; the input is not
+// modified.
+func diskWarnPromotion(state attention.State, beats int, now time.Time) (attention.State, int, []attention.Event) {
 	it, ok := attention.Find(state, attention.RuleHostDiskWarn)
 	if !ok {
-		return 0, nil
+		return state, 0, nil
 	}
 	beats++
-	if beats != attention.DiskWarnPromoteBeats {
-		return beats, nil
+	if beats < attention.DiskWarnPromoteBeats || it.PromotedAt != nil || it.AckedAt != nil {
+		return state, beats, nil
 	}
-	return beats, []attention.Event{{
+	items := append([]attention.Item(nil), state.Items...)
+	for i := range items {
+		if items[i].Key == it.Key {
+			promotedAt := now
+			items[i].PromotedAt = &promotedAt
+		}
+	}
+	state.Items = items
+	return state, beats, []attention.Event{{
 		TS:       now,
 		Class:    it.Kind,
 		Severity: attention.SeverityHigh,
