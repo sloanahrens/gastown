@@ -3078,3 +3078,41 @@ func treeOf(t *testing.T, g *Git, rev string) string {
 	}
 	return tree
 }
+
+// A polecat commits internal/coverage/collector.go by hand and leaves its
+// golden fixture untracked. The fixture is work: it must block the clean check
+// and stay out of the artifact reset list, while generated output in a
+// coverage directory with no tracked source is still ignored.
+func TestIntegrationCheckUncommittedWorkKeepsFixtureBesideTrackedSource(t *testing.T) {
+	t.Parallel()
+	dir := initTestRepo(t)
+	write := func(rel string) {
+		t.Helper()
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("x\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("internal/coverage/collector.go")
+	runGitTestCmd(t, dir, "add", "internal/coverage/collector.go")
+	runGitTestCmd(t, dir, "commit", "-m", "add collector")
+	write("internal/coverage/testdata/report.golden")
+	write("web/coverage/lcov.info")
+
+	status, err := NewGit(dir).CheckUncommittedWork()
+	if err != nil {
+		t.Fatalf("CheckUncommittedWork: %v", err)
+	}
+	if status.CleanExcludingRuntime() {
+		t.Fatal("untracked fixture beside tracked source must block the clean check")
+	}
+	if got, want := status.NonRuntimePaths(), []string{"internal/coverage/testdata/report.golden"}; strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("NonRuntimePaths = %q, want %q", got, want)
+	}
+	if got, want := status.RuntimeArtifactPaths(), []string{"web/coverage/"}; strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("RuntimeArtifactPaths = %q, want %q", got, want)
+	}
+}

@@ -3,6 +3,7 @@ package git
 import (
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -58,6 +59,92 @@ func TestRuntimeArtifactRoot_SourceDirNamedCoverage(t *testing.T) {
 	s := &UncommittedWorkStatus{ModifiedFiles: []string{"pkg/coverage/collector.go", "coverage/lcov.info"}}
 	if got := s.NonRuntimePaths(); !slices.Equal(got, []string{"pkg/coverage/collector.go"}) {
 		t.Errorf("NonRuntimePaths = %q, want the source file only", got)
+	}
+}
+
+// git reset on a whole coverage/ directory unstages the source beside the
+// artifact, so a directory that holds source is narrowed to the artifact's own
+// subtree; pure output directories still reset as one pathspec.
+func TestRuntimeArtifactPathspecs_MixedCoverageDirKeepsSource(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		paths []string
+		want  []string
+	}{
+		{
+			name:  "fixture beside source",
+			paths: []string{"internal/coverage/collector.go", "internal/coverage/testdata/report.golden"},
+			want:  []string{"internal/coverage/testdata/"},
+		},
+		{
+			name:  "artifact in the source directory itself",
+			paths: []string{"pkg/.cache/store.py", "pkg/.cache/blob.bin", "pkg/.cache/other.bin"},
+			want:  []string{"pkg/.cache/blob.bin", "pkg/.cache/other.bin"},
+		},
+		{
+			name:  "output tree below a source directory stays one pathspec",
+			paths: []string{"coverage/main.go", "coverage/lcov-report/index.html", "coverage/lcov-report/css/a.css"},
+			want:  []string{"coverage/lcov-report/"},
+		},
+		{
+			name:  "source in a sibling subtree does not narrow",
+			paths: []string{"coverage/lcov.info", "coverage/lcov-report/index.html"},
+			want:  []string{"coverage/"},
+		},
+		{
+			name:  "source under a different coverage directory",
+			paths: []string{"pkg/coverage/collector.go", "web/coverage/lcov.info"},
+			want:  []string{"web/coverage/"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := RuntimeArtifactPathspecs(tc.paths)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("RuntimeArtifactPathspecs(%q) = %q, want %q", tc.paths, got, tc.want)
+			}
+			for _, src := range tc.paths {
+				if !isSourceCodePath(src) || isGasTownRuntimePath(src) {
+					continue
+				}
+				for _, spec := range got {
+					if strings.HasPrefix(src, spec) {
+						t.Errorf("pathspec %q covers source file %q", spec, src)
+					}
+				}
+			}
+		})
+	}
+}
+
+// A fixture beside tracked source is work, not output: the status must not
+// count it as a runtime artifact, or gt done passes its clean check and the
+// fixture never lands.
+func TestUncommittedWorkStatus_FixtureBesideTrackedSourceIsNotArtifact(t *testing.T) {
+	t.Parallel()
+	fixture := "internal/coverage/testdata/report.golden"
+	s := &UncommittedWorkStatus{
+		HasUncommittedChanges: true,
+		UntrackedFiles:        []string{fixture, "web/coverage/lcov.info"},
+		sourceRoots:           []string{"internal/coverage/"},
+	}
+	if got := s.NonRuntimePaths(); !slices.Equal(got, []string{fixture}) {
+		t.Errorf("NonRuntimePaths = %q, want the fixture", got)
+	}
+	if s.CleanExcludingRuntime() {
+		t.Error("CleanExcludingRuntime = true; the fixture must block")
+	}
+	if got := s.RuntimeArtifactPaths(); !slices.Equal(got, []string{"web/coverage/"}) {
+		t.Errorf("RuntimeArtifactPaths = %q, want only web/coverage/", got)
+	}
+
+	s.sourceRoots = nil
+	if !s.CleanExcludingRuntime() {
+		t.Error("without tracked source both files are artifacts")
+	}
+	if got := s.NonRuntimePaths(); len(got) != 0 {
+		t.Errorf("NonRuntimePaths without tracked source = %q, want none", got)
 	}
 }
 
