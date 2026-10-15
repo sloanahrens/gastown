@@ -1281,9 +1281,11 @@ func (s *attentionSources) collectRiskPaths(ctx context.Context) ([]attention.It
 }
 
 // collectTierSweepRed raises one item per rig and tier whose last sweep
-// verdict is RED (gt-vsct7.5), read from the sweep job's own record. The item
-// clears on the next GREEN of that tier, because that is what rewrites the
-// record's verdict; nothing clears it by hand.
+// verdict is RED (gt-vsct7.5), read from the sweep job's own record and dated
+// at the tip that verdict was taken at. The item clears on the next GREEN of
+// that tier, because that is what rewrites the record's verdict; nothing
+// clears it by hand, and a Partial cycle that never reached the tier leaves the
+// RED standing (gt-euxf1).
 func (s *attentionSources) collectTierSweepRed(ctx context.Context) ([]attention.Item, error) {
 	var out []attention.Item
 	for _, rig := range s.tierSweepRigs() {
@@ -1303,6 +1305,7 @@ func (s *attentionSources) collectTierSweepRed(ctx context.Context) ([]attention
 				Kind:     attention.KindTierSweepRed,
 				Severity: attention.SeverityHigh,
 				Rig:      rig,
+				SHA:      res.SHA,
 				Summary:  fmt.Sprintf("tier sweep %s %s RED (%d failed%s)", rig, tier, res.Failed, tierSweepFailureNames(res.FailedNames)),
 			})
 		}
