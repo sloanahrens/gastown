@@ -8,7 +8,7 @@ import (
 	"github.com/steveyegge/gastown/internal/lock"
 )
 
-// dockerRmTimeout bounds one `docker rm -f`. Generous next to dockerPSTimeout
+// dockerRmTimeout bounds one `docker rm -f -v`. Generous next to dockerPSTimeout
 // because force-removing a container waits for the daemon to finish tearing it
 // down, which a loaded VM can stretch.
 const dockerRmTimeout = 30 * time.Second

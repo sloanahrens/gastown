@@ -1,11 +1,24 @@
 package slot
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/jonboulle/clockwork"
 )
+
+// TestDockerRmArgs pins the exact argv dockerCLI.Remove hands docker. -v is
+// what removes a reaped container's anonymous volumes (the Dolt test image
+// declares a data volume); dropping it strands one orphan volume per reap.
+func TestDockerRmArgs(t *testing.T) {
+	t.Parallel()
+	got := dockerRmArgs("abc123")
+	want := []string{"rm", "-f", "-v", "abc123"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("dockerRmArgs = %v, want %v", got, want)
+	}
+}
 
 // TestNewGate_Defaults pins what the package-level functions run on: the
 // swappable default runtime, DefaultPollInterval, and options that override

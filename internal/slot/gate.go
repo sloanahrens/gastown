@@ -28,7 +28,7 @@ type ContainerRuntime interface {
 	// performed and must be read as "unknown", never as "no containers
 	// running", except the isDaemonUnreachable case Acquire distinguishes.
 	List() ([]string, error)
-	// Remove force-removes one container by id.
+	// Remove force-removes one container by id, with its anonymous volumes.
 	Remove(id string) error
 	// Info reports the Docker VM's CPU and memory bound.
 	Info() (VMInfo, error)
@@ -78,11 +78,19 @@ func (dockerCLI) List() ([]string, error) {
 	return matchGateContainers(string(out)), nil
 }
 
-// Remove runs `docker rm -f`, bounded by dockerRmTimeout.
+// dockerRmArgs is the argv for removing one reaped container. -v takes the
+// container's anonymous volumes with it: the Dolt test image declares a data
+// volume, so without -v every reap strands an orphan volume nothing else
+// removes. Named volumes are never touched by -v.
+func dockerRmArgs(id string) []string {
+	return []string{"rm", "-f", "-v", id}
+}
+
+// Remove runs `docker rm -f -v`, bounded by dockerRmTimeout.
 func (dockerCLI) Remove(id string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), dockerRmTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "docker", "rm", "-f", id).CombinedOutput() //nolint:gosec // G204: fixed args, id comes from docker's own listing
+	out, err := exec.CommandContext(ctx, "docker", dockerRmArgs(id)...).CombinedOutput() //nolint:gosec // G204: fixed args, id comes from docker's own listing
 	if err != nil {
 		if msg := strings.TrimSpace(string(out)); msg != "" {
 			return errors.New(msg)
