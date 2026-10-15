@@ -358,6 +358,101 @@ func TestKillSessionWithProcessesExcluding_NonexistentSession(t *testing.T) {
 	}
 }
 
+// killTargets records the -t each kill-path subcommand aimed at, keyed by
+// subcommand. A subcommand called more than once must agree with itself.
+func killTargets(t *testing.T, s *scripted, subs ...string) map[string]string {
+	t.Helper()
+	got := map[string]string{}
+	for _, sub := range subs {
+		for _, c := range s.find(sub) {
+			target := flagValue(c.args, "-t")
+			if prev, seen := got[sub]; seen && prev != target {
+				t.Errorf("%s targets %q and %q in one kill", sub, prev, target)
+			}
+			got[sub] = target
+		}
+	}
+	return got
+}
+
+// TestKillSessionTargetsExactName: the kill path aims every session target at
+// the exact session name. tmux falls back to prefix matching when no session
+// carries the name outright, so a bare "kx" also names "kx-b": killing the
+// session called kx can silence its neighbor instead (gt-u4lr9).
+func TestKillSessionTargetsExactName(t *testing.T) {
+	t.Parallel()
+	f, _, _, _, _, _, _ := processTree()
+	s, err := killWith(t, f, func(tm *Tmux) error { return tm.KillSessionWithProcesses("gt-x") })
+	if err != nil {
+		t.Fatalf("KillSessionWithProcesses: %v", err)
+	}
+	// set-option and set-hook name a pane, and tmux reads a bare name there as
+	// a window name — "=gt-x" alone is rejected with "no such window" — so the
+	// session part keeps its ":" suffix. display-message adds "^" for the first
+	// window. kill-session takes a session name and needs no suffix.
+	got := killTargets(t, s, "kill-session", "set-option", "set-hook", "display-message")
+	for sub, want := range map[string]string{
+		"kill-session":    "=gt-x",
+		"set-option":      "=gt-x:",
+		"set-hook":        "=gt-x:",
+		"display-message": "=gt-x:^",
+	} {
+		if got[sub] != want {
+			t.Errorf("%s -t = %q, want %q", sub, got[sub], want)
+		}
+	}
+}
+
+// TestKillSessionExcludingTargetsExactName: the self-kill variant aims at the
+// same exact targets as the plain one.
+func TestKillSessionExcludingTargetsExactName(t *testing.T) {
+	t.Parallel()
+	f, _, _, _, _, _, _ := processTree()
+	s, err := killWith(t, f, func(tm *Tmux) error { return tm.KillSessionWithProcessesExcluding("gt-x", nil) })
+	if err != nil {
+		t.Fatalf("KillSessionWithProcessesExcluding: %v", err)
+	}
+	got := killTargets(t, s, "kill-session", "set-option", "set-hook")
+	for sub, want := range map[string]string{
+		"kill-session": "=gt-x",
+		"set-option":   "=gt-x:",
+		"set-hook":     "=gt-x:",
+	} {
+		if got[sub] != want {
+			t.Errorf("%s -t = %q, want %q", sub, got[sub], want)
+		}
+	}
+}
+
+// TestKillSessionAloneTargetsExactName covers the bare KillSession, which the
+// lifecycle and session-manager callers reach without a HasSession guard.
+func TestKillSessionAloneTargetsExactName(t *testing.T) {
+	t.Parallel()
+	f := newFakeServer()
+	f.addSession("kx-b", "bash")
+	tm, s := f.tmux(newFixedClock())
+	if err := tm.KillSession("kx"); err != nil {
+		t.Fatalf("KillSession(kx) = %v, want nil for a session that is already gone", err)
+	}
+	if got := killTargets(t, s, "kill-session")["kill-session"]; got != "=kx" {
+		t.Errorf("kill-session -t = %q, want %q", got, "=kx")
+	}
+	if !f.has("kx-b") {
+		t.Error("KillSession(kx) killed kx-b")
+	}
+}
+
+// TestExactTargetForms pins the two target spellings the kill path composes.
+func TestExactTargetForms(t *testing.T) {
+	t.Parallel()
+	if got := exactSessionTarget("kx"); got != "=kx" {
+		t.Errorf("exactSessionTarget(kx) = %q, want %q", got, "=kx")
+	}
+	if got := exactPaneTarget("kx"); got != "=kx:" {
+		t.Errorf("exactPaneTarget(kx) = %q, want %q", got, "=kx:")
+	}
+}
+
 func TestKillPaneProcesses(t *testing.T) {
 	t.Parallel()
 	f, pane, node, claude, reparented, _, _ := processTree()

@@ -279,8 +279,10 @@ func TestGetPaneCommand_MultiPane(t *testing.T) {
 	}
 	for format, want := range map[string]string{
 		"#{pane_current_command}": "gt-x:^",
-		"#{pane_pid}":             "gt-x:^",
-		"#{pane_current_path}":    "gt-x:0.0",
+		// GetPanePID matches the session exactly: a bare "gt-x" also matches
+		// "gt-x-b", and its PID is what the kill path would then signal.
+		"#{pane_pid}":          "=gt-x:^",
+		"#{pane_current_path}": "gt-x:0.0",
 	} {
 		if targets[format] != want {
 			t.Errorf("%s targeted %q, want %q", format, targets[format], want)
