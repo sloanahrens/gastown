@@ -1669,6 +1669,50 @@ func TestAddRigDoesNotDropAnotherRigsDatabase(t *testing.T) {
 	})
 }
 
+// TestAddRigRejectsDetectedPrefixOwnedByAnotherRig: the prefix check runs on
+// the derived value, but the clone's .beads/config.yaml replaces it, and
+// AppendRoute rewrites the path an existing prefix already has — so a detected
+// prefix another rig routes is refused with routes.jsonl untouched (gt-jj3n3).
+func TestAddRigRejectsDetectedPrefixOwnedByAnotherRig(t *testing.T) {
+	t.Parallel()
+	root, rigsConfig := setupTestTown(t)
+	manager, f, _ := testManager(root, rigsConfig)
+
+	// Another rig owns prefix gt and already has its route.
+	townBeads := filepath.Join(root, ".beads")
+	if err := os.MkdirAll(townBeads, 0755); err != nil {
+		t.Fatalf("mkdir town beads: %v", err)
+	}
+	routesPath := filepath.Join(townBeads, beads.RoutesFileName)
+	before := "{\"prefix\":\"gt-\",\"path\":\"alpha\"}\n"
+	if err := os.WriteFile(routesPath, []byte(before), 0644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+
+	// The rig's name derives a free prefix; only the clone's config.yaml
+	// carries the owned one.
+	repoDir := remoteRepo(t, f, filepath.Join(t.TempDir(), "remote.git"), map[string]string{
+		".beads/config.yaml": "issue-prefix: gt\n",
+	})
+
+	_, err := manager.AddRig(AddRigOptions{
+		Name:          "zulu_rig",
+		GitURL:        repoDir,
+		SkipDoltCheck: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), `prefix "gt-" is already used by alpha`) {
+		t.Fatalf("AddRig error = %v, want the detected prefix's collision named", err)
+	}
+
+	after, err := os.ReadFile(routesPath)
+	if err != nil {
+		t.Fatalf("read routes.jsonl: %v", err)
+	}
+	if string(after) != before {
+		t.Errorf("routes.jsonl changed:\nbefore: %q\nafter:  %q", before, after)
+	}
+}
+
 func TestAddRig_UpstreamURL(t *testing.T) {
 	t.Parallel()
 	root, rigsConfig := setupTestTown(t)

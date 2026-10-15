@@ -585,6 +585,14 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 			if userProvidedPrefix && strings.TrimSuffix(opts.BeadsPrefix, "-") != strings.TrimSuffix(sourcePrefix, "-") {
 				return nil, fmt.Errorf("prefix mismatch: source repo uses '%s' but --prefix '%s' was provided; use --prefix %s to match existing issues", sourcePrefix, opts.BeadsPrefix, sourcePrefix)
 			}
+			// The check above ran before the clone, on the derived or --prefix
+			// value, which detection replaces here. AppendRoute rewrites the
+			// path of an existing prefix rather than refusing it, so adopting
+			// a prefix another rig routes leaves that rig's beads unreachable
+			// by prefix (gt-jj3n3).
+			if err := beads.CheckPrefixAvailable(m.townRoot, sourcePrefix+"-", opts.Name); err != nil {
+				return nil, fmt.Errorf("prefix collision (prefix %q detected in the source repo): %w", sourcePrefix, err)
+			}
 			// Use detected prefix (overrides derived prefix)
 			opts.BeadsPrefix = sourcePrefix
 			rigConfig.Beads.Prefix = sourcePrefix
