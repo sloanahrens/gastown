@@ -46,6 +46,7 @@ func TestParseCPUIdle(t *testing.T) {
 		"macOS takes the sampled line, not the since-boot one": {in: macTop, want: ptr(95.5)},
 		"Linux takes the sampled line, not the since-boot one": {in: linuxTop, want: ptr(0.1)},
 		"macOS fully idle": {in: "CPU usage: 0.0% user, 0.0% sys, 100.0% idle\n", want: ptr(100.0)},
+		"Linux in procps' older printf layout, unit on the field": {in: "%Cpu(s):  6.2%us, 12.5%sy, 81.2%id,  0.0%wa\n", want: ptr(81.2)},
 		"Linux fully idle": {in: "%Cpu(s):  0.0 us,  0.0 sy, 100.0 id,  0.0 wa\n", want: ptr(100.0)},
 		"no CPU line":      {in: "Load Avg: 1.0, 2.0, 3.0\n"},
 		"no idle field":    {in: "CPU usage: 39.24% user, 60.75% sys\n"},

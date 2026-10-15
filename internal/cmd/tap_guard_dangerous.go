@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,7 +16,7 @@ import (
 
 	"github.com/google/shlex"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/hostcpu"
+	"github.com/steveyegge/gastown/internal/hoststat"
 )
 
 var tapGuardDangerousCmd = &cobra.Command{
@@ -131,7 +132,7 @@ func tapGuardDangerous(stdin io.Reader, stderr io.Writer, proc guardProcess) err
 		return NewSilentExit(2)
 	}
 
-	if cpuIdle, heldAction := evaluateIdleGate(proc, command, proc.cpuIdle); heldAction != "" {
+	if cpuIdle, _, heldAction := evaluateIdleGate(proc, command, proc.cpuIdle); heldAction != "" {
 		printIdleGateHold(stderr, cpuIdle, command, heldAction)
 		return NewSilentExit(2)
 	}
@@ -140,28 +141,26 @@ func tapGuardDangerous(stdin io.Reader, stderr io.Writer, proc guardProcess) err
 }
 
 // evaluateIdleGate reports whether command is a full-suite start
-// (idleGateHeldAction) that should be held because the sampled share of the
-// host's CPU that is idle is below idleGateCPUIdleThreshold. cpuIdle is the
-// sampled value (0 when the command isn't gated or the sample failed — a
-// failed sample fails open, never holding the command). heldAction is the
-// held invocation's own spelling ("make test", "go build ./..."), returned so
-// the HOLD banner can name what it held instead of guessing; "" means the
-// command was not held. proc supplies the working directory each segment is
-// judged in (idleGateHeldAction), which decides whether a make target is the
-// whole-module Go action at all.
-func evaluateIdleGate(proc guardProcess, command string, hostCPUIdle func() (float64, bool)) (cpuIdle float64, heldAction string) {
+// (idleGateHeldAction) that the host is too busy to take: a matched command
+// comes back as heldAction, its own spelling ("make test", "go build ./..."),
+// so the HOLD banner names what it held instead of guessing. cpuIdle and
+// idleKnown are the sampled idle share and whether the sample could be read
+// at all, so a caller can tell a host it read as idle from one it could not
+// read. An unread host holds nothing, because a CPU that could not be
+// measured is no evidence of a busy one and holding on it would stop every
+// suite start where top cannot be driven (gt-6rieh). proc supplies the
+// working directory each segment is judged in (idleGateHeldAction), which
+// decides whether a make target is the whole-module Go action at all.
+func evaluateIdleGate(proc guardProcess, command string, hostCPUIdle func() (float64, bool)) (cpuIdle float64, idleKnown bool, heldAction string) {
 	heldAction = idleGateHeldAction(proc, command)
 	if heldAction == "" {
-		return 0, ""
+		return 0, false, ""
 	}
-	cpuIdle, ok := hostCPUIdle()
-	if !ok {
-		return 0, ""
+	cpuIdle, idleKnown = hostCPUIdle()
+	if !idleKnown || cpuIdle >= idleGateCPUIdleThreshold {
+		return cpuIdle, idleKnown, ""
 	}
-	if cpuIdle >= idleGateCPUIdleThreshold {
-		return cpuIdle, ""
-	}
-	return cpuIdle, heldAction
+	return cpuIdle, idleKnown, heldAction
 }
 
 // maxDangerousNestDepth bounds nestedCommands recursion so a pathological
@@ -3090,11 +3089,9 @@ func fullSuiteUncachedGoTest(rest []string) bool {
 
 // idleGateCPUIdleThreshold is the percent of the host's CPU that must be
 // idle for a full-suite start to be permitted; below it the start is HELD
-// (exit 2, retryable). The operator's own rule for a full suite on this
-// shared host is this bar — "Before a full suite ... proceed only if idle
-// >= 25%" (the town's Host Hygiene directive) — so the gate holds what that
-// rule holds. It held a 1-minute load average above 60 before (gt-6rieh;
-// gt-e6xh before that).
+// (exit 2, retryable). It is the barrier the rig's Host Hygiene directive
+// sets for running a full suite on the operator's shared host, and the
+// guard's job is to hold what that rule holds (gt-6rieh).
 const idleGateCPUIdleThreshold = 25
 
 // idleGateAlternative is the HOLD banner's suggested next step. The first
@@ -3254,12 +3251,17 @@ func wholeRepoArgFollows(tokens []string, idx int) bool {
 }
 
 // actualHostCPUIdle returns the percent of the host's CPU that is idle
-// (guardProcess.cpuIdle in production), from internal/hostcpu's two-sample
-// top. The probe runs only for a full-suite start — the command this gate
-// decides about, never per command — which is what pays for the sample loop
-// (gt-f57o, gt-6rieh).
+// (guardProcess.cpuIdle in production), from internal/hoststat's sample of
+// the host. ok is false when the sample could not take the reading, which
+// the gate reads as no evidence of a busy host. Only a command the gate
+// matched reaches this sample, so a gated suite start pays for it and no
+// other command does (gt-6rieh).
 func actualHostCPUIdle() (cpuIdle float64, ok bool) {
-	return hostcpu.Idle()
+	idle := hoststat.Sample(context.Background()).CPUIdle
+	if idle == nil {
+		return 0, false
+	}
+	return *idle, true
 }
 
 // printIdleGateHold prints the HOLD banner to stderr — distinct from

@@ -266,26 +266,25 @@ const StrictBudgetEnv = "GATE_STRICT_BUDGET"
 // User CPU depends on load far less than wall time, but not on nothing: an
 // oversubscribed host shares cores and caches, so a package can cross the
 // budget beside six other gates and not alone (gt-ik4a1.1). The budget is
-// enforced when the host had at least one core's worth of its CPU idle when
-// the run started (cpuIdle >= 100/ncpu) — a host with a core to spare, which
-// is what a 1-minute load average below ncpu meant before this read CPU idle
-// (gt-6rieh) — or when strict (GATE_STRICT_BUDGET=1) is set; otherwise the
-// overruns are reported and the run passes. A CPU idle that could not be
-// read is not evidence of a quiet host, so it reports too.
-func EnforceBudget(cpuIdle float64, idleKnown bool, ncpu int, strict bool) (bool, string) {
+// enforced when the host had a core to spare as the run started — at least
+// one core's worth of its CPU idle, cpuIdle >= 100/ncpu — or when strict
+// (GATE_STRICT_BUDGET=1) is set; otherwise the overruns are reported and the
+// run passes. cpuIdle is nil when the sample could not take it: an unread
+// reading is no evidence of a quiet host, so it reports too (gt-6rieh).
+func EnforceBudget(cpuIdle *float64, ncpu int, strict bool) (bool, string) {
 	switch {
 	case strict:
 		return true, StrictBudgetEnv + "=1"
-	case !idleKnown:
+	case cpuIdle == nil:
 		return false, "host CPU idle unknown"
 	case ncpu < 1:
 		return false, "host CPU count unknown"
 	}
 	oneCore := 100 / float64(ncpu)
-	if cpuIdle >= oneCore {
-		return true, fmt.Sprintf("CPU idle %.1f%% >= %.1f%% (one of %d cores)", cpuIdle, oneCore, ncpu)
+	if *cpuIdle >= oneCore {
+		return true, fmt.Sprintf("CPU idle %.1f%% >= %.1f%% (one of %d cores)", *cpuIdle, oneCore, ncpu)
 	}
-	return false, fmt.Sprintf("CPU idle %.1f%% < %.1f%% (one of %d cores)", cpuIdle, oneCore, ncpu)
+	return false, fmt.Sprintf("CPU idle %.1f%% < %.1f%% (one of %d cores)", *cpuIdle, oneCore, ncpu)
 }
 
 // BudgetFails reports whether the overruns fail the run. A package that

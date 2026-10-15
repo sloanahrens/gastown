@@ -2310,9 +2310,8 @@ func TestIdleGateFollowsCdOnTheLine(t *testing.T) {
 // TestEvaluateIdleGate checks the wiring between the pure command matcher and
 // the CPU idle sample: a gated command is held when the sampled idle share is
 // below idleGateCPUIdleThreshold, and allowed through when it is at or above
-// it, the sample fails (fail open), or the command isn't gated at all. Each
-// case names the old reading beside its idle share (gt-6rieh): the boundary
-// cases and the two that cross over pin that the idle share alone decides.
+// it, or when the command isn't gated at all. The boundary cases pin that the
+// idle share alone decides (gt-6rieh).
 func TestEvaluateIdleGate(t *testing.T) {
 	t.Parallel()
 	goTree := fakeModule(t, "clone")
@@ -2322,28 +2321,60 @@ func TestEvaluateIdleGate(t *testing.T) {
 		command  string
 		sample   float64
 		sampleOK bool
-		load1    float64 // the reading this gate used to decide by; only names the case
+		// wantRead is whether the gate reached the sample at all. A command
+		// the gate does not match is answered before the host is read.
+		wantRead bool
 		wantHeld bool
 	}{
-		{"held below the idle threshold", "make test", 24.9, true, 5, true},
-		{"allowed at the idle threshold", "make test", 25, true, 74, false},
-		{"allowed above the idle threshold", "make test", 48.6, true, 29.6, false},
-		{"held at a tenth idle while the old reading was quiet", "make test", 10, true, 5, true},
-		{"allowed at half idle while the old reading said busy", "make test", 50, true, 74, false},
-		{"allowed when the sample fails (fail open)", "make test", 0, false, 74, false},
-		{"allowed when not a gated command", "make lint", 0, true, 0, false},
+		{"held below the idle threshold", "make test", 24.9, true, true, true},
+		{"allowed at the idle threshold", "make test", 25, true, true, false},
+		{"allowed on a half-idle host", "make test", 48.6, true, true, false},
+		{"held at a tenth idle", "make test", 10, true, true, true},
+		{"allowed when not a gated command", "make lint", 0, true, false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sample := func() (float64, bool) { return tt.sample, tt.sampleOK }
-			cpuIdle, heldAction := evaluateIdleGate(fakeGuardProcess(nil, goTree), tt.command, sample)
+			cpuIdle, idleKnown, heldAction := evaluateIdleGate(fakeGuardProcess(nil, goTree), tt.command, sample)
 			if held := heldAction != ""; held != tt.wantHeld {
-				t.Errorf("evaluateIdleGate(%q) at CPU idle %.1f%% (load1 %.1f) held=%v, want %v", tt.command, tt.sample, tt.load1, held, tt.wantHeld)
+				t.Errorf("evaluateIdleGate(%q) at CPU idle %.1f%% held=%v, want %v", tt.command, tt.sample, held, tt.wantHeld)
 			}
-			if heldAction != "" && cpuIdle != tt.sample {
-				t.Errorf("evaluateIdleGate(%q) returned the reading %v, want the sampled %v", tt.command, cpuIdle, tt.sample)
+			if idleKnown != tt.wantRead {
+				t.Errorf("evaluateIdleGate(%q) reported the reading as read=%v, want %v", tt.command, idleKnown, tt.wantRead)
+			}
+			if idleKnown && cpuIdle != tt.sample {
+				t.Errorf("evaluateIdleGate(%q) = reading %.1f, want the sampled %.1f", tt.command, cpuIdle, tt.sample)
 			}
 		})
+	}
+}
+
+// An unread sample is not a busy host: a host whose top cannot be driven
+// holds nothing, and the gate reports the reading as unread rather than as
+// the 0 an idle-but-unreadable host would otherwise be indistinguishable
+// from (gt-6rieh). The unread answer never reaches the banner, because only
+// a known reading can hold.
+func TestEvaluateIdleGateUnreadSampleHoldsNothing(t *testing.T) {
+	t.Parallel()
+	goTree := fakeModule(t, "clone")
+
+	for _, command := range []string{"make test", "make lint"} {
+		sample := func() (float64, bool) { return 0, false }
+		cpuIdle, idleKnown, heldAction := evaluateIdleGate(fakeGuardProcess(nil, goTree), command, sample)
+		if heldAction != "" {
+			t.Errorf("evaluateIdleGate(%q) with an unread sample held %q, want nothing held", command, heldAction)
+		}
+		if idleKnown {
+			t.Errorf("evaluateIdleGate(%q) reported an unread sample as known (%.1f%%)", command, cpuIdle)
+		}
+	}
+
+	// The gated command is the one the unread sample could have held: it is
+	// held when the same host reads idle, so the case above is the failing
+	// sample and not a command the gate does not match.
+	sample := func() (float64, bool) { return 1, true }
+	if _, _, held := evaluateIdleGate(fakeGuardProcess(nil, goTree), "make test", sample); held == "" {
+		t.Fatal("make test is not held even at 1% idle: the unread case above proves nothing")
 	}
 }
 

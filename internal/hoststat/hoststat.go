@@ -121,21 +121,43 @@ func parseCPUIdle(s string) *float64 {
 	if line == "" {
 		line = lastLineContaining(s, "cpu(s)")
 	}
-	f := strings.Fields(line)
+	return parseIdleFields(strings.Fields(line))
+}
+
+// parseIdleFields reads the idle share off one CPU line's fields. Both
+// procps-ng field layouts are here: the one whose value is its own token
+// ("6.2 us, 12.5 sy, 81.2 id"), and the older printf-style one that carries
+// the unit in the name ("6.2%us, 12.5%sy, 81.2%id") (gt-6rieh).
+func parseIdleFields(f []string) *float64 {
 	for i, tok := range f {
 		if i == 0 {
 			continue
 		}
-		switch strings.Trim(tok, ",%") {
+		tok = strings.TrimSuffix(tok, ",")
+		switch tok {
 		case "idle", "id":
-			v, err := strconv.ParseFloat(strings.Trim(f[i-1], ",%"), 64)
-			if err != nil {
-				return nil
+			return idleValue(f[i-1])
+		}
+		for _, unit := range []string{"%idle", "%id"} {
+			if !strings.HasSuffix(tok, unit) {
+				continue
 			}
-			return &v
+			if v, err := strconv.ParseFloat(strings.TrimSuffix(tok, unit), 64); err == nil {
+				return &v
+			}
 		}
 	}
 	return nil
+}
+
+// idleValue reads the number before an "idle"/"id" field, which top may hang
+// its own punctuation off.
+func idleValue(tok string) *float64 {
+	v, err := strconv.ParseFloat(strings.Trim(tok, ",%"), 64)
+	if err != nil {
+		return nil
+	}
+	return &v
 }
 
 // parseDoltCores sums the CPU of the Dolt server's processes out of a "pcpu
