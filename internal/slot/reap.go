@@ -64,6 +64,9 @@ type ReapReport struct {
 // under a live suite breaks it. Owner-gone debris is removed either way — the
 // owner process is provably dead, so nothing can be using the container.
 //
+// A removed container's anonymous volumes go with it only when its owner
+// labels proved it is this gate's debris (gt-lsxps, see RemoveOptions).
+//
 // A non-nil error means the container half could not run — the list came back
 // unreadable, so nothing was classified and nothing removed. The owner-file
 // half is local and has already run by then, which is why the report comes
@@ -110,7 +113,9 @@ func (g *Gate) Reap(townRoot string, opts ReapOptions) (ReapReport, error) {
 				fmt.Sprintf("%s: no container id in the docker listing, so it cannot be removed", verdict.Container.Display()))
 			continue
 		}
-		if removeErr := g.runtime.Remove(verdict.Container.ID); removeErr != nil {
+		// Only OwnerGone is proved debris, so only OwnerGone takes the
+		// container's volume with it (see RemoveOptions, gt-lsxps).
+		if removeErr := g.runtime.Remove(verdict.Container.ID, RemoveOptions{Volumes: verdict.OwnerGone}); removeErr != nil {
 			report.Failed = append(report.Failed, fmt.Sprintf("%s: %v", verdict.Container.Display(), removeErr))
 			continue
 		}

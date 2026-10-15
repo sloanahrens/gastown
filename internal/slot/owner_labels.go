@@ -142,7 +142,9 @@ func orphanRemover(rt ContainerRuntime, w io.Writer) func(ContainerVerdict) {
 			return
 		}
 		tried[verdict.Container.ID] = true
-		if err := rt.Remove(verdict.Container.ID); err != nil {
+		// Every verdict here is OwnerGone: the labels proved the container is
+		// the gate's, volume included (gt-kmjxq).
+		if err := rt.Remove(verdict.Container.ID, RemoveOptions{Volumes: true}); err != nil {
 			fmt.Fprintf(w, "gt slot: could not remove orphaned %s (%s): %v. 'gt slot reap' will retry.\n",
 				verdict.Container.Display(), verdict.Reason, err)
 			return

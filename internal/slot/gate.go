@@ -28,8 +28,9 @@ type ContainerRuntime interface {
 	// performed and must be read as "unknown", never as "no containers
 	// running", except the isDaemonUnreachable case Acquire distinguishes.
 	List() ([]string, error)
-	// Remove force-removes one container by id, with its anonymous volumes.
-	Remove(id string) error
+	// Remove force-removes one container by id, and its anonymous volumes
+	// too when the caller can prove they are disposable (see RemoveOptions).
+	Remove(id string, opts RemoveOptions) error
 	// Info reports the Docker VM's CPU and memory bound.
 	Info() (VMInfo, error)
 }
@@ -78,19 +79,36 @@ func (dockerCLI) List() ([]string, error) {
 	return matchGateContainers(string(out)), nil
 }
 
-// dockerRmArgs is the argv for removing one reaped container. -v takes the
-// container's anonymous volumes with it: the Dolt test image declares a data
-// volume, so without -v every reap strands an orphan volume nothing else
-// removes. Named volumes are never touched by -v.
-func dockerRmArgs(id string) []string {
-	return []string{"rm", "-f", "-v", id}
+// RemoveOptions controls one container removal.
+type RemoveOptions struct {
+	// Volumes also removes the container's anonymous volumes (-v), so it is
+	// set only for a container the caller can PROVE is gate debris by its
+	// owner labels (ContainerVerdict.OwnerGone, gt-ehlga): the Dolt test image
+	// declares a data volume, and the owner process being dead means nothing
+	// else will ever remove it.
+	//
+	// An unlabelled lookalike — an operator's own dolthub/dolt-sql-server, a
+	// container named gt-dolt-dev — matches the same image/name substring as
+	// real debris, and nothing distinguishes its anonymous /var/lib/dolt
+	// volume from live data, so it is removed without -v and keeps its volume
+	// (gt-lsxps). Named volumes are never touched by -v either way.
+	Volumes bool
 }
 
-// Remove runs `docker rm -f -v`, bounded by dockerRmTimeout.
-func (dockerCLI) Remove(id string) error {
+// dockerRmArgs is the argv for removing one reaped container.
+func dockerRmArgs(id string, opts RemoveOptions) []string {
+	args := []string{"rm", "-f"}
+	if opts.Volumes {
+		args = append(args, "-v")
+	}
+	return append(args, id)
+}
+
+// Remove runs `docker rm -f [-v]`, bounded by dockerRmTimeout.
+func (dockerCLI) Remove(id string, opts RemoveOptions) error {
 	ctx, cancel := context.WithTimeout(context.Background(), dockerRmTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "docker", dockerRmArgs(id)...).CombinedOutput() //nolint:gosec // G204: fixed args, id comes from docker's own listing
+	out, err := exec.CommandContext(ctx, "docker", dockerRmArgs(id, opts)...).CombinedOutput() //nolint:gosec // G204: fixed args, id comes from docker's own listing
 	if err != nil {
 		if msg := strings.TrimSpace(string(out)); msg != "" {
 			return errors.New(msg)
@@ -138,14 +156,16 @@ var defaultRuntime = DockerRuntime()
 type legacyRuntime struct{}
 
 func (legacyRuntime) List() ([]string, error) { return defaultRuntime.List() }
-func (legacyRuntime) Remove(id string) error  { return defaultRuntime.Remove(id) }
-func (legacyRuntime) Info() (VMInfo, error)   { return defaultRuntime.Info() }
+func (legacyRuntime) Remove(id string, opts RemoveOptions) error {
+	return defaultRuntime.Remove(id, opts)
+}
+func (legacyRuntime) Info() (VMInfo, error) { return defaultRuntime.Info() }
 
 // funcRuntime overrides some of a base runtime's methods.
 type funcRuntime struct {
 	base   ContainerRuntime
 	list   func() ([]string, error)
-	remove func(id string) error
+	remove func(id string, opts RemoveOptions) error
 }
 
 func (r funcRuntime) List() ([]string, error) {
@@ -155,11 +175,11 @@ func (r funcRuntime) List() ([]string, error) {
 	return r.base.List()
 }
 
-func (r funcRuntime) Remove(id string) error {
+func (r funcRuntime) Remove(id string, opts RemoveOptions) error {
 	if r.remove != nil {
-		return r.remove(id)
+		return r.remove(id, opts)
 	}
-	return r.base.Remove(id)
+	return r.base.Remove(id, opts)
 }
 
 func (r funcRuntime) Info() (VMInfo, error) { return r.base.Info() }
@@ -188,13 +208,15 @@ func SetContainerListerForTest(fn func() ([]string, error)) (restore func()) {
 
 // SetContainerRemoverForTest overrides the removal the package-level
 // functions use, for tests in other packages that drive Reap and must not
-// delete a real container. Returns a restore func the caller must invoke
-// (typically via t.Cleanup). Like SetContainerListerForTest, it replaces the
-// whole default runtime, so restores must run in reverse order (LIFO).
+// delete a real container. The fn sees the whole request, opts included: a
+// fake that could not tell whether -v was asked for could not stand in for the
+// real runtime. Returns a restore func the caller must invoke (typically via
+// t.Cleanup). Like SetContainerListerForTest, it replaces the whole default
+// runtime, so restores must run in reverse order (LIFO).
 //
 // Deprecated: inject a runtime with NewGate(WithRuntime(...)) instead. Kept
 // until internal/doctor converts to the unit-test rules.
-func SetContainerRemoverForTest(fn func(id string) error) (restore func()) {
+func SetContainerRemoverForTest(fn func(id string, opts RemoveOptions) error) (restore func()) {
 	prev := defaultRuntime
 	defaultRuntime = funcRuntime{base: prev, remove: fn}
 	return func() { defaultRuntime = prev }

@@ -2,6 +2,7 @@ package slot
 
 import (
 	"errors"
+	"maps"
 	"os"
 	"slices"
 	"sort"
@@ -390,5 +391,46 @@ func TestReap_DryRunMatchesTheRealRun(t *testing.T) {
 	}
 	if len(dryRemoved) != 0 || len(realRemoved) != 0 {
 		t.Fatalf("a held gate removed something: dry %v, real %v", dryRemoved, realRemoved)
+	}
+}
+
+// TestReap_UnlabelledLookalikeIsRemovedWithoutVolumes is gt-lsxps's contract:
+// the detector is a substring match on image and name, so an operator's own
+// dolt container is reaped exactly like gate debris, and -v would take the
+// anonymous /var/lib/dolt volume nothing here can show is disposable. Only the
+// owner labels prove a container is the gate's, so only an owner-gone one is
+// removed with -v. Both halves are asserted so narrowing -v cannot quietly
+// become skipping the removal.
+func TestReap_UnlabelledLookalikeIsRemovedWithoutVolumes(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
+	townRoot := t.TempDir()
+	const deadPID = 4242
+	tg.gone[deadPID] = true
+	tg.rt.setLines(
+		dockerPSLine("lookalike-id", "dolthub/dolt-sql-server:2.2.0", "gt-dolt-dev", tg.clk.Now().Add(-5*time.Hour), nil),
+		dockerPSLine("owner-gone-id", "dolt/dolt-sql-server:2.2.0", "orphaned-suite", tg.clk.Now().Add(-5*time.Hour),
+			ownerLabels(deadPID, testHost, "sess-1")),
+	)
+
+	report, err := tg.Reap(townRoot, ReapOptions{})
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if len(report.Debris) != 2 {
+		t.Fatalf("Debris = %+v, want both the lookalike and the owner-gone container acted on", report.Debris)
+	}
+	if len(report.Failed) != 0 {
+		t.Fatalf("Failed = %v, want every removal to succeed", report.Failed)
+	}
+
+	got := map[string]bool{}
+	for _, rm := range tg.rt.removals() {
+		got[rm.id] = rm.volumes
+	}
+	want := map[string]bool{"lookalike-id": false, "owner-gone-id": true}
+	if !maps.Equal(got, want) {
+		t.Fatalf("removals (id -> -v) = %v, want %v: an unlabelled lookalike is removed without its volume, an owner-gone container with it",
+			got, want)
 	}
 }
