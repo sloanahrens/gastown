@@ -376,9 +376,34 @@ func TestRuntimeArtifactPathspecsListing(t *testing.T) {
 		},
 		{
 			name:  "a tracked fixture keeps new output in its directory from a whole-directory reset",
-			paths: []string{"pkg/coverage/collector.go", "pkg/coverage/testdata/new.golden", "pkg/coverage/testdata/report.golden"},
+			paths: []string{"pkg/coverage/collector.go", "pkg/coverage/lcov-report/index.html", "pkg/coverage/lcov-report/keep.golden", "pkg/coverage/testdata/report.golden"},
+			list:  lister(map[string][]string{"pkg/coverage/": {"pkg/coverage/collector.go", "pkg/coverage/lcov-report/keep.golden", "pkg/coverage/testdata/report.golden"}}),
+			head:  lister(map[string][]string{"pkg/coverage/": {"pkg/coverage/collector.go", "pkg/coverage/lcov-report/keep.golden", "pkg/coverage/testdata/report.golden"}}),
+			want:  []string{"pkg/coverage/lcov-report/index.html"},
+		},
+		{
+			name:  "edited source spares a new fixture beside it but resets the output",
+			paths: []string{"pkg/coverage/collector.go", "pkg/coverage/testdata/new.golden", "pkg/coverage/lcov-report/index.html", "pkg/coverage/coverage.out"},
 			list:  pkg, head: pkg,
-			want: []string{"pkg/coverage/testdata/new.golden"},
+			want: []string{"pkg/coverage/lcov-report/", "pkg/coverage/coverage.out"},
+		},
+		{
+			name:  "new source spares a new fixture beside it when nothing is tracked",
+			paths: []string{"internal/coverage/collector.go", "internal/coverage/testdata/report.golden", "internal/coverage/coverage.out"},
+			list:  lister(nil), head: lister(nil),
+			want: []string{"internal/coverage/coverage.out"},
+		},
+		{
+			name:  "a new lcov.info under testdata is a fixture, one beside it is output",
+			paths: []string{"pkg/coverage/collector.go", "pkg/coverage/testdata/lcov.info", "pkg/coverage/lcov.info"},
+			list:  pkg, head: pkg,
+			want: []string{"pkg/coverage/lcov.info"},
+		},
+		{
+			name:  "a .cache directory beside edited source stays output",
+			paths: []string{"pkg/.cache/store.py", "pkg/.cache/blob.golden"},
+			list:  lister(map[string][]string{"pkg/.cache/": {"pkg/.cache/store.py"}}), head: lister(map[string][]string{"pkg/.cache/": {"pkg/.cache/store.py"}}),
+			want: []string{"pkg/.cache/blob.golden"},
 		},
 		{
 			name:  "edited source with a failed HEAD listing spares everything",
@@ -442,5 +467,50 @@ func TestRuntimeArtifactPathspecsBesideResetsArtifactsUnderSourceRoot(t *testing
 		[]string{"pkg/coverage/collector.go", "pkg/coverage/lcov-report/index.html", "pkg/coverage/coverage.out"}, files, files)
 	if want := []string{"pkg/coverage/lcov-report/", "pkg/coverage/coverage.out"}; !slices.Equal(got, want) {
 		t.Fatalf("RuntimeArtifactPathspecsListing = %q, want %q", got, want)
+	}
+}
+
+// A new hand-written fixture beside edited tracked source is not in HEAD, so
+// HEAD cannot vouch for it, but it does not look generated either: it stays
+// staged while the output beside it is reset (gt-v90u4).
+func TestRuntimeArtifactPathspecsBesideKeepsNewFixtureBesideEditedSource(t *testing.T) {
+	t.Parallel()
+	files := func(string) ([]string, error) { return []string{"pkg/coverage/collector.go"}, nil }
+	fixture := "pkg/coverage/testdata/report.golden"
+	got := RuntimeArtifactPathspecsListing(
+		[]string{"pkg/coverage/collector.go", fixture, "pkg/coverage/lcov-report/index.html", "pkg/coverage/coverage.out"}, files, files)
+	if want := []string{"pkg/coverage/lcov-report/", "pkg/coverage/coverage.out"}; !slices.Equal(got, want) {
+		t.Fatalf("RuntimeArtifactPathspecsListing = %q, want %q", got, want)
+	}
+	for _, spec := range got {
+		if strings.HasPrefix(fixture, spec) {
+			t.Errorf("pathspec %q covers the new fixture %s", spec, fixture)
+		}
+	}
+}
+
+// looksGenerated is the line between a new fixture and generator output under
+// a coverage/ or .cache/ root.
+func TestLooksGenerated(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		root, path string
+		want       bool
+	}{
+		{"pkg/coverage/", "pkg/coverage/coverage.out", true},
+		{"pkg/coverage/", "pkg/coverage/lcov.info", true},
+		{"pkg/coverage/", "pkg/coverage/lcov-report/index.html", true},
+		{"pkg/coverage/", "pkg/coverage/lcov-report/css/a.css", true},
+		{"pkg/coverage/", "pkg/coverage/default_1.profraw", true},
+		{"pkg/coverage/", "pkg/coverage/testdata/report.golden", false},
+		{"pkg/coverage/", "pkg/coverage/testdata/lcov.info", false},
+		{"pkg/coverage/", "pkg/coverage/testdata/lcov-report/index.html", false},
+		{"pkg/coverage/", "pkg/coverage/helper_notes.md", false},
+		{"pkg/.cache/", "pkg/.cache/blob.bin", true},
+		{"pkg/.cache/", "pkg/.cache/testdata/blob.golden", true},
+	} {
+		if got := looksGenerated(tc.root, tc.path); got != tc.want {
+			t.Errorf("looksGenerated(%q, %q) = %v, want %v", tc.root, tc.path, got, tc.want)
+		}
 	}
 }

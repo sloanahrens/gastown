@@ -352,6 +352,38 @@ func TestCheckpointWorktreeKeepsFixtureBesideTrackedSource(t *testing.T) {
 	}
 }
 
+// A new source file and a new fixture beside it, with nothing committed: HEAD
+// vouches for neither, but a golden file is hand-written work, so the
+// checkpoint commits both while the generated output beside them stays out
+// (gt-v90u4).
+func TestCheckpointWorktreeKeepsNewFixtureBesideNewSource(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	workDir, _, g := checkpointClone(t, d, map[string]string{"README.md": "readme\n"})
+	before := headOf(t, g)
+	writeWorkFiles(t, workDir, map[string]string{
+		"internal/coverage/collector.go":           "package coverage\n",
+		"internal/coverage/testdata/report.golden": "golden\n",
+		"internal/coverage/coverage.out":           "mode: set\n",
+		"internal/coverage/lcov-report/index.html": "<html>\n",
+	})
+
+	if !d.checkpointWorktree(workDir, "rig", "polecat") {
+		t.Fatal("checkpointWorktree did not create a checkpoint commit")
+	}
+	want := []string{"internal/coverage/collector.go", "internal/coverage/testdata/report.golden"}
+	if got := changedSince(t, g, before); !slices.Equal(got, want) {
+		t.Fatalf("checkpoint commit changed %q, want %q", got, want)
+	}
+	wantNothingStaged(t, g)
+	st := worktreeStatus(t, g)
+	for _, generated := range []string{"internal/coverage/coverage.out", "internal/coverage/lcov-report/index.html"} {
+		if !slices.Contains(st.Untracked, generated) {
+			t.Errorf("status %+v: %s was committed or lost; want it left untracked", st, generated)
+		}
+	}
+}
+
 // An edited source file under a coverage/ directory does not make the output
 // written beside it work: the checkpoint commits the edit and a modified
 // fixture HEAD tracks, and leaves the generated files out (gt-qdvp2).

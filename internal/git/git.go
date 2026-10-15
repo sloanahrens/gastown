@@ -4472,8 +4472,11 @@ func isGasTownRuntimePath(path string) bool {
 // is not handed over whole: resetting it would unstage that source. The
 // artifact gets the shortest directory below it that holds no such source, or
 // its own path, so coverage/lcov-report/ style output still costs one pathspec.
+//
+// With no checkout to ask, a file beside changed source is spared unless it
+// looks like generator output (looksGenerated).
 func RuntimeArtifactPathspecs(paths []string) []string {
-	return runtimeArtifactPathspecs(paths, sourcePathsIn(paths))
+	return runtimeArtifactPathspecsBeside(paths, sourceBeside{})
 }
 
 // runtimeArtifactPathspecs is RuntimeArtifactPathspecs with the files a
@@ -4562,8 +4565,9 @@ func (s *UncommittedWorkStatus) RuntimeArtifactPaths() []string {
 // paths in this checkout: a file under a coverage/ or .cache/ directory that
 // holds tracked source is a fixture beside that source, so it is left out of
 // the result (gt-za3u1), unless a source file under that directory is among
-// paths and HEAD does not track the file (sourceBeside.spares). A failed
-// listing counts as holding source (besideSource).
+// paths, HEAD does not track the file and it looks like generator output
+// (sourceBeside.spares). A failed listing counts as holding source
+// (besideSource).
 func (g *Git) RuntimeArtifactPathspecs(paths []string) []string {
 	return runtimeArtifactPathspecsBeside(paths, g.besideSource(paths))
 }
@@ -4589,15 +4593,53 @@ type sourceBeside struct {
 // spares reports whether path, an artifact candidate under root, is work
 // rather than output. Beside tracked source a fixture cannot be told from
 // output, so the path is spared. Once source under root is among the changed
-// paths, that source already narrows each pathspec away from itself, so only a
-// file HEAD tracks is spared: a fixture, or an edit that stays staged
-// (gt-qdvp2).
+// paths, that source already narrows each pathspec away from itself, so a file
+// is spared only when HEAD tracks it (a fixture, or an edit that stays staged,
+// gt-qdvp2) or when it does not look like generator output: a new
+// testdata/report.golden is hand-written work HEAD cannot vouch for yet
+// (gt-v90u4). The source need not be tracked: a new collector.go beside a new
+// fixture is the same case.
 func (b sourceBeside) spares(root, path string, changedSources []string) bool {
-	if !slices.Contains(b.roots, root) {
+	tracked := slices.Contains(b.roots, root)
+	sourceChanged := isSourceBearableRoot(root) && holdsSource(root, changedSources)
+	if !tracked && !sourceChanged {
 		return false
 	}
 	head, listed := b.head[root]
-	return !listed || !holdsSource(root, changedSources) || slices.Contains(head, normalizeArtifactPath(path))
+	if tracked && (!listed || !sourceChanged) {
+		return true
+	}
+	return slices.Contains(head, normalizeArtifactPath(path)) || !looksGenerated(root, path)
+}
+
+// looksGenerated reports whether path, a file under the coverage/ or .cache/
+// directory root, reads as generator output: anything in a .cache, a coverage
+// reporter's report directory or well-known report file, or a compiler's
+// profile data. A file under testdata/ is a fixture by Go convention whatever
+// its name, since a coverage package tests against sample lcov.info files.
+func looksGenerated(root, path string) bool {
+	if filepath.Base(strings.TrimSuffix(root, "/")) == ".cache" {
+		return true
+	}
+	parts := strings.Split(strings.TrimPrefix(normalizeArtifactPath(path), root), "/")
+	dirs := parts[:len(parts)-1]
+	if slices.Contains(dirs, "testdata") {
+		return false
+	}
+	if slices.Contains(dirs, "lcov-report") {
+		return true
+	}
+	name := strings.ToLower(parts[len(parts)-1])
+	switch name {
+	case "coverage.out", "cover.out", "lcov.info", "coverage.xml", "cobertura.xml", "clover.xml",
+		"coverage-final.json", "coverage-summary.json", ".coverage":
+		return true
+	}
+	switch filepath.Ext(name) {
+	case ".profraw", ".profdata", ".gcda", ".gcno":
+		return true
+	}
+	return false
 }
 
 // runtimeArtifactPathspecsBeside is RuntimeArtifactPathspecs for the artifacts
@@ -4611,8 +4653,13 @@ func runtimeArtifactPathspecsBeside(paths []string, beside sourceBeside) []strin
 	}
 	var kept []string
 	for _, f := range paths {
-		if root, isArtifact := runtimeArtifactRoot(f); !isArtifact || !beside.spares(root, f, changedSources) {
+		root, isArtifact := runtimeArtifactRoot(f)
+		if !isArtifact || !beside.spares(root, f, changedSources) {
 			kept = append(kept, f)
+		} else if isSourceBearableRoot(root) {
+			// A spared fixture is work too: a directory pathspec for the
+			// output beside it must not cover it.
+			protected = append(protected, normalizeArtifactPath(f))
 		}
 	}
 	return runtimeArtifactPathspecs(kept, protected)
