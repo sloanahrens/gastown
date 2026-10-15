@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -510,5 +511,123 @@ func TestValidateCommandBinary(t *testing.T) {
 				t.Errorf("validateCommandBinary(%q) error = %v, wantErr = %v", tc.cmd, err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// bannerKeys returns the text SendNotificationBanner handed to `send-keys -l`,
+// the literal paste that ends up in the overseer's shell.
+func bannerKeys(t *testing.T, sc *scripted) string {
+	t.Helper()
+	for _, c := range sc.find("send-keys") {
+		if c.has("-l") {
+			return c.last()
+		}
+	}
+	t.Fatal("SendNotificationBanner sent no send-keys -l call")
+	return ""
+}
+
+// TestSendNotificationBanner_QuotesSubject feeds the banner a subject that
+// closes the echo argument and starts a command. The keystrokes must still
+// split into exactly one echo command, with the subject intact inside its
+// argument: a third word would be a command the shell runs.
+func TestSendNotificationBanner_QuotesSubject(t *testing.T) {
+	t.Parallel()
+	sc := newScripted(nil)
+	tm := newTmuxForTest("gt-test-unit", sc.exec, nil)
+
+	subject := "x'; touch /tmp/p; echo '"
+	if err := tm.SendNotificationBanner("gt-overseer", "a/b", subject); err != nil {
+		t.Fatalf("SendNotificationBanner: %v", err)
+	}
+
+	keys := bannerKeys(t, sc)
+	words, err := shellWords(keys)
+	if err != nil {
+		t.Fatalf("keystrokes are not a complete command: %v\nkeys: %q", err, keys)
+	}
+	if len(words) != 2 || words[0] != "echo" {
+		t.Fatalf("keystrokes are not one echo command, they run %q\nkeys: %q", words, keys)
+	}
+	if !strings.Contains(words[1], subject) {
+		t.Errorf("echo argument %q does not carry the subject %q", words[1], subject)
+	}
+	if !strings.Contains(words[1], "NEW MAIL from a/b") || !strings.Contains(words[1], "Run: gt mail inbox") {
+		t.Errorf("echo argument %q lost the banner text", words[1])
+	}
+
+	// The unescaped interpolation the banner used before the fix must split
+	// into more words, or this test asserts nothing about the escaping.
+	raw := "echo '\n📬 NEW MAIL from a/b\nSubject: " + subject + "\nRun: gt mail inbox\n'"
+	if rawWords, err := shellWords(raw); err != nil || len(rawWords) == 2 {
+		t.Fatalf("unquoted interpolation parses as one command (words %q, err %v): "+
+			"the parser no longer detects the injection", rawWords, err)
+	}
+}
+
+// shellWords resolves a command string into the words a POSIX shell passes to
+// the command: unquoted whitespace separates words, a single-quoted run is
+// literal, and a backslash outside single quotes escapes the next character.
+// An unterminated quote is the state a closing quote in a value leaves the
+// shell in, so it is reported rather than swallowed.
+func shellWords(s string) ([]string, error) {
+	var words []string
+	var cur strings.Builder
+	started, quoted, escaped := false, false, false
+	for _, r := range s {
+		switch {
+		case escaped:
+			cur.WriteRune(r)
+			escaped = false
+		case quoted:
+			if r == '\'' {
+				quoted = false
+				continue
+			}
+			cur.WriteRune(r)
+		case r == '\\':
+			escaped, started = true, true
+		case r == '\'':
+			quoted, started = true, true
+		case r == ' ' || r == '\t' || r == '\n':
+			if started {
+				words = append(words, cur.String())
+				cur.Reset()
+				started = false
+			}
+		default:
+			cur.WriteRune(r)
+			started = true
+		}
+	}
+	switch {
+	case quoted:
+		return words, errors.New("unterminated single quote")
+	case escaped:
+		return words, errors.New("trailing backslash")
+	}
+	if started {
+		words = append(words, cur.String())
+	}
+	return words, nil
+}
+
+// TestSendNotificationBanner_DropsControlCharacters keeps ESC and Ctrl-C out of
+// the keystrokes: tmux -l delivers their bytes to the shell as terminal input.
+func TestSendNotificationBanner_DropsControlCharacters(t *testing.T) {
+	t.Parallel()
+	sc := newScripted(nil)
+	tm := newTmuxForTest("gt-test-unit", sc.exec, nil)
+
+	if err := tm.SendNotificationBanner("gt-overseer", "a/b", "hi\x1bthere\x03now"); err != nil {
+		t.Fatalf("SendNotificationBanner: %v", err)
+	}
+
+	arg := bannerKeys(t, sc)
+	if i := strings.IndexAny(arg, "\x1b\x03"); i >= 0 {
+		t.Errorf("keystrokes carry control byte %q at %d: %q", arg[i], i, arg)
+	}
+	if !strings.Contains(arg, "hitherenow") {
+		t.Errorf("keystrokes lost the subject text: %q", arg)
 	}
 }
