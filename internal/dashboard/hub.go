@@ -129,6 +129,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.Questions != nil {
 		start(h.cfg.QuestionsEvery, h.pollQuestions)
 	}
+	if h.cfg.Overseer != nil {
+		start(h.cfg.OverseerEvery, h.pollOverseer)
+	}
 	if h.cfg.DeepReview != nil {
 		start(h.cfg.DeepReviewEvery, h.pollDeepReview)
 	}
@@ -551,6 +554,18 @@ func (h *Hub) pollQuestions() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.Questions = q
+	h.publishLocked()
+}
+
+// pollOverseer reads the overseer's heartbeat and journal.
+func (h *Hub) pollOverseer() {
+	o := h.cfg.Overseer()
+	if o == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.state.Overseer = o
 	h.publishLocked()
 }
 

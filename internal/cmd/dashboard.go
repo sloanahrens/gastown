@@ -96,6 +96,13 @@ hourly report that is late is marked, the text is drawn as text and never as
 markup, and a directory the reader cannot read says so rather than reading as
 one with no reports in it. The panel writes nothing there.
 
+The Overseer panel reads the heartbeat and journal under
+.runtime/overseer: alive or silent against overseer.silent_after, the last
+active time and state, the newest eight journal lines, the last seven days of
+interventions by kind and the open question count. A file it cannot read makes
+the panel say so instead of reading as a silent overseer. The panel writes
+nothing; gt overseer beat and gt overseer log do.
+
 The Questions panel reads the town's open overseer-question beads with bd —
 each one's question, the answer the overseer recommends, the work it holds up,
 how long it has waited and whether Sloan has answered it — so he can see what is
@@ -278,6 +285,10 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		WithChecks(dashboard.NewCloudChecksReader(dashboardCloudChecksPath(townRoot)))
 	reports := dashboard.NewReportsReader(dashboardReportsDir(townRoot))
 	questions := newDashQuestionsReader(townRoot)
+	overseerPane := newDashOverseerReader(townRoot, func() (int, error) {
+		open, err := questions.list()
+		return len(open), err
+	})
 	deepReview := newDashDeepReviewReader(townRoot)
 	usage := newDashUsageReader(townRoot)
 	loads := newDashLoads(townRoot, time.Now)
@@ -295,6 +306,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Reports:    func() *dashboard.Reports { return reports.Read(time.Now()) },
 		ReportsDir: dashboardReportsDir(townRoot),
 		Questions:  func() *dashboard.Questions { return questions.read(time.Now()) },
+		Overseer:   func() *dashboard.Overseer { return overseerPane.read(time.Now()) },
 		DeepReview: func() *dashboard.DeepReview { return deepReview.read(time.Now()) },
 		Usage:      func() *dashboard.Usage { return usage.read(time.Now()) },
 		Escalation: func() *dashboard.Escalations { return escalations.read(time.Now()) },

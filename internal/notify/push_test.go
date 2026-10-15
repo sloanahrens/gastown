@@ -194,3 +194,13 @@ func TestDefaultSendersCarryTheRealCommandRunner(t *testing.T) {
 		t.Error("defaultSenders().command is nil: an exec: action would panic in production")
 	}
 }
+
+// PushIn reads the escalation config under the town root it is handed, with no
+// reliance on the working directory.
+func TestPushInResolvesTheCommandFromTheGivenTown(t *testing.T) {
+	t.Parallel()
+	err := PushIn(t.TempDir(), "ntfy", "t", "b")
+	if err == nil || !strings.Contains(err.Error(), `"ntfy"`) {
+		t.Fatalf("PushIn on a town with no commands = %v, want an error naming ntfy", err)
+	}
+}

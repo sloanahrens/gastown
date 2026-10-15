@@ -558,6 +558,10 @@ type State struct {
 	// own beads database. It is nil until the reader first reports.
 	Reports   *Reports   `json:"reports,omitempty"`
 	Questions *Questions `json:"questions,omitempty"`
+	// Overseer is the overseer's heartbeat, journal and open-question count,
+	// read from the files it writes under the town root. It is nil until the
+	// reader first reports.
+	Overseer *Overseer `json:"overseer,omitempty"`
 	// DeepReview is the scheduled deep review's next run and last ten runs,
 	// read from the gastown rig's beads database. It is nil until the reader
 	// first reports.
@@ -621,6 +625,8 @@ type Config struct {
 	ReportsDir string
 	// Questions reads the overseer's open questions for Sloan.
 	Questions func() *Questions
+	// Overseer reads the overseer's heartbeat and journal.
+	Overseer func() *Overseer
 	// DeepReview reads the scheduled deep review's next run and last runs.
 	DeepReview func() *DeepReview
 	// Usage reads the town's spend over the last day from the usage scan's
@@ -660,6 +666,7 @@ type Config struct {
 	DeploysEvery    time.Duration
 	ReportsEvery    time.Duration
 	QuestionsEvery  time.Duration
+	OverseerEvery   time.Duration
 	DeepReviewEvery time.Duration
 	UsageEvery      time.Duration
 	EscalationEvery time.Duration
@@ -701,6 +708,9 @@ func (c *Config) defaults() {
 	// soonest: the reader runs bd per open question, and a page asks nothing
 	// faster than that.
 	def(&c.QuestionsEvery, 60*time.Second)
+	// The heartbeat and journal are two small files and one bd list for the
+	// question count; the silence window is minutes, so a minute is slack.
+	def(&c.OverseerEvery, 60*time.Second)
 	// A deep review runs about daily, so the minute is slack to spare; the
 	// reader lists beads and runs bd per listed run for its comment count.
 	def(&c.DeepReviewEvery, 60*time.Second)

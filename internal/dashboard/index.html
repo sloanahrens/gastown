@@ -173,6 +173,8 @@ section.collapsed>h2{border-bottom:0}
 .rtime:hover{background:#19212b}
 .rtime.on{color:var(--text)}
 .rback{margin-bottom:4px}
+.ojline{display:flex;gap:6px;align-items:baseline;flex-wrap:wrap;padding:2px 0;overflow-wrap:anywhere}
+.ojage,.okind{color:var(--dim);white-space:nowrap}
 .qcard{padding:4px 0;border-top:1px solid var(--line);overflow-wrap:anywhere}
 .qtext{margin:2px 0}
 .qrec,.qheld{color:var(--dim);margin:2px 0}
@@ -216,6 +218,7 @@ a.drow:hover{background:#19212b}
 
 <div class="grid">
   <div class="col">
+    <section><h2>Overseer <span class="r" id="overseernote"></span></h2><div class="body" id="overseer"></div></section>
     <section><h2>Questions <span class="r" id="questionsnote"></span></h2><div class="body" id="questions"></div></section>
     <section><h2>Deep review <span class="r" id="deepreviewnote"></span></h2><div class="body" id="deepreview"></div></section>
     <section><h2>Escalations <span class="r" id="escalationnote"></span></h2><div class="body" id="escalations"></div></section>
@@ -1870,6 +1873,49 @@ function questionCard(r) {
   return c;
 }
 
+// The Overseer pane: whether the overseer session is alive, what it has done
+// lately and what it does most. The status is the reader's own word, judged
+// against the silence window the daemon's silent-overseer rule uses, so the
+// pane and the push agree on when the overseer went quiet. Read-only: the
+// overseer writes its heartbeat and journal with gt overseer beat and log.
+//
+// Every cell goes through el(), which writes textContent: a journal line is the
+// overseer's own text and shows as that text, never as markup.
+function renderOverseer(s) {
+  const box = $("overseer"), note = $("overseernote");
+  box.replaceChildren();
+  const o = s.overseer;
+  note.className = "r"; note.textContent = "";
+  if (!o) { box.append(el("div", "empty", "reading…")); return; }
+  // A read that failed is a named state: "the overseer is silent" and "its
+  // files could not be read" must not look alike.
+  if (o.unavailable) { box.append(el("div", "badc", "unavailable: the overseer's heartbeat or journal could not be read")); return; }
+  const head = el("div", "kv");
+  const cell = el("div");
+  const alive = o.status === "alive";
+  cell.append(el("b", alive ? "good" : "warnc", o.status === "none" ? "no heartbeat" : o.status));
+  cell.append(el("span", "", o.last_active_sec != null ? "last active " + fmtDur(o.last_active_sec) + " ago" : "has never beaten"));
+  head.append(cell);
+  if (o.state) { const c = el("div"); c.append(el("b", "", o.state), el("span", "", "state")); head.append(c); }
+  if (o.open_questions != null) { const c = el("div"); c.append(el("b", "", String(o.open_questions)), el("span", "", "open questions")); head.append(c); }
+  box.append(head);
+  note.className = alive ? "r" : "r warnc";
+  note.textContent = alive ? "" : "silent window " + fmtDur(o.silent_after_sec);
+  const counts = o.interventions || [];
+  if (counts.length) {
+    box.append(el("div", "empty", "last 7 days: " + counts.map(c => c.kind + " " + c.count).join(" · ")));
+  }
+  const lines = o.journal || [];
+  if (!lines.length) { box.append(el("div", "empty", "no journal lines")); return; }
+  for (const l of lines) {
+    const row = el("div", "ojline");
+    row.append(el("span", "ojage", fmtDur(l.age_sec)), el("span", "okind", l.kind));
+    if (l.bead) row.append(el("span", "bead", l.bead));
+    row.append(el("span", "", l.text));
+    box.append(row);
+  }
+}
+
 // The Deep review pane: when each of the review's schedules is next due, or why
 // the town holds them, and the last ten runs, newest first. Read-only: a run is
 // triggered, paused and edited from a terminal.
@@ -2337,7 +2383,7 @@ function renderQueue(s, force) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderModels(state); renderModelsPanel(state); renderTiles(state); renderQuestions(state); renderDeepReview(state); renderUsage(state); renderEscalations(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderReports(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
+function renderAll() { if (!state) return; renderHealth(state.health); renderModels(state); renderModelsPanel(state); renderTiles(state); renderOverseer(state); renderQuestions(state); renderDeepReview(state); renderUsage(state); renderEscalations(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderReports(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));

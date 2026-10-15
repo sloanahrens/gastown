@@ -443,6 +443,41 @@ func (d *DaemonThresholds) PressureMaxSessionsV() int {
 	return DefaultPressureMaxSessions
 }
 
+// --- Overseer accessors ---
+
+// DefaultOverseerSilentAfter is how old the overseer's heartbeat may be before
+// the silent-overseer rule can fire.
+const DefaultOverseerSilentAfter = 90 * time.Minute
+
+// GetOverseerConfig returns the overseer thresholds, never nil.
+func (c *OperationalConfig) GetOverseerConfig() *OverseerThresholds {
+	if c != nil && c.Overseer != nil {
+		return c.Overseer
+	}
+	return &OverseerThresholds{}
+}
+
+// SilentAfterD returns the configured or default silence window. A value that
+// is not a positive duration falls back to the default: a zero window would
+// call every overseer silent.
+func (o *OverseerThresholds) SilentAfterD() time.Duration {
+	if o != nil {
+		if d := ParseDurationOrDefault(o.SilentAfter, DefaultOverseerSilentAfter); d > 0 {
+			return d
+		}
+	}
+	return DefaultOverseerSilentAfter
+}
+
+// SilentPushName returns the notify command the silent rule pushes through, or
+// "" when none is configured.
+func (o *OverseerThresholds) SilentPushName() string {
+	if o == nil {
+		return ""
+	}
+	return strings.TrimSpace(o.SilentPush)
+}
+
 // --- Mail accessors ---
 
 // GetMailConfig returns the mail thresholds, never nil.

@@ -71,6 +71,9 @@ const (
 	KindQuestionAnswered Kind = "question-answered"
 	// KindQuestionStale: an overseer question has been open more than a day.
 	KindQuestionStale Kind = "question-stale"
+	// KindOverseerSilent: the overseer's heartbeat is older than its window
+	// while dispatchable work or an unanswered question waits.
+	KindOverseerSilent Kind = "overseer-silent"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -83,6 +86,7 @@ func Kinds() []Kind {
 		KindRevertRefused, KindBlockedMail, KindOverrunStopped, KindScheduledGate,
 		KindHostDisk, KindHostMem, KindHostDocker, KindHostProbe,
 		KindQuestionNew, KindQuestionAnswered, KindQuestionStale,
+		KindOverseerSilent,
 	}
 }
 
