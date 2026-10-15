@@ -144,11 +144,11 @@ func TestReportOver(t *testing.T) {
 		line    string
 	}{
 		{"enforced", []testpolicy.Overrun{cpu}, true, true, "BUDGET: internal/a used 11s user CPU"},
-		{"loaded host", []testpolicy.Overrun{cpu}, false, false, "BUDGET (reported only, load 30.0 >= 16 CPUs; GATE_STRICT_BUDGET=1 enforces): internal/a"},
+		{"loaded host", []testpolicy.Overrun{cpu}, false, false, "BUDGET (reported only, CPU idle 3.0% < 6.2% (one of 16 cores); GATE_STRICT_BUDGET=1 enforces): internal/a"},
 		{"unmeasured on loaded host", []testpolicy.Overrun{unmeasured}, false, true, "BUDGET: internal/b passed but its CPU time was not recorded"},
 	} {
 		var out bytes.Buffer
-		if got := reportOver(&out, tc.over, 10*time.Second, tc.enforce, "load 30.0 >= 16 CPUs"); got != tc.fails {
+		if got := reportOver(&out, tc.over, 10*time.Second, tc.enforce, "CPU idle 3.0% < 6.2% (one of 16 cores)"); got != tc.fails {
 			t.Errorf("%s: reportOver = %v, want %v", tc.name, got, tc.fails)
 		}
 		if !strings.Contains(out.String(), tc.line) {

@@ -246,26 +246,47 @@ func TestIdleJudgedTopIsBounded(t *testing.T) {
 	}
 }
 
+// TestEnforceBudget pins the enforcement boundary on the CPU idle reading:
+// the budget is enforced at or above one core's worth of idle CPU (100/ncpu)
+// and reported only below it. Each case names the old reading beside it
+// (gt-6rieh), including the one where a half-idle host the 1-minute load
+// average called oversubscribed is enforced anyway.
 func TestEnforceBudget(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name      string
-		load1     float64
-		loadKnown bool
+		cpuIdle   float64
+		idleKnown bool
+		ncpu      int
 		strict    bool
+		load1     float64 // the reading the rule used to decide by; only names the case
 		want      bool
 	}{
-		{"quiet host", 3.5, true, false, true},
-		{"load at ncpu", 16, true, false, false},
-		{"loaded host", 30, true, false, false},
-		{"loaded host, strict", 30, true, true, true},
-		{"load unknown", 0, false, false, false},
-		{"load unknown, strict", 0, false, true, true},
+		{"quiet host", 80, true, 16, false, 3.5, true},
+		{"idle at one core's worth", 6.25, true, 16, false, 15.9, true},
+		{"idle just below one core's worth", 6.2, true, 16, false, 16, false},
+		{"oversubscribed host", 3, true, 16, false, 30, false},
+		{"oversubscribed host, strict", 3, true, 16, true, 30, true},
+		{"half idle on the threaded host that started this", 48.6, true, 24, false, 29.6, true},
+		{"a tenth of a core idle while the old reading was quiet", 0.3, true, 16, false, 5, false},
+		{"idle unknown", 0, false, 16, false, 3.5, false},
+		{"idle unknown, strict", 0, false, 16, true, 3.5, true},
+		{"CPU count unknown", 80, true, 0, false, 3.5, false},
 	} {
-		got, why := EnforceBudget(tc.load1, tc.loadKnown, 16, tc.strict)
+		got, why := EnforceBudget(tc.cpuIdle, tc.idleKnown, tc.ncpu, tc.strict)
 		if got != tc.want || why == "" {
-			t.Errorf("%s: EnforceBudget(%v, %v, 16, %v) = %v, %q; want %v with a reason", tc.name, tc.load1, tc.loadKnown, tc.strict, got, why, tc.want)
+			t.Errorf("%s: EnforceBudget(%.1f%%, %v, %d CPUs, %v) = %v, %q; want %v with a reason (load1 %.1f)", tc.name, tc.cpuIdle, tc.idleKnown, tc.ncpu, tc.strict, got, why, tc.want, tc.load1)
 		}
+	}
+}
+
+// The reason names the reading that decided, so a reported-only run says what
+// the host looked like rather than leaving the operator to guess (gt-6rieh).
+func TestEnforceBudgetReasonNamesTheIdleReading(t *testing.T) {
+	t.Parallel()
+	_, why := EnforceBudget(3.1, true, 24, false)
+	if want := "CPU idle 3.1% < 4.2% (one of 24 cores)"; why != want {
+		t.Errorf("EnforceBudget(3.1%%, 24 CPUs) reason = %q, want %q", why, want)
 	}
 }
 
@@ -289,24 +310,6 @@ func TestBudgetFails(t *testing.T) {
 	} {
 		if got := BudgetFails(tc.over, tc.enforce); got != tc.want {
 			t.Errorf("%s: BudgetFails(enforce=%v) = %v, want %v", tc.name, tc.enforce, got, tc.want)
-		}
-	}
-}
-
-func TestParseLoad1(t *testing.T) {
-	t.Parallel()
-	for in, want := range map[string]float64{
-		"1.23 4.56 7.89 2/345 6789\n": 1.23,
-		"{ 27.65 30.07 30.59 }\n":     27.65,
-	} {
-		got, err := ParseLoad1(in)
-		if err != nil || got != want {
-			t.Errorf("ParseLoad1(%q) = %v, %v; want %v", in, got, err, want)
-		}
-	}
-	for _, in := range []string{"", "{ }", "busy"} {
-		if _, err := ParseLoad1(in); err == nil {
-			t.Errorf("ParseLoad1(%q) succeeded, want an error", in)
 		}
 	}
 }

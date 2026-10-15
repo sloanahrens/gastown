@@ -86,10 +86,10 @@ func run() int {
 	if err != nil {
 		return fail(err)
 	}
-	// The load is read before go test adds its own, so it measures what
-	// the run competes with.
-	load1, loadErr := hostLoad1()
-	enforce, why := testpolicy.EnforceBudget(load1, loadErr == nil, runtime.NumCPU(), os.Getenv(testpolicy.StrictBudgetEnv) == "1")
+	// The CPU idle share is sampled before go test adds its own load, so it
+	// measures what the run competes with.
+	cpuIdle, idleErr := hostCPUIdle()
+	enforce, why := testpolicy.EnforceBudget(cpuIdle, idleErr == nil, runtime.NumCPU(), os.Getenv(testpolicy.StrictBudgetEnv) == "1")
 	if enforce {
 		fmt.Fprintf(os.Stderr, "budget: user-CPU budget enforced (%s)\n", why)
 	} else {

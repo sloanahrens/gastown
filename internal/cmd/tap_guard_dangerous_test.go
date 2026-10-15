@@ -2307,36 +2307,65 @@ func TestIdleGateFollowsCdOnTheLine(t *testing.T) {
 	}
 }
 
-// TestEvaluateIdleGate checks the wiring between the pure command matcher
-// and the load sample: a gated command is held when the sampled 1-minute
-// load average is above idleGateLoad1Threshold, and allowed through when it
-// is at or below threshold, the sample fails (fail open), or the command
-// isn't gated at all.
+// TestEvaluateIdleGate checks the wiring between the pure command matcher and
+// the CPU idle sample: a gated command is held when the sampled idle share is
+// below idleGateCPUIdleThreshold, and allowed through when it is at or above
+// it, the sample fails (fail open), or the command isn't gated at all. Each
+// case names the old reading beside its idle share (gt-6rieh): the boundary
+// cases and the two that cross over pin that the idle share alone decides.
 func TestEvaluateIdleGate(t *testing.T) {
 	t.Parallel()
 	goTree := fakeModule(t, "clone")
 
 	tests := []struct {
-		name        string
-		command     string
-		sampleLoad1 float64
-		sampleOK    bool
-		wantHeld    bool
+		name     string
+		command  string
+		sample   float64
+		sampleOK bool
+		load1    float64 // the reading this gate used to decide by; only names the case
+		wantHeld bool
 	}{
-		{"held when load above threshold", "make test", 74, true, true},
-		{"allowed when load at threshold", "make test", 60, true, false},
-		{"allowed when load below threshold", "make test", 5, true, false},
-		{"allowed when sample fails (fail open)", "make test", 0, false, false},
-		{"allowed when not a gated command", "make lint", 0, true, false},
+		{"held below the idle threshold", "make test", 24.9, true, 5, true},
+		{"allowed at the idle threshold", "make test", 25, true, 74, false},
+		{"allowed above the idle threshold", "make test", 48.6, true, 29.6, false},
+		{"held at a tenth idle while the old reading was quiet", "make test", 10, true, 5, true},
+		{"allowed at half idle while the old reading said busy", "make test", 50, true, 74, false},
+		{"allowed when the sample fails (fail open)", "make test", 0, false, 74, false},
+		{"allowed when not a gated command", "make lint", 0, true, 0, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sample := func() (float64, bool) { return tt.sampleLoad1, tt.sampleOK }
-			_, heldAction := evaluateIdleGate(fakeGuardProcess(nil, goTree), tt.command, sample)
+			sample := func() (float64, bool) { return tt.sample, tt.sampleOK }
+			cpuIdle, heldAction := evaluateIdleGate(fakeGuardProcess(nil, goTree), tt.command, sample)
 			if held := heldAction != ""; held != tt.wantHeld {
-				t.Errorf("evaluateIdleGate(%q) held=%v, want %v", tt.command, held, tt.wantHeld)
+				t.Errorf("evaluateIdleGate(%q) at CPU idle %.1f%% (load1 %.1f) held=%v, want %v", tt.command, tt.sample, tt.load1, held, tt.wantHeld)
+			}
+			if heldAction != "" && cpuIdle != tt.sample {
+				t.Errorf("evaluateIdleGate(%q) returned the reading %v, want the sampled %v", tt.command, cpuIdle, tt.sample)
 			}
 		})
+	}
+}
+
+// The acceptance criterion for gt-6rieh: the HOLD banner names the reading
+// that held it — the CPU idle share, not the load average it replaced — with
+// the value the gate sampled and the threshold it missed.
+func TestIdleGateHoldBannerNamesTheIdleReading(t *testing.T) {
+	t.Parallel()
+	goTree := fakeModule(t, "clone")
+	proc := fakeGuardProcess(map[string]string{"GT_POLECAT": "coral", "GT_ROLE": "gastown/polecats/coral"}, goTree)
+	proc.cpuIdle = func() (float64, bool) { return 12.4, true }
+
+	var buf strings.Builder
+	input := `{"tool_name":"Bash","tool_input":{"command":"make test"}}`
+	if err := tapGuardDangerous(strings.NewReader(input), &buf, proc); err == nil {
+		t.Fatalf("tapGuardDangerous(make test) was not held; stderr:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "CPU idle:  12.4% (need >= 25%)") {
+		t.Errorf("the HOLD banner does not name the CPU idle reading that held it:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "Load avg") {
+		t.Errorf("the HOLD banner still reports a load average:\n%s", buf.String())
 	}
 }
 
@@ -2347,7 +2376,7 @@ func TestEvaluateIdleGate(t *testing.T) {
 // hold keeps the GOFLAGS advice.
 func TestIdleGateHoldAdviceNamesTheHeldCommand(t *testing.T) {
 	t.Parallel()
-	busy := func() (float64, bool) { return idleGateLoad1Threshold + 15, true }
+	busy := func() (float64, bool) { return idleGateCPUIdleThreshold - 15, true }
 	goTree := fakeModule(t, "clone")
 
 	for _, tt := range []struct {
@@ -2366,7 +2395,7 @@ func TestIdleGateHoldAdviceNamesTheHeldCommand(t *testing.T) {
 				"GT_POLECAT": "coral",
 				"GT_ROLE":    "gastown/polecats/coral",
 			}, goTree)
-			proc.load1 = busy
+			proc.cpuIdle = busy
 
 			input := `{"tool_name":"Bash","tool_input":{"command":"` + tt.command + `"}}`
 			var buf strings.Builder
@@ -2387,12 +2416,12 @@ func TestIdleGateHoldAdviceNamesTheHeldCommand(t *testing.T) {
 }
 
 // The acceptance criterion, through the real hook entry point: a polecat in a
-// non-Go rig runs its rig's suite target while host load1 is above the idle
-// gate's threshold (gt-mjfir). The Go tree beside it shows the gate still
-// holds what it was built for, and names the reason on stderr.
+// non-Go rig runs its rig's suite target while the host's CPU idle share is
+// below the idle gate's threshold (gt-mjfir). The Go tree beside it shows the
+// gate still holds what it was built for, and names the reason on stderr.
 func TestRunTapGuardDangerous_NonGoRigSuiteTargetWhileHostBusy(t *testing.T) {
 	t.Parallel()
-	busy := func() (float64, bool) { return idleGateLoad1Threshold + 15, true }
+	busy := func() (float64, bool) { return idleGateCPUIdleThreshold - 15, true }
 	for _, tt := range []struct {
 		name   string
 		rigDir string
@@ -2406,7 +2435,7 @@ func TestRunTapGuardDangerous_NonGoRigSuiteTargetWhileHostBusy(t *testing.T) {
 				"GT_POLECAT": "coral",
 				"GT_ROLE":    "fractals/polecats/coral",
 			}, tt.rigDir)
-			proc.load1 = busy
+			proc.cpuIdle = busy
 
 			input := `{"tool_name":"Bash","tool_input":{"command":"make test"}}`
 			var buf strings.Builder
@@ -2428,7 +2457,7 @@ func TestRunTapGuardDangerous_NonGoRigSuiteTargetWhileHostBusy(t *testing.T) {
 // reads the session's own working directory rather than the guard's.
 func TestRunTapGuardDangerous_IdleGateFollowsCdOnTheLine(t *testing.T) {
 	t.Parallel()
-	busy := func() (float64, bool) { return idleGateLoad1Threshold + 15, true }
+	busy := func() (float64, bool) { return idleGateCPUIdleThreshold - 15, true }
 	goRoot := fakeModule(t, "clone")
 	nonGo := nonGoTree(t)
 	for _, tt := range []struct {
@@ -2444,7 +2473,7 @@ func TestRunTapGuardDangerous_IdleGateFollowsCdOnTheLine(t *testing.T) {
 				"GT_POLECAT": "coral",
 				"GT_ROLE":    "fractals/polecats/coral",
 			}, nonGo)
-			proc.load1 = busy
+			proc.cpuIdle = busy
 
 			input := `{"tool_name":"Bash","tool_input":{"command":"` + tt.command + `"}}`
 			var buf strings.Builder

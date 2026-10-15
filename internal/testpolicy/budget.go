@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -267,21 +266,26 @@ const StrictBudgetEnv = "GATE_STRICT_BUDGET"
 // User CPU depends on load far less than wall time, but not on nothing: an
 // oversubscribed host shares cores and caches, so a package can cross the
 // budget beside six other gates and not alone (gt-ik4a1.1). The budget is
-// enforced when the 1-minute load average at the start of the run is below
-// ncpu, or when strict (GATE_STRICT_BUDGET=1) is set; otherwise the overruns
-// are reported and the run passes. A load that could not be read is not
-// evidence of a quiet host, so it reports too.
-func EnforceBudget(load1 float64, loadKnown bool, ncpu int, strict bool) (bool, string) {
+// enforced when the host had at least one core's worth of its CPU idle when
+// the run started (cpuIdle >= 100/ncpu) — a host with a core to spare, which
+// is what a 1-minute load average below ncpu meant before this read CPU idle
+// (gt-6rieh) — or when strict (GATE_STRICT_BUDGET=1) is set; otherwise the
+// overruns are reported and the run passes. A CPU idle that could not be
+// read is not evidence of a quiet host, so it reports too.
+func EnforceBudget(cpuIdle float64, idleKnown bool, ncpu int, strict bool) (bool, string) {
 	switch {
 	case strict:
 		return true, StrictBudgetEnv + "=1"
-	case !loadKnown:
-		return false, "host load unknown"
-	case load1 < float64(ncpu):
-		return true, fmt.Sprintf("load %.1f < %d CPUs", load1, ncpu)
-	default:
-		return false, fmt.Sprintf("load %.1f >= %d CPUs", load1, ncpu)
+	case !idleKnown:
+		return false, "host CPU idle unknown"
+	case ncpu < 1:
+		return false, "host CPU count unknown"
 	}
+	oneCore := 100 / float64(ncpu)
+	if cpuIdle >= oneCore {
+		return true, fmt.Sprintf("CPU idle %.1f%% >= %.1f%% (one of %d cores)", cpuIdle, oneCore, ncpu)
+	}
+	return false, fmt.Sprintf("CPU idle %.1f%% < %.1f%% (one of %d cores)", cpuIdle, oneCore, ncpu)
 }
 
 // BudgetFails reports whether the overruns fail the run. A package that
@@ -295,19 +299,4 @@ func BudgetFails(over []Overrun, enforce bool) bool {
 		}
 	}
 	return false
-}
-
-// ParseLoad1 reads the 1-minute load average from Linux's /proc/loadavg
-// ("1.23 4.56 7.89 2/345 6789") or macOS's `sysctl -n vm.loadavg`
-// ("{ 1.23 4.56 7.89 }").
-func ParseLoad1(s string) (float64, error) {
-	fields := strings.Fields(strings.Trim(strings.TrimSpace(s), "{}"))
-	if len(fields) == 0 {
-		return 0, fmt.Errorf("no load average in %q", s)
-	}
-	v, err := strconv.ParseFloat(fields[0], 64)
-	if err != nil {
-		return 0, fmt.Errorf("load average %q: %w", s, err)
-	}
-	return v, nil
 }
