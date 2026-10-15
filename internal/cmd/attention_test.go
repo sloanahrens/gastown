@@ -174,50 +174,182 @@ func TestAttentionStaleExits3(t *testing.T) {
 	}
 }
 
-func TestAttentionFollowStreamsNewAndCleared(t *testing.T) {
+// followHarness runs attentionFollowEvents against a town and steps it one
+// poll at a time.
+type followHarness struct {
+	t     *testing.T
+	town  string
+	buf   *bytes.Buffer
+	ticks chan time.Time
+	done  chan error
+	stop  context.CancelFunc
+}
+
+func startFollow(t *testing.T, town string, opts followOptions) *followHarness {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	h := &followHarness{t: t, town: town, buf: &bytes.Buffer{}, ticks: make(chan time.Time), done: make(chan error, 1), stop: cancel}
+	go func() { h.done <- attentionFollowEvents(ctx, h.buf, town, h.ticks, opts) }()
+	t.Cleanup(cancel)
+	return h
+}
+
+// poll steps the follower once and waits for that poll to finish: the second
+// send only returns after the loop has gone back to select.
+func (h *followHarness) poll() {
+	h.t.Helper()
+	now := time.Now()
+	h.ticks <- now
+	h.ticks <- now
+}
+
+// finish stops the follower and returns what it printed.
+func (h *followHarness) finish() string {
+	h.t.Helper()
+	h.stop()
+	if err := <-h.done; err != nil {
+		h.t.Fatalf("attentionFollowEvents: %v", err)
+	}
+	return h.buf.String()
+}
+
+func appendAttention(t *testing.T, town string, evs ...attention.Event) {
+	t.Helper()
+	if err := attention.AppendEvents(town, evs); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func raised(rule, key, text string) attention.Event {
+	f, _ := attention.Flags(rule)
+	return attention.Event{TS: time.Now(), Class: attention.KindRedMain, Severity: attention.SeverityHigh, Text: text, Key: key,
+		State: attention.EventNew, Rule: rule, Handled: f.Handled, Wake: f.Wake}
+}
+
+func TestAttentionFollowPrintsOnlyNewEventsAsRuleLines(t *testing.T) {
+	t.Parallel()
+	town := attentionTown(t)
+	appendAttention(t, town, raised(attention.RuleEscalation, "esc:old", "before start"))
+	h := startFollow(t, town, followOptions{})
+	h.poll() // the follower has opened the tail before it receives a tick
+
+	red := raised(attention.RuleRedMain, "red-main:gastown", "main is red")
+	cleared := raised(attention.RuleEscalation, "esc:hq-3", "escalation open")
+	cleared.State, cleared.Handled, cleared.Wake = attention.EventCleared, attention.HandledInfo, false
+	info := raised(attention.RuleRiskPath, "risk:gt-1:abc", "landing touched a risk path")
+	appendAttention(t, town, red, cleared, info)
+	h.poll()
+
+	lines := strings.Split(strings.TrimSpace(h.finish()), "\n")
+	want := []string{
+		red.TS.Local().Format("15:04:05") + " main.red main is red",
+		cleared.TS.Local().Format("15:04:05") + " escalation.open cleared: escalation open",
+		info.TS.Local().Format("15:04:05") + " landing.risk_path landing touched a risk path",
+	}
+	if strings.Join(lines, "\n") != strings.Join(want, "\n") {
+		t.Errorf("follow lines:\n%s\nwant\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestAttentionFollowWakeOnlyFilters(t *testing.T) {
+	t.Parallel()
+	town := attentionTown(t)
+	h := startFollow(t, town, followOptions{wakeOnly: true})
+	h.poll()
+
+	cleared := raised(attention.RuleRedMain, "red-main:gastown", "main is red")
+	cleared.State, cleared.Handled, cleared.Wake = attention.EventCleared, attention.HandledInfo, false
+	legacy := attention.Event{TS: time.Now(), Class: attention.KindBDSlow, Severity: attention.SeverityLow, Text: "legacy line", Key: "bd-slow", State: attention.EventNew}
+	appendAttention(t, town,
+		raised(attention.RuleHostDiskWarn, "host.disk_warn", "disk 82% used"),
+		raised(attention.RuleHostDockerDown, "host.docker_stack_down", "1 of 5 stack containers not running"),
+		raised(attention.RuleOverrunStopped, "overrun:x", "stopped a polecat"),
+		cleared, legacy)
+	h.poll()
+
+	out := h.finish()
+	if !strings.Contains(out, "host.docker_stack_down 1 of 5 stack containers not running") {
+		t.Errorf("wake-only dropped the wake event:\n%s", out)
+	}
+	for _, drop := range []string{"disk 82%", "stopped a polecat", "cleared", "legacy line"} {
+		if strings.Contains(out, drop) {
+			t.Errorf("wake-only printed %q:\n%s", drop, out)
+		}
+	}
+	if n := strings.Count(strings.TrimSpace(out), "\n") + 1; n != 1 {
+		t.Errorf("wake-only printed %d lines, want 1:\n%s", n, out)
+	}
+}
+
+func TestAttentionFollowJSONPrintsTheLine(t *testing.T) {
+	t.Parallel()
+	town := attentionTown(t)
+	h := startFollow(t, town, followOptions{wakeOnly: true, asJSON: true})
+	h.poll()
+	appendAttention(t, town, raised(attention.RuleLandingStuck, "landing-stuck:gastown:gt-abc", "gt-abc in flight 40m"))
+	h.poll()
+
+	var e attention.Event
+	if err := json.Unmarshal([]byte(strings.TrimSpace(h.finish())), &e); err != nil {
+		t.Fatalf("--json line is not an event: %v", err)
+	}
+	if e.Rule != attention.RuleLandingStuck || !e.Wake || e.Handled != attention.HandledOperatorAction {
+		t.Errorf("event = %+v", e)
+	}
+}
+
+func TestAttentionFollowSurvivesRotation(t *testing.T) {
+	t.Parallel()
+	town := attentionTown(t)
+	appendAttention(t, town, raised(attention.RuleRedMain, "red-main:a", "already there"))
+	h := startFollow(t, town, followOptions{wakeOnly: true})
+	h.poll()
+
+	// The writer's rotation: events.jsonl moves to events.jsonl.1 and a fresh
+	// file takes its place.
+	if err := os.Rename(attention.EventsPath(town), attention.RotatedEventsPath(town)); err != nil {
+		t.Fatal(err)
+	}
+	appendAttention(t, town, raised(attention.RuleEscalation, "esc:hq-9", "after rotation"))
+	h.poll()
+
+	out := h.finish()
+	if !strings.Contains(out, "escalation.open after rotation") {
+		t.Errorf("follow went deaf after rotation:\n%s", out)
+	}
+	if strings.Contains(out, "already there") {
+		t.Errorf("follow replayed pre-start history after rotation:\n%s", out)
+	}
+}
+
+func TestAttentionFollowSinceReplaysRecentHistoryOnly(t *testing.T) {
 	t.Parallel()
 	town := attentionTown(t)
 	now := time.Now()
-	if err := attention.AppendEvents(town, []attention.Event{
-		{TS: now, Class: attention.KindEscalation, Severity: attention.SeverityHigh, Text: "before start", Key: "esc:old", State: attention.EventNew},
-	}); err != nil {
-		t.Fatal(err)
-	}
+	old := raised(attention.RuleRedMain, "red-main:old", "two hours ago")
+	old.TS = now.Add(-2 * time.Hour)
+	recent := raised(attention.RuleEscalation, "esc:hq-1", "ten minutes ago")
+	recent.TS = now.Add(-10 * time.Minute)
+	appendAttention(t, town, old, recent)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	ticks := make(chan time.Time)
-	var buf bytes.Buffer
-	done := make(chan error, 1)
-	go func() { done <- attentionFollowEvents(ctx, &buf, town, ticks) }()
+	h := startFollow(t, town, followOptions{since: time.Hour, now: now})
+	h.poll()
+	appendAttention(t, town, raised(attention.RuleBDSlow, "bd-slow", "bd read took 6s"))
+	h.poll()
 
-	// The first tick is a barrier: the follower has snapshotted the count
-	// before it receives, so anything appended after it is new.
-	ticks <- now
-	if err := attention.AppendEvents(town, []attention.Event{
-		{TS: now, Class: attention.KindRedMain, Severity: attention.SeverityHigh, Text: "main is red", Key: "red-main:gastown", State: attention.EventNew},
-	}); err != nil {
-		t.Fatal(err)
+	out := h.finish()
+	if strings.Contains(out, "two hours ago") {
+		t.Errorf("--since replayed an event older than the window:\n%s", out)
 	}
-	if err := attention.AppendEvents(town, []attention.Event{
-		{TS: now, Class: attention.KindEscalation, Severity: attention.SeverityHigh, Text: "escalation open", Key: "esc:hq-3", State: attention.EventCleared},
-	}); err != nil {
-		t.Fatal(err)
+	if strings.Index(out, "ten minutes ago") < 0 || strings.Index(out, "bd read took 6s") < strings.Index(out, "ten minutes ago") {
+		t.Errorf("--since output out of order or missing lines:\n%s", out)
 	}
-	ticks <- now
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatalf("attentionFollowEvents: %v", err)
-	}
+}
 
-	out := buf.String()
-	if strings.Contains(out, "before start") {
-		t.Errorf("follow printed a pre-start line:\n%s", out)
-	}
-	if !strings.Contains(out, "+ ") || !strings.Contains(out, "red-main:gastown") {
-		t.Errorf("follow missing the new line:\n%s", out)
-	}
-	if !strings.Contains(out, "- ") || !strings.Contains(out, "esc:hq-3") {
-		t.Errorf("follow missing the cleared line:\n%s", out)
+func TestAttentionFollowFlagsNeedFollow(t *testing.T) {
+	attentionWakeOnly = true
+	defer func() { attentionWakeOnly = false }()
+	if err := runAttention(attentionCmd, nil); err == nil || !strings.Contains(err.Error(), "--follow") {
+		t.Errorf("--wake-only without --follow = %v, want an error naming --follow", err)
 	}
 }

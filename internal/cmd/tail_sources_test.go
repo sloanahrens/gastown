@@ -1394,3 +1394,39 @@ func TestTailEventsSource_CommentTextAndSubmittedLine(t *testing.T) {
 		t.Fatalf("a landed bead reprinted its submission: %+v", got)
 	}
 }
+
+// TestWatchSource_AttentionEventsWithRuleFieldsMergeUnchanged is the golden for
+// gt-0f3nd: the rule, handled and wake keys an attention event now carries are
+// ignored by the watch source, so the same events print the same lines and
+// classes as before they existed.
+func TestWatchSource_AttentionEventsWithRuleFieldsMergeUnchanged(t *testing.T) {
+	t.Parallel()
+	legacy := `{"ts":"2026-09-30T13:53:00Z","class":"polecat-stall","severity":"low","text":"gastown/opal silent 40m","key":"stall:gastown/opal","state":"new"}` + "\n" +
+		`{"ts":"2026-09-30T13:54:00Z","class":"red-main","severity":"high","text":"main is red","key":"red-main:gastown","state":"new"}` + "\n" +
+		`{"ts":"2026-09-30T13:55:00Z","class":"red-main","severity":"high","text":"main is red","key":"red-main:gastown","state":"cleared"}` + "\n"
+	current := `{"ts":"2026-09-30T13:53:00Z","class":"polecat-stall","severity":"low","text":"gastown/opal silent 40m","key":"stall:gastown/opal","state":"new","rule":"polecat.stall","handled":"operator_action","wake":true}` + "\n" +
+		`{"ts":"2026-09-30T13:54:00Z","class":"red-main","severity":"high","text":"main is red","key":"red-main:gastown","state":"new","rule":"main.red","handled":"operator_action","wake":true}` + "\n" +
+		`{"ts":"2026-09-30T13:55:00Z","class":"red-main","severity":"high","text":"main is red","key":"red-main:gastown","state":"cleared","rule":"main.red","handled":"info"}` + "\n"
+
+	poll := func(content string) []tailLine {
+		town := t.TempDir()
+		path := attention.EventsPath(town)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		appendFile(t, path, content)
+		return newTailWatchSource(town, at("2026-09-30T13:00:00Z"), fixedNow).Poll()
+	}
+	want := []string{
+		"watch watch polecat-stall: gastown/opal silent 40m",
+		"watch watch red-main: main is red",
+		"watch watch red-main: main is red",
+	}
+	before, after := poll(legacy), poll(current)
+	if !reflect.DeepEqual(texts(before), want) {
+		t.Fatalf("legacy lines:\n%q\nwant\n%q", texts(before), want)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Errorf("lines with rule fields differ from the legacy ones:\n%+v\nwant\n%+v", after, before)
+	}
+}

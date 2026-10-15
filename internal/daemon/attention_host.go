@@ -34,10 +34,10 @@ const (
 // The host rules' stable ids. They are the item keys, so an ack and a reader
 // find a rule by the same name.
 const (
-	hostRuleDiskWarn   = "host.disk_warn"
-	hostRuleDiskCrit   = "host.disk_crit"
-	hostRuleMemLow     = "host.mem_low"
-	hostRuleDockerDown = "host.docker_stack_down"
+	hostRuleDiskWarn   = attention.RuleHostDiskWarn
+	hostRuleDiskCrit   = attention.RuleHostDiskCrit
+	hostRuleMemLow     = attention.RuleHostMemLow
+	hostRuleDockerDown = attention.RuleHostDockerDown
 	// hostProbeFailedPrefix keys the item a failed probe raises; the probe's
 	// name follows.
 	hostProbeFailedPrefix = "host.probe_failed:"
