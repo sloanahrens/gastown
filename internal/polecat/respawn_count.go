@@ -296,3 +296,50 @@ func ResetBeadRespawnCount(workDir, beadID string) error {
 	delete(state.Beads, beadID)
 	return saveBeadRespawnState(townRoot, state)
 }
+
+// ResetBeadRespawnForRound clears beadID's respawn count when the sling now
+// being made follows a submission for landing rather than a failed start, and
+// reports whether it cleared it.
+//
+// The count is the breaker for a bead whose polecat dies at start over and
+// over, and a rework round is not that: the bead went out to a polecat, the
+// polecat submitted, the landing worker refused the attempt, dispatch slung the
+// bead again. Counting those spent a live bead's budget on work, and three
+// legitimate rounds put the fourth sling at the limit for good (gt-tatcn).
+// rework is the bead's own record of a rejection — the label the landing worker
+// swaps in for gt:ready-to-land, which only a resubmission clears. submitted is
+// when the bead was last submitted (zero when unreadable), and one older than
+// its last respawn belongs to a round whose sling never submitted, so it clears
+// nothing.
+func ResetBeadRespawnForRound(workDir, beadID string, rework bool, submitted time.Time) (bool, error) {
+	if !rework && submitted.IsZero() {
+		return false, nil
+	}
+	respawnMu.Lock()
+	defer respawnMu.Unlock()
+
+	townRoot := respawnTownRoot(workDir)
+
+	unlock, err := lockRespawnState(townRoot)
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+
+	state, err := loadBeadRespawnState(townRoot)
+	if err != nil {
+		return false, err
+	}
+	rec, ok := state.Beads[beadID]
+	if !ok {
+		return false, nil
+	}
+	if !rework && !submitted.After(rec.LastRespawn) {
+		return false, nil
+	}
+	delete(state.Beads, beadID)
+	if err := saveBeadRespawnState(townRoot, state); err != nil {
+		return false, err
+	}
+	return true, nil
+}

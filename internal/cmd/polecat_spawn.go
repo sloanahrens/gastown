@@ -804,6 +804,10 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 		}
 	}
 	if opts.HookBead != "" && !opts.Force {
+		// A sling that follows a landing rejection is a round of work, not a
+		// failed start, so its count is cleared before the limit reads it
+		// (gt-tatcn).
+		clearRespawnForReworkRound(slingStores{}, townRoot, opts.HookBead)
 		if polecat.ShouldBlockRespawn(townRoot, opts.HookBead) {
 			maxRespawns := config.LoadOperationalConfig(townRoot).GetRecoveryConfig().MaxBeadRespawnsV()
 			return nil, fmt.Errorf("respawn limit reached for %s (%d attempts). "+
