@@ -73,9 +73,19 @@ func TestRuntimeArtifactPathspecs_MixedCoverageDirKeepsSource(t *testing.T) {
 		want  []string
 	}{
 		{
-			name:  "fixture beside source",
+			name:  "fixture beside source is work, not output",
 			paths: []string{"internal/coverage/collector.go", "internal/coverage/testdata/report.golden"},
-			want:  []string{"internal/coverage/testdata/"},
+			want:  nil,
+		},
+		{
+			name:  "output beside source stays one pathspec",
+			paths: []string{"internal/coverage/collector.go", "internal/coverage/testdata/report.golden", "internal/coverage/coverage.out"},
+			want:  []string{"internal/coverage/coverage.out"},
+		},
+		{
+			name:  "output in a directory with a fixture keeps the fixture out of the pathspec",
+			paths: []string{"coverage/main.go", "coverage/lcov-report/index.html", "coverage/lcov-report/testdata/sample.golden"},
+			want:  []string{"coverage/lcov-report/index.html"},
 		},
 		{
 			name:  "artifact in the source directory itself",
