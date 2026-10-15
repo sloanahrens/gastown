@@ -1224,6 +1224,10 @@ type failingBeads struct {
 	failUpdate bool
 	shows      int
 	failShow   bool
+	// failShowNow fails the first Show too, for a caller whose only read it
+	// is: the post-landing queue runs after every other read of the bead
+	// (gt-qtj72).
+	failShowNow bool
 }
 
 func (b *failingBeads) AppendNotes(id, note string) error {
@@ -1242,7 +1246,7 @@ func (b *failingBeads) Update(id string, opts beads.UpdateOptions) error {
 
 func (b *failingBeads) Show(id string) (*beads.Issue, error) {
 	b.shows++
-	if b.failShow && b.shows > 1 {
+	if b.failShowNow || (b.failShow && b.shows > 1) {
 		return nil, errors.New("dolt: connection refused")
 	}
 	return b.Fake.Show(id)

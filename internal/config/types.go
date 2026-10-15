@@ -1064,6 +1064,13 @@ type LandingConfig struct {
 	// blocking on, de-duplicated against the beads earlier landings filed
 	// (gt-s01pn). False leaves the feed off, and off means nothing in it runs.
 	Followups bool `json:"followups,omitempty"`
+
+	// OMQueue enables the om finding queue: a landing om approved gets its
+	// major and critical findings written onto the work bead as the ledger
+	// lines the next deep-review run reads, where its verifiers try to refute
+	// each one before any bead is filed (gt-qtj72). False leaves the queue off,
+	// and off means nothing in it runs.
+	OMQueue bool `json:"om_queue,omitempty"`
 }
 
 // MergeQueueConfig represents merge queue settings for a rig.

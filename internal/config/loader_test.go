@@ -221,6 +221,54 @@ func TestRigSettingsWithCustomMergeQueue(t *testing.T) {
 	}
 }
 
+// TestRigSettingsOMQueue pins the wire name of the om finding queue's setting:
+// the landing worker reads it out of the rig's own settings/config.json, so
+// `landing.om_queue` is what an operator writes and what the daemon must see
+// (gt-qtj72).
+func TestRigSettingsOMQueue(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"absent", `{"type":"rig-settings","version":1,"landing":{}}`, false},
+		{"false", `{"type":"rig-settings","version":1,"landing":{"om_queue":false}}`, false},
+		{"true", `{"type":"rig-settings","version":1,"landing":{"om_queue":true}}`, true},
+		{"beside followups", `{"type":"rig-settings","version":1,"landing":{"followups":true,"om_queue":true}}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := LoadRigSettings(path)
+			if err != nil {
+				t.Fatalf("LoadRigSettings: %v", err)
+			}
+			if loaded.Landing == nil {
+				t.Fatal("Landing is nil")
+			}
+			if loaded.Landing.OMQueue != tc.want {
+				t.Errorf("landing.om_queue = %v, want %v", loaded.Landing.OMQueue, tc.want)
+			}
+		})
+	}
+	// The setting round-trips through SaveRigSettings under the same key.
+	if err := SaveRigSettings(path, &RigSettings{Type: "rig-settings", Version: 1,
+		Landing: &LandingConfig{OMQueue: true}}); err != nil {
+		t.Fatalf("SaveRigSettings: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"om_queue": true`) {
+		t.Errorf("saved settings = %s, want landing.om_queue written as om_queue", data)
+	}
+}
+
 func TestRigConfigValidation(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
