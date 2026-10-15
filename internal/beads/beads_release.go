@@ -40,6 +40,28 @@ func (b *Beads) TransferIfAssignee(id, expected, status, assignee string) (trans
 	return false, err
 }
 
+// TransferIfUnassigned sets a bead's status and assignee, but only while it is
+// still open and unassigned (bd --if-status/--if-assignee, atomic). It is how
+// a failed force re-sling hands a bead back to the holder it took it from: the
+// bead sits open there only until someone hooks it, and a bead that actor has
+// since taken is left with them. transferred=false with a nil error means the
+// guard no longer held.
+func (b *Beads) TransferIfUnassigned(id, expectedStatus, status, assignee string) (transferred bool, err error) {
+	if !b.noRoute {
+		if target := b.forIssueID(id); target != b {
+			return target.TransferIfUnassigned(id, expectedStatus, status, assignee)
+		}
+	}
+	_, err = b.run("update", id, "--status="+status, "--assignee="+assignee, "--if-status="+expectedStatus, "--if-assignee=")
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, ErrGuardNotHeld):
+		return false, nil
+	}
+	return false, err
+}
+
 // AppendNotes appends note to an issue's notes (bd update --append-notes),
 // which bd joins to existing notes with a newline. It routes by the issue's
 // prefix the way Update does. An empty note is a no-op.

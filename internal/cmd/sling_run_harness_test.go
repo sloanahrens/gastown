@@ -284,12 +284,22 @@ func newSlingHarness(t *testing.T) *slingHarness {
 		},
 		restoreRawFields: func(id, _, _ string, _ *beadInfo) { h.record("restore raw fields %s", id) },
 		restorePinned:    func(_, id, assignee string) { h.record("restore pinned %s %s", id, assignee) },
+		// The real write is guarded on the bead being open and unassigned
+		// (beads.TransferIfUnassigned), so the fake mirrors that guard: a bead
+		// another actor has taken is left alone, which is what a lost race
+		// looks like from here.
 		restoreHold: func(_, id string, hold beadHold) {
 			h.mu.Lock()
-			if b := h.beads[id]; b != nil {
+			b := h.beads[id]
+			applied := b != nil && b.Status == "open" && b.Assignee == ""
+			if applied {
 				b.Status, b.Assignee = hold.Status, hold.Assignee
 			}
 			h.mu.Unlock()
+			if !applied {
+				h.record("restore hold skipped %s", id)
+				return
+			}
 			h.record("restore hold %s %s %s", id, hold.Status, hold.Assignee)
 		},
 
