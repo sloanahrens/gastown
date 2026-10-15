@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -258,6 +259,15 @@ func TestReadSkipsNonRegularMarkerWithoutBlocking(t *testing.T) {
 	if err := syscall.Mkfifo(filepath.Join(r.releasesDir, "z.jsonl"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Without the fix the goroutine sits in open(2) on the FIFO; opening it
+	// read-write at cleanup releases it so the test leaves nothing behind.
+	t.Cleanup(func() {
+		if f, err := os.OpenFile(filepath.Join(r.offDir, "x.off"), os.O_RDWR, 0); err == nil {
+			f.Close()
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	done := make(chan *AppPower, 1)
 	go func() { done <- r.Read(appNow) }()
 	select {
@@ -269,7 +279,7 @@ func TestReadSkipsNonRegularMarkerWithoutBlocking(t *testing.T) {
 		if z := appRow(t, p, "z"); z.ReleaseNote != appLedgerReadFailed {
 			t.Errorf("z row release note %q, want %q", z.ReleaseNote, appLedgerReadFailed)
 		}
-	case <-time.After(5 * time.Second):
+	case <-ctx.Done():
 		t.Fatal("Read blocked on a FIFO marker")
 	}
 }
