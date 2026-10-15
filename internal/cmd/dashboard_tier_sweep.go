@@ -313,6 +313,10 @@ type tierSweepRecord struct {
 
 type tierSweepTier struct {
 	FailedNames []string `json:"failed_names"`
+	// SHA is the tip the tier's verdict was taken at. A cycle that stopped
+	// early carries a tier it never reached forward from an earlier tip, so one
+	// record can name more than one (gt-euxf1).
+	SHA string `json:"sha,omitempty"`
 }
 
 // recordFailed is one rig's failing units by tier. A record that cannot be
@@ -333,14 +337,33 @@ func (r *tierSweepReader) recordFailed(rig, sha string, known map[string]bool) m
 	if json.Unmarshal(b, &rec) != nil || rec.LastSHA == "" {
 		return nil
 	}
-	if !strings.HasPrefix(rec.LastSHA, sha) && !strings.HasPrefix(sha, rec.LastSHA) {
+	if !tierSweepSameSHA(rec.LastSHA, sha) {
 		return nil
 	}
 	out := map[string][]string{}
 	for tier, t := range rec.Tiers {
-		if len(t.FailedNames) > 0 {
-			out[tier] = t.FailedNames
+		if len(t.FailedNames) == 0 {
+			continue
 		}
+		// A tier a partial cycle carried forward names the tip its verdict was
+		// taken at, and its failing units are that tip's: attaching them to
+		// this row would date a red nobody re-ran to the tip this cycle saw
+		// (gt-euxf1). A record written before the field carries no tier sha,
+		// and the record's own has already been matched above.
+		if t.SHA != "" && !tierSweepSameSHA(t.SHA, sha) {
+			continue
+		}
+		out[tier] = t.FailedNames
 	}
 	return out
+}
+
+// tierSweepSameSHA reports whether two shas name the same commit, allowing
+// either to carry the other's prefix: the log line and the record each hold the
+// abbreviated form.
+func tierSweepSameSHA(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	return strings.HasPrefix(a, b) || strings.HasPrefix(b, a)
 }

@@ -166,6 +166,29 @@ func TestTierSweepRedNamesComeFromTheRecord(t *testing.T) {
 	}
 }
 
+// A cycle that stopped early left the tier it never reached at whatever tip
+// that tier was last judged at, so the record can name more than one. The names
+// belong to the row for their own tip: attaching a red nobody re-ran to this
+// cycle's tip would date it to a commit it was never seen at (gt-euxf1).
+func TestTierSweepCarriedTierNamesStayWithTheirOwnTip(t *testing.T) {
+	t.Parallel()
+	r, _ := tierSweepTestReader(t, "2026/10/05 10:00:19 tier_sweep: gastown: swept tipb0001 (shell GREEN, integration RED, race RED) in 4m")
+	writeTierSweepRecord(t, r.stateDir, "gastown", `{"last_sha":"tipb0001ffff","partial":true,"tiers":{`+
+		`"shell":{"verdict":"GREEN","sha":"tipb0001ffff"},`+
+		`"integration":{"verdict":"RED","failed_names":["./internal/daemon"],"sha":"tipa0002ffff"},`+
+		`"race":{"verdict":"RED","failed_names":["./internal/cmd"],"sha":"tipb0001ffff"}}}`)
+	stages := r.read(time.Date(2026, 10, 5, 10, 5, 0, 0, time.Local)).Sweeps[0].Stages
+	if len(stages) != 3 {
+		t.Fatalf("stages = %+v", stages)
+	}
+	if got := stages[1]; got.Verdict != "RED" || len(got.Failed) != 0 {
+		t.Errorf("carried integration = %+v, want a RED with no names: those failing units are tipa0002's", got)
+	}
+	if got := stages[2]; got.Verdict != "RED" || len(got.Failed) != 1 || got.Failed[0] != "./internal/cmd" {
+		t.Errorf("race = %+v, want this row's own RED with its names", got)
+	}
+}
+
 // A stage the daemon started beside a busy CI runner is annotated "under load"
 // in the swept line. The annotation is not part of the verdict, so the panel
 // still reads GREEN and still attaches a RED tier's failing names (gt-5ejux).

@@ -342,6 +342,10 @@ type reportSweepTier struct {
 	Passed      int      `json:"passed"`
 	Failed      int      `json:"failed"`
 	FailedNames []string `json:"failed_names,omitempty"`
+	// SHA is the tip this tier's verdict was taken at. It is the record's own
+	// last_sha for a tier the last cycle ran, and an earlier tip for a tier
+	// that cycle never reached (gt-euxf1).
+	SHA string `json:"sha,omitempty"`
 }
 
 type reportEscalations struct {
@@ -790,6 +794,9 @@ type reportTierResult struct {
 	Passed      int      `json:"passed"`
 	Failed      int      `json:"failed"`
 	FailedNames []string `json:"failed_names"`
+	// SHA is the tip the verdict was taken at. A record written before the
+	// field carries none, and the record's own last_sha answers for it.
+	SHA string `json:"sha,omitempty"`
 }
 
 // collectSweep reads each rig's tier-sweep record. A rig with no record says
@@ -820,12 +827,19 @@ func (r HourRun) collectSweep(doc *HourDoc, rigs []string, rigsErr error) {
 				row.LastRun = &t
 			}
 			for tier, res := range f.Tiers {
+				// A tier with no sha of its own is one an older daemon wrote;
+				// the record's tip is the only date such a verdict has.
+				sha := res.SHA
+				if sha == "" {
+					sha = f.LastSHA
+				}
 				row.Tiers = append(row.Tiers, reportSweepTier{
 					Tier:        tier,
 					Verdict:     res.Verdict,
 					Passed:      res.Passed,
 					Failed:      res.Failed,
 					FailedNames: res.FailedNames,
+					SHA:         sha,
 				})
 			}
 			sort.Slice(row.Tiers, func(i, j int) bool { return row.Tiers[i].Tier < row.Tiers[j].Tier })
@@ -1041,9 +1055,13 @@ func (r HourRun) renderSection(name string, doc *HourDoc) {
 				r.row("%s  sweep record has no tiers  sha %s", s.Rig, reportOrDash(shortHash(s.LastSHA)))
 			default:
 				for _, tier := range s.Tiers {
+					// The tier's own tip: a cycle that did not reach a tier
+					// leaves the earlier verdict, and dating it by the last
+					// cycle's tip would name a commit nothing judged it at
+					// (gt-euxf1).
 					r.row("%s  %s %s  %d passed, %d failed%s  sha %s  %s",
 						s.Rig, tier.Tier, reportOrDash(tier.Verdict), tier.Passed, tier.Failed,
-						reportFailedNames(tier.FailedNames), reportOrDash(shortHash(s.LastSHA)), r.sweptAge(s.LastRun))
+						reportFailedNames(tier.FailedNames), reportOrDash(shortHash(tier.SHA)), r.sweptAge(s.LastRun))
 				}
 			}
 		}

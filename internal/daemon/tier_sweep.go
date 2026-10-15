@@ -117,17 +117,21 @@ const (
 // gt report --hour reads the same file (internal/cmd/report.go).
 type tierSweepState struct {
 	LastRun time.Time `json:"last_run"`
-	// LastSHA is the tip the last cycle saw, and the tip Tiers describes.
+	// LastSHA is the tip the last cycle saw. Every tier that cycle ran was
+	// judged there; a tier a Partial cycle did not reach carries the tip its
+	// verdict was taken at on the verdict itself.
 	LastSHA string `json:"last_sha"`
 	// Partial is true while the last cycle stopped before running every stage
-	// it planned. Tiers then holds only the tiers that cycle reached, and the
-	// tip owes the rest of itself to the next one (gt-icmdq).
+	// it planned. Tiers then holds the tiers that cycle judged at LastSHA plus
+	// the verdicts carried forward for the tiers it never reached, and the tip
+	// owes the rest of itself to the next one (gt-icmdq).
 	Partial bool `json:"partial,omitempty"`
 	// LastGreenSHA is the tip of the last cycle that covered every tier the
 	// sweep is scheduled to cover and was green throughout. It is the skip
 	// key: while origin/main equals it there is nothing new to sweep.
 	LastGreenSHA string `json:"last_green_sha"`
-	// Tiers is the verdict per tier for LastSHA's tip.
+	// Tiers is the last verdict per tier, each carrying the tip it was taken
+	// at.
 	Tiers map[string]tierSweepTierResult `json:"tiers"`
 	// OwedSince is when this rig was first seen owing a sweep. The zero time
 	// means it is caught up, which is why the field carries no omitempty: a
@@ -143,6 +147,11 @@ type tierSweepTierResult struct {
 	FailedNames []string `json:"failed_names"`
 	// Log is the file the stage's whole output was written to.
 	Log string `json:"log,omitempty"`
+	// SHA is the tip this verdict was taken at: the cycle's own tip for a tier
+	// that cycle ran, an earlier one for a tier a later Partial cycle carried
+	// forward (gt-euxf1). It, not the record's LastSHA, is what a verdict's
+	// failing names belong to.
+	SHA string `json:"sha,omitempty"`
 }
 
 func tierSweepStatePath(townRoot, rig string) string {
@@ -1091,14 +1100,8 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 	}
 
 	state.LastRun = now
-	// The record's verdicts, and the failing names on them, describe the tip
-	// LastSHA holds: the hour report prints the pair together, and the dashboard
-	// matches a row's names to them by sha. So every verdict goes in under the
-	// tip it was taken at, and the map is replaced rather than merged — a tier
-	// left over from the previous tip would otherwise sit beside the new one's
-	// (gt-icmdq). A cycle that stopped early says so, and the early re-run reads
-	// Partial to come back for the stages it never reached.
-	state.Tiers = results
+	prior := state.Tiers
+	state.Tiers = tierSweepRecordedTiers(results, prior, stages, sha, deferred)
 	state.LastSHA = sha
 	state.Partial = deferred
 	// LastGreenSHA advances only on a cycle whose every stage ran green: a
@@ -1134,6 +1137,43 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 
 	d.tierSweepRecordBeads(rig, sha, results)
 	return !deferred
+}
+
+// tierSweepRecordedTiers is the verdict map one cycle leaves in the record:
+// every tier the cycle ran, under this cycle's tip, plus — for a cycle that
+// stopped before running every stage it planned — the verdict the previous
+// cycle took for each tier the schedule names and this one never reached.
+//
+// The carry-over is what keeps the record a reading of the tree rather than of
+// a single cycle. A tier nothing re-ran has no new verdict, and dropping the
+// old one reads as a clear the sweep never took: the attention item for a red
+// tier would retire while its beads stayed open (gt-euxf1). The carried verdict
+// keeps its own tip in SHA, so an earlier tip's verdict is never read as this
+// cycle's (gt-icmdq). A tier the schedule no longer names is dropped rather
+// than carried: no cycle would ever re-run it, so its verdict would sit in the
+// record forever.
+func tierSweepRecordedTiers(results, prior map[string]tierSweepTierResult, stages []tierSweepStage, sha string, deferred bool) map[string]tierSweepTierResult {
+	recorded := make(map[string]tierSweepTierResult, len(results))
+	for tier, res := range results {
+		res.SHA = sha
+		recorded[tier] = res
+	}
+	if !deferred {
+		// Every stage ran, so this cycle has a verdict of its own for every
+		// tier the schedule names; there is nothing to carry.
+		return recorded
+	}
+	for _, st := range stages {
+		for _, tier := range st.tiers {
+			if _, ran := results[tier]; ran {
+				continue
+			}
+			if prev, ok := prior[tier]; ok {
+				recorded[tier] = prev
+			}
+		}
+	}
+	return recorded
 }
 
 // tierSweepAllGreen reports whether every tier of every stage came back GREEN,
