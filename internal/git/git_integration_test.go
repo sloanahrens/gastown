@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -3114,5 +3115,66 @@ func TestIntegrationCheckUncommittedWorkKeepsFixtureBesideTrackedSource(t *testi
 	}
 	if got, want := status.RuntimeArtifactPaths(), []string{"web/coverage/"}; strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("RuntimeArtifactPaths = %q, want %q", got, want)
+	}
+}
+
+// Git.RuntimeArtifactPathspecs and the status read the checkout's tracked files
+// from real git: the scenario of gt-qdvp2 end to end.
+func TestIntegrationRuntimeArtifactPathspecsBesideEditedSource(t *testing.T) {
+	t.Parallel()
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+	write := func(files map[string]string) {
+		t.Helper()
+		for p, content := range files {
+			path := filepath.Join(dir, filepath.FromSlash(p))
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	write(map[string]string{
+		"pkg/coverage/collector.go":           "package coverage\n",
+		"pkg/coverage/testdata/report.golden": "old\n",
+	})
+	if err := g.Add("-A"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Commit("source and fixture"); err != nil {
+		t.Fatal(err)
+	}
+
+	write(map[string]string{
+		"pkg/coverage/collector.go":           "package coverage\n// edited\n",
+		"pkg/coverage/testdata/report.golden": "new\n",
+		"pkg/coverage/lcov-report/index.html": "<html>\n",
+		"pkg/coverage/coverage.out":           "mode: set\n",
+	})
+	paths := []string{
+		"pkg/coverage/collector.go",
+		"pkg/coverage/testdata/report.golden",
+		"pkg/coverage/lcov-report/index.html",
+		"pkg/coverage/coverage.out",
+	}
+	want := []string{"pkg/coverage/lcov-report/", "pkg/coverage/coverage.out"}
+	if got := g.RuntimeArtifactPathspecs(paths); !slices.Equal(got, want) {
+		t.Errorf("RuntimeArtifactPathspecs = %q, want %q", got, want)
+	}
+
+	status, err := g.CheckUncommittedWork()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := status.RuntimeArtifactPaths()
+	slices.Sort(got)
+	if wantSorted := slices.Sorted(slices.Values(want)); !slices.Equal(got, wantSorted) {
+		t.Errorf("status RuntimeArtifactPaths = %q, want %q", got, wantSorted)
+	}
+	wantWork := []string{"pkg/coverage/collector.go", "pkg/coverage/testdata/report.golden"}
+	if got := status.NonRuntimePaths(); !slices.Equal(got, wantWork) {
+		t.Errorf("status NonRuntimePaths = %q, want %q", got, wantWork)
 	}
 }

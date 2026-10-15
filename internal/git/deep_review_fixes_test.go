@@ -127,7 +127,7 @@ func TestUncommittedWorkStatus_FixtureBesideTrackedSourceIsNotArtifact(t *testin
 	s := &UncommittedWorkStatus{
 		HasUncommittedChanges: true,
 		UntrackedFiles:        []string{fixture, "web/coverage/lcov.info"},
-		sourceRoots:           []string{"internal/coverage/"},
+		beside:                sourceBeside{roots: []string{"internal/coverage/"}},
 	}
 	if got := s.NonRuntimePaths(); !slices.Equal(got, []string{fixture}) {
 		t.Errorf("NonRuntimePaths = %q, want the fixture", got)
@@ -139,7 +139,7 @@ func TestUncommittedWorkStatus_FixtureBesideTrackedSourceIsNotArtifact(t *testin
 		t.Errorf("RuntimeArtifactPaths = %q, want only web/coverage/", got)
 	}
 
-	s.sourceRoots = nil
+	s.beside = sourceBeside{}
 	if !s.CleanExcludingRuntime() {
 		t.Error("without tracked source both files are artifacts")
 	}

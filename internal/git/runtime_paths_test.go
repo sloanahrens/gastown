@@ -317,28 +317,130 @@ func TestComparisonRefCandidatesPreferRemoteTrackingRef(t *testing.T) {
 }
 
 // The checkout's tracked source decides which coverage/ and .cache/ directories
-// are fixtures; a listing that fails counts as holding source (gt-za3u1).
+// are fixtures (gt-za3u1). Beside source that is among the changed paths the
+// output is reset, but a file HEAD tracks there is a fixture or an edit and
+// stays, and no pathspec reaches it or the source (gt-qdvp2). A listing that
+// fails counts as holding source, or as everything under it being tracked.
 func TestRuntimeArtifactPathspecsListing(t *testing.T) {
 	t.Parallel()
-	paths := []string{"internal/coverage/testdata/report.golden", "web/coverage/lcov.info"}
-	tracked := map[string][]string{
-		"internal/coverage/": {"internal/coverage/collector.go"},
-		"web/coverage/":      {"web/coverage/README.md"},
+	lister := func(files map[string][]string) func(root string) ([]string, error) {
+		return func(root string) ([]string, error) { return files[root], nil }
 	}
+	failing := func(string) ([]string, error) { return nil, errors.New("listing failed") }
+	pkg := lister(map[string][]string{"pkg/coverage/": {"pkg/coverage/collector.go", "pkg/coverage/testdata/report.golden"}})
 	for _, tc := range []struct {
-		name string
-		list func(root string) ([]string, error)
-		want []string
+		name       string
+		paths      []string
+		list, head func(root string) ([]string, error)
+		want       []string
 	}{
-		{"tracked source spares only its own directory", func(root string) ([]string, error) { return tracked[root], nil }, []string{"web/coverage/"}},
-		{"a failed listing spares every directory", func(string) ([]string, error) { return nil, errors.New("ls-files failed") }, nil},
-		{"no tracked source resets both", func(string) ([]string, error) { return nil, nil }, []string{"internal/coverage/", "web/coverage/"}},
+		{
+			name:  "tracked source spares only its own directory",
+			paths: []string{"internal/coverage/testdata/report.golden", "web/coverage/lcov.info"},
+			list: lister(map[string][]string{
+				"internal/coverage/": {"internal/coverage/collector.go"},
+				"web/coverage/":      {"web/coverage/README.md"},
+			}),
+			head: lister(map[string][]string{"internal/coverage/": {"internal/coverage/collector.go"}}),
+			want: []string{"web/coverage/"},
+		},
+		{
+			name:  "a failed listing spares every directory",
+			paths: []string{"internal/coverage/testdata/report.golden", "web/coverage/lcov.info"},
+			list:  failing, head: failing,
+			want: nil,
+		},
+		{
+			name:  "no tracked source resets both",
+			paths: []string{"internal/coverage/testdata/report.golden", "web/coverage/lcov.info"},
+			list:  lister(nil), head: lister(nil),
+			want: []string{"internal/coverage/", "web/coverage/"},
+		},
+		{
+			name:  "edited source leaves the output beside it reset",
+			paths: []string{"pkg/coverage/collector.go", "pkg/coverage/lcov-report/index.html", "pkg/coverage/coverage.out"},
+			list:  pkg, head: pkg,
+			want: []string{"pkg/coverage/lcov-report/", "pkg/coverage/coverage.out"},
+		},
+		{
+			name:  "unchanged source keeps the output as a possible fixture",
+			paths: []string{"pkg/coverage/lcov-report/index.html", "pkg/coverage/coverage.out"},
+			list:  pkg, head: pkg,
+			want: nil,
+		},
+		{
+			name:  "edited source does not reset a tracked fixture beside it",
+			paths: []string{"pkg/coverage/collector.go", "pkg/coverage/testdata/report.golden", "pkg/coverage/coverage.out"},
+			list:  pkg, head: pkg,
+			want: []string{"pkg/coverage/coverage.out"},
+		},
+		{
+			name:  "a tracked fixture keeps new output in its directory from a whole-directory reset",
+			paths: []string{"pkg/coverage/collector.go", "pkg/coverage/testdata/new.golden", "pkg/coverage/testdata/report.golden"},
+			list:  pkg, head: pkg,
+			want: []string{"pkg/coverage/testdata/new.golden"},
+		},
+		{
+			name:  "edited source with a failed HEAD listing spares everything",
+			paths: []string{"pkg/coverage/collector.go", "pkg/coverage/coverage.out"},
+			list:  pkg, head: failing,
+			want: nil,
+		},
+		{
+			name:  "source under another root does not spare this one",
+			paths: []string{"pkg/coverage/lcov-report/index.html", "web/coverage/main.go"},
+			list:  pkg, head: pkg,
+			want: nil,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := RuntimeArtifactPathspecsListing(paths, tc.list); !slices.Equal(got, tc.want) {
+			got := RuntimeArtifactPathspecsListing(tc.paths, tc.list, tc.head)
+			if !slices.Equal(got, tc.want) {
 				t.Fatalf("RuntimeArtifactPathspecsListing = %q, want %q", got, tc.want)
 			}
+			for _, spec := range got {
+				for _, src := range []string{"pkg/coverage/collector.go", "pkg/coverage/testdata/report.golden"} {
+					if strings.HasPrefix(src, spec) {
+						t.Errorf("pathspec %q covers %s", spec, src)
+					}
+				}
+			}
 		})
+	}
+}
+
+// The status takes the same side as the reset: gt done ignores the output the
+// checkpoint dog resets beside edited source, and blocks on the fixture it keeps.
+func TestUncommittedWorkStatusOutputBesideEditedSourceIsArtifact(t *testing.T) {
+	t.Parallel()
+	fixture := "pkg/coverage/testdata/report.golden"
+	s := &UncommittedWorkStatus{
+		HasUncommittedChanges: true,
+		ModifiedFiles:         []string{"pkg/coverage/collector.go", fixture},
+		UntrackedFiles:        []string{"pkg/coverage/lcov-report/index.html"},
+		beside: sourceBeside{
+			roots: []string{"pkg/coverage/"},
+			head:  map[string][]string{"pkg/coverage/": {"pkg/coverage/collector.go", fixture}},
+		},
+	}
+	want := []string{"pkg/coverage/collector.go", fixture}
+	if got := s.NonRuntimePaths(); !slices.Equal(got, want) {
+		t.Errorf("NonRuntimePaths = %q, want %q", got, want)
+	}
+	if got := s.RuntimeArtifactPaths(); !slices.Equal(got, []string{"pkg/coverage/lcov-report/"}) {
+		t.Errorf("RuntimeArtifactPaths = %q, want the lcov-report directory", got)
+	}
+}
+
+// With pkg/coverage/collector.go tracked and edited, the generated output
+// staged beside it is reset and the source stays staged (gt-qdvp2).
+func TestRuntimeArtifactPathspecsBesideResetsArtifactsUnderSourceRoot(t *testing.T) {
+	t.Parallel()
+	files := func(string) ([]string, error) { return []string{"pkg/coverage/collector.go"}, nil }
+	got := RuntimeArtifactPathspecsListing(
+		[]string{"pkg/coverage/collector.go", "pkg/coverage/lcov-report/index.html", "pkg/coverage/coverage.out"}, files, files)
+	if want := []string{"pkg/coverage/lcov-report/", "pkg/coverage/coverage.out"}; !slices.Equal(got, want) {
+		t.Fatalf("RuntimeArtifactPathspecsListing = %q, want %q", got, want)
 	}
 }

@@ -400,8 +400,19 @@ func (h *handle) ResetFiles(pathspecs ...string) error {
 }
 
 // RuntimeArtifactPathspecs is git.Git's: the tracked files under a root are
-// the index's (git ls-files).
+// the index's (git ls-files), and the ones HEAD tracks are HEAD's tree
+// (git ls-tree).
 func (h *handle) RuntimeArtifactPathspecs(paths []string) []string {
+	under := func(tree map[string]string, root string) []string {
+		var files []string
+		for p := range tree {
+			if strings.HasPrefix(p, root) {
+				files = append(files, p)
+			}
+		}
+		sort.Strings(files)
+		return files
+	}
 	return git.RuntimeArtifactPathspecsListing(paths, func(root string) ([]string, error) {
 		h.f.mu.Lock()
 		defer h.f.mu.Unlock()
@@ -409,14 +420,19 @@ func (h *handle) RuntimeArtifactPathspecs(paths []string) []string {
 		if err != nil {
 			return nil, err
 		}
-		var tracked []string
-		for p := range h.f.stage(r, wt).tree {
-			if strings.HasPrefix(p, root) {
-				tracked = append(tracked, p)
-			}
+		return under(h.f.stage(r, wt).tree, root), nil
+	}, func(root string) ([]string, error) {
+		h.f.mu.Lock()
+		defer h.f.mu.Unlock()
+		r, wt, err := h.workTree("ls-tree", "-r", "-z", "--name-only", "HEAD", "--", root)
+		if err != nil {
+			return nil, err
 		}
-		sort.Strings(tracked)
-		return tracked, nil
+		headID := headCommit(r, wt)
+		if headID == "" {
+			return nil, gitErr(128, "fatal: Not a valid object name HEAD", "ls-tree")
+		}
+		return under(h.f.treeOf(headID), root), nil
 	})
 }
 
