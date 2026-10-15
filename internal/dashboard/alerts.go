@@ -2,9 +2,14 @@ package dashboard
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/events"
 )
 
 // Alert levels, in ascending severity.
@@ -56,6 +61,16 @@ var rejectionRe = regexp.MustCompile(`rejected \((review|gate|conflict|policy|em
 // landing rejected (review)", and both name the bead.
 var rejectionBeadRe = regexp.MustCompile(`(\S+): (?:landing )?rejected \((?:review|gate|conflict|policy|empty)\)`)
 
+// The keys of the alerts the Alerter raises more than once or that the
+// attention table below names.
+const (
+	keyHealthRed       = "health:red"
+	keyHealthDegraded  = "health:degraded"
+	keyEscalations     = "escalations"
+	keyQueueStuck      = "queue:stuck"
+	polecatAlertPrefix = "polecat:"
+)
+
 // rejectionFreshWithin is how old a rejection line may be and still alert. The
 // feed delivers its backlog (the last couple of hours) to the first page that
 // connects, and a rejection from before the page opened is history, not news.
@@ -106,6 +121,16 @@ type Alerter struct {
 
 	// cooldown is the last time each key fired.
 	cooldown map[string]time.Time
+
+	// standing is the attention wake alerts that stand now, by event key.
+	standing map[string]standingAttention
+}
+
+// standingAttention is one attention alert that stands, with the keys of the
+// Alerter's own alerts it covers (see attentionCovered).
+type standingAttention struct {
+	alert  Alert
+	covers []string
 }
 
 // NewAlerter returns an alerter reading the time from now.
@@ -117,6 +142,7 @@ func NewAlerter(now func() time.Time) *Alerter {
 		now:        now,
 		rejectSeen: map[int64]bool{},
 		cooldown:   map[string]time.Time{},
+		standing:   map[string]standingAttention{},
 	}
 }
 
@@ -159,11 +185,15 @@ func (a *Alerter) Observe(prev, next State, entries []Entry) []Alert {
 	return out
 }
 
-// fire returns one alert for key, unless that key is still inside its cooldown,
-// and records the firing. A suppressed alert is not recorded, so a rule whose
-// condition is still standing may try again once the cooldown expires.
+// fire returns one alert for key, unless that key is still inside its cooldown
+// or an attention alert that covers it stands, and records the firing. A
+// suppressed alert is not recorded, so a rule whose condition is still standing
+// may try again once the cooldown expires or the attention alert clears.
 func (a *Alerter) fire(now time.Time, level, key, title, text string) (Alert, bool) {
 	if last, ok := a.cooldown[key]; ok && now.Sub(last) < alertCooldown {
+		return Alert{}, false
+	}
+	if a.coveredByAttention(key) {
 		return Alert{}, false
 	}
 	a.cooldown[key] = now
@@ -207,9 +237,9 @@ func (a *Alerter) healthAlert(next State, now time.Time) (Alert, bool) {
 		if a.healthLive || a.healthStreak < healthConfirmPolls {
 			return Alert{}, false
 		}
-		level, key, title := LevelCrit, "health:red", "town health is red"
+		level, key, title := LevelCrit, keyHealthRed, "town health is red"
 		if h.Verdict == "degraded" {
-			level, key, title = LevelWarn, "health:degraded", "town health is degraded"
+			level, key, title = LevelWarn, keyHealthDegraded, "town health is degraded"
 		}
 		al, ok := a.fire(now, level, key, title, h.Line)
 		a.healthLive = a.healthLive || ok
@@ -263,7 +293,7 @@ func (a *Alerter) polecatAlerts(prev, next State, now time.Time) []Alert {
 			}
 		}
 		title := key + " is " + p.State
-		if al, ok := a.fire(now, LevelWarn, "polecat:"+key, title, text); ok {
+		if al, ok := a.fire(now, LevelWarn, polecatAlertPrefix+key, title, text); ok {
 			out = append(out, al)
 		}
 	}
@@ -285,7 +315,7 @@ func (a *Alerter) escalationAlert(next State, now time.Time) (Alert, bool) {
 	if !known || n <= was {
 		return Alert{}, false
 	}
-	return a.fire(now, LevelCrit, "escalations", "escalations rose",
+	return a.fire(now, LevelCrit, keyEscalations, "escalations rose",
 		fmt.Sprintf("open escalations rose from %d to %d", was, n))
 }
 
@@ -341,7 +371,7 @@ func (a *Alerter) stuckQueueAlert(next State, now time.Time) (Alert, bool) {
 	if a.stuckFired {
 		return Alert{}, false
 	}
-	al, ok := a.fire(now, LevelWarn, "queue:stuck", "a bead has waited over 30 minutes to land",
+	al, ok := a.fire(now, LevelWarn, keyQueueStuck, "a bead has waited over 30 minutes to land",
 		fmt.Sprintf("the oldest bead waiting to land was last touched %d minutes ago", int(age.Minutes())))
 	if ok {
 		a.stuckFired = true
@@ -370,4 +400,169 @@ func (a *Alerter) dispatchAlert(next State, now time.Time) (Alert, bool) {
 		a.dispatchFired = true
 	}
 	return al, ok
+}
+
+// attentionCovered is the rule-to-existing-alert table: the keys of the
+// Alerter's own alerts that report the same condition as an attention item of
+// rule, whose event key is key. When the attention alert stands, these are not
+// shown, so the condition appears once and the attention alert is the one kept.
+//
+//	main.red             -> health:red, health:degraded (the town health reads main red)
+//	escalation.open      -> escalations
+//	polecat.stall        -> polecat:<rig>/<name> (event key stall:<rig>/<name>)
+//	landing.queue_stuck  -> queue:stuck
+//
+// Health red or degraded also has other causes; while a red-main alert stands
+// they are not told apart, and the health alert fires again if it is still
+// red once the attention alert clears.
+func attentionCovered(rule, key string) []string {
+	switch rule {
+	case attention.RuleRedMain:
+		return []string{keyHealthRed, keyHealthDegraded}
+	case attention.RuleEscalation:
+		return []string{keyEscalations}
+	case attention.RulePolecatStall:
+		if seat, ok := strings.CutPrefix(key, "stall:"); ok {
+			return []string{polecatAlertPrefix + seat}
+		}
+	case attention.RuleQueueStuck:
+		return []string{keyQueueStuck}
+	}
+	return nil
+}
+
+// coveredByAttention reports whether a standing attention alert covers key.
+func (a *Alerter) coveredByAttention(key string) bool {
+	for _, s := range a.standing {
+		for _, k := range s.covers {
+			if k == key {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// attentionLevel is the alert level of an attention severity. An event that
+// wakes the overseer is never info.
+func attentionLevel(s attention.Severity) string {
+	if s == attention.SeverityHigh {
+		return LevelCrit
+	}
+	return LevelWarn
+}
+
+// ObserveAttention takes the attention transitions that arrived since the last
+// call, with the acks as they stand now, and returns the alerts to add and the
+// keys of the alerts to remove.
+//
+// A new line with wake=true and a handled value other than info raises an
+// alert keyed by the event's key, titled with its rule id and carrying its
+// text. A cleared line for the key removes it. A key that is acked raises
+// nothing, and an ack made while the alert stands removes it. A key that
+// already stands is left as it is, so a repeat line (the daemon's "still
+// holding") does not show it twice. Raising one also removes the Alerter's own
+// alert for the same condition (attentionCovered).
+//
+// Attention alerts bypass the cooldown: the stream states the transitions, so a
+// condition that clears and returns shows again.
+func (a *Alerter) ObserveAttention(evs []attention.Event, acks attention.Acks) (raised []Alert, removed []string) {
+	now := a.now()
+	drop := func(key string) {
+		for i := range raised {
+			if raised[i].Key == key {
+				raised = append(raised[:i], raised[i+1:]...)
+				break
+			}
+		}
+		removed = append(removed, key)
+	}
+	for _, e := range evs {
+		switch e.State {
+		case attention.EventCleared:
+			if _, ok := a.standing[e.Key]; ok {
+				delete(a.standing, e.Key)
+				drop(e.Key)
+			}
+		case attention.EventNew:
+			if !e.Wake || e.EffectiveHandled() == attention.HandledInfo {
+				continue
+			}
+			if _, ok := a.standing[e.Key]; ok || attention.AckedKey(acks, e.Key) {
+				continue
+			}
+			title := e.Rule
+			if title == "" {
+				title = string(e.Class)
+			}
+			a.seq++
+			al := Alert{ID: fmt.Sprintf("alert-%d", a.seq), At: e.TS, Level: attentionLevel(e.Severity), Key: e.Key, Title: title, Text: e.Text}
+			if al.At.IsZero() {
+				al.At = now
+			}
+			covers := attentionCovered(e.Rule, e.Key)
+			a.standing[e.Key] = standingAttention{alert: al, covers: covers}
+			raised = append(raised, al)
+			removed = append(removed, covers...)
+		}
+	}
+	// An ack made while an alert stands hides it.
+	keys := make([]string, 0, len(a.standing))
+	for k := range a.standing {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if attention.AckedKey(acks, k) {
+			delete(a.standing, k)
+			drop(k)
+		}
+	}
+	return raised, removed
+}
+
+// AttentionFollower reads the attention queue's events.jsonl for the hub. The
+// first read returns what the retained logs hold, so a condition that was
+// raised before the page opened and has not cleared is on it; every later read
+// returns the lines appended since, followed by path across the file's 1 MB
+// rotation the way gt attention -f follows it.
+type AttentionFollower struct {
+	townRoot string
+	tail     *events.Tail
+}
+
+// NewAttentionFollower follows the events.jsonl of the town at townRoot.
+func NewAttentionFollower(townRoot string) *AttentionFollower {
+	return &AttentionFollower{townRoot: townRoot}
+}
+
+// Read returns the new transitions and the acks as they stand. A missing or
+// unreadable events file yields no transitions and is tried again on the next
+// read; unreadable acks read as none, so an alert is shown rather than hidden.
+func (f *AttentionFollower) Read() ([]attention.Event, attention.Acks) {
+	acks, _ := attention.ReadAcks(f.townRoot)
+	if f.tail == nil {
+		path := attention.EventsPath(f.townRoot)
+		if _, err := os.Stat(path); err != nil {
+			return nil, acks
+		}
+		// Open the tail before reading the history: a line appended in between
+		// is then seen twice, which the Alerter takes in its stride, rather
+		// than not at all.
+		t, err := events.OpenTail(path)
+		if err != nil {
+			return nil, acks
+		}
+		f.tail = t
+		history, _ := attention.ReadRetainedEvents(f.townRoot)
+		return history, acks
+	}
+	lines, _ := f.tail.Poll()
+	var out []attention.Event
+	for _, line := range lines {
+		if e, ok := attention.ParseEventLine(line); ok {
+			out = append(out, e)
+		}
+	}
+	return out, acks
 }

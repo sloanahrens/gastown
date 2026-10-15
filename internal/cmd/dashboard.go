@@ -312,6 +312,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Usage:      func() *dashboard.Usage { return usage.read(time.Now()) },
 		Escalation: func() *dashboard.Escalations { return escalations.read(time.Now()) },
 		Dispatch:   om.dispatch,
+		Attention:  dashboard.NewAttentionFollower(townRoot).Read,
 		Models:     models.read,
 		Queue:      func() *dashboard.Queue { return queue.read(time.Now()) },
 		Bead:       queue.detail,
