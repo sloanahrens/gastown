@@ -1470,6 +1470,15 @@ type EscalationConfig struct {
 	// every cycle. Format: Go duration string (e.g., "1h", "30m").
 	// Default: "1h". A value of "0" re-notifies on every firing.
 	RenotifyWindow string `json:"renotify_window,omitempty"`
+
+	// UnhandledAfter is how long an escalation the overseer owns may stay open
+	// before the human is pushed about it once. An escalation the human owns is
+	// pushed when it is filed; one the overseer owns reaches the human only if
+	// nobody acted on it for this long (gt-71714). A value that is not a
+	// positive duration falls back to the default, since a zero window would
+	// unhandle nothing.
+	// Format: Go duration string (e.g., "30m", "2h"). Default: "30m".
+	UnhandledAfter string `json:"unhandled_after,omitempty"`
 }
 
 // NotifyConfig names the commands that push a message to the human outside the

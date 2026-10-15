@@ -103,9 +103,94 @@ func openMem(m *memQuestionStore) func() (questionStore, error) {
 // default priority and no effort tag.
 func askDefault() question.AskOptions { return question.AskOptions{Priority: question.Priority} }
 
+// recordingPush is the notify command as gt ask sees it: it records the title
+// and body of each push and answers with err, so no test starts a process.
+type recordingPush struct {
+	name   string
+	titles []string
+	bodies []string
+	err    error
+}
+
+func (r *recordingPush) push() questionPush {
+	return questionPush{name: r.name, run: func(_, title, body string) error {
+		r.titles = append(r.titles, title)
+		r.bodies = append(r.bodies, body)
+		return r.err
+	}}
+}
+
 const askTestBody = "## Question\nRetry a rejected landing once?\n\n## Recommended answer\nYes, once.\n\n## Held work\n- gt-abc1 (the rework)\n- stub: split the landing gate\n\n## Facts\nTwo of ten passed on retry.\n"
 
 var askNow = time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+
+// A question at P0, P1 or P2 is pushed once through the configured notify
+// command, naming the question's id; a P3 or P4 is not pushed at all, and the
+// push never carries the body (gt-71714).
+func TestAskPushesThePrioritiesThatMustReachTheHuman(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		priority int
+		wantPush bool
+	}{
+		{priority: 0, wantPush: true},
+		{priority: 1, wantPush: true},
+		{priority: 2, wantPush: true},
+		{priority: 3, wantPush: false},
+		{priority: 4, wantPush: false},
+	} {
+		store := newMemQuestionStore(askNow)
+		var out bytes.Buffer
+		rec := &recordingPush{name: "imessage"}
+		opts := question.AskOptions{Priority: tc.priority}
+		if err := askQuestion(strings.NewReader(askTestBody), &out, "Retry policy", opts, openMem(store), rec.push()); err != nil {
+			t.Fatal(err)
+		}
+		if !tc.wantPush {
+			if len(rec.titles) != 0 {
+				t.Errorf("P%d pushed %q, want no push", tc.priority, rec.titles)
+			}
+			continue
+		}
+		if len(rec.titles) != 1 {
+			t.Fatalf("P%d pushed %d times, want once", tc.priority, len(rec.titles))
+		}
+		want := fmt.Sprintf("Question hq-t1 P%d: Retry policy", tc.priority)
+		if rec.titles[0] != want {
+			t.Errorf("P%d pushed %q, want %q", tc.priority, rec.titles[0], want)
+		}
+		if rec.bodies[0] != "" {
+			t.Errorf("P%d pushed the body %q; a push carries the title alone", tc.priority, rec.bodies[0])
+		}
+	}
+}
+
+// A town that configures no notify command pushes nothing, and a push that
+// fails leaves the question filed: the id and the answer command are printed
+// either way.
+func TestAskSurvivesANotifyCommandThatIsMissingOrFails(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		push       questionPush
+		wantOutput string
+	}{
+		"no command configured": {push: questionPush{}, wantOutput: "hq-t1\n"},
+		"the command failed": {push: (&recordingPush{name: "imessage", err: errors.New("timed out")}).push(),
+			wantOutput: "warning: the question was filed but not pushed through imessage: timed out"},
+	} {
+		store := newMemQuestionStore(askNow)
+		var out bytes.Buffer
+		if err := askQuestion(strings.NewReader(askTestBody), &out, "Retry policy", askDefault(), openMem(store), tc.push); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if store.find("hq-t1") == nil {
+			t.Errorf("%s: the question was not filed", name)
+		}
+		if !strings.Contains(out.String(), tc.wantOutput) {
+			t.Errorf("%s: output = %q, want it to contain %q", name, out.String(), tc.wantOutput)
+		}
+	}
+}
 
 // gt ask files the bead the dashboard reader parses back to the same
 // Question, Recommended and Held fields, in the town database, under the
@@ -114,7 +199,7 @@ func TestAskFilesABeadTheDashboardReaderParsesBack(t *testing.T) {
 	t.Parallel()
 	store := newMemQuestionStore(askNow)
 	var out bytes.Buffer
-	if err := askQuestion(strings.NewReader(askTestBody), &out, "Retry policy", askDefault(), openMem(store)); err != nil {
+	if err := askQuestion(strings.NewReader(askTestBody), &out, "Retry policy", askDefault(), openMem(store), questionPush{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -163,7 +248,7 @@ func TestAskRefusesABodyWithoutQuestionOrRecommendedAnswer(t *testing.T) {
 		err := askQuestion(strings.NewReader(body), &bytes.Buffer{}, "t", askDefault(), func() (questionStore, error) {
 			opened = true
 			return store, nil
-		})
+		}, questionPush{})
 		if err == nil {
 			t.Errorf("%s: gt ask filed a question", name)
 		}
@@ -180,7 +265,7 @@ func TestAskFilesThePriorityAndEffortItWasGiven(t *testing.T) {
 	store := newMemQuestionStore(askNow)
 	var out bytes.Buffer
 	opts := question.AskOptions{Priority: 1, Effort: question.EffortQuick}
-	if err := askQuestion(strings.NewReader(askTestBody), &out, "Retry policy", opts, openMem(store)); err != nil {
+	if err := askQuestion(strings.NewReader(askTestBody), &out, "Retry policy", opts, openMem(store), questionPush{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -226,7 +311,7 @@ func TestAskRefusesAPriorityOrEffortOutsideTheScale(t *testing.T) {
 			func() (questionStore, error) {
 				opened = true
 				return store, nil
-			})
+			}, questionPush{})
 		if err == nil || !strings.HasPrefix(err.Error(), "gt ask: --") {
 			t.Errorf("%s: err = %v, want one naming the flag", name, err)
 		}
@@ -243,7 +328,7 @@ func TestAskKeepsTheQuestionWhenAHoldFails(t *testing.T) {
 	store := newMemQuestionStore(askNow)
 	store.depErr = errors.New("dep add failed")
 	var out bytes.Buffer
-	err := askQuestion(strings.NewReader(askTestBody), &out, "Retry policy", askDefault(), openMem(store))
+	err := askQuestion(strings.NewReader(askTestBody), &out, "Retry policy", askDefault(), openMem(store), questionPush{})
 	if err == nil || !strings.Contains(err.Error(), "hq-t1 was filed") || !strings.Contains(err.Error(), "gt-abc1") {
 		t.Errorf("err = %v, want one naming the filed question and the failed hold", err)
 	}
@@ -257,7 +342,7 @@ func TestAskKeepsTheQuestionWhenAHoldFails(t *testing.T) {
 func TestAnswerAddsTheCommentTheConventionReads(t *testing.T) {
 	t.Parallel()
 	store := newMemQuestionStore(askNow)
-	if err := askQuestion(strings.NewReader(askTestBody), &bytes.Buffer{}, "Retry policy", askDefault(), openMem(store)); err != nil {
+	if err := askQuestion(strings.NewReader(askTestBody), &bytes.Buffer{}, "Retry policy", askDefault(), openMem(store), questionPush{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -291,7 +376,7 @@ func TestAnswerAddsTheCommentTheConventionReads(t *testing.T) {
 func TestAnswerRefusesWhatItCannotMarkCorrectly(t *testing.T) {
 	t.Parallel()
 	store := newMemQuestionStore(askNow)
-	if err := askQuestion(strings.NewReader(askTestBody), &bytes.Buffer{}, "Retry policy", askDefault(), openMem(store)); err != nil {
+	if err := askQuestion(strings.NewReader(askTestBody), &bytes.Buffer{}, "Retry policy", askDefault(), openMem(store), questionPush{}); err != nil {
 		t.Fatal(err)
 	}
 	other, _ := store.Create(beads.CreateOptions{Title: "not a question", Labels: []string{"gt:task"}})
@@ -322,11 +407,11 @@ func TestAnswerRefusesWhatItCannotMarkCorrectly(t *testing.T) {
 func TestQuestionsListsOpenQuestionsWithAgeAndHeldWork(t *testing.T) {
 	t.Parallel()
 	store := newMemQuestionStore(askNow.Add(-26 * time.Hour))
-	if err := askQuestion(strings.NewReader(askTestBody), &bytes.Buffer{}, "older question", askDefault(), openMem(store)); err != nil {
+	if err := askQuestion(strings.NewReader(askTestBody), &bytes.Buffer{}, "older question", askDefault(), openMem(store), questionPush{}); err != nil {
 		t.Fatal(err)
 	}
 	store.now = askNow.Add(-20 * time.Minute)
-	if err := askQuestion(strings.NewReader("## Question\nq\n## Recommended answer\nr\n## Held work\nnone"), &bytes.Buffer{}, "newer question", askDefault(), openMem(store)); err != nil {
+	if err := askQuestion(strings.NewReader("## Question\nq\n## Recommended answer\nr\n## Held work\nnone"), &bytes.Buffer{}, "newer question", askDefault(), openMem(store), questionPush{}); err != nil {
 		t.Fatal(err)
 	}
 	store.now = askNow

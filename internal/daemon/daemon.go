@@ -1493,6 +1493,11 @@ var heartbeatSteps = []heartbeatStep{
 	// townhealth, so the bd-slow collector can read this tick's Dolt verdict;
 	// non-lifecycle, so an E-stopped town still gets its queue.
 	{name: "attention", run: (*Daemon).writeAttention},
+
+	// Tell the human once about each escalation the overseer left open past
+	// its unhandled window (gt-71714). Last, so it reads the escalations the
+	// steps above filed this tick.
+	{name: "unhandled-escalations", run: (*Daemon).pushUnhandledEscalations},
 }
 
 // startState is the state record a daemon writes as it starts. The first

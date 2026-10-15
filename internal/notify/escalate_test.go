@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/config"
 )
 
@@ -91,6 +92,75 @@ func TestExecuteExternalActionsContactsConfiguredChannels(t *testing.T) {
 	for _, s := range statuses {
 		if !s.RuntimeNotified || s.Error != "" {
 			t.Errorf("status %+v, want notified without error", s)
+		}
+	}
+}
+
+// TestSendNotificationsPushesOnlyTheHumansEscalations is the push gate as the
+// raise path applies it: a polecat's or the daemon's escalation to the overseer
+// runs no channel that reaches a person, and the human's own session does
+// (gt-71714). The route carries no mail action, so the mail the router sends
+// for either owner is PushActions' business, not this test's.
+func TestSendNotificationsPushesOnlyTheHumansEscalations(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		escalatedBy string
+		wantPush    bool
+	}{
+		"a polecat's escalation to the overseer": {escalatedBy: "gastown/polecats/rictus"},
+		"the daemon's escalation":                {escalatedBy: "daemon"},
+		"the human's own session":                {escalatedBy: attention.HumanAddress, wantPush: true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			cfg := &config.EscalationConfig{
+				Routes: map[string][]string{"high": {"bead", "exec:imessage"}},
+				Notify: config.NotifyConfig{Commands: map[string][]string{"imessage": {"push-cmd"}}},
+			}
+			rr := &recordingRunner{}
+			req := EscalationRequest{
+				TownRoot: t.TempDir(), Severity: "high",
+				Description: "revert-guard ruling", EscalatedBy: tc.escalatedBy,
+			}
+			statuses := sendNotifications(req, "hq-esc1", cfg, externalSenders{command: rr.run})
+			if pushed := len(rr.stdin) == 1; pushed != tc.wantPush {
+				t.Fatalf("pushed = %v, want %v (statuses %+v)", pushed, tc.wantPush, statuses)
+			}
+			// The result says what was withheld, so `gt escalate --json` shows
+			// why nothing texted anyone.
+			withheld := false
+			for _, s := range statuses {
+				if s.Channel != "push" {
+					continue
+				}
+				withheld = true
+				if s.Target != string(attention.OwnerOverseer) || s.Warning == "" {
+					t.Errorf("withheld-push status = %+v, want the overseer named with a reason", s)
+				}
+			}
+			if withheld == tc.wantPush {
+				t.Errorf("the result reports withheld = %v with pushed = %v", withheld, tc.wantPush)
+			}
+		})
+	}
+}
+
+// A route that reaches nobody reports no withheld push: the gate withholds what
+// a push action would have sent, and a route with none never had one to
+// withhold (gt-71714). The route carries no mail action, so the router is not
+// asked to resolve a recipient here.
+func TestSendNotificationsReportsNoWithheldPushWithoutAPushAction(t *testing.T) {
+	t.Parallel()
+	cfg := &config.EscalationConfig{
+		Routes: map[string][]string{"low": {"bead", "log"}},
+	}
+	req := EscalationRequest{
+		TownRoot: t.TempDir(), Severity: "low", Description: "x", EscalatedBy: "daemon",
+	}
+	for _, status := range sendNotifications(req, "hq-esc1", cfg, externalSenders{}) {
+		if status.Channel == "push" {
+			t.Errorf("status %+v reports a withheld push for a route with no push action", status)
 		}
 	}
 }

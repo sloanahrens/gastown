@@ -116,8 +116,8 @@ func TestExecuteExternalActionsExecPushesTheEscalation(t *testing.T) {
 		t.Fatalf("ran %d commands, want 1", len(rr.stdin))
 	}
 	title, body, _ := strings.Cut(rr.stdin[0], "\n")
-	if title != "[Gas Town CRITICAL] db down" {
-		t.Errorf("title line = %q", title)
+	if title != "[Gas Town CRITICAL] hq-e1: db down" {
+		t.Errorf("title line = %q, want it to name the bead", title)
 	}
 	for _, want := range []string{"hq-e1", "CRITICAL", "gt escalate ack hq-e1"} {
 		if !strings.Contains(body, want) {

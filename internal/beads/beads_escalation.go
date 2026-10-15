@@ -320,6 +320,16 @@ func AckEscalation(c Client, id, ackedBy string) error {
 	})
 }
 
+// EscalationPushedLabel marks an escalation the unhandled push has already
+// told the human about, so a restart does not say it twice (gt-71714).
+const EscalationPushedLabel = "unhandled-pushed"
+
+// MarkEscalationPushed records that an escalation the overseer has not acted on
+// was pushed to the human once (gt-71714).
+func MarkEscalationPushed(c Client, id string) error {
+	return c.Update(id, UpdateOptions{AddLabels: []string{EscalationPushedLabel}})
+}
+
 // CloseEscalation closes an escalation bead with a resolution reason.
 // Sets closed_by and closed_reason fields, closes the issue.
 func CloseEscalation(c Client, id, closedBy, reason string) error {
