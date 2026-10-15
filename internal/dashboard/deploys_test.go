@@ -782,9 +782,9 @@ func TestDeployReaderCountsTheHealthWindowAndNoMore(t *testing.T) {
 
 	require.Len(t, d.Health, 2)
 	assert.Equal(t, healthRunWindow, d.Health[1].Runs, "the window, and the run past it is not counted")
-	assert.Equal(t, healthRunWindow, d.Health[1].Passed)
-	assert.Empty(t, d.HealthFailed, "a failure older than the window is not the newest check")
-	assert.Len(t, stub.jobsAsked, healthRunWindow, "one jobs call per run of the window, and none for the runs past it")
+	assert.Equal(t, healthRunWindow, d.Health[1].Passed, "the run past the window failed, and it is not in the count")
+	assert.Empty(t, d.HealthFailed, "the newest check passed, whatever the run past the window did")
+	assert.Len(t, stub.jobsAsked, healthRunWindow, "one jobs call per run of the window: the run past it is never asked for")
 }
 
 // A repo with no health run shows nothing extra: the block gains its scheduled
@@ -866,6 +866,43 @@ func TestDeployReaderSaysAHealthRowItCouldNotRead(t *testing.T) {
 	d = newDeployTestReader(stub, nil).Read()
 	assert.Empty(t, d.Health)
 	assert.Empty(t, d.HealthFailed)
+}
+
+// The strip's marker is raised from the newest run or not at all: a newer run
+// the block could not read is a check nobody has a reading of, and an older
+// run's failure under it is not what a marker says. The rows already refuse
+// that claim, and a marker making it would be the strip disagreeing with the
+// block it is drawn beside.
+func TestDeployReaderRaisesNoMarkerFromARunUnderAnUnreadNewest(t *testing.T) {
+	t.Parallel()
+
+	stub := &deployStub{
+		repos: []string{"sloan/fractals-nextjs"},
+		runs: map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {
+			testHealthRun(2, "failure", 41),
+			testHealthRun(1, "failure", 21),
+		}},
+		jobs: map[int64][]forgejo.ActionRunJob{
+			1: healthJobs("success", "success", "failure"),
+		},
+		jobsErr: map[int64]error{2: io.EOF},
+	}
+	d := newDeployTestReader(stub, nil).Read()
+
+	require.Len(t, d.Health, 2)
+	assert.True(t, d.Health[1].Unread)
+	assert.Empty(t, d.Health[1].Status)
+	assert.Empty(t, d.HealthFailed, "the newest check was not read, so nothing is known to have failed")
+
+	// And with the newest run read, the failure under it is not the marker's
+	// either: only the newest run's own result is.
+	stub.jobsErr = nil
+	stub.jobs[2] = healthJobs("success", "success", "success")
+	d = newDeployTestReader(stub, nil).Read()
+	assert.Empty(t, d.HealthFailed, "the newest check passed, whatever the run under it did")
+	assert.Equal(t, healthSuccess, d.Health[1].Status)
+	assert.Equal(t, 1, d.Health[1].Passed, "the older failure is still in the count")
+	assert.Equal(t, 2, d.Health[1].Runs)
 }
 
 // A run the block could not read under a newer one the block could does not

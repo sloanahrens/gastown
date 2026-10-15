@@ -70,11 +70,11 @@ const (
 
 	// healthRunWindow is how many of an app's newest health runs a row is
 	// counted over: the pass count's denominator, and how far back the block
-	// looks for the environment's last green. The jobs of every run in the
-	// window are fetched, one call each, since an environment's result is not
-	// on the run — the run's own status is the whole workflow's — so each run
-	// costs one call. Only a repo that has health runs pays it, and the whole
-	// read shares the refresh's own deadline.
+	// looks for the environment's last green. Listing them is one call per
+	// repo, which every repo the viewer sees pays; the jobs are one call each
+	// per run of the window, which only a repo with health runs pays, since an
+	// environment's result is not on the run — the run's own status is the
+	// whole workflow's. The whole read shares the refresh's own deadline.
 	healthRunWindow = 24
 
 	// deployNoRunnerAfter is how long a deploy run may sit waiting before the
@@ -280,6 +280,7 @@ func (r *DeployReader) Read() *Deploys {
 
 	var (
 		runs         []deployRun
+		readable     []string // the repos whose runs answered, whose checks are read below
 		health       []DeployHealthRow
 		healthFailed []string
 		missing      []string
@@ -299,21 +300,28 @@ func (r *DeployReader) Read() *Deploys {
 			continue
 		}
 		runs = append(runs, found...)
-		// The same repo's scheduled checks, folded. A repo that cannot list
-		// them costs the block its scheduled rows and nothing else: the deploy
-		// runs above are already in hand, and a repo with no health run at all
-		// shows nothing extra.
-		rows, failed := r.healthRows(ctx, name, owner, repo)
-		health = append(health, rows...)
-		if failed {
-			healthFailed = append(healthFailed, healthApp(name))
-		}
+		readable = append(readable, name)
 	}
 	if len(missing) == len(names) && len(missing) > 0 {
 		// Every repo failed, so there is no fresh value at all. That is the
 		// viewer not answering, and the note says so rather than the block
 		// drawing an empty list that reads as a town with no deploys.
 		return &Deploys{Runs: []DeployRun{}, Error: forgejoErrorClass(firstErr)}
+	}
+	// The scheduled checks are read after every repo's runs rather than beside
+	// them, because they are the read that costs: a jobs call per run of the
+	// window. A refresh that runs out of the shared deadline then loses the
+	// checks — a row the block draws nothing for, as a repo with no health run
+	// draws nothing — rather than the deploys the block is about. A repo that
+	// cannot list its checks costs itself those rows and nothing else: its runs
+	// above are already in hand.
+	for _, name := range readable {
+		owner, repo, _ := strings.Cut(name, "/")
+		rows, failed := r.healthRows(ctx, name, owner, repo)
+		health = append(health, rows...)
+		if failed {
+			healthFailed = append(healthFailed, healthApp(name))
+		}
 	}
 
 	sort.SliceStable(runs, func(i, j int) bool { return runs[i].created.After(runs[j].created) })
@@ -528,10 +536,12 @@ func foldHealth(name string, window []healthRun) ([]DeployHealthRow, bool) {
 					row.LastGreen = hr.created
 				}
 			}
-			if !have {
+			if read && !have {
 				// The first run that carries this environment is the newest
 				// one: the window is newest first, and a run whose jobs were
-				// not read carries no environment at all.
+				// not read carries no environment at all. A row whose newest
+				// run was not read takes no result at all, so the row and its
+				// Unread mark say one thing rather than two.
 				have = true
 				row.Status, row.At, row.URL = status, hr.created, deployURL(hr.run.HTMLURL)
 			}
@@ -569,22 +579,22 @@ func healthWindowEnvs(window []healthRun) []string {
 }
 
 // healthFailed reports whether an app's newest scheduled check failed, which
-// is what the strip's marker is drawn from. A run whose environment jobs are
-// skipped is an app that is off on purpose: that is not a failure, and it is
-// why the run's own status is not what this reads.
+// is what the strip's marker is drawn from. It is the newest run's word and no
+// older one's: a run the block could not read is no word at all, and a marker
+// raised from the run under it would claim the newest check failed when the
+// block never saw it — the same claim the row beside it refuses to make.
+//
+// A run whose environment jobs are skipped is an app that is off on purpose:
+// that is not a failure, and it is why the run's own status is not what this
+// reads.
 func healthFailed(window []healthRun) bool {
-	for _, hr := range window {
-		if hr.unread {
-			// A run the block could not read is no word on the app; the newest
-			// one it did read is.
-			continue
-		}
-		for _, status := range hr.envs {
-			if status == healthFailure {
-				return true
-			}
-		}
+	if len(window) == 0 || window[0].unread {
 		return false
+	}
+	for _, status := range window[0].envs {
+		if status == healthFailure {
+			return true
+		}
 	}
 	return false
 }

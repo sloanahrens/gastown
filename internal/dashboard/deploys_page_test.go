@@ -50,6 +50,9 @@ func TestDeploysBlockDrawsWhatTheReaderDecided(t *testing.T) {
 		`box.append(el("div", err ? "badc" : "empty", err ? "no deploy runs: " + err : "no deploy runs yet"));`,
 		`for (const r of runs) box.append(deployRow(r));`,
 		`if (!runs.length && !health.length)`,
+		// The runs' header is drawn only where there are runs: a block holding
+		// scheduled rows alone has no run column to name (gt-t9w60).
+		`if (runs.length) {`,
 	} {
 		if !strings.Contains(draw, want) {
 			t.Errorf("renderDeploys has no %q", want)
