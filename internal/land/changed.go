@@ -328,6 +328,7 @@ var treeWideGuards = []treeWideGuard{
 		tests: []string{
 			"TestShippedOMRubricIsGradeable",
 			"TestShippedOMRubricCarriesInstructionProliferationCriterion",
+			"TestShippedOMThresholdIsGastownBar",
 		},
 		judges:  func(rel string) bool { return rel == ".om.json" },
 		removal: true,

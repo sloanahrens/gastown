@@ -120,3 +120,24 @@ func TestShippedOMRubricCarriesInstructionProliferationCriterion(t *testing.T) {
 		t.Errorf("%s guidance no longer points at the rule it enforces (R2, one place per meaning), so a reviewer has nothing to cite: %q", instructionProliferationCriterion, c.Guidance)
 	}
 }
+
+// TestShippedOMThresholdIsGastownBar pins the approval bar the landing worker
+// reads from the repo-root .om.json, through the reader that reads it: an
+// OMThreshold that finds no file, no key or a non-numeric one reports 0, and no
+// om verdict scores below 0, so a bar degraded into one of those shapes holds
+// every approve to nothing and no other test in the tree would say so. It also
+// catches the plainer one: the file still parses and the value moved.
+//
+// Sloan set gastown's bar to 0.7 on 2026-10-14 (gt-f4wgn); a later deliberate
+// change moves this pin with it.
+func TestShippedOMThresholdIsGastownBar(t *testing.T) {
+	t.Parallel()
+	root := filepath.Dir(shippedRubricPath(t))
+	got, err := OMThreshold(root)
+	if err != nil {
+		t.Fatalf("OMThreshold(%s): %v", root, err)
+	}
+	if got != 0.7 {
+		t.Errorf("OMThreshold(%s) = %v, want 0.7: the bar is the value the landing worker holds an approve to, and OMThreshold reports a missing file or key as 0", root, got)
+	}
+}
