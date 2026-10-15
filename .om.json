@@ -1,5 +1,5 @@
 {
-  "threshold": 0.75,
+  "threshold": 0.8,
   "depth": "standard",
   "timeout": 900,
   "context_file": "docs/writing-for-agents.md",

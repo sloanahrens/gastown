@@ -128,8 +128,8 @@ func TestShippedOMRubricCarriesInstructionProliferationCriterion(t *testing.T) {
 // every approve to nothing and no other test in the tree would say so. It also
 // catches the plainer one: the file still parses and the value moved.
 //
-// Sloan set gastown's bar to 0.75 on 2026-10-15 (gt-h27a0), from 0.7
-// (gt-f4wgn); a later deliberate change moves this pin with it.
+// Sloan set gastown's bar to 0.8 on 2026-10-15 (gt-q2aaa); a later deliberate
+// change moves this pin with it.
 func TestShippedOMThresholdIsGastownBar(t *testing.T) {
 	t.Parallel()
 	root := filepath.Dir(shippedRubricPath(t))
@@ -137,7 +137,7 @@ func TestShippedOMThresholdIsGastownBar(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OMThreshold(%s): %v", root, err)
 	}
-	if got != 0.75 {
-		t.Errorf("OMThreshold(%s) = %v, want 0.75: the bar is the value the landing worker holds an approve to, and OMThreshold reports a missing file or key as 0", root, got)
+	if got != 0.8 {
+		t.Errorf("OMThreshold(%s) = %v, want 0.8: the bar is the value the landing worker holds an approve to, and OMThreshold reports a missing file or key as 0", root, got)
 	}
 }
