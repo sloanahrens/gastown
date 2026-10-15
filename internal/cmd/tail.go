@@ -228,6 +228,9 @@ func runTail(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	// The follow run's journal connections live as long as the run, and are
+	// handed back when it returns (gt-jw9sr).
+	defer closeTailSources(sources)
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var tick <-chan time.Time
@@ -460,8 +463,9 @@ func allTailKinds() map[string]bool {
 	return m
 }
 
-// openTailJournal opens a store's journal through bd, pinned to that store's
-// beads directory.
+// openTailJournal opens a store's journal: the journal read over a connection
+// of gastown's own, with bd answering the polls that connection cannot
+// (gt-jw9sr), both pinned to that store's beads directory.
 func openTailJournal(townRoot, rig string) (tailJournal, error) {
 	dir := doltserver.FindRigBeadsDir(townRoot, rig)
 	if dir == "" {
@@ -470,7 +474,8 @@ func openTailJournal(townRoot, rig string) (tailJournal, error) {
 	if _, err := os.Stat(dir); err != nil {
 		return nil, fmt.Errorf("beads directory %s: %w", dir, err)
 	}
-	return &tailBDJournal{Beads: beads.NewWithBeadsDir(townRoot, dir), dir: dir, run: deps.NewBDProcessRunner(filepath.Dir(dir))}, nil
+	bd := &tailBDJournal{Beads: beads.NewWithBeadsDir(townRoot, dir), dir: dir, run: deps.NewBDProcessRunner(filepath.Dir(dir))}
+	return newTailJournalStore(bd, func() (tailJournalRead, error) { return openTailJournalSQL(townRoot, dir) }), nil
 }
 
 // buildTailSources returns the selected sources in tie order: hq, then each
@@ -801,6 +806,17 @@ type tailLine struct {
 // and never stops the stream.
 type tailSource interface {
 	Poll() []tailLine
+}
+
+// closeTailSources releases what the sources hold open between polls — an
+// events source's journal connection (gt-jw9sr). A viewer that stops closes
+// them rather than leaving a Dolt session to the process's exit.
+func closeTailSources(sources []tailSource) {
+	for _, s := range sources {
+		if c, ok := s.(interface{ Close() error }); ok {
+			_ = c.Close()
+		}
+	}
 }
 
 // The kinds gt tail merges, in the order ties print.

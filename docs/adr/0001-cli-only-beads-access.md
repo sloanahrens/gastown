@@ -46,6 +46,10 @@ knows. gastown never installs `bd`.
   through a `gt` verb.
 - Hot reads (convoy event polling, dispatch board, ready work) move to `bd events tail --since`
   and `bd ready --json` and are measured after the move.
+- Measured, a viewer polling the journal every three seconds is a process per poll — two idle
+  viewers cost ~5 bd starts a second, about a fifth of Dolt's steady CPU — so the viewers read the
+  journal over one persistent connection and keep `bd events tail` for the polls it cannot answer
+  (gt-jw9sr).
 
 Decision record: wayfinder map claude-1ey, ticket claude-1ey.1, in the operator's `~/.claude`
 tracker; evidence in `~/.claude/docs/research/deep-review/synthesis.md` (theme T1).
