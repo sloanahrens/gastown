@@ -309,9 +309,8 @@ func TestNukeHandsThePreRemovalVerdictToRemoval(t *testing.T) {
 // sandbox stays. Removal's own shell check came after the release, so the bead
 // went back to open while the worktree was still on disk (gt-m31te).
 func TestNukeFromInsideTheWorktreeRefusesBeforeTouchingAnything(t *testing.T) {
-	// Not parallel: t.Chdir moves the whole process.
+	t.Parallel()
 	f := newNukeE2E(t)
-	t.Chdir(f.polecatAt)
 
 	releaser := &recordingReleaser{
 		fakeWorkReleaser: &fakeWorkReleaser{
@@ -328,6 +327,9 @@ func TestNukeFromInsideTheWorktreeRefusesBeforeTouchingAnything(t *testing.T) {
 			Releaser:      releaser,
 			SurvivingWork: func(string) (string, error) { return "", nil },
 			MoleculeBeads: f.store,
+			// The refusal the Manager's check gives for a shell in the
+			// worktree, without moving the test process there.
+			ShellCheck: func(string) error { return polecat.ErrShellInWorktree },
 		},
 	})
 

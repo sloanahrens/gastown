@@ -2696,6 +2696,9 @@ type nukePolecatOptions struct {
 // nukeDeps is the nuke's process-starting collaborators, each nil meaning the
 // production one. See nukePolecatOptions.Deps.
 type nukeDeps struct {
+	// ShellCheck refuses a nuke run from a shell inside the polecat's
+	// worktree. nil: the Manager's own check against the process directory.
+	ShellCheck func(polecatName string) error
 	// Sessions stops the seat's tmux session. nil: the operator supervisor's
 	// polecat session manager over a fresh tmux.
 	Sessions polecatSessionStopper
@@ -2831,18 +2834,23 @@ func preserveFailureBlocker(rigName, polecatName string, force, acknowledged boo
 }
 
 func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manager, r *rig.Rig, opts nukePolecatOptions) error {
+	deps := opts.Deps
+	if deps == nil {
+		deps = &nukeDeps{}
+	}
+
 	// Refuse before any step mutates state: the session kill, molecule burn and
 	// hooked-work release below cannot be undone when removal later refuses
 	// because the operator's shell is inside this worktree.
-	if err := mgr.CheckShellOutsideWorktree(polecatName); err != nil {
+	shellCheck := deps.ShellCheck
+	if shellCheck == nil {
+		shellCheck = mgr.CheckShellOutsideWorktree
+	}
+	if err := shellCheck(polecatName); err != nil {
 		return err
 	}
 	if err := checkNukeActiveMRSafety(mgr, polecatName, rigName, opts.Force); err != nil {
 		return err
-	}
-	deps := opts.Deps
-	if deps == nil {
-		deps = &nukeDeps{}
 	}
 
 	// Step 1: Kill tmux session unconditionally to prevent ghost sessions

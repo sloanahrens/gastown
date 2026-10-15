@@ -186,6 +186,10 @@ type Manager struct {
 	// beforePolecatLock, when set, runs as lockPolecat is about to wait on a
 	// polecat's lock, so a test can see a caller reach the wait.
 	beforePolecatLock func(name string)
+	// getwd is the process working directory the shell check compares against
+	// the worktree; nil means os.Getwd. A test sets it instead of moving the
+	// whole process with a chdir.
+	getwd func() (string, error)
 	// clock paces the Dolt retry backoff; nil is the real clock.
 	clock clockwork.Clock
 	// diskSpace reports the free space at a path; nil means
@@ -1419,7 +1423,11 @@ func (m *Manager) RemoveWithOptions(name string, opts RemoveOptions) (retErr err
 // so the broken shell is harmless.
 // See: https://github.com/steveyegge/gastown/issues/942
 func (m *Manager) CheckShellOutsideWorktree(name string) error {
-	cwd, cwdErr := os.Getwd()
+	getwd := m.getwd
+	if getwd == nil {
+		getwd = os.Getwd
+	}
+	cwd, cwdErr := getwd()
 	if cwdErr != nil {
 		return nil
 	}

@@ -2856,8 +2856,9 @@ func TestCleanupStaleBranches_KeepsBranchWhenOriginIsUnreachable(t *testing.T) {
 // bead is not released, or the work could be redispatched while the worktree
 // is still on disk (gt-m31te).
 func TestRemoveWithOptions_ShellInWorktreeLeavesBeadsUntouched(t *testing.T) {
-	// Not parallel: t.Chdir moves the whole process.
+	t.Parallel()
 	mgr, _, bd, added, _ := canonicalWithPolecats(t, true, "toast")
+	mgr.getwd = func() (string, error) { return added["toast"].ClonePath, nil }
 	agentID := mgr.agentBeadID("toast")
 	bd.Seed(beads.Issue{ID: "gt-work1", Title: "work", Status: "in_progress", Assignee: mgr.assigneeID("toast")})
 	_, before, err := beads.GetAgentBead(bd, agentID)
@@ -2865,7 +2866,6 @@ func TestRemoveWithOptions_ShellInWorktreeLeavesBeadsUntouched(t *testing.T) {
 		t.Fatalf("GetAgentBead before: %v", err)
 	}
 
-	t.Chdir(added["toast"].ClonePath)
 	err = mgr.RemoveWithOptions("toast", RemoveOptions{Force: true, Nuclear: true})
 	if !errors.Is(err, ErrShellInWorktree) {
 		t.Fatalf("RemoveWithOptions with the shell in the worktree = %v, want ErrShellInWorktree", err)
@@ -2895,8 +2895,9 @@ func TestRemoveWithOptions_ShellInWorktreeLeavesBeadsUntouched(t *testing.T) {
 // SelfNuke is the polecat deleting its own worktree from inside it: the shell
 // check is skipped and the removal goes ahead.
 func TestRemoveWithOptions_SelfNukeIgnoresShellInWorktree(t *testing.T) {
+	t.Parallel()
 	mgr, _, _, added, _ := canonicalWithPolecats(t, true, "toast")
-	t.Chdir(added["toast"].ClonePath)
+	mgr.getwd = func() (string, error) { return added["toast"].ClonePath, nil }
 	if err := mgr.RemoveWithOptions("toast", RemoveOptions{Force: true, Nuclear: true, SelfNuke: true}); err != nil {
 		t.Fatalf("self-nuke from inside the worktree: %v", err)
 	}
