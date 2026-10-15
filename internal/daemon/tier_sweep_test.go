@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -814,5 +815,54 @@ func TestTierSweepCoversRigAgreesWithTierSweepCoverageFor(t *testing.T) {
 		if got.Covered != d.tierSweepCoversRig(rig) {
 			t.Errorf("rig %s: TierSweepCoverageFor covered=%v, daemon predicate=%v", rig, got.Covered, d.tierSweepCoversRig(rig))
 		}
+	}
+}
+
+// A deferred early re-run (the stage never started) learned nothing about the
+// new tip, so it must leave LastSHA at the old one: runTierSweepEarly skips a
+// tip equal to LastSHA, and advancing it would lose the retry to the hourly
+// cycle.
+func TestRunTierSweepEarlyKeepsLastSHAOnDeferredVerdict(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec, _, _ := newTierSweepDaemon(t, now, "gastown")
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "new2", nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+	if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{
+		LastRun: now.Add(-15 * time.Minute), LastSHA: "red1", LastGreenSHA: "green0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// First attempt: the shell stage runs green but the integration stage
+	// never starts (a slot the sweep could not take), so the cycle defers
+	// with a partial record.
+	green := &tierSweepRunRecorder{}
+	green.green()
+	rec.result = func(st tierSweepStage) tierSweepStageResult {
+		if st.slot {
+			return tierSweepStageResult{ran: false, err: errors.New("slot busy")}
+		}
+		return green.result(st)
+	}
+	d.runTierSweepEarly([]string{"gastown"}, now)
+	st := tierSweepTestState(t, d, "gastown")
+	if st.LastSHA != "red1" {
+		t.Fatalf("LastSHA = %q after a deferred early re-run, want the old tip red1", st.LastSHA)
+	}
+	if !st.LastRun.Equal(now) {
+		t.Fatalf("LastRun = %v, want %v so the retry gap spaces the next attempt", st.LastRun, now)
+	}
+
+	// Next early tick, past the gap: the retry runs and records the tip.
+	later := now.Add(tierSweepRetryMinGap)
+	rec.stages = nil
+	rec.green()
+	d.runTierSweepEarly([]string{"gastown"}, later)
+	if len(rec.stages) == 0 {
+		t.Fatal("the next early tick did not retry the deferred re-run")
+	}
+	if st := tierSweepTestState(t, d, "gastown"); st.LastSHA != "new2" || st.LastGreenSHA != "new2" {
+		t.Fatalf("record = %+v, want the retry to land on new2", st)
 	}
 }
