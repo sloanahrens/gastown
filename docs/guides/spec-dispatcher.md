@@ -154,9 +154,16 @@ such as `"90m"`, default `60m`) is the only limit on such a seat, counted from t
 sling. Past it the guard stops the session with the same deliberate-stop record
 `gt session stop` writes, so `patrol_scan` and the zombie detector leave the seat
 down, logs `overrun_guard: stopped scheduled <rig>/<polecat> on <bead> after
-<elapsed>` and adds one comment to the bead naming the limit. It does not hand
-the bead back, label it `needs-split`, checkpoint or push: a scheduled run is
-report-only, and the `scheduled_slings` patrol creates the next one. `"0"` never
+<elapsed>` and adds one comment to the bead naming the limit. It then closes the
+run bead (clearing its assignee first) and releases the seat the way an ordinary
+overrun stop does: reset the agent bead, record the cleanup status, retire the
+seat. It does not hand the bead back as work, label it `needs-split`, checkpoint
+or push: a scheduled run is report-only, and the `scheduled_slings` patrol
+creates the next one on the entry's own interval and gate (a run left hooked
+would pin the seat against `max_total` and keep the entry in skip-open). A step
+that fails is retried on the next tick without repeating the comment or the
+close; a close that fails five times leaves the seat paused and the bead hooked
+for an operator, as before. `"0"` never
 stops a scheduled seat, which is how the guard behaved before the limit; a
 negative or unparseable value is refused when the config loads. Add the key to
 `settings/config.json` only after the running `gt` binary knows it, because the

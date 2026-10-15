@@ -111,27 +111,100 @@ func (d *Daemon) overrunScheduledStop(s overrunSeams, seat overrunSeat, st overr
 		}
 	}
 
-	// 3. Comment on the bead.
-	if s.comment != nil {
-		text := fmt.Sprintf("scheduled run stopped by the overrun guard after %s: it ran past "+
-			"daemon.patrols.overrun_guard.scheduled_stop_after (%s). The bead's status is unchanged; "+
-			"the scheduled_slings patrol creates the next run.",
-			elapsed.Round(time.Second), overrunScheduledStopAfter(d.patrolConfig))
-		if err := s.comment(seat, text); err != nil {
-			st.CommentFailures++
-			d.logger.Printf("overrun_guard: stop scheduled %s on %s: comment failed (%d of %d): %v",
-				who, st.Bead, st.CommentFailures, overrunCommentMaxAttempts, err)
-			if st.CommentFailures < overrunCommentMaxAttempts {
+	limit := overrunScheduledStopAfter(d.patrolConfig)
+	target := seat
+	target.Bead = st.Bead
+
+	// 3. Comment on the bead, once: a later step that fails is retried from
+	// the saved state and must not repeat the comment.
+	if st.CommentedAt.IsZero() {
+		if s.comment != nil {
+			text := fmt.Sprintf("scheduled run stopped by the overrun guard after %s: it ran past "+
+				"daemon.patrols.overrun_guard.scheduled_stop_after (%s). The run is report-only: "+
+				"the guard closes this bead and releases the seat, and the scheduled_slings patrol "+
+				"creates the next run.", elapsed.Round(time.Second), limit)
+			if err := s.comment(target, text); err != nil {
+				st.CommentFailures++
+				d.logger.Printf("overrun_guard: stop scheduled %s on %s: comment failed (%d of %d): %v",
+					who, st.Bead, st.CommentFailures, overrunCommentMaxAttempts, err)
+				if st.CommentFailures < overrunCommentMaxAttempts {
+					save()
+					return
+				}
+				d.logger.Printf("overrun_guard: stop scheduled %s on %s: giving up on the comment; the stop goes on", who, st.Bead)
+			}
+		}
+		st.CommentedAt = now
+		if !save() {
+			return
+		}
+	}
+
+	// 4. Close the run bead. A scheduled run is report-only and its schedule
+	// makes the next one, so there is no work to hand back: left hooked, the
+	// bead would hold the seat against the town total and keep the entry in
+	// skip-open until someone closed it by hand. The assignee is cleared first,
+	// since bd refuses a close by an actor that is not the assignee.
+	if st.ClosedAt.IsZero() && s.closeBead != nil {
+		reason := fmt.Sprintf("stopped by the overrun guard after %s (scheduled_stop_after %s); "+
+			"a scheduled run is report-only and the scheduled_slings patrol creates the next one",
+			elapsed.Round(time.Second), limit)
+		if err := s.closeBead(target, reason); err != nil {
+			st.CloseFailures++
+			d.logger.Printf("overrun_guard: stop scheduled %s on %s: close failed (%d of %d): %v",
+				who, st.Bead, st.CloseFailures, overrunCommentMaxAttempts, err)
+			if st.CloseFailures < overrunCommentMaxAttempts {
 				save()
 				return
 			}
-			d.logger.Printf("overrun_guard: stop scheduled %s on %s: giving up on the comment; the session stays stopped", who, st.Bead)
+			// The bead is still hooked, so the seat is not released: it stays
+			// paused for an operator, as a scheduled stop left it before.
+			st.StoppedAt = now
+			save()
+			d.logger.Printf("overrun_guard: stop scheduled %s on %s: giving up on closing the bead; the seat stays paused (close it and nuke the seat by hand)", who, st.Bead)
+			return
+		}
+		st.ClosedAt = now
+		if !save() {
+			return
+		}
+	}
+
+	// 5. Release the seat, in the order overrunStop releases one: reset the
+	// agent bead (it still names the closed run), record the cleanup status
+	// the reset clears (so gt polecat nuke accepts the seat), and retire last
+	// (ends the pause and stops the seat's record in one write). Every step
+	// runs while the pause still keeps a new sling off the name; a failure
+	// leaves the stop pending and the next tick repeats from here.
+	if st.ClosedAt.IsZero() {
+		// No close seam: the bead is still hooked, so leave the seat paused.
+		st.StoppedAt = now
+		save()
+		return
+	}
+	if s.resetAgentBead != nil {
+		if err := s.resetAgentBead(target); err != nil {
+			d.logger.Printf("overrun_guard: WARNING: %s: agent bead not reset after closing %s: %v", who, st.Bead, err)
+			return
+		}
+	}
+	if s.recordCleanup != nil {
+		if err := s.recordCleanup(seat); err != nil {
+			d.logger.Printf("overrun_guard: WARNING: %s: cleanup status not recorded for the released seat %s: %v", who, st.Bead, err)
+		}
+	}
+	if s.retire != nil {
+		if err := s.retire(seat); err != nil {
+			d.logger.Printf("overrun_guard: WARNING: %s: seat not retired after closing %s: %v", who, st.Bead, err)
+			return
 		}
 	}
 	st.StoppedAt = now
 	if !save() {
-		d.logger.Printf("overrun_guard: WARNING: %s: %s stopped but state not saved — the comment may be repeated", who, st.Bead)
+		d.logger.Printf("overrun_guard: WARNING: %s: %s released but state not saved — the release may be repeated", who, st.Bead)
+		return
 	}
+	d.logger.Printf("overrun_guard: released scheduled %s: run bead %s closed, seat retired", who, st.Bead)
 }
 
 // overrunCommentBead is the production comment seam: one comment on the seat's
@@ -142,4 +215,18 @@ func (d *Daemon) overrunCommentBead(seat overrunSeat, text string) error {
 	store := beads.NewPlain(d.config.TownRoot, bdMutationRoutingEnv(d.config.TownRoot),
 		beads.WithBin(d.bdPathOrDefault())).WithTimeout(overrunHandBackTimeout)
 	return polecat.NewBeadWriter(store, overrunActor).Comment(ctx, seat.Bead, text)
+}
+
+// overrunCloseRunBead is the production closeBead seam: clear the assignee, then
+// close the run bead with reason. The close is forced past dependency checks, as
+// gt done's is: the run's molecule wisps must not hold a stopped run open.
+func (d *Daemon) overrunCloseRunBead(seat overrunSeat, reason string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), overrunHandBackTimeout)
+	defer cancel()
+	store := beads.NewPlain(d.config.TownRoot, bdMutationRoutingEnv(d.config.TownRoot),
+		beads.WithBin(d.bdPathOrDefault())).WithTimeout(overrunHandBackTimeout)
+	if err := polecat.NewBeadWriter(store, overrunActor).ClearAssignee(ctx, seat.Bead); err != nil {
+		return err
+	}
+	return store.ForceCloseWithReason(reason, seat.Bead)
 }

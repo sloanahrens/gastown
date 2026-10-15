@@ -105,10 +105,16 @@ type overrunSeams struct {
 	recordCleanup func(seat overrunSeat) error
 	retire        func(seat overrunSeat) error
 
-	// comment adds one comment to the seat's bead and nothing else: the
-	// scheduled stop's record, which leaves the bead's status, assignee and
-	// labels as they are. nil means no comment.
+	// comment adds one comment to the seat's bead: the scheduled stop's
+	// record. nil means no comment.
 	comment func(seat overrunSeat, text string) error
+
+	// closeBead closes a stopped scheduled run's bead with reason, after
+	// clearing its assignee (a close by an actor that is not the assignee is
+	// refused). It is the scheduled stop's hand-back: the run is report-only and
+	// the scheduled_slings patrol creates the next one. nil means the bead is
+	// left hooked and the seat stays paused.
+	closeBead func(seat overrunSeat, reason string) error
 
 	// stopLapsed re-reads, before a resumed stop runs its checkpoint or
 	// hand-back, whether the stop still owns the seat. It returns why not

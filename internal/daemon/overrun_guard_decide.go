@@ -135,12 +135,19 @@ type overrunState struct {
 	StoppedAt time.Time `json:"stopped_at,omitzero"`
 
 	// Scheduled marks a stop of a scheduled sling (overrunScheduledStop): it
-	// ends at the session stop and one bead comment, so a pending one is
-	// resumed there and never by overrunStop, which would hand the bead back.
-	// CommentFailures counts the failed comments; at
-	// overrunCommentMaxAttempts the stop ends without one.
-	Scheduled       bool `json:"scheduled,omitempty"`
-	CommentFailures int  `json:"comment_failures,omitempty"`
+	// stops the session, comments once, closes the run bead and releases the
+	// seat, so a pending one is resumed there and never by overrunStop, which
+	// would hand the bead back as work. CommentFailures counts the failed
+	// comments; at overrunCommentMaxAttempts the stop goes on without one.
+	// CommentedAt and ClosedAt stamp those two steps so a retry of a later
+	// step does not repeat them; CloseFailures counts the failed closes, and
+	// at overrunCommentMaxAttempts the stop ends with the seat left paused and
+	// the bead hooked, as before this release step existed.
+	Scheduled       bool      `json:"scheduled,omitempty"`
+	CommentFailures int       `json:"comment_failures,omitempty"`
+	CommentedAt     time.Time `json:"commented_at,omitzero"`
+	ClosedAt        time.Time `json:"closed_at,omitzero"`
+	CloseFailures   int       `json:"close_failures,omitempty"`
 }
 
 // overrunStatePath is <town>/.runtime/overrun-guard/<bead>.json. A bead id

@@ -93,8 +93,10 @@ type overrunFake struct {
 	agentBeadsReset []string
 	// handBackNotes lists the note each handBack call carried, in the same order.
 	handBackNotes []string
-	// comments lists "<bead>: <text>" for each comment a scheduled stop added.
+	// comments lists "<bead>: <text>" for each comment a scheduled stop added;
+	// closed lists "<bead>: <reason>" for each run bead it closed.
 	comments []string
+	closed   []string
 
 	// submitted is what the submittedNow re-check answers from the start;
 	// readyAfterStop makes it answer true once the session has been stopped,
@@ -145,6 +147,13 @@ func (f *overrunFake) seams() overrunSeams {
 				return err
 			}
 			f.comments = append(f.comments, seat.Bead+": "+text)
+			return nil
+		},
+		closeBead: func(seat overrunSeat, reason string) error {
+			if err := f.step("close", seat); err != nil {
+				return err
+			}
+			f.closed = append(f.closed, seat.Bead+": "+reason)
 			return nil
 		},
 		push: func(seat overrunSeat) error {

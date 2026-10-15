@@ -79,9 +79,16 @@ func TestRunOverrunGuard_ScheduledStoppedAtLimit(t *testing.T) {
 
 	d.runOverrunGuard(f.seams())
 
-	want := []string{"pause gastown/capable", "stop gastown/capable", "comment gastown/capable"}
+	want := []string{"pause gastown/capable", "stop gastown/capable", "comment gastown/capable", "close gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
 	if !slices.Equal(f.calls, want) {
 		t.Errorf("calls = %v, want %v", f.calls, want)
+	}
+	if len(f.closed) != 1 || !strings.HasPrefix(f.closed[0], "gt-r71dd: stopped by the overrun guard after 1h0m0s") ||
+		!strings.Contains(f.closed[0], "scheduled_stop_after 1h0m0s") {
+		t.Errorf("closed = %q, want the run bead closed with the limit in the reason", f.closed)
+	}
+	if !slices.Equal(f.agentBeadsReset, []string{"gt-r71dd"}) {
+		t.Errorf("agent beads reset = %v, want the run's", f.agentBeadsReset)
 	}
 	if len(f.nudges) != 0 || len(f.handedBack) != 0 {
 		t.Errorf("nudges %v, hand-backs %v; want none", f.nudges, f.handedBack)
@@ -95,8 +102,11 @@ func TestRunOverrunGuard_ScheduledStoppedAtLimit(t *testing.T) {
 		t.Errorf("comments = %q, want one naming scheduled_stop_after (1h0m0s)", f.comments)
 	}
 	st, err := readOverrunState(d.config.TownRoot, "gt-r71dd")
-	if err != nil || st.StoppedAt.IsZero() || !st.Scheduled {
-		t.Errorf("state = %+v (err %v), want a finished scheduled stop", st, err)
+	if err != nil || st.StoppedAt.IsZero() || !st.Scheduled || st.CommentedAt.IsZero() || st.ClosedAt.IsZero() {
+		t.Errorf("state = %+v (err %v), want a finished scheduled stop that commented and closed", st, err)
+	}
+	if want := "overrun_guard: released scheduled gastown/capable: run bead gt-r71dd closed, seat retired"; !strings.Contains(buf.String(), want) {
+		t.Errorf("log lacks %q:\n%s", want, buf.String())
 	}
 
 	// The next tick finds the seat again (the fake keeps listing it) and does
@@ -237,7 +247,7 @@ func TestRunOverrunGuard_ScheduledFailedStopRetriesNextTick(t *testing.T) {
 	f.now = f.now.Add(time.Minute)
 	d.runOverrunGuard(f.seams())
 
-	want = []string{"pause gastown/capable", "stop gastown/capable", "comment gastown/capable"}
+	want = []string{"pause gastown/capable", "stop gastown/capable", "comment gastown/capable", "close gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
 	if !slices.Equal(f.calls, want) {
 		t.Errorf("second tick calls = %v, want %v", f.calls, want)
 	}
@@ -247,8 +257,8 @@ func TestRunOverrunGuard_ScheduledFailedStopRetriesNextTick(t *testing.T) {
 }
 
 // A comment that fails after the session is gone is retried from the saved
-// state on the next tick, when the seat is no longer listed; the resume ends
-// at the comment and never hands the bead back.
+// state on the next tick, when the seat is no longer listed; the resume goes on
+// to close the run bead and release the seat, and never hands the bead back.
 func TestRunOverrunGuard_ScheduledFailedCommentResumes(t *testing.T) {
 	t.Parallel()
 	d, buf := newScheduledOverrunDaemon(t, "", false)
@@ -269,7 +279,7 @@ func TestRunOverrunGuard_ScheduledFailedCommentResumes(t *testing.T) {
 	f.now = f.now.Add(time.Minute)
 	d.runOverrunGuard(f.seams())
 
-	want := []string{"recheck gastown/capable", "comment gastown/capable"}
+	want := []string{"recheck gastown/capable", "comment gastown/capable", "close gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
 	if !slices.Equal(f.calls, want) {
 		t.Errorf("resume calls = %v, want %v", f.calls, want)
 	}
@@ -319,5 +329,108 @@ func TestRunOverrunGuard_ScheduledSubmittedBeforeStop(t *testing.T) {
 
 	if len(f.calls) != 0 || len(f.comments) != 0 {
 		t.Errorf("submitted seat acted on: calls %v, comments %v", f.calls, f.comments)
+	}
+}
+
+// A close that fails after the comment landed is retried on the next tick without
+// repeating the comment, and the seat is not released until the bead is closed.
+func TestRunOverrunGuard_ScheduledFailedCloseRetriesWithoutRecommenting(t *testing.T) {
+	t.Parallel()
+	d, buf := newScheduledOverrunDaemon(t, "", false)
+	f := newOverrunFake(61*time.Minute, overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-r71dd", Scheduled: true})
+	f.failOn = map[string]error{"close": errors.New("bd down")}
+
+	d.runOverrunGuard(f.seams())
+
+	if !strings.Contains(buf.String(), "close failed (1 of 5): bd down") {
+		t.Errorf("failure not logged:\n%s", buf.String())
+	}
+	if slices.Contains(f.calls, "retire gastown/capable") || slices.Contains(f.calls, "reset-agent-bead gastown/capable") {
+		t.Errorf("seat released although the bead is still hooked: %v", f.calls)
+	}
+	st, _ := readOverrunState(d.config.TownRoot, "gt-r71dd")
+	if !st.StoppedAt.IsZero() || st.CommentedAt.IsZero() || st.CloseFailures != 1 {
+		t.Errorf("state = %+v, want a pending stop that commented and failed one close", st)
+	}
+
+	f.seats, f.calls, f.failOn = nil, nil, nil
+	f.now = f.now.Add(time.Minute)
+	d.runOverrunGuard(f.seams())
+
+	want := []string{"recheck gastown/capable", "close gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
+	if !slices.Equal(f.calls, want) {
+		t.Errorf("resume calls = %v, want %v (no second comment)", f.calls, want)
+	}
+	if len(f.comments) != 1 || len(f.closed) != 1 {
+		t.Errorf("comments %q, closed %q; want one of each", f.comments, f.closed)
+	}
+	if st, _ := readOverrunState(d.config.TownRoot, "gt-r71dd"); st.StoppedAt.IsZero() {
+		t.Errorf("stop still pending after the release: %+v", st)
+	}
+}
+
+// A close that never lands is given up on after five tries: the stop ends with the
+// seat left paused and the bead hooked (an operator closes and nukes by hand), and
+// the guard does not loop on it.
+func TestRunOverrunGuard_ScheduledCloseGivenUpLeavesSeatPaused(t *testing.T) {
+	t.Parallel()
+	d, buf := newScheduledOverrunDaemon(t, "", false)
+	f := newOverrunFake(61*time.Minute, overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-r71dd", Scheduled: true})
+	f.failOn = map[string]error{"close": errors.New("bd down")}
+
+	d.runOverrunGuard(f.seams())
+	f.seats = nil
+	for range overrunCommentMaxAttempts {
+		f.now = f.now.Add(time.Minute)
+		d.runOverrunGuard(f.seams())
+	}
+
+	if !strings.Contains(buf.String(), "giving up on closing the bead; the seat stays paused") {
+		t.Errorf("give-up not logged:\n%s", buf.String())
+	}
+	st, _ := readOverrunState(d.config.TownRoot, "gt-r71dd")
+	if st.StoppedAt.IsZero() || st.CloseFailures != overrunCommentMaxAttempts || !st.ClosedAt.IsZero() {
+		t.Errorf("state = %+v, want a finished stop after %d failed closes and no close", st, overrunCommentMaxAttempts)
+	}
+	for _, c := range f.calls {
+		if strings.HasPrefix(c, "retire") || strings.HasPrefix(c, "reset-agent-bead") {
+			t.Errorf("seat released although the bead was never closed: %v", f.calls)
+		}
+	}
+	n := len(f.calls)
+	f.now = f.now.Add(time.Minute)
+	d.runOverrunGuard(f.seams())
+	if len(f.calls) != n {
+		t.Errorf("the guard acted again after giving up: %v", f.calls[n:])
+	}
+}
+
+// A retire that fails leaves the release pending: the next tick repeats from the
+// agent-bead reset, and neither the comment nor the close is repeated.
+func TestRunOverrunGuard_ScheduledFailedRetireRepeatsOnlyTheRelease(t *testing.T) {
+	t.Parallel()
+	d, buf := newScheduledOverrunDaemon(t, "", false)
+	f := newOverrunFake(61*time.Minute, overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-r71dd", Scheduled: true})
+	f.failOn = map[string]error{"retire": errors.New("intent locked")}
+
+	d.runOverrunGuard(f.seams())
+
+	if !strings.Contains(buf.String(), "seat not retired after closing gt-r71dd: intent locked") {
+		t.Errorf("failure not logged:\n%s", buf.String())
+	}
+	if st, _ := readOverrunState(d.config.TownRoot, "gt-r71dd"); !st.StoppedAt.IsZero() || st.ClosedAt.IsZero() {
+		t.Errorf("state = %+v, want a pending stop with the bead closed", st)
+	}
+
+	f.seats, f.calls, f.failOn = nil, nil, nil
+	f.now = f.now.Add(time.Minute)
+	d.runOverrunGuard(f.seams())
+
+	want := []string{"recheck gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
+	if !slices.Equal(f.calls, want) {
+		t.Errorf("resume calls = %v, want %v", f.calls, want)
+	}
+	if len(f.comments) != 1 || len(f.closed) != 1 {
+		t.Errorf("comments %q, closed %q; want one of each, not repeated", f.comments, f.closed)
 	}
 }
