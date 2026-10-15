@@ -406,11 +406,13 @@ func TestFollowupFeedIsOffWithoutABeadsSurface(t *testing.T) {
 func TestLandSurvivesAFollowupFeedFailure(t *testing.T) {
 	t.Parallel()
 	// The reviewer raises the finding the feed files on, at a score inside the
-	// band: below the top of it and above the rig's own floor of 0.
+	// band: below the top of it and above the rig's own floor of 0. It is a
+	// minor, because a major refuses the landing before the feed runs
+	// (gt-oi4je), and the feed's own filters are not what this test is about.
 	withFindings := func(f *landFixture) {
 		f.review = &fakeReviewer{fn: func(string) (Verdict, error) {
 			return Verdict{Verdict: VerdictApprove, Score: 0.8,
-				Findings: []Finding{{ID: "1", Severity: "major", Path: "b.txt", Line: 1, Title: "name the error"}}}, nil
+				Findings: []Finding{{ID: "1", Severity: "minor", Path: "b.txt", Line: 1, Title: "name the error"}}}, nil
 		}}
 	}
 	control := newLandFixture(t)

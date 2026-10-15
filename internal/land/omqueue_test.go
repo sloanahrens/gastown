@@ -11,10 +11,11 @@ import (
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
 
-// TestLandQueuesAnApprovedLandingsFindings: the queue runs off the landing
-// itself, once the record is written, so the bead a landing closed carries the
-// findings om raised on it for the next deep-review run (gt-qtj72).
-func TestLandQueuesAnApprovedLandingsFindings(t *testing.T) {
+// TestLandRunsNoFindingQueueForARefusedApprove: the queue runs off the landing
+// itself, once the record is written, so an approve the finding rules refuse
+// queues nothing — there is no record to hang the ledger on, and the major goes
+// back to the author instead of into the queue (gt-oi4je).
+func TestLandRunsNoFindingQueueForARefusedApprove(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
 	f.review.fn = func(string) (Verdict, error) {
@@ -26,32 +27,29 @@ func TestLandQueuesAnApprovedLandingsFindings(t *testing.T) {
 	}
 	lander := f.lander()
 	lander.OMQueue = true
-	if _, err := lander.Land(context.Background(), f.work); err != nil {
-		t.Fatalf("Land: %v", err)
+	if _, err := lander.Land(context.Background(), f.work); err == nil {
+		t.Fatal("Land landed an approve carrying a critical finding")
 	}
 
 	issue := f.bead()
-	want := []string{
-		omQueuedMarker + Fingerprint("b.txt", "drop the lock") + " P1 b.txt:1 drop the lock",
-		omQueuedMarker + Fingerprint("b.txt", "swap the nil check") + " P2 b.txt:2 swap the nil check",
+	if got := queuedLedgerLines(issue.Notes); len(got) != 0 {
+		t.Errorf("queued lines = %q, want none on a refusal", got)
 	}
-	var got []string
-	for _, line := range strings.Split(issue.Notes, "\n") {
+	if beads.HasLabel(issue, OMFindingsLabel) || strings.Contains(issue.Notes, LandingNoteMarker) {
+		t.Errorf("the refused landing queued findings or recorded a landing: labels = %v\n%s", issue.Labels, issue.Notes)
+	}
+}
+
+// queuedLedgerLines is the queued: ledger the notes carry, for a test that has
+// to say there is none.
+func queuedLedgerLines(notes string) []string {
+	var out []string
+	for _, line := range strings.Split(notes, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), omQueuedMarker) {
-			got = append(got, strings.TrimSpace(line))
+			out = append(out, strings.TrimSpace(line))
 		}
 	}
-	if !slices.Equal(got, want) {
-		t.Errorf("queued lines = %q, want %q", got, want)
-	}
-	if !beads.HasLabel(issue, OMFindingsLabel) {
-		t.Errorf("labels = %v, want %s", issue.Labels, OMFindingsLabel)
-	}
-	// The queue runs after the record, so the landing's own note is still the
-	// first thing the bead carries.
-	if !strings.Contains(issue.Notes, LandingNoteMarker) {
-		t.Errorf("the landing record is missing from the notes:\n%s", issue.Notes)
-	}
+	return out
 }
 
 // omQueueFixture is one landing whose finding queue runs: the beads store the
