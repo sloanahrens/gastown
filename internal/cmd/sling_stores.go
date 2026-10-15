@@ -115,6 +115,8 @@ func beadInfoOf(issue *beads.Issue) *beadInfo {
 		Labels:       issue.Labels,
 		Dependencies: issue.Dependencies,
 		IssueType:    issue.Type,
+		Priority:     issue.Priority,
+		CreatedAt:    issue.CreatedAt,
 	}
 }
 

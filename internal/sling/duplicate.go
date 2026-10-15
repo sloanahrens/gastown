@@ -34,6 +34,12 @@ type Duplicate struct {
 	Status    string
 	ClosedAt  string
 	IssueType string
+	// Priority and CreatedAt are the bead's dispatch-order keys. The guard
+	// ranks an unstarted overlap against the candidate with them, so the bead
+	// an all-open cluster lets through is the one the dispatcher would have
+	// taken first (gt-nlkba).
+	Priority  int
+	CreatedAt string
 	Refs      ContentRefs
 	// Blockers lists the IDs this bead has a blocking dependency on, as far as
 	// the caller could read them from bd. The overlap guard walks these edges
@@ -58,13 +64,64 @@ type DuplicateMatch struct {
 
 // Blocking reports whether the overlap is strong enough to refuse the sling:
 // a shared test name against live work, since shared files alone are common
-// between beads that are genuinely distinct (gt-4k3fj.5).
-func (m DuplicateMatch) Blocking() bool {
-	return len(m.SharedTests) > 0 && blockingStatuses[m.Bead.Status]
+// between beads that are genuinely distinct (gt-4k3fj.5). candidate is the
+// bead being slung, which the unstarted case ranks the overlap against.
+//
+// Work in flight on the test refuses the sling whoever the two beads are. An
+// unstarted overlap — an open bead, holding no seat — refuses only when it
+// precedes the candidate in dispatch order, which lets exactly one bead of an
+// all-open cluster through: the one the ready board would reach first. Every
+// open bead refusing every other refused the whole cluster forever and left
+// the dispatcher nothing to sling (gt-nlkba).
+func (m DuplicateMatch) Blocking(candidate Duplicate) bool {
+	if len(m.SharedTests) == 0 {
+		return false
+	}
+	if liveOverlapStatuses[m.Bead.Status] {
+		return true
+	}
+	return m.Bead.Status == "open" && Precedes(m.Bead, candidate)
 }
 
-// blockingStatuses are the statuses whose overlap refuses a sling.
-var blockingStatuses = map[string]bool{"open": true, "in_progress": true, "hooked": true}
+// liveOverlapStatuses are the statuses of work already in flight: a bead in
+// either name already holds a seat on its defect.
+var liveOverlapStatuses = map[string]bool{"in_progress": true, "hooked": true}
+
+// Precedes reports whether a comes before b in dispatch order: lower priority
+// number first, then earlier creation, then bead ID. It is the ready board's
+// own total order (specdispatch.Order), which is what lets the overlap guard
+// let exactly one bead of an all-open cluster through instead of refusing all
+// of them (gt-nlkba).
+func Precedes(a, b Duplicate) bool {
+	if a.Priority != b.Priority {
+		return a.Priority < b.Priority
+	}
+	ta, tb := parseDispatchTime(a.CreatedAt), parseDispatchTime(b.CreatedAt)
+	if !ta.Equal(tb) {
+		// An unparseable time sorts after every parseable one.
+		if ta.IsZero() {
+			return false
+		}
+		if tb.IsZero() {
+			return true
+		}
+		return ta.Before(tb)
+	}
+	return a.ID < b.ID
+}
+
+// parseDispatchTime reads the creation layouts bd writes — the same set
+// specdispatch.parseTime reads, so the guard's ranking cannot drift from the
+// board's on a spelling one of them accepted and the other did not.
+func parseDispatchTime(s string) time.Time {
+	s = strings.TrimSpace(s)
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05", "2006-01-02T15:04:05"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
+}
 
 // DepEdge is one blocking dependency edge as bd records it: From depends on
 // To.
@@ -181,16 +238,19 @@ func (e *duplicateRefusal) Error() string { return e.report }
 func (e *duplicateRefusal) Is(target error) bool { return target == ErrDuplicateContent }
 
 // DecideDuplicates turns the overlaps found against a bead into the decision
-// the dispatch acts on, and the report it prints either way.
-func DecideDuplicates(beadID string, matches []DuplicateMatch) DuplicateDecision {
+// the dispatch acts on, and the report it prints either way. candidate is the
+// bead being slung: it names the bead in the report and it is what each
+// unstarted overlap is ranked against.
+func DecideDuplicates(candidate Duplicate, matches []DuplicateMatch) DuplicateDecision {
 	if len(matches) == 0 {
 		return DuplicateDecision{}
 	}
+	beadID := candidate.ID
 
 	blocking := make([]DuplicateMatch, 0, len(matches))
 	warning := make([]DuplicateMatch, 0, len(matches))
 	for _, m := range matches {
-		if m.Blocking() {
+		if m.Blocking(candidate) {
 			blocking = append(blocking, m)
 		} else {
 			warning = append(warning, m)
@@ -202,17 +262,21 @@ func DecideDuplicates(beadID string, matches []DuplicateMatch) DuplicateDecision
 		fmt.Fprintf(&b, "%s Refusing to sling %s: its content overlaps %d existing bead(s).\n",
 			style.Error.Render("✗"), beadID, len(blocking))
 		b.WriteString("  Two beads describing one defect from different vantage points share no\n")
-		b.WriteString("  keywords, but they do name the same failing tests (gt-mcq).\n\n")
+		b.WriteString("  keywords, but they do name the same failing tests (gt-mcq).\n")
+		b.WriteString("  Work in flight on that test refuses the sling; unstarted work refuses only\n")
+		b.WriteString("  when it comes first in dispatch order, so a cluster of ready beads still\n")
+		b.WriteString("  dispatches one at a time rather than not at all.\n\n")
 		writeMatchList(&b, blocking)
 		// One line, and the report's last: an automatic dispatcher logs only
 		// the last line of a failed sling, so it has to carry both the reason
 		// and the remediation or the dispatcher log is blank again (gt-fudap).
-		fmt.Fprintf(&b, "\nRefusing to sling %s: %d live bead(s) share the test(s) above; re-sling with --force if this is genuinely distinct: gt sling %s <target> --force\n",
+		fmt.Fprintf(&b, "\nRefusing to sling %s: %d overlapping bead(s) share the test(s) above; re-sling with --force if this is genuinely distinct: gt sling %s <target> --force\n",
 			beadID, len(blocking), beadID)
 	} else {
-		fmt.Fprintf(&b, "%s %s overlaps %d existing bead(s), none of them live work sharing a test.\n",
+		fmt.Fprintf(&b, "%s %s overlaps %d existing bead(s), none of them in flight or ahead of it.\n",
 			style.Warning.Render("⚠"), beadID, len(warning))
-		b.WriteString("  Shared files alone, or overlap with closed/parked work, does not block; this sling proceeds.\n\n")
+		b.WriteString("  Shared files alone, closed or parked work, and unstarted work this bead would\n")
+		b.WriteString("  reach first do not block; this sling proceeds.\n\n")
 		writeMatchList(&b, warning)
 	}
 

@@ -1221,15 +1221,18 @@ func TestSpecDispatchPoolRefusalIsASkip(t *testing.T) {
 }
 
 // A content-overlap refusal is a deferral, not a failure: the guard refuses
-// only live work, so the refusal clears by itself when the overlapping bead
-// closes and the bead is retried with no label for an operator to remove
-// (gt-q6zoo).
+// work in flight, and an unstarted peer only while it is ahead of this bead in
+// dispatch order — here, an older bead on the same test — so the refusal clears
+// by itself once that peer is slung or closes. The bead is retried with no
+// label for an operator to remove (gt-q6zoo, gt-nlkba).
 func TestSpecDispatchOverlapRefusalDefersAndRetries(t *testing.T) {
 	t.Parallel()
-	overlap := sling.DecideDuplicates("gt-a", []sling.DuplicateMatch{{
-		Bead:        sling.Duplicate{ID: "gt-b", Status: "open"},
-		SharedTests: []string{"TestSpecDispatch"},
-	}}).Err()
+	overlap := sling.DecideDuplicates(
+		sling.Duplicate{ID: "gt-a", Status: "open", CreatedAt: "2026-10-15T12:00:00Z"},
+		[]sling.DuplicateMatch{{
+			Bead:        sling.Duplicate{ID: "gt-b", Status: "open", CreatedAt: "2026-10-15T09:00:00Z"},
+			SharedTests: []string{"TestSpecDispatch"},
+		}}).Err()
 	if !errors.Is(overlap, errSlingDuplicateContent) {
 		t.Fatalf("fixture: %v is not the overlap sentinel", overlap)
 	}
@@ -1250,8 +1253,8 @@ func TestSpecDispatchOverlapRefusalDefersAndRetries(t *testing.T) {
 		t.Errorf("overlap-refused bead annotated %d times, want none", n)
 	}
 
-	// The overlapping bead closes, the guard stops refusing, and the next tick
-	// dispatches the bead with nothing removed by hand.
+	// The overlapping bead is slung or closes, the guard stops refusing, and
+	// the next tick dispatches the bead with nothing removed by hand.
 	r = runSpecDispatchCycle(f.env())
 	if len(f.slung) != 1 || f.slung[0] != "gt-a" {
 		t.Fatalf("slung %v, want gt-a retried on the next tick", f.slung)

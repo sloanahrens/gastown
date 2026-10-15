@@ -56,8 +56,11 @@ Content Duplicate Guard:
   Before dispatch, the bead's named test functions and file paths are compared
   against the rig's open and recently-closed beads. Two beads describing one
   defect from different vantage points share no keywords, but they do name the
-  same tests. A shared test name refuses the sling; a shared file alone warns
-  and proceeds. --force overrides.
+  same tests. A shared test name refuses the sling: work already in flight
+  always, and unstarted work only when it comes first in dispatch order
+  (priority, then age, then id), so a cluster of overlapping ready beads still
+  dispatches one at a time. A shared file alone warns and proceeds.
+  --force overrides.
   gt sling gt-abc greenplace --force                # Sling despite the overlap
 
 Natural Language Args:
@@ -718,7 +721,14 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		if checkErr != nil {
 			fmt.Fprintf(r.out, "%s %v\n", style.Dim.Render("Warning:"), checkErr)
 		}
-		decision := decideSlingDuplicates(beadID, matches)
+		// A nil candidate is the check declining to run — a bead naming no
+		// tests or files — and it comes back with no matches, so the ID-only
+		// stand-in is never ranked against anything: it only names the bead.
+		candidate := duplicateCandidate{ID: beadID}
+		if dupCandidate != nil {
+			candidate = *dupCandidate
+		}
+		decision := decideSlingDuplicates(candidate, matches)
 		switch {
 		case decision.Blocked && !r.opts.dryRun:
 			return decision.Err()

@@ -226,9 +226,10 @@ filed as gt-tt8sg.
 A Dolt serialization failure (Error 1213) retries the whole dispatch up to
 four times with jittered backoff; the bond step inside the sling already
 retries on its own. Pool and merge-queue refusals are skips, and so is a
-content-overlap refusal: the guard refuses only live work, so the refusal
-clears by itself when the overlapping bead closes and the next tick takes the
-bead again with no label for anyone to remove (gt-q6zoo). Any other failure
+content-overlap refusal: the guard refuses work in flight, and an unstarted peer
+only while that peer comes first in dispatch order, so the refusal clears by
+itself once the peer is slung or closes and the next tick takes the bead again
+with no label for anyone to remove (gt-q6zoo, gt-nlkba). Any other failure
 leaves the bead unassigned, adds `spec-dispatch-failed` and one comment saying
 the bead is out of the queue until the label is cleared. Remove the label to
 retry.

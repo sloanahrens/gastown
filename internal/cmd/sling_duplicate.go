@@ -37,7 +37,12 @@ import (
 // so it warns and proceeds. Those two cases are the acceptance criteria on
 // gt-mcq, and they are the whole of the policy: nothing here inspects titles,
 // keywords, or embeddings, because those are exactly what the two vantage
-// points defeat.
+// points defeat. Which overlaps of a shared test refuse is narrower than it
+// looks: work in flight always does, but an unstarted peer only when it comes
+// first in dispatch order, or a cluster of ready beads naming one test would
+// refuse each other forever and dispatch none of them (gt-nlkba). The rule
+// lives in sling.Blocking / sling.DecideDuplicates, so the CLI and the
+// dispatcher cannot disagree about it.
 
 const (
 	// duplicateLookback bounds the recently-closed half of the comparison pool.
@@ -109,9 +114,10 @@ type duplicateMatch = sling.DuplicateMatch
 type slingDuplicateDecision = sling.DuplicateDecision
 
 // decideSlingDuplicates turns the overlaps found against a bead into the
-// decision the sling acts on, plus the report it prints.
-func decideSlingDuplicates(beadID string, matches []duplicateMatch) slingDuplicateDecision {
-	return sling.DecideDuplicates(beadID, matches)
+// decision the sling acts on, plus the report it prints. candidate is the
+// bead being slung, which the guard ranks each unstarted overlap against.
+func decideSlingDuplicates(candidate duplicateCandidate, matches []duplicateMatch) slingDuplicateDecision {
+	return sling.DecideDuplicates(candidate, matches)
 }
 
 // extractContentRefs pulls test names and file paths out of free-form bead
@@ -229,8 +235,9 @@ func findDuplicateMatches(candidate duplicateCandidate, pool []duplicateCandidat
 		})
 	}
 	sort.Slice(matches, func(i, j int) bool {
-		if matches[i].Blocking() != matches[j].Blocking() {
-			return matches[i].Blocking()
+		bi, bj := matches[i].Blocking(candidate), matches[j].Blocking(candidate)
+		if bi != bj {
+			return bi
 		}
 		return matches[i].Bead.ID < matches[j].Bead.ID
 	})
@@ -265,6 +272,8 @@ func (p *duplicatePools) check(townRoot, beadID string, info *beadInfo) (*duplic
 		Title:     info.Title,
 		Status:    info.Status,
 		IssueType: info.IssueType,
+		Priority:  info.Priority,
+		CreatedAt: info.CreatedAt,
 		Blockers:  blockingDepIDs(info.Dependencies),
 		Refs:      refs,
 	}
@@ -498,6 +507,8 @@ func listDuplicateCandidates(store beads.Client, warn func(beadsDir string, err 
 			Status:    row.Status,
 			ClosedAt:  row.ClosedAt,
 			IssueType: row.Type,
+			Priority:  row.Priority,
+			CreatedAt: row.CreatedAt,
 			Blockers:  detail.Blockers,
 			Refs: extractContentRefs(row.Title, row.Description, row.CloseReason,
 				detail.Design, detail.Notes),

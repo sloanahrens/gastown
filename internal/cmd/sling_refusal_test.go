@@ -28,8 +28,8 @@ func TestIsSlingRefusal(t *testing.T) {
 		want bool
 	}{
 		{"nil", nil, false},
-		{"duplicate content", sling.DecideDuplicates("gt-x", []sling.DuplicateMatch{{
-			Bead: sling.Duplicate{ID: "gt-y", Status: "open", IssueType: "task"}, SharedTests: []string{"TestFoo"},
+		{"duplicate content", sling.DecideDuplicates(sling.Duplicate{ID: "gt-x"}, []sling.DuplicateMatch{{
+			Bead: sling.Duplicate{ID: "gt-y", Status: "hooked", IssueType: "task"}, SharedTests: []string{"TestFoo"},
 		}}).Err(), true},
 		{"pool full", &poolBackpressureError{Reason: "gastown pool at capacity"}, true},
 		{"landing queue", &queueBackpressureError{Rig: "gastown", Ready: 3, Max: 1}, true},
