@@ -3,9 +3,6 @@ package daemon
 import (
 	"context"
 	"errors"
-	"github.com/steveyegge/gastown/internal/agentpause"
-	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/session"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,9 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 // stopSeat is the seat the stop tests act on.
@@ -35,10 +36,11 @@ func TestStop_OrderIsPauseStopCheckpointHandBack(t *testing.T) {
 		"push gastown/capable",
 		"hand-back gastown/capable",
 		"reset-agent-bead gastown/capable",
-		"clear-pause gastown/capable",
+		"record-cleanup gastown/capable",
+		"retire gastown/capable",
 	}
 	if !reflect.DeepEqual(f.calls, want) {
-		t.Errorf("call order = %q, want %q (push before the hand-back, agent bead reset before the pause clears)", f.calls, want)
+		t.Errorf("call order = %q, want %q (push before the hand-back, reset then cleanup then retire after it)", f.calls, want)
 	}
 	if len(f.pushed) != 1 || f.pushed[0] != "gt-aaa11 polecat/capable/gt-aaa11+x1" {
 		t.Errorf("push got %q, want the bead and its branch", f.pushed)
@@ -58,14 +60,14 @@ func TestStop_OrderIsPauseStopCheckpointHandBack(t *testing.T) {
 	}
 }
 
-// A pause that cannot be cleared after the hand-back leaves the seat parked,
-// so the stop stays pending: the next tick repeats the hand-back and the clear
-// instead of finishing with the park unannounced.
+// A seat that cannot be retired after the hand-back stays parked, so the stop
+// stays pending: the next tick repeats the hand-back and the release instead of
+// finishing with the park unannounced.
 func TestStop_FailedReleaseAfterHandBackKeepsTheStopPending(t *testing.T) {
 	t.Parallel()
 	d, buf := newOverrunDaemon(t, false)
 	f := newOverrunFake(20*time.Minute, stopSeat)
-	f.failOn = map[string]error{"clear-pause": errors.New("disk full")}
+	f.failOn = map[string]error{"retire": errors.New("disk full")}
 
 	d.runOverrunGuard(f.seams())
 
@@ -73,7 +75,7 @@ func TestStop_FailedReleaseAfterHandBackKeepsTheStopPending(t *testing.T) {
 	if !st.StoppedAt.IsZero() {
 		t.Error("StoppedAt written although the seat is still parked")
 	}
-	if !strings.Contains(buf.String(), "pause marker not cleared after the hand-back") {
+	if !strings.Contains(buf.String(), "seat not retired after the hand-back") {
 		t.Errorf("log lacks the failed release:\n%s", buf.String())
 	}
 
@@ -81,7 +83,7 @@ func TestStop_FailedReleaseAfterHandBackKeepsTheStopPending(t *testing.T) {
 	f.now = f.now.Add(time.Minute)
 	d.runOverrunGuard(f.seams())
 
-	want := []string{"recheck gastown/capable", "hand-back gastown/capable", "reset-agent-bead gastown/capable", "clear-pause gastown/capable"}
+	want := []string{"recheck gastown/capable", "hand-back gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
 	if !reflect.DeepEqual(f.calls, want) {
 		t.Errorf("resumed call order = %q, want %q", f.calls, want)
 	}
@@ -118,7 +120,7 @@ func TestStop_FailedSessionStopClearsMarkerAndSkipsHandBack(t *testing.T) {
 	f.calls, f.failOn = nil, nil
 	f.now = f.now.Add(time.Minute)
 	d.runOverrunGuard(f.seams())
-	if len(f.calls) != 7 || f.calls[0] != "pause gastown/capable" || f.calls[4] != "hand-back gastown/capable" || f.calls[6] != "clear-pause gastown/capable" {
+	if len(f.calls) != 8 || f.calls[0] != "pause gastown/capable" || f.calls[4] != "hand-back gastown/capable" || f.calls[7] != "retire gastown/capable" {
 		t.Errorf("retry call order = %q, want the full sequence", f.calls)
 	}
 }
@@ -136,7 +138,7 @@ func TestStop_FailedMarkerClearKeepsTheStopPending(t *testing.T) {
 	f.now = f.now.Add(time.Minute)
 	d.runOverrunGuard(f.seams())
 
-	want := []string{"stop gastown/capable", "checkpoint gastown/capable", "push gastown/capable", "hand-back gastown/capable", "reset-agent-bead gastown/capable", "clear-pause gastown/capable"}
+	want := []string{"stop gastown/capable", "checkpoint gastown/capable", "push gastown/capable", "hand-back gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
 	if !reflect.DeepEqual(f.calls, want) {
 		t.Errorf("resumed call order = %q, want %q (no second pause)", f.calls, want)
 	}
@@ -149,8 +151,8 @@ func TestStop_RunsOnceAfterStoppedAt(t *testing.T) {
 
 	d.runOverrunGuard(f.seams())
 	first := len(f.calls)
-	if first != 7 {
-		t.Fatalf("first tick made %d calls (%q), want 7", first, f.calls)
+	if first != 8 {
+		t.Fatalf("first tick made %d calls (%q), want 8", first, f.calls)
 	}
 
 	// The seat is still listed (say the session came back): the stop is done
@@ -182,7 +184,7 @@ func TestStop_ReslingAfterStopRunsAFreshStop(t *testing.T) {
 	f.now = resling.Add(21 * time.Minute)
 	d.runOverrunGuard(f.seams())
 
-	if len(f.calls) != 7 {
+	if len(f.calls) != 8 {
 		t.Errorf("calls for the new sling = %q, want a full stop", f.calls)
 	}
 }
@@ -207,7 +209,7 @@ func TestStop_FailedCheckpointRetriesWithoutRepeatingEarlierSteps(t *testing.T) 
 	f.seats, f.calls, f.failOn = nil, nil, nil
 	f.now = f.now.Add(time.Minute)
 	d.runOverrunGuard(f.seams())
-	want = []string{"recheck gastown/capable", "checkpoint gastown/capable", "push gastown/capable", "hand-back gastown/capable", "reset-agent-bead gastown/capable", "clear-pause gastown/capable"}
+	want = []string{"recheck gastown/capable", "checkpoint gastown/capable", "push gastown/capable", "hand-back gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
 	if !reflect.DeepEqual(f.calls, want) {
 		t.Errorf("retry calls = %q, want %q", f.calls, want)
 	}
@@ -232,7 +234,7 @@ func TestStop_FailedHandBackRetriesAndStaysUnfinished(t *testing.T) {
 	f.seats, f.calls, f.failOn = nil, nil, nil
 	f.now = f.now.Add(time.Minute)
 	d.runOverrunGuard(f.seams())
-	if want := []string{"recheck gastown/capable", "hand-back gastown/capable", "reset-agent-bead gastown/capable", "clear-pause gastown/capable"}; !reflect.DeepEqual(f.calls, want) {
+	if want := []string{"recheck gastown/capable", "hand-back gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}; !reflect.DeepEqual(f.calls, want) {
 		t.Errorf("retry calls = %q, want the hand-back and the release", f.calls)
 	}
 	st, _ = readOverrunState(d.config.TownRoot, "gt-aaa11")
@@ -586,7 +588,7 @@ func TestStop_PersistentlyRefusedCheckpointIsGivenUpOnAndHandedBack(t *testing.T
 
 	want := []string{"recheck gastown/capable", "checkpoint gastown/capable", "push gastown/capable", "hand-back gastown/capable"}
 	if !reflect.DeepEqual(f.calls, want) {
-		t.Fatalf("calls at the cap = %q, want %q (no clear-pause: the seat stays parked)", f.calls, want)
+		t.Fatalf("calls at the cap = %q, want %q (no retire: the seat stays parked)", f.calls, want)
 	}
 	if len(f.handedBack) != 1 || len(f.handBackNotes) != 1 {
 		t.Fatalf("hand-backs = %q notes = %q, want one each", f.handedBack, f.handBackNotes)
@@ -646,8 +648,8 @@ func TestStop_CheckpointThatRecoversHandsBackWithoutANote(t *testing.T) {
 	if len(f.handBackNotes) != 1 || f.handBackNotes[0] != "" {
 		t.Errorf("notes = %q, want one empty note", f.handBackNotes)
 	}
-	if got := f.calls[len(f.calls)-1]; got != "clear-pause gastown/capable" {
-		t.Errorf("last call %q, want the pause cleared", got)
+	if got := f.calls[len(f.calls)-1]; got != "retire gastown/capable" {
+		t.Errorf("last call %q, want the seat retired", got)
 	}
 }
 
@@ -728,8 +730,8 @@ func TestStop_FirstRunDoesNotRecheckTheSeat(t *testing.T) {
 }
 
 // checkpointSeat builds a polecat worktree under the daemon's town and returns
-// the checkout.
-func checkpointSeat(t *testing.T, d *Daemon, files map[string]string) string {
+// the checkout and the gitfake world d reads it through.
+func checkpointSeat(t *testing.T, d *Daemon, files map[string]string) (string, *gitfake.Fake) {
 	t.Helper()
 	f := useGitfake(t, d)
 	base := t.TempDir()
@@ -738,7 +740,7 @@ func checkpointSeat(t *testing.T, d *Daemon, files map[string]string) string {
 	f.InitBare(t, origin)
 	f.Commit(t, origin, "main", "initial", files)
 	f.Clone(t, origin, workDir)
-	return workDir
+	return workDir, f
 }
 
 // The production checkpoint seam fails a refused checkpoint and passes a
@@ -746,7 +748,7 @@ func checkpointSeat(t *testing.T, d *Daemon, files map[string]string) string {
 func TestOverrunCheckpointSeam_FailsOnlyARefusedCheckpoint(t *testing.T) {
 	t.Parallel()
 	d, _ := newOverrunDaemon(t, false)
-	workDir := checkpointSeat(t, d, map[string]string{"a.go": "package a\n"})
+	workDir, _ := checkpointSeat(t, d, map[string]string{"a.go": "package a\n"})
 	seam := d.overrunStopSeams(overrunSeams{}).checkpoint
 
 	if err := seam(stopSeat); err != nil {

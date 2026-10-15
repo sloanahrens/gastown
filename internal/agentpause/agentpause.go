@@ -13,7 +13,8 @@
 // Since gt-4k3fj.1 that file is the seat's intent record (internal/intent):
 // a pause is desired=park there, and a seat the supervisor froze on an
 // exhausted restart budget reads as paused too. This package is the pause
-// view of that record; it never writes the record's other fields.
+// view of that record; apart from Retire, which ends the hold and retires the
+// seat in the one write (gt-6ixtp), it never writes the record's other fields.
 // Every scanner (Go and the stuck-agent dog's shell script alike) reads
 // this file and only this file to decide "is this agent paused".
 //
@@ -149,19 +150,54 @@ func Resume(townRoot, rig, role, name string) error {
 		return nil
 	}
 	_, err := intent.Update(townRoot, intent.Seat{Rig: rig, Role: role, Name: name}, func(r *intent.Record) error {
-		r.Desired = intent.DesiredRun
-		if r.Frozen {
-			// A supervisor freeze is an exhausted restart budget; resuming
-			// without emptying it would freeze the seat again on its next
-			// restart.
-			r.Restarts = nil
-		}
-		r.Frozen = false
-		r.Reason = ""
-		r.PausedAt = time.Time{}
-		r.PausedBy = ""
-		r.PriorAgentState = ""
-		r.UpdatedAt = time.Now().UTC()
+		clearHold(r, time.Now().UTC())
+		return nil
+	})
+	return err
+}
+
+// clearHold is the hold-clearing Resume and Retire share: the agent is free
+// to run again, with no pause reason left to show and no exhausted restart
+// budget to freeze it on its next restart.
+func clearHold(r *intent.Record, now time.Time) {
+	r.Desired = intent.DesiredRun
+	if r.Frozen {
+		// A supervisor freeze is an exhausted restart budget; returning the
+		// seat to run without emptying it would freeze it again at once.
+		r.Restarts = nil
+	}
+	r.Frozen = false
+	r.Reason = ""
+	r.PausedAt = time.Time{}
+	r.PausedBy = ""
+	r.PriorAgentState = ""
+	r.UpdatedAt = now
+}
+
+// Retire ends any hold on the agent and retires its seat to stop in the one
+// locked write: desired=stop, with the seat's stall evidence dropped and the
+// actor recorded.
+//
+// It is Resume and intent.MarkIdle fused, for a seat whose own release ends
+// its hold (the overrun guard's). The two must not be separate writes: a hold
+// lifted on its own leaves the record at desired=run with a session that is
+// gone, which internal/townhealth reports as a dead seat until a later
+// liveness sample retires it (gt-6ixtp). Retiring while the hold still stands
+// is also what makes the write retryable — no scanner starts a session on a
+// held seat, so nothing can take the name between the two. An agent with no
+// record is a no-op, as in Resume.
+func Retire(townRoot, rig, role, name, actor string) error {
+	path := FilePath(townRoot, rig, role, name)
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	now := time.Now().UTC()
+	_, err := intent.Update(townRoot, intent.Seat{Rig: rig, Role: role, Name: name}, func(r *intent.Record) error {
+		clearHold(r, now)
+		r.Desired = intent.DesiredStop
+		r.WorkBead = ""
+		r.Progress = nil
+		r.Actor = actor
 		return nil
 	})
 	return err

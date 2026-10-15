@@ -43,10 +43,12 @@ const (
 //     another polecat is left alone. The attention item for the stop is
 //     derived from that hand-back (collectOverrunStopped);
 //  6. release the seat: reset its agent bead (hook_bead cleared, so the roster
-//     stops counting it as dead-hooked), then clear the pause, so the polecat
-//     name and its worktree can take new work. The kept branch is safe without
-//     the park: it is on origin, the bead's comment names it, and the worktree
-//     is not touched.
+//     stops counting it as dead-hooked), record the cleanup status that reset
+//     clears, then retire the seat — end the pause and stop its record in the
+//     one write — so the polecat name and its worktree can take new work and
+//     nothing reads the sessionless seat as a running seat whose session died.
+//     The kept branch is safe without the park: it is on origin, the bead's
+//     comment names it, and the worktree is not touched.
 //
 // submittedNow is read before step 1 and before step 4: a seat that has
 // submitted (gt done running, or gt:ready-to-land) is not stopped, and a bead
@@ -262,11 +264,12 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	// 6. Release the seat. The bead no longer names it, so nothing restarts it
 	// on this sling; leaving the pause would make parkedReuseBlocker refuse the
 	// name until an operator ran gt agent resume, with no notice that it was
-	// parked. A failed clear leaves the stop pending, so the next tick repeats
-	// the hand-back (HandBack finishes a bead it already released) and the clear.
-	// The agent bead is reset first, while the pause still keeps a new sling off
-	// the name: one that still names the handed-back bead reads as a dead-hooked
-	// seat to the pool roster.
+	// parked. A failed step leaves the stop pending, so the next tick repeats
+	// the hand-back (HandBack finishes a bead it already released) and the
+	// release. Every step runs while the pause still keeps a new sling off the
+	// name: one that still names the handed-back bead reads as a dead-hooked
+	// seat to the pool roster, and a seat retired out from under a new sling
+	// would lose that sling's record.
 	if s.resetAgentBead != nil {
 		reset := seat
 		reset.Bead = st.Bead
@@ -275,9 +278,26 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 			return
 		}
 	}
-	if err := s.clearPause(seat); err != nil {
-		d.logger.Printf("overrun_guard: WARNING: %s: pause marker not cleared after the hand-back of %s: %v", who, st.Bead, err)
-		return
+	// The cleanup status the reset above cleared is recorded next, while the
+	// pause still keeps a new sling off the name: without it a later
+	// `gt polecat nuke` refuses the seat it was told to release, for a
+	// cleanup_status=<missing> the release itself created (gt-6ixtp). A probe
+	// that cannot read the worktree records unknown, and a failed write is
+	// logged rather than retried: it holds no work back.
+	if s.recordCleanup != nil {
+		if err := s.recordCleanup(seat); err != nil {
+			d.logger.Printf("overrun_guard: WARNING: %s: cleanup status not recorded for the released seat %s: %v", who, st.Bead, err)
+		}
+	}
+	// Retire last: it ends the hold and stops the seat's record in one write,
+	// so no reader sees a running seat whose session is gone (gt-6ixtp). A
+	// failure leaves the hold standing, so the next tick retries the release,
+	// and the seat stays parked (and named by nobody) until it works.
+	if s.retire != nil {
+		if err := s.retire(seat); err != nil {
+			d.logger.Printf("overrun_guard: WARNING: %s: seat not retired after the hand-back of %s: %v", who, st.Bead, err)
+			return
+		}
 	}
 	st.StoppedAt = now
 	if !save() {
@@ -333,6 +353,10 @@ func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 	s.stopLapsed = d.overrunStopLapsed
 	s.push = d.overrunPushBranch
 	s.resetAgentBead = d.overrunResetAgentBead
+	s.recordCleanup = d.overrunRecordCleanupStatus
+	s.retire = func(seat overrunSeat) error {
+		return agentpause.Retire(d.config.TownRoot, seat.Rig, constants.RolePolecat, seat.Polecat, overrunActor)
+	}
 	s.handBack = func(seat overrunSeat, elapsed time.Duration, note string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), overrunHandBackTimeout)
 		defer cancel()
@@ -482,6 +506,50 @@ func resetOverrunAgentBead(c beads.Client, id, bead string) error {
 		return nil
 	}
 	return beads.ResetAgentBeadForReuse(c, id, "overrun stop")
+}
+
+// overrunRecordCleanupStatus records what a live probe of the released seat's
+// worktree finds, so a later `gt polecat nuke` does not refuse the seat it was
+// told to release for a cleanup_status=<missing> the release itself created
+// (gt-6ixtp). The kept branch is on origin by then — the push runs before the
+// hand-back — so only the worktree's own state is asked about. A seat with no
+// worktree has nothing to record.
+func (d *Daemon) overrunRecordCleanupStatus(seat overrunSeat) error {
+	polecatsDir := filepath.Join(d.config.TownRoot, seat.Rig, "polecats")
+	workDir := resolvePolecatWorktree(polecatsDir, seat.Polecat, seat.Rig)
+	if workDir == "" {
+		d.logger.Printf("overrun_guard: %s/%s: no worktree to read a cleanup status from", seat.Rig, seat.Polecat)
+		return nil
+	}
+	id := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(d.config.TownRoot, seat.Rig), seat.Rig, seat.Polecat)
+	return recordOverrunCleanupStatus(beads.New(d.config.TownRoot), id, overrunCleanupStatus(d.gitAt(workDir)))
+}
+
+// overrunCleanupStatus is the status a live probe of g's worktree supports:
+// what the nuke preflight reads to decide whether removing the seat would lose
+// work. A probe that cannot answer is unknown — the value a nuke reads the same
+// way it reads a missing one — never clean.
+func overrunCleanupStatus(g daemonGit) string {
+	work, err := g.CheckUncommittedWork()
+	if err != nil {
+		return string(polecat.CleanupUnknown)
+	}
+	switch {
+	case work.HasUncommittedChanges && !work.CleanExcludingRuntime():
+		return string(polecat.CleanupUncommitted)
+	case work.StashCount > 0:
+		return string(polecat.CleanupStash)
+	}
+	return string(polecat.CleanupClean)
+}
+
+// recordOverrunCleanupStatus is overrunRecordCleanupStatus over c: it writes
+// status onto agent bead id.
+func recordOverrunCleanupStatus(c beads.Client, id, status string) error {
+	if id == "" {
+		return errors.New("no agent bead id to record a cleanup status on")
+	}
+	return beads.UpdateAgentCleanupStatus(c, id, status)
 }
 
 // overrunStopLapsed reports why a stop that began on an earlier tick no longer

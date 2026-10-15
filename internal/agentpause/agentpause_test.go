@@ -71,6 +71,54 @@ func TestResumeClearsMarker(t *testing.T) {
 	}
 }
 
+// TestRetireEndsTheHoldAndStopsTheSeat: Retire is the release a seat's own
+// stop makes — the pause comes off and the record goes to stop in the one
+// write, so a sessionless seat is never left reading as a running one
+// (gt-6ixtp).
+func TestRetireEndsTheHoldAndStopsTheSeat(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	seat := intent.Seat{Rig: "gastown", Role: "polecat", Name: "flint"}
+	if err := Pause(town, "gastown", "polecat", "flint", "overrun (20 minute rule)", "overrun_guard", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := intent.Update(town, seat, func(r *intent.Record) error {
+		r.IncarnationID = "inc-7"
+		r.WorkBead = "gt-abc"
+		r.Progress = &intent.Progress{SampledAt: time.Now().UTC(), DeadSamples: 2}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Retire(town, "gastown", "polecat", "flint", "overrun_guard"); err != nil {
+		t.Fatalf("Retire: %v", err)
+	}
+
+	if paused, _, err := IsPaused(town, "gastown", "polecat", "flint"); err != nil || paused {
+		t.Errorf("after Retire: paused=%v err=%v, want the pause gate free", paused, err)
+	}
+	rec, err := intent.Read(town, seat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Desired != intent.DesiredStop || rec.Progress != nil || rec.WorkBead != "" {
+		t.Errorf("record after Retire = %+v, want desired=stop with no work and no stall evidence", rec)
+	}
+	if rec.Paused || rec.IncarnationID != "inc-7" || rec.Actor != "overrun_guard" {
+		t.Errorf("record after Retire = %+v, want the incarnation kept and the actor recorded", rec)
+	}
+
+	// An agent with no record is a no-op, as in Resume: the release must not
+	// manufacture a record for a seat that never had one.
+	if err := Retire(town, "gastown", "polecat", "jasper", "overrun_guard"); err != nil {
+		t.Errorf("Retire of an agent with no record: %v", err)
+	}
+	if _, err := os.Stat(FilePath(town, "gastown", "polecat", "jasper")); err == nil {
+		t.Error("Retire wrote a record for an agent that had none")
+	}
+}
+
 func TestFilePathSingleton(t *testing.T) {
 	t.Parallel()
 	if got := FilePath("/t", "gastown", "witness", ""); got != filepath.Join("/t", ".runtime", "agents", "gastown", "witness.json") {
