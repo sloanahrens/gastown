@@ -341,3 +341,39 @@ func TestBatchCloseAllRefused(t *testing.T) {
 		t.Fatalf("CloseWithReason = %v, want nothing closed, both refused", err)
 	}
 }
+
+// TestRoutedCloseSingleRefusedGroupDoesNotSkipOtherGroup: a plain failure from
+// one single-id group (hq-b here) must not stop the other databases' groups,
+// whichever order the groups run in.
+func TestRoutedCloseSingleRefusedGroupDoesNotSkipOtherGroup(t *testing.T) {
+	t.Parallel()
+	b, _, _ := routedTown(t)
+	r := newRecorder(func(args []string) reply {
+		if cmdOf(args) == "close" && args[1] == "hq-b" {
+			return reply{stderr: "Error: cannot close hq-b", err: exitError{1}}
+		}
+		return reply{}
+	})
+	b.exec = r.exec
+
+	for i := 0; i < 40; i++ {
+		before := len(r.calls())
+		err := b.Close("hq-b", "pt-c")
+		var pe *PartialCloseError
+		if !errors.As(err, &pe) {
+			t.Fatalf("Close(hq-b, pt-c) = %T %v, want a *PartialCloseError", err, err)
+		}
+		if !reflect.DeepEqual(pe.Closed, []string{"pt-c"}) || !reflect.DeepEqual(pe.NotClosed, []string{"hq-b"}) {
+			t.Fatalf("Closed %v NotClosed %v, want [pt-c] and [hq-b]", pe.Closed, pe.NotClosed)
+		}
+		var sawPT bool
+		for _, c := range r.calls()[before:] {
+			if cmdOf(c.args) == "close" && c.args[1] == "pt-c" {
+				sawPT = true
+			}
+		}
+		if !sawPT {
+			t.Fatalf("round %d: no close pt-c call; calls %v", i, r.argvs()[before:])
+		}
+	}
+}

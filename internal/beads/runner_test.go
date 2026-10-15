@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -459,5 +460,94 @@ func TestActingAsSetsBDActor(t *testing.T) {
 	}
 	if want := []string{"crew-a", "crew-b", "crew-c"}; !reflect.DeepEqual(actors, want) {
 		t.Errorf("BD_ACTOR per call = %v, want %v", actors, want)
+	}
+}
+
+// TestNewPinnedMachineVerbsForceAccessMode: the verbs that run in machine mode
+// (Close, ForceCloseWithReason, DeleteIssues, ReadyAll) get the same pinned
+// access-mode env as every other verb, whatever BD_DOLT_AUTO_COMMIT the
+// process env carries (a polecat's is off).
+func TestNewPinnedMachineVerbsForceAccessMode(t *testing.T) {
+	t.Parallel()
+	beadsDir := filepath.Join(t.TempDir(), "rig", ".beads")
+	r := newRecorder(func(args []string) reply {
+		if cmdOf(args) == "ready" {
+			return reply{stdout: "[]"}
+		}
+		return reply{}
+	})
+	b := NewPinned(beadsDir, WithEnv(append(os.Environ(), "BD_DOLT_AUTO_COMMIT=off")))
+	b.exec = r.exec
+
+	_ = b.Close("hq-1")
+	_ = b.ForceCloseWithReason("r", "hq-1")
+	_ = b.DeleteIssues("hq-1")
+	_, _ = b.ReadyAll()
+
+	calls := r.calls()
+	seen := map[string]bool{}
+	for _, c := range calls {
+		verb := cmdOf(c.args)
+		if verb == "show" {
+			continue
+		}
+		seen[verb] = true
+		if _, ok := lastEnvValue(c.env, "BD_MACHINE"); !ok && verb != "ready" {
+			t.Errorf("bd %v ran without BD_MACHINE", c.args)
+		}
+		auto, _ := lastEnvValue(c.env, "BD_DOLT_AUTO_COMMIT")
+		ro, hasRO := lastEnvValue(c.env, "BD_READONLY")
+		if verb == "ready" {
+			if ro != "true" {
+				t.Errorf("bd %v BD_READONLY = %q, want true", c.args, ro)
+			}
+			continue
+		}
+		if auto != "on" || hasRO {
+			t.Errorf("bd %v BD_DOLT_AUTO_COMMIT = %q, BD_READONLY set = %v; want on and unset", c.args, auto, hasRO)
+		}
+	}
+	for _, verb := range []string{"close", "delete", "ready"} {
+		if !seen[verb] {
+			t.Errorf("no %s call recorded; calls: %v", verb, r.argvs())
+		}
+	}
+}
+
+// TestActingAsCreateUsesWrapperActor: Create and createWithID on a wrapper
+// made with WithActor record the wrapper's actor as creator, not the process
+// BD_ACTOR (the RunActorContract promise).
+func TestActingAsCreateUsesWrapperActor(t *testing.T) {
+	t.Setenv("BD_ACTOR", "proc")
+	r := newRecorder(func([]string) reply { return reply{stdout: `{"id":"gt-x","title":"t"}`} })
+	b := newBeads(applyOptions(beadsFields{workDir: t.TempDir(), noRoute: true, exec: r.exec}, []Option{WithActor("crew-a")}))
+	if _, err := b.Create(CreateOptions{Title: "t"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := b.createWithID("gt-x", CreateOptions{Title: "t"}); err != nil {
+		t.Fatalf("createWithID: %v", err)
+	}
+	calls := r.calls()
+	if len(calls) != 2 {
+		t.Fatalf("calls = %v, want a create and a create with id", r.argvs())
+	}
+	for _, c := range calls {
+		for _, a := range c.args {
+			if a == "--actor=proc" {
+				t.Errorf("bd %v passes the process actor", c.args)
+			}
+		}
+		n := 0
+		for _, kv := range c.env {
+			if kv == "BD_ACTOR=crew-a" {
+				n++
+			}
+			if strings.HasPrefix(kv, "BD_ACTOR=") && kv != "BD_ACTOR=crew-a" {
+				t.Errorf("bd %v env carries %s", c.args, kv)
+			}
+		}
+		if n != 1 {
+			t.Errorf("bd %v env holds %d BD_ACTOR=crew-a entries, want 1", c.args, n)
+		}
 	}
 }

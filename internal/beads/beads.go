@@ -1179,6 +1179,9 @@ func (b *Beads) getActor() string {
 	if b.isolated {
 		return ""
 	}
+	if b.actor != "" {
+		return b.actor
+	}
 	return os.Getenv("BD_ACTOR")
 }
 
@@ -1543,13 +1546,7 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) ([]byte, error) {
 	if machineExempt(args) {
 		runEnv = WithoutMachineEnv(runEnv)
 	}
-	if b.accessMode {
-		if ArgsAreReadOnly(args) {
-			runEnv = forceBDReadOnly(runEnv)
-		} else {
-			runEnv = forceBDMutation(runEnv)
-		}
-	}
+	runEnv = b.applyAccessMode(runEnv, args)
 
 	out, err := b.runBdWithRetry(stdinData, runEnv, args)
 	if err != nil {
@@ -1560,6 +1557,20 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) ([]byte, error) {
 	return LegacyPayload(args, out), nil
 }
 
+// applyAccessMode forces the Dolt auto-commit and read-only env a pinned
+// wrapper's contract promises for args: read-only verbs run with
+// BD_READONLY=true, every other verb with BD_DOLT_AUTO_COMMIT=on, whatever
+// the process env says. A wrapper without accessMode keeps env as given.
+func (b *Beads) applyAccessMode(env []string, args []string) []string {
+	if !b.accessMode {
+		return env
+	}
+	if ArgsAreReadOnly(args) {
+		return forceBDReadOnly(env)
+	}
+	return forceBDMutation(env)
+}
+
 // runMachine runs one bd call in machine mode (BD_MACHINE=1): a failure exits
 // with bd's typed status and leaves the error envelope on stdout, which
 // machineErrorOf reads. Only callers that ignore stdout on success, or parse
@@ -1567,6 +1578,7 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) ([]byte, error) {
 func (b *Beads) runMachine(args ...string) ([]byte, error) {
 	beadsDir := b.getResolvedBeadsDir()
 	runEnv := append(b.buildRunEnv(), "BEADS_DIR="+beadsDir, "BD_MACHINE=1")
+	runEnv = b.applyAccessMode(runEnv, args)
 	return b.runBdWithRetry(nil, runEnv, args)
 }
 
@@ -3435,10 +3447,14 @@ func (b *Beads) closeWithOptions(opts closeOptions, ids ...string) error {
 	if !b.noRoute {
 		groups := make(map[string][]string)
 		targets := make(map[string]*Beads)
+		var dirOrder []string
 		currentDir := b.getResolvedBeadsDir()
 		for _, id := range ids {
 			target := b.forIssueID(id)
 			targetDir := target.getResolvedBeadsDir()
+			if groups[targetDir] == nil {
+				dirOrder = append(dirOrder, targetDir)
+			}
 			groups[targetDir] = append(groups[targetDir], id)
 			targets[targetDir] = target
 		}
@@ -3446,35 +3462,33 @@ func (b *Beads) closeWithOptions(opts closeOptions, ids ...string) error {
 			// Each database closes its own group. A refused issue in one
 			// group does not stop the others; the partial results merge
 			// into one *PartialCloseError.
-			var partial *PartialCloseError
-			for targetDir, groupIDs := range groups {
+			partial := &PartialCloseError{}
+			var failures []error
+			for _, targetDir := range dirOrder {
+				groupIDs := groups[targetDir]
 				err := targets[targetDir].closeInCurrentDB(opts, groupIDs...)
 				var pe *PartialCloseError
 				switch {
 				case err == nil:
-					if partial == nil {
-						partial = &PartialCloseError{}
-					}
 					partial.Closed = append(partial.Closed, groupIDs...)
 				case errors.As(err, &pe):
-					if partial == nil {
-						partial = &PartialCloseError{}
-					}
 					partial.Closed = append(partial.Closed, pe.Closed...)
 					partial.NotClosed = append(partial.NotClosed, pe.NotClosed...)
 				default:
-					if partial == nil {
-						return err
-					}
-					// Groups before this one ran: report what they
-					// closed, and every other issue as not closed.
-					if len(partial.NotClosed) > 0 {
-						err = errors.Join(ErrCloseRefused, err)
-					}
-					return notClosedExcept(ids, partial.Closed, err)
+					// A plain failure says nothing about which of its
+					// group's issues closed, so they all count as not
+					// closed; the other groups still run.
+					failures = append(failures, err)
 				}
 			}
-			if partial == nil || len(partial.NotClosed) == 0 {
+			if len(failures) > 0 {
+				err := errors.Join(failures...)
+				if len(partial.NotClosed) > 0 {
+					err = errors.Join(ErrCloseRefused, err)
+				}
+				return notClosedExcept(ids, partial.Closed, err)
+			}
+			if len(partial.NotClosed) == 0 {
 				return nil
 			}
 			return partial
