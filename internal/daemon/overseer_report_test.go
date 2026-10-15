@@ -14,6 +14,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/question"
 	townreport "github.com/steveyegge/gastown/internal/report"
@@ -445,6 +446,27 @@ func TestOverseerReportLeftDryRunErrors(t *testing.T) {
 	want := "LEFT\n  unavailable (dispatch dry run reported errors: roster unreadable (+1 more))\n"
 	if !strings.Contains(text, want) {
 		t.Errorf("LEFT does not say the dry run failed (want %q):\n%s", want, text)
+	}
+	if strings.Contains(text, "LEFT\n  (none)") {
+		t.Errorf("LEFT reads as an empty queue:\n%s", text)
+	}
+}
+
+// A bead the dispatcher holds out with the spec-dispatch-failed label has no
+// skip entry, only the LabeledFailed count. With it the only ready bead, LEFT
+// must still say something is held, not "(none)".
+func TestOverseerReportLeftLabeledFailed(t *testing.T) {
+	t.Parallel()
+	w := newOverseerWorld(t, "2026-10-14T20:17:33Z")
+	w.left = func() (townreport.DispatchLeft, error) {
+		return overseerReportLeftFrom(specDispatchTickReport{LabeledFailed: 1})
+	}
+	slot := overseerAt("2026-10-14T20:15:00Z")
+	text := w.seams().digest(slot, slot.Add(-15*time.Minute)).Render()
+
+	want := "LEFT\n  held  1 by label " + constants.LabelSpecDispatchFailed
+	if !strings.Contains(text, want) {
+		t.Errorf("LEFT does not say how many beads the label holds (want %q):\n%s", want, text)
 	}
 	if strings.Contains(text, "LEFT\n  (none)") {
 		t.Errorf("LEFT reads as an empty queue:\n%s", text)
