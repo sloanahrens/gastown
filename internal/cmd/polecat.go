@@ -2165,11 +2165,11 @@ func reconcileCleanupStatusIfSafe(status *RecoveryStatus, updater beads.Client, 
 		return
 	}
 	if updater == nil {
-		failCleanupReconcile(status, "cleanup_reconcile_failed: updater unavailable")
+		failCleanupReconcile(status, cleanupReconcileFailedBlocker+": updater unavailable")
 		return
 	}
 	if err := beads.UpdateAgentCleanupStatus(updater, agentBeadID, string(polecat.CleanupClean)); err != nil {
-		failCleanupReconcile(status, fmt.Sprintf("cleanup_reconcile_failed: %v", err))
+		failCleanupReconcile(status, fmt.Sprintf("%s: %v", cleanupReconcileFailedBlocker, err))
 		return
 	}
 	status.CleanupStatus = polecat.CleanupClean
@@ -2177,17 +2177,44 @@ func reconcileCleanupStatusIfSafe(status *RecoveryStatus, updater beads.Client, 
 	status.Diagnostics = append(status.Diagnostics, fmt.Sprintf("reconciled_cleanup_status=clean previous=%s", previous))
 }
 
+// cleanupReconcileFailedBlocker is the blocker a failed cleanup_status
+// reconcile adds. It is a constant because the recovery action for it is
+// derived by matching that blocker, exactly as the stash action matches
+// git_state=has_stash (gt-y6mhx).
+const cleanupReconcileFailedBlocker = "cleanup_reconcile_failed"
+
 // failCleanupReconcile turns a SAFE_TO_NUKE status into NEEDS_RECOVERY after a
 // failed reconcile. The verdict flips together with the flags DecideWorkstate
 // derived from the old verdict, or --json would report safe_to_nuke true beside
 // needs_recovery true.
+//
+// The rest of the status is rebuilt to the shape a native NEEDS_RECOVERY
+// carries for the same recorded cleanup_status — the cleanup predicate's block
+// in DecideWorkstate: reason from cleanupStatusBlockReason, reuse_status
+// idle-recovery-needed, counts_toward_capacity true, and the recovery actions
+// for its blockers (gt-y6mhx).
 func failCleanupReconcile(status *RecoveryStatus, blocker string) {
 	status.NeedsRecovery = true
-	status.Verdict = "NEEDS_RECOVERY"
+	status.Verdict = polecat.WorkstateVerdictNeedsRecovery
+	status.Reason = cleanupStatusBlockReason(status.CleanupStatus)
 	status.SafeToNuke = false
 	status.Reusable = false
-	status.CountsTowardCapacity = false
+	status.CountsTowardCapacity = true
+	status.ReuseStatus = "idle-recovery-needed"
 	status.Blockers = append(status.Blockers, blocker)
+	status.RecoveryActions = recoveryActionsForBlockers(status.Blockers)
+}
+
+// cleanupStatusBlockReason names a recorded cleanup_status the way
+// DecideWorkstate's cleanup predicate does when it blocks on one, so a status
+// this file rebuilds by hand reads like one the classifier produced
+// (workstate.go: reason "cleanup-"+status, with a missing or unknown status
+// reported as cleanup-unknown).
+func cleanupStatusBlockReason(status polecat.CleanupStatus) string {
+	if status == "" || status == polecat.CleanupUnknown {
+		return "cleanup-unknown"
+	}
+	return "cleanup-" + string(status)
 }
 
 func cleanupStatusReconcileCandidate(status *RecoveryStatus, p *polecat.Polecat, fields *beads.AgentFields) (polecat.CleanupStatus, bool) {
@@ -2255,8 +2282,15 @@ func recoveryGitStateBlocker(worktreePath string, gitState *GitState, gitErr err
 
 func recoveryActionsForBlockers(blockers []string) []string {
 	for _, blocker := range blockers {
-		if strings.HasPrefix(blocker, "git_state=has_stash") {
+		switch {
+		case strings.HasPrefix(blocker, "git_state=has_stash"):
 			return []string{"preserve branch-owned stash entries to auditable recovery refs before cleanup, then rerun check-recovery"}
+		case strings.HasPrefix(blocker, cleanupReconcileFailedBlocker):
+			// The recorded cleanup_status still blocks reuse: the write that
+			// would have cleared it failed, so the seat stays at recovery
+			// until an operator clears it by hand or makes the write succeed
+			// (gt-y6mhx).
+			return []string{"write cleanup_status=" + string(polecat.CleanupClean) + " on the agent bead (or rerun check-recovery --reconcile-cleanup once the write succeeds), then rerun check-recovery"}
 		}
 	}
 	return nil
@@ -2581,21 +2615,25 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// A --dry-run reports the run it replaces and stops here: no session, no
+	// worktree and no branch is touched, so none of the nuke below applies.
+	if polecatNukeDryRun {
+		blocked := previewNukeDryRunBatch(os.Stdout, targets, polecatNukeForce, townRegistry(), nukePreviewDeps{})
+		if blocked > 0 {
+			fmt.Printf("\n%s %s\n", style.Warning.Render("⚠"), dryRunNukeSummary(len(targets), blocked))
+		} else {
+			fmt.Printf("\n%s %s\n", style.Info.Render("ℹ"), dryRunNukeSummary(len(targets), blocked))
+		}
+		return nil
+	}
+
 	// Nuke each polecat
 	var nukeErrors []string
 	nuked := 0
-	batchPurge := !polecatNukeDryRun && len(targets) > 1
+	batchPurge := len(targets) > 1
 	purgeRigs := make(map[string]*rig.Rig)
-	dryRunBlocked := 0
 
 	for _, p := range targets {
-		if polecatNukeDryRun {
-			if previewNukeDryRun(os.Stdout, p, polecatNukeForce, townRegistry(), checkPolecatSafety, displayDryRunSafetyCheck) {
-				dryRunBlocked++
-			}
-			continue
-		}
-
 		if polecatNukeForce {
 			fmt.Printf("%s Nuking %s/%s (--force)...\n", style.Warning.Render("⚠"), p.rigName, p.polecatName)
 		} else {
@@ -2623,15 +2661,6 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 	}
 
 	// Report results
-	if polecatNukeDryRun {
-		if dryRunBlocked > 0 {
-			fmt.Printf("\n%s %s\n", style.Warning.Render("⚠"), dryRunNukeSummary(len(targets), dryRunBlocked))
-		} else {
-			fmt.Printf("\n%s %s\n", style.Info.Render("ℹ"), dryRunNukeSummary(len(targets), dryRunBlocked))
-		}
-		return nil
-	}
-
 	if len(nukeErrors) > 0 {
 		fmt.Printf("\n%s Some nukes failed:\n", style.Warning.Render("Warning:"))
 		for _, e := range nukeErrors {
@@ -2645,9 +2674,7 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 
 	// Final cleanup: Kill any orphaned Claude processes that escaped the session termination.
 	// This catches processes that called setsid() or were reparented during session shutdown.
-	if !polecatNukeDryRun {
-		cleanupOrphanedProcesses()
-	}
+	cleanupOrphanedProcesses()
 
 	if len(nukeErrors) > 0 {
 		return fmt.Errorf("%d nuke(s) failed", len(nukeErrors))
@@ -2656,17 +2683,101 @@ func runPolecatNuke(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// nukePreviewDeps are the collaborators a --dry-run preview reads through, each
+// nil meaning the production one. They are fields rather than arguments of
+// previewNukeDryRunBatch so a unit test can inject the checks that read live
+// Dolt, git and session state without a live town.
+type nukePreviewDeps struct {
+	// Check evaluates one target's nuke safety, once per target. nil:
+	// checkPolecatSafety.
+	Check func(polecatTarget) *SafetyCheckResult
+	// ListSafety prints the safety detail for a target whose result the caller
+	// already evaluated. nil: displayDryRunSafetyCheck.
+	ListSafety func(polecatTarget, *SafetyCheckResult)
+	// PreserveRisk names the preserve blocker a --force nuke of the target
+	// would meet. nil: the unpreservedBranchRefusal of a run without
+	// --acknowledge-unpreserved.
+	PreserveRisk func(polecatTarget) nukePreviewRefusal
+}
+
+// nukePreviewRefusal is why a preview reports a polecat as refused: the clause
+// that completes "Would refuse to nuke <rig>/<name> ..." and the detail lines
+// that tell an operator what to change. The zero value means the nuke would
+// proceed.
+type nukePreviewRefusal struct {
+	Clause string
+	Detail []string
+}
+
+// nukePreviewSafetyRefusal is the refusal nukeSafetyRefusal raises for the
+// whole batch when no --force is given: the same clause, so the preview and the
+// real run phrase the refusal alike.
+var nukePreviewSafetyRefusal = nukePreviewRefusal{Clause: "without --force"}
+
+// previewNukeDryRunBatch prints the --dry-run preview for every target and
+// reports how many of them the run it replaces would refuse.
+//
+// The preview models the COMMAND, not each polecat alone. nukeSafetyRefusal
+// refuses the whole batch as soon as one target is blocked, so a clean target
+// beside a blocked one is not "Would nuke" — the batch it belongs to nukes
+// nothing, and a preview that promised to nuke it disagreed with the run it
+// claims to describe. --force bypasses that gate, but not every gate: a forced
+// run still stops at preserveFailureBlocker when its self-preserve push fails,
+// so a target exposed to that is refused here too (gt-y6mhx).
+func previewNukeDryRunBatch(w io.Writer, targets []polecatTarget, force bool, reg *session.PrefixRegistry,
+	deps nukePreviewDeps) int {
+	check := deps.Check
+	if check == nil {
+		check = checkPolecatSafety
+	}
+	listSafety := deps.ListSafety
+	if listSafety == nil {
+		listSafety = displayDryRunSafetyCheck
+	}
+	preserveRisk := deps.PreserveRisk
+	if preserveRisk == nil {
+		preserveRisk = func(p polecatTarget) nukePreviewRefusal {
+			return unpreservedBranchRefusal(p, polecatNukeAcknowledgeUnpreserved)
+		}
+	}
+
+	// One evaluation per target, shared by this batch's header, listing and
+	// count: deciding them from separate reads let a polecat be judged twice
+	// and the three disagree (gt-y6mhx).
+	results := make([]*SafetyCheckResult, len(targets))
+	batchBlocked := false
+	for i, p := range targets {
+		results[i] = check(p)
+		batchBlocked = batchBlocked || results[i].Blocked
+	}
+
+	refused := 0
+	for i, p := range targets {
+		var refusal nukePreviewRefusal
+		if force {
+			refusal = preserveRisk(p)
+		} else if batchBlocked {
+			refusal = nukePreviewSafetyRefusal
+		}
+		if previewNukeDryRun(w, p, refusal, reg, results[i], listSafety) {
+			refused++
+		}
+	}
+	return refused
+}
+
 // previewNukeDryRun prints one polecat's --dry-run preview to w and reports
-// whether the real nuke would refuse it. --force bypasses the safety refusal
-// (nukeSafetyRefusal), so a forced preview never counts one, though the safety
-// listing still prints. The session and worktree are the ones the nuke will
-// stop and delete: the rig's registered session prefix, not the rig name, and
-// the Manager's clone path, not polecats/<name>.
-func previewNukeDryRun(w io.Writer, p polecatTarget, force bool, reg *session.PrefixRegistry,
-	check func(polecatTarget) *SafetyCheckResult, listSafety func(polecatTarget) bool) bool {
-	refused := !force && check(p).Blocked
-	if refused {
-		fmt.Fprintf(w, "Would refuse to nuke %s/%s without --force:\n", p.rigName, p.polecatName)
+// whether it would be refused: refusal is the reason the run it belongs to
+// would stop, decided by the batch. The session and worktree are the ones the
+// nuke will stop and delete: the rig's registered session prefix, not the rig
+// name, and the Manager's clone path, not polecats/<name>.
+func previewNukeDryRun(w io.Writer, p polecatTarget, refusal nukePreviewRefusal, reg *session.PrefixRegistry,
+	result *SafetyCheckResult, listSafety func(polecatTarget, *SafetyCheckResult)) bool {
+	if refusal.Clause != "" {
+		fmt.Fprintf(w, "Would refuse to nuke %s/%s %s:\n", p.rigName, p.polecatName, refusal.Clause)
+		for _, line := range refusal.Detail {
+			fmt.Fprintf(w, "  - %s\n", line)
+		}
 	} else {
 		fmt.Fprintf(w, "Would nuke %s/%s:\n", p.rigName, p.polecatName)
 	}
@@ -2675,13 +2786,76 @@ func previewNukeDryRun(w io.Writer, p polecatTarget, force bool, reg *session.Pr
 	fmt.Fprintf(w, "  - Delete branch (if exists)\n")
 	fmt.Fprintf(w, "  - Reset agent bead: %s\n", polecatBeadIDForRig(p.r, p.rigName, p.polecatName))
 
-	// The listing prints its own report; only an unforced preview that did not
-	// already count the refusal above takes its verdict.
-	if listSafety(p) && !refused && !force {
-		refused = true
-	}
+	// The listing reports the same result this preview counted, so it cannot
+	// reach a different verdict from the one above.
+	listSafety(p, result)
 	fmt.Fprintln(w)
-	return refused
+	return refusal.Clause != ""
+}
+
+// unpreservedBranchRefusal is the preserveFailureBlocker a forced nuke of
+// target would meet if its self-preserve push failed, for a preview that must
+// not push: a branch whose work no remote ref holds is the one whose deletion
+// would lose it, and that push is the only thing covering it. acknowledged is
+// --acknowledge-unpreserved, with which the real run proceeds regardless. It
+// reports nothing for a polecat with no branch, or with no local ref to
+// preserve — the cases the nuke itself passes without pushing.
+func unpreservedBranchRefusal(target polecatTarget, acknowledged bool) nukePreviewRefusal {
+	if acknowledged {
+		return nukePreviewRefusal{}
+	}
+	info, err := target.mgr.Get(target.polecatName)
+	if err != nil || info == nil || info.Branch == "" {
+		return nukePreviewRefusal{}
+	}
+	g := nukePreserveRepo(info, target.r)
+	if g == nil {
+		return nukePreviewRefusal{}
+	}
+	if exists, err := g.BranchExists(info.Branch); err != nil || !exists {
+		return nukePreviewRefusal{}
+	}
+	status, err := g.BranchPreservationStatus(info.Branch, "origin", nil)
+	if err != nil {
+		return nukePreviewRefusal{}
+	}
+	return unpreservedBranchRefusalFor(target, info.Branch, status)
+}
+
+// unpreservedBranchRefusalFor is the refusal for a branch whose preservation
+// status the caller already read: work no remote ref holds is what deleting the
+// local branch would lose, and the self-preserve push is the only thing that
+// covers it.
+func unpreservedBranchRefusalFor(target polecatTarget, branch string, status git.BranchPreservationStatus) nukePreviewRefusal {
+	if status.Preserved || status.UnpreservedPatchCount == 0 {
+		return nukePreviewRefusal{}
+	}
+	return nukePreviewRefusal{
+		Clause: "under --force unless its self-preserve push succeeds",
+		Detail: []string{
+			fmt.Sprintf("branch %s has %d commit(s) no remote ref holds; if that push fails the run is refused without %s",
+				branch, status.UnpreservedPatchCount, NukeAcknowledgeUnpreservedFlag),
+			fmt.Sprintf("Push %s/%s by hand, or re-run with: gt polecat nuke %s/%s --force %s",
+				target.rigName, target.polecatName, target.rigName, target.polecatName, NukeAcknowledgeUnpreservedFlag),
+		},
+	}
+}
+
+// nukePreserveRepo is the repo that holds the polecat's branch, in the order
+// the nuke's own preserve step looks for it: the departed seat's worktree,
+// which has the session's latest commits, then the rig's bare repo. nil means
+// neither exists, so there is no local branch to preserve.
+func nukePreserveRepo(info *polecat.Polecat, r *rig.Rig) *git.Git {
+	if info != nil && info.ClonePath != "" {
+		if _, err := os.Stat(info.ClonePath); err == nil {
+			return git.NewGit(info.ClonePath)
+		}
+	}
+	bareRepoPath := filepath.Join(r.Path, ".repo.git")
+	if stat, err := os.Stat(bareRepoPath); err == nil && stat.IsDir() {
+		return git.NewGitWithDir(bareRepoPath, "")
+	}
+	return nil
 }
 
 func dryRunNukeSummary(total, blocked int) string {

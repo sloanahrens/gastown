@@ -273,10 +273,16 @@ func formatSafetyCheckBlockers(blocked []*SafetyCheckResult) string {
 	return strings.Join(parts, " | ")
 }
 
-// displayDryRunSafetyCheck shows safety check status for dry-run mode. It returns true when a normal nuke would refuse.
-func displayDryRunSafetyCheck(target polecatTarget) bool {
+// displayDryRunSafetyCheck shows safety check status for dry-run mode, ending
+// in the verdict a normal nuke would reach.
+//
+// result is the safety check the caller already ran for this target: the detail
+// lines below are live reads for the human (agent bead, MR, git state), and the
+// verdict is that one result, handed over rather than recomputed, so the
+// preview header, this listing and the "Would refuse N of M" count cannot
+// disagree (gt-y6mhx).
+func displayDryRunSafetyCheck(target polecatTarget, result *SafetyCheckResult) {
 	fmt.Printf("\n  Safety checks:\n")
-	result := checkPolecatSafety(target)
 	polecatInfo, infoErr := target.mgr.Get(target.polecatName)
 	bd := beads.New(target.r.Path)
 	agentBeadID := polecatBeadIDForRig(target.r, target.rigName, target.polecatName)
@@ -352,5 +358,11 @@ func displayDryRunSafetyCheck(target polecatTarget) bool {
 		fmt.Printf("    - Open MR: %s\n", style.Dim.Render("unknown (no branch info)"))
 	}
 
-	return result.Blocked
+	// The verdict is the result the caller already evaluated, not a second
+	// reading of the same polecat (gt-y6mhx).
+	if result.Blocked {
+		fmt.Printf("    - Verdict: %s\n", style.Error.Render("blocked"))
+	} else {
+		fmt.Printf("    - Verdict: %s\n", style.Success.Render("clear"))
+	}
 }
