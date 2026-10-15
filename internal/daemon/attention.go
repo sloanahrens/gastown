@@ -163,6 +163,8 @@ type attentionCache struct {
 	state         attention.State
 	reworkNotes   map[string]reworkNote
 	diskWarnBeats int
+	// dockerProbeFails is how many consecutive ticks docker ps has failed.
+	dockerProbeFails int
 	// repeatedAt is when each repeating item (attention.Repeats) was last
 	// said. It is memory only: after a restart an item's clock starts again.
 	repeatedAt map[string]time.Time
@@ -259,6 +261,9 @@ type attentionSources struct {
 	// diskWarnBeats is how many consecutive ticks host.disk_warn has held,
 	// carried across ticks by the daemon. attentionTick updates it.
 	diskWarnBeats int
+	// dockerProbeFails is how many consecutive ticks docker ps has failed,
+	// carried across ticks by the daemon. collectHostDocker updates it.
+	dockerProbeFails int
 
 	// questions is the overseer-question collectors' read of the town
 	// database (attention_questions.go).
@@ -304,6 +309,7 @@ func (d *Daemon) writeAttention() {
 		src.reworkNotes = cache.reworkNotes
 	}
 	src.diskWarnBeats = cache.diskWarnBeats
+	src.dockerProbeFails = cache.dockerProbeFails
 	src.repeatedAt = cache.repeatedAt
 	tips, err := readDirectPushTips(d.config.TownRoot)
 	if err != nil {
@@ -311,7 +317,7 @@ func (d *Daemon) writeAttention() {
 	}
 	src.tips = &tips
 	state := d.attentionTick(ctx, src, prev, acks, now)
-	d.lastAttention = &attentionCache{state: state, reworkNotes: src.reworkNotes, diskWarnBeats: src.diskWarnBeats, repeatedAt: src.repeatedAt}
+	d.lastAttention = &attentionCache{state: state, reworkNotes: src.reworkNotes, diskWarnBeats: src.diskWarnBeats, dockerProbeFails: src.dockerProbeFails, repeatedAt: src.repeatedAt}
 	if len(src.tips.Rigs) == 0 {
 		return
 	}
