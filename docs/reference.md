@@ -951,6 +951,41 @@ The repeat intervals are `repeatEvery` in `internal/attention/repeat.go`. Each
 question row on the dashboard shows the `gt answer <id> "..."` line Sloan runs;
 the page stays read-only.
 
+### Overseer Heartbeat and Journal
+
+The overseer session reports to the town through two files under
+`<town>/.runtime/overseer/`, so the dashboard and the daemon can tell whether it
+is alive and what it keeps doing by hand. Neither command starts, stops or
+restarts a session.
+
+```bash
+gt overseer beat [--state working|idle|away]   # heartbeat.json: {ts, state, session}
+gt overseer log <kind> "<text>" [--bead ID]    # one line of journal.jsonl: {ts, kind, text, bead}
+```
+
+`kind` is one of `file_bead`, `review`, `config_edit`, `hold`, `install`,
+`nuke_seat`, `answer`, `decision`, `fix_by_hand`; any other kind is refused with
+that list. The text is cut to 300 characters and collapsed to one line. The
+journal is pruned the way the events log is (`events.Prune`, 90 days or 1 MB),
+and the dashboard's Overseer panel counts its last seven days by kind: the
+backlog for what to automate next.
+
+The `overseer.silent` rule (info, no wake) holds while the heartbeat is older
+than `overseer.silent_after` (default `90m`) and either the spec dispatcher's
+newest tick, under ten minutes old, found ready beads, or an open question is
+owed a move by the overseer: no comment yet, or answered by Sloan. A town whose
+overseer has never beaten is silent. When `overseer.silent_push` names a
+`notify.commands` entry, the daemon pushes through it once per silent period,
+the period being one stale heartbeat; `silent-push.json` in the same directory
+records the heartbeat time it pushed for. Both keys sit under `overseer` in the
+operational settings:
+
+```json
+"overseer": {"silent_after": "90m", "silent_push": "ntfy"}
+```
+
+The rule acts on nothing else: it restarts, kills and unhooks no session.
+
 ### Watch Feed
 
 Two files carry the town's own alerts in one schema, and `gt tail`'s watch

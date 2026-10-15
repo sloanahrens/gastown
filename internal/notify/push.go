@@ -30,6 +30,12 @@ func Push(name, title, body string) error {
 	if err != nil {
 		return err
 	}
+	return PushIn(townRoot, name, title, body)
+}
+
+// PushIn is Push for a caller that already holds the town root, as the daemon
+// does: its working directory is not the town's to rely on.
+func PushIn(townRoot, name, title, body string) error {
 	cfg, err := config.LoadOrCreateEscalationConfig(config.EscalationConfigPath(townRoot))
 	if err != nil {
 		return fmt.Errorf("loading escalation config: %w", err)

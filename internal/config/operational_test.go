@@ -642,3 +642,43 @@ func TestDoltLogLevelSetting_Validates(t *testing.T) {
 		t.Errorf("empty log_level: got %q, %v; want \"\", false", got, ok)
 	}
 }
+
+func TestOverseerThresholds(t *testing.T) {
+	t.Parallel()
+
+	var op *OperationalConfig
+	o := op.GetOverseerConfig()
+	if got := o.SilentAfterD(); got != DefaultOverseerSilentAfter || DefaultOverseerSilentAfter != 90*time.Minute {
+		t.Errorf("default SilentAfterD = %v, want 90m", got)
+	}
+	if got := o.SilentPushName(); got != "" {
+		t.Errorf("default SilentPushName = %q, want none", got)
+	}
+
+	for _, tc := range []struct {
+		in   string
+		want time.Duration
+	}{
+		{"45m", 45 * time.Minute},
+		{"", DefaultOverseerSilentAfter},
+		{"soon", DefaultOverseerSilentAfter},
+		{"0s", DefaultOverseerSilentAfter},
+		{"-5m", DefaultOverseerSilentAfter},
+	} {
+		got := (&OverseerThresholds{SilentAfter: tc.in}).SilentAfterD()
+		if got != tc.want {
+			t.Errorf("SilentAfterD(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+	if got := (&OverseerThresholds{SilentPush: " ntfy "}).SilentPushName(); got != "ntfy" {
+		t.Errorf("SilentPushName = %q, want ntfy", got)
+	}
+
+	var parsed OperationalConfig
+	if err := json.Unmarshal([]byte(`{"overseer":{"silent_after":"2h","silent_push":"ntfy"}}`), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if o := parsed.GetOverseerConfig(); o.SilentAfterD() != 2*time.Hour || o.SilentPushName() != "ntfy" {
+		t.Errorf("parsed overseer section = %+v", o)
+	}
+}

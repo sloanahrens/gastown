@@ -57,7 +57,7 @@ func TestRuleFlagsAssignments(t *testing.T) {
 			t.Errorf("%s = %+v, want operator_action and wake", r, f)
 		}
 	}
-	for _, r := range []string{RuleHostDiskWarn, RuleHostProbe, RuleRiskPath, RuleQuestionStale} {
+	for _, r := range []string{RuleHostDiskWarn, RuleHostProbe, RuleRiskPath, RuleQuestionStale, RuleOverseerSilent} {
 		f, _ := Flags(r)
 		if f.Wake || f.Handled != HandledInfo {
 			t.Errorf("%s = %+v, want info and no wake", r, f)

@@ -89,9 +89,9 @@ func (d *Daemon) productionQuestionReads() questionReads {
 	}
 }
 
-// questionCollectors are the three question collectors, sharing one read of the
-// open questions. The read is made by whichever collector runs first, and a
-// failure of it fails all three alike. It is per call, so a tick that builds
+// questionCollectors are the three question collectors and the silent-overseer
+// collector, sharing one read of the open questions. The read is made by
+// whichever collector runs first, and a failure of it fails them alike. It is per call, so a tick that builds
 // its collectors afresh never judges last tick's questions.
 func (s *attentionSources) questionCollectors() []attentionCollector {
 	var (
@@ -119,6 +119,11 @@ func (s *attentionSources) questionCollectors() []attentionCollector {
 		collector(attention.KindQuestionNew, questionNewItems),
 		collector(attention.KindQuestionAnswered, questionAnsweredItems),
 		collector(attention.KindQuestionStale, questionStaleItems),
+		// The silent-overseer rule reads the same snapshot when it needs
+		// one, so it adds no bd read of its own.
+		{kind: attention.KindOverseerSilent, collect: func(ctx context.Context) ([]attention.Item, error) {
+			return s.collectOverseerSilent(ctx, read)
+		}},
 	}
 }
 

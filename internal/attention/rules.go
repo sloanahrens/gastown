@@ -55,6 +55,9 @@ const (
 	RuleQuestionNew      = "question.new"
 	RuleQuestionAnswered = "question.answered"
 	RuleQuestionStale    = "question.stale"
+
+	// RuleOverseerSilent is the silent-overseer rule (gt-3a6h6).
+	RuleOverseerSilent = "overseer.silent"
 )
 
 var (
@@ -91,6 +94,10 @@ var ruleFlags = map[string]RuleFlags{
 	// A day-old question is a record for the overseer's next look, not a
 	// reason to wake it.
 	RuleQuestionStale: flagsInfo,
+	// A silent overseer cannot be woken by its own queue: the daemon pushes to
+	// the person through the configured command instead, so the event itself
+	// is a record.
+	RuleOverseerSilent: flagsInfo,
 	// A refusal is gt done working: the polecat is told and the bead goes
 	// back. It needs an operator only if it repeats, which rejected_twice
 	// catches.
@@ -155,6 +162,7 @@ var kindRules = map[Kind]string{
 	KindQuestionNew:      RuleQuestionNew,
 	KindQuestionAnswered: RuleQuestionAnswered,
 	KindQuestionStale:    RuleQuestionStale,
+	KindOverseerSilent:   RuleOverseerSilent,
 }
 
 // RuleFor is the rule id of an item. The disk collector's key is its rule

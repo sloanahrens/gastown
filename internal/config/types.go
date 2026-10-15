@@ -216,6 +216,22 @@ type OperationalConfig struct {
 	// Health holds every threshold of the town health signal
 	// (internal/townhealth, gt-s3rec.2); absent keys keep its defaults.
 	Health *townhealth.Settings `json:"health,omitempty"`
+
+	// Overseer holds the silent-overseer rule's knobs (gt-3a6h6).
+	Overseer *OverseerThresholds `json:"overseer,omitempty"`
+}
+
+// OverseerThresholds configures the daemon's silent-overseer rule.
+type OverseerThresholds struct {
+	// SilentAfter is how old the overseer's heartbeat may be, while dispatchable
+	// work or an unanswered question waits, before the daemon raises
+	// overseer.silent (default "90m").
+	SilentAfter string `json:"silent_after,omitempty"`
+
+	// SilentPush names the notify.commands entry the daemon pushes through,
+	// once per silent period. Unset pushes nothing; the rule still raises its
+	// info event.
+	SilentPush string `json:"silent_push,omitempty"`
 }
 
 // DoltThresholds configures Dolt server thresholds.

@@ -263,6 +263,8 @@ type attentionSources struct {
 	// questions is the overseer-question collectors' read of the town
 	// database (attention_questions.go).
 	questions questionReads
+	// overseer is the silent-overseer collector's reads (attention_overseer.go).
+	overseer overseerReads
 	// repeatedAt is when each repeating item was last said, carried across
 	// ticks by the daemon. attentionTick updates it.
 	repeatedAt map[string]time.Time
@@ -481,6 +483,7 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 	}
 	s.landingRigs = d.attentionLandingRigs
 	s.questions = d.productionQuestionReads()
+	s.overseer = d.productionOverseerReads()
 	s.redMain = func(ctx context.Context, rig string) ([]*beads.Issue, error) {
 		return d.rigWorkBeads(rig).List(beads.ListOptions{
 			Status: "open", Label: landworker.LabelRedMain, Priority: -1, Limit: 0,
