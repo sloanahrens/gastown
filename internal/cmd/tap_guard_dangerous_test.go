@@ -1794,10 +1794,11 @@ func TestGoCleanSharedCacheReachesGuard(t *testing.T) {
 }
 
 // TestMatchesPolecatFullSuiteUncached pins the gt-v4r0x rule: an uncached
-// whole-module 'go test' is denied in a polecat session, in any flag order
-// and with or without -json, while cached full-tree runs, scoped uncached
-// runs, and -run-filtered runs stay allowed — and the same full-tree command
-// stays allowed outside a polecat session (crew, refinery, mayor, operator).
+// whole-module 'go test' is denied in a polecat session, in any flag order,
+// with or without -json, and behind Go's global -C dir flag (gt-soohm), while
+// cached full-tree runs, scoped uncached runs, and -run-filtered runs stay
+// allowed — and the same full-tree command stays allowed outside a polecat
+// session (crew, refinery, mayor, operator).
 func TestMatchesPolecatFullSuiteUncached(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1818,8 +1819,17 @@ func TestMatchesPolecatFullSuiteUncached(t *testing.T) {
 		{"after a shell separator", "cd internal && go test -count=1 ./...", true, true},
 		{"other flags present", "go test -count=1 -timeout 10m -race ./...", true, true},
 
+		// Go's global -C dir flag sits between the binary and the subcommand
+		// in both of its spellings without hiding a full-tree run (gt-soohm).
+		{"-C dir before the subcommand", "go -C /tmp test -count=1 ./...", true, true},
+		{"-C=dir before the subcommand", "go -C=/tmp test -count=1 ./...", true, true},
+		{"-C dir with a space-separated count", "go -C /tmp test -count 1 ./...", true, true},
+
 		// Allowed in a polecat session.
 		{"cached full tree", "go test ./...", true, false},
+		{"-C dir with a cached full tree", "go -C /tmp test ./...", true, false},
+		{"-C dir with a scoped uncached run", "go -C /tmp test -count=1 ./internal/cmd/...", true, false},
+		{"-C dir that another tool owns", "make -C /tmp test -count=1 ./...", true, false},
 		{"json cached full tree", "go test -json ./...", true, false},
 		{"scoped uncached", "go test -count=1 ./internal/cmd/...", true, false},
 		{"scoped package uncached", "go test -count=1 ./internal/cmd", true, false},
@@ -1861,6 +1871,8 @@ func TestPolecatFullSuiteUncachedReachesGuard(t *testing.T) {
 		blocked bool
 	}{
 		{"top-level polecat", "go test -count=1 ./...", polecat, true},
+		{"-C dir polecat", "go -C /tmp test -count=1 ./...", polecat, true},
+		{"-C dir polecat, cached", "go -C /tmp test ./...", polecat, false},
 		{"bash -c wrapped polecat", `bash -c "go test -count=1 -json ./..."`, polecat, true},
 		{"top-level non-polecat", "go test -count=1 ./...", noTownSession, false},
 		{"scoped polecat", "go test -count=1 ./internal/cmd/...", polecat, false},
@@ -1877,9 +1889,10 @@ func TestPolecatFullSuiteUncachedReachesGuard(t *testing.T) {
 
 // TestIsIdleGatedSuiteStartCommand pins the gt-nqcy follow-up's detection of
 // unwrapped full-suite starts, ported from the interim host-hygiene hook:
-// 'go test ./...' and 'go build ./...' are gated wherever they run, 'make
-// test' and 'make build' in a Go tree too; scoped invocations, 'gt slot
-// run'-wrapped ones, and quoted prose are not. The non-Go tree cases live in
+// 'go test ./...' and 'go build ./...' are gated wherever they run, their -C
+// dir spellings included (gt-soohm), 'make test' and 'make build' in a Go
+// tree too; scoped invocations, 'gt slot run'-wrapped ones, and quoted prose
+// are not. The non-Go tree cases live in
 // TestIsIdleGatedSuiteStartOutsideGoTree, which may not be buildable here.
 func TestIsIdleGatedSuiteStartCommand(t *testing.T) {
 	t.Parallel()
@@ -1902,10 +1915,14 @@ func TestIsIdleGatedSuiteStartCommand(t *testing.T) {
 		{"go build whole repo", "go build ./...", goTree, true},
 		{"go test after unrelated segment", "echo hi && go test ./...", goTree, true},
 		{"go test glued to semicolon", "cd /tmp;go test ./...", goTree, true},
+		{"go -C into a tree, whole repo test", "go -C " + goTree + " test ./...", goTree, true},
+		{"go -C=dir, whole repo build", "go -C=" + goTree + " build ./...", goTree, true},
 
 		// Should NOT gate.
 		{"scoped go test", "go test ./internal/beads/...", goTree, false},
 		{"scoped go build", "go build ./cmd/gt", goTree, false},
+		{"go -C dir with a scoped test", "go -C " + goTree + " test ./internal/beads/...", goTree, false},
+		{"go -C dir with a flag before the whole-repo arg", "go -C " + goTree + " test -v ./...", goTree, false},
 		{"make lint", "make lint", goTree, false},
 		{"wrapped in gt slot run", "gt slot run -- make test", goTree, false},
 		{"wrapped go test in gt slot run", "gt slot run --role gastown/flint -- go test ./...", goTree, false},
@@ -2239,6 +2256,7 @@ func TestIdleGateHoldAdviceNamesTheHeldCommand(t *testing.T) {
 		{"make test", "GOFLAGS=-p=8 make test", "make build"},
 		{"go build ./...", "GOFLAGS=-p=8 go build ./...", "make test"},
 		{"go test ./...", "GOFLAGS=-p=8 go test ./...", "make build"},
+		{"go -C /tmp test ./...", "GOFLAGS=-p=8 go -C /tmp test ./...", "make test"},
 	} {
 		t.Run(tt.command, func(t *testing.T) {
 			proc := fakeGuardProcess(map[string]string{

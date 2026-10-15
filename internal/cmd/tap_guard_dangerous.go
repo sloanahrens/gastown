@@ -2766,12 +2766,13 @@ func matchesGoCleanSharedCache(tokens []string) (reason, alternative string) {
 	return "", ""
 }
 
-// goSubcommandBefore reports whether tokens[i] is the subcommand word of a
-// `go` invocation that starts earlier in the token list — the relationship a
-// 'go SUBCOMMAND' matcher needs, since Go's global -C dir flag (Go >= 1.20)
-// may sit between the binary and the subcommand. Without the walk,
-// `go -C /tmp clean -modcache` reaches `clean` with the directory before it,
-// not `go`, and the invocation read as a plain `clean` (gt-t7p80).
+// goBinaryBefore returns the index of the `go` binary whose subcommand word
+// tokens[i] is — the relationship a 'go SUBCOMMAND' matcher needs, since Go's
+// global -C dir flag (Go >= 1.20) may sit between the binary and the
+// subcommand. Without the walk, `go -C /tmp clean -modcache` reaches `clean`
+// with the directory before it, not `go`, and the invocation read as a plain
+// `clean` (gt-t7p80). Naming the invocation back to the operator needs the
+// binary's own position, so the index is returned rather than a yes/no.
 //
 // The walk back from tokens[i] consumes exactly what -C costs: the flag in
 // either spelling, "-C dir" and "-C=dir", repeated for each -C on the line.
@@ -2780,10 +2781,10 @@ func matchesGoCleanSharedCache(tokens []string) (reason, alternative string) {
 // isGoBinaryName, so a versioned toolchain (go1.22.0, gotip) owns its
 // subcommands too. tokens must be lowercased, shell-aware tokens (see
 // shellTokenize), which is why -C arrives as -c.
-func goSubcommandBefore(tokens []string, i int) bool {
+func goBinaryBefore(tokens []string, i int) int {
 	for j := i - 1; j >= 0; j-- {
 		if isGoBinaryName(filepath.Base(tokens[j])) {
-			return true
+			return j
 		}
 		if isGoDirFlagValue(tokens[j]) {
 			continue
@@ -2792,9 +2793,31 @@ func goSubcommandBefore(tokens []string, i int) bool {
 			j-- // tokens[j] is the directory a bare `-C` consumed
 			continue
 		}
-		return false
+		return -1
 	}
-	return false
+	return -1
+}
+
+// goSubcommandBefore reports whether tokens[i] is the subcommand word of a
+// `go` invocation that starts earlier in the token list (goBinaryBefore).
+func goSubcommandBefore(tokens []string, i int) bool {
+	return goBinaryBefore(tokens, i) >= 0
+}
+
+// findGoSubcommand returns the index of the subcommand word of the first
+// `go SUB` invocation in a shell segment (tokens already lowercased), or -1.
+// It is findInvocation's go case widened by the -C dir flag that may sit
+// between the binary and the subcommand: findInvocation requires the
+// subcommand to follow the binary directly, so a whole-module
+// `go -C /tmp test ./...` reached it as no invocation at all and the
+// full-suite HOLD never fired (gt-soohm).
+func findGoSubcommand(tokens []string, sub string) int {
+	for i, tok := range tokens {
+		if tok == sub && goSubcommandBefore(tokens, i) {
+			return i
+		}
+	}
+	return -1
 }
 
 // goBinaryNamePattern matches every name the Go toolchain ships under: the
@@ -2857,6 +2880,10 @@ const polecatFullSuiteUncachedAlternative = "Alternative: run 'make presubmit' �
 // gate from ~30s to 5m02s (gt-v4r0x). 'make presubmit' already tests only
 // the changed packages, so a seat has no need for the full-tree form.
 //
+// The invocation is located by its subcommand (goSubcommandBefore), not by a
+// 'go' token abutting 'test', so the -C dir flag between the two hides
+// nothing (gt-soohm).
+//
 // Only the full-tree form is blocked. A plain cached 'go test ./...' (no
 // -count=1) reuses the shared cache and stays allowed; scoped uncached runs
 // (go test -count=1 ./internal/cmd/...) and -run-filtered runs stay allowed;
@@ -2873,9 +2900,9 @@ func matchesPolecatFullSuiteUncached(tokens []string, polecatSession bool) (reas
 	if !polecatSession {
 		return "", ""
 	}
-	for i := 0; i+1 < len(tokens); i++ {
-		if tokens[i] == "go" && tokens[i+1] == "test" {
-			if fullSuiteUncachedGoTest(tokens[i+2:]) {
+	for i := range tokens {
+		if tokens[i] == "test" && goSubcommandBefore(tokens, i) {
+			if fullSuiteUncachedGoTest(tokens[i+1:]) {
 				return polecatFullSuiteUncachedReason, polecatFullSuiteUncachedAlternative
 			}
 		}
@@ -3017,11 +3044,12 @@ func isIdleGatedSuiteStartSegment(tokens []string, cwd string, cwdKnown bool) bo
 // idleGateHeldSegment judges a single shell segment (tokens between shell
 // operators) and returns the held invocation as it should be spelled back to
 // the operator — the target of a held make ('make test'/'make build', however
-// its flags were written) or the whole-repo go form ('go test ./...'/'go build
-// ./...'). "" means the segment is not gated. tokens is original-case; matching
-// is done on a lowercased copy so "Make Test" and "make test" are treated the
-// same. cwd and cwdKnown locate a make invocation's tree, through makeTreeDir
-// and makeActsOnWholeGoModule.
+// its flags were written) or the whole-repo go form as written ('go test
+// ./...', 'go -C /tmp test ./...'; see goWholeRepoInvocation). "" means the
+// segment is not gated. tokens is original-case; matching is done on a
+// lowercased copy so "Make Test" and "make test" are treated the same. cwd
+// and cwdKnown locate a make invocation's tree, through makeTreeDir and
+// makeActsOnWholeGoModule.
 func idleGateHeldSegment(tokens []string, cwd string, cwdKnown bool) string {
 	if len(tokens) == 0 {
 		return ""
@@ -3039,13 +3067,24 @@ func idleGateHeldSegment(tokens []string, cwd string, cwdKnown bool) string {
 	if i := findInvocation(lower, "make", "build"); i >= 0 && makeActsOnWholeGoModule(tokens[i:], makeTreeDir(cwd, cwdKnown)) {
 		return "make build"
 	}
-	if i := findInvocation(lower, "go", "test"); i >= 0 && wholeRepoArgFollows(tokens, i+2) {
-		return "go test " + tokens[i+2]
+	if i := findGoSubcommand(lower, "test"); i >= 0 && wholeRepoArgFollows(tokens, i+1) {
+		return goWholeRepoInvocation(tokens, lower, i)
 	}
-	if i := findInvocation(lower, "go", "build"); i >= 0 && wholeRepoArgFollows(tokens, i+2) {
-		return "go build " + tokens[i+2]
+	if i := findGoSubcommand(lower, "build"); i >= 0 && wholeRepoArgFollows(tokens, i+1) {
+		return goWholeRepoInvocation(tokens, lower, i)
 	}
 	return ""
+}
+
+// goWholeRepoInvocation spells a held whole-repo go invocation back to the
+// operator as it was written, from the binary through the whole-repo argument
+// at sub+1 — "go test ./..." for the plain form, and "go -C /tmp test ./..."
+// when the -C dir flag sits between the two, so the advice line names the tree
+// the command actually runs in (gt-soohm). tokens is original-case (what the
+// operator typed); lower is its lowercased twin, whose indices are the same
+// and which located the subcommand at sub.
+func goWholeRepoInvocation(tokens, lower []string, sub int) string {
+	return strings.Join(tokens[goBinaryBefore(lower, sub):sub+2], " ")
 }
 
 // hasPrefix reports whether tokens begins with prefix, element for element.
