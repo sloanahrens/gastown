@@ -461,12 +461,13 @@ type heredocSpan struct {
 // the shell never reads as a redirection, and one preceded by "<" is the tail
 // of a "<<<" here-string: both are skipped, because a body inferred from
 // either runs to the end of the text and hides the lines after it (gt-79opc).
-// So are the two other spellings that look like a heredoc operator but are
-// not (gt-yza8u): a "<" behind a backslash ("\<<EOF" reads as a literal "<"
-// followed by a single-"<" redirect) and a "<<" inside a "$((" arithmetic
-// expansion, where it is a shift. Accepting either one stripped a body the
-// shell never read, and the live commands standing in for that body went
-// unchecked.
+// So are the other spellings that look like a heredoc operator but are not
+// (gt-yza8u, gt-dherr): a "<" behind a backslash ("\<<EOF" reads as a literal
+// "<" followed by a single-"<" redirect) and a "<<" inside an arithmetic
+// context — a "$((", a command-position "((" or C-style "for ((", a "$[" or
+// array subscript, or the offset of a "${name:..}" — where it is a shift.
+// Accepting any of them stripped a body the shell never read, and the live
+// commands standing in for that body went unchecked.
 func scanHeredocs(command string) []heredocSpan {
 	matches := heredocStartPattern.FindAllStringSubmatchIndex(command, -1)
 	if matches == nil {
@@ -480,7 +481,7 @@ func scanHeredocs(command string) []heredocSpan {
 		if start < stripped {
 			continue // inside a previously accepted heredoc body
 		}
-		if walk.advanceTo(start) != 0 || walk.escaped || walk.arith {
+		if walk.advanceTo(start) != 0 || walk.escaped || walk.inArith() {
 			continue
 		}
 		if start > 0 && command[start-1] == '<' {
@@ -542,19 +543,39 @@ func scanHeredocs(command string) []heredocSpan {
 // a literal "<<" from a redirection. Comments decide it because a word-leading
 // "#" makes the rest of its line text the shell does not parse at all: read as
 // a quote, the apostrophe in "# don't" left the real heredoc below invisible
-// (gt-79opc). Arithmetic expansions decide it too: the shell reads the text of
-// a "$((" as an expression, where "<<" shifts (gt-yza8u).
+// (gt-79opc). Arithmetic contexts decide it too: the shell reads their text as
+// an expression, where "<<" shifts (gt-yza8u, gt-dherr).
 type heredocQuoteWalk struct {
 	runes   []rune
 	runeIdx int
 	byteIdx int
-	quote   rune // the quoted stretch being read: 0, '\'' or '"'
-	comment bool // inside a "#" comment, which runs to the end of its line
-	escaped bool // the rune at runeIdx is literal text behind a backslash
-	arith   bool // inside a "$((" arithmetic expansion, where "<<" is a shift
-	paren   int  // parens open since that expansion began
-	prevIdx int  // the rune the shell read last, for startsShellWord
-	prevEsc bool // that rune was backslash-escaped
+	quote   rune         // the quoted stretch being read: 0, '\'' or '"'
+	comment bool         // inside a "#" comment, which runs to the end of its line
+	escaped bool         // the rune at runeIdx is literal text behind a backslash
+	arith   []arithFrame // arithmetic contexts open here, innermost last
+	braces  int          // "${" expansions open here, for the ":" offset rule
+	prevIdx int          // the rune the shell read last, for startsShellWord
+	prevEsc bool         // that rune was backslash-escaped
+}
+
+// arithKind is what opened an arithmetic context, and so what closes it.
+type arithKind uint8
+
+const (
+	arithParen   arithKind = iota + 1 // "$((" or a command-position "(("
+	arithBracket                      // a "$[" or an array subscript "["
+	arithColon                        // the offset or length of a "${name:..}"
+)
+
+// arithFrame is one arithmetic context the walk is reading. depth counts the
+// brackets open inside it, the opener the walk has already passed included, so
+// the matching closer is what returns it to zero. brace is the "${" nesting
+// depth a colon frame belongs to: the "}" that ends that expansion, and not a
+// "}" of one nested inside it, is what closes the frame (gt-dherr).
+type arithFrame struct {
+	kind  arithKind
+	depth int
+	brace int
 }
 
 // advanceTo reads up to byte offset to and returns the quote open there.
@@ -581,19 +602,49 @@ func (w *heredocQuoteWalk) advanceTo(to int) rune {
 		case w.quote == 0 && r == '$' && w.runeAt(w.runeIdx+1) == '(' && w.runeAt(w.runeIdx+2) == '(':
 			// "$((" opens an arithmetic expansion. The two "(" that follow
 			// are counted, so the matching "))" is what closes it. One met
-			// inside an expansion already open adds its two "(" to that
-			// count instead of starting a fresh one, whose "))" would end
-			// the outer expansion early and leave a later "<<" reading as a
-			// heredoc (gt-schaa).
-			if !w.arith {
-				w.arith, w.paren = true, 0
+			// inside an expansion already open opens its own frame, so its
+			// "))" ends that frame without ending the outer expansion early
+			// and leaving a later "<<" reading as a heredoc (gt-schaa).
+			w.arith = append(w.arith, arithFrame{kind: arithParen})
+		case w.parenArith() && w.quote == 0 && r == '(':
+			w.arith[len(w.arith)-1].depth++
+		case w.parenArith() && w.quote == 0 && r == ')':
+			top := &w.arith[len(w.arith)-1]
+			top.depth--
+			if top.depth <= 0 {
+				w.arith = w.arith[:len(w.arith)-1]
 			}
-		case w.arith && w.quote == 0 && r == '(':
-			w.paren++
-		case w.arith && w.quote == 0 && r == ')':
-			if w.paren--; w.paren <= 0 {
-				w.arith, w.paren = false, 0
+		case w.quote == 0 && r == '(' && w.runeAt(w.runeIdx+1) == '(' && startsShellWord(w.runes, w.prevIdx, w.prevEsc):
+			// A "((" in command position — an arithmetic command, and the
+			// header of a C-style "for ((...))" — is an expression too
+			// (gt-dherr).
+			w.arith = append(w.arith, arithFrame{kind: arithParen})
+		case w.quote == 0 && r == '[' && w.opensSubscript():
+			// A "[" after a word opens an array subscript, and a "$[" opens
+			// the deprecated arithmetic expansion: their text is an
+			// expression (gt-dherr).
+			w.arith = append(w.arith, arithFrame{kind: arithBracket})
+		case w.bracketArith() && w.quote == 0 && r == '[':
+			w.arith[len(w.arith)-1].depth++
+		case w.bracketArith() && w.quote == 0 && r == ']':
+			top := &w.arith[len(w.arith)-1]
+			top.depth--
+			if top.depth <= 0 {
+				w.arith = w.arith[:len(w.arith)-1]
 			}
+		case w.quote == 0 && r == '$' && w.runeAt(w.runeIdx+1) == '{':
+			w.braces++
+		case w.quote == 0 && r == '}' && w.braces > 0:
+			w.braces--
+			w.closeArithBraces()
+		case w.quote == 0 && r == ':' && w.braces > 0 && !w.colonArith():
+			// The offset and length of a "${name:offset:length}" expansion
+			// are arithmetic; the ":" that separates them leaves the frame
+			// open, so the length counts too. "${name:-word}" and its three
+			// operator siblings open a frame here as well: their word is not
+			// an expression, but nothing inside a "${..}" is a redirection,
+			// so reading it as one costs no check that matters (gt-dherr).
+			w.arith = append(w.arith, arithFrame{kind: arithColon, brace: w.braces})
 		}
 		w.prevIdx, w.prevEsc = w.runeIdx, escaped
 		w.byteIdx += utf8.RuneLen(r)
@@ -611,6 +662,59 @@ func (w *heredocQuoteWalk) runeAt(i int) rune {
 	return w.runes[i]
 }
 
+// inArith reports whether the walk is reading an arithmetic context, where a
+// "<<" is a shift the shell never takes as a heredoc operator (gt-dherr).
+func (w *heredocQuoteWalk) inArith() bool { return len(w.arith) > 0 }
+
+// topArith is the innermost arithmetic frame, or nil when none is open.
+func (w *heredocQuoteWalk) topArith() *arithFrame {
+	if len(w.arith) == 0 {
+		return nil
+	}
+	return &w.arith[len(w.arith)-1]
+}
+
+// parenArith, bracketArith and colonArith report whether the innermost frame is
+// of that kind, which is what decides how the current rune extends or closes it.
+func (w *heredocQuoteWalk) parenArith() bool {
+	top := w.topArith()
+	return top != nil && top.kind == arithParen
+}
+
+func (w *heredocQuoteWalk) bracketArith() bool {
+	top := w.topArith()
+	return top != nil && top.kind == arithBracket
+}
+
+func (w *heredocQuoteWalk) colonArith() bool {
+	top := w.topArith()
+	return top != nil && top.kind == arithColon
+}
+
+// opensSubscript reports whether the "[" at the current rune follows a word
+// character, "]" or "$" — where it opens an array subscript or the "$["
+// arithmetic expansion, whose text is an expression. A "[" in command position
+// opens the test command instead and a "[a-z]" glob is a filename: neither is an
+// expression, so neither enters arith mode.
+func (w *heredocQuoteWalk) opensSubscript() bool {
+	p := w.runeAt(w.prevIdx)
+	return p == '$' || p == ']' || p == '_' || unicode.IsLetter(p) || unicode.IsDigit(p)
+}
+
+// closeArithBraces drops the colon frames the "}" just closed. A frame belongs
+// to the "${" level it opened at, so a "}" that leaves that level still open —
+// the one ending an expansion nested inside the offset — leaves the frame in
+// place (gt-dherr).
+func (w *heredocQuoteWalk) closeArithBraces() {
+	for {
+		top := w.topArith()
+		if top == nil || top.kind != arithColon || top.brace <= w.braces {
+			return
+		}
+		w.arith = w.arith[:len(w.arith)-1]
+	}
+}
+
 // skipTo reads past byte offset to with no quote tracking: the text crossed is
 // a heredoc body, which the shell reads verbatim, so a quote left open in it
 // must not reach the command text after the terminator.
@@ -620,7 +724,7 @@ func (w *heredocQuoteWalk) skipTo(to int) {
 		w.runeIdx++
 	}
 	w.quote, w.comment, w.escaped, w.prevIdx, w.prevEsc = 0, false, false, -1, false
-	w.arith, w.paren = false, 0
+	w.arith, w.braces = nil, 0
 }
 
 // heredocReaderLine returns the text of the line the heredoc operator at
