@@ -358,11 +358,16 @@ func reuseIdlePolecatForSlingWith(
 		fmt.Printf("Reusing idle polecat: %s\n", polecatName)
 	}
 
-	// ResumeBranch takes precedence over BaseBranch / integration auto-detection:
-	// when the user (or scheduler) wants to resume an existing PR branch, we
-	// must not start from main or an integration branch.
+	// An explicit ResumeBranch takes precedence over BaseBranch / integration
+	// auto-detection: a resume of an existing PR branch must not start from main
+	// or an integration branch.
+	//
+	// The gate reads opts.ResumeBranch, not the resumeBranch the rework
+	// preference fills in: a rework resumes the rejected attempt's branch, and
+	// where the work sits is not where it lands — it still merges into its
+	// epic's integration branch (gt-9jj8i).
 	baseBranch := opts.BaseBranch
-	if resumeBranch == "" {
+	if opts.ResumeBranch == "" {
 		if baseBranch == "" && opts.HookBead != "" {
 			if detected := env.integrationBranch(opts.HookBead); detected != "" {
 				baseBranch = "origin/" + detected

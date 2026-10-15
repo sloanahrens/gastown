@@ -62,6 +62,9 @@ func newReworkSlingFakeBare() *reworkSlingFake {
 const (
 	reworkBead   = "gt-rw1"
 	reworkBranch = "polecat/garnet/gt-rw1+muu1"
+	// epicIntegrationBranch is what detection answers for a bead whose parent
+	// epic carries one, and the target a rework of that bead must keep.
+	epicIntegrationBranch = "integration/gt-epic"
 )
 
 // reworkIdleReuseEnv is the idle-reuse path whose bead source answers with
@@ -90,6 +93,64 @@ func reuseForRework(t *testing.T, fake idlePolecatReuse, opts SlingSpawnOptions,
 	return reuseIdlePolecatForSlingWith(fake, reworkIdleReuseEnv(seats), "rig", opts, func() {})
 }
 
+// TestReworkSling_KeepsEpicIntegrationTarget: a rework resumes the rejected
+// attempt's branch but still merges into its epic's integration branch. Where
+// the work sits is not where it lands, so detection must run for the rework
+// path too (gt-9jj8i).
+func TestReworkSling_KeepsEpicIntegrationTarget(t *testing.T) {
+	t.Parallel()
+	fake := authorSeat(nil)
+	env := reworkIdleReuseEnv(map[string]*reworkSeat{reworkBead: {PolecatName: "garnet", Branch: reworkBranch}})
+	env.integrationBranch = func(beadID string) string {
+		if beadID == reworkBead {
+			return epicIntegrationBranch
+		}
+		return ""
+	}
+
+	info, err := reuseIdlePolecatForSlingWith(fake, env, "rig", SlingSpawnOptions{HookBead: reworkBead}, func() {})
+	if err != nil {
+		t.Fatalf("rework reuse failed: %v", err)
+	}
+	if info == nil {
+		t.Fatal("rework reuse returned no polecat")
+	}
+	if info.BaseBranch != epicIntegrationBranch {
+		t.Errorf("BaseBranch = %q; want the epic's integration branch %q", info.BaseBranch, epicIntegrationBranch)
+	}
+	if info.BranchCreated {
+		t.Error("BranchCreated = true; the rejected attempt's branch predates this sling")
+	}
+	if got := fake.reuseOpts["garnet"]; got.ResumeBranch != reworkBranch {
+		t.Errorf("ResumeBranch = %q; want the rework's own branch %q", got.ResumeBranch, reworkBranch)
+	}
+}
+
+// TestReworkSling_ExplicitResumeKeepsTheDefaultTarget: an explicit --branch /
+// --pr resume names a branch to work on, not a target to merge into, so
+// detection stays out of it and the bead keeps the rig default.
+func TestReworkSling_ExplicitResumeKeepsTheDefaultTarget(t *testing.T) {
+	t.Parallel()
+	fake := authorSeat(nil)
+	env := reworkIdleReuseEnv(map[string]*reworkSeat{reworkBead: {PolecatName: "garnet", Branch: reworkBranch}})
+	env.integrationBranch = func(string) string { return epicIntegrationBranch }
+
+	info, err := reuseIdlePolecatForSlingWith(fake, env, "rig",
+		SlingSpawnOptions{HookBead: reworkBead, ResumeBranch: "topic/explicit"}, func() {})
+	if err != nil {
+		t.Fatalf("explicit resume failed: %v", err)
+	}
+	if info == nil {
+		t.Fatal("explicit resume returned no polecat")
+	}
+	if info.BaseBranch != "main" {
+		t.Errorf("BaseBranch = %q; want the rig default %q", info.BaseBranch, "main")
+	}
+	if info.BranchCreated {
+		t.Error("BranchCreated = true; an explicit resume names a branch that already existed")
+	}
+}
+
 // TestReworkSling_GoesBackToItsAuthorOnItsBranch: the polecat that built the
 // rejected branch is reused, on that branch, ahead of the pool's offer.
 func TestReworkSling_GoesBackToItsAuthorOnItsBranch(t *testing.T) {
@@ -106,6 +167,9 @@ func TestReworkSling_GoesBackToItsAuthorOnItsBranch(t *testing.T) {
 	}
 	if info.Branch != reworkBranch {
 		t.Errorf("branch = %q; want the rejected attempt's branch %q", info.Branch, reworkBranch)
+	}
+	if info.BaseBranch != "main" {
+		t.Errorf("BaseBranch = %q; want the rig default for a rework whose epic has no integration branch", info.BaseBranch)
 	}
 	if fake.findCalls != 0 {
 		t.Errorf("rework consulted the idle pool (%d calls); the author's seat was free", fake.findCalls)
