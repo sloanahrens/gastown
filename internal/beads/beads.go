@@ -562,6 +562,38 @@ func HasUnresolvedBlockers(issue *Issue) bool {
 	return count > 0
 }
 
+// UnresolvedBlockerIDs names the blocking dependencies in deps that are not
+// resolved — the edges bd's ready query keeps an issue off the board for. The
+// input is a show's dependency list: a bd list row's entries carry no target
+// status, so a caller reading one answers with no ids however blocked the issue
+// looks, and must treat that as unread rather than unblocked.
+func UnresolvedBlockerIDs(deps []IssueDep) []string {
+	ids, _ := unresolvedBlockingDeps(deps)
+	return ids
+}
+
+// unresolvedBlockingDeps reduces one dependency list to the unresolved blocking
+// ids, deduped, and their count. The count keeps duplicate edges, since the
+// caller that reads it only asks whether there are any.
+func unresolvedBlockingDeps(deps []IssueDep) ([]string, int) {
+	seen := make(map[string]bool, len(deps))
+	ids := make([]string, 0, len(deps))
+	count := 0
+	for _, dep := range deps {
+		if !IsBlockingDependencyType(dep.DependencyType) || isResolvedDependency(dep) {
+			continue
+		}
+		count++
+		id := ExtractIssueID(dep.ID)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	return ids, count
+}
+
 func unresolvedBlockingDependencyIDs(issue *Issue) ([]string, int) {
 	if issue == nil {
 		return nil, 0
@@ -577,23 +609,7 @@ func unresolvedBlockingDependencyIDs(issue *Issue) ([]string, int) {
 		}
 		return ids, count
 	}
-
-	seen := make(map[string]bool)
-	ids := make([]string, 0, len(issue.Dependencies))
-	count := 0
-	for _, dep := range issue.Dependencies {
-		if !IsBlockingDependencyType(dep.DependencyType) || isResolvedDependency(dep) {
-			continue
-		}
-		count++
-		id := ExtractIssueID(dep.ID)
-		if id == "" || seen[id] {
-			continue
-		}
-		seen[id] = true
-		ids = append(ids, id)
-	}
-	return ids, count
+	return unresolvedBlockingDeps(issue.Dependencies)
 }
 
 func normalizedIssueIDs(ids []string) []string {

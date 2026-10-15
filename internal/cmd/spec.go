@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -376,13 +377,21 @@ func specHoldKnobsFrom(townRoot string) (specHoldKnobs, bool) {
 	return knobs, true
 }
 
-// specPeerHeldFrom reports why the spec dispatcher would not sling beadID, and
-// "" when the bead is one it would take. It asks of the bead the three
-// questions the tick asks of a candidate before spending a seat: the candidate
-// filter (specdispatch.Eligible), the shape gate's verdict, and the container
-// rule. The overlap guard reads the answer on an unstarted peer, so a cluster
-// whose head is held dispatches its next eligible bead instead of none
-// (gt-00gee).
+// specPeerHeldFrom reports why the spec dispatcher would not sling peer, and
+// "" when the peer is a bead it would take. It asks the four questions the
+// tick asks of a candidate before spending a seat: the candidate filter
+// (specdispatch.Eligible), readiness — the ready query lists only beads whose
+// blocking dependencies have all resolved, so a peer with one still open is
+// never reached at all — the shape gate's verdict, and the container rule. The
+// overlap guard reads the answer on an unstarted peer, so a cluster whose head
+// is held dispatches its next eligible bead instead of none (gt-00gee,
+// gt-mknmb).
+//
+// The questions read the peer's own pool row rather than the bead: the fields
+// they need are the ones a pool fetch already holds (sling.Readiness), so a
+// peer costs the guard no bd read. The child set is the exception — bd's
+// parent-child view unions the issue and wisp tables, which the pool's flat
+// listing does not — so it is read here from the database the pool came from.
 //
 // A hold the tick decides from its own state rather than the bead — seat
 // availability, the per-tick limit, the pre-dispatch overlap hold, a red-main
@@ -392,16 +401,16 @@ func specHoldKnobsFrom(townRoot string) (specHoldKnobs, bool) {
 // comparison pool is the candidate's own rig, so such a hold can never tell a
 // peer apart from the bead being slung.
 //
-// Unknown is not held: a bead that will not read, or a child set that will
-// not, answers "" and the guard keeps refusing. That reads wrong as a delayed
-// dispatch, where the other answer reads wrong as two seats on one defect.
-func specPeerHeldFrom(store beads.Client, knobs specHoldKnobs, beadID string) string {
-	issue, err := store.Show(beadID)
-	if err != nil || issue == nil {
-		return ""
-	}
-	spec := specFromIssue(issue)
+// Unknown is not held: a peer whose row a degraded pool fetch left unread, and
+// a child set that will not read, answer "" and the guard keeps refusing. That
+// reads wrong as a delayed dispatch, where the other answer reads wrong as two
+// seats on one defect.
+func specPeerHeldFrom(store beads.Client, knobs specHoldKnobs, peer sling.Duplicate) string {
+	spec := specFromPeer(peer)
 	if ok, why := specdispatch.Eligible(spec, knobs.MaxPriority, knobs.Reserved); !ok {
+		return why
+	}
+	if why := specPeerBlocked(peer.Ready.OpenBlockers); why != "" {
 		return why
 	}
 	if knobs.ShapeGate != specdispatch.ShapeGateOff && !spec.HasLabel(specdispatch.ShapeWaivedLabel) {
@@ -412,7 +421,7 @@ func specPeerHeldFrom(store beads.Client, knobs specHoldKnobs, beadID string) st
 			return verdict.Field + ": " + verdict.Reason
 		}
 	}
-	children, err := store.Children(beadID)
+	children, err := store.Children(peer.ID)
 	if err != nil {
 		return ""
 	}
@@ -420,15 +429,63 @@ func specPeerHeldFrom(store beads.Client, knobs specHoldKnobs, beadID string) st
 	return specdispatch.OpenChildHold(spec)
 }
 
+// maxNamedBlockers bounds the blocker ids specPeerBlocked names, so one widely
+// blocked peer does not turn a hold line into a wall.
+const maxNamedBlockers = 3
+
+// specPeerBlocked names the blocking dependencies that keep the peer off the
+// ready board, and "" when it has none open. The dispatcher's draw is that
+// board, so a peer the query leaves out is never slung however eligible it is:
+// ranking it ahead of a candidate refuses the rest of its cluster until the
+// dependency closes (gt-mknmb).
+func specPeerBlocked(open []string) string {
+	if len(open) == 0 {
+		return ""
+	}
+	named, more := open, 0
+	if len(named) > maxNamedBlockers {
+		more = len(named) - maxNamedBlockers
+		named = named[:maxNamedBlockers]
+	}
+	reason := "blocked by " + strings.Join(named, ", ")
+	if more > 0 {
+		reason += fmt.Sprintf(" (+%d more)", more)
+	}
+	return reason
+}
+
+// specFromPeer is the peer's pool row as the dispatcher's predicates read it:
+// the row's own fields plus the readiness half the pool fetch recovered for it.
+// It is specFromIssue's set but for the child set (specPeerHeldFrom reads that)
+// and the ephemeral flag, which a pool listing does not carry.
+func specFromPeer(peer sling.Duplicate) specdispatch.Spec {
+	return specdispatch.Spec{
+		ID:          peer.ID,
+		Title:       peer.Title,
+		Type:        peer.IssueType,
+		Status:      peer.Status,
+		Assignee:    peer.Ready.Assignee,
+		Priority:    peer.Priority,
+		CreatedAt:   peer.CreatedAt,
+		Labels:      peer.Ready.Labels,
+		Description: peer.Ready.Description,
+		Design:      peer.Ready.Design,
+		Notes:       peer.Ready.Notes,
+		Acceptance:  peer.Ready.Acceptance,
+
+		SubmittedForLanding: specLiveLandingRequest(peer.Ready.Notes),
+	}
+}
+
 // specPeerHeldPinned is specPeerHeldFrom against the rig's own beads, the
-// shape the overlap guard asks it in: the knobs come from the town, the bead
-// from the database its comparison pool came from.
-func specPeerHeldPinned(townRoot, beadsDir, beadID string) string {
+// shape the overlap guard asks it in: the knobs come from the town, and the
+// peer's children from the database its comparison pool came from.
+func specPeerHeldPinned(townRoot, beadsDir string, peer sling.Duplicate) string {
 	knobs, ok := specHoldKnobsFrom(townRoot)
 	if !ok {
 		return ""
 	}
-	return specPeerHeldFrom(slingStores{}.pinnedAt(beadsDir), knobs, beadID)
+	return specPeerHeldFrom(slingStores{}.pinnedAt(beadsDir), knobs, peer)
 }
 
 func runSpecLint(cmd *cobra.Command, args []string) error {

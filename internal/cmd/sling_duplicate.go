@@ -43,10 +43,13 @@ import (
 // ready beads naming one test would otherwise refuse each other forever and
 // dispatch none of them (gt-nlkba), and a head the dispatcher holds for a
 // reason of its own would refuse the rest for as long as the hold lasted
-// (gt-00gee). The rule lives in sling.Blocking / sling.DecideDuplicates, so
-// the CLI and the dispatcher cannot disagree about it, and the peer's
-// dispatchability is answered here (specPeerHeldFrom) because deciding it is
-// the dispatcher's rule.
+// (gt-00gee). A peer the dispatcher never reaches counts as held too, which is
+// the same standoff by another road: a bead blocked by an open dependency is
+// not on the ready board at all, so ranking it first refuses the rest until
+// that dependency closes (gt-mknmb). The rule lives in sling.Blocking /
+// sling.DecideDuplicates, so the CLI and the dispatcher cannot disagree about
+// it, and the peer's dispatchability is answered here (specPeerHeldFrom),
+// from the peer's own pool row, because deciding it is the dispatcher's rule.
 
 const (
 	// duplicateLookback bounds the recently-closed half of the comparison pool.
@@ -287,6 +290,7 @@ func (p *duplicatePools) check(townRoot, beadID string, info *beadInfo) (*duplic
 		Priority:  info.Priority,
 		CreatedAt: info.CreatedAt,
 		Blockers:  blockingDepIDs(info.Dependencies),
+		Ready:     readinessOfBeadInfo(info),
 		Refs:      refs,
 	}
 
@@ -308,7 +312,8 @@ func (p *duplicatePools) check(townRoot, beadID string, info *beadInfo) (*duplic
 // the dispatcher would not sling that bead, or "" when it would. Only a peer
 // that is open and ahead of the candidate is asked — those are the only ones
 // an answer changes (sling.Blocking) — so the question costs one read per peer
-// that could refuse rather than one per pool bead.
+// that could refuse rather than one per pool bead. What the verdict is read
+// from is the peer's own pool row, so the question itself costs no bd read.
 //
 // A pool built without a resolver leaves every peer un-asked, which is the
 // conservative reading of the same silence: each still holds the sling on its
@@ -323,7 +328,7 @@ func (p *duplicatePools) resolvePeerHolds(townRoot, beadsDir string, candidate d
 		if peer.Status != "open" || !sling.Precedes(peer, candidate) {
 			continue
 		}
-		matches[i].Bead.Held = p.held(townRoot, beadsDir, peer.ID)
+		matches[i].Bead.Held = p.held(townRoot, beadsDir, peer)
 		asked = true
 	}
 	if asked {
@@ -449,15 +454,16 @@ type duplicatePools struct {
 	// (sling.Duplicate.Held). It is a parameter of the check rather than part
 	// of the pool fetch because it is a question about the dispatcher's own
 	// knobs — the priority ceiling, the shape gate, the child set — asked of
-	// the few peers the rank is weighing. A nil resolver is the conservative
-	// reading: no peer is known to be held, so each still holds the sling on
-	// its rank.
-	held  func(townRoot, beadsDir, beadID string) string
+	// the few peers the rank is weighing, and it reads the peer's pool row
+	// rather than asking bd about the bead again (gt-mknmb). A nil resolver is
+	// the conservative reading: no peer is known to be held, so each still
+	// holds the sling on its rank.
+	held  func(townRoot, beadsDir string, peer duplicateCandidate) string
 	mu    sync.Mutex
 	cache map[string]*duplicatePoolEntry
 }
 
-func newDuplicatePools(fetch func(beadsDir string) ([]duplicateCandidate, error), held func(townRoot, beadsDir, beadID string) string) *duplicatePools {
+func newDuplicatePools(fetch func(beadsDir string) ([]duplicateCandidate, error), held func(townRoot, beadsDir string, peer duplicateCandidate) string) *duplicatePools {
 	return &duplicatePools{fetch: fetch, held: held, cache: map[string]*duplicatePoolEntry{}}
 }
 
@@ -560,11 +566,52 @@ func listDuplicateCandidates(store beads.Client, warn func(beadsDir string, err 
 			Priority:  row.Priority,
 			CreatedAt: row.CreatedAt,
 			Blockers:  detail.Blockers,
+			Ready:     readinessOf(row, detail),
 			Refs: extractContentRefs(row.Title, row.Description, row.CloseReason,
 				detail.Design, detail.Notes),
 		})
 	}
 	return candidates, nil
+}
+
+// readinessOf reduces one listed bead to the fields the readiness question
+// reads off an unstarted peer — whether the dispatcher could sling it — so the
+// overlap guard can ask that of a pool row instead of a bd read per peer
+// (gt-mknmb).
+//
+// The list row carries most of it. The two fields it does not are the ones the
+// batched show is for: the design, and the blocking dependencies with the
+// statuses that say which of them are still open. A row the show did not
+// answer leaves those two unread, which reads as the dispatcher's to sling —
+// the guard keeps refusing, and the pool warns that its comparison is degraded.
+func readinessOf(row *beads.Issue, detail duplicateDetail) sling.Readiness {
+	return sling.Readiness{
+		Assignee:     row.Assignee,
+		Labels:       row.Labels,
+		Design:       detail.Design,
+		Notes:        detail.Notes,
+		Description:  row.Description,
+		Acceptance:   row.AcceptanceCriteria,
+		OpenBlockers: detail.OpenBlockers,
+	}
+}
+
+// readinessOfBeadInfo is readinessOf for the bead the check is about to sling,
+// from the show the sling guards read it through. That candidate joins the pool
+// once its hook lands (noteSlingCandidateDispatched) and can be a peer to the
+// next bead of the same burst, so it has to answer the hold question as the
+// record does — the halved row a pool fetch degrades to is not the one to
+// answer it from (gt-mknmb).
+func readinessOfBeadInfo(info *beadInfo) sling.Readiness {
+	return sling.Readiness{
+		Assignee:     info.Assignee,
+		Labels:       info.Labels,
+		Design:       info.Design,
+		Notes:        info.Notes,
+		Description:  info.Description,
+		Acceptance:   info.Acceptance,
+		OpenBlockers: beads.UnresolvedBlockerIDs(info.Dependencies),
+	}
 }
 
 // warnDuplicateEnrichmentFailed tells the operator the duplicate check is
@@ -577,12 +624,16 @@ func warnDuplicateEnrichmentFailed(beadsDir string, err error) {
 
 // duplicateDetail is what one batched show recovers for a pool bead beyond its
 // bd list row: the design and notes text, which bd list's JSON never carries,
-// and the blocking dependency edges, which the guard walks to tell a bead in
-// the candidate's chain from a duplicate (gt-xydyc).
+// the blocking dependency edges, which the guard walks to tell a bead in the
+// candidate's chain from a duplicate (gt-xydyc), and the blockers that are
+// still open, which only a show's dependency statuses can name (gt-mknmb).
 type duplicateDetail struct {
 	Design   string
 	Notes    string
 	Blockers []string
+	// OpenBlockers is Blockers less the dependencies that are resolved: the
+	// edges bd's ready query holds the bead off the board for.
+	OpenBlockers []string
 }
 
 // fetchDuplicateDetails recovers that detail for a pool of beads with a single
@@ -601,9 +652,10 @@ func fetchDuplicateDetails(store beads.Client, ids []string) (map[string]duplica
 	details := make(map[string]duplicateDetail, len(issues))
 	for id, is := range issues {
 		details[id] = duplicateDetail{
-			Design:   is.Design,
-			Notes:    is.Notes,
-			Blockers: blockingDepIDs(is.Dependencies),
+			Design:       is.Design,
+			Notes:        is.Notes,
+			Blockers:     blockingDepIDs(is.Dependencies),
+			OpenBlockers: beads.UnresolvedBlockerIDs(is.Dependencies),
 		}
 	}
 	return details, nil

@@ -44,7 +44,11 @@ type Duplicate struct {
 	// would. The verdict is the caller's, because deciding that a bead is the
 	// dispatcher's to run is the dispatcher's own rule (gt-00gee).
 	Held string
-	Refs ContentRefs
+	// Ready is what that verdict reads off the bead. The pool builder fills it
+	// from the rows a fetch already reads, so asking whether the dispatcher
+	// would sling a peer costs no read of its own (gt-mknmb).
+	Ready Readiness
+	Refs  ContentRefs
 	// Blockers lists the IDs this bead has a blocking dependency on, as far as
 	// the caller could read them from bd. The overlap guard walks these edges
 	// to tell a bead of the candidate's own chain from a duplicate: a chain's
@@ -57,6 +61,41 @@ type Duplicate struct {
 // naming one defect; sharing a test with it says nothing about duplication
 // (gt-fudap).
 func (d Duplicate) IsEpic() bool { return d.IssueType == "epic" }
+
+// Readiness is the half of a pool bead the readiness question reads: the
+// fields the spec dispatcher's candidate test asks of a bead before it spends
+// a seat. The overlap guard ranks an unstarted peer ahead of a candidate only
+// when the dispatcher could itself sling that peer, and the pool builder fills
+// this from the rows a fetch already reads, so the fields below cost the guard
+// no read of its own (gt-mknmb).
+//
+// An unread field reads exactly as an empty one: the bead looks like the
+// dispatcher's to sling, which leaves the guard refusing — a delayed dispatch,
+// never two seats on one defect. That direction is what makes the two reads a
+// fetch already makes enough: bd list's row carries the labels, assignee,
+// prose and acceptance fields, and the batched show behind it carries the
+// design and the dependencies' statuses.
+type Readiness struct {
+	// Assignee and Labels are the candidate filter's own inputs: a bead
+	// another agent already owns, or wearing a label the dispatcher routes
+	// elsewhere, is not its to take (specdispatch.Eligible).
+	Assignee string
+	Labels   []string
+	// Design and Notes carry a hold recorded on the bead itself, the half of
+	// the candidate filter no label states (dispatch.DispatchHoldFields).
+	Design string
+	Notes  string
+	// Description and Acceptance are the shape lint's inputs: its sections
+	// come out of the description unless the bead keeps them in its acceptance
+	// field (specdispatch.Lint).
+	Description string
+	Acceptance  string
+	// OpenBlockers are the blocking dependencies that are not resolved. bd's
+	// ready query leaves the bead off the board while any of them is open, so
+	// however eligible the bead is, the dispatcher never reaches it
+	// (gt-mknmb).
+	OpenBlockers []string
+}
 
 // DuplicateMatch records one existing bead whose content overlaps the
 // candidate's, and on what.

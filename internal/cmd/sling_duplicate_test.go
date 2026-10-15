@@ -503,6 +503,48 @@ func TestDuplicateIntraBatchDetection(t *testing.T) {
 	}
 }
 
+// TestCheckSlingDuplicatesReadiesTheCandidate (gt-mknmb): the bead the check is
+// about to sling joins the pool once its hook lands, under the status it had
+// before the sling, so it can be the peer the next bead of the same burst is
+// weighed against. Its row has to carry the readiness half a bd show gave the
+// sling — read from a row that never was, the shape lint refuses it for a
+// description it does not have, and the guard stops refusing the second filing
+// of the same defect.
+func TestCheckSlingDuplicatesReadiesTheCandidate(t *testing.T) {
+	t.Parallel()
+	knobs := specHoldKnobs{
+		MaxPriority: 2,
+		ShapeGate:   specdispatch.ShapeGateWarn,
+		Template:    specdispatch.Template{Sections: specdispatch.DefaultSections, Source: "built-in"},
+	}
+	pools := newDuplicatePools(
+		func(string) ([]duplicateCandidate, error) { return nil, nil },
+		func(_, _ string, peer duplicateCandidate) string {
+			return specPeerHeldFrom(beadsfake.New(), knobs, peer)
+		},
+	)
+
+	info := &beadInfo{
+		Title:       "Fix TestFoo in internal/cmd/tap_guard_dangerous.go",
+		Status:      "open",
+		IssueType:   "task",
+		Priority:    1,
+		CreatedAt:   "2026-10-15T09:00:00Z",
+		Description: specTestDescription,
+		Acceptance:  specTestAcceptance,
+	}
+	candidate, _, err := pools.check(duplicateTown(t), "gt-first", info)
+	if err != nil {
+		t.Fatalf("checkSlingDuplicates: %v", err)
+	}
+	if candidate == nil {
+		t.Fatal("the bead names TestFoo, so the guard has to inspect it")
+	}
+	if got := specPeerHeldFrom(beadsfake.New(), knobs, *candidate); got != "" {
+		t.Errorf("the candidate's own row holds it from dispatch: %q, want the dispatcher's to sling", got)
+	}
+}
+
 // TestNoteSlingCandidateDispatchedNilIsSafe guards the call sites, which pass
 // through a possibly-nil candidate when the check was skipped.
 func TestNoteSlingCandidateDispatchedNilIsSafe(t *testing.T) {
@@ -742,7 +784,7 @@ func mustPool(t *testing.T, pools *duplicatePools, beadsDir string) []duplicateC
 // noPeerHolds is the resolver for a pool whose test varies something other
 // than the peer-hold question: no peer is known to be held, so the guard's
 // rank decides alone, exactly as it did before the holds existed.
-func noPeerHolds(string, string, string) string { return "" }
+func noPeerHolds(string, string, duplicateCandidate) string { return "" }
 
 func assertStrings(t *testing.T, label string, got, want []string) {
 	t.Helper()
@@ -939,8 +981,10 @@ func TestOpenClusterDispatchesOneAtATime(t *testing.T) {
 // the head — so the cluster only progressed while the dispatcher could sling
 // that head. A head the dispatcher holds for a reason of its own is never slung
 // at all, and ranking it first refused the other two for as long as the hold
-// lasted. Here the head is a shape the lint refuses, which the dispatcher's
-// warn gate holds.
+// lasted. Every hold the dispatcher takes a bead over is one of those reasons,
+// which is what extends the bar past the shape gate to the rest of them
+// (gt-mknmb): a hold label, a bead routed to a person, and a bead the ready
+// query never lists because a dependency of it is still open.
 func TestOpenClusterDispatchesPastAHeldHead(t *testing.T) {
 	t.Parallel()
 	townRoot := duplicateTown(t)
@@ -956,14 +1000,24 @@ func TestOpenClusterDispatchesPastAHeldHead(t *testing.T) {
 		Template:    specdispatch.Template{Sections: specdispatch.DefaultSections, Source: "built-in"},
 	}
 
+	// head is the cluster's first bead, varied per case: the same work, held for
+	// a different reason each time.
+	head := func(mutate func(*beads.Issue)) beads.Issue {
+		h := beads.Issue{ID: "gt-head", Title: "guard blocks a nested command", Type: "task", Status: "open",
+			Priority: 1, CreatedAt: "2026-10-15T09:00:00Z", Description: shaped,
+			AcceptanceCriteria: specTestAcceptance}
+		if mutate != nil {
+			mutate(&h)
+		}
+		return h
+	}
+
 	// cluster is the three beads in board order — one test, one file, oldest
-	// first. Only the head's shape varies between the two phases.
-	cluster := func(headDescription string) *beadsfake.Fake {
+	// first — with the head the case asks for.
+	cluster := func(h beads.Issue, extra ...beads.Issue) *beadsfake.Fake {
 		db := beadsfake.New()
+		db.Seed(h)
 		db.Seed(
-			beads.Issue{ID: "gt-head", Title: "guard blocks a nested command", Type: "task", Status: "open",
-				Priority: 1, CreatedAt: "2026-10-15T09:00:00Z", Description: headDescription,
-				AcceptanceCriteria: specTestAcceptance},
 			beads.Issue{ID: "gt-mid", Title: "guard judges the argv after `gt slot run --`", Type: "task", Status: "open",
 				Priority: 1, CreatedAt: "2026-10-15T10:00:00Z", Description: shaped,
 				AcceptanceCriteria: specTestAcceptance},
@@ -971,6 +1025,7 @@ func TestOpenClusterDispatchesPastAHeldHead(t *testing.T) {
 				Priority: 1, CreatedAt: "2026-10-15T11:00:00Z", Description: shaped,
 				AcceptanceCriteria: specTestAcceptance},
 		)
+		db.Seed(extra...)
 		return db
 	}
 
@@ -979,6 +1034,8 @@ func TestOpenClusterDispatchesPastAHeldHead(t *testing.T) {
 	// bead the overlap guard lets past is slung. The pool is the pass's own
 	// snapshot, so a bead slung mid-pass still reads as open in it — which is
 	// what the bead behind it compares against, exactly as the burst path does.
+	// The dispatcher's own hold question reads the peer's row in that same pool
+	// (gt-mknmb).
 	dispatched := func(db *beadsfake.Fake) []string {
 		pools := newDuplicatePools(
 			func(beadsDir string) ([]duplicateCandidate, error) {
@@ -986,11 +1043,19 @@ func TestOpenClusterDispatchesPastAHeldHead(t *testing.T) {
 					t.Errorf("enrichment of %s failed: %v", dir, err)
 				}, beadsDir)
 			},
-			func(_, _, beadID string) string { return specPeerHeldFrom(db, knobs, beadID) },
+			func(_, _ string, peer duplicateCandidate) string { return specPeerHeldFrom(db, knobs, peer) },
 		)
+		beadsDir := duplicateBeadsDir(townRoot, "gt-head")
+		if beadsDir == "" {
+			t.Fatal("the town routes no gt- bead to a rig, so the pass has no pool to read")
+		}
+		pool, err := pools.poolFor(beadsDir)
+		if err != nil {
+			t.Fatalf("pool: %v", err)
+		}
 		var slung []string
 		for _, id := range []string{"gt-head", "gt-mid", "gt-tail"} {
-			if specPeerHeldFrom(db, knobs, id) != "" {
+			if specPeerHeldFrom(db, knobs, poolRow(t, pool, id)) != "" {
 				continue
 			}
 			issue, err := db.Show(id)
@@ -1012,23 +1077,77 @@ func TestOpenClusterDispatchesPastAHeldHead(t *testing.T) {
 		return slung
 	}
 
-	// The head is unshaped, so the dispatcher holds it and never slings it: the
-	// next bead goes, and the third is refused against work now ahead of it.
-	if got := dispatched(cluster(unshaped)); strings.Join(got, " ") != "gt-mid" {
-		t.Fatalf("dispatched %v, want [gt-mid]: a head the dispatcher holds must not wedge its cluster", got)
+	// The blocked head waits on an open bead of its own that shares nothing with
+	// the cluster, so it is the head's rank and not the blocker that the guard
+	// weighs.
+	blocker := beads.Issue{ID: "gt-blocker", Title: "nightly dashboard tick is slow", Type: "task", Status: "open",
+		Priority: 1, CreatedAt: "2026-10-15T08:00:00Z", Description: "The dashboard's collector runs long under load."}
+
+	cases := []struct {
+		name  string
+		head  beads.Issue
+		extra []beads.Issue
+		link  func(*beadsfake.Fake)
+		want  string
+	}{
+		{name: "the head's shape is one the lint refuses",
+			head: head(func(h *beads.Issue) { h.Description = unshaped }), want: "gt-mid"},
+		{name: "the head is one only the crew takes",
+			head: head(func(h *beads.Issue) { h.Labels = []string{specdispatch.CrewOnlyLabel} }), want: "gt-mid"},
+		{name: "the head is one routed to a person",
+			head: head(func(h *beads.Issue) { h.Labels = []string{"needs-human"} }), want: "gt-mid"},
+		{name: "the head waits on a dependency that is still open",
+			head: head(nil), extra: []beads.Issue{blocker},
+			link: func(db *beadsfake.Fake) {
+				if err := db.AddTypedDependency("gt-head", blocker.ID, "blocks"); err != nil {
+					t.Fatalf("blocking edge gt-head -> %s: %v", blocker.ID, err)
+				}
+			}, want: "gt-mid"},
+		{name: "the head's dependency landed, so the head goes",
+			head: head(nil), extra: []beads.Issue{func() beads.Issue {
+				closed := blocker
+				closed.Status = "closed"
+				return closed
+			}()},
+			link: func(db *beadsfake.Fake) {
+				if err := db.AddTypedDependency("gt-head", blocker.ID, "blocks"); err != nil {
+					t.Fatalf("blocking edge gt-head -> %s: %v", blocker.ID, err)
+				}
+			}, want: "gt-head"},
 	}
 
-	// The control is gt-nlkba's own rule: a head the dispatcher can sling is
-	// still the one bead of the cluster that goes.
-	if got := dispatched(cluster(shaped)); strings.Join(got, " ") != "gt-head" {
-		t.Fatalf("dispatched %v, want [gt-head]: a slingable head still holds the cluster", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := cluster(tc.head, tc.extra...)
+			if tc.link != nil {
+				tc.link(db)
+			}
+			if got := dispatched(db); strings.Join(got, " ") != tc.want {
+				t.Errorf("dispatched %v, want [%s]: a head the dispatcher holds must not wedge its cluster, and one it can sling still holds it", got, tc.want)
+			}
+		})
 	}
+}
+
+// poolRow is the pool's own row for id: the record the overlap guard weighs a
+// peer by, and the one the dispatcher's hold questions read.
+func poolRow(t *testing.T, pool []duplicateCandidate, id string) duplicateCandidate {
+	t.Helper()
+	for _, c := range pool {
+		if c.ID == id {
+			return c
+		}
+	}
+	t.Fatalf("the pool has no row for %s", id)
+	return duplicateCandidate{}
 }
 
 // TestSpecPeerHeldFrom covers the rule the guard reads a peer's dispatchability
 // from: the questions the dispatcher asks a candidate before it spends a seat
-// (gt-00gee). "" means the dispatcher would sling the bead, so the guard must
-// count it; anything else is a hold, so the guard must not.
+// (gt-00gee), read off the peer's own pool row (gt-mknmb). "" means the
+// dispatcher would sling the bead, so the guard must count it; anything else is
+// a hold, so the guard must not.
 func TestSpecPeerHeldFrom(t *testing.T) {
 	t.Parallel()
 	knobs := specHoldKnobs{
@@ -1038,24 +1157,29 @@ func TestSpecPeerHeldFrom(t *testing.T) {
 	}
 	off := knobs
 	off.ShapeGate = specdispatch.ShapeGateOff
-	unshape := func(i *beads.Issue) {
-		i.Description = strings.Replace(i.Description, "## Gate\nmake gate", "", 1)
+	unshape := func(p *duplicateCandidate) {
+		p.Ready.Description = strings.Replace(p.Ready.Description, "## Gate\nmake gate", "", 1)
 	}
 
-	// peerDB seeds the peer gt-peer, mutated as the case asks, with a child for
-	// each entry of children.
-	peerDB := func(mutate func(*beads.Issue), children ...beads.Issue) *beadsfake.Fake {
-		db := beadsfake.New()
-		peer := beads.Issue{ID: "gt-peer", Title: "Fix TestFoo", Type: "task", Status: "open", Priority: 1,
-			Description: specTestDescription, AcceptanceCriteria: specTestAcceptance}
+	// peer is the pool row the rule reads, mutated as the case asks, and childDB
+	// seeds the children the container rule reads from the store.
+	peer := func(mutate func(*duplicateCandidate)) duplicateCandidate {
+		p := duplicateCandidate{ID: "gt-peer", Title: "Fix TestFoo", Status: "open", Priority: 1, IssueType: "task",
+			Ready: sling.Readiness{Description: specTestDescription, Acceptance: specTestAcceptance}}
 		if mutate != nil {
-			mutate(&peer)
+			mutate(&p)
 		}
-		db.Seed(peer)
+		return p
+	}
+	childDB := func(children ...beads.Issue) *beadsfake.Fake {
+		db := beadsfake.New()
+		// The store needs the peer to hang the child edges off, though the rule
+		// reads only the child set from it.
+		db.Seed(beads.Issue{ID: "gt-peer", Title: "Fix TestFoo", Type: "task", Status: "open", Priority: 1})
 		for _, child := range children {
 			db.Seed(child)
-			if err := db.AddTypedDependency(child.ID, peer.ID, "parent-child"); err != nil {
-				t.Fatalf("parent edge %s -> %s: %v", child.ID, peer.ID, err)
+			if err := db.AddTypedDependency(child.ID, "gt-peer", "parent-child"); err != nil {
+				t.Fatalf("parent edge %s -> gt-peer: %v", child.ID, err)
 			}
 		}
 		return db
@@ -1064,42 +1188,43 @@ func TestSpecPeerHeldFrom(t *testing.T) {
 	cases := []struct {
 		name  string
 		db    *beadsfake.Fake
+		peer  duplicateCandidate
 		knobs specHoldKnobs
 		want  string
 	}{
-		{"a clean work bead is the dispatcher's", peerDB(nil), knobs, ""},
-		{"the failed label puts a bead out of the queue",
-			peerDB(func(i *beads.Issue) { i.Labels = []string{specdispatch.DispatchFailedLabel} }), knobs,
+		{"a clean work bead is the dispatcher's", beadsfake.New(), peer(nil), knobs, ""},
+		{"the failed label puts a bead out of the queue", beadsfake.New(),
+			peer(func(p *duplicateCandidate) { p.Ready.Labels = []string{specdispatch.DispatchFailedLabel} }), knobs,
 			"label " + specdispatch.DispatchFailedLabel},
-		{"the shape gate holds a bead the lint refuses", peerDB(unshape), knobs,
+		{"the shape gate holds a bead the lint refuses", beadsfake.New(), peer(unshape), knobs,
 			"## Gate: section missing"},
-		{"a waived refusal dispatches anyway",
-			peerDB(func(i *beads.Issue) { unshape(i); i.Labels = []string{specdispatch.ShapeWaivedLabel} }), knobs, ""},
-		{"an off gate runs no lint", peerDB(unshape), off, ""},
-		{"an assigned bead is not the dispatcher's to take",
-			peerDB(func(i *beads.Issue) { i.Assignee = "gastown/polecats/x" }), knobs, "assigned to gastown/polecats/x"},
-		{"a bead past the ceiling is backlog", peerDB(func(i *beads.Issue) { i.Priority = 3 }), knobs,
+		{"a waived refusal dispatches anyway", beadsfake.New(),
+			peer(func(p *duplicateCandidate) { unshape(p); p.Ready.Labels = []string{specdispatch.ShapeWaivedLabel} }), knobs, ""},
+		{"an off gate runs no lint", beadsfake.New(), peer(unshape), off, ""},
+		{"an assigned bead is not the dispatcher's to take", beadsfake.New(),
+			peer(func(p *duplicateCandidate) { p.Ready.Assignee = "gastown/polecats/x" }), knobs, "assigned to gastown/polecats/x"},
+		{"a bead past the ceiling is backlog", beadsfake.New(), peer(func(p *duplicateCandidate) { p.Priority = 3 }), knobs,
 			"priority P3 outside the ceiling P2"},
-		{"a type the dispatcher never takes", peerDB(func(i *beads.Issue) { i.Type = "chore" }), knobs, "type chore"},
-		{"a container waits for its open child", peerDB(nil, beads.Issue{ID: "gt-child", Status: "open"}), knobs,
+		{"a type the dispatcher never takes", beadsfake.New(),
+			peer(func(p *duplicateCandidate) { p.IssueType = "chore" }), knobs, "type chore"},
+		{"an open blocking dependency is not on the ready board", beadsfake.New(),
+			peer(func(p *duplicateCandidate) { p.Ready.OpenBlockers = []string{"gt-x"} }), knobs, "blocked by gt-x"},
+		{"a peer with many open blockers names the first few", beadsfake.New(),
+			peer(func(p *duplicateCandidate) { p.Ready.OpenBlockers = []string{"gt-a", "gt-b", "gt-c", "gt-d"} }), knobs,
+			"blocked by gt-a, gt-b, gt-c (+1 more)"},
+		{"a container waits for its open child", childDB(beads.Issue{ID: "gt-child", Status: "open"}), peer(nil), knobs,
 			"container: open child gt-child"},
 		{"a container whose children closed is a candidate again",
-			peerDB(nil, beads.Issue{ID: "gt-child", Status: "closed"}), knobs, ""},
+			childDB(beads.Issue{ID: "gt-child", Status: "closed"}), peer(nil), knobs, ""},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := specPeerHeldFrom(tc.db, tc.knobs, "gt-peer"); got != tc.want {
+			if got := specPeerHeldFrom(tc.db, tc.knobs, tc.peer); got != tc.want {
 				t.Errorf("specPeerHeldFrom = %q, want %q", got, tc.want)
 			}
 		})
-	}
-
-	// A bead the rule cannot read answers "", the conservative half: the guard
-	// keeps refusing, which costs a delayed dispatch and never a second seat.
-	if got := specPeerHeldFrom(beadsfake.New(), knobs, "gt-missing"); got != "" {
-		t.Errorf("an unreadable bead = %q, want %q", got, "")
 	}
 }
 

@@ -80,6 +80,10 @@ type Bead struct {
 	Labels       []string         `json:"labels,omitempty"`
 	Dependencies []beads.IssueDep `json:"dependencies,omitempty"`
 	IssueType    string           `json:"issue_type,omitempty"`
+	// Acceptance is the acceptance field bd keeps beside the description, which
+	// the shape lint reads when the description carries no section of its own
+	// (gt-mknmb).
+	Acceptance string `json:"acceptance_criteria,omitempty"`
 	// Priority and CreatedAt are the bead's dispatch-order keys, read so the
 	// content-overlap guard can rank an unstarted peer against it (gt-nlkba).
 	Priority  int    `json:"priority"`
