@@ -198,15 +198,15 @@ func planPoolMix(mix []poolMixEntry, opts poolMixOptions, in poolMixInputs) (poo
 
 	ts, resSD := poolMixCopies(in.ts, sd)
 	plan := poolMixPlan{
-		ts:          ts,
-		sd:          resSD,
-		poolAgent:   mix[0].agent,
-		poolSeats:   mix[0].seats,
-		maxTotal:    mix[0].seats,
-		roleAgent:   poolMixRoleAgent(mix),
-		secondAgent: secondAgent,
-		secondSeats: secondCap,
+		ts:        ts,
+		sd:        resSD,
+		poolAgent: mix[0].agent,
+		poolSeats: mix[0].seats,
+		maxTotal:  mix[0].seats,
+		roleAgent: poolMixRoleAgent(mix),
 	}
+	// A mix that names one agent leaves the second seat at nothing: its cap is
+	// whatever the mix says, not whatever the file happened to hold.
 	if len(mix) > 1 {
 		plan.secondAgent, plan.secondAgentSet = mix[1].agent, true
 		plan.secondSeats = mix[1].seats
@@ -409,15 +409,20 @@ func runPoolMixWith(w io.Writer, townRoot string, mix []poolMixEntry, opts poolM
 	if reads.live != nil {
 		live = reads.live()
 	}
-	if err := renderPoolMixReport(w, townRoot, plan, opts, live); err != nil {
-		return err
-	}
 	if opts.dryRun {
+		if err := renderPoolMixReport(w, townRoot, plan, opts, live); err != nil {
+			return err
+		}
 		fmt.Fprintln(w, "dry run: nothing written")
 		return nil
 	}
+	// The page is printed once the files are written, so a "keys written" list
+	// is never printed over a write that failed half way.
 	stamp, err := applyPoolMix(townRoot, plan)
 	if err != nil {
+		return err
+	}
+	if err := renderPoolMixReport(w, townRoot, plan, opts, live); err != nil {
 		return err
 	}
 	written := []string{

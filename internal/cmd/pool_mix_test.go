@@ -257,6 +257,74 @@ func TestPoolMixIsAttachedUnderPool(t *testing.T) {
 	}
 }
 
+// The seats the town ran the day the mix went wrong (gt-lwlva): two Sonnet in
+// the pool seat and two flash in the second one, with the daily deep reviews
+// pinned to claude-sonnet.
+const poolMixTestIncidentSettings = `{
+  "type": "town-settings",
+  "version": 1,
+  "agents": {
+    "claude-sonnet": {"command": "claude", "args": ["--model", "sonnet"]},
+    "deepseek-flash": {"command": "claude", "args": ["--model", "flash"]}
+  },
+  "role_agents": {"polecat": "claude-sonnet"},
+  "polecat_pool": {"agent": "claude-sonnet", "max_seats": 2, "max_total": 4}
+}
+`
+
+const poolMixTestIncidentPatrol = `{
+  "type": "daemon-patrol-config",
+  "version": 1,
+  "patrols": {
+    "spec_dispatch": {"enabled": true, "interval": "30s", "hooked_agent": "deepseek-flash", "max_hooked": 2},
+    "scheduled_slings": {
+      "enabled": true,
+      "entries": [
+        {"name": "deep-review-slice", "rig": "alpha", "formula": "mol-deep-review", "agent": "claude-sonnet", "interval": "24h", "dispatch": "spec"}
+      ]
+    }
+  }
+}
+`
+
+// TestPoolMixIsTheIncidentFixInOneCommand is the day gt-lwlva describes: two
+// Sonnet plus two flash to four flash, with the reviews pinned to Sonnet left a
+// seat. It took six commands and three silent traps; this is the one.
+func TestPoolMixIsTheIncidentFixInOneCommand(t *testing.T) {
+	t.Parallel()
+	root := poolMixTown(t, poolMixTestIncidentSettings, poolMixTestIncidentPatrol, poolMixTestModels)
+	if _, err := poolMixRun(t, root, []string{"deepseek-flash=4"}, poolMixOptions{keepPinned: true}); err != nil {
+		t.Fatalf("mix deepseek-flash=4 --keep-pinned: %v", err)
+	}
+	pool := poolMixTownSettings(t, root).PolecatPool
+	if pool.Agent != "deepseek-flash" || pool.MaxSeats != 4 {
+		t.Errorf("pool seat = %s cap %d, want deepseek-flash cap 4", pool.Agent, pool.MaxSeats)
+	}
+	if pool.GetMaxTotal() != 5 {
+		t.Errorf("max_total = %d, want 5 (four flash plus the reserved seat)", pool.GetMaxTotal())
+	}
+	if pool.ProAgent != "claude-sonnet" || pool.GetProMax() != 1 || pool.GetProLabel() != "agent:claude-sonnet" {
+		t.Errorf("pro seat = %s cap %d label %s, want claude-sonnet cap 1 label agent:claude-sonnet",
+			pool.ProAgent, pool.GetProMax(), pool.GetProLabel())
+	}
+	if got := poolMixTownSettings(t, root).RoleAgents["polecat"]; got != "deepseek-flash" {
+		t.Errorf("role_agents.polecat = %q, want deepseek-flash", got)
+	}
+	if got := poolMixSecondSeat(t, root).MaxHooked; got != 0 {
+		t.Errorf("max_hooked = %d, want 0: the one-agent mix closes the second seat", got)
+	}
+	seats := poolTestTownBudget(t, root).Seats
+	if len(seats) != 2 {
+		t.Fatalf("the dispatcher runs %d seats, want 2: %v", len(seats), seats)
+	}
+	if seats[0].Agent != "deepseek-flash" || seats[0].Cap != 4 {
+		t.Errorf("first seat = %s cap %d, want deepseek-flash cap 4", seats[0].Agent, seats[0].Cap)
+	}
+	if seats[1].Agent != "claude-sonnet" || seats[1].Cap != 1 || seats[1].Label != "agent:claude-sonnet" {
+		t.Errorf("reserved seat = %+v, want claude-sonnet cap 1 label agent:claude-sonnet", seats[1])
+	}
+}
+
 func TestPoolMixSetsTheWholeMix(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -347,6 +415,18 @@ func TestPoolMixKeepsTheSecondSeatAndItsAgent(t *testing.T) {
 	sd := poolMixSecondSeat(t, root)
 	if sd.HookedAgent != "claude-sonnet" || sd.MaxHooked != 3 {
 		t.Errorf("second seat = %s cap %d, want claude-sonnet cap 3", sd.HookedAgent, sd.MaxHooked)
+	}
+	// A zero on the second agent closes the seat and records the agent, the way
+	// gt pool set-second does, so reopening it is one cap away.
+	if _, err := poolMixRun(t, root, []string{"deepseek-flash=2", "claude-sonnet=0"}, poolMixOptions{}); err != nil {
+		t.Fatalf("mix with the second seat closed: %v", err)
+	}
+	sd = poolMixSecondSeat(t, root)
+	if sd.HookedAgent != "claude-sonnet" || sd.MaxHooked != 0 {
+		t.Errorf("second seat = %s cap %d, want claude-sonnet cap 0", sd.HookedAgent, sd.MaxHooked)
+	}
+	if got := poolTestBudget(t, root); !maps.Equal(got, map[string]int{"deepseek-flash": 2}) {
+		t.Errorf("dispatcher seats = %v, want deepseek-flash alone", got)
 	}
 }
 
