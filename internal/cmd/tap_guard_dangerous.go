@@ -2438,13 +2438,14 @@ func trimRevisionSuffix(rev string) string {
 //
 // The sanctioned integration is `git rebase <remote-ref>`, which replays the
 // branch's own commits onto the new base and leaves the remote's content alone.
-// Only a reset whose TARGET is a remote-tracking ref is blocked, so the
-// ordinary `git reset --soft HEAD~1` squash — and every reset to a local ref or
-// pathspec — still works. tokens must be lowercased, shell-aware tokens (see
-// shellTokenize); the "git reset" adjacency check matches matchesDangerousGitPush,
-// which treats `git -C <dir> push --force` as out of scope for the same reason:
-// the guard scans argv shapes, and the branch content check in gt done is what
-// actually fails closed.
+// Only a reset whose TARGET is a remote-tracking ref — spelled out, or hidden
+// behind a shell expansion (gitResetTargetIsExpansion) — is blocked, so the
+// ordinary `git reset --soft HEAD~1` squash, and every reset to a literal local
+// ref or pathspec, still works. tokens must be lowercased, shell-aware tokens
+// (see shellTokenize); the "git reset" adjacency check matches
+// matchesDangerousGitPush, which treats `git -C <dir> push --force` as out of
+// scope for the same reason: the guard scans argv shapes, and the branch
+// content check in gt done is what actually fails closed.
 func matchesDangerousGitReset(tokens []string) (reason, alternative string) {
 	for _, args := range gitSubcommandArgs(tokens, "reset") {
 		for _, f := range args {
@@ -2459,8 +2460,57 @@ func matchesDangerousGitReset(tokens []string) (reason, alternative string) {
 					"Alternative: `git rebase " + f + "` — rebase your CHANGES onto the remote ref; never reset your tree onto it."
 			}
 		}
+		if target, ok := gitResetTarget(args); ok && gitResetTargetIsExpansion(target) {
+			return "Reset onto a shell expansion hides the ref it resets to",
+				"Alternative: name the revision literally and `git rebase <ref>` it — a substitution or variable target is what hides a reset onto the remote."
+		}
 	}
 	return "", ""
+}
+
+// gitResetTarget returns the revision a `git reset` invocation names — the
+// first argument after the subcommand that is not a flag — and whether the
+// invocation names one at all. Git reads its mode and -q flags before the
+// revision, so the first non-flag word is the <tree-ish>; a word after that is
+// a pathspec, which only does anything when a revision is present. A reset
+// with no non-flag word ("git reset", "git reset --hard") names no revision
+// and resets to HEAD.
+func gitResetTarget(args []string) (string, bool) {
+	for _, f := range args {
+		// A bare "--" ends the revisions, so a target written after it is a
+		// pathspec and this invocation names none (gt-63sz).
+		if f == "--" {
+			return "", false
+		}
+		if strings.HasPrefix(f, "-") {
+			continue
+		}
+		return f, true
+	}
+	return "", false
+}
+
+// gitResetTargetIsExpansion reports whether a `git reset` target is a shell
+// expansion — a command substitution ("$(git rev-parse origin/main)", a
+// backtick spelling) or a variable expansion ("$BASE", "${BASE}", "$1") —
+// rather than the literal revision the text spells.
+//
+// The reset gt-63sz blocks is otherwise reachable without ever writing a
+// remote-tracking ref where the matcher can read one:
+// `git reset --soft "$(git rev-parse origin/main)"`, `git reset --soft $BASE`
+// and `BASE=$(git rev-parse origin/main); git reset --soft $BASE` all reset
+// onto the remote's tip, and all three were allowed (gt-tao2j). The
+// nested-command walk does not close this: it runs the substitution as a
+// command of its own, and `git rev-parse origin/main` is not a reset.
+//
+// Any "$" or backtick in the target counts, because the guard cannot tell what
+// the shell resolves it to. Quoting is no help either way: "$BASE" and "$(…)"
+// reach git expanded inside double quotes, while a single-quoted "$BASE"
+// reaches it as a word no legitimate ref matches. Only the first non-flag
+// argument is judged — a pathspec after it is not a reset target, and the
+// remote-prefix scan above already covers a target that spells the ref out.
+func gitResetTargetIsExpansion(target string) bool {
+	return strings.ContainsAny(target, "$`")
 }
 
 // hasForceFlag reports whether args carry git's force flag in either
