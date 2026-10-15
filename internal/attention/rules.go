@@ -64,6 +64,9 @@ const (
 
 	// RuleDispatchIdle is the idle-dispatcher rule (gt-wil0h).
 	RuleDispatchIdle = "dispatch.idle"
+
+	// RuleDeployFailed is the failed-deploy rule (gt-hcbft).
+	RuleDeployFailed = "deploy.failed"
 )
 
 var (
@@ -96,6 +99,9 @@ var ruleFlags = map[string]RuleFlags{
 	// Free seats and dispatchable beads with nothing started is work that is
 	// not happening, which no rule over existing work can see.
 	RuleDispatchIdle: flagsWake,
+	// A deploy that failed is an app that did not ship; it waits on the
+	// overseer until the next run of that workflow is green.
+	RuleDeployFailed: flagsWake,
 	// A question is waiting on Sloan, or Sloan has answered and the overseer
 	// has yet to act; both are the overseer's to pick up.
 	RuleQuestionNew:      flagsWake,
@@ -182,6 +188,7 @@ var kindRules = map[Kind]string{
 	KindQuestionStale:    RuleQuestionStale,
 	KindOverseerSilent:   RuleOverseerSilent,
 	KindDispatchIdle:     RuleDispatchIdle,
+	KindDeployFailed:     RuleDeployFailed,
 }
 
 // RuleFor is the rule id of an item. The disk collector's key is its rule

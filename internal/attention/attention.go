@@ -77,6 +77,9 @@ const (
 	// KindDispatchIdle: the dispatcher has a free seat and dispatchable work
 	// and has started nothing for several ticks.
 	KindDispatchIdle Kind = "dispatch-idle"
+	// KindDeployFailed: a deploy workflow's newest run on an app rig's main or
+	// a v* tag failed, so a landing or a release did not ship (gt-hcbft).
+	KindDeployFailed Kind = "deploy-failed"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -89,7 +92,7 @@ func Kinds() []Kind {
 		KindRevertRefused, KindBlockedMail, KindOverrunStopped, KindScheduledGate,
 		KindHostDisk, KindHostMem, KindHostDocker, KindHostProbe,
 		KindQuestionNew, KindQuestionAnswered, KindQuestionStale,
-		KindOverseerSilent, KindDispatchIdle,
+		KindOverseerSilent, KindDispatchIdle, KindDeployFailed,
 	}
 }
 

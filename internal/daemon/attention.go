@@ -496,6 +496,7 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindHostMem, collect: s.collectHostMem},
 		{kind: attention.KindHostDocker, collect: s.collectHostDocker},
 		{kind: attention.KindDispatchIdle, collect: s.collectDispatchIdle},
+		{kind: attention.KindDeployFailed, collect: s.collectDeployFailures},
 	}, s.questionCollectors()...)
 }
 
