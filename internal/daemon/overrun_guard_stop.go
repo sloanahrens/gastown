@@ -339,6 +339,7 @@ func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 			reason, overrunActor, "")
 	}
 	s.comment = d.overrunCommentBead
+	s.closeBead = d.overrunCloseRunBead
 	s.clearPause = func(seat overrunSeat) error {
 		return agentpause.Resume(d.config.TownRoot, seat.Rig, constants.RolePolecat, seat.Polecat)
 	}
