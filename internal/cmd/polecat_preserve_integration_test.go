@@ -57,6 +57,38 @@ func TestIntegrationPolecatBranchPreservation(t *testing.T) {
 		}
 	})
 
+	// The branch was pushed and then deleted unmerged on the remote. The stale
+	// refs/remotes/origin/<branch> still holds the tip, so a plain fetch would
+	// call it preserved and the nuke would delete the only real copy.
+	t.Run("PreserveBranchBeforeNukeRepushesWhenRemoteBranchWasDeleted", func(t *testing.T) {
+		t.Parallel()
+		repo, remote, branch := setupPreserveRepo(t)
+		g := git.NewGit(repo)
+
+		runGitCmd(t, repo, "push", "origin", branch)
+		// Delete inside the bare remote: `git push origin :<branch>` would also
+		// drop the local tracking ref and leave nothing stale.
+		runGitCmd(t, remote, "update-ref", "-d", "refs/heads/"+branch)
+		tip := gitNow(t, repo, "rev-parse", "refs/heads/"+branch)
+		if stale := gitNow(t, repo, "rev-parse", "refs/remotes/origin/"+branch); stale != tip {
+			t.Fatalf("fixture is wrong: stale origin/%s = %s, want the tip %s", branch, stale, tip)
+		}
+		if published := gitNow(t, repo, "ls-remote", "--heads", remote, branch); published != "" {
+			t.Fatalf("fixture is wrong: %s should be deleted on the remote, got %q", branch, published)
+		}
+
+		outcome, err := preserveBranchBeforeNuke(g, branch, "origin")
+		if err != nil {
+			t.Fatalf("preserveBranchBeforeNuke: %v", err)
+		}
+		if outcome.AlreadyThere {
+			t.Fatal("AlreadyThere = true, want false: the stale tracking ref is not a remote copy")
+		}
+		if published := gitNow(t, repo, "ls-remote", "--heads", remote, branch); !strings.HasPrefix(published, tip) {
+			t.Fatalf("remote %s = %q, want the tip %s pushed back", branch, published, tip)
+		}
+	})
+
 	// A branch already merged into main is preserved even though no origin/<branch>
 	// exists: reachability, not tip membership, is the test. The jade run showed
 	// two heads that are ancestors of main where `ls-remote` on the branch name

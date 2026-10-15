@@ -2776,8 +2776,10 @@ func preserveBranchBeforeNuke(g *git.Git, branch, remote string) (preserveOutcom
 
 	// Refresh remote-tracking refs before deciding anything: every check below
 	// reads the remote's state, and a stale origin/main is how work that exists
-	// only locally gets classified as preserved.
-	if err := g.Fetch(remote); err != nil {
+	// only locally gets classified as preserved. Prune too: a branch deleted
+	// unmerged on the remote leaves a stale refs/remotes/<remote>/<branch> at
+	// the tip, and the daemon's prune would drop it right after the nuke.
+	if err := g.FetchPrune(remote); err != nil {
 		return preserveOutcome{}, fmt.Errorf("fetch %s before nuke: %w", remote, err)
 	}
 	if refs, err := g.RemoteRefsContaining(tip); err == nil && len(refs) > 0 {
