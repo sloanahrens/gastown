@@ -2902,3 +2902,43 @@ func TestRemoveWithOptions_SelfNukeIgnoresShellInWorktree(t *testing.T) {
 		t.Fatalf("self-nuke from inside the worktree: %v", err)
 	}
 }
+
+// bd writes Dolt's own "not found" text for a missing database or table. That
+// is a configuration failure, never bd answering that the probe id is absent,
+// so the spawn must stop before it builds a worktree (gt-fif9v).
+func TestCheckDoltHealth_DatabaseNotFoundIsUnhealthy(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		err     error
+		healthy bool
+	}{
+		{"database not found", errors.New("bd show __health_check_nonexistent__ --json: database not found: x"), false},
+		{"table not found", errors.New("bd show __health_check_nonexistent__ --json: table not found: issues"), false},
+		{"genuine ErrNotFound", beads.ErrNotFound, true},
+		{"wrapped ErrNotFound", fmt.Errorf("__health_check_nonexistent__: %w", beads.ErrNotFound), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			db := newPolecatDB()
+			db.err = tt.err
+			r := &rig.Rig{Name: "test-rig", Path: t.TempDir()}
+			m := newTestManager(r, nil, nil, db)
+
+			err := m.CheckDoltHealth()
+			if tt.healthy {
+				if err != nil {
+					t.Fatalf("CheckDoltHealth = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrDoltUnhealthy) {
+				t.Fatalf("CheckDoltHealth = %v, want ErrDoltUnhealthy", err)
+			}
+			if got := db.readCount(); got != 1 {
+				t.Errorf("probe reads = %d, want 1 (config errors fail fast)", got)
+			}
+		})
+	}
+}
