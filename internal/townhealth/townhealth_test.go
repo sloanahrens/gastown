@@ -68,6 +68,9 @@ type fake struct {
 
 	// started is the daemon's start time the dispatch field reads.
 	started time.Time
+
+	// loadCtx is the context the last host read ran under.
+	loadCtx context.Context
 }
 
 func (f *fake) Ping(context.Context) (time.Duration, error) {
@@ -86,7 +89,10 @@ func (f *fake) Heartbeat() (HeartbeatRecord, error) { return f.hb, f.hbErr }
 func (f *fake) ExecTax(context.Context) (time.Duration, error) {
 	return f.execTax, f.execTaxErr
 }
-func (f *fake) Load1() (HostLoad, error) { return f.load, f.loadErr }
+func (f *fake) Load1(ctx context.Context) (HostLoad, error) {
+	f.loadCtx = ctx
+	return f.load, f.loadErr
+}
 
 func (f *fake) Ticks() ([]Tick, error) { return f.ticks, f.ticksErr }
 func (f *fake) Landings(_ context.Context, since time.Time) ([]RigLandings, error) {
@@ -1061,6 +1067,22 @@ func TestHostThatReportedNothingLeavesTheTownVerdict(t *testing.T) {
 				t.Errorf("town verdict = %s, want the exec-tax field's red", r.Verdict)
 			}
 		})
+	}
+}
+
+// The host read runs under the caller's context, not a fresh one: a read that
+// samples top for a second must be cancelled by the computation's deadline
+// rather than hold the health computation past it (gt-auiji).
+func TestHostReadRunsUnderTheComputationsContext(t *testing.T) {
+	t.Parallel()
+	type key struct{}
+	ctx := context.WithValue(context.Background(), key{}, "compute")
+	f := healthy()
+
+	Compute(ctx, inputs(f))
+
+	if f.loadCtx == nil || f.loadCtx.Value(key{}) != "compute" {
+		t.Errorf("host read ran under %v, want the context Compute was given", f.loadCtx)
 	}
 }
 

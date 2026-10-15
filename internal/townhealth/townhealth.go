@@ -324,7 +324,7 @@ type HostLoad struct {
 // fails, leaves the probe's verdict standing and makes the host field
 // UNKNOWN (gt-v50sn).
 type Load interface {
-	Load1() (HostLoad, error)
+	Load1(ctx context.Context) (HostLoad, error)
 }
 
 // HeartbeatRecord is the daemon's last completed heartbeat.
@@ -616,7 +616,7 @@ var errNotWired = errors.New("no source wired")
 // calling goroutine.
 func Compute(ctx context.Context, in Inputs) Report {
 	r := Report{At: in.Now}
-	h, hErr := hostReading(in)
+	h, hErr := hostReading(ctx, in)
 	r.Fields = append(r.Fields, dolt(ctx, in))
 	et, ms := execTax(ctx, in, h)
 	r.Fields = append(r.Fields, et)
@@ -748,11 +748,11 @@ func overloadReason(h HostLoad) string {
 // hostReading reads the host once per computation: the exec-tax probe's
 // corroboration and the host field both need it, and reading the host twice
 // would run its probes twice (gt-auiji).
-func hostReading(in Inputs) (HostLoad, error) {
+func hostReading(ctx context.Context, in Inputs) (HostLoad, error) {
 	if in.Load == nil {
 		return HostLoad{}, errNotWired
 	}
-	return in.Load.Load1()
+	return in.Load.Load1(ctx)
 }
 
 // host renders the host's own busyness, and reports whether it had one to

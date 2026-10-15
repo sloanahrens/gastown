@@ -91,7 +91,7 @@ type healthSources struct {
 	execTax func(ctx context.Context) (time.Duration, error)
 	// load1 reads the host's one-minute load average and core count, which
 	// corroborate a slow exec probe (gt-v50sn); nil reads the host.
-	load1      func() (townhealth.HostLoad, error)
+	load1      func(context.Context) (townhealth.HostLoad, error)
 	backupRoot func() (string, error)
 	slots      func() (slot.Report, error)
 	dispatch   func() (townhealth.DispatchRecord, error)
@@ -203,11 +203,11 @@ func (s *healthSources) ExecTax(ctx context.Context) (time.Duration, error) {
 // readings beside the load average (gt-v50sn, gt-auiji). One hoststat sample
 // supplies the CPU idle and Dolt readings and the load average, which falls
 // back to sysctl when the sample parses none.
-func (s *healthSources) Load1() (townhealth.HostLoad, error) {
+func (s *healthSources) Load1(ctx context.Context) (townhealth.HostLoad, error) {
 	if s.load1 != nil {
-		return s.load1()
+		return s.load1(ctx)
 	}
-	r := hoststat.Sample(context.Background())
+	r := hoststat.Sample(ctx)
 	h := townhealth.HostLoad{Cores: runtime.NumCPU(), CPUIdle: r.CPUIdle, DoltCores: r.DoltCores}
 	if r.Load1 != nil {
 		h.Average = *r.Load1

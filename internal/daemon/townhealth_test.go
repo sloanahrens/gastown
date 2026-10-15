@@ -169,7 +169,7 @@ func stubHealthProbes(s *healthSources, town string, now time.Time) {
 	// The host load is the machine's, so a test pins it: otherwise a busy
 	// host would turn a red exec-tax reading degraded under the test
 	// (gt-v50sn).
-	s.load1 = func() (townhealth.HostLoad, error) { return townhealth.HostLoad{Average: 2, Cores: 8}, nil }
+	s.load1 = func(context.Context) (townhealth.HostLoad, error) { return townhealth.HostLoad{Average: 2, Cores: 8}, nil }
 	s.backupRoot = func() (string, error) { return filepath.Join(town, "no-backups"), nil }
 	s.slots = func() (slot.Report, error) {
 		return slot.Report{Slots: []slot.SlotState{{Index: 0, Held: true, Owner: &slot.Owner{Role: "refinery", AcquiredAt: now.Add(-40 * time.Minute)}}}}, nil
@@ -417,7 +417,7 @@ func TestWriteTownHealth_LogsTheExecTaxOnlyWhenItChanges(t *testing.T) {
 		s.ping = func() (time.Duration, error) { return 4 * time.Millisecond, nil }
 		s.execTax = func(context.Context) (time.Duration, error) { return median, nil }
 		// An idle host, so the 180 ms reading stays the red this test judges.
-		s.load1 = func() (townhealth.HostLoad, error) { return townhealth.HostLoad{Average: 2, Cores: 8}, nil }
+		s.load1 = func(context.Context) (townhealth.HostLoad, error) { return townhealth.HostLoad{Average: 2, Cores: 8}, nil }
 	}
 
 	// Every beat logs the health line itself; only the exec-tax line is
@@ -695,7 +695,7 @@ func TestWriteTownHealth_FailedReadsAreUnknown(t *testing.T) {
 	d.townHealthSources = func(s *healthSources) {
 		s.ping = func() (time.Duration, error) { return 0, errors.New("connection refused") }
 		s.execTax = func(context.Context) (time.Duration, error) { return 9 * time.Millisecond, nil }
-		s.load1 = func() (townhealth.HostLoad, error) { return townhealth.HostLoad{Average: 2, Cores: 8}, nil }
+		s.load1 = func(context.Context) (townhealth.HostLoad, error) { return townhealth.HostLoad{Average: 2, Cores: 8}, nil }
 		s.backupRoot = func() (string, error) { return "", errors.New("no home") }
 		s.slots = func() (slot.Report, error) { return slot.Report{}, nil }
 	}
