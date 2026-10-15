@@ -111,6 +111,16 @@ func (m *pushMemory) note(id string) {
 	m.ids[id] = true
 }
 
+// DefaultUnhandledMaxPerPass is how many escalations one pass pushes at most.
+//
+// A pass runs inside a heartbeat, and a notify command that hangs holds it for
+// pushcmd.Timeout each: the cap is what makes the wait a small multiple of that
+// timeout instead of one timeout per unread escalation, so a town deployed with
+// silent_push set texts a few old escalations per heartbeat rather than every
+// open one in the first pass after the deploy (gt-8db90). It stays well under
+// the 3m default heartbeat (config.DefaultRecoveryHeartbeatInterval).
+const DefaultUnhandledMaxPerPass = 5
+
 // UnhandledRun is one pass of the unhandled push: where it reads the open
 // escalations, where it sends and where it records the send. Tests replace them
 // so no unit test touches a database or starts a process.
@@ -122,12 +132,29 @@ type UnhandledRun struct {
 	Name string
 	// Window is how long an escalation may wait on the overseer first.
 	Window time.Duration
+	// Max is the most pushes one pass makes; 0 or less is
+	// DefaultUnhandledMaxPerPass.
+	Max int
 	// memory remembers the sends whose record failed; nil remembers nothing.
 	memory *pushMemory
 }
 
+// maxPerPass is the cap this pass runs under.
+func (r UnhandledRun) maxPerPass() int {
+	if r.Max > 0 {
+		return r.Max
+	}
+	return DefaultUnhandledMaxPerPass
+}
+
 // Run pushes once for each escalation that has waited out the window, and
 // returns the ids it pushed.
+//
+// One pass is bounded: it pushes at most maxPerPass escalations, and every
+// escalation it does not reach waits for a later pass untouched — nothing is
+// pushed twice, dropped or marked on its behalf (gt-8db90). A pass costs one
+// push timeout per push it makes, so the cap is what keeps a heartbeat from
+// paying the timeout once per open escalation.
 //
 // One escalation's failure does not stop the others: the errors are joined into
 // the one this returns. A push that fails is not recorded, so the next pass
@@ -144,12 +171,20 @@ func (r UnhandledRun) Run(now time.Time) ([]string, error) {
 	}
 	var pushed []string
 	var errs []error
+	// The cap counts the pushes the pass makes, outcomes included: a failed
+	// push still spent a timeout, which is what the cap bounds. A skipped
+	// memory hit costs nothing and so is not one of them.
+	pushes := 0
 	for _, u := range unhandledPushes(issues, now, r.Window) {
 		if r.memory.has(u.ID) {
 			// This process already texted the human about it; only the record
 			// of that send was missing.
 			continue
 		}
+		if pushes >= r.maxPerPass() {
+			break
+		}
+		pushes++
 		if err := r.Push(r.Name, u.Line(r.Window), ""); err != nil {
 			errs = append(errs, fmt.Errorf("pushing %s: %w", u.ID, err))
 			continue

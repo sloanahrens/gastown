@@ -2,6 +2,7 @@ package notify
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -87,6 +88,113 @@ func TestUnhandledRunPushesOnceAfterTheWindow(t *testing.T) {
 	want := "imessage|Unhandled for 30 min: hq-polecat revert-guard ruling|"
 	if len(pushed) != 1 || pushed[0] != want {
 		t.Fatalf("pushed %v, want %q", pushed, want)
+	}
+}
+
+// One pass is bounded: it pushes at most the cap, and every escalation it does
+// not reach waits for a later pass unmarked. The following passes drain the
+// rest in cap-sized chunks, so none is pushed twice and none is lost (gt-8db90).
+func TestUnhandledRunBoundsOnePass(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	issues := make(map[string]*beads.Issue, 7)
+	for i := range 7 {
+		id := fmt.Sprintf("hq-%d", i)
+		issues[id] = escalationBead(id, "daemon", now.Add(-time.Hour))
+	}
+	var pushed, marked []string
+	run := UnhandledRun{
+		List: func() ([]*beads.Issue, error) {
+			out := make([]*beads.Issue, 0, len(issues))
+			for i := range 7 {
+				out = append(out, issues[fmt.Sprintf("hq-%d", i)])
+			}
+			return out, nil
+		},
+		Push: func(_, title, _ string) error { pushed = append(pushed, title); return nil },
+		// The mark is the durable record the next pass reads: it is the label.
+		Mark: func(id string) error {
+			marked = append(marked, id)
+			issues[id].Labels = append(issues[id].Labels, beads.EscalationPushedLabel)
+			return nil
+		},
+		Name: "imessage", Window: config.DefaultEscalationUnhandledAfter,
+		Max: 3,
+	}
+	pass := func() []string {
+		ids, err := run.Run(now)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		return ids
+	}
+
+	// Seven escalations, a cap of three: the first pass pushes three and leaves
+	// the other four open and unmarked.
+	if ids := pass(); strings.Join(ids, ",") != "hq-0,hq-1,hq-2" {
+		t.Fatalf("first pass pushed %v, want the first three", ids)
+	}
+	if len(pushed) != 3 {
+		t.Fatalf("pushed %d texts, want three", len(pushed))
+	}
+	// The mark is what carries the once-only, so the ones behind the cap must
+	// not have one: a second text would be the human's price for the cap.
+	if strings.Join(marked, ",") != "hq-0,hq-1,hq-2" {
+		t.Errorf("marked %v, want the same three the pass pushed", marked)
+	}
+
+	// The rest drain over the passes that follow, in cap-sized chunks, and end
+	// with nothing left to push.
+	var drained []string
+	for range 3 {
+		drained = append(drained, pass()...)
+	}
+	if strings.Join(drained, ",") != "hq-3,hq-4,hq-5,hq-6" {
+		t.Errorf("later passes pushed %v, want the remaining four", drained)
+	}
+	if len(pushed) != 7 || strings.Join(marked, ",") != "hq-0,hq-1,hq-2,hq-3,hq-4,hq-5,hq-6" {
+		t.Errorf("after draining: %d texts, marked %v, want one of each", len(pushed), marked)
+	}
+	if ids := pass(); len(ids) != 0 {
+		t.Errorf("a pass on a drained town pushed %v, want none", ids)
+	}
+}
+
+// The cap bounds the time a pass spends, so it counts the pushes that fail too:
+// a notify command that hangs costs its timeout per push, and a pass over more
+// escalations than the cap must not pay it once per escalation (gt-8db90).
+func TestUnhandledRunBoundsAPassOfFailures(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	var issues []*beads.Issue
+	for i := range 7 {
+		issues = append(issues, escalationBead(fmt.Sprintf("hq-%d", i), "daemon", now.Add(-time.Hour)))
+	}
+	tries := 0
+	run := UnhandledRun{
+		List:   func() ([]*beads.Issue, error) { return issues, nil },
+		Push:   func(string, string, string) error { tries++; return errors.New("timed out") },
+		Mark:   func(string) error { t.Error("a failed push was recorded"); return nil },
+		Name:   "imessage",
+		Window: config.DefaultEscalationUnhandledAfter,
+		Max:    3,
+	}
+	ids, err := run.Run(now)
+	if ids != nil {
+		t.Errorf("Run pushed %v, want none recorded as pushed", ids)
+	}
+	if err == nil {
+		t.Fatal("Run = nil, want the failures it had")
+	}
+	// Every push the pass made is named in the error; the escalations behind
+	// the cap were not pushed and so have nothing to report.
+	for _, id := range []string{"hq-0", "hq-1", "hq-2"} {
+		if !strings.Contains(err.Error(), id) {
+			t.Errorf("Run error %v does not name %s", err, id)
+		}
+	}
+	if tries != 3 {
+		t.Errorf("pushed %d times, want the cap of three", tries)
 	}
 }
 
