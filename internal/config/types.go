@@ -1075,10 +1075,11 @@ func BuiltinRoleThemes() map[string]string {
 // rig. It is read from the rig's own settings/config.json, never from merged
 // repo content, because it decides what the daemon does after a landing.
 type LandingConfig struct {
-	// Followups enables the follow-up feed: a landing om approved in the band
-	// gets one shaped om-followup bead for the findings that were not worth
-	// blocking on, de-duplicated against the beads earlier landings filed
-	// (gt-s01pn). False leaves the feed off, and off means nothing in it runs.
+	// Followups enables the follow-up feed: a landing om approved at or above
+	// the rig's bar gets shaped om-followup beads for the minor findings that
+	// were not worth blocking on, de-duplicated against the beads earlier
+	// landings filed (gt-s01pn). False leaves the feed off, and off means
+	// nothing in it runs.
 	Followups bool `json:"followups,omitempty"`
 
 	// OMQueue enables the om finding queue: a landing om approved gets its
@@ -1137,6 +1138,12 @@ type MergeQueueConfig struct {
 	// labeled `rework` or an explicit --force passes anyway. Zero or unset
 	// disables the guard (no queue read at all).
 	MaxReadyForDispatch int `json:"max_ready_for_dispatch,omitempty"`
+
+	// FollowupBackpressure is the open om-followup count at which the landing
+	// worker's follow-up feed stops filing for this rig; the feed resumes on
+	// its own when the count falls back under it (gt-4ty22). Zero or unset
+	// means the feed's own default of 40 (land.DefaultFollowupBackpressure).
+	FollowupBackpressure int `json:"followup_backpressure,omitempty"`
 
 	// Editorial configures the om editorial gate: whether a merge requires
 	// an om review before it can land, and how that review runs. Nil means

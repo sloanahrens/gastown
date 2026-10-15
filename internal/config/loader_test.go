@@ -269,6 +269,68 @@ func TestRigSettingsOMQueue(t *testing.T) {
 	}
 }
 
+// TestRigSettingsFollowupBackpressure pins the wire name of the follow-up
+// feed's backpressure bound: the landing worker reads it out of the rig's own
+// settings/config.json, so `merge_queue.followup_backpressure` is what an
+// operator writes and what the daemon must see (gt-4ty22).
+func TestRigSettingsFollowupBackpressure(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	for _, tc := range []struct {
+		name string
+		body string
+		want int
+	}{
+		{"absent", `{"type":"rig-settings","version":1,"merge_queue":{}}`, 0},
+		{"zero", `{"type":"rig-settings","version":1,"merge_queue":{"followup_backpressure":0}}`, 0},
+		{"a count", `{"type":"rig-settings","version":1,"merge_queue":{"followup_backpressure":12}}`, 12},
+		{"beside another key", `{"type":"rig-settings","version":1,"merge_queue":{"max_ready_for_dispatch":3,"followup_backpressure":12}}`, 12},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := LoadRigSettings(path)
+			if err != nil {
+				t.Fatalf("LoadRigSettings: %v", err)
+			}
+			if loaded.MergeQueue == nil {
+				t.Fatal("MergeQueue is nil")
+			}
+			if loaded.MergeQueue.FollowupBackpressure != tc.want {
+				t.Errorf("merge_queue.followup_backpressure = %d, want %d",
+					loaded.MergeQueue.FollowupBackpressure, tc.want)
+			}
+		})
+	}
+	// The setting round-trips under the same key when an operator sets one.
+	if err := SaveRigSettings(path, &RigSettings{Type: "rig-settings", Version: 1,
+		MergeQueue: &MergeQueueConfig{FollowupBackpressure: 12}}); err != nil {
+		t.Fatalf("SaveRigSettings: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"followup_backpressure": 12`) {
+		t.Errorf("saved settings = %s, want merge_queue.followup_backpressure written as followup_backpressure", data)
+	}
+	// An unset bound writes no key at all: a config file the new defaults write
+	// still decodes on a binary that does not know the key yet (gt-4ty22).
+	if err := SaveRigSettings(path, &RigSettings{Type: "rig-settings", Version: 1,
+		MergeQueue: DefaultMergeQueueConfig()}); err != nil {
+		t.Fatalf("SaveRigSettings: %v", err)
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "followup_backpressure") {
+		t.Errorf("saved settings = %s, want the unset bound written as no key", data)
+	}
+}
+
 func TestRigConfigValidation(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

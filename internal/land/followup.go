@@ -2,37 +2,41 @@ package land
 
 import (
 	"fmt"
+	"path"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
-// The post-landing follow-up feed: after a landing om approved in the band, the
-// worker files one shaped bead for the findings om raised and did not block on,
-// de-duplicated against the beads earlier landings filed (gt-s01pn). A finding
-// that really must be fixed blocks the landing through the score floor instead;
-// this feed is for the ones worth fixing and not worth holding the queue for.
+// The post-landing follow-up feed: after a landing om approved at or above the
+// rig's own bar, the worker files shaped beads for the minor findings om raised
+// and did not block on, de-duplicated against the beads earlier landings filed
+// (gt-s01pn). A finding that really must be fixed refuses the landing instead;
+// this feed is for the ones worth fixing and not worth holding the queue for
+// (gt-4ty22).
 
 const (
 	// FollowUpLabel is the label every filed bead wears and the one a later run
-	// lists to find the beads it must de-duplicate against.
+	// lists to find the beads it must de-duplicate against. A landing whose own
+	// bead wears it files nothing (gt-4ty22).
 	FollowUpLabel = "om-followup"
 
-	// followUpMaxScore tops the band. om scored the landing at or above it, so
-	// what the review raised is not worth a bead either. It is named here
-	// rather than configured because the top of the band is a property of om's
-	// scale, not of a rig: om calls 0.9 the point where its findings stop
-	// being worth filing.
-	followUpMaxScore = 0.9
+	// DefaultFollowupBackpressure is the open follow-up count at which the feed
+	// stops filing for a rig that configures none. It is backpressure rather
+	// than a cap, so the count falling back under it resumes the feed on the
+	// next landing (gt-4ty22).
+	DefaultFollowupBackpressure = 40
 
-	// followUpBackpressure is the open follow-up count at which the feed stops
-	// filing. It is backpressure rather than a cap, so the count falling back
-	// under it resumes the feed on the next landing.
-	followUpBackpressure = 30
+	// followUpGroupFindings is the finding count above which a landing's
+	// findings file one bead per package rather than one bead in all.
+	followUpGroupFindings = 6
 
-	// followUpPriority is the priority a filed bead takes: it is work nobody is
-	// waiting on, so it sorts below the queue's own beads.
+	// followUpPriority is the priority a filed bead takes: every finding a
+	// passing review leaves is a minor, which is work nobody is waiting on, so
+	// it sorts below the queue's own beads.
 	followUpPriority = 3
 
 	// followUpTimeout bounds the whole feed — the de-duplication read, the
@@ -69,8 +73,8 @@ type FollowupBeads interface {
 	ListFollowups(label string) ([]ExistingFollowup, error)
 }
 
-// fileFollowups files the follow-up bead this landing earns, or comments on the
-// bead an earlier landing already filed for one of its findings (gt-s01pn).
+// fileFollowups files the follow-up beads this landing earns, or comments on
+// the bead an earlier landing already filed for one of its findings (gt-s01pn).
 //
 // It runs once the landing is recorded and every failure is logged and dropped:
 // the record is written, and nothing here may change the result or hold the
@@ -84,18 +88,19 @@ func (l *Lander) fileFollowups(dir string, w Work, res Result) {
 	if res.Verdict.Verdict != VerdictApprove {
 		return
 	}
-	// The band's floor is the rig's own threshold, read the way the review read
-	// it: the landing om approved at the bar is exactly the one worth a
-	// follow-up, and one it scored at followUpMaxScore or above has nothing
-	// left to feed.
+	// The floor is the rig's own threshold, read the way the review read it:
+	// the landing om approved at its bar is the one worth a follow-up. There is
+	// no ceiling — a landing that risks a great deal and still passes leaves as
+	// many minors as one that barely passes, and the review stays strictest
+	// when every finding of a passing landing is written down (gt-4ty22).
 	threshold, err := OMThreshold(dir)
 	if err != nil {
-		l.logf("%s: could not read the .om.json threshold the follow-up feed bands on (%v); reading it as 0", w.BeadID, err)
+		l.logf("%s: could not read the .om.json threshold the follow-up feed floors on (%v); reading it as 0", w.BeadID, err)
 	}
-	if res.Verdict.Score < threshold || res.Verdict.Score >= followUpMaxScore {
+	if res.Verdict.Score < threshold {
 		return
 	}
-	findings := followupCandidates(nonBlockingFindings(res.Verdict.Findings))
+	findings := followupCandidates(followupFindings(res.Verdict.Findings))
 	if len(findings) == 0 {
 		return // nothing but info: worth knowing, not worth a bead
 	}
@@ -116,10 +121,20 @@ func (l *Lander) fileFollowups(dir string, w Work, res Result) {
 }
 
 // followupFeed is the feed's I/O for one landing: the de-duplication read, the
-// comments a repeat earns, and the one bead the new findings earn. It returns
-// the lines it wants logged and never returns an error — every failure is a
-// line the caller logs and the landing does not see.
+// comments a repeat earns, and the beads the new findings earn. It returns the
+// lines it wants logged and never returns an error — every failure is a line
+// the caller logs and the landing does not see.
 func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate) []string {
+	issue, err := l.Beads.Show(w.BeadID)
+	if err != nil {
+		// Only a read work bead can rule out that this landing is itself a
+		// follow-up, and a follow-up of a follow-up is how the feed would never
+		// drain: every fix generates its own new minors.
+		return []string{fmt.Sprintf("could not read the work bead to see whether it is a %s bead itself (%v); filing nothing for this landing", FollowUpLabel, err)}
+	}
+	if beads.HasLabel(issue, FollowUpLabel) {
+		return []string{fmt.Sprintf("the bead is a %s follow-up itself, and a follow-up of a follow-up never drains the feed; filing nothing", FollowUpLabel)}
+	}
 	existing, err := l.Followups.ListFollowups(FollowUpLabel)
 	if err != nil {
 		// Filing with no view of what exists would file a paraphrase of an
@@ -127,12 +142,13 @@ func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate) 
 		// files nothing.
 		return []string{fmt.Sprintf("could not list the %s beads (%v); filing nothing for this landing", FollowUpLabel, err)}
 	}
-	if id := followupForCommit(existing, res.LandedCommit); id != "" {
-		return []string{fmt.Sprintf("%s already carries this landing's follow-up; filing nothing", id)}
-	}
-	if n := openFollowups(existing); n >= followUpBackpressure {
-		return []string{fmt.Sprintf("%d %s beads are open, at the %d-bead backpressure bound; filing nothing for this landing",
-			n, FollowUpLabel, followUpBackpressure)}
+	// The beads an earlier attempt at this landing filed. They are this
+	// landing's own work, so a retry says nothing to them — the "seen again"
+	// comment is for a finding another landing raised (gt-4ty22).
+	own := followupIDsForCommit(existing, res.LandedCommit)
+	open := openFollowups(existing)
+	if bound := l.followupBackpressure(); open >= bound {
+		return []string{l.holdBack(open, bound, len(findings))}
 	}
 	var lines []string
 	var fresh []FollowupCandidate
@@ -141,6 +157,9 @@ func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate) 
 		case DedupeComment:
 			// The finding is already filed: the repeat goes on that bead's
 			// history, and nothing new is filed for it.
+			if own[d.Target] {
+				continue
+			}
 			if err := l.Beads.AddComment(d.Target, followupComment(w, res, c)); err != nil {
 				lines = append(lines, fmt.Sprintf("could not comment %s for the finding it repeats (%v)", d.Target, err))
 			}
@@ -151,22 +170,134 @@ func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate) 
 	if len(fresh) == 0 {
 		return lines
 	}
-	id, err := l.Followups.CreateFollowup(followupSpec(w, res, fresh))
-	if err != nil {
-		return append(lines, fmt.Sprintf("could not file the follow-up bead for %s (%v)", findingsPhrase(len(fresh)), err))
-	}
-	return append(lines, fmt.Sprintf("filed %s for %s of the landing at %.2f", id, findingsPhrase(len(fresh)), res.Verdict.Score))
+	return append(lines, l.fileFollowupBeads(w, res, fresh, open)...)
 }
 
-// nonBlockingFindings keeps the findings a follow-up bead is for: major and
-// minor. Info is what om already decided is not worth fixing, and a landing
-// reaches the feed carrying no major or critical finding at all, because either
-// refuses it back to the author first (gt-oi4je).
-func nonBlockingFindings(findings []Finding) []Finding {
+// fileFollowupBeads files the beads the fresh findings of one landing earn —
+// one for the landing, or one per package — and leaves one comment on the work
+// bead naming them. open is the om-followup count the de-duplication read
+// found, so the backpressure bound is applied to every bead the landing files
+// rather than once to the landing: a landing that splits into three beads
+// stops at the bound instead of carrying the queue past it (gt-4ty22). It
+// returns the lines it wants logged.
+func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate, open int) []string {
+	groups := followupGroups(fresh)
+	bound := l.followupBackpressure()
+	var lines []string
+	var ids []string
+	for i, g := range groups {
+		if open+len(ids) >= bound {
+			held := 0
+			for _, rest := range groups[i:] {
+				held += len(rest.Findings)
+			}
+			lines = append(lines, l.holdBack(open+len(ids), bound, held))
+			break
+		}
+		id, err := l.Followups.CreateFollowup(followupSpec(w, res, g))
+		if err != nil {
+			lines = append(lines, fmt.Sprintf("could not file the follow-up bead for %s (%v)", findingsPhrase(len(g.Findings)), err))
+			continue
+		}
+		ids = append(ids, id)
+		lines = append(lines, fmt.Sprintf("filed %s for %s of the landing at %.2f", id, findingsPhrase(len(g.Findings)), res.Verdict.Score))
+	}
+	if len(ids) == 0 {
+		return lines
+	}
+	// The work bead is where a reader of the landing finds what its minors
+	// became, so the filed beads are named there and nowhere else (gt-4ty22).
+	if err := l.Beads.AddComment(w.BeadID, followupFiledComment(ids, res)); err != nil {
+		lines = append(lines, fmt.Sprintf("could not comment the filed follow-up onto %s (%v)", w.BeadID, err))
+	}
+	return lines
+}
+
+// holdBack is what the feed says and does when the backpressure bound keeps
+// findings from beads: the line it logs, and the item it hands the attention
+// sink, every time the bound holds something back (gt-4ty22).
+func (l *Lander) holdBack(open, bound, held int) string {
+	if l.FollowupAlert != nil {
+		l.FollowupAlert(fmt.Sprintf("%d %s beads are open, at the %d-bead backpressure bound: %s of this landing got no bead, and the feed files nothing more until the open count falls back",
+			open, FollowUpLabel, bound, findingsPhrase(held)))
+	}
+	return fmt.Sprintf("%d %s beads are open, at the %d-bead backpressure bound; held back %s for this landing",
+		open, FollowUpLabel, bound, findingsPhrase(held))
+}
+
+// FollowupBackpressureOrDefault is the open om-followup count at which a feed
+// stops filing: the rig's configured count, or DefaultFollowupBackpressure when
+// it configures none.
+func FollowupBackpressureOrDefault(configured int) int {
+	if configured > 0 {
+		return configured
+	}
+	return DefaultFollowupBackpressure
+}
+
+// followupBackpressure is the open follow-up count at which this lander's feed
+// stops filing.
+func (l *Lander) followupBackpressure() int {
+	return FollowupBackpressureOrDefault(l.FollowupBackpressure)
+}
+
+// followupGroup is one bead's worth of a landing's findings. Package is the
+// package the bead was filed for, and "" when the bead carries a landing whose
+// findings all sit in one place.
+type followupGroup struct {
+	Package  string
+	Findings []FollowupCandidate
+}
+
+// followupGroups splits a landing's findings into the beads they file: one bead
+// for the landing, or one per package when the landing carries more than
+// followUpGroupFindings findings or its findings reach more than one package. A
+// package's findings are work one worker takes; a landing spread across three
+// packages is not.
+func followupGroups(findings []FollowupCandidate) []followupGroup {
+	byPackage := map[string][]FollowupCandidate{}
+	var order []string
+	for _, c := range findings {
+		pkg := followupPackage(c.Path)
+		if _, seen := byPackage[pkg]; !seen {
+			order = append(order, pkg)
+		}
+		byPackage[pkg] = append(byPackage[pkg], c)
+	}
+	if len(order) <= 1 && len(findings) <= followUpGroupFindings {
+		return []followupGroup{{Findings: findings}}
+	}
+	sort.Strings(order)
+	out := make([]followupGroup, 0, len(order))
+	for _, pkg := range order {
+		out = append(out, followupGroup{Package: pkg, Findings: byPackage[pkg]})
+	}
+	return out
+}
+
+// followupPackage is the package a finding belongs to: the directory its file
+// sits in. A finding om named no path for has no package, and so does one in a
+// file at the repository root — path.Dir spells that ".", which is not a
+// package any worker takes (gt-4ty22).
+func followupPackage(fpath string) string {
+	fpath = strings.TrimSpace(fpath)
+	if fpath == "" {
+		return ""
+	}
+	if dir := path.Dir(path.Clean(fpath)); dir != "." {
+		return dir
+	}
+	return ""
+}
+
+// followupFindings keeps the findings a follow-up bead is for: the minors. Any
+// other severity is either info, which om already decided is not worth fixing,
+// or a major or critical, which refuses the landing back to the author rather
+// than reaching a recorded landing (gt-oi4je).
+func followupFindings(findings []Finding) []Finding {
 	var out []Finding
 	for _, f := range findings {
-		switch omSeverity(f.Severity) {
-		case omSeverityMajor, omSeverityMinor:
+		if omSeverity(f.Severity) == omSeverityMinor {
 			out = append(out, f)
 		}
 	}
@@ -186,19 +317,26 @@ func followupCandidates(findings []Finding) []FollowupCandidate {
 	return out
 }
 
-// followupForCommit is the open follow-up that already names commit, or "".
-// A retry of a landing attempt that filed before failing finds its own bead
-// this way and files no second one.
-func followupForCommit(existing []ExistingFollowup, commit string) string {
+// followupIDsForCommit is the follow-ups that name commit in their body: the
+// beads an earlier attempt at this landing filed. A retry files no second bead
+// for them and has nothing to say to them either, but only for them — an
+// attempt that filed one package of three leaves the other two to the retry,
+// so one filed bead never stands for the whole landing (gt-4ty22).
+func followupIDsForCommit(existing []ExistingFollowup, commit string) map[string]bool {
 	if commit == "" {
-		return ""
+		return nil
 	}
+	var ids map[string]bool
 	for _, e := range existing {
-		if !followupClosed(e) && strings.Contains(e.Description, commit) {
-			return e.ID
+		if !strings.Contains(e.Description, commit) {
+			continue
 		}
+		if ids == nil {
+			ids = map[string]bool{}
+		}
+		ids[e.ID] = true
 	}
-	return ""
+	return ids
 }
 
 // openFollowups counts the follow-ups that are still open. Everything a bead
@@ -220,30 +358,34 @@ func followupClosed(e ExistingFollowup) bool {
 	return strings.EqualFold(strings.TrimSpace(e.Status), "closed")
 }
 
-// followupSpec is the one bead a landing files: the title the retired
-// refinery's beads carried, the shaped body, and the labels the next landing
-// de-duplicates on — one fingerprint per finding it files for.
-func followupSpec(w Work, res Result, findings []FollowupCandidate) FollowupSpec {
+// followupSpec is the one bead a group of a landing's findings files: the
+// title the retired refinery's beads carried, the shaped body, and the labels
+// the next landing de-duplicates on — one fingerprint per finding it files for.
+func followupSpec(w Work, res Result, g followupGroup) FollowupSpec {
 	labels := []string{FollowUpLabel}
-	for _, c := range findings {
+	for _, c := range g.Findings {
 		labels = append(labels, Fingerprint(c.Path, c.Title))
 	}
 	return FollowupSpec{
-		Title:    followupTitle(w, res, findings),
-		Body:     followupBody(w, res, findings),
+		Title:    followupTitle(w, res, g),
+		Body:     followupBody(w, res, g),
 		Labels:   labels,
 		Priority: followUpPriority,
 	}
 }
 
 // followupTitle names the first finding, the count when one bead groups
-// several, and what raised them: "Found: <finding> and 2 more (om major on
-// gt-abc approved at 0.62)".
-func followupTitle(w Work, res Result, findings []FollowupCandidate) string {
-	first := findings[0]
+// several, the package a split bead was filed for, and what raised them:
+// "Found: <finding> and 2 more in internal/land (om minor on gt-abc approved
+// at 0.62)".
+func followupTitle(w Work, res Result, g followupGroup) string {
+	first := g.Findings[0]
 	more := ""
-	if n := len(findings) - 1; n > 0 {
+	if n := len(g.Findings) - 1; n > 0 {
 		more = fmt.Sprintf(" and %d more", n)
+	}
+	if g.Package != "" {
+		more += " in " + g.Package
 	}
 	raised := fmt.Sprintf("on %s approved at %.2f", w.BeadID, res.Verdict.Score)
 	if severity := strings.TrimSpace(first.Severity); severity != "" {
@@ -255,12 +397,16 @@ func followupTitle(w Work, res Result, findings []FollowupCandidate) string {
 // followupBody is the filed bead's description in the shape the spec
 // dispatcher lints: the findings with their location and om's id, and the five
 // sections a bead must carry to be dispatchable at all.
-func followupBody(w Work, res Result, findings []FollowupCandidate) string {
+func followupBody(w Work, res Result, g followupGroup) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "## Goal\nFixed: the %s om raised on %s and did not block on, from the landing approved at %.2f (landed commit %s).\n",
-		findingsPhrase(len(findings)), w.BeadID, res.Verdict.Score, res.LandedCommit)
+	in := ""
+	if g.Package != "" {
+		in = " in " + g.Package
+	}
+	fmt.Fprintf(&b, "## Goal\nFixed: the %s om raised on %s%s and did not block on, from the landing approved at %.2f (landed commit %s).\n",
+		findingsPhrase(len(g.Findings)), w.BeadID, in, res.Verdict.Score, res.LandedCommit)
 	b.WriteString("\n")
-	for _, c := range findings {
+	for _, c := range g.Findings {
 		fmt.Fprintf(&b, "- %s\n", c.Detail)
 	}
 	b.WriteString("\n## Constraints\nOnly the files the findings name. Keep the rig's gate green. Do not widen the change.\n")
@@ -268,7 +414,7 @@ func followupBody(w Work, res Result, findings []FollowupCandidate) string {
 	b.WriteString("\n## Gate\ngt done presubmit; the landing runs make gate\n")
 	b.WriteString("\n## Size\none worker, one landing\n")
 	b.WriteString("\n## Acceptance\n")
-	for _, item := range acceptanceItems(findings) {
+	for _, item := range acceptanceItems(g.Findings) {
 		fmt.Fprintf(&b, "- [ ] %s\n", item)
 	}
 	return b.String()
@@ -332,6 +478,17 @@ func location(path string, line int) string {
 		return fmt.Sprintf("%s:%d", path, line)
 	}
 	return path
+}
+
+// followupFiledComment is the line the feed leaves on the work bead naming the
+// beads this landing earned, so a reader of the landed work finds its minors
+// without reading the follow-up beads themselves.
+func followupFiledComment(ids []string, res Result) string {
+	what := "follow-up"
+	if len(ids) > 1 {
+		what = "follow-ups"
+	}
+	return fmt.Sprintf("%s filed for this landing: %s (om approved at %.2f)", what, strings.Join(ids, ", "), res.Verdict.Score)
 }
 
 // followupComment is the line a repeat leaves on the bead that already filed

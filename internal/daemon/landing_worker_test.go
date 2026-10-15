@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -290,6 +291,105 @@ func TestRigFollowupsEnabledReadsRigSettingsOnly(t *testing.T) {
 			t.Fatal("the feed is off with landing.followups true")
 		}
 	})
+}
+
+// TestRigFollowupBackpressureReadsRigSettingsOnly: the bound decides when the
+// feed stops filing beads, so it comes from the rig's own settings/config.json
+// and an unset one is the feed's default rather than a value from merged repo
+// content (gt-4ty22).
+func TestRigFollowupBackpressureReadsRigSettingsOnly(t *testing.T) {
+	t.Parallel()
+	write := func(t *testing.T, rigPath, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(rigPath, "settings"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(rigPath, "settings", "config.json"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		body string
+		want int
+	}{
+		{name: "no settings file", want: 0},
+		{name: "settings without a merge queue block", body: `{"type":"rig-settings","version":1,"landing":{"followups":true}}`, want: 0},
+		{name: "an empty merge queue block", body: `{"type":"rig-settings","version":1,"merge_queue":{}}`, want: 0},
+		{name: "a bound", body: `{"type":"rig-settings","version":1,"merge_queue":{"followup_backpressure":12}}`, want: 12},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rigPath := t.TempDir()
+			if tc.body != "" {
+				write(t, rigPath, tc.body)
+			}
+			got := rigFollowupBackpressure(rigPath)
+			if got != tc.want {
+				t.Errorf("rigFollowupBackpressure() = %d, want %d", got, tc.want)
+			}
+			// Whatever the file says, the feed reads a bound that stops it.
+			if land.FollowupBackpressureOrDefault(got) <= 0 {
+				t.Errorf("the feed resolves %d to no bound at all", got)
+			}
+		})
+	}
+}
+
+// TestFollowupBackpressureAlertOnceADay: the feed's backpressure item reaches
+// the operator once a day per rig — the bound holds findings back on every
+// landing until the open count falls, and a landing rate is not a news rate
+// (gt-4ty22).
+func TestFollowupBackpressureAlertOnceADay(t *testing.T) {
+	t.Parallel()
+	d, rec := daemonWithRecorder(t)
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	clk := clockwork.NewFakeClockAt(now)
+	d.clock = clk
+	alert := d.followupBackpressureAlert("gastown")
+
+	alert("40 om-followup beads are open")
+	got := rec.Escalations()
+	if len(got) != 1 {
+		t.Fatalf("escalations = %+v, want one", got)
+	}
+	if want := (notify.Escalation{Severity: "low", Description: "landing_worker: 40 om-followup beads are open",
+		Reason: "40 om-followup beads are open", Fingerprint: "followup-backpressure:gastown"}); got[0].Escalation != want {
+		t.Errorf("escalation = %+v\nwant            %+v", got[0].Escalation, want)
+	}
+	// The next landing the same day is held back the same way and says nothing
+	// more; one a day is what keeps the item from being noise.
+	alert("40 om-followup beads are open")
+	if got := rec.Escalations(); len(got) != 1 {
+		t.Fatalf("escalations for two landings in a day = %+v, want one", got)
+	}
+	clk.Advance(followupBackpressureAlertEvery)
+	alert("40 om-followup beads are open")
+	if got := rec.Escalations(); len(got) != 2 {
+		t.Fatalf("escalations the next day = %+v, want two", got)
+	}
+}
+
+// TestFollowupBackpressureAlertLogsADeliveryThatFailed: the item is the only
+// place the findings the bound held back are visible, so an escalation that
+// never arrived is logged rather than dropped (gt-4ty22).
+func TestFollowupBackpressureAlertLogsADeliveryThatFailed(t *testing.T) {
+	t.Parallel()
+	d, rec := daemonWithRecorder(t)
+	rec.Fail(notifyfake.KindEscalate, errors.New("gt escalate: exit status 1 (bd: database not found)"))
+	var out lockedBuffer
+	d.logger = log.New(&out, "", 0)
+	clk := newFixedClock()
+	d.clock = clk
+
+	// A refused escalation retries with the daemon's own backoff.
+	runOnClock(t, clk, time.Second, func() {
+		d.followupBackpressureAlert("gastown")("40 om-followup beads are open")
+	})
+
+	if !strings.Contains(out.String(), "the follow-up backpressure item was not raised") {
+		t.Errorf("log = %q, want the failed delivery named", out.String())
+	}
 }
 
 // TestRigOMQueueEnabledReadsRigSettingsOnly: the finding queue writes to beads,

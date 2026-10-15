@@ -520,7 +520,12 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	// a rig whose own settings turn it on (gt-s01pn).
 	if rigFollowupsEnabled(rigPath) {
 		lander.Followups = followupBeads{client: bd}
-		d.logger.Printf("landing_worker: %s: om follow-up feed on (landing.followups)", rigName)
+		lander.FollowupBackpressure = rigFollowupBackpressure(rigPath)
+		// The backpressure holds findings back silently otherwise, so the day
+		// it does, the loss reaches a human as a low attention item (gt-4ty22).
+		lander.FollowupAlert = d.followupBackpressureAlert(rigName)
+		d.logger.Printf("landing_worker: %s: om follow-up feed on (landing.followups; %d open %s beads stop it)",
+			rigName, land.FollowupBackpressureOrDefault(lander.FollowupBackpressure), land.FollowUpLabel)
 	}
 	// The finding queue records an approved landing's om findings on its own
 	// work bead, for the next deep-review run to verify. It is the rig's own
@@ -1007,6 +1012,53 @@ func rigFollowupsEnabled(rigPath string) bool {
 		return false
 	}
 	return settings.Landing.Followups
+}
+
+// rigFollowupBackpressure is merge_queue.followup_backpressure from the rig's
+// own settings/config.json, and 0 when it names none — the count the feed
+// reads as its own default. It is read from there for the reason
+// rigFollowupsEnabled reads its file: it decides when the feed stops filing
+// beads nobody is waiting on (gt-4ty22).
+func rigFollowupBackpressure(rigPath string) int {
+	settings, err := config.LoadRigSettings(config.RigSettingsPath(rigPath))
+	if err != nil || settings == nil || settings.MergeQueue == nil {
+		return 0
+	}
+	return settings.MergeQueue.FollowupBackpressure
+}
+
+// followupBackpressureAlertEvery is how often the feed's backpressure item may
+// reach a human for one rig: the bound holds findings back on every landing
+// until the open count falls, and a landing rate is not a news rate (gt-4ty22).
+const followupBackpressureAlertEvery = 24 * time.Hour
+
+// followupBackpressureAlert is the feed's low attention item for one rig: the
+// findings merge_queue.followup_backpressure held back, escalated at most once
+// a day. The record lives here rather than on the lander, which holds no state
+// between landings, and the mutex covers the feed's goroutine outliving the
+// timeout that abandoned it (gt-4ty22).
+func (d *Daemon) followupBackpressureAlert(rigName string) func(message string) {
+	var mu sync.Mutex
+	var last time.Time
+	key := "followup-backpressure:" + rigName
+	return func(message string) {
+		now := d.clk().Now()
+		mu.Lock()
+		raised := !last.IsZero() && now.Sub(last) < followupBackpressureAlertEvery
+		if !raised {
+			last = now
+		}
+		mu.Unlock()
+		if raised {
+			return
+		}
+		// The item is the only record of what the bound held back, so a
+		// delivery that failed keeps the day's slot and is logged rather than
+		// dropped (gt-4ty22).
+		if err := d.escalateAlertSeverity("low", key, "landing_worker", message); err != nil {
+			d.logger.Printf("landing_worker: %s: the follow-up backpressure item was not raised: %v", rigName, err)
+		}
+	}
 }
 
 // rigOMQueueEnabled is landing.om_queue from the rig's own settings/config.json
