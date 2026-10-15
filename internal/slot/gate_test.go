@@ -8,15 +8,24 @@ import (
 	"github.com/jonboulle/clockwork"
 )
 
-// TestDockerRmArgs pins the exact argv dockerCLI.Remove hands docker. -v is
+// TestDockerRmArgs pins both argv shapes dockerCLI.Remove hands docker. -v is
 // what removes a reaped container's anonymous volumes (the Dolt test image
-// declares a data volume); dropping it strands one orphan volume per reap.
+// declares a data volume); dropping it strands one orphan volume per reap. It
+// is passed only for a container the gate can prove is its own debris, so the
+// other shape — the same removal without -v — is what an unlabelled lookalike
+// gets, its anonymous volume left behind rather than deleted with it
+// (gt-lsxps).
 func TestDockerRmArgs(t *testing.T) {
 	t.Parallel()
-	got := dockerRmArgs("abc123")
+	got := dockerRmArgs("abc123", RemoveOptions{Volumes: true})
 	want := []string{"rm", "-f", "-v", "abc123"}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("dockerRmArgs = %v, want %v", got, want)
+		t.Errorf("dockerRmArgs with volumes = %v, want %v", got, want)
+	}
+	got = dockerRmArgs("abc123", RemoveOptions{})
+	want = []string{"rm", "-f", "abc123"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("dockerRmArgs without volumes = %v, want %v", got, want)
 	}
 }
 

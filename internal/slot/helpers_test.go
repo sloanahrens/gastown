@@ -30,8 +30,15 @@ type fakeRuntime struct {
 	listErr   error
 	listFn    func(call int) ([]string, error)
 	listCalls int
-	removed   []string
+	removed   []removal
 	removeErr error
+}
+
+// removal is one Remove call the fake answered: the container and whether the
+// gate asked for its anonymous volumes.
+type removal struct {
+	id      string
+	volumes bool
 }
 
 func (r *fakeRuntime) List() ([]string, error) {
@@ -44,13 +51,13 @@ func (r *fakeRuntime) List() ([]string, error) {
 	return append([]string(nil), r.lines...), r.listErr
 }
 
-func (r *fakeRuntime) Remove(id string) error {
+func (r *fakeRuntime) Remove(id string, opts RemoveOptions) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.removeErr != nil {
 		return r.removeErr
 	}
-	r.removed = append(r.removed, id)
+	r.removed = append(r.removed, removal{id: id, volumes: opts.Volumes})
 	return nil
 }
 
@@ -72,10 +79,23 @@ func (r *fakeRuntime) failList(err error) {
 	r.lines, r.listErr, r.listFn = nil, err, nil
 }
 
+// removedIDs is the id of every removal, in the order the gate made them.
 func (r *fakeRuntime) removedIDs() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]string(nil), r.removed...)
+	ids := make([]string, len(r.removed))
+	for i, rm := range r.removed {
+		ids[i] = rm.id
+	}
+	return ids
+}
+
+// removals is every Remove call as the gate made it, so a test can assert on
+// the -v the argv would have carried.
+func (r *fakeRuntime) removals() []removal {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]removal(nil), r.removed...)
 }
 
 func (r *fakeRuntime) calls() int {

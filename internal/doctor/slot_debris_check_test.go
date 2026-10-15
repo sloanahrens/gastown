@@ -30,7 +30,7 @@ type fakeContainers struct {
 
 func (f *fakeContainers) List() ([]string, error) { return f.lines, f.listErr }
 
-func (f *fakeContainers) Remove(id string) error {
+func (f *fakeContainers) Remove(id string, _ slot.RemoveOptions) error {
 	if f.removeErr != nil {
 		return f.removeErr
 	}
