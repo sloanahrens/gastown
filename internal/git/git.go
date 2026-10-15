@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -4328,6 +4329,12 @@ type UncommittedWorkStatus struct {
 	// consumers never do).
 	StagedOnly []string
 
+	// sourceRoots lists the coverage/ and .cache/ directories (as
+	// runtimeArtifactRoot spells them) that hold tracked source files. A
+	// non-source file under one is a fixture beside that source, not
+	// generated output, so it is not a runtime artifact (gt-zjhyo).
+	sourceRoots []string
+
 	indexSkewComputed bool
 	indexSkewFiles    []string
 }
@@ -4455,12 +4462,31 @@ func isGasTownRuntimePath(path string) bool {
 // RuntimeArtifactPathspecs returns deduplicated git pathspecs for runtime
 // artifacts in paths. Callers can pass the result to git reset after git add
 // to keep generated state out of safety-net commits.
+//
+// A coverage/ or .cache/ directory that also holds a source file named in paths
+// is not handed over whole: resetting it would unstage that source. The
+// artifact gets the shortest directory below it that holds no such source, or
+// its own path, so coverage/lcov-report/ style output still costs one pathspec.
 func RuntimeArtifactPathspecs(paths []string) []string {
+	var sources []string
+	for _, f := range paths {
+		f = normalizeArtifactPath(f)
+		if isSourceCodePath(f) && !isGasTownRuntimePath(f) {
+			sources = append(sources, f)
+		}
+	}
+
 	seen := make(map[string]bool)
 	var pathspecs []string
 	for _, f := range paths {
 		root, ok := runtimeArtifactRoot(f)
-		if !ok || seen[root] {
+		if !ok {
+			continue
+		}
+		if isSourceBearableRoot(root) && holdsSource(root, sources) {
+			root = narrowArtifactRoot(normalizeArtifactPath(f), root, sources)
+		}
+		if seen[root] {
 			continue
 		}
 		seen[root] = true
@@ -4469,12 +4495,64 @@ func RuntimeArtifactPathspecs(paths []string) []string {
 	return pathspecs
 }
 
+func normalizeArtifactPath(path string) string {
+	return strings.TrimPrefix(filepath.ToSlash(strings.ReplaceAll(path, "\\", "/")), "./")
+}
+
+// holdsSource reports whether any of sources lies under the directory dir ("a/b/").
+func holdsSource(dir string, sources []string) bool {
+	for _, s := range sources {
+		if strings.HasPrefix(s, dir) {
+			return true
+		}
+	}
+	return false
+}
+
+// narrowArtifactRoot is the pathspec for artifact path inside root, a directory
+// that also holds source: the shortest directory between them with no source
+// under it, else path itself.
+func narrowArtifactRoot(path, root string, sources []string) string {
+	rest := strings.Split(strings.TrimPrefix(path, root), "/")
+	dir := root
+	for _, part := range rest[:len(rest)-1] {
+		dir += part + "/"
+		if !holdsSource(dir, sources) {
+			return dir
+		}
+	}
+	return path
+}
+
+// isSourceBearableRoot reports whether root is a coverage/ or .cache/ directory,
+// the only roots runtimeArtifactRoot lets source files live in.
+func isSourceBearableRoot(root string) bool {
+	if !strings.HasSuffix(root, "/") {
+		return false
+	}
+	base := filepath.Base(strings.TrimSuffix(root, "/"))
+	return base == "coverage" || base == ".cache"
+}
+
 // RuntimeArtifactPaths returns deduplicated pathspecs for runtime artifacts in the
 // current uncommitted work. Callers can pass the result to git reset after git add
 // to keep generated state out of safety-net commits.
 func (s *UncommittedWorkStatus) RuntimeArtifactPaths() []string {
-	paths := append(append([]string{}, s.ModifiedFiles...), s.UntrackedFiles...)
+	var paths []string
+	for _, f := range append(append([]string{}, s.ModifiedFiles...), s.UntrackedFiles...) {
+		// Source files stay in the list: they decide how far a pathspec may reach.
+		if s.isRuntimeArtifact(f) || !isGasTownRuntimePath(f) {
+			paths = append(paths, f)
+		}
+	}
 	return RuntimeArtifactPathspecs(paths)
+}
+
+// isRuntimeArtifact is isGasTownRuntimePath for a path in this status: a file
+// under a coverage/ or .cache/ directory that holds tracked source is kept.
+func (s *UncommittedWorkStatus) isRuntimeArtifact(path string) bool {
+	root, ok := runtimeArtifactRoot(path)
+	return ok && !slices.Contains(s.sourceRoots, root)
 }
 
 // NonRuntimePaths returns uncommitted paths that are not covered by the runtime
@@ -4484,7 +4562,7 @@ func (s *UncommittedWorkStatus) NonRuntimePaths() []string {
 	var paths []string
 	paths = append(paths, s.UnmergedFiles...)
 	for _, f := range append(append([]string{}, s.ModifiedFiles...), s.UntrackedFiles...) {
-		if !isGasTownRuntimePath(f) {
+		if !s.isRuntimeArtifact(f) {
 			paths = append(paths, f)
 		}
 	}
@@ -4525,13 +4603,13 @@ func (s *UncommittedWorkStatus) CleanExcludingRuntime() bool {
 	}
 
 	for _, f := range s.ModifiedFiles {
-		if !isGasTownRuntimePath(f) {
+		if !s.isRuntimeArtifact(f) {
 			return false
 		}
 	}
 
 	for _, f := range s.UntrackedFiles {
-		if !isGasTownRuntimePath(f) {
+		if !s.isRuntimeArtifact(f) {
 			return false
 		}
 	}
@@ -4559,13 +4637,13 @@ func (s *UncommittedWorkStatus) CleanExcludingRuntimeAndIndexSkew(g IndexSkewCla
 	}
 
 	for _, f := range s.ModifiedFiles {
-		if !isGasTownRuntimePath(f) && !skew[f] {
+		if !s.isRuntimeArtifact(f) && !skew[f] {
 			return false
 		}
 	}
 
 	for _, f := range s.UntrackedFiles {
-		if !isGasTownRuntimePath(f) {
+		if !s.isRuntimeArtifact(f) {
 			return false
 		}
 	}
@@ -4805,6 +4883,7 @@ func (g *Git) checkUncommittedWork(unpushedCommits func() (int, error)) (*Uncomm
 	status.UntrackedFiles = gitStatus.Untracked
 	status.UnmergedFiles = gitStatus.Unmerged
 	status.StagedOnly = gitStatus.StagedOnly
+	status.sourceRoots = g.trackedSourceRoots(append(append([]string{}, status.ModifiedFiles...), status.UntrackedFiles...))
 
 	// Check stashes
 	stashCount, err := g.StashCount()
@@ -4829,6 +4908,33 @@ func (g *Git) checkUncommittedWork(unpushedCommits func() (int, error)) (*Uncomm
 	status.UnpushedCommits = unpushed
 
 	return status, nil
+}
+
+// trackedSourceRoots returns the coverage/ and .cache/ artifact roots of paths
+// that hold a tracked source file. A failed listing counts as holding source:
+// a wrong "yes" surfaces a file as uncommitted work, a wrong "no" loses a fixture.
+func (g *Git) trackedSourceRoots(paths []string) []string {
+	var roots []string
+	checked := make(map[string]bool)
+	for _, f := range paths {
+		root, ok := runtimeArtifactRoot(f)
+		if !ok || checked[root] || !isSourceBearableRoot(root) {
+			continue
+		}
+		checked[root] = true
+		out, err := g.runOutput("ls-files", "-z", "--", root)
+		if err != nil {
+			roots = append(roots, root)
+			continue
+		}
+		for _, tracked := range strings.Split(out, "\x00") {
+			if isSourceCodePath(tracked) {
+				roots = append(roots, root)
+				break
+			}
+		}
+	}
+	return roots
 }
 
 // BranchPushedToRemote checks if a branch has been pushed to the remote.
