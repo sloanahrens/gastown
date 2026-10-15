@@ -2850,3 +2850,55 @@ func TestCleanupStaleBranches_KeepsBranchWhenOriginIsUnreachable(t *testing.T) {
 		t.Errorf("branches after gc = %v, want %s kept", left, branch)
 	}
 }
+
+// A removal refused because the operator's shell is inside the worktree must
+// change nothing: the agent bead is not reset to "nuked" and the hooked work
+// bead is not released, or the work could be redispatched while the worktree
+// is still on disk (gt-m31te).
+func TestRemoveWithOptions_ShellInWorktreeLeavesBeadsUntouched(t *testing.T) {
+	t.Parallel()
+	mgr, _, bd, added, _ := canonicalWithPolecats(t, true, "toast")
+	mgr.getwd = func() (string, error) { return added["toast"].ClonePath, nil }
+	agentID := mgr.agentBeadID("toast")
+	bd.Seed(beads.Issue{ID: "gt-work1", Title: "work", Status: "in_progress", Assignee: mgr.assigneeID("toast")})
+	_, before, err := beads.GetAgentBead(bd, agentID)
+	if err != nil {
+		t.Fatalf("GetAgentBead before: %v", err)
+	}
+
+	err = mgr.RemoveWithOptions("toast", RemoveOptions{Force: true, Nuclear: true})
+	if !errors.Is(err, ErrShellInWorktree) {
+		t.Fatalf("RemoveWithOptions with the shell in the worktree = %v, want ErrShellInWorktree", err)
+	}
+
+	_, after, err := beads.GetAgentBead(bd, agentID)
+	if err != nil {
+		t.Fatalf("GetAgentBead after: %v", err)
+	}
+	if after.AgentState != before.AgentState || after.HookBead != before.HookBead {
+		t.Errorf("agent bead after refusal = state %q hook %q, want state %q hook %q",
+			after.AgentState, after.HookBead, before.AgentState, before.HookBead)
+	}
+	work, err := bd.Show("gt-work1")
+	if err != nil {
+		t.Fatalf("show work bead: %v", err)
+	}
+	if work.Status != "in_progress" || work.Assignee != mgr.assigneeID("toast") {
+		t.Errorf("work bead after refusal = status %q assignee %q, want in_progress and %q",
+			work.Status, work.Assignee, mgr.assigneeID("toast"))
+	}
+	if _, statErr := os.Stat(added["toast"].ClonePath); statErr != nil {
+		t.Errorf("worktree gone after a refused removal: %v", statErr)
+	}
+}
+
+// SelfNuke is the polecat deleting its own worktree from inside it: the shell
+// check is skipped and the removal goes ahead.
+func TestRemoveWithOptions_SelfNukeIgnoresShellInWorktree(t *testing.T) {
+	t.Parallel()
+	mgr, _, _, added, _ := canonicalWithPolecats(t, true, "toast")
+	mgr.getwd = func() (string, error) { return added["toast"].ClonePath, nil }
+	if err := mgr.RemoveWithOptions("toast", RemoveOptions{Force: true, Nuclear: true, SelfNuke: true}); err != nil {
+		t.Fatalf("self-nuke from inside the worktree: %v", err)
+	}
+}

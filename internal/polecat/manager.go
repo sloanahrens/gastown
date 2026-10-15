@@ -186,6 +186,10 @@ type Manager struct {
 	// beforePolecatLock, when set, runs as lockPolecat is about to wait on a
 	// polecat's lock, so a test can see a caller reach the wait.
 	beforePolecatLock func(name string)
+	// getwd is the process working directory the shell check compares against
+	// the worktree; nil means os.Getwd. A test sets it instead of moving the
+	// whole process with a chdir.
+	getwd func() (string, error)
 	// clock paces the Dolt retry backoff; nil is the real clock.
 	clock clockwork.Clock
 	// diskSpace reports the free space at a path; nil means
@@ -1411,6 +1415,35 @@ func (m *Manager) RemoveWithOptions(name string, opts RemoveOptions) (retErr err
 	return m.removeWithOptionsLocked(name, opts)
 }
 
+// CheckShellOutsideWorktree refuses (ErrShellInWorktree) when this process's
+// working directory is inside the polecat's worktree, which removing would
+// leave the caller's shell in a deleted directory. It fails closed when the
+// paths cannot be resolved. A polecat deleting its own worktree (gt done)
+// skips it through RemoveOptions.SelfNuke: its session is killed right after,
+// so the broken shell is harmless.
+// See: https://github.com/steveyegge/gastown/issues/942
+func (m *Manager) CheckShellOutsideWorktree(name string) error {
+	getwd := m.getwd
+	if getwd == nil {
+		getwd = os.Getwd
+	}
+	cwd, cwdErr := getwd()
+	if cwdErr != nil {
+		return nil
+	}
+	cwdAbs, absErr1 := filepath.Abs(cwd)
+	cloneAbs, absErr2 := filepath.Abs(m.clonePath(name))
+	polecatAbs, absErr3 := filepath.Abs(m.polecatDir(name))
+	if absErr1 != nil || absErr2 != nil || absErr3 != nil {
+		return fmt.Errorf("cannot verify shell safety: failed to resolve paths")
+	}
+	if strings.HasPrefix(cwdAbs, cloneAbs) || strings.HasPrefix(cwdAbs, polecatAbs) {
+		return fmt.Errorf("%w: your shell is in %s\n\nPlease cd elsewhere first, then retry:\n  cd ~/gt\n  gt polecat nuke %s/%s --force",
+			ErrShellInWorktree, cwd, m.rig.Name, name)
+	}
+	return nil
+}
+
 func (m *Manager) removeWithOptionsLocked(name string, opts RemoveOptions) error {
 	if !m.exists(name) {
 		return ErrPolecatNotFound
@@ -1459,6 +1492,16 @@ func (m *Manager) removeWithOptionsLocked(name string, opts RemoveOptions) error
 		}
 	}
 
+	// A refused removal must change nothing, so the shell check runs before the
+	// agent bead is reset and the work beads are released: otherwise a refusal
+	// leaves a "nuked" agent bead and an open, unassigned work bead that can be
+	// redispatched while the worktree is still on disk.
+	if !opts.SelfNuke {
+		if err := m.CheckShellOutsideWorktree(name); err != nil {
+			return err
+		}
+	}
+
 	// Reset agent bead FIRST, before any filesystem operations.
 	// This prevents a race where a concurrent sling allocates the same name,
 	// sets hook_bead, and then has it cleared by this cleanup. By resetting
@@ -1478,31 +1521,6 @@ func (m *Manager) removeWithOptionsLocked(name string, opts RemoveOptions) error
 	// Without this, beads remain assigned to a ghost polecat (status in_progress,
 	// assignee set) after removal, permanently stuck with no one working on them.
 	m.unassignWorkBeads(name, opts.Judged)
-
-	// Check if user's shell is cd'd into the worktree (prevents broken shell)
-	// This check runs unless selfNuke=true (polecat deleting its own worktree).
-	// When a polecat calls `gt done`, it's inside its worktree by design - the session
-	// will be killed immediately after, so breaking the shell is expected and harmless.
-	// See: https://github.com/steveyegge/gastown/issues/942
-	if !opts.SelfNuke {
-		cwd, cwdErr := os.Getwd()
-		if cwdErr == nil {
-			// Normalize paths for comparison
-			cwdAbs, absErr1 := filepath.Abs(cwd)
-			cloneAbs, absErr2 := filepath.Abs(clonePath)
-			polecatAbs, absErr3 := filepath.Abs(polecatDir)
-
-			if absErr1 != nil || absErr2 != nil || absErr3 != nil {
-				// If we can't resolve paths, refuse to nuke for safety
-				return fmt.Errorf("cannot verify shell safety: failed to resolve paths")
-			}
-
-			if strings.HasPrefix(cwdAbs, cloneAbs) || strings.HasPrefix(cwdAbs, polecatAbs) {
-				return fmt.Errorf("%w: your shell is in %s\n\nPlease cd elsewhere first, then retry:\n  cd ~/gt\n  gt polecat nuke %s/%s --force",
-					ErrShellInWorktree, cwd, m.rig.Name, name)
-			}
-		}
-	}
 
 	// Best-effort: Push the polecat's branch to remote before removing the worktree.
 	// This preserves committed work that hasn't been pushed yet — without this,

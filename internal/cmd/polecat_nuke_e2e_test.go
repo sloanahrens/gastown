@@ -303,3 +303,49 @@ func TestNukeHandsThePreRemovalVerdictToRemoval(t *testing.T) {
 		t.Errorf("calls = %v, want the comment last", releaser.calls)
 	}
 }
+
+// A nuke run from a shell inside the polecat's worktree is refused before it
+// changes anything: no session is stopped, no bead is read or released, and the
+// sandbox stays. Removal's own shell check came after the release, so the bead
+// went back to open while the worktree was still on disk (gt-m31te).
+func TestNukeFromInsideTheWorktreeRefusesBeforeTouchingAnything(t *testing.T) {
+	t.Parallel()
+	f := newNukeE2E(t)
+
+	releaser := &recordingReleaser{
+		fakeWorkReleaser: &fakeWorkReleaser{
+			beads: map[string][2]string{nukeE2EBead: {"hooked", nukeE2EAgent}},
+		},
+		sandboxGone: func() bool { return false },
+	}
+	sessions := &noSession{}
+	r := &rig.Rig{Name: nukeE2ERig, Path: f.rigPath}
+	mgr := polecat.NewManagerWithStore(r, nil, nil, townRegistry(), f.store)
+	err := nukePolecatFullWithOptions(nukeE2EPolecat, nukeE2ERig, mgr, r, nukePolecatOptions{
+		Deps: &nukeDeps{
+			Sessions:      sessions,
+			Releaser:      releaser,
+			SurvivingWork: func(string) (string, error) { return "", nil },
+			MoleculeBeads: f.store,
+			// The refusal the Manager's check gives for a shell in the
+			// worktree, without moving the test process there.
+			ShellCheck: func(string) error { return polecat.ErrShellInWorktree },
+		},
+	})
+
+	if !errors.Is(err, polecat.ErrShellInWorktree) {
+		t.Fatalf("nuke from inside the worktree = %v, want ErrShellInWorktree", err)
+	}
+	if sessions.stops != 0 {
+		t.Errorf("session stops = %d, want 0: a refused nuke must not end the session", sessions.stops)
+	}
+	if len(releaser.calls) != 0 {
+		t.Errorf("bd calls = %v, want none: a refused nuke must not read or release the hooked bead", releaser.calls)
+	}
+	if got := releaser.beads[nukeE2EBead]; got != [2]string{"hooked", nukeE2EAgent} {
+		t.Errorf("hooked bead = %v, want it untouched", got)
+	}
+	if _, statErr := os.Stat(f.polecatAt); statErr != nil {
+		t.Errorf("polecat sandbox gone after a refused nuke: %v", statErr)
+	}
+}
