@@ -402,6 +402,16 @@ func tailSHA7(sha string) string {
 	return sha
 }
 
+// Close releases what the source holds open between polls: the journal
+// connection a persistent read stands on. A journal with nothing to release —
+// bd per poll, or a test's stub — has no Close and nothing happens.
+func (s *eventsSource) Close() error {
+	if c, ok := s.journal.(interface{ Close() error }); ok {
+		return c.Close()
+	}
+	return nil
+}
+
 func (s *eventsSource) Poll() []tailLine {
 	now := s.now()
 	s.pollIssues = nil

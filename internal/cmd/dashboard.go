@@ -167,10 +167,13 @@ func runDashboard(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	hub, err := newDashboardHub(townRoot, cutoff, loc, dashboardSpendCmd)
+	hub, closeSources, err := newDashboardHub(townRoot, cutoff, loc, dashboardSpendCmd)
 	if err != nil {
 		return err
 	}
+	// The feed's journal connections are held for the server's lifetime, and
+	// handed back when it ends with it (gt-jw9sr).
+	defer closeSources()
 	ln, inherited, err := dashboardListener(addr, os.Getenv(dashboardListenFDEnv))
 	if err != nil {
 		return err
@@ -233,8 +236,10 @@ func dashboardCloudChecksPath(townRoot string) string {
 	return filepath.Join(townRoot, ".runtime", "cloud-check", "status.json")
 }
 
-// newDashboardHub wires a hub to the readers gt tail -f uses.
-func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string) (*dashboard.Hub, error) {
+// newDashboardHub wires a hub to the readers gt tail -f uses. The returned
+// function releases the connections the feed holds open; the caller runs it
+// when the server stops.
+func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string) (*dashboard.Hub, func(), error) {
 	beadReads := openTailBeads(townRoot)
 	rigOfBead := landingRig(townRoot)
 	// The deploy block reads the same repos through the same viewer client as
@@ -247,7 +252,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		rigNames: knownRigNames, journalFor: openTailJournal, beads: beadReads, deploys: deploys,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	view := newTailView(loc, tailViewOptions{
 		gitUser: tailGitUser(townRoot),
@@ -337,7 +342,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 			return tr
 		},
 		LoadSample: loads.append,
-	}), nil
+	}), func() { closeTailSources(sources) }, nil
 }
 
 // dashboardDeploys builds the deploy tracker the Landings pane reads: the

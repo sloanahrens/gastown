@@ -228,6 +228,9 @@ func runTail(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	// The follow run's journal connections live as long as the run, and are
+	// handed back when it returns (gt-jw9sr).
+	defer closeTailSources(sources)
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var tick <-chan time.Time
@@ -803,6 +806,17 @@ type tailLine struct {
 // and never stops the stream.
 type tailSource interface {
 	Poll() []tailLine
+}
+
+// closeTailSources releases what the sources hold open between polls — an
+// events source's journal connection (gt-jw9sr). A viewer that stops closes
+// them rather than leaving a Dolt session to the process's exit.
+func closeTailSources(sources []tailSource) {
+	for _, s := range sources {
+		if c, ok := s.(interface{ Close() error }); ok {
+			_ = c.Close()
+		}
+	}
 }
 
 // The kinds gt tail merges, in the order ties print.
