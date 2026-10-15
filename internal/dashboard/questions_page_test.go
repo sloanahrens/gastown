@@ -82,7 +82,7 @@ func TestQuestionCardCarriesTheAnswerPath(t *testing.T) {
 		`if (r.recommended) c.append(el("div", "qrec", "Recommended: " + r.recommended));`,
 		`if ((r.held || []).length) c.append(el("div", "qheld", "Held: " + r.held.join(", ")));`,
 		`el("span", "qstate", r.state === "answered" ? "answered, overseer acting" : "awaiting you")`,
-		`c.append(el("div", "qcmd", 'bd comments add ' + r.id + ' "<answer>"'));`,
+		`c.append(el("div", "qcmd", 'gt answer ' + r.id + ' "<answer>"'));`,
 	} {
 		if !strings.Contains(draw, want) {
 			t.Errorf("questionCard has no %q", want)

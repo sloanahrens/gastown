@@ -59,6 +59,10 @@ func newAttentionFixture(t *testing.T, now time.Time) *attentionFixture {
 		bdLatency:   func(context.Context) (time.Duration, error) { return 0, nil },
 		refusals:    func() ([]attention.Refusal, error) { return nil, nil },
 		refusalBead: func(context.Context, string, string) (*beads.Issue, error) { return nil, nil },
+		questions: questionReads{
+			list:     func(context.Context) ([]*beads.Issue, error) { return nil, nil },
+			comments: func(context.Context, string) ([]beads.Comment, error) { return nil, nil },
+		},
 
 		landingState:  func(string) landingState { return landingState{} },
 		readyToLand:   func(context.Context, string) (readyQueue, error) { return readyQueue{}, nil },

@@ -1825,8 +1825,8 @@ const QUESTION_OLDEST_SEC = 4 * 3600;
 //
 // Every cell goes through el(), which writes textContent: the question and the
 // recommended answer are the overseer's own words, and a tag in them shows as
-// that text and never as markup. The pane writes nothing — the answer is a
-// comment on the bead, from a terminal.
+// that text and never as markup. The pane writes nothing — the answer is gt answer,
+// a comment on the bead, from a terminal.
 function renderQuestions(s) {
   const box = $("questions"), note = $("questionsnote");
   box.replaceChildren();
@@ -1866,7 +1866,7 @@ function questionCard(r) {
   if (r.recommended) c.append(el("div", "qrec", "Recommended: " + r.recommended));
   if ((r.held || []).length) c.append(el("div", "qheld", "Held: " + r.held.join(", ")));
   if (r.malformed) c.append(el("div", "badc", "the bead's description has no question and recommended answer"));
-  c.append(el("div", "qcmd", 'bd comments add ' + r.id + ' "<answer>"'));
+  c.append(el("div", "qcmd", 'gt answer ' + r.id + ' "<answer>"'));
   return c;
 }
 

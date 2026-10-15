@@ -163,6 +163,9 @@ type attentionCache struct {
 	state         attention.State
 	reworkNotes   map[string]reworkNote
 	diskWarnBeats int
+	// repeatedAt is when each repeating item (attention.Repeats) was last
+	// said. It is memory only: after a restart an item's clock starts again.
+	repeatedAt map[string]time.Time
 }
 
 // reworkNote is one rework bead's cached rejection count, keyed by the
@@ -256,6 +259,13 @@ type attentionSources struct {
 	// diskWarnBeats is how many consecutive ticks host.disk_warn has held,
 	// carried across ticks by the daemon. attentionTick updates it.
 	diskWarnBeats int
+
+	// questions is the overseer-question collectors' read of the town
+	// database (attention_questions.go).
+	questions questionReads
+	// repeatedAt is when each repeating item was last said, carried across
+	// ticks by the daemon. attentionTick updates it.
+	repeatedAt map[string]time.Time
 }
 
 // writeAttention is the heartbeat step after townhealth (gt-vsct7.2): it runs
@@ -292,13 +302,14 @@ func (d *Daemon) writeAttention() {
 		src.reworkNotes = cache.reworkNotes
 	}
 	src.diskWarnBeats = cache.diskWarnBeats
+	src.repeatedAt = cache.repeatedAt
 	tips, err := readDirectPushTips(d.config.TownRoot)
 	if err != nil {
 		d.logger.Printf("attention: reading %s: %v", tipsFileName, err)
 	}
 	src.tips = &tips
 	state := d.attentionTick(ctx, src, prev, acks, now)
-	d.lastAttention = &attentionCache{state: state, reworkNotes: src.reworkNotes, diskWarnBeats: src.diskWarnBeats}
+	d.lastAttention = &attentionCache{state: state, reworkNotes: src.reworkNotes, diskWarnBeats: src.diskWarnBeats, repeatedAt: src.repeatedAt}
 	if len(src.tips.Rigs) == 0 {
 		return
 	}
@@ -326,13 +337,17 @@ func (d *Daemon) attentionTick(ctx context.Context, src *attentionSources, prev 
 	res := attention.Reconcile(prev, observed, acks, now)
 	beats, promoted := diskWarnPromotion(res.State, src.diskWarnBeats, now)
 	res.Events = append(res.Events, promoted...)
+	repeatedAt, repeats := attention.Repeats(res.State, res.Events, src.repeatedAt, now)
+	res.Events = append(res.Events, repeats...)
 	if err := attention.AppendEvents(d.config.TownRoot, res.Events); err != nil {
 		d.logger.Printf("attention: appending %s: %v", attention.EventsFileName, err)
 		return prev
 	}
-	// The count advances only once its events are durable, so a failed append
-	// re-derives the promotion on the next tick instead of skipping it.
+	// The count and the repeat clocks advance only once their events are
+	// durable, so a failed append re-derives the promotion and the repeat on
+	// the next tick instead of skipping them.
 	src.diskWarnBeats = beats
+	src.repeatedAt = repeatedAt
 	// One line per transition, and nothing on a tick with no change: the line
 	// is the signal, not a per-beat heartbeat. It says what the append just
 	// made durable, so the tick that delivered nothing says nothing here.
@@ -428,7 +443,7 @@ func prevOfKind(prev attention.State, kind attention.Kind) []attention.Item {
 // collectors is the queue's collector set, in the order they run. Each later
 // bead (gt-vsct7.4, .5, .6) adds its checks by appending entries here.
 func (s *attentionSources) collectors() []attentionCollector {
-	return []attentionCollector{
+	return append([]attentionCollector{
 		{kind: attention.KindRedMain, collect: s.collectRedMain},
 		{kind: attention.KindEscalation, collect: s.collectEscalations},
 		{kind: attention.KindRejectedTwice, collect: s.collectRejectedTwice},
@@ -447,7 +462,7 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindHostDisk, collect: s.collectHostDisk},
 		{kind: attention.KindHostMem, collect: s.collectHostMem},
 		{kind: attention.KindHostDocker, collect: s.collectHostDocker},
-	}
+	}, s.questionCollectors()...)
 }
 
 // attentionSources builds the production reads. The bead lists go through the
@@ -465,6 +480,7 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 		s.host = systemHostProbes{townRoot: d.config.TownRoot}
 	}
 	s.landingRigs = d.attentionLandingRigs
+	s.questions = d.productionQuestionReads()
 	s.redMain = func(ctx context.Context, rig string) ([]*beads.Issue, error) {
 		return d.rigWorkBeads(rig).List(beads.ListOptions{
 			Status: "open", Label: landworker.LabelRedMain, Priority: -1, Limit: 0,

@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/question"
 )
 
 // The Deep review panel: when each of the review's schedules is next due, or
@@ -293,7 +294,7 @@ func (r *dashDeepReviewReader) digest(id, label string) string {
 // deepReviewField is a string the panel draws: one line, control and invisible
 // format characters gone, capped at deepReviewFieldMax runes.
 func deepReviewField(s string) string {
-	return capRunes(questionField(s), deepReviewFieldMax)
+	return question.CapRunes(question.Field(s), deepReviewFieldMax)
 }
 
 // deepReviewRow is one run bead as the panel draws it, apart from its digest.
