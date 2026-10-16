@@ -115,17 +115,17 @@ func TestUsagePanelSetsNoMarkup(t *testing.T) {
 }
 
 // The Deep reviews table shows what a run's tokens bought: the findings the
-// Deep review pane counted for the same bead, and the uncached tokens per
-// finding. The two lists come from different readers, so the page joins them by
-// bead id and does no new read.
+// Deep review block's reader counted for the same bead, and the uncached tokens
+// per finding. The two lists come from different readers, so the page joins
+// them by bead id and does no new read.
 func TestUsagePanelJoinsDeepReviewFindings(t *testing.T) {
 	t.Parallel()
 
 	draw := pageFunc(t, "renderUsage")
 	for _, want := range []string{
-		// The join: the Deep review pane's rows keyed by their id, read off the
+		// The join: the Deep review block's runs keyed by their id, read off the
 		// same state the Usage payload rides in.
-		`const found = new Map(((s.deepreview && s.deepreview.rows) || []).map(r => [r.id, r.findings]));`,
+		`const found = new Map(((s.deepreview && s.deepreview.runs) || []).map(r => [r.id, r.findings]));`,
 		`const f = found.get(r.bead);`,
 		`["Findings", 1], ["Tokens per finding", 1]`,
 		// Findings: the count, and "-" for a run the Deep review pane does not list.
@@ -150,8 +150,8 @@ func TestUsagePanelDeepReviewColumnsHandleMissingAndZero(t *testing.T) {
 	draw := pageFunc(t, "renderUsage")
 	// No deep review in the state, or one that carried no rows, joins to an
 	// empty map: every run then draws "-" in both columns.
-	if !strings.Contains(draw, `(s.deepreview && s.deepreview.rows) || []`) {
-		t.Error("renderUsage joins without guarding a missing deepreview or rows")
+	if !strings.Contains(draw, `(s.deepreview && s.deepreview.runs) || []`) {
+		t.Error("renderUsage joins without guarding a missing deepreview or runs")
 	}
 	// Unknown findings (no entry) is told apart from zero findings (an entry of
 	// 0): the first draws "-", the second draws "0".

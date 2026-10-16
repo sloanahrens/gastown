@@ -9,7 +9,7 @@ import (
 // of the per-record files the usage scan writes under
 // <town>/.runtime/usage/beads. The reader that opens those files lives with the
 // town's other readers, internal/cmd/dashboard_usage.go, for the reason the
-// Deep review panel's does; this file holds the payload's types and the
+// Deep review block's does; this file holds the payload's types and the
 // arithmetic that turns records into them, so the windows and the sort order
 // are testable without a disk.
 

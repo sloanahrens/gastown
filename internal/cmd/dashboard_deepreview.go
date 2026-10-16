@@ -14,27 +14,32 @@ import (
 	"github.com/steveyegge/gastown/internal/question"
 )
 
-// The Deep review panel: when each of the review's schedules is next due, or
-// why the town holds them, and the last ten runs with what each found. Every
-// run is a bead the daemon's scheduled_slings patrol files under the label
-// "scheduled:" plus its schedule's name, in the gastown rig's own database, so
-// that is where the reader lists; the town database holds none of them.
+// The deep review's block of the Overseer panel: one row per entry of the
+// town's daemon.patrols.scheduled_slings — the schedule's name, when it is next
+// due and the newest run it filed, with what that run found and how many beads
+// it filed — and the review's newest runs, which the Usage panel joins its own
+// records to. Every run is a bead the daemon's scheduled_slings patrol files
+// under the label "scheduled:" plus its schedule's name, in the gastown rig's
+// own database, so that is where the reader lists; the town database holds none
+// of them.
 //
-// The review runs on two schedules since it was split into a slice path and a
-// risk path (gt-32nag), and the single-schedule label its older runs carry is
-// listed with them: those runs are a season of the review's history, and they
-// leave the panel by falling past its ten rows rather than by being cut here.
+// The block reads the town's schedule list rather than a set of names baked
+// into this binary: the review's slice and risk paths were once the whole list,
+// and a schedule configured beside them was a schedule the page could not see
+// (gt-uv08f). Its names are the config's own text, so each is drawn through
+// deepReviewField.
 //
 // A read that fails is a named state rather than an empty list, because "no
 // deep review has run" and "the runs could not be read" are different things to
-// tell the operator. The panel only reads: it never files, closes or pauses a
+// tell the operator. The block only reads: it never files, closes or pauses a
 // run, and it never draws a comment's text.
 
 const (
 	// deepReviewRig is the rig the deep review runs in.
 	deepReviewRig = "gastown"
 
-	// dashDeepReviewRows is how many runs the panel draws.
+	// dashDeepReviewRows is how many of the review's newest runs the payload
+	// carries for the Usage panel to join its records to.
 	dashDeepReviewRows = 10
 
 	// deepReviewNotesMax and deepReviewLineMax bound what a run's notes cost
@@ -58,22 +63,6 @@ const (
 	deepReviewQueuedLine  = "queued:"
 	deepReviewCursorLine  = "cursor:"
 )
-
-// deepReviewPath is one of the review's schedules: the name the patrol files
-// its runs under, and the kind the pane draws those runs as.
-type deepReviewPath struct {
-	name string
-	kind string
-}
-
-// deepReviewPaths are the panel's schedules, in the order it draws their next
-// lines and breaks ties between runs filed in the same instant. The legacy
-// name is last: it is the one schedule the review ran as before the split.
-var deepReviewPaths = []deepReviewPath{
-	{name: "deep-review-slice", kind: dashboard.DeepReviewKindSlice},
-	{name: "deep-review-risk", kind: dashboard.DeepReviewKindRisk},
-	{name: deepReviewSchedule, kind: dashboard.DeepReviewKindLegacy},
-}
 
 // deepReviewLabel is the label a schedule's runs carry.
 func deepReviewLabel(name string) string { return "scheduled:" + name }
@@ -115,67 +104,122 @@ func newDashDeepReviewReader(townRoot string) *dashDeepReviewReader {
 	}
 }
 
-// read is the panel's whole reading. A list that fails is an unavailable panel;
-// a digest whose comments cannot be counted is a row that says so, since the
-// runs themselves were read.
+// read is the block's whole reading: one line per entry of the town's
+// scheduled_slings config, with that schedule's next-run text and the newest
+// run it filed, then the review's newest runs. A list that fails is an
+// unavailable block, and so is a patrols config that is there and does not
+// parse: the block says which it is rather than reading as a town that
+// configures no schedule. A digest whose comments cannot be counted is a run
+// that says so, since the runs themselves were read.
 func (r *dashDeepReviewReader) read(now time.Time) *dashboard.DeepReview {
+	out := &dashboard.DeepReview{
+		Schedules: []dashboard.DeepReviewSchedule{},
+		Runs:      []dashboard.DeepReviewRun{},
+		Paused:    deepReviewField(dispatch.RigHold(r.townRoot, deepReviewRig)),
+	}
+	// The block reads the town's own schedule list rather than a set of names
+	// baked into this binary: a schedule added to the config — a documentation
+	// audit beside the review's slice and risk paths — is a row the moment it
+	// exists, and one the config drops is a row that goes (gt-uv08f).
+	patrols, err := r.patrols()
+	if err != nil {
+		// A config that is there and does not parse is not a town with no
+		// schedules: one is a daemon.json to fix, the other a town that never
+		// ran the review, and the block must not read alike for both (gt-uv08f).
+		return &dashboard.DeepReview{Unavailable: true}
+	}
+	var slings *config.ScheduledSlingsConfig
+	if patrols != nil {
+		slings = patrols.ScheduledSlings
+	}
+	// The schedules the block reads runs from: the config's own entries, and —
+	// when the town configures none, because there is no config or the patrol
+	// carries no entries — the names this binary knows the review has run as.
+	// The runs are the review's history whatever the config now says, and the
+	// Usage panel joins its own records to them by bead id, so a town that
+	// configures no schedule must not read as a review with no runs (gt-uv08f).
+	// Only the config's own entries draw rows: a name the config does not
+	// configure is not a schedule to draw a next run for.
+	entries, drawRows := []config.ScheduledSlingEntry(nil), true
+	if slings != nil {
+		entries = slings.Entries
+	}
+	if len(entries) == 0 {
+		entries, drawRows = knownDeepReviewEntries(), false
+	}
+	// The patrol off leaves every configured schedule unrun: the rows stay,
+	// since the town configures them, and each says the patrol is off rather
+	// than counting down to a run the daemon will not dispatch.
+	enabled := slings != nil && slings.Enabled
+	digests := map[string]string{}
+	digestFor := func(issue *beads.Issue, label string) string {
+		if text, ok := digests[issue.ID]; ok {
+			return text
+		}
+		text := r.digest(issue.ID, label)
+		digests[issue.ID] = text
+		return text
+	}
+
 	// One list per schedule: bd's label filter keeps beads carrying the label,
-	// so asking once for three schedules would list only a bead carrying all
-	// three, which is none of them. A schedule whose list fails leaves the
-	// panel with a partial picture of the review, which is worse than saying
-	// the picture could not be read.
-	bySchedule := make(map[string][]*beads.Issue, len(deepReviewPaths))
-	listed := make([]dashDeepReviewRun, 0, len(deepReviewPaths))
-	for _, path := range deepReviewPaths {
-		issues, err := r.list(deepReviewLabel(path.name))
+	// so asking once for every schedule would list only a bead carrying all of
+	// them, which is none of them. A schedule whose list fails leaves the block
+	// with a partial picture of the review, which is worse than saying the
+	// picture could not be read.
+	listed := make([]*beads.Issue, 0, len(entries))
+	for _, entry := range entries {
+		issues, err := r.list(deepReviewLabel(entry.Name))
 		if err != nil {
 			return &dashboard.DeepReview{Unavailable: true}
 		}
-		bySchedule[path.name] = issues
-		for _, issue := range issues {
-			listed = append(listed, dashDeepReviewRun{issue: issue, kind: path.kind})
+		listed = append(listed, issues...)
+		if !drawRows {
+			continue
 		}
-	}
 
-	out := &dashboard.DeepReview{
-		Next:   r.next(bySchedule, now),
-		Paused: deepReviewField(dispatch.RigHold(r.townRoot, deepReviewRig)),
-		Rows:   []dashboard.DeepReviewRow{},
+		schedule := dashboard.DeepReviewSchedule{
+			Name: deepReviewField(entry.Name),
+			Rig:  deepReviewField(entry.Rig),
+			Next: deepReviewNotScheduled,
+		}
+		if !enabled {
+			schedule.Next = deepReviewPatrolOff
+		} else if interval, err := time.ParseDuration(entry.IntervalStr); err == nil && interval > 0 {
+			schedule.Next = deepReviewScheduleNext(&entry, issues, interval, now)
+		}
+		if runs := deepReviewRuns(issues); len(runs) > 0 {
+			last := deepReviewRow(runs[0])
+			last.Digest = digestFor(runs[0], last.ID)
+			schedule.Last = &last
+		}
+		out.Schedules = append(out.Schedules, schedule)
 	}
 
 	runs := deepReviewRuns(listed)
 	if len(runs) > dashDeepReviewRows {
 		runs = runs[:dashDeepReviewRows]
 	}
-	for _, run := range runs {
-		row := deepReviewRow(run)
-		row.Digest = r.digest(run.issue.ID, row.ID)
-		out.Rows = append(out.Rows, row)
+	for _, issue := range runs {
+		run := deepReviewRow(issue)
+		run.Digest = digestFor(issue, run.ID)
+		out.Runs = append(out.Runs, run)
 	}
 	return out
 }
 
-// dashDeepReviewRun is a listed run bead with the kind of schedule that filed
-// it: the label the panel listed it under is the only record of that, since the
-// label itself is the schedule's name and not the kind's.
-type dashDeepReviewRun struct {
-	issue *beads.Issue
-	kind  string
-}
-
-// deepReviewRuns are the listed runs, newest first. A bead the patrol closed
-// because its sling failed is not one: no run happened, and a row of zeros
-// would read as a clean review. A bead with no creation time that parses sorts
-// after every one that has one.
-func deepReviewRuns(listed []dashDeepReviewRun) []dashDeepReviewRun {
-	runs := make([]dashDeepReviewRun, 0, len(listed))
-	for _, run := range listed {
-		if run.issue != nil && !deepReviewSlingFailed(run.issue) {
-			runs = append(runs, run)
+// deepReviewRuns are the listed beads that are runs, newest first. A bead the
+// patrol closed because its sling failed is not one: no run happened, and a row
+// of zeros would read as a clean review. A bead with no creation time that
+// parses sorts after every one that has one.
+func deepReviewRuns(listed []*beads.Issue) []*beads.Issue {
+	runs := make([]*beads.Issue, 0, len(listed))
+	for _, issue := range listed {
+		if issue != nil && !deepReviewSlingFailed(issue) {
+			runs = append(runs, issue)
 		}
 	}
 	sort.SliceStable(runs, func(i, j int) bool {
-		a, b := beads.ParseIssueTime(runs[i].issue.CreatedAt), beads.ParseIssueTime(runs[j].issue.CreatedAt)
+		a, b := beads.ParseIssueTime(runs[i].CreatedAt), beads.ParseIssueTime(runs[j].CreatedAt)
 		switch {
 		case a.IsZero() != b.IsZero():
 			return b.IsZero()
@@ -194,35 +238,6 @@ const deepReviewSlingFailureMarker = "scheduled_slings-sling-failed"
 
 func deepReviewSlingFailed(issue *beads.Issue) bool {
 	return issue.Status == "closed" && strings.HasPrefix(issue.CloseReason, deepReviewSlingFailureMarker)
-}
-
-// next is the panel's "next run" lines, one per configured schedule: the
-// schedule's own interval from the town's config and the due logic of
-// decideScheduledSling over the runs that schedule filed. A town whose
-// scheduled_slings patrol is off or unreadable, and a town that configures no
-// deep review at all, has the one nameless line the pane drew before the
-// split; the rows show either way.
-func (r *dashDeepReviewReader) next(bySchedule map[string][]*beads.Issue, now time.Time) []dashboard.DeepReviewNext {
-	patrols, err := r.patrols()
-	if err != nil || patrols == nil || patrols.ScheduledSlings == nil || !patrols.ScheduledSlings.Enabled {
-		return []dashboard.DeepReviewNext{{Text: deepReviewNotScheduled}}
-	}
-	next := make([]dashboard.DeepReviewNext, 0, len(deepReviewPaths))
-	for _, path := range deepReviewPaths {
-		entry := scheduledSling(patrols, path.name)
-		if entry == nil {
-			continue
-		}
-		line := dashboard.DeepReviewNext{Name: path.name, Text: deepReviewNotScheduled}
-		if interval, err := time.ParseDuration(entry.IntervalStr); err == nil && interval > 0 {
-			line.Text = deepReviewScheduleNext(entry, bySchedule[path.name], interval, now)
-		}
-		next = append(next, line)
-	}
-	if len(next) == 0 {
-		return []dashboard.DeepReviewNext{{Text: deepReviewNotScheduled}}
-	}
-	return next
 }
 
 // deepReviewScheduleNext is one schedule's next-run text. An open run is
@@ -245,7 +260,23 @@ const (
 	// deepReviewGated is the next-run text of a schedule with a gate_command:
 	// the gate decides whether an interval's run happens at all.
 	deepReviewGated = "gated: runs when needed"
+	// deepReviewPatrolOff is the next-run text of every schedule in a town whose
+	// scheduled_slings patrol is disabled: the schedules are still configured,
+	// so they still draw, but nothing the interval says will be dispatched.
+	deepReviewPatrolOff = "patrol disabled"
 )
+
+// knownDeepReviewEntries are the schedules the review is known to run as, for
+// the town whose config lists none: the slice and risk paths and the legacy
+// name the runs of both carry. They feed the runs listing alone — a town that
+// configures no schedule draws no row for one.
+func knownDeepReviewEntries() []config.ScheduledSlingEntry {
+	entries := make([]config.ScheduledSlingEntry, 0, len(deepReviewModelSchedules))
+	for _, name := range deepReviewModelSchedules {
+		entries = append(entries, config.ScheduledSlingEntry{Name: name, Rig: deepReviewRig})
+	}
+	return entries
+}
 
 // deepReviewNextDue mirrors decideScheduledSling in internal/daemon, which this
 // package may not import, and answers when it would next dispatch: a bead that
@@ -297,42 +328,27 @@ func deepReviewField(s string) string {
 	return question.CapRunes(question.Field(s), deepReviewFieldMax)
 }
 
-// deepReviewRow is one run bead as the panel draws it, apart from its digest.
-func deepReviewRow(run dashDeepReviewRun) dashboard.DeepReviewRow {
-	issue := run.issue
-	row := dashboard.DeepReviewRow{
+// deepReviewRow is one run bead as the blocks draw it, apart from its digest.
+func deepReviewRow(issue *beads.Issue) dashboard.DeepReviewRun {
+	row := dashboard.DeepReviewRun{
 		ID:     deepReviewField(issue.ID),
-		Kind:   run.kind,
 		Status: dashboard.DeepReviewOpen,
 	}
 	if issue.Status == "closed" {
 		row.Status = dashboard.DeepReviewClosed
-		row.DurationSec = deepReviewDurationSec(issue)
 	}
 	deepReviewCountNotes(&row, issue.Notes)
 	return row
 }
 
-// deepReviewDurationSec is closed_at minus created_at, nil when either does
-// not parse or the close precedes the creation: a duration the bead cannot
-// support is none, not zero.
-func deepReviewDurationSec(issue *beads.Issue) *int64 {
-	created, closed := beads.ParseIssueTime(issue.CreatedAt), beads.ParseIssueTime(issue.ClosedAt)
-	if created.IsZero() || closed.IsZero() || closed.Before(created) {
-		return nil
-	}
-	sec := int64(closed.Sub(created) / time.Second)
-	return &sec
-}
-
-// deepReviewCountNotes reads a run's notes into the row's counts. The notes are
+// deepReviewCountNotes reads a run's notes into the run's counts. The notes are
 // whatever the run's agent appended, so nothing here may trust them: at most
 // deepReviewNotesMax bytes are read, at most deepReviewLineMax bytes of a line,
 // and a line that names one of the run's records but lacks its fields is
-// skipped and marks the row unparsed. So does a notes field that was cut at the
+// skipped and marks the run unparsed. So does a notes field that was cut at the
 // cap, as its counts may be short. Text that is not a record line, binary
 // included, is ignored.
-func deepReviewCountNotes(row *dashboard.DeepReviewRow, notes string) {
+func deepReviewCountNotes(row *dashboard.DeepReviewRun, notes string) {
 	if len(notes) > deepReviewNotesMax {
 		notes = notes[:deepReviewNotesMax]
 		row.Unparsed = true
@@ -357,11 +373,12 @@ func deepReviewCountNotes(row *dashboard.DeepReviewRow, notes string) {
 				row.Filed++
 			}
 		case deepReviewQueuedLine:
+			// The run's queued findings are counted by the run itself, not by
+			// this block: the line is read only for whether it is whole, which
+			// is what Unparsed tells the reader.
 			if len(args) < 4 {
 				row.Unparsed = true
-				continue
 			}
-			row.Queued++
 		case deepReviewCursorLine:
 			if len(args) < 2 {
 				row.Unparsed = true

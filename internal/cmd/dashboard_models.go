@@ -217,8 +217,8 @@ type modelRoleInputs struct {
 const deepReviewSchedule = "deep-review"
 
 // deepReviewModelSchedules are the scheduled slings the models panel reads the
-// deep-review agent from: the same three the Deep review panel lists runs for,
-// the slice and risk schedules and the legacy one they replace.
+// deep-review agent from: the slice and risk schedules and the legacy one they
+// replaced.
 var deepReviewModelSchedules = []string{"deep-review-slice", "deep-review-risk", deepReviewSchedule}
 
 // modelRoleRows is the panel's model-per-role table. Each role is read from
