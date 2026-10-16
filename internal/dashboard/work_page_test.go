@@ -392,7 +392,7 @@ func TestTheWorkRowsCannotOverflowTheirPanel(t *testing.T) {
 	if want := `const c = el("span", cls, text); if (tip) c.title = tip; tr.append(c); return c;`; !strings.Contains(pageFunc(t, "workRow"), want) {
 		t.Errorf("a seat's cell does not carry its full text: %s", want)
 	}
-	if !strings.Contains(pageFunc(t, "workRow"), `bd.title = [p.bead, p.title].filter(Boolean).join(" ")`) {
+	if !strings.Contains(pageFunc(t, "workRow"), `bd.title = [p.bead, p.title].filter(Boolean).join(" ") + (p.description ? "\n\n" + p.description : "");`) {
 		t.Error("a bead's cell does not carry the bead and its whole title, so a clipped title is lost")
 	}
 }
@@ -738,5 +738,25 @@ func TestTheWorkPanelRedrawsWhenABeadsDescriptionChanges(t *testing.T) {
 	dom.call(t, "renderWork", s)
 	if tips := beadTips(t, dom); len(tips) != 2 || !strings.HasSuffix(tips[1], "second") {
 		t.Errorf("after the description changed the bead cell hovers as %q, want it to end with the new text", tips)
+	}
+}
+
+// TestTheWorkPanelRedrawsWhenACommaMovesBetweenTitleAndDescription: the panel's
+// key must tell apart two seats whose fields join to the same text, or a
+// description edit that only moves a comma would keep the old hover (gt-noda1).
+func TestTheWorkPanelRedrawsWhenACommaMovesBetweenTitleAndDescription(t *testing.T) {
+	t.Parallel()
+
+	one := seat("gastown", "dementus", "working", "gt-noda1", "a,b", "deepseek-flash", time.Minute)
+	one["description"] = "c"
+	dom := newPageDOM(t)
+	s := workState([]any{one}, workQueueReading(1, 0, 0, 0))
+	dom.call(t, "renderWork", s)
+
+	one["title"] = "a"
+	one["description"] = "b,c"
+	dom.call(t, "renderWork", s)
+	if tips := beadTips(t, dom); len(tips) != 2 || tips[1] != "gt-noda1 a\n\nb,c" {
+		t.Errorf("after a comma moved from the title to the description the bead cell hovers as %q, want gt-noda1 a, a blank line and b,c", tips)
 	}
 }
