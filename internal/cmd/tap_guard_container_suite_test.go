@@ -474,6 +474,49 @@ func TestContainerSuiteTarget(t *testing.T) {
 	}
 }
 
+// A package argument spelled as a path under the run directory is judged
+// there, which is where go resolves it, as well as at the module root, which
+// is the reading an explicit argument has always carried: 'go -C internal
+// test ./beads/...' runs internal/beads, and the module-root reading of the
+// same argument names a package "beads" that go never starts (gt-g6yi7). A
+// spelling that is not a filesystem path — a bare import path, which go
+// resolves against the module path and refuses from any directory — keeps
+// its own reading and does not move with the directory.
+func TestContainerSuiteTargetFollowsTheRunDir(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/refinery/rig")
+	tests := []struct {
+		name      string
+		relDir    string
+		pkgArgs   []string
+		wantWhole bool
+		want      []string
+	}{
+		{"relative path under the run dir", "internal", []string{"./beads/..."}, false, []string{"internal/beads"}},
+		{"relative subpackage under the run dir", "internal/beads", []string{"./sub"}, false, []string{"internal/beads"}},
+		{"relative path up out of the container package", "internal/beads/sub", []string{".."}, false, []string{"internal/beads"}},
+		{"relative path out of the run dir, light", "internal", []string{"../internal/style/..."}, false, nil},
+		{"relative path out of the module", "internal", []string{"../../elsewhere/..."}, false, nil},
+		{"bare import path does not move with the run dir", "internal", []string{"beads"}, false, nil},
+		{"module-root spelling keeps its reading beside the resolved one", "internal", []string{"./internal/beads/..."}, false, []string{"internal/beads"}},
+		{"whole-repo wildcard under a run dir", "internal", []string{"./..."}, true, nil},
+		{"relative and bare arguments together", "internal", []string{"beads", "./daemon/..."}, false, []string{"internal/daemon"}},
+		{"relative path at the module root", ".", []string{"./internal/beads/..."}, false, []string{"internal/beads"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cwd := filepath.Join(root, filepath.FromSlash(tt.relDir))
+			wholeRepo, matched := containerSuiteTarget(tt.pkgArgs, cwd)
+			if wholeRepo != tt.wantWhole {
+				t.Errorf("containerSuiteTarget(%v, %s) wholeRepo = %v, want %v", tt.pkgArgs, tt.relDir, wholeRepo, tt.wantWhole)
+			}
+			if strings.Join(matched, ",") != strings.Join(tt.want, ",") {
+				t.Errorf("containerSuiteTarget(%v, %s) matched = %v, want %v", tt.pkgArgs, tt.relDir, matched, tt.want)
+			}
+		})
+	}
+}
+
 // cwdContainerPackages is the cwd form of the container rule: the cwd's
 // package is judged with packageArgCovers, the same rule an argument gets, so
 // the set a "go test ." from that directory reaches is the set "go test
@@ -622,6 +665,20 @@ func TestEvaluateContainerSuiteCommand_CwdStyle(t *testing.T) {
 		{"dot in a light package outside internal", "cmd/gt", "GT_TEST_DOCKER=1 go test .", false},
 		{"dot at the module root", ".", "GT_TEST_DOCKER=1 go test .", false},
 		{"dot in a container package, switch off", "internal/beads", "go test .", false},
+
+		// A package argument spelled as a path under the directory the
+		// invocation runs in names the package go runs there, not a
+		// module-root one: both of these runs test internal/beads, and the
+		// module-root reading of "./beads/..." names a package "beads" that
+		// go never starts, so they used to get through unwrapped (gt-g6yi7).
+		{"relative package arg under the run dir", "internal", "GT_TEST_DOCKER=1 go test ./beads/...", true},
+		{"relative package arg after a cd", ".", "cd internal && GT_TEST_DOCKER=1 go test ./beads/...", true},
+
+		// The module-root reading stands beside the resolved one, so the run
+		// that spells a relative path out of reach — this one would test
+		// internal/internal/beads, which is nothing — is refused as it always
+		// was, and the rule only ever blocks more.
+		{"relative package arg spelled for the module root", ".", "cd internal && GT_TEST_DOCKER=1 go test ./internal/beads/...", true},
 	}
 	for _, layout := range worktreeLayouts {
 		t.Run(layout, func(t *testing.T) {
@@ -644,8 +701,9 @@ func TestEvaluateContainerSuiteCommand_CwdStyle(t *testing.T) {
 // flag names, not in the one the hook runs in: Go chdirs on -C before it runs
 // the command, so the shell's cwd has no say in what the target tests
 // (gt-tzdpe). An explicit package argument carries its own path and keeps its
-// reading. The polecat scope rule's half of the same hole is gt-zn7ma, so
-// these rows pin the container rule alone.
+// reading, and one spelled as a path under that -C directory ("./beads/...")
+// is judged where it lands as well (gt-g6yi7). The polecat scope rule's half
+// of the same hole is gt-zn7ma, so these rows pin the container rule alone.
 func TestContainerSuiteGoTestTargetFollowsTheCDirFlag(t *testing.T) {
 	t.Parallel()
 	root := fakeModule(t, "gastown/refinery/rig")
@@ -674,6 +732,13 @@ func TestContainerSuiteGoTestTargetFollowsTheCDirFlag(t *testing.T) {
 		{"-C to the module root", container, "GT_TEST_DOCKER=1 go -C " + root + " test .", false},
 		{"-C away with the switch off", light, "go -C " + container + " test .", false},
 		{"explicit container argument read whatever -C names", light, "GT_TEST_DOCKER=1 go -C " + light + " test ./internal/beads/...", true},
+
+		// A package argument spelled as a path under the -C directory is
+		// judged there, which is where go resolves it: this run tests
+		// internal/beads, and the module-root reading of "./beads/..." names
+		// a package go never starts (gt-g6yi7).
+		{"-C dir flag with a relative package argument", root, "GT_TEST_DOCKER=1 go -C internal test ./beads/...", true},
+		{"relative argument out of the -C directory", root, "GT_TEST_DOCKER=1 go -C internal test ../internal/style/...", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
