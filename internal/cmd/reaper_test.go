@@ -365,6 +365,8 @@ func TestReaperUserInfoForNoTownIsDefaultUser(t *testing.T) {
 // default user rather than read ./settings/config.json from whatever directory
 // the command ran in, which would send that file's password to the --host the
 // reaper is pointed at (gt-1daus).
+//
+//testpolicy:allow parallel — reaperUserInfo reads the process working directory, which t.Chdir sets for the whole process
 func TestReaperUserInfoOutsideTownIgnoresCwdSettings(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "settings"), 0o755); err != nil {
@@ -374,6 +376,7 @@ func TestReaperUserInfoOutsideTownIgnoresCwdSettings(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "settings", "config.json"), []byte(settings), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	//testpolicy:allow no-chdir — the cwd is the input under test: reaperUserInfo takes no directory argument
 	t.Chdir(dir)
 	if got := reaperUserInfo(); got != doltserver.DefaultUser {
 		t.Errorf("reaperUserInfo() outside a town = %q, want %q", got, doltserver.DefaultUser)
