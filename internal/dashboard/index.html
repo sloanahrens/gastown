@@ -117,6 +117,17 @@ section>h2:hover{color:var(--text)}
 section>h2 .caret{display:inline-block;width:10px;color:var(--dim)}
 section.collapsed>:not(h2){display:none}
 section.collapsed>h2{border-bottom:0}
+/* The News pane: one line per story, the title taking what the comments link
+   leaves. Both tracks may shrink, so a long title is ellipsed rather than
+   widening the panel. */
+#news{padding-top:2px}
+.nrow{display:grid;grid-template-columns:minmax(0,1fr) max-content;gap:8px;align-items:baseline;padding:3px 0;border-top:1px solid var(--line)}
+.nrow:first-child{border-top:0}
+.nrow>*{min-width:0}
+.nrow .ntitle{color:var(--text);text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nrow .ntitle:hover{color:var(--blue);text-decoration:underline}
+.nrow .ncmt{color:var(--dim);font-size:11px;text-decoration:none;white-space:nowrap}
+.nrow .ncmt:hover{color:var(--text)}
 #forgejo{max-height:240px;overflow:auto}
 #forgejo.folded{display:none}
 .feedhead{display:flex;align-items:center;gap:6px;width:100%;background:none;border:0;padding:2px 0 3px;color:var(--dim);font:inherit;font-size:11px;letter-spacing:.04em;text-align:left;cursor:pointer}
@@ -280,6 +291,7 @@ a.hrow:hover{background:#19212b}
     </section>
   </div>
   <div class="col">
+    <section id="newssec" hidden><h2>Hacker News <span class="r" id="newsnote"></span></h2><div class="body" id="news"></div></section>
     <section><h2>Machine <span class="r" id="machnote"></span></h2><div class="body" id="machine"></div></section>
     <section><h2>Cloud <span class="r" id="cloudnote"></span></h2><div class="body" id="cloud"></div><h3 class="sub">Deploys <span class="r" id="deploysnote"></span></h3><div class="body" id="deploys"></div></section>
     <section><h2>Forgejo <span class="r" id="forgejonote"></span></h2><div class="body"><div id="forgejoacts"></div><button id="forgejofeedhead" type="button" class="feedhead" aria-controls="forgejo"></button><div id="forgejo"></div></div></section>
@@ -1201,6 +1213,51 @@ function landingTable(s, names, rows, waiting) {
   wrap.append(el("div", "k title", "landings: waiting to land first, then the ones running now and the ones failing in backoff, then the last 10 finished (newest first; hover a row for the commit and stage times)"), tbl);
   if (more) wrap.append(el("div", "empty", "and " + more + " more waiting to land — see the Queue pane's “Waiting to land” tab"));
   return wrap;
+}
+
+// The News pane draws the top Hacker News stories the hub fetched: one line
+// each, the title linking to the story and the comment count to the discussion.
+// The page never calls Hacker News itself — its CSP allows same-origin reads
+// only — so these links are the one thing here that leaves the page. A refresh
+// that failed keeps the stories it last read, dimmed, under a note saying how
+// old they are; a pane with nothing to show says why. The section is left out
+// entirely when the server sends no news, which is the pane switched off in
+// settings/config.json. Every string goes through el(), which writes
+// textContent, so a title carrying markup reads as that markup (gt-9ktrr).
+function renderNews(s) {
+  const sec = $("newssec"), box = $("news"), note = $("newsnote");
+  const f = s.news;
+  if (!f) { sec.hidden = true; box.replaceChildren(); box.classList.remove("stale"); note.textContent = ""; note.className = "r"; return; }
+  sec.hidden = false;
+  box.replaceChildren();
+  const stories = f.stories || [];
+  const stale = !!f.error;
+  box.classList.toggle("stale", stale && stories.length > 0);
+  if (!stories.length) {
+    box.append(el("div", stale ? "badc" : "empty", stale ? "unavailable: " + f.error : "no stories"));
+    note.textContent = ""; note.className = "r";
+    return;
+  }
+  for (const st of stories) {
+    const row = el("div", "nrow");
+    const link = el("a", "ntitle", st.rank + ". " + st.title);
+    link.href = st.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    row.append(link);
+    const cmt = el("a", "ncmt", st.comments + (st.comments === 1 ? " comment" : " comments"));
+    cmt.href = "https://news.ycombinator.com/item?id=" + st.id;
+    cmt.target = "_blank";
+    cmt.rel = "noopener noreferrer";
+    row.append(cmt);
+    row.title = [st.title, st.points + " points", st.comments + " comments", age(st.at) + " ago", st.domain || null].filter(Boolean).join(" · ");
+    box.append(row);
+  }
+  // The note ages the snapshot, which is what the pane's staleness turns on: a
+  // story's own age is in its hover and says nothing about the read behind it.
+  const read = f.at ? age(f.at) : null;
+  note.textContent = stale ? "stale " + read + " · " + f.error : "read " + read + " ago";
+  note.className = "r" + (stale ? " badc" : "");
 }
 
 function renderMachine(s) {
@@ -3353,7 +3410,7 @@ function drawQueueList(box, s) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderAttention(state); renderOverseer(state); renderCost(state); renderRigs(state); renderWork(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderOM(state); }
+function renderAll() { if (!state) return; renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderAttention(state); renderOverseer(state); renderCost(state); renderRigs(state); renderWork(state); renderTrend(state); renderNews(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderOM(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));
@@ -3532,7 +3589,7 @@ setInterval(() => {
   connect();
 }, WATCHDOG_MS);
 // Ages and elapsed times drift between pushes; redraw the cheap parts locally.
-setInterval(() => { if (state) { renderStrip(state); renderWork(state); renderTierSweep(state); renderForgejo(state); } }, 15000);
+setInterval(() => { if (state) { renderStrip(state); renderWork(state); renderTierSweep(state); renderForgejo(state); renderNews(state); } }, 15000);
 </script>
 </body>
 </html>

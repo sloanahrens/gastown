@@ -120,6 +120,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.Forgejo != nil {
 		start(h.cfg.ForgejoEvery, h.pollForgejo)
 	}
+	if h.cfg.News != nil {
+		start(h.cfg.NewsEvery, h.pollNews)
+	}
 	if h.cfg.Deploys != nil {
 		start(h.cfg.DeploysEvery, h.pollDeploys)
 	}
@@ -562,6 +565,20 @@ func (h *Hub) pollForgejo() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.Forgejo = f
+	h.publishLocked()
+}
+
+// pollNews reads the top Hacker News stories for the News pane. It publishes
+// without observing: the pane carries its own failures, since Hacker News being
+// slow or down is not a town condition the health pill or an alert is for.
+func (h *Hub) pollNews() {
+	n := h.cfg.News()
+	if n == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.state.News = n
 	h.publishLocked()
 }
 

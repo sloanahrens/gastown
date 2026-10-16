@@ -170,6 +170,29 @@ type TownSettings struct {
 	// Escalation is the escalation routing document:
 	// settings/config.json's "escalation" section on the two-file layout.
 	Escalation *EscalationConfig `json:"escalation,omitempty"`
+
+	// Dashboard configures gt dashboard's own panels. Its sections are the
+	// panels' switches; gt dashboard reads them when it starts.
+	Dashboard *DashboardConfig `json:"dashboard,omitempty"`
+}
+
+// DashboardConfig is gt dashboard's own settings.
+type DashboardConfig struct {
+	// News is the Hacker News pane above the Machine panel.
+	News *DashboardNewsConfig `json:"news,omitempty"`
+}
+
+// DashboardNewsConfig is the News pane's switch.
+type DashboardNewsConfig struct {
+	// Enabled turns the pane and the fetcher behind it on. Unset is on: the
+	// pane is part of the dashboard unless it is switched off.
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// NewsEnabled reports whether the Hacker News pane runs, which it does unless
+// settings/config.json turns it off.
+func (c *DashboardConfig) NewsEnabled() bool {
+	return c == nil || c.News == nil || c.News.Enabled == nil || *c.News.Enabled
 }
 
 // NewTownSettings creates a new TownSettings with defaults.
