@@ -130,6 +130,18 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 		{"wildcard leading the path", "GT_TEST_DOCKER=1 go test ./*/beads", true},
 		{"wildcard inside a subpackage of a container package", "GT_TEST_DOCKER=1 go test ./internal/beads/s*", true},
 
+		// Blocked: an argument the shell rewrites before go sees it names a
+		// package the hook cannot read from the text (gt-e40zb).
+		{"command substitution in a path element", "GT_TEST_DOCKER=1 go test ./internal/$(echo beads)", true},
+		{"backtick substitution in a path element", "GT_TEST_DOCKER=1 go test './internal/`echo beads`'", true},
+		{"variable leading an absolute path", "GT_TEST_DOCKER=1 go test $PWD/internal/beads", true},
+		{"braced variable in a path element", "GT_TEST_DOCKER=1 go test ./internal/${P}", true},
+		{"home directory prefix", "GT_TEST_DOCKER=1 go test ~/x/internal/beads", true},
+		{"another user's home directory prefix", "GT_TEST_DOCKER=1 go test ~root/x/internal/beads", true},
+		{"variable set in an earlier segment", "P=beads; GT_TEST_DOCKER=1 go test ./internal/$P", true},
+		{"variable set before an exported switch", "P=beads; export GT_TEST_DOCKER=1; go test ./internal/$P", true},
+		{"expanded argument beside a light package", "GT_TEST_DOCKER=1 go test ./internal/style $PWD/internal/beads", true},
+
 		// Allowed: a pattern the list cannot reach stays allowed — refusing it
 		// would cost a wrapped run for nothing.
 		{"partial wildcard reaching only a light package", "GT_TEST_DOCKER=1 go test ./internal/st...", false},
@@ -139,6 +151,8 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 		{"wildcard beside a light package", "GT_TEST_DOCKER=1 go test ./internal/st... ./internal/version", false},
 		{"wildcard, wrapped in gt slot run", "gt slot run --role gastown/refinery -- go test ./internal/b...", false},
 		{"wildcard, switch off", "go test ./internal/b...", false},
+		{"expanded argument, switch off", "go test ./internal/$(echo beads)", false},
+		{"expanded argument, wrapped in gt slot run", "gt slot run --role gastown/refinery -- go test $PWD/internal/beads", false},
 		{"pattern value of -skip is not a package", "GT_TEST_DOCKER=1 go test -skip 'Test*' ./internal/style", false},
 		{"pattern value of -run is not a package", "GT_TEST_DOCKER=1 go test -run 'Foo.*' ./internal/style", false},
 
@@ -742,6 +756,13 @@ func TestPackageArgWildcard(t *testing.T) {
 		{"./internal/[b]eads", true},
 		{"./internal/{beads,style}", true},
 		{"/abs/internal/b...", true},
+		{"./internal/$(echo beads)", true},
+		{"./internal/$P", true},
+		{"$PWD/internal/beads", true},
+		{"./internal/`echo beads`", true},
+		{"~/x/internal/beads", true},
+		{"~", true},
+		{"./internal/~beads", false},
 	}
 	for _, tt := range tests {
 		if got := packageArgWildcard(tt.arg); got != tt.want {

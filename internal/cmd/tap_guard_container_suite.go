@@ -591,8 +591,12 @@ func normalizeGoPackageArg(arg string) string {
 // container package (gt-d1e8c). The whole-repo spellings and the trailing
 // "/..." form of a directory are not wildcards in this sense:
 // normalizeGoPackageArg reads them.
+//
+// An argument the shell rewrites at run time is one too (shellExpandedPackageArg,
+// gt-e40zb): the hook sees "$PWD/internal/beads" or "./internal/$(echo beads)"
+// as written, and the package go is handed is whatever the shell makes of it.
 func packageArgWildcard(arg string) bool {
-	if strings.ContainsAny(arg, "*?[{") {
+	if strings.ContainsAny(arg, "*?[{") || shellExpandedPackageArg(arg) {
 		return true
 	}
 	p := strings.TrimRight(arg, "/")
@@ -600,6 +604,16 @@ func packageArgWildcard(arg string) bool {
 		return false
 	}
 	return strings.Contains(strings.TrimSuffix(p, "/..."), "...")
+}
+
+// shellExpandedPackageArg reports whether the shell rewrites a package
+// argument before go sees it: a "$" (a variable or a $(...) substitution), a
+// backtick substitution, or a leading "~" (the home directory, or another
+// user's). The hook cannot tell what such an argument becomes, so it is read as
+// a set it cannot see into rather than as the literal text, which names no
+// package on the list (gt-e40zb).
+func shellExpandedPackageArg(arg string) bool {
+	return strings.ContainsAny(arg, "$`") || strings.HasPrefix(arg, "~")
 }
 
 // packageWildcardMayReachContainerSuite reports whether a wildcard package
@@ -614,11 +628,12 @@ func packageArgWildcard(arg string) bool {
 // (packagePatternReaches). The argument is read the way every other spelling
 // is: an absolute directory by the module-relative path it names, and one
 // spelled as a path under the run directory also by the path go resolves it to
-// (packageArgsUnderRunDir). A brace expansion is not matched at all, and nor is
-// an absolute pattern whose module the guard cannot place, because the
-// wildcard may sit in the part of the path that says which tree it is.
+// (packageArgsUnderRunDir). A brace expansion is not matched at all, nor is an
+// argument the shell expands (shellExpandedPackageArg), and nor is an absolute
+// pattern whose module the guard cannot place, because the wildcard may sit in
+// the part of the path that says which tree it is.
 func packageWildcardMayReachContainerSuite(arg, cwd string) bool {
-	if strings.Contains(arg, "{") {
+	if strings.Contains(arg, "{") || shellExpandedPackageArg(arg) {
 		return true
 	}
 	placed := moduleRelativePackageArgs([]string{arg})[0]
