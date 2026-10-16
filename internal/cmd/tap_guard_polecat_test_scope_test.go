@@ -407,6 +407,13 @@ func TestPolecatTestScopeMatchAllRunFilter(t *testing.T) {
 		{"double dash spelling", "go test ./internal/cmd --run .", true},
 		{"match-all after a narrow one", "go test ./internal/cmd -run TestX -run .", true},
 		{"slot-wrapped", "gt slot run --role gastown/flint -- go test ./internal/daemon -run '.*'", true},
+		{"variable value", `go test ./internal/cmd -run "$PATTERN"`, true},
+		{"variable value, = form", `go test ./internal/cmd -run="$PATTERN"`, true},
+		{"braced variable value", `go test ./internal/cmd -run "${PATTERN}"`, true},
+		{"command substitution value", `go test ./internal/cmd -run "$(echo TestX)"`, true},
+		{"backtick substitution value", "go test ./internal/cmd -run \"`echo TestX`\"", true},
+		{"variable value after a narrow one", `go test ./internal/cmd -run TestX -run "$PATTERN"`, true},
+		{"slash inside a bracket class", "go test ./internal/cmd -run '[^/]*'", true},
 
 		{"name", "go test ./internal/cmd -run TestX", false},
 		{"name, = form", "go test ./internal/cmd -run=TestX", false},
@@ -417,6 +424,9 @@ func TestPolecatTestScopeMatchAllRunFilter(t *testing.T) {
 		{"test binary flag after --", "go test ./internal/cmd -- -test.run TestX", false},
 		{"narrow after a match-all one", "go test ./internal/cmd -run . -run TestX", false},
 		{"invalid pattern", "go test ./internal/cmd -run '('", false},
+		{"trailing anchor", "go test ./internal/cmd -run 'TestA$|TestB$'", false},
+		{"variable value before a narrow one", `go test ./internal/cmd -run "$PATTERN" -run TestX`, false},
+		{"slash inside a group", "go test ./internal/cmd -run '(TestA/b)'", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -444,6 +454,9 @@ func TestRunPatternBoundsRunPrefixMatchAll(t *testing.T) {
 		{"T", false},
 		{"^Test[A-Z]", false},
 		{"Test.*/sub", false},
+		{"[^/]*", false},
+		{"[/]*", false},
+		{`\/*`, false},
 
 		{"^TestSpecific$", true},
 		{"TestSpecific", true},
@@ -456,6 +469,34 @@ func TestRunPatternBoundsRunPrefixMatchAll(t *testing.T) {
 		t.Run(tt.pattern, func(t *testing.T) {
 			if got := runPatternBoundsRun(tt.pattern); got != tt.bounded {
 				t.Errorf("runPatternBoundsRun(%q) = %v, want %v", tt.pattern, got, tt.bounded)
+			}
+		})
+	}
+}
+
+// A "/" separates subtest elements only outside a bracket class and
+// parentheses, and not when escaped, as testing splits a -run pattern.
+func TestFirstSubtestElement(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		pattern string
+		want    string
+	}{
+		{"TestX", "TestX"},
+		{"TestX/case", "TestX"},
+		{"TestX/a/b", "TestX"},
+		{"[^/]*/sub", "[^/]*"},
+		{"(a/b)/sub", "(a/b)"},
+		{"([/])/sub", "([/])"},
+		{`a\/b/sub`, `a\/b`},
+		{"[a-z/", "[a-z/"},
+		{"a]/sub", "a]"},
+		{"/sub", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.pattern, func(t *testing.T) {
+			if got := firstSubtestElement(tt.pattern); got != tt.want {
+				t.Errorf("firstSubtestElement(%q) = %q, want %q", tt.pattern, got, tt.want)
 			}
 		})
 	}
