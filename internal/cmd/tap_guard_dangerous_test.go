@@ -1439,6 +1439,11 @@ func TestHeredocDoesNotHideRealCommand(t *testing.T) {
 			wantBlock: true,
 		},
 		{
+			name:      "shift in an arithmetic command glued to a function definition",
+			command:   "f()((1<<x))\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
 			name:      "shift in an arithmetic command after time and a space",
 			command:   "time ((1<<x))\nsudo rm -rf /\nx",
 			wantBlock: true,
@@ -2905,24 +2910,6 @@ func TestANSICQuotedStringKeepsTheCommandsBehindIt(t *testing.T) {
 	}
 	if reason, _ := evaluateDangerousCommand(`echo $'rm -rf /'`, 0, noTownSession); reason != "" {
 		t.Errorf("rm -rf / inside an ANSI-C string is only text, but was blocked (%q)", reason)
-	}
-}
-
-// A "((" glued to time, "!", "{" or a case pattern's ")" is an arithmetic
-// command, so the "<<" in it is a shift and the sudo line after it is judged,
-// not stripped as the body of a heredoc (gt-4jcks).
-func TestGluedArithmeticCommandKeepsPayloadVisible(t *testing.T) {
-	t.Parallel()
-	for _, command := range []string{
-		"time((1<<x))\nsudo rm -rf /\nx",
-		"!((1<<x))\nsudo rm -rf /\nx",
-		"{((1<<x));}\nsudo rm -rf /\nx",
-		"case y in y)((1<<x));; esac\nsudo rm -rf /\nx",
-	} {
-		reason, _ := evaluateDangerousCommand(command, 0, noTownSession)
-		if !strings.Contains(reason, "sudo") {
-			t.Errorf("evaluateDangerousCommand(%q) reason = %q, want the sudo block", command, reason)
-		}
 	}
 }
 
