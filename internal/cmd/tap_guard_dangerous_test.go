@@ -3122,14 +3122,30 @@ func TestEndsCommandReservedWord(t *testing.T) {
 	}
 }
 
-func TestDangerousGuardBlocksEscapedNestedBacktick(t *testing.T) {
+// An escaped backtick pair inside a backtick span is literal to the outer scan
+// but live to the body's own parse, so the command it holds is judged wherever
+// the shell would run it — on a command line and in an unquoted heredoc body
+// alike (gt-h3312). The negative pairs pin the other side of the cut: a body
+// holding no dangerous command is allowed, a quoted heredoc body is data for its
+// reader, and a backtick pair that is itself escaped opens no substitution.
+func TestDangerousGuardJudgesEscapedNestedBacktick(t *testing.T) {
 	t.Parallel()
-	for _, command := range []string{
-		"echo `echo \\`rm -rf /\\``",
-		"echo `echo \\`git reset --hard\\``",
+	for _, tt := range []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"a nuke in the nested command", "echo `echo \\`rm -rf /\\``", true},
+		{"a reset onto the remote in the nested command", "echo `echo \\`git reset --hard origin/main\\``", true},
+		{"the nuke in an unquoted heredoc body", "cat > f <<EOF\necho `echo \\`rm -rf /\\``\nEOF", true},
+		{"a harmless nested command", "echo `echo \\`echo hi\\``", false},
+		{"the same body quoted stays data", "cat > f <<'EOF'\necho `echo \\`rm -rf /\\``\nEOF", false},
+		{"an escaped backtick pair opens no substitution", "echo \\`rm -rf /\\`", false},
 	} {
-		if reason, _ := evaluateDangerousCommand(command, 0, noTownSession); reason == "" {
-			t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked — the nested backtick command runs", command)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			if reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession); (reason != "") != tt.blocked {
+				t.Errorf("evaluateDangerousCommand(%q) blocked = %v (reason %q), want %v", tt.command, reason != "", reason, tt.blocked)
+			}
+		})
 	}
 }

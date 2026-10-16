@@ -653,18 +653,11 @@ func substitutionSpansIn(text string, quotes bool) []substitutionSpan {
 	return spans
 }
 
-// substitutionBody is the text of one command substitution as the shell runs it,
-// for a span written on a command line or in an unquoted heredoc body alike:
-// either way an escape suppresses the substitution where it sits, so a span the
-// scan did find is one the shell performs, and the backslashes are dropped when
-// its body is parsed. The body of a backtick span therefore has the backslash
-// escaping a nested backtick pair dropped, which is what the shell does when it
-// parses the body: a backslash-escaped backtick pair around "make gate" is
-// literal to the outer scan, yet the body the shell runs holds it as a live
-// substitution, so its own parse runs make (gt-jj3or). A "$(...)" and a process
-// substitution carry no such escaping; their bodies are returned as written.
-// Every guard reads its bodies through here or through substitutionBodies
-// (gt-h3312).
+// substitutionBody is the body of one command substitution as the shell parses
+// it: a backtick span's body drops the backslash of an escaped nested backtick
+// pair — literal to the outer scan, yet a live substitution to the body's own
+// parse — so a nested command the caller must judge is judged (gt-jj3or). A
+// "$(...)" or process-substitution body is returned as written.
 func substitutionBody(text string, span substitutionSpan) string {
 	body := text[span.bodyStart:span.bodyEnd]
 	if text[span.open] == '`' {
