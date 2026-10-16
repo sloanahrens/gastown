@@ -157,6 +157,23 @@ func (o SlingSpawnOptions) step(name string) {
 	slingSteps.Step(name)
 }
 
+// slingAddOptions is what a sling hands the polecat manager, on the idle-reuse
+// path and the fresh-allocation path alike. Both build their options here so a
+// field added to polecat.AddOptions cannot be wired into only one of them.
+//
+// Agent rides in the same AddOptions as HookBead because the manager writes
+// both to the agent bead in one write, which is what keeps the seat's agent
+// readable after its session ends (gt-y6cja).
+func slingAddOptions(opts SlingSpawnOptions, baseBranch, resumeBranch string, allowRecovery bool) polecat.AddOptions {
+	return polecat.AddOptions{
+		HookBead:      opts.HookBead,
+		Agent:         opts.Agent,
+		BaseBranch:    baseBranch,
+		ResumeBranch:  resumeBranch,
+		AllowRecovery: allowRecovery,
+	}
+}
+
 func effectivePolecatDirCap(configured int) int {
 	if configured < minPolecatDirsPerRig {
 		return minPolecatDirsPerRig
@@ -404,13 +421,7 @@ func reuseIdlePolecatForSlingWith(
 	// skipping ~5s of worktree creation (persistent-polecat-pool phase 3). Any
 	// other failure allocates a fresh polecat rather than repairing this worktree
 	// destructively.
-	addOpts := polecat.AddOptions{
-		HookBead:      opts.HookBead,
-		Agent:         opts.Agent,
-		BaseBranch:    baseBranch,
-		ResumeBranch:  resumeBranch,
-		AllowRecovery: allowRecovery,
-	}
+	addOpts := slingAddOptions(opts, baseBranch, resumeBranch, allowRecovery)
 	if _, err := polecatMgr.ReuseIdlePolecat(polecatName, addOpts); err != nil {
 		if opts.Name != "" {
 			return nil, namedPolecatRefusal(rigName, polecatName, opts.HookBead, heldIssue, err)
@@ -936,12 +947,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 	}
 
 	// Build add options with hook_bead set atomically at spawn time
-	addOpts := polecat.AddOptions{
-		HookBead:     opts.HookBead,
-		Agent:        opts.Agent,
-		BaseBranch:   baseBranch,
-		ResumeBranch: opts.ResumeBranch,
-	}
+	addOpts := slingAddOptions(opts, baseBranch, opts.ResumeBranch, false)
 
 	// Nothing to reuse — create the polecat. The pool path (AllocateAndAdd,
 	// GH#2215) and the named path (AddNamedWithOptions, gt-2w4f9) both hold the

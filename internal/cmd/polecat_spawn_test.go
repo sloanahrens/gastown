@@ -86,14 +86,16 @@ func TestPolecatIntegrationEnabledDefaultsTrue(t *testing.T) {
 }
 
 // idlePolecatReuseFake stands in for the polecat manager's idle-reuse surface.
-// released records what the reuse path handed back, in order.
+// released records what the reuse path handed back, in order; reuseOpts records
+// the options that path handed the manager instead.
 type idlePolecatReuseFake struct {
-	idle     *polecat.Polecat
-	findErr  error
-	reuseErr error
-	getErr   error
-	getCalls int
-	released []idleReuseRelease
+	idle      *polecat.Polecat
+	findErr   error
+	reuseErr  error
+	getErr    error
+	getCalls  int
+	released  []idleReuseRelease
+	reuseOpts []polecat.AddOptions
 }
 
 // idleReuseRelease is one release the reuse path asked for.
@@ -108,6 +110,7 @@ func (f *idlePolecatReuseFake) FindIdlePolecat() (*polecat.Polecat, error) {
 }
 
 func (f *idlePolecatReuseFake) ReuseIdlePolecat(name string, opts polecat.AddOptions) (*polecat.Polecat, error) {
+	f.reuseOpts = append(f.reuseOpts, opts)
 	if f.reuseErr != nil {
 		return nil, f.reuseErr
 	}
@@ -279,6 +282,72 @@ func TestReuseIdlePolecatForSling_VerifyFailureReleasesSlot(t *testing.T) {
 				t.Errorf("released %+v, want exactly %+v", tt.fake.released, want)
 			}
 		})
+	}
+}
+
+// TestReuseIdlePolecatForSling_CarriesAgentIntoAddOptions guards gt-smab3: the
+// agent a sling was told to spawn the seat on has to reach the manager in the
+// same AddOptions as the hook bead, because the manager writes both to the
+// agent bead in one write (gt-y6cja). A sling that names no agent passes none
+// through, leaving the manager to apply the role's default.
+func TestReuseIdlePolecatForSling_CarriesAgentIntoAddOptions(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name  string
+		agent string
+		want  string
+	}{
+		{"sling's agent reaches the manager", "deepseek-flash", "deepseek-flash"},
+		{"no agent passes none through", "", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &idlePolecatReuseFake{
+				idle: &polecat.Polecat{Name: "alpha", ClonePath: "/town/rig/polecats/alpha/rig"},
+			}
+
+			info, err := reuseIdlePolecatForSlingWith(fake, fakeIdleReuseEnv(), "rig",
+				SlingSpawnOptions{HookBead: "gt-next", Agent: tt.agent}, func() {})
+
+			if err != nil || info == nil {
+				t.Fatalf("reuseIdlePolecatForSling = (%+v, %v), want the reused polecat", info, err)
+			}
+			if len(fake.reuseOpts) != 1 {
+				t.Fatalf("the manager was handed %d AddOptions, want 1", len(fake.reuseOpts))
+			}
+			got := fake.reuseOpts[0]
+			if got.Agent != tt.want {
+				t.Errorf("AddOptions.Agent = %q, want %q", got.Agent, tt.want)
+			}
+			if got.HookBead != "gt-next" {
+				t.Errorf("AddOptions.HookBead = %q, want gt-next: the agent is stored by the write that sets the hook", got.HookBead)
+			}
+		})
+	}
+}
+
+// TestSlingAddOptionsCarriesAgent covers the same field on the fresh-allocation
+// path, which builds its AddOptions through the same helper: a sling that
+// allocates a new polecat records the agent on its agent bead exactly as a
+// reuse does (gt-smab3).
+func TestSlingAddOptionsCarriesAgent(t *testing.T) {
+	t.Parallel()
+	reused := slingAddOptions(
+		SlingSpawnOptions{HookBead: "gt-next", Agent: "claude-sonnet"},
+		"origin/main", "polecat/alpha/gt-old+mud", true)
+	if reused.Agent != "claude-sonnet" || reused.HookBead != "gt-next" {
+		t.Errorf("reuse AddOptions = %+v, want the sling's agent beside its hook bead", reused)
+	}
+	if reused.ResumeBranch != "polecat/alpha/gt-old+mud" || !reused.AllowRecovery {
+		t.Errorf("reuse AddOptions = %+v, want the resumed branch with recovery allowed", reused)
+	}
+
+	fresh := slingAddOptions(SlingSpawnOptions{HookBead: "gt-next", Agent: "claude-sonnet"},
+		"origin/main", "", false)
+	if fresh.Agent != "claude-sonnet" || fresh.HookBead != "gt-next" {
+		t.Errorf("fresh AddOptions = %+v, want the sling's agent beside its hook bead", fresh)
+	}
+	if fresh.BaseBranch != "origin/main" || fresh.ResumeBranch != "" || fresh.AllowRecovery {
+		t.Errorf("fresh AddOptions = %+v, want the base branch, no resume and no recovery", fresh)
 	}
 }
 
